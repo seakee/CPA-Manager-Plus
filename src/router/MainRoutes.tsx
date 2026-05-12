@@ -18,6 +18,7 @@ import { OAuthPage } from '@/pages/OAuthPage';
 import { QuotaPage } from '@/pages/QuotaPage';
 import { MonitoringCenterPage } from '@/pages/MonitoringCenterPage';
 import { CodexInspectionPage } from '@/pages/CodexInspectionPage';
+import { CodexInspectionTasksPage } from '@/pages/CodexInspectionTasksPage';
 import { ConfigPage } from '@/pages/ConfigPage';
 import { LogsPage } from '@/pages/LogsPage';
 import { SystemPage } from '@/pages/SystemPage';
@@ -75,6 +76,7 @@ const mainRoutes = [
   { path: '/quota', element: <QuotaPage /> },
   { path: '/monitoring', element: <MonitoringCenterPage /> },
   { path: '/monitoring/codex-inspection', element: <CodexInspectionPage /> },
+  { path: '/monitoring/codex-inspection/tasks', element: <CodexInspectionTasksPage /> },
   { path: '/config', element: <ConfigPage /> },
   { path: '/logs', element: <LogsPage /> },
   { path: '/system', element: <SystemPage /> },

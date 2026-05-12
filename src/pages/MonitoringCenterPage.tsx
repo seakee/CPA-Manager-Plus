@@ -2983,6 +2983,14 @@ export function MonitoringCenterPage() {
             <span>{t('monitoring.codex_inspection_entry')}</span>
             <IconExternalLink size={14} />
           </Link>
+          <Link
+            to="/monitoring/codex-inspection/tasks"
+            className={`${styles.actionButton} ${styles.quickNavLink}`}
+          >
+            <IconTimer size={16} />
+            <span>Codex 巡检任务</span>
+            <IconExternalLink size={14} />
+          </Link>
           {config?.loggingToFile ? (
             <Link to="/logs" className={`${styles.actionButton} ${styles.quickNavLink}`}>
               <IconFileText size={16} />
