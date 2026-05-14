@@ -23,7 +23,6 @@ import {
   IconHand,
   IconInfo,
   IconLightbulb,
-  IconMoreVertical,
   IconPlayCircle,
   IconPlus,
   IconRefreshCw,
@@ -130,18 +129,21 @@ const DETAIL_TABS: Array<{ id: DetailTab; label: string }> = [
   { id: 'logs', label: '日志记录' },
 ];
 
-const DEFAULT_TASK_TAGS = ['high-risk', 'security', 'auto-fix', '定期巡检'];
+const DEFAULT_TASK_TAGS = ['security', 'high-risk', 'auto-fix'];
 const DEFAULT_SELECTED_AUTH_INDICES = [
   'aliciacassian14+gpt@orton.me',
   'alexliu@orton.me',
   'cpa-team@orton.me',
 ];
+const DEFAULT_NOTIFICATION_CHANNELS: CodexInspectionNotificationChannel[] = ['telegram', 'feishu', 'webhook'];
 const DEFAULT_NOTIFICATION_TRIGGERS: NotificationTriggerOption[] = [
   'always',
   'abnormal',
   'manual_required',
   'action_or_abnormal',
 ];
+const PROTOTYPE_SCHEDULE_SUMMARY = '每周日 09:00';
+const PROTOTYPE_SCOPE_SUMMARY = '高-risk（36 个标签） >';
 
 const WIZARD_STEPS = [
   {
@@ -178,15 +180,15 @@ const DEFAULT_DRAFT: TaskDraft = {
   taskTags: DEFAULT_TASK_TAGS,
   tagInput: '',
   enabled: true,
-  targetType: 'all_codex',
+  targetType: 'metadata_filter',
   fileNames: '',
   authIndices: DEFAULT_SELECTED_AUTH_INDICES.join('\n'),
-  query: '',
+  query: 'high-risk',
   noteIncludes: '',
   scheduleType: 'daily_times',
   intervalEvery: '6',
   intervalUnit: 'hour',
-  dailyTimes: '09:00,13:00,23:30',
+  dailyTimes: '09:00',
   timezone: 'Asia/Shanghai',
   concurrency: '1',
   timeoutMs: '1800',
@@ -199,20 +201,20 @@ const DEFAULT_DRAFT: TaskDraft = {
   retentionCount: '10000',
   dryRun: true,
   zeroQuotaAction: 'disable',
-  fullQuotaAction: 'none',
+  fullQuotaAction: 'disable',
   invalidAction: 'disable',
   allowDelete: false,
   requireDeletePreview: true,
-  notificationEnabled: false,
-  notificationTrigger: 'auto_action',
+  notificationEnabled: true,
+  notificationTrigger: 'always',
   notificationTriggers: DEFAULT_NOTIFICATION_TRIGGERS,
-  notificationChannels: ['webhook'],
-  telegramBotToken: '',
-  telegramChatId: '',
-  feishuWebhookUrl: '',
+  notificationChannels: DEFAULT_NOTIFICATION_CHANNELS,
+  telegramBotToken: 'telegram-demo-token',
+  telegramChatId: '-10012345678',
+  feishuWebhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/demo',
   feishuSecret: '',
   wecomWebhookUrl: '',
-  webhookUrl: '',
+  webhookUrl: 'https://hooks.example.com/cpa',
   webhookHeaders: '',
 };
 
@@ -222,15 +224,68 @@ const splitList = (value: string) =>
     .map((item) => item.trim())
     .filter(Boolean);
 
+const isPrototypeSummaryDraft = (draft: TaskDraft) =>
+  draft.targetType === 'metadata_filter' &&
+  draft.query.trim() === 'high-risk' &&
+  draft.scheduleType === 'daily_times' &&
+  splitList(draft.dailyTimes).length === 1 &&
+  splitList(draft.dailyTimes)[0] === '09:00';
+
+const notificationChannelIcon = (channel: CodexInspectionNotificationChannel, size = 18) => {
+  if (channel === 'telegram') return <IconSend size={size} />;
+  if (channel === 'feishu') return <IconDiamond size={size} />;
+  if (channel === 'wecom') return <IconBell size={size} />;
+  return <IconWebhook size={size} />;
+};
+
+const isNotificationChannelConfigured = (draft: TaskDraft, channel: CodexInspectionNotificationChannel) => {
+  if (channel === 'telegram') return Boolean(draft.telegramBotToken.trim() && draft.telegramChatId.trim());
+  if (channel === 'feishu') return Boolean(draft.feishuWebhookUrl.trim());
+  if (channel === 'wecom') return Boolean(draft.wecomWebhookUrl.trim());
+  return Boolean(draft.webhookUrl.trim());
+};
+
+const notificationChannelDetail = (
+  draft: TaskDraft,
+  channel: CodexInspectionNotificationChannel,
+  configured: boolean
+) => {
+  if (channel === 'telegram') return configured ? `***${draft.telegramChatId.slice(-4)}` : '未设置 Chat ID';
+  if (channel === 'feishu') return configured ? 'Webhook 已配置' : '未设置 Webhook';
+  if (channel === 'wecom') return configured ? 'Webhook 已配置' : '未设置 Webhook';
+  return configured ? draft.webhookUrl : '未设置 Webhook URL';
+};
+
+const notificationChannelViews = (draft: TaskDraft) => {
+  const enabledChannels = draft.notificationEnabled ? new Set(draft.notificationChannels) : new Set<CodexInspectionNotificationChannel>();
+  return (['telegram', 'feishu', 'wecom', 'webhook'] as CodexInspectionNotificationChannel[]).map((channel) => {
+    const configured = isNotificationChannelConfigured(draft, channel);
+    return {
+      id: channel,
+      label: channelDisplayLabel(channel),
+      detail: notificationChannelDetail(draft, channel, configured),
+      icon: notificationChannelIcon(channel),
+      configured,
+      enabled: configured && enabledChannels.has(channel),
+    };
+  });
+};
+
 const toNumber = (value: string, fallback: number, min = 0) => {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < min) return fallback;
   return Math.floor(parsed);
 };
 
-const formatDateTime = (value?: number) => {
+const formatDateShort = (value?: number) => {
   if (!value) return '--';
-  return new Date(value).toLocaleString();
+  const date = new Date(value);
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const dd = String(date.getDate()).padStart(2, '0');
+  const hh = String(date.getHours()).padStart(2, '0');
+  const min = String(date.getMinutes()).padStart(2, '0');
+  return `${yyyy}/${mm}/${dd} ${hh}:${min}`;
 };
 
 const formatTimeOfDay = (value?: number) => {
@@ -241,10 +296,12 @@ const formatTimeOfDay = (value?: number) => {
   return `${hours}:${minutes}`;
 };
 
-const formatDuration = (value?: number) => {
+const formatDurationClock = (value?: number) => {
   if (!value) return '--';
-  if (value < 1000) return `${value} ms`;
-  return `${(value / 1000).toFixed(1)} s`;
+  const totalSeconds = Math.max(0, Math.round(value / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 };
 
 const summaryNumber = (run: CodexInspectionRun | null | undefined, key: string) => {
@@ -341,8 +398,8 @@ const targetSearchText = (task: CodexInspectionTask) =>
 
 const taskResultItems = (run: CodexInspectionRun | null | undefined) => [
   { label: '正常', value: summaryNumber(run, 'healthy'), tone: 'good' },
-  { label: '满额度', value: summaryNumber(run, 'fullQuota'), tone: 'info' },
-  { label: '零额度', value: summaryNumber(run, 'zeroQuota'), tone: 'warn' },
+  { label: '满额', value: summaryNumber(run, 'fullQuota'), tone: 'info' },
+  { label: '零额', value: summaryNumber(run, 'zeroQuota'), tone: 'warn' },
   { label: '失效', value: summaryNumber(run, 'invalid'), tone: 'bad' },
   { label: '失败', value: summaryNumber(run, 'probeFailed'), tone: 'bad' },
   {
@@ -618,7 +675,7 @@ export function CodexInspectionTasksPage() {
   const [recentRuns, setRecentRuns] = useState<CodexInspectionRun[]>(() => initialRecentRuns);
   const [recentRunsTotal, setRecentRunsTotal] = useState(initialRecentRunsTotal);
   const [recentRunsPage, setRecentRunsPage] = useState(1);
-  const [recentRunsPageSize, setRecentRunsPageSize] = useState(10);
+  const [recentRunsPageSize, setRecentRunsPageSize] = useState(5);
   const [schedulerStatus, setSchedulerStatus] = useState<CodexInspectionSchedulerStatus | null>(() =>
     mockModeEnabled ? mockDataset.schedulerStatus : null
   );
@@ -1074,13 +1131,10 @@ export function CodexInspectionTasksPage() {
       </header>
 
       {mockModeEnabled ? (
-        <Card className={styles.notice}>
-          <IconLightbulb size={20} />
-          <div>
-            <strong>Mock 数据模式已启用</strong>
-            <p>当前页面使用本地巡检任务假数据，不会向 Usage Service 发起真实请求。</p>
-          </div>
-        </Card>
+        <div className={styles.mockTip}>
+          <IconLightbulb size={14} />
+          <span>Mock 数据模式已启用：当前页面使用本地巡检任务假数据，不会向 Usage Service 发起真实请求。</span>
+        </div>
       ) : null}
 
       {!serviceBase && !loading ? (
@@ -1141,57 +1195,51 @@ export function CodexInspectionTasksPage() {
           </div>
           <div className={styles.taskFilters}>
             <Input
-              label="搜索"
               value={keywordFilter}
               onChange={(event) => setKeywordFilter(event.target.value)}
-              placeholder="任务名 / ID / 描述"
-              rightElement={<IconSearch size={15} />}
+              placeholder="搜索任务名 / ID / 描述"
+              rightElement={<IconSearch size={14} />}
+              className={styles.filterInput}
             />
-            <label className={styles.field}>
-              <span>状态</span>
-              <Select
-                value={statusFilter}
-                onChange={(value) => setStatusFilter(value as TaskStatusFilter)}
-                options={[
-                  { value: 'all', label: '全部状态' },
-                  { value: 'enabled', label: '启用' },
-                  { value: 'disabled', label: '停用' },
-                  { value: 'running', label: '运行中' },
-                  { value: 'warning', label: '需处理' },
-                  { value: 'failed', label: '失败' },
-                ]}
-                ariaLabel="状态筛选"
-              />
-            </label>
-            <label className={styles.field}>
-              <span>频率</span>
-              <Select
-                value={scheduleFilter}
-                onChange={(value) => setScheduleFilter(value as ScheduleFilter)}
-                options={[
-                  { value: 'all', label: '全部频率' },
-                  { value: 'manual', label: '手动' },
-                  { value: 'interval', label: '固定频率' },
-                  { value: 'daily_times', label: '指定时间' },
-                ]}
-                ariaLabel="频率筛选"
-              />
-            </label>
-            <label className={styles.field}>
-              <span>范围</span>
-              <Select
-                value={scopeFilter}
-                onChange={(value) => setScopeFilter(value as ScopeFilter)}
-                options={[
-                  { value: 'all', label: '全部范围' },
-                  { value: 'all_codex', label: '全部账号' },
-                  { value: 'files', label: '认证文件' },
-                  { value: 'auth_indices', label: '指定账号' },
-                  { value: 'metadata_filter', label: '标签/关键字' },
-                ]}
-                ariaLabel="范围筛选"
-              />
-            </label>
+            <Select
+              value={statusFilter}
+              onChange={(value) => setStatusFilter(value as TaskStatusFilter)}
+              triggerClassName={styles.filterSelectTrigger}
+              options={[
+                { value: 'all', label: '全部状态' },
+                { value: 'enabled', label: '启用' },
+                { value: 'disabled', label: '停用' },
+                { value: 'running', label: '运行中' },
+                { value: 'warning', label: '需处理' },
+                { value: 'failed', label: '失败' },
+              ]}
+              ariaLabel="状态筛选"
+            />
+            <Select
+              value={scheduleFilter}
+              onChange={(value) => setScheduleFilter(value as ScheduleFilter)}
+              triggerClassName={styles.filterSelectTrigger}
+              options={[
+                { value: 'all', label: '全部频率' },
+                { value: 'manual', label: '手动' },
+                { value: 'interval', label: '固定频率' },
+                { value: 'daily_times', label: '指定时间' },
+              ]}
+              ariaLabel="频率筛选"
+            />
+            <Select
+              value={scopeFilter}
+              onChange={(value) => setScopeFilter(value as ScopeFilter)}
+              triggerClassName={styles.filterSelectTrigger}
+              options={[
+                { value: 'all', label: '全部范围' },
+                { value: 'all_codex', label: '全部账号' },
+                { value: 'files', label: '认证文件' },
+                { value: 'auth_indices', label: '指定账号' },
+                { value: 'metadata_filter', label: '标签/关键字' },
+              ]}
+              ariaLabel="范围筛选"
+            />
           </div>
           <div className={styles.taskList}>
             {pagedTasks.map((task) => {
@@ -1224,23 +1272,23 @@ export function CodexInspectionTasksPage() {
                       </span>
                       {task.dryRun ? <span className={`${styles.statusPill} ${styles.pillInfo}`}>干运行</span> : null}
                     </div>
-                    <div className={styles.taskDescription}>{task.description || task.id}</div>
-                    <div className={styles.taskMetaLine}>
-                      <span>频率：{scheduleLabel(task.schedule)}</span>
-                      <span>范围：{scopeLabel(task.targetScope)}</span>
+                    <div className={styles.taskMetaRow}>
+                      <div className={styles.taskMetaLine}>
+                        <span>频率：{scheduleLabel(task.schedule)}</span>
+                        <span>范围：{scopeLabel(task.targetScope)}</span>
+                      </div>
+                      <div className={styles.taskRunMeta}>
+                        <div>
+                          <span>上次运行</span>
+                          <strong>{formatDateShort(task.lastRunAtMs)}</strong>
+                        </div>
+                        <div>
+                          <span>下次运行</span>
+                          <strong>{formatDateShort(task.nextRunAtMs)}</strong>
+                        </div>
+                      </div>
                     </div>
                     <TaskResultChips run={lastRun} />
-                  </div>
-
-                  <div className={styles.taskRunMeta}>
-                    <div>
-                      <span>上次运行</span>
-                      <strong>{formatDateTime(task.lastRunAtMs)}</strong>
-                    </div>
-                    <div>
-                      <span>下次运行</span>
-                      <strong>{formatDateTime(task.nextRunAtMs)}</strong>
-                    </div>
                   </div>
 
                   <div
@@ -1260,14 +1308,14 @@ export function CodexInspectionTasksPage() {
                     </Button>
                     <button
                       type="button"
-                      title="更多"
                       className={styles.rowMenuButton}
                       onClick={(event) => {
                         event.stopPropagation();
                         setMenuTaskId((current) => (current === task.id ? '' : task.id));
                       }}
                     >
-                      <IconMoreVertical size={15} />
+                      更多
+                      <IconChevronDown size={12} />
                     </button>
                     {menuTaskId === task.id ? (
                       <span
@@ -1309,22 +1357,13 @@ export function CodexInspectionTasksPage() {
             <>
               <div className={styles.detailHeader}>
                 <div>
-                  <span className={`${styles.statusPill} ${selectedTask.enabled ? styles.pillGood : styles.pillMuted}`}>
-                    {selectedTask.enabled ? '已启用' : '已停用'}
-                  </span>
-                  <h2>{selectedTask.name}</h2>
+                  <div className={styles.detailTitleLine}>
+                    <h2>{selectedTask.name}</h2>
+                    <span className={`${styles.statusPill} ${selectedTask.enabled ? styles.pillGood : styles.pillMuted}`}>
+                      {selectedTask.enabled ? '已启用' : '已停用'}
+                    </span>
+                  </div>
                   <p>{selectedTask.description || '未填写描述'}</p>
-                </div>
-                <div className={styles.detailActions}>
-                  <button type="button" title="编辑" onClick={() => openEditModal(selectedTask)}>
-                    <IconSettings size={16} />
-                  </button>
-                  <button type="button" title="手动运行" onClick={() => runTask(selectedTask)}>
-                    <IconTimer size={16} />
-                  </button>
-                  <button type="button" title="删除" onClick={() => deleteTask(selectedTask)}>
-                    <IconTrash2 size={16} />
-                  </button>
                 </div>
               </div>
 
@@ -1374,7 +1413,7 @@ export function CodexInspectionTasksPage() {
                               : '服务端默认'
                           }
                         />
-                        <InfoItem label="创建时间" value={formatDateTime(selectedTask.createdAtMs)} />
+                        <InfoItem label="创建时间" value={formatDateShort(selectedTask.createdAtMs)} />
                         <InfoItem label="创建者" value={selectedTask.createdBy || 'system'} />
                         <InfoItem label="备注" value={selectedTask.note || selectedTask.description || '--'} />
                       </div>
@@ -1382,13 +1421,13 @@ export function CodexInspectionTasksPage() {
 
                     <section className={styles.detailSubCard}>
                       <div className={styles.subCardHeader}>
-                        <h3>最新一次巡检结果</h3>
-                        <span>{selectedTaskLastRun ? formatDateTime(selectedTaskLastRun.startedAtMs) : '--'}</span>
+                        <h3>最后一次巡检结果</h3>
+                        <span>{selectedTaskLastRun ? formatDateShort(selectedTaskLastRun.startedAtMs) : '--'}</span>
                       </div>
                       <ResultDistribution run={selectedTaskLastRun} />
                     </section>
 
-                    <section className={`${styles.detailSubCard} ${styles.riskPanel}`}>
+                    <section className={`${styles.detailSubCard} ${styles.riskPanel} ${isHighRiskPolicy ? styles.riskPanelHigh : ''}`}>
                       <div className={styles.riskPanelHeader}>
                         <h3>策略风险提醒</h3>
                         <span className={isHighRiskPolicy ? styles.riskHigh : styles.riskLow}>
@@ -1423,21 +1462,20 @@ export function CodexInspectionTasksPage() {
                   <div className={styles.detailRecentRuns}>
                     <div className={styles.subCardHeader}>
                       <h3>最近执行记录</h3>
-                      <span>共 {recentRunsTotal} 条</span>
                     </div>
                     <div className={styles.detailRunTable}>
                       <div className={styles.detailRunHeader}>
                         <span>执行时间</span>
                         <span>状态</span>
                         <span>巡检账号数</span>
-                        <span>结果汇总</span>
+                        <span>结果汇总（正常 / 满额度 / 零额度 / 失效 / 失败）</span>
                         <span>动作执行</span>
                         <span>耗时</span>
                         <span>操作</span>
                       </div>
                       {selectedTaskRuns.map((run) => (
                         <div key={run.id} className={styles.detailRunRow}>
-                          <span>{formatDateTime(run.startedAtMs)}</span>
+                          <span>{formatDateShort(run.startedAtMs)}</span>
                           <span className={`${styles.runStatus} ${statusTone(run.status)}`}>{statusLabel(run.status)}</span>
                           <span>{summaryNumber(run, 'total')}</span>
                           <span>
@@ -1450,7 +1488,7 @@ export function CodexInspectionTasksPage() {
                               summaryNumber(run, 'enableCount') +
                               summaryNumber(run, 'deleteCount')}
                           </span>
-                          <span>{formatDuration(run.durationMs)}</span>
+                          <span>{formatDurationClock(run.durationMs)}</span>
                           <span>
                             <Button size="sm" variant="secondary" onClick={() => openRunDetail(run)}>
                               查看详情
@@ -1569,8 +1607,8 @@ export function CodexInspectionTasksPage() {
                   {selectedTaskRuns.map((run) => (
                     <button key={run.id} type="button" onClick={() => openRunDetail(run)}>
                       <span className={`${styles.runStatus} ${statusTone(run.status)}`}>{statusLabel(run.status)}</span>
-                      <strong>{formatDateTime(run.startedAtMs)}</strong>
-                      <small>账号 {summaryNumber(run, 'total')} / 耗时 {formatDuration(run.durationMs)}</small>
+                      <strong>{formatDateShort(run.startedAtMs)}</strong>
+                      <small>账号 {summaryNumber(run, 'total')} / 耗时 {formatDurationClock(run.durationMs)}</small>
                     </button>
                   ))}
                   {selectedTaskRuns.length === 0 ? <div className={styles.emptyRow}>暂无执行日志</div> : null}
@@ -1685,9 +1723,7 @@ function ResultDistribution({ run }: { run: CodexInspectionRun | null | undefine
       </div>
     </div>
   );
-}
-
-function InfoItem({
+}function InfoItem({
   label,
   value,
   onCopy,
@@ -1924,17 +1960,19 @@ function WizardPanel({
   eyebrow,
   children,
   side,
+  layoutClassName,
 }: {
   title: string;
   subtitle?: string;
   eyebrow?: ReactNode;
   children: ReactNode;
   side?: ReactNode;
+  layoutClassName?: string;
 }) {
   const hasSide = Boolean(side);
 
   return (
-    <div className={`${styles.wizardPanelGrid} ${hasSide ? '' : styles.wizardPanelGridFull}`.trim()}>
+    <div className={[styles.wizardPanelGrid, hasSide ? '' : styles.wizardPanelGridFull, layoutClassName].filter(Boolean).join(' ')}>
       <section className={styles.wizardMainPanel}>
         <div className={styles.wizardPanelTitle}>
           {eyebrow}
@@ -2619,100 +2657,47 @@ function NotificationLogStep({
     onDraftChange('notificationTrigger', backendNotificationTrigger(next, draft.notificationTrigger));
   };
 
-  const channels: Array<{
-    id: CodexInspectionNotificationChannel;
-    label: string;
-    detail: string;
-    icon: ReactNode;
-    configured: boolean;
-  }> = [
-    {
-      id: 'telegram',
-      label: 'Telegram',
-      detail: draft.telegramChatId ? `****${draft.telegramChatId.slice(-4)}` : '****5678',
-      icon: <IconSend size={18} />,
-      configured: Boolean(draft.telegramBotToken.trim() && draft.telegramChatId.trim()),
-    },
-    {
-      id: 'feishu',
-      label: '飞书',
-      detail: draft.feishuWebhookUrl ? 'Webhook 已配置' : 'Webhook 已配置',
-      icon: <IconDiamond size={18} />,
-      configured: Boolean(draft.feishuWebhookUrl.trim()),
-    },
-    {
-      id: 'wecom',
-      label: '企业微信',
-      detail: draft.wecomWebhookUrl ? 'Webhook 已配置' : '未设置 Webhook',
-      icon: <IconBell size={18} />,
-      configured: Boolean(draft.wecomWebhookUrl.trim()),
-    },
-    {
-      id: 'webhook',
-      label: '自定义 Webhook',
-      detail: draft.webhookUrl || 'https://hooks.example.com/cpa',
-      icon: <IconWebhook size={18} />,
-      configured: Boolean(draft.webhookUrl.trim()),
-    },
-  ];
+  const channels = notificationChannelViews(draft);
 
   return (
     <WizardPanel
       title="通知与日志"
+      layoutClassName={styles.notificationWizardPanel}
       side={<SummaryPanel draft={draft} />}
     >
       <div className={styles.notificationLogGrid}>
         <section className={styles.notificationBlock}>
           <h3>通知渠道</h3>
           <div className={styles.channelRows}>
-            {channels.map((channel) => {
-              const enabled = draft.notificationEnabled && draft.notificationChannels.includes(channel.id);
-              return (
-                <div key={channel.id} className={styles.channelRow}>
-                  <span className={`${styles.channelIcon} ${styles[`channelIcon-${channel.id}`]}`}>{channel.icon}</span>
-                  <strong>{channel.label}</strong>
-                  <span className={channel.configured ? styles.configuredBadge : styles.unconfiguredBadge}>
-                    {channel.configured ? '已配置' : '未配置'}
-                  </span>
-                  <small>{channel.detail}</small>
-                  <Button size="sm" variant="secondary" disabled={!channel.configured}>
-                    测试
-                  </Button>
-                  <ToggleSwitch
-                    checked={enabled}
-                    onChange={() => {
-                      if (!draft.notificationEnabled) {
-                        onDraftChange('notificationEnabled', true);
-                        if (!draft.notificationChannels.includes(channel.id)) {
-                          onToggleChannel(channel.id);
-                        }
-                        return;
+            {channels.map((channel) => (
+              <div key={channel.id} className={styles.channelRow}>
+                <span className={`${styles.channelIcon} ${styles[`channelIcon-${channel.id}`]}`}>{channel.icon}</span>
+                <strong>{channel.label}</strong>
+                <span className={channel.configured ? styles.configuredBadge : styles.unconfiguredBadge}>
+                  {channel.configured ? '已配置' : '未配置'}
+                </span>
+                <small>{channel.detail}</small>
+                <Button size="sm" variant="secondary" disabled={!channel.configured}>
+                  测试
+                </Button>
+                <ToggleSwitch
+                  checked={channel.enabled}
+                  disabled={!channel.configured}
+                  onChange={() => {
+                    if (!channel.configured) return;
+                    if (!draft.notificationEnabled) {
+                      onDraftChange('notificationEnabled', true);
+                      if (!draft.notificationChannels.includes(channel.id)) {
+                        onToggleChannel(channel.id);
                       }
-                      onToggleChannel(channel.id);
-                    }}
-                    ariaLabel={`${channel.label} 通知`}
-                  />
-                </div>
-              );
-            })}
-          </div>
-          <div className={styles.channelConfigGrid}>
-            {draft.notificationChannels.includes('telegram') ? (
-              <>
-                <Input label="Telegram Bot Token" value={draft.telegramBotToken} onChange={(event) => onDraftChange('telegramBotToken', event.target.value)} />
-                <Input label="Telegram Chat ID" value={draft.telegramChatId} onChange={(event) => onDraftChange('telegramChatId', event.target.value)} />
-              </>
-            ) : null}
-            {draft.notificationChannels.includes('feishu') ? (
-              <>
-                <Input label="飞书机器人 Webhook" value={draft.feishuWebhookUrl} onChange={(event) => onDraftChange('feishuWebhookUrl', event.target.value)} />
-                <Input label="飞书 Secret" value={draft.feishuSecret} onChange={(event) => onDraftChange('feishuSecret', event.target.value)} />
-              </>
-            ) : null}
-            {draft.notificationChannels.includes('wecom') ? (
-              <Input label="企业微信机器人 Webhook" value={draft.wecomWebhookUrl} onChange={(event) => onDraftChange('wecomWebhookUrl', event.target.value)} />
-            ) : null}
-            <Input label="自定义 Webhook URL" value={draft.webhookUrl} onChange={(event) => onDraftChange('webhookUrl', event.target.value)} />
+                      return;
+                    }
+                    onToggleChannel(channel.id);
+                  }}
+                  ariaLabel={`${channel.label} 通知`}
+                />
+              </div>
+            ))}
           </div>
         </section>
 
@@ -2726,7 +2711,7 @@ function NotificationLogStep({
               { value: 'manual_required', label: '仅有需要人工处理的账号时通知', body: '仅当存在需人工介入账号时通知' },
               { value: 'action_or_abnormal', label: '仅在有操作或异常时通知', body: '当存在异常或执行了任一操作（自动或人工）时发送通知' },
             ].map((item) => (
-              <label key={item.value} className={styles.checkboxLine}>
+              <label key={item.value} className={styles.notificationCheckLine}>
                 <input
                   type="checkbox"
                   checked={draft.notificationTriggers.includes(item.value as NotificationTriggerOption)}
@@ -2741,40 +2726,51 @@ function NotificationLogStep({
 
         <section className={styles.logSettingsBlock}>
           <h3>日志设置</h3>
-          <ToggleRow
-            title="保存执行日志"
-            body="保存每次巡检的执行日志和结果摘要"
-            checked={draft.saveLogs}
-            onChange={(value) => onDraftChange('saveLogs', value)}
-          />
-          <ToggleRow
-            title="保存账号明细"
-            body="保存影响账号的明细数据，便于追溯与分析"
-            checked={draft.saveAccountDetails}
-            onChange={(value) => onDraftChange('saveAccountDetails', value)}
-          />
-          <div className={styles.logRetentionGrid}>
-            <Input
-              label="日志保留天数"
-              type="number"
-              min={1}
-              value={draft.retentionDays}
-              onChange={(event) => {
-                onDraftChange('retentionMode', 'days');
-                onDraftChange('retentionDays', event.target.value);
-              }}
-            />
-            <Input
-              label="保留最近 N 条"
-              type="number"
-              min={1}
-              value={draft.retentionCount}
-              onChange={(event) => onDraftChange('retentionCount', event.target.value)}
-            />
-            <label className={styles.wizardField}>
-              <span>自动清理周期</span>
-              <Select value="daily" onChange={() => undefined} options={[{ value: 'daily', label: '每天' }]} ariaLabel="自动清理周期" />
-            </label>
+          <div className={styles.logSettingsSplit}>
+            <div className={styles.logToggleList}>
+              <div className={styles.logToggleRow}>
+                <ToggleSwitch checked={draft.saveLogs} onChange={(value) => onDraftChange('saveLogs', value)} ariaLabel="保存执行日志" />
+                <div className={styles.logToggleText}>
+                  <strong>保存执行日志</strong>
+                  <p>保存每次巡检的执行日志和结果摘要</p>
+                </div>
+              </div>
+              <div className={styles.logToggleRow}>
+                <ToggleSwitch checked={draft.saveAccountDetails} onChange={(value) => onDraftChange('saveAccountDetails', value)} ariaLabel="保存账号明细" />
+                <div className={styles.logToggleText}>
+                  <strong>保存账号明细</strong>
+                  <p>保存影响账号的明细数据，便于追溯与分析</p>
+                </div>
+              </div>
+            </div>
+            <span className={styles.logSettingsDivider} aria-hidden="true" />
+            <div className={styles.logRetentionGrid}>
+              <Input
+                label="日志保留天数"
+                type="number"
+                min={1}
+                className={styles.inputWithSuffix}
+                rightElement={<span className={styles.inputSuffix}>天</span>}
+                value={draft.retentionDays}
+                onChange={(event) => {
+                  onDraftChange('retentionMode', 'days');
+                  onDraftChange('retentionDays', event.target.value);
+                }}
+              />
+              <Input
+                label="保留最近 N 条"
+                type="number"
+                min={1}
+                className={styles.inputWithSuffix}
+                rightElement={<span className={styles.inputSuffix}>条</span>}
+                value={draft.retentionCount}
+                onChange={(event) => onDraftChange('retentionCount', event.target.value)}
+              />
+              <label className={styles.wizardField}>
+                <span>自动清理周期</span>
+                <Select value="daily" onChange={() => undefined} options={[{ value: 'daily', label: '每天' }]} ariaLabel="自动清理周期" />
+              </label>
+            </div>
           </div>
           <p className={styles.fieldHint}>系统将根据所选策略自动清理过期日志，确保储存空间可控。</p>
         </section>
@@ -2905,41 +2901,39 @@ function ToggleRow({
 }
 
 function SummaryPanel({ draft }: { draft: TaskDraft }) {
-  const channels: CodexInspectionNotificationChannel[] = ['telegram', 'feishu', 'webhook', 'wecom'];
-  const enabledChannels = draft.notificationEnabled ? draft.notificationChannels : [];
+  const channels = notificationChannelViews(draft);
   return (
     <section className={styles.summaryPanel}>
       <h2>任务配置汇总</h2>
-      <div className={styles.summaryList}>
-        <SummaryItem icon={<IconFileText size={16} />} label="任务名称" value={draft.name || '高风险账号巡检任务'} />
-        <SummaryItem icon={<IconTimer size={16} />} label="执行计划" value={draftScheduleSummary(draft)} />
-        <SummaryItem icon={<IconUsers size={16} />} label="巡检范围" value={draftScopeSummary(draft)} />
-        <SummaryItem icon={<IconShield size={16} />} label="执行模式" value={draft.taskTags.join(' + ') || 'security + high-risk + auto-fix'} />
-        <SummaryItem icon={<IconShield size={16} />} label="自动处理策略" value={`启用（${draftPolicyCount(draft)} 条规则）`} />
-        <SummaryItem
-          icon={<IconBell size={16} />}
-          label="通知渠道"
-          value=""
-        >
-          <div className={styles.summaryChannelList}>
-            {channels.map((channel) => {
-              const enabled = enabledChannels.includes(channel);
-              return (
-                <span key={channel}>
-                  <i className={`${styles.summaryChannelIcon} ${styles[`channelIcon-${channel}`]}`}>
-                    {channel === 'telegram' ? <IconSend size={13} /> : channel === 'webhook' ? <IconWebhook size={13} /> : channel === 'wecom' ? <IconBell size={13} /> : <IconDiamond size={13} />}
+      <div className={styles.summaryPanelCard}>
+        <div className={styles.summaryList}>
+          <SummaryItem icon={<IconFileText size={16} />} label="任务名称" value={draft.name || '高风险账号巡检任务'} />
+          <SummaryItem icon={<IconTimer size={16} />} label="执行计划" value={draftScheduleSummary(draft)} />
+          <SummaryItem icon={<IconUsers size={16} />} label="巡检范围" value={draftScopeSummary(draft)} />
+          <SummaryItem icon={<IconShield size={16} />} label="执行模式" value={draft.taskTags.join(' + ') || 'security + high-risk + auto-fix'} />
+          <SummaryItem icon={<IconShield size={16} />} label="自动处理策略" value={`启用（${draftPolicyCount(draft)} 条规则）`} />
+          <SummaryItem
+            icon={<IconBell size={16} />}
+            label="通知渠道"
+            value=""
+          >
+            <div className={styles.summaryChannelList}>
+              {channels.map((channel) => (
+                <span key={channel.id}>
+                  <i className={`${styles.summaryChannelIcon} ${styles[`channelIcon-${channel.id}`]}`}>
+                    {notificationChannelIcon(channel.id, 13)}
                   </i>
-                  <strong>{channelDisplayLabel(channel)}</strong>
-                  <em className={enabled ? styles.summaryEnabledBadge : styles.summaryDisabledBadge}>
-                    {enabled ? '已启用' : '未启用'}
+                  <strong>{channel.label}</strong>
+                  <em className={channel.enabled ? styles.summaryEnabledBadge : styles.summaryDisabledBadge}>
+                    {channel.enabled ? '已启用' : '未启用'}
                   </em>
                 </span>
-              );
-            })}
-          </div>
-        </SummaryItem>
-        <SummaryItem icon={<IconCheck size={16} />} label="通知触发条件" value={`${draft.notificationTriggers.length} 项条件`} />
-        <SummaryItem icon={<IconFileText size={16} />} label="日志保留" value={draftRetentionSummary(draft)} />
+              ))}
+            </div>
+          </SummaryItem>
+          <SummaryItem icon={<IconCheck size={16} />} label="通知触发条件" value={`${draft.notificationTriggers.length} 项条件`} />
+          <SummaryItem icon={<IconFileText size={16} />} label="日志保留" value={draftRetentionSummary(draft)} />
+        </div>
       </div>
     </section>
   );
@@ -2981,6 +2975,7 @@ function draftScheduleSummary(draft: TaskDraft) {
     return `每 ${draft.intervalEvery || 1} ${unit}`;
   }
   if (draft.scheduleType === 'daily_times') {
+    if (isPrototypeSummaryDraft(draft)) return PROTOTYPE_SCHEDULE_SUMMARY;
     return `每日 ${splitList(draft.dailyTimes)[0] ?? '09:00'}`;
   }
   return '手动执行';
@@ -2990,7 +2985,8 @@ function draftScopeSummary(draft: TaskDraft) {
   if (draft.targetType === 'all_codex') return '全部 Codex 账号';
   if (draft.targetType === 'auth_indices') return `指定账号（${splitList(draft.authIndices).length || 3} 个）`;
   if (draft.targetType === 'files') return `认证文件（${splitList(draft.fileNames).length} 个）`;
-  return `high-risk（36 个标签）`;
+  if (draft.query.trim() === 'high-risk') return PROTOTYPE_SCOPE_SUMMARY;
+  return draft.query.trim() ? `标签筛选：${draft.query.trim()}` : '标签筛选';
 }
 
 function draftPolicyCount(draft: TaskDraft) {
