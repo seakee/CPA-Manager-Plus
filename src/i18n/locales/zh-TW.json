@@ -61,13 +61,13 @@
     "unsaved_changes_message": "你有未儲存的變更，離開後將遺失這些變更。確定要離開嗎？"
   },
   "title": {
-    "main": "CLI Proxy API Management Center",
-    "login": "CLI Proxy API Management Center",
-    "abbr": "CPAMC"
+    "main": "CPA Manager Plus",
+    "login": "CPA Manager Plus",
+    "abbr": "CPAMP"
   },
   "splash": {
-    "title": "CLI Proxy API",
-    "subtitle": "管理中心"
+    "title": "CPA Manager Plus",
+    "subtitle": "WebUI"
   },
   "auto_login": {
     "title": "正在自動登入...",
@@ -144,7 +144,7 @@
     "monitoring_center": "請求監控",
     "config_management": "設定面板",
     "logs": "記錄檢視",
-    "system_info": "中心資訊"
+    "system_info": "系統資訊"
   },
   "dashboard": {
     "title": "儀表板",
@@ -1063,7 +1063,7 @@
     "import_confirm_title": "匯入使用統計",
     "import_confirm_body": "將把 {{name}} 寫入 Usage Service 的 SQLite 用量庫，重複事件會自動跳過。",
     "import_legacy_warning": "舊版匯出檔缺少部分請求中繼資料，帳號匹配與明細精度可能低於新採集資料。",
-    "import_export_requires_usage_service": "匯入匯出需要連接 Usage Service，請從 Docker 面板訪問或在「設定面板 -> CPA-Manager 設定」中設定 Usage Service 位址。",
+    "import_export_requires_usage_service": "匯入匯出需要連接 Usage Service，請從 Docker 面板訪問或在「設定面板 -> CPA Manager Plus 設定」中設定 Usage Service 位址。",
     "chart_line_label_1": "曲線 1",
     "chart_line_label_2": "曲線 2",
     "chart_line_label_3": "曲線 3",
@@ -1104,7 +1104,7 @@
     "model_price_sync_success": "已從 {{source}} 同步 {{count}} 筆模型定價",
     "model_price_sync_failed": "模型定價同步失敗",
     "model_price_sync_no_models": "目前沒有可同步的模型",
-    "model_price_sync_requires_usage_service": "定價同步需要連接 Usage Service，請從 Docker 面板存取或在「設定面板 -> CPA-Manager 設定」中設定 Usage Service 位址。",
+    "model_price_sync_requires_usage_service": "定價同步需要連接 Usage Service，請從 Docker 面板存取或在「設定面板 -> CPA Manager Plus 設定」中設定 Usage Service 位址。",
     "model_price_model_required": "請選擇要設定定價的模型",
     "cost_trend": "花費統計",
     "cost_axis_label": "花費（$）",
@@ -1204,7 +1204,7 @@
     "open_usage": "開啟使用統計",
     "open_logs": "開啟記錄檢視",
     "open_system": "開啟中心資訊",
-    "open_manager_config": "開啟 CPA-Manager 設定",
+    "open_manager_config": "開啟 CPA Manager Plus 設定",
     "active_credentials": "活躍憑證",
     "unavailable_auth_meta": "{{count}} 個憑證目前不可用",
     "auth_health_meta": "認證資訊已映射回使用明細",
@@ -1220,7 +1220,7 @@
     "usage_disabled_body": "請求監控依賴 Usage Service 或相容用量資料。請先開啟「使用統計」並確認用量服務正在執行，否則此處只能顯示連線與設定狀態。",
     "request_monitoring_disabled_title": "請求監控未啟用",
     "request_monitoring_unavailable_title": "請求監控服務不可用",
-    "request_monitoring_disabled_body": "CPA-Manager 目前沒有啟動請求採集器。需要使用監控頁時，請到 CPA-Manager 設定中啟用請求監控。",
+    "request_monitoring_disabled_body": "CPA Manager Plus 目前沒有啟動請求採集器。需要使用監控頁時，請到 CPA Manager Plus 設定中啟用請求監控。",
     "request_monitoring_service_unavailable_body": "已設定的 Usage Service 暫時無法存取。請檢查服務位址、網路和部署狀態。",
     "request_monitoring_not_configured_body": "目前沒有偵測到可用的 Usage Service。CPA 控制面板方案需要先部署並設定 Usage Service。",
     "empty_diagnostics_body": "如果 CPA 已產生請求但這裡仍為空，請確認已啟用用量發布，檢查 Usage Service /status，並確保同一個 CPA 執行個體只有一個 Usage Service 消費用量佇列。",
@@ -1632,14 +1632,14 @@
     "tabs": {
       "visual": "視覺化編輯",
       "source": "原始檔編輯",
-      "manager": "CPA-Manager 設定"
+      "manager": "CPA Manager Plus 設定"
     },
     "manager": {
-      "title": "CPA-Manager 設定",
-      "description": "管理 CPA-Manager 自身設定，和 CPA 設定分開儲存。",
+      "title": "CPA Manager Plus 設定",
+      "description": "管理 CPA Manager Plus 自身設定，和 CPA 設定分開儲存。",
       "boundary_hint": "這裡儲存 CPAM 自身執行設定；CPA 用量統計和佇列保留時間仍屬於 CPA 設定。",
-      "load_failed": "CPA-Manager 設定載入失敗",
-      "save_success": "CPA-Manager 設定已儲存",
+      "load_failed": "CPA Manager Plus 設定載入失敗",
+      "save_success": "CPA Manager Plus 設定已儲存",
       "number_invalid": "{{label}} 必須是正整數",
       "service_base_required": "請先填寫獨立 Usage Service 位址",
       "poll_interval_retention_error": "採集輪詢間隔必須小於等於 CPA 用量佇列保留時間",
@@ -1895,8 +1895,8 @@
     "sort_plan_asc": "方案低到高"
   },
   "system_info": {
-    "title": "管理中心資訊",
-    "about_title": "CLI Proxy API Management Center",
+    "title": "系統資訊",
+    "about_title": "CPA Manager Plus",
     "connection_status_title": "連線狀態",
     "api_status_label": "API 狀態:",
     "config_status_label": "設定狀態:",
@@ -1922,17 +1922,17 @@
     "version_is_latest": "目前已是最新版本",
     "version_check_error": "檢查更新失敗",
     "version_current_missing": "未取得到伺服器版本號，暫無法比對",
-    "manager_version_update_available": "CPA-Manager 有新版本可用：{{version}}",
-    "manager_version_is_latest": "CPA-Manager 目前已是最新版本",
-    "manager_version_check_error": "CPA-Manager 更新檢查失敗",
-    "manager_version_current_missing": "目前 CPA-Manager 版本不可用，暫無法比對",
+    "manager_version_update_available": "CPA Manager Plus 有新版本可用：{{version}}",
+    "manager_version_is_latest": "CPA Manager Plus 目前已是最新版本",
+    "manager_version_check_error": "CPA Manager Plus 更新檢查失敗",
+    "manager_version_current_missing": "目前 CPA Manager Plus 版本不可用，暫無法比對",
     "version_unknown": "未知",
     "quick_links_title": "快速連結",
     "quick_links_desc": "存取專案儲存庫和文件，取得協助和更新。",
     "link_main_repo": "主程式儲存庫",
     "link_main_repo_desc": "CLI Proxy API 核心程式原始碼",
     "link_webui_repo": "WebUI 儲存庫",
-    "link_webui_repo_desc": "管理中心前端介面原始碼",
+    "link_webui_repo_desc": "CPA Manager Plus 前端介面原始碼",
     "link_docs": "使用教學",
     "link_docs_desc": "設定指南和使用說明",
     "clear_login_title": "本地登入資訊",

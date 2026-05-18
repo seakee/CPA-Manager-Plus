@@ -62,13 +62,13 @@
     "unsaved_changes_message": "You have unsaved changes. Leaving now will discard them. Do you want to leave?"
   },
   "title": {
-    "main": "CLI Proxy API Management Center",
-    "login": "CLI Proxy API Management Center",
-    "abbr": "CPAMC"
+    "main": "CPA Manager Plus",
+    "login": "CPA Manager Plus",
+    "abbr": "CPAMP"
   },
   "splash": {
-    "title": "CLI Proxy API",
-    "subtitle": "Management Center"
+    "title": "CPA Manager Plus",
+    "subtitle": "WebUI"
   },
   "auto_login": {
     "title": "Auto Login in Progress...",
@@ -146,11 +146,11 @@
     "monitoring_center": "Request Monitoring",
     "config_management": "Config Panel",
     "logs": "Logs Viewer",
-    "system_info": "Management Center Info"
+    "system_info": "System Info"
   },
   "dashboard": {
     "title": "Dashboard",
-    "subtitle": "Welcome to CLI Proxy API Management Center",
+    "subtitle": "Welcome to CPA Manager Plus",
     "openai_providers": "OpenAI Providers",
     "quick_actions": "Quick Actions",
     "current_config": "Current Configuration",
@@ -1039,7 +1039,7 @@
     "import_confirm_title": "Import Usage Data",
     "import_confirm_body": "{{name}} will be written into the Usage Service SQLite usage database. Duplicate events will be skipped automatically.",
     "import_legacy_warning": "Legacy export files are missing some request metadata, so account matching and detail accuracy may be lower than newly collected data.",
-    "import_export_requires_usage_service": "Import and export require Usage Service. Open the Docker-hosted panel or configure a Usage Service URL under Configuration -> CPA-Manager Configuration.",
+    "import_export_requires_usage_service": "Import and export require Usage Service. Open the Docker-hosted panel or configure a Usage Service URL under Configuration -> CPA Manager Plus Configuration.",
     "chart_line_label_1": "Line 1",
     "chart_line_label_2": "Line 2",
     "chart_line_label_3": "Line 3",
@@ -1080,7 +1080,7 @@
     "model_price_sync_success": "Synced {{count}} model prices from {{source}}",
     "model_price_sync_failed": "Failed to sync model prices",
     "model_price_sync_no_models": "No models available to sync",
-    "model_price_sync_requires_usage_service": "Price sync requires Usage Service. Open the Docker-hosted panel or configure a Usage Service URL under Configuration -> CPA-Manager Configuration.",
+    "model_price_sync_requires_usage_service": "Price sync requires Usage Service. Open the Docker-hosted panel or configure a Usage Service URL under Configuration -> CPA Manager Plus Configuration.",
     "model_price_model_required": "Please choose a model to set pricing",
     "cost_trend": "Cost Overview",
     "cost_axis_label": "Cost ($)",
@@ -1180,7 +1180,7 @@
     "open_usage": "Open Usage Stats",
     "open_logs": "Open Logs",
     "open_system": "Open System Info",
-    "open_manager_config": "Open CPA-Manager Configuration",
+    "open_manager_config": "Open CPA Manager Plus Configuration",
     "active_credentials": "Active Credentials",
     "unavailable_auth_meta": "{{count}} credentials are currently unavailable",
     "auth_health_meta": "Credential metadata is mapped back to usage details",
@@ -1196,7 +1196,7 @@
     "usage_disabled_body": "Request Monitoring depends on Usage Service or compatible usage data. Enable usage statistics and verify the usage service is running to populate runtime metrics here.",
     "request_monitoring_disabled_title": "Request monitoring is disabled",
     "request_monitoring_unavailable_title": "Request monitoring service unavailable",
-    "request_monitoring_disabled_body": "CPA-Manager is not currently running the request collector. Enable request monitoring in CPA-Manager Configuration when you need this page.",
+    "request_monitoring_disabled_body": "CPA Manager Plus is not currently running the request collector. Enable request monitoring in CPA Manager Plus Configuration when you need this page.",
     "request_monitoring_service_unavailable_body": "The configured Usage Service cannot be reached. Check the service URL, network, and deployment status.",
     "request_monitoring_not_configured_body": "No available Usage Service was detected. The CPA-hosted panel mode requires a deployed and configured Usage Service.",
     "empty_diagnostics_body": "If CPA has produced requests but this view is still empty, confirm usage publishing is enabled, check Usage Service /status, and make sure only one Usage Service consumes the same CPA usage queue.",
@@ -1608,14 +1608,14 @@
     "tabs": {
       "visual": "Visual Editor",
       "source": "Source File Editor",
-      "manager": "CPA-Manager Configuration"
+      "manager": "CPA Manager Plus Configuration"
     },
     "manager": {
-      "title": "CPA-Manager Configuration",
-      "description": "Manage CPA-Manager runtime settings separately from CPA configuration.",
+      "title": "CPA Manager Plus Configuration",
+      "description": "Manage CPA Manager Plus runtime settings separately from CPA configuration.",
       "boundary_hint": "These settings are saved for CPAM itself. CPA usage statistics and queue retention still belong to CPA configuration.",
-      "load_failed": "Failed to load CPA-Manager configuration",
-      "save_success": "CPA-Manager configuration saved",
+      "load_failed": "Failed to load CPA Manager Plus configuration",
+      "save_success": "CPA Manager Plus configuration saved",
       "number_invalid": "{{label}} must be a positive integer",
       "service_base_required": "Enter the standalone Usage Service URL first",
       "poll_interval_retention_error": "The collection polling interval must be less than or equal to the CPA usage queue retention window",
@@ -1871,8 +1871,8 @@
     "sort_plan_asc": "Plan low to high"
   },
   "system_info": {
-    "title": "Management Center Info",
-    "about_title": "CLI Proxy API Management Center",
+    "title": "System Info",
+    "about_title": "CPA Manager Plus",
     "connection_status_title": "Connection Status",
     "api_status_label": "API Status:",
     "config_status_label": "Config Status:",
@@ -1898,17 +1898,17 @@
     "version_is_latest": "You are on the latest version",
     "version_check_error": "Update check failed",
     "version_current_missing": "Server version is unavailable; cannot compare",
-    "manager_version_update_available": "CPA-Manager update available: {{version}}",
-    "manager_version_is_latest": "CPA-Manager is on the latest version",
-    "manager_version_check_error": "CPA-Manager update check failed",
-    "manager_version_current_missing": "Current CPA-Manager version is unavailable; cannot compare",
+    "manager_version_update_available": "CPA Manager Plus update available: {{version}}",
+    "manager_version_is_latest": "CPA Manager Plus is on the latest version",
+    "manager_version_check_error": "CPA Manager Plus update check failed",
+    "manager_version_current_missing": "Current CPA Manager Plus version is unavailable; cannot compare",
     "version_unknown": "Unknown",
     "quick_links_title": "Quick Links",
     "quick_links_desc": "Access project repositories and documentation for help and updates.",
     "link_main_repo": "Main Repository",
     "link_main_repo_desc": "CLI Proxy API core program source code",
     "link_webui_repo": "WebUI Repository",
-    "link_webui_repo_desc": "Management Center frontend source code",
+    "link_webui_repo_desc": "CPA Manager Plus frontend source code",
     "link_docs": "Documentation",
     "link_docs_desc": "Configuration tutorials and guides",
     "clear_login_title": "Local Login Data",

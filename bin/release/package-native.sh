@@ -5,7 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 version="${VERSION:-dev}"
 out_dir="${OUT_DIR:-"${repo_root}/dist/native"}"
 web_html="${WEB_HTML:-"${repo_root}/dist/index.html"}"
-binary_name="cpa-manager"
+binary_name="cpa-manager-plus"
 
 if [ ! -f "${web_html}" ]; then
   echo "missing ${web_html}; run npm run build first" >&2
@@ -44,7 +44,7 @@ for target in "${targets[@]}"; do
   mkdir -p "${package_dir}"
   (
     cd "${work_dir}/usage-service"
-    CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" go build -trimpath -ldflags "-s -w" -o "${package_dir}/${exe_name}" ./cmd/cpa-manager
+    CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" go build -trimpath -ldflags "-s -w" -o "${package_dir}/${exe_name}" ./cmd/cpa-manager-plus
   )
 
   cp "${repo_root}/README.md" "${package_dir}/README.md"

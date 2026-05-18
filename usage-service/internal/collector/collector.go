@@ -7,11 +7,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/seakee/cpa-manager/usage-service/internal/config"
-	"github.com/seakee/cpa-manager/usage-service/internal/httpqueue"
-	"github.com/seakee/cpa-manager/usage-service/internal/resp"
-	"github.com/seakee/cpa-manager/usage-service/internal/store"
-	"github.com/seakee/cpa-manager/usage-service/internal/usage"
+	"github.com/seakee/cpa-manager-plus/usage-service/internal/config"
+	"github.com/seakee/cpa-manager-plus/usage-service/internal/httpqueue"
+	"github.com/seakee/cpa-manager-plus/usage-service/internal/resp"
+	"github.com/seakee/cpa-manager-plus/usage-service/internal/store"
+	"github.com/seakee/cpa-manager-plus/usage-service/internal/usage"
 )
 
 type Status struct {

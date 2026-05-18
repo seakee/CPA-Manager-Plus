@@ -1,9 +1,9 @@
 services:
-  cpa-manager:
+  cpa-manager-plus:
     build:
       context: .
       dockerfile: Dockerfile.usage-service
-    image: seakee/cpa-manager:latest
+    image: seakee/cpa-manager-plus:latest
     restart: unless-stopped
     ports:
       - "18317:18317"
@@ -18,7 +18,7 @@ services:
       USAGE_QUERY_LIMIT: "50000"
       USAGE_CORS_ORIGINS: "*"
     volumes:
-      - cpa-manager-data:/data
+      - cpa-manager-plus-data:/data
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:18317/health"]
       interval: 10s
@@ -26,4 +26,4 @@ services:
       retries: 3
 
 volumes:
-  cpa-manager-data:
+  cpa-manager-plus-data:

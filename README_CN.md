@@ -1,4 +1,4 @@
-# CLI Proxy API 管理中心
+# CPA Manager Plus
 
 [English](README.md)
 
@@ -32,7 +32,7 @@ CPA 自 v6.10.0 起不再内置用量统计。当前方案通过常驻 Usage Ser
 | 模式 | 入口地址 | 用户需要配置 | 适用场景 |
 |---|---|---|---|
 | 完整 Docker 方案 | `http://<host>:18317/management.html` | 首次 setup：CPA 地址 + Management Key；之后登录：只填 Management Key | 新部署、单入口、最少浏览器/CORS 问题 |
-| CPA 控制面板方案 | `http://<cpa-host>:8317/management.html` | 先登录 CPA，再在「配置面板 -> CPA-Manager 配置」配置 Usage Service 地址 | 保留 CPA 自动载入面板的现有习惯 |
+| CPA 控制面板方案 | `http://<cpa-host>:8317/management.html` | 先登录 CPA，再在「配置面板 -> CPA Manager Plus 配置」配置 Usage Service 地址 | 保留 CPA 自动载入面板的现有习惯 |
 | 前端开发方案 | Vite dev server 或 `dist/index.html` | CPA 地址，可选 Usage Service 地址 | 本地开发 |
 
 完整 Docker 方案不内置 CPA 本体。CPA 仍然作为上游服务独立运行；Docker 镜像提供 Usage Service 和内置管理面板。
@@ -42,7 +42,7 @@ CPA 自 v6.10.0 起不再内置用量统计。当前方案通过常驻 Usage Ser
 请求统计依赖 CPA 的用量队列：
 
 - CPA 必须启用 Management，因为用量队列与 `/v0/management` 使用相同的可用性条件和 Management Key。
-- 使用请求监控时，CPA 必须启用用量发布：配置 `usage-statistics-enabled: true`，或通过 `PUT /usage-statistics-enabled` 提交 `{ "value": true }`。CPA-Manager 初始化或保存启用请求监控时会自动打开该开关。
+- 使用请求监控时，CPA 必须启用用量发布：配置 `usage-statistics-enabled: true`，或通过 `PUT /usage-statistics-enabled` 提交 `{ "value": true }`。CPA Manager Plus 初始化或保存启用请求监控时会自动打开该开关。
 - 关闭 CPAM 请求监控只会停止 Usage Service 采集器，不会自动关闭 CPA 用量发布或清空 CPA 用量队列。如果 CPA 用量发布仍开启，在队列保留时间内再次启用请求监控，可能会采集到关闭采集器期间保留的数据。
 - CPA `v6.10.8+` 推荐使用 HTTP 用量队列接口 `/v0/management/usage-queue`，可通过普通 HTTP 反代访问。
 - 旧版 CPA 使用 RESP 队列协议。Usage Service 在 `auto` 模式下，如果 HTTP 队列接口不可用，会回退到 RESP。RESP 监听在 CPA API 端口，通常是 `8317`，不能通过普通 HTTP 反代转发。
@@ -64,7 +64,7 @@ CPA 自 v6.10.0 起不再内置用量统计。当前方案通过常驻 Usage Ser
       -> SQLite /data/usage.sqlite
 ```
 
-登录页会调用 `GET /usage-service/info`，识别当前是否由 Usage Service 托管。如果响应显示尚未配置，会进入 setup wizard：你填写 CPA 地址、Management Key，并选择是否启用请求监控。启用时还需要填写采集轮询间隔，Usage Service 会验证 CPA Management API，启用 CPA 用量统计，校验采集间隔不超过 CPA 队列保留时间，把 CPA-Manager 配置保存到 SQLite，按配置的采集模式启动采集器（默认 `auto`：优先 HTTP 队列，旧版回退 RESP），并从同源提供完整管理面板。关闭请求监控时仍会保存 CPA 连接用于反代管理接口，但不会启用 CPA 用量统计或启动采集器。
+登录页会调用 `GET /usage-service/info`，识别当前是否由 Usage Service 托管。如果响应显示尚未配置，会进入 setup wizard：你填写 CPA 地址、Management Key，并选择是否启用请求监控。启用时还需要填写采集轮询间隔，Usage Service 会验证 CPA Management API，启用 CPA 用量统计，校验采集间隔不超过 CPA 队列保留时间，把 CPA Manager Plus 配置保存到 SQLite，按配置的采集模式启动采集器（默认 `auto`：优先 HTTP 队列，旧版回退 RESP），并从同源提供完整管理面板。关闭请求监控时仍会保存 CPA 连接用于反代管理接口，但不会启用 CPA 用量统计或启动采集器。
 
 Usage Service 配置完成后，新浏览器再次打开同一地址会使用普通登录表单。用户只需要输入 Management Key，面板会使用服务端已保存的 CPA 连接。
 
@@ -81,7 +81,22 @@ Usage Service
   -> SQLite /data/usage.sqlite
 ```
 
-当你希望保留 CPA 自动下载并托管面板的机制时，使用这个方案。该模式由 CPA 托管页面，因此不会显示 Usage Service 托管面板的 setup wizard。请求监控是可选能力；如果没有部署 Usage Service，面板会自动隐藏请求监控入口，直接访问监控页时会提示先部署并配置 Usage Service。需要请求监控时，先登录 CPA，再单独部署 Usage Service，然后在面板的「配置面板 -> CPA-Manager 配置」中启用并填写地址。
+当你希望保留 CPA 自动下载并托管面板的机制时，使用这个方案。该模式由 CPA 托管页面，因此不会显示 Usage Service 托管面板的 setup wizard。请求监控是可选能力；如果没有部署 Usage Service，面板会自动隐藏请求监控入口，直接访问监控页时会提示先部署并配置 Usage Service。需要请求监控时，先登录 CPA，再单独部署 Usage Service，然后在面板的「配置面板 -> CPA Manager Plus 配置」中启用并填写地址。
+
+### Usage Service 后端
+
+Go 后端位于 `github.com/seakee/cpa-manager-plus/usage-service` 模块。请求链路按以下分层组织：
+
+```text
+model -> repository -> service -> controller -> router
+```
+
+- `internal/model` 定义持久化和 API 响应相关数据结构。
+- `internal/repository` 负责 SQLite 读写和 schema 迁移，并保持现有数据表兼容。
+- `internal/service` 承担 setup、CPA Manager Plus 配置、usage、模型价格、API Key 别名、代理、面板和 collector 生命周期等业务规则。
+- `internal/http/controller`、`internal/http/middleware` 和 `internal/http/router` 把 HTTP decode、CORS/auth/recovery、Gin 路由和响应写入限制在边界层。
+- `internal/httpapi` 保留为当前 `cmd/cpa-manager-plus` 入口的兼容 wrapper。
+- `internal/worker` 负责 collector 启动、重启和停止，不改变现有 HTTP/RESP/auto 队列消费协议。
 
 ## 快速开始：完整 Docker 方案
 
@@ -89,11 +104,11 @@ Usage Service
 
 ```bash
 docker run -d \
-  --name cpa-manager \
+  --name cpa-manager-plus \
   --restart unless-stopped \
   -p 18317:18317 \
-  -v cpa-manager-data:/data \
-  seakee/cpa-manager:latest
+  -v cpa-manager-plus-data:/data \
+  seakee/cpa-manager-plus:latest
 ```
 
 打开：
@@ -112,25 +127,25 @@ http://<host>:18317/management.html
 
 setup 完成后，同一入口地址会使用 Usage Service SQLite 中保存的 CPA 连接。新浏览器只需要在登录页填写 Management Key。
 
-发布镜像支持 `linux/amd64` 和 `linux/arm64`。如果你的镜像发布在其他 Docker Hub 命名空间，把 `seakee/cpa-manager:latest` 替换成实际镜像名。
+发布镜像支持 `linux/amd64` 和 `linux/arm64`。如果你的镜像发布在其他 Docker Hub 命名空间，把 `seakee/cpa-manager-plus:latest` 替换成实际镜像名。
 
 ### 原生运行包
 
 GitHub Releases 同时提供内置面板的原生运行包：
 
-- `cpa-manager_<version>_linux_amd64.tar.gz`
-- `cpa-manager_<version>_linux_arm64.tar.gz`
-- `cpa-manager_<version>_darwin_amd64.tar.gz`
-- `cpa-manager_<version>_darwin_arm64.tar.gz`
-- `cpa-manager_<version>_windows_amd64.zip`
-- `cpa-manager_<version>_windows_arm64.zip`
+- `cpa-manager-plus_<version>_linux_amd64.tar.gz`
+- `cpa-manager-plus_<version>_linux_arm64.tar.gz`
+- `cpa-manager-plus_<version>_darwin_amd64.tar.gz`
+- `cpa-manager-plus_<version>_darwin_arm64.tar.gz`
+- `cpa-manager-plus_<version>_windows_amd64.zip`
+- `cpa-manager-plus_<version>_windows_arm64.zip`
 
 macOS/Linux：
 
 ```bash
-tar -xzf cpa-manager_vX.Y.Z_linux_amd64.tar.gz
-cd cpa-manager_vX.Y.Z_linux_amd64
-./cpa-manager
+tar -xzf cpa-manager-plus_vX.Y.Z_linux_amd64.tar.gz
+cd cpa-manager-plus_vX.Y.Z_linux_amd64
+./cpa-manager-plus
 ```
 
 tar 包已保留执行权限，正常解压后不需要额外 `chmod +x`。macOS 如果提示无法打开未签名程序，可在解压目录执行 `xattr -dr com.apple.quarantine .` 后再运行。
@@ -138,12 +153,12 @@ tar 包已保留执行权限，正常解压后不需要额外 `chmod +x`。macOS
 Windows PowerShell：
 
 ```powershell
-Expand-Archive .\cpa-manager_vX.Y.Z_windows_amd64.zip -DestinationPath .
-cd .\cpa-manager_vX.Y.Z_windows_amd64
-.\cpa-manager.exe
+Expand-Archive .\cpa-manager-plus_vX.Y.Z_windows_amd64.zip -DestinationPath .
+cd .\cpa-manager-plus_vX.Y.Z_windows_amd64
+.\cpa-manager-plus.exe
 ```
 
-Windows 可直接双击 `cpa-manager.exe` 启动，但推荐用 PowerShell 运行，方便查看日志和错误信息。
+Windows 可直接双击 `cpa-manager-plus.exe` 启动，但推荐用 PowerShell 运行，方便查看日志和错误信息。
 
 启动后打开：
 
@@ -159,16 +174,16 @@ http://<host>:18317/management.html
 
 ```yaml
 services:
-  cpa-manager:
-    image: seakee/cpa-manager:latest
+  cpa-manager-plus:
+    image: seakee/cpa-manager-plus:latest
     restart: unless-stopped
     ports:
       - "18317:18317"
     volumes:
-      - cpa-manager-data:/data
+      - cpa-manager-plus-data:/data
 
 volumes:
-  cpa-manager-data:
+  cpa-manager-plus-data:
 ```
 
 启动：
@@ -183,12 +198,12 @@ docker compose up -d
 
 ```bash
 docker run -d \
-  --name cpa-manager \
+  --name cpa-manager-plus \
   --restart unless-stopped \
   --add-host=host.docker.internal:host-gateway \
   -p 18317:18317 \
-  -v cpa-manager-data:/data \
-  seakee/cpa-manager:latest
+  -v cpa-manager-plus-data:/data \
+  seakee/cpa-manager-plus:latest
 ```
 
 然后在首次 setup 时将 CPA 地址填写为 `http://host.docker.internal:8317`。
@@ -207,17 +222,17 @@ docker run -d \
 
    ```bash
    docker run -d \
-     --name cpa-manager \
+     --name cpa-manager-plus \
      --restart unless-stopped \
      -p 18317:18317 \
-     -v cpa-manager-data:/data \
-     seakee/cpa-manager:latest
+     -v cpa-manager-plus-data:/data \
+     seakee/cpa-manager-plus:latest
    ```
 
 3. 在 CPA 面板进入：
 
    ```text
-   配置面板 -> CPA-Manager 配置
+   配置面板 -> CPA Manager Plus 配置
    ```
 
 4. 启用并填写：
@@ -226,7 +241,7 @@ docker run -d \
    http://<usage-service-host>:18317
    ```
 
-5. 保存 CPA-Manager 配置。
+5. 保存 CPA Manager Plus 配置。
 
 面板会把当前 CPA 地址和 Management Key 发送给 Usage Service。之后监控页从 Usage Service 读取用量数据，其他管理功能仍然访问 CPA。
 
@@ -240,7 +255,7 @@ docker compose -f docker-compose.usage.yml up --build
 
 ## Usage Service 配置项
 
-大多数用户可以直接在面板的「配置面板 -> CPA-Manager 配置」中配置 CPA 地址、Management Key、是否启用请求监控、采集模式和轮询间隔。CPA-Manager 配置会保存到 SQLite；环境变量更适合首次引导和无人值守部署。
+大多数用户可以直接在面板的「配置面板 -> CPA Manager Plus 配置」中配置 CPA 地址、Management Key、是否启用请求监控、采集模式和轮询间隔。CPA Manager Plus 配置会保存到 SQLite；环境变量更适合首次引导和无人值守部署。
 
 下表是 Usage Service 运行时配置。前端构建时配置是独立的：`VITE_DEFAULT_CPA_BASE_URL` 用于设置 Usage Service 托管面板首次 setup wizard 中展示的默认 CPA 地址；未设置时，Docker 托管面板默认建议 `http://host.docker.internal:8317`。
 
@@ -274,16 +289,16 @@ docker compose -f docker-compose.usage.yml up --build
 
 如果设置了 `CPA_UPSTREAM_URL` 和 `CPA_MANAGEMENT_KEY`，服务启动后会自动开始采集，并作为环境变量管理的连接配置展示在面板中。否则通过面板 setup 流程配置，保存到 SQLite `settings.manager_config_v1`；旧版 `settings.setup` 会继续写入，用于兼容已有数据和回滚。
 
-### CPA 与 CPA-Manager 配置边界
+### CPA 与 CPA Manager Plus 配置边界
 
 - **CPA 配置**：`usage-statistics-enabled`、`redis-usage-queue-retention-seconds`、代理、日志、路由、认证文件等仍属于 CPA，由 `/config` / `/config.yaml` 管理。
-- **CPA-Manager 配置**：CPA 连接地址、Management Key、请求监控开关、Usage Service 采集模式、`pollIntervalMs`、`batchSize`、`queryLimit`、CPA 控制面板模式下的 Usage Service 引导地址等保存到 Usage Service SQLite。
-- 配置面板会分开展示 CPA 与 CPA-Manager 配置。保存 CPAM 配置不会写入 CPA `config.yaml`；启用请求监控时会按要求调用 CPA Management API 启用用量统计，关闭请求监控时只停止 CPAM 采集器。
+- **CPA Manager Plus 配置**：CPA 连接地址、Management Key、请求监控开关、Usage Service 采集模式、`pollIntervalMs`、`batchSize`、`queryLimit`、CPA 控制面板模式下的 Usage Service 引导地址等保存到 Usage Service SQLite。
+- 配置面板会分开展示 CPA 与 CPA Manager Plus 配置。保存 CPAM 配置不会写入 CPA `config.yaml`；启用请求监控时会按要求调用 CPA Management API 启用用量统计，关闭请求监控时只停止 CPAM 采集器。
 
 ### 迁移指引
 
 1. 备份 Usage Service 数据目录，尤其是 `/data/usage.sqlite`。
-2. 升级后首次打开面板，进入「配置面板 -> CPA-Manager 配置」检查 CPA 地址、请求监控开关、采集模式和轮询间隔。旧数据缺少请求监控开关时按已启用处理。
+2. 升级后首次打开面板，进入「配置面板 -> CPA Manager Plus 配置」检查 CPA 地址、请求监控开关、采集模式和轮询间隔。旧数据缺少请求监控开关时按已启用处理。
 3. 如果旧版本已经通过 `/setup` 保存过 CPA 地址和 Management Key，服务会从 `settings.setup` 自动生成新的 `settings.manager_config_v1` 视图，并在下次保存时写入新结构。
 4. 如果使用环境变量 `CPA_UPSTREAM_URL` / `CPA_MANAGEMENT_KEY`，连接配置仍由环境变量管理；要改为面板持久化，请移除环境变量后重启，再在面板保存。
 5. CPA 托管面板模式下，浏览器仍需要先知道 Usage Service 地址才能读取其数据库配置；首次填写后会同步写入 SQLite，并继续保留本地缓存作为 bootstrap。
@@ -306,8 +321,8 @@ docker compose -f docker-compose.usage.yml up --build
 | `GET /health` | 基础健康检查 |
 | `GET /status` | 采集器、SQLite、事件数、错误状态 |
 | `GET /usage-service/info` | 让前端识别完整 Docker 方案，并通过 `configured` 区分 setup 和登录流程 |
-| `GET /usage-service/config` | 读取 CPA-Manager 持久化配置和 CPA 用量统计状态 |
-| `PUT /usage-service/config` | 保存 CPA-Manager 配置，并按需重启采集器 |
+| `GET /usage-service/config` | 读取 CPA Manager Plus 持久化配置和 CPA 用量统计状态 |
+| `PUT /usage-service/config` | 保存 CPA Manager Plus 配置，并按需重启采集器 |
 | `POST /setup` | 保存 CPA 地址和 Management Key，并启动采集 |
 | `GET /v0/management/usage` | 面板兼容用量数据 |
 | `GET /v0/management/usage/export` | JSONL 导出用量事件 |
@@ -325,7 +340,7 @@ setup 后，`/status`、用量、模型价格和 `/v0/management/*` 反代接口
 ## 功能概览
 
 - **仪表盘**：连接状态、后端版本、快速健康概览
-- **配置管理**：可视化和源码模式编辑 CPA 配置，并单独管理 CPA-Manager 配置
+- **配置管理**：可视化和源码模式编辑 CPA 配置，并单独管理 CPA Manager Plus 配置
 - **AI 提供商**：Gemini、Codex、Claude、Vertex、OpenAI 兼容渠道、Ampcode
 - **认证文件**：上传、下载、删除、状态、OAuth 排除模型、模型别名
 - **配额管理**：支持提供商的配额视图
@@ -351,7 +366,9 @@ Usage Service：
 ```bash
 cd usage-service
 go test ./...
-go run ./cmd/cpa-manager
+go test -race ./...
+go vet ./...
+go run ./cmd/cpa-manager-plus
 ```
 
 ## 构建与发布
@@ -360,7 +377,7 @@ go run ./cmd/cpa-manager
 - 打 `vX.Y.Z` 标签会触发 `.github/workflows/release.yml`
 - 发布流程会上传 `dist/management.html`、原生运行包和 `checksums.txt` 到 GitHub Releases
 - 原生运行包会发布 `linux`、`darwin`、`windows` 的 `amd64` 和 `arm64` 版本，包内已内置管理面板
-- 同一个 workflow 会构建 `Dockerfile.usage-service` 并推送 `seakee/cpa-manager`
+- 同一个 workflow 会构建 `Dockerfile.usage-service` 并推送 `seakee/cpa-manager-plus`
 - Docker 镜像会发布 `linux/amd64` 和 `linux/arm64`
 - workflow 会把 `README.md` 同步到 Docker Hub overview
 - 必需 GitHub secrets：
@@ -378,7 +395,7 @@ go run ./cmd/cpa-manager
 - **Docker 面板数据不更新**：检查 `/status` 中的 `lastConsumedAt`、`lastInsertedAt`、`lastError`。
 - **CPA 控制面板方案有 CORS 错误**：将 `USAGE_CORS_ORIGINS` 设置为 CPA 面板来源；私有部署可保持默认 `*`。
 - **容器重建后数据丢失**：确认 `/data` 已挂载到 Docker volume 或宿主机目录。
-- **完整 FAQ**：查看 [CPA-Manager 常见问题与解决方案](https://github.com/seakee/CPA-Manager/wiki/CPA%E2%80%90Manager-%E5%B8%B8%E8%A7%81%E9%97%AE%E9%A2%98%E4%B8%8E%E8%A7%A3%E5%86%B3%E6%96%B9%E6%A1%88) 或 [English FAQ and Troubleshooting](https://github.com/seakee/CPA-Manager/wiki/CPA-Manager-FAQ-and-Troubleshooting)。
+- **完整 FAQ**：查看 [CPA Manager Plus 常见问题与解决方案](https://github.com/seakee/CPA-Manager-Plus/wiki/CPA%E2%80%90Manager-%E5%B8%B8%E8%A7%81%E9%97%AE%E9%A2%98%E4%B8%8E%E8%A7%A3%E5%86%B3%E6%96%B9%E6%A1%88) 或 [English FAQ and Troubleshooting](https://github.com/seakee/CPA-Manager-Plus/wiki/CPA-Manager-Plus-FAQ-and-Troubleshooting)。
 
 ## 参考
 

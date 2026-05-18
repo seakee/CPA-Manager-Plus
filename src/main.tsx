@@ -4,7 +4,7 @@ import '@/styles/global.scss';
 import { INLINE_LOGO_JPEG } from '@/assets/logoInline';
 import App from './App.tsx';
 
-document.title = 'CLI Proxy API Management Center';
+document.title = 'CPA Manager Plus';
 document.documentElement.setAttribute('translate', 'no');
 document.documentElement.classList.add('notranslate');
 

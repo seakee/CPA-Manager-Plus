@@ -151,13 +151,19 @@ export interface UsageExportResponse {
 
 const USAGE_SERVICE_TIMEOUT_MS = 15 * 1000;
 const USAGE_SERVICE_TRANSFER_TIMEOUT_MS = 60 * 1000;
-export const USAGE_SERVICE_ID = 'cpa-manager';
-export const LEGACY_USAGE_SERVICE_ID = 'cpa-usage-service';
-export const USAGE_SERVICE_LAST_CPA_BASE_KEY = 'cpa-manager:last-cpa-base';
-export const LEGACY_USAGE_SERVICE_LAST_CPA_BASE_KEY = 'cpa-usage-service:last-cpa-base';
+export const USAGE_SERVICE_ID = 'cpa-manager-plus';
+export const LEGACY_USAGE_SERVICE_ID = 'cpa-manager';
+export const LEGACY_USAGE_SERVICE_IDS = [LEGACY_USAGE_SERVICE_ID, 'cpa-usage-service'] as const;
+export const USAGE_SERVICE_LAST_CPA_BASE_KEY = 'cpa-manager-plus:last-cpa-base';
+export const LEGACY_USAGE_SERVICE_LAST_CPA_BASE_KEY = 'cpa-manager:last-cpa-base';
+export const LEGACY_USAGE_SERVICE_LAST_CPA_BASE_KEYS = [
+  LEGACY_USAGE_SERVICE_LAST_CPA_BASE_KEY,
+  'cpa-usage-service:last-cpa-base',
+] as const;
 
 export const isUsageServiceId = (service?: string): boolean =>
-  service === USAGE_SERVICE_ID || service === LEGACY_USAGE_SERVICE_ID;
+  service === USAGE_SERVICE_ID ||
+  (typeof service === 'string' && (LEGACY_USAGE_SERVICE_IDS as readonly string[]).includes(service));
 
 export const normalizeUsageServiceBase = (input: string): string => normalizeApiBase(input);
 

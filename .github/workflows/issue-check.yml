@@ -74,7 +74,7 @@ jobs:
               labels: [label]
             });
 
-            const commentMarker = "<!-- cpa-manager-template-check -->";
+            const commentMarker = "<!-- cpa-manager-plus-template-check -->";
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,

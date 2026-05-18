@@ -83,7 +83,7 @@ jobs:
       contents: read
 
     env:
-      DOCKERHUB_IMAGE: seakee/cpa-manager
+      DOCKERHUB_IMAGE: seakee/cpa-manager-plus
 
     steps:
       - name: Checkout code
@@ -106,8 +106,8 @@ jobs:
             echo "DOCKERHUB_TOKEN secret is required" >&2
             exit 1
           fi
-          if [ "${DOCKERHUB_IMAGE}" != "seakee/cpa-manager" ]; then
-            echo "Docker image name must be seakee/cpa-manager" >&2
+          if [ "${DOCKERHUB_IMAGE}" != "seakee/cpa-manager-plus" ]; then
+            echo "Docker image name must be seakee/cpa-manager-plus" >&2
             exit 1
           fi
         env:
@@ -149,5 +149,5 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: ${{ env.DOCKERHUB_IMAGE }}
-          short-description: CLI Proxy API Management Center with Dockerized Usage Service
+          short-description: CPA Manager Plus with Dockerized Usage Service
           readme-filepath: ./README.md

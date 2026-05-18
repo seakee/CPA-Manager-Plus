@@ -14,13 +14,20 @@ describe('resolveUsageServiceLoginMode', () => {
   });
 
   it('uses setup only for unconfigured Usage Service hosted panels', () => {
-    expect(resolveUsageServiceLoginMode({ service: 'cpa-manager', configured: false })).toEqual({
+    expect(resolveUsageServiceLoginMode({ service: 'cpa-manager-plus', configured: false })).toEqual({
       hostedByUsageService: true,
       usageServiceNeedsSetup: true,
     });
   });
 
   it('uses regular login for configured Usage Service hosted panels', () => {
+    expect(resolveUsageServiceLoginMode({ service: 'cpa-manager-plus', configured: true })).toEqual({
+      hostedByUsageService: true,
+      usageServiceNeedsSetup: false,
+    });
+  });
+
+  it('still recognizes legacy service ids (cpa-manager) as Usage Service', () => {
     expect(resolveUsageServiceLoginMode({ service: 'cpa-manager', configured: true })).toEqual({
       hostedByUsageService: true,
       usageServiceNeedsSetup: false,

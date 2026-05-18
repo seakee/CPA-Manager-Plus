@@ -7,13 +7,13 @@ body:
   - type: markdown
     attributes:
       value: |
-        感谢反馈。请尽量完整填写下面信息，否则很难判断是 CPA、CPA-Manager、网络、Docker 还是配置问题。
+        感谢反馈。请尽量完整填写下面信息，否则很难判断是 CPA、CPA Manager Plus、网络、Docker 还是配置问题。
 
   - type: dropdown
     id: deploy-mode
     attributes:
       label: 部署方式
-      description: 你现在是如何部署 CPA-Manager 的？
+      description: 你现在是如何部署 CPA Manager Plus 的？
       options:
         - 只配置 CPA 面板仓库地址
         - 完整 Docker 方案
@@ -34,7 +34,7 @@ body:
   - type: input
     id: manager-version
     attributes:
-      label: CPA-Manager 版本
+      label: CPA Manager Plus 版本
       placeholder: 例如 v1.1.5 / latest / commit hash
     validations:
       required: true
@@ -93,7 +93,7 @@ body:
     id: logs
     attributes:
       label: 日志
-      description: 请粘贴 CPA-Manager / Usage Service / Docker 相关日志。
+      description: 请粘贴 CPA Manager Plus / Usage Service / Docker 相关日志。
       render: shell
     validations:
       required: false

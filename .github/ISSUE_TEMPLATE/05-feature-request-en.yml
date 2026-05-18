@@ -14,7 +14,7 @@ body:
     attributes:
       label: Use Case
       description: In what situation do you need this feature?
-      placeholder: "Example: I have multiple CPA instances and want to view request statistics from all of them in one CPA-Manager."
+      placeholder: "Example: I have multiple CPA instances and want to view request statistics from all of them in one CPA Manager Plus."
     validations:
       required: true
 
@@ -30,7 +30,7 @@ body:
     id: solution
     attributes:
       label: Expected Solution
-      description: How would you like CPA-Manager to support this?
+      description: How would you like CPA Manager Plus to support this?
     validations:
       required: true
 

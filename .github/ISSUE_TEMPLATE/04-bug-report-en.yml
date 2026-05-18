@@ -7,13 +7,13 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting a bug. Please fill in the details below as completely as possible so we can determine whether the issue is caused by CPA, CPA-Manager, networking, Docker, or configuration.
+        Thanks for reporting a bug. Please fill in the details below as completely as possible so we can determine whether the issue is caused by CPA, CPA Manager Plus, networking, Docker, or configuration.
 
   - type: dropdown
     id: deploy-mode
     attributes:
       label: Deployment Mode
-      description: How are you deploying CPA-Manager?
+      description: How are you deploying CPA Manager Plus?
       options:
         - CPA panel repository URL only
         - Full Docker setup
@@ -34,7 +34,7 @@ body:
   - type: input
     id: manager-version
     attributes:
-      label: CPA-Manager Version
+      label: CPA Manager Plus Version
       placeholder: e.g. v1.1.5 / latest / commit hash
     validations:
       required: true
@@ -93,7 +93,7 @@ body:
     id: logs
     attributes:
       label: Logs
-      description: Paste relevant CPA-Manager, Usage Service, Docker, or reverse proxy logs.
+      description: Paste relevant CPA Manager Plus, Usage Service, Docker, or reverse proxy logs.
       render: shell
     validations:
       required: false

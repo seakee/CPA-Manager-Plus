@@ -61,13 +61,13 @@
     "unsaved_changes_message": "У вас есть несохранённые изменения. Если вы уйдёте, они будут потеряны. Выйти?"
   },
   "title": {
-    "main": "Центр управления CLI Proxy API",
-    "login": "Центр управления CLI Proxy API",
-    "abbr": "CPAMC"
+    "main": "CPA Manager Plus",
+    "login": "CPA Manager Plus",
+    "abbr": "CPAMP"
   },
   "splash": {
-    "title": "CLI Proxy API",
-    "subtitle": "Центр управления"
+    "title": "CPA Manager Plus",
+    "subtitle": "WebUI"
   },
   "auto_login": {
     "title": "Автовход...",
@@ -1034,7 +1034,7 @@
     "import_confirm_title": "Импорт данных использования",
     "import_confirm_body": "{{name}} будет записан в базу SQLite Usage Service. Дублирующиеся события будут пропущены автоматически.",
     "import_legacy_warning": "В старых файлах экспорта отсутствует часть метаданных запросов, поэтому сопоставление аккаунтов и точность деталей могут быть ниже, чем у новых данных.",
-    "import_export_requires_usage_service": "Для импорта и экспорта нужен Usage Service. Откройте Docker-панель или укажите URL Usage Service в Configuration -> CPA-Manager Configuration.",
+    "import_export_requires_usage_service": "Для импорта и экспорта нужен Usage Service. Откройте Docker-панель или укажите URL Usage Service в Configuration -> CPA Manager Plus Configuration.",
     "chart_line_label_1": "Линия 1",
     "chart_line_label_2": "Линия 2",
     "chart_line_label_3": "Линия 3",
@@ -1075,7 +1075,7 @@
     "model_price_sync_success": "Синхронизировано {{count}} цен моделей из {{source}}",
     "model_price_sync_failed": "Не удалось синхронизировать цены моделей",
     "model_price_sync_no_models": "Нет моделей для синхронизации",
-    "model_price_sync_requires_usage_service": "Для синхронизации цен нужен Usage Service. Откройте Docker-панель или укажите URL Usage Service в Configuration -> CPA-Manager Configuration.",
+    "model_price_sync_requires_usage_service": "Для синхронизации цен нужен Usage Service. Откройте Docker-панель или укажите URL Usage Service в Configuration -> CPA Manager Plus Configuration.",
     "model_price_model_required": "Выберите модель для задания цены",
     "cost_trend": "Обзор стоимости",
     "cost_axis_label": "Стоимость ($)",
@@ -1175,7 +1175,7 @@
     "open_usage": "Открыть статистику",
     "open_logs": "Открыть логи",
     "open_system": "Открыть сведения о системе",
-    "open_manager_config": "Открыть конфигурацию CPA-Manager",
+    "open_manager_config": "Открыть конфигурацию CPA Manager Plus",
     "active_credentials": "Активные credentials",
     "unavailable_auth_meta": "{{count}} credentials сейчас недоступны",
     "auth_health_meta": "Метаданные credential сопоставлены с usage details",
@@ -1191,7 +1191,7 @@
     "usage_disabled_body": "Мониторинг запросов зависит от Usage Service или совместимых данных использования. Включите статистику и убедитесь, что служба использования запущена.",
     "request_monitoring_disabled_title": "Мониторинг запросов отключён",
     "request_monitoring_unavailable_title": "Сервис мониторинга запросов недоступен",
-    "request_monitoring_disabled_body": "Сборщик запросов CPA-Manager сейчас не запущен. Включите мониторинг запросов в конфигурации CPA-Manager, если нужна эта страница.",
+    "request_monitoring_disabled_body": "Сборщик запросов CPA Manager Plus сейчас не запущен. Включите мониторинг запросов в конфигурации CPA Manager Plus, если нужна эта страница.",
     "request_monitoring_service_unavailable_body": "Настроенный Usage Service сейчас недоступен. Проверьте URL сервиса, сеть и состояние развёртывания.",
     "request_monitoring_not_configured_body": "Доступный Usage Service не обнаружен. Для панели, размещённой CPA, сначала нужно развернуть и настроить Usage Service.",
     "empty_diagnostics_body": "Если CPA уже обрабатывал запросы, а этот экран всё ещё пуст, включите публикацию usage, проверьте Usage Service /status и убедитесь, что одну очередь CPA usage потребляет только один Usage Service.",
@@ -1603,14 +1603,14 @@
     "tabs": {
       "visual": "Визуальный редактор",
       "source": "Редактор файла",
-      "manager": "Конфигурация CPA-Manager"
+      "manager": "Конфигурация CPA Manager Plus"
     },
     "manager": {
-      "title": "Конфигурация CPA-Manager",
-      "description": "Управляйте настройками CPA-Manager отдельно от конфигурации CPA.",
+      "title": "Конфигурация CPA Manager Plus",
+      "description": "Управляйте настройками CPA Manager Plus отдельно от конфигурации CPA.",
       "boundary_hint": "Эти настройки сохраняются для самого CPAM. CPA usage statistics и хранение очереди остаются частью конфигурации CPA.",
-      "load_failed": "Не удалось загрузить конфигурацию CPA-Manager",
-      "save_success": "Конфигурация CPA-Manager сохранена",
+      "load_failed": "Не удалось загрузить конфигурацию CPA Manager Plus",
+      "save_success": "Конфигурация CPA Manager Plus сохранена",
       "number_invalid": "{{label}} должен быть положительным целым числом",
       "service_base_required": "Сначала укажите URL отдельного Usage Service",
       "poll_interval_retention_error": "Интервал опроса сборщика должен быть не больше окна хранения очереди CPA usage",
@@ -1866,8 +1866,8 @@
     "sort_plan_asc": "План от низкого"
   },
   "system_info": {
-    "title": "Информация о центре управления",
-    "about_title": "CLI Proxy API Management Center",
+    "title": "Информация о системе",
+    "about_title": "CPA Manager Plus",
     "connection_status_title": "Статус подключения",
     "api_status_label": "Статус API:",
     "config_status_label": "Статус конфигурации:",
@@ -1893,17 +1893,17 @@
     "version_is_latest": "Установлена последняя версия",
     "version_check_error": "Не удалось проверить обновление",
     "version_current_missing": "Версия сервера недоступна; сравнение невозможно",
-    "manager_version_update_available": "Доступно обновление CPA-Manager: {{version}}",
-    "manager_version_is_latest": "CPA-Manager обновлен до последней версии",
-    "manager_version_check_error": "Не удалось проверить обновление CPA-Manager",
-    "manager_version_current_missing": "Текущая версия CPA-Manager недоступна; сравнение невозможно",
+    "manager_version_update_available": "Доступно обновление CPA Manager Plus: {{version}}",
+    "manager_version_is_latest": "CPA Manager Plus обновлен до последней версии",
+    "manager_version_check_error": "Не удалось проверить обновление CPA Manager Plus",
+    "manager_version_current_missing": "Текущая версия CPA Manager Plus недоступна; сравнение невозможно",
     "version_unknown": "Неизвестно",
     "quick_links_title": "Быстрые ссылки",
     "quick_links_desc": "Доступ к репозиториям проекта и документации для помощи и обновлений.",
     "link_main_repo": "Основной репозиторий",
     "link_main_repo_desc": "Исходный код основной программы CLI Proxy API",
     "link_webui_repo": "Репозиторий WebUI",
-    "link_webui_repo_desc": "Исходный код фронтенда центра управления",
+    "link_webui_repo_desc": "Исходный код фронтенда CPA Manager Plus",
     "link_docs": "Документация",
     "link_docs_desc": "Учебные пособия и руководства по настройке",
     "clear_login_title": "Локальные данные входа",

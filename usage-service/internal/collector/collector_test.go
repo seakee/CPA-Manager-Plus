@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/seakee/cpa-manager/usage-service/internal/config"
-	"github.com/seakee/cpa-manager/usage-service/internal/store"
+	"github.com/seakee/cpa-manager-plus/usage-service/internal/config"
+	"github.com/seakee/cpa-manager-plus/usage-service/internal/store"
 )
 
 func TestManagerConsumesHTTPUsageQueue(t *testing.T) {

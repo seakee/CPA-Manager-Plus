@@ -429,7 +429,7 @@ export function LoginPage() {
                     />
                   </div>
                   <img src={INLINE_LOGO_JPEG} alt="Logo" className={styles.setupLogo} />
-                  <h1>CPA Manager</h1>
+                  <h1>CPA Manager Plus</h1>
                   <p>{t('login.setup_title')}</p>
                 </div>
               ) : (
