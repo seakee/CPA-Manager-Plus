@@ -199,7 +199,9 @@
     "health_recent_failures": "最近失敗",
     "health_abnormal_channels": "異常渠道",
     "health_error_logs": "錯誤記錄",
-    "health_no_alerts": "暫無警示"
+    "health_no_alerts": "暫無警示",
+    "health_channel_failure_summary": "{{failures}}/{{calls}} 失敗（{{rate}}）",
+    "health_unlinked_channel": "未關聯渠道"
   },
   "basic_settings": {
     "title": "基本設定",

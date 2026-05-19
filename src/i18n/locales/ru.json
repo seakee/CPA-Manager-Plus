@@ -199,7 +199,9 @@
     "health_recent_failures": "Недавние ошибки",
     "health_abnormal_channels": "Проблемные каналы",
     "health_error_logs": "Журналы ошибок",
-    "health_no_alerts": "Активных предупреждений нет"
+    "health_no_alerts": "Активных предупреждений нет",
+    "health_channel_failure_summary": "Ошибок: {{failures}}/{{calls}} ({{rate}})",
+    "health_unlinked_channel": "Канал не связан"
   },
   "basic_settings": {
     "title": "Основные настройки",

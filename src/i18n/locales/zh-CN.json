@@ -201,7 +201,9 @@
     "health_recent_failures": "最近失败",
     "health_abnormal_channels": "异常渠道",
     "health_error_logs": "错误日志",
-    "health_no_alerts": "暂无告警"
+    "health_no_alerts": "暂无告警",
+    "health_channel_failure_summary": "{{failures}}/{{calls}} 失败（{{rate}}）",
+    "health_unlinked_channel": "未关联渠道"
   },
   "basic_settings": {
     "title": "基础设置",

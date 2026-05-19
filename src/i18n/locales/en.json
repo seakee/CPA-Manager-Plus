@@ -201,7 +201,9 @@
     "health_recent_failures": "Recent Failures",
     "health_abnormal_channels": "Abnormal Channels",
     "health_error_logs": "Error Logs",
-    "health_no_alerts": "No active alerts"
+    "health_no_alerts": "No active alerts",
+    "health_channel_failure_summary": "{{failures}}/{{calls}} failed ({{rate}})",
+    "health_unlinked_channel": "Unlinked channel"
   },
   "basic_settings": {
     "title": "Basic Settings",
