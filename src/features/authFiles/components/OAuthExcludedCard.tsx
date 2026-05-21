@@ -48,10 +48,10 @@ export function OAuthExcludedCard(props: OAuthExcludedCardProps) {
                 </div>
               </div>
               <div className={styles.excludedActions}>
-                <Button variant="secondary" size="sm" onClick={() => onEdit(provider)}>
+                <Button variant="secondary" size="xs" onClick={() => onEdit(provider)}>
                   {t('common.edit')}
                 </Button>
-                <Button variant="danger" size="sm" onClick={() => onDelete(provider)}>
+                <Button variant="danger" size="xs" onClick={() => onDelete(provider)}>
                   {t('oauth_excluded.delete')}
                 </Button>
               </div>

@@ -12,7 +12,7 @@
 
 .headerActions {
   display: flex;
-  gap: $spacing-sm;
+  gap: 6px;
   flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
@@ -21,6 +21,12 @@
 
   :global(.btn) {
     min-width: 0;
+  }
+
+  :global(.btn.btn-sm) {
+    min-height: 34px;
+    padding: 0 10px;
+    border-radius: 12px;
   }
 
   @include mobile {
@@ -55,16 +61,16 @@
 .filterSection {
   display: flex;
   flex-direction: column;
-  gap: $spacing-md;
-  margin-bottom: $spacing-lg;
+  gap: 12px;
+  margin-bottom: $spacing-md;
 }
 
 .filterPanel {
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 14px;
-  border-radius: 12px;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 14px;
   border: 1px solid var(--glass-border);
   background: var(--glass-bg);
   box-shadow: none;
@@ -77,11 +83,11 @@
 
 .filterPanelHeader {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: $spacing-md;
+  gap: 12px;
   min-width: 0;
-  padding-bottom: 12px;
+  padding-bottom: 10px;
   border-bottom: 1px solid color-mix(in srgb, var(--border-color) 56%, transparent);
 
   @include mobile {
@@ -127,7 +133,7 @@
   display: flex;
   flex-direction: row;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
 
   @include mobile {
@@ -140,10 +146,11 @@
 .filterTag {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 7px 12px 7px 8px;
-  border-radius: 10px;
-  font-size: 13px;
+  gap: 6px;
+  min-height: 34px;
+  padding: 5px 10px 5px 7px;
+  border-radius: 12px;
+  font-size: 12px;
   font-weight: 600;
   line-height: 1.2;
   border: 1px solid var(--border-secondary);
@@ -178,13 +185,13 @@
 .filterTagLabel {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
 }
 
 .filterTagIconWrap {
-  width: 24px;
-  height: 24px;
+  width: 22px;
+  height: 22px;
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
@@ -217,9 +224,9 @@
 .filterTagCount {
   display: inline-grid;
   place-items: center;
-  min-width: 20px;
-  height: 20px;
-  padding: 0 6px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
   border-radius: 6px;
   background: color-mix(in srgb, var(--filter-color) 12%, transparent);
   color: var(--text-tertiary);
@@ -242,8 +249,8 @@
 
 .filterControls {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(96px, 132px) minmax(160px, 220px);
-  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) minmax(88px, 120px) minmax(150px, 200px);
+  gap: 8px;
   align-items: flex-end;
   min-width: 0;
 
@@ -253,7 +260,11 @@
   }
 
   :global(.input) {
-    height: 40px;
+    height: 36px;
+    min-height: 36px;
+    padding-top: 0;
+    padding-bottom: 0;
+    border-radius: 12px;
     box-sizing: border-box;
   }
 
@@ -269,7 +280,7 @@
 .filterItem {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
   min-width: 0;
 
   label {
@@ -287,7 +298,7 @@
   grid-column: 1 / -1;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
-  column-gap: 12px;
+  column-gap: 8px;
   min-width: 0;
 
   label {
@@ -304,8 +315,8 @@
 .filterToggleGroup {
   display: inline-flex;
   flex-wrap: wrap;
-  gap: 8px;
-  min-height: 40px;
+  gap: 6px;
+  min-height: 36px;
   width: fit-content;
   max-width: 100%;
 
@@ -320,9 +331,9 @@
   display: flex;
   align-items: center;
   min-width: 0;
-  min-height: 40px;
-  padding: 0 10px;
-  border-radius: 8px;
+  min-height: 36px;
+  padding: 0 8px;
+  border-radius: 12px;
   border: none;
   background: transparent;
 
@@ -343,7 +354,7 @@
 .filterToggle {
   display: flex;
   align-items: center;
-  min-height: 40px;
+  min-height: 36px;
   padding-inline: 2px;
 }
 
@@ -359,14 +370,14 @@
 
 .pageSizeSelect {
   width: 100%;
-  padding: 8px 12px;
+  padding: 0 10px;
   border: 1px solid color-mix(in srgb, var(--border-color) 70%, transparent);
-  border-radius: 8px;
+  border-radius: 12px;
   background-color: var(--bg-primary);
   color: var(--text-primary);
-  font-size: 14px;
+  font-size: 13px;
   cursor: text;
-  height: 40px;
+  height: 36px;
   box-sizing: border-box;
 
   &:focus {
@@ -836,14 +847,14 @@
   .cardUtilityActions {
     gap: 2px;
     padding: 2px;
-    border-radius: 6px;
+    border-radius: 8px;
   }
 
   .iconButton:global(.btn.btn-sm) {
     width: 28px;
     height: 28px;
     min-width: 28px;
-    border-radius: 6px;
+    border-radius: 8px;
   }
 
   .statusToggle {
@@ -1042,6 +1053,12 @@
 .sortSelect {
   width: 100%;
   min-width: 0;
+
+  :global(button) {
+    height: 36px;
+    border-radius: 12px;
+    font-size: 13px;
+  }
 }
 
 .healthStatusMessage {
@@ -1052,7 +1069,7 @@
   color: var(--warning-text);
   background-color: color-mix(in srgb, var(--warning-bg) 60%, transparent);
   border: 1px solid color-mix(in srgb, var(--warning-border) 60%, transparent);
-  border-radius: 8px;
+  border-radius: 10px;
   padding: 8px 10px;
   word-break: break-word;
 }
@@ -1471,7 +1488,7 @@
   min-width: 32px;
   padding: 0;
   box-sizing: border-box;
-  border-radius: 8px;
+  border-radius: 10px;
   gap: 0;
 }
 
@@ -1494,7 +1511,7 @@
   align-items: center;
   gap: 3px;
   padding: 2px;
-  border-radius: 8px;
+  border-radius: 10px;
   background: transparent;
 }
 
@@ -1518,7 +1535,7 @@
   min-width: 32px;
   padding: 0;
   box-sizing: border-box;
-  border-radius: 8px;
+  border-radius: 10px;
   gap: 0;
 }
 

@@ -96,7 +96,8 @@ export function OAuthModelAliasCard(props: OAuthModelAliasCardProps) {
               <h4 className={styles.aliasChartTitle}>{t('oauth_model_alias.chart_title')}</h4>
               <Button
                 variant="ghost"
-                size="sm"
+                size="xs"
+                iconOnly
                 onClick={() => diagramRef.current?.collapseAll()}
                 disabled={disableControls || modelAliasError === 'unsupported'}
                 title={t('oauth_model_alias.diagram_collapse')}
@@ -135,10 +136,10 @@ export function OAuthModelAliasCard(props: OAuthModelAliasCardProps) {
                 </div>
               </div>
               <div className={styles.excludedActions}>
-                <Button variant="secondary" size="sm" onClick={() => onEditProvider(provider)}>
+                <Button variant="secondary" size="xs" onClick={() => onEditProvider(provider)}>
                   {t('common.edit')}
                 </Button>
-                <Button variant="danger" size="sm" onClick={() => onDeleteProvider(provider)}>
+                <Button variant="danger" size="xs" onClick={() => onDeleteProvider(provider)}>
                   {t('oauth_model_alias.delete')}
                 </Button>
               </div>
