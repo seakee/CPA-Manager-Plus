@@ -14,16 +14,21 @@ type ModelTokens struct {
 }
 
 // CostForModel computes the dollar cost for a single (model, tokens) pair.
-// Cached tokens use the cache price (often discounted); when a model has no
-// entry in the price book the cost is reported as zero.
+// Cached tokens are included in input tokens by upstream usage payloads, so
+// only non-cached input tokens use the prompt price.
 func CostForModel(modelName string, tokens ModelTokens, prices map[string]model.ModelPrice) float64 {
 	price, ok := prices[modelName]
 	if !ok {
 		return 0
 	}
-	return float64(tokens.InputTokens)*price.Prompt/PerMillion +
-		float64(tokens.OutputTokens)*price.Completion/PerMillion +
-		float64(tokens.CachedTokens)*price.Cache/PerMillion
+	inputTokens := maxInt64(tokens.InputTokens, 0)
+	outputTokens := maxInt64(tokens.OutputTokens, 0)
+	cachedTokens := maxInt64(tokens.CachedTokens, 0)
+	promptTokens := maxInt64(inputTokens-cachedTokens, 0)
+
+	return float64(promptTokens)*price.Prompt/PerMillion +
+		float64(outputTokens)*price.Completion/PerMillion +
+		float64(cachedTokens)*price.Cache/PerMillion
 }
 
 // SumCost folds CostForModel over a slice of (model, tokens) tuples.
@@ -39,4 +44,11 @@ func SumCost(items []Item, prices map[string]model.ModelPrice) float64 {
 		total += CostForModel(item.Model, item.Tokens, prices)
 	}
 	return total
+}
+
+func maxInt64(left, right int64) int64 {
+	if left > right {
+		return left
+	}
+	return right
 }

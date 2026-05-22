@@ -80,14 +80,14 @@ func TestSummaryAggregatesCostsAndWindows(t *testing.T) {
 	if resp.Today.AverageLatencyMS == nil || *resp.Today.AverageLatencyMS != 150 {
 		t.Fatalf("average latency = %#v", resp.Today.AverageLatencyMS)
 	}
-	if math.Abs(resp.Today.TotalCost-4.25) > 0.000001 {
+	if math.Abs(resp.Today.TotalCost-3.75) > 0.000001 {
 		t.Fatalf("total cost = %v", resp.Today.TotalCost)
 	}
 	if resp.Rolling30M.TotalCalls != 2 || resp.Rolling30M.TotalTokens != 100 {
 		t.Fatalf("rolling = %#v", resp.Rolling30M)
 	}
 	if len(resp.TopModelsToday) != 1 || resp.TopModelsToday[0].Model != "gpt-a" ||
-		resp.TopModelsToday[0].Calls != 2 || math.Abs(resp.TopModelsToday[0].Cost-4.25) > 0.000001 {
+		resp.TopModelsToday[0].Calls != 2 || math.Abs(resp.TopModelsToday[0].Cost-3.75) > 0.000001 {
 		t.Fatalf("top models = %#v", resp.TopModelsToday)
 	}
 	if len(resp.RecentFailures) != 1 || resp.RecentFailures[0].Model != "gpt-b" ||
