@@ -697,46 +697,68 @@ export function LoginPage() {
                     )}
 
                     {usageSetupStep === 'review' && (
-                      <div className={styles.reviewGrid}>
-                        <div>
-                          <span className={styles.reviewIcon}>
-                            <IconShield size={18} />
-                          </span>
-                          <span>{t('login.admin_key_label')}</span>
-                          <strong>{adminKey ? '************' : '-'}</strong>
+                      <div className={styles.stepFields}>
+                        <div className={styles.optionBox}>
+                          <SelectionCheckbox
+                            checked={rememberCredential}
+                            onChange={setRememberCredential}
+                            ariaLabel={t('login.remember_credential_label')}
+                            label={t('login.remember_credential_label')}
+                            labelClassName={styles.toggleLabel}
+                          />
                         </div>
-                        <div>
-                          <span className={styles.reviewIcon}>
-                            <IconInfo size={18} />
-                          </span>
-                          <span>{t('login.cpa_connection_label')}</span>
-                          <strong>{apiBase || '-'}</strong>
-                        </div>
-                        <div>
-                          <span className={styles.reviewIcon}>
-                            <IconKey size={18} />
-                          </span>
-                          <span>{t('login.cpa_management_key_label')}</span>
-                          <strong>{cpaManagementKey ? '************' : '-'}</strong>
-                        </div>
-                        <div>
-                          <span className={styles.reviewIcon}>
-                            <IconEye size={18} />
-                          </span>
-                          <span>{t('login.request_monitoring_enabled')}</span>
-                          <strong>
-                            {requestMonitoringEnabled ? t('common.enabled') : t('common.disabled')}
-                          </strong>
-                        </div>
-                        {requestMonitoringEnabled && (
+                        <div className={styles.reviewGrid}>
                           <div>
                             <span className={styles.reviewIcon}>
-                              <IconTimer size={18} />
+                              <IconShield size={18} />
                             </span>
-                            <span>{t('login.poll_interval_label')}</span>
-                            <strong>{pollIntervalMs}</strong>
+                            <span>{t('login.admin_key_label')}</span>
+                            <strong>{adminKey ? '************' : '-'}</strong>
                           </div>
-                        )}
+                          <div>
+                            <span className={styles.reviewIcon}>
+                              <IconKey size={18} />
+                            </span>
+                            <span>{t('login.remember_credential_label')}</span>
+                            <strong>
+                              {rememberCredential ? t('common.enabled') : t('common.disabled')}
+                            </strong>
+                          </div>
+                          <div>
+                            <span className={styles.reviewIcon}>
+                              <IconInfo size={18} />
+                            </span>
+                            <span>{t('login.cpa_connection_label')}</span>
+                            <strong>{apiBase || '-'}</strong>
+                          </div>
+                          <div>
+                            <span className={styles.reviewIcon}>
+                              <IconKey size={18} />
+                            </span>
+                            <span>{t('login.cpa_management_key_label')}</span>
+                            <strong>{cpaManagementKey ? '************' : '-'}</strong>
+                          </div>
+                          <div>
+                            <span className={styles.reviewIcon}>
+                              <IconEye size={18} />
+                            </span>
+                            <span>{t('login.request_monitoring_enabled')}</span>
+                            <strong>
+                              {requestMonitoringEnabled
+                                ? t('common.enabled')
+                                : t('common.disabled')}
+                            </strong>
+                          </div>
+                          {requestMonitoringEnabled && (
+                            <div>
+                              <span className={styles.reviewIcon}>
+                                <IconTimer size={18} />
+                              </span>
+                              <span>{t('login.poll_interval_label')}</span>
+                              <strong>{pollIntervalMs}</strong>
+                            </div>
+                          )}
+                        </div>
                       </div>
                     )}
                   </div>
