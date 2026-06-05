@@ -1548,9 +1548,12 @@
   }
 
   .summaryHero,
-  .summarySub,
-  .summaryGrid {
+  .summarySub {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .summaryGrid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
   .accountOverviewCardGrid {
@@ -1703,8 +1706,8 @@
   .summaryCard,
   .summaryCardPrimary,
   .summaryCardSecondary {
-    height: 128px;
-    min-height: 128px;
+    height: auto;
+    min-height: 112px;
     border-radius: var(--app-radius-md);
   }
 
@@ -1810,11 +1813,11 @@
   }
 
   .summaryValue {
-    font-size: 26px;
+    font-size: 22px;
   }
 
   .summaryCardSecondary .summaryValue {
-    font-size: 26px;
+    font-size: 22px;
   }
 
   .priceActionsBar {

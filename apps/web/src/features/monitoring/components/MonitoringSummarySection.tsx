@@ -10,15 +10,12 @@ export function MonitoringSummarySection({
   primaryCards,
   secondaryCards,
 }: MonitoringSummarySectionProps) {
+  const cards = [...primaryCards, ...secondaryCards];
+
   return (
     <section className={styles.summarySection}>
-      <div className={styles.summaryHero}>
-        {primaryCards.map((card) => (
-          <SummaryCard key={card.label} {...card} />
-        ))}
-      </div>
-      <div className={styles.summarySub}>
-        {secondaryCards.map((card) => (
+      <div className={styles.summaryGrid}>
+        {cards.map((card) => (
           <SummaryCard key={card.label} {...card} />
         ))}
       </div>

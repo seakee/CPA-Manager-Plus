@@ -629,8 +629,8 @@ export function MonitoringCenterPage() {
   );
 
   const secondarySummaryCards = useMemo(
-    () => buildSecondarySummaryCards(scopedSummary, t),
-    [scopedSummary, t]
+    () => buildSecondarySummaryCards(scopedSummary, i18n.language, t),
+    [i18n.language, scopedSummary, t]
   );
 
   const dataTabs = useMemo<MonitoringTab<MonitoringDataTab>[]>(() => {

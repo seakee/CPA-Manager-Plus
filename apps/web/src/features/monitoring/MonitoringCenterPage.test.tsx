@@ -2,6 +2,12 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import type { TFunction } from 'i18next';
 import { AccountExpandedDetails, AccountOverviewCard } from './MonitoringCenterPage';
+import { MonitoringSummarySection } from '@/features/monitoring/components/MonitoringSummarySection';
+import {
+  buildPrimarySummaryCards,
+  buildSecondarySummaryCards,
+} from '@/features/monitoring/model/monitoringCenterPageModel';
+import type { MonitoringSummary } from '@/features/monitoring/hooks/useMonitoringData';
 import { buildEmptyMonitoringStatusData } from '@/features/monitoring/accountOverviewState';
 import { buildRealtimeSourceDisplay } from '@/features/monitoring/realtimeSourceDisplay';
 
@@ -33,6 +39,7 @@ const t = ((key: string, options?: Record<string, unknown>) => {
     'monitoring.account_overview_collapse_models': 'Collapse',
     'monitoring.account_overview_no_models': 'No model details',
     'monitoring.total_calls': 'Total calls',
+    'monitoring.call_success_rate': 'Success rate',
     'monitoring.calls': 'Calls',
     'stats.success': 'Success',
     'stats.failure': 'Failure',
@@ -49,6 +56,13 @@ const t = ((key: string, options?: Record<string, unknown>) => {
     'monitoring.cache_read_tokens_short': 'Read',
     'monitoring.cache_creation_tokens_short': 'Create',
     'monitoring.estimated_cost': 'Estimated Cost',
+    'monitoring.estimated_cost_hint': 'Configured model prices',
+    'monitoring.estimated_cost_missing': 'No configured model prices',
+    'monitoring.accounts_suffix': 'accounts',
+    'monitoring.groups_suffix': 'groups',
+    'monitoring.reasoning_tokens': 'Reasoning',
+    'monitoring.of_token_mix': 'Share',
+    'monitoring.of_input_tokens': 'Input share',
     'usage_stats.model_price_model': 'Model',
     'monitoring.last_sync': 'Last sync',
     'monitoring.account_quota_title': 'Account Quota',
@@ -70,6 +84,115 @@ const t = ((key: string, options?: Record<string, unknown>) => {
   });
   return value;
 }) as TFunction;
+
+describe('MonitoringCenterPage summary cards', () => {
+  it('renders all request monitoring summary metrics in one ordered grid with large values intact', () => {
+    const summary: MonitoringSummary = {
+      totalCalls: 25_500,
+      successCalls: 23_600,
+      failureCalls: 1_900,
+      successRate: 0.999,
+      inputTokens: 2_783_500_000,
+      outputTokens: 11_700_000,
+      reasoningTokens: 5_000_000,
+      cachedTokens: 2_595_300_000,
+      cacheReadTokens: 444_400_000,
+      cacheCreationTokens: 555_500_000,
+      totalTokens: 2_795_200_000,
+      totalCost: 9_999_999.99,
+      averageLatencyMs: 999,
+      rpm30m: 0,
+      tpm30m: 0,
+      avgDailyRequests: 0,
+      avgDailyTokens: 0,
+      approxTasks: 0,
+      approxTaskFailures: 0,
+      approxTaskSuccessRate: 0,
+      zeroTokenCalls: 0,
+      zeroTokenModels: [],
+    };
+    const primaryCards = buildPrimarySummaryCards({
+      summary,
+      accountCount: 999,
+      failedGroupCount: 88,
+      hasPrices: true,
+      locale: 'en',
+      t,
+    });
+    const secondaryCards = buildSecondarySummaryCards(summary, 'en', t);
+
+    const html = renderToStaticMarkup(
+      <MonitoringSummarySection primaryCards={primaryCards} secondaryCards={secondaryCards} />
+    );
+    const labels = [
+      'Total calls',
+      'Success rate',
+      'Failure calls',
+      'Estimated Cost',
+      'Total Tokens',
+      'Input Tokens',
+      'Output Tokens',
+      'Cached Tokens',
+    ];
+    let previousIndex = -1;
+
+    labels.forEach((label) => {
+      const index = html.indexOf(label);
+      expect(index).toBeGreaterThan(previousIndex);
+      previousIndex = index;
+    });
+
+    expect(html).toContain('_summaryGrid');
+    expect(html.match(/<strong/g)).toHaveLength(8);
+    expect(html).toContain('25.5K');
+    expect(html).toContain('1.9K');
+    expect(html).toContain('2.8B');
+    expect(html).toContain('2.6B');
+    expect(html).toContain('role="tooltip"');
+    expect(html).toContain('2,795,200,000');
+    expect(html).toContain('2,783,500,000');
+    expect(html).toContain('2,595,300,000');
+    expect(html).toContain('$9,999,999.99');
+    expect(html).toContain('Reasoning 5.0M');
+    expect(html).toContain('Share 99.6%');
+    expect(html).toContain('Share 0.4%');
+    expect(html).toContain('Input share 93.2% · Create 555.5M · Read 444.4M');
+  });
+
+  it('hides cache creation and read meta when both cached sub-metrics are zero', () => {
+    const secondaryCards = buildSecondarySummaryCards(
+      {
+        totalCalls: 1,
+        successCalls: 1,
+        failureCalls: 0,
+        successRate: 1,
+        inputTokens: 1_000,
+        outputTokens: 0,
+        reasoningTokens: 0,
+        cachedTokens: 932,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        totalTokens: 1_000,
+        totalCost: 0,
+        averageLatencyMs: null,
+        rpm30m: 0,
+        tpm30m: 0,
+        avgDailyRequests: 0,
+        avgDailyTokens: 0,
+        approxTasks: 0,
+        approxTaskFailures: 0,
+        approxTaskSuccessRate: 0,
+        zeroTokenCalls: 0,
+        zeroTokenModels: [],
+      },
+      'en',
+      t
+    );
+    const cachedCard = secondaryCards.find((card) => card.label === 'Cached Tokens');
+
+    expect(cachedCard?.meta).toBe('Input share 93.2%');
+  });
+});
 
 describe('MonitoringCenterPage account card', () => {
   it('prefers readable channel names in realtime source cells', () => {

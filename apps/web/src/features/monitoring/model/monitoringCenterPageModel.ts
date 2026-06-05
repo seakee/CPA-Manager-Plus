@@ -109,6 +109,19 @@ export const getTodayStartInputValue = () => {
 
 export const getCurrentInputValue = () => formatDateTimeLocalValue(new Date());
 
+const formatFullNumber = (value: number, locale?: string) => {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return '0';
+
+  try {
+    return new Intl.NumberFormat(locale || undefined, {
+      maximumFractionDigits: 0,
+    }).format(num);
+  } catch {
+    return String(Math.round(num));
+  }
+};
+
 export const parseDateTimeLocalValue = (value: string) => {
   if (!value) return null;
   const timestamp = new Date(value).getTime();
@@ -378,6 +391,7 @@ export const buildPrimarySummaryCards = ({
   {
     label: t('monitoring.total_calls'),
     value: formatCompactNumber(summary.totalCalls),
+    valueTitle: formatFullNumber(summary.totalCalls, locale),
     meta: `${accountCount} ${t('monitoring.accounts_suffix')}`,
     icon: 'calls',
     accent: 'blue',
@@ -393,6 +407,7 @@ export const buildPrimarySummaryCards = ({
   {
     label: t('monitoring.failure_calls'),
     value: formatCompactNumber(summary.failureCalls),
+    valueTitle: formatFullNumber(summary.failureCalls, locale),
     meta: `${failedGroupCount} ${t('monitoring.groups_suffix')}`,
     tone: summary.failureCalls > 0 ? 'bad' : 'good',
     icon: 'failure',
@@ -401,6 +416,7 @@ export const buildPrimarySummaryCards = ({
   {
     label: t('monitoring.estimated_cost'),
     value: hasPrices ? formatUsd(summary.totalCost) : '--',
+    valueTitle: hasPrices ? formatUsd(summary.totalCost) : undefined,
     meta: hasPrices ? t('monitoring.estimated_cost_hint') : t('monitoring.estimated_cost_missing'),
     tone: hasPrices ? undefined : 'warn',
     icon: 'cost',
@@ -410,45 +426,59 @@ export const buildPrimarySummaryCards = ({
 
 export const buildSecondarySummaryCards = (
   summary: MonitoringSummary,
+  locale: string,
   t: TFunction
-): SummaryCardProps[] => [
-  {
-    label: t('monitoring.total_tokens'),
-    value: formatCompactNumber(summary.totalTokens),
-    meta: `${t('monitoring.reasoning_tokens')} ${formatCompactNumber(summary.reasoningTokens)}`,
-    variant: 'secondary',
-    icon: 'tokens',
-    accent: 'indigo',
-  },
-  {
-    label: t('monitoring.input_tokens'),
-    value: formatCompactNumber(summary.inputTokens),
-    meta: `${t('monitoring.of_token_mix')} ${formatPercent(summary.totalTokens > 0 ? summary.inputTokens / summary.totalTokens : 0)}`,
-    variant: 'secondary',
-    icon: 'input',
-    accent: 'cyan',
-  },
-  {
-    label: t('monitoring.output_tokens'),
-    value: formatCompactNumber(summary.outputTokens),
-    meta: `${t('monitoring.of_token_mix')} ${formatPercent(summary.totalTokens > 0 ? summary.outputTokens / summary.totalTokens : 0)}`,
-    variant: 'secondary',
-    icon: 'output',
-    accent: 'violet',
-  },
-  {
-    label: t('monitoring.cached_tokens'),
-    value: formatCompactNumber(summary.cachedTokens),
-    meta: [
-      `${t('monitoring.of_input_tokens')} ${formatPercent(summary.inputTokens > 0 ? summary.cachedTokens / summary.inputTokens : 0)}`,
+): SummaryCardProps[] => {
+  const cachedTokenMetaParts = [
+    `${t('monitoring.of_input_tokens')} ${formatPercent(summary.inputTokens > 0 ? summary.cachedTokens / summary.inputTokens : 0)}`,
+  ];
+
+  if (summary.cacheCreationTokens > 0 || summary.cacheReadTokens > 0) {
+    cachedTokenMetaParts.push(
       `${t('monitoring.cache_creation_tokens_short')} ${formatCompactNumber(summary.cacheCreationTokens)}`,
-      `${t('monitoring.cache_read_tokens_short')} ${formatCompactNumber(summary.cacheReadTokens)}`,
-    ].join(' · '),
-    variant: 'secondary',
-    icon: 'cache',
-    accent: 'teal',
-  },
-];
+      `${t('monitoring.cache_read_tokens_short')} ${formatCompactNumber(summary.cacheReadTokens)}`
+    );
+  }
+
+  return [
+    {
+      label: t('monitoring.total_tokens'),
+      value: formatCompactNumber(summary.totalTokens),
+      valueTitle: formatFullNumber(summary.totalTokens, locale),
+      meta: `${t('monitoring.reasoning_tokens')} ${formatCompactNumber(summary.reasoningTokens)}`,
+      variant: 'secondary',
+      icon: 'tokens',
+      accent: 'indigo',
+    },
+    {
+      label: t('monitoring.input_tokens'),
+      value: formatCompactNumber(summary.inputTokens),
+      valueTitle: formatFullNumber(summary.inputTokens, locale),
+      meta: `${t('monitoring.of_token_mix')} ${formatPercent(summary.totalTokens > 0 ? summary.inputTokens / summary.totalTokens : 0)}`,
+      variant: 'secondary',
+      icon: 'input',
+      accent: 'cyan',
+    },
+    {
+      label: t('monitoring.output_tokens'),
+      value: formatCompactNumber(summary.outputTokens),
+      valueTitle: formatFullNumber(summary.outputTokens, locale),
+      meta: `${t('monitoring.of_token_mix')} ${formatPercent(summary.totalTokens > 0 ? summary.outputTokens / summary.totalTokens : 0)}`,
+      variant: 'secondary',
+      icon: 'output',
+      accent: 'violet',
+    },
+    {
+      label: t('monitoring.cached_tokens'),
+      value: formatCompactNumber(summary.cachedTokens),
+      valueTitle: formatFullNumber(summary.cachedTokens, locale),
+      meta: cachedTokenMetaParts.join(' · '),
+      variant: 'secondary',
+      icon: 'cache',
+      accent: 'teal',
+    },
+  ];
+};
 
 export const isUsageImportFile = (file: File) => {
   const normalizedName = file.name.toLowerCase();

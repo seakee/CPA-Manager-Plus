@@ -1,4 +1,11 @@
-import { useEffect, useState, type ComponentType, type KeyboardEvent, type ReactNode } from 'react';
+import {
+  useEffect,
+  useId,
+  useState,
+  type ComponentType,
+  type KeyboardEvent,
+  type ReactNode,
+} from 'react';
 import type { TFunction } from 'i18next';
 import { Button } from '@/components/ui/Button';
 import { Select } from '@/components/ui/Select';
@@ -39,6 +46,7 @@ export type SummaryCardAccent =
 export type SummaryCardProps = {
   label: string;
   value: string;
+  valueTitle?: string;
   meta: string;
   tone?: MonitoringStatusTone;
   variant?: 'primary' | 'secondary';
@@ -92,6 +100,7 @@ const summaryAccentClassMap: Record<SummaryCardAccent, string> = {
 export function SummaryCard({
   label,
   value,
+  valueTitle,
   meta,
   tone,
   variant = 'primary',
@@ -99,6 +108,9 @@ export function SummaryCard({
   accent = 'blue',
 }: SummaryCardProps) {
   const Icon = icon ? summaryIconMap[icon] : null;
+  const tooltipId = useId();
+  const tooltipValue = valueTitle ?? value;
+  const hasValueTooltip = tooltipValue !== value;
   const cardClassName = [
     'card',
     styles.summaryCard,
@@ -121,9 +133,21 @@ export function SummaryCard({
         </span>
       </div>
       <div className={styles.summaryCardBody}>
-        <strong className={`${styles.summaryValue} ${tone ? styles[`tone${tone}`] : ''}`}>
-          {value}
-        </strong>
+        <span className={styles.summaryValueWrap}>
+          <strong
+            className={`${styles.summaryValue} ${tone ? styles[`tone${tone}`] : ''}`}
+            tabIndex={hasValueTooltip ? 0 : undefined}
+            aria-describedby={hasValueTooltip ? tooltipId : undefined}
+          >
+            {value}
+          </strong>
+          {hasValueTooltip ? (
+            <span id={tooltipId} className={styles.summaryValueTooltip} role="tooltip">
+              <span className={styles.summaryValueTooltipLabel}>{label}</span>
+              <span className={styles.summaryValueTooltipValue}>{tooltipValue}</span>
+            </span>
+          ) : null}
+        </span>
         <span className={styles.summaryMeta} title={meta}>
           {meta}
         </span>

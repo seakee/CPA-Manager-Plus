@@ -3,7 +3,7 @@
 @mixin styles {
   .summarySection {
     display: grid;
-    gap: 14px;
+    gap: 12px;
     min-width: 0;
   }
 
@@ -11,8 +11,13 @@
   .summarySub,
   .summaryGrid {
     display: grid;
-    grid-auto-rows: 1fr;
-    gap: 12px;
+    grid-auto-rows: minmax(112px, auto);
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .summaryGrid {
+    grid-template-columns: repeat(8, minmax(0, 1fr));
   }
 
   .summaryHero {
@@ -35,13 +40,14 @@
     --summary-accent: var(--monitor-accent);
 
     isolation: isolate;
+    overflow: visible;
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 10px;
     min-width: 0;
-    height: 136px;
-    min-height: 136px;
-    padding: 16px;
+    height: auto;
+    min-height: 112px;
+    padding: 12px;
     border-radius: var(--app-radius-md);
     background: var(--glass-bg);
     backdrop-filter: var(--glass-backdrop-filter);
@@ -54,14 +60,19 @@
 
   .summaryCardPrimary,
   .summaryCardSecondary {
-    height: 136px;
-    min-height: 136px;
-    padding: 16px;
+    height: auto;
+    min-height: 112px;
+    padding: 12px;
     box-shadow: var(--shadow);
   }
 
   .summaryCard:hover {
+    z-index: 5;
     transform: translateY(-1px);
+  }
+
+  .summaryCard:focus-within {
+    z-index: 5;
   }
 
   .summaryCard:hover {
@@ -74,7 +85,7 @@
     z-index: 1;
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     min-width: 0;
   }
 
@@ -82,12 +93,17 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 32px;
-    height: 32px;
-    flex: 0 0 32px;
+    width: 28px;
+    height: 28px;
+    flex: 0 0 28px;
     border-radius: 8px;
     background: color-mix(in srgb, var(--summary-accent) 12%, transparent);
     color: var(--summary-accent);
+  }
+
+  .summaryIcon svg {
+    width: 16px;
+    height: 16px;
   }
 
   .summaryCardBody {
@@ -119,41 +135,120 @@
   .summaryValue {
     min-width: 0;
     max-width: 100%;
-    overflow: hidden;
     color: var(--monitor-ink);
-    font-size: 28px;
+    font-size: 24px;
     font-weight: 700;
     font-variant-numeric: tabular-nums;
-    line-height: 1;
+    line-height: 1.05;
     letter-spacing: 0;
-    text-overflow: ellipsis;
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+
+  .summaryValueWrap {
+    position: relative;
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .summaryValueWrap .summaryValue {
+    cursor: default;
+    outline: 0;
+  }
+
+  .summaryValueWrap .summaryValue[tabindex='0'] {
+    cursor: help;
+  }
+
+  .summaryValueWrap .summaryValue[tabindex='0']:focus-visible {
+    border-radius: 6px;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--summary-accent) 28%, transparent);
+  }
+
+  .summaryValueTooltip {
+    position: absolute;
+    left: 0;
+    bottom: calc(100% + 8px);
+    z-index: 4;
+    display: grid;
+    gap: 3px;
+    width: max-content;
+    min-width: min(160px, 100%);
+    max-width: min(280px, calc(100vw - 32px));
+    padding: 8px 10px;
+    border: 1px solid color-mix(in srgb, var(--monitor-accent) 78%, var(--monitor-line));
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--monitor-accent) 92%, var(--monitor-accent-strong));
+    color: var(--primary-contrast, #fff);
+    box-shadow: 0 14px 30px color-mix(in srgb, var(--monitor-accent) 28%, transparent);
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(4px);
+    transition:
+      opacity 0.14s ease,
+      transform 0.14s ease;
+  }
+
+  .summaryValueTooltip::after {
+    content: '';
+    position: absolute;
+    left: 16px;
+    bottom: -5px;
+    width: 9px;
+    height: 9px;
+    border-right: 1px solid color-mix(in srgb, var(--monitor-accent) 78%, var(--monitor-line));
+    border-bottom: 1px solid color-mix(in srgb, var(--monitor-accent) 78%, var(--monitor-line));
+    background: inherit;
+    transform: rotate(45deg);
+  }
+
+  .summaryValueWrap:hover .summaryValueTooltip,
+  .summaryValueWrap:focus-within .summaryValueTooltip {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  .summaryValueTooltipLabel {
+    color: color-mix(in srgb, var(--primary-contrast, #fff) 72%, transparent);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1.2;
     white-space: nowrap;
   }
 
+  .summaryValueTooltipValue {
+    color: var(--primary-contrast, #fff);
+    font-size: 13px;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.2;
+    overflow-wrap: anywhere;
+  }
+
   .summaryCardSecondary .summaryValue {
-    font-size: 28px;
+    font-size: 24px;
   }
 
   .summaryMeta {
-    margin-top: 6px;
+    margin-top: 5px;
     color: var(--monitor-muted);
-    display: -webkit-box;
-    overflow: hidden;
-    font-size: 12px;
+    display: block;
+    font-size: 11px;
     font-weight: 500;
-    line-height: 1.45;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
   }
 
   .summaryCardChart {
     position: absolute;
-    right: 0;
-    bottom: -5px;
+    right: 8px;
+    bottom: 8px;
     z-index: 0;
-    width: 46%;
-    min-width: 96px;
-    height: 34px;
+    width: calc(46% - 8px);
+    min-width: 72px;
+    height: 28px;
     color: var(--summary-accent);
     opacity: 0.5;
     pointer-events: none;
