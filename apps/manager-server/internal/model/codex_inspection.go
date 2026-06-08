@@ -18,6 +18,9 @@ const (
 	CodexInspectionAutoActionDisable = "disable"
 	CodexInspectionAutoActionDelete  = "delete"
 
+	CodexInspectionShortWindowQuotaModeKeep    = "keep"
+	CodexInspectionShortWindowQuotaModeDisable = "disable"
+
 	CodexInspectionStatusRunning   = "running"
 	CodexInspectionStatusCompleted = "completed"
 	CodexInspectionStatusFailed    = "failed"
@@ -45,6 +48,7 @@ type ManagerCodexInspectionConfig struct {
 	UsedPercentThreshold float64                              `json:"usedPercentThreshold,omitempty"`
 	SampleSize           int                                  `json:"sampleSize,omitempty"`
 	AutoActionMode       string                               `json:"autoActionMode,omitempty"`
+	ShortWindowQuotaMode string                               `json:"shortWindowQuotaMode,omitempty"`
 }
 
 type ManagerCodexInspectionScheduleConfig struct {
@@ -128,6 +132,7 @@ func DefaultCodexInspectionConfig() ManagerCodexInspectionConfig {
 		UsedPercentThreshold: 100,
 		SampleSize:           0,
 		AutoActionMode:       CodexInspectionAutoActionNone,
+		ShortWindowQuotaMode: CodexInspectionShortWindowQuotaModeKeep,
 	}
 }
 
@@ -158,6 +163,7 @@ func NormalizeCodexInspectionConfig(input ManagerCodexInspectionConfig, fallback
 		next.SampleSize = input.SampleSize
 	}
 	next.AutoActionMode = NormalizeCodexInspectionAutoActionMode(input.AutoActionMode, base.AutoActionMode)
+	next.ShortWindowQuotaMode = NormalizeCodexInspectionShortWindowQuotaMode(input.ShortWindowQuotaMode, base.ShortWindowQuotaMode)
 	return next
 }
 
@@ -299,6 +305,20 @@ func NormalizeCodexInspectionAutoActionMode(value string, fallback string) strin
 			return fallback
 		}
 		return CodexInspectionAutoActionNone
+	}
+}
+
+func NormalizeCodexInspectionShortWindowQuotaMode(value string, fallback string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case CodexInspectionShortWindowQuotaModeDisable:
+		return CodexInspectionShortWindowQuotaModeDisable
+	case CodexInspectionShortWindowQuotaModeKeep:
+		return CodexInspectionShortWindowQuotaModeKeep
+	default:
+		if strings.ToLower(strings.TrimSpace(fallback)) == CodexInspectionShortWindowQuotaModeDisable {
+			return CodexInspectionShortWindowQuotaModeDisable
+		}
+		return CodexInspectionShortWindowQuotaModeKeep
 	}
 }
 

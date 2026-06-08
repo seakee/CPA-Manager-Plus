@@ -643,7 +643,7 @@ func (s *Service) inspectSingleAccount(
 		strings.Contains(bodyLower, "payment_required") ||
 		isRateLimitReached(rateLimit) ||
 		(usedPercent != nil && *usedPercent >= settings.UsedPercentThreshold)
-	decision := resolveProbeAction(item, statusCode, response.BodyText, rateLimit, usedPercent, isQuota, settings.UsedPercentThreshold)
+	decision := resolveProbeAction(item, statusCode, response.BodyText, rateLimit, usedPercent, isQuota, settings.UsedPercentThreshold, settings.ShortWindowQuotaMode)
 
 	base.Action = decision.Action
 	base.ActionReason = decision.ActionReason
@@ -1031,14 +1031,14 @@ func (l runLogger) log(ctx context.Context, level string, message string, detail
 	})
 }
 
-func resolveProbeAction(item account, statusCode int, bodyText string, rateLimit *codexRateLimit, usedPercent *float64, isQuota bool, threshold float64) inspectionDecision {
-	if decision := resolveWindowAwareProbeAction(item, statusCode, bodyText, rateLimit, threshold); decision != nil {
+func resolveProbeAction(item account, statusCode int, bodyText string, rateLimit *codexRateLimit, usedPercent *float64, isQuota bool, threshold float64, shortWindowQuotaMode string) inspectionDecision {
+	if decision := resolveWindowAwareProbeAction(item, statusCode, bodyText, rateLimit, threshold, shortWindowQuotaMode); decision != nil {
 		return *decision
 	}
 	return resolveLegacyProbeAction(item, statusCode, bodyText, usedPercent, isQuota, threshold)
 }
 
-func resolveWindowAwareProbeAction(item account, statusCode int, bodyText string, rateLimit *codexRateLimit, threshold float64) *inspectionDecision {
+func resolveWindowAwareProbeAction(item account, statusCode int, bodyText string, rateLimit *codexRateLimit, threshold float64, shortWindowQuotaMode string) *inspectionDecision {
 	if rateLimit == nil {
 		return nil
 	}
@@ -1051,6 +1051,7 @@ func resolveWindowAwareProbeAction(item account, statusCode int, bodyText string
 	longWindowLabel := classified.longWindowLabel(longWindow)
 	fiveHour := classified.FiveHour
 	fiveHourOverThreshold := fiveHour != nil && fiveHour.UsedPercent != nil && *fiveHour.UsedPercent >= threshold
+	shortWindowMode := model.NormalizeCodexInspectionShortWindowQuotaMode(shortWindowQuotaMode, model.CodexInspectionShortWindowQuotaModeKeep)
 
 	if statusCode == http.StatusUnauthorized {
 		decision := resolveUnauthorizedProbeAction(bodyText, ptrFloat(longWindowUsedPercent))
@@ -1073,18 +1074,30 @@ func resolveWindowAwareProbeAction(item account, statusCode int, bodyText string
 		}
 	}
 	if item.Disabled {
-		reason := fmt.Sprintf("%s仍可用，建议立即启用账号", longWindowLabel)
-		if fiveHourOverThreshold {
-			reason = fmt.Sprintf("5 小时额度达到阈值，但%s仍可用，建议立即启用账号", longWindowLabel)
+		if fiveHourOverThreshold && shortWindowMode == model.CodexInspectionShortWindowQuotaModeDisable {
+			return &inspectionDecision{
+				Action:       "keep",
+				ActionReason: fmt.Sprintf("5 小时额度达到阈值，但%s仍可用，账号保持禁用等待短窗口恢复", longWindowLabel),
+				UsedPercent:  ptrFloat(longWindowUsedPercent),
+				IsQuota:      false,
+			}
 		}
 		return &inspectionDecision{
 			Action:       "enable",
-			ActionReason: reason,
+			ActionReason: fmt.Sprintf("%s仍可用，建议立即启用账号", longWindowLabel),
 			UsedPercent:  ptrFloat(longWindowUsedPercent),
 			IsQuota:      false,
 		}
 	}
 	if fiveHourOverThreshold {
+		if shortWindowMode == model.CodexInspectionShortWindowQuotaModeDisable {
+			return &inspectionDecision{
+				Action:       "disable",
+				ActionReason: fmt.Sprintf("5 小时额度达到阈值，但%s仍可用，建议暂时禁用账号等待短窗口恢复", longWindowLabel),
+				UsedPercent:  ptrFloat(longWindowUsedPercent),
+				IsQuota:      false,
+			}
+		}
 		return &inspectionDecision{
 			Action:       "keep",
 			ActionReason: fmt.Sprintf("5 小时额度达到阈值，但%s仍可用，暂不禁用账号", longWindowLabel),

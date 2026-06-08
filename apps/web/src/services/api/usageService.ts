@@ -106,6 +106,7 @@ export interface ManagerExternalUsageServiceConfig {
 
 export type ManagerCodexInspectionScheduleMode = 'interval' | 'time_points';
 export type ManagerCodexInspectionAutoActionMode = 'none' | 'enable' | 'disable' | 'delete';
+export type ManagerCodexInspectionShortWindowQuotaMode = 'keep' | 'disable';
 
 export interface ManagerCodexInspectionScheduleConfig {
   mode?: ManagerCodexInspectionScheduleMode | string;
@@ -126,6 +127,7 @@ export interface ManagerCodexInspectionConfig {
   usedPercentThreshold?: number;
   sampleSize?: number;
   autoActionMode?: ManagerCodexInspectionAutoActionMode | string;
+  shortWindowQuotaMode?: ManagerCodexInspectionShortWindowQuotaMode | string;
 }
 
 export interface ManagerConfig {

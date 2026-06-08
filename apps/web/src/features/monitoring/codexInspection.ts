@@ -3,12 +3,14 @@ import { getApiCallErrorMessage } from '@/services/api/apiCall';
 import type { AuthFileItem, Config } from '@/types';
 import {
   CODEX_INSPECTION_AUTO_ACTION_MODES,
+  CODEX_INSPECTION_SHORT_WINDOW_QUOTA_MODES,
   CODEX_INSPECTION_SETTINGS_STORAGE_KEY,
   DEFAULT_CODEX_INSPECTION_SETTINGS,
   clearCodexInspectionConfigurableSettings,
   loadCodexInspectionConfigurableSettings,
   normalizeAutoActionMode,
   normalizeConfigurableSettings,
+  normalizeShortWindowQuotaMode,
   readConfigurableSettingsFromConfig,
   readString,
   saveCodexInspectionConfigurableSettings,
@@ -34,10 +36,12 @@ import {
 
 export {
   CODEX_INSPECTION_AUTO_ACTION_MODES,
+  CODEX_INSPECTION_SHORT_WINDOW_QUOTA_MODES,
   CODEX_INSPECTION_SETTINGS_STORAGE_KEY,
   DEFAULT_CODEX_INSPECTION_SETTINGS,
   clearCodexInspectionConfigurableSettings,
   loadCodexInspectionConfigurableSettings,
+  normalizeShortWindowQuotaMode,
   saveCodexInspectionConfigurableSettings,
 };
 
@@ -60,6 +64,7 @@ export type CodexInspectionExecutionAction = Extract<
 >;
 export type CodexInspectionProgressStatus = 'idle' | 'running' | 'paused' | 'stopped' | 'completed';
 export type CodexInspectionAutoActionMode = 'none' | 'enable' | 'disable' | 'delete';
+export type CodexInspectionShortWindowQuotaMode = 'keep' | 'disable';
 export type CodexInspectionStoredActionFilter =
   | 'all'
   | 'delete'
@@ -79,6 +84,7 @@ export interface CodexInspectionSettings {
   userAgent: string;
   usedPercentThreshold: number;
   sampleSize: number;
+  shortWindowQuotaMode: CodexInspectionShortWindowQuotaMode;
 }
 
 export interface CodexInspectionConfigurableSettings {
@@ -91,6 +97,7 @@ export interface CodexInspectionConfigurableSettings {
   usedPercentThreshold: number;
   sampleSize: number;
   autoActionMode: CodexInspectionAutoActionMode;
+  shortWindowQuotaMode: CodexInspectionShortWindowQuotaMode;
 }
 
 export interface CodexInspectionAccount {
@@ -302,6 +309,7 @@ export const resolveCodexInspectionSettings = (
     userAgent: configurable.userAgent,
     usedPercentThreshold: configurable.usedPercentThreshold,
     sampleSize: configurable.sampleSize,
+    shortWindowQuotaMode: configurable.shortWindowQuotaMode,
   };
 };
 

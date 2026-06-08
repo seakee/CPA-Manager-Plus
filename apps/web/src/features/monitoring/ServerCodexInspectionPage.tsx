@@ -32,6 +32,7 @@ import {
   isActionableServerCodexInspectionResult,
   normalizeServerCodexInspectionActionStatus,
   type StatusTone,
+  normalizeInspectionShortWindowQuotaMode,
   validateInspectionConfigDraft,
   validateInspectionConfigFields,
 } from '@/features/monitoring/model/codexInspectionPresentation';
@@ -45,6 +46,7 @@ import {
   type CodexInspectionRunDetail,
   type ManagerCodexInspectionConfig,
   type ManagerCodexInspectionScheduleMode,
+  type ManagerCodexInspectionShortWindowQuotaMode,
   type ManagerConfig,
 } from '@/services/api/usageService';
 import { useAuthStore, useNotificationStore } from '@/stores';
@@ -65,6 +67,7 @@ type ServerCodexInspectionDraft = {
   usedPercentThreshold: string;
   sampleSize: string;
   autoActionMode: string;
+  shortWindowQuotaMode: string;
 };
 
 type NormalizedServerCodexInspectionConfig = {
@@ -84,6 +87,7 @@ type NormalizedServerCodexInspectionConfig = {
   usedPercentThreshold: number;
   sampleSize: number;
   autoActionMode: string;
+  shortWindowQuotaMode: ManagerCodexInspectionShortWindowQuotaMode;
 };
 
 const DEFAULT_SERVER_CODEX_CONFIG: NormalizedServerCodexInspectionConfig = {
@@ -103,6 +107,7 @@ const DEFAULT_SERVER_CODEX_CONFIG: NormalizedServerCodexInspectionConfig = {
   usedPercentThreshold: 100,
   sampleSize: 0,
   autoActionMode: 'none',
+  shortWindowQuotaMode: 'keep',
 };
 
 const RUNS_LIMIT = 30;
@@ -194,6 +199,9 @@ const resolveServerCodexConfig = (
         ? config.sampleSize
         : DEFAULT_SERVER_CODEX_CONFIG.sampleSize,
     autoActionMode: config?.autoActionMode || DEFAULT_SERVER_CODEX_CONFIG.autoActionMode,
+    shortWindowQuotaMode: normalizeInspectionShortWindowQuotaMode(
+      config?.shortWindowQuotaMode || DEFAULT_SERVER_CODEX_CONFIG.shortWindowQuotaMode
+    ),
   };
 };
 
@@ -214,6 +222,7 @@ const toDraft = (config?: ManagerCodexInspectionConfig | null): ServerCodexInspe
     usedPercentThreshold: String(resolved.usedPercentThreshold),
     sampleSize: String(resolved.sampleSize),
     autoActionMode: resolved.autoActionMode,
+    shortWindowQuotaMode: resolved.shortWindowQuotaMode,
   };
 };
 
@@ -309,6 +318,7 @@ const createConfigFromDraft = (
     usedPercentThreshold: validation.values.usedPercentThreshold,
     sampleSize: validation.values.sampleSize,
     autoActionMode: validation.values.autoActionMode,
+    shortWindowQuotaMode: validation.values.shortWindowQuotaMode,
   };
 };
 
@@ -439,6 +449,7 @@ function getComparableConfig(config: NormalizedServerCodexInspectionConfig) {
     usedPercentThreshold: config.usedPercentThreshold,
     sampleSize: config.sampleSize,
     autoActionMode: config.autoActionMode,
+    shortWindowQuotaMode: config.shortWindowQuotaMode,
   };
 }
 
@@ -1292,6 +1303,7 @@ export function ServerCodexInspectionPage() {
           t={t}
           onFieldChange={(field, value) => updateDraft(field, value)}
           onAutoActionModeChange={(value) => updateDraft('autoActionMode', value)}
+          onShortWindowQuotaModeChange={(value) => updateDraft('shortWindowQuotaMode', value)}
         />
       </InspectionConfigDrawer>
     );

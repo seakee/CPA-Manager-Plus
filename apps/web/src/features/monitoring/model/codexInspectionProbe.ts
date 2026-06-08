@@ -17,7 +17,7 @@ import {
   type CodexInspectionResultItem,
   type CodexInspectionSettings,
 } from '@/features/monitoring/codexInspection';
-import { readString } from './codexInspectionSettings';
+import { normalizeShortWindowQuotaMode, readString } from './codexInspectionSettings';
 
 type LogHandler = (level: CodexInspectionLogLevel, message: string) => void;
 
@@ -172,7 +172,8 @@ const resolveWindowAwareProbeAction = (
   statusCode: number,
   bodyText: string,
   rateLimit: CodexRateLimitInfo | null,
-  threshold: number
+  threshold: number,
+  shortWindowQuotaMode: string
 ): CodexInspectionDecision | null => {
   if (!rateLimit) return null;
 
@@ -186,6 +187,7 @@ const resolveWindowAwareProbeAction = (
     longWindow === weeklyWindow ? '周额度' : longWindow === monthlyWindow ? '月额度' : '长期额度';
   const longWindowOverThreshold = longWindowUsedPercent >= threshold;
   const fiveHourOverThreshold = fiveHourUsedPercent !== null && fiveHourUsedPercent >= threshold;
+  const shortWindowMode = normalizeShortWindowQuotaMode(shortWindowQuotaMode);
 
   if (statusCode === 401) {
     return resolveUnauthorizedProbeAction(bodyText, longWindowUsedPercent);
@@ -209,17 +211,31 @@ const resolveWindowAwareProbeAction = (
   }
 
   if (account.disabled) {
+    if (fiveHourOverThreshold && shortWindowMode === 'disable') {
+      return {
+        action: 'keep',
+        actionReason: `5 小时额度达到阈值，但${longWindowLabel}仍可用，账号保持禁用等待短窗口恢复`,
+        usedPercent: longWindowUsedPercent,
+        isQuota: false,
+      };
+    }
     return {
       action: 'enable',
-      actionReason: fiveHourOverThreshold
-        ? `5 小时额度达到阈值，但${longWindowLabel}仍可用，建议立即启用账号`
-        : `${longWindowLabel}仍可用，建议立即启用账号`,
+      actionReason: `${longWindowLabel}仍可用，建议立即启用账号`,
       usedPercent: longWindowUsedPercent,
       isQuota: false,
     };
   }
 
   if (fiveHourOverThreshold) {
+    if (shortWindowMode === 'disable') {
+      return {
+        action: 'disable',
+        actionReason: `5 小时额度达到阈值，但${longWindowLabel}仍可用，建议暂时禁用账号等待短窗口恢复`,
+        usedPercent: longWindowUsedPercent,
+        isQuota: false,
+      };
+    }
     return {
       action: 'keep',
       actionReason: `5 小时额度达到阈值，但${longWindowLabel}仍可用，暂不禁用账号`,
@@ -243,14 +259,16 @@ const resolveProbeAction = (
   rateLimit: CodexRateLimitInfo | null,
   usedPercent: number | null,
   isQuota: boolean,
-  threshold: number
+  threshold: number,
+  shortWindowQuotaMode: string
 ): CodexInspectionDecision => {
   const windowAwareDecision = resolveWindowAwareProbeAction(
     account,
     statusCode,
     bodyText,
     rateLimit,
-    threshold
+    threshold,
+    shortWindowQuotaMode
   );
   if (windowAwareDecision) return windowAwareDecision;
   return resolveLegacyProbeAction(account, statusCode, bodyText, usedPercent, isQuota, threshold);
@@ -316,7 +334,8 @@ export const inspectSingleAccount = async (
       rateLimit,
       usedPercent,
       isQuota,
-      settings.usedPercentThreshold
+      settings.usedPercentThreshold,
+      settings.shortWindowQuotaMode
     );
 
     const successLevel =

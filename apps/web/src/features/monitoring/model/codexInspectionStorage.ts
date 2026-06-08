@@ -15,6 +15,7 @@ import {
   normalizeConfigurableSettings,
   normalizeInspectionAction,
   normalizeLogLevel,
+  normalizeShortWindowQuotaMode,
   normalizeStoredActionFilter,
   readBoolean,
   readNonNegativeInteger,
@@ -54,6 +55,7 @@ const sanitizeInspectionSettingsForStorage = (
     normalizeNumberValue(settings.usedPercentThreshold) ??
     DEFAULT_CODEX_INSPECTION_SETTINGS.usedPercentThreshold,
   sampleSize: Math.max(0, Math.floor(normalizeNumberValue(settings.sampleSize) ?? 0)),
+  shortWindowQuotaMode: normalizeShortWindowQuotaMode(settings.shortWindowQuotaMode),
 });
 
 const normalizeStoredSettings = (value: unknown): CodexInspectionSettings => {
@@ -67,6 +69,7 @@ const normalizeStoredSettings = (value: unknown): CodexInspectionSettings => {
     userAgent: input.userAgent,
     usedPercentThreshold: input.usedPercentThreshold,
     sampleSize: input.sampleSize,
+    shortWindowQuotaMode: input.shortWindowQuotaMode,
   });
 
   return {
@@ -80,6 +83,7 @@ const normalizeStoredSettings = (value: unknown): CodexInspectionSettings => {
     userAgent: configurable.userAgent,
     usedPercentThreshold: configurable.usedPercentThreshold,
     sampleSize: configurable.sampleSize,
+    shortWindowQuotaMode: configurable.shortWindowQuotaMode,
   };
 };
 

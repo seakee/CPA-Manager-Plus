@@ -85,6 +85,7 @@ const createRunResult = (): CodexInspectionRunResult => {
       userAgent: 'test-agent',
       usedPercentThreshold: 90,
       sampleSize: 0,
+      shortWindowQuotaMode: 'keep',
     },
     files: [
       {
@@ -153,6 +154,7 @@ describe('Codex inspection settings', () => {
         usedPercentThreshold: '120',
         sampleSize: 'all',
         autoActionMode: 'delete',
+        shortWindowQuotaMode: 'unexpected',
       },
       t
     );
@@ -177,6 +179,7 @@ describe('Codex inspection settings', () => {
         usedPercentThreshold: '99.5',
         sampleSize: '0',
         autoActionMode: 'unexpected',
+        shortWindowQuotaMode: 'disable',
       },
       t
     );
@@ -192,6 +195,7 @@ describe('Codex inspection settings', () => {
       usedPercentThreshold: 99.5,
       sampleSize: 0,
       autoActionMode: 'none',
+      shortWindowQuotaMode: 'disable',
     });
   });
 
@@ -200,6 +204,9 @@ describe('Codex inspection settings', () => {
       'monitoring.codex_inspection_threshold': 'Threshold',
       'monitoring.codex_inspection_sample_size': 'Sample',
       'monitoring.codex_inspection_settings_auto_action_mode_label': 'Auto',
+      'monitoring.codex_inspection_settings_short_window_quota_mode_label': '5h',
+      'monitoring.codex_inspection_settings_short_window_quota_mode_keep': 'Keep short',
+      'monitoring.codex_inspection_settings_short_window_quota_mode_disable': 'Cooldown',
       'monitoring.codex_inspection_settings_auto_action_mode_delete': 'Auto delete',
       'monitoring.codex_inspection_workers': 'Workers',
       'monitoring.codex_inspection_settings_timeout_label': 'Timeout',
@@ -221,11 +228,13 @@ describe('Codex inspection settings', () => {
       usedPercentThreshold: 100,
       sampleSize: 0,
       autoActionMode: 'delete' as const,
+      shortWindowQuotaMode: 'disable' as const,
     };
 
     expect(buildConfigOverviewItems(settings, { mode: 'local', t })).toMatchObject([
       { key: 'threshold', value: '100%', field: 'usedPercentThreshold' },
       { key: 'sample', value: 'All', field: 'sampleSize' },
+      { key: 'short-window', value: 'Cooldown', tone: 'warn', field: 'shortWindowQuotaMode' },
       { key: 'auto', value: 'Auto delete', tone: 'bad', field: 'autoActionMode' },
       { key: 'concurrency', value: '4', hint: 'Timeout: 15000', field: 'workers' },
       { key: 'target', value: 'codex', field: 'targetType' },
@@ -243,6 +252,7 @@ describe('Codex inspection settings', () => {
       { key: 'trigger', value: 'Every 60 minutes', field: 'schedule' },
       { key: 'threshold', value: '100%', field: 'usedPercentThreshold' },
       { key: 'sample', value: 'All', field: 'sampleSize' },
+      { key: 'short-window', value: 'Cooldown', tone: 'warn', field: 'shortWindowQuotaMode' },
       { key: 'auto', value: 'Auto delete', tone: 'bad', field: 'autoActionMode' },
     ]);
   });

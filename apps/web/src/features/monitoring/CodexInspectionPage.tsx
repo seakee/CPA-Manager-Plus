@@ -730,6 +730,13 @@ export function CodexInspectionPage() {
     }));
   }, []);
 
+  const handleShortWindowQuotaModeChange = useCallback((value: 'keep' | 'disable') => {
+    setSettingsDraft((previous) => ({
+      ...previous,
+      shortWindowQuotaMode: value,
+    }));
+  }, []);
+
   const settingsFieldErrors = useMemo(
     () => validateInspectionConfigFields(settingsDraft, t),
     [settingsDraft, t]
@@ -939,6 +946,7 @@ export function CodexInspectionPage() {
           t={t}
           onFieldChange={handleSettingsDraftChange}
           onAutoActionModeChange={handleAutoActionModeChange}
+          onShortWindowQuotaModeChange={handleShortWindowQuotaModeChange}
         />
       </InspectionConfigDrawer>
     </div>

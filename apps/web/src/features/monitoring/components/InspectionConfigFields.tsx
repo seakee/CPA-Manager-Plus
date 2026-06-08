@@ -1,5 +1,6 @@
 import type { TFunction } from 'i18next';
 import { Input } from '@/components/ui/Input';
+import { Select } from '@/components/ui/Select';
 import type { CodexInspectionAutoActionMode } from '@/features/monitoring/codexInspection';
 import { CodexInspectionAutoActionEditor } from '@/features/monitoring/components/CodexInspectionAutoActionEditor';
 import type {
@@ -15,6 +16,7 @@ type InspectionConfigFieldsProps = {
   t: TFunction;
   onFieldChange: (field: SharedInspectionConfigField, value: string) => void;
   onAutoActionModeChange: (mode: CodexInspectionAutoActionMode) => void;
+  onShortWindowQuotaModeChange: (mode: 'keep' | 'disable') => void;
 };
 
 // 本地与服务端共享的 9 个配置字段。分组:基础规则 → 自动处置 → 高级(默认折叠)。
@@ -25,6 +27,7 @@ export function InspectionConfigFields({
   t,
   onFieldChange,
   onAutoActionModeChange,
+  onShortWindowQuotaModeChange,
 }: InspectionConfigFieldsProps) {
   return (
     <>
@@ -59,6 +62,29 @@ export function InspectionConfigFields({
               value={draft.sampleSize}
               onChange={(event) => onFieldChange('sampleSize', event.target.value)}
             />
+          </div>
+          <div className={`${styles.serverField} ${styles.serverFieldWide}`} id="shortWindowQuotaMode">
+            <span className={styles.serverFieldLabel}>
+              {t('monitoring.codex_inspection_settings_short_window_quota_mode_label')}
+            </span>
+            <Select
+              value={draft.shortWindowQuotaMode === 'disable' ? 'disable' : 'keep'}
+              options={[
+                {
+                  value: 'keep',
+                  label: t('monitoring.codex_inspection_settings_short_window_quota_mode_keep'),
+                },
+                {
+                  value: 'disable',
+                  label: t('monitoring.codex_inspection_settings_short_window_quota_mode_disable'),
+                },
+              ]}
+              onChange={(value) => onShortWindowQuotaModeChange(value === 'disable' ? 'disable' : 'keep')}
+              ariaLabel={t('monitoring.codex_inspection_settings_short_window_quota_mode_label')}
+            />
+            <p className={styles.settingsAutoHint}>
+              {t('monitoring.codex_inspection_settings_short_window_quota_mode_hint')}
+            </p>
           </div>
         </div>
       </section>

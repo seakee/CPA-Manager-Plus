@@ -460,7 +460,7 @@ func TestResolveProbeActionUsesMonthlyWindowAsLongQuota(t *testing.T) {
 				LimitWindowSeconds: ptrFloat(codexMonthWindow),
 			},
 		}
-		decision := resolveProbeAction(item, http.StatusOK, "", rateLimit, deriveRateLimitUsedPercent(rateLimit), false, threshold)
+		decision := resolveProbeAction(item, http.StatusOK, "", rateLimit, deriveRateLimitUsedPercent(rateLimit), false, threshold, model.CodexInspectionShortWindowQuotaModeKeep)
 
 		if decision.Action != "keep" ||
 			decision.ActionReason != "月额度仍可用，无需处理" ||
@@ -478,7 +478,7 @@ func TestResolveProbeActionUsesMonthlyWindowAsLongQuota(t *testing.T) {
 				LimitWindowSeconds: ptrFloat(codexMonthWindow),
 			},
 		}
-		decision := resolveProbeAction(item, http.StatusOK, "", rateLimit, deriveRateLimitUsedPercent(rateLimit), true, threshold)
+		decision := resolveProbeAction(item, http.StatusOK, "", rateLimit, deriveRateLimitUsedPercent(rateLimit), true, threshold, model.CodexInspectionShortWindowQuotaModeKeep)
 
 		if decision.Action != "disable" ||
 			decision.ActionReason != "月额度达到阈值，建议禁用账号" ||
@@ -500,7 +500,7 @@ func TestResolveProbeActionUsesMonthlyWindowAsLongQuota(t *testing.T) {
 				LimitWindowSeconds: ptrFloat(codexMonthWindow),
 			},
 		}
-		decision := resolveProbeAction(item, http.StatusOK, "", rateLimit, deriveRateLimitUsedPercent(rateLimit), true, threshold)
+		decision := resolveProbeAction(item, http.StatusOK, "", rateLimit, deriveRateLimitUsedPercent(rateLimit), true, threshold, model.CodexInspectionShortWindowQuotaModeKeep)
 
 		if decision.Action != "keep" ||
 			decision.ActionReason != "5 小时额度达到阈值，但月额度仍可用，暂不禁用账号" ||
@@ -510,6 +510,78 @@ func TestResolveProbeActionUsesMonthlyWindowAsLongQuota(t *testing.T) {
 			t.Fatalf("decision = %#v, want keep exhausted short window with healthy monthly quota", decision)
 		}
 	})
+}
+
+func TestResolveProbeActionShortWindowQuotaMode(t *testing.T) {
+	threshold := 100.0
+	rateLimit := &codexRateLimit{
+		PrimaryWindow: &codexWindow{
+			UsedPercent:        ptrFloat(100),
+			LimitWindowSeconds: ptrFloat(codexFiveHourWindow),
+		},
+		SecondaryWindow: &codexWindow{
+			UsedPercent:        ptrFloat(5),
+			LimitWindowSeconds: ptrFloat(codexMonthWindow),
+		},
+	}
+
+	cases := []struct {
+		name       string
+		disabled   bool
+		mode       string
+		wantAction string
+		wantReason string
+	}{
+		{
+			name:       "default keep mode keeps enabled short-window-exhausted account",
+			disabled:   false,
+			mode:       model.CodexInspectionShortWindowQuotaModeKeep,
+			wantAction: "keep",
+			wantReason: "5 小时额度达到阈值，但月额度仍可用，暂不禁用账号",
+		},
+		{
+			name:       "default keep mode enables disabled short-window-exhausted account",
+			disabled:   true,
+			mode:       model.CodexInspectionShortWindowQuotaModeKeep,
+			wantAction: "enable",
+			wantReason: "月额度仍可用，建议立即启用账号",
+		},
+		{
+			name:       "disable mode disables enabled short-window-exhausted account",
+			disabled:   false,
+			mode:       model.CodexInspectionShortWindowQuotaModeDisable,
+			wantAction: "disable",
+			wantReason: "5 小时额度达到阈值，但月额度仍可用，建议暂时禁用账号等待短窗口恢复",
+		},
+		{
+			name:       "disable mode keeps disabled short-window-exhausted account disabled",
+			disabled:   true,
+			mode:       model.CodexInspectionShortWindowQuotaModeDisable,
+			wantAction: "keep",
+			wantReason: "5 小时额度达到阈值，但月额度仍可用，账号保持禁用等待短窗口恢复",
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			decision := resolveProbeAction(
+				account{DisplayAccount: "user@example.test", Disabled: tt.disabled},
+				http.StatusOK,
+				"",
+				rateLimit,
+				deriveRateLimitUsedPercent(rateLimit),
+				true,
+				threshold,
+				tt.mode,
+			)
+			if decision.Action != tt.wantAction || decision.ActionReason != tt.wantReason {
+				t.Fatalf("decision = %#v, want action=%q reason=%q", decision, tt.wantAction, tt.wantReason)
+			}
+			if decision.UsedPercent == nil || *decision.UsedPercent != 5 || decision.IsQuota {
+				t.Fatalf("decision quota fields = %#v, want long-window percent and non-quota", decision)
+			}
+		})
+	}
 }
 
 func TestRunFallsBackToManagementAPICallPath(t *testing.T) {

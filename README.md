@@ -378,7 +378,7 @@ Failure bodies from CPA usage events are treated as sensitive diagnostics. Manag
 - **Auth Files**: upload, download, delete, status, OAuth exclusions, model aliases
 - **Quota**: quota views for supported providers
 - **Request Monitoring**: persisted usage KPIs, model/channel/account/API-key breakdowns, requested vs resolved model tracking, project snapshots, model pricing, estimated token cost, failure analysis, realtime tables with a readable source label and one prioritized supplemental detail
-- **Codex Account Inspection**: batch probing and cleanup suggestions for Codex auth pools
+- **Codex Account Inspection**: batch probing and cleanup suggestions for Codex auth pools, with an optional 5-hour short-window cooldown mode that temporarily disables short-window-exhausted accounts while keeping the default behavior unchanged
 - **Logs**: incremental file log reading and filtering
 - **System Info**: model list, version checks, and local state tools
 
@@ -454,3 +454,10 @@ go run ./cmd/cpa-manager-plus
 ## License
 
 MIT
+
+
+### Codex inspection 5-hour short-window cooldown
+
+Codex inspection keeps the existing behavior by default: when a credential reaches the 5-hour quota threshold but still has weekly or monthly quota available, the account is kept or re-enabled.
+
+For large Codex pools, you can change **Handling when the 5-hour quota reaches the threshold** to **Short-window cooldown**. In this mode, accounts whose 5-hour window reaches the threshold while the long window is still available are temporarily disabled instead of deleted. A later inspection can re-enable them after the short window recovers. This mode is intended to reduce repeated proxy routing attempts against short-window-exhausted accounts; it works best with scheduled server Codex inspection at around a 60-minute interval and automatic handling set to disable.

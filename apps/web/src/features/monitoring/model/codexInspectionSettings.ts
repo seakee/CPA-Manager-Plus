@@ -3,6 +3,7 @@ import type {
   CodexInspectionAutoActionMode,
   CodexInspectionConfigurableSettings,
   CodexInspectionLogLevel,
+  CodexInspectionShortWindowQuotaMode,
   CodexInspectionStoredActionFilter,
 } from '@/features/monitoring/codexInspection';
 import type { Config } from '@/types';
@@ -17,6 +18,11 @@ export const CODEX_INSPECTION_AUTO_ACTION_MODES: readonly CodexInspectionAutoAct
   'delete',
 ];
 
+export const CODEX_INSPECTION_SHORT_WINDOW_QUOTA_MODES: readonly CodexInspectionShortWindowQuotaMode[] = [
+  'keep',
+  'disable',
+];
+
 export const DEFAULT_CODEX_INSPECTION_SETTINGS: CodexInspectionConfigurableSettings = {
   targetType: 'codex',
   workers: 4,
@@ -27,6 +33,7 @@ export const DEFAULT_CODEX_INSPECTION_SETTINGS: CodexInspectionConfigurableSetti
   usedPercentThreshold: 100,
   sampleSize: 0,
   autoActionMode: 'none',
+  shortWindowQuotaMode: 'keep',
 };
 
 export const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -81,6 +88,9 @@ export const readNonNegativeInteger = (value: unknown, fallback: number) => {
 const isAutoActionMode = (value: string): value is CodexInspectionAutoActionMode =>
   CODEX_INSPECTION_AUTO_ACTION_MODES.includes(value as CodexInspectionAutoActionMode);
 
+const isShortWindowQuotaMode = (value: string): value is CodexInspectionShortWindowQuotaMode =>
+  CODEX_INSPECTION_SHORT_WINDOW_QUOTA_MODES.includes(value as CodexInspectionShortWindowQuotaMode);
+
 export const normalizeAutoActionMode = (
   value: unknown,
   legacyAutoExecuteActions?: unknown
@@ -93,6 +103,16 @@ export const normalizeAutoActionMode = (
   }
 
   return DEFAULT_CODEX_INSPECTION_SETTINGS.autoActionMode;
+};
+
+export const normalizeShortWindowQuotaMode = (
+  value: unknown,
+  fallback: CodexInspectionShortWindowQuotaMode = DEFAULT_CODEX_INSPECTION_SETTINGS.shortWindowQuotaMode
+): CodexInspectionShortWindowQuotaMode => {
+  const normalized = readString(value).toLowerCase();
+  if (isShortWindowQuotaMode(normalized)) return normalized;
+  if (isShortWindowQuotaMode(fallback)) return fallback;
+  return 'keep';
 };
 
 export const normalizeInspectionAction = (
@@ -142,6 +162,10 @@ export const readConfigurableSettingsFromConfig = (
       cleanRecord.autoActionMode === undefined
         ? undefined
         : normalizeAutoActionMode(cleanRecord.autoActionMode),
+    shortWindowQuotaMode:
+      cleanRecord.shortWindowQuotaMode === undefined
+        ? undefined
+        : normalizeShortWindowQuotaMode(cleanRecord.shortWindowQuotaMode),
   };
 };
 
@@ -156,6 +180,7 @@ type CodexInspectionConfigurableSettingsInput = {
   sampleSize?: unknown;
   autoExecuteActions?: unknown;
   autoActionMode?: unknown;
+  shortWindowQuotaMode?: unknown;
 };
 
 export const normalizeConfigurableSettings = (
@@ -201,6 +226,7 @@ export const normalizeConfigurableSettings = (
         ? DEFAULT_CODEX_INSPECTION_SETTINGS.sampleSize
         : Math.max(0, Math.floor(sampleSizeValue)),
     autoActionMode: normalizeAutoActionMode(merged.autoActionMode, merged.autoExecuteActions),
+    shortWindowQuotaMode: normalizeShortWindowQuotaMode(merged.shortWindowQuotaMode),
   };
 };
 

@@ -128,3 +128,19 @@ func TestNormalizeCodexInspectionSchedulePreservesTimeZone(t *testing.T) {
 		t.Fatalf("invalid TimeZone did not fall back, got %q", out.TimeZone)
 	}
 }
+
+func TestNormalizeCodexInspectionShortWindowQuotaMode(t *testing.T) {
+	if got := DefaultCodexInspectionConfig().ShortWindowQuotaMode; got != CodexInspectionShortWindowQuotaModeKeep {
+		t.Fatalf("default ShortWindowQuotaMode = %q, want keep", got)
+	}
+	fallback := ManagerCodexInspectionConfig{TargetType: "codex", ShortWindowQuotaMode: CodexInspectionShortWindowQuotaModeDisable}
+	if got := NormalizeCodexInspectionConfig(ManagerCodexInspectionConfig{}, fallback).ShortWindowQuotaMode; got != CodexInspectionShortWindowQuotaModeDisable {
+		t.Fatalf("fallback ShortWindowQuotaMode = %q, want disable", got)
+	}
+	if got := NormalizeCodexInspectionConfig(ManagerCodexInspectionConfig{ShortWindowQuotaMode: "unexpected"}, DefaultCodexInspectionConfig()).ShortWindowQuotaMode; got != CodexInspectionShortWindowQuotaModeKeep {
+		t.Fatalf("invalid ShortWindowQuotaMode = %q, want keep", got)
+	}
+	if got := UnmarshalCodexInspectionSettings(`{"targetType":"codex"}`).ShortWindowQuotaMode; got != CodexInspectionShortWindowQuotaModeKeep {
+		t.Fatalf("unmarshal missing ShortWindowQuotaMode = %q, want keep", got)
+	}
+}

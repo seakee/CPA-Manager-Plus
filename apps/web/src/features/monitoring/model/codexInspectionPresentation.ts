@@ -5,6 +5,7 @@ import {
   type CodexInspectionConfigurableSettings,
   type CodexInspectionProgressSnapshot,
   type CodexInspectionResultItem,
+  type CodexInspectionShortWindowQuotaMode,
   type CodexInspectionRunResult,
   type CodexInspectionStoredActionFilter,
   type CodexInspectionStoredLogEntry,
@@ -78,12 +79,13 @@ export type InspectionSettingsDraft = {
   userAgent: string;
   usedPercentThreshold: string;
   sampleSize: string;
-  autoActionMode: CodexInspectionAutoActionMode;
+  autoActionMode: CodexInspectionAutoActionMode | string;
+  shortWindowQuotaMode: CodexInspectionShortWindowQuotaMode | string;
 };
 
 export type InspectionSettingsDraftField = Exclude<
   keyof InspectionSettingsDraft,
-  'autoActionMode'
+  'autoActionMode' | 'shortWindowQuotaMode'
 >;
 
 export const ACTION_FILTERS: ActionFilter[] = [
@@ -118,6 +120,7 @@ export const toSettingsDraft = (
   usedPercentThreshold: String(settings.usedPercentThreshold),
   sampleSize: String(settings.sampleSize),
   autoActionMode: settings.autoActionMode,
+  shortWindowQuotaMode: settings.shortWindowQuotaMode,
 });
 
 export const formatActionLabel = (action: CodexInspectionAction, t: TFunction) => {
@@ -378,6 +381,7 @@ export type SharedInspectionConfigDraft = {
   [K in SharedInspectionConfigField]: string;
 } & {
   autoActionMode: CodexInspectionAutoActionMode | string;
+  shortWindowQuotaMode: CodexInspectionShortWindowQuotaMode | string;
 };
 
 export type InspectionConfigFieldErrors = Partial<
@@ -394,6 +398,7 @@ export type ValidatedInspectionConfigValues = {
   usedPercentThreshold: number;
   sampleSize: number;
   autoActionMode: CodexInspectionAutoActionMode;
+  shortWindowQuotaMode: CodexInspectionShortWindowQuotaMode;
 };
 
 type InspectionConfigDraftValidation =
@@ -413,6 +418,23 @@ export const normalizeInspectionAutoActionMode = (
 ): CodexInspectionAutoActionMode => {
   if (mode === 'enable' || mode === 'disable' || mode === 'delete') return mode;
   return 'none';
+};
+
+export const normalizeInspectionShortWindowQuotaMode = (
+  mode: CodexInspectionShortWindowQuotaMode | string
+): CodexInspectionShortWindowQuotaMode => (mode === 'disable' ? 'disable' : 'keep');
+
+export const formatShortWindowQuotaModeLabel = (
+  mode: CodexInspectionShortWindowQuotaMode | string,
+  t: TFunction
+) => {
+  switch (normalizeInspectionShortWindowQuotaMode(mode)) {
+    case 'disable':
+      return t('monitoring.codex_inspection_settings_short_window_quota_mode_disable');
+    case 'keep':
+    default:
+      return t('monitoring.codex_inspection_settings_short_window_quota_mode_keep');
+  }
 };
 
 // 字段级即时校验,边界与 normalizeConfigurableSettings 保持一致,作为两模式单一校验源。
@@ -477,6 +499,7 @@ export const validateInspectionConfigDraft = (
       usedPercentThreshold: Number(draft.usedPercentThreshold.trim()),
       sampleSize: Number(draft.sampleSize.trim()),
       autoActionMode: normalizeInspectionAutoActionMode(draft.autoActionMode),
+      shortWindowQuotaMode: normalizeInspectionShortWindowQuotaMode(draft.shortWindowQuotaMode),
     },
   };
 };
@@ -508,7 +531,7 @@ export type ConfigOverviewItem = {
 
 type ConfigOverviewSettings = Pick<
   CodexInspectionConfigurableSettings,
-  'targetType' | 'workers' | 'timeout' | 'usedPercentThreshold' | 'sampleSize'
+  'targetType' | 'workers' | 'timeout' | 'usedPercentThreshold' | 'sampleSize' | 'shortWindowQuotaMode'
 > & {
   autoActionMode: CodexInspectionAutoActionMode | string;
 };
@@ -532,6 +555,8 @@ export const buildConfigOverviewItems = (
   const { t } = options;
   const autoActionMode = normalizeInspectionAutoActionMode(settings.autoActionMode);
   const autoActionLabel = formatAutoActionModeLabel(autoActionMode, t);
+  const shortWindowQuotaMode = normalizeInspectionShortWindowQuotaMode(settings.shortWindowQuotaMode);
+  const shortWindowQuotaLabel = formatShortWindowQuotaModeLabel(shortWindowQuotaMode, t);
   const sampleSizeLabel =
     settings.sampleSize > 0
       ? String(settings.sampleSize)
@@ -567,6 +592,13 @@ export const buildConfigOverviewItems = (
         field: 'sampleSize',
       },
       {
+        key: 'short-window',
+        label: t('monitoring.codex_inspection_settings_short_window_quota_mode_label'),
+        value: shortWindowQuotaLabel,
+        tone: shortWindowQuotaMode === 'disable' ? 'warn' : 'idle',
+        field: 'shortWindowQuotaMode',
+      },
+      {
         key: 'auto',
         label: t('monitoring.server_codex_inspection_config_summary_auto'),
         value: autoActionLabel,
@@ -588,6 +620,13 @@ export const buildConfigOverviewItems = (
       label: t('monitoring.codex_inspection_sample_size'),
       value: sampleSizeLabel,
       field: 'sampleSize',
+    },
+    {
+      key: 'short-window',
+      label: t('monitoring.codex_inspection_settings_short_window_quota_mode_label'),
+      value: shortWindowQuotaLabel,
+      tone: shortWindowQuotaMode === 'disable' ? 'warn' : 'idle',
+      field: 'shortWindowQuotaMode',
     },
     {
       key: 'auto',
