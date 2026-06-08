@@ -16,6 +16,7 @@ export type MonitoringTabIcon = 'accounts' | 'apiKeys' | 'realtime';
 export type MonitoringTab<Id extends string = string> = {
   id: Id;
   label: string;
+  fullLabel?: string;
   icon?: MonitoringTabIcon;
   badge?: string | number | null;
   badgeTitle?: string;
@@ -125,6 +126,7 @@ export function MonitoringTabsBar<Id extends string>({
             aria-controls={`${idBase}-${tab.id}-panel`}
             tabIndex={isActive ? 0 : -1}
             className={buttonClass}
+            title={tab.fullLabel ?? tab.label}
             onClick={() => {
               if (!isActive) onChange(tab.id);
             }}

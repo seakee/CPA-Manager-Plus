@@ -18,6 +18,12 @@ type MonitoringActionBarProps = {
   statusSummary: ReactNode;
 };
 
+const shortLabel = (t: TFunction, shortKey: string, fallbackKey: string) => {
+  const fallback = t(fallbackKey);
+  const label = t(shortKey, { defaultValue: fallback });
+  return label === shortKey ? fallback : label;
+};
+
 export function MonitoringActionBar({
   usageTransferAvailable,
   usageExporting,
@@ -31,6 +37,12 @@ export function MonitoringActionBar({
   onUsageImportChange,
   statusSummary,
 }: MonitoringActionBarProps) {
+  const modelPriceSettingsLabel = shortLabel(
+    t,
+    'usage_stats.model_price_settings_short',
+    'usage_stats.model_price_settings'
+  );
+
   return (
     <section className={styles.actionBar} aria-label={t('common.action')}>
       <div className={styles.actionGroup}>
@@ -63,9 +75,13 @@ export function MonitoringActionBar({
           <span>{usageImporting ? t('common.loading') : t('usage_stats.import')}</span>
         </button>
         {modelPricesAvailable ? (
-          <Link to="/model-prices" className={styles.actionButton}>
+          <Link
+            to="/model-prices"
+            className={styles.actionButton}
+            title={t('usage_stats.model_price_settings')}
+          >
             <IconSettings size={16} />
-            <span>{t('usage_stats.model_price_settings')}</span>
+            <span>{modelPriceSettingsLabel}</span>
           </Link>
         ) : null}
         <input

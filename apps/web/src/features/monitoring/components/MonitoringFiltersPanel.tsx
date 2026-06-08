@@ -57,6 +57,12 @@ const AUTO_REFRESH_OPTIONS = [
   { value: '300000', labelKey: 'monitoring.auto_refresh_5m' },
 ];
 
+const shortLabel = (t: TFunction, shortKey: string, fallbackKey: string) => {
+  const fallback = t(fallbackKey);
+  const label = t(shortKey, { defaultValue: fallback });
+  return label === shortKey ? fallback : label;
+};
+
 export function MonitoringFiltersPanel({
   timeRange,
   autoRefreshMs,
@@ -89,6 +95,17 @@ export function MonitoringFiltersPanel({
   onSearchChange,
   onClearFilters,
 }: MonitoringFiltersPanelProps) {
+  const autoRefreshLabel = shortLabel(
+    t,
+    'monitoring.auto_refresh_short',
+    'monitoring.auto_refresh'
+  );
+  const clearFiltersLabel = shortLabel(
+    t,
+    'monitoring.clear_filters_short',
+    'monitoring.clear_filters'
+  );
+
   return (
     <MonitoringPanel className={styles.toolbarPanel}>
       <div className={styles.controlBar}>
@@ -118,9 +135,9 @@ export function MonitoringFiltersPanel({
 
         <div className={styles.refreshControls}>
           <div className={styles.autoRefreshField}>
-            <span className={styles.autoRefreshLabel}>
+            <span className={styles.autoRefreshLabel} title={t('monitoring.auto_refresh')}>
               <IconTimer size={16} />
-              {t('monitoring.auto_refresh')}
+              {autoRefreshLabel}
             </span>
             <Select
               className={styles.autoRefreshSelect}
@@ -149,9 +166,15 @@ export function MonitoringFiltersPanel({
             <span className={styles.refreshButtonLabel}>{t('usage_stats.refresh')}</span>
           </button>
 
-          <button type="button" className={styles.clearButton} onClick={onClearFilters}>
+          <button
+            type="button"
+            className={styles.clearButton}
+            onClick={onClearFilters}
+            title={t('monitoring.clear_filters')}
+            aria-label={t('monitoring.clear_filters')}
+          >
             <IconSlidersHorizontal size={16} />
-            <span>{t('monitoring.clear_filters')}</span>
+            <span>{clearFiltersLabel}</span>
           </button>
         </div>
       </div>

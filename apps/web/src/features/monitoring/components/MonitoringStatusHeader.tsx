@@ -23,6 +23,12 @@ type MonitoringStatusSummaryProps = {
   t: TFunction;
 };
 
+const shortLabel = (t: TFunction, shortKey: string, fallbackKey: string) => {
+  const fallback = t(fallbackKey);
+  const label = t(shortKey, { defaultValue: fallback });
+  return label === shortKey ? fallback : label;
+};
+
 export function MonitoringStatusSummary({
   connectionTone,
   connectionLabel,
@@ -32,6 +38,14 @@ export function MonitoringStatusSummary({
   totalCalls,
   t,
 }: MonitoringStatusSummaryProps) {
+  const lastSyncLabel = shortLabel(t, 'monitoring.last_sync_short', 'monitoring.last_sync');
+  const recentFailuresLabel = shortLabel(
+    t,
+    'monitoring.recent_failures_short',
+    'monitoring.recent_failures'
+  );
+  const totalCallsLabel = shortLabel(t, 'monitoring.total_calls_short', 'monitoring.total_calls');
+
   return (
     <div className={styles.statusBar}>
       <span className={`${styles.statusBadge} ${styles[`tone${connectionTone}`]}`}>
@@ -39,14 +53,19 @@ export function MonitoringStatusSummary({
         {connectionLabel}
       </span>
       <div className={styles.statusMeta}>
-        <span>
-          {t('monitoring.last_sync')}:{' '}
+        <span title={t('monitoring.last_sync')}>
+          {lastSyncLabel}:{' '}
           {lastRefreshedAt ? lastRefreshedAt.toLocaleTimeString(locale) : '--'}
         </span>
-        <span className={scopedFailureCount > 0 ? styles.statusMetaWarn : undefined}>
-          {`${t('monitoring.recent_failures')}: ${scopedFailureCount}`}
+        <span
+          className={scopedFailureCount > 0 ? styles.statusMetaWarn : undefined}
+          title={t('monitoring.recent_failures')}
+        >
+          {`${recentFailuresLabel}: ${scopedFailureCount}`}
         </span>
-        <span>{`${t('monitoring.total_calls')}: ${formatCompactNumber(totalCalls)}`}</span>
+        <span title={t('monitoring.total_calls')}>
+          {`${totalCallsLabel}: ${formatCompactNumber(totalCalls)}`}
+        </span>
       </div>
     </div>
   );

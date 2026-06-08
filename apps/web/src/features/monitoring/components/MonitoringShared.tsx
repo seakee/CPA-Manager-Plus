@@ -45,6 +45,7 @@ export type SummaryCardAccent =
 
 export type SummaryCardProps = {
   label: string;
+  fullLabel?: string;
   value: string;
   valueTitle?: string;
   meta: string;
@@ -75,6 +76,12 @@ const parsePageSize = (value: string, fallback: number) => {
 const clampPage = (value: number, totalPages: number) =>
   Math.min(Math.max(Number.isFinite(value) ? value : 1, 1), Math.max(totalPages, 1));
 
+const shortLabel = (t: TFunction, shortKey: string, fallbackKey: string) => {
+  const fallback = t(fallbackKey);
+  const label = t(shortKey, { defaultValue: fallback });
+  return label === shortKey ? fallback : label;
+};
+
 const summaryIconMap: Record<SummaryCardIcon, ComponentType<IconProps>> = {
   calls: IconInbox,
   success: IconCheck,
@@ -99,6 +106,7 @@ const summaryAccentClassMap: Record<SummaryCardAccent, string> = {
 
 export function SummaryCard({
   label,
+  fullLabel,
   value,
   valueTitle,
   meta,
@@ -110,6 +118,7 @@ export function SummaryCard({
   const Icon = icon ? summaryIconMap[icon] : null;
   const tooltipId = useId();
   const tooltipValue = valueTitle ?? value;
+  const resolvedLabel = fullLabel ?? label;
   const hasValueTooltip = tooltipValue !== value;
   const cardClassName = [
     'card',
@@ -128,7 +137,7 @@ export function SummaryCard({
             <Icon size={20} />
           </span>
         ) : null}
-        <span className={styles.summaryLabel} title={label}>
+        <span className={styles.summaryLabel} title={resolvedLabel}>
           {label}
         </span>
       </div>
@@ -143,7 +152,7 @@ export function SummaryCard({
           </strong>
           {hasValueTooltip ? (
             <span id={tooltipId} className={styles.summaryValueTooltip} role="tooltip">
-              <span className={styles.summaryValueTooltipLabel}>{label}</span>
+              <span className={styles.summaryValueTooltipLabel}>{resolvedLabel}</span>
               <span className={styles.summaryValueTooltipValue}>{tooltipValue}</span>
             </span>
           ) : null}
@@ -208,7 +217,9 @@ export function PaginationControls({
       </div>
       <div className={styles.paginationControls}>
         <div className={styles.pageSizeField}>
-          <span>{t('monitoring.page_size_label')}</span>
+          <span title={t('monitoring.page_size_label')}>
+            {shortLabel(t, 'monitoring.page_size_label_short', 'monitoring.page_size_label')}
+          </span>
           <Select
             className={styles.pageSizeSelect}
             triggerClassName={styles.pageSizeSelectTrigger}
@@ -228,7 +239,7 @@ export function PaginationControls({
           onClick={() => onPageChange(Math.max(1, currentPage - 1))}
           disabled={currentPage <= 1}
         >
-          {t('monitoring.pagination_prev')}
+          {shortLabel(t, 'monitoring.pagination_prev_short', 'monitoring.pagination_prev')}
         </Button>
         <Button
           variant="secondary"
@@ -236,7 +247,7 @@ export function PaginationControls({
           onClick={() => onPageChange(Math.min(totalPages, currentPage + 1))}
           disabled={currentPage >= totalPages}
         >
-          {t('monitoring.pagination_next')}
+          {shortLabel(t, 'monitoring.pagination_next_short', 'monitoring.pagination_next')}
         </Button>
         <label className={styles.pageJumpField}>
           <span>{t('monitoring.pagination_jump_prefix')}</span>
