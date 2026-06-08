@@ -130,6 +130,87 @@ export function resolveManagerCPAConnection({
   return savedConnection ?? { cpaBaseUrl: '', managementKey: '' };
 }
 
+function parseManagerPositiveIntegerInput(value: string): number | null {
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return Math.floor(parsed);
+}
+
+function resolveManagerPositiveIntegerBaseline(value: number | undefined, fallback: number): number {
+  return Number.isFinite(value) && value && value > 0 ? Math.floor(value) : fallback;
+}
+
+function managerPositiveIntegerInputChanged(
+  input: string,
+  savedValue: number | undefined,
+  fallback: number
+): boolean {
+  const parsed = parseManagerPositiveIntegerInput(input);
+  if (parsed === null) return true;
+  return parsed !== resolveManagerPositiveIntegerBaseline(savedValue, fallback);
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function resolveManagerFormDirty({
+  managerConfig,
+  cpaBaseUrlInput,
+  managementKeyInput = '',
+  requestMonitoringEnabled,
+  collectorMode,
+  pollIntervalMs,
+  batchSize,
+  queryLimit,
+}: {
+  managerConfig: ManagerConfig | null;
+  cpaBaseUrlInput: string;
+  managementKeyInput?: string;
+  requestMonitoringEnabled: boolean;
+  collectorMode: string;
+  pollIntervalMs: string;
+  batchSize: string;
+  queryLimit: string;
+}): boolean {
+  if (!managerConfig) return false;
+
+  const savedConnection = managerConfig.cpaConnection;
+  const savedCollector = managerConfig.collector ?? MANAGER_COLLECTOR_DEFAULT;
+  const savedCPABase = normalizeUsageServiceBase(savedConnection?.cpaBaseUrl || '');
+  const nextCPABase = normalizeUsageServiceBase(cpaBaseUrlInput || '');
+  if (savedCPABase !== nextCPABase) return true;
+
+  const nextManagementKey = managementKeyInput.trim();
+  if (nextManagementKey && nextManagementKey !== (savedConnection?.managementKey || '')) {
+    return true;
+  }
+
+  if (requestMonitoringEnabled !== (savedCollector.enabled !== false)) return true;
+  const savedCollectorMode =
+    savedCollector.collectorMode || MANAGER_COLLECTOR_DEFAULT.collectorMode;
+  if ((collectorMode || MANAGER_COLLECTOR_DEFAULT.collectorMode) !== savedCollectorMode) {
+    return true;
+  }
+
+  return (
+    managerPositiveIntegerInputChanged(
+      pollIntervalMs,
+      savedCollector.pollIntervalMs,
+      MANAGER_COLLECTOR_DEFAULT.pollIntervalMs
+    ) ||
+    managerPositiveIntegerInputChanged(
+      batchSize,
+      savedCollector.batchSize,
+      MANAGER_COLLECTOR_DEFAULT.batchSize
+    ) ||
+    managerPositiveIntegerInputChanged(
+      queryLimit,
+      savedCollector.queryLimit,
+      MANAGER_COLLECTOR_DEFAULT.queryLimit
+    )
+  );
+}
+
 function isManagerAuthErrorCode(code: string): boolean {
   return code === 'invalid_admin_key' || code === 'invalid_management_key';
 }
@@ -199,7 +280,6 @@ export function ConfigPage() {
   const [managerLoading, setManagerLoading] = useState(false);
   const [managerSaving, setManagerSaving] = useState(false);
   const [managerError, setManagerError] = useState('');
-  const [managerDirty, setManagerDirty] = useState(false);
   const [managerRequestMonitoringEnabled, setManagerRequestMonitoringEnabled] = useState(true);
   const [managerCPABaseInput, setManagerCPABaseInput] = useState('');
   const [managerCPAManagementKeyInput, setManagerCPAManagementKeyInput] = useState('');
@@ -343,6 +423,29 @@ export function ConfigPage() {
   }, [detectedPanelBase, panelHostedByUsageService]);
 
   const managerServiceTarget = resolveManagerServiceBase();
+  const managerDirty = useMemo(
+    () =>
+      resolveManagerFormDirty({
+        managerConfig,
+        cpaBaseUrlInput: managerCPABaseInput,
+        managementKeyInput: managerCPAManagementKeyInput,
+        requestMonitoringEnabled: managerRequestMonitoringEnabled,
+        collectorMode: managerCollectorMode,
+        pollIntervalMs: managerPollIntervalMs,
+        batchSize: managerBatchSize,
+        queryLimit: managerQueryLimit,
+      }),
+    [
+      managerBatchSize,
+      managerCPABaseInput,
+      managerCPAManagementKeyInput,
+      managerCollectorMode,
+      managerConfig,
+      managerPollIntervalMs,
+      managerQueryLimit,
+      managerRequestMonitoringEnabled,
+    ]
+  );
   const managerSaveState = resolveManagerSaveState({
     panelHostedByUsageService,
     managerDirty,
@@ -380,7 +483,6 @@ export function ConfigPage() {
       setManagerQueryLimit(String(collector.queryLimit || MANAGER_COLLECTOR_DEFAULT.queryLimit));
       setManagerCPAManagementKeyInput('');
       setManagerCPAManagementKeyVisible(false);
-      setManagerDirty(false);
     },
     []
   );
@@ -430,10 +532,6 @@ export function ConfigPage() {
     syncEmbeddedManagerBootstrap,
     t,
   ]);
-
-  const setManagerFieldDirty = useCallback(() => {
-    setManagerDirty(true);
-  }, []);
 
   const readManagerPositiveInteger = useCallback(
     (value: string, label: string) => {
@@ -1155,39 +1253,31 @@ export function ConfigPage() {
               onRefresh={() => void loadManagerConfig()}
               onRequestMonitoringChange={(value) => {
                 setManagerRequestMonitoringEnabled(value);
-                setManagerFieldDirty();
               }}
               onCPABaseInputChange={(value) => {
                 setManagerCPABaseInput(value);
-                setManagerFieldDirty();
               }}
               onCPAManagementKeyInputChange={(value) => {
                 setManagerCPAManagementKeyInput(value);
-                setManagerFieldDirty();
               }}
               onCPAManagementKeyClear={() => {
                 setManagerCPAManagementKeyInput('');
                 setManagerCPAManagementKeyVisible(false);
-                setManagerFieldDirty();
               }}
               onCPAManagementKeyVisibilityToggle={() => {
                 setManagerCPAManagementKeyVisible((visible) => !visible);
               }}
               onCollectorModeChange={(value) => {
                 setManagerCollectorMode(value);
-                setManagerFieldDirty();
               }}
               onPollIntervalMsChange={(value) => {
                 setManagerPollIntervalMs(value);
-                setManagerFieldDirty();
               }}
               onBatchSizeChange={(value) => {
                 setManagerBatchSize(value);
-                setManagerFieldDirty();
               }}
               onQueryLimitChange={(value) => {
                 setManagerQueryLimit(value);
-                setManagerFieldDirty();
               }}
             />
           ) : activeTab === 'visual' ? (

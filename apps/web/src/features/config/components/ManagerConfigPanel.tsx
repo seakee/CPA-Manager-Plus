@@ -147,11 +147,18 @@ export function ManagerConfigPanel({
           />
           <Input
             label={t('config_management.manager.cpa_management_key_label')}
+            name="manager-cpa-management-key-rotation"
             type={managerCPAManagementKeyVisible ? 'text' : 'password'}
             value={managerCPAManagementKeyInput}
             placeholder={t('config_management.manager.cpa_management_key_placeholder')}
             onChange={(event) => onCPAManagementKeyInputChange(event.target.value)}
             disabled={connectionInputDisabled}
+            autoComplete="new-password"
+            autoCorrect="off"
+            autoCapitalize="none"
+            spellCheck={false}
+            data-lpignore="true"
+            data-1p-ignore="true"
             className={styles.managerCpaKeyInput}
             hint={t('config_management.manager.cpa_management_key_section_hint')}
             rightElement={
