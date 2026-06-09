@@ -190,6 +190,58 @@ Native packages do not include CPA itself. Run CPA separately, then enter the ad
 
 On first start, if `USAGE_DATA_DIR` and `USAGE_DB_PATH` are not set, the native package creates `config.json` next to the binary and writes SQLite data to `data/usage.sqlite` in the same directory. The extracted package directory therefore contains both the program and its user data.
 
+### Arch Linux AUR
+
+Arch Linux users can install the community AUR package:
+
+```bash
+yay -S cpa-manager-plus-bin
+```
+
+The AUR package installs the `cpa-manager-plus` binary, an example environment file, and a user-level systemd service. It does not install CPA itself; run CPA locally or point the Manager Server at a remote CPA endpoint.
+
+Configure the user service before starting it:
+
+```bash
+install -Dm600 /usr/share/doc/cpa-manager-plus-bin/cpa-manager-plus.env.example ~/.config/cpa-manager-plus/cpa-manager-plus.env
+$EDITOR ~/.config/cpa-manager-plus/cpa-manager-plus.env
+```
+
+Set at least:
+
+```env
+HTTP_ADDR=127.0.0.1:18317
+CPA_UPSTREAM_URL=http://127.0.0.1:8317
+CPA_MANAGEMENT_KEY=replace-with-your-cpa-management-key
+CPA_MANAGER_ADMIN_KEY=replace-with-your-manager-admin-key
+```
+
+`CPA_MANAGEMENT_KEY` is the key used by Manager Server to access CPA. Use the plaintext CPA Management Key, not the bcrypt hash that CPA may write back to its config after startup. `CPA_MANAGER_ADMIN_KEY` is a separate key used to log in to the CPA Manager Plus web UI.
+
+Start the user service:
+
+```bash
+systemctl --user enable --now cpa-manager-plus.service
+```
+
+Then open:
+
+```text
+http://127.0.0.1:18317/management.html
+```
+
+The AUR service stores data under `~/.local/state/cpa-manager-plus`. After first initialization, changing `CPA_MANAGER_ADMIN_KEY` in the env file alone does not rotate the login key because the admin credential is stored as a digest in SQLite. To rotate it, stop the service and reset the key explicitly:
+
+```bash
+printf '%s\n' 'replace-with-your-new-manager-admin-key' > /tmp/cpamp-admin-key
+systemctl --user stop cpa-manager-plus.service
+cpa-manager-plus reset-admin-key --db-path ~/.local/state/cpa-manager-plus/usage.sqlite --admin-key-file /tmp/cpamp-admin-key
+rm -f /tmp/cpamp-admin-key
+systemctl --user start cpa-manager-plus.service
+```
+
+For usage collection, CPA should enable `usage-statistics-enabled: true`, and only one Manager Server should consume the same CPA usage queue.
+
 ### Docker Compose
 
 ```yaml

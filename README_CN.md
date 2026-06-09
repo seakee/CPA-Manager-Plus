@@ -190,6 +190,58 @@ http://<host>:18317/management.html
 
 原生包首次启动时，如果没有设置 `USAGE_DATA_DIR` 或 `USAGE_DB_PATH`，会在程序所在目录自动生成 `config.json`，并把 SQLite 数据写入同目录下的 `data/usage.sqlite`。这样解压后的目录就是完整的程序和用户数据目录。
 
+### Arch Linux AUR
+
+Arch Linux 用户可以安装社区维护的 AUR 包：
+
+```bash
+yay -S cpa-manager-plus-bin
+```
+
+AUR 包会安装 `cpa-manager-plus` 二进制、示例环境变量文件和 user-level systemd 服务。它不安装 CPA 本体；请在本机运行 CPA，或让 Manager Server 连接远程 CPA endpoint。
+
+启动服务前先复制并编辑配置：
+
+```bash
+install -Dm600 /usr/share/doc/cpa-manager-plus-bin/cpa-manager-plus.env.example ~/.config/cpa-manager-plus/cpa-manager-plus.env
+$EDITOR ~/.config/cpa-manager-plus/cpa-manager-plus.env
+```
+
+至少需要设置：
+
+```env
+HTTP_ADDR=127.0.0.1:18317
+CPA_UPSTREAM_URL=http://127.0.0.1:8317
+CPA_MANAGEMENT_KEY=replace-with-your-cpa-management-key
+CPA_MANAGER_ADMIN_KEY=replace-with-your-manager-admin-key
+```
+
+`CPA_MANAGEMENT_KEY` 是 Manager Server 访问 CPA 使用的密钥。这里要填写明文 CPA Management Key，不要填写 CPA 启动后可能写回配置文件的 bcrypt hash。`CPA_MANAGER_ADMIN_KEY` 是登录 CPA Manager Plus Web UI 使用的独立密钥。
+
+启动 user 服务：
+
+```bash
+systemctl --user enable --now cpa-manager-plus.service
+```
+
+然后打开：
+
+```text
+http://127.0.0.1:18317/management.html
+```
+
+AUR 服务会把数据保存到 `~/.local/state/cpa-manager-plus`。首次初始化后，单独修改 env 文件里的 `CPA_MANAGER_ADMIN_KEY` 不会轮换登录密钥，因为管理员凭据会以 digest 形式保存在 SQLite 中。需要轮换时，请停止服务并显式重置：
+
+```bash
+printf '%s\n' 'replace-with-your-new-manager-admin-key' > /tmp/cpamp-admin-key
+systemctl --user stop cpa-manager-plus.service
+cpa-manager-plus reset-admin-key --db-path ~/.local/state/cpa-manager-plus/usage.sqlite --admin-key-file /tmp/cpamp-admin-key
+rm -f /tmp/cpamp-admin-key
+systemctl --user start cpa-manager-plus.service
+```
+
+如果要采集用量，CPA 应启用 `usage-statistics-enabled: true`，并确保同一个 CPA 用量队列只由一个 Manager Server 消费。
+
 ### Docker Compose
 
 ```yaml
