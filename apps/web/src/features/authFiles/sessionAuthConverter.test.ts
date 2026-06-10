@@ -1266,9 +1266,33 @@ describe('convertAuthJsonInput', () => {
     const authJson = {
       type: 'codex',
       email: 'User.Name+tag@example.com',
+      account_id: '0ded482d-team-account',
+      plan_type: 'team',
     };
 
-    expect(getDefaultSessionAuthFileName(authJson)).toBe('user-name-tag-example-com.codex.json');
+    expect(getDefaultSessionAuthFileName(authJson)).toBe(
+      'codex-0ded482d-user.name+tag@example.com-team.json'
+    );
+  });
+
+  it('uses a stable metadata fingerprint when account identity has no id', () => {
+    const authJson = {
+      type: 'codex',
+      email: 'User.Name+tag@example.com',
+      access_token: 'token-one',
+    };
+    const sameIdentityWithDifferentToken = {
+      type: 'codex',
+      email: 'User.Name+tag@example.com',
+      access_token: 'token-two',
+    };
+
+    expect(getDefaultSessionAuthFileName(authJson)).toMatch(
+      /^codex-[a-f0-9]{8}-user\.name\+tag@example\.com\.json$/
+    );
+    expect(getDefaultSessionAuthFileName(sameIdentityWithDifferentToken)).toBe(
+      getDefaultSessionAuthFileName(authJson)
+    );
   });
 
   it.each(['con', 'AUX', 'lpt1'])(
@@ -1279,8 +1303,8 @@ describe('convertAuthJsonInput', () => {
         email: identity,
       };
 
-      expect(getDefaultSessionAuthFileName(authJson)).toBe(
-        `${identity.toLowerCase()}-account.codex.json`
+      expect(getDefaultSessionAuthFileName(authJson)).toMatch(
+        new RegExp(`^codex-[a-f0-9]{8}-${identity.toLowerCase()}-account\\.json$`)
       );
     }
   );

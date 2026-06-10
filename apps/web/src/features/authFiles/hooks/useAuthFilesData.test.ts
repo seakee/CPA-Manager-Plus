@@ -147,7 +147,7 @@ describe('buildPastedAuthJsonPayload', () => {
       })
     );
 
-    expect(result.resolvedFileName).toBe('session-user-tag-example-com.codex.json');
+    expect(result.resolvedFileName).toBe('codex-session-session.user+tag@example.com.json');
     expect(result.authJson).toMatchObject({
       type: 'codex',
       email: 'Session.User+tag@example.com',
@@ -215,9 +215,9 @@ describe('useAuthFilesData savePastedAuthJson', () => {
       .getCurrent()
       .savePastedAuthJson('session', 'codex-account.json', sessionInput);
 
-    expect(savedName).toBe('session-user-tag-example-com.codex.json');
+    expect(savedName).toBe('codex-session-session.user+tag@example.com.json');
     expect(mocks.saveJsonObject).toHaveBeenCalledWith(
-      'session-user-tag-example-com.codex.json',
+      'codex-session-session.user+tag@example.com.json',
       expect.objectContaining({
         type: 'codex',
         email: 'Session.User+tag@example.com',
@@ -226,7 +226,7 @@ describe('useAuthFilesData savePastedAuthJson', () => {
       })
     );
     expect(mocks.showNotification).toHaveBeenCalledWith(
-      'auth_files.paste_success:session-user-tag-example-com.codex.json',
+      'auth_files.paste_success:codex-session-session.user+tag@example.com.json',
       'success'
     );
     expect(mocks.list).toHaveBeenCalledTimes(1);

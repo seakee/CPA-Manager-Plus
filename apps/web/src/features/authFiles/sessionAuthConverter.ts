@@ -923,29 +923,85 @@ export const convertAuthJsonInput = (
   return convertSessionToCpaAuthJson(sessions[0].value, now);
 };
 
-const buildSafeDefaultAuthFileName = (rawName: unknown) => {
-  const safeName = String(rawName)
-    .replace(/\.json$/iu, '')
-    .replace(/[\\/:*?"<>|]+/g, '-')
-    .replace(/[^a-z0-9]+/gi, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .toLowerCase()
-    .slice(0, 80);
-  const safeBaseName = WINDOWS_RESERVED_BASE_NAMES.has(safeName) ? `${safeName}-account` : safeName;
+const stableStringifyForFingerprint = (value: unknown): string => {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringifyForFingerprint).join(',')}]`;
+  }
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .filter((key) => !GENERIC_CREDENTIAL_KEYS.has(key.toLowerCase()))
+      .map((key) => `${JSON.stringify(key)}:${stableStringifyForFingerprint(value[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? String(value);
+};
 
-  return `${safeBaseName || 'codex-account'}.codex.json`;
+const buildAuthFileFingerprint = (value: unknown) => {
+  const text = stableStringifyForFingerprint(value);
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+};
+
+const buildSafeFileNameSegment = (
+  value: unknown,
+  {
+    fallback = '',
+    maxLength = 80,
+    preserveEmailSymbols = false,
+  }: { fallback?: string; maxLength?: number; preserveEmailSymbols?: boolean } = {}
+) => {
+  const raw = String(value ?? '')
+    .trim()
+    .replace(/\.json$/iu, '')
+    .toLowerCase();
+  const unsupportedPattern = preserveEmailSymbols ? /[^a-z0-9@._+-]+/g : /[^a-z0-9]+/g;
+  const safeName = raw
+    .replace(/[\\/:*?"<>|]+/g, '-')
+    .replace(unsupportedPattern, '-')
+    .replace(/-+/g, '-')
+    .replace(/\.{2,}/g, '.')
+    .replace(/^[.-]+|[.-]+$/g, '')
+    .slice(0, maxLength)
+    .replace(/[.-]+$/g, '');
+  const safeBaseName = WINDOWS_RESERVED_BASE_NAMES.has(safeName) ? `${safeName}-account` : safeName;
+  return safeBaseName || fallback;
+};
+
+const getDefaultAuthFileIdSegment = (authJson: JsonRecord) => {
+  const rawId = firstNonEmpty(
+    authJson.account_id,
+    authJson.chatgpt_account_id,
+    authJson.organization_id
+  );
+  return buildSafeFileNameSegment(rawId, { maxLength: 8 }) || buildAuthFileFingerprint(authJson);
 };
 
 export const getDefaultSessionAuthFileName = (authJson: JsonRecord) => {
-  const rawName = firstNonEmpty(
-    authJson.email,
-    authJson.name,
-    authJson.account_id,
-    'codex-account'
+  const provider = buildSafeFileNameSegment(firstNonEmpty(authJson.type, authJson.provider), {
+    fallback: 'codex',
+    maxLength: 24,
+  });
+  const id = getDefaultAuthFileIdSegment(authJson);
+  const identity = buildSafeFileNameSegment(
+    firstNonEmpty(authJson.email, authJson.name, authJson.account_id, 'account'),
+    {
+      fallback: 'account',
+      maxLength: 96,
+      preserveEmailSymbols: true,
+    }
   );
+  const plan = buildSafeFileNameSegment(firstNonEmpty(authJson.plan_type, authJson.chatgpt_plan_type), {
+    maxLength: 32,
+  });
+  const baseName = [provider, id, identity, plan].filter(Boolean).join('-');
 
-  return buildSafeDefaultAuthFileName(rawName);
+  return `${baseName}.json`;
 };
 
 export const getDefaultSub2ApiAuthFileName = (authJson: AuthJsonConversionResult) => {
