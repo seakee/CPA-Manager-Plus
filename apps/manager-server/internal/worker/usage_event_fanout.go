@@ -32,3 +32,19 @@ func (f *UsageEventFanout) HandleUsageEvents(ctx context.Context, cfg collectorp
 		handler.HandleUsageEvents(ctx, cfg, events)
 	}
 }
+
+func (f *UsageEventFanout) UpdateRuntimeConfig(ctx context.Context, cfg collectorpkg.RuntimeConfig) {
+	if f == nil {
+		return
+	}
+	for _, handler := range f.handlers {
+		if ctx.Err() != nil {
+			return
+		}
+		runtimeHandler, ok := handler.(collectorpkg.UsageRuntimeConfigHandler)
+		if !ok {
+			continue
+		}
+		runtimeHandler.UpdateRuntimeConfig(ctx, cfg)
+	}
+}

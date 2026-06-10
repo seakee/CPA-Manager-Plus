@@ -29,7 +29,7 @@ func TestAccountActionCandidateFromEventUsesSafeEvidence(t *testing.T) {
 		FailBody:              `{"error":{"type":"authentication_error","code":"token_revoked","message":"secret token sk-sensitive"}}`,
 		RawJSON:               `{"authorization":"Bearer secret","raw":"payload"}`,
 	}
-	candidate, ok := accountActionCandidateFromEvent(event, "http://cpa.local", "mgmt", now)
+	candidate, ok := accountActionCandidateFromEvent(event, now)
 	if !ok {
 		t.Fatal("candidate not detected")
 	}
@@ -51,14 +51,14 @@ func TestAccountActionCandidateFromEventUsesSafeEvidence(t *testing.T) {
 	}
 }
 
-func TestAccountActionCandidateWorkerSavesWithoutAutoDisable(t *testing.T) {
+func TestAccountActionCandidateWorkerSavesQueueOnly(t *testing.T) {
 	st, err := store.Open(t.TempDir() + "/usage.sqlite")
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 	defer st.Close()
 
-	worker := NewAccountActionCandidateWorker(st, false)
+	worker := NewAccountActionCandidateWorker(st)
 	event := usage.Event{
 		Failed:           true,
 		FailStatusCode:   401,
@@ -68,7 +68,7 @@ func TestAccountActionCandidateWorkerSavesWithoutAutoDisable(t *testing.T) {
 		AuthIndex:        "7",
 		FailSummary:      "invalidated OAuth token",
 	}
-	candidate, ok := accountActionCandidateFromEvent(event, "http://cpa.local", "mgmt", time.Now())
+	candidate, ok := accountActionCandidateFromEvent(event, time.Now())
 	if !ok {
 		t.Fatal("candidate not detected")
 	}
@@ -83,6 +83,56 @@ func TestAccountActionCandidateWorkerSavesWithoutAutoDisable(t *testing.T) {
 	}
 }
 
+func TestAccountActionCandidateFromEventHandlesDeactivatedWorkspace402(t *testing.T) {
+	event := usage.Event{
+		Failed:           true,
+		FailStatusCode:   402,
+		EventHash:        "evt-402-deactivated",
+		Provider:         "codex",
+		AuthFileSnapshot: "codex-auth.json",
+		FailSummary:      "payment required",
+		FailBody:         `{"error":{"type":"deactivated_workspace","code":"deactivated_workspace","message":"workspace inactive sk-sensitive"}}`,
+		RawJSON:          `{"authorization":"Bearer secret"}`,
+	}
+	candidate, ok := accountActionCandidateFromEvent(event, time.Now())
+	if !ok {
+		t.Fatal("candidate not detected")
+	}
+	if candidate.ActionType != model.AccountActionTypeDelete {
+		t.Fatalf("action type = %q", candidate.ActionType)
+	}
+	if strings.Contains(candidate.EvidenceJSON, "FailBody") || strings.Contains(candidate.EvidenceJSON, "RawJSON") || strings.Contains(candidate.EvidenceJSON, "sk-sensitive") || strings.Contains(candidate.EvidenceJSON, "Bearer secret") {
+		t.Fatalf("evidence leaked sensitive raw payload: %s", candidate.EvidenceJSON)
+	}
+}
+
+func TestAccountActionCandidateFromEventSkipsOrdinary402(t *testing.T) {
+	cases := []usage.Event{
+		{
+			Failed:           true,
+			FailStatusCode:   402,
+			EventHash:        "evt-payment-required",
+			Provider:         "codex",
+			AuthFileSnapshot: "codex-auth.json",
+			FailBody:         `{"error":{"type":"payment_required","code":"payment_required"}}`,
+		},
+		{
+			Failed:           true,
+			FailStatusCode:   402,
+			EventHash:        "evt-quota",
+			Provider:         "codex",
+			AuthFileSnapshot: "codex-auth.json",
+			FailSummary:      "quota exceeded",
+			FailBody:         `{"error":{"type":"quota_exceeded","code":"quota_exceeded"}}`,
+		},
+	}
+	for _, event := range cases {
+		if candidate, ok := accountActionCandidateFromEvent(event, time.Now()); ok {
+			t.Fatalf("unexpected candidate for %s: %#v", event.EventHash, candidate)
+		}
+	}
+}
+
 func TestUsageEventFanoutCallsHandlers(t *testing.T) {
 	first := &recordingUsageHandler{}
 	second := &recordingUsageHandler{}
@@ -93,8 +143,30 @@ func TestUsageEventFanoutCallsHandlers(t *testing.T) {
 	}
 }
 
-type recordingUsageHandler struct{ count int }
+func TestUsageEventFanoutForwardsRuntimeConfig(t *testing.T) {
+	first := &recordingUsageHandler{}
+	second := &recordingUsageHandler{}
+	fanout := NewUsageEventFanout(first, nil, second)
+	fanout.UpdateRuntimeConfig(context.Background(), collectorpkg.RuntimeConfig{CPAUpstreamURL: "http://cpa", ManagementKey: "mgmt"})
+	if first.runtimeCount != 1 || second.runtimeCount != 1 {
+		t.Fatalf("runtime counts = %d/%d", first.runtimeCount, second.runtimeCount)
+	}
+	if first.lastRuntime.CPAUpstreamURL != "http://cpa" || second.lastRuntime.ManagementKey != "mgmt" {
+		t.Fatalf("runtime configs = %#v / %#v", first.lastRuntime, second.lastRuntime)
+	}
+}
+
+type recordingUsageHandler struct {
+	count        int
+	runtimeCount int
+	lastRuntime  collectorpkg.RuntimeConfig
+}
 
 func (h *recordingUsageHandler) HandleUsageEvents(context.Context, collectorpkg.RuntimeConfig, []usage.Event) {
 	h.count++
+}
+
+func (h *recordingUsageHandler) UpdateRuntimeConfig(_ context.Context, cfg collectorpkg.RuntimeConfig) {
+	h.runtimeCount++
+	h.lastRuntime = cfg
 }

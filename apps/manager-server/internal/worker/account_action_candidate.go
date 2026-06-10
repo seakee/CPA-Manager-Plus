@@ -18,14 +18,11 @@ import (
 const accountActionCandidateQueueSize = 256
 
 type AccountActionCandidateWorker struct {
-	store       *store.Store
-	jobs        chan accountActionCandidate
-	autoDisable bool
+	store *store.Store
+	jobs  chan accountActionCandidate
 }
 
 type accountActionCandidate struct {
-	BaseURL        string
-	ManagementKey  string
 	FileName       string
 	AuthIndex      string
 	DisplayAccount string
@@ -39,11 +36,10 @@ type accountActionCandidate struct {
 	SeenAtMS       int64
 }
 
-func NewAccountActionCandidateWorker(st *store.Store, autoDisable bool) *AccountActionCandidateWorker {
+func NewAccountActionCandidateWorker(st *store.Store) *AccountActionCandidateWorker {
 	return &AccountActionCandidateWorker{
-		store:       st,
-		jobs:        make(chan accountActionCandidate, accountActionCandidateQueueSize),
-		autoDisable: autoDisable,
+		store: st,
+		jobs:  make(chan accountActionCandidate, accountActionCandidateQueueSize),
 	}
 }
 
@@ -51,18 +47,13 @@ func (w *AccountActionCandidateWorker) Start(ctx context.Context) {
 	go w.run(ctx)
 }
 
-func (w *AccountActionCandidateWorker) HandleUsageEvents(ctx context.Context, cfg collectorpkg.RuntimeConfig, events []usage.Event) {
+func (w *AccountActionCandidateWorker) HandleUsageEvents(ctx context.Context, _ collectorpkg.RuntimeConfig, events []usage.Event) {
 	if w == nil || len(events) == 0 {
-		return
-	}
-	baseURL := strings.TrimSpace(cfg.CPAUpstreamURL)
-	managementKey := strings.TrimSpace(cfg.ManagementKey)
-	if baseURL == "" || managementKey == "" {
 		return
 	}
 	now := time.Now()
 	for _, event := range events {
-		candidate, ok := accountActionCandidateFromEvent(event, baseURL, managementKey, now)
+		candidate, ok := accountActionCandidateFromEvent(event, now)
 		if !ok {
 			continue
 		}
@@ -88,7 +79,7 @@ func (w *AccountActionCandidateWorker) run(ctx context.Context) {
 }
 
 func (w *AccountActionCandidateWorker) handleCandidate(ctx context.Context, candidate accountActionCandidate) {
-	if candidate.FileName == "" || candidate.BaseURL == "" || candidate.ManagementKey == "" {
+	if candidate.FileName == "" {
 		return
 	}
 	if w == nil || w.store == nil || w.store.AccountActions == nil {
@@ -111,34 +102,10 @@ func (w *AccountActionCandidateWorker) handleCandidate(ctx context.Context, cand
 		log.Printf("[account-action] failed to upsert pending candidate for auth file %q: %v", candidate.FileName, err)
 		return
 	}
-	if !w.autoDisable {
-		log.Printf("[account-action] saved pending %s candidate %d for auth file %q", candidate.ActionType, item.ID, candidate.FileName)
-		return
-	}
-	// Auto-disable is deliberately conservative. It verifies the current CPA auth-file
-	// still matches the event snapshot before mutating CPA state.
-	quotaWorker := &RateLimitAutoDisableWorker{client: &http.Client{Timeout: quotaAutoDisableActionTimeout}}
-	current, ok, err := quotaWorker.currentAuthFile(ctx, candidate.BaseURL, candidate.ManagementKey, candidate.FileName, candidate.AuthIndex)
-	if err != nil {
-		log.Printf("[account-action] pending candidate %d saved, but auth file verification failed for %q: %v", item.ID, candidate.FileName, err)
-		return
-	}
-	if !ok {
-		log.Printf("[account-action] pending candidate %d saved, but auth file %q authIndex=%q is missing/mismatched; skip auto-disable", item.ID, candidate.FileName, candidate.AuthIndex)
-		return
-	}
-	if authFileDisabled(current) {
-		log.Printf("[account-action] pending candidate %d saved; auth file %q already disabled", item.ID, candidate.FileName)
-		return
-	}
-	if err := quotaWorker.patchAuthFile(ctx, candidate.BaseURL, candidate.ManagementKey, candidate.FileName, true); err != nil {
-		log.Printf("[account-action] pending candidate %d saved, but failed to disable auth file %q: %v", item.ID, candidate.FileName, err)
-		return
-	}
-	log.Printf("[account-action] disabled auth file %q and saved pending %s candidate %d", candidate.FileName, candidate.ActionType, item.ID)
+	log.Printf("[account-action] saved pending %s candidate %d for auth file %q", candidate.ActionType, item.ID, candidate.FileName)
 }
 
-func accountActionCandidateFromEvent(event usage.Event, baseURL string, managementKey string, now time.Time) (accountActionCandidate, bool) {
+func accountActionCandidateFromEvent(event usage.Event, now time.Time) (accountActionCandidate, bool) {
 	actionType, reason, ok := classifyAccountActionEvent(event)
 	if !ok {
 		return accountActionCandidate{}, false
@@ -153,8 +120,6 @@ func accountActionCandidateFromEvent(event usage.Event, baseURL string, manageme
 		seenAtMS = now.UnixMilli()
 	}
 	return accountActionCandidate{
-		BaseURL:        baseURL,
-		ManagementKey:  managementKey,
 		FileName:       fileName,
 		AuthIndex:      strings.TrimSpace(event.AuthIndex),
 		DisplayAccount: firstNonEmpty(event.AccountSnapshot, event.AuthLabelSnapshot, event.Source, fileName),
@@ -170,13 +135,23 @@ func accountActionCandidateFromEvent(event usage.Event, baseURL string, manageme
 }
 
 func classifyAccountActionEvent(event usage.Event) (string, string, bool) {
-	if !event.Failed || (event.FailStatusCode != http.StatusUnauthorized && event.FailStatusCode != http.StatusForbidden) {
+	if !event.Failed {
 		return "", "", false
 	}
 	code, typ := accountActionErrorCodeAndType(event)
 	code = strings.ToLower(strings.TrimSpace(code))
 	typ = strings.ToLower(strings.TrimSpace(typ))
 	text := strings.ToLower(strings.Join([]string{event.FailSummary, code, typ}, "\n"))
+
+	if event.FailStatusCode == http.StatusPaymentRequired {
+		if strings.Contains(text, "deactivated_workspace") {
+			return model.AccountActionTypeDelete, "Workspace is deactivated; review and delete the stale auth file if appropriate", true
+		}
+		return "", "", false
+	}
+	if event.FailStatusCode != http.StatusUnauthorized && event.FailStatusCode != http.StatusForbidden {
+		return "", "", false
+	}
 
 	if strings.Contains(text, "token_revoked") || strings.Contains(text, "invalidated_oauth_token") || strings.Contains(text, "invalidated oauth token") || strings.Contains(text, "oauth token revoked") {
 		return model.AccountActionTypeDelete, "OAuth token revoked / invalidated; review and delete the stale auth file if appropriate", true
