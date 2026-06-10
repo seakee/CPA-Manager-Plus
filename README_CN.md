@@ -438,6 +438,10 @@ go run ./cmd/cpa-manager-plus
 - **管理员密钥丢失**：已有 `settings.admin_credential_v1` 时，单独设置 `CPA_MANAGER_ADMIN_KEY` 不会覆盖旧凭证。请先停止 Manager Server、备份 `/data`，再按 [重置 Manager Server 管理员密钥](docs/reset-admin-key.zh-CN.md) 处理。
 - **完整 FAQ**：查看 [CPA Manager Plus 常见问题与解决方案](https://github.com/seakee/CPA-Manager-Plus/wiki/CPA%E2%80%90Manager-%E5%B8%B8%E8%A7%81%E9%97%AE%E9%A2%98%E4%B8%8E%E8%A7%A3%E5%86%B3%E6%96%B9%E6%A1%88) 或 [English FAQ and Troubleshooting](https://github.com/seakee/CPA-Manager-Plus/wiki/CPA-Manager-Plus-FAQ-and-Troubleshooting)。
 
+## 社区与反馈
+
+- Telegram 交流群: https://t.me/cpa_mp
+
 ## 参考
 
 - CLIProxyAPI: https://github.com/router-for-me/CLIProxyAPI
