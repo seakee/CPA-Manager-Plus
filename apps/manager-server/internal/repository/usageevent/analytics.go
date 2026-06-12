@@ -106,6 +106,8 @@ type HeatmapPoint struct {
 	Model               string
 	BillingModel        string
 	ServiceTier         string
+	APIKeyHash          string
+	Provider            string
 	Calls               int64
 	SuccessCalls        int64
 	FailureCalls        int64
@@ -751,6 +753,8 @@ func (r *repository) HeatmapWithFilter(ctx context.Context, filter AnalyticsFilt
 	model,
 	coalesce(nullif(resolved_model, ''), model) as billing_model,
 	coalesce(service_tier, '') as service_tier,
+	coalesce(api_key_hash, ''),
+	coalesce(nullif(auth_provider_snapshot, ''), provider, ''),
 	failed,
 	input_tokens,
 	output_tokens,
@@ -774,6 +778,8 @@ order by timestamp_ms, model`, args...)
 		model        string
 		billingModel string
 		serviceTier  string
+		apiKeyHash   string
+		provider     string
 	}
 	grouped := map[key]*HeatmapPoint{}
 	order := make([]key, 0)
@@ -782,6 +788,8 @@ order by timestamp_ms, model`, args...)
 		var model string
 		var billingModel string
 		var serviceTier string
+		var apiKeyHash string
+		var provider string
 		var failed int
 		var inputTokens int64
 		var outputTokens int64
@@ -794,6 +802,8 @@ order by timestamp_ms, model`, args...)
 			&model,
 			&billingModel,
 			&serviceTier,
+			&apiKeyHash,
+			&provider,
 			&failed,
 			&inputTokens,
 			&outputTokens,
@@ -811,6 +821,8 @@ order by timestamp_ms, model`, args...)
 			model:        model,
 			billingModel: billingModel,
 			serviceTier:  serviceTier,
+			apiKeyHash:   apiKeyHash,
+			provider:     provider,
 		}
 		point := grouped[mapKey]
 		if point == nil {
@@ -820,6 +832,8 @@ order by timestamp_ms, model`, args...)
 				Model:        model,
 				BillingModel: billingModel,
 				ServiceTier:  serviceTier,
+				APIKeyHash:   apiKeyHash,
+				Provider:     provider,
 			}
 			grouped[mapKey] = point
 			order = append(order, mapKey)

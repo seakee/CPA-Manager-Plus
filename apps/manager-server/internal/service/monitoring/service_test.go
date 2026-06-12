@@ -103,6 +103,66 @@ func TestAnalyticsBuildsIncludedSections(t *testing.T) {
 	}
 }
 
+func TestAnalyticsHeatmapIncludesTopContributors(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	ctx := context.Background()
+	fromMS := time.Date(2026, 6, 8, 9, 0, 0, 0, time.UTC).UnixMilli()
+	toMS := fromMS + 60*60*1000
+
+	if err := db.SaveModelPrices(ctx, map[string]store.ModelPrice{
+		"gpt-a": {Prompt: 1},
+		"gpt-b": {Prompt: 2},
+	}); err != nil {
+		t.Fatalf("save model prices: %v", err)
+	}
+
+	first := monitoringEvent("heatmap-contrib-a1", fromMS+1_000, "gpt-a", "auth-1", "source-a", false, 1_000_000, 0, 0, 0, 1_000_000, nil)
+	first.AuthProviderSnapshot = "openai"
+	second := monitoringEvent("heatmap-contrib-a2", fromMS+2_000, "gpt-a", "auth-1", "source-a", true, 1_000_000, 0, 0, 0, 1_000_000, nil)
+	second.AuthProviderSnapshot = "openai"
+	third := monitoringEvent("heatmap-contrib-b1", fromMS+3_000, "gpt-b", "auth-2", "source-b", false, 1_000_000, 0, 0, 0, 1_000_000, nil)
+	third.Provider = "anthropic"
+	if _, err := db.InsertEvents(ctx, []usage.Event{first, second, third}); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	resp, err := New(db).Analytics(ctx, Request{
+		FromMS:  fromMS,
+		ToMS:    toMS,
+		Include: Include{Heatmap: true},
+	})
+	if err != nil {
+		t.Fatalf("analytics: %v", err)
+	}
+	if len(resp.Heatmap) != 1 {
+		t.Fatalf("heatmap = %#v", resp.Heatmap)
+	}
+	point := resp.Heatmap[0]
+	if point.Calls != 3 || point.Success != 2 || point.Failure != 1 || point.Tokens != 3_000_000 {
+		t.Fatalf("heatmap totals = %#v", point)
+	}
+	if math.Abs(point.Cost-4) > 0.000001 {
+		t.Fatalf("heatmap cost = %v", point.Cost)
+	}
+	if len(point.ModelContributors) != 2 || point.ModelContributors[0].Key != "gpt-a" {
+		t.Fatalf("model contributors = %#v", point.ModelContributors)
+	}
+	topModel := point.ModelContributors[0]
+	if topModel.Calls != 2 || topModel.Success != 1 || topModel.Failure != 1 ||
+		math.Abs(topModel.FailureRate-0.5) > 0.000001 || math.Abs(topModel.Share-2.0/3.0) > 0.000001 ||
+		math.Abs(topModel.Cost-2) > 0.000001 {
+		t.Fatalf("top model contributor = %#v", topModel)
+	}
+	if len(point.APIKeyContributors) != 2 || point.APIKeyContributors[0].Key != "api-key-auth-1" ||
+		point.APIKeyContributors[0].Calls != 2 {
+		t.Fatalf("api key contributors = %#v", point.APIKeyContributors)
+	}
+	if len(point.ProviderContributors) != 2 || point.ProviderContributors[0].Key != "openai" ||
+		point.ProviderContributors[0].Calls != 2 {
+		t.Fatalf("provider contributors = %#v", point.ProviderContributors)
+	}
+}
+
 func TestAnalyticsSummaryComparisonReturnsPreviousPeriod(t *testing.T) {
 	db := newMonitoringTestStore(t)
 	ctx := context.Background()

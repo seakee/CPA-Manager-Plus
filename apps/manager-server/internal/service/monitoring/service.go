@@ -184,14 +184,29 @@ type HourlyPoint struct {
 }
 
 type HeatmapPoint struct {
-	Weekday     int     `json:"weekday"`
-	Hour        int     `json:"hour"`
+	Weekday              int                  `json:"weekday"`
+	Hour                 int                  `json:"hour"`
+	Calls                int64                `json:"calls"`
+	Success              int64                `json:"success"`
+	Failure              int64                `json:"failure"`
+	Tokens               int64                `json:"tokens"`
+	Cost                 float64              `json:"cost"`
+	FailureRate          float64              `json:"failure_rate"`
+	ModelContributors    []HeatmapContributor `json:"model_contributors,omitempty"`
+	APIKeyContributors   []HeatmapContributor `json:"api_key_contributors,omitempty"`
+	ProviderContributors []HeatmapContributor `json:"provider_contributors,omitempty"`
+}
+
+type HeatmapContributor struct {
+	Key         string  `json:"key"`
+	Label       string  `json:"label,omitempty"`
 	Calls       int64   `json:"calls"`
 	Success     int64   `json:"success"`
 	Failure     int64   `json:"failure"`
 	Tokens      int64   `json:"tokens"`
 	Cost        float64 `json:"cost"`
 	FailureRate float64 `json:"failure_rate"`
+	Share       float64 `json:"share"`
 }
 
 type AnomalyPoint struct {
@@ -906,40 +921,120 @@ func buildHourly(points []store.HourlyPoint) []HourlyPoint {
 	return result
 }
 
+const heatmapContributorLimit = 5
+
+type heatmapAccumulator struct {
+	point     *HeatmapPoint
+	models    map[string]*HeatmapContributor
+	apiKeys   map[string]*HeatmapContributor
+	providers map[string]*HeatmapContributor
+}
+
+func newHeatmapAccumulator(point store.HeatmapPoint) *heatmapAccumulator {
+	return &heatmapAccumulator{
+		point: &HeatmapPoint{
+			Weekday: point.Weekday,
+			Hour:    point.Hour,
+		},
+		models:    map[string]*HeatmapContributor{},
+		apiKeys:   map[string]*HeatmapContributor{},
+		providers: map[string]*HeatmapContributor{},
+	}
+}
+
 func buildHeatmap(points []store.HeatmapPoint, prices map[string]store.ModelPrice) []HeatmapPoint {
 	type key struct {
 		weekday int
 		hour    int
 	}
-	grouped := map[key]*HeatmapPoint{}
+	grouped := map[key]*heatmapAccumulator{}
 	order := make([]key, 0)
 	for _, point := range points {
 		mapKey := key{weekday: point.Weekday, hour: point.Hour}
 		entry := grouped[mapKey]
 		if entry == nil {
-			entry = &HeatmapPoint{
-				Weekday: point.Weekday,
-				Hour:    point.Hour,
-			}
+			entry = newHeatmapAccumulator(point)
 			grouped[mapKey] = entry
 			order = append(order, mapKey)
 		}
-		entry.Calls += point.Calls
-		entry.Success += point.SuccessCalls
-		entry.Failure += point.FailureCalls
-		entry.Tokens += point.TotalTokens
-		entry.Cost += costForHeatmapPoint(point, prices)
+		cost := costForHeatmapPoint(point, prices)
+		entry.point.Calls += point.Calls
+		entry.point.Success += point.SuccessCalls
+		entry.point.Failure += point.FailureCalls
+		entry.point.Tokens += point.TotalTokens
+		entry.point.Cost += cost
+		addHeatmapContributor(entry.models, heatmapContributorKey(point.Model), point.Model, point, cost)
+		addHeatmapContributor(entry.apiKeys, strings.TrimSpace(point.APIKeyHash), point.APIKeyHash, point, cost)
+		addHeatmapContributor(entry.providers, heatmapProviderKey(point.Provider), point.Provider, point, cost)
 	}
 	result := make([]HeatmapPoint, 0, len(order))
 	for _, mapKey := range order {
 		entry := grouped[mapKey]
-		entry.FailureRate = ratio(entry.Failure, entry.Calls)
-		result = append(result, *entry)
+		entry.point.FailureRate = ratio(entry.point.Failure, entry.point.Calls)
+		entry.point.ModelContributors = topHeatmapContributors(entry.models, entry.point.Calls)
+		entry.point.APIKeyContributors = topHeatmapContributors(entry.apiKeys, entry.point.Calls)
+		entry.point.ProviderContributors = topHeatmapContributors(entry.providers, entry.point.Calls)
+		result = append(result, *entry.point)
 	}
 	sort.SliceStable(result, func(i, j int) bool {
 		return result[i].Weekday < result[j].Weekday ||
 			(result[i].Weekday == result[j].Weekday && result[i].Hour < result[j].Hour)
 	})
+	return result
+}
+
+func addHeatmapContributor(group map[string]*HeatmapContributor, key string, label string, point store.HeatmapPoint, cost float64) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return
+	}
+	label = strings.TrimSpace(label)
+	if label == "" {
+		label = key
+	}
+	entry := group[key]
+	if entry == nil {
+		entry = &HeatmapContributor{Key: key, Label: label}
+		group[key] = entry
+	}
+	entry.Calls += point.Calls
+	entry.Success += point.SuccessCalls
+	entry.Failure += point.FailureCalls
+	entry.Tokens += point.TotalTokens
+	entry.Cost += cost
+}
+
+func heatmapContributorKey(value string) string {
+	normalized := strings.TrimSpace(value)
+	if normalized == "" {
+		return "Unknown"
+	}
+	return normalized
+}
+
+func heatmapProviderKey(value string) string {
+	return heatmapContributorKey(value)
+}
+
+func topHeatmapContributors(group map[string]*HeatmapContributor, totalCalls int64) []HeatmapContributor {
+	if len(group) == 0 {
+		return nil
+	}
+	result := make([]HeatmapContributor, 0, len(group))
+	for _, contributor := range group {
+		next := *contributor
+		next.FailureRate = ratio(next.Failure, next.Calls)
+		next.Share = ratio(next.Calls, totalCalls)
+		result = append(result, next)
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		return result[i].Calls > result[j].Calls ||
+			(result[i].Calls == result[j].Calls && result[i].Cost > result[j].Cost) ||
+			(result[i].Calls == result[j].Calls && result[i].Cost == result[j].Cost && result[i].Key < result[j].Key)
+	})
+	if len(result) > heatmapContributorLimit {
+		result = result[:heatmapContributorLimit]
+	}
 	return result
 }
 
