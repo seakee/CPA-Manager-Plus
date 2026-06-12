@@ -10,6 +10,7 @@ export type {
   ProviderHealthCheckStatus,
   ProviderHealthCheckSummary,
 } from './ProviderHealthCheckDrawer';
+export * from './ProviderEditDrawer';
 export * from './hooks/useProviderRecentRequests';
 export * from './types';
 export * from './utils';

@@ -300,6 +300,7 @@ The variables below are Manager Server runtime settings. Frontend build-time set
 | `USAGE_QUERY_LIMIT` | `50000` | Maximum recent events returned through compatible `/usage` |
 | `USAGE_CORS_ORIGINS` | `*` | Allowed browser origins for CPA panel mode |
 | `USAGE_RESP_TLS_SKIP_VERIFY` | `false` | Skip TLS verification for RESP connection |
+| `USAGE_QUOTA_COOLDOWN_ENABLED` | `false` | Opt-in Codex usage-limit cooldown worker; see [Codex usage-limit cooldown](#codex-usage-limit-cooldown) |
 | `PANEL_PATH` | empty | Serve a custom `management.html` instead of the embedded one |
 
 Startup configuration precedence is: environment variables > `config.json` > program defaults. Relative paths in the config file are resolved from the config file directory. The generated default config is:
@@ -312,6 +313,40 @@ Startup configuration precedence is: environment variables > `config.json` > pro
 ```
 
 If `CPA_MANAGER_ADMIN_KEY` is set, the service initializes the admin credential from that value and does not log a generated admin key. If `CPA_UPSTREAM_URL` and `CPA_MANAGEMENT_KEY` are set, collection starts automatically on boot and the connection is shown as environment-managed in the panel. Otherwise, use the full Docker setup flow; the result is saved to SQLite `settings.manager_config_v1`. The legacy `settings.setup` value is still written for compatibility and rollback.
+
+### Codex usage-limit cooldown
+
+The quota cooldown worker is disabled by default. To enable it, set:
+
+```bash
+USAGE_QUOTA_COOLDOWN_ENABLED=true
+```
+
+or add the equivalent config-file field:
+
+```json
+{
+  "quotaCooldownEnabled": true
+}
+```
+
+When enabled, Manager Server watches only newly inserted request-monitoring events and temporarily disables a CPA auth file only for the strict Codex short-window usage-limit case:
+
+- provider is `codex`;
+- HTTP status is `429`;
+- structured error type is `usage_limit_reached`;
+- the event includes an explicit `resets_at` or `resets_in_seconds` value;
+- the event includes an auth-file snapshot.
+
+Temporary disables are persisted in `quota_cooldowns` with CPAMP ownership metadata such as `owner=cpamp_usage_429`, auth file/index, account snapshot, event hash, `recover_at_ms`, and the pre-disable state. Recovery is driven from SQLite, so due cooldowns can be recovered after Manager Server restarts as long as the collector runtime CPA URL and Management Key are available from the current environment, saved Manager Server configuration, or setup record.
+
+Safety boundaries:
+
+- only CPAMP-owned cooldowns with `pre_disabled_state=false` are auto-recovered;
+- auth files that were already disabled before CPAMP acted are not re-enabled automatically;
+- recovery re-reads current CPA auth files and verifies the auth file and auth index before enabling;
+- the cooldown state is a CPAMP-derived temporary state, not a third CPA auth-file state;
+- the worker does not expose raw request `fail_body` / `raw_json` through management APIs.
 
 ### CPA vs CPA Manager Plus Configuration Boundary
 

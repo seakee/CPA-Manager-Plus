@@ -75,7 +75,8 @@ func TestLoadReadsConfigAndResolvesRelativePaths(t *testing.T) {
   "corsOrigins": ["http://panel.local"],
   "tlsSkipVerify": true,
   "quotaCooldownEnabled": true,
-  "accountActionsEnabled": true
+  "accountActionsEnabled": true,
+  "accountActionsAutoDisable": true
 }`), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -117,6 +118,9 @@ func TestLoadReadsConfigAndResolvesRelativePaths(t *testing.T) {
 	}
 	if !cfg.AccountActionsEnabled {
 		t.Fatal("AccountActionsEnabled = false")
+	}
+	if !cfg.AccountActionsAutoDisable {
+		t.Fatal("AccountActionsAutoDisable = false")
 	}
 }
 
@@ -197,6 +201,7 @@ func clearConfigEnv(t *testing.T) {
 		"USAGE_RESP_TLS_SKIP_VERIFY",
 		"USAGE_QUOTA_COOLDOWN_ENABLED",
 		"USAGE_ACCOUNT_ACTIONS_ENABLED",
+		"USAGE_ACCOUNT_ACTIONS_AUTO_DISABLE",
 		"PANEL_PATH",
 	} {
 		t.Setenv(key, "")

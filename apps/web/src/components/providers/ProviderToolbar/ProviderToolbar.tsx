@@ -562,13 +562,25 @@ export function ProviderToolbar({
           <IconShield size={14} />
           {t('ai_providers.health_check_button')}
         </Button>
-        <DropdownMenu
-          ariaLabel={t('ai_providers.add_config_menu_aria')}
-          triggerLabel={t('ai_providers.add_config_button')}
-          triggerClassName={styles.addButton}
-          disabled={disabled}
-          items={addMenuItems}
-        />
+        {kind === 'all' ? (
+          <DropdownMenu
+            ariaLabel={t('ai_providers.add_config_menu_aria')}
+            triggerLabel={t('ai_providers.add_config_button')}
+            triggerClassName={styles.addButton}
+            disabled={disabled}
+            items={addMenuItems}
+          />
+        ) : (
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => onAdd(kind)}
+            disabled={disabled}
+            className={styles.addButton}
+          >
+            {t('ai_providers.add_kind_button', { name: PROVIDER_KIND_LABELS[kind] })}
+          </Button>
+        )}
       </div>
     </div>
   );

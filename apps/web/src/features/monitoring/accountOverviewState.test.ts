@@ -339,7 +339,7 @@ describe('accountOverviewState', () => {
     expect(result.enabledState).toBe('disabled');
   });
 
-  it('builds account auth state from all auth files that belong to the same account', () => {
+  it('only includes auth files matching the row auth indices', () => {
     const authFilesByIndex = new Map<string, AuthFileItem>([
       [
         '1',
@@ -378,7 +378,7 @@ describe('accountOverviewState', () => {
         id: 'account@example.com',
         account: 'account@example.com',
         authLabels: ['Alpha'],
-        authIndices: ['1'],
+        authIndices: ['1', '2'],
       }),
     ];
 
@@ -389,7 +389,7 @@ describe('accountOverviewState', () => {
     expect(accountState?.enabledState).toBe('mixed');
   });
 
-  it('keeps row auth indices when account identity adds related auth files', () => {
+  it('does not include auth files via identity matching when row auth indices differ', () => {
     const authFilesByIndex = new Map<string, AuthFileItem>([
       [
         'auth-file-1',
@@ -415,8 +415,8 @@ describe('accountOverviewState', () => {
     const result = buildMonitoringAccountAuthStateMap(rows, authFilesByIndex);
     const accountState = result.get('account@example.com');
 
-    expect(accountState?.files.map((file) => file.name)).toEqual(['alpha.json']);
-    expect(accountState?.enabledState).toBe('enabled');
+    expect(accountState?.files).toHaveLength(0);
+    expect(accountState?.enabledState).toBe('unavailable');
   });
 
   it('does not merge auth files from a different account just because labels match', () => {

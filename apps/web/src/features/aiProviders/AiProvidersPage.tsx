@@ -1,15 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
 import {
   AmpcodeSection,
+  AmpcodeEditDrawer,
   buildProviderRows,
+  ClaudeEditDrawer,
+  CodexEditDrawer,
   filterAndSortProviderRows,
+  GeminiEditDrawer,
+  OpenAIEditDrawer,
   PROVIDER_KIND_LABELS,
   ProviderDetailDrawer,
   ProviderHealthCheckDrawer,
   ProviderTable,
   ProviderToolbar,
+  VertexEditDrawer,
   useProviderRecentRequests,
   type ProviderHealthCheckApplyAction,
   type ProviderKind,
@@ -44,7 +49,6 @@ const DEFAULT_CLOAK_CONFIG: CloakConfig = {
 
 export function AiProvidersPage() {
   const { t } = useTranslation();
-  const navigate = useNavigate();
   const { showNotification, showConfirmation } = useNotificationStore();
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
@@ -85,6 +89,9 @@ export function AiProvidersPage() {
   const [sortDirection, setSortDirection] = useState<ProviderSortDirection>('desc');
   const [detailRowKey, setDetailRowKey] = useState<string | null>(null);
   const [healthCheckOpen, setHealthCheckOpen] = useState(false);
+  const [editDrawerKind, setEditDrawerKind] = useState<ProviderKind | null>(null);
+  const [editDrawerIndex, setEditDrawerIndex] = useState<number | null>(null);
+  const [ampcodeEditOpen, setAmpcodeEditOpen] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(PROVIDER_TABLE_DEFAULT_PAGE_SIZE);
 
@@ -185,12 +192,20 @@ export function AiProvidersPage() {
 
   useHeaderRefresh(handleRecentRequestsRefresh, isCurrentLayer);
 
-  const openEditor = useCallback(
-    (path: string) => {
-      navigate(path, { state: { fromAiProviders: true } });
-    },
-    [navigate]
-  );
+  const openEditorDrawer = useCallback((kind: ProviderKind, editIndex: number | null) => {
+    setDetailRowKey(null);
+    setEditDrawerKind(kind);
+    setEditDrawerIndex(editIndex);
+  }, []);
+
+  const closeEditorDrawer = useCallback(() => {
+    setEditDrawerKind(null);
+    setEditDrawerIndex(null);
+  }, []);
+
+  const handleDrawerSaved = useCallback(() => {
+    void loadConfigs();
+  }, [loadConfigs]);
 
   // 统一行集合与派生数据
   const rows = useMemo(
@@ -815,7 +830,7 @@ export function AiProvidersPage() {
 
   const handleRowEdit = (row: ProviderRow) => {
     setDetailRowKey(null);
-    openEditor(`/ai-providers/${row.kind}/${row.originalIndex}`);
+    openEditorDrawer(row.kind, row.originalIndex);
   };
 
   const handleRowDelete = (row: ProviderRow) => {
@@ -832,7 +847,7 @@ export function AiProvidersPage() {
   };
 
   const handleAdd = (kind: ProviderKind) => {
-    openEditor(`/ai-providers/${kind}/new`);
+    openEditorDrawer(kind, null);
   };
 
   const handlePageSizeChange = (value: string) => {
@@ -970,7 +985,7 @@ export function AiProvidersPage() {
           loading={loading}
           disableControls={disableControls}
           isSwitching={isSwitching}
-          onEdit={() => openEditor('/ai-providers/ampcode')}
+          onEdit={() => setAmpcodeEditOpen(true)}
         />
       </div>
 
@@ -995,6 +1010,47 @@ export function AiProvidersPage() {
         onClose={() => setHealthCheckOpen(false)}
         onApplyResultActions={applyProviderEnabledActions}
         onSetProviderEnabled={setHealthCheckProviderEnabled}
+      />
+      <GeminiEditDrawer
+        open={editDrawerKind === 'gemini'}
+        editIndex={editDrawerIndex}
+        disabled={actionsDisabled}
+        onClose={closeEditorDrawer}
+        onSaved={handleDrawerSaved}
+      />
+      <CodexEditDrawer
+        open={editDrawerKind === 'codex'}
+        editIndex={editDrawerIndex}
+        disabled={actionsDisabled}
+        onClose={closeEditorDrawer}
+        onSaved={handleDrawerSaved}
+      />
+      <VertexEditDrawer
+        open={editDrawerKind === 'vertex'}
+        editIndex={editDrawerIndex}
+        disabled={actionsDisabled}
+        onClose={closeEditorDrawer}
+        onSaved={handleDrawerSaved}
+      />
+      <ClaudeEditDrawer
+        open={editDrawerKind === 'claude'}
+        editIndex={editDrawerIndex}
+        disabled={actionsDisabled}
+        onClose={closeEditorDrawer}
+        onSaved={handleDrawerSaved}
+      />
+      <OpenAIEditDrawer
+        open={editDrawerKind === 'openai'}
+        editIndex={editDrawerIndex}
+        disabled={actionsDisabled}
+        onClose={closeEditorDrawer}
+        onSaved={handleDrawerSaved}
+      />
+      <AmpcodeEditDrawer
+        open={ampcodeEditOpen}
+        disabled={actionsDisabled}
+        onClose={() => setAmpcodeEditOpen(false)}
+        onSaved={handleDrawerSaved}
       />
     </div>
   );

@@ -89,10 +89,10 @@ func runServer() {
 		log.Printf("quota cooldown worker disabled (set USAGE_QUOTA_COOLDOWN_ENABLED=1 to enable)")
 	}
 	if cfg.AccountActionsEnabled {
-		accountActionWorker := worker.NewAccountActionCandidateWorker(db)
+		accountActionWorker := worker.NewAccountActionCandidateWorker(db, cfg.AccountActionsAutoDisable)
 		usageHandlers = append(usageHandlers, accountActionWorker)
 		accountActionWorker.Start(ctx)
-		log.Printf("account action worker enabled (queue-only)")
+		log.Printf("account action worker enabled (auto-disable=%t)", cfg.AccountActionsAutoDisable)
 	} else {
 		log.Printf("account action worker disabled (set USAGE_ACCOUNT_ACTIONS_ENABLED=1 to enable)")
 	}
