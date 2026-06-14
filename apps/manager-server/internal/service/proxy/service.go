@@ -16,6 +16,8 @@ type Service struct {
 	managerConfigService *managerconfig.Service
 }
 
+const cpaPluginResourcePrefix = "/v0/resource/plugins"
+
 func New(managerConfigService *managerconfig.Service) *Service {
 	return &Service{managerConfigService: managerConfigService}
 }
@@ -112,6 +114,11 @@ func IsCPAProxyPath(path string) bool {
 	return false
 }
 
+func IsCPAPluginResourcePath(path string) bool {
+	cleaned := strings.TrimRight(path, "/")
+	return cleaned == cpaPluginResourcePrefix || strings.HasPrefix(cleaned, cpaPluginResourcePrefix+"/")
+}
+
 var exactCPAProxyPaths = map[string]struct{}{
 	"/ampcode":                             {},
 	"/api-call":                            {},
@@ -137,6 +144,8 @@ var exactCPAProxyPaths = map[string]struct{}{
 	"/oauth-excluded-models":               {},
 	"/oauth-model-alias":                   {},
 	"/openai-compatibility":                {},
+	"/plugin-store":                        {},
+	"/plugins":                             {},
 	"/proxy-url":                           {},
 	"/quota-exceeded/switch-preview-model": {},
 	"/quota-exceeded/switch-project":       {},
@@ -155,6 +164,9 @@ var cpaProxyPathPrefixes = []string{
 	"/auth-files",
 	"/oauth-excluded-models/",
 	"/oauth-model-alias/",
+	"/plugin-store",
+	"/plugins",
+	cpaPluginResourcePrefix,
 	"/request-error-logs",
 	"/request-log-by-id",
 }

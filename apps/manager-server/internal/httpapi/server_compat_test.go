@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -525,6 +526,116 @@ func TestServerCompatProxyRoutes(t *testing.T) {
 	if modelsProxyReq.Authorization != "Bearer upstream-key" || modelsProxyReq.Query != "limit=20" {
 		t.Fatalf("model list proxy request = %#v", modelsProxyReq)
 	}
+}
+
+func TestServerCompatPluginProxyRoutes(t *testing.T) {
+	type observedRequest struct {
+		method        string
+		path          string
+		query         string
+		authorization string
+		body          string
+	}
+
+	observed := make(chan observedRequest, 4)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		observed <- observedRequest{
+			method:        r.Method,
+			path:          r.URL.Path,
+			query:         r.URL.RawQuery,
+			authorization: r.Header.Get("Authorization"),
+			body:          string(body),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	setup := &store.Setup{
+		CPAUpstreamURL: upstream.URL,
+		ManagementKey:  "management-key",
+		Queue:          "usage",
+		PopSide:        "right",
+	}
+	handler, _ := newCompatHandler(t, testutil.NewConfig(t), setup)
+
+	assertObserved := func(path string, want observedRequest) {
+		t.Helper()
+		select {
+		case got := <-observed:
+			if got != want {
+				t.Fatalf("%s proxy request = %#v, want %#v", path, got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("CPA upstream did not receive %s", path)
+		}
+	}
+
+	listRR := testutil.Request(t, handler, http.MethodGet, "/plugins?scope=all", "", testutil.AdminKey)
+	testutil.RequireStatus(t, listRR, http.StatusOK)
+	assertObserved("/plugins", observedRequest{
+		method:        http.MethodGet,
+		path:          "/plugins",
+		query:         "scope=all",
+		authorization: "Bearer management-key",
+	})
+
+	configRR := testutil.Request(
+		t,
+		handler,
+		http.MethodPut,
+		"/plugins/demo/config",
+		`{"enabled":true}`,
+		testutil.AdminKey,
+	)
+	testutil.RequireStatus(t, configRR, http.StatusOK)
+	assertObserved("/plugins/demo/config", observedRequest{
+		method:        http.MethodPut,
+		path:          "/plugins/demo/config",
+		authorization: "Bearer management-key",
+		body:          `{"enabled":true}`,
+	})
+
+	installRR := testutil.Request(
+		t,
+		handler,
+		http.MethodPost,
+		"/plugin-store/demo/install",
+		"",
+		testutil.AdminKey,
+	)
+	testutil.RequireStatus(t, installRR, http.StatusOK)
+	assertObserved("/plugin-store/demo/install", observedRequest{
+		method:        http.MethodPost,
+		path:          "/plugin-store/demo/install",
+		authorization: "Bearer management-key",
+	})
+
+	resourcePostRR := testutil.Request(
+		t,
+		handler,
+		http.MethodPost,
+		"/v0/resource/plugins/codex-invite/invite",
+		"",
+		"",
+	)
+	testutil.RequireStatus(t, resourcePostRR, http.StatusMethodNotAllowed)
+
+	resourceRR := testutil.Request(
+		t,
+		handler,
+		http.MethodGet,
+		"/v0/resource/plugins/codex-invite/invite",
+		"",
+		"",
+	)
+	testutil.RequireStatus(t, resourceRR, http.StatusOK)
+	assertObserved("/v0/resource/plugins/codex-invite/invite", observedRequest{
+		method:        http.MethodGet,
+		path:          "/v0/resource/plugins/codex-invite/invite",
+		authorization: "Bearer management-key",
+	})
 }
 
 func compatEvent(hash string, offset int64) usage.Event {

@@ -103,6 +103,10 @@ func rootHandler(
 			middleware.WithCORS(appCtx.Config, proxyHandler.ModelList)(w, r)
 			return
 		}
+		if proxysvc.IsCPAPluginResourcePath(r.URL.Path) {
+			middleware.WithCORS(appCtx.Config, proxyHandler.CPAResource)(w, r)
+			return
+		}
 		if proxysvc.IsCPAProxyPath(r.URL.Path) {
 			middleware.WithCORS(appCtx.Config, proxyHandler.CPA)(w, r)
 			return
