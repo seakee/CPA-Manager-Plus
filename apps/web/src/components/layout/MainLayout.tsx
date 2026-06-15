@@ -20,6 +20,8 @@ import {
   IconSidebarLogs,
   IconSidebarMonitor,
   IconSidebarOauth,
+  IconSidebarPlugins,
+  IconSidebarPluginStore,
   IconSidebarProviders,
   IconSidebarQuota,
   IconSidebarSystem,
@@ -50,6 +52,8 @@ const sidebarIcons: Record<string, ReactNode> = {
   codexInspection: <IconSidebarInspection size={SIDEBAR_ICON_SIZE} />,
   monitoring: <IconSidebarMonitor size={SIDEBAR_ICON_SIZE} />,
   config: <IconSidebarConfig size={SIDEBAR_ICON_SIZE} />,
+  plugins: <IconSidebarPlugins size={SIDEBAR_ICON_SIZE} />,
+  pluginStore: <IconSidebarPluginStore size={SIDEBAR_ICON_SIZE} />,
   logs: <IconSidebarLogs size={SIDEBAR_ICON_SIZE} />,
   system: <IconSidebarSystem size={SIDEBAR_ICON_SIZE} />,
 };
@@ -400,6 +404,23 @@ export function MainLayout() {
         label: t('nav.ai_providers'),
         shortLabel: navShortLabel('nav.ai_providers', t('nav.ai_providers')),
         icon: sidebarIcons.aiProviders,
+      },
+    ],
+    [
+      {
+        path: '/plugins',
+        label: t('nav.plugins', { defaultValue: 'Plugin Management' }),
+        shortLabel: navShortLabel('nav.plugins', t('nav.plugins', { defaultValue: 'Plugin Management' })),
+        icon: sidebarIcons.plugins,
+      },
+      {
+        path: '/plugins-store',
+        label: t('nav.plugin_store', { defaultValue: 'Plugin Store' }),
+        shortLabel: navShortLabel(
+          'nav.plugin_store',
+          t('nav.plugin_store', { defaultValue: 'Plugin Store' })
+        ),
+        icon: sidebarIcons.pluginStore,
       },
     ],
     [
