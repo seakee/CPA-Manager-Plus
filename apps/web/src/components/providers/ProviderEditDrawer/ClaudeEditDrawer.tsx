@@ -6,8 +6,10 @@ import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
 import { HeaderInputList } from '@/components/ui/HeaderInputList';
 import { ModelInputList } from '@/components/ui/ModelInputList';
+import { Modal } from '@/components/ui/Modal';
+import { SelectionCheckbox } from '@/components/ui/SelectionCheckbox';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
-import { apiCallApi, getApiCallErrorMessage, providersApi } from '@/services/api';
+import { apiCallApi, getApiCallErrorMessage, modelsApi, providersApi } from '@/services/api';
 import { useConfigStore, useNotificationStore } from '@/stores';
 import type { ProviderKeyConfig } from '@/types';
 import { buildHeaderObject, headersToEntries, normalizeHeaderEntries } from '@/utils/headers';
@@ -25,6 +27,7 @@ import {
 } from '@/components/providers/utils';
 import { modelsToEntries } from '@/components/ui/modelInputListUtils';
 import type { ProviderFormState } from '@/components/providers';
+import type { ModelInfo } from '@/utils/models';
 import styles from '@/features/aiProviders/AiProvidersPage.module.scss';
 
 interface ClaudeEditDrawerProps {
@@ -150,6 +153,12 @@ export function ClaudeEditDrawer({
   const [testModel, setTestModel] = useState('');
   const [testStatus, setTestStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [testMessage, setTestMessage] = useState('');
+  const [modelDiscoveryOpen, setModelDiscoveryOpen] = useState(false);
+  const [modelDiscoveryFetching, setModelDiscoveryFetching] = useState(false);
+  const [modelDiscoveryError, setModelDiscoveryError] = useState('');
+  const [discoveredModels, setDiscoveredModels] = useState<ModelInfo[]>([]);
+  const [modelDiscoverySearch, setModelDiscoverySearch] = useState('');
+  const [modelDiscoverySelected, setModelDiscoverySelected] = useState<Set<string>>(new Set());
   const lastCloakConfigRef = useRef<typeof form.cloak>(null);
 
   const initialData = useMemo(() => {
@@ -255,6 +264,34 @@ export function ClaudeEditDrawer({
     }, []);
   }, [form.modelEntries]);
 
+  const modelDiscoveryEndpoint = useMemo(
+    () => modelsApi.buildClaudeModelsEndpoint(form.baseUrl ?? ''),
+    [form.baseUrl]
+  );
+
+  const discoveredModelsFiltered = useMemo(() => {
+    const filter = modelDiscoverySearch.trim().toLowerCase();
+    if (!filter) return discoveredModels;
+    return discoveredModels.filter((model) => {
+      const name = (model.name || '').toLowerCase();
+      const alias = (model.alias || '').toLowerCase();
+      const description = (model.description || '').toLowerCase();
+      return name.includes(filter) || alias.includes(filter) || description.includes(filter);
+    });
+  }, [discoveredModels, modelDiscoverySearch]);
+
+  const visibleModelNames = useMemo(
+    () => discoveredModelsFiltered.map((model) => model.name),
+    [discoveredModelsFiltered]
+  );
+
+  const allVisibleSelected = useMemo(
+    () =>
+      visibleModelNames.length > 0 &&
+      visibleModelNames.every((name) => modelDiscoverySelected.has(name)),
+    [modelDiscoverySelected, visibleModelNames]
+  );
+
   const cloakModeOptions = useMemo(
     () => [
       { value: 'auto', label: t('ai_providers.claude_cloak_mode_auto') },
@@ -271,6 +308,132 @@ export function ClaudeEditDrawer({
     if (mode === 'auto' || mode === 'always' || mode === 'never') return mode;
     return 'auto';
   }, [form.cloak?.mode]);
+
+  const mergeDiscoveredModels = useCallback(
+    (selectedModels: ModelInfo[]) => {
+      if (!selectedModels.length) return;
+
+      let addedCount = 0;
+      setForm((prev) => {
+        const mergedMap = new Map<string, { name: string; alias: string }>();
+        prev.modelEntries.forEach((entry) => {
+          const name = entry.name.trim();
+          if (!name) return;
+          mergedMap.set(name.toLowerCase(), { ...entry, name, alias: entry.alias?.trim() || '' });
+        });
+
+        selectedModels.forEach((model) => {
+          const name = String(model.name ?? '').trim();
+          if (!name) return;
+          const key = name.toLowerCase();
+          if (mergedMap.has(key)) return;
+          mergedMap.set(key, { name, alias: model.alias ?? '' });
+          addedCount += 1;
+        });
+
+        const mergedEntries = Array.from(mergedMap.values());
+        return {
+          ...prev,
+          modelEntries: mergedEntries.length ? mergedEntries : [{ name: '', alias: '' }],
+        };
+      });
+
+      if (addedCount > 0) {
+        showNotification(
+          t('ai_providers.claude_models_fetch_added', { count: addedCount }),
+          'success'
+        );
+      }
+    },
+    [showNotification, t]
+  );
+
+  const fetchClaudeModelDiscovery = useCallback(async () => {
+    setModelDiscoveryFetching(true);
+    setModelDiscoveryError('');
+    const headerObject = buildHeaderObject(form.headers);
+
+    try {
+      const list = await modelsApi.fetchClaudeModelsViaApiCall(
+        form.baseUrl ?? '',
+        form.apiKey.trim() || undefined,
+        headerObject,
+        normalizeAuthIndex(form.authIndex) ?? undefined
+      );
+      setDiscoveredModels(list);
+    } catch (err: unknown) {
+      setDiscoveredModels([]);
+      const message = getErrorMessage(err);
+      const hasCustomXApiKey = Object.keys(headerObject).some(
+        (key) => key.toLowerCase() === 'x-api-key'
+      );
+      const hasAuthorization = Object.keys(headerObject).some(
+        (key) => key.toLowerCase() === 'authorization'
+      );
+      const shouldAttachDiag =
+        message.toLowerCase().includes('x-api-key') || message.includes('401');
+      const diag = shouldAttachDiag
+        ? ` [diag: apiKeyField=${form.apiKey.trim() ? 'yes' : 'no'}, customXApiKey=${
+            hasCustomXApiKey ? 'yes' : 'no'
+          }, customAuthorization=${hasAuthorization ? 'yes' : 'no'}]`
+        : '';
+      setModelDiscoveryError(
+        `${t('ai_providers.claude_models_fetch_error')}: ${message}${diag}`
+      );
+    } finally {
+      setModelDiscoveryFetching(false);
+    }
+  }, [form.apiKey, form.authIndex, form.baseUrl, form.headers, t]);
+
+  useEffect(() => {
+    if (!modelDiscoveryOpen) return;
+    setDiscoveredModels([]);
+    setModelDiscoverySearch('');
+    setModelDiscoverySelected(new Set());
+    setModelDiscoveryError('');
+    void fetchClaudeModelDiscovery();
+  }, [modelDiscoveryOpen, fetchClaudeModelDiscovery]);
+
+  useEffect(() => {
+    const availableNames = new Set(discoveredModels.map((model) => model.name));
+    setModelDiscoverySelected((prev) => {
+      let changed = false;
+      const next = new Set<string>();
+      prev.forEach((name) => {
+        if (availableNames.has(name)) {
+          next.add(name);
+        } else {
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [discoveredModels]);
+
+  const toggleModelDiscoverySelection = useCallback((name: string) => {
+    setModelDiscoverySelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  }, []);
+
+  const handleSelectVisibleModels = useCallback(() => {
+    setModelDiscoverySelected((prev) => {
+      const next = new Set(prev);
+      visibleModelNames.forEach((name) => next.add(name));
+      return next;
+    });
+  }, [visibleModelNames]);
+
+  const handleClearModelDiscoverySelection = useCallback(() => {
+    setModelDiscoverySelected(new Set());
+  }, []);
+
+  const canOpenModelDiscovery = !disabled && !loading && !saving && !invalidIndex && !isTesting;
+  const canApplyModelDiscovery =
+    !disabled && !saving && !modelDiscoveryFetching && modelDiscoverySelected.size > 0;
 
   const runConnectivityTest = useCallback(async () => {
     if (isTesting) return;
@@ -536,6 +699,14 @@ export function ClaudeEditDrawer({
                   >
                     {t('ai_providers.claude_models_add_btn')}
                   </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setModelDiscoveryOpen(true)}
+                    disabled={!canOpenModelDiscovery}
+                  >
+                    {t('ai_providers.claude_models_fetch_button')}
+                  </Button>
                 </div>
               </div>
               <div className={styles.sectionHint}>{t('ai_providers.claude_models_hint')}</div>
@@ -624,6 +795,158 @@ export function ClaudeEditDrawer({
               />
               <div className="hint">{t('ai_providers.excluded_models_hint')}</div>
             </div>
+
+            <Modal
+              open={modelDiscoveryOpen}
+              title={t('ai_providers.claude_models_fetch_title')}
+              onClose={() => setModelDiscoveryOpen(false)}
+              width={720}
+              footer={
+                <>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setModelDiscoveryOpen(false)}
+                    disabled={modelDiscoveryFetching}
+                  >
+                    {t('common.cancel')}
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      const selectedModels = discoveredModels.filter((model) =>
+                        modelDiscoverySelected.has(model.name)
+                      );
+                      mergeDiscoveredModels(selectedModels);
+                      setModelDiscoveryOpen(false);
+                    }}
+                    disabled={!canApplyModelDiscovery}
+                  >
+                    {t('ai_providers.claude_models_fetch_apply')}
+                  </Button>
+                </>
+              }
+            >
+              <div className={styles.openaiModelsContent}>
+                <div className={styles.sectionHint}>
+                  {t('ai_providers.claude_models_fetch_hint')}
+                </div>
+                <div className={styles.openaiModelsEndpointSection}>
+                  <label className={styles.openaiModelsEndpointLabel}>
+                    {t('ai_providers.claude_models_fetch_url_label')}
+                  </label>
+                  <div className={styles.openaiModelsEndpointControls}>
+                    <input
+                      className={`input ${styles.openaiModelsEndpointInput}`}
+                      readOnly
+                      value={modelDiscoveryEndpoint}
+                    />
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => void fetchClaudeModelDiscovery()}
+                      loading={modelDiscoveryFetching}
+                      disabled={disabled || saving}
+                    >
+                      {t('ai_providers.claude_models_fetch_refresh')}
+                    </Button>
+                  </div>
+                </div>
+                <Input
+                  label={t('ai_providers.claude_models_search_label')}
+                  placeholder={t('ai_providers.claude_models_search_placeholder')}
+                  value={modelDiscoverySearch}
+                  onChange={(e) => setModelDiscoverySearch(e.target.value)}
+                  disabled={modelDiscoveryFetching}
+                />
+                {discoveredModels.length > 0 && (
+                  <div className={styles.modelDiscoveryToolbar}>
+                    <div className={styles.modelDiscoveryToolbarActions}>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={handleSelectVisibleModels}
+                        disabled={
+                          disabled ||
+                          saving ||
+                          modelDiscoveryFetching ||
+                          discoveredModelsFiltered.length === 0 ||
+                          allVisibleSelected
+                        }
+                      >
+                        {t('ai_providers.model_discovery_select_visible')}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={handleClearModelDiscoverySelection}
+                        disabled={
+                          disabled ||
+                          saving ||
+                          modelDiscoveryFetching ||
+                          modelDiscoverySelected.size === 0
+                        }
+                      >
+                        {t('ai_providers.model_discovery_clear_selection')}
+                      </Button>
+                    </div>
+                    <div className={styles.modelDiscoverySelectionSummary}>
+                      {t('ai_providers.model_discovery_selected_count', {
+                        count: modelDiscoverySelected.size,
+                      })}
+                    </div>
+                  </div>
+                )}
+                {modelDiscoveryError && <div className="error-box">{modelDiscoveryError}</div>}
+                {modelDiscoveryFetching ? (
+                  <div className={styles.sectionHint}>
+                    {t('ai_providers.claude_models_fetch_loading')}
+                  </div>
+                ) : discoveredModels.length === 0 ? (
+                  <div className={styles.sectionHint}>
+                    {t('ai_providers.claude_models_fetch_empty')}
+                  </div>
+                ) : discoveredModelsFiltered.length === 0 ? (
+                  <div className={styles.sectionHint}>
+                    {t('ai_providers.claude_models_search_empty')}
+                  </div>
+                ) : (
+                  <div className={styles.modelDiscoveryList}>
+                    {discoveredModelsFiltered.map((model) => {
+                      const checked = modelDiscoverySelected.has(model.name);
+                      return (
+                        <SelectionCheckbox
+                          key={model.name}
+                          checked={checked}
+                          onChange={() => toggleModelDiscoverySelection(model.name)}
+                          disabled={disabled || saving || modelDiscoveryFetching}
+                          ariaLabel={model.name}
+                          className={`${styles.modelDiscoveryRow} ${
+                            checked ? styles.modelDiscoveryRowSelected : ''
+                          }`}
+                          labelClassName={styles.modelDiscoverySelectionLabel}
+                          label={
+                            <div className={styles.modelDiscoveryMeta}>
+                              <div className={styles.modelDiscoveryName}>
+                                {model.name}
+                                {model.alias && (
+                                  <span className={styles.modelDiscoveryAlias}>{model.alias}</span>
+                                )}
+                              </div>
+                              {model.description && (
+                                <div className={styles.modelDiscoveryDesc}>
+                                  {model.description}
+                                </div>
+                              )}
+                            </div>
+                          }
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </Modal>
 
             <div className={styles.modelConfigSection}>
               <div className={styles.modelConfigHeader}>
