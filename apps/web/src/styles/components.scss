@@ -394,7 +394,12 @@ textarea {
 
   .message {
     flex: 1;
+    min-width: 0;
     font-weight: 500;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    white-space: normal;
+    line-height: 1.45;
   }
 
   .close-btn {
