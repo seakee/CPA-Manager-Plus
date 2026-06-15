@@ -22,6 +22,8 @@ import { AccountActionCandidatesPage } from '@/pages/AccountActionCandidatesPage
 import { ModelPricesPage } from '@/pages/ModelPricesPage';
 import { CodexInspectionPage } from '@/pages/CodexInspectionPage';
 import { ServerCodexInspectionPage } from '@/pages/ServerCodexInspectionPage';
+import { PluginsPage } from '@/pages/PluginsPage';
+import { PluginStorePage } from '@/pages/PluginStorePage';
 import { ConfigPage } from '@/pages/ConfigPage';
 import { LogsPage } from '@/pages/LogsPage';
 import { SystemPage } from '@/pages/SystemPage';
@@ -234,6 +236,8 @@ const mainRoutes = [
     ),
   },
   { path: '/config', element: <ConfigPage /> },
+  { path: '/plugins', element: <PluginsPage /> },
+  { path: '/plugins-store', element: <PluginStorePage /> },
   {
     path: '/logs',
     element: (

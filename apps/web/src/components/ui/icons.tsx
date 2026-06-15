@@ -661,3 +661,28 @@ export function IconSidebarSystem({ size = 20, ...props }: IconProps) {
     </svg>
   );
 }
+
+export function IconSidebarPlugins({ size = 20, ...props }: IconProps) {
+  // 插头（plug）风格：两支插脚 + 中段手柄，底端圆点表示接地。
+  return (
+    <svg {...sidebarSvgProps} width={size} height={size} {...props}>
+      <path d="M9 2v5" />
+      <path d="M15 2v5" />
+      <path d="M7.5 7h9v3a4.5 4.5 0 0 1-9 0V7Z" />
+      <path d="M12 14.5V17" />
+      <circle cx="12" cy="19.5" r="1.4" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+export function IconSidebarPluginStore({ size = 20, ...props }: IconProps) {
+  // 商店（storefront）风格：屋顶锯齿遮阳棚 + 柜体。
+  return (
+    <svg {...sidebarSvgProps} width={size} height={size} {...props}>
+      <path d="M3.5 9.5 5 4.5h14l1.5 5" />
+      <path d="M3.5 9.5h17a2.2 2.2 0 0 1-4 1.4 2.2 2.2 0 0 1-4 0 2.2 2.2 0 0 1-4 0 2.2 2.2 0 0 1-4-1.4Z" />
+      <path d="M5.5 10.9V19a1 1 0 0 0 1 1h11a1 1 0 0 0 1-1v-8.1" />
+      <path d="M9.5 20v-4a2.5 2.5 0 0 1 5 0v4" />
+    </svg>
+  );
+}
