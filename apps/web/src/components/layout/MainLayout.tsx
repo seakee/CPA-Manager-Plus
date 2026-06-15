@@ -34,6 +34,7 @@ import {
   useNotificationStore,
   useThemeStore,
 } from '@/stores';
+import { detectPluginSupport } from '@/services/api/plugins';
 import { triggerHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import { isFileLogsAvailable } from '@/features/logs/logFeatureAvailability';
@@ -187,6 +188,7 @@ export function MainLayout() {
   const setLanguage = useLanguageStore((state) => state.setLanguage);
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [pluginSupport, setPluginSupport] = useState<boolean | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try {
       return localStorage.getItem(STORAGE_KEY_SIDEBAR) === 'true';
@@ -354,6 +356,19 @@ export function MainLayout() {
     });
   }, [fetchConfig]);
 
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const supported = await detectPluginSupport();
+      if (!cancelled) {
+        setPluginSupport(supported);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const fileLogsAvailable = isFileLogsAvailable(config);
   const navShortLabel = (key: string, fallback: string) => {
     const shortKey = `${key}_short`;
@@ -406,23 +421,28 @@ export function MainLayout() {
         icon: sidebarIcons.aiProviders,
       },
     ],
-    [
-      {
-        path: '/plugins',
-        label: t('nav.plugins', { defaultValue: 'Plugin Management' }),
-        shortLabel: navShortLabel('nav.plugins', t('nav.plugins', { defaultValue: 'Plugin Management' })),
-        icon: sidebarIcons.plugins,
-      },
-      {
-        path: '/plugins-store',
-        label: t('nav.plugin_store', { defaultValue: 'Plugin Store' }),
-        shortLabel: navShortLabel(
-          'nav.plugin_store',
-          t('nav.plugin_store', { defaultValue: 'Plugin Store' })
-        ),
-        icon: sidebarIcons.pluginStore,
-      },
-    ],
+    pluginSupport
+      ? [
+          {
+            path: '/plugins',
+            label: t('nav.plugins', { defaultValue: 'Plugin Management' }),
+            shortLabel: navShortLabel(
+              'nav.plugins',
+              t('nav.plugins', { defaultValue: 'Plugin Management' })
+            ),
+            icon: sidebarIcons.plugins,
+          },
+          {
+            path: '/plugins-store',
+            label: t('nav.plugin_store', { defaultValue: 'Plugin Store' }),
+            shortLabel: navShortLabel(
+              'nav.plugin_store',
+              t('nav.plugin_store', { defaultValue: 'Plugin Store' })
+            ),
+            icon: sidebarIcons.pluginStore,
+          },
+        ]
+      : [],
     [
       {
         path: '/auth-files',
