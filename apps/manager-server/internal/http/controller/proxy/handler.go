@@ -1,11 +1,12 @@
 package proxy
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/app"
-	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/response"
+	proxysvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/proxy"
 )
 
 type Handler struct {
@@ -13,10 +14,24 @@ type Handler struct {
 }
 
 func (h *Handler) Management(w http.ResponseWriter, r *http.Request) {
-	if !middleware.AuthorizeAdmin(w, r, h.App.AdminAuthService) {
+	ok, err := h.App.AdminAuthService.VerifyHeader(r.Context(), r.Header.Get("Authorization"))
+	if err != nil {
+		response.Error(w, http.StatusInternalServerError, err)
 		return
 	}
-	h.App.ProxyService.ProxyManagement(w, r, response.Error)
+	if ok {
+		if proxysvc.IsCPAPluginManagementPath(r.URL.Path) {
+			h.App.ProxyService.ProxyPluginManagement(w, r, response.Error)
+			return
+		}
+		h.App.ProxyService.ProxyManagement(w, r, response.Error)
+		return
+	}
+	if !proxysvc.IsCPAPluginManagementPath(r.URL.Path) {
+		response.Error(w, http.StatusUnauthorized, errors.New("invalid admin key"))
+		return
+	}
+	h.App.ProxyService.ProxyPluginManagementWithCallerAuth(w, r, response.Error)
 }
 
 func (h *Handler) ModelList(w http.ResponseWriter, r *http.Request) {
@@ -24,9 +39,23 @@ func (h *Handler) ModelList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) CPAResource(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+	useSavedManagementKey := true
+	switch r.Method {
+	case http.MethodGet, http.MethodHead:
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		ok, err := h.App.AdminAuthService.VerifyHeader(r.Context(), r.Header.Get("Authorization"))
+		if err != nil {
+			response.Error(w, http.StatusInternalServerError, err)
+			return
+		}
+		useSavedManagementKey = ok
+	default:
 		response.MethodNotAllowed(w)
 		return
 	}
-	h.App.ProxyService.ProxyManagement(w, r, response.Error)
+	if useSavedManagementKey {
+		h.App.ProxyService.ProxyPluginResource(w, r, response.Error)
+		return
+	}
+	h.App.ProxyService.ProxyPluginResourceWithCallerAuth(w, r, response.Error)
 }
