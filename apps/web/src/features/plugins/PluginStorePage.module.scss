@@ -435,7 +435,8 @@
 .badge,
 .badgeOn,
 .badgeWarn,
-.badgeMuted {
+.badgeMuted,
+.badgeThirdParty {
   display: inline-flex;
   align-items: center;
   height: 22px;
@@ -464,6 +465,17 @@
 .badgeMuted {
   color: var(--text-tertiary);
   background: color-mix(in srgb, var(--surface-subtle) 70%, var(--bg-primary));
+}
+
+.badgeThirdParty {
+  gap: 4px;
+  color: var(--danger-color);
+  border-color: color-mix(in srgb, var(--danger-color) 36%, var(--border-color));
+  background: color-mix(in srgb, var(--danger-color) 8%, var(--bg-primary));
+
+  svg {
+    flex-shrink: 0;
+  }
 }
 
 .description {

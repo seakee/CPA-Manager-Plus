@@ -27,10 +27,13 @@ import { useAuthStore, useConfigStore, useNotificationStore } from '@/stores';
 import { getErrorMessage, isRecord } from '@/utils/helpers';
 import type { PluginStoreEntry, PluginStoreResponse } from '@/types';
 import {
+  isDefaultPluginStoreSource,
+  isOfficialPlugin,
   notifyPluginResourcesChanged,
   PLUGIN_RESOURCES_SETTLE_REFRESH_DELAY_MS,
   resolvePluginAssetURL,
 } from './pluginResources';
+import { PluginInstallGateModal } from './components/PluginInstallGateModal';
 import styles from './PluginStorePage.module.scss';
 
 type StoreStatusFilter = 'all' | 'installed' | 'notInstalled' | 'updates';
@@ -107,6 +110,9 @@ export function PluginStorePage({
   const [statusFilter, setStatusFilter] = useState<StoreStatusFilter>('all');
   const [installingID, setInstallingID] = useState('');
   const [restartRequiredIDs, setRestartRequiredIDs] = useState<string[]>([]);
+  const [gateEntry, setGateEntry] = useState<PluginStoreEntry | null>(null);
+  const [gateMode, setGateMode] = useState<'install' | 'reinstall'>('install');
+  const [gateIsUpdate, setGateIsUpdate] = useState(false);
 
   const connected = connectionStatus === 'connected';
 
@@ -260,13 +266,60 @@ export function PluginStorePage({
     [focusStatusFilter]
   );
 
+  const runInstall = useCallback(
+    async (entry: PluginStoreEntry, isUpdate: boolean) => {
+      const failedKey = isUpdate ? 'plugin_store.update_failed' : 'plugin_store.install_failed';
+      const entryKey = getStoreEntryKey(entry);
+      const sourceId = entry.sourceId || undefined;
+
+      setInstallingID(entryKey);
+      try {
+        const result = await pluginStoreApi.install(entry.id, { sourceId });
+        showNotification(
+          isUpdate ? t('plugin_store.update_success') : t('plugin_store.install_success'),
+          'success'
+        );
+        if (result.restartRequired) {
+          setRestartRequiredIDs((current) =>
+            current.includes(entryKey) ? current : [...current, entryKey]
+          );
+          showNotification(t('plugin_store.restart_required_notice'), 'warning');
+        }
+        clearConfigCache();
+        await loadStore();
+        notifyPluginResourcesChanged();
+        if (!result.restartRequired) {
+          notifyPluginResourcesChanged({
+            delayMs: PLUGIN_RESOURCES_SETTLE_REFRESH_DELAY_MS,
+          });
+        }
+      } catch (err: unknown) {
+        const sourceRequired = getErrorDetailCode(err) === 'plugin_store_source_required';
+        showNotification(
+          sourceRequired
+            ? t('plugin_store.source_required')
+            : `${t(failedKey)}: ${getErrorMessage(err, t(failedKey))}`,
+          sourceRequired ? 'warning' : 'error'
+        );
+        throw err;
+      } finally {
+        setInstallingID('');
+      }
+    },
+    [clearConfigCache, loadStore, showNotification, t]
+  );
+
   const handleInstall = (entry: PluginStoreEntry) => {
     const isUpdate = entry.installed && entry.updateAvailable;
+    if (!isOfficialPlugin(entry)) {
+      setGateEntry(entry);
+      setGateMode('install');
+      setGateIsUpdate(isUpdate);
+      return;
+    }
+
     const title = getStoreEntryTitle(entry);
     const target = entry.version ? `${title} v${entry.version}` : title;
-    const failedKey = isUpdate ? 'plugin_store.update_failed' : 'plugin_store.install_failed';
-    const entryKey = getStoreEntryKey(entry);
-    const sourceId = entry.sourceId || undefined;
     const confirmationMessage = isUpdate ? (
       t('plugin_store.update_confirm_message', { target })
     ) : (
@@ -295,41 +348,7 @@ export function PluginStorePage({
       message: confirmationMessage,
       confirmText: isUpdate ? t('plugin_store.update') : t('plugin_store.install'),
       variant: 'primary',
-      onConfirm: async () => {
-        setInstallingID(entryKey);
-        try {
-          const result = await pluginStoreApi.install(entry.id, { sourceId });
-          showNotification(
-            isUpdate ? t('plugin_store.update_success') : t('plugin_store.install_success'),
-            'success'
-          );
-          if (result.restartRequired) {
-            setRestartRequiredIDs((current) =>
-              current.includes(entryKey) ? current : [...current, entryKey]
-            );
-            showNotification(t('plugin_store.restart_required_notice'), 'warning');
-          }
-          clearConfigCache();
-          await loadStore();
-          notifyPluginResourcesChanged();
-          if (!result.restartRequired) {
-            notifyPluginResourcesChanged({
-              delayMs: PLUGIN_RESOURCES_SETTLE_REFRESH_DELAY_MS,
-            });
-          }
-        } catch (err: unknown) {
-          const sourceRequired = getErrorDetailCode(err) === 'plugin_store_source_required';
-          showNotification(
-            sourceRequired
-              ? t('plugin_store.source_required')
-              : `${t(failedKey)}: ${getErrorMessage(err, t(failedKey))}`,
-            sourceRequired ? 'warning' : 'error'
-          );
-          throw err;
-        } finally {
-          setInstallingID('');
-        }
-      },
+      onConfirm: () => runInstall(entry, isUpdate),
     });
   };
 
@@ -381,13 +400,73 @@ export function PluginStorePage({
     });
   };
 
+  const runReinstall = useCallback(
+    async (entry: PluginStoreEntry) => {
+      const entryKey = getStoreEntryKey(entry);
+      const sourceId = entry.sourceId || undefined;
+
+      setInstallingID(`${entryKey}:reinstall`);
+      try {
+        const deleteResult = await pluginsApi.deletePlugin(entry.id);
+        clearConfigCache();
+        if (deleteResult.restartRequired) {
+          setRestartRequiredIDs((current) =>
+            current.includes(entryKey) ? current : [...current, entryKey]
+          );
+          await loadStore();
+          notifyPluginResourcesChanged();
+          showNotification(t('plugin_store.reinstall_delete_restart_required'), 'warning');
+          return;
+        }
+
+        const installResult = await pluginStoreApi.install(entry.id, { sourceId });
+        if (installResult.restartRequired) {
+          setRestartRequiredIDs((current) =>
+            current.includes(entryKey) ? current : [...current, entryKey]
+          );
+          showNotification(t('plugin_store.restart_required_notice'), 'warning');
+        }
+        await loadStore();
+        notifyPluginResourcesChanged();
+        if (!installResult.restartRequired) {
+          notifyPluginResourcesChanged({
+            delayMs: PLUGIN_RESOURCES_SETTLE_REFRESH_DELAY_MS,
+          });
+        }
+        showNotification(t('plugin_store.reinstall_success'), 'success');
+      } catch (err: unknown) {
+        const sourceRequired = getErrorDetailCode(err) === 'plugin_store_source_required';
+        showNotification(
+          sourceRequired
+            ? t('plugin_store.source_required')
+            : hasRestartRequired(err)
+              ? t('plugin_store.reinstall_delete_restart_required')
+              : `${t('plugin_store.reinstall_failed')}: ${getErrorMessage(
+                  err,
+                  t('plugin_store.reinstall_failed')
+                )}`,
+          sourceRequired || hasRestartRequired(err) ? 'warning' : 'error'
+        );
+        throw err;
+      } finally {
+        setInstallingID('');
+      }
+    },
+    [clearConfigCache, loadStore, showNotification, t]
+  );
+
   const handleReinstall = (entry: PluginStoreEntry) => {
     if (installingID) return;
 
-    const entryKey = getStoreEntryKey(entry);
+    if (!isOfficialPlugin(entry)) {
+      setGateEntry(entry);
+      setGateMode('reinstall');
+      setGateIsUpdate(false);
+      return;
+    }
+
     const title = getStoreEntryTitle(entry);
     const target = entry.version ? `${title} v${entry.version}` : title;
-    const sourceId = entry.sourceId || undefined;
 
     showConfirmation({
       title: t('plugin_store.reinstall_confirm_title'),
@@ -395,62 +474,30 @@ export function PluginStorePage({
       confirmText: t('plugin_store.reinstall_plugin'),
       cancelText: t('common.cancel'),
       variant: 'danger',
-      onConfirm: async () => {
-        setInstallingID(`${entryKey}:reinstall`);
-        try {
-          const deleteResult = await pluginsApi.deletePlugin(entry.id);
-          clearConfigCache();
-          if (deleteResult.restartRequired) {
-            setRestartRequiredIDs((current) =>
-              current.includes(entryKey) ? current : [...current, entryKey]
-            );
-            await loadStore();
-            notifyPluginResourcesChanged();
-            showNotification(t('plugin_store.reinstall_delete_restart_required'), 'warning');
-            return;
-          }
-
-          const installResult = await pluginStoreApi.install(entry.id, { sourceId });
-          if (installResult.restartRequired) {
-            setRestartRequiredIDs((current) =>
-              current.includes(entryKey) ? current : [...current, entryKey]
-            );
-            showNotification(t('plugin_store.restart_required_notice'), 'warning');
-          }
-          await loadStore();
-          notifyPluginResourcesChanged();
-          if (!installResult.restartRequired) {
-            notifyPluginResourcesChanged({
-              delayMs: PLUGIN_RESOURCES_SETTLE_REFRESH_DELAY_MS,
-            });
-          }
-          showNotification(t('plugin_store.reinstall_success'), 'success');
-        } catch (err: unknown) {
-          const sourceRequired = getErrorDetailCode(err) === 'plugin_store_source_required';
-          showNotification(
-            sourceRequired
-              ? t('plugin_store.source_required')
-              : hasRestartRequired(err)
-                ? t('plugin_store.reinstall_delete_restart_required')
-                : `${t('plugin_store.reinstall_failed')}: ${getErrorMessage(
-                    err,
-                    t('plugin_store.reinstall_failed')
-                  )}`,
-            sourceRequired || hasRestartRequired(err) ? 'warning' : 'error'
-          );
-          throw err;
-        } finally {
-          setInstallingID('');
-        }
-      },
+      onConfirm: () => runReinstall(entry),
     });
   };
+
+  const handleGateClose = useCallback(() => {
+    setGateEntry(null);
+  }, []);
+
+  const handleGateConfirm = useCallback(async () => {
+    if (!gateEntry) return;
+    if (gateMode === 'reinstall') {
+      await runReinstall(gateEntry);
+    } else {
+      await runInstall(gateEntry, gateIsUpdate);
+    }
+    setGateEntry(null);
+  }, [gateEntry, gateIsUpdate, gateMode, runInstall, runReinstall]);
 
   const renderCard = (entry: PluginStoreEntry) => {
     const entryKey = getStoreEntryKey(entry);
     const logo = resolvePluginAssetURL(entry.logo, apiBase);
     const homepageURL = /^https?:\/\//i.test(entry.homepage) ? entry.homepage : '';
     const isUpdate = entry.installed && entry.updateAvailable;
+    const isOfficial = isOfficialPlugin(entry);
     const versionText =
       isUpdate && entry.installedVersion && entry.version
         ? t('plugin_store.version_arrow', { from: entry.installedVersion, to: entry.version })
@@ -459,7 +506,9 @@ export function PluginStorePage({
           : entry.version
             ? `v${entry.version}`
             : '';
-    const sourceLabel = entry.sourceName || entry.sourceId;
+    const sourceLabel = isDefaultPluginStoreSource(entry)
+      ? t('plugin_store.cli_proxy_api_source')
+      : entry.sourceName || entry.sourceId;
     const metaItems: Array<{
       key: string;
       label: string;
@@ -532,6 +581,12 @@ export function PluginStorePage({
             <span>{entry.id}</span>
           </div>
           <div className={styles.badges}>
+            {!isOfficial ? (
+              <span className={styles.badgeThirdParty}>
+                <IconShield size={12} />
+                {t('plugin_store.badge_untrusted')}
+              </span>
+            ) : null}
             {!entry.installed ? (
               <span className={styles.badgeMuted}>{t('plugin_store.badge_not_installed')}</span>
             ) : isUpdate ? (
@@ -815,6 +870,19 @@ export function PluginStorePage({
           <div className={styles.grid}>{visiblePlugins.map((entry) => renderCard(entry))}</div>
         )}
       </section>
+      <PluginInstallGateModal
+        open={Boolean(gateEntry)}
+        entry={gateEntry}
+        isUpdate={gateIsUpdate}
+        installing={
+          gateEntry
+            ? installingID === getStoreEntryKey(gateEntry) ||
+              installingID === `${getStoreEntryKey(gateEntry)}:reinstall`
+            : false
+        }
+        onClose={handleGateClose}
+        onConfirm={handleGateConfirm}
+      />
     </div>
   );
 }

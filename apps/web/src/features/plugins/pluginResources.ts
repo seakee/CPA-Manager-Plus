@@ -1,4 +1,4 @@
-import type { PluginListEntry, PluginMenu } from '@/types';
+import type { PluginListEntry, PluginMenu, PluginStoreEntry } from '@/types';
 import { normalizeApiBase } from '@/utils/connection';
 
 export const PLUGIN_RESOURCES_REFRESH_EVENT = 'plugin-resources-refresh';
@@ -60,6 +60,34 @@ export const buildRepositoryURL = (repository: string) => {
   if (/^https?:\/\//i.test(trimmed)) return trimmed;
   return `https://github.com/${trimmed.replace(/^\/+/, '')}`;
 };
+
+export const OFFICIAL_PLUGIN_REPO_PREFIX = 'https://github.com/router-for-me/';
+export const DEFAULT_PLUGIN_STORE_SOURCE_ID = 'official';
+const DEFAULT_PLUGIN_STORE_SOURCE_NAME = 'official';
+
+export const getPluginRepositorySlug = (repository: string): string => {
+  const trimmed = repository.trim();
+  if (!trimmed) return '';
+  const withoutHost = /^https?:\/\/[^/]+\/(.+)$/i.exec(trimmed)?.[1] ?? trimmed;
+  const [owner = '', repo = ''] = withoutHost.replace(/^\/+/, '').split('/');
+  if (!owner) return '';
+  return repo ? `${owner}/${repo.replace(/\.git$/i, '')}` : owner;
+};
+
+export const isOfficialRepository = (repository: string): boolean =>
+  buildRepositoryURL(repository).toLowerCase().startsWith(OFFICIAL_PLUGIN_REPO_PREFIX);
+
+export const isOfficialPlugin = (entry: PluginStoreEntry): boolean =>
+  isOfficialRepository(entry.repository);
+
+export const isDefaultPluginStoreSource = (
+  entry: Pick<PluginStoreEntry, 'sourceId' | 'sourceName'>
+): boolean =>
+  entry.sourceId.trim().toLowerCase() === DEFAULT_PLUGIN_STORE_SOURCE_ID ||
+  entry.sourceName.trim().toLowerCase() === DEFAULT_PLUGIN_STORE_SOURCE_NAME;
+
+export const getPluginConfirmToken = (entry: PluginStoreEntry): string =>
+  getPluginRepositorySlug(entry.repository) || entry.id;
 
 export const collectPluginResourceEntries = (
   plugins: PluginListEntry[]
