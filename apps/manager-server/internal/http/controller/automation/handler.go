@@ -16,7 +16,11 @@ type Handler struct {
 }
 
 func New(appCtx *app.Context) *Handler {
-	return &Handler{App: appCtx, service: automationsvc.New(appCtx.Config, appCtx.Store)}
+	service := appCtx.AccountProcessingPolicyService
+	if service == nil {
+		service = automationsvc.New(appCtx.Config, appCtx.Store)
+	}
+	return &Handler{App: appCtx, service: service}
 }
 
 func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {

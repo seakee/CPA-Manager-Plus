@@ -15,7 +15,6 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/httpapi"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
-	automationservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/automation"
 	bootstrapservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrap"
 	collectorservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
@@ -77,7 +76,8 @@ func runServer() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	automationSettingsService := automationservice.New(cfg, db)
+	serverApp := httpapi.New(cfg, db, manager)
+	automationSettingsService := serverApp.AppContext().AccountProcessingPolicyService
 	runtimeSettings := automationSettingsService.RuntimeSettings(ctx)
 	rateLimitAutoDisableWorker := worker.NewRateLimitAutoDisableWorker(db, collector.RuntimeConfig{
 		CPAUpstreamURL: cfg.CPAUpstreamURL,
@@ -90,11 +90,11 @@ func runServer() {
 		rateLimitAutoDisableWorker,
 		accountActionWorker,
 	)
+	serverApp.AppContext().AutomationRuntimeService = automationRuntime
 	automationRuntime.Start(ctx)
 
 	collectorWorker.Start(ctx)
 
-	serverApp := httpapi.New(cfg, db, manager, automationRuntime)
 	codexInspectionWorker := worker.NewCodexInspectionWorker(serverApp.AppContext().Store, serverApp.AppContext().CodexInspectionService)
 	codexInspectionWorker.Start(ctx)
 

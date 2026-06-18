@@ -234,7 +234,8 @@ func TestServerCompatAccountProcessingPolicyPatchReloadsRuntime(t *testing.T) {
 	db := testutil.NewStore(t, cfg)
 	manager := collector.NewManager(cfg, db)
 	runtime := &recordingAutomationRuntimeService{}
-	handler := New(cfg, db, manager, runtime).Handler()
+	server := New(cfg, db, manager, runtime)
+	handler := server.Handler()
 
 	body := `{"codexQuotaCooldownEnabled":true,"authIssueQueueEnabled":true,"authIssueAutoDisableEnabled":true}`
 	rr := testutil.Request(t, handler, http.MethodPatch, "/usage-service/account-processing-policy", body, testutil.AdminKey)
@@ -265,6 +266,14 @@ func TestServerCompatAccountProcessingPolicyPatchReloadsRuntime(t *testing.T) {
 	testutil.RequireStatus(t, getRR, http.StatusOK)
 	if !strings.Contains(getRR.Body.String(), `"source":"database"`) {
 		t.Fatalf("expected persisted database source, body = %s", getRR.Body.String())
+	}
+
+	if err := db.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	runtimeSettings := server.AppContext().AccountProcessingPolicyService.RuntimeSettings(context.Background())
+	if !runtimeSettings.QuotaCooldownEnabled || !runtimeSettings.AccountActionsEnabled || !runtimeSettings.AccountActionsAutoDisable {
+		t.Fatalf("runtime settings should use the PATCH-updated cache after load failure, got %#v", runtimeSettings)
 	}
 }
 
