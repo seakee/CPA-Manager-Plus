@@ -163,6 +163,59 @@ func TestAnalyticsHeatmapIncludesTopContributors(t *testing.T) {
 	}
 }
 
+func TestAnalyticsPerformanceHeatmapBuildsDateHourSpeedBuckets(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	ctx := context.Background()
+	fromMS := time.Date(2026, 6, 8, 9, 0, 0, 0, time.UTC).UnixMilli()
+	toMS := fromMS + 60*60*1000
+	latency := int64(4000)
+	ttft := int64(1000)
+	failedLatency := int64(8000)
+	failedTTFT := int64(2000)
+
+	success := monitoringEvent("perf-heatmap-success", fromMS+1_000, "gpt-a", "auth-1", "source-a", false, 10, 121, 0, 0, 131, &latency)
+	success.TTFTMS = &ttft
+	failed := monitoringEvent("perf-heatmap-failed", fromMS+2_000, "gpt-a", "auth-1", "source-a", true, 10, 60, 0, 0, 70, &failedLatency)
+	failed.TTFTMS = &failedTTFT
+	if _, err := db.InsertEvents(ctx, []usage.Event{success, failed}); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	includeFailed := true
+	resp, err := New(db).Analytics(ctx, Request{
+		FromMS: fromMS,
+		ToMS:   toMS,
+		Filters: Filters{
+			IncludeFailed: &includeFailed,
+		},
+		Include: Include{PerformanceHeatmap: true},
+	})
+	if err != nil {
+		t.Fatalf("analytics: %v", err)
+	}
+	if len(resp.PerformanceHeatmap) != 1 {
+		t.Fatalf("performance heatmap = %#v", resp.PerformanceHeatmap)
+	}
+	point := resp.PerformanceHeatmap[0]
+	if point.DateKey != "2026-06-08" || point.DateLabel != "06-08" || point.Hour != 9 {
+		t.Fatalf("performance heatmap bucket = %#v", point)
+	}
+	if point.Calls != 2 || point.Success != 1 || point.Failure != 1 || point.OutputTokens != 181 {
+		t.Fatalf("performance heatmap totals = %#v", point)
+	}
+	if point.LatencySamples != 1 || point.TTFTSamples != 1 || point.DecodeSamples != 1 {
+		t.Fatalf("performance heatmap samples = %#v", point)
+	}
+	if point.P50LatencyMS == nil || *point.P50LatencyMS != 4000 || point.P90LatencyMS == nil || *point.P90LatencyMS != 4000 {
+		t.Fatalf("performance latency percentiles = %#v", point)
+	}
+	if point.P50TTFTMS == nil || *point.P50TTFTMS != 1000 || point.WeightedDecodeTokensPerSecond == nil ||
+		math.Abs(*point.WeightedDecodeTokensPerSecond-40) > 0.000001 || point.MedianDecodeTokensPerSecond == nil ||
+		math.Abs(*point.MedianDecodeTokensPerSecond-40) > 0.000001 || math.Abs(point.FailureRate-0.5) > 0.000001 {
+		t.Fatalf("performance speed metrics = %#v", point)
+	}
+}
+
 func TestAnalyticsCredentialTimelineBuildsPerCredentialBuckets(t *testing.T) {
 	db := newMonitoringTestStore(t)
 	ctx := context.Background()

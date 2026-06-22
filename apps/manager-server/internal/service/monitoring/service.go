@@ -70,6 +70,7 @@ type Include struct {
 	APIKeyStats        bool              `json:"api_key_stats"`
 	FilterOptions      bool              `json:"filter_options"`
 	Heatmap            bool              `json:"heatmap"`
+	PerformanceHeatmap bool              `json:"performance_heatmap"`
 	AnomalyPoints      bool              `json:"anomaly_points"`
 	TaskBuckets        bool              `json:"task_buckets"`
 	RecentFailures     int               `json:"recent_failures"`
@@ -98,6 +99,7 @@ type Response struct {
 	Timeline           []TimelinePoint           `json:"timeline,omitempty"`
 	HourlyDistribution []HourlyPoint             `json:"hourly_distribution,omitempty"`
 	Heatmap            []HeatmapPoint            `json:"heatmap,omitempty"`
+	PerformanceHeatmap []PerformanceHeatmapPoint `json:"performance_heatmap,omitempty"`
 	AnomalyPoints      []AnomalyPoint            `json:"anomaly_points,omitempty"`
 	ModelShare         []ModelShareRow           `json:"model_share,omitempty"`
 	ModelStats         []ModelStat               `json:"model_stats,omitempty"`
@@ -209,6 +211,29 @@ type HeatmapContributor struct {
 	Cost        float64 `json:"cost"`
 	FailureRate float64 `json:"failure_rate"`
 	Share       float64 `json:"share"`
+}
+
+type PerformanceHeatmapPoint struct {
+	DateKey                       string   `json:"date_key"`
+	DateLabel                     string   `json:"date_label"`
+	Weekday                       int      `json:"weekday"`
+	Hour                          int      `json:"hour"`
+	Calls                         int64    `json:"calls"`
+	Success                       int64    `json:"success"`
+	Failure                       int64    `json:"failure"`
+	OutputTokens                  int64    `json:"output_tokens"`
+	LatencySamples                int64    `json:"latency_samples"`
+	TTFTSamples                   int64    `json:"ttft_samples"`
+	DecodeSamples                 int64    `json:"decode_samples"`
+	AvgLatencyMS                  *float64 `json:"average_latency_ms"`
+	P50LatencyMS                  *float64 `json:"p50_latency_ms"`
+	P90LatencyMS                  *float64 `json:"p90_latency_ms"`
+	AvgTTFTMS                     *float64 `json:"average_ttft_ms"`
+	P50TTFTMS                     *float64 `json:"p50_ttft_ms"`
+	P90TTFTMS                     *float64 `json:"p90_ttft_ms"`
+	MedianDecodeTokensPerSecond   *float64 `json:"median_decode_tokens_per_second"`
+	WeightedDecodeTokensPerSecond *float64 `json:"weighted_decode_tokens_per_second"`
+	FailureRate                   float64  `json:"failure_rate"`
 }
 
 type AnomalyPoint struct {
@@ -649,6 +674,13 @@ func (s *Service) Analytics(ctx context.Context, req Request) (Response, error) 
 		}
 		response.Heatmap = buildHeatmap(points, prices)
 	}
+	if req.Include.PerformanceHeatmap {
+		points, err := s.store.PerformanceHeatmapWithFilter(ctx, filter, location)
+		if err != nil {
+			return Response{}, err
+		}
+		response.PerformanceHeatmap = buildPerformanceHeatmap(points)
+	}
 	if req.Include.ModelShare {
 		response.ModelShare = buildModelShare(modelStats, prices)
 	}
@@ -1039,6 +1071,35 @@ func buildHeatmap(points []store.HeatmapPoint, prices map[string]store.ModelPric
 		return result[i].Weekday < result[j].Weekday ||
 			(result[i].Weekday == result[j].Weekday && result[i].Hour < result[j].Hour)
 	})
+	return result
+}
+
+func buildPerformanceHeatmap(points []store.PerformanceHeatmapPoint) []PerformanceHeatmapPoint {
+	result := make([]PerformanceHeatmapPoint, 0, len(points))
+	for _, point := range points {
+		result = append(result, PerformanceHeatmapPoint{
+			DateKey:                       point.DateKey,
+			DateLabel:                     point.DateLabel,
+			Weekday:                       point.Weekday,
+			Hour:                          point.Hour,
+			Calls:                         point.Calls,
+			Success:                       point.SuccessCalls,
+			Failure:                       point.FailureCalls,
+			OutputTokens:                  point.OutputTokens,
+			LatencySamples:                point.LatencySamples,
+			TTFTSamples:                   point.TTFTSamples,
+			DecodeSamples:                 point.DecodeSamples,
+			AvgLatencyMS:                  nullableFloat(point.AvgLatencyMS.Valid, point.AvgLatencyMS.Float64),
+			P50LatencyMS:                  nullableFloat(point.P50LatencyMS.Valid, point.P50LatencyMS.Float64),
+			P90LatencyMS:                  nullableFloat(point.P90LatencyMS.Valid, point.P90LatencyMS.Float64),
+			AvgTTFTMS:                     nullableFloat(point.AvgTTFTMS.Valid, point.AvgTTFTMS.Float64),
+			P50TTFTMS:                     nullableFloat(point.P50TTFTMS.Valid, point.P50TTFTMS.Float64),
+			P90TTFTMS:                     nullableFloat(point.P90TTFTMS.Valid, point.P90TTFTMS.Float64),
+			MedianDecodeTokensPerSecond:   nullableFloat(point.MedianDecodeTokensPerSecond.Valid, point.MedianDecodeTokensPerSecond.Float64),
+			WeightedDecodeTokensPerSecond: nullableFloat(point.WeightedDecodeTokensPerSecond.Valid, point.WeightedDecodeTokensPerSecond.Float64),
+			FailureRate:                   ratio(point.FailureCalls, point.Calls),
+		})
+	}
 	return result
 }
 

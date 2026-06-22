@@ -1736,6 +1736,94 @@
   }
 }
 
+.performanceHelpDetails {
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--usage-border) 74%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--usage-muted-surface) 42%, var(--usage-surface));
+
+  summary {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-height: 32px;
+    padding: 0 12px;
+    color: var(--usage-muted);
+    font-size: 12px;
+    font-weight: 800;
+    cursor: pointer;
+    user-select: none;
+
+    &::marker,
+    &::-webkit-details-marker {
+      display: none;
+    }
+
+    svg {
+      flex: 0 0 auto;
+      color: var(--usage-primary);
+    }
+  }
+}
+
+.performanceHelpDetails[open] summary {
+  border-bottom: 1px solid color-mix(in srgb, var(--usage-border) 70%, transparent);
+  background: color-mix(in srgb, var(--usage-primary) 5%, transparent);
+  color: var(--usage-text);
+}
+
+.performanceHelpBody {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.42fr) minmax(0, 1fr);
+  gap: 12px;
+  padding: 10px 12px 12px;
+  color: var(--usage-muted);
+  font-size: 12px;
+  line-height: 1.45;
+
+  p,
+  dl,
+  dt,
+  dd {
+    margin: 0;
+  }
+}
+
+.performanceHelpIntro {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  padding: 1px 0;
+}
+
+.performanceHelpGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+
+  > div {
+    display: grid;
+    grid-template-columns: minmax(92px, max-content) minmax(0, 1fr);
+    gap: 8px;
+    align-items: baseline;
+    min-width: 0;
+    padding: 7px 9px;
+    border: 1px solid color-mix(in srgb, var(--usage-border) 62%, transparent);
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--usage-surface) 76%, transparent);
+  }
+
+  dt {
+    color: var(--usage-text);
+    font-weight: 800;
+    white-space: nowrap;
+  }
+
+  dd {
+    min-width: 0;
+  }
+}
+
 .heatmapWorkspace {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -2567,6 +2655,11 @@
   .heatmapHighlightGrid,
   .heatmapContributorGrid,
   .heatmapComparisonList {
+    grid-template-columns: 1fr;
+  }
+
+  .performanceHelpBody,
+  .performanceHelpGrid {
     grid-template-columns: 1fr;
   }
 

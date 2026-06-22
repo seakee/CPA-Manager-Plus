@@ -119,6 +119,28 @@ type HeatmapPoint struct {
 	TotalTokens         int64
 }
 
+type PerformanceHeatmapPoint struct {
+	DateKey                       string
+	DateLabel                     string
+	Weekday                       int
+	Hour                          int
+	Calls                         int64
+	SuccessCalls                  int64
+	FailureCalls                  int64
+	OutputTokens                  int64
+	LatencySamples                int64
+	TTFTSamples                   int64
+	DecodeSamples                 int64
+	AvgLatencyMS                  sql.NullFloat64
+	P50LatencyMS                  sql.NullFloat64
+	P90LatencyMS                  sql.NullFloat64
+	AvgTTFTMS                     sql.NullFloat64
+	P50TTFTMS                     sql.NullFloat64
+	P90TTFTMS                     sql.NullFloat64
+	MedianDecodeTokensPerSecond   sql.NullFloat64
+	WeightedDecodeTokensPerSecond sql.NullFloat64
+}
+
 type ChannelModelStat struct {
 	AuthIndex            string
 	Source               string
@@ -887,6 +909,145 @@ order by timestamp_ms, model`, args...)
 		points = append(points, *grouped[mapKey])
 	}
 	return points, nil
+}
+
+func (r *repository) PerformanceHeatmapWithFilter(ctx context.Context, filter AnalyticsFilter, location *time.Location) ([]PerformanceHeatmapPoint, error) {
+	if location == nil {
+		location = time.UTC
+	}
+	where, args := analyticsWhere(filter)
+	rows, err := r.db.QueryContext(ctx, `select
+	timestamp_ms,
+	failed,
+	output_tokens,
+	latency_ms,
+	ttft_ms
+from usage_events `+where+`
+order by timestamp_ms`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type key struct {
+		dateKey string
+		hour    int
+	}
+	type accumulator struct {
+		point              PerformanceHeatmapPoint
+		latencies          []float64
+		ttfts              []float64
+		outputSpeeds       []float64
+		outputSpeedTokens  int64
+		outputSpeedSeconds float64
+	}
+
+	grouped := map[key]*accumulator{}
+	order := make([]key, 0)
+	for rows.Next() {
+		var timestampMS int64
+		var failed int
+		var outputTokens int64
+		var latency sql.NullInt64
+		var ttft sql.NullInt64
+		if err := rows.Scan(&timestampMS, &failed, &outputTokens, &latency, &ttft); err != nil {
+			return nil, err
+		}
+		tm := time.UnixMilli(timestampMS).In(location)
+		mapKey := key{dateKey: tm.Format("2006-01-02"), hour: tm.Hour()}
+		entry := grouped[mapKey]
+		if entry == nil {
+			entry = &accumulator{
+				point: PerformanceHeatmapPoint{
+					DateKey:   mapKey.dateKey,
+					DateLabel: tm.Format("01-02"),
+					Weekday:   int(tm.Weekday()),
+					Hour:      mapKey.hour,
+				},
+			}
+			grouped[mapKey] = entry
+			order = append(order, mapKey)
+		}
+		entry.point.Calls++
+		if failed != 0 {
+			entry.point.FailureCalls++
+		} else {
+			entry.point.SuccessCalls++
+		}
+		entry.point.OutputTokens += outputTokens
+		successful := failed == 0
+		if successful && latency.Valid && latency.Int64 > 0 {
+			entry.latencies = append(entry.latencies, float64(latency.Int64))
+		}
+		if successful && ttft.Valid && ttft.Int64 > 0 {
+			entry.ttfts = append(entry.ttfts, float64(ttft.Int64))
+		}
+		if successful && outputTokens > 1 && latency.Valid && ttft.Valid && latency.Int64 > ttft.Int64 {
+			seconds := float64(latency.Int64-ttft.Int64) / 1000
+			tokensAfterFirst := outputTokens - 1
+			entry.outputSpeeds = append(entry.outputSpeeds, float64(tokensAfterFirst)/seconds)
+			entry.outputSpeedTokens += tokensAfterFirst
+			entry.outputSpeedSeconds += seconds
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	points := make([]PerformanceHeatmapPoint, 0, len(order))
+	for _, mapKey := range order {
+		entry := grouped[mapKey]
+		point := entry.point
+		point.LatencySamples = int64(len(entry.latencies))
+		point.TTFTSamples = int64(len(entry.ttfts))
+		point.DecodeSamples = int64(len(entry.outputSpeeds))
+		point.AvgLatencyMS = averageFloat64(entry.latencies)
+		point.P50LatencyMS = percentileFloat64(entry.latencies, 0.50)
+		point.P90LatencyMS = percentileFloat64(entry.latencies, 0.90)
+		point.AvgTTFTMS = averageFloat64(entry.ttfts)
+		point.P50TTFTMS = percentileFloat64(entry.ttfts, 0.50)
+		point.P90TTFTMS = percentileFloat64(entry.ttfts, 0.90)
+		point.MedianDecodeTokensPerSecond = percentileFloat64(entry.outputSpeeds, 0.50)
+		if entry.outputSpeedSeconds > 0 {
+			point.WeightedDecodeTokensPerSecond = sql.NullFloat64{
+				Float64: float64(entry.outputSpeedTokens) / entry.outputSpeedSeconds,
+				Valid:   true,
+			}
+		}
+		points = append(points, point)
+	}
+	sort.SliceStable(points, func(i, j int) bool {
+		return points[i].DateKey < points[j].DateKey ||
+			(points[i].DateKey == points[j].DateKey && points[i].Hour < points[j].Hour)
+	})
+	return points, nil
+}
+
+func averageFloat64(values []float64) sql.NullFloat64 {
+	if len(values) == 0 {
+		return sql.NullFloat64{}
+	}
+	var total float64
+	for _, value := range values {
+		total += value
+	}
+	return sql.NullFloat64{Float64: total / float64(len(values)), Valid: true}
+}
+
+func percentileFloat64(values []float64, percentile float64) sql.NullFloat64 {
+	if len(values) == 0 {
+		return sql.NullFloat64{}
+	}
+	sorted := append([]float64(nil), values...)
+	sort.Float64s(sorted)
+	index := int(float64(len(sorted))*percentile+0.999999) - 1
+	if index < 0 {
+		index = 0
+	}
+	if index >= len(sorted) {
+		index = len(sorted) - 1
+	}
+	return sql.NullFloat64{Float64: sorted[index], Valid: true}
 }
 
 func (r *repository) ChannelModelStatsWithFilter(ctx context.Context, filter AnalyticsFilter) ([]ChannelModelStat, error) {

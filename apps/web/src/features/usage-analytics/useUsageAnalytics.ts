@@ -45,6 +45,7 @@ import {
   type UsageHeatmapDateOption,
   type UsageHeatmapMetricKey,
   type UsageHeatmapScaleMode,
+  type UsagePerformanceHeatmapMetricKey,
   type UsageTimelinePoint,
   type UsageCredentialDisplayContext,
 } from './usageAnalyticsModel';
@@ -93,10 +94,7 @@ export function useUsageAnalytics() {
   );
   const [searchParams, setSearchParams] = useSearchParams();
   const [initialUiState] = useState<UsageAnalyticsUiState>(() =>
-    buildUsageAnalyticsUiStateFromSearchParams(
-      searchParams,
-      readUsageAnalyticsUiState()
-    )
+    buildUsageAnalyticsUiStateFromSearchParams(searchParams, readUsageAnalyticsUiState())
   );
   const [filters, setFiltersState] = useState<UsageAnalyticsFiltersState>(
     () => initialUiState.filters
@@ -114,6 +112,8 @@ export function useUsageAnalytics() {
   const [matrixMetric, setMatrixMetric] = useState<UsageMatrixMetricKey>('requestCount');
   const [heatmapMetric, setHeatmapMetric] = useState<UsageHeatmapMetricKey>('requestCount');
   const [heatmapScaleMode, setHeatmapScaleMode] = useState<UsageHeatmapScaleMode>('absolute');
+  const [performanceHeatmapMetric, setPerformanceHeatmapMetric] =
+    useState<UsagePerformanceHeatmapMetricKey>('weightedDecodeTps');
   const [selectedHeatmapDateKey, setSelectedHeatmapDateKey] = useState(USAGE_HEATMAP_ALL_DATES_KEY);
   const [selectedHeatmapCell, setSelectedHeatmapCell] = useState<UsageHeatmapCellSelection | null>(
     null
@@ -577,6 +577,9 @@ export function useUsageAnalytics() {
     allCredentialRows: adapted.credentialRows,
     providerRows: adapted.providerRows,
     heatmap: adapted.heatmap,
+    performanceHeatmap: adapted.performanceHeatmap,
+    performanceHeatmapMetric,
+    setPerformanceHeatmapMetric,
     heatmapMetric,
     setHeatmapMetric,
     heatmapScaleMode,

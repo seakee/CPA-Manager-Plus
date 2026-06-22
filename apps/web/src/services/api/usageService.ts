@@ -594,6 +594,7 @@ export interface MonitoringAnalyticsInclude {
   api_key_stats?: boolean;
   filter_options?: boolean;
   heatmap?: boolean;
+  performance_heatmap?: boolean;
   anomaly_points?: boolean;
   task_buckets?: boolean;
   recent_failures?: number;
@@ -705,6 +706,29 @@ export interface MonitoringAnalyticsHeatmapPoint {
   model_contributors?: MonitoringAnalyticsHeatmapContributor[];
   api_key_contributors?: MonitoringAnalyticsHeatmapContributor[];
   provider_contributors?: MonitoringAnalyticsHeatmapContributor[];
+}
+
+export interface MonitoringAnalyticsPerformanceHeatmapPoint {
+  date_key: string;
+  date_label: string;
+  weekday: number;
+  hour: number;
+  calls: number;
+  success: number;
+  failure: number;
+  output_tokens: number;
+  latency_samples: number;
+  ttft_samples: number;
+  decode_samples: number;
+  average_latency_ms?: number | null;
+  p50_latency_ms?: number | null;
+  p90_latency_ms?: number | null;
+  average_ttft_ms?: number | null;
+  p50_ttft_ms?: number | null;
+  p90_ttft_ms?: number | null;
+  median_decode_tokens_per_second?: number | null;
+  weighted_decode_tokens_per_second?: number | null;
+  failure_rate: number;
 }
 
 export type MonitoringAnalyticsAnomalySeverity = 'low' | 'medium' | 'high' | string;
@@ -1018,6 +1042,7 @@ export interface MonitoringAnalyticsResponse {
   timeline?: MonitoringAnalyticsTimelinePoint[];
   hourly_distribution?: MonitoringAnalyticsHourlyPoint[];
   heatmap?: MonitoringAnalyticsHeatmapPoint[];
+  performance_heatmap?: MonitoringAnalyticsPerformanceHeatmapPoint[];
   anomaly_points?: MonitoringAnalyticsAnomalyPoint[];
   model_share?: MonitoringAnalyticsModelShareRow[];
   model_stats?: MonitoringAnalyticsModelStat[];

@@ -244,6 +244,32 @@ const createUsageState = (overrides: Record<string, unknown> = {}) => {
         failureRate: 1 / 12,
       },
     ],
+    performanceHeatmap: [
+      {
+        dateKey: '2026-06-08',
+        dateLabel: '06-08',
+        weekday: 1,
+        hour: 9,
+        requestCount: 12,
+        successCount: 11,
+        failureCount: 1,
+        outputTokens: 400,
+        latencySamples: 12,
+        ttftSamples: 12,
+        decodeSamples: 11,
+        averageLatencyMs: 250,
+        p50LatencyMs: 230,
+        p90LatencyMs: 420,
+        averageTtftMs: 120,
+        p50TtftMs: 110,
+        p90TtftMs: 180,
+        medianDecodeTps: 65,
+        weightedDecodeTps: 70,
+        failureRate: 1 / 12,
+      },
+    ],
+    performanceHeatmapMetric: 'weightedDecodeTps',
+    setPerformanceHeatmapMetric: vi.fn(),
     heatmapMetric: 'requestCount',
     setHeatmapMetric: vi.fn(),
     heatmapScaleMode: 'absolute',
@@ -839,6 +865,8 @@ describe('UsageAnalyticsPage', () => {
     expect(text).toContain('usage_analytics.heatmap_title');
     expect(text).toContain('usage_analytics.heatmap_metric_requestCount');
     expect(text).toContain('usage_analytics.heatmap_scale_absolute');
+    expect(text).toContain('usage_analytics.performance_heatmap_title');
+    expect(text).toContain('usage_analytics.performance_heatmap_metric_weightedDecodeTps');
     expect(text).not.toContain('usage_analytics.heatmap_date_all');
     expect(text).not.toContain('06/08');
     expect(text).not.toContain('usage_analytics.heatmap_range_label');
@@ -854,6 +882,10 @@ describe('UsageAnalyticsPage', () => {
       findHostButtonByText(renderer, 'usage_analytics.heatmap_metric_requestCount').props[
         'aria-pressed'
       ]
+    ).toBe(true);
+    expect(
+      findHostButtonByText(renderer, 'usage_analytics.performance_heatmap_metric_weightedDecodeTps')
+        .props['aria-pressed']
     ).toBe(true);
     expect(
       findHostButtonByText(renderer, 'usage_analytics.heatmap_metric_totalTokens').props[

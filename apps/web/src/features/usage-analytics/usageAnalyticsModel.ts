@@ -10,6 +10,7 @@ import type {
   MonitoringAnalyticsHeatmapPoint,
   MonitoringAnalyticsInclude,
   MonitoringAnalyticsModelStat,
+  MonitoringAnalyticsPerformanceHeatmapPoint,
   MonitoringAnalyticsResponse,
   MonitoringAnalyticsSummary,
   MonitoringAnalyticsSummaryComparison,
@@ -71,6 +72,12 @@ export type UsageMatrixMetricKey = 'requestCount' | 'totalTokens' | 'estimatedCo
 export type UsageMatrixDimension = 'apiKeyModel' | 'authFileModel' | 'providerModel';
 export type UsageHeatmapMetricKey = UsageMatrixMetricKey;
 export type UsageHeatmapScaleMode = 'absolute' | 'byWeekday' | 'byHour';
+export type UsagePerformanceHeatmapMetricKey =
+  | 'weightedDecodeTps'
+  | 'medianDecodeTps'
+  | 'p50TtftMs'
+  | 'p50LatencyMs'
+  | 'failureRate';
 
 export type UsageMetricDefinition = {
   key: UsageMetricKey;
@@ -365,6 +372,51 @@ export type UsageHeatmapHighlights = {
   failureRisks: UsageHeatmapHighlight[];
 };
 
+export type UsagePerformanceHeatmapPoint = {
+  dateKey: string;
+  dateLabel: string;
+  weekday: number;
+  hour: number;
+  requestCount: number;
+  successCount: number;
+  failureCount: number;
+  outputTokens: number;
+  latencySamples: number;
+  ttftSamples: number;
+  decodeSamples: number;
+  averageLatencyMs: number | null;
+  p50LatencyMs: number | null;
+  p90LatencyMs: number | null;
+  averageTtftMs: number | null;
+  p50TtftMs: number | null;
+  p90TtftMs: number | null;
+  medianDecodeTps: number | null;
+  weightedDecodeTps: number | null;
+  failureRate: number;
+};
+
+export type UsagePerformanceHeatmapChartDatum = [
+  hour: number,
+  dateIndex: number,
+  visualValue: number,
+  metricValue: number,
+  requestCount: number,
+  outputTokens: number,
+  weightedDecodeTps: number,
+  medianDecodeTps: number,
+  p50TtftMs: number,
+  p50LatencyMs: number,
+  failureRate: number,
+  decodeSamples: number,
+];
+
+export type UsagePerformanceHeatmapChartData = {
+  dates: string[];
+  labels: string[];
+  data: UsagePerformanceHeatmapChartDatum[];
+  maxValue: number;
+};
+
 export type UsageServerAnomaly = {
   bucketMs: number;
   bucketEndMs: number;
@@ -532,6 +584,14 @@ export const USAGE_HEATMAP_SCALE_MODES: UsageHeatmapScaleMode[] = [
   'absolute',
   'byWeekday',
   'byHour',
+];
+
+export const USAGE_PERFORMANCE_HEATMAP_METRICS: UsagePerformanceHeatmapMetricKey[] = [
+  'weightedDecodeTps',
+  'medianDecodeTps',
+  'p50TtftMs',
+  'p50LatencyMs',
+  'failureRate',
 ];
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -711,6 +771,7 @@ export const buildUsageAnalyticsInclude = (
     credential_timeline: true,
     filter_options: true,
     heatmap: true,
+    performance_heatmap: true,
     anomaly_points: true,
     granularity,
   };
@@ -2027,6 +2088,92 @@ export const buildUsageHeatmapChartData = (
   });
 };
 
+export const buildUsagePerformanceHeatmap = (
+  points: MonitoringAnalyticsPerformanceHeatmapPoint[] = []
+): UsagePerformanceHeatmapPoint[] =>
+  points.map((point) => ({
+    dateKey: point.date_key || '',
+    dateLabel: point.date_label || point.date_key || '',
+    weekday: toNumber(point.weekday),
+    hour: toNumber(point.hour),
+    requestCount: toNumber(point.calls),
+    successCount: toNumber(point.success),
+    failureCount: toNumber(point.failure),
+    outputTokens: toNumber(point.output_tokens),
+    latencySamples: toNumber(point.latency_samples),
+    ttftSamples: toNumber(point.ttft_samples),
+    decodeSamples: toNumber(point.decode_samples),
+    averageLatencyMs: toNullableNumber(point.average_latency_ms),
+    p50LatencyMs: toNullableNumber(point.p50_latency_ms),
+    p90LatencyMs: toNullableNumber(point.p90_latency_ms),
+    averageTtftMs: toNullableNumber(point.average_ttft_ms),
+    p50TtftMs: toNullableNumber(point.p50_ttft_ms),
+    p90TtftMs: toNullableNumber(point.p90_ttft_ms),
+    medianDecodeTps: toNullableNumber(point.median_decode_tokens_per_second),
+    weightedDecodeTps: toNullableNumber(point.weighted_decode_tokens_per_second),
+    failureRate: toNumber(point.failure_rate),
+  }));
+
+export const getUsagePerformanceHeatmapMetricValue = (
+  point: UsagePerformanceHeatmapPoint,
+  metric: UsagePerformanceHeatmapMetricKey
+) => {
+  if (metric === 'medianDecodeTps') return point.medianDecodeTps ?? 0;
+  if (metric === 'p50TtftMs') return point.p50TtftMs ?? 0;
+  if (metric === 'p50LatencyMs') return point.p50LatencyMs ?? 0;
+  if (metric === 'failureRate') return point.failureRate;
+  return point.weightedDecodeTps ?? 0;
+};
+
+export const buildUsagePerformanceHeatmapChartData = (
+  points: UsagePerformanceHeatmapPoint[],
+  metric: UsagePerformanceHeatmapMetricKey = 'weightedDecodeTps'
+): UsagePerformanceHeatmapChartData => {
+  const validPoints = points.filter(
+    (point) =>
+      point.dateKey &&
+      Number.isInteger(point.hour) &&
+      point.hour >= 0 &&
+      point.hour < 24 &&
+      point.requestCount > 0
+  );
+  const dates = Array.from(new Set(validPoints.map((point) => point.dateKey))).sort();
+  const dateIndex = new Map(dates.map((dateKey, index) => [dateKey, index]));
+  const labelByDate = new Map(validPoints.map((point) => [point.dateKey, point.dateLabel]));
+  const rawValues = validPoints.map((point) =>
+    getUsagePerformanceHeatmapMetricValue(point, metric)
+  );
+  const maxRawValue = Math.max(0, ...rawValues);
+  const data = validPoints
+    .map((point): UsagePerformanceHeatmapChartDatum | null => {
+      const y = dateIndex.get(point.dateKey);
+      if (y === undefined) return null;
+      const metricValue = getUsagePerformanceHeatmapMetricValue(point, metric);
+      return [
+        point.hour,
+        y,
+        metricValue,
+        metricValue,
+        point.requestCount,
+        point.outputTokens,
+        point.weightedDecodeTps ?? 0,
+        point.medianDecodeTps ?? 0,
+        point.p50TtftMs ?? 0,
+        point.p50LatencyMs ?? 0,
+        point.failureRate,
+        point.decodeSamples,
+      ];
+    })
+    .filter((datum): datum is UsagePerformanceHeatmapChartDatum => Boolean(datum));
+
+  return {
+    dates,
+    labels: dates.map((dateKey) => labelByDate.get(dateKey) || dateKey.slice(5)),
+    data,
+    maxValue: maxRawValue > 0 ? maxRawValue : 1,
+  };
+};
+
 export const buildUsageHeatmapCellDetail = (
   points: UsageHeatmapPoint[],
   selection: UsageHeatmapCellSelection | null,
@@ -2207,8 +2354,9 @@ export const adaptUsageAnalyticsData = (
     apiKeyRows,
     credentialRows,
     providerRows,
-    heatmap: buildUsageHeatmap(data?.heatmap ?? [], apiKeyDisplayMap),
-    anomalyPoints: buildServerAnomalyPoints(data?.anomaly_points ?? []),
+	    heatmap: buildUsageHeatmap(data?.heatmap ?? [], apiKeyDisplayMap),
+	    performanceHeatmap: buildUsagePerformanceHeatmap(data?.performance_heatmap ?? []),
+	    anomalyPoints: buildServerAnomalyPoints(data?.anomaly_points ?? []),
     drilldownPreview: buildDrilldownPreview(
       data?.drilldown_preview?.items ?? [],
       modelRows,
@@ -2477,6 +2625,16 @@ export const formatHeatmapMetricValue = (key: UsageHeatmapMetricKey, value: numb
   if (key === 'failureRate') return `${((Number.isFinite(value) ? value : 0) * 100).toFixed(1)}%`;
   if (key === 'estimatedCost') return formatUsd(value);
   return formatCompactNumber(value);
+};
+
+export const formatPerformanceHeatmapMetricValue = (
+  key: UsagePerformanceHeatmapMetricKey,
+  value: number
+) => {
+  const safeValue = Number.isFinite(value) ? value : 0;
+  if (key === 'failureRate') return `${(safeValue * 100).toFixed(1)}%`;
+  if (key === 'p50TtftMs' || key === 'p50LatencyMs') return `${Math.round(safeValue)} ms`;
+  return `${safeValue.toFixed(safeValue >= 100 ? 0 : 1)} tok/s`;
 };
 
 export const hasUsageData = (summary: UsageSummaryMetrics, timeline: UsageTimelinePoint[]) =>

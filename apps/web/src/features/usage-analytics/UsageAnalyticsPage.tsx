@@ -8,11 +8,7 @@ import type {
   TooltipComponentOption,
   VisualMapComponentOption,
 } from 'echarts/components';
-import type {
-  BarSeriesOption,
-  HeatmapSeriesOption,
-  LineSeriesOption,
-} from 'echarts/charts';
+import type { BarSeriesOption, HeatmapSeriesOption, LineSeriesOption } from 'echarts/charts';
 import type { ComposeOption, ECElementEvent } from 'echarts/core';
 import { EChartsView } from '@/components/charts/EChartsView';
 import { Button } from '@/components/ui/Button';
@@ -25,6 +21,7 @@ import {
   IconExternalLink,
   IconFileText,
   IconInbox,
+  IconInfo,
   IconKey,
   IconModelCluster,
   IconRefreshCw,
@@ -36,6 +33,7 @@ import {
 import { useThemeStore } from '@/stores';
 import {
   buildUsageHeatmapChartData,
+  buildUsagePerformanceHeatmapChartData,
   buildModelKeyDistribution,
   buildMonitoringDetailUrl,
   buildOptionValues,
@@ -46,6 +44,7 @@ import {
   DEFAULT_SELECTED_METRICS,
   formatDateTimeLocalValue,
   formatHeatmapMetricValue,
+  formatPerformanceHeatmapMetricValue,
   formatLocalDateTime,
   formatMetricValue,
   hasUsageData,
@@ -55,6 +54,7 @@ import {
   USAGE_ANALYTICS_TABS,
   USAGE_HEATMAP_METRICS,
   USAGE_HEATMAP_SCALE_MODES,
+  USAGE_PERFORMANCE_HEATMAP_METRICS,
   USAGE_METRICS,
   USAGE_SUCCESS_RATE_WATCH_THRESHOLD,
   USAGE_TIME_RANGES,
@@ -75,6 +75,8 @@ import {
   type UsageHeatmapMetricKey,
   type UsageHeatmapPoint,
   type UsageHeatmapScaleMode,
+  type UsagePerformanceHeatmapMetricKey,
+  type UsagePerformanceHeatmapPoint,
   type UsageKeyAnomalyRow,
   type UsageMetricKey,
   type UsageModelKeyDistributionRow,
@@ -116,6 +118,16 @@ const heatmapScaleOptions: Array<{ value: UsageHeatmapScaleMode; labelKey: strin
     labelKey: `usage_analytics.heatmap_scale_${mode}`,
   }));
 
+const performanceHeatmapMetricOptions: Array<{
+  value: UsagePerformanceHeatmapMetricKey;
+  labelKey: string;
+  descriptionKey: string;
+}> = USAGE_PERFORMANCE_HEATMAP_METRICS.map((metric) => ({
+  value: metric,
+  labelKey: `usage_analytics.performance_heatmap_metric_${metric}`,
+  descriptionKey: `usage_analytics.performance_heatmap_metric_${metric}_desc`,
+}));
+
 const chartHeight = 360;
 const compactChartHeight = 220;
 
@@ -151,8 +163,7 @@ type HeatmapChartOption = ComposeOption<
   GridComponentOption | HeatmapSeriesOption | TooltipComponentOption | VisualMapComponentOption
 >;
 
-type CostShareRankStyle = CSSProperties &
-  Record<'--rank-color' | '--rank-share', string | number>;
+type CostShareRankStyle = CSSProperties & Record<'--rank-color' | '--rank-share', string | number>;
 
 const usageChartAxisKeys = {
   requests: 0,
@@ -1301,6 +1312,191 @@ function UsageHeatmapChart({
       <div className={styles.heatmapLegendLabels} aria-hidden="true">
         <span>{minLegendLabel}</span>
         <span>{maxLegendLabel}</span>
+      </div>
+    </div>
+  );
+}
+
+const isLowerBetterPerformanceMetric = (metric: UsagePerformanceHeatmapMetricKey) =>
+  metric === 'p50TtftMs' || metric === 'p50LatencyMs' || metric === 'failureRate';
+
+function UsagePerformanceHeatmapChart({
+  loading = false,
+  metric,
+  points,
+}: {
+  loading?: boolean;
+  metric: UsagePerformanceHeatmapMetricKey;
+  points: UsagePerformanceHeatmapPoint[];
+}) {
+  const { t } = useTranslation();
+  const chartTheme = useUsageChartTheme();
+  const hours = Array.from({ length: 24 }, (_, hour) => String(hour));
+  const { data, labels, maxValue } = buildUsagePerformanceHeatmapChartData(points, metric);
+  const colors = isLowerBetterPerformanceMetric(metric)
+    ? ['#dcfce7', '#bef264', '#facc15', '#fb923c', '#ef4444']
+    : ['#e0f2fe', '#7dd3fc', '#34d399', '#22c55e', '#16a34a'];
+  const option: HeatmapChartOption = {
+    animationDuration: 260,
+    backgroundColor: 'transparent',
+    grid: { bottom: 68, containLabel: true, left: 10, right: 18, top: 18 },
+    tooltip: {
+      appendToBody: true,
+      ...getTooltipOption(chartTheme),
+      borderRadius: 10,
+      borderWidth: 1,
+      confine: true,
+      formatter: (params: unknown) => {
+        const item = params as { value?: number[] };
+        const [
+          hour,
+          dateIndex,
+          ,
+          metricValue,
+          calls,
+          outputTokens,
+          weightedDecode,
+          medianDecode,
+          p50Ttft,
+          p50Latency,
+          failureRate,
+          decodeSamples,
+        ] = item.value ?? [];
+        return tooltipHtml(
+          chartTheme,
+          `${tooltipRowHtml(
+            chartTheme,
+            escapeHtml(t(`usage_analytics.performance_heatmap_metric_${metric}`)),
+            escapeHtml(formatPerformanceHeatmapMetricValue(metric, metricValue ?? 0))
+          )}${tooltipRowHtml(
+            chartTheme,
+            escapeHtml(t('usage_analytics.performance_heatmap_weighted_decode')),
+            escapeHtml(
+              formatPerformanceHeatmapMetricValue('weightedDecodeTps', weightedDecode ?? 0)
+            )
+          )}${tooltipRowHtml(
+            chartTheme,
+            escapeHtml(t('usage_analytics.performance_heatmap_median_decode')),
+            escapeHtml(formatPerformanceHeatmapMetricValue('medianDecodeTps', medianDecode ?? 0))
+          )}${tooltipRowHtml(
+            chartTheme,
+            escapeHtml(t('usage_analytics.performance_heatmap_p50_ttft')),
+            escapeHtml(formatPerformanceHeatmapMetricValue('p50TtftMs', p50Ttft ?? 0))
+          )}${tooltipRowHtml(
+            chartTheme,
+            escapeHtml(t('usage_analytics.performance_heatmap_p50_latency')),
+            escapeHtml(formatPerformanceHeatmapMetricValue('p50LatencyMs', p50Latency ?? 0))
+          )}${tooltipRowHtml(
+            chartTheme,
+            escapeHtml(t('usage_analytics.failure_rate')),
+            escapeHtml(formatPerformanceHeatmapMetricValue('failureRate', failureRate ?? 0))
+          )}${tooltipRowHtml(
+            chartTheme,
+            escapeHtml(t('usage_analytics.metric_request_count')),
+            escapeHtml(compactNumber(calls ?? 0))
+          )}${tooltipRowHtml(
+            chartTheme,
+            escapeHtml(t('usage_analytics.metric_output_tokens')),
+            escapeHtml(compactNumber(outputTokens ?? 0))
+          )}${tooltipRowHtml(
+            chartTheme,
+            escapeHtml(t('usage_analytics.performance_heatmap_decode_samples')),
+            escapeHtml(compactNumber(decodeSamples ?? 0))
+          )}`,
+          escapeHtml(`${labels[dateIndex] ?? ''} ${String(hour ?? '').padStart(2, '0')}:00`)
+        );
+      },
+      padding: 0,
+    },
+    visualMap: {
+      bottom: 20,
+      calculable: true,
+      dimension: 2,
+      formatter: () => '',
+      inRange: { color: colors },
+      itemHeight: 150,
+      itemWidth: 16,
+      left: 'center',
+      max: maxValue,
+      min: 0,
+      orient: 'horizontal',
+      textStyle: { color: chartTheme.surface.axisLabel, fontSize: 11 },
+    },
+    xAxis: {
+      axisLabel: { color: chartTheme.surface.axisLabel, fontSize: 10 },
+      axisTick: { show: false },
+      data: hours,
+      splitArea: { show: true },
+      type: 'category',
+    },
+    yAxis: {
+      axisLabel: { color: chartTheme.surface.axisLabel, fontSize: 11, fontWeight: 700 },
+      axisTick: { show: false },
+      data: labels,
+      splitArea: { show: true },
+      type: 'category',
+    },
+    series: [
+      {
+        data,
+        encode: { x: 0, y: 1, value: 2, tooltip: [2, 3, 4] },
+        emphasis: {
+          itemStyle: {
+            borderColor: chartTheme.surface.heatmapEmphasisBorder,
+            borderWidth: 1,
+            shadowBlur: 6,
+            shadowColor: appendHexAlpha(chartTheme.axisColors.requests, '4D'),
+          },
+        },
+        itemStyle: { borderColor: chartTheme.surface.heatmapCellBorder, borderWidth: 1 },
+        label: {
+          color: '#172033',
+          fontSize: 10,
+          fontWeight: 700,
+          formatter: (params) => {
+            const value = Array.isArray(params.value) ? params.value : [];
+            return formatPerformanceHeatmapMetricValue(metric, Number(value[3]) || 0).replace(
+              ' tok/s',
+              ''
+            );
+          },
+          show: labels.length <= 14,
+        },
+        name: t('usage_analytics.performance_heatmap_title'),
+        type: 'heatmap',
+      },
+    ],
+  };
+
+  if (loading) {
+    return (
+      <div className={styles.chartEmptyInline}>
+        <IconRefreshCw size={24} />
+        <span>{t('common.loading')}</span>
+      </div>
+    );
+  }
+
+  if (data.length === 0) {
+    return (
+      <div className={styles.chartEmptyInline}>
+        <IconInbox size={24} />
+        <span>{t('usage_analytics.empty_title')}</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className={styles.heatmapChartFrame}>
+      <EChartsView
+        option={option}
+        className={styles.echartsCanvas}
+        style={{ height: Math.max(300, Math.min(620, 120 + labels.length * 42)) }}
+        ariaLabel={t('usage_analytics.performance_heatmap_title')}
+      />
+      <div className={styles.heatmapLegendLabels} aria-hidden="true">
+        <span>{formatPerformanceHeatmapMetricValue(metric, 0)}</span>
+        <span>{formatPerformanceHeatmapMetricValue(metric, maxValue)}</span>
       </div>
     </div>
   );
@@ -3276,9 +3472,7 @@ function UsageAnalyticsPageInner() {
                   <Button
                     variant="secondary"
                     size="sm"
-                    onClick={() =>
-                      navigate(buildCredentialMonitoringUrl(usage.selectedCredential))
-                    }
+                    onClick={() => navigate(buildCredentialMonitoringUrl(usage.selectedCredential))}
                   >
                     <IconExternalLink size={14} />
                     {t('usage_analytics.view_request_details')}
@@ -3415,6 +3609,67 @@ function UsageAnalyticsPageInner() {
                 onSelect={usage.selectHeatmapCell}
               />
             )}
+          </section>
+          <section className={styles.chartPanel}>
+            <div className={`${styles.panelHeader} ${styles.heatmapPanelHeader}`}>
+              <div>
+                <h2>{t('usage_analytics.performance_heatmap_title')}</h2>
+                <p>
+                  {t('usage_analytics.performance_heatmap_hint')}{' '}
+                  {t('usage_analytics.heatmap_timezone_hint', {
+                    timeZone: usage.browserTimeZone,
+                  })}
+                </p>
+              </div>
+              <div className={styles.heatmapToolbar}>
+                <div
+                  className={`${styles.segmentedControl} ${styles.heatmapSegmented}`}
+                  aria-label={t('usage_analytics.performance_heatmap_metric_label')}
+                >
+                  {performanceHeatmapMetricOptions.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      aria-pressed={usage.performanceHeatmapMetric === option.value}
+                      className={`${styles.segmentButton} ${
+                        usage.performanceHeatmapMetric === option.value
+                          ? styles.segmentButtonActive
+                          : ''
+                      }`}
+                      title={t(option.descriptionKey)}
+                      onClick={() => usage.setPerformanceHeatmapMetric(option.value)}
+                    >
+                      {t(option.labelKey)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <details className={styles.performanceHelpDetails}>
+              <summary>
+                <IconInfo size={14} />
+                <span>{t('usage_analytics.performance_heatmap_help_title')}</span>
+              </summary>
+              <div className={styles.performanceHelpBody}>
+                <div className={styles.performanceHelpIntro}>
+                  <p>{t('usage_analytics.performance_heatmap_help_body')}</p>
+                  <p>{t('usage_analytics.performance_heatmap_help_color')}</p>
+                </div>
+                <dl className={styles.performanceHelpGrid}>
+                  {performanceHeatmapMetricOptions.map((option) => (
+                    <div key={option.value}>
+                      <dt>{t(option.labelKey)}</dt>
+                      <dd>{t(option.descriptionKey)}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </div>
+            </details>
+            <UsagePerformanceHeatmapChart
+              metric={usage.performanceHeatmapMetric}
+              points={usage.performanceHeatmap}
+              loading={usage.loading}
+            />
           </section>
         </>
       ) : null}

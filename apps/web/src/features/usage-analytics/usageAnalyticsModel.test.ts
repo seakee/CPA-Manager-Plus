@@ -23,6 +23,8 @@ import {
   buildUsageHeatmapHighlights,
   buildUsageHeatmapRangeContext,
   buildUsageHeatmap,
+  buildUsagePerformanceHeatmap,
+  buildUsagePerformanceHeatmapChartData,
   buildUsageCredentialTimeline,
   buildUsageTimeline,
   computeCacheHitRate,
@@ -197,6 +199,51 @@ describe('usage analytics adapters', () => {
     expect(highlights.failureRisks[0]).toMatchObject({
       metric: 'failureRate',
       value: 0.4,
+    });
+  });
+
+  it('builds performance heatmap data by date and hour', () => {
+    const points = buildUsagePerformanceHeatmap([
+      {
+        date_key: '2026-06-08',
+        date_label: '06-08',
+        weekday: 1,
+        hour: 9,
+        calls: 2,
+        success: 1,
+        failure: 1,
+        output_tokens: 180,
+        latency_samples: 2,
+        ttft_samples: 2,
+        decode_samples: 1,
+        average_latency_ms: 6000,
+        p50_latency_ms: 4000,
+        p90_latency_ms: 8000,
+        average_ttft_ms: 1500,
+        p50_ttft_ms: 1000,
+        p90_ttft_ms: 2000,
+        median_decode_tokens_per_second: 40,
+        weighted_decode_tokens_per_second: 40,
+        failure_rate: 0.5,
+      },
+    ]);
+
+    expect(points[0]).toMatchObject({
+      dateKey: '2026-06-08',
+      dateLabel: '06-08',
+      hour: 9,
+      requestCount: 2,
+      weightedDecodeTps: 40,
+      p50TtftMs: 1000,
+      p50LatencyMs: 4000,
+      failureRate: 0.5,
+    });
+
+    expect(buildUsagePerformanceHeatmapChartData(points, 'weightedDecodeTps')).toEqual({
+      dates: ['2026-06-08'],
+      labels: ['06-08'],
+      maxValue: 40,
+      data: [[9, 0, 40, 40, 2, 180, 40, 40, 1000, 4000, 0.5, 1]],
     });
   });
 

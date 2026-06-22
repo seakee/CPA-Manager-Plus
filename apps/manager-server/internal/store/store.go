@@ -55,6 +55,7 @@ type LatencySummary = usageevent.LatencySummary
 type HourlyPoint = usageevent.HourlyPoint
 type FilterOptionValues = usageevent.FilterOptionValues
 type HeatmapPoint = usageevent.HeatmapPoint
+type PerformanceHeatmapPoint = usageevent.PerformanceHeatmapPoint
 type ChannelModelStat = usageevent.ChannelModelStat
 type FailureSourceStat = usageevent.FailureSourceStat
 type AccountModelStat = usageevent.AccountModelStat
@@ -349,6 +350,10 @@ func (s *Store) FilterOptionValuesWithFilter(ctx context.Context, filter Analyti
 
 func (s *Store) HeatmapWithFilter(ctx context.Context, filter AnalyticsFilter, location *time.Location) ([]HeatmapPoint, error) {
 	return s.UsageEvents.HeatmapWithFilter(ctx, filter, location)
+}
+
+func (s *Store) PerformanceHeatmapWithFilter(ctx context.Context, filter AnalyticsFilter, location *time.Location) ([]PerformanceHeatmapPoint, error) {
+	return s.UsageEvents.PerformanceHeatmapWithFilter(ctx, filter, location)
 }
 
 func (s *Store) ChannelModelStatsWithFilter(ctx context.Context, filter AnalyticsFilter) ([]ChannelModelStat, error) {
