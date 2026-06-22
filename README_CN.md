@@ -12,11 +12,28 @@ CPA Manager Plus 是面向 [CLIProxyAPI](https://github.com/router-for-me/CLIPro
 
 ## 面板预览
 
-| 首页仪表盘 | 请求监控 |
-|---|---|
-| <img src="img/home-zh.png" alt="CPA Manager Plus 首页仪表盘" width="420"> | <img src="img/monitoring-zh.png" alt="请求监控中心" width="420"> |
-| 用量分析 | Codex 账号巡检 |
-| <img src="img/usage-analytics-zh.png" alt="用量分析页面" width="420"> | <img src="img/codex-inspection-zh.png" alt="Codex 账号巡检页面" width="420"> |
+<table>
+  <tr>
+    <td align="center">
+      <strong>首页仪表盘</strong><br>
+      <img src="img/home-zh.png" alt="CPA Manager Plus 首页仪表盘" width="420">
+    </td>
+    <td align="center">
+      <strong>请求监控</strong><br>
+      <img src="img/monitoring-zh.png" alt="请求监控中心" width="420">
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <strong>用量分析</strong><br>
+      <img src="img/usage-analytics-zh.png" alt="用量分析页面" width="420">
+    </td>
+    <td align="center">
+      <strong>Codex 账号巡检</strong><br>
+      <img src="img/codex-inspection-zh.png" alt="Codex 账号巡检页面" width="420">
+    </td>
+  </tr>
+</table>
 
 ## 核心能力
 

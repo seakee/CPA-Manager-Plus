@@ -12,11 +12,28 @@ CPA Manager Plus is a single-file management panel for [CLIProxyAPI](https://git
 
 ## Panel Preview
 
-| Dashboard | Request Monitoring |
-|---|---|
-| <img src="img/home.png" alt="CPA Manager Plus dashboard" width="420"> | <img src="img/monitoring.png" alt="Request monitoring center" width="420"> |
-| Usage Analytics | Codex Account Inspection |
-| <img src="img/usage-analytics.png" alt="Usage analytics view" width="420"> | <img src="img/codex-inspection.png" alt="Codex account inspection view" width="420"> |
+<table>
+  <tr>
+    <td align="center">
+      <strong>Dashboard</strong><br>
+      <img src="img/home.png" alt="CPA Manager Plus dashboard" width="420">
+    </td>
+    <td align="center">
+      <strong>Request Monitoring</strong><br>
+      <img src="img/monitoring.png" alt="Request monitoring center" width="420">
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <strong>Usage Analytics</strong><br>
+      <img src="img/usage-analytics.png" alt="Usage analytics view" width="420">
+    </td>
+    <td align="center">
+      <strong>Codex Account Inspection</strong><br>
+      <img src="img/codex-inspection.png" alt="Codex account inspection view" width="420">
+    </td>
+  </tr>
+</table>
 
 ## Core Features
 
