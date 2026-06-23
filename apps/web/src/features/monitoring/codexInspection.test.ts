@@ -7,10 +7,12 @@ import {
   createCodexInspectionConnectionFingerprint,
   executeCodexInspectionActions,
   hydrateCodexInspectionLastRun,
+  isReauthAction,
   loadCodexInspectionConfigurableSettings,
   loadCodexInspectionLastRun,
   resolveCodexInspectionAutoActionItems,
   saveCodexInspectionLastRun,
+  toReauthDeleteExecutionItem,
   type CodexInspectionAction,
   type CodexInspectionResultItem,
   type CodexInspectionRunResult,
@@ -315,6 +317,25 @@ describe('resolveCodexInspectionAutoActionItems', () => {
   });
 });
 
+describe('reauth delete execution mapping', () => {
+  it('keeps reauth as a non-auto-executable action until the user chooses delete', () => {
+    const reauthItem = createResultItem('reauth', {
+      fileName: 'reauth.json',
+      statusCode: 401,
+      actionReason: '接口返回 401，认证令牌已失效，建议重新登录账号',
+    });
+
+    expect(isReauthAction(reauthItem)).toBe(true);
+
+    const deleteItem = toReauthDeleteExecutionItem(reauthItem);
+    expect(deleteItem).toMatchObject({
+      fileName: 'reauth.json',
+      action: 'delete',
+    });
+    expect(deleteItem.actionReason).toContain('用户选择删除需重新登录账号');
+  });
+});
+
 describe('Codex inspection action presentation', () => {
   it('counts reauth suggestions and separates handling status from action filters', () => {
     const items = [
@@ -440,6 +461,37 @@ describe('Server Codex inspection action presentation', () => {
 });
 
 describe('executeCodexInspectionActions', () => {
+  it('deletes reauth accounts only after explicit delete mapping', async () => {
+    const deleteSpy = vi.spyOn(authFilesApi, 'deleteFileByName').mockResolvedValue({
+      status: 'ok',
+      deleted: 1,
+      files: ['reauth.json'],
+      failed: [],
+    });
+    vi.spyOn(authFilesApi, 'list').mockResolvedValue({ files: [] });
+
+    const execution = await executeCodexInspectionActions({
+      settings: createRunResult().settings,
+      items: [
+        toReauthDeleteExecutionItem(
+          createResultItem('reauth', { fileName: 'reauth.json', statusCode: 401 })
+        ),
+      ],
+      previousFiles: [],
+    });
+
+    expect(deleteSpy).toHaveBeenCalledWith('reauth.json');
+    expect(execution.outcomes).toEqual([
+      {
+        action: 'delete',
+        fileName: 'reauth.json',
+        displayAccount: 'reauth@example.com',
+        success: true,
+        error: '',
+      },
+    ]);
+  });
+
   it('uses action concurrency for disable and enable operations', async () => {
     let activeStatusUpdates = 0;
     let maxStatusUpdates = 0;

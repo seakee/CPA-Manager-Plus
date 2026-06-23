@@ -614,6 +614,18 @@ export const isSuggestedAction = (item: CodexInspectionResultItem) => item.actio
 export const isExecutableAction = (item: CodexInspectionResultItem) =>
   item.action === 'delete' || item.action === 'disable' || item.action === 'enable';
 
+export const isReauthAction = (item: CodexInspectionResultItem) => item.action === 'reauth';
+
+export const toReauthDeleteExecutionItem = (
+  item: CodexInspectionResultItem
+): CodexInspectionResultItem => ({
+  ...item,
+  action: 'delete',
+  actionReason: item.actionReason
+    ? `${item.actionReason}；用户选择删除需重新登录账号`
+    : '用户选择删除需重新登录账号',
+});
+
 export const resolveCodexInspectionAutoActionItems = (
   mode: CodexInspectionAutoActionMode,
   items: CodexInspectionResultItem[]

@@ -11,12 +11,14 @@ import {
   executeCodexInspectionActions,
   isCodexInspectionStoppedError,
   isExecutableAction,
+  isReauthAction,
   isSuggestedAction,
   loadCodexInspectionLastRun,
   resolveCodexInspectionAutoActionItems,
   loadCodexInspectionConfigurableSettings,
   saveCodexInspectionLastRun,
   saveCodexInspectionConfigurableSettings,
+  toReauthDeleteExecutionItem,
   type CodexInspectionAutoActionMode,
   type CodexInspectionConfigurableSettings,
   type CodexInspectionLogLevel,
@@ -506,6 +508,11 @@ export function CodexInspectionPage() {
     [result]
   );
 
+  const reauthResults = useMemo(
+    () => (result ? result.results.filter(isReauthAction) : []),
+    [result]
+  );
+
   const filteredResults = useMemo(
     () => filterInspectionResults(displayResults, handlingFilter, actionFilter),
     [displayResults, handlingFilter, actionFilter]
@@ -563,6 +570,39 @@ export function CodexInspectionPage() {
         cancelText: t('common.cancel'),
         variant: item.action === 'delete' ? 'danger' : 'primary',
         onConfirm: () => executeItems([item]),
+      });
+    },
+    [executeItems, showConfirmation, t]
+  );
+
+  const handleDeleteReauthPlanned = useCallback(() => {
+    if (!result) return;
+
+    const targets = reauthResults.map(toReauthDeleteExecutionItem);
+    showConfirmation({
+      title: t('monitoring.codex_inspection_delete_reauth_confirm_title'),
+      message: t('monitoring.codex_inspection_delete_reauth_confirm_body', {
+        count: targets.length,
+      }),
+      confirmText: t('monitoring.codex_inspection_delete_reauth_now'),
+      cancelText: t('common.cancel'),
+      variant: 'danger',
+      onConfirm: () => executeItems(targets),
+    });
+  }, [executeItems, reauthResults, result, showConfirmation, t]);
+
+  const handleDeleteSingleReauth = useCallback(
+    (item: CodexInspectionResultItem) => {
+      showConfirmation({
+        title: t('monitoring.codex_inspection_delete_reauth_single_title'),
+        message: t('monitoring.codex_inspection_delete_reauth_single_body', {
+          account: item.displayAccount,
+          file: item.fileName,
+        }),
+        confirmText: t('monitoring.codex_inspection_action_delete'),
+        cancelText: t('common.cancel'),
+        variant: 'danger',
+        onConfirm: () => executeItems([toReauthDeleteExecutionItem(item)]),
       });
     },
     [executeItems, showConfirmation, t]
@@ -907,6 +947,7 @@ export function CodexInspectionPage() {
         suggestedResults={suggestedResults}
         pendingActionCount={pendingActionCount}
         manualActionCount={filterCounts.reauth}
+        reauthActionCount={reauthResults.length}
         handlingFilterCounts={handlingFilterCounts}
         filterCounts={filterCounts}
         handlingFilter={handlingFilter}
@@ -924,6 +965,8 @@ export function CodexInspectionPage() {
         onExecutePlanned={handleExecutePlanned}
         onExecuteSingle={handleExecuteSingle}
         onReauthAccount={handleOpenCodexReauth}
+        onDeleteReauthPlanned={handleDeleteReauthPlanned}
+        onDeleteReauthSingle={handleDeleteSingleReauth}
         filterLabel={filterLabel}
         handlingFilterLabel={handlingFilterLabel}
       />

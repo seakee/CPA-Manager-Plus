@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 import type { TFunction } from 'i18next';
 import { Button } from '@/components/ui/Button';
 import { Select } from '@/components/ui/Select';
-import { IconRefreshCw } from '@/components/ui/icons';
+import { IconRefreshCw, IconTrash2 } from '@/components/ui/icons';
 import {
   type CodexInspectionAction,
   type CodexInspectionResultItem,
@@ -30,6 +30,7 @@ type CodexInspectionResultsPanelProps = {
   suggestedResults: CodexInspectionResultItem[];
   pendingActionCount: number;
   manualActionCount?: number;
+  reauthActionCount?: number;
   handlingFilterCounts: Record<HandlingFilter, number>;
   filterCounts: Record<ActionFilter, number>;
   handlingFilter: HandlingFilter;
@@ -50,6 +51,8 @@ type CodexInspectionResultsPanelProps = {
   onExecutePlanned: () => void;
   onExecuteSingle: (item: CodexInspectionResultItem) => void;
   onReauthAccount?: (item: CodexInspectionResultItem) => void;
+  onDeleteReauthPlanned?: () => void;
+  onDeleteReauthSingle?: (item: CodexInspectionResultItem) => void;
   filterLabel: (filter: ActionFilter) => string;
   handlingFilterLabel: (filter: HandlingFilter) => string;
   renderOperation?: (item: CodexInspectionResultItem) => ReactNode;
@@ -69,6 +72,7 @@ export function CodexInspectionResultsPanel({
   suggestedResults,
   pendingActionCount,
   manualActionCount = 0,
+  reauthActionCount = 0,
   handlingFilterCounts,
   filterCounts,
   handlingFilter,
@@ -89,15 +93,18 @@ export function CodexInspectionResultsPanel({
   onExecutePlanned,
   onExecuteSingle,
   onReauthAccount,
+  onDeleteReauthPlanned,
+  onDeleteReauthSingle,
   filterLabel,
   handlingFilterLabel,
   renderOperation,
 }: CodexInspectionResultsPanelProps) {
+  const reauthDeleteAvailable = Boolean(onDeleteReauthPlanned);
   const headerButtonText = executing
     ? t('monitoring.codex_inspection_executing')
     : pendingActionCount > 0
       ? t('monitoring.codex_inspection_execute_now')
-      : manualActionCount > 0
+      : manualActionCount > 0 && !reauthDeleteAvailable
         ? t('monitoring.codex_inspection_pending_reauth_count', { count: manualActionCount })
         : t('monitoring.codex_inspection_no_executable_actions');
 
@@ -107,6 +114,19 @@ export function CodexInspectionResultsPanel({
       subtitle={subtitle ?? t('monitoring.codex_inspection_results_desc')}
       extra={
         <div className={styles.resultsHeaderActions}>
+          {onDeleteReauthPlanned ? (
+            <Button
+              variant="danger"
+              size="sm"
+              onClick={onDeleteReauthPlanned}
+              disabled={!result || isInspectionInFlight || executing || reauthActionCount === 0}
+            >
+              <IconTrash2 size={14} />
+              {t('monitoring.codex_inspection_delete_reauth_count', {
+                count: reauthActionCount,
+              })}
+            </Button>
+          ) : null}
           <Button
             variant={pendingActionCount > 0 ? 'danger' : 'secondary'}
             size="sm"
@@ -271,21 +291,34 @@ export function CodexInspectionResultsPanel({
                               {formatActionLabel(item.action, t)}
                             </Button>
                           ) : item.action === 'reauth' ? (
-                            onReauthAccount ? (
-                              <Button
-                                size="sm"
-                                variant="secondary"
-                                onClick={() => onReauthAccount(item)}
-                                disabled={isInspectionInFlight || executing}
-                              >
-                                <IconRefreshCw size={14} />
-                                {t('codex_reauth.button')}
-                              </Button>
-                            ) : (
-                              <span className={styles.primaryReason}>
-                                {t('monitoring.codex_inspection_manual_required')}
-                              </span>
-                            )
+                            <div className={styles.resultsHeaderActions}>
+                              {onReauthAccount ? (
+                                <Button
+                                  size="sm"
+                                  variant="secondary"
+                                  onClick={() => onReauthAccount(item)}
+                                  disabled={isInspectionInFlight || executing}
+                                >
+                                  <IconRefreshCw size={14} />
+                                  {t('codex_reauth.button')}
+                                </Button>
+                              ) : (
+                                <span className={styles.primaryReason}>
+                                  {t('monitoring.codex_inspection_manual_required')}
+                                </span>
+                              )}
+                              {onDeleteReauthSingle ? (
+                                <Button
+                                  size="sm"
+                                  variant="danger"
+                                  onClick={() => onDeleteReauthSingle(item)}
+                                  disabled={isInspectionInFlight || executing}
+                                >
+                                  <IconTrash2 size={14} />
+                                  {t('monitoring.codex_inspection_action_delete')}
+                                </Button>
+                              ) : null}
+                            </div>
                           ) : (
                             <span className={styles.primaryReason}>
                               {t('monitoring.codex_inspection_no_action')}
