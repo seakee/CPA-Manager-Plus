@@ -38,6 +38,7 @@ settings.local.json
 *.sw?
 
 TODO.md
+/docs/plan/
 
 /bin/tmp/
 /bin/cpa-manager
