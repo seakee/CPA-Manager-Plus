@@ -1,5 +1,11 @@
-import { useEffect, useRef, useState, type ReactElement } from 'react';
-import { Navigate, useLocation, useRoutes, type Location } from 'react-router-dom';
+import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
+import {
+  Navigate,
+  useLocation,
+  useRoutes,
+  type Location,
+  type RouteObject,
+} from 'react-router-dom';
 import { DashboardPage } from '@/pages/DashboardPage';
 import { AiProvidersPage } from '@/pages/AiProvidersPage';
 import { AiProvidersClaudeEditLayout } from '@/pages/AiProvidersClaudeEditLayout';
@@ -31,6 +37,7 @@ import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { CodexInspectionModeTabs } from '@/features/monitoring/components/CodexInspectionModeTabs';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import { isLogsRouteAvailable } from '@/features/logs/logFeatureAvailability';
+import { ensureRouteBasePathname, isDemoMode } from '@/features/demo/demoMode';
 import { useAuthStore, useConfigStore } from '@/stores';
 import codexInspectionStyles from '@/features/monitoring/CodexInspectionPage.module.scss';
 
@@ -38,6 +45,9 @@ type FeatureKey = 'requestMonitoring' | 'modelPrices' | 'serverCodexInspection';
 
 function PluginGate({ children }: { children: ReactElement }) {
   const supportsPlugin = useAuthStore((state) => state.supportsPlugin);
+  if (__DEMO_SITE__ && isDemoMode()) {
+    return children;
+  }
   if (!supportsPlugin) {
     return <Navigate to="/" replace />;
   }
@@ -139,7 +149,7 @@ function LogsGate({ children }: { children: ReactElement }) {
   return children;
 }
 
-const mainRoutes = [
+const mainRoutes: RouteObject[] = [
   { path: '/', element: <DashboardPage /> },
   { path: '/dashboard', element: <DashboardPage /> },
   { path: '/settings', element: <Navigate to="/config" replace /> },
@@ -290,6 +300,32 @@ const mainRoutes = [
   { path: '*', element: <Navigate to="/" replace /> },
 ];
 
-export function MainRoutes({ location }: { location?: Location }) {
-  return useRoutes(mainRoutes, location);
+const ensureRouteLocationBase = (
+  location: Location | undefined,
+  routeBase: string | undefined
+): Location | undefined => {
+  if (!location || !routeBase) return location;
+
+  const pathname = ensureRouteBasePathname(location.pathname, routeBase);
+  if (pathname === location.pathname) return location;
+
+  return {
+    ...location,
+    pathname,
+  };
+};
+
+export function MainRoutes({
+  location,
+  routeBase,
+}: {
+  location?: Location;
+  routeBase?: string;
+}) {
+  const routeLocation = useMemo(
+    () => ensureRouteLocationBase(location, routeBase),
+    [location, routeBase]
+  );
+
+  return useRoutes(mainRoutes, routeLocation);
 }

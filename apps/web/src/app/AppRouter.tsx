@@ -1,26 +1,8 @@
+import { useMemo } from 'react';
 import { RouterProvider, createHashRouter } from 'react-router-dom';
-import { MainLayout } from '@/components/layout/MainLayout';
-import { LoginPage } from '@/pages/LoginPage';
-import { ProtectedRoute } from '@/router/ProtectedRoute';
-import { RootShell } from './RootShell';
-
-const router = createHashRouter([
-  {
-    element: <RootShell />,
-    children: [
-      { path: '/login', element: <LoginPage /> },
-      {
-        path: '/*',
-        element: (
-          <ProtectedRoute>
-            <MainLayout />
-          </ProtectedRoute>
-        ),
-      },
-    ],
-  },
-]);
+import { createAppRoutes } from './appRoutes';
 
 export function AppRouter() {
+  const router = useMemo(() => createHashRouter(createAppRoutes()), []);
   return <RouterProvider router={router} />;
 }

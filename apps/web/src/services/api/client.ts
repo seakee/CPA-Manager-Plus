@@ -12,6 +12,12 @@ import {
   VERSION_HEADER_KEYS
 } from '@/utils/constants';
 import { computeApiUrl } from '@/utils/connection';
+import {
+  handleDemoApiRequest,
+  handleDemoFormRequest,
+  handleDemoRawRequest,
+} from '@/features/demo/demoApi';
+import { isDemoMode } from '@/features/demo/demoMode';
 
 class ApiClient {
   private instance: AxiosInstance;
@@ -194,6 +200,9 @@ class ApiClient {
    * GET 请求
    */
   async get<T = unknown>(url: string, config?: AxiosRequestConfig): Promise<T> {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return handleDemoApiRequest<T>('get', url, undefined, config);
+    }
     const response = await this.instance.get<T>(url, config);
     return response.data;
   }
@@ -202,6 +211,9 @@ class ApiClient {
    * POST 请求
    */
   async post<T = unknown>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T> {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return handleDemoApiRequest<T>('post', url, data, config);
+    }
     const response = await this.instance.post<T>(url, data, config);
     return response.data;
   }
@@ -210,6 +222,9 @@ class ApiClient {
    * PUT 请求
    */
   async put<T = unknown>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T> {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return handleDemoApiRequest<T>('put', url, data, config);
+    }
     const response = await this.instance.put<T>(url, data, config);
     return response.data;
   }
@@ -218,6 +233,9 @@ class ApiClient {
    * PATCH 请求
    */
   async patch<T = unknown>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T> {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return handleDemoApiRequest<T>('patch', url, data, config);
+    }
     const response = await this.instance.patch<T>(url, data, config);
     return response.data;
   }
@@ -226,6 +244,9 @@ class ApiClient {
    * DELETE 请求
    */
   async delete<T = unknown>(url: string, config?: AxiosRequestConfig): Promise<T> {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return handleDemoApiRequest<T>('delete', url, undefined, config);
+    }
     const response = await this.instance.delete<T>(url, config);
     return response.data;
   }
@@ -234,6 +255,9 @@ class ApiClient {
    * 获取原始响应（用于下载等场景）
    */
   async getRaw(url: string, config?: AxiosRequestConfig): Promise<AxiosResponse> {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return handleDemoRawRequest(url, config);
+    }
     return this.instance.get(url, config);
   }
 
@@ -245,6 +269,9 @@ class ApiClient {
     formData: FormData,
     config?: AxiosRequestConfig
   ): Promise<T> {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return handleDemoFormRequest<T>(url, formData, config);
+    }
     const response = await this.instance.post<T>(url, formData, {
       ...config,
       headers: {
@@ -259,6 +286,9 @@ class ApiClient {
    * 保留对 axios.request 的访问，便于下载等场景
    */
   async requestRaw(config: AxiosRequestConfig): Promise<AxiosResponse> {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return handleDemoRawRequest(config.url || '/', config);
+    }
     return this.instance.request(config);
   }
 }

@@ -5,6 +5,8 @@
 import axios from 'axios';
 import { normalizeModelList } from '@/utils/models';
 import { normalizeApiBase } from '@/utils/connection';
+import { getDemoProviderModels } from '@/features/demo/demoFixtures';
+import { isDemoMode } from '@/features/demo/demoMode';
 import { apiCallApi, getApiCallErrorMessage } from './apiCall';
 
 const DEFAULT_CLAUDE_BASE_URL = 'https://api.anthropic.com';
@@ -88,6 +90,10 @@ export const modelsApi = {
    * Fetch available models from /v1/models endpoint (for system info page)
    */
   async fetchModels(baseUrl: string, apiKey?: string, headers: Record<string, string> = {}) {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return getDemoProviderModels();
+    }
+
     const endpoint = buildV1ModelsEndpoint(baseUrl);
     if (!endpoint) {
       throw new Error('Invalid base url');

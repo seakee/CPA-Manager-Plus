@@ -5,6 +5,7 @@ import {
   usageServiceApi,
   type ManagerConfig,
 } from '@/services/api/usageService';
+import { DEMO_API_BASE, isDemoMode } from '@/features/demo/demoMode';
 import { useAuthStore } from '@/stores';
 import { detectApiBaseFromLocation } from '@/utils/connection';
 
@@ -156,6 +157,20 @@ const initialAvailability: PanelFeatureAvailability = {
   reason: 'checking',
 };
 
+const demoAvailability: PanelFeatureAvailability = {
+  checking: false,
+  panelHostMode: 'manager_embedded',
+  panelBase: DEMO_API_BASE,
+  managerServiceBase: DEMO_API_BASE,
+  managerServiceAvailable: true,
+  requestMonitoringAvailable: true,
+  modelPricesAvailable: true,
+  serverCodexInspectionAvailable: true,
+  dockerSetupAvailable: true,
+  externalManagerConfigAvailable: false,
+  reason: '',
+};
+
 let cachedAvailabilityKey = '';
 let cachedAvailability: PanelFeatureAvailability | null = null;
 let inFlightAvailabilityRequest: PanelFeatureAvailabilityRequest | null = null;
@@ -274,6 +289,7 @@ function requestPanelFeatureAvailability(
 }
 
 export function usePanelFeatureAvailability(): PanelFeatureAvailability {
+  const demoMode = __DEMO_SITE__ && isDemoMode();
   const apiBase = useAuthStore((state) => state.apiBase);
   const managementKey = useAuthStore((state) => state.managementKey);
   const panelBase = useMemo(() => detectApiBaseFromLocation(), []);
@@ -291,13 +307,21 @@ export function usePanelFeatureAvailability(): PanelFeatureAvailability {
     [requestInput]
   );
   const [state, setState] = useState<PanelFeatureAvailability>(() =>
-    cachedAvailabilityKey === requestKey && cachedAvailability
-      ? cachedAvailability
-      : initialAvailability
+    demoMode
+      ? demoAvailability
+      : cachedAvailabilityKey === requestKey && cachedAvailability
+        ? cachedAvailability
+        : initialAvailability
   );
 
   useEffect(() => {
     let cancelled = false;
+    if (demoMode) {
+      return () => {
+        cancelled = true;
+      };
+    }
+
     const hasCachedAvailability = cachedAvailabilityKey === requestKey && cachedAvailability;
     if (!hasCachedAvailability) {
       queueMicrotask(() => {
@@ -322,9 +346,10 @@ export function usePanelFeatureAvailability(): PanelFeatureAvailability {
     };
   }, [
     panelBase,
+    demoMode,
     requestInput,
     requestKey,
   ]);
 
-  return state;
+  return demoMode ? demoAvailability : state;
 }
