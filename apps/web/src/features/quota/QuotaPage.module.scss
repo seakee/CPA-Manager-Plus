@@ -276,6 +276,36 @@
   }
 }
 
+.quotaBatchActions {
+  display: inline-flex;
+  align-items: center;
+  gap: $spacing-xs;
+  padding: 3px;
+  border: 1px solid color-mix(in srgb, var(--danger-color) 22%, var(--border-color));
+  border-radius: $radius-md;
+  background: color-mix(in srgb, var(--danger-color) 7%, var(--bg-secondary));
+
+  :global(.btn.btn-sm) > span {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+  }
+
+  @include mobile {
+    width: 100%;
+    justify-content: space-between;
+  }
+}
+
+.quotaBatchSelected {
+  padding-inline: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
 .accountDisplayModeButton:global(.btn.btn-sm) {
   height: 34px;
   min-height: 34px;
@@ -381,6 +411,16 @@
   padding-top: $spacing-sm;
   margin-top: $spacing-xs;
   border-top: 1px dashed var(--border-color);
+}
+
+.quotaCardSelection {
+  flex: 0 0 auto;
+}
+
+.quotaDeleteAuthFileButton:global(.btn.btn-sm) {
+  width: 34px;
+  padding-inline: 0;
+  border-radius: $radius-sm;
 }
 
 .quotaRow {
