@@ -6,6 +6,7 @@
 export interface ModelAlias {
   name: string;
   alias?: string;
+  forceMapping?: boolean;
   priority?: number;
   testModel?: string;
   image?: boolean;

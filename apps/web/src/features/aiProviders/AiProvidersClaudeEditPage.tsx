@@ -405,6 +405,11 @@ export function AiProvidersClaudeEditPage() {
                 className={styles.modelInputList}
                 rowClassName={styles.modelInputRow}
                 inputClassName={styles.modelInputField}
+                showForceMapping
+                forceMappingClassName={styles.modelInputForceMapping}
+                forceMappingLabel={t('common.model_force_mapping_label')}
+                forceMappingTitle={t('common.model_force_mapping_hint')}
+                forceMappingAriaLabel={t('common.model_force_mapping_label')}
                 removeButtonClassName={styles.modelRowRemoveButton}
                 removeButtonTitle={t('common.delete')}
                 removeButtonAriaLabel={t('common.delete')}

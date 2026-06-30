@@ -64,17 +64,26 @@ const getErrorMessage = (err: unknown) => {
   return '';
 };
 
-const normalizeModelEntries = (entries: Array<{ name: string; alias: string }>) =>
-  (entries ?? []).reduce<Array<{ name: string; alias: string }>>((acc, entry) => {
-    const name = String(entry?.name ?? '').trim();
-    let alias = String(entry?.alias ?? '').trim();
-    if (name && alias === name) {
-      alias = '';
-    }
-    if (!name && !alias) return acc;
-    acc.push({ name, alias });
-    return acc;
-  }, []);
+const normalizeModelEntries = (
+  entries: Array<{ name: string; alias: string; forceMapping?: boolean }>
+) =>
+  (entries ?? []).reduce<Array<{ name: string; alias: string; forceMapping?: boolean }>>(
+    (acc, entry) => {
+      const name = String(entry?.name ?? '').trim();
+      let alias = String(entry?.alias ?? '').trim();
+      if (name && alias === name) {
+        alias = '';
+      }
+      if (!name && !alias) return acc;
+      const normalized =
+        entry.forceMapping !== undefined
+          ? { name, alias, forceMapping: entry.forceMapping }
+          : { name, alias };
+      acc.push(normalized);
+      return acc;
+    },
+    []
+  );
 
 type CodexFormBaseline = {
   apiKey: string;
@@ -836,6 +845,11 @@ export function AiProvidersCodexEditPage() {
                 className={styles.modelInputList}
                 rowClassName={styles.modelInputRow}
                 inputClassName={styles.modelInputField}
+                showForceMapping
+                forceMappingClassName={styles.modelInputForceMapping}
+                forceMappingLabel={t('common.model_force_mapping_label')}
+                forceMappingTitle={t('common.model_force_mapping_hint')}
+                forceMappingAriaLabel={t('common.model_force_mapping_label')}
                 removeButtonClassName={styles.modelRowRemoveButton}
                 removeButtonTitle={t('common.delete')}
                 removeButtonAriaLabel={t('common.delete')}

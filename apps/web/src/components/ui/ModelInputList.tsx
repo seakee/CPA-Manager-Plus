@@ -1,6 +1,7 @@
 import { Fragment } from 'react';
 import { Button } from './Button';
 import { IconX } from './icons';
+import { SelectionCheckbox } from './SelectionCheckbox';
 import type { ModelEntry } from './modelInputListUtils';
 
 interface ModelInputListProps {
@@ -15,9 +16,14 @@ interface ModelInputListProps {
   className?: string;
   rowClassName?: string;
   inputClassName?: string;
+  forceMappingClassName?: string;
   removeButtonClassName?: string;
   removeButtonTitle?: string;
   removeButtonAriaLabel?: string;
+  showForceMapping?: boolean;
+  forceMappingLabel?: string;
+  forceMappingTitle?: string;
+  forceMappingAriaLabel?: string;
 }
 
 export function ModelInputList({
@@ -32,17 +38,31 @@ export function ModelInputList({
   className = '',
   rowClassName = '',
   inputClassName = '',
+  forceMappingClassName = '',
   removeButtonClassName = '',
   removeButtonTitle = 'Remove',
   removeButtonAriaLabel = 'Remove',
+  showForceMapping = false,
+  forceMappingLabel,
+  forceMappingTitle,
+  forceMappingAriaLabel,
 }: ModelInputListProps) {
   const currentEntries = entries.length ? entries : [{ name: '', alias: '' }];
   const containerClassName = ['header-input-list', className].filter(Boolean).join(' ');
   const inputClassNames = ['input', inputClassName].filter(Boolean).join(' ');
-  const rowClassNames = ['header-input-row', rowClassName].filter(Boolean).join(' ');
+  const baseRowClassNames = ['header-input-row', rowClassName].filter(Boolean).join(' ');
 
   const updateEntry = (index: number, field: 'name' | 'alias', value: string) => {
-    const next = currentEntries.map((entry, idx) => (idx === index ? { ...entry, [field]: value } : entry));
+    const next = currentEntries.map((entry, idx) =>
+      idx === index ? { ...entry, [field]: value } : entry
+    );
+    onChange(next);
+  };
+
+  const updateForceMapping = (index: number, value: boolean) => {
+    const next = currentEntries.map((entry, idx) =>
+      idx === index ? { ...entry, forceMapping: value } : entry
+    );
     onChange(next);
   };
 
@@ -63,7 +83,14 @@ export function ModelInputList({
     <div className={containerClassName}>
       {currentEntries.map((entry, index) => (
         <Fragment key={index}>
-          <div className={rowClassNames}>
+          <div
+            className={[
+              baseRowClassNames,
+              showForceMapping ? 'model-input-row-with-force-mapping' : '',
+            ]
+              .filter(Boolean)
+              .join(' ')}
+          >
             <input
               className={inputClassNames}
               placeholder={namePlaceholder}
@@ -79,6 +106,17 @@ export function ModelInputList({
               onChange={(e) => updateEntry(index, 'alias', e.target.value)}
               disabled={disabled}
             />
+            {showForceMapping && (
+              <SelectionCheckbox
+                checked={Boolean(entry.forceMapping)}
+                onChange={(value) => updateForceMapping(index, value)}
+                label={forceMappingLabel}
+                ariaLabel={forceMappingAriaLabel || forceMappingLabel}
+                title={forceMappingTitle}
+                disabled={disabled}
+                className={forceMappingClassName}
+              />
+            )}
             <Button
               variant="ghost"
               size="xs"
@@ -95,7 +133,13 @@ export function ModelInputList({
         </Fragment>
       ))}
       {!hideAddButton && addLabel && (
-        <Button variant="secondary" size="xs" onClick={addEntry} disabled={disabled} className="align-start">
+        <Button
+          variant="secondary"
+          size="xs"
+          onClick={addEntry}
+          disabled={disabled}
+          className="align-start"
+        >
           {addLabel}
         </Button>
       )}

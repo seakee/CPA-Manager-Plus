@@ -113,6 +113,7 @@ describe('providersApi v1.16 provider fields', () => {
           models: [
             {
               name: 'gpt-image',
+              'force-mapping': true,
               image: true,
               thinking: { effort: 'high' },
             },
@@ -126,7 +127,9 @@ describe('providersApi v1.16 provider fields', () => {
     expect(providers[0]).toMatchObject({
       name: 'openai-compatible',
       disableCooling: true,
-      models: [{ name: 'gpt-image', image: true, thinking: { effort: 'high' } }],
+      models: [
+        { name: 'gpt-image', forceMapping: true, image: true, thinking: { effort: 'high' } },
+      ],
     });
   });
 
@@ -192,6 +195,7 @@ describe('providersApi v1.16 provider fields', () => {
           {
             name: 'claude-sonnet',
             alias: 'sonnet',
+            forceMapping: true,
             image: true,
             thinking: { budget_tokens: 1024 },
           },
@@ -215,6 +219,7 @@ describe('providersApi v1.16 provider fields', () => {
             'raw-model-field': true,
             name: 'claude-sonnet',
             alias: 'sonnet',
+            'force-mapping': true,
             image: true,
             thinking: { budget_tokens: 1024 },
           },
@@ -409,6 +414,7 @@ describe('providersApi v1.16 provider fields', () => {
           'base-url': 'https://api.example.com/v1',
           'api-key-entries': [],
           'disable-cooling': true,
+          models: [{ name: 'openai-model', 'force-mapping': true }],
         },
       ],
     });
@@ -420,6 +426,7 @@ describe('providersApi v1.16 provider fields', () => {
         baseUrl: 'https://api.example.com/v1',
         apiKeyEntries: [],
         disableCooling: false,
+        models: [{ name: 'openai-model', forceMapping: false }],
       },
     ]);
 
@@ -429,6 +436,7 @@ describe('providersApi v1.16 provider fields', () => {
         'base-url': 'https://api.example.com/v1',
         'api-key-entries': [],
         'disable-cooling': false,
+        models: [{ name: 'openai-model', 'force-mapping': false }],
       },
     ]);
   });

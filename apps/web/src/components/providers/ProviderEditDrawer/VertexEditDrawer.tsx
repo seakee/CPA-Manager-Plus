@@ -36,12 +36,12 @@ const buildEmptyForm = (): VertexFormState => ({
   excludedText: '',
 });
 
-const normalizeModelEntries = (entries: Array<{ name: string; alias: string }>) =>
-  (entries ?? []).reduce<Array<{ name: string; alias: string }>>((acc, entry) => {
+const normalizeModelEntries = (entries: Array<{ name: string; alias: string; forceMapping?: boolean }>) =>
+  (entries ?? []).reduce<Array<{ name: string; alias: string; forceMapping?: boolean }>>((acc, entry) => {
     const name = String(entry?.name ?? '').trim();
     const alias = String(entry?.alias ?? '').trim();
     if (!name && !alias) return acc;
-    acc.push({ name, alias });
+    acc.push(entry.forceMapping !== undefined ? { name, alias, forceMapping: entry.forceMapping } : { name, alias });
     return acc;
   }, []);
 
@@ -117,7 +117,7 @@ export function VertexEditDrawer({ open, editIndex, disabled, onClose, onSaved }
       const nextForm: VertexFormState = {
         ...initialData,
         headers: headersToEntries(initialData.headers),
-        modelEntries: initialData.models?.map((m) => ({ name: m.name, alias: m.alias ?? '' })) ?? [{ name: '', alias: '' }],
+        modelEntries: initialData.models?.map((m) => ({ name: m.name, alias: m.alias ?? '', forceMapping: m.forceMapping })) ?? [{ name: '', alias: '' }],
         excludedText: excludedModelsToText(initialData.excludedModels),
       };
       setForm(nextForm);
@@ -171,7 +171,7 @@ export function VertexEditDrawer({ open, editIndex, disabled, onClose, onSaved }
           const name = entry.name.trim();
           const alias = entry.alias.trim();
           if (!name || !alias) return null;
-          return { name, alias };
+          return entry.forceMapping !== undefined ? { name, alias, forceMapping: entry.forceMapping } : { name, alias };
         }).filter(Boolean) as ProviderKeyConfig['models'],
         excludedModels: parseExcludedModels(form.excludedText),
       };
@@ -242,6 +242,15 @@ export function VertexEditDrawer({ open, editIndex, disabled, onClose, onSaved }
                 onChange={(entries) => setForm((prev) => ({ ...prev, modelEntries: entries }))}
                 addLabel={t('ai_providers.vertex_models_add_btn')}
                 namePlaceholder={t('common.model_name_placeholder')} aliasPlaceholder={t('common.model_alias_placeholder')}
+                className={styles.modelInputList}
+                rowClassName={styles.modelInputRow}
+                inputClassName={styles.modelInputField}
+                showForceMapping
+                forceMappingClassName={styles.modelInputForceMapping}
+                forceMappingLabel={t('common.model_force_mapping_label')}
+                forceMappingTitle={t('common.model_force_mapping_hint')}
+                forceMappingAriaLabel={t('common.model_force_mapping_label')}
+                removeButtonClassName={styles.modelRowRemoveButton}
                 removeButtonTitle={t('common.delete')} removeButtonAriaLabel={t('common.delete')}
                 disabled={disabled || saving} />
             </div>

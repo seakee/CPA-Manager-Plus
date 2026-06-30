@@ -74,17 +74,26 @@ const getErrorMessage = (err: unknown) => {
   return '';
 };
 
-const normalizeClaudeModelEntries = (entries: Array<{ name: string; alias: string }>) =>
-  (entries ?? []).reduce<Array<{ name: string; alias: string }>>((acc, entry) => {
-    const name = String(entry?.name ?? '').trim();
-    let alias = String(entry?.alias ?? '').trim();
-    if (name) {
-      alias = alias || name;
-    }
-    if (!name && !alias) return acc;
-    acc.push({ name, alias });
-    return acc;
-  }, []);
+const normalizeClaudeModelEntries = (
+  entries: Array<{ name: string; alias: string; forceMapping?: boolean }>
+) =>
+  (entries ?? []).reduce<Array<{ name: string; alias: string; forceMapping?: boolean }>>(
+    (acc, entry) => {
+      const name = String(entry?.name ?? '').trim();
+      let alias = String(entry?.alias ?? '').trim();
+      if (name) {
+        alias = alias || name;
+      }
+      if (!name && !alias) return acc;
+      const normalized =
+        entry.forceMapping !== undefined
+          ? { name, alias, forceMapping: entry.forceMapping }
+          : { name, alias };
+      acc.push(normalized);
+      return acc;
+    },
+    []
+  );
 
 const normalizeCloakConfig = (cloak: ProviderFormState['cloak']) => {
   if (!cloak) return null;

@@ -72,6 +72,12 @@ const normalizeModelAliases = (models: unknown): ModelAlias[] => {
       if (testModel) {
         entry.testModel = String(testModel);
       }
+      const forceMapping = normalizeBoolean(
+        item['force-mapping'] ?? item.forceMapping ?? item.force_mapping
+      );
+      if (forceMapping !== undefined) {
+        entry.forceMapping = forceMapping;
+      }
       const image = normalizeBoolean(item.image ?? item['image']);
       if (image !== undefined) {
         entry.image = image;

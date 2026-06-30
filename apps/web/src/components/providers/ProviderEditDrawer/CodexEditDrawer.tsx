@@ -61,15 +61,24 @@ const buildEmptyForm = (): ProviderFormState => ({
   excludedText: '',
 });
 
-const normalizeModelEntries = (entries: Array<{ name: string; alias: string }>) =>
-  (entries ?? []).reduce<Array<{ name: string; alias: string }>>((acc, entry) => {
-    const name = String(entry?.name ?? '').trim();
-    let alias = String(entry?.alias ?? '').trim();
-    if (name && alias === name) alias = '';
-    if (!name && !alias) return acc;
-    acc.push({ name, alias });
-    return acc;
-  }, []);
+const normalizeModelEntries = (
+  entries: Array<{ name: string; alias: string; forceMapping?: boolean }>
+) =>
+  (entries ?? []).reduce<Array<{ name: string; alias: string; forceMapping?: boolean }>>(
+    (acc, entry) => {
+      const name = String(entry?.name ?? '').trim();
+      let alias = String(entry?.alias ?? '').trim();
+      if (name && alias === name) alias = '';
+      if (!name && !alias) return acc;
+      const normalized =
+        entry.forceMapping !== undefined
+          ? { name, alias, forceMapping: entry.forceMapping }
+          : { name, alias };
+      acc.push(normalized);
+      return acc;
+    },
+    []
+  );
 
 const buildCodexBaseline = (form: ProviderFormState) => ({
   apiKey: String(form.apiKey ?? '').trim(),
@@ -220,11 +229,7 @@ export function CodexEditDrawer({
 
   const configuredModelNames = useMemo(
     () =>
-      new Set(
-        form.modelEntries
-          .map((entry) => entry.name.trim().toLowerCase())
-          .filter(Boolean)
-      ),
+      new Set(form.modelEntries.map((entry) => entry.name.trim().toLowerCase()).filter(Boolean)),
     [form.modelEntries]
   );
 
@@ -524,7 +529,9 @@ export function CodexEditDrawer({
   }, [modelDiscoveryOpen, fetchModelDiscovery]);
 
   useEffect(() => {
-    const availableNames = new Set(discoveredModels.map((model) => String(model.name ?? '').trim()));
+    const availableNames = new Set(
+      discoveredModels.map((model) => String(model.name ?? '').trim())
+    );
     setModelDiscoverySelected((prev) => {
       let changed = false;
       const next = new Set<string>();
@@ -683,6 +690,11 @@ export function CodexEditDrawer({
                 className={styles.modelInputList}
                 rowClassName={styles.modelInputRow}
                 inputClassName={styles.modelInputField}
+                showForceMapping
+                forceMappingClassName={styles.modelInputForceMapping}
+                forceMappingLabel={t('common.model_force_mapping_label')}
+                forceMappingTitle={t('common.model_force_mapping_hint')}
+                forceMappingAriaLabel={t('common.model_force_mapping_label')}
                 removeButtonClassName={styles.modelRowRemoveButton}
                 removeButtonTitle={t('common.delete')}
                 removeButtonAriaLabel={t('common.delete')}

@@ -33,7 +33,7 @@ export type OpenAIEditBaseline = {
     authIndex: string;
     headers: Array<{ key: string; value: string }>;
   }>;
-  models: Array<{ name: string; alias: string }>;
+  models: Array<{ name: string; alias: string; forceMapping?: boolean }>;
   testModel: string;
 };
 
@@ -65,7 +65,7 @@ interface OpenAIEditDraftState {
   clearDraft: (key: string) => void;
 }
 
-const resolveAction = <T,>(action: SetStateAction<T>, prev: T): T =>
+const resolveAction = <T>(action: SetStateAction<T>, prev: T): T =>
   typeof action === 'function' ? (action as (previous: T) => T)(prev) : action;
 
 const buildEmptyForm = (): OpenAIFormState => ({

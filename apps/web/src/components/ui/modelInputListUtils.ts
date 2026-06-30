@@ -3,6 +3,7 @@ import type { ModelAlias } from '@/types';
 export interface ModelEntry {
   name: string;
   alias: string;
+  forceMapping?: boolean;
   priority?: number;
   testModel?: string;
   image?: boolean;
@@ -16,6 +17,7 @@ export const modelsToEntries = (models?: ModelAlias[]): ModelEntry[] => {
   return models.map((model) => ({
     name: model.name || '',
     alias: model.alias || '',
+    forceMapping: model.forceMapping,
     priority: model.priority,
     testModel: model.testModel,
     image: model.image,
@@ -31,6 +33,9 @@ export const entriesToModels = (entries: ModelEntry[]): ModelAlias[] => {
       const alias = entry.alias.trim();
       if (alias && alias !== model.name) {
         model.alias = alias;
+      }
+      if (entry.forceMapping !== undefined) {
+        model.forceMapping = entry.forceMapping;
       }
       if (entry.priority !== undefined) {
         model.priority = entry.priority;

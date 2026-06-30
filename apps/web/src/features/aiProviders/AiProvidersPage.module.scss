@@ -580,10 +580,33 @@
       grid-row: 1 / 2;
     }
   }
+
+  &:global(.model-input-row-with-force-mapping) {
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto auto;
+
+    @include mobile {
+      grid-template-columns: minmax(0, 1fr) auto;
+
+      > :nth-child(4) {
+        grid-column: 1 / 2;
+        grid-row: 3 / 4;
+      }
+
+      > :nth-child(5) {
+        grid-column: 2 / 3;
+        grid-row: 1 / 2;
+      }
+    }
+  }
 }
 
 .modelInputField {
   min-width: 0;
+}
+
+.modelInputForceMapping {
+  justify-self: start;
+  white-space: nowrap;
 }
 
 .modelRowRemoveButton {
@@ -923,5 +946,4 @@
     background: rgba($error-color, 0.24);
     color: #f1b0a6;
   }
-
 }

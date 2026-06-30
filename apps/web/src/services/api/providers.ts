@@ -96,6 +96,9 @@ const MODEL_ALIAS_FIELDS = [
   'test-model',
   'testModel',
   'test_model',
+  'force-mapping',
+  'forceMapping',
+  'force_mapping',
   'image',
   'thinking',
 ] as const;
@@ -269,6 +272,11 @@ const mergeModelPayloads = (raw: unknown, models: unknown) =>
         return payloadItems.map((payload, index) => {
           const rawModel = findRawRecord(rawRecords, usedIndexes, payload, index, modelIdentity);
           const next = mergeKnownFields(rawModel, payload, MODEL_ALIAS_FIELDS);
+          preserveOmittedRawField(rawModel, payload, next, [
+            'force-mapping',
+            'forceMapping',
+            'force_mapping',
+          ]);
           preserveOmittedRawField(rawModel, payload, next, ['image']);
           preserveOmittedRawField(rawModel, payload, next, ['thinking']);
           return next;
@@ -426,6 +434,9 @@ const serializeModelAliases = (models?: ModelAlias[]) =>
           if (model.testModel) {
             payload['test-model'] = model.testModel;
           }
+          if (model.forceMapping !== undefined) {
+            payload['force-mapping'] = model.forceMapping;
+          }
           if (model.image !== undefined) {
             payload.image = model.image;
           }
@@ -502,7 +513,11 @@ const serializeVertexModelAliases = (models?: ModelAlias[]) =>
           const name = typeof model?.name === 'string' ? model.name.trim() : '';
           const alias = typeof model?.alias === 'string' ? model.alias.trim() : '';
           if (!name || !alias) return null;
-          return { name, alias };
+          const payload: Record<string, unknown> = { name, alias };
+          if (model.forceMapping !== undefined) {
+            payload['force-mapping'] = model.forceMapping;
+          }
+          return payload;
         })
         .filter(Boolean)
     : undefined;

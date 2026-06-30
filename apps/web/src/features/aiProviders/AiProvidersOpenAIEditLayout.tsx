@@ -70,16 +70,23 @@ const getErrorMessage = (err: unknown) => {
 };
 
 const normalizeModelEntries = (entries: ModelEntry[]) =>
-  (entries ?? []).reduce<Array<{ name: string; alias: string }>>((acc, entry) => {
-    const name = String(entry?.name ?? '').trim();
-    let alias = String(entry?.alias ?? '').trim();
-    if (name && (alias === '' || alias === name)) {
-      alias = '';
-    }
-    if (!name && !alias) return acc;
-    acc.push({ name, alias });
-    return acc;
-  }, []);
+  (entries ?? []).reduce<Array<{ name: string; alias: string; forceMapping?: boolean }>>(
+    (acc, entry) => {
+      const name = String(entry?.name ?? '').trim();
+      let alias = String(entry?.alias ?? '').trim();
+      if (name && (alias === '' || alias === name)) {
+        alias = '';
+      }
+      if (!name && !alias) return acc;
+      const normalized =
+        entry.forceMapping !== undefined
+          ? { name, alias, forceMapping: entry.forceMapping }
+          : { name, alias };
+      acc.push(normalized);
+      return acc;
+    },
+    []
+  );
 
 const normalizeKeyHeaders = (headers: ApiKeyEntry['headers']) => {
   if (!headers || typeof headers !== 'object') return [];

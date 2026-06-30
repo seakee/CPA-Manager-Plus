@@ -4,6 +4,7 @@ import type { HeaderEntry } from '@/utils/headers';
 export interface ModelEntry {
   name: string;
   alias: string;
+  forceMapping?: boolean;
   priority?: number;
   testModel?: string;
   image?: boolean;
