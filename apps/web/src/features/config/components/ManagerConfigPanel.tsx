@@ -26,6 +26,7 @@ type ManagerConfigPanelProps = {
   managerPollIntervalMs: string;
   managerBatchSize: string;
   managerQueryLimit: string;
+  managerCodexQuotaUserAgent: string;
   managerRetentionSeconds: number;
   managerConfigSourceLabel: string;
   managerUsageStatisticsEnabled: boolean;
@@ -39,6 +40,7 @@ type ManagerConfigPanelProps = {
   onPollIntervalMsChange: (value: string) => void;
   onBatchSizeChange: (value: string) => void;
   onQueryLimitChange: (value: string) => void;
+  onCodexQuotaUserAgentChange: (value: string) => void;
 };
 
 export function ManagerConfigPanel({
@@ -60,6 +62,7 @@ export function ManagerConfigPanel({
   managerPollIntervalMs,
   managerBatchSize,
   managerQueryLimit,
+  managerCodexQuotaUserAgent,
   managerRetentionSeconds,
   managerConfigSourceLabel,
   managerUsageStatisticsEnabled,
@@ -73,6 +76,7 @@ export function ManagerConfigPanel({
   onPollIntervalMsChange,
   onBatchSizeChange,
   onQueryLimitChange,
+  onCodexQuotaUserAgentChange,
 }: ManagerConfigPanelProps) {
   const { t } = useTranslation();
   const connectionInputDisabled =
@@ -298,6 +302,25 @@ export function ManagerConfigPanel({
               !managerRequestMonitoringEnabled ||
               !canConfigureRequestMonitoring
             }
+          />
+        </div>
+      </section>
+
+      <section className={styles.managerSection}>
+        <div className={styles.managerSectionHeader}>
+          <div>
+            <h3>{t('config_management.manager.codex_quota_title')}</h3>
+            <p>{t('config_management.manager.codex_quota_hint')}</p>
+          </div>
+        </div>
+        <div className={styles.managerConfigGrid}>
+          <Input
+            label={t('config_management.manager.codex_quota_user_agent_label')}
+            value={managerCodexQuotaUserAgent}
+            placeholder={t('config_management.manager.codex_quota_user_agent_placeholder')}
+            onChange={(event) => onCodexQuotaUserAgentChange(event.target.value)}
+            disabled={connectionInputDisabled}
+            hint={t('config_management.manager.codex_quota_user_agent_hint')}
           />
         </div>
       </section>

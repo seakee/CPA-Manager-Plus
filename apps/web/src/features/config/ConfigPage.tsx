@@ -163,6 +163,7 @@ export function resolveManagerFormDirty({
   pollIntervalMs,
   batchSize,
   queryLimit,
+  codexQuotaUserAgent,
 }: {
   managerConfig: ManagerConfig | null;
   cpaBaseUrlInput: string;
@@ -172,8 +173,13 @@ export function resolveManagerFormDirty({
   pollIntervalMs: string;
   batchSize: string;
   queryLimit: string;
+  codexQuotaUserAgent: string;
 }): boolean {
   if (!managerConfig) return false;
+
+  if (codexQuotaUserAgent.trim() !== (managerConfig.codex?.quotaUserAgent || '')) {
+    return true;
+  }
 
   const savedConnection = managerConfig.cpaConnection;
   const savedCollector = managerConfig.collector ?? MANAGER_COLLECTOR_DEFAULT;
@@ -298,6 +304,7 @@ export function ConfigPage() {
   const [managerQueryLimit, setManagerQueryLimit] = useState(
     String(MANAGER_COLLECTOR_DEFAULT.queryLimit)
   );
+  const [managerCodexQuotaUserAgent, setManagerCodexQuotaUserAgent] = useState('');
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('');
@@ -435,11 +442,13 @@ export function ConfigPage() {
         pollIntervalMs: managerPollIntervalMs,
         batchSize: managerBatchSize,
         queryLimit: managerQueryLimit,
+        codexQuotaUserAgent: managerCodexQuotaUserAgent,
       }),
     [
       managerBatchSize,
       managerCPABaseInput,
       managerCPAManagementKeyInput,
+      managerCodexQuotaUserAgent,
       managerCollectorMode,
       managerConfig,
       managerPollIntervalMs,
@@ -482,6 +491,7 @@ export function ConfigPage() {
       setManagerPollIntervalMs(String(collector.pollIntervalMs || MANAGER_COLLECTOR_DEFAULT.pollIntervalMs));
       setManagerBatchSize(String(collector.batchSize || MANAGER_COLLECTOR_DEFAULT.batchSize));
       setManagerQueryLimit(String(collector.queryLimit || MANAGER_COLLECTOR_DEFAULT.queryLimit));
+      setManagerCodexQuotaUserAgent(nextConfig.codex?.quotaUserAgent || '');
       setManagerCPAManagementKeyInput('');
       setManagerCPAManagementKeyVisible(false);
     },
@@ -703,6 +713,10 @@ export function ConfigPage() {
           pollIntervalMs,
           batchSize,
           queryLimit,
+        },
+        codex: {
+          ...(managerConfig?.codex ?? {}),
+          quotaUserAgent: managerCodexQuotaUserAgent.trim(),
         },
         externalUsageService: {
           enabled: false,
@@ -1250,6 +1264,7 @@ export function ConfigPage() {
               managerPollIntervalMs={managerPollIntervalMs}
               managerBatchSize={managerBatchSize}
               managerQueryLimit={managerQueryLimit}
+              managerCodexQuotaUserAgent={managerCodexQuotaUserAgent}
               managerRetentionSeconds={managerRetentionSeconds}
               managerConfigSourceLabel={managerConfigSourceLabel}
               managerUsageStatisticsEnabled={Boolean(managerCPAUsage?.usageStatisticsEnabled)}
@@ -1281,6 +1296,9 @@ export function ConfigPage() {
               }}
               onQueryLimitChange={(value) => {
                 setManagerQueryLimit(value);
+              }}
+              onCodexQuotaUserAgentChange={(value) => {
+                setManagerCodexQuotaUserAgent(value);
               }}
             />
           ) : activeTab === 'visual' ? (

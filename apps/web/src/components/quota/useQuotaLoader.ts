@@ -15,6 +15,23 @@ type QuotaUpdater<T> = T | ((prev: T) => T);
 
 type QuotaSetter<T> = (updater: QuotaUpdater<T>) => void;
 
+// Concurrency limit for bulk quota refresh. The official panel caps a single
+// batch via pagination/display thresholds (25/30), which QuotaSection already
+// mirrors in this repo; here we add the actual concurrency pool to avoid firing
+// dozens of wham/usage requests at once and being flagged as batch behavior.
+const QUOTA_REFRESH_CONCURRENCY = 5;
+// Random delay (ms) before each request to further spread out the cadence.
+const QUOTA_REFRESH_JITTER_MIN_MS = 80;
+const QUOTA_REFRESH_JITTER_MAX_MS = 400;
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+const randomQuotaRefreshJitterMs = () =>
+  QUOTA_REFRESH_JITTER_MIN_MS +
+  Math.floor(
+    Math.random() * (QUOTA_REFRESH_JITTER_MAX_MS - QUOTA_REFRESH_JITTER_MIN_MS + 1)
+  );
+
 interface LoadQuotaResult<TData> {
   storeKey: string;
   file: AuthFileItem;
@@ -56,19 +73,33 @@ export function useQuotaLoader<TState, TData>(config: QuotaConfig<TState, TData>
           return nextState;
         });
 
-        const results = await Promise.all(
-          targets.map(async (file): Promise<LoadQuotaResult<TData>> => {
-            const storeKey = getQuotaStoreKey(config, file);
-            try {
-              const data = await config.fetchQuota(file, t);
-              return { storeKey, file, status: 'success', data };
-            } catch (err: unknown) {
-              const message = err instanceof Error ? err.message : t('common.unknown_error');
-              const errorStatus = getStatusFromError(err);
-              return { storeKey, file, status: 'error', error: message, errorStatus };
-            }
-          })
-        );
+        const fetchOne = async (file: AuthFileItem): Promise<LoadQuotaResult<TData>> => {
+          const storeKey = getQuotaStoreKey(config, file);
+          try {
+            const data = await config.fetchQuota(file, t);
+            return { storeKey, file, status: 'success', data };
+          } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : t('common.unknown_error');
+            const errorStatus = getStatusFromError(err);
+            return { storeKey, file, status: 'error', error: message, errorStatus };
+          }
+        };
+
+        // Bounded worker pool: each worker takes one task, jitters before
+        // firing, and writes results back by index to preserve order.
+        const results = new Array<LoadQuotaResult<TData>>(targets.length);
+        let cursor = 0;
+        const runWorker = async () => {
+          for (;;) {
+            const index = cursor;
+            cursor += 1;
+            if (index >= targets.length) return;
+            await sleep(randomQuotaRefreshJitterMs());
+            results[index] = await fetchOne(targets[index]);
+          }
+        };
+        const workerCount = Math.min(QUOTA_REFRESH_CONCURRENCY, targets.length);
+        await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
 
         if (requestId !== requestIdRef.current) return;
 

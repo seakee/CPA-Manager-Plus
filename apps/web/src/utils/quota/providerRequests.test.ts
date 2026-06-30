@@ -78,7 +78,7 @@ describe('fetchCodexQuota', () => {
       url: CODEX_USAGE_URL,
       header: expect.objectContaining({
         Authorization: 'Bearer $TOKEN$',
-        'Chatgpt-Account-Id': 'acct-1',
+        'ChatGPT-Account-Id': 'acct-1',
       }),
     });
     expect(mocks.request.mock.calls[1][0]).toMatchObject({
@@ -89,7 +89,7 @@ describe('fetchCodexQuota', () => {
         Accept: 'application/json',
         'OpenAI-Beta': 'codex-1',
         Originator: 'Codex Desktop',
-        'Chatgpt-Account-Id': 'acct-1',
+        'ChatGPT-Account-Id': 'acct-1',
       }),
     });
     expect(mocks.request.mock.calls[1][1]).toMatchObject({ timeout: 8000 });

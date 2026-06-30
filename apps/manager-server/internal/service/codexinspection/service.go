@@ -31,6 +31,12 @@ const (
 	codexMinMonthWindow = 28 * 24 * 60 * 60
 	codexMaxMonthWindow = 31 * 24 * 60 * 60
 	maxStoredBodyText   = 2048
+
+	// Random delay (ms) before each per-account wham/usage probe, used to spread
+	// out the bulk probing cadence and reduce the chance of being flagged as
+	// machine-driven batch behavior by anti-fraud systems.
+	inspectionJitterMinMs = 300
+	inspectionJitterMaxMs = 2000
 )
 
 var (
@@ -535,6 +541,11 @@ func (s *Service) inspectAccounts(
 		go func() {
 			defer wg.Done()
 			for item := range jobs {
+				// Random sleep before probing to spread out the bulk request
+				// cadence; exit immediately when ctx is cancelled.
+				if !sleepWithJitter(ctx, inspectionJitterMinMs, inspectionJitterMaxMs) {
+					return
+				}
 				result := s.inspectSingleAccount(ctx, setup, settings, item, logger)
 				result.RunID = runID
 				if _, err := s.store.InsertCodexInspectionResult(ctx, result); err != nil {
@@ -573,6 +584,27 @@ func (s *Service) inspectAccounts(
 		return out[i].FileName < out[j].FileName
 	})
 	return out
+}
+
+// sleepWithJitter sleeps for a random duration within [minMs, maxMs]. It returns
+// false when ctx is cancelled during the wait, so callers can stop early. When
+// minMs/maxMs are invalid it skips the jitter and returns immediately.
+func sleepWithJitter(ctx context.Context, minMs, maxMs int) bool {
+	if maxMs <= 0 || maxMs < minMs {
+		return ctx.Err() == nil
+	}
+	delay := minMs
+	if span := maxMs - minMs; span > 0 {
+		delay += rand.Intn(span + 1)
+	}
+	timer := time.NewTimer(time.Duration(delay) * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func (s *Service) inspectSingleAccount(
@@ -701,13 +733,16 @@ func (s *Service) requestCodexUsageAt(
 	item account,
 	path string,
 ) (apiCallResponse, int, error) {
+	// wham/usage is a GET request and real Codex clients don't send Content-Type,
+	// so we don't add it either to avoid diverging from the real client
+	// fingerprint. User-Agent still uses the inspection's own config (separate
+	// from the quota-lookup UA).
 	headers := map[string]string{
 		"Authorization": "Bearer $TOKEN$",
-		"Content-Type":  "application/json",
 		"User-Agent":    settings.UserAgent,
 	}
 	if strings.TrimSpace(item.AccountID) != "" {
-		headers["Chatgpt-Account-Id"] = strings.TrimSpace(item.AccountID)
+		headers["ChatGPT-Account-Id"] = strings.TrimSpace(item.AccountID)
 	}
 	payload := map[string]any{
 		"authIndex": item.AuthIndex,

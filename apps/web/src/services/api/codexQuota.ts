@@ -6,6 +6,7 @@ import {
   CODEX_REQUEST_HEADERS,
   CODEX_USAGE_URL,
 } from '@/utils/quota/constants';
+import { getCodexQuotaUserAgent } from '@/utils/quota/codexQuotaSettings';
 import { createStatusError } from '@/utils/quota/formatters';
 import { normalizeAuthIndex, parseCodexUsagePayload } from '@/utils/quota/parsers';
 import { fetchCodexQuota, type CodexQuotaData } from '@/utils/quota/providerRequests';
@@ -28,18 +29,17 @@ export const buildCodexUsageRequestHeaders = (
   accountId?: string | null,
   options: { userAgent?: string } = {}
 ): Record<string, string> => {
+  // Inspection passes its UA explicitly (separate from the quota-lookup UA);
+  // other quota-lookup paths fall back to the configured/default UA.
+  const userAgent = String(options.userAgent ?? '').trim() || getCodexQuotaUserAgent();
   const headers: Record<string, string> = {
     ...CODEX_REQUEST_HEADERS,
+    'User-Agent': userAgent,
   };
 
   const trimmedAccountId = String(accountId ?? '').trim();
   if (trimmedAccountId) {
-    headers['Chatgpt-Account-Id'] = trimmedAccountId;
-  }
-
-  const userAgent = String(options.userAgent ?? '').trim();
-  if (userAgent) {
-    headers['User-Agent'] = userAgent;
+    headers['ChatGPT-Account-Id'] = trimmedAccountId;
   }
 
   return headers;
@@ -103,7 +103,10 @@ export const consumeCodexRateLimitResetCredit = async (
     authIndex,
     method: 'POST',
     url: CODEX_RATE_LIMIT_RESET_CREDITS_CONSUME_URL,
-    header: buildCodexUsageRequestHeaders(accountId),
+    header: {
+      ...buildCodexUsageRequestHeaders(accountId),
+      'Content-Type': 'application/json',
+    },
     data: JSON.stringify({
       redeem_request_id: createCodexRedeemRequestId(),
     }),

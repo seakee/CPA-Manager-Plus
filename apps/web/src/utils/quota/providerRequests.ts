@@ -31,6 +31,7 @@ import {
   XAI_BILLING_URL,
   XAI_REQUEST_HEADERS,
 } from './constants';
+import { getCodexQuotaUserAgent } from './codexQuotaSettings';
 import { buildAntigravityQuotaGroups, buildKimiQuotaRows } from './builders';
 import { createStatusError, formatQuotaResetTime, getStatusFromError } from './formatters';
 import {
@@ -231,10 +232,11 @@ export const buildCodexQuotaWindows = (
 const buildCodexUsageRequestHeaders = (accountId?: string | null): Record<string, string> => {
   const headers: Record<string, string> = {
     ...CODEX_REQUEST_HEADERS,
+    'User-Agent': getCodexQuotaUserAgent(),
   };
   const trimmedAccountId = String(accountId ?? '').trim();
   if (trimmedAccountId) {
-    headers['Chatgpt-Account-Id'] = trimmedAccountId;
+    headers['ChatGPT-Account-Id'] = trimmedAccountId;
   }
   return headers;
 };

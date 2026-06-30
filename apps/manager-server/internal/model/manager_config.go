@@ -1,11 +1,25 @@
 package model
 
+// DefaultCodexQuotaUserAgent matches CLIProxyAPI's reverse-proxy inference
+// fallback User-Agent, so quota-lookup requests share a self-consistent client
+// fingerprint with real inference requests for the same account, reducing
+// anti-fraud risk.
+const DefaultCodexQuotaUserAgent = "codex-tui/0.135.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10"
+
 type ManagerConfig struct {
 	CPAConnection        ManagerCPAConnectionConfig        `json:"cpaConnection"`
 	Collector            ManagerCollectorConfig            `json:"collector"`
+	Codex                ManagerCodexConfig                `json:"codex"`
 	CodexInspection      ManagerCodexInspectionConfig      `json:"codexInspection"`
 	ExternalUsageService ManagerExternalUsageServiceConfig `json:"externalUsageService"`
 	UpdatedAtMS          int64                             `json:"updatedAtMs,omitempty"`
+}
+
+// ManagerCodexConfig holds general Codex settings (independent from the
+// inspection UA settings). QuotaUserAgent is the User-Agent sent by all
+// frontend quota-lookup paths.
+type ManagerCodexConfig struct {
+	QuotaUserAgent string `json:"quotaUserAgent,omitempty"`
 }
 
 type ManagerCPAConnectionConfig struct {

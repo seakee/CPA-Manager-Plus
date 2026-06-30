@@ -166,6 +166,7 @@ describe('resolveManagerFormDirty', () => {
     pollIntervalMs: '500',
     batchSize: '100',
     queryLimit: '50000',
+    codexQuotaUserAgent: '',
   };
 
   it('does not mark a freshly loaded Manager config as dirty when the key input is empty', () => {

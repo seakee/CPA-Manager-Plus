@@ -22,17 +22,17 @@ beforeEach(() => {
 });
 
 describe('buildCodexUsageRequestHeaders', () => {
-  it('does not include Chatgpt-Account-Id when account id is missing', () => {
+  it('does not include ChatGPT-Account-Id when account id is missing', () => {
     const headers = buildCodexUsageRequestHeaders(null);
 
-    expect(headers).not.toHaveProperty('Chatgpt-Account-Id');
+    expect(headers).not.toHaveProperty('ChatGPT-Account-Id');
     expect(headers.Authorization).toBe('Bearer $TOKEN$');
   });
 
   it('includes trimmed account id when available', () => {
     const headers = buildCodexUsageRequestHeaders(' account-123 ');
 
-    expect(headers['Chatgpt-Account-Id']).toBe('account-123');
+    expect(headers['ChatGPT-Account-Id']).toBe('account-123');
   });
 
   it('allows Codex inspection to override User-Agent', () => {
@@ -69,7 +69,7 @@ describe('consumeCodexRateLimitResetCredit', () => {
       url: CODEX_RATE_LIMIT_RESET_CREDITS_CONSUME_URL,
       header: expect.objectContaining({
         Authorization: 'Bearer $TOKEN$',
-        'Chatgpt-Account-Id': 'acct-1',
+        'ChatGPT-Account-Id': 'acct-1',
       }),
     });
     expect(JSON.parse(payload.data)).toEqual({

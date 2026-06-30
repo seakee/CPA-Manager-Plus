@@ -150,10 +150,18 @@ export const CODEX_RATE_LIMIT_RESET_CREDITS_URL =
 export const CODEX_RATE_LIMIT_RESET_CREDITS_CONSUME_URL =
   'https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume';
 
+// Quota-lookup fallback User-Agent, kept consistent with CLIProxyAPI's
+// reverse-proxy inference fallback UA so a single account's quota-lookup and
+// real inference requests share the same fingerprint. Can be overridden by the
+// backend manager config codex.quotaUserAgent (see codexQuotaSettings.ts).
+export const CODEX_QUOTA_USER_AGENT =
+  'codex-tui/0.135.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10';
+
+// wham/usage and other quota-lookup requests are GET; real clients don't send
+// Content-Type, so we keep only the auth header here and let each build function
+// inject the User-Agent per config.
 export const CODEX_REQUEST_HEADERS = {
   Authorization: 'Bearer $TOKEN$',
-  'Content-Type': 'application/json',
-  'User-Agent': 'codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal',
 };
 
 // Kimi API configuration

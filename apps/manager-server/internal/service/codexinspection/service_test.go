@@ -692,7 +692,7 @@ func TestRunSendsDirectCodexAccountIDHeader(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				t.Fatalf("decode api-call payload: %v", err)
 			}
-			accountIDHeader = payload.Header["Chatgpt-Account-Id"]
+			accountIDHeader = payload.Header["ChatGPT-Account-Id"]
 			_, _ = w.Write([]byte(`{"status_code":200,"body":{"ok":true}}`))
 		default:
 			http.NotFound(w, r)
@@ -713,7 +713,7 @@ func TestRunSendsDirectCodexAccountIDHeader(t *testing.T) {
 		t.Fatalf("run inspection: %v", err)
 	}
 	if accountIDHeader != "acct-direct" {
-		t.Fatalf("Chatgpt-Account-Id = %q, want %q", accountIDHeader, "acct-direct")
+		t.Fatalf("ChatGPT-Account-Id = %q, want %q", accountIDHeader, "acct-direct")
 	}
 }
 

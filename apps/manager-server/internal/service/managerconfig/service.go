@@ -215,6 +215,9 @@ func (s *Service) DefaultManagerConfig() store.ManagerConfig {
 			QueryLimit:     PositiveOrDefault(s.cfg.QueryLimit, 50000, 50000),
 			TLSSkipVerify:  s.cfg.TLSSkipVerify,
 		},
+		Codex: model.ManagerCodexConfig{
+			QuotaUserAgent: model.DefaultCodexQuotaUserAgent,
+		},
 		CodexInspection: store.DefaultCodexInspectionConfig(),
 	}
 }
@@ -237,6 +240,8 @@ func (s *Service) MergeSubmittedManagerConfig(base store.ManagerConfig, submitte
 	next.Collector.PollIntervalMS = PositiveOrDefault(submitted.Collector.PollIntervalMS, next.Collector.PollIntervalMS, 500)
 	next.Collector.QueryLimit = PositiveOrDefault(submitted.Collector.QueryLimit, next.Collector.QueryLimit, 50000)
 	next.Collector.TLSSkipVerify = submitted.Collector.TLSSkipVerify
+
+	next.Codex.QuotaUserAgent = ValueOr(strings.TrimSpace(submitted.Codex.QuotaUserAgent), next.Codex.QuotaUserAgent)
 
 	next.CodexInspection = store.NormalizeCodexInspectionConfig(submitted.CodexInspection, next.CodexInspection)
 
