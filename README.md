@@ -91,23 +91,48 @@ If you don't have CPA running yet, this Compose file starts both:
 services:
   cli-proxy-api:
     image: eceasy/cli-proxy-api:latest
+    container_name: cli-proxy-api
     restart: unless-stopped
     ports:
       - "8317:8317"
     volumes:
-      - cpa-data:/app/data
+      - ./cpa_data/config.yaml:/CLIProxyAPI/config.yaml
+      - ./cpa_data/auths:/root/.cli-proxy-api
+      - ./cpa_data/logs:/CLIProxyAPI/logs
 
   cpa-manager-plus:
     image: seakee/cpa-manager-plus:latest
+    container_name: cpa-manager-plus
     restart: unless-stopped
+    depends_on:
+      - cli-proxy-api
     ports:
       - "18317:18317"
     volumes:
-      - cpa-manager-plus-data:/data
+      - ./cmp_data:/data
+```
 
-volumes:
-  cpa-data:
-  cpa-manager-plus-data:
+Before starting the stack, create the host paths used by the bind mounts:
+
+```bash
+mkdir -p cpa_data/auths cpa_data/logs cmp_data
+touch cpa_data/config.yaml
+```
+
+`cpa_data/config.yaml` must be a file before `docker compose up -d`; otherwise Docker may create it as a directory. At minimum, enable the CPA Management API so CPAMP can reach CPA from the Compose network:
+
+```yaml
+host: ""
+port: 8317
+
+remote-management:
+  allow-remote: true
+  secret-key: "replace-with-your-cpa-management-key"
+
+auth-dir: "~/.cli-proxy-api"
+
+api-keys:
+  - "replace-with-your-client-api-key"
 ```
 
 ```bash

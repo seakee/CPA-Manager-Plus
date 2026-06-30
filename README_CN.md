@@ -91,23 +91,48 @@ CPA Manager Plus 配合 [CPA / CLIProxyAPI](https://github.com/router-for-me/CLI
 services:
   cli-proxy-api:
     image: eceasy/cli-proxy-api:latest
+    container_name: cli-proxy-api
     restart: unless-stopped
     ports:
       - "8317:8317"
     volumes:
-      - cpa-data:/app/data
+      - ./cpa_data/config.yaml:/CLIProxyAPI/config.yaml
+      - ./cpa_data/auths:/root/.cli-proxy-api
+      - ./cpa_data/logs:/CLIProxyAPI/logs
 
   cpa-manager-plus:
     image: seakee/cpa-manager-plus:latest
+    container_name: cpa-manager-plus
     restart: unless-stopped
+    depends_on:
+      - cli-proxy-api
     ports:
       - "18317:18317"
     volumes:
-      - cpa-manager-plus-data:/data
+      - ./cmp_data:/data
+```
 
-volumes:
-  cpa-data:
-  cpa-manager-plus-data:
+启动前先创建 bind mount 使用的宿主机路径：
+
+```bash
+mkdir -p cpa_data/auths cpa_data/logs cmp_data
+touch cpa_data/config.yaml
+```
+
+`cpa_data/config.yaml` 在执行 `docker compose up -d` 前必须是文件，否则 Docker 可能把它创建成目录。最小配置需要启用 CPA Management API，这样 CPAMP 才能在 Compose 网络里访问 CPA：
+
+```yaml
+host: ""
+port: 8317
+
+remote-management:
+  allow-remote: true
+  secret-key: "replace-with-your-cpa-management-key"
+
+auth-dir: "~/.cli-proxy-api"
+
+api-keys:
+  - "replace-with-your-client-api-key"
 ```
 
 ```bash
