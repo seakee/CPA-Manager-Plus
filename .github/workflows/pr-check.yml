@@ -23,6 +23,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -39,10 +41,21 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Test
+        run: npm run test
+
       - name: Build
         run: npm run build
         env:
           VERSION: ci
+
+      - name: Check demo isolation
+        run: npm run check:demo-isolation
+
+      - name: Build demo site
+        run: npm run build:demo
+        env:
+          VERSION: ci-demo
 
   manager-server:
     name: Manager Server
