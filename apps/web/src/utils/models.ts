@@ -15,10 +15,17 @@ const MODEL_CATEGORIES = [
   { id: 'gemini', label: 'Gemini', patterns: [/gemini/i, /\bgai\b/i] },
   { id: 'kimi', label: 'Kimi', patterns: [/kimi/i] },
   { id: 'qwen', label: 'Qwen', patterns: [/qwen/i] },
-  { id: 'glm', label: 'GLM', patterns: [/glm/i, /chatglm/i] },
+  { id: 'glm', label: 'ZHIPU', patterns: [/glm/i, /chatglm/i] },
   { id: 'grok', label: 'Grok', patterns: [/grok/i] },
   { id: 'deepseek', label: 'DeepSeek', patterns: [/deepseek/i] },
-  { id: 'minimax', label: 'MiniMax', patterns: [/minimax/i, /abab/i] }
+  { id: 'minimax', label: 'MiniMax', patterns: [/minimax/i, /abab/i] },
+  { id: 'mimo', label: 'Mimo', patterns: [/mimo/i] },
+  { id: 'hunyuan', label: 'HunYuan', patterns: [/hunyuan/i] },
+  { id: 'bytedance', label: 'ByteDance', patterns: [/seed/i, /doubao/i] },
+  { id: 'volcengine', label: 'VolcEngine', patterns: [/ark/i] },
+  { id: 'longcat', label: 'LongCat', patterns: [/longcat/i] },
+  { id: 'stepfun', label: 'StepFun', patterns: [/stepfun/i] },
+  { id: 'wenxin', label: 'WenXin', patterns: [/wenxin/i] },
 ];
 
 const matchCategory = (text: string) => {
@@ -90,11 +97,14 @@ export interface ModelGroup {
   items: ModelInfo[];
 }
 
-export function classifyModels(models: ModelInfo[] = [], { otherLabel = 'Other' } = {}): ModelGroup[] {
+export function classifyModels(
+  models: ModelInfo[] = [],
+  { otherLabel = 'Other' } = {}
+): ModelGroup[] {
   const groups: ModelGroup[] = MODEL_CATEGORIES.map((category) => ({
     id: category.id,
     label: category.label,
-    items: []
+    items: [],
   }));
 
   const otherGroup: ModelGroup = { id: 'other', label: otherLabel, items: [] };
