@@ -102,7 +102,7 @@ export function SystemPage() {
   const handleCopyModelName = async (name: string) => {
     const copied = await copyToClipboard(name);
     showNotification(
-      t(copied ? 'notification.link_copied' : 'notification.copy_failed'),
+      t(copied ? 'notification.model_id_copied' : 'notification.copy_failed'),
       copied ? 'success' : 'error'
     );
     if (!copied) return;
@@ -351,6 +351,7 @@ export function SystemPage() {
                             type="button"
                             className={`${styles.modelTag}${isCopied ? ` ${styles.modelTagCopied}` : ''}`}
                             title={model.description || model.name}
+                            aria-label={t('common.copy') + ' ' + model.name}
                             onClick={() => handleCopyModelName(model.name)}
                           >
                             <span className={styles.modelName}>{model.name}</span>

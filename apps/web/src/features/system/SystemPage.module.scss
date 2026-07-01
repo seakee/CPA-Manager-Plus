@@ -161,7 +161,7 @@
 
 .modelTagCopied {
   border-color: var(--success-color);
-  background-color: oklch(from var(--success-color) l c h / 0.08);
+  background: color-mix(in srgb, var(--success-color) 8%, var(--bg));
 }
 
 .modelName {
