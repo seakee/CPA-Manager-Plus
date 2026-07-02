@@ -73,7 +73,7 @@ func (c *Client) Fetch(ctx context.Context, baseURL string, managementKey string
 		return nil, fmt.Errorf("GET %s: %w", authFilesPath, err)
 	}
 	defer res.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(res.Body, 1024*1024))
+	body, _ := io.ReadAll(io.LimitReader(res.Body, 8*1024*1024))
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		return nil, fmt.Errorf("GET %s: HTTP %d %s", authFilesPath, res.StatusCode, strings.TrimSpace(string(body)))
 	}
