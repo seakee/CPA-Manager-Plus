@@ -7,7 +7,9 @@ import { useTranslation } from 'react-i18next';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { EmptyState } from '@/components/ui/EmptyState';
+import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { triggerHeaderRefresh } from '@/hooks/useHeaderRefresh';
+import { authFilesApi } from '@/services/api';
 import { useNotificationStore, useQuotaStore, useThemeStore } from '@/stores';
 import type { AuthFileItem, ResolvedTheme } from '@/types';
 import { getStatusFromError } from '@/utils/quota';
@@ -33,7 +35,7 @@ import {
   type QuotaSectionViewMode,
 } from '@/features/quota/quotaPageUiState';
 import { useGridColumns } from './useGridColumns';
-import { IconEye, IconEyeOff, IconRefreshCw } from '@/components/ui/icons';
+import { IconEye, IconEyeOff, IconRefreshCw, IconTrash2 } from '@/components/ui/icons';
 import styles from '@/features/quota/QuotaPage.module.scss';
 
 type QuotaUpdater<T> = T | ((prev: T) => T);
@@ -42,6 +44,7 @@ type QuotaSetter<T> = (updater: QuotaUpdater<T>) => void;
 
 const MAX_ITEMS_PER_PAGE = 25;
 const MAX_SHOW_ALL_THRESHOLD = 30;
+const PAGE_ROWS = 5;
 
 const stringifySearchValue = (value: unknown): string[] => {
   if (value === undefined || value === null) return [];
@@ -86,8 +89,11 @@ const useQuotaPagination = <T,>(items: T[], defaultPageSize = 6): QuotaPaginatio
   }, [items, currentPage, pageSize]);
 
   const setPageSize = useCallback((size: number) => {
-    setPageSizeState(size);
-    setPage(1);
+    setPageSizeState((prev) => {
+      if (prev === size) return prev;
+      setPage(1);
+      return size;
+    });
   }, []);
 
   const goToPrev = useCallback(() => {
@@ -160,6 +166,9 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
   const [internalAccountDisplayMode, setInternalAccountDisplayMode] =
     useState<QuotaAccountDisplayMode>(DEFAULT_QUOTA_ACCOUNT_DISPLAY_MODE);
   const [showTooManyWarning, setShowTooManyWarning] = useState(false);
+  const [deletingFileNames, setDeletingFileNames] = useState<Set<string>>(() => new Set());
+  const [deletedFileNames, setDeletedFileNames] = useState<Set<string>>(() => new Set());
+  const [selectedFileNames, setSelectedFileNames] = useState<Set<string>>(() => new Set());
   const resolvedViewMode = viewMode ?? internalViewMode;
   const resolvedAccountDisplayMode = accountDisplayMode ?? internalAccountDisplayMode;
   const setViewMode = useCallback(
@@ -189,9 +198,10 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
   );
 
   const filteredFiles = useMemo(
-    () => files.filter((file) => config.filterFn(file)),
-    [files, config]
+    () => files.filter((file) => config.filterFn(file) && !deletedFileNames.has(file.name)),
+    [files, config, deletedFileNames]
   );
+  const selectedCount = selectedFileNames.size;
   const normalizedSearchQuery = searchQuery.trim().toLowerCase();
 
   const { quota, loadQuota } = useQuotaLoader(config);
@@ -305,10 +315,28 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
     if (effectiveViewMode === 'all') {
       setPageSize(Math.max(1, displayFiles.length));
     } else {
-      // Paged mode: 3 rows * columns, capped to avoid oversized pages.
-      setPageSize(Math.min(columns * 3, MAX_ITEMS_PER_PAGE));
+      // Paged mode: fixed rows * columns, capped to avoid oversized pages.
+      setPageSize(Math.min(columns * PAGE_ROWS, MAX_ITEMS_PER_PAGE));
     }
   }, [effectiveViewMode, columns, displayFiles.length, setPageSize]);
+
+  useEffect(() => {
+    setDeletedFileNames((prev) => {
+      if (prev.size === 0) return prev;
+      const fileNames = new Set(files.map((file) => file.name));
+      const next = new Set([...prev].filter((name) => fileNames.has(name)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [files]);
+
+  useEffect(() => {
+    setSelectedFileNames((prev) => {
+      if (prev.size === 0) return prev;
+      const displayNames = new Set(displayFiles.map((file) => file.name));
+      const next = new Set([...prev].filter((name) => displayNames.has(name)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [displayFiles]);
 
   const pendingQuotaRefreshRef = useRef(false);
   const prevFilesLoadingRef = useRef(loading);
@@ -469,6 +497,161 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
     ]
   );
 
+  const applyDeletedAuthFiles = useCallback(
+    (names: string[]) => {
+      if (names.length === 0) return;
+      const deletedNames = new Set(names);
+      const deletedStoreKeys = new Set(
+        files
+          .filter((file) => deletedNames.has(file.name))
+          .map((file) => getQuotaStoreKey(config, file))
+      );
+
+      setDeletedFileNames((prev) => {
+        const next = new Set(prev);
+        names.forEach((name) => next.add(name));
+        return next;
+      });
+      setSelectedFileNames((prev) => {
+        if (prev.size === 0) return prev;
+        const next = new Set(prev);
+        names.forEach((name) => next.delete(name));
+        return next;
+      });
+      setQuota((prev) => {
+        const next = { ...prev };
+        names.forEach((name) => {
+          delete next[name];
+        });
+        deletedStoreKeys.forEach((key) => {
+          delete next[key];
+        });
+        return next;
+      });
+    },
+    [config, files, setQuota]
+  );
+
+  const deleteAuthFile = useCallback(
+    (file: AuthFileItem) => {
+      if (disabled || deletingFileNames.has(file.name)) return;
+      const displayName = getAccountDisplayName(file);
+
+      showConfirmation({
+        title: t('auth_files.delete_title', { defaultValue: 'Delete File' }),
+        message: `${t('auth_files.delete_confirm')} "${displayName}" ?`,
+        confirmText: t('common.confirm'),
+        cancelText: t('common.cancel'),
+        variant: 'danger',
+        onConfirm: async () => {
+          setDeletingFileNames((prev) => new Set(prev).add(file.name));
+          try {
+            const result = await authFilesApi.deleteFile(file.name);
+            applyDeletedAuthFiles(result.files.length > 0 ? result.files : [file.name]);
+            showNotification(t('auth_files.delete_success'), 'success');
+          } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : t('common.unknown_error');
+            showNotification(`${t('notification.delete_failed')}: ${message}`, 'error');
+          } finally {
+            setDeletingFileNames((prev) => {
+              const next = new Set(prev);
+              next.delete(file.name);
+              return next;
+            });
+          }
+        },
+      });
+    },
+    [
+      applyDeletedAuthFiles,
+      deletingFileNames,
+      disabled,
+      getAccountDisplayName,
+      showConfirmation,
+      showNotification,
+      t,
+    ]
+  );
+
+  const toggleSelectedFile = useCallback((name: string, selected: boolean) => {
+    setSelectedFileNames((prev) => {
+      const next = new Set(prev);
+      if (selected) {
+        next.add(name);
+      } else {
+        next.delete(name);
+      }
+      return next;
+    });
+  }, []);
+
+  const deleteSelectedAuthFiles = useCallback(() => {
+    if (disabled || selectedFileNames.size === 0) return;
+    const names = [...selectedFileNames].filter((name) => !deletingFileNames.has(name));
+    if (names.length === 0) return;
+
+    showConfirmation({
+      title: t('auth_files.batch_delete_title'),
+      message: t('auth_files.batch_delete_confirm', { count: names.length }),
+      confirmText: t('common.confirm'),
+      cancelText: t('common.cancel'),
+      variant: 'danger',
+      onConfirm: async () => {
+        setDeletingFileNames((prev) => {
+          const next = new Set(prev);
+          names.forEach((name) => next.add(name));
+          return next;
+        });
+        try {
+          const result = await authFilesApi.deleteFiles(names);
+          const failedNames = new Set(result.failed.map((item) => item.name));
+          const deletedNames =
+            result.files.length > 0
+              ? result.files
+              : result.failed.length === 0
+                ? names
+                : names.filter((name) => !failedNames.has(name));
+          applyDeletedAuthFiles(deletedNames);
+          if (result.failed.length > 0) {
+            showNotification(
+              t('auth_files.delete_filtered_result_partial', {
+                success: deletedNames.length,
+                failed: result.failed.length,
+              }),
+              'warning'
+            );
+          } else {
+            showNotification(
+              t('auth_files.delete_filtered_result_success', { count: deletedNames.length }),
+              'success'
+            );
+          }
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : t('common.unknown_error');
+          showNotification(`${t('notification.delete_failed')}: ${message}`, 'error');
+        } finally {
+          setDeletingFileNames((prev) => {
+            const next = new Set(prev);
+            names.forEach((name) => next.delete(name));
+            return next;
+          });
+        }
+      },
+    });
+  }, [
+    applyDeletedAuthFiles,
+    deletingFileNames,
+    disabled,
+    selectedFileNames,
+    showConfirmation,
+    showNotification,
+    t,
+  ]);
+
+  const clearSelectedFiles = useCallback(() => {
+    setSelectedFileNames(new Set());
+  }, []);
+
   const titleNode = (
     <div className={styles.titleWrapper}>
       <span>{t(`${config.i18nPrefix}.title`)}</span>
@@ -557,6 +740,20 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
             {!isRefreshing && <IconRefreshCw size={16} />}
             {t('quota_management.refresh_all_credentials')}
           </Button>
+          {selectedCount > 0 ? (
+            <div className={styles.quotaBatchActions}>
+              <span className={styles.quotaBatchSelected}>
+                {t('auth_files.batch_selected', { count: selectedCount })}
+              </span>
+              <Button variant="danger" size="sm" onClick={deleteSelectedAuthFiles} disabled={disabled}>
+                <IconTrash2 size={16} />
+                {t('auth_files.delete_button')}
+              </Button>
+              <Button variant="secondary" size="sm" onClick={clearSelectedFiles}>
+                {t('auth_files.batch_deselect')}
+              </Button>
+            </div>
+          ) : null}
         </div>
       }
     >
@@ -576,6 +773,7 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
             {pageItems.map((item) => {
               const itemQuota = getScopedQuota(item);
               const displayQuota = getDisplayQuota(item);
+              const isDeletingFile = deletingFileNames.has(item.name);
               const resetCount =
                 (itemQuota as { rateLimitResetCreditsAvailableCount?: number | null } | undefined)
                   ?.rateLimitResetCreditsAvailableCount ?? 0;
@@ -583,6 +781,7 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
                 Boolean(config.resetQuota) &&
                 !disabled &&
                 !item.disabled &&
+                !isDeletingFile &&
                 (config.canResetQuota?.(item, itemQuota) ??
                   Boolean(itemQuota && itemQuota.status === 'success'));
               const canReauth =
@@ -591,7 +790,23 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
                 itemQuota.errorStatus === 401 &&
                 !disabled &&
                 !item.disabled &&
+                !isDeletingFile &&
                 Boolean(onReauthAccount);
+              const canDeleteAuthFile = !disabled && !isDeletingFile;
+              const deleteAuthFileAction = (
+                <Button
+                  type="button"
+                  variant="danger"
+                  size="sm"
+                  className={styles.quotaDeleteAuthFileButton}
+                  onClick={() => deleteAuthFile(item)}
+                  disabled={!canDeleteAuthFile}
+                  title={t('auth_files.delete_button')}
+                  aria-label={t('auth_files.delete_button')}
+                >
+                  {isDeletingFile ? <LoadingSpinner size={14} /> : <IconTrash2 size={16} />}
+                </Button>
+              );
 
               return (
                 <QuotaCard
@@ -604,8 +819,10 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
                   cardClassName={config.cardClassName}
                   defaultType={config.type}
                   accountDisplayMode={resolvedAccountDisplayMode}
-                  canRefresh={!disabled && !item.disabled}
+                  canRefresh={!disabled && !item.disabled && !isDeletingFile}
                   onRefresh={() => void refreshQuotaForFile(item)}
+                  selected={selectedFileNames.has(item.name)}
+                  onToggleSelect={toggleSelectedFile}
                   canReset={canReset}
                   resetLabel={
                     canReset
@@ -615,6 +832,7 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
                   onReset={canReset ? () => resetQuotaForFile(item) : undefined}
                   canReauth={canReauth}
                   onReauth={canReauth ? () => onReauthAccount?.(item) : undefined}
+                  deleteAuthFileAction={deleteAuthFileAction}
                   renderQuotaItems={config.renderQuotaItems}
                 />
               );

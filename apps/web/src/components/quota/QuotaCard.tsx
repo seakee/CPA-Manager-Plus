@@ -6,6 +6,7 @@ import { useTranslation } from 'react-i18next';
 import type { ReactElement, ReactNode } from 'react';
 import type { TFunction } from 'i18next';
 import { Button } from '@/components/ui/Button';
+import { SelectionCheckbox } from '@/components/ui/SelectionCheckbox';
 import {
   DEFAULT_QUOTA_ACCOUNT_DISPLAY_MODE,
   type QuotaAccountDisplayMode,
@@ -72,11 +73,14 @@ interface QuotaCardProps<TState extends QuotaStatusState> {
   accountDisplayMode?: QuotaAccountDisplayMode;
   canRefresh?: boolean;
   onRefresh?: () => void;
+  selected?: boolean;
+  onToggleSelect?: (name: string, selected: boolean) => void;
   canReset?: boolean;
   resetLabel?: string;
   onReset?: () => void;
   canReauth?: boolean;
   onReauth?: () => void;
+  deleteAuthFileAction?: ReactNode;
   renderQuotaItems: (quota: TState, t: TFunction, helpers: QuotaRenderHelpers) => ReactNode;
 }
 
@@ -91,11 +95,14 @@ export function QuotaCard<TState extends QuotaStatusState>({
   accountDisplayMode = DEFAULT_QUOTA_ACCOUNT_DISPLAY_MODE,
   canRefresh = false,
   onRefresh,
+  selected = false,
+  onToggleSelect,
   canReset = false,
   resetLabel,
   onReset,
   canReauth = false,
   onReauth,
+  deleteAuthFileAction,
   renderQuotaItems,
 }: QuotaCardProps<TState>) {
   const { t } = useTranslation();
@@ -128,7 +135,7 @@ export function QuotaCard<TState extends QuotaStatusState>({
   };
 
   const renderActions = (options?: { includeReauth?: boolean }) =>
-    onRefresh || (onReset && resetLabel) || (options?.includeReauth && onReauth) ? (
+    onRefresh || (onReset && resetLabel) || (options?.includeReauth && onReauth) || deleteAuthFileAction ? (
       <div className={styles.quotaActions}>
         {options?.includeReauth && onReauth ? (
           <Button
@@ -166,12 +173,22 @@ export function QuotaCard<TState extends QuotaStatusState>({
             {t(`${i18nPrefix}.refresh_button`)}
           </Button>
         ) : null}
+        {deleteAuthFileAction}
       </div>
     ) : null;
 
   return (
     <div className={`${styles.fileCard} ${cardClassName}`}>
       <div className={styles.cardHeader}>
+        {onToggleSelect ? (
+          <SelectionCheckbox
+            checked={selected}
+            onChange={(value) => onToggleSelect(item.name, value)}
+            className={styles.quotaCardSelection}
+            ariaLabel={selected ? t('auth_files.batch_deselect') : t('auth_files.batch_select_all')}
+            title={selected ? t('auth_files.batch_deselect') : t('auth_files.batch_select_all')}
+          />
+        ) : null}
         <span
           className={styles.typeBadge}
           style={{
