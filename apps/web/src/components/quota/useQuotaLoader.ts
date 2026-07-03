@@ -90,27 +90,9 @@ export function useQuotaLoader<TState, TData>(config: QuotaConfig<TState, TData>
           return nextState;
         });
 
-        const results = await runWithConcurrencyLimit(
-          targets,
-          DEFAULT_QUOTA_REFRESH_CONCURRENCY,
-          async (file): Promise<LoadQuotaResult<TData>> => {
-            const storeKey = getQuotaStoreKey(config, file);
-            try {
-              const data = await config.fetchQuota(file, t);
-              return { storeKey, file, status: 'success', data };
-            } catch (err: unknown) {
-              const message = err instanceof Error ? err.message : t('common.unknown_error');
-              const errorStatus = getStatusFromError(err);
-              return { storeKey, file, status: 'error', error: message, errorStatus };
-            }
-          }
-        );
-
-        if (requestId !== requestIdRef.current) return;
-
-        setQuota((prev) => {
-          const nextState = { ...prev };
-          results.forEach((result) => {
+        const commitQuotaResult = (result: LoadQuotaResult<TData>) => {
+          setQuota((prev) => {
+            const nextState = { ...prev };
             if (result.status === 'success') {
               nextState[result.storeKey] = config.buildSuccessState(
                 result.data as TData,
@@ -125,9 +107,41 @@ export function useQuotaLoader<TState, TData>(config: QuotaConfig<TState, TData>
                 previousStateByStoreKey.get(result.storeKey)
               );
             }
+            return nextState;
           });
-          return nextState;
-        });
+        };
+
+        await runWithConcurrencyLimit(
+          targets,
+          DEFAULT_QUOTA_REFRESH_CONCURRENCY,
+          async (file): Promise<LoadQuotaResult<TData>> => {
+            const storeKey = getQuotaStoreKey(config, file);
+            try {
+              const data = await config.fetchQuota(file, t);
+              const result: LoadQuotaResult<TData> = { storeKey, file, status: 'success', data };
+              if (requestId === requestIdRef.current) {
+                commitQuotaResult(result);
+              }
+              return result;
+            } catch (err: unknown) {
+              const message = err instanceof Error ? err.message : t('common.unknown_error');
+              const errorStatus = getStatusFromError(err);
+              const result: LoadQuotaResult<TData> = {
+                storeKey,
+                file,
+                status: 'error',
+                error: message,
+                errorStatus,
+              };
+              if (requestId === requestIdRef.current) {
+                commitQuotaResult(result);
+              }
+              return result;
+            }
+          }
+        );
+
+        if (requestId !== requestIdRef.current) return;
       } finally {
         if (requestId === requestIdRef.current) {
           setLoading(false);
