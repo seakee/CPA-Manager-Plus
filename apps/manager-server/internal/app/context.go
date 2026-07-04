@@ -78,7 +78,7 @@ func FromExisting(
 		Collector:                      collectorManager,
 		StartedAt:                      startedAt,
 		ServiceID:                      serviceID,
-		AdminAuthService:               adminauthsvc.New(cfg, st),
+		AdminAuthService:               adminauthsvc.New(cfg, st, managerConfigService),
 		SetupService:                   setupsvc.New(cfg, st, collectorService, managerConfigService, startedAt, serviceID),
 		ManagerConfigService:           managerConfigService,
 		CollectorService:               collectorService,

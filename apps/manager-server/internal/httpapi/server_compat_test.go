@@ -290,7 +290,7 @@ func TestServerCompatAccountProcessingPolicyPatchRejectsEnvLockedField(t *testin
 	}
 }
 
-func TestServerCompatCPAPanelKeyCannotUseManagerOnlyRoutes(t *testing.T) {
+func TestServerCompatCPAManagementKeyCanUseManagerRoutes(t *testing.T) {
 	cpa := testutil.NewCPAMock(t)
 	cfg := testutil.NewConfig(t)
 	handler, db := newCompatHandler(t, cfg, nil)
@@ -307,8 +307,9 @@ func TestServerCompatCPAPanelKeyCannotUseManagerOnlyRoutes(t *testing.T) {
 	}
 
 	cpaKeyConfigRR := testutil.Request(t, handler, http.MethodGet, "/usage-service/config", "", "management-key")
-	testutil.RequireStatus(t, cpaKeyConfigRR, http.StatusUnauthorized)
-	if !strings.Contains(cpaKeyConfigRR.Body.String(), `"code":"invalid_admin_key"`) {
+	testutil.RequireStatus(t, cpaKeyConfigRR, http.StatusOK)
+	if !strings.Contains(cpaKeyConfigRR.Body.String(), `"source":"db"`) ||
+		!strings.Contains(cpaKeyConfigRR.Body.String(), `"cpaBaseUrl":"`+cpa.URL()+`"`) {
 		t.Fatalf("CPA key config body = %s", cpaKeyConfigRR.Body.String())
 	}
 
@@ -323,16 +324,13 @@ func TestServerCompatCPAPanelKeyCannotUseManagerOnlyRoutes(t *testing.T) {
 		t.Fatalf("insert event: %v", err)
 	}
 	usageRR := testutil.Request(t, handler, http.MethodGet, "/v0/management/usage", "", "management-key")
-	testutil.RequireStatus(t, usageRR, http.StatusUnauthorized)
-	if !strings.Contains(usageRR.Body.String(), `"code":"invalid_admin_key"`) {
+	testutil.RequireStatus(t, usageRR, http.StatusOK)
+	if !strings.Contains(usageRR.Body.String(), `"total_requests":1`) {
 		t.Fatalf("usage body = %s", usageRR.Body.String())
 	}
 
 	proxyRR := testutil.Request(t, handler, http.MethodGet, "/v0/management/config", "", "management-key")
-	testutil.RequireStatus(t, proxyRR, http.StatusUnauthorized)
-	if !strings.Contains(proxyRR.Body.String(), `"code":"invalid_admin_key"`) {
-		t.Fatalf("proxy body = %s", proxyRR.Body.String())
-	}
+	testutil.RequireStatus(t, proxyRR, http.StatusOK)
 }
 
 func TestServerCompatStatusAuthAndCounts(t *testing.T) {
