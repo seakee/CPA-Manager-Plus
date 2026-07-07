@@ -148,7 +148,7 @@ describe('MonitoringCenterPage summary cards', () => {
     expect(html).toContain('_summaryGrid');
     expect(html.match(/<strong/g)).toHaveLength(8);
     expect(html).toContain('25.5K');
-    expect(html).toContain('1.9K');
+    expect(html).toContain('1900');
     expect(html).toContain('2.8B');
     expect(html).toContain('3.6B');
     expect(html).toContain('role="tooltip"');
