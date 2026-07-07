@@ -6,7 +6,7 @@ import {
   usageServiceApi,
   type ApiKeyAlias,
 } from '@/services/api/usageService';
-import { useAuthStore, useNotificationStore } from '@/stores';
+import { useAuthStore, useConfigStore, useNotificationStore } from '@/stores';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import { copyToClipboard } from '@/utils/clipboard';
 import { maskApiKey } from '@/utils/format';
@@ -33,6 +33,7 @@ export const ApiKeysCardEditor = memo(function ApiKeysCardEditor({
   const showNotification = useNotificationStore((state) => state.showNotification);
   const showConfirmation = useNotificationStore((state) => state.showConfirmation);
   const managementKey = useAuthStore((state) => state.managementKey);
+  const savedApiKeys = useConfigStore((state) => state.config?.apiKeys);
   const featureAvailability = usePanelFeatureAvailability();
   const apiKeys = useMemo(
     () =>
@@ -459,7 +460,18 @@ export const ApiKeysCardEditor = memo(function ApiKeysCardEditor({
         activeApiKeyHashes,
         cleanupDecision.allowOrphanAliasCleanup
       );
-      showNotification(t('config_management.visual.api_keys.alias_saved'), 'success');
+      const editingKeyHash = getApiKeyHash(editingKey);
+      const savedHashSet = new Set(
+        (savedApiKeys ?? []).map((k) => getApiKeyHash(k))
+      );
+      if (editingKeyHash && !savedHashSet.has(editingKeyHash)) {
+        showNotification(
+          t('config_management.visual.api_keys.alias_saved_key_not_in_cpa'),
+          'warning'
+        );
+      } else {
+        showNotification(t('config_management.visual.api_keys.alias_saved'), 'success');
+      }
       closeAliasModal();
     } catch (error) {
       setAliasFormError(getAliasErrorMessage(error));

@@ -2559,6 +2559,7 @@
         "alias_action": "Set Alias",
         "alias_title": "Set API Key Alias",
         "alias_saved": "API key alias saved",
+        "alias_saved_key_not_in_cpa": "Alias saved, but this key is not in the active CPA api-keys list yet. Add it to API Keys and save the configuration before clients can use it.",
         "alias_deleted": "API key alias deleted",
         "alias_delete": "Delete Alias",
         "alias_delete_title": "Delete API Key Alias",

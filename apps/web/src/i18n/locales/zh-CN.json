@@ -2559,6 +2559,7 @@
         "alias_action": "设置别名",
         "alias_title": "设置 API Key 别名",
         "alias_saved": "API Key 别名已保存",
+        "alias_saved_key_not_in_cpa": "别名已保存，但此密钥尚未添加到 CPA 的 api-keys 列表中。请先将密钥添加到 API Keys 并保存配置，否则客户端无法使用。",
         "alias_deleted": "API Key 别名已删除",
         "alias_delete": "删除别名",
         "alias_delete_title": "删除 API Key 别名",
