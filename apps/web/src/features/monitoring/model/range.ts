@@ -44,6 +44,8 @@ export const getRangeBounds = (
   switch (range) {
     case 'today':
       return { startMs: todayStart, endMs: nowMs };
+    case 'yesterday':
+      return { startMs: todayStart - 24 * 60 * 60 * 1000, endMs: todayStart };
     case '7d':
       return { startMs: todayStart - 6 * 24 * 60 * 60 * 1000, endMs: nowMs };
     case '14d':
@@ -61,6 +63,7 @@ export const shouldUseHourlyTimeline = (
   customRange?: MonitoringCustomTimeRange | null
 ) =>
   range === 'today' ||
+  range === 'yesterday' ||
   (range === 'custom' &&
     isValidCustomTimeRange(customRange) &&
     buildLocalDayKey(customRange.startMs) === buildLocalDayKey(customRange.endMs));

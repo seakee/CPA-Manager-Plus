@@ -1568,6 +1568,7 @@
     "realtime_console_eyebrow": "实时运行监控",
     "console_subtitle": "按账号和时间范围追踪调用规模、成功失败、Token 结构和花费，并提供接近请求日志的实时监控表。",
     "range_today": "今天",
+    "range_yesterday": "昨天",
     "range_7d": "7 天",
     "range_14d": "14 天",
     "range_30d": "30 天",

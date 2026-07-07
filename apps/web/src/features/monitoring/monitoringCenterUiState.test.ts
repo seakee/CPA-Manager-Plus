@@ -67,6 +67,7 @@ describe('monitoringCenterUiState', () => {
 
   it('normalizes persisted filter fields', () => {
     expect(normalizeMonitoringTimeRange('30d')).toBe('30d');
+    expect(normalizeMonitoringTimeRange('yesterday')).toBe('yesterday');
     expect(normalizeMonitoringTimeRange('bad')).toBe('today');
     expect(normalizeMonitoringStatusFilter('failed')).toBe('failed');
     expect(normalizeMonitoringStatusFilter('bad')).toBe('all');

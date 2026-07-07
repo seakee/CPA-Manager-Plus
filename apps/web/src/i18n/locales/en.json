@@ -1568,6 +1568,7 @@
     "realtime_console_eyebrow": "Realtime Runtime Monitor",
     "console_subtitle": "Track call volume, success and failure, token structure, and spend by account within the selected time range, with a live table that behaves more like a request log console.",
     "range_today": "Today",
+    "range_yesterday": "Yesterday",
     "range_7d": "7d",
     "range_14d": "14d",
     "range_30d": "30d",
