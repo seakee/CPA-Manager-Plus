@@ -42,6 +42,7 @@
     "prefix": "前綴",
     "proxy_url": "代理",
     "priority": "優先順序",
+    "resize_column": "調整欄寬",
     "alias": "別名",
     "failure": "失敗",
     "unknown_error": "未知錯誤",

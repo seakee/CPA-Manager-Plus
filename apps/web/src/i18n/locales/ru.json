@@ -42,6 +42,7 @@
     "prefix": "Префикс",
     "proxy_url": "Прокси",
     "priority": "Приоритет",
+    "resize_column": "Изменить ширину столбца",
     "alias": "Псевдоним",
     "failure": "Сбой",
     "unknown_error": "Неизвестная ошибка",

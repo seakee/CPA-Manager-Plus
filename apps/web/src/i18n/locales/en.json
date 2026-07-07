@@ -42,6 +42,7 @@
     "prefix": "Prefix",
     "proxy_url": "Proxy",
     "priority": "Priority",
+    "resize_column": "Resize column",
     "alias": "Alias",
     "failure": "Failure",
     "unknown_error": "Unknown error",

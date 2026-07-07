@@ -6,6 +6,7 @@ import { IconCheck, IconEye, IconPencil, IconTrash2, IconX } from '@/components/
 import { ProviderStatusBar } from '../ProviderStatusBar';
 import { getProviderKindIcon, PROVIDER_KIND_LABELS } from './kindMeta';
 import type { ProviderRow } from './rowData';
+import { useResizableColumns } from './useResizableColumns';
 import styles from './ProviderTable.module.scss';
 
 interface ProviderTableProps {
@@ -38,6 +39,8 @@ export function ProviderTable({
   onToggle,
 }: ProviderTableProps) {
   const { t } = useTranslation();
+  const { gridTemplateColumns, onResizeStart, resetColumn, isResizable } = useResizableColumns();
+  const gridStyle = { gridTemplateColumns } as const;
 
   if (loading && rows.length === 0) {
     return <div className="hint">{t('common.loading')}</div>;
@@ -57,10 +60,26 @@ export function ProviderTable({
 
   return (
     <div className={styles.table} role="table" aria-label={t('ai_providers.table_aria_label')}>
-      <div className={`${styles.headerRow}`} role="row">
+      <div className={styles.headerRow} role="row" style={gridStyle}>
         <span role="columnheader">{t('ai_providers.table_col_type')}</span>
-        <span role="columnheader">{t('ai_providers.table_col_identity')}</span>
-        <span role="columnheader">{t('common.base_url')}</span>
+        {([
+          { label: t('ai_providers.table_col_identity'), colIndex: 1, className: undefined },
+          { label: t('common.base_url'), colIndex: 2, className: undefined },
+        ] as const).map(({ label, colIndex, className }) => (
+          <div key={colIndex} role="columnheader" className={`${styles.resizableHeader} ${className ?? ''}`}>
+            {label}
+            {isResizable(colIndex) && (
+              <div
+                className={styles.resizeHandle}
+                onPointerDown={(e) => onResizeStart(colIndex, e)}
+                onDoubleClick={() => resetColumn(colIndex)}
+                role="separator"
+                aria-orientation="vertical"
+                aria-label={t('common.resize_column')}
+              />
+            )}
+          </div>
+        ))}
         <span role="columnheader" className={styles.cellNumeric}>
           {t('ai_providers.table_col_models')}
         </span>
@@ -84,6 +103,7 @@ export function ProviderTable({
             role="row"
             tabIndex={0}
             className={`${styles.row} ${row.enabled ? '' : styles.rowDisabled}`}
+            style={gridStyle}
             onClick={() => onShowDetail(row)}
             onKeyDown={(event) => handleRowKeyDown(event, row)}
             aria-label={`${kindLabel} ${row.label}`}
