@@ -523,6 +523,59 @@ func TestAnalyticsUsesResolvedModelPricingInAggregates(t *testing.T) {
 	}
 }
 
+func TestAnalyticsFallsBackToRequestedModelPriceWhenResolvedPriceIsMissing(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	ctx := context.Background()
+	fromMS := int64(1_778_005_000_000)
+	toMS := fromMS + 60*60*1000
+
+	if err := db.SaveModelPrices(ctx, map[string]store.ModelPrice{
+		"GLM-5.2": {Prompt: 3},
+	}); err != nil {
+		t.Fatalf("save model prices: %v", err)
+	}
+	event := monitoringEvent("alias-fallback-cost", fromMS+1_000, "GLM-5.2", "auth-1", "source-a", false, 1_000_000, 0, 0, 0, 1_000_000, nil)
+	event.RequestedModel = "GLM-5.2"
+	event.ResolvedModel = "zai/glm-5.2"
+	if _, err := db.InsertEvents(ctx, []usage.Event{event}); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	resp, err := New(db).Analytics(ctx, Request{
+		FromMS: fromMS,
+		ToMS:   toMS,
+		Include: Include{
+			Summary:      true,
+			ModelShare:   true,
+			ModelStats:   true,
+			ChannelShare: true,
+			Timeline:     true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("analytics: %v", err)
+	}
+
+	if resp.Summary == nil || math.Abs(resp.Summary.TotalCost-3) > 0.000001 {
+		t.Fatalf("summary cost = %#v", resp.Summary)
+	}
+	if len(resp.ModelStats) != 1 || resp.ModelStats[0].Model != "GLM-5.2" ||
+		math.Abs(resp.ModelStats[0].Cost-3) > 0.000001 {
+		t.Fatalf("model stats = %#v", resp.ModelStats)
+	}
+	if len(resp.ModelShare) != 1 || resp.ModelShare[0].Model != "GLM-5.2" ||
+		math.Abs(resp.ModelShare[0].Cost-3) > 0.000001 {
+		t.Fatalf("model share = %#v", resp.ModelShare)
+	}
+	if len(resp.ChannelShare) != 1 || resp.ChannelShare[0].AuthIndex != "auth-1" ||
+		math.Abs(resp.ChannelShare[0].Cost-3) > 0.000001 {
+		t.Fatalf("channel share = %#v", resp.ChannelShare)
+	}
+	if len(resp.Timeline) != 1 || math.Abs(resp.Timeline[0].Cost-3) > 0.000001 {
+		t.Fatalf("timeline = %#v", resp.Timeline)
+	}
+}
+
 func TestAnalyticsPricesPriorityAndDefaultServiceTiersSeparately(t *testing.T) {
 	db := newMonitoringTestStore(t)
 	ctx := context.Background()
@@ -1316,6 +1369,107 @@ func TestAnalyticsSummaryAndHourlyDistributionUseRequestedTimeZone(t *testing.T)
 	}
 	if resp.HourlyDistribution[1].Hour != 8 || resp.HourlyDistribution[1].Calls != 1 || resp.HourlyDistribution[1].Tokens != 30 {
 		t.Fatalf("second hourly point = %#v", resp.HourlyDistribution[1])
+	}
+}
+
+func TestAccountHistoryReturnsRollupTotalsAndCost(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	ctx := context.Background()
+	baseMS := int64(1_700_000_000_000)
+	if err := db.SaveModelPrices(ctx, map[string]store.ModelPrice{
+		"resolved-a": {
+			Prompt:        1,
+			Completion:    2,
+			Cache:         0.5,
+			CacheRead:     0.25,
+			CacheCreation: 1.5,
+		},
+	}); err != nil {
+		t.Fatalf("save model prices: %v", err)
+	}
+
+	first := monitoringEvent("history-a-1", baseMS+1_000, "alias-a", "auth-1", "source-a", false, 1_000_000, 500_000, 0, 100_000, 1_530_000, nil)
+	first.ResolvedModel = "resolved-a"
+	first.AccountSnapshot = "hist@example.com"
+	first.Source = "hist@example.com"
+	first.CacheReadTokens = 20_000
+	first.CacheCreationTokens = 10_000
+	second := monitoringEvent("history-a-2", baseMS+2_000, "alias-a", "auth-1", "source-a", true, 0, 0, 0, 0, 0, nil)
+	second.ResolvedModel = "resolved-a"
+	second.AccountSnapshot = "hist@example.com"
+	second.Source = "hist@example.com"
+	if _, err := db.InsertEvents(ctx, []usage.Event{first, second}); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	resp, err := New(db).AccountHistory(ctx, AccountHistoryRequest{
+		Accounts: []AccountHistoryTarget{
+			{AccountSnapshot: "hist@example.com"},
+			{AccountSnapshot: "missing@example.com"},
+			{AccountKey: "hist@example.com"},
+		},
+		CatchUp: true,
+	})
+	if err != nil {
+		t.Fatalf("account history: %v", err)
+	}
+	if resp.Checkpoint.Pending || resp.Checkpoint.LatestID != 2 || resp.Checkpoint.LastEventID != 2 || resp.Checkpoint.Processed != 2 {
+		t.Fatalf("checkpoint = %#v", resp.Checkpoint)
+	}
+	if len(resp.Items) != 3 {
+		t.Fatalf("items = %#v", resp.Items)
+	}
+	history := resp.Items[0]
+	if history.AccountKey != "hist@example.com" || !history.Matched || history.SyncStatus != "ready" {
+		t.Fatalf("history item = %#v", history)
+	}
+	if history.TotalRequests != 2 || history.SuccessCalls != 1 || history.FailureCalls != 1 || history.TotalTokens != 1_530_000 {
+		t.Fatalf("history totals = %#v", history)
+	}
+	if history.SuccessRate == nil || math.Abs(*history.SuccessRate-0.5) > 0.000001 {
+		t.Fatalf("success rate = %#v", history.SuccessRate)
+	}
+	if math.Abs(history.TotalCost-1.985) > 0.000001 {
+		t.Fatalf("total cost = %v", history.TotalCost)
+	}
+	if history.FirstSeenMS == nil || *history.FirstSeenMS != baseMS+1_000 || history.LastSeenMS == nil || *history.LastSeenMS != baseMS+2_000 {
+		t.Fatalf("seen range = %#v %#v", history.FirstSeenMS, history.LastSeenMS)
+	}
+	if resp.Items[1].Matched || resp.Items[1].SyncStatus != "empty" {
+		t.Fatalf("missing item = %#v", resp.Items[1])
+	}
+	if !resp.Items[2].Matched || resp.Items[2].AccountKey != "hist@example.com" || resp.Items[2].TotalRequests != 2 {
+		t.Fatalf("account_key item = %#v", resp.Items[2])
+	}
+}
+
+func TestAccountHistoryEmptyTargetDoesNotMatchAnonymousBucket(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	ctx := context.Background()
+	baseMS := int64(1_700_000_000_000)
+	event := monitoringEvent("history-anonymous-source", baseMS+1_000, "gpt-a", "", "source-only", false, 10, 5, 0, 0, 15, nil)
+	event.AccountSnapshot = ""
+	event.AuthLabelSnapshot = ""
+	event.Source = ""
+	event.AuthIndex = ""
+	if _, err := db.InsertEvents(ctx, []usage.Event{event}); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	resp, err := New(db).AccountHistory(ctx, AccountHistoryRequest{
+		Accounts: []AccountHistoryTarget{
+			{},
+		},
+		CatchUp: true,
+	})
+	if err != nil {
+		t.Fatalf("account history: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("items = %#v", resp.Items)
+	}
+	if resp.Items[0].Matched || resp.Items[0].AccountKey != "" || resp.Items[0].SyncStatus != "empty" {
+		t.Fatalf("empty target matched anonymous bucket: %#v", resp.Items[0])
 	}
 }
 

@@ -30,8 +30,7 @@ export function getAntigravityQuotaInfo(entry?: AntigravityQuotaInfo): {
   const remainingFraction = normalizeQuotaFraction(remainingValue);
   const resetValue = quotaInfo.resetTime ?? quotaInfo.reset_time;
   const resetTime = typeof resetValue === 'string' ? resetValue : undefined;
-  const displayName =
-    normalizeStringValue(entry.displayName ?? entry.display_name) ?? undefined;
+  const displayName = normalizeStringValue(entry.displayName ?? entry.display_name) ?? undefined;
 
   return {
     remainingFraction,
@@ -288,13 +287,7 @@ export function buildAntigravityQuotaGroupsFromModels(
       models,
       payload
     ),
-    buildAntigravitySharedGroup(
-      'gemini',
-      'Gemini',
-      geminiModelIds,
-      models,
-      payload
-    ),
+    buildAntigravitySharedGroup('gemini', 'Gemini', geminiModelIds, models, payload),
   ].filter((group): group is AntigravityQuotaGroup => group !== null);
 }
 
@@ -412,11 +405,11 @@ function kimiResetHint(data: Record<string, unknown>): string | undefined {
 
 function kimiDurationToken(duration: number, rawTimeUnit: unknown): string {
   const unit = typeof rawTimeUnit === 'string' ? rawTimeUnit.trim().toUpperCase() : '';
-  if (unit === 'MINUTES') {
+  if (unit === 'MINUTE' || unit === 'MINUTES') {
     return duration % 60 === 0 ? `${duration / 60}h` : `${duration}m`;
   }
-  if (unit === 'HOURS') return `${duration}h`;
-  if (unit === 'DAYS') return `${duration}d`;
+  if (unit === 'HOUR' || unit === 'HOURS') return `${duration}h`;
+  if (unit === 'DAY' || unit === 'DAYS') return `${duration}d`;
   return `${duration}s`;
 }
 
@@ -498,8 +491,12 @@ export function buildKimiQuotaRows(payload: KimiUsagePayload): KimiQuotaRow[] {
   const limits = payload.limits;
   if (Array.isArray(limits)) {
     limits.forEach((item, idx) => {
-      const detail = (item.detail && typeof item.detail === 'object' ? item.detail : item) as KimiUsageDetail | KimiLimitItem;
-      const window = (item.window && typeof item.window === 'object' ? item.window : {}) as KimiLimitWindow;
+      const detail = (item.detail && typeof item.detail === 'object' ? item.detail : item) as
+        | KimiUsageDetail
+        | KimiLimitItem;
+      const window = (
+        item.window && typeof item.window === 'object' ? item.window : {}
+      ) as KimiLimitWindow;
       const fallbackLabel = kimiLimitLabel(item, detail, window, idx);
       const row = toKimiUsageRow(detail as Record<string, unknown>, fallbackLabel);
       if (row) {

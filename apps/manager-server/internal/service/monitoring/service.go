@@ -22,6 +22,8 @@ const (
 	maxDrilldownLimit          = 100
 	maxHeaderSnapshotDays      = 365
 	maxHeaderSnapshotLimit     = 5000
+	maxAccountHistoryTargets   = 200
+	accountHistoryCatchUpLimit = 5000
 	recentWindowMS             = 30 * 60 * 1000
 )
 
@@ -133,6 +135,46 @@ type HeaderSnapshotsResponse struct {
 	FromMS        int64            `json:"from_ms"`
 	ToMS          int64            `json:"to_ms"`
 	Items         []HeaderSnapshot `json:"items"`
+}
+
+type AccountHistoryRequest struct {
+	Accounts []AccountHistoryTarget `json:"accounts"`
+	CatchUp  bool                   `json:"catch_up"`
+}
+
+type AccountHistoryTarget struct {
+	AccountKey        string `json:"account_key,omitempty"`
+	AccountSnapshot   string `json:"account_snapshot,omitempty"`
+	AuthLabelSnapshot string `json:"auth_label_snapshot,omitempty"`
+	AuthIndex         string `json:"auth_index,omitempty"`
+	Source            string `json:"source,omitempty"`
+}
+
+type AccountHistoryResponse struct {
+	GeneratedAtMS int64                         `json:"generated_at_ms"`
+	Checkpoint    AccountHistoryCheckpointState `json:"checkpoint"`
+	Items         []AccountHistoryItem          `json:"items"`
+}
+
+type AccountHistoryCheckpointState struct {
+	LastEventID int64 `json:"last_event_id"`
+	LatestID    int64 `json:"latest_id"`
+	Pending     bool  `json:"pending"`
+	Processed   int   `json:"processed"`
+}
+
+type AccountHistoryItem struct {
+	AccountKey    string   `json:"account_key"`
+	Matched       bool     `json:"matched"`
+	TotalRequests int64    `json:"total_requests"`
+	SuccessCalls  int64    `json:"success_calls"`
+	FailureCalls  int64    `json:"failure_calls"`
+	TotalTokens   int64    `json:"total_tokens"`
+	TotalCost     float64  `json:"total_cost"`
+	SuccessRate   *float64 `json:"success_rate"`
+	FirstSeenMS   *int64   `json:"first_seen_ms"`
+	LastSeenMS    *int64   `json:"last_seen_ms"`
+	SyncStatus    string   `json:"sync_status"`
 }
 
 type Summary struct {
@@ -829,6 +871,104 @@ func (s *Service) Analytics(ctx context.Context, req Request) (Response, error) 
 	}
 
 	return response, nil
+}
+
+func (s *Service) AccountHistory(ctx context.Context, req AccountHistoryRequest) (AccountHistoryResponse, error) {
+	if len(req.Accounts) == 0 {
+		return AccountHistoryResponse{}, errors.New("accounts are required")
+	}
+	if len(req.Accounts) > maxAccountHistoryTargets {
+		return AccountHistoryResponse{}, fmt.Errorf("accounts must be less than or equal to %d", maxAccountHistoryTargets)
+	}
+	generatedAtMS := time.Now().UnixMilli()
+	processed := 0
+	if req.CatchUp {
+		result, err := s.store.CatchUpAccountHistoryRollups(ctx, accountHistoryCatchUpLimit, generatedAtMS)
+		if err != nil {
+			return AccountHistoryResponse{}, err
+		}
+		processed = result.Processed
+	}
+	checkpoint, err := s.store.AccountHistoryRollupCheckpoint(ctx)
+	if err != nil {
+		return AccountHistoryResponse{}, err
+	}
+	latestID, err := s.store.LatestUsageEventID(ctx)
+	if err != nil {
+		return AccountHistoryResponse{}, err
+	}
+
+	keys := make([]string, 0, len(req.Accounts))
+	targetKeys := make([]string, len(req.Accounts))
+	validTargets := make([]bool, len(req.Accounts))
+	for index, account := range req.Accounts {
+		key, valid := accountHistoryTargetKey(account)
+		targetKeys[index] = key
+		validTargets[index] = valid
+		if valid {
+			keys = append(keys, key)
+		}
+	}
+	rows, err := s.store.AccountHistoryRollupRows(ctx, keys)
+	if err != nil {
+		return AccountHistoryResponse{}, err
+	}
+	prices, err := s.store.LoadModelPrices(ctx)
+	if err != nil {
+		return AccountHistoryResponse{}, err
+	}
+	totals := buildAccountHistoryTotals(rows, prices)
+	pending := latestID > checkpoint.LastEventID
+	items := make([]AccountHistoryItem, 0, len(req.Accounts))
+	for index := range req.Accounts {
+		key := targetKeys[index]
+		if !validTargets[index] {
+			items = append(items, AccountHistoryItem{
+				AccountKey: key,
+				Matched:    false,
+				SyncStatus: accountHistorySyncStatus(false, false),
+			})
+			continue
+		}
+		total := totals[key]
+		if total == nil {
+			items = append(items, AccountHistoryItem{
+				AccountKey: key,
+				Matched:    false,
+				SyncStatus: accountHistorySyncStatus(false, pending),
+			})
+			continue
+		}
+		var successRate *float64
+		if total.requests > 0 {
+			value := ratio(total.successCalls, total.requests)
+			successRate = &value
+		}
+		items = append(items, AccountHistoryItem{
+			AccountKey:    key,
+			Matched:       true,
+			TotalRequests: total.requests,
+			SuccessCalls:  total.successCalls,
+			FailureCalls:  total.failureCalls,
+			TotalTokens:   total.totalTokens,
+			TotalCost:     total.cost,
+			SuccessRate:   successRate,
+			FirstSeenMS:   nullableMSPointer(total.firstSeenMS),
+			LastSeenMS:    nullableMSPointer(total.lastSeenMS),
+			SyncStatus:    accountHistorySyncStatus(true, pending),
+		})
+	}
+
+	return AccountHistoryResponse{
+		GeneratedAtMS: generatedAtMS,
+		Checkpoint: AccountHistoryCheckpointState{
+			LastEventID: checkpoint.LastEventID,
+			LatestID:    latestID,
+			Pending:     pending,
+			Processed:   processed,
+		},
+		Items: items,
+	}, nil
 }
 
 func (s *Service) HeaderSnapshots(ctx context.Context, req HeaderSnapshotsRequest) (HeaderSnapshotsResponse, error) {
@@ -2217,6 +2357,85 @@ func buildHeaderSnapshots(items []store.HeaderSnapshot) []HeaderSnapshot {
 	return result
 }
 
+type accountHistoryTotal struct {
+	requests     int64
+	successCalls int64
+	failureCalls int64
+	totalTokens  int64
+	cost         float64
+	firstSeenMS  int64
+	lastSeenMS   int64
+}
+
+func accountHistoryTargetKey(target AccountHistoryTarget) (string, bool) {
+	if key := strings.TrimSpace(target.AccountKey); key != "" {
+		return key, true
+	}
+	if strings.TrimSpace(target.AccountSnapshot) == "" &&
+		strings.TrimSpace(target.AuthLabelSnapshot) == "" &&
+		strings.TrimSpace(target.Source) == "" &&
+		strings.TrimSpace(target.AuthIndex) == "" {
+		return "", false
+	}
+	return store.AccountHistoryKey(
+		target.AccountSnapshot,
+		target.AuthLabelSnapshot,
+		target.Source,
+		target.AuthIndex,
+	), true
+}
+
+func buildAccountHistoryTotals(rows []store.AccountHistoryRollupRow, prices map[string]store.ModelPrice) map[string]*accountHistoryTotal {
+	totals := map[string]*accountHistoryTotal{}
+	for _, row := range rows {
+		total := totals[row.AccountKey]
+		if total == nil {
+			total = &accountHistoryTotal{}
+			totals[row.AccountKey] = total
+		}
+		total.requests += row.Calls
+		total.successCalls += row.SuccessCalls
+		total.failureCalls += row.FailureCalls
+		total.totalTokens += row.TotalTokens
+		total.cost += pricing.CostForModelCandidatesWithServiceTier(
+			[]string{row.BillingModel, row.Model},
+			row.ServiceTier,
+			pricing.ModelTokens{
+				InputTokens:         row.InputTokens,
+				OutputTokens:        row.OutputTokens,
+				CachedTokens:        row.CachedTokens,
+				CacheReadTokens:     row.CacheReadTokens,
+				CacheCreationTokens: row.CacheCreationTokens,
+			},
+			prices,
+		)
+		if total.firstSeenMS == 0 || (row.FirstSeenMS > 0 && row.FirstSeenMS < total.firstSeenMS) {
+			total.firstSeenMS = row.FirstSeenMS
+		}
+		if row.LastSeenMS > total.lastSeenMS {
+			total.lastSeenMS = row.LastSeenMS
+		}
+	}
+	return totals
+}
+
+func accountHistorySyncStatus(matched bool, pending bool) string {
+	if pending {
+		return "pending"
+	}
+	if matched {
+		return "ready"
+	}
+	return "empty"
+}
+
+func nullableMSPointer(value int64) *int64 {
+	if value <= 0 {
+		return nil
+	}
+	return &value
+}
+
 func sumCost(stats []store.ModelStat, prices map[string]store.ModelPrice) float64 {
 	total := 0.0
 	for _, stat := range stats {
@@ -2226,11 +2445,7 @@ func sumCost(stats []store.ModelStat, prices map[string]store.ModelPrice) float6
 }
 
 func costForStat(stat store.ModelStat, prices map[string]store.ModelPrice) float64 {
-	model := stat.BillingModel
-	if model == "" {
-		model = stat.Model
-	}
-	return pricing.CostForModelWithServiceTier(model, stat.ServiceTier, pricing.ModelTokens{
+	return pricing.CostForModelCandidatesWithServiceTier([]string{stat.BillingModel, stat.Model}, stat.ServiceTier, pricing.ModelTokens{
 		InputTokens:         stat.InputTokens,
 		OutputTokens:        stat.OutputTokens,
 		CachedTokens:        stat.CachedTokens,
@@ -2240,11 +2455,7 @@ func costForStat(stat store.ModelStat, prices map[string]store.ModelPrice) float
 }
 
 func costForTimelinePoint(point store.TimelinePoint, prices map[string]store.ModelPrice) float64 {
-	model := point.BillingModel
-	if model == "" {
-		model = point.Model
-	}
-	return pricing.CostForModelWithServiceTier(model, point.ServiceTier, pricing.ModelTokens{
+	return pricing.CostForModelCandidatesWithServiceTier([]string{point.BillingModel, point.Model}, point.ServiceTier, pricing.ModelTokens{
 		InputTokens:         point.InputTokens,
 		OutputTokens:        point.OutputTokens,
 		CachedTokens:        point.CachedTokens,
@@ -2254,11 +2465,7 @@ func costForTimelinePoint(point store.TimelinePoint, prices map[string]store.Mod
 }
 
 func costForHeatmapPoint(point store.HeatmapPoint, prices map[string]store.ModelPrice) float64 {
-	model := point.BillingModel
-	if model == "" {
-		model = point.Model
-	}
-	return pricing.CostForModelWithServiceTier(model, point.ServiceTier, pricing.ModelTokens{
+	return pricing.CostForModelCandidatesWithServiceTier([]string{point.BillingModel, point.Model}, point.ServiceTier, pricing.ModelTokens{
 		InputTokens:         point.InputTokens,
 		OutputTokens:        point.OutputTokens,
 		CachedTokens:        point.CachedTokens,
@@ -2268,11 +2475,7 @@ func costForHeatmapPoint(point store.HeatmapPoint, prices map[string]store.Model
 }
 
 func costForChannelStat(stat store.ChannelModelStat, prices map[string]store.ModelPrice) float64 {
-	model := stat.BillingModel
-	if model == "" {
-		model = stat.Model
-	}
-	return pricing.CostForModelWithServiceTier(model, stat.ServiceTier, pricing.ModelTokens{
+	return pricing.CostForModelCandidatesWithServiceTier([]string{stat.BillingModel, stat.Model}, stat.ServiceTier, pricing.ModelTokens{
 		InputTokens:         stat.InputTokens,
 		OutputTokens:        stat.OutputTokens,
 		CachedTokens:        stat.CachedTokens,
@@ -2282,11 +2485,7 @@ func costForChannelStat(stat store.ChannelModelStat, prices map[string]store.Mod
 }
 
 func costForAccountModelStat(stat store.AccountModelStat, prices map[string]store.ModelPrice) float64 {
-	model := stat.BillingModel
-	if model == "" {
-		model = stat.Model
-	}
-	return pricing.CostForModelWithServiceTier(model, stat.ServiceTier, pricing.ModelTokens{
+	return pricing.CostForModelCandidatesWithServiceTier([]string{stat.BillingModel, stat.Model}, stat.ServiceTier, pricing.ModelTokens{
 		InputTokens:         stat.InputTokens,
 		OutputTokens:        stat.OutputTokens,
 		CachedTokens:        stat.CachedTokens,
@@ -2296,11 +2495,7 @@ func costForAccountModelStat(stat store.AccountModelStat, prices map[string]stor
 }
 
 func costForAPIKeyModelStat(stat store.APIKeyModelStat, prices map[string]store.ModelPrice) float64 {
-	model := stat.BillingModel
-	if model == "" {
-		model = stat.Model
-	}
-	return pricing.CostForModelWithServiceTier(model, stat.ServiceTier, pricing.ModelTokens{
+	return pricing.CostForModelCandidatesWithServiceTier([]string{stat.BillingModel, stat.Model}, stat.ServiceTier, pricing.ModelTokens{
 		InputTokens:         stat.InputTokens,
 		OutputTokens:        stat.OutputTokens,
 		CachedTokens:        stat.CachedTokens,
@@ -2310,11 +2505,7 @@ func costForAPIKeyModelStat(stat store.APIKeyModelStat, prices map[string]store.
 }
 
 func costForCredentialModelStat(stat store.CredentialModelStat, prices map[string]store.ModelPrice) float64 {
-	model := stat.BillingModel
-	if model == "" {
-		model = stat.Model
-	}
-	return pricing.CostForModelWithServiceTier(model, stat.ServiceTier, pricing.ModelTokens{
+	return pricing.CostForModelCandidatesWithServiceTier([]string{stat.BillingModel, stat.Model}, stat.ServiceTier, pricing.ModelTokens{
 		InputTokens:         stat.InputTokens,
 		OutputTokens:        stat.OutputTokens,
 		CachedTokens:        stat.CachedTokens,
@@ -2324,11 +2515,7 @@ func costForCredentialModelStat(stat store.CredentialModelStat, prices map[strin
 }
 
 func costForCredentialTimelinePoint(point store.CredentialTimelinePoint, prices map[string]store.ModelPrice) float64 {
-	model := point.BillingModel
-	if model == "" {
-		model = point.Model
-	}
-	return pricing.CostForModelWithServiceTier(model, point.ServiceTier, pricing.ModelTokens{
+	return pricing.CostForModelCandidatesWithServiceTier([]string{point.BillingModel, point.Model}, point.ServiceTier, pricing.ModelTokens{
 		InputTokens:         point.InputTokens,
 		OutputTokens:        point.OutputTokens,
 		CachedTokens:        point.CachedTokens,

@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -158,13 +159,7 @@ func (w *AccountActionCandidateWorker) maybeAutoDisable(ctx context.Context, ite
 		return
 	}
 	client := cpaauthfiles.New(nil)
-	files, err := client.Fetch(ctx, baseURL, managementKey)
-	if err != nil {
-		_ = w.store.RecordAccountActionCandidateFailure(ctx, item.ID, err.Error())
-		log.Printf("[account-action] auto-disable verification failed for pending candidate %d authFile=%q: %v", item.ID, item.AuthFileName, err)
-		return
-	}
-	current, err := cpaauthfiles.VerifyIdentity(files, cpaauthfiles.Identity{
+	current, err := client.Verify(ctx, baseURL, managementKey, cpaauthfiles.Identity{
 		AuthFileName:      item.AuthFileName,
 		AuthIndex:         item.AuthIndex,
 		Provider:          item.Provider,
@@ -172,16 +167,21 @@ func (w *AccountActionCandidateWorker) maybeAutoDisable(ctx context.Context, ite
 		AccountIDSnapshot: item.AccountIDSnapshot,
 	})
 	if err != nil {
-		reason := "current CPA auth file identity verification failed: " + err.Error()
-		_ = w.store.RecordAccountActionCandidateFailure(ctx, item.ID, reason)
-		log.Printf("[account-action] auto-disable skipped for pending candidate %d authFile=%q reason=identity_verification_failed detail=%v", item.ID, item.AuthFileName, err)
+		if errors.Is(err, cpaauthfiles.ErrAuthFileNotFound) || errors.Is(err, cpaauthfiles.ErrIdentityMismatch) {
+			reason := "current CPA auth file identity verification failed: " + err.Error()
+			_ = w.store.RecordAccountActionCandidateFailure(ctx, item.ID, reason)
+			log.Printf("[account-action] auto-disable skipped for pending candidate %d authFile=%q reason=identity_verification_failed detail=%v", item.ID, item.AuthFileName, err)
+			return
+		}
+		_ = w.store.RecordAccountActionCandidateFailure(ctx, item.ID, err.Error())
+		log.Printf("[account-action] auto-disable verification failed for pending candidate %d authFile=%q: %v", item.ID, item.AuthFileName, err)
 		return
 	}
 	if current.Disabled {
 		log.Printf("[account-action] auto-disable skipped for pending candidate %d authFile=%q reason=already_disabled", item.ID, item.AuthFileName)
 		return
 	}
-	if err := client.PatchDisabled(ctx, baseURL, managementKey, item.AuthFileName, true); err != nil {
+	if err := client.PatchDisabled(ctx, baseURL, managementKey, item.AuthFileName, true, item.AuthIndex); err != nil {
 		_ = w.store.RecordAccountActionCandidateFailure(ctx, item.ID, err.Error())
 		log.Printf("[account-action] auto-disable patch failed for pending candidate %d authFile=%q: %v", item.ID, item.AuthFileName, err)
 		return

@@ -67,7 +67,7 @@ func (s *Service) Enable(ctx context.Context, id int64) (model.AccountActionCand
 	if _, err := s.verifyCurrentAuthFile(ctx, setup, item); err != nil {
 		return model.AccountActionCandidate{}, err
 	}
-	if err := s.patchAuthFile(ctx, setup, item.AuthFileName, false); err != nil {
+	if err := s.patchAuthFile(ctx, setup, item.AuthFileName, item.AuthIndex, false); err != nil {
 		_ = s.store.RecordAccountActionCandidateFailure(ctx, id, err.Error())
 		return model.AccountActionCandidate{}, err
 	}
@@ -135,12 +135,7 @@ func (s *Service) resolveCandidateAndSetup(ctx context.Context, id int64) (model
 }
 
 func (s *Service) verifyCurrentAuthFile(ctx context.Context, setup store.Setup, item model.AccountActionCandidate) (authFile, error) {
-	files, err := cpaauthfiles.New(s.client).Fetch(ctx, setup.CPAUpstreamURL, setup.ManagementKey)
-	if err != nil {
-		_ = s.store.RecordAccountActionCandidateFailure(ctx, item.ID, err.Error())
-		return authFile{}, err
-	}
-	file, err := cpaauthfiles.VerifyIdentity(files, cpaauthfiles.Identity{
+	file, err := cpaauthfiles.New(s.client).Verify(ctx, setup.CPAUpstreamURL, setup.ManagementKey, cpaauthfiles.Identity{
 		AuthFileName:      item.AuthFileName,
 		AuthIndex:         item.AuthIndex,
 		Provider:          item.Provider,
@@ -148,14 +143,18 @@ func (s *Service) verifyCurrentAuthFile(ctx context.Context, setup store.Setup, 
 		AccountIDSnapshot: item.AccountIDSnapshot,
 	})
 	if err != nil {
+		if !errors.Is(err, cpaauthfiles.ErrAuthFileNotFound) && !errors.Is(err, cpaauthfiles.ErrIdentityMismatch) {
+			_ = s.store.RecordAccountActionCandidateFailure(ctx, item.ID, err.Error())
+			return authFile{}, err
+		}
 		return authFile{}, ErrCandidateConflict
 	}
 	return file, nil
 
 }
 
-func (s *Service) patchAuthFile(ctx context.Context, setup store.Setup, fileName string, disabled bool) error {
-	return cpaauthfiles.New(s.client).PatchDisabled(ctx, setup.CPAUpstreamURL, setup.ManagementKey, fileName, disabled)
+func (s *Service) patchAuthFile(ctx context.Context, setup store.Setup, fileName string, authIndex string, disabled bool) error {
+	return cpaauthfiles.New(s.client).PatchDisabled(ctx, setup.CPAUpstreamURL, setup.ManagementKey, fileName, disabled, authIndex)
 }
 
 func (s *Service) deleteAuthFile(ctx context.Context, setup store.Setup, fileName string) error {

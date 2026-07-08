@@ -85,6 +85,8 @@ func runServer() {
 		ManagementKey:  cfg.ManagementKey,
 	})
 	accountActionWorker := worker.NewAccountActionCandidateWorker(db, runtimeSettings.AccountActionsAutoDisable)
+	accountHistoryRollupWorker := worker.NewAccountHistoryRollupWorker(db)
+	accountHistoryRollupWorker.Start(ctx)
 	automationRuntime := worker.NewAutomationRuntime(
 		automationSettingsService,
 		manager,
@@ -93,6 +95,10 @@ func runServer() {
 	)
 	serverApp.AppContext().AutomationRuntimeService = automationRuntime
 	automationRuntime.Start(ctx)
+	manager.SetUsageEventHandler(worker.NewUsageEventFanout(
+		automationRuntime.UsageEventHandler(),
+		accountHistoryRollupWorker,
+	))
 
 	collectorWorker.Start(ctx)
 

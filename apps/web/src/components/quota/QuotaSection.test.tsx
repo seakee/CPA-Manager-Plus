@@ -188,6 +188,11 @@ const findButtonByText = (renderer: ReactTestRenderer, text: string) => {
 const findButtonsByText = (renderer: ReactTestRenderer, text: string) =>
   renderer.root.findAllByType('button').filter((node) => getText(node).includes(text));
 
+const flushMicrotasks = async () => {
+  await Promise.resolve();
+  await Promise.resolve();
+};
+
 let runLoadQuota:
   | ((targets: AuthFileItem[], setLoading?: (loading: boolean) => void) => Promise<void>)
   | undefined;
@@ -414,6 +419,70 @@ describe('QuotaSection account display mode', () => {
     expect(
       (mocks.quotaStoreState.codexQuota as Record<string, unknown>)[FULL_FILE_NAME]
     ).toBeUndefined();
+
+    act(() => {
+      renderer.unmount();
+    });
+  });
+
+  it('limits bulk quota refresh concurrency', async () => {
+    const scopedConfig = createScopedTestConfig();
+    const files: AuthFileItem[] = Array.from({ length: 7 }, (_, index) => ({
+      ...testFile,
+      authIndex: index,
+      name: `${index}-${testFile.name}`,
+    }));
+    const resolvers: Array<() => void> = [];
+    let activeRequests = 0;
+    let maxActiveRequests = 0;
+
+    mocks.quotaStoreState.codexQuota = {};
+    mocks.fetchQuota.mockImplementation(async (file: AuthFileItem) => {
+      activeRequests += 1;
+      maxActiveRequests = Math.max(maxActiveRequests, activeRequests);
+
+      await new Promise<void>((resolve) => {
+        resolvers.push(resolve);
+      });
+
+      activeRequests -= 1;
+      return { resetCredits: file.authIndex ?? 0 };
+    });
+
+    let renderer!: ReactTestRenderer;
+    act(() => {
+      renderer = create(
+        <QuotaLoaderHarness
+          config={scopedConfig}
+          onLoadQuota={(nextLoadQuota) => {
+            runLoadQuota = nextLoadQuota;
+          }}
+        />
+      );
+    });
+
+    const loadPromise = runLoadQuota?.(files);
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    expect(mocks.fetchQuota).toHaveBeenCalledTimes(4);
+    expect(maxActiveRequests).toBe(4);
+
+    while (mocks.fetchQuota.mock.calls.length < files.length) {
+      resolvers.shift()?.();
+      await act(async () => {
+        await flushMicrotasks();
+      });
+    }
+
+    resolvers.splice(0).forEach((resolve) => resolve());
+    await act(async () => {
+      await loadPromise;
+    });
+
+    expect(maxActiveRequests).toBe(4);
+    expect(mocks.fetchQuota).toHaveBeenCalledTimes(files.length);
 
     act(() => {
       renderer.unmount();

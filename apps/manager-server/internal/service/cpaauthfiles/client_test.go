@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -58,14 +59,15 @@ func TestClientPatchDisabledAndDelete(t *testing.T) {
 			_ = json.NewEncoder(w).Encode([]map[string]any{{"name": "codex-auth.json", "auth_index": "7"}})
 		case "PATCH /v0/management/auth-files/status":
 			var payload struct {
-				Name     string `json:"name"`
-				Disabled bool   `json:"disabled"`
+				Name      string `json:"name"`
+				AuthIndex string `json:"auth_index"`
+				Disabled  bool   `json:"disabled"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			if payload.Name != "codex-auth.json" || !payload.Disabled {
+			if payload.Name != "codex-auth.json" || payload.AuthIndex != "7" || !payload.Disabled {
 				t.Fatalf("patch payload = %#v", payload)
 			}
 			patched = true
@@ -90,7 +92,7 @@ func TestClientPatchDisabledAndDelete(t *testing.T) {
 	if _, ok := Find(files, "codex-auth.json", "7"); !ok {
 		t.Fatalf("find files = %#v", files)
 	}
-	if err := client.PatchDisabled(context.Background(), server.URL, "mgmt", "codex-auth.json", true); err != nil {
+	if err := client.PatchDisabled(context.Background(), server.URL, "mgmt", "codex-auth.json", true, "7"); err != nil {
 		t.Fatalf("patch disabled: %v", err)
 	}
 	if err := client.Delete(context.Background(), server.URL, "mgmt", "codex-auth.json"); err != nil {
@@ -98,5 +100,82 @@ func TestClientPatchDisabledAndDelete(t *testing.T) {
 	}
 	if !patched || !deleted {
 		t.Fatalf("patched=%t deleted=%t", patched, deleted)
+	}
+}
+
+func TestClientFindStreamsLargeAuthFilesResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v0/management/auth-files" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Query().Get("name") != "target.json" || r.URL.Query().Get("auth_index") != "target-index" {
+			t.Fatalf("query = %s", r.URL.RawQuery)
+		}
+		if r.Header.Get("Authorization") != "Bearer mgmt" {
+			http.Error(w, "missing auth", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"files":[`)
+		padding := strings.Repeat("x", 2048)
+		for i := 0; i < 650; i++ {
+			if i > 0 {
+				_, _ = io.WriteString(w, ",")
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"name":           "filler.json",
+				"auth_index":     "filler",
+				"status_message": padding,
+			})
+		}
+		_, _ = io.WriteString(w, `,{"name":"target.json","auth_index":"target-index","provider":"codex","account":"user@example.com","account_id":"acct-123","disabled":false}]}`)
+	}))
+	defer server.Close()
+
+	client := New(server.Client())
+	file, ok, err := client.Find(context.Background(), server.URL, "mgmt", "target.json", "target-index")
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected target auth file to be found")
+	}
+	if file.Name != "target.json" || file.AuthIndex != "target-index" || file.AccountID != "acct-123" {
+		t.Fatalf("file = %#v", file)
+	}
+}
+
+func TestClientFetchAndFindAcceptSingleAuthFileObject(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v0/management/auth-files" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"name":       "single.json",
+			"auth_index": "single-index",
+			"provider":   "codex",
+			"account":    "user@example.com",
+			"account_id": "acct-123",
+			"disabled":   false,
+		})
+	}))
+	defer server.Close()
+
+	client := New(server.Client())
+	files, err := client.Fetch(context.Background(), server.URL, "mgmt")
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if len(files) != 1 || files[0].Name != "single.json" || files[0].AuthIndex != "single-index" {
+		t.Fatalf("files = %#v", files)
+	}
+	file, ok, err := client.Find(context.Background(), server.URL, "mgmt", "single.json", "single-index")
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if !ok || file.Name != "single.json" || file.AuthIndex != "single-index" {
+		t.Fatalf("file=%#v ok=%t", file, ok)
 	}
 }

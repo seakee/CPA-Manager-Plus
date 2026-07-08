@@ -256,6 +256,52 @@ func TestAccountActionCandidateWorkerAutoDisableRejectsIdentityMismatch(t *testi
 	}
 }
 
+func TestAccountActionCandidateWorkerAutoDisableRecordsVerificationTransportError(t *testing.T) {
+	st, err := store.Open(t.TempDir() + "/usage.sqlite")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	var patched bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v0/management/auth-files":
+			http.Error(w, "temporary CPA failure", http.StatusInternalServerError)
+		case "PATCH /v0/management/auth-files/status":
+			patched = true
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	worker := NewAccountActionCandidateWorker(st, true)
+	worker.handleCandidate(context.Background(), accountActionCandidate{
+		BaseURL:        server.URL,
+		ManagementKey:  "mgmt",
+		FileName:       "codex-auth.json",
+		AuthIndex:      "7",
+		DisplayAccount: "user@example.com",
+		AccountID:      "acct-123",
+		Provider:       "codex",
+		ActionType:     model.AccountActionTypeDelete,
+		Reason:         "token revoked",
+	})
+
+	if patched {
+		t.Fatal("PATCH should not be called when verification request fails")
+	}
+	items, err := st.ListAccountActionCandidates(context.Background(), model.AccountActionStatusPending, 10)
+	if err != nil {
+		t.Fatalf("list candidates: %v", err)
+	}
+	if len(items) != 1 || !strings.Contains(items[0].LastError, "HTTP 500") || strings.Contains(items[0].LastError, "identity verification failed") {
+		t.Fatalf("items = %#v", items)
+	}
+}
+
 func TestAccountActionCandidateWorkerAutoDisablesReauth(t *testing.T) {
 	st, err := store.Open(t.TempDir() + "/usage.sqlite")
 	if err != nil {

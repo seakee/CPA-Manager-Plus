@@ -987,11 +987,121 @@
     align-items: center;
     justify-content: space-between;
     gap: 12px;
+    min-width: 0;
   }
 
   .quotaWindowHeader span {
     color: var(--monitor-ink);
     font-size: 12px;
+  }
+
+  .quotaWindowLabel {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    max-width: 100%;
+    overflow: visible;
+  }
+
+  .quotaWindowLabel > span:first-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .quotaInfoTrigger {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    flex: 0 0 auto;
+    color: var(--monitor-muted);
+    cursor: help;
+    outline: none;
+  }
+
+  .quotaInfoTrigger:hover,
+  .quotaInfoTrigger:focus-visible {
+    color: var(--monitor-ink);
+  }
+
+  .quotaInfoTrigger:focus-visible {
+    border-radius: 50%;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--monitor-accent) 24%, transparent);
+  }
+
+  .quotaInfoIcon {
+    display: block;
+  }
+
+  .quotaInfoTooltip {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 0;
+    z-index: 20;
+    display: grid;
+    gap: 4px;
+    min-width: 210px;
+    max-width: min(320px, calc(100vw - 32px));
+    padding: 8px 10px;
+    border: 1px solid var(--monitor-line);
+    border-radius: 8px;
+    background: var(--monitor-surface);
+    box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);
+    color: var(--monitor-ink);
+    font-size: 11px;
+    line-height: 1.45;
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(4px);
+    transition:
+      opacity 0.14s ease,
+      transform 0.14s ease,
+      visibility 0.14s ease;
+    visibility: hidden;
+    white-space: normal;
+  }
+
+  .quotaInfoTooltip::after {
+    content: '';
+    position: absolute;
+    bottom: -5px;
+    left: 6px;
+    width: 9px;
+    height: 9px;
+    border-right: 1px solid var(--monitor-line);
+    border-bottom: 1px solid var(--monitor-line);
+    background: inherit;
+    transform: rotate(45deg);
+  }
+
+  .quotaInfoTrigger:hover .quotaInfoTooltip,
+  .quotaInfoTrigger:focus-within .quotaInfoTooltip {
+    opacity: 1;
+    transform: translateY(0);
+    visibility: visible;
+  }
+
+  .quotaInfoTooltipRow {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 8px;
+    align-items: baseline;
+  }
+
+  .quotaInfoTooltipLabel {
+    color: var(--monitor-muted);
+    white-space: nowrap;
+  }
+
+  .quotaInfoTooltipValue {
+    color: var(--monitor-ink);
+    font-weight: 700;
+    overflow-wrap: anywhere;
   }
 
   .quotaProgressTrack {

@@ -4,8 +4,11 @@ import {
   fetchAntigravityQuota,
   fetchClaudeQuota,
   fetchCodexQuota,
+  fetchKimiQuota,
   fetchXaiQuota,
 } from '@/utils/quota';
+import zhCN from '@/i18n/locales/zh-CN.json';
+import zhTW from '@/i18n/locales/zh-TW.json';
 import type { MonitoringAccountQuotaTarget } from '@/features/monitoring/accountOverviewQuotaTargets';
 import type {
   MonitoringAccountRow,
@@ -57,6 +60,8 @@ const t = ((key: string, options?: Record<string, unknown>) => {
     'xai_quota.title': 'xAI Quota',
     'xai_quota.empty_data': 'No xAI quota data',
     'xai_quota.monthly_limit': 'Monthly billing limit',
+    'xai_quota.monthly_credits': 'Monthly credits',
+    'xai_quota.pay_as_you_go_label': 'Pay-as-you-go',
     'xai_quota.on_demand_cap': 'On-demand cap',
     'xai_quota.usage_amount': '{{remaining}} / {{limit}} remaining',
   };
@@ -139,6 +144,36 @@ const createApiKeyRow = (apiKeyHash: string, label: string): MonitoringApiKeyRow
 });
 
 describe('monitoringCenterPageModel filter options', () => {
+  it('keeps Chinese compact all-filter labels contextual', () => {
+    const keys = [
+      'filter_all_accounts_short',
+      'filter_all_providers_short',
+      'filter_all_models_short',
+      'filter_all_channels_short',
+      'filter_all_api_keys_short',
+      'filter_all_statuses_short',
+    ] as const;
+
+    expect(keys.map((key) => zhCN.monitoring[key])).toEqual([
+      '全部账号',
+      '全部提供方',
+      '全部模型',
+      '全部渠道',
+      '全部调用方密钥',
+      '全部状态',
+    ]);
+    expect(keys.map((key) => zhTW.monitoring[key])).toEqual([
+      '全部帳號',
+      '全部提供方',
+      '全部模型',
+      '全部渠道',
+      '全部呼叫方密鑰',
+      '全部狀態',
+    ]);
+    expect(new Set(keys.map((key) => zhCN.monitoring[key])).size).toBe(keys.length);
+    expect(new Set(keys.map((key) => zhTW.monitoring[key])).size).toBe(keys.length);
+  });
+
   it('maps usage analytics drilldown query into initial realtime filters', () => {
     const initialState = {
       ...getDefaultMonitoringCenterUiState(),
@@ -844,14 +879,51 @@ describe('monitoringCenterPageModel account quota', () => {
     ]);
   });
 
+  it('maps Kimi quota rows without amount labels in account quota entries', async () => {
+    vi.mocked(fetchKimiQuota).mockResolvedValue([
+      {
+        id: 'daily',
+        label: 'Daily',
+        used: 25,
+        limit: 100,
+        resetHint: '2026-07-31T00:00:00Z',
+      },
+    ]);
+
+    const entry = await requestAccountQuota(
+      createTarget({
+        provider: 'kimi',
+        authIndex: '4',
+        fileName: 'kimi.json',
+      }),
+      t
+    );
+
+    expect(entry).toMatchObject({
+      provider: 'kimi',
+      providerLabel: 'Kimi Quota',
+      windows: [
+        {
+          id: 'daily',
+          label: 'Daily',
+          remainingPercent: 75,
+          usageLabel: null,
+        },
+      ],
+    });
+  });
+
   it('maps xAI billing into account quota entries', async () => {
     vi.mocked(fetchXaiQuota).mockResolvedValue({
       monthlyLimitCents: 10000,
-      usedCents: 2500,
+      usedCents: 12500,
+      includedUsedCents: 10000,
       onDemandCapCents: 5000,
+      onDemandUsedCents: 2500,
+      onDemandUsedPercent: 50,
       billingPeriodStart: '2026-05-01T00:00:00Z',
       billingPeriodEnd: '2026-06-01T00:00:00Z',
-      usedPercent: 25,
+      usedPercent: 100,
     });
 
     const entry = await requestAccountQuota(
@@ -870,9 +942,15 @@ describe('monitoringCenterPageModel account quota', () => {
       windows: [
         {
           id: 'monthly-limit',
-          label: 'Monthly billing limit',
-          remainingPercent: 75,
-          usageLabel: '$75.00 / $100.00 remaining',
+          label: 'Monthly credits',
+          remainingPercent: 0,
+          usageLabel: '$0.00 / $100.00 remaining',
+        },
+        {
+          id: 'pay-as-you-go',
+          label: 'Pay-as-you-go',
+          remainingPercent: 50,
+          usageLabel: '$25.00 / $50.00 remaining',
         },
       ],
     });

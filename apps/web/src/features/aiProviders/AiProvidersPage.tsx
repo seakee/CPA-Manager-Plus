@@ -802,6 +802,130 @@ export function AiProvidersPage() {
     }
   };
 
+  const setProviderPriority = async (row: ProviderRow, priority: number) => {
+    const nextPriority = Math.trunc(priority);
+    const switchingKey = `${row.key}:priority`;
+
+    // 复用页面级切换锁，避免外层快捷优先级与抽屉保存、开关切换并发写入。
+    if (row.kind === 'gemini') {
+      const current = geminiKeys[row.originalIndex];
+      if (!current || current.priority === nextPriority) return;
+
+      setConfigSwitchingKey(switchingKey);
+      const previousList = geminiKeys;
+      const nextList = previousList.map((item, idx) =>
+        idx === row.originalIndex ? { ...item, priority: nextPriority } : item
+      );
+
+      setGeminiKeys(nextList);
+      updateConfigValue('gemini-api-key', nextList);
+      clearCache('gemini-api-key');
+
+      try {
+        await providersApi.saveGeminiKeys(nextList);
+        showNotification(t('notification.gemini_key_updated'), 'success');
+      } catch (err: unknown) {
+        const message = getErrorMessage(err);
+        setGeminiKeys(previousList);
+        updateConfigValue('gemini-api-key', previousList);
+        clearCache('gemini-api-key');
+        showNotification(`${t('notification.update_failed')}: ${message}`, 'error');
+      } finally {
+        setConfigSwitchingKey(null);
+      }
+      return;
+    }
+
+    if (row.kind === 'openai') {
+      const current = openaiProviders[row.originalIndex];
+      if (!current || current.priority === nextPriority) return;
+
+      setConfigSwitchingKey(switchingKey);
+      const previousList = openaiProviders;
+      const nextList = previousList.map((item, idx) =>
+        idx === row.originalIndex ? { ...item, priority: nextPriority } : item
+      );
+
+      setOpenaiProviders(nextList);
+      updateConfigValue('openai-compatibility', nextList);
+      clearCache('openai-compatibility');
+
+      try {
+        await providersApi.saveOpenAIProviders(nextList);
+        showNotification(t('notification.openai_provider_updated'), 'success');
+      } catch (err: unknown) {
+        const message = getErrorMessage(err);
+        setOpenaiProviders(previousList);
+        updateConfigValue('openai-compatibility', previousList);
+        clearCache('openai-compatibility');
+        showNotification(`${t('notification.update_failed')}: ${message}`, 'error');
+      } finally {
+        setConfigSwitchingKey(null);
+      }
+      return;
+    }
+
+    const source =
+      row.kind === 'codex'
+        ? codexConfigs
+        : row.kind === 'claude'
+          ? claudeConfigs
+          : vertexConfigs;
+    const current = source[row.originalIndex];
+    if (!current || current.priority === nextPriority) return;
+
+    setConfigSwitchingKey(switchingKey);
+    const previousList = source;
+    const nextList = previousList.map((item, idx) =>
+      idx === row.originalIndex ? { ...item, priority: nextPriority } : item
+    );
+
+    if (row.kind === 'codex') {
+      setCodexConfigs(nextList);
+      updateConfigValue('codex-api-key', nextList);
+      clearCache('codex-api-key');
+    } else if (row.kind === 'claude') {
+      setClaudeConfigs(nextList);
+      updateConfigValue('claude-api-key', nextList);
+      clearCache('claude-api-key');
+    } else {
+      setVertexConfigs(nextList);
+      updateConfigValue('vertex-api-key', nextList);
+      clearCache('vertex-api-key');
+    }
+
+    try {
+      if (row.kind === 'codex') {
+        await providersApi.saveCodexConfigs(nextList);
+        showNotification(t('notification.codex_config_updated'), 'success');
+      } else if (row.kind === 'claude') {
+        await providersApi.saveClaudeConfigs(nextList);
+        showNotification(t('notification.claude_config_updated'), 'success');
+      } else {
+        await providersApi.saveVertexConfigs(nextList);
+        showNotification(t('notification.vertex_config_updated'), 'success');
+      }
+    } catch (err: unknown) {
+      const message = getErrorMessage(err);
+      if (row.kind === 'codex') {
+        setCodexConfigs(previousList);
+        updateConfigValue('codex-api-key', previousList);
+        clearCache('codex-api-key');
+      } else if (row.kind === 'claude') {
+        setClaudeConfigs(previousList);
+        updateConfigValue('claude-api-key', previousList);
+        clearCache('claude-api-key');
+      } else {
+        setVertexConfigs(previousList);
+        updateConfigValue('vertex-api-key', previousList);
+        clearCache('vertex-api-key');
+      }
+      showNotification(`${t('notification.update_failed')}: ${message}`, 'error');
+    } finally {
+      setConfigSwitchingKey(null);
+    }
+  };
+
   // 删除（按 provider 分派，沿用既有 API 契约）
   const deleteGemini = (index: number) => {
     const entry = geminiKeys[index];
@@ -942,6 +1066,10 @@ export function AiProvidersPage() {
     void setProviderDisableCoolingEnabled(row.kind, row.originalIndex, enabled);
   };
 
+  const handleRowPriorityChange = (row: ProviderRow, priority: number) => {
+    void setProviderPriority(row, priority);
+  };
+
   const handleRowEdit = (row: ProviderRow) => {
     setDetailRowKey(null);
     openEditorDrawer(row.kind, row.originalIndex);
@@ -1041,6 +1169,7 @@ export function AiProvidersPage() {
               onEdit={handleRowEdit}
               onDelete={handleRowDelete}
               onToggle={handleRowToggle}
+              onPriorityChange={handleRowPriorityChange}
             />
             {visibleRows.length > 0 &&
               (visibleRows.length > PROVIDER_TABLE_DEFAULT_PAGE_SIZE ||

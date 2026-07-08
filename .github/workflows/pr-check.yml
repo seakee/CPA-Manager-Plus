@@ -78,6 +78,33 @@ jobs:
         working-directory: apps/manager-server
         run: go test ./...
 
+  native-control:
+    name: Native Control (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-latest
+          - ubuntu-latest
+          - windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test native control scripts
+        run: npx vitest run tests/nativeControlScripts.test.mjs
+
   docker-build:
     name: Docker Build
     runs-on: ubuntu-latest

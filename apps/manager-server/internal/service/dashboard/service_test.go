@@ -263,6 +263,51 @@ func TestSummaryUsesResolvedModelPricing(t *testing.T) {
 	}
 }
 
+func TestSummaryFallsBackToRequestedModelPriceWhenResolvedPriceIsMissing(t *testing.T) {
+	db := newDashboardTestStore(t)
+	ctx := context.Background()
+	todayStart := int64(1_778_005_000_000)
+	nowMS := todayStart + 60*60*1000
+
+	if err := db.SaveModelPrices(ctx, map[string]store.ModelPrice{
+		"GLM-5.2": {Prompt: 3},
+	}); err != nil {
+		t.Fatalf("save prices: %v", err)
+	}
+	event := dashboardEvent("dashboard-alias-fallback-cost", todayStart+1_000, "GLM-5.2", false, 1_000_000, 0, 0, 0, 0, 1_000_000, nil)
+	event.RequestedModel = "GLM-5.2"
+	event.ResolvedModel = "zai/glm-5.2"
+	if _, err := db.InsertEvents(ctx, []usage.Event{event}); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	resp, err := New(db).Summary(ctx, SummaryParams{
+		TodayStartMS:   todayStart,
+		NowMS:          nowMS,
+		TopModels:      5,
+		RecentFailures: 1,
+	})
+	if err != nil {
+		t.Fatalf("summary: %v", err)
+	}
+
+	if math.Abs(resp.Today.TotalCost-3) > 0.000001 {
+		t.Fatalf("today cost = %v", resp.Today.TotalCost)
+	}
+	if len(resp.TopModelsToday) != 1 || resp.TopModelsToday[0].Model != "GLM-5.2" ||
+		math.Abs(resp.TopModelsToday[0].Cost-3) > 0.000001 {
+		t.Fatalf("top models = %#v", resp.TopModelsToday)
+	}
+	if len(resp.ModelCostRank) != 1 || resp.ModelCostRank[0].Model != "GLM-5.2" ||
+		math.Abs(resp.ModelCostRank[0].Cost-3) > 0.000001 {
+		t.Fatalf("model cost rank = %#v", resp.ModelCostRank)
+	}
+	if len(resp.ChannelHealth) != 1 || resp.ChannelHealth[0].AuthIndex != "auth-1" ||
+		math.Abs(resp.ChannelHealth[0].Cost-3) > 0.000001 {
+		t.Fatalf("channel health = %#v", resp.ChannelHealth)
+	}
+}
+
 func TestSummaryPricesPriorityAndDefaultServiceTiersSeparately(t *testing.T) {
 	db := newDashboardTestStore(t)
 	ctx := context.Background()

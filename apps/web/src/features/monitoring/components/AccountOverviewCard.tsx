@@ -34,6 +34,7 @@ import {
   getAccountStatusLabel,
   getAccountStatusTone,
   getSuccessRateClassName,
+  type AccountQuotaEntry,
   type AccountQuotaState,
   type AccountQuotaWindow,
   type AccountSummaryMetric,
@@ -137,20 +138,66 @@ function AccountQuotaPanel({
 }) {
   const quotaEntries = quotaState?.entries ?? [];
   const quotaLoading = quotaState?.status === 'loading';
-  const lastQuotaSync =
+  const lastQuotaSyncMs =
     quotaState?.lastRefreshedAt && Number.isFinite(quotaState.lastRefreshedAt)
-      ? new Date(quotaState.lastRefreshedAt).toLocaleString(locale)
-      : '';
+      ? quotaState.lastRefreshedAt
+      : undefined;
   const singleQuotaEntry = quotaEntries.length === 1 ? quotaEntries[0] : null;
-  const lastSyncLabel = shortLabel(t, 'monitoring.last_sync_short', 'monitoring.last_sync');
-  const quotaMetaText = [
-    ...(singleQuotaEntry?.metaLabels ?? []),
-    lastQuotaSync ? `${lastSyncLabel}: ${lastQuotaSync}` : '',
-  ]
-    .filter(Boolean)
-    .join(' · ');
 
-  const renderQuotaWindows = (windows: AccountQuotaWindow[]) => (
+  const buildQuotaInfoRows = (entry: AccountQuotaEntry) => {
+    const fromUsageHeaders = entry.observedFromUsageHeaders === true;
+    const timestampMs = fromUsageHeaders
+      ? entry.observedAtMs
+      : (entry.fetchedAtMs ?? lastQuotaSyncMs);
+    const formattedTime =
+      timestampMs && Number.isFinite(timestampMs)
+        ? new Date(timestampMs).toLocaleString(locale)
+        : '--';
+
+    return [
+      {
+        key: 'source',
+        label: t('codex_quota.tooltip_source_label'),
+        value: fromUsageHeaders
+          ? t('codex_quota.tooltip_source_header')
+          : t('codex_quota.tooltip_source_api'),
+      },
+      {
+        key: 'fetched-at',
+        label: t('codex_quota.tooltip_fetched_at_label'),
+        value: formattedTime,
+      },
+    ];
+  };
+
+  const renderQuotaInfo = (entry: AccountQuotaEntry, windowLabel: string) => {
+    const rows = buildQuotaInfoRows(entry);
+
+    return (
+      <span
+        className={styles.quotaInfoTrigger}
+        tabIndex={0}
+        aria-label={t('codex_quota.tooltip_label', { label: windowLabel })}
+      >
+        <IconInfo
+          size={14}
+          className={styles.quotaInfoIcon}
+          aria-hidden="true"
+          focusable={false}
+        />
+        <span className={styles.quotaInfoTooltip} role="tooltip">
+          {rows.map((row) => (
+            <span key={row.key} className={styles.quotaInfoTooltipRow}>
+              <span className={styles.quotaInfoTooltipLabel}>{row.label}</span>
+              <span className={styles.quotaInfoTooltipValue}>{row.value}</span>
+            </span>
+          ))}
+        </span>
+      </span>
+    );
+  };
+
+  const renderQuotaWindows = (windows: AccountQuotaWindow[], entry: AccountQuotaEntry) => (
     <div className={styles.quotaWindowList}>
       {windows.map((window) => {
         const percentLabel =
@@ -163,7 +210,10 @@ function AccountQuotaPanel({
         return (
           <div key={window.id} className={styles.quotaWindowRow}>
             <div className={styles.quotaWindowHeader}>
-              <span>{window.label}</span>
+              <span className={styles.quotaWindowLabel}>
+                <span>{window.label}</span>
+                {renderQuotaInfo(entry, window.label)}
+              </span>
               <strong>{percentLabel}</strong>
             </div>
             <div className={styles.quotaProgressTrack}>
@@ -220,7 +270,6 @@ function AccountQuotaPanel({
       <div className={styles.quotaSectionHeader}>
         <div className={styles.quotaSectionTitleGroup}>
           <strong>{t('monitoring.account_quota_title')}</strong>
-          {quotaMetaText ? <span>{quotaMetaText}</span> : null}
         </div>
         {renderRefreshButton()}
       </div>
@@ -261,7 +310,7 @@ function AccountQuotaPanel({
             true
           )
         ) : singleQuotaEntry.windows.length > 0 ? (
-          renderQuotaWindows(singleQuotaEntry.windows)
+          renderQuotaWindows(singleQuotaEntry.windows, singleQuotaEntry)
         ) : (
           renderStateMessage(
             singleQuotaEntry.emptyMessage ?? t('monitoring.account_quota_empty'),
@@ -271,10 +320,7 @@ function AccountQuotaPanel({
       ) : quotaEntries.length > 0 ? (
         <div className={styles.quotaEntryGrid}>
           {quotaEntries.map((entry) => {
-            const entryMetaText =
-              entry.metaLabels && entry.metaLabels.length > 0
-                ? entry.metaLabels.join(' · ')
-                : `${entry.providerLabel} · ${entry.fileName}`;
+            const entryMetaText = `${entry.providerLabel} · ${entry.fileName}`;
             return (
               <div key={entry.key} className={styles.quotaEntryCard}>
                 <div className={styles.quotaEntryHeader}>
@@ -291,7 +337,7 @@ function AccountQuotaPanel({
                       true
                     )
                   : entry.windows.length > 0
-                    ? renderQuotaWindows(entry.windows)
+                    ? renderQuotaWindows(entry.windows, entry)
                     : renderStateMessage(
                         entry.emptyMessage ?? t('monitoring.account_quota_empty'),
                         t('monitoring.account_quota_idle')
@@ -333,13 +379,7 @@ export function AccountTokenMetricGrid({
 
   if (variant === 'table') {
     const tokenStructureMetrics = metrics.filter((metric) =>
-      [
-        'input-tokens',
-        'output-tokens',
-        'cached-tokens',
-        'cache-creation-tokens',
-        'cache-read-tokens',
-      ].includes(metric.key)
+      ['input-tokens', 'output-tokens', 'cached-tokens'].includes(metric.key)
     );
     const getTokenStructureRowToneClassName = (key: string) => {
       if (key === 'input-tokens') return styles.tokenStructureRowInput;

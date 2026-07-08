@@ -2,7 +2,13 @@
 @use '@/styles/mixins.scss' as *;
 
 // 类型 / 标识 / 地址 / 模型 / 优先级 / 近期请求 / 启用 / 操作
-$table-columns: 92px minmax(112px, 0.72fr) minmax(144px, 0.96fr) 80px 76px 360px 60px 108px;
+$table-columns: 92px minmax(132px, 0.72fr) minmax(180px, 1fr) 96px 72px minmax(188px, 0.68fr) 68px 112px;
+
+@mixin provider-card-layout {
+  @include narrow-laptop {
+    @content;
+  }
+}
 
 .table {
   display: flex;
@@ -14,14 +20,14 @@ $table-columns: 92px minmax(112px, 0.72fr) minmax(144px, 0.96fr) 80px 76px 360px
   display: grid;
   grid-template-columns: $table-columns;
   align-items: center;
-  gap: 12px;
+  gap: 16px;
   padding: $spacing-sm $spacing-md;
   font-size: 12px;
   font-weight: 600;
   color: var(--text-tertiary);
   border-bottom: 1px solid var(--border-color);
 
-  @include mobile {
+  @include provider-card-layout {
     display: none;
   }
 }
@@ -30,7 +36,7 @@ $table-columns: 92px minmax(112px, 0.72fr) minmax(144px, 0.96fr) 80px 76px 360px
   display: grid;
   grid-template-columns: $table-columns;
   align-items: center;
-  gap: 12px;
+  gap: 16px;
   min-height: 58px;
   padding: 10px $spacing-md;
   border-bottom: 1px solid var(--border-subtle);
@@ -47,14 +53,16 @@ $table-columns: 92px minmax(112px, 0.72fr) minmax(144px, 0.96fr) 80px 76px 360px
     border-bottom: none;
   }
 
-  @include mobile {
-    grid-template-columns: auto 1fr auto;
+  @include provider-card-layout {
+    grid-template-columns: 1fr auto;
     grid-template-areas:
-      'type identity toggle'
-      'url url url'
-      'priority models models'
-      'recent recent recent'
-      'actions actions actions';
+      'type toggle'
+      'identity identity'
+      'url url'
+      'priority models'
+      'recent recent'
+      'actions actions';
+    column-gap: 10px;
     row-gap: 6px;
     padding: $spacing-md;
     border: 1px solid var(--border-color);
@@ -82,7 +90,7 @@ $table-columns: 92px minmax(112px, 0.72fr) minmax(144px, 0.96fr) 80px 76px 360px
   gap: 8px;
   min-width: 0;
 
-  @include mobile {
+  @include provider-card-layout {
     grid-area: type;
   }
 }
@@ -125,7 +133,7 @@ $table-columns: 92px minmax(112px, 0.72fr) minmax(144px, 0.96fr) 80px 76px 360px
   gap: 0;
   min-width: 0;
 
-  @include mobile {
+  @include provider-card-layout {
     grid-area: identity;
   }
 }
@@ -135,9 +143,15 @@ $table-columns: 92px minmax(112px, 0.72fr) minmax(144px, 0.96fr) 80px 76px 360px
   align-items: center;
   gap: 6px;
   min-width: 0;
+
+  @include provider-card-layout {
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
 }
 
 .identityLabel {
+  min-width: 0;
   font-size: 13px;
   font-weight: 600;
   color: var(--text-primary);
@@ -149,6 +163,13 @@ $table-columns: 92px minmax(112px, 0.72fr) minmax(144px, 0.96fr) 80px 76px 360px
   flex-shrink: 0;
   font-size: 12px;
   color: var(--text-tertiary);
+
+  @include provider-card-layout {
+    flex-shrink: 1;
+    min-width: 0;
+    max-width: 100%;
+    @include text-ellipsis;
+  }
 }
 
 .cellUrl {
@@ -156,7 +177,7 @@ $table-columns: 92px minmax(112px, 0.72fr) minmax(144px, 0.96fr) 80px 76px 360px
   color: var(--text-secondary);
   @include text-ellipsis;
 
-  @include mobile {
+  @include provider-card-layout {
     grid-area: url;
     white-space: normal;
     overflow-wrap: anywhere;
@@ -166,7 +187,7 @@ $table-columns: 92px minmax(112px, 0.72fr) minmax(144px, 0.96fr) 80px 76px 360px
 .cellNumeric {
   text-align: right;
 
-  @include mobile {
+  @include provider-card-layout {
     text-align: left;
   }
 }
@@ -177,29 +198,135 @@ $table-columns: 92px minmax(112px, 0.72fr) minmax(144px, 0.96fr) 80px 76px 360px
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
 
-  @include mobile {
+  @include provider-card-layout {
     display: flex;
     align-items: center;
     gap: 6px;
   }
 }
 
+.cellModelsHeader,
+.cellPriorityHeader {
+  text-align: center;
+}
+
 .cellPriority {
-  @include mobile {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  @include provider-card-layout {
     grid-area: priority;
+    justify-content: flex-start;
+  }
+}
+
+.priorityControl {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+
+  @include provider-card-layout {
+    justify-content: flex-start;
+  }
+}
+
+.priorityValueButton {
+  max-width: 100%;
+  min-width: 0;
+  height: 30px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 6px;
+  outline: none;
+  background: transparent;
+  text-align: center;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 30px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition:
+    background $transition-fast,
+    color $transition-fast,
+    box-shadow $transition-fast;
+
+  &:hover:not(:disabled) {
+    background: var(--app-accent-soft);
+    color: var(--primary-color);
+  }
+
+  &:focus {
+    background: var(--focus-bg);
+    color: var(--focus-text);
+    box-shadow: inset 0 0 0 1px var(--focus-inset);
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.62;
+  }
+}
+
+.priorityInput {
+  width: 36px;
+  min-width: 36px;
+  height: 30px;
+  padding: 0 3px;
+  border: 0;
+  border-radius: 6px;
+  outline: none;
+  appearance: textfield;
+  background: transparent;
+  text-align: center;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+  transition:
+    background $transition-fast,
+    color $transition-fast,
+    box-shadow $transition-fast;
+
+  &:focus {
+    background: var(--focus-bg);
+    color: var(--focus-text);
+    box-shadow: inset 0 0 0 1px var(--focus-inset);
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.62;
+  }
+
+  &::-webkit-outer-spin-button,
+  &::-webkit-inner-spin-button {
+    margin: 0;
+    appearance: none;
   }
 }
 
 .cellModels {
-  @include mobile {
+  text-align: center;
+
+  @include provider-card-layout {
     grid-area: models;
+    text-align: left;
   }
 }
 
 .cellRecentHeader {
-  padding-left: 16px;
+  padding-left: 8px;
+  text-align: left;
 
-  @include mobile {
+  @include provider-card-layout {
     padding-left: 0;
   }
 }
@@ -208,7 +335,7 @@ $table-columns: 92px minmax(112px, 0.72fr) minmax(144px, 0.96fr) 80px 76px 360px
 .cellCaption {
   display: none;
 
-  @include mobile {
+  @include provider-card-layout {
     display: inline;
     font-size: 12px;
     color: var(--text-tertiary);
@@ -220,13 +347,13 @@ $table-columns: 92px minmax(112px, 0.72fr) minmax(144px, 0.96fr) 80px 76px 360px
   align-items: center;
   gap: $spacing-sm;
   min-width: 0;
-  width: 360px;
-  max-width: 360px;
-  padding-left: 16px;
+  width: auto;
+  max-width: none;
+  padding-left: 8px;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 
-  @include mobile {
+  @include provider-card-layout {
     grid-area: recent;
     width: 100%;
     max-width: 100%;
@@ -237,8 +364,8 @@ $table-columns: 92px minmax(112px, 0.72fr) minmax(144px, 0.96fr) 80px 76px 360px
 // 中和 ProviderStatusBar 默认样式中的纵向留白，保证单行对齐
 .recentBarWrap {
   flex: 1;
-  min-width: 228px;
-  max-width: 260px;
+  min-width: 150px;
+  max-width: 220px;
 
   > div {
     margin-top: 0;
@@ -246,7 +373,7 @@ $table-columns: 92px minmax(112px, 0.72fr) minmax(144px, 0.96fr) 80px 76px 360px
     max-width: 100%;
   }
 
-  @include mobile {
+  @include provider-card-layout {
     min-width: 0;
     max-width: none;
   }
@@ -278,7 +405,7 @@ $table-columns: 92px minmax(112px, 0.72fr) minmax(144px, 0.96fr) 80px 76px 360px
   justify-content: flex-start;
   cursor: default;
 
-  @include mobile {
+  @include provider-card-layout {
     grid-area: toggle;
     justify-content: flex-end;
   }
@@ -291,7 +418,7 @@ $table-columns: 92px minmax(112px, 0.72fr) minmax(144px, 0.96fr) 80px 76px 360px
   gap: 5px;
   cursor: default;
 
-  @include mobile {
+  @include provider-card-layout {
     grid-area: actions;
     justify-content: flex-end;
     padding-top: 2px;

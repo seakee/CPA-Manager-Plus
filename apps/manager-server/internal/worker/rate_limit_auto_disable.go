@@ -192,15 +192,16 @@ func (w *RateLimitAutoDisableWorker) handleCandidate(ctx context.Context, candid
 		return
 	}
 
+	resolvedAuthIndex := firstNonEmpty(candidate.AuthIndex, current.AuthIndex)
 	log.Printf("[quota-auto-disable] Codex usage limit reached for auth file %q account=%q provider=%q resetAt=%s, disabling", candidate.FileName, candidate.DisplayAccount, candidate.Provider, candidate.ResetAt.Format(time.RFC3339))
-	if err := w.patchAuthFile(ctx, candidate.BaseURL, candidate.ManagementKey, candidate.FileName, true); err != nil {
+	if err := w.patchAuthFile(ctx, candidate.BaseURL, candidate.ManagementKey, candidate.FileName, resolvedAuthIndex, true); err != nil {
 		log.Printf("[quota-auto-disable] failed to disable auth file %q: %v", candidate.FileName, err)
 		return
 	}
 
 	_, err = w.store.UpsertQuotaCooldown(ctx, store.QuotaCooldownUpsert{
 		AuthFileName:     candidate.FileName,
-		AuthIndex:        firstNonEmpty(candidate.AuthIndex, current.AuthIndex),
+		AuthIndex:        resolvedAuthIndex,
 		AccountSnapshot:  candidate.DisplayAccount,
 		Provider:         strings.ToLower(strings.TrimSpace(candidate.Provider)),
 		RecoverAtMS:      candidate.ResetAt.UnixMilli(),
@@ -211,7 +212,7 @@ func (w *RateLimitAutoDisableWorker) handleCandidate(ctx context.Context, candid
 	})
 	if err != nil {
 		log.Printf("[quota-auto-disable] disabled auth file %q but failed to persist cooldown ownership: %v", candidate.FileName, err)
-		if rollbackErr := w.patchAuthFile(ctx, candidate.BaseURL, candidate.ManagementKey, candidate.FileName, false); rollbackErr != nil {
+		if rollbackErr := w.patchAuthFile(ctx, candidate.BaseURL, candidate.ManagementKey, candidate.FileName, resolvedAuthIndex, false); rollbackErr != nil {
 			log.Printf("[quota-auto-disable] failed to roll back auth file %q after cooldown persistence error: %v", candidate.FileName, rollbackErr)
 		}
 		return
@@ -308,7 +309,7 @@ func (w *RateLimitAutoDisableWorker) recoverCooldown(ctx context.Context, baseUR
 	}
 
 	log.Printf("[quota-auto-disable] reset time reached for auth file %q account=%q, enabling", item.AuthFileName, item.AccountSnapshot)
-	if err := w.patchAuthFile(ctx, baseURL, managementKey, item.AuthFileName, false); err != nil {
+	if err := w.patchAuthFile(ctx, baseURL, managementKey, item.AuthFileName, item.AuthIndex, false); err != nil {
 		_ = w.store.RecordQuotaCooldownFailure(ctx, item.ID, err.Error())
 		log.Printf("[quota-auto-disable] failed to enable auth file %q: %v", item.AuthFileName, err)
 		return
@@ -638,16 +639,12 @@ func parseCommonTime(text string) (time.Time, bool) {
 }
 
 func (w *RateLimitAutoDisableWorker) currentAuthFile(ctx context.Context, baseURL string, managementKey string, fileName string, authIndex string) (authFile, bool, error) {
-	files, err := cpaauthfiles.New(w.client, quotaAutoDisableActionTimeout).Fetch(ctx, baseURL, managementKey)
-	if err != nil {
-		return authFile{}, false, err
-	}
-	file, ok := cpaauthfiles.Find(files, fileName, authIndex)
-	return file, ok, nil
+	file, ok, err := cpaauthfiles.New(w.client, quotaAutoDisableActionTimeout).Find(ctx, baseURL, managementKey, fileName, authIndex)
+	return file, ok, err
 }
 
-func (w *RateLimitAutoDisableWorker) patchAuthFile(ctx context.Context, baseURL string, managementKey string, fileName string, disabled bool) error {
-	return cpaauthfiles.New(w.client, quotaAutoDisableActionTimeout).PatchDisabled(ctx, baseURL, managementKey, fileName, disabled)
+func (w *RateLimitAutoDisableWorker) patchAuthFile(ctx context.Context, baseURL string, managementKey string, fileName string, authIndex string, disabled bool) error {
+	return cpaauthfiles.New(w.client, quotaAutoDisableActionTimeout).PatchDisabled(ctx, baseURL, managementKey, fileName, disabled, authIndex)
 }
 
 func firstNonEmpty(values ...string) string {

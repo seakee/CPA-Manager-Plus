@@ -964,9 +964,7 @@ export function MainLayout({ routeBase = '', demoMode = false }: MainLayoutProps
                     title={item.label}
                   >
                     <span className="nav-icon">{item.icon}</span>
-                    {showSidebarLabels && (
-                      <span className="nav-label">{item.shortLabel ?? item.label}</span>
-                    )}
+                    {showSidebarLabels && <span className="nav-label">{item.label}</span>}
                   </NavLink>
                 ))}
               </div>

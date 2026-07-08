@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildAntigravityQuotaGroups } from './builders';
+import { buildAntigravityQuotaGroups, buildKimiQuotaRows } from './builders';
 
 describe('buildAntigravityQuotaGroups', () => {
   it('builds Antigravity groups from the real models payload shape', () => {
@@ -41,7 +41,7 @@ describe('buildAntigravityQuotaGroups', () => {
           apiProvider: 'API_PROVIDER_GOOGLE_GEMINI',
           modelProvider: 'MODEL_PROVIDER_GOOGLE',
         },
-        'chat_20706': {
+        chat_20706: {
           quotaInfo: {
             remainingFraction: 1,
           },
@@ -113,5 +113,35 @@ describe('buildAntigravityQuotaGroups', () => {
     );
     expect(groups.some((group) => group.id === 'tab-models')).toBe(false);
     expect(groups.some((group) => group.models?.includes('chat_20706'))).toBe(false);
+  });
+});
+
+describe('buildKimiQuotaRows', () => {
+  it('normalizes singular, plural, second, and empty duration units', () => {
+    const rows = buildKimiQuotaRows({
+      limits: [
+        { window: { duration: 30, timeUnit: 'SECONDS' }, detail: { used: 1, limit: 10 } },
+        { window: { duration: 45, timeUnit: 'SECOND' }, detail: { used: 1, limit: 10 } },
+        { window: { duration: 60, timeUnit: 'MINUTES' }, detail: { used: 1, limit: 10 } },
+        { window: { duration: 30, timeUnit: 'MINUTE' }, detail: { used: 1, limit: 10 } },
+        { window: { duration: 6, timeUnit: 'HOURS' }, detail: { used: 1, limit: 10 } },
+        { window: { duration: 1, timeUnit: 'HOUR' }, detail: { used: 1, limit: 10 } },
+        { window: { duration: 7, timeUnit: 'DAYS' }, detail: { used: 1, limit: 10 } },
+        { window: { duration: 1, timeUnit: 'DAY' }, detail: { used: 1, limit: 10 } },
+        { window: { duration: 90, timeUnit: '' }, detail: { used: 1, limit: 10 } },
+      ],
+    });
+
+    expect(rows.map((row) => row.labelParams?.duration)).toEqual([
+      '30s',
+      '45s',
+      '1h',
+      '30m',
+      '6h',
+      '1h',
+      '7d',
+      '1d',
+      '90s',
+    ]);
   });
 });

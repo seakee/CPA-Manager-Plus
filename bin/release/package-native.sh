@@ -7,6 +7,7 @@ out_dir="${OUT_DIR:-"${repo_root}/dist/native"}"
 web_html="${WEB_HTML:-"${repo_root}/apps/web/dist/index.html"}"
 binary_name="cpa-manager-plus"
 server_src="${repo_root}/apps/manager-server"
+native_script_src="${repo_root}/bin/native"
 
 if [ ! -f "${web_html}" ]; then
   echo "missing ${web_html}; run npm run build first" >&2
@@ -52,6 +53,12 @@ for target in "${targets[@]}"; do
   cp "${repo_root}/README_CN.md" "${package_dir}/README_CN.md"
   cp -R "${repo_root}/docs" "${package_dir}/docs"
   cp "${repo_root}/LICENSE" "${package_dir}/LICENSE"
+  if [ "${goos}" = "windows" ]; then
+    cp "${native_script_src}/cpa-manager-plusctl.ps1" "${package_dir}/cpa-manager-plusctl.ps1"
+  else
+    cp "${native_script_src}/cpa-manager-plusctl.sh" "${package_dir}/cpa-manager-plusctl"
+    chmod 0755 "${package_dir}/cpa-manager-plusctl"
+  fi
 
   if [ "${goos}" = "windows" ]; then
     (

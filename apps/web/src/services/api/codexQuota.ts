@@ -3,9 +3,9 @@ import type { TFunction } from 'i18next';
 import type { AuthFileItem, CodexUsagePayload } from '@/types';
 import {
   CODEX_RATE_LIMIT_RESET_CREDITS_CONSUME_URL,
-  CODEX_REQUEST_HEADERS,
   CODEX_USAGE_URL,
 } from '@/utils/quota/constants';
+import { buildCodexUsageRequestHeaders } from '@/utils/quota/codexRequestHeaders';
 import { createStatusError } from '@/utils/quota/formatters';
 import { normalizeAuthIndex, parseCodexUsagePayload } from '@/utils/quota/parsers';
 import { fetchCodexQuota, type CodexQuotaData } from '@/utils/quota/providerRequests';
@@ -24,26 +24,7 @@ export type CodexUsageRawResult = {
   payload: CodexUsagePayload | null;
 };
 
-export const buildCodexUsageRequestHeaders = (
-  accountId?: string | null,
-  options: { userAgent?: string } = {}
-): Record<string, string> => {
-  const headers: Record<string, string> = {
-    ...CODEX_REQUEST_HEADERS,
-  };
-
-  const trimmedAccountId = String(accountId ?? '').trim();
-  if (trimmedAccountId) {
-    headers['Chatgpt-Account-Id'] = trimmedAccountId;
-  }
-
-  const userAgent = String(options.userAgent ?? '').trim();
-  if (userAgent) {
-    headers['User-Agent'] = userAgent;
-  }
-
-  return headers;
-};
+export { buildCodexUsageRequestHeaders };
 
 export const requestCodexUsageRaw = async ({
   authIndex,

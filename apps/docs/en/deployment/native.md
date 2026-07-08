@@ -208,7 +208,9 @@ After setup:
 
 ## Running In The Background
 
-For production, run the process through systemd, launchd, Windows Service Manager, or another process manager. Whichever method you use, make sure the data directory is persistent and backed up.
+Native packages include background control scripts for `start`, `status`, `logs`, `restart`, and `stop`. The scripts write PID records and log files, and protect the default runtime directories with private permissions. See [Native Background Control](./native-background-control.md).
+
+For production, you can also run the process through systemd, launchd, Windows Service Manager, or another process manager. Whichever method you use, make sure the data directory is persistent and backed up.
 
 ## Upgrade
 

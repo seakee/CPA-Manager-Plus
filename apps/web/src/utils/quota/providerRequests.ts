@@ -1,6 +1,7 @@
 import type { TFunction } from 'i18next';
 import type {
   AntigravityQuotaGroup,
+  AntigravityQuotaSubscription,
   AntigravityQuotaSummaryPayload,
   AuthFileItem,
   ClaudeExtraUsage,
@@ -15,15 +16,19 @@ import type {
   XaiBillingSummary,
 } from '@/types';
 import { apiCallApi, getApiCallErrorMessage } from '@/services/api/apiCall';
+import {
+  antigravitySubscriptionApi,
+  type AntigravitySubscriptionSummary,
+} from '@/services/api/antigravitySubscription';
 import { authFilesApi } from '@/services/api/authFiles';
 import {
-  ANTIGRAVITY_QUOTA_URLS,
+  ANTIGRAVITY_AVAILABLE_MODELS_URLS,
+  ANTIGRAVITY_QUOTA_SUMMARY_URLS,
   ANTIGRAVITY_REQUEST_HEADERS,
   CLAUDE_PROFILE_URL,
   CLAUDE_REQUEST_HEADERS,
   CLAUDE_USAGE_URL,
   CLAUDE_USAGE_WINDOW_KEYS,
-  CODEX_REQUEST_HEADERS,
   CODEX_RATE_LIMIT_RESET_CREDITS_URL,
   CODEX_USAGE_URL,
   KIMI_REQUEST_HEADERS,
@@ -46,6 +51,10 @@ import {
 } from './parsers';
 import { resolveCodexChatgptAccountId, resolveCodexPlanType } from './resolvers';
 import { buildCodexQuotaWindowInfos } from './codexQuota';
+import {
+  buildCodexResetCreditsRequestHeaders,
+  buildCodexUsageRequestHeaders,
+} from './codexRequestHeaders';
 import { normalizeCodexResetCreditsPayload } from './resetCredits';
 
 const DEFAULT_ANTIGRAVITY_PROJECT_ID = 'bamboo-precept-lgxtn';
@@ -68,7 +77,41 @@ export type ClaudeQuotaData = {
 
 export type AntigravityQuotaData = {
   groups: AntigravityQuotaGroup[];
+  subscription?: AntigravityQuotaSubscription | null;
   serverTimeOffsetMs: number | null;
+};
+
+const antigravitySubscriptionRequests = new Map<
+  string,
+  Promise<AntigravityQuotaSubscription | null>
+>();
+
+const toAntigravityQuotaSubscription = (
+  summary: AntigravitySubscriptionSummary | null
+): AntigravityQuotaSubscription | null => {
+  if (!summary) return null;
+  return {
+    plan: summary.plan,
+    tierName: summary.tierName,
+    tierId: summary.tierId,
+  };
+};
+
+const fetchAntigravityQuotaSubscription = (
+  authIndex: string
+): Promise<AntigravityQuotaSubscription | null> => {
+  const existing = antigravitySubscriptionRequests.get(authIndex);
+  if (existing) return existing;
+
+  const request = antigravitySubscriptionApi
+    .get(authIndex)
+    .then(toAntigravityQuotaSubscription)
+    .catch(() => null)
+    .finally(() => {
+      antigravitySubscriptionRequests.delete(authIndex);
+    });
+  antigravitySubscriptionRequests.set(authIndex, request);
+  return request;
 };
 
 export const resolveAntigravityProjectId = async (file: AuthFileItem): Promise<string> => {
@@ -150,13 +193,14 @@ export const fetchAntigravityQuota = async (
 
   const projectId = await resolveAntigravityProjectId(file);
   const requestBody = JSON.stringify({ project: projectId });
+  const subscriptionPromise = fetchAntigravityQuotaSubscription(authIndex);
 
   let lastError = '';
   let lastStatus: number | undefined;
   let priorityStatus: number | undefined;
   let hadSuccess = false;
 
-  for (const url of ANTIGRAVITY_QUOTA_URLS) {
+  for (const url of [...ANTIGRAVITY_QUOTA_SUMMARY_URLS, ...ANTIGRAVITY_AVAILABLE_MODELS_URLS]) {
     try {
       const result = await apiCallApi.request({
         authIndex,
@@ -192,6 +236,7 @@ export const fetchAntigravityQuota = async (
 
       return {
         groups,
+        subscription: await subscriptionPromise,
         serverTimeOffsetMs: resolveResponseServerTimeOffsetMs(result.header),
       };
     } catch (err: unknown) {
@@ -207,7 +252,11 @@ export const fetchAntigravityQuota = async (
   }
 
   if (hadSuccess) {
-    return { groups: [], serverTimeOffsetMs: null };
+    return {
+      groups: [],
+      subscription: await subscriptionPromise,
+      serverTimeOffsetMs: null,
+    };
   }
 
   throw createStatusError(lastError || t('common.unknown_error'), priorityStatus ?? lastStatus);
@@ -227,26 +276,6 @@ export const buildCodexQuotaWindows = (
     resetLabel: window.resetLabel,
     limitWindowSeconds: window.limitWindowSeconds,
   }));
-
-const buildCodexUsageRequestHeaders = (accountId?: string | null): Record<string, string> => {
-  const headers: Record<string, string> = {
-    ...CODEX_REQUEST_HEADERS,
-  };
-  const trimmedAccountId = String(accountId ?? '').trim();
-  if (trimmedAccountId) {
-    headers['Chatgpt-Account-Id'] = trimmedAccountId;
-  }
-  return headers;
-};
-
-const buildCodexResetCreditsRequestHeaders = (
-  accountId?: string | null
-): Record<string, string> => ({
-  ...buildCodexUsageRequestHeaders(accountId),
-  Accept: 'application/json',
-  'OpenAI-Beta': 'codex-1',
-  Originator: 'Codex Desktop',
-});
 
 const resolveCodexRateLimitResetCreditsAvailableCount = (
   payload: CodexUsagePayload
@@ -275,7 +304,8 @@ const resolveCodexResetCreditsAvailableCount = (
 
 const fetchCodexResetCredits = async (
   authIndex: string,
-  accountId?: string | null
+  accountId: string | null | undefined,
+  t: TFunction
 ): Promise<CodexResetCreditsData> => {
   try {
     const result = await apiCallApi.request(
@@ -301,7 +331,7 @@ const fetchCodexResetCredits = async (
       return {
         availableCount: null,
         credits: [],
-        error: 'Invalid Codex reset credits payload',
+        error: t('codex_quota.reset_credits_invalid_payload'),
       };
     }
 
@@ -351,7 +381,7 @@ export const fetchCodexQuota = async (
   const planType = planTypeFromUsage ?? planTypeFromFile;
   const windows = buildCodexQuotaWindows(payload, t, planType);
   const usageResetCreditsAvailableCount = resolveCodexRateLimitResetCreditsAvailableCount(payload);
-  const resetCredits = await fetchCodexResetCredits(authIndex, accountId);
+  const resetCredits = await fetchCodexResetCredits(authIndex, accountId, t);
   return {
     planType,
     windows,
@@ -552,15 +582,32 @@ export const buildXaiBillingSummary = (
     return null;
   }
 
+  const includedUsedCents =
+    usedCents === null
+      ? null
+      : monthlyLimitCents !== null && monthlyLimitCents > 0
+        ? Math.min(usedCents, monthlyLimitCents)
+        : usedCents;
+  const onDemandUsedCents =
+    usedCents !== null && monthlyLimitCents !== null
+      ? Math.max(0, usedCents - monthlyLimitCents)
+      : null;
   const usedPercent =
-    monthlyLimitCents !== null && monthlyLimitCents > 0 && usedCents !== null
-      ? (usedCents / monthlyLimitCents) * 100
+    monthlyLimitCents !== null && monthlyLimitCents > 0 && includedUsedCents !== null
+      ? (includedUsedCents / monthlyLimitCents) * 100
+      : null;
+  const onDemandUsedPercent =
+    onDemandCapCents !== null && onDemandCapCents > 0 && onDemandUsedCents !== null
+      ? (onDemandUsedCents / onDemandCapCents) * 100
       : null;
 
   return {
     monthlyLimitCents,
     usedCents,
+    includedUsedCents,
     onDemandCapCents,
+    onDemandUsedCents,
+    onDemandUsedPercent,
     billingPeriodStart,
     billingPeriodEnd,
     usedPercent,

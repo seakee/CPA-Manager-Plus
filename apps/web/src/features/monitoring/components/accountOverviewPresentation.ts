@@ -28,6 +28,7 @@ export type AccountQuotaEntry = {
   windows: AccountQuotaWindow[];
   error?: string;
   failedAtMs?: number;
+  fetchedAtMs?: number;
   observedAtMs?: number;
   observedFromUsageHeaders?: boolean;
 };

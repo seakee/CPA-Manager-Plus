@@ -1,11 +1,10 @@
 import { apiCallApi, getApiCallErrorMessage } from './apiCall';
 import {
-  ANTIGRAVITY_CODE_ASSIST_URL,
+  ANTIGRAVITY_CODE_ASSIST_URLS,
   ANTIGRAVITY_REQUEST_HEADERS,
-  createStatusError,
-  normalizeStringValue,
-  parseAntigravityPayload,
-} from '@/utils/quota';
+} from '@/utils/quota/constants';
+import { createStatusError, getStatusFromError } from '@/utils/quota/formatters';
+import { normalizeStringValue, parseAntigravityPayload } from '@/utils/quota/parsers';
 
 export type AntigravitySubscriptionPlan = 'free' | 'pro' | 'ultra' | 'ultra-lite' | 'unknown';
 
@@ -96,7 +95,7 @@ export const parseAntigravitySubscriptionSummary = (
   if (!effectiveTier?.id && !effectiveTier?.name) return null;
 
   const rawCredits = isRecord(paidTierPayload)
-    ? paidTierPayload.availableCredits ?? paidTierPayload.available_credits
+    ? (paidTierPayload.availableCredits ?? paidTierPayload.available_credits)
     : undefined;
 
   return {
@@ -112,18 +111,32 @@ export const parseAntigravitySubscriptionSummary = (
 
 export const antigravitySubscriptionApi = {
   async get(authIndex: string): Promise<AntigravitySubscriptionSummary | null> {
-    const result = await apiCallApi.request({
-      authIndex,
-      method: 'POST',
-      url: ANTIGRAVITY_CODE_ASSIST_URL,
-      header: { ...ANTIGRAVITY_REQUEST_HEADERS },
-      data: CODE_ASSIST_REQUEST_BODY,
-    });
+    let lastError = '';
+    let lastStatus: number | undefined;
 
-    if (result.statusCode < 200 || result.statusCode >= 300) {
-      throw createStatusError(getApiCallErrorMessage(result), result.statusCode);
+    for (const url of ANTIGRAVITY_CODE_ASSIST_URLS) {
+      try {
+        const result = await apiCallApi.request({
+          authIndex,
+          method: 'POST',
+          url,
+          header: { ...ANTIGRAVITY_REQUEST_HEADERS },
+          data: CODE_ASSIST_REQUEST_BODY,
+        });
+
+        if (result.statusCode < 200 || result.statusCode >= 300) {
+          lastError = getApiCallErrorMessage(result);
+          lastStatus = result.statusCode;
+          continue;
+        }
+
+        return parseAntigravitySubscriptionSummary(result.body ?? result.bodyText);
+      } catch (err: unknown) {
+        lastError = err instanceof Error ? err.message : 'Unknown error';
+        lastStatus = getStatusFromError(err) ?? lastStatus;
+      }
     }
 
-    return parseAntigravitySubscriptionSummary(result.body ?? result.bodyText);
+    throw createStatusError(lastError || 'Unknown error', lastStatus);
   },
 };

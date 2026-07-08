@@ -307,8 +307,100 @@ export const getHeaderSnapshotRecoverAtMs = (
   const value =
     snapshot?.header_quota_recover_at_ms ??
     snapshot?.response_metadata?.quota?.recover_at_ms ??
+    snapshot?.response_metadata?.errors?.retry_after_recover_at_ms ??
     null;
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+};
+
+const getHeaderQuotaWindowResetAtMs = (
+  snapshot: UsageHeaderSnapshot | null | undefined,
+  window: ResponseHeaderQuotaWindow | null | undefined
+): number | null => {
+  const resetAtMs = readNumber(window?.reset_at_ms);
+  if (resetAtMs !== null && resetAtMs > 0) return resetAtMs;
+
+  const resetAfterSeconds = readNumber(window?.reset_after_seconds);
+  const timestampMs = readNumber(snapshot?.timestamp_ms);
+  if (resetAfterSeconds !== null && resetAfterSeconds > 0 && timestampMs !== null) {
+    return timestampMs + resetAfterSeconds * 1000;
+  }
+
+  return null;
+};
+
+const getHeaderQuotaWindowSourcesByKind = (
+  quota: ResponseHeaderQuotaMetadata | undefined,
+  windowKind: string | null
+): Array<'primary' | 'secondary'> => {
+  if (!quota || !windowKind) return [];
+  return (['primary', 'secondary'] as const).filter(
+    (source) =>
+      classifyHeaderQuotaWindowKind(getHeaderQuotaWindowBySource(quota, source)) === windowKind
+  );
+};
+
+const isHeaderQuotaWindowDepleted = (
+  window: ResponseHeaderQuotaWindow | null | undefined
+): boolean => {
+  const usedPercent = readNumber(window?.used_percent);
+  return usedPercent !== null && usedPercent >= 100;
+};
+
+const getHeaderQuotaTargetResetAtMsCandidates = (
+  snapshot: UsageHeaderSnapshot | null | undefined
+): number[] => {
+  const candidates: number[] = [];
+  const addCandidate = (value: number | null) => {
+    if (value !== null && Number.isFinite(value)) candidates.push(value);
+  };
+
+  addCandidate(getHeaderSnapshotRecoverAtMs(snapshot));
+
+  const quota = getHeaderSnapshotQuotaMetadata(snapshot);
+  if (!quota) return candidates;
+
+  const sourceCandidates: Array<'primary' | 'secondary'> = [];
+  const addSourceCandidate = (value: unknown) => {
+    const source = normalizeHeaderQuotaWindowSource(value);
+    if (source && !sourceCandidates.includes(source)) sourceCandidates.push(source);
+  };
+
+  addSourceCandidate(quota.reached_window_source);
+  addSourceCandidate(quota.rate_limit_reached_type);
+
+  const reachedWindowKind = getHeaderSnapshotReachedWindowKind(snapshot);
+  if (sourceCandidates.length === 0) {
+    getHeaderQuotaWindowSourcesByKind(quota, reachedWindowKind).forEach(addSourceCandidate);
+  }
+
+  let targetedWindowCount = 0;
+  sourceCandidates.forEach((source) => {
+    targetedWindowCount += 1;
+    addCandidate(
+      getHeaderQuotaWindowResetAtMs(snapshot, getHeaderQuotaWindowBySource(quota, source))
+    );
+  });
+
+  if (targetedWindowCount > 0) return candidates;
+
+  (['primary', 'secondary'] as const).forEach((source) => {
+    const window = getHeaderQuotaWindowBySource(quota, source);
+    if (isHeaderQuotaWindowDepleted(window)) {
+      addCandidate(getHeaderQuotaWindowResetAtMs(snapshot, window));
+    }
+  });
+
+  return candidates;
+};
+
+export const isUsageHeaderQuotaSnapshotExpired = (
+  snapshot: UsageHeaderSnapshot | null | undefined,
+  nowMs = Date.now()
+): boolean => {
+  if (!hasUsageHeaderQuotaSignal(snapshot)) return false;
+  const candidates = getHeaderQuotaTargetResetAtMsCandidates(snapshot);
+  if (candidates.length === 0) return false;
+  return Math.max(...candidates) <= nowMs;
 };
 
 export const getHeaderSnapshotErrorKind = (

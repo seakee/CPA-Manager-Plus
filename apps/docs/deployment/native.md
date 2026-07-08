@@ -206,7 +206,9 @@ setup 后：
 
 ## 后台运行
 
-生产环境建议使用 systemd、launchd、Windows 服务管理器或进程管理工具托管进程。无论使用哪种方式，都要保证数据目录持久化并纳入备份。
+原生包内置后台控制脚本，可以直接执行 `start`、`status`、`logs`、`restart` 和 `stop`。脚本会写入 PID 记录和日志文件，并对默认运行目录使用私有权限。详见 [原生包后台控制](./native-background-control.md)。
+
+生产环境也可以使用 systemd、launchd、Windows 服务管理器或进程管理工具托管进程。无论使用哪种方式，都要保证数据目录持久化并纳入备份。
 
 ## 升级
 

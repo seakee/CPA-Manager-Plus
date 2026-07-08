@@ -117,6 +117,41 @@ func TestCostForModelWithServiceTier(t *testing.T) {
 	}
 }
 
+func TestCostForModelCandidatesWithServiceTierFallsBackToRequestedModel(t *testing.T) {
+	prices := map[string]model.ModelPrice{
+		"gpt-5.4": {Prompt: 2.5, Completion: 5, Cache: 1},
+	}
+
+	cost := CostForModelCandidatesWithServiceTier(
+		[]string{"missing-upstream", "gpt-5.4"},
+		"priority",
+		ModelTokens{InputTokens: 1_000_000},
+		prices,
+	)
+
+	if math.Abs(cost-5) > 0.000001 {
+		t.Fatalf("fallback cost = %v, want 5", cost)
+	}
+}
+
+func TestCostForModelCandidatesWithServiceTierPrefersResolvedModel(t *testing.T) {
+	prices := map[string]model.ModelPrice{
+		"gpt-resolved": {Prompt: 1, Completion: 2, Cache: 0.5},
+		"gpt-5.4":      {Prompt: 2.5, Completion: 5, Cache: 1},
+	}
+
+	cost := CostForModelCandidatesWithServiceTier(
+		[]string{"gpt-resolved", "gpt-5.4"},
+		"priority",
+		ModelTokens{InputTokens: 1_000_000},
+		prices,
+	)
+
+	if math.Abs(cost-1) > 0.000001 {
+		t.Fatalf("resolved cost = %v, want 1", cost)
+	}
+}
+
 func TestCostForModelWithServiceTierPreservesCacheBuckets(t *testing.T) {
 	prices := map[string]model.ModelPrice{
 		"gpt-5.4": {Prompt: 2, Completion: 4, Cache: 1, CacheRead: 0.5, CacheCreation: 3},

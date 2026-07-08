@@ -96,12 +96,16 @@ func TestServerCompatHealthInfoAndPanel(t *testing.T) {
 	if !strings.Contains(strings.ToLower(panelRR.Body.String()), "<html") {
 		t.Fatalf("panel body does not look like html")
 	}
+	if got, want := panelRR.Header().Get("Content-Length"), strconv.Itoa(panelRR.Body.Len()); got != want {
+		t.Fatalf("panel content length = %q, want %q", got, want)
+	}
 }
 
 func TestServerCompatPanelPathOverridesEmbeddedPanel(t *testing.T) {
 	cfg := testutil.NewConfig(t)
 	panelPath := filepath.Join(t.TempDir(), "management.html")
-	if err := osWriteFile(panelPath, []byte("<html><body>custom panel</body></html>")); err != nil {
+	customPanel := "<html><body>custom panel</body></html>"
+	if err := osWriteFile(panelPath, []byte(customPanel)); err != nil {
 		t.Fatalf("write panel: %v", err)
 	}
 	cfg.PanelPath = panelPath
@@ -109,8 +113,11 @@ func TestServerCompatPanelPathOverridesEmbeddedPanel(t *testing.T) {
 
 	rr := testutil.Request(t, handler, http.MethodGet, "/management.html", "", "")
 	testutil.RequireStatus(t, rr, http.StatusOK)
-	if rr.Body.String() != "<html><body>custom panel</body></html>" {
+	if rr.Body.String() != customPanel {
 		t.Fatalf("panel body = %q", rr.Body.String())
+	}
+	if got, want := rr.Header().Get("Content-Length"), strconv.Itoa(len(customPanel)); got != want {
+		t.Fatalf("panel content length = %q, want %q", got, want)
 	}
 }
 

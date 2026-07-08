@@ -890,6 +890,7 @@ export const mergeObservedAccountQuotaEntry = (
     planType: observedEntry.planType ?? mergeableActiveEntry.planType,
     metaLabels: mergeAccountQuotaEntryMetaLabels(mergeableActiveEntry, observedEntry),
     windows: mergeAccountQuotaWindows(mergeableActiveEntry.windows, observedEntry.windows),
+    fetchedAtMs: mergeableActiveEntry.fetchedAtMs,
     observedAtMs: observedEntry.observedAtMs ?? mergeableActiveEntry.observedAtMs,
     observedFromUsageHeaders:
       observedEntry.observedFromUsageHeaders ?? mergeableActiveEntry.observedFromUsageHeaders,
@@ -1055,7 +1056,7 @@ const buildKimiAccountQuotaWindows = (rows: KimiQuotaRow[], t: TFunction): Accou
       label: rowLabel,
       remainingPercent,
       resetLabel: resetLabel || '-',
-      usageLabel: limit > 0 ? `${used} / ${limit}` : null,
+      usageLabel: null,
     };
   });
 
@@ -1069,14 +1070,13 @@ const buildXaiAccountQuotaWindows = (
   t: TFunction
 ): AccountQuotaWindow[] => {
   const remainingCents =
-    billing.monthlyLimitCents !== null && billing.usedCents !== null
-      ? Math.max(0, billing.monthlyLimitCents - billing.usedCents)
+    billing.monthlyLimitCents !== null && billing.includedUsedCents !== null
+      ? Math.max(0, billing.monthlyLimitCents - billing.includedUsedCents)
       : null;
-
-  return [
+  const windows: AccountQuotaWindow[] = [
     {
       id: 'monthly-limit',
-      label: t('xai_quota.monthly_limit'),
+      label: t('xai_quota.monthly_credits'),
       remainingPercent: buildRemainingFromUsedPercent(billing.usedPercent),
       resetLabel: billing.billingPeriodEnd ? formatQuotaResetTime(billing.billingPeriodEnd) : '-',
       usageLabel: t('xai_quota.usage_amount', {
@@ -1085,6 +1085,25 @@ const buildXaiAccountQuotaWindows = (
       }),
     },
   ];
+
+  if (billing.onDemandCapCents !== null && billing.onDemandCapCents > 0) {
+    const onDemandRemainingCents =
+      billing.onDemandUsedCents !== null
+        ? Math.max(0, billing.onDemandCapCents - billing.onDemandUsedCents)
+        : null;
+    windows.push({
+      id: 'pay-as-you-go',
+      label: t('xai_quota.pay_as_you_go_label'),
+      remainingPercent: buildRemainingFromUsedPercent(billing.onDemandUsedPercent),
+      resetLabel: '-',
+      usageLabel: t('xai_quota.usage_amount', {
+        remaining: formatXaiCurrency(onDemandRemainingCents),
+        limit: formatXaiCurrency(billing.onDemandCapCents),
+      }),
+    });
+  }
+
+  return windows;
 };
 
 export const getAccountQuotaProviderLabel = (
@@ -1139,6 +1158,11 @@ const buildBaseAccountQuotaEntry = (
     emptyMessage: getAccountQuotaEmptyMessage(target.provider, t),
   };
 };
+
+const stampAccountQuotaFetchTime = <T extends AccountQuotaEntry>(entry: T): T => ({
+  ...entry,
+  fetchedAtMs: Date.now(),
+});
 
 export const buildAccountQuotaErrorEntry = (
   target: MonitoringAccountQuotaTarget,
@@ -1228,10 +1252,10 @@ export const requestAccountQuota = async (
   switch (target.provider) {
     case 'antigravity': {
       const { groups } = await fetchAntigravityQuota(target.file, t);
-      return {
+      return stampAccountQuotaFetchTime({
         ...buildBaseAccountQuotaEntry(target, t),
         windows: buildAntigravityAccountQuotaWindows(groups),
-      };
+      });
     }
     case 'claude': {
       const quota = await fetchClaudeQuota(target.file, t);
@@ -1244,18 +1268,18 @@ export const requestAccountQuota = async (
           `${t('claude_quota.extra_usage_label')}: $${(quota.extraUsage.used_credits / 100).toFixed(2)} / $${(quota.extraUsage.monthly_limit / 100).toFixed(2)}`
         );
       }
-      return {
+      return stampAccountQuotaFetchTime({
         ...buildBaseAccountQuotaEntry(target, t, metaLabels),
         planType: quota.planType ?? target.planType,
         windows: buildClaudeAccountQuotaWindows(quota.windows, t),
-      };
+      });
     }
     case 'kimi': {
       const rows = await fetchKimiQuota(target.file, t);
-      return {
+      return stampAccountQuotaFetchTime({
         ...buildBaseAccountQuotaEntry(target, t),
         windows: buildKimiAccountQuotaWindows(rows, t),
-      };
+      });
     }
     case 'xai': {
       const billing = await fetchXaiQuota(target.file, t);
@@ -1263,16 +1287,16 @@ export const requestAccountQuota = async (
         billing.onDemandCapCents !== null
           ? [`${t('xai_quota.on_demand_cap')}: ${formatXaiCurrency(billing.onDemandCapCents)}`]
           : [];
-      return {
+      return stampAccountQuotaFetchTime({
         ...buildBaseAccountQuotaEntry(target, t, metaLabels),
         windows: buildXaiAccountQuotaWindows(billing, t),
-      };
+      });
     }
     case 'codex':
     default: {
       const quota = await fetchCodexQuota(target.file, t);
       const planLabel = getCodexPlanLabel(quota.planType ?? target.planType, t);
-      return {
+      return stampAccountQuotaFetchTime({
         ...buildBaseAccountQuotaEntry(
           {
             ...target,
@@ -1283,7 +1307,7 @@ export const requestAccountQuota = async (
         ),
         planType: quota.planType ?? target.planType,
         windows: buildCodexAccountQuotaWindows(quota.windows, t),
-      };
+      });
     }
   }
 };

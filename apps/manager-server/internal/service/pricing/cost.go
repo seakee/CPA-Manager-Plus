@@ -86,6 +86,25 @@ func CostForModelWithServiceTier(modelName string, serviceTier string, tokens Mo
 	return CostForModel(modelName, tokens, prices) * ServiceTierMultiplier(modelName, serviceTier)
 }
 
+// CostForModelCandidatesWithServiceTier computes cost using the first priced
+// model name from the candidate list. Callers should pass resolved/upstream
+// model first, followed by the requested display model or alias as fallback.
+func CostForModelCandidatesWithServiceTier(modelNames []string, serviceTier string, tokens ModelTokens, prices map[string]model.ModelPrice) float64 {
+	seen := map[string]bool{}
+	for _, modelName := range modelNames {
+		modelName = strings.TrimSpace(modelName)
+		if modelName == "" || seen[modelName] {
+			continue
+		}
+		seen[modelName] = true
+		if _, ok := prices[modelName]; !ok {
+			continue
+		}
+		return CostForModelWithServiceTier(modelName, serviceTier, tokens, prices)
+	}
+	return 0
+}
+
 // SumCost folds CostForModel over a slice of (model, tokens) tuples.
 type Item struct {
 	Model  string

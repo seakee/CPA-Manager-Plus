@@ -694,11 +694,7 @@ func aggregateModelStats(stats []store.ModelStat, prices map[string]store.ModelP
 }
 
 func costForStat(stat store.ModelStat, prices map[string]store.ModelPrice) float64 {
-	model := stat.BillingModel
-	if model == "" {
-		model = stat.Model
-	}
-	return pricing.CostForModelWithServiceTier(model, stat.ServiceTier, pricing.ModelTokens{
+	return pricing.CostForModelCandidatesWithServiceTier([]string{stat.BillingModel, stat.Model}, stat.ServiceTier, pricing.ModelTokens{
 		InputTokens:         stat.InputTokens,
 		OutputTokens:        stat.OutputTokens,
 		CachedTokens:        stat.CachedTokens,
@@ -708,11 +704,7 @@ func costForStat(stat store.ModelStat, prices map[string]store.ModelPrice) float
 }
 
 func costForChannelStat(stat store.ChannelModelStat, prices map[string]store.ModelPrice) float64 {
-	model := stat.BillingModel
-	if model == "" {
-		model = stat.Model
-	}
-	return pricing.CostForModelWithServiceTier(model, stat.ServiceTier, pricing.ModelTokens{
+	return pricing.CostForModelCandidatesWithServiceTier([]string{stat.BillingModel, stat.Model}, stat.ServiceTier, pricing.ModelTokens{
 		InputTokens:         stat.InputTokens,
 		OutputTokens:        stat.OutputTokens,
 		CachedTokens:        stat.CachedTokens,

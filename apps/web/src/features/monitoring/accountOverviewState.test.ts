@@ -219,8 +219,6 @@ describe('accountOverviewState', () => {
       'input-tokens',
       'output-tokens',
       'cached-tokens',
-      'cache-creation-tokens',
-      'cache-read-tokens',
     ]);
   });
 

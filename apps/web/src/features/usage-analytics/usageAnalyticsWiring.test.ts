@@ -347,6 +347,13 @@ describe('usage analytics app wiring', () => {
     expect(monitoringIndex).toBeGreaterThan(usageIndex);
   });
 
+  it('renders full sidebar labels when the sidebar is expanded', () => {
+    expect(layoutSource).toContain(
+      '{showSidebarLabels && <span className="nav-label">{item.label}</span>}'
+    );
+    expect(layoutSource).not.toContain('item.shortLabel ?? item.label');
+  });
+
   it('escapes user-controlled chart tooltip labels before returning tooltip HTML', () => {
     expect(pageSource).toContain('const escapeHtml = (value: string | number | null | undefined)');
     expect(pageSource).not.toContain('<b>${item.name}</b>');
