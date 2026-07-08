@@ -76,6 +76,52 @@ $table-columns: 92px minmax(112px, 0.72fr) minmax(144px, 0.96fr) 80px 76px 360px
   }
 }
 
+.resizableHeader {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  @include text-ellipsis;
+}
+
+.resizeHandle {
+  position: absolute;
+  top: 0;
+  right: -7px;
+  width: 14px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 1;
+  touch-action: none;
+
+  &::after {
+    content: '';
+    position: absolute;
+    top: 20%;
+    left: 50%;
+    width: 2px;
+    height: 60%;
+    border-radius: 1px;
+    background: var(--border-color);
+    opacity: 0;
+    transition: opacity $transition-fast;
+    transform: translateX(-50%);
+  }
+
+  &:hover::after,
+  &:active::after {
+    opacity: 1;
+  }
+
+  &:active::after {
+    background: var(--primary-color, #{$primary-color});
+  }
+
+  @include mobile {
+    display: none;
+  }
+}
+
 .cellType {
   display: flex;
   align-items: center;
