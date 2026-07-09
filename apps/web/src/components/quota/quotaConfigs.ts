@@ -1209,6 +1209,20 @@ const formatXaiOnDemandAmount = (billing: XaiBillingSummary): string => {
   return `${formatXaiCurrency(remainingCents)} / ${formatXaiCurrency(billing.onDemandCapCents)}`;
 };
 
+const formatXaiPercent = (value: number | null): string => {
+  if (value === null) return '--';
+  return `${Math.round(value)}%`;
+};
+
+const formatXaiPeriodRange = (start?: string, end?: string): string => {
+  const startLabel = formatQuotaResetTime(start);
+  const endLabel = formatQuotaResetTime(end);
+  if (startLabel !== '-' && endLabel !== '-') return `${startLabel} ~ ${endLabel}`;
+  if (endLabel !== '-') return endLabel;
+  if (startLabel !== '-') return startLabel;
+  return '';
+};
+
 const XAI_SUPERGROK_LIMIT_CENTS = 15_000;
 const XAI_SUPERGROK_HEAVY_LIMIT_CENTS = 150_000;
 
@@ -1240,7 +1254,7 @@ const renderXaiItems = (
   const clampedUsed =
     billing.usedPercent === null ? null : Math.max(0, Math.min(100, billing.usedPercent));
   const remaining = clampedUsed === null ? null : Math.max(0, Math.min(100, 100 - clampedUsed));
-  const percentLabel = remaining === null ? '--' : `${Math.round(remaining)}%`;
+  const percentLabel = formatXaiPercent(remaining);
   const amountLabel = formatXaiRemainingAmount(billing);
   const resetLabel = billing.billingPeriodEnd
     ? formatQuotaResetTime(billing.billingPeriodEnd)
@@ -1252,10 +1266,23 @@ const renderXaiItems = (
       : Math.max(0, Math.min(100, billing.onDemandUsedPercent));
   const onDemandRemaining =
     clampedOnDemandUsed === null ? null : Math.max(0, Math.min(100, 100 - clampedOnDemandUsed));
-  const onDemandPercentLabel =
-    onDemandRemaining === null ? '--' : `${Math.round(onDemandRemaining)}%`;
+  const onDemandPercentLabel = formatXaiPercent(onDemandRemaining);
   const onDemandAmountLabel = formatXaiOnDemandAmount(billing);
   const plan = resolveXaiPlan(billing.monthlyLimitCents);
+  const weeklyUsed =
+    billing.periodType === 'weekly' && billing.usagePercent !== null
+      ? Math.max(0, Math.min(100, billing.usagePercent))
+      : null;
+  const weeklyRemaining = weeklyUsed === null ? null : Math.max(0, Math.min(100, 100 - weeklyUsed));
+  const weeklyPeriodLabel = formatXaiPeriodRange(billing.periodStart, billing.periodEnd);
+  const weeklyResetLabel = formatQuotaResetTime(billing.periodEnd);
+  const hasWeeklyData =
+    billing.periodType === 'weekly' &&
+    (weeklyUsed !== null || Boolean(billing.periodEnd) || billing.productUsage.length > 0);
+  const hasMonthlyData =
+    billing.monthlyLimitCents !== null ||
+    billing.usedCents !== null ||
+    Boolean(billing.billingPeriodEnd);
 
   const nodes: ReactNode[] = [
     plan
@@ -1270,6 +1297,79 @@ const renderXaiItems = (
           )
         )
       : null,
+    hasWeeklyData
+      ? h(
+          'div',
+          { key: 'weekly-limit', className: styleMap.quotaRow },
+          h(
+            'div',
+            { className: styleMap.quotaRowHeader },
+            h('span', { className: styleMap.quotaModel }, t('xai_quota.weekly_limit')),
+            h(
+              'div',
+              { className: styleMap.quotaMeta },
+              h(
+                'span',
+                { className: styleMap.quotaPercent },
+                t('xai_quota.used_percent', {
+                  percent: formatXaiPercent(weeklyUsed),
+                })
+              ),
+              weeklyPeriodLabel
+                ? h('span', { className: styleMap.quotaAmount }, weeklyPeriodLabel)
+                : null,
+              weeklyResetLabel !== '-'
+                ? h(
+                    'span',
+                    { className: styleMap.quotaReset },
+                    t('xai_quota.reset_at', {
+                      time: weeklyResetLabel,
+                    })
+                  )
+                : null
+            )
+          ),
+          h(QuotaProgressBar, {
+            percent: weeklyRemaining,
+            highThreshold: QUOTA_PROGRESS_HIGH_THRESHOLD,
+            mediumThreshold: QUOTA_PROGRESS_MEDIUM_THRESHOLD,
+          })
+        )
+      : null,
+    ...billing.productUsage.map((item, index) => {
+      const used =
+        item.usagePercent === null ? null : Math.max(0, Math.min(100, item.usagePercent));
+      const remainingPercent = used === null ? null : Math.max(0, Math.min(100, 100 - used));
+      return h(
+        'div',
+        { key: `product-${index}-${item.product}`, className: styleMap.quotaRow },
+        h(
+          'div',
+          { className: styleMap.quotaRowHeader },
+          h(
+            'span',
+            { className: styleMap.quotaModel },
+            t('xai_quota.product_usage', { product: item.product })
+          ),
+          h(
+            'div',
+            { className: styleMap.quotaMeta },
+            h(
+              'span',
+              { className: styleMap.quotaPercent },
+              t('xai_quota.used_percent', {
+                percent: formatXaiPercent(used),
+              })
+            )
+          )
+        ),
+        h(QuotaProgressBar, {
+          percent: remainingPercent,
+          highThreshold: QUOTA_PROGRESS_HIGH_THRESHOLD,
+          mediumThreshold: QUOTA_PROGRESS_MEDIUM_THRESHOLD,
+        })
+      );
+    }),
     onDemandCap > 0
       ? h(
           'div',
@@ -1297,27 +1397,29 @@ const renderXaiItems = (
           h('span', { className: styleMap.codexPlanLabel }, t('xai_quota.pay_as_you_go_label')),
           h('span', { className: styleMap.codexPlanValue }, t('xai_quota.pay_as_you_go_disabled'))
         ),
-    h(
-      'div',
-      { key: 'billing', className: styleMap.quotaRow },
-      h(
-        'div',
-        { className: styleMap.quotaRowHeader },
-        h('span', { className: styleMap.quotaModel }, t('xai_quota.monthly_credits')),
-        h(
+    hasMonthlyData
+      ? h(
           'div',
-          { className: styleMap.quotaMeta },
-          h('span', { className: styleMap.quotaPercent }, percentLabel),
-          h('span', { className: styleMap.quotaAmount }, amountLabel),
-          h('span', { className: styleMap.quotaReset }, resetLabel)
+          { key: 'billing', className: styleMap.quotaRow },
+          h(
+            'div',
+            { className: styleMap.quotaRowHeader },
+            h('span', { className: styleMap.quotaModel }, t('xai_quota.monthly_credits')),
+            h(
+              'div',
+              { className: styleMap.quotaMeta },
+              h('span', { className: styleMap.quotaPercent }, percentLabel),
+              h('span', { className: styleMap.quotaAmount }, amountLabel),
+              h('span', { className: styleMap.quotaReset }, resetLabel)
+            )
+          ),
+          h(QuotaProgressBar, {
+            percent: remaining,
+            highThreshold: QUOTA_PROGRESS_HIGH_THRESHOLD,
+            mediumThreshold: QUOTA_PROGRESS_MEDIUM_THRESHOLD,
+          })
         )
-      ),
-      h(QuotaProgressBar, {
-        percent: remaining,
-        highThreshold: QUOTA_PROGRESS_HIGH_THRESHOLD,
-        mediumThreshold: QUOTA_PROGRESS_MEDIUM_THRESHOLD,
-      })
-    ),
+      : null,
   ];
 
   return h(React.Fragment, null, ...nodes);

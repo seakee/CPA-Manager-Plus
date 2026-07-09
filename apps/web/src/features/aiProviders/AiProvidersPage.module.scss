@@ -271,9 +271,12 @@
 
 // 状态监测栏
 .statusBar {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
   align-items: center;
   gap: 8px;
+  width: 100%;
+  min-width: 0;
   margin-top: 8px;
   padding: 8px 0;
   max-width: 280px;
@@ -282,14 +285,14 @@
 .statusBlocks {
   display: flex;
   gap: 2px;
-  flex: 1;
-  min-width: 180px;
+  width: 100%;
+  min-width: 0;
   position: relative;
 }
 
 .statusBlockWrapper {
-  flex: 1;
-  min-width: 6px;
+  flex: 1 1 0;
+  min-width: 0;
   position: relative;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
@@ -406,7 +409,9 @@
 .statusRate {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 4px;
+  min-width: 48px;
   font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
@@ -437,7 +442,7 @@
   }
 
   .statusBlocks {
-    min-width: 140px;
+    min-width: 0;
   }
 }
 

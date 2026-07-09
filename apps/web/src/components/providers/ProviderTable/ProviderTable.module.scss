@@ -2,7 +2,7 @@
 @use '@/styles/mixins.scss' as *;
 
 // 类型 / 标识 / 地址 / 模型 / 优先级 / 近期请求 / 启用 / 操作
-$table-columns: 92px minmax(132px, 0.72fr) minmax(180px, 1fr) 96px 72px minmax(188px, 0.68fr) 68px 112px;
+$table-columns: 92px minmax(132px, 0.72fr) minmax(180px, 1fr) 96px 72px minmax(220px, 0.82fr) 68px 112px;
 
 @mixin provider-card-layout {
   @include narrow-laptop {
@@ -363,14 +363,28 @@ $table-columns: 92px minmax(132px, 0.72fr) minmax(180px, 1fr) 96px 72px minmax(1
 
 // 中和 ProviderStatusBar 默认样式中的纵向留白，保证单行对齐
 .recentBarWrap {
-  flex: 1;
-  min-width: 150px;
+  flex: 1 1 88px;
+  min-width: 0;
   max-width: 220px;
 
   > div {
     margin-top: 0;
     padding: 0;
+    min-width: 0;
+    width: 100%;
     max-width: 100%;
+  }
+
+  > div > div:first-child {
+    min-width: 0;
+  }
+
+  > div > div:first-child > div {
+    min-width: 0;
+  }
+
+  > div > span:last-child {
+    flex-shrink: 0;
   }
 
   @include provider-card-layout {

@@ -58,6 +58,158 @@
   color: var(--text-secondary);
   font-size: 14px;
   line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.installVersionField {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.installVersionLabel {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.installVersionModes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.installVersionMode {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
+  border-radius: 10px;
+  background: var(--bg-primary);
+  cursor: pointer;
+  transition:
+    border-color 0.16s ease,
+    background-color 0.16s ease;
+
+  &:hover {
+    border-color: color-mix(in srgb, var(--primary-color) 44%, var(--border-color));
+    background: color-mix(in srgb, var(--surface-subtle) 72%, var(--bg-primary));
+  }
+
+  input {
+    flex: 0 0 auto;
+    margin-top: 2px;
+  }
+}
+
+.installVersionModeActive {
+  border-color: color-mix(in srgb, var(--primary-color) 72%, var(--border-color));
+  background: color-mix(in srgb, var(--primary-color) 10%, var(--bg-primary));
+}
+
+.installVersionModeDisabled {
+  cursor: not-allowed;
+  opacity: 0.68;
+}
+
+.installVersionModeText {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+
+  strong {
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 800;
+    line-height: 1.3;
+  }
+
+  small {
+    color: var(--text-secondary);
+    font-size: 11px;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+  }
+}
+
+.installVersionPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 64%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface-subtle) 70%, var(--bg-primary));
+
+  :global(.form-group) {
+    margin-bottom: 0;
+  }
+}
+
+.installVersionHint,
+.installVersionWarning {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.installVersionHint {
+  color: var(--text-secondary);
+}
+
+.installVersionWarning {
+  color: var(--warning-text);
+}
+
+.installVersionCheckbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  width: fit-content;
+  max-width: 100%;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+
+  input {
+    flex: 0 0 auto;
+  }
+}
+
+.installReleaseLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  width: fit-content;
+  max-width: 100%;
+  color: var(--primary-color);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.4;
+  text-decoration: none;
+
+  span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  svg {
+    flex: 0 0 auto;
+  }
+
+  &:hover {
+    color: var(--primary-hover);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
 }
 
 .installSecurityWarning {
@@ -744,6 +896,10 @@
   .badges {
     grid-column: auto;
     justify-content: flex-start;
+  }
+
+  .installVersionModes {
+    grid-template-columns: 1fr;
   }
 }
 

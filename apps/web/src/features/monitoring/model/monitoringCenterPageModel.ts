@@ -1073,8 +1073,41 @@ const buildXaiAccountQuotaWindows = (
     billing.monthlyLimitCents !== null && billing.includedUsedCents !== null
       ? Math.max(0, billing.monthlyLimitCents - billing.includedUsedCents)
       : null;
-  const windows: AccountQuotaWindow[] = [
-    {
+  const windows: AccountQuotaWindow[] = [];
+  const hasWeeklyData =
+    billing.periodType === 'weekly' &&
+    (billing.usagePercent !== null || Boolean(billing.periodEnd) || billing.productUsage.length > 0);
+  const hasMonthlyData =
+    billing.monthlyLimitCents !== null ||
+    billing.usedCents !== null ||
+    Boolean(billing.billingPeriodEnd);
+
+  if (hasWeeklyData) {
+    windows.push({
+      id: 'weekly-limit',
+      label: t('xai_quota.weekly_limit'),
+      remainingPercent: buildRemainingFromUsedPercent(billing.usagePercent),
+      resetLabel: billing.periodEnd ? formatQuotaResetTime(billing.periodEnd) : '-',
+      usageLabel: t('xai_quota.used_percent', {
+        percent: billing.usagePercent === null ? '--' : `${Math.round(billing.usagePercent)}%`,
+      }),
+    });
+  }
+
+  billing.productUsage.forEach((item, index) => {
+    windows.push({
+      id: `product-${index}-${item.product}`,
+      label: t('xai_quota.product_usage', { product: item.product }),
+      remainingPercent: buildRemainingFromUsedPercent(item.usagePercent),
+      resetLabel: '-',
+      usageLabel: t('xai_quota.used_percent', {
+        percent: item.usagePercent === null ? '--' : `${Math.round(item.usagePercent)}%`,
+      }),
+    });
+  });
+
+  if (hasMonthlyData) {
+    windows.push({
       id: 'monthly-limit',
       label: t('xai_quota.monthly_credits'),
       remainingPercent: buildRemainingFromUsedPercent(billing.usedPercent),
@@ -1083,8 +1116,8 @@ const buildXaiAccountQuotaWindows = (
         remaining: formatXaiCurrency(remainingCents),
         limit: formatXaiCurrency(billing.monthlyLimitCents),
       }),
-    },
-  ];
+    });
+  }
 
   if (billing.onDemandCapCents !== null && billing.onDemandCapCents > 0) {
     const onDemandRemainingCents =

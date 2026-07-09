@@ -13,7 +13,10 @@ import type {
   CodexUsagePayload,
   KimiQuotaRow,
   XaiBillingConfig,
+  XaiBillingPeriod,
+  XaiBillingPeriodType,
   XaiBillingSummary,
+  XaiProductUsageSummary,
 } from '@/types';
 import { apiCallApi, getApiCallErrorMessage } from '@/services/api/apiCall';
 import {
@@ -33,7 +36,8 @@ import {
   CODEX_USAGE_URL,
   KIMI_REQUEST_HEADERS,
   KIMI_USAGE_URL,
-  XAI_BILLING_URL,
+  XAI_BILLING_MONTHLY_URL,
+  XAI_BILLING_WEEKLY_URL,
   XAI_REQUEST_HEADERS,
 } from './constants';
 import { buildAntigravityQuotaGroups, buildKimiQuotaRows } from './builders';
@@ -552,7 +556,7 @@ export const fetchKimiQuota = async (file: AuthFileItem, t: TFunction): Promise<
   return buildKimiQuotaRows(payload);
 };
 
-const normalizeXaiCentValue = (value: XaiBillingConfig['monthlyLimit']): number | null => {
+const normalizeXaiCentValue = (value: unknown): number | null => {
   if (value === undefined || value === null) return null;
   if (typeof value === 'object' && !Array.isArray(value)) {
     return normalizeNumberValue((value as { val?: unknown }).val);
@@ -560,27 +564,76 @@ const normalizeXaiCentValue = (value: XaiBillingConfig['monthlyLimit']): number 
   return normalizeNumberValue(value);
 };
 
+const resolveXaiPeriodType = (period?: XaiBillingPeriod | null): XaiBillingPeriodType => {
+  const rawType = normalizeStringValue(period?.type)?.toLowerCase() ?? '';
+  if (rawType.includes('weekly')) return 'weekly';
+  if (rawType.includes('monthly')) return 'monthly';
+  return 'unknown';
+};
+
+const normalizeXaiProductUsage = (
+  productUsage: XaiBillingConfig['productUsage'],
+  fallbackPrefix: string
+): XaiProductUsageSummary[] => {
+  if (!Array.isArray(productUsage)) return [];
+
+  return productUsage
+    .map((item, index): XaiProductUsageSummary | null => {
+      if (!item || typeof item !== 'object') return null;
+      const product = normalizeStringValue(item.product) ?? `${fallbackPrefix} ${index + 1}`;
+      const usagePercent = normalizeNumberValue(item.usagePercent ?? item.usage_percent);
+      return { product, usagePercent };
+    })
+    .filter((item): item is XaiProductUsageSummary => item !== null);
+};
+
+const emptyXaiBillingSummary = (): XaiBillingSummary => ({
+  periodType: 'unknown',
+  usagePercent: null,
+  productUsage: [],
+  monthlyLimitCents: null,
+  usedCents: null,
+  includedUsedCents: null,
+  onDemandCapCents: null,
+  onDemandUsedCents: null,
+  onDemandUsedPercent: null,
+  usedPercent: null,
+});
+
 export const buildXaiBillingSummary = (
   config: XaiBillingConfig | null | undefined
 ): XaiBillingSummary | null => {
   if (!config || typeof config !== 'object') return null;
 
+  const summary = emptyXaiBillingSummary();
+  const currentPeriod = config.currentPeriod ?? config.current_period ?? null;
+  const periodType = resolveXaiPeriodType(currentPeriod);
+  const creditUsagePercent = normalizeNumberValue(
+    config.creditUsagePercent ?? config.credit_usage_percent
+  );
+  const periodStart =
+    normalizeStringValue(currentPeriod?.start) ??
+    normalizeStringValue(config.billingPeriodStart ?? config.billing_period_start) ??
+    undefined;
+  const periodEnd =
+    normalizeStringValue(currentPeriod?.end) ??
+    normalizeStringValue(config.billingPeriodEnd ?? config.billing_period_end) ??
+    undefined;
+  const productUsage = normalizeXaiProductUsage(
+    config.productUsage ?? config.product_usage,
+    'Product'
+  );
+
   const monthlyLimitCents = normalizeXaiCentValue(config.monthlyLimit ?? config.monthly_limit);
   const usedCents = normalizeXaiCentValue(config.used);
   const onDemandCapCents = normalizeXaiCentValue(config.onDemandCap ?? config.on_demand_cap);
+  const explicitOnDemandUsedCents = normalizeXaiCentValue(
+    config.onDemandUsed ?? config.on_demand_used
+  );
   const billingPeriodStart =
     normalizeStringValue(config.billingPeriodStart ?? config.billing_period_start) ?? undefined;
   const billingPeriodEnd =
     normalizeStringValue(config.billingPeriodEnd ?? config.billing_period_end) ?? undefined;
-
-  if (
-    monthlyLimitCents === null &&
-    usedCents === null &&
-    onDemandCapCents === null &&
-    !billingPeriodEnd
-  ) {
-    return null;
-  }
 
   const includedUsedCents =
     usedCents === null
@@ -588,10 +641,11 @@ export const buildXaiBillingSummary = (
       : monthlyLimitCents !== null && monthlyLimitCents > 0
         ? Math.min(usedCents, monthlyLimitCents)
         : usedCents;
-  const onDemandUsedCents =
+  const derivedOnDemandUsedCents =
     usedCents !== null && monthlyLimitCents !== null
       ? Math.max(0, usedCents - monthlyLimitCents)
       : null;
+  const onDemandUsedCents = explicitOnDemandUsedCents ?? derivedOnDemandUsedCents;
   const usedPercent =
     monthlyLimitCents !== null && monthlyLimitCents > 0 && includedUsedCents !== null
       ? (includedUsedCents / monthlyLimitCents) * 100
@@ -601,17 +655,127 @@ export const buildXaiBillingSummary = (
       ? (onDemandUsedCents / onDemandCapCents) * 100
       : null;
 
+  const hasWeeklyData =
+    creditUsagePercent !== null || periodType === 'weekly' || productUsage.length > 0;
+  const hasMonthlyData =
+    monthlyLimitCents !== null ||
+    usedCents !== null ||
+    (!hasWeeklyData && (onDemandCapCents !== null || !!billingPeriodEnd));
+
+  if (!hasWeeklyData && !hasMonthlyData) return null;
+
+  summary.periodType = hasWeeklyData
+    ? periodType === 'unknown'
+      ? 'weekly'
+      : periodType
+    : 'monthly';
+  summary.usagePercent = hasWeeklyData ? creditUsagePercent : usedPercent;
+  summary.periodStart = hasWeeklyData ? periodStart : billingPeriodStart;
+  summary.periodEnd = hasWeeklyData ? periodEnd : billingPeriodEnd;
+  summary.productUsage = productUsage;
+  summary.monthlyLimitCents = monthlyLimitCents;
+  summary.usedCents = usedCents;
+  summary.includedUsedCents = includedUsedCents;
+  summary.onDemandCapCents = onDemandCapCents;
+  summary.onDemandUsedCents = onDemandUsedCents;
+  summary.onDemandUsedPercent = onDemandUsedPercent;
+  summary.billingPeriodStart = hasMonthlyData ? billingPeriodStart : undefined;
+  summary.billingPeriodEnd = hasMonthlyData ? billingPeriodEnd : undefined;
+  summary.usedPercent = usedPercent;
+
+  return summary;
+};
+
+export const mergeXaiBillingSummaries = (
+  primary: XaiBillingSummary | null,
+  fallback: XaiBillingSummary | null
+): XaiBillingSummary | null => {
+  if (!primary) return fallback;
+  if (!fallback) return primary;
+
   return {
-    monthlyLimitCents,
-    usedCents,
-    includedUsedCents,
-    onDemandCapCents,
-    onDemandUsedCents,
-    onDemandUsedPercent,
-    billingPeriodStart,
-    billingPeriodEnd,
-    usedPercent,
+    periodType: primary.periodType !== 'unknown' ? primary.periodType : fallback.periodType,
+    usagePercent: primary.usagePercent ?? fallback.usagePercent,
+    periodStart: primary.periodStart ?? fallback.periodStart,
+    periodEnd: primary.periodEnd ?? fallback.periodEnd,
+    productUsage: primary.productUsage.length > 0 ? primary.productUsage : fallback.productUsage,
+    monthlyLimitCents: primary.monthlyLimitCents ?? fallback.monthlyLimitCents,
+    usedCents: primary.usedCents ?? fallback.usedCents,
+    includedUsedCents: primary.includedUsedCents ?? fallback.includedUsedCents,
+    onDemandCapCents: primary.onDemandCapCents ?? fallback.onDemandCapCents,
+    onDemandUsedCents: primary.onDemandUsedCents ?? fallback.onDemandUsedCents,
+    onDemandUsedPercent: primary.onDemandUsedPercent ?? fallback.onDemandUsedPercent,
+    billingPeriodStart: primary.billingPeriodStart ?? fallback.billingPeriodStart,
+    billingPeriodEnd: primary.billingPeriodEnd ?? fallback.billingPeriodEnd,
+    usedPercent: primary.usedPercent ?? fallback.usedPercent,
   };
+};
+
+const toXaiRecord = (value: unknown): Record<string, unknown> | null =>
+  value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+
+const resolveXaiUserId = (file: AuthFileItem): string | null => {
+  const metadata = toXaiRecord(file.metadata);
+  const attributes = toXaiRecord(file.attributes);
+  const oauth = toXaiRecord(file.oauth ?? metadata?.oauth ?? attributes?.oauth);
+  const user = toXaiRecord(file.user ?? metadata?.user ?? attributes?.user);
+
+  const candidates = [
+    file.sub,
+    file.subject,
+    file.user_id,
+    file.userId,
+    metadata?.sub,
+    metadata?.subject,
+    metadata?.user_id,
+    metadata?.userId,
+    attributes?.sub,
+    attributes?.subject,
+    attributes?.user_id,
+    attributes?.userId,
+    oauth?.sub,
+    oauth?.subject,
+    user?.sub,
+    user?.id,
+  ];
+
+  for (const candidate of candidates) {
+    const userId = normalizeStringValue(candidate);
+    if (userId) return userId;
+  }
+
+  return null;
+};
+
+const buildXaiRequestHeaders = (file: AuthFileItem): Record<string, string> => {
+  const headers: Record<string, string> = { ...XAI_REQUEST_HEADERS };
+  const userId = resolveXaiUserId(file);
+  if (userId) {
+    headers['x-userid'] = userId;
+  }
+  return headers;
+};
+
+const requestXaiBilling = async (
+  authIndex: string,
+  url: string,
+  header: Record<string, string>
+): Promise<XaiBillingSummary | null> => {
+  const result = await apiCallApi.request({
+    authIndex,
+    method: 'GET',
+    url,
+    header,
+  });
+
+  if (result.statusCode < 200 || result.statusCode >= 300) {
+    throw createStatusError(getApiCallErrorMessage(result), result.statusCode);
+  }
+
+  const payload = parseXaiBillingPayload(result.body ?? result.bodyText);
+  return buildXaiBillingSummary(payload?.config);
 };
 
 export const fetchXaiQuota = async (
@@ -624,20 +788,18 @@ export const fetchXaiQuota = async (
     throw new Error(t('xai_quota.missing_auth_index'));
   }
 
-  const result = await apiCallApi.request({
-    authIndex,
-    method: 'GET',
-    url: XAI_BILLING_URL,
-    header: { ...XAI_REQUEST_HEADERS },
-  });
-
-  if (result.statusCode < 200 || result.statusCode >= 300) {
-    throw createStatusError(getApiCallErrorMessage(result), result.statusCode);
-  }
-
-  const payload = parseXaiBillingPayload(result.body ?? result.bodyText);
-  const summary = buildXaiBillingSummary(payload?.config);
+  const requestHeader = buildXaiRequestHeaders(file);
+  const [weeklyResult, monthlyResult] = await Promise.allSettled([
+    requestXaiBilling(authIndex, XAI_BILLING_WEEKLY_URL, requestHeader),
+    requestXaiBilling(authIndex, XAI_BILLING_MONTHLY_URL, requestHeader),
+  ]);
+  const weeklySummary = weeklyResult.status === 'fulfilled' ? weeklyResult.value : null;
+  const monthlySummary = monthlyResult.status === 'fulfilled' ? monthlyResult.value : null;
+  const summary = mergeXaiBillingSummaries(weeklySummary, monthlySummary);
   if (!summary) {
+    if (weeklyResult.status === 'rejected' && monthlyResult.status === 'rejected') {
+      throw weeklyResult.reason;
+    }
     throw new Error(t('xai_quota.empty_data'));
   }
 
