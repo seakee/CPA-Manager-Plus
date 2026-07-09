@@ -301,4 +301,85 @@ describe('useVisualConfig', () => {
 
     harness.unmount();
   });
+
+  it('does not load the hashed secret-key into the editable field', () => {
+    const harness = mountUseVisualConfig();
+    const yaml = [
+      'remote-management:',
+      '  allow-remote: true',
+      '  secret-key: "$2a$10$abcdefghijklmnopqrstuvwxyzABCDEF0123456789ABCDEFG"',
+      '',
+    ].join('\n');
+
+    act(() => {
+      const result = harness.getCurrent().loadVisualValuesFromYaml(yaml);
+      expect(result.ok).toBe(true);
+    });
+
+    // The backend stores secret-key hashed; echoing it back into the field would
+    // rewrite the hash on every save and leave the form permanently dirty.
+    expect(harness.getCurrent().visualValues.rmSecretKey).toBe('');
+
+    harness.unmount();
+  });
+
+  it('preserves the existing secret-key when the field is left blank', () => {
+    const harness = mountUseVisualConfig();
+    const hash = '$2a$10$abcdefghijklmnopqrstuvwxyzABCDEF0123456789ABCDEFG';
+    const yaml = [
+      'remote-management:',
+      '  allow-remote: true',
+      `  secret-key: "${hash}"`,
+      '',
+    ].join('\n');
+
+    act(() => {
+      const result = harness.getCurrent().loadVisualValuesFromYaml(yaml);
+      expect(result.ok).toBe(true);
+    });
+
+    // User changes an unrelated field and saves without touching secret-key.
+    act(() => {
+      harness.getCurrent().setVisualValues({ rmDisableControlPanel: true });
+    });
+
+    const savedYaml = harness.getCurrent().applyVisualChangesToYaml(yaml);
+    const parsed = parseYaml(savedYaml) as {
+      'remote-management'?: { 'secret-key'?: string; 'disable-control-panel'?: boolean };
+    };
+
+    // The on-disk hash must survive untouched, and the unrelated edit must apply.
+    expect(parsed['remote-management']?.['secret-key']).toBe(hash);
+    expect(parsed['remote-management']?.['disable-control-panel']).toBe(true);
+
+    harness.unmount();
+  });
+
+  it('writes a new secret-key only when the user types one', () => {
+    const harness = mountUseVisualConfig();
+    const yaml = [
+      'remote-management:',
+      '  allow-remote: true',
+      '  secret-key: "$2a$10$oldhashvalue0000000000000000000000000000000000000"',
+      '',
+    ].join('\n');
+
+    act(() => {
+      const result = harness.getCurrent().loadVisualValuesFromYaml(yaml);
+      expect(result.ok).toBe(true);
+    });
+
+    act(() => {
+      harness.getCurrent().setVisualValues({ rmSecretKey: 'my-new-plaintext-key' });
+    });
+
+    const savedYaml = harness.getCurrent().applyVisualChangesToYaml(yaml);
+    const parsed = parseYaml(savedYaml) as {
+      'remote-management'?: { 'secret-key'?: string };
+    };
+
+    expect(parsed['remote-management']?.['secret-key']).toBe('my-new-plaintext-key');
+
+    harness.unmount();
+  });
 });

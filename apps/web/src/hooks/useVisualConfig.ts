@@ -744,10 +744,12 @@ export function useVisualConfig() {
         tlsKey: typeof tls?.key === 'string' ? tls.key : '',
 
         rmAllowRemote: Boolean(remoteManagement?.['allow-remote']),
-        rmSecretKey:
-          typeof remoteManagement?.['secret-key'] === 'string'
-            ? remoteManagement['secret-key']
-            : '',
+        // secret-key is stored hashed (bcrypt) on the backend. Never load the hash
+        // into the editable field: echoing it back would (a) rewrite the hash as a
+        // plain value on every save and (b) make the form permanently "dirty" since
+        // the hash never equals the plaintext the user typed. Load blank; an empty
+        // field means "keep the existing secret-key unchanged".
+        rmSecretKey: '',
         rmDisableControlPanel: Boolean(remoteManagement?.['disable-control-panel']),
         rmDisableAutoUpdatePanel: Boolean(remoteManagement?.['disable-auto-update-panel']),
         rmPanelRepo:
@@ -899,7 +901,13 @@ export function useVisualConfig() {
         ) {
           ensureMapInDoc(doc, ['remote-management']);
           setBooleanInDoc(doc, ['remote-management', 'allow-remote'], values.rmAllowRemote);
-          setStringInDoc(doc, ['remote-management', 'secret-key'], values.rmSecretKey);
+          // Only write secret-key when the user typed a new value. An empty field
+          // means "unchanged": preserve whatever (hashed) value is already on disk
+          // instead of overwriting it. This keeps the backend hash intact and avoids
+          // silently resetting the management password on unrelated config saves.
+          if (values.rmSecretKey.trim()) {
+            setStringInDoc(doc, ['remote-management', 'secret-key'], values.rmSecretKey);
+          }
           setBooleanInDoc(
             doc,
             ['remote-management', 'disable-control-panel'],

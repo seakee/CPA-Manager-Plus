@@ -2407,7 +2407,7 @@
           "disable_auto_update_panel": "停用面板自動更新",
           "disable_auto_update_panel_desc": "首次缺失時仍可下載，但不再從 GitHub 背景自動更新",
           "secret_key": "管理金鑰",
-          "secret_key_placeholder": "設定管理金鑰",
+          "secret_key_placeholder": "留空表示不修改現有金鑰",
           "panel_repo": "面板儲存庫"
         },
         "auth": {
