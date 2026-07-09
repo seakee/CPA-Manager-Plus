@@ -11,6 +11,11 @@ const { mocks } = vi.hoisted(() => {
       savePastedAuthJson: vi.fn(async () => 'saved.json'),
       showNotification: vi.fn(),
       navigate: vi.fn(),
+      panelFeatureAvailability: {
+        checking: false,
+        managerServiceBase: '',
+        serverCodexInspectionAvailable: false,
+      },
       lastModalProps: null as {
         open: boolean;
         saving: boolean;
@@ -42,6 +47,10 @@ vi.mock('@/hooks/useInterval', () => ({
 
 vi.mock('@/hooks/useHeaderRefresh', () => ({
   useHeaderRefresh: () => {},
+}));
+
+vi.mock('@/hooks/usePanelFeatureAvailability', () => ({
+  usePanelFeatureAvailability: () => mocks.panelFeatureAvailability,
 }));
 
 vi.mock('@/components/common/PageTransitionLayer', () => ({

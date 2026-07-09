@@ -63,6 +63,9 @@ import {
 import {
   monitoringAnalyticsApi,
   usageServiceApi,
+  type MonitoringAnalyticsCredentialStatRow,
+  type MonitoringAnalyticsInclude,
+  type MonitoringAnalyticsResponse,
   type QuotaCooldownInfo,
   type UsageHeaderSnapshot,
 } from '@/services/api/usageService';
@@ -110,6 +113,10 @@ import {
   type AuthFilesCodexStatusFilter,
 } from '@/features/authFiles/model/authFilesPageModel';
 import {
+  buildAuthFileUsageSummaryMap,
+  getAuthFileUsageSummaryKey,
+} from '@/features/authFiles/model/authFileUsageSummary';
+import {
   createCodexInspectionConnectionFingerprint,
   loadCodexInspectionLastRun,
 } from '@/features/monitoring/codexInspection';
@@ -126,6 +133,13 @@ import type { AuthJsonInputType } from '@/features/authFiles/sessionAuthConverte
 import type { AuthFileItem, CodexQuotaState } from '@/types';
 import { useAuthStore, useNotificationStore, useQuotaStore, useThemeStore } from '@/stores';
 import styles from './AuthFilesPage.module.scss';
+
+const AUTH_FILE_USAGE_FIVE_HOUR_MS = 5 * 60 * 60 * 1000;
+const AUTH_FILE_USAGE_WEEKLY_MS = 7 * 24 * 60 * 60 * 1000;
+const AUTH_FILE_USAGE_HISTORY_FROM_MS = 1;
+const AUTH_FILE_USAGE_ANALYTICS_INCLUDE = {
+  credential_stats: true,
+} satisfies MonitoringAnalyticsInclude;
 
 const hasInlineQuotaLayout = (file: AuthFileItem): boolean => {
   if (isRuntimeOnlyAuthFile(file)) return false;
@@ -185,8 +199,24 @@ type QuotaCooldownState = {
   items: Map<string, QuotaCooldownInfo>;
 };
 
+type AuthFileUsageRows = {
+  retained: MonitoringAnalyticsCredentialStatRow[];
+  fiveHour: MonitoringAnalyticsCredentialStatRow[];
+  weekly: MonitoringAnalyticsCredentialStatRow[];
+};
+
+const EMPTY_AUTH_FILE_USAGE_ROWS: AuthFileUsageRows = {
+  retained: [],
+  fiveHour: [],
+  weekly: [],
+};
+
 const getQuotaCooldownContextKey = (managerServiceBase: string, managementKey: string): string =>
   `${managerServiceBase}\u0000${managementKey}`;
+
+const readCredentialStats = (
+  response: MonitoringAnalyticsResponse
+): MonitoringAnalyticsCredentialStatRow[] => response.credential_stats ?? [];
 
 export function AuthFilesPage() {
   const { t } = useTranslation();
@@ -199,6 +229,7 @@ export function AuthFilesPage() {
   const setCodexQuota = useQuotaStore((state) => state.setCodexQuota);
   const featureAvailability = usePanelFeatureAvailability();
   const managerServiceBase = featureAvailability.managerServiceBase;
+  const requestMonitoringAvailable = featureAvailability.requestMonitoringAvailable !== false;
   const pageTransitionLayer = usePageTransitionLayer();
   const isCurrentLayer = pageTransitionLayer ? pageTransitionLayer.status === 'current' : true;
   const navigate = useNavigate();
@@ -235,6 +266,9 @@ export function AuthFilesPage() {
   const quotaCooldowns = quotaCooldownState.items;
   const [headerSnapshots, setHeaderSnapshots] = useState<UsageHeaderSnapshot[]>([]);
   const [headerSnapshotGeneratedAtMs, setHeaderSnapshotGeneratedAtMs] = useState(0);
+  const [authFileUsageRows, setAuthFileUsageRows] = useState<AuthFileUsageRows>(
+    EMPTY_AUTH_FILE_USAGE_ROWS
+  );
   const floatingBatchActionsRef = useRef<HTMLDivElement>(null);
   const batchActionAnimationRef = useRef<AnimationPlaybackControlsWithThen | null>(null);
   const previousSelectionCountRef = useRef(0);
@@ -253,6 +287,7 @@ export function AuthFilesPage() {
   // the old context was invalidated.
   const cooldownReqId = useRef(0);
   const headerSnapshotReqId = useRef(0);
+  const authFileUsageReqId = useRef(0);
   // Tracks the context identity so the layout effect can detect cross-context
   // transitions synchronously (before passive effects fire) and invalidate any
   // in-flight request that belongs to the old context.
@@ -611,14 +646,68 @@ export function AuthFilesPage() {
     [savePastedAuthJson]
   );
 
+  const loadAuthFileUsageSummaries = useCallback(async () => {
+    if (!managerServiceBase || !requestMonitoringAvailable) {
+      authFileUsageReqId.current += 1;
+      setAuthFileUsageRows(EMPTY_AUTH_FILE_USAGE_ROWS);
+      return;
+    }
+
+    const id = ++authFileUsageReqId.current;
+    const nowMs = Date.now();
+    const buildRequest = (fromMs: number) => ({
+      from_ms: fromMs,
+      to_ms: nowMs,
+      now_ms: nowMs,
+      include: AUTH_FILE_USAGE_ANALYTICS_INCLUDE,
+    });
+
+    try {
+      const [retained, fiveHour, weekly] = await Promise.all([
+        monitoringAnalyticsApi.getAnalytics(
+          managerServiceBase,
+          managementKey,
+          buildRequest(AUTH_FILE_USAGE_HISTORY_FROM_MS)
+        ),
+        monitoringAnalyticsApi.getAnalytics(
+          managerServiceBase,
+          managementKey,
+          buildRequest(nowMs - AUTH_FILE_USAGE_FIVE_HOUR_MS)
+        ),
+        monitoringAnalyticsApi.getAnalytics(
+          managerServiceBase,
+          managementKey,
+          buildRequest(nowMs - AUTH_FILE_USAGE_WEEKLY_MS)
+        ),
+      ]);
+      if (id !== authFileUsageReqId.current) return;
+      setAuthFileUsageRows({
+        retained: readCredentialStats(retained),
+        fiveHour: readCredentialStats(fiveHour),
+        weekly: readCredentialStats(weekly),
+      });
+    } catch {
+      if (id === authFileUsageReqId.current) {
+        setAuthFileUsageRows(EMPTY_AUTH_FILE_USAGE_ROWS);
+      }
+    }
+  }, [managementKey, managerServiceBase, requestMonitoringAvailable]);
+
   const handleHeaderRefresh = useCallback(async () => {
     await Promise.all([
       loadFiles(),
       loadExcluded(),
       loadModelAlias(),
       loadCodexInspectionSnapshots(),
+      loadAuthFileUsageSummaries(),
     ]);
-  }, [loadFiles, loadExcluded, loadModelAlias, loadCodexInspectionSnapshots]);
+  }, [
+    loadFiles,
+    loadExcluded,
+    loadModelAlias,
+    loadCodexInspectionSnapshots,
+    loadAuthFileUsageSummaries,
+  ]);
 
   useHeaderRefresh(handleHeaderRefresh);
 
@@ -795,11 +884,23 @@ export function AuthFilesPage() {
     setHeaderSnapshotGeneratedAtMs(0);
   }, [managerServiceBase, managementKey]);
 
+  useLayoutEffect(() => {
+    authFileUsageReqId.current += 1;
+    setAuthFileUsageRows(EMPTY_AUTH_FILE_USAGE_ROWS);
+  }, [managerServiceBase, managementKey]);
+
   useEffect(() => {
     if (!isCurrentLayer || !managerServiceBase) return;
     void loadQuotaCooldowns();
     void loadHeaderSnapshots();
-  }, [isCurrentLayer, managerServiceBase, loadHeaderSnapshots, loadQuotaCooldowns]);
+    void loadAuthFileUsageSummaries();
+  }, [
+    isCurrentLayer,
+    managerServiceBase,
+    loadHeaderSnapshots,
+    loadQuotaCooldowns,
+    loadAuthFileUsageSummaries,
+  ]);
 
   useInterval(
     () => {
@@ -988,6 +1089,25 @@ export function AuthFilesPage() {
     });
     return statusMap;
   }, [codexStatusSourcesByAuthFileKey, files, getDisplayCodexQuota]);
+
+  const codexDisplayQuotaByAuthFileUsageKey = useMemo(() => {
+    const quotaMap = new Map<string, CodexQuotaState | undefined>();
+    files.forEach((file) => {
+      quotaMap.set(getAuthFileUsageSummaryKey(file), getDisplayCodexQuota(file));
+    });
+    return quotaMap;
+  }, [files, getDisplayCodexQuota]);
+
+  const authFileUsageSummaryByKey = useMemo(
+    () =>
+      buildAuthFileUsageSummaryMap(files, {
+        retainedRows: authFileUsageRows.retained,
+        fiveHourRows: authFileUsageRows.fiveHour,
+        weeklyRows: authFileUsageRows.weekly,
+        codexQuotaByKey: codexDisplayQuotaByAuthFileUsageKey,
+      }),
+    [authFileUsageRows, codexDisplayQuotaByAuthFileUsageKey, files]
+  );
 
   const filesMatchingStatusFilters = useMemo(
     () =>
@@ -1731,6 +1851,9 @@ export function AuthFilesPage() {
                       codexStatusBadges={codexStatus?.badges ?? []}
                       codexNeedsReauth={codexStatus?.needsReauth ?? false}
                       codexDisplayQuota={getDisplayCodexQuota(file)}
+                      usageSummary={authFileUsageSummaryByKey.get(
+                        getAuthFileUsageSummaryKey(file)
+                      )}
                       antigravitySubscription={antigravitySubscriptions[file.name]}
                       onRefreshAntigravitySubscription={refreshSubscription}
                       quotaCooldown={getQuotaCooldownForFile(file)}

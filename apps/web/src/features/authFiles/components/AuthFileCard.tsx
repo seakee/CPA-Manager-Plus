@@ -14,6 +14,7 @@ import {
 import { ProviderStatusBar } from '@/components/providers/ProviderStatusBar';
 import type { AuthFileItem, CodexQuotaState } from '@/types';
 import { resolveAuthProvider } from '@/utils/quota';
+import { formatCompactNumber, formatUsd } from '@/utils/usage';
 import {
   normalizeRecentRequestAuthIndex,
   normalizeRecentRequestBuckets,
@@ -36,6 +37,7 @@ import {
 import type { AuthFileStatusBarData } from '@/features/authFiles/hooks/useAuthFilesStatusBarCache';
 import type { AntigravitySubscriptionState } from '@/features/authFiles/hooks/useAntigravitySubscriptions';
 import type { AuthFileCodexStatusBadge } from '@/features/authFiles/model/authFilesPageModel';
+import type { AuthFileUsageSummary } from '@/features/authFiles/model/authFileUsageSummary';
 import type { QuotaCooldownInfo } from '@/services/api/usageService';
 import { AuthFileQuotaSection } from '@/features/authFiles/components/AuthFileQuotaSection';
 import styles from '@/features/authFiles/AuthFilesPage.module.scss';
@@ -54,6 +56,7 @@ export type AuthFileCardProps = {
   codexStatusBadges?: AuthFileCodexStatusBadge[];
   codexNeedsReauth?: boolean;
   codexDisplayQuota?: CodexQuotaState;
+  usageSummary?: AuthFileUsageSummary;
   antigravitySubscription?: AntigravitySubscriptionState;
   onRefreshAntigravitySubscription?: (file: AuthFileItem) => void;
   quotaCooldown?: QuotaCooldownInfo;
@@ -92,6 +95,7 @@ export function AuthFileCard(props: AuthFileCardProps) {
     codexStatusBadges = [],
     codexNeedsReauth = false,
     codexDisplayQuota,
+    usageSummary,
     antigravitySubscription,
     onRefreshAntigravitySubscription,
     quotaCooldown,
@@ -120,6 +124,7 @@ export function AuthFileCard(props: AuthFileCardProps) {
 
   const quotaType = resolveQuotaType(file);
   const showQuotaLayout = Boolean(quotaType) && !isRuntimeOnly && !compact;
+  const showUsageSummary = Boolean(usageSummary) && !compact;
 
   const providerCardClass =
     quotaType === 'antigravity'
@@ -218,6 +223,15 @@ export function AuthFileCard(props: AuthFileCardProps) {
     warning: styles.codexStatusBadgeWarning,
     info: styles.codexStatusBadgeInfo,
   } satisfies Record<AuthFileCodexStatusBadge['tone'], string>;
+  const formatUsageTokens = (value: number) => formatCompactNumber(Math.round(value));
+  const formatEstimatedTokens = (value: number | null | undefined) =>
+    value && value > 0
+      ? `~${formatCompactNumber(Math.round(value))}`
+      : t('auth_files.usage_estimate_unavailable');
+  const formatEstimatedUsd = (value: number | null | undefined) =>
+    value !== null && value !== undefined && value >= 0
+      ? `~${formatUsd(value)}`
+      : t('auth_files.usage_estimate_unavailable');
 
   return (
     <div
@@ -379,6 +393,77 @@ export function AuthFileCard(props: AuthFileCardProps) {
                 <span className={styles.statValue}>{fileStats.failure}</span>
               </div>
             </div>
+
+            {showUsageSummary && usageSummary && (
+              <div className={styles.usageSummaryPanel} title={t('auth_files.usage_summary_title')}>
+                <div className={styles.usageSummaryItem}>
+                  <span className={styles.usageSummaryLabel}>
+                    {t('auth_files.usage_column_recorded')}
+                  </span>
+                  <span className={styles.usageSummaryMetric}>
+                    {t('auth_files.usage_metric_tokens')}
+                  </span>
+                  <span className={styles.usageSummaryValue}>
+                    {formatUsageTokens(usageSummary.totalTokens)}
+                  </span>
+                </div>
+                <div className={styles.usageSummaryItem}>
+                  <span className={styles.usageSummaryLabel}>
+                    {t('auth_files.usage_column_weekly_projection')}
+                  </span>
+                  <span className={styles.usageSummaryMetric}>
+                    {t('auth_files.usage_metric_tokens')}
+                  </span>
+                  <span className={styles.usageSummaryValue}>
+                    {formatEstimatedTokens(usageSummary.codexWeeklyLimitTokens)}
+                  </span>
+                </div>
+                <div className={styles.usageSummaryItem}>
+                  <span className={styles.usageSummaryLabel}>
+                    {t('auth_files.usage_column_five_hour_projection')}
+                  </span>
+                  <span className={styles.usageSummaryMetric}>
+                    {t('auth_files.usage_metric_tokens')}
+                  </span>
+                  <span className={styles.usageSummaryValue}>
+                    {formatEstimatedTokens(usageSummary.codexFiveHourLimitTokens)}
+                  </span>
+                </div>
+                <div className={styles.usageSummaryItem}>
+                  <span className={styles.usageSummaryLabel}>
+                    {t('auth_files.usage_column_recorded')}
+                  </span>
+                  <span className={styles.usageSummaryMetric}>
+                    {t('auth_files.usage_metric_cost')}
+                  </span>
+                  <span className={styles.usageSummaryValue}>
+                    {formatUsd(usageSummary.estimatedCost)}
+                  </span>
+                </div>
+                <div className={styles.usageSummaryItem}>
+                  <span className={styles.usageSummaryLabel}>
+                    {t('auth_files.usage_column_weekly_projection')}
+                  </span>
+                  <span className={styles.usageSummaryMetric}>
+                    {t('auth_files.usage_metric_value')}
+                  </span>
+                  <span className={styles.usageSummaryValue}>
+                    {formatEstimatedUsd(usageSummary.codexWeeklyLimitCost)}
+                  </span>
+                </div>
+                <div className={styles.usageSummaryItem}>
+                  <span className={styles.usageSummaryLabel}>
+                    {t('auth_files.usage_column_five_hour_projection')}
+                  </span>
+                  <span className={styles.usageSummaryMetric}>
+                    {t('auth_files.usage_metric_value')}
+                  </span>
+                  <span className={styles.usageSummaryValue}>
+                    {formatEstimatedUsd(usageSummary.codexFiveHourLimitCost)}
+                  </span>
+                </div>
+              </div>
+            )}
 
             <div className={`${styles.statusPanel} ${compact ? styles.statusPanelCompact : ''}`}>
               <div className={styles.statusPanelLabel}>

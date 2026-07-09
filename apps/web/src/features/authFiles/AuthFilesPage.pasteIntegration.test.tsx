@@ -29,6 +29,7 @@ const { mocks } = vi.hoisted(() => {
       listCodexInspectionRuns: vi.fn(),
       getCodexInspectionRun: vi.fn(),
       getHeaderSnapshots: vi.fn(),
+      getAnalytics: vi.fn(),
       deleteExcluded: vi.fn(async () => undefined),
       deleteModelAlias: vi.fn(async () => undefined),
       handleMappingUpdate: vi.fn(async () => undefined),
@@ -118,6 +119,7 @@ vi.mock('@/services/api/usageService', () => ({
   },
   monitoringAnalyticsApi: {
     getHeaderSnapshots: mocks.getHeaderSnapshots,
+    getAnalytics: mocks.getAnalytics,
   },
 }));
 
@@ -286,6 +288,7 @@ describe('AuthFilesPage real auth JSON paste flow', () => {
     mocks.listCodexInspectionRuns.mockReset();
     mocks.getCodexInspectionRun.mockReset();
     mocks.getHeaderSnapshots.mockReset();
+    mocks.getAnalytics.mockReset();
     mocks.connectionStatus = 'connected';
     mocks.codexQuota = {};
     mocks.panelFeatureAvailability = {
@@ -308,6 +311,11 @@ describe('AuthFilesPage real auth JSON paste flow', () => {
       from_ms: 1_700_000_000_000,
       to_ms: 1_700_000_000_000,
       items: [],
+    });
+    mocks.getAnalytics.mockResolvedValue({
+      generated_at_ms: 1_700_000_000_000,
+      granularity: 'hour',
+      credential_stats: [],
     });
   });
 

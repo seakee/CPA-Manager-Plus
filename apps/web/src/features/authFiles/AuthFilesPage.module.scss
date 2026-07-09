@@ -1380,6 +1380,61 @@
   color: var(--failure-badge-text);
 }
 
+.usageSummaryPanel {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  width: 100%;
+  min-width: 0;
+  padding: 4px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--border-color) 36%, var(--surface-subtle));
+  overflow: hidden;
+}
+
+.usageSummaryItem {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--bg-primary) 76%, transparent);
+}
+
+.usageSummaryLabel {
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.usageSummaryMetric {
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usageSummaryValue {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .statusPanel {
   display: flex;
   flex-direction: column;

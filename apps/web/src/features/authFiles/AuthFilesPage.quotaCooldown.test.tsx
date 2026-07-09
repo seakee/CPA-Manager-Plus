@@ -1,6 +1,10 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Select } from '@/components/ui/Select';
+import type {
+  MonitoringAnalyticsCredentialStatRow,
+  MonitoringAnalyticsResponse,
+} from '@/services/api/usageService';
 import { AuthFilesPage } from './AuthFilesPage';
 
 const { mocks } = vi.hoisted(() => {
@@ -22,6 +26,7 @@ const { mocks } = vi.hoisted(() => {
       getCodexInspectionRun: vi.fn(),
       getActiveQuotaCooldowns: vi.fn(),
       getHeaderSnapshots: vi.fn(),
+      getAnalytics: vi.fn(),
       apiCallRequest: vi.fn(),
       setCodexQuota: vi.fn(),
       intervalCallbacks: [] as Array<{ callback: () => void; delay: number | null }>,
@@ -100,6 +105,7 @@ vi.mock('@/services/api/usageService', () => ({
   },
   monitoringAnalyticsApi: {
     getHeaderSnapshots: mocks.getHeaderSnapshots,
+    getAnalytics: mocks.getAnalytics,
   },
 }));
 
@@ -261,6 +267,14 @@ vi.mock('@/features/authFiles/components/AuthFileCard', () => ({
         limitWindowSeconds?: number | null;
       }>;
     };
+    usageSummary?: {
+      estimatedCost: number;
+      totalTokens: number;
+      codexFiveHourLimitTokens: number | null;
+      codexFiveHourLimitCost: number | null;
+      codexWeeklyLimitTokens: number | null;
+      codexWeeklyLimitCost: number | null;
+    };
   }) => {
     const cooldown = props.quotaCooldown
       ? `${props.quotaCooldown.authFileName}@${props.quotaCooldown.recoverAtMs}`
@@ -294,6 +308,32 @@ vi.mock('@/features/authFiles/components/AuthFileCard', () => ({
           window?.limitWindowSeconds === undefined || window.limitWindowSeconds === null
             ? ''
             : String(window.limitWindowSeconds)
+        }
+        data-usage-cost={props.usageSummary ? String(props.usageSummary.estimatedCost) : ''}
+        data-usage-tokens={props.usageSummary ? String(props.usageSummary.totalTokens) : ''}
+        data-usage-five-hour-estimate={
+          props.usageSummary?.codexFiveHourLimitTokens === undefined ||
+          props.usageSummary.codexFiveHourLimitTokens === null
+            ? ''
+            : String(props.usageSummary.codexFiveHourLimitTokens)
+        }
+        data-usage-five-hour-cost-estimate={
+          props.usageSummary?.codexFiveHourLimitCost === undefined ||
+          props.usageSummary.codexFiveHourLimitCost === null
+            ? ''
+            : String(props.usageSummary.codexFiveHourLimitCost)
+        }
+        data-usage-weekly-estimate={
+          props.usageSummary?.codexWeeklyLimitTokens === undefined ||
+          props.usageSummary.codexWeeklyLimitTokens === null
+            ? ''
+            : String(props.usageSummary.codexWeeklyLimitTokens)
+        }
+        data-usage-weekly-cost-estimate={
+          props.usageSummary?.codexWeeklyLimitCost === undefined ||
+          props.usageSummary.codexWeeklyLimitCost === null
+            ? ''
+            : String(props.usageSummary.codexWeeklyLimitCost)
         }
       />
     );
@@ -359,6 +399,42 @@ const createDeferred = () => {
   return { promise, resolve };
 };
 
+const credentialStatsRow = (
+  overrides: Partial<MonitoringAnalyticsCredentialStatRow>
+): MonitoringAnalyticsCredentialStatRow => ({
+  id: overrides.id ?? 'credential-row',
+  auth_file_snapshot: overrides.auth_file_snapshot,
+  auth_index: overrides.auth_index,
+  source: overrides.source,
+  source_hash: overrides.source_hash,
+  account_snapshot: overrides.account_snapshot,
+  auth_label_snapshot: overrides.auth_label_snapshot,
+  auth_provider_snapshot: overrides.auth_provider_snapshot,
+  auth_project_id_snapshot: overrides.auth_project_id_snapshot,
+  calls: overrides.calls ?? 1,
+  success_calls: overrides.success_calls ?? 1,
+  failure_calls: overrides.failure_calls ?? 0,
+  success_rate: overrides.success_rate ?? 1,
+  input_tokens: overrides.input_tokens ?? 0,
+  output_tokens: overrides.output_tokens ?? 0,
+  cached_tokens: overrides.cached_tokens ?? 0,
+  cache_read_tokens: overrides.cache_read_tokens ?? 0,
+  cache_creation_tokens: overrides.cache_creation_tokens ?? 0,
+  total_tokens: overrides.total_tokens ?? 0,
+  cost: overrides.cost ?? 0,
+  average_latency_ms: overrides.average_latency_ms ?? null,
+  last_seen_ms: overrides.last_seen_ms ?? 0,
+  models: overrides.models,
+});
+
+const analyticsResponse = (
+  credentialStats: MonitoringAnalyticsCredentialStatRow[] = []
+): MonitoringAnalyticsResponse => ({
+  generated_at_ms: 1_700_000_000_000,
+  granularity: 'hour',
+  credential_stats: credentialStats,
+});
+
 describe('AuthFilesPage quota cooldown derived badge', () => {
   beforeEach(() => {
     mocks.list.mockReset();
@@ -366,6 +442,7 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
     mocks.listCodexInspectionRuns.mockReset();
     mocks.getCodexInspectionRun.mockReset();
     mocks.getHeaderSnapshots.mockReset();
+    mocks.getAnalytics.mockReset();
     mocks.apiCallRequest.mockReset();
     mocks.intervalCallbacks = [];
     mocks.codexQuota = {};
@@ -393,6 +470,7 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
       to_ms: 1_700_000_000_000,
       items: [],
     });
+    mocks.getAnalytics.mockResolvedValue(analyticsResponse());
 
     setManagerServiceBase('http://manager.local:18317');
   });
@@ -473,6 +551,99 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
     expect(card.props['data-codex-quota-observed']).toBe('true');
     expect(card.props['data-codex-quota-window-percent']).toBe('20');
     expect(card.props['data-codex-quota-window-seconds']).toBe('2592000');
+  });
+
+  it('passes credential usage summaries from monitoring analytics to auth file cards', async () => {
+    mocks.list.mockReturnValue([
+      { name: 'codex-one.json', type: 'codex', authIndex: '0' },
+      { name: 'codex-two.json', type: 'codex', authIndex: '0' },
+    ]);
+    mocks.codexQuota = {
+      'codex-one.json::0': {
+        status: 'success',
+        authFileKey: 'codex-one.json::0',
+        authFileName: 'codex-one.json',
+        authIndex: '0',
+        planType: 'plus',
+        windows: [
+          {
+            id: 'five-hour',
+            label: '5-hour limit',
+            labelKey: 'codex_quota.primary_window',
+            usedPercent: 25,
+            resetLabel: 'soon',
+            limitWindowSeconds: 18_000,
+          },
+          {
+            id: 'weekly',
+            label: 'Weekly limit',
+            labelKey: 'codex_quota.secondary_window',
+            usedPercent: 40,
+            resetLabel: 'later',
+            limitWindowSeconds: 604_800,
+          },
+        ],
+      },
+    };
+    mocks.getAnalytics
+      .mockResolvedValueOnce(
+        analyticsResponse([
+          credentialStatsRow({
+            auth_file_snapshot: 'codex-one.json',
+            auth_index: '0',
+            total_tokens: 50_000,
+            cost: 1.5,
+          }),
+          credentialStatsRow({
+            auth_file_snapshot: 'codex-one.json',
+            auth_index: '1',
+            total_tokens: 99_000,
+            cost: 9.9,
+          }),
+        ])
+      )
+      .mockResolvedValueOnce(
+        analyticsResponse([
+          credentialStatsRow({
+            auth_file_snapshot: 'codex-one.json',
+            auth_index: '0',
+            total_tokens: 5_000,
+            cost: 0.25,
+          }),
+        ])
+      )
+      .mockResolvedValueOnce(
+        analyticsResponse([
+          credentialStatsRow({
+            auth_file_snapshot: 'codex-one.json',
+            auth_index: '0',
+            total_tokens: 28_000,
+            cost: 2.8,
+          }),
+        ])
+      );
+
+    let renderer: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(<AuthFilesPage />);
+    });
+
+    await vi.waitFor(() => {
+      expect(
+        renderer!.root.findByProps({ 'data-auth-card': 'codex-one.json' }).props[
+          'data-usage-tokens'
+        ]
+      ).toBe('50000');
+    });
+
+    const card = renderer!.root.findByProps({ 'data-auth-card': 'codex-one.json' });
+    expect(card.props['data-usage-cost']).toBe('1.5');
+    expect(card.props['data-usage-five-hour-estimate']).toBe('20000');
+    expect(card.props['data-usage-five-hour-cost-estimate']).toBe('1');
+    expect(card.props['data-usage-weekly-estimate']).toBe('70000');
+    expect(card.props['data-usage-weekly-cost-estimate']).toBe('7');
+    expect(mocks.getAnalytics).toHaveBeenCalledTimes(3);
+    expect(mocks.getAnalytics.mock.calls[0]?.[2].include).toEqual({ credential_stats: true });
   });
 
   it('refreshes Codex quota instead of showing expired usage response headers', async () => {
