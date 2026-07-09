@@ -2407,7 +2407,7 @@
           "disable_auto_update_panel": "Disable Panel Auto Updates",
           "disable_auto_update_panel_desc": "Download the panel when first missing, but never auto-update it from GitHub",
           "secret_key": "Management Key",
-          "secret_key_placeholder": "Leave blank to keep the current key",
+          "secret_key_placeholder": "Leave blank to keep the current key; enter a value to set a new one",
           "panel_repo": "Panel Repository"
         },
         "auth": {

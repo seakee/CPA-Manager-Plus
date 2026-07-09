@@ -319,6 +319,9 @@ describe('useVisualConfig', () => {
     // The backend stores secret-key hashed; echoing it back into the field would
     // rewrite the hash on every save and leave the form permanently dirty.
     expect(harness.getCurrent().visualValues.rmSecretKey).toBe('');
+    // Loading a config that already has a hashed secret-key must not mark the form
+    // dirty on its own — this is the "permanently unsaved changes" regression guard.
+    expect(harness.getCurrent().visualDirty).toBe(false);
 
     harness.unmount();
   });

@@ -905,8 +905,9 @@ export function useVisualConfig() {
           // means "unchanged": preserve whatever (hashed) value is already on disk
           // instead of overwriting it. This keeps the backend hash intact and avoids
           // silently resetting the management password on unrelated config saves.
-          if (values.rmSecretKey.trim()) {
-            setStringInDoc(doc, ['remote-management', 'secret-key'], values.rmSecretKey);
+          const nextSecretKey = values.rmSecretKey.trim();
+          if (nextSecretKey) {
+            setStringInDoc(doc, ['remote-management', 'secret-key'], nextSecretKey);
           }
           setBooleanInDoc(
             doc,
