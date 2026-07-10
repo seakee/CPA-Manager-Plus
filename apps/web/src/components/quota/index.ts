@@ -13,6 +13,7 @@ export {
   XAI_CONFIG,
   buildObservedCodexQuotaState,
   getQuotaStoreKey,
+  getScopedQuotaState,
   resolveQuotaDisplayState,
 } from './quotaConfigs';
 export type { QuotaConfig } from './quotaConfigs';

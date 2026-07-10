@@ -155,6 +155,121 @@
   }
 }
 
+.codexAggregateSummary {
+  min-width: 0;
+  margin-bottom: 10px;
+}
+
+.codexAggregateHeader {
+  margin-bottom: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.codexAggregateRows {
+  display: grid;
+  gap: 1px;
+  overflow: hidden;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--border-color) 44%, transparent);
+}
+
+.codexAggregateRow {
+  display: grid;
+  grid-template-areas: 'window cost tokens coverage';
+  grid-template-columns:
+    max-content
+    minmax(190px, 250px)
+    minmax(200px, 270px)
+    max-content;
+  justify-content: start;
+  gap: 20px;
+  align-items: center;
+  min-width: 0;
+  padding: 9px 12px;
+  background: color-mix(in srgb, var(--surface-subtle) 66%, var(--bg-primary));
+
+  @include mobile {
+    grid-template-areas:
+      'window coverage'
+      'cost tokens';
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 7px 10px;
+    padding: 9px 10px;
+  }
+}
+
+.codexAggregateWindow {
+  grid-area: window;
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.codexAggregateMetric {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-start;
+  gap: 7px;
+  min-width: 0;
+
+  @include mobile {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    overflow: visible;
+  }
+}
+
+.codexAggregateCostMetric {
+  grid-area: cost;
+}
+
+.codexAggregateTokenMetric {
+  grid-area: tokens;
+}
+
+.codexAggregateLabel {
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codexAggregateValue {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+
+  @include mobile {
+    max-width: none;
+    overflow: visible;
+    font-size: 14px;
+    text-overflow: clip;
+  }
+}
+
+.codexAggregateCoverage {
+  grid-area: coverage;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  text-align: left;
+  white-space: nowrap;
+
+  @include mobile {
+    text-align: right;
+  }
+}
+
 .antigravityControls,
 .claudeControls,
 .codexControls,

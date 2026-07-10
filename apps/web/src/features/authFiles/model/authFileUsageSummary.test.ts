@@ -117,8 +117,12 @@ describe('auth file usage summary model', () => {
 
     expect(summary?.codexFiveHourLimitTokens).toBe(20_000);
     expect(summary?.codexFiveHourLimitCost).toBe(1);
+    expect(summary?.codexFiveHourRemainingTokens).toBe(15_000);
+    expect(summary?.codexFiveHourRemainingCost).toBe(0.75);
     expect(summary?.codexWeeklyLimitTokens).toBe(70_000);
     expect(summary?.codexWeeklyLimitCost).toBe(7);
+    expect(summary?.codexWeeklyRemainingTokens).toBe(42_000);
+    expect(summary?.codexWeeklyRemainingCost).toBe(4.2);
   });
 
   it('does not estimate limits when quota percentages are missing or zero', () => {
@@ -169,8 +173,12 @@ describe('auth file usage summary model', () => {
 
     expect(summary?.codexFiveHourLimitTokens).toBeNull();
     expect(summary?.codexFiveHourLimitCost).toBeNull();
+    expect(summary?.codexFiveHourRemainingTokens).toBeNull();
+    expect(summary?.codexFiveHourRemainingCost).toBeNull();
     expect(summary?.codexWeeklyLimitTokens).toBeNull();
     expect(summary?.codexWeeklyLimitCost).toBeNull();
+    expect(summary?.codexWeeklyRemainingTokens).toBeNull();
+    expect(summary?.codexWeeklyRemainingCost).toBeNull();
   });
 
   it('builds a summary map without leaking same-name auth-indexed files', () => {

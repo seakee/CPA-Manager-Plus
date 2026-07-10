@@ -1108,7 +1108,14 @@
     "plan_team": "Team",
     "plan_free": "Free",
     "plan_pro": "Pro 20x",
-    "plan_prolite": "Pro 5x"
+    "plan_prolite": "Pro 5x",
+    "aggregate_title": "預估剩餘總量",
+    "aggregate_five_hour": "5 小時視窗",
+    "aggregate_weekly": "週視窗",
+    "aggregate_value": "剩餘價值",
+    "aggregate_tokens": "剩餘 Token",
+    "aggregate_coverage": "已估算 {{estimated}} / {{total}} 個憑證",
+    "aggregate_loading": "正在估算..."
   },
   "kimi_quota": {
     "title": "Kimi 配額",

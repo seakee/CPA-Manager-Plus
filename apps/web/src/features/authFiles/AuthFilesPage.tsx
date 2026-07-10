@@ -63,9 +63,6 @@ import {
 import {
   monitoringAnalyticsApi,
   usageServiceApi,
-  type MonitoringAnalyticsCredentialStatRow,
-  type MonitoringAnalyticsInclude,
-  type MonitoringAnalyticsResponse,
   type QuotaCooldownInfo,
   type UsageHeaderSnapshot,
 } from '@/services/api/usageService';
@@ -80,6 +77,10 @@ import { useAuthFilesOauth } from '@/features/authFiles/hooks/useAuthFilesOauth'
 import { useAuthFilesPrefixProxyEditor } from '@/features/authFiles/hooks/useAuthFilesPrefixProxyEditor';
 import { useAuthFilesStatusBarCache } from '@/features/authFiles/hooks/useAuthFilesStatusBarCache';
 import { useAntigravitySubscriptions } from '@/features/authFiles/hooks/useAntigravitySubscriptions';
+import {
+  fetchAuthFileUsageRows,
+  type AuthFileUsageRows,
+} from '@/features/authFiles/hooks/useAuthFileUsageAnalytics';
 import {
   BATCH_BAR_BASE_TRANSFORM,
   BATCH_BAR_HIDDEN_TRANSFORM,
@@ -133,13 +134,6 @@ import type { AuthJsonInputType } from '@/features/authFiles/sessionAuthConverte
 import type { AuthFileItem, CodexQuotaState } from '@/types';
 import { useAuthStore, useNotificationStore, useQuotaStore, useThemeStore } from '@/stores';
 import styles from './AuthFilesPage.module.scss';
-
-const AUTH_FILE_USAGE_FIVE_HOUR_MS = 5 * 60 * 60 * 1000;
-const AUTH_FILE_USAGE_WEEKLY_MS = 7 * 24 * 60 * 60 * 1000;
-const AUTH_FILE_USAGE_HISTORY_FROM_MS = 1;
-const AUTH_FILE_USAGE_ANALYTICS_INCLUDE = {
-  credential_stats: true,
-} satisfies MonitoringAnalyticsInclude;
 
 const hasInlineQuotaLayout = (file: AuthFileItem): boolean => {
   if (isRuntimeOnlyAuthFile(file)) return false;
@@ -199,24 +193,14 @@ type QuotaCooldownState = {
   items: Map<string, QuotaCooldownInfo>;
 };
 
-type AuthFileUsageRows = {
-  retained: MonitoringAnalyticsCredentialStatRow[];
-  fiveHour: MonitoringAnalyticsCredentialStatRow[];
-  weekly: MonitoringAnalyticsCredentialStatRow[];
-};
+const getQuotaCooldownContextKey = (managerServiceBase: string, managementKey: string): string =>
+  `${managerServiceBase}\u0000${managementKey}`;
 
 const EMPTY_AUTH_FILE_USAGE_ROWS: AuthFileUsageRows = {
   retained: [],
   fiveHour: [],
   weekly: [],
 };
-
-const getQuotaCooldownContextKey = (managerServiceBase: string, managementKey: string): string =>
-  `${managerServiceBase}\u0000${managementKey}`;
-
-const readCredentialStats = (
-  response: MonitoringAnalyticsResponse
-): MonitoringAnalyticsCredentialStatRow[] => response.credential_stats ?? [];
 
 export function AuthFilesPage() {
   const { t } = useTranslation();
@@ -654,38 +638,13 @@ export function AuthFilesPage() {
     }
 
     const id = ++authFileUsageReqId.current;
-    const nowMs = Date.now();
-    const buildRequest = (fromMs: number) => ({
-      from_ms: fromMs,
-      to_ms: nowMs,
-      now_ms: nowMs,
-      include: AUTH_FILE_USAGE_ANALYTICS_INCLUDE,
-    });
-
     try {
-      const [retained, fiveHour, weekly] = await Promise.all([
-        monitoringAnalyticsApi.getAnalytics(
-          managerServiceBase,
-          managementKey,
-          buildRequest(AUTH_FILE_USAGE_HISTORY_FROM_MS)
-        ),
-        monitoringAnalyticsApi.getAnalytics(
-          managerServiceBase,
-          managementKey,
-          buildRequest(nowMs - AUTH_FILE_USAGE_FIVE_HOUR_MS)
-        ),
-        monitoringAnalyticsApi.getAnalytics(
-          managerServiceBase,
-          managementKey,
-          buildRequest(nowMs - AUTH_FILE_USAGE_WEEKLY_MS)
-        ),
-      ]);
-      if (id !== authFileUsageReqId.current) return;
-      setAuthFileUsageRows({
-        retained: readCredentialStats(retained),
-        fiveHour: readCredentialStats(fiveHour),
-        weekly: readCredentialStats(weekly),
+      const nextRows = await fetchAuthFileUsageRows({
+        managerServiceBase,
+        managementKey,
       });
+      if (id !== authFileUsageReqId.current) return;
+      setAuthFileUsageRows(nextRows);
     } catch {
       if (id === authFileUsageReqId.current) {
         setAuthFileUsageRows(EMPTY_AUTH_FILE_USAGE_ROWS);

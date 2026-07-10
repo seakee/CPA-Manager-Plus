@@ -11,8 +11,12 @@ export type AuthFileUsageSummary = {
   totalTokens: number;
   codexFiveHourLimitTokens: number | null;
   codexFiveHourLimitCost: number | null;
+  codexFiveHourRemainingTokens: number | null;
+  codexFiveHourRemainingCost: number | null;
   codexWeeklyLimitTokens: number | null;
   codexWeeklyLimitCost: number | null;
+  codexWeeklyRemainingTokens: number | null;
+  codexWeeklyRemainingCost: number | null;
 };
 
 export type AuthFileUsageSummaryInput = {
@@ -125,6 +129,14 @@ const estimateCostLimit = (
   return estimate === null ? null : roundCurrency(estimate);
 };
 
+const estimateRemainingTokens = (limit: number | null, used: number): number | null =>
+  limit === null ? null : Math.max(0, Math.round(limit - normalizeFiniteNumber(used)));
+
+const estimateRemainingCost = (limit: number | null, used: number): number | null =>
+  limit === null
+    ? null
+    : roundCurrency(Math.max(0, limit - normalizeFiniteNumber(used)));
+
 export const buildAuthFileUsageSummary = (
   file: AuthFileItem,
   input: AuthFileUsageSummaryInput
@@ -143,20 +155,34 @@ export const buildAuthFileUsageSummary = (
     fiveHour.totalTokens,
     fiveHourQuotaWindow?.usedPercent
   );
+  const fiveHourRemainingTokens = estimateRemainingTokens(
+    fiveHourLimitTokens,
+    fiveHour.totalTokens
+  );
+  const fiveHourRemainingCost = estimateRemainingCost(
+    fiveHourLimitCost,
+    fiveHour.estimatedCost
+  );
   const weeklyLimitTokens = estimateTokenLimit(weekly.totalTokens, weeklyQuotaWindow?.usedPercent);
   const weeklyLimitCost = estimateCostLimit(
     weekly.estimatedCost,
     weekly.totalTokens,
     weeklyQuotaWindow?.usedPercent
   );
+  const weeklyRemainingTokens = estimateRemainingTokens(weeklyLimitTokens, weekly.totalTokens);
+  const weeklyRemainingCost = estimateRemainingCost(weeklyLimitCost, weekly.estimatedCost);
 
   if (
     retained.totalTokens <= 0 &&
     retained.estimatedCost <= 0 &&
     fiveHourLimitTokens === null &&
     fiveHourLimitCost === null &&
+    fiveHourRemainingTokens === null &&
+    fiveHourRemainingCost === null &&
     weeklyLimitTokens === null &&
-    weeklyLimitCost === null
+    weeklyLimitCost === null &&
+    weeklyRemainingTokens === null &&
+    weeklyRemainingCost === null
   ) {
     return undefined;
   }
@@ -166,8 +192,12 @@ export const buildAuthFileUsageSummary = (
     totalTokens: retained.totalTokens,
     codexFiveHourLimitTokens: fiveHourLimitTokens,
     codexFiveHourLimitCost: fiveHourLimitCost,
+    codexFiveHourRemainingTokens: fiveHourRemainingTokens,
+    codexFiveHourRemainingCost: fiveHourRemainingCost,
     codexWeeklyLimitTokens: weeklyLimitTokens,
     codexWeeklyLimitCost: weeklyLimitCost,
+    codexWeeklyRemainingTokens: weeklyRemainingTokens,
+    codexWeeklyRemainingCost: weeklyRemainingCost,
   };
 };
 

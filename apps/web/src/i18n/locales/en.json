@@ -1108,7 +1108,14 @@
     "plan_team": "Team",
     "plan_free": "Free",
     "plan_pro": "Pro 20x",
-    "plan_prolite": "Pro 5x"
+    "plan_prolite": "Pro 5x",
+    "aggregate_title": "Estimated remaining totals",
+    "aggregate_five_hour": "5-hour window",
+    "aggregate_weekly": "Weekly window",
+    "aggregate_value": "Remaining value",
+    "aggregate_tokens": "Remaining tokens",
+    "aggregate_coverage": "{{estimated}} / {{total}} credentials estimated",
+    "aggregate_loading": "Estimating..."
   },
   "kimi_quota": {
     "title": "Kimi Quota",

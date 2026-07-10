@@ -1,4 +1,4 @@
-import { act, useEffect } from 'react';
+import { act, useEffect, type ReactNode } from 'react';
 import { create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthFileItem } from '@/types';
@@ -162,6 +162,7 @@ const renderSection = (
   options: {
     config?: QuotaConfig<TestQuotaState, TestQuotaData>;
     files?: AuthFileItem[];
+    summary?: ReactNode;
   } = {}
 ) => {
   let renderer!: ReactTestRenderer;
@@ -173,6 +174,7 @@ const renderSection = (
         loading={false}
         disabled={false}
         accountDisplayMode="masked"
+        summary={options.summary}
       />
     );
   });
@@ -222,6 +224,18 @@ describe('QuotaSection account display mode', () => {
       [FULL_FILE_NAME]: successQuota,
     };
     (mocks.quotaStoreState.setCodexQuota as ReturnType<typeof vi.fn>).mockClear();
+  });
+
+  it('renders an optional section summary before credential cards', () => {
+    const renderer = renderSection({ summary: <div data-test-summary>aggregate</div> });
+    const summary = renderer.root.findByProps({ 'data-test-summary': true });
+    const grid = renderer.root.findByProps({ className: 'codex-grid' });
+
+    expect(summary.children).toContain('aggregate');
+    expect(summary.parent).toBe(grid.parent);
+    expect(summary.parent!.children.indexOf(summary)).toBeLessThan(
+      summary.parent!.children.indexOf(grid)
+    );
   });
 
   it('uses masked names in single quota refresh notifications', async () => {

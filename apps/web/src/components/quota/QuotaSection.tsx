@@ -2,7 +2,14 @@
  * Generic quota section component.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -130,6 +137,7 @@ interface QuotaSectionProps<TState extends QuotaStatusState, TData> {
   accountDisplayMode?: QuotaAccountDisplayMode;
   onAccountDisplayModeChange?: (mode: QuotaAccountDisplayMode) => void;
   headerSnapshotLookup?: UsageHeaderSnapshotLookup;
+  summary?: ReactNode;
 }
 
 export function QuotaSection<TState extends QuotaStatusState, TData>({
@@ -145,6 +153,7 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
   accountDisplayMode,
   onAccountDisplayModeChange,
   headerSnapshotLookup,
+  summary,
 }: QuotaSectionProps<TState, TData>) {
   const { t } = useTranslation();
   const resolvedTheme: ResolvedTheme = useThemeStore((state) => state.resolvedTheme);
@@ -560,6 +569,7 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
         </div>
       }
     >
+      {filteredFiles.length > 0 && summary}
       {filteredFiles.length === 0 ? (
         <EmptyState
           title={t(`${config.i18nPrefix}.empty_title`)}

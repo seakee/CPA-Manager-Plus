@@ -1108,7 +1108,14 @@
     "plan_team": "Team",
     "plan_free": "Free",
     "plan_pro": "Pro 20x",
-    "plan_prolite": "Pro 5x"
+    "plan_prolite": "Pro 5x",
+    "aggregate_title": "Оценка общего остатка",
+    "aggregate_five_hour": "Окно 5 ч",
+    "aggregate_weekly": "Недельное окно",
+    "aggregate_value": "Остаток стоимости",
+    "aggregate_tokens": "Остаток токенов",
+    "aggregate_coverage": "Оценено {{estimated}} из {{total}} учётных данных",
+    "aggregate_loading": "Выполняется оценка..."
   },
   "kimi_quota": {
     "title": "Квота Kimi",

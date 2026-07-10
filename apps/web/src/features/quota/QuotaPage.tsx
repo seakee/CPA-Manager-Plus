@@ -6,13 +6,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
-import { useAuthStore } from '@/stores';
+import { useAuthStore, useQuotaStore } from '@/stores';
 import { authFilesApi, configFileApi } from '@/services/api';
 import {
   monitoringAnalyticsApi,
   type UsageHeaderSnapshot,
 } from '@/services/api/usageService';
-import { buildUsageHeaderSnapshotLookup } from '@/utils/usageHeaderSnapshots';
 import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
 import { IconSearch } from '@/components/ui/icons';
@@ -22,7 +21,9 @@ import {
   CLAUDE_CONFIG,
   CODEX_CONFIG,
   KIMI_CONFIG,
-  XAI_CONFIG
+  XAI_CONFIG,
+  getScopedQuotaState,
+  resolveQuotaDisplayState,
 } from '@/components/quota';
 import { CodexReauthDialog } from '@/features/oauth/CodexReauthDialog';
 import {
@@ -30,7 +31,18 @@ import {
   type CodexReauthTarget,
 } from '@/features/oauth/codexReauthModel';
 import type { QuotaSortMode } from '@/components/quota/quotaConfigs';
-import type { AuthFileItem } from '@/types';
+import type { AuthFileItem, CodexQuotaState } from '@/types';
+import {
+  buildUsageHeaderSnapshotLookup,
+  getHighConfidenceUsageHeaderSnapshotForAuthFile,
+} from '@/utils/usageHeaderSnapshots';
+import { useAuthFileUsageAnalytics } from '@/features/authFiles/hooks/useAuthFileUsageAnalytics';
+import {
+  buildAuthFileUsageSummaryMap,
+  getAuthFileUsageSummaryKey,
+} from '@/features/authFiles/model/authFileUsageSummary';
+import { CodexQuotaAggregateSummary } from './CodexQuotaAggregateSummary';
+import { buildCodexQuotaAggregateSummary } from './codexQuotaAggregateModel';
 import {
   DEFAULT_QUOTA_ACCOUNT_DISPLAY_MODE,
   readQuotaPageUiState,
@@ -45,8 +57,20 @@ export function QuotaPage() {
   const { t } = useTranslation();
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
   const managementKey = useAuthStore((state) => state.managementKey);
+  const codexQuota = useQuotaStore((state) => state.codexQuota);
   const featureAvailability = usePanelFeatureAvailability();
   const managerServiceBase = featureAvailability.managerServiceBase;
+  const requestMonitoringAvailable = featureAvailability.requestMonitoringAvailable !== false;
+  const {
+    rows: codexUsageRows,
+    loading: codexUsageLoading,
+    load: loadCodexUsageSummaries,
+  } = useAuthFileUsageAnalytics({
+    managerServiceBase,
+    managementKey,
+    enabled: requestMonitoringAvailable,
+    includeRetained: false,
+  });
   const initialUiState = useRef(readQuotaPageUiState());
 
   const [files, setFiles] = useState<AuthFileItem[]>([]);
@@ -114,8 +138,13 @@ export function QuotaPage() {
   }, [managementKey, managerServiceBase]);
 
   const handleHeaderRefresh = useCallback(async () => {
-    await Promise.all([loadConfig(), loadFiles(), loadHeaderSnapshots()]);
-  }, [loadConfig, loadFiles, loadHeaderSnapshots]);
+    await Promise.all([
+      loadConfig(),
+      loadFiles(),
+      loadHeaderSnapshots(),
+      loadCodexUsageSummaries(),
+    ]);
+  }, [loadCodexUsageSummaries, loadConfig, loadFiles, loadHeaderSnapshots]);
 
   useHeaderRefresh(handleHeaderRefresh);
 
@@ -123,11 +152,47 @@ export function QuotaPage() {
     loadFiles();
     loadConfig();
     loadHeaderSnapshots();
-  }, [loadFiles, loadConfig, loadHeaderSnapshots]);
+    loadCodexUsageSummaries();
+  }, [loadFiles, loadConfig, loadHeaderSnapshots, loadCodexUsageSummaries]);
 
   const headerSnapshotLookup = useMemo(
     () => buildUsageHeaderSnapshotLookup(headerSnapshots),
     [headerSnapshots]
+  );
+
+  const codexFiles = useMemo(() => files.filter(CODEX_CONFIG.filterFn), [files]);
+
+  const codexDisplayQuotaByUsageKey = useMemo(() => {
+    const quotaMap = new Map<string, CodexQuotaState | undefined>();
+    codexFiles.forEach((file) => {
+      const activeQuota = getScopedQuotaState(CODEX_CONFIG, codexQuota, file);
+      const observedQuota = CODEX_CONFIG.buildObservedState?.(
+        file,
+        getHighConfidenceUsageHeaderSnapshotForAuthFile(headerSnapshotLookup, file),
+        t
+      );
+      quotaMap.set(
+        getAuthFileUsageSummaryKey(file),
+        resolveQuotaDisplayState(activeQuota, observedQuota)
+      );
+    });
+    return quotaMap;
+  }, [codexFiles, codexQuota, headerSnapshotLookup, t]);
+
+  const codexUsageSummaryByKey = useMemo(
+    () =>
+      buildAuthFileUsageSummaryMap(codexFiles, {
+        retainedRows: [],
+        fiveHourRows: codexUsageRows.fiveHour,
+        weeklyRows: codexUsageRows.weekly,
+        codexQuotaByKey: codexDisplayQuotaByUsageKey,
+      }),
+    [codexDisplayQuotaByUsageKey, codexFiles, codexUsageRows]
+  );
+
+  const codexAggregateSummary = useMemo(
+    () => buildCodexQuotaAggregateSummary(codexFiles, codexUsageSummaryByKey),
+    [codexFiles, codexUsageSummaryByKey]
   );
 
   useEffect(() => {
@@ -218,6 +283,12 @@ export function QuotaPage() {
         accountDisplayMode={getAccountDisplayMode(CODEX_CONFIG.type)}
         onAccountDisplayModeChange={(mode) => setAccountDisplayMode(CODEX_CONFIG.type, mode)}
         headerSnapshotLookup={headerSnapshotLookup}
+        summary={
+          <CodexQuotaAggregateSummary
+            summary={codexAggregateSummary}
+            loading={codexUsageLoading}
+          />
+        }
       />
       <QuotaSection
         config={CLAUDE_CONFIG}
