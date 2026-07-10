@@ -443,6 +443,11 @@ func dashboardMetricsFromHourlyRows(rows []store.DashboardHourlyRollupRow) (stor
 		agg.CachedTokens += row.CachedTokens
 		agg.CacheReadTokens += row.CacheReadTokens
 		agg.CacheCreationTokens += row.CacheCreationTokens
+		agg.LongInputTokens += row.LongInputTokens
+		agg.LongOutputTokens += row.LongOutputTokens
+		agg.LongCachedTokens += row.LongCachedTokens
+		agg.LongCacheReadTokens += row.LongCacheReadTokens
+		agg.LongCacheCreationTokens += row.LongCacheCreationTokens
 		agg.TotalTokens += row.TotalTokens
 		agg.LatencySamples += row.LatencySamples
 		agg.ZeroTokenCalls += row.ZeroTokenCalls
@@ -459,6 +464,7 @@ func dashboardMetricsFromHourlyRows(rows []store.DashboardHourlyRollupRow) (stor
 			CachedTokens:        row.CachedTokens,
 			CacheReadTokens:     row.CacheReadTokens,
 			CacheCreationTokens: row.CacheCreationTokens,
+			LongContextTokens:   row.LongContextTokens,
 			TotalTokens:         row.TotalTokens,
 		})
 		point := timelineByBucket[row.BucketMS]
@@ -494,6 +500,11 @@ func mergeDashboardAggregates(left, right store.Aggregate) store.Aggregate {
 	left.CachedTokens += right.CachedTokens
 	left.CacheReadTokens += right.CacheReadTokens
 	left.CacheCreationTokens += right.CacheCreationTokens
+	left.LongInputTokens += right.LongInputTokens
+	left.LongOutputTokens += right.LongOutputTokens
+	left.LongCachedTokens += right.LongCachedTokens
+	left.LongCacheReadTokens += right.LongCacheReadTokens
+	left.LongCacheCreationTokens += right.LongCacheCreationTokens
 	left.TotalTokens += right.TotalTokens
 	left.LatencySamples += right.LatencySamples
 	left.ZeroTokenCalls += right.ZeroTokenCalls
@@ -529,6 +540,11 @@ func mergeDashboardModelStats(left, right []store.ModelStat) []store.ModelStat {
 		entry.CachedTokens += stat.CachedTokens
 		entry.CacheReadTokens += stat.CacheReadTokens
 		entry.CacheCreationTokens += stat.CacheCreationTokens
+		entry.LongInputTokens += stat.LongInputTokens
+		entry.LongOutputTokens += stat.LongOutputTokens
+		entry.LongCachedTokens += stat.LongCachedTokens
+		entry.LongCacheReadTokens += stat.LongCacheReadTokens
+		entry.LongCacheCreationTokens += stat.LongCacheCreationTokens
 		entry.TotalTokens += stat.TotalTokens
 	}
 	result := make([]store.ModelStat, 0, len(order))
@@ -991,21 +1007,31 @@ func aggregateModelStats(stats []store.ModelStat, prices map[string]store.ModelP
 
 func costForStat(stat store.ModelStat, prices map[string]store.ModelPrice) float64 {
 	return pricing.CostForModelCandidatesWithServiceTier([]string{stat.BillingModel, stat.Model}, stat.ServiceTier, pricing.ModelTokens{
-		InputTokens:         stat.InputTokens,
-		OutputTokens:        stat.OutputTokens,
-		CachedTokens:        stat.CachedTokens,
-		CacheReadTokens:     stat.CacheReadTokens,
-		CacheCreationTokens: stat.CacheCreationTokens,
+		InputTokens:             stat.InputTokens,
+		OutputTokens:            stat.OutputTokens,
+		CachedTokens:            stat.CachedTokens,
+		CacheReadTokens:         stat.CacheReadTokens,
+		CacheCreationTokens:     stat.CacheCreationTokens,
+		LongInputTokens:         stat.LongInputTokens,
+		LongOutputTokens:        stat.LongOutputTokens,
+		LongCachedTokens:        stat.LongCachedTokens,
+		LongCacheReadTokens:     stat.LongCacheReadTokens,
+		LongCacheCreationTokens: stat.LongCacheCreationTokens,
 	}, prices)
 }
 
 func costForChannelStat(stat store.ChannelModelStat, prices map[string]store.ModelPrice) float64 {
 	return pricing.CostForModelCandidatesWithServiceTier([]string{stat.BillingModel, stat.Model}, stat.ServiceTier, pricing.ModelTokens{
-		InputTokens:         stat.InputTokens,
-		OutputTokens:        stat.OutputTokens,
-		CachedTokens:        stat.CachedTokens,
-		CacheReadTokens:     stat.CacheReadTokens,
-		CacheCreationTokens: stat.CacheCreationTokens,
+		InputTokens:             stat.InputTokens,
+		OutputTokens:            stat.OutputTokens,
+		CachedTokens:            stat.CachedTokens,
+		CacheReadTokens:         stat.CacheReadTokens,
+		CacheCreationTokens:     stat.CacheCreationTokens,
+		LongInputTokens:         stat.LongInputTokens,
+		LongOutputTokens:        stat.LongOutputTokens,
+		LongCachedTokens:        stat.LongCachedTokens,
+		LongCacheReadTokens:     stat.LongCacheReadTokens,
+		LongCacheCreationTokens: stat.LongCacheCreationTokens,
 	}, prices)
 }
 

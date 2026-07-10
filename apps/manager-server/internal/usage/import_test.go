@@ -411,6 +411,25 @@ func TestNormalizeRawReadsAnthropicCacheUsageFieldsAtTopLevel(t *testing.T) {
 	}
 }
 
+func TestNormalizeRawReadsCacheWriteTokenAliases(t *testing.T) {
+	payload := `{
+	  "timestamp": "2026-07-10T00:00:00Z",
+	  "model": "gpt-5.6-sol",
+	  "tokens": {
+	    "input_tokens": 100,
+	    "cache_write_tokens": 17
+	  }
+	}`
+
+	event, err := NormalizeRaw([]byte(payload))
+	if err != nil {
+		t.Fatalf("normalize raw: %v", err)
+	}
+	if event.CacheCreationTokens != 17 {
+		t.Fatalf("cache creation tokens = %d, want 17", event.CacheCreationTokens)
+	}
+}
+
 func TestCompatibleCachedTokensDoesNotDoubleCountFineGrainedCache(t *testing.T) {
 	if got := CompatibleCachedTokens(5, 0, 4, 1); got != 0 {
 		t.Fatalf("fully mirrored cached tokens = %d, want 0", got)

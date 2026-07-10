@@ -376,7 +376,7 @@ describe('calculateCost model price preference', () => {
     expect(cost).toBeCloseTo(50);
   });
 
-  it('applies the tier multiplier to the requested price fallback', () => {
+  it('keeps resolved model tier behavior when using a requested price fallback', () => {
     const cost = calculateCost(
       {
         tokens: { input_tokens: 1_000_000, output_tokens: 0 },
@@ -387,7 +387,7 @@ describe('calculateCost model price preference', () => {
       prices
     );
 
-    expect(cost).toBeCloseTo(100);
+    expect(cost).toBeCloseTo(50);
   });
 
   it('charges cached input tokens only at the cache price', () => {
@@ -488,6 +488,155 @@ describe('calculateCost model price preference', () => {
     ).toBeCloseTo(2.5);
   });
 
+  it('uses official gpt-5.6 prices when the current price book has no entry', () => {
+    const cost = calculateCost(
+      {
+        tokens: {
+          input_tokens: 200_000,
+          output_tokens: 20_000,
+          cached_tokens: 20_000,
+          cache_read_tokens: 40_000,
+          cache_creation_tokens: 20_000,
+        },
+        __modelName: 'openai/gpt-5.6-sol',
+      },
+      {}
+    );
+
+    expect(cost).toBeCloseTo(1.355);
+  });
+
+  it('prefers configured gpt-5.6 base prices over the official fallback', () => {
+    const cost = calculateCost(
+      {
+        tokens: { input_tokens: 100_000 },
+        __modelName: 'gpt-5.6-sol',
+      },
+      {
+        'gpt-5.6-sol': { prompt: 9, completion: 18, cache: 0 },
+      }
+    );
+
+    expect(cost).toBeCloseTo(0.9);
+  });
+
+  it('applies gpt-5.6 long-context multipliers above 272K', () => {
+    const cost = calculateCost(
+      {
+        tokens: {
+          input_tokens: 1_000_000,
+          output_tokens: 100_000,
+          cache_read_tokens: 200_000,
+          cache_creation_tokens: 100_000,
+        },
+        __modelName: 'gpt-5.6-sol',
+      },
+      {}
+    );
+
+    expect(cost).toBeCloseTo(12.95);
+  });
+
+  it('keeps exactly 272K of gpt-5.6 input at standard rates', () => {
+    const cost = calculateCost(
+      {
+        tokens: { input_tokens: 272_000, output_tokens: 100_000 },
+        __modelName: 'gpt-5.6-luna',
+      },
+      {}
+    );
+
+    expect(cost).toBeCloseTo(0.872);
+  });
+
+  it('uses resolved gpt-5.6 behavior with a configured alias price', () => {
+    const cost = calculateCost(
+      {
+        tokens: {
+          input_tokens: 200_000,
+          cache_read_tokens: 40_000,
+          cache_creation_tokens: 20_000,
+        },
+        __modelName: 'internal-fast',
+        __resolvedModel: 'openai/gpt-5.6-luna',
+      },
+      {
+        'internal-fast': { prompt: 2, completion: 4, cache: 0 },
+      }
+    );
+
+    expect(cost).toBeCloseTo(0.338);
+  });
+
+  it('ignores the legacy cache price when gpt-5.6 cache-read pricing is missing', () => {
+    const cost = calculateCost(
+      {
+        tokens: {
+          input_tokens: 200_000,
+          cache_read_tokens: 40_000,
+          cache_creation_tokens: 20_000,
+        },
+        __modelName: 'gpt-5.6-terra',
+      },
+      {
+        'gpt-5.6-terra': {
+          prompt: 10,
+          completion: 20,
+          cache: 10,
+          promptConfigured: true,
+          completionConfigured: true,
+        },
+      }
+    );
+
+    expect(cost).toBeCloseTo(1.69);
+  });
+
+  it('respects explicitly configured zero prices for gpt-5.6', () => {
+    const cost = calculateCost(
+      {
+        tokens: {
+          input_tokens: 1_000_000,
+          output_tokens: 100_000,
+          cache_read_tokens: 200_000,
+          cache_creation_tokens: 100_000,
+        },
+        __modelName: 'gpt-5.6-sol',
+      },
+      {
+        'gpt-5.6-sol': {
+          prompt: 0,
+          completion: 0,
+          cache: 0,
+          cacheRead: 0,
+          cacheCreation: 0,
+          promptConfigured: true,
+          completionConfigured: true,
+          cacheReadConfigured: true,
+          cacheCreationConfigured: true,
+        },
+      }
+    );
+
+    expect(cost).toBe(0);
+  });
+
+  it('keeps resolved non-gpt behavior when the requested alias is gpt-5.6', () => {
+    const cost = calculateCost(
+      {
+        tokens: { input_tokens: 1_000_000 },
+        __modelName: 'gpt-5.6-sol',
+        __resolvedModel: 'resolved-other',
+        service_tier: 'priority',
+      },
+      {
+        'resolved-other': { prompt: 2, completion: 4, cache: 0 },
+      }
+    );
+
+    expect(cost).toBeCloseTo(2);
+  });
+
   it('does not guess priority multiplier for unknown models', () => {
     const cost = calculateCost(
       {
@@ -507,6 +656,7 @@ describe('calculateCost model price preference', () => {
 describe('getServiceTierMultiplier', () => {
   it('matches backend priority tier rules', () => {
     expect(getServiceTierMultiplier('gpt-5.4', 'default')).toBe(1);
+    expect(getServiceTierMultiplier('openai/gpt-5.6-sol', 'priority')).toBe(2);
     expect(getServiceTierMultiplier('gpt-5.4', 'priority')).toBe(2);
     expect(getServiceTierMultiplier('gpt-5.4', 'fast')).toBe(2);
     expect(getServiceTierMultiplier('gpt-5.4-mini', 'priority')).toBe(2);

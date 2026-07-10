@@ -1440,6 +1440,7 @@
     "candidate_confirmed": "价格已确认",
     "add_manual": "手动添加",
     "unmatched_title": "未匹配模型",
+    "optional_price_placeholder": "留空时自动计算",
     "empty": "没有符合条件的模型价格"
   },
   "usage_stats": {
@@ -1516,6 +1517,8 @@
     "model_price_prompt": "提示价格",
     "model_price_completion": "补全价格",
     "model_price_cache": "缓存价格",
+    "model_price_cache_read": "缓存读取价格",
+    "model_price_cache_creation": "缓存创建价格",
     "model_price_save": "保存价格",
     "model_price_empty": "暂未设置任何模型价格",
     "model_price_model": "模型",

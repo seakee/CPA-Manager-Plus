@@ -118,12 +118,40 @@ describe('modelPricesPageModel', () => {
         prompt: '1',
         completion: '2',
         cache: '',
+        cacheRead: '',
+        cacheCreation: '',
       })
     ).toMatchObject({
       prompt: 1,
       completion: 2,
       cache: 1,
+      promptConfigured: true,
+      completionConfigured: true,
+      cacheReadConfigured: false,
+      cacheCreationConfigured: false,
       source: 'manual',
+    });
+  });
+
+  it('distinguishes blank cache prices from explicitly configured zero prices', () => {
+    expect(
+      buildPriceFromDraft({
+        model: 'gpt-5.6-sol',
+        prompt: '0',
+        completion: '0',
+        cache: '',
+        cacheRead: '0',
+        cacheCreation: '0',
+      })
+    ).toMatchObject({
+      prompt: 0,
+      completion: 0,
+      cacheRead: 0,
+      cacheCreation: 0,
+      promptConfigured: true,
+      completionConfigured: true,
+      cacheReadConfigured: true,
+      cacheCreationConfigured: true,
     });
   });
 });

@@ -81,6 +81,8 @@ func TestServiceTierMultiplier(t *testing.T) {
 		want        float64
 	}{
 		{name: "gpt-5.4 default", model: "gpt-5.4", serviceTier: "default", want: 1},
+		{name: "gpt-5.6 priority", model: "gpt-5.6-sol", serviceTier: "priority", want: 2},
+		{name: "namespaced gpt-5.6 fast", model: "openai/gpt-5.6-terra", serviceTier: "fast", want: 2},
 		{name: "gpt-5.4 priority", model: "gpt-5.4", serviceTier: "priority", want: 2},
 		{name: "gpt-5.4 fast", model: "gpt-5.4", serviceTier: "fast", want: 2},
 		{name: "gpt-5.4 mini priority", model: "gpt-5.4-mini", serviceTier: "priority", want: 2},
@@ -97,6 +99,129 @@ func TestServiceTierMultiplier(t *testing.T) {
 				t.Fatalf("ServiceTierMultiplier(%q, %q) = %v, want %v", tt.model, tt.serviceTier, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCostForGPT56UsesOfficialFallbackPrice(t *testing.T) {
+	cost := CostForModel("openai/gpt-5.6-sol", ModelTokens{
+		InputTokens:         1_000_000,
+		OutputTokens:        100_000,
+		CachedTokens:        100_000,
+		CacheReadTokens:     200_000,
+		CacheCreationTokens: 100_000,
+	}, nil)
+
+	if math.Abs(cost-6.775) > 0.000001 {
+		t.Fatalf("fallback cost = %v, want 6.775", cost)
+	}
+}
+
+func TestCostForGPT56PrefersConfiguredBasePrice(t *testing.T) {
+	prices := map[string]model.ModelPrice{
+		"gpt-5.6-sol": {Prompt: 9, Completion: 18},
+	}
+
+	cost := CostForModel("gpt-5.6-sol", ModelTokens{InputTokens: 1_000_000}, prices)
+	if math.Abs(cost-9) > 0.000001 {
+		t.Fatalf("configured cost = %v, want 9", cost)
+	}
+}
+
+func TestCostForGPT56AppliesLongContextMultipliers(t *testing.T) {
+	tokens := ModelTokens{
+		InputTokens:             1_000_000,
+		OutputTokens:            100_000,
+		CacheReadTokens:         200_000,
+		CacheCreationTokens:     100_000,
+		LongInputTokens:         1_000_000,
+		LongOutputTokens:        100_000,
+		LongCacheReadTokens:     200_000,
+		LongCacheCreationTokens: 100_000,
+	}
+
+	cost := CostForModel("gpt-5.6-sol", tokens, nil)
+	if math.Abs(cost-12.95) > 0.000001 {
+		t.Fatalf("long-context cost = %v, want 12.95", cost)
+	}
+}
+
+func TestCostForGPT56KeepsExactly272KAtStandardRates(t *testing.T) {
+	cost := CostForModel("gpt-5.6-luna", ModelTokens{
+		InputTokens:  272_000,
+		OutputTokens: 100_000,
+	}, nil)
+
+	if math.Abs(cost-0.872) > 0.000001 {
+		t.Fatalf("272K cost = %v, want 0.872", cost)
+	}
+}
+
+func TestCostForGPT56UsesPromptRatiosWhenCachePricesAreMissing(t *testing.T) {
+	prices := map[string]model.ModelPrice{
+		"gpt-5.6-terra": {Prompt: 10, Completion: 20, Cache: 10},
+	}
+	cost := CostForModelWithServiceTier("gpt-5.6-terra", "priority", ModelTokens{
+		InputTokens:         1_000_000,
+		CacheReadTokens:     200_000,
+		CacheCreationTokens: 100_000,
+	}, prices)
+
+	if math.Abs(cost-16.9) > 0.000001 {
+		t.Fatalf("priority fallback-ratio cost = %v, want 16.9", cost)
+	}
+}
+
+func TestCostForGPT56RespectsExplicitZeroPrices(t *testing.T) {
+	prices := map[string]model.ModelPrice{
+		"gpt-5.6-sol": {
+			PromptConfigured: true, CompletionConfigured: true, CacheReadConfigured: true, CacheCreationConfigured: true,
+		},
+	}
+	cost := CostForModel("gpt-5.6-sol", ModelTokens{
+		InputTokens:         1_000_000,
+		OutputTokens:        100_000,
+		CacheReadTokens:     200_000,
+		CacheCreationTokens: 100_000,
+	}, prices)
+
+	if cost != 0 {
+		t.Fatalf("explicit-zero cost = %v, want 0", cost)
+	}
+}
+
+func TestCostForGPT56AliasPriceUsesResolvedModelBehavior(t *testing.T) {
+	prices := map[string]model.ModelPrice{
+		"internal-fast": {Prompt: 2, Completion: 4},
+	}
+	cost := CostForModelCandidatesWithServiceTier(
+		[]string{"openai/gpt-5.6-luna", "internal-fast"},
+		"default",
+		ModelTokens{
+			InputTokens:         1_000_000,
+			CacheReadTokens:     200_000,
+			CacheCreationTokens: 100_000,
+		},
+		prices,
+	)
+
+	if math.Abs(cost-1.69) > 0.000001 {
+		t.Fatalf("alias cost = %v, want 1.69", cost)
+	}
+}
+
+func TestCostForModelCandidatesKeepsResolvedNonGPTBehavior(t *testing.T) {
+	prices := map[string]model.ModelPrice{
+		"resolved-other": {Prompt: 2, Completion: 4},
+	}
+	cost := CostForModelCandidatesWithServiceTier(
+		[]string{"resolved-other", "gpt-5.6-sol"},
+		"priority",
+		ModelTokens{InputTokens: 1_000_000, LongInputTokens: 1_000_000},
+		prices,
+	)
+
+	if math.Abs(cost-2) > 0.000001 {
+		t.Fatalf("resolved non-GPT cost = %v, want 2", cost)
 	}
 }
 
@@ -129,8 +254,8 @@ func TestCostForModelCandidatesWithServiceTierFallsBackToRequestedModel(t *testi
 		prices,
 	)
 
-	if math.Abs(cost-5) > 0.000001 {
-		t.Fatalf("fallback cost = %v, want 5", cost)
+	if math.Abs(cost-2.5) > 0.000001 {
+		t.Fatalf("fallback cost = %v, want 2.5", cost)
 	}
 }
 

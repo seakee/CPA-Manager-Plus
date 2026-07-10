@@ -79,6 +79,28 @@ type Tokens struct {
 	TotalTokens         int64 `json:"total_tokens"`
 }
 
+// LongContextTokens preserves the portions of token aggregates that came from
+// requests over a model-specific context threshold. It stays internal to
+// aggregation and pricing so public usage payloads remain backward compatible.
+type LongContextTokens struct {
+	LongInputTokens         int64
+	LongOutputTokens        int64
+	LongCachedTokens        int64
+	LongCacheReadTokens     int64
+	LongCacheCreationTokens int64
+}
+
+func (tokens *LongContextTokens) AddIfLongContext(input, output, cached, cacheRead, cacheCreation int64) {
+	if tokens == nil || !IsLongContextInput(input) {
+		return
+	}
+	tokens.LongInputTokens += input
+	tokens.LongOutputTokens += output
+	tokens.LongCachedTokens += cached
+	tokens.LongCacheReadTokens += cacheRead
+	tokens.LongCacheCreationTokens += cacheCreation
+}
+
 type Detail struct {
 	Timestamp             string                  `json:"timestamp"`
 	Source                string                  `json:"source"`
@@ -119,7 +141,14 @@ type Payload struct {
 	APIs          map[string]*APIAggregate `json:"apis"`
 }
 
-const maxFailSummaryBytes = 4096
+const (
+	maxFailSummaryBytes            = 4096
+	LongContextInputTokenThreshold = int64(272_000)
+)
+
+func IsLongContextInput(inputTokens int64) bool {
+	return inputTokens > LongContextInputTokenThreshold
+}
 
 var (
 	endpointPattern          = regexp.MustCompile(`^(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s+(\S+)`)
@@ -409,6 +438,8 @@ func readTokenFields(record map[string]any) (int64, int64, int64, int64, int64, 
 		"cacheCreationTokens",
 		"cache_creation_input_tokens",
 		"cacheCreationInputTokens",
+		"cache_write_tokens",
+		"cacheWriteTokens",
 		"cache_write_input_tokens",
 		"cacheWriteInputTokens",
 	)
@@ -418,6 +449,8 @@ func readTokenFields(record map[string]any) (int64, int64, int64, int64, int64, 
 			"cacheCreationTokens",
 			"cache_creation_input_tokens",
 			"cacheCreationInputTokens",
+			"cache_write_tokens",
+			"cacheWriteTokens",
 			"cache_write_input_tokens",
 			"cacheWriteInputTokens",
 		)

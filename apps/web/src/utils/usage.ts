@@ -11,6 +11,10 @@ export interface ModelPrice {
   cache: number;
   cacheRead?: number;
   cacheCreation?: number;
+  promptConfigured?: boolean;
+  completionConfigured?: boolean;
+  cacheReadConfigured?: boolean;
+  cacheCreationConfigured?: boolean;
   source?: string;
   sourceModelId?: string;
   rawJson?: string;
@@ -30,6 +34,8 @@ export interface UsageTokens {
   cache_creation_tokens?: number;
   cache_creation_input_tokens?: number;
   cacheCreationInputTokens?: number;
+  cache_write_tokens?: number;
+  cacheWriteTokens?: number;
   cache_write_input_tokens?: number;
   cacheWriteInputTokens?: number;
   total_tokens?: number;
@@ -196,6 +202,8 @@ const CACHE_CREATION_TOKEN_KEYS = [
   'cacheCreationTokens',
   'cache_creation_input_tokens',
   'cacheCreationInputTokens',
+  'cache_write_tokens',
+  'cacheWriteTokens',
   'cache_write_input_tokens',
   'cacheWriteInputTokens',
 ] as const;
@@ -238,8 +246,68 @@ const readDetailString = (value: unknown): string | undefined => {
 const readResponseHeaderMetadata = (value: unknown): UsageResponseHeaderMetadata | undefined =>
   isRecord(value) ? (value as UsageResponseHeaderMetadata) : undefined;
 
-const isModelFamily = (modelName: string, family: string): boolean =>
-  modelName === family || modelName.startsWith(`${family}-`);
+const normalizedModelSlug = (modelName: string): string => {
+  const normalized = String(modelName ?? '')
+    .trim()
+    .toLowerCase();
+  const separator = normalized.lastIndexOf('/');
+  return separator >= 0 ? normalized.slice(separator + 1) : normalized;
+};
+
+const isModelFamily = (modelName: string, family: string): boolean => {
+  const slug = normalizedModelSlug(modelName);
+  return slug === family || slug.startsWith(`${family}-`);
+};
+
+const isGpt56Model = (modelName: string): boolean => isModelFamily(modelName, 'gpt-5.6');
+
+const isConfiguredPriceValue = (value: unknown, configured?: boolean): boolean => {
+  const parsed = Number(value);
+  return configured === true || (Number.isFinite(parsed) && parsed > 0);
+};
+
+const getOfficialGpt56Price = (modelName: string): ModelPrice | undefined => {
+  if (isModelFamily(modelName, 'gpt-5.6-sol')) {
+    return {
+      prompt: 5,
+      completion: 30,
+      cache: 0.5,
+      cacheRead: 0.5,
+      cacheCreation: 6.25,
+      promptConfigured: true,
+      completionConfigured: true,
+      cacheReadConfigured: true,
+      cacheCreationConfigured: true,
+    };
+  }
+  if (isModelFamily(modelName, 'gpt-5.6-terra')) {
+    return {
+      prompt: 2.5,
+      completion: 15,
+      cache: 0.25,
+      cacheRead: 0.25,
+      cacheCreation: 3.125,
+      promptConfigured: true,
+      completionConfigured: true,
+      cacheReadConfigured: true,
+      cacheCreationConfigured: true,
+    };
+  }
+  if (isModelFamily(modelName, 'gpt-5.6-luna')) {
+    return {
+      prompt: 1,
+      completion: 6,
+      cache: 0.1,
+      cacheRead: 0.1,
+      cacheCreation: 1.25,
+      promptConfigured: true,
+      completionConfigured: true,
+      cacheReadConfigured: true,
+      cacheCreationConfigured: true,
+    };
+  }
+  return undefined;
+};
 
 export function getServiceTierMultiplier(modelName: string, serviceTier?: string): number {
   const tier = String(serviceTier ?? '')
@@ -253,6 +321,7 @@ export function getServiceTierMultiplier(modelName: string, serviceTier?: string
   // OpenAI Priority pricing currently publishes tier multipliers for these
   // model families. Keep this as a compatibility layer until model prices can
   // be represented per tier, such as standard, priority, flex, and batch.
+  if (isModelFamily(normalizedModel, 'gpt-5.6')) return 2;
   if (isModelFamily(normalizedModel, 'gpt-5.5')) return 2.5;
   if (isModelFamily(normalizedModel, 'gpt-5.4-mini')) return 2;
   if (isModelFamily(normalizedModel, 'gpt-5.4')) return 2;
@@ -736,8 +805,28 @@ export function calculateCost(
   const requestedModel = detail.__modelName || '';
   const resolvedPrice = resolvedModel ? modelPrices[resolvedModel] : undefined;
   const requestedPrice = requestedModel ? modelPrices[requestedModel] : undefined;
-  const price = resolvedPrice || requestedPrice;
-  const pricedModel = resolvedPrice ? resolvedModel : requestedPrice ? requestedModel : '';
+  const behaviorModel = resolvedModel || requestedModel;
+  const behaviorFallback = getOfficialGpt56Price(behaviorModel);
+  const officialCandidatePrice =
+    getOfficialGpt56Price(resolvedModel) || getOfficialGpt56Price(requestedModel);
+  const configuredPrice = resolvedPrice || requestedPrice;
+  const price = configuredPrice
+    ? {
+        ...configuredPrice,
+        prompt: isConfiguredPriceValue(
+          configuredPrice.prompt,
+          configuredPrice.promptConfigured
+        )
+          ? Number(configuredPrice.prompt)
+          : (behaviorFallback?.prompt ?? 0),
+        completion: isConfiguredPriceValue(
+          configuredPrice.completion,
+          configuredPrice.completionConfigured
+        )
+          ? Number(configuredPrice.completion)
+          : (behaviorFallback?.completion ?? 0),
+      }
+    : officialCandidatePrice;
   if (!price) return 0;
 
   const inputTokens = Math.max(toFiniteNumber(detail.tokens.input_tokens), 0);
@@ -751,7 +840,33 @@ export function calculateCost(
   const promptPrice = Number(price.prompt) || 0;
   const completionPrice = Number(price.completion) || 0;
   let standardCost = 0;
-  if (cacheReadTokens > 0 || cacheCreationTokens > 0) {
+  if (isGpt56Model(behaviorModel)) {
+    const configuredCacheReadPrice = Number(price.cacheRead) || 0;
+    const cacheReadPrice = isConfiguredPriceValue(
+      configuredCacheReadPrice,
+      price.cacheReadConfigured
+    )
+      ? configuredCacheReadPrice
+      : promptPrice * 0.1;
+    const configuredCacheCreationPrice = Number(price.cacheCreation) || 0;
+    const cacheCreationPrice = isConfiguredPriceValue(
+      configuredCacheCreationPrice,
+      price.cacheCreationConfigured
+    )
+      ? configuredCacheCreationPrice
+      : promptPrice * 1.25;
+    const readTokens = cachedTokens + cacheReadTokens;
+    const promptTokens = Math.max(inputTokens - readTokens - cacheCreationTokens, 0);
+    const longContext = inputTokens > 272_000;
+    const inputMultiplier = longContext ? 2 : 1;
+    const outputMultiplier = longContext ? 1.5 : 1;
+    standardCost =
+      ((promptTokens / TOKENS_PER_PRICE_UNIT) * promptPrice +
+        (readTokens / TOKENS_PER_PRICE_UNIT) * cacheReadPrice +
+        (cacheCreationTokens / TOKENS_PER_PRICE_UNIT) * cacheCreationPrice) *
+        inputMultiplier +
+      (completionTokens / TOKENS_PER_PRICE_UNIT) * completionPrice * outputMultiplier;
+  } else if (cacheReadTokens > 0 || cacheCreationTokens > 0) {
     const cacheReadPrice = Number(price.cacheRead) || Number(price.cache) || 0;
     const cacheCreationPrice = Number(price.cacheCreation) || promptPrice;
     const promptTokens = Math.max(inputTokens - cachedTokens, 0);
@@ -770,7 +885,7 @@ export function calculateCost(
   }
 
   const serviceTier = detail.service_tier ?? detail.serviceTier;
-  const multiplier = getServiceTierMultiplier(pricedModel, serviceTier);
+  const multiplier = getServiceTierMultiplier(behaviorModel, serviceTier);
   const total = standardCost * multiplier;
   return Number.isFinite(total) && total > 0 ? total : 0;
 }

@@ -12,6 +12,7 @@ import (
 const dashboardHourMS int64 = 60 * 60 * 1000
 
 type DashboardHourlyRow struct {
+	usage.LongContextTokens
 	BucketMS            int64
 	Model               string
 	BillingModel        string
@@ -135,6 +136,11 @@ func (r *repository) DashboardHourlyRows(ctx context.Context, fromMS, toMS int64
 	cached_tokens,
 	cache_read_tokens,
 	cache_creation_tokens,
+	long_input_tokens,
+	long_output_tokens,
+	long_cached_tokens,
+	long_cache_read_tokens,
+	long_cache_creation_tokens,
 	total_tokens,
 	latency_sum_ms,
 	latency_samples,
@@ -165,6 +171,11 @@ order by bucket_ms, model, billing_model, service_tier`, fromMS, toMS)
 			&row.CachedTokens,
 			&row.CacheReadTokens,
 			&row.CacheCreationTokens,
+			&row.LongInputTokens,
+			&row.LongOutputTokens,
+			&row.LongCachedTokens,
+			&row.LongCacheReadTokens,
+			&row.LongCacheCreationTokens,
 			&row.TotalTokens,
 			&row.LatencySumMS,
 			&row.LatencySamples,
@@ -282,6 +293,7 @@ func aggregateDashboardHourly(events []dashboardEventRow, nowMS int64) []Dashboa
 		row.CachedTokens += event.CachedTokens
 		row.CacheReadTokens += event.CacheReadTokens
 		row.CacheCreationTokens += event.CacheCreationTokens
+		row.AddIfLongContext(event.InputTokens, event.OutputTokens, event.CachedTokens, event.CacheReadTokens, event.CacheCreationTokens)
 		row.TotalTokens += event.TotalTokens
 		if event.LatencyMS.Valid && event.LatencyMS.Int64 != 0 {
 			row.LatencySumMS += event.LatencyMS.Int64
@@ -314,12 +326,17 @@ func upsertDashboardHourlyRows(ctx context.Context, tx *sql.Tx, rows []Dashboard
 	cached_tokens,
 	cache_read_tokens,
 	cache_creation_tokens,
+	long_input_tokens,
+	long_output_tokens,
+	long_cached_tokens,
+	long_cache_read_tokens,
+	long_cache_creation_tokens,
 	total_tokens,
 	latency_sum_ms,
 	latency_samples,
 	zero_token_calls,
 	updated_at_ms
-) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 on conflict(bucket_ms, model, billing_model, service_tier) do update set
 	calls = usage_dashboard_hourly_rollups.calls + excluded.calls,
 	success_calls = usage_dashboard_hourly_rollups.success_calls + excluded.success_calls,
@@ -330,6 +347,11 @@ on conflict(bucket_ms, model, billing_model, service_tier) do update set
 	cached_tokens = usage_dashboard_hourly_rollups.cached_tokens + excluded.cached_tokens,
 	cache_read_tokens = usage_dashboard_hourly_rollups.cache_read_tokens + excluded.cache_read_tokens,
 	cache_creation_tokens = usage_dashboard_hourly_rollups.cache_creation_tokens + excluded.cache_creation_tokens,
+	long_input_tokens = usage_dashboard_hourly_rollups.long_input_tokens + excluded.long_input_tokens,
+	long_output_tokens = usage_dashboard_hourly_rollups.long_output_tokens + excluded.long_output_tokens,
+	long_cached_tokens = usage_dashboard_hourly_rollups.long_cached_tokens + excluded.long_cached_tokens,
+	long_cache_read_tokens = usage_dashboard_hourly_rollups.long_cache_read_tokens + excluded.long_cache_read_tokens,
+	long_cache_creation_tokens = usage_dashboard_hourly_rollups.long_cache_creation_tokens + excluded.long_cache_creation_tokens,
 	total_tokens = usage_dashboard_hourly_rollups.total_tokens + excluded.total_tokens,
 	latency_sum_ms = usage_dashboard_hourly_rollups.latency_sum_ms + excluded.latency_sum_ms,
 	latency_samples = usage_dashboard_hourly_rollups.latency_samples + excluded.latency_samples,
@@ -356,6 +378,11 @@ on conflict(bucket_ms, model, billing_model, service_tier) do update set
 			row.CachedTokens,
 			row.CacheReadTokens,
 			row.CacheCreationTokens,
+			row.LongInputTokens,
+			row.LongOutputTokens,
+			row.LongCachedTokens,
+			row.LongCacheReadTokens,
+			row.LongCacheCreationTokens,
 			row.TotalTokens,
 			row.LatencySumMS,
 			row.LatencySamples,

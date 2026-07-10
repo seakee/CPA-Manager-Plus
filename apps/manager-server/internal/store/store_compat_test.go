@@ -353,8 +353,11 @@ func TestStoreCompatModelPricesAndAPIKeyAliases(t *testing.T) {
 	})
 
 	err = db.SaveModelPrices(context.Background(), map[string]ModelPrice{
-		"gpt-a": {Prompt: 1, Completion: 2, Cache: 0.5, CacheRead: 0.25, CacheCreation: 1.5},
-		"gpt-b": {Prompt: 3, Completion: 4, Cache: 0},
+		"gpt-a": {
+			Prompt: 1, Completion: 2, Cache: 0.5, CacheRead: 0.25, CacheCreation: 1.5,
+			PromptConfigured: true, CompletionConfigured: true, CacheReadConfigured: true, CacheCreationConfigured: true,
+		},
+		"gpt-b": {Prompt: 0, Completion: 0, Cache: 0, PromptConfigured: true, CompletionConfigured: true},
 	})
 	if err != nil {
 		t.Fatalf("save model prices: %v", err)
@@ -364,13 +367,19 @@ func TestStoreCompatModelPricesAndAPIKeyAliases(t *testing.T) {
 		t.Fatalf("load model prices: %v", err)
 	}
 	if len(prices) != 2 || prices["gpt-a"].Prompt != 1 || prices["gpt-a"].CacheRead != 0.25 ||
-		prices["gpt-a"].CacheCreation != 1.5 || prices["gpt-b"].Completion != 4 {
+		prices["gpt-a"].CacheCreation != 1.5 || !prices["gpt-a"].CacheReadConfigured ||
+		!prices["gpt-a"].CacheCreationConfigured || prices["gpt-b"].Completion != 0 ||
+		!prices["gpt-b"].PromptConfigured || !prices["gpt-b"].CompletionConfigured {
 		t.Fatalf("prices = %#v", prices)
 	}
 
 	result, err := db.UpsertSyncedModelPrices(context.Background(), map[string]ModelPrice{
-		"gpt-a": {Prompt: 5, Completion: 6, Cache: 1, CacheRead: 0.75, CacheCreation: 4, Source: "litellm"},
-		"bad":   {Prompt: -1, Completion: 0, Cache: 0},
+		"gpt-a": {
+			Prompt: 5, Completion: 6, Cache: 1, CacheRead: 0.75, CacheCreation: 4,
+			PromptConfigured: true, CompletionConfigured: true, CacheReadConfigured: true, CacheCreationConfigured: true,
+			Source: "litellm",
+		},
+		"bad": {Prompt: -1, Completion: 0, Cache: 0},
 	})
 	if err != nil {
 		t.Fatalf("upsert synced prices: %v", err)

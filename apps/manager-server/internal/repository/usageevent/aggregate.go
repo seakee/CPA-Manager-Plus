@@ -3,12 +3,14 @@ package usageevent
 import (
 	"context"
 	"database/sql"
+	"fmt"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
 
 // Aggregate captures roll-up metrics for a usage_events window.
 type Aggregate struct {
+	usage.LongContextTokens
 	TotalCalls          int64
 	SuccessCalls        int64
 	FailureCalls        int64
@@ -26,6 +28,7 @@ type Aggregate struct {
 
 // ModelStat aggregates per-model totals.
 type ModelStat struct {
+	usage.LongContextTokens
 	Model               string
 	BillingModel        string
 	ServiceTier         string
@@ -65,7 +68,7 @@ type RecentFailure struct {
 	HeaderTraceID          string
 }
 
-const aggregateSQL = `select
+var aggregateSQL = fmt.Sprintf(`select
 	count(*),
 	sum(case when failed = 0 then 1 else 0 end),
 	sum(case when failed = 1 then 1 else 0 end),
@@ -75,12 +78,17 @@ const aggregateSQL = `select
 	coalesce(sum(max(max(cached_tokens, cache_tokens) - max(cache_read_tokens, 0) - max(cache_creation_tokens, 0), 0)), 0),
 	coalesce(sum(cache_read_tokens), 0),
 	coalesce(sum(cache_creation_tokens), 0),
+	coalesce(sum(case when input_tokens > %[1]d then input_tokens else 0 end), 0),
+	coalesce(sum(case when input_tokens > %[1]d then output_tokens else 0 end), 0),
+	coalesce(sum(case when input_tokens > %[1]d then max(max(cached_tokens, cache_tokens) - max(cache_read_tokens, 0) - max(cache_creation_tokens, 0), 0) else 0 end), 0),
+	coalesce(sum(case when input_tokens > %[1]d then cache_read_tokens else 0 end), 0),
+	coalesce(sum(case when input_tokens > %[1]d then cache_creation_tokens else 0 end), 0),
 	coalesce(sum(total_tokens), 0),
 	avg(nullif(latency_ms, 0)),
 	count(nullif(latency_ms, 0)),
 	coalesce(sum(case when total_tokens = 0 and failed = 0 then 1 else 0 end), 0)
 from usage_events
-where timestamp_ms >= ? and timestamp_ms < ?`
+where timestamp_ms >= ? and timestamp_ms < ?`, usage.LongContextInputTokenThreshold)
 
 // AggregateBetween computes summary metrics over [fromMs, toMs).
 func (r *repository) AggregateBetween(ctx context.Context, fromMs, toMs int64) (Aggregate, error) {
@@ -97,6 +105,11 @@ func (r *repository) AggregateBetween(ctx context.Context, fromMs, toMs int64) (
 		&agg.CachedTokens,
 		&agg.CacheReadTokens,
 		&agg.CacheCreationTokens,
+		&agg.LongInputTokens,
+		&agg.LongOutputTokens,
+		&agg.LongCachedTokens,
+		&agg.LongCacheReadTokens,
+		&agg.LongCacheCreationTokens,
 		&agg.TotalTokens,
 		&agg.AvgLatencyMS,
 		&agg.LatencySamples,
@@ -109,7 +122,7 @@ func (r *repository) AggregateBetween(ctx context.Context, fromMs, toMs int64) (
 	return agg, nil
 }
 
-const topModelsSQL = `with top_models as (
+var topModelsSQL = fmt.Sprintf(`with top_models as (
 	select
 		model,
 		count(*) as model_calls
@@ -131,12 +144,17 @@ select
 	coalesce(sum(max(max(e.cached_tokens, e.cache_tokens) - max(e.cache_read_tokens, 0) - max(e.cache_creation_tokens, 0), 0)), 0),
 	coalesce(sum(e.cache_read_tokens), 0),
 	coalesce(sum(e.cache_creation_tokens), 0),
+	coalesce(sum(case when e.input_tokens > %[1]d then e.input_tokens else 0 end), 0),
+	coalesce(sum(case when e.input_tokens > %[1]d then e.output_tokens else 0 end), 0),
+	coalesce(sum(case when e.input_tokens > %[1]d then max(max(e.cached_tokens, e.cache_tokens) - max(e.cache_read_tokens, 0) - max(e.cache_creation_tokens, 0), 0) else 0 end), 0),
+	coalesce(sum(case when e.input_tokens > %[1]d then e.cache_read_tokens else 0 end), 0),
+	coalesce(sum(case when e.input_tokens > %[1]d then e.cache_creation_tokens else 0 end), 0),
 	coalesce(sum(e.total_tokens), 0)
 from usage_events e
 join top_models t on t.model = e.model
 where e.timestamp_ms >= ? and e.timestamp_ms < ?
 group by e.model, billing_model, coalesce(e.service_tier, '')
-order by max(t.model_calls) desc, e.model, calls desc`
+order by max(t.model_calls) desc, e.model, calls desc`, usage.LongContextInputTokenThreshold)
 
 // TopModelsBetween returns the most active models ordered by call count.
 func (r *repository) TopModelsBetween(ctx context.Context, fromMs, toMs int64, limit int) ([]ModelStat, error) {
@@ -164,6 +182,11 @@ func (r *repository) TopModelsBetween(ctx context.Context, fromMs, toMs int64, l
 			&stat.CachedTokens,
 			&stat.CacheReadTokens,
 			&stat.CacheCreationTokens,
+			&stat.LongInputTokens,
+			&stat.LongOutputTokens,
+			&stat.LongCachedTokens,
+			&stat.LongCacheReadTokens,
+			&stat.LongCacheCreationTokens,
 			&stat.TotalTokens,
 		); err != nil {
 			return nil, err
@@ -173,7 +196,7 @@ func (r *repository) TopModelsBetween(ctx context.Context, fromMs, toMs int64, l
 	return stats, rows.Err()
 }
 
-const modelStatsSQL = `select
+var modelStatsSQL = fmt.Sprintf(`select
 	model,
 	coalesce(nullif(resolved_model, ''), model) as billing_model,
 	coalesce(service_tier, '') as service_tier,
@@ -185,11 +208,16 @@ const modelStatsSQL = `select
 	coalesce(sum(max(max(cached_tokens, cache_tokens) - max(cache_read_tokens, 0) - max(cache_creation_tokens, 0), 0)), 0),
 	coalesce(sum(cache_read_tokens), 0),
 	coalesce(sum(cache_creation_tokens), 0),
+	coalesce(sum(case when input_tokens > %[1]d then input_tokens else 0 end), 0),
+	coalesce(sum(case when input_tokens > %[1]d then output_tokens else 0 end), 0),
+	coalesce(sum(case when input_tokens > %[1]d then max(max(cached_tokens, cache_tokens) - max(cache_read_tokens, 0) - max(cache_creation_tokens, 0), 0) else 0 end), 0),
+	coalesce(sum(case when input_tokens > %[1]d then cache_read_tokens else 0 end), 0),
+	coalesce(sum(case when input_tokens > %[1]d then cache_creation_tokens else 0 end), 0),
 	coalesce(sum(total_tokens), 0)
 from usage_events
 where timestamp_ms >= ? and timestamp_ms < ?
 group by model, billing_model, coalesce(service_tier, '')
-order by calls desc`
+order by calls desc`, usage.LongContextInputTokenThreshold)
 
 // ModelStatsBetween returns per-model totals for all models in a window.
 func (r *repository) ModelStatsBetween(ctx context.Context, fromMs, toMs int64) ([]ModelStat, error) {
@@ -214,6 +242,11 @@ func (r *repository) ModelStatsBetween(ctx context.Context, fromMs, toMs int64) 
 			&stat.CachedTokens,
 			&stat.CacheReadTokens,
 			&stat.CacheCreationTokens,
+			&stat.LongInputTokens,
+			&stat.LongOutputTokens,
+			&stat.LongCachedTokens,
+			&stat.LongCacheReadTokens,
+			&stat.LongCacheCreationTokens,
 			&stat.TotalTokens,
 		); err != nil {
 			return nil, err

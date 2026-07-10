@@ -95,6 +95,11 @@ func Migrate(db *sql.DB) error {
 			cached_tokens integer not null default 0,
 			cache_read_tokens integer not null default 0,
 			cache_creation_tokens integer not null default 0,
+			long_input_tokens integer not null default 0,
+			long_output_tokens integer not null default 0,
+			long_cached_tokens integer not null default 0,
+			long_cache_read_tokens integer not null default 0,
+			long_cache_creation_tokens integer not null default 0,
 			total_tokens integer not null default 0,
 			first_seen_ms integer not null,
 			last_seen_ms integer not null,
@@ -117,6 +122,11 @@ func Migrate(db *sql.DB) error {
 			cached_tokens integer not null default 0,
 			cache_read_tokens integer not null default 0,
 			cache_creation_tokens integer not null default 0,
+			long_input_tokens integer not null default 0,
+			long_output_tokens integer not null default 0,
+			long_cached_tokens integer not null default 0,
+			long_cache_read_tokens integer not null default 0,
+			long_cache_creation_tokens integer not null default 0,
 			total_tokens integer not null default 0,
 			latency_sum_ms integer not null default 0,
 			latency_samples integer not null default 0,
@@ -142,6 +152,10 @@ func Migrate(db *sql.DB) error {
 			cache_per_1m real not null,
 			cache_read_per_1m real not null default 0,
 			cache_creation_per_1m real not null default 0,
+			prompt_configured integer not null default 0,
+			completion_configured integer not null default 0,
+			cache_read_configured integer not null default 0,
+			cache_creation_configured integer not null default 0,
 			source text,
 			source_model_id text,
 			raw_json text,
@@ -279,7 +293,78 @@ func Migrate(db *sql.DB) error {
 	if err := ensureAccountActionCandidateColumns(db); err != nil {
 		return err
 	}
+	if err := ensureUsageRollupLongContextColumns(db); err != nil {
+		return err
+	}
 	return ensureModelPriceColumns(db)
+}
+
+func ensureUsageRollupLongContextColumns(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	columns := []struct {
+		name       string
+		definition string
+	}{
+		{name: "long_input_tokens", definition: "integer not null default 0"},
+		{name: "long_output_tokens", definition: "integer not null default 0"},
+		{name: "long_cached_tokens", definition: "integer not null default 0"},
+		{name: "long_cache_read_tokens", definition: "integer not null default 0"},
+		{name: "long_cache_creation_tokens", definition: "integer not null default 0"},
+	}
+	changed := false
+	for _, table := range []string{"usage_account_model_rollups", "usage_dashboard_hourly_rollups"} {
+		rows, err := tx.Query(`pragma table_info(` + table + `)`)
+		if err != nil {
+			return err
+		}
+		existing := map[string]struct{}{}
+		for rows.Next() {
+			var cid int
+			var name, typ string
+			var notNull int
+			var defaultValue any
+			var pk int
+			if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			existing[name] = struct{}{}
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, column := range columns {
+			if _, ok := existing[column.name]; ok {
+				continue
+			}
+			if _, err := tx.Exec(fmt.Sprintf(`alter table %s add column %s %s`, table, column.name, column.definition)); err != nil {
+				return err
+			}
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	for _, statement := range []string{
+		`delete from usage_account_model_rollups`,
+		`delete from usage_dashboard_hourly_rollups`,
+		`delete from usage_rollup_checkpoints where name in ('account_history', 'dashboard_hourly')`,
+	} {
+		if _, err := tx.Exec(statement); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func ensureAccountActionCandidateColumns(db *sql.DB) error {
@@ -502,11 +587,16 @@ func ensureUsageEventSnapshotColumns(db *sql.DB) error {
 }
 
 func ensureModelPriceColumns(db *sql.DB) error {
-	rows, err := db.Query(`pragma table_info(model_prices)`)
+	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.Query(`pragma table_info(model_prices)`)
+	if err != nil {
+		return err
+	}
 
 	existing := map[string]struct{}{}
 	for rows.Next() {
@@ -522,6 +612,10 @@ func ensureModelPriceColumns(db *sql.DB) error {
 		existing[name] = struct{}{}
 	}
 	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
 		return err
 	}
 
@@ -531,18 +625,39 @@ func ensureModelPriceColumns(db *sql.DB) error {
 	}{
 		{name: "cache_read_per_1m", definition: "real not null default 0"},
 		{name: "cache_creation_per_1m", definition: "real not null default 0"},
+		{name: "prompt_configured", definition: "integer not null default 0"},
+		{name: "completion_configured", definition: "integer not null default 0"},
+		{name: "cache_read_configured", definition: "integer not null default 0"},
+		{name: "cache_creation_configured", definition: "integer not null default 0"},
 	}
+	added := map[string]bool{}
 	for _, column := range columns {
 		if _, ok := existing[column.name]; ok {
 			continue
 		}
-		if _, err := db.Exec(fmt.Sprintf(
+		if _, err := tx.Exec(fmt.Sprintf(
 			`alter table model_prices add column %s %s`,
 			column.name,
 			column.definition,
 		)); err != nil {
 			return err
 		}
+		added[column.name] = true
 	}
-	return nil
+	if added["prompt_configured"] || added["completion_configured"] {
+		if _, err := tx.Exec(`update model_prices set prompt_configured = 1, completion_configured = 1`); err != nil {
+			return err
+		}
+	}
+	if added["cache_read_configured"] {
+		if _, err := tx.Exec(`update model_prices set cache_read_configured = 1 where cache_read_per_1m != 0`); err != nil {
+			return err
+		}
+	}
+	if added["cache_creation_configured"] {
+		if _, err := tx.Exec(`update model_prices set cache_creation_configured = 1 where cache_creation_per_1m != 0`); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }

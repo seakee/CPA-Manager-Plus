@@ -317,15 +317,35 @@ export function ModelPricesPage() {
               placeholder="0.0000"
               step="0.0001"
             />
-            <Input
-              label={`${t('usage_stats.model_price_cache')} ($/1M)`}
-              className={styles.compactInput}
-              type="number"
-              value={draft.cache}
-              onChange={(event) => setDraftField('cache', event.target.value)}
-              placeholder="0.0000"
-              step="0.0001"
-            />
+            <div style={{ display: 'grid', gap: 8 }}>
+              <Input
+                label={`${t('usage_stats.model_price_cache')} ($/1M)`}
+                className={styles.compactInput}
+                type="number"
+                value={draft.cache}
+                onChange={(event) => setDraftField('cache', event.target.value)}
+                placeholder="0.0000"
+                step="0.0001"
+              />
+              <Input
+                label={`${t('usage_stats.model_price_cache_read')} ($/1M)`}
+                className={styles.compactInput}
+                type="number"
+                value={draft.cacheRead}
+                onChange={(event) => setDraftField('cacheRead', event.target.value)}
+                placeholder={t('model_prices.optional_price_placeholder')}
+                step="0.0001"
+              />
+              <Input
+                label={`${t('usage_stats.model_price_cache_creation')} ($/1M)`}
+                className={styles.compactInput}
+                type="number"
+                value={draft.cacheCreation}
+                onChange={(event) => setDraftField('cacheCreation', event.target.value)}
+                placeholder={t('model_prices.optional_price_placeholder')}
+                step="0.0001"
+              />
+            </div>
             <div className={styles.compactEditorActions}>
               <Button
                 size="xs"
@@ -357,6 +377,8 @@ export function ModelPricesPage() {
                   <th>{t('usage_stats.model_price_prompt')}</th>
                   <th>{t('usage_stats.model_price_completion')}</th>
                   <th>{t('usage_stats.model_price_cache')}</th>
+                  <th>{t('usage_stats.model_price_cache_read')}</th>
+                  <th>{t('usage_stats.model_price_cache_creation')}</th>
                   <th>{t('model_prices.source')}</th>
                   <th>{t('common.action')}</th>
                 </tr>
@@ -388,6 +410,8 @@ export function ModelPricesPage() {
                       <td>{formatPriceUnit(row.price?.prompt)}</td>
                       <td>{formatPriceUnit(row.price?.completion)}</td>
                       <td>{formatPriceUnit(row.price?.cache)}</td>
+                      <td>{formatPriceUnit(row.price?.cacheRead)}</td>
+                      <td>{formatPriceUnit(row.price?.cacheCreation)}</td>
                       <td className={styles.sourceCell}>
                         {row.price ? (
                           <div className={styles.sourceContent}>

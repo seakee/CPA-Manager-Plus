@@ -1440,6 +1440,7 @@
     "candidate_confirmed": "Candidate price confirmed",
     "add_manual": "Add manually",
     "unmatched_title": "Unmatched models",
+    "optional_price_placeholder": "Auto when blank",
     "empty": "No matching model prices"
   },
   "usage_stats": {
@@ -1516,6 +1517,8 @@
     "model_price_prompt": "Prompt price",
     "model_price_completion": "Completion price",
     "model_price_cache": "Cache price",
+    "model_price_cache_read": "Cache read price",
+    "model_price_cache_creation": "Cache creation price",
     "model_price_save": "Save Price",
     "model_price_empty": "No model prices set",
     "model_price_model": "Model",

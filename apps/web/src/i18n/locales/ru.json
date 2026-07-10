@@ -1440,6 +1440,7 @@
     "candidate_confirmed": "Цена подтверждена",
     "add_manual": "Добавить вручную",
     "unmatched_title": "Модели без совпадений",
+    "optional_price_placeholder": "Автоматически, если пусто",
     "empty": "Подходящих цен моделей нет"
   },
   "usage_stats": {
@@ -1516,6 +1517,8 @@
     "model_price_prompt": "Цена prompt",
     "model_price_completion": "Цена completion",
     "model_price_cache": "Цена кэша",
+    "model_price_cache_read": "Цена чтения кэша",
+    "model_price_cache_creation": "Цена создания кэша",
     "model_price_save": "Сохранить цену",
     "model_price_empty": "Цена для моделей не задана",
     "model_price_model": "Модель",

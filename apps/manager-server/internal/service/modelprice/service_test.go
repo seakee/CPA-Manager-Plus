@@ -96,7 +96,8 @@ func TestFetchOpenRouterModelPrices(t *testing.T) {
 	if price.Source != SyncSourceOpenRouter || price.SourceModelID != "openai/gpt-test" {
 		t.Fatalf("source metadata = %#v", price)
 	}
-	if !closePrice(price.Prompt, 1) || !closePrice(price.Completion, 2) || !closePrice(price.Cache, 0.25) {
+	if !closePrice(price.Prompt, 1) || !closePrice(price.Completion, 2) || !closePrice(price.Cache, 0.25) ||
+		!price.PromptConfigured || !price.CompletionConfigured || !price.CacheReadConfigured || price.CacheCreationConfigured {
 		t.Fatalf("price = %#v", price)
 	}
 }
