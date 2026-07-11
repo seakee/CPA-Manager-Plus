@@ -30,7 +30,11 @@ const (
 	codexMonthWindow    = 2_592_000
 	codexMinMonthWindow = 28 * 24 * 60 * 60
 	codexMaxMonthWindow = 31 * 24 * 60 * 60
-	maxStoredBodyText   = 2048
+
+	// xAI / Grok billing API
+	xaiBillingURL = "https://cli-chat-proxy.grok.com/v1/billing"
+
+	maxStoredBodyText = 2048
 )
 
 var (
@@ -599,7 +603,11 @@ func (s *Service) inspectSingleAccount(
 	var response apiCallResponse
 	var err error
 	for attempt := 0; attempt <= settings.Retries; attempt++ {
-		response, err = s.requestCodexUsage(ctx, setup, settings, item)
+		if item.Provider == model.TargetTypeXAI {
+			response, err = s.requestXaiBilling(ctx, setup, settings, item)
+		} else {
+			response, err = s.requestCodexUsage(ctx, setup, settings, item)
+		}
 		if err == nil {
 			break
 		}
@@ -636,6 +644,38 @@ func (s *Service) inspectSingleAccount(
 	payload := parseRecord(response.Body)
 	if payload == nil {
 		payload = parseRecord(response.BodyText)
+	}
+
+	// For xAI/Grok, use billing-based inspection
+	if item.Provider == model.TargetTypeXAI {
+		decision := resolveXaiBillingProbeAction(item, statusCode, response.BodyText, payload)
+		base.Action = decision.Action
+		base.ActionReason = decision.ActionReason
+		base.UsedPercent = decision.UsedPercent
+		base.IsQuota = decision.IsQuota
+		base.PlanType = ""
+		base.Error = ""
+		if statusCode < 200 || statusCode >= 300 {
+			base.ErrorKind = "http_status"
+			base.ErrorDetail = firstNonEmpty(truncate(response.BodyText, maxStoredBodyText), fmt.Sprintf("HTTP %d", statusCode))
+		}
+		level := "info"
+		switch decision.Action {
+		case "delete":
+			level = "error"
+		case "disable":
+			level = "warning"
+		case "enable":
+			level = "success"
+		}
+		logger.log(ctx, level, "账号探测完成", map[string]any{
+			"fileName":       item.FileName,
+			"displayAccount": item.DisplayAccount,
+			"action":         decision.Action,
+			"actionReason":   decision.ActionReason,
+			"statusCode":     statusCode,
+		})
+		return base
 	}
 	planType := normalizeCodexPlanType(readString(payload, "plan_type", "planType"))
 	if planType == "" {
@@ -713,6 +753,83 @@ func (s *Service) requestCodexUsageAt(
 		"authIndex": item.AuthIndex,
 		"method":    http.MethodGet,
 		"url":       codexUsageURL,
+		"header":    headers,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return apiCallResponse{}, 0, err
+	}
+	requestCtx := ctx
+	cancel := func() {}
+	if settings.Timeout > 0 {
+		requestCtx, cancel = context.WithTimeout(ctx, time.Duration(settings.Timeout)*time.Millisecond)
+	}
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(
+		requestCtx,
+		http.MethodPost,
+		cpa.NormalizeBaseURL(setup.CPAUpstreamURL)+path,
+		bytes.NewReader(data),
+	)
+	if err != nil {
+		return apiCallResponse{}, 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+setup.ManagementKey)
+	req.Header.Set("Content-Type", "application/json")
+	res, err := s.client.Do(req)
+	if err != nil {
+		return apiCallResponse{}, 0, err
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(res.Body, 8*1024*1024))
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return apiCallResponse{}, res.StatusCode, fmt.Errorf("api-call failed: %s %s", res.Status, truncate(string(body), maxStoredBodyText))
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return apiCallResponse{}, res.StatusCode, err
+	}
+	statusRaw, hasStatus := firstValue(raw, "status_code", "statusCode")
+	statusCode := int(readFloat(statusRaw, 0))
+	bodyRaw, _ := firstValue(raw, "body")
+	bodyText, bodyValue := normalizeBody(bodyRaw)
+	return apiCallResponse{
+		StatusCode:    statusCode,
+		HasStatusCode: hasStatus && strings.TrimSpace(fmt.Sprint(statusRaw)) != "",
+		BodyText:      bodyText,
+		Body:          bodyValue,
+	}, res.StatusCode, nil
+}
+
+// requestXaiBilling probes an xAI/Grok credential by calling the Grok billing API
+// through the CPA management api-call proxy.
+func (s *Service) requestXaiBilling(
+	ctx context.Context,
+	setup store.Setup,
+	settings model.ManagerCodexInspectionConfig,
+	item account,
+) (apiCallResponse, error) {
+	result, _, err := s.requestXaiBillingAt(ctx, setup, settings, item, "/v0/management/api-call")
+	return result, err
+}
+
+func (s *Service) requestXaiBillingAt(
+	ctx context.Context,
+	setup store.Setup,
+	settings model.ManagerCodexInspectionConfig,
+	item account,
+	path string,
+) (apiCallResponse, int, error) {
+	headers := map[string]string{
+		"Authorization": "Bearer $TOKEN$",
+		"Content-Type":  "application/json",
+	}
+	payload := map[string]any{
+		"authIndex": item.AuthIndex,
+		"method":    http.MethodGet,
+		"url":       xaiBillingURL,
 		"header":    headers,
 	}
 	data, err := json.Marshal(payload)
@@ -870,17 +987,75 @@ func (s *Service) executeActionItems(
 }
 
 func collectActionOutcomes(outcomes <-chan ActionOutcome, capacity int) []ActionOutcome {
-	result := make([]ActionOutcome, 0, capacity)
-	for outcome := range outcomes {
-		result = append(result, outcome)
+	out := make([]ActionOutcome, 0, capacity)
+	for o := range outcomes {
+		out = append(out, o)
 	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].FileName == result[j].FileName {
-			return result[i].Action < result[j].Action
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].FileName == out[j].FileName {
+			return out[i].Action < out[j].Action
 		}
-		return result[i].FileName < result[j].FileName
+		return out[i].FileName < out[j].FileName
 	})
-	return result
+	return out
+}
+
+// resolveXaiBillingProbeAction determines the inspection action for an xAI/Grok
+// credential based on the billing API response probed via CPA api-call.
+func resolveXaiBillingProbeAction(item account, statusCode int, bodyText string, payload map[string]any) inspectionDecision {
+	bodyLower := strings.ToLower(bodyText)
+
+	// 401 / 403: authentication or authorization failure
+	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+		if strings.Contains(bodyLower, "permission-denied") || strings.Contains(bodyLower, "region") {
+			return inspectionDecision{Action: "keep", ActionReason: "区域不可用（非凭证问题），保留账号", IsQuota: false}
+		}
+		return inspectionDecision{Action: "disable", ActionReason: "认证失败（凭证可能已失效），建议停用", IsQuota: false}
+	}
+
+	// 402: spending-limit reached
+	if statusCode == http.StatusPaymentRequired {
+		if strings.Contains(bodyLower, "spending-limit") || strings.Contains(bodyLower, "out of credits") {
+			return inspectionDecision{Action: "disable", ActionReason: "额度耗尽（spending-limit），暂停使用", IsQuota: true}
+		}
+	}
+
+	// 429: rate-limited
+	if statusCode == http.StatusTooManyRequests {
+		return inspectionDecision{Action: "disable", ActionReason: "触发限流（429），暂停使用", IsQuota: true}
+	}
+
+	// 200: parse billing config
+	if statusCode >= 200 && statusCode < 300 && payload != nil {
+		config := readMap(payload, "config")
+		var monthlyLimit, used, onDemandCap float64
+		if config != nil {
+			if ml, ok := config["monthlyLimit"]; ok {
+				monthlyLimit = readFloat(readMapValue(ml), 0)
+			}
+			if u, ok := config["used"]; ok {
+				used = readFloat(readMapValue(u), 0)
+			}
+			if odc, ok := config["onDemandCap"]; ok {
+				onDemandCap = readFloat(readMapValue(odc), 0)
+			}
+		}
+
+		if monthlyLimit > 0 && used >= monthlyLimit {
+			pct := (used / monthlyLimit) * 100
+			return inspectionDecision{Action: "disable", ActionReason: fmt.Sprintf("月额度已用尽 (%.0f/%.0f)", used, monthlyLimit), UsedPercent: &pct, IsQuota: true}
+		}
+		if onDemandCap > 0 && used >= onDemandCap {
+			pct := (used / onDemandCap) * 100
+			return inspectionDecision{Action: "disable", ActionReason: fmt.Sprintf("按需额度已用尽 (%.0f/%.0f)", used, onDemandCap), UsedPercent: &pct, IsQuota: true}
+		}
+		if item.Disabled {
+			return inspectionDecision{Action: "enable", ActionReason: "额度未用尽，建议重新启用", IsQuota: false}
+		}
+		return inspectionDecision{Action: "keep", ActionReason: "额度正常，保留账号", IsQuota: false}
+	}
+
+	return inspectionDecision{Action: "keep", ActionReason: fmt.Sprintf("探测结果 HTTP %d，保留账号", statusCode), IsQuota: false}
 }
 
 func (s *Service) executeAction(ctx context.Context, setup store.Setup, item model.CodexInspectionResult) error {
@@ -2152,6 +2327,16 @@ func readMap(record map[string]any, keys ...string) map[string]any {
 		}
 	}
 	return nil
+}
+
+// readMapValue extracts a float64 from an xAI-style nested-value map (e.g., {"val": 1500}).
+func readMapValue(value any) any {
+	if m, ok := value.(map[string]any); ok {
+		if v, ok := m["val"]; ok {
+			return v
+		}
+	}
+	return value
 }
 
 func firstValue(record map[string]any, keys ...string) (any, bool) {

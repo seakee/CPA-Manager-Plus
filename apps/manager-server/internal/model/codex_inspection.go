@@ -31,6 +31,10 @@ const (
 	CodexInspectionActionStatusFailed      = "failed"
 	CodexInspectionActionStatusSkipped     = "skipped"
 	CodexInspectionActionStatusNeedsReview = "needs_review"
+
+	// Supported target types for inspection.
+	TargetTypeCodex = "codex"
+	TargetTypeXAI   = "xai"
 )
 
 type ManagerCodexInspectionConfig struct {
@@ -133,7 +137,7 @@ func DefaultCodexInspectionConfig() ManagerCodexInspectionConfig {
 			Mode:            CodexInspectionScheduleModeInterval,
 			IntervalMinutes: 60,
 		},
-		TargetType:           "codex",
+		TargetType:           TargetTypeCodex,
 		Workers:              4,
 		DeleteWorkers:        4,
 		Timeout:              15000,
