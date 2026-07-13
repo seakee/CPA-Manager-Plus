@@ -469,6 +469,20 @@ describe('QuotaSection account display mode', () => {
     expect(mocks.fetchQuota).toHaveBeenCalledTimes(4);
     expect(maxActiveRequests).toBe(4);
 
+    resolvers.shift()?.();
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    expect(mocks.quotaStoreState.codexQuota).toMatchObject({
+      [getTestAuthFileKey(files[0])]: {
+        status: 'success',
+        rateLimitResetCreditsAvailableCount: 0,
+        authFileKey: getTestAuthFileKey(files[0]),
+      },
+    });
+    expect(mocks.fetchQuota).toHaveBeenCalledTimes(5);
+
     while (mocks.fetchQuota.mock.calls.length < files.length) {
       resolvers.shift()?.();
       await act(async () => {
