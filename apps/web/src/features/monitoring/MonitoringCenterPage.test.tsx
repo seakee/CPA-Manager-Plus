@@ -13,6 +13,7 @@ import {
   type MonitoringAccountAuthState,
 } from '@/features/monitoring/accountOverviewState';
 import { buildRealtimeSourceDisplay } from '@/features/monitoring/realtimeSourceDisplay';
+import { buildCacheTokenPresentation } from '@/features/monitoring/components/accountOverviewPresentation';
 
 const t = ((key: string, options?: Record<string, unknown>) => {
   const copy: Record<string, string> = {
@@ -269,6 +270,33 @@ describe('MonitoringCenterPage summary cards', () => {
 });
 
 describe('MonitoringCenterPage account card', () => {
+  it('formats legacy and fine-grained account cache metrics without changing the token slot', () => {
+    expect(
+      buildCacheTokenPresentation(
+        { cachedTokens: 12_500, cacheReadTokens: 0, cacheCreationTokens: 0 },
+        t
+      )
+    ).toMatchObject({ label: 'Cached Tokens', value: '12.5K' });
+    expect(
+      buildCacheTokenPresentation(
+        { cachedTokens: 0, cacheReadTokens: 1_200, cacheCreationTokens: 300 },
+        t
+      )
+    ).toMatchObject({ label: 'CR / CW', value: '1.2K / 300' });
+    expect(
+      buildCacheTokenPresentation(
+        { cachedTokens: 40, cacheReadTokens: 1_200, cacheCreationTokens: 300 },
+        t
+      )
+    ).toMatchObject({ label: 'C / CR / CW', value: '40 / 1.2K / 300' });
+    expect(
+      buildCacheTokenPresentation(
+        { cachedTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
+        t
+      )
+    ).toMatchObject({ label: 'Cached Tokens', value: '0' });
+  });
+
   it('prefers readable channel names in realtime source cells', () => {
     const display = buildRealtimeSourceDisplay(
       {
@@ -688,7 +716,13 @@ describe('MonitoringCenterPage account card', () => {
           { key: 'total-tokens', label: 'Total Tokens', value: '35.1M' },
           { key: 'input-tokens', label: 'Input Tokens', value: '35.0M' },
           { key: 'output-tokens', label: 'Output Tokens', value: '68.5K' },
-          { key: 'cached-tokens', label: 'Cached Tokens', value: '33.9M' },
+          {
+            key: 'cached-tokens',
+            label: 'C / CR / CW',
+            fullLabel:
+              'Cached Tokens: 33.9M · Cache Read Tokens: 1.2M · Cache Creation Tokens: 340.0K',
+            value: '33.9M / 1.2M / 340.0K',
+          },
         ]}
         onRefreshQuota={() => {}}
         variant="table"
@@ -698,9 +732,8 @@ describe('MonitoringCenterPage account card', () => {
     expect(html).toContain('Token Structure');
     expect(html).toContain('Input Tokens');
     expect(html).toContain('Output Tokens');
-    expect(html).toContain('Cached Tokens');
-    expect(html).not.toContain('Cache Read Tokens');
-    expect(html).not.toContain('Cache Creation Tokens');
+    expect(html).toContain('C / CR / CW');
+    expect(html).toContain('33.9M / 1.2M / 340.0K');
     expect(html).toContain('Model Usage Top 2');
     expect(html).toContain('View All');
     expect(html).not.toContain('<th>Read</th>');
@@ -709,6 +742,7 @@ describe('MonitoringCenterPage account card', () => {
     expect(html).toContain('<th>Latest request</th>');
     expect(html).toContain('gpt-5.5');
     expect(html).toContain('codex-auto-review');
+    expect(html).toContain('C / CR / CW 32.5M / 1.1M / 300.0K');
     expect(html).not.toContain('long-tail-model');
   });
 

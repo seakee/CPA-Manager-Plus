@@ -50,6 +50,12 @@ export type AccountSummaryMetric = {
   valueClassName?: string;
 };
 
+export type CacheTokenPresentation = {
+  label: string;
+  fullLabel: string;
+  value: string;
+};
+
 export const formatPercent = (value: number) => `${(value * 100).toFixed(1)}%`;
 
 const joinShort = (values: string[], limit = 2) => {
@@ -63,6 +69,61 @@ const shortLabel = (t: TFunction, shortKey: string, fallbackKey: string) => {
   const fallback = t(fallbackKey);
   const label = t(shortKey, { defaultValue: fallback });
   return label === shortKey ? fallback : label;
+};
+
+export const buildCacheTokenPresentation = (
+  tokens: Pick<MonitoringAccountRow, 'cachedTokens' | 'cacheReadTokens' | 'cacheCreationTokens'>,
+  t: TFunction
+): CacheTokenPresentation => {
+  const cachedTokens = Math.max(tokens.cachedTokens || 0, 0);
+  const cacheReadTokens = Math.max(tokens.cacheReadTokens || 0, 0);
+  const cacheCreationTokens = Math.max(tokens.cacheCreationTokens || 0, 0);
+  const hasFineGrainedCache = cacheReadTokens > 0 || cacheCreationTokens > 0;
+
+  if (!hasFineGrainedCache) {
+    return {
+      label: shortLabel(t, 'monitoring.cached_tokens_short', 'monitoring.cached_tokens'),
+      fullLabel: t('monitoring.cached_tokens'),
+      value: formatCompactNumber(cachedTokens),
+    };
+  }
+
+  const parts = [
+    cachedTokens > 0
+      ? { code: 'C', fullLabel: t('monitoring.cached_tokens'), value: cachedTokens }
+      : null,
+    cacheReadTokens > 0
+      ? { code: 'CR', fullLabel: t('monitoring.cache_read_tokens'), value: cacheReadTokens }
+      : null,
+    cacheCreationTokens > 0
+      ? {
+          code: 'CW',
+          fullLabel: t('monitoring.cache_creation_tokens'),
+          value: cacheCreationTokens,
+        }
+      : null,
+  ].filter((part): part is { code: string; fullLabel: string; value: number } => part !== null);
+
+  return {
+    label: parts.map((part) => part.code).join(' / '),
+    fullLabel: parts
+      .map((part) => `${part.fullLabel}: ${formatCompactNumber(part.value)}`)
+      .join(' · '),
+    value: parts.map((part) => formatCompactNumber(part.value)).join(' / '),
+  };
+};
+
+const buildAccountCacheSummaryMetric = (
+  row: MonitoringAccountRow,
+  t: TFunction
+): AccountSummaryMetric => {
+  const cacheMetric = buildCacheTokenPresentation(row, t);
+  return {
+    key: 'cached-tokens',
+    label: cacheMetric.label,
+    fullLabel: cacheMetric.fullLabel,
+    value: cacheMetric.value,
+  };
 };
 
 export const getCodexPlanLabel = (
@@ -144,12 +205,7 @@ export const buildAccountSummaryMetrics = (
     fullLabel: t('monitoring.output_tokens'),
     value: formatCompactNumber(row.outputTokens),
   },
-  {
-    key: 'cached-tokens',
-    label: shortLabel(t, 'monitoring.cached_tokens_short', 'monitoring.cached_tokens'),
-    fullLabel: t('monitoring.cached_tokens'),
-    value: formatCompactNumber(row.cachedTokens),
-  },
+  buildAccountCacheSummaryMetric(row, t),
   {
     key: 'cache-creation-tokens',
     label: shortLabel(
