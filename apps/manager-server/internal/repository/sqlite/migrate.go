@@ -243,6 +243,7 @@ func Migrate(db *sql.DB) error {
 			status_code integer,
 			used_percent real,
 			is_quota integer not null default 0,
+			auto_recover_eligible integer not null default 0,
 			error text,
 			plan_type text,
 			quota_windows_json text,
@@ -263,6 +264,13 @@ func Migrate(db *sql.DB) error {
 			foreign key(run_id) references codex_inspection_runs(id) on delete cascade
 		)`,
 		`create index if not exists idx_codex_inspection_logs_run on codex_inspection_logs(run_id, created_at_ms)`,
+		`create table if not exists codex_inspection_disable_ownership (
+			file_name text primary key,
+			auth_index text,
+			account_id text,
+			disabled_at_ms integer not null,
+			updated_at_ms integer not null
+		)`,
 		`create table if not exists quota_cooldowns (
 			id integer primary key autoincrement,
 			auth_file_name text not null,
@@ -500,6 +508,7 @@ func ensureCodexInspectionResultColumns(db *sql.DB) error {
 		{name: "quota_windows_json", definition: "text"},
 		{name: "error_kind", definition: "text"},
 		{name: "error_detail", definition: "text"},
+		{name: "auto_recover_eligible", definition: "integer not null default 0"},
 	}
 	for _, column := range columns {
 		if _, ok := existing[column.name]; ok {

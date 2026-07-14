@@ -20,6 +20,9 @@ type Repository interface {
 	GetLatestRunByTrigger(ctx context.Context, triggerType, triggerKey string) (model.CodexInspectionRun, bool, error)
 	ListResults(ctx context.Context, runID int64) ([]model.CodexInspectionResult, error)
 	ListLogs(ctx context.Context, runID int64) ([]model.CodexInspectionLog, error)
+	ListDisableOwnership(ctx context.Context) ([]model.CodexInspectionDisableOwnership, error)
+	UpsertDisableOwnership(ctx context.Context, item model.CodexInspectionDisableOwnership) error
+	DeleteDisableOwnership(ctx context.Context, fileName string) error
 }
 
 type repository struct {
@@ -147,14 +150,18 @@ func (r *repository) InsertResult(ctx context.Context, result model.CodexInspect
 	if result.IsQuota {
 		isQuota = 1
 	}
+	autoRecoverEligible := 0
+	if result.AutoRecoverEligible {
+		autoRecoverEligible = 1
+	}
 	res, err := r.db.ExecContext(
 		ctx,
 		`insert into codex_inspection_results (
 			run_id, account_key, file_name, display_account, auth_index, account_id,
 			provider, disabled, status, state, action, action_reason, status_code,
-			used_percent, is_quota, error, action_status, executed_action, action_error,
+			used_percent, is_quota, auto_recover_eligible, error, action_status, executed_action, action_error,
 			plan_type, quota_windows_json, error_kind, error_detail, created_at_ms
-		) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		on conflict(run_id, account_key) do update set
 			file_name = excluded.file_name,
 			display_account = excluded.display_account,
@@ -169,6 +176,7 @@ func (r *repository) InsertResult(ctx context.Context, result model.CodexInspect
 			status_code = excluded.status_code,
 			used_percent = excluded.used_percent,
 			is_quota = excluded.is_quota,
+			auto_recover_eligible = excluded.auto_recover_eligible,
 			error = excluded.error,
 			action_status = excluded.action_status,
 			executed_action = excluded.executed_action,
@@ -193,6 +201,7 @@ func (r *repository) InsertResult(ctx context.Context, result model.CodexInspect
 		nullInt(result.StatusCode),
 		nullFloat(result.UsedPercent),
 		isQuota,
+		autoRecoverEligible,
 		nullString(result.Error),
 		nullString(result.ActionStatus),
 		nullString(result.ExecutedAction),
@@ -323,7 +332,7 @@ func (r *repository) ListResults(ctx context.Context, runID int64) ([]model.Code
 		`select
 			id, run_id, account_key, file_name, display_account, auth_index, account_id,
 			provider, disabled, status, state, action, action_reason, status_code,
-			used_percent, is_quota, error, action_status, executed_action, action_error,
+			used_percent, is_quota, auto_recover_eligible, error, action_status, executed_action, action_error,
 			plan_type, quota_windows_json, error_kind, error_detail, created_at_ms
 		from codex_inspection_results
 		where run_id = ?
@@ -344,6 +353,62 @@ func (r *repository) ListResults(ctx context.Context, runID int64) ([]model.Code
 		results = append(results, result)
 	}
 	return results, rows.Err()
+}
+
+func (r *repository) ListDisableOwnership(ctx context.Context) ([]model.CodexInspectionDisableOwnership, error) {
+	rows, err := r.db.QueryContext(ctx, `select file_name, auth_index, account_id, disabled_at_ms, updated_at_ms
+		from codex_inspection_disable_ownership order by file_name asc`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]model.CodexInspectionDisableOwnership, 0)
+	for rows.Next() {
+		var item model.CodexInspectionDisableOwnership
+		var authIndex, accountID sql.NullString
+		if err := rows.Scan(&item.FileName, &authIndex, &accountID, &item.DisabledAtMS, &item.UpdatedAtMS); err != nil {
+			return nil, err
+		}
+		item.AuthIndex = authIndex.String
+		item.AccountID = accountID.String
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *repository) UpsertDisableOwnership(ctx context.Context, item model.CodexInspectionDisableOwnership) error {
+	if item.FileName == "" {
+		return errors.New("codex inspection ownership file name is required")
+	}
+	now := time.Now().UnixMilli()
+	if item.DisabledAtMS <= 0 {
+		item.DisabledAtMS = now
+	}
+	item.UpdatedAtMS = now
+	_, err := r.db.ExecContext(ctx, `insert into codex_inspection_disable_ownership (
+		file_name, auth_index, account_id, disabled_at_ms, updated_at_ms
+	) values (?, ?, ?, ?, ?)
+	on conflict(file_name) do update set
+		auth_index = excluded.auth_index,
+		account_id = excluded.account_id,
+		disabled_at_ms = excluded.disabled_at_ms,
+		updated_at_ms = excluded.updated_at_ms`,
+		item.FileName,
+		nullString(item.AuthIndex),
+		nullString(item.AccountID),
+		item.DisabledAtMS,
+		item.UpdatedAtMS,
+	)
+	return err
+}
+
+func (r *repository) DeleteDisableOwnership(ctx context.Context, fileName string) error {
+	if fileName == "" {
+		return nil
+	}
+	_, err := r.db.ExecContext(ctx, `delete from codex_inspection_disable_ownership where file_name = ?`, fileName)
+	return err
 }
 
 func (r *repository) ListLogs(ctx context.Context, runID int64) ([]model.CodexInspectionLog, error) {
@@ -419,7 +484,7 @@ func scanResult(row scanner) (model.CodexInspectionResult, error) {
 	var planType, quotaWindowsJSON, errorKind, errorDetail sql.NullString
 	var statusCode sql.NullInt64
 	var usedPercent sql.NullFloat64
-	var disabled, isQuota int
+	var disabled, isQuota, autoRecoverEligible int
 	if err := row.Scan(
 		&result.ID,
 		&result.RunID,
@@ -437,6 +502,7 @@ func scanResult(row scanner) (model.CodexInspectionResult, error) {
 		&statusCode,
 		&usedPercent,
 		&isQuota,
+		&autoRecoverEligible,
 		&errorText,
 		&actionStatus,
 		&executedAction,
@@ -457,6 +523,7 @@ func scanResult(row scanner) (model.CodexInspectionResult, error) {
 	result.State = state.String
 	result.ActionReason = actionReason.String
 	result.IsQuota = isQuota != 0
+	result.AutoRecoverEligible = autoRecoverEligible != 0
 	result.Error = errorText.String
 	result.ActionStatus = model.NormalizeCodexInspectionActionStatus(actionStatus.String, result.Action)
 	result.ExecutedAction = executedAction.String

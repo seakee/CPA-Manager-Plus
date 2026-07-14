@@ -6,6 +6,44 @@ import (
 	"testing"
 )
 
+func TestCodexInspectionAutoRecoverySchema(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "codex-inspection.sqlite"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	columns := migrationTableColumns(t, db, "codex_inspection_results")
+	if !columns["auto_recover_eligible"] {
+		t.Fatalf("codex inspection results columns = %#v, want auto_recover_eligible", columns)
+	}
+	ownershipColumns := migrationTableColumns(t, db, "codex_inspection_disable_ownership")
+	for _, column := range []string{"file_name", "auth_index", "account_id", "disabled_at_ms", "updated_at_ms"} {
+		if !ownershipColumns[column] {
+			t.Fatalf("ownership columns = %#v, missing %s", ownershipColumns, column)
+		}
+	}
+}
+
+func TestEnsureCodexInspectionResultColumnsAddsAutoRecoveryEligibility(t *testing.T) {
+	db, err := sql.Open("sqlite", dataSourceName(filepath.Join(t.TempDir(), "legacy-codex-inspection.sqlite")))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`create table codex_inspection_results (id integer primary key)`); err != nil {
+		t.Fatalf("create legacy results table: %v", err)
+	}
+
+	if err := ensureCodexInspectionResultColumns(db); err != nil {
+		t.Fatalf("migrate codex inspection results: %v", err)
+	}
+	columns := migrationTableColumns(t, db, "codex_inspection_results")
+	if !columns["auto_recover_eligible"] {
+		t.Fatalf("legacy results columns = %#v, want auto_recover_eligible", columns)
+	}
+}
+
 func TestEnsureUsageRollupLongContextColumnsRollsBackAndRetries(t *testing.T) {
 	db, err := sql.Open("sqlite", dataSourceName(filepath.Join(t.TempDir(), "rollup-migration.sqlite")))
 	if err != nil {

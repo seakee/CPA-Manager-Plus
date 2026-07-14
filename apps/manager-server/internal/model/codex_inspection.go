@@ -45,6 +45,7 @@ type ManagerCodexInspectionConfig struct {
 	UsedPercentThreshold float64                              `json:"usedPercentThreshold,omitempty"`
 	SampleSize           int                                  `json:"sampleSize,omitempty"`
 	AutoActionMode       string                               `json:"autoActionMode,omitempty"`
+	AutoRecoverEnabled   bool                                 `json:"autoRecoverEnabled,omitempty"`
 }
 
 type ManagerCodexInspectionScheduleConfig struct {
@@ -88,32 +89,41 @@ type CodexInspectionQuotaWindow struct {
 }
 
 type CodexInspectionResult struct {
-	ID               int64                        `json:"id"`
-	RunID            int64                        `json:"runId"`
-	AccountKey       string                       `json:"accountKey"`
-	FileName         string                       `json:"fileName"`
-	DisplayAccount   string                       `json:"displayAccount"`
-	AuthIndex        string                       `json:"authIndex,omitempty"`
-	AccountID        string                       `json:"accountId,omitempty"`
-	Provider         string                       `json:"provider"`
-	Disabled         bool                         `json:"disabled"`
-	Status           string                       `json:"status,omitempty"`
-	State            string                       `json:"state,omitempty"`
-	Action           string                       `json:"action"`
-	ActionReason     string                       `json:"actionReason"`
-	ActionStatus     string                       `json:"actionStatus,omitempty"`
-	ExecutedAction   string                       `json:"executedAction,omitempty"`
-	ActionError      string                       `json:"actionError,omitempty"`
-	StatusCode       *int                         `json:"statusCode,omitempty"`
-	UsedPercent      *float64                     `json:"usedPercent,omitempty"`
-	IsQuota          bool                         `json:"isQuota"`
-	Error            string                       `json:"error,omitempty"`
-	PlanType         string                       `json:"planType,omitempty"`
-	QuotaWindows     []CodexInspectionQuotaWindow `json:"quotaWindows,omitempty"`
-	QuotaWindowsJSON string                       `json:"-"`
-	ErrorKind        string                       `json:"errorKind,omitempty"`
-	ErrorDetail      string                       `json:"errorDetail,omitempty"`
-	CreatedAtMS      int64                        `json:"createdAtMs"`
+	ID                  int64                        `json:"id"`
+	RunID               int64                        `json:"runId"`
+	AccountKey          string                       `json:"accountKey"`
+	FileName            string                       `json:"fileName"`
+	DisplayAccount      string                       `json:"displayAccount"`
+	AuthIndex           string                       `json:"authIndex,omitempty"`
+	AccountID           string                       `json:"accountId,omitempty"`
+	Provider            string                       `json:"provider"`
+	Disabled            bool                         `json:"disabled"`
+	Status              string                       `json:"status,omitempty"`
+	State               string                       `json:"state,omitempty"`
+	Action              string                       `json:"action"`
+	ActionReason        string                       `json:"actionReason"`
+	ActionStatus        string                       `json:"actionStatus,omitempty"`
+	ExecutedAction      string                       `json:"executedAction,omitempty"`
+	ActionError         string                       `json:"actionError,omitempty"`
+	StatusCode          *int                         `json:"statusCode,omitempty"`
+	UsedPercent         *float64                     `json:"usedPercent,omitempty"`
+	IsQuota             bool                         `json:"isQuota"`
+	AutoRecoverEligible bool                         `json:"autoRecoverEligible"`
+	Error               string                       `json:"error,omitempty"`
+	PlanType            string                       `json:"planType,omitempty"`
+	QuotaWindows        []CodexInspectionQuotaWindow `json:"quotaWindows,omitempty"`
+	QuotaWindowsJSON    string                       `json:"-"`
+	ErrorKind           string                       `json:"errorKind,omitempty"`
+	ErrorDetail         string                       `json:"errorDetail,omitempty"`
+	CreatedAtMS         int64                        `json:"createdAtMs"`
+}
+
+type CodexInspectionDisableOwnership struct {
+	FileName     string
+	AuthIndex    string
+	AccountID    string
+	DisabledAtMS int64
+	UpdatedAtMS  int64
 }
 
 type CodexInspectionLog struct {
@@ -142,6 +152,7 @@ func DefaultCodexInspectionConfig() ManagerCodexInspectionConfig {
 		UsedPercentThreshold: 100,
 		SampleSize:           0,
 		AutoActionMode:       CodexInspectionAutoActionNone,
+		AutoRecoverEnabled:   false,
 	}
 }
 
@@ -172,6 +183,9 @@ func NormalizeCodexInspectionConfig(input ManagerCodexInspectionConfig, fallback
 		next.SampleSize = input.SampleSize
 	}
 	next.AutoActionMode = NormalizeCodexInspectionAutoActionMode(input.AutoActionMode, base.AutoActionMode)
+	// Frontend and API saves submit the complete inspection config. Keeping this
+	// assignment explicit makes the safe false default win for legacy configs.
+	next.AutoRecoverEnabled = input.AutoRecoverEnabled
 	return next
 }
 

@@ -34,6 +34,7 @@ type ManagerExternalUsageServiceConfig = model.ManagerExternalUsageServiceConfig
 type CodexInspectionRun = model.CodexInspectionRun
 type CodexInspectionResult = model.CodexInspectionResult
 type CodexInspectionLog = model.CodexInspectionLog
+type CodexInspectionDisableOwnership = model.CodexInspectionDisableOwnership
 type InsertResult = model.InsertResult
 type ModelPrice = model.ModelPrice
 type ModelPriceSyncResult = model.ModelPriceSyncResult
@@ -258,6 +259,18 @@ func (s *Store) ListCodexInspectionResults(ctx context.Context, runID int64) ([]
 
 func (s *Store) ListCodexInspectionLogs(ctx context.Context, runID int64) ([]CodexInspectionLog, error) {
 	return s.CodexInspections.ListLogs(ctx, runID)
+}
+
+func (s *Store) ListCodexInspectionDisableOwnership(ctx context.Context) ([]CodexInspectionDisableOwnership, error) {
+	return s.CodexInspections.ListDisableOwnership(ctx)
+}
+
+func (s *Store) UpsertCodexInspectionDisableOwnership(ctx context.Context, item CodexInspectionDisableOwnership) error {
+	return s.CodexInspections.UpsertDisableOwnership(ctx, item)
+}
+
+func (s *Store) DeleteCodexInspectionDisableOwnership(ctx context.Context, fileName string) error {
+	return s.CodexInspections.DeleteDisableOwnership(ctx, fileName)
 }
 
 func (s *Store) InsertEvents(ctx context.Context, events []usage.Event) (InsertResult, error) {
