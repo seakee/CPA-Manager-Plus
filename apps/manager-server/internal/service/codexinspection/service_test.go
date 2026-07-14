@@ -418,6 +418,42 @@ func TestRunAutoRecoverSkipsManuallyDisabledAccount(t *testing.T) {
 	}
 }
 
+func TestRunWithDifferentTargetTypePreservesDisableOwnership(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"files":[{"name":"auth-a.json","auth_index":"auth-1","provider":"codex","account":"alice@example.com","disabled":true,"status":"ok","state":"ready"}]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(upstream.Close)
+
+	db := newCodexInspectionTestStore(t)
+	managerCfg := newCodexInspectionManagerConfig(upstream.URL)
+	managerCfg.CodexInspection.TargetType = "anthropic"
+	if err := db.SaveManagerConfig(context.Background(), managerCfg); err != nil {
+		t.Fatalf("save manager config: %v", err)
+	}
+	if err := db.UpsertCodexInspectionDisableOwnership(context.Background(), model.CodexInspectionDisableOwnership{
+		FileName:  "auth-a.json",
+		AuthIndex: "auth-1",
+	}); err != nil {
+		t.Fatalf("save inspection disable ownership: %v", err)
+	}
+
+	svc := newCodexInspectionTestService(t, db)
+	if _, err := svc.Run(context.Background(), RunRequest{TriggerType: "manual", TriggerKey: "manual"}); err != nil {
+		t.Fatalf("run inspection: %v", err)
+	}
+	ownership, err := db.ListCodexInspectionDisableOwnership(context.Background())
+	if err != nil {
+		t.Fatalf("list inspection disable ownership: %v", err)
+	}
+	if len(ownership) != 1 || ownership[0].FileName != "auth-a.json" {
+		t.Fatalf("ownership = %#v, want preserved auth-a.json", ownership)
+	}
+}
+
 func TestRunAutoActionDisableExecutesDeleteSuggestionAsDisable(t *testing.T) {
 	var deleteCalled bool
 	var patchCalled bool
@@ -1201,7 +1237,14 @@ func TestExecuteActionReturnsPatchError(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	svc := New(newCodexInspectionTestStore(t), nil, upstream.Client())
+	db := newCodexInspectionTestStore(t)
+	if err := db.UpsertCodexInspectionDisableOwnership(context.Background(), model.CodexInspectionDisableOwnership{
+		FileName:  "auth-a.json",
+		AuthIndex: "auth-1",
+	}); err != nil {
+		t.Fatalf("save inspection disable ownership: %v", err)
+	}
+	svc := New(db, nil, upstream.Client())
 	err := svc.executeAction(context.Background(), store.Setup{
 		CPAUpstreamURL: upstream.URL,
 		ManagementKey:  "management-key",
@@ -1215,6 +1258,13 @@ func TestExecuteActionReturnsPatchError(t *testing.T) {
 	message := err.Error()
 	if !strings.Contains(message, "status patch failed") {
 		t.Fatalf("patch error = %q", message)
+	}
+	ownership, listErr := db.ListCodexInspectionDisableOwnership(context.Background())
+	if listErr != nil {
+		t.Fatalf("list ownership: %v", listErr)
+	}
+	if len(ownership) != 1 || ownership[0].FileName != "auth-a.json" {
+		t.Fatalf("ownership after failed patch = %#v, want preserved", ownership)
 	}
 }
 

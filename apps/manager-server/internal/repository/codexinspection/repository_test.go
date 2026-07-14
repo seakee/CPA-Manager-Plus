@@ -60,4 +60,18 @@ func TestDisableOwnershipCRUD(t *testing.T) {
 	if len(items) != 0 {
 		t.Fatalf("ownership after delete = %#v, want empty", items)
 	}
+
+	if err := repository.UpsertDisableOwnership(ctx, model.CodexInspectionDisableOwnership{FileName: "auth-b.json"}); err != nil {
+		t.Fatalf("upsert ownership for clear all: %v", err)
+	}
+	if err := repository.DeleteAllDisableOwnership(ctx); err != nil {
+		t.Fatalf("delete all ownership: %v", err)
+	}
+	items, err = repository.ListDisableOwnership(ctx)
+	if err != nil {
+		t.Fatalf("list ownership after clear all: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("ownership after clear all = %#v, want empty", items)
+	}
 }

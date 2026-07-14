@@ -23,6 +23,7 @@ type Repository interface {
 	ListDisableOwnership(ctx context.Context) ([]model.CodexInspectionDisableOwnership, error)
 	UpsertDisableOwnership(ctx context.Context, item model.CodexInspectionDisableOwnership) error
 	DeleteDisableOwnership(ctx context.Context, fileName string) error
+	DeleteAllDisableOwnership(ctx context.Context) error
 }
 
 type repository struct {
@@ -408,6 +409,11 @@ func (r *repository) DeleteDisableOwnership(ctx context.Context, fileName string
 		return nil
 	}
 	_, err := r.db.ExecContext(ctx, `delete from codex_inspection_disable_ownership where file_name = ?`, fileName)
+	return err
+}
+
+func (r *repository) DeleteAllDisableOwnership(ctx context.Context) error {
+	_, err := r.db.ExecContext(ctx, `delete from codex_inspection_disable_ownership`)
 	return err
 }
 

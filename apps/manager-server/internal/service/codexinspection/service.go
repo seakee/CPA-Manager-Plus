@@ -238,14 +238,18 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (RunDetail, error) {
 		return s.failRun(persistCtx, run, err)
 	}
 
-	accounts := make([]account, 0, len(files))
+	allAccounts := make([]account, 0, len(files))
 	for _, file := range files {
-		next := toAccount(file)
+		allAccounts = append(allAccounts, toAccount(file))
+	}
+	s.applyDisableOwnership(ctx, allAccounts, logger)
+
+	accounts := make([]account, 0, len(allAccounts))
+	for _, next := range allAccounts {
 		if next.Provider == settings.TargetType {
 			accounts = append(accounts, next)
 		}
 	}
-	s.applyDisableOwnership(ctx, accounts, logger)
 	probeSetCount := len(accounts)
 	sampled := pickSample(accounts, settings.SampleSize)
 
@@ -904,12 +908,6 @@ func collectActionOutcomes(outcomes <-chan ActionOutcome, capacity int) []Action
 }
 
 func (s *Service) executeAction(ctx context.Context, setup store.Setup, item model.CodexInspectionResult, automatic bool) error {
-	if item.Action == "disable" && !automatic {
-		if err := s.store.DeleteCodexInspectionDisableOwnership(ctx, item.FileName); err != nil {
-			return fmt.Errorf("clear inspection disable ownership: %w", err)
-		}
-	}
-
 	var actionErr error
 	switch item.Action {
 	case "delete":
@@ -927,7 +925,13 @@ func (s *Service) executeAction(ctx context.Context, setup store.Setup, item mod
 
 	switch item.Action {
 	case "disable":
-		if !automatic || item.Disabled {
+		if !automatic {
+			if err := s.store.DeleteCodexInspectionDisableOwnership(ctx, item.FileName); err != nil {
+				return fmt.Errorf("clear inspection disable ownership: %w", err)
+			}
+			return nil
+		}
+		if item.Disabled {
 			return nil
 		}
 		if err := s.store.UpsertCodexInspectionDisableOwnership(ctx, model.CodexInspectionDisableOwnership{

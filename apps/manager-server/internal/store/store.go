@@ -273,6 +273,10 @@ func (s *Store) DeleteCodexInspectionDisableOwnership(ctx context.Context, fileN
 	return s.CodexInspections.DeleteDisableOwnership(ctx, fileName)
 }
 
+func (s *Store) DeleteAllCodexInspectionDisableOwnership(ctx context.Context) error {
+	return s.CodexInspections.DeleteAllDisableOwnership(ctx)
+}
+
 func (s *Store) InsertEvents(ctx context.Context, events []usage.Event) (InsertResult, error) {
 	return s.UsageEvents.InsertBatch(ctx, events)
 }
