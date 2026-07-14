@@ -37,6 +37,8 @@ If you are not sure whether an account is still needed, disable it first instead
 
 When pasting JSON, choose the format that matches the source. JSON formats differ by source, and a successful save does not guarantee the account can serve requests.
 
+When you directly upload an official sub2api account export, CPAMP detects and converts its OpenAI OAuth accounts in the browser, then uploads one independent CPA Codex auth file per account. Pasted sub2api JSON uses the same conversion flow. Multi-account imports generate per-account file names instead of saving a top-level JSON array as one auth file.
+
 ## Handling Problem Accounts
 
 - **Needs reauth**: open [OAuth Login](./oauth.md), then confirm state here.
@@ -48,4 +50,3 @@ When pasting JSON, choose the format that matches the source. JSON formats diffe
 ## Security Notes
 
 Auth files contain sensitive credentials. Do not share full JSON, OAuth tokens, API keys, or management keys. For troubleshooting, share sanitized monitoring summaries, account-state screenshots, and log timestamps instead.
-
