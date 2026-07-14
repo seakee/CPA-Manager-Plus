@@ -84,6 +84,88 @@ func TestRunPersistsLogsResultsAndDetail(t *testing.T) {
 	}
 }
 
+func TestFetchAuthFilesStreamsResponsesLargerThanEightMiB(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/management/auth-files" || r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"files":[{"name":"auth-a.json","auth_index":"auth-1","provider":"codex","padding":"`))
+		_, _ = w.Write([]byte(strings.Repeat("x", 8*1024*1024)))
+		_, _ = w.Write([]byte(`"}]}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	svc := New(newCodexInspectionTestStore(t), nil, upstream.Client())
+	files, err := svc.fetchAuthFiles(context.Background(), store.Setup{
+		CPAUpstreamURL: upstream.URL,
+		ManagementKey:  "management-key",
+	})
+	if err != nil {
+		t.Fatalf("fetch auth files: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("files = %d, want 1", len(files))
+	}
+	if name := readString(files[0], "name"); name != "auth-a.json" {
+		t.Fatalf("file name = %q, want auth-a.json", name)
+	}
+}
+
+func TestRequestCodexUsageStreamsResponsesLargerThanEightMiB(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/management/api-call" || r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"status_code":200,"body":{"padding":"`))
+		_, _ = w.Write([]byte(strings.Repeat("x", 8*1024*1024)))
+		_, _ = w.Write([]byte(`"}}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	svc := New(nil, nil, upstream.Client())
+	result, _, err := svc.requestCodexUsageAt(
+		context.Background(),
+		store.Setup{CPAUpstreamURL: upstream.URL, ManagementKey: "management-key"},
+		model.ManagerCodexInspectionConfig{},
+		account{AuthIndex: "auth-1"},
+		"/v0/management/api-call",
+	)
+	if err != nil {
+		t.Fatalf("request Codex usage: %v", err)
+	}
+	body, ok := result.Body.(map[string]any)
+	if !ok {
+		t.Fatalf("body = %#v, want map", result.Body)
+	}
+	if padding := readString(body, "padding"); len(padding) != 8*1024*1024 {
+		t.Fatalf("padding length = %d, want %d", len(padding), 8*1024*1024)
+	}
+}
+
+func TestDoCPAActionRejectsLargeBusinessFailureResponse(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"padding":"`))
+		_, _ = w.Write([]byte(strings.Repeat("x", 1024*1024)))
+		_, _ = w.Write([]byte(`","failed":["denied"]}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, upstream.URL, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	svc := New(nil, nil, upstream.Client())
+	actionErr, statusCode := svc.doCPAAction(req, "management-key")
+	if actionErr == nil || !strings.Contains(actionErr.Error(), "denied") {
+		t.Fatalf("action error = %v, want denied failure", actionErr)
+	}
+	if statusCode != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", statusCode, http.StatusOK)
+	}
+}
+
 func TestRunPersistsPlanQuotaWindowsAndErrorDetail(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {

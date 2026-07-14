@@ -19,6 +19,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
@@ -478,37 +479,15 @@ func (s *Service) failRun(ctx context.Context, run model.CodexInspectionRun, cau
 }
 
 func (s *Service) fetchAuthFiles(ctx context.Context, setup store.Setup) ([]authFile, error) {
-	files, _, err := s.fetchAuthFilesAt(ctx, setup, "/v0/management/auth-files")
-	return files, err
-}
-
-func (s *Service) fetchAuthFilesAt(ctx context.Context, setup store.Setup, path string) ([]authFile, int, error) {
-	req, err := http.NewRequestWithContext(
-		ctx,
-		http.MethodGet,
-		cpa.NormalizeBaseURL(setup.CPAUpstreamURL)+path,
-		nil,
-	)
+	files, err := cpaauthfiles.New(s.client).Fetch(ctx, setup.CPAUpstreamURL, setup.ManagementKey)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+setup.ManagementKey)
-	res, err := s.client.Do(req)
-	if err != nil {
-		return nil, 0, err
+	result := make([]authFile, 0, len(files))
+	for _, file := range files {
+		result = append(result, authFile(file.Raw))
 	}
-	defer res.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(res.Body, 8*1024*1024))
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return nil, res.StatusCode, fmt.Errorf("auth files request failed: %s %s", res.Status, truncate(string(body), maxStoredBodyText))
-	}
-	var payload struct {
-		Files []authFile `json:"files"`
-	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, res.StatusCode, err
-	}
-	return payload.Files, res.StatusCode, nil
+	return result, nil
 }
 
 func (s *Service) inspectAccounts(
@@ -742,14 +721,22 @@ func (s *Service) requestCodexUsageAt(
 		return apiCallResponse{}, 0, err
 	}
 	defer res.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(res.Body, 8*1024*1024))
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(res.Body, maxStoredBodyText))
 		return apiCallResponse{}, res.StatusCode, fmt.Errorf("api-call failed: %s %s", res.Status, truncate(string(body), maxStoredBodyText))
 	}
 
 	var raw map[string]any
-	if err := json.Unmarshal(body, &raw); err != nil {
+	decoder := json.NewDecoder(res.Body)
+	if err := decoder.Decode(&raw); err != nil {
 		return apiCallResponse{}, res.StatusCode, err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return apiCallResponse{}, res.StatusCode, errors.New("api-call response contains multiple JSON values")
+		}
+		return apiCallResponse{}, res.StatusCode, fmt.Errorf("decode api-call response trailing data: %w", err)
 	}
 	statusRaw, hasStatus := firstValue(raw, "status_code", "statusCode")
 	statusCode := int(readFloat(statusRaw, 0))
@@ -936,15 +923,12 @@ func (s *Service) doCPAAction(req *http.Request, managementKey string) (error, i
 		return err, 0
 	}
 	defer res.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(res.Body, 1024*1024))
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(res.Body, maxStoredBodyText))
 		return fmt.Errorf("%s %s", res.Status, truncate(string(body), maxStoredBodyText)), res.StatusCode
 	}
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err == nil {
-		if failed, ok := payload["failed"].([]any); ok && len(failed) > 0 {
-			return fmt.Errorf("CPA action failed: %s", truncate(fmt.Sprint(failed[0]), maxStoredBodyText)), res.StatusCode
-		}
+	if err := cpaauthfiles.ValidateActionResponse(res.Body); err != nil {
+		return err, res.StatusCode
 	}
 	return nil, res.StatusCode
 }
