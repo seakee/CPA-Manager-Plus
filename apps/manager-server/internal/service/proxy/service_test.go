@@ -1,12 +1,55 @@
 package proxy
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
+
+func TestManualAuthFileStatusClearsInspectionOwnershipAndRestoresBody(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.UpsertCodexInspectionDisableOwnership(context.Background(), model.CodexInspectionDisableOwnership{
+		FileName:  "auth-a.json",
+		AuthIndex: "auth-1",
+	}); err != nil {
+		t.Fatalf("save ownership: %v", err)
+	}
+
+	body := `{"name":"auth-a.json","disabled":false}`
+	req, err := http.NewRequest(http.MethodPatch, "/v0/management/auth-files/status", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	service := New(nil, st)
+	if err := service.clearInspectionOwnershipForManualStatusChange(context.Background(), req); err != nil {
+		t.Fatalf("clear ownership: %v", err)
+	}
+	items, err := st.ListCodexInspectionDisableOwnership(context.Background())
+	if err != nil {
+		t.Fatalf("list ownership: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("ownership = %#v, want empty", items)
+	}
+	raw, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("read restored body: %v", err)
+	}
+	if string(raw) != body {
+		t.Fatalf("restored body = %q, want %q", raw, body)
+	}
+}
 
 func TestIsManagementPath(t *testing.T) {
 	tests := []struct {

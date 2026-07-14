@@ -17,6 +17,7 @@ import (
 
 type Service struct {
 	managerConfigService *managerconfig.Service
+	store                *store.Store
 }
 
 const cpaPluginResourcePrefix = "/v0/resource/plugins"
@@ -43,8 +44,12 @@ var cpaBuiltinManagementPathHeads = map[string]struct{}{
 	"usage-statistics-enabled":  {},
 }
 
-func New(managerConfigService *managerconfig.Service) *Service {
-	return &Service{managerConfigService: managerConfigService}
+func New(managerConfigService *managerconfig.Service, stores ...*store.Store) *Service {
+	service := &Service{managerConfigService: managerConfigService}
+	if len(stores) > 0 {
+		service.store = stores[0]
+	}
+	return service
 }
 
 func (s *Service) ProxyManagement(w http.ResponseWriter, r *http.Request, writeError func(http.ResponseWriter, int, error)) {
@@ -112,6 +117,10 @@ func (s *Service) proxyToSavedSetup(w http.ResponseWriter, r *http.Request, writ
 			return
 		}
 	}
+	if err := s.clearInspectionOwnershipForManualStatusChange(r.Context(), r); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
@@ -130,6 +139,50 @@ func (s *Service) proxyToSavedSetup(w http.ResponseWriter, r *http.Request, writ
 		writeError(w, http.StatusBadGateway, err)
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+func (s *Service) clearInspectionOwnershipForManualStatusChange(ctx context.Context, r *http.Request) error {
+	if s.store == nil {
+		return nil
+	}
+	fileName, err := manualAuthFileStatusName(r)
+	if err != nil {
+		return err
+	}
+	if fileName == "" {
+		return nil
+	}
+	return s.store.DeleteCodexInspectionDisableOwnership(ctx, fileName)
+}
+
+func manualAuthFileStatusName(r *http.Request) (string, error) {
+	if r == nil || r.Method != http.MethodPatch || strings.TrimRight(r.URL.Path, "/") != "/v0/management/auth-files/status" || r.Body == nil {
+		return "", nil
+	}
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		return "", err
+	}
+	if errClose := r.Body.Close(); errClose != nil {
+		return "", errClose
+	}
+	restoreRequestBody(r, raw)
+	var payload struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return "", nil
+	}
+	return strings.TrimSpace(payload.Name), nil
+}
+
+func restoreRequestBody(r *http.Request, body []byte) {
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.ContentLength = int64(len(body))
+	bodyCopy := append([]byte(nil), body...)
+	r.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(bodyCopy)), nil
+	}
 }
 
 func rewriteCodexInviteOrigin(header http.Header, target *url.URL) {
@@ -154,45 +207,37 @@ func rewritePluginManagementOriginBody(r *http.Request, target *url.URL) error {
 	if errClose := r.Body.Close(); errClose != nil {
 		return errClose
 	}
-	restoreBody := func(body []byte) {
-		r.Body = io.NopCloser(bytes.NewReader(body))
-		r.ContentLength = int64(len(body))
-		bodyCopy := append([]byte(nil), body...)
-		r.GetBody = func() (io.ReadCloser, error) {
-			return io.NopCloser(bytes.NewReader(bodyCopy)), nil
-		}
-	}
 	if len(bytes.TrimSpace(raw)) == 0 {
-		restoreBody(raw)
+		restoreRequestBody(r, raw)
 		return nil
 	}
 
 	var payload map[string]json.RawMessage
 	if errUnmarshal := json.Unmarshal(raw, &payload); errUnmarshal != nil {
-		restoreBody(raw)
+		restoreRequestBody(r, raw)
 		return nil
 	}
 	if _, ok := payload[managementOriginJSONField]; !ok {
-		restoreBody(raw)
+		restoreRequestBody(r, raw)
 		return nil
 	}
 	origin := target.Scheme + "://" + target.Host
 	if origin == "://" {
-		restoreBody(raw)
+		restoreRequestBody(r, raw)
 		return nil
 	}
 	encodedOrigin, errMarshal := json.Marshal(origin)
 	if errMarshal != nil {
-		restoreBody(raw)
+		restoreRequestBody(r, raw)
 		return errMarshal
 	}
 	payload[managementOriginJSONField] = encodedOrigin
 	next, errMarshal := json.Marshal(payload)
 	if errMarshal != nil {
-		restoreBody(raw)
+		restoreRequestBody(r, raw)
 		return errMarshal
 	}
-	restoreBody(next)
+	restoreRequestBody(r, next)
 	return nil
 }
 

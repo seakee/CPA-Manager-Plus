@@ -50,7 +50,7 @@ func TestCodexInspectionManualActionsRoute(t *testing.T) {
 		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
 			_, _ = w.Write([]byte(`{"files":[{"name":"auth-a.json","auth_index":"auth-1","provider":"codex","account":"alice@example.com","disabled":true,"status":"ok","state":"ready"}]}`))
 		case r.URL.Path == "/v0/management/api-call" && r.Method == http.MethodPost:
-			_, _ = w.Write([]byte(`{"status_code":200,"body":{"ok":true}}`))
+			_, _ = w.Write([]byte(`{"status_code":200,"body":{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000},"secondary_window":{"used_percent":5,"limit_window_seconds":2592000}}}}`))
 		case r.URL.Path == "/v0/management/auth-files/status" && r.Method == http.MethodPatch:
 			patchCalled = true
 			var payload struct {

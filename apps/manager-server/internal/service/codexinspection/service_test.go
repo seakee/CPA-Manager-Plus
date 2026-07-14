@@ -293,8 +293,8 @@ func TestRunAutoActionNoneDoesNotExecuteActions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run inspection: %v", err)
 	}
-	if result.Run.EnableCount != 1 {
-		t.Fatalf("enable count = %d, want 1", result.Run.EnableCount)
+	if result.Run.EnableCount != 0 || result.Run.KeepCount != 1 {
+		t.Fatalf("run counts enable=%d keep=%d, want 0/1", result.Run.EnableCount, result.Run.KeepCount)
 	}
 	if patchCalled {
 		t.Fatal("server inspection executed action in none mode")
@@ -309,7 +309,7 @@ func TestRunAutoActionEnableEnablesRecoveredDisabledAccount(t *testing.T) {
 		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
 			_, _ = w.Write([]byte(`{"files":[{"name":"auth-a.json","auth_index":"auth-1","provider":"codex","account":"alice@example.com","disabled":true,"status":"ok","state":"ready"}]}`))
 		case r.URL.Path == "/v0/management/api-call" && r.Method == http.MethodPost:
-			_, _ = w.Write([]byte(`{"status_code":200,"body":{"ok":true}}`))
+			_, _ = w.Write([]byte(`{"status_code":200,"body":{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000},"secondary_window":{"used_percent":5,"limit_window_seconds":2592000}}}}`))
 		case strings.HasPrefix(r.URL.Path, "/v0/management/auth-files") && r.Method == http.MethodPatch:
 			patchCalled = true
 			var payload struct {
@@ -332,9 +332,16 @@ func TestRunAutoActionEnableEnablesRecoveredDisabledAccount(t *testing.T) {
 
 	db := newCodexInspectionTestStore(t)
 	managerCfg := newCodexInspectionManagerConfig(upstream.URL)
-	managerCfg.CodexInspection.AutoActionMode = model.CodexInspectionAutoActionEnable
+	managerCfg.CodexInspection.AutoActionMode = model.CodexInspectionAutoActionNone
+	managerCfg.CodexInspection.AutoRecoverEnabled = true
 	if err := db.SaveManagerConfig(context.Background(), managerCfg); err != nil {
 		t.Fatalf("save manager config: %v", err)
+	}
+	if err := db.UpsertCodexInspectionDisableOwnership(context.Background(), model.CodexInspectionDisableOwnership{
+		FileName:  "auth-a.json",
+		AuthIndex: "auth-1",
+	}); err != nil {
+		t.Fatalf("save inspection disable ownership: %v", err)
 	}
 	svc := newCodexInspectionTestService(t, db)
 
@@ -355,10 +362,59 @@ func TestRunAutoActionEnableEnablesRecoveredDisabledAccount(t *testing.T) {
 		t.Fatalf("run counts enable=%d keep=%d, want 1/0", result.Run.EnableCount, result.Run.KeepCount)
 	}
 	if result.Results[0].Action != "enable" ||
+		!result.Results[0].AutoRecoverEligible ||
 		result.Results[0].ActionStatus != model.CodexInspectionActionStatusSuccess ||
 		result.Results[0].ExecutedAction != "enable" ||
 		result.Results[0].Disabled {
 		t.Fatalf("result after enable = %#v", result.Results[0])
+	}
+	ownership, err := db.ListCodexInspectionDisableOwnership(context.Background())
+	if err != nil {
+		t.Fatalf("list inspection disable ownership: %v", err)
+	}
+	if len(ownership) != 0 {
+		t.Fatalf("ownership after enable = %#v, want empty", ownership)
+	}
+}
+
+func TestRunAutoRecoverSkipsManuallyDisabledAccount(t *testing.T) {
+	var patchCalled bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"files":[{"name":"auth-a.json","auth_index":"auth-1","provider":"codex","account":"alice@example.com","disabled":true,"status":"ok","state":"ready"}]}`))
+		case r.URL.Path == "/v0/management/api-call" && r.Method == http.MethodPost:
+			_, _ = w.Write([]byte(`{"status_code":200,"body":{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000},"secondary_window":{"used_percent":5,"limit_window_seconds":2592000}}}}`))
+		case strings.HasPrefix(r.URL.Path, "/v0/management/auth-files") && r.Method == http.MethodPatch:
+			patchCalled = true
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	db := newCodexInspectionTestStore(t)
+	managerCfg := newCodexInspectionManagerConfig(upstream.URL)
+	managerCfg.CodexInspection.AutoActionMode = model.CodexInspectionAutoActionNone
+	managerCfg.CodexInspection.AutoRecoverEnabled = true
+	if err := db.SaveManagerConfig(context.Background(), managerCfg); err != nil {
+		t.Fatalf("save manager config: %v", err)
+	}
+	svc := newCodexInspectionTestService(t, db)
+
+	result, err := svc.Run(context.Background(), RunRequest{TriggerType: "manual", TriggerKey: "manual"})
+	if err != nil {
+		t.Fatalf("run inspection: %v", err)
+	}
+	if patchCalled {
+		t.Fatal("auto recovery enabled a manually disabled account")
+	}
+	if len(result.Results) != 1 || result.Results[0].Action != "enable" || result.Results[0].AutoRecoverEligible {
+		t.Fatalf("result = %#v, want manual-only enable suggestion", result.Results)
+	}
+	if !strings.Contains(result.Results[0].ActionReason, "仅允许手动启用") {
+		t.Fatalf("action reason = %q, want manual-only explanation", result.Results[0].ActionReason)
 	}
 }
 
@@ -424,6 +480,13 @@ func TestRunAutoActionDisableExecutesDeleteSuggestionAsDisable(t *testing.T) {
 		result.Results[0].ExecutedAction != "disable" ||
 		!result.Results[0].Disabled {
 		t.Fatalf("result after auto disable = %#v", result.Results[0])
+	}
+	ownership, err := db.ListCodexInspectionDisableOwnership(context.Background())
+	if err != nil {
+		t.Fatalf("list inspection disable ownership: %v", err)
+	}
+	if len(ownership) != 1 || ownership[0].FileName != "auth-a.json" || ownership[0].AuthIndex != "auth-1" {
+		t.Fatalf("ownership after auto disable = %#v", ownership)
 	}
 }
 
@@ -714,6 +777,40 @@ func TestResolveProbeActionUsesMonthlyWindowAsLongQuota(t *testing.T) {
 		}
 	})
 
+	t.Run("keeps disabled account while short window remains exhausted", func(t *testing.T) {
+		disabledItem := item
+		disabledItem.Disabled = true
+		rateLimit := &codexRateLimit{
+			PrimaryWindow: &codexWindow{
+				UsedPercent:        ptrFloat(100),
+				LimitWindowSeconds: ptrFloat(codexFiveHourWindow),
+			},
+			SecondaryWindow: &codexWindow{
+				UsedPercent:        ptrFloat(5),
+				LimitWindowSeconds: ptrFloat(codexMonthWindow),
+			},
+		}
+		decision := resolveProbeAction(disabledItem, http.StatusOK, "", rateLimit, deriveRateLimitUsedPercent(rateLimit), true, threshold)
+
+		if decision.Action != "keep" ||
+			decision.ActionReason != "5 小时额度仍达到阈值，月额度可用但继续保持禁用" ||
+			decision.UsedPercent == nil ||
+			*decision.UsedPercent != 5 ||
+			!decision.IsQuota {
+			t.Fatalf("decision = %#v, want keep disabled account until short window recovers", decision)
+		}
+	})
+
+	t.Run("keeps disabled account when quota is unknown", func(t *testing.T) {
+		disabledItem := item
+		disabledItem.Disabled = true
+		decision := resolveProbeAction(disabledItem, http.StatusOK, `{"ok":true}`, nil, nil, false, threshold)
+
+		if decision.Action != "keep" || decision.UsedPercent != nil || decision.IsQuota {
+			t.Fatalf("decision = %#v, want keep unknown quota", decision)
+		}
+	})
+
 	t.Run("treats team secondary window without duration as monthly quota", func(t *testing.T) {
 		rateLimit := &codexRateLimit{
 			PrimaryWindow: &codexWindow{
@@ -816,7 +913,7 @@ func TestExecuteManualActionsProcessesCompletedRunResults(t *testing.T) {
 		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
 			_, _ = w.Write([]byte(`{"files":[{"name":"auth-a.json","auth_index":"auth-1","provider":"codex","account":"alice@example.com","disabled":true,"status":"ok","state":"ready"}]}`))
 		case r.URL.Path == "/v0/management/api-call" && r.Method == http.MethodPost:
-			_, _ = w.Write([]byte(`{"status_code":200,"body":{"ok":true}}`))
+			_, _ = w.Write([]byte(`{"status_code":200,"body":{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000},"secondary_window":{"used_percent":5,"limit_window_seconds":2592000}}}}`))
 		case strings.HasPrefix(r.URL.Path, "/v0/management/auth-files") && r.Method == http.MethodPatch:
 			patchCalled = true
 			var payload struct {
@@ -1111,7 +1208,7 @@ func TestExecuteActionReturnsPatchError(t *testing.T) {
 	}, model.CodexInspectionResult{
 		FileName: "auth-a.json",
 		Action:   "disable",
-	})
+	}, false)
 	if err == nil {
 		t.Fatal("execute action succeeded, want patch error")
 	}
@@ -1218,7 +1315,7 @@ func newMixedAutoActionServer(
 					_, _ = w.Write([]byte(`{"status_code":402,"body":{"message":"limit reached"}}`))
 					return
 				}
-				_, _ = w.Write([]byte(`{"status_code":200,"body":{"ok":true}}`))
+				_, _ = w.Write([]byte(`{"status_code":200,"body":{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000},"secondary_window":{"used_percent":5,"limit_window_seconds":2592000}}}}`))
 			case "auth-2":
 				_, _ = w.Write([]byte(`{"status_code":402,"body":{"detail":{"code":"deactivated_workspace"}}}`))
 			default:

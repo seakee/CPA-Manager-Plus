@@ -88,16 +88,17 @@ type ExecuteActionsResult struct {
 type authFile map[string]any
 
 type account struct {
-	Key            string
-	FileName       string
-	DisplayAccount string
-	AuthIndex      string
-	AccountID      string
-	Provider       string
-	Disabled       bool
-	Status         string
-	State          string
-	File           authFile
+	Key              string
+	FileName         string
+	DisplayAccount   string
+	AuthIndex        string
+	AccountID        string
+	Provider         string
+	Disabled         bool
+	AutoRecoverOwned bool
+	Status           string
+	State            string
+	File             authFile
 }
 
 type apiCallResponse struct {
@@ -244,6 +245,7 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (RunDetail, error) {
 			accounts = append(accounts, next)
 		}
 	}
+	s.applyDisableOwnership(ctx, accounts, logger)
 	probeSetCount := len(accounts)
 	sampled := pickSample(accounts, settings.SampleSize)
 
@@ -388,7 +390,7 @@ func (s *Service) ExecuteManualActions(ctx context.Context, runID int64, req Exe
 	outcomes := make([]ActionOutcome, 0, len(preflightOutcomes)+len(validationOutcomes)+len(validItems))
 	outcomes = append(outcomes, preflightOutcomes...)
 	outcomes = append(outcomes, validationOutcomes...)
-	outcomes = append(outcomes, s.executeActionItems(ctx, setup, settings, validItems, logger, "手动处理", func(item model.CodexInspectionResult) string {
+	outcomes = append(outcomes, s.executeActionItems(ctx, setup, settings, validItems, logger, "手动处理", false, func(item model.CodexInspectionResult) string {
 		return item.Action
 	})...)
 	if len(outcomes) == 0 {
@@ -637,6 +639,10 @@ func (s *Service) inspectSingleAccount(
 	base.ActionReason = decision.ActionReason
 	base.UsedPercent = decision.UsedPercent
 	base.IsQuota = decision.IsQuota
+	base.AutoRecoverEligible = decision.Action == "enable" && item.AutoRecoverOwned
+	if decision.Action == "enable" && !base.AutoRecoverEligible {
+		base.ActionReason += "；禁用来源不受巡检管理，仅允许手动启用"
+	}
 	base.PlanType = planType
 	base.QuotaWindows = buildCodexInspectionQuotaWindows(payload, planType)
 	base.Error = ""
@@ -784,13 +790,13 @@ func (s *Service) executeAutoActions(
 	logger runLogger,
 ) []ActionOutcome {
 	mode := model.NormalizeCodexInspectionAutoActionMode(settings.AutoActionMode, model.CodexInspectionAutoActionNone)
-	items, preflightOutcomes := selectAutoActionItems(mode, results)
+	items, preflightOutcomes := selectAutoActionItems(mode, settings.AutoRecoverEnabled, results)
 	if len(items) == 0 {
 		return preflightOutcomes
 	}
 	outcomes := make([]ActionOutcome, 0, len(preflightOutcomes)+len(items))
 	outcomes = append(outcomes, preflightOutcomes...)
-	outcomes = append(outcomes, s.executeActionItems(ctx, setup, settings, items, logger, "自动处理", func(item model.CodexInspectionResult) string {
+	outcomes = append(outcomes, s.executeActionItems(ctx, setup, settings, items, logger, "自动处理", true, func(item model.CodexInspectionResult) string {
 		return resolveExecutableAction(mode, item.Action)
 	})...)
 	return outcomes
@@ -803,6 +809,7 @@ func (s *Service) executeActionItems(
 	items []model.CodexInspectionResult,
 	logger runLogger,
 	logPrefix string,
+	automatic bool,
 	actionFor func(model.CodexInspectionResult) string,
 ) []ActionOutcome {
 	workers := settings.DeleteWorkers
@@ -840,7 +847,7 @@ func (s *Service) executeActionItems(
 						DisplayAccount: item.DisplayAccount,
 						Action:         action,
 					}
-					if err := s.executeAction(ctx, setup, actionItem); err != nil {
+					if err := s.executeAction(ctx, setup, actionItem, automatic); err != nil {
 						outcome.Success = false
 						outcome.Status = model.CodexInspectionActionStatusFailed
 						outcome.Error = err.Error()
@@ -896,18 +903,54 @@ func collectActionOutcomes(outcomes <-chan ActionOutcome, capacity int) []Action
 	return result
 }
 
-func (s *Service) executeAction(ctx context.Context, setup store.Setup, item model.CodexInspectionResult) error {
+func (s *Service) executeAction(ctx context.Context, setup store.Setup, item model.CodexInspectionResult, automatic bool) error {
+	if item.Action == "disable" && !automatic {
+		if err := s.store.DeleteCodexInspectionDisableOwnership(ctx, item.FileName); err != nil {
+			return fmt.Errorf("clear inspection disable ownership: %w", err)
+		}
+	}
+
+	var actionErr error
 	switch item.Action {
 	case "delete":
-		return s.deleteAuthFileOnly(ctx, setup, "/v0/management/auth-files", item.FileName)
+		actionErr = s.deleteAuthFileOnly(ctx, setup, "/v0/management/auth-files", item.FileName)
 	case "disable", "enable":
 		disabled := item.Action == "disable"
 		payload := map[string]any{"name": item.FileName, "disabled": disabled}
-		err, _ := s.patchAuthFile(ctx, setup, "/v0/management/auth-files/status", payload)
-		return err
+		actionErr, _ = s.patchAuthFile(ctx, setup, "/v0/management/auth-files/status", payload)
 	default:
 		return nil
 	}
+	if actionErr != nil {
+		return actionErr
+	}
+
+	switch item.Action {
+	case "disable":
+		if !automatic || item.Disabled {
+			return nil
+		}
+		if err := s.store.UpsertCodexInspectionDisableOwnership(ctx, model.CodexInspectionDisableOwnership{
+			FileName:     item.FileName,
+			AuthIndex:    item.AuthIndex,
+			AccountID:    item.AccountID,
+			DisabledAtMS: time.Now().UnixMilli(),
+		}); err != nil {
+			rollbackErr, _ := s.patchAuthFile(ctx, setup, "/v0/management/auth-files/status", map[string]any{
+				"name":     item.FileName,
+				"disabled": false,
+			})
+			if rollbackErr != nil {
+				return fmt.Errorf("persist inspection disable ownership: %w; rollback enable failed: %v", err, rollbackErr)
+			}
+			return fmt.Errorf("persist inspection disable ownership: %w", err)
+		}
+	case "enable", "delete":
+		if err := s.store.DeleteCodexInspectionDisableOwnership(ctx, item.FileName); err != nil {
+			return fmt.Errorf("clear inspection disable ownership: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *Service) deleteAuthFileOnly(ctx context.Context, setup store.Setup, path string, fileName string) error {
@@ -1027,7 +1070,13 @@ func resolveWindowAwareProbeAction(item account, statusCode int, bodyText string
 	classified := classifyWindows(rateLimit, planType)
 	longWindow := classified.longWindow()
 	if longWindow == nil || longWindow.UsedPercent == nil {
-		return nil
+		decision := inspectionDecision{
+			Action:       "keep",
+			ActionReason: "额度信息不完整，保留账号",
+			UsedPercent:  deriveRateLimitUsedPercent(rateLimit),
+			IsQuota:      false,
+		}
+		return &decision
 	}
 	longWindowUsedPercent := *longWindow.UsedPercent
 	longWindowLabel := classified.longWindowLabel(longWindow)
@@ -1055,10 +1104,15 @@ func resolveWindowAwareProbeAction(item account, statusCode int, bodyText string
 		}
 	}
 	if item.Disabled {
-		reason := fmt.Sprintf("%s仍可用，建议立即启用账号", longWindowLabel)
 		if fiveHourOverThreshold {
-			reason = fmt.Sprintf("5 小时额度达到阈值，但%s仍可用，建议立即启用账号", longWindowLabel)
+			return &inspectionDecision{
+				Action:       "keep",
+				ActionReason: fmt.Sprintf("5 小时额度仍达到阈值，%s可用但继续保持禁用", longWindowLabel),
+				UsedPercent:  ptrFloat(longWindowUsedPercent),
+				IsQuota:      true,
+			}
 		}
+		reason := fmt.Sprintf("%s仍可用，建议立即启用账号", longWindowLabel)
 		return &inspectionDecision{
 			Action:       "enable",
 			ActionReason: reason,
@@ -1101,10 +1155,18 @@ func resolveLegacyProbeAction(item account, statusCode int, bodyText string, use
 		}
 		return inspectionDecision{Action: "disable", ActionReason: reason, UsedPercent: usedPercent, IsQuota: isQuota}
 	}
-	if statusCode == http.StatusOK && item.Disabled {
+	if statusCode == http.StatusOK && item.Disabled && usedPercent != nil {
 		return inspectionDecision{
 			Action:       "enable",
 			ActionReason: "账号恢复健康，建议重新启用",
+			UsedPercent:  usedPercent,
+			IsQuota:      false,
+		}
+	}
+	if statusCode == http.StatusOK && item.Disabled {
+		return inspectionDecision{
+			Action:       "keep",
+			ActionReason: "额度信息不完整，无法确认恢复，保留账号",
 			UsedPercent:  usedPercent,
 			IsQuota:      false,
 		}
@@ -1171,9 +1233,9 @@ func resolveExecutableAction(mode string, action string) string {
 	return action
 }
 
-func selectAutoActionItems(mode string, results []model.CodexInspectionResult) ([]model.CodexInspectionResult, []ActionOutcome) {
+func selectAutoActionItems(mode string, autoRecoverEnabled bool, results []model.CodexInspectionResult) ([]model.CodexInspectionResult, []ActionOutcome) {
 	mode = model.NormalizeCodexInspectionAutoActionMode(mode, model.CodexInspectionAutoActionNone)
-	if mode == model.CodexInspectionAutoActionNone {
+	if mode == model.CodexInspectionAutoActionNone && !autoRecoverEnabled {
 		return nil, nil
 	}
 
@@ -1186,7 +1248,7 @@ func selectAutoActionItems(mode string, results []model.CodexInspectionResult) (
 			}
 			continue
 		}
-		if len(group.Items) == 0 || !allowAutoAction(mode, group.Items[0]) {
+		if len(group.Items) == 0 || !allowAutoAction(mode, autoRecoverEnabled, group.Items[0]) {
 			continue
 		}
 		items = append(items, group.Items[0])
@@ -1226,16 +1288,53 @@ func buildExecutableFileActionGroups(results []model.CodexInspectionResult) []fi
 	return groups
 }
 
-func allowAutoAction(mode string, result model.CodexInspectionResult) bool {
+func allowAutoAction(mode string, autoRecoverEnabled bool, result model.CodexInspectionResult) bool {
+	if result.Action == "enable" {
+		return autoRecoverEnabled && result.AutoRecoverEligible
+	}
 	switch mode {
 	case model.CodexInspectionAutoActionEnable:
-		return result.Action == "enable"
+		return false
 	case model.CodexInspectionAutoActionDisable:
-		return result.Action == "enable" || result.Action == "disable" || result.Action == "delete"
+		return result.Action == "disable" || result.Action == "delete"
 	case model.CodexInspectionAutoActionDelete:
-		return result.Action == "enable" || result.Action == "disable" || result.Action == "delete"
+		return result.Action == "disable" || result.Action == "delete"
 	default:
 		return false
+	}
+}
+
+func (s *Service) applyDisableOwnership(ctx context.Context, accounts []account, logger runLogger) {
+	items, err := s.store.ListCodexInspectionDisableOwnership(ctx)
+	if err != nil {
+		logger.warning(ctx, "加载巡检禁用所有权失败，自动恢复将保持关闭", map[string]any{"error": err.Error()})
+		return
+	}
+	for _, item := range items {
+		matched := false
+		disabled := false
+		for _, candidate := range accounts {
+			if candidate.FileName != item.FileName {
+				continue
+			}
+			if item.AuthIndex != "" && candidate.AuthIndex != item.AuthIndex {
+				continue
+			}
+			if item.AccountID != "" && candidate.AccountID != item.AccountID {
+				continue
+			}
+			matched = true
+			disabled = disabled || candidate.Disabled
+		}
+		if !matched || !disabled {
+			_ = s.store.DeleteCodexInspectionDisableOwnership(ctx, item.FileName)
+			continue
+		}
+		for index := range accounts {
+			if accounts[index].FileName == item.FileName {
+				accounts[index].AutoRecoverOwned = true
+			}
+		}
 	}
 }
 
