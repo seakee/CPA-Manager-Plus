@@ -24,8 +24,7 @@ import {
   readString,
 } from './codexInspectionSettings';
 
-export const CODEX_INSPECTION_LAST_RUN_STORAGE_KEY =
-  'cli-proxy-codex-inspection-last-run-v1';
+export const CODEX_INSPECTION_LAST_RUN_STORAGE_KEY = 'cli-proxy-codex-inspection-last-run-v1';
 
 const CODEX_INSPECTION_LAST_RUN_STORAGE_VERSION = 1;
 
@@ -104,9 +103,7 @@ const normalizeQuotaWindowLabelParams = (
   return Object.keys(params).length > 0 ? params : undefined;
 };
 
-const serializeQuotaWindow = (
-  window: CodexInspectionQuotaWindow
-): CodexInspectionQuotaWindow => ({
+const serializeQuotaWindow = (window: CodexInspectionQuotaWindow): CodexInspectionQuotaWindow => ({
   id: readString(window.id),
   labelKey: readString(window.labelKey),
   labelParams: normalizeQuotaWindowLabelParams(window.labelParams),
@@ -141,6 +138,7 @@ const serializeResultItemForStorage = (
   accountId: null,
   provider: item.provider,
   disabled: item.disabled,
+  autoRecoverOwned: item.autoRecoverOwned,
   status: item.status,
   state: item.state,
   action: item.action,
@@ -148,6 +146,7 @@ const serializeResultItemForStorage = (
   statusCode: item.statusCode,
   usedPercent: item.usedPercent,
   isQuota: item.isQuota,
+  autoRecoverEligible: item.autoRecoverEligible,
   error: item.error,
   planType: readNullableString(item.planType),
   quotaWindows: (item.quotaWindows ?? []).map(serializeQuotaWindow),
@@ -176,6 +175,7 @@ const hydrateStoredResultItem = (
     accountId: readNullableString(value.accountId),
     provider,
     disabled,
+    autoRecoverOwned: readBoolean(value.autoRecoverOwned, false),
     status: readString(value.status),
     state: readString(value.state),
     raw: {
@@ -189,6 +189,7 @@ const hydrateStoredResultItem = (
     statusCode: readNullableNumber(value.statusCode),
     usedPercent: readNullableNumber(value.usedPercent),
     isQuota: readBoolean(value.isQuota, false),
+    autoRecoverEligible: readBoolean(value.autoRecoverEligible, false),
     error: readString(value.error),
     planType: readNullableString(value.planType),
     quotaWindows: Array.isArray(value.quotaWindows)

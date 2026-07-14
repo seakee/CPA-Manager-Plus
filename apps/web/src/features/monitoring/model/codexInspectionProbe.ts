@@ -60,6 +60,7 @@ export const toInspectionAccount = (file: AuthFileItem): CodexInspectionAccount 
   accountId: resolveCodexChatgptAccountId(file),
   provider: resolveAuthProvider(file),
   disabled: isDisabledAuthFile(file),
+  autoRecoverOwned: false,
   status: readString(file.status),
   state: readString(file.state),
   raw: file,
@@ -174,10 +175,18 @@ const resolveLegacyProbeAction = (
       isQuota,
     };
   }
-  if (statusCode === 200 && account.disabled) {
+  if (statusCode === 200 && account.disabled && usedPercent !== null) {
     return {
       action: 'enable',
       actionReason: '账号恢复健康，建议重新启用',
+      usedPercent,
+      isQuota: false,
+    };
+  }
+  if (statusCode === 200 && account.disabled) {
+    return {
+      action: 'keep',
+      actionReason: '额度信息不完整，无法确认恢复，保留账号',
       usedPercent,
       isQuota: false,
     };
@@ -200,12 +209,21 @@ const resolveWindowAwareProbeAction = (
 ): CodexInspectionDecision | null => {
   if (!rateLimit) return null;
 
-  const { fiveHourWindow, weeklyWindow, monthlyWindow, longWindow } =
-    classifyCodexRateLimitWindows(rateLimit, {
+  const { fiveHourWindow, weeklyWindow, monthlyWindow, longWindow } = classifyCodexRateLimitWindows(
+    rateLimit,
+    {
       teamPlan: normalizePlanType(planType) === 'team',
-    });
+    }
+  );
   const longWindowUsedPercent = getCodexQuotaWindowUsedPercent(longWindow);
-  if (!longWindow || longWindowUsedPercent === null) return null;
+  if (!longWindow || longWindowUsedPercent === null) {
+    return {
+      action: 'keep',
+      actionReason: '额度信息不完整，保留账号',
+      usedPercent: deriveCodexRateLimitUsedPercent(rateLimit),
+      isQuota: false,
+    };
+  }
 
   const fiveHourUsedPercent = getCodexQuotaWindowUsedPercent(fiveHourWindow);
   const longWindowLabel =
@@ -235,11 +253,17 @@ const resolveWindowAwareProbeAction = (
   }
 
   if (account.disabled) {
+    if (fiveHourOverThreshold) {
+      return {
+        action: 'keep',
+        actionReason: `5 小时额度仍达到阈值，${longWindowLabel}可用但继续保持禁用`,
+        usedPercent: longWindowUsedPercent,
+        isQuota: true,
+      };
+    }
     return {
       action: 'enable',
-      actionReason: fiveHourOverThreshold
-        ? `5 小时额度达到阈值，但${longWindowLabel}仍可用，建议立即启用账号`
-        : `${longWindowLabel}仍可用，建议立即启用账号`,
+      actionReason: `${longWindowLabel}仍可用，建议立即启用账号`,
       usedPercent: longWindowUsedPercent,
       isQuota: false,
     };
@@ -302,6 +326,7 @@ export const inspectSingleAccount = async (
       statusCode: null,
       usedPercent: null,
       isQuota: false,
+      autoRecoverEligible: false,
       error: '缺少 auth_index',
       planType: resolveCodexPlanType(account.raw),
       quotaWindows: [],
@@ -325,13 +350,13 @@ export const inspectSingleAccount = async (
     );
 
     const planType =
-      normalizePlanType(payload?.plan_type ?? payload?.planType) ?? resolveCodexPlanType(account.raw);
+      normalizePlanType(payload?.plan_type ?? payload?.planType) ??
+      resolveCodexPlanType(account.raw);
     const quotaWindows = payload ? buildCodexQuotaWindowInfos(payload, { planType }) : [];
 
     if (!result.hasStatusCode) {
       onLog?.('warning', `${account.displayAccount} 探测未返回 status_code，保留账号`);
-      const errorDetail =
-        truncateInspectionDetail(result.bodyText) || '探测响应缺少 status_code';
+      const errorDetail = truncateInspectionDetail(result.bodyText) || '探测响应缺少 status_code';
       return {
         ...account,
         action: 'keep',
@@ -339,6 +364,7 @@ export const inspectSingleAccount = async (
         statusCode: null,
         usedPercent: null,
         isQuota: false,
+        autoRecoverEligible: false,
         error: '响应缺少 status_code',
         planType,
         quotaWindows,
@@ -365,6 +391,11 @@ export const inspectSingleAccount = async (
       settings.usedPercentThreshold,
       planType
     );
+    const autoRecoverEligible = decision.action === 'enable' && account.autoRecoverOwned;
+    const actionReason =
+      decision.action === 'enable' && !autoRecoverEligible
+        ? `${decision.actionReason}；禁用来源不受巡检管理，仅允许手动启用`
+        : decision.actionReason;
 
     const successLevel =
       decision.action === 'delete'
@@ -384,15 +415,15 @@ export const inspectSingleAccount = async (
     return {
       ...account,
       action: decision.action,
-      actionReason: decision.actionReason,
+      actionReason,
       statusCode: result.statusCode,
       usedPercent: decision.usedPercent,
       isQuota: decision.isQuota,
+      autoRecoverEligible,
       error: '',
       planType,
       quotaWindows,
-      errorKind:
-        result.statusCode >= 200 && result.statusCode < 300 ? '' : 'http_status',
+      errorKind: result.statusCode >= 200 && result.statusCode < 300 ? '' : 'http_status',
       errorDetail:
         result.statusCode >= 200 && result.statusCode < 300
           ? ''
@@ -409,6 +440,7 @@ export const inspectSingleAccount = async (
       statusCode: null,
       usedPercent: null,
       isQuota: false,
+      autoRecoverEligible: false,
       error: errorMessage,
       planType: resolveCodexPlanType(account.raw),
       quotaWindows: [],

@@ -89,6 +89,7 @@ type ServerCodexInspectionDraft = {
   usedPercentThreshold: string;
   sampleSize: string;
   autoActionMode: string;
+  autoRecoverEnabled: boolean;
 };
 
 type NormalizedServerCodexInspectionConfig = {
@@ -108,6 +109,7 @@ type NormalizedServerCodexInspectionConfig = {
   usedPercentThreshold: number;
   sampleSize: number;
   autoActionMode: string;
+  autoRecoverEnabled: boolean;
 };
 
 const DEFAULT_SERVER_CODEX_CONFIG: NormalizedServerCodexInspectionConfig = {
@@ -127,6 +129,7 @@ const DEFAULT_SERVER_CODEX_CONFIG: NormalizedServerCodexInspectionConfig = {
   usedPercentThreshold: 100,
   sampleSize: 0,
   autoActionMode: 'none',
+  autoRecoverEnabled: false,
 };
 
 const RUNS_LIMIT = 30;
@@ -205,6 +208,8 @@ const resolveServerCodexConfig = (
         ? config.sampleSize
         : DEFAULT_SERVER_CODEX_CONFIG.sampleSize,
     autoActionMode: config?.autoActionMode || DEFAULT_SERVER_CODEX_CONFIG.autoActionMode,
+    autoRecoverEnabled:
+      config?.autoRecoverEnabled ?? DEFAULT_SERVER_CODEX_CONFIG.autoRecoverEnabled,
   };
 };
 
@@ -225,6 +230,7 @@ const toDraft = (config?: ManagerCodexInspectionConfig | null): ServerCodexInspe
     usedPercentThreshold: String(resolved.usedPercentThreshold),
     sampleSize: String(resolved.sampleSize),
     autoActionMode: resolved.autoActionMode,
+    autoRecoverEnabled: resolved.autoRecoverEnabled,
   };
 };
 
@@ -314,6 +320,7 @@ const createConfigFromDraft = (
     usedPercentThreshold: validation.values.usedPercentThreshold,
     sampleSize: validation.values.sampleSize,
     autoActionMode: validation.values.autoActionMode,
+    autoRecoverEnabled: validation.values.autoRecoverEnabled,
   };
 };
 
@@ -449,6 +456,7 @@ function getComparableConfig(config: NormalizedServerCodexInspectionConfig) {
     usedPercentThreshold: config.usedPercentThreshold,
     sampleSize: config.sampleSize,
     autoActionMode: config.autoActionMode,
+    autoRecoverEnabled: config.autoRecoverEnabled,
   };
 }
 
@@ -607,6 +615,7 @@ function toServerResultItem(
     accountId: item.accountId ?? null,
     provider: item.provider,
     disabled: item.disabled,
+    autoRecoverOwned: item.autoRecoverEligible === true,
     status: item.status ?? '',
     state: item.state ?? '',
     raw: item as unknown as CodexInspectionResultItem['raw'],
@@ -615,6 +624,7 @@ function toServerResultItem(
     statusCode: item.statusCode ?? null,
     usedPercent: item.usedPercent ?? null,
     isQuota: item.isQuota,
+    autoRecoverEligible: item.autoRecoverEligible === true,
     error: item.error ?? '',
     planType: item.planType ?? null,
     quotaWindows: item.quotaWindows?.map((window) => ({
@@ -1510,6 +1520,7 @@ export function ServerCodexInspectionPage() {
           t={t}
           onFieldChange={(field, value) => updateDraft(field, value)}
           onAutoActionModeChange={(value) => updateDraft('autoActionMode', value)}
+          onAutoRecoverEnabledChange={(value) => updateDraft('autoRecoverEnabled', value)}
         />
       </InspectionConfigDrawer>
     );

@@ -25,6 +25,7 @@ import {
   getAuthFileSelectionKey,
   type AuthFilePatchTarget,
 } from '@/features/authFiles/model/authFilesPageModel';
+import { clearCodexInspectionDisableOwnershipForFile } from '@/features/monitoring/model/codexInspectionOwnership';
 
 type DeleteAllOptions = {
   filter: string;
@@ -769,6 +770,7 @@ export function useAuthFilesData(): UseAuthFilesDataResult {
         setFiles((prev) =>
           prev.map((f) => (f.name === name ? { ...f, disabled: res.disabled } : f))
         );
+        clearCodexInspectionDisableOwnershipForFile(name);
         showNotification(
           enabled
             ? t('auth_files.status_enabled_success', { name })
@@ -842,6 +844,7 @@ export function useAuthFilesData(): UseAuthFilesDataResult {
           if (result.status === 'fulfilled') {
             successCount++;
             confirmedDisabled.set(name, result.value.disabled);
+            clearCodexInspectionDisableOwnershipForFile(name);
           } else {
             failCount++;
             failedNames.add(name);

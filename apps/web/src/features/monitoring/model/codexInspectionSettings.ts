@@ -27,6 +27,7 @@ export const DEFAULT_CODEX_INSPECTION_SETTINGS: CodexInspectionConfigurableSetti
   usedPercentThreshold: 100,
   sampleSize: 0,
   autoActionMode: 'none',
+  autoRecoverEnabled: false,
 };
 
 export const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -106,9 +107,7 @@ export const normalizeInspectionAction = (
   return fallback;
 };
 
-export const normalizeStoredActionFilter = (
-  value: unknown
-): CodexInspectionStoredActionFilter => {
+export const normalizeStoredActionFilter = (value: unknown): CodexInspectionStoredActionFilter => {
   const normalized = readString(value).toLowerCase();
   if (normalized === 'http_401') return 'reauth';
   if (['all', 'delete', 'disable', 'enable', 'reauth', 'keep'].includes(normalized)) {
@@ -143,6 +142,7 @@ export const readConfigurableSettingsFromConfig = (
       cleanRecord.autoActionMode === undefined
         ? undefined
         : normalizeAutoActionMode(cleanRecord.autoActionMode),
+    autoRecoverEnabled: readBoolean(cleanRecord.autoRecoverEnabled, false),
   };
 };
 
@@ -157,6 +157,7 @@ type CodexInspectionConfigurableSettingsInput = {
   sampleSize?: unknown;
   autoExecuteActions?: unknown;
   autoActionMode?: unknown;
+  autoRecoverEnabled?: unknown;
 };
 
 export const normalizeConfigurableSettings = (
@@ -202,6 +203,7 @@ export const normalizeConfigurableSettings = (
         ? DEFAULT_CODEX_INSPECTION_SETTINGS.sampleSize
         : Math.max(0, Math.floor(sampleSizeValue)),
     autoActionMode: normalizeAutoActionMode(merged.autoActionMode, merged.autoExecuteActions),
+    autoRecoverEnabled: readBoolean(merged.autoRecoverEnabled, false),
   };
 };
 

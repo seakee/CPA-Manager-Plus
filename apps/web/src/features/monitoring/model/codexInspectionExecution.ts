@@ -8,6 +8,10 @@ import {
 } from '@/features/monitoring/codexInspection';
 import type { AuthFileItem } from '@/types';
 import { clampPositiveInteger } from './codexInspectionSettings';
+import {
+  clearCodexInspectionDisableOwnership,
+  recordCodexInspectionDisableOwnership,
+} from './codexInspectionOwnership';
 
 type LogHandler = (level: CodexInspectionLogLevel, message: string) => void;
 
@@ -15,6 +19,8 @@ type ExecuteCodexInspectionActionsOptions = {
   settings: CodexInspectionSettings;
   items: CodexInspectionResultItem[];
   previousFiles: AuthFileItem[];
+  connectionFingerprint: string;
+  source: 'auto' | 'manual';
   onLog?: LogHandler;
 };
 
@@ -119,6 +125,8 @@ export const executeCodexInspectionActions = async ({
   settings,
   items,
   previousFiles,
+  connectionFingerprint,
+  source,
   onLog,
 }: ExecuteCodexInspectionActionsOptions): Promise<CodexInspectionExecutionResult> => {
   const dedupedItems = dedupeExecutionItems(items);
@@ -170,6 +178,22 @@ export const executeCodexInspectionActions = async ({
     });
     outcomes.push(...enableOutcomes);
   }
+
+  const itemByFileName = new Map(dedupedItems.map((item) => [item.fileName, item] as const));
+  outcomes.forEach((outcome) => {
+    if (!outcome.success) return;
+    const item = itemByFileName.get(outcome.fileName);
+    if (!item) return;
+    if (outcome.action === 'disable' && source === 'auto') {
+      recordCodexInspectionDisableOwnership(connectionFingerprint, {
+        fileName: item.fileName,
+        authIndex: item.authIndex,
+        accountId: item.accountId,
+      });
+      return;
+    }
+    clearCodexInspectionDisableOwnership(connectionFingerprint, item.fileName);
+  });
 
   let refreshedFiles = previousFiles;
   let refreshError = '';

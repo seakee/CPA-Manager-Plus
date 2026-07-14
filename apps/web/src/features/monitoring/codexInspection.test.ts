@@ -32,6 +32,10 @@ import {
   normalizeServerCodexInspectionActionStatus,
   validateInspectionConfigDraft,
 } from './model/codexInspectionPresentation';
+import {
+  getCodexInspectionOwnedDisableFileNames,
+  recordCodexInspectionDisableOwnership,
+} from './model/codexInspectionOwnership';
 
 const createStorage = () => {
   const values = new Map<string, string>();
@@ -60,6 +64,7 @@ const createResultItem = (
   accountId: overrides.accountId ?? 'account-1',
   provider: overrides.provider ?? 'codex',
   disabled: overrides.disabled ?? false,
+  autoRecoverOwned: overrides.autoRecoverOwned ?? false,
   status: overrides.status ?? '',
   state: overrides.state ?? '',
   raw:
@@ -74,6 +79,7 @@ const createResultItem = (
   statusCode: overrides.statusCode ?? (action === 'delete' ? 401 : 200),
   usedPercent: overrides.usedPercent ?? null,
   isQuota: overrides.isQuota ?? false,
+  autoRecoverEligible: overrides.autoRecoverEligible ?? false,
   error: overrides.error ?? '',
   planType: overrides.planType ?? null,
   quotaWindows: overrides.quotaWindows ?? [],
@@ -163,6 +169,7 @@ describe('Codex inspection settings', () => {
         usedPercentThreshold: '120',
         sampleSize: 'all',
         autoActionMode: 'delete',
+        autoRecoverEnabled: false,
       },
       t
     );
@@ -187,6 +194,7 @@ describe('Codex inspection settings', () => {
         usedPercentThreshold: '99.5',
         sampleSize: '0',
         autoActionMode: 'unexpected',
+        autoRecoverEnabled: true,
       },
       t
     );
@@ -202,6 +210,7 @@ describe('Codex inspection settings', () => {
       usedPercentThreshold: 99.5,
       sampleSize: 0,
       autoActionMode: 'none',
+      autoRecoverEnabled: true,
     });
   });
 
@@ -211,6 +220,7 @@ describe('Codex inspection settings', () => {
       'monitoring.codex_inspection_sample_size': 'Sample',
       'monitoring.codex_inspection_settings_auto_action_mode_label': 'Auto',
       'monitoring.codex_inspection_settings_auto_action_mode_delete': 'Auto delete',
+      'monitoring.codex_inspection_settings_auto_recover_label': 'Recovery',
       'monitoring.codex_inspection_workers': 'Workers',
       'monitoring.codex_inspection_settings_timeout_label': 'Timeout',
       'monitoring.codex_inspection_target_type': 'Target',
@@ -222,6 +232,8 @@ describe('Codex inspection settings', () => {
       'monitoring.server_codex_inspection_config_summary_auto': 'Auto',
       'monitoring.server_codex_inspection_schedule_enabled': 'Enabled',
       'monitoring.server_codex_inspection_schedule_disabled': 'Disabled',
+      'common.enabled': 'Enabled',
+      'common.disabled': 'Disabled',
     };
     const t = ((key: string) => labels[key] ?? key) as never;
     const settings = {
@@ -231,12 +243,14 @@ describe('Codex inspection settings', () => {
       usedPercentThreshold: 100,
       sampleSize: 0,
       autoActionMode: 'delete' as const,
+      autoRecoverEnabled: false,
     };
 
     expect(buildConfigOverviewItems(settings, { mode: 'local', t })).toMatchObject([
       { key: 'threshold', value: '100%', field: 'usedPercentThreshold' },
       { key: 'sample', value: 'All', field: 'sampleSize' },
       { key: 'auto', value: 'Auto delete', tone: 'bad', field: 'autoActionMode' },
+      { key: 'recover', value: 'Disabled', tone: 'idle', field: 'autoActionMode' },
       { key: 'concurrency', value: '4', hint: 'Timeout: 15000', field: 'workers' },
       { key: 'target', value: 'codex', field: 'targetType' },
     ]);
@@ -254,6 +268,7 @@ describe('Codex inspection settings', () => {
       { key: 'threshold', value: '100%', field: 'usedPercentThreshold' },
       { key: 'sample', value: 'All', field: 'sampleSize' },
       { key: 'auto', value: 'Auto delete', tone: 'bad', field: 'autoActionMode' },
+      { key: 'recover', value: 'Disabled', tone: 'idle', field: 'autoActionMode' },
     ]);
   });
 });
@@ -261,12 +276,12 @@ describe('Codex inspection settings', () => {
 describe('resolveCodexInspectionAutoActionItems', () => {
   const deleteItem = createResultItem('delete');
   const disableItem = createResultItem('disable');
-  const enableItem = createResultItem('enable');
+  const enableItem = createResultItem('enable', { autoRecoverEligible: true });
   const reauthItem = createResultItem('reauth', { statusCode: 401 });
 
   it('does nothing when automatic mode is none', () => {
     expect(
-      resolveCodexInspectionAutoActionItems('none', [
+      resolveCodexInspectionAutoActionItems('none', false, [
         deleteItem,
         disableItem,
         enableItem,
@@ -276,7 +291,7 @@ describe('resolveCodexInspectionAutoActionItems', () => {
   });
 
   it('only enables recovered accounts in auto enable mode', () => {
-    const items = resolveCodexInspectionAutoActionItems('enable', [
+    const items = resolveCodexInspectionAutoActionItems('enable', true, [
       deleteItem,
       disableItem,
       enableItem,
@@ -286,8 +301,36 @@ describe('resolveCodexInspectionAutoActionItems', () => {
     expect(items.map((item) => [item.fileName, item.action])).toEqual([['enable.json', 'enable']]);
   });
 
+  it('runs automatic recovery independently from the problem-account mode', () => {
+    const items = resolveCodexInspectionAutoActionItems('none', true, [
+      deleteItem,
+      disableItem,
+      enableItem,
+    ]);
+
+    expect(items.map((item) => [item.fileName, item.action])).toEqual([['enable.json', 'enable']]);
+  });
+
+  it('never auto-enables an account without inspection ownership', () => {
+    const unownedEnable = createResultItem('enable', { autoRecoverEligible: false });
+
+    expect(resolveCodexInspectionAutoActionItems('delete', true, [unownedEnable])).toEqual([]);
+  });
+
+  it('blocks mixed actions for the same file before automatic execution', () => {
+    const mixed = [
+      createResultItem('enable', {
+        fileName: 'mixed.json',
+        autoRecoverEligible: true,
+      }),
+      createResultItem('delete', { fileName: 'mixed.json' }),
+    ];
+
+    expect(resolveCodexInspectionAutoActionItems('delete', true, mixed)).toEqual([]);
+  });
+
   it('turns delete suggestions into disable actions in auto disable mode', () => {
-    const items = resolveCodexInspectionAutoActionItems('disable', [
+    const items = resolveCodexInspectionAutoActionItems('disable', false, [
       deleteItem,
       disableItem,
       enableItem,
@@ -297,12 +340,11 @@ describe('resolveCodexInspectionAutoActionItems', () => {
     expect(items.map((item) => [item.fileName, item.action])).toEqual([
       ['delete.json', 'disable'],
       ['disable.json', 'disable'],
-      ['enable.json', 'enable'],
     ]);
   });
 
   it('keeps delete, disable, and enable suggestions in auto delete mode', () => {
-    const items = resolveCodexInspectionAutoActionItems('delete', [
+    const items = resolveCodexInspectionAutoActionItems('delete', true, [
       deleteItem,
       disableItem,
       enableItem,
@@ -478,6 +520,8 @@ describe('executeCodexInspectionActions', () => {
         ),
       ],
       previousFiles: [],
+      connectionFingerprint: 'scope-test',
+      source: 'manual',
     });
 
     expect(deleteSpy).toHaveBeenCalledWith('reauth.json');
@@ -519,10 +563,95 @@ describe('executeCodexInspectionActions', () => {
         createResultItem('enable', { fileName: 'enable-a.json' }),
       ],
       previousFiles: [],
+      connectionFingerprint: 'scope-test',
+      source: 'manual',
     });
 
     expect(execution.outcomes).toHaveLength(3);
     expect(maxStatusUpdates).toBe(1);
+  });
+
+  it('records ownership for automatic disables and clears it after manual recovery', async () => {
+    const storage = createStorage();
+    vi.stubGlobal('localStorage', storage);
+    vi.spyOn(authFilesApi, 'setStatusWithFallback').mockResolvedValue(
+      {} as Awaited<ReturnType<typeof authFilesApi.setStatusWithFallback>>
+    );
+    vi.spyOn(authFilesApi, 'list').mockResolvedValue({ files: [] });
+    const scope = 'scope-auto-recovery';
+    const disabledFile = {
+      name: 'owned.json',
+      type: 'codex',
+      auth_index: 'auth-1',
+      disabled: true,
+    } as AuthFileItem;
+
+    await executeCodexInspectionActions({
+      settings: createRunResult().settings,
+      items: [
+        {
+          ...createResultItem('disable', {
+            fileName: 'owned.json',
+            authIndex: 'auth-1',
+          }),
+          accountId: null,
+        },
+      ],
+      previousFiles: [],
+      connectionFingerprint: scope,
+      source: 'auto',
+    });
+    expect(Array.from(getCodexInspectionOwnedDisableFileNames(scope, [disabledFile]))).toEqual([
+      'owned.json',
+    ]);
+
+    await executeCodexInspectionActions({
+      settings: createRunResult().settings,
+      items: [
+        {
+          ...createResultItem('enable', {
+            fileName: 'owned.json',
+            authIndex: 'auth-1',
+            autoRecoverEligible: true,
+          }),
+          accountId: null,
+        },
+      ],
+      previousFiles: [],
+      connectionFingerprint: scope,
+      source: 'manual',
+    });
+    expect(getCodexInspectionOwnedDisableFileNames(scope, [disabledFile]).size).toBe(0);
+  });
+});
+
+describe('Codex inspection disable ownership', () => {
+  it('isolates records by connection fingerprint and invalidates identity changes', () => {
+    const storage = createStorage();
+    vi.stubGlobal('localStorage', storage);
+    const file = {
+      name: 'owned.json',
+      type: 'codex',
+      auth_index: 'auth-1',
+      disabled: true,
+    } as AuthFileItem;
+
+    recordCodexInspectionDisableOwnership('scope-a', {
+      fileName: 'owned.json',
+      authIndex: 'auth-1',
+      accountId: null,
+    });
+
+    expect(Array.from(getCodexInspectionOwnedDisableFileNames('scope-a', [file]))).toEqual([
+      'owned.json',
+    ]);
+    expect(getCodexInspectionOwnedDisableFileNames('scope-b', [file]).size).toBe(0);
+    expect(
+      getCodexInspectionOwnedDisableFileNames('scope-a', [
+        { ...file, auth_index: 'auth-2' } as AuthFileItem,
+      ]).size
+    ).toBe(0);
+    expect(getCodexInspectionOwnedDisableFileNames('scope-a', [file]).size).toBe(0);
   });
 });
 

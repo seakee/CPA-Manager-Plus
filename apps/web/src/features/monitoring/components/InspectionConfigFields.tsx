@@ -15,6 +15,7 @@ type InspectionConfigFieldsProps = {
   t: TFunction;
   onFieldChange: (field: SharedInspectionConfigField, value: string) => void;
   onAutoActionModeChange: (mode: CodexInspectionAutoActionMode) => void;
+  onAutoRecoverEnabledChange: (enabled: boolean) => void;
 };
 
 // 本地与服务端共享的 9 个配置字段。分组:基础规则 → 自动处置 → 高级(默认折叠)。
@@ -25,6 +26,7 @@ export function InspectionConfigFields({
   t,
   onFieldChange,
   onAutoActionModeChange,
+  onAutoRecoverEnabledChange,
 }: InspectionConfigFieldsProps) {
   return (
     <>
@@ -70,8 +72,10 @@ export function InspectionConfigFields({
         <div className={styles.autoActionField} id="autoActionMode">
           <CodexInspectionAutoActionEditor
             value={draft.autoActionMode}
+            autoRecoverEnabled={draft.autoRecoverEnabled}
             t={t}
             onChange={onAutoActionModeChange}
+            onAutoRecoverChange={onAutoRecoverEnabledChange}
           />
         </div>
       </section>

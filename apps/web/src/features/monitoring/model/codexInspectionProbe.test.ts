@@ -23,6 +23,12 @@ const settings = {
   usedPercentThreshold: 100,
 };
 
+const createDisabledAccount = (autoRecoverOwned: boolean) => ({
+  ...baseAccount,
+  disabled: true,
+  autoRecoverOwned,
+});
+
 const createUsageResult = (usedPercent: number, extraWindows = {}) => ({
   result: {
     statusCode: 200,
@@ -269,5 +275,75 @@ describe('inspectSingleAccount', () => {
     expect(result.action).toBe('keep');
     expect(result.errorKind).toBe('request_error');
     expect(result.errorDetail).toBe('network failed');
+  });
+
+  it('keeps a disabled account when a successful response has no quota data', async () => {
+    mockRequestCodexUsageRaw.mockResolvedValue({
+      result: {
+        statusCode: 200,
+        hasStatusCode: true,
+        header: {},
+        bodyText: '{"ok":true}',
+        body: { ok: true },
+      },
+      payload: null,
+    });
+
+    const result = await inspectSingleAccount(createDisabledAccount(true), settings);
+
+    expect(result).toMatchObject({
+      action: 'keep',
+      usedPercent: null,
+      isQuota: false,
+      autoRecoverEligible: false,
+    });
+  });
+
+  it('keeps a disabled account while the five-hour window is exhausted', async () => {
+    mockRequestCodexUsageRaw.mockResolvedValue(
+      createUsageResult(5, {
+        primary_window: {
+          used_percent: 100,
+          limit_window_seconds: 18_000,
+        },
+        secondary_window: {
+          used_percent: 5,
+          limit_window_seconds: 2_592_000,
+        },
+      })
+    );
+
+    const result = await inspectSingleAccount(createDisabledAccount(true), settings);
+
+    expect(result).toMatchObject({
+      action: 'keep',
+      actionReason: '5 小时额度仍达到阈值，月额度可用但继续保持禁用',
+      usedPercent: 5,
+      isQuota: true,
+      autoRecoverEligible: false,
+    });
+  });
+
+  it('leaves a healthy manually disabled account eligible for manual recovery only', async () => {
+    mockRequestCodexUsageRaw.mockResolvedValue(createUsageResult(5));
+
+    const result = await inspectSingleAccount(createDisabledAccount(false), settings);
+
+    expect(result.action).toBe('enable');
+    expect(result.autoRecoverEligible).toBe(false);
+    expect(result.actionReason).toContain('仅允许手动启用');
+  });
+
+  it('marks a healthy inspection-owned disable as auto-recoverable', async () => {
+    mockRequestCodexUsageRaw.mockResolvedValue(createUsageResult(5));
+
+    const result = await inspectSingleAccount(createDisabledAccount(true), settings);
+
+    expect(result).toMatchObject({
+      action: 'enable',
+      usedPercent: 5,
+      isQuota: false,
+      autoRecoverEligible: true,
+    });
   });
 });

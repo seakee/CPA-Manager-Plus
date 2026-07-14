@@ -18,8 +18,10 @@ import styles from '../CodexInspectionPage.module.scss';
 
 type CodexInspectionAutoActionEditorProps = {
   value: CodexInspectionAutoActionMode | string;
+  autoRecoverEnabled: boolean;
   t: TFunction;
   onChange: (value: CodexInspectionAutoActionMode) => void;
+  onAutoRecoverChange: (value: boolean) => void;
 };
 
 const normalizeAutoActionMode = (value: CodexInspectionAutoActionMode | string) => {
@@ -33,10 +35,7 @@ const problemActionToneClass: Record<CodexInspectionProblemActionMode, string> =
   delete: styles.settingsAutoOptionDelete,
 };
 
-const problemActionIcon: Record<
-  CodexInspectionProblemActionMode,
-  typeof IconCrosshair
-> = {
+const problemActionIcon: Record<CodexInspectionProblemActionMode, typeof IconCrosshair> = {
   none: IconCrosshair,
   disable: IconShield,
   delete: IconTrash2,
@@ -44,19 +43,42 @@ const problemActionIcon: Record<
 
 export function CodexInspectionAutoActionEditor({
   value,
+  autoRecoverEnabled,
   t,
   onChange,
+  onAutoRecoverChange,
 }: CodexInspectionAutoActionEditorProps) {
   const normalizedValue = normalizeAutoActionMode(value);
-  const autoExecutionEnabled = isCodexInspectionAutoExecutionEnabled(normalizedValue);
+  const autoExecutionEnabled = isCodexInspectionAutoExecutionEnabled(
+    normalizedValue,
+    autoRecoverEnabled
+  );
   const problemActionMode = getCodexInspectionProblemActionMode(normalizedValue);
 
   const selectAutoExecution = (enabled: boolean) => {
-    onChange(composeCodexInspectionAutoActionMode(enabled, problemActionMode));
+    if (!enabled) {
+      onAutoRecoverChange(false);
+      onChange('none');
+      return;
+    }
+    onChange(composeCodexInspectionAutoActionMode(true, problemActionMode));
   };
 
   const selectProblemAction = (mode: CodexInspectionProblemActionMode) => {
+    if (mode === 'none' && !autoRecoverEnabled) {
+      onChange('none');
+      return;
+    }
     onChange(composeCodexInspectionAutoActionMode(true, mode));
+  };
+
+  const selectAutoRecovery = (enabled: boolean) => {
+    onAutoRecoverChange(enabled);
+    if (enabled && normalizedValue === 'none') {
+      onChange('enable');
+    } else if (!enabled && problemActionMode === 'none') {
+      onChange('none');
+    }
   };
 
   const warningClass =
@@ -71,9 +93,7 @@ export function CodexInspectionAutoActionEditor({
       <span className={styles.settingsAutoLabel}>
         {t('monitoring.codex_inspection_settings_auto_execution_label')}
       </span>
-      <div
-        className={`${styles.settingsAutoCards} ${styles.settingsAutoExecutionCards}`}
-      >
+      <div className={`${styles.settingsAutoCards} ${styles.settingsAutoExecutionCards}`}>
         {[
           {
             key: 'none',
@@ -127,9 +147,7 @@ export function CodexInspectionAutoActionEditor({
           <span className={styles.settingsAutoSubLabel}>
             {t('monitoring.codex_inspection_settings_problem_action_label')}
           </span>
-          <div
-            className={`${styles.settingsAutoCards} ${styles.settingsAutoProblemCards}`}
-          >
+          <div className={`${styles.settingsAutoCards} ${styles.settingsAutoProblemCards}`}>
             {CODEX_INSPECTION_PROBLEM_ACTION_MODES.map((mode) => {
               const active = problemActionMode === mode;
               const ProblemIcon = problemActionIcon[mode];
@@ -155,10 +173,59 @@ export function CodexInspectionAutoActionEditor({
                       {t(`monitoring.codex_inspection_settings_problem_action_${mode}`)}
                     </strong>
                     <small>
-                      {t(
-                        `monitoring.codex_inspection_settings_problem_action_${mode}_desc`
-                      )}
+                      {t(`monitoring.codex_inspection_settings_problem_action_${mode}_desc`)}
                     </small>
+                  </span>
+                  <span className={styles.settingsAutoOptionCheck}>
+                    {active ? <IconCheck size={14} /> : null}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          <span className={styles.settingsAutoSubLabel}>
+            {t('monitoring.codex_inspection_settings_auto_recover_label')}
+          </span>
+          <div className={`${styles.settingsAutoCards} ${styles.settingsAutoExecutionCards}`}>
+            {[
+              {
+                key: 'recover-off',
+                enabled: false,
+                title: t('monitoring.codex_inspection_settings_auto_recover_off'),
+                desc: t('monitoring.codex_inspection_settings_auto_recover_off_desc'),
+                Icon: IconCrosshair,
+              },
+              {
+                key: 'recover-on',
+                enabled: true,
+                title: t('monitoring.codex_inspection_settings_auto_recover_on'),
+                desc: t('monitoring.codex_inspection_settings_auto_recover_on_desc'),
+                Icon: IconRefreshCw,
+              },
+            ].map((option) => {
+              const active = autoRecoverEnabled === option.enabled;
+              return (
+                <button
+                  key={option.key}
+                  type="button"
+                  className={[
+                    styles.settingsAutoOption,
+                    option.enabled
+                      ? styles.settingsAutoOptionEnable
+                      : styles.settingsAutoOptionNone,
+                    active ? styles.settingsAutoOptionActive : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
+                  onClick={() => selectAutoRecovery(option.enabled)}
+                  aria-pressed={active}
+                >
+                  <span className={styles.settingsAutoOptionIcon}>
+                    <option.Icon size={28} />
+                  </span>
+                  <span className={styles.settingsAutoOptionText}>
+                    <strong>{option.title}</strong>
+                    <small>{option.desc}</small>
                   </span>
                   <span className={styles.settingsAutoOptionCheck}>
                     {active ? <IconCheck size={14} /> : null}
@@ -175,9 +242,7 @@ export function CodexInspectionAutoActionEditor({
       </p>
       {autoExecutionEnabled ? (
         <p className={`${styles.settingsAutoWarning} ${warningClass}`}>
-          {t(
-            `monitoring.codex_inspection_settings_auto_action_mode_${normalizedValue}_warning`
-          )}
+          {t(`monitoring.codex_inspection_settings_auto_action_mode_${normalizedValue}_warning`)}
         </p>
       ) : null}
     </div>
