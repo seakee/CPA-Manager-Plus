@@ -7,6 +7,7 @@ const { mocks } = vi.hoisted(() => {
     mocks: {
       list: vi.fn(),
       saveJsonObject: vi.fn(),
+      uploadFiles: vi.fn(),
       deleteFiles: vi.fn(),
       patchFields: vi.fn(),
       patchFieldsForAuthIndexes: vi.fn(),
@@ -21,6 +22,14 @@ vi.mock('react-i18next', () => ({
     t: (key: string, options?: Record<string, unknown>) => {
       if (options && typeof options.name === 'string') {
         return `${key}:${options.name}`;
+      }
+      if (
+        options &&
+        typeof options.uploaded === 'number' &&
+        typeof options.total === 'number' &&
+        typeof options.names === 'string'
+      ) {
+        return `${key}:${options.uploaded}/${options.total}:${options.names}`;
       }
       return key;
     },
@@ -38,13 +47,18 @@ vi.mock('@/services/api', () => ({
   authFilesApi: {
     list: mocks.list,
     saveJsonObject: mocks.saveJsonObject,
+    uploadFiles: mocks.uploadFiles,
     deleteFiles: mocks.deleteFiles,
     patchFields: mocks.patchFields,
     patchFieldsForAuthIndexes: mocks.patchFieldsForAuthIndexes,
   },
 }));
 
-import { buildPastedAuthJsonPayload, useAuthFilesData } from './useAuthFilesData';
+import {
+  buildPastedAuthJsonPayloads,
+  prepareAuthFilesForUpload,
+  useAuthFilesData,
+} from './useAuthFilesData';
 
 type UseAuthFilesDataHarness = {
   getCurrent: () => ReturnType<typeof useAuthFilesData>;
@@ -95,6 +109,7 @@ const mountUseAuthFilesData = (): UseAuthFilesDataHarness => {
 beforeEach(() => {
   mocks.list.mockReset();
   mocks.saveJsonObject.mockReset();
+  mocks.uploadFiles.mockReset();
   mocks.deleteFiles.mockReset();
   mocks.patchFields.mockReset();
   mocks.patchFieldsForAuthIndexes.mockReset();
@@ -103,12 +118,13 @@ beforeEach(() => {
 
   mocks.list.mockResolvedValue({ files: [] });
   mocks.saveJsonObject.mockResolvedValue(undefined);
+  mocks.uploadFiles.mockResolvedValue({ status: 'ok', uploaded: 0, files: [], failed: [] });
   mocks.deleteFiles.mockResolvedValue({ deleted: 0, failed: [], files: [] });
   mocks.patchFields.mockResolvedValue(undefined);
   mocks.patchFieldsForAuthIndexes.mockResolvedValue(undefined);
 });
 
-describe('buildPastedAuthJsonPayload', () => {
+describe('buildPastedAuthJsonPayloads', () => {
   it('keeps explicit file names for pasted CPA auth JSON', () => {
     const input = {
       type: 'codex',
@@ -116,14 +132,13 @@ describe('buildPastedAuthJsonPayload', () => {
       access_token: 'existing-access-token',
     };
 
-    const result = buildPastedAuthJsonPayload('cpa', 'custom-auth.json', JSON.stringify(input));
+    const result = buildPastedAuthJsonPayloads('cpa', 'custom-auth.json', JSON.stringify(input));
 
-    expect(result.resolvedFileName).toBe('custom-auth.json');
-    expect(result.authJson).toEqual(input);
+    expect(result).toEqual([{ fileName: 'custom-auth.json', authJson: input }]);
   });
 
   it('keeps explicit file names for pasted session auth JSON when a custom name is provided', () => {
-    const result = buildPastedAuthJsonPayload(
+    const result = buildPastedAuthJsonPayloads(
       'session',
       'my-work-account.json',
       JSON.stringify({
@@ -133,11 +148,11 @@ describe('buildPastedAuthJsonPayload', () => {
       })
     );
 
-    expect(result.resolvedFileName).toBe('my-work-account.json');
+    expect(result[0].fileName).toBe('my-work-account.json');
   });
 
   it('derives a default codex file name for pasted session auth JSON', () => {
-    const result = buildPastedAuthJsonPayload(
+    const result = buildPastedAuthJsonPayloads(
       'session',
       'codex-account.json',
       JSON.stringify({
@@ -147,8 +162,8 @@ describe('buildPastedAuthJsonPayload', () => {
       })
     );
 
-    expect(result.resolvedFileName).toBe('codex-session-session.user+tag@example.com.json');
-    expect(result.authJson).toMatchObject({
+    expect(result[0].fileName).toBe('codex-session-session.user+tag@example.com.json');
+    expect(result[0].authJson).toMatchObject({
       type: 'codex',
       email: 'Session.User+tag@example.com',
       account_id: 'session-account',
@@ -156,8 +171,8 @@ describe('buildPastedAuthJsonPayload', () => {
     });
   });
 
-  it('derives a default file name for multi-account sub2api auth JSON', () => {
-    const result = buildPastedAuthJsonPayload(
+  it('derives separate default file names for multi-account sub2api auth JSON', () => {
+    const result = buildPastedAuthJsonPayloads(
       'sub2api',
       'codex-account.json',
       JSON.stringify({
@@ -186,19 +201,333 @@ describe('buildPastedAuthJsonPayload', () => {
       })
     );
 
-    expect(result.resolvedFileName).toBe('sub2api-codex-accounts.codex.json');
-    expect(result.authJson).toEqual([
-      expect.objectContaining({
+    expect(result).toHaveLength(2);
+    expect(result[0]).toEqual({
+      fileName: expect.stringMatching(/^codex-[a-f0-9]{8}-first@example\.com\.json$/),
+      authJson: expect.objectContaining({
         type: 'codex',
         email: 'first@example.com',
         access_token: 'first-access-token',
       }),
-      expect.objectContaining({
+    });
+    expect(result[1]).toEqual({
+      fileName: expect.stringMatching(/^codex-[a-f0-9]{8}-second@example\.com\.json$/),
+      authJson: expect.objectContaining({
         type: 'codex',
         email: 'second@example.com',
         access_token: 'second-access-token',
       }),
+    });
+  });
+});
+
+describe('prepareAuthFilesForUpload', () => {
+  it('preserves ordinary CPA auth JSON files without rewriting them', async () => {
+    const file = new File(
+      [JSON.stringify({ type: 'codex', email: 'user@example.com', access_token: 'token' })],
+      'existing-auth.json',
+      { type: 'application/json' }
+    );
+
+    const result = await prepareAuthFilesForUpload([file]);
+
+    expect(result).toEqual({
+      files: [file],
+      failures: [],
+      convertedSourceCount: 0,
+    });
+    expect(result.files[0]).toBe(file);
+  });
+
+  it('preserves valid CPA auth JSON with export-like metadata without rewriting it', async () => {
+    const file = new File(
+      [
+        JSON.stringify({
+          type: 'custom-provider',
+          token: 'provider-secret',
+          exported_at: '2026-06-01T12:00:00.000Z',
+          proxies: [],
+        }),
+      ],
+      'custom-provider-auth.json',
+      { type: 'application/json' }
+    );
+
+    const result = await prepareAuthFilesForUpload([file]);
+
+    expect(result).toEqual({
+      files: [file],
+      failures: [],
+      convertedSourceCount: 0,
+    });
+    expect(result.files[0]).toBe(file);
+  });
+
+  it('converts an uploaded sub2api export into separate CPA auth files', async () => {
+    const file = new File(
+      [
+        JSON.stringify({
+          exported_at: '2026-06-01T12:00:00.000Z',
+          proxies: [],
+          accounts: [
+            {
+              name: 'First OpenAI',
+              platform: 'openai',
+              type: 'oauth',
+              credentials: {
+                access_token: 'first-access-token',
+                email: 'first@example.com',
+              },
+            },
+            {
+              name: 'Second OpenAI',
+              platform: 'openai',
+              type: 'oauth',
+              credentials: {
+                access_token: 'second-access-token',
+                email: 'second@example.com',
+              },
+            },
+          ],
+        }),
+      ],
+      'sub2api-export.json',
+      { type: 'application/json' }
+    );
+
+    const result = await prepareAuthFilesForUpload([file]);
+
+    expect(result.failures).toEqual([]);
+    expect(result.convertedSourceCount).toBe(1);
+    expect(result.files).toHaveLength(2);
+    expect(result.files.map((item) => item.name)).toEqual([
+      expect.stringMatching(/^codex-[a-f0-9]{8}-first@example\.com\.json$/),
+      expect.stringMatching(/^codex-[a-f0-9]{8}-second@example\.com\.json$/),
     ]);
+    for (const convertedFile of result.files) {
+      const parsed = JSON.parse(await convertedFile.text()) as unknown;
+      expect(parsed).toBeTypeOf('object');
+      expect(Array.isArray(parsed)).toBe(false);
+    }
+  });
+
+  it('reports an invalid detected sub2api export without uploading the source file', async () => {
+    const file = new File(
+      [
+        JSON.stringify({
+          exported_at: '2026-06-01T12:00:00.000Z',
+          proxies: [],
+          accounts: [
+            {
+              name: 'Missing Token',
+              platform: 'openai',
+              type: 'oauth',
+              credentials: { email: 'missing@example.com' },
+            },
+          ],
+        }),
+      ],
+      'invalid-sub2api-export.json',
+      { type: 'application/json' }
+    );
+
+    const result = await prepareAuthFilesForUpload([file]);
+
+    expect(result.files).toEqual([]);
+    expect(result.convertedSourceCount).toBe(0);
+    expect(result.failures).toEqual([
+      {
+        name: 'invalid-sub2api-export.json',
+        error: expect.stringContaining('missing credentials.access_token'),
+      },
+    ]);
+  });
+
+  it('rejects an empty sub2api export instead of uploading it as an ordinary auth file', async () => {
+    const file = new File(
+      [JSON.stringify({ exported_at: '2026-06-01T12:00:00.000Z', proxies: [], accounts: [] })],
+      'empty-sub2api-export.json',
+      { type: 'application/json' }
+    );
+
+    const result = await prepareAuthFilesForUpload([file]);
+
+    expect(result.files).toEqual([]);
+    expect(result.failures).toEqual([
+      {
+        name: 'empty-sub2api-export.json',
+        error: expect.stringContaining('No sub2api OpenAI OAuth account'),
+      },
+    ]);
+  });
+
+  it('rejects malformed sub2api account entries instead of uploading the export unchanged', async () => {
+    const file = new File(
+      [
+        JSON.stringify({
+          exported_at: '2026-06-01T12:00:00.000Z',
+          proxies: [],
+          accounts: [{ name: 'Malformed', platform: 'openai', type: 'oauth', credentials: null }],
+        }),
+      ],
+      'malformed-sub2api-export.json',
+      { type: 'application/json' }
+    );
+
+    const result = await prepareAuthFilesForUpload([file]);
+
+    expect(result.files).toEqual([]);
+    expect(result.failures).toEqual([
+      {
+        name: 'malformed-sub2api-export.json',
+        error: expect.stringContaining('missing credentials'),
+      },
+    ]);
+  });
+
+  it.each([
+    { label: 'null', accounts: null },
+    { label: 'object', accounts: {} },
+    { label: 'string', accounts: 'invalid' },
+  ])(
+    'rejects a sub2api export whose accounts value is $label instead of uploading it unchanged',
+    async ({ label, accounts }) => {
+      const file = new File(
+        [
+          JSON.stringify({
+            exported_at: '2026-06-01T12:00:00.000Z',
+            proxies: [],
+            accounts,
+          }),
+        ],
+        `malformed-accounts-${label}.json`,
+        { type: 'application/json' }
+      );
+
+      const result = await prepareAuthFilesForUpload([file]);
+
+      expect(result.files).toEqual([]);
+      expect(result.failures).toEqual([
+        {
+          name: `malformed-accounts-${label}.json`,
+          error: expect.stringContaining('accounts must be an array'),
+        },
+      ]);
+    }
+  );
+});
+
+describe('useAuthFilesData handleFileChange', () => {
+  it('auto-converts an uploaded sub2api export before calling the backend upload API', async () => {
+    const hook = mountUseAuthFilesData();
+    const file = new File(
+      [
+        JSON.stringify({
+          exported_at: '2026-06-01T12:00:00.000Z',
+          proxies: [],
+          accounts: [
+            {
+              name: 'First OpenAI',
+              platform: 'openai',
+              type: 'oauth',
+              credentials: {
+                access_token: 'first-access-token',
+                email: 'first@example.com',
+              },
+            },
+            {
+              name: 'Second OpenAI',
+              platform: 'openai',
+              type: 'oauth',
+              credentials: {
+                access_token: 'second-access-token',
+                email: 'second@example.com',
+              },
+            },
+          ],
+        }),
+      ],
+      'sub2api-export.json',
+      { type: 'application/json' }
+    );
+    mocks.uploadFiles.mockImplementationOnce(async (files: File[]) => ({
+      status: 'ok',
+      uploaded: files.length,
+      files: files.map((item) => item.name),
+      failed: [],
+    }));
+    const target = {
+      files: [file] as unknown as FileList,
+      value: 'sub2api-export.json',
+    };
+
+    await act(async () => {
+      await hook
+        .getCurrent()
+        .handleFileChange({ target } as unknown as Parameters<
+          ReturnType<typeof useAuthFilesData>['handleFileChange']
+        >[0]);
+    });
+
+    expect(mocks.uploadFiles).toHaveBeenCalledTimes(1);
+    const uploadedFiles = mocks.uploadFiles.mock.calls[0]?.[0] as File[];
+    expect(uploadedFiles).toHaveLength(2);
+    expect(uploadedFiles.every((item) => item.name !== file.name)).toBe(true);
+    expect(target.value).toBe('');
+    expect(mocks.showNotification).toHaveBeenCalledWith(
+      'auth_files.upload_success (2/2)',
+      'success'
+    );
+    expect(mocks.list).toHaveBeenCalledTimes(1);
+    hook.unmount();
+  });
+
+  it('does not report direct upload success when the backend returns an explicit failure status', async () => {
+    const hook = mountUseAuthFilesData();
+    const file = new File(
+      [
+        JSON.stringify({
+          exported_at: '2026-06-01T12:00:00.000Z',
+          proxies: [],
+          accounts: [
+            {
+              name: 'First OpenAI',
+              platform: 'openai',
+              type: 'oauth',
+              credentials: {
+                access_token: 'first-access-token',
+                email: 'first@example.com',
+              },
+            },
+          ],
+        }),
+      ],
+      'sub2api-export.json',
+      { type: 'application/json' }
+    );
+    mocks.uploadFiles.mockImplementationOnce(async (files: File[]) => ({
+      status: 'error',
+      uploaded: files.length,
+      files: files.map((item) => item.name),
+      failed: [],
+    }));
+    const target = {
+      files: [file] as unknown as FileList,
+      value: 'sub2api-export.json',
+    };
+
+    await act(async () => {
+      await hook
+        .getCurrent()
+        .handleFileChange({ target } as unknown as Parameters<
+          ReturnType<typeof useAuthFilesData>['handleFileChange']
+        >[0]);
+    });
+
+    expect(mocks.list).toHaveBeenCalledTimes(1);
+    expect(mocks.showNotification).not.toHaveBeenCalledWith('auth_files.upload_success', 'success');
+    expect(mocks.showNotification).toHaveBeenCalledWith('notification.upload_failed', 'error');
+    hook.unmount();
   });
 });
 
@@ -215,7 +544,7 @@ describe('useAuthFilesData savePastedAuthJson', () => {
       .getCurrent()
       .savePastedAuthJson('session', 'codex-account.json', sessionInput);
 
-    expect(savedName).toBe('codex-session-session.user+tag@example.com.json');
+    expect(savedName).toEqual(['codex-session-session.user+tag@example.com.json']);
     expect(mocks.saveJsonObject).toHaveBeenCalledWith(
       'codex-session-session.user+tag@example.com.json',
       expect.objectContaining({
@@ -245,13 +574,13 @@ describe('useAuthFilesData savePastedAuthJson', () => {
       .getCurrent()
       .savePastedAuthJson('cpa', 'custom-auth.json', JSON.stringify(cpaInput));
 
-    expect(savedName).toBe('custom-auth.json');
+    expect(savedName).toEqual(['custom-auth.json']);
     expect(mocks.saveJsonObject).toHaveBeenCalledWith('custom-auth.json', cpaInput);
     expect(mocks.list).toHaveBeenCalledTimes(1);
     hook.unmount();
   });
 
-  it('saves converted sub2api JSON as a CPA auth array', async () => {
+  it('saves converted sub2api JSON as separate CPA auth files', async () => {
     const hook = mountUseAuthFilesData();
     const sub2apiInput = JSON.stringify({
       exported_at: '2026-06-01T12:00:00.000Z',
@@ -277,13 +606,29 @@ describe('useAuthFilesData savePastedAuthJson', () => {
         },
       ],
     });
+    mocks.uploadFiles.mockImplementationOnce(async (files: File[]) => ({
+      status: 'ok',
+      uploaded: files.length,
+      files: files.map((file) => file.name),
+      failed: [],
+    }));
 
-    const savedName = await hook
+    const savedNames = await hook
       .getCurrent()
       .savePastedAuthJson('sub2api', 'codex-account.json', sub2apiInput);
 
-    expect(savedName).toBe('sub2api-codex-accounts.codex.json');
-    expect(mocks.saveJsonObject).toHaveBeenCalledWith('sub2api-codex-accounts.codex.json', [
+    expect(savedNames).toEqual([
+      expect.stringMatching(/^codex-[a-f0-9]{8}-first@example\.com\.json$/),
+      expect.stringMatching(/^codex-[a-f0-9]{8}-second@example\.com\.json$/),
+    ]);
+    expect(mocks.saveJsonObject).not.toHaveBeenCalled();
+    expect(mocks.uploadFiles).toHaveBeenCalledTimes(1);
+    const uploadedFiles = mocks.uploadFiles.mock.calls[0]?.[0] as File[];
+    expect(uploadedFiles).toHaveLength(2);
+    const uploadedJson = await Promise.all(
+      uploadedFiles.map(async (file) => JSON.parse(await file.text()) as Record<string, unknown>)
+    );
+    expect(uploadedJson).toEqual([
       expect.objectContaining({
         type: 'codex',
         email: 'first@example.com',
@@ -295,7 +640,157 @@ describe('useAuthFilesData savePastedAuthJson', () => {
         access_token: 'second-access-token',
       }),
     ]);
+    expect(uploadedJson.every((item) => !Array.isArray(item))).toBe(true);
+    expect(mocks.showNotification).toHaveBeenCalledWith('auth_files.paste_success_many', 'success');
     expect(mocks.list).toHaveBeenCalledTimes(1);
+    hook.unmount();
+  });
+
+  it('rejects an explicit partial upload status even when all generated files are counted', async () => {
+    const hook = mountUseAuthFilesData();
+    const sub2apiInput = JSON.stringify({
+      exported_at: '2026-06-01T12:00:00.000Z',
+      proxies: [],
+      accounts: [
+        {
+          name: 'First OpenAI',
+          platform: 'openai',
+          type: 'oauth',
+          credentials: {
+            access_token: 'first-access-token',
+            email: 'first@example.com',
+          },
+        },
+        {
+          name: 'Second OpenAI',
+          platform: 'openai',
+          type: 'oauth',
+          credentials: {
+            access_token: 'second-access-token',
+            email: 'second@example.com',
+          },
+        },
+      ],
+    });
+    mocks.uploadFiles.mockImplementationOnce(async (files: File[]) => ({
+      status: 'partial',
+      uploaded: files.length,
+      files: files.map((file) => file.name),
+      failed: [],
+    }));
+
+    await expect(
+      hook.getCurrent().savePastedAuthJson('sub2api', 'codex-account.json', sub2apiInput)
+    ).rejects.toThrow('notification.save_failed');
+
+    expect(mocks.list).toHaveBeenCalledTimes(1);
+    expect(mocks.showNotification).not.toHaveBeenCalledWith(
+      'auth_files.paste_success_many',
+      'success'
+    );
+    hook.unmount();
+  });
+
+  it('reloads files and reports the failed name after a partial sub2api paste upload', async () => {
+    const hook = mountUseAuthFilesData();
+    const sub2apiInput = JSON.stringify({
+      exported_at: '2026-06-01T12:00:00.000Z',
+      proxies: [],
+      accounts: [
+        {
+          name: 'First OpenAI',
+          platform: 'openai',
+          type: 'oauth',
+          credentials: {
+            access_token: 'first-access-token',
+            email: 'first@example.com',
+          },
+        },
+        {
+          name: 'Second OpenAI',
+          platform: 'openai',
+          type: 'oauth',
+          credentials: {
+            access_token: 'second-access-token',
+            email: 'second@example.com',
+          },
+        },
+      ],
+    });
+    let failedName = '';
+    mocks.uploadFiles.mockImplementationOnce(async (files: File[]) => {
+      failedName = files[1].name;
+      return {
+        status: 'partial',
+        uploaded: 1,
+        files: [files[0].name],
+        failed: [{ name: failedName, error: 'upload failed' }],
+      };
+    });
+
+    await expect(
+      hook.getCurrent().savePastedAuthJson('sub2api', 'codex-account.json', sub2apiInput)
+    ).rejects.toThrow(`auth_files.paste_error_partial:1/2:${failedName}`);
+
+    expect(mocks.list).toHaveBeenCalledTimes(1);
+    expect(mocks.showNotification).not.toHaveBeenCalledWith(
+      'auth_files.paste_success_many',
+      'success'
+    );
+    hook.unmount();
+  });
+
+  it('keeps the partial upload error and warns when its file reload also fails', async () => {
+    const hook = mountUseAuthFilesData();
+    const sub2apiInput = JSON.stringify({
+      exported_at: '2026-06-01T12:00:00.000Z',
+      proxies: [],
+      accounts: [
+        {
+          name: 'First OpenAI',
+          platform: 'openai',
+          type: 'oauth',
+          credentials: {
+            access_token: 'first-access-token',
+            email: 'first@example.com',
+          },
+        },
+        {
+          name: 'Second OpenAI',
+          platform: 'openai',
+          type: 'oauth',
+          credentials: {
+            access_token: 'second-access-token',
+            email: 'second@example.com',
+          },
+        },
+      ],
+    });
+    let failedName = '';
+    mocks.uploadFiles.mockImplementationOnce(async (files: File[]) => {
+      failedName = files[1].name;
+      return {
+        status: 'partial',
+        uploaded: 1,
+        files: [files[0].name],
+        failed: [{ name: failedName, error: 'upload failed' }],
+      };
+    });
+    mocks.list.mockRejectedValueOnce(new Error('reload failed'));
+
+    await expect(
+      hook.getCurrent().savePastedAuthJson('sub2api', 'codex-account.json', sub2apiInput)
+    ).rejects.toThrow(`auth_files.paste_error_partial:1/2:${failedName}`);
+
+    expect(mocks.list).toHaveBeenCalledTimes(1);
+    expect(mocks.showNotification).toHaveBeenCalledWith(
+      'notification.refresh_failed: reload failed',
+      'warning'
+    );
+    expect(mocks.showNotification).not.toHaveBeenCalledWith(
+      'auth_files.paste_success_many',
+      'success'
+    );
     hook.unmount();
   });
 
@@ -327,7 +822,7 @@ describe('useAuthFilesData savePastedAuthJson', () => {
     expect(resolveList).toBeTypeOf('function');
     resolveList?.();
     await savePromise;
-    expect(settled).toHaveBeenCalledWith('custom-auth.json');
+    expect(settled).toHaveBeenCalledWith(['custom-auth.json']);
     expect(mocks.showNotification).toHaveBeenCalledWith(
       'auth_files.paste_success:custom-auth.json',
       'success'
@@ -358,7 +853,7 @@ describe('useAuthFilesData savePastedAuthJson', () => {
 
     expect(resolveUpload).toBeTypeOf('function');
     resolveUpload?.();
-    await expect(savePromise).resolves.toBe('custom-auth.json');
+    await expect(savePromise).resolves.toEqual(['custom-auth.json']);
     await act(async () => {
       await Promise.resolve();
     });
@@ -393,7 +888,7 @@ describe('useAuthFilesData savePastedAuthJson', () => {
     expect(mocks.saveJsonObject).toHaveBeenCalledTimes(1);
     expect(resolveUpload).toBeTypeOf('function');
     resolveUpload?.();
-    await expect(firstSave).resolves.toBe('custom-auth.json');
+    await expect(firstSave).resolves.toEqual(['custom-auth.json']);
     hook.unmount();
   });
 
@@ -443,7 +938,7 @@ describe('useAuthFilesData savePastedAuthJson', () => {
 
     await expect(
       hook.getCurrent().savePastedAuthJson('cpa', 'custom-auth.json', validInput)
-    ).resolves.toBe('custom-auth.json');
+    ).resolves.toEqual(['custom-auth.json']);
 
     expect(mocks.saveJsonObject).toHaveBeenCalledTimes(1);
     expect(mocks.list).toHaveBeenCalledTimes(1);
@@ -507,7 +1002,7 @@ describe('useAuthFilesData savePastedAuthJson', () => {
     ).rejects.toThrow('notification.save_failed');
     await expect(
       hook.getCurrent().savePastedAuthJson('cpa', 'custom-auth.json', validInput)
-    ).resolves.toBe('custom-auth.json');
+    ).resolves.toEqual(['custom-auth.json']);
 
     expect(mocks.saveJsonObject).toHaveBeenCalledTimes(2);
     expect(mocks.list).toHaveBeenCalledTimes(1);

@@ -14,6 +14,7 @@ const { mocks } = vi.hoisted(() => {
       connectionStatus: 'connected' as 'connected' | 'disconnected',
       list: vi.fn(),
       saveJsonObject: vi.fn(),
+      uploadFiles: vi.fn(),
       deleteFiles: vi.fn(),
       deleteAll: vi.fn(),
       showNotification: vi.fn(),
@@ -106,6 +107,7 @@ vi.mock('@/services/api', () => ({
   authFilesApi: {
     list: mocks.list,
     saveJsonObject: mocks.saveJsonObject,
+    uploadFiles: mocks.uploadFiles,
     deleteFiles: mocks.deleteFiles,
     deleteAll: mocks.deleteAll,
   },
@@ -282,6 +284,7 @@ describe('AuthFilesPage real auth JSON paste flow', () => {
   beforeEach(() => {
     mocks.list.mockReset();
     mocks.saveJsonObject.mockReset();
+    mocks.uploadFiles.mockReset();
     mocks.deleteFiles.mockReset();
     mocks.deleteAll.mockReset();
     mocks.showNotification.mockReset();
@@ -302,6 +305,12 @@ describe('AuthFilesPage real auth JSON paste flow', () => {
 
     mocks.list.mockResolvedValue({ files: [] });
     mocks.saveJsonObject.mockResolvedValue(undefined);
+    mocks.uploadFiles.mockImplementation(async (files: File[]) => ({
+      status: 'ok',
+      uploaded: files.length,
+      files: files.map((file) => file.name),
+      failed: [],
+    }));
     mocks.deleteFiles.mockResolvedValue({ deleted: 0, failed: [], files: [] });
     mocks.deleteAll.mockResolvedValue(undefined);
     mocks.loadExcluded.mockResolvedValue(undefined);
@@ -895,20 +904,25 @@ describe('AuthFilesPage real auth JSON paste flow', () => {
       await findButtonByText(renderer!, 'auth_files.paste_save_button').props.onClick?.();
     });
 
-    await vi.waitFor(() => {
-      expect(mocks.saveJsonObject).toHaveBeenCalledWith('sub2api-codex-accounts.codex.json', [
-        expect.objectContaining({
-          type: 'codex',
-          email: 'first@example.com',
-          access_token: 'first-access-token',
-        }),
-        expect.objectContaining({
-          type: 'codex',
-          email: 'second@example.com',
-          access_token: 'second-access-token',
-        }),
-      ]);
-    });
+    await vi.waitFor(() => expect(mocks.uploadFiles).toHaveBeenCalledTimes(1));
+    expect(mocks.saveJsonObject).not.toHaveBeenCalled();
+    const uploadedFiles = mocks.uploadFiles.mock.calls[0]?.[0] as File[];
+    expect(uploadedFiles).toHaveLength(2);
+    const uploadedJson = await Promise.all(
+      uploadedFiles.map(async (file) => JSON.parse(await file.text()) as Record<string, unknown>)
+    );
+    expect(uploadedJson).toEqual([
+      expect.objectContaining({
+        type: 'codex',
+        email: 'first@example.com',
+        access_token: 'first-access-token',
+      }),
+      expect.objectContaining({
+        type: 'codex',
+        email: 'second@example.com',
+        access_token: 'second-access-token',
+      }),
+    ]);
 
     await act(async () => {
       renderer!.unmount();
