@@ -3,6 +3,7 @@ package codexinspection
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -141,6 +142,15 @@ func TestRequestCodexUsageStreamsResponsesLargerThanEightMiB(t *testing.T) {
 	}
 	if padding := readString(body, "padding"); len(padding) != 8*1024*1024 {
 		t.Fatalf("padding length = %d, want %d", len(padding), 8*1024*1024)
+	}
+}
+
+func TestDecodeCPAAPICallResponseRejectsOversizedBody(t *testing.T) {
+	body := `{"status_code":200,"body":{"padding":"` + strings.Repeat("x", 256) + `"}}`
+	var raw map[string]any
+	err := decodeCPAAPICallResponse(strings.NewReader(body), 128, &raw)
+	if !errors.Is(err, errCPAAPICallResponseTooLarge) {
+		t.Fatalf("decodeCPAAPICallResponse() error = %v, want errCPAAPICallResponseTooLarge", err)
 	}
 }
 

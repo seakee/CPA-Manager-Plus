@@ -25,22 +25,24 @@ import (
 )
 
 const (
-	codexUsageURL       = "https://chatgpt.com/backend-api/wham/usage"
-	codexFiveHourWindow = 18_000
-	codexWeekWindow     = 604_800
-	codexMonthWindow    = 2_592_000
-	codexMinMonthWindow = 28 * 24 * 60 * 60
-	codexMaxMonthWindow = 31 * 24 * 60 * 60
-	maxStoredBodyText   = 2048
+	codexUsageURL             = "https://chatgpt.com/backend-api/wham/usage"
+	codexFiveHourWindow       = 18_000
+	codexWeekWindow           = 604_800
+	codexMonthWindow          = 2_592_000
+	codexMinMonthWindow       = 28 * 24 * 60 * 60
+	codexMaxMonthWindow       = 31 * 24 * 60 * 60
+	maxStoredBodyText         = 2048
+	maxCPAAPICallResponseSize = 16 * 1024 * 1024
 )
 
 var (
-	ErrRunAlreadyActive    = errors.New("codex inspection is already running")
-	ErrNotConfigured       = errors.New("usage service is not configured")
-	ErrRunNotFound         = errors.New("codex inspection run not found")
-	ErrRunNotCompleted     = errors.New("codex inspection run is not completed")
-	ErrActionIDsRequired   = errors.New("codex inspection action result ids are required")
-	ErrNoActionableResults = errors.New("codex inspection has no actionable results")
+	ErrRunAlreadyActive           = errors.New("codex inspection is already running")
+	ErrNotConfigured              = errors.New("usage service is not configured")
+	ErrRunNotFound                = errors.New("codex inspection run not found")
+	ErrRunNotCompleted            = errors.New("codex inspection run is not completed")
+	ErrActionIDsRequired          = errors.New("codex inspection action result ids are required")
+	ErrNoActionableResults        = errors.New("codex inspection has no actionable results")
+	errCPAAPICallResponseTooLarge = errors.New("CPA api-call response too large")
 )
 
 type Service struct {
@@ -727,16 +729,8 @@ func (s *Service) requestCodexUsageAt(
 	}
 
 	var raw map[string]any
-	decoder := json.NewDecoder(res.Body)
-	if err := decoder.Decode(&raw); err != nil {
+	if err := decodeCPAAPICallResponse(res.Body, maxCPAAPICallResponseSize, &raw); err != nil {
 		return apiCallResponse{}, res.StatusCode, err
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return apiCallResponse{}, res.StatusCode, errors.New("api-call response contains multiple JSON values")
-		}
-		return apiCallResponse{}, res.StatusCode, fmt.Errorf("decode api-call response trailing data: %w", err)
 	}
 	statusRaw, hasStatus := firstValue(raw, "status_code", "statusCode")
 	statusCode := int(readFloat(statusRaw, 0))
@@ -748,6 +742,38 @@ func (s *Service) requestCodexUsageAt(
 		BodyText:      bodyText,
 		Body:          bodyValue,
 	}, res.StatusCode, nil
+}
+
+func decodeCPAAPICallResponse(body io.Reader, maxBytes int64, target any) error {
+	if body == nil {
+		return io.EOF
+	}
+	if maxBytes <= 0 {
+		return errors.New("CPA api-call response size limit must be positive")
+	}
+	limited := &io.LimitedReader{R: body, N: maxBytes + 1}
+	decoder := json.NewDecoder(limited)
+	if err := decoder.Decode(target); err != nil {
+		if limited.N == 0 {
+			return fmt.Errorf("%w: exceeds %d bytes", errCPAAPICallResponseTooLarge, maxBytes)
+		}
+		return err
+	}
+	if limited.N == 0 {
+		return fmt.Errorf("%w: exceeds %d bytes", errCPAAPICallResponseTooLarge, maxBytes)
+	}
+	var trailing any
+	trailingErr := decoder.Decode(&trailing)
+	if limited.N == 0 {
+		return fmt.Errorf("%w: exceeds %d bytes", errCPAAPICallResponseTooLarge, maxBytes)
+	}
+	if errors.Is(trailingErr, io.EOF) {
+		return nil
+	}
+	if trailingErr == nil {
+		return errors.New("api-call response contains multiple JSON values")
+	}
+	return fmt.Errorf("decode api-call response trailing data: %w", trailingErr)
 }
 
 func (s *Service) executeAutoActions(
