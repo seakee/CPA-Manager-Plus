@@ -163,6 +163,7 @@ describe('Codex inspection settings', () => {
         usedPercentThreshold: '120',
         sampleSize: 'all',
         autoActionMode: 'delete',
+        disableOnShortWindowExhausted: false,
       },
       t
     );
@@ -187,6 +188,7 @@ describe('Codex inspection settings', () => {
         usedPercentThreshold: '99.5',
         sampleSize: '0',
         autoActionMode: 'unexpected',
+        disableOnShortWindowExhausted: false,
       },
       t
     );
@@ -202,6 +204,7 @@ describe('Codex inspection settings', () => {
       usedPercentThreshold: 99.5,
       sampleSize: 0,
       autoActionMode: 'none',
+      disableOnShortWindowExhausted: false,
     });
   });
 
@@ -222,6 +225,9 @@ describe('Codex inspection settings', () => {
       'monitoring.server_codex_inspection_config_summary_auto': 'Auto',
       'monitoring.server_codex_inspection_schedule_enabled': 'Enabled',
       'monitoring.server_codex_inspection_schedule_disabled': 'Disabled',
+      'monitoring.codex_inspection_settings_disable_on_short_window_label': 'Short window',
+      'monitoring.codex_inspection_settings_disable_on_short_window_enabled': 'On',
+      'monitoring.codex_inspection_settings_disable_on_short_window_disabled': 'Off',
     };
     const t = ((key: string) => labels[key] ?? key) as never;
     const settings = {
@@ -237,6 +243,7 @@ describe('Codex inspection settings', () => {
       { key: 'threshold', value: '100%', field: 'usedPercentThreshold' },
       { key: 'sample', value: 'All', field: 'sampleSize' },
       { key: 'auto', value: 'Auto delete', tone: 'bad', field: 'autoActionMode' },
+      { key: 'shortWindowDisable', value: 'Off', tone: 'idle' },
       { key: 'concurrency', value: '4', hint: 'Timeout: 15000', field: 'workers' },
       { key: 'target', value: 'codex', field: 'targetType' },
     ]);
@@ -254,6 +261,7 @@ describe('Codex inspection settings', () => {
       { key: 'threshold', value: '100%', field: 'usedPercentThreshold' },
       { key: 'sample', value: 'All', field: 'sampleSize' },
       { key: 'auto', value: 'Auto delete', tone: 'bad', field: 'autoActionMode' },
+      { key: 'shortWindowDisable', value: 'Off', tone: 'idle' },
     ]);
   });
 });

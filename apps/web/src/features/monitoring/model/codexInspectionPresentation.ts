@@ -80,11 +80,12 @@ export type InspectionSettingsDraft = {
   usedPercentThreshold: string;
   sampleSize: string;
   autoActionMode: CodexInspectionAutoActionMode;
+  disableOnShortWindowExhausted: boolean;
 };
 
 export type InspectionSettingsDraftField = Exclude<
   keyof InspectionSettingsDraft,
-  'autoActionMode'
+  'autoActionMode' | 'disableOnShortWindowExhausted'
 >;
 
 export const ACTION_FILTERS: ActionFilter[] = [
@@ -121,6 +122,7 @@ export const toSettingsDraft = (
   usedPercentThreshold: String(settings.usedPercentThreshold),
   sampleSize: String(settings.sampleSize),
   autoActionMode: settings.autoActionMode,
+  disableOnShortWindowExhausted: settings.disableOnShortWindowExhausted,
 });
 
 export const formatActionLabel = (action: CodexInspectionAction, t: TFunction) => {
@@ -456,6 +458,7 @@ export type SharedInspectionConfigDraft = {
   [K in SharedInspectionConfigField]: string;
 } & {
   autoActionMode: CodexInspectionAutoActionMode | string;
+  disableOnShortWindowExhausted: boolean;
 };
 
 export type InspectionConfigFieldErrors = Partial<
@@ -472,6 +475,7 @@ export type ValidatedInspectionConfigValues = {
   usedPercentThreshold: number;
   sampleSize: number;
   autoActionMode: CodexInspectionAutoActionMode;
+  disableOnShortWindowExhausted: boolean;
 };
 
 type InspectionConfigDraftValidation =
@@ -555,6 +559,7 @@ export const validateInspectionConfigDraft = (
       usedPercentThreshold: Number(draft.usedPercentThreshold.trim()),
       sampleSize: Number(draft.sampleSize.trim()),
       autoActionMode: normalizeInspectionAutoActionMode(draft.autoActionMode),
+      disableOnShortWindowExhausted: draft.disableOnShortWindowExhausted,
     },
   };
 };
@@ -589,6 +594,7 @@ type ConfigOverviewSettings = Pick<
   'targetType' | 'workers' | 'timeout' | 'usedPercentThreshold' | 'sampleSize'
 > & {
   autoActionMode: CodexInspectionAutoActionMode | string;
+  disableOnShortWindowExhausted?: boolean;
 };
 
 type BuildConfigOverviewItemsOptions =
@@ -651,6 +657,14 @@ export const buildConfigOverviewItems = (
         tone: getAutoActionTone(autoActionMode),
         field: 'autoActionMode',
       },
+      {
+        key: 'shortWindowDisable',
+        label: t('monitoring.codex_inspection_settings_disable_on_short_window_label'),
+        value: settings.disableOnShortWindowExhausted
+          ? t('monitoring.codex_inspection_settings_disable_on_short_window_enabled')
+          : t('monitoring.codex_inspection_settings_disable_on_short_window_disabled'),
+        tone: settings.disableOnShortWindowExhausted ? 'warn' : 'idle',
+      },
     ];
   }
 
@@ -673,6 +687,14 @@ export const buildConfigOverviewItems = (
       value: autoActionLabel,
       tone: getAutoActionTone(autoActionMode),
       field: 'autoActionMode',
+    },
+    {
+      key: 'shortWindowDisable',
+      label: t('monitoring.codex_inspection_settings_disable_on_short_window_label'),
+      value: settings.disableOnShortWindowExhausted
+        ? t('monitoring.codex_inspection_settings_disable_on_short_window_enabled')
+        : t('monitoring.codex_inspection_settings_disable_on_short_window_disabled'),
+      tone: settings.disableOnShortWindowExhausted ? 'warn' : 'idle',
     },
     {
       key: 'concurrency',

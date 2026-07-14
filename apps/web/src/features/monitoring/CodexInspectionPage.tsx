@@ -795,6 +795,13 @@ export function CodexInspectionPage() {
     }));
   }, []);
 
+  const handleDisableOnShortWindowExhaustedChange = useCallback((value: boolean) => {
+    setSettingsDraft((previous) => ({
+      ...previous,
+      disableOnShortWindowExhausted: value,
+    }));
+  }, []);
+
   const settingsFieldErrors = useMemo(
     () => validateInspectionConfigFields(settingsDraft, t),
     [settingsDraft, t]
@@ -1022,6 +1029,7 @@ export function CodexInspectionPage() {
           t={t}
           onFieldChange={handleSettingsDraftChange}
           onAutoActionModeChange={handleAutoActionModeChange}
+          onDisableOnShortWindowExhaustedChange={handleDisableOnShortWindowExhaustedChange}
         />
       </InspectionConfigDrawer>
 

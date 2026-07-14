@@ -1967,6 +1967,14 @@
   gap: 10px;
 }
 
+.autoActionHint {
+  margin: 0;
+  color: var(--inspect-ink-muted, var(--inspect-ink));
+  font-size: 12px;
+  line-height: 1.5;
+  opacity: 0.7;
+}
+
 .serverField :global(.form-group) {
   margin-bottom: 0;
 }

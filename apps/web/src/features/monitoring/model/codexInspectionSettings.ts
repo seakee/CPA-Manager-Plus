@@ -27,6 +27,7 @@ export const DEFAULT_CODEX_INSPECTION_SETTINGS: CodexInspectionConfigurableSetti
   usedPercentThreshold: 100,
   sampleSize: 0,
   autoActionMode: 'none',
+  disableOnShortWindowExhausted: false,
 };
 
 export const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -143,6 +144,7 @@ export const readConfigurableSettingsFromConfig = (
       cleanRecord.autoActionMode === undefined
         ? undefined
         : normalizeAutoActionMode(cleanRecord.autoActionMode),
+    disableOnShortWindowExhausted: readBoolean(cleanRecord.disableOnShortWindowExhausted, false),
   };
 };
 
@@ -157,6 +159,7 @@ type CodexInspectionConfigurableSettingsInput = {
   sampleSize?: unknown;
   autoExecuteActions?: unknown;
   autoActionMode?: unknown;
+  disableOnShortWindowExhausted?: unknown;
 };
 
 export const normalizeConfigurableSettings = (
@@ -202,6 +205,7 @@ export const normalizeConfigurableSettings = (
         ? DEFAULT_CODEX_INSPECTION_SETTINGS.sampleSize
         : Math.max(0, Math.floor(sampleSizeValue)),
     autoActionMode: normalizeAutoActionMode(merged.autoActionMode, merged.autoExecuteActions),
+    disableOnShortWindowExhausted: readBoolean(merged.disableOnShortWindowExhausted, false),
   };
 };
 

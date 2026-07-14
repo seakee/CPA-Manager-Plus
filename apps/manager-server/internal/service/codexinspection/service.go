@@ -650,7 +650,7 @@ func (s *Service) inspectSingleAccount(
 		strings.Contains(bodyLower, "payment_required") ||
 		isRateLimitReached(rateLimit) ||
 		(usedPercent != nil && *usedPercent >= settings.UsedPercentThreshold)
-	decision := resolveProbeAction(item, statusCode, response.BodyText, rateLimit, usedPercent, isQuota, settings.UsedPercentThreshold, planType)
+	decision := resolveProbeAction(item, statusCode, response.BodyText, rateLimit, usedPercent, isQuota, settings.UsedPercentThreshold, settings.DisableOnShortWindowExhausted != nil && *settings.DisableOnShortWindowExhausted, planType)
 
 	base.Action = decision.Action
 	base.ActionReason = decision.ActionReason
@@ -982,7 +982,7 @@ func (l runLogger) log(ctx context.Context, level string, message string, detail
 	})
 }
 
-func resolveProbeAction(item account, statusCode int, bodyText string, rateLimit *codexRateLimit, usedPercent *float64, isQuota bool, threshold float64, planTypes ...string) inspectionDecision {
+func resolveProbeAction(item account, statusCode int, bodyText string, rateLimit *codexRateLimit, usedPercent *float64, isQuota bool, threshold float64, disableOnShortWindow bool, planTypes ...string) inspectionDecision {
 	if isDeactivatedWorkspaceResponse(statusCode, bodyText) {
 		return resolveDeactivatedWorkspaceProbeAction(usedPercent)
 	}
@@ -990,7 +990,7 @@ func resolveProbeAction(item account, statusCode int, bodyText string, rateLimit
 	if len(planTypes) > 0 {
 		planType = planTypes[0]
 	}
-	if decision := resolveWindowAwareProbeAction(item, statusCode, bodyText, rateLimit, threshold, planType); decision != nil {
+	if decision := resolveWindowAwareProbeAction(item, statusCode, bodyText, rateLimit, threshold, planType, disableOnShortWindow); decision != nil {
 		return *decision
 	}
 	return resolveLegacyProbeAction(item, statusCode, bodyText, usedPercent, isQuota, threshold)
@@ -1010,7 +1010,7 @@ func resolveDeactivatedWorkspaceProbeAction(usedPercent *float64) inspectionDeci
 	}
 }
 
-func resolveWindowAwareProbeAction(item account, statusCode int, bodyText string, rateLimit *codexRateLimit, threshold float64, planType string) *inspectionDecision {
+func resolveWindowAwareProbeAction(item account, statusCode int, bodyText string, rateLimit *codexRateLimit, threshold float64, planType string, disableOnShortWindow bool) *inspectionDecision {
 	if rateLimit == nil {
 		return nil
 	}
@@ -1044,22 +1044,46 @@ func resolveWindowAwareProbeAction(item account, statusCode int, bodyText string
 			IsQuota:      true,
 		}
 	}
-	if item.Disabled {
-		reason := fmt.Sprintf("%s仍可用，建议立即启用账号", longWindowLabel)
-		if fiveHourOverThreshold {
-			reason = fmt.Sprintf("5 小时额度达到阈值，但%s仍可用，建议立即启用账号", longWindowLabel)
-		}
-		return &inspectionDecision{
-			Action:       "enable",
-			ActionReason: reason,
-			UsedPercent:  ptrFloat(longWindowUsedPercent),
-			IsQuota:      false,
-		}
-	}
+	// Short-window (5h) exhaustion blocks real requests even when the
+	// weekly/monthly bucket still has quota.  When disableOnShortWindow is
+	// true the account is temporarily disabled until the next inspection
+	// sees the short window recovered; otherwise the account is kept as-is.
 	if fiveHourOverThreshold {
+		if disableOnShortWindow {
+			if item.Disabled {
+				return &inspectionDecision{
+					Action:       "keep",
+					ActionReason: "5 小时额度达到阈值，账号已禁用，等待短窗口恢复",
+					UsedPercent:  ptrFloat(longWindowUsedPercent),
+					IsQuota:      true,
+				}
+			}
+			return &inspectionDecision{
+				Action:       "disable",
+				ActionReason: fmt.Sprintf("5 小时额度达到阈值，建议临时禁用账号（%s仍可用，短窗口恢复后可再启用）", longWindowLabel),
+				UsedPercent:  ptrFloat(longWindowUsedPercent),
+				IsQuota:      true,
+			}
+		}
+		if item.Disabled {
+			return &inspectionDecision{
+				Action:       "keep",
+				ActionReason: "5 小时额度达到阈值，账号已禁用，等待短窗口恢复",
+				UsedPercent:  ptrFloat(longWindowUsedPercent),
+				IsQuota:      true,
+			}
+		}
 		return &inspectionDecision{
 			Action:       "keep",
-			ActionReason: fmt.Sprintf("5 小时额度达到阈值，但%s仍可用，暂不禁用账号", longWindowLabel),
+			ActionReason: fmt.Sprintf("5 小时额度达到阈值，%s仍可用，暂不处理", longWindowLabel),
+			UsedPercent:  ptrFloat(longWindowUsedPercent),
+			IsQuota:      true,
+		}
+	}
+	if item.Disabled {
+		return &inspectionDecision{
+			Action:       "enable",
+			ActionReason: fmt.Sprintf("%s仍可用，建议立即启用账号", longWindowLabel),
 			UsedPercent:  ptrFloat(longWindowUsedPercent),
 			IsQuota:      false,
 		}

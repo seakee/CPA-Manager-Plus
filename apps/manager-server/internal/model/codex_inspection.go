@@ -42,9 +42,10 @@ type ManagerCodexInspectionConfig struct {
 	Timeout              int                                  `json:"timeout,omitempty"`
 	Retries              int                                  `json:"retries,omitempty"`
 	UserAgent            string                               `json:"userAgent,omitempty"`
-	UsedPercentThreshold float64                              `json:"usedPercentThreshold,omitempty"`
-	SampleSize           int                                  `json:"sampleSize,omitempty"`
-	AutoActionMode       string                               `json:"autoActionMode,omitempty"`
+	UsedPercentThreshold         float64                              `json:"usedPercentThreshold,omitempty"`
+	SampleSize                   int                                  `json:"sampleSize,omitempty"`
+	AutoActionMode               string                               `json:"autoActionMode,omitempty"`
+	DisableOnShortWindowExhausted *bool                               `json:"disableOnShortWindowExhausted,omitempty"`
 }
 
 type ManagerCodexInspectionScheduleConfig struct {
@@ -142,6 +143,7 @@ func DefaultCodexInspectionConfig() ManagerCodexInspectionConfig {
 		UsedPercentThreshold: 100,
 		SampleSize:           0,
 		AutoActionMode:       CodexInspectionAutoActionNone,
+		DisableOnShortWindowExhausted: boolPtr(false),
 	}
 }
 
@@ -172,6 +174,11 @@ func NormalizeCodexInspectionConfig(input ManagerCodexInspectionConfig, fallback
 		next.SampleSize = input.SampleSize
 	}
 	next.AutoActionMode = NormalizeCodexInspectionAutoActionMode(input.AutoActionMode, base.AutoActionMode)
+	if input.DisableOnShortWindowExhausted != nil {
+		next.DisableOnShortWindowExhausted = boolPtr(*input.DisableOnShortWindowExhausted)
+	} else {
+		next.DisableOnShortWindowExhausted = boolPtr(false)
+	}
 	return next
 }
 

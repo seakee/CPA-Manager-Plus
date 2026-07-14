@@ -183,6 +183,7 @@ export interface ManagerCodexInspectionConfig {
   usedPercentThreshold?: number;
   sampleSize?: number;
   autoActionMode?: ManagerCodexInspectionAutoActionMode | string;
+  disableOnShortWindowExhausted?: boolean;
 }
 
 export interface ManagerConfig {

@@ -91,6 +91,7 @@ export interface CodexInspectionConfigurableSettings {
   usedPercentThreshold: number;
   sampleSize: number;
   autoActionMode: CodexInspectionAutoActionMode;
+  disableOnShortWindowExhausted: boolean;
 }
 
 export interface CodexInspectionAccount {

@@ -553,6 +553,7 @@ func TestResolveProbeActionUsesMonthlyWindowAsLongQuota(t *testing.T) {
 			deriveRateLimitUsedPercent(rateLimit),
 			true,
 			threshold,
+			false,
 		)
 
 		if decision.Action != "delete" ||
@@ -571,7 +572,7 @@ func TestResolveProbeActionUsesMonthlyWindowAsLongQuota(t *testing.T) {
 				LimitWindowSeconds: ptrFloat(codexMonthWindow),
 			},
 		}
-		decision := resolveProbeAction(item, http.StatusOK, "", rateLimit, deriveRateLimitUsedPercent(rateLimit), false, threshold)
+		decision := resolveProbeAction(item, http.StatusOK, "", rateLimit, deriveRateLimitUsedPercent(rateLimit), false, threshold, false)
 
 		if decision.Action != "keep" ||
 			decision.ActionReason != "月额度仍可用，无需处理" ||
@@ -589,7 +590,7 @@ func TestResolveProbeActionUsesMonthlyWindowAsLongQuota(t *testing.T) {
 				LimitWindowSeconds: ptrFloat(codexMonthWindow),
 			},
 		}
-		decision := resolveProbeAction(item, http.StatusOK, "", rateLimit, deriveRateLimitUsedPercent(rateLimit), true, threshold)
+		decision := resolveProbeAction(item, http.StatusOK, "", rateLimit, deriveRateLimitUsedPercent(rateLimit), true, threshold, false)
 
 		if decision.Action != "disable" ||
 			decision.ActionReason != "月额度达到阈值，建议禁用账号" ||
@@ -600,7 +601,7 @@ func TestResolveProbeActionUsesMonthlyWindowAsLongQuota(t *testing.T) {
 		}
 	})
 
-	t.Run("keeps exhausted short window with healthy monthly quota", func(t *testing.T) {
+	t.Run("disables exhausted short window with healthy monthly quota", func(t *testing.T) {
 		rateLimit := &codexRateLimit{
 			PrimaryWindow: &codexWindow{
 				UsedPercent:        ptrFloat(100),
@@ -611,14 +612,38 @@ func TestResolveProbeActionUsesMonthlyWindowAsLongQuota(t *testing.T) {
 				LimitWindowSeconds: ptrFloat(codexMonthWindow),
 			},
 		}
-		decision := resolveProbeAction(item, http.StatusOK, "", rateLimit, deriveRateLimitUsedPercent(rateLimit), true, threshold)
+		decision := resolveProbeAction(item, http.StatusOK, "", rateLimit, deriveRateLimitUsedPercent(rateLimit), true, threshold, true)
 
-		if decision.Action != "keep" ||
-			decision.ActionReason != "5 小时额度达到阈值，但月额度仍可用，暂不禁用账号" ||
+		if decision.Action != "disable" ||
+			decision.ActionReason != "5 小时额度达到阈值，建议临时禁用账号（月额度仍可用，短窗口恢复后可再启用）" ||
 			decision.UsedPercent == nil ||
 			*decision.UsedPercent != 5 ||
-			decision.IsQuota {
-			t.Fatalf("decision = %#v, want keep exhausted short window with healthy monthly quota", decision)
+			!decision.IsQuota {
+			t.Fatalf("decision = %#v, want disable exhausted short window with healthy monthly quota", decision)
+		}
+	})
+
+	t.Run("keeps already disabled short-window exhaustion until recovery", func(t *testing.T) {
+		disabledItem := item
+		disabledItem.Disabled = true
+		rateLimit := &codexRateLimit{
+			PrimaryWindow: &codexWindow{
+				UsedPercent:        ptrFloat(100),
+				LimitWindowSeconds: ptrFloat(codexFiveHourWindow),
+			},
+			SecondaryWindow: &codexWindow{
+				UsedPercent:        ptrFloat(5),
+				LimitWindowSeconds: ptrFloat(codexMonthWindow),
+			},
+		}
+		decision := resolveProbeAction(disabledItem, http.StatusOK, "", rateLimit, deriveRateLimitUsedPercent(rateLimit), true, threshold, true)
+
+		if decision.Action != "keep" ||
+			decision.ActionReason != "5 小时额度达到阈值，账号已禁用，等待短窗口恢复" ||
+			decision.UsedPercent == nil ||
+			*decision.UsedPercent != 5 ||
+			!decision.IsQuota {
+			t.Fatalf("decision = %#v, want keep already-disabled short-window exhaustion", decision)
 		}
 	})
 
@@ -631,14 +656,60 @@ func TestResolveProbeActionUsesMonthlyWindowAsLongQuota(t *testing.T) {
 				UsedPercent: ptrFloat(5),
 			},
 		}
-		decision := resolveProbeAction(item, http.StatusOK, "", rateLimit, deriveRateLimitUsedPercent(rateLimit), true, threshold, "team")
+		decision := resolveProbeAction(item, http.StatusOK, "", rateLimit, deriveRateLimitUsedPercent(rateLimit), true, threshold, true, "team")
 
-		if decision.Action != "keep" ||
-			decision.ActionReason != "5 小时额度达到阈值，但月额度仍可用，暂不禁用账号" ||
+		if decision.Action != "disable" ||
+			decision.ActionReason != "5 小时额度达到阈值，建议临时禁用账号（月额度仍可用，短窗口恢复后可再启用）" ||
 			decision.UsedPercent == nil ||
 			*decision.UsedPercent != 5 ||
-			decision.IsQuota {
-			t.Fatalf("decision = %#v, want team secondary window treated as monthly quota", decision)
+			!decision.IsQuota {
+			t.Fatalf("decision = %#v, want disable team short-window exhaustion with monthly remaining", decision)
+		}
+	})
+
+	t.Run("keeps short-window exhaustion when disableOnShortWindow is false", func(t *testing.T) {
+		rateLimit := &codexRateLimit{
+			PrimaryWindow: &codexWindow{
+				UsedPercent:        ptrFloat(100),
+				LimitWindowSeconds: ptrFloat(codexFiveHourWindow),
+			},
+			SecondaryWindow: &codexWindow{
+				UsedPercent:        ptrFloat(5),
+				LimitWindowSeconds: ptrFloat(codexMonthWindow),
+			},
+		}
+		decision := resolveProbeAction(item, http.StatusOK, "", rateLimit, deriveRateLimitUsedPercent(rateLimit), true, threshold, false)
+
+		if decision.Action != "keep" ||
+			decision.ActionReason != "5 小时额度达到阈值，月额度仍可用，暂不处理" ||
+			decision.UsedPercent == nil ||
+			*decision.UsedPercent != 5 ||
+			!decision.IsQuota {
+			t.Fatalf("decision = %#v, want keep short-window exhaustion when disableOnShortWindow is false", decision)
+		}
+	})
+
+	t.Run("keeps already disabled short-window exhaustion when disableOnShortWindow is false", func(t *testing.T) {
+		disabledItem := item
+		disabledItem.Disabled = true
+		rateLimit := &codexRateLimit{
+			PrimaryWindow: &codexWindow{
+				UsedPercent:        ptrFloat(100),
+				LimitWindowSeconds: ptrFloat(codexFiveHourWindow),
+			},
+			SecondaryWindow: &codexWindow{
+				UsedPercent:        ptrFloat(5),
+				LimitWindowSeconds: ptrFloat(codexMonthWindow),
+			},
+		}
+		decision := resolveProbeAction(disabledItem, http.StatusOK, "", rateLimit, deriveRateLimitUsedPercent(rateLimit), true, threshold, false)
+
+		if decision.Action != "keep" ||
+			decision.ActionReason != "5 小时额度达到阈值，账号已禁用，等待短窗口恢复" ||
+			decision.UsedPercent == nil ||
+			*decision.UsedPercent != 5 ||
+			!decision.IsQuota {
+			t.Fatalf("decision = %#v, want keep already-disabled short-window exhaustion when disableOnShortWindow is false", decision)
 		}
 	})
 }

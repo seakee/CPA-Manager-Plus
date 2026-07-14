@@ -89,6 +89,7 @@ type ServerCodexInspectionDraft = {
   usedPercentThreshold: string;
   sampleSize: string;
   autoActionMode: string;
+  disableOnShortWindowExhausted: boolean;
 };
 
 type NormalizedServerCodexInspectionConfig = {
@@ -108,6 +109,7 @@ type NormalizedServerCodexInspectionConfig = {
   usedPercentThreshold: number;
   sampleSize: number;
   autoActionMode: string;
+  disableOnShortWindowExhausted: boolean;
 };
 
 const DEFAULT_SERVER_CODEX_CONFIG: NormalizedServerCodexInspectionConfig = {
@@ -127,6 +129,7 @@ const DEFAULT_SERVER_CODEX_CONFIG: NormalizedServerCodexInspectionConfig = {
   usedPercentThreshold: 100,
   sampleSize: 0,
   autoActionMode: 'none',
+  disableOnShortWindowExhausted: false,
 };
 
 const RUNS_LIMIT = 30;
@@ -205,6 +208,10 @@ const resolveServerCodexConfig = (
         ? config.sampleSize
         : DEFAULT_SERVER_CODEX_CONFIG.sampleSize,
     autoActionMode: config?.autoActionMode || DEFAULT_SERVER_CODEX_CONFIG.autoActionMode,
+    disableOnShortWindowExhausted:
+      typeof config?.disableOnShortWindowExhausted === 'boolean'
+        ? config.disableOnShortWindowExhausted
+        : DEFAULT_SERVER_CODEX_CONFIG.disableOnShortWindowExhausted,
   };
 };
 
@@ -225,6 +232,7 @@ const toDraft = (config?: ManagerCodexInspectionConfig | null): ServerCodexInspe
     usedPercentThreshold: String(resolved.usedPercentThreshold),
     sampleSize: String(resolved.sampleSize),
     autoActionMode: resolved.autoActionMode,
+    disableOnShortWindowExhausted: resolved.disableOnShortWindowExhausted,
   };
 };
 
@@ -314,6 +322,7 @@ const createConfigFromDraft = (
     usedPercentThreshold: validation.values.usedPercentThreshold,
     sampleSize: validation.values.sampleSize,
     autoActionMode: validation.values.autoActionMode,
+    disableOnShortWindowExhausted: validation.values.disableOnShortWindowExhausted,
   };
 };
 
@@ -449,6 +458,7 @@ function getComparableConfig(config: NormalizedServerCodexInspectionConfig) {
     usedPercentThreshold: config.usedPercentThreshold,
     sampleSize: config.sampleSize,
     autoActionMode: config.autoActionMode,
+    disableOnShortWindowExhausted: config.disableOnShortWindowExhausted,
   };
 }
 
@@ -1510,6 +1520,7 @@ export function ServerCodexInspectionPage() {
           t={t}
           onFieldChange={(field, value) => updateDraft(field, value)}
           onAutoActionModeChange={(value) => updateDraft('autoActionMode', value)}
+          onDisableOnShortWindowExhaustedChange={(value) => updateDraft('disableOnShortWindowExhausted', value)}
         />
       </InspectionConfigDrawer>
     );
