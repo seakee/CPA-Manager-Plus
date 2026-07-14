@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -31,6 +32,11 @@ const cpaPluginResourcePrefix = "/v0/resource/plugins"
 const cpaManagementPrefix = "/v0/management"
 const codexInviteOriginHeader = "X-Codex-Invite-Origin"
 const managementOriginJSONField = "management_origin"
+
+const maxAuthFileMutationRequestBytes int64 = 10*1024*1024 + 64*1024
+const maxAuthFileMutationResponseBytes int64 = 1024 * 1024
+
+var errAuthFileMutationBodyTooLarge = errors.New("auth file mutation body is too large")
 
 var cpaBuiltinManagementPathHeads = map[string]struct{}{
 	"account-action-candidates": {},
@@ -126,8 +132,21 @@ func (s *Service) proxyToSavedSetup(w http.ResponseWriter, r *http.Request, writ
 	}
 	ownershipMutation, err := inspectAuthFileOwnershipMutation(r)
 	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, errAuthFileMutationBodyTooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeError(w, status, err)
+		return
+	}
+	persistCtx := context.WithoutCancel(r.Context())
+	revokedOwnership, err := s.revokeInspectionOwnership(persistCtx, ownershipMutation)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+	if ownershipMutation.clearAll {
+		ownershipMutation.fileNames = ownershipFileNames(revokedOwnership)
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	originalDirector := proxy.Director
@@ -142,36 +161,48 @@ func (s *Service) proxyToSavedSetup(w http.ResponseWriter, r *http.Request, writ
 		if rewritePluginOrigin {
 			rewriteCodexInviteOrigin(req.Header, target)
 		}
+		if ownershipMutation.clearAll || len(ownershipMutation.fileNames) > 0 {
+			req.Header.Set("Accept-Encoding", "identity")
+		}
 	}
-	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
-		writeError(w, http.StatusBadGateway, err)
+	responseProcessed := false
+	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, proxyErr error) {
+		if !responseProcessed {
+			if restoreErr := s.restoreInspectionOwnership(persistCtx, revokedOwnership); restoreErr != nil {
+				proxyErr = fmt.Errorf("%w; restore inspection ownership: %v", proxyErr, restoreErr)
+			}
+		}
+		writeError(w, http.StatusBadGateway, proxyErr)
 	}
 	proxy.ModifyResponse = func(response *http.Response) error {
+		responseProcessed = true
 		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-			return nil
+			return s.restoreInspectionOwnership(persistCtx, revokedOwnership)
 		}
 		mutation, err := successfulAuthFileOwnershipMutation(response, ownershipMutation)
 		if err != nil {
+			if restoreErr := s.restoreInspectionOwnership(persistCtx, revokedOwnership); restoreErr != nil {
+				return fmt.Errorf("%w; restore inspection ownership: %v", err, restoreErr)
+			}
 			return err
 		}
-		return s.clearInspectionOwnership(response.Request.Context(), mutation)
+		return s.restoreInspectionOwnership(persistCtx, ownershipItemsNotMutated(revokedOwnership, mutation))
 	}
 	proxy.ServeHTTP(w, r)
 }
 
-func (s *Service) clearInspectionOwnership(ctx context.Context, mutation authFileOwnershipMutation) error {
+func (s *Service) revokeInspectionOwnership(ctx context.Context, mutation authFileOwnershipMutation) ([]store.CodexInspectionDisableOwnership, error) {
 	if s.store == nil || (!mutation.clearAll && len(mutation.fileNames) == 0) {
+		return nil, nil
+	}
+	return s.store.RevokeCodexInspectionDisableOwnership(ctx, mutation.fileNames, mutation.clearAll)
+}
+
+func (s *Service) restoreInspectionOwnership(ctx context.Context, items []store.CodexInspectionDisableOwnership) error {
+	if s.store == nil || len(items) == 0 {
 		return nil
 	}
-	if mutation.clearAll {
-		return s.store.DeleteAllCodexInspectionDisableOwnership(ctx)
-	}
-	for _, fileName := range mutation.fileNames {
-		if err := s.store.DeleteCodexInspectionDisableOwnership(ctx, fileName); err != nil {
-			return err
-		}
-	}
-	return nil
+	return s.store.RestoreCodexInspectionDisableOwnership(ctx, items)
 }
 
 func inspectAuthFileOwnershipMutation(r *http.Request) (authFileOwnershipMutation, error) {
@@ -209,14 +240,10 @@ func readJSONAuthFileNames(r *http.Request) ([]string, error) {
 	if r.Body == nil {
 		return nil, nil
 	}
-	raw, err := io.ReadAll(r.Body)
+	raw, err := readAndRestoreRequestBody(r, maxAuthFileMutationRequestBytes)
 	if err != nil {
 		return nil, err
 	}
-	if errClose := r.Body.Close(); errClose != nil {
-		return nil, errClose
-	}
-	restoreRequestBody(r, raw)
 	var payload struct {
 		Name  string   `json:"name"`
 		Names []string `json:"names"`
@@ -235,14 +262,10 @@ func readMultipartAuthFileNames(r *http.Request) ([]string, error) {
 	if err != nil || params["boundary"] == "" {
 		return nil, nil
 	}
-	raw, err := io.ReadAll(r.Body)
+	raw, err := readAndRestoreRequestBody(r, maxAuthFileMutationRequestBytes)
 	if err != nil {
 		return nil, err
 	}
-	if errClose := r.Body.Close(); errClose != nil {
-		return nil, errClose
-	}
-	restoreRequestBody(r, raw)
 	reader := multipart.NewReader(bytes.NewReader(raw), params["boundary"])
 	fileNames := make([]string, 0)
 	for {
@@ -263,22 +286,38 @@ func successfulAuthFileOwnershipMutation(response *http.Response, mutation authF
 	if response == nil || response.Body == nil || (!mutation.clearAll && len(mutation.fileNames) == 0) {
 		return mutation, nil
 	}
-	raw, err := io.ReadAll(response.Body)
+	contentEncoding := strings.ToLower(strings.TrimSpace(response.Header.Get("Content-Encoding")))
+	if contentEncoding != "" && contentEncoding != "identity" {
+		return authFileOwnershipMutation{}, fmt.Errorf("unsupported auth file mutation response encoding %q", contentEncoding)
+	}
+	raw, err := io.ReadAll(io.LimitReader(response.Body, maxAuthFileMutationResponseBytes+1))
 	if err != nil {
 		return authFileOwnershipMutation{}, err
+	}
+	if int64(len(raw)) > maxAuthFileMutationResponseBytes {
+		return authFileOwnershipMutation{}, errAuthFileMutationBodyTooLarge
 	}
 	response.Body.Close()
 	response.Body = io.NopCloser(bytes.NewReader(raw))
 	response.ContentLength = int64(len(raw))
 
 	var payload struct {
-		Files  []string `json:"files"`
-		Failed []struct {
+		Status   string   `json:"status"`
+		Deleted  *int     `json:"deleted"`
+		Uploaded *int     `json:"uploaded"`
+		Files    []string `json:"files"`
+		Failed   []struct {
 			Name string `json:"name"`
 		} `json:"failed"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return mutation, nil
+	}
+	status := strings.ToLower(strings.TrimSpace(payload.Status))
+	if status == "error" || status == "failed" ||
+		(payload.Deleted != nil && *payload.Deleted <= 0) ||
+		(payload.Uploaded != nil && *payload.Uploaded <= 0) {
+		return authFileOwnershipMutation{}, nil
 	}
 	if fileNames := normalizeFileNames(payload.Files); len(fileNames) > 0 {
 		return authFileOwnershipMutation{fileNames: fileNames}, nil
@@ -292,9 +331,6 @@ func successfulAuthFileOwnershipMutation(response *http.Response, mutation authF
 	if len(failed) == 0 {
 		return mutation, nil
 	}
-	if mutation.clearAll {
-		return authFileOwnershipMutation{}, nil
-	}
 	succeeded := make([]string, 0, len(mutation.fileNames))
 	for _, fileName := range mutation.fileNames {
 		if _, ok := failed[fileName]; !ok {
@@ -302,6 +338,46 @@ func successfulAuthFileOwnershipMutation(response *http.Response, mutation authF
 		}
 	}
 	return authFileOwnershipMutation{fileNames: succeeded}, nil
+}
+
+func ownershipFileNames(items []store.CodexInspectionDisableOwnership) []string {
+	fileNames := make([]string, 0, len(items))
+	for _, item := range items {
+		fileNames = append(fileNames, item.FileName)
+	}
+	return normalizeFileNames(fileNames)
+}
+
+func ownershipItemsNotMutated(items []store.CodexInspectionDisableOwnership, mutation authFileOwnershipMutation) []store.CodexInspectionDisableOwnership {
+	if mutation.clearAll {
+		return nil
+	}
+	succeeded := make(map[string]struct{}, len(mutation.fileNames))
+	for _, fileName := range mutation.fileNames {
+		succeeded[fileName] = struct{}{}
+	}
+	result := make([]store.CodexInspectionDisableOwnership, 0, len(items))
+	for _, item := range items {
+		if _, ok := succeeded[item.FileName]; !ok {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func readAndRestoreRequestBody(r *http.Request, limit int64) ([]byte, error) {
+	raw, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if errClose := r.Body.Close(); errClose != nil {
+		return nil, errClose
+	}
+	if int64(len(raw)) > limit {
+		return nil, errAuthFileMutationBodyTooLarge
+	}
+	restoreRequestBody(r, raw)
+	return raw, nil
 }
 
 func normalizeFileNames(values []string) []string {

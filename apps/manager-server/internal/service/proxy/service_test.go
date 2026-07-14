@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -94,7 +95,50 @@ func TestSuccessfulAuthFileOwnershipMutationKeepsOnlySuccessfulFiles(t *testing.
 	}
 }
 
-func TestClearInspectionOwnershipSupportsFilesAndAll(t *testing.T) {
+func TestSuccessfulAuthFileOwnershipMutationDerivesClearAllPartialSuccess(t *testing.T) {
+	response := &http.Response{
+		Body: io.NopCloser(strings.NewReader(`{"deleted":1,"failed":[{"name":"auth-b.json"}]}`)),
+	}
+	mutation, err := successfulAuthFileOwnershipMutation(response, authFileOwnershipMutation{
+		fileNames: []string{"auth-a.json", "auth-b.json"},
+		clearAll:  true,
+	})
+	if err != nil {
+		t.Fatalf("resolve clear-all mutation: %v", err)
+	}
+	if mutation.clearAll || len(mutation.fileNames) != 1 || mutation.fileNames[0] != "auth-a.json" {
+		t.Fatalf("mutation = %#v", mutation)
+	}
+}
+
+func TestSuccessfulAuthFileOwnershipMutationRejectsLogicalFailure(t *testing.T) {
+	response := &http.Response{
+		Body: io.NopCloser(strings.NewReader(`{"status":"error","deleted":0}`)),
+	}
+	mutation, err := successfulAuthFileOwnershipMutation(response, authFileOwnershipMutation{
+		fileNames: []string{"auth-a.json"},
+	})
+	if err != nil {
+		t.Fatalf("resolve logical failure: %v", err)
+	}
+	if mutation.clearAll || len(mutation.fileNames) != 0 {
+		t.Fatalf("logical failure mutation = %#v, want empty", mutation)
+	}
+}
+
+func TestSuccessfulAuthFileOwnershipMutationRejectsEncodedResponse(t *testing.T) {
+	response := &http.Response{
+		Header: http.Header{"Content-Encoding": []string{"gzip"}},
+		Body:   io.NopCloser(strings.NewReader("compressed")),
+	}
+	if _, err := successfulAuthFileOwnershipMutation(response, authFileOwnershipMutation{
+		fileNames: []string{"auth-a.json"},
+	}); err == nil {
+		t.Fatal("encoded response succeeded, want error")
+	}
+}
+
+func TestRevokeAndRestoreInspectionOwnership(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -113,8 +157,12 @@ func TestClearInspectionOwnershipSupportsFilesAndAll(t *testing.T) {
 		t.Fatalf("save second ownership: %v", err)
 	}
 	service := New(nil, st)
-	if err := service.clearInspectionOwnership(context.Background(), authFileOwnershipMutation{fileNames: []string{"auth-a.json"}}); err != nil {
-		t.Fatalf("clear ownership: %v", err)
+	revoked, err := service.revokeInspectionOwnership(context.Background(), authFileOwnershipMutation{fileNames: []string{"auth-a.json"}})
+	if err != nil {
+		t.Fatalf("revoke ownership: %v", err)
+	}
+	if len(revoked) != 1 || revoked[0].FileName != "auth-a.json" {
+		t.Fatalf("revoked ownership = %#v", revoked)
 	}
 	items, err := st.ListCodexInspectionDisableOwnership(context.Background())
 	if err != nil {
@@ -123,15 +171,36 @@ func TestClearInspectionOwnershipSupportsFilesAndAll(t *testing.T) {
 	if len(items) != 1 || items[0].FileName != "auth-b.json" {
 		t.Fatalf("ownership = %#v, want auth-b.json", items)
 	}
-	if err := service.clearInspectionOwnership(context.Background(), authFileOwnershipMutation{clearAll: true}); err != nil {
-		t.Fatalf("clear all ownership: %v", err)
+	if err := service.restoreInspectionOwnership(context.Background(), revoked); err != nil {
+		t.Fatalf("restore ownership: %v", err)
 	}
 	items, err = st.ListCodexInspectionDisableOwnership(context.Background())
 	if err != nil {
-		t.Fatalf("list ownership after clear all: %v", err)
+		t.Fatalf("list ownership after restore: %v", err)
 	}
-	if len(items) != 0 {
-		t.Fatalf("ownership after clear all = %#v", items)
+	if len(items) != 2 {
+		t.Fatalf("ownership after restore = %#v, want 2 items", items)
+	}
+}
+
+func TestReadAndRestoreRequestBodyRejectsOversizedBody(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "/v0/management/auth-files", strings.NewReader("12345"))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	if _, err := readAndRestoreRequestBody(req, 4); !errors.Is(err, errAuthFileMutationBodyTooLarge) {
+		t.Fatalf("read oversized body error = %v", err)
+	}
+}
+
+func TestOwnershipItemsNotMutatedRestoresOnlyFailedFiles(t *testing.T) {
+	items := []store.CodexInspectionDisableOwnership{
+		{FileName: "auth-a.json"},
+		{FileName: "auth-b.json"},
+	}
+	remaining := ownershipItemsNotMutated(items, authFileOwnershipMutation{fileNames: []string{"auth-a.json"}})
+	if len(remaining) != 1 || remaining[0].FileName != "auth-b.json" {
+		t.Fatalf("remaining ownership = %#v", remaining)
 	}
 }
 

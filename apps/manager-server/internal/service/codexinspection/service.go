@@ -908,6 +908,16 @@ func collectActionOutcomes(outcomes <-chan ActionOutcome, capacity int) []Action
 }
 
 func (s *Service) executeAction(ctx context.Context, setup store.Setup, item model.CodexInspectionResult, automatic bool) error {
+	var revokedOwnership []store.CodexInspectionDisableOwnership
+	shouldRevokeOwnership := item.Action == "enable" || item.Action == "delete" || (item.Action == "disable" && !automatic)
+	if shouldRevokeOwnership {
+		var err error
+		revokedOwnership, err = s.store.RevokeCodexInspectionDisableOwnership(ctx, []string{item.FileName}, false)
+		if err != nil {
+			return fmt.Errorf("revoke inspection disable ownership: %w", err)
+		}
+	}
+
 	var actionErr error
 	switch item.Action {
 	case "delete":
@@ -920,15 +930,15 @@ func (s *Service) executeAction(ctx context.Context, setup store.Setup, item mod
 		return nil
 	}
 	if actionErr != nil {
+		if restoreErr := s.store.RestoreCodexInspectionDisableOwnership(context.WithoutCancel(ctx), revokedOwnership); restoreErr != nil {
+			return fmt.Errorf("%w; restore inspection disable ownership: %v", actionErr, restoreErr)
+		}
 		return actionErr
 	}
 
 	switch item.Action {
 	case "disable":
 		if !automatic {
-			if err := s.store.DeleteCodexInspectionDisableOwnership(ctx, item.FileName); err != nil {
-				return fmt.Errorf("clear inspection disable ownership: %w", err)
-			}
 			return nil
 		}
 		if item.Disabled {
@@ -948,10 +958,6 @@ func (s *Service) executeAction(ctx context.Context, setup store.Setup, item mod
 				return fmt.Errorf("persist inspection disable ownership: %w; rollback enable failed: %v", err, rollbackErr)
 			}
 			return fmt.Errorf("persist inspection disable ownership: %w", err)
-		}
-	case "enable", "delete":
-		if err := s.store.DeleteCodexInspectionDisableOwnership(ctx, item.FileName); err != nil {
-			return fmt.Errorf("clear inspection disable ownership: %w", err)
 		}
 	}
 	return nil

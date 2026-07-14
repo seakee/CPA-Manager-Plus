@@ -23,7 +23,8 @@ type Repository interface {
 	ListDisableOwnership(ctx context.Context) ([]model.CodexInspectionDisableOwnership, error)
 	UpsertDisableOwnership(ctx context.Context, item model.CodexInspectionDisableOwnership) error
 	DeleteDisableOwnership(ctx context.Context, fileName string) error
-	DeleteAllDisableOwnership(ctx context.Context) error
+	RevokeDisableOwnership(ctx context.Context, fileNames []string, clearAll bool) ([]model.CodexInspectionDisableOwnership, error)
+	RestoreDisableOwnership(ctx context.Context, items []model.CodexInspectionDisableOwnership) error
 }
 
 type repository struct {
@@ -412,9 +413,101 @@ func (r *repository) DeleteDisableOwnership(ctx context.Context, fileName string
 	return err
 }
 
-func (r *repository) DeleteAllDisableOwnership(ctx context.Context) error {
-	_, err := r.db.ExecContext(ctx, `delete from codex_inspection_disable_ownership`)
-	return err
+func (r *repository) RevokeDisableOwnership(ctx context.Context, fileNames []string, clearAll bool) ([]model.CodexInspectionDisableOwnership, error) {
+	if !clearAll && len(fileNames) == 0 {
+		return nil, nil
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	targets := make(map[string]struct{}, len(fileNames))
+	for _, fileName := range fileNames {
+		if fileName != "" {
+			targets[fileName] = struct{}{}
+		}
+	}
+	rows, err := tx.QueryContext(ctx, `select file_name, auth_index, account_id, disabled_at_ms, updated_at_ms
+		from codex_inspection_disable_ownership`)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]model.CodexInspectionDisableOwnership, 0)
+	for rows.Next() {
+		var item model.CodexInspectionDisableOwnership
+		var authIndex, accountID sql.NullString
+		if err := rows.Scan(&item.FileName, &authIndex, &accountID, &item.DisabledAtMS, &item.UpdatedAtMS); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		item.AuthIndex = authIndex.String
+		item.AccountID = accountID.String
+		if !clearAll {
+			if _, ok := targets[item.FileName]; !ok {
+				continue
+			}
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	if clearAll {
+		_, err = tx.ExecContext(ctx, `delete from codex_inspection_disable_ownership`)
+	} else {
+		for _, item := range items {
+			if _, err = tx.ExecContext(ctx, `delete from codex_inspection_disable_ownership where file_name = ?`, item.FileName); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func (r *repository) RestoreDisableOwnership(ctx context.Context, items []model.CodexInspectionDisableOwnership) error {
+	if len(items) == 0 {
+		return nil
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, item := range items {
+		if item.FileName == "" {
+			continue
+		}
+		if item.DisabledAtMS <= 0 {
+			item.DisabledAtMS = time.Now().UnixMilli()
+		}
+		item.UpdatedAtMS = time.Now().UnixMilli()
+		if _, err := tx.ExecContext(ctx, `insert into codex_inspection_disable_ownership (
+			file_name, auth_index, account_id, disabled_at_ms, updated_at_ms
+		) values (?, ?, ?, ?, ?)
+		on conflict(file_name) do nothing`,
+			item.FileName,
+			nullString(item.AuthIndex),
+			nullString(item.AccountID),
+			item.DisabledAtMS,
+			item.UpdatedAtMS,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (r *repository) ListLogs(ctx context.Context, runID int64) ([]model.CodexInspectionLog, error) {
