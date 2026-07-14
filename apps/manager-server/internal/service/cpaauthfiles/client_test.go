@@ -111,10 +111,17 @@ func TestValidateActionResponse(t *testing.T) {
 	}{
 		{name: "empty"},
 		{name: "success", body: `{"ok":true}`},
+		{name: "CPA status success", body: `{"status":"ok","disabled":true}`},
 		{name: "failed list", body: `{"failed":["denied"]}`, wantErr: true},
+		{name: "failed string", body: `{"failed":"denied"}`, wantErr: true},
+		{name: "error field", body: `{"error":"denied"}`, wantErr: true},
 		{name: "success false", body: `{"success":false}`, wantErr: true},
 		{name: "ok false", body: `{"ok":false}`, wantErr: true},
 		{name: "failed status", body: `{"status":"failed"}`, wantErr: true},
+		{name: "partial status", body: `{"status":"partial"}`, wantErr: true},
+		{name: "null response", body: `null`, wantErr: true},
+		{name: "boolean response", body: `false`, wantErr: true},
+		{name: "array response", body: `[]`, wantErr: true},
 		{name: "invalid json", body: `{"ok":`, wantErr: true},
 		{name: "multiple values", body: `{"ok":true}{"ok":true}`, wantErr: true},
 		{
@@ -133,6 +140,14 @@ func TestValidateActionResponse(t *testing.T) {
 	}
 }
 
+func TestValidateActionResponseRejectsOversizedBody(t *testing.T) {
+	body := `{"padding":"` + strings.Repeat("x", maxActionResponseSize) + `"}`
+	err := ValidateActionResponse(strings.NewReader(body))
+	if !errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("ValidateActionResponse() error = %v, want ErrResponseTooLarge", err)
+	}
+}
+
 func TestClientActionsRejectBusinessFailureResponses(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -146,6 +161,22 @@ func TestClientActionsRejectBusinessFailureResponses(t *testing.T) {
 	}
 	if err := client.Delete(context.Background(), server.URL, "mgmt", "codex-auth.json"); err == nil {
 		t.Fatal("Delete succeeded for ok=false response")
+	}
+}
+
+func TestClientFetchRejectsOversizedAuthFilesResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"files":[{"name":"auth.json","padding":"`)
+		_, _ = io.WriteString(w, strings.Repeat("x", 256))
+		_, _ = io.WriteString(w, `"}]}`)
+	}))
+	defer server.Close()
+
+	client := New(server.Client())
+	client.maxResponseBytes = 128
+	_, err := client.Fetch(context.Background(), server.URL, "mgmt")
+	if !errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("Fetch() error = %v, want ErrResponseTooLarge", err)
 	}
 }
 

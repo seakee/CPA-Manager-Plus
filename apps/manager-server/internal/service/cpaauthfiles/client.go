@@ -16,15 +16,22 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 )
 
-const DefaultTimeout = 30 * time.Second
+const (
+	DefaultTimeout                  = 30 * time.Second
+	defaultMaxAuthFilesResponseSize = 64 * 1024 * 1024
+	maxActionResponseSize           = 4 * 1024 * 1024
+)
 
 var ErrAuthFileNotFound = errors.New("CPA auth file not found")
 
 var ErrIdentityMismatch = errors.New("CPA auth file identity mismatch")
 
+var ErrResponseTooLarge = errors.New("CPA response too large")
+
 type Client struct {
-	httpClient *http.Client
-	timeout    time.Duration
+	httpClient       *http.Client
+	timeout          time.Duration
+	maxResponseBytes int64
 }
 
 type File struct {
@@ -53,7 +60,11 @@ func New(client *http.Client, timeout ...time.Duration) *Client {
 	if len(timeout) > 0 && timeout[0] > 0 {
 		d = timeout[0]
 	}
-	return &Client{httpClient: client, timeout: d}
+	return &Client{
+		httpClient:       client,
+		timeout:          d,
+		maxResponseBytes: defaultMaxAuthFilesResponseSize,
+	}
 }
 
 const authFilesPath = "/v0/management/auth-files"
@@ -106,8 +117,15 @@ func (c *Client) Visit(ctx context.Context, baseURL string, managementKey string
 	if visit == nil {
 		return errors.New("CPA auth file visitor is required")
 	}
-	if err := scanFiles(res.Body, visit); err != nil {
+	body, limit := c.limitedAuthFilesResponse(res.Body)
+	if err := scanFiles(body, visit); err != nil {
+		if body.N == 0 {
+			return fmt.Errorf("GET %s: %w", authFilesPath, responseTooLargeError("auth-files response", limit))
+		}
 		return fmt.Errorf("GET %s: %w", authFilesPath, err)
+	}
+	if body.N == 0 {
+		return fmt.Errorf("GET %s: %w", authFilesPath, responseTooLargeError("auth-files response", limit))
 	}
 	return nil
 }
@@ -133,7 +151,8 @@ func (c *Client) Find(ctx context.Context, baseURL string, managementKey string,
 
 	var matched File
 	found := false
-	err = scanFiles(res.Body, func(file File) (bool, error) {
+	body, limit := c.limitedAuthFilesResponse(res.Body)
+	err = scanFiles(body, func(file File) (bool, error) {
 		if !matches(file, fileName, authIndex) {
 			return false, nil
 		}
@@ -142,9 +161,27 @@ func (c *Client) Find(ctx context.Context, baseURL string, managementKey string,
 		return true, nil
 	})
 	if err != nil {
+		if body.N == 0 {
+			return File{}, false, fmt.Errorf("GET %s: %w", authFilesPath, responseTooLargeError("auth-files response", limit))
+		}
 		return File{}, false, fmt.Errorf("GET %s: %w", authFilesPath, err)
 	}
+	if body.N == 0 {
+		return File{}, false, fmt.Errorf("GET %s: %w", authFilesPath, responseTooLargeError("auth-files response", limit))
+	}
 	return matched, found, nil
+}
+
+func (c *Client) limitedAuthFilesResponse(body io.Reader) (*io.LimitedReader, int64) {
+	limit := c.maxResponseBytes
+	if limit <= 0 {
+		limit = defaultMaxAuthFilesResponseSize
+	}
+	return &io.LimitedReader{R: body, N: limit + 1}, limit
+}
+
+func responseTooLargeError(label string, limit int64) error {
+	return fmt.Errorf("%w: %s exceeds %d bytes", ErrResponseTooLarge, label, limit)
 }
 
 func (c *Client) Verify(ctx context.Context, baseURL string, managementKey string, identity Identity) (File, error) {
@@ -493,28 +530,42 @@ func ValidateActionResponse(body io.Reader) error {
 	if body == nil {
 		return nil
 	}
-	decoder := json.NewDecoder(body)
+	limited := &io.LimitedReader{R: body, N: maxActionResponseSize + 1}
+	decoder := json.NewDecoder(limited)
 	decoder.UseNumber()
 	var payload any
 	if err := decoder.Decode(&payload); err != nil {
+		if limited.N == 0 {
+			return responseTooLargeError("action response", maxActionResponseSize)
+		}
 		if errors.Is(err, io.EOF) {
 			return nil
 		}
 		return fmt.Errorf("decode CPA action response: %w", err)
 	}
+	if limited.N == 0 {
+		return responseTooLargeError("action response", maxActionResponseSize)
+	}
 	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		if err == nil {
+	trailingErr := decoder.Decode(&trailing)
+	if limited.N == 0 {
+		return responseTooLargeError("action response", maxActionResponseSize)
+	}
+	if !errors.Is(trailingErr, io.EOF) {
+		if trailingErr == nil {
 			return errors.New("decode CPA action response: multiple JSON values")
 		}
-		return fmt.Errorf("decode CPA action response trailing data: %w", err)
+		return fmt.Errorf("decode CPA action response trailing data: %w", trailingErr)
 	}
 	result, ok := payload.(map[string]any)
 	if !ok {
-		return nil
+		return errors.New("decode CPA action response: expected JSON object")
 	}
-	if failed, ok := result["failed"].([]any); ok && len(failed) > 0 {
-		return fmt.Errorf("CPA action failed: %s", strings.TrimSpace(fmt.Sprint(failed[0])))
+	if failed, exists := result["failed"]; exists && hasActionFailureValue(failed) {
+		return fmt.Errorf("CPA action failed: %s", actionFailureDetail(failed))
+	}
+	if actionErr, exists := result["error"]; exists && hasActionFailureValue(actionErr) {
+		return fmt.Errorf("CPA action failed: %s", actionFailureDetail(actionErr))
 	}
 	if success, ok := result["success"].(bool); ok && !success {
 		return errors.New("CPA action failed: success=false")
@@ -523,8 +574,39 @@ func ValidateActionResponse(body io.Reader) error {
 		return errors.New("CPA action failed: ok=false")
 	}
 	status := strings.ToLower(strings.TrimSpace(fmt.Sprint(result["status"])))
-	if status == "error" || status == "failed" {
+	if status == "error" || status == "failed" || status == "partial" {
 		return fmt.Errorf("CPA action failed: status=%s", status)
 	}
 	return nil
+}
+
+func hasActionFailureValue(value any) bool {
+	switch typed := value.(type) {
+	case nil:
+		return false
+	case bool:
+		return typed
+	case string:
+		return strings.TrimSpace(typed) != ""
+	case json.Number:
+		parsed, err := typed.Float64()
+		return err != nil || parsed != 0
+	case []any:
+		return len(typed) > 0
+	case map[string]any:
+		return len(typed) > 0
+	default:
+		return strings.TrimSpace(fmt.Sprint(typed)) != ""
+	}
+}
+
+func actionFailureDetail(value any) string {
+	if values, ok := value.([]any); ok && len(values) > 0 {
+		value = values[0]
+	}
+	detail := strings.TrimSpace(fmt.Sprint(value))
+	if detail == "" {
+		return "unknown failure"
+	}
+	return detail
 }
