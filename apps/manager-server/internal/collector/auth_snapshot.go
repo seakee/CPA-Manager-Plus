@@ -3,14 +3,13 @@ package collector
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
 )
 
 const authSnapshotCacheTTL = 30 * time.Second
@@ -106,43 +105,17 @@ func (r *authSnapshotResolver) lookupLocked(authIndices map[string]struct{}) map
 }
 
 func (r *authSnapshotResolver) fetch(ctx context.Context, baseURL string, managementKey string) (map[string]authSnapshot, error) {
-	endpoint, err := authFilesEndpoint(baseURL)
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+managementKey)
-
 	client := r.client
 	if client == nil {
 		client = http.DefaultClient
 	}
-	res, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 1024))
-		return nil, errors.New("auth files request failed: " + res.Status)
-	}
-
-	var payload authFilesPayload
-	decoder := json.NewDecoder(res.Body)
-	if err := decoder.Decode(&payload); err != nil {
-		return nil, err
-	}
-
 	capturedAt := time.Now().UnixMilli()
-	snapshots := make(map[string]authSnapshot, len(payload.Files))
-	for _, file := range payload.Files {
+	snapshots := make(map[string]authSnapshot)
+	err := cpaauthfiles.New(client).Visit(ctx, baseURL, managementKey, func(item cpaauthfiles.File) (bool, error) {
+		file := item.Raw
 		authIndex := readAuthFileString(file, "auth_index", "authIndex", "auth-index")
 		if authIndex == "" {
-			continue
+			return false, nil
 		}
 		account := firstSafeAccount(
 			readAuthFileString(file, "account"),
@@ -176,27 +149,12 @@ func (r *authSnapshotResolver) fetch(ctx context.Context, baseURL string, manage
 			ProjectID:    projectID,
 			CapturedAtMS: capturedAt,
 		}
+		return false, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return snapshots, nil
-}
-
-type authFilesPayload struct {
-	Files []map[string]any `json:"files"`
-}
-
-func authFilesEndpoint(baseURL string) (string, error) {
-	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
-	if base == "" {
-		return "", errors.New("upstream URL is empty")
-	}
-	if !strings.Contains(base, "://") {
-		base = "http://" + base
-	}
-	parsed, err := url.Parse(base + "/v0/management/auth-files")
-	if err != nil {
-		return "", err
-	}
-	return parsed.String(), nil
 }
 
 func readAuthFileString(file map[string]any, keys ...string) string {
