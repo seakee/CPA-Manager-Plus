@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -14,10 +15,14 @@ func Open(path string) (*sql.DB, error) {
 }
 
 func OpenWithOptions(options Options) (*sql.DB, error) {
-	if err := os.MkdirAll(filepath.Dir(options.Path), 0o755); err != nil {
+	dbPath, err := filepath.Abs(options.Path)
+	if err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", dataSourceName(options.Path))
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", dataSourceName(dbPath))
 	if err != nil {
 		return nil, err
 	}
@@ -32,9 +37,13 @@ func OpenWithOptions(options Options) (*sql.DB, error) {
 }
 
 func dataSourceName(path string) string {
+	uriPath := filepath.ToSlash(path)
+	if !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
 	dsn := &url.URL{
 		Scheme: "file",
-		Path:   filepath.ToSlash(path),
+		Path:   uriPath,
 	}
 	query := dsn.Query()
 	query.Add("_pragma", "busy_timeout(5000)")

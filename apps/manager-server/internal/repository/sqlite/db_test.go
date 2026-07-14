@@ -3,9 +3,52 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"net/url"
+	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
+
+func TestDataSourceNameEncodesWindowsDrivePath(t *testing.T) {
+	dsn := dataSourceName("C:/CPA Manager/data/usage ? #.sqlite")
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("parse data source name: %v", err)
+	}
+	if parsed.Scheme != "file" {
+		t.Fatalf("scheme = %q, want file", parsed.Scheme)
+	}
+	if parsed.Host != "" {
+		t.Fatalf("host = %q, want empty", parsed.Host)
+	}
+	if want := "/C:/CPA Manager/data/usage ? #.sqlite"; parsed.Path != want {
+		t.Fatalf("path = %q, want %q", parsed.Path, want)
+	}
+	wantPragmas := []string{
+		"busy_timeout(5000)",
+		"foreign_keys(1)",
+		"synchronous(FULL)",
+	}
+	if pragmas := parsed.Query()["_pragma"]; !slices.Equal(pragmas, wantPragmas) {
+		t.Fatalf("pragmas = %q, want %q", pragmas, wantPragmas)
+	}
+}
+
+func TestOpenWithOptionsSupportsRelativePath(t *testing.T) {
+	t.Chdir(t.TempDir())
+	dbPath := filepath.Join("data", "usage.sqlite")
+	db, err := OpenWithOptions(Options{Path: dbPath})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close sqlite: %v", err)
+	}
+	if _, err := os.Stat(dbPath); err != nil {
+		t.Fatalf("stat sqlite database: %v", err)
+	}
+}
 
 func TestOpenWithOptionsAppliesConnectionDefaults(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "usage ? #.sqlite")
