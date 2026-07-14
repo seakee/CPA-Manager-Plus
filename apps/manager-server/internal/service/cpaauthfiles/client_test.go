@@ -103,6 +103,52 @@ func TestClientPatchDisabledAndDelete(t *testing.T) {
 	}
 }
 
+func TestValidateActionResponse(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{name: "empty"},
+		{name: "success", body: `{"ok":true}`},
+		{name: "failed list", body: `{"failed":["denied"]}`, wantErr: true},
+		{name: "success false", body: `{"success":false}`, wantErr: true},
+		{name: "ok false", body: `{"ok":false}`, wantErr: true},
+		{name: "failed status", body: `{"status":"failed"}`, wantErr: true},
+		{name: "invalid json", body: `{"ok":`, wantErr: true},
+		{name: "multiple values", body: `{"ok":true}{"ok":true}`, wantErr: true},
+		{
+			name:    "failure beyond old read limit",
+			body:    `{"padding":"` + strings.Repeat("x", 8192) + `","failed":["denied"]}`,
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateActionResponse(strings.NewReader(tt.body))
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ValidateActionResponse() error = %v, wantErr %t", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestClientActionsRejectBusinessFailureResponses(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok":false}`)
+	}))
+	defer server.Close()
+
+	client := New(server.Client())
+	if err := client.PatchDisabled(context.Background(), server.URL, "mgmt", "codex-auth.json", true); err == nil {
+		t.Fatal("PatchDisabled succeeded for ok=false response")
+	}
+	if err := client.Delete(context.Background(), server.URL, "mgmt", "codex-auth.json"); err == nil {
+		t.Fatal("Delete succeeded for ok=false response")
+	}
+}
+
 func TestClientFindStreamsLargeAuthFilesResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v0/management/auth-files" {

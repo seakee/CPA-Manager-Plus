@@ -75,31 +75,41 @@ func authFilesEndpoint(baseURL string, fileName string, authIndex string) string
 }
 
 func (c *Client) Fetch(ctx context.Context, baseURL string, managementKey string) ([]File, error) {
+	files := make([]File, 0)
+	if err := c.Visit(ctx, baseURL, managementKey, func(file File) (bool, error) {
+		files = append(files, file)
+		return false, nil
+	}); err != nil {
+		return nil, err
+	}
+	return files, nil
+}
+
+func (c *Client) Visit(ctx context.Context, baseURL string, managementKey string, visit func(File) (bool, error)) error {
 	base := cpa.NormalizeBaseURL(baseURL)
 	reqCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, base+authFilesPath, nil)
 	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", authFilesPath, err)
+		return fmt.Errorf("GET %s: %w", authFilesPath, err)
 	}
 	req.Header.Set("Authorization", "Bearer "+managementKey)
 	res, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", authFilesPath, err)
+		return fmt.Errorf("GET %s: %w", authFilesPath, err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-		return nil, fmt.Errorf("GET %s: HTTP %d %s", authFilesPath, res.StatusCode, strings.TrimSpace(string(body)))
+		return fmt.Errorf("GET %s: HTTP %d %s", authFilesPath, res.StatusCode, strings.TrimSpace(string(body)))
 	}
-	files := make([]File, 0)
-	if err := scanFiles(res.Body, func(file File) (bool, error) {
-		files = append(files, file)
-		return false, nil
-	}); err != nil {
-		return nil, fmt.Errorf("GET %s: %w", authFilesPath, err)
+	if visit == nil {
+		return errors.New("CPA auth file visitor is required")
 	}
-	return files, nil
+	if err := scanFiles(res.Body, visit); err != nil {
+		return fmt.Errorf("GET %s: %w", authFilesPath, err)
+	}
+	return nil
 }
 
 func (c *Client) Find(ctx context.Context, baseURL string, managementKey string, fileName string, authIndex string) (File, bool, error) {
@@ -372,10 +382,13 @@ func (c *Client) PatchDisabled(ctx context.Context, baseURL string, managementKe
 		return fmt.Errorf("PATCH %s: %w", authFilesStatusPath, err)
 	}
 	defer res.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
 	if res.StatusCode >= 200 && res.StatusCode < 300 {
+		if err := ValidateActionResponse(res.Body); err != nil {
+			return fmt.Errorf("PATCH %s: %w", authFilesStatusPath, err)
+		}
 		return nil
 	}
+	body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
 	return fmt.Errorf("PATCH %s: HTTP %d %s", authFilesStatusPath, res.StatusCode, strings.TrimSpace(string(body)))
 }
 
@@ -394,13 +407,13 @@ func (c *Client) Delete(ctx context.Context, baseURL string, managementKey strin
 		return fmt.Errorf("DELETE %s: %w", authFilesPath, err)
 	}
 	defer res.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
 	if res.StatusCode >= 200 && res.StatusCode < 300 {
-		if actionFailed(body) {
-			return fmt.Errorf("DELETE %s: CPA action failed", authFilesPath)
+		if err := ValidateActionResponse(res.Body); err != nil {
+			return fmt.Errorf("DELETE %s: %w", authFilesPath, err)
 		}
 		return nil
 	}
+	body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
 	return fmt.Errorf("DELETE %s: HTTP %d %s", authFilesPath, res.StatusCode, strings.TrimSpace(string(body)))
 }
 
@@ -476,20 +489,42 @@ func stringField(file map[string]any, keys ...string) string {
 	return ""
 }
 
-func actionFailed(body []byte) bool {
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return false
+func ValidateActionResponse(body io.Reader) error {
+	if body == nil {
+		return nil
 	}
-	if failed, ok := payload["failed"].([]any); ok && len(failed) > 0 {
-		return true
+	decoder := json.NewDecoder(body)
+	decoder.UseNumber()
+	var payload any
+	if err := decoder.Decode(&payload); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return fmt.Errorf("decode CPA action response: %w", err)
 	}
-	if ok, _ := payload["success"].(bool); ok {
-		return false
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("decode CPA action response: multiple JSON values")
+		}
+		return fmt.Errorf("decode CPA action response trailing data: %w", err)
 	}
-	if ok, _ := payload["ok"].(bool); ok {
-		return false
+	result, ok := payload.(map[string]any)
+	if !ok {
+		return nil
 	}
-	status := strings.ToLower(strings.TrimSpace(fmt.Sprint(payload["status"])))
-	return status == "error" || status == "failed"
+	if failed, ok := result["failed"].([]any); ok && len(failed) > 0 {
+		return fmt.Errorf("CPA action failed: %s", strings.TrimSpace(fmt.Sprint(failed[0])))
+	}
+	if success, ok := result["success"].(bool); ok && !success {
+		return errors.New("CPA action failed: success=false")
+	}
+	if okValue, ok := result["ok"].(bool); ok && !okValue {
+		return errors.New("CPA action failed: ok=false")
+	}
+	status := strings.ToLower(strings.TrimSpace(fmt.Sprint(result["status"])))
+	if status == "error" || status == "failed" {
+		return fmt.Errorf("CPA action failed: status=%s", status)
+	}
+	return nil
 }
