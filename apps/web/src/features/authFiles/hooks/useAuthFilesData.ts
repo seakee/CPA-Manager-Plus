@@ -318,6 +318,7 @@ export function useAuthFilesData(): UseAuthFilesDataResult {
     if (deletedNames.length === 0) return;
 
     const deletedSet = new Set(deletedNames);
+    deletedNames.forEach(clearCodexInspectionDisableOwnershipForFile);
     setFiles((prev) => prev.filter((file) => !deletedSet.has(file.name)));
     setSelectedFiles((prev) => {
       if (prev.size === 0) return prev;
@@ -425,6 +426,7 @@ export function useAuthFilesData(): UseAuthFilesDataResult {
         const hasFailureStatus = hasAuthFileUploadFailureStatus(result.status);
 
         if (successCount > 0) {
+          result.files.forEach(clearCodexInspectionDisableOwnershipForFile);
           if (!hasFailureStatus || failures.length > 0) {
             const suffix =
               prepared.files.length > 1 ? ` (${successCount}/${prepared.files.length})` : '';
@@ -469,6 +471,7 @@ export function useAuthFilesData(): UseAuthFilesDataResult {
         if (payloads.length === 1) {
           try {
             await authFilesApi.saveJsonObject(payloads[0].fileName, payloads[0].authJson);
+            clearCodexInspectionDisableOwnershipForFile(payloads[0].fileName);
           } catch {
             throw new Error(t('notification.save_failed'));
           }
@@ -480,6 +483,7 @@ export function useAuthFilesData(): UseAuthFilesDataResult {
           } catch {
             throw new Error(t('notification.save_failed'));
           }
+          result.files.forEach(clearCodexInspectionDisableOwnershipForFile);
           if (
             hasAuthFileUploadFailureStatus(result.status) ||
             result.failed.length > 0 ||
