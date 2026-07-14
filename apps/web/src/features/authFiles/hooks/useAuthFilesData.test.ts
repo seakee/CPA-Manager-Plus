@@ -1,6 +1,7 @@
 import { act, createElement } from 'react';
 import { create, type ReactTestRenderer } from 'react-test-renderer';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { AuthFileItem } from '@/types';
 
 const { mocks } = vi.hoisted(() => {
   return {
@@ -9,6 +10,7 @@ const { mocks } = vi.hoisted(() => {
       saveJsonObject: vi.fn(),
       uploadFiles: vi.fn(),
       deleteFiles: vi.fn(),
+      deleteFile: vi.fn(),
       patchFields: vi.fn(),
       patchFieldsForAuthIndexes: vi.fn(),
       showNotification: vi.fn(),
@@ -49,6 +51,7 @@ vi.mock('@/services/api', () => ({
     saveJsonObject: mocks.saveJsonObject,
     uploadFiles: mocks.uploadFiles,
     deleteFiles: mocks.deleteFiles,
+    deleteFile: mocks.deleteFile,
     patchFields: mocks.patchFields,
     patchFieldsForAuthIndexes: mocks.patchFieldsForAuthIndexes,
   },
@@ -59,6 +62,10 @@ import {
   prepareAuthFilesForUpload,
   useAuthFilesData,
 } from './useAuthFilesData';
+import {
+  getCodexInspectionOwnedDisableFileNames,
+  recordCodexInspectionDisableOwnership,
+} from '@/features/monitoring/model/codexInspectionOwnership';
 
 type UseAuthFilesDataHarness = {
   getCurrent: () => ReturnType<typeof useAuthFilesData>;
@@ -66,7 +73,21 @@ type UseAuthFilesDataHarness = {
   unmount: () => void;
 };
 
-const mountUseAuthFilesData = (): UseAuthFilesDataHarness => {
+const createStorage = () => {
+  const values = new Map<string, string>();
+  return {
+    getItem: vi.fn((key: string) => values.get(key) ?? null),
+    setItem: vi.fn((key: string, value: string) => {
+      values.set(key, value);
+    }),
+    removeItem: vi.fn((key: string) => {
+      values.delete(key);
+    }),
+    clear: vi.fn(() => values.clear()),
+  } as unknown as Storage;
+};
+
+const mountUseAuthFilesData = (connectionFingerprint?: string): UseAuthFilesDataHarness => {
   let hook: ReturnType<typeof useAuthFilesData> | null = null;
   let lastSavingState: boolean | undefined;
   const savingHistory: boolean[] = [];
@@ -81,7 +102,7 @@ const mountUseAuthFilesData = (): UseAuthFilesDataHarness => {
   };
 
   function HookHarness() {
-    captureHook(useAuthFilesData());
+    captureHook(useAuthFilesData({ connectionFingerprint }));
     return null;
   }
 
@@ -111,6 +132,7 @@ beforeEach(() => {
   mocks.saveJsonObject.mockReset();
   mocks.uploadFiles.mockReset();
   mocks.deleteFiles.mockReset();
+  mocks.deleteFile.mockReset();
   mocks.patchFields.mockReset();
   mocks.patchFieldsForAuthIndexes.mockReset();
   mocks.showNotification.mockReset();
@@ -120,8 +142,13 @@ beforeEach(() => {
   mocks.saveJsonObject.mockResolvedValue(undefined);
   mocks.uploadFiles.mockResolvedValue({ status: 'ok', uploaded: 0, files: [], failed: [] });
   mocks.deleteFiles.mockResolvedValue({ deleted: 0, failed: [], files: [] });
+  mocks.deleteFile.mockResolvedValue({ deleted: 0, failed: [], files: [] });
   mocks.patchFields.mockResolvedValue(undefined);
   mocks.patchFieldsForAuthIndexes.mockResolvedValue(undefined);
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 describe('buildPastedAuthJsonPayloads', () => {
@@ -1010,6 +1037,74 @@ describe('useAuthFilesData savePastedAuthJson', () => {
       'auth_files.paste_success:custom-auth.json',
       'success'
     );
+    hook.unmount();
+  });
+});
+
+describe('useAuthFilesData handleDelete', () => {
+  const disabledFile = {
+    name: 'owned.json',
+    type: 'codex',
+    auth_index: 'auth-1',
+    disabled: true,
+  } as AuthFileItem;
+
+  it('keeps ownership when CPA reports a logical delete failure', async () => {
+    vi.stubGlobal('localStorage', createStorage());
+    recordCodexInspectionDisableOwnership('scope-a', {
+      fileName: 'owned.json',
+      authIndex: 'auth-1',
+      accountId: null,
+    });
+    mocks.deleteFile.mockResolvedValueOnce({
+      deleted: 0,
+      files: [],
+      failed: [{ name: 'owned.json', error: 'still in use' }],
+    });
+    const hook = mountUseAuthFilesData('scope-a');
+
+    act(() => hook.getCurrent().handleDelete('owned.json'));
+    const confirmation = mocks.showConfirmation.mock.calls[0]?.[0] as
+      | { onConfirm?: () => Promise<void> }
+      | undefined;
+    await act(async () => confirmation?.onConfirm?.());
+
+    expect(Array.from(getCodexInspectionOwnedDisableFileNames('scope-a', [disabledFile]))).toEqual([
+      'owned.json',
+    ]);
+    expect(mocks.showNotification).toHaveBeenCalledWith(
+      'notification.delete_failed: still in use',
+      'error'
+    );
+    hook.unmount();
+  });
+
+  it('clears ownership only for the active connection after a successful delete', async () => {
+    vi.stubGlobal('localStorage', createStorage());
+    for (const scope of ['scope-a', 'scope-b']) {
+      recordCodexInspectionDisableOwnership(scope, {
+        fileName: 'owned.json',
+        authIndex: 'auth-1',
+        accountId: null,
+      });
+    }
+    mocks.deleteFile.mockResolvedValueOnce({
+      deleted: 1,
+      files: ['owned.json'],
+      failed: [],
+    });
+    const hook = mountUseAuthFilesData('scope-a');
+
+    act(() => hook.getCurrent().handleDelete('owned.json'));
+    const confirmation = mocks.showConfirmation.mock.calls[0]?.[0] as
+      | { onConfirm?: () => Promise<void> }
+      | undefined;
+    await act(async () => confirmation?.onConfirm?.());
+
+    expect(getCodexInspectionOwnedDisableFileNames('scope-a', [disabledFile]).size).toBe(0);
+    expect(Array.from(getCodexInspectionOwnedDisableFileNames('scope-b', [disabledFile]))).toEqual([
+      'owned.json',
+    ]);
     hook.unmount();
   });
 });

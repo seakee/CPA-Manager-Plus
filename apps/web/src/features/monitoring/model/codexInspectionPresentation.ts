@@ -406,7 +406,7 @@ export const buildCodexInspectionPaginationState = <T>(
 export const isCodexInspectionAutoExecutionEnabled = (
   mode: CodexInspectionAutoActionMode,
   autoRecoverEnabled = false
-) => mode !== 'none' || autoRecoverEnabled;
+) => mode === 'disable' || mode === 'delete' || autoRecoverEnabled;
 
 export const getCodexInspectionProblemActionMode = (
   mode: CodexInspectionAutoActionMode

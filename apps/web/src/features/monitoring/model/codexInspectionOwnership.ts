@@ -95,20 +95,6 @@ export const clearCodexInspectionDisableOwnership = (scope: string, fileName: st
   writeStore(store);
 };
 
-export const clearCodexInspectionDisableOwnershipForFile = (fileName: string) => {
-  const normalizedFileName = fileName.trim();
-  if (!normalizedFileName) return;
-  const store = readStore();
-  let changed = false;
-  Object.keys(store).forEach((scope) => {
-    if (!store[scope]?.[normalizedFileName]) return;
-    delete store[scope][normalizedFileName];
-    if (Object.keys(store[scope]).length === 0) delete store[scope];
-    changed = true;
-  });
-  if (changed) writeStore(store);
-};
-
 export const getCodexInspectionOwnedDisableFileNames = (
   scope: string,
   files: AuthFileItem[]

@@ -209,6 +209,10 @@ export function AuthFilesPage() {
   const pageTransitionLayer = usePageTransitionLayer();
   const isCurrentLayer = pageTransitionLayer ? pageTransitionLayer.status === 'current' : true;
   const navigate = useNavigate();
+  const connectionFingerprint = useMemo(
+    () => createCodexInspectionConnectionFingerprint(apiBase, managementKey),
+    [apiBase, managementKey]
+  );
 
   const [filter, setFilter] = useState<'all' | string>('all');
   const [problemOnly, setProblemOnly] = useState(false);
@@ -297,7 +301,7 @@ export function AuthFilesPage() {
     batchSetStatus,
     batchPatchFields,
     batchDelete,
-  } = useAuthFilesData();
+  } = useAuthFilesData({ connectionFingerprint });
 
   const statusBarCache = useAuthFilesStatusBarCache(files);
   const uniqueAuthFileKeyByFallbackCooldownKey = useMemo(() => {
@@ -384,11 +388,6 @@ export function AuthFilesPage() {
   const disableControls = connectionStatus !== 'connected';
   const normalizedFilter = normalizeProviderKey(String(filter));
   const pageSize = compactMode ? pageSizeByMode.compact : pageSizeByMode.regular;
-  const connectionFingerprint = useMemo(
-    () => createCodexInspectionConnectionFingerprint(apiBase, managementKey),
-    [apiBase, managementKey]
-  );
-
   useEffect(() => {
     const persistedCompactMode = readPersistedAuthFilesCompactMode();
     if (typeof persistedCompactMode === 'boolean') {

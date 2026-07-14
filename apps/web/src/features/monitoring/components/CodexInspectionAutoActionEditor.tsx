@@ -61,6 +61,9 @@ export function CodexInspectionAutoActionEditor({
       onChange('none');
       return;
     }
+    if (problemActionMode === 'none' && !autoRecoverEnabled) {
+      onAutoRecoverChange(true);
+    }
     onChange(composeCodexInspectionAutoActionMode(true, problemActionMode));
   };
 
