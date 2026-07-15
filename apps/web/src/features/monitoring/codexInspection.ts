@@ -93,6 +93,7 @@ export interface CodexInspectionConfigurableSettings {
   sampleSize: number;
   autoActionMode: CodexInspectionAutoActionMode;
   autoRecoverEnabled: boolean;
+  disableOnShortWindowExhausted: boolean;
 }
 
 export interface CodexInspectionAccount {

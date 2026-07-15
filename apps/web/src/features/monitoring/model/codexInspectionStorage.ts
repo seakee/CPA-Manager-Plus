@@ -67,6 +67,7 @@ const normalizeStoredSettings = (value: unknown): CodexInspectionSettings => {
     userAgent: input.userAgent,
     usedPercentThreshold: input.usedPercentThreshold,
     sampleSize: input.sampleSize,
+    disableOnShortWindowExhausted: input.disableOnShortWindowExhausted,
   });
 
   return {

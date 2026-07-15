@@ -184,6 +184,7 @@ export interface ManagerCodexInspectionConfig {
   sampleSize?: number;
   autoActionMode?: ManagerCodexInspectionAutoActionMode | string;
   autoRecoverEnabled?: boolean;
+  disableOnShortWindowExhausted?: boolean;
 }
 
 export interface ManagerConfig {

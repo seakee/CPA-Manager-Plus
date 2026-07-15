@@ -28,6 +28,7 @@ export const DEFAULT_CODEX_INSPECTION_SETTINGS: CodexInspectionConfigurableSetti
   sampleSize: 0,
   autoActionMode: 'none',
   autoRecoverEnabled: false,
+  disableOnShortWindowExhausted: false,
 };
 
 export const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -143,6 +144,7 @@ export const readConfigurableSettingsFromConfig = (
         ? undefined
         : normalizeAutoActionMode(cleanRecord.autoActionMode),
     autoRecoverEnabled: readBoolean(cleanRecord.autoRecoverEnabled, false),
+    disableOnShortWindowExhausted: readBoolean(cleanRecord.disableOnShortWindowExhausted, false),
   };
 };
 
@@ -158,6 +160,7 @@ type CodexInspectionConfigurableSettingsInput = {
   autoExecuteActions?: unknown;
   autoActionMode?: unknown;
   autoRecoverEnabled?: unknown;
+  disableOnShortWindowExhausted?: unknown;
 };
 
 export const normalizeConfigurableSettings = (
@@ -204,6 +207,7 @@ export const normalizeConfigurableSettings = (
         : Math.max(0, Math.floor(sampleSizeValue)),
     autoActionMode: normalizeAutoActionMode(merged.autoActionMode, merged.autoExecuteActions),
     autoRecoverEnabled: readBoolean(merged.autoRecoverEnabled, false),
+    disableOnShortWindowExhausted: readBoolean(merged.disableOnShortWindowExhausted, false),
   };
 };
 

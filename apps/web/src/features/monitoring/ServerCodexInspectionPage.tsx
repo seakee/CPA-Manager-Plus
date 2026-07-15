@@ -90,6 +90,7 @@ type ServerCodexInspectionDraft = {
   sampleSize: string;
   autoActionMode: string;
   autoRecoverEnabled: boolean;
+  disableOnShortWindowExhausted: boolean;
 };
 
 type NormalizedServerCodexInspectionConfig = {
@@ -110,6 +111,7 @@ type NormalizedServerCodexInspectionConfig = {
   sampleSize: number;
   autoActionMode: string;
   autoRecoverEnabled: boolean;
+  disableOnShortWindowExhausted: boolean;
 };
 
 const DEFAULT_SERVER_CODEX_CONFIG: NormalizedServerCodexInspectionConfig = {
@@ -130,6 +132,7 @@ const DEFAULT_SERVER_CODEX_CONFIG: NormalizedServerCodexInspectionConfig = {
   sampleSize: 0,
   autoActionMode: 'none',
   autoRecoverEnabled: false,
+  disableOnShortWindowExhausted: false,
 };
 
 const RUNS_LIMIT = 30;
@@ -210,6 +213,10 @@ const resolveServerCodexConfig = (
     autoActionMode: config?.autoActionMode || DEFAULT_SERVER_CODEX_CONFIG.autoActionMode,
     autoRecoverEnabled:
       config?.autoRecoverEnabled ?? DEFAULT_SERVER_CODEX_CONFIG.autoRecoverEnabled,
+    disableOnShortWindowExhausted:
+      typeof config?.disableOnShortWindowExhausted === 'boolean'
+        ? config.disableOnShortWindowExhausted
+        : DEFAULT_SERVER_CODEX_CONFIG.disableOnShortWindowExhausted,
   };
 };
 
@@ -231,6 +238,7 @@ const toDraft = (config?: ManagerCodexInspectionConfig | null): ServerCodexInspe
     sampleSize: String(resolved.sampleSize),
     autoActionMode: resolved.autoActionMode,
     autoRecoverEnabled: resolved.autoRecoverEnabled,
+    disableOnShortWindowExhausted: resolved.disableOnShortWindowExhausted,
   };
 };
 
@@ -321,6 +329,7 @@ const createConfigFromDraft = (
     sampleSize: validation.values.sampleSize,
     autoActionMode: validation.values.autoActionMode,
     autoRecoverEnabled: validation.values.autoRecoverEnabled,
+    disableOnShortWindowExhausted: validation.values.disableOnShortWindowExhausted,
   };
 };
 
@@ -457,6 +466,7 @@ function getComparableConfig(config: NormalizedServerCodexInspectionConfig) {
     sampleSize: config.sampleSize,
     autoActionMode: config.autoActionMode,
     autoRecoverEnabled: config.autoRecoverEnabled,
+    disableOnShortWindowExhausted: config.disableOnShortWindowExhausted,
   };
 }
 
@@ -1521,6 +1531,9 @@ export function ServerCodexInspectionPage() {
           onFieldChange={(field, value) => updateDraft(field, value)}
           onAutoActionModeChange={(value) => updateDraft('autoActionMode', value)}
           onAutoRecoverEnabledChange={(value) => updateDraft('autoRecoverEnabled', value)}
+          onDisableOnShortWindowExhaustedChange={(value) =>
+            updateDraft('disableOnShortWindowExhausted', value)
+          }
         />
       </InspectionConfigDrawer>
     );

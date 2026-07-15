@@ -34,18 +34,19 @@ const (
 )
 
 type ManagerCodexInspectionConfig struct {
-	Enabled              *bool                                `json:"enabled,omitempty"`
-	Schedule             ManagerCodexInspectionScheduleConfig `json:"schedule"`
-	TargetType           string                               `json:"targetType,omitempty"`
-	Workers              int                                  `json:"workers,omitempty"`
-	DeleteWorkers        int                                  `json:"deleteWorkers,omitempty"`
-	Timeout              int                                  `json:"timeout,omitempty"`
-	Retries              int                                  `json:"retries,omitempty"`
-	UserAgent            string                               `json:"userAgent,omitempty"`
-	UsedPercentThreshold float64                              `json:"usedPercentThreshold,omitempty"`
-	SampleSize           int                                  `json:"sampleSize,omitempty"`
-	AutoActionMode       string                               `json:"autoActionMode,omitempty"`
-	AutoRecoverEnabled   bool                                 `json:"autoRecoverEnabled,omitempty"`
+	Enabled                      *bool                                `json:"enabled,omitempty"`
+	Schedule                     ManagerCodexInspectionScheduleConfig `json:"schedule"`
+	TargetType                   string                               `json:"targetType,omitempty"`
+	Workers                      int                                  `json:"workers,omitempty"`
+	DeleteWorkers                int                                  `json:"deleteWorkers,omitempty"`
+	Timeout                      int                                  `json:"timeout,omitempty"`
+	Retries                      int                                  `json:"retries,omitempty"`
+	UserAgent                    string                               `json:"userAgent,omitempty"`
+	UsedPercentThreshold         float64                              `json:"usedPercentThreshold,omitempty"`
+	SampleSize                   int                                  `json:"sampleSize,omitempty"`
+	AutoActionMode               string                               `json:"autoActionMode,omitempty"`
+	AutoRecoverEnabled           bool                                 `json:"autoRecoverEnabled,omitempty"`
+	DisableOnShortWindowExhausted *bool                               `json:"disableOnShortWindowExhausted,omitempty"`
 }
 
 type ManagerCodexInspectionScheduleConfig struct {
@@ -149,10 +150,11 @@ func DefaultCodexInspectionConfig() ManagerCodexInspectionConfig {
 		Timeout:              15000,
 		Retries:              0,
 		UserAgent:            "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal",
-		UsedPercentThreshold: 100,
-		SampleSize:           0,
-		AutoActionMode:       CodexInspectionAutoActionNone,
-		AutoRecoverEnabled:   false,
+		UsedPercentThreshold:          100,
+		SampleSize:                    0,
+		AutoActionMode:                CodexInspectionAutoActionNone,
+		AutoRecoverEnabled:            false,
+		DisableOnShortWindowExhausted: boolPtr(false),
 	}
 }
 
@@ -186,6 +188,11 @@ func NormalizeCodexInspectionConfig(input ManagerCodexInspectionConfig, fallback
 	// Frontend and API saves submit the complete inspection config. Keeping this
 	// assignment explicit makes the safe false default win for legacy configs.
 	next.AutoRecoverEnabled = input.AutoRecoverEnabled
+	if input.DisableOnShortWindowExhausted != nil {
+		next.DisableOnShortWindowExhausted = boolPtr(*input.DisableOnShortWindowExhausted)
+	} else {
+		next.DisableOnShortWindowExhausted = boolPtr(false)
+	}
 	return next
 }
 

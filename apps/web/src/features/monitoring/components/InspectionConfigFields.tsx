@@ -1,5 +1,6 @@
 import type { TFunction } from 'i18next';
 import { Input } from '@/components/ui/Input';
+import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import type { CodexInspectionAutoActionMode } from '@/features/monitoring/codexInspection';
 import { CodexInspectionAutoActionEditor } from '@/features/monitoring/components/CodexInspectionAutoActionEditor';
 import type {
@@ -16,6 +17,7 @@ type InspectionConfigFieldsProps = {
   onFieldChange: (field: SharedInspectionConfigField, value: string) => void;
   onAutoActionModeChange: (mode: CodexInspectionAutoActionMode) => void;
   onAutoRecoverEnabledChange: (enabled: boolean) => void;
+  onDisableOnShortWindowExhaustedChange: (value: boolean) => void;
 };
 
 // 本地与服务端共享的 9 个配置字段。分组:基础规则 → 自动处置 → 高级(默认折叠)。
@@ -27,6 +29,7 @@ export function InspectionConfigFields({
   onFieldChange,
   onAutoActionModeChange,
   onAutoRecoverEnabledChange,
+  onDisableOnShortWindowExhaustedChange,
 }: InspectionConfigFieldsProps) {
   return (
     <>
@@ -77,6 +80,17 @@ export function InspectionConfigFields({
             onChange={onAutoActionModeChange}
             onAutoRecoverChange={onAutoRecoverEnabledChange}
           />
+        </div>
+        <div className={styles.autoActionField} id="disableOnShortWindowExhausted">
+          <ToggleSwitch
+            checked={draft.disableOnShortWindowExhausted}
+            onChange={onDisableOnShortWindowExhaustedChange}
+            label={t('monitoring.codex_inspection_settings_disable_on_short_window_label')}
+            ariaLabel={t('monitoring.codex_inspection_settings_disable_on_short_window_label')}
+          />
+          <p className={styles.autoActionHint}>
+            {t('monitoring.codex_inspection_settings_disable_on_short_window_hint')}
+          </p>
         </div>
       </section>
 

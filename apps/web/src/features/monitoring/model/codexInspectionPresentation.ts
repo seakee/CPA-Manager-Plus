@@ -78,11 +78,12 @@ export type InspectionSettingsDraft = {
   sampleSize: string;
   autoActionMode: CodexInspectionAutoActionMode;
   autoRecoverEnabled: boolean;
+  disableOnShortWindowExhausted: boolean;
 };
 
 export type InspectionSettingsDraftField = Exclude<
   keyof InspectionSettingsDraft,
-  'autoActionMode' | 'autoRecoverEnabled'
+  'autoActionMode' | 'autoRecoverEnabled' | 'disableOnShortWindowExhausted'
 >;
 
 export const ACTION_FILTERS: ActionFilter[] = [
@@ -120,6 +121,7 @@ export const toSettingsDraft = (
   sampleSize: String(settings.sampleSize),
   autoActionMode: settings.autoActionMode,
   autoRecoverEnabled: settings.autoRecoverEnabled,
+  disableOnShortWindowExhausted: settings.disableOnShortWindowExhausted,
 });
 
 export const formatActionLabel = (action: CodexInspectionAction, t: TFunction) => {
@@ -457,6 +459,7 @@ export type SharedInspectionConfigDraft = {
 } & {
   autoActionMode: CodexInspectionAutoActionMode | string;
   autoRecoverEnabled: boolean;
+  disableOnShortWindowExhausted: boolean;
 };
 
 export type InspectionConfigFieldErrors = Partial<Record<SharedInspectionConfigField, string>>;
@@ -472,6 +475,7 @@ export type ValidatedInspectionConfigValues = {
   sampleSize: number;
   autoActionMode: CodexInspectionAutoActionMode;
   autoRecoverEnabled: boolean;
+  disableOnShortWindowExhausted: boolean;
 };
 
 type InspectionConfigDraftValidation =
@@ -556,6 +560,7 @@ export const validateInspectionConfigDraft = (
       sampleSize: Number(draft.sampleSize.trim()),
       autoActionMode: normalizeInspectionAutoActionMode(draft.autoActionMode),
       autoRecoverEnabled: draft.autoRecoverEnabled === true,
+      disableOnShortWindowExhausted: draft.disableOnShortWindowExhausted,
     },
   };
 };
@@ -591,6 +596,7 @@ type ConfigOverviewSettings = Pick<
 > & {
   autoActionMode: CodexInspectionAutoActionMode | string;
   autoRecoverEnabled: boolean;
+  disableOnShortWindowExhausted?: boolean;
 };
 
 type BuildConfigOverviewItemsOptions =
@@ -660,6 +666,14 @@ export const buildConfigOverviewItems = (
         tone: settings.autoRecoverEnabled ? 'good' : 'idle',
         field: 'autoActionMode',
       },
+      {
+        key: 'shortWindowDisable',
+        label: t('monitoring.codex_inspection_settings_disable_on_short_window_label'),
+        value: settings.disableOnShortWindowExhausted
+          ? t('monitoring.codex_inspection_settings_disable_on_short_window_enabled')
+          : t('monitoring.codex_inspection_settings_disable_on_short_window_disabled'),
+        tone: settings.disableOnShortWindowExhausted ? 'warn' : 'idle',
+      },
     ];
   }
 
@@ -689,6 +703,14 @@ export const buildConfigOverviewItems = (
       value: settings.autoRecoverEnabled ? t('common.enabled') : t('common.disabled'),
       tone: settings.autoRecoverEnabled ? 'good' : 'idle',
       field: 'autoActionMode',
+    },
+    {
+      key: 'shortWindowDisable',
+      label: t('monitoring.codex_inspection_settings_disable_on_short_window_label'),
+      value: settings.disableOnShortWindowExhausted
+        ? t('monitoring.codex_inspection_settings_disable_on_short_window_enabled')
+        : t('monitoring.codex_inspection_settings_disable_on_short_window_disabled'),
+      tone: settings.disableOnShortWindowExhausted ? 'warn' : 'idle',
     },
     {
       key: 'concurrency',
