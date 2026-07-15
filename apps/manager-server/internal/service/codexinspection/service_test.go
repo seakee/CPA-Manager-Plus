@@ -851,7 +851,7 @@ func TestResolveProbeActionUsesMonthlyWindowAsLongQuota(t *testing.T) {
 				LimitWindowSeconds: ptrFloat(codexMonthWindow),
 			},
 		}
-		decision := resolveProbeAction(disabledItem, http.StatusOK, "", rateLimit, deriveRateLimitUsedPercent(rateLimit), true, threshold)
+		decision := resolveProbeAction(disabledItem, http.StatusOK, "", rateLimit, deriveRateLimitUsedPercent(rateLimit), true, threshold, false)
 
 		if decision.Action != "keep" ||
 			decision.ActionReason != "5 小时额度仍达到阈值，月额度可用但继续保持禁用" ||
@@ -865,7 +865,7 @@ func TestResolveProbeActionUsesMonthlyWindowAsLongQuota(t *testing.T) {
 	t.Run("keeps disabled account when quota is unknown", func(t *testing.T) {
 		disabledItem := item
 		disabledItem.Disabled = true
-		decision := resolveProbeAction(disabledItem, http.StatusOK, `{"ok":true}`, nil, nil, false, threshold)
+		decision := resolveProbeAction(disabledItem, http.StatusOK, `{"ok":true}`, nil, nil, false, threshold, false)
 
 		if decision.Action != "keep" || decision.UsedPercent != nil || decision.IsQuota {
 			t.Fatalf("decision = %#v, want keep unknown quota", decision)
