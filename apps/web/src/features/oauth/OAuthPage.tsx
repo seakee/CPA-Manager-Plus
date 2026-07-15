@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
@@ -130,12 +130,7 @@ const BUILT_IN_PROVIDERS: BuiltInProviderDefinition[] = [
 
 const BUILT_IN_PROVIDER_IDS = new Set<string>(BUILT_IN_PROVIDERS.map((provider) => provider.id));
 
-const CALLBACK_SUPPORTED = new Set<string>([
-  'codex',
-  'anthropic',
-  'antigravity',
-  'xai',
-]);
+const CALLBACK_SUPPORTED = new Set<string>(['codex', 'anthropic', 'antigravity', 'xai']);
 const XAI_CALLBACK_URL = 'http://127.0.0.1:56121/callback';
 const SUCCESS_RESET_DELAY_MS = 5000;
 const getProviderI18nPrefix = (provider: BuiltInOAuthProvider) => provider.replace('-', '_');
@@ -220,6 +215,7 @@ const resolveCallbackUrl = (
 export function OAuthPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const location = useLocation();
   const { showNotification } = useNotificationStore();
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
@@ -266,6 +262,15 @@ export function OAuthPage() {
       : [];
     return [...builtIn, ...pluginProviders];
   }, [apiBase, pluginOAuthAvailable, pluginOAuthPlugins, t]);
+
+  useEffect(() => {
+    const targetId = location.hash.replace(/^#/, '');
+    if (!targetId) return;
+    const frame = window.requestAnimationFrame(() => {
+      document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [location.hash, providers.length]);
 
   const clearTimers = useCallback(() => {
     Object.values(pollingTimers.current).forEach((timer) => {
@@ -590,7 +595,7 @@ export function OAuthPage() {
             .filter(Boolean)
             .join(' ');
           return (
-            <div key={provider.id}>
+            <div key={provider.id} id={`oauth-provider-${provider.id}`}>
               <Card
                 title={
                   <span className={styles.cardTitle}>

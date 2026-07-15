@@ -1,0 +1,135 @@
+[
+  {
+    "name": "free usage exhausted",
+    "surface": "inference",
+    "statusCode": 402,
+    "body": { "code": "subscription:free-usage-exhausted" },
+    "headers": { "retry-after": "3600" },
+    "expected": {
+      "classification": "free_quota_exhausted",
+      "action": "disable",
+      "reasonCode": "xai_free_usage_exhausted",
+      "retryAfterSeconds": 3600
+    }
+  },
+  {
+    "name": "spending limit",
+    "surface": "billing",
+    "statusCode": 403,
+    "body": { "error": "Your team has used all available credits or reached its monthly spending limit." },
+    "expected": {
+      "classification": "spending_limit",
+      "action": "disable",
+      "reasonCode": "xai_spending_limit",
+      "retryAfterSeconds": null
+    }
+  },
+  {
+    "name": "invalid refresh credential",
+    "surface": "oauth",
+    "statusCode": 400,
+    "body": { "error": "invalid_grant", "error_description": "Refresh token reused" },
+    "expected": {
+      "classification": "auth_invalid",
+      "action": "reauth",
+      "reasonCode": "xai_auth_invalid",
+      "retryAfterSeconds": null
+    }
+  },
+  {
+    "name": "subscription entitlement denied",
+    "surface": "inference",
+    "statusCode": 403,
+    "body": { "error": "You need a Grok subscription." },
+    "expected": {
+      "classification": "entitlement_denied",
+      "action": "disable",
+      "reasonCode": "xai_entitlement_denied",
+      "retryAfterSeconds": null
+    }
+  },
+  {
+    "name": "policy denied",
+    "surface": "inference",
+    "statusCode": 403,
+    "body": { "error": "Content violates usage guidelines. Failed check: SAFETY_CHECK." },
+    "expected": {
+      "classification": "policy_denied",
+      "action": "keep",
+      "reasonCode": "xai_policy_denied",
+      "retryAfterSeconds": null
+    }
+  },
+  {
+    "name": "ambiguous forbidden",
+    "surface": "billing",
+    "statusCode": 403,
+    "body": { "error": "Forbidden" },
+    "expected": {
+      "classification": "permission_unknown",
+      "action": "keep",
+      "reasonCode": "xai_permission_unknown",
+      "retryAfterSeconds": null
+    }
+  },
+  {
+    "name": "generic rate limit",
+    "surface": "billing",
+    "statusCode": 429,
+    "body": { "code": "rate_limit", "error": "too many requests" },
+    "expected": {
+      "classification": "rate_limited",
+      "action": "keep",
+      "reasonCode": "xai_rate_limited",
+      "retryAfterSeconds": null
+    }
+  },
+  {
+    "name": "outdated client",
+    "surface": "billing",
+    "statusCode": 426,
+    "body": { "error": "client version is too old" },
+    "expected": {
+      "classification": "client_outdated",
+      "action": "keep",
+      "reasonCode": "xai_client_outdated",
+      "retryAfterSeconds": null
+    }
+  },
+  {
+    "name": "invalid probe request",
+    "surface": "billing",
+    "statusCode": 400,
+    "body": { "error": "invalid request payload" },
+    "expected": {
+      "classification": "probe_invalid",
+      "action": "keep",
+      "reasonCode": "xai_http_400",
+      "retryAfterSeconds": null
+    }
+  },
+  {
+    "name": "model unavailable",
+    "surface": "inference",
+    "statusCode": 404,
+    "body": { "error": "model not found" },
+    "expected": {
+      "classification": "model_unavailable",
+      "action": "keep",
+      "reasonCode": "xai_model_or_endpoint_unavailable",
+      "retryAfterSeconds": null
+    }
+  },
+  {
+    "name": "upstream error",
+    "surface": "billing",
+    "statusCode": 503,
+    "body": { "error": "service unavailable" },
+    "expected": {
+      "classification": "upstream_error",
+      "action": "keep",
+      "reasonCode": "xai_http_503",
+      "retryAfterSeconds": null
+    }
+  }
+]

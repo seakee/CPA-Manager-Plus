@@ -384,15 +384,16 @@ func quotaAutoDisableCandidateFromEvent(event usage.Event, baseURL string, manag
 }
 
 func xaiFreeUsageResetTimeFromEvent(event usage.Event, now time.Time) (time.Time, bool) {
-	if !event.Failed || event.FailStatusCode != http.StatusTooManyRequests {
+	if !event.Failed || (event.FailStatusCode != http.StatusPaymentRequired && event.FailStatusCode != http.StatusTooManyRequests) {
 		return time.Time{}, false
 	}
 	provider := normalizeQuotaProvider(firstNonEmpty(event.Provider, event.AuthProviderSnapshot))
 	if provider != "xai" {
 		return time.Time{}, false
 	}
-	for _, text := range []string{event.FailBody, event.RawJSON, event.FailSummary} {
-		matched := false
+	texts := []string{event.FailBody, event.RawJSON, event.FailSummary}
+	matched := false
+	for _, text := range texts {
 		forEachJSONValue(text, func(decoded any) bool {
 			if xaiFreeUsageCode(decoded) {
 				matched = true
@@ -401,7 +402,92 @@ func xaiFreeUsageResetTimeFromEvent(event usage.Event, now time.Time) (time.Time
 			return false
 		})
 		if matched {
-			return now.Add(xaiFreeUsageCooldown), true
+			break
+		}
+	}
+	if matched {
+		if resetAt, ok := xaiFreeUsageResetTimeFromHeaders(event, now); ok {
+			return resetAt, true
+		}
+		for _, text := range texts {
+			if resetAt, ok := xaiFreeUsageResetTimeFromJSONText(text, now); ok {
+				return resetAt, true
+			}
+		}
+		return now.Add(xaiFreeUsageCooldown), true
+	}
+	return time.Time{}, false
+}
+
+func xaiFreeUsageResetTimeFromHeaders(event usage.Event, now time.Time) (time.Time, bool) {
+	metadata := event.ResponseMetadata
+	if metadata == nil && event.ResponseMetadataJSON != "" {
+		metadata = usage.ResponseHeaderMetadataFromJSON(event.ResponseMetadataJSON)
+	}
+	if metadata == nil || metadata.Errors == nil || metadata.Errors.RetryAfterRecoverAtMS <= 0 {
+		return time.Time{}, false
+	}
+	resetAt := time.UnixMilli(metadata.Errors.RetryAfterRecoverAtMS)
+	return resetAt, resetAt.After(now)
+}
+
+func xaiFreeUsageResetTimeFromJSONText(text string, now time.Time) (time.Time, bool) {
+	var resetAt time.Time
+	found := false
+	forEachJSONValue(text, func(decoded any) bool {
+		if at, ok := xaiExplicitResetTime(decoded, now); ok {
+			resetAt = at
+			found = true
+			return true
+		}
+		return false
+	})
+	return resetAt, found && resetAt.After(now)
+}
+
+func xaiExplicitResetTime(value any, now time.Time) (time.Time, bool) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for _, key := range []string{
+			"reset_at",
+			"resetAt",
+			"resets_at",
+			"resetsAt",
+			"period_end",
+			"periodEnd",
+			"billing_period_end",
+			"billingPeriodEnd",
+		} {
+			if raw, ok := typed[key]; ok {
+				if resetAt, ok := parseResetValue(raw, now, false); ok {
+					return resetAt, true
+				}
+			}
+		}
+		for _, key := range []string{
+			"retry_after",
+			"retryAfter",
+			"retry_after_seconds",
+			"retryAfterSeconds",
+			"reset_after_seconds",
+			"resetAfterSeconds",
+		} {
+			if raw, ok := typed[key]; ok {
+				if resetAt, ok := parseResetValue(raw, now, true); ok {
+					return resetAt, true
+				}
+			}
+		}
+		for _, child := range typed {
+			if resetAt, ok := xaiExplicitResetTime(child, now); ok {
+				return resetAt, true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if resetAt, ok := xaiExplicitResetTime(child, now); ok {
+				return resetAt, true
+			}
 		}
 	}
 	return time.Time{}, false

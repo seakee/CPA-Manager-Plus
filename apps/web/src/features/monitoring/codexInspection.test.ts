@@ -29,6 +29,7 @@ import {
   normalizeActionFilter,
   getMixedServerCodexInspectionActionIds,
   isActionableServerCodexInspectionResult,
+  isPendingServerReauthResult,
   normalizeServerCodexInspectionActionStatus,
   validateInspectionConfigDraft,
 } from './model/codexInspectionPresentation';
@@ -376,6 +377,20 @@ describe('reauth delete execution mapping', () => {
     });
     expect(deleteItem.actionReason).toContain('用户选择删除需重新登录账号');
   });
+
+  it('allows an xAI reauth result to become an explicit manual delete action', () => {
+    const reauthItem = createResultItem('reauth', {
+      fileName: 'xai-reauth.json',
+      provider: 'xai',
+      raw: { name: 'xai-reauth.json', type: 'xai', auth_index: 'xai-1' },
+    });
+
+    expect(toReauthDeleteExecutionItem(reauthItem)).toMatchObject({
+      fileName: 'xai-reauth.json',
+      provider: 'xai',
+      action: 'delete',
+    });
+  });
 });
 
 describe('Codex inspection action presentation', () => {
@@ -500,6 +515,29 @@ describe('Server Codex inspection action presentation', () => {
 
     expect(Array.from(canonicalIds)).toEqual([1, 2]);
   });
+
+  it('hides completed server reauth deletion from pending actions', () => {
+    expect(isPendingServerReauthResult({ action: 'reauth' })).toBe(true);
+    expect(
+      isPendingServerReauthResult({
+        action: 'reauth',
+        actionStatus: 'failed',
+      })
+    ).toBe(true);
+    expect(
+      isPendingServerReauthResult({
+        action: 'reauth',
+        actionStatus: 'success',
+        executedAction: 'delete',
+      })
+    ).toBe(false);
+    expect(
+      isPendingServerReauthResult({
+        action: 'reauth',
+        actionStatus: 'skipped',
+      })
+    ).toBe(false);
+  });
 });
 
 describe('executeCodexInspectionActions', () => {
@@ -510,13 +548,28 @@ describe('executeCodexInspectionActions', () => {
       files: ['reauth.json'],
       failed: [],
     });
-    vi.spyOn(authFilesApi, 'list').mockResolvedValue({ files: [] });
+    vi.spyOn(authFilesApi, 'list')
+      .mockResolvedValueOnce({
+        files: [
+          {
+            name: 'reauth.json',
+            type: 'xai',
+            auth_index: '1',
+          } as AuthFileItem,
+        ],
+      })
+      .mockResolvedValueOnce({ files: [] });
 
     const execution = await executeCodexInspectionActions({
       settings: createRunResult().settings,
       items: [
         toReauthDeleteExecutionItem(
-          createResultItem('reauth', { fileName: 'reauth.json', statusCode: 401 })
+          createResultItem('reauth', {
+            fileName: 'reauth.json',
+            statusCode: 401,
+            provider: 'xai',
+            accountId: '',
+          })
         ),
       ],
       previousFiles: [],
@@ -534,6 +587,158 @@ describe('executeCodexInspectionActions', () => {
         error: '',
       },
     ]);
+  });
+
+  it('rejects deletion when the current auth file belongs to another provider', async () => {
+    const deleteSpy = vi.spyOn(authFilesApi, 'deleteFileByName').mockResolvedValue({
+      status: 'ok',
+      deleted: 1,
+      files: ['reauth.json'],
+      failed: [],
+    });
+    vi.spyOn(authFilesApi, 'list')
+      .mockResolvedValueOnce({
+        files: [
+          {
+            name: 'reauth.json',
+            type: 'codex',
+            auth_index: '1',
+          } as AuthFileItem,
+        ],
+      })
+      .mockResolvedValueOnce({ files: [] });
+
+    const execution = await executeCodexInspectionActions({
+      settings: createRunResult().settings,
+      items: [
+        toReauthDeleteExecutionItem(
+          createResultItem('reauth', {
+            fileName: 'reauth.json',
+            provider: 'xai',
+            authIndex: '1',
+            accountId: null,
+          })
+        ),
+      ],
+      previousFiles: [],
+      connectionFingerprint: 'scope-test',
+      source: 'manual',
+    });
+
+    expect(deleteSpy).not.toHaveBeenCalled();
+    expect(execution.outcomes).toEqual([
+      expect.objectContaining({
+        action: 'delete',
+        fileName: 'reauth.json',
+        success: false,
+      }),
+    ]);
+  });
+
+  it('treats an unconfirmed delete response as a failed action', async () => {
+    const deleteSpy = vi.spyOn(authFilesApi, 'deleteFileByName').mockResolvedValue({
+      status: 'ok',
+      deleted: 0,
+      files: [],
+      failed: [],
+    });
+    vi.spyOn(authFilesApi, 'list')
+      .mockResolvedValueOnce({
+        files: [{ name: 'reauth.json', type: 'xai', auth_index: '1' } as AuthFileItem],
+      })
+      .mockResolvedValueOnce({ files: [] });
+
+    const execution = await executeCodexInspectionActions({
+      settings: createRunResult().settings,
+      items: [
+        toReauthDeleteExecutionItem(
+          createResultItem('reauth', { fileName: 'reauth.json', provider: 'xai', accountId: '' })
+        ),
+      ],
+      previousFiles: [],
+      connectionFingerprint: 'scope-test',
+      source: 'manual',
+    });
+
+    expect(deleteSpy).toHaveBeenCalledWith('reauth.json');
+    expect(execution.outcomes).toEqual([
+      expect.objectContaining({ success: false, error: '删除接口未确认认证文件已删除' }),
+    ]);
+  });
+
+  it('rejects deletion when current auth files cannot be refreshed', async () => {
+    const deleteSpy = vi.spyOn(authFilesApi, 'deleteFileByName').mockResolvedValue({
+      status: 'ok',
+      deleted: 1,
+      files: ['reauth.json'],
+      failed: [],
+    });
+    vi.spyOn(authFilesApi, 'list')
+      .mockRejectedValueOnce(new Error('refresh failed'))
+      .mockResolvedValueOnce({ files: [] });
+
+    const execution = await executeCodexInspectionActions({
+      settings: createRunResult().settings,
+      items: [
+        toReauthDeleteExecutionItem(
+          createResultItem('reauth', {
+            fileName: 'reauth.json',
+            provider: 'xai',
+            accountId: '',
+          })
+        ),
+      ],
+      previousFiles: [],
+      connectionFingerprint: 'scope-test',
+      source: 'manual',
+    });
+
+    expect(deleteSpy).not.toHaveBeenCalled();
+    expect(execution.outcomes[0]).toMatchObject({
+      action: 'delete',
+      success: false,
+      error: expect.stringContaining('删除前刷新认证文件失败'),
+    });
+  });
+
+  it('rejects deletion when the current auth identity changed', async () => {
+    const deleteSpy = vi.spyOn(authFilesApi, 'deleteFileByName').mockResolvedValue({
+      status: 'ok',
+      deleted: 1,
+      files: ['reauth.json'],
+      failed: [],
+    });
+    vi.spyOn(authFilesApi, 'list')
+      .mockResolvedValueOnce({
+        files: [
+          {
+            name: 'reauth.json',
+            type: 'xai',
+            auth_index: 'replacement',
+          } as AuthFileItem,
+        ],
+      })
+      .mockResolvedValueOnce({ files: [] });
+
+    const execution = await executeCodexInspectionActions({
+      settings: createRunResult().settings,
+      items: [
+        toReauthDeleteExecutionItem(
+          createResultItem('reauth', {
+            fileName: 'reauth.json',
+            provider: 'xai',
+            authIndex: 'original',
+            accountId: null,
+          })
+        ),
+      ],
+      previousFiles: [],
+      connectionFingerprint: 'scope-test',
+      source: 'manual',
+    });
+
+    expect(deleteSpy).not.toHaveBeenCalled();
+    expect(execution.outcomes[0]).toMatchObject({ success: false, action: 'delete' });
   });
 
   it('uses action concurrency for disable and enable operations', async () => {
@@ -638,6 +843,7 @@ describe('Codex inspection disable ownership', () => {
 
     recordCodexInspectionDisableOwnership('scope-a', {
       fileName: 'owned.json',
+      provider: 'codex',
       authIndex: 'auth-1',
       accountId: null,
     });
@@ -652,6 +858,53 @@ describe('Codex inspection disable ownership', () => {
       ]).size
     ).toBe(0);
     expect(getCodexInspectionOwnedDisableFileNames('scope-a', [file]).size).toBe(0);
+  });
+
+  it('does not transfer local disable ownership across providers', () => {
+    const storage = createStorage();
+    vi.stubGlobal('localStorage', storage);
+    recordCodexInspectionDisableOwnership('scope-provider', {
+      fileName: 'shared.json',
+      provider: 'codex',
+      authIndex: 'shared-auth',
+      accountId: null,
+    });
+
+    const xaiFile = {
+      name: 'shared.json',
+      type: 'xai',
+      auth_index: 'shared-auth',
+      disabled: true,
+    } as AuthFileItem;
+    expect(getCodexInspectionOwnedDisableFileNames('scope-provider', [xaiFile]).size).toBe(0);
+  });
+
+  it('treats legacy ownership records without provider as Codex', () => {
+    const storage = createStorage();
+    storage.setItem(
+      'cli-proxy-codex-inspection-disable-ownership-v1',
+      JSON.stringify({
+        'scope-legacy': {
+          'legacy.json': {
+            fileName: 'legacy.json',
+            authIndex: 'legacy-auth',
+            accountId: null,
+            disabledAtMs: 1,
+          },
+        },
+      })
+    );
+    vi.stubGlobal('localStorage', storage);
+
+    const codexFile = {
+      name: 'legacy.json',
+      type: 'codex',
+      auth_index: 'legacy-auth',
+      disabled: true,
+    } as AuthFileItem;
+    expect(Array.from(getCodexInspectionOwnedDisableFileNames('scope-legacy', [codexFile]))).toEqual([
+      'legacy.json',
+    ]);
   });
 });
 

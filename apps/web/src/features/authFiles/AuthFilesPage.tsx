@@ -147,11 +147,13 @@ const hasInlineQuotaLayout = (file: AuthFileItem): boolean => {
 
 type CodexInspectionSnapshotSource = {
   fileName: string;
+  provider?: string | null;
   authIndex?: string | number | null;
   statusCode?: number | string | null;
   action?: string | null;
   usedPercent?: number | string | null;
   isQuota?: boolean | null;
+  errorKind?: string | null;
 };
 
 const readCodexInspectionRunAtMs = (run: {
@@ -173,11 +175,13 @@ const toAuthFileCodexInspectionSnapshots = (
 ): AuthFileCodexInspectionSnapshot[] =>
   results.map((item) => ({
     fileName: item.fileName,
+    provider: item.provider ?? null,
     authIndex: item.authIndex ?? null,
     statusCode: item.statusCode ?? null,
     action: item.action ?? null,
     usedPercent: item.usedPercent ?? null,
     isQuota: item.isQuota ?? null,
+    errorKind: item.errorKind ?? null,
     inspectionAtMs: inspectionAtMs ?? null,
   }));
 
@@ -1902,7 +1906,9 @@ export function AuthFilesPage() {
                       accountActionCandidate={getAccountActionForFile(file)}
                       onShowModels={showModels}
                       onReauth={(targetFile) =>
-                        setCodexReauthTarget(createCodexReauthTargetFromAuthFile(targetFile))
+                        resolveAuthProvider(targetFile) === 'xai'
+                          ? navigate('/oauth#oauth-provider-xai')
+                          : setCodexReauthTarget(createCodexReauthTargetFromAuthFile(targetFile))
                       }
                       onDownload={handleDownload}
                       onOpenPrefixProxyEditor={openPrefixProxyEditor}

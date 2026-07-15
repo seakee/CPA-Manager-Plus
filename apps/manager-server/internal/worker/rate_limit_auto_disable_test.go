@@ -3,8 +3,10 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -99,32 +101,149 @@ func TestQuotaAutoDisableCandidateRequiresStrictCodexUsageLimit(t *testing.T) {
 
 func TestQuotaAutoDisableCandidateAcceptsXAIIncludedFreeUsageExhausted(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
-	event := usage.Event{
-		EventHash:        "evt-xai-free-exhausted",
-		Failed:           true,
-		FailStatusCode:   http.StatusTooManyRequests,
-		FailBody:         `{"code":"subscription:free-usage-exhausted","error":"You've used all the included free usage for model grok-4.5-build-free for now. Usage resets over a rolling 24-hour window — tokens (actual/limit): 2033137/2000000."}`,
-		AuthFileSnapshot: "xai-auth.json",
-		AuthIndex:        "auth-xai-1",
-		AccountSnapshot:  "[邮箱]",
-		Provider:         "xai",
+	for _, statusCode := range []int{http.StatusPaymentRequired, http.StatusTooManyRequests} {
+		t.Run(http.StatusText(statusCode), func(t *testing.T) {
+			event := usage.Event{
+				EventHash:        "evt-xai-free-exhausted",
+				Failed:           true,
+				FailStatusCode:   statusCode,
+				FailBody:         `{"code":"subscription:free-usage-exhausted","error":"You've used all the included free usage for model grok-4.5-build-free for now. Usage resets over a rolling 24-hour window — tokens (actual/limit): 2033137/2000000."}`,
+				AuthFileSnapshot: "xai-auth.json",
+				AuthIndex:        "auth-xai-1",
+				AccountSnapshot:  "[邮箱]",
+				Provider:         "xai",
+			}
+
+			candidate, ok := quotaAutoDisableCandidateFromEvent(event, "http://cpa", "key", now)
+			if !ok {
+				t.Fatal("xAI free-usage-exhausted candidate not detected")
+			}
+			if candidate.Provider != "xai" {
+				t.Fatalf("provider = %q, want xai", candidate.Provider)
+			}
+			if candidate.FileName != "xai-auth.json" || candidate.AuthIndex != "auth-xai-1" {
+				t.Fatalf("candidate identity = %#v", candidate)
+			}
+			if got, want := candidate.ResetAt, now.Add(24*time.Hour); !got.Equal(want) {
+				t.Fatalf("reset time = %s, want %s", got, want)
+			}
+			if candidate.ReasonCode != quotaReasonXAIFreeUsage || candidate.WindowKind != quotaWindowRolling24H {
+				t.Fatalf("candidate metadata = %#v", candidate)
+			}
+		})
+	}
+}
+
+func TestQuotaAutoDisableCandidatePrefersXAIExplicitResetSignals(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	cases := []struct {
+		name  string
+		event usage.Event
+		want  time.Time
+	}{
+		{
+			name: "retry after header",
+			event: usage.Event{
+				ResponseMetadata: usage.ParseResponseHeaderMetadata(map[string]any{
+					"Retry-After": []any{"90"},
+				}, now),
+			},
+			want: now.Add(90 * time.Second),
+		},
+		{
+			name: "billing period end",
+			event: usage.Event{
+				FailBody: fmt.Sprintf(
+					`{"code":"subscription:free-usage-exhausted","billing_period_end":%d}`,
+					now.Add(6*time.Hour).Unix(),
+				),
+			},
+			want: now.Add(6 * time.Hour),
+		},
+		{
+			name: "code and reset split across event fields",
+			event: usage.Event{
+				FailBody: `{"code":"subscription:free-usage-exhausted"}`,
+				RawJSON: fmt.Sprintf(
+					`{"response":{"billing_period_end":%d}}`,
+					now.Add(8*time.Hour).Unix(),
+				),
+			},
+			want: now.Add(8 * time.Hour),
+		},
 	}
 
-	candidate, ok := quotaAutoDisableCandidateFromEvent(event, "http://cpa", "key", now)
-	if !ok {
-		t.Fatal("xAI free-usage-exhausted candidate not detected")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			event := tc.event
+			event.EventHash = "evt-xai-reset"
+			event.Failed = true
+			event.FailStatusCode = http.StatusPaymentRequired
+			if event.FailBody == "" {
+				event.FailBody = `{"code":"subscription:free-usage-exhausted"}`
+			}
+			event.AuthFileSnapshot = "xai-auth.json"
+			event.AuthIndex = "auth-xai-1"
+			event.Provider = "xai"
+
+			candidate, ok := quotaAutoDisableCandidateFromEvent(event, "http://cpa", "key", now)
+			if !ok {
+				t.Fatal("xAI free-usage-exhausted candidate not detected")
+			}
+			if !candidate.ResetAt.Equal(tc.want) {
+				t.Fatalf("reset time = %s, want %s", candidate.ResetAt, tc.want)
+			}
+		})
 	}
-	if candidate.Provider != "xai" {
-		t.Fatalf("provider = %q, want xai", candidate.Provider)
+}
+
+func TestXAIResetMatchesSharedFixture(t *testing.T) {
+	type fixtureCase struct {
+		Name       string            `json:"name"`
+		StatusCode int               `json:"statusCode"`
+		Body       any               `json:"body"`
+		Headers    map[string]string `json:"headers"`
+		Expected   struct {
+			Classification    string `json:"classification"`
+			RetryAfterSeconds *int64 `json:"retryAfterSeconds"`
+		} `json:"expected"`
 	}
-	if candidate.FileName != "xai-auth.json" || candidate.AuthIndex != "auth-xai-1" {
-		t.Fatalf("candidate identity = %#v", candidate)
+	data, err := os.ReadFile("../../../../tests/fixtures/xai-inspection-cases.json")
+	if err != nil {
+		t.Fatalf("read shared xAI fixtures: %v", err)
 	}
-	if got, want := candidate.ResetAt, now.Add(24*time.Hour); !got.Equal(want) {
-		t.Fatalf("reset time = %s, want %s", got, want)
+	var fixtures []fixtureCase
+	if err := json.Unmarshal(data, &fixtures); err != nil {
+		t.Fatalf("decode shared xAI fixtures: %v", err)
 	}
-	if candidate.ReasonCode != quotaReasonXAIFreeUsage || candidate.WindowKind != quotaWindowRolling24H {
-		t.Fatalf("candidate metadata = %#v", candidate)
+	now := time.Unix(1_700_000_000, 0)
+	for _, fixture := range fixtures {
+		if fixture.Expected.Classification != "free_quota_exhausted" || fixture.Expected.RetryAfterSeconds == nil {
+			continue
+		}
+		body, err := json.Marshal(fixture.Body)
+		if err != nil {
+			t.Fatalf("marshal fixture body: %v", err)
+		}
+		headerValues := map[string]any{}
+		for key, value := range fixture.Headers {
+			headerValues[key] = []any{value}
+		}
+		event := usage.Event{
+			Failed:           true,
+			FailStatusCode:   fixture.StatusCode,
+			FailBody:         string(body),
+			Provider:         "xai",
+			ResponseMetadata: usage.ParseResponseHeaderMetadata(headerValues, now),
+		}
+		resetAt, ok := xaiFreeUsageResetTimeFromEvent(event, now)
+		if !ok {
+			t.Fatalf("fixture %q did not produce reset time", fixture.Name)
+		}
+		want := now.Add(time.Duration(*fixture.Expected.RetryAfterSeconds) * time.Second)
+		if !resetAt.Equal(want) {
+			t.Fatalf("fixture %q reset = %s, want %s", fixture.Name, resetAt, want)
+		}
 	}
 }
 

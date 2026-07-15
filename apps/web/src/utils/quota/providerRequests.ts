@@ -1,4 +1,5 @@
 import type { TFunction } from 'i18next';
+import type { AxiosRequestConfig } from 'axios';
 import type {
   AntigravityQuotaGroup,
   AntigravityQuotaSubscription,
@@ -13,6 +14,7 @@ import type {
   CodexUsagePayload,
   KimiQuotaRow,
   XaiBillingConfig,
+  XaiBillingDiagnostic,
   XaiBillingPeriod,
   XaiBillingPeriodType,
   XaiBillingSummary,
@@ -60,6 +62,7 @@ import {
   buildCodexUsageRequestHeaders,
 } from './codexRequestHeaders';
 import { normalizeCodexResetCreditsPayload } from './resetCredits';
+import { classifyXaiProbe, parseXaiErrorEnvelope, XaiProbeError } from './xaiErrors';
 
 const DEFAULT_ANTIGRAVITY_PROJECT_ID = 'bamboo-precept-lgxtn';
 const CODEX_RESET_CREDITS_REQUEST_TIMEOUT_MS = 8000;
@@ -761,27 +764,90 @@ const buildXaiRequestHeaders = (file: AuthFileItem): Record<string, string> => {
 const requestXaiBilling = async (
   authIndex: string,
   url: string,
-  header: Record<string, string>
+  header: Record<string, string>,
+  requestConfig?: AxiosRequestConfig
 ): Promise<XaiBillingSummary | null> => {
-  const result = await apiCallApi.request({
-    authIndex,
-    method: 'GET',
-    url,
-    header,
-  });
+  const result = await apiCallApi.request(
+    {
+      authIndex,
+      method: 'GET',
+      url,
+      header,
+    },
+    requestConfig
+  );
 
   if (result.statusCode < 200 || result.statusCode >= 300) {
-    throw createStatusError(getApiCallErrorMessage(result), result.statusCode);
+    const envelope = parseXaiErrorEnvelope({
+      statusCode: result.hasStatusCode ? result.statusCode : null,
+      body: result.body,
+      bodyText: result.bodyText,
+      headers: result.header,
+    });
+    const decision = classifyXaiProbe({ surface: 'billing', envelope });
+    throw new XaiProbeError(getApiCallErrorMessage(result), envelope, decision);
   }
 
-  const payload = parseXaiBillingPayload(result.body ?? result.bodyText);
-  return buildXaiBillingSummary(payload?.config);
+	const payload = parseXaiBillingPayload(result.body ?? result.bodyText);
+	const summary = buildXaiBillingSummary(payload?.config);
+	if (!summary) {
+		const envelope = parseXaiErrorEnvelope({
+			statusCode: result.hasStatusCode ? result.statusCode : null,
+			body: result.body,
+			bodyText: result.bodyText,
+			headers: result.header,
+		});
+		const decision = classifyXaiProbe({ surface: 'billing', envelope, hasPayload: false });
+		throw new XaiProbeError('xAI billing response schema changed', envelope, decision);
+	}
+	return summary;
 };
 
-export const fetchXaiQuota = async (
+export interface XaiBillingProbeResult {
+  summary: XaiBillingSummary;
+  failures: unknown[];
+  partial: boolean;
+}
+
+const xaiFailurePriority = (failure: unknown) => {
+  if (!(failure instanceof XaiProbeError)) return 0;
+  switch (failure.decision.classification) {
+    case 'auth_invalid':
+      return 100;
+    case 'free_quota_exhausted':
+    case 'spending_limit':
+      return 90;
+    case 'client_outdated':
+      return 80;
+    case 'entitlement_denied':
+    case 'permission_unknown':
+    case 'quota_or_entitlement_unknown':
+      return 70;
+    case 'policy_denied':
+      return 60;
+    case 'rate_limited':
+      return 40;
+    case 'probe_invalid':
+      return 30;
+    case 'upstream_error':
+      return 10;
+    default:
+      return 1;
+  }
+};
+
+const selectXaiBillingFailure = (failures: unknown[]) =>
+  failures.reduce<unknown>(
+    (selected, failure) =>
+      xaiFailurePriority(failure) > xaiFailurePriority(selected) ? failure : selected,
+    failures[0]
+  );
+
+export const probeXaiBilling = async (
   file: AuthFileItem,
-  t: TFunction
-): Promise<XaiBillingSummary> => {
+  t: TFunction,
+  requestConfig?: AxiosRequestConfig
+): Promise<XaiBillingProbeResult> => {
   const rawAuthIndex = file['auth_index'] ?? file.authIndex;
   const authIndex = normalizeAuthIndex(rawAuthIndex);
   if (!authIndex) {
@@ -790,18 +856,43 @@ export const fetchXaiQuota = async (
 
   const requestHeader = buildXaiRequestHeaders(file);
   const [weeklyResult, monthlyResult] = await Promise.allSettled([
-    requestXaiBilling(authIndex, XAI_BILLING_WEEKLY_URL, requestHeader),
-    requestXaiBilling(authIndex, XAI_BILLING_MONTHLY_URL, requestHeader),
+    requestXaiBilling(authIndex, XAI_BILLING_WEEKLY_URL, requestHeader, requestConfig),
+    requestXaiBilling(authIndex, XAI_BILLING_MONTHLY_URL, requestHeader, requestConfig),
   ]);
   const weeklySummary = weeklyResult.status === 'fulfilled' ? weeklyResult.value : null;
   const monthlySummary = monthlyResult.status === 'fulfilled' ? monthlyResult.value : null;
+  const failures = [weeklyResult, monthlyResult].flatMap((result) =>
+    result.status === 'rejected' ? [result.reason] : []
+  );
   const summary = mergeXaiBillingSummaries(weeklySummary, monthlySummary);
   if (!summary) {
-    if (weeklyResult.status === 'rejected' && monthlyResult.status === 'rejected') {
-      throw weeklyResult.reason;
-    }
+    if (failures.length > 0) throw selectXaiBillingFailure(failures);
     throw new Error(t('xai_quota.empty_data'));
   }
 
-  return summary;
+  return {
+    summary,
+    failures,
+    partial: failures.length > 0 || weeklySummary === null || monthlySummary === null,
+  };
 };
+
+export const fetchXaiQuota = async (file: AuthFileItem, t: TFunction): Promise<XaiBillingSummary> =>
+  probeXaiBilling(file, t).then(({ summary, partial, failures }) => ({
+    ...summary,
+    partial,
+    diagnostics: failures.map((failure): XaiBillingDiagnostic => {
+      if (failure instanceof XaiProbeError) {
+        return {
+          classification: failure.decision.classification,
+          statusCode: failure.envelope.statusCode,
+          message: failure.message,
+        };
+      }
+      return {
+        classification: 'unknown',
+        statusCode: null,
+        message: failure instanceof Error ? failure.message : String(failure),
+      };
+    }),
+  }));

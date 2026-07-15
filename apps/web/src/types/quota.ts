@@ -458,6 +458,12 @@ export interface XaiProductUsageSummary {
   usagePercent: number | null;
 }
 
+export interface XaiBillingDiagnostic {
+  classification: string;
+  statusCode: number | null;
+  message: string;
+}
+
 export interface XaiBillingSummary {
   periodType: XaiBillingPeriodType;
   usagePercent: number | null;
@@ -473,6 +479,8 @@ export interface XaiBillingSummary {
   billingPeriodStart?: string;
   billingPeriodEnd?: string;
   usedPercent: number | null;
+  partial?: boolean;
+  diagnostics?: XaiBillingDiagnostic[];
 }
 
 export interface XaiQuotaState {

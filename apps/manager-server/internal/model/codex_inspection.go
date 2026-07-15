@@ -120,6 +120,7 @@ type CodexInspectionResult struct {
 
 type CodexInspectionDisableOwnership struct {
 	FileName     string
+	Provider     string
 	AuthIndex    string
 	AccountID    string
 	DisabledAtMS int64
@@ -243,6 +244,10 @@ func NormalizeCodexInspectionTimeZone(value string, fallback string) string {
 }
 
 func ValidateCodexInspectionConfig(input ManagerCodexInspectionConfig) error {
+	targetType := strings.ToLower(strings.TrimSpace(input.TargetType))
+	if targetType != "" && targetType != "codex" && targetType != "xai" {
+		return fmt.Errorf("unsupported inspection target type %q", input.TargetType)
+	}
 	return ValidateCodexInspectionSchedule(input.Schedule)
 }
 

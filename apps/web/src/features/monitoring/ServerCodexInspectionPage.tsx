@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/Button';
 import {
   IconChartLine,
@@ -40,6 +41,7 @@ import {
   getCanonicalServerCodexInspectionActionIds,
   getMixedServerCodexInspectionActionIds,
   isActionableServerCodexInspectionResult,
+  isPendingServerReauthResult,
   normalizeServerCodexInspectionActionStatus,
   type ActionFilter,
   type HandlingFilter,
@@ -605,7 +607,10 @@ function toServerResultItem(
   locale: string
 ): CodexInspectionResultItem {
   const actionStatusLabel = formatServerActionStatusLabel(item, t);
-  const reasonParts = [item.actionReason, actionStatusLabel].filter(Boolean);
+  const actionReason = item.actionReason?.startsWith('monitoring.')
+    ? t(item.actionReason)
+    : item.actionReason;
+  const reasonParts = [actionReason, actionStatusLabel].filter(Boolean);
   const observedHeaderEvidence = buildObservedHeaderEvidence(snapshot, locale, t);
   return {
     key: `server-${item.id || item.accountKey}`,
@@ -637,6 +642,7 @@ function toServerResultItem(
     })),
     errorKind: item.errorKind,
     errorDetail: item.actionError || item.errorDetail || '',
+    actionHandled: item.action === 'reauth' && !isPendingServerReauthResult(item),
     observedHeaderEvidence,
     observedHeaderAtMs: snapshot?.timestamp_ms ?? null,
   };
@@ -685,6 +691,7 @@ function formatServiceHost(base: string): string {
 
 export function ServerCodexInspectionPage() {
   const { t, i18n } = useTranslation();
+  const navigate = useNavigate();
   const managementKey = useAuthStore((state) => state.managementKey);
   const featureAvailability = usePanelFeatureAvailability();
   const showNotification = useNotificationStore((state) => state.showNotification);
@@ -1078,13 +1085,25 @@ export function ServerCodexInspectionPage() {
   };
 
   const executeServerActions = useCallback(
-    async (targets: CodexInspectionResult[], scope: 'single' | 'bulk') => {
+    async (
+      targets: CodexInspectionResult[],
+      scope: 'single' | 'bulk',
+      overrideAction?: 'delete'
+    ) => {
       if (!serviceBase || !detail) {
         showNotification(t('monitoring.server_codex_inspection_service_unavailable'), 'warning');
         return;
       }
       const resultIds = Array.from(
-        new Set(targets.filter(isActionableServerCodexInspectionResult).map((item) => item.id))
+        new Set(
+          targets
+            .filter((item) =>
+              overrideAction === 'delete'
+                ? item.action === 'reauth' && item.id > 0
+                : isActionableServerCodexInspectionResult(item)
+            )
+            .map((item) => item.id)
+        )
       );
       if (resultIds.length === 0) {
         showNotification(t('monitoring.server_codex_inspection_no_actions'), 'warning');
@@ -1098,7 +1117,10 @@ export function ServerCodexInspectionPage() {
           serviceBase,
           managementKey,
           detail.run.id,
-          resultIds
+          resultIds,
+          overrideAction === 'delete'
+            ? resultIds.map((resultId) => ({ resultId, action: 'delete' as const }))
+            : []
         );
         setDetail(response.detail);
         setSelectedRunId(response.detail.run.id);
@@ -1172,13 +1194,44 @@ export function ServerCodexInspectionPage() {
   );
 
   const handleOpenCodexReauth = useCallback((item: CodexInspectionResult) => {
+    if (item.provider === 'xai') {
+      navigate('/oauth#oauth-provider-xai');
+      return;
+    }
     setCodexReauthTarget({
       account: item.displayAccount || item.accountId || item.fileName,
       fileName: item.fileName,
       authIndex: item.authIndex ?? null,
       accountId: item.accountId ?? null,
     });
-  }, []);
+  }, [navigate]);
+
+  const handleDeleteServerReauth = useCallback(
+    (targets: CodexInspectionResult[], scope: 'single' | 'bulk') => {
+      if (targets.length === 0) return;
+      const first = targets[0];
+      showConfirmation({
+        title:
+          scope === 'bulk'
+            ? t('monitoring.codex_inspection_delete_reauth_confirm_title')
+            : t('monitoring.codex_inspection_delete_reauth_single_title'),
+        message:
+          scope === 'bulk'
+            ? t('monitoring.codex_inspection_delete_reauth_confirm_body', {
+                count: targets.length,
+              })
+            : t('monitoring.codex_inspection_delete_reauth_single_body', {
+                account: first.displayAccount,
+                file: first.fileName,
+              }),
+        confirmText: t('monitoring.codex_inspection_action_delete'),
+        cancelText: t('common.cancel'),
+        variant: 'danger',
+        onConfirm: () => executeServerActions(targets, scope, 'delete'),
+      });
+    },
+    [executeServerActions, showConfirmation, t]
+  );
 
   const handleCodexReauthSuccess = useCallback(async () => {
     await refreshRuns({ silent: true });
@@ -1618,6 +1671,7 @@ export function ServerCodexInspectionPage() {
     const canonicalExecutableIds = getCanonicalServerCodexInspectionActionIds(resultRows);
     const mixedActionIds = getMixedServerCodexInspectionActionIds(resultRows);
     const executableResults = resultRows.filter((item) => canonicalExecutableIds.has(item.id));
+    const reauthResults = resultRows.filter(isPendingServerReauthResult);
     const canExecuteActions = detail?.run.status === 'completed';
     const resultsRun = detail?.run ?? null;
     const actionFilterCounts = getActionFilterCounts(resultItems);
@@ -1731,16 +1785,30 @@ export function ServerCodexInspectionPage() {
             <span className={styles.primaryReason}>
               {t('monitoring.server_codex_inspection_file_level_action_hint')}
             </span>
-          ) : source.action === 'reauth' ? (
-            <Button
-              size="xs"
-              variant="secondary"
-              className={styles.serverResultActionButton}
-              onClick={() => handleOpenCodexReauth(source)}
-            >
-              <IconRefreshCw size={13} />
-              {t('codex_reauth.button')}
-            </Button>
+          ) : isPendingServerReauthResult(source) ? (
+            <div className={styles.resultsHeaderActions}>
+              <Button
+                size="xs"
+                variant="secondary"
+                className={styles.serverResultActionButton}
+                onClick={() => handleOpenCodexReauth(source)}
+              >
+                <IconRefreshCw size={13} />
+                {t(
+                  source.provider === 'xai' ? 'auth_login.xai_oauth_button' : 'codex_reauth.button'
+                )}
+              </Button>
+              <Button
+                size="xs"
+                variant="danger"
+                className={styles.serverResultActionButton}
+                onClick={() => handleDeleteServerReauth([source], 'single')}
+                disabled={!canExecuteActions || executingResultIds.size > 0}
+              >
+                <IconTrash2 size={13} />
+                {t('monitoring.codex_inspection_action_delete')}
+              </Button>
+            </div>
           ) : source.action === 'keep' ? (
             <span className={styles.primaryReason}>
               {t('monitoring.codex_inspection_no_action')}
@@ -1756,7 +1824,8 @@ export function ServerCodexInspectionPage() {
         filteredResults={resultPagination.pageItems}
         suggestedResults={resultItems.filter((item) => item.action !== 'keep')}
         pendingActionCount={executableResults.length}
-        manualActionCount={actionFilterCounts.reauth}
+        manualActionCount={reauthResults.length}
+        reauthActionCount={reauthResults.length}
         handlingFilterCounts={handlingFilterCounts}
         filterCounts={actionFilterCounts}
         handlingFilter={handlingFilter}
@@ -1780,6 +1849,11 @@ export function ServerCodexInspectionPage() {
           const source = resultByKey.get(item.key);
           if (source) handleOpenCodexReauth(source);
         }}
+        onDeleteReauthPlanned={
+          reauthResults.length > 0
+            ? () => handleDeleteServerReauth(reauthResults, 'bulk')
+            : undefined
+        }
         filterLabel={filterLabel}
         handlingFilterLabel={handlingFilterLabel}
         renderOperation={renderOperation}
@@ -1795,7 +1869,8 @@ export function ServerCodexInspectionPage() {
         const detail = entry.detail
           ? ` ${typeof entry.detail === 'string' ? entry.detail : JSON.stringify(entry.detail)}`
           : '';
-        return `[${ts}] [${entry.level}] ${entry.message}${detail}`;
+        const message = entry.message.startsWith('monitoring.') ? t(entry.message) : entry.message;
+        return `[${ts}] [${entry.level}] ${message}${detail}`;
       });
       try {
         await navigator.clipboard.writeText(lines.join('\n'));
@@ -1904,7 +1979,7 @@ export function ServerCodexInspectionPage() {
                     {formatTimestamp(entry.createdAtMs, i18n.language)}
                   </span>
                   <span className={styles.logMessage}>
-                    {entry.message}
+                    {entry.message.startsWith('monitoring.') ? t(entry.message) : entry.message}
                     {entry.detail ? (
                       <small className={styles.serverLogDetail}>
                         {typeof entry.detail === 'string'

@@ -1285,6 +1285,22 @@ const renderXaiItems = (
     Boolean(billing.billingPeriodEnd);
 
   const nodes: ReactNode[] = [
+    billing.partial
+      ? h(
+          'div',
+          { key: 'partial-diagnostic', className: styleMap.quotaMessage },
+          t('xai_quota.partial_data', {
+            details:
+              billing.diagnostics
+                ?.map((item) =>
+                  item.statusCode
+                    ? `${item.classification} (HTTP ${item.statusCode})`
+                    : item.classification
+                )
+                .join(', ') || t('xai_quota.partial_unknown'),
+          })
+        )
+      : null,
     plan
       ? h(
           'div',

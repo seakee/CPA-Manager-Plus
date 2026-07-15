@@ -7,6 +7,8 @@ import {
   type CodexInspectionSettings,
 } from '@/features/monitoring/codexInspection';
 import type { AuthFileItem } from '@/types';
+import { normalizeAuthIndex } from '@/utils/authIndex';
+import { resolveAuthProvider, resolveCodexChatgptAccountId } from '@/utils/quota';
 import { clampPositiveInteger } from './codexInspectionSettings';
 import {
   clearCodexInspectionDisableOwnership,
@@ -64,6 +66,42 @@ const dedupeExecutionItems = (items: CodexInspectionResultItem[]) => {
   );
 };
 
+const normalizeProvider = (value: unknown): string => {
+  const normalized = String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/_/g, '-');
+  if (normalized === 'x-ai' || normalized === 'grok') return 'xai';
+  return normalized || 'codex';
+};
+
+const readCurrentFileName = (file: AuthFileItem): string =>
+  String(file.name ?? file.id ?? '').trim();
+
+const matchesCurrentDeleteIdentity = (
+  file: AuthFileItem,
+  item: CodexInspectionResultItem
+): boolean => {
+  if (readCurrentFileName(file) !== item.fileName) return false;
+  if (normalizeProvider(resolveAuthProvider(file)) !== normalizeProvider(item.provider)) return false;
+  const authIndex = normalizeAuthIndex(file['auth_index'] ?? file.authIndex ?? file['auth-index']);
+  if (item.authIndex && authIndex !== normalizeAuthIndex(item.authIndex)) return false;
+  const accountId = resolveCodexChatgptAccountId(file);
+  if (item.accountId && accountId !== item.accountId.trim()) return false;
+  return true;
+};
+
+const failedDeletePreflightOutcome = (
+  item: CodexInspectionResultItem,
+  error: string
+): CodexInspectionExecutionOutcome => ({
+  action: 'delete',
+  fileName: item.fileName,
+  displayAccount: item.displayAccount,
+  success: false,
+  error,
+});
+
 const executeDelete = async (
   item: CodexInspectionResultItem
 ): Promise<CodexInspectionExecutionOutcome> => {
@@ -77,6 +115,15 @@ const executeDelete = async (
         displayAccount: item.displayAccount,
         success: false,
         error: failed.error || '删除失败',
+      };
+    }
+    if (result.deleted <= 0) {
+      return {
+        action: 'delete',
+        fileName: item.fileName,
+        displayAccount: item.displayAccount,
+        success: false,
+        error: '删除接口未确认认证文件已删除',
       };
     }
     return {
@@ -130,10 +177,40 @@ export const executeCodexInspectionActions = async ({
   onLog,
 }: ExecuteCodexInspectionActionsOptions): Promise<CodexInspectionExecutionResult> => {
   const dedupedItems = dedupeExecutionItems(items);
-  const deleteItems = dedupedItems.filter((item) => item.action === 'delete');
+  const requestedDeleteItems = dedupedItems.filter((item) => item.action === 'delete');
   const disableItems = dedupedItems.filter((item) => item.action === 'disable');
   const enableItems = dedupedItems.filter((item) => item.action === 'enable');
   const outcomes: CodexInspectionExecutionOutcome[] = [];
+  let deleteItems = requestedDeleteItems;
+
+  if (requestedDeleteItems.length > 0) {
+    try {
+      const response = await authFilesApi.list();
+      const currentFiles = Array.isArray(response.files) ? response.files : [];
+      deleteItems = requestedDeleteItems.filter((item) => {
+        const matched = currentFiles.some((file) => matchesCurrentDeleteIdentity(file, item));
+        if (matched) return true;
+        const outcome = failedDeletePreflightOutcome(
+          item,
+          '认证文件不存在、Provider 不匹配或账号标识已变化，已拒绝删除'
+        );
+        outcomes.push(outcome);
+        onLog?.('error', `${outcome.displayAccount} 删除失败：${outcome.error}`);
+        return false;
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error || '未知错误');
+      requestedDeleteItems.forEach((item) => {
+        const outcome = failedDeletePreflightOutcome(
+          item,
+          `删除前刷新认证文件失败，已拒绝删除：${message}`
+        );
+        outcomes.push(outcome);
+        onLog?.('error', `${outcome.displayAccount} 删除失败：${outcome.error}`);
+      });
+      deleteItems = [];
+    }
+  }
 
   if (deleteItems.length > 0) {
     onLog?.('info', `开始删除 ${deleteItems.length} 个账号`);
@@ -187,6 +264,7 @@ export const executeCodexInspectionActions = async ({
     if (outcome.action === 'disable' && source === 'auto') {
       recordCodexInspectionDisableOwnership(connectionFingerprint, {
         fileName: item.fileName,
+        provider: item.provider,
         authIndex: item.authIndex,
         accountId: item.accountId,
       });

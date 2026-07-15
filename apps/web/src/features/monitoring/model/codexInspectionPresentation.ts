@@ -170,6 +170,14 @@ export const isActionableServerCodexInspectionResult = (
   );
 };
 
+export const isPendingServerReauthResult = (
+  item: Pick<CodexInspectionResult, 'action' | 'actionStatus' | 'executedAction'>
+) => {
+  if (item.action !== 'reauth' || item.executedAction === 'delete') return false;
+  const status = normalizeServerCodexInspectionActionStatus(item);
+  return status === 'none' || status === 'pending' || status === 'failed';
+};
+
 export const getCanonicalServerCodexInspectionActionIds = (
   results: Array<Pick<CodexInspectionResult, 'id' | 'fileName' | 'action' | 'actionStatus'>>
 ) => {
@@ -271,8 +279,9 @@ export const normalizeActionFilter = (value: unknown): ActionFilter => {
   return 'all';
 };
 
-export const isNeedsHandling = (item: Pick<CodexInspectionResultItem, 'action' | 'statusCode'>) =>
-  item.action !== 'keep' || item.statusCode === 401;
+export const isNeedsHandling = (
+  item: Pick<CodexInspectionResultItem, 'action' | 'statusCode' | 'actionHandled'>
+) => !item.actionHandled && (item.action !== 'keep' || item.statusCode === 401);
 
 export const countHandlingStates = (items: CodexInspectionResultItem[]) => {
   const pending = items.filter(isNeedsHandling).length;
@@ -500,7 +509,7 @@ export const validateInspectionConfigFields = (
 ): InspectionConfigFieldErrors => {
   const errors: InspectionConfigFieldErrors = {};
 
-  if (!draft.targetType.trim()) {
+  if (!['codex', 'xai'].includes(draft.targetType.trim().toLowerCase())) {
     errors.targetType = t('monitoring.codex_inspection_settings_target_type_required');
   }
 

@@ -358,7 +358,7 @@ func (r *repository) ListResults(ctx context.Context, runID int64) ([]model.Code
 }
 
 func (r *repository) ListDisableOwnership(ctx context.Context) ([]model.CodexInspectionDisableOwnership, error) {
-	rows, err := r.db.QueryContext(ctx, `select file_name, auth_index, account_id, disabled_at_ms, updated_at_ms
+	rows, err := r.db.QueryContext(ctx, `select file_name, provider, auth_index, account_id, disabled_at_ms, updated_at_ms
 		from codex_inspection_disable_ownership order by file_name asc`)
 	if err != nil {
 		return nil, err
@@ -368,10 +368,11 @@ func (r *repository) ListDisableOwnership(ctx context.Context) ([]model.CodexIns
 	items := make([]model.CodexInspectionDisableOwnership, 0)
 	for rows.Next() {
 		var item model.CodexInspectionDisableOwnership
-		var authIndex, accountID sql.NullString
-		if err := rows.Scan(&item.FileName, &authIndex, &accountID, &item.DisabledAtMS, &item.UpdatedAtMS); err != nil {
+		var provider, authIndex, accountID sql.NullString
+		if err := rows.Scan(&item.FileName, &provider, &authIndex, &accountID, &item.DisabledAtMS, &item.UpdatedAtMS); err != nil {
 			return nil, err
 		}
+		item.Provider = provider.String
 		item.AuthIndex = authIndex.String
 		item.AccountID = accountID.String
 		items = append(items, item)
@@ -388,15 +389,21 @@ func (r *repository) UpsertDisableOwnership(ctx context.Context, item model.Code
 		item.DisabledAtMS = now
 	}
 	item.UpdatedAtMS = now
+	provider := item.Provider
+	if provider == "" {
+		provider = "codex"
+	}
 	_, err := r.db.ExecContext(ctx, `insert into codex_inspection_disable_ownership (
-		file_name, auth_index, account_id, disabled_at_ms, updated_at_ms
-	) values (?, ?, ?, ?, ?)
+		file_name, provider, auth_index, account_id, disabled_at_ms, updated_at_ms
+	) values (?, ?, ?, ?, ?, ?)
 	on conflict(file_name) do update set
+		provider = excluded.provider,
 		auth_index = excluded.auth_index,
 		account_id = excluded.account_id,
 		disabled_at_ms = excluded.disabled_at_ms,
 		updated_at_ms = excluded.updated_at_ms`,
 		item.FileName,
+		provider,
 		nullString(item.AuthIndex),
 		nullString(item.AccountID),
 		item.DisabledAtMS,
@@ -429,7 +436,7 @@ func (r *repository) RevokeDisableOwnership(ctx context.Context, fileNames []str
 			targets[fileName] = struct{}{}
 		}
 	}
-	rows, err := tx.QueryContext(ctx, `select file_name, auth_index, account_id, disabled_at_ms, updated_at_ms
+	rows, err := tx.QueryContext(ctx, `select file_name, provider, auth_index, account_id, disabled_at_ms, updated_at_ms
 		from codex_inspection_disable_ownership`)
 	if err != nil {
 		return nil, err
@@ -437,11 +444,12 @@ func (r *repository) RevokeDisableOwnership(ctx context.Context, fileNames []str
 	items := make([]model.CodexInspectionDisableOwnership, 0)
 	for rows.Next() {
 		var item model.CodexInspectionDisableOwnership
-		var authIndex, accountID sql.NullString
-		if err := rows.Scan(&item.FileName, &authIndex, &accountID, &item.DisabledAtMS, &item.UpdatedAtMS); err != nil {
+		var provider, authIndex, accountID sql.NullString
+		if err := rows.Scan(&item.FileName, &provider, &authIndex, &accountID, &item.DisabledAtMS, &item.UpdatedAtMS); err != nil {
 			_ = rows.Close()
 			return nil, err
 		}
+		item.Provider = provider.String
 		item.AuthIndex = authIndex.String
 		item.AccountID = accountID.String
 		if !clearAll {
@@ -494,11 +502,16 @@ func (r *repository) RestoreDisableOwnership(ctx context.Context, items []model.
 			item.DisabledAtMS = time.Now().UnixMilli()
 		}
 		item.UpdatedAtMS = time.Now().UnixMilli()
+		provider := item.Provider
+		if provider == "" {
+			provider = "codex"
+		}
 		if _, err := tx.ExecContext(ctx, `insert into codex_inspection_disable_ownership (
-			file_name, auth_index, account_id, disabled_at_ms, updated_at_ms
-		) values (?, ?, ?, ?, ?)
+			file_name, provider, auth_index, account_id, disabled_at_ms, updated_at_ms
+		) values (?, ?, ?, ?, ?, ?)
 		on conflict(file_name) do nothing`,
 			item.FileName,
+			provider,
 			nullString(item.AuthIndex),
 			nullString(item.AccountID),
 			item.DisabledAtMS,

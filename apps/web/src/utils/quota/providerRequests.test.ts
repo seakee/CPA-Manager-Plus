@@ -38,7 +38,9 @@ import {
   fetchClaudeQuota,
   fetchCodexQuota,
   mergeXaiBillingSummaries,
+  probeXaiBilling,
 } from './providerRequests';
+import { XaiProbeError } from './xaiErrors';
 
 const t = ((key: string) => key) as TFunction;
 
@@ -441,6 +443,84 @@ describe('fetchXaiQuota', () => {
       monthlyLimitCents: 20000,
       usedCents: 5000,
       usedPercent: 25,
+      partial: true,
+      diagnostics: [
+        expect.objectContaining({ classification: 'upstream_error', statusCode: 500 }),
+      ],
+    });
+  });
+
+  it('marks a one-sided xAI billing response as partial while keeping usable data', async () => {
+    mocks.request
+      .mockResolvedValueOnce({
+        statusCode: 500,
+        hasStatusCode: true,
+        header: {},
+        bodyText: 'weekly down',
+        body: null,
+      })
+      .mockResolvedValueOnce({
+        statusCode: 200,
+        hasStatusCode: true,
+        header: {},
+        bodyText: '',
+        body: { config: { monthly_limit: 20000, used: 5000 } },
+      });
+
+    const result = await probeXaiBilling({ name: 'xai.json', type: 'xai', authIndex: 'xai-1' }, t);
+
+    expect(result).toMatchObject({
+      partial: true,
+      summary: { monthlyLimitCents: 20000, usedCents: 5000 },
+    });
+    expect(result.failures).toHaveLength(1);
+  });
+
+  it('prefers a verified xAI quota signal when both billing requests fail differently', async () => {
+    mocks.request
+      .mockResolvedValueOnce({
+        statusCode: 500,
+        hasStatusCode: true,
+        header: {},
+        bodyText: 'weekly down',
+        body: null,
+      })
+      .mockResolvedValueOnce({
+        statusCode: 402,
+        hasStatusCode: true,
+        header: {},
+        bodyText: '{"code":"subscription:free-usage-exhausted"}',
+        body: { code: 'subscription:free-usage-exhausted' },
+      });
+
+    await expect(
+      probeXaiBilling({ name: 'xai.json', type: 'xai', authIndex: 'xai-1' }, t)
+    ).rejects.toMatchObject({
+      decision: { classification: 'free_quota_exhausted' },
+    });
+  });
+
+  it('prefers auth invalid over a generic forbidden billing failure', async () => {
+    mocks.request
+      .mockResolvedValueOnce({
+        statusCode: 403,
+        hasStatusCode: true,
+        header: {},
+        bodyText: 'forbidden',
+        body: { error: 'forbidden' },
+      })
+      .mockResolvedValueOnce({
+        statusCode: 401,
+        hasStatusCode: true,
+        header: {},
+        bodyText: 'invalid credentials',
+        body: { error: 'invalid credentials' },
+      });
+
+    await expect(
+      probeXaiBilling({ name: 'xai.json', type: 'xai', authIndex: 'xai-1' }, t)
+    ).rejects.toMatchObject({
+      decision: { classification: 'auth_invalid', suggestedAction: 'reauth' },
     });
   });
 
@@ -471,6 +551,109 @@ describe('fetchXaiQuota', () => {
         t
       )
     ).rejects.toThrow('500 weekly down');
+  });
+
+  it('classifies empty successful xAI billing payloads as protocol changes', async () => {
+    mocks.request.mockResolvedValue({
+      statusCode: 200,
+      hasStatusCode: true,
+      header: {},
+      bodyText: '',
+      body: { config: {} },
+    });
+
+    await expect(
+      probeXaiBilling({ name: 'xai.json', type: 'xai', authIndex: 'xai-1' }, t)
+    ).rejects.toMatchObject({
+      decision: { classification: 'protocol_changed', suggestedAction: 'keep' },
+    });
+  });
+
+  it.each([402, 429])(
+    'preserves xAI free usage exhaustion under HTTP %i as a structured error',
+    async (statusCode) => {
+      mocks.request.mockResolvedValue({
+        statusCode,
+        hasStatusCode: true,
+        header: { 'retry-after': ['3600'] },
+        bodyText: '{"code":"subscription:free-usage-exhausted"}',
+        body: { code: 'subscription:free-usage-exhausted' },
+      });
+
+      const promise = fetchXaiQuota({ name: 'xai.json', type: 'xai', authIndex: 'xai-1' }, t);
+
+      await expect(promise).rejects.toMatchObject({
+        name: 'XaiProbeError',
+        status: statusCode,
+        decision: {
+          classification: 'free_quota_exhausted',
+          suggestedAction: 'disable',
+          retryAfterSeconds: 3600,
+        },
+      });
+    }
+  );
+
+  it('classifies an xAI spending limit without treating it as invalid auth', async () => {
+    mocks.request.mockResolvedValue({
+      statusCode: 403,
+      hasStatusCode: true,
+      header: {},
+      bodyText: '{"code":"personal-team-blocked:spending-limit"}',
+      body: { code: 'personal-team-blocked:spending-limit' },
+    });
+
+    await expect(
+      fetchXaiQuota({ name: 'xai.json', type: 'xai', authIndex: 'xai-1' }, t)
+    ).rejects.toMatchObject({
+      decision: {
+        classification: 'spending_limit',
+        suggestedAction: 'disable',
+      },
+    });
+  });
+
+  it('keeps generic xAI 403 responses reviewable and non-destructive', async () => {
+    mocks.request.mockResolvedValue({
+      statusCode: 403,
+      hasStatusCode: true,
+      header: {},
+      bodyText: '{"error":"Forbidden"}',
+      body: { error: 'Forbidden' },
+    });
+
+    await expect(
+      fetchXaiQuota({ name: 'xai.json', type: 'xai', authIndex: 'xai-1' }, t)
+    ).rejects.toMatchObject({
+      decision: {
+        classification: 'permission_unknown',
+        suggestedAction: 'keep',
+        needsReview: true,
+      },
+    });
+  });
+
+  it('reports an outdated Grok client without suggesting account mutation', async () => {
+    mocks.request.mockResolvedValue({
+      statusCode: 426,
+      hasStatusCode: true,
+      header: {},
+      bodyText: '{"error":"client version is too old"}',
+      body: { error: 'client version is too old' },
+    });
+
+    try {
+      await fetchXaiQuota({ name: 'xai.json', type: 'xai', authIndex: 'xai-1' }, t);
+      throw new Error('expected fetchXaiQuota to reject');
+    } catch (error) {
+      expect(error).toBeInstanceOf(XaiProbeError);
+      expect(error).toMatchObject({
+        decision: {
+          classification: 'client_outdated',
+          suggestedAction: 'keep',
+        },
+      });
+    }
   });
 });
 

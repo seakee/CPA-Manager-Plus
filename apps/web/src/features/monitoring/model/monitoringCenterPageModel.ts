@@ -1322,10 +1322,24 @@ export const requestAccountQuota = async (
     }
     case 'xai': {
       const billing = await fetchXaiQuota(target.file, t);
-      const metaLabels =
+      const metaLabels: string[] =
         billing.onDemandCapCents !== null
           ? [`${t('xai_quota.on_demand_cap')}: ${formatXaiCurrency(billing.onDemandCapCents)}`]
           : [];
+      if (billing.partial) {
+        metaLabels.push(
+          t('xai_quota.partial_data', {
+            details:
+              billing.diagnostics
+                ?.map((item) =>
+                  item.statusCode
+                    ? `${item.classification} (HTTP ${item.statusCode})`
+                    : item.classification
+                )
+                .join(', ') || t('xai_quota.partial_unknown'),
+          })
+        );
+      }
       return stampAccountQuotaFetchTime({
         ...buildBaseAccountQuotaEntry(target, t, metaLabels),
         windows: buildXaiAccountQuotaWindows(billing, t),

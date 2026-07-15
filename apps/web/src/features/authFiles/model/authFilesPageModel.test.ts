@@ -462,6 +462,46 @@ describe('auth file Codex status helpers', () => {
     expect(authFileMatchesCodexStatusFilter(status, 'weekly_limited')).toBe(false);
   });
 
+  it('shows provider-aware xAI inspection evidence without using Codex window filters', () => {
+    const file: AuthFileItem = { name: 'xai-main.json', type: 'xai', authIndex: 'xai-main' };
+    const quotaStatus = getAuthFileCodexStatus(file, undefined, {
+      fileName: file.name,
+      provider: 'xai',
+      authIndex: file.authIndex,
+      action: 'disable',
+      isQuota: true,
+      errorKind: 'free_quota_exhausted',
+    });
+    const reauthStatus = getAuthFileCodexStatus(file, undefined, {
+      fileName: file.name,
+      provider: 'xai',
+      authIndex: file.authIndex,
+      action: 'reauth',
+      isQuota: false,
+      errorKind: 'auth_invalid',
+    });
+    const partialStatus = getAuthFileCodexStatus(file, undefined, {
+      fileName: file.name,
+      provider: 'xai',
+      authIndex: file.authIndex,
+      action: 'keep',
+      isQuota: false,
+      errorKind: 'billing_partial',
+    });
+
+    expect(quotaStatus).toMatchObject({
+      isCodex: false,
+      isQuotaLimited: true,
+      isUnknownQuotaLimited: true,
+      isWeeklyLimited: false,
+      isMonthlyLimited: false,
+    });
+    expect(quotaStatus.badges.map((badge) => badge.kind)).toContain('observed_quota');
+    expect(reauthStatus.badges.map((badge) => badge.kind)).toContain('reauth');
+    expect(partialStatus.badges.map((badge) => badge.kind)).toContain('observed_error');
+    expect(authFileMatchesCodexStatusFilter(quotaStatus, 'quota_limited')).toBe(false);
+  });
+
   it('indexes inspection results by file name and auth index', () => {
     const inspection: AuthFileCodexInspectionSnapshot = {
       fileName: 'codex-main.json',
@@ -477,6 +517,23 @@ describe('auth file Codex status helpers', () => {
     expect(map.get(getAuthFileCodexInspectionKey('codex-main.json', 'codex-main'))).toBe(
       inspection
     );
+  });
+
+  it('does not apply a provider-mismatched inspection snapshot to a row', () => {
+    const sources = getFreshAuthFileCodexStatusSources(
+      codexFile(),
+      undefined,
+      {
+        fileName: 'codex-main.json',
+        provider: 'xai',
+        authIndex: 'codex-main',
+        action: 'disable',
+        isQuota: true,
+      },
+      undefined
+    );
+
+    expect(sources.inspection).toBeUndefined();
   });
 
   it('suppresses older Codex inspection and header status sources after a same-row quota refresh', () => {

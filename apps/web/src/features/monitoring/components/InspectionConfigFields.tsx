@@ -1,5 +1,6 @@
 import type { TFunction } from 'i18next';
 import { Input } from '@/components/ui/Input';
+import { Select } from '@/components/ui/Select';
 import type { CodexInspectionAutoActionMode } from '@/features/monitoring/codexInspection';
 import { CodexInspectionAutoActionEditor } from '@/features/monitoring/components/CodexInspectionAutoActionEditor';
 import type {
@@ -89,13 +90,29 @@ export function InspectionConfigFields({
         </summary>
         <div className={styles.advancedBody}>
           <div className={styles.serverField}>
-            <Input
-              id="targetType"
-              label={t('monitoring.codex_inspection_settings_target_type_label')}
-              error={errors.targetType}
-              value={draft.targetType}
-              onChange={(event) => onFieldChange('targetType', event.target.value)}
-            />
+            <div className="form-group">
+              <label className={styles.serverFieldLabel} htmlFor="targetType">
+                {t('monitoring.codex_inspection_settings_target_type_label')}
+              </label>
+              <Select
+                id="targetType"
+                value={draft.targetType}
+                options={[
+                  {
+                    value: 'codex',
+                    label: t('monitoring.codex_inspection_target_codex'),
+                  },
+                  {
+                    value: 'xai',
+                    label: t('monitoring.codex_inspection_target_xai'),
+                  },
+                ]}
+                onChange={(value) => onFieldChange('targetType', value)}
+                ariaLabel={t('monitoring.codex_inspection_settings_target_type_label')}
+              />
+              <div className="hint">{t('monitoring.codex_inspection_settings_target_type_hint')}</div>
+              {errors.targetType ? <div className="error-box">{errors.targetType}</div> : null}
+            </div>
           </div>
           <div className={styles.serverField}>
             <Input

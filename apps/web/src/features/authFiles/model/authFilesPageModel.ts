@@ -111,11 +111,13 @@ export type AuthFileCodexStatusSummary = {
 
 export type AuthFileCodexInspectionSnapshot = {
   fileName: string;
+  provider?: string | null;
   authIndex?: string | number | null;
   statusCode?: number | string | null;
   action?: string | null;
   usedPercent?: number | string | null;
   isQuota?: boolean | null;
+  errorKind?: string | null;
   inspectionAtMs?: number | null;
 };
 
@@ -383,14 +385,18 @@ export const getFreshAuthFileCodexStatusSources = (
   inspection?: AuthFileCodexInspectionSnapshot,
   headerSnapshot?: UsageHeaderSnapshot
 ): AuthFileCodexStatusSources => ({
-  inspection: shouldSuppressOlderCodexStatusSource(
+  inspection:
+    inspection?.provider &&
+    normalizeProviderKey(inspection.provider) !== normalizeProviderKey(file.type ?? file.provider ?? '')
+      ? undefined
+      : shouldSuppressOlderCodexStatusSource(
     file,
     quota,
     inspection?.inspectionAtMs,
     headerSnapshot?.timestamp_ms
   )
-    ? undefined
-    : inspection,
+        ? undefined
+        : inspection,
   headerSnapshot: shouldSuppressOlderCodexStatusSource(
     file,
     quota,
@@ -407,8 +413,10 @@ export const getAuthFileCodexStatus = (
   inspection?: AuthFileCodexInspectionSnapshot,
   headerSnapshot?: UsageHeaderSnapshot
 ): AuthFileCodexStatusSummary => {
+  const provider = normalizeProviderKey(file.type ?? file.provider ?? '');
   const isCodex = isCodexAuthFile(file);
-  if (!isCodex) {
+  const isXai = provider === 'xai';
+  if (!isCodex && !isXai) {
     return {
       isCodex: false,
       isHttp401: false,
@@ -498,6 +506,8 @@ export const getAuthFileCodexStatus = (
     ) ??
     normalizeNumber(quota?.errorStatus);
   const action = typeof inspection?.action === 'string' ? inspection.action : '';
+  const inspectionErrorKind =
+    typeof inspection?.errorKind === 'string' ? inspection.errorKind.trim() : '';
   const isHttp401 = statusCode === 401;
   const needsReauth =
     action === 'reauth' || isHttp401 || isObservedAuthError(observedErrorKind, observedErrorCode);
@@ -507,17 +517,21 @@ export const getAuthFileCodexStatus = (
       (longWindowUsedPercent !== null && longWindowUsedPercent >= 100) ||
       (file.disabled === true && action === 'keep'));
   const isWeeklyLimited =
-    (weeklyUsedPercent !== null && weeklyUsedPercent >= 100) ||
-    (inspectionReachedQuota && !monthlyWindow) ||
-    observedWeeklyLimited;
+    isCodex &&
+    ((weeklyUsedPercent !== null && weeklyUsedPercent >= 100) ||
+      (inspectionReachedQuota && !monthlyWindow) ||
+      observedWeeklyLimited);
   const isMonthlyLimited =
-    (monthlyUsedPercent !== null && monthlyUsedPercent >= 100) ||
-    (inspectionReachedQuota && monthlyWindow !== null && !weeklyWindow) ||
-    observedMonthlyLimited;
+    isCodex &&
+    ((monthlyUsedPercent !== null && monthlyUsedPercent >= 100) ||
+      (inspectionReachedQuota && monthlyWindow !== null && !weeklyWindow) ||
+      observedMonthlyLimited);
   const isFiveHourLimited =
-    (fiveHourUsedPercent !== null && fiveHourUsedPercent >= 100) || observedFiveHourLimited;
+    isCodex &&
+    ((fiveHourUsedPercent !== null && fiveHourUsedPercent >= 100) || observedFiveHourLimited);
   const isUnknownQuotaLimited =
-    observedQuotaLimitedStatus && !isFiveHourLimited && !isWeeklyLimited && !isMonthlyLimited;
+    (isXai && inspectionReachedQuota) ||
+    (observedQuotaLimitedStatus && !isFiveHourLimited && !isWeeklyLimited && !isMonthlyLimited);
   const isQuotaLimited =
     isFiveHourLimited || isWeeklyLimited || isMonthlyLimited || isUnknownQuotaLimited;
   const recoveryResetLabel =
@@ -533,10 +547,15 @@ export const getAuthFileCodexStatus = (
     badges.push({
       kind: 'reauth',
       tone: 'danger',
-      labelKey: 'auth_files.codex_status_badge_reauth',
+      labelKey: isXai
+        ? 'auth_files.provider_inspection_badge_reauth'
+        : 'auth_files.codex_status_badge_reauth',
       defaultLabel: 'Needs reauth',
-      titleKey: 'auth_files.codex_status_badge_reauth_title',
+      titleKey: isXai
+        ? 'auth_files.provider_inspection_badge_reauth_title'
+        : 'auth_files.codex_status_badge_reauth_title',
       defaultTitle: 'Latest Codex check returned 401 or suggested reauthorization.',
+      labelParams: { provider: isXai ? 'xAI' : 'Codex' },
     });
   }
 
@@ -585,7 +604,17 @@ export const getAuthFileCodexStatus = (
     });
   }
 
-  if (observedQuotaLimitedStatus) {
+  if (isXai && inspectionReachedQuota) {
+    badges.push({
+      kind: 'observed_quota',
+      tone: 'warning',
+      labelKey: 'auth_files.provider_inspection_badge_quota',
+      defaultLabel: 'Quota unavailable',
+      titleKey: 'auth_files.provider_inspection_badge_quota_title',
+      defaultTitle: 'Latest xAI inspection reported an exhausted quota or spending limit.',
+      labelParams: { provider: 'xAI' },
+    });
+  } else if (observedQuotaLimitedStatus) {
     badges.push({
       kind: 'observed_quota',
       tone: 'warning',
@@ -620,6 +649,21 @@ export const getAuthFileCodexStatus = (
       ]
         .filter(Boolean)
         .join(' '),
+    });
+  } else if (
+    isXai &&
+    inspectionErrorKind &&
+    inspectionErrorKind !== 'billing_healthy' &&
+    !needsReauth
+  ) {
+    badges.push({
+      kind: 'observed_error',
+      tone: 'info',
+      labelKey: 'auth_files.provider_inspection_badge_error',
+      defaultLabel: 'Inspection warning',
+      titleKey: 'auth_files.provider_inspection_badge_error_title',
+      defaultTitle: `Latest xAI inspection reported ${inspectionErrorKind}.`,
+      labelParams: { provider: 'xAI', kind: inspectionErrorKind },
     });
   }
 

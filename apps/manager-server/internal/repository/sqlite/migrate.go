@@ -305,6 +305,7 @@ func Migrate(db *sql.DB) error {
 		`create index if not exists idx_codex_inspection_logs_run on codex_inspection_logs(run_id, created_at_ms)`,
 		`create table if not exists codex_inspection_disable_ownership (
 			file_name text primary key,
+			provider text not null default 'codex',
 			auth_index text,
 			account_id text,
 			disabled_at_ms integer not null,
@@ -347,6 +348,9 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 	if err := ensureCodexInspectionResultColumns(db); err != nil {
+		return err
+	}
+	if err := ensureCodexInspectionOwnershipColumns(db); err != nil {
 		return err
 	}
 	if err := ensureAccountActionCandidateColumns(db); err != nil {
@@ -426,6 +430,35 @@ func ensureUsageDataMigrationColumns(db *sql.DB) error {
 	}
 	_, err = db.Exec(`alter table usage_data_migrations add column changed_rows integer not null default 0`)
 	return err
+}
+
+func ensureCodexInspectionOwnershipColumns(db *sql.DB) error {
+	rows, err := db.Query(`pragma table_info(codex_inspection_disable_ownership)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	existing := map[string]struct{}{}
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, pk int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		existing[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if _, ok := existing["provider"]; ok {
+		return nil
+	}
+	if _, err := db.Exec(`alter table codex_inspection_disable_ownership add column provider text not null default 'codex'`); err != nil {
+		return err
+	}
+	return nil
 }
 
 func ensureQuotaCooldownColumns(db *sql.DB) error {

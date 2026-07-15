@@ -1,4 +1,5 @@
 import { authFilesApi } from '@/services/api/authFiles';
+import type { TFunction } from 'i18next';
 import { getApiCallErrorMessage } from '@/services/api/apiCall';
 import type { AuthFileItem, Config } from '@/types';
 import {
@@ -27,6 +28,7 @@ import {
   inspectSingleAccount,
   toInspectionAccount,
 } from '@/features/monitoring/model/codexInspectionProbe';
+import { inspectSingleXaiAccount } from '@/features/monitoring/model/xaiInspectionProbe';
 import {
   buildProgressSummary,
   buildSummary,
@@ -130,6 +132,7 @@ export interface CodexInspectionResultItem extends CodexInspectionAccount {
   quotaWindows?: CodexInspectionQuotaWindow[];
   errorKind?: string;
   errorDetail?: string;
+  actionHandled?: boolean;
   observedHeaderEvidence?: string[];
   observedHeaderAtMs?: number | null;
 }
@@ -224,6 +227,7 @@ type InspectCodexAccountsOptions = {
   onLog?: LogHandler;
   onProgress?: ProgressHandler;
   onResultsChange?: ResultsChangeHandler;
+  t?: TFunction;
 };
 
 type CreateCodexInspectionSessionOptions = InspectCodexAccountsOptions;
@@ -332,6 +336,7 @@ export const createCodexInspectionSession = ({
   onLog,
   onProgress,
   onResultsChange,
+  t,
 }: CreateCodexInspectionSessionOptions): CodexInspectionSession => {
   const resolvedSettings = resolveCodexInspectionSettings(config, apiBase, managementKey, settings);
   const sessionId = `codex-inspection-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -438,7 +443,11 @@ export const createCodexInspectionSession = ({
       inFlight += 1;
       emitProgress();
 
-      void inspectSingleAccount(account, resolvedSettings, onLog)
+      void (
+        account.provider === 'xai'
+          ? inspectSingleXaiAccount(account, resolvedSettings, onLog, t)
+          : inspectSingleAccount(account, resolvedSettings, onLog)
+      )
         .then((inspectionResult) => {
           resultMap.set(inspectionResult.key, inspectionResult);
           emitResultsChange(inspectionResult);
@@ -610,6 +619,7 @@ export const inspectCodexAccounts = async ({
   onLog,
   onProgress,
   onResultsChange,
+  t,
 }: InspectCodexAccountsOptions): Promise<CodexInspectionRunResult> => {
   const session = createCodexInspectionSession({
     config,
@@ -619,6 +629,7 @@ export const inspectCodexAccounts = async ({
     onLog,
     onProgress,
     onResultsChange,
+    t,
   });
 
   return session.start();

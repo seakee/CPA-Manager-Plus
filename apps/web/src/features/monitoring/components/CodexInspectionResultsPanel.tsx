@@ -309,7 +309,11 @@ export function CodexInspectionResultsPanel({
                                     disabled={isInspectionInFlight || executing}
                                   >
                                     <IconRefreshCw size={14} />
-                                    {t('codex_reauth.button')}
+                                    {t(
+                                      item.provider === 'xai'
+                                        ? 'auth_login.xai_oauth_button'
+                                        : 'codex_reauth.button'
+                                    )}
                                   </Button>
                                 ) : (
                                   <span className={styles.primaryReason}>

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import {
   applyCodexInspectionExecutionResult,
   buildCodexInspectionError,
@@ -69,6 +70,7 @@ import styles from './CodexInspectionPage.module.scss';
 
 export function CodexInspectionPage() {
   const { t, i18n } = useTranslation();
+  const navigate = useNavigate();
   const config = useConfigStore((state) => state.config);
   const apiBase = useAuthStore((state) => state.apiBase);
   const managementKey = useAuthStore((state) => state.managementKey);
@@ -352,6 +354,7 @@ export function CodexInspectionPage() {
         apiBase,
         managementKey,
         settings: inspectionSettings,
+        t,
         onLog: (level, message) => {
           if (activeSessionIdRef.current !== session.id) return;
           appendLog(level, message);
@@ -532,7 +535,6 @@ export function CodexInspectionPage() {
     () => (result ? result.results.filter(isReauthAction) : []),
     [result]
   );
-
   const filteredResults = useMemo(
     () => filterInspectionResults(displayResults, handlingFilter, actionFilter),
     [displayResults, handlingFilter, actionFilter]
@@ -628,14 +630,21 @@ export function CodexInspectionPage() {
     [executeItems, showConfirmation, t]
   );
 
-  const handleOpenCodexReauth = useCallback((item: CodexInspectionResultItem) => {
-    setCodexReauthTarget({
-      account: item.displayAccount || item.accountId || item.fileName,
-      fileName: item.fileName,
-      authIndex: item.authIndex,
-      accountId: item.accountId,
-    });
-  }, []);
+  const handleOpenCodexReauth = useCallback(
+    (item: CodexInspectionResultItem) => {
+      if (item.provider === 'xai') {
+        navigate('/oauth#oauth-provider-xai');
+        return;
+      }
+      setCodexReauthTarget({
+        account: item.displayAccount || item.accountId || item.fileName,
+        fileName: item.fileName,
+        authIndex: item.authIndex,
+        accountId: item.accountId,
+      });
+    },
+    [navigate]
+  );
 
   const handleCodexReauthSuccess = useCallback(() => {
     showNotification(t('codex_reauth.rerun_hint'), 'success');
@@ -995,8 +1004,8 @@ export function CodexInspectionPage() {
         onExecutePlanned={handleExecutePlanned}
         onExecuteSingle={handleExecuteSingle}
         onReauthAccount={handleOpenCodexReauth}
-        onDeleteReauthPlanned={handleDeleteReauthPlanned}
-        onDeleteReauthSingle={handleDeleteSingleReauth}
+        onDeleteReauthPlanned={reauthResults.length > 0 ? handleDeleteReauthPlanned : undefined}
+        onDeleteReauthSingle={reauthResults.length > 0 ? handleDeleteSingleReauth : undefined}
         filterLabel={filterLabel}
         handlingFilterLabel={handlingFilterLabel}
       />

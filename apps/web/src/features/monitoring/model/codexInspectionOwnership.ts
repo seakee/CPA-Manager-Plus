@@ -1,11 +1,12 @@
 import type { AuthFileItem } from '@/types';
-import { resolveCodexChatgptAccountId } from '@/utils/quota';
+import { resolveAuthProvider, resolveCodexChatgptAccountId } from '@/utils/quota';
 import { normalizeAuthIndex } from '@/utils/authIndex';
 
 const STORAGE_KEY = 'cli-proxy-codex-inspection-disable-ownership-v1';
 
 type DisableOwnershipRecord = {
   fileName: string;
+  provider?: string | null;
   authIndex: string | null;
   accountId: string | null;
   disabledAtMs: number;
@@ -15,6 +16,7 @@ type DisableOwnershipStore = Record<string, Record<string, DisableOwnershipRecor
 
 type OwnershipIdentity = {
   fileName: string;
+  provider?: string | null;
   authIndex?: string | number | null;
   accountId?: string | null;
 };
@@ -48,14 +50,22 @@ const normalizeAccountId = (value: unknown): string | null => {
   return normalized || null;
 };
 
+const normalizeProvider = (value: unknown): string => {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase().replace(/_/g, '-') : '';
+  if (normalized === 'x-ai' || normalized === 'grok') return 'xai';
+  return normalized || 'codex';
+};
+
 const identityFromFile = (file: AuthFileItem): OwnershipIdentity => ({
   fileName: file.name,
+  provider: resolveAuthProvider(file),
   authIndex: normalizeAuthIndex(file['auth_index'] ?? file.authIndex ?? file['auth-index']),
   accountId: resolveCodexChatgptAccountId(file),
 });
 
 const matchesIdentity = (record: DisableOwnershipRecord, identity: OwnershipIdentity): boolean => {
   if (record.fileName !== identity.fileName) return false;
+  if (normalizeProvider(record.provider) !== normalizeProvider(identity.provider)) return false;
   const authIndex = normalizeAuthIndex(identity.authIndex);
   const accountId = normalizeAccountId(identity.accountId);
   if (record.authIndex && record.authIndex !== authIndex) return false;
@@ -75,6 +85,7 @@ export const recordCodexInspectionDisableOwnership = (
     ...(store[normalizedScope] ?? {}),
     [fileName]: {
       fileName,
+      provider: normalizeProvider(identity.provider),
       authIndex: normalizeAuthIndex(identity.authIndex),
       accountId: normalizeAccountId(identity.accountId),
       disabledAtMs: Date.now(),

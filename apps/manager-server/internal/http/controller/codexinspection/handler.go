@@ -116,7 +116,8 @@ func codexInspectionErrorStatus(err error) int {
 	case errors.Is(err, codexsvc.ErrNotConfigured):
 		return http.StatusPreconditionFailed
 	case errors.Is(err, codexsvc.ErrActionIDsRequired),
-		errors.Is(err, codexsvc.ErrNoActionableResults):
+		errors.Is(err, codexsvc.ErrNoActionableResults),
+		errors.Is(err, codexsvc.ErrInvalidActionOverride):
 		return http.StatusBadRequest
 	default:
 		return http.StatusInternalServerError
