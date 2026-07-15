@@ -1137,7 +1137,7 @@ func resolveWindowAwareProbeAction(item account, statusCode int, bodyText string
 		if item.Disabled {
 			return &inspectionDecision{
 				Action:       "keep",
-				ActionReason: "5 小时额度达到阈值，账号已禁用，等待短窗口恢复",
+				ActionReason: fmt.Sprintf("5 小时额度仍达到阈值，%s可用但继续保持禁用", longWindowLabel),
 				UsedPercent:  ptrFloat(longWindowUsedPercent),
 				IsQuota:      true,
 			}
