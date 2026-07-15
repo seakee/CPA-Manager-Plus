@@ -930,7 +930,7 @@ func TestResolveProbeActionUsesMonthlyWindowAsLongQuota(t *testing.T) {
 		decision := resolveProbeAction(disabledItem, http.StatusOK, "", rateLimit, deriveRateLimitUsedPercent(rateLimit), true, threshold, false)
 
 		if decision.Action != "keep" ||
-			decision.ActionReason != "5 小时额度达到阈值，账号已禁用，等待短窗口恢复" ||
+			decision.ActionReason != "5 小时额度仍达到阈值，月额度可用但继续保持禁用" ||
 			decision.UsedPercent == nil ||
 			*decision.UsedPercent != 5 ||
 			!decision.IsQuota {
