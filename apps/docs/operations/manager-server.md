@@ -224,6 +224,17 @@ USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED=false
 
 关闭后需重启 Manager Server，Dashboard 和 Usage Analytics 将始终读取 raw events，已有 rollup 表不会被删除。该运行期开关不接入 UI。
 
+升级旧数据库时，Manager Server 只在启动阶段执行快速 schema 变更；需要扫描历史 `usage_events` 的 cache accounting 修正会在 HTTP 服务开始监听后，以每批 1000 条的方式在后台执行。每批数据更新和 checkpoint 在同一个事务中提交，进程重启后会从最后成功的 event ID 继续，不会重新处理已经提交的批次。
+
+迁移期间：
+
+- 新采集的事件会按新格式直接写入，不进入旧数据迁移目标范围。
+- account history 和 dashboard hourly rollup 暂停追平，避免基于半迁移数据生成错误汇总。
+- 日志输出迁移进度、完成状态或可重试错误。
+- `GET /status` 的 `dataMigration` 字段可查看 `status`、`lastEventId`、`targetEventId` 和 `processedRows`；该接口不返回底层迁移错误文本。
+
+迁移完成后，response metadata backfill 和两个 rollup worker 会自动继续。不要为了缩短迁移时间同时启动第二个 Manager Server 连接同一 SQLite 或消费同一 CPA 队列。
+
 完整的优化原因、实现阶段和 100k benchmark 数据见 [2026-07-10 性能优化报告](./performance-optimization-2026-07-10.md)。
 
 如果 `USAGE_QUOTA_COOLDOWN_ENABLED`、`USAGE_ACCOUNT_ACTIONS_ENABLED` 或 `USAGE_ACCOUNT_ACTIONS_AUTO_DISABLE` 由环境变量设置，面板中的对应开关会显示为环境变量来源并被锁定。要改成面板可编辑，需要移除环境变量并重启 Manager Server。
@@ -233,7 +244,7 @@ USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED=false
 | Endpoint | 用途 |
 |---|---|
 | `GET /health` | 健康检查。 |
-| `GET /status` | 采集器、SQLite、事件计数和错误。 |
+| `GET /status` | 采集器、SQLite、事件计数和后台数据迁移进度。 |
 | `GET /usage-service/info` | Manager Server 模式探测。 |
 | `GET /usage-service/config` | 读取 CPAMP Manager Server 配置。 |
 | `PUT /usage-service/config` | 保存 CPAMP 配置，必要时重启采集器。 |

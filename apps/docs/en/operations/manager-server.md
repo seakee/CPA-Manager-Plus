@@ -226,6 +226,17 @@ USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED=false
 
 Restart Manager Server after changing it. Dashboard and Usage Analytics will always use raw events while disabled, and existing rollup tables are left intact. This runtime switch is not exposed in the UI.
 
+When upgrading an existing database, Manager Server performs only fast schema changes during startup. Cache-accounting corrections that must scan historical `usage_events` begin in the background after the HTTP listener is bound, processing 1,000 rows per batch. Each data update and its checkpoint commit in the same transaction, so a restart resumes at the last successfully committed event ID instead of repeating completed batches.
+
+While the migration is running:
+
+- Newly collected events are written in the new format and are outside the legacy migration target range.
+- Account-history and dashboard-hourly rollup catch-up is paused to avoid building summaries from partially migrated data.
+- Logs report migration start, progress, retryable failures, and completion.
+- `GET /status` exposes `status`, `lastEventId`, `targetEventId`, and `processedRows` under `dataMigration`; low-level migration error text is not returned.
+
+After completion, the response-metadata backfill and both rollup workers continue automatically. Do not start a second Manager Server against the same SQLite database or CPA queue to accelerate the migration.
+
 See the [July 10, 2026 Performance Optimization Report](./performance-optimization-2026-07-10.md) for the causes, delivery stages, and complete 100k benchmark evidence.
 
 When `USAGE_QUOTA_COOLDOWN_ENABLED`, `USAGE_ACCOUNT_ACTIONS_ENABLED`, or `USAGE_ACCOUNT_ACTIONS_AUTO_DISABLE` is set through the environment, the matching panel switch is shown as environment-sourced and locked. Remove the environment variable and restart Manager Server if you want the setting to be editable from the panel.
@@ -235,7 +246,7 @@ When `USAGE_QUOTA_COOLDOWN_ENABLED`, `USAGE_ACCOUNT_ACTIONS_ENABLED`, or `USAGE_
 | Endpoint | Purpose |
 |---|---|
 | `GET /health` | Health check. |
-| `GET /status` | Collector, SQLite, event count, and errors. |
+| `GET /status` | Collector, SQLite, event count, and background data-migration progress. |
 | `GET /usage-service/info` | Manager Server mode detection. |
 | `GET /usage-service/config` | Read CPAMP Manager Server config. |
 | `PUT /usage-service/config` | Save CPAMP config and restart collector if needed. |
