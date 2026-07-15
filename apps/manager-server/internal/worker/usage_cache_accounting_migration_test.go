@@ -30,7 +30,7 @@ func TestUsageCacheAccountingMigrationWorkerRunsBatchesBeforeCompletion(t *testi
 		status = 'discovering', last_event_id = 0, target_event_id = 0,
 		processed_rows = 0, started_at_ms = null, updated_at_ms = 0,
 		finished_at_ms = null, last_error = null
-		where name = 'usage_cache_accounting_v1'`); err != nil {
+		where name = 'usage_cache_accounting_v2'`); err != nil {
 		t.Fatalf("reset migration state: %v", err)
 	}
 

@@ -13,7 +13,7 @@ func TestUsageDataMigrationInitialStateMatchesExistingUsageData(t *testing.T) {
 		t.Fatalf("open empty sqlite: %v", err)
 	}
 	var status string
-	if err := db.QueryRow(`select status from usage_data_migrations where name = 'usage_cache_accounting_v1'`).Scan(&status); err != nil {
+	if err := db.QueryRow(`select status from usage_data_migrations where name = 'usage_cache_accounting_v2'`).Scan(&status); err != nil {
 		t.Fatalf("read empty migration state: %v", err)
 	}
 	if status != "completed" {
@@ -36,7 +36,7 @@ func TestUsageDataMigrationInitialStateMatchesExistingUsageData(t *testing.T) {
 		t.Fatalf("reopen legacy sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	if err := db.QueryRow(`select status from usage_data_migrations where name = 'usage_cache_accounting_v1'`).Scan(&status); err != nil {
+	if err := db.QueryRow(`select status from usage_data_migrations where name = 'usage_cache_accounting_v2'`).Scan(&status); err != nil {
 		t.Fatalf("read legacy migration state: %v", err)
 	}
 	if status != "discovering" {

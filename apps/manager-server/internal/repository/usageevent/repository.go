@@ -87,7 +87,11 @@ func (r *repository) InsertBatch(ctx context.Context, events []model.UsageEvent)
 
 	result := model.InsertResult{}
 	for _, event := range events {
-		accounting := usage.NormalizeCacheAccounting(event.CacheInputMode, event.Provider, event.ExecutorType, event.ResolvedModel, event.InputTokens, event.CachedTokens, event.CacheTokens, event.CacheReadTokens, event.CacheCreationTokens)
+		modelForCache := event.ResolvedModel
+		if modelForCache == "" {
+			modelForCache = event.Model
+		}
+		accounting := usage.NormalizeCacheAccounting(event.CacheInputMode, event.Provider, event.AuthProviderSnapshot, event.ExecutorType, modelForCache, event.InputTokens, event.CachedTokens, event.CacheTokens, event.CacheReadTokens, event.CacheCreationTokens)
 		event.CacheInputMode = accounting.Mode
 		event.NormalizedUncachedInputTokens = accounting.UncachedInputTokens
 		event.NormalizedTotalInputTokens = accounting.TotalInputTokens
@@ -299,7 +303,11 @@ func (r *repository) ListRecent(ctx context.Context, limit int) ([]model.UsageEv
 		event.RequestServiceTier = requestServiceTier.String
 		event.ResponseServiceTier = responseServiceTier.String
 		event.CacheInputMode = cacheInputMode.String
-		accounting := usage.NormalizeCacheAccounting(event.CacheInputMode, event.Provider, event.ExecutorType, event.ResolvedModel, event.InputTokens, event.CachedTokens, event.CacheTokens, event.CacheReadTokens, event.CacheCreationTokens)
+		modelForCache := event.ResolvedModel
+		if modelForCache == "" {
+			modelForCache = event.Model
+		}
+		accounting := usage.NormalizeCacheAccounting(event.CacheInputMode, event.Provider, event.AuthProviderSnapshot, event.ExecutorType, modelForCache, event.InputTokens, event.CachedTokens, event.CacheTokens, event.CacheReadTokens, event.CacheCreationTokens)
 		event.CacheInputMode = accounting.Mode
 		event.NormalizedUncachedInputTokens = accounting.UncachedInputTokens
 		event.NormalizedTotalInputTokens = accounting.TotalInputTokens

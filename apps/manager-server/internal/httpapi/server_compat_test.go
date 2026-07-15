@@ -368,7 +368,7 @@ func TestServerCompatStatusAuthAndCounts(t *testing.T) {
 	}
 	if _, err := rawDB.Exec(`update usage_data_migrations set
 		status = 'failed', last_error = 'secret migration detail'
-		where name = 'usage_cache_accounting_v1'`); err != nil {
+		where name = 'usage_cache_accounting_v2'`); err != nil {
 		_ = rawDB.Close()
 		t.Fatalf("set failed migration state: %v", err)
 	}
@@ -385,7 +385,7 @@ func TestServerCompatStatusAuthAndCounts(t *testing.T) {
 		!strings.Contains(statusRR.Body.String(), `"deadLetters":1`) ||
 		!strings.Contains(statusRR.Body.String(), `"collector"`) ||
 		!strings.Contains(statusRR.Body.String(), `"dataMigration"`) ||
-		!strings.Contains(statusRR.Body.String(), `"name":"usage_cache_accounting_v1"`) ||
+		!strings.Contains(statusRR.Body.String(), `"name":"usage_cache_accounting_v2"`) ||
 		!strings.Contains(statusRR.Body.String(), `"status":"failed"`) ||
 		strings.Contains(statusRR.Body.String(), `"lastError"`) ||
 		strings.Contains(statusRR.Body.String(), "secret migration detail") {

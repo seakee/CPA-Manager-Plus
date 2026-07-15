@@ -8,7 +8,10 @@ import (
 	"time"
 )
 
-const UsageCacheAccountingMigrationName = "usage_cache_accounting_v1"
+// UsageCacheAccountingMigrationName identifies the resumable backfill that
+// normalizes cache accounting with field-priority semantics (executor first).
+// v2 reclassifies rows previously inferred by the concatenated-identity rules.
+const UsageCacheAccountingMigrationName = "usage_cache_accounting_v2"
 
 const (
 	StatusDiscovering = "discovering"
@@ -18,12 +21,67 @@ const (
 	StatusFailed      = "failed"
 )
 
-const incompleteUsageCacheAccountingPredicate = `(cache_input_mode is null
+// inferCacheInputModeSQL mirrors usage.InferCacheInputMode field priority:
+// executor_type → provider/auth_provider_snapshot → resolved_model/model → fine-grained fallback.
+// Explicit cache_input_mode is handled by callers (only fill null / repair misclassified).
+func inferCacheInputModeSQL() string {
+	executor := `lower(coalesce(executor_type, ''))`
+	provider := `lower(coalesce(provider, '') || ' ' || coalesce(auth_provider_snapshot, ''))`
+	model := `lower(coalesce(resolved_model, '') || ' ' || coalesce(model, ''))`
+	return `case
+		when ` + executor + ` like '%claude%' then 'separate_from_input'
+		when ` + executor + ` like '%openaicompat%'
+			or ` + executor + ` like '%openai_compat%'
+			or ` + executor + ` like '%openai-compat%'
+			or ` + executor + ` like '%openai%'
+			or ` + executor + ` like '%codex%'
+			or ` + executor + ` like '%gemini%'
+			or ` + executor + ` like '%aistudio%'
+			or ` + executor + ` like '%ai_studio%'
+			or ` + executor + ` like '%antigravity%'
+			or ` + executor + ` like '%xai%'
+			or ` + executor + ` like '%kimi%'
+			then 'included_in_input'
+		when ` + provider + ` like '%anthropic%'
+			or ` + provider + ` like '%claude%'
+			then 'separate_from_input'
+		when ` + provider + ` like '%openai%'
+			or ` + provider + ` like '%codex%'
+			or ` + provider + ` like '%gemini%'
+			or ` + provider + ` like '%antigravity%'
+			or ` + provider + ` like '%interaction%'
+			or ` + provider + ` like '%xai%'
+			or ` + provider + ` like '%kimi%'
+			or ` + provider + ` like '%moonshot%'
+			then 'included_in_input'
+		when ` + model + ` like '%anthropic%'
+			or ` + model + ` like '%claude%'
+			then 'separate_from_input'
+		when ` + model + ` like '%gpt-%'
+			or ` + model + ` like '%openai%'
+			or ` + model + ` like '%codex%'
+			or ` + model + ` like '%gemini%'
+			or ` + model + ` like '%antigravity%'
+			or ` + model + ` like '%grok%'
+			or ` + model + ` like '%xai%'
+			or ` + model + ` like '%kimi%'
+			or ` + model + ` like '%moonshot%'
+			then 'included_in_input'
+		when coalesce(cache_read_tokens, 0) > 0 or coalesce(cache_creation_tokens, 0) > 0 then 'separate_from_input'
+		else 'included_in_input'
+	end`
+}
+
+func incompleteUsageCacheAccountingPredicate() string {
+	infer := inferCacheInputModeSQL()
+	return `(cache_input_mode is null
 	or trim(cache_input_mode) = ''
 	or normalized_uncached_input_tokens is null
 	or normalized_total_input_tokens is null
 	or normalized_cache_read_tokens is null
-	or normalized_cache_creation_tokens is null)`
+	or normalized_cache_creation_tokens is null
+	or (coalesce(cache_input_mode, '') = 'separate_from_input' and (` + infer + `) = 'included_in_input'))`
+}
 
 type State struct {
 	Name          string `json:"name"`
@@ -136,7 +194,7 @@ func (r *repository) DiscoverUsageCacheAccounting(ctx context.Context) (State, e
 	var firstIncompleteID int64
 	err = tx.QueryRowContext(ctx, `select id
 	from usage_events
-	where `+incompleteUsageCacheAccountingPredicate+`
+	where `+incompleteUsageCacheAccountingPredicate()+`
 	order by id
 	limit 1`).Scan(&firstIncompleteID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -353,26 +411,23 @@ func completeInTx(ctx context.Context, tx *sql.Tx, state State) (State, error) {
 }
 
 func updateCacheAccountingInRange(ctx context.Context, tx *sql.Tx, firstEventID, lastEventID int64) error {
+	infer := inferCacheInputModeSQL()
+	// Fill missing modes and repair only rows that the new rules classify as included
+	// (do not rewrite legitimate separate rows such as ClaudeExecutor + Grok alias).
 	if _, err := tx.ExecContext(ctx, `update usage_events set
 		cache_input_mode = case
-			when lower(coalesce(provider, '') || ' ' || coalesce(executor_type, '') || ' ' || coalesce(resolved_model, '') || ' ' || coalesce(model, '')) like '%anthropic%'
-				or lower(coalesce(provider, '') || ' ' || coalesce(executor_type, '') || ' ' || coalesce(resolved_model, '') || ' ' || coalesce(model, '')) like '%claude%'
-				then 'separate_from_input'
-			when lower(coalesce(provider, '') || ' ' || coalesce(executor_type, '') || ' ' || coalesce(resolved_model, '') || ' ' || coalesce(model, '')) like '%openai%'
-				or lower(coalesce(provider, '') || ' ' || coalesce(executor_type, '') || ' ' || coalesce(resolved_model, '') || ' ' || coalesce(model, '')) like '%codex%'
-				or lower(coalesce(provider, '') || ' ' || coalesce(executor_type, '') || ' ' || coalesce(resolved_model, '') || ' ' || coalesce(model, '')) like '%gemini%'
-				or lower(coalesce(provider, '') || ' ' || coalesce(executor_type, '') || ' ' || coalesce(resolved_model, '') || ' ' || coalesce(model, '')) like '%antigravity%'
-				or lower(coalesce(provider, '') || ' ' || coalesce(executor_type, '') || ' ' || coalesce(resolved_model, '') || ' ' || coalesce(model, '')) like '%gpt-%'
-				then 'included_in_input'
-			when coalesce(cache_read_tokens, 0) > 0 or coalesce(cache_creation_tokens, 0) > 0 then 'separate_from_input'
-			else 'included_in_input'
+			when cache_input_mode is null or trim(cache_input_mode) = '' then (`+infer+`)
+			when coalesce(cache_input_mode, '') = 'separate_from_input' and (`+infer+`) = 'included_in_input' then 'included_in_input'
+			else cache_input_mode
 		end
 	where id >= ? and id <= ?
-		and (cache_input_mode is null or trim(cache_input_mode) = '')`, firstEventID, lastEventID); err != nil {
+		and (`+incompleteUsageCacheAccountingPredicate()+`)`, firstEventID, lastEventID); err != nil {
 		return err
 	}
 	compatCache := `max(max(cached_tokens, cache_tokens) - max(cache_read_tokens, 0) - max(cache_creation_tokens, 0), 0)`
 	normalizedRead := compatCache + ` + max(cache_read_tokens, 0)`
+	// Recompute normalized buckets for the whole batch range so mode repairs above
+	// also refresh previously double-counted totals (idempotent).
 	_, err := tx.ExecContext(ctx, `update usage_events set
 		normalized_cache_read_tokens = `+normalizedRead+`,
 		normalized_cache_creation_tokens = max(cache_creation_tokens, 0),
@@ -384,10 +439,6 @@ func updateCacheAccountingInRange(ctx context.Context, tx *sql.Tx, firstEventID,
 			when cache_input_mode = 'separate_from_input' then max(input_tokens, 0) + (`+normalizedRead+`) + max(cache_creation_tokens, 0)
 			else max(input_tokens, 0)
 		end
-	where id >= ? and id <= ?
-		and (normalized_uncached_input_tokens is null
-			or normalized_total_input_tokens is null
-			or normalized_cache_read_tokens is null
-			or normalized_cache_creation_tokens is null)`, firstEventID, lastEventID)
+	where id >= ? and id <= ?`, firstEventID, lastEventID)
 	return err
 }

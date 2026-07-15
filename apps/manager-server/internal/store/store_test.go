@@ -24,7 +24,7 @@ func TestStorePausesRollupsUntilUsageCacheAccountingMigrationCompletes(t *testin
 	}}); err != nil {
 		t.Fatalf("insert event: %v", err)
 	}
-	if _, err := db.db.Exec(`update usage_data_migrations set status = 'running' where name = 'usage_cache_accounting_v1'`); err != nil {
+	if _, err := db.db.Exec(`update usage_data_migrations set status = 'running' where name = 'usage_cache_accounting_v2'`); err != nil {
 		t.Fatalf("mark migration running: %v", err)
 	}
 
@@ -40,7 +40,7 @@ func TestStorePausesRollupsUntilUsageCacheAccountingMigrationCompletes(t *testin
 		t.Fatalf("rollups were not paused: account=%#v dashboard=%#v", accountResult, dashboardResult)
 	}
 
-	if _, err := db.db.Exec(`update usage_data_migrations set status = 'completed' where name = 'usage_cache_accounting_v1'`); err != nil {
+	if _, err := db.db.Exec(`update usage_data_migrations set status = 'completed' where name = 'usage_cache_accounting_v2'`); err != nil {
 		t.Fatalf("mark migration completed: %v", err)
 	}
 	accountResult, err = db.CatchUpAccountHistoryRollups(context.Background(), 100, 1_778_000_001_000)

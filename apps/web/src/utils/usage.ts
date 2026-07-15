@@ -366,31 +366,111 @@ export const compatibleCachedTokens = (
   return Math.max(cached - fineGrained, 0);
 };
 
-const inferCacheInputMode = (
-  mode: unknown,
-  identity: string,
-  cacheReadTokens: number,
-  cacheCreationTokens: number
-): CacheInputMode => {
-  const normalizedMode = String(mode ?? '')
+const containsAny = (value: string, markers: string[]): boolean =>
+  markers.some((marker) => value.includes(marker));
+
+const classifyExecutorCacheInputMode = (executorType: string): CacheInputMode | null => {
+  const executor = executorType.trim().toLowerCase();
+  if (!executor) return null;
+  if (executor.includes('claude')) return 'separate_from_input';
+  if (
+    containsAny(executor, [
+      'openaicompat',
+      'openai_compat',
+      'openai-compat',
+      'openai',
+      'codex',
+      'gemini',
+      'aistudio',
+      'ai_studio',
+      'ai-studio',
+      'antigravity',
+      'xai',
+      'kimi',
+    ])
+  ) {
+    return 'included_in_input';
+  }
+  return null;
+};
+
+const classifyProviderCacheInputMode = (
+  provider: string,
+  authProviderSnapshot: string
+): CacheInputMode | null => {
+  const identity = `${provider} ${authProviderSnapshot}`.trim().toLowerCase();
+  if (!identity) return null;
+  if (identity.includes('anthropic') || identity.includes('claude')) return 'separate_from_input';
+  if (
+    containsAny(identity, [
+      'openai',
+      'codex',
+      'gemini',
+      'antigravity',
+      'interaction',
+      'xai',
+      'kimi',
+      'moonshot',
+    ])
+  ) {
+    return 'included_in_input';
+  }
+  return null;
+};
+
+const classifyModelCacheInputMode = (modelName: string): CacheInputMode | null => {
+  const model = modelName.trim().toLowerCase();
+  if (!model) return null;
+  if (model.includes('anthropic') || model.includes('claude')) return 'separate_from_input';
+  if (
+    containsAny(model, [
+      'gpt-',
+      'openai',
+      'codex',
+      'gemini',
+      'antigravity',
+      'grok',
+      'xai',
+      'kimi',
+      'moonshot',
+    ])
+  ) {
+    return 'included_in_input';
+  }
+  return null;
+};
+
+// Field priority matches manager-server usage.InferCacheInputMode:
+// explicit mode → executor_type → provider/snapshot → model → fine-grained fallback.
+export const inferCacheInputMode = (input: {
+  mode?: unknown;
+  executorType?: unknown;
+  provider?: unknown;
+  authProviderSnapshot?: unknown;
+  modelName?: unknown;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+}): CacheInputMode => {
+  const normalizedMode = String(input.mode ?? '')
     .trim()
     .toLowerCase();
   if (normalizedMode === 'separate_from_input') return 'separate_from_input';
   if (normalizedMode === 'included_in_input') return 'included_in_input';
-  const normalizedIdentity = identity.toLowerCase();
-  if (normalizedIdentity.includes('anthropic') || normalizedIdentity.includes('claude')) {
-    return 'separate_from_input';
-  }
-  if (
-    normalizedIdentity.includes('openai') ||
-    normalizedIdentity.includes('codex') ||
-    normalizedIdentity.includes('gemini') ||
-    normalizedIdentity.includes('antigravity') ||
-    normalizedIdentity.includes('interaction') ||
-    normalizedIdentity.includes('gpt-')
-  ) {
-    return 'included_in_input';
-  }
+
+  const executorMode = classifyExecutorCacheInputMode(String(input.executorType ?? ''));
+  if (executorMode) return executorMode;
+
+  const providerMode = classifyProviderCacheInputMode(
+    String(input.provider ?? ''),
+    String(input.authProviderSnapshot ?? '')
+  );
+  if (providerMode) return providerMode;
+
+  const modelMode = classifyModelCacheInputMode(String(input.modelName ?? ''));
+  if (modelMode) return modelMode;
+
+  const cacheReadTokens = Math.max(toFiniteNumber(input.cacheReadTokens), 0);
+  const cacheCreationTokens = Math.max(toFiniteNumber(input.cacheCreationTokens), 0);
   return cacheReadTokens > 0 || cacheCreationTokens > 0
     ? 'separate_from_input'
     : 'included_in_input';
@@ -398,7 +478,10 @@ const inferCacheInputMode = (
 
 const normalizeCacheAccounting = (input: {
   mode?: unknown;
-  identity?: string;
+  executorType?: unknown;
+  provider?: unknown;
+  authProviderSnapshot?: unknown;
+  modelName?: unknown;
   inputTokens: unknown;
   cachedTokens: unknown;
   cacheTokens: unknown;
@@ -415,7 +498,15 @@ const normalizeCacheAccounting = (input: {
     creation
   );
   const read = legacyRead + rawRead;
-  const mode = inferCacheInputMode(input.mode, input.identity ?? '', rawRead, creation);
+  const mode = inferCacheInputMode({
+    mode: input.mode,
+    executorType: input.executorType,
+    provider: input.provider,
+    authProviderSnapshot: input.authProviderSnapshot,
+    modelName: input.modelName,
+    cacheReadTokens: rawRead,
+    cacheCreationTokens: creation,
+  });
   return {
     mode,
     legacyRead,
@@ -622,15 +713,10 @@ const readTokens = (detail: Record<string, unknown>, modelName: string): UsageTo
   const cacheCreationTokens = readFirstTokenNumber(tokensRaw, CACHE_CREATION_TOKEN_KEYS);
   const accounting = normalizeCacheAccounting({
     mode: detail.cache_input_mode ?? detail.cacheInputMode,
-    identity: [
-      modelName,
-      detail.executor_type,
-      detail.executorType,
-      detail.auth_provider_snapshot,
-      detail.authProviderSnapshot,
-    ]
-      .filter(Boolean)
-      .join(' '),
+    executorType: detail.executor_type ?? detail.executorType,
+    provider: detail.auth_provider_snapshot ?? detail.authProviderSnapshot,
+    authProviderSnapshot: detail.auth_provider_snapshot ?? detail.authProviderSnapshot,
+    modelName,
     inputTokens: tokensRaw.input_tokens ?? tokensRaw.inputTokens,
     cachedTokens: tokensRaw.cached_tokens ?? tokensRaw.cachedTokens,
     cacheTokens: tokensRaw.cache_tokens ?? tokensRaw.cacheTokens,

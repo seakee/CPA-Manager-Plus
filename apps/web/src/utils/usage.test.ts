@@ -284,6 +284,104 @@ describe('usage detail collection', () => {
     expect(detail.tokens.cache_read_tokens).toBe(23);
     expect(detail.tokens.total_tokens).toBe(154);
   });
+
+  it('treats XAIExecutor Grok cache as included in input', () => {
+    const usageData = {
+      apis: {
+        'POST /v1/chat/completions': {
+          models: {
+            'grok-4.5': {
+              details: [
+                {
+                  timestamp: '2026-07-13T11:02:20Z',
+                  source: 'user@example.com',
+                  executor_type: 'XAIExecutor',
+                  auth_provider_snapshot: 'xai',
+                  tokens: {
+                    input_tokens: 130482,
+                    output_tokens: 70,
+                    cached_tokens: 125824,
+                    cache_read_tokens: 125824,
+                    total_tokens: 130552,
+                  },
+                  failed: false,
+                },
+              ],
+            },
+          },
+        },
+      },
+    };
+
+    const detail = collectUsageDetailsWithEndpoint(usageData)[0];
+    expect(detail.tokens.input_tokens).toBe(130482);
+    expect(detail.tokens.cache_read_tokens).toBe(125824);
+    expect(detail.tokens.total_tokens).toBe(130552);
+  });
+
+  it('keeps OpenAICompatExecutor + Claude model as included', () => {
+    const usageData = {
+      apis: {
+        'POST /v1/chat/completions': {
+          models: {
+            'claude-sonnet-4': {
+              details: [
+                {
+                  timestamp: '2026-07-13T11:02:20Z',
+                  source: 'user@example.com',
+                  executor_type: 'OpenAICompatExecutor',
+                  tokens: {
+                    input_tokens: 1000,
+                    output_tokens: 10,
+                    cached_tokens: 400,
+                    cache_read_tokens: 400,
+                    total_tokens: 1010,
+                  },
+                  failed: false,
+                },
+              ],
+            },
+          },
+        },
+      },
+    };
+
+    const detail = collectUsageDetailsWithEndpoint(usageData)[0];
+    expect(detail.tokens.input_tokens).toBe(1000);
+    expect(detail.tokens.total_tokens).toBe(1010);
+  });
+
+  it('keeps ClaudeExecutor + Grok alias as separate', () => {
+    const usageData = {
+      apis: {
+        'POST /v1/messages': {
+          models: {
+            'grok-4.5': {
+              details: [
+                {
+                  timestamp: '2026-07-13T11:02:20Z',
+                  source: 'user@example.com',
+                  executor_type: 'ClaudeExecutor',
+                  tokens: {
+                    input_tokens: 100,
+                    output_tokens: 20,
+                    cache_read_tokens: 200,
+                    total_tokens: 320,
+                  },
+                  failed: false,
+                },
+              ],
+            },
+          },
+        },
+      },
+    };
+
+    const detail = collectUsageDetailsWithEndpoint(usageData)[0];
+    // separate: normalized input = 100 + 200
+    expect(detail.tokens.input_tokens).toBe(300);
+    expect(detail.tokens.total_tokens).toBe(320);
+  });
 });
 
 describe('usage token helpers', () => {

@@ -157,6 +157,12 @@ func Migrate(db *sql.DB) error {
 		) select 'usage_cache_accounting_v1',
 			case when exists (select 1 from usage_events limit 1) then 'discovering' else 'completed' end,
 			0, 0, 0, 0`,
+		// v2 reclassifies cache modes with executor-first priority (xAI/Kimi/OpenAI-compat).
+		`insert or ignore into usage_data_migrations (
+			name, status, last_event_id, target_event_id, processed_rows, updated_at_ms
+		) select 'usage_cache_accounting_v2',
+			case when exists (select 1 from usage_events limit 1) then 'discovering' else 'completed' end,
+			0, 0, 0, 0`,
 		`create table if not exists dead_letter_events (
 			id integer primary key autoincrement,
 			payload text not null,

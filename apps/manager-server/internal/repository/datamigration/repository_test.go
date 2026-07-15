@@ -209,6 +209,79 @@ func TestUsageCacheAccountingDiscoveryFailureRetriesDiscovery(t *testing.T) {
 	assertCount(t, db, "usage_dashboard_hourly_rollups", 0)
 }
 
+func TestUsageCacheAccountingRepairsXAISeparateWithoutTouchingClaudeExecutorAlias(t *testing.T) {
+	db := openMigrationTestDB(t)
+	// Misclassified by legacy concatenated-identity rules after CPA started filling cache_read.
+	if _, err := db.Exec(`insert into usage_events (
+		event_hash, timestamp_ms, timestamp, provider, executor_type, model, cache_input_mode,
+		input_tokens, cached_tokens, cache_read_tokens,
+		normalized_uncached_input_tokens, normalized_total_input_tokens,
+		normalized_cache_read_tokens, normalized_cache_creation_tokens, created_at_ms
+	) values (
+		'xai-misclassified', 1, '1', 'xai', 'XAIExecutor', 'grok-4.5', 'separate_from_input',
+		130482, 125824, 125824,
+		130482, 256306,
+		125824, 0, 1
+	)`); err != nil {
+		t.Fatalf("insert xai misclassified: %v", err)
+	}
+	// Legitimate separate: ClaudeExecutor wins over Grok model alias.
+	if _, err := db.Exec(`insert into usage_events (
+		event_hash, timestamp_ms, timestamp, provider, executor_type, model, cache_input_mode,
+		input_tokens, cache_read_tokens,
+		normalized_uncached_input_tokens, normalized_total_input_tokens,
+		normalized_cache_read_tokens, normalized_cache_creation_tokens, created_at_ms
+	) values (
+		'claude-exec-grok-alias', 2, '2', 'anthropic', 'ClaudeExecutor', 'grok-4.5', 'separate_from_input',
+		100, 200,
+		100, 300,
+		200, 0, 2
+	)`); err != nil {
+		t.Fatalf("insert claude executor alias: %v", err)
+	}
+	markMigrationDiscovering(t, db)
+	insertRollupFixtures(t, db)
+	repo := New(db)
+
+	state, err := repo.DiscoverUsageCacheAccounting(context.Background())
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	if state.Status != StatusPending || state.TargetEventID != 2 {
+		t.Fatalf("discovered state = %#v", state)
+	}
+	assertCount(t, db, "usage_account_model_rollups", 0)
+
+	result, err := repo.RunUsageCacheAccountingBatch(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("batch: %v", err)
+	}
+	if !result.Completed {
+		t.Fatalf("batch incomplete: %#v", result)
+	}
+
+	assertAccounting(t, db, "xai-misclassified", "included_in_input", 4658, 130482, 125824, 0)
+	assertAccounting(t, db, "claude-exec-grok-alias", "separate_from_input", 100, 300, 200, 0)
+
+	// Second discover is a no-op: no incomplete rows, no rollup wipe.
+	insertRollupFixtures(t, db)
+	if _, err := db.Exec(`update usage_data_migrations set status = 'discovering',
+		last_event_id = 0, target_event_id = 0, processed_rows = 0,
+		started_at_ms = null, finished_at_ms = null, last_error = null
+	where name = ?`, UsageCacheAccountingMigrationName); err != nil {
+		t.Fatalf("reset discovering: %v", err)
+	}
+	second, err := repo.DiscoverUsageCacheAccounting(context.Background())
+	if err != nil {
+		t.Fatalf("second discover: %v", err)
+	}
+	if second.Status != StatusCompleted {
+		t.Fatalf("second discover status = %#v, want completed", second)
+	}
+	assertCount(t, db, "usage_account_model_rollups", 1)
+	assertCount(t, db, "usage_dashboard_hourly_rollups", 1)
+}
+
 func TestUsageCacheAccountingRejectsUnknownState(t *testing.T) {
 	db := openMigrationTestDB(t)
 	if _, err := db.Exec(`update usage_data_migrations set status = 'future-state'

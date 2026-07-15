@@ -168,8 +168,17 @@ type CacheAccounting struct {
 	CacheCreationTokens int64
 }
 
-func NormalizeCacheAccounting(mode, provider, executorType, modelName string, inputTokens, cachedTokens, cacheTokens, cacheReadTokens, cacheCreationTokens int64) CacheAccounting {
-	mode = inferCacheInputMode(mode, provider, executorType, modelName, cacheReadTokens, cacheCreationTokens)
+// NormalizeCacheAccounting resolves provider cache semantics and returns
+// normalized input buckets for aggregation, pricing, and hit-rate.
+//
+// Mode inference priority (executor selects the CPA usage parser):
+//  1. explicit cache_input_mode
+//  2. executor_type
+//  3. provider / auth_provider_snapshot
+//  4. resolved model / model
+//  5. legacy fallback from fine-grained cache fields
+func NormalizeCacheAccounting(mode, provider, authProviderSnapshot, executorType, modelName string, inputTokens, cachedTokens, cacheTokens, cacheReadTokens, cacheCreationTokens int64) CacheAccounting {
+	mode = InferCacheInputMode(mode, executorType, provider, authProviderSnapshot, modelName, cacheReadTokens, cacheCreationTokens)
 	input := maxInt64(inputTokens, 0)
 	cacheRead := CompatibleCachedTokens(cachedTokens, cacheTokens, cacheReadTokens, cacheCreationTokens) + maxInt64(cacheReadTokens, 0)
 	cacheCreation := maxInt64(cacheCreationTokens, 0)
@@ -188,24 +197,109 @@ func NormalizeCacheAccounting(mode, provider, executorType, modelName string, in
 	return accounting
 }
 
-func inferCacheInputMode(mode, provider, executorType, modelName string, cacheReadTokens, cacheCreationTokens int64) string {
+// InferCacheInputMode classifies whether fine-grained cache tokens are already
+// inside input_tokens (OpenAI-style parsers) or reported outside it (Claude).
+func InferCacheInputMode(mode, executorType, provider, authProviderSnapshot, modelName string, cacheReadTokens, cacheCreationTokens int64) string {
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	if mode == CacheInputModeIncluded || mode == CacheInputModeSeparate {
 		return mode
 	}
-	identity := strings.ToLower(strings.Join([]string{provider, executorType, modelName}, " "))
-	if strings.Contains(identity, "anthropic") || strings.Contains(identity, "claude") {
-		return CacheInputModeSeparate
+	if classified, ok := classifyExecutorCacheInputMode(executorType); ok {
+		return classified
 	}
-	if strings.Contains(identity, "openai") || strings.Contains(identity, "codex") ||
-		strings.Contains(identity, "gemini") || strings.Contains(identity, "antigravity") ||
-		strings.Contains(identity, "interaction") || strings.Contains(identity, "gpt-") {
-		return CacheInputModeIncluded
+	if classified, ok := classifyProviderCacheInputMode(provider, authProviderSnapshot); ok {
+		return classified
+	}
+	if classified, ok := classifyModelCacheInputMode(modelName); ok {
+		return classified
 	}
 	if cacheReadTokens > 0 || cacheCreationTokens > 0 {
 		return CacheInputModeSeparate
 	}
 	return CacheInputModeIncluded
+}
+
+func classifyExecutorCacheInputMode(executorType string) (string, bool) {
+	executor := strings.ToLower(strings.TrimSpace(executorType))
+	if executor == "" {
+		return "", false
+	}
+	// ClaudeExecutor uses ParseClaudeUsage: cache tokens are outside input_tokens.
+	if strings.Contains(executor, "claude") {
+		return CacheInputModeSeparate, true
+	}
+	// OpenAI-compatible parsers mirror details.cached_tokens into cache_read_tokens
+	// while input_tokens already includes the cached portion.
+	for _, marker := range []string{
+		"openaicompat",
+		"openai_compat",
+		"openai-compat",
+		"openai",
+		"codex",
+		"gemini",
+		"aistudio",
+		"ai_studio",
+		"ai-studio",
+		"antigravity",
+		"xai",
+		"kimi",
+	} {
+		if strings.Contains(executor, marker) {
+			return CacheInputModeIncluded, true
+		}
+	}
+	return "", false
+}
+
+func classifyProviderCacheInputMode(provider, authProviderSnapshot string) (string, bool) {
+	identity := strings.ToLower(strings.TrimSpace(provider + " " + authProviderSnapshot))
+	if identity == "" {
+		return "", false
+	}
+	if strings.Contains(identity, "anthropic") || strings.Contains(identity, "claude") {
+		return CacheInputModeSeparate, true
+	}
+	for _, marker := range []string{
+		"openai",
+		"codex",
+		"gemini",
+		"antigravity",
+		"interaction",
+		"xai",
+		"kimi",
+		"moonshot",
+	} {
+		if strings.Contains(identity, marker) {
+			return CacheInputModeIncluded, true
+		}
+	}
+	return "", false
+}
+
+func classifyModelCacheInputMode(modelName string) (string, bool) {
+	model := strings.ToLower(strings.TrimSpace(modelName))
+	if model == "" {
+		return "", false
+	}
+	if strings.Contains(model, "anthropic") || strings.Contains(model, "claude") {
+		return CacheInputModeSeparate, true
+	}
+	for _, marker := range []string{
+		"gpt-",
+		"openai",
+		"codex",
+		"gemini",
+		"antigravity",
+		"grok",
+		"xai",
+		"kimi",
+		"moonshot",
+	} {
+		if strings.Contains(model, marker) {
+			return CacheInputModeIncluded, true
+		}
+	}
+	return "", false
 }
 
 func IsLongContextInput(inputTokens int64) bool {
@@ -340,7 +434,12 @@ func NormalizeRaw(raw []byte) (Event, error) {
 	if cacheInputMode == "" {
 		cacheInputMode = readString(record, "cache_input_mode", "cacheInputMode")
 	}
-	cacheAccounting := NormalizeCacheAccounting(cacheInputMode, provider, executorType, resolvedModel, inputTokens, cachedTokens, cacheTokens, cacheReadTokens, cacheCreationTokens)
+	authProviderSnapshot := readString(record, "auth_provider_snapshot", "authProviderSnapshot")
+	modelForCache := resolvedModel
+	if modelForCache == "" {
+		modelForCache = model
+	}
+	cacheAccounting := NormalizeCacheAccounting(cacheInputMode, provider, authProviderSnapshot, executorType, modelForCache, inputTokens, cachedTokens, cacheTokens, cacheReadTokens, cacheCreationTokens)
 	if totalTokens <= 0 {
 		totalTokens = cacheAccounting.TotalInputTokens + maxInt64(outputTokens, 0) + maxInt64(reasoningTokens, 0)
 	}
@@ -365,7 +464,7 @@ func NormalizeRaw(raw []byte) (Event, error) {
 		AccountSnapshot:               readString(record, "account_snapshot", "accountSnapshot"),
 		AuthLabelSnapshot:             readString(record, "auth_label_snapshot", "authLabelSnapshot"),
 		AuthFileSnapshot:              readString(record, "auth_file_snapshot", "authFileSnapshot"),
-		AuthProviderSnapshot:          readString(record, "auth_provider_snapshot", "authProviderSnapshot"),
+		AuthProviderSnapshot:          authProviderSnapshot,
 		AuthProjectIDSnapshot:         readString(record, "auth_project_id_snapshot", "authProjectIdSnapshot", "project_id", "projectId"),
 		AuthSnapshotAtMS:              readInt(record, "auth_snapshot_at_ms", "authSnapshotAtMs"),
 		ReasoningEffort:               readString(record, "reasoning_effort", "reasoningEffort"),
