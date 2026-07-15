@@ -8,6 +8,54 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
 
+func TestStorePausesRollupsUntilUsageCacheAccountingMigrationCompletes(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if _, err := db.InsertEvents(context.Background(), []usage.Event{{
+		EventHash:   "rollup-event",
+		TimestampMS: 1_778_000_000_000,
+		Timestamp:   "2026-05-06T00:00:00Z",
+		Model:       "gpt-test",
+		CreatedAtMS: 1_778_000_000_100,
+	}}); err != nil {
+		t.Fatalf("insert event: %v", err)
+	}
+	if _, err := db.db.Exec(`update usage_data_migrations set status = 'running' where name = 'usage_cache_accounting_v1'`); err != nil {
+		t.Fatalf("mark migration running: %v", err)
+	}
+
+	accountResult, err := db.CatchUpAccountHistoryRollups(context.Background(), 100, 1_778_000_001_000)
+	if err != nil {
+		t.Fatalf("account rollup while migrating: %v", err)
+	}
+	dashboardResult, err := db.CatchUpDashboardHourlyRollups(context.Background(), 100, 1_778_000_001_000)
+	if err != nil {
+		t.Fatalf("dashboard rollup while migrating: %v", err)
+	}
+	if !accountResult.Pending || accountResult.Processed != 0 || !dashboardResult.Pending || dashboardResult.Processed != 0 {
+		t.Fatalf("rollups were not paused: account=%#v dashboard=%#v", accountResult, dashboardResult)
+	}
+
+	if _, err := db.db.Exec(`update usage_data_migrations set status = 'completed' where name = 'usage_cache_accounting_v1'`); err != nil {
+		t.Fatalf("mark migration completed: %v", err)
+	}
+	accountResult, err = db.CatchUpAccountHistoryRollups(context.Background(), 100, 1_778_000_001_000)
+	if err != nil {
+		t.Fatalf("account rollup after migration: %v", err)
+	}
+	dashboardResult, err = db.CatchUpDashboardHourlyRollups(context.Background(), 100, 1_778_000_001_000)
+	if err != nil {
+		t.Fatalf("dashboard rollup after migration: %v", err)
+	}
+	if accountResult.Processed != 1 || dashboardResult.Processed != 1 {
+		t.Fatalf("rollups did not resume: account=%#v dashboard=%#v", accountResult, dashboardResult)
+	}
+}
+
 func TestStorePersistsAccountSnapshot(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "usage.sqlite"))
 	if err != nil {

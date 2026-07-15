@@ -80,7 +80,6 @@ func runServer() {
 	collectorWorker := worker.NewCollectorWorker(cfg, db, collectorService)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	go runUsageResponseMetadataBackfill(ctx, db)
 
 	serverApp := httpapi.New(cfg, db, manager)
 	automationSettingsService := serverApp.AppContext().AccountProcessingPolicyService
@@ -140,12 +139,25 @@ func runServer() {
 		}()
 	}
 
+	listener, err := net.Listen("tcp", cfg.HTTPAddr)
+	if err != nil {
+		log.Fatalf("http listen: %v", err)
+	}
 	go func() {
-		log.Printf("cpa-manager-plus listening on %s", cfg.HTTPAddr)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Printf("cpa-manager-plus listening on %s", listener.Addr())
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("http server: %v", err)
 		}
 	}()
+
+	usageCacheAccountingMigrationWorker := worker.NewUsageCacheAccountingMigrationWorker(db, func() {
+		go runUsageResponseMetadataBackfill(ctx, db)
+		accountHistoryRollupWorker.Wake()
+		if dashboardHourlyRollupWorker != nil {
+			dashboardHourlyRollupWorker.Wake()
+		}
+	})
+	usageCacheAccountingMigrationWorker.Start(ctx)
 
 	<-ctx.Done()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

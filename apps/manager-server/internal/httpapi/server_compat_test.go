@@ -15,6 +15,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
+	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/testutil"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
@@ -352,13 +353,27 @@ func TestServerCompatStatusAuthAndCounts(t *testing.T) {
 
 	cpa := testutil.NewCPAMock(t)
 	setup := &store.Setup{CPAUpstreamURL: cpa.URL(), ManagementKey: "management-key", Queue: "usage", PopSide: "right"}
-	configuredHandler, db := newCompatHandler(t, testutil.NewConfig(t), setup)
+	configuredCfg := testutil.NewConfig(t)
+	configuredHandler, db := newCompatHandler(t, configuredCfg, setup)
 	if err := db.AddDeadLetter(context.Background(), `{"bad":true}`, errors.New("parse failed")); err != nil {
 		t.Fatalf("add dead letter: %v", err)
 	}
 	_, err := db.InsertEvents(context.Background(), []usage.Event{compatEvent("status-event", 1)})
 	if err != nil {
 		t.Fatalf("insert event: %v", err)
+	}
+	rawDB, err := sqliterepo.Open(configuredCfg.DBPath)
+	if err != nil {
+		t.Fatalf("open migration state database: %v", err)
+	}
+	if _, err := rawDB.Exec(`update usage_data_migrations set
+		status = 'failed', last_error = 'secret migration detail'
+		where name = 'usage_cache_accounting_v1'`); err != nil {
+		_ = rawDB.Close()
+		t.Fatalf("set failed migration state: %v", err)
+	}
+	if err := rawDB.Close(); err != nil {
+		t.Fatalf("close migration state database: %v", err)
 	}
 
 	unauthorizedRR := testutil.Request(t, configuredHandler, http.MethodGet, "/status", "", "")
@@ -368,7 +383,12 @@ func TestServerCompatStatusAuthAndCounts(t *testing.T) {
 	testutil.RequireStatus(t, statusRR, http.StatusOK)
 	if !strings.Contains(statusRR.Body.String(), `"events":1`) ||
 		!strings.Contains(statusRR.Body.String(), `"deadLetters":1`) ||
-		!strings.Contains(statusRR.Body.String(), `"collector"`) {
+		!strings.Contains(statusRR.Body.String(), `"collector"`) ||
+		!strings.Contains(statusRR.Body.String(), `"dataMigration"`) ||
+		!strings.Contains(statusRR.Body.String(), `"name":"usage_cache_accounting_v1"`) ||
+		!strings.Contains(statusRR.Body.String(), `"status":"failed"`) ||
+		strings.Contains(statusRR.Body.String(), `"lastError"`) ||
+		strings.Contains(statusRR.Body.String(), "secret migration detail") {
 		t.Fatalf("status body = %s", statusRR.Body.String())
 	}
 }
