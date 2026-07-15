@@ -120,6 +120,7 @@ type CodexInspectionResult struct {
 
 type CodexInspectionDisableOwnership struct {
 	FileName     string
+	Provider     string
 	AuthIndex    string
 	AccountID    string
 	DisabledAtMS int64

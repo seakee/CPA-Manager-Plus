@@ -33,9 +33,13 @@ func TestDisableOwnershipCRUD(t *testing.T) {
 	if len(items) != 1 || items[0].FileName != "auth-a.json" || items[0].AuthIndex != "auth-1" || items[0].AccountID != "account-1" || items[0].DisabledAtMS != 123 {
 		t.Fatalf("inserted ownership = %#v", items)
 	}
+	if items[0].Provider != "codex" {
+		t.Fatalf("default provider = %q, want codex", items[0].Provider)
+	}
 
 	if err := repository.UpsertDisableOwnership(ctx, model.CodexInspectionDisableOwnership{
 		FileName:     "auth-a.json",
+		Provider:     "xai",
 		AuthIndex:    "auth-2",
 		AccountID:    "account-2",
 		DisabledAtMS: 456,
@@ -46,7 +50,7 @@ func TestDisableOwnershipCRUD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list updated ownership: %v", err)
 	}
-	if len(items) != 1 || items[0].AuthIndex != "auth-2" || items[0].AccountID != "account-2" || items[0].DisabledAtMS != 456 {
+	if len(items) != 1 || items[0].Provider != "xai" || items[0].AuthIndex != "auth-2" || items[0].AccountID != "account-2" || items[0].DisabledAtMS != 456 {
 		t.Fatalf("updated ownership = %#v", items)
 	}
 
