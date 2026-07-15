@@ -55,6 +55,8 @@ for target in "${targets[@]}"; do
   cp "${repo_root}/LICENSE" "${package_dir}/LICENSE"
   if [ "${goos}" = "windows" ]; then
     cp "${native_script_src}/cpa-manager-plusctl.ps1" "${package_dir}/cpa-manager-plusctl.ps1"
+    cp "${native_script_src}/Start-CPA.ps1" "${package_dir}/Start-CPA.ps1"
+    cp "${native_script_src}/Start-CPA.cmd" "${package_dir}/Start-CPA.cmd"
   else
     cp "${native_script_src}/cpa-manager-plusctl.sh" "${package_dir}/cpa-manager-plusctl"
     chmod 0755 "${package_dir}/cpa-manager-plusctl"
