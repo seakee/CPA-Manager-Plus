@@ -1,25 +1,30 @@
 # 2026-07-10 性能优化报告
 
-本文记录 2026-07-10 完成的 Manager Server、Dashboard、请求监控、Usage Analytics 和 Model Prices 性能优化，包括问题原因、实现方式、测试口径和实测结果。
+本文记录自 2026-07-10 开始、并在 2026-07-15 完成的 Manager Server、Dashboard、请求监控、Usage Analytics 和 Model Prices 性能优化，包括问题原因、实现方式、测试口径和实测结果。报告于 2026-07-16 补充后续阶段及当前 `main` 的复测数据。
 
 ## 执行摘要
 
-本轮优化分为五个阶段：
+本轮优化分为十个阶段：
 
 1. PR #319：限制无界内存、请求和 SQLite 连接资源。
 2. PR #320：Dashboard 核心统计改用增量小时汇总。
 3. PR #323：Usage Analytics 按当前 Tab 请求最小数据集。
 4. Usage Analytics Hourly Rollup Phase 2B：严格无筛选的长窗口核心统计复用小时汇总。
-5. Monitoring 完整请求复用重复维度统计，并以有界并发执行独立 SQLite 读取。
+5. Usage Analytics Compact Summary：跳过当前 Tab 不需要的 Summary 子查询。
+6. Credential Timeline SQL 预聚合与按需加载：只为选中凭据读取时间线。
+7. Usage Analytics Hourly Rollup Projected Read：按调用方需要裁剪小时汇总字段。
+8. Latency Percentile Compact Read：使用整数投影读取延迟和 TTFT 样本。
+9. Dashboard Refresh Bounded Concurrency：并行执行独立 Dashboard 读取。
+10. Monitoring 完整请求复用重复维度统计，并以有界并发执行独立 SQLite 读取。
 
 在 100,000 条测试事件下，以打开 Usage Analytics Overview 的有效工作量为口径：
 
 | 指标 | 优化前 legacy 路径 | 当前路径 | 综合变化 |
 |---|---:|---:|---:|
-| 请求耗时 | 约 7.00s | 约 2.48s | 降低约 65% |
-| 单次内存分配 | 约 215MB | 约 20.24MB | 降低约 91% |
+| 请求耗时 | 约 7.00s | 约 1.12s | 降低约 84% |
+| 单次内存分配 | 约 215MB | 约 5.23MB | 降低约 97.6% |
 
-legacy 路径会请求全部 Tab 和完整筛选数据；当前路径只执行 Overview 实际需要的查询。因此该结果代表用户打开 Overview 时的有效工作量变化，而不是两组完全相同 SQL 的对比。
+legacy 路径会请求全部 Tab 和完整筛选数据；当前路径只执行 Overview 实际需要的主查询和 selector 请求。当前 `main` 三次复测为约 1.119～1.126s、5.23MB/op。因此该结果代表用户打开 Overview 时的有效工作量变化，而不是两组完全相同 SQL 的对比。
 
 ## 测试口径说明
 
@@ -201,7 +206,114 @@ Raw analytics 与 rollup reader 共用同一个时区 bucket 规则。每个 UTC
 
 核心路径约快 20 倍，但 Overview 整体只快约 23%，是因为 P95、TTFT、task、active days、API Key 和 Channel 等保留的 raw 查询已经成为主要耗时来源。
 
-## 阶段五：Monitoring 完整请求去重与有界并发
+## 阶段五：Usage Analytics Compact Summary
+
+### 问题原因
+
+Usage Analytics 各 Tab 虽然已经按需裁剪主数据集，但原有 Summary 合同仍会执行 rolling 30m、task buckets、active days、zero-token models 和 percentile 等完整子查询。多数 Tab 只显示调用数、Token、成本和平均延迟，仍为不可见指标支付查询成本。
+
+### 优化内容
+
+- 新增向后兼容的 `compact` Summary profile；未显式请求时继续保持完整合同。
+- 所有 Usage Analytics Tab 使用 compact profile。
+- 只有 Overview 请求 P95 latency 和 P95 TTFT；其他 Tab 跳过 percentile 查询。
+- Request Monitoring 等既有消费者继续使用完整 Summary，不改变响应语义。
+
+### 100k 当前 main 三次复测
+
+| 路径 | 平均耗时 | B/op | allocs/op |
+|---|---:|---:|---:|
+| Full Summary | 约 1.66s | 约 3.77MB | 约 31.0 万 |
+| Compact Summary + percentiles | 约 775ms | 约 31KB | 约 506 |
+| Compact Summary，无 percentiles | 约 21.5ms | 约 22.8KB | 399 |
+
+保留 percentile 时耗时降低约 53%，分配降低约 99%；不需要 percentile 的 Tab，Summary 耗时降低约 98.7%。
+
+## 阶段六：Credential Timeline SQL 预聚合与按需加载
+
+### 问题原因
+
+Credentials Tab 原本会读取范围内的凭据事件并在 Go 中逐条构建所有凭据的时间线，即使用户最终只查看其中一个凭据。事件数量和凭据数量增长后，隐藏时间线成为额外的扫描、传输和分配成本。
+
+### 优化内容
+
+- 把 Credential Timeline 的小时聚合下推到 SQLite，并保留首尾 partial raw edge。
+- 共用 UTC 小时可表达性检查；半小时、45 分钟时区和无法无损表达的范围安全回退 raw。
+- 新增精确 `credential_ids` 筛选，兼容 auth file、auth index、source hash 和 source-only identity。
+- 前端先加载凭据排行，只有用户选中凭据后才发起对应 Timeline 请求。
+- 保留取消、stale response 防护、加载状态和错误反馈。
+
+### 100k 当前 main 三次复测
+
+| 请求 | 平均耗时 | B/op | allocs/op |
+|---|---:|---:|---:|
+| Credentials 排行与 Summary | 约 524ms | 约 847KB | 约 1.19 万 |
+| 单个选中凭据 Timeline | 约 50.0ms | 约 340KB | 约 3,275 |
+| 两阶段合计 | 约 565ms | 约 1.19MB | 约 1.52 万 |
+
+首次进入 Credentials 时只执行第一行；第二行仅在存在选中凭据且需要时间线时执行，避免为未查看的凭据构建 Timeline。
+
+## 阶段七：Hourly Rollup Projected Read
+
+### 问题原因
+
+Phase 2B 已经用小时汇总替代大量 raw scan，但 reader 仍会加载完整的 `hour + model + billing model + service tier` 行并构建完整 snapshot。只需要 model 聚合或 UTC day timeline 的调用方仍承担无关维度和中间对象的分配。
+
+### 优化内容
+
+- 增加 model-only 和 UTC daily projection。
+- 按 Summary、Model Stats 和 Timeline 的实际组合选择紧凑 snapshot。
+- 保留 partial raw edge、价格重算、checkpoint 检查和时区 fallback。
+- 不修改 schema 和 API。
+
+### 100k 核心路径当前 main 三次复测
+
+| 路径 | 平均耗时 | B/op | allocs/op |
+|---|---:|---:|---:|
+| Raw | 约 830ms | 23.78MB | 约 186.5 万 |
+| Projected rollup | 约 24.0ms | 611KB | 7,900 |
+| 相对 Raw | 约快 34.6 倍 | 降低约 97.4% | 降低约 99.6% |
+
+与 Phase 2B 当时的 rollup 结果（约 39ms、9.51MB/op）相比，投影读取又把耗时降低约 38%，分配降低约 94%。
+
+## 阶段八：Latency Percentile Compact Read
+
+### 问题原因
+
+Latency 和 TTFT percentile 查询经 `database/sql` 读取可空数值时，会产生 integer → string → float 的逐行转换和临时对象。Trends、Models 和 Overview 的 percentile 路径因此保留了不必要的分配。
+
+### 优化内容与结果
+
+- SQLite 只投影有效的整数 latency/TTFT 样本。
+- Go 端直接读取紧凑整数并保持 nearest-rank 语义。
+- 覆盖 DST、非整小时时区、筛选、NULL 样本和 10k/100k 数据。
+- Trends 和 Models 的分配从约 7.20MB/op 降至约 4.80MB/op，降低约 33%，响应和筛选语义不变。
+
+当前 `main` 三次复测中，Trends 约 532～544ms、4.81MB/op，Models 约 543～560ms、4.80MB/op，与优化记录的紧凑分配水平一致。
+
+## 阶段九：Dashboard Refresh 有界并发
+
+### 问题原因
+
+小时汇总已大幅降低 Dashboard 核心统计成本，但 rolling 30m、health timeline、recent failures、channel stats 和 failure sources 等独立读取仍串行执行。数据量增大后，这些 recent/raw 查询成为刷新关键路径。
+
+### 优化内容与结果
+
+- 在现有四连接 SQLite 连接池内并行执行独立 Dashboard 查询。
+- 保留 context cancellation 和 first-error propagation。
+- 不增加常驻 recent-event cache，不改变响应合同。
+- 合入时的 10k、100k、1m benchmark 分别降低完整刷新延迟约 37%、44% 和 50%。
+
+当前 `main` 三次单次复测结果：
+
+| 数据量 | 完整刷新耗时 | B/op | allocs/op |
+|---|---:|---:|---:|
+| 10k | 约 39.7～43.2ms | 约 1.63MB | 约 2.05 万 |
+| 100k | 约 403～405ms | 约 1.64MB | 约 2.18 万 |
+
+分配量随事件规模基本稳定，耗时仍主要来自必须扫描 recent/raw 范围的查询。
+
+## 阶段十：Monitoring 完整请求去重与有界并发
 
 ### 问题原因
 
@@ -238,7 +350,7 @@ Request Monitoring 会在一次 analytics 请求中同时加载 Summary、Timeli
 
 在 `bin/tmp/db/data` 的 disposable SQLite backup 上，完成 cache-accounting migration 和 dashboard rollup 追平后：
 
-- Phase 1 后完整请求基线约 5.80s。
+- Monitoring 第一轮查询整形后的完整请求基线约 5.80s。
 - 本阶段 service 耗时稳定在 2.21～2.38s。
 - 相对上一阶段再降低约 59%～62%。
 - 7.58MB JSON 响应的序列化仅约 16ms，剩余耗时仍主要来自 SQLite 查询。
@@ -309,7 +421,7 @@ USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED=false
 
 ## 后续方向
 
-当前 Compact Summary、hourly rollup、latency percentile 紧凑读取、高维请求裁剪和 Monitoring 完整请求并发均已完成。剩余耗时主要依赖必须保留 raw 语义的查询：
+当前 Compact Summary、credential timeline SQL 预聚合与按需加载、hourly rollup 投影读取、latency percentile 紧凑读取、Dashboard/Monitoring 有界并发和高维请求裁剪均已完成。剩余耗时主要依赖必须保留 raw 语义的查询：
 
 - P95 latency 和 P95 TTFT。
 - Task buckets。

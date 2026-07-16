@@ -62,6 +62,7 @@ const zhSidebar: DefaultTheme.Sidebar = [
     text: '运维',
     items: [
       { text: 'Manager Server 指南', link: '/operations/manager-server' },
+      { text: '更新 CPAMP', link: '/operations/update' },
       { text: '性能优化报告（2026-07-10）', link: '/operations/performance-optimization-2026-07-10' },
       { text: '配置与数据目录', link: '/operations/configuration' },
       { text: '备份与恢复', link: '/operations/backup' },
@@ -139,6 +140,7 @@ const enSidebar: DefaultTheme.Sidebar = [
     text: 'Operations',
     items: [
       { text: 'Manager Server Guide', link: '/en/operations/manager-server' },
+      { text: 'Upgrade CPAMP', link: '/en/operations/update' },
       { text: 'Performance Report (2026-07-10)', link: '/en/operations/performance-optimization-2026-07-10' },
       { text: 'Configuration And Data Directory', link: '/en/operations/configuration' },
       { text: 'Backup And Restore', link: '/en/operations/backup' },

@@ -1,25 +1,30 @@
 # Performance Optimization Report — July 10, 2026
 
-This report documents the Manager Server, Dashboard, Request Monitoring, Usage Analytics, and Model Prices performance work completed on July 10, 2026. It covers the causes, implementation strategy, benchmark methodology, and measured results.
+This report documents the Manager Server, Dashboard, Request Monitoring, Usage Analytics, and Model Prices performance work started on July 10 and completed on July 15, 2026. It covers the causes, implementation strategy, benchmark methodology, and measured results. The report was updated on July 16 with the later stages and fresh measurements from current `main`.
 
 ## Executive Summary
 
-The work was delivered in five stages:
+The work was delivered in ten stages:
 
 1. PR #319 bounded memory, request, and SQLite connection resources.
 2. PR #320 moved Dashboard core metrics to incremental hourly rollups.
 3. PR #323 scoped Usage Analytics requests to the active tab.
 4. Usage Analytics Hourly Rollup Phase 2B reused hourly rollups for strictly unfiltered long-window core metrics.
-5. Complete Monitoring requests reused duplicate dimension statistics and executed independent SQLite reads with bounded concurrency.
+5. Usage Analytics Compact Summary skipped Summary subqueries not required by the active tab.
+6. Credential Timeline SQL preaggregation and on-demand loading read timelines only for the selected credential.
+7. Usage Analytics Hourly Rollup Projected Read selected only the rollup dimensions required by the caller.
+8. Latency Percentile Compact Read used integer projections for latency and TTFT samples.
+9. Dashboard Refresh Bounded Concurrency executed independent Dashboard reads concurrently.
+10. Complete Monitoring requests reused duplicate dimension statistics and executed independent SQLite reads with bounded concurrency.
 
 Using the effective work required to open Usage Analytics Overview on a 100,000-event dataset:
 
 | Metric | Legacy path | Current path | Combined change |
 |---|---:|---:|---:|
-| Request time | about 7.00s | about 2.48s | about 65% lower |
-| Allocation per operation | about 215MB | about 20.24MB | about 91% lower |
+| Request time | about 7.00s | about 1.12s | about 84% lower |
+| Allocation per operation | about 215MB | about 5.23MB | about 97.6% lower |
 
-The legacy path requested every tab and the complete filter dataset. The current path executes only the queries required by Overview. This comparison represents the user-visible Overview workload rather than two identical SQL workloads.
+The legacy path requested every tab and the complete filter dataset. The current path executes only the main Overview query and selector request. Three fresh current-main runs measured about 1.119–1.126s and 5.23MB/op. This comparison represents the user-visible Overview workload rather than two identical SQL workloads.
 
 ## Benchmark Interpretation
 
@@ -201,7 +206,114 @@ This scope includes only the aggregate, model-stat, and timeline work owned by P
 
 The rollup-owned path is about 20 times faster, while the complete Overview request is about 23% faster because P95, TTFT, task, active-day, API key, and channel queries remain on raw events and now dominate the remaining time.
 
-## Stage 5: Complete Monitoring Request Deduplication And Bounded Concurrency
+## Stage 5: Usage Analytics Compact Summary
+
+### Cause
+
+Usage Analytics already scoped the main dataset by tab, but the original Summary contract still ran rolling 30m, task buckets, active days, zero-token models, and percentile subqueries. Most tabs only display calls, tokens, cost, and average latency, so they still paid for hidden metrics.
+
+### Changes
+
+- Added a backward-compatible `compact` Summary profile; the full contract remains the default.
+- All Usage Analytics tabs use the compact profile.
+- Only Overview requests P95 latency and P95 TTFT; other tabs skip percentile queries.
+- Request Monitoring and existing consumers continue using the full Summary contract.
+
+### Fresh 100k Results On Current main, Three Runs
+
+| Path | Average duration | B/op | allocs/op |
+|---|---:|---:|---:|
+| Full Summary | about 1.66s | about 3.77MB | about 310k |
+| Compact Summary with percentiles | about 775ms | about 31KB | about 506 |
+| Compact Summary without percentiles | about 21.5ms | about 22.8KB | 399 |
+
+With percentiles retained, duration fell about 53% and allocation about 99%. Tabs that do not need percentiles reduced Summary duration by about 98.7%.
+
+## Stage 6: Credential Timeline SQL Preaggregation And On-Demand Loading
+
+### Cause
+
+The Credentials tab previously read credential events and constructed timelines for every credential in Go even when the user viewed only one credential. Hidden timelines added scans, transfer, and allocation as event and credential counts increased.
+
+### Changes
+
+- Moved hourly Credential Timeline aggregation into SQLite while preserving partial raw edges.
+- Shared UTC-hour representability checks; fractional-offset zones and non-lossless ranges safely fall back to raw events.
+- Added exact `credential_ids` filtering for auth file, auth index, source hash, and source-only identities.
+- The frontend loads credential rankings first and requests a timeline only for the selected credential.
+- Cancellation, stale-response protection, loading state, and error feedback remain intact.
+
+### Fresh 100k Results On Current main, Three Runs
+
+| Request | Average duration | B/op | allocs/op |
+|---|---:|---:|---:|
+| Credential ranking and Summary | about 524ms | about 847KB | about 11.9k |
+| One selected credential timeline | about 50.0ms | about 340KB | about 3,275 |
+| Two-stage total | about 565ms | about 1.19MB | about 15.2k |
+
+Opening the tab executes only the first row. The second request runs only when a selected credential needs a timeline, avoiding timeline construction for credentials the user does not inspect.
+
+## Stage 7: Hourly Rollup Projected Read
+
+### Cause
+
+Phase 2B replaced many raw scans with hourly rollups, but the reader still loaded complete `hour + model + billing model + service tier` rows and built a full snapshot. Model-only and UTC-day callers still allocated unrelated dimensions and intermediate objects.
+
+### Changes
+
+- Added model-only and UTC daily projections.
+- Selected compact snapshots based on the requested Summary, Model Stats, and Timeline combination.
+- Preserved partial raw edges, current-price calculation, checkpoint checks, and timezone fallback.
+- No schema or API changes were required.
+
+### Fresh 100k Core Results On Current main, Three Runs
+
+| Path | Average duration | B/op | allocs/op |
+|---|---:|---:|---:|
+| Raw | about 830ms | 23.78MB | about 1.865m |
+| Projected rollup | about 24.0ms | 611KB | 7,900 |
+| Versus raw | about 34.6 times faster | about 97.4% lower | about 99.6% lower |
+
+Compared with the Phase 2B rollup result of about 39ms and 9.51MB/op, projected reads reduced duration by another 38% and allocation by about 94%.
+
+## Stage 8: Latency Percentile Compact Read
+
+### Cause
+
+Nullable latency and TTFT samples read through `database/sql` created per-row integer-to-string-to-float conversions and temporary objects. Percentile paths in Trends, Models, and Overview retained unnecessary allocations.
+
+### Changes And Results
+
+- SQLite projects only valid integer latency and TTFT samples.
+- Go reads compact integers directly while preserving nearest-rank semantics.
+- Coverage includes DST, fractional-offset zones, filters, NULL samples, and 10k/100k datasets.
+- Trends and Models allocation fell from about 7.20MB/op to about 4.80MB/op, a reduction of about 33%, with unchanged response and filtering semantics.
+
+Fresh current-main runs kept Trends near 532–544ms and 4.81MB/op, and Models near 543–560ms and 4.80MB/op.
+
+## Stage 9: Dashboard Refresh Bounded Concurrency
+
+### Cause
+
+Hourly rollups made Dashboard core metrics cheap, but rolling 30m, health timeline, recent failures, channel stats, and failure sources still ran serially. These recent/raw queries became the refresh critical path as data volume grew.
+
+### Changes And Results
+
+- Independent Dashboard queries run concurrently within the existing four-connection SQLite pool.
+- Context cancellation and first-error propagation are preserved.
+- No resident recent-event cache or response-contract change was added.
+- Merge-time 10k, 100k, and 1m benchmarks reduced full-refresh latency by about 37%, 44%, and 50%, respectively.
+
+Fresh single-operation runs on current `main`:
+
+| Event count | Full refresh duration | B/op | allocs/op |
+|---|---:|---:|---:|
+| 10k | about 39.7–43.2ms | about 1.63MB | about 20.5k |
+| 100k | about 403–405ms | about 1.64MB | about 21.8k |
+
+Allocation remains nearly flat as event count grows; time is still dominated by queries that must scan recent/raw ranges.
+
+## Stage 10: Complete Monitoring Request Deduplication And Bounded Concurrency
 
 ### Cause
 
@@ -238,7 +350,7 @@ A separate post-change benchmark using the curl scope (`from_ms=1`, `Asia/Shangh
 
 On a disposable SQLite backup of `bin/tmp/db/data`, after completing the cache-accounting migration and dashboard-rollup catch-up:
 
-- The complete request baseline after Phase 1 was about 5.80s.
+- The complete request baseline after the first Monitoring query-shaping pass was about 5.80s.
 - This stage completed the service call in 2.21–2.38s.
 - That is another reduction of approximately 59%–62% from the previous stage.
 - Serializing the 7.58MB JSON response took only about 16ms, so SQLite reads still dominate the remaining time.
@@ -309,7 +421,7 @@ See the [Manager Server Guide](./manager-server.md) for the full runtime referen
 
 ## Recommended Next Step
 
-Compact Summary, hourly rollups, compact latency-percentile reads, high-dimensional request shaping, and complete Monitoring request concurrency are now implemented. The remaining time depends primarily on queries that must preserve raw-event semantics:
+Compact Summary, Credential Timeline SQL preaggregation and on-demand loading, projected hourly rollup reads, compact latency-percentile reads, bounded Dashboard/Monitoring concurrency, and high-dimensional request shaping are now implemented. The remaining time depends primarily on queries that must preserve raw-event semantics:
 
 - P95 latency and P95 TTFT.
 - Task buckets.
