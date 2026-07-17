@@ -21,7 +21,9 @@ import cacheInputAccountingFixtures from './cacheInputAccounting.fixtures.json';
 describe('formatCompactNumber', () => {
   it('keeps large values compact as data grows beyond millions', () => {
     expect(formatCompactNumber(999)).toBe('999');
-    expect(formatCompactNumber(1_200)).toBe('1.2K');
+    expect(formatCompactNumber(1_200)).toBe('1200');
+    expect(formatCompactNumber(9_999)).toBe('9999');
+    expect(formatCompactNumber(12_000)).toBe('12.0K');
     expect(formatCompactNumber(999_950)).toBe('1.0M');
     expect(formatCompactNumber(2_795_200_000)).toBe('2.8B');
     expect(formatCompactNumber(1_200_000_000_000)).toBe('1.2T');

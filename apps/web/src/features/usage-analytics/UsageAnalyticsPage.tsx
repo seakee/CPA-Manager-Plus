@@ -291,7 +291,7 @@ const compactNumber = (value: number) => {
   if (!Number.isFinite(value)) return '0';
   if (Math.abs(value) >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(2)}B`;
   if (Math.abs(value) >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
-  if (Math.abs(value) >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+  if (Math.abs(value) >= 10_000) return `${(value / 1_000).toFixed(1)}K`;
   return String(Math.round(value));
 };
 
