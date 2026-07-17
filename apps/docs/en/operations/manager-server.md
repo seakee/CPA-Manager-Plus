@@ -2,19 +2,30 @@
 
 Manager Server is the backend for the full CPAMP experience. It hosts `management.html`, stores local SQLite data, consumes the CPA usage queue through the collector, and protects management capabilities with the CPAMP Admin Key.
 
+Most users do not need to read this page from top to bottom. Start with the document that matches your task:
+
+| Goal                                    | Recommended document                                               |
+| --------------------------------------- | ------------------------------------------------------------------ |
+| Install Full Mode for the first time    | [Quick Start](../guide/getting-started.md)                         |
+| Change the CPA connection or Monitoring | [Configuration](../manual/configuration.md)                        |
+| Monitoring has no data                  | [Monitoring Has No Data](../troubleshooting/request-monitoring.md) |
+| Upgrade or back up                      | [Upgrade CPAMP](./update.md), [Backup And Restore](./backup.md)    |
+
+This page is mainly for advanced deployments that need environment variables, custom collection networking, runtime endpoints, or data-directory control.
+
 When you open this entry point, you are using Manager Server mode:
 
 ```text
 http://<host>:18317/management.html
 ```
 
-When CPA itself serves this entry point, you are using the CPA-hosted panel compatibility mode:
+When CPA itself serves this entry point, you are using the CPAMP Lightweight Panel:
 
 ```text
 http://<cpa-host>:8317/management.html
 ```
 
-The CPA-hosted panel does not read Manager Server SQLite and does not provide the full historical monitoring, model prices, API Key aliases, import/export, or server inspection history.
+The CPAMP Lightweight Panel does not connect to or read Manager Server SQLite and does not provide full historical monitoring, model prices, API key aliases, import/export, or server inspection history.
 
 ## What Manager Server Does
 
@@ -28,6 +39,8 @@ Manager Server:
 - Consumes CPA usage events.
 - Persists usage events in SQLite.
 - Provides Dashboard, Request Monitoring, Usage Analytics, Model Pricing, API Key Alias, Usage Import/Export, and Server Codex Inspection APIs.
+
+::: details Advanced: architecture and data flow
 
 ## Architecture
 
@@ -49,6 +62,8 @@ Browser
 ```
 
 CPA still runs separately. CPAMP does not bundle CPA.
+
+:::
 
 ## First Setup And Login
 
@@ -105,7 +120,7 @@ CPA Management API must be enabled:
 
 ```yaml
 remote-management:
-  secret-key: "your CPA Management Key"
+  secret-key: 'your CPA Management Key'
   allow-remote: true
 ```
 
@@ -137,12 +152,12 @@ Behavior:
 auto -> RESP Pub/Sub -> HTTP usage queue -> RESP pop fallback
 ```
 
-| Mode | Use when |
-|---|---|
-| `auto` | Recommended default. |
-| `subscribe` | Force RESP Pub/Sub for low-latency direct CPA API access. |
-| `http` | Force HTTP usage queue, useful behind normal HTTP reverse proxies. |
-| `resp` | Force legacy RESP pop; must directly reach the CPA API port. |
+| Mode        | Use when                                                           |
+| ----------- | ------------------------------------------------------------------ |
+| `auto`      | Recommended default.                                               |
+| `subscribe` | Force RESP Pub/Sub for low-latency direct CPA API access.          |
+| `http`      | Force HTTP usage queue, useful behind normal HTTP reverse proxies. |
+| `resp`      | Force legacy RESP pop; must directly reach the CPA API port.       |
 
 RESP transports cannot pass through a normal HTTP reverse proxy. If you see `unsupported RESP prefix 'H'`, the RESP client is probably connecting to an HTTP endpoint.
 
@@ -174,34 +189,34 @@ Saving CPAMP configuration does not rewrite the full CPA `config.yaml`.
 
 ## Environment Variables
 
-| Variable | Default | Description |
-|---|---|---|
-| `CPA_MANAGER_CONFIG` | empty | Optional config file path. Native packages default to `config.json` next to the binary. |
-| `HTTP_ADDR` | `0.0.0.0:18317` | Manager Server listen address. |
-| `CPA_MANAGER_PPROF_ADDR` | empty | Optional Go pprof listen address; only `localhost`, `127.0.0.1`, or `::1` is accepted. |
-| `USAGE_DATA_DIR` | Docker: `/data`; native: `./data` | Base data directory. |
-| `USAGE_DB_PATH` | Docker: `/data/usage.sqlite`; native: `./data/usage.sqlite` | SQLite database path. |
-| `CPA_MANAGER_ADMIN_KEY` | empty | Optional admin key. |
-| `CPA_MANAGER_ADMIN_KEY_FILE` | `/run/secrets/cpa_admin_key` | Optional admin key file. |
-| `CPA_MANAGER_DATA_KEY` | empty | Optional data encryption key. |
-| `CPA_MANAGER_DATA_KEY_FILE` | `/run/secrets/cpa_data_key` | Optional data encryption key file. |
-| `CPA_MANAGER_DATA_KEY_PATH` | Docker: `/data/data.key`; native: `./data/data.key` | Generated data key path. |
-| `CPA_UPSTREAM_URL` | empty | Optional environment-managed CPA URL. |
-| `CPA_MANAGEMENT_KEY` | empty | Optional environment-managed CPA Management Key. |
-| `CPA_MANAGEMENT_KEY_FILE` | `/run/secrets/cpa_management_key` | Optional CPA Management Key file. |
-| `USAGE_COLLECTOR_MODE` | `auto` | `auto`, `subscribe`, `http`, or `resp`. |
-| `USAGE_RESP_QUEUE` | `usage` | RESP key argument; normally leave unchanged. |
-| `USAGE_RESP_POP_SIDE` | `right` | `right` uses `RPOP`; `left` uses `LPOP`. |
-| `USAGE_BATCH_SIZE` | `100` | Max records per batch. |
-| `USAGE_POLL_INTERVAL_MS` | `500` | Idle poll interval. |
-| `USAGE_QUERY_LIMIT` | `50000` | Max recent usage events. |
-| `USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED` | `true` | Enable the hourly rollup worker plus the Dashboard and strictly unfiltered Usage Analytics query paths. Temporarily set it to `false` when diagnosing SQLite write contention or rollup failures; queries fall back to raw events. |
-| `USAGE_CORS_ORIGINS` | `*` | CORS origins for compatibility endpoints. |
-| `USAGE_RESP_TLS_SKIP_VERIFY` | `false` | Skip TLS verification for RESP connection. |
-| `USAGE_QUOTA_COOLDOWN_ENABLED` | `false` | Enable the provider quota cooldown worker for strict Codex usage-limit and xAI free-usage-exhausted signals. |
-| `USAGE_ACCOUNT_ACTIONS_ENABLED` | `false` | Enable the account action queue for auth issues that need review. |
-| `USAGE_ACCOUNT_ACTIONS_AUTO_DISABLE` | `false` | Enable automatic disabling for auth issues. This only takes effect when the account action queue is enabled. |
-| `PANEL_PATH` | empty | Optional custom `management.html`. |
+| Variable                                | Default                                                     | Description                                                                                                                                                                                                                        |
+| --------------------------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CPA_MANAGER_CONFIG`                    | empty                                                       | Optional config file path. Native packages default to `config.json` next to the binary.                                                                                                                                            |
+| `HTTP_ADDR`                             | `0.0.0.0:18317`                                             | Manager Server listen address.                                                                                                                                                                                                     |
+| `CPA_MANAGER_PPROF_ADDR`                | empty                                                       | Optional Go pprof listen address; only `localhost`, `127.0.0.1`, or `::1` is accepted.                                                                                                                                             |
+| `USAGE_DATA_DIR`                        | Docker: `/data`; native: `./data`                           | Base data directory.                                                                                                                                                                                                               |
+| `USAGE_DB_PATH`                         | Docker: `/data/usage.sqlite`; native: `./data/usage.sqlite` | SQLite database path.                                                                                                                                                                                                              |
+| `CPA_MANAGER_ADMIN_KEY`                 | empty                                                       | Optional admin key.                                                                                                                                                                                                                |
+| `CPA_MANAGER_ADMIN_KEY_FILE`            | `/run/secrets/cpa_admin_key`                                | Optional admin key file.                                                                                                                                                                                                           |
+| `CPA_MANAGER_DATA_KEY`                  | empty                                                       | Optional data encryption key.                                                                                                                                                                                                      |
+| `CPA_MANAGER_DATA_KEY_FILE`             | `/run/secrets/cpa_data_key`                                 | Optional data encryption key file.                                                                                                                                                                                                 |
+| `CPA_MANAGER_DATA_KEY_PATH`             | Docker: `/data/data.key`; native: `./data/data.key`         | Generated data key path.                                                                                                                                                                                                           |
+| `CPA_UPSTREAM_URL`                      | empty                                                       | Optional environment-managed CPA URL.                                                                                                                                                                                              |
+| `CPA_MANAGEMENT_KEY`                    | empty                                                       | Optional environment-managed CPA Management Key.                                                                                                                                                                                   |
+| `CPA_MANAGEMENT_KEY_FILE`               | `/run/secrets/cpa_management_key`                           | Optional CPA Management Key file.                                                                                                                                                                                                  |
+| `USAGE_COLLECTOR_MODE`                  | `auto`                                                      | `auto`, `subscribe`, `http`, or `resp`.                                                                                                                                                                                            |
+| `USAGE_RESP_QUEUE`                      | `usage`                                                     | RESP key argument; normally leave unchanged.                                                                                                                                                                                       |
+| `USAGE_RESP_POP_SIDE`                   | `right`                                                     | `right` uses `RPOP`; `left` uses `LPOP`.                                                                                                                                                                                           |
+| `USAGE_BATCH_SIZE`                      | `100`                                                       | Max records per batch.                                                                                                                                                                                                             |
+| `USAGE_POLL_INTERVAL_MS`                | `500`                                                       | Idle poll interval.                                                                                                                                                                                                                |
+| `USAGE_QUERY_LIMIT`                     | `50000`                                                     | Max recent usage events.                                                                                                                                                                                                           |
+| `USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED` | `true`                                                      | Enable the hourly rollup worker plus the Dashboard and strictly unfiltered Usage Analytics query paths. Temporarily set it to `false` when diagnosing SQLite write contention or rollup failures; queries fall back to raw events. |
+| `USAGE_CORS_ORIGINS`                    | `*`                                                         | CORS origins for compatibility endpoints.                                                                                                                                                                                          |
+| `USAGE_RESP_TLS_SKIP_VERIFY`            | `false`                                                     | Skip TLS verification for RESP connection.                                                                                                                                                                                         |
+| `USAGE_QUOTA_COOLDOWN_ENABLED`          | `false`                                                     | Enable the provider quota cooldown worker for strict Codex usage-limit and xAI free-usage-exhausted signals.                                                                                                                       |
+| `USAGE_ACCOUNT_ACTIONS_ENABLED`         | `false`                                                     | Enable the account action queue for auth issues that need review.                                                                                                                                                                  |
+| `USAGE_ACCOUNT_ACTIONS_AUTO_DISABLE`    | `false`                                                     | Enable automatic disabling for auth issues. This only takes effect when the account action queue is enabled.                                                                                                                       |
+| `PANEL_PATH`                            | empty                                                       | Optional custom `management.html`.                                                                                                                                                                                                 |
 
 Startup precedence:
 
@@ -243,43 +258,47 @@ See the [July 10, 2026 Performance Optimization Report](./performance-optimizati
 
 When `USAGE_QUOTA_COOLDOWN_ENABLED`, `USAGE_ACCOUNT_ACTIONS_ENABLED`, or `USAGE_ACCOUNT_ACTIONS_AUTO_DISABLE` is set through the environment, the matching panel switch is shown as environment-sourced and locked. Remove the environment variable and restart Manager Server if you want the setting to be editable from the panel.
 
+::: details Advanced: runtime endpoints
+
 ## Runtime Endpoints
 
-| Endpoint | Purpose |
-|---|---|
-| `GET /health` | Health check. |
-| `GET /status` | Collector, SQLite, event count, and background data-migration progress. |
-| `GET /usage-service/info` | Manager Server mode detection. |
-| `GET /usage-service/config` | Read CPAMP Manager Server config. |
-| `PUT /usage-service/config` | Save CPAMP config and restart collector if needed. |
-| `GET /usage-service/account-processing-policy` | Read quota cooldown, account action queue, and auto-disable policy. |
-| `PATCH /usage-service/account-processing-policy` | Update account processing policy. Fields locked by environment variables cannot be modified through the API. |
-| `GET /usage-service/quota-cooldowns` | Read active quota cooldowns so the auth files page can show recovery hints. |
-| `POST /setup` | First setup. |
-| `GET /v0/management/usage` | Compatible usage data. |
-| `GET /v0/management/usage/export` | Export JSONL usage events. |
-| `POST /v0/management/usage/import` | Import JSONL or compatible legacy snapshots. |
-| `GET /v0/management/model-prices/usage-summary` | Return the lightweight model-call summary used by the Model Prices page. |
-| `GET /v0/management/model-prices` | Model pricing. |
-| `PUT /v0/management/model-prices` | Replace saved model pricing. |
-| `POST /v0/management/model-prices/sync` | Price sync. |
-| `GET /v0/management/api-key-aliases` | API Key aliases. |
-| `GET /v0/management/account-action-candidates` | Auth issue action queue. |
-| `POST /v0/management/account-action-candidates/{id}/ignore` | Ignore an account action candidate. |
-| `POST /v0/management/account-action-candidates/{id}/resolve` | Mark an account action candidate as resolved. |
-| `POST /v0/management/account-action-candidates/{id}/enable` | Re-enable the auth file linked to a candidate. |
-| `DELETE /v0/management/account-action-candidates/{id}/auth-file` | Delete the auth file linked to a candidate. |
-| `GET /v0/management/dashboard/*` | Dashboard data. |
-| `GET /v0/management/monitoring/*` | Monitoring data. |
-| `GET /v0/management/codex-inspection/*` | Server Codex inspection. |
-| `GET /models`, `GET /v1/models` | Proxy model-list requests to CPA after setup. |
-| `/v0/management/*` | Proxied to CPA unless handled by CPAMP. |
+| Endpoint                                                         | Purpose                                                                                                      |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `GET /health`                                                    | Health check.                                                                                                |
+| `GET /status`                                                    | Collector, SQLite, event count, and background data-migration progress.                                      |
+| `GET /usage-service/info`                                        | Manager Server mode detection.                                                                               |
+| `GET /usage-service/config`                                      | Read CPAMP Manager Server config.                                                                            |
+| `PUT /usage-service/config`                                      | Save CPAMP config and restart collector if needed.                                                           |
+| `GET /usage-service/account-processing-policy`                   | Read quota cooldown, account action queue, and auto-disable policy.                                          |
+| `PATCH /usage-service/account-processing-policy`                 | Update account processing policy. Fields locked by environment variables cannot be modified through the API. |
+| `GET /usage-service/quota-cooldowns`                             | Read active quota cooldowns so the auth files page can show recovery hints.                                  |
+| `POST /setup`                                                    | First setup.                                                                                                 |
+| `GET /v0/management/usage`                                       | Compatible usage data.                                                                                       |
+| `GET /v0/management/usage/export`                                | Export JSONL usage events.                                                                                   |
+| `POST /v0/management/usage/import`                               | Import JSONL or compatible legacy snapshots.                                                                 |
+| `GET /v0/management/model-prices/usage-summary`                  | Return the lightweight model-call summary used by the Model Prices page.                                     |
+| `GET /v0/management/model-prices`                                | Model pricing.                                                                                               |
+| `PUT /v0/management/model-prices`                                | Replace saved model pricing.                                                                                 |
+| `POST /v0/management/model-prices/sync`                          | Price sync.                                                                                                  |
+| `GET /v0/management/api-key-aliases`                             | API Key aliases.                                                                                             |
+| `GET /v0/management/account-action-candidates`                   | Auth issue action queue.                                                                                     |
+| `POST /v0/management/account-action-candidates/{id}/ignore`      | Ignore an account action candidate.                                                                          |
+| `POST /v0/management/account-action-candidates/{id}/resolve`     | Mark an account action candidate as resolved.                                                                |
+| `POST /v0/management/account-action-candidates/{id}/enable`      | Re-enable the auth file linked to a candidate.                                                               |
+| `DELETE /v0/management/account-action-candidates/{id}/auth-file` | Delete the auth file linked to a candidate.                                                                  |
+| `GET /v0/management/dashboard/*`                                 | Dashboard data.                                                                                              |
+| `GET /v0/management/monitoring/*`                                | Monitoring data.                                                                                             |
+| `GET /v0/management/codex-inspection/*`                          | Server Codex inspection.                                                                                     |
+| `GET /models`, `GET /v1/models`                                  | Proxy model-list requests to CPA after setup.                                                                |
+| `/v0/management/*`                                               | Proxied to CPA unless handled by CPAMP.                                                                      |
 
 After setup, Manager Server management endpoints require:
 
 ```text
 Authorization: Bearer <CPAMP_ADMIN_KEY>
 ```
+
+:::
 
 ## Data And Security
 

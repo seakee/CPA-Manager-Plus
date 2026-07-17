@@ -2,9 +2,19 @@
 
 Use native packages when Docker is not part of your environment. They fit deployments already managed by systemd, launchd, Windows services, or another process supervisor.
 
-Native mode is still Manager Server mode: the binary serves `/management.html`, stores SQLite data locally, and uses the CPAMP Admin Key for login. It is not the old "external Usage Service for the CPA-hosted panel" workflow.
+Native mode is still Manager Server mode: the binary serves `/management.html`, stores SQLite data locally, and uses the CPAMP Admin Key for login. It is not the old "external Usage Service for the CPA-port panel" workflow.
 
 If you only want to install the CPAMP native package, you can use [One-Click Installer](./installer.md). The script does not install CPA natively; use Docker for a full new deployment.
+
+## Shortest Installation Path
+
+1. Confirm that CPA already runs and prepare its URL and CPA Management Key.
+2. Download the native package for your operating system and architecture from GitHub Releases.
+3. Extract and run `cpa-manager-plus`, or use the included background control script.
+4. Open `http://<host>:18317/management.html`.
+5. Log in with the generated CPAMP Admin Key from the logs and connect CPA.
+
+For long-running production use, choose systemd, launchd, Windows Service Manager, or another process manager afterward.
 
 ## Requirements
 
@@ -133,6 +143,8 @@ data/data.key
 
 `data.key` decrypts the saved CPA Management Key. If it is lost, save the CPA connection again.
 
+::: details Advanced: Linux systemd example
+
 ## Linux systemd Example
 
 Install to a fixed directory:
@@ -183,6 +195,8 @@ Logs:
 ```bash
 journalctl -u cpa-manager-plus -f
 ```
+
+:::
 
 ## First Setup
 

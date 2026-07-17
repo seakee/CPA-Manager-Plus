@@ -187,14 +187,15 @@ sudo systemctl status cpa-manager-plus
 
 如果 Windows 服务的可执行文件路径包含版本目录，需要同步修改服务配置。
 
-## CPA 托管面板兼容模式
+## CPAMP 轻量面板
 
-CPA 托管面板只更新浏览器前端，不会更新 Manager Server 二进制、SQLite schema 或后台采集能力。
+CPAMP 轻量面板由 CPA 下载和托管。更新它只会更新浏览器前端，不会安装或更新 Manager Server、SQLite schema 或后台采集能力。
 
 确认 CPA 指向本项目：
 
-```text
-remote-management.panel-repo = https://github.com/seakee/CPA-Manager-Plus
+```yaml
+remote-management:
+  panel-github-repository: 'https://github.com/seakee/CPA-Manager-Plus'
 ```
 
 CPA 通常会自动更新缓存面板。如果仍显示旧版本，删除 CPA 工作目录中的缓存文件并重新加载或重启 CPA：

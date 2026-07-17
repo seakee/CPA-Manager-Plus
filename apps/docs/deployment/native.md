@@ -2,9 +2,19 @@
 
 不想使用 Docker 时，可以直接运行 CPAMP 原生包。它适合已有进程管理、systemd、launchd 或 Windows 服务托管习惯的环境。
 
-原生包模式仍然是 Manager Server 模式：二进制会托管 `/management.html`，本地保存 SQLite 数据，并使用 CPAMP 管理员密钥登录。它不是旧 CPA-Manager 的“给 CPA 托管面板外接 Usage Service”工作流。
+原生包模式仍然是 Manager Server 模式：二进制会托管 `/management.html`，本地保存 SQLite 数据，并使用 CPAMP 管理员密钥登录。它不是旧 CPA-Manager 的“给 CPA 端口面板外接 Usage Service”工作流。
 
 如果只想安装 CPAMP 原生包，可以使用 [一键安装脚本](./installer.md)。脚本不会原生安装 CPA；完整新部署仍建议用 Docker。
+
+## 最短安装流程
+
+1. 确认 CPA 已经运行，并准备 CPA 地址和 CPA Management Key。
+2. 从 GitHub Release 下载与你系统和架构匹配的原生包。
+3. 解压后运行 `cpa-manager-plus`，或使用包内的后台控制脚本。
+4. 打开 `http://<host>:18317/management.html`。
+5. 使用日志中生成的 CPAMP 管理员密钥登录并连接 CPA。
+
+需要长期运行时，再选择 systemd、launchd、Windows 服务或其他进程管理方式。
 
 ## 前置要求
 
@@ -131,6 +141,8 @@ data/data.key
 
 `data.key` 用来解密已保存的 CPA Management Key。丢失后只能重新保存 CPA 连接。
 
+::: details 高级：Linux systemd 示例
+
 ## Linux systemd 示例
 
 安装到固定目录：
@@ -181,6 +193,8 @@ sudo systemctl status cpa-manager-plus
 ```bash
 journalctl -u cpa-manager-plus -f
 ```
+
+:::
 
 ## 首次 setup
 

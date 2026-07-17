@@ -2,6 +2,8 @@
 
 安装脚本适合第一次部署，或已经有 CPA、只想把 CPAMP 跑起来的环境。它不会直接覆盖已有配置文件；执行前会先展示安装摘要，确认后才写入文件和启动服务。
 
+大多数用户只需要完成四步：运行脚本、选择安装范围、选择 Docker 或原生包、确认摘要。安装完成后按脚本输出的地址和密钥登录即可。
+
 ## 运行方式
 
 下载脚本后运行：
@@ -38,6 +40,10 @@ bash install-cpamp.sh
 完整安装推荐 Docker。CPAMP 原生包只包含 Manager Server，不包含 CPA 运行时；如果要用原生包，需要先单独部署 CPA。
 
 ## 完整 Docker 安装
+
+没有现成 CPA 时选择这个组合。安装器会同时启动 CPA 和 CPAMP，并准备持久化目录和登录密钥。
+
+::: details 查看安装器生成的文件和连接方式
 
 选择 CPA + CPAMP 后，脚本会生成：
 
@@ -102,6 +108,8 @@ http://<host>:18317/management.html
 
 脚本会保存 CPAMP 管理员密钥并打印文件路径和查看命令。交互安装可以选择是否立即在终端显示完整密钥；不要分享包含密钥的终端截图。演示客户端 API Key 只用于安装后快速连通性验证，生产客户端建议在面板里重新创建并按用途命名。
 
+:::
+
 ## 仅安装 CPAMP
 
 如果 CPA 已经在运行，选择仅安装 CPAMP。交互向导会优先询问是否现在填写 CPA URL 和 CPA Management Key。
@@ -148,6 +156,8 @@ cpa-manager-plus.pid
 ```
 
 原生包会以前台程序的方式启动到后台。Linux 会额外生成 `cpa-manager-plus.service`，可复制到 systemd 服务目录后按你的系统策略启用；macOS 或已有进程管理方式可以继续参考 `run.sh`。
+
+::: details 自动化部署、重跑和修复
 
 ## 高级用法
 
@@ -234,6 +244,8 @@ CPAMP_OPERATION=regenerate bash install-cpamp.sh
 ```
 
 `CPAMP_OVERWRITE=1` 继续兼容旧用法，并会映射到配置重新生成流程。脚本会把旧的 `.env`、`compose.yaml`、CPA 配置、`run.sh` 和 service 文件备份到安装目录的 `backups/installer-*`，但仍建议单独备份 `secrets/`、`data/` 和 `cliproxyapi/`。丢失 `data.key` 后，已保存的 CPA Management Key 无法恢复。
+
+:::
 
 ## 启动和登录验证
 

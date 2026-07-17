@@ -4,6 +4,18 @@ Use this page when you have lost the CPAMP Admin Key for Full Docker or native M
 
 The reset command modifies the local SQLite database directly. Stop Manager Server before running it so the service does not keep writing to SQLite.
 
+## Shortest Recovery Path
+
+1. Stop Manager Server and back up its data directory.
+2. Run `reset-admin-key` in the matching Docker or native environment.
+3. Record the new CPAMP Admin Key from the terminal, but never commit or share it.
+4. Restart Manager Server.
+5. Open `:18317/management.html`, log in with the new key, and confirm the CPA connection.
+
+The commands below are grouped by deployment. Run only the group that matches your setup.
+
+::: details Advanced: command internals
+
 ## What The Command Does
 
 `cpa-manager-plus reset-admin-key` replaces `settings.admin_credential_v1` in the Manager Server SQLite database with a new salt and HMAC digest.
@@ -14,6 +26,8 @@ The reset command modifies the local SQLite database directly. Stop Manager Serv
 - The command does not need the CPA Management Key or `data.key`.
 
 The alias `reset-admin-password` is also available.
+
+:::
 
 ## Before You Run It
 

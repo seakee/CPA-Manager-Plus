@@ -187,14 +187,15 @@ Keeping `/var/lib/cpa-manager-plus` outside the program directory prevents relea
 
 Update the Windows service configuration if its executable path contains the version directory.
 
-## CPA-Hosted Panel Compatibility Mode
+## CPAMP Lightweight Panel
 
-Updating a CPA-hosted panel updates only the browser frontend. It does not update the Manager Server binary, SQLite schema, or collector.
+The CPAMP Lightweight Panel is downloaded and hosted by CPA. Updating it changes only the browser frontend; it does not install or update Manager Server, the SQLite schema, or the collector.
 
 Confirm that CPA points to this repository:
 
-```text
-remote-management.panel-repo = https://github.com/seakee/CPA-Manager-Plus
+```yaml
+remote-management:
+  panel-github-repository: 'https://github.com/seakee/CPA-Manager-Plus'
 ```
 
 CPA normally refreshes its cached panel automatically. If it still serves an old panel, remove the cached file from the CPA working directory and reload or restart CPA:

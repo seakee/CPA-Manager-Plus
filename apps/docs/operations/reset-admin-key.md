@@ -4,6 +4,18 @@
 
 重置命令会直接修改本地 SQLite 数据库。执行前请先停止 Manager Server，避免服务运行中继续写入 SQLite。
 
+## 最短恢复流程
+
+1. 停止 Manager Server 并备份数据目录。
+2. 在对应 Docker 或原生包环境中运行 `reset-admin-key`。
+3. 只记录终端输出的新 CPAMP 管理员密钥，不要把它提交到仓库或发到聊天中。
+4. 重启 Manager Server。
+5. 打开 `:18317/management.html`，用新密钥登录并确认 CPA 连接正常。
+
+下面的命令按部署方式分类。只执行与你当前部署匹配的一组。
+
+::: details 高级：命令内部行为
+
 ## 命令作用
 
 `cpa-manager-plus reset-admin-key` 会替换 Manager Server SQLite 中的 `settings.admin_credential_v1`，写入新的盐和 HMAC 摘要。
@@ -14,6 +26,8 @@
 - 命令不需要 CPA Management Key，也不需要 `data.key`。
 
 也可以使用别名 `reset-admin-password`。
+
+:::
 
 ## 执行前检查
 

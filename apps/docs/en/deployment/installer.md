@@ -2,6 +2,8 @@
 
 Use the installer for a first deployment, or when CPA is already running and you only want to bring up CPAMP. It does not overwrite existing config files by default. Before it writes files or starts services, it shows a summary and asks for confirmation.
 
+Most users only need four steps: run the script, choose the install scope, choose Docker or a native package, and confirm the summary. After installation, use the address and key printed by the installer.
+
 ## Run It
 
 Download the script, then run it:
@@ -38,6 +40,10 @@ The wizard walks through:
 Use Docker for a full CPA + CPAMP install. The CPAMP native package contains Manager Server only; CPA must already be deployed separately.
 
 ## Full Docker Install
+
+Choose this when CPA is not installed yet. The installer starts both CPA and CPAMP and prepares persistent storage and login keys.
+
+::: details Generated files and connection behavior
 
 When you choose CPA + CPAMP, the script generates:
 
@@ -102,6 +108,8 @@ http://<host>:18317/management.html
 
 The script saves the CPAMP Admin Key and prints its file path and view command. Interactive installs can choose whether to reveal the full key in the terminal; do not share terminal screenshots containing it. The demo client API key is only for a quick post-install connectivity check; create named production clients in the panel.
 
+:::
+
 ## CPAMP-Only Install
 
 If CPA is already running, choose CPAMP only. The interactive wizard first asks whether you want to enter the CPA URL and CPA Management Key now.
@@ -148,6 +156,8 @@ cpa-manager-plus.pid
 ```
 
 The native package is started in the background. On Linux the installer also creates `cpa-manager-plus.service`; copy it into your systemd service directory and enable it according to your host policy. On macOS, or with another process manager, keep using `run.sh` as the integration point.
+
+::: details Automation, reruns, and repair
 
 ## Advanced Usage
 
@@ -234,6 +244,8 @@ CPAMP_OPERATION=regenerate bash install-cpamp.sh
 ```
 
 `CPAMP_OVERWRITE=1` remains compatible with the old workflow and maps to config regeneration. The installer backs up the previous `.env`, `compose.yaml`, CPA config, `run.sh`, and service file under `backups/installer-*`. You should still separately back up `secrets/`, `data/`, and `cliproxyapi/`. If `data.key` is lost, stored CPA Management Keys cannot be recovered.
+
+:::
 
 ## Startup And Login Verification
 
