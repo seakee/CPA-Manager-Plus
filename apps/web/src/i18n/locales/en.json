@@ -3561,6 +3561,61 @@
     "full": "Full effects",
     "reduced": "Performance"
   },
+  "theme_studio": {
+    "open": "Open theme studio",
+    "title": "Theme Studio",
+    "description": "Tune colors, radius, typography, density, and page layout with a live preview.",
+    "close": "Close theme studio",
+    "reset": "Reset theme defaults",
+    "mode": "Display mode",
+    "colors": "Color theme",
+    "live_preview": "Live preview",
+    "custom_color": "Choose a custom accent color",
+    "options": {
+      "default": "Default"
+    },
+    "presets": {
+      "default": "CPAMP Blue",
+      "anthropic": "Warm Clay",
+      "underground": "Underground",
+      "rose_garden": "Rose Garden",
+      "lake_view": "Lake View",
+      "sunset_glow": "Sunset Glow",
+      "forest_whisper": "Forest Whisper",
+      "ocean_breeze": "Ocean Breeze",
+      "lavender_dream": "Lavender Dream",
+      "monochrome": "Monochrome",
+      "custom": "Custom accent"
+    },
+    "radius": {
+      "title": "Corner radius",
+      "none": "Square",
+      "sm": "Small",
+      "md": "Medium",
+      "lg": "Large",
+      "xl": "Extra large"
+    },
+    "density": {
+      "title": "Interface density",
+      "compact": "Compact",
+      "comfortable": "Comfortable"
+    },
+    "font": {
+      "title": "Font style",
+      "system": "System",
+      "modern": "Modern",
+      "serif": "Serif"
+    },
+    "layout": {
+      "title": "Content width",
+      "full": "Full width",
+      "centered": "Centered"
+    },
+    "effects": {
+      "full_description": "Keep animated backgrounds, glass blur, and the full visual depth.",
+      "reduced_description": "Disable expensive blur and background motion for smoother performance."
+    }
+  },
   "sidebar": {
     "toggle_expand": "Expand sidebar",
     "toggle_collapse": "Collapse sidebar"

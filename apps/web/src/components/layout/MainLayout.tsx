@@ -11,6 +11,7 @@ import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
 import { PageTransition } from '@/components/common/PageTransition';
+import { ThemeStudio } from '@/components/theme/ThemeStudio';
 import { MainRoutes } from '@/router/MainRoutes';
 import {
   IconGithub,
@@ -33,8 +34,6 @@ import {
   useConfigStore,
   useLanguageStore,
   useNotificationStore,
-  useThemeStore,
-  useVisualEffectsStore,
 } from '@/stores';
 import { pluginsApi } from '@/services/api';
 import {
@@ -51,7 +50,6 @@ import { isFileLogsAvailable } from '@/features/logs/logFeatureAvailability';
 import { getDemoLogoutPath, prefixRouteBase, stripRouteBase } from '@/features/demo/demoMode';
 import { LANGUAGE_LABEL_KEYS, LANGUAGE_ORDER, STORAGE_KEY_SIDEBAR } from '@/utils/constants';
 import { isSupportedLanguage } from '@/utils/language';
-import type { Theme, VisualEffectsMode } from '@/types';
 
 const SIDEBAR_ICON_SIZE = 20;
 const GITHUB_REPOSITORY_URL = 'https://github.com/seakee/CPA-Manager-Plus';
@@ -126,52 +124,6 @@ const headerIcons = {
       <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
     </svg>
   ),
-  sun: (
-    <svg {...headerIconProps}>
-      <circle cx="12" cy="12" r="4" />
-      <path d="M12 2v2" />
-      <path d="M12 20v2" />
-      <path d="m4.93 4.93 1.41 1.41" />
-      <path d="m17.66 17.66 1.41 1.41" />
-      <path d="M2 12h2" />
-      <path d="M20 12h2" />
-      <path d="m6.34 17.66-1.41 1.41" />
-      <path d="m19.07 4.93-1.41 1.41" />
-    </svg>
-  ),
-  moon: (
-    <svg {...headerIconProps}>
-      <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9z" />
-    </svg>
-  ),
-  autoTheme: (
-    <svg {...headerIconProps}>
-      <rect x="4" y="5" width="16" height="11" rx="2" />
-      <path d="M8 21h8" />
-      <path d="M12 16v5" />
-      <path d="M9 11a3 3 0 0 1 5.2-2" />
-      <path d="M14.5 7v2h-2" />
-      <path d="M15 11a3 3 0 0 1-5.2 2" />
-      <path d="M9.5 15v-2h2" />
-    </svg>
-  ),
-  visualEffectsFull: (
-    <svg {...headerIconProps}>
-      <path d="m12 3 1.85 5.15L19 10l-5.15 1.85L12 17l-1.85-5.15L5 10l5.15-1.85L12 3z" />
-      <path d="M5 3v4" />
-      <path d="M3 5h4" />
-      <path d="M19 17v4" />
-      <path d="M17 19h4" />
-    </svg>
-  ),
-  visualEffectsReduced: (
-    <svg {...headerIconProps}>
-      <path d="M4 14a8 8 0 0 1 16 0" />
-      <path d="M12 14l4-5" />
-      <path d="M8 14h8" />
-      <path d="M5 19h14" />
-    </svg>
-  ),
   logout: (
     <svg {...headerIconProps}>
       <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
@@ -180,29 +132,6 @@ const headerIcons = {
     </svg>
   ),
 };
-
-const THEME_OPTIONS: Array<{
-  key: Theme;
-  labelKey: string;
-  icon: ReactNode;
-}> = [
-  { key: 'auto', labelKey: 'theme.auto', icon: headerIcons.autoTheme },
-  { key: 'white', labelKey: 'theme.white', icon: headerIcons.sun },
-  { key: 'dark', labelKey: 'theme.dark', icon: headerIcons.moon },
-];
-
-const VISUAL_EFFECTS_OPTIONS: Array<{
-  key: VisualEffectsMode;
-  labelKey: string;
-  icon: ReactNode;
-}> = [
-  { key: 'full', labelKey: 'visual_effects.full', icon: headerIcons.visualEffectsFull },
-  {
-    key: 'reduced',
-    labelKey: 'visual_effects.reduced',
-    icon: headerIcons.visualEffectsReduced,
-  },
-];
 
 function PluginSidebarIcon({ src }: { src: string }) {
   const [failed, setFailed] = useState(false);
@@ -245,10 +174,6 @@ export function MainLayout({ routeBase = '', demoMode = false }: MainLayoutProps
   const clearCache = useConfigStore((state) => state.clearCache);
   const featureAvailability = usePanelFeatureAvailability();
 
-  const theme = useThemeStore((state) => state.theme);
-  const setTheme = useThemeStore((state) => state.setTheme);
-  const visualEffectsMode = useVisualEffectsStore((state) => state.mode);
-  const setVisualEffectsMode = useVisualEffectsStore((state) => state.setMode);
   const language = useLanguageStore((state) => state.language);
   const setLanguage = useLanguageStore((state) => state.setLanguage);
 
@@ -261,13 +186,9 @@ export function MainLayout({ routeBase = '', demoMode = false }: MainLayoutProps
     }
   });
   const [languageMenuOpen, setLanguageMenuOpen] = useState(false);
-  const [themeMenuOpen, setThemeMenuOpen] = useState(false);
-  const [visualEffectsMenuOpen, setVisualEffectsMenuOpen] = useState(false);
   const [pluginResources, setPluginResources] = useState<PluginResourceEntry[]>([]);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const languageMenuRef = useRef<HTMLDivElement | null>(null);
-  const themeMenuRef = useRef<HTMLDivElement | null>(null);
-  const visualEffectsMenuRef = useRef<HTMLDivElement | null>(null);
   const headerRef = useRef<HTMLElement | null>(null);
 
   const fullBrandName = 'CPA Manager Plus';
@@ -365,91 +286,9 @@ export function MainLayout({ routeBase = '', demoMode = false }: MainLayoutProps
     };
   }, [languageMenuOpen]);
 
-  useEffect(() => {
-    if (!themeMenuOpen) {
-      return;
-    }
-
-    const handlePointerDown = (event: MouseEvent) => {
-      if (!themeMenuRef.current?.contains(event.target as Node)) {
-        setThemeMenuOpen(false);
-      }
-    };
-
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setThemeMenuOpen(false);
-      }
-    };
-
-    document.addEventListener('mousedown', handlePointerDown);
-    document.addEventListener('keydown', handleEscape);
-
-    return () => {
-      document.removeEventListener('mousedown', handlePointerDown);
-      document.removeEventListener('keydown', handleEscape);
-    };
-  }, [themeMenuOpen]);
-
-  useEffect(() => {
-    if (!visualEffectsMenuOpen) {
-      return;
-    }
-
-    const handlePointerDown = (event: MouseEvent) => {
-      if (!visualEffectsMenuRef.current?.contains(event.target as Node)) {
-        setVisualEffectsMenuOpen(false);
-      }
-    };
-
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setVisualEffectsMenuOpen(false);
-      }
-    };
-
-    document.addEventListener('mousedown', handlePointerDown);
-    document.addEventListener('keydown', handleEscape);
-
-    return () => {
-      document.removeEventListener('mousedown', handlePointerDown);
-      document.removeEventListener('keydown', handleEscape);
-    };
-  }, [visualEffectsMenuOpen]);
-
   const toggleLanguageMenu = useCallback(() => {
     setLanguageMenuOpen((prev) => !prev);
-    setThemeMenuOpen(false);
-    setVisualEffectsMenuOpen(false);
   }, []);
-
-  const toggleThemeMenu = useCallback(() => {
-    setThemeMenuOpen((prev) => !prev);
-    setLanguageMenuOpen(false);
-    setVisualEffectsMenuOpen(false);
-  }, []);
-
-  const toggleVisualEffectsMenu = useCallback(() => {
-    setVisualEffectsMenuOpen((prev) => !prev);
-    setLanguageMenuOpen(false);
-    setThemeMenuOpen(false);
-  }, []);
-
-  const handleThemeSelect = useCallback(
-    (nextTheme: Theme) => {
-      setTheme(nextTheme);
-      setThemeMenuOpen(false);
-    },
-    [setTheme]
-  );
-
-  const handleVisualEffectsSelect = useCallback(
-    (nextMode: VisualEffectsMode) => {
-      setVisualEffectsMode(nextMode);
-      setVisualEffectsMenuOpen(false);
-    },
-    [setVisualEffectsMode]
-  );
 
   const handleLanguageSelect = useCallback(
     (nextLanguage: string) => {
@@ -828,89 +667,7 @@ export function MainLayout({ routeBase = '', demoMode = false }: MainLayoutProps
               )}
             </div>
 
-            <div className={`theme-menu ${themeMenuOpen ? 'open' : ''}`} ref={themeMenuRef}>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={toggleThemeMenu}
-                title={t('theme.switch')}
-                aria-label={t('theme.switch')}
-                aria-haspopup="menu"
-                aria-expanded={themeMenuOpen}
-              >
-                {theme === 'auto'
-                  ? headerIcons.autoTheme
-                  : theme === 'dark'
-                    ? headerIcons.moon
-                    : headerIcons.sun}
-              </Button>
-              {themeMenuOpen && (
-                <div
-                  className="notification entering theme-menu-popover"
-                  role="menu"
-                  aria-label={t('theme.switch')}
-                >
-                  {THEME_OPTIONS.map((option) => (
-                    <button
-                      key={option.key}
-                      type="button"
-                      className={`theme-option ${theme === option.key ? 'active' : ''}`}
-                      onClick={() => handleThemeSelect(option.key)}
-                      role="menuitemradio"
-                      aria-checked={theme === option.key}
-                      title={t(option.labelKey)}
-                      aria-label={t(option.labelKey)}
-                    >
-                      <span className="theme-option-icon">{option.icon}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <div
-              className={`visual-effects-menu ${visualEffectsMenuOpen ? 'open' : ''}`}
-              ref={visualEffectsMenuRef}
-            >
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={toggleVisualEffectsMenu}
-                title={t('visual_effects.switch')}
-                aria-label={t('visual_effects.switch')}
-                aria-haspopup="menu"
-                aria-expanded={visualEffectsMenuOpen}
-              >
-                {visualEffectsMode === 'full'
-                  ? headerIcons.visualEffectsFull
-                  : headerIcons.visualEffectsReduced}
-              </Button>
-              {visualEffectsMenuOpen && (
-                <div
-                  className="notification entering visual-effects-menu-popover"
-                  role="menu"
-                  aria-label={t('visual_effects.switch')}
-                >
-                  {VISUAL_EFFECTS_OPTIONS.map((option) => (
-                    <button
-                      key={option.key}
-                      type="button"
-                      className={`visual-effects-option ${
-                        visualEffectsMode === option.key ? 'active' : ''
-                      }`}
-                      onClick={() => handleVisualEffectsSelect(option.key)}
-                      role="menuitemradio"
-                      aria-checked={visualEffectsMode === option.key}
-                      title={t(option.labelKey)}
-                      aria-label={t(option.labelKey)}
-                    >
-                      <span className="visual-effects-option-icon">{option.icon}</span>
-                      <span className="visual-effects-option-label">{t(option.labelKey)}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
+            <ThemeStudio />
 
             <Button
               variant="ghost"

@@ -20,7 +20,7 @@ body {
 
 body {
   margin: 0;
-  font-family: $font-family;
+  font-family: var(--app-font-family, #{$font-family});
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   line-height: 1.5;

@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { SelectionCheckbox } from '@/components/ui/SelectionCheckbox';
+import { ThemeStudio } from '@/components/theme/ThemeStudio';
 import {
   IconCheck,
   IconEye,
@@ -11,16 +12,13 @@ import {
   IconInfo,
   IconKey,
   IconLanguages,
-  IconMoon,
   IconShield,
-  IconSun,
   IconTimer,
 } from '@/components/ui/icons';
 import {
   useAuthStore,
   useLanguageStore,
   useNotificationStore,
-  useThemeStore,
   useUsageServiceStore,
 } from '@/stores';
 import {
@@ -108,8 +106,6 @@ export function LoginPage() {
   const { showNotification } = useNotificationStore();
   const language = useLanguageStore((state) => state.language);
   const setLanguage = useLanguageStore((state) => state.setLanguage);
-  const theme = useThemeStore((state) => state.theme);
-  const cycleTheme = useThemeStore((state) => state.cycleTheme);
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
   const login = useAuthStore((state) => state.login);
   const restoreSession = useAuthStore((state) => state.restoreSession);
@@ -501,15 +497,7 @@ export function LoginPage() {
   return (
     <div className={styles.container}>
       <div className={styles.toolBar}>
-        <button
-          type="button"
-          className={styles.toolButton}
-          onClick={cycleTheme}
-          aria-label={t('theme.switch')}
-          title={t('theme.switch')}
-        >
-          {theme === 'dark' ? <IconMoon size={17} /> : <IconSun size={17} />}
-        </button>
+        <ThemeStudio triggerClassName={styles.toolButton} triggerVariant="secondary" />
         <div className={styles.languageMenu} ref={languageMenuRef}>
           <button
             type="button"
