@@ -655,6 +655,7 @@
     "openai_models_fetch_loading": "Fetching models from /models...",
     "openai_models_fetch_empty": "No models returned. Check the address, key, or headers.",
     "openai_models_fetch_error": "Failed to fetch models",
+    "openai_models_proxy_requires_saved_entry": "Save the provider before fetching models through its configured proxy.",
     "openai_models_fetch_back": "Back to edit",
     "openai_models_fetch_apply": "Add selected models",
     "openai_models_search_label": "Search models",
