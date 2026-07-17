@@ -25,7 +25,7 @@ import (
 )
 
 func New(appCtx *app.Context) http.Handler {
-	healthHandler := &healthcontroller.Handler{ServiceID: appCtx.ServiceID}
+	healthHandler := &healthcontroller.Handler{App: appCtx}
 	systemHandler := &systemcontroller.Handler{App: appCtx}
 	setupHandler := &setupcontroller.Handler{App: appCtx}
 	managerConfigHandler := &managerconfigcontroller.Handler{App: appCtx}
@@ -43,6 +43,7 @@ func New(appCtx *app.Context) http.Handler {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", middleware.WithCORS(appCtx.Config, healthHandler.Health))
+	mux.HandleFunc("/health/ready", middleware.WithCORS(appCtx.Config, healthHandler.Ready))
 	mux.HandleFunc("/status", middleware.WithCORS(appCtx.Config, systemHandler.Status))
 	mux.HandleFunc("/usage-service/info", middleware.WithCORS(appCtx.Config, systemHandler.Info))
 	mux.HandleFunc("/usage-service/config", middleware.WithCORS(appCtx.Config, managerConfigHandler.Handle))
