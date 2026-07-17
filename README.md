@@ -82,6 +82,12 @@ CPAMP has no analytics SDKs, cloud account dependency, or registration flow. By 
 
 CPA Manager Plus works with [CPA / CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), an AI gateway that routes requests to OpenAI-compatible providers.
 
+### Windows native launcher
+
+Windows native release packages include `Start-CPA.cmd` and `Start-CPA.ps1` to start CPA and CPA Manager Plus together. The launcher validates process and port ownership, performs an authenticated GPT-5.5 request, and requires Manager Plus to persist the resulting usage event before opening the panel. It can also install a current-user Start Menu shortcut for `Win+S` search without administrator privileges.
+
+See [Windows one-click launcher](docs/windows-launcher.md) for setup, shortcut management, and readiness details.
+
 ### Installer
 
 For a guided deployment, run:
@@ -162,6 +168,7 @@ CPAMP can also run as a CPA-hosted panel on `:8317`, or as a standalone frontend
 | Docker deployment | [Docker Deployment](https://seakee.github.io/CPA-Manager-Plus/docs/en/deployment/docker.html) |
 | Native packages | [Native Packages](https://seakee.github.io/CPA-Manager-Plus/docs/en/deployment/native.html) |
 | Native background control | [Native Background Control](https://seakee.github.io/CPA-Manager-Plus/docs/en/deployment/native-background-control.html) |
+| Windows one-click launcher | [Windows one-click launcher](docs/windows-launcher.md) |
 | Manager Server config, endpoints, data, and security | [Manager Server Guide](https://seakee.github.io/CPA-Manager-Plus/docs/en/operations/manager-server.html) |
 | Reverse proxy | [Reverse Proxy](https://seakee.github.io/CPA-Manager-Plus/docs/en/deployment/reverse-proxy.html) |
 | Migrate from old CPA-Manager | [Migration from CPA-Manager](https://seakee.github.io/CPA-Manager-Plus/docs/en/migration/from-cpa-manager.html) |
