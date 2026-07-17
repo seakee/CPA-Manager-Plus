@@ -30,10 +30,10 @@ bash install-cpamp.sh
 
 ## 支持的组合
 
-| 安装范围 | Docker | 原生包 |
-|---|---:|---:|
-| CPA + CPAMP | 支持 | 暂不支持 |
-| 仅 CPAMP | 支持 | 支持 |
+| 安装范围    | Docker |   原生包 |
+| ----------- | -----: | -------: |
+| CPA + CPAMP |   支持 | 暂不支持 |
+| 仅 CPAMP    |   支持 |     支持 |
 
 完整安装推荐 Docker。CPAMP 原生包只包含 Manager Server，不包含 CPA 运行时；如果要用原生包，需要先单独部署 CPA。
 
@@ -66,10 +66,10 @@ CPA 最小配置会启用远程管理和用量发布：
 
 ```yaml
 api-keys:
-  - "sk-..."
+  - 'sk-...'
 
 remote-management:
-  secret-key: "cpa_..."
+  secret-key: 'cpa_...'
   allow-remote: true
 
 usage-statistics-enabled: true
@@ -100,7 +100,7 @@ http://cli-proxy-api:8317
 http://<host>:18317/management.html
 ```
 
-脚本会在最后打印 CPAMP 管理员密钥。演示客户端 API Key 只用于安装后快速连通性验证，生产客户端建议在面板里重新创建并按用途命名。
+脚本会保存 CPAMP 管理员密钥并打印文件路径和查看命令。交互安装可以选择是否立即在终端显示完整密钥；不要分享包含密钥的终端截图。演示客户端 API Key 只用于安装后快速连通性验证，生产客户端建议在面板里重新创建并按用途命名。
 
 ## 仅安装 CPAMP
 
@@ -177,27 +177,66 @@ bash install-cpamp.sh
 
 常用变量：
 
-| 变量 | 说明 |
-|---|---|
-| `CPAMP_LANG` | `zh-CN` 或 `en-US`。 |
-| `CPAMP_INSTALL_MODE` | `stack` 或 `cpamp`。 |
-| `CPAMP_DEPLOY_METHOD` | `docker` 或 `native`。 |
-| `CPAMP_INSTALL_DIR` | 安装目录，默认 `~/cpa-manager-plus`。 |
-| `CPAMP_PORT` | CPAMP 对外端口，默认 `18317`。 |
-| `CPAMP_CPA_PORT` | 完整 Docker 安装时 CPA 对外端口，默认 `8317`。 |
-| `CPAMP_IMAGE` | CPAMP Docker 镜像。 |
-| `CPAMP_CPA_IMAGE` | CPA Docker 镜像。 |
-| `CPAMP_VERSION` | 原生包版本，默认 `latest`。 |
-| `CPAMP_CPA_CONNECTION_MODE` | `setup` 或 `env`。 |
-| `CPAMP_CPA_URL` | `env` 模式下的 CPA URL。 |
-| `CPAMP_CPA_MANAGEMENT_KEY` | `env` 模式下的 CPA Management Key。 |
+| 变量                        | 说明                                                                               |
+| --------------------------- | ---------------------------------------------------------------------------------- |
+| `CPAMP_LANG`                | `zh-CN` 或 `en-US`。                                                               |
+| `CPAMP_INSTALL_MODE`        | `stack` 或 `cpamp`。                                                               |
+| `CPAMP_DEPLOY_METHOD`       | `docker` 或 `native`。                                                             |
+| `CPAMP_INSTALL_DIR`         | 安装目录，默认 `~/cpa-manager-plus`。                                              |
+| `CPAMP_PORT`                | CPAMP 对外端口，默认 `18317`。                                                     |
+| `CPAMP_CPA_PORT`            | 完整 Docker 安装时 CPA 对外端口，默认 `8317`。                                     |
+| `CPAMP_IMAGE`               | CPAMP Docker 镜像。                                                                |
+| `CPAMP_CPA_IMAGE`           | CPA Docker 镜像。                                                                  |
+| `CPAMP_VERSION`             | 原生包版本，默认 `latest`。                                                        |
+| `CPAMP_CPA_CONNECTION_MODE` | `setup` 或 `env`。                                                                 |
+| `CPAMP_CPA_URL`             | `env` 模式下的 CPA URL。                                                           |
+| `CPAMP_CPA_MANAGEMENT_KEY`  | `env` 模式下的 CPA Management Key。                                                |
+| `CPAMP_OPERATION`           | `install`、`upgrade`、`repair` 或 `regenerate`。已有部署的非交互操作必须明确设置。 |
+| `CPAMP_PROJECT_NAME`        | Docker Compose 项目名，默认 `cpamp`；需要在同一主机创建隔离的新部署时使用。        |
 
 ## 重跑和覆盖
 
-脚本会复用已经存在的 secret 文件，但不会默认覆盖 `compose.yaml`、`.env`、`config.yaml` 或 `run.sh`。如果确定要重新生成配置，可以设置：
+以下 `CPAMP_OPERATION` 操作模式用于 Docker 部署；原生包继续使用原有的版本和覆盖参数。
+
+脚本会在写文件前检查安装目录和 Docker 数据卷。检测到已有部署时，交互模式会提供：
+
+1. **升级现有部署**：只执行镜像拉取和容器更新，不修改配置或密钥。
+2. **修复管理员登录**：停止 CPAMP，把 SQLite 中的管理员凭证同步为 `secrets/cpamp-admin-key`，然后重启并验证登录；CPA 服务和业务数据不会被删除。
+3. **重新生成配置**：备份现有生成配置后重新写入，继续复用 secret 和数据卷。
+4. **退出**。
+
+如果安装目录已经被删除、但 `cpamp_cpa-manager-plus-data` 仍然存在，脚本不会再静默创建新密钥并报告成功，而是要求恢复旧数据或使用新的 Compose 项目名进行全新安装。
+
+非交互升级：
 
 ```bash
-CPAMP_OVERWRITE=1 bash install-cpamp.sh
+CPAMP_OPERATION=upgrade \
+CPAMP_NON_INTERACTIVE=1 \
+CPAMP_CONFIRM=1 \
+bash install-cpamp.sh
 ```
 
-覆盖配置前先备份安装目录，尤其是 `secrets/`、`data/` 和 `cliproxyapi/`。丢失 `data.key` 后，已保存的 CPA Management Key 无法恢复。
+非交互修复管理员登录：
+
+```bash
+CPAMP_OPERATION=repair \
+CPAMP_NON_INTERACTIVE=1 \
+CPAMP_CONFIRM=1 \
+bash install-cpamp.sh
+```
+
+如果安装目录已经丢失、只剩旧 Docker 数据卷，非交互修复还必须设置原来的 `CPAMP_INSTALL_MODE=stack` 或 `CPAMP_INSTALL_MODE=cpamp`，避免生成错误的服务组合。
+
+如果确定要重新生成配置：
+
+```bash
+CPAMP_OPERATION=regenerate bash install-cpamp.sh
+```
+
+`CPAMP_OVERWRITE=1` 继续兼容旧用法，并会映射到配置重新生成流程。脚本会把旧的 `.env`、`compose.yaml`、CPA 配置、`run.sh` 和 service 文件备份到安装目录的 `backups/installer-*`，但仍建议单独备份 `secrets/`、`data/` 和 `cliproxyapi/`。丢失 `data.key` 后，已保存的 CPA Management Key 无法恢复。
+
+## 启动和登录验证
+
+Docker 安装、升级或修复后，脚本会等待 CPAMP 健康检查通过，再使用当前管理员密钥请求受保护的 Manager Server 接口。只有健康检查和管理员密钥验证都成功后，才会输出“安装步骤已完成”。
+
+如果容器已启动但密钥验证失败，交互模式会询问是否自动停止 CPAMP 并修复管理员凭证；非交互模式会返回失败状态，并提示使用 `CPAMP_OPERATION=repair`。这可以避免用户拿到一个与旧数据库不匹配的“新密钥”。
