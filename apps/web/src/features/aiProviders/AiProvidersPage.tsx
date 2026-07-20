@@ -87,6 +87,8 @@ export function AiProvidersPage() {
   );
 
   const [configSwitchingKey, setConfigSwitchingKey] = useState<string | null>(null);
+  /** Synchronous lock so double-clicks in the same tick cannot start two enable/disable writes. */
+  const configSwitchingLockRef = useRef(false);
 
   // 表格筛选 / 排序 / 详情状态
   const [kindFilter, setKindFilter] = useState<ProviderKindFilter>('all');
@@ -319,6 +321,7 @@ export function AiProvidersPage() {
     actions: Map<string, ProviderHealthCheckApplyAction>
   ) => {
     if (actions.size === 0) return;
+    if (configSwitchingLockRef.current || configSwitchingKey) return;
 
     const rowByKey = new Map(rows.map((row) => [row.key, row]));
     const previous = {
@@ -428,6 +431,7 @@ export function AiProvidersPage() {
       return;
     }
 
+    configSwitchingLockRef.current = true;
     setConfigSwitchingKey('health-check');
 
     const applyLocalState = (
@@ -552,8 +556,9 @@ export function AiProvidersPage() {
       showNotification(`${t('notification.update_failed')}: ${message}`, 'error');
       throw err;
     } finally {
-      setConfigSwitchingKey(null);
-    }
+        configSwitchingLockRef.current = false;
+        setConfigSwitchingKey(null);
+      }
   };
 
   const setHealthCheckProviderEnabled = async (providerKey: string, enabled: boolean) => {
@@ -566,12 +571,15 @@ export function AiProvidersPage() {
     index: number,
     enabled: boolean
   ) => {
+    if (configSwitchingLockRef.current || configSwitchingKey) return;
+
     if (provider === 'gemini' || provider === 'interactions') {
       const source = provider === 'gemini' ? geminiKeys : interactionsKeys;
       const current = source[index];
       if (!current) return;
 
       const switchingKey = `${provider}:${current.apiKey}`;
+      configSwitchingLockRef.current = true;
       setConfigSwitchingKey(switchingKey);
 
       const previousList = source;
@@ -615,6 +623,7 @@ export function AiProvidersPage() {
         }
         showNotification(`${t('notification.update_failed')}: ${message}`, 'error');
       } finally {
+        configSwitchingLockRef.current = false;
         setConfigSwitchingKey(null);
       }
       return;
@@ -632,6 +641,7 @@ export function AiProvidersPage() {
     if (!current) return;
 
     const switchingKey = `${provider}:${current.apiKey}`;
+    configSwitchingLockRef.current = true;
     setConfigSwitchingKey(switchingKey);
 
     const previousList = source;
@@ -695,15 +705,18 @@ export function AiProvidersPage() {
       }
       showNotification(`${t('notification.update_failed')}: ${message}`, 'error');
     } finally {
-      setConfigSwitchingKey(null);
-    }
+        configSwitchingLockRef.current = false;
+        setConfigSwitchingKey(null);
+      }
   };
 
   const setOpenAIProviderEnabled = async (index: number, enabled: boolean) => {
+    if (configSwitchingLockRef.current || configSwitchingKey) return;
     const current = openaiProviders[index];
     if (!current) return;
 
     const switchingKey = `openai:${current.name}:${index}`;
+    configSwitchingLockRef.current = true;
     setConfigSwitchingKey(switchingKey);
 
     const previousList = openaiProviders;
@@ -728,8 +741,9 @@ export function AiProvidersPage() {
       clearCache('openai-compatibility');
       showNotification(`${t('notification.update_failed')}: ${message}`, 'error');
     } finally {
-      setConfigSwitchingKey(null);
-    }
+        configSwitchingLockRef.current = false;
+        setConfigSwitchingKey(null);
+      }
   };
 
   const setProviderWebsocketsEnabled = async (
@@ -742,7 +756,9 @@ export function AiProvidersPage() {
     const current = source[index];
     if (!current) return;
 
+    if (configSwitchingLockRef.current || configSwitchingKey) return;
     const switchingKey = `${provider}:${current.apiKey}:websockets`;
+    configSwitchingLockRef.current = true;
     setConfigSwitchingKey(switchingKey);
 
     const previousList = source;
@@ -794,8 +810,9 @@ export function AiProvidersPage() {
       }
       showNotification(`${t('notification.update_failed')}: ${message}`, 'error');
     } finally {
-      setConfigSwitchingKey(null);
-    }
+        configSwitchingLockRef.current = false;
+        setConfigSwitchingKey(null);
+      }
   };
 
   const setProviderCloakEnabled = async (
@@ -807,7 +824,9 @@ export function AiProvidersPage() {
     const current = source[index];
     if (!current) return;
 
+    if (configSwitchingLockRef.current || configSwitchingKey) return;
     const switchingKey = `${provider}:${current.apiKey}:cloak`;
+    configSwitchingLockRef.current = true;
     setConfigSwitchingKey(switchingKey);
 
     const previousList = source;
@@ -852,8 +871,9 @@ export function AiProvidersPage() {
       }
       showNotification(`${t('notification.update_failed')}: ${message}`, 'error');
     } finally {
-      setConfigSwitchingKey(null);
-    }
+        configSwitchingLockRef.current = false;
+        setConfigSwitchingKey(null);
+      }
   };
 
   const setProviderDisableCoolingEnabled = async (
@@ -911,6 +931,7 @@ export function AiProvidersPage() {
         }
         showNotification(`${t('notification.update_failed')}: ${message}`, 'error');
       } finally {
+        configSwitchingLockRef.current = false;
         setConfigSwitchingKey(null);
       }
       return;
@@ -942,6 +963,7 @@ export function AiProvidersPage() {
         clearCache('openai-compatibility');
         showNotification(`${t('notification.update_failed')}: ${message}`, 'error');
       } finally {
+        configSwitchingLockRef.current = false;
         setConfigSwitchingKey(null);
       }
       return;
@@ -1004,8 +1026,9 @@ export function AiProvidersPage() {
       }
       showNotification(`${t('notification.update_failed')}: ${message}`, 'error');
     } finally {
-      setConfigSwitchingKey(null);
-    }
+        configSwitchingLockRef.current = false;
+        setConfigSwitchingKey(null);
+      }
   };
 
   const setProviderPriority = async (row: ProviderRow, priority: number) => {
@@ -1062,6 +1085,7 @@ export function AiProvidersPage() {
         }
         showNotification(`${t('notification.update_failed')}: ${message}`, 'error');
       } finally {
+        configSwitchingLockRef.current = false;
         setConfigSwitchingKey(null);
       }
       return;
@@ -1095,6 +1119,7 @@ export function AiProvidersPage() {
         clearCache('openai-compatibility');
         showNotification(`${t('notification.update_failed')}: ${message}`, 'error');
       } finally {
+        configSwitchingLockRef.current = false;
         setConfigSwitchingKey(null);
       }
       return;
@@ -1174,8 +1199,9 @@ export function AiProvidersPage() {
       }
       showNotification(`${t('notification.update_failed')}: ${message}`, 'error');
     } finally {
-      setConfigSwitchingKey(null);
-    }
+        configSwitchingLockRef.current = false;
+        setConfigSwitchingKey(null);
+      }
   };
 
   // 删除（按 provider 分派，沿用既有 API 契约）

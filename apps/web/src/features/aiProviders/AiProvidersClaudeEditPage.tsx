@@ -394,6 +394,7 @@ export function AiProvidersClaudeEditPage() {
               </div>
 
               <div className={styles.sectionHint}>{t('ai_providers.claude_models_hint')}</div>
+              <div className={styles.sectionHint}>{t('ai_providers.model_alias_scope_hint')}</div>
 
               <ModelInputList
                 entries={form.modelEntries}

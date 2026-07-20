@@ -409,14 +409,31 @@ export const replaceLatestProviderRecord = (
   );
 };
 
+/** Serializes read-modify-write updates per CPA config section to avoid lost updates. */
+const providerSectionWriteQueues = new Map<string, Promise<unknown>>();
+
+const enqueueProviderSectionWrite = <T>(section: string, task: () => Promise<T>): Promise<T> => {
+  const previous = providerSectionWriteQueues.get(section) ?? Promise.resolve();
+  const run = previous.then(task, task);
+  providerSectionWriteQueues.set(
+    section,
+    run.then(
+      () => undefined,
+      () => undefined
+    )
+  );
+  return run;
+};
+
 const mutateLatestProviderList = async (
   section: string,
   mutate: (latestItems: unknown[]) => unknown[]
-) => {
-  const rawConfig = await apiClient.get('/config');
-  const latestItems = getRawSectionList(rawConfig, section);
-  await apiClient.put(`/${section}`, mutate(latestItems));
-};
+) =>
+  enqueueProviderSectionWrite(section, async () => {
+    const rawConfig = await apiClient.get('/config');
+    const latestItems = getRawSectionList(rawConfig, section);
+    await apiClient.put(`/${section}`, mutate(latestItems));
+  });
 
 const matchesProviderConfig = (
   record: Record<string, unknown>,
