@@ -22,8 +22,8 @@ import type {
 } from '@/types';
 import type { UsageHeaderSnapshot } from '@/services/api/usageService';
 import type { AntigravityQuotaData, CodexQuotaData } from '@/utils/quota';
-import { IconInfo } from '@/components/ui/icons';
 import { resetCodexQuota } from '@/services/api/codexQuota';
+import { QuotaInfoTooltip } from '@/components/quota/QuotaInfoTooltip';
 import {
   normalizePlanType,
   resolveCodexChatgptAccountId,
@@ -679,9 +679,22 @@ export const getSortedCodexResetCreditExpiries = (
     .filter((credit): credit is CodexResetCreditExpiryInfo => Boolean(credit))
     .sort((left, right) => left.expiresAtMs - right.expiresAtMs || left.id.localeCompare(right.id));
 
-const formatCodexResetCreditExpiryTime = (expiresAt: string): string => {
+const formatCodexResetCreditExpiryTime = (
+  expiresAt: string,
+  options?: { compact?: boolean }
+): string => {
   const expiresAtMs = new Date(expiresAt).getTime();
   if (!Number.isFinite(expiresAtMs)) return '-';
+  // Compact inline labels omit the year so plan/reset/expiry stay on one row.
+  if (options?.compact) {
+    return new Date(expiresAtMs).toLocaleString(undefined, {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+  }
   return new Date(expiresAtMs).toLocaleString(undefined, {
     year: 'numeric',
     month: '2-digit',
@@ -701,7 +714,16 @@ const renderCodexResetCreditExpiryInfo = (
   if (creditExpiries.length === 0) return null;
 
   const { createElement: h, Fragment } = React;
-  const earliestExpiryLabel = formatCodexResetCreditExpiryTime(creditExpiries[0].expiresAt);
+  const earliestExpiryCompact = formatCodexResetCreditExpiryTime(creditExpiries[0].expiresAt, {
+    compact: true,
+  });
+  const earliestExpiryFull = formatCodexResetCreditExpiryTime(creditExpiries[0].expiresAt);
+  const earliestExpirySummary = t('codex_quota.reset_credits_earliest_expiry', {
+    time: earliestExpiryCompact,
+  });
+  const earliestExpiryTitle = t('codex_quota.reset_credits_earliest_expiry', {
+    time: earliestExpiryFull,
+  });
   const rows = creditExpiries.map((credit, index) => ({
     key: `${credit.id}-${credit.expiresAt}`,
     label: t('codex_quota.reset_credit_expiry_item', { index: index + 1 }),
@@ -713,37 +735,18 @@ const renderCodexResetCreditExpiryInfo = (
     null,
     h(
       'span',
-      { key: 'reset-expiry-summary', className: styleMap.codexResetCreditExpiry },
-      t('codex_quota.reset_credits_earliest_expiry', { time: earliestExpiryLabel })
-    ),
-    h(
-      'span',
       {
-        key: 'reset-expiry-info',
-        className: styleMap.quotaInfoTrigger,
-        tabIndex: 0,
-        'aria-label': t('codex_quota.reset_credits_expiry_label'),
+        key: 'reset-expiry-summary',
+        className: styleMap.codexResetCreditExpiry,
+        title: earliestExpiryTitle,
       },
-      h(IconInfo, {
-        key: 'icon',
-        size: 14,
-        className: styleMap.quotaInfoIcon,
-        'aria-hidden': true,
-        focusable: false,
-      }),
-      h(
-        'span',
-        { key: 'tooltip', className: styleMap.quotaInfoTooltip, role: 'tooltip' },
-        ...rows.map((row) =>
-          h(
-            'span',
-            { key: row.key, className: styleMap.quotaInfoTooltipRow },
-            h('span', { className: styleMap.quotaInfoTooltipLabel }, row.label),
-            h('span', { className: styleMap.quotaInfoTooltipValue }, row.value)
-          )
-        )
-      )
-    )
+      earliestExpirySummary
+    ),
+    h(QuotaInfoTooltip, {
+      key: 'reset-expiry-info',
+      ariaLabel: t('codex_quota.reset_credits_expiry_label'),
+      rows,
+    })
   );
 };
 
@@ -776,41 +779,17 @@ const renderCodexWindowInfo = (
   quota: CodexQuotaState,
   window: CodexQuotaWindow,
   windowLabel: string,
-  t: TFunction,
-  styleMap: QuotaRenderHelpers['styles']
+  t: TFunction
 ): ReactNode => {
   if (!CODEX_INFO_WINDOW_IDS.has(window.id)) return null;
 
   const { createElement: h } = React;
   const rows = buildCodexWindowTooltipRows(quota, t);
 
-  return h(
-    'span',
-    {
-      className: styleMap.quotaInfoTrigger,
-      tabIndex: 0,
-      'aria-label': t('codex_quota.tooltip_label', { label: windowLabel }),
-    },
-    h(IconInfo, {
-      key: 'icon',
-      size: 14,
-      className: styleMap.quotaInfoIcon,
-      'aria-hidden': true,
-      focusable: false,
-    }),
-    h(
-      'span',
-      { key: 'tooltip', className: styleMap.quotaInfoTooltip, role: 'tooltip' },
-      ...rows.map((row) =>
-        h(
-          'span',
-          { key: row.key, className: styleMap.quotaInfoTooltipRow },
-          h('span', { className: styleMap.quotaInfoTooltipLabel }, row.label),
-          h('span', { className: styleMap.quotaInfoTooltipValue }, row.value)
-        )
-      )
-    )
-  );
+  return h(QuotaInfoTooltip, {
+    ariaLabel: t('codex_quota.tooltip_label', { label: windowLabel }),
+    rows,
+  });
 };
 
 const renderCodexItems = (
@@ -886,7 +865,7 @@ const renderCodexItems = (
       const windowLabel = window.labelKey
         ? t(window.labelKey, window.labelParams as Record<string, string | number>)
         : window.label;
-      const infoIcon = renderCodexWindowInfo(quota, window, windowLabel, t, styleMap);
+      const infoIcon = renderCodexWindowInfo(quota, window, windowLabel, t);
 
       return h(
         'div',
