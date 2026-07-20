@@ -614,7 +614,9 @@
   outline: none;
 
   &:hover,
-  &:focus-visible {
+  &:focus-visible,
+  &:focus-within {
+    z-index: $z-dropdown;
     color: var(--text-secondary);
   }
 
@@ -791,32 +793,53 @@
 .codexPlan {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 12px;
+  gap: 4px;
+  flex-wrap: nowrap;
+  min-width: 0;
+  max-width: 100%;
+  font-size: 11px;
+  line-height: 1.3;
   color: var(--text-secondary);
 }
 
 .codexPlanLabel {
+  flex: 0 0 auto;
   color: var(--text-tertiary);
+  white-space: nowrap;
 }
 
 .codexPlanValue {
+  flex: 0 0 auto;
   font-weight: 600;
   color: var(--text-primary);
   text-transform: capitalize;
+  white-space: nowrap;
 }
 
+.codexResetCreditExpiry {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+// Compact chip: premium plans stay highlighted without dominating the plan row.
 .premiumPlanValue {
   display: inline-flex;
   align-items: center;
+  flex: 0 0 auto;
   font-weight: 700;
-  font-size: 12px;
-  padding: 2px 8px;
-  border-radius: 6px;
+  font-size: 10px;
+  line-height: 1.2;
+  padding: 0 5px;
+  border-radius: 4px;
   background: var(--color-warning-light-9);
   border: 1px solid var(--color-warning-light-5);
   color: var(--color-warning-dark-2);
-  text-transform: capitalize;
+  text-transform: none;
+  white-space: nowrap;
 }
 
 :global([data-theme='dark']) .premiumPlanValue {
@@ -828,7 +851,8 @@
 // 单个认证文件卡片
 .fileCard {
   position: relative;
-  overflow: hidden;
+  // Keep tooltips/popovers visible above the card chrome.
+  overflow: visible;
   background: var(--bg-primary);
   --glass-blur: 8px;
   backdrop-filter: var(--glass-backdrop-filter);
@@ -844,7 +868,9 @@
     box-shadow $transition-fast,
     border-color $transition-fast;
 
-  &:hover {
+  &:hover,
+  &:focus-within {
+    z-index: 3;
     transform: translateY(-1px);
     box-shadow: 0 8px 24px -12px rgba(0, 0, 0, 0.15);
     border-color: var(--color-primary-light-7);
