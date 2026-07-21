@@ -3550,7 +3550,8 @@
     "claude_api_key": "Claude API 金鑰",
     "commercial_mode_restart_required": "商業模式開關已變更，請重啟服務後生效",
     "copy_failed": "複製失敗",
-    "link_copied": "已複製"
+    "link_copied": "已複製",
+    "model_id_copied": "模型 ID 已複製"
   },
   "language": {
     "switch": "語言",
