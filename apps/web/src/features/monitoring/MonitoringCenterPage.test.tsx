@@ -7,6 +7,7 @@ import {
   buildPrimarySummaryCards,
   buildSecondarySummaryCards,
 } from '@/features/monitoring/model/monitoringCenterPageModel';
+import { resolveMonitoringDimensionCounts } from '@/features/monitoring/model/monitoringAnalyticsModel';
 import type { MonitoringSummary } from '@/features/monitoring/hooks/useMonitoringData';
 import {
   buildEmptyMonitoringStatusData,
@@ -88,6 +89,38 @@ const t = ((key: string, options?: Record<string, unknown>) => {
 
 const createAuthState = (overrides: MonitoringAccountAuthState): MonitoringAccountAuthState =>
   overrides;
+
+describe('MonitoringCenterPage dimension counts', () => {
+  it('uses scoped rows for the active aggregate tab and selector counts elsewhere', () => {
+    expect(
+      resolveMonitoringDimensionCounts({
+        activeDataTab: 'accounts',
+        accountRowCount: 2,
+        apiKeyRowCount: 3,
+        accountSelectorCount: 9,
+        apiKeySelectorCount: 8,
+      })
+    ).toEqual({ accountCount: 2, apiKeyCount: 8 });
+    expect(
+      resolveMonitoringDimensionCounts({
+        activeDataTab: 'apiKeys',
+        accountRowCount: 2,
+        apiKeyRowCount: 3,
+        accountSelectorCount: 9,
+        apiKeySelectorCount: 8,
+      })
+    ).toEqual({ accountCount: 9, apiKeyCount: 3 });
+    expect(
+      resolveMonitoringDimensionCounts({
+        activeDataTab: 'realtime',
+        accountRowCount: 2,
+        apiKeyRowCount: 3,
+        accountSelectorCount: 9,
+        apiKeySelectorCount: 8,
+      })
+    ).toEqual({ accountCount: 9, apiKeyCount: 8 });
+  });
+});
 
 describe('MonitoringCenterPage summary cards', () => {
   it('renders all request monitoring summary metrics in one ordered grid with large values intact', () => {

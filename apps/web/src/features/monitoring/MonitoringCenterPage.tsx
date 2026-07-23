@@ -96,6 +96,7 @@ import {
   type FocusSnapshot,
   type StatusFilter,
 } from '@/features/monitoring/model/monitoringCenterPageModel';
+import { resolveMonitoringDimensionCounts } from '@/features/monitoring/model/monitoringAnalyticsModel';
 import { useUsageData } from '@/features/monitoring/hooks/useUsageData';
 import { monitoringAnalyticsApi, type UsageHeaderSnapshot } from '@/services/api/usageService';
 import {
@@ -391,6 +392,7 @@ export function MonitoringCenterPage() {
     searchQuery: deferredSearch,
     searchApiKeyHash: deferredSearchApiKeyHash,
     scopeFilters: monitoringScopeFilters,
+    activeDataTab,
   });
 
   const loadHeaderSnapshots = useCallback(async () => {
@@ -599,6 +601,27 @@ export function MonitoringCenterPage() {
   const scopedSummary = monitoringSummary;
   const accountRows = monitoringAccountRows;
   const apiKeyRows = monitoringApiKeyRows;
+  const { accountCount, apiKeyCount } = useMemo(
+    () =>
+      resolveMonitoringDimensionCounts({
+        activeDataTab,
+        accountRowCount: accountRows.length,
+        apiKeyRowCount: apiKeyRows.length,
+        accountSelectorCount:
+          monitoringFilterOptions.accountCount ?? monitoringFilterOptions.accountRows.length,
+        apiKeySelectorCount:
+          monitoringFilterOptions.apiKeyCount ?? monitoringFilterOptions.apiKeyRows.length,
+      }),
+    [
+      accountRows.length,
+      activeDataTab,
+      apiKeyRows.length,
+      monitoringFilterOptions.accountCount,
+      monitoringFilterOptions.accountRows.length,
+      monitoringFilterOptions.apiKeyCount,
+      monitoringFilterOptions.apiKeyRows.length,
+    ]
+  );
   const accountStatusDataByRowId = useMemo(
     () => buildMonitoringAccountStatusDataMap(scopedRows, accountStatusBounds),
     [accountStatusBounds, scopedRows]
@@ -747,6 +770,11 @@ export function MonitoringCenterPage() {
   const hasActiveDataFilter = hasSearchFilter || hasScopeFilter;
   const failedGroupCount = groupedRealtimeRows.filter((row) => row.failureCalls > 0).length;
   const failedOnlyActive = selectedStatus === 'failed';
+  const hasMonitoringDisplayData =
+    scopedSummary.totalCalls > 0 ||
+    accountRows.length > 0 ||
+    apiKeyRows.length > 0 ||
+    filteredRows.length > 0;
   const connectionTone: MonitoringStatusTone =
     connectionStatus === 'connected' ? 'good' : connectionStatus === 'connecting' ? 'warn' : 'bad';
   const connectionLabel =
@@ -776,13 +804,13 @@ export function MonitoringCenterPage() {
     () =>
       buildPrimarySummaryCards({
         summary: scopedSummary,
-        accountCount: accountRows.length,
+        accountCount,
         failedGroupCount,
         hasPrices,
         locale: i18n.language,
         t,
       }),
-    [accountRows.length, failedGroupCount, hasPrices, i18n.language, scopedSummary, t]
+    [accountCount, failedGroupCount, hasPrices, i18n.language, scopedSummary, t]
   );
 
   const secondarySummaryCards = useMemo(
@@ -801,16 +829,16 @@ export function MonitoringCenterPage() {
         label: shortLabel(t, 'monitoring.data_tab_accounts_short', 'monitoring.data_tab_accounts'),
         fullLabel: t('monitoring.data_tab_accounts'),
         icon: 'accounts',
-        badge: accountRows.length,
-        badgeTitle: t('monitoring.data_tab_accounts_badge_title', { count: accountRows.length }),
+        badge: accountCount,
+        badgeTitle: t('monitoring.data_tab_accounts_badge_title', { count: accountCount }),
       },
       {
         id: 'apiKeys',
         label: shortLabel(t, 'monitoring.data_tab_api_keys_short', 'monitoring.data_tab_api_keys'),
         fullLabel: t('monitoring.data_tab_api_keys'),
         icon: 'apiKeys',
-        badge: apiKeyRows.length,
-        badgeTitle: t('monitoring.data_tab_api_keys_badge_title', { count: apiKeyRows.length }),
+        badge: apiKeyCount,
+        badgeTitle: t('monitoring.data_tab_api_keys_badge_title', { count: apiKeyCount }),
       },
       {
         id: 'realtime',
@@ -825,7 +853,7 @@ export function MonitoringCenterPage() {
         }),
       },
     ];
-  }, [accountRows.length, apiKeyRows.length, scopedFailureCount, scopedSummary.totalCalls, t]);
+  }, [accountCount, apiKeyCount, scopedFailureCount, scopedSummary.totalCalls, t]);
 
   const handleDataTabChange = useCallback((tab: MonitoringDataTab) => {
     setActiveDataTab(tab);
@@ -1341,7 +1369,7 @@ export function MonitoringCenterPage() {
       <MonitoringStatusHeader
         showLoadingOverlay={
           overallLoading &&
-          filteredRows.length === 0 &&
+          !hasMonitoringDisplayData &&
           (!monitoringScopeTransitioning || !hasMonitoringPresentationSnapshot)
         }
         monitoringUnavailable={monitoringUnavailable}

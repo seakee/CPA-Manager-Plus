@@ -1021,6 +1021,9 @@ export interface MonitoringAnalyticsFilterOptions {
   api_key_hashes?: string[];
   providers?: string[];
   auth_files?: string[];
+  accounts?: string[];
+  account_count?: number;
+  api_key_count?: number;
   project_ids?: string[];
   request_types?: string[];
   header_error_kinds?: string[];
