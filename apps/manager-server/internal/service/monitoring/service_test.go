@@ -577,6 +577,25 @@ func TestCacheHitRateMatchesWebClient(t *testing.T) {
 	}
 }
 
+func TestBuildTimelineIsIndependentOfPointOrder(t *testing.T) {
+	points := []store.TimelinePoint{
+		{BucketMS: 1_000, Model: "z-big", BillingModel: "z-big", Calls: 1, Success: 1, InputTokens: 10_000_000_000_000_000},
+		{BucketMS: 1_000, Model: "a-small", BillingModel: "a-small", Calls: 1, Success: 1, InputTokens: 1},
+		{BucketMS: 1_000, Model: "b-small", BillingModel: "b-small", Calls: 1, Success: 1, InputTokens: 1},
+	}
+	prices := map[string]store.ModelPrice{
+		"z-big":   {Prompt: 1_000_000},
+		"a-small": {Prompt: 1_000_000},
+		"b-small": {Prompt: 1_000_000},
+	}
+
+	forward := buildTimeline(points, nil, "hour", time.UTC, prices)
+	reverse := buildTimeline([]store.TimelinePoint{points[2], points[1], points[0]}, nil, "hour", time.UTC, prices)
+	if !reflect.DeepEqual(forward, reverse) {
+		t.Fatalf("timeline changed with point order\nforward=%#v\nreverse=%#v", forward, reverse)
+	}
+}
+
 func TestModelCacheHitRateUsesBillingModelBeforeAliasAggregation(t *testing.T) {
 	stats := []store.ModelStat{
 		{

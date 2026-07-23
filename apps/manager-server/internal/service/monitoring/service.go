@@ -1636,9 +1636,23 @@ func buildTimeline(points []store.TimelinePoint, percentiles []store.LatencyPerc
 		latencyTotal        float64
 		latencySample       int64
 	}
-	buckets := make(map[int64]*bucketAccumulator, len(points))
+	orderedPoints := append([]store.TimelinePoint(nil), points...)
+	sort.SliceStable(orderedPoints, func(i, j int) bool {
+		if orderedPoints[i].BucketMS != orderedPoints[j].BucketMS {
+			return orderedPoints[i].BucketMS < orderedPoints[j].BucketMS
+		}
+		if orderedPoints[i].Model != orderedPoints[j].Model {
+			return orderedPoints[i].Model < orderedPoints[j].Model
+		}
+		if orderedPoints[i].BillingModel != orderedPoints[j].BillingModel {
+			return orderedPoints[i].BillingModel < orderedPoints[j].BillingModel
+		}
+		return orderedPoints[i].ServiceTier < orderedPoints[j].ServiceTier
+	})
+
+	buckets := make(map[int64]*bucketAccumulator, len(orderedPoints))
 	order := make([]int64, 0, len(points))
-	for _, point := range points {
+	for _, point := range orderedPoints {
 		bucket := buckets[point.BucketMS]
 		if bucket == nil {
 			bucket = &bucketAccumulator{
