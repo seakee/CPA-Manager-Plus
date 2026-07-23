@@ -114,7 +114,7 @@ func (s *Service) inspectSingleXAIAccount(
 		return base
 	}
 
-	inference := s.requestXAIInferenceWithRetries(ctx, setup, settings, item)
+	inference := s.requestXAIInferenceWithRetries(ctx, setup, settings, item, billing.OfficialAPIHealthy)
 	if inference.Healthy {
 		base.Action = "keep"
 		base.ActionReason = "monitoring.xai_inspection_reason_inference_healthy"
@@ -231,10 +231,11 @@ func (s *Service) requestXAIInferenceWithRetries(
 	setup store.Setup,
 	settings model.ManagerCodexInspectionConfig,
 	item account,
+	forceOfficialAPI bool,
 ) xaiInferenceProbe {
 	var probe xaiInferenceProbe
 	for attempt := 0; attempt <= settings.Retries; attempt++ {
-		probe = s.requestXAIInference(ctx, setup, settings, item)
+		probe = s.requestXAIInference(ctx, setup, settings, item, forceOfficialAPI)
 		if probe.Healthy || probe.Decision == nil || !xaiInferenceShouldRetry(*probe.Decision) {
 			break
 		}
@@ -247,8 +248,9 @@ func (s *Service) requestXAIInference(
 	setup store.Setup,
 	settings model.ManagerCodexInspectionConfig,
 	item account,
+	forceOfficialAPI bool,
 ) xaiInferenceProbe {
-	targetURL, usesCLIChatProxy := resolveXAIInferenceURL(item.File)
+	targetURL, usesCLIChatProxy := resolveXAIInferenceURL(item.File, forceOfficialAPI)
 	header := map[string]string{
 		"Authorization": "Bearer $TOKEN$",
 		"Accept":        "application/json",
@@ -258,9 +260,9 @@ func (s *Service) requestXAIInference(
 	if usesCLIChatProxy {
 		header["x-xai-token-auth"] = "xai-grok-cli"
 		header["x-grok-client-version"] = xaiGrokVersion
-	}
-	if userID := resolveXAIUserID(item.File); userID != "" {
-		header["x-userid"] = userID
+		if userID := resolveXAIUserID(item.File); userID != "" {
+			header["x-userid"] = userID
+		}
 	}
 
 	data, err := json.Marshal(map[string]any{
@@ -349,7 +351,10 @@ func xaiInferenceShouldRetry(decision xaiProbeDecision) bool {
 	}
 }
 
-func resolveXAIInferenceURL(file authFile) (string, bool) {
+func resolveXAIInferenceURL(file authFile, forceOfficialAPI bool) (string, bool) {
+	if forceOfficialAPI {
+		return xaiOfficialAPIBaseURL + "/responses", false
+	}
 	baseURL := strings.TrimSuffix(strings.TrimSpace(readXAIAuthString(file, "base_url", "baseUrl")), "/")
 	usingAPI, hasUsingAPI := readXAIAuthBool(file, "using_api", "usingApi")
 	authKind := strings.ToLower(readXAIAuthString(file, "auth_kind", "authKind"))

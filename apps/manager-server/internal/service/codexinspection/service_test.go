@@ -345,11 +345,19 @@ func TestRunXAIUsesBillingAndInferenceEndpoints(t *testing.T) {
 
 func TestResolveXAIInferenceURLMatchesRuntimeUsingAPISemantics(t *testing.T) {
 	tests := []struct {
-		name    string
-		file    authFile
-		wantURL string
-		wantCLI bool
+		name          string
+		file          authFile
+		forceOfficial bool
+		wantURL       string
+		wantCLI       bool
 	}{
+		{
+			name:          "verified official identity forces official api",
+			file:          authFile{},
+			forceOfficial: true,
+			wantURL:       xaiOfficialAPIBaseURL + "/responses",
+			wantCLI:       false,
+		},
 		{
 			name:    "missing auth metadata defaults to cli proxy",
 			file:    authFile{},
@@ -389,7 +397,7 @@ func TestResolveXAIInferenceURLMatchesRuntimeUsingAPISemantics(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotURL, gotCLI := resolveXAIInferenceURL(tt.file)
+			gotURL, gotCLI := resolveXAIInferenceURL(tt.file, tt.forceOfficial)
 			if gotURL != tt.wantURL || gotCLI != tt.wantCLI {
 				t.Fatalf("resolveXAIInferenceURL() = %q, %t; want %q, %t", gotURL, gotCLI, tt.wantURL, tt.wantCLI)
 			}
@@ -458,7 +466,7 @@ func TestRunXAIFallsBackToOfficialAPIIdentityHealth(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
-			_, _ = w.Write([]byte(`{"files":[{"name":"paid-xai.json","auth_index":"xai-paid-1","provider":"xai","account":"paid@example.com","disabled":true}]}`))
+			_, _ = w.Write([]byte(`{"files":[{"name":"paid-xai.json","auth_index":"xai-paid-1","provider":"xai","account":"paid@example.com","disabled":true,"user":{"id":"user-1"}}]}`))
 		case r.URL.Path == "/v0/management/api-call" && r.Method == http.MethodPost:
 			var payload struct {
 				Method string            `json:"method"`
@@ -472,6 +480,12 @@ func TestRunXAIFallsBackToOfficialAPIIdentityHealth(t *testing.T) {
 			if strings.HasSuffix(payload.URL, "/responses") {
 				if payload.Method != http.MethodPost {
 					t.Fatalf("xAI inference method = %q, want POST", payload.Method)
+				}
+				if payload.URL != xaiOfficialAPIBaseURL+"/responses" {
+					t.Fatalf("xAI inference URL = %q, want official API", payload.URL)
+				}
+				if payload.Header["x-xai-token-auth"] != "" || payload.Header["x-grok-client-version"] != "" || payload.Header["x-userid"] != "" {
+					t.Fatalf("xAI official inference headers = %#v", payload.Header)
 				}
 				_, _ = w.Write([]byte(xaiCompletedInferenceAPICallResponse))
 				return
@@ -505,7 +519,7 @@ func TestRunXAIFallsBackToOfficialAPIIdentityHealth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run xAI inspection: %v", err)
 	}
-	if len(requestedURLs) != 4 || requestedURLs[2] != xaiOfficialAPIMeURL || !strings.HasSuffix(requestedURLs[3], "/responses") {
+	if len(requestedURLs) != 4 || requestedURLs[2] != xaiOfficialAPIMeURL || requestedURLs[3] != xaiOfficialAPIBaseURL+"/responses" {
 		t.Fatalf("requested URLs = %#v, want billing, identity fallback, and inference", requestedURLs)
 	}
 	if len(result.Results) != 1 {
@@ -715,8 +729,8 @@ func TestRunXAIRejectsInvalidOfficialAPIIdentityPayload(t *testing.T) {
 			if err != nil {
 				t.Fatalf("run xAI inspection: %v", err)
 			}
-			if len(requestedURLs) != 4 || requestedURLs[2] != xaiOfficialAPIMeURL || !strings.HasSuffix(requestedURLs[3], "/responses") {
-				t.Fatalf("requested URLs = %#v, want billing, identity fallback, and inference", requestedURLs)
+			if len(requestedURLs) != 4 || requestedURLs[2] != xaiOfficialAPIMeURL || requestedURLs[3] != xaiCLIChatProxyBaseURL+"/responses" {
+				t.Fatalf("requested URLs = %#v, want billing, rejected identity fallback, and CLI inference", requestedURLs)
 			}
 			if len(result.Results) != 1 || result.Results[0].ErrorKind == "official_api_healthy" {
 				t.Fatalf("invalid official API payload reported healthy: %#v", result.Results)

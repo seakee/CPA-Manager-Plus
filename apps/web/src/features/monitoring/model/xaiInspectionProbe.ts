@@ -1,6 +1,6 @@
 import type { TFunction } from 'i18next';
 import type { XaiBillingSummary } from '@/types';
-import { probeXaiBilling, probeXaiInference, probeXaiQuota } from '@/utils/quota/providerRequests';
+import { probeXaiInference, probeXaiQuota } from '@/utils/quota/providerRequests';
 import { formatQuotaResetTime } from '@/utils/quota/formatters';
 import { XaiProbeError } from '@/utils/quota/xaiErrors';
 import { formatXaiProbeIssue } from '@/utils/quota/xaiPresentation';
@@ -224,18 +224,14 @@ export const inspectSingleXaiAccount = async (
   try {
     const billing = await withRetry(
       settings.retries,
-      () =>
-        settings.xaiInferenceEnabled
-          ? probeXaiBilling(account.raw, t, requestConfig)
-          : probeXaiQuota(account.raw, t, requestConfig),
+      () => probeXaiQuota(account.raw, t, requestConfig),
       shouldRetryXaiBilling
     );
     billingSummary = billing.summary;
     billingStatusCode = billing.statusCode ?? null;
     billingPartial = billing.partial;
     billingError = billing.blockingFailure ?? null;
-    billingSource =
-      'source' in billing && billing.source === 'official-api' ? 'official-api' : 'billing';
+    billingSource = billing.source;
   } catch (error) {
     billingError = error;
     // With inference enabled, billing remains supplementary quota evidence.
@@ -296,6 +292,7 @@ export const inspectSingleXaiAccount = async (
           model: settings.xaiInferenceModel,
           prompt: settings.xaiInferencePrompt,
           userAgent: settings.xaiInferenceUserAgent,
+          ...(billingSource === 'official-api' ? { routeMode: 'official' as const } : {}),
         }),
       shouldRetryXaiInference
     );

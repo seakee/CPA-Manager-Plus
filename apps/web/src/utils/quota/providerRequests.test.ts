@@ -2288,7 +2288,7 @@ describe('probeXaiInference', () => {
         name: 'xai-api.json',
         type: 'xai',
         authIndex: 'xai-api-1',
-        metadata: { auth_kind: 'api_key', using_api: true },
+        metadata: { auth_kind: 'api_key', using_api: true, user_id: 'user-123' },
       },
       t
     );
@@ -2303,6 +2303,44 @@ describe('probeXaiInference', () => {
       },
     });
     expect(mocks.request.mock.calls[0][0].header).not.toHaveProperty('x-xai-token-auth');
+    expect(mocks.request.mock.calls[0][0].header).not.toHaveProperty('x-grok-client-version');
+    expect(mocks.request.mock.calls[0][0].header).not.toHaveProperty('x-userid');
+  });
+
+  it('forces the official endpoint after verified official identity fallback', async () => {
+    const body = completedXaiInferenceResponse();
+    mocks.request.mockResolvedValue({
+      statusCode: 200,
+      hasStatusCode: true,
+      header: {},
+      bodyText: JSON.stringify(body),
+      body,
+    });
+
+    await probeXaiInference(
+      {
+        name: 'xai-paid-oauth.json',
+        type: 'xai',
+        authIndex: 'xai-paid-oauth-1',
+        metadata: { user_id: 'user-123' },
+      },
+      t,
+      undefined,
+      { routeMode: 'official' }
+    );
+
+    expect(mocks.request.mock.calls[0][0]).toMatchObject({
+      url: `${XAI_OFFICIAL_API_BASE_URL}/responses`,
+      header: {
+        Authorization: 'Bearer $TOKEN$',
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        'User-Agent': XAI_INFERENCE_USER_AGENT,
+      },
+    });
+    expect(mocks.request.mock.calls[0][0].header).not.toHaveProperty('x-xai-token-auth');
+    expect(mocks.request.mock.calls[0][0].header).not.toHaveProperty('x-grok-client-version');
+    expect(mocks.request.mock.calls[0][0].header).not.toHaveProperty('x-userid');
   });
 
   it('uses the configured model and prompt in the real inference request', async () => {
