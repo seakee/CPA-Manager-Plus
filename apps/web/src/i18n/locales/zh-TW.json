@@ -3717,6 +3717,61 @@
     "full": "完整效果",
     "reduced": "效能優先"
   },
+  "theme_studio": {
+    "open": "開啟主題工作室",
+    "title": "主題工作室",
+    "description": "即時調整配色、圓角、字型、密度與頁面版面。",
+    "close": "關閉主題工作室",
+    "reset": "恢復預設主題",
+    "mode": "顯示模式",
+    "colors": "主題配色",
+    "live_preview": "即時預覽",
+    "custom_color": "選擇自訂強調色",
+    "options": {
+      "default": "預設"
+    },
+    "presets": {
+      "default": "CPAMP 藍",
+      "anthropic": "暖陶",
+      "underground": "地下花園",
+      "rose_garden": "玫瑰花園",
+      "lake_view": "湖光",
+      "sunset_glow": "落日餘暉",
+      "forest_whisper": "森林低語",
+      "ocean_breeze": "海風",
+      "lavender_dream": "薰衣草夢",
+      "monochrome": "黑白",
+      "custom": "自訂強調色"
+    },
+    "radius": {
+      "title": "圓角",
+      "none": "直角",
+      "sm": "小",
+      "md": "中",
+      "lg": "大",
+      "xl": "超大"
+    },
+    "density": {
+      "title": "介面密度",
+      "compact": "緊湊",
+      "comfortable": "舒適"
+    },
+    "font": {
+      "title": "字型風格",
+      "system": "系統",
+      "modern": "現代",
+      "serif": "襯線"
+    },
+    "layout": {
+      "title": "內容寬度",
+      "full": "鋪滿",
+      "centered": "置中"
+    },
+    "effects": {
+      "full_description": "保留動態背景、玻璃模糊與完整視覺層次。",
+      "reduced_description": "關閉高負載模糊與背景動畫，優先流暢度。"
+    }
+  },
   "sidebar": {
     "toggle_expand": "展開側邊欄",
     "toggle_collapse": "收起側邊欄"

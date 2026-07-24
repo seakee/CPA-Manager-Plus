@@ -3717,6 +3717,61 @@
     "full": "完整效果",
     "reduced": "性能优先"
   },
+  "theme_studio": {
+    "open": "打开主题工作室",
+    "title": "主题工作室",
+    "description": "实时调整配色、圆角、字体、密度与页面布局。",
+    "close": "关闭主题工作室",
+    "reset": "恢复默认主题",
+    "mode": "显示模式",
+    "colors": "主题配色",
+    "live_preview": "即时预览",
+    "custom_color": "选择自定义强调色",
+    "options": {
+      "default": "默认"
+    },
+    "presets": {
+      "default": "CPAMP 蓝",
+      "anthropic": "暖陶",
+      "underground": "地下花园",
+      "rose_garden": "玫瑰花园",
+      "lake_view": "湖光",
+      "sunset_glow": "落日余晖",
+      "forest_whisper": "森林低语",
+      "ocean_breeze": "海风",
+      "lavender_dream": "薰衣草梦",
+      "monochrome": "黑白",
+      "custom": "自定义强调色"
+    },
+    "radius": {
+      "title": "圆角",
+      "none": "直角",
+      "sm": "小",
+      "md": "中",
+      "lg": "大",
+      "xl": "超大"
+    },
+    "density": {
+      "title": "界面密度",
+      "compact": "紧凑",
+      "comfortable": "舒适"
+    },
+    "font": {
+      "title": "字体风格",
+      "system": "系统",
+      "modern": "现代",
+      "serif": "衬线"
+    },
+    "layout": {
+      "title": "内容宽度",
+      "full": "铺满",
+      "centered": "居中"
+    },
+    "effects": {
+      "full_description": "保留动态背景、玻璃模糊与完整视觉层次。",
+      "reduced_description": "关闭高开销模糊和背景动画，优先流畅度。"
+    }
+  },
   "sidebar": {
     "toggle_expand": "展开侧边栏",
     "toggle_collapse": "收起侧边栏"

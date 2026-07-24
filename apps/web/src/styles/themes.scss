@@ -41,6 +41,7 @@
   --app-radius-sm: 8px;
   --app-gap: 20px;
   --app-card-padding: 24px;
+  --app-font-size: 14px;
   --app-blur: 20px;
 
   --sidebar-bg-color: rgba(255, 255, 255, 0.54);
@@ -308,4 +309,274 @@
   --glass-bg: var(--app-surface);
   --glass-bg-secondary: var(--app-surface-muted);
   --glass-border: var(--app-border);
+}
+
+/* Theme Studio color presets. Each preset provides paired light/dark accents
+ * and canvases; the bridge below maps them onto CPAMP's existing semantic
+ * tokens so legacy pages inherit the selected palette without per-page edits. */
+:root[data-theme-preset='anthropic'] {
+  --theme-primary-light: #d97757;
+  --theme-primary-dark: #e18a6b;
+  --theme-secondary-light: #788c5d;
+  --theme-secondary-dark: #9aaf76;
+  --theme-light-bg: #faf9f5;
+  --theme-dark-bg: #171613;
+  --theme-primary-contrast: #ffffff;
+}
+
+:root[data-theme-preset='underground'] {
+  --theme-primary-light: #3f7c5c;
+  --theme-primary-dark: #73b48d;
+  --theme-secondary-light: #a45b8d;
+  --theme-secondary-dark: #d087b8;
+  --theme-light-bg: #f2f6f1;
+  --theme-dark-bg: #101713;
+  --theme-primary-contrast: #ffffff;
+}
+
+:root[data-theme-preset='rose-garden'] {
+  --theme-primary-light: #df315b;
+  --theme-primary-dark: #f06484;
+  --theme-secondary-light: #f3a9b8;
+  --theme-secondary-dark: #d88a9f;
+  --theme-light-bg: #fff5f7;
+  --theme-dark-bg: #1b1014;
+  --theme-primary-contrast: #ffffff;
+}
+
+:root[data-theme-preset='lake-view'] {
+  --theme-primary-light: #22a981;
+  --theme-primary-dark: #4ed0a9;
+  --theme-secondary-light: #2f8fa2;
+  --theme-secondary-dark: #5fb8c5;
+  --theme-light-bg: #f1fbf9;
+  --theme-dark-bg: #0b1718;
+  --theme-primary-contrast: #ffffff;
+}
+
+:root[data-theme-preset='sunset-glow'] {
+  --theme-primary-light: #dc503c;
+  --theme-primary-dark: #f07863;
+  --theme-secondary-light: #f2a25b;
+  --theme-secondary-dark: #f4b97f;
+  --theme-light-bg: #fff7f2;
+  --theme-dark-bg: #1d1210;
+  --theme-primary-contrast: #ffffff;
+}
+
+:root[data-theme-preset='forest-whisper'] {
+  --theme-primary-light: #267f72;
+  --theme-primary-dark: #55b3a4;
+  --theme-secondary-light: #52677f;
+  --theme-secondary-dark: #8498af;
+  --theme-light-bg: #f3f8f7;
+  --theme-dark-bg: #0d1717;
+  --theme-primary-contrast: #ffffff;
+}
+
+:root[data-theme-preset='ocean-breeze'] {
+  --theme-primary-light: #3f6fe5;
+  --theme-primary-dark: #7397f4;
+  --theme-secondary-light: #7358d8;
+  --theme-secondary-dark: #9a83ea;
+  --theme-light-bg: #f3f6ff;
+  --theme-dark-bg: #0d1322;
+  --theme-primary-contrast: #ffffff;
+}
+
+:root[data-theme-preset='lavender-dream'] {
+  --theme-primary-light: #9650cf;
+  --theme-primary-dark: #bd7ee8;
+  --theme-secondary-light: #59aebb;
+  --theme-secondary-dark: #81ced7;
+  --theme-light-bg: #faf5ff;
+  --theme-dark-bg: #18111f;
+  --theme-primary-contrast: #ffffff;
+}
+
+:root[data-theme-preset='monochrome'] {
+  --theme-primary-light: #202124;
+  --theme-primary-dark: #e3e5e8;
+  --theme-secondary-light: #72767e;
+  --theme-secondary-dark: #a7abb2;
+  --theme-light-bg: #f5f5f4;
+  --theme-dark-bg: #111214;
+  --theme-primary-contrast: #ffffff;
+}
+
+:root[data-theme-preset='custom'] {
+  --theme-primary-light: var(--theme-custom-primary, #409eff);
+  --theme-primary-dark: color-mix(in srgb, var(--theme-custom-primary, #409eff) 72%, #ffffff);
+  --theme-secondary-light: color-mix(in srgb, var(--theme-custom-primary, #409eff) 62%, #22b8a7);
+  --theme-secondary-dark: color-mix(in srgb, var(--theme-custom-primary, #409eff) 64%, #79e5d6);
+  --theme-light-bg: color-mix(in srgb, var(--theme-custom-primary, #409eff) 4%, #f6f8fb);
+  --theme-dark-bg: color-mix(in srgb, var(--theme-custom-primary, #409eff) 9%, #090d14);
+  --theme-primary-contrast: var(--theme-custom-contrast, #ffffff);
+}
+
+:root[data-theme-preset]:not([data-theme-preset='default']) {
+  --theme-primary: var(--theme-primary-light);
+  --theme-secondary: var(--theme-secondary-light);
+  --app-bg: var(--theme-light-bg);
+  --app-bg-gradient: linear-gradient(
+    125deg,
+    color-mix(in srgb, var(--theme-primary) 10%, var(--theme-light-bg)) 0%,
+    var(--theme-light-bg) 48%,
+    color-mix(in srgb, var(--theme-secondary) 12%, var(--theme-light-bg)) 100%
+  );
+  --app-bg-blob-1-start: var(--theme-primary);
+  --app-bg-blob-1-end: color-mix(in srgb, var(--theme-primary) 48%, #ffffff);
+  --app-bg-blob-2-start: var(--theme-secondary);
+  --app-bg-blob-2-end: color-mix(in srgb, var(--theme-secondary) 46%, #ffffff);
+  --app-surface: color-mix(in srgb, var(--theme-primary) 3%, rgba(255, 255, 255, 0.94));
+  --app-surface-strong: color-mix(in srgb, var(--theme-primary) 2%, #ffffff);
+  --app-surface-muted: color-mix(in srgb, var(--theme-primary) 5%, rgba(255, 255, 255, 0.72));
+  --app-border: color-mix(in srgb, var(--theme-primary) 12%, rgba(15, 23, 42, 0.08));
+  --app-border-strong: color-mix(in srgb, var(--theme-primary) 18%, rgba(15, 23, 42, 0.12));
+  --app-accent: var(--theme-primary);
+  --app-accent-soft: color-mix(in srgb, var(--theme-primary) 13%, transparent);
+  --surface-subtle: color-mix(in srgb, var(--theme-primary) 5%, #ffffff);
+  --surface-subtle-hover: color-mix(in srgb, var(--theme-primary) 8%, #ffffff);
+  --surface-subtle-strong: color-mix(in srgb, var(--theme-primary) 12%, #ffffff);
+  --border-subtle: color-mix(in srgb, var(--theme-primary) 20%, #d8e0e8);
+  --border-subtle-dashed: color-mix(in srgb, var(--theme-primary) 22%, #d4dde6);
+  --sidebar-bg-color: color-mix(in srgb, var(--theme-primary) 4%, rgba(255, 255, 255, 0.62));
+  --sidebar-logo-bg-color: color-mix(in srgb, var(--theme-primary) 5%, rgba(255, 255, 255, 0.46));
+  --sidebar-hover-bg-color: color-mix(in srgb, var(--theme-primary) 12%, transparent);
+  --glass-bg: var(--app-surface-strong);
+  --glass-bg-secondary: var(--app-surface-muted);
+  --glass-border: color-mix(in srgb, var(--theme-primary) 12%, rgba(255, 255, 255, 0.68));
+  --app-input-bg: color-mix(in srgb, var(--theme-primary) 3%, rgba(255, 255, 255, 0.78));
+  --app-input-bg-focus: var(--app-surface-strong);
+  --bg-quinary: color-mix(in srgb, var(--theme-primary) 5%, #ffffff);
+  --border-hover: color-mix(in srgb, var(--theme-primary) 36%, transparent);
+  --color-primary: var(--theme-primary);
+  --color-primary-light-3: color-mix(in srgb, var(--theme-primary) 72%, #ffffff);
+  --color-primary-light-5: color-mix(in srgb, var(--theme-primary) 50%, #ffffff);
+  --color-primary-light-7: color-mix(in srgb, var(--theme-primary) 28%, #ffffff);
+  --color-primary-light-8: color-mix(in srgb, var(--theme-primary) 18%, #ffffff);
+  --color-primary-light-9: color-mix(in srgb, var(--theme-primary) 9%, #ffffff);
+  --color-primary-dark-2: color-mix(in srgb, var(--theme-primary) 78%, #000000);
+  --primary-color: var(--theme-primary);
+  --primary-hover: var(--color-primary-light-3);
+  --primary-active: var(--color-primary-dark-2);
+  --primary-contrast: var(--theme-primary-contrast);
+  --primary-soft: var(--color-primary-light-8);
+  --primary-subtle: var(--color-primary-light-9);
+  --primary-ring: color-mix(in srgb, var(--theme-primary) 24%, transparent);
+  --count-badge-bg: var(--color-primary-light-9);
+  --count-badge-text: var(--color-primary-dark-2);
+}
+
+:root[data-theme='dark'][data-theme-preset]:not([data-theme-preset='default']) {
+  --theme-primary: var(--theme-primary-dark);
+  --theme-secondary: var(--theme-secondary-dark);
+  --app-bg: var(--theme-dark-bg);
+  --app-bg-gradient: linear-gradient(
+    125deg,
+    color-mix(in srgb, var(--theme-primary) 14%, var(--theme-dark-bg)) 0%,
+    var(--theme-dark-bg) 48%,
+    color-mix(in srgb, var(--theme-secondary) 12%, var(--theme-dark-bg)) 100%
+  );
+  --app-bg-blob-1-start: var(--theme-primary);
+  --app-bg-blob-1-end: color-mix(in srgb, var(--theme-primary) 54%, var(--theme-dark-bg));
+  --app-bg-blob-2-start: var(--theme-secondary);
+  --app-bg-blob-2-end: color-mix(in srgb, var(--theme-secondary) 50%, var(--theme-dark-bg));
+  --app-surface: color-mix(in srgb, var(--theme-dark-bg) 88%, #ffffff);
+  --app-surface-strong: color-mix(in srgb, var(--theme-dark-bg) 82%, #ffffff);
+  --app-surface-muted: color-mix(in srgb, var(--theme-primary) 9%, rgba(255, 255, 255, 0.08));
+  --app-border: color-mix(in srgb, var(--theme-primary) 14%, rgba(255, 255, 255, 0.08));
+  --app-border-strong: color-mix(in srgb, var(--theme-primary) 20%, rgba(255, 255, 255, 0.12));
+  --app-accent-soft: color-mix(in srgb, var(--theme-primary) 18%, transparent);
+  --surface-subtle: color-mix(in srgb, var(--theme-primary) 8%, rgba(255, 255, 255, 0.05));
+  --surface-subtle-hover: color-mix(in srgb, var(--theme-primary) 13%, rgba(255, 255, 255, 0.06));
+  --surface-subtle-strong: color-mix(in srgb, var(--theme-primary) 17%, rgba(255, 255, 255, 0.07));
+  --border-subtle: color-mix(in srgb, var(--theme-primary) 16%, rgba(255, 255, 255, 0.1));
+  --border-subtle-dashed: color-mix(in srgb, var(--theme-primary) 20%, rgba(255, 255, 255, 0.12));
+  --sidebar-bg-color: color-mix(in srgb, var(--theme-dark-bg) 82%, transparent);
+  --sidebar-logo-bg-color: color-mix(in srgb, var(--theme-dark-bg) 76%, transparent);
+  --sidebar-hover-bg-color: color-mix(in srgb, var(--theme-primary) 10%, transparent);
+  --glass-bg: color-mix(in srgb, var(--theme-dark-bg) 82%, transparent);
+  --glass-bg-secondary: var(--app-surface-muted);
+  --glass-border: var(--app-border-strong);
+  --app-input-bg: var(--app-surface-strong);
+  --app-input-bg-focus: var(--app-surface-strong);
+  --bg-quinary: color-mix(in srgb, var(--theme-primary) 5%, var(--theme-dark-bg));
+  --border-hover: color-mix(in srgb, var(--theme-primary) 46%, transparent);
+  --color-primary-light-3: color-mix(in srgb, var(--theme-primary) 82%, #ffffff);
+  --color-primary-light-5: color-mix(in srgb, var(--theme-primary) 42%, var(--theme-dark-bg));
+  --color-primary-light-7: color-mix(in srgb, var(--theme-primary) 30%, var(--theme-dark-bg));
+  --color-primary-light-8: color-mix(in srgb, var(--theme-primary) 22%, var(--theme-dark-bg));
+  --color-primary-light-9: color-mix(in srgb, var(--theme-primary) 15%, var(--theme-dark-bg));
+  --color-primary-dark-2: color-mix(in srgb, var(--theme-primary) 80%, #000000);
+  --primary-active: var(--theme-primary);
+  --primary-contrast: var(--theme-dark-bg);
+  --count-badge-text: var(--color-primary-light-3);
+}
+
+/* Independent style axes modeled after new-api's theme customizer. */
+:root[data-theme-radius='none'] {
+  --app-radius-lg: 0;
+  --app-radius-md: 0;
+  --app-radius-sm: 0;
+}
+
+:root[data-theme-radius='sm'] {
+  --app-radius-lg: 8px;
+  --app-radius-md: 5px;
+  --app-radius-sm: 3px;
+}
+
+:root[data-theme-radius='md'] {
+  --app-radius-lg: 14px;
+  --app-radius-md: 9px;
+  --app-radius-sm: 6px;
+}
+
+:root[data-theme-radius='lg'] {
+  --app-radius-lg: 22px;
+  --app-radius-md: 14px;
+  --app-radius-sm: 9px;
+}
+
+:root[data-theme-radius='xl'] {
+  --app-radius-lg: 30px;
+  --app-radius-md: 20px;
+  --app-radius-sm: 13px;
+}
+
+:root[data-theme-density='compact'] {
+  --app-gap: 14px;
+  --app-card-padding: 18px;
+  --sidebar-width: 198px;
+  --floating-control-size: 32px;
+  --app-font-size: 13px;
+}
+
+:root[data-theme-density='comfortable'] {
+  --app-gap: 24px;
+  --app-card-padding: 28px;
+  --sidebar-width: 224px;
+  --floating-control-size: 38px;
+  --app-font-size: 15px;
+}
+
+:root[data-theme-font='system'] {
+  --app-font-family:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell,
+    'Helvetica Neue', sans-serif;
+}
+
+:root[data-theme-font='modern'] {
+  --app-font-family:
+    Inter, 'Segoe UI Variable', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+
+:root[data-theme-font='serif'] {
+  --app-font-family:
+    ui-serif, Georgia, Cambria, 'Times New Roman', 'Noto Serif SC', 'Songti SC', serif;
+}
+
+body {
+  font-size: var(--app-font-size);
 }

@@ -6,6 +6,27 @@ export type Theme = 'white' | 'dark' | 'auto';
 
 export type VisualEffectsMode = 'full' | 'reduced';
 
+export type ThemePreset =
+  | 'default'
+  | 'anthropic'
+  | 'underground'
+  | 'rose-garden'
+  | 'lake-view'
+  | 'sunset-glow'
+  | 'forest-whisper'
+  | 'ocean-breeze'
+  | 'lavender-dream'
+  | 'monochrome'
+  | 'custom';
+
+export type ThemeRadius = 'default' | 'none' | 'sm' | 'md' | 'lg' | 'xl';
+
+export type ThemeDensity = 'compact' | 'default' | 'comfortable';
+
+export type ThemeFont = 'system' | 'modern' | 'serif';
+
+export type ThemeContentLayout = 'full' | 'centered';
+
 export type Language = 'zh-CN' | 'zh-TW' | 'en' | 'ru';
 
 export type NotificationType = 'info' | 'success' | 'warning' | 'error';
