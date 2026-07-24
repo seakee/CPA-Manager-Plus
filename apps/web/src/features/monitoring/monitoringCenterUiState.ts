@@ -1,5 +1,5 @@
 export type MonitoringDataTab = 'accounts' | 'apiKeys' | 'realtime';
-export type MonitoringCenterTimeRange = 'today' | '7d' | '14d' | '30d' | 'all' | 'custom';
+export type MonitoringCenterTimeRange = 'today' | 'yesterday' | '7d' | '14d' | '30d' | 'all' | 'custom';
 export type MonitoringCenterStatusFilter = 'all' | 'success' | 'failed';
 
 export const MONITORING_DATA_TABS: readonly MonitoringDataTab[] = [
@@ -37,6 +37,7 @@ export type MonitoringCenterUiState = {
 const TAB_SET = new Set<MonitoringDataTab>(MONITORING_DATA_TABS);
 const TIME_RANGE_SET = new Set<MonitoringCenterTimeRange>([
   'today',
+  'yesterday',
   '7d',
   '14d',
   '30d',
