@@ -4,6 +4,7 @@ import {
   useId,
   useRef,
   useState,
+  type PointerEvent as ReactPointerEvent,
   type PropsWithChildren,
   type ReactNode,
 } from 'react';
@@ -63,6 +64,7 @@ export function Drawer({
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
+  const overlayPointerStartedRef = useRef(false);
 
   const startClose = useCallback(
     (notifyParent: boolean) => {
@@ -116,6 +118,31 @@ export function Drawer({
   const handleClose = useCallback(() => {
     startClose(true);
   }, [startClose]);
+
+  // 仅当按下与释放都发生在遮罩本身时才关闭，避免「面板内拖选到遮罩释放」误关。
+  const handleOverlayPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    overlayPointerStartedRef.current = event.target === event.currentTarget;
+  }, []);
+
+  const handleOverlayPointerUp = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      const shouldClose =
+        overlayPointerStartedRef.current &&
+        event.target === event.currentTarget &&
+        event.button === 0;
+
+      overlayPointerStartedRef.current = false;
+
+      if (shouldClose) {
+        handleClose();
+      }
+    },
+    [handleClose]
+  );
+
+  const handleOverlayPointerCancel = useCallback(() => {
+    overlayPointerStartedRef.current = false;
+  }, []);
 
   const shouldLockScroll = open || isVisible;
 
@@ -173,7 +200,12 @@ export function Drawer({
     .join(' ');
 
   const drawerContent = (
-    <div className={overlayClass} onClick={handleClose}>
+    <div
+      className={overlayClass}
+      onPointerDown={handleOverlayPointerDown}
+      onPointerUp={handleOverlayPointerUp}
+      onPointerCancel={handleOverlayPointerCancel}
+    >
       <div
         ref={panelRef}
         className={panelClass}
