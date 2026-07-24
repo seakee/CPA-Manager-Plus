@@ -596,6 +596,9 @@ type FilterOptions struct {
 	APIKeyHashes     []string          `json:"api_key_hashes,omitempty"`
 	Providers        []string          `json:"providers,omitempty"`
 	AuthFiles        []string          `json:"auth_files,omitempty"`
+	Accounts         []string          `json:"accounts,omitempty"`
+	AccountCount     int               `json:"account_count,omitempty"`
+	APIKeyCount      int               `json:"api_key_count,omitempty"`
 	ProjectIDs       []string          `json:"project_ids,omitempty"`
 	RequestTypes     []string          `json:"request_types,omitempty"`
 	HeaderErrorKinds []string          `json:"header_error_kinds,omitempty"`
@@ -760,8 +763,7 @@ func (s *Service) Analytics(ctx context.Context, req Request) (Response, error) 
 	if rollupEligible && needsHourlyCore {
 		hourlySnapshot, hourlySnapshotAvailable = s.hourlyReader.LoadAnalytics(
 			ctx,
-			req.FromMS,
-			req.ToMS,
+			filter,
 			granularity,
 			location,
 			hourlyTimelineRepresentable,
@@ -1006,8 +1008,7 @@ func (s *Service) Analytics(ctx context.Context, req Request) (Response, error) 
 				if rollupEligible {
 					prevSnapshot, prevSnapshotAvailable = s.hourlyReader.LoadAnalytics(
 						ctx,
-						prevFrom,
-						req.FromMS,
+						prevFilter,
 						granularity,
 						location,
 						false,
@@ -1339,26 +1340,7 @@ func buildFilter(req Request) store.AnalyticsFilter {
 }
 
 func analyticsHourlyRollupEligible(filter store.AnalyticsFilter) bool {
-	return strings.TrimSpace(filter.SearchQuery) == "" &&
-		strings.TrimSpace(filter.SearchAPIKeyHash) == "" &&
-		len(filter.Models) == 0 &&
-		len(filter.Providers) == 0 &&
-		len(filter.Accounts) == 0 &&
-		len(filter.CredentialIDs) == 0 &&
-		len(filter.AuthFiles) == 0 &&
-		len(filter.AuthIndices) == 0 &&
-		len(filter.APIKeyHashes) == 0 &&
-		len(filter.SourceHashes) == 0 &&
-		len(filter.ProjectIDs) == 0 &&
-		len(filter.RequestTypes) == 0 &&
-		len(filter.HeaderErrorKinds) == 0 &&
-		len(filter.HeaderErrorCodes) == 0 &&
-		len(filter.HeaderQuotaPlans) == 0 &&
-		len(filter.HeaderTraceIDs) == 0 &&
-		filter.IncludeFailed &&
-		!filter.FailedOnly &&
-		filter.MinLatencyMS == 0 &&
-		strings.TrimSpace(filter.CacheStatus) == ""
+	return usagehourly.SupportsAnalyticsFilter(filter)
 }
 
 type filterOptionStats struct {
@@ -1465,12 +1447,83 @@ func (s *Service) filterSelectors(ctx context.Context, filter store.AnalyticsFil
 	if err != nil {
 		return nil, err
 	}
+	accountStats := buildAccountSelectorStats(values)
 	return &FilterOptions{
 		Models:       values.Models,
 		APIKeyHashes: values.APIKeyHashes,
 		Providers:    values.Providers,
 		AuthFiles:    values.AuthFiles,
+		Accounts:     values.Accounts,
+		AccountStats: accountStats,
+		AccountCount: len(accountStats),
+		APIKeyCount:  countAPIKeySelectors(values),
 	}, nil
+}
+
+func countAPIKeySelectors(values store.FilterSelectorValues) int {
+	groups := make(map[string]struct{}, len(values.APIKeySelectors))
+	for _, selector := range values.APIKeySelectors {
+		groups[apiKeyGroupKey(
+			selector.APIKeyHash,
+			selector.SourceHash,
+			selector.AuthIndex,
+			selector.Source,
+			selector.AuthProviderSnapshot,
+		)] = struct{}{}
+	}
+	return len(groups)
+}
+
+func buildAccountSelectorStats(values store.FilterSelectorValues) []AccountStatRow {
+	grouped := map[string]*accountStatAccumulator{}
+	for _, selector := range values.AccountSelectors {
+		id := accountGroupKey(
+			selector.AccountSnapshot,
+			selector.AuthLabelSnapshot,
+			selector.Source,
+			selector.AuthIndex,
+		)
+		if id == "-" && strings.TrimSpace(selector.SourceHash) == "" {
+			continue
+		}
+		entry := grouped[id]
+		if entry == nil {
+			entry = &accountStatAccumulator{
+				row: AccountStatRow{
+					ID:                   id,
+					AccountSnapshot:      selector.AccountSnapshot,
+					AuthLabelSnapshot:    selector.AuthLabelSnapshot,
+					AuthProviderSnapshot: selector.AuthProviderSnapshot,
+					SuccessRate:          1,
+				},
+				authIndices:  map[string]struct{}{},
+				sources:      map[string]struct{}{},
+				sourceHashes: map[string]struct{}{},
+			}
+			grouped[id] = entry
+		}
+		fillAccountStatSnapshots(
+			&entry.row,
+			selector.AccountSnapshot,
+			selector.AuthLabelSnapshot,
+			selector.AuthProviderSnapshot,
+		)
+		addSetValue(entry.authIndices, selector.AuthIndex)
+		addSetValue(entry.sources, selector.Source)
+		addSetValue(entry.sourceHashes, selector.SourceHash)
+	}
+
+	result := make([]AccountStatRow, 0, len(grouped))
+	for _, entry := range grouped {
+		entry.row.AuthIndices = sortedSetValues(entry.authIndices)
+		entry.row.Sources = sortedSetValues(entry.sources)
+		entry.row.SourceHashes = sortedSetValues(entry.sourceHashes)
+		result = append(result, entry.row)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].ID < result[j].ID
+	})
+	return result
 }
 
 func filterOptionsBaseFilter(filter store.AnalyticsFilter) store.AnalyticsFilter {
@@ -1583,9 +1636,23 @@ func buildTimeline(points []store.TimelinePoint, percentiles []store.LatencyPerc
 		latencyTotal        float64
 		latencySample       int64
 	}
-	buckets := make(map[int64]*bucketAccumulator, len(points))
+	orderedPoints := append([]store.TimelinePoint(nil), points...)
+	sort.SliceStable(orderedPoints, func(i, j int) bool {
+		if orderedPoints[i].BucketMS != orderedPoints[j].BucketMS {
+			return orderedPoints[i].BucketMS < orderedPoints[j].BucketMS
+		}
+		if orderedPoints[i].Model != orderedPoints[j].Model {
+			return orderedPoints[i].Model < orderedPoints[j].Model
+		}
+		if orderedPoints[i].BillingModel != orderedPoints[j].BillingModel {
+			return orderedPoints[i].BillingModel < orderedPoints[j].BillingModel
+		}
+		return orderedPoints[i].ServiceTier < orderedPoints[j].ServiceTier
+	})
+
+	buckets := make(map[int64]*bucketAccumulator, len(orderedPoints))
 	order := make([]int64, 0, len(points))
-	for _, point := range points {
+	for _, point := range orderedPoints {
 		bucket := buckets[point.BucketMS]
 		if bucket == nil {
 			bucket = &bucketAccumulator{

@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"io/fs"
+	"path/filepath"
+	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
@@ -72,6 +74,17 @@ func FromExisting(
 	collectorService := collectorsvc.New(collectorManager)
 	managerConfigService := managerconfigsvc.New(cfg, st, collectorService)
 	accountProcessingPolicyService := automationsvc.New(cfg, st)
+	usageImportBaseDir := strings.TrimSpace(cfg.DataDir)
+	if usageImportBaseDir == "" {
+		usageImportBaseDir = filepath.Dir(cfg.DBPath)
+	}
+	usageService := usagesvc.New(st, usagesvc.WithImportSessions(usagesvc.ImportSessionConfig{
+		Directory:      filepath.Join(usageImportBaseDir, "usage-imports"),
+		ChunkSizeBytes: cfg.UsageImportChunkBytes,
+		DiskQuotaBytes: cfg.UsageImportDiskQuotaBytes,
+		MaxSessions:    cfg.UsageImportMaxSessions,
+		TTL:            cfg.UsageImportSessionTTL,
+	}))
 	return &Context{
 		Config:                         cfg,
 		Store:                          st,
@@ -82,7 +95,7 @@ func FromExisting(
 		SetupService:                   setupsvc.New(cfg, st, collectorService, managerConfigService, startedAt, serviceID),
 		ManagerConfigService:           managerConfigService,
 		CollectorService:               collectorService,
-		UsageService:                   usagesvc.New(st),
+		UsageService:                   usageService,
 		DashboardService:               dashboardsvc.New(st, cfg.DashboardHourlyRollupEnabled),
 		CodexInspectionService:         codexinspectionsvc.New(st, managerConfigService),
 		MonitoringService:              monitoringsvc.New(st, cfg.DashboardHourlyRollupEnabled),

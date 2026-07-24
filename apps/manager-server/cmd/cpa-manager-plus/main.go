@@ -82,6 +82,9 @@ func runServer() {
 	defer stop()
 
 	serverApp := httpapi.New(cfg, db, manager)
+	if err := serverApp.AppContext().UsageService.StartImportSessionCleanup(ctx); err != nil {
+		log.Fatalf("start usage import session cleanup: %v", err)
+	}
 	automationSettingsService := serverApp.AppContext().AccountProcessingPolicyService
 	runtimeSettings := automationSettingsService.RuntimeSettings(ctx)
 	rateLimitAutoDisableWorker := worker.NewRateLimitAutoDisableWorker(db, collector.RuntimeConfig{
@@ -91,15 +94,15 @@ func runServer() {
 	accountActionWorker := worker.NewAccountActionCandidateWorker(db, runtimeSettings.AccountActionsAutoDisable)
 	accountHistoryRollupWorker := worker.NewAccountHistoryRollupWorker(db)
 	accountHistoryRollupWorker.Start(ctx)
-	var dashboardHourlyRollupWorker *worker.DashboardHourlyRollupWorker
+	var usageHourlyAggregateWorker *worker.UsageHourlyAggregateWorker
 	if cfg.DashboardHourlyRollupEnabled {
-		dashboardHourlyRollupWorker = worker.NewDashboardHourlyRollupWorker(db)
-		dashboardHourlyRollupWorker.Start(ctx)
+		usageHourlyAggregateWorker = worker.NewUsageHourlyAggregateWorker(db)
+		usageHourlyAggregateWorker.Start(ctx)
 	}
 	serverApp.AppContext().UsageService.SetEventsInsertedNotifier(func() {
 		accountHistoryRollupWorker.Wake()
-		if dashboardHourlyRollupWorker != nil {
-			dashboardHourlyRollupWorker.Wake()
+		if usageHourlyAggregateWorker != nil {
+			usageHourlyAggregateWorker.Wake()
 		}
 	})
 	automationRuntime := worker.NewAutomationRuntime(
@@ -113,7 +116,7 @@ func runServer() {
 	manager.SetUsageEventHandler(worker.NewUsageEventFanout(
 		automationRuntime.UsageEventHandler(),
 		accountHistoryRollupWorker,
-		dashboardHourlyRollupWorker,
+		usageHourlyAggregateWorker,
 	))
 
 	collectorWorker.Start(ctx)
@@ -153,8 +156,8 @@ func runServer() {
 	usageCacheAccountingMigrationWorker := worker.NewUsageCacheAccountingMigrationWorker(db, func() {
 		go runUsageResponseMetadataBackfill(ctx, db)
 		accountHistoryRollupWorker.Wake()
-		if dashboardHourlyRollupWorker != nil {
-			dashboardHourlyRollupWorker.Wake()
+		if usageHourlyAggregateWorker != nil {
+			usageHourlyAggregateWorker.Wake()
 		}
 	})
 	usageCacheAccountingMigrationWorker.Start(ctx)

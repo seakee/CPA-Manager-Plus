@@ -34,7 +34,7 @@ func BenchmarkDashboardTodayMetrics(b *testing.B) {
 	})
 
 	for {
-		result, err := db.CatchUpDashboardHourlyRollups(ctx, 5_000, time.Now().UnixMilli())
+		result, err := db.CatchUpUsageHourlyAggregate(ctx, 5_000, time.Now().UnixMilli())
 		if err != nil {
 			b.Fatalf("catch up dashboard rollup: %v", err)
 		}
@@ -104,7 +104,7 @@ func BenchmarkDashboardMonitoringRefreshPaths(b *testing.B) {
 			nowMS := todayStartMS + 24*hourWindowMs
 			insertDashboardRecentBenchmarkEvents(b, ctx, db, todayStartMS, nowMS, count)
 			for {
-				result, err := db.CatchUpDashboardHourlyRollups(ctx, 10_000, nowMS)
+				result, err := db.CatchUpUsageHourlyAggregate(ctx, 10_000, nowMS)
 				if err != nil {
 					b.Fatalf("catch up dashboard rollup: %v", err)
 				}

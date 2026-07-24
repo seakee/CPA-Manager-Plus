@@ -14,14 +14,20 @@ const AdminKey = "cpamp_test_key_0123456789abcdef"
 
 func NewConfig(t testing.TB) config.Config {
 	t.Helper()
+	dir := t.TempDir()
 	return config.Config{
-		DBPath:        filepath.Join(t.TempDir(), "usage.sqlite"),
-		Queue:         "usage",
-		PopSide:       "right",
-		BatchSize:     100,
-		QueryLimit:    50000,
-		CORSOrigins:   []string{"*"},
-		CollectorMode: "auto",
+		DataDir:                   dir,
+		DBPath:                    filepath.Join(dir, "usage.sqlite"),
+		Queue:                     "usage",
+		PopSide:                   "right",
+		BatchSize:                 100,
+		QueryLimit:                50000,
+		CORSOrigins:               []string{"*"},
+		CollectorMode:             "auto",
+		UsageImportChunkBytes:     config.DefaultUsageImportChunkBytes,
+		UsageImportDiskQuotaBytes: config.DefaultUsageImportDiskQuotaBytes,
+		UsageImportMaxSessions:    config.DefaultUsageImportMaxSessions,
+		UsageImportSessionTTL:     config.DefaultUsageImportSessionTTL,
 	}
 }
 

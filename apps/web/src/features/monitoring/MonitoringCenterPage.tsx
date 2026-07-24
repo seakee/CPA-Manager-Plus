@@ -55,6 +55,7 @@ import { MonitoringDataPanel } from '@/features/monitoring/components/Monitoring
 import { MonitoringActionBar } from '@/features/monitoring/components/MonitoringActionBar';
 import { MonitoringCustomRangeModal } from '@/features/monitoring/components/MonitoringCustomRangeModal';
 import { MonitoringFiltersPanel } from '@/features/monitoring/components/MonitoringFiltersPanel';
+import { UsageImportProgressModal } from '@/features/monitoring/components/UsageImportProgressModal';
 import { usePageTransitionLayer } from '@/components/common/PageTransitionLayer';
 import { IconInbox } from '@/components/ui/icons';
 import {
@@ -96,7 +97,13 @@ import {
   type FocusSnapshot,
   type StatusFilter,
 } from '@/features/monitoring/model/monitoringCenterPageModel';
+import { resolveMonitoringDimensionCounts } from '@/features/monitoring/model/monitoringAnalyticsModel';
 import { useUsageData } from '@/features/monitoring/hooks/useUsageData';
+import {
+  isUsageImportCancelledError,
+  isUsageImportPausedError,
+  type UsageImportProgress,
+} from '@/features/monitoring/services/usageImportSession';
 import { monitoringAnalyticsApi, type UsageHeaderSnapshot } from '@/services/api/usageService';
 import {
   readMonitoringCenterUiState,
@@ -108,7 +115,6 @@ import { useInterval } from '@/hooks/useInterval';
 import { useRequestMonitoringAvailability } from '@/hooks/useRequestMonitoringAvailability';
 import { isFileLogsAvailable } from '@/features/logs/logFeatureAvailability';
 import { useAuthStore, useConfigStore, useNotificationStore } from '@/stores';
-import { formatFileSize } from '@/utils/format';
 import type { StatusBarData } from '@/utils/recentRequests';
 import { downloadBlob } from '@/utils/download';
 import { sha256Hex } from '@/utils/apiKeyHash';
@@ -123,7 +129,6 @@ import styles from './MonitoringCenterPage.module.scss';
 export { AccountExpandedDetails, AccountOverviewCard };
 
 const DEFAULT_ACCOUNT_PAGE_SIZE = ACCOUNT_OVERVIEW_TABLE_PAGE_SIZE_OPTIONS[0];
-const MAX_USAGE_IMPORT_FILE_SIZE = 64 * 1024 * 1024;
 const EMPTY_STATUS_BAR_DATA: StatusBarData = {
   blocks: [],
   blockDetails: [],
@@ -233,6 +238,11 @@ export function MonitoringCenterPage() {
   const [isCustomRangeModalOpen, setIsCustomRangeModalOpen] = useState(false);
   const [usageExporting, setUsageExporting] = useState(false);
   const [usageImporting, setUsageImporting] = useState(false);
+  const [usageImportCancelling, setUsageImportCancelling] = useState(false);
+  const [usageImportTask, setUsageImportTask] = useState<{
+    file: File;
+    progress: UsageImportProgress;
+  } | null>(null);
   const [accountQuotaStates, setAccountQuotaStates] = useState<Record<string, AccountQuotaState>>(
     {}
   );
@@ -269,6 +279,9 @@ export function MonitoringCenterPage() {
   const accountQuotaStatesRef = useRef<Record<string, AccountQuotaState>>({});
   const accountQuotaRequestIdsRef = useRef<Record<string, number>>({});
   const usageImportInputRef = useRef<HTMLInputElement | null>(null);
+  const usageImportAbortRef = useRef<AbortController | null>(null);
+  const usageImportCancelPendingRef = useRef(false);
+  const usageImportRunIDRef = useRef(0);
   const deferredSearch = useDeferredValue(searchInput);
   const deferredSearchApiKeyHash = useMemo(() => sha256Hex(deferredSearch), [deferredSearch]);
   const accountPage =
@@ -330,6 +343,7 @@ export function MonitoringCenterPage() {
     loadApiKeyAliases,
     exportUsage,
     importUsage,
+    cancelUsageImport,
   } = useUsageData({ loadUsageEvents: false });
 
   const monitoringScopeFilters = useMemo(
@@ -391,6 +405,7 @@ export function MonitoringCenterPage() {
     searchQuery: deferredSearch,
     searchApiKeyHash: deferredSearchApiKeyHash,
     scopeFilters: monitoringScopeFilters,
+    activeDataTab,
   });
 
   const loadHeaderSnapshots = useCallback(async () => {
@@ -599,6 +614,27 @@ export function MonitoringCenterPage() {
   const scopedSummary = monitoringSummary;
   const accountRows = monitoringAccountRows;
   const apiKeyRows = monitoringApiKeyRows;
+  const { accountCount, apiKeyCount } = useMemo(
+    () =>
+      resolveMonitoringDimensionCounts({
+        activeDataTab,
+        accountRowCount: accountRows.length,
+        apiKeyRowCount: apiKeyRows.length,
+        accountSelectorCount:
+          monitoringFilterOptions.accountCount ?? monitoringFilterOptions.accountRows.length,
+        apiKeySelectorCount:
+          monitoringFilterOptions.apiKeyCount ?? monitoringFilterOptions.apiKeyRows.length,
+      }),
+    [
+      accountRows.length,
+      activeDataTab,
+      apiKeyRows.length,
+      monitoringFilterOptions.accountCount,
+      monitoringFilterOptions.accountRows.length,
+      monitoringFilterOptions.apiKeyCount,
+      monitoringFilterOptions.apiKeyRows.length,
+    ]
+  );
   const accountStatusDataByRowId = useMemo(
     () => buildMonitoringAccountStatusDataMap(scopedRows, accountStatusBounds),
     [accountStatusBounds, scopedRows]
@@ -747,6 +783,11 @@ export function MonitoringCenterPage() {
   const hasActiveDataFilter = hasSearchFilter || hasScopeFilter;
   const failedGroupCount = groupedRealtimeRows.filter((row) => row.failureCalls > 0).length;
   const failedOnlyActive = selectedStatus === 'failed';
+  const hasMonitoringDisplayData =
+    scopedSummary.totalCalls > 0 ||
+    accountRows.length > 0 ||
+    apiKeyRows.length > 0 ||
+    filteredRows.length > 0;
   const connectionTone: MonitoringStatusTone =
     connectionStatus === 'connected' ? 'good' : connectionStatus === 'connecting' ? 'warn' : 'bad';
   const connectionLabel =
@@ -776,13 +817,13 @@ export function MonitoringCenterPage() {
     () =>
       buildPrimarySummaryCards({
         summary: scopedSummary,
-        accountCount: accountRows.length,
+        accountCount,
         failedGroupCount,
         hasPrices,
         locale: i18n.language,
         t,
       }),
-    [accountRows.length, failedGroupCount, hasPrices, i18n.language, scopedSummary, t]
+    [accountCount, failedGroupCount, hasPrices, i18n.language, scopedSummary, t]
   );
 
   const secondarySummaryCards = useMemo(
@@ -801,16 +842,16 @@ export function MonitoringCenterPage() {
         label: shortLabel(t, 'monitoring.data_tab_accounts_short', 'monitoring.data_tab_accounts'),
         fullLabel: t('monitoring.data_tab_accounts'),
         icon: 'accounts',
-        badge: accountRows.length,
-        badgeTitle: t('monitoring.data_tab_accounts_badge_title', { count: accountRows.length }),
+        badge: accountCount,
+        badgeTitle: t('monitoring.data_tab_accounts_badge_title', { count: accountCount }),
       },
       {
         id: 'apiKeys',
         label: shortLabel(t, 'monitoring.data_tab_api_keys_short', 'monitoring.data_tab_api_keys'),
         fullLabel: t('monitoring.data_tab_api_keys'),
         icon: 'apiKeys',
-        badge: apiKeyRows.length,
-        badgeTitle: t('monitoring.data_tab_api_keys_badge_title', { count: apiKeyRows.length }),
+        badge: apiKeyCount,
+        badgeTitle: t('monitoring.data_tab_api_keys_badge_title', { count: apiKeyCount }),
       },
       {
         id: 'realtime',
@@ -825,7 +866,7 @@ export function MonitoringCenterPage() {
         }),
       },
     ];
-  }, [accountRows.length, apiKeyRows.length, scopedFailureCount, scopedSummary.totalCalls, t]);
+  }, [accountCount, apiKeyCount, scopedFailureCount, scopedSummary.totalCalls, t]);
 
   const handleDataTabChange = useCallback((tab: MonitoringDataTab) => {
     setActiveDataTab(tab);
@@ -1251,11 +1292,36 @@ export function MonitoringCenterPage() {
     }
   }, [exportUsage, resolveUsageTransferError, showNotification, t]);
 
-  const importUsageFile = useCallback(
+  const runUsageImport = useCallback(
     async (file: File) => {
+      const runID = usageImportRunIDRef.current + 1;
+      usageImportRunIDRef.current = runID;
+      const controller = new AbortController();
+      usageImportAbortRef.current = controller;
       setUsageImporting(true);
+      setUsageImportTask((current) => ({
+        file,
+        progress:
+          current?.file === file
+            ? { ...current.progress, phase: 'preparing', error: undefined }
+            : {
+                sessionId: '',
+                filename: file.name,
+                phase: 'preparing',
+                uploadedBytes: 0,
+                totalBytes: file.size,
+                percent: 0,
+              },
+      }));
       try {
-        const result = await importUsage(file);
+        const result = await importUsage(file, {
+          signal: controller.signal,
+          onProgress: (progress) => {
+            if (usageImportRunIDRef.current !== runID) return;
+            setUsageImportTask({ file, progress });
+          },
+        });
+        if (usageImportRunIDRef.current !== runID) return;
         const unsupported = result.unsupported ?? 0;
         showNotification(
           `${t('usage_stats.import_success', {
@@ -1270,17 +1336,161 @@ export function MonitoringCenterPage() {
           showNotification(t('usage_stats.import_legacy_warning'), 'warning');
         }
         await refreshAll();
+        if (usageImportRunIDRef.current === runID) {
+          setUsageImportTask(null);
+        }
       } catch (error: unknown) {
+        if (usageImportRunIDRef.current !== runID) return;
+        if (isUsageImportPausedError(error)) {
+          setUsageImportTask((current) =>
+            current?.file === file
+              ? { ...current, progress: { ...current.progress, phase: 'paused', error: undefined } }
+              : current
+          );
+          return;
+        }
+        if (isUsageImportCancelledError(error)) {
+          setUsageImportTask((current) =>
+            current?.file === file
+              ? {
+                  ...current,
+                  progress: { ...current.progress, phase: 'cancelled', error: undefined },
+                }
+              : current
+          );
+          showNotification(t('usage_stats.import_cancelled'), 'success');
+          return;
+        }
         const message = resolveUsageTransferError(error);
+        setUsageImportTask((current) =>
+          current?.file === file
+            ? { ...current, progress: { ...current.progress, phase: 'failed', error: message } }
+            : current
+        );
         showNotification(
           `${t('notification.upload_failed')}${message ? `: ${message}` : ''}`,
           'error'
         );
       } finally {
-        setUsageImporting(false);
+        if (usageImportRunIDRef.current === runID) {
+          usageImportAbortRef.current = null;
+          setUsageImporting(false);
+        }
       }
     },
     [importUsage, refreshAll, resolveUsageTransferError, showNotification, t]
+  );
+
+  const handleUsageImportPause = useCallback(() => {
+    usageImportAbortRef.current?.abort();
+  }, []);
+
+  const handleUsageImportResume = useCallback(() => {
+    if (!usageImportTask || usageImporting) return;
+    void runUsageImport(usageImportTask.file);
+  }, [runUsageImport, usageImportTask, usageImporting]);
+
+  const handleUsageImportCancel = useCallback(async () => {
+    const task = usageImportTask;
+    if (!task || usageImportCancelPendingRef.current) return;
+    usageImportCancelPendingRef.current = true;
+    const runID = usageImportRunIDRef.current + 1;
+    usageImportRunIDRef.current = runID;
+    usageImportAbortRef.current?.abort();
+    usageImportAbortRef.current = null;
+    setUsageImporting(true);
+    setUsageImportCancelling(true);
+    let closeTask = false;
+    try {
+      if (task.progress.sessionId) {
+        const cancelled = await cancelUsageImport(task.progress.sessionId, task.file);
+        if (cancelled?.status === 'completed') {
+          showNotification(
+            t('usage_stats.import_completed_before_cancel', {
+              added: cancelled.result?.added ?? 0,
+              skipped: cancelled.result?.skipped ?? 0,
+            }),
+            'warning'
+          );
+          await refreshAll();
+          closeTask = true;
+        } else if (cancelled?.status === 'cancelled') {
+          const uploadedBytes = cancelled.received_bytes;
+          const totalBytes = cancelled.size_bytes || task.progress.totalBytes;
+          setUsageImportTask((current) =>
+            current?.file === task.file
+              ? {
+                  ...current,
+                  progress: {
+                    sessionId: cancelled.id,
+                    filename: cancelled.filename || task.file.name,
+                    phase: 'cancelled',
+                    status: cancelled.status,
+                    uploadedBytes,
+                    totalBytes,
+                    percent:
+                      totalBytes > 0
+                        ? uploadedBytes >= totalBytes
+                          ? 100
+                          : Math.max(0, Math.floor((uploadedBytes / totalBytes) * 100))
+                        : 0,
+                    retryable: cancelled.retryable,
+                    result: cancelled.result,
+                  },
+                }
+              : current
+          );
+          showNotification(t('usage_stats.import_cancelled'), 'success');
+        } else {
+          showNotification(t('usage_stats.import_cancelled'), 'success');
+          closeTask = true;
+        }
+      } else {
+        showNotification(t('usage_stats.import_cancelled'), 'success');
+        closeTask = true;
+      }
+    } catch (error: unknown) {
+      const message = resolveUsageTransferError(error);
+      setUsageImportTask((current) =>
+        current?.file === task.file
+          ? { ...current, progress: { ...current.progress, phase: 'paused', error: message } }
+          : current
+      );
+      showNotification(
+        `${t('usage_stats.import_cancel_failed')}${message ? `: ${message}` : ''}`,
+        'error'
+      );
+    } finally {
+      usageImportCancelPendingRef.current = false;
+      if (usageImportRunIDRef.current === runID) {
+        setUsageImporting(false);
+        setUsageImportCancelling(false);
+        if (closeTask) {
+          setUsageImportTask(null);
+        }
+      }
+    }
+  }, [
+    cancelUsageImport,
+    refreshAll,
+    resolveUsageTransferError,
+    showNotification,
+    t,
+    usageImportTask,
+  ]);
+
+  const handleUsageImportModalClose = useCallback(() => {
+    if (!usageImporting && !usageImportCancelling) {
+      setUsageImportTask(null);
+    }
+  }, [usageImportCancelling, usageImporting]);
+
+  useEffect(
+    () => () => {
+      usageImportRunIDRef.current += 1;
+      usageImportAbortRef.current?.abort();
+    },
+    []
   );
 
   const handleUsageImportClick = useCallback(() => {
@@ -1301,25 +1511,15 @@ export function MonitoringCenterPage() {
         showNotification(t('usage_stats.import_invalid'), 'error');
         return;
       }
-      if (file.size > MAX_USAGE_IMPORT_FILE_SIZE) {
-        showNotification(
-          t('usage_stats.import_file_too_large', {
-            maxSize: formatFileSize(MAX_USAGE_IMPORT_FILE_SIZE),
-          }),
-          'error'
-        );
-        return;
-      }
-
       showConfirmation({
         title: t('usage_stats.import_confirm_title'),
         message: t('usage_stats.import_confirm_body', { name: file.name }),
         confirmText: t('usage_stats.import'),
         variant: 'primary',
-        onConfirm: () => importUsageFile(file),
+        onConfirm: () => runUsageImport(file),
       });
     },
-    [importUsageFile, showConfirmation, showNotification, t]
+    [runUsageImport, showConfirmation, showNotification, t]
   );
 
   if (monitoringUnavailable) {
@@ -1341,7 +1541,7 @@ export function MonitoringCenterPage() {
       <MonitoringStatusHeader
         showLoadingOverlay={
           overallLoading &&
-          filteredRows.length === 0 &&
+          !hasMonitoringDisplayData &&
           (!monitoringScopeTransitioning || !hasMonitoringPresentationSnapshot)
         }
         monitoringUnavailable={monitoringUnavailable}
@@ -1520,6 +1720,16 @@ export function MonitoringCenterPage() {
         onApply={applyCustomTimeRange}
         onStartChange={handleCustomDraftStartChange}
         onEndChange={handleCustomDraftEndChange}
+      />
+
+      <UsageImportProgressModal
+        open={Boolean(usageImportTask)}
+        progress={usageImportTask?.progress ?? null}
+        busy={usageImportCancelling}
+        onPause={handleUsageImportPause}
+        onResume={handleUsageImportResume}
+        onCancel={() => void handleUsageImportCancel()}
+        onClose={handleUsageImportModalClose}
       />
     </div>
   );

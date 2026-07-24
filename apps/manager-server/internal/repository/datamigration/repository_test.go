@@ -35,6 +35,7 @@ func TestUsageCacheAccountingMigratesInBatchesExcludesNewRowsAndInvalidatesAtCom
 	insertLegacyUsageEvent(t, db, "legacy-generic", "", "", "other", 50, 0, 0, 0, 0, "")
 	markMigrationDiscovering(t, db)
 	insertRollupFixtures(t, db)
+	insertPermanentAggregateFixture(t, db, "legacy-anthropic")
 
 	repo := New(db)
 	state, err := repo.DiscoverUsageCacheAccounting(context.Background())
@@ -68,6 +69,8 @@ func TestUsageCacheAccountingMigratesInBatchesExcludesNewRowsAndInvalidatesAtCom
 	assertNormalizedTotalNull(t, db, "legacy-xai")
 	assertCount(t, db, "usage_cache_accounting_v2_changes", 2)
 	assertCount(t, db, "usage_account_model_rollups", 1)
+	assertCount(t, db, "usage_hourly_aggregate_v1", 1)
+	assertPermanentAggregateState(t, db, "backfilling", 1, 1, 3)
 	assertCheckpoint(t, db, "account_history", 9)
 
 	second, err := repo.RunUsageCacheAccountingBatch(context.Background(), 2)
@@ -84,6 +87,9 @@ func TestUsageCacheAccountingMigratesInBatchesExcludesNewRowsAndInvalidatesAtCom
 	assertAccounting(t, db, "new-normalized", "included_in_input", 999, 999, 999, 999, 0)
 	assertCount(t, db, "usage_account_model_rollups", 0)
 	assertCount(t, db, "usage_dashboard_hourly_rollups", 0)
+	assertCount(t, db, "usage_hourly_aggregate_v1", 0)
+	assertPermanentAggregateState(t, db, "pending", 0, 0, 4)
+	assertIdentityAggregateVersion(t, db, "legacy-anthropic", 0)
 	assertCheckpoint(t, db, "account_history", 0)
 	assertCheckpoint(t, db, "dashboard_hourly", 0)
 	assertCheckpoint(t, db, "unrelated", 9)
@@ -436,6 +442,48 @@ func insertRollupFixtures(t *testing.T, db *sql.DB) {
 	}
 }
 
+func insertPermanentAggregateFixture(t *testing.T, db *sql.DB, eventHash string) {
+	t.Helper()
+	statements := []struct {
+		query string
+		args  []any
+	}{
+		{
+			query: `insert into usage_hourly_aggregate_v1 (
+				bucket_ms, model, billing_model, service_tier, failed, calls, updated_at_ms
+			) select 0, model, model, '', failed, 1, 1 from usage_events where event_hash = ?`,
+			args: []any{eventHash},
+		},
+		{
+			query: `insert into usage_event_identity_ledger (
+				event_hash, raw_event_id, timestamp_ms, bucket_ms, aggregate_schema_version,
+				first_seen_at_ms, updated_at_ms
+			) select event_hash, id, timestamp_ms, 0, 1, created_at_ms, 1
+			from usage_events where event_hash = ?`,
+			args: []any{eventHash},
+		},
+		{
+			query: `update usage_hourly_aggregate_state set
+				status = 'backfilling',
+				backfill_last_event_id = (select id from usage_events where event_hash = ?),
+				coverage_event_id = (select id from usage_events where event_hash = ?),
+				target_event_id = (select max(id) from usage_events),
+				processed_events = 1,
+				min_bucket_ms = 0,
+				max_bucket_ms = 0,
+				updated_at_ms = 1,
+				finished_at_ms = null
+			where aggregate_name = 'hourly_core' and schema_version = 1`,
+			args: []any{eventHash, eventHash},
+		},
+	}
+	for _, statement := range statements {
+		if _, err := db.Exec(statement.query, statement.args...); err != nil {
+			t.Fatalf("insert permanent aggregate fixture: %v", err)
+		}
+	}
+}
+
 func markMigrationDiscovering(t *testing.T, db *sql.DB) {
 	t.Helper()
 	if _, err := db.Exec(`update usage_data_migrations set
@@ -466,6 +514,45 @@ func assertCheckpoint(t *testing.T, db *sql.DB, name string, want int64) {
 	}
 	if got != want {
 		t.Fatalf("checkpoint %s = %d, want %d", name, got, want)
+	}
+}
+
+func assertPermanentAggregateState(t *testing.T, db *sql.DB, wantStatus string, wantCheckpoint, wantCoverage, wantTarget int64) {
+	t.Helper()
+	var status string
+	var checkpoint, coverage, target int64
+	if err := db.QueryRow(`select status, backfill_last_event_id, coverage_event_id, target_event_id
+		from usage_hourly_aggregate_state where aggregate_name = 'hourly_core'`).Scan(
+		&status,
+		&checkpoint,
+		&coverage,
+		&target,
+	); err != nil {
+		t.Fatalf("read permanent aggregate state: %v", err)
+	}
+	if status != wantStatus || checkpoint != wantCheckpoint || coverage != wantCoverage || target != wantTarget {
+		t.Fatalf(
+			"permanent aggregate state = status:%q checkpoint:%d coverage:%d target:%d, want status:%q checkpoint:%d coverage:%d target:%d",
+			status,
+			checkpoint,
+			coverage,
+			target,
+			wantStatus,
+			wantCheckpoint,
+			wantCoverage,
+			wantTarget,
+		)
+	}
+}
+
+func assertIdentityAggregateVersion(t *testing.T, db *sql.DB, eventHash string, want int) {
+	t.Helper()
+	var got int
+	if err := db.QueryRow(`select aggregate_schema_version from usage_event_identity_ledger where event_hash = ?`, eventHash).Scan(&got); err != nil {
+		t.Fatalf("read identity aggregate version: %v", err)
+	}
+	if got != want {
+		t.Fatalf("identity aggregate version = %d, want %d", got, want)
 	}
 }
 

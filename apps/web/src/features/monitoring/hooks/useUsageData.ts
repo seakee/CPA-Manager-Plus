@@ -8,9 +8,15 @@ import {
   type ModelPriceSyncResponse,
   type UsageExportResponse,
   type UsageImportResponse,
+  type UsageImportSession,
 } from '@/services/api/usageService';
 import { useAuthStore } from '@/stores';
 import { clearModelPrices, loadModelPrices, saveModelPrices, type ModelPrice } from '@/utils/usage';
+import {
+  cancelUsageImportFile,
+  uploadUsageImportFile,
+  type UsageImportProgress,
+} from '@/features/monitoring/services/usageImportSession';
 
 export interface UsagePayload {
   total_requests?: number;
@@ -33,8 +39,14 @@ export interface UseUsageDataReturn {
   loadApiKeyAliases: () => Promise<void>;
   syncModelPrices: (models?: string[]) => Promise<ModelPriceSyncResponse>;
   exportUsage: () => Promise<UsageExportResponse>;
-  importUsage: (file: File) => Promise<UsageImportResponse>;
+  importUsage: (file: File, options?: UsageImportOptions) => Promise<UsageImportResponse>;
+  cancelUsageImport: (sessionId: string, file?: File) => Promise<UsageImportSession | null>;
   loadUsage: () => Promise<void>;
+}
+
+export interface UsageImportOptions {
+  signal?: AbortSignal;
+  onProgress?: (progress: UsageImportProgress) => void;
 }
 
 export interface UseUsageDataOptions {
@@ -105,11 +117,32 @@ export function useUsageData({
   }, [managementKey, usageEventsServiceBase]);
 
   const importUsageToApi = useCallback(
-    async (file: File): Promise<UsageImportResponse> => {
+    async (file: File, options?: UsageImportOptions): Promise<UsageImportResponse> => {
       if (!usageEventsServiceBase) {
         throw new Error('usage_import_export_requires_usage_service');
       }
-      return usageServiceApi.importUsage(usageEventsServiceBase, file, managementKey);
+      return uploadUsageImportFile({
+        base: usageEventsServiceBase,
+        managementKey,
+        file,
+        signal: options?.signal,
+        onProgress: options?.onProgress,
+      });
+    },
+    [managementKey, usageEventsServiceBase]
+  );
+
+  const cancelUsageImportOnApi = useCallback(
+    async (sessionId: string, file?: File): Promise<UsageImportSession | null> => {
+      if (!usageEventsServiceBase) {
+        throw new Error('usage_import_export_requires_usage_service');
+      }
+      return cancelUsageImportFile({
+        base: usageEventsServiceBase,
+        managementKey,
+        sessionId,
+        file,
+      });
     },
     [managementKey, usageEventsServiceBase]
   );
@@ -229,6 +262,7 @@ export function useUsageData({
     syncModelPrices,
     exportUsage: exportUsageFromApi,
     importUsage: importUsageToApi,
+    cancelUsageImport: cancelUsageImportOnApi,
     loadUsage,
   };
 }

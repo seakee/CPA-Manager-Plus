@@ -42,6 +42,13 @@ const USAGE_SERVICE_ERROR_CODES = new Set([
   'model_price_sync_failed',
   'method_not_allowed',
   'account_processing_policy_env_locked',
+  'usage_import_session_invalid_request',
+  'usage_import_session_not_found',
+  'usage_import_session_conflict',
+  'usage_import_session_too_large',
+  'usage_import_session_quota_exceeded',
+  'usage_import_session_limit_exceeded',
+  'usage_import_session_unavailable',
 ]);
 
 export interface UsageServiceApiError extends Error {
@@ -417,6 +424,97 @@ export interface UsageImportResponse {
   unsupported?: number;
   warnings?: string[];
 }
+
+export type UsageImportSessionStatus =
+  | 'uploading'
+  | 'ready'
+  | 'processing'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export interface UsageImportSession {
+  id: string;
+  filename: string;
+  status: UsageImportSessionStatus;
+  size_bytes: number;
+  received_bytes: number;
+  chunk_size_bytes: number;
+  created_at_ms: number;
+  updated_at_ms: number;
+  expires_at_ms: number;
+  retryable?: boolean;
+  error?: string;
+  result?: UsageImportResponse;
+}
+
+const demoUsageImportSessions = new Map<string, UsageImportSession>();
+let demoUsageImportSessionSequence = 0;
+
+const cloneUsageImportSession = (session: UsageImportSession): UsageImportSession => ({
+  ...session,
+  result: session.result
+    ? { ...session.result, warnings: [...(session.result.warnings ?? [])] }
+    : undefined,
+});
+
+const getDemoUsageImportSession = (sessionId: string): UsageImportSession => {
+  const session = demoUsageImportSessions.get(sessionId);
+  if (!session) {
+    const error = new Error('usage import session not found') as UsageServiceApiError;
+    error.code = 'usage_import_session_not_found';
+    throw error;
+  }
+  return cloneUsageImportSession(session);
+};
+
+const createDemoUsageImportSession = (filename: string, sizeBytes: number): UsageImportSession => {
+  const now = Date.now();
+  const id = `demo-usage-import-${++demoUsageImportSessionSequence}`;
+  const session: UsageImportSession = {
+    id,
+    filename,
+    status: 'uploading',
+    size_bytes: sizeBytes,
+    received_bytes: 0,
+    chunk_size_bytes: Math.min(4 * 1024 * 1024, sizeBytes),
+    created_at_ms: now,
+    updated_at_ms: now,
+    expires_at_ms: now + 24 * 60 * 60 * 1000,
+  };
+  demoUsageImportSessions.set(id, session);
+  return cloneUsageImportSession(session);
+};
+
+const uploadDemoUsageImportSessionChunk = (
+  sessionId: string,
+  offset: number,
+  chunkSize: number
+): UsageImportSession => {
+  const session = getDemoUsageImportSession(sessionId);
+  session.received_bytes = Math.min(session.size_bytes, offset + chunkSize);
+  session.status = session.received_bytes === session.size_bytes ? 'ready' : 'uploading';
+  session.updated_at_ms = Date.now();
+  demoUsageImportSessions.set(sessionId, session);
+  return cloneUsageImportSession(session);
+};
+
+const completeDemoUsageImportSession = (sessionId: string): UsageImportSession => {
+  const session = getDemoUsageImportSession(sessionId);
+  session.status = 'completed';
+  session.updated_at_ms = Date.now();
+  session.result = { format: 'jsonl', added: 12, skipped: 0, total: 12, failed: 0 };
+  demoUsageImportSessions.set(sessionId, session);
+  return cloneUsageImportSession(session);
+};
+
+const cancelDemoUsageImportSession = (sessionId: string): UsageImportSession => {
+  const session = getDemoUsageImportSession(sessionId);
+  session.status = 'cancelled';
+  session.updated_at_ms = Date.now();
+  demoUsageImportSessions.set(sessionId, session);
+  return cloneUsageImportSession(session);
+};
 
 export interface UsageExportResponse {
   blob: Blob;
@@ -1020,6 +1118,9 @@ export interface MonitoringAnalyticsFilterOptions {
   api_key_hashes?: string[];
   providers?: string[];
   auth_files?: string[];
+  accounts?: string[];
+  account_count?: number;
+  api_key_count?: number;
   project_ids?: string[];
   request_types?: string[];
   header_error_kinds?: string[];
@@ -1301,6 +1402,7 @@ export interface MonitoringAnalyticsResponse {
 
 const USAGE_SERVICE_TIMEOUT_MS = 30 * 1000;
 const USAGE_SERVICE_TRANSFER_TIMEOUT_MS = 60 * 1000;
+const USAGE_IMPORT_CHUNK_TIMEOUT_MS = 5 * 60 * 1000;
 const CODEX_INSPECTION_RUN_TIMEOUT_MS = 10 * 60 * 1000;
 export const USAGE_SERVICE_ID = 'cpa-manager-plus';
 export const LEGACY_USAGE_SERVICE_ID = 'cpa-manager';
@@ -2375,6 +2477,139 @@ export const usageServiceApi = {
         payload,
         {
           timeout: USAGE_SERVICE_TRANSFER_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+        }
+      );
+      return response.data;
+    });
+  },
+
+  createUsageImportSession: async (
+    base: string,
+    filename: string,
+    sizeBytes: number,
+    managementKey?: string,
+    resumeKey?: string,
+    signal?: AbortSignal
+  ): Promise<UsageImportSession> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return createDemoUsageImportSession(filename, sizeBytes);
+    }
+
+    return withUsageServiceError(async () => {
+      const response = await axios.post<UsageImportSession>(
+        buildUrl(base, '/v0/management/usage/import-sessions'),
+        {
+          filename,
+          size_bytes: sizeBytes,
+          ...(resumeKey ? { resume_key: resumeKey } : {}),
+        },
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+          signal,
+        }
+      );
+      return response.data;
+    });
+  },
+
+  getUsageImportSession: async (
+    base: string,
+    sessionId: string,
+    managementKey?: string,
+    signal?: AbortSignal
+  ): Promise<UsageImportSession> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return getDemoUsageImportSession(sessionId);
+    }
+
+    return withUsageServiceError(async () => {
+      const response = await axios.get<UsageImportSession>(
+        buildUrl(base, `/v0/management/usage/import-sessions/${encodeURIComponent(sessionId)}`),
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+          signal,
+        }
+      );
+      return response.data;
+    });
+  },
+
+  uploadUsageImportSessionChunk: async (
+    base: string,
+    sessionId: string,
+    offset: number,
+    chunk: Blob,
+    managementKey?: string,
+    signal?: AbortSignal
+  ): Promise<UsageImportSession> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return uploadDemoUsageImportSessionChunk(sessionId, offset, chunk.size);
+    }
+
+    return withUsageServiceError(async () => {
+      const response = await axios.put<UsageImportSession>(
+        buildUrl(
+          base,
+          `/v0/management/usage/import-sessions/${encodeURIComponent(sessionId)}/chunk?offset=${offset}`
+        ),
+        chunk,
+        {
+          timeout: USAGE_IMPORT_CHUNK_TIMEOUT_MS,
+          headers: {
+            ...(authHeaders(managementKey) ?? {}),
+            'Content-Type': 'application/octet-stream',
+          },
+          signal,
+        }
+      );
+      return response.data;
+    });
+  },
+
+  completeUsageImportSession: async (
+    base: string,
+    sessionId: string,
+    managementKey?: string,
+    signal?: AbortSignal
+  ): Promise<UsageImportSession> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return completeDemoUsageImportSession(sessionId);
+    }
+
+    return withUsageServiceError(async () => {
+      const response = await axios.post<UsageImportSession>(
+        buildUrl(
+          base,
+          `/v0/management/usage/import-sessions/${encodeURIComponent(sessionId)}/complete`
+        ),
+        undefined,
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+          signal,
+        }
+      );
+      return response.data;
+    });
+  },
+
+  cancelUsageImportSession: async (
+    base: string,
+    sessionId: string,
+    managementKey?: string
+  ): Promise<UsageImportSession> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return cancelDemoUsageImportSession(sessionId);
+    }
+
+    return withUsageServiceError(async () => {
+      const response = await axios.delete<UsageImportSession>(
+        buildUrl(base, `/v0/management/usage/import-sessions/${encodeURIComponent(sessionId)}`),
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
           headers: authHeaders(managementKey),
         }
       );

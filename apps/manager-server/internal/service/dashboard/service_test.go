@@ -480,7 +480,7 @@ func TestSummaryDashboardHourlyRollupKeepsOffsetTimelineCorrect(t *testing.T) {
 	}
 }
 
-func TestSummaryDashboardHourlyRollupFallsBackWhilePending(t *testing.T) {
+func TestSummaryDashboardHourlyRollupMergesPendingRawDelta(t *testing.T) {
 	db := newDashboardTestStore(t)
 	ctx := context.Background()
 	todayStart := int64(1_800_000_000_000)
@@ -496,8 +496,9 @@ func TestSummaryDashboardHourlyRollupFallsBackWhilePending(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("insert pending event: %v", err)
 	}
-	if _, _, _, ok := New(db).loadTodayMetricsFromRollup(ctx, todayStart, nowMS); ok {
-		t.Fatalf("expected pending checkpoint to force raw fallback")
+	agg, _, timeline, ok := New(db).loadTodayMetricsFromRollup(ctx, todayStart, nowMS)
+	if !ok || agg.TotalCalls != 2 || agg.TotalTokens != 3 || len(timeline) != 2 {
+		t.Fatalf("pending aggregate did not merge raw delta: ok=%v agg=%#v timeline=%#v", ok, agg, timeline)
 	}
 	resp, err := New(db).Summary(ctx, SummaryParams{TodayStartMS: todayStart, NowMS: nowMS})
 	if err != nil {
@@ -535,7 +536,7 @@ func TestSummaryDashboardHourlyRollupCanBeDisabled(t *testing.T) {
 func catchUpDashboardHourlyForTest(t *testing.T, ctx context.Context, db *store.Store) {
 	t.Helper()
 	for {
-		result, err := db.CatchUpDashboardHourlyRollups(ctx, 100, time.Now().UnixMilli())
+		result, err := db.CatchUpUsageHourlyAggregate(ctx, 100, time.Now().UnixMilli())
 		if err != nil {
 			t.Fatalf("catch up dashboard hourly: %v", err)
 		}

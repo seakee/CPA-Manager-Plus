@@ -38,6 +38,12 @@ import {
 } from '../model/analyticsAdapters';
 import { buildEventRows } from '../model/eventRows';
 import {
+  buildMonitoringCenterAnalyticsInclude,
+  buildMonitoringFilterSelectorsScopeKey,
+  buildMonitoringFilterSelectorsInclude,
+  mergeMonitoringAccountOptionRows,
+} from '../model/monitoringAnalyticsModel';
+import {
   buildAccountRows,
   buildApiKeyRows,
   buildMonitoringSummary,
@@ -47,6 +53,7 @@ import {
 } from '../model/rowBuilders';
 import type {
   MonitoringAuthMeta,
+  MonitoringApiKeyRow,
   MonitoringChannelMeta,
   MonitoringFilterOptions,
   MonitoringMetadata,
@@ -228,6 +235,19 @@ const uniqueOptionValues = (values: Array<string | null | undefined>) =>
     (left, right) => left.localeCompare(right)
   );
 
+const mergeMonitoringApiKeyOptionRows = (
+  ...collections: ReadonlyArray<readonly MonitoringApiKeyRow[]>
+) => {
+  const rows = new Map<string, MonitoringApiKeyRow>();
+  collections.flat().forEach((row) => {
+    const key = row.apiKeyHash.trim().toLowerCase() || row.id;
+    if (!rows.has(key)) {
+      rows.set(key, row);
+    }
+  });
+  return Array.from(rows.values());
+};
+
 export const resolveMonitoringDisplayEventItems = ({
   analyticsData,
   currentPageItems,
@@ -298,6 +318,7 @@ export function useMonitoringData({
   searchQuery,
   searchApiKeyHash,
   scopeFilters,
+  activeDataTab = 'accounts',
 }: UseMonitoringDataParams): UseMonitoringDataReturn {
   const [authFiles, setAuthFiles] = useState<AuthFileItem[]>([]);
   const [channels, setChannels] = useState<MonitoringChannelMeta[]>([]);
@@ -458,45 +479,66 @@ export function useMonitoringData({
   const eventsHasMore = activeEventsPageState.hasMore;
   const eventsLoadingMore = activeEventsPageState.loadingMore;
 
+  const analyticsInclude = useMemo(
+    () =>
+      buildMonitoringCenterAnalyticsInclude(activeDataTab, analyticsGranularity, {
+        limit: MONITORING_EVENTS_PAGE_LIMIT,
+        before_ms: eventsBeforeMs,
+        before_id: eventsBeforeId,
+      }),
+    [activeDataTab, analyticsGranularity, eventsBeforeId, eventsBeforeMs]
+  );
+  const requestedEventsBeforeMs = analyticsInclude.events_page?.before_ms ?? null;
+  const requestedEventsBeforeId = analyticsInclude.events_page?.before_id ?? null;
+  const analyticsScopeKey = useMemo(
+    () => JSON.stringify({ activeDataTab, eventsScopeKey }),
+    [activeDataTab, eventsScopeKey]
+  );
+
   const analytics = useMonitoringAnalytics({
     fromMs: analyticsBounds?.startMs,
     toMs: analyticsBounds?.endMs,
     nowMs: analyticsNowMs,
-    dataScopeKey: eventsScopeKey,
+    dataScopeKey: analyticsScopeKey,
     searchQuery,
     searchApiKeyHash,
     filters: analyticsFilters,
-    include: {
-      summary: true,
-      timeline: true,
-      hourly_distribution: true,
-      model_share: true,
-      channel_share: true,
-      model_stats: true,
-      failure_sources: true,
-      account_stats: true,
-      api_key_stats: true,
-      filter_options: true,
-      task_buckets: true,
-      recent_failures: 8,
-      events_page: {
-        limit: MONITORING_EVENTS_PAGE_LIMIT,
-        before_ms: eventsBeforeMs,
-        before_id: eventsBeforeId,
-      },
-      granularity: analyticsGranularity,
-    },
+    include: analyticsInclude,
+    throttleMs: 1_000,
+  });
+  const filterSelectorsInclude = useMemo(() => buildMonitoringFilterSelectorsInclude(), []);
+  const filterSelectorsScopeKey = useMemo(
+    () =>
+      buildMonitoringFilterSelectorsScopeKey(
+        timeRange,
+        analyticsBounds,
+        searchQuery,
+        searchApiKeyHash
+      ),
+    [analyticsBounds, searchApiKeyHash, searchQuery, timeRange]
+  );
+  const filterSelectorsAnalytics = useMonitoringAnalytics({
+    fromMs: analyticsBounds?.startMs,
+    toMs: analyticsBounds?.endMs,
+    nowMs: analyticsNowMs,
+    dataScopeKey: filterSelectorsScopeKey,
+    searchQuery,
+    searchApiKeyHash,
+    include: filterSelectorsInclude,
     throttleMs: 1_000,
   });
   const analyticsData = analytics.data;
   const currentAnalyticsData = analytics.dataStale ? null : analyticsData;
+  const currentFilterSelectorsData = filterSelectorsAnalytics.dataStale
+    ? null
+    : filterSelectorsAnalytics.data;
   const displayEventItems = useMemo(
     () =>
       resolveMonitoringDisplayEventItems({
         analyticsData,
         currentPageItems: currentAnalyticsData?.events?.items ?? null,
         eventsPageItems: eventItems,
-        eventsBeforeMs,
+        eventsBeforeMs: requestedEventsBeforeMs,
         dataStale: analytics.dataStale,
       }),
     [
@@ -504,7 +546,7 @@ export function useMonitoringData({
       analyticsData,
       currentAnalyticsData?.events?.items,
       eventItems,
-      eventsBeforeMs,
+      requestedEventsBeforeMs,
     ]
   );
   const eventsLoadedCount = displayEventItems.length;
@@ -520,8 +562,8 @@ export function useMonitoringData({
   useEffect(() => {
     const page = currentAnalyticsData?.events;
     if (!page) return;
-    const requestBeforeMs = eventsBeforeMs;
-    const requestBeforeId = eventsBeforeId;
+    const requestBeforeMs = requestedEventsBeforeMs;
+    const requestBeforeId = requestedEventsBeforeId;
     const pageKey = buildEventsPageKey(
       eventsScopeKey,
       requestBeforeMs,
@@ -550,7 +592,12 @@ export function useMonitoringData({
     return () => {
       cancelled = true;
     };
-  }, [currentAnalyticsData?.events, eventsScopeKey, eventsBeforeMs, eventsBeforeId]);
+  }, [
+    currentAnalyticsData?.events,
+    eventsScopeKey,
+    requestedEventsBeforeId,
+    requestedEventsBeforeMs,
+  ]);
 
   useEffect(() => {
     if (analytics.error) {
@@ -569,6 +616,7 @@ export function useMonitoringData({
 
   const loadMoreEvents = useCallback(() => {
     if (
+      activeDataTab !== 'realtime' ||
       analytics.loading ||
       eventsLoadingMore ||
       !eventsHasMore ||
@@ -585,6 +633,7 @@ export function useMonitoringData({
       return { ...base, beforeMs: nextBeforeMs, beforeId: nextBeforeId, loadingMore: true };
     });
   }, [
+    activeDataTab,
     currentAnalyticsData?.events?.next_before_ms,
     currentAnalyticsData?.events?.next_before_id,
     analytics.loading,
@@ -769,40 +818,82 @@ export function useMonitoringData({
       sourceInfoMap,
     ]
   );
-  const fallbackFilterOptions = useMemo<MonitoringFilterOptions>(
-    () => ({
-      accountRows: buildAccountRows(rangeFilteredRows),
-      apiKeyRows: buildApiKeyRows(rangeFilteredRows, apiKeyDisplayMap),
+  const fallbackFilterOptions = useMemo<MonitoringFilterOptions>(() => {
+    const fallbackAccountRows = buildAccountRows(rangeFilteredRows);
+    const fallbackApiKeyRows = buildApiKeyRows(rangeFilteredRows, apiKeyDisplayMap);
+    return {
+      accountRows: fallbackAccountRows,
+      apiKeyRows: fallbackApiKeyRows,
+      accountCount: fallbackAccountRows.length,
+      apiKeyCount: fallbackApiKeyRows.length,
       providers: uniqueOptionValues(rangeFilteredRows.map((row) => row.provider)),
       models: uniqueOptionValues(rangeFilteredRows.map((row) => row.model)),
       channels: uniqueOptionValues(rangeFilteredRows.map((row) => row.channel)),
       headerTraceIds: uniqueOptionValues(rangeFilteredRows.map((row) => row.headerTraceId)),
-    }),
+    };
+  },
     [apiKeyDisplayMap, rangeFilteredRows]
   );
-  const analyticsFilterOptions = currentAnalyticsData?.filter_options;
-  const filterOptions = useMemo(
-    () =>
-      analyticsFilterOptions
-        ? buildFilterOptionsFromAnalytics(
-            analyticsFilterOptions,
-            authMetaMap,
-            authFileMap,
-            sourceInfoMap,
-            channelByAuthIndex,
-            apiKeyDisplayMap
-          )
-        : fallbackFilterOptions,
-    [
-      apiKeyDisplayMap,
-      authFileMap,
-      authMetaMap,
-      channelByAuthIndex,
-      analyticsFilterOptions,
-      fallbackFilterOptions,
-      sourceInfoMap,
-    ]
-  );
+  const analyticsFilterOptions =
+    currentFilterSelectorsData?.filter_options ?? currentAnalyticsData?.filter_options;
+  const filterOptions = useMemo(() => {
+    const selectorOptions = analyticsFilterOptions
+      ? buildFilterOptionsFromAnalytics(
+          analyticsFilterOptions,
+          authMetaMap,
+          authFileMap,
+          sourceInfoMap,
+          channelByAuthIndex,
+          apiKeyDisplayMap
+        )
+      : null;
+    const mergedAccountRows = mergeMonitoringAccountOptionRows(
+      accountRows,
+      selectorOptions?.accountRows ?? [],
+      fallbackFilterOptions.accountRows
+    );
+    const mergedApiKeyRows = mergeMonitoringApiKeyOptionRows(
+      apiKeyRows,
+      selectorOptions?.apiKeyRows ?? [],
+      fallbackFilterOptions.apiKeyRows
+    );
+    return {
+      accountRows: mergedAccountRows,
+      apiKeyRows: mergedApiKeyRows,
+      accountCount: analyticsFilterOptions
+        ? (analyticsFilterOptions.account_count ?? selectorOptions?.accountRows.length ?? 0)
+        : mergedAccountRows.length,
+      apiKeyCount: analyticsFilterOptions
+        ? (analyticsFilterOptions.api_key_count ?? selectorOptions?.apiKeyRows.length ?? 0)
+        : mergedApiKeyRows.length,
+      providers: uniqueOptionValues([
+        ...(selectorOptions?.providers ?? []),
+        ...fallbackFilterOptions.providers,
+      ]),
+      models: uniqueOptionValues([
+        ...(selectorOptions?.models ?? []),
+        ...fallbackFilterOptions.models,
+      ]),
+      channels: uniqueOptionValues([
+        ...(selectorOptions?.channels ?? []),
+        ...fallbackFilterOptions.channels,
+      ]),
+      headerTraceIds: uniqueOptionValues([
+        ...(selectorOptions?.headerTraceIds ?? []),
+        ...fallbackFilterOptions.headerTraceIds,
+      ]),
+    };
+  }, [
+    apiKeyDisplayMap,
+    authFileMap,
+    authMetaMap,
+    accountRows,
+    apiKeyRows,
+    channelByAuthIndex,
+    analyticsFilterOptions,
+    fallbackFilterOptions,
+    sourceInfoMap,
+  ]);
 
   const computedPresentationSnapshot = useMemo<MonitoringPresentationSnapshot>(
     () => ({
@@ -860,15 +951,15 @@ export function useMonitoringData({
       setPresentationSnapshotStore((previous) => {
         if (
           previous.lastStableSnapshot === computedPresentationSnapshot &&
-          previous.cachedSnapshots.get(eventsScopeKey) === computedPresentationSnapshot
+          previous.cachedSnapshots.get(analyticsScopeKey) === computedPresentationSnapshot
         ) {
           return previous;
         }
 
         const cachedSnapshot = withoutMonitoringSnapshotEvents(computedPresentationSnapshot);
         const cachedSnapshots = new Map(previous.cachedSnapshots);
-        cachedSnapshots.delete(eventsScopeKey);
-        cachedSnapshots.set(eventsScopeKey, cachedSnapshot);
+        cachedSnapshots.delete(analyticsScopeKey);
+        cachedSnapshots.set(analyticsScopeKey, cachedSnapshot);
         while (cachedSnapshots.size > MONITORING_PRESENTATION_CACHE_LIMIT) {
           const oldestKey = cachedSnapshots.keys().next().value;
           if (oldestKey === undefined) break;
@@ -883,13 +974,13 @@ export function useMonitoringData({
     return () => {
       cancelled = true;
     };
-  }, [analytics.dataStale, computedPresentationSnapshot, eventsScopeKey]);
+  }, [analytics.dataStale, analyticsScopeKey, computedPresentationSnapshot]);
 
   const presentationResolution = useMemo(
     () =>
       resolveMonitoringPresentationSnapshot({
         computedSnapshot: computedPresentationSnapshot,
-        scopeKey: eventsScopeKey,
+        scopeKey: analyticsScopeKey,
         dataStale: analytics.dataStale,
         cachedSnapshots: presentationSnapshotStore.cachedSnapshots,
         lastStableSnapshot: presentationSnapshotStore.lastStableSnapshot,
@@ -897,7 +988,7 @@ export function useMonitoringData({
     [
       analytics.dataStale,
       computedPresentationSnapshot,
-      eventsScopeKey,
+      analyticsScopeKey,
       presentationSnapshotStore.cachedSnapshots,
       presentationSnapshotStore.lastStableSnapshot,
     ]
@@ -927,7 +1018,7 @@ export function useMonitoringData({
 
   return {
     loading: loading || analytics.loading,
-    error: [error, analytics.error].filter(Boolean).join('；'),
+    error: [error, analytics.error, filterSelectorsAnalytics.error].filter(Boolean).join('；'),
     authFiles,
     channels,
     summary: presentationSnapshot.summary,

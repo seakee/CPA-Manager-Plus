@@ -17,6 +17,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotacooldown"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageaggregate"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageevent"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagerollup"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
@@ -80,6 +81,10 @@ type UsageRollupCheckpoint = usagerollup.Checkpoint
 type UsageRollupCatchUpResult = usagerollup.CatchUpResult
 type AccountHistoryRollupRow = usagerollup.AccountHistoryRow
 type DashboardHourlyRollupRow = usagerollup.DashboardHourlyRow
+type UsageHourlyAggregateState = usageaggregate.State
+type UsageHourlyAggregateCatchUpResult = usageaggregate.CatchUpResult
+type UsageHourlyAggregateFilter = usageaggregate.Filter
+type UsageHourlyAggregateRow = usageaggregate.Row
 
 type Store struct {
 	db *sql.DB
@@ -93,6 +98,7 @@ type Store struct {
 	CodexInspections codexinspection.Repository
 	DataMigrations   datamigration.Repository
 	QuotaCooldowns   quotacooldown.Repository
+	UsageAggregates  usageaggregate.Repository
 	UsageRollups     usagerollup.Repository
 }
 
@@ -116,6 +122,7 @@ func New(db *sql.DB, protector ...*security.Protector) *Store {
 		CodexInspections: codexinspection.New(db),
 		DataMigrations:   datamigration.New(db),
 		QuotaCooldowns:   quotacooldown.New(db),
+		UsageAggregates:  usageaggregate.New(db),
 		UsageRollups:     usagerollup.New(db),
 	}
 }
@@ -327,6 +334,29 @@ func (s *Store) UsageCacheAccountingMigrationReady(ctx context.Context) (bool, e
 		return false, err
 	}
 	return state.Status == datamigration.StatusCompleted, nil
+}
+
+func (s *Store) CatchUpUsageHourlyAggregate(ctx context.Context, limit int, nowMS int64) (UsageHourlyAggregateCatchUpResult, error) {
+	ready, err := s.UsageCacheAccountingMigrationReady(ctx)
+	if err != nil {
+		return UsageHourlyAggregateCatchUpResult{}, err
+	}
+	if !ready {
+		return UsageHourlyAggregateCatchUpResult{Pending: true}, nil
+	}
+	return s.UsageAggregates.CatchUp(ctx, limit, nowMS)
+}
+
+func (s *Store) RecordUsageHourlyAggregateFailure(ctx context.Context, aggregateErr error, nowMS int64) error {
+	return s.UsageAggregates.RecordFailure(ctx, aggregateErr, nowMS)
+}
+
+func (s *Store) UsageHourlyAggregateState(ctx context.Context) (UsageHourlyAggregateState, error) {
+	return s.UsageAggregates.State(ctx)
+}
+
+func (s *Store) UsageHourlyAggregateRows(ctx context.Context, filter UsageHourlyAggregateFilter) ([]UsageHourlyAggregateRow, UsageHourlyAggregateState, bool, error) {
+	return s.UsageAggregates.LoadRows(ctx, filter)
 }
 
 func (s *Store) CatchUpAccountHistoryRollups(ctx context.Context, limit int, nowMS int64) (UsageRollupCatchUpResult, error) {

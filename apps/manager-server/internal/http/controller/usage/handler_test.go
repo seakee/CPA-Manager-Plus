@@ -53,3 +53,26 @@ func TestImportRejectsKnownOversizedContentLengthBeforeReading(t *testing.T) {
 		t.Fatalf("status = %d body = %s", recorder.Code, recorder.Body.String())
 	}
 }
+
+func TestParseImportSessionPath(t *testing.T) {
+	cases := []struct {
+		path   string
+		id     string
+		action string
+		ok     bool
+	}{
+		{path: "/v0/management/usage/import-sessions", ok: true},
+		{path: "/v0/management/usage/import-sessions/", ok: true},
+		{path: "/v0/management/usage/import-sessions/abc", id: "abc", ok: true},
+		{path: "/v0/management/usage/import-sessions/abc/chunk", id: "abc", action: "chunk", ok: true},
+		{path: "/v0/management/usage/import-sessions/abc/complete", id: "abc", action: "complete", ok: true},
+		{path: "/v0/management/usage/import-sessions-legacy", ok: false},
+		{path: "/v0/management/usage/import-sessions/abc/delete", ok: false},
+	}
+	for _, test := range cases {
+		id, action, ok := parseImportSessionPath(test.path)
+		if id != test.id || action != test.action || ok != test.ok {
+			t.Errorf("parseImportSessionPath(%q) = (%q, %q, %t)", test.path, id, action, ok)
+		}
+	}
+}

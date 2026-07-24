@@ -485,7 +485,23 @@ func completeInTx(ctx context.Context, tx *sql.Tx, state State) (State, error) {
 			`delete from usage_account_model_rollups`,
 			`delete from usage_dashboard_hourly_rollups`,
 			`update usage_rollup_checkpoints set last_event_id = 0, updated_at_ms = 0, last_error = null
-				where name in ('account_history', 'dashboard_hourly')`,
+					where name in ('account_history', 'dashboard_hourly')`,
+			`delete from usage_hourly_aggregate_v1`,
+			`update usage_event_identity_ledger set aggregate_schema_version = 0
+					where aggregate_schema_version = 1`,
+			`update usage_hourly_aggregate_state set
+					status = case when exists (select 1 from usage_events limit 1) then 'pending' else 'ready' end,
+					backfill_last_event_id = 0,
+					coverage_event_id = 0,
+					target_event_id = coalesce((select max(id) from usage_events), 0),
+					processed_events = 0,
+					min_bucket_ms = null,
+					max_bucket_ms = null,
+					last_run_started_at_ms = null,
+					updated_at_ms = 0,
+					finished_at_ms = null,
+					last_error = null
+				where aggregate_name = 'hourly_core' and schema_version = 1`,
 		} {
 			if _, err := tx.ExecContext(ctx, statement); err != nil {
 				return State{}, err

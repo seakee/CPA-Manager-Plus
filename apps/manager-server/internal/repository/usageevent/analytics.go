@@ -106,10 +106,30 @@ type FilterOptionValues struct {
 }
 
 type FilterSelectorValues struct {
-	Models       []string
-	APIKeyHashes []string
-	Providers    []string
-	AuthFiles    []string
+	Models           []string
+	APIKeyHashes     []string
+	Providers        []string
+	AuthFiles        []string
+	Accounts         []string
+	AccountSelectors []AccountSelectorValue
+	APIKeySelectors  []APIKeySelectorValue
+}
+
+type AccountSelectorValue struct {
+	AccountSnapshot      string
+	AuthLabelSnapshot    string
+	AuthProviderSnapshot string
+	AuthIndex            string
+	Source               string
+	SourceHash           string
+}
+
+type APIKeySelectorValue struct {
+	APIKeyHash           string
+	AuthProviderSnapshot string
+	AuthIndex            string
+	Source               string
+	SourceHash           string
 }
 
 type TimelinePoint struct {
@@ -997,10 +1017,22 @@ func (r *repository) FilterSelectorValuesWithFilter(ctx context.Context, filter 
 	if err != nil {
 		return FilterSelectorValues{}, err
 	}
-	apiKeyHashes, err := r.distinctFilterValues(ctx, filter, "coalesce(api_key_hash, '')")
+	apiKeySelectors, err := r.apiKeyFilterSelectorValuesWithFilter(ctx, filter)
 	if err != nil {
 		return FilterSelectorValues{}, err
 	}
+	apiKeyHashSet := make(map[string]struct{}, len(apiKeySelectors))
+	for _, selector := range apiKeySelectors {
+		apiKeyHash := strings.ToLower(strings.TrimSpace(selector.APIKeyHash))
+		if apiKeyHash != "" {
+			apiKeyHashSet[apiKeyHash] = struct{}{}
+		}
+	}
+	apiKeyHashes := make([]string, 0, len(apiKeyHashSet))
+	for apiKeyHash := range apiKeyHashSet {
+		apiKeyHashes = append(apiKeyHashes, apiKeyHash)
+	}
+	sort.Strings(apiKeyHashes)
 	providers, err := r.distinctFilterValues(ctx, filter, "coalesce(nullif(auth_provider_snapshot, ''), nullif(provider, ''), '')")
 	if err != nil {
 		return FilterSelectorValues{}, err
@@ -1009,12 +1041,121 @@ func (r *repository) FilterSelectorValuesWithFilter(ctx context.Context, filter 
 	if err != nil {
 		return FilterSelectorValues{}, err
 	}
+	accountSelectors, err := r.accountFilterSelectorValuesWithFilter(ctx, filter)
+	if err != nil {
+		return FilterSelectorValues{}, err
+	}
+	accountSet := make(map[string]struct{}, len(accountSelectors))
+	for _, selector := range accountSelectors {
+		account := strings.TrimSpace(selector.AccountSnapshot)
+		if account != "" {
+			accountSet[account] = struct{}{}
+		}
+	}
+	accounts := make([]string, 0, len(accountSet))
+	for account := range accountSet {
+		accounts = append(accounts, account)
+	}
+	sort.Strings(accounts)
 	return FilterSelectorValues{
-		Models:       models,
-		APIKeyHashes: apiKeyHashes,
-		Providers:    providers,
-		AuthFiles:    authFiles,
+		Models:           models,
+		APIKeyHashes:     apiKeyHashes,
+		Providers:        providers,
+		AuthFiles:        authFiles,
+		Accounts:         accounts,
+		AccountSelectors: accountSelectors,
+		APIKeySelectors:  apiKeySelectors,
 	}, nil
+}
+
+func (r *repository) apiKeyFilterSelectorValuesWithFilter(ctx context.Context, filter AnalyticsFilter) ([]APIKeySelectorValue, error) {
+	where, args := analyticsWhere(filter)
+	rows, err := r.db.QueryContext(ctx, `select
+	coalesce(api_key_hash, ''),
+	coalesce(nullif(auth_provider_snapshot, ''), nullif(provider, ''), ''),
+	coalesce(auth_index, ''),
+	coalesce(max(source), ''),
+	coalesce(source_hash, '')
+from usage_events `+where+`
+group by
+	coalesce(api_key_hash, ''),
+	coalesce(nullif(auth_provider_snapshot, ''), nullif(provider, ''), ''),
+	coalesce(auth_index, ''),
+	coalesce(source_hash, '')
+order by 1, 5, 3, 4, 2`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	values := make([]APIKeySelectorValue, 0)
+	for rows.Next() {
+		var value APIKeySelectorValue
+		if err := rows.Scan(
+			&value.APIKeyHash,
+			&value.AuthProviderSnapshot,
+			&value.AuthIndex,
+			&value.Source,
+			&value.SourceHash,
+		); err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return values, nil
+}
+
+func (r *repository) accountFilterSelectorValuesWithFilter(ctx context.Context, filter AnalyticsFilter) ([]AccountSelectorValue, error) {
+	where, args := analyticsWhere(filter)
+	rows, err := r.db.QueryContext(ctx, `select
+	coalesce(account_snapshot, ''),
+	coalesce(auth_label_snapshot, ''),
+	coalesce(nullif(auth_provider_snapshot, ''), nullif(provider, ''), ''),
+	coalesce(auth_index, ''),
+	coalesce(max(source), ''),
+	coalesce(source_hash, '')
+from usage_events `+where+`
+and (
+	coalesce(account_snapshot, '') <> '' or
+	coalesce(auth_label_snapshot, '') <> '' or
+	coalesce(auth_index, '') <> '' or
+	coalesce(source, '') <> '' or
+	coalesce(source_hash, '') <> ''
+)
+group by
+	coalesce(account_snapshot, ''),
+	coalesce(auth_label_snapshot, ''),
+	coalesce(nullif(auth_provider_snapshot, ''), nullif(provider, ''), ''),
+	coalesce(auth_index, ''),
+	coalesce(source_hash, '')
+order by 1, 2, 5, 4, 6`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	values := make([]AccountSelectorValue, 0)
+	for rows.Next() {
+		var value AccountSelectorValue
+		if err := rows.Scan(
+			&value.AccountSnapshot,
+			&value.AuthLabelSnapshot,
+			&value.AuthProviderSnapshot,
+			&value.AuthIndex,
+			&value.Source,
+			&value.SourceHash,
+		); err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return values, nil
 }
 
 func (r *repository) distinctFilterValues(ctx context.Context, filter AnalyticsFilter, expression string) ([]string, error) {

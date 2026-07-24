@@ -89,7 +89,9 @@ const buildSourceKeysFromAnalyticsIdentity = (
     });
   });
 
-  return Array.from(keys).filter((key) => key && key !== 'source:-').sort();
+  return Array.from(keys)
+    .filter((key) => key && key !== 'source:-')
+    .sort();
 };
 
 const normalizeFilterText = (value: string | null | undefined) =>
@@ -757,40 +759,120 @@ export const buildFilterOptionsFromAnalytics = (
   const resolveAuthIndex = (value: string | undefined) => normalizeAuthIndex(value) ?? value ?? '';
   const resolveAuthMeta = (value: string | undefined) => authMetaMap.get(resolveAuthIndex(value));
   const channelRows = options.channel_share || [];
+  const accountRows = buildAccountRowsFromAnalytics(
+    options.account_stats || [],
+    authMetaMap,
+    authFileMap,
+    sourceInfoMap,
+    channelByAuthIndex
+  );
+  const knownAccounts = new Set(accountRows.map((row) => normalizeFilterText(row.account)));
+  const accountSelectorRows = uniqueReadableValues(options.accounts || [])
+    .filter((account) => !knownAccounts.has(normalizeFilterText(account)))
+    .map(
+      (account): MonitoringAccountRow => ({
+        id: `selector:${normalizeFilterText(account)}`,
+        account,
+        filterValue: buildMonitoringAccountFilterValue({ account }) || account,
+        displayAccount: account,
+        accountMasked: maskEmailLike(account),
+        authLabels: [],
+        authIndices: [],
+        sourceKeys: [],
+        channels: [],
+        totalCalls: 0,
+        successCalls: 0,
+        failureCalls: 0,
+        successRate: 1,
+        inputTokens: 0,
+        outputTokens: 0,
+        cachedTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        totalTokens: 0,
+        totalCost: 0,
+        averageLatencyMs: null,
+        lastSeenAt: 0,
+        recentPattern: [],
+        models: [],
+      })
+    );
+  const apiKeyRows = buildApiKeyRowsFromAnalytics(
+    options.api_key_stats || [],
+    authMetaMap,
+    authFileMap,
+    sourceInfoMap,
+    channelByAuthIndex,
+    apiKeyDisplayMap
+  );
+  const knownApiKeyHashes = new Set(apiKeyRows.map((row) => row.apiKeyHash));
+  const apiKeySelectorRows = uniqueReadableValues(options.api_key_hashes || [])
+    .map((value) => value.toLowerCase())
+    .filter((apiKeyHash) => !knownApiKeyHashes.has(apiKeyHash))
+    .map((apiKeyHash): MonitoringApiKeyRow => {
+      const apiKeyDisplay = apiKeyDisplayMap.get(apiKeyHash);
+      const fallbackLabel = formatApiKeyHashLabel(apiKeyHash);
+      const apiKeyLabel = sanitizeApiKeyDisplayText(
+        apiKeyDisplay?.label || fallbackLabel,
+        fallbackLabel
+      );
+      const apiKeyMasked = sanitizeApiKeyDisplayText(
+        apiKeyDisplay?.masked || apiKeyLabel,
+        apiKeyLabel
+      );
+      return {
+        id: apiKeyHash,
+        apiKeyHash,
+        apiKeyLabel,
+        apiKeyMasked,
+        apiKeyCopyValue: apiKeyDisplay?.copyValue,
+        isUnknown: false,
+        authLabels: [],
+        sourceLabels: [],
+        channels: [],
+        totalCalls: 0,
+        successCalls: 0,
+        failureCalls: 0,
+        successRate: 1,
+        inputTokens: 0,
+        outputTokens: 0,
+        cachedTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        totalTokens: 0,
+        totalCost: 0,
+        averageLatencyMs: null,
+        lastSeenAt: 0,
+        models: [],
+      };
+    });
 
   return {
-    accountRows: buildAccountRowsFromAnalytics(
-      options.account_stats || [],
-      authMetaMap,
-      authFileMap,
-      sourceInfoMap,
-      channelByAuthIndex
-    ),
-    apiKeyRows: buildApiKeyRowsFromAnalytics(
-      options.api_key_stats || [],
-      authMetaMap,
-      authFileMap,
-      sourceInfoMap,
-      channelByAuthIndex,
-      apiKeyDisplayMap
-    ),
+    accountRows: [...accountRows, ...accountSelectorRows],
+    apiKeyRows: [...apiKeyRows, ...apiKeySelectorRows],
     providers: uniqueReadableValues([
+      ...(options.providers || []),
       ...channelRows.map((row) => resolveAuthMeta(row.auth_index)?.provider),
       ...channelRows.map((row) => row.auth_provider_snapshot),
       ...(options.account_stats || []).map((row) => row.auth_provider_snapshot),
       ...(options.api_key_stats || []).map((row) => row.auth_provider_snapshot),
     ]),
-    models: uniqueReadableValues((options.model_stats || []).map((row) => row.model)),
-    channels: uniqueReadableValues(
-      channelRows.map((row) => {
+    models: uniqueReadableValues([
+      ...(options.models || []),
+      ...(options.model_stats || []).map((row) => row.model),
+    ]),
+    channels: uniqueReadableValues([
+      ...channelRows.map((row) => {
         const authIndex = resolveAuthIndex(row.auth_index);
         return (
           channelByAuthIndex.get(authIndex)?.name ||
           resolveAuthMeta(row.auth_index)?.provider ||
           row.auth_provider_snapshot
         );
-      })
-    ),
+      }),
+      ...Array.from(channelByAuthIndex.values()).map((channel) => channel.name),
+      ...(options.providers || []),
+    ]),
     headerTraceIds: uniqueReadableValues(options.header_trace_ids || []),
   };
 };

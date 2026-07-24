@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -29,17 +30,11 @@ type Snapshot struct {
 	Aggregate  store.Aggregate
 	ModelStats []store.ModelStat
 
-	rows                   []store.DashboardHourlyRollupRow
-	edges                  []timeRange
-	fullStartMS            int64
-	fullEndMS              int64
+	rows                   []store.UsageHourlyAggregateRow
+	fromMS                 int64
+	toMS                   int64
 	dashboardTimelineReady bool
 	analyticsTimelineReady bool
-}
-
-type timeRange struct {
-	fromMS int64
-	toMS   int64
 }
 
 type modelStatKey struct {
@@ -55,6 +50,11 @@ type analyticsTimelineKey struct {
 	serviceTier  string
 }
 
+type analyticsTimelineAccumulator struct {
+	point        store.TimelinePoint
+	latencySumMS int64
+}
+
 func New(store *store.Store, enabled bool, logContext ...string) *Reader {
 	contextName := defaultFallbackLogContext
 	if len(logContext) > 0 && logContext[0] != "" {
@@ -68,94 +68,88 @@ func New(store *store.Store, enabled bool, logContext ...string) *Reader {
 }
 
 func (r *Reader) Load(ctx context.Context, fromMS, toMS int64) (Snapshot, bool) {
-	return r.loadRows(ctx, fromMS, toMS, r.store.DashboardHourlyRollupRows, true, true)
+	return r.loadRows(ctx, store.AnalyticsFilter{
+		FromMS:        fromMS,
+		ToMS:          toMS,
+		IncludeFailed: true,
+	}, true, true)
 }
 
 func (r *Reader) LoadAnalytics(
 	ctx context.Context,
-	fromMS int64,
-	toMS int64,
+	filter store.AnalyticsFilter,
 	granularity string,
 	location *time.Location,
 	needsTimeline bool,
 ) (Snapshot, bool) {
-	if needsTimeline {
-		if granularity != "day" || location == nil || location.String() != "UTC" {
-			return r.Load(ctx, fromMS, toMS)
-		}
-		return r.loadRows(ctx, fromMS, toMS, r.store.DashboardDailyRollupRows, false, true)
+	if !SupportsAnalyticsFilter(filter) {
+		return Snapshot{}, false
 	}
-	return r.loadRows(ctx, fromMS, toMS, r.store.DashboardHourlyRollupModelRows, false, false)
+	analyticsTimelineReady := needsTimeline && r.CanRepresentAnalyticsTimeline(filter.FromMS, filter.ToMS, granularity, location)
+	return r.loadRows(ctx, filter, false, analyticsTimelineReady)
 }
 
-type rowLoader func(context.Context, int64, int64) ([]store.DashboardHourlyRollupRow, error)
+// SupportsAnalyticsFilter reports whether the permanent hourly aggregate
+// persists every dimension required by the supplied analytics filter.
+func SupportsAnalyticsFilter(filter store.AnalyticsFilter) bool {
+	return strings.TrimSpace(filter.SearchQuery) == "" &&
+		strings.TrimSpace(filter.SearchAPIKeyHash) == "" &&
+		len(filter.Providers) == 0 &&
+		len(filter.Accounts) == 0 &&
+		len(filter.CredentialIDs) == 0 &&
+		len(filter.AuthFiles) == 0 &&
+		len(filter.AuthIndices) == 0 &&
+		len(filter.APIKeyHashes) == 0 &&
+		len(filter.SourceHashes) == 0 &&
+		len(filter.ProjectIDs) == 0 &&
+		len(filter.RequestTypes) == 0 &&
+		len(filter.HeaderErrorKinds) == 0 &&
+		len(filter.HeaderErrorCodes) == 0 &&
+		len(filter.HeaderQuotaPlans) == 0 &&
+		len(filter.HeaderTraceIDs) == 0 &&
+		filter.MinLatencyMS == 0 &&
+		strings.TrimSpace(filter.CacheStatus) == ""
+}
 
-func (r *Reader) loadRows(
-	ctx context.Context,
-	fromMS int64,
-	toMS int64,
-	load rowLoader,
-	dashboardTimelineReady bool,
-	analyticsTimelineReady bool,
-) (Snapshot, bool) {
+func (r *Reader) loadRows(ctx context.Context, filter store.AnalyticsFilter, dashboardTimelineReady bool, analyticsTimelineReady bool) (Snapshot, bool) {
 	if !r.enabled {
 		return Snapshot{}, false
 	}
-	if fromMS >= toMS {
+	if filter.FromMS >= filter.ToMS {
 		return Snapshot{
 			ModelStats: []store.ModelStat{},
 		}, true
 	}
-	fullStartMS := ceilHourMS(fromMS)
-	fullEndMS := floorHourMS(toMS)
+	fullStartMS := ceilHourMS(filter.FromMS)
+	fullEndMS := floorHourMS(filter.ToMS)
 	if fullStartMS >= fullEndMS {
 		return Snapshot{}, false
 	}
 
-	checkpoint, err := r.store.DashboardHourlyRollupCheckpoint(ctx)
+	rows, state, available, err := r.store.UsageHourlyAggregateRows(ctx, store.UsageHourlyAggregateFilter{
+		FromMS:          filter.FromMS,
+		ToMS:            filter.ToMS,
+		Models:          filter.Models,
+		IncludeFailed:   filter.IncludeFailed,
+		FailedOnly:      filter.FailedOnly,
+		CollapseBuckets: !dashboardTimelineReady && !analyticsTimelineReady,
+	})
 	if err != nil {
-		r.logFallback(fmt.Sprintf("checkpoint query failed: %v", err))
+		r.logFallback(fmt.Sprintf("permanent hourly rows query failed: %v", err))
 		return Snapshot{}, false
 	}
-	latestID, err := r.store.LatestUsageEventID(ctx)
-	if err != nil {
-		r.logFallback(fmt.Sprintf("latest event query failed: %v", err))
-		return Snapshot{}, false
-	}
-	if checkpoint.LastEventID < latestID {
-		r.logFallback(fmt.Sprintf("checkpoint pending: last_event_id=%d latest_event_id=%d", checkpoint.LastEventID, latestID))
-		return Snapshot{}, false
-	}
-
-	rows, err := load(ctx, fullStartMS, fullEndMS)
-	if err != nil {
-		r.logFallback(fmt.Sprintf("hourly rows query failed: %v", err))
+	if !available {
+		r.logFallback(fmt.Sprintf("permanent hourly aggregate unavailable: schema_version=%d status=%s", state.SchemaVersion, state.Status))
 		return Snapshot{}, false
 	}
 	agg, modelStats := coreFromRows(rows)
-	edges := rawEdges(fromMS, toMS, fullStartMS, fullEndMS)
-	for _, edge := range edges {
-		edgeAgg, err := r.store.AggregateBetween(ctx, edge.fromMS, edge.toMS)
-		if err != nil {
-			r.logFallback(fmt.Sprintf("raw edge aggregate failed: %v", err))
-			return Snapshot{}, false
-		}
-		edgeModels, err := r.store.ModelStatsBetween(ctx, edge.fromMS, edge.toMS)
-		if err != nil {
-			r.logFallback(fmt.Sprintf("raw edge model query failed: %v", err))
-			return Snapshot{}, false
-		}
-		agg = mergeAggregates(agg, edgeAgg)
-		modelStats = mergeModelStats(modelStats, edgeModels)
-	}
 
 	return Snapshot{
 		Aggregate:              agg,
 		ModelStats:             modelStats,
 		rows:                   rows,
-		edges:                  edges,
-		fullStartMS:            fullStartMS,
-		fullEndMS:              fullEndMS,
+		fromMS:                 filter.FromMS,
+		toMS:                   filter.ToMS,
 		dashboardTimelineReady: dashboardTimelineReady,
 		analyticsTimelineReady: analyticsTimelineReady,
 	}, true
@@ -174,16 +168,7 @@ func (r *Reader) DashboardTimeline(ctx context.Context, snapshot Snapshot, fromM
 		return timeline, true
 	}
 
-	timeline := dashboardTimelineFromRows(snapshot.rows)
-	if snapshot.fullEndMS < toMS {
-		edgeTimeline, err := r.store.HourlyTimelineBetween(ctx, snapshot.fullEndMS, toMS)
-		if err != nil {
-			r.logFallback(fmt.Sprintf("raw edge timeline query failed: %v", err))
-			return nil, false
-		}
-		timeline = mergeDashboardTimeline(timeline, edgeTimeline)
-	}
-	return timeline, true
+	return dashboardTimelineFromRows(snapshot.rows), true
 }
 
 func (r *Reader) AnalyticsTimeline(
@@ -201,25 +186,11 @@ func (r *Reader) AnalyticsTimeline(
 	if granularity != "day" {
 		granularity = "hour"
 	}
-	if !usage.CanMapUTCWholeHours(snapshot.fullStartMS, snapshot.fullEndMS, granularity, location) {
+	if !r.CanRepresentAnalyticsTimeline(snapshot.fromMS, snapshot.toMS, granularity, location) {
 		return nil, false
 	}
 
-	timeline := analyticsTimelineFromRows(snapshot.rows, granularity, location)
-	for _, edge := range snapshot.edges {
-		filter := store.AnalyticsFilter{
-			FromMS:        edge.fromMS,
-			ToMS:          edge.toMS,
-			IncludeFailed: true,
-		}
-		edgeTimeline, err := r.store.TimelineWithFilter(ctx, filter, granularity, location)
-		if err != nil {
-			r.logFallback(fmt.Sprintf("analytics raw edge timeline query failed: %v", err))
-			return nil, false
-		}
-		timeline = mergeAnalyticsTimeline(timeline, edgeTimeline)
-	}
-	return timeline, true
+	return analyticsTimelineFromRows(snapshot.rows, granularity, location), true
 }
 
 // CanRepresentAnalyticsTimeline reports whether complete UTC hourly rows can
@@ -236,18 +207,12 @@ func (r *Reader) CanRepresentAnalyticsTimeline(fromMS, toMS int64, granularity s
 	}
 	fullStartMS := ceilHourMS(fromMS)
 	fullEndMS := floorHourMS(toMS)
-	return fullStartMS < fullEndMS && usage.CanMapUTCWholeHours(fullStartMS, fullEndMS, granularity, location)
-}
-
-func rawEdges(fromMS, toMS, fullStartMS, fullEndMS int64) []timeRange {
-	ranges := make([]timeRange, 0, 2)
-	if fromMS < fullStartMS {
-		ranges = append(ranges, timeRange{fromMS: fromMS, toMS: min(fullStartMS, toMS)})
+	if fullStartMS >= fullEndMS {
+		return false
 	}
-	if fullEndMS < toMS {
-		ranges = append(ranges, timeRange{fromMS: max(fullEndMS, fromMS), toMS: toMS})
-	}
-	return ranges
+	touchedStartMS := floorHourMS(fromMS)
+	touchedEndMS := ceilHourMS(toMS)
+	return usage.CanMapUTCWholeHours(touchedStartMS, touchedEndMS, granularity, location)
 }
 
 func ceilHourMS(value int64) int64 {
@@ -261,14 +226,17 @@ func floorHourMS(value int64) int64 {
 	return value - value%hourMS
 }
 
-func coreFromRows(rows []store.DashboardHourlyRollupRow) (store.Aggregate, []store.ModelStat) {
+func coreFromRows(rows []store.UsageHourlyAggregateRow) (store.Aggregate, []store.ModelStat) {
 	agg := store.Aggregate{}
 	modelStats := make(map[modelStatKey]*store.ModelStat)
 	var latencySum int64
 	for _, row := range rows {
 		agg.TotalCalls += row.Calls
-		agg.SuccessCalls += row.SuccessCalls
-		agg.FailureCalls += row.FailureCalls
+		if row.Failed {
+			agg.FailureCalls += row.Calls
+		} else {
+			agg.SuccessCalls += row.Calls
+		}
 		agg.InputTokens += row.InputTokens
 		agg.OutputTokens += row.OutputTokens
 		agg.ReasoningTokens += row.ReasoningTokens
@@ -284,12 +252,16 @@ func coreFromRows(rows []store.DashboardHourlyRollupRow) (store.Aggregate, []sto
 		agg.LatencySamples += row.LatencySamples
 		agg.ZeroTokenCalls += row.ZeroTokenCalls
 		latencySum += row.LatencySumMS
+		successCalls := int64(0)
+		if !row.Failed {
+			successCalls = row.Calls
+		}
 		addModelStat(modelStats, store.ModelStat{
 			Model:               row.Model,
 			BillingModel:        row.BillingModel,
 			ServiceTier:         row.ServiceTier,
 			Calls:               row.Calls,
-			SuccessCalls:        row.SuccessCalls,
+			SuccessCalls:        successCalls,
 			InputTokens:         row.InputTokens,
 			OutputTokens:        row.OutputTokens,
 			ReasoningTokens:     row.ReasoningTokens,
@@ -305,43 +277,6 @@ func coreFromRows(rows []store.DashboardHourlyRollupRow) (store.Aggregate, []sto
 		agg.AvgLatencyMS.Float64 = float64(latencySum) / float64(agg.LatencySamples)
 	}
 	return agg, sortedModelStats(modelStats)
-}
-
-func mergeAggregates(left, right store.Aggregate) store.Aggregate {
-	latencySum := left.AvgLatencyMS.Float64*float64(left.LatencySamples) + right.AvgLatencyMS.Float64*float64(right.LatencySamples)
-	left.TotalCalls += right.TotalCalls
-	left.SuccessCalls += right.SuccessCalls
-	left.FailureCalls += right.FailureCalls
-	left.InputTokens += right.InputTokens
-	left.OutputTokens += right.OutputTokens
-	left.ReasoningTokens += right.ReasoningTokens
-	left.CachedTokens += right.CachedTokens
-	left.CacheReadTokens += right.CacheReadTokens
-	left.CacheCreationTokens += right.CacheCreationTokens
-	left.LongInputTokens += right.LongInputTokens
-	left.LongOutputTokens += right.LongOutputTokens
-	left.LongCachedTokens += right.LongCachedTokens
-	left.LongCacheReadTokens += right.LongCacheReadTokens
-	left.LongCacheCreationTokens += right.LongCacheCreationTokens
-	left.TotalTokens += right.TotalTokens
-	left.LatencySamples += right.LatencySamples
-	left.ZeroTokenCalls += right.ZeroTokenCalls
-	left.AvgLatencyMS.Valid = left.LatencySamples > 0
-	if left.AvgLatencyMS.Valid {
-		left.AvgLatencyMS.Float64 = latencySum / float64(left.LatencySamples)
-	}
-	return left
-}
-
-func mergeModelStats(left, right []store.ModelStat) []store.ModelStat {
-	grouped := make(map[modelStatKey]*store.ModelStat, len(left)+len(right))
-	for _, stat := range left {
-		addModelStat(grouped, stat)
-	}
-	for _, stat := range right {
-		addModelStat(grouped, stat)
-	}
-	return sortedModelStats(grouped)
 }
 
 func addModelStat(grouped map[modelStatKey]*store.ModelStat, stat store.ModelStat) {
@@ -388,7 +323,7 @@ func sortedModelStats(grouped map[modelStatKey]*store.ModelStat) []store.ModelSt
 	return result
 }
 
-func dashboardTimelineFromRows(rows []store.DashboardHourlyRollupRow) []store.TimelinePoint {
+func dashboardTimelineFromRows(rows []store.UsageHourlyAggregateRow) []store.TimelinePoint {
 	grouped := make(map[int64]*store.TimelinePoint)
 	for _, row := range rows {
 		point := grouped[row.BucketMS]
@@ -398,36 +333,11 @@ func dashboardTimelineFromRows(rows []store.DashboardHourlyRollupRow) []store.Ti
 		}
 		point.Calls += row.Calls
 		point.Tokens += row.TotalTokens
-		point.Success += row.SuccessCalls
-		point.Failure += row.FailureCalls
-	}
-	result := make([]store.TimelinePoint, 0, len(grouped))
-	for _, point := range grouped {
-		result = append(result, *point)
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i].BucketMS < result[j].BucketMS })
-	return result
-}
-
-func mergeDashboardTimeline(left, right []store.TimelinePoint) []store.TimelinePoint {
-	grouped := make(map[int64]*store.TimelinePoint, len(left)+len(right))
-	add := func(point store.TimelinePoint) {
-		entry := grouped[point.BucketMS]
-		if entry == nil {
-			copy := point
-			grouped[point.BucketMS] = &copy
-			return
+		if row.Failed {
+			point.Failure += row.Calls
+		} else {
+			point.Success += row.Calls
 		}
-		entry.Calls += point.Calls
-		entry.Tokens += point.Tokens
-		entry.Success += point.Success
-		entry.Failure += point.Failure
-	}
-	for _, point := range left {
-		add(point)
-	}
-	for _, point := range right {
-		add(point)
 	}
 	result := make([]store.TimelinePoint, 0, len(grouped))
 	for _, point := range grouped {
@@ -437,8 +347,8 @@ func mergeDashboardTimeline(left, right []store.TimelinePoint) []store.TimelineP
 	return result
 }
 
-func analyticsTimelineFromRows(rows []store.DashboardHourlyRollupRow, granularity string, location *time.Location) []store.TimelinePoint {
-	grouped := make(map[analyticsTimelineKey]*store.TimelinePoint)
+func analyticsTimelineFromRows(rows []store.UsageHourlyAggregateRow, granularity string, location *time.Location) []store.TimelinePoint {
+	grouped := make(map[analyticsTimelineKey]*analyticsTimelineAccumulator)
 	for _, row := range rows {
 		point := store.TimelinePoint{
 			LongContextTokens:   row.LongContextTokens,
@@ -448,8 +358,6 @@ func analyticsTimelineFromRows(rows []store.DashboardHourlyRollupRow, granularit
 			ServiceTier:         row.ServiceTier,
 			Calls:               row.Calls,
 			Tokens:              row.TotalTokens,
-			Success:             row.SuccessCalls,
-			Failure:             row.FailureCalls,
 			InputTokens:         row.InputTokens,
 			OutputTokens:        row.OutputTokens,
 			ReasoningTokens:     row.ReasoningTokens,
@@ -458,27 +366,17 @@ func analyticsTimelineFromRows(rows []store.DashboardHourlyRollupRow, granularit
 			CacheCreationTokens: row.CacheCreationTokens,
 			LatencySamples:      row.LatencySamples,
 		}
-		if row.LatencySamples > 0 {
-			point.AvgLatencyMS.Valid = true
-			point.AvgLatencyMS.Float64 = float64(row.LatencySumMS) / float64(row.LatencySamples)
+		if row.Failed {
+			point.Failure = row.Calls
+		} else {
+			point.Success = row.Calls
 		}
-		addAnalyticsTimelinePoint(grouped, point)
+		addAnalyticsTimelinePoint(grouped, point, row.LatencySumMS)
 	}
 	return sortedAnalyticsTimeline(grouped)
 }
 
-func mergeAnalyticsTimeline(left, right []store.TimelinePoint) []store.TimelinePoint {
-	grouped := make(map[analyticsTimelineKey]*store.TimelinePoint, len(left)+len(right))
-	for _, point := range left {
-		addAnalyticsTimelinePoint(grouped, point)
-	}
-	for _, point := range right {
-		addAnalyticsTimelinePoint(grouped, point)
-	}
-	return sortedAnalyticsTimeline(grouped)
-}
-
-func addAnalyticsTimelinePoint(grouped map[analyticsTimelineKey]*store.TimelinePoint, point store.TimelinePoint) {
+func addAnalyticsTimelinePoint(grouped map[analyticsTimelineKey]*analyticsTimelineAccumulator, point store.TimelinePoint, latencySumMS int64) {
 	mapKey := analyticsTimelineKey{
 		bucketMS:     point.BucketMS,
 		model:        point.Model,
@@ -487,37 +385,39 @@ func addAnalyticsTimelinePoint(grouped map[analyticsTimelineKey]*store.TimelineP
 	}
 	entry := grouped[mapKey]
 	if entry == nil {
-		copy := point
-		grouped[mapKey] = &copy
+		grouped[mapKey] = &analyticsTimelineAccumulator{
+			point:        point,
+			latencySumMS: latencySumMS,
+		}
 		return
 	}
-	latencyTotal := entry.AvgLatencyMS.Float64*float64(entry.LatencySamples) + point.AvgLatencyMS.Float64*float64(point.LatencySamples)
-	entry.Calls += point.Calls
-	entry.Tokens += point.Tokens
-	entry.Success += point.Success
-	entry.Failure += point.Failure
-	entry.InputTokens += point.InputTokens
-	entry.OutputTokens += point.OutputTokens
-	entry.ReasoningTokens += point.ReasoningTokens
-	entry.CachedTokens += point.CachedTokens
-	entry.CacheReadTokens += point.CacheReadTokens
-	entry.CacheCreationTokens += point.CacheCreationTokens
-	entry.LongInputTokens += point.LongInputTokens
-	entry.LongOutputTokens += point.LongOutputTokens
-	entry.LongCachedTokens += point.LongCachedTokens
-	entry.LongCacheReadTokens += point.LongCacheReadTokens
-	entry.LongCacheCreationTokens += point.LongCacheCreationTokens
-	entry.LatencySamples += point.LatencySamples
-	entry.AvgLatencyMS.Valid = entry.LatencySamples > 0
-	if entry.AvgLatencyMS.Valid {
-		entry.AvgLatencyMS.Float64 = latencyTotal / float64(entry.LatencySamples)
-	}
+	entry.point.Calls += point.Calls
+	entry.point.Tokens += point.Tokens
+	entry.point.Success += point.Success
+	entry.point.Failure += point.Failure
+	entry.point.InputTokens += point.InputTokens
+	entry.point.OutputTokens += point.OutputTokens
+	entry.point.ReasoningTokens += point.ReasoningTokens
+	entry.point.CachedTokens += point.CachedTokens
+	entry.point.CacheReadTokens += point.CacheReadTokens
+	entry.point.CacheCreationTokens += point.CacheCreationTokens
+	entry.point.LongInputTokens += point.LongInputTokens
+	entry.point.LongOutputTokens += point.LongOutputTokens
+	entry.point.LongCachedTokens += point.LongCachedTokens
+	entry.point.LongCacheReadTokens += point.LongCacheReadTokens
+	entry.point.LongCacheCreationTokens += point.LongCacheCreationTokens
+	entry.point.LatencySamples += point.LatencySamples
+	entry.latencySumMS += latencySumMS
 }
 
-func sortedAnalyticsTimeline(grouped map[analyticsTimelineKey]*store.TimelinePoint) []store.TimelinePoint {
+func sortedAnalyticsTimeline(grouped map[analyticsTimelineKey]*analyticsTimelineAccumulator) []store.TimelinePoint {
 	result := make([]store.TimelinePoint, 0, len(grouped))
-	for _, point := range grouped {
-		result = append(result, *point)
+	for _, entry := range grouped {
+		if entry.point.LatencySamples > 0 {
+			entry.point.AvgLatencyMS.Valid = true
+			entry.point.AvgLatencyMS.Float64 = float64(entry.latencySumMS) / float64(entry.point.LatencySamples)
+		}
+		result = append(result, entry.point)
 	}
 	sort.Slice(result, func(i, j int) bool {
 		if result[i].BucketMS != result[j].BucketMS {

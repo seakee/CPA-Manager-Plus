@@ -415,6 +415,76 @@ func TestDashboardHourlyRollupFormatUpgradeRejectsUnknownVersionWithoutMutation(
 	}
 }
 
+func TestUsageHourlyAggregateMigrationIsAdditiveAndSeedsPendingState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage-hourly-aggregate.sqlite")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	for _, statement := range []string{
+		`drop table usage_event_identity_ledger`,
+		`drop table usage_hourly_aggregate_state`,
+		`drop table usage_hourly_aggregate_v1`,
+		`insert into usage_events (event_hash, timestamp_ms, timestamp, model, created_at_ms)
+		values ('aggregate-migration-event', 3600001, '1970-01-01T01:00:00.001Z', 'gpt-test', 1)`,
+		`insert into usage_dashboard_hourly_rollups (
+			bucket_ms, model, billing_model, service_tier, updated_at_ms
+		) values (3600000, 'gpt-test', 'gpt-test', '', 1)`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			_ = db.Close()
+			t.Fatalf("setup legacy aggregate database: %v", err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close legacy aggregate database: %v", err)
+	}
+
+	db, err = Open(path)
+	if err != nil {
+		t.Fatalf("reopen migrated aggregate database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	for _, table := range []string{
+		"usage_hourly_aggregate_v1",
+		"usage_hourly_aggregate_state",
+		"usage_event_identity_ledger",
+	} {
+		var count int
+		if err := db.QueryRow(`select count(*) from sqlite_master where type = 'table' and name = ?`, table).Scan(&count); err != nil {
+			t.Fatalf("query sqlite_master for %s: %v", table, err)
+		}
+		if count != 1 {
+			t.Fatalf("expected table %s to exist", table)
+		}
+	}
+	columns := migrationTableColumns(t, db, "usage_hourly_aggregate_v1")
+	for _, column := range []string{"bucket_ms", "model", "billing_model", "service_tier", "failed", "latency_sum_ms", "latency_samples"} {
+		if !columns[column] {
+			t.Fatalf("aggregate columns = %#v, missing %s", columns, column)
+		}
+	}
+	var version int
+	var status string
+	var checkpoint, coverage, target int64
+	if err := db.QueryRow(`select schema_version, status, backfill_last_event_id, coverage_event_id, target_event_id
+		from usage_hourly_aggregate_state where aggregate_name = 'hourly_core'`).Scan(
+		&version,
+		&status,
+		&checkpoint,
+		&coverage,
+		&target,
+	); err != nil {
+		t.Fatalf("read aggregate state: %v", err)
+	}
+	if version != 1 || status != "pending" || checkpoint != 0 || coverage != 0 || target != 1 {
+		t.Fatalf("aggregate state = version:%d status:%q checkpoint:%d coverage:%d target:%d", version, status, checkpoint, coverage, target)
+	}
+	assertTableCount(t, db, "usage_events", 1)
+	assertTableCount(t, db, "usage_dashboard_hourly_rollups", 1)
+}
+
 func TestEnsureUsageEventSnapshotColumnsOnlyMigratesSchema(t *testing.T) {
 	db, err := sql.Open("sqlite", dataSourceName(filepath.Join(t.TempDir(), "usage-event-migration.sqlite")))
 	if err != nil {

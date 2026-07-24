@@ -27,6 +27,12 @@ func TestLoadCreatesDefaultConfig(t *testing.T) {
 	if !cfg.DashboardHourlyRollupEnabled {
 		t.Fatal("DashboardHourlyRollupEnabled = false by default")
 	}
+	if cfg.UsageImportChunkBytes != DefaultUsageImportChunkBytes ||
+		cfg.UsageImportDiskQuotaBytes != DefaultUsageImportDiskQuotaBytes ||
+		cfg.UsageImportMaxSessions != DefaultUsageImportMaxSessions ||
+		cfg.UsageImportSessionTTL != DefaultUsageImportSessionTTL {
+		t.Fatalf("usage import defaults = %#v", cfg)
+	}
 
 	data, err := os.ReadFile(configPath)
 	if err != nil {
@@ -79,8 +85,12 @@ func TestLoadReadsConfigAndResolvesRelativePaths(t *testing.T) {
   "corsOrigins": ["http://panel.local"],
   "tlsSkipVerify": true,
   "quotaCooldownEnabled": true,
-  "accountActionsEnabled": true,
-  "accountActionsAutoDisable": true
+	  "accountActionsEnabled": true,
+	  "accountActionsAutoDisable": true,
+	  "usageImportChunkBytes": 1048576,
+	  "usageImportDiskQuotaBytes": 1073741824,
+	  "usageImportMaxSessions": 3,
+	  "usageImportSessionTTLMinutes": 120
 }`), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -129,6 +139,10 @@ func TestLoadReadsConfigAndResolvesRelativePaths(t *testing.T) {
 	if !cfg.AccountActionsAutoDisable {
 		t.Fatal("AccountActionsAutoDisable = false")
 	}
+	if cfg.UsageImportChunkBytes != 1048576 || cfg.UsageImportDiskQuotaBytes != 1073741824 ||
+		cfg.UsageImportMaxSessions != 3 || cfg.UsageImportSessionTTL != 2*time.Hour {
+		t.Fatalf("usage import config = %#v", cfg)
+	}
 }
 
 func TestLoadEnvOverridesConfig(t *testing.T) {
@@ -150,6 +164,10 @@ func TestLoadEnvOverridesConfig(t *testing.T) {
 	t.Setenv("USAGE_BATCH_SIZE", "12")
 	t.Setenv("CPA_MANAGER_PPROF_ADDR", "[::1]:6061")
 	t.Setenv("USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED", "false")
+	t.Setenv("USAGE_IMPORT_CHUNK_BYTES", "2097152")
+	t.Setenv("USAGE_IMPORT_DISK_QUOTA_BYTES", "2147483648")
+	t.Setenv("USAGE_IMPORT_MAX_SESSIONS", "4")
+	t.Setenv("USAGE_IMPORT_SESSION_TTL_MINUTES", "30")
 
 	cfg, err := Load()
 	if err != nil {
@@ -172,6 +190,10 @@ func TestLoadEnvOverridesConfig(t *testing.T) {
 	}
 	if cfg.DashboardHourlyRollupEnabled {
 		t.Fatal("DashboardHourlyRollupEnabled = true, want false")
+	}
+	if cfg.UsageImportChunkBytes != 2097152 || cfg.UsageImportDiskQuotaBytes != 2147483648 ||
+		cfg.UsageImportMaxSessions != 4 || cfg.UsageImportSessionTTL != 30*time.Minute {
+		t.Fatalf("usage import env config = %#v", cfg)
 	}
 }
 
@@ -219,6 +241,10 @@ func clearConfigEnv(t *testing.T) {
 		"USAGE_ACCOUNT_ACTIONS_ENABLED",
 		"USAGE_ACCOUNT_ACTIONS_AUTO_DISABLE",
 		"USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED",
+		"USAGE_IMPORT_CHUNK_BYTES",
+		"USAGE_IMPORT_DISK_QUOTA_BYTES",
+		"USAGE_IMPORT_MAX_SESSIONS",
+		"USAGE_IMPORT_SESSION_TTL_MINUTES",
 		"PANEL_PATH",
 	} {
 		t.Setenv(key, "")

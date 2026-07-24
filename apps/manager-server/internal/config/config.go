@@ -18,6 +18,13 @@ const defaultSecretFile = "/run/secrets/cpa_management_key"
 const defaultAdminSecretFile = "/run/secrets/cpa_admin_key"
 const defaultDataKeySecretFile = "/run/secrets/cpa_data_key"
 
+const (
+	DefaultUsageImportChunkBytes     int64 = 4 * 1024 * 1024
+	DefaultUsageImportDiskQuotaBytes int64 = 16 * 1024 * 1024 * 1024
+	DefaultUsageImportMaxSessions          = 2
+	DefaultUsageImportSessionTTL           = 24 * time.Hour
+)
+
 type Config struct {
 	HTTPAddr                     string
 	DataDir                      string
@@ -41,6 +48,10 @@ type Config struct {
 	AccountActionsEnabled        bool
 	AccountActionsAutoDisable    bool
 	DashboardHourlyRollupEnabled bool
+	UsageImportChunkBytes        int64
+	UsageImportDiskQuotaBytes    int64
+	UsageImportMaxSessions       int
+	UsageImportSessionTTL        time.Duration
 	QuotaCooldownEnvSet          bool
 	AccountActionsEnvSet         bool
 	AccountActionsAutoEnvSet     bool
@@ -72,6 +83,10 @@ type fileConfig struct {
 	QuotaCooldownEnabled      bool     `json:"quotaCooldownEnabled,omitempty"`
 	AccountActionsEnabled     bool     `json:"accountActionsEnabled,omitempty"`
 	AccountActionsAutoDisable bool     `json:"accountActionsAutoDisable,omitempty"`
+	UsageImportChunkBytes     int64    `json:"usageImportChunkBytes,omitempty"`
+	UsageImportDiskQuotaBytes int64    `json:"usageImportDiskQuotaBytes,omitempty"`
+	UsageImportMaxSessions    int      `json:"usageImportMaxSessions,omitempty"`
+	UsageImportTTLMinutes     int      `json:"usageImportSessionTTLMinutes,omitempty"`
 }
 
 func Load() (Config, error) {
@@ -143,9 +158,25 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 		AccountActionsEnabled:        envBool("USAGE_ACCOUNT_ACTIONS_ENABLED", cfgFile.AccountActionsEnabled),
 		AccountActionsAutoDisable:    envBool("USAGE_ACCOUNT_ACTIONS_AUTO_DISABLE", cfgFile.AccountActionsAutoDisable),
 		DashboardHourlyRollupEnabled: envBool("USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED", true),
-		QuotaCooldownEnvSet:          hasEnv("USAGE_QUOTA_COOLDOWN_ENABLED"),
-		AccountActionsEnvSet:         hasEnv("USAGE_ACCOUNT_ACTIONS_ENABLED"),
-		AccountActionsAutoEnvSet:     hasEnv("USAGE_ACCOUNT_ACTIONS_AUTO_DISABLE"),
+		UsageImportChunkBytes: envInt64(
+			"USAGE_IMPORT_CHUNK_BYTES",
+			int64Fallback(cfgFile.UsageImportChunkBytes, DefaultUsageImportChunkBytes),
+		),
+		UsageImportDiskQuotaBytes: envInt64(
+			"USAGE_IMPORT_DISK_QUOTA_BYTES",
+			int64Fallback(cfgFile.UsageImportDiskQuotaBytes, DefaultUsageImportDiskQuotaBytes),
+		),
+		UsageImportMaxSessions: envInt(
+			"USAGE_IMPORT_MAX_SESSIONS",
+			intFallback(cfgFile.UsageImportMaxSessions, DefaultUsageImportMaxSessions),
+		),
+		UsageImportSessionTTL: time.Duration(envInt(
+			"USAGE_IMPORT_SESSION_TTL_MINUTES",
+			intFallback(cfgFile.UsageImportTTLMinutes, int(DefaultUsageImportSessionTTL/time.Minute)),
+		)) * time.Minute,
+		QuotaCooldownEnvSet:      hasEnv("USAGE_QUOTA_COOLDOWN_ENABLED"),
+		AccountActionsEnvSet:     hasEnv("USAGE_ACCOUNT_ACTIONS_ENABLED"),
+		AccountActionsAutoEnvSet: hasEnv("USAGE_ACCOUNT_ACTIONS_AUTO_DISABLE"),
 	}, nil
 }
 
@@ -261,6 +292,18 @@ func envInt(key string, fallback int) int {
 	return parsed
 }
 
+func envInt64(key string, fallback int64) int64 {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
+}
+
 func envBool(key string, fallback bool) bool {
 	value := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
 	if value == "" {
@@ -278,6 +321,13 @@ func stringFallback(value string, fallback string) string {
 }
 
 func intFallback(value int, fallback int) int {
+	if value <= 0 {
+		return fallback
+	}
+	return value
+}
+
+func int64Fallback(value int64, fallback int64) int64 {
 	if value <= 0 {
 		return fallback
 	}

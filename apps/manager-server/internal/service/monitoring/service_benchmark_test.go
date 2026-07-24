@@ -24,7 +24,7 @@ func BenchmarkUsageAnalyticsIncludeProfiles(b *testing.B) {
 	toMS := fromMS + 30*24*60*60*1000
 	insertMonitoringBenchmarkEvents(b, ctx, db, fromMS, toMS, 100_000)
 	for {
-		result, err := db.CatchUpDashboardHourlyRollups(ctx, 5_000, toMS)
+		result, err := db.CatchUpUsageHourlyAggregate(ctx, 5_000, toMS)
 		if err != nil {
 			b.Fatalf("catch up hourly rollup: %v", err)
 		}
@@ -73,6 +73,26 @@ func BenchmarkUsageAnalyticsIncludeProfiles(b *testing.B) {
 	monitoringFullWithoutFilterOptions.Include.FilterOptions = false
 	monitoringFullFiltered := monitoringFull
 	monitoringFullFiltered.Filters.Models = []string{"gpt-00"}
+	monitoringAccountsCompact := request(Include{
+		Summary:        true,
+		SummaryProfile: "compact",
+		AccountStats:   true,
+		EventsPage:     &EventsPage{Limit: 500},
+		Granularity:    "day",
+	})
+	monitoringAPIKeysCompact := request(Include{
+		Summary:        true,
+		SummaryProfile: "compact",
+		APIKeyStats:    true,
+		EventsPage:     &EventsPage{Limit: 500},
+		Granularity:    "day",
+	})
+	monitoringRealtimeCompact := request(Include{
+		Summary:        true,
+		SummaryProfile: "compact",
+		EventsPage:     &EventsPage{Limit: 500},
+		Granularity:    "day",
+	})
 	profiles := []struct {
 		name     string
 		service  *Service
@@ -100,6 +120,9 @@ func BenchmarkUsageAnalyticsIncludeProfiles(b *testing.B) {
 		{name: "monitoring_curl_scope", service: rollupService, requests: []Request{monitoringCurlScope}},
 		{name: "monitoring_full_without_filter_options", service: rollupService, requests: []Request{monitoringFullWithoutFilterOptions}},
 		{name: "monitoring_full_filtered", service: rollupService, requests: []Request{monitoringFullFiltered}},
+		{name: "monitoring_accounts_compact", service: rollupService, requests: []Request{monitoringAccountsCompact}},
+		{name: "monitoring_api_keys_compact", service: rollupService, requests: []Request{monitoringAPIKeysCompact}},
+		{name: "monitoring_realtime_compact", service: rollupService, requests: []Request{monitoringRealtimeCompact}},
 		{name: "filter_options_only", service: rollupService, requests: []Request{request(Include{FilterOptions: true})}},
 		{
 			name:    "overview_initial",
@@ -340,7 +363,7 @@ func BenchmarkUsageAnalyticsHourlyCorePaths(b *testing.B) {
 	toMS := fromMS + 30*24*60*60*1000
 	insertMonitoringBenchmarkEvents(b, ctx, db, fromMS, toMS, 100_000)
 	for {
-		result, err := db.CatchUpDashboardHourlyRollups(ctx, 5_000, toMS)
+		result, err := db.CatchUpUsageHourlyAggregate(ctx, 5_000, toMS)
 		if err != nil {
 			b.Fatalf("catch up hourly rollup: %v", err)
 		}
@@ -351,7 +374,28 @@ func BenchmarkUsageAnalyticsHourlyCorePaths(b *testing.B) {
 	filter := store.AnalyticsFilter{FromMS: fromMS, ToMS: toMS, IncludeFailed: true}
 	reader := usagehourly.New(db, true)
 
-	b.Run("raw", func(b *testing.B) {
+	b.Run("raw_core", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, err := db.AggregateWithFilter(ctx, filter); err != nil {
+				b.Fatalf("aggregate: %v", err)
+			}
+			if _, err := db.ModelStatsWithFilter(ctx, filter, 0); err != nil {
+				b.Fatalf("model stats: %v", err)
+			}
+		}
+	})
+
+	b.Run("rollup_core", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, ok := reader.LoadAnalytics(ctx, filter, "day", time.UTC, false); !ok {
+				b.Fatal("rollup unavailable")
+			}
+		}
+	})
+
+	b.Run("raw_with_timeline", func(b *testing.B) {
 		b.ReportAllocs()
 		for range b.N {
 			if _, err := db.AggregateWithFilter(ctx, filter); err != nil {
@@ -366,10 +410,10 @@ func BenchmarkUsageAnalyticsHourlyCorePaths(b *testing.B) {
 		}
 	})
 
-	b.Run("rollup", func(b *testing.B) {
+	b.Run("rollup_with_timeline", func(b *testing.B) {
 		b.ReportAllocs()
 		for range b.N {
-			snapshot, ok := reader.LoadAnalytics(ctx, fromMS, toMS, "day", time.UTC, true)
+			snapshot, ok := reader.LoadAnalytics(ctx, filter, "day", time.UTC, true)
 			if !ok {
 				b.Fatal("rollup unavailable")
 			}

@@ -577,6 +577,25 @@ func TestCacheHitRateMatchesWebClient(t *testing.T) {
 	}
 }
 
+func TestBuildTimelineIsIndependentOfPointOrder(t *testing.T) {
+	points := []store.TimelinePoint{
+		{BucketMS: 1_000, Model: "z-big", BillingModel: "z-big", Calls: 1, Success: 1, InputTokens: 10_000_000_000_000_000},
+		{BucketMS: 1_000, Model: "a-small", BillingModel: "a-small", Calls: 1, Success: 1, InputTokens: 1},
+		{BucketMS: 1_000, Model: "b-small", BillingModel: "b-small", Calls: 1, Success: 1, InputTokens: 1},
+	}
+	prices := map[string]store.ModelPrice{
+		"z-big":   {Prompt: 1_000_000},
+		"a-small": {Prompt: 1_000_000},
+		"b-small": {Prompt: 1_000_000},
+	}
+
+	forward := buildTimeline(points, nil, "hour", time.UTC, prices)
+	reverse := buildTimeline([]store.TimelinePoint{points[2], points[1], points[0]}, nil, "hour", time.UTC, prices)
+	if !reflect.DeepEqual(forward, reverse) {
+		t.Fatalf("timeline changed with point order\nforward=%#v\nreverse=%#v", forward, reverse)
+	}
+}
+
 func TestModelCacheHitRateUsesBillingModelBeforeAliasAggregation(t *testing.T) {
 	stats := []store.ModelStat{
 		{
@@ -1525,7 +1544,7 @@ func TestAnalyticsFilterOptionsIgnoreActiveScopeFilters(t *testing.T) {
 	}
 }
 
-func TestAnalyticsFilterSelectorsReturnOnlyUsageAnalyticsOptions(t *testing.T) {
+func TestAnalyticsFilterSelectorsReturnLightweightOptions(t *testing.T) {
 	db := newMonitoringTestStore(t)
 	ctx := context.Background()
 	fromMS := int64(1_778_350_000_000)
@@ -1541,8 +1560,29 @@ func TestAnalyticsFilterSelectorsReturnOnlyUsageAnalyticsOptions(t *testing.T) {
 	bob.AuthProviderSnapshot = "gemini"
 	bob.AuthFileSnapshot = "bob.json"
 	bob.APIKeyHash = "key-bob"
+	sourceOnly := monitoringEvent("selector-source-only", fromMS+3_000, "gpt-a", "", "source-only", false, 10, 5, 0, 0, 15, nil)
+	sourceOnly.AccountSnapshot = ""
+	sourceOnly.AuthLabelSnapshot = ""
+	sourceOnly.AuthProviderSnapshot = "openai"
+	sourceOnly.AuthFileSnapshot = ""
+	sourceOnly.APIKeyHash = ""
+	sourceOnly.Source = "k:upstream-key"
+	sourceOnlyRotated := monitoringEvent("selector-source-only-rotated", fromMS+4_000, "gpt-b", "", "source-only", false, 10, 5, 0, 0, 15, nil)
+	sourceOnlyRotated.AccountSnapshot = ""
+	sourceOnlyRotated.AuthLabelSnapshot = ""
+	sourceOnlyRotated.AuthProviderSnapshot = "openai"
+	sourceOnlyRotated.AuthFileSnapshot = ""
+	sourceOnlyRotated.APIKeyHash = ""
+	sourceOnlyRotated.Source = "k:z-upstream-key"
+	sourceHashOnly := monitoringEvent("selector-source-hash-only", fromMS+5_000, "gpt-a", "", "source-hash-only", false, 10, 5, 0, 0, 15, nil)
+	sourceHashOnly.AccountSnapshot = ""
+	sourceHashOnly.AuthLabelSnapshot = ""
+	sourceHashOnly.AuthProviderSnapshot = "openai"
+	sourceHashOnly.AuthFileSnapshot = ""
+	sourceHashOnly.APIKeyHash = ""
+	sourceHashOnly.Source = ""
 
-	if _, err := db.InsertEvents(ctx, []usage.Event{alice, bob}); err != nil {
+	if _, err := db.InsertEvents(ctx, []usage.Event{alice, bob, sourceOnly, sourceOnlyRotated, sourceHashOnly}); err != nil {
 		t.Fatalf("insert events: %v", err)
 	}
 
@@ -1567,14 +1607,51 @@ func TestAnalyticsFilterSelectorsReturnOnlyUsageAnalyticsOptions(t *testing.T) {
 	if !slices.Equal(resp.FilterOptions.APIKeyHashes, []string{"key-alice", "key-bob"}) {
 		t.Fatalf("api key hashes = %#v", resp.FilterOptions.APIKeyHashes)
 	}
-	if !slices.Equal(resp.FilterOptions.Providers, []string{"codex", "gemini"}) {
+	if !slices.Equal(resp.FilterOptions.Providers, []string{"codex", "gemini", "openai"}) {
 		t.Fatalf("providers = %#v", resp.FilterOptions.Providers)
 	}
 	if !slices.Equal(resp.FilterOptions.AuthFiles, []string{"alice.json", "bob.json"}) {
 		t.Fatalf("auth files = %#v", resp.FilterOptions.AuthFiles)
 	}
-	if len(resp.FilterOptions.AccountStats) != 0 || len(resp.FilterOptions.APIKeyStats) != 0 ||
-		len(resp.FilterOptions.ChannelShare) != 0 || len(resp.FilterOptions.ModelStats) != 0 {
+	if !slices.Equal(resp.FilterOptions.Accounts, []string{"alice@example.com", "bob@example.com"}) {
+		t.Fatalf("accounts = %#v", resp.FilterOptions.Accounts)
+	}
+	if resp.FilterOptions.AccountCount != 4 || resp.FilterOptions.APIKeyCount != 4 {
+		t.Fatalf(
+			"selector counts account=%d api_key=%d",
+			resp.FilterOptions.AccountCount,
+			resp.FilterOptions.APIKeyCount,
+		)
+	}
+	if len(resp.FilterOptions.AccountStats) != 4 {
+		t.Fatalf("account identity selectors = %#v", resp.FilterOptions.AccountStats)
+	}
+	var sourceOnlySelector *AccountStatRow
+	for i := range resp.FilterOptions.AccountStats {
+		row := &resp.FilterOptions.AccountStats[i]
+		if slices.Contains(row.SourceHashes, "source-only") {
+			sourceOnlySelector = row
+			break
+		}
+	}
+	if sourceOnlySelector == nil || !slices.Equal(sourceOnlySelector.Sources, []string{"k:z-upstream-key"}) {
+		t.Fatalf("missing source-only selector: %#v", resp.FilterOptions.AccountStats)
+	}
+	if sourceOnlySelector.Calls != 0 || len(sourceOnlySelector.Models) != 0 {
+		t.Fatalf("selector unexpectedly returned aggregate metrics: %#v", sourceOnlySelector)
+	}
+	var sourceHashOnlySelector *AccountStatRow
+	for i := range resp.FilterOptions.AccountStats {
+		row := &resp.FilterOptions.AccountStats[i]
+		if slices.Contains(row.SourceHashes, "source-hash-only") {
+			sourceHashOnlySelector = row
+			break
+		}
+	}
+	if sourceHashOnlySelector == nil || len(sourceHashOnlySelector.Sources) != 0 {
+		t.Fatalf("missing source-hash-only selector: %#v", resp.FilterOptions.AccountStats)
+	}
+	if len(resp.FilterOptions.APIKeyStats) != 0 || len(resp.FilterOptions.ChannelShare) != 0 || len(resp.FilterOptions.ModelStats) != 0 {
 		t.Fatalf("filter selectors returned full stats: %#v", resp.FilterOptions)
 	}
 }
@@ -2064,6 +2141,69 @@ func TestAnalyticsHourlyRollupMatchesRawCoreComparisonAndTimeline(t *testing.T) 
 	}
 }
 
+func TestAnalyticsHourlyRollupMatchesRawForModelAndOutcomeFilters(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	ctx := context.Background()
+	fromMS := int64(1_800_000_000_000) + 15*time.Minute.Milliseconds()
+	toMS := fromMS + 4*time.Hour.Milliseconds() + 20*time.Minute.Milliseconds()
+	latency := int64(125)
+	events := []usage.Event{
+		monitoringEvent("filtered-edge-success-a", fromMS+time.Minute.Milliseconds(), "model-a", "auth-a", "source-a", false, 10, 1, 0, 0, 11, &latency),
+		monitoringEvent("filtered-full-failed-a", fromMS+time.Hour.Milliseconds(), "model-a", "auth-a", "source-a", true, 20, 2, 0, 0, 22, &latency),
+		monitoringEvent("filtered-full-success-b", fromMS+2*time.Hour.Milliseconds(), "model-b", "auth-b", "source-b", false, 30, 3, 0, 0, 33, &latency),
+		monitoringEvent("filtered-edge-failed-b", toMS-time.Minute.Milliseconds(), "model-b", "auth-b", "source-b", true, 40, 4, 0, 0, 44, &latency),
+	}
+	if _, err := db.InsertEvents(ctx, events); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+	catchUpMonitoringHourlyRollup(t, ctx, db)
+	if _, err := db.InsertEvents(ctx, []usage.Event{
+		monitoringEvent("filtered-late-success-a", fromMS+90*time.Minute.Milliseconds(), "model-a", "auth-a", "source-a", false, 50, 5, 0, 0, 55, &latency),
+	}); err != nil {
+		t.Fatalf("insert late event: %v", err)
+	}
+
+	includeFailed := false
+	tests := []struct {
+		name    string
+		filters Filters
+	}{
+		{name: "model", filters: Filters{Models: []string{"model-a"}}},
+		{name: "success only", filters: Filters{IncludeFailed: &includeFailed}},
+		{name: "failed only", filters: Filters{FailedOnly: true}},
+		{name: "model and failed", filters: Filters{Models: []string{"model-b"}, FailedOnly: true}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req := Request{
+				FromMS:   fromMS,
+				ToMS:     toMS,
+				NowMS:    toMS,
+				TimeZone: "UTC",
+				Filters:  test.filters,
+				Include: Include{
+					Summary:     true,
+					Timeline:    true,
+					ModelStats:  true,
+					Granularity: "hour",
+				},
+			}
+			raw, err := New(db, false).Analytics(ctx, req)
+			if err != nil {
+				t.Fatalf("raw analytics: %v", err)
+			}
+			rolled, err := New(db, true).Analytics(ctx, req)
+			if err != nil {
+				t.Fatalf("rollup analytics: %v", err)
+			}
+			raw.GeneratedAtMS = rolled.GeneratedAtMS
+			if !reflect.DeepEqual(rolled, raw) {
+				t.Fatalf("filtered analytics mismatch\nrollup=%#v\nraw=%#v", rolled, raw)
+			}
+		})
+	}
+}
+
 func TestAnalyticsHourlyRollupTimelineMatchesRawAcrossDST(t *testing.T) {
 	db := newMonitoringTestStore(t)
 	ctx := context.Background()
@@ -2185,7 +2325,6 @@ func TestAnalyticsHourlyRollupEligibilityIsStrict(t *testing.T) {
 	}{
 		{name: "search", mutate: func(filter *store.AnalyticsFilter) { filter.SearchQuery = "model" }},
 		{name: "search api key", mutate: func(filter *store.AnalyticsFilter) { filter.SearchAPIKeyHash = "key" }},
-		{name: "models", mutate: func(filter *store.AnalyticsFilter) { filter.Models = []string{"model-a"} }},
 		{name: "providers", mutate: func(filter *store.AnalyticsFilter) { filter.Providers = []string{"codex"} }},
 		{name: "accounts", mutate: func(filter *store.AnalyticsFilter) { filter.Accounts = []string{"account"} }},
 		{name: "credential ids", mutate: func(filter *store.AnalyticsFilter) { filter.CredentialIDs = []string{"credential"} }},
@@ -2199,8 +2338,6 @@ func TestAnalyticsHourlyRollupEligibilityIsStrict(t *testing.T) {
 		{name: "header error codes", mutate: func(filter *store.AnalyticsFilter) { filter.HeaderErrorCodes = []string{"429"} }},
 		{name: "header quota plans", mutate: func(filter *store.AnalyticsFilter) { filter.HeaderQuotaPlans = []string{"pro"} }},
 		{name: "header trace ids", mutate: func(filter *store.AnalyticsFilter) { filter.HeaderTraceIDs = []string{"trace"} }},
-		{name: "exclude failed", mutate: func(filter *store.AnalyticsFilter) { filter.IncludeFailed = false }},
-		{name: "failed only", mutate: func(filter *store.AnalyticsFilter) { filter.FailedOnly = true }},
 		{name: "minimum latency", mutate: func(filter *store.AnalyticsFilter) { filter.MinLatencyMS = 100 }},
 		{name: "cache status", mutate: func(filter *store.AnalyticsFilter) { filter.CacheStatus = "hit" }},
 	}
@@ -2213,12 +2350,22 @@ func TestAnalyticsHourlyRollupEligibilityIsStrict(t *testing.T) {
 			}
 		})
 	}
+
+	for _, supported := range []store.AnalyticsFilter{
+		{IncludeFailed: true, Models: []string{"model-a"}},
+		{IncludeFailed: false},
+		{IncludeFailed: true, FailedOnly: true},
+	} {
+		if !analyticsHourlyRollupEligible(supported) {
+			t.Fatalf("supported filter unexpectedly ineligible: %#v", supported)
+		}
+	}
 }
 
 func catchUpMonitoringHourlyRollup(t *testing.T, ctx context.Context, db *store.Store) {
 	t.Helper()
 	for {
-		result, err := db.CatchUpDashboardHourlyRollups(ctx, 100, time.Now().UnixMilli())
+		result, err := db.CatchUpUsageHourlyAggregate(ctx, 100, time.Now().UnixMilli())
 		if err != nil {
 			t.Fatalf("catch up hourly rollup: %v", err)
 		}

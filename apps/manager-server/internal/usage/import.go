@@ -51,6 +51,19 @@ func StreamImportPayload(reader io.Reader, batchSize int, consume func([]Event) 
 	if batchSize <= 0 {
 		batchSize = 256
 	}
+	batcher := &importBatcher{
+		batchSize: batchSize,
+		batch:     make([]Event, 0, batchSize),
+		consume:   consume,
+	}
+	if seeker, ok := reader.(io.ReadSeeker); ok {
+		result, handled, err := streamSeekableLegacyImport(seeker, batcher)
+		if err != nil || handled {
+			result.Total = batcher.total
+			return result, err
+		}
+	}
+
 	buffered := bufio.NewReader(reader)
 	first, err := peekNonWhitespaceByte(buffered)
 	if err != nil {
@@ -60,11 +73,6 @@ func StreamImportPayload(reader io.Reader, batchSize int, consume func([]Event) 
 		return ImportStreamResult{}, err
 	}
 
-	batcher := &importBatcher{
-		batchSize: batchSize,
-		batch:     make([]Event, 0, batchSize),
-		consume:   consume,
-	}
 	var result ImportStreamResult
 	switch first {
 	case '[':
@@ -77,6 +85,781 @@ func StreamImportPayload(reader io.Reader, batchSize int, consume func([]Event) 
 	}
 	result.Total = batcher.total
 	return result, err
+}
+
+type legacyStreamShape struct {
+	format        string
+	wrapped       bool
+	endpointRanks map[string]int
+	modelRanks    map[string]map[string]int
+}
+
+func streamSeekableLegacyImport(reader io.ReadSeeker, batcher *importBatcher) (ImportStreamResult, bool, error) {
+	start, err := reader.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return ImportStreamResult{}, false, err
+	}
+	shape, inspectErr := inspectLegacyStreamShape(reader)
+	_, rewindErr := reader.Seek(start, io.SeekStart)
+	if inspectErr != nil {
+		return ImportStreamResult{}, false, inspectErr
+	}
+	if rewindErr != nil {
+		return ImportStreamResult{}, false, rewindErr
+	}
+	if shape.format == "" {
+		return ImportStreamResult{}, false, nil
+	}
+	result, err := streamLegacyObjectImport(reader, shape, batcher)
+	return result, true, err
+}
+
+func inspectLegacyStreamShape(reader io.Reader) (legacyStreamShape, error) {
+	decoder := json.NewDecoder(reader)
+	decoder.UseNumber()
+	token, err := decoder.Token()
+	if err != nil {
+		return legacyStreamShape{}, err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok || delimiter != '{' {
+		return legacyStreamShape{}, nil
+	}
+
+	var usageSeen bool
+	var usageFound bool
+	var usageEndpointKeys []string
+	var usageModelKeys map[string][]string
+	var directAPIsSeen bool
+	var directAPIsFound bool
+	var directEndpointKeys []string
+	var directModelKeys map[string][]string
+	var eventHashSeen bool
+	var eventHashNonEmpty bool
+	var camelEventHashSeen bool
+	var camelEventHashNonEmpty bool
+	for decoder.More() {
+		key, err := nextJSONObjectKey(decoder)
+		if err != nil {
+			return legacyStreamShape{}, err
+		}
+		switch key {
+		case "usage":
+			if usageSeen {
+				return legacyStreamShape{}, duplicateLegacyStructuralKeyError("usage")
+			}
+			usageSeen = true
+			usageEndpointKeys, usageModelKeys, usageFound, err = inspectLegacyUsageValue(decoder)
+			if err != nil {
+				return legacyStreamShape{}, err
+			}
+		case "apis":
+			if directAPIsSeen {
+				return legacyStreamShape{}, duplicateLegacyStructuralKeyError("apis")
+			}
+			directAPIsSeen = true
+			directEndpointKeys, directModelKeys, directAPIsFound, err = inspectLegacyAPIsValue(decoder)
+			if err != nil {
+				return legacyStreamShape{}, err
+			}
+		case "event_hash":
+			eventHashSeen = true
+			eventHashNonEmpty, err = inspectExportedEventHashValue(decoder)
+			if err != nil {
+				return legacyStreamShape{}, err
+			}
+		case "eventHash":
+			camelEventHashSeen = true
+			camelEventHashNonEmpty, err = inspectExportedEventHashValue(decoder)
+			if err != nil {
+				return legacyStreamShape{}, err
+			}
+		default:
+			if err := skipNextJSONValue(decoder); err != nil {
+				return legacyStreamShape{}, err
+			}
+		}
+	}
+	if err := consumeJSONDelimiter(decoder, '}'); err != nil {
+		return legacyStreamShape{}, err
+	}
+	exportedEvent := eventHashNonEmpty
+	if !eventHashSeen && camelEventHashSeen {
+		exportedEvent = camelEventHashNonEmpty
+	}
+	if exportedEvent {
+		return legacyStreamShape{}, nil
+	}
+	var shape legacyStreamShape
+	if usageSeen {
+		if usageFound {
+			shape = buildLegacyStreamShape(ImportFormatLegacyExport, true, usageEndpointKeys, usageModelKeys)
+		}
+	} else if directAPIsFound {
+		shape = buildLegacyStreamShape(ImportFormatLegacyPayload, false, directEndpointKeys, directModelKeys)
+	}
+	if shape.format != "" {
+		if err := ensureDecoderEOF(decoder); err != nil {
+			return legacyStreamShape{}, err
+		}
+	}
+	return shape, nil
+}
+
+func inspectExportedEventHashValue(decoder *json.Decoder) (bool, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return false, err
+	}
+	if delimiter, ok := token.(json.Delim); ok {
+		return true, skipJSONValueFromToken(decoder, delimiter)
+	}
+	if token == nil {
+		return false, nil
+	}
+	if value, ok := token.(string); ok {
+		return strings.TrimSpace(value) != "", nil
+	}
+	return true, nil
+}
+
+func duplicateLegacyStructuralKeyError(key string) error {
+	return fmt.Errorf("usage import legacy object contains duplicate structural key %q", key)
+}
+
+func inspectLegacyUsageValue(decoder *json.Decoder) ([]string, map[string][]string, bool, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, nil, false, err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok || delimiter != '{' {
+		return nil, nil, false, skipJSONValueFromToken(decoder, token)
+	}
+
+	var endpointKeys []string
+	var modelKeys map[string][]string
+	found := false
+	apisSeen := false
+	for decoder.More() {
+		key, err := nextJSONObjectKey(decoder)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		if key != "apis" {
+			if err := skipNextJSONValue(decoder); err != nil {
+				return nil, nil, false, err
+			}
+			continue
+		}
+		if apisSeen {
+			return nil, nil, false, duplicateLegacyStructuralKeyError("usage.apis")
+		}
+		apisSeen = true
+		keys, models, ok, err := inspectLegacyAPIsValue(decoder)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		if ok {
+			endpointKeys = keys
+			modelKeys = models
+			found = true
+		}
+	}
+	if err := consumeJSONDelimiter(decoder, '}'); err != nil {
+		return nil, nil, false, err
+	}
+	return endpointKeys, modelKeys, found, nil
+}
+
+func inspectLegacyAPIsValue(decoder *json.Decoder) ([]string, map[string][]string, bool, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, nil, false, err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok || delimiter != '{' {
+		return nil, nil, false, skipJSONValueFromToken(decoder, token)
+	}
+
+	endpointSet := make(map[string]struct{})
+	modelKeys := make(map[string][]string)
+	for decoder.More() {
+		endpoint, err := nextJSONObjectKey(decoder)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		if _, exists := endpointSet[endpoint]; exists {
+			return nil, nil, false, duplicateLegacyStructuralKeyError("apis." + endpoint)
+		}
+		endpointSet[endpoint] = struct{}{}
+		models, err := inspectLegacyEndpointValue(decoder)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		if models != nil {
+			modelKeys[endpoint] = models
+		}
+	}
+	if err := consumeJSONDelimiter(decoder, '}'); err != nil {
+		return nil, nil, false, err
+	}
+	if len(endpointSet) == 0 {
+		return nil, nil, false, nil
+	}
+	endpointKeys := make([]string, 0, len(endpointSet))
+	for endpoint := range endpointSet {
+		endpointKeys = append(endpointKeys, endpoint)
+	}
+	return endpointKeys, modelKeys, true, nil
+}
+
+func inspectLegacyEndpointValue(decoder *json.Decoder) ([]string, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok || delimiter != '{' {
+		return nil, skipJSONValueFromToken(decoder, token)
+	}
+
+	var modelKeys []string
+	modelsSeen := false
+	for decoder.More() {
+		key, err := nextJSONObjectKey(decoder)
+		if err != nil {
+			return nil, err
+		}
+		if key != "models" {
+			if err := skipNextJSONValue(decoder); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if modelsSeen {
+			return nil, duplicateLegacyStructuralKeyError("models")
+		}
+		modelsSeen = true
+		keys, err := inspectLegacyModelsValue(decoder)
+		if err != nil {
+			return nil, err
+		}
+		modelKeys = keys
+	}
+	if err := consumeJSONDelimiter(decoder, '}'); err != nil {
+		return nil, err
+	}
+	return modelKeys, nil
+}
+
+func inspectLegacyModelsValue(decoder *json.Decoder) ([]string, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok || delimiter != '{' {
+		return nil, skipJSONValueFromToken(decoder, token)
+	}
+
+	modelSet := make(map[string]struct{})
+	for decoder.More() {
+		model, err := nextJSONObjectKey(decoder)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := modelSet[model]; exists {
+			return nil, duplicateLegacyStructuralKeyError("models." + model)
+		}
+		modelSet[model] = struct{}{}
+		if err := inspectLegacyModelValue(decoder); err != nil {
+			return nil, err
+		}
+	}
+	if err := consumeJSONDelimiter(decoder, '}'); err != nil {
+		return nil, err
+	}
+	modelKeys := make([]string, 0, len(modelSet))
+	for model := range modelSet {
+		modelKeys = append(modelKeys, model)
+	}
+	return modelKeys, nil
+}
+
+func inspectLegacyModelValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok || delimiter != '{' {
+		return skipJSONValueFromToken(decoder, token)
+	}
+
+	detailsSeen := false
+	for decoder.More() {
+		key, err := nextJSONObjectKey(decoder)
+		if err != nil {
+			return err
+		}
+		if key == "details" {
+			if detailsSeen {
+				return duplicateLegacyStructuralKeyError("details")
+			}
+			detailsSeen = true
+		}
+		if err := skipNextJSONValue(decoder); err != nil {
+			return err
+		}
+	}
+	return consumeJSONDelimiter(decoder, '}')
+}
+
+func buildLegacyStreamShape(
+	format string,
+	wrapped bool,
+	endpointKeys []string,
+	modelKeys map[string][]string,
+) legacyStreamShape {
+	return legacyStreamShape{
+		format:        format,
+		wrapped:       wrapped,
+		endpointRanks: rankSortedStrings(endpointKeys),
+		modelRanks: func() map[string]map[string]int {
+			ranks := make(map[string]map[string]int, len(modelKeys))
+			for endpoint, keys := range modelKeys {
+				ranks[endpoint] = rankSortedStrings(keys)
+			}
+			return ranks
+		}(),
+	}
+}
+
+func rankSortedStrings(values []string) map[string]int {
+	values = append([]string(nil), values...)
+	sort.Strings(values)
+	ranks := make(map[string]int, len(values))
+	for index, value := range values {
+		ranks[value] = index + 1
+	}
+	return ranks
+}
+
+func streamLegacyObjectImport(
+	reader io.Reader,
+	shape legacyStreamShape,
+	batcher *importBatcher,
+) (ImportStreamResult, error) {
+	result := ImportStreamResult{
+		Format: shape.format,
+		Warnings: []string{
+			"legacy_usage_metadata_is_partial",
+			"legacy_usage_source_matching_may_be_approximate",
+		},
+	}
+	decoder := json.NewDecoder(reader)
+	decoder.UseNumber()
+	nowMS := time.Now().UnixMilli()
+	if err := expectJSONDelimiter(decoder, '{'); err != nil {
+		return result, err
+	}
+	processed := false
+	for decoder.More() {
+		key, err := nextJSONObjectKey(decoder)
+		if err != nil {
+			return result, err
+		}
+		if shape.wrapped && key == "usage" && !processed {
+			processed, err = streamLegacyUsageValue(decoder, shape, batcher, &result, nowMS)
+			if err != nil {
+				return result, err
+			}
+			continue
+		}
+		if !shape.wrapped && key == "apis" && !processed {
+			processed, err = streamLegacyAPIsValue(decoder, shape, batcher, &result, nowMS)
+			if err != nil {
+				return result, err
+			}
+			continue
+		}
+		if err := skipNextJSONValue(decoder); err != nil {
+			return result, err
+		}
+	}
+	if err := consumeJSONDelimiter(decoder, '}'); err != nil {
+		return result, err
+	}
+	if err := ensureDecoderEOF(decoder); err != nil {
+		return result, err
+	}
+	if !processed || batcher.total == 0 {
+		return result, ErrLegacyUsageNoDetails
+	}
+	return result, batcher.flush()
+}
+
+func streamLegacyUsageValue(
+	decoder *json.Decoder,
+	shape legacyStreamShape,
+	batcher *importBatcher,
+	result *ImportStreamResult,
+	nowMS int64,
+) (bool, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return false, err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok || delimiter != '{' {
+		return false, skipJSONValueFromToken(decoder, token)
+	}
+
+	processed := false
+	for decoder.More() {
+		key, err := nextJSONObjectKey(decoder)
+		if err != nil {
+			return false, err
+		}
+		if key == "apis" && !processed {
+			processed, err = streamLegacyAPIsValue(decoder, shape, batcher, result, nowMS)
+			if err != nil {
+				return false, err
+			}
+			continue
+		}
+		if err := skipNextJSONValue(decoder); err != nil {
+			return false, err
+		}
+	}
+	if err := consumeJSONDelimiter(decoder, '}'); err != nil {
+		return false, err
+	}
+	return processed, nil
+}
+
+func streamLegacyAPIsValue(
+	decoder *json.Decoder,
+	shape legacyStreamShape,
+	batcher *importBatcher,
+	result *ImportStreamResult,
+	nowMS int64,
+) (bool, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return false, err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok || delimiter != '{' {
+		return false, skipJSONValueFromToken(decoder, token)
+	}
+
+	for decoder.More() {
+		endpoint, err := nextJSONObjectKey(decoder)
+		if err != nil {
+			return false, err
+		}
+		if err := streamLegacyEndpointValue(
+			decoder,
+			endpoint,
+			shape.endpointRanks[endpoint],
+			shape.modelRanks[endpoint],
+			batcher,
+			result,
+			nowMS,
+		); err != nil {
+			return false, err
+		}
+	}
+	if err := consumeJSONDelimiter(decoder, '}'); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func streamLegacyEndpointValue(
+	decoder *json.Decoder,
+	endpoint string,
+	endpointIndex int,
+	modelRanks map[string]int,
+	batcher *importBatcher,
+	result *ImportStreamResult,
+	nowMS int64,
+) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok || delimiter != '{' {
+		result.Failed++
+		return skipJSONValueFromToken(decoder, token)
+	}
+
+	modelsFound := false
+	for decoder.More() {
+		key, err := nextJSONObjectKey(decoder)
+		if err != nil {
+			return err
+		}
+		if key == "models" && !modelsFound {
+			modelsFound, err = streamLegacyModelsValue(
+				decoder,
+				endpoint,
+				endpointIndex,
+				modelRanks,
+				batcher,
+				result,
+				nowMS,
+			)
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		if err := skipNextJSONValue(decoder); err != nil {
+			return err
+		}
+	}
+	if err := consumeJSONDelimiter(decoder, '}'); err != nil {
+		return err
+	}
+	if !modelsFound {
+		result.Failed++
+	}
+	return nil
+}
+
+func streamLegacyModelsValue(
+	decoder *json.Decoder,
+	endpoint string,
+	endpointIndex int,
+	modelRanks map[string]int,
+	batcher *importBatcher,
+	result *ImportStreamResult,
+	nowMS int64,
+) (bool, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return false, err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok || delimiter != '{' {
+		return false, skipJSONValueFromToken(decoder, token)
+	}
+
+	for decoder.More() {
+		model, err := nextJSONObjectKey(decoder)
+		if err != nil {
+			return false, err
+		}
+		if err := streamLegacyModelValue(
+			decoder,
+			endpoint,
+			model,
+			endpointIndex,
+			modelRanks[model],
+			batcher,
+			result,
+			nowMS,
+		); err != nil {
+			return false, err
+		}
+	}
+	if err := consumeJSONDelimiter(decoder, '}'); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func streamLegacyModelValue(
+	decoder *json.Decoder,
+	endpoint string,
+	model string,
+	endpointIndex int,
+	modelIndex int,
+	batcher *importBatcher,
+	result *ImportStreamResult,
+	nowMS int64,
+) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok || delimiter != '{' {
+		result.Failed++
+		return skipJSONValueFromToken(decoder, token)
+	}
+
+	detailsFound := false
+	for decoder.More() {
+		key, err := nextJSONObjectKey(decoder)
+		if err != nil {
+			return err
+		}
+		if key == "details" && !detailsFound {
+			method, path := parseEndpoint(endpoint)
+			detailsFound, err = streamLegacyDetailsValue(
+				decoder,
+				endpoint,
+				method,
+				path,
+				model,
+				endpointIndex,
+				modelIndex,
+				batcher,
+				result,
+				nowMS,
+			)
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		if err := skipNextJSONValue(decoder); err != nil {
+			return err
+		}
+	}
+	if err := consumeJSONDelimiter(decoder, '}'); err != nil {
+		return err
+	}
+	if !detailsFound {
+		result.Unsupported++
+	}
+	return nil
+}
+
+func streamLegacyDetailsValue(
+	decoder *json.Decoder,
+	endpoint string,
+	method string,
+	path string,
+	model string,
+	endpointIndex int,
+	modelIndex int,
+	batcher *importBatcher,
+	result *ImportStreamResult,
+	nowMS int64,
+) (bool, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return false, err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok || delimiter != '[' {
+		return false, skipJSONValueFromToken(decoder, token)
+	}
+
+	detailIndex := 0
+	for decoder.More() {
+		var raw any
+		if err := decoder.Decode(&raw); err != nil {
+			return false, err
+		}
+		detail, ok := raw.(map[string]any)
+		if !ok {
+			result.Failed++
+			detailIndex++
+			continue
+		}
+		event, err := eventFromLegacyDetail(
+			endpoint,
+			method,
+			path,
+			model,
+			detail,
+			endpointIndex,
+			modelIndex,
+			detailIndex,
+			nowMS,
+		)
+		detailIndex++
+		if err != nil {
+			result.Failed++
+			continue
+		}
+		if err := batcher.add(event); err != nil {
+			return false, err
+		}
+	}
+	if err := consumeJSONDelimiter(decoder, ']'); err != nil {
+		return false, err
+	}
+	return detailIndex > 0, nil
+}
+
+func nextJSONObjectKey(decoder *json.Decoder) (string, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return "", err
+	}
+	key, ok := token.(string)
+	if !ok {
+		return "", errors.New("usage import object key is invalid")
+	}
+	return key, nil
+}
+
+func expectJSONDelimiter(decoder *json.Decoder, expected json.Delim) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok || delimiter != expected {
+		return ErrUnsupportedImportFormat
+	}
+	return nil
+}
+
+func consumeJSONDelimiter(decoder *json.Decoder, expected json.Delim) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok || delimiter != expected {
+		return errors.New("usage import JSON delimiter is invalid")
+	}
+	return nil
+}
+
+func skipNextJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	return skipJSONValueFromToken(decoder, token)
+}
+
+func skipJSONValueFromToken(decoder *json.Decoder, token json.Token) error {
+	delimiter, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		for decoder.More() {
+			if _, err := nextJSONObjectKey(decoder); err != nil {
+				return err
+			}
+			if err := skipNextJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		return consumeJSONDelimiter(decoder, '}')
+	case '[':
+		for decoder.More() {
+			if err := skipNextJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		return consumeJSONDelimiter(decoder, ']')
+	default:
+		return errors.New("usage import JSON delimiter is invalid")
+	}
 }
 
 func streamJSONArrayImport(reader io.Reader, batcher *importBatcher) (ImportStreamResult, error) {
