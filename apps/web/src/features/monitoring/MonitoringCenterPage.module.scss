@@ -636,6 +636,75 @@
   width: 100%;
 }
 
+.usageImportModalBody {
+  display: grid;
+  gap: 12px;
+}
+
+.usageImportFileName {
+  overflow: hidden;
+  color: var(--monitor-ink);
+  font-size: 14px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usageImportStatusRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--monitor-muted);
+  font-size: 13px;
+
+  strong {
+    color: var(--monitor-ink);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.usageImportProgressTrack {
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--monitor-line) 72%, transparent);
+
+  span {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, var(--monitor-accent), var(--monitor-cyan));
+    transition: width 0.18s ease;
+  }
+}
+
+.usageImportBytes,
+.usageImportHint {
+  color: var(--monitor-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.usageImportError {
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--monitor-red) 36%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--monitor-red) 8%, transparent);
+  color: var(--monitor-red);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.usageImportModalFooter {
+  display: inline-flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
+}
+
 .refreshControls {
   display: inline-flex;
   align-items: center;
