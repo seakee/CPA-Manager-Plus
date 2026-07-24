@@ -7,12 +7,10 @@ import { Input } from '@/components/ui/Input';
 import { SelectionCheckbox } from '@/components/ui/SelectionCheckbox';
 import { SecondaryScreenShell } from '@/components/common/SecondaryScreenShell';
 import { useEdgeSwipeBack } from '@/hooks/useEdgeSwipeBack';
-import { modelsApi } from '@/services/api';
 import type { ModelInfo } from '@/utils/models';
-import { normalizeAuthIndex } from '@/utils/authIndex';
-import { buildHeaderObject, hasHeader } from '@/utils/headers';
 import { buildOpenAIModelsEndpoint } from '@/components/providers/utils';
 import type { OpenAIEditOutletContext } from './AiProvidersOpenAIEditLayout';
+import { discoverOpenAIModels } from './openAIModelDiscovery';
 import styles from './AiProvidersPage.module.scss';
 import layoutStyles from './AiProvidersEditLayout.module.scss';
 
@@ -74,42 +72,25 @@ export function AiProvidersOpenAIModelsPage() {
   );
 
   const fetchOpenaiModelDiscovery = useCallback(
-    async ({ allowFallback = true }: { allowFallback?: boolean } = {}) => {
+    async () => {
       const trimmedBaseUrl = form.baseUrl.trim();
       if (!trimmedBaseUrl) return;
 
       setFetching(true);
       setError('');
       try {
-        const headerObject = buildHeaderObject(form.headers);
-        const firstEntry = form.apiKeyEntries.find(
-          (entry) => entry.apiKey?.trim() || normalizeAuthIndex(entry.authIndex)
-        );
-        const firstKey = firstEntry?.apiKey?.trim();
-        const authIndex = normalizeAuthIndex(firstEntry?.authIndex) ?? undefined;
-        const hasAuthHeader = hasHeader(headerObject, 'authorization');
-        const list = await modelsApi.fetchModelsViaApiCall(
-          trimmedBaseUrl,
-          hasAuthHeader ? undefined : firstKey,
-          headerObject,
-          authIndex
-        );
+        const list = await discoverOpenAIModels({
+          baseUrl: trimmedBaseUrl,
+          headers: form.headers,
+          apiKeyEntries: form.apiKeyEntries,
+          proxyRequiresSavedEntryMessage: t(
+            'ai_providers.openai_models_proxy_requires_saved_entry'
+          ),
+        });
         setModels(list);
       } catch (err: unknown) {
-        if (allowFallback) {
-          try {
-            const list = await modelsApi.fetchModelsViaApiCall(trimmedBaseUrl);
-            setModels(list);
-            return;
-          } catch (fallbackErr: unknown) {
-            const message = getErrorMessage(fallbackErr) || getErrorMessage(err);
-            setModels([]);
-            setError(`${t('ai_providers.openai_models_fetch_error')}: ${message}`);
-          }
-        } else {
-          setModels([]);
-          setError(`${t('ai_providers.openai_models_fetch_error')}: ${getErrorMessage(err)}`);
-        }
+        setModels([]);
+        setError(`${t('ai_providers.openai_models_fetch_error')}: ${getErrorMessage(err)}`);
       } finally {
         setFetching(false);
       }
@@ -243,7 +224,7 @@ export function AiProvidersOpenAIModelsPage() {
               <Button
                 variant="secondary"
                 size="sm"
-                onClick={() => void fetchOpenaiModelDiscovery({ allowFallback: true })}
+                onClick={() => void fetchOpenaiModelDiscovery()}
                 loading={fetching}
                 disabled={disableControls || saving}
               >

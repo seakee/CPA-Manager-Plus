@@ -655,6 +655,7 @@
     "openai_models_fetch_loading": "正在從 /models 取得模型清單...",
     "openai_models_fetch_empty": "未取得模型，請檢查位址、金鑰或請求標頭。",
     "openai_models_fetch_error": "取得模型失敗",
+    "openai_models_proxy_requires_saved_entry": "請先儲存渠道，再透過已設定的代理取得模型。",
     "openai_models_fetch_back": "返回編輯",
     "openai_models_fetch_apply": "新增已選模型",
     "openai_models_search_label": "搜尋模型",

@@ -655,6 +655,7 @@
     "openai_models_fetch_loading": "Получение моделей из /models...",
     "openai_models_fetch_empty": "Модели не вернулись. Проверьте адрес, ключ или заголовки.",
     "openai_models_fetch_error": "Не удалось получить модели",
+    "openai_models_proxy_requires_saved_entry": "Сохраните провайдера перед получением моделей через настроенный прокси.",
     "openai_models_fetch_back": "Вернуться к редактированию",
     "openai_models_fetch_apply": "Добавить выбранные модели",
     "openai_models_search_label": "Поиск моделей",
