@@ -258,29 +258,43 @@ func TestIsModelListPath(t *testing.T) {
 	}
 }
 
-func TestIsCPAPluginManagementPath(t *testing.T) {
+func TestIsCPAPluginManagementRequest(t *testing.T) {
 	tests := []struct {
-		path string
-		want bool
+		method string
+		path   string
+		want   bool
 	}{
-		{path: "/v0/management/codex-invite/accounts", want: true},
-		{path: "/v0/management/sample-plugin/custom/action", want: true},
-		{path: "/v0/management/accounts", want: false},
-		{path: "/v0/management/accounts/", want: false},
-		{path: "/v0/management/config", want: false},
-		{path: "/v0/management/reload", want: false},
-		{path: "/v0/management/plugins/demo/custom", want: false},
-		{path: "/v0/management/plugin-store/demo/install", want: false},
-		{path: "/v0/management/usage", want: false},
-		{path: "/v0/resource/plugins/codex-invite/invite", want: false},
-		{path: "/v0/management", want: false},
-		{path: "/v0/management/", want: false},
+		{method: http.MethodGet, path: "/v0/management/codex-invite/accounts", want: true},
+		{method: http.MethodPost, path: "/v0/management/sample-plugin/custom/action", want: true},
+		{method: http.MethodGet, path: "/v0/management/accounts", want: false},
+		{method: http.MethodGet, path: "/v0/management/accounts/", want: false},
+		{method: http.MethodGet, path: "/v0/management/config", want: false},
+		{method: http.MethodPost, path: "/v0/management/reload", want: false},
+		{method: http.MethodGet, path: "/v0/management/plugins", want: false},
+		{method: http.MethodPost, path: "/v0/management/plugins", want: true},
+		{method: http.MethodDelete, path: "/v0/management/plugins/demo", want: false},
+		{method: http.MethodGet, path: "/v0/management/plugins/demo", want: true},
+		{method: http.MethodPatch, path: "/v0/management/plugins/demo/enabled", want: false},
+		{method: http.MethodGet, path: "/v0/management/plugins/demo/enabled", want: true},
+		{method: http.MethodGet, path: "/v0/management/plugins/demo/config", want: false},
+		{method: http.MethodPut, path: "/v0/management/plugins/demo/config", want: false},
+		{method: http.MethodPatch, path: "/v0/management/plugins/demo/config", want: false},
+		{method: http.MethodPost, path: "/v0/management/plugins/demo/config", want: true},
+		{method: http.MethodGet, path: "/v0/management/plugins/codex-pat/status", want: true},
+		{method: http.MethodPost, path: "/v0/management/plugins/codex-pat/import", want: true},
+		{method: http.MethodPost, path: "/v0/management/plugins/codex-pat/revalidate", want: true},
+		{method: http.MethodPatch, path: "/v0/management/plugins/demo/custom", want: true},
+		{method: http.MethodPost, path: "/v0/management/plugin-store/demo/install", want: false},
+		{method: http.MethodGet, path: "/v0/management/usage", want: false},
+		{method: http.MethodGet, path: "/v0/resource/plugins/codex-invite/invite", want: false},
+		{method: http.MethodGet, path: "/v0/management", want: false},
+		{method: http.MethodGet, path: "/v0/management/", want: false},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.path, func(t *testing.T) {
-			if got := IsCPAPluginManagementPath(tt.path); got != tt.want {
-				t.Fatalf("IsCPAPluginManagementPath(%q) = %v, want %v", tt.path, got, tt.want)
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
+			if got := IsCPAPluginManagementRequest(tt.method, tt.path); got != tt.want {
+				t.Fatalf("IsCPAPluginManagementRequest(%q, %q) = %v, want %v", tt.method, tt.path, got, tt.want)
 			}
 		})
 	}

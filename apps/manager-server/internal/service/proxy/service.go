@@ -70,7 +70,7 @@ func (s *Service) ProxyManagement(w http.ResponseWriter, r *http.Request, writeE
 }
 
 func (s *Service) ProxyPluginManagement(w http.ResponseWriter, r *http.Request, writeError func(http.ResponseWriter, int, error)) {
-	if !IsCPAPluginManagementPath(r.URL.Path) {
+	if !IsCPAPluginManagementRequest(r.Method, r.URL.Path) {
 		writeError(w, http.StatusNotFound, errors.New("proxy path must be a CPA plugin management path"))
 		return
 	}
@@ -78,7 +78,7 @@ func (s *Service) ProxyPluginManagement(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *Service) ProxyPluginManagementWithCallerAuth(w http.ResponseWriter, r *http.Request, writeError func(http.ResponseWriter, int, error)) {
-	if !IsCPAPluginManagementPath(r.URL.Path) {
+	if !IsCPAPluginManagementRequest(r.Method, r.URL.Path) {
 		writeError(w, http.StatusNotFound, errors.New("proxy path must be a CPA plugin management path"))
 		return
 	}
@@ -520,18 +520,43 @@ func isStrictManagementPath(path string) bool {
 	return path == "/v0/management" || strings.HasPrefix(path, "/v0/management/")
 }
 
-func IsCPAPluginManagementPath(path string) bool {
+func IsCPAPluginManagementRequest(method string, path string) bool {
 	cleaned := strings.TrimRight(path, "/")
 	if !strings.HasPrefix(cleaned, cpaManagementPrefix+"/") {
 		return false
 	}
 	rest := strings.TrimPrefix(cleaned, cpaManagementPrefix+"/")
-	head, _, _ := strings.Cut(rest, "/")
+	head, tail, _ := strings.Cut(rest, "/")
 	if head == "" {
 		return false
 	}
+	if head == "plugins" {
+		return !isCPABuiltinPluginManagementRequest(method, tail)
+	}
 	_, reserved := cpaBuiltinManagementPathHeads[head]
 	return !reserved
+}
+
+func isCPABuiltinPluginManagementRequest(method string, path string) bool {
+	method = strings.ToUpper(strings.TrimSpace(method))
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) == 1 && parts[0] == "" {
+		return method == http.MethodGet
+	}
+	if len(parts) == 1 {
+		return method == http.MethodDelete
+	}
+	if len(parts) != 2 {
+		return false
+	}
+	switch parts[1] {
+	case "enabled":
+		return method == http.MethodPatch
+	case "config":
+		return method == http.MethodGet || method == http.MethodPut || method == http.MethodPatch
+	default:
+		return false
+	}
 }
 
 func IsCPAPluginResourcePath(path string) bool {

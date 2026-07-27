@@ -20,14 +20,14 @@ func (h *Handler) Management(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if ok {
-		if proxysvc.IsCPAPluginManagementPath(r.URL.Path) {
+		if proxysvc.IsCPAPluginManagementRequest(r.Method, r.URL.Path) {
 			h.App.ProxyService.ProxyPluginManagement(w, r, response.Error)
 			return
 		}
 		h.App.ProxyService.ProxyManagement(w, r, response.Error)
 		return
 	}
-	if !proxysvc.IsCPAPluginManagementPath(r.URL.Path) {
+	if !proxysvc.IsCPAPluginManagementRequest(r.Method, r.URL.Path) {
 		response.Error(w, http.StatusUnauthorized, errors.New("invalid admin key"))
 		return
 	}

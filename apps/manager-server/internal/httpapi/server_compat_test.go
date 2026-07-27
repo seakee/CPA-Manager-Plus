@@ -841,6 +841,37 @@ func TestServerCompatPluginProxyRoutes(t *testing.T) {
 		body:          `{"refresh":true}`,
 	})
 
+	pluginNestedManagementRR := requestWithHeaders(
+		http.MethodGet,
+		"/v0/management/plugins/codex-pat/status",
+		"",
+		"plugin-management-key",
+		nil,
+	)
+	testutil.RequireStatus(t, pluginNestedManagementRR, http.StatusOK)
+	assertObserved("/v0/management/plugins/codex-pat/status", observedRequest{
+		method:        http.MethodGet,
+		path:          "/v0/management/plugins/codex-pat/status",
+		authorization: "Bearer plugin-management-key",
+	})
+
+	pluginBuiltinConfigRR := requestWithHeaders(
+		http.MethodGet,
+		"/v0/management/plugins/codex-pat/config",
+		"",
+		"plugin-management-key",
+		nil,
+	)
+	testutil.RequireStatus(t, pluginBuiltinConfigRR, http.StatusUnauthorized)
+	if !strings.Contains(pluginBuiltinConfigRR.Body.String(), `"code":"invalid_admin_key"`) {
+		t.Fatalf("plugin config body = %s", pluginBuiltinConfigRR.Body.String())
+	}
+	select {
+	case got := <-observed:
+		t.Fatalf("CPA upstream received rejected built-in plugin request: %#v", got)
+	default:
+	}
+
 	pluginDynamicManagementRR := requestWithHeaders(
 		http.MethodGet,
 		"/v0/management/codex-invite/accounts",
