@@ -64,6 +64,9 @@ func TestUsageSnapshotFreezesHighWaterAndUsesStableEventIDs(t *testing.T) {
 		if event.EventHash == "after-high-water" {
 			t.Fatalf("snapshot included concurrent event: %#v", event)
 		}
+		if event.RecordDigest == "" {
+			t.Fatalf("event %d is missing record digest: %#v", index, event)
+		}
 	}
 	if events[0].TimestampMS != events[1].TimestampMS || events[0].Model != events[1].Model ||
 		events[0].Endpoint != events[1].Endpoint || events[0].EventID == events[1].EventID {
@@ -125,7 +128,7 @@ func TestUsageSnapshotPagesAllRowsBeyondLegacy50000Limit(t *testing.T) {
 		t.Fatalf("snapshot = %#v", snapshot)
 	}
 
-	hash := sha256.New()
+	digest := initialSnapshotDigest()
 	var delivered int64
 	var afterID int64
 	for {
@@ -134,7 +137,7 @@ func TestUsageSnapshotPagesAllRowsBeyondLegacy50000Limit(t *testing.T) {
 			t.Fatalf("read page after %d: %v", afterID, err)
 		}
 		for _, event := range page.Events {
-			_, _ = fmt.Fprintf(hash, "%d\x00%s\n", event.EventID, event.EventHash)
+			digest = extendSnapshotDigest(digest, event)
 			afterID = event.EventID
 			delivered++
 		}
@@ -145,7 +148,7 @@ func TestUsageSnapshotPagesAllRowsBeyondLegacy50000Limit(t *testing.T) {
 	if delivered != rowCount || afterID != rowCount {
 		t.Fatalf("delivered = %d, last id = %d", delivered, afterID)
 	}
-	if got := "sha256:" + hex.EncodeToString(hash.Sum(nil)); got != snapshot.Digest {
+	if got := "sha256:" + hex.EncodeToString(digest); got != snapshot.Digest {
 		t.Fatalf("digest = %q, want %q", got, snapshot.Digest)
 	}
 }
@@ -168,9 +171,21 @@ func snapshotTestEvent(hash string, timestampMS int64) usage.Event {
 }
 
 func snapshotDigest(events []SnapshotEvent) string {
-	hash := sha256.New()
+	digest := initialSnapshotDigest()
 	for _, event := range events {
-		_, _ = fmt.Fprintf(hash, "%d\x00%s\n", event.EventID, event.EventHash)
+		digest = extendSnapshotDigest(digest, event)
 	}
-	return "sha256:" + hex.EncodeToString(hash.Sum(nil))
+	return "sha256:" + hex.EncodeToString(digest)
+}
+
+func initialSnapshotDigest() []byte {
+	seed := sha256.Sum256([]byte("cpa-manager-plus:usage-snapshot:v1"))
+	return append([]byte(nil), seed[:]...)
+}
+
+func extendSnapshotDigest(previous []byte, event SnapshotEvent) []byte {
+	hash := sha256.New()
+	_, _ = hash.Write(previous)
+	_, _ = fmt.Fprintf(hash, "%d\x00%s\n", event.EventID, event.RecordDigest)
+	return hash.Sum(nil)
 }

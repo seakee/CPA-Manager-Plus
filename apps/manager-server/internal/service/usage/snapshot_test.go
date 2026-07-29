@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	usageparser "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
@@ -85,6 +86,51 @@ func TestSnapshotProtocolReplaysAndRejectsTamperedCrossSnapshotCursor(t *testing
 		Limit:      1,
 	})
 	requireSnapshotErrorCode(t, err, SnapshotErrorInvalidCursor)
+}
+
+func TestSnapshotProtocolFailsClosedWhenFrozenRowsChange(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	path := filepath.Join(t.TempDir(), "usage.sqlite")
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.InsertEvents(context.Background(), []usageparser.Event{
+		snapshotServiceEvent("event-a", 1),
+		snapshotServiceEvent("event-b", 2),
+	}); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	service := New(db, WithSnapshotProtocol(SnapshotProtocolConfig{
+		SigningKey: []byte("0123456789abcdef0123456789abcdef"),
+		TTL:        time.Hour,
+		Now:        func() time.Time { return now },
+	}))
+	first, err := service.ReadSnapshotPage(context.Background(), SnapshotPageRequest{Limit: 1})
+	if err != nil {
+		t.Fatalf("read first page: %v", err)
+	}
+
+	raw, err := sqliterepo.Open(path)
+	if err != nil {
+		t.Fatalf("open raw database: %v", err)
+	}
+	if _, err := raw.Exec(`update usage_events set model = 'mutated' where id = 2`); err != nil {
+		_ = raw.Close()
+		t.Fatalf("mutate frozen row: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw database: %v", err)
+	}
+
+	_, err = service.ReadSnapshotPage(context.Background(), SnapshotPageRequest{
+		SnapshotID: first.SnapshotID,
+		Cursor:     first.NextCursor,
+		Limit:      1,
+	})
+	requireSnapshotErrorCode(t, err, SnapshotErrorChanged)
 }
 
 func TestSnapshotProtocolExpiresSnapshotAndCursor(t *testing.T) {

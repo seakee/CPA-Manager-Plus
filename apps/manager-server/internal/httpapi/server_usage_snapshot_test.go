@@ -50,7 +50,7 @@ func TestServerUsageSnapshotProtocolRequiresAdminAndPreservesLegacyRoutes(t *tes
 	}
 	testutil.DecodeJSON(t, firstRR, &page)
 	if page.ProtocolVersion != 1 || page.SnapshotID == "" || page.MaxEventID != 2 || page.RowCount != 2 ||
-		page.Digest == "" || page.DigestAlgorithm != "sha256:event-id-event-hash:v1" || page.Complete ||
+		page.Digest == "" || page.DigestAlgorithm != "sha256-chain:event-id-record-digest:v1" || page.Complete ||
 		page.NextCursor == "" || len(page.Events) != 1 || page.Events[0].EventID == 0 ||
 		page.Events[0].RequestID != "request-a" || page.Events[0].EventHash != "same-shape-a" {
 		t.Fatalf("snapshot page = %#v", page)
