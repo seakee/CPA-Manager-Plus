@@ -1,6 +1,13 @@
-# Usage Analytics
+---
+title: CPA Usage And Cost Analytics
+description: Analyze requests, tokens, cache, cost, latency, and failures by model, account, API key, provider, project, and time range.
+---
+
+# CPA Usage And Cost Analytics
 
 Usage Analytics answers "where did the money go?" and "which requests caused the abnormal pattern?" It uses request-monitoring events and [Model Prices](./model-prices.md). It does not change provider billing.
+
+Open the [Usage Analytics Demo](https://seakee.github.io/CPA-Manager-Plus/#/demo/usage-analytics) to browse fictional Overview, trends, models, API keys, credentials, and heatmap data.
 
 ## Pick The Range First
 
@@ -34,6 +41,14 @@ Filters include model, API key, provider, status, auth file, latency, and cache 
 
 If the model name is an alias or internal name, add the matching entry in [Model Prices](./model-prices.md), or cost will be underestimated or empty.
 
+## Long Histories And Query Behavior
+
+- Each tab requests only the data it needs; stable filter selectors load separately from main analytics.
+- Strictly unfiltered long-range statistics can use incremental hourly rollups, while search, provider, account, latency, cache, and other complex filters continue to read raw events.
+- Credential timelines load only after a credential is selected.
+- When a rollup checkpoint is pending, a timezone cannot be represented losslessly, or a rollup read fails, the query falls back to raw events to preserve correctness.
+- Historical cost may be recalculated with current model prices.
+
 ## Accuracy Boundary
 
 - Provider bills are the source of truth.
@@ -41,4 +56,4 @@ If the model name is an alias or internal name, add the matching entry in [Model
 - If model names are rewritten by clients, providers, or route aliases, maintain the corresponding name in Model Prices.
 - Missing token fields can make cost incomplete.
 - Requests lost while Manager Server was stopped or queue data expired cannot be reconstructed.
-
+- Performance depends on data volume, filter complexity, disk, and SQLite state. See the [Performance Report](../operations/performance-optimization-2026-07-10.md) for diagnostic details.

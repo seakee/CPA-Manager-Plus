@@ -9,7 +9,12 @@ import {
   KIMI_CONFIG,
   XAI_CONFIG
 } from '@/components/quota';
-import { useNotificationStore, useQuotaStore } from '@/stores';
+import {
+  captureQuotaCacheGeneration,
+  commitIfQuotaCacheCurrent,
+  useNotificationStore,
+  useQuotaStore,
+} from '@/stores';
 import type { AuthFileItem } from '@/types';
 import { getStatusFromError } from '@/utils/quota';
 import {
@@ -86,6 +91,7 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
     if (file.disabled) return;
     if (quota?.status === 'loading') return;
     const previousQuota = quota;
+    const cacheGeneration = captureQuotaCacheGeneration();
 
     updateQuotaState((prev: Record<string, unknown>) => ({
       ...prev,
@@ -94,21 +100,25 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
 
     try {
       const data = await config.fetchQuota(file, t);
-      updateQuotaState((prev: Record<string, unknown>) => ({
-        ...prev,
-        [storeKey]: config.buildSuccessState(data, file)
-      }));
-      showNotification(t('auth_files.quota_refresh_success', { name: file.name }), 'success');
+      commitIfQuotaCacheCurrent(cacheGeneration, () => {
+        updateQuotaState((prev: Record<string, unknown>) => ({
+          ...prev,
+          [storeKey]: config.buildSuccessState(data, file)
+        }));
+        showNotification(t('auth_files.quota_refresh_success', { name: file.name }), 'success');
+      });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : t('common.unknown_error');
       const status = getStatusFromError(err);
-      updateQuotaState((prev: Record<string, unknown>) => ({
-        ...prev,
-        [storeKey]: config.buildFailureState
-          ? config.buildFailureState(message, status, file, previousQuota, Date.now())
-          : config.buildErrorState(message, status, file)
-      }));
-      showNotification(t('auth_files.quota_refresh_failed', { name: file.name, message }), 'error');
+      commitIfQuotaCacheCurrent(cacheGeneration, () => {
+        updateQuotaState((prev: Record<string, unknown>) => ({
+          ...prev,
+          [storeKey]: config.buildFailureState
+            ? config.buildFailureState(message, status, file, previousQuota, Date.now())
+            : config.buildErrorState(message, status, file)
+        }));
+        showNotification(t('auth_files.quota_refresh_failed', { name: file.name, message }), 'error');
+      });
     }
   }, [config, disableControls, file, quota, showNotification, storeKey, t, updateQuotaState]);
 

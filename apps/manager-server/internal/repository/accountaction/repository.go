@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ type Repository interface {
 	UpdateStatus(ctx context.Context, id int64, status string) (model.AccountActionCandidate, error)
 	UpdatePendingStatus(ctx context.Context, id int64, status string) (model.AccountActionCandidate, error)
 	RecordFailure(ctx context.Context, id int64, reason string) error
+	MarkAutoDisabled(ctx context.Context, id int64, disabledAtMS int64) error
 }
 
 type repository struct {
@@ -35,11 +37,15 @@ func (r *repository) Upsert(ctx context.Context, input model.AccountActionCandid
 		return model.AccountActionCandidate{}, errors.New("auth file name is required")
 	}
 	input.ActionType = normalizeActionType(input.ActionType)
-	input.Provider = strings.TrimSpace(input.Provider)
+	input.Provider = normalizeProvider(input.Provider)
 	input.AuthIndex = strings.TrimSpace(input.AuthIndex)
 	input.AccountSnapshot = strings.TrimSpace(input.AccountSnapshot)
+	if input.AccountSnapshot == input.AuthFileName {
+		input.AccountSnapshot = ""
+	}
 	input.AccountIDSnapshot = strings.TrimSpace(input.AccountIDSnapshot)
 	input.AuthLabel = strings.TrimSpace(input.AuthLabel)
+	input.ReasonCode = strings.TrimSpace(input.ReasonCode)
 	input.Reason = strings.TrimSpace(input.Reason)
 	input.EvidenceJSON = strings.TrimSpace(input.EvidenceJSON)
 
@@ -55,19 +61,46 @@ func (r *repository) Upsert(ctx context.Context, input model.AccountActionCandid
 	}
 	defer tx.Rollback()
 
-	var id int64
-	err = tx.QueryRowContext(ctx, `select id from account_action_candidates
+	authIndexIdentity, accountIDIdentity, providerIdentity, accountSnapshotIdentity := candidateIdentity(input)
+	id, found, err := querySingleCandidateID(ctx, tx, `select id from account_action_candidates
 		where status = ? and auth_file_name = ? and action_type = ?
-		and coalesce(auth_index, '') = ? and coalesce(account_id_snapshot, '') = ?
-		limit 1`, model.AccountActionStatusPending, input.AuthFileName, input.ActionType, input.AuthIndex, input.AccountIDSnapshot).Scan(&id)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		and coalesce(trim(reason_code), '') = ?
+		and coalesce(trim(auth_index), '') = ?
+		and case when coalesce(trim(auth_index), '') <> '' then '' else coalesce(trim(account_id_snapshot), '') end = ?
+		and case when coalesce(trim(auth_index), '') <> '' then ''
+			else case coalesce(lower(replace(trim(provider), '_', '-')), '')
+				when 'x-ai' then 'xai'
+				when 'grok' then 'xai'
+				else coalesce(lower(replace(trim(provider), '_', '-')), '')
+			end
+		end = ?
+		and case when coalesce(trim(auth_index), '') <> '' or coalesce(trim(account_id_snapshot), '') <> '' then ''
+			else coalesce(trim(account_snapshot), '')
+		end = ?
+		order by id asc limit 2`,
+		model.AccountActionStatusPending,
+		input.AuthFileName,
+		input.ActionType,
+		input.ReasonCode,
+		authIndexIdentity,
+		accountIDIdentity,
+		providerIdentity,
+		accountSnapshotIdentity,
+	)
+	if err != nil {
 		return model.AccountActionCandidate{}, err
 	}
-	if errors.Is(err, sql.ErrNoRows) {
+	if !found {
+		id, found, err = findUpgradeableCandidateID(ctx, tx, input)
+		if err != nil {
+			return model.AccountActionCandidate{}, err
+		}
+	}
+	if !found {
 		res, execErr := tx.ExecContext(ctx, `insert into account_action_candidates (
 			action_type, status, provider, auth_file_name, auth_index, account_snapshot, account_id_snapshot, auth_label,
-			reason, evidence_json, first_seen_at_ms, last_seen_at_ms, hit_count, created_at_ms, updated_at_ms
-		) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+			reason_code, reason, auto_disable_eligible, evidence_json, first_seen_at_ms, last_seen_at_ms, hit_count, created_at_ms, updated_at_ms
+		) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
 			input.ActionType,
 			model.AccountActionStatusPending,
 			nullString(input.Provider),
@@ -76,7 +109,9 @@ func (r *repository) Upsert(ctx context.Context, input model.AccountActionCandid
 			nullString(input.AccountSnapshot),
 			nullString(input.AccountIDSnapshot),
 			nullString(input.AuthLabel),
+			nullString(input.ReasonCode),
 			nullString(input.Reason),
+			boolInt(input.AutoDisableEligible),
 			nullString(input.EvidenceJSON),
 			seenAt,
 			seenAt,
@@ -92,16 +127,20 @@ func (r *repository) Upsert(ctx context.Context, input model.AccountActionCandid
 		}
 	} else {
 		_, err = tx.ExecContext(ctx, `update account_action_candidates set
-			provider = coalesce(nullif(?, ''), provider),
-			account_snapshot = coalesce(nullif(?, ''), account_snapshot),
+				provider = coalesce(nullif(?, ''), provider),
+				auth_index = coalesce(nullif(?, ''), auth_index),
+				account_snapshot = coalesce(nullif(?, ''), account_snapshot),
+				account_id_snapshot = coalesce(nullif(?, ''), account_id_snapshot),
 			auth_label = coalesce(nullif(?, ''), auth_label),
+			reason_code = coalesce(nullif(?, ''), reason_code),
 			reason = coalesce(nullif(?, ''), reason),
+			auto_disable_eligible = max(auto_disable_eligible, ?),
 			evidence_json = coalesce(nullif(?, ''), evidence_json),
 			last_error = null,
 			last_seen_at_ms = ?,
 			hit_count = hit_count + 1,
 			updated_at_ms = ?
-			where id = ?`, input.Provider, input.AccountSnapshot, input.AuthLabel, input.Reason, input.EvidenceJSON, seenAt, now, id)
+				where id = ?`, input.Provider, input.AuthIndex, input.AccountSnapshot, input.AccountIDSnapshot, input.AuthLabel, input.ReasonCode, input.Reason, boolInt(input.AutoDisableEligible), input.EvidenceJSON, seenAt, now, id)
 		if err != nil {
 			return model.AccountActionCandidate{}, err
 		}
@@ -114,6 +153,93 @@ func (r *repository) Upsert(ctx context.Context, input model.AccountActionCandid
 		return model.AccountActionCandidate{}, err
 	}
 	return item, nil
+}
+
+func candidateIdentity(input model.AccountActionCandidateUpsert) (authIndex string, accountID string, provider string, accountSnapshot string) {
+	authIndex = strings.TrimSpace(input.AuthIndex)
+	if authIndex != "" {
+		return authIndex, "", "", ""
+	}
+	accountID = strings.TrimSpace(input.AccountIDSnapshot)
+	if accountID != "" {
+		return "", accountID, normalizeProvider(input.Provider), ""
+	}
+	return "", "", normalizeProvider(input.Provider), strings.TrimSpace(input.AccountSnapshot)
+}
+
+func findUpgradeableCandidateID(ctx context.Context, tx *sql.Tx, input model.AccountActionCandidateUpsert) (int64, bool, error) {
+	provider := normalizeProvider(input.Provider)
+	accountSnapshot := strings.TrimSpace(input.AccountSnapshot)
+	baseArgs := []any{
+		model.AccountActionStatusPending,
+		input.AuthFileName,
+		input.ActionType,
+		input.ReasonCode,
+	}
+	if input.AuthIndex != "" && input.AccountIDSnapshot != "" && provider != "" {
+		id, found, err := querySingleCandidateID(ctx, tx, `select id from account_action_candidates
+			where status = ? and auth_file_name = ? and action_type = ? and coalesce(trim(reason_code), '') = ?
+				and coalesce(trim(auth_index), '') = '' and coalesce(trim(account_id_snapshot), '') = ?
+				and case coalesce(lower(replace(trim(provider), '_', '-')), '')
+					when 'x-ai' then 'xai'
+					when 'grok' then 'xai'
+					else coalesce(lower(replace(trim(provider), '_', '-')), '')
+				end = ?
+			order by id asc limit 2`, append(baseArgs, input.AccountIDSnapshot, provider)...)
+		if err != nil || found {
+			return id, found, err
+		}
+	}
+	if (input.AuthIndex == "" && input.AccountIDSnapshot == "") || provider == "" || accountSnapshot == "" {
+		return 0, false, nil
+	}
+	return querySingleCandidateID(ctx, tx, `select id from account_action_candidates
+		where status = ? and auth_file_name = ? and action_type = ? and coalesce(trim(reason_code), '') = ?
+			and coalesce(trim(auth_index), '') = '' and coalesce(trim(account_id_snapshot), '') = ''
+			and case coalesce(lower(replace(trim(provider), '_', '-')), '')
+				when 'x-ai' then 'xai'
+				when 'grok' then 'xai'
+				else coalesce(lower(replace(trim(provider), '_', '-')), '')
+			end = ?
+			and coalesce(trim(account_snapshot), '') = ?
+		order by id asc limit 2`, append(baseArgs, provider, accountSnapshot)...)
+}
+
+func querySingleCandidateID(ctx context.Context, tx *sql.Tx, query string, args ...any) (int64, bool, error) {
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return 0, false, err
+	}
+	defer rows.Close()
+	ids := make([]int64, 0, 2)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return 0, false, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, false, err
+	}
+	if len(ids) == 0 {
+		return 0, false, nil
+	}
+	if len(ids) > 1 {
+		return 0, false, fmt.Errorf("account action identity is ambiguous across candidates %v", ids)
+	}
+	return ids[0], true, nil
+}
+
+func normalizeProvider(value string) string {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	normalized = strings.ReplaceAll(normalized, "_", "-")
+	switch normalized {
+	case "x-ai", "grok":
+		return "xai"
+	default:
+		return normalized
+	}
 }
 
 func (r *repository) List(ctx context.Context, status string, limit int) ([]model.AccountActionCandidate, error) {
@@ -213,6 +339,27 @@ func (r *repository) RecordFailure(ctx context.Context, id int64, reason string)
 	return err
 }
 
+func (r *repository) MarkAutoDisabled(ctx context.Context, id int64, disabledAtMS int64) error {
+	if id <= 0 {
+		return errors.New("candidate id is required")
+	}
+	if disabledAtMS <= 0 {
+		disabledAtMS = time.Now().UnixMilli()
+	}
+	res, err := r.db.ExecContext(ctx, `update account_action_candidates set auto_disabled_at_ms = ?, last_error = null, updated_at_ms = ? where id = ? and status = ?`, disabledAtMS, disabledAtMS, id, model.AccountActionStatusPending)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 func (r *repository) mustGet(ctx context.Context, id int64) (model.AccountActionCandidate, error) {
 	item, ok, err := r.Get(ctx, id)
 	if err != nil {
@@ -229,7 +376,7 @@ type queryer interface {
 }
 
 const selectCandidates = `select id, action_type, status, provider, auth_file_name, auth_index, account_snapshot, account_id_snapshot, auth_label,
-	reason, evidence_json, last_error, first_seen_at_ms, last_seen_at_ms, hit_count, created_at_ms, updated_at_ms
+	reason_code, reason, auto_disable_eligible, auto_disabled_at_ms, evidence_json, last_error, first_seen_at_ms, last_seen_at_ms, hit_count, created_at_ms, updated_at_ms
 	from account_action_candidates`
 
 func getByID(ctx context.Context, q queryer, id int64) (model.AccountActionCandidate, error) {
@@ -242,7 +389,9 @@ type rowScanner interface {
 
 func scanCandidate(row rowScanner) (model.AccountActionCandidate, error) {
 	var item model.AccountActionCandidate
-	var provider, authIndex, accountSnapshot, accountIDSnapshot, authLabel, reason, evidenceJSON, lastError sql.NullString
+	var provider, authIndex, accountSnapshot, accountIDSnapshot, authLabel, reasonCode, reason, evidenceJSON, lastError sql.NullString
+	var autoDisableEligible int
+	var autoDisabledAtMS sql.NullInt64
 	if err := row.Scan(
 		&item.ID,
 		&item.ActionType,
@@ -253,7 +402,10 @@ func scanCandidate(row rowScanner) (model.AccountActionCandidate, error) {
 		&accountSnapshot,
 		&accountIDSnapshot,
 		&authLabel,
+		&reasonCode,
 		&reason,
+		&autoDisableEligible,
+		&autoDisabledAtMS,
 		&evidenceJSON,
 		&lastError,
 		&item.FirstSeenAtMS,
@@ -269,7 +421,12 @@ func scanCandidate(row rowScanner) (model.AccountActionCandidate, error) {
 	item.AccountSnapshot = accountSnapshot.String
 	item.AccountIDSnapshot = accountIDSnapshot.String
 	item.AuthLabel = authLabel.String
+	item.ReasonCode = reasonCode.String
 	item.Reason = reason.String
+	item.AutoDisableEligible = autoDisableEligible != 0
+	if autoDisabledAtMS.Valid {
+		item.AutoDisabledAtMS = autoDisabledAtMS.Int64
+	}
 	item.EvidenceJSON = evidenceJSON.String
 	item.LastError = lastError.String
 	if item.EvidenceJSON != "" {
@@ -310,4 +467,11 @@ func nullString(value string) any {
 		return nil
 	}
 	return strings.TrimSpace(value)
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }

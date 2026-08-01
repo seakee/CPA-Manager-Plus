@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
@@ -79,13 +80,20 @@ func newTestHandlerWithConfig(t *testing.T, cfg config.Config) http.Handler {
 	return New(cfg, db, manager).Handler()
 }
 
-func stubModelPriceSyncURLs(t *testing.T, liteLLMURL string, openRouterURL string) {
+func stubModelPriceSyncURLs(t *testing.T, liteLLMURL string, openRouterURL string, modelsDevURLs ...string) {
 	t.Helper()
+	oldModelsDevURL := modelsDevModelPriceSyncURL
 	oldLiteLLMURL := modelPriceSyncURL
 	oldOpenRouterURL := openRouterModelPriceSyncURL
+	modelsDevURL := ""
+	if len(modelsDevURLs) > 0 {
+		modelsDevURL = modelsDevURLs[0]
+	}
+	modelsDevModelPriceSyncURL = modelsDevURL
 	modelPriceSyncURL = liteLLMURL
 	openRouterModelPriceSyncURL = openRouterURL
 	t.Cleanup(func() {
+		modelsDevModelPriceSyncURL = oldModelsDevURL
 		modelPriceSyncURL = oldLiteLLMURL
 		openRouterModelPriceSyncURL = oldOpenRouterURL
 	})
@@ -735,6 +743,195 @@ func TestModelPricesSyncFromLiteLLMFormat(t *testing.T) {
 	}
 	if routerPrice.Source != "openrouter" || routerPrice.SourceModelID != "openrouter/gpt-router" {
 		t.Fatalf("openrouter source metadata = %#v", routerPrice)
+	}
+}
+
+func TestModelPricesSyncUsesModelsDevOfficialAndOrderedFallback(t *testing.T) {
+	modelsDevSource := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"models": {
+				"openai/gpt-test": {"id":"openai/gpt-test","name":"GPT Test"}
+			},
+			"providers": {
+				"openai": {"models": {
+					"gpt-test": {"cost":{"input":9,"output":10,"cache_read":1}},
+					"ambiguous": {"cost":{"input":3,"output":4}}
+				}},
+				"azure": {"models": {
+					"ambiguous": {"cost":{"input":5,"output":6}}
+				}},
+				"crossmodel": {"models": {
+					"openai/gpt-test": {"cost":{"input":11,"output":12}}
+				}}
+			}
+		}`))
+	}))
+	t.Cleanup(modelsDevSource.Close)
+	liteLLMSource := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"gpt-test": {"input_cost_per_token":0.000001,"output_cost_per_token":0.000002},
+			"ambiguous": {"input_cost_per_token":0.000007,"output_cost_per_token":0.000008},
+			"fallback-only": {"input_cost_per_token":0.000001,"output_cost_per_token":0.000002}
+		}`))
+	}))
+	t.Cleanup(liteLLMSource.Close)
+	stubModelPriceSyncURLs(t, liteLLMSource.URL, "", modelsDevSource.URL)
+
+	handler := newTestHandler(t, "http://example.test", true)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v0/management/model-prices/sync",
+		bytes.NewBufferString(`{"models":["gpt-test","openai/gpt-test","crossmodel/openai/gpt-test","ambiguous","openai/ambiguous","fallback-only"]}`),
+	)
+	req.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("sync status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var response struct {
+		Sources    []string `json:"sources"`
+		Imported   int      `json:"imported"`
+		Candidates []struct {
+			Model      string `json:"model"`
+			Candidates []struct {
+				SourceModelID string `json:"sourceModelId"`
+			} `json:"candidates"`
+		} `json:"candidates"`
+		Prices map[string]struct {
+			Prompt        float64 `json:"prompt"`
+			Completion    float64 `json:"completion"`
+			Source        string  `json:"source"`
+			SourceModelID string  `json:"sourceModelId"`
+		} `json:"prices"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(response.Sources) != 2 || response.Sources[0] != "models.dev" || response.Sources[1] != "litellm" {
+		t.Fatalf("source order = %#v", response.Sources)
+	}
+	if response.Imported != 6 || len(response.Candidates) != 0 {
+		t.Fatalf("sync selection = %#v", response)
+	}
+	price, ok := response.Prices["gpt-test"]
+	if !ok || !closeFloat(price.Prompt, 9) || !closeFloat(price.Completion, 10) || price.Source != "models.dev" || price.SourceModelID != "openai/gpt-test" {
+		t.Fatalf("models.dev alias price = %#v", price)
+	}
+	scoped, ok := response.Prices["openai/ambiguous"]
+	if !ok || !closeFloat(scoped.Prompt, 3) || scoped.SourceModelID != "openai/ambiguous" {
+		t.Fatalf("provider-scoped ambiguous price = %#v", scoped)
+	}
+	crossmodel, ok := response.Prices["crossmodel/openai/gpt-test"]
+	if !ok || !closeFloat(crossmodel.Prompt, 11) || crossmodel.SourceModelID != "crossmodel/openai/gpt-test" {
+		t.Fatalf("nested provider-scoped price = %#v", crossmodel)
+	}
+	officialScoped, ok := response.Prices["openai/gpt-test"]
+	if !ok || !closeFloat(officialScoped.Prompt, 9) || officialScoped.Source != "models.dev" || officialScoped.SourceModelID != "openai/gpt-test" {
+		t.Fatalf("official scoped price = %#v", officialScoped)
+	}
+	ambiguous, ok := response.Prices["ambiguous"]
+	if !ok || !closeFloat(ambiguous.Prompt, 7) || ambiguous.Source != "litellm" || ambiguous.SourceModelID != "ambiguous" {
+		t.Fatalf("ordered ambiguity fallback = %#v", ambiguous)
+	}
+	fallback, ok := response.Prices["fallback-only"]
+	if !ok || !closeFloat(fallback.Prompt, 1) || fallback.Source != "litellm" || fallback.SourceModelID != "fallback-only" {
+		t.Fatalf("fallback price = %#v", fallback)
+	}
+}
+
+func TestModelPricesSyncCachesModelsDevAndSkipsCoveredFallbacks(t *testing.T) {
+	const etag = `"catalog-v1"`
+	var modelsDevRequests atomic.Int32
+	modelsDevSource := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestNumber := modelsDevRequests.Add(1)
+		if requestNumber == 1 {
+			if received := r.Header.Get("If-None-Match"); received != "" {
+				http.Error(w, "unexpected conditional request", http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("ETag", etag)
+			_, _ = w.Write([]byte(`{
+				"models":{"openai/gpt-test":{"id":"openai/gpt-test"}},
+				"providers":{"openai":{"models":{"gpt-test":{"cost":{"input":9,"output":10}}}}}
+			}`))
+			return
+		}
+		if received := r.Header.Get("If-None-Match"); received != etag {
+			http.Error(w, "missing models.dev validator", http.StatusPreconditionFailed)
+			return
+		}
+		w.Header().Set("ETag", etag)
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	t.Cleanup(modelsDevSource.Close)
+
+	var liteLLMRequests atomic.Int32
+	liteLLMSource := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		liteLLMRequests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"gpt-test":{"input_cost_per_token":0.000001,"output_cost_per_token":0.000002}}`))
+	}))
+	t.Cleanup(liteLLMSource.Close)
+
+	var openRouterRequests atomic.Int32
+	openRouterSource := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		openRouterRequests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-test","pricing":{"prompt":"0.000001","completion":"0.000002"}}]}`))
+	}))
+	t.Cleanup(openRouterSource.Close)
+
+	stubModelPriceSyncURLs(t, liteLLMSource.URL, openRouterSource.URL, modelsDevSource.URL)
+	handler := newTestHandler(t, "http://example.test", true)
+	for attempt := 1; attempt <= 2; attempt++ {
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/v0/management/model-prices/sync",
+			bytes.NewBufferString(`{"models":["gpt-test"]}`),
+		)
+		req.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("sync attempt %d status = %d, body = %s", attempt, rr.Code, rr.Body.String())
+		}
+		var response struct {
+			Sources       []string `json:"sources"`
+			SourceResults []struct {
+				Source string `json:"source"`
+			} `json:"sourceResults"`
+			Prices map[string]struct {
+				Prompt        float64 `json:"prompt"`
+				Source        string  `json:"source"`
+				SourceModelID string  `json:"sourceModelId"`
+			} `json:"prices"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+			t.Fatalf("decode sync attempt %d: %v", attempt, err)
+		}
+		if len(response.Sources) != 1 || response.Sources[0] != "models.dev" ||
+			len(response.SourceResults) != 1 || response.SourceResults[0].Source != "models.dev" {
+			t.Fatalf("sync attempt %d sources = %#v, results = %#v", attempt, response.Sources, response.SourceResults)
+		}
+		price := response.Prices["gpt-test"]
+		if !closeFloat(price.Prompt, 9) || price.Source != "models.dev" || price.SourceModelID != "openai/gpt-test" {
+			t.Fatalf("sync attempt %d price = %#v", attempt, price)
+		}
+	}
+
+	if got := modelsDevRequests.Load(); got != 2 {
+		t.Fatalf("models.dev requests = %d", got)
+	}
+	if got := liteLLMRequests.Load(); got != 0 {
+		t.Fatalf("LiteLLM requests = %d", got)
+	}
+	if got := openRouterRequests.Load(); got != 0 {
+		t.Fatalf("OpenRouter requests = %d", got)
 	}
 }
 

@@ -3,20 +3,13 @@
  */
 
 import type { AuthFileItem } from '@/types';
-import {
-  normalizeStringValue,
-  normalizePlanType,
-  parseIdTokenPayload
-} from './parsers';
+import { normalizeStringValue, normalizePlanType, parseIdTokenPayload } from './parsers';
 
 const resolveAccountIdCandidate = (value: unknown): string | null => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
   return normalizeStringValue(
-    record.chatgpt_account_id ??
-      record.chatgptAccountId ??
-      record.account_id ??
-      record.accountId
+    record.chatgpt_account_id ?? record.chatgptAccountId ?? record.account_id ?? record.accountId
   );
 };
 
@@ -44,7 +37,7 @@ export function resolveCodexChatgptAccountId(file: AuthFileItem): string | null 
       ? (file.attributes as Record<string, unknown>)
       : null;
 
-  const candidates = [
+  const directCandidates = [
     file.chatgpt_account_id,
     file.chatgptAccountId,
     file.account_id,
@@ -57,12 +50,16 @@ export function resolveCodexChatgptAccountId(file: AuthFileItem): string | null 
     attributes?.chatgptAccountId,
     attributes?.account_id,
     attributes?.accountId,
-    file.id_token,
-    metadata?.id_token,
-    attributes?.id_token,
   ];
 
-  for (const candidate of candidates) {
+  for (const candidate of directCandidates) {
+    const id = normalizeStringValue(candidate) ?? resolveAccountIdCandidate(candidate);
+    if (id) return id;
+  }
+
+  const tokenCandidates = [file.id_token, metadata?.id_token, attributes?.id_token];
+
+  for (const candidate of tokenCandidates) {
     const id = extractCodexChatgptAccountId(candidate);
     if (id) return id;
   }
@@ -107,7 +104,7 @@ export function resolveCodexPlanType(file: AuthFileItem): string | null {
     metadataIdToken?.planType,
     attributes?.plan_type,
     attributes?.planType,
-    resolveIdTokenPlanCandidate(attributes?.id_token)
+    resolveIdTokenPlanCandidate(attributes?.id_token),
   ];
 
   for (const candidate of candidates) {

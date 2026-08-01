@@ -6,6 +6,7 @@ import {
   authFileMatchesCodexStatusFilter,
   buildAuthFileCodexInspectionMap,
   getAuthFileCodexInspectionKey,
+  getAuthFileCodexInspectionKeyForIdentity,
   getAuthFileCodexStatus,
   getAuthFileNameFromSelectionKey,
   getAuthFilePatchTarget,
@@ -13,6 +14,7 @@ import {
   getAuthFileSearchValues,
   getAuthFileSelectionKey,
   getFreshAuthFileCodexStatusSources,
+  getWholeAuthFileDeleteCandidates,
   hasPartialSharedAuthFileSelection,
   normalizeAuthFilesCodexStatusFilter,
   stringifySearchValue,
@@ -461,6 +463,83 @@ describe('auth file Codex status helpers', () => {
     expect(authFileMatchesCodexStatusFilter(status, 'weekly_limited')).toBe(false);
   });
 
+  it('shows provider-aware xAI inspection evidence without using Codex window filters', () => {
+    const file: AuthFileItem = { name: 'xai-main.json', type: 'xai', authIndex: 'xai-main' };
+    const quotaStatus = getAuthFileCodexStatus(file, undefined, {
+      fileName: file.name,
+      provider: 'xai',
+      authIndex: file.authIndex,
+      action: 'disable',
+      isQuota: true,
+      errorKind: 'free_quota_exhausted',
+    });
+    const reauthStatus = getAuthFileCodexStatus(file, undefined, {
+      fileName: file.name,
+      provider: 'xai',
+      authIndex: file.authIndex,
+      action: 'reauth',
+      isQuota: false,
+      errorKind: 'auth_invalid',
+    });
+    const partialStatus = getAuthFileCodexStatus(file, undefined, {
+      fileName: file.name,
+      provider: 'xai',
+      authIndex: file.authIndex,
+      action: 'keep',
+      isQuota: false,
+      errorKind: 'billing_partial',
+    });
+    const officialApiStatus = getAuthFileCodexStatus(file, undefined, {
+      fileName: file.name,
+      provider: 'xai',
+      authIndex: file.authIndex,
+      action: 'keep',
+      isQuota: false,
+      errorKind: 'official_api_healthy',
+    });
+    const legacyIdentityStatus = getAuthFileCodexStatus(file, undefined, {
+      fileName: file.name,
+      provider: 'xai',
+      authIndex: file.authIndex,
+      action: 'keep',
+      isQuota: false,
+      errorKind: 'identity_healthy',
+    });
+
+    expect(quotaStatus).toMatchObject({
+      isCodex: false,
+      isQuotaLimited: true,
+      isUnknownQuotaLimited: true,
+      isWeeklyLimited: false,
+      isMonthlyLimited: false,
+    });
+    expect(quotaStatus.badges.map((badge) => badge.kind)).toContain('observed_quota');
+    expect(reauthStatus.badges.map((badge) => badge.kind)).toContain('reauth');
+    expect(partialStatus.badges.map((badge) => badge.kind)).not.toContain('observed_error');
+    expect(officialApiStatus.badges.map((badge) => badge.kind)).not.toContain('observed_error');
+    expect(legacyIdentityStatus.badges.map((badge) => badge.kind)).not.toContain('observed_error');
+    expect(authFileMatchesCodexStatusFilter(quotaStatus, 'quota_limited')).toBe(false);
+  });
+
+  it('does not expose unknown xAI inspection classifications in auth file badges', () => {
+    const file: AuthFileItem = { name: 'xai-main.json', type: 'xai', authIndex: 'xai-main' };
+    const status = getAuthFileCodexStatus(file, undefined, {
+      fileName: file.name,
+      provider: 'xai',
+      authIndex: file.authIndex,
+      action: 'keep',
+      isQuota: false,
+      errorKind: 'future_xai_failure',
+    });
+
+    const badge = status.badges.find((item) => item.kind === 'observed_error');
+    expect(badge).toMatchObject({
+      titleKey: 'auth_files.provider_inspection_badge_error_title',
+      labelParams: { provider: 'xAI' },
+    });
+    expect(JSON.stringify(badge)).not.toContain('future_xai_failure');
+  });
+
   it('indexes inspection results by file name and auth index', () => {
     const inspection: AuthFileCodexInspectionSnapshot = {
       fileName: 'codex-main.json',
@@ -476,6 +555,45 @@ describe('auth file Codex status helpers', () => {
     expect(map.get(getAuthFileCodexInspectionKey('codex-main.json', 'codex-main'))).toBe(
       inspection
     );
+  });
+
+  it('keeps same-file inspection snapshots without auth indexes distinct', () => {
+    const first: AuthFileCodexInspectionSnapshot = {
+      fileName: 'shared-codex.json',
+      provider: 'codex',
+      accountId: 'account-1',
+      accountSnapshot: 'first@example.com',
+      action: 'reauth',
+    };
+    const second: AuthFileCodexInspectionSnapshot = {
+      fileName: 'shared-codex.json',
+      provider: 'codex',
+      accountSnapshot: 'second@example.com',
+      action: 'disable',
+    };
+
+    const map = buildAuthFileCodexInspectionMap([first, second]);
+
+    expect(map.size).toBe(2);
+    expect(map.get(getAuthFileCodexInspectionKeyForIdentity(first))).toBe(first);
+    expect(map.get(getAuthFileCodexInspectionKeyForIdentity(second))).toBe(second);
+  });
+
+  it('does not apply a provider-mismatched inspection snapshot to a row', () => {
+    const sources = getFreshAuthFileCodexStatusSources(
+      codexFile(),
+      undefined,
+      {
+        fileName: 'codex-main.json',
+        provider: 'xai',
+        authIndex: 'codex-main',
+        action: 'disable',
+        isQuota: true,
+      },
+      undefined
+    );
+
+    expect(sources.inspection).toBeUndefined();
   });
 
   it('suppresses older Codex inspection and header status sources after a same-row quota refresh', () => {
@@ -510,12 +628,7 @@ describe('auth file Codex status helpers', () => {
     };
 
     const sources = getFreshAuthFileCodexStatusSources(file, quota, inspection, headerSnapshot);
-    const status = getAuthFileCodexStatus(
-      file,
-      quota,
-      sources.inspection,
-      sources.headerSnapshot
-    );
+    const status = getAuthFileCodexStatus(file, quota, sources.inspection, sources.headerSnapshot);
 
     expect(sources.inspection).toBeUndefined();
     expect(sources.headerSnapshot).toBeUndefined();
@@ -547,12 +660,7 @@ describe('auth file Codex status helpers', () => {
     };
 
     const sources = getFreshAuthFileCodexStatusSources(file, quota, inspection, headerSnapshot);
-    const status = getAuthFileCodexStatus(
-      file,
-      quota,
-      sources.inspection,
-      sources.headerSnapshot
-    );
+    const status = getAuthFileCodexStatus(file, quota, sources.inspection, sources.headerSnapshot);
 
     expect(sources.inspection).toBe(inspection);
     expect(sources.headerSnapshot).toBe(headerSnapshot);
@@ -577,12 +685,7 @@ describe('auth file Codex status helpers', () => {
       header_trace_id: 'trace-new',
     };
 
-    const sources = getFreshAuthFileCodexStatusSources(
-      file,
-      undefined,
-      inspection,
-      headerSnapshot
-    );
+    const sources = getFreshAuthFileCodexStatusSources(file, undefined, inspection, headerSnapshot);
     const status = getAuthFileCodexStatus(
       file,
       undefined,
@@ -613,12 +716,7 @@ describe('auth file Codex status helpers', () => {
       header_error_code: 'invalid_api_key',
     };
 
-    const sources = getFreshAuthFileCodexStatusSources(
-      file,
-      undefined,
-      inspection,
-      headerSnapshot
-    );
+    const sources = getFreshAuthFileCodexStatusSources(file, undefined, inspection, headerSnapshot);
     const status = getAuthFileCodexStatus(
       file,
       undefined,
@@ -653,7 +751,12 @@ describe('auth file Codex status helpers', () => {
   });
 
   it('keeps active Codex quota scoped to the matching auth file row', () => {
-    const first = codexFile({ name: 'shared-codex.json', authIndex: 0 });
+    const first = codexFile({
+      id: 'runtime-shared-0',
+      name: 'shared-codex.json',
+      authIndex: 0,
+      account_id: 'account-shared-0',
+    });
     const second = codexFile({ name: 'shared-codex.json', authIndex: 1 });
     const quota = codexQuota({
       authFileKey: getAuthFileCodexInspectionKey(first.name, first.authIndex),
@@ -764,17 +867,83 @@ describe('auth file Codex plan helpers', () => {
   });
 
   it('keeps same-file auth rows distinct for selection and patch targets', () => {
-    const first = codexFile({ name: 'shared-codex.json', authIndex: 0 });
+    const first = codexFile({
+      id: 'runtime-shared-0',
+      name: 'shared-codex.json',
+      authIndex: 0,
+      account_id: 'account-shared-0',
+    });
     const second = codexFile({ name: 'shared-codex.json', authIndex: 1 });
     const firstKey = getAuthFileSelectionKey(first);
     const secondKey = getAuthFileSelectionKey(second);
 
     expect(firstKey).not.toBe(secondKey);
     expect(getAuthFileNameFromSelectionKey(firstKey)).toBe('shared-codex.json');
-    expect(getAuthFilePatchTarget(first)).toEqual({ name: 'shared-codex.json', authIndex: 0 });
-    expect(getAuthFilePatchTarget(codexFile({ authIndex: undefined }))).toEqual({
-      name: 'codex-main.json',
+    expect(getAuthFilePatchTarget(first)).toEqual({
+      name: 'shared-codex.json',
+      runtimeId: 'runtime-shared-0',
+      authIndex: 0,
+      provider: 'codex',
+      accountId: 'account-shared-0',
     });
+    expect(
+      getAuthFilePatchTarget(codexFile({ authIndex: undefined, account: 'codex-main@example.com' }))
+    ).toEqual({
+      name: 'codex-main.json',
+      provider: 'codex',
+      accountSnapshot: 'codex-main@example.com',
+    });
+    expect(
+      getAuthFilePatchTarget({
+        id: 'runtime-unknown',
+        name: 'unknown.json',
+        account: 'unknown@example.com',
+      } as AuthFileItem)
+    ).toEqual({
+      name: 'unknown.json',
+      runtimeId: 'runtime-unknown',
+      accountSnapshot: 'unknown@example.com',
+    });
+    expect(
+      getAuthFilePatchTarget({
+        id: 'runtime-xai',
+        name: 'xai.json',
+        type: '',
+        provider: 'xai',
+        account: 'xai@example.com',
+      } as AuthFileItem)
+    ).toEqual({
+      name: 'xai.json',
+      runtimeId: 'runtime-xai',
+      provider: 'xai',
+      accountSnapshot: 'xai@example.com',
+    });
+  });
+
+  it('keeps same-file rows without auth indexes distinct by stable account identity', () => {
+    const first = codexFile({
+      id: 'runtime-shared-0',
+      name: 'shared-codex.json',
+      authIndex: undefined,
+      account_id: 'account-shared-0',
+      account: 'first@example.com',
+    });
+    const renamed = codexFile({
+      ...first,
+      account: 'renamed@example.com',
+    });
+    const second = codexFile({
+      id: 'runtime-shared-1',
+      name: 'shared-codex.json',
+      authIndex: undefined,
+      account: 'second@example.com',
+    });
+
+    expect(getAuthFileSelectionKey(first)).toBe(getAuthFileSelectionKey(renamed));
+    expect(getAuthFileSelectionKey(first)).not.toBe(getAuthFileSelectionKey(second));
+    expect(getAuthFileNameFromSelectionKey(getAuthFileSelectionKey(second))).toBe(
+      'shared-codex.json'
+    );
   });
 
   it('detects partial selection for shared auth files', () => {
@@ -794,5 +963,26 @@ describe('auth file Codex plan helpers', () => {
     expect(
       hasPartialSharedAuthFileSelection([first, second, single], [getAuthFileSelectionKey(single)])
     ).toBe(false);
+  });
+
+  it('returns delete candidates only when every row in a shared auth file is eligible', () => {
+    const first = codexFile({ name: 'shared-codex.json', authIndex: 0 });
+    const second = codexFile({ name: 'shared-codex.json', authIndex: 1 });
+    const single = codexFile({ name: 'single-codex.json', authIndex: 'single' });
+
+    expect(getWholeAuthFileDeleteCandidates([first, second, single], [first, single])).toEqual([
+      single,
+    ]);
+    expect(
+      getWholeAuthFileDeleteCandidates([first, second, single], [first, second, single])
+    ).toEqual([first, single]);
+  });
+
+  it('does not collapse repeated rows that have no auth index', () => {
+    const first = codexFile({ name: 'legacy-shared.json', authIndex: undefined });
+    const second = codexFile({ name: 'legacy-shared.json', authIndex: undefined });
+
+    expect(getWholeAuthFileDeleteCandidates([first, second], [first])).toEqual([]);
+    expect(getWholeAuthFileDeleteCandidates([first, second], [first, second])).toEqual([first]);
   });
 });

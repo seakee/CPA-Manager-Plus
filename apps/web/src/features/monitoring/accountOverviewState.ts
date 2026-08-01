@@ -40,8 +40,6 @@ export const ACCOUNT_OVERVIEW_CARD_METRIC_KEYS = [
   'input-tokens',
   'output-tokens',
   'cached-tokens',
-  'cache-creation-tokens',
-  'cache-read-tokens',
 ] as const;
 const DEFAULT_ACCOUNT_OVERVIEW_CARD_PAGINATION = {
   page: 1,
@@ -210,6 +208,21 @@ const hasReadableAccountValue = (value: string | null | undefined) => {
 const firstReadableAccountValue = (...values: Array<string | null | undefined>) =>
   values.find(hasReadableAccountValue)?.trim() || '';
 
+const isRedundantAccountLabel = (
+  candidate: string | null | undefined,
+  primary: string | null | undefined
+) => {
+  const candidateValue = String(candidate || '').trim();
+  const primaryValue = String(primary || '').trim();
+  if (!candidateValue || !primaryValue) return false;
+  if (candidateValue === primaryValue) return true;
+  const lowerCandidate = candidateValue.toLowerCase();
+  const lowerPrimary = primaryValue.toLowerCase();
+  return (
+    lowerPrimary.startsWith(`${lowerCandidate} #`) || lowerCandidate.startsWith(`${lowerPrimary} #`)
+  );
+};
+
 export const resolveAccountDisplayText = (
   row: Pick<
     MonitoringAccountRow,
@@ -238,7 +251,12 @@ export const resolveAccountDisplayText = (
       ]
     : [maskedAccount, fullAccount];
   const secondary =
-    secondaryCandidates.find((value) => hasReadableAccountValue(value) && value !== primary) || '';
+    secondaryCandidates.find(
+      (value) =>
+        hasReadableAccountValue(value) &&
+        value !== primary &&
+        !isRedundantAccountLabel(value, primary)
+    ) || '';
   const titleParts = Array.from(
     new Set([primary, fullAccount, maskedAccount, secondary].filter(hasReadableAccountValue))
   );

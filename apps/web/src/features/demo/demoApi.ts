@@ -1,5 +1,6 @@
 import type { AxiosRequestConfig, AxiosResponse } from 'axios';
 import {
+  advanceDemoCredentialRefresh,
   getDemoApiCallResult,
   getDemoAuthFiles,
   getDemoConfigYaml,
@@ -9,12 +10,22 @@ import {
   getDemoPluginStore,
   getDemoPlugins,
   getDemoRawConfig,
+  requestDemoCredentialRefresh,
 } from '@/features/demo/demoFixtures';
 import { DEMO_API_BASE, DEMO_SERVER_VERSION, getDemoServerBuildDate } from './demoMode';
 
 type DemoMethod = 'get' | 'post' | 'put' | 'patch' | 'delete';
 
 const ok = { status: 'ok', success: true };
+const FORCE_REFRESH_TIMESTAMP = '2000-01-01T00:00:00Z';
+
+const isCredentialRefreshPatch = (data: unknown): data is Record<string, unknown> =>
+  Boolean(
+    data &&
+    typeof data === 'object' &&
+    (data as Record<string, unknown>).expired === FORCE_REFRESH_TIMESTAMP &&
+    (data as Record<string, unknown>).last_refresh === FORCE_REFRESH_TIMESTAMP
+  );
 
 const normalizeDemoUrl = (url: string, config?: AxiosRequestConfig) => {
   const parsed = new URL(url || '/', DEMO_API_BASE);
@@ -55,6 +66,7 @@ const providerEndpointKeys: Record<string, string> = {
   '/api-keys': 'api-keys',
   '/gemini-api-key': 'gemini-api-key',
   '/codex-api-key': 'codex-api-key',
+  '/xai-api-key': 'xai-api-key',
   '/claude-api-key': 'claude-api-key',
   '/vertex-api-key': 'vertex-api-key',
   '/openai-compatibility': 'openai-compatibility',
@@ -71,7 +83,8 @@ export async function handleDemoApiRequest<T = unknown>(
 
   if (pathname === '/config') return rawConfig as T;
   if (pathname === '/latest-version') return getDemoLatestVersion() as T;
-  if (pathname === '/config.yaml') return (typeof data === 'string' ? ok : getDemoConfigYaml()) as T;
+  if (pathname === '/config.yaml')
+    return (typeof data === 'string' ? ok : getDemoConfigYaml()) as T;
 
   const providerKey = providerEndpointKeys[pathname];
   if (providerKey) {
@@ -103,11 +116,21 @@ export async function handleDemoApiRequest<T = unknown>(
   }
 
   if (pathname === '/auth-files') {
-    if (method === 'get') return getDemoAuthFiles() as T;
+    if (method === 'get') {
+      advanceDemoCredentialRefresh();
+      return getDemoAuthFiles() as T;
+    }
     if (method === 'delete') return { deleted: params.get('all') === 'true' ? 8 : 1 } as T;
     return { ...ok, files: getDemoAuthFiles().files } as T;
   }
-  if (pathname === '/auth-files/status' || pathname === '/auth-files/fields') return ok as T;
+  if (pathname === '/auth-files/fields') {
+    if (method === 'patch' && isCredentialRefreshPatch(data)) {
+      const selector = typeof data.name === 'string' ? data.name : '';
+      requestDemoCredentialRefresh(selector);
+    }
+    return ok as T;
+  }
+  if (pathname === '/auth-files/status') return ok as T;
   if (pathname.startsWith('/auth-files/')) return ok as T;
 
   if (pathname === '/oauth-excluded-models') {
@@ -117,10 +140,16 @@ export async function handleDemoApiRequest<T = unknown>(
   if (pathname === '/oauth-model-alias') {
     if (method === 'get') {
       return {
-        items: [
-          { provider: 'codex', source: 'gpt-5-codex', target: 'gpt-4.1' },
-          { provider: 'claude', source: 'claude-sonnet-4-5', target: 'claude-sonnet-4-5' },
-        ],
+        'oauth-model-alias': {
+          codex: [
+            { name: 'gpt-5-codex', alias: 'team-codex', fork: true },
+            { name: 'gpt-5', alias: 'g5', fork: true },
+          ],
+          claude: [
+            { name: 'claude-sonnet-4-5-20250929', alias: 'claude-sonnet-4-5', fork: true },
+            { name: 'claude-opus-4-1-20250805', alias: 'claude-opus-4-1', fork: true },
+          ],
+        },
       } as T;
     }
     return ok as T;
@@ -143,10 +172,10 @@ export async function handleDemoApiRequest<T = unknown>(
   if (/^\/plugin-store\/[^/]+\/install$/.test(pathname)) {
     const requestedVersion =
       params.get('version') ||
-      ((data && typeof data === 'object' && 'version' in data
+      (data && typeof data === 'object' && 'version' in data
         ? String((data as { version?: unknown }).version ?? '')
         : ''
-      ).trim());
+      ).trim();
     return {
       status: 'installed',
       source_id: params.get('source') || 'official',

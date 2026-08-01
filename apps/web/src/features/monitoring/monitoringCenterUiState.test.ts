@@ -71,7 +71,7 @@ describe('monitoringCenterUiState', () => {
     expect(normalizeMonitoringStatusFilter('failed')).toBe('failed');
     expect(normalizeMonitoringStatusFilter('bad')).toBe('all');
     expect(normalizeMonitoringAutoRefreshMs(30000)).toBe('30000');
-    expect(normalizeMonitoringAutoRefreshMs('123')).toBe('5000');
+    expect(normalizeMonitoringAutoRefreshMs('123')).toBe('30000');
   });
 
   it('normalizes ui state from arbitrary input', () => {

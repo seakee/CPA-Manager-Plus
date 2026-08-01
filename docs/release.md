@@ -10,6 +10,40 @@ installed as a global cross-project skill.
 `docs/release-notes/` is reserved for versioned release note files only. Do not
 place process documentation or README files inside that directory.
 
+Formal release notes are technical release records. Community-facing release
+copy is authored separately so it can prioritize user value and readability
+without weakening the technical notes.
+
+## Release Branch Flow
+
+`main` is the stable default branch. `dev` is the integration branch. Every
+release follows this sequence:
+
+```text
+release/<version> -> dev -> main -> v<version> tag -> GitHub Release
+```
+
+1. Freeze the intended release scope on `dev`; do not merge unrelated work
+   until the tag is created.
+2. Create `release/<version>` from `dev`, add the two release-note files and
+   the Telegram post, then merge its release PR into `dev`.
+3. Record the resulting `dev` commit from that release PR as the release SHA.
+   Before promotion, confirm that `dev` still points to that exact SHA.
+4. Open a same-repository `dev -> main` promotion PR. It must pass the normal
+   PR checks and the `Verify dev promotion source` gate before merging.
+5. Reconfirm that the resulting `main` commit contains the recorded release
+   `dev` SHA, then create the tag from that exact `main` commit.
+
+Do not open a release PR directly to `main`: branch protection permits only
+the repository's `dev` branch to promote into `main`.
+
+`main` can contain a prior `dev -> main` merge commit that is not an ancestor
+of the current `dev` ref. This is normal. Before a new release, require that
+`main` has no non-merge commits absent from `dev`; investigate and stop if it
+does. The release scope is still invalid if `dev` advances after the release PR
+is merged: refresh the notes and repeat the release preflight rather than
+including unreviewed changes in the tag.
+
 ## Release Note Files
 
 ```text
@@ -28,6 +62,102 @@ Examples:
 docs/release-notes/v1.0.2-zh.md
 docs/release-notes/v1.0.2-en.md
 ```
+
+## Community Release Post
+
+Each new release must include a reviewed Telegram post:
+
+```text
+docs/release-posts/<tag>-telegram.html
+```
+
+Example:
+
+```text
+docs/release-posts/v1.0.2-telegram.html
+```
+
+The repo-local `/release` workflow drafts this file before confirmation and
+shows the exact message in the release plan. Commit it in the same release PR
+as the Chinese and English release notes. Do not generate or rewrite the post
+inside GitHub Actions.
+
+Write the post for users and community members rather than code reviewers:
+
+- use `## <M> 月 <D> 日 v<version>` as the Markdown heading, with `更新内容`,
+  `注意事项`, `发布截图`, and `致谢` sections as applicable; end the Markdown
+  summary and release closeout with the separate title
+  `CPA-Manager-Plus [<M>月<D>日：<primary benefit>，<supporting benefit>]`;
+- make the standalone title reflect the release's main user value, without
+  implementation trivia; it is not part of the date/version heading;
+- list every release-relevant, user-visible semantic change in `更新内容`; do
+  not impose a fixed item count, but merge implementation commits that result
+  in the same user behavior;
+- keep each bullet to one concise sentence with the product subject and its
+  user-visible result; retain necessary product terms but omit CRUD lists,
+  commit/file counts, internal paths, tests, demo fixtures, and pure CI noise;
+- include `注意事项` only for upgrade, data, compatibility, configuration, or
+  meaningful behavior changes that users need to act on or understand;
+- include `发布截图` only when a specific screen or workflow should be shown;
+- keep `发布截图` and the standalone community-summary title in the Markdown
+  release summary only; Telegram HTML must omit both because the workflow does
+  not attach media and the title is not part of the message format;
+- include acknowledgements only for external contributors and preserve their
+  GitHub profile links;
+- keep claims factual and grounded in the formal release notes;
+- keep the complete HTML body within 3,500 characters.
+
+Markdown community-summary template:
+
+```markdown
+## <M> 月 <D> 日 v<version>
+
+### 更新内容
+
+- <用户可感知的更新>
+
+### 注意事项
+
+- <需要升级、配置或兼容性关注的事项>
+
+### 发布截图
+
+<具体页面或操作路径；没有推荐时省略本节>
+
+### 致谢
+
+- [@contributor](https://github.com/contributor) - <贡献带来的用户价值>
+
+CPA-Manager-Plus [<M>月<D>日：<primary benefit>，<supporting benefit>]
+```
+
+Omit optional sections that have no content. The Telegram HTML mirrors only
+the applicable `更新内容`, `注意事项`, and `致谢` sections; do not append the
+standalone Markdown community-summary title.
+
+Telegram posts use a conservative HTML subset supported by the Bot API:
+
+```text
+<b> <i> <code> <a href="https://example.com">...</a>
+```
+
+Escape other HTML characters. Do not include inline keyboard JSON, bot tokens,
+chat IDs, thread IDs, or any other secret in the post file. The release
+workflow adds one `View Release` button at send time.
+
+After both release jobs succeed, `.github/workflows/release.yml` reads the
+tag-matched post and sends it through Telegram Bot API `sendMessage`. Configure
+these repository secrets:
+
+```text
+TELEGRAM_BOT_TOKEN
+TELEGRAM_CHAT_ID
+TELEGRAM_MESSAGE_THREAD_ID  # optional, for a forum topic
+```
+
+Missing configuration or a missing post file skips the notification with an
+Actions warning. Telegram delivery failure must not roll back or invalidate an
+otherwise successful GitHub Release.
 
 ## CI Lookup
 
@@ -68,9 +198,11 @@ curated note body outside that directory.
 ## Highlights
 
 ### Features
+
 - <User-facing capability description> (`<scope>`)
 
 ### Fixes
+
 - <What was fixed and the affected scope>
 
 <Keep only non-empty groups as needed: Performance / Refactor / Docs / Chore / CI / Build. Drop merge commits and noise.>
@@ -92,13 +224,13 @@ curated note body outside that directory.
 
 ## Commit Type Groups
 
-| Type | Group |
-|------|-------|
-| feat | Features |
-| fix | Fixes |
-| perf | Performance |
-| refactor | Refactor |
-| docs | Docs |
-| chore | Chore |
-| ci | CI |
-| build | Build |
+| Type     | Group       |
+| -------- | ----------- |
+| feat     | Features    |
+| fix      | Fixes       |
+| perf     | Performance |
+| refactor | Refactor    |
+| docs     | Docs        |
+| chore    | Chore       |
+| ci       | CI          |
+| build    | Build       |

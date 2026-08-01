@@ -40,18 +40,20 @@ interface CodexEditDrawerProps {
   disabled: boolean;
   onClose: () => void;
   onSaved: () => void;
+  providerKind?: 'codex' | 'xai';
 }
 
 type CodexFormBaseline = ReturnType<typeof buildCodexBaseline>;
 type TestStatus = 'idle' | 'loading' | 'success' | 'error';
 
 const CODEX_TEST_TIMEOUT_MS = 20_000;
+const XAI_API_BASE_URL = 'https://api.x.ai/v1';
 
-const buildEmptyForm = (): ProviderFormState => ({
+const buildEmptyForm = (baseUrl = ''): ProviderFormState => ({
   apiKey: '',
   priority: undefined,
   prefix: '',
-  baseUrl: '',
+  baseUrl,
   websockets: false,
   proxyUrl: '',
   headers: [],
@@ -61,13 +63,13 @@ const buildEmptyForm = (): ProviderFormState => ({
   excludedText: '',
 });
 
-const normalizeModelEntries = (entries: Array<{ name: string; alias: string }>) =>
-  (entries ?? []).reduce<Array<{ name: string; alias: string }>>((acc, entry) => {
+const normalizeModelEntries = (entries: ProviderFormState['modelEntries']) =>
+  (entries ?? []).reduce<ProviderFormState['modelEntries']>((acc, entry) => {
     const name = String(entry?.name ?? '').trim();
     let alias = String(entry?.alias ?? '').trim();
     if (name && alias === name) alias = '';
     if (!name && !alias) return acc;
-    acc.push({ name, alias });
+    acc.push({ ...entry, name, alias });
     return acc;
   }, []);
 
@@ -100,19 +102,25 @@ export function CodexEditDrawer({
   disabled,
   onClose,
   onSaved,
+  providerKind = 'codex',
 }: CodexEditDrawerProps) {
   const { t } = useTranslation();
   const { showNotification } = useNotificationStore();
   const fetchConfig = useConfigStore((state) => state.fetchConfig);
   const updateConfigValue = useConfigStore((state) => state.updateConfigValue);
   const clearCache = useConfigStore((state) => state.clearCache);
+  const isXAI = providerKind === 'xai';
+  const providerSection = isXAI ? 'xai-api-key' : 'codex-api-key';
+  const defaultBaseUrl = isXAI ? XAI_API_BASE_URL : '';
 
   const [configs, setConfigs] = useState<ProviderKeyConfig[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
-  const [form, setForm] = useState<ProviderFormState>(buildEmptyForm);
-  const [baseline, setBaseline] = useState<CodexFormBaseline>(buildCodexBaseline(buildEmptyForm()));
+  const [form, setForm] = useState<ProviderFormState>(() => buildEmptyForm(defaultBaseUrl));
+  const [baseline, setBaseline] = useState<CodexFormBaseline>(() =>
+    buildCodexBaseline(buildEmptyForm(defaultBaseUrl))
+  );
   const [loaded, setLoaded] = useState(false);
 
   const [modelDiscoveryOpen, setModelDiscoveryOpen] = useState(false);
@@ -130,22 +138,25 @@ export function CodexEditDrawer({
     if (editIndex === null) return undefined;
     return configs[editIndex];
   }, [configs, editIndex]);
-  const invalidIndex = editIndex !== null && !initialData;
+  const invalidIndex = loaded && editIndex !== null && !initialData;
 
   const title =
     editIndex !== null
-      ? t('ai_providers.codex_edit_modal_title')
-      : t('ai_providers.codex_add_modal_title');
+      ? t(isXAI ? 'ai_providers.xai_edit_modal_title' : 'ai_providers.codex_edit_modal_title')
+      : t(isXAI ? 'ai_providers.xai_add_modal_title' : 'ai_providers.codex_add_modal_title');
 
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
+    setLoaded(false);
+    setConfigs([]);
     setLoading(true);
     setError('');
-    fetchConfig('codex-api-key')
+    fetchConfig(providerSection)
       .then((value) => {
         if (cancelled) return;
         setConfigs(Array.isArray(value) ? (value as ProviderKeyConfig[]) : []);
+        setLoaded(true);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -154,12 +165,18 @@ export function CodexEditDrawer({
       .finally(() => {
         if (cancelled) return;
         setLoading(false);
-        setLoaded(true);
       });
     return () => {
       cancelled = true;
     };
-  }, [open, fetchConfig, t]);
+  }, [open, fetchConfig, providerSection, t]);
+
+  useEffect(() => {
+    if (open) return;
+    setLoaded(false);
+    setConfigs([]);
+    setError('');
+  }, [open]);
 
   useEffect(() => {
     if (!open || !loaded) return;
@@ -176,16 +193,17 @@ export function CodexEditDrawer({
       const available = nextForm.modelEntries.map((entry) => entry.name.trim()).filter(Boolean);
       setTestModel(available[0] || '');
     } else {
-      const nextForm = buildEmptyForm();
+      const nextForm = buildEmptyForm(defaultBaseUrl);
       setForm(nextForm);
       setBaseline(buildCodexBaseline(nextForm));
       setTestModel('');
     }
     setTestStatus('idle');
     setTestMessage('');
-  }, [open, loaded, initialData]);
+  }, [defaultBaseUrl, open, loaded, initialData]);
 
-  const canSave = !disabled && !saving && !loading && !invalidIndex && !isTesting;
+  const canSave =
+    loaded && !error && !disabled && !saving && !loading && !invalidIndex && !isTesting;
 
   const isDirty = useMemo(() => {
     const normalizedPriority =
@@ -220,11 +238,7 @@ export function CodexEditDrawer({
 
   const configuredModelNames = useMemo(
     () =>
-      new Set(
-        form.modelEntries
-          .map((entry) => entry.name.trim().toLowerCase())
-          .filter(Boolean)
-      ),
+      new Set(form.modelEntries.map((entry) => entry.name.trim().toLowerCase()).filter(Boolean)),
     [form.modelEntries]
   );
 
@@ -378,7 +392,9 @@ export function CodexEditDrawer({
     const hasAuthorization = hasHeader(customHeaders, 'authorization');
 
     if (!apiKey && !hasAuthorization && !keyAuthIndex) {
-      const message = t('ai_providers.codex_test_key_required');
+      const message = t(
+        isXAI ? 'ai_providers.xai_test_key_required' : 'ai_providers.codex_test_key_required'
+      );
       setTestStatus('error');
       setTestMessage(message);
       showNotification(message, 'error');
@@ -395,7 +411,7 @@ export function CodexEditDrawer({
 
     setIsTesting(true);
     setTestStatus('loading');
-    setTestMessage(t('ai_providers.codex_test_running'));
+    setTestMessage(t(isXAI ? 'ai_providers.xai_test_running' : 'ai_providers.codex_test_running'));
 
     try {
       const result = await apiCallApi.request(
@@ -417,15 +433,20 @@ export function CodexEditDrawer({
         throw new Error(getApiCallErrorMessage(result));
       }
 
-      const message = t('ai_providers.codex_test_success');
+      const message = t(
+        isXAI ? 'ai_providers.xai_test_success' : 'ai_providers.codex_test_success'
+      );
       setTestStatus('success');
       setTestMessage(message);
       showNotification(message, 'success');
     } catch (err: unknown) {
-      const message = getErrorMessage(err) || t('ai_providers.codex_test_failed');
+      const failureText = t(
+        isXAI ? 'ai_providers.xai_test_failed' : 'ai_providers.codex_test_failed'
+      );
+      const message = getErrorMessage(err) || failureText;
       setTestStatus('error');
       setTestMessage(message);
-      showNotification(`${t('ai_providers.codex_test_failed')}: ${message}`, 'error');
+      showNotification(`${failureText}: ${message}`, 'error');
     } finally {
       setIsTesting(false);
     }
@@ -435,6 +456,7 @@ export function CodexEditDrawer({
     form.authIndex,
     form.baseUrl,
     form.headers,
+    isXAI,
     isTesting,
     showNotification,
     t,
@@ -446,14 +468,17 @@ export function CodexEditDrawer({
     const apiKey = form.apiKey.trim();
     if (!apiKey && !normalizeAuthIndex(form.authIndex)) {
       showNotification(
-        t('ai_providers.codex_key_required', { defaultValue: 'Please enter a Codex API Key' }),
+        t(isXAI ? 'ai_providers.xai_key_required' : 'ai_providers.codex_key_required'),
         'error'
       );
       return;
     }
     const trimmedBaseUrl = (form.baseUrl ?? '').trim();
     if (!trimmedBaseUrl) {
-      showNotification(t('notification.codex_base_url_required'), 'error');
+      showNotification(
+        t(isXAI ? 'notification.xai_base_url_required' : 'notification.codex_base_url_required'),
+        'error'
+      );
       return;
     }
     setSaving(true);
@@ -473,17 +498,32 @@ export function CodexEditDrawer({
         disableCooling: form.disableCooling,
         experimentalCchSigning: form.experimentalCchSigning,
       };
-      const nextList =
+      if (editIndex !== null) {
+        if (isXAI) {
+          await providersApi.updateXAIConfig(configs[editIndex], payload);
+        } else {
+          await providersApi.updateCodexConfig(configs[editIndex], payload);
+        }
+      } else {
+        if (isXAI) {
+          await providersApi.createXAIConfig(payload);
+        } else {
+          await providersApi.createCodexConfig(payload);
+        }
+      }
+      const syncedList = await (
+        isXAI ? providersApi.getXAIConfigs() : providersApi.getCodexConfigs()
+      ).catch(() =>
         editIndex !== null
-          ? configs.map((item, idx) => (idx === editIndex ? payload : item))
-          : [...configs, payload];
-      await providersApi.saveCodexConfigs(nextList);
-      updateConfigValue('codex-api-key', nextList);
-      clearCache('codex-api-key');
+          ? configs.map((item, index) => (index === editIndex ? payload : item))
+          : [...configs, payload]
+      );
+      updateConfigValue(providerSection, syncedList);
+      clearCache(providerSection);
       showNotification(
         editIndex !== null
-          ? t('notification.codex_config_updated')
-          : t('notification.codex_config_added'),
+          ? t(isXAI ? 'notification.xai_config_updated' : 'notification.codex_config_updated')
+          : t(isXAI ? 'notification.xai_config_added' : 'notification.codex_config_added'),
         'success'
       );
       onSaved();
@@ -500,8 +540,10 @@ export function CodexEditDrawer({
     configs,
     editIndex,
     form,
+    isXAI,
     onClose,
     onSaved,
+    providerSection,
     showNotification,
     t,
     updateConfigValue,
@@ -524,7 +566,9 @@ export function CodexEditDrawer({
   }, [modelDiscoveryOpen, fetchModelDiscovery]);
 
   useEffect(() => {
-    const availableNames = new Set(discoveredModels.map((model) => String(model.name ?? '').trim()));
+    const availableNames = new Set(
+      discoveredModels.map((model) => String(model.name ?? '').trim())
+    );
     setModelDiscoverySelected((prev) => {
       let changed = false;
       const next = new Set<string>();
@@ -586,7 +630,7 @@ export function CodexEditDrawer({
         {error && <div className="error-box">{error}</div>}
         {loading && <div className={styles.sectionHint}>{t('common.loading')}</div>}
         {invalidIndex && <div className="hint">{t('common.invalid_provider_index')}</div>}
-        {!loading && !invalidIndex && (
+        {!loading && loaded && !invalidIndex && (
           <>
             <Input
               label={t('ai_providers.codex_add_modal_key_label')}
@@ -686,13 +730,17 @@ export function CodexEditDrawer({
                 removeButtonClassName={styles.modelRowRemoveButton}
                 removeButtonTitle={t('common.delete')}
                 removeButtonAriaLabel={t('common.delete')}
+                showForceMapping
+                forceMappingLabel={t('ai_providers.force_mapping_label')}
               />
               <div className={styles.modelTestPanel}>
                 <div className={styles.modelTestMeta}>
                   <label className={styles.modelTestLabel}>
                     {t('ai_providers.codex_test_title')}
                   </label>
-                  <span className={styles.modelTestHint}>{t('ai_providers.codex_test_hint')}</span>
+                  <span className={styles.modelTestHint}>
+                    {t(isXAI ? 'ai_providers.xai_test_hint' : 'ai_providers.codex_test_hint')}
+                  </span>
                 </div>
                 <div className={styles.modelTestControls}>
                   <Select

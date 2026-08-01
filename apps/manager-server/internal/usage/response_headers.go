@@ -3,6 +3,7 @@ package usage
 import (
 	"encoding/json"
 	"math"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -10,12 +11,15 @@ import (
 )
 
 type ResponseHeaderMetadata struct {
-	Quota     *HeaderQuotaMetadata    `json:"quota,omitempty"`
-	Errors    *HeaderErrorMetadata    `json:"errors,omitempty"`
-	Trace     *HeaderTraceMetadata    `json:"trace,omitempty"`
-	Routing   *HeaderRoutingMetadata  `json:"routing,omitempty"`
-	Response  *HeaderResponseMetadata `json:"response,omitempty"`
-	Providers *HeaderProviderMetadata `json:"providers,omitempty"`
+	Quota         *HeaderQuotaMetadata      `json:"quota,omitempty"`
+	Errors        *HeaderErrorMetadata      `json:"errors,omitempty"`
+	Trace         *HeaderTraceMetadata      `json:"trace,omitempty"`
+	Routing       *HeaderRoutingMetadata    `json:"routing,omitempty"`
+	Response      *HeaderResponseMetadata   `json:"response,omitempty"`
+	Providers     *HeaderProviderMetadata   `json:"providers,omitempty"`
+	RateLimit     *HeaderRateLimitMetadata  `json:"rate_limit,omitempty"`
+	DataPolicy    *HeaderDataPolicyMetadata `json:"data_policy,omitempty"`
+	ProviderUsage *ProviderUsageMetadata    `json:"provider_usage,omitempty"`
 }
 
 type HeaderQuotaMetadata struct {
@@ -49,6 +53,7 @@ type HeaderErrorMetadata struct {
 	AuthorizationError    string   `json:"authorization_error,omitempty"`
 	IDEErrorCode          string   `json:"ide_error_code,omitempty"`
 	IDERootErrorCode      string   `json:"ide_root_error_code,omitempty"`
+	ShouldRetry           *bool    `json:"should_retry,omitempty"`
 	RetryAfterSeconds     *float64 `json:"retry_after_seconds,omitempty"`
 	RetryAfterRecoverAtMS int64    `json:"retry_after_recover_at_ms,omitempty"`
 	RateLimitBypass       string   `json:"rate_limit_bypass,omitempty"`
@@ -64,6 +69,7 @@ type HeaderTraceMetadata struct {
 	CloudAICompanionTraceID string `json:"cloud_ai_companion_trace_id,omitempty"`
 	ClientRequestID         string `json:"client_request_id,omitempty"`
 	ZeaburRequestID         string `json:"zeabur_request_id,omitempty"`
+	Traceparent             string `json:"traceparent,omitempty"`
 }
 
 type HeaderRoutingMetadata struct {
@@ -94,6 +100,21 @@ type HeaderProviderMetadata struct {
 	CloudflareCacheStatus   string `json:"cloudflare_cache_status,omitempty"`
 }
 
+type HeaderRateLimitBucket struct {
+	Limit     *int64 `json:"limit,omitempty"`
+	Remaining *int64 `json:"remaining,omitempty"`
+}
+
+type HeaderRateLimitMetadata struct {
+	Requests *HeaderRateLimitBucket `json:"requests,omitempty"`
+	Tokens   *HeaderRateLimitBucket `json:"tokens,omitempty"`
+}
+
+type HeaderDataPolicyMetadata struct {
+	RetentionMode string `json:"retention_mode,omitempty"`
+	ZeroRetention *bool  `json:"zero_retention,omitempty"`
+}
+
 type ResponseHeaderDerived struct {
 	MetadataJSON     string
 	QuotaRecoverAtMS int64
@@ -106,6 +127,8 @@ type ResponseHeaderDerived struct {
 
 const maxResponseHeaderMetadataValueBytes = 1024
 
+var traceparentPattern = regexp.MustCompile(`^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$`)
+
 func ParseResponseHeaderMetadata(raw any, base time.Time) *ResponseHeaderMetadata {
 	headers := normalizeResponseHeaders(raw)
 	if len(headers) == 0 {
@@ -113,12 +136,14 @@ func ParseResponseHeaderMetadata(raw any, base time.Time) *ResponseHeaderMetadat
 	}
 
 	metadata := &ResponseHeaderMetadata{
-		Quota:     parseQuotaHeaders(headers, base),
-		Errors:    parseErrorHeaders(headers, base),
-		Trace:     parseTraceHeaders(headers),
-		Routing:   parseRoutingHeaders(headers),
-		Response:  parseResponseShapeHeaders(headers),
-		Providers: parseProviderHeaders(headers),
+		Quota:      parseQuotaHeaders(headers, base),
+		Errors:     parseErrorHeaders(headers, base),
+		Trace:      parseTraceHeaders(headers),
+		Routing:    parseRoutingHeaders(headers),
+		Response:   parseResponseShapeHeaders(headers),
+		Providers:  parseProviderHeaders(headers),
+		RateLimit:  parseRateLimitHeaders(headers),
+		DataPolicy: parseDataPolicyHeaders(headers),
 	}
 	if metadata.isEmpty() {
 		return nil
@@ -135,22 +160,43 @@ func ParseResponseHeaderMetadataFromRawJSON(rawJSON string, base time.Time) *Res
 	if err := json.Unmarshal([]byte(trimmed), &record); err != nil {
 		return nil
 	}
-	return ParseResponseHeaderMetadata(first(record, "response_headers", "responseHeaders", "headers"), base)
+	metadata := ParseResponseHeaderMetadata(first(record, "response_headers", "responseHeaders", "headers"), base)
+	return attachProviderUsageMetadata(metadata, ProviderUsageMetadataFromRecord(record, base))
 }
 
 func ResponseHeaderMetadataFromRecord(record map[string]any, base time.Time) *ResponseHeaderMetadata {
 	if record == nil {
 		return nil
 	}
+	var metadata *ResponseHeaderMetadata
 	if raw := first(record, "response_metadata", "responseMetadata"); raw != nil {
-		if metadata := responseHeaderMetadataFromAny(raw); metadata != nil {
-			return metadata
-		}
+		metadata = responseHeaderMetadataFromAny(raw)
 	}
-	if metadata := ParseResponseHeaderMetadata(first(record, "response_headers", "responseHeaders", "headers"), base); metadata != nil {
+	// Imported JSONL can contain metadata produced by an older CPAMP version
+	// alongside newer signals in raw_json or response_headers. Enrich the stored
+	// metadata instead of letting its presence hide those same-record signals.
+	metadata = MergeResponseHeaderMetadata(
+		metadata,
+		ParseResponseHeaderMetadataFromRawJSON(readString(record, "raw_json", "rawJson"), base),
+	)
+	metadata = MergeResponseHeaderMetadata(
+		metadata,
+		ParseResponseHeaderMetadata(first(record, "response_headers", "responseHeaders", "headers"), base),
+	)
+	return attachProviderUsageMetadata(metadata, ProviderUsageMetadataFromRecord(record, base))
+}
+
+func attachProviderUsageMetadata(metadata *ResponseHeaderMetadata, providerUsage *ProviderUsageMetadata) *ResponseHeaderMetadata {
+	if providerUsage == nil || providerUsage.isEmpty() {
 		return metadata
 	}
-	return ParseResponseHeaderMetadataFromRawJSON(readString(record, "raw_json", "rawJson"), base)
+	if metadata == nil {
+		metadata = &ResponseHeaderMetadata{}
+	}
+	// Do not overlay transport Retry-After onto provider_usage recovery.
+	// xAI included-free exhaustion uses a rolling 24h quota window; short
+	// Retry-After headers only describe request retry backoff.
+	return MergeResponseHeaderMetadata(metadata, &ResponseHeaderMetadata{ProviderUsage: providerUsage})
 }
 
 func ResponseHeaderMetadataFromJSON(raw string) *ResponseHeaderMetadata {
@@ -186,6 +232,79 @@ func responseHeaderMetadataFromAny(raw any) *ResponseHeaderMetadata {
 		return nil
 	}
 	return &metadata
+}
+
+// MergeResponseHeaderMetadata enriches existing metadata with non-empty values
+// from the same response. Nested objects are merged so a newly supported header
+// does not discard diagnostics already carried by an imported record.
+func MergeResponseHeaderMetadata(existing *ResponseHeaderMetadata, overlay *ResponseHeaderMetadata) *ResponseHeaderMetadata {
+	if existing == nil {
+		return cloneResponseHeaderMetadata(overlay)
+	}
+	if overlay == nil {
+		return cloneResponseHeaderMetadata(existing)
+	}
+	providerUsage := MergeProviderUsageMetadata(existing.ProviderUsage, overlay.ProviderUsage)
+
+	existingRaw, err := json.Marshal(existing)
+	if err != nil {
+		return cloneResponseHeaderMetadata(existing)
+	}
+	overlayRaw, err := json.Marshal(overlay)
+	if err != nil {
+		return cloneResponseHeaderMetadata(existing)
+	}
+	var existingObject map[string]any
+	var overlayObject map[string]any
+	if json.Unmarshal(existingRaw, &existingObject) != nil || json.Unmarshal(overlayRaw, &overlayObject) != nil {
+		return cloneResponseHeaderMetadata(existing)
+	}
+	mergeResponseHeaderMetadataObjects(existingObject, overlayObject)
+	mergedRaw, err := json.Marshal(existingObject)
+	if err != nil {
+		return cloneResponseHeaderMetadata(existing)
+	}
+	var merged ResponseHeaderMetadata
+	if json.Unmarshal(mergedRaw, &merged) != nil {
+		return cloneResponseHeaderMetadata(existing)
+	}
+	merged.ProviderUsage = providerUsage
+	sanitizeResponseHeaderMetadata(&merged)
+	if merged.isEmpty() {
+		return nil
+	}
+	return &merged
+}
+
+func cloneResponseHeaderMetadata(metadata *ResponseHeaderMetadata) *ResponseHeaderMetadata {
+	if metadata == nil {
+		return nil
+	}
+	raw, err := json.Marshal(metadata)
+	if err != nil {
+		return nil
+	}
+	var cloned ResponseHeaderMetadata
+	if json.Unmarshal(raw, &cloned) != nil {
+		return nil
+	}
+	sanitizeResponseHeaderMetadata(&cloned)
+	if cloned.isEmpty() {
+		return nil
+	}
+	return &cloned
+}
+
+func mergeResponseHeaderMetadataObjects(existing map[string]any, overlay map[string]any) {
+	for key, value := range overlay {
+		overlayObject, overlayOK := value.(map[string]any)
+		existingObject, existingOK := existing[key].(map[string]any)
+		if overlayOK && existingOK {
+			mergeResponseHeaderMetadataObjects(existingObject, overlayObject)
+			continue
+		}
+		existing[key] = value
+	}
 }
 
 func DeriveResponseHeaderMetadata(metadata *ResponseHeaderMetadata) ResponseHeaderDerived {
@@ -271,6 +390,7 @@ func sanitizeResponseHeaderMetadata(metadata *ResponseHeaderMetadata) {
 		metadata.Trace.CloudAICompanionTraceID = normalizeHeaderValue(metadata.Trace.CloudAICompanionTraceID)
 		metadata.Trace.ClientRequestID = normalizeHeaderValue(metadata.Trace.ClientRequestID)
 		metadata.Trace.ZeaburRequestID = normalizeHeaderValue(metadata.Trace.ZeaburRequestID)
+		metadata.Trace.Traceparent = normalizeTraceparent(metadata.Trace.Traceparent)
 		metadata.Trace.PrimaryTraceID = firstNonEmptyString(
 			metadata.Trace.PrimaryTraceID,
 			metadata.Trace.OpenAIRequestID,
@@ -281,6 +401,7 @@ func sanitizeResponseHeaderMetadata(metadata *ResponseHeaderMetadata) {
 			metadata.Trace.EagleID,
 			metadata.Trace.ClientRequestID,
 			metadata.Trace.ZeaburRequestID,
+			traceIDFromTraceparent(metadata.Trace.Traceparent),
 		)
 		if metadata.Trace.isEmpty() {
 			metadata.Trace = nil
@@ -319,6 +440,25 @@ func sanitizeResponseHeaderMetadata(metadata *ResponseHeaderMetadata) {
 			metadata.Providers = nil
 		}
 	}
+	if metadata.RateLimit != nil {
+		sanitizeRateLimitBucket(metadata.RateLimit.Requests)
+		sanitizeRateLimitBucket(metadata.RateLimit.Tokens)
+		if metadata.RateLimit.isEmpty() {
+			metadata.RateLimit = nil
+		}
+	}
+	if metadata.DataPolicy != nil {
+		metadata.DataPolicy.RetentionMode = strings.ToLower(normalizeHeaderValue(metadata.DataPolicy.RetentionMode))
+		if metadata.DataPolicy.isEmpty() {
+			metadata.DataPolicy = nil
+		}
+	}
+	if metadata.ProviderUsage != nil {
+		sanitizeProviderUsageMetadata(metadata.ProviderUsage)
+		if metadata.ProviderUsage.isEmpty() {
+			metadata.ProviderUsage = nil
+		}
+	}
 }
 
 func (m *ResponseHeaderMetadata) isEmpty() bool {
@@ -328,7 +468,22 @@ func (m *ResponseHeaderMetadata) isEmpty() bool {
 			m.Trace == nil &&
 			m.Routing == nil &&
 			m.Response == nil &&
-			m.Providers == nil)
+			m.Providers == nil &&
+			m.RateLimit == nil &&
+			m.DataPolicy == nil &&
+			m.ProviderUsage == nil)
+}
+
+func sanitizeRateLimitBucket(bucket *HeaderRateLimitBucket) {
+	if bucket == nil {
+		return
+	}
+	if bucket.Limit != nil && *bucket.Limit < 0 {
+		bucket.Limit = nil
+	}
+	if bucket.Remaining != nil && *bucket.Remaining < 0 {
+		bucket.Remaining = nil
+	}
 }
 
 func normalizeResponseHeaders(raw any) map[string][]string {
@@ -372,7 +527,7 @@ func normalizeResponseHeaders(raw any) map[string][]string {
 //     future work can correlate them with model-list or proxy-version changes.
 func isResponseHeaderAllowed(key string) bool {
 	if key == "set-cookie" ||
-		strings.Contains(key, "token") ||
+		(strings.Contains(key, "token") && !isSafeTokenRateLimitHeader(key)) ||
 		strings.Contains(key, "secret") ||
 		strings.Contains(key, "authorization") && key != "x-openai-authorization-error" {
 		return false
@@ -394,6 +549,7 @@ func isResponseHeaderAllowed(key string) bool {
 		"x-codex-primary-window-minutes",
 		"x-codex-secondary-window-minutes",
 		"retry-after",
+		"x-should-retry",
 		"x-openai-authorization-error",
 		"x-openai-ide-error-code",
 		"x-openai-ide-root-error-code",
@@ -406,6 +562,7 @@ func isResponseHeaderAllowed(key string) bool {
 		"x-cloudaicompanion-trace-id",
 		"x-client-request-id",
 		"x-zeabur-request-id",
+		"traceparent",
 		"x-openai-proxy-wasm",
 		"x-models-etag",
 		"x-new-api-version",
@@ -418,11 +575,22 @@ func isResponseHeaderAllowed(key string) bool {
 		"content-type",
 		"content-length",
 		"content-disposition",
-		"server-timing":
+		"server-timing",
+		"x-ratelimit-limit-requests",
+		"x-ratelimit-remaining-requests",
+		"x-ratelimit-limit-tokens",
+		"x-ratelimit-remaining-tokens",
+		"x-data-retention",
+		"x-zero-data-retention",
+		"x-zero-retention":
 		return true
 	default:
 		return false
 	}
+}
+
+func isSafeTokenRateLimitHeader(key string) bool {
+	return key == "x-ratelimit-limit-tokens" || key == "x-ratelimit-remaining-tokens"
 }
 
 func headerValues(raw any) []string {
@@ -558,6 +726,9 @@ func parseErrorHeaders(headers map[string][]string, base time.Time) *HeaderError
 		IDERootErrorCode:   normalizeHeaderValue(headerFirst(headers, "x-openai-ide-root-error-code")),
 		RateLimitBypass:    normalizeHeaderValue(headerFirst(headers, "x-ratelimit-bypass")),
 	}
+	if value, ok := parseBoolHeader(headerFirst(headers, "x-should-retry")); ok {
+		errors.ShouldRetry = &value
+	}
 	retryAfter := headerFirst(headers, "retry-after")
 	if retryAfter != "" {
 		if seconds, recoverAt, ok := parseRetryAfter(retryAfter, base); ok {
@@ -582,6 +753,7 @@ func parseTraceHeaders(headers map[string][]string) *HeaderTraceMetadata {
 		CloudAICompanionTraceID: normalizeHeaderValue(headerFirst(headers, "x-cloudaicompanion-trace-id")),
 		ClientRequestID:         normalizeHeaderValue(headerFirst(headers, "x-client-request-id")),
 		ZeaburRequestID:         normalizeHeaderValue(headerFirst(headers, "x-zeabur-request-id")),
+		Traceparent:             normalizeTraceparent(headerFirst(headers, "traceparent")),
 	}
 	trace.PrimaryTraceID = firstNonEmptyString(
 		trace.OpenAIRequestID,
@@ -592,6 +764,7 @@ func parseTraceHeaders(headers map[string][]string) *HeaderTraceMetadata {
 		trace.EagleID,
 		trace.ClientRequestID,
 		trace.ZeaburRequestID,
+		traceIDFromTraceparent(trace.Traceparent),
 	)
 	if trace.isEmpty() {
 		return nil
@@ -647,12 +820,88 @@ func parseProviderHeaders(headers map[string][]string) *HeaderProviderMetadata {
 	return providers
 }
 
+func parseRateLimitHeaders(headers map[string][]string) *HeaderRateLimitMetadata {
+	metadata := &HeaderRateLimitMetadata{
+		Requests: parseRateLimitBucket(
+			headers,
+			"x-ratelimit-limit-requests",
+			"x-ratelimit-remaining-requests",
+		),
+		Tokens: parseRateLimitBucket(
+			headers,
+			"x-ratelimit-limit-tokens",
+			"x-ratelimit-remaining-tokens",
+		),
+	}
+	if metadata.isEmpty() {
+		return nil
+	}
+	return metadata
+}
+
+func parseRateLimitBucket(headers map[string][]string, limitKey string, remainingKey string) *HeaderRateLimitBucket {
+	bucket := &HeaderRateLimitBucket{}
+	if value, ok := parseIntHeader(headerFirst(headers, limitKey)); ok && value >= 0 {
+		bucket.Limit = int64Pointer(value)
+	}
+	if value, ok := parseIntHeader(headerFirst(headers, remainingKey)); ok && value >= 0 {
+		bucket.Remaining = int64Pointer(value)
+	}
+	if bucket.isEmpty() {
+		return nil
+	}
+	return bucket
+}
+
+func parseDataPolicyHeaders(headers map[string][]string) *HeaderDataPolicyMetadata {
+	metadata := &HeaderDataPolicyMetadata{
+		RetentionMode: normalizeHeaderValue(headerFirst(headers, "x-data-retention")),
+	}
+	for _, key := range []string{"x-zero-data-retention", "x-zero-retention"} {
+		if value, ok := parseBoolHeader(headerFirst(headers, key)); ok {
+			metadata.ZeroRetention = boolPointer(value)
+			break
+		}
+	}
+	if metadata.isEmpty() {
+		return nil
+	}
+	return metadata
+}
+
 func normalizeHeaderValue(value string) string {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
 		return ""
 	}
 	return truncateUTF8Bytes(FailSummaryFromBody(trimmed), maxResponseHeaderMetadataValueBytes)
+}
+
+func normalizeTraceparent(value string) string {
+	normalized := strings.ToLower(normalizeHeaderValue(value))
+	if !traceparentPattern.MatchString(normalized) {
+		return ""
+	}
+	parts := strings.Split(normalized, "-")
+	if parts[0] == "ff" || parts[1] == strings.Repeat("0", 32) || parts[2] == strings.Repeat("0", 16) {
+		return ""
+	}
+	return normalized
+}
+
+// traceIDFromTraceparent extracts the 32-hex trace-id from a validated W3C
+// traceparent value. PrimaryTraceID / header_trace_id use this compact id for
+// filtering and correlation; the full traceparent stays in Traceparent.
+func traceIDFromTraceparent(value string) string {
+	normalized := normalizeTraceparent(value)
+	if normalized == "" {
+		return ""
+	}
+	parts := strings.Split(normalized, "-")
+	if len(parts) < 2 {
+		return ""
+	}
+	return parts[1]
 }
 
 func parseFloatHeader(value string) (float64, bool) {
@@ -668,11 +917,12 @@ func parseFloatHeader(value string) (float64, bool) {
 }
 
 func parseIntHeader(value string) (int64, bool) {
-	parsed, ok := parseFloatHeader(value)
-	if !ok {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
 		return 0, false
 	}
-	return int64(parsed), true
+	parsed, err := strconv.ParseInt(trimmed, 10, 64)
+	return parsed, err == nil
 }
 
 func parseBoolHeader(value string) (bool, bool) {
@@ -957,6 +1207,10 @@ func float64Pointer(value float64) *float64 {
 	return &value
 }
 
+func boolPointer(value bool) *bool {
+	return &value
+}
+
 func nearlyEqualFloat(left float64, right float64) bool {
 	return math.Abs(left-right) < 0.001
 }
@@ -1004,6 +1258,7 @@ func (e *HeaderErrorMetadata) isEmpty() bool {
 			e.AuthorizationError == "" &&
 			e.IDEErrorCode == "" &&
 			e.IDERootErrorCode == "" &&
+			e.ShouldRetry == nil &&
 			e.RetryAfterSeconds == nil &&
 			e.RetryAfterRecoverAtMS == 0 &&
 			e.RateLimitBypass == "")
@@ -1019,7 +1274,8 @@ func (t *HeaderTraceMetadata) isEmpty() bool {
 			t.EagleID == "" &&
 			t.CloudAICompanionTraceID == "" &&
 			t.ClientRequestID == "" &&
-			t.ZeaburRequestID == "")
+			t.ZeaburRequestID == "" &&
+			t.Traceparent == "")
 }
 
 func (r *HeaderRoutingMetadata) isEmpty() bool {
@@ -1051,4 +1307,16 @@ func (p *HeaderProviderMetadata) isEmpty() bool {
 			p.OneAPIRequestID == "" &&
 			p.CloudflareRay == "" &&
 			p.CloudflareCacheStatus == "")
+}
+
+func (b *HeaderRateLimitBucket) isEmpty() bool {
+	return b == nil || (b.Limit == nil && b.Remaining == nil)
+}
+
+func (m *HeaderRateLimitMetadata) isEmpty() bool {
+	return m == nil || (m.Requests == nil && m.Tokens == nil)
+}
+
+func (m *HeaderDataPolicyMetadata) isEmpty() bool {
+	return m == nil || (m.RetentionMode == "" && m.ZeroRetention == nil)
 }

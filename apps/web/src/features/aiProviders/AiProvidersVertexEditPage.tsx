@@ -256,13 +256,17 @@ export function AiProvidersVertexEditPage() {
         excludedModels: parseExcludedModels(form.excludedText),
       };
 
-      const nextList =
+      if (editIndex !== null) {
+        await providersApi.updateVertexConfig(configs[editIndex], payload);
+      } else {
+        await providersApi.createVertexConfig(payload);
+      }
+      const syncedList = await providersApi.getVertexConfigs().catch(() =>
         editIndex !== null
-          ? configs.map((item, idx) => (idx === editIndex ? payload : item))
-          : [...configs, payload];
-
-      await providersApi.saveVertexConfigs(nextList);
-      updateConfigValue('vertex-api-key', nextList);
+          ? configs.map((item, index) => (index === editIndex ? payload : item))
+          : [...configs, payload]
+      );
+      updateConfigValue('vertex-api-key', syncedList);
       clearCache('vertex-api-key');
       showNotification(
         editIndex !== null ? t('notification.vertex_config_updated') : t('notification.vertex_config_added'),

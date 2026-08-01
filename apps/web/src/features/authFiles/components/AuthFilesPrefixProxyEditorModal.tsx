@@ -4,12 +4,17 @@ import { Button } from '@/components/ui/Button';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { Input } from '@/components/ui/Input';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
+import { IconRefreshCw } from '@/components/ui/icons';
+import type { AuthFileItem } from '@/types';
 import type {
   PrefixProxyEditorField,
   PrefixProxyEditorFieldValue,
   PrefixProxyEditorState,
 } from '@/features/authFiles/hooks/useAuthFilesPrefixProxyEditor';
-import { supportsAuthFileWebsockets } from '@/features/authFiles/constants';
+import {
+  supportsAuthFileUsingApi,
+  supportsAuthFileWebsockets,
+} from '@/features/authFiles/constants';
 import styles from '@/features/authFiles/AuthFilesPage.module.scss';
 
 export type AuthFilesPrefixProxyEditorModalProps = {
@@ -17,16 +22,28 @@ export type AuthFilesPrefixProxyEditorModalProps = {
   editor: PrefixProxyEditorState | null;
   updatedText: string;
   dirty: boolean;
+  credentialRefreshing: boolean;
   onClose: () => void;
   onCopyText: (text: string) => void | Promise<void>;
   onSave: () => void;
+  onRefreshCredential: (file: AuthFileItem) => void | Promise<void>;
   onChange: (field: PrefixProxyEditorField, value: PrefixProxyEditorFieldValue) => void;
 };
 
 export function AuthFilesPrefixProxyEditorModal(props: AuthFilesPrefixProxyEditorModalProps) {
   const { t } = useTranslation();
-  const { disableControls, editor, updatedText, dirty, onClose, onCopyText, onSave, onChange } =
-    props;
+  const {
+    disableControls,
+    editor,
+    updatedText,
+    dirty,
+    credentialRefreshing,
+    onClose,
+    onCopyText,
+    onSave,
+    onRefreshCredential,
+    onChange,
+  } = props;
   const formatJsonText = (text: string) => {
     if (!text) return '';
     try {
@@ -51,6 +68,20 @@ export function AuthFilesPrefixProxyEditorModal(props: AuthFilesPrefixProxyEdito
       }
       footer={
         <>
+          {editor?.providerKey === 'codex' && (
+            <Button
+              variant="secondary"
+              className={styles.prefixProxyCredentialRefreshButton}
+              onClick={() => void onRefreshCredential(editor.authFile)}
+              loading={credentialRefreshing}
+              disabled={disableControls || editor.loading || editor.saving || credentialRefreshing}
+              title={t('auth_files.credential_refresh_hint')}
+              aria-label={t('auth_files.credential_refresh_button')}
+            >
+              {!credentialRefreshing && <IconRefreshCw size={16} />}
+              {t('auth_files.credential_refresh_button')}
+            </Button>
+          )}
           <Button variant="secondary" onClick={onClose} disabled={editor?.saving === true}>
             {dirty ? t('common.cancel') : t('common.close')}
           </Button>
@@ -153,6 +184,18 @@ export function AuthFilesPrefixProxyEditorModal(props: AuthFilesPrefixProxyEdito
                         ariaLabel={t('auth_files.websockets_label')}
                       />
                       <div className="hint">{t('auth_files.websockets_hint')}</div>
+                    </div>
+                  )}
+                  {supportsAuthFileUsingApi(editor.providerKey) && (
+                    <div className="form-group">
+                      <label>{t('auth_files.using_api_label')}</label>
+                      <ToggleSwitch
+                        checked={editor.usingApi}
+                        onChange={(value) => onChange('usingApi', value)}
+                        disabled={disableControls || editor.saving || !editor.json}
+                        ariaLabel={t('auth_files.using_api_label')}
+                      />
+                      <div className="hint">{t('auth_files.using_api_hint')}</div>
                     </div>
                   )}
                   <div className="form-group">

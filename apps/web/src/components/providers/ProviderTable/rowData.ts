@@ -14,11 +14,20 @@ import {
   type ProviderRecentUsageMap,
 } from '../utils';
 
-export type ProviderKind = 'gemini' | 'codex' | 'claude' | 'vertex' | 'openai';
+export type ProviderKind =
+  | 'gemini'
+  | 'interactions'
+  | 'codex'
+  | 'xai'
+  | 'claude'
+  | 'vertex'
+  | 'openai';
 
 export const PROVIDER_KINDS: readonly ProviderKind[] = [
   'gemini',
+  'interactions',
   'codex',
+  'xai',
   'claude',
   'vertex',
   'openai',
@@ -51,12 +60,15 @@ interface ProviderRowBase {
 
 export type ProviderRow =
   | (ProviderRowBase & { kind: 'gemini'; raw: GeminiKeyConfig })
-  | (ProviderRowBase & { kind: 'codex' | 'claude' | 'vertex'; raw: ProviderKeyConfig })
+  | (ProviderRowBase & { kind: 'interactions'; raw: GeminiKeyConfig })
+  | (ProviderRowBase & { kind: 'codex' | 'xai' | 'claude' | 'vertex'; raw: ProviderKeyConfig })
   | (ProviderRowBase & { kind: 'openai'; raw: OpenAIProviderConfig });
 
 export interface BuildProviderRowsInput {
   gemini: GeminiKeyConfig[];
+  interactions?: GeminiKeyConfig[];
   codex: ProviderKeyConfig[];
+  xai?: ProviderKeyConfig[];
   claude: ProviderKeyConfig[];
   vertex: ProviderKeyConfig[];
   openai: OpenAIProviderConfig[];
@@ -68,7 +80,11 @@ const collectModelNames = (models?: { name: string }[]): string[] =>
 
 const buildHaystack = (parts: Array<string | undefined>): string =>
   parts
-    .map((part) => String(part ?? '').trim().toLowerCase())
+    .map((part) =>
+      String(part ?? '')
+        .trim()
+        .toLowerCase()
+    )
     .filter(Boolean)
     .join('\n');
 
@@ -78,7 +94,7 @@ const getKeyConfigSortName = (config: GeminiKeyConfig | ProviderKeyConfig): stri
     .find(Boolean) ?? '';
 
 function buildKeyConfigRow(
-  kind: 'gemini' | 'codex' | 'claude' | 'vertex',
+  kind: 'gemini' | 'interactions' | 'codex' | 'xai' | 'claude' | 'vertex',
   config: GeminiKeyConfig | ProviderKeyConfig,
   originalIndex: number,
   usageByProvider: ProviderRecentUsageMap
@@ -150,7 +166,9 @@ function buildOpenAIRow(
 
 export function buildProviderRows({
   gemini,
+  interactions = [],
   codex,
+  xai = [],
   claude,
   vertex,
   openai,
@@ -158,7 +176,11 @@ export function buildProviderRows({
 }: BuildProviderRowsInput): ProviderRow[] {
   return [
     ...gemini.map((config, index) => buildKeyConfigRow('gemini', config, index, usageByProvider)),
+    ...interactions.map((config, index) =>
+      buildKeyConfigRow('interactions', config, index, usageByProvider)
+    ),
     ...codex.map((config, index) => buildKeyConfigRow('codex', config, index, usageByProvider)),
+    ...xai.map((config, index) => buildKeyConfigRow('xai', config, index, usageByProvider)),
     ...claude.map((config, index) => buildKeyConfigRow('claude', config, index, usageByProvider)),
     ...vertex.map((config, index) => buildKeyConfigRow('vertex', config, index, usageByProvider)),
     ...openai.map((provider, index) => buildOpenAIRow(provider, index, usageByProvider)),

@@ -4,6 +4,7 @@
 
 export { QuotaSection } from './QuotaSection';
 export { QuotaCard } from './QuotaCard';
+export { QuotaInfoTooltip, resolveQuotaInfoTooltipPosition } from './QuotaInfoTooltip';
 export { useQuotaLoader } from './useQuotaLoader';
 export {
   ANTIGRAVITY_CONFIG,

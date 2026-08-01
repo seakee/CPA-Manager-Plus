@@ -482,6 +482,11 @@ export const VISUAL_CONFIG_PROTOCOL_OPTIONS = [
     defaultLabel: 'Gemini',
   },
   {
+    value: 'interactions',
+    labelKey: 'config_management.visual.payload_rules.provider_interactions',
+    defaultLabel: 'Interactions',
+  },
+  {
     value: 'claude',
     labelKey: 'config_management.visual.payload_rules.provider_claude',
     defaultLabel: 'Claude',

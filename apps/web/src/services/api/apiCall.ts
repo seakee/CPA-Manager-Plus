@@ -78,6 +78,36 @@ export const getApiCallErrorMessage = (result: ApiCallResult): string => {
   return message || 'Request failed';
 };
 
+const formatApiCallBody = (result: ApiCallResult): string => {
+  const bodyText = result.bodyText.trim();
+  const body = result.body;
+
+  if (body !== null && typeof body !== 'string') {
+    try {
+      return JSON.stringify(body, null, 2);
+    } catch {
+      // Fall back to the original response text below.
+    }
+  }
+
+  if (bodyText) {
+    try {
+      return JSON.stringify(JSON.parse(bodyText), null, 2);
+    } catch {
+      return bodyText;
+    }
+  }
+
+  return typeof body === 'string' ? body.trim() : '';
+};
+
+export const getApiCallErrorDetails = (result: ApiCallResult): string => {
+  const summary = getApiCallErrorMessage(result);
+  const body = formatApiCallBody(result);
+
+  return body ? `${summary}\n\nBody:\n${body}` : summary;
+};
+
 export const apiCallApi = {
   request: async (
     payload: ApiCallRequest,

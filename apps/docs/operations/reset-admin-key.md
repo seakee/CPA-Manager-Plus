@@ -4,6 +4,18 @@
 
 重置命令会直接修改本地 SQLite 数据库。执行前请先停止 Manager Server，避免服务运行中继续写入 SQLite。
 
+## 最短恢复流程
+
+1. 停止 Manager Server 并备份数据目录。
+2. 在对应 Docker 或原生包环境中运行 `reset-admin-key`。
+3. 只记录终端输出的新 CPAMP 管理员密钥，不要把它提交到仓库或发到聊天中。
+4. 重启 Manager Server。
+5. 打开 `:18317/management.html`，用新密钥登录并确认 CPA 连接正常。
+
+下面的命令按部署方式分类。只执行与你当前部署匹配的一组。
+
+::: details 高级：命令内部行为
+
 ## 命令作用
 
 `cpa-manager-plus reset-admin-key` 会替换 Manager Server SQLite 中的 `settings.admin_credential_v1`，写入新的盐和 HMAC 摘要。
@@ -14,6 +26,8 @@
 - 命令不需要 CPA Management Key，也不需要 `data.key`。
 
 也可以使用别名 `reset-admin-password`。
+
+:::
 
 ## 执行前检查
 
@@ -38,6 +52,30 @@ docker compose -f docker-compose.manager.yml up -d cpa-manager-plus
 CPA Manager Plus admin key reset.
 New admin key: cpamp_...
 Save this value now. It will not be shown again.
+```
+
+### 一键安装脚本创建的 Docker 部署
+
+如果 Docker 部署由 `install-cpamp.sh` 创建，优先让安装器完成停止、重置、重启和登录验证：
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/seakee/CPA-Manager-Plus/main/bin/install-cpamp.sh
+CPAMP_OPERATION=repair \
+CPAMP_INSTALL_DIR="$HOME/cpa-manager-plus" \
+bash install-cpamp.sh
+```
+
+修复流程会把 SQLite 中的管理员凭证同步为安装目录中的 `secrets/cpamp-admin-key`，因此文件中的密钥和实际登录密钥会保持一致。它不会删除 Docker 数据卷、CPA Management Key 或请求历史。
+
+非交互环境需要明确确认：
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/seakee/CPA-Manager-Plus/main/bin/install-cpamp.sh
+CPAMP_OPERATION=repair \
+CPAMP_INSTALL_DIR="$HOME/cpa-manager-plus" \
+CPAMP_NON_INTERACTIVE=1 \
+CPAMP_CONFIRM=1 \
+bash install-cpamp.sh
 ```
 
 ## Docker Named Volume

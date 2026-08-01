@@ -1,32 +1,25 @@
 # Releases
 
-CPAMP publishes versions through GitHub Releases. Release note source files are stored in the repository under `docs/release-notes/`.
+When reviewing a new version, focus on three things: what changed, whether anything is incompatible, and whether the upgrade requires extra backup or configuration work.
 
-## Latest Version
+## View The Latest Version
 
-- [GitHub Releases](https://github.com/seakee/CPA-Manager-Plus/releases)
-- [Latest Release](https://github.com/seakee/CPA-Manager-Plus/releases/latest)
+- [Latest GitHub Release](https://github.com/seakee/CPA-Manager-Plus/releases/latest)
+- [All Releases](https://github.com/seakee/CPA-Manager-Plus/releases)
 
-## Release Note Source Files
+Each Release lists major features, fixes, downloads, and any required upgrade notes.
 
-- [docs/release-notes](https://github.com/seakee/CPA-Manager-Plus/tree/main/docs/release-notes)
+## Before Upgrading
 
-File names:
+1. Read the target version's Upgrade Notes.
+2. Confirm whether you use Lightweight Panel, Docker Full Mode, or a native package.
+3. For Full Mode, back up SQLite, `data.key`, and secrets in the install directory.
+4. Follow the matching steps in [Upgrade CPAMP](../operations/update.md).
 
-```text
-docs/release-notes/<tag>-zh.md
-docs/release-notes/<tag>-en.md
-```
+Lightweight Panel is normally updated by CPA when it checks for a new `management.html`. If the old interface remains, see [Lightweight Panel Updates And Cache](../deployment/cpa-panel.md#updates-and-cache).
 
-## Release Process
+## If Something Goes Wrong
 
-The release workflow is documented in the repository:
-
-- [docs/release.md](https://github.com/seakee/CPA-Manager-Plus/blob/main/docs/release.md)
-
-Pushing a tag triggers `.github/workflows/release.yml`, which generates:
-
-- `management.html`
-- native packages
-- Docker images
-- GitHub Release body
+- Cannot log in after upgrade: [Reset Admin Key](../operations/reset-admin-key.md)
+- Monitoring is empty after upgrade: [Monitoring Has No Data](../troubleshooting/request-monitoring.md)
+- Unsure where data files are stored: [Configuration And Data Directory](../operations/configuration.md)

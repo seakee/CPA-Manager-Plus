@@ -1,7 +1,9 @@
 import type { TFunction } from 'i18next';
 import {
   computeCacheHitRate,
+  computeRowCacheHitRate,
   formatMetricValue,
+  getUsageCacheTokens,
   USAGE_MODEL_LONG_TAIL_SHARE,
   USAGE_MODEL_TOP_SHARE_THRESHOLD,
   USAGE_SUCCESS_RATE_WATCH_THRESHOLD,
@@ -163,7 +165,7 @@ export const buildUsageOverviewSummaryCards = ({
   summaryDelta,
   t,
 }: OverviewSummaryCardsInput): UsageSummaryCard[] => {
-  const cacheTokens = summary.cachedTokens + summary.cacheReadTokens + summary.cacheCreationTokens;
+  const cacheTokens = getUsageCacheTokens(summary);
   const totalTokens = Math.max(summary.totalTokens, 0);
   const p95LatencyLabel =
     summary.p95LatencyMs === null && summary.p95TtftMs !== null
@@ -570,7 +572,7 @@ export const buildCredentialDetailCards = ({
   const averageCost = row.requestCount > 0 ? row.estimatedCost / row.requestCount : 0;
   const averageTokens = row.requestCount > 0 ? row.totalTokens / row.requestCount : 0;
   const failureRate = row.requestCount > 0 ? row.failureCount / row.requestCount : 0;
-  const cacheRate = computeCacheHitRate(row);
+  const cacheRate = computeRowCacheHitRate(row);
   const lastSeenLabel = row.lastSeenMs
     ? new Intl.DateTimeFormat(locale, {
         day: '2-digit',
@@ -609,7 +611,7 @@ export const buildCredentialDetailCards = ({
       accent: 'cyan',
       icon: 'cache',
       label: t('usage_analytics.cache_read_rate'),
-      meta: `${t('usage_analytics.metric_cached_tokens')} ${formatCompactNumber(row.cachedTokens)}`,
+      meta: `${t('usage_analytics.metric_cached_tokens')} ${formatCompactNumber(getUsageCacheTokens(row))}`,
       value: formatPercent(cacheRate),
     },
     {

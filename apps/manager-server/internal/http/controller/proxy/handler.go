@@ -39,21 +39,28 @@ func (h *Handler) ModelList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) CPAResource(w http.ResponseWriter, r *http.Request) {
-	useSavedManagementKey := true
 	switch r.Method {
-	case http.MethodGet, http.MethodHead:
-	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
-		ok, err := h.App.AdminAuthService.VerifyHeader(r.Context(), r.Header.Get("Authorization"))
-		if err != nil {
-			response.Error(w, http.StatusInternalServerError, err)
-			return
-		}
-		useSavedManagementKey = ok
+	case http.MethodGet,
+		http.MethodHead,
+		http.MethodPost,
+		http.MethodPut,
+		http.MethodPatch,
+		http.MethodDelete:
 	default:
 		response.MethodNotAllowed(w)
 		return
 	}
-	if useSavedManagementKey {
+
+	ok, err := h.App.AdminAuthService.VerifyHeader(r.Context(), r.Header.Get("Authorization"))
+	if err != nil {
+		response.Error(w, http.StatusInternalServerError, err)
+		return
+	}
+	// Only a verified CPAMP admin key authorizes substituting the saved CPA
+	// management key. Otherwise preserve the caller's own authorization (or
+	// lack of it) so public plugin resources remain reachable without privilege
+	// elevation.
+	if ok {
 		h.App.ProxyService.ProxyPluginResource(w, r, response.Error)
 		return
 	}

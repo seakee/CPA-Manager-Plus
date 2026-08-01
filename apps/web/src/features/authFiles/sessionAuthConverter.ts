@@ -2,6 +2,10 @@ export type AuthJsonInputType = 'cpa' | 'session' | 'sub2api';
 
 type JsonRecord = Record<string, unknown>;
 export type AuthJsonConversionResult = JsonRecord | JsonRecord[];
+export type AuthJsonFilePayload = {
+  fileName: string;
+  authJson: JsonRecord;
+};
 type TraversalState = {
   visited: WeakSet<object>;
   visitedRecords: number;
@@ -65,6 +69,19 @@ const GENERIC_CREDENTIAL_KEYS = new Set([
   'sessionsecret',
   'client_secret',
   'clientsecret',
+]);
+
+const AUTH_FILE_FINGERPRINT_IGNORED_KEYS = new Set([
+  ...GENERIC_CREDENTIAL_KEYS,
+  'last_refresh',
+  'lastrefresh',
+  'last_refreshed_at',
+  'lastrefreshedat',
+  'expired',
+  'expires',
+  'expires_at',
+  'expiresat',
+  'disabled',
 ]);
 
 const SERVICE_ACCOUNT_CREDENTIAL_KEYS = new Set(['private_key', 'privatekey']);
@@ -273,8 +290,12 @@ const normalizeTimestamp = (value: unknown) => {
   return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
 };
 
-const parseJsonObject = (text: string, allowArray = false): JsonRecord | unknown[] => {
-  if (text.length > MAX_AUTH_JSON_INPUT_CHARS) {
+const parseJsonObject = (
+  text: string,
+  allowArray = false,
+  maxInputChars = MAX_AUTH_JSON_INPUT_CHARS
+): JsonRecord | unknown[] => {
+  if (text.length > maxInputChars) {
     throw new AuthJsonConversionError('Auth JSON input exceeds size limit');
   }
 
@@ -759,6 +780,35 @@ const collectSub2ApiAccounts = (
   return { accounts: [] };
 };
 
+const hasSub2ApiExportEnvelopeMarkers = (value: JsonRecord) =>
+  ('accounts' in value && ('exported_at' in value || 'proxies' in value)) ||
+  ('exported_at' in value && 'proxies' in value);
+
+const findSub2ApiExportRecord = (value: unknown): JsonRecord | undefined => {
+  if (!isRecord(value)) return undefined;
+  if (hasCpaAuthFileShape(value)) return undefined;
+  if (hasSub2ApiExportEnvelopeMarkers(value)) return value;
+  if (isRecord(value.data) && hasSub2ApiExportEnvelopeMarkers(value.data)) return value.data;
+  return undefined;
+};
+
+const isSub2ApiExportValue = (value: unknown): boolean => {
+  return Boolean(findSub2ApiExportRecord(value));
+};
+
+export const isSub2ApiAuthJsonInput = (
+  text: string,
+  maxInputChars = MAX_AUTH_JSON_INPUT_CHARS
+): boolean => {
+  if (!text.trim() || text.length > maxInputChars) return false;
+
+  try {
+    return isSub2ApiExportValue(JSON.parse(text) as unknown);
+  } catch {
+    return false;
+  }
+};
+
 const readSub2ApiCredentialString = (
   credentials: JsonRecord,
   extra: JsonRecord | undefined,
@@ -872,6 +922,10 @@ const convertSub2ApiAccountToCpaAuthJson = (
 };
 
 const convertSub2ApiToCpaAuthJson = (value: unknown, now: Date): AuthJsonConversionResult => {
+  const exportRecord = findSub2ApiExportRecord(value);
+  if (exportRecord && !Array.isArray(exportRecord.accounts)) {
+    throw new AuthJsonConversionError('sub2api export accounts must be an array');
+  }
   const { accounts, exportedAt } = collectSub2ApiAccounts(value);
   const openAiOauthAccounts = accounts.filter(isSub2ApiOpenAIOAuthAccount);
   if (openAiOauthAccounts.length === 0) {
@@ -890,9 +944,10 @@ const convertSub2ApiToCpaAuthJson = (value: unknown, now: Date): AuthJsonConvers
 export const convertAuthJsonInput = (
   text: string,
   type: AuthJsonInputType,
-  now = new Date()
+  now = new Date(),
+  maxInputChars = MAX_AUTH_JSON_INPUT_CHARS
 ): AuthJsonConversionResult => {
-  const parsed = parseJsonObject(text, type === 'session' || type === 'sub2api');
+  const parsed = parseJsonObject(text, type === 'session' || type === 'sub2api', maxInputChars);
   if (hasForbiddenInvisibleCharacter(parsed)) {
     throw new AuthJsonConversionError('Auth JSON contains unsupported invisible characters');
   }
@@ -931,7 +986,7 @@ const stableStringifyForFingerprint = (value: unknown): string => {
   if (isRecord(value)) {
     return `{${Object.keys(value)
       .sort()
-      .filter((key) => !GENERIC_CREDENTIAL_KEYS.has(key.toLowerCase()))
+      .filter((key) => !AUTH_FILE_FINGERPRINT_IGNORED_KEYS.has(key.toLowerCase()))
       .map((key) => `${JSON.stringify(key)}:${stableStringifyForFingerprint(value[key])}`)
       .join(',')}}`;
   }
@@ -996,16 +1051,62 @@ export const getDefaultSessionAuthFileName = (authJson: JsonRecord) => {
       preserveEmailSymbols: true,
     }
   );
-  const plan = buildSafeFileNameSegment(firstNonEmpty(authJson.plan_type, authJson.chatgpt_plan_type), {
-    maxLength: 32,
-  });
+  const plan = buildSafeFileNameSegment(
+    firstNonEmpty(authJson.plan_type, authJson.chatgpt_plan_type),
+    {
+      maxLength: 32,
+    }
+  );
   const baseName = [provider, id, identity, plan].filter(Boolean).join('-');
 
   return `${baseName}.json`;
 };
 
-export const getDefaultSub2ApiAuthFileName = (authJson: AuthJsonConversionResult) => {
-  if (!Array.isArray(authJson)) return getDefaultSessionAuthFileName(authJson);
-  if (authJson.length === 1) return getDefaultSessionAuthFileName(authJson[0]);
-  return 'sub2api-codex-accounts.codex.json';
+const appendJsonFileNameSuffix = (fileName: string, suffix: number) => {
+  const baseName = fileName.toLowerCase().endsWith('.json')
+    ? fileName.slice(0, -'.json'.length)
+    : fileName;
+  return `${baseName}-${suffix}.json`;
+};
+
+const ensureUniqueAuthJsonFilePayloadNames = (payloads: AuthJsonFilePayload[]) => {
+  const usedNames = new Set<string>();
+
+  return payloads.map((payload) => {
+    let fileName = payload.fileName;
+    let suffix = 2;
+    while (usedNames.has(fileName.toLowerCase())) {
+      fileName = appendJsonFileNameSuffix(payload.fileName, suffix);
+      suffix += 1;
+    }
+    usedNames.add(fileName.toLowerCase());
+    return fileName === payload.fileName ? payload : { ...payload, fileName };
+  });
+};
+
+export const buildAuthJsonFilePayloads = (
+  type: AuthJsonInputType,
+  requestedFileName: string,
+  text: string,
+  now = new Date(),
+  maxInputChars = MAX_AUTH_JSON_INPUT_CHARS
+): AuthJsonFilePayload[] => {
+  const converted = convertAuthJsonInput(text, type, now, maxInputChars);
+  const authJsonRecords = Array.isArray(converted) ? converted : [converted];
+
+  if (authJsonRecords.length === 1) {
+    const authJson = authJsonRecords[0];
+    const fileName =
+      (type === 'session' || type === 'sub2api') && requestedFileName === 'codex-account.json'
+        ? getDefaultSessionAuthFileName(authJson)
+        : requestedFileName;
+    return [{ fileName, authJson }];
+  }
+
+  return ensureUniqueAuthJsonFilePayloadNames(
+    authJsonRecords.map((authJson) => ({
+      fileName: getDefaultSessionAuthFileName(authJson),
+      authJson,
+    }))
+  );
 };

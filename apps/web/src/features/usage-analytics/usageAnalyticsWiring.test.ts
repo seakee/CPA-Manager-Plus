@@ -354,6 +354,13 @@ describe('usage analytics app wiring', () => {
     expect(layoutSource).not.toContain('item.shortLabel ?? item.label');
   });
 
+  it('keeps long English sidebar labels concise', () => {
+    expect(en.nav.monitoring_center).toBe('Request Monitor');
+    expect(en.nav.plugins).toBe('Plugins');
+    expect(en.nav.quota_management).toBe('Quota');
+    expect(en.nav.codex_inspection).toBe('Credential Health');
+  });
+
   it('escapes user-controlled chart tooltip labels before returning tooltip HTML', () => {
     expect(pageSource).toContain('const escapeHtml = (value: string | number | null | undefined)');
     expect(pageSource).not.toContain('<b>${item.name}</b>');

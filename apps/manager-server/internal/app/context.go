@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"io/fs"
+	"path/filepath"
+	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
@@ -13,6 +15,7 @@ import (
 	bootstrapsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrap"
 	codexinspectionsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/codexinspection"
 	collectorsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/collector"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
 	dashboardsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/dashboard"
 	managerconfigsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 	modelpricesvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/modelprice"
@@ -49,6 +52,7 @@ type Context struct {
 	APIKeyAliasService             *apikeyaliassvc.Service
 	AccountActionService           *accountactionsvc.Service
 	AccountProcessingPolicyService *automationsvc.Service
+	AuthFileMutationCoordinator    *cpaauthfiles.MutationCoordinator
 	ProxyService                   *proxysvc.Service
 	PanelService                   *panelsvc.Service
 	AutomationRuntimeService       AutomationRuntimeService
@@ -65,6 +69,58 @@ func FromExisting(
 	serviceID string,
 	automationRuntimeService ...AutomationRuntimeService,
 ) *Context {
+	return fromExisting(
+		cfg,
+		st,
+		collectorManager,
+		startedAt,
+		embeddedPanel,
+		nil,
+		modelPriceSyncURL,
+		openRouterModelPriceSyncURL,
+		serviceID,
+		automationRuntimeService...,
+	)
+}
+
+func FromExistingWithModelsDev(
+	cfg config.Config,
+	st *store.Store,
+	collectorManager *collector.Manager,
+	startedAt int64,
+	embeddedPanel fs.FS,
+	modelsDevModelPriceSyncURL *string,
+	modelPriceSyncURL *string,
+	openRouterModelPriceSyncURL *string,
+	serviceID string,
+	automationRuntimeService ...AutomationRuntimeService,
+) *Context {
+	return fromExisting(
+		cfg,
+		st,
+		collectorManager,
+		startedAt,
+		embeddedPanel,
+		modelsDevModelPriceSyncURL,
+		modelPriceSyncURL,
+		openRouterModelPriceSyncURL,
+		serviceID,
+		automationRuntimeService...,
+	)
+}
+
+func fromExisting(
+	cfg config.Config,
+	st *store.Store,
+	collectorManager *collector.Manager,
+	startedAt int64,
+	embeddedPanel fs.FS,
+	modelsDevModelPriceSyncURL *string,
+	modelPriceSyncURL *string,
+	openRouterModelPriceSyncURL *string,
+	serviceID string,
+	automationRuntimeService ...AutomationRuntimeService,
+) *Context {
 	var runtimeService AutomationRuntimeService
 	if len(automationRuntimeService) > 0 {
 		runtimeService = automationRuntimeService[0]
@@ -72,26 +128,51 @@ func FromExisting(
 	collectorService := collectorsvc.New(collectorManager)
 	managerConfigService := managerconfigsvc.New(cfg, st, collectorService)
 	accountProcessingPolicyService := automationsvc.New(cfg, st)
+	usageImportBaseDir := strings.TrimSpace(cfg.DataDir)
+	if usageImportBaseDir == "" {
+		usageImportBaseDir = filepath.Dir(cfg.DBPath)
+	}
+	usageService := usagesvc.New(st, usagesvc.WithImportSessions(usagesvc.ImportSessionConfig{
+		Directory:      filepath.Join(usageImportBaseDir, "usage-imports"),
+		ChunkSizeBytes: cfg.UsageImportChunkBytes,
+		DiskQuotaBytes: cfg.UsageImportDiskQuotaBytes,
+		MaxSessions:    cfg.UsageImportMaxSessions,
+		TTL:            cfg.UsageImportSessionTTL,
+	}))
+	authFileMutationCoordinator := cpaauthfiles.NewMutationCoordinator()
 	return &Context{
-		Config:                         cfg,
-		Store:                          st,
-		Collector:                      collectorManager,
-		StartedAt:                      startedAt,
-		ServiceID:                      serviceID,
-		AdminAuthService:               adminauthsvc.New(cfg, st),
-		SetupService:                   setupsvc.New(cfg, st, collectorService, managerConfigService, startedAt, serviceID),
-		ManagerConfigService:           managerConfigService,
-		CollectorService:               collectorService,
-		UsageService:                   usagesvc.New(st),
-		DashboardService:               dashboardsvc.New(st),
-		CodexInspectionService:         codexinspectionsvc.New(st, managerConfigService),
-		MonitoringService:              monitoringsvc.New(st),
-		ModelPriceService:              modelpricesvc.NewMultiSource(st, modelPriceSyncURL, openRouterModelPriceSyncURL, managerConfigService),
-		APIKeyAliasService:             apikeyaliassvc.New(st),
-		AccountActionService:           accountactionsvc.New(st, managerConfigService),
+		Config:               cfg,
+		Store:                st,
+		Collector:            collectorManager,
+		StartedAt:            startedAt,
+		ServiceID:            serviceID,
+		AdminAuthService:     adminauthsvc.New(cfg, st),
+		SetupService:         setupsvc.New(cfg, st, collectorService, managerConfigService, startedAt, serviceID),
+		ManagerConfigService: managerConfigService,
+		CollectorService:     collectorService,
+		UsageService:         usageService,
+		DashboardService:     dashboardsvc.New(st, cfg.DashboardHourlyRollupEnabled),
+		CodexInspectionService: codexinspectionsvc.NewWithOptions(
+			st,
+			managerConfigService,
+			codexinspectionsvc.ServiceOptions{AuthFileMutationCoordinator: authFileMutationCoordinator},
+		),
+		MonitoringService:  monitoringsvc.New(st, cfg.DashboardHourlyRollupEnabled),
+		ModelPriceService:  modelpricesvc.NewMultiSourceWithModelsDev(st, modelsDevModelPriceSyncURL, modelPriceSyncURL, openRouterModelPriceSyncURL, managerConfigService),
+		APIKeyAliasService: apikeyaliassvc.New(st),
+		AccountActionService: accountactionsvc.NewWithMutationCoordinator(
+			st,
+			managerConfigService,
+			authFileMutationCoordinator,
+		),
 		AccountProcessingPolicyService: accountProcessingPolicyService,
-		ProxyService:                   proxysvc.New(managerConfigService),
-		PanelService:                   panelsvc.New(cfg.PanelPath, embeddedPanel),
-		AutomationRuntimeService:       runtimeService,
+		AuthFileMutationCoordinator:    authFileMutationCoordinator,
+		ProxyService: proxysvc.NewWithMutationCoordinator(
+			managerConfigService,
+			authFileMutationCoordinator,
+			st,
+		),
+		PanelService:             panelsvc.New(cfg.PanelPath, embeddedPanel),
+		AutomationRuntimeService: runtimeService,
 	}
 }

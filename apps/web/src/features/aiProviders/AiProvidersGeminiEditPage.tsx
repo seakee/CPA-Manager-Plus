@@ -491,13 +491,17 @@ export function AiProvidersGeminiEditPage() {
         disableCooling: form.disableCooling,
       };
 
-      const nextList =
+      if (editIndex !== null) {
+        await providersApi.updateGeminiKey(configs[editIndex], payload);
+      } else {
+        await providersApi.createGeminiKey(payload);
+      }
+      const syncedList = await providersApi.getGeminiKeys().catch(() =>
         editIndex !== null
-          ? configs.map((item, idx) => (idx === editIndex ? payload : item))
-          : [...configs, payload];
-
-      await providersApi.saveGeminiKeys(nextList);
-      updateConfigValue('gemini-api-key', nextList);
+          ? configs.map((item, index) => (index === editIndex ? payload : item))
+          : [...configs, payload]
+      );
+      updateConfigValue('gemini-api-key', syncedList);
       clearCache('gemini-api-key');
       showNotification(
         editIndex !== null

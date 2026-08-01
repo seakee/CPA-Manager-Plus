@@ -1,7 +1,6 @@
 package codexinspection
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -30,7 +29,7 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 			response.MethodNotAllowed(w)
 			return
 		}
-		result, err := h.App.CodexInspectionService.Run(context.WithoutCancel(r.Context()), codexsvc.RunRequest{
+		result, err := h.App.CodexInspectionService.Start(r.Context(), codexsvc.RunRequest{
 			TriggerType: "manual",
 			TriggerKey:  "manual",
 		})
@@ -63,9 +62,14 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 		idRaw := strings.TrimPrefix(path, "/v0/management/codex-inspection/runs/")
 		actionPath := false
+		cancelPath := false
 		if strings.HasSuffix(idRaw, "/actions") {
 			actionPath = true
 			idRaw = strings.TrimSuffix(idRaw, "/actions")
+		}
+		if strings.HasSuffix(idRaw, "/cancel") {
+			cancelPath = true
+			idRaw = strings.TrimSuffix(idRaw, "/cancel")
 		}
 		id, err := strconv.ParseInt(idRaw, 10, 64)
 		if err != nil || id <= 0 {
@@ -93,6 +97,19 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 			response.JSON(w, http.StatusOK, result)
 			return
 		}
+		if cancelPath {
+			if r.Method != http.MethodPost {
+				response.MethodNotAllowed(w)
+				return
+			}
+			detail, err := h.App.CodexInspectionService.CancelRun(r.Context(), id)
+			if err != nil {
+				response.Error(w, codexInspectionErrorStatus(err), err)
+				return
+			}
+			response.JSON(w, http.StatusOK, detail)
+			return
+		}
 		if r.Method != http.MethodGet {
 			response.MethodNotAllowed(w)
 			return
@@ -111,12 +128,17 @@ func codexInspectionErrorStatus(err error) int {
 	case errors.Is(err, codexsvc.ErrRunNotFound):
 		return http.StatusNotFound
 	case errors.Is(err, codexsvc.ErrRunAlreadyActive),
-		errors.Is(err, codexsvc.ErrRunNotCompleted):
+		errors.Is(err, codexsvc.ErrRunNotCompleted),
+		errors.Is(err, codexsvc.ErrRunNotOwned),
+		errors.Is(err, codexsvc.ErrRunNotCancellable),
+		errors.Is(err, codexsvc.ErrServiceStopping),
+		errors.Is(err, codexsvc.ErrTriggerAlreadyExists):
 		return http.StatusConflict
 	case errors.Is(err, codexsvc.ErrNotConfigured):
 		return http.StatusPreconditionFailed
 	case errors.Is(err, codexsvc.ErrActionIDsRequired),
-		errors.Is(err, codexsvc.ErrNoActionableResults):
+		errors.Is(err, codexsvc.ErrNoActionableResults),
+		errors.Is(err, codexsvc.ErrInvalidActionOverride):
 		return http.StatusBadRequest
 	default:
 		return http.StatusInternalServerError

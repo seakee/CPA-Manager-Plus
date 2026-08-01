@@ -260,6 +260,34 @@ describe('buildObservedCodexQuotaFromHeaderSnapshot', () => {
     expect(getHighConfidenceUsageHeaderSnapshotForAuthFile(lookup, missingIndexFile)).toBeUndefined();
   });
 
+  it('does not use same-account header snapshots as high-confidence auth-file quota evidence', () => {
+    const lookup = buildUsageHeaderSnapshotLookup([
+      {
+        event_hash: 'free-workspace-header',
+        timestamp_ms: 1_700_000_000_200,
+        auth_file_snapshot: 'codex-free.json',
+        auth_index: 'free',
+        account_snapshot: 'user@example.com',
+        response_metadata: {
+          quota: {
+            plan_type: 'free',
+          },
+        },
+      },
+    ]);
+    const teamFile = {
+      name: 'codex-team.json',
+      provider: 'codex',
+      authIndex: 'team',
+      account: 'user@example.com',
+    } as AuthFileItem;
+
+    expect(getUsageHeaderSnapshotForAuthFile(lookup, teamFile)?.event_hash).toBe(
+      'free-workspace-header'
+    );
+    expect(getHighConfidenceUsageHeaderSnapshotForAuthFile(lookup, teamFile)).toBeUndefined();
+  });
+
   it('does not use active limit as the plan type', () => {
     const snapshot: UsageHeaderSnapshot = {
       event_hash: 'active-limit-only',

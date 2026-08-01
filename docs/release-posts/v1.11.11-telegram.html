@@ -1,0 +1,16 @@
+🚀 <b>7 月 31 日 v1.11.11</b>
+
+✨ <b>更新内容</b>
+
+• Manager Server 插件资源代理只有在验证 CPAMP Admin Key 后才使用已保存的 CPA Management Key，未认证请求不再被提升为管理权限。
+• 插件自身携带的 Authorization 会继续原样转发，公开插件资源仍由 CPA 或插件的现有访问策略决定。
+
+⚠️ <b>注意事项</b>
+
+• v1.5.0 至 v1.11.10 的 Manager Server、Full Docker 和原生 Manager Server 部署建议尽快升级；CPA Panel 直接模式不受影响。
+• 如 Manager Server 曾暴露给不可信网络，请检查相关访问和插件日志；如插件资源可能返回敏感凭据，请按排查结果轮换相关 Token 或 API Key。
+• 本次无需配置或数据库迁移。
+
+🤝 <b>致谢</b>
+
+• <a href="https://github.com/Cec1c">@Cec1c</a> - 报告并修复了该权限提升问题。

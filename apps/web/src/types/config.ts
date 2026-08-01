@@ -14,12 +14,17 @@ export interface QuotaExceededConfig {
 export interface AuthPoolCleanConfig {
   baseUrl?: string;
   token?: string;
+  targetTypes?: string[];
   targetType?: string;
   workers?: number;
   deleteWorkers?: number;
   timeout?: number;
   retries?: number;
   userAgent?: string;
+  xaiInferenceUserAgent?: string;
+  xaiInferenceEnabled?: boolean;
+  xaiInferenceModel?: string;
+  xaiInferencePrompt?: string;
   usedPercentThreshold?: number;
   sampleSize?: number;
 }
@@ -41,7 +46,9 @@ export interface Config {
   routingStrategy?: string;
   apiKeys?: string[];
   geminiApiKeys?: GeminiKeyConfig[];
+  interactionsApiKeys?: GeminiKeyConfig[];
   codexApiKeys?: ProviderKeyConfig[];
+  xaiApiKeys?: ProviderKeyConfig[];
   claudeApiKeys?: ProviderKeyConfig[];
   vertexApiKeys?: ProviderKeyConfig[];
   openaiCompatibility?: OpenAIProviderConfig[];
@@ -65,7 +72,9 @@ export type RawConfigSection =
   | 'routing/strategy'
   | 'api-keys'
   | 'gemini-api-key'
+  | 'interactions-api-key'
   | 'codex-api-key'
+  | 'xai-api-key'
   | 'claude-api-key'
   | 'vertex-api-key'
   | 'openai-compatibility'

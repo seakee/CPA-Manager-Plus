@@ -169,6 +169,25 @@ describe('accountOverviewState', () => {
     });
   });
 
+  it('does not show a bare provider name under its multi-key disambiguated primary label', () => {
+    const row = createAccountRow({
+      account: 'kuaileshifu',
+      displayAccount: 'kuaileshifu #1',
+      accountMasked: 'kuaileshifu',
+      authLabels: ['kuaileshifu'],
+      channels: ['kuaileshifu'],
+    });
+
+    expect(resolveAccountDisplayText(row, 'masked')).toMatchObject({
+      primary: 'kuaileshifu #1',
+      secondary: '',
+    });
+    expect(resolveAccountDisplayText(row, 'full')).toMatchObject({
+      primary: 'kuaileshifu #1',
+      secondary: '',
+    });
+  });
+
   it('keeps the existing default account sort contract', () => {
     expect(DEFAULT_ACCOUNT_SORT).toEqual({ key: 'lastSeenAt', direction: 'desc' });
     expect(normalizeAccountSortState(undefined)).toEqual(DEFAULT_ACCOUNT_SORT);
@@ -219,8 +238,6 @@ describe('accountOverviewState', () => {
       'input-tokens',
       'output-tokens',
       'cached-tokens',
-      'cache-creation-tokens',
-      'cache-read-tokens',
     ]);
   });
 

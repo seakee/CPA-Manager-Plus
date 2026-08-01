@@ -102,6 +102,7 @@ export function useMonitoringAnalytics({
   const lastRequestKeyRef = useRef('');
   const inFlightRequestIdentityKeyRef = useRef('');
   const inFlightRequestIdRef = useRef(0);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const filtersKey = useMemo(() => stableJson(filters), [filters]);
   const includeKey = useMemo(() => stableJson(include), [include]);
@@ -162,6 +163,8 @@ export function useMonitoringAnalytics({
   const refresh = useCallback(
     async (options: MonitoringAnalyticsRefreshOptions = {}) => {
       if (!enabled || !request || !serviceBase) {
+        abortControllerRef.current?.abort();
+        abortControllerRef.current = null;
         requestIdRef.current += 1;
         inFlightRequestIdentityKeyRef.current = '';
         inFlightRequestIdRef.current = 0;
@@ -187,6 +190,9 @@ export function useMonitoringAnalytics({
       }
 
       const requestId = requestIdRef.current + 1;
+      abortControllerRef.current?.abort();
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
       requestIdRef.current = requestId;
       lastStartedAtRef.current = startedAt;
       lastRequestKeyRef.current = requestKey;
@@ -199,19 +205,24 @@ export function useMonitoringAnalytics({
         const response = await monitoringAnalyticsApi.getAnalytics(
           serviceBase,
           managementKey,
-          request
+          request,
+          controller.signal
         );
         if (requestIdRef.current !== requestId) return;
         setData(response);
         setDataScopeStateKey(activeDataScopeKey);
         setLastRefreshedAt(new Date());
       } catch (err) {
+        if (controller.signal.aborted) return;
         if (requestIdRef.current !== requestId) return;
         setError(err instanceof Error ? err.message : String(err));
       } finally {
         if (inFlightRequestIdRef.current === requestId) {
           inFlightRequestIdentityKeyRef.current = '';
           inFlightRequestIdRef.current = 0;
+        }
+        if (abortControllerRef.current === controller) {
+          abortControllerRef.current = null;
         }
         if (requestIdRef.current === requestId) {
           setLoading(false);
@@ -236,6 +247,14 @@ export function useMonitoringAnalytics({
     }
     void refresh({ force: true });
   }, [availability.checking, refresh]);
+
+  useEffect(
+    () => () => {
+      abortControllerRef.current?.abort();
+      abortControllerRef.current = null;
+    },
+    []
+  );
 
   const dataStale = Boolean(dataScopeKey && data && dataScopeStateKey !== activeDataScopeKey);
   const scopedData = dataScopeKey || dataScopeStateKey === activeDataScopeKey ? data : null;

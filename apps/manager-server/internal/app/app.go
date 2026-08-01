@@ -15,6 +15,7 @@ import (
 
 type Options struct {
 	EmbeddedPanel               fs.FS
+	ModelsDevModelPriceSyncURL  *string
 	ModelPriceSyncURL           *string
 	OpenRouterModelPriceSyncURL *string
 	ServiceID                   string
@@ -51,12 +52,13 @@ func New(ctx context.Context, cfg config.Config, options Options) (*Context, err
 	if startedAt <= 0 {
 		startedAt = time.Now().UnixMilli()
 	}
-	appCtx := FromExisting(
+	appCtx := FromExistingWithModelsDev(
 		cfg,
 		st,
 		manager,
 		startedAt,
 		options.EmbeddedPanel,
+		options.ModelsDevModelPriceSyncURL,
 		options.ModelPriceSyncURL,
 		options.OpenRouterModelPriceSyncURL,
 		serviceID,

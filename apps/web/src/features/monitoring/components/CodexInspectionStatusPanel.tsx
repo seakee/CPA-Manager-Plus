@@ -1,20 +1,14 @@
 import { Link } from 'react-router-dom';
-import type { ComponentType } from 'react';
 import type { TFunction } from 'i18next';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
-import {
-  IconChartLine,
-  IconCheck,
-  IconExternalLink,
-  IconInbox,
-  IconRefreshCw,
-  IconShield,
-  IconTrash2,
-  type IconProps,
-} from '@/components/ui/icons';
+import { IconExternalLink } from '@/components/ui/icons';
 import { type CodexInspectionProgressSnapshot } from '@/features/monitoring/codexInspection';
 import { CodexInspectionConfigOverview } from '@/features/monitoring/components/CodexInspectionConfigOverview';
+import {
+  SummaryCard as MonitoringSummaryCard,
+  type SummaryCardProps as MonitoringSummaryCardProps,
+} from '@/features/monitoring/components/MonitoringShared';
 import {
   type ConfigOverviewItem,
   type RunStatus,
@@ -22,24 +16,6 @@ import {
   type SummaryCard,
 } from '@/features/monitoring/model/codexInspectionPresentation';
 import styles from '../CodexInspectionPage.module.scss';
-
-const summaryIconMap: Record<NonNullable<SummaryCard['icon']>, ComponentType<IconProps>> = {
-  probe: IconInbox,
-  sampled: IconChartLine,
-  delete: IconTrash2,
-  disable: IconShield,
-  enable: IconCheck,
-  reauth: IconRefreshCw,
-};
-
-const summaryAccentClassMap: Record<NonNullable<SummaryCard['accent']>, string> = {
-  blue: styles.summaryAccentBlue,
-  cyan: styles.summaryAccentCyan,
-  red: styles.summaryAccentRed,
-  amber: styles.summaryAccentAmber,
-  green: styles.summaryAccentGreen,
-  violet: styles.summaryAccentViolet,
-};
 
 type CodexInspectionStatusPanelProps = {
   statusTone: StatusTone;
@@ -114,6 +90,7 @@ export function CodexInspectionStatusPanel({
             </Link>
             <Button
               variant="primary"
+              size="sm"
               onClick={onRunInspection}
               loading={runStatus === 'running'}
               disabled={runDisabled}
@@ -124,12 +101,13 @@ export function CodexInspectionStatusPanel({
               <>
                 <Button
                   variant="secondary"
+                  size="sm"
                   onClick={onPauseInspection}
                   disabled={runStatus !== 'running' || executing}
                 >
                   {t('monitoring.codex_inspection_pause')}
                 </Button>
-                <Button variant="danger" onClick={onStopInspection} disabled={executing}>
+                <Button variant="danger" size="sm" onClick={onStopInspection} disabled={executing}>
                   {t('monitoring.codex_inspection_stop')}
                 </Button>
               </>
@@ -151,55 +129,44 @@ export function CodexInspectionStatusPanel({
             </div>
             <div className={styles.progressMeta}>
               <span>{progressLabel}</span>
-              {runStatus === 'paused' ? <strong>{t('monitoring.codex_inspection_paused')}</strong> : null}
+              {runStatus === 'paused' ? (
+                <strong>{t('monitoring.codex_inspection_paused')}</strong>
+              ) : null}
             </div>
           </div>
         ) : null}
-      </Card>
 
-      <CodexInspectionConfigOverview
-        title={configOverviewTitle}
-        editLabel={configOverviewEditLabel}
-        items={configOverviewItems}
-        onEdit={onEditConfig}
-      />
+        <CodexInspectionConfigOverview
+          title={configOverviewTitle}
+          editLabel={configOverviewEditLabel}
+          copyLabel={t('monitoring.codex_inspection_settings_copy_prompt')}
+          copiedLabel={t('common.copied')}
+          items={configOverviewItems}
+          onEdit={onEditConfig}
+          compact
+          embedded
+        />
 
-      <div className={styles.summaryShell}>
         <section className={styles.summaryGrid}>
           {summaryCards.map((card) => {
-            const SummaryIcon = card.icon ? summaryIconMap[card.icon] : null;
+            const tone: MonitoringSummaryCardProps['tone'] =
+              card.tone === 'good' || card.tone === 'warn' || card.tone === 'bad'
+                ? card.tone
+                : undefined;
             return (
-              <div
+              <MonitoringSummaryCard
                 key={card.key}
-                className={[
-                  styles.summaryCard,
-                  card.accent ? summaryAccentClassMap[card.accent] : '',
-                  card.tone ? styles[`tone-${card.tone}`] : '',
-                ]
-                  .filter(Boolean)
-                  .join(' ')}
-              >
-                <div className={styles.summaryHeader}>
-                  {SummaryIcon ? (
-                    <span className={styles.summaryIcon}>
-                      <SummaryIcon size={18} />
-                    </span>
-                  ) : null}
-                  <span className={styles.summaryLabel} title={card.label}>
-                    {card.label}
-                  </span>
-                </div>
-                <div className={styles.summaryBody}>
-                  <strong className={styles.summaryValue}>{card.value}</strong>
-                  <span className={styles.summaryMeta} title={card.meta}>
-                    {card.meta}
-                  </span>
-                </div>
-              </div>
+                label={card.label}
+                value={card.value}
+                meta={card.meta}
+                icon={card.icon}
+                accent={card.accent}
+                tone={tone}
+              />
             );
           })}
         </section>
-      </div>
+      </Card>
     </>
   );
 }

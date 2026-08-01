@@ -1,56 +1,65 @@
-# Runtime Model
+# How CPAMP Works With CPA
 
-CPAMP does not replace CPA. Normal model traffic still goes through the CPA gateway runtime. CPAMP turns runtime state, request events, cost estimates, and account health into an operational panel.
+CPA receives and forwards real model requests. CPAMP manages CPA and, in Full Mode, stores request history, analyzes cost, and helps maintain account state.
 
-Think of the split this way:
+Most users only need to remember three things:
 
-- CPA / CLIProxyAPI handles real model requests and owns providers, auth files, OAuth, API keys, quota, logs, and plugin runtime.
-- CPAMP hosts the management panel, collects the usage queue, stores local SQLite data, and provides Dashboard, Monitoring, Usage Analytics, Codex Inspection, and automation policy.
+1. Codex, Claude Code, OpenCode, and other clients always connect to CPA, not CPAMP.
+2. The CPAMP Lightweight Panel opens from CPA `:8317/management.html` and uses the CPA Management Key.
+3. CPAMP Full Mode opens from `:18317/management.html` and uses the CPAMP Admin Key.
 
-When troubleshooting, first decide whether the issue is in CPA request routing or in CPAMP collection, storage, and display.
+## Where Each Request Goes
 
-## Request Path
+| Action                      | Address                                       | Key                |
+| --------------------------- | --------------------------------------------- | ------------------ |
+| A client requests a model   | CPA model endpoints such as `/v1/...`         | CPA client API key |
+| Use CPAMP Lightweight Panel | CPA `:8317/management.html`                   | CPA Management Key |
+| Use CPAMP Full Mode         | CPAMP `:18317/management.html`                | CPAMP Admin Key    |
+| Connect Full Mode to CPA    | CPA URL entered during setup or configuration | CPA Management Key |
+
+Do not mix these keys. If login fails, first confirm whether the current page uses port `8317` or `18317`.
+
+## The Two Modes
+
+- **Lightweight Panel**: replaces the official CPA management UI without adding a service or database.
+- **Full Mode**: adds Manager Server for request history, cost analytics, server-side inspection, backups, and automation.
+
+If you are unsure which one to use, read [Choosing A Panel](./choosing-a-panel.md).
+
+::: details Complete request and data flow
 
 ```text
-Client
-  -> CPA gateway runtime
-      -> provider / model endpoint
-      -> usage queue / request log
-  -> CPAMP Manager Server
-      -> monitoring / analytics / inspection / dashboard
+Codex / Claude Code / other clients
+  -> CPA
+      -> model providers
+      -> request logs and usage queue
+
+CPAMP Full Mode
+  -> reads management information and usage events from CPA
+  -> stores request history, prices, inspection, and automation state
 ```
 
-This path has two practical consequences:
+This means:
 
-- Client base URLs should point to CPA, not CPAMP.
-- If CPAMP pages have no data, first confirm that requests went through CPA, then check the usage queue and collector.
+- For a failed client request, check CPA, the provider, the account, and client configuration first.
+- When CPAMP has no data, confirm that requests pass through CPA, then inspect monitoring collection.
+- CPAMP does not forward model requests by itself.
 
-## Login And Keys
+:::
 
-| Scenario | Key | Notes |
-|---|---|---|
-| Log in to CPAMP in Full Docker / Manager Server mode | CPAMP Admin Key | The `cpamp_...` key from startup logs or the secret file. It only manages CPAMP. |
-| CPAMP connects to CPA | CPA Management Key | Setup/panel-saved connections are encrypted into SQLite; installer env/secret mode reads the key from the install directory. |
-| Normal model API request | CPA API Key | Used by clients calling `/v1/...`, `/backend-api/codex/...`, and similar model APIs. |
-| Log in in the CPA-hosted panel | CPA Management Key | CPA hosts the panel and the browser holds the CPA Management Key. |
+## When To Change CPA Configuration
 
-When debugging 401s, read the path first. `/v1/...` belongs to the model API and uses a CPA API Key. `/v0/management/...` usually uses the CPAMP Admin Key in Manager Server mode.
+CPA configuration still controls:
 
-## When You Still Edit CPA Config
+- Providers, model routing, auth files, and OAuth.
+- Client API keys, quota, logs, and plugins.
+- Remote management, usage publishing, and queue retention.
 
-These still belong in CPA `config.yaml` or CPA management:
+Prefer the CPAMP interface for daily work. Edit CPA `config.yaml` directly only when the UI does not expose a field, when preparing CPA before deployment, or during advanced troubleshooting.
 
-- provider routing, auth file directories, OAuth, API keys, quota, logs, and gateway behavior.
-- plugin runtime capabilities after installation.
-- `remote-management`, `usage-statistics-enabled`, and `redis-usage-queue-retention-seconds`.
-- storage backend, hot reload, and provider compatibility interfaces.
+## Next Steps
 
-CPAMP saves only the connection and observability settings Manager Server needs. It does not rewrite the full CPA `config.yaml`.
-
-## Recommended Reading Order
-
-1. [Get Started](./getting-started.md)
-2. [Gateway Configuration](../gateway/configuration.md)
-3. [Providers And Compatibility APIs](../gateway/providers.md)
-4. [Client Configuration](../gateway/clients.md)
-5. [Panel Manual](../manual/dashboard.md)
+- Install: [Quick Start](./getting-started.md)
+- Add model services: [AI Providers](../manual/ai-providers.md)
+- Configure clients: [Client Configuration](../gateway/clients.md)
+- Monitoring has no data: [Monitoring Has No Data](../troubleshooting/request-monitoring.md)

@@ -173,7 +173,7 @@ export const getUsageHeaderSnapshotMatchForIdentity = (
   const candidates = [
     matchOf(lookup.byFileAuthIndex.get(fileAuthKey(fileName, authIndex ?? '')), 'high'),
     matchOf(hasAuthIndex ? undefined : lookup.byFileName.get(normalizeKey(fileName)), 'high'),
-    matchOf(lookup.byAccount.get(normalizeKey(account)), 'high'),
+    matchOf(lookup.byAccount.get(normalizeKey(account)), 'low'),
     matchOf(lookup.byAuthIndex.get(normalizeKey(authIndex)), 'low'),
     matchOf(lookup.bySource.get(normalizeKey(source)), 'low'),
   ];

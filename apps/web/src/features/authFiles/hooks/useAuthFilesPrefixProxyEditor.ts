@@ -9,7 +9,10 @@ import {
   parsePriorityValue,
   readAuthFileWebsockets,
   supportsAuthFileWebsockets,
+  supportsAuthFileUsingApi,
 } from '@/features/authFiles/constants';
+import { getAuthFilePatchTarget } from '@/features/authFiles/model/authFilesPageModel';
+import { resolveAuthFileStatusMutationTarget } from '@/utils/authFileStatusMutation';
 
 type AuthFileHeaders = Record<string, string>;
 type AuthFileHeadersErrorKey =
@@ -25,12 +28,14 @@ export type PrefixProxyEditorField =
   | 'proxyUrl'
   | 'priority'
   | 'websockets'
+  | 'usingApi'
   | 'note'
   | 'headersText';
 
 export type PrefixProxyEditorFieldValue = string | boolean;
 
 export type PrefixProxyEditorState = {
+  authFile: AuthFileItem;
   fileName: string;
   fileInfoText: string;
   loading: boolean;
@@ -46,6 +51,8 @@ export type PrefixProxyEditorState = {
   priority: string;
   websockets: boolean;
   websocketsTouched: boolean;
+  usingApi: boolean;
+  usingApiTouched: boolean;
   note: string;
   noteTouched: boolean;
   headersText: string;
@@ -278,6 +285,10 @@ const buildAuthFileFieldsPatch = (
       patch.websockets = nextWebsockets;
     }
   }
+  if (supportsAuthFileUsingApi(editor.providerKey) && editor.usingApiTouched) {
+    const originalUsingApi = original.using_api === true;
+    if (editor.usingApi !== originalUsingApi) patch.using_api = editor.usingApi;
+  }
 
   return patch;
 };
@@ -325,6 +336,7 @@ const buildPrefixProxyUpdatedText = (
   if (patch.websockets !== undefined) {
     next = applyAuthFileWebsockets(next, patch.websockets);
   }
+  if (patch.using_api !== undefined) next.using_api = patch.using_api;
 
   return JSON.stringify(next);
 };
@@ -368,6 +380,7 @@ export function useAuthFilesPrefixProxyEditor(
     }
 
     setPrefixProxyEditor({
+      authFile: file,
       fileName: name,
       fileInfoText: JSON.stringify(file, null, 2),
       loading: true,
@@ -383,6 +396,8 @@ export function useAuthFilesPrefixProxyEditor(
       priority: '',
       websockets: false,
       websocketsTouched: false,
+      usingApi: false,
+      usingApiTouched: false,
       note: '',
       noteTouched: false,
       headersText: '',
@@ -430,6 +445,7 @@ export function useAuthFilesPrefixProxyEditor(
       const websockets = supportsAuthFileWebsockets(providerKey)
         ? readAuthFileWebsockets(json)
         : false;
+      const usingApi = supportsAuthFileUsingApi(providerKey) && json.using_api === true;
       const note = typeof json.note === 'string' ? json.note : '';
       const headers = json.headers;
       let headersText = '';
@@ -455,6 +471,8 @@ export function useAuthFilesPrefixProxyEditor(
           priority: priority !== undefined ? String(priority) : '',
           websockets,
           websocketsTouched: false,
+          usingApi,
+          usingApiTouched: false,
           note,
           noteTouched: false,
           headersText,
@@ -484,6 +502,9 @@ export function useAuthFilesPrefixProxyEditor(
       if (field === 'priority') return { ...prev, priority: String(value) };
       if (field === 'websockets') {
         return { ...prev, websockets: Boolean(value), websocketsTouched: true };
+      }
+      if (field === 'usingApi') {
+        return { ...prev, usingApi: Boolean(value), usingApiTouched: true };
       }
       if (field === 'note') return { ...prev, note: String(value), noteTouched: true };
       if (field === 'headersText') {
@@ -521,7 +542,22 @@ export function useAuthFilesPrefixProxyEditor(
     });
 
     try {
-      await authFilesApi.patchFields(name, payload);
+      const response = await authFilesApi.list();
+      const currentFiles = Array.isArray(response.files) ? response.files : [];
+      const resolution = resolveAuthFileStatusMutationTarget(
+        currentFiles,
+        getAuthFilePatchTarget(prefixProxyEditor.authFile)
+      );
+      if (!resolution.target || resolution.failure !== null || resolution.scope !== 'credential') {
+        throw new Error(t('auth_files.status_mutation_scope_ambiguous', { name }));
+      }
+      await authFilesApi.patchFieldsWithPluginSourceFallback(
+        getAuthFilePatchTarget(resolution.target),
+        payload,
+        currentFiles
+          .filter((file) => file.name.trim() === resolution.target?.name.trim())
+          .map(getAuthFilePatchTarget)
+      );
       showNotification(t('auth_files.prefix_proxy_saved_success', { name }), 'success');
       await loadFiles();
       setPrefixProxyEditor(null);

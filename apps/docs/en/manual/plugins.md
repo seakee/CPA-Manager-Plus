@@ -1,64 +1,64 @@
-# Plugin Management
+---
+title: CPA Plugin Management And Store
+description: Install, select versions, enable, configure, and troubleshoot CPA plugins with GitHub Releases, prereleases, manual tags, and plugin pages.
+---
 
-Plugin Management is where you install, enable, configure, and troubleshoot CPA plugins. CPAMP provides one panel entry for plugin status, configuration, and plugin page resources.
+# CPA Plugin Management And Store
 
-This page covers installing, enabling, configuring, and troubleshooting plugins from the panel.
+The Plugins page installs, upgrades, enables, configures, and troubleshoots CPA plugins. CPAMP provides the management UI and plugin-page container; actual runtime capability depends on CPA and the plugin.
 
-## Page Structure
+Open the [Plugin Management Demo](https://seakee.github.io/CPA-Manager-Plus/#/demo/plugins) to inspect fictional plugin and store data.
 
-Plugin Management normally has two entries:
+## Page Areas
 
-- **Installed plugins**: the plugins currently discovered by the runtime, with status, config, and page resources.
-- **Plugin store**: plugins available from configured store sources.
+- **Installed Plugins** shows versions, authors, state, configuration, OAuth, menus, and page resources.
+- **Plugin Store** loads installable plugins from `plugins.store-sources`.
 
-If the plugin system is globally disabled, the page will show the `plugins.enabled` state. A plugin instance marked enabled will still not run until the global switch is enabled.
+When `plugins.enabled` is off, an individually enabled plugin still cannot run.
 
-## Installed Plugins
+## Install Versions
 
-- View installed plugins, version, author, status, and configuration fields.
-- Enable or disable plugins.
-- Edit plugin configuration, priority, and enabled state.
-- Fill plugin-declared fields such as strings, numbers, booleans, arrays, and objects.
-- Start OAuth flows provided by plugins.
-- Open plugin-provided pages.
-- Delete plugin configuration or plugin files.
+The store supports three version modes:
 
-If the page says a restart is required, restart CPA or Manager Server according to your deployment. Refreshing the browser is not enough.
+- **Latest** uses the default latest version from the store or repository.
+- **GitHub Release** loads releases and lets you select a tag, with an option to show prereleases.
+- **Manual tag** pins an explicit tag when the release API is unavailable or a fixed version is required.
 
-## Plugin Store
+GitHub release discovery may fail because of repository access, network/proxy configuration, or API rate limits. Latest and manual tag remain fallback paths.
 
-The plugin store depends on `plugins.store-sources` and optional store authentication. Common operations:
+Before installing or upgrading:
 
-- Refresh the store list.
-- View plugin name, version, source, and description.
-- Install or update plugins.
-- Handle sources that require authentication.
+1. Trust the repository and download source.
+2. Confirm support for the current CPA version, OS, and architecture.
+3. Persist the plugin directory.
+4. Use prereleases only when the environment accepts compatibility risk.
 
-After installing, return to Installed plugins and confirm runtime status. The plugin directory must be persistent, otherwise container rebuilds may remove installed files.
+## Installed Plugin Actions
 
-## Before Enabling
+- Enable or disable a plugin.
+- Edit string, number, boolean, array, or object fields.
+- Change priority.
+- Start plugin-provided OAuth.
+- Open plugin page resources.
+- Remove plugin configuration or files.
 
-1. CPA plugin support is enabled.
-2. The plugin directory is persistent in the container or host.
-3. The plugin supports the current OS and architecture.
-4. Required plugin configuration fields are filled.
-5. If the plugin provides OAuth or pages, reverse proxy includes `/v0/resource/plugins/*` to CPAMP.
+If the UI says a restart is required, restart CPA or Manager Server for the deployment mode; a browser refresh is not enough.
 
-Whether a plugin can run depends on CPA runtime capability and the plugin's own compatibility. CPAMP exposes management, but it cannot make a plugin support your CPA version, OS, or CPU architecture.
+## Plugin Pages And Reverse Proxies
 
-## Blank Plugin Pages
+Plugin pages use `/v0/resource/plugins/*`. A custom reverse proxy must route that path to CPAMP or the page may be blank.
 
 Common causes:
 
-- The plugin is disabled or not registered.
-- Plugin configuration is missing.
-- The reverse proxy does not send `/v0/resource/plugins/*` to CPAMP.
-- Plugin resource files are missing or incompatible with the current version.
+- The plugin is disabled or declares no menu.
+- Resource files are missing.
+- Reverse-proxy paths are wrong.
+- The plugin version is incompatible with CPA runtime.
+- Required configuration is missing.
 
-First check path boundaries in [Reverse Proxy](../deployment/reverse-proxy.md), then inspect runtime errors in [Logs](./logs.md).
+## Security Boundaries
 
-## Change Advice
-
-In production, enable, upgrade, or delete plugins during low traffic. After enabling, watch [Dashboard](./dashboard.md) and [Monitoring](./monitoring.md) to make sure request volume, failure rate, and latency stay normal.
-
-If a plugin affects auth or upstream requests, also check [Auth Files](./auth-files.md), [OAuth Login](./oauth.md), and [Logs](./logs.md).
+- Plugins are executable extensions. Review sources, permissions, and updates like server-side code.
+- CPAMP displays metadata and proxies management operations; it does not guarantee third-party plugin security or compatibility.
+- Do not publish plugin directories, configuration, or credentials in logs and issues.
+- After production upgrades, observe [Dashboard](./dashboard.md), [Monitoring](./monitoring.md), and [Logs](./logs.md).

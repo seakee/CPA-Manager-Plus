@@ -1240,6 +1240,31 @@
   font-weight: 700;
 }
 
+.entityCopyButton {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--usage-muted);
+  cursor: pointer;
+}
+
+.entityCopyButton:hover {
+  border-color: color-mix(in srgb, var(--usage-primary) 30%, var(--usage-border));
+  background: color-mix(in srgb, var(--usage-primary) 8%, var(--usage-surface));
+  color: var(--usage-primary);
+}
+
+.entityCopyButton:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--usage-primary) 45%, transparent);
+  outline-offset: 2px;
+}
+
 .trendUnavailable {
   display: inline-flex;
   align-items: center;

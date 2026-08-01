@@ -1,0 +1,98 @@
+[
+  {
+    "name": "xai executor with grok",
+    "context": { "executorType": "XAIExecutor", "displayModel": "grok-4" },
+    "tokens": { "input": 100, "cached": 0, "cache": 0, "read": 20, "creation": 10 },
+    "expected": { "mode": "included_in_input", "uncached": 70, "totalInput": 100, "cacheRead": 20, "cacheCreation": 10 }
+  },
+  {
+    "name": "kimi executor with kimi",
+    "context": { "executorType": "KimiExecutor", "displayModel": "kimi-k2" },
+    "tokens": { "input": 100, "cached": 0, "cache": 0, "read": 20, "creation": 10 },
+    "expected": { "mode": "included_in_input", "uncached": 70, "totalInput": 100, "cacheRead": 20, "cacheCreation": 10 }
+  },
+  {
+    "name": "openai compat executor beats claude alias",
+    "context": { "executorType": "OpenAICompatExecutor", "resolvedModel": "claude-sonnet-4" },
+    "tokens": { "input": 100, "cached": 0, "cache": 0, "read": 20, "creation": 10 },
+    "expected": { "mode": "included_in_input", "uncached": 70, "totalInput": 100, "cacheRead": 20, "cacheCreation": 10 }
+  },
+  {
+    "name": "claude executor beats kimi alias",
+    "context": { "executorType": "ClaudeExecutor", "requestedModel": "kimi-k2" },
+    "tokens": { "input": 100, "cached": 0, "cache": 0, "read": 20, "creation": 10 },
+    "expected": { "mode": "separate_from_input", "uncached": 100, "totalInput": 130, "cacheRead": 20, "cacheCreation": 10 }
+  },
+  {
+    "name": "claude executor beats grok alias",
+    "context": { "executorType": "ClaudeExecutor", "displayModel": "grok-4" },
+    "tokens": { "input": 100, "cached": 0, "cache": 0, "read": 20, "creation": 10 },
+    "expected": { "mode": "separate_from_input", "uncached": 100, "totalInput": 130, "cacheRead": 20, "cacheCreation": 10 }
+  },
+  {
+    "name": "explicit separate mode beats xai executor",
+    "context": { "explicitMode": "separate_from_input", "executorType": "XAIExecutor" },
+    "tokens": { "input": 100, "cached": 0, "cache": 0, "read": 20, "creation": 10 },
+    "expected": { "mode": "separate_from_input", "uncached": 100, "totalInput": 130, "cacheRead": 20, "cacheCreation": 10 }
+  },
+  {
+    "name": "resolved model beats requested and display models",
+    "context": { "resolvedModel": "claude-sonnet-4", "requestedModel": "gpt-5", "displayModel": "grok-4" },
+    "tokens": { "input": 100, "cached": 0, "cache": 0, "read": 20, "creation": 10 },
+    "expected": { "mode": "separate_from_input", "uncached": 100, "totalInput": 130, "cacheRead": 20, "cacheCreation": 10 }
+  },
+  {
+    "name": "grok model fallback without identity fields",
+    "context": { "displayModel": "grok-4" },
+    "tokens": { "input": 100, "cached": 0, "cache": 0, "read": 20, "creation": 10 },
+    "expected": { "mode": "included_in_input", "uncached": 70, "totalInput": 100, "cacheRead": 20, "cacheCreation": 10 }
+  },
+  {
+    "name": "unknown fine grained cache fallback",
+    "context": { "displayModel": "custom-model" },
+    "tokens": { "input": 100, "cached": 0, "cache": 0, "read": 20, "creation": 10 },
+    "expected": { "mode": "separate_from_input", "uncached": 100, "totalInput": 130, "cacheRead": 20, "cacheCreation": 10 }
+  },
+  {
+    "name": "moonshot provider snapshot beats claude model",
+    "context": { "providerSnapshot": "moonshot", "resolvedModel": "claude-sonnet-4" },
+    "tokens": { "input": 100, "cached": 0, "cache": 0, "read": 20, "creation": 10 },
+    "expected": { "mode": "included_in_input", "uncached": 70, "totalInput": 100, "cacheRead": 20, "cacheCreation": 10 }
+  },
+  {
+    "name": "legacy cached tokens stay included for openai",
+    "context": { "provider": "openai", "displayModel": "gpt-5" },
+    "tokens": { "input": 100, "cached": 40, "cache": 0, "read": 0, "creation": 0 },
+    "expected": { "mode": "included_in_input", "uncached": 60, "totalInput": 100, "cacheRead": 40, "cacheCreation": 0 }
+  },
+  {
+    "name": "codex websocket executor",
+    "context": { "executorType": "CodexWebsocketsExecutor", "displayModel": "claude-alias" },
+    "tokens": { "input": 100, "cached": 0, "cache": 0, "read": 20, "creation": 10 },
+    "expected": { "mode": "included_in_input", "uncached": 70, "totalInput": 100, "cacheRead": 20, "cacheCreation": 10 }
+  },
+  {
+    "name": "codex auto executor",
+    "context": { "executorType": "CodexAutoExecutor", "displayModel": "claude-alias" },
+    "tokens": { "input": 100, "cached": 0, "cache": 0, "read": 20, "creation": 10 },
+    "expected": { "mode": "included_in_input", "uncached": 70, "totalInput": 100, "cacheRead": 20, "cacheCreation": 10 }
+  },
+  {
+    "name": "xai websocket executor",
+    "context": { "executorType": "XAIWebsocketsExecutor", "displayModel": "claude-alias" },
+    "tokens": { "input": 100, "cached": 0, "cache": 0, "read": 20, "creation": 10 },
+    "expected": { "mode": "included_in_input", "uncached": 70, "totalInput": 100, "cacheRead": 20, "cacheCreation": 10 }
+  },
+  {
+    "name": "xai auto executor",
+    "context": { "executorType": "XAIAutoExecutor", "displayModel": "claude-alias" },
+    "tokens": { "input": 100, "cached": 0, "cache": 0, "read": 20, "creation": 10 },
+    "expected": { "mode": "included_in_input", "uncached": 70, "totalInput": 100, "cacheRead": 20, "cacheCreation": 10 }
+  },
+  {
+    "name": "gemini vertex executor",
+    "context": { "executorType": "GeminiVertexExecutor", "displayModel": "claude-alias" },
+    "tokens": { "input": 100, "cached": 0, "cache": 0, "read": 20, "creation": 10 },
+    "expected": { "mode": "included_in_input", "uncached": 70, "totalInput": 100, "cacheRead": 20, "cacheCreation": 10 }
+  }
+]

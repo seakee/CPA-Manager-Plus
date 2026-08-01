@@ -20,6 +20,7 @@ export type AuthFileType =
   | 'unknown';
 
 export interface AuthFileItem {
+  id?: string;
   name: string;
   type?: AuthFileType | string;
   provider?: string;

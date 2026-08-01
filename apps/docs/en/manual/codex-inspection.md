@@ -1,60 +1,68 @@
-# Codex Inspection
+---
+title: Account Inspection (Codex / xAI)
+description: Inspect Codex and xAI accounts locally or on a Manager Server schedule, including quota, credentials, workspace, billing evidence, and controlled actions.
+---
 
-Codex Inspection checks why Codex accounts cannot serve requests reliably. Compared with Monitoring, it focuses on account state: quota, auth, workspace, reset time, and recoverable actions.
+# Account Inspection (Codex / xAI)
 
-If you only need one failed request, start with [Monitoring](./monitoring.md). If the issue is clearly concentrated on Codex accounts, use this page.
+Account inspection explains why an account cannot reliably serve requests. The route and parts of the UI still use the `Codex Inspection` name, but inspection targets now include Codex and xAI.
 
-## What It Checks
+Open the [Account Inspection Demo](https://seakee.github.io/CPA-Manager-Plus/#/demo/codex-inspection) to inspect fictional results without contacting a provider.
 
-- Account plan, quota windows, reset time, and remaining quota.
-- Whether OAuth tokens expired or became invalid.
-- Whether workspace state affects requests.
-- Whether the account hit `usage_limit_reached`.
-- Whether reauth, enable, disable, or delete actions are needed.
-
-Different accounts may return incomplete data. Missing fields are treated as unknown, not healthy or unhealthy.
+For a single failed request, start with [Monitoring](./monitoring.md). Use inspection after the problem is narrowed to an account, credential, or quota signal.
 
 ## Local And Server Inspection
 
-The page has two modes:
+- **Local inspection** runs in the current browser session and is useful for a few accounts or temporary diagnostics.
+- **Server inspection** runs in Manager Server and supports schedules, history, logs, and shared action policy.
 
-- **Local inspection**: starts from the current browser session. Best for temporary checks and small batches.
-- **Server inspection**: submitted to Manager Server. Best for background runs, schedules, history, and centralized action execution.
+Before server inspection, confirm the CPA URL, CPA Management Key, auth files, and stable `auth_index` values.
 
-Before enabling server inspection, check:
+## Codex Evidence
 
-1. CPA URL and CPA Management Key are correct.
-2. Auth Files contain complete account metadata.
-3. `auth_index` is stable.
-4. Account action policy matches your expectations, to avoid unintended automatic disable.
+- Plan, five-hour/weekly quota windows, reset, and remaining quota.
+- OAuth token and credential state.
+- Workspace availability or deactivation.
+- Explicit evidence such as `usage_limit_reached`.
+- Recommendations to keep, reauthorize, disable, enable, or delete.
 
-## Reading Results
+Missing fields remain unknown; they are not converted into healthy or unhealthy states.
 
-Results are grouped by suggested action:
+## xAI Evidence
 
-- **Keep**: no action required.
-- **Reauth**: OAuth or auth state is invalid. Go to [OAuth Login](./oauth.md).
-- **Disable**: the account should not currently serve requests, often because quota crossed a threshold or state is abnormal.
-- **Enable**: the account appears recovered and can be re-enabled.
-- **Delete**: only for accounts confirmed invalid and no longer needed.
+xAI inspection prefers read-only evidence that does not send a model inference request:
 
-Do not read only the action. Check reason, evidence, and recent request behavior. For important accounts, disable first and observe before deleting.
+- Grok Build / CLI OAuth may expose weekly quota, monthly billing, and account state.
+- Free-usage exhaustion events can enter a controlled rolling 24-hour cooldown.
+- When paid `api.x.ai` OAuth cannot access CLI billing, a read-only identity endpoint can verify official API identity.
+- Identity success proves only access to the identity endpoint; it does not prove a specific model, chat route, cost, or remaining quota.
+- Ambiguous `403`, regional restrictions, and model permissions are not automatically treated as invalid credentials.
 
-## Server Schedule
+## Results And Actions
 
-Server inspection can run at a fixed interval or at specific daily time points. Saved settings normally take effect after the next worker poll.
+- **Keep**: no sufficient evidence requires action.
+- **Reauthorize**: OAuth or credential state is explicitly invalid.
+- **Review**: evidence is incomplete or may involve region, permission, or model scope.
+- **Disable**: the account should not receive new requests and policy permits the action.
+- **Enable**: the same inspection automation disabled the credential and now has explicit recovery evidence.
+- **Delete**: only after the account is clearly invalid, the file is not shared, and the user confirms.
 
-Scheduled inspection is useful for:
+Read the provider, reason code, redacted evidence, and recent request behavior together with the action label.
 
-- Routine health checks for many Codex accounts.
-- Automatically recovering accounts after cooldown.
-- Keeping inspection history and logs.
+## Scheduling And Automation Boundaries
 
-If you enable automatic actions, start conservatively. Automatically enabling clearly recovered accounts is safer than automatic delete or broad disable.
+Server inspection can run at fixed intervals or a daily time. Start with record-only or conservative actions before enabling automatic disables.
 
-## Automatic Action Boundaries
+All restores follow “the owner that disabled is the owner that may restore”:
 
-Automation should handle clearly recoverable states, such as restoring after quota cooldown. Manually disabled accounts are not restored automatically.
+- Inspection only restores credentials disabled by inspection.
+- Quota cooldown only restores credentials disabled by that cooldown record.
+- Manual and account-action disables are not overridden by inspection.
 
-If inspection results disagree with real request behavior, check the Monitoring failure summary first, then Auth Files and OAuth state.
+## Related Pages
 
+- Quota windows and cooldowns: [Quota](./quota.md)
+- OAuth reauthorization: [OAuth Login](./oauth.md)
+- Auth file state: [Auth Files](./auth-files.md)
+- Repeated credential failures: [Account Action Queue](./account-actions.md)
+- Individual request evidence: [Monitoring](./monitoring.md)

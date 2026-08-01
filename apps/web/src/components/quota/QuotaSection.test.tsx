@@ -55,6 +55,11 @@ vi.mock('@/hooks/useHeaderRefresh', () => ({
 }));
 
 vi.mock('@/stores', () => ({
+  captureQuotaCacheGeneration: () => 0,
+  commitIfQuotaCacheCurrent: (_generation: number, commit: () => void) => {
+    commit();
+    return true;
+  },
   useNotificationStore: (selector: (state: unknown) => unknown) =>
     selector({
       showConfirmation: mocks.showConfirmation,

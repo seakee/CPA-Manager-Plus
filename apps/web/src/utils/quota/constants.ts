@@ -200,8 +200,21 @@ export const KIMI_REQUEST_HEADERS = {
 };
 
 // xAI/Grok API configuration
-export const XAI_BILLING_URL = 'https://cli-chat-proxy.grok.com/v1/billing';
+export const XAI_BILLING_WEEKLY_URL = 'https://cli-chat-proxy.grok.com/v1/billing?format=credits';
+export const XAI_BILLING_MONTHLY_URL = 'https://cli-chat-proxy.grok.com/v1/billing';
+export const XAI_OFFICIAL_API_ME_URL = 'https://api.x.ai/v1/me';
+export const XAI_OFFICIAL_API_BASE_URL = 'https://api.x.ai/v1';
+export const XAI_CLI_CHAT_PROXY_BASE_URL = 'https://cli-chat-proxy.grok.com/v1';
+export const DEFAULT_XAI_INSPECTION_MODEL = 'grok-4.5';
+export const DEFAULT_XAI_INSPECTION_PROMPT = 'Reply with exactly OK.';
+export const XAI_GROK_CLIENT_VERSION = '0.2.101';
+export const XAI_GROK_USER_AGENT = 'grok-pager/0.2.101 grok-shell/0.2.101 (macos; aarch64)';
+export const XAI_INFERENCE_USER_AGENT = 'xai-grok-workspace/0.2.101';
 
 export const XAI_REQUEST_HEADERS = {
   Authorization: 'Bearer $TOKEN$',
+  'x-xai-token-auth': 'xai-grok-cli',
+  'x-grok-client-version': XAI_GROK_CLIENT_VERSION,
+  accept: '*/*',
+  'user-agent': XAI_GROK_USER_AGENT,
 };

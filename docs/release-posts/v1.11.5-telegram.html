@@ -1,0 +1,14 @@
+🚀 <b>7 月 22 日 · v1.11.5</b>
+
+✨ <b>更新内容</b>
+
+• xAI 免费用量耗尽会展示额度证据、预计恢复时间与保留策略。
+• Codex 账号升级后可在认证文件详情中主动刷新套餐元数据。
+• Usage Analytics 的 API Key 趋势改用真实时间分布与整数请求数。
+• OpenAI 兼容 Provider 的 Key 测试可完整查看上游错误正文。
+
+⚠️ <b>注意事项</b>
+
+• Manager Server 会自动新增可空的 <code>quota_cooldowns.evidence_json</code> 字段；升级前仍建议备份 SQLite 与 <code>data.key</code>，无需手工迁移。
+• xAI 免费用量诊断仅适用于 Full Docker 和 Manager Server，轻量 CPA Panel 不提供该本地诊断。
+• Codex“刷新凭据”只刷新凭据元数据，不会同时刷新配额。

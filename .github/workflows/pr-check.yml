@@ -4,9 +4,11 @@ on:
   pull_request:
     branches:
       - main
+      - dev
   push:
     branches:
       - main
+      - dev
 
 permissions:
   contents: read
@@ -16,8 +18,52 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Scope
+    runs-on: ubuntu-latest
+
+    outputs:
+      frontend: ${{ steps.classify.outputs.frontend }}
+      manager_server: ${{ steps.classify.outputs.manager_server }}
+      windows_sqlite: ${{ steps.classify.outputs.windows_sqlite }}
+      native_control: ${{ steps.classify.outputs.native_control }}
+      docker: ${{ steps.classify.outputs.docker }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed paths
+        id: classify
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          changed_files="${RUNNER_TEMP}/pr-check-changed-files.txt"
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
+            git diff --name-only "${PR_BASE_SHA}...${PR_HEAD_SHA}" > "${changed_files}"
+          elif [ -z "${PUSH_BEFORE_SHA}" ] || [[ "${PUSH_BEFORE_SHA}" =~ ^0+$ ]]; then
+            git show --pretty=format: --name-only "${CURRENT_SHA}" > "${changed_files}"
+          else
+            git diff --name-only "${PUSH_BEFORE_SHA}..${CURRENT_SHA}" > "${changed_files}"
+          fi
+
+          echo "Changed files:"
+          sed 's/^/- /' "${changed_files}"
+          node bin/ci/classify-pr-checks.mjs < "${changed_files}" >> "${GITHUB_OUTPUT}"
+
   frontend:
     name: Frontend
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -45,23 +91,17 @@ jobs:
         run: npm run test
 
       - name: Build
-        run: npm run build
+        run: npm --workspace apps/web run build:bundle
         env:
           VERSION: ci
 
       - name: Check demo isolation
         run: npm run check:demo-isolation
 
-      - name: Build demo site
-        run: npm run build:demo
-        env:
-          VERSION: ci-demo
-
-      - name: Build docs site
-        run: npm run docs:build
-
   manager-server:
     name: Manager Server
+    needs: changes
+    if: needs.changes.outputs.manager_server == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -78,8 +118,30 @@ jobs:
         working-directory: apps/manager-server
         run: go test ./...
 
+  manager-server-windows-sqlite:
+    name: Manager Server SQLite (Windows)
+    needs: changes
+    if: needs.changes.outputs.windows_sqlite == 'true'
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+          cache-dependency-path: apps/manager-server/go.sum
+
+      - name: Test SQLite repository
+        working-directory: apps/manager-server
+        run: go test ./internal/repository/sqlite
+
   native-control:
     name: Native Control (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.native_control == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -105,12 +167,23 @@ jobs:
       - name: Test native control scripts
         run: npx vitest run tests/nativeControlScripts.test.mjs
 
+      - name: Validate native packaging script syntax
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash -n bin/release/package-native.sh
+
   docker-build:
     name: Docker Build
     runs-on: ubuntu-latest
     needs:
+      - changes
       - frontend
       - manager-server
+    if: >-
+      always() &&
+      needs.changes.outputs.docker == 'true' &&
+      (needs.frontend.result == 'success' || needs.frontend.result == 'skipped') &&
+      (needs['manager-server'].result == 'success' || needs['manager-server'].result == 'skipped')
 
     steps:
       - name: Checkout code
@@ -118,6 +191,9 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Validate Docker Compose configuration
+        run: docker compose -f docker-compose.manager.yml config
 
       - name: Build Manager Server image
         uses: docker/build-push-action@v6
@@ -127,3 +203,51 @@ jobs:
           push: false
           build-args: |
             VERSION=ci
+
+  required:
+    name: Required checks
+    needs:
+      - changes
+      - frontend
+      - manager-server
+      - manager-server-windows-sqlite
+      - native-control
+      - docker-build
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Verify applicable checks
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+          MANAGER_SERVER_RESULT: ${{ needs['manager-server'].result }}
+          WINDOWS_SQLITE_RESULT: ${{ needs['manager-server-windows-sqlite'].result }}
+          NATIVE_CONTROL_RESULT: ${{ needs['native-control'].result }}
+          DOCKER_BUILD_RESULT: ${{ needs['docker-build'].result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          results=(
+            "Scope:${CHANGES_RESULT}"
+            "Frontend:${FRONTEND_RESULT}"
+            "Manager Server:${MANAGER_SERVER_RESULT}"
+            "Manager Server SQLite (Windows):${WINDOWS_SQLITE_RESULT}"
+            "Native Control:${NATIVE_CONTROL_RESULT}"
+            "Docker Build:${DOCKER_BUILD_RESULT}"
+          )
+
+          for check in "${results[@]}"; do
+            name="${check%%:*}"
+            result="${check#*:}"
+            case "${result}" in
+              success|skipped)
+                echo "${name}: ${result}"
+                ;;
+              *)
+                echo "${name} did not complete successfully: ${result:-missing}" >&2
+                exit 1
+                ;;
+            esac
+          done

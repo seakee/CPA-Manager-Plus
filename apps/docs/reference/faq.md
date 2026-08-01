@@ -8,26 +8,26 @@ CPAMP 统计和监控能力应从 Manager Server 托管面板进入：
 http://<host>:18317/management.html
 ```
 
-## 应该选择哪个部署模式？
+## 应该选择哪种使用方式？
 
-| 目标 | 推荐模式 |
-|---|---|
-| 新部署 | Full Docker / Manager Server 模式 |
-| 请求监控、历史统计、模型价格、别名、导入导出 | Full Docker / Manager Server 模式 |
-| 只保留已有 CPA 端口面板，不需要 Manager Server 统计 | [CPA 托管面板兼容模式](../deployment/cpa-panel.md) |
-| 不使用 Docker | 原生 Manager Server 模式 |
+| 目标                                         | 推荐模式                                     |
+| -------------------------------------------- | -------------------------------------------- |
+| 新部署，需要全部功能                         | CPAMP 完整模式（Docker，推荐）               |
+| 请求监控、历史统计、模型价格、别名、导入导出 | CPAMP 完整模式                               |
+| 不增加额外服务，用更清晰的界面替代官方 UI    | [CPAMP 轻量面板](../deployment/cpa-panel.md) |
+| 不使用 Docker，但需要全部功能                | CPAMP 完整模式（原生包）                     |
 
-CPA 托管面板只适合延续已有 CPA 端口访问习惯。它不配置 Manager Server，也不读取 Manager Server SQLite 数据。需要完整 CPAMP 能力时，使用 Docker 或原生包启动 Manager Server。
+CPAMP 轻量面板由 CPA 直接托管，是官方 Management Center 的增强替代 UI。它不配置 Manager Server，也不读取 Manager Server SQLite 数据。需要完整 CPAMP 能力时，使用 Docker 或原生包启动 Manager Server，并打开 `:18317/management.html`。
 
 ## 打开面板后应该访问哪个地址？
 
-完整 Docker / 原生 Manager Server 模式：
+CPAMP 完整模式（Docker 或原生包）：
 
 ```text
 http://<host>:18317/management.html
 ```
 
-CPA 托管面板通常从 CPA 端口访问，常见是：
+CPAMP 轻量面板由 CPA 托管，通常从 CPA 端口访问：
 
 ```text
 http://<cpa-host>:8317/management.html
@@ -37,16 +37,16 @@ http://<cpa-host>:8317/management.html
 
 ## 管理员密钥和 CPA Management Key 有什么区别？
 
-| 位置 | 使用的密钥 |
-|---|---|
-| CPAMP Full Docker / 原生登录 | CPAMP 管理员密钥，通常以 `cpamp_...` 开头 |
-| CPAMP 首次 setup 连接 CPA | CPA Management Key |
-| CPA 托管面板登录 | CPA Management Key |
-| 普通模型 API 请求 | CPA API 密钥 |
-| `GET /v1/models` | CPA API 密钥 |
-| setup 后的 CPAMP Manager Server API | CPAMP 管理员密钥 |
+| 位置                                | 使用的密钥                                |
+| ----------------------------------- | ----------------------------------------- |
+| CPAMP Full Docker / 原生登录        | CPAMP 管理员密钥，通常以 `cpamp_...` 开头 |
+| CPAMP 首次 setup 连接 CPA           | CPA Management Key                        |
+| CPAMP 轻量面板登录                  | CPA Management Key                        |
+| 普通模型 API 请求                   | CPA API 密钥                              |
+| `GET /v1/models`                    | CPA API 密钥                              |
+| setup 后的 CPAMP Manager Server API | CPAMP 管理员密钥                          |
 
-不要混用这些密钥。通过 setup 或面板保存的 CPA 连接会把 CPA Management Key 用 `data.key` 加密后写入 SQLite；安装器 env/secret 管理的连接从安装目录读取密钥，不写入 SQLite。CPA 托管面板由浏览器持有 CPA Management Key。
+不要混用这些密钥。通过 setup 或面板保存的 CPA 连接会把 CPA Management Key 用 `data.key` 加密后写入 SQLite；安装器 env/secret 管理的连接从安装目录读取密钥，不写入 SQLite。CPAMP 轻量面板由浏览器持有 CPA Management Key。
 
 ## Full Docker 打开的是登录页，不是 setup
 
@@ -335,11 +335,11 @@ CPA 用量队列是内存队列，保留时间有限。
 
 如果 Manager Server 停机超过保留窗口，通常无法从 CPA 恢复那段时间的数据。请保持 Manager Server 持续运行。
 
-## CPA 托管面板缺少监控或模型价格
+## CPAMP 轻量面板缺少监控或模型价格
 
 这是预期行为。
 
-CPA 托管面板不使用 Manager Server 分析能力。需要监控、仪表盘、模型价格、API 密钥别名、用量导入导出和服务端巡检时，请打开：
+CPAMP 轻量面板不使用 Manager Server 分析能力，也不能挂接独立 Manager Server。需要监控、仪表盘、模型价格、API 密钥别名、用量导入导出和服务端巡检时，请打开：
 
 ```text
 http://<cpamp-host>:18317/management.html
@@ -349,8 +349,9 @@ http://<cpamp-host>:18317/management.html
 
 确认 CPA 配置指向本项目：
 
-```text
-remote-management.panel-repo = https://github.com/seakee/CPA-Manager-Plus
+```yaml
+remote-management:
+  panel-github-repository: 'https://github.com/seakee/CPA-Manager-Plus'
 ```
 
 如果新面板仍未加载，清理 CPA 缓存的面板文件，然后重新载入或重启 CPA：
@@ -371,4 +372,4 @@ rm static/management.html
 
 ## release 里的 management.html 是什么？
 
-`management.html` 是 release 包中的单文件管理面板，可被 Manager Server 或 CPA 托管面板加载。在线文档仍通过 GitHub Pages 访问，不随安装包分发。
+`management.html` 是 release 包中的单文件管理面板，可由 Manager Server 托管，也可作为 CPAMP 轻量面板由 CPA 加载。在线文档仍通过 GitHub Pages 访问，不随安装包分发。

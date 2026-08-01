@@ -1,84 +1,56 @@
-# Request Monitoring Troubleshooting
+# Monitoring Has No Data
 
-When Dashboard or Monitoring is empty, do not start by refreshing the page or changing filters. First locate the broken link: CPA publishing, Manager Server collection, SQLite insertion, or frontend display.
+First confirm that you opened CPAMP Full Mode:
 
-## Quick Checks
+```text
+http://<cpamp-host>:18317/management.html
+```
 
-1. Confirm CPA has produced real requests.
-2. Confirm CPA usage publishing is enabled.
-3. Open Manager Server `/status` and check `collector`, `lastConsumedAt`, `lastInsertedAt`, and `lastError`.
-4. Confirm no other Manager Server is consuming the same CPA queue.
-5. Confirm `pollIntervalMs` is less than or equal to CPA usage queue retention.
+The Lightweight Panel on CPA `:8317/management.html` does not store request history, so Monitoring is unavailable there by design.
 
-## `/status` Fields
+## Check In This Order
 
-| Field | Meaning | How to read it |
-|---|---|---|
-| `collector` / `mode` | Current collector state and mode. | Should match `USAGE_COLLECTOR_MODE` or panel configuration. |
-| `queue` | CPA usage queue name. | Usually `usage` by default. |
-| `lastConsumedAt` | Last time an event was read from the CPA queue. | Empty for a long time means no event has been consumed. |
-| `lastInsertedAt` | Last time an event was written to SQLite. | If events are consumed but not inserted, check `lastError` and skipped counts. |
-| `totalInserted` | Total inserted events. | Growth means the collection path is working. |
-| `totalSkipped` | Total skipped events. | Can be duplicate, invalid, or already processed events. |
-| `lastError` | Latest error. | Use it first to locate network, auth, or data format issues. |
+1. **Send a real request**: confirm that Codex, Claude Code, or another client actually requested a model through CPA.
+2. **Check the CPA connection**: Dashboard should show CPA as connected with no authentication error.
+3. **Enable Monitoring**: in Manager Server configuration, confirm that request monitoring is enabled.
+4. **Wait for a new request**: Monitoring only shows events collected after it is enabled; expired events cannot be recovered.
+5. **Use one Full Mode instance**: do not let multiple Manager Servers read the same CPA request queue.
 
-## Collection Modes
+## Troubleshoot By Symptom
 
-`USAGE_COLLECTOR_MODE=auto` tries:
+| Symptom                                 | Check first                                                    |
+| --------------------------------------- | -------------------------------------------------------------- |
+| Dashboard says CPA is disconnected      | CPA URL, CPA Management Key, network, and remote management    |
+| CPA is connected but no requests appear | Client base URL, CPA usage publishing, Monitoring switch       |
+| Data appears intermittently             | Manager Server restarts, queue retention, duplicate collectors |
+| Data stopped after adding a proxy       | Let Manager Server connect directly to CPA `:8317` first       |
+| No new data immediately after upgrade   | Send a new request and check the current connection            |
 
-1. RESP Pub/Sub.
-2. HTTP queue.
-3. RESP pop.
+## Most Common Fix
 
-Behind a reverse proxy:
+1. Confirm that client base URLs point to CPA, not CPAMP.
+2. Enable `usage-statistics-enabled` in CPA configuration.
+3. Enable Monitoring in CPAMP and keep automatic collection mode.
+4. Let Manager Server reach the CPA API port directly.
+5. After restarting, send a new request and refresh Monitoring.
 
-- RESP Pub/Sub and RESP pop must connect directly to the CPA API port, usually `8317`.
-- HTTP reverse proxies cannot proxy RESP.
-- HTTP queue can go through an HTTP proxy.
-- If only an HTTP proxy path is available, confirm CPA is at least `v6.10.8+`.
+If data is still missing, save CPA logs, Manager Server logs, and System version information for the same time window. Do not share real API keys, Management Keys, or auth files.
 
-## Retention And Polling
+::: details Advanced diagnostics: status fields and collection protocols
 
-CPA usage queue retention defaults to 60 seconds and is capped at 3600 seconds. `pollIntervalMs` cannot exceed retention.
+Open the authenticated Manager Server `/status` endpoint and check:
 
-Typical problems:
+| Field            | Meaning                                            |
+| ---------------- | -------------------------------------------------- |
+| `lastConsumedAt` | Last time an event was read from CPA               |
+| `lastInsertedAt` | Last time an event was saved to local history      |
+| `lastError`      | Most recent network, authentication, or data error |
+| `totalInserted`  | Total request events saved                         |
 
-- Manager Server was stopped longer than retention, so old events expired and cannot be recovered.
-- `pollIntervalMs` is too large, so events expire before the next poll.
-- Multiple Manager Servers consume the same queue and one instance removes events first.
+If `lastConsumedAt` is empty, check CPA usage publishing, address, and collection networking. If events are consumed but not inserted, check `lastError` and data directory permissions.
 
-## Common Symptoms
+Automatic collection selects an available path. RESP mode must connect directly to the CPA API port; a normal HTTP reverse proxy cannot proxy RESP. The HTTP queue can use an HTTP proxy.
 
-### The panel is empty and `lastConsumedAt` is also empty
+CPA queue retention is intentionally short. Events cannot be recovered after Manager Server stays offline longer than retention. The poll interval must not exceed queue retention.
 
-Check:
-
-- Whether CPA usage publishing is enabled.
-- Whether the CPA URL is reachable from Manager Server.
-- Whether the CPA Management Key is correct.
-- Whether collector mode matches the network path.
-
-### `lastConsumedAt` has a value, but `lastInsertedAt` does not change
-
-Check:
-
-- Whether `lastError` contains SQLite, JSON, or field compatibility errors.
-- Whether the SQLite data directory is writable.
-- Whether restored `usage.sqlite` and `data.key` do not match.
-
-### Events are missing intermittently
-
-Check:
-
-- Whether retention is too short.
-- Whether Manager Server is restarted frequently.
-- Whether multiple Manager Servers consume the same queue.
-- Whether CPA and Manager Server clocks have a large skew.
-
-## Fix Order
-
-1. Let Manager Server connect directly to CPA `:8317` first to rule out proxy issues.
-2. Temporarily set `USAGE_COLLECTOR_MODE` to `auto`.
-3. Increase CPA usage queue retention and keep `pollIntervalMs` lower.
-4. Ensure only one Manager Server consumes the same CPA queue.
-5. If monitoring is still empty, keep `/status`, Manager Server logs, and CPA usage configuration for further diagnosis.
+:::

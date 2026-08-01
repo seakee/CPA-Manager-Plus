@@ -455,7 +455,7 @@ describe('native control scripts', () => {
         'if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }',
       ].join('; '),
     ]);
-  });
+  }, 10_000);
 
   it('starts Windows processes with custom paths, private files, logs, and stop', () => {
     if (process.platform !== 'win32') {

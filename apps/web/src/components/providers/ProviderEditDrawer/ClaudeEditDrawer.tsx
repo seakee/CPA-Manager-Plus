@@ -57,13 +57,13 @@ const buildEmptyForm = (): ProviderFormState => ({
   excludedText: '',
 });
 
-const normalizeClaudeModelEntries = (entries: Array<{ name: string; alias: string }>) =>
-  (entries ?? []).reduce<Array<{ name: string; alias: string }>>((acc, entry) => {
+const normalizeClaudeModelEntries = (entries: ProviderFormState['modelEntries']) =>
+  (entries ?? []).reduce<ProviderFormState['modelEntries']>((acc, entry) => {
     const name = String(entry?.name ?? '').trim();
     let alias = String(entry?.alias ?? '').trim();
     if (name) alias = alias || name;
     if (!name && !alias) return acc;
-    acc.push({ name, alias });
+    acc.push({ ...entry, name, alias });
     return acc;
   }, []);
 
@@ -103,6 +103,7 @@ const buildClaudeBaseline = (form: ProviderFormState) => ({
   baseUrl: String(form.baseUrl ?? '').trim(),
   proxyUrl: String(form.proxyUrl ?? '').trim(),
   disableCooling: Boolean(form.disableCooling),
+  rebuildMidSystemMessage: Boolean(form.rebuildMidSystemMessage),
   headers: normalizeHeaderEntries(form.headers),
   models: normalizeClaudeModelEntries(form.modelEntries),
   excludedModels: parseExcludedModels(form.excludedText ?? ''),
@@ -244,6 +245,7 @@ export function ClaudeEditDrawer({
       baseline.baseUrl !== String(form.baseUrl ?? '').trim() ||
       baseline.proxyUrl !== String(form.proxyUrl ?? '').trim() ||
       baseline.disableCooling !== Boolean(form.disableCooling) ||
+      baseline.rebuildMidSystemMessage !== Boolean(form.rebuildMidSystemMessage) ||
       !areKeyValueEntriesEqual(baseline.headers, normalizeHeaderEntries(form.headers)) ||
       !areModelEntriesEqual(baseline.models, normalizeClaudeModelEntries(form.modelEntries)) ||
       !areStringArraysEqual(
@@ -580,13 +582,19 @@ export function ClaudeEditDrawer({
         authIndex: normalizeAuthIndex(form.authIndex) ?? undefined,
         disableCooling: form.disableCooling,
         experimentalCchSigning: form.experimentalCchSigning,
+        rebuildMidSystemMessage: form.rebuildMidSystemMessage,
       };
-      const nextList =
+      if (editIndex !== null) {
+        await providersApi.updateClaudeConfig(configs[editIndex], payload);
+      } else {
+        await providersApi.createClaudeConfig(payload);
+      }
+      const syncedList = await providersApi.getClaudeConfigs().catch(() =>
         editIndex !== null
-          ? configs.map((item, idx) => (idx === editIndex ? payload : item))
-          : [...configs, payload];
-      await providersApi.saveClaudeConfigs(nextList);
-      updateConfigValue('claude-api-key', nextList);
+          ? configs.map((item, index) => (index === editIndex ? payload : item))
+          : [...configs, payload]
+      );
+      updateConfigValue('claude-api-key', syncedList);
       clearCache('claude-api-key');
       showNotification(
         editIndex !== null
@@ -695,6 +703,20 @@ export function ClaudeEditDrawer({
               />
               <div className="hint">{t('ai_providers.disable_cooling_hint')}</div>
             </div>
+            <div className="form-group">
+              <label>{t('ai_providers.rebuild_mid_system_message_label')}</label>
+              <ToggleSwitch
+                checked={Boolean(form.rebuildMidSystemMessage)}
+                onChange={(value) =>
+                  setForm((prev) => ({ ...prev, rebuildMidSystemMessage: value }))
+                }
+                disabled={saving || disabled || isTesting}
+                ariaLabel={t('ai_providers.rebuild_mid_system_message_label')}
+              />
+              <div className="hint">
+                {t('ai_providers.rebuild_mid_system_message_hint')}
+              </div>
+            </div>
             <HeaderInputList
               entries={form.headers}
               onChange={(entries) => setForm((prev) => ({ ...prev, headers: entries }))}
@@ -749,6 +771,8 @@ export function ClaudeEditDrawer({
                 removeButtonClassName={styles.modelRowRemoveButton}
                 removeButtonTitle={t('common.delete')}
                 removeButtonAriaLabel={t('common.delete')}
+                showForceMapping
+                forceMappingLabel={t('ai_providers.force_mapping_label')}
               />
 
               <div className={styles.modelTestPanel}>

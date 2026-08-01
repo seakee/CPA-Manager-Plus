@@ -4,11 +4,12 @@ import {
   getDemoAccountActionCandidates,
   getDemoAccountProcessingPolicy,
   getDemoApiKeyAliases,
+  getDemoAuthFiles,
   getDemoCodexInspectionRun,
-  getDemoCodexInspectionRuns,
   getDemoDashboardSummary,
   getDemoHeaderSnapshots,
   getDemoManagerConfig,
+  getDemoModelPriceUsageSummary,
   getDemoModelPrices,
   getDemoMonitoringAnalytics,
   getDemoQuotaCooldowns,
@@ -17,7 +18,14 @@ import {
   getDemoUsageServiceStatus,
 } from '@/features/demo/demoFixtures';
 import { isDemoMode } from '@/features/demo/demoMode';
+import { hasCodexInspectionStableIdentity } from '@/features/monitoring/model/codexInspectionOwnership';
+import type { AuthFileItem } from '@/types';
 import { normalizeApiBase } from '@/utils/connection';
+import {
+  getAuthFileStatusIdentityKey,
+  readAuthFileStatusPhysicalName,
+  resolveAuthFileStatusMutationTarget,
+} from '@/utils/authFileStatusMutation';
 import type { ModelPrice } from '@/utils/usage';
 
 const USAGE_SERVICE_ERROR_CODES = new Set([
@@ -42,6 +50,13 @@ const USAGE_SERVICE_ERROR_CODES = new Set([
   'model_price_sync_failed',
   'method_not_allowed',
   'account_processing_policy_env_locked',
+  'usage_import_session_invalid_request',
+  'usage_import_session_not_found',
+  'usage_import_session_conflict',
+  'usage_import_session_too_large',
+  'usage_import_session_quota_exceeded',
+  'usage_import_session_limit_exceeded',
+  'usage_import_session_unavailable',
 ]);
 
 export interface UsageServiceApiError extends Error {
@@ -113,11 +128,15 @@ export interface AccountProcessingPolicyPatch {
 export interface QuotaCooldownInfo {
   authFileName: string;
   authIndex?: string;
+  accountSnapshot?: string;
   provider?: string;
   owner?: string;
+  reasonCode?: string;
+  windowKind?: 'five_hour' | 'weekly' | 'monthly' | 'rolling_24h' | 'unknown' | string;
   recoverAtMs: number;
   disabledAtMs?: number;
   createdAtMs?: number;
+  evidence?: ProviderUsageMetadata;
 }
 
 export interface QuotaCooldownsResponse {
@@ -173,15 +192,21 @@ export interface ManagerCodexInspectionScheduleConfig {
 export interface ManagerCodexInspectionConfig {
   enabled?: boolean;
   schedule?: ManagerCodexInspectionScheduleConfig;
+  targetTypes?: string[];
   targetType?: string;
   workers?: number;
   deleteWorkers?: number;
   timeout?: number;
   retries?: number;
   userAgent?: string;
+  xaiInferenceUserAgent?: string;
+  xaiInferenceEnabled?: boolean;
+  xaiInferenceModel?: string;
+  xaiInferencePrompt?: string;
   usedPercentThreshold?: number;
   sampleSize?: number;
   autoActionMode?: ManagerCodexInspectionAutoActionMode | string;
+  autoRecoverEnabled?: boolean;
 }
 
 export interface ManagerConfig {
@@ -225,6 +250,8 @@ export interface CodexInspectionRun {
   settings?: ManagerCodexInspectionConfig;
   createdAtMs: number;
   updatedAtMs: number;
+  active?: boolean;
+  cancellable?: boolean;
 }
 
 export interface CodexInspectionQuotaWindow {
@@ -242,6 +269,7 @@ export interface CodexInspectionResult {
   accountKey: string;
   fileName: string;
   displayAccount: string;
+  accountSnapshot?: string;
   authIndex?: string;
   accountId?: string;
   provider: string;
@@ -256,6 +284,7 @@ export interface CodexInspectionResult {
   statusCode?: number;
   usedPercent?: number;
   isQuota: boolean;
+  autoRecoverEligible?: boolean;
   error?: string;
   planType?: string | null;
   quotaWindows?: CodexInspectionQuotaWindow[];
@@ -299,8 +328,27 @@ export interface CodexInspectionActionsResponse {
   detail: CodexInspectionRunDetail;
 }
 
+export interface CodexInspectionActionOverride {
+  resultId: number;
+  action: 'delete';
+}
+
 export interface ModelPricesResponse {
   prices: Record<string, ModelPrice>;
+}
+
+export interface ModelPriceUsageStat {
+  model: string;
+  calls: number;
+  requested_calls: number;
+  resolved_calls: number;
+}
+
+export interface ModelPriceUsageSummaryResponse {
+  sampled_events: number;
+  total_events: number;
+  truncated: boolean;
+  models: ModelPriceUsageStat[];
 }
 
 export interface ModelPriceSyncCandidate {
@@ -330,6 +378,7 @@ export interface ModelPriceSyncResponse extends ModelPricesResponse {
   matched?: Record<string, ModelPrice>;
   candidates?: ModelPriceSyncCandidateSet[];
   unmatched?: string[];
+  preserved?: string[];
   proxyUsed?: boolean;
   sourceResults?: ModelPriceSyncSourceResult[];
 }
@@ -357,7 +406,10 @@ export interface AccountActionCandidate {
   accountSnapshot?: string;
   accountIdSnapshot?: string;
   authLabel?: string;
+  reasonCode?: string;
   reason: string;
+  autoDisableEligible?: boolean;
+  autoDisabledAtMs?: number;
   evidence?: unknown;
   lastError?: string;
   firstSeenAtMs: number;
@@ -385,6 +437,97 @@ export interface UsageImportResponse {
   unsupported?: number;
   warnings?: string[];
 }
+
+export type UsageImportSessionStatus =
+  | 'uploading'
+  | 'ready'
+  | 'processing'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export interface UsageImportSession {
+  id: string;
+  filename: string;
+  status: UsageImportSessionStatus;
+  size_bytes: number;
+  received_bytes: number;
+  chunk_size_bytes: number;
+  created_at_ms: number;
+  updated_at_ms: number;
+  expires_at_ms: number;
+  retryable?: boolean;
+  error?: string;
+  result?: UsageImportResponse;
+}
+
+const demoUsageImportSessions = new Map<string, UsageImportSession>();
+let demoUsageImportSessionSequence = 0;
+
+const cloneUsageImportSession = (session: UsageImportSession): UsageImportSession => ({
+  ...session,
+  result: session.result
+    ? { ...session.result, warnings: [...(session.result.warnings ?? [])] }
+    : undefined,
+});
+
+const getDemoUsageImportSession = (sessionId: string): UsageImportSession => {
+  const session = demoUsageImportSessions.get(sessionId);
+  if (!session) {
+    const error = new Error('usage import session not found') as UsageServiceApiError;
+    error.code = 'usage_import_session_not_found';
+    throw error;
+  }
+  return cloneUsageImportSession(session);
+};
+
+const createDemoUsageImportSession = (filename: string, sizeBytes: number): UsageImportSession => {
+  const now = Date.now();
+  const id = `demo-usage-import-${++demoUsageImportSessionSequence}`;
+  const session: UsageImportSession = {
+    id,
+    filename,
+    status: 'uploading',
+    size_bytes: sizeBytes,
+    received_bytes: 0,
+    chunk_size_bytes: Math.min(4 * 1024 * 1024, sizeBytes),
+    created_at_ms: now,
+    updated_at_ms: now,
+    expires_at_ms: now + 24 * 60 * 60 * 1000,
+  };
+  demoUsageImportSessions.set(id, session);
+  return cloneUsageImportSession(session);
+};
+
+const uploadDemoUsageImportSessionChunk = (
+  sessionId: string,
+  offset: number,
+  chunkSize: number
+): UsageImportSession => {
+  const session = getDemoUsageImportSession(sessionId);
+  session.received_bytes = Math.min(session.size_bytes, offset + chunkSize);
+  session.status = session.received_bytes === session.size_bytes ? 'ready' : 'uploading';
+  session.updated_at_ms = Date.now();
+  demoUsageImportSessions.set(sessionId, session);
+  return cloneUsageImportSession(session);
+};
+
+const completeDemoUsageImportSession = (sessionId: string): UsageImportSession => {
+  const session = getDemoUsageImportSession(sessionId);
+  session.status = 'completed';
+  session.updated_at_ms = Date.now();
+  session.result = { format: 'jsonl', added: 12, skipped: 0, total: 12, failed: 0 };
+  demoUsageImportSessions.set(sessionId, session);
+  return cloneUsageImportSession(session);
+};
+
+const cancelDemoUsageImportSession = (sessionId: string): UsageImportSession => {
+  const session = getDemoUsageImportSession(sessionId);
+  session.status = 'cancelled';
+  session.updated_at_ms = Date.now();
+  demoUsageImportSessions.set(sessionId, session);
+  return cloneUsageImportSession(session);
+};
 
 export interface UsageExportResponse {
   blob: Blob;
@@ -579,6 +722,7 @@ export interface MonitoringAnalyticsFilters {
   models?: string[];
   providers?: string[];
   accounts?: string[];
+  credential_ids?: string[];
   auth_files?: string[];
   auth_indices?: string[];
   api_key_hashes?: string[];
@@ -609,6 +753,8 @@ export interface MonitoringAnalyticsDrilldownPreviewRequest {
 
 export interface MonitoringAnalyticsInclude {
   summary?: boolean;
+  summary_profile?: 'full' | 'compact';
+  summary_percentiles?: boolean;
   summary_comparison?: boolean;
   timeline?: boolean;
   hourly_distribution?: boolean;
@@ -619,8 +765,10 @@ export interface MonitoringAnalyticsInclude {
   account_stats?: boolean;
   credential_stats?: boolean;
   credential_timeline?: boolean;
+  api_key_timeline?: boolean;
   api_key_stats?: boolean;
   filter_options?: boolean;
+  filter_selectors?: boolean;
   heatmap?: boolean;
   anomaly_points?: boolean;
   task_buckets?: boolean;
@@ -651,6 +799,7 @@ export interface MonitoringAnalyticsSummary {
   cached_tokens: number;
   cache_read_tokens: number;
   cache_creation_tokens: number;
+  cache_hit_rate?: number;
   reasoning_tokens: number;
   total_tokens: number;
   total_cost: number;
@@ -693,6 +842,7 @@ export interface MonitoringAnalyticsTimelinePoint {
   cached_tokens?: number;
   cache_read_tokens?: number;
   cache_creation_tokens?: number;
+  cache_hit_rate?: number;
   reasoning_tokens?: number;
   total_tokens?: number;
   cost?: number;
@@ -773,6 +923,9 @@ export interface MonitoringAnalyticsModelStat {
   cached_tokens: number;
   cache_read_tokens: number;
   cache_creation_tokens: number;
+  cache_hit_tokens?: number;
+  cache_hit_input_tokens?: number;
+  cache_hit_rate?: number;
   total_tokens: number;
   cost: number;
 }
@@ -815,6 +968,9 @@ export interface MonitoringAnalyticsAccountModelStatRow {
   cached_tokens: number;
   cache_read_tokens: number;
   cache_creation_tokens: number;
+  cache_hit_tokens?: number;
+  cache_hit_input_tokens?: number;
+  cache_hit_rate?: number;
   total_tokens: number;
   cost: number;
   last_seen_ms: number;
@@ -900,6 +1056,27 @@ export interface MonitoringAnalyticsCredentialTimelinePoint {
   failure_rate?: number;
 }
 
+export interface MonitoringAnalyticsApiKeyTimelinePoint {
+  api_key_hash: string;
+  bucket_ms: number;
+  bucket_label?: string;
+  calls: number;
+  tokens: number;
+  success: number;
+  failure: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  cached_tokens?: number;
+  cache_read_tokens?: number;
+  cache_creation_tokens?: number;
+  reasoning_tokens?: number;
+  total_tokens?: number;
+  cost?: number;
+  average_latency_ms?: number | null;
+  success_rate?: number;
+  failure_rate?: number;
+}
+
 export interface MonitoringAnalyticsApiKeyStatRow {
   id: string;
   api_key_hash: string;
@@ -950,8 +1127,13 @@ export interface MonitoringAnalyticsFilterOptions {
   api_key_stats?: MonitoringAnalyticsApiKeyStatRow[];
   channel_share?: MonitoringAnalyticsChannelShareRow[];
   model_stats?: MonitoringAnalyticsModelStat[];
+  models?: string[];
+  api_key_hashes?: string[];
   providers?: string[];
   auth_files?: string[];
+  accounts?: string[];
+  account_count?: number;
+  api_key_count?: number;
   project_ids?: string[];
   request_types?: string[];
   header_error_kinds?: string[];
@@ -1016,6 +1198,7 @@ export interface ResponseHeaderErrorMetadata {
   retry_after_seconds?: number;
   retry_after_recover_at_ms?: number;
   rate_limit_bypass?: string;
+  should_retry?: boolean;
 }
 
 export interface ResponseHeaderTraceMetadata {
@@ -1028,6 +1211,7 @@ export interface ResponseHeaderTraceMetadata {
   cloud_ai_companion_trace_id?: string;
   client_request_id?: string;
   zeabur_request_id?: string;
+  traceparent?: string;
 }
 
 export interface ResponseHeaderRoutingMetadata {
@@ -1058,6 +1242,39 @@ export interface ResponseHeaderProviderMetadata {
   cloudflare_cache_status?: string;
 }
 
+export interface ResponseHeaderRateLimitBucket {
+  limit?: number;
+  remaining?: number;
+}
+
+export interface ResponseHeaderRateLimitMetadata {
+  requests?: ResponseHeaderRateLimitBucket;
+  tokens?: ResponseHeaderRateLimitBucket;
+}
+
+export interface ResponseHeaderDataPolicyMetadata {
+  retention_mode?: string;
+  zero_retention?: boolean;
+}
+
+export interface ProviderUsageMetadata {
+  provider?: string;
+  kind?: string;
+  state?: string;
+  code?: string;
+  model?: string;
+  unit?: string;
+  actual?: number;
+  limit?: number;
+  remaining?: number;
+  overage?: number;
+  window_kind?: string;
+  observed_at_ms?: number;
+  recover_at_ms?: number;
+  recover_at_estimated?: boolean;
+  source?: string;
+}
+
 export interface ResponseHeaderMetadata {
   quota?: ResponseHeaderQuotaMetadata;
   errors?: ResponseHeaderErrorMetadata;
@@ -1065,6 +1282,9 @@ export interface ResponseHeaderMetadata {
   routing?: ResponseHeaderRoutingMetadata;
   response?: ResponseHeaderResponseMetadata;
   providers?: ResponseHeaderProviderMetadata;
+  rate_limit?: ResponseHeaderRateLimitMetadata;
+  data_policy?: ResponseHeaderDataPolicyMetadata;
+  provider_usage?: ProviderUsageMetadata;
 }
 
 export interface UsageHeaderSnapshot {
@@ -1184,6 +1404,7 @@ export interface MonitoringAnalyticsResponse {
   account_stats?: MonitoringAnalyticsAccountStatRow[];
   credential_stats?: MonitoringAnalyticsCredentialStatRow[];
   credential_timeline?: MonitoringAnalyticsCredentialTimelinePoint[];
+  api_key_timeline?: MonitoringAnalyticsApiKeyTimelinePoint[];
   api_key_stats?: MonitoringAnalyticsApiKeyStatRow[];
   filter_options?: MonitoringAnalyticsFilterOptions;
   task_buckets?: MonitoringAnalyticsTaskBucketRow[];
@@ -1194,6 +1415,7 @@ export interface MonitoringAnalyticsResponse {
 
 const USAGE_SERVICE_TIMEOUT_MS = 30 * 1000;
 const USAGE_SERVICE_TRANSFER_TIMEOUT_MS = 60 * 1000;
+const USAGE_IMPORT_CHUNK_TIMEOUT_MS = 5 * 60 * 1000;
 const CODEX_INSPECTION_RUN_TIMEOUT_MS = 10 * 60 * 1000;
 export const USAGE_SERVICE_ID = 'cpa-manager-plus';
 export const LEGACY_USAGE_SERVICE_ID = 'cpa-manager';
@@ -1373,24 +1595,490 @@ const getDemoPatchedAccountProcessingPolicy = (
   };
 };
 
+const createDemoCodexInspectionError = (message: string, status: number): UsageServiceApiError => {
+  const details = { error: message, code: 'request_failed' };
+  const error = new Error(message) as UsageServiceApiError;
+  error.name = 'UsageServiceApiError';
+  error.status = status;
+  error.code = 'request_failed';
+  error.details = details;
+  error.data = details;
+  return error;
+};
+
+const cloneDemoCodexInspectionDetail = (
+  detail: CodexInspectionRunDetail
+): CodexInspectionRunDetail => JSON.parse(JSON.stringify(detail)) as CodexInspectionRunDetail;
+
+export const isDemoCodexInspectionStatusMutationAmbiguous = (
+  _results: Array<Pick<CodexInspectionResult, 'accountKey' | 'fileName'>>,
+  result: Pick<
+    CodexInspectionResult,
+    | 'accountKey'
+    | 'fileName'
+    | 'action'
+    | 'authIndex'
+    | 'accountId'
+    | 'provider'
+    | 'accountSnapshot'
+  >,
+  authFiles = getDemoAuthFiles().files
+): boolean => {
+  if (result.action !== 'disable' && result.action !== 'enable') return false;
+  const fileName = result.fileName.trim();
+  if (!fileName) return true;
+  const accountSnapshot = result.accountSnapshot?.trim() ?? '';
+  const resolution = resolveAuthFileStatusMutationTarget(authFiles, {
+    name: fileName,
+    authIndex: result.authIndex,
+    provider: result.provider,
+    accountId: result.accountId,
+    accountSnapshot: accountSnapshot && accountSnapshot !== fileName ? accountSnapshot : null,
+  });
+  return (
+    resolution.failure !== null ||
+    resolution.scope === 'ambiguous' ||
+    resolution.scope === 'expanded-child'
+  );
+};
+
+type DemoSourceFileStatusActionPlan = {
+  canonicalResultId: number;
+  action: 'disable' | 'enable';
+  memberResultIds: Set<number>;
+};
+
+export const buildDemoCodexInspectionSourceFileStatusActionPlans = (
+  results: CodexInspectionResult[],
+  authFiles: AuthFileItem[] = getDemoAuthFiles().files
+): Map<string, DemoSourceFileStatusActionPlan> => {
+  const plans = new Map<string, DemoSourceFileStatusActionPlan>();
+  const filesByName = new Map<string, AuthFileItem[]>();
+  authFiles.forEach((file) => {
+    const fileName = readAuthFileStatusPhysicalName(file);
+    if (!fileName) return;
+    const siblings = filesByName.get(fileName) ?? [];
+    siblings.push(file);
+    filesByName.set(fileName, siblings);
+  });
+
+  const resolved = results.flatMap((result) => {
+    if (result.action !== 'disable' && result.action !== 'enable') return [];
+    const accountSnapshot = result.accountSnapshot?.trim() ?? '';
+    const resolution = resolveAuthFileStatusMutationTarget(authFiles, {
+      name: result.fileName,
+      authIndex: result.authIndex,
+      provider: result.provider,
+      accountId: result.accountId,
+      accountSnapshot:
+        accountSnapshot && accountSnapshot !== result.fileName.trim() ? accountSnapshot : null,
+    });
+    if (!resolution.target || resolution.failure !== null) return [];
+    return [{ result, resolution }];
+  });
+
+  filesByName.forEach((currentFiles, fileName) => {
+    if (currentFiles.length <= 1) return;
+    const entries = resolved.filter(
+      (entry) => readAuthFileStatusPhysicalName(entry.resolution.target!) === fileName
+    );
+    const matchedEntries: typeof entries = [];
+    const members: number[] = [];
+    let action: 'disable' | 'enable' | null = null;
+    for (const currentFile of currentFiles) {
+      const matches = entries.filter((entry) => entry.resolution.target === currentFile);
+      if (matches.length !== 1) return;
+      const matchedAction = matches[0].result.action;
+      if (matchedAction !== 'disable' && matchedAction !== 'enable') return;
+      if (action === null) action = matchedAction;
+      if (matchedAction !== action) return;
+      matchedEntries.push(matches[0]);
+      members.push(matches[0].result.id);
+    }
+    const sourceEntries = matchedEntries.filter(
+      (entry) => entry.resolution.scope === 'source-file'
+    );
+    if (!action || sourceEntries.length > 1) return;
+    const canonicalEntry = sourceEntries[0] ?? matchedEntries[0];
+    if (!canonicalEntry) return;
+    plans.set(fileName, {
+      canonicalResultId: canonicalEntry.result.id,
+      action,
+      memberResultIds: new Set(members),
+    });
+  });
+  return plans;
+};
+
+export const getDemoCodexInspectionActionIdentityKey = (
+  item: Pick<
+    CodexInspectionResult,
+    'fileName' | 'provider' | 'authIndex' | 'accountId' | 'accountSnapshot' | 'displayAccount'
+  >
+): string => {
+  const fileName = item.fileName.trim();
+  const accountSnapshot = item.accountSnapshot?.trim() ?? '';
+  return getAuthFileStatusIdentityKey({
+    name: fileName,
+    provider: item.provider,
+    authIndex: item.authIndex,
+    accountId: item.accountId,
+    accountSnapshot: accountSnapshot && accountSnapshot !== fileName ? accountSnapshot : null,
+  });
+};
+
+let demoCodexInspectionRunState: CodexInspectionRunDetail | null = null;
+
+export const resetDemoCodexInspectionRunState = () => {
+  demoCodexInspectionRunState = null;
+};
+
+const readDemoCodexInspectionRunState = (): CodexInspectionRunDetail => {
+  if (!demoCodexInspectionRunState) {
+    demoCodexInspectionRunState = getDemoCodexInspectionRun();
+  }
+  return cloneDemoCodexInspectionDetail(demoCodexInspectionRunState);
+};
+
+const replaceDemoCodexInspectionRunState = (
+  detail: CodexInspectionRunDetail
+): CodexInspectionRunDetail => {
+  demoCodexInspectionRunState = cloneDemoCodexInspectionDetail(detail);
+  return cloneDemoCodexInspectionDetail(demoCodexInspectionRunState);
+};
+
 const getDemoCodexInspectionActionsResponse = (
-  resultIds: number[]
+  runId: number,
+  resultIds: number[],
+  actionOverrides: CodexInspectionActionOverride[] = []
 ): CodexInspectionActionsResponse => {
-  const detail = getDemoCodexInspectionRun();
-  const selected = resultIds.length
-    ? detail.results.filter((result) => resultIds.includes(result.id))
-    : detail.results;
-  return {
-    outcomes: selected.map((result) => ({
-      resultId: result.id,
-      accountKey: result.accountKey,
-      fileName: result.fileName,
-      displayAccount: result.displayAccount,
-      action: result.action,
-      status: 'done',
+  const requestedIDs = new Set(resultIds.filter((resultId) => resultId > 0));
+  if (requestedIDs.size === 0) {
+    throw createDemoCodexInspectionError('codex inspection action result ids are required', 400);
+  }
+
+  const detail = readDemoCodexInspectionRunState();
+  if (runId !== detail.run.id) {
+    throw createDemoCodexInspectionError('codex inspection run not found', 404);
+  }
+
+  const completedAt = Date.now();
+  const overrideByID = new Map<number, 'delete'>();
+  actionOverrides.forEach((item) => {
+    const result = detail.results.find((candidate) => candidate.id === item.resultId);
+    if (
+      item.resultId <= 0 ||
+      item.action !== 'delete' ||
+      !requestedIDs.has(item.resultId) ||
+      result?.action !== 'reauth'
+    ) {
+      throw createDemoCodexInspectionError('codex inspection action override is invalid', 400);
+    }
+    overrideByID.set(item.resultId, item.action);
+  });
+
+  const manualResults = detail.results.map((result) => {
+    const action = overrideByID.get(result.id);
+    return action ? { ...result, action } : result;
+  });
+  const selected = manualResults.filter((result) => requestedIDs.has(result.id));
+  if (selected.length === 0) {
+    throw createDemoCodexInspectionError('codex inspection has no actionable results', 400);
+  }
+  const executableActions = new Set(['delete', 'disable', 'enable']);
+  const normalizeActionStatus = (result: CodexInspectionResult): string => {
+    switch (result.actionStatus) {
+      case 'none':
+      case 'pending':
+      case 'success':
+      case 'failed':
+      case 'skipped':
+      case 'needs_review':
+        return result.actionStatus;
+      default:
+        return executableActions.has(result.action) ? 'pending' : 'none';
+    }
+  };
+  const sourceFilePlans = buildDemoCodexInspectionSourceFileStatusActionPlans(
+    selected.filter((result) => {
+      const status = normalizeActionStatus(result);
+      return status !== 'success' && status !== 'skipped' && status !== 'needs_review';
+    })
+  );
+  type DemoActionGroup = { key: string; items: CodexInspectionResult[]; mixed: boolean };
+  const itemsByFileName = new Map<string, CodexInspectionResult[]>();
+  manualResults.forEach((result) => {
+    const fileName = result.fileName.trim();
+    if (!fileName) return;
+    const fileItems = itemsByFileName.get(fileName) ?? [];
+    fileItems.push(result);
+    itemsByFileName.set(fileName, fileItems);
+  });
+  const groupByResultID = new Map<number, DemoActionGroup>();
+  itemsByFileName.forEach((allFileItems, fileName) => {
+    const fileItems = allFileItems.filter((item) => executableActions.has(item.action));
+    if (fileItems.length === 0) return;
+    if (fileItems.some((item) => item.action === 'delete')) {
+      const group = {
+        key: `file:${fileName}`,
+        items: fileItems,
+        mixed: allFileItems.some((item) => item.action !== 'delete'),
+      };
+      fileItems.forEach((item) => groupByResultID.set(item.id, group));
+      return;
+    }
+    const identityGroups = new Map<string, DemoActionGroup>();
+    fileItems.forEach((item) => {
+      const identityKey = getDemoCodexInspectionActionIdentityKey(item);
+      const group = identityGroups.get(identityKey) ?? {
+        key: `credential:${identityKey}`,
+        items: [],
+        mixed: false,
+      };
+      if (group.items.length > 0 && group.items[0].action !== item.action) group.mixed = true;
+      group.items.push(item);
+      identityGroups.set(identityKey, group);
+      groupByResultID.set(item.id, group);
+    });
+  });
+  const seenGroupKeys = new Set<string>();
+  const plannedOutcomes = selected.map((result) => {
+    const action = result.action;
+    const currentStatus = normalizeActionStatus(result);
+    if (!executableActions.has(action)) {
+      return {
+        result,
+        action,
+        status: 'skipped',
+        success: true,
+        error: '该巡检结果不是可执行动作',
+      };
+    }
+    if (currentStatus === 'success') {
+      return {
+        result,
+        action,
+        status: 'skipped',
+        success: true,
+        error: '该建议动作已执行成功',
+      };
+    }
+    if (currentStatus === 'skipped') {
+      return {
+        result,
+        action,
+        status: 'skipped',
+        success: true,
+        error: '该建议动作已跳过',
+      };
+    }
+    if (currentStatus === 'needs_review') {
+      return {
+        result,
+        action,
+        status: 'needs_review',
+        success: true,
+        error: '该建议动作需要到认证文件管理中人工处理',
+      };
+    }
+    const fileName = result.fileName.trim();
+    if (!fileName) {
+      return {
+        result,
+        action,
+        status: 'failed',
+        success: false,
+        error: '认证文件名为空，无法执行',
+      };
+    }
+    if (
+      !hasCodexInspectionStableIdentity({
+        fileName: result.fileName,
+        provider: result.provider,
+        authIndex: result.authIndex,
+        accountId: result.accountId,
+        accountSnapshot: result.accountSnapshot,
+      })
+    ) {
+      return {
+        result,
+        action,
+        status: 'needs_review',
+        success: true,
+        error: '巡检结果缺少稳定账号标识，已阻止处理，请人工确认',
+      };
+    }
+    const sourceFilePlan = sourceFilePlans.get(fileName);
+    if (
+      sourceFilePlan?.memberResultIds.has(result.id) &&
+      sourceFilePlan.canonicalResultId !== result.id
+    ) {
+      return {
+        result,
+        action,
+        status: 'skipped',
+        success: true,
+        error: '该认证目标已由另一条结果处理',
+      };
+    }
+    if (
+      sourceFilePlan?.canonicalResultId !== result.id &&
+      isDemoCodexInspectionStatusMutationAmbiguous(manualResults, result)
+    ) {
+      return {
+        result,
+        action,
+        status: 'needs_review',
+        success: true,
+        error:
+          '认证凭证缺少唯一 runtime ID，或 runtime ID 与物理文件选择器冲突，已阻止状态修改，请人工确认',
+      };
+    }
+    const group = groupByResultID.get(result.id) ?? {
+      key: `credential:${result.id}`,
+      items: [result],
+      mixed: false,
+    };
+    if (group.mixed) {
+      return {
+        result,
+        action,
+        status: 'needs_review',
+        success: true,
+        error: '同一认证文件下存在多个不同建议动作，文件级处理已阻止，请到认证文件管理中手动处理',
+      };
+    }
+    if (seenGroupKeys.has(group.key)) {
+      return {
+        result,
+        action,
+        status: 'skipped',
+        success: true,
+        error: '该认证目标已由另一条结果处理',
+      };
+    }
+    seenGroupKeys.add(group.key);
+    return {
+      result,
+      action,
+      status: 'success',
       success: true,
+      error: '',
+    };
+  });
+  const outcomeByID = new Map(plannedOutcomes.map((outcome) => [outcome.result.id, outcome]));
+  const actionCount = plannedOutcomes.filter((outcome) => outcome.status === 'success').length;
+  let nextLogID = detail.logs.reduce((maximum, entry) => Math.max(maximum, entry.id), 0) + 1;
+  const createLog = (level: string, message: string, logDetail: unknown) => ({
+    id: nextLogID++,
+    runId: detail.run.id,
+    level,
+    message,
+    detail: logDetail,
+    createdAtMs: completedAt,
+  });
+
+  detail.logs.push(
+    createLog('info', '手动处理账号开始', {
+      requestedCount: resultIds.length,
+      actionCount,
+    })
+  );
+  plannedOutcomes
+    .filter((outcome) => outcome.status !== 'success')
+    .forEach((outcome) => {
+      const failed = outcome.status === 'failed' || !outcome.success;
+      detail.logs.push(
+        createLog(
+          failed ? 'error' : outcome.status === 'needs_review' ? 'warning' : 'info',
+          failed ? '手动处理账号失败' : '手动处理账号跳过',
+          {
+            fileName: outcome.result.fileName,
+            displayAccount: outcome.result.displayAccount,
+            action: outcome.action,
+            status: outcome.status,
+            reason: outcome.error,
+          }
+        )
+      );
+    });
+  detail.results = detail.results.map((result) => {
+    const outcome = outcomeByID.get(result.id);
+    if (!outcome) return result;
+    if (normalizeActionStatus(result) === 'success' && outcome.status === 'skipped') {
+      return result;
+    }
+    if (outcome.status !== 'success') {
+      return {
+        ...result,
+        actionStatus: outcome.status,
+        executedAction: undefined,
+        actionError: outcome.error,
+      };
+    }
+    return {
+      ...result,
+      disabled:
+        outcome.action === 'disable' ? true : outcome.action === 'enable' ? false : result.disabled,
+      actionStatus: 'success',
+      executedAction: outcome.action,
+      actionError: undefined,
+    };
+  });
+  plannedOutcomes
+    .filter((outcome) => outcome.status === 'success')
+    .forEach((outcome) => {
+      detail.logs.push(
+        createLog('success', '手动处理账号成功', {
+          fileName: outcome.result.fileName,
+          displayAccount: outcome.result.displayAccount,
+          action: outcome.action,
+        })
+      );
+    });
+  const outcomeSummary = plannedOutcomes.reduce(
+    (summary, outcome) => {
+      if (outcome.status === 'success') summary.success += 1;
+      else if (outcome.status === 'skipped') summary.skipped += 1;
+      else if (outcome.status === 'needs_review') summary.needsReview += 1;
+      else summary.failed += 1;
+      return summary;
+    },
+    { success: 0, failed: 0, skipped: 0, needsReview: 0 }
+  );
+  detail.logs.push(
+    createLog(
+      outcomeSummary.failed > 0 || outcomeSummary.needsReview > 0 ? 'warning' : 'success',
+      '手动处理账号完成',
+      {
+        successCount: outcomeSummary.success,
+        failedCount: outcomeSummary.failed,
+        skippedCount: outcomeSummary.skipped,
+        needsReviewCount: outcomeSummary.needsReview,
+        resultWriteFailedCount: 0,
+      }
+    )
+  );
+  detail.run.disabledCount = detail.results.filter((result) => result.disabled).length;
+  detail.run.enabledCount = detail.results.length - detail.run.disabledCount;
+  detail.run.error =
+    outcomeSummary.failed > 0
+      ? `${outcomeSummary.failed} 个手动处理动作执行失败，详见巡检日志`
+      : undefined;
+  detail.run.updatedAtMs = completedAt;
+  const nextDetail = replaceDemoCodexInspectionRunState(detail);
+  return {
+    outcomes: plannedOutcomes.map((outcome) => ({
+      resultId: outcome.result.id,
+      accountKey: outcome.result.accountKey,
+      fileName: outcome.result.fileName,
+      displayAccount: outcome.result.displayAccount,
+      action: outcome.action,
+      status: outcome.status,
+      success: outcome.success,
+      ...(outcome.error ? { error: outcome.error } : {}),
     })),
-    detail,
+    detail: nextDetail,
   };
 };
 
@@ -1399,9 +2087,7 @@ const getDemoModelPriceSyncResponse = (models?: string[]): ModelPriceSyncRespons
   const selectedModels = new Set((models || []).map((model) => model.trim()).filter(Boolean));
   const selectedPrices =
     selectedModels.size > 0
-      ? Object.fromEntries(
-          Object.entries(prices).filter(([model]) => selectedModels.has(model))
-        )
+      ? Object.fromEntries(Object.entries(prices).filter(([model]) => selectedModels.has(model)))
       : prices;
 
   return {
@@ -1497,8 +2183,8 @@ export const usageServiceApi = {
     limit = 20
   ): Promise<CodexInspectionRunsResponse> => {
     if (__DEMO_SITE__ && isDemoMode()) {
-      const response = getDemoCodexInspectionRuns();
-      return { items: response.items.slice(0, limit) };
+      const detail = readDemoCodexInspectionRunState();
+      return { items: [detail.run].slice(0, limit) };
     }
 
     return withUsageServiceError(async () => {
@@ -1520,7 +2206,11 @@ export const usageServiceApi = {
     id: number
   ): Promise<CodexInspectionRunDetail> => {
     if (__DEMO_SITE__ && isDemoMode()) {
-      return getDemoCodexInspectionRun();
+      const detail = readDemoCodexInspectionRunState();
+      if (id !== detail.run.id) {
+        throw createDemoCodexInspectionError('codex inspection run not found', 404);
+      }
+      return detail;
     }
 
     return withUsageServiceError(async () => {
@@ -1540,7 +2230,7 @@ export const usageServiceApi = {
     managementKey?: string
   ): Promise<CodexInspectionRunDetail> => {
     if (__DEMO_SITE__ && isDemoMode()) {
-      return getDemoCodexInspectionRun();
+      return replaceDemoCodexInspectionRunState(getDemoCodexInspectionRun());
     }
 
     return withUsageServiceError(async () => {
@@ -1556,20 +2246,68 @@ export const usageServiceApi = {
     });
   },
 
+  cancelCodexInspectionRun: async (
+    base: string,
+    managementKey: string | undefined,
+    runId: number
+  ): Promise<CodexInspectionRunDetail> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      const detail = readDemoCodexInspectionRunState();
+      if (runId !== detail.run.id) {
+        throw createDemoCodexInspectionError('codex inspection run not found', 404);
+      }
+      if (detail.run.status === 'cancelled') {
+        return detail;
+      }
+      if (detail.run.status !== 'running' && detail.run.status !== 'cancelling') {
+        throw createDemoCodexInspectionError('codex inspection run cannot be cancelled', 409);
+      }
+      const completedAt = Date.now();
+      detail.run.status = 'cancelled';
+      detail.run.active = false;
+      detail.run.cancellable = false;
+      detail.run.finishedAtMs = completedAt;
+      detail.run.updatedAtMs = completedAt;
+      detail.run.error = '用户主动取消巡检';
+      detail.logs.push({
+        id: detail.logs.reduce((maximum, entry) => Math.max(maximum, entry.id), 0) + 1,
+        runId,
+        level: 'warning',
+        message: '凭证健康巡检已取消',
+        detail: { status: 'cancelled' },
+        createdAtMs: completedAt,
+      });
+      return replaceDemoCodexInspectionRunState(detail);
+    }
+
+    return withUsageServiceError(async () => {
+      const response = await axios.post<CodexInspectionRunDetail>(
+        buildUrl(base, `/v0/management/codex-inspection/runs/${runId}/cancel`),
+        undefined,
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+        }
+      );
+      return response.data;
+    });
+  },
+
   executeCodexInspectionActions: async (
     base: string,
     managementKey: string | undefined,
     runId: number,
-    resultIds: number[]
+    resultIds: number[],
+    actionOverrides: CodexInspectionActionOverride[] = []
   ): Promise<CodexInspectionActionsResponse> => {
     if (__DEMO_SITE__ && isDemoMode()) {
-      return getDemoCodexInspectionActionsResponse(resultIds);
+      return getDemoCodexInspectionActionsResponse(runId, resultIds, actionOverrides);
     }
 
     return withUsageServiceError(async () => {
       const response = await axios.post<CodexInspectionActionsResponse>(
         buildUrl(base, `/v0/management/codex-inspection/runs/${runId}/actions`),
-        { resultIds },
+        { resultIds, actionOverrides },
         {
           timeout: CODEX_INSPECTION_RUN_TIMEOUT_MS,
           headers: authHeaders(managementKey),
@@ -1680,6 +2418,28 @@ export const usageServiceApi = {
         {
           timeout: USAGE_SERVICE_TIMEOUT_MS,
           headers: authHeaders(managementKey),
+        }
+      );
+      return response.data;
+    });
+  },
+
+  getModelPriceUsageSummary: async (
+    base: string,
+    managementKey?: string,
+    signal?: AbortSignal
+  ): Promise<ModelPriceUsageSummaryResponse> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return getDemoModelPriceUsageSummary();
+    }
+
+    return withUsageServiceError(async () => {
+      const response = await axios.get<ModelPriceUsageSummaryResponse>(
+        buildUrl(base, '/v0/management/model-prices/usage-summary'),
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+          signal,
         }
       );
       return response.data;
@@ -1919,7 +2679,7 @@ export const usageServiceApi = {
         buildUrl(base, '/v0/management/model-prices/sync'),
         models ? { models } : {},
         {
-          timeout: 30 * 1000,
+          timeout: 45 * 1000,
           headers: authHeaders(managementKey),
         }
       );
@@ -1966,6 +2726,139 @@ export const usageServiceApi = {
         payload,
         {
           timeout: USAGE_SERVICE_TRANSFER_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+        }
+      );
+      return response.data;
+    });
+  },
+
+  createUsageImportSession: async (
+    base: string,
+    filename: string,
+    sizeBytes: number,
+    managementKey?: string,
+    resumeKey?: string,
+    signal?: AbortSignal
+  ): Promise<UsageImportSession> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return createDemoUsageImportSession(filename, sizeBytes);
+    }
+
+    return withUsageServiceError(async () => {
+      const response = await axios.post<UsageImportSession>(
+        buildUrl(base, '/v0/management/usage/import-sessions'),
+        {
+          filename,
+          size_bytes: sizeBytes,
+          ...(resumeKey ? { resume_key: resumeKey } : {}),
+        },
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+          signal,
+        }
+      );
+      return response.data;
+    });
+  },
+
+  getUsageImportSession: async (
+    base: string,
+    sessionId: string,
+    managementKey?: string,
+    signal?: AbortSignal
+  ): Promise<UsageImportSession> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return getDemoUsageImportSession(sessionId);
+    }
+
+    return withUsageServiceError(async () => {
+      const response = await axios.get<UsageImportSession>(
+        buildUrl(base, `/v0/management/usage/import-sessions/${encodeURIComponent(sessionId)}`),
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+          signal,
+        }
+      );
+      return response.data;
+    });
+  },
+
+  uploadUsageImportSessionChunk: async (
+    base: string,
+    sessionId: string,
+    offset: number,
+    chunk: Blob,
+    managementKey?: string,
+    signal?: AbortSignal
+  ): Promise<UsageImportSession> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return uploadDemoUsageImportSessionChunk(sessionId, offset, chunk.size);
+    }
+
+    return withUsageServiceError(async () => {
+      const response = await axios.put<UsageImportSession>(
+        buildUrl(
+          base,
+          `/v0/management/usage/import-sessions/${encodeURIComponent(sessionId)}/chunk?offset=${offset}`
+        ),
+        chunk,
+        {
+          timeout: USAGE_IMPORT_CHUNK_TIMEOUT_MS,
+          headers: {
+            ...(authHeaders(managementKey) ?? {}),
+            'Content-Type': 'application/octet-stream',
+          },
+          signal,
+        }
+      );
+      return response.data;
+    });
+  },
+
+  completeUsageImportSession: async (
+    base: string,
+    sessionId: string,
+    managementKey?: string,
+    signal?: AbortSignal
+  ): Promise<UsageImportSession> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return completeDemoUsageImportSession(sessionId);
+    }
+
+    return withUsageServiceError(async () => {
+      const response = await axios.post<UsageImportSession>(
+        buildUrl(
+          base,
+          `/v0/management/usage/import-sessions/${encodeURIComponent(sessionId)}/complete`
+        ),
+        undefined,
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+          signal,
+        }
+      );
+      return response.data;
+    });
+  },
+
+  cancelUsageImportSession: async (
+    base: string,
+    sessionId: string,
+    managementKey?: string
+  ): Promise<UsageImportSession> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return cancelDemoUsageImportSession(sessionId);
+    }
+
+    return withUsageServiceError(async () => {
+      const response = await axios.delete<UsageImportSession>(
+        buildUrl(base, `/v0/management/usage/import-sessions/${encodeURIComponent(sessionId)}`),
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
           headers: authHeaders(managementKey),
         }
       );
@@ -2030,7 +2923,8 @@ export const monitoringAnalyticsApi = {
   getAnalytics: async (
     base: string,
     managementKey: string | undefined,
-    request: MonitoringAnalyticsRequest
+    request: MonitoringAnalyticsRequest,
+    signal?: AbortSignal
   ): Promise<MonitoringAnalyticsResponse> => {
     if (__DEMO_SITE__ && isDemoMode()) {
       return getDemoMonitoringAnalytics(request);
@@ -2043,6 +2937,7 @@ export const monitoringAnalyticsApi = {
         {
           timeout: USAGE_SERVICE_TIMEOUT_MS,
           headers: authHeaders(managementKey),
+          signal,
         }
       );
       return response.data;

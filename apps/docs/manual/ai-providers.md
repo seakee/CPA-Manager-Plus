@@ -1,52 +1,78 @@
-# AI 提供商
+---
+title: AI 提供商管理
+description: 在 CPA Manager Plus 中管理 Gemini、Codex、Claude、Vertex、xAI 和 OpenAI-compatible Provider，配置优先级、模型、代理、Header 与密钥测试。
+---
 
-AI 提供商页面决定 CPA 如何把客户端请求转发到上游模型服务。这里配置的是模型服务本身，不是 CPAMP 管理员登录，也不是 CPA Management Key。
+# AI 提供商管理
 
-如果你要改 Manager Server 连接、采集器或运行时开关，请去 [配置中心](./configuration.md)。
+AI 提供商页面决定 CPA 如何把客户端请求路由到上游模型服务。这里配置的是 CPA Provider，不是 CPAMP 管理员登录，也不是 CPA Management Key。
+
+打开 [AI Providers Demo](https://seakee.github.io/CPA-Manager-Plus/#/demo/ai-providers) 可以查看虚构配置，不会连接真实 Provider。
+
+## 最常用流程
+
+1. 点击新增并选择 Provider 类型。
+2. 填写 Base URL 和凭证，或选择对应的 OAuth / 认证文件。
+3. 填写要让客户端使用的模型名或别名。
+4. 保存后执行页面提供的模型或密钥测试。
+5. 发送一条低成本真实请求，并到[请求监控](./monitoring.md)确认结果。
 
 ## 支持的配置类型
 
-页面会按提供商类型管理配置，常见类型包括：
-
-- Codex
-- Claude Code
 - Gemini / AI Studio
+- Codex API Key
+- Claude API Key
 - Vertex
+- xAI API Key
 - OpenAI-compatible
+- CPA 当前版本暴露的其他兼容配置
 
-不同提供商需要的字段不完全一样，但都围绕几个核心问题：请求发到哪里、用什么凭证、用哪些模型、是否启用、请求头或兼容接口是否需要特殊处理。
+不同类型的字段不完全相同，但都围绕 Base URL、凭证、模型、Header、代理、优先级和启用状态。
 
-## 新增或编辑提供商
+## 新增或编辑 Provider
 
-1. 点击添加配置，选择提供商类型。
-2. 填写名称、Base URL、API Key、认证文件或 OAuth 相关字段。
-3. 如果页面要求 `auth_index`，使用稳定且唯一的值，方便用量、配额和巡检关联到同一个账号。
-4. 配置模型列表或模型规则。不要把客户端模型名、提供商实际模型名和模型价格名混在一起。
-5. 保存后发一条低成本请求。
-6. 到 [请求监控](./monitoring.md) 查看请求是否命中预期提供商、模型和账号。
+1. 选择 Provider 类型。
+2. 填写 Base URL 和 API Key，或选择对应 OAuth/Auth File 工作流。
+3. 设置清晰的名称；需要关联认证文件时保持账号标识 `auth_index` 稳定。
+4. 配置模型列表、别名、排除规则或 Provider 特定选项。
+5. 保存后执行低成本密钥测试或真实请求。
+6. 到[请求监控](./monitoring.md)确认请求命中了预期 Provider、模型和账号。
 
-## 字段怎么判断
+## xAI API Key
 
-- **Base URL**：应指向上游模型服务或 CPA 期望的兼容接口，不是 CPAMP 文档站或管理面板地址。
-- **API Key**：是提供商或客户端调用密钥。不要填 CPA Management Key 或 CPAMP Admin Key。
-- **认证文件**：适合 OAuth 或账号文件类提供商。维护账号状态时去 [认证文件](./auth-files.md)。
-- **模型列表**：影响客户端可见模型和路由匹配。成本估算还需要 [模型价格](./model-prices.md) 中存在对应模型名。
-- **启用状态**：停用配置后，CPA 不应继续把新请求路由到该配置。
+当前面板支持管理 CPA `xai-api-key` 配置，包括：
+
+- API Key、Base URL、代理和自定义 Header。
+- 模型列表、别名、前缀和排除模型。
+- Provider 优先级和启用状态。
+- 通过 Provider 测试入口验证密钥和模型访问。
+
+xAI API Key 与 xAI/Grok OAuth 认证文件不是同一种凭证。OAuth 登录、billing 证据和账号巡检请分别查看 [OAuth 登录](./oauth.md)、[配额管理](./quota.md) 和[账号巡检](./codex-inspection.md)。
+
+## 优先级与并发保存
+
+Provider 表格支持直接调整优先级。数值只影响 CPA 当前支持的路由排序，不代表健康状态或成本优先级。
+
+保存时 CPAMP 会尽量复用精确的单项更新接口并刷新配置缓存。若配置在其他浏览器或进程中同时修改，保存前重新加载页面，避免用旧快照覆盖新配置。
+
+## 模型与密钥测试
+
+- 模型获取会使用当前 Provider 的 Base URL、API Key、Header 和代理配置。
+- OpenAI-compatible、Codex、Claude 和 xAI 等配置可以根据页面能力执行密钥或模型测试。
+- 测试成功只证明当前测试请求成功，不代表所有模型、地区、账号状态和长期配额都可用。
+- 测试失败时完整错误只应在已认证的本地面板中查看，不要把 API Key 或原始凭证贴到 Issue。
 
 ## 保存后验证
 
-最可靠的验证方式不是只看“保存成功”，而是发一条真实请求：
+1. 发一条低成本真实请求。
+2. 在请求监控确认 Provider、模型、账号和状态码。
+3. 如果成本为空，检查[模型价格](./model-prices.md)。
+4. 如果像认证或额度问题，检查[认证文件](./auth-files.md)、[配额管理](./quota.md)和[账号处理队列](./account-actions.md)。
+5. 如果页面没有请求事件，先排查采集链路，而不是反复修改 Provider。
 
-1. 用客户端请求一个低成本模型。
-2. 在 [请求监控](./monitoring.md) 中确认提供商、模型、账号和状态码。
-3. 如果请求成功但成本为空，检查 [模型价格](./model-prices.md)。
-4. 如果请求失败且像认证问题，检查 [认证文件](./auth-files.md) 或 [OAuth 登录](./oauth.md)。
-5. 如果页面没有出现请求事件，先排查请求监控采集链路。
+## 配置边界
 
-## 常见问题
-
-- **保存后模型仍不可用**：确认配置已启用、模型名匹配、客户端请求经过 CPA。
-- **请求打到错误提供商**：检查路由规则、模型别名和配置顺序。
-- **只在某些账号失败**：进入认证文件或 Codex 账号巡检，按 `auth_index` 查账号状态。
-- **成本估算不对**：提供商配置不决定价格，去模型价格页维护对应模型。
-
+- Provider 配置决定 CPA 如何请求上游，不决定 CPAMP 的登录方式。
+- 模型别名、Provider 模型名和价格表名称可能不同，需要分别维护。
+- 不要把 CPA Management Key、CPAMP Admin Key 和普通模型 API Key 混用。
+- Provider 能力取决于当前 CPA 版本；旧版本可能忽略或拒绝新字段。

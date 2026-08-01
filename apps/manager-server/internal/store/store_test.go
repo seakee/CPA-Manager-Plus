@@ -3,10 +3,59 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
+
+func TestStorePausesRollupsUntilUsageCacheAccountingMigrationCompletes(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if _, err := db.InsertEvents(context.Background(), []usage.Event{{
+		EventHash:   "rollup-event",
+		TimestampMS: 1_778_000_000_000,
+		Timestamp:   "2026-05-06T00:00:00Z",
+		Model:       "gpt-test",
+		CreatedAtMS: 1_778_000_000_100,
+	}}); err != nil {
+		t.Fatalf("insert event: %v", err)
+	}
+	if _, err := db.db.Exec(`update usage_data_migrations set status = 'running' where name = 'usage_cache_accounting_v2'`); err != nil {
+		t.Fatalf("mark migration running: %v", err)
+	}
+
+	accountResult, err := db.CatchUpAccountHistoryRollups(context.Background(), 100, 1_778_000_001_000)
+	if err != nil {
+		t.Fatalf("account rollup while migrating: %v", err)
+	}
+	dashboardResult, err := db.CatchUpDashboardHourlyRollups(context.Background(), 100, 1_778_000_001_000)
+	if err != nil {
+		t.Fatalf("dashboard rollup while migrating: %v", err)
+	}
+	if !accountResult.Pending || accountResult.Processed != 0 || !dashboardResult.Pending || dashboardResult.Processed != 0 {
+		t.Fatalf("rollups were not paused: account=%#v dashboard=%#v", accountResult, dashboardResult)
+	}
+
+	if _, err := db.db.Exec(`update usage_data_migrations set status = 'completed' where name = 'usage_cache_accounting_v2'`); err != nil {
+		t.Fatalf("mark migration completed: %v", err)
+	}
+	accountResult, err = db.CatchUpAccountHistoryRollups(context.Background(), 100, 1_778_000_001_000)
+	if err != nil {
+		t.Fatalf("account rollup after migration: %v", err)
+	}
+	dashboardResult, err = db.CatchUpDashboardHourlyRollups(context.Background(), 100, 1_778_000_001_000)
+	if err != nil {
+		t.Fatalf("dashboard rollup after migration: %v", err)
+	}
+	if accountResult.Processed != 1 || dashboardResult.Processed != 1 {
+		t.Fatalf("rollups did not resume: account=%#v dashboard=%#v", accountResult, dashboardResult)
+	}
+}
 
 func TestStorePersistsAccountSnapshot(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "usage.sqlite"))
@@ -203,6 +252,218 @@ func TestStoreBackfillsCamelCaseUsageResponseMetadata(t *testing.T) {
 	}
 	if event.HeaderQuotaPlanType != "team" || event.HeaderTraceID != "req-camel-backfill" {
 		t.Fatalf("header quota/trace = %q/%q", event.HeaderQuotaPlanType, event.HeaderTraceID)
+	}
+}
+
+func TestStoreEnrichesExistingXAIResponseMetadata(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	rawJSON := `{"provider":"xai","executor_type":"XAIExecutor","fail":{"status_code":429,"body":"{\"code\":\"subscription:free-usage-exhausted\",\"error\":\"You've used all the included free usage for model grok-4.5-build-free for now. Usage resets over a rolling 24-hour window — tokens (actual/limit): 1024413/1000000.\"}"},"response_headers":{"X-Request-Id":["req-xai"],"X-Should-Retry":["true"],"X-Data-Retention":["zdr"],"X-Zero-Retention":["true"]}}`
+	if _, err := db.db.ExecContext(context.Background(), `insert into usage_events (
+		event_hash, timestamp_ms, timestamp, provider, executor_type, model, failed, fail_status_code,
+		raw_json, response_metadata_json, created_at_ms
+	) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"event-xai-enrich",
+		int64(1_784_543_105_000),
+		"2026-07-20T10:25:05Z",
+		"xai",
+		"XAIExecutor",
+		"grok-4.5",
+		1,
+		429,
+		rawJSON,
+		`{"trace":{"request_id":"req-xai","primary_trace_id":"req-xai","client_request_id":"existing-client"}}`,
+		int64(1_784_543_105_100),
+	); err != nil {
+		t.Fatalf("insert xAI usage event: %v", err)
+	}
+
+	updated, err := db.BackfillUsageResponseMetadata(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("enrich xAI response metadata: %v", err)
+	}
+	if updated != 1 {
+		t.Fatalf("updated = %d, want 1", updated)
+	}
+	updated, err = db.BackfillUsageResponseMetadata(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("second xAI enrichment: %v", err)
+	}
+	if updated != 0 {
+		t.Fatalf("second updated = %d, want 0", updated)
+	}
+
+	events, err := db.RecentEvents(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("recent events: %v", err)
+	}
+	if len(events) != 1 || events[0].ResponseMetadata == nil || events[0].ResponseMetadata.ProviderUsage == nil {
+		t.Fatalf("events = %#v", events)
+	}
+	metadata := events[0].ResponseMetadata
+	if metadata.ProviderUsage.Actual == nil || *metadata.ProviderUsage.Actual != 1_024_413 || metadata.ProviderUsage.Overage == nil || *metadata.ProviderUsage.Overage != 24_413 {
+		t.Fatalf("provider usage = %#v", metadata.ProviderUsage)
+	}
+	if metadata.DataPolicy == nil || metadata.DataPolicy.ZeroRetention == nil || !*metadata.DataPolicy.ZeroRetention {
+		t.Fatalf("data policy = %#v", metadata.DataPolicy)
+	}
+	if metadata.Trace == nil || metadata.Trace.ClientRequestID != "existing-client" {
+		t.Fatalf("existing trace metadata was not preserved: %#v", metadata.Trace)
+	}
+}
+
+func TestStoreCompletesPartialXAIProviderUsageMetadata(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	rawJSON := `{"provider":"xai","executor_type":"XAIExecutor","fail":{"status_code":429,"body":"{\"code\":\"subscription:free-usage-exhausted\",\"error\":\"tokens (actual/limit): 1024413/1000000\"}"}}`
+	if _, err := db.db.ExecContext(context.Background(), `insert into usage_events (
+		event_hash, timestamp_ms, timestamp, provider, model, failed, fail_status_code, raw_json, response_metadata_json, created_at_ms
+	) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"event-xai-partial",
+		int64(1_784_543_105_000),
+		"2026-07-20T10:25:05Z",
+		"xai",
+		"grok-test",
+		1,
+		429,
+		rawJSON,
+		`{"provider_usage":{"provider":"xai","kind":"included_free_usage","state":"exhausted","code":"subscription:free-usage-exhausted","actual":1024413,"limit":1000000,"unit":"tokens","window_kind":"rolling_24h","observed_at_ms":1784543105000,"recover_at_ms":1784629505000,"recover_at_estimated":true,"source":"response_body"}}`,
+		int64(1_784_543_105_100),
+	); err != nil {
+		t.Fatalf("insert partial xAI event: %v", err)
+	}
+
+	updated, err := db.BackfillUsageResponseMetadata(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("backfill partial xAI metadata: %v", err)
+	}
+	if updated != 1 {
+		t.Fatalf("updated = %d, want 1", updated)
+	}
+	events, err := db.RecentEvents(context.Background(), 10)
+	if err != nil || len(events) != 1 || events[0].ResponseMetadata == nil || events[0].ResponseMetadata.ProviderUsage == nil {
+		t.Fatalf("events = %#v, err = %v", events, err)
+	}
+	usageMetadata := events[0].ResponseMetadata.ProviderUsage
+	if usageMetadata.Actual == nil || *usageMetadata.Actual != 1_024_413 || usageMetadata.Limit == nil || *usageMetadata.Limit != 1_000_000 {
+		t.Fatalf("partial provider usage was not completed: %#v", usageMetadata)
+	}
+	if usageMetadata.Remaining == nil || *usageMetadata.Remaining != 0 || usageMetadata.Overage == nil || *usageMetadata.Overage != 24_413 {
+		t.Fatalf("derived provider usage fields were not completed: %#v", usageMetadata)
+	}
+}
+
+func TestStoreBackfillSkipsUnsupportedRateLimitHeadersWithoutStarvingLaterRows(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	if _, err := db.db.ExecContext(context.Background(), `insert into usage_events (
+		event_hash, timestamp_ms, timestamp, model, failed, raw_json, response_metadata_json, created_at_ms
+	) values (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"event-unsupported-rate-limit",
+		int64(1_784_543_104_000),
+		"2026-07-20T10:25:04Z",
+		"gpt-test",
+		0,
+		`{"response_headers":{"X-Ratelimit-Reset-Tokens":["60"],"X-Request-ID":["req-unsupported"]}}`,
+		`{"trace":{"request_id":"req-unsupported","primary_trace_id":"req-unsupported"}}`,
+		int64(1_784_543_104_100),
+	); err != nil {
+		t.Fatalf("insert unsupported rate-limit event: %v", err)
+	}
+
+	xaiRawJSON := `{"provider":"xai","fail":{"status_code":429,"body":"{\"code\":\"subscription:free-usage-exhausted\",\"error\":\"tokens (actual/limit): 1024413/1000000\"}"}}`
+	if _, err := db.db.ExecContext(context.Background(), `insert into usage_events (
+		event_hash, timestamp_ms, timestamp, provider, model, failed, fail_status_code, raw_json, created_at_ms
+	) values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"event-actionable-xai",
+		int64(1_784_543_105_000),
+		"2026-07-20T10:25:05Z",
+		"xai",
+		"grok-test",
+		1,
+		429,
+		xaiRawJSON,
+		int64(1_784_543_105_100),
+	); err != nil {
+		t.Fatalf("insert actionable xAI event: %v", err)
+	}
+
+	updated, err := db.BackfillUsageResponseMetadata(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("backfill response metadata: %v", err)
+	}
+	if updated != 1 {
+		t.Fatalf("updated = %d, want 1", updated)
+	}
+	updated, err = db.BackfillUsageResponseMetadata(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("second backfill response metadata: %v", err)
+	}
+	if updated != 0 {
+		t.Fatalf("second updated = %d, want 0", updated)
+	}
+
+	var metadataJSON string
+	if err := db.db.QueryRowContext(context.Background(), `select coalesce(response_metadata_json, '') from usage_events where event_hash = ?`, "event-actionable-xai").Scan(&metadataJSON); err != nil {
+		t.Fatalf("read actionable metadata: %v", err)
+	}
+	if !strings.Contains(metadataJSON, `"provider_usage"`) {
+		t.Fatalf("xAI provider usage was starved: %s", metadataJSON)
+	}
+}
+
+func TestStoreBackfillMarksUnsupportedOnlyHeaderRowsProcessed(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if _, err := db.db.ExecContext(context.Background(), `insert into usage_events (
+		event_hash, timestamp_ms, timestamp, model, failed, raw_json, created_at_ms
+	) values (?, ?, ?, ?, ?, ?, ?)`,
+		"event-unsupported-only-header",
+		int64(1_784_543_104_000),
+		"2026-07-20T10:25:04Z",
+		"gpt-test",
+		0,
+		`{"response_headers":{"X-Ratelimit-Reset-Tokens":["60"]}}`,
+		int64(1_784_543_104_100),
+	); err != nil {
+		t.Fatalf("insert unsupported-only event: %v", err)
+	}
+
+	updated, err := db.BackfillUsageResponseMetadata(context.Background(), 10)
+	if err != nil || updated != 1 {
+		t.Fatalf("first backfill updated=%d err=%v, want one processed marker", updated, err)
+	}
+	updated, err = db.BackfillUsageResponseMetadata(context.Background(), 10)
+	if err != nil || updated != 0 {
+		t.Fatalf("second backfill updated=%d err=%v, want no rescan", updated, err)
+	}
+
+	var metadataJSON string
+	if err := db.db.QueryRowContext(context.Background(), `select coalesce(response_metadata_json, '') from usage_events where event_hash = ?`, "event-unsupported-only-header").Scan(&metadataJSON); err != nil {
+		t.Fatalf("read processed marker: %v", err)
+	}
+	if metadataJSON != "{}" {
+		t.Fatalf("processed marker = %q, want {}", metadataJSON)
 	}
 }
 

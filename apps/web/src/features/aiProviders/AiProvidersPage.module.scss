@@ -271,9 +271,12 @@
 
 // 状态监测栏
 .statusBar {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
   align-items: center;
   gap: 8px;
+  width: 100%;
+  min-width: 0;
   margin-top: 8px;
   padding: 8px 0;
   max-width: 280px;
@@ -282,14 +285,14 @@
 .statusBlocks {
   display: flex;
   gap: 2px;
-  flex: 1;
-  min-width: 180px;
+  width: 100%;
+  min-width: 0;
   position: relative;
 }
 
 .statusBlockWrapper {
-  flex: 1;
-  min-width: 6px;
+  flex: 1 1 0;
+  min-width: 0;
   position: relative;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
@@ -406,7 +409,9 @@
 .statusRate {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 4px;
+  min-width: 48px;
   font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
@@ -437,7 +442,7 @@
   }
 
   .statusBlocks {
-    min-width: 140px;
+    min-width: 0;
   }
 }
 
@@ -812,15 +817,30 @@
 }
 
 .keyStatusTooltip {
-  bottom: calc(100% + 10px);
-  width: max-content;
-  max-width: min(280px, 42vw);
-  white-space: normal;
+  position: fixed;
+  transform: translateX(-50%);
+  box-sizing: border-box;
+  width: min(420px, calc(100vw - 24px));
+  padding: 8px 10px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  background: var(--bg-primary, #fff);
+  border: 1px solid var(--border-subtle, #d8e5f2);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  color: var(--text-primary);
+  font-size: 11px;
+  line-height: 1.5;
+  pointer-events: auto;
   text-align: left;
+  user-select: text;
+  z-index: $z-modal + 1;
 }
 
 .keyStatusTooltipText {
   display: block;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
 }
@@ -923,5 +943,4 @@
     background: rgba($error-color, 0.24);
     color: #f1b0a6;
   }
-
 }

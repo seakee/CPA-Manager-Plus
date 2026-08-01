@@ -24,6 +24,13 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	path := strings.TrimRight(r.URL.Path, "/")
 	switch {
+	case path == "/v0/management/model-prices/usage-summary" && r.Method == http.MethodGet:
+		summary, err := h.App.ModelPriceService.UsageSummary(r.Context(), h.App.Config.QueryLimit)
+		if err != nil {
+			response.Error(w, http.StatusInternalServerError, err)
+			return
+		}
+		response.JSON(w, http.StatusOK, summary)
 	case path == "/v0/management/model-prices" && r.Method == http.MethodGet:
 		prices, err := h.App.ModelPriceService.List(r.Context())
 		if err != nil {

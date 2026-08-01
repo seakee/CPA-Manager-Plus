@@ -4,6 +4,18 @@ Use this page when you have lost the CPAMP Admin Key for Full Docker or native M
 
 The reset command modifies the local SQLite database directly. Stop Manager Server before running it so the service does not keep writing to SQLite.
 
+## Shortest Recovery Path
+
+1. Stop Manager Server and back up its data directory.
+2. Run `reset-admin-key` in the matching Docker or native environment.
+3. Record the new CPAMP Admin Key from the terminal, but never commit or share it.
+4. Restart Manager Server.
+5. Open `:18317/management.html`, log in with the new key, and confirm the CPA connection.
+
+The commands below are grouped by deployment. Run only the group that matches your setup.
+
+::: details Advanced: command internals
+
 ## What The Command Does
 
 `cpa-manager-plus reset-admin-key` replaces `settings.admin_credential_v1` in the Manager Server SQLite database with a new salt and HMAC digest.
@@ -14,6 +26,8 @@ The reset command modifies the local SQLite database directly. Stop Manager Serv
 - The command does not need the CPA Management Key or `data.key`.
 
 The alias `reset-admin-password` is also available.
+
+:::
 
 ## Before You Run It
 
@@ -38,6 +52,30 @@ The command prints the newly generated key once:
 CPA Manager Plus admin key reset.
 New admin key: cpamp_...
 Save this value now. It will not be shown again.
+```
+
+### One-Click Installer Docker Deployments
+
+If `install-cpamp.sh` created the Docker deployment, prefer letting the installer stop the service, reset the credential, restart, and verify login:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/seakee/CPA-Manager-Plus/main/bin/install-cpamp.sh
+CPAMP_OPERATION=repair \
+CPAMP_INSTALL_DIR="$HOME/cpa-manager-plus" \
+bash install-cpamp.sh
+```
+
+The repair flow synchronizes the SQLite admin credential with `secrets/cpamp-admin-key` in the install directory, so the file and actual login key remain aligned. It does not delete the Docker data volume, CPA Management Key, or request history.
+
+Non-interactive environments require explicit confirmation:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/seakee/CPA-Manager-Plus/main/bin/install-cpamp.sh
+CPAMP_OPERATION=repair \
+CPAMP_INSTALL_DIR="$HOME/cpa-manager-plus" \
+CPAMP_NON_INTERACTIVE=1 \
+CPAMP_CONFIRM=1 \
+bash install-cpamp.sh
 ```
 
 ## Docker Named Volume

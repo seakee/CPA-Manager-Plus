@@ -8,21 +8,31 @@ This guide uses a same-domain setup:
 - CPA / CLI Proxy API: `https://your-domain.com/v1/...`
 - CPA OAuth callbacks, Codex API, Amp routes, and other CPA-side endpoints
 
-This applies to Full Docker / Manager Server mode. In the CPA-hosted panel, CPA itself serves `/management.html`, so this mixed routing is usually unnecessary.
+This applies to Full Docker / Manager Server mode. CPA itself serves `/management.html` for the CPAMP Lightweight Panel, so this mixed routing is usually unnecessary.
+
+## Choose Your Scenario
+
+| Goal                                        | Recommended approach                                                |
+| ------------------------------------------- | ------------------------------------------------------------------- |
+| Proxy only the CPAMP Lightweight Panel      | Send all management pages and APIs to CPA; do not use mixed routing |
+| Use separate domains for CPAMP and CPA      | Simplest: send CPAMP to `18317` and CPA to `8317`                   |
+| Use one domain for CPAMP panel and CPA APIs | Continue with the path-routing configuration on this page           |
+
+For most deployments, use separate domains or subdomains for CPAMP and CPA. Read the full route table only when both must share one domain.
 
 ## Route Boundaries
 
-| Traffic | Recommended backend | Notes |
-|---|---|---|
-| `/management.html` | CPAMP `:18317` | Manager Server-hosted management panel. |
-| `/usage-service/*` | CPAMP `:18317` | Manager Server mode detection and config APIs. |
-| `/v0/management/*` | CPAMP `:18317` | CPAMP handles usage, model-prices, aliases, dashboard, monitoring, and codex-inspection first; other management APIs are then proxied by CPAMP to CPA. |
-| `/v0/resource/plugins/*` | CPAMP `:18317` | Plugin page resources used by the CPAMP panel. CPAMP proxies them to CPA when needed. |
-| `/models` | CPAMP `:18317` | Compatibility proxy to CPA after setup. |
-| `/v1/*`, `/v1beta/*`, `/backend-api/codex/*` | CPA `:8317` | Actual model API, Codex API, and provider requests. |
-| OAuth callback | CPA `:8317` | For example `/anthropic/callback` and `/codex/callback`. |
-| New paths without explicit ownership | CPA `:8317` | Avoid blocking future CPA endpoints. |
-| RESP Pub/Sub / RESP pop | Direct CPA `:8317` | Cannot go through an HTTP reverse proxy. |
+| Traffic                                      | Recommended backend | Notes                                                                                                                                                  |
+| -------------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `/management.html`                           | CPAMP `:18317`      | Manager Server-hosted management panel.                                                                                                                |
+| `/usage-service/*`                           | CPAMP `:18317`      | Manager Server mode detection and config APIs.                                                                                                         |
+| `/v0/management/*`                           | CPAMP `:18317`      | CPAMP handles usage, model-prices, aliases, dashboard, monitoring, and codex-inspection first; other management APIs are then proxied by CPAMP to CPA. |
+| `/v0/resource/plugins/*`                     | CPAMP `:18317`      | Plugin page resources used by the CPAMP panel. CPAMP proxies them to CPA when needed.                                                                  |
+| `/models`                                    | CPAMP `:18317`      | Compatibility proxy to CPA after setup.                                                                                                                |
+| `/v1/*`, `/v1beta/*`, `/backend-api/codex/*` | CPA `:8317`         | Actual model API, Codex API, and provider requests.                                                                                                    |
+| OAuth callback                               | CPA `:8317`         | For example `/anthropic/callback` and `/codex/callback`.                                                                                               |
+| New paths without explicit ownership         | CPA `:8317`         | Avoid blocking future CPA endpoints.                                                                                                                   |
+| RESP Pub/Sub / RESP pop                      | Direct CPA `:8317`  | Cannot go through an HTTP reverse proxy.                                                                                                               |
 
 Recommended architecture:
 
@@ -52,7 +62,7 @@ CPA must have Management API enabled:
 
 ```yaml
 remote-management:
-  secret-key: "your CPA Management Key"
+  secret-key: 'your CPA Management Key'
   allow-remote: true
 ```
 
@@ -90,7 +100,7 @@ services:
       - ./cliproxyapi/auths:/app/auths
       - ./cliproxyapi/logs:/app/logs
     expose:
-      - "8317"
+      - '8317'
 
   cpa-manager-plus:
     image: seakee/cpa-manager-plus:latest
@@ -99,7 +109,7 @@ services:
     volumes:
       - ./cpa-manager-plus-data:/data
     expose:
-      - "18317"
+      - '18317'
     depends_on:
       - cli-proxy-api
 
@@ -108,7 +118,7 @@ services:
     container_name: cpa-nginx
     restart: unless-stopped
     ports:
-      - "80:80"
+      - '80:80'
       # Expose 443 if HTTPS is enabled.
       # - "443:443"
     volumes:
@@ -259,12 +269,12 @@ Make sure both services expose ports to the host:
 
 ```yaml
 ports:
-  - "8317:8317"
+  - '8317:8317'
 ```
 
 ```yaml
 ports:
-  - "18317:18317"
+  - '18317:18317'
 ```
 
 ## CPAMP First Setup

@@ -8,21 +8,31 @@
 - CPA / CLI Proxy API：`https://your-domain.com/v1/...`
 - CPA OAuth 回调、Codex API、Amp 路由等 CPA 侧接口
 
-本文适用于 Full Docker / Manager Server 模式。CPA 托管面板由 CPA 自己托管 `/management.html`，通常不需要这套混合分流。
+本文适用于 Full Docker / Manager Server 模式。CPAMP 轻量面板由 CPA 自己托管 `/management.html`，通常不需要这套混合分流。
+
+## 先选场景
+
+| 目标                                  | 推荐方式                                             |
+| ------------------------------------- | ---------------------------------------------------- |
+| 只代理 CPAMP 轻量面板                 | 所有管理页面和接口都转发到 CPA，不使用本页的混合分流 |
+| CPAMP 和 CPA 使用不同域名             | 最简单：CPAMP 转发到 `18317`，CPA 转发到 `8317`      |
+| CPAMP 面板和 CPA API 必须使用同一域名 | 继续使用本页的路径分流配置                           |
+
+大多数用户建议为 CPAMP 和 CPA 使用不同域名或子域名。只有必须共用域名时，才需要理解下面的完整路径表。
 
 ## 路径边界
 
-| 流量 | 推荐后端 | 说明 |
-|---|---|---|
-| `/management.html` | CPAMP `:18317` | Manager Server 托管的管理面板。 |
-| `/usage-service/*` | CPAMP `:18317` | Manager Server 模式探测和配置接口。 |
-| `/v0/management/*` | CPAMP `:18317` | CPAMP 先处理用量、模型价格、别名、仪表盘、请求监控、Codex 账号巡检；其他管理接口再由 CPAMP 代理到 CPA。 |
-| `/v0/resource/plugins/*` | CPAMP `:18317` | CPAMP 面板中的插件页面资源；CPAMP 会按需代理到 CPA。 |
-| `/models` | CPAMP `:18317` | setup 后由 CPAMP 兼容代理到 CPA。 |
-| `/v1/*`、`/v1beta/*`、`/backend-api/codex/*` | CPA `:8317` | 实际模型 API、Codex API 和提供商请求。 |
-| OAuth 回调 | CPA `:8317` | 例如 `/anthropic/callback`、`/codex/callback`。 |
-| 未明确归属的新路径 | CPA `:8317` | 避免阻断 CPA 未来新增接口。 |
-| RESP Pub/Sub / RESP pop | 直连 CPA `:8317` | 不能经过 HTTP 反向代理。 |
+| 流量                                         | 推荐后端         | 说明                                                                                                    |
+| -------------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------- |
+| `/management.html`                           | CPAMP `:18317`   | Manager Server 托管的管理面板。                                                                         |
+| `/usage-service/*`                           | CPAMP `:18317`   | Manager Server 模式探测和配置接口。                                                                     |
+| `/v0/management/*`                           | CPAMP `:18317`   | CPAMP 先处理用量、模型价格、别名、仪表盘、请求监控、Codex 账号巡检；其他管理接口再由 CPAMP 代理到 CPA。 |
+| `/v0/resource/plugins/*`                     | CPAMP `:18317`   | CPAMP 面板中的插件页面资源；CPAMP 会按需代理到 CPA。                                                    |
+| `/models`                                    | CPAMP `:18317`   | setup 后由 CPAMP 兼容代理到 CPA。                                                                       |
+| `/v1/*`、`/v1beta/*`、`/backend-api/codex/*` | CPA `:8317`      | 实际模型 API、Codex API 和提供商请求。                                                                  |
+| OAuth 回调                                   | CPA `:8317`      | 例如 `/anthropic/callback`、`/codex/callback`。                                                         |
+| 未明确归属的新路径                           | CPA `:8317`      | 避免阻断 CPA 未来新增接口。                                                                             |
+| RESP Pub/Sub / RESP pop                      | 直连 CPA `:8317` | 不能经过 HTTP 反向代理。                                                                                |
 
 推荐架构：
 
@@ -52,7 +62,7 @@ CPA 配置中至少需要开启：
 
 ```yaml
 remote-management:
-  secret-key: "你的 CPA Management Key"
+  secret-key: '你的 CPA Management Key'
   allow-remote: true
 ```
 
@@ -90,7 +100,7 @@ services:
       - ./cliproxyapi/auths:/app/auths
       - ./cliproxyapi/logs:/app/logs
     expose:
-      - "8317"
+      - '8317'
 
   cpa-manager-plus:
     image: seakee/cpa-manager-plus:latest
@@ -99,7 +109,7 @@ services:
     volumes:
       - ./cpa-manager-plus-data:/data
     expose:
-      - "18317"
+      - '18317'
     depends_on:
       - cli-proxy-api
 
@@ -108,7 +118,7 @@ services:
     container_name: cpa-nginx
     restart: unless-stopped
     ports:
-      - "80:80"
+      - '80:80'
       # 如果使用 HTTPS，可以再暴露 443。
       # - "443:443"
     volumes:
@@ -259,12 +269,12 @@ upstream cpamp {
 
 ```yaml
 ports:
-  - "8317:8317"
+  - '8317:8317'
 ```
 
 ```yaml
 ports:
-  - "18317:18317"
+  - '18317:18317'
 ```
 
 ## CPAMP 首次 setup

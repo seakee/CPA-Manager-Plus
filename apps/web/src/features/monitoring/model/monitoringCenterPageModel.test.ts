@@ -4,8 +4,11 @@ import {
   fetchAntigravityQuota,
   fetchClaudeQuota,
   fetchCodexQuota,
+  fetchKimiQuota,
   fetchXaiQuota,
 } from '@/utils/quota';
+import zhCN from '@/i18n/locales/zh-CN.json';
+import zhTW from '@/i18n/locales/zh-TW.json';
 import type { MonitoringAccountQuotaTarget } from '@/features/monitoring/accountOverviewQuotaTargets';
 import type {
   MonitoringAccountRow,
@@ -57,8 +60,19 @@ const t = ((key: string, options?: Record<string, unknown>) => {
     'xai_quota.title': 'xAI Quota',
     'xai_quota.empty_data': 'No xAI quota data',
     'xai_quota.monthly_limit': 'Monthly billing limit',
+    'xai_quota.monthly_credits': 'Monthly credits',
+    'xai_quota.weekly_limit': 'Weekly limit',
+    'xai_quota.used_percent': 'Used {{percent}}',
+    'xai_quota.product_usage': '{{product}} usage',
+    'xai_quota.pay_as_you_go_label': 'Pay-as-you-go',
     'xai_quota.on_demand_cap': 'On-demand cap',
     'xai_quota.usage_amount': '{{remaining}} / {{limit}} remaining',
+    'xai_quota.partial_data': 'Some billing data is unavailable. Reason: {{details}}',
+    'xai_quota.partial_unknown': 'The cause could not be determined',
+    'xai_quota.official_api_health':
+      'Official xAI API identity is reachable. Billing and remaining quota are unavailable for this OAuth credential.',
+    'xai_quota.diagnostic_protocol_changed':
+      'The billing endpoint returned data that cannot currently be recognized',
   };
   let value = copy[key] ?? key;
   Object.entries(options ?? {}).forEach(([name, replacement]) => {
@@ -139,6 +153,36 @@ const createApiKeyRow = (apiKeyHash: string, label: string): MonitoringApiKeyRow
 });
 
 describe('monitoringCenterPageModel filter options', () => {
+  it('keeps Chinese compact all-filter labels contextual', () => {
+    const keys = [
+      'filter_all_accounts_short',
+      'filter_all_providers_short',
+      'filter_all_models_short',
+      'filter_all_channels_short',
+      'filter_all_api_keys_short',
+      'filter_all_statuses_short',
+    ] as const;
+
+    expect(keys.map((key) => zhCN.monitoring[key])).toEqual([
+      '全部账号',
+      '全部提供方',
+      '全部模型',
+      '全部渠道',
+      '全部调用方密钥',
+      '全部状态',
+    ]);
+    expect(keys.map((key) => zhTW.monitoring[key])).toEqual([
+      '全部帳號',
+      '全部提供方',
+      '全部模型',
+      '全部渠道',
+      '全部呼叫方密鑰',
+      '全部狀態',
+    ]);
+    expect(new Set(keys.map((key) => zhCN.monitoring[key])).size).toBe(keys.length);
+    expect(new Set(keys.map((key) => zhTW.monitoring[key])).size).toBe(keys.length);
+  });
+
   it('maps usage analytics drilldown query into initial realtime filters', () => {
     const initialState = {
       ...getDefaultMonitoringCenterUiState(),
@@ -221,6 +265,12 @@ describe('monitoringCenterPageModel account quota', () => {
           usedPercent: 40,
           resetLabel: '05/20 12:00',
         },
+        {
+          id: 'weekly-scoped-fable%205%20max',
+          label: 'Fable 5 Max',
+          usedPercent: 100,
+          resetLabel: '05/27 12:00',
+        },
       ],
       planType: 'plan_pro',
       extraUsage: {
@@ -243,6 +293,12 @@ describe('monitoringCenterPageModel account quota', () => {
           label: '5-hour limit',
           remainingPercent: 60,
           resetLabel: '05/20 12:00',
+        },
+        {
+          id: 'weekly-scoped-fable%205%20max',
+          label: 'Fable 5 Max',
+          remainingPercent: 0,
+          resetLabel: '05/27 12:00',
         },
       ],
     });
@@ -342,11 +398,7 @@ describe('monitoringCenterPageModel account quota', () => {
 
     expect(merged).toMatchObject({
       planType: 'plus',
-      metaLabels: [
-        'Codex Quota',
-        'Plan: Plus',
-        'Observed from latest usage response headers',
-      ],
+      metaLabels: ['Codex Quota', 'Plan: Plus', 'Observed from latest usage response headers'],
       windows: [
         {
           id: 'monthly',
@@ -844,14 +896,54 @@ describe('monitoringCenterPageModel account quota', () => {
     ]);
   });
 
+  it('maps Kimi quota rows without amount labels in account quota entries', async () => {
+    vi.mocked(fetchKimiQuota).mockResolvedValue([
+      {
+        id: 'daily',
+        label: 'Daily',
+        used: 25,
+        limit: 100,
+        resetHint: '2026-07-31T00:00:00Z',
+      },
+    ]);
+
+    const entry = await requestAccountQuota(
+      createTarget({
+        provider: 'kimi',
+        authIndex: '4',
+        fileName: 'kimi.json',
+      }),
+      t
+    );
+
+    expect(entry).toMatchObject({
+      provider: 'kimi',
+      providerLabel: 'Kimi Quota',
+      windows: [
+        {
+          id: 'daily',
+          label: 'Daily',
+          remainingPercent: 75,
+          usageLabel: null,
+        },
+      ],
+    });
+  });
+
   it('maps xAI billing into account quota entries', async () => {
     vi.mocked(fetchXaiQuota).mockResolvedValue({
+      periodType: 'monthly',
+      usagePercent: 100,
+      productUsage: [],
       monthlyLimitCents: 10000,
-      usedCents: 2500,
+      usedCents: 12500,
+      includedUsedCents: 10000,
       onDemandCapCents: 5000,
+      onDemandUsedCents: 2500,
+      onDemandUsedPercent: 50,
       billingPeriodStart: '2026-05-01T00:00:00Z',
       billingPeriodEnd: '2026-06-01T00:00:00Z',
-      usedPercent: 25,
+      usedPercent: 100,
     });
 
     const entry = await requestAccountQuota(
@@ -870,11 +962,144 @@ describe('monitoringCenterPageModel account quota', () => {
       windows: [
         {
           id: 'monthly-limit',
-          label: 'Monthly billing limit',
+          label: 'Monthly credits',
+          remainingPercent: 0,
+          usageLabel: '$0.00 / $100.00 remaining',
+        },
+        {
+          id: 'pay-as-you-go',
+          label: 'Pay-as-you-go',
+          remainingPercent: 50,
+          usageLabel: '$25.00 / $50.00 remaining',
+        },
+      ],
+    });
+  });
+
+  it('maps xAI weekly and product usage into account quota entries', async () => {
+    vi.mocked(fetchXaiQuota).mockResolvedValue({
+      periodType: 'weekly',
+      usagePercent: 40,
+      periodStart: '2026-07-01T00:00:00Z',
+      periodEnd: '2026-07-08T00:00:00Z',
+      productUsage: [{ product: 'Grok 4', usagePercent: 25 }],
+      monthlyLimitCents: 10000,
+      usedCents: 2500,
+      includedUsedCents: 2500,
+      onDemandCapCents: null,
+      onDemandUsedCents: null,
+      onDemandUsedPercent: null,
+      billingPeriodStart: '2026-07-01T00:00:00Z',
+      billingPeriodEnd: '2026-08-01T00:00:00Z',
+      usedPercent: 25,
+    });
+
+    const entry = await requestAccountQuota(
+      createTarget({
+        provider: 'xai',
+        authIndex: '3',
+        fileName: 'xai.json',
+      }),
+      t
+    );
+
+    expect(entry).toMatchObject({
+      provider: 'xai',
+      providerLabel: 'xAI Quota',
+      windows: [
+        {
+          id: 'weekly-limit',
+          label: 'Weekly limit',
+          remainingPercent: 60,
+          usageLabel: 'Used 40%',
+        },
+        {
+          id: 'product-0-Grok 4',
+          label: 'Grok 4 usage',
+          remainingPercent: 75,
+          usageLabel: 'Used 25%',
+        },
+        {
+          id: 'monthly-limit',
+          label: 'Monthly credits',
           remainingPercent: 75,
           usageLabel: '$75.00 / $100.00 remaining',
         },
       ],
     });
+  });
+
+  it('maps official API health without synthesizing quota windows', async () => {
+    vi.mocked(fetchXaiQuota).mockResolvedValue({
+      periodType: 'unknown',
+      usagePercent: null,
+      productUsage: [],
+      monthlyLimitCents: null,
+      usedCents: null,
+      includedUsedCents: null,
+      onDemandCapCents: null,
+      onDemandUsedCents: null,
+      onDemandUsedPercent: null,
+      usedPercent: null,
+      officialApiHealth: {
+        source: 'api.x.ai/v1/me',
+        userId: 'user-1',
+        teamId: 'team-1',
+        teamBlocked: false,
+      },
+    });
+
+    const entry = await requestAccountQuota(
+      createTarget({ provider: 'xai', authIndex: '3', fileName: 'paid-xai.json' }),
+      t
+    );
+
+    expect(entry).toMatchObject({
+      provider: 'xai',
+      metaLabels: [
+        'xAI Quota',
+        'Official xAI API identity is reachable. Billing and remaining quota are unavailable for this OAuth credential.',
+      ],
+      windows: [],
+    });
+  });
+
+  it('maps partial xAI billing diagnostics to user-facing explanations', async () => {
+    vi.mocked(fetchXaiQuota).mockResolvedValue({
+      periodType: 'monthly',
+      usagePercent: null,
+      productUsage: [],
+      monthlyLimitCents: 10_000,
+      usedCents: 2_500,
+      includedUsedCents: 2_500,
+      onDemandCapCents: null,
+      onDemandUsedCents: null,
+      onDemandUsedPercent: null,
+      usedPercent: 25,
+      partial: true,
+      diagnostics: [
+        {
+          classification: 'protocol_changed',
+          statusCode: 200,
+          message: 'xAI billing response schema changed',
+        },
+      ],
+    });
+
+    const entry = await requestAccountQuota(
+      createTarget({
+        provider: 'xai',
+        authIndex: '3',
+        fileName: 'xai.json',
+      }),
+      t
+    );
+
+    const metaLabels = entry.metaLabels ?? [];
+    expect(metaLabels).toContain(
+      'Some billing data is unavailable. Reason: The billing endpoint returned data that cannot currently be recognized'
+    );
+    expect(metaLabels.join(' ')).not.toContain('protocol_changed');
+    expect(metaLabels.join(' ')).not.toContain('HTTP 200');
   });
 });

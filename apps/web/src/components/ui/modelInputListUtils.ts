@@ -6,6 +6,11 @@ export interface ModelEntry {
   priority?: number;
   testModel?: string;
   image?: boolean;
+  forceMapping?: boolean;
+  inputModalities?: string[];
+  outputModalities?: string[];
+  inputModalitiesDraft?: string;
+  outputModalitiesDraft?: string;
   thinking?: Record<string, unknown>;
 }
 
@@ -19,6 +24,11 @@ export const modelsToEntries = (models?: ModelAlias[]): ModelEntry[] => {
     priority: model.priority,
     testModel: model.testModel,
     image: model.image,
+    forceMapping: model.forceMapping,
+    inputModalities: model.inputModalities,
+    outputModalities: model.outputModalities,
+    inputModalitiesDraft: model.inputModalities?.join(', '),
+    outputModalitiesDraft: model.outputModalities?.join(', '),
     thinking: model.thinking,
   }));
 };
@@ -40,6 +50,15 @@ export const entriesToModels = (entries: ModelEntry[]): ModelAlias[] => {
       }
       if (entry.image !== undefined) {
         model.image = entry.image;
+      }
+      if (entry.forceMapping !== undefined) {
+        model.forceMapping = entry.forceMapping;
+      }
+      if (entry.inputModalities !== undefined) {
+        model.inputModalities = [...entry.inputModalities];
+      }
+      if (entry.outputModalities !== undefined) {
+        model.outputModalities = [...entry.outputModalities];
       }
       if (entry.thinking && typeof entry.thinking === 'object') {
         model.thinking = entry.thinking;

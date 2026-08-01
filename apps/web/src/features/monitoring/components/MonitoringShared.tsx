@@ -13,10 +13,14 @@ import {
   IconArrowDownToLine,
   IconArrowUpFromLine,
   IconBinary,
+  IconChartLine,
   IconCheck,
   IconDatabaseZap,
   IconDollarSign,
   IconInbox,
+  IconRefreshCw,
+  IconShield,
+  IconTrash2,
   IconX,
   type IconProps,
 } from '@/components/ui/icons';
@@ -31,7 +35,13 @@ export type SummaryCardIcon =
   | 'tokens'
   | 'input'
   | 'output'
-  | 'cache';
+  | 'cache'
+  | 'probe'
+  | 'sampled'
+  | 'delete'
+  | 'disable'
+  | 'enable'
+  | 'reauth';
 
 export type SummaryCardAccent =
   | 'blue'
@@ -91,6 +101,12 @@ const summaryIconMap: Record<SummaryCardIcon, ComponentType<IconProps>> = {
   input: IconArrowDownToLine,
   output: IconArrowUpFromLine,
   cache: IconDatabaseZap,
+  probe: IconInbox,
+  sampled: IconChartLine,
+  delete: IconTrash2,
+  disable: IconShield,
+  enable: IconCheck,
+  reauth: IconRefreshCw,
 };
 
 const summaryAccentClassMap: Record<SummaryCardAccent, string> = {

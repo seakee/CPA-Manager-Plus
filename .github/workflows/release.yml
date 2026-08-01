@@ -233,3 +233,172 @@ jobs:
           repository: ${{ env.DOCKERHUB_IMAGE }}
           short-description: CPA Manager Plus with Dockerized Manager Server
           readme-filepath: ./README.md
+
+  notify-telegram:
+    name: Notify Telegram
+    needs:
+      - build-and-release
+      - build-and-push-docker
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v4
+
+      - name: Send Telegram release notification
+        shell: bash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_MESSAGE_THREAD_ID: ${{ secrets.TELEGRAM_MESSAGE_THREAD_ID }}
+        run: |
+          set -euo pipefail
+
+          release_post="docs/release-posts/${GITHUB_REF_NAME}-telegram.html"
+
+          if [ -z "${TELEGRAM_BOT_TOKEN}" ] || [ -z "${TELEGRAM_CHAT_ID}" ]; then
+            echo "::warning::TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not configured; Telegram notification skipped."
+            exit 0
+          fi
+
+          if [ ! -f "${release_post}" ]; then
+            echo "::warning::Telegram release post ${release_post} was not found; notification skipped."
+            exit 0
+          fi
+
+          validation_error="$(python3 - "${release_post}" <<'PY' 2>&1 || true
+          import sys
+          from html.parser import HTMLParser
+          from pathlib import Path
+          from urllib.parse import urlparse
+
+          path = Path(sys.argv[1])
+          body = path.read_text(encoding="utf-8")
+
+          if not body.strip():
+              raise SystemExit("release post is empty")
+          if len(body) > 3500:
+              raise SystemExit(f"release post is {len(body)} characters; maximum is 3500")
+
+          class TelegramHTMLValidator(HTMLParser):
+              allowed_tags = {"b", "i", "code", "a"}
+
+              def __init__(self):
+                  super().__init__(convert_charrefs=False)
+                  self.stack = []
+
+              def handle_starttag(self, tag, attrs):
+                  if tag not in self.allowed_tags:
+                      raise ValueError(f"unsupported HTML tag: <{tag}>")
+                  if tag == "a":
+                      if len(attrs) != 1 or attrs[0][0] != "href":
+                          raise ValueError("<a> must contain only one href attribute")
+                      url = urlparse(attrs[0][1])
+                      if url.scheme != "https" or not url.netloc:
+                          raise ValueError("<a href> must use an absolute HTTPS URL")
+                  elif attrs:
+                      raise ValueError(f"<{tag}> does not support attributes")
+                  self.stack.append(tag)
+
+              def handle_endtag(self, tag):
+                  if not self.stack or self.stack[-1] != tag:
+                      raise ValueError(f"unbalanced closing tag: </{tag}>")
+                  self.stack.pop()
+
+              def handle_startendtag(self, tag, attrs):
+                  raise ValueError(f"self-closing tag is not supported: <{tag}/>")
+
+          validator = TelegramHTMLValidator()
+          try:
+              validator.feed(body)
+              validator.close()
+              if validator.stack:
+                  raise ValueError(f"unclosed HTML tag: <{validator.stack[-1]}>")
+          except ValueError as error:
+              raise SystemExit(str(error)) from error
+          PY
+          )"
+
+          if [ -n "${validation_error}" ]; then
+            echo "::warning::Telegram release post validation failed: ${validation_error}"
+            exit 0
+          fi
+
+          if [ -n "${TELEGRAM_MESSAGE_THREAD_ID}" ] && ! [[ "${TELEGRAM_MESSAGE_THREAD_ID}" =~ ^[0-9]+$ ]]; then
+            echo "::warning::TELEGRAM_MESSAGE_THREAD_ID must be numeric; Telegram notification skipped."
+            exit 0
+          fi
+
+          release_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}"
+
+          reply_markup="$(python3 - "${release_url}" <<'PY'
+          import json
+          import sys
+
+          print(json.dumps({
+              "inline_keyboard": [
+                  [{"text": "查看 Release", "url": sys.argv[1]}],
+              ]
+          }, ensure_ascii=False, separators=(",", ":")))
+          PY
+          )"
+
+          response_file="$(mktemp)"
+          curl_args=(
+            --silent
+            --show-error
+            --retry 3
+            --retry-all-errors
+            --connect-timeout 10
+            --max-time 30
+            --output "${response_file}"
+            --write-out "%{http_code}"
+            --request POST
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}"
+            --data-urlencode "text@${release_post}"
+            --data-urlencode "parse_mode=HTML"
+            --data-urlencode "disable_web_page_preview=true"
+            --data-urlencode "reply_markup=${reply_markup}"
+          )
+
+          if [ -n "${TELEGRAM_MESSAGE_THREAD_ID}" ]; then
+            curl_args+=(--data-urlencode "message_thread_id=${TELEGRAM_MESSAGE_THREAD_ID}")
+          fi
+
+          set +e
+          http_code="$(curl "${curl_args[@]}")"
+          curl_status=$?
+          set -e
+
+          if [ "${curl_status}" -ne 0 ]; then
+            echo "::warning::Telegram API request failed before receiving an HTTP response."
+            exit 0
+          fi
+
+          if ! [[ "${http_code}" =~ ^2[0-9][0-9]$ ]]; then
+            echo "::warning::Telegram API returned HTTP ${http_code}; release remains successful."
+            exit 0
+          fi
+
+          if ! python3 - "${response_file}" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          try:
+              response = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+              raise SystemExit(1)
+
+          raise SystemExit(0 if response.get("ok") is True else 1)
+          PY
+          then
+            echo "::warning::Telegram API did not confirm message delivery; release remains successful."
+            exit 0
+          fi
+
+          echo "Telegram release notification sent successfully."

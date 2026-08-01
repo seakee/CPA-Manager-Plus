@@ -2,10 +2,12 @@ import type {
   AccountActionCandidate,
   AccountProcessingPolicy,
   ApiKeyAlias,
+  CodexInspectionResult,
   CodexInspectionRunDetail,
   CodexInspectionRunsResponse,
   DashboardSummaryResponse,
   ManagerConfigResponse,
+  ModelPriceUsageSummaryResponse,
   ModelPricesResponse,
   MonitoringAnalyticsRequest,
   MonitoringAnalyticsResponse,
@@ -14,9 +16,17 @@ import type {
   UsageServiceInfo,
   UsageServiceStatus,
 } from '@/services/api/usageService';
+import type {
+  CodexInspectionAction,
+  CodexInspectionRunResult,
+  CodexInspectionStoredLogEntry,
+} from '@/features/monitoring/codexInspection';
+import { formatActionLabel } from '@/features/monitoring/model/codexInspectionPresentation';
 import type { AuthFilesResponse } from '@/types/authFile';
 import type { PluginListResponse, PluginStoreResponse } from '@/types/plugin';
 import type { ModelInfo } from '@/utils/models';
+import { formatXaiProbeIssue } from '@/utils/quota/xaiPresentation';
+import type { TFunction } from 'i18next';
 import {
   DEMO_API_BASE,
   DEMO_SERVER_VERSION,
@@ -41,6 +51,7 @@ const now = () => Date.now();
 const minute = 60 * 1000;
 const hour = 60 * minute;
 const day = 24 * hour;
+const identityT = ((key: string) => key) as TFunction;
 
 const startOfLocalDayIso = (input = now()) => {
   const date = new Date(input);
@@ -62,14 +73,11 @@ const splitTokens = (totalTokens: number) => {
   const cachedTokens = Math.round(totalTokens * 0.13);
   const cacheReadTokens = Math.round(cachedTokens * 0.78);
   const cacheCreationTokens = cachedTokens - cacheReadTokens;
-  const reasoningTokens = Math.max(
-    0,
-    totalTokens - inputTokens - outputTokens - cachedTokens
-  );
+  const reasoningTokens = Math.max(0, totalTokens - inputTokens - outputTokens);
   return {
     input_tokens: inputTokens,
     output_tokens: outputTokens,
-    cached_tokens: cachedTokens,
+    cached_tokens: 0,
     cache_read_tokens: cacheReadTokens,
     cache_creation_tokens: cacheCreationTokens,
     reasoning_tokens: reasoningTokens,
@@ -159,13 +167,18 @@ const initialRawConfig: Record<string, unknown> = {
   clean: {
     base_url: DEMO_API_BASE,
     target_type: 'codex',
+    target_types: ['codex', 'xai'],
     workers: 6,
     delete_workers: 2,
     timeout: 30,
     retries: 2,
     user_agent: 'CPA-Manager-Plus Demo',
+    xai_inference_user_agent: 'xai-grok-workspace/0.2.101 Demo',
+    xai_inference_enabled: true,
+    xai_inference_model: 'grok-4.5',
+    xai_inference_prompt: 'Reply with exactly OK.',
     used_percent_threshold: 92,
-    sample_size: 24,
+    sample_size: 0,
   },
   'usage-statistics-enabled': true,
   'redis-usage-queue-retention-seconds': 1800,
@@ -199,6 +212,17 @@ const initialRawConfig: Record<string, unknown> = {
       models: [{ name: 'gpt-5-codex', alias: 'Codex Team' }],
     },
   ],
+  'xai-api-key': [
+    {
+      'api-key': 'xai-demo-team-key',
+      'auth-index': 'xai-api-team-01',
+      prefix: 'xai-team',
+      'base-url': 'https://api.x.ai/v1',
+      priority: 9,
+      websockets: true,
+      models: [{ name: 'grok-4.5', alias: 'Grok Team' }],
+    },
+  ],
   'claude-api-key': [
     {
       'api-key': 'claude-demo-team-key',
@@ -227,7 +251,9 @@ const initialRawConfig: Record<string, unknown> = {
       name: 'OpenAI Compatible',
       prefix: 'openai',
       'base-url': 'https://api.openai.example/v1',
-      'api-key-entries': [{ 'api-key': 'sk-compatible-demo-primary' }],
+      'api-key-entries': [
+        { 'api-key': 'sk-compatible-demo-primary', 'auth-index': 'openai-primary' },
+      ],
       models: [
         { name: 'gpt-4.1', alias: 'GPT-4.1' },
         { name: 'gpt-4.1-mini', alias: 'GPT-4.1 Mini' },
@@ -236,10 +262,35 @@ const initialRawConfig: Record<string, unknown> = {
       'test-model': 'gpt-4.1-mini',
     },
     {
+      // Multi-key OpenAI-compatible provider: monitoring should show "kuaileshifu #1/#2".
+      name: 'kuaileshifu',
+      'base-url': 'https://api.kuaileshifu.example/v1',
+      'api-key-entries': [
+        { 'api-key': 'sk-kuai-demo-key-1111aaaa', 'auth-index': 'kuai-auth-1' },
+        { 'api-key': 'sk-kuai-demo-key-2222bbbb', 'auth-index': 'kuai-auth-2' },
+      ],
+      models: [
+        { name: 'gpt-4.1-mini', alias: 'Kuai Mini' },
+        { name: 'gpt-4.1', alias: 'Kuai Full' },
+      ],
+      priority: 55,
+      'test-model': 'gpt-4.1-mini',
+    },
+    {
+      // Named channel that already includes an ordinal (not multi-key disambiguation).
+      name: 'anyrouter.top #1',
+      'base-url': 'https://anyrouter.top/v1',
+      'api-key-entries': [{ 'api-key': 'sk-anyrouter-demo-key', 'auth-index': 'anyrouter-auth-1' }],
+      models: [{ name: 'gpt-4.1-mini', alias: 'AnyRouter Mini' }],
+      priority: 60,
+    },
+    {
       name: 'Automation Shared Pool',
       prefix: 'auto',
       'base-url': 'https://gateway.example.com/v1',
-      'api-key-entries': [{ 'api-key': 'sk-automation-demo' }],
+      'api-key-entries': [
+        { 'api-key': 'sk-automation-demo', 'auth-index': 'openai-automation-01' },
+      ],
       models: [{ name: 'qwen-plus', alias: 'Qwen Plus' }],
       priority: 70,
     },
@@ -251,9 +302,29 @@ const initialRawConfig: Record<string, unknown> = {
 };
 
 const demoAuthFiles: AuthFilesResponse = {
-  total: 12,
+  total: 20,
   files: [
     {
+      id: 'codex-upgrade-demo-runtime',
+      name: 'codex-upgrade-demo.json',
+      type: 'codex',
+      provider: 'codex',
+      authIndex: 'codex-upgrade-demo-01',
+      disabled: false,
+      status: 'healthy',
+      statusMessage: 'Ready',
+      size: 4612,
+      modified: now() - 4 * hour,
+      last_refresh: new Date(now() - 4 * hour).toISOString(),
+      account_snapshot: 'Upgrade Demo',
+      account_id: 'acct_codex_upgrade_demo',
+      plan_type: 'free',
+      id_token: { plan_type: 'free' },
+      success: 318,
+      failed: 2,
+    },
+    {
+      id: 'codex-team-01.json',
       name: 'codex-team-01.json',
       type: 'codex',
       provider: 'codex',
@@ -265,21 +336,62 @@ const demoAuthFiles: AuthFilesResponse = {
       modified: now() - 2 * hour,
       account_snapshot: 'Platform Team',
       account_id: 'acct_codex_team',
+      plan_type: 'team',
       success: 1842,
       failed: 18,
     },
     {
+      // Codex OAuth-style email identity: primary should be the email, secondary "codex".
+      id: 'codex-email-user.json',
+      name: 'codex-email-user.json',
+      type: 'codex',
+      provider: 'codex',
+      authIndex: 'codex-email-user-01',
+      disabled: false,
+      status: 'healthy',
+      statusMessage: 'Ready',
+      size: 4680,
+      modified: now() - 90 * minute,
+      account_snapshot: 'fbcabcdef@vip.qq.com',
+      email: 'fbcabcdef@vip.qq.com',
+      account: 'fbcabcdef@vip.qq.com',
+      label: 'codex',
+      account_id: 'acct_codex_email',
+      plan_type: 'plus',
+      success: 640,
+      failed: 6,
+    },
+    {
+      id: 'codex-pro-20x-01.json',
+      name: 'codex-pro-20x-01.json',
+      type: 'codex',
+      provider: 'codex',
+      authIndex: 'codex-pro-20x-01',
+      disabled: false,
+      status: 'healthy',
+      statusMessage: 'Ready',
+      size: 4960,
+      modified: now() - hour,
+      account_snapshot: 'Pro 20x Workspace',
+      account_id: 'acct_codex_pro_20x',
+      plan_type: 'pro',
+      success: 1260,
+      failed: 8,
+    },
+    {
+      id: 'codex-fallback-02.json',
       name: 'codex-fallback-02.json',
       type: 'codex',
       provider: 'codex',
       authIndex: 'codex-fallback-02',
-      disabled: false,
+      disabled: true,
       status: 'cooldown',
       statusMessage: 'Recovering from quota pressure',
       size: 4710,
       modified: now() - 6 * hour,
       account_snapshot: 'Automation Pool',
       account_id: 'acct_codex_auto',
+      plan_type: 'team',
       success: 934,
       failed: 42,
     },
@@ -349,16 +461,58 @@ const demoAuthFiles: AuthFilesResponse = {
       failed: 36,
     },
     {
+      // xAI OAuth-style email identity: primary should be the email, secondary "xai".
+      id: 'xai-ops.json',
       name: 'xai-ops.json',
       type: 'xai',
       provider: 'xai',
       authIndex: 'xai-ops-01',
-      disabled: false,
-      status: 'healthy',
+      disabled: true,
+      status: 'cooldown',
+      statusMessage: 'Included free usage exhausted; automatic restore is scheduled',
       size: 3180,
       modified: now() - day,
+      account_snapshot: 'oc0demo01@yijihwjw.com',
+      email: 'oc0demo01@yijihwjw.com',
+      account: 'oc0demo01@yijihwjw.com',
+      label: 'xai',
       success: 294,
       failed: 4,
+    },
+    {
+      id: 'xai-email-user.json',
+      name: 'xai-email-user.json',
+      type: 'xai',
+      provider: 'xai',
+      authIndex: 'xai-email-user-01',
+      disabled: false,
+      status: 'healthy',
+      size: 3020,
+      modified: now() - 5 * hour,
+      account_snapshot: 'oc1demo02@yijihwjw.com',
+      email: 'oc1demo02@yijihwjw.com',
+      account: 'oc1demo02@yijihwjw.com',
+      label: 'xai',
+      success: 188,
+      failed: 3,
+    },
+    {
+      id: 'xai-expired.json',
+      name: 'xai-expired.json',
+      type: 'xai',
+      provider: 'xai',
+      authIndex: 'xai-expired-01',
+      disabled: false,
+      status: 'warning',
+      statusMessage: 'Authentication expired',
+      size: 2980,
+      modified: now() - 8 * hour,
+      account_snapshot: 'expired.demo@example.com',
+      email: 'expired.demo@example.com',
+      account: 'expired.demo@example.com',
+      label: 'xai',
+      success: 82,
+      failed: 12,
     },
     {
       name: 'openai-support-02.json',
@@ -414,7 +568,82 @@ const demoAuthFiles: AuthFilesResponse = {
       success: 312,
       failed: 16,
     },
+    {
+      name: 'kuai-auth-1.json',
+      type: 'openai',
+      provider: 'openai',
+      authIndex: 'kuai-auth-1',
+      disabled: false,
+      status: 'healthy',
+      size: 2680,
+      modified: now() - 2 * hour,
+      account_snapshot: 'kuaileshifu',
+      label: 'kuaileshifu',
+      success: 420,
+      failed: 5,
+    },
+    {
+      name: 'kuai-auth-2.json',
+      type: 'openai',
+      provider: 'openai',
+      authIndex: 'kuai-auth-2',
+      disabled: false,
+      status: 'healthy',
+      size: 2680,
+      modified: now() - 3 * hour,
+      account_snapshot: 'kuaileshifu',
+      label: 'kuaileshifu',
+      success: 360,
+      failed: 4,
+    },
+    {
+      name: 'anyrouter-auth-1.json',
+      type: 'openai',
+      provider: 'openai',
+      authIndex: 'anyrouter-auth-1',
+      disabled: false,
+      status: 'healthy',
+      size: 2540,
+      modified: now() - 4 * hour,
+      account_snapshot: 'anyrouter.top #1',
+      label: 'anyrouter.top #1',
+      success: 280,
+      failed: 3,
+    },
   ],
+};
+
+const DEMO_CODEX_UPGRADE_AUTH_ID = 'codex-upgrade-demo-runtime';
+const DEMO_CODEX_UPGRADE_FILE_NAME = 'codex-upgrade-demo.json';
+const DEMO_CODEX_UPGRADE_POLL_COUNT = 2;
+
+let demoCodexUpgradePollsRemaining = 0;
+let demoCodexUpgradeCompletedAt: string | null = null;
+
+export const requestDemoCredentialRefresh = (selector: string): boolean => {
+  const normalizedSelector = selector.trim();
+  if (
+    normalizedSelector !== DEMO_CODEX_UPGRADE_AUTH_ID &&
+    normalizedSelector !== DEMO_CODEX_UPGRADE_FILE_NAME
+  ) {
+    return false;
+  }
+
+  demoCodexUpgradePollsRemaining = DEMO_CODEX_UPGRADE_POLL_COUNT;
+  return true;
+};
+
+export const advanceDemoCredentialRefresh = (): void => {
+  if (demoCodexUpgradePollsRemaining <= 0) return;
+  demoCodexUpgradePollsRemaining -= 1;
+  if (demoCodexUpgradePollsRemaining === 0) {
+    demoCodexUpgradeCompletedAt = new Date(now()).toISOString();
+  }
+};
+
+export const resetDemoCredentialRefresh = (): void => {
+  demoCodexUpgradePollsRemaining = 0;
+  demoCodexUpgradeCompletedAt = null;
 };
 
 const demoPlugins: PluginListResponse = {
@@ -582,14 +811,20 @@ const demoManagerConfig: ManagerConfigResponse = {
         timeZone: 'Asia/Shanghai',
       },
       targetType: 'codex',
+      targetTypes: ['codex', 'xai'],
       workers: 6,
       deleteWorkers: 2,
       timeout: 30,
       retries: 2,
       userAgent: 'CPA-Manager-Plus Demo',
+      xaiInferenceUserAgent: 'xai-grok-workspace/0.2.101 Demo',
+      xaiInferenceEnabled: true,
+      xaiInferenceModel: 'grok-4.5',
+      xaiInferencePrompt: 'Reply with exactly OK.',
       usedPercentThreshold: 92,
-      sampleSize: 24,
+      sampleSize: 0,
       autoActionMode: 'disable',
+      autoRecoverEnabled: true,
     },
     externalUsageService: {
       enabled: true,
@@ -613,6 +848,18 @@ const demoModelPrices: ModelPricesResponse = {
   },
 };
 
+const demoModelPriceUsageSummary: ModelPriceUsageSummaryResponse = {
+  sampled_events: 1_638,
+  total_events: 1_638,
+  truncated: false,
+  models: [
+    { model: 'gpt-4.1-mini', calls: 520, requested_calls: 520, resolved_calls: 0 },
+    { model: 'claude-sonnet-4-5', calls: 416, requested_calls: 416, resolved_calls: 0 },
+    { model: 'gemini-2.5-pro', calls: 384, requested_calls: 384, resolved_calls: 0 },
+    { model: 'gpt-4.1', calls: 318, requested_calls: 318, resolved_calls: 0 },
+  ],
+};
+
 const demoApiAliases: ApiKeyAlias[] = [
   { apiKeyHash: 'hash_openai_primary', alias: 'OpenAI Primary', updatedAtMs: now() - day },
   { apiKeyHash: 'hash_codex_team', alias: 'Codex Team', updatedAtMs: now() - 2 * hour },
@@ -625,6 +872,11 @@ const demoApiAliases: ApiKeyAlias[] = [
   { apiKeyHash: 'hash_kimi_coding', alias: 'Kimi Coding', updatedAtMs: now() - 9 * hour },
   { apiKeyHash: 'hash_builder_lab', alias: 'Builder Lab', updatedAtMs: now() - 10 * hour },
   { apiKeyHash: 'hash_xai_ops', alias: 'xAI Ops', updatedAtMs: now() - 11 * hour },
+  { apiKeyHash: 'hash_xai_email_user', alias: 'xAI Email User', updatedAtMs: now() - 9 * hour },
+  { apiKeyHash: 'hash_codex_email_user', alias: 'Codex Email User', updatedAtMs: now() - 8 * hour },
+  { apiKeyHash: 'hash_kuai_key_1', alias: 'kuaileshifu #1', updatedAtMs: now() - 6 * hour },
+  { apiKeyHash: 'hash_kuai_key_2', alias: 'kuaileshifu #2', updatedAtMs: now() - 5 * hour },
+  { apiKeyHash: 'hash_anyrouter_top', alias: 'anyrouter.top #1', updatedAtMs: now() - 4 * hour },
   { apiKeyHash: 'hash_deepseek_ops', alias: 'DeepSeek Ops', updatedAtMs: now() - 12 * hour },
 ];
 
@@ -702,7 +954,10 @@ const dashboardBase = (inputNow = now()): DashboardSummaryResponse => {
   const todayTokens = splitTokens(totalTokens);
   const totalCost = round2((totalTokens / 1_000_000) * 22.9);
   const timeline = Array.from({ length: 24 }, (_, hourIndex) => {
-    const hourPoints = healthPoints.slice(hourIndex * bucketsPerHour, (hourIndex + 1) * bucketsPerHour);
+    const hourPoints = healthPoints.slice(
+      hourIndex * bucketsPerHour,
+      (hourIndex + 1) * bucketsPerHour
+    );
     const calls = hourPoints.reduce((sum, point) => sum + point.calls, 0);
     const tokens = hourPoints.reduce((sum, point) => sum + point.tokens, 0);
     const success = hourPoints.reduce((sum, point) => sum + point.success, 0);
@@ -724,11 +979,35 @@ const dashboardBase = (inputNow = now()): DashboardSummaryResponse => {
   const rollingCalls = rollingPoints.reduce((sum, point) => sum + point.calls, 0);
   const rollingTokens = rollingPoints.reduce((sum, point) => sum + point.tokens, 0);
   const modelMix = [
-    { model: 'gpt-4.1-mini', callShare: 0.28, tokenShare: 0.21, costShare: 0.11, successRate: 0.991 },
-    { model: 'claude-sonnet-4-5', callShare: 0.22, tokenShare: 0.27, costShare: 0.3, successRate: 0.982 },
-    { model: 'gemini-2.5-pro', callShare: 0.2, tokenShare: 0.23, costShare: 0.25, successRate: 0.986 },
+    {
+      model: 'gpt-4.1-mini',
+      callShare: 0.28,
+      tokenShare: 0.21,
+      costShare: 0.11,
+      successRate: 0.991,
+    },
+    {
+      model: 'claude-sonnet-4-5',
+      callShare: 0.22,
+      tokenShare: 0.27,
+      costShare: 0.3,
+      successRate: 0.982,
+    },
+    {
+      model: 'gemini-2.5-pro',
+      callShare: 0.2,
+      tokenShare: 0.23,
+      costShare: 0.25,
+      successRate: 0.986,
+    },
     { model: 'gpt-4.1', callShare: 0.17, tokenShare: 0.19, costShare: 0.24, successRate: 0.976 },
-    { model: 'gemini-2.5-flash', callShare: 0.13, tokenShare: 0.1, costShare: 0.1, successRate: 0.994 },
+    {
+      model: 'gemini-2.5-flash',
+      callShare: 0.13,
+      tokenShare: 0.1,
+      costShare: 0.1,
+      successRate: 0.994,
+    },
   ].map((item) => ({
     model: item.model,
     calls: Math.round(totalCalls * item.callShare),
@@ -787,10 +1066,26 @@ const dashboardBase = (inputNow = now()): DashboardSummaryResponse => {
       points: healthPoints,
     },
     token_mix: [
-      { key: 'input', tokens: todayTokens.input_tokens, share: safeRate(todayTokens.input_tokens, totalTokens) },
-      { key: 'output', tokens: todayTokens.output_tokens, share: safeRate(todayTokens.output_tokens, totalTokens) },
-      { key: 'cached', tokens: todayTokens.cached_tokens, share: safeRate(todayTokens.cached_tokens, totalTokens) },
-      { key: 'reasoning', tokens: todayTokens.reasoning_tokens, share: safeRate(todayTokens.reasoning_tokens, totalTokens) },
+      {
+        key: 'input',
+        tokens: todayTokens.input_tokens,
+        share: safeRate(todayTokens.input_tokens, totalTokens),
+      },
+      {
+        key: 'output',
+        tokens: todayTokens.output_tokens,
+        share: safeRate(todayTokens.output_tokens, totalTokens),
+      },
+      {
+        key: 'cached',
+        tokens: todayTokens.cached_tokens,
+        share: safeRate(todayTokens.cached_tokens, totalTokens),
+      },
+      {
+        key: 'reasoning',
+        tokens: todayTokens.reasoning_tokens,
+        share: safeRate(todayTokens.reasoning_tokens, totalTokens),
+      },
     ],
     channel_health: [
       {
@@ -884,10 +1179,11 @@ const paginateDemoEvents = (
   beforeMs?: number | null
 ): DemoMonitoringEventsResponse => {
   const sorted = [...items].sort((left, right) => right.timestamp_ms - left.timestamp_ms);
-  const filtered = beforeMs
-    ? sorted.filter((item) => item.timestamp_ms < beforeMs)
-    : sorted;
-  const safeLimit = Math.max(1, Math.min(Math.trunc(limit || filtered.length), filtered.length || 1));
+  const filtered = beforeMs ? sorted.filter((item) => item.timestamp_ms < beforeMs) : sorted;
+  const safeLimit = Math.max(
+    1,
+    Math.min(Math.trunc(limit || filtered.length), filtered.length || 1)
+  );
   const pageItems = filtered.slice(0, safeLimit);
   const last = pageItems[pageItems.length - 1];
   return {
@@ -937,7 +1233,14 @@ const buildMonitoringAnalytics = (
 
   const modelStats = [
     buildNestedModelRow('gpt-4.1-mini', 6200, 48, 4_680_000, 56.2, analyticsNow - 8 * minute),
-    buildNestedModelRow('claude-sonnet-4-5', 4380, 96, 5_720_000, 158.7, analyticsNow - 13 * minute),
+    buildNestedModelRow(
+      'claude-sonnet-4-5',
+      4380,
+      96,
+      5_720_000,
+      158.7,
+      analyticsNow - 13 * minute
+    ),
     buildNestedModelRow('gemini-2.5-pro', 3620, 74, 4_960_000, 124.4, analyticsNow - 21 * minute),
     buildNestedModelRow('gpt-4.1', 2940, 81, 3_840_000, 102.8, analyticsNow - 16 * minute),
     buildNestedModelRow('gemini-2.5-flash', 2140, 24, 1_780_000, 28.9, analyticsNow - 6 * minute),
@@ -952,10 +1255,7 @@ const buildMonitoringAnalytics = (
   const summaryInputTokens = modelStats.reduce((sum, row) => sum + row.input_tokens, 0);
   const summaryOutputTokens = modelStats.reduce((sum, row) => sum + row.output_tokens, 0);
   const summaryCachedTokens = modelStats.reduce((sum, row) => sum + row.cached_tokens, 0);
-  const summaryCacheReadTokens = modelStats.reduce(
-    (sum, row) => sum + row.cache_read_tokens,
-    0
-  );
+  const summaryCacheReadTokens = modelStats.reduce((sum, row) => sum + row.cache_read_tokens, 0);
   const summaryCacheCreationTokens = modelStats.reduce(
     (sum, row) => sum + row.cache_creation_tokens,
     0
@@ -1007,14 +1307,7 @@ const buildMonitoringAnalytics = (
           145.6,
           analyticsNow - 13 * minute
         ),
-        buildNestedModelRow(
-          'claude-haiku-4-5',
-          460,
-          8,
-          600_000,
-          13.1,
-          analyticsNow - 52 * minute
-        ),
+        buildNestedModelRow('claude-haiku-4-5', 460, 8, 600_000, 13.1, analyticsNow - 52 * minute),
       ],
     },
     {
@@ -1065,14 +1358,7 @@ const buildMonitoringAnalytics = (
       average_latency_ms: 1080,
       last_seen_ms: analyticsNow - 10 * minute,
       models: [
-        buildNestedModelRow(
-          'gpt-4.1-mini',
-          2720,
-          24,
-          2_040_000,
-          25.0,
-          analyticsNow - 10 * minute
-        ),
+        buildNestedModelRow('gpt-4.1-mini', 2720, 24, 2_040_000, 25.0, analyticsNow - 10 * minute),
         buildNestedModelRow('gpt-4.1', 820, 15, 660_000, 20.8, analyticsNow - 36 * minute),
       ],
     },
@@ -1092,14 +1378,7 @@ const buildMonitoringAnalytics = (
       last_seen_ms: analyticsNow - 18 * minute,
       models: [
         buildNestedModelRow('gpt-4.1', 440, 24, 520_000, 22.6, analyticsNow - 18 * minute),
-        buildNestedModelRow(
-          'gpt-4.1-mini',
-          1120,
-          22,
-          740_000,
-          9.1,
-          analyticsNow - 28 * minute
-        ),
+        buildNestedModelRow('gpt-4.1-mini', 1120, 22, 740_000, 9.1, analyticsNow - 28 * minute),
       ],
     },
     {
@@ -1117,14 +1396,7 @@ const buildMonitoringAnalytics = (
       average_latency_ms: 980,
       last_seen_ms: analyticsNow - 11 * minute,
       models: [
-        buildNestedModelRow(
-          'gpt-4.1-mini',
-          1800,
-          18,
-          1_240_000,
-          15.2,
-          analyticsNow - 11 * minute
-        ),
+        buildNestedModelRow('gpt-4.1-mini', 1800, 18, 1_240_000, 15.2, analyticsNow - 11 * minute),
         buildNestedModelRow('gpt-4.1', 680, 10, 680_000, 17.2, analyticsNow - 32 * minute),
       ],
     },
@@ -1151,14 +1423,7 @@ const buildMonitoringAnalytics = (
           65.1,
           analyticsNow - 19 * minute
         ),
-        buildNestedModelRow(
-          'claude-haiku-4-5',
-          820,
-          12,
-          860_000,
-          18.4,
-          analyticsNow - 52 * minute
-        ),
+        buildNestedModelRow('claude-haiku-4-5', 820, 12, 860_000, 18.4, analyticsNow - 52 * minute),
       ],
     },
     {
@@ -1184,14 +1449,7 @@ const buildMonitoringAnalytics = (
           15.8,
           analyticsNow - 24 * minute
         ),
-        buildNestedModelRow(
-          'gemini-2.5-pro',
-          600,
-          11,
-          820_000,
-          22.4,
-          analyticsNow - 43 * minute
-        ),
+        buildNestedModelRow('gemini-2.5-pro', 600, 11, 820_000, 22.4, analyticsNow - 43 * minute),
       ],
     },
     {
@@ -1208,7 +1466,9 @@ const buildMonitoringAnalytics = (
       cost: 15.8,
       average_latency_ms: 1710,
       last_seen_ms: analyticsNow - 48 * minute,
-      models: [buildNestedModelRow('qwen-plus', 1220, 36, 980_000, 15.8, analyticsNow - 48 * minute)],
+      models: [
+        buildNestedModelRow('qwen-plus', 1220, 36, 980_000, 15.8, analyticsNow - 48 * minute),
+      ],
     },
     {
       id: 'acct_builder_lab',
@@ -1225,20 +1485,14 @@ const buildMonitoringAnalytics = (
       average_latency_ms: 1320,
       last_seen_ms: analyticsNow - 27 * minute,
       models: [
-        buildNestedModelRow(
-          'gemini-2.5-flash',
-          960,
-          12,
-          820_000,
-          14.4,
-          analyticsNow - 27 * minute
-        ),
+        buildNestedModelRow('gemini-2.5-flash', 960, 12, 820_000, 14.4, analyticsNow - 27 * minute),
       ],
     },
     {
+      // xAI email identity: primary masked email, secondary "xai".
       id: 'acct_ops_console',
-      account_snapshot: 'Ops Console',
-      auth_label_snapshot: 'xAI Ops',
+      account_snapshot: 'oc0demo01@yijihwjw.com',
+      auth_label_snapshot: 'xai',
       auth_provider_snapshot: 'xai',
       auth_indices: ['xai-ops-01'],
       sources: ['ops'],
@@ -1249,7 +1503,106 @@ const buildMonitoringAnalytics = (
       cost: 12.2,
       average_latency_ms: 1490,
       last_seen_ms: analyticsNow - 55 * minute,
-      models: [buildNestedModelRow('grok-4-fast', 860, 14, 690_000, 12.2, analyticsNow - 55 * minute)],
+      models: [
+        buildNestedModelRow('grok-4-fast', 860, 14, 690_000, 12.2, analyticsNow - 55 * minute),
+      ],
+    },
+    {
+      id: 'acct_xai_email_user',
+      account_snapshot: 'oc1demo02@yijihwjw.com',
+      auth_label_snapshot: 'xai',
+      auth_provider_snapshot: 'xai',
+      auth_indices: ['xai-email-user-01'],
+      sources: ['ops'],
+      source_hashes: ['src_xai_email_user'],
+      calls: 520,
+      failure_calls: 8,
+      total_tokens: 410_000,
+      cost: 7.4,
+      average_latency_ms: 1420,
+      last_seen_ms: analyticsNow - 14 * minute,
+      models: [
+        buildNestedModelRow('grok-4-fast', 520, 8, 410_000, 7.4, analyticsNow - 14 * minute),
+      ],
+    },
+    {
+      // Codex email identity: primary masked email, secondary "codex".
+      id: 'acct_codex_email_user',
+      account_snapshot: 'fbcabcdef@vip.qq.com',
+      auth_label_snapshot: 'codex',
+      auth_provider_snapshot: 'codex',
+      auth_indices: ['codex-email-user-01'],
+      sources: ['team'],
+      source_hashes: ['src_codex_email_user'],
+      calls: 980,
+      failure_calls: 12,
+      total_tokens: 780_000,
+      cost: 16.8,
+      average_latency_ms: 1180,
+      last_seen_ms: analyticsNow - 9 * minute,
+      models: [
+        buildNestedModelRow('gpt-4.1-mini', 680, 8, 460_000, 6.2, analyticsNow - 9 * minute),
+        buildNestedModelRow('gpt-4.1', 300, 4, 320_000, 10.6, analyticsNow - 22 * minute),
+      ],
+    },
+    {
+      // Multi-key OpenAI-compatible key #1 → primary "kuaileshifu #1".
+      id: 'acct_kuaileshifu_key_1',
+      account_snapshot: 'kuaileshifu',
+      auth_label_snapshot: 'kuaileshifu',
+      auth_provider_snapshot: 'openai',
+      auth_indices: ['kuai-auth-1'],
+      sources: ['k:sk-kuai-demo-key-1111aaaa'],
+      source_hashes: ['src_kuai_key_1'],
+      calls: 1240,
+      failure_calls: 11,
+      total_tokens: 920_000,
+      cost: 18.6,
+      average_latency_ms: 1040,
+      last_seen_ms: analyticsNow - 5 * minute,
+      models: [
+        buildNestedModelRow('gpt-4.1-mini', 900, 7, 620_000, 9.4, analyticsNow - 5 * minute),
+        buildNestedModelRow('gpt-4.1', 340, 4, 300_000, 9.2, analyticsNow - 17 * minute),
+      ],
+    },
+    {
+      // Multi-key OpenAI-compatible key #2 → primary "kuaileshifu #2".
+      id: 'acct_kuaileshifu_key_2',
+      account_snapshot: 'kuaileshifu',
+      auth_label_snapshot: 'kuaileshifu',
+      auth_provider_snapshot: 'openai',
+      auth_indices: ['kuai-auth-2'],
+      sources: ['k:sk-kuai-demo-key-2222bbbb'],
+      source_hashes: ['src_kuai_key_2'],
+      calls: 980,
+      failure_calls: 9,
+      total_tokens: 740_000,
+      cost: 14.2,
+      average_latency_ms: 1090,
+      last_seen_ms: analyticsNow - 7 * minute,
+      models: [
+        buildNestedModelRow('gpt-4.1-mini', 720, 6, 510_000, 7.8, analyticsNow - 7 * minute),
+        buildNestedModelRow('gpt-4.1', 260, 3, 230_000, 6.4, analyticsNow - 25 * minute),
+      ],
+    },
+    {
+      // Named channel already containing "#1" (not multi-key disambiguation).
+      id: 'acct_anyrouter_top',
+      account_snapshot: 'anyrouter.top #1',
+      auth_label_snapshot: 'anyrouter.top #1',
+      auth_provider_snapshot: 'openai',
+      auth_indices: ['anyrouter-auth-1'],
+      sources: ['k:sk-anyrouter-demo-key'],
+      source_hashes: ['src_anyrouter_top'],
+      calls: 760,
+      failure_calls: 8,
+      total_tokens: 560_000,
+      cost: 9.6,
+      average_latency_ms: 980,
+      last_seen_ms: analyticsNow - 12 * minute,
+      models: [
+        buildNestedModelRow('gpt-4.1-mini', 760, 8, 560_000, 9.6, analyticsNow - 12 * minute),
+      ],
     },
     {
       id: 'acct_edge_experiments',
@@ -1265,7 +1618,9 @@ const buildMonitoringAnalytics = (
       cost: 6.8,
       average_latency_ms: 1580,
       last_seen_ms: analyticsNow - 44 * minute,
-      models: [buildNestedModelRow('deepseek-chat', 740, 20, 610_000, 6.8, analyticsNow - 44 * minute)],
+      models: [
+        buildNestedModelRow('deepseek-chat', 740, 20, 610_000, 6.8, analyticsNow - 44 * minute),
+      ],
     },
   ].map((row) => {
     const tokenSplit = splitTokens(row.total_tokens);
@@ -1333,7 +1688,16 @@ const buildMonitoringAnalytics = (
       cost: 124.4,
       average_latency_ms: 1160,
       last_seen_ms: analyticsNow - 21 * minute,
-      models: [buildNestedModelRow('gemini-2.5-pro', 3620, 74, 4_960_000, 124.4, analyticsNow - 21 * minute)],
+      models: [
+        buildNestedModelRow(
+          'gemini-2.5-pro',
+          3620,
+          74,
+          4_960_000,
+          124.4,
+          analyticsNow - 21 * minute
+        ),
+      ],
     },
     {
       id: 'vertex-regional-01',
@@ -1351,7 +1715,16 @@ const buildMonitoringAnalytics = (
       cost: 28.9,
       average_latency_ms: 1040,
       last_seen_ms: analyticsNow - 6 * minute,
-      models: [buildNestedModelRow('gemini-2.5-flash', 2140, 24, 1_400_000, 28.9, analyticsNow - 6 * minute)],
+      models: [
+        buildNestedModelRow(
+          'gemini-2.5-flash',
+          2140,
+          24,
+          1_400_000,
+          28.9,
+          analyticsNow - 6 * minute
+        ),
+      ],
     },
     {
       id: 'codex-fallback-02',
@@ -1410,8 +1783,8 @@ const buildMonitoringAnalytics = (
       auth_index: 'xai-ops-01',
       source: 'ops',
       source_hash: 'src_xai_ops',
-      account_snapshot: 'Ops Console',
-      auth_label_snapshot: 'xAI Ops',
+      account_snapshot: 'oc0demo01@yijihwjw.com',
+      auth_label_snapshot: 'xai',
       auth_provider_snapshot: 'xai',
       calls: 860,
       failure_calls: 14,
@@ -1420,6 +1793,91 @@ const buildMonitoringAnalytics = (
       average_latency_ms: 1490,
       last_seen_ms: analyticsNow - 55 * minute,
       models: accountStats[10].models,
+    },
+    {
+      id: 'xai-email-user-01',
+      auth_file_snapshot: 'xai-email-user.json',
+      auth_index: 'xai-email-user-01',
+      source: 'ops',
+      source_hash: 'src_xai_email_user',
+      account_snapshot: 'oc1demo02@yijihwjw.com',
+      auth_label_snapshot: 'xai',
+      auth_provider_snapshot: 'xai',
+      calls: 520,
+      failure_calls: 8,
+      total_tokens: 410_000,
+      cost: 7.4,
+      average_latency_ms: 1420,
+      last_seen_ms: analyticsNow - 14 * minute,
+      models: accountStats[11].models,
+    },
+    {
+      id: 'codex-email-user-01',
+      auth_file_snapshot: 'codex-email-user.json',
+      auth_index: 'codex-email-user-01',
+      source: 'team',
+      source_hash: 'src_codex_email_user',
+      account_snapshot: 'fbcabcdef@vip.qq.com',
+      auth_label_snapshot: 'codex',
+      auth_provider_snapshot: 'codex',
+      calls: 980,
+      failure_calls: 12,
+      total_tokens: 780_000,
+      cost: 16.8,
+      average_latency_ms: 1180,
+      last_seen_ms: analyticsNow - 9 * minute,
+      models: accountStats[12].models,
+    },
+    {
+      id: 'kuai-auth-1',
+      auth_file_snapshot: 'kuai-auth-1.json',
+      auth_index: 'kuai-auth-1',
+      source: 'k:sk-kuai-demo-key-1111aaaa',
+      source_hash: 'src_kuai_key_1',
+      account_snapshot: 'kuaileshifu',
+      auth_label_snapshot: 'kuaileshifu',
+      auth_provider_snapshot: 'openai',
+      calls: 1240,
+      failure_calls: 11,
+      total_tokens: 920_000,
+      cost: 18.6,
+      average_latency_ms: 1040,
+      last_seen_ms: analyticsNow - 5 * minute,
+      models: accountStats[13].models,
+    },
+    {
+      id: 'kuai-auth-2',
+      auth_file_snapshot: 'kuai-auth-2.json',
+      auth_index: 'kuai-auth-2',
+      source: 'k:sk-kuai-demo-key-2222bbbb',
+      source_hash: 'src_kuai_key_2',
+      account_snapshot: 'kuaileshifu',
+      auth_label_snapshot: 'kuaileshifu',
+      auth_provider_snapshot: 'openai',
+      calls: 980,
+      failure_calls: 9,
+      total_tokens: 740_000,
+      cost: 14.2,
+      average_latency_ms: 1090,
+      last_seen_ms: analyticsNow - 7 * minute,
+      models: accountStats[14].models,
+    },
+    {
+      id: 'anyrouter-auth-1',
+      auth_file_snapshot: 'anyrouter-auth-1.json',
+      auth_index: 'anyrouter-auth-1',
+      source: 'k:sk-anyrouter-demo-key',
+      source_hash: 'src_anyrouter_top',
+      account_snapshot: 'anyrouter.top #1',
+      auth_label_snapshot: 'anyrouter.top #1',
+      auth_provider_snapshot: 'openai',
+      calls: 760,
+      failure_calls: 8,
+      total_tokens: 560_000,
+      cost: 9.6,
+      average_latency_ms: 980,
+      last_seen_ms: analyticsNow - 12 * minute,
+      models: accountStats[15].models,
     },
     {
       id: 'openai-support-02',
@@ -1488,7 +1946,7 @@ const buildMonitoringAnalytics = (
       cost: 6.8,
       average_latency_ms: 1580,
       last_seen_ms: analyticsNow - 44 * minute,
-      models: accountStats[11].models,
+      models: accountStats[16].models,
     },
   ].map((row) => {
     const tokenSplit = splitTokens(row.total_tokens);
@@ -1679,8 +2137,8 @@ const buildMonitoringAnalytics = (
     {
       id: 'hash_xai_ops',
       api_key_hash: 'hash_xai_ops',
-      account_snapshot: 'Ops Console',
-      auth_label_snapshot: 'xAI Ops',
+      account_snapshot: 'oc0demo01@yijihwjw.com',
+      auth_label_snapshot: 'xai',
       auth_provider_snapshot: 'xai',
       auth_indices: ['xai-ops-01'],
       sources: ['ops'],
@@ -1692,6 +2150,91 @@ const buildMonitoringAnalytics = (
       average_latency_ms: 1490,
       last_seen_ms: analyticsNow - 55 * minute,
       models: accountStats[10].models,
+    },
+    {
+      id: 'hash_xai_email_user',
+      api_key_hash: 'hash_xai_email_user',
+      account_snapshot: 'oc1demo02@yijihwjw.com',
+      auth_label_snapshot: 'xai',
+      auth_provider_snapshot: 'xai',
+      auth_indices: ['xai-email-user-01'],
+      sources: ['ops'],
+      source_hashes: ['src_xai_email_user'],
+      calls: 520,
+      failure_calls: 8,
+      total_tokens: 410_000,
+      cost: 7.4,
+      average_latency_ms: 1420,
+      last_seen_ms: analyticsNow - 14 * minute,
+      models: accountStats[11].models,
+    },
+    {
+      id: 'hash_codex_email_user',
+      api_key_hash: 'hash_codex_email_user',
+      account_snapshot: 'fbcabcdef@vip.qq.com',
+      auth_label_snapshot: 'codex',
+      auth_provider_snapshot: 'codex',
+      auth_indices: ['codex-email-user-01'],
+      sources: ['team'],
+      source_hashes: ['src_codex_email_user'],
+      calls: 980,
+      failure_calls: 12,
+      total_tokens: 780_000,
+      cost: 16.8,
+      average_latency_ms: 1180,
+      last_seen_ms: analyticsNow - 9 * minute,
+      models: accountStats[12].models,
+    },
+    {
+      id: 'hash_kuai_key_1',
+      api_key_hash: 'hash_kuai_key_1',
+      account_snapshot: 'kuaileshifu',
+      auth_label_snapshot: 'kuaileshifu',
+      auth_provider_snapshot: 'openai',
+      auth_indices: ['kuai-auth-1'],
+      sources: ['k:sk-kuai-demo-key-1111aaaa'],
+      source_hashes: ['src_kuai_key_1'],
+      calls: 1240,
+      failure_calls: 11,
+      total_tokens: 920_000,
+      cost: 18.6,
+      average_latency_ms: 1040,
+      last_seen_ms: analyticsNow - 5 * minute,
+      models: accountStats[13].models,
+    },
+    {
+      id: 'hash_kuai_key_2',
+      api_key_hash: 'hash_kuai_key_2',
+      account_snapshot: 'kuaileshifu',
+      auth_label_snapshot: 'kuaileshifu',
+      auth_provider_snapshot: 'openai',
+      auth_indices: ['kuai-auth-2'],
+      sources: ['k:sk-kuai-demo-key-2222bbbb'],
+      source_hashes: ['src_kuai_key_2'],
+      calls: 980,
+      failure_calls: 9,
+      total_tokens: 740_000,
+      cost: 14.2,
+      average_latency_ms: 1090,
+      last_seen_ms: analyticsNow - 7 * minute,
+      models: accountStats[14].models,
+    },
+    {
+      id: 'hash_anyrouter_top',
+      api_key_hash: 'hash_anyrouter_top',
+      account_snapshot: 'anyrouter.top #1',
+      auth_label_snapshot: 'anyrouter.top #1',
+      auth_provider_snapshot: 'openai',
+      auth_indices: ['anyrouter-auth-1'],
+      sources: ['k:sk-anyrouter-demo-key'],
+      source_hashes: ['src_anyrouter_top'],
+      calls: 760,
+      failure_calls: 8,
+      total_tokens: 560_000,
+      cost: 9.6,
+      average_latency_ms: 980,
+      last_seen_ms: analyticsNow - 12 * minute,
+      models: accountStats[15].models,
     },
     {
       id: 'hash_deepseek_ops',
@@ -1708,7 +2251,7 @@ const buildMonitoringAnalytics = (
       cost: 6.8,
       average_latency_ms: 1580,
       last_seen_ms: analyticsNow - 44 * minute,
-      models: accountStats[11].models,
+      models: accountStats[16].models,
     },
   ].map((row) => {
     const tokenSplit = splitTokens(row.total_tokens);
@@ -1746,6 +2289,78 @@ const buildMonitoringAnalytics = (
       }),
     };
   });
+
+  const requestedAPIKeyTimelineHashes = new Set(
+    (request?.filters?.api_key_hashes ?? [])
+      .map((hash) => hash.trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const apiKeyTimelineProfiles = [
+    {
+      apiKeyHash: 'hash_research_shared',
+      callShares: [0.36, 0.14, 0.29, 0.42, 0.19, 0.31, 0.12],
+      tokenShares: [0.39, 0.18, 0.33, 0.46, 0.22, 0.35, 0.15],
+      failureRate: 0.026,
+      averageLatencyMs: 1420,
+      missingBuckets: [],
+    },
+    {
+      apiKeyHash: 'hash_gemini_prod',
+      callShares: [0.16, 0.3, 0.11, 0.25, 0.37, 0.15, 0.28],
+      tokenShares: [0.21, 0.34, 0.14, 0.28, 0.41, 0.18, 0.31],
+      failureRate: 0.018,
+      averageLatencyMs: 1160,
+      missingBuckets: [],
+    },
+    {
+      apiKeyHash: 'hash_codex_team',
+      callShares: [0.22, 0.1, 0.34, 0.17, 0.27, 0.09, 0.23],
+      tokenShares: [0.19, 0.08, 0.29, 0.13, 0.24, 0.07, 0.2],
+      failureRate: 0.012,
+      averageLatencyMs: 1220,
+      missingBuckets: [3, 10],
+    },
+    {
+      apiKeyHash: 'hash_research_batch',
+      callShares: [0.08, 0.19, 0.27, 0.1, 0.16, 0.29, 0.07],
+      tokenShares: [0.11, 0.24, 0.35, 0.14, 0.21, 0.37, 0.09],
+      failureRate: 0.034,
+      averageLatencyMs: 1510,
+      missingBuckets: [],
+    },
+  ];
+  const apiKeyTimeline = timeline
+    .flatMap((point, bucketIndex) =>
+      apiKeyTimelineProfiles.flatMap((profile) => {
+        if (profile.missingBuckets.includes(bucketIndex)) return [];
+        const callShare = profile.callShares[bucketIndex % profile.callShares.length];
+        const tokenShare = profile.tokenShares[bucketIndex % profile.tokenShares.length];
+        const calls = Math.round(point.calls * callShare);
+        const failure = Math.min(calls, Math.round(calls * profile.failureRate));
+        const tokens = Math.round(point.tokens * tokenShare);
+        return [
+          {
+            api_key_hash: profile.apiKeyHash,
+            bucket_ms: point.bucket_ms,
+            bucket_label: point.label,
+            calls,
+            tokens,
+            success: calls - failure,
+            failure,
+            ...splitTokens(tokens),
+            cost: round2(point.cost * tokenShare),
+            average_latency_ms: profile.averageLatencyMs,
+            success_rate: safeRate(calls - failure, calls),
+            failure_rate: safeRate(failure, calls),
+          },
+        ];
+      })
+    )
+    .filter(
+      (point) =>
+        requestedAPIKeyTimelineHashes.size === 0 ||
+        requestedAPIKeyTimelineHashes.has(point.api_key_hash)
+    );
 
   const channelShare = accountStats.map((row) => ({
     auth_index: row.auth_indices?.[0] ?? row.id,
@@ -1824,7 +2439,8 @@ const buildMonitoringAnalytics = (
       provider: 'vertex',
       source: 'regional',
       sourceHash: 'src_vertex_regional',
-      endpoint: '/v1/projects/demo-vertex-regional/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent',
+      endpoint:
+        '/v1/projects/demo-vertex-regional/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent',
       executor: 'worker',
     },
     {
@@ -1897,13 +2513,78 @@ const buildMonitoringAnalytics = (
       apiKeyHash: 'hash_xai_ops',
       authIndex: 'xai-ops-01',
       authFile: 'xai-ops.json',
-      account: 'Ops Console',
-      label: 'xAI Ops',
+      account: 'oc0demo01@yijihwjw.com',
+      label: 'xai',
       provider: 'xai',
       source: 'ops',
       sourceHash: 'src_xai_ops',
       endpoint: '/v1/chat/completions',
       executor: 'ops',
+    },
+    {
+      model: 'grok-4-fast',
+      apiKeyHash: 'hash_xai_email_user',
+      authIndex: 'xai-email-user-01',
+      authFile: 'xai-email-user.json',
+      account: 'oc1demo02@yijihwjw.com',
+      label: 'xai',
+      provider: 'xai',
+      source: 'ops',
+      sourceHash: 'src_xai_email_user',
+      endpoint: '/v1/chat/completions',
+      executor: 'ops',
+    },
+    {
+      model: 'gpt-4.1-mini',
+      apiKeyHash: 'hash_codex_email_user',
+      authIndex: 'codex-email-user-01',
+      authFile: 'codex-email-user.json',
+      account: 'fbcabcdef@vip.qq.com',
+      label: 'codex',
+      provider: 'codex',
+      source: 'team',
+      sourceHash: 'src_codex_email_user',
+      endpoint: '/v1/chat/completions',
+      executor: 'team',
+    },
+    {
+      model: 'gpt-4.1-mini',
+      apiKeyHash: 'hash_kuai_key_1',
+      authIndex: 'kuai-auth-1',
+      authFile: 'kuai-auth-1.json',
+      account: 'kuaileshifu',
+      label: 'kuaileshifu',
+      provider: 'openai',
+      source: 'k:sk-kuai-demo-key-1111aaaa',
+      sourceHash: 'src_kuai_key_1',
+      endpoint: '/v1/chat/completions',
+      executor: 'compat',
+    },
+    {
+      model: 'gpt-4.1',
+      apiKeyHash: 'hash_kuai_key_2',
+      authIndex: 'kuai-auth-2',
+      authFile: 'kuai-auth-2.json',
+      account: 'kuaileshifu',
+      label: 'kuaileshifu',
+      provider: 'openai',
+      source: 'k:sk-kuai-demo-key-2222bbbb',
+      sourceHash: 'src_kuai_key_2',
+      endpoint: '/v1/chat/completions',
+      executor: 'compat',
+    },
+    {
+      model: 'gpt-4.1-mini',
+      apiKeyHash: 'hash_anyrouter_top',
+      authIndex: 'anyrouter-auth-1',
+      authFile: 'anyrouter-auth-1.json',
+      account: 'anyrouter.top #1',
+      label: 'anyrouter.top #1',
+      provider: 'openai',
+      source: 'k:sk-anyrouter-demo-key',
+      sourceHash: 'src_anyrouter_top',
+      endpoint: '/v1/chat/completions',
+      executor: 'compat',
     },
     {
       model: 'deepseek-chat',
@@ -1920,82 +2601,224 @@ const buildMonitoringAnalytics = (
     },
   ];
 
-  const events: DemoMonitoringEventRow[] = Array.from({ length: 72 }, (_, index) => {
-    const profile = eventProfiles[index % eventProfiles.length];
-    const failed = index % 9 === 0 || index % 22 === 0;
-    const quotaFailure = failed && index % 2 === 0;
-    const inputTokens = 620 + ((index * 113) % 2600);
-    const outputTokens = 210 + ((index * 71) % 980);
-    const cachedTokens = index % 3 === 0 ? 180 + ((index * 17) % 520) : 0;
-    const reasoningTokens = index % 4 === 0 ? 80 + ((index * 13) % 360) : 0;
-    const totalTokens = inputTokens + outputTokens + cachedTokens + reasoningTokens;
-    const timestampMs = analyticsNow - (index * 5 + (index % 4)) * minute;
-    return {
-      request_id: `demo-request-${String(index + 1).padStart(3, '0')}`,
-      event_hash: `demo-event-${String(index + 1).padStart(3, '0')}`,
-      timestamp_ms: timestampMs,
-      model: profile.model,
-      endpoint: profile.endpoint,
-      method: 'POST',
-      path: profile.endpoint,
-      auth_index: profile.authIndex,
-      auth_file_snapshot: profile.authFile,
-      source: profile.source,
-      source_hash: profile.sourceHash,
-      api_key_hash: profile.apiKeyHash,
-      account_snapshot: profile.account,
-      auth_label_snapshot: profile.label,
-      auth_provider_snapshot: profile.provider,
-      auth_project_id_snapshot:
-        profile.provider === 'gemini' || profile.provider === 'vertex'
-          ? 'demo-gemini-prod'
+  const xaiFreeUsageRecoverAtMs = analyticsNow + day;
+  const xaiFreeUsageEvent: DemoMonitoringEventRow = {
+    request_id: 'demo-xai-free-usage-429',
+    event_hash: 'demo-event-xai-free-usage-exhausted',
+    timestamp_ms: analyticsNow - minute,
+    model: 'grok-4.5-build-free',
+    endpoint: '/v1/chat/completions',
+    method: 'POST',
+    path: '/v1/chat/completions',
+    auth_index: 'xai-ops-01',
+    auth_file_snapshot: 'xai-ops.json',
+    source: 'ops',
+    source_hash: 'src_xai_ops',
+    api_key_hash: 'hash_xai_ops',
+    account_snapshot: 'oc0demo01@yijihwjw.com',
+    auth_label_snapshot: 'xai',
+    auth_provider_snapshot: 'xai',
+    resolved_model: 'grok-4.5-build-free',
+    service_tier: 'standard',
+    executor_type: 'ops',
+    input_tokens: 1_284,
+    output_tokens: 0,
+    cached_tokens: 0,
+    cache_read_tokens: 0,
+    cache_creation_tokens: 0,
+    reasoning_tokens: 0,
+    total_tokens: 1_284,
+    latency_ms: 1_180,
+    ttft_ms: 0,
+    failed: true,
+    fail_status_code: 429,
+    fail_summary: 'Included free usage for grok-4.5-build-free is exhausted.',
+    header_error_kind: 'rate_limit',
+    header_error_code: 'subscription:free-usage-exhausted',
+    header_trace_id: 'demo-xai-free-usage-429',
+    response_metadata: {
+      errors: {
+        kind: 'rate_limit',
+        code: 'subscription:free-usage-exhausted',
+        should_retry: true,
+      },
+      trace: {
+        request_id: 'demo-xai-free-usage-429',
+        primary_trace_id: 'demo-xai-free-usage-429',
+      },
+      routing: {
+        server: 'cloudflare',
+        cf_cache_status: 'DYNAMIC',
+      },
+      response: {
+        content_type: 'application/json',
+        content_length: 297,
+      },
+      providers: {
+        cloudflare_ray: 'demo-xai-free-usage-LAX',
+        cloudflare_cache_status: 'DYNAMIC',
+      },
+      data_policy: {
+        retention_mode: 'zdr',
+        zero_retention: true,
+      },
+      provider_usage: {
+        provider: 'xai',
+        kind: 'included_free_usage',
+        state: 'exhausted',
+        code: 'subscription:free-usage-exhausted',
+        model: 'grok-4.5-build-free',
+        unit: 'tokens',
+        actual: 1_024_413,
+        limit: 1_000_000,
+        remaining: 0,
+        overage: 24_413,
+        window_kind: 'rolling_24h',
+        observed_at_ms: analyticsNow - minute,
+        recover_at_ms: xaiFreeUsageRecoverAtMs,
+        recover_at_estimated: true,
+        source: 'response_body',
+      },
+    },
+  };
+  const xaiSuccessfulRateLimitEvent: DemoMonitoringEventRow = {
+    request_id: 'demo-xai-rate-limit-success',
+    event_hash: 'demo-event-xai-rate-limit-success',
+    timestamp_ms: analyticsNow - 3 * minute,
+    model: 'grok-4.5',
+    endpoint: '/v1/chat/completions',
+    method: 'POST',
+    path: '/v1/chat/completions',
+    auth_index: 'xai-email-user-01',
+    auth_file_snapshot: 'xai-email-user.json',
+    source: 'ops',
+    source_hash: 'src_xai_email_user',
+    api_key_hash: 'hash_xai_email_user',
+    account_snapshot: 'oc1demo02@yijihwjw.com',
+    auth_label_snapshot: 'xai',
+    auth_provider_snapshot: 'xai',
+    resolved_model: 'grok-4.5',
+    service_tier: 'standard',
+    executor_type: 'ops',
+    input_tokens: 1_176,
+    output_tokens: 562,
+    cached_tokens: 0,
+    cache_read_tokens: 0,
+    cache_creation_tokens: 0,
+    reasoning_tokens: 0,
+    total_tokens: 1_738,
+    latency_ms: 924,
+    ttft_ms: 186,
+    failed: false,
+    header_trace_id: 'demo-xai-rate-limit-success',
+    response_metadata: {
+      errors: { should_retry: false },
+      trace: {
+        request_id: 'demo-xai-rate-limit-success',
+        primary_trace_id: 'demo-xai-rate-limit-success',
+      },
+      routing: {
+        server: 'cloudflare',
+        cf_cache_status: 'DYNAMIC',
+      },
+      response: {
+        content_type: 'application/json',
+        content_length: 948,
+      },
+      providers: {
+        cloudflare_ray: 'demo-xai-success-LAX',
+        cloudflare_cache_status: 'DYNAMIC',
+      },
+      rate_limit: {
+        requests: { limit: 21, remaining: 18 },
+      },
+      data_policy: {
+        retention_mode: 'zdr',
+        zero_retention: true,
+      },
+    },
+  };
+  const events: DemoMonitoringEventRow[] = [
+    xaiFreeUsageEvent,
+    xaiSuccessfulRateLimitEvent,
+    ...Array.from({ length: 72 }, (_, index) => {
+      const profile = eventProfiles[index % eventProfiles.length];
+      const failed = index % 9 === 0 || index % 22 === 0;
+      const quotaFailure = failed && index % 2 === 0;
+      const uncachedInputTokens = 620 + ((index * 113) % 2600);
+      const outputTokens = 210 + ((index * 71) % 980);
+      const cachedTokens = index % 3 === 0 ? 180 + ((index * 17) % 520) : 0;
+      const inputTokens = uncachedInputTokens + cachedTokens;
+      const reasoningTokens = index % 4 === 0 ? 80 + ((index * 13) % 360) : 0;
+      const totalTokens = inputTokens + outputTokens + reasoningTokens;
+      const timestampMs = analyticsNow - (index * 5 + (index % 4)) * minute;
+      return {
+        request_id: `demo-request-${String(index + 1).padStart(3, '0')}`,
+        event_hash: `demo-event-${String(index + 1).padStart(3, '0')}`,
+        timestamp_ms: timestampMs,
+        model: profile.model,
+        endpoint: profile.endpoint,
+        method: 'POST',
+        path: profile.endpoint,
+        auth_index: profile.authIndex,
+        auth_file_snapshot: profile.authFile,
+        source: profile.source,
+        source_hash: profile.sourceHash,
+        api_key_hash: profile.apiKeyHash,
+        account_snapshot: profile.account,
+        auth_label_snapshot: profile.label,
+        auth_provider_snapshot: profile.provider,
+        auth_project_id_snapshot:
+          profile.provider === 'gemini' || profile.provider === 'vertex'
+            ? 'demo-gemini-prod'
+            : undefined,
+        resolved_model: profile.model,
+        reasoning_effort: index % 4 === 0 ? 'medium' : undefined,
+        service_tier: index % 5 === 0 ? 'priority' : 'standard',
+        executor_type: profile.executor,
+        input_tokens: inputTokens,
+        output_tokens: outputTokens,
+        cached_tokens: 0,
+        cache_read_tokens: Math.round(cachedTokens * 0.78),
+        cache_creation_tokens: Math.round(cachedTokens * 0.22),
+        reasoning_tokens: reasoningTokens,
+        total_tokens: totalTokens,
+        latency_ms: failed ? 2400 + ((index * 97) % 1800) : 780 + ((index * 83) % 1540),
+        ttft_ms: failed ? 820 + ((index * 23) % 360) : 180 + ((index * 19) % 420),
+        failed,
+        fail_status_code: failed ? (quotaFailure ? 429 : 503) : undefined,
+        fail_summary: failed
+          ? quotaFailure
+            ? 'Quota window reached'
+            : 'Upstream response timeout'
           : undefined,
-      resolved_model: profile.model,
-      reasoning_effort: index % 4 === 0 ? 'medium' : undefined,
-      service_tier: index % 5 === 0 ? 'priority' : 'standard',
-      executor_type: profile.executor,
-      input_tokens: inputTokens,
-      output_tokens: outputTokens,
-      cached_tokens: cachedTokens,
-      cache_read_tokens: Math.round(cachedTokens * 0.78),
-      cache_creation_tokens: Math.round(cachedTokens * 0.22),
-      reasoning_tokens: reasoningTokens,
-      total_tokens: totalTokens,
-      latency_ms: failed ? 2400 + ((index * 97) % 1800) : 780 + ((index * 83) % 1540),
-      ttft_ms: failed ? 820 + ((index * 23) % 360) : 180 + ((index * 19) % 420),
-      failed,
-      fail_status_code: failed ? (quotaFailure ? 429 : 503) : undefined,
-      fail_summary: failed
-        ? quotaFailure
-          ? 'Quota window reached'
-          : 'Upstream response timeout'
-        : undefined,
-      header_quota_recover_at_ms: quotaFailure ? analyticsNow + 68 * minute : undefined,
-      header_quota_used_percent: quotaFailure ? 94 + (index % 5) : undefined,
-      header_quota_plan_type: quotaFailure ? 'team' : undefined,
-      header_error_kind: failed ? (quotaFailure ? 'quota' : 'upstream') : undefined,
-      header_error_code: failed ? (quotaFailure ? 'rate_limit' : 'timeout') : undefined,
-      header_trace_id: failed ? `demo-trace-${String(index + 1).padStart(3, '0')}` : undefined,
-      response_metadata: failed
-        ? {
-            quota: quotaFailure
-              ? {
-                  plan_type: 'team',
-                  recover_at_ms: analyticsNow + 68 * minute,
-                  used_percent: 94 + (index % 5),
-                }
-              : undefined,
-            errors: {
-              kind: quotaFailure ? 'quota' : 'upstream',
-              code: quotaFailure ? 'rate_limit' : 'timeout',
-            },
-            trace: {
-              request_id: `demo-trace-${String(index + 1).padStart(3, '0')}`,
-            },
-          }
-        : undefined,
-    };
-  });
+        header_quota_recover_at_ms: quotaFailure ? analyticsNow + 68 * minute : undefined,
+        header_quota_used_percent: quotaFailure ? 94 + (index % 5) : undefined,
+        header_quota_plan_type: quotaFailure ? 'team' : undefined,
+        header_error_kind: failed ? (quotaFailure ? 'quota' : 'upstream') : undefined,
+        header_error_code: failed ? (quotaFailure ? 'rate_limit' : 'timeout') : undefined,
+        header_trace_id: failed ? `demo-trace-${String(index + 1).padStart(3, '0')}` : undefined,
+        response_metadata: failed
+          ? {
+              quota: quotaFailure
+                ? {
+                    plan_type: 'team',
+                    recover_at_ms: analyticsNow + 68 * minute,
+                    used_percent: 94 + (index % 5),
+                  }
+                : undefined,
+              errors: {
+                kind: quotaFailure ? 'quota' : 'upstream',
+                code: quotaFailure ? 'rate_limit' : 'timeout',
+              },
+              trace: {
+                request_id: `demo-trace-${String(index + 1).padStart(3, '0')}`,
+              },
+            }
+          : undefined,
+      };
+    }),
+  ];
 
   const recentFailures = events
     .filter((event) => event.failed)
@@ -2213,10 +3036,7 @@ const buildMonitoringAnalytics = (
     timeline,
     hourly_distribution: Array.from({ length: 24 }, (_, hourIndex) => ({
       hour: hourIndex,
-      calls:
-        24 +
-        ((hourIndex * 11) % 80) +
-        (hourIndex >= 9 && hourIndex <= 18 ? 42 : 0),
+      calls: 24 + ((hourIndex * 11) % 80) + (hourIndex >= 9 && hourIndex <= 18 ? 42 : 0),
       tokens: 24_000 + ((hourIndex * 7100) % 90_000),
     })),
     heatmap,
@@ -2306,6 +3126,9 @@ const buildMonitoringAnalytics = (
     credential_stats: credentialStats,
     credential_timeline: credentialTimeline,
     api_key_stats: apiKeyStats,
+    ...(request?.include?.api_key_timeline && requestedAPIKeyTimelineHashes.size > 0
+      ? { api_key_timeline: apiKeyTimeline }
+      : {}),
     filter_options: {
       account_stats: accountStats,
       api_key_stats: apiKeyStats,
@@ -2345,9 +3168,9 @@ const buildMonitoringAnalytics = (
         auth_index: 'codex-team-01',
         models: ['gpt-4.1-mini', 'gpt-4.1'],
         endpoints: ['/v1/chat/completions', '/v1/responses'],
-        input_tokens: 1_260_000,
+        input_tokens: 1_520_000,
         output_tokens: 540_000,
-        cached_tokens: 260_000,
+        cached_tokens: 0,
         cache_read_tokens: 210_000,
         cache_creation_tokens: 50_000,
         total_tokens: 2_060_000,
@@ -2366,9 +3189,9 @@ const buildMonitoringAnalytics = (
         auth_index: 'claude-team-01',
         models: ['claude-sonnet-4-5'],
         endpoints: ['/v1/messages'],
-        input_tokens: 1_480_000,
+        input_tokens: 1_660_000,
         output_tokens: 620_000,
-        cached_tokens: 180_000,
+        cached_tokens: 0,
         cache_read_tokens: 150_000,
         cache_creation_tokens: 30_000,
         total_tokens: 2_280_000,
@@ -2382,92 +3205,552 @@ const buildMonitoringAnalytics = (
   };
 };
 
-const demoInspectionRunDetail = (baseNow = now()): CodexInspectionRunDetail => ({
-  run: {
-    id: 1001,
-    triggerType: 'schedule',
-    triggerKey: 'interval:45m',
-    status: 'completed',
-    startedAtMs: baseNow - 42 * 60 * 1000,
-    finishedAtMs: baseNow - 39 * 60 * 1000,
-    totalFiles: 24,
-    probeSetCount: 24,
-    sampledCount: 18,
-    disabledCount: 2,
-    enabledCount: 16,
-    deleteCount: 0,
-    disableCount: 2,
-    enableCount: 1,
-    reauthCount: 1,
-    keepCount: 14,
-    createdAtMs: baseNow - 42 * 60 * 1000,
-    updatedAtMs: baseNow - 39 * 60 * 1000,
-    settings: demoManagerConfig.config.codexInspection,
+const buildDemoInspectionResults = (baseNow: number): CodexInspectionResult[] => [
+  {
+    id: 500,
+    runId: 1001,
+    accountKey: 'codex-upgrade-demo-01',
+    fileName: 'codex-upgrade-demo.json',
+    displayAccount: 'codex-upgrade-demo.json',
+    authIndex: 'codex-upgrade-demo-01',
+    accountId: 'acct_codex_upgrade_demo',
+    provider: 'codex',
+    disabled: false,
+    status: 'healthy',
+    state: '',
+    action: 'keep',
+    actionReason: 'monitoring.codex_inspection_reason_healthy',
+    actionStatus: 'none',
+    statusCode: 200,
+    usedPercent: 42,
+    isQuota: false,
+    planType: 'free',
+    quotaWindows: [
+      {
+        id: 'five-hour',
+        labelKey: 'codex_quota.primary_window',
+        usedPercent: 63,
+        resetLabel: '2h 18m',
+        limitWindowSeconds: 18000,
+      },
+      {
+        id: 'weekly',
+        labelKey: 'codex_quota.secondary_window',
+        usedPercent: 42,
+        resetLabel: '2d 20h',
+        limitWindowSeconds: 604800,
+      },
+      {
+        id: 'code-review-five-hour',
+        labelKey: 'codex_quota.code_review_primary_window',
+        usedPercent: 38,
+        resetLabel: '2h',
+        limitWindowSeconds: 18000,
+      },
+    ],
+    createdAtMs: baseNow - 41 * minute,
   },
-  results: [
-    {
-      id: 501,
-      runId: 1001,
-      accountKey: 'codex-team-01',
-      fileName: 'codex-team-01.json',
-      displayAccount: 'Platform Team',
-      authIndex: 'codex-team-01',
-      accountId: 'acct_codex_team',
-      provider: 'codex',
-      disabled: false,
-      status: 'ok',
-      state: 'active',
-      action: 'keep',
-      actionReason: 'Healthy quota',
-      actionStatus: 'done',
-      usedPercent: 63,
-      isQuota: true,
-      planType: 'team',
-      quotaWindows: [
-        {
-          id: 'primary',
-          labelKey: 'codex_quota.primary_window',
-          usedPercent: 63,
-          resetLabel: '2h 18m',
-          limitWindowSeconds: 18000,
-        },
-      ],
-      createdAtMs: baseNow - 41 * 60 * 1000,
-    },
-    {
-      id: 502,
-      runId: 1001,
-      accountKey: 'codex-fallback-02',
-      fileName: 'codex-fallback-02.json',
-      displayAccount: 'Automation Pool',
-      authIndex: 'codex-fallback-02',
-      accountId: 'acct_codex_auto',
-      provider: 'codex',
-      disabled: true,
-      status: 'quota',
-      state: 'disabled',
-      action: 'disable',
-      actionReason: 'Quota above threshold',
-      actionStatus: 'done',
-      statusCode: 429,
-      usedPercent: 96,
-      isQuota: true,
-      planType: 'team',
-      errorKind: 'quota',
-      errorDetail: 'Primary quota window reached',
-      createdAtMs: baseNow - 40 * 60 * 1000,
-    },
-  ],
-  logs: [
-    {
-      id: 9001,
-      runId: 1001,
-      level: 'info',
-      message: 'Inspection completed for 24 auth files',
-      createdAtMs: baseNow - 39 * 60 * 1000,
-    },
-  ],
+  {
+    id: 501,
+    runId: 1001,
+    accountKey: 'codex-team-01',
+    fileName: 'codex-team-01.json',
+    displayAccount: 'codex-team-01.json',
+    authIndex: 'codex-team-01',
+    accountId: 'acct_codex_team',
+    provider: 'codex',
+    disabled: false,
+    status: 'healthy',
+    state: '',
+    action: 'keep',
+    actionReason: 'monitoring.codex_inspection_reason_healthy',
+    actionStatus: 'none',
+    statusCode: 200,
+    usedPercent: 42,
+    isQuota: false,
+    planType: 'team',
+    quotaWindows: [
+      {
+        id: 'five-hour',
+        labelKey: 'codex_quota.primary_window',
+        usedPercent: 63,
+        resetLabel: '2h 18m',
+        limitWindowSeconds: 18000,
+      },
+      {
+        id: 'weekly',
+        labelKey: 'codex_quota.secondary_window',
+        usedPercent: 42,
+        resetLabel: '2d 20h',
+        limitWindowSeconds: 604800,
+      },
+      {
+        id: 'code-review-five-hour',
+        labelKey: 'codex_quota.code_review_primary_window',
+        usedPercent: 38,
+        resetLabel: '2h',
+        limitWindowSeconds: 18000,
+      },
+    ],
+    createdAtMs: baseNow - 41 * minute,
+  },
+  {
+    id: 502,
+    runId: 1001,
+    accountKey: 'codex-email-user-01',
+    fileName: 'codex-email-user.json',
+    displayAccount: 'fbcabcdef@vip.qq.com',
+    authIndex: 'codex-email-user-01',
+    accountId: 'acct_codex_email',
+    provider: 'codex',
+    disabled: false,
+    status: 'healthy',
+    state: '',
+    action: 'reauth',
+    actionReason: 'monitoring.codex_inspection_reason_reauth',
+    actionStatus: 'none',
+    statusCode: 401,
+    isQuota: false,
+    planType: 'plus',
+    errorKind: 'http_status',
+    errorDetail: 'Provided authentication token is expired',
+    createdAtMs: baseNow - 41 * minute,
+  },
+  {
+    id: 503,
+    runId: 1001,
+    accountKey: 'codex-pro-20x-01',
+    fileName: 'codex-pro-20x-01.json',
+    displayAccount: 'codex-pro-20x-01.json',
+    authIndex: 'codex-pro-20x-01',
+    accountId: 'acct_codex_pro_20x',
+    provider: 'codex',
+    disabled: false,
+    status: 'healthy',
+    state: '',
+    action: 'disable',
+    actionReason: 'monitoring.codex_inspection_reason_quota_threshold',
+    actionStatus: 'pending',
+    statusCode: 200,
+    usedPercent: 96,
+    isQuota: true,
+    planType: 'pro',
+    quotaWindows: [
+      {
+        id: 'five-hour',
+        labelKey: 'codex_quota.primary_window',
+        usedPercent: 84,
+        resetLabel: '1h 42m',
+        limitWindowSeconds: 18000,
+      },
+      {
+        id: 'weekly',
+        labelKey: 'codex_quota.secondary_window',
+        usedPercent: 96,
+        resetLabel: '2d 7h',
+        limitWindowSeconds: 604800,
+      },
+      {
+        id: 'code-review-five-hour',
+        labelKey: 'codex_quota.code_review_primary_window',
+        usedPercent: 29,
+        resetLabel: '2h',
+        limitWindowSeconds: 18000,
+      },
+    ],
+    createdAtMs: baseNow - 40 * minute,
+  },
+  {
+    id: 504,
+    runId: 1001,
+    accountKey: 'codex-fallback-02',
+    fileName: 'codex-fallback-02.json',
+    displayAccount: 'codex-fallback-02.json',
+    authIndex: 'codex-fallback-02',
+    accountId: 'acct_codex_auto',
+    provider: 'codex',
+    disabled: true,
+    status: 'cooldown',
+    state: '',
+    action: 'enable',
+    actionReason: 'monitoring.codex_inspection_reason_recovered',
+    actionStatus: 'pending',
+    statusCode: 200,
+    usedPercent: 18,
+    isQuota: false,
+    autoRecoverEligible: true,
+    planType: 'team',
+    quotaWindows: [
+      {
+        id: 'five-hour',
+        labelKey: 'codex_quota.primary_window',
+        usedPercent: 24,
+        resetLabel: '3h 36m',
+        limitWindowSeconds: 18000,
+      },
+      {
+        id: 'weekly',
+        labelKey: 'codex_quota.secondary_window',
+        usedPercent: 18,
+        resetLabel: '2d 20h',
+        limitWindowSeconds: 604800,
+      },
+      {
+        id: 'code-review-five-hour',
+        labelKey: 'codex_quota.code_review_primary_window',
+        usedPercent: 38,
+        resetLabel: '2h',
+        limitWindowSeconds: 18000,
+      },
+    ],
+    createdAtMs: baseNow - 40 * minute,
+  },
+  {
+    id: 505,
+    runId: 1001,
+    accountKey: 'xai-ops-01',
+    fileName: 'xai-ops.json',
+    displayAccount: 'oc0demo01@yijihwjw.com',
+    authIndex: 'xai-ops-01',
+    provider: 'xai',
+    disabled: true,
+    status: 'cooldown',
+    state: '',
+    action: 'keep',
+    actionReason: 'monitoring.xai_inspection_reason_inference_manual_disable',
+    actionStatus: 'none',
+    statusCode: 200,
+    usedPercent: 22,
+    isQuota: false,
+    planType: null,
+    quotaWindows: [
+      {
+        id: 'xai-weekly',
+        labelKey: 'xai_quota.weekly_limit',
+        usedPercent: 3,
+        resetLabel: new Date(baseNow + 6 * day).toISOString(),
+        limitWindowSeconds: null,
+      },
+      {
+        id: 'xai-monthly',
+        labelKey: 'xai_quota.monthly_limit',
+        usedPercent: 22,
+        resetLabel: new Date(baseNow + 19 * day).toISOString(),
+        limitWindowSeconds: null,
+      },
+      {
+        id: 'xai-product-0',
+        labelKey: 'xai_quota.product_usage',
+        labelParams: { product: 'Grok Build' },
+        usedPercent: 3,
+        resetLabel: new Date(baseNow + 6 * day).toISOString(),
+        limitWindowSeconds: null,
+      },
+    ],
+    errorKind: 'inference_healthy',
+    createdAtMs: baseNow - 39 * minute,
+  },
+  {
+    id: 506,
+    runId: 1001,
+    accountKey: 'xai-email-user-01',
+    fileName: 'xai-email-user.json',
+    displayAccount: 'oc1demo02@yijihwjw.com',
+    authIndex: 'xai-email-user-01',
+    provider: 'xai',
+    disabled: false,
+    status: 'healthy',
+    state: '',
+    action: 'disable',
+    actionReason: 'monitoring.xai_inspection_reason_spending_limit_disable',
+    actionStatus: 'pending',
+    statusCode: 402,
+    usedPercent: 100,
+    isQuota: true,
+    planType: null,
+    quotaWindows: [
+      {
+        id: 'xai-weekly',
+        labelKey: 'xai_quota.weekly_limit',
+        usedPercent: 100,
+        resetLabel: new Date(baseNow + 6 * day).toISOString(),
+        limitWindowSeconds: null,
+      },
+      {
+        id: 'xai-monthly',
+        labelKey: 'xai_quota.monthly_limit',
+        usedPercent: 100,
+        resetLabel: new Date(baseNow + 19 * day).toISOString(),
+        limitWindowSeconds: null,
+      },
+      {
+        id: 'xai-product-0',
+        labelKey: 'xai_quota.product_usage',
+        labelParams: { product: 'Grok Build' },
+        usedPercent: 100,
+        resetLabel: new Date(baseNow + 6 * day).toISOString(),
+        limitWindowSeconds: null,
+      },
+    ],
+    errorKind: 'spending_limit',
+    errorDetail:
+      'personal-team-blocked:spending-limit · You have run out of credits or need a Grok subscription.',
+    createdAtMs: baseNow - 39 * minute,
+  },
+  {
+    id: 507,
+    runId: 1001,
+    accountKey: 'xai-expired-01',
+    fileName: 'xai-expired.json',
+    displayAccount: 'expired.demo@example.com',
+    authIndex: 'xai-expired-01',
+    provider: 'xai',
+    disabled: false,
+    status: 'warning',
+    state: '',
+    action: 'reauth',
+    actionReason: 'monitoring.xai_inspection_reason_auth_invalid',
+    actionStatus: 'none',
+    statusCode: 401,
+    usedPercent: 12,
+    isQuota: false,
+    planType: null,
+    quotaWindows: [
+      {
+        id: 'xai-weekly',
+        labelKey: 'xai_quota.weekly_limit',
+        usedPercent: 12,
+        resetLabel: new Date(baseNow + 6 * day).toISOString(),
+        limitWindowSeconds: null,
+      },
+      {
+        id: 'xai-monthly',
+        labelKey: 'xai_quota.monthly_limit',
+        usedPercent: 12,
+        resetLabel: new Date(baseNow + 19 * day).toISOString(),
+        limitWindowSeconds: null,
+      },
+      {
+        id: 'xai-product-0',
+        labelKey: 'xai_quota.product_usage',
+        labelParams: { product: 'Grok Build' },
+        usedPercent: 12,
+        resetLabel: new Date(baseNow + 6 * day).toISOString(),
+        limitWindowSeconds: null,
+      },
+    ],
+    errorKind: 'auth_invalid',
+    errorDetail: 'invalid_token · The xAI OAuth credential has expired.',
+    createdAtMs: baseNow - 39 * minute,
+  },
+];
+
+const countDemoInspectionActions = (results: CodexInspectionResult[], action: string) =>
+  results.filter((item) => item.action === action).length;
+
+const normalizeDemoInspectionAction = (value: string): CodexInspectionAction => {
+  switch (value) {
+    case 'delete':
+    case 'disable':
+    case 'enable':
+    case 'reauth':
+      return value;
+    case 'keep':
+    default:
+      return 'keep';
+  }
+};
+
+const demoCodexInspectionLogLevel = (item: CodexInspectionResult): string => {
+  switch (item.action) {
+    case 'delete':
+    case 'reauth':
+      return 'error';
+    case 'disable':
+      return 'warning';
+    case 'enable':
+      return 'success';
+    default:
+      return 'info';
+  }
+};
+
+const demoXaiInspectionLogLevel = (item: CodexInspectionResult): string => {
+  switch (item.action) {
+    case 'delete':
+    case 'reauth':
+      return 'error';
+    case 'disable':
+      return 'warning';
+    case 'enable':
+      return 'success';
+  }
+  return ['', 'billing_healthy', 'official_api_healthy', 'inference_healthy'].includes(
+    item.errorKind ?? ''
+  )
+    ? 'info'
+    : 'warning';
+};
+
+const buildDemoCodexInspectionLogDetail = (
+  item: CodexInspectionResult
+): Record<string, unknown> => ({
+  fileName: item.fileName,
+  displayAccount: item.displayAccount,
+  action: item.action,
+  statusCode: item.statusCode,
+  usedPercent: item.usedPercent ?? null,
+  isQuota: item.isQuota,
 });
+
+const buildDemoXaiInspectionLogDetail = (
+  item: CodexInspectionResult,
+  inferenceEnabled: boolean
+): Record<string, unknown> => ({
+  provider: 'xai',
+  fileName: item.fileName,
+  displayAccount: item.displayAccount,
+  inspectionMode: inferenceEnabled
+    ? 'inference'
+    : item.errorKind === 'official_api_healthy'
+      ? 'identity'
+      : 'billing',
+  healthEvidence: item.errorKind ?? '',
+  billingAvailable: (item.quotaWindows?.length ?? 0) > 0,
+  billingPartial: item.errorKind === 'billing_partial',
+  inferenceEnabled,
+  action: item.action,
+  ...(item.statusCode !== undefined ? { statusCode: item.statusCode } : {}),
+  ...(item.usedPercent !== undefined ? { usedPercent: item.usedPercent } : {}),
+  ...(inferenceEnabled ? { inferenceHealthy: item.errorKind === 'inference_healthy' } : {}),
+});
+
+const buildDemoInspectionCompletionDetail = (
+  run: CodexInspectionRunDetail['run']
+): Record<string, unknown> => ({
+  deleteCount: run.deleteCount,
+  disableCount: run.disableCount,
+  enableCount: run.enableCount,
+  reauthCount: run.reauthCount,
+  keepCount: run.keepCount,
+  actionSuccessCount: 0,
+  actionFailedCount: 0,
+  actionSkippedCount: 0,
+  actionNeedsReviewCount: 0,
+  actionErrors: [],
+  resultWriteFailedCount: 0,
+});
+
+const buildDemoServerInspectionLogs = (
+  run: CodexInspectionRunDetail['run'],
+  results: CodexInspectionResult[]
+): CodexInspectionRunDetail['logs'] => {
+  let nextId = 9001;
+  const createLog = (level: string, message: string, detail: unknown, createdAtMs: number) => ({
+    id: nextId++,
+    runId: run.id,
+    level,
+    message,
+    detail,
+    createdAtMs,
+  });
+  const logs: CodexInspectionRunDetail['logs'] = [
+    createLog(
+      'info',
+      '凭证健康巡检开始',
+      {
+        triggerType: run.triggerType,
+        triggerKey: run.triggerKey,
+        targetTypes: run.settings?.targetTypes ?? ['codex', 'xai'],
+      },
+      run.startedAtMs
+    ),
+    createLog(
+      'info',
+      '凭证健康巡检集合已准备',
+      {
+        totalFiles: run.totalFiles,
+        probeSetCount: run.probeSetCount,
+        sampledCount: run.sampledCount,
+        targetTypes: run.settings?.targetTypes ?? ['codex', 'xai'],
+      },
+      run.startedAtMs + 500
+    ),
+  ];
+
+  results.forEach((item) => {
+    if (item.provider === 'xai') {
+      const inferenceEnabled = run.settings?.xaiInferenceEnabled === true;
+      logs.push(
+        createLog(
+          demoXaiInspectionLogLevel(item),
+          'monitoring.xai_inspection_log_server_complete',
+          buildDemoXaiInspectionLogDetail(item, inferenceEnabled),
+          item.createdAtMs
+        )
+      );
+      return;
+    }
+
+    logs.push(
+      createLog(
+        demoCodexInspectionLogLevel(item),
+        '账号探测完成',
+        buildDemoCodexInspectionLogDetail(item),
+        item.createdAtMs
+      )
+    );
+  });
+
+  logs.push(
+    createLog(
+      'success',
+      '凭证健康巡检完成',
+      buildDemoInspectionCompletionDetail(run),
+      run.finishedAtMs ?? run.updatedAtMs
+    )
+  );
+  return logs;
+};
+
+const demoInspectionRunDetail = (baseNow = now()): CodexInspectionRunDetail => {
+  const results = buildDemoInspectionResults(baseNow);
+  const targetFiles = demoAuthFiles.files.filter((file) =>
+    ['codex', 'xai'].includes(String(file.provider ?? file.type ?? '').toLowerCase())
+  );
+  const startedAtMs = baseNow - 42 * minute;
+  const detail: CodexInspectionRunDetail = {
+    run: {
+      id: 1001,
+      triggerType: 'scheduled',
+      triggerKey: `interval:45:${Math.floor(startedAtMs / (45 * minute))}`,
+      status: 'completed',
+      startedAtMs,
+      finishedAtMs: baseNow - 39 * minute,
+      totalFiles: demoAuthFiles.total ?? demoAuthFiles.files.length,
+      probeSetCount: targetFiles.length,
+      sampledCount: results.length,
+      disabledCount: results.filter((item) => item.disabled).length,
+      enabledCount: results.filter((item) => !item.disabled).length,
+      deleteCount: countDemoInspectionActions(results, 'delete'),
+      disableCount: countDemoInspectionActions(results, 'disable'),
+      enableCount: countDemoInspectionActions(results, 'enable'),
+      reauthCount: countDemoInspectionActions(results, 'reauth'),
+      keepCount: countDemoInspectionActions(results, 'keep'),
+      createdAtMs: baseNow - 42 * minute,
+      updatedAtMs: baseNow - 39 * minute,
+      settings: {
+        ...demoManagerConfig.config.codexInspection,
+        autoActionMode: 'none',
+        autoRecoverEnabled: false,
+      },
+    },
+    results,
+    logs: [],
+  };
+  detail.logs = buildDemoServerInspectionLogs(detail.run, detail.results);
+  return detail;
+};
 
 const demoAccountCandidates: AccountActionCandidate[] = [
   {
@@ -2507,7 +3790,20 @@ const demoAccountCandidates: AccountActionCandidate[] = [
 
 export const getDemoRawConfig = () => clone(initialRawConfig);
 export const getDemoProviderModels = () => clone(demoProviderModels);
-export const getDemoAuthFiles = () => clone(demoAuthFiles);
+export const getDemoAuthFiles = (): AuthFilesResponse => {
+  const response = clone(demoAuthFiles);
+  if (!demoCodexUpgradeCompletedAt) return response;
+
+  const target = response.files.find((file) => file.id === DEMO_CODEX_UPGRADE_AUTH_ID);
+  if (!target) return response;
+
+  target.plan_type = 'plus';
+  target.id_token = { plan_type: 'plus' };
+  target.last_refresh = demoCodexUpgradeCompletedAt;
+  target.modified = Date.parse(demoCodexUpgradeCompletedAt);
+  target.statusMessage = 'Ready';
+  return response;
+};
 export const getDemoPlugins = () => clone(demoPlugins);
 export const getDemoPluginStore = () => clone(demoPluginStore);
 export const getDemoManagerConfig = () => clone(demoManagerConfig);
@@ -2515,6 +3811,7 @@ export const getDemoDashboardSummary = () => clone(dashboardBase());
 export const getDemoMonitoringAnalytics = (request?: MonitoringAnalyticsRequest) =>
   clone(buildMonitoringAnalytics(undefined, request));
 export const getDemoModelPrices = () => clone(demoModelPrices);
+export const getDemoModelPriceUsageSummary = () => clone(demoModelPriceUsageSummary);
 export const getDemoUsagePayload = () => {
   const dashboard = dashboardBase();
   return {
@@ -2612,17 +3909,49 @@ export const getDemoAccountProcessingPolicy = (): AccountProcessingPolicy => ({
   },
 });
 
-export const getDemoQuotaCooldowns = (): QuotaCooldownInfo[] => [
-  {
-    authFileName: 'codex-fallback-02.json',
-    authIndex: 'codex-fallback-02',
-    provider: 'codex',
-    owner: 'Automation Pool',
-    recoverAtMs: now() + 68 * 60 * 1000,
-    disabledAtMs: now() - 18 * 60 * 1000,
-    createdAtMs: now() - 18 * 60 * 1000,
-  },
-];
+export const getDemoQuotaCooldowns = (): QuotaCooldownInfo[] => {
+  const xaiObservedAtMs = now() - 4 * minute;
+  const xaiRecoverAtMs = xaiObservedAtMs + day;
+  return [
+    {
+      authFileName: 'codex-fallback-02.json',
+      authIndex: 'codex-fallback-02',
+      provider: 'codex',
+      owner: 'Automation Pool',
+      recoverAtMs: now() + 68 * 60 * 1000,
+      disabledAtMs: now() - 18 * 60 * 1000,
+      createdAtMs: now() - 18 * 60 * 1000,
+    },
+    {
+      authFileName: 'xai-ops.json',
+      authIndex: 'xai-ops-01',
+      provider: 'xai',
+      owner: 'cpamp_xai_free_usage',
+      reasonCode: 'xai_free_usage_exhausted',
+      windowKind: 'rolling_24h',
+      recoverAtMs: xaiRecoverAtMs,
+      disabledAtMs: xaiObservedAtMs,
+      createdAtMs: xaiObservedAtMs,
+      evidence: {
+        provider: 'xai',
+        kind: 'included_free_usage',
+        state: 'exhausted',
+        code: 'subscription:free-usage-exhausted',
+        model: 'grok-4.5-build-free',
+        unit: 'tokens',
+        actual: 1_024_413,
+        limit: 1_000_000,
+        remaining: 0,
+        overage: 24_413,
+        window_kind: 'rolling_24h',
+        observed_at_ms: xaiObservedAtMs,
+        recover_at_ms: xaiRecoverAtMs,
+        recover_at_estimated: true,
+        source: 'response_body',
+      },
+    },
+  ];
+};
 
 export const getDemoHeaderSnapshots = (): UsageHeaderSnapshotsResponse => ({
   generated_at_ms: now(),
@@ -2660,6 +3989,102 @@ export const getDemoHeaderSnapshots = (): UsageHeaderSnapshotsResponse => ({
         },
       },
     },
+    {
+      event_hash: 'demo-event-xai-free-usage-exhausted',
+      timestamp_ms: now() - minute,
+      auth_file_snapshot: 'xai-ops.json',
+      auth_index: 'xai-ops-01',
+      account_snapshot: 'oc0demo01@yijihwjw.com',
+      auth_label_snapshot: 'xai',
+      auth_provider_snapshot: 'xai',
+      source: 'ops',
+      source_hash: 'src_xai_ops',
+      header_error_kind: 'rate_limit',
+      header_error_code: 'subscription:free-usage-exhausted',
+      header_trace_id: 'demo-xai-free-usage-429',
+      response_metadata: {
+        errors: {
+          kind: 'rate_limit',
+          code: 'subscription:free-usage-exhausted',
+          should_retry: true,
+        },
+        trace: {
+          request_id: 'demo-xai-free-usage-429',
+          primary_trace_id: 'demo-xai-free-usage-429',
+        },
+        routing: {
+          server: 'cloudflare',
+          cf_cache_status: 'DYNAMIC',
+        },
+        response: {
+          content_type: 'application/json',
+          content_length: 297,
+        },
+        providers: {
+          cloudflare_ray: 'demo-xai-free-usage-LAX',
+          cloudflare_cache_status: 'DYNAMIC',
+        },
+        data_policy: {
+          retention_mode: 'zdr',
+          zero_retention: true,
+        },
+        provider_usage: {
+          provider: 'xai',
+          kind: 'included_free_usage',
+          state: 'exhausted',
+          code: 'subscription:free-usage-exhausted',
+          model: 'grok-4.5-build-free',
+          unit: 'tokens',
+          actual: 1_024_413,
+          limit: 1_000_000,
+          remaining: 0,
+          overage: 24_413,
+          window_kind: 'rolling_24h',
+          observed_at_ms: now() - minute,
+          recover_at_ms: now() + day - minute,
+          recover_at_estimated: true,
+          source: 'response_body',
+        },
+      },
+    },
+    {
+      event_hash: 'demo-event-xai-rate-limit-success',
+      timestamp_ms: now() - 3 * minute,
+      auth_file_snapshot: 'xai-email-user.json',
+      auth_index: 'xai-email-user-01',
+      account_snapshot: 'oc1demo02@yijihwjw.com',
+      auth_label_snapshot: 'xai',
+      auth_provider_snapshot: 'xai',
+      source: 'ops',
+      source_hash: 'src_xai_email_user',
+      header_trace_id: 'demo-xai-rate-limit-success',
+      response_metadata: {
+        errors: { should_retry: false },
+        trace: {
+          request_id: 'demo-xai-rate-limit-success',
+          primary_trace_id: 'demo-xai-rate-limit-success',
+        },
+        routing: {
+          server: 'cloudflare',
+          cf_cache_status: 'DYNAMIC',
+        },
+        response: {
+          content_type: 'application/json',
+          content_length: 948,
+        },
+        providers: {
+          cloudflare_ray: 'demo-xai-success-LAX',
+          cloudflare_cache_status: 'DYNAMIC',
+        },
+        rate_limit: {
+          requests: { limit: 21, remaining: 18 },
+        },
+        data_policy: {
+          retention_mode: 'zdr',
+          zero_retention: true,
+        },
+      },
+    },
   ],
 });
 
@@ -2668,7 +4093,215 @@ export const getDemoCodexInspectionRuns = (): CodexInspectionRunsResponse => {
   return { items: [detail.run] };
 };
 
-export const getDemoCodexInspectionRun = () => clone(demoInspectionRunDetail());
+export const getDemoCodexInspectionRun = (baseNow = now()) =>
+  clone(demoInspectionRunDetail(baseNow));
+
+export const getDemoCodexInspectionLocalRun = (baseNow = now()): CodexInspectionRunResult => {
+  const detail = demoInspectionRunDetail(baseNow);
+  const filesByName = new Map(demoAuthFiles.files.map((file) => [file.name, file]));
+  const results = detail.results.map((item) => {
+    const raw =
+      filesByName.get(item.fileName) ??
+      ({
+        name: item.fileName,
+        type: item.provider,
+        provider: item.provider,
+        authIndex: item.authIndex,
+        disabled: item.disabled,
+      } as AuthFilesResponse['files'][number]);
+    return {
+      key: `${item.fileName}::${item.authIndex || '-'}`,
+      runtimeId: typeof raw.id === 'string' ? raw.id : null,
+      fileName: item.fileName,
+      displayAccount: item.displayAccount,
+      accountSnapshot: item.accountSnapshot ?? null,
+      authIndex: item.authIndex ?? null,
+      accountId: item.accountId ?? null,
+      provider: item.provider,
+      disabled: item.disabled,
+      autoRecoverOwned: item.autoRecoverEligible === true,
+      status: item.status ?? '',
+      state: item.state ?? '',
+      raw,
+      action: item.action as CodexInspectionAction,
+      actionReason: item.actionReason,
+      statusCode: item.statusCode ?? null,
+      usedPercent: item.usedPercent ?? null,
+      isQuota: item.isQuota,
+      autoRecoverEligible: item.autoRecoverEligible === true,
+      error: item.errorDetail ?? item.error ?? '',
+      planType: item.planType ?? null,
+      quotaWindows: (item.quotaWindows ?? []).map((window) => ({
+        id: window.id,
+        labelKey: window.labelKey,
+        labelParams: window.labelParams,
+        usedPercent: window.usedPercent ?? null,
+        resetLabel: window.resetLabel ?? '',
+        limitWindowSeconds: window.limitWindowSeconds ?? null,
+      })),
+      errorKind: item.errorKind,
+      errorDetail: item.errorDetail,
+    };
+  });
+  return {
+    settings: {
+      baseUrl: DEMO_API_BASE,
+      token: '',
+      targetTypes: ['codex', 'xai'],
+      targetType: 'codex',
+      workers: 6,
+      deleteWorkers: 2,
+      timeout: 30,
+      retries: 2,
+      userAgent: 'CPA-Manager-Plus Demo',
+      xaiInferenceUserAgent: 'xai-grok-workspace/0.2.101 Demo',
+      xaiInferenceEnabled: true,
+      xaiInferenceModel: 'grok-4.5',
+      xaiInferencePrompt: 'Reply with exactly OK.',
+      usedPercentThreshold: 92,
+      sampleSize: 0,
+    },
+    files: clone(demoAuthFiles.files),
+    results,
+    summary: {
+      totalFiles: detail.run.totalFiles,
+      probeSetCount: detail.run.probeSetCount,
+      sampledCount: detail.run.sampledCount,
+      disabledCount: detail.run.disabledCount,
+      enabledCount: detail.run.enabledCount,
+      deleteCount: detail.run.deleteCount,
+      disableCount: detail.run.disableCount,
+      enableCount: detail.run.enableCount,
+      reauthCount: detail.run.reauthCount,
+      keepCount: detail.run.keepCount,
+      usedPercentThreshold: 92,
+      sampled: false,
+      plannedActionPreview: results
+        .filter((item) => item.action !== 'keep')
+        .map((item) => `${item.displayAccount} -> ${item.action}`),
+    },
+    startedAt: detail.run.startedAtMs,
+    finishedAt: detail.run.finishedAtMs ?? detail.run.updatedAtMs,
+  };
+};
+
+export const getDemoCodexInspectionLocalLogs = (
+  baseNow = now(),
+  t: TFunction = identityT
+): CodexInspectionStoredLogEntry[] => {
+  const detail = demoInspectionRunDetail(baseNow);
+  const actionLabel = (action: string) =>
+    formatActionLabel(normalizeDemoInspectionAction(action), t);
+  const percentLabel = (value?: number) => (value === undefined ? '--' : `${value.toFixed(1)}%`);
+  const targetTypes = detail.run.settings?.targetTypes ?? ['codex', 'xai'];
+  const providers = new Set(targetTypes.map((item) => item.trim().toLowerCase()));
+  const target =
+    providers.has('codex') && providers.has('xai')
+      ? t('monitoring.codex_inspection_target_codex_xai')
+      : providers.has('xai')
+        ? t('monitoring.codex_inspection_target_xai')
+        : t('monitoring.codex_inspection_target_codex');
+  const logs: CodexInspectionStoredLogEntry[] = [
+    {
+      id: 'demo-inspection-loading',
+      level: 'info',
+      message: t('monitoring.codex_inspection_log_loading', { target }),
+      timestamp: detail.run.startedAtMs,
+      detail: {
+        triggerType: 'manual',
+        triggerKey: 'manual',
+        targetTypes: [...targetTypes],
+      },
+    },
+    {
+      id: 'demo-inspection-set-ready',
+      level: 'info',
+      message: t('monitoring.codex_inspection_log_set_ready', {
+        total: detail.run.probeSetCount,
+        sampled: detail.run.sampledCount,
+      }),
+      timestamp: detail.run.startedAtMs + 500,
+      detail: {
+        totalFiles: detail.run.totalFiles,
+        probeSetCount: detail.run.probeSetCount,
+        sampledCount: detail.run.sampledCount,
+        targetTypes: [...targetTypes],
+      },
+    },
+  ];
+
+  detail.results.forEach((item) => {
+    if (item.provider !== 'xai') {
+      logs.push({
+        id: `demo-inspection-result-${item.id}`,
+        level: demoCodexInspectionLogLevel(item) as CodexInspectionStoredLogEntry['level'],
+        message: t('monitoring.codex_inspection_log_result', {
+          account: item.displayAccount,
+          action: actionLabel(item.action),
+          status: item.statusCode ?? '--',
+          percent: percentLabel(item.usedPercent),
+        }),
+        timestamp: item.createdAtMs,
+        detail: buildDemoCodexInspectionLogDetail(item),
+      });
+      return;
+    }
+
+    const inferenceEnabled = detail.run.settings?.xaiInferenceEnabled === true;
+    const healthyEvidenceKeys: Record<string, string> = {
+      billing_healthy: 'monitoring.xai_inspection_evidence_billing_healthy',
+      billing_partial: 'monitoring.xai_inspection_evidence_billing_partial',
+      official_api_healthy: 'monitoring.xai_inspection_evidence_official_api_healthy',
+      inference_healthy: 'monitoring.xai_inspection_evidence_inference_healthy',
+    };
+    const evidenceKey = healthyEvidenceKeys[item.errorKind ?? ''];
+    const message = evidenceKey
+      ? t('monitoring.xai_inspection_log_result', {
+          account: item.displayAccount,
+          action: actionLabel(item.action),
+          evidence: t(evidenceKey),
+          percent: percentLabel(item.usedPercent),
+        })
+      : t('monitoring.xai_inspection_log_classified', {
+          account: item.displayAccount,
+          action: actionLabel(item.action),
+          surface: t(
+            inferenceEnabled
+              ? 'monitoring.xai_inspection_surface_inference'
+              : 'monitoring.xai_inspection_surface_billing'
+          ),
+          reason:
+            formatXaiProbeIssue(
+              item.errorKind ?? 'unknown',
+              t,
+              inferenceEnabled ? 'inference' : 'billing'
+            ) ?? t('xai_quota.diagnostic_unknown'),
+        });
+    logs.push({
+      id: `demo-inspection-result-${item.id}`,
+      level: demoXaiInspectionLogLevel(item) as CodexInspectionStoredLogEntry['level'],
+      message,
+      timestamp: item.createdAtMs,
+      detail: buildDemoXaiInspectionLogDetail(item, inferenceEnabled),
+    });
+  });
+
+  const completedAt = detail.run.finishedAtMs ?? detail.run.updatedAtMs;
+  logs.push({
+    id: 'demo-inspection-completed-summary',
+    level: 'success',
+    message: t('monitoring.codex_inspection_log_completed', {
+      delete: detail.run.deleteCount,
+      disable: detail.run.disableCount,
+      enable: detail.run.enableCount,
+      reauth: detail.run.reauthCount,
+      keep: detail.run.keepCount,
+    }),
+    timestamp: completedAt,
+    detail: buildDemoInspectionCompletionDetail(detail.run),
+  });
+  return logs;
+};
 
 export const getDemoAccountActionCandidates = () => ({
   items: clone(demoAccountCandidates),
@@ -2735,82 +4368,293 @@ export const getDemoConfigYaml = () =>
     '  enabled: true',
   ].join('\n');
 
+const DEMO_FORBIDDEN_API_HOST = 'forbidden.demo.invalid';
+
+const isDemoForbiddenApiCall = (requestUrl: string): boolean => {
+  try {
+    return new URL(requestUrl).hostname === DEMO_FORBIDDEN_API_HOST;
+  } catch {
+    return false;
+  }
+};
+
 export const getDemoApiCallResult = (payload: DemoApiCallPayload = {}) => {
   const requestUrl = String(payload.url || '');
+  const authIndex = String(payload.authIndex || '');
+  const isCodexUpgrade = authIndex === 'codex-upgrade-demo-01';
+  const isCodexPro20x = authIndex === 'codex-pro-20x-01';
+  const isCodexRecovered = authIndex === 'codex-fallback-02';
+  const isCodexExpired = authIndex === 'codex-email-user-01';
+  const isXaiSpendingLimited = authIndex === 'xai-email-user-01';
+  const isXaiExpired = authIndex === 'xai-expired-01';
+
+  if (isDemoForbiddenApiCall(requestUrl)) {
+    return {
+      status_code: 401,
+      has_status_code: true,
+      header: {
+        'access-control-allow-origin': ['*'],
+        'content-type': ['application/json'],
+        date: [new Date().toUTCString()],
+        'x-request-id': ['demo-forbidden-request'],
+      },
+      body: JSON.stringify({ error: { code: 16, message: 'Forbidden' } }),
+    };
+  }
+
+  let statusCode = 200;
   let body: unknown = { data: demoProviderModels.map((model) => ({ id: model.name })) };
 
   if (requestUrl.includes('/wham/usage')) {
-    body = {
-      user_id: 'demo-user',
-      account_id: 'acct_codex_team',
-      email: 'platform@example.com',
-      plan_type: 'team',
-      rate_limit: {
-        allowed: true,
-        primary_window: {
-          used_percent: 0.63,
-          limit_window_seconds: 18000,
-          reset_after_seconds: 8280,
+    if (isCodexExpired) {
+      statusCode = 401;
+      body = {
+        error: {
+          code: 'token_expired',
+          message: 'Provided authentication token is expired',
         },
-        secondary_window: {
-          used_percent: 0.42,
-          limit_window_seconds: 604800,
-          reset_after_seconds: 246000,
+      };
+    } else {
+      const primaryUsedPercent = isCodexPro20x ? 84 : isCodexRecovered ? 24 : 63;
+      const secondaryUsedPercent = isCodexPro20x ? 96 : isCodexRecovered ? 18 : 42;
+      const accountId = isCodexPro20x
+        ? 'acct_codex_pro_20x'
+        : isCodexRecovered
+          ? 'acct_codex_auto'
+          : isCodexUpgrade
+            ? 'acct_codex_upgrade_demo'
+            : 'acct_codex_team';
+      const email = isCodexPro20x
+        ? 'pro20x@example.com'
+        : isCodexRecovered
+          ? 'automation@example.com'
+          : isCodexUpgrade
+            ? 'upgrade@example.com'
+            : 'platform@example.com';
+      body = {
+        user_id: isCodexPro20x ? 'demo-pro-user' : 'demo-user',
+        account_id: accountId,
+        email,
+        plan_type: isCodexPro20x ? 'pro' : isCodexUpgrade ? 'free' : 'team',
+        rate_limit: {
+          allowed: true,
+          primary_window: {
+            used_percent: primaryUsedPercent,
+            limit_window_seconds: 18000,
+            reset_after_seconds: isCodexPro20x ? 6120 : isCodexRecovered ? 12960 : 8280,
+          },
+          secondary_window: {
+            used_percent: secondaryUsedPercent,
+            limit_window_seconds: 604800,
+            reset_after_seconds: isCodexPro20x ? 198000 : 246000,
+          },
         },
-      },
-      code_review_rate_limit: {
-        allowed: true,
-        primary_window: {
-          used_percent: 0.38,
-          limit_window_seconds: 18000,
-          reset_after_seconds: 7200,
+        code_review_rate_limit: {
+          allowed: true,
+          primary_window: {
+            used_percent: isCodexPro20x ? 29 : 38,
+            limit_window_seconds: 18000,
+            reset_after_seconds: 7200,
+          },
         },
-      },
-      credits: {
-        has_credits: true,
-        unlimited: false,
-        balance: 18.4,
-      },
-      rate_limit_reset_credits: {
-        available_count: 2,
-      },
-      subscription_active_until: new Date(now() + 23 * day).toISOString(),
-    };
+        credits: {
+          has_credits: true,
+          unlimited: false,
+          balance: isCodexPro20x ? 42.6 : 18.4,
+        },
+        rate_limit_reset_credits: {
+          available_count: isCodexPro20x ? 3 : 2,
+        },
+        subscription_active_until: new Date(now() + 23 * day).toISOString(),
+      };
+    }
   } else if (requestUrl.includes('/rate-limit-reset-credits')) {
     body = {
-      available_count: 2,
-      credits: [
-        {
-          id: 'demo-credit-1',
-          status: 'available',
-          granted_at: new Date(now() - day).toISOString(),
-          expires_at: new Date(now() + 6 * day).toISOString(),
-        },
-      ],
+      available_count: isCodexPro20x ? 3 : 2,
+      credits: isCodexPro20x
+        ? [
+            {
+              id: 'demo-pro-credit-1',
+              reset_type: 'codex_rate_limits',
+              status: 'available',
+              granted_at: new Date(now() - 2 * day).toISOString(),
+              expires_at: new Date(now() + 3 * day + 4 * hour).toISOString(),
+            },
+            {
+              id: 'demo-pro-credit-2',
+              reset_type: 'codex_rate_limits',
+              status: 'available',
+              granted_at: new Date(now() - day).toISOString(),
+              expires_at: new Date(now() + 9 * day).toISOString(),
+            },
+            {
+              id: 'demo-pro-credit-3',
+              reset_type: 'codex_rate_limits',
+              status: 'available',
+              granted_at: new Date(now() - 6 * hour).toISOString(),
+              expires_at: new Date(now() + 18 * day).toISOString(),
+            },
+          ]
+        : [
+            {
+              id: 'demo-credit-1',
+              reset_type: 'codex_rate_limits',
+              status: 'available',
+              granted_at: new Date(now() - day).toISOString(),
+              expires_at: new Date(now() + 6 * day).toISOString(),
+            },
+            {
+              id: 'demo-credit-2',
+              reset_type: 'codex_rate_limits',
+              status: 'available',
+              granted_at: new Date(now() - 12 * hour).toISOString(),
+              expires_at: new Date(now() + 14 * day).toISOString(),
+            },
+          ],
     };
   } else if (requestUrl.includes('anthropic.com/api/oauth/profile')) {
-    body = { email: 'research@example.com', organization_name: 'Research Team' };
+    body =
+      authIndex === 'claude-team-01'
+        ? { account: { has_claude_max: true } }
+        : authIndex === 'claude-research-02'
+          ? { account: { has_claude_pro: true } }
+          : { email: 'research@example.com', organization_name: 'Research Team' };
   } else if (requestUrl.includes('anthropic.com/api/oauth/usage')) {
-    body = {
-      plan_type: 'pro',
-      usage: {
-        five_hour: { utilization: 0.44, resets_at: new Date(now() + 2 * hour).toISOString() },
-        seven_day: { utilization: 0.31, resets_at: new Date(now() + 3 * day).toISOString() },
-      },
+    const fiveHour = {
+      utilization: authIndex === 'claude-team-01' ? 44 : 18,
+      resets_at: new Date(now() + 2 * hour).toISOString(),
     };
+    const sevenDay = {
+      utilization: authIndex === 'claude-team-01' ? 31 : 22,
+      resets_at: new Date(now() + 3 * day).toISOString(),
+    };
+    body =
+      authIndex === 'claude-team-01'
+        ? {
+            limits: [
+              {
+                kind: 'session',
+                group: 'session',
+                percent: fiveHour.utilization,
+                resets_at: fiveHour.resets_at,
+                scope: null,
+                is_active: true,
+              },
+              {
+                kind: 'weekly_all',
+                group: 'weekly',
+                percent: sevenDay.utilization,
+                resets_at: sevenDay.resets_at,
+                scope: null,
+                is_active: true,
+              },
+              {
+                kind: 'weekly_scoped',
+                group: 'weekly',
+                percent: 78,
+                resets_at: new Date(now() + 4 * day).toISOString(),
+                scope: { model: { display_name: 'Demo Model A' } },
+                is_active: true,
+              },
+              {
+                kind: 'model_scoped',
+                group: 'weekly',
+                percent: 12,
+                resets_at: new Date(now() + 4 * day).toISOString(),
+                scope: { model: { displayName: 'Demo Model B' } },
+                is_active: false,
+              },
+              {
+                kind: 'model_scoped',
+                group: 'weekly',
+                percent: 42,
+                resets_at: new Date(now() + 5 * day).toISOString(),
+                scope: { model: { displayName: 'Demo Model B' } },
+                is_active: false,
+              },
+            ],
+          }
+        : {
+            five_hour: fiveHour,
+            seven_day: sevenDay,
+          };
   } else if (requestUrl.includes('api.kimi.com')) {
     body = {
       items: [
         { model: 'kimi-k2', used: 62, total: 100, reset_time: new Date(now() + day).toISOString() },
       ],
     };
-  } else if (requestUrl.includes('grok.com')) {
+  } else if (requestUrl.includes('/responses') && requestUrl.includes('grok.com')) {
+    if (isXaiSpendingLimited) {
+      statusCode = 402;
+      body = {
+        code: 'personal-team-blocked:spending-limit',
+        error:
+          'You have run out of credits or need a Grok subscription. Add credits or upgrade at grok.com.',
+      };
+    } else if (isXaiExpired) {
+      statusCode = 401;
+      body = {
+        code: 'invalid_token',
+        error: 'The xAI OAuth credential has expired.',
+      };
+    } else {
+      body = {
+        id: `resp_demo_${authIndex || 'xai'}`,
+        object: 'response',
+        status: 'completed',
+        model: 'grok-4.5-build-free',
+        output: [
+          {
+            id: `msg_demo_${authIndex || 'xai'}`,
+            role: 'assistant',
+            type: 'message',
+            status: 'completed',
+            content: [{ type: 'output_text', text: 'OK', annotations: [], logprobs: [] }],
+          },
+        ],
+      };
+    }
+  } else if (requestUrl.includes('/billing?format=credits')) {
     body = {
-      billing: {
-        plan: 'pro',
-        usage: [{ name: 'requests', used: 320, total: 1000 }],
+      config: {
+        currentPeriod: {
+          type: 'USAGE_PERIOD_TYPE_WEEKLY',
+          start: new Date(now() - day).toISOString(),
+          end: new Date(now() + 6 * day).toISOString(),
+        },
+        creditUsagePercent: isXaiSpendingLimited ? 100 : isXaiExpired ? 12 : 3,
+        productUsage: [
+          {
+            product: 'Grok Build',
+            usagePercent: isXaiSpendingLimited ? 100 : isXaiExpired ? 12 : 3,
+          },
+        ],
       },
     };
+  } else if (requestUrl.includes('/billing') && requestUrl.includes('grok.com')) {
+    body = {
+      config: {
+        currentPeriod: {
+          type: 'USAGE_PERIOD_TYPE_MONTHLY',
+          start: new Date(now() - 11 * day).toISOString(),
+          end: new Date(now() + 19 * day).toISOString(),
+        },
+        monthlyLimit: { val: 10000 },
+        used: { val: isXaiSpendingLimited ? 10000 : isXaiExpired ? 1200 : 2200 },
+        onDemandCap: { val: 0 },
+        onDemandUsed: { val: 0 },
+        billingPeriodStart: new Date(now() - 11 * day).toISOString(),
+        billingPeriodEnd: new Date(now() + 19 * day).toISOString(),
+      },
+    };
+  } else if (requestUrl.includes('api.x.ai/v1/me')) {
+    if (isXaiExpired) {
+      statusCode = 401;
+      body = { code: 'invalid_token', error: 'The xAI OAuth credential has expired.' };
+    } else {
+      body = { id: `demo-${authIndex || 'xai'}`, active: true };
+    }
   } else if (requestUrl.includes('cloudcode-pa.googleapis.com')) {
     body = {
       groups: [
@@ -2829,13 +4673,15 @@ export const getDemoApiCallResult = (payload: DemoApiCallPayload = {}) => {
       paidTier: {
         id: 'g1-pro-tier',
         name: 'Pro',
-        availableCredits: [{ creditType: 'monthly', creditAmount: 260, minimumCreditAmountForUsage: 1 }],
+        availableCredits: [
+          { creditType: 'monthly', creditAmount: 260, minimumCreditAmountForUsage: 1 },
+        ],
       },
     };
   }
 
   return {
-    status_code: 200,
+    status_code: statusCode,
     has_status_code: true,
     header: {
       'content-type': ['application/json'],

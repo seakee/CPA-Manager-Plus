@@ -1,6 +1,7 @@
 import { act } from 'react';
 import { create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { EChartsView } from '@/components/charts/EChartsView';
 import { Button } from '@/components/ui/Button';
 import { Select } from '@/components/ui/Select';
 import {
@@ -13,6 +14,7 @@ import { UsageAnalyticsPage } from './UsageAnalyticsPage';
 const { mocks } = vi.hoisted(() => ({
   mocks: {
     navigate: vi.fn(),
+    copyToClipboard: vi.fn(async () => true),
     usageState: null as unknown,
   },
 }));
@@ -37,6 +39,10 @@ vi.mock('react-i18next', () => ({
 
 vi.mock('./useUsageAnalytics', () => ({
   useUsageAnalytics: () => mocks.usageState,
+}));
+
+vi.mock('@/utils/clipboard', () => ({
+  copyToClipboard: mocks.copyToClipboard,
 }));
 
 const getText = (node: ReactTestInstance): string =>
@@ -121,6 +127,7 @@ const createUsageState = (overrides: Record<string, unknown> = {}) => {
     id: 'abcdef1234567890',
     label: 'sk-****7890',
     apiKeyHash: 'abcdef1234567890',
+    apiKeyCopyValue: 'sk-client-key-original',
     model: undefined,
     provider: 'codex',
     account: 'team-alpha',
@@ -380,6 +387,8 @@ const createUsageState = (overrides: Record<string, unknown> = {}) => {
         points: [{ bucketMs: point.bucketMs, label: point.label, value: 8 }],
       },
     ],
+    credentialTrendLoading: false,
+    credentialTrendError: '',
     keyAnomalies: [
       {
         id: 'abcdef1234567890',
@@ -482,6 +491,8 @@ const createUsageState = (overrides: Record<string, unknown> = {}) => {
 
 beforeEach(() => {
   mocks.navigate.mockReset();
+  mocks.copyToClipboard.mockReset();
+  mocks.copyToClipboard.mockResolvedValue(true);
   mocks.usageState = createUsageState();
 });
 
@@ -532,6 +543,52 @@ describe('UsageAnalyticsPage', () => {
     expect(text).not.toContain('usage_analytics.model_overview_title');
     expect(text).not.toContain('usage_analytics.api_key_overview_title');
     expect(text).not.toContain('usage_analytics.drilldown_preview_title');
+  });
+
+  it('renders fine-grained cache buckets in token charts', () => {
+    const point = createTimelinePoint({
+      cachedTokens: 0,
+      cacheReadTokens: 80,
+      cacheCreationTokens: 20,
+    });
+    mocks.usageState = createUsageState({
+      activeTab: 'trends',
+      timeline: [point],
+      anomalyAnalysis: null,
+      selectedBucket: null,
+    });
+
+    const renderer = renderPage();
+    const cacheSeries = renderer.root
+      .findAllByType(EChartsView)
+      .flatMap(
+        (node) => (node.props.option?.series ?? []) as Array<{ data?: number[]; name?: string }>
+      )
+      .find((series) => series.name === 'usage_analytics.metric_cached_tokens');
+
+    expect(cacheSeries?.data).toEqual([100]);
+  });
+
+  it('renders fine-grained cache buckets in rank tables', () => {
+    const modelRow = createRankRow({
+      cachedTokens: 0,
+      cacheReadTokens: 80,
+      cacheCreationTokens: 20,
+    });
+    mocks.usageState = createUsageState({
+      activeTab: 'models',
+      modelRows: [modelRow],
+      selectedModel: modelRow,
+    });
+
+    const renderer = renderPage();
+    const cells = renderer.root
+      .findAllByType('tr')
+      .map((row) => row.findAllByType('td'))
+      .find((rowCells) => rowCells.length >= 10 && getText(rowCells[1]).includes('gpt-4o'));
+
+    expect(cells).toBeDefined();
+    expect(getText(cells![6])).toBe('100');
   });
 
   it('shows empty and error states from the analytics hook', () => {
@@ -652,6 +709,26 @@ describe('UsageAnalyticsPage', () => {
     expect(text).toContain('sk-****7890');
     expect(text).not.toContain('abcdef1234567890');
     expect(text).not.toContain('usage_analytics.trend_pending_data');
+  });
+
+  it('copies the original API key without selecting the row', async () => {
+    const usageState = createUsageState({ activeTab: 'apiKeys' });
+    mocks.usageState = usageState;
+    const renderer = renderPage();
+    const copyButton = renderer.root
+      .findAllByType('button')
+      .find((node) => node.props['aria-label'] === 'common.copy');
+    if (!copyButton) throw new Error('API key copy button not found');
+    const event = { stopPropagation: vi.fn() };
+
+    act(() => {
+      copyButton.props.onClick(event);
+    });
+    await act(async () => Promise.resolve());
+
+    expect(event.stopPropagation).toHaveBeenCalledTimes(1);
+    expect(mocks.copyToClipboard).toHaveBeenCalledWith('sk-client-key-original');
+    expect(usageState.setSelectedApiKeyHash).not.toHaveBeenCalled();
   });
 
   it('renders the API Key tab with key-dimension cards, unit-economics columns, and anomaly drilldown', () => {
@@ -828,6 +905,24 @@ describe('UsageAnalyticsPage', () => {
     expect(mocks.navigate).toHaveBeenCalledWith(
       '/monitoring?from_ms=1780000000000&to_ms=1780003600000&auth_file=auth.json&project_id=project-1&search=req-42&min_latency_ms=10000&cache_status=miss'
     );
+  });
+
+  it('renders selected credential timeline loading and error states', () => {
+    mocks.usageState = createUsageState({
+      activeTab: 'credentials',
+      credentialTrendLoading: true,
+    });
+    let renderer = renderPage();
+    expect(getText(renderer.root)).toContain('common.loading');
+
+    mocks.usageState = createUsageState({
+      activeTab: 'credentials',
+      credentialTrendError: 'timeline failed',
+    });
+    renderer = renderPage();
+    const text = getText(renderer.root);
+    expect(text).toContain('usage_analytics.error_title');
+    expect(text).toContain('timeline failed');
   });
 
   it('renders the heatmap tab as a focused time-window workspace', () => {

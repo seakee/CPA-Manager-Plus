@@ -178,7 +178,7 @@ function ApiKeySummaryPrimary({
   const keyLabel = row.isUnknown
     ? t('monitoring.api_key_unknown_label')
     : row.apiKeyLabel || row.apiKeyMasked || t('monitoring.api_key_unknown_label');
-  const copyText = row.apiKeyMasked || row.apiKeyHash || secondaryText || keyLabel;
+  const copyValue = row.apiKeyCopyValue;
 
   return (
     <div className={styles.apiKeyPrimaryCell}>
@@ -203,11 +203,11 @@ function ApiKeySummaryPrimary({
         {secondaryText ? <small>{secondaryText}</small> : null}
       </button>
       <span className={styles.apiKeyInlineMeta}>
-        {copyText ? (
+        {copyValue ? (
           <button
             type="button"
             className={styles.apiKeyCopyButton}
-            onClick={() => onCopyText(copyText)}
+            onClick={() => onCopyText(copyValue)}
             title={t('common.copy')}
             aria-label={t('common.copy')}
           >

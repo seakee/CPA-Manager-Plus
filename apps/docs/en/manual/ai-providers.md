@@ -1,52 +1,78 @@
-# AI Providers
+---
+title: AI Provider Management
+description: Manage Gemini, Codex, Claude, Vertex, xAI, and OpenAI-compatible CPA providers with priorities, models, proxies, headers, and key testing.
+---
 
-AI Providers controls how CPA forwards client requests to upstream model services. These settings are provider credentials and routing settings, not CPAMP login or the CPA Management Key.
+# AI Provider Management
 
-Use [Configuration](./configuration.md) for Manager Server connection, collector, and runtime switches.
+The AI Providers page controls how CPA routes client requests to upstream model services. These are CPA provider settings, not the CPAMP admin login or CPA Management Key.
+
+Open the [AI Providers Demo](https://seakee.github.io/CPA-Manager-Plus/#/demo/ai-providers) to inspect fictional configuration without contacting a real provider.
+
+## Most Common Workflow
+
+1. Select Add and choose a provider type.
+2. Enter the base URL and credential, or choose the related OAuth / Auth File flow.
+3. Enter model names or aliases that clients should use.
+4. Save and run an available model or key test.
+5. Send a low-cost real request and confirm it in [Monitoring](./monitoring.md).
 
 ## Supported Configuration Types
 
-Provider entries are grouped by type. Common types include:
-
-- Codex
-- Claude Code
 - Gemini / AI Studio
+- Codex API Key
+- Claude API Key
 - Vertex
+- xAI API Key
 - OpenAI-compatible
+- Other compatible configuration exposed by the current CPA version
 
-Each provider has different fields, but the core questions are the same: where requests go, which credentials are used, which models are available, whether the entry is enabled, and whether headers or compatibility APIs need special handling.
+Fields vary by provider, but they generally cover the base URL, credential, models, headers, proxy, priority, and enabled state.
 
 ## Add Or Edit A Provider
 
-1. Click add configuration and choose the provider type.
-2. Fill name, Base URL, API key, auth file, or OAuth-related fields.
-3. If the page asks for `auth_index`, use a stable and unique value so usage, quota, and inspection can connect data to the same account.
-4. Configure model lists or model rules. Keep client model names, provider model names, and model-price names clear.
-5. Save, then send one low-cost request.
-6. Open [Monitoring](./monitoring.md) and confirm provider, model, account, and status.
+1. Select the provider type.
+2. Enter the base URL and API key, or use the matching OAuth/Auth File workflow.
+3. Use a clear name; when binding an auth file, keep the account identifier `auth_index` stable.
+4. Configure model lists, aliases, exclusions, and provider-specific options.
+5. Save, then run a low-cost key test or real request.
+6. Confirm the provider, model, and account in [Monitoring](./monitoring.md).
 
-## Field Guidance
+## xAI API Keys
 
-- **Base URL**: should point to the upstream model service or CPA-compatible endpoint, not the CPAMP docs or panel URL.
-- **API Key**: a provider or client credential. Do not use CPA Management Key or CPAMP Admin Key here.
-- **Auth file**: use it for OAuth or account-file providers. Maintain account state in [Auth Files](./auth-files.md).
-- **Model list**: affects visible models and routing. Cost estimation also needs matching names in [Model Prices](./model-prices.md).
-- **Enabled state**: disabled entries should no longer receive new routed requests.
+The panel manages CPA `xai-api-key` entries, including:
+
+- API key, base URL, proxy, and custom headers.
+- Models, aliases, prefixes, and excluded models.
+- Provider priority and enabled state.
+- Provider test actions for credential and model access.
+
+An xAI API key is different from an xAI/Grok OAuth auth file. See [OAuth Login](./oauth.md), [Quota](./quota.md), and [Account Inspection](./codex-inspection.md) for OAuth, billing evidence, and account health.
+
+## Priority And Concurrent Saves
+
+Provider priority can be edited directly in the table. It affects routing order supported by CPA; it is not a health or cost priority.
+
+CPAMP uses targeted update APIs where available and refreshes configuration caches after saves. Reload before editing if another browser or process may have changed the same configuration.
+
+## Model And Key Testing
+
+- Model discovery uses the provider base URL, API key, headers, and proxy.
+- OpenAI-compatible, Codex, Claude, and xAI entries can expose key or model testing depending on the current panel and CPA capability.
+- A successful test proves only that test request; it does not guarantee every model, region, account state, or future quota window.
+- Inspect failures only in the authenticated local panel. Never paste API keys or raw credentials into an issue.
 
 ## Verify After Saving
 
-The reliable test is not the "saved" toast. Send a real request:
+1. Send a low-cost real request.
+2. Confirm provider, model, account, and status in Monitoring.
+3. If cost is missing, check [Model Prices](./model-prices.md).
+4. For credential or quota failures, check [Auth Files](./auth-files.md), [Quota](./quota.md), and the [Account Action Queue](./account-actions.md).
+5. If no event appears, troubleshoot collection before repeatedly changing the provider.
 
-1. Ask a client to use a low-cost model.
-2. In [Monitoring](./monitoring.md), confirm provider, model, account, and status code.
-3. If the request succeeds but cost is empty, check [Model Prices](./model-prices.md).
-4. If the request fails like an auth issue, check [Auth Files](./auth-files.md) or [OAuth Login](./oauth.md).
-5. If no request event appears, troubleshoot the monitoring collection path.
+## Configuration Boundaries
 
-## Common Problems
-
-- **Model still unavailable after save**: confirm the entry is enabled, the model name matches, and client traffic passes through CPA.
-- **Requests hit the wrong provider**: check routing rules, model aliases, and provider order.
-- **Only some accounts fail**: use Auth Files or Codex Inspection and search by `auth_index`.
-- **Cost estimate is wrong**: provider configuration does not set prices. Maintain the matching model in Model Prices.
-
+- Provider configuration controls CPA upstream requests, not CPAMP authentication.
+- Client aliases, provider model names, and price-table names may differ and require separate mapping.
+- Do not mix CPA Management Keys, CPAMP Admin Keys, and ordinary model API keys.
+- Provider support depends on the current CPA version; older versions may ignore or reject newer fields.

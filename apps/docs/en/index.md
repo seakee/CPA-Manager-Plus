@@ -1,25 +1,30 @@
 ---
 layout: home
+title: CPA / CLIProxyAPI Management Panel And Observability Docs
+description: CPA Manager Plus documentation for CPA / CLIProxyAPI configuration, request monitoring, cost analytics, quota, Codex/xAI account health, plugins, deployment, and operations.
 
 hero:
   name: CPA Manager Plus
-  text: Documentation
-  tagline: One place to deploy the gateway, run CPAMP, monitor requests, estimate cost, and troubleshoot account health.
+  text: CPA Management And Observability Docs
+  tagline: Operate CPA / CLIProxyAPI, persist requests, analyze cost, and manage Codex, Claude, and xAI quota and account health.
   actions:
     - theme: brand
       text: Get Started
       link: /en/guide/getting-started
     - theme: alt
+      text: Choose A Panel
+      link: /en/guide/choosing-a-panel
+    - theme: alt
       text: Live Demo
       link: https://seakee.github.io/CPA-Manager-Plus/
 
 features:
-  - title: Deployment
-    details: Use the installer, Docker, or native packages to finish the first setup.
-  - title: Observability
-    details: Follow requests, cost, failures, quota, and Codex account state.
-  - title: Operations
-    details: Handle backups, admin keys, reverse proxies, migration, and common failures.
+  - title: Install With Confidence
+    details: Choose Lightweight Panel or Full Mode, then follow the recommended login and verification steps.
+  - title: Manage Models And Accounts
+    details: Add providers, OAuth, and auth files, then check quota and account state.
+  - title: Understand Requests And Cost
+    details: Find failed requests and analyze tokens, cost, latency, and callers.
 ---
 
 <script setup>
@@ -28,89 +33,72 @@ import homePreview from '../images/home.png';
 
 <figure class="cpamp-home-preview">
   <img :src="homePreview" alt="CPA Manager Plus dashboard screenshot" />
-  <figcaption>Request monitoring, usage analytics, Codex account inspection, and Manager Server status in one self-hosted panel.</figcaption>
+  <figcaption>CPA / CLIProxyAPI gateway management, request monitoring, cost analytics, and account health in one self-hosted panel.</figcaption>
 </figure>
 
 ## Read By Task
 
 <div class="cpamp-doc-grid">
   <section class="cpamp-doc-card">
-    <h3>First Deployment</h3>
-    <p>Start CPA and CPAMP from a minimal Docker setup, then complete the first login.</p>
+    <h3>Get Started</h3>
+    <p>Choose the right mode, then complete installation, login, and the first verification.</p>
     <ul>
-      <li><a href="./guide/getting-started.html">Get Started</a></li>
-      <li><a href="./deployment/installer.html">One-Click Installer</a></li>
-      <li><a href="./deployment/docker.html">Docker Deployment</a></li>
-      <li><a href="./deployment/native.html">Native Packages</a></li>
+      <li><a href="./guide/choosing-a-panel.html">Choose Lightweight Panel Or Full Mode</a></li>
+      <li><a href="./guide/getting-started.html">Quick Start</a></li>
+      <li><a href="./deployment/cpa-panel.html">Install Lightweight Panel</a></li>
+      <li><a href="./deployment/installer.html">Install Full Mode</a></li>
     </ul>
   </section>
   <section class="cpamp-doc-card">
-    <h3>Advanced Deployment</h3>
-    <p>For existing environments, reverse proxies, or compatibility access paths, check the entry point and boundary here.</p>
+    <h3>Manage Models And Accounts</h3>
+    <p>Handle providers, OAuth, auth files, and client setup for daily use.</p>
     <ul>
-      <li><a href="./deployment/reverse-proxy.html">Reverse Proxy</a></li>
-      <li><a href="./operations/manager-server.html">Manager Server Guide</a></li>
-      <li><a href="./deployment/cpa-panel.html">CPA-Hosted Panel Compatibility</a></li>
-    </ul>
-  </section>
-  <section class="cpamp-doc-card">
-    <h3>Gateway Runtime And Clients</h3>
-    <p>Configure providers, auth files, compatibility APIs, and clients such as Codex, Claude Code, and OpenCode.</p>
-    <ul>
-      <li><a href="./guide/runtime-model.html">Runtime Model</a></li>
-      <li><a href="./gateway/configuration.html">Gateway Configuration</a></li>
-      <li><a href="./gateway/providers.html">Providers And Compatibility APIs</a></li>
+      <li><a href="./manual/ai-providers.html">AI Providers</a></li>
+      <li><a href="./manual/auth-files.html">Auth Files</a></li>
+      <li><a href="./manual/oauth.html">OAuth Login</a></li>
       <li><a href="./gateway/clients.html">Client Configuration</a></li>
     </ul>
   </section>
   <section class="cpamp-doc-card">
-    <h3>Panel Manual</h3>
-    <p>Use the manual by real panel page: configuration, providers, auth files, monitoring, analytics, inspection, plugins, and logs each have their own page.</p>
+    <h3>Understand Requests And Cost</h3>
+    <p>Use Dashboard to spot a problem, then investigate failures, cost, and account health.</p>
     <ul>
       <li><a href="./manual/dashboard.html">Dashboard</a></li>
-      <li><a href="./manual/configuration.html">Configuration</a></li>
-      <li><a href="./manual/ai-providers.html">AI Providers</a></li>
       <li><a href="./manual/monitoring.html">Monitoring</a></li>
-      <li><a href="./manual/plugins.html">Plugin Management</a></li>
+      <li><a href="./manual/usage-analytics.html">Usage Analytics</a></li>
+      <li><a href="./manual/quota.html">Quota</a></li>
     </ul>
   </section>
   <section class="cpamp-doc-card">
-    <h3>Operations And Security</h3>
-    <p>Protect SQLite, data.key, and admin credentials before you need to recover them.</p>
+    <h3>Maintain And Troubleshoot</h3>
+    <p>Upgrade and back up safely, then troubleshoot monitoring, login, or network problems by symptom.</p>
     <ul>
+      <li><a href="./operations/update.html">Upgrade CPAMP</a></li>
       <li><a href="./operations/backup.html">Backup And Restore</a></li>
-      <li><a href="./operations/reset-admin-key.html">Reset Admin Key</a></li>
-      <li><a href="./operations/configuration.html">Configuration And Data Directory</a></li>
-      <li><a href="./migration/from-cpa-manager.html">Migrate From CPA-Manager</a></li>
-    </ul>
-  </section>
-  <section class="cpamp-doc-card">
-    <h3>Troubleshooting</h3>
-    <p>Start here when monitoring is empty, the collector fails, queue data expires, or reverse proxy paths are wrong.</p>
-    <ul>
-      <li><a href="./troubleshooting/request-monitoring.html">Request Monitoring Troubleshooting</a></li>
+      <li><a href="./troubleshooting/request-monitoring.html">Monitoring Has No Data</a></li>
       <li><a href="./reference/faq.html">FAQ</a></li>
-      <li><a href="./reference/releases.html">Releases</a></li>
     </ul>
   </section>
 </div>
 
-## Runtime Modes
+## Choose How To Use CPAMP
 
 <div class="cpamp-mode-grid">
   <section class="cpamp-mode-card">
-    <h3>Full Docker</h3>
-    <p>The recommended new deployment. Manager Server hosts the panel and the browser only needs the CPAMP Admin Key.</p>
-    <a href="./deployment/docker.html">View Docker Deployment</a>
+    <h3>CPAMP Lightweight Panel</h3>
+    <p>Keep your existing CPA and replace only the management UI, with no additional service, database, or port.</p>
+    <a href="./deployment/cpa-panel.html">Install Lightweight Panel</a>
   </section>
   <section class="cpamp-mode-card">
-    <h3>Native Packages</h3>
-    <p>Run Manager Server directly on Linux, macOS, or Windows when Docker is not part of the environment.</p>
-    <a href="./deployment/native.html">View Native Packages</a>
-  </section>
-  <section class="cpamp-mode-card">
-    <h3>Compatibility Access</h3>
-    <p>You can keep an existing CPA-port panel, but full monitoring and analytics come from Manager Server.</p>
-    <a href="./deployment/cpa-panel.html">View Compatibility Mode</a>
+    <h3>CPAMP Full Mode</h3>
+    <p>Use request history, cost analytics, account inspection, and automation through Docker or a native package.</p>
+    <a href="./deployment/docker.html">Docker Deployment (Recommended)</a>
+    <a href="./deployment/native.html">Native Package Deployment</a>
   </section>
 </div>
+
+## Preview The Interface
+
+The Live Demo only previews the interface with fictional data. It is not a deployment or runtime mode and cannot connect to, manage, or monitor a real CPA instance.
+
+[Open Live Demo](https://seakee.github.io/CPA-Manager-Plus/)

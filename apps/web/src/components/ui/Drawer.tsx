@@ -4,6 +4,7 @@ import {
   useId,
   useRef,
   useState,
+  type PointerEvent as ReactPointerEvent,
   type PropsWithChildren,
   type ReactNode,
 } from 'react';
@@ -63,6 +64,7 @@ export function Drawer({
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
+  const overlayPointerIdsRef = useRef<Set<number>>(new Set());
 
   const startClose = useCallback(
     (notifyParent: boolean) => {
@@ -116,6 +118,35 @@ export function Drawer({
   const handleClose = useCallback(() => {
     startClose(true);
   }, [startClose]);
+
+  // 按 pointerId 配对：仅当同一指针在遮罩上按下且在遮罩上释放时才关闭。
+  // 避免「面板内拖选到遮罩释放」与多指针交错状态互相覆盖。
+  const handleOverlayPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.target === event.currentTarget && event.button === 0) {
+      overlayPointerIdsRef.current.add(event.pointerId);
+    } else {
+      overlayPointerIdsRef.current.delete(event.pointerId);
+    }
+  }, []);
+
+  const handleOverlayPointerUp = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      const startedOnOverlay = overlayPointerIdsRef.current.delete(event.pointerId);
+
+      if (
+        startedOnOverlay &&
+        event.target === event.currentTarget &&
+        event.button === 0
+      ) {
+        handleClose();
+      }
+    },
+    [handleClose]
+  );
+
+  const handleOverlayPointerCancel = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    overlayPointerIdsRef.current.delete(event.pointerId);
+  }, []);
 
   const shouldLockScroll = open || isVisible;
 
@@ -173,7 +204,12 @@ export function Drawer({
     .join(' ');
 
   const drawerContent = (
-    <div className={overlayClass} onClick={handleClose}>
+    <div
+      className={overlayClass}
+      onPointerDown={handleOverlayPointerDown}
+      onPointerUp={handleOverlayPointerUp}
+      onPointerCancel={handleOverlayPointerCancel}
+    >
       <div
         ref={panelRef}
         className={panelClass}

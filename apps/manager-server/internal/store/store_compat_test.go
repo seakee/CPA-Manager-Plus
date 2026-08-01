@@ -9,8 +9,59 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
+
+func TestStoreCompatMigratesLegacyCodexInspectionOwnershipIdentity(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ownership.sqlite")
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+	if _, err := raw.Exec(`create table codex_inspection_disable_ownership (
+		file_name text primary key,
+		provider text not null default 'codex',
+		auth_index text,
+		account_id text,
+		disabled_at_ms integer not null,
+		updated_at_ms integer not null
+	)`); err != nil {
+		_ = raw.Close()
+		t.Fatalf("create legacy ownership table: %v", err)
+	}
+	if _, err := raw.Exec(`insert into codex_inspection_disable_ownership (
+		file_name, provider, auth_index, account_id, disabled_at_ms, updated_at_ms
+	) values ('shared.json', 'codex', 'auth-1', 'account-1', 10, 20)`); err != nil {
+		_ = raw.Close()
+		t.Fatalf("insert legacy ownership: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw sqlite: %v", err)
+	}
+
+	st, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("open migrated store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.UpsertCodexInspectionDisableOwnership(context.Background(), model.CodexInspectionDisableOwnership{
+		FileName:        "shared.json",
+		Provider:        "codex",
+		AuthIndex:       "auth-2",
+		AccountID:       "account-2",
+		AccountSnapshot: "bob@example.com",
+	}); err != nil {
+		t.Fatalf("insert second ownership: %v", err)
+	}
+	items, err := st.ListCodexInspectionDisableOwnership(context.Background())
+	if err != nil {
+		t.Fatalf("list migrated ownership: %v", err)
+	}
+	if len(items) != 2 || items[0].AuthIndex != "auth-1" || items[0].AccountSnapshot != "" || items[1].AuthIndex != "auth-2" || items[1].AccountSnapshot != "" {
+		t.Fatalf("migrated ownership = %#v", items)
+	}
+}
 
 func TestStoreCompatMigratesLegacyUsageEventSchema(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "usage.sqlite")
@@ -353,8 +404,18 @@ func TestStoreCompatModelPricesAndAPIKeyAliases(t *testing.T) {
 	})
 
 	err = db.SaveModelPrices(context.Background(), map[string]ModelPrice{
-		"gpt-a": {Prompt: 1, Completion: 2, Cache: 0.5, CacheRead: 0.25, CacheCreation: 1.5},
-		"gpt-b": {Prompt: 3, Completion: 4, Cache: 0},
+		"gpt-a": {
+			Prompt: 1, Completion: 2, Cache: 0.5, CacheRead: 0.25, CacheCreation: 1.5,
+			PromptConfigured: true, CompletionConfigured: true, CacheReadConfigured: true, CacheCreationConfigured: true,
+			ContextTiers: []ModelPriceContextTier{
+				{ThresholdTokens: 200_000, Prompt: 0, Completion: 8, PromptConfigured: true, CompletionConfigured: true},
+				{ThresholdTokens: 32_000, Prompt: 3, Completion: 4, CacheRead: 0, PromptConfigured: true, CompletionConfigured: true, CacheReadConfigured: true},
+			},
+			ServiceTiers: []ModelPriceServiceTier{
+				{Mode: "fast", ServiceTier: "priority", Prompt: 2.5, Completion: 5, PromptConfigured: true, CompletionConfigured: true},
+			},
+		},
+		"gpt-b": {Prompt: 0, Completion: 0, Cache: 0, PromptConfigured: true, CompletionConfigured: true},
 	})
 	if err != nil {
 		t.Fatalf("save model prices: %v", err)
@@ -364,13 +425,35 @@ func TestStoreCompatModelPricesAndAPIKeyAliases(t *testing.T) {
 		t.Fatalf("load model prices: %v", err)
 	}
 	if len(prices) != 2 || prices["gpt-a"].Prompt != 1 || prices["gpt-a"].CacheRead != 0.25 ||
-		prices["gpt-a"].CacheCreation != 1.5 || prices["gpt-b"].Completion != 4 {
+		prices["gpt-a"].CacheCreation != 1.5 || !prices["gpt-a"].CacheReadConfigured ||
+		!prices["gpt-a"].CacheCreationConfigured || prices["gpt-b"].Completion != 0 ||
+		!prices["gpt-b"].PromptConfigured || !prices["gpt-b"].CompletionConfigured ||
+		len(prices["gpt-a"].ContextTiers) != 2 || prices["gpt-a"].ContextTiers[0].ThresholdTokens != 32_000 ||
+		prices["gpt-a"].ContextTiers[1].Prompt != 0 || !prices["gpt-a"].ContextTiers[1].PromptConfigured ||
+		len(prices["gpt-a"].ServiceTiers) != 1 || prices["gpt-a"].ServiceTiers[0].Mode != "fast" ||
+		prices["gpt-a"].ServiceTiers[0].ServiceTier != "priority" {
 		t.Fatalf("prices = %#v", prices)
 	}
 
 	result, err := db.UpsertSyncedModelPrices(context.Background(), map[string]ModelPrice{
-		"gpt-a": {Prompt: 5, Completion: 6, Cache: 1, CacheRead: 0.75, CacheCreation: 4, Source: "litellm"},
-		"bad":   {Prompt: -1, Completion: 0, Cache: 0},
+		"gpt-a": {
+			Prompt: 5, Completion: 6, Cache: 1, CacheRead: 0.75, CacheCreation: 4,
+			PromptConfigured: true, CompletionConfigured: true, CacheReadConfigured: true, CacheCreationConfigured: true,
+			Source: "litellm",
+			ContextTiers: []ModelPriceContextTier{
+				{ThresholdTokens: 128_000, Prompt: 7, Completion: 9, PromptConfigured: true, CompletionConfigured: true},
+			},
+			ServiceTiers: []ModelPriceServiceTier{
+				{Mode: "FAST", ServiceTier: "PRIORITY", Prompt: 11, PromptConfigured: true},
+			},
+		},
+		"bad": {
+			Prompt: 1,
+			ContextTiers: []ModelPriceContextTier{
+				{ThresholdTokens: 32_000, Prompt: 2, PromptConfigured: true},
+				{ThresholdTokens: 32_000, Prompt: 3, PromptConfigured: true},
+			},
+		},
 	})
 	if err != nil {
 		t.Fatalf("upsert synced prices: %v", err)
@@ -384,8 +467,24 @@ func TestStoreCompatModelPricesAndAPIKeyAliases(t *testing.T) {
 	}
 	if prices["gpt-a"].Prompt != 5 || prices["gpt-a"].CacheRead != 0.75 ||
 		prices["gpt-a"].CacheCreation != 4 || prices["gpt-a"].SyncedAtMS == nil ||
-		prices["gpt-a"].Source != "litellm" {
+		prices["gpt-a"].Source != "litellm" || len(prices["gpt-a"].ContextTiers) != 1 ||
+		prices["gpt-a"].ContextTiers[0].ThresholdTokens != 128_000 || len(prices["gpt-a"].ServiceTiers) != 1 ||
+		prices["gpt-a"].ServiceTiers[0].Mode != "fast" || prices["gpt-a"].ServiceTiers[0].Prompt != 11 {
 		t.Fatalf("synced price = %#v", prices["gpt-a"])
+	}
+
+	if err := db.SaveModelPrices(context.Background(), map[string]ModelPrice{
+		"gpt-a": {Prompt: 6, Completion: 12, Source: "manual"},
+	}); err != nil {
+		t.Fatalf("save manual replacement: %v", err)
+	}
+	prices, err = db.LoadModelPrices(context.Background())
+	if err != nil {
+		t.Fatalf("reload manual replacement: %v", err)
+	}
+	if len(prices) != 1 || prices["gpt-a"].Source != "manual" || len(prices["gpt-a"].ContextTiers) != 0 ||
+		len(prices["gpt-a"].ServiceTiers) != 0 {
+		t.Fatalf("manual replacement retained synchronized rules: %#v", prices)
 	}
 
 	const hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"

@@ -5,26 +5,34 @@ import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { IconPencil, IconSearch, IconTrash2, IconX } from '@/components/ui/icons';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
-import type { ModelPriceSyncCandidate, ModelPriceSyncResponse } from '@/services/api/usageService';
-import { useNotificationStore } from '@/stores';
+import {
+  usageServiceApi,
+  type ModelPriceSyncCandidate,
+  type ModelPriceSyncResponse,
+  type ModelPriceUsageSummaryResponse,
+} from '@/services/api/usageService';
+import { useAuthStore, useNotificationStore } from '@/stores';
 import { useUsageData } from '@/features/monitoring/hooks/useUsageData';
 import {
   applyCandidatePrice,
   buildModelPriceRows,
   buildModelPriceSummary,
   buildPriceFromDraft,
-  buildSyncPriceModelsFromUsage,
+  buildSyncPriceModelsFromSummary,
   createEmptyPriceDraft,
   createPriceDraft,
   filterModelPriceRows,
+  formatContextThreshold,
   formatPriceUnit,
+  formatServiceTierRule,
+  getModelPriceCandidateIdentity,
+  groupModelPriceCandidatesBySource,
+  resolveContextTierDisplayPrice,
+  resolveServiceTierDisplayPrice,
   type ModelPriceFilter,
   type PriceDraft,
 } from '@/features/monitoring/model/modelPricesPageModel';
-import {
-  readModelPricesPageUiState,
-  writeModelPricesPageUiState,
-} from './modelPricesPageUiState';
+import { readModelPricesPageUiState, writeModelPricesPageUiState } from './modelPricesPageUiState';
 import styles from './ModelPricesPage.module.scss';
 
 const FILTERS: ModelPriceFilter[] = ['all', 'missing', 'candidates', 'saved'];
@@ -39,9 +47,12 @@ const resolveErrorMessage = (error: unknown, fallback: string) => {
 export function ModelPricesPage() {
   const { t } = useTranslation();
   const { showNotification } = useNotificationStore();
+  const managementKey = useAuthStore((state) => state.managementKey);
   const featureAvailability = usePanelFeatureAvailability();
-  const { usage, loading, modelPrices, setModelPrices, syncModelPrices, usageServiceAvailable } =
-    useUsageData();
+  const { loading, modelPrices, setModelPrices, syncModelPrices, usageServiceAvailable } =
+    useUsageData({ loadUsageEvents: false });
+  const [usageSummary, setUsageSummary] = useState<ModelPriceUsageSummaryResponse | null>(null);
+  const [usageSummaryLoading, setUsageSummaryLoading] = useState(false);
   const initialUiState = useRef(readModelPricesPageUiState());
   const [search, setSearch] = useState(() => initialUiState.current.search);
   const [filter, setFilter] = useState<ModelPriceFilter>(() => initialUiState.current.filter);
@@ -50,16 +61,19 @@ export function ModelPricesPage() {
   const [selectedCandidates, setSelectedCandidates] = useState<Record<string, string>>({});
   const [draft, setDraft] = useState<PriceDraft>(() => createEmptyPriceDraft());
   const [manualEditorOpen, setManualEditorOpen] = useState(false);
+  const modelPriceServiceBase = featureAvailability.modelPricesAvailable
+    ? featureAvailability.managerServiceBase
+    : '';
 
   const syncModels = useMemo(
-    () => buildSyncPriceModelsFromUsage(usage, modelPrices),
-    [modelPrices, usage]
+    () => buildSyncPriceModelsFromSummary(usageSummary, modelPrices),
+    [modelPrices, usageSummary]
   );
 
   const candidateSets = useMemo(() => syncResult?.candidates ?? [], [syncResult?.candidates]);
   const rows = useMemo(
-    () => buildModelPriceRows(usage, modelPrices, candidateSets),
-    [candidateSets, modelPrices, usage]
+    () => buildModelPriceRows(usageSummary, modelPrices, candidateSets),
+    [candidateSets, modelPrices, usageSummary]
   );
   const summary = useMemo(() => buildModelPriceSummary(rows), [rows]);
   const visibleRows = useMemo(
@@ -81,6 +95,38 @@ export function ModelPricesPage() {
     writeModelPricesPageUiState({ search, filter });
   }, [filter, search]);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    if (!modelPriceServiceBase) {
+      setUsageSummary(null);
+      setUsageSummaryLoading(false);
+      return () => controller.abort();
+    }
+
+    setUsageSummaryLoading(true);
+    void usageServiceApi
+      .getModelPriceUsageSummary(modelPriceServiceBase, managementKey, controller.signal)
+      .then((response) => {
+        if (!controller.signal.aborted) {
+          setUsageSummary(response);
+        }
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          // Older Manager Server versions do not expose this lightweight endpoint.
+          // Keep saved prices visible without falling back to the large /usage payload.
+          setUsageSummary(null);
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setUsageSummaryLoading(false);
+        }
+      });
+
+    return () => controller.abort();
+  }, [managementKey, modelPriceServiceBase]);
+
   const handleSync = async () => {
     if (syncModels.length === 0) {
       showNotification(t('usage_stats.model_price_sync_no_models'), 'warning');
@@ -95,8 +141,9 @@ export function ModelPricesPage() {
           imported: result.imported,
           candidates: result.candidates?.length ?? 0,
           unmatched: result.unmatched?.length ?? 0,
+          preserved: result.preserved?.length ?? 0,
         }),
-        'success'
+        result.preserved?.length ? 'warning' : 'success'
       );
     } catch (error: unknown) {
       const message = resolveErrorMessage(error, t('common.unknown_error'));
@@ -277,15 +324,35 @@ export function ModelPricesPage() {
               placeholder="0.0000"
               step="0.0001"
             />
-            <Input
-              label={`${t('usage_stats.model_price_cache')} ($/1M)`}
-              className={styles.compactInput}
-              type="number"
-              value={draft.cache}
-              onChange={(event) => setDraftField('cache', event.target.value)}
-              placeholder="0.0000"
-              step="0.0001"
-            />
+            <div style={{ display: 'grid', gap: 8 }}>
+              <Input
+                label={`${t('usage_stats.model_price_cache')} ($/1M)`}
+                className={styles.compactInput}
+                type="number"
+                value={draft.cache}
+                onChange={(event) => setDraftField('cache', event.target.value)}
+                placeholder="0.0000"
+                step="0.0001"
+              />
+              <Input
+                label={`${t('usage_stats.model_price_cache_read')} ($/1M)`}
+                className={styles.compactInput}
+                type="number"
+                value={draft.cacheRead}
+                onChange={(event) => setDraftField('cacheRead', event.target.value)}
+                placeholder={t('model_prices.optional_price_placeholder')}
+                step="0.0001"
+              />
+              <Input
+                label={`${t('usage_stats.model_price_cache_creation')} ($/1M)`}
+                className={styles.compactInput}
+                type="number"
+                value={draft.cacheCreation}
+                onChange={(event) => setDraftField('cacheCreation', event.target.value)}
+                placeholder={t('model_prices.optional_price_placeholder')}
+                step="0.0001"
+              />
+            </div>
             <div className={styles.compactEditorActions}>
               <Button
                 size="xs"
@@ -300,10 +367,21 @@ export function ModelPricesPage() {
                 {t('common.save')}
               </Button>
             </div>
+            {(modelPrices[draft.model.trim()]?.contextTiers?.length ?? 0) +
+              (modelPrices[draft.model.trim()]?.serviceTiers?.length ?? 0) >
+            0 ? (
+              <div className={styles.tierClearNotice}>
+                {t('model_prices.manual_clears_pricing_rules', {
+                  count:
+                    (modelPrices[draft.model.trim()]?.contextTiers?.length ?? 0) +
+                    (modelPrices[draft.model.trim()]?.serviceTiers?.length ?? 0),
+                })}
+              </div>
+            ) : null}
           </div>
         ) : null}
 
-        {loading ? (
+        {loading || usageSummaryLoading ? (
           <div className={styles.emptyState}>{t('common.loading')}</div>
         ) : visibleRows.length === 0 ? (
           <div className={styles.emptyState}>{t('model_prices.empty')}</div>
@@ -317,6 +395,9 @@ export function ModelPricesPage() {
                   <th>{t('usage_stats.model_price_prompt')}</th>
                   <th>{t('usage_stats.model_price_completion')}</th>
                   <th>{t('usage_stats.model_price_cache')}</th>
+                  <th>{t('usage_stats.model_price_cache_read')}</th>
+                  <th>{t('usage_stats.model_price_cache_creation')}</th>
+                  <th>{t('model_prices.pricing_rules')}</th>
                   <th>{t('model_prices.source')}</th>
                   <th>{t('common.action')}</th>
                 </tr>
@@ -326,11 +407,19 @@ export function ModelPricesPage() {
                   const candidates =
                     candidateSets.find((candidateSet) => candidateSet.model === row.model)
                       ?.candidates ?? [];
-                  const selectedSource =
-                    selectedCandidates[row.model] || candidates[0]?.sourceModelId || '';
+                  const candidateGroups = groupModelPriceCandidatesBySource(candidates);
+                  const requestedCandidateIdentity = selectedCandidates[row.model] || '';
                   const selectedCandidate =
-                    candidates.find((candidate) => candidate.sourceModelId === selectedSource) ??
+                    candidates.find(
+                      (candidate) =>
+                        getModelPriceCandidateIdentity(candidate) === requestedCandidateIdentity
+                    ) ??
                     candidates[0];
+                  const selectedCandidateIdentity = selectedCandidate
+                    ? getModelPriceCandidateIdentity(selectedCandidate)
+                    : '';
+                  const contextTiers = row.price?.contextTiers ?? [];
+                  const serviceTiers = row.price?.serviceTiers ?? [];
 
                   return (
                     <tr key={row.model}>
@@ -348,6 +437,54 @@ export function ModelPricesPage() {
                       <td>{formatPriceUnit(row.price?.prompt)}</td>
                       <td>{formatPriceUnit(row.price?.completion)}</td>
                       <td>{formatPriceUnit(row.price?.cache)}</td>
+                      <td>{formatPriceUnit(row.price?.cacheRead)}</td>
+                      <td>{formatPriceUnit(row.price?.cacheCreation)}</td>
+                      <td className={styles.tierCell}>
+                        {contextTiers.length > 0 || serviceTiers.length > 0 ? (
+                          <div className={styles.tierList}>
+                            {contextTiers.map((tier) => {
+                              const effectivePrice = resolveContextTierDisplayPrice(
+                                row.price,
+                                tier
+                              );
+                              return (
+                                <span
+                                  key={tier.thresholdTokens}
+                                  className={styles.tierBadge}
+                                  title={`${t('usage_stats.model_price_prompt')}: ${formatPriceUnit(effectivePrice.prompt)} · ${t('usage_stats.model_price_completion')}: ${formatPriceUnit(effectivePrice.completion)}`}
+                                >
+                                  <strong>{`>${formatContextThreshold(tier.thresholdTokens)}`}</strong>
+                                  <small>
+                                    {formatPriceUnit(effectivePrice.prompt)} /{' '}
+                                    {formatPriceUnit(effectivePrice.completion)}
+                                  </small>
+                                </span>
+                              );
+                            })}
+                            {serviceTiers.map((tier) => {
+                              const effectivePrice = resolveServiceTierDisplayPrice(
+                                row.price,
+                                tier
+                              );
+                              return (
+                                <span
+                                  key={`${tier.mode}:${tier.serviceTier}`}
+                                  className={styles.tierBadge}
+                                  title={`${t('usage_stats.model_price_prompt')}: ${formatPriceUnit(effectivePrice.prompt)} · ${t('usage_stats.model_price_completion')}: ${formatPriceUnit(effectivePrice.completion)}`}
+                                >
+                                  <strong>{formatServiceTierRule(tier)}</strong>
+                                  <small>
+                                    {formatPriceUnit(effectivePrice.prompt)} /{' '}
+                                    {formatPriceUnit(effectivePrice.completion)}
+                                  </small>
+                                </span>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <span className={styles.sourcePlaceholder}>--</span>
+                        )}
+                      </td>
                       <td className={styles.sourceCell}>
                         {row.price ? (
                           <div className={styles.sourceContent}>
@@ -399,7 +536,7 @@ export function ModelPricesPage() {
                           ) : candidates.length > 0 && selectedCandidate ? (
                             <div className={styles.candidateControl}>
                               <select
-                                value={selectedSource}
+                                value={selectedCandidateIdentity}
                                 onChange={(event) =>
                                   setSelectedCandidates((previous) => ({
                                     ...previous,
@@ -408,13 +545,17 @@ export function ModelPricesPage() {
                                 }
                                 aria-label={t('model_prices.candidate_select')}
                               >
-                                {candidates.map((candidate) => (
-                                  <option
-                                    key={candidate.sourceModelId}
-                                    value={candidate.sourceModelId}
-                                  >
-                                    {`${candidate.price.source || 'sync'} · ${candidate.sourceModelId} · ${Math.round(candidate.score * 100)}%`}
-                                  </option>
+                                {candidateGroups.map((group) => (
+                                  <optgroup key={group.source} label={group.source}>
+                                    {group.candidates.map((candidate) => {
+                                      const identity = getModelPriceCandidateIdentity(candidate);
+                                      return (
+                                        <option key={identity} value={identity}>
+                                          {`${candidate.sourceModelId} · ${Math.round(candidate.score * 100)}%`}
+                                        </option>
+                                      );
+                                    })}
+                                  </optgroup>
                                 ))}
                               </select>
                               <button

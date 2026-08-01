@@ -2,14 +2,15 @@
 
 Use this guide when migrating from the old `seakee/cpa-manager` / CPA-Manager project to `seakee/cpa-manager-plus`. The goal is to keep historical request statistics, model prices, API Key aliases, and saved CPA connection configuration.
 
+If you never used the old `seakee/cpa-manager`, skip this page and use [Quick Start](../guide/getting-started.md).
+
 ## Key Changes
 
 - The image name changed from `seakee/cpa-manager` to `seakee/cpa-manager-plus`.
 - Native packages and binaries changed from `cpa-manager` to `cpa-manager-plus`.
-- The backend directory changed from the old project's `usage-service` to `apps/manager-server`; compatibility endpoints under `/usage-service/*` are still kept.
 - Full Docker login changed from CPA Management Key to the Manager Server admin key `cpamp_...`.
 - The CPA Management Key is encrypted with `/data/data.key` before being saved to SQLite.
-- Old `settings.setup` data is migrated to `settings.manager_config_v1` and kept as compatibility data.
+- Existing data receives the required compatibility migration during the first startup.
 
 ## Before Migration
 
@@ -48,13 +49,13 @@ services:
     image: seakee/cpa-manager-plus:latest
     restart: unless-stopped
     ports:
-      - "18317:18317"
+      - '18317:18317'
     environment:
-      HTTP_ADDR: "0.0.0.0:18317"
-      USAGE_DB_PATH: "/data/usage.sqlite"
-      CPA_MANAGER_DATA_KEY_PATH: "/data/data.key"
-      CPA_MANAGER_ADMIN_KEY: "replace-with-a-long-random-admin-key"
-      USAGE_COLLECTOR_MODE: "auto"
+      HTTP_ADDR: '0.0.0.0:18317'
+      USAGE_DB_PATH: '/data/usage.sqlite'
+      CPA_MANAGER_DATA_KEY_PATH: '/data/data.key'
+      CPA_MANAGER_ADMIN_KEY: 'replace-with-a-long-random-admin-key'
+      USAGE_COLLECTOR_MODE: 'auto'
     volumes:
       - cpa-manager-data:/data
 

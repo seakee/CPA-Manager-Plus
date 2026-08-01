@@ -177,6 +177,7 @@ describe('useMonitoringAnalytics', () => {
     });
 
     expect(getAnalyticsMock).toHaveBeenCalledTimes(2);
+    expect((getAnalyticsMock.mock.calls[0]?.[3] as AbortSignal | undefined)?.aborted).toBe(true);
     expect(getAnalyticsMock.mock.calls[1]?.[2]).toEqual({
       from_ms: 2,
       to_ms: 20_000,

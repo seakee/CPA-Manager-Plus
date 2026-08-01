@@ -2,14 +2,15 @@
 
 本文面向从旧 `seakee/cpa-manager` / CPA-Manager 项目迁移到 `seakee/cpa-manager-plus` 的用户。目标是保留历史请求统计、模型价格、API 密钥别名和已保存的 CPA 连接配置。
 
+如果你没有使用过旧 `seakee/cpa-manager`，不需要阅读本页，直接使用[快速开始](../guide/getting-started.md)。
+
 ## 关键变化
 
 - 镜像名从 `seakee/cpa-manager` 变为 `seakee/cpa-manager-plus`。
 - 原生包和二进制从 `cpa-manager` 变为 `cpa-manager-plus`。
-- 后端目录从旧项目的 `usage-service` 变为 `apps/manager-server`，兼容端点仍保留 `/usage-service/*`。
 - 完整 Docker 方案的登录凭证从 CPA Management Key 变为 Manager Server 管理员密钥 `cpamp_...`。
 - CPA Management Key 会使用 `/data/data.key` 加密后保存到 SQLite。
-- 旧 `settings.setup` 会迁移到 `settings.manager_config_v1`，并继续保留为兼容数据。
+- 旧数据会在首次启动时自动执行必要的兼容迁移。
 
 ## 迁移前检查
 
@@ -48,13 +49,13 @@ services:
     image: seakee/cpa-manager-plus:latest
     restart: unless-stopped
     ports:
-      - "18317:18317"
+      - '18317:18317'
     environment:
-      HTTP_ADDR: "0.0.0.0:18317"
-      USAGE_DB_PATH: "/data/usage.sqlite"
-      CPA_MANAGER_DATA_KEY_PATH: "/data/data.key"
-      CPA_MANAGER_ADMIN_KEY: "replace-with-a-long-random-admin-key"
-      USAGE_COLLECTOR_MODE: "auto"
+      HTTP_ADDR: '0.0.0.0:18317'
+      USAGE_DB_PATH: '/data/usage.sqlite'
+      CPA_MANAGER_DATA_KEY_PATH: '/data/data.key'
+      CPA_MANAGER_ADMIN_KEY: 'replace-with-a-long-random-admin-key'
+      USAGE_COLLECTOR_MODE: 'auto'
     volumes:
       - cpa-manager-data:/data
 

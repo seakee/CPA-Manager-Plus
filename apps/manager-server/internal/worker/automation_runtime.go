@@ -60,6 +60,13 @@ func (r *AutomationRuntime) Start(ctx context.Context) {
 	r.logState(ctx, "loaded")
 }
 
+func (r *AutomationRuntime) UsageEventHandler() collectorpkg.UsageEventHandler {
+	if r == nil {
+		return nil
+	}
+	return r.handler
+}
+
 func (r *AutomationRuntime) Reload(ctx context.Context) error {
 	if r == nil {
 		return nil

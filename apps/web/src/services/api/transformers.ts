@@ -30,6 +30,11 @@ const normalizeString = (value: unknown): string | undefined => {
   return trimmed ? trimmed : undefined;
 };
 
+const normalizeStringList = (value: unknown): string[] | undefined => {
+  if (!Array.isArray(value)) return undefined;
+  return value.map(normalizeString).filter((item): item is string => Boolean(item));
+};
+
 const normalizeNumber = (value: unknown): number | undefined => {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return value;
@@ -75,6 +80,24 @@ const normalizeModelAliases = (models: unknown): ModelAlias[] => {
       const image = normalizeBoolean(item.image ?? item['image']);
       if (image !== undefined) {
         entry.image = image;
+      }
+      const forceMapping = normalizeBoolean(
+        item['force-mapping'] ?? item.forceMapping ?? item.force_mapping
+      );
+      if (forceMapping !== undefined) {
+        entry.forceMapping = forceMapping;
+      }
+      const inputModalities = normalizeExcludedModels(
+        item['input-modalities'] ?? item.inputModalities ?? item.input_modalities
+      );
+      if (inputModalities.length) {
+        entry.inputModalities = inputModalities;
+      }
+      const outputModalities = normalizeExcludedModels(
+        item['output-modalities'] ?? item.outputModalities ?? item.output_modalities
+      );
+      if (outputModalities.length) {
+        entry.outputModalities = outputModalities;
       }
       const thinking = item.thinking ?? item['thinking'];
       if (isRecord(thinking)) {
@@ -189,6 +212,14 @@ const normalizeProviderKeyConfig = (item: unknown): ProviderKeyConfig | null => 
       record?.experimental_cch_signing
   );
   if (experimentalCchSigning !== undefined) config.experimentalCchSigning = experimentalCchSigning;
+  const rebuildMidSystemMessage = normalizeBoolean(
+    record?.['rebuild-mid-system-message'] ??
+      record?.rebuildMidSystemMessage ??
+      record?.rebuild_mid_system_message
+  );
+  if (rebuildMidSystemMessage !== undefined) {
+    config.rebuildMidSystemMessage = rebuildMidSystemMessage;
+  }
   if (proxyUrl) config.proxyUrl = String(proxyUrl);
   const headers = normalizeHeaders(record?.headers);
   if (headers) config.headers = headers;
@@ -392,6 +423,9 @@ export const normalizeConfigResponse = (raw: unknown): Config => {
     config.clean = {
       baseUrl: normalizeString(clean['base_url'] ?? clean.baseUrl ?? clean['base-url']),
       token: normalizeString(clean.token),
+      targetTypes: normalizeStringList(
+        clean['target_types'] ?? clean.targetTypes ?? clean['target-types']
+      ),
       targetType: normalizeString(clean['target_type'] ?? clean.targetType ?? clean['target-type']),
       workers: normalizeNumber(clean.workers),
       deleteWorkers: normalizeNumber(
@@ -400,6 +434,22 @@ export const normalizeConfigResponse = (raw: unknown): Config => {
       timeout: normalizeNumber(clean.timeout),
       retries: normalizeNumber(clean.retries),
       userAgent: normalizeString(clean['user_agent'] ?? clean.userAgent ?? clean['user-agent']),
+      xaiInferenceUserAgent: normalizeString(
+        clean['xai_inference_user_agent'] ??
+          clean.xaiInferenceUserAgent ??
+          clean['xai-inference-user-agent']
+      ),
+      xaiInferenceEnabled: normalizeBoolean(
+        clean['xai_inference_enabled'] ??
+          clean.xaiInferenceEnabled ??
+          clean['xai-inference-enabled']
+      ),
+      xaiInferenceModel: normalizeString(
+        clean['xai_inference_model'] ?? clean.xaiInferenceModel ?? clean['xai-inference-model']
+      ),
+      xaiInferencePrompt: normalizeString(
+        clean['xai_inference_prompt'] ?? clean.xaiInferencePrompt ?? clean['xai-inference-prompt']
+      ),
       usedPercentThreshold: threshold,
       sampleSize: normalizeNumber(clean['sample_size'] ?? clean.sampleSize ?? clean['sample-size']),
     };
@@ -449,9 +499,24 @@ export const normalizeConfigResponse = (raw: unknown): Config => {
       .filter(Boolean) as GeminiKeyConfig[];
   }
 
+  const interactionsList =
+    raw['interactions-api-key'] ?? raw.interactionsApiKey ?? raw.interactionsApiKeys;
+  if (Array.isArray(interactionsList)) {
+    config.interactionsApiKeys = interactionsList
+      .map((item) => normalizeGeminiKeyConfig(item))
+      .filter(Boolean) as GeminiKeyConfig[];
+  }
+
   const codexList = raw['codex-api-key'] ?? raw.codexApiKey ?? raw.codexApiKeys;
   if (Array.isArray(codexList)) {
     config.codexApiKeys = codexList
+      .map((item) => normalizeProviderKeyConfig(item))
+      .filter(Boolean) as ProviderKeyConfig[];
+  }
+
+  const xaiList = raw['xai-api-key'] ?? raw.xaiApiKey ?? raw.xaiApiKeys;
+  if (Array.isArray(xaiList)) {
+    config.xaiApiKeys = xaiList
       .map((item) => normalizeProviderKeyConfig(item))
       .filter(Boolean) as ProviderKeyConfig[];
   }

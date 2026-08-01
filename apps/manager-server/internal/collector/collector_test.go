@@ -23,6 +23,29 @@ func (h *recordingUsageHandler) HandleUsageEvents(_ context.Context, _ RuntimeCo
 	h.events = append(h.events, events...)
 }
 
+func TestAuthSnapshotResolverStreamsAuthFiles(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/management/auth-files" || r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"files":[{"auth_index":"auth-1","account":"alice@example.com","name":"alice.json","provider":"codex","padding":"`))
+		_, _ = w.Write([]byte(strings.Repeat("x", 1024*1024)))
+		_, _ = w.Write([]byte(`"}]}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	resolver := newAuthSnapshotResolver()
+	resolver.client = upstream.Client()
+	snapshots, err := resolver.fetch(context.Background(), upstream.URL, "management-key")
+	if err != nil {
+		t.Fatalf("fetch snapshots: %v", err)
+	}
+	if snapshot := snapshots["auth-1"]; snapshot.Account != "alice@example.com" || snapshot.FileName != "alice.json" {
+		t.Fatalf("snapshot = %#v", snapshot)
+	}
+}
+
 func TestManagerConsumesHTTPUsageQueue(t *testing.T) {
 	var calls int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -69,3 +69,41 @@ Copy-Item -Recurse .\data .\data.backup
 6. Log in and check configuration, monitoring data, and collector status.
 
 If restore produces decryption errors, first check whether `data.key` matches the SQLite database.
+
+## Move Manager Configuration Without Request History
+
+If the old `usage.sqlite` is large and request history is no longer needed, start the replacement instance with an empty data directory and use the existing Manager configuration API to move the CPA connection, collector, Codex inspection, and External Usage Service settings. This does not copy `usage_events`, rollups, inspection run history, model prices, API Key aliases, or account-processing policy.
+
+Export while the old instance is still reachable:
+
+```bash
+export OLD_CPAMP_URL='http://old-host:18317'
+export OLD_CPAMP_ADMIN_KEY='cpamp_...'
+
+curl -fsS \
+  -H "Authorization: Bearer ${OLD_CPAMP_ADMIN_KEY}" \
+  "${OLD_CPAMP_URL}/usage-service/config" \
+  | jq '{config: .config}' \
+  > manager-config.json
+chmod 600 manager-config.json
+```
+
+`manager-config.json` may contain the CPA Management Key in plaintext. Treat it as a secret, do not commit it, and do not attach it to an issue.
+
+Stop the old instance and start the new instance with an empty data directory. Record the new administrator key generated during first startup, then import the configuration:
+
+```bash
+export NEW_CPAMP_URL='http://new-host:18317'
+export NEW_CPAMP_ADMIN_KEY='cpamp_...'
+
+curl -fsS \
+  -X PUT \
+  -H "Authorization: Bearer ${NEW_CPAMP_ADMIN_KEY}" \
+  -H 'Content-Type: application/json' \
+  --data-binary @manager-config.json \
+  "${NEW_CPAMP_URL}/usage-service/config"
+```
+
+The import validates the CPA Management API. After it succeeds, verify collector status and the related settings, then securely delete the exported file.
+
+If the connection is managed through environment variables or secret files, the API reports `source` as `env` and an import cannot override the connection fields. Move `CPA_UPSTREAM_URL`, `CPA_MANAGEMENT_KEY`, or the matching secret files through the deployment environment instead. Administrator credentials are also outside the Manager configuration export; the new instance uses its newly generated or explicitly configured `CPA_MANAGER_ADMIN_KEY`.

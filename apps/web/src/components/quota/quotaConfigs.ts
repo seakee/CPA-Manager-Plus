@@ -21,9 +21,10 @@ import type {
   XaiQuotaState,
 } from '@/types';
 import type { UsageHeaderSnapshot } from '@/services/api/usageService';
+import { getAuthFileStatusIdentityKey } from '@/utils/authFileStatusMutation';
 import type { AntigravityQuotaData, CodexQuotaData } from '@/utils/quota';
-import { IconInfo } from '@/components/ui/icons';
 import { resetCodexQuota } from '@/services/api/codexQuota';
+import { QuotaInfoTooltip } from '@/components/quota/QuotaInfoTooltip';
 import {
   normalizePlanType,
   resolveCodexChatgptAccountId,
@@ -54,6 +55,7 @@ import {
   hasUsageHeaderQuotaSignal,
 } from '@/utils/usageHeaderSnapshots';
 import { normalizeAuthIndex } from '@/utils/authIndex';
+import { formatXaiBillingDiagnostics } from '@/utils/quota/xaiPresentation';
 import type { QuotaRenderHelpers } from './QuotaCard';
 import styles from '@/features/quota/QuotaPage.module.scss';
 
@@ -533,7 +535,7 @@ const buildCodexQuotaAuthIdentity = (file: AuthFileItem | undefined) => {
   if (!file?.name) return {};
   const authIndex = normalizeAuthIndex(file['auth_index'] ?? file.authIndex ?? file['auth-index']);
   return {
-    authFileKey: `${file.name}::${authIndex ?? '-'}`,
+    authFileKey: getAuthFileStatusIdentityKey(file),
     authFileName: file.name,
     authIndex,
   };
@@ -678,9 +680,22 @@ export const getSortedCodexResetCreditExpiries = (
     .filter((credit): credit is CodexResetCreditExpiryInfo => Boolean(credit))
     .sort((left, right) => left.expiresAtMs - right.expiresAtMs || left.id.localeCompare(right.id));
 
-const formatCodexResetCreditExpiryTime = (expiresAt: string): string => {
+const formatCodexResetCreditExpiryTime = (
+  expiresAt: string,
+  options?: { compact?: boolean }
+): string => {
   const expiresAtMs = new Date(expiresAt).getTime();
   if (!Number.isFinite(expiresAtMs)) return '-';
+  // Compact inline labels omit the year so plan/reset/expiry stay on one row.
+  if (options?.compact) {
+    return new Date(expiresAtMs).toLocaleString(undefined, {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+  }
   return new Date(expiresAtMs).toLocaleString(undefined, {
     year: 'numeric',
     month: '2-digit',
@@ -691,9 +706,6 @@ const formatCodexResetCreditExpiryTime = (expiresAt: string): string => {
   });
 };
 
-const formatCodexTooltipPercent = (value: number | null): string | null =>
-  value === null ? null : `${Math.round(value)}%`;
-
 const renderCodexResetCreditExpiryInfo = (
   quota: CodexQuotaState,
   t: TFunction,
@@ -703,7 +715,16 @@ const renderCodexResetCreditExpiryInfo = (
   if (creditExpiries.length === 0) return null;
 
   const { createElement: h, Fragment } = React;
-  const earliestExpiryLabel = formatCodexResetCreditExpiryTime(creditExpiries[0].expiresAt);
+  const earliestExpiryCompact = formatCodexResetCreditExpiryTime(creditExpiries[0].expiresAt, {
+    compact: true,
+  });
+  const earliestExpiryFull = formatCodexResetCreditExpiryTime(creditExpiries[0].expiresAt);
+  const earliestExpirySummary = t('codex_quota.reset_credits_earliest_expiry', {
+    time: earliestExpiryCompact,
+  });
+  const earliestExpiryTitle = t('codex_quota.reset_credits_earliest_expiry', {
+    time: earliestExpiryFull,
+  });
   const rows = creditExpiries.map((credit, index) => ({
     key: `${credit.id}-${credit.expiresAt}`,
     label: t('codex_quota.reset_credit_expiry_item', { index: index + 1 }),
@@ -715,165 +736,61 @@ const renderCodexResetCreditExpiryInfo = (
     null,
     h(
       'span',
-      { key: 'reset-expiry-summary', className: styleMap.codexResetCreditExpiry },
-      t('codex_quota.reset_credits_earliest_expiry', { time: earliestExpiryLabel })
-    ),
-    h(
-      'span',
       {
-        key: 'reset-expiry-info',
-        className: styleMap.quotaInfoTrigger,
-        tabIndex: 0,
-        'aria-label': t('codex_quota.reset_credits_expiry_label'),
+        key: 'reset-expiry-summary',
+        className: styleMap.codexResetCreditExpiry,
+        title: earliestExpiryTitle,
       },
-      h(IconInfo, {
-        key: 'icon',
-        size: 14,
-        className: styleMap.quotaInfoIcon,
-        'aria-hidden': true,
-        focusable: false,
-      }),
-      h(
-        'span',
-        { key: 'tooltip', className: styleMap.quotaInfoTooltip, role: 'tooltip' },
-        ...rows.map((row) =>
-          h(
-            'span',
-            { key: row.key, className: styleMap.quotaInfoTooltipRow },
-            h('span', { className: styleMap.quotaInfoTooltipLabel }, row.label),
-            h('span', { className: styleMap.quotaInfoTooltipValue }, row.value)
-          )
-        )
-      )
-    )
+      earliestExpirySummary
+    ),
+    h(QuotaInfoTooltip, {
+      key: 'reset-expiry-info',
+      ariaLabel: t('codex_quota.reset_credits_expiry_label'),
+      rows,
+    })
   );
 };
 
 const buildCodexWindowTooltipRows = (
   quota: CodexQuotaState,
-  window: CodexQuotaWindow,
-  windowLabel: string,
-  usedPercent: number | null,
-  remainingPercent: number | null,
   t: TFunction
 ): CodexQuotaTooltipRow[] => {
-  const rows: CodexQuotaTooltipRow[] = [];
-  const usedLabel = formatCodexTooltipPercent(usedPercent);
-  const remainingLabel = formatCodexTooltipPercent(remainingPercent);
+  const fromUsageHeaders = quota.observedFromUsageHeaders === true;
+  const timestampMs = fromUsageHeaders ? quota.observedAtMs : quota.fetchedAtMs;
+  const fetchedAt =
+    timestampMs && Number.isFinite(timestampMs) ? new Date(timestampMs).toLocaleString() : '--';
 
-  if (quota.observedFromUsageHeaders) {
-    rows.push({
+  return [
+    {
       key: 'source',
       label: t('codex_quota.tooltip_source_label'),
-      value: t('codex_quota.tooltip_source_header'),
-    });
-
-    if (quota.observedAtMs && Number.isFinite(quota.observedAtMs)) {
-      rows.push({
-        key: 'recorded-at',
-        label: t('codex_quota.tooltip_recorded_at_label'),
-        value: new Date(quota.observedAtMs).toLocaleString(),
-      });
-    }
-  } else {
-    rows.push({
-      key: 'source',
-      label: t('codex_quota.tooltip_source_label'),
-      value: t('codex_quota.tooltip_source_api'),
-    });
-
-    if (quota.fetchedAtMs && Number.isFinite(quota.fetchedAtMs)) {
-      rows.push({
-        key: 'fetched-at',
-        label: t('codex_quota.tooltip_fetched_at_label'),
-        value: new Date(quota.fetchedAtMs).toLocaleString(),
-      });
-    }
-  }
-
-  if (usedLabel) {
-    rows.push({
-      key: 'used',
-      label: t('codex_quota.tooltip_used_label'),
-      value: usedLabel,
-    });
-  }
-
-  if (remainingLabel) {
-    rows.push({
-      key: 'remaining',
-      label: t('codex_quota.tooltip_remaining_label'),
-      value: remainingLabel,
-    });
-  }
-
-  if (window.resetLabel && window.resetLabel !== '-') {
-    rows.push({
-      key: 'reset',
-      label: t('codex_quota.tooltip_reset_label'),
-      value: window.resetLabel,
-    });
-  }
-
-  return rows.length > 0
-    ? rows
-    : [
-        {
-          key: 'window',
-          label: t('codex_quota.tooltip_window_label'),
-          value: windowLabel,
-        },
-      ];
+      value: fromUsageHeaders
+        ? t('codex_quota.tooltip_source_header')
+        : t('codex_quota.tooltip_source_api'),
+    },
+    {
+      key: 'fetched-at',
+      label: t('codex_quota.tooltip_fetched_at_label'),
+      value: fetchedAt,
+    },
+  ];
 };
 
 const renderCodexWindowInfo = (
   quota: CodexQuotaState,
   window: CodexQuotaWindow,
   windowLabel: string,
-  usedPercent: number | null,
-  remainingPercent: number | null,
-  t: TFunction,
-  styleMap: QuotaRenderHelpers['styles']
+  t: TFunction
 ): ReactNode => {
   if (!CODEX_INFO_WINDOW_IDS.has(window.id)) return null;
 
   const { createElement: h } = React;
-  const rows = buildCodexWindowTooltipRows(
-    quota,
-    window,
-    windowLabel,
-    usedPercent,
-    remainingPercent,
-    t
-  );
+  const rows = buildCodexWindowTooltipRows(quota, t);
 
-  return h(
-    'span',
-    {
-      className: styleMap.quotaInfoTrigger,
-      tabIndex: 0,
-      'aria-label': t('codex_quota.tooltip_label', { label: windowLabel }),
-    },
-    h(IconInfo, {
-      key: 'icon',
-      size: 14,
-      className: styleMap.quotaInfoIcon,
-      'aria-hidden': true,
-      focusable: false,
-    }),
-    h(
-      'span',
-      { key: 'tooltip', className: styleMap.quotaInfoTooltip, role: 'tooltip' },
-      ...rows.map((row) =>
-        h(
-          'span',
-          { key: row.key, className: styleMap.quotaInfoTooltipRow },
-          h('span', { className: styleMap.quotaInfoTooltipLabel }, row.label),
-          h('span', { className: styleMap.quotaInfoTooltipValue }, row.value)
-        )
-      )
-    )
-  );
+  return h(QuotaInfoTooltip, {
+    ariaLabel: t('codex_quota.tooltip_label', { label: windowLabel }),
+    rows,
+  });
 };
 
 const renderCodexItems = (
@@ -949,15 +866,7 @@ const renderCodexItems = (
       const windowLabel = window.labelKey
         ? t(window.labelKey, window.labelParams as Record<string, string | number>)
         : window.label;
-      const infoIcon = renderCodexWindowInfo(
-        quota,
-        window,
-        windowLabel,
-        clampedUsed,
-        remaining,
-        t,
-        styleMap
-      );
+      const infoIcon = renderCodexWindowInfo(quota, window, windowLabel, t);
 
       return h(
         'div',
@@ -1219,7 +1128,6 @@ const renderKimiItems = (
           'div',
           { className: styleMap.quotaMeta },
           h('span', { className: styleMap.quotaPercent }, percentLabel),
-          limit > 0 ? h('span', { className: styleMap.quotaAmount }, `${used} / ${limit}`) : null,
           resetLabel ? h('span', { className: styleMap.quotaReset }, resetLabel) : null
         )
       ),
@@ -1260,6 +1168,36 @@ const formatXaiCurrency = (value: number | null): string => {
   return `$${(value / 100).toFixed(2)}`;
 };
 
+const formatXaiRemainingAmount = (billing: XaiBillingSummary): string => {
+  const remainingCents =
+    billing.monthlyLimitCents !== null && billing.includedUsedCents !== null
+      ? Math.max(0, billing.monthlyLimitCents - billing.includedUsedCents)
+      : null;
+  return `${formatXaiCurrency(remainingCents)} / ${formatXaiCurrency(billing.monthlyLimitCents)}`;
+};
+
+const formatXaiOnDemandAmount = (billing: XaiBillingSummary): string => {
+  const remainingCents =
+    billing.onDemandCapCents !== null && billing.onDemandUsedCents !== null
+      ? Math.max(0, billing.onDemandCapCents - billing.onDemandUsedCents)
+      : null;
+  return `${formatXaiCurrency(remainingCents)} / ${formatXaiCurrency(billing.onDemandCapCents)}`;
+};
+
+const formatXaiPercent = (value: number | null): string => {
+  if (value === null) return '--';
+  return `${Math.round(value)}%`;
+};
+
+const formatXaiPeriodRange = (start?: string, end?: string): string => {
+  const startLabel = formatQuotaResetTime(start);
+  const endLabel = formatQuotaResetTime(end);
+  if (startLabel !== '-' && endLabel !== '-') return `${startLabel} ~ ${endLabel}`;
+  if (endLabel !== '-') return endLabel;
+  if (startLabel !== '-') return startLabel;
+  return '';
+};
+
 const XAI_SUPERGROK_LIMIT_CENTS = 15_000;
 const XAI_SUPERGROK_HEAVY_LIMIT_CENTS = 150_000;
 
@@ -1288,24 +1226,63 @@ const renderXaiItems = (
     return h('div', { className: styleMap.quotaMessage }, t('xai_quota.empty_data'));
   }
 
-  const usedPercent = billing.usedPercent;
-  const clampedUsed = usedPercent === null ? null : Math.max(0, Math.min(100, usedPercent));
+  if (billing.officialApiHealth) {
+    return h(
+      React.Fragment,
+      null,
+      h(
+        'div',
+        { className: styleMap.codexPlan },
+        h('span', { className: styleMap.codexPlanLabel }, t('xai_quota.plan_label')),
+        h('span', { className: styleMap.codexPlanValue }, t('xai_quota.official_api_plan'))
+      ),
+      h('div', { className: styleMap.quotaMessage }, t('xai_quota.official_api_health'))
+    );
+  }
+
+  const clampedUsed =
+    billing.usedPercent === null ? null : Math.max(0, Math.min(100, billing.usedPercent));
   const remaining = clampedUsed === null ? null : Math.max(0, Math.min(100, 100 - clampedUsed));
-  const percentLabel = remaining === null ? '--' : `${Math.round(remaining)}%`;
-  const remainingCents =
-    billing.monthlyLimitCents !== null && billing.usedCents !== null
-      ? Math.max(0, billing.monthlyLimitCents - billing.usedCents)
-      : null;
-  const amountLabel = t('xai_quota.usage_amount', {
-    remaining: formatXaiCurrency(remainingCents),
-    limit: formatXaiCurrency(billing.monthlyLimitCents),
-  });
+  const percentLabel = formatXaiPercent(remaining);
+  const amountLabel = formatXaiRemainingAmount(billing);
   const resetLabel = billing.billingPeriodEnd
     ? formatQuotaResetTime(billing.billingPeriodEnd)
     : t('xai_quota.reset_unknown');
+  const onDemandCap = billing.onDemandCapCents ?? 0;
+  const clampedOnDemandUsed =
+    billing.onDemandUsedPercent === null
+      ? null
+      : Math.max(0, Math.min(100, billing.onDemandUsedPercent));
+  const onDemandRemaining =
+    clampedOnDemandUsed === null ? null : Math.max(0, Math.min(100, 100 - clampedOnDemandUsed));
+  const onDemandPercentLabel = formatXaiPercent(onDemandRemaining);
+  const onDemandAmountLabel = formatXaiOnDemandAmount(billing);
   const plan = resolveXaiPlan(billing.monthlyLimitCents);
+  const weeklyUsed =
+    billing.periodType === 'weekly' && billing.usagePercent !== null
+      ? Math.max(0, Math.min(100, billing.usagePercent))
+      : null;
+  const weeklyRemaining = weeklyUsed === null ? null : Math.max(0, Math.min(100, 100 - weeklyUsed));
+  const weeklyPeriodLabel = formatXaiPeriodRange(billing.periodStart, billing.periodEnd);
+  const weeklyResetLabel = formatQuotaResetTime(billing.periodEnd);
+  const hasWeeklyData =
+    billing.periodType === 'weekly' &&
+    (weeklyUsed !== null || Boolean(billing.periodEnd) || billing.productUsage.length > 0);
+  const hasMonthlyData =
+    billing.monthlyLimitCents !== null ||
+    billing.usedCents !== null ||
+    Boolean(billing.billingPeriodEnd);
 
   const nodes: ReactNode[] = [
+    billing.partial
+      ? h(
+          'div',
+          { key: 'partial-diagnostic', className: styleMap.quotaMessage },
+          t('xai_quota.partial_data', {
+            details: formatXaiBillingDiagnostics(billing.diagnostics, t),
+          })
+        )
+      : null,
     plan
       ? h(
           'div',
@@ -1318,43 +1295,130 @@ const renderXaiItems = (
           )
         )
       : null,
-    h(
-      'div',
-      { key: 'billing', className: styleMap.quotaRow },
-      h(
+    hasWeeklyData
+      ? h(
+          'div',
+          { key: 'weekly-limit', className: styleMap.quotaRow },
+          h(
+            'div',
+            { className: styleMap.quotaRowHeader },
+            h('span', { className: styleMap.quotaModel }, t('xai_quota.weekly_limit')),
+            h(
+              'div',
+              { className: styleMap.quotaMeta },
+              h(
+                'span',
+                { className: styleMap.quotaPercent },
+                t('xai_quota.used_percent', {
+                  percent: formatXaiPercent(weeklyUsed),
+                })
+              ),
+              weeklyPeriodLabel
+                ? h('span', { className: styleMap.quotaAmount }, weeklyPeriodLabel)
+                : null,
+              weeklyResetLabel !== '-'
+                ? h(
+                    'span',
+                    { className: styleMap.quotaReset },
+                    t('xai_quota.reset_at', {
+                      time: weeklyResetLabel,
+                    })
+                  )
+                : null
+            )
+          ),
+          h(QuotaProgressBar, {
+            percent: weeklyRemaining,
+            highThreshold: QUOTA_PROGRESS_HIGH_THRESHOLD,
+            mediumThreshold: QUOTA_PROGRESS_MEDIUM_THRESHOLD,
+          })
+        )
+      : null,
+    ...billing.productUsage.map((item, index) => {
+      const used =
+        item.usagePercent === null ? null : Math.max(0, Math.min(100, item.usagePercent));
+      const remainingPercent = used === null ? null : Math.max(0, Math.min(100, 100 - used));
+      return h(
         'div',
-        { className: styleMap.quotaRowHeader },
-        h('span', { className: styleMap.quotaModel }, t('xai_quota.monthly_limit')),
+        { key: `product-${index}-${item.product}`, className: styleMap.quotaRow },
         h(
           'div',
-          { className: styleMap.quotaMeta },
-          h('span', { className: styleMap.quotaPercent }, percentLabel),
-          h('span', { className: styleMap.quotaAmount }, amountLabel),
-          h('span', { className: styleMap.quotaReset }, resetLabel)
+          { className: styleMap.quotaRowHeader },
+          h(
+            'span',
+            { className: styleMap.quotaModel },
+            t('xai_quota.product_usage', { product: item.product })
+          ),
+          h(
+            'div',
+            { className: styleMap.quotaMeta },
+            h(
+              'span',
+              { className: styleMap.quotaPercent },
+              t('xai_quota.used_percent', {
+                percent: formatXaiPercent(used),
+              })
+            )
+          )
+        ),
+        h(QuotaProgressBar, {
+          percent: remainingPercent,
+          highThreshold: QUOTA_PROGRESS_HIGH_THRESHOLD,
+          mediumThreshold: QUOTA_PROGRESS_MEDIUM_THRESHOLD,
+        })
+      );
+    }),
+    onDemandCap > 0
+      ? h(
+          'div',
+          { key: 'pay-as-you-go', className: styleMap.quotaRow },
+          h(
+            'div',
+            { className: styleMap.quotaRowHeader },
+            h('span', { className: styleMap.quotaModel }, t('xai_quota.pay_as_you_go_label')),
+            h(
+              'div',
+              { className: styleMap.quotaMeta },
+              h('span', { className: styleMap.quotaPercent }, onDemandPercentLabel),
+              h('span', { className: styleMap.quotaAmount }, onDemandAmountLabel)
+            )
+          ),
+          h(QuotaProgressBar, {
+            percent: onDemandRemaining,
+            highThreshold: QUOTA_PROGRESS_HIGH_THRESHOLD,
+            mediumThreshold: QUOTA_PROGRESS_MEDIUM_THRESHOLD,
+          })
         )
-      ),
-      h(QuotaProgressBar, {
-        percent: remaining,
-        highThreshold: QUOTA_PROGRESS_HIGH_THRESHOLD,
-        mediumThreshold: QUOTA_PROGRESS_MEDIUM_THRESHOLD,
-      })
-    ),
+      : h(
+          'div',
+          { key: 'pay-as-you-go', className: styleMap.codexPlan },
+          h('span', { className: styleMap.codexPlanLabel }, t('xai_quota.pay_as_you_go_label')),
+          h('span', { className: styleMap.codexPlanValue }, t('xai_quota.pay_as_you_go_disabled'))
+        ),
+    hasMonthlyData
+      ? h(
+          'div',
+          { key: 'billing', className: styleMap.quotaRow },
+          h(
+            'div',
+            { className: styleMap.quotaRowHeader },
+            h('span', { className: styleMap.quotaModel }, t('xai_quota.monthly_credits')),
+            h(
+              'div',
+              { className: styleMap.quotaMeta },
+              h('span', { className: styleMap.quotaPercent }, percentLabel),
+              h('span', { className: styleMap.quotaAmount }, amountLabel),
+              h('span', { className: styleMap.quotaReset }, resetLabel)
+            )
+          ),
+          h(QuotaProgressBar, {
+            percent: remaining,
+            highThreshold: QUOTA_PROGRESS_HIGH_THRESHOLD,
+            mediumThreshold: QUOTA_PROGRESS_MEDIUM_THRESHOLD,
+          })
+        )
+      : null,
   ];
-
-  if (billing.onDemandCapCents !== null) {
-    nodes.push(
-      h(
-        'div',
-        { key: 'on-demand-cap', className: styleMap.codexPlan },
-        h('span', { className: styleMap.codexPlanLabel }, t('xai_quota.on_demand_cap')),
-        h(
-          'span',
-          { className: styleMap.codexPlanValue },
-          formatXaiCurrency(billing.onDemandCapCents)
-        )
-      )
-    );
-  }
 
   return h(React.Fragment, null, ...nodes);
 };

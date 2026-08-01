@@ -41,6 +41,11 @@ vi.mock('@/utils/quota', async (importOriginal) => {
 });
 
 vi.mock('@/stores', () => ({
+  captureQuotaCacheGeneration: () => 0,
+  commitIfQuotaCacheCurrent: (_generation: number, commit: () => void) => {
+    commit();
+    return true;
+  },
   useNotificationStore: (selector: (state: unknown) => unknown) =>
     selector({
       showNotification: mocks.showNotification,

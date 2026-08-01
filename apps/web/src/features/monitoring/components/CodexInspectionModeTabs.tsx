@@ -30,11 +30,6 @@ const MODES: ReadonlyArray<{
 export function CodexInspectionModeTabs({ activeMode }: CodexInspectionModeTabsProps) {
   const { t } = useTranslation();
   const availability = usePanelFeatureAvailability();
-  const activeLabel = t(
-    activeMode === 'local'
-      ? 'monitoring.codex_inspection_mode_local'
-      : 'monitoring.codex_inspection_mode_server'
-  );
   const visibleModes = MODES.filter(
     (item) =>
       item.mode === 'local' ||
@@ -64,18 +59,6 @@ export function CodexInspectionModeTabs({ activeMode }: CodexInspectionModeTabsP
           linkComponent={Link}
         />
 
-        <div className={styles.modeSwitchCopy}>
-          <span className={styles.modeSwitchEyebrow}>
-            {t('monitoring.codex_inspection_mode_current', { mode: activeLabel })}
-          </span>
-          <p>
-            {t(
-              activeMode === 'local'
-                ? 'monitoring.codex_inspection_mode_local_desc'
-                : 'monitoring.codex_inspection_mode_server_desc'
-            )}
-          </p>
-        </div>
       </div>
     </section>
   );

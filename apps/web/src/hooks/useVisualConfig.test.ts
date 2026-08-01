@@ -301,4 +301,260 @@ describe('useVisualConfig', () => {
 
     harness.unmount();
   });
+
+  it('round-trips disable-image-generation passthrough without rewriting it', () => {
+    const harness = mountUseVisualConfig();
+    const yaml = ['disable-image-generation: passthrough', 'debug: false', ''].join('\n');
+
+    act(() => {
+      expect(harness.getCurrent().loadVisualValuesFromYaml(yaml).ok).toBe(true);
+    });
+    expect(harness.getCurrent().visualValues.disableImageGeneration).toBe('passthrough');
+
+    act(() => {
+      harness.getCurrent().setVisualValues({ debug: true });
+    });
+    const parsed = parseYaml(harness.getCurrent().applyVisualChangesToYaml(yaml)) as Record<
+      string,
+      unknown
+    >;
+    expect(parsed['disable-image-generation']).toBe('passthrough');
+    expect(parsed.debug).toBe(true);
+
+    harness.unmount();
+  });
+
+  it('applies only dirty visual fields to the latest server YAML', () => {
+    const harness = mountUseVisualConfig();
+    const originalYaml = ['debug: false', 'proxy-url: http://old-proxy.example', ''].join('\n');
+
+    act(() => {
+      expect(harness.getCurrent().loadVisualValuesFromYaml(originalYaml).ok).toBe(true);
+      harness.getCurrent().setVisualValues({ proxyUrl: 'http://localhost:8080' });
+    });
+
+    const latestYaml = ['debug: true', 'proxy-url: http://old-proxy.example', ''].join('\n');
+    const parsed = parseYaml(harness.getCurrent().applyVisualChangesToYaml(latestYaml)) as Record<
+      string,
+      unknown
+    >;
+
+    expect(parsed).toEqual({
+      debug: true,
+      'proxy-url': 'http://localhost:8080',
+    });
+    harness.unmount();
+  });
+
+  it('uses CPA defaults for absent quota and WebSocket auth fields', () => {
+    const harness = mountUseVisualConfig();
+    const yaml = ['host: 127.0.0.1', ''].join('\n');
+
+    act(() => {
+      expect(harness.getCurrent().loadVisualValuesFromYaml(yaml).ok).toBe(true);
+    });
+
+    expect(harness.getCurrent().visualValues.quotaSwitchProject).toBe(false);
+    expect(harness.getCurrent().visualValues.quotaSwitchPreviewModel).toBe(false);
+    expect(harness.getCurrent().visualValues.wsAuth).toBe(true);
+
+    const parsed = parseYaml(harness.getCurrent().applyVisualChangesToYaml(yaml)) as Record<
+      string,
+      unknown
+    >;
+    expect(parsed['quota-exceeded']).toBeUndefined();
+    expect(parsed['ws-auth']).toBeUndefined();
+
+    harness.unmount();
+  });
+
+  it('writes only the quota option explicitly changed from an absent quota block', () => {
+    const harness = mountUseVisualConfig();
+    const yaml = ['host: 127.0.0.1', ''].join('\n');
+
+    act(() => {
+      expect(harness.getCurrent().loadVisualValuesFromYaml(yaml).ok).toBe(true);
+      harness.getCurrent().setVisualValues({ quotaSwitchProject: true });
+    });
+
+    const parsed = parseYaml(harness.getCurrent().applyVisualChangesToYaml(yaml)) as {
+      'quota-exceeded'?: Record<string, unknown>;
+    };
+    expect(parsed['quota-exceeded']).toEqual({ 'switch-project': true });
+
+    harness.unmount();
+  });
+
+  it('writes ws-auth false when the user explicitly disables the CPA default', () => {
+    const harness = mountUseVisualConfig();
+    const yaml = ['host: 127.0.0.1', ''].join('\n');
+
+    act(() => {
+      expect(harness.getCurrent().loadVisualValuesFromYaml(yaml).ok).toBe(true);
+      harness.getCurrent().setVisualValues({ wsAuth: false });
+    });
+
+    const parsed = parseYaml(harness.getCurrent().applyVisualChangesToYaml(yaml)) as Record<
+      string,
+      unknown
+    >;
+    expect(parsed['ws-auth']).toBe(false);
+
+    harness.unmount();
+  });
+
+  it('rejects zero Redis usage retention because CPA normalizes it to 60', () => {
+    const harness = mountUseVisualConfig();
+
+    act(() => {
+      harness.getCurrent().setVisualValues({ redisUsageQueueRetentionSeconds: '0' });
+    });
+
+    expect(
+      harness.getCurrent().visualValidationErrors.redisUsageQueueRetentionSeconds
+    ).toBe('retention_seconds_range');
+    harness.unmount();
+  });
+
+  it('keeps an existing management key unchanged during unrelated visual edits', () => {
+    const harness = mountUseVisualConfig();
+    const hash = '$2a$10$01234567890123456789012345678901234567890123456789012';
+    const yaml = [
+      'remote-management:',
+      `  secret-key: '${hash}'`,
+      '  allow-remote: false',
+      '',
+    ].join('\n');
+
+    act(() => {
+      expect(harness.getCurrent().loadVisualValuesFromYaml(yaml).ok).toBe(true);
+    });
+    expect(harness.getCurrent().visualValues.rmSecretKey).toBe('');
+    expect(harness.getCurrent().visualValues.rmSecretKeyAction).toBe('unchanged');
+    expect(harness.getCurrent().visualValues.rmSecretKeyConfigured).toBe(true);
+
+    act(() => {
+      harness.getCurrent().setVisualValues({ rmAllowRemote: true });
+    });
+    const parsed = parseYaml(harness.getCurrent().applyVisualChangesToYaml(yaml)) as {
+      'remote-management'?: Record<string, unknown>;
+    };
+    expect(parsed['remote-management']?.['secret-key']).toBe(hash);
+    expect(parsed['remote-management']?.['allow-remote']).toBe(true);
+
+    harness.unmount();
+  });
+
+  it('replaces a management key without trimming its bytes', () => {
+    const harness = mountUseVisualConfig();
+    const yaml = ['remote-management:', "  secret-key: '$2a$10$existing'", ''].join('\n');
+
+    act(() => {
+      expect(harness.getCurrent().loadVisualValuesFromYaml(yaml).ok).toBe(true);
+      harness.getCurrent().setVisualValues({
+        rmSecretKey: '  exact key  ',
+        rmSecretKeyAction: 'replace',
+      });
+    });
+
+    const parsed = parseYaml(harness.getCurrent().applyVisualChangesToYaml(yaml)) as {
+      'remote-management'?: Record<string, unknown>;
+    };
+    expect(parsed['remote-management']?.['secret-key']).toBe('  exact key  ');
+
+    harness.unmount();
+  });
+
+  it('does not clear an existing management key through an empty replacement', () => {
+    const harness = mountUseVisualConfig();
+    const hash = '$2a$10$existing';
+    const yaml = ['remote-management:', `  secret-key: '${hash}'`, ''].join('\n');
+
+    act(() => {
+      expect(harness.getCurrent().loadVisualValuesFromYaml(yaml).ok).toBe(true);
+      harness.getCurrent().setVisualValues({
+        rmSecretKey: '',
+        rmSecretKeyAction: 'replace',
+      });
+    });
+
+    const parsed = parseYaml(harness.getCurrent().applyVisualChangesToYaml(yaml)) as {
+      'remote-management'?: Record<string, unknown>;
+    };
+    expect(parsed['remote-management']?.['secret-key']).toBe(hash);
+
+    harness.unmount();
+  });
+
+  it('explicitly clears the management key to disable the Management API', () => {
+    const harness = mountUseVisualConfig();
+    const yaml = ['remote-management:', "  secret-key: '$2a$10$existing'", ''].join('\n');
+
+    act(() => {
+      expect(harness.getCurrent().loadVisualValuesFromYaml(yaml).ok).toBe(true);
+      harness.getCurrent().setVisualValues({ rmSecretKey: '', rmSecretKeyAction: 'clear' });
+    });
+
+    const parsed = parseYaml(harness.getCurrent().applyVisualChangesToYaml(yaml)) as {
+      'remote-management'?: Record<string, unknown>;
+    };
+    expect(parsed['remote-management']?.['secret-key']).toBe('');
+
+    harness.unmount();
+  });
+
+  it('loads and saves the added CPA runtime settings', () => {
+    const harness = mountUseVisualConfig();
+    const yaml = [
+      'pprof:',
+      '  enable: true',
+      '  addr: 127.0.0.1:9316',
+      'save-cooldown-status: true',
+      'transient-error-cooldown-seconds: -1',
+      'disable-claude-cloak-mode: true',
+      'gpt-image-2-base-model: gpt-5.4',
+      'video-result-auth-cache-ttl: 45m',
+      '',
+    ].join('\n');
+
+    act(() => {
+      expect(harness.getCurrent().loadVisualValuesFromYaml(yaml).ok).toBe(true);
+    });
+    expect(harness.getCurrent().visualValues).toEqual(
+      expect.objectContaining({
+        pprofEnable: true,
+        pprofAddr: '127.0.0.1:9316',
+        saveCooldownStatus: true,
+        transientErrorCooldownSeconds: '-1',
+        disableClaudeCloakMode: true,
+        gptImage2BaseModel: 'gpt-5.4',
+        videoResultAuthCacheTtl: '45m',
+      })
+    );
+
+    act(() => {
+      harness.getCurrent().setVisualValues({
+        pprofEnable: false,
+        pprofAddr: '127.0.0.1:8316',
+        saveCooldownStatus: false,
+        transientErrorCooldownSeconds: '15',
+        disableClaudeCloakMode: false,
+        gptImage2BaseModel: 'gpt-5.4-mini',
+        videoResultAuthCacheTtl: '3h',
+      });
+    });
+
+    const parsed = parseYaml(harness.getCurrent().applyVisualChangesToYaml(yaml)) as Record<
+      string,
+      unknown
+    >;
+    expect(parsed.pprof).toEqual({ enable: false, addr: '127.0.0.1:8316' });
+    expect(parsed['save-cooldown-status']).toBe(false);
+    expect(parsed['transient-error-cooldown-seconds']).toBe(15);
+    expect(parsed['disable-claude-cloak-mode']).toBe(false);
+    expect(parsed['gpt-image-2-base-model']).toBe('gpt-5.4-mini');
+    expect(parsed['video-result-auth-cache-ttl']).toBe('3h');
+
+    harness.unmount();
+  });
 });

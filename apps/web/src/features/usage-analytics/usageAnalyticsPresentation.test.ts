@@ -7,6 +7,7 @@ import type {
   UsageTimelinePoint,
 } from './usageAnalyticsModel';
 import {
+  buildCredentialDetailCards,
   buildUsageApiKeySummaryCards,
   buildUsageEntitySummaryCards,
   buildUsageModelSummaryCards,
@@ -110,6 +111,33 @@ describe('usageAnalyticsPresentation', () => {
     });
     expect(cards[4].meta).toContain('usage_analytics.metric_reasoning_tokens');
     expect(cards[7].meta).toContain('usage_analytics.cache_read_rate');
+    expect(cards[7]).toMatchObject({ value: '8.0K', valueTitle: '8,000' });
+  });
+
+  it('shows fine-grained cache buckets in credential detail cache totals', () => {
+    const cards = buildCredentialDetailCards({
+      locale: 'en',
+      row: {
+        id: 'credential-a',
+        label: 'credential-a',
+        requestCount: 10,
+        successCount: 10,
+        failureCount: 0,
+        successRate: 1,
+        totalTokens: 1000,
+        inputTokens: 700,
+        outputTokens: 300,
+        cachedTokens: 0,
+        cacheReadTokens: 80,
+        cacheCreationTokens: 20,
+        estimatedCost: 1,
+        averageLatencyMs: 200,
+        share: 1,
+      },
+      t,
+    });
+
+    expect(cards[3].meta).toBe('usage_analytics.metric_cached_tokens 100');
   });
 
   it('builds trend summary cards from peak buckets and comparison deltas', () => {

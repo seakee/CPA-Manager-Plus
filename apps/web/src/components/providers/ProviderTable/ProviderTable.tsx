@@ -1,8 +1,22 @@
-import type { KeyboardEvent, MouseEvent, ReactNode } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type KeyboardEvent,
+  type MouseEvent,
+  type ReactNode,
+} from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
-import { IconCheck, IconEye, IconPencil, IconTrash2, IconX } from '@/components/ui/icons';
+import {
+  IconCheck,
+  IconEye,
+  IconPencil,
+  IconTrash2,
+  IconX,
+} from '@/components/ui/icons';
 import { ProviderStatusBar } from '../ProviderStatusBar';
 import { getProviderKindIcon, PROVIDER_KIND_LABELS } from './kindMeta';
 import type { ProviderRow } from './rowData';
@@ -19,11 +33,129 @@ interface ProviderTableProps {
   onEdit: (row: ProviderRow) => void;
   onDelete: (row: ProviderRow) => void;
   onToggle: (row: ProviderRow, enabled: boolean) => void;
+  onPriorityChange: (row: ProviderRow, priority: number) => void;
 }
 
 const stopPropagation = (event: MouseEvent) => {
   event.stopPropagation();
 };
+
+const priorityToDraft = (priority: number | undefined) =>
+  Number.isFinite(priority) ? String(Math.trunc(priority ?? 0)) : '';
+
+interface PriorityControlProps {
+  row: ProviderRow;
+  disabled: boolean;
+  editLabel: string;
+  onPriorityChange: (row: ProviderRow, priority: number) => void;
+}
+
+function PriorityControl({
+  row,
+  disabled,
+  editLabel,
+  onPriorityChange,
+}: PriorityControlProps) {
+  const [draft, setDraft] = useState(() => priorityToDraft(row.priority));
+  const [isEditing, setIsEditing] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const skipNextBlurCommitRef = useRef(false);
+  const currentPriority = Number.isFinite(row.priority) ? Math.trunc(row.priority ?? 0) : 0;
+  const displayPriority = priorityToDraft(row.priority) || '—';
+
+  useEffect(() => {
+    if (!isEditing) return;
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, [isEditing]);
+
+  const commitDraft = () => {
+    if (skipNextBlurCommitRef.current) {
+      skipNextBlurCommitRef.current = false;
+      return;
+    }
+
+    const trimmed = draft.trim();
+    if (!trimmed) {
+      setDraft(priorityToDraft(row.priority));
+      setIsEditing(false);
+      return;
+    }
+
+    const parsed = Number(trimmed);
+    if (!Number.isFinite(parsed)) {
+      setDraft(priorityToDraft(row.priority));
+      setIsEditing(false);
+      return;
+    }
+
+    const nextPriority = Math.trunc(parsed);
+    setDraft(String(nextPriority));
+    setIsEditing(false);
+    if (nextPriority !== currentPriority || row.priority === undefined) {
+      onPriorityChange(row, nextPriority);
+    }
+  };
+
+  const startEditing = () => {
+    if (disabled) return;
+    skipNextBlurCommitRef.current = false;
+    setDraft(priorityToDraft(row.priority));
+    setIsEditing(true);
+  };
+
+  const handleInputChange = (event: ChangeEvent<HTMLInputElement>) => {
+    setDraft(event.target.value);
+  };
+
+  const handleInputKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      commitDraft();
+      skipNextBlurCommitRef.current = true;
+      event.currentTarget.blur();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      skipNextBlurCommitRef.current = true;
+      setDraft(priorityToDraft(row.priority));
+      setIsEditing(false);
+      event.currentTarget.blur();
+    }
+  };
+
+  return (
+    <div className={styles.priorityControl} onClick={stopPropagation}>
+      {isEditing ? (
+        <input
+          ref={inputRef}
+          className={styles.priorityInput}
+          type="number"
+          step={1}
+          inputMode="numeric"
+          value={draft}
+          placeholder="—"
+          disabled={disabled}
+          aria-label={editLabel}
+          title={editLabel}
+          onChange={handleInputChange}
+          onBlur={commitDraft}
+          onKeyDown={handleInputKeyDown}
+        />
+      ) : (
+        <button
+          type="button"
+          className={styles.priorityValueButton}
+          disabled={disabled}
+          aria-label={editLabel}
+          title={editLabel}
+          onClick={startEditing}
+        >
+          {displayPriority}
+        </button>
+      )}
+    </div>
+  );
+}
 
 export function ProviderTable({
   rows,
@@ -36,6 +168,7 @@ export function ProviderTable({
   onEdit,
   onDelete,
   onToggle,
+  onPriorityChange,
 }: ProviderTableProps) {
   const { t } = useTranslation();
 
@@ -61,10 +194,10 @@ export function ProviderTable({
         <span role="columnheader">{t('ai_providers.table_col_type')}</span>
         <span role="columnheader">{t('ai_providers.table_col_identity')}</span>
         <span role="columnheader">{t('common.base_url')}</span>
-        <span role="columnheader" className={styles.cellNumeric}>
+        <span role="columnheader" className={styles.cellModelsHeader}>
           {t('ai_providers.table_col_models')}
         </span>
-        <span role="columnheader" className={styles.cellNumeric}>
+        <span role="columnheader" className={styles.cellPriorityHeader}>
           {t('common.priority')}
         </span>
         <span role="columnheader" className={styles.cellRecentHeader}>
@@ -129,7 +262,13 @@ export function ProviderTable({
 
             <div className={`${styles.cellPriority} ${styles.cellNumeric}`} role="cell">
               <span className={styles.cellCaption}>{t('common.priority')}</span>
-              {row.priority ?? '—'}
+              <PriorityControl
+                key={`${row.key}:${row.priority ?? 'unset'}`}
+                row={row}
+                disabled={actionsDisabled}
+                editLabel={t('ai_providers.priority_edit')}
+                onPriorityChange={onPriorityChange}
+              />
             </div>
 
             <div className={styles.cellRecent} role="cell">

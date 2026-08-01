@@ -1,12 +1,19 @@
-# 请求监控
+---
+title: CPA 请求监控与失败诊断
+description: 使用 CPA Manager Plus 按账号、调用方 API Key、Provider、模型、Trace、延迟、缓存和状态筛选持久化请求并分析脱敏失败证据。
+---
+
+# CPA 请求监控与失败诊断
 
 请求监控是排查请求失败的主入口。仪表盘告诉你“出问题了”，请求监控用来查“是哪类请求、哪个账号、哪个模型或哪个调用方出了问题”。
 
 账号处理已经拆到 [账号处理队列](./account-actions.md)。这里先专注于请求事件本身。
 
+打开[请求监控演示](https://seakee.github.io/CPA-Manager-Plus/#/demo/monitoring)可以浏览虚构的账号概览、API Key 汇总和实时请求。
+
 ## 可用条件
 
-请求监控需要 Manager Server 提供采集能力，并且 CPA 用量发布已经开启。CPA 托管面板兼容模式或未绑定 Manager Server 时，用量类功能可能不可用。
+请求监控只在 Manager Server 托管的面板中可用，并且需要开启 CPA 用量发布。CPAMP 轻量面板不连接 Manager Server，也不读取它的 SQLite；需要监控时请打开 `http://<cpamp-host>:18317/management.html`。
 
 如果页面提示请求监控未启用，请先到 [配置中心](./configuration.md) 的 Manager Server 配置里启用请求监控。
 
@@ -39,6 +46,8 @@
 - **延迟和缓存状态**：排查慢请求、缓存缺失或流式响应异常。
 
 筛选结果可以作为下一步分析的入口。成本问题进入 [用量分析](./usage-analytics.md)，认证问题进入 [账号处理队列](./account-actions.md)。
+
+调用方 API Key 默认保持遮罩。只有当前配置中仍然存在并且允许安全读取时，页面才会提供复制操作；历史或已删除密钥不会恢复原值。
 
 ## 监控为空
 

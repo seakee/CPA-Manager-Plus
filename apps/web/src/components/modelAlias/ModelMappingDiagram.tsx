@@ -4,6 +4,7 @@ import type { OAuthModelAliasEntry } from '@/types';
 import { useThemeStore } from '@/stores';
 import { AliasColumn, ProviderColumn, SourceColumn } from './ModelMappingDiagramColumns';
 import { DiagramContextMenu } from './ModelMappingDiagramContextMenu';
+import { hasCaseInsensitiveAliasConflict } from './aliasValidation';
 import {
   AddAliasModal,
   RenameAliasModal,
@@ -458,7 +459,7 @@ export const ModelMappingDiagram = forwardRef<ModelMappingDiagramRef, ModelMappi
       setAddAliasError(t('oauth_model_alias.diagram_please_enter_alias'));
       return;
     }
-    if (aliasNodes.some(a => a.alias === trimmed)) {
+    if (hasCaseInsensitiveAliasConflict(aliasNodes.map((node) => node.alias), trimmed)) {
       setAddAliasError(t('oauth_model_alias.diagram_alias_exists'));
       return;
     }
@@ -483,7 +484,13 @@ export const ModelMappingDiagram = forwardRef<ModelMappingDiagramRef, ModelMappi
       setRenameState(null);
       return;
     }
-    if (aliasNodes.some(a => a.alias === trimmed)) {
+    if (
+      hasCaseInsensitiveAliasConflict(
+        aliasNodes.map((node) => node.alias),
+        trimmed,
+        renameState?.oldAlias
+      )
+    ) {
       setRenameError(t('oauth_model_alias.diagram_alias_exists'));
       return;
     }

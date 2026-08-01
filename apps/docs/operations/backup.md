@@ -69,3 +69,41 @@ Copy-Item -Recurse .\data .\data.backup
 6. 登录后检查配置、监控数据和采集器状态。
 
 如果恢复后出现解密失败，优先检查 `data.key` 是否和 SQLite 匹配。
+
+## 不保留请求历史，只迁移 Manager 配置
+
+如果旧 `usage.sqlite` 很大且请求历史不需要保留，可以让新实例使用空数据目录，然后通过现有 Manager 配置 API 导出和导入 CPA 连接、采集器、Codex 巡检与 External Usage Service 配置。该方式不会复制 `usage_events`、rollup、巡检运行历史、模型价格、API 密钥别名或账号处理策略。
+
+在旧实例仍可访问时导出：
+
+```bash
+export OLD_CPAMP_URL='http://old-host:18317'
+export OLD_CPAMP_ADMIN_KEY='cpamp_...'
+
+curl -fsS \
+  -H "Authorization: Bearer ${OLD_CPAMP_ADMIN_KEY}" \
+  "${OLD_CPAMP_URL}/usage-service/config" \
+  | jq '{config: .config}' \
+  > manager-config.json
+chmod 600 manager-config.json
+```
+
+`manager-config.json` 可能包含明文 CPA Management Key，应按 secret 管理，不要提交到版本库或发送到 Issue。
+
+然后停止旧实例，使用空目录启动新实例。记录新实例首次启动生成的管理员密钥，再导入：
+
+```bash
+export NEW_CPAMP_URL='http://new-host:18317'
+export NEW_CPAMP_ADMIN_KEY='cpamp_...'
+
+curl -fsS \
+  -X PUT \
+  -H "Authorization: Bearer ${NEW_CPAMP_ADMIN_KEY}" \
+  -H 'Content-Type: application/json' \
+  --data-binary @manager-config.json \
+  "${NEW_CPAMP_URL}/usage-service/config"
+```
+
+导入时会校验 CPA Management API；成功后检查采集器状态和相关开关。确认恢复完成后安全删除导出文件。
+
+如果连接配置由环境变量或 secret 文件管理，API 返回的 `source` 为 `env`，连接字段不能通过导入覆盖；应改为迁移部署环境中的 `CPA_UPSTREAM_URL`、`CPA_MANAGEMENT_KEY` 或对应 secret 文件。管理员登录凭证也不属于 Manager 配置导出：新实例使用新生成或显式设置的 `CPA_MANAGER_ADMIN_KEY`。

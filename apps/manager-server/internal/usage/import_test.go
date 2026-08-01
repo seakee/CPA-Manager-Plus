@@ -1,7 +1,12 @@
 package usage
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -85,7 +90,7 @@ func TestParseImportPayloadLegacyUsageExport(t *testing.T) {
 	}
 
 	second := result.Events[1]
-	if second.TotalTokens != 26 || !second.Failed || second.AuthIndex != "auth-2" {
+	if second.TotalTokens != 18 || !second.Failed || second.AuthIndex != "auth-2" {
 		t.Fatalf("second event = %#v", second)
 	}
 
@@ -95,6 +100,64 @@ func TestParseImportPayloadLegacyUsageExport(t *testing.T) {
 	}
 	if again.Events[0].EventHash != first.EventHash || again.Events[1].EventHash != second.EventHash {
 		t.Fatalf("legacy event hashes are not stable")
+	}
+}
+
+func TestImportCacheAccountingUsesStructuredSemantics(t *testing.T) {
+	tests := []struct {
+		name        string
+		payload     string
+		wantMode    string
+		wantInput   int64
+		wantTotal   int64
+		wantUncache int64
+	}{
+		{
+			name:     "openai compat executor beats claude alias",
+			payload:  `{"event_hash":"openai-compat","timestamp_ms":1,"timestamp":"2026-07-15T00:00:00Z","executor_type":"OpenAICompatExecutor","model":"claude-sonnet","tokens":{"input_tokens":100,"cache_read_tokens":20,"cache_creation_tokens":10}}`,
+			wantMode: CacheInputModeIncluded, wantInput: 100, wantTotal: 100, wantUncache: 70,
+		},
+		{
+			name:     "claude executor beats grok alias",
+			payload:  `{"eventHash":"claude-grok","timestampMs":1,"timestamp":"2026-07-15T00:00:00Z","executorType":"ClaudeExecutor","model":"grok-4","tokens":{"inputTokens":100,"cacheReadTokens":20,"cacheCreationTokens":10}}`,
+			wantMode: CacheInputModeSeparate, wantInput: 130, wantTotal: 130, wantUncache: 100,
+		},
+		{
+			name:     "usage object and moonshot provider are included",
+			payload:  `{"event_hash":"moonshot","timestamp_ms":1,"timestamp":"2026-07-15T00:00:00Z","provider":"moonshot","model":"claude-alias","usage":{"input_tokens":100,"cache_read_tokens":20,"cache_creation_tokens":10}}`,
+			wantMode: CacheInputModeIncluded, wantInput: 100, wantTotal: 100, wantUncache: 70,
+		},
+		{
+			name:     "nested explicit mode and total are preserved",
+			payload:  `{"event_hash":"explicit","timestamp_ms":1,"timestamp":"2026-07-15T00:00:00Z","executor_type":"XAIExecutor","model":"grok-4","tokens":{"input_tokens":100,"cache_read_tokens":20,"cache_creation_tokens":10,"cache_input_mode":"separate_from_input","total_tokens":777}}`,
+			wantMode: CacheInputModeSeparate, wantInput: 130, wantTotal: 777, wantUncache: 100,
+		},
+		{
+			name:     "explicit total from preserved raw json is retained",
+			payload:  `{"event_hash":"raw-explicit","timestamp_ms":1,"timestamp":"2026-07-15T00:00:00Z","executor_type":"XAIExecutor","model":"grok-4","tokens":{"input_tokens":100,"cache_read_tokens":20},"raw_json":"{\"tokens\":{\"total_tokens\":888}}"}`,
+			wantMode: CacheInputModeIncluded, wantInput: 100, wantTotal: 888, wantUncache: 80,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := ParseImportPayload([]byte(tt.payload))
+			if err != nil {
+				t.Fatalf("parse import: %v", err)
+			}
+			if len(result.Events) != 1 {
+				t.Fatalf("events = %#v", result.Events)
+			}
+			event := result.Events[0]
+			if event.CacheInputMode != tt.wantMode || event.NormalizedTotalInputTokens != tt.wantInput || event.NormalizedUncachedInputTokens != tt.wantUncache || event.TotalTokens != tt.wantTotal {
+				t.Fatalf("event = %#v", event)
+			}
+			if tt.wantTotal == 777 {
+				hints := RawCacheAccountingHintsFromJSON(event.RawJSON)
+				if hints.ExplicitMode != CacheInputModeSeparate || !hints.HasExplicitTotal || hints.ExplicitTotal != 777 {
+					t.Fatalf("preserved hints = %#v raw=%s", hints, event.RawJSON)
+				}
+			}
+		})
 	}
 }
 
@@ -161,6 +224,272 @@ not-json`
 	if result.Format != ImportFormatJSONL || len(result.Events) != 1 || result.Failed != 1 {
 		t.Fatalf("result = %#v", result)
 	}
+}
+
+func TestStreamImportPayloadBatchesJSONLAndCountsBadLines(t *testing.T) {
+	var payload strings.Builder
+	for index := 0; index < 600; index++ {
+		_, _ = fmt.Fprintf(&payload, `{"event_hash":"stream-%d","timestamp_ms":%d,"timestamp":"2026-01-02T03:04:05Z","model":"gpt-4o","endpoint":"GET /v1/models"}`+"\n", index, index+1)
+		if index == 300 {
+			payload.WriteString("not-json\n")
+		}
+	}
+
+	var batchSizes []int
+	result, err := StreamImportPayload(strings.NewReader(payload.String()), 256, func(events []Event) error {
+		batchSizes = append(batchSizes, len(events))
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("stream import: %v", err)
+	}
+	if result.Format != ImportFormatJSONL || result.Total != 600 || result.Failed != 1 {
+		t.Fatalf("result = %#v", result)
+	}
+	if !reflect.DeepEqual(batchSizes, []int{256, 256, 88}) {
+		t.Fatalf("batch sizes = %#v", batchSizes)
+	}
+}
+
+func TestStreamImportPayloadStreamsTopLevelArray(t *testing.T) {
+	var payload strings.Builder
+	payload.WriteByte('[')
+	for index := 0; index < 300; index++ {
+		if index > 0 {
+			payload.WriteByte(',')
+		}
+		_, _ = fmt.Fprintf(&payload, `{"event_hash":"array-%d","timestamp_ms":%d,"timestamp":"2026-01-02T03:04:05Z","model":"gpt-4o","endpoint":"GET /v1/models"}`, index, index+1)
+	}
+	payload.WriteByte(']')
+
+	var batchSizes []int
+	result, err := StreamImportPayload(strings.NewReader(payload.String()), 256, func(events []Event) error {
+		batchSizes = append(batchSizes, len(events))
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("stream import array: %v", err)
+	}
+	if result.Total != 300 || result.Failed != 0 || !reflect.DeepEqual(batchSizes, []int{256, 44}) {
+		t.Fatalf("result = %#v batches = %#v", result, batchSizes)
+	}
+}
+
+func TestStreamImportPayloadKeepsCompletedBatchesOnLaterConsumerError(t *testing.T) {
+	payload := strings.Repeat(`{"timestamp":"2026-01-02T03:04:05Z","model":"gpt-4o","endpoint":"GET /v1/models"}`+"\n", 600)
+	completed := 0
+	batchCalls := 0
+	result, err := StreamImportPayload(strings.NewReader(payload), 256, func(events []Event) error {
+		batchCalls++
+		if batchCalls == 2 {
+			return errors.New("insert failed")
+		}
+		completed += len(events)
+		return nil
+	})
+	if err == nil || err.Error() != "insert failed" {
+		t.Fatalf("error = %v", err)
+	}
+	if completed != 256 || result.Total != 512 {
+		t.Fatalf("completed = %d result = %#v", completed, result)
+	}
+}
+
+func TestStreamImportPayloadLegacyMatchesExistingParser(t *testing.T) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(legacyUsageExportFixture), &envelope); err != nil {
+		t.Fatalf("decode wrapped fixture: %v", err)
+	}
+	directFixture := string(envelope["usage"])
+	partialFixture := `{
+	  "apis": {
+	    "bad endpoint": 1,
+	    "missing models": {},
+	    "GET /v1/models": {
+	      "models": {
+	        "bad model": 1,
+	        "empty details": {"details": []},
+	        "gpt-test": {
+	          "details": [
+	            null,
+	            {"source": "missing timestamp"},
+	            {"timestamp": "2026-01-02T03:04:05Z", "tokens": {"input_tokens": 1}}
+	          ]
+	        }
+	      }
+	    }
+	  }
+	}`
+
+	for _, test := range []struct {
+		name    string
+		payload string
+	}{
+		{name: "wrapped export", payload: legacyUsageExportFixture},
+		{name: "direct payload", payload: directFixture},
+		{name: "partial records", payload: partialFixture},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			parsed, err := ParseImportPayload([]byte(test.payload))
+			if err != nil {
+				t.Fatalf("parse legacy payload: %v", err)
+			}
+			var streamedEvents []Event
+			streamed, err := StreamImportPayload(bytes.NewReader([]byte(test.payload)), 1, func(events []Event) error {
+				streamedEvents = append(streamedEvents, events...)
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("stream legacy payload: %v", err)
+			}
+			if streamed.Format != parsed.Format || streamed.Total != len(parsed.Events) ||
+				streamed.Failed != parsed.Failed || streamed.Unsupported != parsed.Unsupported ||
+				!reflect.DeepEqual(streamed.Warnings, parsed.Warnings) {
+				t.Fatalf("streamed = %#v parsed = %#v", streamed, parsed)
+			}
+			if len(streamedEvents) != len(parsed.Events) {
+				t.Fatalf("streamed events = %d parsed events = %d", len(streamedEvents), len(parsed.Events))
+			}
+			for index := range parsed.Events {
+				want := parsed.Events[index]
+				got := streamedEvents[index]
+				want.CreatedAtMS = 0
+				got.CreatedAtMS = 0
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("event %d differs\nstreamed: %#v\nparsed:   %#v", index, got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestStreamImportPayloadLegacyDeliversBatchesBeforeSecondPassEOF(t *testing.T) {
+	payload := buildLargeLegacyStreamFixture(600, 1024)
+	reader := &trackingReadSeeker{Reader: bytes.NewReader([]byte(payload)), pass: 1}
+	consumerErr := errors.New("insert failed")
+	batchCalls := 0
+	firstBatchPass := 0
+	firstBatchPosition := int64(0)
+	result, err := StreamImportPayload(reader, 256, func(events []Event) error {
+		batchCalls++
+		if batchCalls == 1 {
+			firstBatchPass = reader.pass
+			firstBatchPosition = reader.position
+		}
+		if batchCalls == 2 {
+			return consumerErr
+		}
+		return nil
+	})
+	if !errors.Is(err, consumerErr) {
+		t.Fatalf("error = %v, want %v", err, consumerErr)
+	}
+	if result.Format != ImportFormatLegacyExport || result.Total != 512 || batchCalls != 2 {
+		t.Fatalf("result = %#v batch calls = %d", result, batchCalls)
+	}
+	if firstBatchPass != 2 {
+		t.Fatalf("first batch pass = %d, want second pass", firstBatchPass)
+	}
+	if firstBatchPosition <= 0 || firstBatchPosition >= int64(len(payload)) {
+		t.Fatalf("first batch position = %d payload size = %d", firstBatchPosition, len(payload))
+	}
+}
+
+func TestStreamImportPayloadKeepsExportedEventPrecedenceOverNestedUsage(t *testing.T) {
+	payload := `{
+	  "event_hash": "exported-event",
+	  "timestamp_ms": 1,
+	  "timestamp": "2026-01-02T03:04:05Z",
+	  "model": "gpt-test",
+	  "usage": {
+	    "apis": {
+	      "GET /v1/models": {
+	        "models": {
+	          "legacy-model": {
+	            "details": [{"timestamp": "2026-01-02T03:04:05Z"}]
+	          }
+	        }
+	      }
+	    }
+	  }
+	}`
+	var events []Event
+	result, err := StreamImportPayload(bytes.NewReader([]byte(payload)), 256, func(batch []Event) error {
+		events = append(events, batch...)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("stream exported event: %v", err)
+	}
+	if result.Format != ImportFormatJSONL || result.Total != 1 || len(events) != 1 ||
+		events[0].EventHash != "exported-event" || events[0].Model != "gpt-test" {
+		t.Fatalf("result = %#v events = %#v", result, events)
+	}
+}
+
+func TestStreamImportPayloadKeepsUsageFieldPrecedenceOverDirectAPIs(t *testing.T) {
+	payload := `{
+	  "usage": {"total_requests": 1},
+	  "apis": {
+	    "GET /v1/models": {
+	      "models": {
+	        "gpt-test": {
+	          "details": [{"timestamp": "2026-01-02T03:04:05Z"}]
+	        }
+	      }
+	    }
+	  }
+	}`
+	result, err := StreamImportPayload(bytes.NewReader([]byte(payload)), 256, func([]Event) error { return nil })
+	if !errors.Is(err, ErrLegacyUsageNoDetails) {
+		t.Fatalf("error = %v result = %#v", err, result)
+	}
+	if result.Format != ImportFormatLegacyExport || result.Total != 0 || result.Unsupported != 1 {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+type trackingReadSeeker struct {
+	*bytes.Reader
+	pass     int
+	position int64
+}
+
+func (r *trackingReadSeeker) Read(buffer []byte) (int, error) {
+	read, err := r.Reader.Read(buffer)
+	r.position += int64(read)
+	return read, err
+}
+
+func (r *trackingReadSeeker) Seek(offset int64, whence int) (int64, error) {
+	position, err := r.Reader.Seek(offset, whence)
+	if err != nil {
+		return 0, err
+	}
+	r.position = position
+	if whence == io.SeekStart && offset == 0 {
+		r.pass++
+	}
+	return position, nil
+}
+
+func buildLargeLegacyStreamFixture(details int, paddingBytes int) string {
+	var payload strings.Builder
+	payload.WriteString(`{"usage":{"apis":{"GET /v1/models":{"models":{"gpt-test":{"details":[`)
+	padding := strings.Repeat("x", paddingBytes)
+	for index := 0; index < details; index++ {
+		if index > 0 {
+			payload.WriteByte(',')
+		}
+		_, _ = fmt.Fprintf(
+			&payload,
+			`{"timestamp":"2026-01-02T03:04:05Z","request_id":"legacy-%d","padding":%q}`,
+			index,
+			padding,
+		)
+	}
+	payload.WriteString(`]}}}}}}`)
+	return payload.String()
 }
 
 func TestParseImportPayloadPreservesAuthProjectIDSnapshot(t *testing.T) {
@@ -308,7 +637,9 @@ func TestNormalizeRawReadsAnthropicCacheUsageFields(t *testing.T) {
 	}
 	if event.InputTokens != 100 || event.OutputTokens != 20 ||
 		event.CachedTokens != 34 || event.CacheReadTokens != 23 ||
-		event.CacheCreationTokens != 11 || event.TotalTokens != 154 {
+		event.CacheCreationTokens != 11 || event.TotalTokens != 154 ||
+		event.CacheInputMode != CacheInputModeSeparate ||
+		event.NormalizedUncachedInputTokens != 100 || event.NormalizedTotalInputTokens != 134 {
 		t.Fatalf("event tokens = %#v", event)
 	}
 
@@ -340,6 +671,97 @@ func TestNormalizeRawReadsAnthropicCacheUsageFieldsAtTopLevel(t *testing.T) {
 	}
 }
 
+func TestNormalizeRawReadsCacheWriteTokenAliases(t *testing.T) {
+	payload := `{
+	  "timestamp": "2026-07-10T00:00:00Z",
+	  "model": "gpt-5.6-sol",
+	  "tokens": {
+	    "input_tokens": 100,
+	    "cache_write_tokens": 17
+	  }
+	}`
+
+	event, err := NormalizeRaw([]byte(payload))
+	if err != nil {
+		t.Fatalf("normalize raw: %v", err)
+	}
+	if event.CacheCreationTokens != 17 {
+		t.Fatalf("cache creation tokens = %d, want 17", event.CacheCreationTokens)
+	}
+}
+
+func TestNormalizeRawHandlesCurrentCPAGPT56QueuePayloadWithoutCacheMode(t *testing.T) {
+	payload := `{
+	  "timestamp": "2026-07-10T00:00:00Z",
+	  "provider": "openai",
+	  "executor_type": "codex",
+	  "model": "gpt-5.6-sol",
+	  "service_tier": "priority",
+	  "request_service_tier": "priority",
+	  "response_service_tier": "default",
+	  "tokens": {
+	    "input_tokens": 100,
+	    "output_tokens": 20,
+	    "cached_tokens": 30,
+	    "cache_read_tokens": 30,
+	    "cache_creation_tokens": 17,
+	    "total_tokens": 120
+	  }
+	}`
+
+	event, err := NormalizeRaw([]byte(payload))
+	if err != nil {
+		t.Fatalf("normalize current CPA payload: %v", err)
+	}
+	if event.CacheInputMode != CacheInputModeIncluded ||
+		event.NormalizedUncachedInputTokens != 53 || event.NormalizedTotalInputTokens != 100 ||
+		event.NormalizedCacheReadTokens != 30 || event.NormalizedCacheCreationTokens != 17 {
+		t.Fatalf("normalized cache accounting = %#v", event)
+	}
+	if event.RequestServiceTier != "priority" || event.ResponseServiceTier != "default" || event.ServiceTier != "priority" {
+		t.Fatalf("service tiers = %q/%q/%q", event.RequestServiceTier, event.ResponseServiceTier, event.ServiceTier)
+	}
+}
+
+func TestNormalizeRawPrefersRequestServiceTierForCodex(t *testing.T) {
+	payload := `{
+	  "timestamp": "2026-07-10T00:00:00Z",
+	  "executor_type": "codex",
+	  "model": "gpt-5.6-sol",
+	  "service_tier": "priority",
+	  "request_service_tier": "priority",
+	  "response_service_tier": "default",
+	  "tokens": {"input_tokens": 1, "total_tokens": 1}
+	}`
+
+	event, err := NormalizeRaw([]byte(payload))
+	if err != nil {
+		t.Fatalf("normalize raw: %v", err)
+	}
+	if event.RequestServiceTier != "priority" || event.ResponseServiceTier != "default" || event.ServiceTier != "priority" {
+		t.Fatalf("service tiers = %q/%q/%q", event.RequestServiceTier, event.ResponseServiceTier, event.ServiceTier)
+	}
+}
+
+func TestNormalizeRawPrefersResponseServiceTierForNonCodex(t *testing.T) {
+	payload := `{
+	  "timestamp": "2026-07-10T00:00:00Z",
+	  "provider": "openai-compatible",
+	  "model": "gpt-5.4",
+	  "request_service_tier": "priority",
+	  "response_service_tier": "default",
+	  "tokens": {"input_tokens": 1, "total_tokens": 1}
+	}`
+
+	event, err := NormalizeRaw([]byte(payload))
+	if err != nil {
+		t.Fatalf("normalize raw: %v", err)
+	}
+	if event.RequestServiceTier != "priority" || event.ResponseServiceTier != "default" || event.ServiceTier != "default" {
+		t.Fatalf("service tiers = %q/%q/%q", event.RequestServiceTier, event.ResponseServiceTier, event.ServiceTier)
+	}
+}
+
 func TestCompatibleCachedTokensDoesNotDoubleCountFineGrainedCache(t *testing.T) {
 	if got := CompatibleCachedTokens(5, 0, 4, 1); got != 0 {
 		t.Fatalf("fully mirrored cached tokens = %d, want 0", got)
@@ -352,7 +774,7 @@ func TestCompatibleCachedTokensDoesNotDoubleCountFineGrainedCache(t *testing.T) 
 	}
 }
 
-func TestNormalizeRawFallbackTotalIncludesFineGrainedCache(t *testing.T) {
+func TestNormalizeRawFallbackTotalAvoidsIncludedCacheDuplication(t *testing.T) {
 	payload := `{
 	  "timestamp": "2026-04-25T00:00:00Z",
 	  "source": "user@example.com",
@@ -371,8 +793,8 @@ func TestNormalizeRawFallbackTotalIncludesFineGrainedCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("normalize fallback total: %v", err)
 	}
-	if event.TotalTokens != 43 {
-		t.Fatalf("total tokens = %d, want 43", event.TotalTokens)
+	if event.TotalTokens != 33 {
+		t.Fatalf("total tokens = %d, want 33", event.TotalTokens)
 	}
 }
 

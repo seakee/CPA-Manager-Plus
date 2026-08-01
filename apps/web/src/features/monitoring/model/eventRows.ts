@@ -2,7 +2,6 @@ import type { CredentialInfo } from '@/types/sourceInfo';
 import { buildSourceInfoMap, resolveSourceDisplay } from '@/utils/sourceResolver';
 import {
   calculateCost,
-  extractTotalTokens,
   normalizeAuthIndex,
   type ModelPrice,
   type UsageDetailWithEndpoint,
@@ -10,6 +9,7 @@ import {
 import { formatApiKeyHashLabel } from './base';
 import { buildSearchText, maskAuthIndex, maskEmailLike, readString } from './base';
 import { sanitizeApiKeyDisplayText, type ApiKeyDisplayInfo } from './apiKeys';
+import { isKeyDisambiguatedLabel } from './sourceDisplay';
 import { buildHourLabel, buildLocalDayKey } from './range';
 import type { MonitoringAuthMeta, MonitoringChannelMeta, MonitoringEventRow } from './types';
 
@@ -65,7 +65,28 @@ export const buildEventRows = (
         detail.auth_provider_snapshot ?? detail.authProviderSnapshot
       );
       const snapshotDisplay = snapshotAccount || snapshotLabel;
-      const sourceLabel = authMeta?.label || snapshotDisplay || sourceMeta.displayName || authIndex;
+      const channelMeta =
+        channelByAuthIndex.get(authIndex) ||
+        (authMeta?.authIndex ? channelByAuthIndex.get(authMeta.authIndex) : undefined);
+      const channelLabel =
+        channelMeta?.name || authMeta?.provider || snapshotProvider || sourceMeta.type || '-';
+      const resolvedSourceName = readString(sourceMeta.displayName);
+      const labelCandidates = authMeta?.label || snapshotLabel || snapshotDisplay;
+      // Prefer multi-key OpenAI-compatible disambiguation (e.g. "kuaileshifu #1") over the
+      // bare provider/auth label so realtime cells match account overview identity.
+      const sourceLabel =
+        (resolvedSourceName &&
+        (isKeyDisambiguatedLabel(resolvedSourceName, channelMeta?.name) ||
+          isKeyDisambiguatedLabel(resolvedSourceName, channelMeta?.host) ||
+          isKeyDisambiguatedLabel(resolvedSourceName, labelCandidates) ||
+          isKeyDisambiguatedLabel(resolvedSourceName, authMeta?.account) ||
+          isKeyDisambiguatedLabel(resolvedSourceName, snapshotAccount))
+          ? resolvedSourceName
+          : '') ||
+        authMeta?.label ||
+        snapshotDisplay ||
+        resolvedSourceName ||
+        authIndex;
       const sourceMasked = maskEmailLike(sourceLabel);
       const account = authMeta?.account || snapshotAccount || sourceLabel;
       const accountMasked = maskEmailLike(account);
@@ -79,11 +100,6 @@ export const buildEventRows = (
         apiKeyDisplay?.masked || apiKeyLabel,
         apiKeyLabel
       );
-      const channelMeta =
-        channelByAuthIndex.get(authIndex) ||
-        (authMeta?.authIndex ? channelByAuthIndex.get(authMeta.authIndex) : undefined);
-      const channelLabel =
-        channelMeta?.name || authMeta?.provider || snapshotProvider || sourceMeta.type || '-';
       const endpoint = readString(detail.__endpoint) || '-';
       const endpointMethod = readString(detail.__endpointMethod) || '-';
       const endpointPath = readString(detail.__endpointPath) || endpoint;
@@ -98,10 +114,11 @@ export const buildEventRows = (
         Math.max(Number(detail.tokens?.cached_tokens) || 0, 0),
         Math.max(Number(detail.tokens?.cache_tokens) || 0, 0)
       );
-      const totalTokens = Math.max(
-        Number(detail.tokens?.total_tokens) || 0,
-        extractTotalTokens(detail)
-      );
+      const explicitTotalTokens = Math.max(Number(detail.tokens?.total_tokens) || 0, 0);
+      const totalTokens =
+        explicitTotalTokens > 0
+          ? explicitTotalTokens
+          : inputTokens + outputTokens + reasoningTokens;
       const latencyMs = toDurationMs(detail.latency_ms);
       const ttftMs = toDurationMs(detail.ttft_ms);
       const tokensPerSecond = calculateOutputTokensPerSecond(outputTokens, latencyMs);
@@ -112,7 +129,16 @@ export const buildEventRows = (
       const sourceKey = sourceMeta.identityKey || `source:${sourceLabel}`;
       const taskKey = `${detail.timestamp}|${sourceKey}|${authIndex}`;
       const reasoningEffort = readString(detail.reasoning_effort ?? detail.reasoningEffort);
-      const serviceTier = readString(detail.service_tier ?? detail.serviceTier);
+      const requestServiceTier = readString(
+        detail.request_service_tier ?? detail.requestServiceTier
+      );
+      const responseServiceTier = readString(
+        detail.response_service_tier ?? detail.responseServiceTier
+      );
+      const serviceTier =
+        requestServiceTier ||
+        readString(detail.service_tier ?? detail.serviceTier) ||
+        responseServiceTier;
       const executorType = readString(detail.executor_type ?? detail.executorType);
       const failStatusCodeRaw = detail.fail_status_code ?? detail.failStatusCode;
       const failStatusCode =
@@ -200,6 +226,8 @@ export const buildEventRows = (
         totalCost,
         reasoningEffort,
         serviceTier,
+        requestServiceTier,
+        responseServiceTier,
         executorType,
         failStatusCode: normalizedFailStatusCode,
         failSummary,
@@ -230,6 +258,8 @@ export const buildEventRows = (
           projectId,
           reasoningEffort,
           serviceTier,
+          requestServiceTier,
+          responseServiceTier,
           executorType,
           normalizedFailStatusCode,
           failSummary,

@@ -30,7 +30,8 @@ import {
   IconTrendingUp,
   IconX,
 } from '@/components/ui/icons';
-import { useThemeStore } from '@/stores';
+import { useNotificationStore, useThemeStore } from '@/stores';
+import { copyToClipboard } from '@/utils/clipboard';
 import {
   buildUsageHeatmapChartData,
   buildModelKeyDistribution,
@@ -45,6 +46,7 @@ import {
   formatHeatmapMetricValue,
   formatLocalDateTime,
   formatMetricValue,
+  getUsageCacheTokens,
   hasUsageData,
   maskApiKeyHash,
   parseDateTimeLocalValue,
@@ -471,7 +473,8 @@ const getApiKeyContributorDisplayLabel = (row: UsageHeatmapContributor) => {
   return label && label.toLowerCase() !== row.key.toLowerCase() ? label : maskApiKeyHash(row.key);
 };
 
-const metricValue = (point: UsageTimelinePoint, key: UsageMetricKey) => point[key];
+const metricValue = (point: UsageTimelinePoint, key: UsageMetricKey) =>
+  key === 'cachedTokens' ? getUsageCacheTokens(point) : point[key];
 
 const getMetricAxisIndex = (axis: (typeof USAGE_METRICS)[number]['axis']) =>
   usageChartAxisKeys[axis];
@@ -1896,7 +1899,7 @@ function TokenStructureChart({ timeline }: { timeline: UsageTimelinePoint[] }) {
         },
         {
           barMaxWidth: 22,
-          data: timeline.map((point) => point.cachedTokens),
+          data: timeline.map((point) => getUsageCacheTokens(point)),
           itemStyle: tokenBarItemStyle,
           name: t('usage_analytics.metric_cached_tokens'),
           stack: 'tokens',
@@ -1938,10 +1941,14 @@ function EntityTrendChart({
   metric,
   series,
   highlightId,
+  loading = false,
+  error = '',
 }: {
   metric: UsageTrendMetricKey;
   series: UsageEntityTrendSeries[];
   highlightId?: string;
+  loading?: boolean;
+  error?: string;
 }) {
   const { t } = useTranslation();
   const chartTheme = useUsageChartTheme();
@@ -2024,6 +2031,25 @@ function EntityTrendChart({
     }),
     [chartTheme, hasHighlight, highlightId, metric, series]
   );
+
+  if (loading) {
+    return (
+      <div className={styles.chartEmptyInline}>
+        <IconRefreshCw size={24} />
+        <span>{t('common.loading')}</span>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className={styles.chartEmptyInline}>
+        <IconX size={24} />
+        <span>{t('usage_analytics.error_title')}</span>
+        <span>{error}</span>
+      </div>
+    );
+  }
 
   if (series.length === 0) {
     return (
@@ -2275,6 +2301,7 @@ function UsageAnalyticsPageInner() {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
   const usage = useUsageAnalytics();
+  const showNotification = useNotificationStore((state) => state.showNotification);
   const chartTheme = useUsageChartTheme();
   const themedUsageMetrics = useMemo(() => getThemedUsageMetrics(chartTheme), [chartTheme]);
   const [selectedMetrics, setSelectedMetrics] =
@@ -2306,6 +2333,10 @@ function UsageAnalyticsPageInner() {
 
   const incomingOptionCache = useMemo<StableUsageOptionCache>(() => {
     const apiKeys = mergeSelectOptions([
+      ...(usage.filterOptions?.api_key_hashes ?? []).map((hash) => ({
+        value: hash,
+        label: resolveUsageApiKeyLabel(hash, usage.apiKeyDisplayMap),
+      })),
       ...(usage.filterOptions?.api_key_stats ?? []).map((row) => {
         const hash = row.api_key_hash || row.id;
         return {
@@ -2321,6 +2352,7 @@ function UsageAnalyticsPageInner() {
 
     return {
       models: buildOptionValues([
+        ...(usage.filterOptions?.models ?? []),
         ...(usage.filterOptions?.model_stats ?? []).map((row) => row.model),
         ...usage.modelRows.map((row) => row.model || row.label),
       ]),
@@ -2340,8 +2372,10 @@ function UsageAnalyticsPageInner() {
     usage.apiKeyDisplayMap,
     usage.apiKeyRows,
     usage.credentialRows,
+    usage.filterOptions?.api_key_hashes,
     usage.filterOptions?.api_key_stats,
     usage.filterOptions?.auth_files,
+    usage.filterOptions?.models,
     usage.filterOptions?.model_stats,
     usage.filterOptions?.providers,
     usage.modelRows,
@@ -2363,6 +2397,16 @@ function UsageAnalyticsPageInner() {
     rememberVisibleOptions();
     usage.setFilters(patch);
   };
+  const handleCopyApiKey = useCallback(
+    async (copyValue: string) => {
+      const copied = await copyToClipboard(copyValue);
+      showNotification(
+        t(copied ? 'notification.link_copied' : 'notification.copy_failed'),
+        copied ? 'success' : 'error'
+      );
+    },
+    [showNotification, t]
+  );
   const buildApiKeyMonitoringUrl = (apiKeyHash: string, status?: UsageAnalyticsStatus) =>
     usage.bounds
       ? buildMonitoringDetailUrl(
@@ -3158,6 +3202,9 @@ function UsageAnalyticsPageInner() {
                 type="apiKey"
                 selectedId={usage.selectedApiKey?.apiKeyHash}
                 onSelect={(row) => usage.setSelectedApiKeyHash(row.apiKeyHash || row.id)}
+                onCopyApiKey={(row) => {
+                  if (row.apiKeyCopyValue) void handleCopyApiKey(row.apiKeyCopyValue);
+                }}
               />
             </div>
             <div className={styles.panel}>
@@ -3281,7 +3328,12 @@ function UsageAnalyticsPageInner() {
                   ))}
                 </div>
               </div>
-              <EntityTrendChart series={usage.credentialTrendSeries} metric={usage.trendMetric} />
+              <EntityTrendChart
+                series={usage.credentialTrendSeries}
+                metric={usage.trendMetric}
+                loading={usage.credentialTrendLoading}
+                error={usage.credentialTrendError}
+              />
             </div>
             {usage.selectedCredential ? (
               <DetailPanel
@@ -3601,11 +3653,13 @@ function RankTable({
   type,
   selectedId,
   onSelect,
+  onCopyApiKey,
 }: {
   rows: UsageRankRow[];
   type: 'model' | 'apiKey' | 'credential';
   selectedId?: string;
   onSelect: (row: UsageRankRow) => void;
+  onCopyApiKey?: (row: UsageRankRow) => void;
 }) {
   const { t } = useTranslation();
   const entityHeader =
@@ -3664,14 +3718,27 @@ function RankTable({
                       <IconModelCluster size={16} />
                     )}
                     {type === 'apiKey' ? getApiKeyRowDisplayLabel(row) : row.label}
-                    {type === 'apiKey' ? <IconCopy size={13} /> : null}
+                    {type === 'apiKey' && row.apiKeyCopyValue && onCopyApiKey ? (
+                      <button
+                        type="button"
+                        className={styles.entityCopyButton}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onCopyApiKey(row);
+                        }}
+                        title={t('common.copy')}
+                        aria-label={t('common.copy')}
+                      >
+                        <IconCopy size={13} />
+                      </button>
+                    ) : null}
                   </span>
                 </td>
                 <td>{compactNumber(row.requestCount)}</td>
                 <td>{compactNumber(row.totalTokens)}</td>
                 <td>{compactNumber(row.inputTokens)}</td>
                 <td>{compactNumber(row.outputTokens)}</td>
-                <td>{compactNumber(row.cachedTokens)}</td>
+                <td>{compactNumber(getUsageCacheTokens(row))}</td>
                 {type !== 'credential' ? (
                   <td>{formatPercent(computeRowCacheHitRate(row))}</td>
                 ) : null}

@@ -24,6 +24,25 @@ describe('source resolver', () => {
     expect(resolved.identityKey).toBe('codex:0');
   });
 
+  it('resolves xAI API key sources independently from xAI OAuth credentials', () => {
+    const sourceInfoMap = buildSourceInfoMap({
+      xaiApiKeys: [
+        {
+          apiKey: 'xai-1234567890abcdef',
+          authIndex: 'xai-api-key-1',
+          prefix: 'Grok API',
+          baseUrl: 'https://api.x.ai/v1',
+        },
+      ],
+    });
+
+    const resolved = resolveSourceDisplay('', 'xai-api-key-1', sourceInfoMap, new Map());
+
+    expect(resolved.displayName).toBe('Grok API');
+    expect(resolved.type).toBe('xai');
+    expect(resolved.identityKey).toBe('xai:0');
+  });
+
   it('keeps shared upstream names when one key is registered under Codex and Claude', () => {
     const sharedKey = 'sk-shared1234567890abcdef';
     const sourceInfoMap = buildSourceInfoMap({
@@ -122,10 +141,7 @@ describe('source resolver', () => {
         {
           name: '',
           baseUrl: 'https://relay.keys.example/v1',
-          apiKeyEntries: [
-            { apiKey: 'sk-openai111111aaaa' },
-            { apiKey: 'sk-openai222222bbbb' },
-          ],
+          apiKeyEntries: [{ apiKey: 'sk-openai111111aaaa' }, { apiKey: 'sk-openai222222bbbb' }],
         },
       ],
     });

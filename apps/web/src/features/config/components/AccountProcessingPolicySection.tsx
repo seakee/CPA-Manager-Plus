@@ -22,7 +22,7 @@ import styles from './AccountProcessingPolicySection.module.scss';
 
 const patchKeyByCapability: Record<AccountPolicyCapabilityKey, keyof AccountProcessingPolicyPatch> =
   {
-    codexQuotaCooldown: 'codexQuotaCooldownEnabled',
+    providerQuotaCooldown: 'codexQuotaCooldownEnabled',
     authIssueQueue: 'authIssueQueueEnabled',
     authIssueAutoDisable: 'authIssueAutoDisableEnabled',
   };

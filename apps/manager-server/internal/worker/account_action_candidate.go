@@ -14,45 +14,67 @@ import (
 	collectorpkg "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/credentialpolicy"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
 
 const accountActionCandidateQueueSize = 256
+const authFileMutationCompensationTimeout = 5 * time.Second
 
 type AccountActionCandidateWorker struct {
-	store *store.Store
-	jobs  chan accountActionCandidate
+	store               *store.Store
+	jobs                chan accountActionCandidate
+	client              *http.Client
+	authFileMutations   *cpaauthfiles.MutationCoordinator
+	compensationTimeout time.Duration
 
 	mu          sync.RWMutex
 	autoDisable bool
 }
 
 type accountActionCandidate struct {
-	BaseURL        string
-	ManagementKey  string
-	FileName       string
-	AuthIndex      string
-	DisplayAccount string
-	AccountID      string
-	AuthLabel      string
-	Provider       string
-	ActionType     string
-	Reason         string
-	EvidenceJSON   string
-	EventHash      string
-	SeenAtMS       int64
+	BaseURL             string
+	ManagementKey       string
+	FileName            string
+	AuthIndex           string
+	DisplayAccount      string
+	AccountSnapshot     string
+	AccountID           string
+	AuthLabel           string
+	Provider            string
+	ActionType          string
+	ReasonCode          string
+	Reason              string
+	AutoDisableEligible bool
+	EvidenceJSON        string
+	EventHash           string
+	SeenAtMS            int64
 }
 
 func NewAccountActionCandidateWorker(st *store.Store, autoDisable ...bool) *AccountActionCandidateWorker {
+	return NewAccountActionCandidateWorkerWithMutationCoordinator(st, nil, autoDisable...)
+}
+
+func NewAccountActionCandidateWorkerWithMutationCoordinator(
+	st *store.Store,
+	coordinator *cpaauthfiles.MutationCoordinator,
+	autoDisable ...bool,
+) *AccountActionCandidateWorker {
 	enabled := false
 	if len(autoDisable) > 0 {
 		enabled = autoDisable[0]
 	}
+	if coordinator == nil {
+		coordinator = cpaauthfiles.NewMutationCoordinator()
+	}
 	return &AccountActionCandidateWorker{
-		store:       st,
-		jobs:        make(chan accountActionCandidate, accountActionCandidateQueueSize),
-		autoDisable: enabled,
+		store:               st,
+		jobs:                make(chan accountActionCandidate, accountActionCandidateQueueSize),
+		client:              http.DefaultClient,
+		authFileMutations:   coordinator,
+		compensationTimeout: authFileMutationCompensationTimeout,
+		autoDisable:         enabled,
 	}
 }
 
@@ -122,16 +144,18 @@ func (w *AccountActionCandidateWorker) handleCandidate(ctx context.Context, cand
 		return
 	}
 	item, err := w.store.UpsertAccountActionCandidate(ctx, model.AccountActionCandidateUpsert{
-		ActionType:        candidate.ActionType,
-		Provider:          candidate.Provider,
-		AuthFileName:      candidate.FileName,
-		AuthIndex:         candidate.AuthIndex,
-		AccountSnapshot:   candidate.DisplayAccount,
-		AccountIDSnapshot: candidate.AccountID,
-		AuthLabel:         candidate.AuthLabel,
-		Reason:            candidate.Reason,
-		EvidenceJSON:      candidate.EvidenceJSON,
-		SeenAtMS:          candidate.SeenAtMS,
+		ActionType:          candidate.ActionType,
+		Provider:            candidate.Provider,
+		AuthFileName:        candidate.FileName,
+		AuthIndex:           candidate.AuthIndex,
+		AccountSnapshot:     candidate.AccountSnapshot,
+		AccountIDSnapshot:   candidate.AccountID,
+		AuthLabel:           candidate.AuthLabel,
+		ReasonCode:          candidate.ReasonCode,
+		Reason:              candidate.Reason,
+		AutoDisableEligible: candidate.AutoDisableEligible,
+		EvidenceJSON:        candidate.EvidenceJSON,
+		SeenAtMS:            candidate.SeenAtMS,
 	})
 	if err != nil {
 		log.Printf("[account-action] failed to upsert pending candidate for auth file %q: %v", candidate.FileName, err)
@@ -145,7 +169,7 @@ func (w *AccountActionCandidateWorker) maybeAutoDisable(ctx context.Context, ite
 	if w == nil || !w.AutoDisableEnabled() {
 		return
 	}
-	if !accountActionAutoDisableEligible(item.ActionType) {
+	if !candidate.AutoDisableEligible {
 		log.Printf("[account-action] auto-disable skipped for pending candidate %d authFile=%q action=%q reason=ineligible_action", item.ID, item.AuthFileName, item.ActionType)
 		return
 	}
@@ -158,14 +182,28 @@ func (w *AccountActionCandidateWorker) maybeAutoDisable(ctx context.Context, ite
 		log.Printf("[account-action] auto-disable skipped for pending candidate %d authFile=%q reason=%s baseURLSet=%t managementKeySet=%t", item.ID, item.AuthFileName, reason, baseURL != "", managementKey != "")
 		return
 	}
-	client := cpaauthfiles.New(nil)
-	current, err := client.Verify(ctx, baseURL, managementKey, cpaauthfiles.Identity{
-		AuthFileName:      item.AuthFileName,
-		AuthIndex:         item.AuthIndex,
-		Provider:          item.Provider,
-		AccountSnapshot:   item.AccountSnapshot,
-		AccountIDSnapshot: item.AccountIDSnapshot,
-	})
+	client := cpaauthfiles.New(w.client)
+	identity, err := accountActionCandidateIdentity(item)
+	if err != nil {
+		reason := "current CPA auth file identity verification failed: " + err.Error()
+		_ = w.store.RecordAccountActionCandidateFailure(ctx, item.ID, reason)
+		log.Printf("[account-action] auto-disable skipped for pending candidate %d authFile=%q reason=identity_verification_failed detail=%v", item.ID, item.AuthFileName, err)
+		return
+	}
+	if w.authFileMutations == nil {
+		reason := cpaauthfiles.ErrMutationCoordinatorUnavailable.Error()
+		_ = w.store.RecordAccountActionCandidateFailure(ctx, item.ID, reason)
+		log.Printf("[account-action] auto-disable skipped for pending candidate %d authFile=%q reason=%s", item.ID, item.AuthFileName, reason)
+		return
+	}
+	releaseMutation, err := w.authFileMutations.Acquire(ctx, identity.AuthFileName)
+	if err != nil {
+		_ = w.store.RecordAccountActionCandidateFailure(ctx, item.ID, err.Error())
+		log.Printf("[account-action] auto-disable coordination failed for pending candidate %d authFile=%q: %v", item.ID, item.AuthFileName, err)
+		return
+	}
+	defer releaseMutation()
+	target, err := client.ResolveVerifiedStatusMutationTarget(ctx, baseURL, managementKey, identity)
 	if err != nil {
 		if errors.Is(err, cpaauthfiles.ErrAuthFileNotFound) || errors.Is(err, cpaauthfiles.ErrIdentityMismatch) {
 			reason := "current CPA auth file identity verification failed: " + err.Error()
@@ -177,29 +215,72 @@ func (w *AccountActionCandidateWorker) maybeAutoDisable(ctx context.Context, ite
 		log.Printf("[account-action] auto-disable verification failed for pending candidate %d authFile=%q: %v", item.ID, item.AuthFileName, err)
 		return
 	}
-	if current.Disabled {
+	if target.File.Disabled {
 		log.Printf("[account-action] auto-disable skipped for pending candidate %d authFile=%q reason=already_disabled", item.ID, item.AuthFileName)
 		return
 	}
-	if err := client.PatchDisabled(ctx, baseURL, managementKey, item.AuthFileName, true, item.AuthIndex); err != nil {
+	if err := client.PatchDisabledTarget(ctx, baseURL, managementKey, target, true); err != nil {
 		_ = w.store.RecordAccountActionCandidateFailure(ctx, item.ID, err.Error())
 		log.Printf("[account-action] auto-disable patch failed for pending candidate %d authFile=%q: %v", item.ID, item.AuthFileName, err)
+		return
+	}
+	if err := w.store.MarkAccountActionCandidateAutoDisabled(ctx, item.ID, time.Now().UnixMilli()); err != nil {
+		rollbackCtx, cancelRollback := detachedAuthFileMutationContext(ctx, w.compensationTimeout)
+		defer cancelRollback()
+		rollbackTarget, rollbackErr := client.ResolveVerifiedStatusMutationTarget(rollbackCtx, baseURL, managementKey, cpaauthfiles.Identity{
+			AuthFileName:      target.File.Name,
+			AuthIndex:         target.File.AuthIndex,
+			Provider:          target.File.Provider,
+			AccountSnapshot:   target.File.AccountSnapshot,
+			AccountIDSnapshot: target.File.AccountID,
+		})
+		if rollbackErr != nil {
+			rollbackErr = fmt.Errorf("revalidate rollback target: %w", rollbackErr)
+		} else {
+			rollbackErr = client.PatchDisabledTarget(rollbackCtx, baseURL, managementKey, rollbackTarget, false)
+		}
+		reason := fmt.Sprintf("auto-disable marker persistence failed: %v", err)
+		if rollbackErr != nil {
+			reason += fmt.Sprintf("; rollback enable failed: %v", rollbackErr)
+		}
+		_ = w.store.RecordAccountActionCandidateFailure(rollbackCtx, item.ID, reason)
+		log.Printf("[account-action] auto-disable patch succeeded but result persistence failed for pending candidate %d authFile=%q rollbackErr=%v: %v", item.ID, item.AuthFileName, rollbackErr, err)
 		return
 	}
 	log.Printf("[account-action] auto-disable patch succeeded for pending candidate %d authFile=%q action=%q", item.ID, item.AuthFileName, item.ActionType)
 }
 
-func accountActionAutoDisableEligible(actionType string) bool {
-	switch actionType {
-	case model.AccountActionTypeDelete, model.AccountActionTypeReauth:
-		return true
-	default:
-		return false
+func detachedAuthFileMutationContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
 	}
+	if timeout <= 0 {
+		timeout = authFileMutationCompensationTimeout
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), timeout)
+}
+
+func accountActionCandidateIdentity(item model.AccountActionCandidate) (cpaauthfiles.Identity, error) {
+	fileName := strings.TrimSpace(item.AuthFileName)
+	accountSnapshot := strings.TrimSpace(item.AccountSnapshot)
+	if accountSnapshot == fileName {
+		accountSnapshot = ""
+	}
+	identity := cpaauthfiles.Identity{
+		AuthFileName:      fileName,
+		AuthIndex:         strings.TrimSpace(item.AuthIndex),
+		Provider:          strings.TrimSpace(item.Provider),
+		AccountSnapshot:   accountSnapshot,
+		AccountIDSnapshot: strings.TrimSpace(item.AccountIDSnapshot),
+	}
+	if identity.AuthIndex == "" && identity.AccountSnapshot == "" && identity.AccountIDSnapshot == "" {
+		return cpaauthfiles.Identity{}, fmt.Errorf("%w: candidate has no stable auth index, account ID, or account snapshot", cpaauthfiles.ErrIdentityMismatch)
+	}
+	return identity, nil
 }
 
 func accountActionCandidateFromEvent(event usage.Event, now time.Time) (accountActionCandidate, bool) {
-	actionType, reason, ok := classifyAccountActionEvent(event)
+	decision, ok := classifyAccountActionEvent(event)
 	if !ok {
 		return accountActionCandidate{}, false
 	}
@@ -213,52 +294,55 @@ func accountActionCandidateFromEvent(event usage.Event, now time.Time) (accountA
 		seenAtMS = now.UnixMilli()
 	}
 	return accountActionCandidate{
-		FileName:       fileName,
-		AuthIndex:      strings.TrimSpace(event.AuthIndex),
-		DisplayAccount: firstNonEmpty(event.AccountSnapshot, event.AuthLabelSnapshot, event.Source, fileName),
-		AccountID:      strings.TrimSpace(event.AuthProjectIDSnapshot),
-		AuthLabel:      event.AuthLabelSnapshot,
-		Provider:       strings.ToLower(strings.TrimSpace(firstNonEmpty(event.Provider, event.AuthProviderSnapshot))),
-		ActionType:     actionType,
-		Reason:         reason,
-		EvidenceJSON:   buildAccountActionEvidenceJSON(event, actionType, reason),
-		EventHash:      event.EventHash,
-		SeenAtMS:       seenAtMS,
+		FileName:            fileName,
+		AuthIndex:           strings.TrimSpace(event.AuthIndex),
+		DisplayAccount:      firstNonEmpty(event.AccountSnapshot, event.AuthLabelSnapshot, event.Source, fileName),
+		AccountSnapshot:     stableEventAccountSnapshot(fileName, event.AccountSnapshot),
+		AccountID:           strings.TrimSpace(event.AuthProjectIDSnapshot),
+		AuthLabel:           event.AuthLabelSnapshot,
+		Provider:            credentialpolicy.NormalizeProvider(firstNonEmpty(event.AuthProviderSnapshot, event.Provider)),
+		ActionType:          decision.Action,
+		ReasonCode:          decision.ReasonCode,
+		Reason:              decision.Reason,
+		AutoDisableEligible: decision.AutoDisableEligible,
+		EvidenceJSON:        buildAccountActionEvidenceJSON(event, decision),
+		EventHash:           event.EventHash,
+		SeenAtMS:            seenAtMS,
 	}, true
 }
 
-func classifyAccountActionEvent(event usage.Event) (string, string, bool) {
+func stableEventAccountSnapshot(fileName string, value string) string {
+	account := strings.TrimSpace(value)
+	if account == "" || account == strings.TrimSpace(fileName) {
+		return ""
+	}
+	return account
+}
+
+func classifyAccountActionEvent(event usage.Event) (credentialpolicy.Decision, bool) {
 	if !event.Failed {
-		return "", "", false
+		return credentialpolicy.Decision{}, false
 	}
 	code, typ := accountActionErrorCodeAndType(event)
-	code = strings.ToLower(strings.TrimSpace(code))
-	typ = strings.ToLower(strings.TrimSpace(typ))
-	text := strings.ToLower(strings.Join([]string{event.FailSummary, code, typ}, "\n"))
+	return credentialpolicy.EvaluateFailure(credentialpolicy.FailureSignal{
+		Provider:    firstNonEmpty(event.AuthProviderSnapshot, event.Provider),
+		StatusCode:  event.FailStatusCode,
+		ErrorCode:   code,
+		ErrorType:   typ,
+		Summary:     event.FailSummary,
+		ShouldRetry: accountActionShouldRetry(event),
+	})
+}
 
-	if event.FailStatusCode == http.StatusPaymentRequired {
-		if strings.Contains(text, "deactivated_workspace") {
-			return model.AccountActionTypeDelete, "Workspace is deactivated; review and delete the stale auth file if appropriate", true
-		}
-		return "", "", false
+func accountActionShouldRetry(event usage.Event) *bool {
+	metadata := event.ResponseMetadata
+	if metadata == nil && event.ResponseMetadataJSON != "" {
+		metadata = usage.ResponseHeaderMetadataFromJSON(event.ResponseMetadataJSON)
 	}
-	if event.FailStatusCode != http.StatusUnauthorized && event.FailStatusCode != http.StatusForbidden {
-		return "", "", false
+	if metadata == nil || metadata.Errors == nil {
+		return nil
 	}
-
-	if strings.Contains(text, "account_deactivated") {
-		return model.AccountActionTypeDelete, "Account is deactivated; review and delete the stale auth file if appropriate", true
-	}
-	if strings.Contains(text, "token_revoked") || strings.Contains(text, "token_invalidated") || strings.Contains(text, "invalidated_oauth_token") || strings.Contains(text, "invalidated oauth token") || strings.Contains(text, "oauth token revoked") {
-		return model.AccountActionTypeReauth, "OAuth token revoked / invalidated; reauthorize the account with OAuth", true
-	}
-	if strings.Contains(text, "invalid_grant") || strings.Contains(text, "reauth") || strings.Contains(text, "auth_unavailable") {
-		return model.AccountActionTypeReauth, "Authentication is unavailable or requires reauthorization", true
-	}
-	if typ == "authentication_error" || strings.Contains(text, "authentication_error") || strings.Contains(text, "unauthorized") || strings.Contains(text, "forbidden") {
-		return model.AccountActionTypeReview, "Authentication failure requires manual review", true
-	}
-	return "", "", false
+	return metadata.Errors.ShouldRetry
 }
 
 func accountActionErrorCodeAndType(event usage.Event) (string, string) {
@@ -327,30 +411,33 @@ func accountActionErrorCodeAndTypeFromJSON(value any) (string, string, bool) {
 	return "", "", false
 }
 
-func buildAccountActionEvidenceJSON(event usage.Event, actionType string, reason string) string {
+func buildAccountActionEvidenceJSON(event usage.Event, decision credentialpolicy.Decision) string {
 	code, typ := accountActionErrorCodeAndType(event)
 	evidence := map[string]any{
-		"eventHash":         event.EventHash,
-		"requestId":         event.RequestID,
-		"timestamp":         event.Timestamp,
-		"timestampMs":       event.TimestampMS,
-		"statusCode":        event.FailStatusCode,
-		"failSummary":       event.FailSummary,
-		"errorCode":         code,
-		"errorType":         typ,
-		"headerErrorKind":   event.HeaderErrorKind,
-		"headerErrorCode":   event.HeaderErrorCode,
-		"headerTraceId":     event.HeaderTraceID,
-		"authIndex":         event.AuthIndex,
-		"authFileName":      event.AuthFileSnapshot,
-		"accountSnapshot":   event.AccountSnapshot,
-		"accountIdSnapshot": event.AuthProjectIDSnapshot,
-		"authLabel":         event.AuthLabelSnapshot,
-		"provider":          firstNonEmpty(event.Provider, event.AuthProviderSnapshot),
-		"model":             event.Model,
-		"endpoint":          event.Endpoint,
-		"actionType":        actionType,
-		"reason":            reason,
+		"eventHash":           event.EventHash,
+		"requestId":           event.RequestID,
+		"timestamp":           event.Timestamp,
+		"timestampMs":         event.TimestampMS,
+		"statusCode":          event.FailStatusCode,
+		"failSummary":         event.FailSummary,
+		"errorCode":           code,
+		"errorType":           typ,
+		"headerErrorKind":     event.HeaderErrorKind,
+		"headerErrorCode":     event.HeaderErrorCode,
+		"headerTraceId":       event.HeaderTraceID,
+		"authIndex":           event.AuthIndex,
+		"authFileName":        event.AuthFileSnapshot,
+		"accountSnapshot":     event.AccountSnapshot,
+		"accountIdSnapshot":   event.AuthProjectIDSnapshot,
+		"authLabel":           event.AuthLabelSnapshot,
+		"provider":            credentialpolicy.NormalizeProvider(firstNonEmpty(event.AuthProviderSnapshot, event.Provider)),
+		"model":               event.Model,
+		"endpoint":            event.Endpoint,
+		"actionType":          decision.Action,
+		"reasonCode":          decision.ReasonCode,
+		"reason":              decision.Reason,
+		"confidence":          decision.Confidence,
+		"autoDisableEligible": decision.AutoDisableEligible,
 	}
 	data, err := json.Marshal(evidence)
 	if err != nil {

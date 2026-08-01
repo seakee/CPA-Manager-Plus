@@ -61,6 +61,26 @@ describe('provider health check model', () => {
     });
   });
 
+  it('builds xAI API key health-check items with xAI identity', () => {
+    const rows = buildProviderRows({
+      gemini: [],
+      codex: [],
+      xai: [{ apiKey: 'xai-key', baseUrl: 'https://api.x.ai/v1' }],
+      claude: [],
+      vertex: [],
+      openai: [],
+      usageByProvider: emptyUsageByProvider,
+    });
+
+    expect(buildProviderHealthCheckItems(rows)).toEqual([
+      expect.objectContaining({
+        providerKind: 'xai',
+        providerLabel: expect.stringContaining('xAI'),
+        providerSubtitle: 'https://api.x.ai/v1',
+      }),
+    ]);
+  });
+
   it('summarizes progress from item statuses', () => {
     const items = [
       { status: 'success' },

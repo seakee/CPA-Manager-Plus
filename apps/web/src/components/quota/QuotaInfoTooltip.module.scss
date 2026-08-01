@@ -1,0 +1,69 @@
+@use '../../styles/variables' as *;
+
+.trigger {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+  cursor: help;
+  outline: none;
+
+  &:hover,
+  &:focus-visible {
+    color: var(--text-secondary);
+  }
+
+  &:focus-visible {
+    border-radius: 50%;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary-color) 24%, transparent);
+  }
+}
+
+.icon {
+  display: block;
+}
+
+.tooltip {
+  position: fixed;
+  z-index: $z-dropdown;
+  display: grid;
+  gap: 4px;
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 8px 10px;
+  overflow-y: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--bg-primary);
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);
+  color: var(--text-primary);
+  font-size: 11px;
+  line-height: 1.45;
+  pointer-events: none;
+  white-space: normal;
+  text-align: left;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+}
+
+.label {
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.value {
+  color: var(--text-primary);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  min-width: 0;
+}

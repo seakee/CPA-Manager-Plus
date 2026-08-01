@@ -40,7 +40,7 @@ describe('buildAccountProcessingPolicyViewModel', () => {
 
     expect(groups).toHaveLength(2);
     expect(groups[0].key).toBe('quota');
-    expect(groups[0].items.map((item) => item.key)).toEqual(['codexQuotaCooldown']);
+    expect(groups[0].items.map((item) => item.key)).toEqual(['providerQuotaCooldown']);
     expect(groups[1].key).toBe('authIssues');
     expect(groups[1].items.map((item) => item.key)).toEqual([
       'authIssueQueue',

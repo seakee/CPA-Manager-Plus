@@ -1,0 +1,8 @@
+.advancedRow {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+  align-items: center;
+  margin: -2px 0 8px;
+  padding-left: 4px;
+}

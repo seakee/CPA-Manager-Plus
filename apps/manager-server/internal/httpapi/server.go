@@ -17,6 +17,7 @@ var embeddedPanel embed.FS
 
 const serviceID = "cpa-manager-plus"
 
+var modelsDevModelPriceSyncURL = "https://models.dev/catalog.json"
 var modelPriceSyncURL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 var openRouterModelPriceSyncURL = "https://openrouter.ai/api/v1/models"
 
@@ -27,12 +28,13 @@ type Server struct {
 
 func New(cfg config.Config, store *store.Store, collector *collector.Manager, automationRuntimeService ...app.AutomationRuntimeService) *Server {
 	startedAt := time.Now().UnixMilli()
-	appCtx := app.FromExisting(
+	appCtx := app.FromExistingWithModelsDev(
 		cfg,
 		store,
 		collector,
 		startedAt,
 		embeddedPanel,
+		&modelsDevModelPriceSyncURL,
 		&modelPriceSyncURL,
 		&openRouterModelPriceSyncURL,
 		serviceID,

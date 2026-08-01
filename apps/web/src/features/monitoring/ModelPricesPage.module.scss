@@ -47,6 +47,16 @@
   min-width: 0;
 }
 
+.tierClearNotice {
+  grid-column: 1 / -1;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--warning-color) 35%, var(--pricing-line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--warning-color) 8%, var(--pricing-surface));
+  color: var(--pricing-muted);
+  font-size: 11px;
+}
+
 .titleGroup {
   flex-wrap: nowrap;
 }
@@ -253,7 +263,7 @@
 
 .priceTable {
   width: 100%;
-  min-width: 980px;
+  min-width: 1220px;
   border-collapse: collapse;
 }
 
@@ -292,6 +302,43 @@
 .sourceCell {
   font-family: var(--font-mono);
   word-break: break-word;
+}
+
+.tierCell {
+  min-width: 220px;
+}
+
+.tierList {
+  display: grid;
+  gap: 4px;
+}
+
+.tierBadge {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  max-width: 100%;
+  padding: 3px 6px;
+  border: 1px solid color-mix(in srgb, var(--pricing-accent) 22%, var(--pricing-line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--pricing-accent) 6%, var(--pricing-surface));
+}
+
+.tierBadge strong {
+  color: var(--pricing-accent-strong);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.tierBadge small {
+  overflow: hidden;
+  color: var(--pricing-muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .modelContent span {

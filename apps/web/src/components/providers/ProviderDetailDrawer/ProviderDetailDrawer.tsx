@@ -65,9 +65,11 @@ export function ProviderDetailDrawer({
 
   const renderQuickSwitches = () => {
     if (!row) return null;
-    const supportsProviderKeySwitches = row.kind === 'codex' || row.kind === 'claude';
+    const supportsProviderKeySwitches =
+      row.kind === 'codex' || row.kind === 'xai' || row.kind === 'claude';
     const showWebsockets =
-      supportsProviderKeySwitches && (row.kind === 'codex' || row.raw.websockets !== undefined);
+      supportsProviderKeySwitches &&
+      (row.kind === 'codex' || row.kind === 'xai' || row.raw.websockets !== undefined);
     const showCloak =
       supportsProviderKeySwitches && (row.kind === 'claude' || row.raw.cloak !== undefined);
     const showDisableCooling = row.kind !== 'vertex';
@@ -137,7 +139,8 @@ export function ProviderDetailDrawer({
   };
 
   const renderCloak = () => {
-    if (!row || row.kind === 'gemini' || row.kind === 'openai') return null;
+    if (!row || row.kind === 'gemini' || row.kind === 'interactions' || row.kind === 'openai')
+      return null;
     const cloak = row.raw.cloak;
     if (!cloak) return null;
 
@@ -214,9 +217,7 @@ export function ProviderDetailDrawer({
       <>
         <section className={styles.section}>
           {!row.enabled && (
-            <div className={styles.disabledBadge}>
-              {t('ai_providers.config_disabled_badge')}
-            </div>
+            <div className={styles.disabledBadge}>{t('ai_providers.config_disabled_badge')}</div>
           )}
           {row.kind !== 'openai' && (
             <FieldRow label={t('common.api_key')} value={maskApiKey(row.raw.apiKey)} />

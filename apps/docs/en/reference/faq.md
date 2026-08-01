@@ -8,26 +8,26 @@ Use the Manager Server-hosted panel for CPAMP analytics:
 http://<host>:18317/management.html
 ```
 
-## Which Deployment Mode Should I Use?
+## Which Usage Option Should I Choose?
 
-| Goal | Recommended mode |
-|---|---|
-| New deployment | Full Docker / Manager Server mode |
-| Request monitoring, historical statistics, model prices, aliases, import/export | Full Docker / Manager Server mode |
-| Keep an existing CPA-port panel without Manager Server analytics | [CPA-hosted panel compatibility mode](../deployment/cpa-panel.md) |
-| No Docker | Native Manager Server mode |
+| Goal                                                                            | Recommended mode                                      |
+| ------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| New deployment requiring all features                                           | CPAMP Full Mode (Docker, recommended)                 |
+| Request monitoring, historical statistics, model prices, aliases, import/export | CPAMP Full Mode                                       |
+| Replace the official UI with a clearer interface and no additional service      | [CPAMP Lightweight Panel](../deployment/cpa-panel.md) |
+| No Docker, but all features are required                                        | CPAMP Full Mode (native package)                      |
 
-The CPA-hosted panel is for preserving an existing CPA-port workflow. It does not configure Manager Server and does not read Manager Server SQLite data. Use Docker or native packages when you need the full CPAMP feature set.
+The CPAMP Lightweight Panel is an enhanced alternative to the official Management Center and is hosted directly by CPA. It does not configure Manager Server or read Manager Server SQLite data. Use Docker or native packages and open `:18317/management.html` for the full CPAMP feature set.
 
 ## Which Address Should I Open?
 
-Full Docker or native Manager Server mode:
+CPAMP Full Mode through Docker or a native package:
 
 ```text
 http://<host>:18317/management.html
 ```
 
-The CPA-hosted panel is usually accessed from the CPA port:
+The CPAMP Lightweight Panel is hosted by CPA and is normally accessed from the CPA port:
 
 ```text
 http://<cpa-host>:8317/management.html
@@ -37,16 +37,16 @@ If you see login instead of setup, Manager Server is already configured. Use the
 
 ## What Is The Difference Between Admin Key And CPA Management Key?
 
-| Place | Key |
-|---|---|
-| CPAMP Full Docker / native login | CPAMP Admin Key, usually starting with `cpamp_...` |
-| CPAMP first setup CPA connection | CPA Management Key |
-| CPA-hosted panel login | CPA Management Key |
-| Normal model API calls | CPA API Key |
-| `GET /v1/models` | CPA API Key |
-| CPAMP Manager Server APIs after setup | CPAMP Admin Key |
+| Place                                 | Key                                                |
+| ------------------------------------- | -------------------------------------------------- |
+| CPAMP Full Docker / native login      | CPAMP Admin Key, usually starting with `cpamp_...` |
+| CPAMP first setup CPA connection      | CPA Management Key                                 |
+| CPAMP Lightweight Panel login         | CPA Management Key                                 |
+| Normal model API calls                | CPA API Key                                        |
+| `GET /v1/models`                      | CPA API Key                                        |
+| CPAMP Manager Server APIs after setup | CPAMP Admin Key                                    |
 
-Do not mix these keys. CPA connections saved through setup or the panel are encrypted with `data.key` and written to SQLite. Installer env/secret-managed connections read the key from the install directory and are not written to SQLite. In the CPA-hosted panel, the browser holds the CPA Management Key.
+Do not mix these keys. CPA connections saved through setup or the panel are encrypted with `data.key` and written to SQLite. Installer env/secret-managed connections read the key from the install directory and are not written to SQLite. In the CPAMP Lightweight Panel, the browser holds the CPA Management Key.
 
 ## Full Docker Opens Login Instead Of Setup
 
@@ -335,11 +335,11 @@ Maximum:
 
 If Manager Server is down longer than the retention window, that period usually cannot be recovered from CPA. Keep Manager Server running continuously.
 
-## CPA-Hosted Panel Is Missing Monitoring Or Model Prices
+## CPAMP Lightweight Panel Is Missing Monitoring Or Model Prices
 
 This is expected.
 
-The CPA-hosted panel does not use Manager Server analytics. Open:
+The CPAMP Lightweight Panel does not use Manager Server analytics and cannot attach to a separate Manager Server. Open:
 
 ```text
 http://<cpamp-host>:18317/management.html
@@ -347,12 +347,13 @@ http://<cpamp-host>:18317/management.html
 
 for monitoring, dashboard analytics, model prices, API key aliases, usage import/export, and server inspection.
 
-## CPA-Hosted Panel Still Shows An Old Panel
+## CPAMP Lightweight Panel Still Shows The Official Or An Older UI
 
 Check that CPA configuration points at this project:
 
-```text
-remote-management.panel-repo = https://github.com/seakee/CPA-Manager-Plus
+```yaml
+remote-management:
+  panel-github-repository: 'https://github.com/seakee/CPA-Manager-Plus'
 ```
 
 If the new panel still does not load, clear CPA's cached panel file and reload or restart CPA:
@@ -373,4 +374,4 @@ No. The live demo uses frontend mock data and does not need CPA, Manager Server,
 
 ## What Is management.html In A Release?
 
-`management.html` is the single-file management panel shipped in release packages. It can be hosted by Manager Server or loaded by the CPA-hosted panel. The online documentation remains on GitHub Pages and is not distributed with install packages.
+`management.html` is the single-file management panel shipped in release packages. Manager Server can host it, or CPA can load it as the CPAMP Lightweight Panel. The online documentation remains on GitHub Pages and is not distributed with install packages.

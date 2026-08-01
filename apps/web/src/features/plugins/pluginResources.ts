@@ -78,6 +78,7 @@ export const isOfficialRepository = (repository: string): boolean =>
   buildRepositoryURL(repository).toLowerCase().startsWith(OFFICIAL_PLUGIN_REPO_PREFIX);
 
 export const isOfficialPlugin = (entry: PluginStoreEntry): boolean =>
+  entry.sourceId.trim().toLowerCase() === DEFAULT_PLUGIN_STORE_SOURCE_ID &&
   isOfficialRepository(entry.repository);
 
 export const isDefaultPluginStoreSource = (

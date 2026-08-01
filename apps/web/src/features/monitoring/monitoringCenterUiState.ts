@@ -10,7 +10,7 @@ export const MONITORING_DATA_TABS: readonly MonitoringDataTab[] = [
 
 export const DEFAULT_MONITORING_DATA_TAB: MonitoringDataTab = 'accounts';
 export const DEFAULT_MONITORING_TIME_RANGE: MonitoringCenterTimeRange = 'today';
-export const DEFAULT_MONITORING_AUTO_REFRESH_MS = '5000';
+export const DEFAULT_MONITORING_AUTO_REFRESH_MS = '30000';
 export const DEFAULT_MONITORING_TABLE_PAGE_SIZE = 12;
 export const DEFAULT_MONITORING_REALTIME_PAGE_SIZE = 10;
 

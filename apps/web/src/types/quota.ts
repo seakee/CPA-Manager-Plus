@@ -227,6 +227,19 @@ export interface ClaudeExtraUsage {
   utilization: number | null;
 }
 
+export interface ClaudeUsageLimit {
+  kind?: unknown;
+  group?: unknown;
+  percent?: unknown;
+  resets_at?: unknown;
+  resetsAt?: unknown;
+  reset_at?: unknown;
+  resetAt?: unknown;
+  scope?: unknown;
+  is_active?: unknown;
+  isActive?: unknown;
+}
+
 export interface ClaudeUsagePayload {
   five_hour?: ClaudeUsageWindow | null;
   seven_day?: ClaudeUsageWindow | null;
@@ -235,6 +248,7 @@ export interface ClaudeUsagePayload {
   seven_day_sonnet?: ClaudeUsageWindow | null;
   seven_day_cowork?: ClaudeUsageWindow | null;
   iguana_necktie?: ClaudeUsageWindow | null;
+  limits?: ClaudeUsageLimit[] | null;
   extra_usage?: ClaudeExtraUsage | null;
 }
 
@@ -415,12 +429,32 @@ export interface XaiBillingCent {
   val?: number | string;
 }
 
+export interface XaiBillingPeriod {
+  type?: string;
+  start?: string;
+  end?: string;
+}
+
+export interface XaiBillingProductUsage {
+  product?: string;
+  usagePercent?: number | string | null;
+  usage_percent?: number | string | null;
+}
+
 export interface XaiBillingConfig {
+  currentPeriod?: XaiBillingPeriod | null;
+  current_period?: XaiBillingPeriod | null;
+  creditUsagePercent?: number | string | null;
+  credit_usage_percent?: number | string | null;
+  productUsage?: XaiBillingProductUsage[] | null;
+  product_usage?: XaiBillingProductUsage[] | null;
   monthlyLimit?: XaiBillingCent | number | string | null;
   monthly_limit?: XaiBillingCent | number | string | null;
   used?: XaiBillingCent | number | string | null;
   onDemandCap?: XaiBillingCent | number | string | null;
   on_demand_cap?: XaiBillingCent | number | string | null;
+  onDemandUsed?: XaiBillingCent | number | string | null;
+  on_demand_used?: XaiBillingCent | number | string | null;
   billingPeriodStart?: string;
   billing_period_start?: string;
   billingPeriodEnd?: string;
@@ -431,13 +465,44 @@ export interface XaiBillingPayload {
   config?: XaiBillingConfig | null;
 }
 
+export type XaiBillingPeriodType = 'weekly' | 'monthly' | 'unknown';
+
+export interface XaiProductUsageSummary {
+  product: string;
+  usagePercent: number | null;
+}
+
+export interface XaiBillingDiagnostic {
+  classification: string;
+  statusCode: number | null;
+  message: string;
+}
+
+export interface XaiOfficialApiHealth {
+  source: 'api.x.ai/v1/me';
+  userId: string | null;
+  teamId: string | null;
+  teamBlocked: boolean | null;
+}
+
 export interface XaiBillingSummary {
+  periodType: XaiBillingPeriodType;
+  usagePercent: number | null;
+  periodStart?: string;
+  periodEnd?: string;
+  productUsage: XaiProductUsageSummary[];
   monthlyLimitCents: number | null;
   usedCents: number | null;
+  includedUsedCents: number | null;
   onDemandCapCents: number | null;
+  onDemandUsedCents: number | null;
+  onDemandUsedPercent: number | null;
   billingPeriodStart?: string;
   billingPeriodEnd?: string;
   usedPercent: number | null;
+  officialApiHealth?: XaiOfficialApiHealth;
+  partial?: boolean;
+  diagnostics?: XaiBillingDiagnostic[];
 }
 
 export interface XaiQuotaState {

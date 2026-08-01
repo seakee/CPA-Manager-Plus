@@ -9,6 +9,9 @@ export interface ModelAlias {
   priority?: number;
   testModel?: string;
   image?: boolean;
+  forceMapping?: boolean;
+  inputModalities?: string[];
+  outputModalities?: string[];
   thinking?: Record<string, unknown>;
 }
 
@@ -53,6 +56,7 @@ export interface ProviderKeyConfig {
   authIndex?: string;
   disableCooling?: boolean;
   experimentalCchSigning?: boolean;
+  rebuildMidSystemMessage?: boolean;
 }
 
 export interface OpenAIProviderConfig {

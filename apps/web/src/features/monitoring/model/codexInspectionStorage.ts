@@ -1,4 +1,5 @@
 import type {
+  CodexInspectionLogDetail,
   CodexInspectionLastRunState,
   CodexInspectionQuotaWindow,
   CodexInspectionResultItem,
@@ -24,8 +25,7 @@ import {
   readString,
 } from './codexInspectionSettings';
 
-export const CODEX_INSPECTION_LAST_RUN_STORAGE_KEY =
-  'cli-proxy-codex-inspection-last-run-v1';
+export const CODEX_INSPECTION_LAST_RUN_STORAGE_KEY = 'cli-proxy-codex-inspection-last-run-v1';
 
 const CODEX_INSPECTION_LAST_RUN_STORAGE_VERSION = 1;
 
@@ -42,6 +42,10 @@ const sanitizeInspectionSettingsForStorage = (
 ): CodexInspectionSettings => ({
   baseUrl: '',
   token: '',
+  targetTypes: normalizeConfigurableSettings({
+    targetTypes: settings.targetTypes,
+    targetType: settings.targetType,
+  }).targetTypes,
   targetType: readString(settings.targetType) || DEFAULT_CODEX_INSPECTION_SETTINGS.targetType,
   workers: clampPositiveInteger(settings.workers, DEFAULT_CODEX_INSPECTION_SETTINGS.workers),
   deleteWorkers: clampPositiveInteger(
@@ -51,6 +55,14 @@ const sanitizeInspectionSettingsForStorage = (
   timeout: clampPositiveInteger(settings.timeout, DEFAULT_CODEX_INSPECTION_SETTINGS.timeout),
   retries: Math.max(0, Math.floor(normalizeNumberValue(settings.retries) ?? 0)),
   userAgent: readString(settings.userAgent) || DEFAULT_CODEX_INSPECTION_SETTINGS.userAgent,
+  xaiInferenceUserAgent:
+    readString(settings.xaiInferenceUserAgent) ||
+    DEFAULT_CODEX_INSPECTION_SETTINGS.xaiInferenceUserAgent,
+  xaiInferenceEnabled: readBoolean(settings.xaiInferenceEnabled, false),
+  xaiInferenceModel:
+    readString(settings.xaiInferenceModel) || DEFAULT_CODEX_INSPECTION_SETTINGS.xaiInferenceModel,
+  xaiInferencePrompt:
+    readString(settings.xaiInferencePrompt) || DEFAULT_CODEX_INSPECTION_SETTINGS.xaiInferencePrompt,
   usedPercentThreshold:
     normalizeNumberValue(settings.usedPercentThreshold) ??
     DEFAULT_CODEX_INSPECTION_SETTINGS.usedPercentThreshold,
@@ -60,12 +72,17 @@ const sanitizeInspectionSettingsForStorage = (
 const normalizeStoredSettings = (value: unknown): CodexInspectionSettings => {
   const input = isRecord(value) ? value : {};
   const configurable = normalizeConfigurableSettings({
+    targetTypes: input.targetTypes,
     targetType: input.targetType,
     workers: input.workers,
     deleteWorkers: input.deleteWorkers,
     timeout: input.timeout,
     retries: input.retries,
     userAgent: input.userAgent,
+    xaiInferenceUserAgent: input.xaiInferenceUserAgent,
+    xaiInferenceEnabled: input.xaiInferenceEnabled,
+    xaiInferenceModel: input.xaiInferenceModel,
+    xaiInferencePrompt: input.xaiInferencePrompt,
     usedPercentThreshold: input.usedPercentThreshold,
     sampleSize: input.sampleSize,
   });
@@ -73,12 +90,17 @@ const normalizeStoredSettings = (value: unknown): CodexInspectionSettings => {
   return {
     baseUrl: '',
     token: '',
+    targetTypes: configurable.targetTypes,
     targetType: configurable.targetType,
     workers: configurable.workers,
     deleteWorkers: configurable.deleteWorkers,
     timeout: configurable.timeout,
     retries: configurable.retries,
     userAgent: configurable.userAgent,
+    xaiInferenceUserAgent: configurable.xaiInferenceUserAgent,
+    xaiInferenceEnabled: configurable.xaiInferenceEnabled,
+    xaiInferenceModel: configurable.xaiInferenceModel,
+    xaiInferencePrompt: configurable.xaiInferencePrompt,
     usedPercentThreshold: configurable.usedPercentThreshold,
     sampleSize: configurable.sampleSize,
   };
@@ -104,9 +126,7 @@ const normalizeQuotaWindowLabelParams = (
   return Object.keys(params).length > 0 ? params : undefined;
 };
 
-const serializeQuotaWindow = (
-  window: CodexInspectionQuotaWindow
-): CodexInspectionQuotaWindow => ({
+const serializeQuotaWindow = (window: CodexInspectionQuotaWindow): CodexInspectionQuotaWindow => ({
   id: readString(window.id),
   labelKey: readString(window.labelKey),
   labelParams: normalizeQuotaWindowLabelParams(window.labelParams),
@@ -137,10 +157,12 @@ const serializeResultItemForStorage = (
   key: item.key,
   fileName: item.fileName,
   displayAccount: item.displayAccount,
+  accountSnapshot: readNullableString(item.accountSnapshot),
   authIndex: item.authIndex,
   accountId: null,
   provider: item.provider,
   disabled: item.disabled,
+  autoRecoverOwned: item.autoRecoverOwned,
   status: item.status,
   state: item.state,
   action: item.action,
@@ -148,11 +170,13 @@ const serializeResultItemForStorage = (
   statusCode: item.statusCode,
   usedPercent: item.usedPercent,
   isQuota: item.isQuota,
+  autoRecoverEligible: item.autoRecoverEligible,
   error: item.error,
   planType: readNullableString(item.planType),
   quotaWindows: (item.quotaWindows ?? []).map(serializeQuotaWindow),
   errorKind: readString(item.errorKind),
-  errorDetail: readString(item.errorDetail),
+  errorDetail: sanitizeStoredText(item.errorDetail),
+  actionHandled: item.actionHandled === true,
 });
 
 const hydrateStoredResultItem = (
@@ -172,10 +196,12 @@ const hydrateStoredResultItem = (
     key,
     fileName,
     displayAccount: readString(value.displayAccount) || fileName,
+    accountSnapshot: readNullableString(value.accountSnapshot),
     authIndex,
     accountId: readNullableString(value.accountId),
     provider,
     disabled,
+    autoRecoverOwned: readBoolean(value.autoRecoverOwned, false),
     status: readString(value.status),
     state: readString(value.state),
     raw: {
@@ -189,6 +215,7 @@ const hydrateStoredResultItem = (
     statusCode: readNullableNumber(value.statusCode),
     usedPercent: readNullableNumber(value.usedPercent),
     isQuota: readBoolean(value.isQuota, false),
+    autoRecoverEligible: readBoolean(value.autoRecoverEligible, false),
     error: readString(value.error),
     planType: readNullableString(value.planType),
     quotaWindows: Array.isArray(value.quotaWindows)
@@ -197,7 +224,8 @@ const hydrateStoredResultItem = (
           .filter((item): item is CodexInspectionQuotaWindow => item !== null)
       : [],
     errorKind: readString(value.errorKind),
-    errorDetail: readString(value.errorDetail),
+    errorDetail: sanitizeStoredText(value.errorDetail),
+    actionHandled: readBoolean(value.actionHandled, false),
   };
 };
 
@@ -235,18 +263,71 @@ const buildSummaryFromStoredResult = (
   };
 };
 
+const isSensitiveLogDetailKey = (key: string): boolean => {
+  const normalized = key.toLowerCase();
+  if (normalized === 'triggerkey') return false;
+  return (
+    normalized.includes('token') ||
+    normalized.includes('secret') ||
+    normalized.includes('authorization') ||
+    normalized.includes('key')
+  );
+};
+
+const sanitizeStringifiedJson = (value: string): string => {
+  try {
+    const sanitized = JSON.stringify(sanitizeLogDetailValue(JSON.parse(value)));
+    return sanitized ?? value;
+  } catch {
+    return value;
+  }
+};
+
+const sanitizeLogDetailValue = (value: unknown): unknown => {
+  if (typeof value === 'string') return sanitizeStringifiedJson(value);
+  if (Array.isArray(value)) return value.map(sanitizeLogDetailValue);
+  if (!isRecord(value)) return value;
+
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [
+      key,
+      isSensitiveLogDetailKey(key) ? '[redacted]' : sanitizeLogDetailValue(item),
+    ])
+  );
+};
+
+const sanitizeStoredText = (value: unknown): string => sanitizeStringifiedJson(readString(value));
+
+const sanitizeStoredLogDetail = (value: unknown): CodexInspectionLogDetail | undefined =>
+  isRecord(value) ? (sanitizeLogDetailValue(value) as CodexInspectionLogDetail) : undefined;
+
+const serializeStoredLogEntry = (
+  entry: CodexInspectionStoredLogEntry
+): CodexInspectionStoredLogEntry => {
+  const detail = sanitizeStoredLogDetail(entry.detail);
+  return {
+    id: entry.id,
+    level: normalizeLogLevel(entry.level),
+    message: readString(entry.message),
+    timestamp: entry.timestamp,
+    ...(detail ? { detail } : {}),
+  };
+};
+
 const hydrateStoredLogEntry = (value: unknown): CodexInspectionStoredLogEntry | null => {
   if (!isRecord(value)) return null;
   const message = readString(value.message);
   if (!message) return null;
   const timestamp = readNullableNumber(value.timestamp) ?? Date.now();
   const id = readString(value.id) || `${timestamp}-${message.slice(0, 12)}`;
+  const detail = sanitizeStoredLogDetail(value.detail);
 
   return {
     id,
     level: normalizeLogLevel(value.level),
     message,
     timestamp,
+    ...(detail ? { detail } : {}),
   };
 };
 
@@ -275,7 +356,7 @@ export const serializeCodexInspectionLastRun = ({
     startedAt: result.startedAt,
     finishedAt: result.finishedAt,
   },
-  logs: (logs ?? []).slice(-500),
+  logs: (logs ?? []).slice(-500).map(serializeStoredLogEntry),
 });
 
 export const hydrateCodexInspectionLastRun = (
@@ -325,6 +406,17 @@ export const hydrateCodexInspectionLastRun = (
   };
 };
 
+const serializeHydratedCodexInspectionLastRun = (state: CodexInspectionLastRunState) => ({
+  ...serializeCodexInspectionLastRun({
+    result: state.result,
+    logs: state.logs,
+    logsCollapsed: state.logsCollapsed,
+    actionFilter: state.actionFilter,
+    connectionFingerprint: state.connectionFingerprint,
+  }),
+  savedAt: state.savedAt,
+});
+
 export const loadCodexInspectionLastRun = (
   expectedConnectionFingerprint?: string | null
 ): CodexInspectionLastRunState | null => {
@@ -332,7 +424,18 @@ export const loadCodexInspectionLastRun = (
     if (typeof localStorage === 'undefined') return null;
     const raw = localStorage.getItem(CODEX_INSPECTION_LAST_RUN_STORAGE_KEY);
     if (!raw) return null;
-    return hydrateCodexInspectionLastRun(JSON.parse(raw), { expectedConnectionFingerprint });
+    const state = hydrateCodexInspectionLastRun(JSON.parse(raw), { expectedConnectionFingerprint });
+    if (!state) return null;
+
+    const sanitizedRaw = JSON.stringify(serializeHydratedCodexInspectionLastRun(state));
+    if (sanitizedRaw !== raw) {
+      try {
+        localStorage.setItem(CODEX_INSPECTION_LAST_RUN_STORAGE_KEY, sanitizedRaw);
+      } catch {
+        // Keep the sanitized in-memory result available when browser storage cannot be updated.
+      }
+    }
+    return state;
   } catch {
     return null;
   }

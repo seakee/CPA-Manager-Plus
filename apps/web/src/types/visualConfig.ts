@@ -1,5 +1,6 @@
 export type PayloadParamValueType = 'string' | 'number' | 'boolean' | 'json';
-export type DisableImageGenerationMode = 'false' | 'true' | 'chat';
+export type DisableImageGenerationMode = 'false' | 'true' | 'chat' | 'passthrough';
+export type RemoteManagementSecretKeyAction = 'unchanged' | 'replace' | 'clear';
 export type PluginStoreAuthType = 'none' | 'bearer' | 'basic' | 'header' | 'github-token';
 export type PluginStoreAuthApplyTo = 'registry' | 'metadata' | 'artifact';
 export type PayloadParamValidationErrorCode =
@@ -12,6 +13,7 @@ export type VisualConfigFieldPath =
   | 'errorLogsMaxFiles'
   | 'logsMaxTotalSizeMb'
   | 'redisUsageQueueRetentionSeconds'
+  | 'transientErrorCooldownSeconds'
   | 'requestRetry'
   | 'maxRetryCredentials'
   | 'maxRetryInterval'
@@ -23,6 +25,7 @@ export type VisualConfigFieldPath =
 export type VisualConfigValidationErrorCode =
   | 'port_range'
   | 'non_negative_integer'
+  | 'integer'
   | 'retention_seconds_range';
 
 export type VisualConfigValidationErrors = Partial<
@@ -93,6 +96,8 @@ export type VisualConfigValues = {
   tlsKey: string;
   rmAllowRemote: boolean;
   rmSecretKey: string;
+  rmSecretKeyAction: RemoteManagementSecretKeyAction;
+  rmSecretKeyConfigured: boolean;
   rmDisableControlPanel: boolean;
   rmDisableAutoUpdatePanel: boolean;
   rmPanelRepo: string;
@@ -103,6 +108,8 @@ export type VisualConfigValues = {
   pluginStoreSourcesText: string;
   pluginStoreAuth: PluginStoreAuthRule[];
   debug: boolean;
+  pprofEnable: boolean;
+  pprofAddr: string;
   commercialMode: boolean;
   usageStatisticsEnabled: boolean;
   loggingToFile: boolean;
@@ -116,7 +123,12 @@ export type VisualConfigValues = {
   maxRetryCredentials: string;
   maxRetryInterval: string;
   disableCooling: boolean;
+  saveCooldownStatus: boolean;
+  transientErrorCooldownSeconds: string;
+  disableClaudeCloakMode: boolean;
   disableImageGeneration: DisableImageGenerationMode;
+  gptImage2BaseModel: string;
+  videoResultAuthCacheTtl: string;
   authAutoRefreshWorkers: string;
   quotaSwitchProject: boolean;
   quotaSwitchPreviewModel: boolean;
@@ -158,6 +170,8 @@ export const DEFAULT_VISUAL_VALUES: VisualConfigValues = {
   tlsKey: '',
   rmAllowRemote: false,
   rmSecretKey: '',
+  rmSecretKeyAction: 'unchanged',
+  rmSecretKeyConfigured: false,
   rmDisableControlPanel: false,
   rmDisableAutoUpdatePanel: false,
   rmPanelRepo: '',
@@ -168,6 +182,8 @@ export const DEFAULT_VISUAL_VALUES: VisualConfigValues = {
   pluginStoreSourcesText: '',
   pluginStoreAuth: [],
   debug: false,
+  pprofEnable: false,
+  pprofAddr: '127.0.0.1:8316',
   commercialMode: false,
   usageStatisticsEnabled: false,
   loggingToFile: false,
@@ -181,15 +197,20 @@ export const DEFAULT_VISUAL_VALUES: VisualConfigValues = {
   maxRetryCredentials: '',
   maxRetryInterval: '',
   disableCooling: false,
+  saveCooldownStatus: false,
+  transientErrorCooldownSeconds: '',
+  disableClaudeCloakMode: false,
   disableImageGeneration: 'false',
+  gptImage2BaseModel: '',
+  videoResultAuthCacheTtl: '',
   authAutoRefreshWorkers: '',
-  quotaSwitchProject: true,
-  quotaSwitchPreviewModel: true,
+  quotaSwitchProject: false,
+  quotaSwitchPreviewModel: false,
   quotaAntigravityCredits: false,
   routingStrategy: 'round-robin',
   routingSessionAffinity: false,
   routingSessionAffinityTTL: '',
-  wsAuth: false,
+  wsAuth: true,
   antigravitySignatureCacheEnabled: true,
   antigravitySignatureBypassStrict: false,
   claudeHeaderUserAgent: '',

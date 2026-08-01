@@ -1,6 +1,7 @@
 import { useEffect, useRef, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { IconX } from '@/components/ui/icons';
+import { getInspectionConfigFocusTarget } from './inspectionConfigFocus';
 import styles from '../CodexInspectionPage.module.scss';
 
 type InspectionConfigDrawerProps = {
@@ -50,7 +51,8 @@ export function InspectionConfigDrawer({
       if (!target) return;
       target.closest('details')?.setAttribute('open', '');
       target.scrollIntoView({ block: 'center', behavior: 'smooth' });
-      target.focus({ preventScroll: true });
+      const focusTarget = getInspectionConfigFocusTarget(target);
+      focusTarget?.focus({ preventScroll: true });
     });
     return () => window.cancelAnimationFrame(frame);
   }, [open, focusField]);

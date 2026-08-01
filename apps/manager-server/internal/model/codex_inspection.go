@@ -18,9 +18,12 @@ const (
 	CodexInspectionAutoActionDisable = "disable"
 	CodexInspectionAutoActionDelete  = "delete"
 
-	CodexInspectionStatusRunning   = "running"
-	CodexInspectionStatusCompleted = "completed"
-	CodexInspectionStatusFailed    = "failed"
+	CodexInspectionStatusRunning     = "running"
+	CodexInspectionStatusCompleted   = "completed"
+	CodexInspectionStatusFailed      = "failed"
+	CodexInspectionStatusCancelling  = "cancelling"
+	CodexInspectionStatusCancelled   = "cancelled"
+	CodexInspectionStatusInterrupted = "interrupted"
 
 	CodexInspectionTriggerManual    = "manual"
 	CodexInspectionTriggerScheduled = "scheduled"
@@ -31,20 +34,35 @@ const (
 	CodexInspectionActionStatusFailed      = "failed"
 	CodexInspectionActionStatusSkipped     = "skipped"
 	CodexInspectionActionStatusNeedsReview = "needs_review"
+
+	CodexInspectionTargetCodex = "codex"
+	CodexInspectionTargetXAI   = "xai"
+
+	DefaultXAIInspectionModel    = "grok-4.5"
+	DefaultXAIInspectionPrompt   = "Reply with exactly OK."
+	DefaultXAIInferenceUserAgent = "xai-grok-workspace/0.2.101"
 )
 
 type ManagerCodexInspectionConfig struct {
-	Enabled              *bool                                `json:"enabled,omitempty"`
-	Schedule             ManagerCodexInspectionScheduleConfig `json:"schedule"`
-	TargetType           string                               `json:"targetType,omitempty"`
-	Workers              int                                  `json:"workers,omitempty"`
-	DeleteWorkers        int                                  `json:"deleteWorkers,omitempty"`
-	Timeout              int                                  `json:"timeout,omitempty"`
-	Retries              int                                  `json:"retries,omitempty"`
-	UserAgent            string                               `json:"userAgent,omitempty"`
-	UsedPercentThreshold float64                              `json:"usedPercentThreshold,omitempty"`
-	SampleSize           int                                  `json:"sampleSize,omitempty"`
-	AutoActionMode       string                               `json:"autoActionMode,omitempty"`
+	Enabled  *bool                                `json:"enabled,omitempty"`
+	Schedule ManagerCodexInspectionScheduleConfig `json:"schedule"`
+	// TargetTypes is the canonical multi-provider selection. TargetType remains
+	// available for legacy callers and is always normalized to the first target.
+	TargetTypes           []string `json:"targetTypes,omitempty"`
+	TargetType            string   `json:"targetType,omitempty"`
+	Workers               int      `json:"workers,omitempty"`
+	DeleteWorkers         int      `json:"deleteWorkers,omitempty"`
+	Timeout               int      `json:"timeout,omitempty"`
+	Retries               int      `json:"retries,omitempty"`
+	UserAgent             string   `json:"userAgent,omitempty"`
+	XAIInferenceUserAgent string   `json:"xaiInferenceUserAgent,omitempty"`
+	XAIInferenceEnabled   bool     `json:"xaiInferenceEnabled,omitempty"`
+	XAIInferenceModel     string   `json:"xaiInferenceModel,omitempty"`
+	XAIInferencePrompt    string   `json:"xaiInferencePrompt,omitempty"`
+	UsedPercentThreshold  float64  `json:"usedPercentThreshold,omitempty"`
+	SampleSize            int      `json:"sampleSize,omitempty"`
+	AutoActionMode        string   `json:"autoActionMode,omitempty"`
+	AutoRecoverEnabled    bool     `json:"autoRecoverEnabled,omitempty"`
 }
 
 type ManagerCodexInspectionScheduleConfig struct {
@@ -76,6 +94,48 @@ type CodexInspectionRun struct {
 	SettingsJSON  string                       `json:"-"`
 	CreatedAtMS   int64                        `json:"createdAtMs"`
 	UpdatedAtMS   int64                        `json:"updatedAtMs"`
+	// Active and Cancellable are derived compatibility fields. They are always
+	// emitted so clients can distinguish a truly active run from a stale row
+	// whose historical status still says running or cancelling.
+	Active      bool `json:"active"`
+	Cancellable bool `json:"cancellable"`
+}
+
+type CodexInspectionLease struct {
+	RunID            int64  `json:"runId"`
+	OwnerID          string `json:"ownerId"`
+	HeartbeatAtMS    int64  `json:"heartbeatAtMs"`
+	LeaseExpiresAtMS int64  `json:"leaseExpiresAtMs"`
+}
+
+func IsCodexInspectionRunActive(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case CodexInspectionStatusRunning, CodexInspectionStatusCancelling:
+		return true
+	default:
+		return false
+	}
+}
+
+func IsCodexInspectionRunCancellable(status string) bool {
+	return IsCodexInspectionRunActive(status)
+}
+
+func NormalizeCodexInspectionRunStatus(status string) string {
+	trimmed := strings.ToLower(strings.TrimSpace(status))
+	switch trimmed {
+	case CodexInspectionStatusRunning,
+		CodexInspectionStatusCompleted,
+		CodexInspectionStatusFailed,
+		CodexInspectionStatusCancelling,
+		CodexInspectionStatusCancelled,
+		CodexInspectionStatusInterrupted:
+		return trimmed
+	default:
+		// Preserve unknown values for forward compatibility instead of silently
+		// presenting them as a successful or failed run.
+		return strings.TrimSpace(status)
+	}
 }
 
 type CodexInspectionQuotaWindow struct {
@@ -88,32 +148,52 @@ type CodexInspectionQuotaWindow struct {
 }
 
 type CodexInspectionResult struct {
-	ID               int64                        `json:"id"`
-	RunID            int64                        `json:"runId"`
-	AccountKey       string                       `json:"accountKey"`
-	FileName         string                       `json:"fileName"`
-	DisplayAccount   string                       `json:"displayAccount"`
-	AuthIndex        string                       `json:"authIndex,omitempty"`
-	AccountID        string                       `json:"accountId,omitempty"`
-	Provider         string                       `json:"provider"`
-	Disabled         bool                         `json:"disabled"`
-	Status           string                       `json:"status,omitempty"`
-	State            string                       `json:"state,omitempty"`
-	Action           string                       `json:"action"`
-	ActionReason     string                       `json:"actionReason"`
-	ActionStatus     string                       `json:"actionStatus,omitempty"`
-	ExecutedAction   string                       `json:"executedAction,omitempty"`
-	ActionError      string                       `json:"actionError,omitempty"`
-	StatusCode       *int                         `json:"statusCode,omitempty"`
-	UsedPercent      *float64                     `json:"usedPercent,omitempty"`
-	IsQuota          bool                         `json:"isQuota"`
-	Error            string                       `json:"error,omitempty"`
-	PlanType         string                       `json:"planType,omitempty"`
-	QuotaWindows     []CodexInspectionQuotaWindow `json:"quotaWindows,omitempty"`
-	QuotaWindowsJSON string                       `json:"-"`
-	ErrorKind        string                       `json:"errorKind,omitempty"`
-	ErrorDetail      string                       `json:"errorDetail,omitempty"`
-	CreatedAtMS      int64                        `json:"createdAtMs"`
+	ID                  int64                        `json:"id"`
+	RunID               int64                        `json:"runId"`
+	AccountKey          string                       `json:"accountKey"`
+	FileName            string                       `json:"fileName"`
+	DisplayAccount      string                       `json:"displayAccount"`
+	AccountSnapshot     string                       `json:"accountSnapshot,omitempty"`
+	AuthIndex           string                       `json:"authIndex,omitempty"`
+	AccountID           string                       `json:"accountId,omitempty"`
+	Provider            string                       `json:"provider"`
+	Disabled            bool                         `json:"disabled"`
+	Status              string                       `json:"status,omitempty"`
+	State               string                       `json:"state,omitempty"`
+	Action              string                       `json:"action"`
+	ActionReason        string                       `json:"actionReason"`
+	ActionStatus        string                       `json:"actionStatus,omitempty"`
+	ExecutedAction      string                       `json:"executedAction,omitempty"`
+	ActionError         string                       `json:"actionError,omitempty"`
+	StatusCode          *int                         `json:"statusCode,omitempty"`
+	UsedPercent         *float64                     `json:"usedPercent,omitempty"`
+	IsQuota             bool                         `json:"isQuota"`
+	AutoRecoverEligible bool                         `json:"autoRecoverEligible"`
+	Error               string                       `json:"error,omitempty"`
+	PlanType            string                       `json:"planType,omitempty"`
+	QuotaWindows        []CodexInspectionQuotaWindow `json:"quotaWindows,omitempty"`
+	QuotaWindowsJSON    string                       `json:"-"`
+	ErrorKind           string                       `json:"errorKind,omitempty"`
+	ErrorDetail         string                       `json:"errorDetail,omitempty"`
+	CreatedAtMS         int64                        `json:"createdAtMs"`
+}
+
+type CodexInspectionDisableOwnership struct {
+	FileName        string
+	Provider        string
+	AuthIndex       string
+	AccountID       string
+	AccountSnapshot string
+	DisabledAtMS    int64
+	UpdatedAtMS     int64
+}
+
+type CodexInspectionDisableOwnershipTarget struct {
+	FileName        string
+	Provider        *string
+	AuthIndex       *string
+	AccountID       *string
+	AccountSnapshot *string
 }
 
 type CodexInspectionLog struct {
@@ -133,30 +213,44 @@ func DefaultCodexInspectionConfig() ManagerCodexInspectionConfig {
 			Mode:            CodexInspectionScheduleModeInterval,
 			IntervalMinutes: 60,
 		},
-		TargetType:           "codex",
-		Workers:              4,
-		DeleteWorkers:        4,
-		Timeout:              15000,
-		Retries:              0,
-		UserAgent:            "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal",
-		UsedPercentThreshold: 100,
-		SampleSize:           0,
-		AutoActionMode:       CodexInspectionAutoActionNone,
+		TargetType:            CodexInspectionTargetCodex,
+		Workers:               4,
+		DeleteWorkers:         4,
+		Timeout:               15000,
+		Retries:               0,
+		UserAgent:             "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal",
+		XAIInferenceUserAgent: DefaultXAIInferenceUserAgent,
+		XAIInferenceEnabled:   false,
+		XAIInferenceModel:     DefaultXAIInspectionModel,
+		XAIInferencePrompt:    DefaultXAIInspectionPrompt,
+		UsedPercentThreshold:  100,
+		SampleSize:            0,
+		AutoActionMode:        CodexInspectionAutoActionNone,
+		AutoRecoverEnabled:    false,
 	}
 }
 
 func NormalizeCodexInspectionConfig(input ManagerCodexInspectionConfig, fallback ManagerCodexInspectionConfig) ManagerCodexInspectionConfig {
 	base := fallback
-	if base.TargetType == "" {
+	base.TargetTypes = NormalizeCodexInspectionTargetTypes(base.TargetTypes, base.TargetType)
+	if len(base.TargetTypes) == 0 {
 		base = DefaultCodexInspectionConfig()
 	}
+	base.TargetType = base.TargetTypes[0]
 
 	next := base
 	if input.Enabled != nil {
 		next.Enabled = boolPtr(*input.Enabled)
 	}
 	next.Schedule = NormalizeCodexInspectionSchedule(input.Schedule, base.Schedule)
-	next.TargetType = valueOrLower(input.TargetType, base.TargetType)
+	if input.TargetTypes != nil {
+		if targetTypes := NormalizeCodexInspectionTargetTypes(input.TargetTypes, ""); len(targetTypes) > 0 {
+			next.TargetTypes = targetTypes
+		}
+	} else if targetTypes := NormalizeCodexInspectionTargetTypes(nil, input.TargetType); len(targetTypes) > 0 {
+		next.TargetTypes = targetTypes
+	}
+	next.TargetType = next.TargetTypes[0]
 	next.Workers = positiveOr(input.Workers, base.Workers)
 	next.DeleteWorkers = positiveOr(input.DeleteWorkers, positiveOr(input.Workers, base.DeleteWorkers))
 	next.Timeout = positiveOr(input.Timeout, base.Timeout)
@@ -167,11 +261,18 @@ func NormalizeCodexInspectionConfig(input ManagerCodexInspectionConfig, fallback
 		next.Retries = input.Retries
 	}
 	next.UserAgent = valueOr(input.UserAgent, base.UserAgent)
+	next.XAIInferenceUserAgent = valueOr(input.XAIInferenceUserAgent, valueOr(base.XAIInferenceUserAgent, DefaultXAIInferenceUserAgent))
+	next.XAIInferenceEnabled = input.XAIInferenceEnabled
+	next.XAIInferenceModel = valueOr(input.XAIInferenceModel, valueOr(base.XAIInferenceModel, DefaultXAIInspectionModel))
+	next.XAIInferencePrompt = valueOr(input.XAIInferencePrompt, valueOr(base.XAIInferencePrompt, DefaultXAIInspectionPrompt))
 	next.UsedPercentThreshold = normalizePercent(input.UsedPercentThreshold, base.UsedPercentThreshold)
 	if input.SampleSize >= 0 {
 		next.SampleSize = input.SampleSize
 	}
 	next.AutoActionMode = NormalizeCodexInspectionAutoActionMode(input.AutoActionMode, base.AutoActionMode)
+	// Frontend and API saves submit the complete inspection config. Keeping this
+	// assignment explicit makes the safe false default win for legacy configs.
+	next.AutoRecoverEnabled = input.AutoRecoverEnabled
 	return next
 }
 
@@ -229,7 +330,68 @@ func NormalizeCodexInspectionTimeZone(value string, fallback string) string {
 }
 
 func ValidateCodexInspectionConfig(input ManagerCodexInspectionConfig) error {
+	targetType := strings.ToLower(strings.TrimSpace(input.TargetType))
+	if targetType != "" && !IsCodexInspectionTargetType(targetType) {
+		return fmt.Errorf("unsupported inspection target type %q", input.TargetType)
+	}
+	if input.TargetTypes != nil {
+		if len(input.TargetTypes) == 0 {
+			return fmt.Errorf("at least one inspection target type is required")
+		}
+		for _, target := range input.TargetTypes {
+			if normalized := strings.ToLower(strings.TrimSpace(target)); !IsCodexInspectionTargetType(normalized) {
+				return fmt.Errorf("unsupported inspection target type %q", target)
+			}
+		}
+	}
 	return ValidateCodexInspectionSchedule(input.Schedule)
+}
+
+func IsCodexInspectionTargetType(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case CodexInspectionTargetCodex, CodexInspectionTargetXAI:
+		return true
+	default:
+		return false
+	}
+}
+
+// NormalizeCodexInspectionTargetTypes returns an ordered, de-duplicated list
+// of supported providers. A nil values slice represents a legacy payload, so
+// its targetType fallback is read; an explicit empty slice is kept empty for
+// validation to reject before persistence.
+func NormalizeCodexInspectionTargetTypes(values []string, legacyTargetType string) []string {
+	if values == nil {
+		values = []string{legacyTargetType}
+	}
+	selected := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		normalized := strings.ToLower(strings.TrimSpace(value))
+		if IsCodexInspectionTargetType(normalized) {
+			selected[normalized] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(selected))
+	for _, target := range []string{CodexInspectionTargetCodex, CodexInspectionTargetXAI} {
+		if _, ok := selected[target]; ok {
+			result = append(result, target)
+		}
+	}
+	return result
+}
+
+func (c ManagerCodexInspectionConfig) TargetProviders() []string {
+	return NormalizeCodexInspectionTargetTypes(c.TargetTypes, c.TargetType)
+}
+
+func (c ManagerCodexInspectionConfig) HasTargetProvider(provider string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(provider))
+	for _, target := range c.TargetProviders() {
+		if target == normalized {
+			return true
+		}
+	}
+	return false
 }
 
 func ValidateCodexInspectionSchedule(input ManagerCodexInspectionScheduleConfig) error {

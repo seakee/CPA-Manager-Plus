@@ -22,6 +22,7 @@ import { useModelsStore } from './useModelsStore';
 import { useQuotaStore } from './useQuotaStore';
 import { useUsageServiceStore } from './useUsageServiceStore';
 import { detectApiBaseFromLocation, normalizeApiBase } from '@/utils/connection';
+import { sha256Hex } from '@/utils/apiKeyHash';
 
 interface AuthStoreState extends AuthState {
   sessionMode: AuthSessionMode | '';
@@ -163,16 +164,10 @@ export const useAuthStore = create<AuthStoreState>()(
         const rememberPassword = credentials.rememberPassword ?? get().rememberPassword ?? false;
         const sessionMode = credentials.sessionMode ?? get().sessionMode;
         const sessionPanelBase = normalizeApiBase(credentials.sessionPanelBase || get().sessionPanelBase);
-        const previousApiBase = get().apiBase;
-        const previousManagementKey = get().managementKey;
-        const shouldClearQuotaCache =
-          Boolean(previousApiBase || previousManagementKey) &&
-          (previousApiBase !== apiBase || previousManagementKey !== managementKey);
+        const quotaCacheScope = sha256Hex(`${apiBase}\u0000${managementKey}`);
 
         const markAuthenticated = (result: LoginResult = {}) => {
-          if (shouldClearQuotaCache) {
-            useQuotaStore.getState().clearQuotaCache();
-          }
+          useQuotaStore.getState().activateQuotaCacheScope(quotaCacheScope);
           apiClient.setConfig({ apiBase, managementKey });
           set({
             isAuthenticated: true,

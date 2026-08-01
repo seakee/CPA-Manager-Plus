@@ -45,6 +45,28 @@ describe('buildProviderRows', () => {
     expect(rows[1].originalIndex).toBe(1);
   });
 
+  it('maps xAI API key configs as a distinct provider kind', () => {
+    const rows = buildProviderRows({
+      ...emptyInput,
+      xai: [
+        {
+          apiKey: 'xai-secret-key',
+          baseUrl: 'https://api.x.ai/v1',
+          websockets: true,
+          models: [{ name: 'grok-4.5' }],
+        },
+      ],
+    });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      kind: 'xai',
+      baseUrl: 'https://api.x.ai/v1',
+      modelNames: ['grok-4.5'],
+      enabled: true,
+    });
+  });
+
   it('maps openai providers with name label, key count and disabled flag', () => {
     const openai: OpenAIProviderConfig[] = [
       {

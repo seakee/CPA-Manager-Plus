@@ -1,0 +1,124 @@
+.trigger {
+  position: relative;
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  border-radius: 4px;
+  outline: none;
+}
+
+.trigger:focus-visible {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.tooltip {
+  --failure-surface: var(--bg-primary);
+  --failure-surface-elevated: color-mix(in srgb, var(--bg-primary) 82%, var(--surface-subtle));
+  --failure-surface-hover: color-mix(in srgb, var(--surface-subtle-hover) 74%, var(--bg-primary));
+  --failure-ink: var(--text-primary);
+  --failure-muted: var(--text-secondary);
+  --failure-line: var(--border-color);
+  --failure-accent: var(--primary-color);
+  --failure-accent-strong: var(--primary-active);
+  --failure-red: var(--error-color);
+
+  position: fixed;
+  z-index: 2030;
+  display: grid;
+  gap: 8px;
+  width: max-content;
+  min-width: 220px;
+  max-width: min(420px, calc(100vw - 48px));
+  max-height: 240px;
+  overflow: auto;
+  padding: 10px 42px 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--failure-red) 26%, var(--failure-line));
+  border-radius: 8px;
+  background: var(--failure-surface-elevated);
+  box-shadow: var(--shadow-lg);
+  color: var(--failure-ink);
+  font-size: 12px;
+  line-height: 1.45;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-4px);
+  transition:
+    opacity 0.12s ease,
+    transform 0.12s ease;
+  visibility: hidden;
+  white-space: normal;
+  user-select: text;
+}
+
+.tooltip::before {
+  content: '';
+  position: absolute;
+  left: 16px;
+  top: -5px;
+  width: 8px;
+  height: 8px;
+  background: var(--failure-surface-elevated);
+  transform: rotate(45deg);
+}
+
+.tooltipBelow::before {
+  top: -5px;
+  bottom: auto;
+  border-left: 1px solid color-mix(in srgb, var(--failure-red) 26%, var(--failure-line));
+  border-top: 1px solid color-mix(in srgb, var(--failure-red) 26%, var(--failure-line));
+}
+
+.tooltipAbove::before {
+  top: auto;
+  bottom: -5px;
+  border-right: 1px solid color-mix(in srgb, var(--failure-red) 26%, var(--failure-line));
+  border-bottom: 1px solid color-mix(in srgb, var(--failure-red) 26%, var(--failure-line));
+}
+
+.tooltipOpen {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+  visibility: visible;
+}
+
+.copyButton {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--failure-line) 84%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--failure-surface) 88%, transparent);
+  color: var(--failure-muted);
+  cursor: pointer;
+}
+
+.copyButton:hover,
+.copyButton:focus-visible {
+  border-color: color-mix(in srgb, var(--failure-accent) 36%, var(--failure-line));
+  background: var(--failure-surface-hover);
+  color: var(--failure-accent-strong);
+}
+
+.status {
+  color: var(--failure-red);
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.body {
+  overflow-wrap: anywhere;
+  color: var(--failure-ink);
+  font-family: var(--font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  white-space: pre-wrap;
+}

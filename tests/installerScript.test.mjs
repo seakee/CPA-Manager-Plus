@@ -1,5 +1,15 @@
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -35,6 +45,42 @@ const runInstallerFromStdin = (env) =>
     },
     encoding: 'utf8',
   });
+
+const writeFakeDocker = (dir) => {
+  const fakeDocker = path.join(dir, 'docker');
+  writeFileSync(
+    fakeDocker,
+    `#!/usr/bin/env bash
+set -eu
+if [ -n "\${FAKE_DOCKER_LOG:-}" ]; then
+  printf '%s|%s\n' "\${COMPOSE_PROJECT_NAME:-}" "$*" >> "$FAKE_DOCKER_LOG"
+fi
+if [ "$1" = "volume" ] && [ "\${2:-}" = "inspect" ]; then
+  if [ "\${FAKE_DOCKER_VOLUME_EXISTS:-0}" = "1" ]; then
+    exit 0
+  fi
+  exit 1
+fi
+if [ "$1" = "info" ] && [ "\${FAKE_DOCKER_DAEMON_OK:-1}" != "1" ]; then
+  exit 1
+fi
+if [ "$1" = "compose" ] && [ "\${2:-}" = "exec" ]; then
+  case "$*" in
+    *'/status'*)
+      if [ "\${FAKE_DOCKER_AUTH_OK:-1}" = "1" ]; then
+        exit 0
+      fi
+      exit 1
+      ;;
+    *) exit 0 ;;
+  esac
+fi
+exit 0
+`
+  );
+  chmodSync(fakeDocker, 0o755);
+  return fakeDocker;
+};
 
 describe('installer script', () => {
   it('passes shell syntax validation', () => {
@@ -77,7 +123,7 @@ describe('installer script', () => {
     expect(result.stdout).toContain('Install scope: CPA + CPAMP stack');
     expect(result.stdout).toContain('CPA URL for CPAMP: http://cli-proxy-api:8317');
     expect(result.stdout).toContain('docker compose pull');
-    expect(result.stdout).toContain('first setup is not required');
+    expect(result.stdout).toContain('Dry-run plan completed');
   });
 
   it('keeps CPAMP-only non-interactive installs in first-setup mode by default', () => {
@@ -88,7 +134,7 @@ describe('installer script', () => {
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('CPA connection: enter during first setup');
-    expect(result.stdout).toContain('After opening the panel, enter the CPA URL and CPA Management Key in setup.');
+    expect(result.stdout).toContain('Dry-run plan completed');
   });
 
   it('rejects native full stack installs', () => {
@@ -152,6 +198,51 @@ describe('installer script', () => {
     expect(combinedOutput(result)).toContain('CPAMP Docker image contains unsupported characters');
   });
 
+  it('rejects Docker Compose project names that Docker would normalize differently', () => {
+    const result = runInstaller({
+      CPAMP_PROJECT_NAME: 'CPAMP.Bad',
+      CPAMP_INSTALL_MODE: 'stack',
+      CPAMP_DEPLOY_METHOD: 'docker',
+    });
+
+    expect(result.status).toBe(1);
+    expect(combinedOutput(result)).toContain(
+      'Docker Compose project name contains unsupported characters'
+    );
+  });
+
+  it('rejects an empty persisted Docker Compose project name', () => {
+    const installDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-'));
+
+    try {
+      mkdirSync(path.join(installDir, 'secrets'), { recursive: true });
+      writeFileSync(path.join(installDir, '.env'), 'COMPOSE_PROJECT_NAME=\nCPAMP_PORT=18317\n');
+      writeFileSync(
+        path.join(installDir, 'compose.yaml'),
+        'services:\n  cpa-manager-plus:\n    image: example/cpamp:v1\n'
+      );
+      writeFileSync(path.join(installDir, 'secrets/cpamp-admin-key'), 'cpamp_existing_admin_key\n');
+
+      const result = spawnSync('bash', [installerPath], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          CPAMP_DRY_RUN: '1',
+          CPAMP_OPERATION: 'upgrade',
+          CPAMP_NON_INTERACTIVE: '1',
+          CPAMP_LANG: 'en-US',
+          CPAMP_INSTALL_DIR: installDir,
+        },
+        encoding: 'utf8',
+      });
+
+      expect(result.status).toBe(1);
+      expect(combinedOutput(result)).toContain('Docker Compose project name must not be empty');
+    } finally {
+      rmSync(installDir, { recursive: true, force: true });
+    }
+  });
+
   it('fails instead of looping when the random source yields no alphanumeric characters', () => {
     const fakeBin = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-bin-'));
 
@@ -167,7 +258,9 @@ describe('installer script', () => {
       });
 
       expect(result.status).toBe(1);
-      expect(combinedOutput(result)).toContain('Random source produced no usable alphanumeric characters');
+      expect(combinedOutput(result)).toContain(
+        'Random source produced no usable alphanumeric characters'
+      );
     } finally {
       rmSync(fakeBin, { recursive: true, force: true });
     }
@@ -196,9 +289,18 @@ describe('installer script', () => {
 
       const compose = readFileSync(path.join(installDir, 'compose.yaml'), 'utf8');
       const cpaConfig = readFileSync(path.join(installDir, 'cliproxyapi/config.yaml'), 'utf8');
-      const adminKey = readFileSync(path.join(installDir, 'secrets/cpamp-admin-key'), 'utf8').trim();
-      const cpaManagementKey = readFileSync(path.join(installDir, 'secrets/cpa-management-key'), 'utf8').trim();
-      const demoClientKey = readFileSync(path.join(installDir, 'secrets/cpa-demo-client-key'), 'utf8').trim();
+      const adminKey = readFileSync(
+        path.join(installDir, 'secrets/cpamp-admin-key'),
+        'utf8'
+      ).trim();
+      const cpaManagementKey = readFileSync(
+        path.join(installDir, 'secrets/cpa-management-key'),
+        'utf8'
+      ).trim();
+      const demoClientKey = readFileSync(
+        path.join(installDir, 'secrets/cpa-demo-client-key'),
+        'utf8'
+      ).trim();
 
       expect(compose).toContain('./cliproxyapi/config.yaml:/CLIProxyAPI/config.yaml');
       expect(compose).toContain('./cliproxyapi/auths:/root/.cli-proxy-api');
@@ -243,7 +345,7 @@ describe('installer script', () => {
 
       expect(envFile).toContain('CPA_UPSTREAM_URL=http://host.docker.internal:8317');
       expect(result.stdout).toContain('first setup');
-      expect(result.stdout).toContain('Open the panel and log in with the CPAMP Admin Key');
+      expect(result.stdout).toContain('Deployment config generated');
       if (process.platform === 'linux') {
         expect(compose).toContain('host.docker.internal:host-gateway');
       }
@@ -257,7 +359,10 @@ describe('installer script', () => {
 
     try {
       mkdirSync(path.join(installDir, 'secrets'), { recursive: true });
-      writeFileSync(path.join(installDir, 'secrets/cpa-management-key'), 'cpa_reused_management_key\n');
+      writeFileSync(
+        path.join(installDir, 'secrets/cpa-management-key'),
+        'cpa_reused_management_key\n'
+      );
 
       const result = spawnSync('bash', [installerPath], {
         cwd: repoRoot,
@@ -293,7 +398,10 @@ describe('installer script', () => {
 
     try {
       mkdirSync(path.join(installDir, 'secrets'), { recursive: true });
-      writeFileSync(path.join(installDir, 'secrets/cpa-management-key'), 'cpa_reused_management_key\n');
+      writeFileSync(
+        path.join(installDir, 'secrets/cpa-management-key'),
+        'cpa_reused_management_key\n'
+      );
 
       const result = spawnSync('bash', [installerPath], {
         cwd: repoRoot,
@@ -319,7 +427,443 @@ describe('installer script', () => {
     }
   });
 
-  it('does not leave partial Docker files when generated config already exists', () => {
+  it('blocks non-interactive installs when an orphaned Docker data volume exists', () => {
+    const installDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-'));
+    const fakeBin = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-bin-'));
+
+    try {
+      writeFakeDocker(fakeBin);
+      const result = spawnSync('bash', [installerPath], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          CPAMP_SKIP_EXECUTE: '1',
+          CPAMP_NON_INTERACTIVE: '1',
+          CPAMP_CONFIRM: '1',
+          CPAMP_LANG: 'en-US',
+          CPAMP_INSTALL_DIR: installDir,
+          FAKE_DOCKER_VOLUME_EXISTS: '1',
+          PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
+        },
+        encoding: 'utf8',
+      });
+
+      expect(result.status).toBe(1);
+      expect(combinedOutput(result)).toContain('old Docker data volume exists');
+      expect(existsSync(path.join(installDir, 'compose.yaml'))).toBe(false);
+      expect(existsSync(path.join(installDir, 'secrets/cpamp-admin-key'))).toBe(false);
+    } finally {
+      rmSync(installDir, { recursive: true, force: true });
+      rmSync(fakeBin, { recursive: true, force: true });
+    }
+  });
+
+  it('requires the original install scope for non-interactive orphan-volume repair', () => {
+    const installDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-'));
+    const fakeBin = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-bin-'));
+
+    try {
+      writeFakeDocker(fakeBin);
+      const result = spawnSync('bash', [installerPath], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          CPAMP_OPERATION: 'repair',
+          CPAMP_NON_INTERACTIVE: '1',
+          CPAMP_CONFIRM: '1',
+          CPAMP_LANG: 'en-US',
+          CPAMP_INSTALL_DIR: installDir,
+          FAKE_DOCKER_VOLUME_EXISTS: '1',
+          PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
+        },
+        encoding: 'utf8',
+      });
+
+      expect(result.status).toBe(1);
+      expect(combinedOutput(result)).toContain('requires CPAMP_INSTALL_MODE=stack or cpamp');
+      expect(existsSync(path.join(installDir, 'compose.yaml'))).toBe(false);
+    } finally {
+      rmSync(installDir, { recursive: true, force: true });
+      rmSync(fakeBin, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects skipped execution for orphan-volume repair before writing a new secret', () => {
+    const installDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-'));
+    const fakeBin = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-bin-'));
+
+    try {
+      writeFakeDocker(fakeBin);
+      const result = spawnSync('bash', [installerPath], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          CPAMP_OPERATION: 'repair',
+          CPAMP_SKIP_EXECUTE: '1',
+          CPAMP_NON_INTERACTIVE: '1',
+          CPAMP_CONFIRM: '1',
+          CPAMP_LANG: 'en-US',
+          CPAMP_INSTALL_MODE: 'stack',
+          CPAMP_INSTALL_DIR: installDir,
+          FAKE_DOCKER_VOLUME_EXISTS: '1',
+          PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
+        },
+        encoding: 'utf8',
+      });
+
+      expect(result.status).toBe(1);
+      expect(combinedOutput(result)).toContain('cannot use CPAMP_SKIP_EXECUTE=1');
+      expect(existsSync(path.join(installDir, 'secrets/cpamp-admin-key'))).toBe(false);
+    } finally {
+      rmSync(installDir, { recursive: true, force: true });
+      rmSync(fakeBin, { recursive: true, force: true });
+    }
+  });
+
+  it('fails before writing Docker config when the Docker daemon is unavailable', () => {
+    const installDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-'));
+    const fakeBin = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-bin-'));
+
+    try {
+      writeFakeDocker(fakeBin);
+      const result = spawnSync('bash', [installerPath], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          CPAMP_NON_INTERACTIVE: '1',
+          CPAMP_CONFIRM: '1',
+          CPAMP_LANG: 'en-US',
+          CPAMP_INSTALL_MODE: 'stack',
+          CPAMP_DEPLOY_METHOD: 'docker',
+          CPAMP_INSTALL_DIR: installDir,
+          FAKE_DOCKER_DAEMON_OK: '0',
+          PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
+        },
+        encoding: 'utf8',
+      });
+
+      expect(result.status).toBe(1);
+      expect(combinedOutput(result)).toContain('Docker daemon is not available');
+      expect(existsSync(path.join(installDir, '.env'))).toBe(false);
+      expect(existsSync(path.join(installDir, 'compose.yaml'))).toBe(false);
+      expect(existsSync(path.join(installDir, 'secrets/cpamp-admin-key'))).toBe(false);
+    } finally {
+      rmSync(installDir, { recursive: true, force: true });
+      rmSync(fakeBin, { recursive: true, force: true });
+    }
+  });
+
+  it('does not create a replacement admin secret before repair preflight succeeds', () => {
+    const installDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-'));
+    const fakeBin = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-bin-'));
+
+    try {
+      writeFileSync(
+        path.join(installDir, '.env'),
+        'COMPOSE_PROJECT_NAME=cpamp\nCPAMP_IMAGE=example/cpamp:v1\nCPAMP_PORT=18317\n'
+      );
+      writeFileSync(
+        path.join(installDir, 'compose.yaml'),
+        'services:\n  cpa-manager-plus:\n    image: ${CPAMP_IMAGE}\n'
+      );
+      writeFakeDocker(fakeBin);
+
+      const result = spawnSync('bash', [installerPath], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          CPAMP_OPERATION: 'repair',
+          CPAMP_NON_INTERACTIVE: '1',
+          CPAMP_CONFIRM: '1',
+          CPAMP_LANG: 'en-US',
+          CPAMP_INSTALL_DIR: installDir,
+          FAKE_DOCKER_DAEMON_OK: '0',
+          PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
+        },
+        encoding: 'utf8',
+      });
+
+      expect(result.status).toBe(1);
+      expect(combinedOutput(result)).toContain('Docker daemon is not available');
+      expect(existsSync(path.join(installDir, 'secrets/cpamp-admin-key'))).toBe(false);
+    } finally {
+      rmSync(installDir, { recursive: true, force: true });
+      rmSync(fakeBin, { recursive: true, force: true });
+    }
+  });
+
+  it('does not create a half-repaired admin secret when repair execution is skipped', () => {
+    const installDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-'));
+
+    try {
+      writeFileSync(
+        path.join(installDir, '.env'),
+        'COMPOSE_PROJECT_NAME=cpamp\nCPAMP_IMAGE=example/cpamp:v1\nCPAMP_PORT=18317\n'
+      );
+      writeFileSync(
+        path.join(installDir, 'compose.yaml'),
+        'services:\n  cpa-manager-plus:\n    image: ${CPAMP_IMAGE}\n'
+      );
+
+      const result = spawnSync('bash', [installerPath], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          CPAMP_OPERATION: 'repair',
+          CPAMP_SKIP_EXECUTE: '1',
+          CPAMP_NON_INTERACTIVE: '1',
+          CPAMP_CONFIRM: '1',
+          CPAMP_LANG: 'en-US',
+          CPAMP_INSTALL_DIR: installDir,
+        },
+        encoding: 'utf8',
+      });
+
+      expect(result.status).toBe(0);
+      expect(existsSync(path.join(installDir, 'secrets/cpamp-admin-key'))).toBe(false);
+      expect(result.stdout).toContain('upgrade or repair commands were skipped');
+      expect(result.stdout).not.toContain('Admin key saved');
+    } finally {
+      rmSync(installDir, { recursive: true, force: true });
+    }
+  });
+
+  it('repairs an orphaned Docker deployment and verifies the generated admin key', () => {
+    const installDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-'));
+    const fakeBin = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-bin-'));
+    const dockerLog = path.join(
+      os.tmpdir(),
+      `cpamp-installer-docker-${process.pid}-${Date.now()}.log`
+    );
+
+    try {
+      writeFakeDocker(fakeBin);
+      const result = spawnSync('bash', [installerPath], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          CPAMP_OPERATION: 'repair',
+          CPAMP_NON_INTERACTIVE: '1',
+          CPAMP_CONFIRM: '1',
+          CPAMP_LANG: 'en-US',
+          CPAMP_INSTALL_MODE: 'stack',
+          CPAMP_INSTALL_DIR: installDir,
+          FAKE_DOCKER_LOG: dockerLog,
+          FAKE_DOCKER_VOLUME_EXISTS: '1',
+          FAKE_DOCKER_AUTH_OK: '1',
+          PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
+        },
+        encoding: 'utf8',
+      });
+
+      expect(result.status).toBe(0);
+      expect(readFileSync(dockerLog, 'utf8')).toContain(
+        'compose run --rm cpa-manager-plus reset-admin-key --admin-key-file /run/secrets/cpamp_admin_key'
+      );
+      expect(readFileSync(path.join(installDir, 'secrets/cpamp-admin-key'), 'utf8').trim()).toMatch(
+        /^cpamp_[A-Za-z0-9]{32}$/
+      );
+      expect(result.stdout).toContain('Admin key verification passed');
+    } finally {
+      rmSync(installDir, { recursive: true, force: true });
+      rmSync(fakeBin, { recursive: true, force: true });
+      rmSync(dockerLog, { force: true });
+    }
+  });
+
+  it('upgrades a managed Docker install without rewriting config or secrets', () => {
+    const installDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-'));
+    const fakeBin = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-bin-'));
+    const dockerLog = path.join(
+      os.tmpdir(),
+      `cpamp-installer-docker-${process.pid}-${Date.now()}.log`
+    );
+    const envContent =
+      'COMPOSE_PROJECT_NAME=oldproject\nCOMPOSE_PROJECT_NAME=cpamp\nCPAMP_IMAGE=example/cpamp:v1\nCPAMP_PORT=19999\nCPAMP_PORT=18317\n';
+    const composeContent = 'services:\n  cpa-manager-plus:\n    image: ${CPAMP_IMAGE}\n';
+    const secretContent = 'cpamp_existing_admin_key\n';
+
+    try {
+      mkdirSync(path.join(installDir, 'secrets'), { recursive: true });
+      writeFileSync(path.join(installDir, '.env'), envContent);
+      writeFileSync(path.join(installDir, 'compose.yaml'), composeContent);
+      writeFileSync(path.join(installDir, 'secrets/cpamp-admin-key'), secretContent);
+      writeFakeDocker(fakeBin);
+
+      const result = spawnSync('bash', [installerPath], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          CPAMP_OPERATION: 'upgrade',
+          COMPOSE_PROJECT_NAME: 'wrong-project',
+          CPAMP_NON_INTERACTIVE: '1',
+          CPAMP_CONFIRM: '1',
+          CPAMP_LANG: 'en-US',
+          CPAMP_INSTALL_DIR: installDir,
+          FAKE_DOCKER_LOG: dockerLog,
+          FAKE_DOCKER_AUTH_OK: '1',
+          PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
+        },
+        encoding: 'utf8',
+      });
+
+      expect(result.status).toBe(0);
+      expect(readFileSync(path.join(installDir, '.env'), 'utf8')).toBe(envContent);
+      expect(readFileSync(path.join(installDir, 'compose.yaml'), 'utf8')).toBe(composeContent);
+      expect(readFileSync(path.join(installDir, 'secrets/cpamp-admin-key'), 'utf8')).toBe(
+        secretContent
+      );
+      expect(readFileSync(dockerLog, 'utf8')).toContain('compose pull');
+      expect(readFileSync(dockerLog, 'utf8')).toContain('compose up -d');
+      expect(readFileSync(dockerLog, 'utf8')).not.toContain('reset-admin-key');
+      expect(readFileSync(dockerLog, 'utf8')).toContain('cpamp|compose pull');
+      expect(result.stdout).toContain('Public CPAMP port: 18317');
+    } finally {
+      rmSync(installDir, { recursive: true, force: true });
+      rmSync(fakeBin, { recursive: true, force: true });
+      rmSync(dockerLog, { force: true });
+    }
+  });
+
+  it('repairs a managed Docker login without pulling unrelated service images', () => {
+    const installDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-'));
+    const fakeBin = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-bin-'));
+    const dockerLog = path.join(
+      os.tmpdir(),
+      `cpamp-installer-docker-${process.pid}-${Date.now()}.log`
+    );
+
+    try {
+      mkdirSync(path.join(installDir, 'secrets'), { recursive: true });
+      writeFileSync(
+        path.join(installDir, '.env'),
+        'COMPOSE_PROJECT_NAME=cpamp\nCPAMP_IMAGE=example/cpamp:v1\nCPAMP_PORT=18317\n'
+      );
+      writeFileSync(
+        path.join(installDir, 'compose.yaml'),
+        'services:\n  cpa-manager-plus:\n    image: ${CPAMP_IMAGE}\n'
+      );
+      writeFileSync(path.join(installDir, 'secrets/cpamp-admin-key'), 'cpamp_existing_admin_key\n');
+      writeFakeDocker(fakeBin);
+
+      const result = spawnSync('bash', [installerPath], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          CPAMP_OPERATION: 'repair',
+          CPAMP_NON_INTERACTIVE: '1',
+          CPAMP_CONFIRM: '1',
+          CPAMP_LANG: 'en-US',
+          CPAMP_INSTALL_DIR: installDir,
+          FAKE_DOCKER_LOG: dockerLog,
+          FAKE_DOCKER_AUTH_OK: '1',
+          PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
+        },
+        encoding: 'utf8',
+      });
+
+      expect(result.status).toBe(0);
+      const calls = readFileSync(dockerLog, 'utf8');
+      expect(calls).toContain(
+        'compose run --rm cpa-manager-plus reset-admin-key --admin-key-file /run/secrets/cpamp_admin_key'
+      );
+      expect(calls).not.toContain('compose pull');
+    } finally {
+      rmSync(installDir, { recursive: true, force: true });
+      rmSync(fakeBin, { recursive: true, force: true });
+      rmSync(dockerLog, { force: true });
+    }
+  });
+
+  it('does not report success when post-start admin key verification fails', () => {
+    const installDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-'));
+    const fakeBin = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-bin-'));
+
+    try {
+      mkdirSync(path.join(installDir, 'secrets'), { recursive: true });
+      writeFileSync(
+        path.join(installDir, '.env'),
+        'COMPOSE_PROJECT_NAME=cpamp\nCPAMP_IMAGE=example/cpamp:v1\nCPAMP_PORT=18317\n'
+      );
+      writeFileSync(
+        path.join(installDir, 'compose.yaml'),
+        'services:\n  cpa-manager-plus:\n    image: ${CPAMP_IMAGE}\n'
+      );
+      writeFileSync(path.join(installDir, 'secrets/cpamp-admin-key'), 'cpamp_wrong_admin_key\n');
+      writeFakeDocker(fakeBin);
+
+      const result = spawnSync('bash', [installerPath], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          CPAMP_OPERATION: 'upgrade',
+          CPAMP_NON_INTERACTIVE: '1',
+          CPAMP_CONFIRM: '1',
+          CPAMP_LANG: 'en-US',
+          CPAMP_INSTALL_DIR: installDir,
+          FAKE_DOCKER_AUTH_OK: '0',
+          PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
+        },
+        encoding: 'utf8',
+      });
+
+      expect(result.status).toBe(1);
+      expect(combinedOutput(result)).toContain('admin key verification failed');
+      expect(result.stdout).not.toContain('Install steps completed');
+    } finally {
+      rmSync(installDir, { recursive: true, force: true });
+      rmSync(fakeBin, { recursive: true, force: true });
+    }
+  });
+
+  it('backs up generated config before regenerating a managed Docker install', () => {
+    const installDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-'));
+    const oldEnv = 'COMPOSE_PROJECT_NAME=cpamp\nCPAMP_IMAGE=example/old:v1\nCPAMP_PORT=18317\n';
+    const oldCompose = 'services:\n  cpa-manager-plus:\n    image: old\n';
+
+    try {
+      mkdirSync(path.join(installDir, 'secrets'), { recursive: true });
+      writeFileSync(path.join(installDir, '.env'), oldEnv);
+      writeFileSync(path.join(installDir, 'compose.yaml'), oldCompose);
+      writeFileSync(path.join(installDir, 'secrets/cpamp-admin-key'), 'cpamp_existing_admin_key\n');
+
+      const result = spawnSync('bash', [installerPath], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          CPAMP_OPERATION: 'regenerate',
+          CPAMP_SKIP_EXECUTE: '1',
+          CPAMP_NON_INTERACTIVE: '1',
+          CPAMP_CONFIRM: '1',
+          CPAMP_LANG: 'en-US',
+          CPAMP_INSTALL_MODE: 'cpamp',
+          CPAMP_DEPLOY_METHOD: 'docker',
+          CPAMP_CPA_CONNECTION_MODE: 'setup',
+          CPAMP_INSTALL_DIR: installDir,
+        },
+        encoding: 'utf8',
+      });
+
+      expect(result.status).toBe(0);
+      const backupNames = readdirSync(path.join(installDir, 'backups'));
+      expect(backupNames).toHaveLength(1);
+      const backupDir = path.join(installDir, 'backups', backupNames[0]);
+      expect(readFileSync(path.join(backupDir, '.env'), 'utf8')).toBe(oldEnv);
+      expect(readFileSync(path.join(backupDir, 'compose.yaml'), 'utf8')).toBe(oldCompose);
+      expect(readFileSync(path.join(installDir, 'secrets/cpamp-admin-key'), 'utf8')).toBe(
+        'cpamp_existing_admin_key\n'
+      );
+      expect(readFileSync(path.join(installDir, '.env'), 'utf8')).toContain(
+        'CPAMP_IMAGE=example/old:v1'
+      );
+      expect(readFileSync(path.join(installDir, '.env'), 'utf8')).toContain('CPAMP_PORT=18317');
+      expect(result.stdout).toContain('Previous config backed up to');
+    } finally {
+      rmSync(installDir, { recursive: true, force: true });
+    }
+  });
+
+  it('blocks a partial Docker install before writing additional generated files', () => {
     const installDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-'));
 
     try {
@@ -342,9 +886,46 @@ describe('installer script', () => {
       });
 
       expect(result.status).toBe(1);
-      expect(combinedOutput(result)).toContain('File already exists');
+      expect(combinedOutput(result)).toContain('Non-interactive mode requires CPAMP_OPERATION');
       expect(existsSync(path.join(installDir, '.env'))).toBe(false);
       expect(existsSync(path.join(installDir, 'secrets/cpamp-admin-key'))).toBe(false);
+    } finally {
+      rmSync(installDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not change existing admin-secret permissions during dry runs', () => {
+    const installDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-'));
+    const secretFile = path.join(installDir, 'secrets/cpamp-admin-key');
+
+    try {
+      mkdirSync(path.dirname(secretFile), { recursive: true });
+      writeFileSync(
+        path.join(installDir, '.env'),
+        'COMPOSE_PROJECT_NAME=cpamp\nCPAMP_IMAGE=example/cpamp:v1\nCPAMP_PORT=18317\n'
+      );
+      writeFileSync(
+        path.join(installDir, 'compose.yaml'),
+        'services:\n  cpa-manager-plus:\n    image: ${CPAMP_IMAGE}\n'
+      );
+      writeFileSync(secretFile, 'cpamp_existing_admin_key\n');
+      chmodSync(secretFile, 0o644);
+
+      const result = spawnSync('bash', [installerPath], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          CPAMP_DRY_RUN: '1',
+          CPAMP_OPERATION: 'upgrade',
+          CPAMP_NON_INTERACTIVE: '1',
+          CPAMP_LANG: 'en-US',
+          CPAMP_INSTALL_DIR: installDir,
+        },
+        encoding: 'utf8',
+      });
+
+      expect(result.status).toBe(0);
+      expect(statSync(secretFile).mode & 0o777).toBe(0o644);
     } finally {
       rmSync(installDir, { recursive: true, force: true });
     }
@@ -462,7 +1043,10 @@ describe('installer script', () => {
     try {
       mkdirSync(packageDir, { recursive: true });
       const fakeBinary = path.join(packageDir, 'cpa-manager-plus');
-      writeFileSync(fakeBinary, '#!/usr/bin/env bash\necho "fake native process exited" >&2\nexit 42\n');
+      writeFileSync(
+        fakeBinary,
+        '#!/usr/bin/env bash\necho "fake native process exited" >&2\nexit 42\n'
+      );
       chmodSync(fakeBinary, 0o755);
       const tarResult = spawnSync('tar', ['-czf', archivePath, '-C', fixtureDir, packageName], {
         cwd: repoRoot,
@@ -518,7 +1102,9 @@ exit 22
       });
 
       expect(result.status).toBe(1);
-      expect(combinedOutput(result)).toContain('Native CPAMP process exited before becoming healthy');
+      expect(combinedOutput(result)).toContain(
+        'Native CPAMP process exited before becoming healthy'
+      );
       expect(combinedOutput(result)).toContain('fake native process exited');
     } finally {
       rmSync(installDir, { recursive: true, force: true });

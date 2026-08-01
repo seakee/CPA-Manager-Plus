@@ -1,27 +1,26 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/Button';
-import {
-  IconChartLine,
-  IconCheck,
-  IconInbox,
-  IconRefreshCw,
-  IconShield,
-  IconTrash2,
-} from '@/components/ui/icons';
+import { IconRefreshCw, IconShield, IconTrash2 } from '@/components/ui/icons';
 import { Input } from '@/components/ui/Input';
 import { Select, type SelectOption } from '@/components/ui/Select';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import { CodexInspectionConfigOverview } from '@/features/monitoring/components/CodexInspectionConfigOverview';
+import { CodexInspectionLogsPanel } from '@/features/monitoring/components/CodexInspectionLogsPanel';
 import { CodexInspectionModeTabs } from '@/features/monitoring/components/CodexInspectionModeTabs';
 import { Panel } from '@/features/monitoring/components/CodexInspectionPanels';
 import { CodexInspectionResultsPanel } from '@/features/monitoring/components/CodexInspectionResultsPanel';
+import { CodexInspectionStopButton } from '@/features/monitoring/components/CodexInspectionStopButton';
 import { InspectionConfigDrawer } from '@/features/monitoring/components/InspectionConfigDrawer';
 import { InspectionConfigFields } from '@/features/monitoring/components/InspectionConfigFields';
+import {
+  SummaryCard as MonitoringSummaryCard,
+  type SummaryCardProps as MonitoringSummaryCardProps,
+} from '@/features/monitoring/components/MonitoringShared';
 import { CodexReauthDialog } from '@/features/oauth/CodexReauthDialog';
 import type { CodexReauthTarget } from '@/features/oauth/codexReauthModel';
-import { formatPercent } from '@/features/monitoring/components/accountOverviewPresentation';
 import {
   type CodexInspectionAction,
   type CodexInspectionResultItem,
@@ -31,28 +30,43 @@ import {
   CODEX_INSPECTION_RESULT_PAGE_SIZE_OPTIONS,
   buildCodexInspectionPaginationState,
   buildConfigOverviewItems,
-  type CodexInspectionSummaryAccent,
   countHandlingStates,
   filterInspectionResults,
   formatActionLabel,
+  formatInspectionLogsForClipboard,
+  formatPercent,
   formatTimestamp,
   getActionFilterCounts,
   getCanonicalServerCodexInspectionActionIds,
   getMixedServerCodexInspectionActionIds,
   isActionableServerCodexInspectionResult,
+  isHandledServerCodexInspectionResult,
+  isPendingServerReauthResult,
   normalizeServerCodexInspectionActionStatus,
+  toServerInspectionLogViewEntry,
   type ActionFilter,
   type HandlingFilter,
+  type InspectionLogLevelFilter,
   type StatusTone,
   validateInspectionConfigDraft,
   validateInspectionConfigFields,
 } from '@/features/monitoring/model/codexInspectionPresentation';
+import {
+  DEFAULT_CODEX_INSPECTION_SETTINGS,
+  codexInspectionTargetTypesToSelection,
+  normalizeCodexInspectionTargetTypes,
+} from '@/features/monitoring/model/codexInspectionSettings';
+import {
+  findCancellableRun,
+  getRunStatusLabel,
+  hasActiveRun,
+  isActiveRun,
+} from '@/features/monitoring/model/serverCodexInspectionLifecycle';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import {
   getUsageServiceErrorCode,
   monitoringAnalyticsApi,
   usageServiceApi,
-  type CodexInspectionLog,
   type CodexInspectionResult,
   type CodexInspectionRun,
   type CodexInspectionRunDetail,
@@ -70,7 +84,7 @@ import {
   getHeaderSnapshotRecoverAtMs,
   getHeaderSnapshotTraceId,
   getHeaderSnapshotUsedPercent,
-  getUsageHeaderSnapshotForIdentity,
+  getUsageHeaderSnapshotMatchForIdentity,
 } from '@/utils/usageHeaderSnapshots';
 import styles from './CodexInspectionPage.module.scss';
 
@@ -80,15 +94,20 @@ type ServerCodexInspectionDraft = {
   intervalMinutes: string;
   timePoints: string;
   timeZone: string;
-  targetType: string;
+  targetTypes: string;
   workers: string;
   deleteWorkers: string;
   timeout: string;
   retries: string;
   userAgent: string;
+  xaiInferenceUserAgent: string;
+  xaiInferenceEnabled: boolean;
+  xaiInferenceModel: string;
+  xaiInferencePrompt: string;
   usedPercentThreshold: string;
   sampleSize: string;
   autoActionMode: string;
+  autoRecoverEnabled: boolean;
 };
 
 type NormalizedServerCodexInspectionConfig = {
@@ -99,15 +118,21 @@ type NormalizedServerCodexInspectionConfig = {
     timePoints: string[];
     timeZone: string;
   };
+  targetTypes: string[];
   targetType: string;
   workers: number;
   deleteWorkers: number;
   timeout: number;
   retries: number;
   userAgent: string;
+  xaiInferenceUserAgent: string;
+  xaiInferenceEnabled: boolean;
+  xaiInferenceModel: string;
+  xaiInferencePrompt: string;
   usedPercentThreshold: number;
   sampleSize: number;
   autoActionMode: string;
+  autoRecoverEnabled: boolean;
 };
 
 const DEFAULT_SERVER_CODEX_CONFIG: NormalizedServerCodexInspectionConfig = {
@@ -118,15 +143,21 @@ const DEFAULT_SERVER_CODEX_CONFIG: NormalizedServerCodexInspectionConfig = {
     timePoints: [],
     timeZone: '',
   },
+  targetTypes: ['codex'],
   targetType: 'codex',
   workers: 4,
   deleteWorkers: 4,
   timeout: 15000,
   retries: 0,
   userAgent: 'codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal',
+  xaiInferenceUserAgent: DEFAULT_CODEX_INSPECTION_SETTINGS.xaiInferenceUserAgent,
+  xaiInferenceEnabled: false,
+  xaiInferenceModel: DEFAULT_CODEX_INSPECTION_SETTINGS.xaiInferenceModel,
+  xaiInferencePrompt: DEFAULT_CODEX_INSPECTION_SETTINGS.xaiInferencePrompt,
   usedPercentThreshold: 100,
   sampleSize: 0,
   autoActionMode: 'none',
+  autoRecoverEnabled: false,
 };
 
 const RUNS_LIMIT = 30;
@@ -182,7 +213,20 @@ const resolveServerCodexConfig = (
           ? schedule.timeZone
           : DEFAULT_SERVER_CODEX_CONFIG.schedule.timeZone,
     },
-    targetType: config?.targetType || DEFAULT_SERVER_CODEX_CONFIG.targetType,
+    targetTypes: (() => {
+      const targetTypes = normalizeCodexInspectionTargetTypes(
+        config?.targetTypes,
+        config?.targetType
+      );
+      return targetTypes.length > 0 ? targetTypes : DEFAULT_SERVER_CODEX_CONFIG.targetTypes;
+    })(),
+    targetType: (() => {
+      const targetTypes = normalizeCodexInspectionTargetTypes(
+        config?.targetTypes,
+        config?.targetType
+      );
+      return targetTypes[0] ?? DEFAULT_SERVER_CODEX_CONFIG.targetType;
+    })(),
     workers:
       config?.workers && config.workers > 0 ? config.workers : DEFAULT_SERVER_CODEX_CONFIG.workers,
     deleteWorkers:
@@ -196,6 +240,13 @@ const resolveServerCodexConfig = (
         ? config.retries
         : DEFAULT_SERVER_CODEX_CONFIG.retries,
     userAgent: config?.userAgent || DEFAULT_SERVER_CODEX_CONFIG.userAgent,
+    xaiInferenceUserAgent:
+      config?.xaiInferenceUserAgent || DEFAULT_SERVER_CODEX_CONFIG.xaiInferenceUserAgent,
+    xaiInferenceEnabled:
+      config?.xaiInferenceEnabled ?? DEFAULT_SERVER_CODEX_CONFIG.xaiInferenceEnabled,
+    xaiInferenceModel: config?.xaiInferenceModel || DEFAULT_SERVER_CODEX_CONFIG.xaiInferenceModel,
+    xaiInferencePrompt:
+      config?.xaiInferencePrompt || DEFAULT_SERVER_CODEX_CONFIG.xaiInferencePrompt,
     usedPercentThreshold:
       config?.usedPercentThreshold !== undefined
         ? config.usedPercentThreshold
@@ -205,6 +256,8 @@ const resolveServerCodexConfig = (
         ? config.sampleSize
         : DEFAULT_SERVER_CODEX_CONFIG.sampleSize,
     autoActionMode: config?.autoActionMode || DEFAULT_SERVER_CODEX_CONFIG.autoActionMode,
+    autoRecoverEnabled:
+      config?.autoRecoverEnabled ?? DEFAULT_SERVER_CODEX_CONFIG.autoRecoverEnabled,
   };
 };
 
@@ -216,15 +269,20 @@ const toDraft = (config?: ManagerCodexInspectionConfig | null): ServerCodexInspe
     intervalMinutes: String(resolved.schedule.intervalMinutes),
     timePoints: resolved.schedule.timePoints.join(', '),
     timeZone: resolved.schedule.timeZone,
-    targetType: resolved.targetType,
+    targetTypes: codexInspectionTargetTypesToSelection(resolved.targetTypes, resolved.targetType),
     workers: String(resolved.workers),
     deleteWorkers: String(resolved.deleteWorkers),
     timeout: String(resolved.timeout),
     retries: String(resolved.retries),
     userAgent: resolved.userAgent,
+    xaiInferenceUserAgent: resolved.xaiInferenceUserAgent,
+    xaiInferenceEnabled: resolved.xaiInferenceEnabled,
+    xaiInferenceModel: resolved.xaiInferenceModel,
+    xaiInferencePrompt: resolved.xaiInferencePrompt,
     usedPercentThreshold: String(resolved.usedPercentThreshold),
     sampleSize: String(resolved.sampleSize),
     autoActionMode: resolved.autoActionMode,
+    autoRecoverEnabled: resolved.autoRecoverEnabled,
   };
 };
 
@@ -305,15 +363,21 @@ const createConfigFromDraft = (
             timePoints,
             timeZone: draft.timeZone.trim(),
           },
-    targetType: validation.values.targetType,
+    targetTypes: validation.values.targetTypes,
+    targetType: validation.values.targetTypes[0],
     workers: validation.values.workers,
     deleteWorkers: validation.values.deleteWorkers,
     timeout: validation.values.timeout,
     retries: validation.values.retries,
     userAgent: validation.values.userAgent,
+    xaiInferenceUserAgent: validation.values.xaiInferenceUserAgent,
+    xaiInferenceEnabled: validation.values.xaiInferenceEnabled,
+    xaiInferenceModel: validation.values.xaiInferenceModel,
+    xaiInferencePrompt: validation.values.xaiInferencePrompt,
     usedPercentThreshold: validation.values.usedPercentThreshold,
     sampleSize: validation.values.sampleSize,
     autoActionMode: validation.values.autoActionMode,
+    autoRecoverEnabled: validation.values.autoRecoverEnabled,
   };
 };
 
@@ -325,48 +389,20 @@ const statusToneClass: Record<StatusTone, string> = {
   bad: styles['tone-bad'],
 };
 
-const summaryAccentClassMap: Record<CodexInspectionSummaryAccent, string> = {
-  blue: styles.summaryAccentBlue,
-  cyan: styles.summaryAccentCyan,
-  red: styles.summaryAccentRed,
-  amber: styles.summaryAccentAmber,
-  green: styles.summaryAccentGreen,
-  violet: styles.summaryAccentViolet,
-};
-
-const logLevelClass: Record<string, string> = {
-  info: styles.logInfo,
-  success: styles.logSuccess,
-  warning: styles.logWarning,
-  error: styles.logError,
-};
-
 function getRunTone(run?: CodexInspectionRun | null): StatusTone {
   switch (run?.status) {
     case 'completed':
+    case 'cancelled':
       return 'good';
     case 'failed':
       return 'bad';
     case 'running':
+    case 'cancelling':
       return 'info';
+    case 'interrupted':
+      return 'warn';
     default:
       return 'idle';
-  }
-}
-
-function getRunStatusLabel(
-  run: CodexInspectionRun | null | undefined,
-  t: ReturnType<typeof useTranslation>['t']
-) {
-  switch (run?.status) {
-    case 'completed':
-      return t('monitoring.codex_inspection_status_success');
-    case 'failed':
-      return t('monitoring.codex_inspection_status_error');
-    case 'running':
-      return t('monitoring.codex_inspection_status_running');
-    default:
-      return t('monitoring.codex_inspection_status_idle');
   }
 }
 
@@ -387,34 +423,6 @@ function formatTrigger(
   if (run.triggerType === 'scheduled')
     return t('monitoring.server_codex_inspection_trigger_scheduled');
   return t('monitoring.server_codex_inspection_trigger_manual');
-}
-
-function formatResultStateHeader(
-  run: CodexInspectionRun | null | undefined,
-  t: ReturnType<typeof useTranslation>['t']
-) {
-  if (run?.triggerType === 'scheduled') {
-    return t('monitoring.server_codex_inspection_result_state_scheduled');
-  }
-  if (run?.triggerType === 'manual') {
-    return t('monitoring.server_codex_inspection_result_state_manual');
-  }
-  return t('monitoring.server_codex_inspection_result_state_snapshot');
-}
-
-function formatResultsDescription(
-  run: CodexInspectionRun | null | undefined,
-  locale: string,
-  t: ReturnType<typeof useTranslation>['t']
-) {
-  const time = run?.finishedAtMs ? formatTimestamp(run.finishedAtMs, locale) : t('common.not_set');
-  if (run?.triggerType === 'manual') {
-    return t('monitoring.server_codex_inspection_results_desc_manual', { time });
-  }
-  if (run?.triggerType === 'scheduled') {
-    return t('monitoring.server_codex_inspection_results_desc_scheduled', { time });
-  }
-  return t('monitoring.server_codex_inspection_results_desc');
 }
 
 function formatSchedule(
@@ -440,15 +448,20 @@ function getComparableConfig(config: NormalizedServerCodexInspectionConfig) {
     intervalMinutes: config.schedule.intervalMinutes,
     timePoints: normalizeTimePointList(config.schedule.timePoints),
     timeZone: (config.schedule.timeZone || '').trim(),
-    targetType: config.targetType.trim(),
+    targetTypes: normalizeCodexInspectionTargetTypes(config.targetTypes, config.targetType),
     workers: config.workers,
     deleteWorkers: config.deleteWorkers,
     timeout: config.timeout,
     retries: config.retries,
     userAgent: config.userAgent.trim(),
+    xaiInferenceUserAgent: config.xaiInferenceUserAgent.trim(),
+    xaiInferenceEnabled: config.xaiInferenceEnabled,
+    xaiInferenceModel: config.xaiInferenceModel.trim(),
+    xaiInferencePrompt: config.xaiInferencePrompt.trim(),
     usedPercentThreshold: config.usedPercentThreshold,
     sampleSize: config.sampleSize,
     autoActionMode: config.autoActionMode,
+    autoRecoverEnabled: config.autoRecoverEnabled,
   };
 }
 
@@ -472,7 +485,7 @@ function resolveActionLabel(action: string, t: ReturnType<typeof useTranslation>
   return action || t('common.not_set');
 }
 
-function formatServerActionStatusLabel(
+function formatServerTerminalActionStatusLabel(
   item: CodexInspectionResult,
   t: ReturnType<typeof useTranslation>['t']
 ) {
@@ -488,40 +501,7 @@ function formatServerActionStatusLabel(
   if (status === 'skipped') {
     return t('monitoring.server_codex_inspection_action_status_skipped');
   }
-  if (status === 'needs_review') {
-    return t('monitoring.server_codex_inspection_action_status_needs_review');
-  }
-  if (status === 'pending') {
-    return t('monitoring.server_codex_inspection_action_status_pending');
-  }
   return '';
-}
-
-function formatServerResultStateToken(
-  value: string | undefined,
-  t: ReturnType<typeof useTranslation>['t']
-) {
-  const normalized = (value ?? '').trim().toLowerCase();
-  if (!normalized) return '';
-  if (normalized === 'active') return t('monitoring.state_active');
-  if (normalized === 'disabled') return t('monitoring.state_disabled');
-  if (normalized === 'inactive') return t('monitoring.state_inactive');
-  if (normalized === 'enabled') return t('monitoring.codex_inspection_state_enabled');
-  return value?.trim() ?? '';
-}
-
-function formatServerResultStateDetail(
-  item: CodexInspectionResult,
-  t: ReturnType<typeof useTranslation>['t']
-) {
-  const errorText = item.actionError || item.errorDetail || item.error;
-  if (errorText) return errorText;
-
-  return (
-    formatServerResultStateToken(item.status, t) ||
-    formatServerResultStateToken(item.state, t) ||
-    '--'
-  );
 }
 
 function normalizeServerResultAction(action: string): CodexInspectionAction {
@@ -555,12 +535,20 @@ function buildObservedHeaderEvidence(
 ) {
   if (!snapshot) return [];
   const evidence: string[] = [];
+  const observedAt = formatObservedHeaderRecoverAt(snapshot.timestamp_ms, locale);
+  if (observedAt) {
+    evidence.push(
+      t('monitoring.codex_inspection_observed_header_at', {
+        time: observedAt,
+      })
+    );
+  }
   const quotaParts = [
     getHeaderSnapshotPlanType(snapshot),
     (() => {
       const usedPercent = getHeaderSnapshotUsedPercent(snapshot);
       return typeof usedPercent === 'number' && Number.isFinite(usedPercent)
-        ? formatPercent(usedPercent / 100)
+        ? formatPercent(usedPercent)
         : '';
     })(),
     (() => {
@@ -596,8 +584,9 @@ function toServerResultItem(
   snapshot: UsageHeaderSnapshot | undefined,
   locale: string
 ): CodexInspectionResultItem {
-  const actionStatusLabel = formatServerActionStatusLabel(item, t);
-  const reasonParts = [item.actionReason, actionStatusLabel].filter(Boolean);
+  const actionReason = item.actionReason?.startsWith('monitoring.')
+    ? t(item.actionReason)
+    : item.actionReason;
   const observedHeaderEvidence = buildObservedHeaderEvidence(snapshot, locale, t);
   return {
     key: `server-${item.id || item.accountKey}`,
@@ -607,14 +596,16 @@ function toServerResultItem(
     accountId: item.accountId ?? null,
     provider: item.provider,
     disabled: item.disabled,
+    autoRecoverOwned: item.autoRecoverEligible === true,
     status: item.status ?? '',
     state: item.state ?? '',
     raw: item as unknown as CodexInspectionResultItem['raw'],
     action: normalizeServerResultAction(item.action),
-    actionReason: reasonParts.join(' · '),
+    actionReason,
     statusCode: item.statusCode ?? null,
     usedPercent: item.usedPercent ?? null,
     isQuota: item.isQuota,
+    autoRecoverEligible: item.autoRecoverEligible === true,
     error: item.error ?? '',
     planType: item.planType ?? null,
     quotaWindows: item.quotaWindows?.map((window) => ({
@@ -626,7 +617,8 @@ function toServerResultItem(
       limitWindowSeconds: window.limitWindowSeconds ?? null,
     })),
     errorKind: item.errorKind,
-    errorDetail: item.actionError || item.errorDetail || '',
+    errorDetail: item.errorDetail || '',
+    actionHandled: isHandledServerCodexInspectionResult(item),
     observedHeaderEvidence,
     observedHeaderAtMs: snapshot?.timestamp_ms ?? null,
   };
@@ -675,6 +667,7 @@ function formatServiceHost(base: string): string {
 
 export function ServerCodexInspectionPage() {
   const { t, i18n } = useTranslation();
+  const navigate = useNavigate();
   const managementKey = useAuthStore((state) => state.managementKey);
   const featureAvailability = usePanelFeatureAvailability();
   const showNotification = useNotificationStore((state) => state.showNotification);
@@ -690,6 +683,7 @@ export function ServerCodexInspectionPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [running, setRunning] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState('');
   const [logsCollapsed, setLogsCollapsed] = useState(false);
   const [actionFilter, setActionFilter] = useState<ActionFilter>('all');
@@ -698,9 +692,7 @@ export function ServerCodexInspectionPage() {
   const [resultPageSize, setResultPageSize] = useState<number>(
     CODEX_INSPECTION_RESULT_PAGE_SIZE_OPTIONS[0]
   );
-  const [logLevelFilter, setLogLevelFilter] = useState<
-    'all' | 'info' | 'success' | 'warning' | 'error'
-  >('all');
+  const [logLevelFilter, setLogLevelFilter] = useState<InspectionLogLevelFilter>('all');
   const [executingResultIds, setExecutingResultIds] = useState<Set<number>>(() => new Set());
   const [executingAllActions, setExecutingAllActions] = useState(false);
   const [configDrawerOpen, setConfigDrawerOpen] = useState(false);
@@ -708,16 +700,57 @@ export function ServerCodexInspectionPage() {
   const [codexReauthTarget, setCodexReauthTarget] = useState<CodexReauthTarget | null>(null);
   const refreshInFlightRef = useRef(false);
   const actionInFlightRef = useRef(false);
+  const detailRequestGenerationRef = useRef(0);
+  const runListMutationGenerationRef = useRef(0);
+  const selectedRunIdRef = useRef<number | null>(null);
+  const logListRef = useRef<HTMLDivElement | null>(null);
+  const previousServerLogCursorRef = useRef<{
+    runId: number | null;
+    latestLogId: number | null;
+  }>({ runId: null, latestLogId: null });
+  const serverLogEntries = useMemo(
+    () =>
+      (detail?.logs ?? []).map((entry) => toServerInspectionLogViewEntry(entry, detail?.run, t)),
+    [detail, t]
+  );
+
+  const selectRunId = useCallback((id: number | null) => {
+    selectedRunIdRef.current = id;
+    detailRequestGenerationRef.current += 1;
+    setSelectedRunId(id);
+  }, []);
 
   const loadRunDetail = useCallback(
     async (base: string, id: number) => {
-      const nextDetail = await usageServiceApi.getCodexInspectionRun(base, managementKey, id);
+      if (selectedRunIdRef.current !== id) return null;
+      const requestGeneration = ++detailRequestGenerationRef.current;
+      let nextDetail: CodexInspectionRunDetail;
+      try {
+        nextDetail = await usageServiceApi.getCodexInspectionRun(base, managementKey, id);
+      } catch (error) {
+        if (
+          requestGeneration !== detailRequestGenerationRef.current ||
+          selectedRunIdRef.current !== id
+        ) {
+          return null;
+        }
+        throw error;
+      }
+      if (
+        requestGeneration !== detailRequestGenerationRef.current ||
+        selectedRunIdRef.current !== id
+      ) {
+        return null;
+      }
       setDetail(nextDetail);
-      setSelectedRunId(nextDetail.run.id);
       return nextDetail;
     },
     [managementKey]
   );
+
+  useEffect(() => {
+    setLogLevelFilter('all');
+  }, [detail?.run.id]);
 
   const loadPageData = useCallback(async () => {
     setLoading(true);
@@ -746,17 +779,18 @@ export function ServerCodexInspectionPage() {
       setRuns(runsResponse.items);
       const nextSelectedId = runsResponse.items[0]?.id;
       if (nextSelectedId) {
+        selectRunId(nextSelectedId);
         await loadRunDetail(resolvedBase, nextSelectedId);
       } else {
         setDetail(null);
-        setSelectedRunId(null);
+        selectRunId(null);
       }
     } catch (error: unknown) {
       setError(getUsageServiceDisplayError(error, t));
       setRuns([]);
       setDetail(null);
       setHeaderSnapshots([]);
-      setSelectedRunId(null);
+      selectRunId(null);
     } finally {
       setLoading(false);
     }
@@ -765,6 +799,7 @@ export function ServerCodexInspectionPage() {
     featureAvailability.serverCodexInspectionAvailable,
     loadRunDetail,
     managementKey,
+    selectRunId,
     t,
   ]);
 
@@ -805,37 +840,37 @@ export function ServerCodexInspectionPage() {
     (!normalizedDraftConfig || !configsEquivalent(selectedConfig, normalizedDraftConfig))
   );
   const savedScheduleLabel = formatSchedule(selectedConfig, t);
-  const hasRunningRun =
-    runs.some((run) => run.status === 'running') || detail?.run.status === 'running';
+  const hasRunningRun = hasActiveRun(runs, detail?.run);
   const latestRun = runs[0] ?? null;
   const activeRun = detail?.run ?? latestRun;
+  const cancellableRun = findCancellableRun(runs, activeRun);
   const activeTone = getRunTone(activeRun);
-  const actionCounts = activeRun
-    ? activeRun.deleteCount +
-      activeRun.disableCount +
-      activeRun.enableCount +
-      (activeRun.reauthCount ?? 0)
-    : 0;
 
   const resultRows = useMemo(() => detail?.results ?? [], [detail?.results]);
+  const headerSnapshotCutoffMs =
+    detail?.run.finishedAtMs ?? detail?.run.updatedAtMs ?? Number.POSITIVE_INFINITY;
   const headerSnapshotLookup = useMemo(
-    () => buildUsageHeaderSnapshotLookup(headerSnapshots),
-    [headerSnapshots]
+    () =>
+      buildUsageHeaderSnapshotLookup(
+        headerSnapshots.filter((snapshot) => snapshot.timestamp_ms <= headerSnapshotCutoffMs)
+      ),
+    [headerSnapshotCutoffMs, headerSnapshots]
   );
   const resultItems = useMemo(
     () =>
-      resultRows.map((item) =>
-        toServerResultItem(
+      resultRows.map((item) => {
+        const snapshotMatch = getUsageHeaderSnapshotMatchForIdentity(headerSnapshotLookup, {
+          fileName: item.fileName,
+          authIndex: item.authIndex,
+          account: item.accountId || item.displayAccount,
+        });
+        return toServerResultItem(
           item,
           t,
-          getUsageHeaderSnapshotForIdentity(headerSnapshotLookup, {
-            fileName: item.fileName,
-            authIndex: item.authIndex,
-            account: item.accountId || item.displayAccount,
-          }),
+          snapshotMatch.confidence === 'high' ? snapshotMatch.snapshot : undefined,
           i18n.language
-        )
-      ),
+        );
+      }),
     [headerSnapshotLookup, i18n.language, resultRows, t]
   );
   const resultByKey = useMemo(() => {
@@ -925,28 +960,36 @@ export function ServerCodexInspectionPage() {
         setError('');
       }
       try {
+        const mutationGeneration = runListMutationGenerationRef.current;
         const response = await usageServiceApi.listCodexInspectionRuns(
           serviceBase,
           managementKey,
           RUNS_LIMIT
         );
+        // A start/cancel response is newer than any list request that began
+        // before that lifecycle mutation completed. Discard the stale snapshot
+        // so it cannot resurrect a running action after cancellation.
+        if (mutationGeneration !== runListMutationGenerationRef.current) return;
         setRuns(response.items);
+        const currentSelectedRunId = selectedRunIdRef.current;
         const selectionStillValid =
-          selectedRunId != null && response.items.some((run) => run.id === selectedRunId);
+          currentSelectedRunId != null &&
+          response.items.some((run) => run.id === currentSelectedRunId);
         if (selectionStillValid) {
           // 静默轮询时保留用户正在查看的历史详情,避免每 30s 重建详情导致结果表/日志
           // 重渲染、打断操作;但正在运行的巡检或尚无详情时仍需刷新以获取最新进度。
-          const watchingRunning = detail?.run.status === 'running';
+          const watchingRunning = isActiveRun(detail?.run);
           if (!silent || !detail || watchingRunning) {
-            await loadRunDetail(serviceBase, selectedRunId);
+            await loadRunDetail(serviceBase, currentSelectedRunId);
           }
         } else {
           const fallbackId = response.items[0]?.id;
           if (fallbackId) {
+            selectRunId(fallbackId);
             await loadRunDetail(serviceBase, fallbackId);
           } else {
             setDetail(null);
-            setSelectedRunId(null);
+            selectRunId(null);
           }
         }
       } catch (error: unknown) {
@@ -956,18 +999,26 @@ export function ServerCodexInspectionPage() {
         refreshInFlightRef.current = false;
       }
     },
-    [detail, loadPageData, loadRunDetail, managementKey, selectedRunId, serviceBase, t]
+    [detail, loadPageData, loadRunDetail, managementKey, selectRunId, serviceBase, t]
   );
 
   useEffect(() => {
     if (!serviceBase || (!selectedConfig.enabled && !hasRunningRun)) return;
     const timer = window.setInterval(() => {
-      if (saving || running || actionInFlightRef.current) return;
+      if (saving || running || cancelling || actionInFlightRef.current) return;
       void refreshRuns({ silent: true });
     }, 30_000);
 
     return () => window.clearInterval(timer);
-  }, [hasRunningRun, refreshRuns, running, saving, selectedConfig.enabled, serviceBase]);
+  }, [
+    cancelling,
+    hasRunningRun,
+    refreshRuns,
+    running,
+    saving,
+    selectedConfig.enabled,
+    serviceBase,
+  ]);
 
   const handleSave = async () => {
     if (!serviceBase || !managerConfig) {
@@ -1035,15 +1086,32 @@ export function ServerCodexInspectionPage() {
     setError('');
     try {
       const nextDetail = await usageServiceApi.runCodexInspection(serviceBase, managementKey);
+      const mutationGeneration = ++runListMutationGenerationRef.current;
+      selectRunId(nextDetail.run.id);
       setDetail(nextDetail);
-      setSelectedRunId(nextDetail.run.id);
-      const response = await usageServiceApi.listCodexInspectionRuns(
-        serviceBase,
-        managementKey,
-        RUNS_LIMIT
-      );
-      setRuns(response.items);
-      showNotification(t('monitoring.server_codex_inspection_run_success'), 'success');
+      showNotification(t('monitoring.server_codex_inspection_run_started'), 'success');
+      try {
+        const response = await usageServiceApi.listCodexInspectionRuns(
+          serviceBase,
+          managementKey,
+          RUNS_LIMIT
+        );
+        if (mutationGeneration !== runListMutationGenerationRef.current) return;
+        setRuns(response.items);
+        const refreshedRun = response.items.find((item) => item.id === nextDetail.run.id);
+        if (refreshedRun) {
+          setDetail((current) =>
+            current?.run.id === refreshedRun.id ? { ...current, run: refreshedRun } : current
+          );
+        }
+        // A small inspection may finish between the asynchronous start response
+        // and this list refresh. Reload its detail so the page does not retain a
+        // synthetic running state with empty results after the run is terminal.
+        await loadRunDetail(serviceBase, nextDetail.run.id);
+      } catch {
+        // Starting already succeeded. Reconciliation failure must not be shown
+        // as a failed start; a later poll/manual refresh can retry it.
+      }
     } catch (error: unknown) {
       const message = getUsageServiceDisplayError(error, t);
       showNotification(
@@ -1054,7 +1122,7 @@ export function ServerCodexInspectionPage() {
     } finally {
       setRunning(false);
     }
-  }, [managementKey, refreshRuns, serviceBase, showNotification, t]);
+  }, [loadRunDetail, managementKey, refreshRuns, selectRunId, serviceBase, showNotification, t]);
 
   const handleRunNow = () => {
     showConfirmation({
@@ -1067,14 +1135,112 @@ export function ServerCodexInspectionPage() {
     });
   };
 
+  const executeServerCancel = useCallback(async () => {
+    if (!serviceBase || !cancellableRun) return;
+    const requestedRunId = cancellableRun.id;
+    // Keep a user's history selection stable while the cancel request is in
+    // flight. A response for the active run may update the detail view only
+    // when that same run is still selected; otherwise the user's history view
+    // must remain untouched.
+    setCancelling(true);
+    try {
+      const nextDetail = await usageServiceApi.cancelCodexInspectionRun(
+        serviceBase,
+        managementKey,
+        requestedRunId
+      );
+      ++runListMutationGenerationRef.current;
+      setRuns((current) => {
+        let found = false;
+        const updated = current.map((item) => {
+          if (item.id !== nextDetail.run.id) return item;
+          found = true;
+          return nextDetail.run;
+        });
+        return found ? updated : [nextDetail.run, ...updated];
+      });
+      if (selectedRunIdRef.current === requestedRunId) {
+        selectRunId(nextDetail.run.id);
+        setDetail(nextDetail);
+      }
+      showNotification(t('monitoring.server_codex_inspection_cancel_requested'), 'success');
+      await refreshRuns({ silent: true });
+    } catch (error: unknown) {
+      showNotification(
+        `${t('monitoring.server_codex_inspection_cancel_failed')}: ${getUsageServiceDisplayError(error, t)}`,
+        'error'
+      );
+      // A conflict normally means the worker committed a newer terminal state.
+      // Bypass the ordinary in-flight refresh guard so a pre-cancel poll cannot
+      // leave the page on a stale running snapshot.
+      const mutationGeneration = ++runListMutationGenerationRef.current;
+      try {
+        const response = await usageServiceApi.listCodexInspectionRuns(
+          serviceBase,
+          managementKey,
+          RUNS_LIMIT
+        );
+        if (mutationGeneration === runListMutationGenerationRef.current) {
+          setRuns(response.items);
+        }
+      } catch {
+        // The original cancellation error remains the user-facing failure. A
+        // later poll/manual refresh can retry list reconciliation.
+      }
+      if (selectedRunIdRef.current === requestedRunId) {
+        try {
+          await loadRunDetail(serviceBase, requestedRunId);
+        } catch {
+          // Keep the cancellation error as the primary notification.
+        }
+      }
+    } finally {
+      setCancelling(false);
+    }
+  }, [
+    cancellableRun,
+    loadRunDetail,
+    managementKey,
+    refreshRuns,
+    selectRunId,
+    selectedRunIdRef,
+    serviceBase,
+    showNotification,
+    t,
+  ]);
+
+  const handleCancelRun = () => {
+    if (!cancellableRun || cancellableRun.status === 'cancelling') return;
+    showConfirmation({
+      title: t('monitoring.server_codex_inspection_cancel_confirm_title'),
+      message: t('monitoring.server_codex_inspection_cancel_confirm_body'),
+      confirmText: t('monitoring.server_codex_inspection_stop'),
+      cancelText: t('common.cancel'),
+      variant: 'danger',
+      onConfirm: executeServerCancel,
+    });
+  };
+
   const executeServerActions = useCallback(
-    async (targets: CodexInspectionResult[], scope: 'single' | 'bulk') => {
+    async (
+      targets: CodexInspectionResult[],
+      scope: 'single' | 'bulk',
+      overrideAction?: 'delete'
+    ) => {
       if (!serviceBase || !detail) {
         showNotification(t('monitoring.server_codex_inspection_service_unavailable'), 'warning');
         return;
       }
       const resultIds = Array.from(
-        new Set(targets.filter(isActionableServerCodexInspectionResult).map((item) => item.id))
+        new Set(
+          targets
+            .filter((item) =>
+              overrideAction === 'delete'
+                ? item.action === 'reauth' && item.id > 0
+                : isActionableServerCodexInspectionResult(item)
+            )
+            .map((item) => item.id)
+        )
       );
       if (resultIds.length === 0) {
         showNotification(t('monitoring.server_codex_inspection_no_actions'), 'warning');
@@ -1088,10 +1254,13 @@ export function ServerCodexInspectionPage() {
           serviceBase,
           managementKey,
           detail.run.id,
-          resultIds
+          resultIds,
+          overrideAction === 'delete'
+            ? resultIds.map((resultId) => ({ resultId, action: 'delete' as const }))
+            : []
         );
+        selectRunId(response.detail.run.id);
         setDetail(response.detail);
-        setSelectedRunId(response.detail.run.id);
 
         const runsResponse = await usageServiceApi.listCodexInspectionRuns(
           serviceBase,
@@ -1100,12 +1269,38 @@ export function ServerCodexInspectionPage() {
         );
         setRuns(runsResponse.items);
 
-        const failed = response.outcomes.filter((item) => !item.success);
-        if (failed.length > 0) {
+        const outcomeSummary = response.outcomes.reduce(
+          (summary, outcome) => {
+            switch (outcome.status) {
+              case 'success':
+                summary.success += 1;
+                break;
+              case 'skipped':
+                summary.skipped += 1;
+                break;
+              case 'needs_review':
+                summary.needsReview += 1;
+                break;
+              case 'failed':
+                summary.failed += 1;
+                break;
+              default:
+                if (outcome.success) summary.success += 1;
+                else summary.failed += 1;
+            }
+            return summary;
+          },
+          { success: 0, skipped: 0, needsReview: 0, failed: 0 }
+        );
+        const hasNonSuccessOutcome =
+          outcomeSummary.failed > 0 || outcomeSummary.skipped > 0 || outcomeSummary.needsReview > 0;
+        if (hasNonSuccessOutcome) {
           showNotification(
-            t('monitoring.server_codex_inspection_execute_partial', {
-              failed: failed.length,
-              total: response.outcomes.length,
+            t('monitoring.codex_inspection_log_manual_completed', {
+              success: outcomeSummary.success,
+              skipped: outcomeSummary.skipped,
+              review: outcomeSummary.needsReview,
+              failed: outcomeSummary.failed,
             }),
             'warning'
           );
@@ -1123,7 +1318,7 @@ export function ServerCodexInspectionPage() {
         setExecutingAllActions(false);
       }
     },
-    [detail, managementKey, serviceBase, showNotification, t]
+    [detail, managementKey, selectRunId, serviceBase, showNotification, t]
   );
 
   const handleExecuteServerActions = useCallback(
@@ -1161,14 +1356,48 @@ export function ServerCodexInspectionPage() {
     [executeServerActions, showConfirmation, t]
   );
 
-  const handleOpenCodexReauth = useCallback((item: CodexInspectionResult) => {
-    setCodexReauthTarget({
-      account: item.displayAccount || item.accountId || item.fileName,
-      fileName: item.fileName,
-      authIndex: item.authIndex ?? null,
-      accountId: item.accountId ?? null,
-    });
-  }, []);
+  const handleOpenCodexReauth = useCallback(
+    (item: CodexInspectionResult) => {
+      if (item.provider === 'xai') {
+        navigate('/oauth#oauth-provider-xai');
+        return;
+      }
+      setCodexReauthTarget({
+        account: item.displayAccount || item.accountId || item.fileName,
+        fileName: item.fileName,
+        authIndex: item.authIndex ?? null,
+        accountId: item.accountId ?? null,
+      });
+    },
+    [navigate]
+  );
+
+  const handleDeleteServerReauth = useCallback(
+    (targets: CodexInspectionResult[], scope: 'single' | 'bulk') => {
+      if (targets.length === 0) return;
+      const first = targets[0];
+      showConfirmation({
+        title:
+          scope === 'bulk'
+            ? t('monitoring.codex_inspection_delete_reauth_confirm_title')
+            : t('monitoring.codex_inspection_delete_reauth_single_title'),
+        message:
+          scope === 'bulk'
+            ? t('monitoring.codex_inspection_delete_reauth_confirm_body', {
+                count: targets.length,
+              })
+            : t('monitoring.codex_inspection_delete_reauth_single_body', {
+                account: first.displayAccount,
+                file: first.fileName,
+              }),
+        confirmText: t('monitoring.codex_inspection_action_delete'),
+        cancelText: t('common.cancel'),
+        variant: 'danger',
+        onConfirm: () => executeServerActions(targets, scope, 'delete'),
+      });
+    },
+    [executeServerActions, showConfirmation, t]
+  );
 
   const handleCodexReauthSuccess = useCallback(async () => {
     await refreshRuns({ silent: true });
@@ -1177,7 +1406,7 @@ export function ServerCodexInspectionPage() {
 
   const handleSelectRun = async (runID: number) => {
     if (!serviceBase || runID === selectedRunId) return;
-    setSelectedRunId(runID);
+    selectRunId(runID);
     try {
       await loadRunDetail(serviceBase, runID);
     } catch (error: unknown) {
@@ -1230,6 +1459,23 @@ export function ServerCodexInspectionPage() {
             </div>
           </div>
           <div className={styles.statusActions}>
+            <details className={`${styles.infoNote} ${styles.infoNoteCompact}`}>
+              <summary>{t('monitoring.server_codex_inspection_info_summary')}</summary>
+              <ul className={styles.infoNoteList}>
+                <li>
+                  <strong>{t('monitoring.server_codex_inspection_worker_poll')}:</strong>{' '}
+                  {t('monitoring.server_codex_inspection_effect_hint')}
+                </li>
+                <li>
+                  <strong>{t('monitoring.server_codex_inspection_time_basis')}:</strong>{' '}
+                  {t('monitoring.server_codex_inspection_server_time_hint')}
+                </li>
+                <li>
+                  <strong>{t('monitoring.server_codex_inspection_history_refresh')}:</strong>{' '}
+                  {t('monitoring.server_codex_inspection_auto_refresh_hint')}
+                </li>
+              </ul>
+            </details>
             <Button
               variant="secondary"
               size="sm"
@@ -1242,37 +1488,29 @@ export function ServerCodexInspectionPage() {
               size="sm"
               onClick={handleRunNow}
               loading={running}
-              disabled={!serviceBase || running}
+              disabled={!serviceBase || running || hasRunningRun}
             >
               {t('monitoring.server_codex_inspection_run_now')}
             </Button>
+            <CodexInspectionStopButton
+              run={cancellableRun}
+              busy={cancelling}
+              onClick={handleCancelRun}
+              t={t}
+            />
           </div>
         </div>
-
-        <details className={styles.infoNote}>
-          <summary>{t('monitoring.server_codex_inspection_info_summary')}</summary>
-          <ul className={styles.infoNoteList}>
-            <li>
-              <strong>{t('monitoring.server_codex_inspection_worker_poll')}:</strong>{' '}
-              {t('monitoring.server_codex_inspection_effect_hint')}
-            </li>
-            <li>
-              <strong>{t('monitoring.server_codex_inspection_time_basis')}:</strong>{' '}
-              {t('monitoring.server_codex_inspection_server_time_hint')}
-            </li>
-            <li>
-              <strong>{t('monitoring.server_codex_inspection_history_refresh')}:</strong>{' '}
-              {t('monitoring.server_codex_inspection_auto_refresh_hint')}
-            </li>
-          </ul>
-        </details>
 
         <CodexInspectionConfigOverview
           title={t('monitoring.codex_inspection_config_overview_title')}
           editLabel={t('monitoring.codex_inspection_config_overview_edit')}
+          copyLabel={t('monitoring.codex_inspection_settings_copy_prompt')}
+          copiedLabel={t('common.copied')}
           ariaLabel={t('monitoring.server_codex_inspection_config_summary_title')}
           items={configOverviewItems}
           onEdit={openConfigDrawer}
+          compact
+          embedded
         />
 
         <div className={styles.summaryGrid}>
@@ -1284,85 +1522,64 @@ export function ServerCodexInspectionPage() {
               meta: t('monitoring.server_codex_inspection_total_files', {
                 count: activeRun?.totalFiles ?? 0,
               }),
-              Icon: IconInbox,
+              icon: 'probe' as const,
               accent: 'blue' as const,
             },
             {
               key: 'sampled',
               label: t('monitoring.codex_inspection_sampled_accounts'),
               value: activeRun ? String(activeRun.sampledCount) : summaryBlankValue,
-              meta: formatTrigger(activeRun, t),
-              Icon: IconChartLine,
+              meta: getRunStatusLabel(activeRun, t),
+              icon: 'sampled' as const,
               accent: 'cyan' as const,
             },
             {
               key: 'delete',
               label: t('monitoring.codex_inspection_delete_count'),
               value: activeRun ? String(activeRun.deleteCount) : summaryBlankValue,
-              meta: t('monitoring.server_codex_inspection_action_total_value', {
-                count: actionCounts,
-              }),
-              tone: 'bad',
-              Icon: IconTrash2,
+              meta: t('monitoring.codex_inspection_delete_meta'),
+              tone: 'bad' as const,
+              icon: 'delete' as const,
               accent: 'red' as const,
             },
             {
               key: 'disable',
               label: t('monitoring.codex_inspection_disable_count'),
               value: activeRun ? String(activeRun.disableCount) : summaryBlankValue,
-              meta: `${t('monitoring.codex_inspection_threshold')}: ${selectedConfig.usedPercentThreshold}%`,
-              tone: 'warn',
-              Icon: IconShield,
+              meta: `${t('monitoring.codex_inspection_threshold')} ${selectedConfig.usedPercentThreshold}%`,
+              tone: 'warn' as const,
+              icon: 'disable' as const,
               accent: 'amber' as const,
             },
             {
               key: 'enable',
               label: t('monitoring.codex_inspection_enable_count'),
               value: activeRun ? String(activeRun.enableCount) : summaryBlankValue,
-              meta: t('monitoring.server_codex_inspection_keep_count', {
-                count: activeRun?.keepCount ?? 0,
-              }),
-              tone: 'good',
-              Icon: IconCheck,
+              meta: t('monitoring.codex_inspection_enable_meta'),
+              tone: 'good' as const,
+              icon: 'enable' as const,
               accent: 'green' as const,
             },
             {
               key: 'reauth',
               label: t('monitoring.codex_inspection_reauth_count'),
               value: activeRun ? String(activeRun.reauthCount) : summaryBlankValue,
-              meta: t('monitoring.codex_inspection_action_reauth'),
-              tone: 'info',
-              Icon: IconRefreshCw,
+              meta: t('monitoring.codex_inspection_reauth_meta'),
+              icon: 'reauth' as const,
               accent: 'violet' as const,
             },
           ].map((card) => {
-            const SummaryIcon = card.Icon;
+            const tone: MonitoringSummaryCardProps['tone'] = card.tone;
             return (
-              <div
+              <MonitoringSummaryCard
                 key={card.key}
-                className={[
-                  styles.summaryCard,
-                  summaryAccentClassMap[card.accent],
-                  card.tone ? styles[`tone-${card.tone}`] : '',
-                ]
-                  .filter(Boolean)
-                  .join(' ')}
-              >
-                <div className={styles.summaryHeader}>
-                  <span className={styles.summaryIcon}>
-                    <SummaryIcon size={18} />
-                  </span>
-                  <span className={styles.summaryLabel} title={card.label}>
-                    {card.label}
-                  </span>
-                </div>
-                <div className={styles.summaryBody}>
-                  <strong className={styles.summaryValue}>{card.value}</strong>
-                  <span className={styles.summaryMeta} title={card.meta}>
-                    {card.meta}
-                  </span>
-                </div>
-              </div>
+                label={card.label}
+                value={card.value}
+                meta={card.meta}
+                icon={card.icon}
+                accent={card.accent}
+                tone={tone}
+              />
             );
           })}
         </div>
@@ -1477,18 +1694,18 @@ export function ServerCodexInspectionPage() {
                 />
               </div>
             ) : (
-              <>
-                <div className={`${styles.serverField} ${styles.serverFieldHalf}`}>
+              <div className={styles.scheduleTimePointFields}>
+                <div className={styles.scheduleTimePointField}>
                   <Input
                     id="timePoints"
                     label={t('monitoring.server_codex_inspection_time_points')}
                     value={draft.timePoints}
                     onChange={(event) => updateDraft('timePoints', event.target.value)}
                     placeholder="09:00, 13:30, 22:00"
-                    hint={t('monitoring.server_codex_inspection_time_points_hint')}
+                    aria-describedby="timePoints-hint"
                   />
                 </div>
-                <div className={`${styles.serverField} ${styles.serverFieldHalf}`}>
+                <div className={styles.scheduleTimePointField}>
                   <span className={styles.serverFieldLabel}>
                     {t('monitoring.server_codex_inspection_time_zone')}
                   </span>
@@ -1497,9 +1714,14 @@ export function ServerCodexInspectionPage() {
                     options={timeZoneOptions}
                     onChange={(value) => updateDraft('timeZone', value)}
                     ariaLabel={t('monitoring.server_codex_inspection_time_zone')}
+                    triggerClassName={styles.configSelectTrigger}
+                    dropdownClassName={styles.configSelectDropdown}
                   />
                 </div>
-              </>
+                <div id="timePoints-hint" className={styles.scheduleTimePointHint}>
+                  {t('monitoring.server_codex_inspection_time_points_hint')}
+                </div>
+              </div>
             )}
           </div>
         </section>
@@ -1509,17 +1731,16 @@ export function ServerCodexInspectionPage() {
           errors={fieldErrors}
           t={t}
           onFieldChange={(field, value) => updateDraft(field, value)}
+          onXaiInferenceEnabledChange={(value) => updateDraft('xaiInferenceEnabled', value)}
           onAutoActionModeChange={(value) => updateDraft('autoActionMode', value)}
+          onAutoRecoverEnabledChange={(value) => updateDraft('autoRecoverEnabled', value)}
         />
       </InspectionConfigDrawer>
     );
   };
 
   const renderRunsPanel = () => (
-    <Panel
-      title={t('monitoring.server_codex_inspection_history_title')}
-      subtitle={t('monitoring.server_codex_inspection_history_desc')}
-    >
+    <Panel title={t('monitoring.server_codex_inspection_history_title')}>
       {runs.length > 0 ? (
         <div
           className={styles.runHistoryList}
@@ -1607,8 +1828,12 @@ export function ServerCodexInspectionPage() {
     const canonicalExecutableIds = getCanonicalServerCodexInspectionActionIds(resultRows);
     const mixedActionIds = getMixedServerCodexInspectionActionIds(resultRows);
     const executableResults = resultRows.filter((item) => canonicalExecutableIds.has(item.id));
+    const reauthResults = resultRows.filter(isPendingServerReauthResult);
     const canExecuteActions = detail?.run.status === 'completed';
     const resultsRun = detail?.run ?? null;
+    const resultsConfig = resolveServerCodexConfig(
+      resultsRun?.settings ?? managerConfig?.codexInspection
+    );
     const actionFilterCounts = getActionFilterCounts(resultItems);
     const handlingFilterCounts = countHandlingStates(resultItems);
     const panelResult: CodexInspectionRunResult | null = resultsRun
@@ -1616,14 +1841,19 @@ export function ServerCodexInspectionPage() {
           settings: {
             baseUrl: serviceBase,
             token: '',
-            targetType: selectedConfig.targetType,
-            workers: selectedConfig.workers,
-            deleteWorkers: selectedConfig.deleteWorkers,
-            timeout: selectedConfig.timeout,
-            retries: selectedConfig.retries,
-            userAgent: selectedConfig.userAgent,
-            usedPercentThreshold: selectedConfig.usedPercentThreshold,
-            sampleSize: selectedConfig.sampleSize,
+            targetTypes: resultsConfig.targetTypes,
+            targetType: resultsConfig.targetType,
+            workers: resultsConfig.workers,
+            deleteWorkers: resultsConfig.deleteWorkers,
+            timeout: resultsConfig.timeout,
+            retries: resultsConfig.retries,
+            userAgent: resultsConfig.userAgent,
+            xaiInferenceUserAgent: resultsConfig.xaiInferenceUserAgent,
+            xaiInferenceEnabled: resultsConfig.xaiInferenceEnabled,
+            xaiInferenceModel: resultsConfig.xaiInferenceModel,
+            xaiInferencePrompt: resultsConfig.xaiInferencePrompt,
+            usedPercentThreshold: resultsConfig.usedPercentThreshold,
+            sampleSize: resultsConfig.sampleSize,
           },
           files: [],
           results: resultItems,
@@ -1638,8 +1868,8 @@ export function ServerCodexInspectionPage() {
             enableCount: resultsRun.enableCount,
             reauthCount: resultsRun.reauthCount,
             keepCount: resultsRun.keepCount,
-            usedPercentThreshold: selectedConfig.usedPercentThreshold,
-            sampled: selectedConfig.sampleSize > 0,
+            usedPercentThreshold: resultsConfig.usedPercentThreshold,
+            sampled: resultsConfig.sampleSize > 0,
             plannedActionPreview: [],
           },
           startedAt: resultsRun.startedAtMs,
@@ -1680,23 +1910,34 @@ export function ServerCodexInspectionPage() {
     const renderOperation = (item: CodexInspectionResultItem) => {
       const source = resultByKey.get(item.key);
       if (!source) {
-        return (
-          <span className={styles.primaryReason}>{t('monitoring.codex_inspection_no_action')}</span>
-        );
+        return null;
       }
 
       const actionStatus = normalizeServerCodexInspectionActionStatus(source);
-      const detailText = formatServerResultStateDetail(source, t);
-      const showDetail =
-        detailText &&
-        detailText !== '--' &&
-        !source.actionError &&
-        !source.errorDetail &&
-        !source.error;
+      const terminalStatusLabel = formatServerTerminalActionStatusLabel(source, t);
+      const actionError = source.actionError?.trim() ?? '';
+      const needsReview = actionStatus === 'needs_review' || mixedActionIds.has(source.id);
+      const hasFileLevelAction = isActionableServerCodexInspectionResult(source);
+      const pendingReauth = isPendingServerReauthResult(source);
+      const hasOperation =
+        Boolean(terminalStatusLabel) ||
+        canonicalExecutableIds.has(source.id) ||
+        needsReview ||
+        hasFileLevelAction ||
+        pendingReauth;
+
+      if (!hasOperation) return null;
 
       return (
         <div className={styles.serverResultOperation}>
-          {showDetail ? <span className={styles.primaryReason}>{detailText}</span> : null}
+          {terminalStatusLabel ? (
+            <span className={styles.primaryReason}>{terminalStatusLabel}</span>
+          ) : null}
+          {actionError ? (
+            <small className={styles.primaryReason} title={actionError}>
+              {actionError}
+            </small>
+          ) : null}
           {canonicalExecutableIds.has(source.id) ? (
             <Button
               size="xs"
@@ -1712,28 +1953,38 @@ export function ServerCodexInspectionPage() {
               })()}
               {resolveActionLabel(source.action, t)}
             </Button>
-          ) : actionStatus === 'needs_review' || mixedActionIds.has(source.id) ? (
+          ) : needsReview ? (
             <span className={styles.primaryReason}>
               {t('monitoring.server_codex_inspection_action_needs_review_hint')}
             </span>
-          ) : isActionableServerCodexInspectionResult(source) ? (
+          ) : hasFileLevelAction ? (
             <span className={styles.primaryReason}>
               {t('monitoring.server_codex_inspection_file_level_action_hint')}
             </span>
-          ) : source.action === 'reauth' ? (
-            <Button
-              size="xs"
-              variant="secondary"
-              className={styles.serverResultActionButton}
-              onClick={() => handleOpenCodexReauth(source)}
-            >
-              <IconRefreshCw size={13} />
-              {t('codex_reauth.button')}
-            </Button>
-          ) : source.action === 'keep' ? (
-            <span className={styles.primaryReason}>
-              {t('monitoring.codex_inspection_no_action')}
-            </span>
+          ) : pendingReauth ? (
+            <div className={styles.resultsHeaderActions}>
+              <Button
+                size="xs"
+                variant="secondary"
+                className={styles.serverResultActionButton}
+                onClick={() => handleOpenCodexReauth(source)}
+              >
+                <IconRefreshCw size={13} />
+                {t(
+                  source.provider === 'xai' ? 'auth_login.xai_oauth_button' : 'codex_reauth.button'
+                )}
+              </Button>
+              <Button
+                size="xs"
+                variant="danger"
+                className={styles.serverResultActionButton}
+                onClick={() => handleDeleteServerReauth([source], 'single')}
+                disabled={!canExecuteActions || executingResultIds.size > 0}
+              >
+                <IconTrash2 size={13} />
+                {t('monitoring.codex_inspection_action_delete')}
+              </Button>
+            </div>
           ) : null}
         </div>
       );
@@ -1743,9 +1994,9 @@ export function ServerCodexInspectionPage() {
       <CodexInspectionResultsPanel
         result={panelResult}
         filteredResults={resultPagination.pageItems}
-        suggestedResults={resultItems.filter((item) => item.action !== 'keep')}
         pendingActionCount={executableResults.length}
-        manualActionCount={actionFilterCounts.reauth}
+        manualActionCount={reauthResults.length}
+        reauthActionCount={reauthResults.length}
         handlingFilterCounts={handlingFilterCounts}
         filterCounts={actionFilterCounts}
         handlingFilter={handlingFilter}
@@ -1757,8 +2008,7 @@ export function ServerCodexInspectionPage() {
         isInspectionInFlight={Boolean(hasRunningRun)}
         t={t}
         title={t('monitoring.codex_inspection_results_title')}
-        subtitle={formatResultsDescription(resultsRun, i18n.language, t)}
-        stateHeaderLabel={formatResultStateHeader(resultsRun, t)}
+        xaiInferenceEnabled={resultsConfig.xaiInferenceEnabled}
         onActionFilterChange={setActionFilter}
         onHandlingFilterChange={setHandlingFilter}
         onPageChange={setResultPage}
@@ -1769,6 +2019,11 @@ export function ServerCodexInspectionPage() {
           const source = resultByKey.get(item.key);
           if (source) handleOpenCodexReauth(source);
         }}
+        onDeleteReauthPlanned={
+          reauthResults.length > 0
+            ? () => handleDeleteServerReauth(reauthResults, 'bulk')
+            : undefined
+        }
         filterLabel={filterLabel}
         handlingFilterLabel={handlingFilterLabel}
         renderOperation={renderOperation}
@@ -1776,148 +2031,41 @@ export function ServerCodexInspectionPage() {
     );
   };
 
-  const handleCopyLogs = useCallback(
-    async (logs: CodexInspectionLog[]) => {
-      if (!logs.length) return;
-      const lines = logs.map((entry) => {
-        const ts = new Date(entry.createdAtMs).toISOString();
-        const detail = entry.detail
-          ? ` ${typeof entry.detail === 'string' ? entry.detail : JSON.stringify(entry.detail)}`
-          : '';
-        return `[${ts}] [${entry.level}] ${entry.message}${detail}`;
-      });
-      try {
-        await navigator.clipboard.writeText(lines.join('\n'));
-        showNotification(t('monitoring.server_codex_inspection_logs_copied'), 'success');
-      } catch {
-        showNotification(t('monitoring.server_codex_inspection_logs_copy_failed'), 'error');
-      }
-    },
-    [showNotification, t]
-  );
+  const scrollLogsToBottom = useCallback(() => {
+    const element = logListRef.current;
+    if (!element) return;
+    element.scrollTop = element.scrollHeight;
+  }, []);
 
-  const renderLogsPanel = (logs: CodexInspectionLog[]) => {
-    const counts: Record<'all' | 'info' | 'success' | 'warning' | 'error', number> = {
-      all: logs.length,
-      info: 0,
-      success: 0,
-      warning: 0,
-      error: 0,
-    };
-    for (const entry of logs) {
-      if (
-        entry.level === 'info' ||
-        entry.level === 'success' ||
-        entry.level === 'warning' ||
-        entry.level === 'error'
-      ) {
-        counts[entry.level] += 1;
-      }
+  useEffect(() => {
+    if (logsCollapsed) return;
+    const runId = detail?.run.id ?? null;
+    const latestLogId = detail?.logs[detail.logs.length - 1]?.id ?? null;
+    const previous = previousServerLogCursorRef.current;
+    previousServerLogCursorRef.current = { runId, latestLogId };
+    if (latestLogId === null) return;
+    if (previous.runId === runId && previous.latestLogId === latestLogId) return;
+    scrollLogsToBottom();
+  }, [detail?.logs, detail?.run.id, logsCollapsed, scrollLogsToBottom]);
+
+  const handleJumpToLatestLog = useCallback(() => {
+    if (logsCollapsed) {
+      setLogsCollapsed(false);
+      requestAnimationFrame(scrollLogsToBottom);
+      return;
     }
-    const filterOptions: ReadonlyArray<{ value: typeof logLevelFilter; label: string }> = [
-      { value: 'all', label: t('monitoring.server_codex_inspection_filter_all') },
-      { value: 'info', label: t('monitoring.server_codex_inspection_log_level_info') },
-      { value: 'success', label: t('monitoring.server_codex_inspection_log_level_success') },
-      { value: 'warning', label: t('monitoring.server_codex_inspection_log_level_warning') },
-      { value: 'error', label: t('monitoring.server_codex_inspection_log_level_error') },
-    ];
-    const filtered =
-      logLevelFilter === 'all' ? logs : logs.filter((entry) => entry.level === logLevelFilter);
-    return (
-      <Panel
-        title={t('monitoring.codex_inspection_logs_title')}
-        subtitle={t('monitoring.server_codex_inspection_logs_desc')}
-        extra={
-          <div className={styles.logToolbar}>
-            {logs.length > 0 ? (
-              <div
-                className={styles.logFilterGroup}
-                role="tablist"
-                aria-label={t('monitoring.codex_inspection_logs_title')}
-              >
-                <div className={styles.segmentedControl}>
-                  {filterOptions.map((opt) => {
-                    const active = logLevelFilter === opt.value;
-                    return (
-                      <button
-                        key={opt.value}
-                        type="button"
-                        role="tab"
-                        aria-selected={active}
-                        className={`${styles.segmentButton} ${active ? styles.segmentButtonActive : ''}`}
-                        onClick={() => setLogLevelFilter(opt.value)}
-                      >
-                        {opt.label}
-                        <span className={styles.segmentCount}>{counts[opt.value]}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            ) : (
-              <span />
-            )}
-            <div className={styles.logToolbarRight}>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => void handleCopyLogs(logs)}
-                disabled={logs.length === 0}
-                aria-label={t('monitoring.server_codex_inspection_logs_copy')}
-              >
-                {t('monitoring.server_codex_inspection_logs_copy')}
-              </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => setLogsCollapsed((previous) => !previous)}
-                disabled={logs.length === 0}
-              >
-                {logsCollapsed
-                  ? t('monitoring.codex_inspection_expand_logs')
-                  : t('monitoring.codex_inspection_fold_logs')}
-              </Button>
-            </div>
-          </div>
-        }
-      >
-        {!logsCollapsed ? (
-          <div className={styles.logList}>
-            {filtered.length > 0 ? (
-              filtered.map((entry) => (
-                <div
-                  key={entry.id}
-                  className={`${styles.logRow} ${logLevelClass[entry.level] ?? styles.logInfo}`}
-                >
-                  <span className={styles.logTime}>
-                    {formatTimestamp(entry.createdAtMs, i18n.language)}
-                  </span>
-                  <span className={styles.logMessage}>
-                    {entry.message}
-                    {entry.detail ? (
-                      <small className={styles.serverLogDetail}>
-                        {typeof entry.detail === 'string'
-                          ? entry.detail
-                          : JSON.stringify(entry.detail)}
-                      </small>
-                    ) : null}
-                  </span>
-                </div>
-              ))
-            ) : (
-              <div className={styles.emptyBlockSmall}>
-                {t('monitoring.codex_inspection_logs_empty')}
-              </div>
-            )}
-          </div>
-        ) : (
-          <div className={styles.logCollapsedBar}>
-            <span>{t('monitoring.codex_inspection_logs_collapsed', { count: logs.length })}</span>
-          </div>
-        )}
-      </Panel>
-    );
-  };
+    scrollLogsToBottom();
+  }, [logsCollapsed, scrollLogsToBottom]);
+
+  const handleCopyLogs = useCallback(async () => {
+    if (serverLogEntries.length === 0) return;
+    try {
+      await navigator.clipboard.writeText(formatInspectionLogsForClipboard(serverLogEntries));
+      showNotification(t('monitoring.codex_inspection_logs_copied'), 'success');
+    } catch {
+      showNotification(t('monitoring.codex_inspection_logs_copy_failed'), 'error');
+    }
+  }, [serverLogEntries, showNotification, t]);
 
   return (
     <div className={styles.page}>
@@ -1948,7 +2096,18 @@ export function ServerCodexInspectionPage() {
             </div>
           ) : null}
           {renderResultsPanel()}
-          {renderLogsPanel(detail?.logs ?? [])}
+          <CodexInspectionLogsPanel
+            logs={serverLogEntries}
+            logsCollapsed={logsCollapsed}
+            levelFilter={logLevelFilter}
+            logListRef={logListRef}
+            locale={i18n.language}
+            t={t}
+            onLevelFilterChange={setLogLevelFilter}
+            onCopyLogs={() => void handleCopyLogs()}
+            onJumpToLatest={handleJumpToLatestLog}
+            onToggleCollapsed={() => setLogsCollapsed((previous) => !previous)}
+          />
         </div>
       </div>
       {renderConfigDrawer()}

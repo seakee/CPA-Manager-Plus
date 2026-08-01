@@ -10,7 +10,7 @@ import { Modal } from '@/components/ui/Modal';
 import { SelectionCheckbox } from '@/components/ui/SelectionCheckbox';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import { OpenAIKeyTestStatusIndicator } from '@/components/providers';
-import { apiCallApi, getApiCallErrorMessage, modelsApi, providersApi } from '@/services/api';
+import { apiCallApi, getApiCallErrorDetails, modelsApi, providersApi } from '@/services/api';
 import { useConfigStore, useNotificationStore } from '@/stores';
 import type { ApiKeyEntry, OpenAIProviderConfig } from '@/types';
 import { buildHeaderObject, headersToEntries, normalizeHeaderEntries } from '@/utils/headers';
@@ -49,13 +49,13 @@ const buildEmptyForm = (): OpenAIFormState => ({
   testModel: undefined,
 });
 
-const normalizeModelEntries = (entries: Array<{ name: string; alias: string }>) =>
-  (entries ?? []).reduce<Array<{ name: string; alias: string }>>((acc, entry) => {
+const normalizeModelEntries = (entries: OpenAIFormState['modelEntries']) =>
+  (entries ?? []).reduce<OpenAIFormState['modelEntries']>((acc, entry) => {
     const name = String(entry?.name ?? '').trim();
     let alias = String(entry?.alias ?? '').trim();
     if (name && (alias === '' || alias === name)) alias = '';
     if (!name && !alias) return acc;
-    acc.push({ name, alias });
+    acc.push({ ...entry, name, alias });
     return acc;
   }, []);
 
@@ -501,7 +501,7 @@ export function OpenAIEditDrawer({
           { timeout: OPENAI_TEST_TIMEOUT_MS }
         );
         if (result.statusCode < 200 || result.statusCode >= 300)
-          throw new Error(getApiCallErrorMessage(result));
+          throw new Error(getApiCallErrorDetails(result));
         setKeyTestStatuses((prev) => {
           const next = [...prev];
           next[keyIndex] = { status: 'success', message: '' };
@@ -651,7 +651,11 @@ export function OpenAIEditDrawer({
         editIndex !== null
           ? providers.map((item, idx) => (idx === editIndex ? payload : item))
           : [...providers, payload];
-      await providersApi.saveOpenAIProviders(nextList);
+      if (editIndex !== null) {
+        await providersApi.updateOpenAIProvider(providers[editIndex].name, editIndex, payload);
+      } else {
+        await providersApi.createOpenAIProvider(payload);
+      }
       let syncedProviders = nextList;
       try {
         syncedProviders = await providersApi.getOpenAIProviders();
@@ -950,6 +954,11 @@ export function OpenAIEditDrawer({
                 removeButtonClassName={styles.modelRowRemoveButton}
                 removeButtonTitle={t('common.delete')}
                 removeButtonAriaLabel={t('common.delete')}
+                showForceMapping
+                showModalities
+                forceMappingLabel={t('ai_providers.force_mapping_label')}
+                inputModalitiesPlaceholder={t('ai_providers.input_modalities_placeholder')}
+                outputModalitiesPlaceholder={t('ai_providers.output_modalities_placeholder')}
               />
               <div className={styles.modelTestPanel}>
                 <div className={styles.modelTestMeta}>

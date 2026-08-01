@@ -8,23 +8,31 @@ export function ConfirmationModal() {
   const confirmation = useNotificationStore((state) => state.confirmation);
   const hideConfirmation = useNotificationStore((state) => state.hideConfirmation);
   const setConfirmationLoading = useNotificationStore((state) => state.setConfirmationLoading);
+  const advanceConfirmation = useNotificationStore((state) => state.advanceConfirmation);
 
-  const { isOpen, isLoading, options } = confirmation;
+  const { isOpen, isLoading, step, options } = confirmation;
 
   if (!isOpen || !options) {
     return null;
   }
 
-  const { title, message, onConfirm, onCancel, confirmText, cancelText, variant = 'primary' } = options;
+  const currentStep =
+    step === 2 && options.secondConfirmation ? options.secondConfirmation : options;
+  const { title, message, confirmText, cancelText, variant = 'primary' } = currentStep;
 
   const handleConfirm = async () => {
+    if (step === 1 && options.secondConfirmation) {
+      advanceConfirmation();
+      return;
+    }
+
     try {
       setConfirmationLoading(true);
-      await onConfirm();
+      await options.onConfirm();
       hideConfirmation();
     } catch (error) {
       console.error('Confirmation action failed:', error);
-      // Optional: show error notification here if needed, 
+      // Optional: show error notification here if needed,
       // but usually the calling component handles specific errors.
     } finally {
       setConfirmationLoading(false);
@@ -35,8 +43,8 @@ export function ConfirmationModal() {
     if (isLoading) {
       return;
     }
-    if (onCancel) {
-      onCancel();
+    if (options.onCancel) {
+      options.onCancel();
     }
     hideConfirmation();
   };
@@ -52,11 +60,7 @@ export function ConfirmationModal() {
         <Button variant="ghost" onClick={handleCancel} disabled={isLoading}>
           {cancelText || t('common.cancel')}
         </Button>
-        <Button 
-          variant={variant} 
-          onClick={handleConfirm} 
-          loading={isLoading}
-        >
+        <Button variant={variant} onClick={handleConfirm} loading={isLoading}>
           {confirmText || t('common.confirm')}
         </Button>
       </div>

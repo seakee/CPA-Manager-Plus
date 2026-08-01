@@ -1,0 +1,42 @@
+name: Main Promotion
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - edited
+      - reopened
+      - synchronize
+      - ready_for_review
+
+permissions:
+  contents: read
+
+jobs:
+  verify-source:
+    name: Verify dev promotion source
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Require the repository dev branch
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${BASE_REF}" != "main" ]; then
+            echo "Expected a pull request targeting main, got ${BASE_REF}." >&2
+            exit 1
+          fi
+
+          if [ "${HEAD_REPOSITORY}" != "${REPOSITORY}" ] || [ "${HEAD_REF}" != "dev" ]; then
+            echo "main accepts promotions only from ${REPOSITORY}:dev." >&2
+            echo "Received ${HEAD_REPOSITORY}:${HEAD_REF}." >&2
+            exit 1
+          fi

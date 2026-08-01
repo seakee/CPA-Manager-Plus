@@ -14,17 +14,16 @@ export const CONFIG_SECTION_KEYS: RawConfigSection[] = [
   'routing/strategy',
   'api-keys',
   'gemini-api-key',
+  'interactions-api-key',
   'codex-api-key',
+  'xai-api-key',
   'claude-api-key',
   'vertex-api-key',
   'openai-compatibility',
   'oauth-excluded-models',
 ];
 
-export const extractConfigSectionValue = (
-  config: Config | null,
-  section?: RawConfigSection
-) => {
+export const extractConfigSectionValue = (config: Config | null, section?: RawConfigSection) => {
   if (!config) return undefined;
   switch (section) {
     case 'debug':
@@ -55,8 +54,12 @@ export const extractConfigSectionValue = (
       return config.apiKeys;
     case 'gemini-api-key':
       return config.geminiApiKeys;
+    case 'interactions-api-key':
+      return config.interactionsApiKeys;
     case 'codex-api-key':
       return config.codexApiKeys;
+    case 'xai-api-key':
+      return config.xaiApiKeys;
     case 'claude-api-key':
       return config.claudeApiKeys;
     case 'vertex-api-key':

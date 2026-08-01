@@ -1,93 +1,80 @@
-# Get Started
+# Quick Start
 
-Start here for the shortest working setup: bring up the CPA gateway runtime, bring up CPAMP, then confirm that request monitoring can receive data. If CPA is already running, jump to [Deploy CPAMP Only](../deployment/docker.md#deploy-cpamp-only).
+Choose a path based on what you need. Both use the CPAMP interface, but installation and available capabilities differ.
 
-## Use The Installer
+| Your situation                                                      | Recommended path                                             |
+| ------------------------------------------------------------------- | ------------------------------------------------------------ |
+| CPA already runs and you only want a clearer management UI          | [CPAMP Lightweight Panel](#path-1-install-lightweight-panel) |
+| You need request history, cost analytics, inspection, or automation | [CPAMP Full Mode](#path-2-install-full-mode)                 |
+| You are not sure                                                    | Read [Choosing A Panel](./choosing-a-panel.md)               |
 
-For a guided deployment, run the installer:
+## Path 1: Install Lightweight Panel
+
+Use this when CPA already runs and you only want to replace the official Management Center. It needs no additional service, database, or port.
+
+1. Set CPA `panel-github-repository` to `seakee/CPA-Manager-Plus`.
+2. Restart or reload CPA.
+3. Open:
+
+```text
+http://<cpa-host>:8317/management.html
+```
+
+Log in with the CPA Management Key. See [Install Lightweight Panel](../deployment/cpa-panel.md) for the complete configuration and update instructions.
+
+## Path 2: Install Full Mode
+
+Full Mode runs Manager Server for request history, cost analytics, server-side inspection, and automation. The installer is the recommended path for most users:
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/seakee/CPA-Manager-Plus/main/bin/install-cpamp.sh
 bash install-cpamp.sh
 ```
 
-It checks your environment, lets you choose the operation language, chooses full stack or CPAMP-only install, generates minimal config, and asks for final confirmation before it deploys. To preview the plan first:
+In the installer:
 
-```bash
-CPAMP_DRY_RUN=1 bash install-cpamp.sh
-```
+1. Install scope: choose “CPA + CPAMP” if CPA is not installed, or “CPAMP only” if CPA already runs.
+2. Deployment method: prefer Docker, or choose a native package when Docker is not used.
+3. Review the summary and confirm deployment.
 
-See [One-Click Installer](../deployment/installer.md) for all options.
-
-## Recommended Deployment
-
-For a first deployment, use Docker Compose. It creates persistent volumes for both CPA and CPAMP:
-
-```yaml
-services:
-  cli-proxy-api:
-    image: eceasy/cli-proxy-api:latest
-    restart: unless-stopped
-    ports:
-      - "8317:8317"
-    volumes:
-      - cpa-data:/app/data
-
-  cpa-manager-plus:
-    image: seakee/cpa-manager-plus:latest
-    restart: unless-stopped
-    ports:
-      - "18317:18317"
-    volumes:
-      - cpa-manager-plus-data:/data
-
-volumes:
-  cpa-data:
-  cpa-manager-plus-data:
-```
-
-Start the services:
-
-```bash
-docker compose up -d
-```
-
-Open the management panel:
+After installation, open:
 
 ```text
 http://<host>:18317/management.html
 ```
 
-The first login requires the CPAMP Admin Key. If you did not set one explicitly, Manager Server prints it once in the startup logs:
+Log in with the CPAMP Admin Key saved or printed by the installer. See [Install Full Mode](../deployment/installer.md) for details.
 
-```bash
-docker compose logs cpa-manager-plus
-```
+## First CPA Connection
 
-## First Configuration
-
-In setup, enter these values in order:
+If the installer did not save a CPA connection, enter these values when Full Mode opens for the first time:
 
 1. CPAMP Admin Key.
 2. CPA URL, for example `http://cli-proxy-api:8317`.
 3. CPA Management Key.
-4. Request monitoring mode. For a new deployment, keep the default `auto` mode.
+4. Keep request monitoring in the default automatic mode.
 
-Recommended CPA version: `v7.1.39+`. The HTTP usage queue needs `v6.10.8+`.
+## Confirm That It Works
 
-## What Should Work After Setup
+### Lightweight Panel
 
-- Dashboard opens and shows Manager Server / CPA connection state.
-- Monitoring shows realtime rows after real requests pass through CPA.
-- Usage Analytics breaks down cost and tokens by model, account, project, and time range.
-- Codex Inspection shows quota, reset time, credential state, and account health.
+- You can log in with the CPA Management Key.
+- CPA management features such as providers, auth files, OAuth, quota, logs, and plugins load normally.
+- The page remains on CPA `:8317/management.html`.
 
-If the panel opens but monitoring stays empty, start with [Request Monitoring Troubleshooting](../troubleshooting/request-monitoring.md). The usual causes are usage publishing, CPA URL, queue retention, or collector path.
+### Full Mode
 
-## Next Steps
+- You can log in to `:18317/management.html` with the CPAMP Admin Key.
+- Dashboard shows that CPA is connected.
+- Monitoring shows an event after a real request passes through CPA.
+- Usage Analytics shows the corresponding tokens and estimated cost.
 
-- To choose the right mode, read [Runtime Model](./runtime-model.md).
-- To configure providers or clients, read [Gateway Configuration](../gateway/configuration.md).
-- To learn each panel page, start with [Dashboard](../manual/dashboard.md).
-- To use native packages, read [Native Packages](../deployment/native.md).
-- To migrate from the old project, read [Migrate From CPA-Manager](../migration/from-cpa-manager.md).
+If Full Mode opens but has no request data, see [Monitoring Has No Data](../troubleshooting/request-monitoring.md).
+
+## What To Do Next
+
+- Add model services: [AI Providers](../manual/ai-providers.md)
+- Log in or import accounts: [OAuth Login](../manual/oauth.md) and [Auth Files](../manual/auth-files.md)
+- Configure clients: [Client Configuration](../gateway/clients.md)
+- Upgrade and back up: [Upgrade CPAMP](../operations/update.md) and [Backup And Restore](../operations/backup.md)
+- Maintain deployment manually: [Docker Deployment](../deployment/docker.md) or [Native Packages](../deployment/native.md)

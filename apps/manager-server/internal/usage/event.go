@@ -40,6 +40,9 @@ type Event struct {
 	// It is not the same as response-side tokens.reasoning_tokens usage.
 	ReasoningEffort     string `json:"reasoning_effort,omitempty"`
 	ServiceTier         string `json:"service_tier,omitempty"`
+	RequestServiceTier  string `json:"request_service_tier,omitempty"`
+	ResponseServiceTier string `json:"response_service_tier,omitempty"`
+	CacheInputMode      string `json:"cache_input_mode,omitempty"`
 	InputTokens         int64  `json:"input_tokens"`
 	OutputTokens        int64  `json:"output_tokens"`
 	ReasoningTokens     int64  `json:"reasoning_tokens"`
@@ -47,12 +50,18 @@ type Event struct {
 	CacheTokens         int64  `json:"cache_tokens"`
 	CacheReadTokens     int64  `json:"cache_read_tokens"`
 	CacheCreationTokens int64  `json:"cache_creation_tokens"`
-	TotalTokens         int64  `json:"total_tokens"`
-	LatencyMS           *int64 `json:"latency_ms,omitempty"`
-	TTFTMS              *int64 `json:"ttft_ms,omitempty"`
-	Failed              bool   `json:"failed"`
-	FailStatusCode      int    `json:"fail_status_code,omitempty"`
-	FailSummary         string `json:"fail_summary,omitempty"`
+	// Normalized token buckets are persisted for aggregation and billing but are
+	// not exposed in compatible usage payloads.
+	NormalizedUncachedInputTokens int64  `json:"-"`
+	NormalizedTotalInputTokens    int64  `json:"-"`
+	NormalizedCacheReadTokens     int64  `json:"-"`
+	NormalizedCacheCreationTokens int64  `json:"-"`
+	TotalTokens                   int64  `json:"total_tokens"`
+	LatencyMS                     *int64 `json:"latency_ms,omitempty"`
+	TTFTMS                        *int64 `json:"ttft_ms,omitempty"`
+	Failed                        bool   `json:"failed"`
+	FailStatusCode                int    `json:"fail_status_code,omitempty"`
+	FailSummary                   string `json:"fail_summary,omitempty"`
 	// FailBody is retained only in the local DB as a sensitive internal field.
 	// Public APIs, compatible payloads, and exports must use FailSummary instead.
 	FailBody               string                  `json:"-"`
@@ -79,6 +88,36 @@ type Tokens struct {
 	TotalTokens         int64 `json:"total_tokens"`
 }
 
+// LongContextTokens preserves the portions of token aggregates that came from
+// requests over a model-specific context threshold. It stays internal to
+// aggregation and pricing so public usage payloads remain backward compatible.
+type LongContextTokens struct {
+	LongInputTokens         int64
+	LongOutputTokens        int64
+	LongCachedTokens        int64
+	LongCacheReadTokens     int64
+	LongCacheCreationTokens int64
+}
+
+// PricingBand identifies the exact price rule used to aggregate a request.
+// ContextThresholdTokens is zero only for legacy/unclassified aggregates;
+// classified base-rate requests use model.ModelPriceBaseContextThreshold.
+type PricingBand struct {
+	PricingModel           string
+	ContextThresholdTokens int64
+}
+
+func (tokens *LongContextTokens) AddIfLongContext(input, output, cached, cacheRead, cacheCreation int64) {
+	if tokens == nil || !IsLongContextInput(input) {
+		return
+	}
+	tokens.LongInputTokens += input
+	tokens.LongOutputTokens += output
+	tokens.LongCachedTokens += cached
+	tokens.LongCacheReadTokens += cacheRead
+	tokens.LongCacheCreationTokens += cacheCreation
+}
+
 type Detail struct {
 	Timestamp             string                  `json:"timestamp"`
 	Source                string                  `json:"source"`
@@ -95,6 +134,9 @@ type Detail struct {
 	ResolvedModel         string                  `json:"resolved_model,omitempty"`
 	ReasoningEffort       string                  `json:"reasoning_effort,omitempty"`
 	ServiceTier           string                  `json:"service_tier,omitempty"`
+	RequestServiceTier    string                  `json:"request_service_tier,omitempty"`
+	ResponseServiceTier   string                  `json:"response_service_tier,omitempty"`
+	CacheInputMode        string                  `json:"cache_input_mode,omitempty"`
 	ExecutorType          string                  `json:"executor_type,omitempty"`
 	Tokens                Tokens                  `json:"tokens"`
 	Failed                bool                    `json:"failed"`
@@ -119,7 +161,264 @@ type Payload struct {
 	APIs          map[string]*APIAggregate `json:"apis"`
 }
 
-const maxFailSummaryBytes = 4096
+const (
+	maxFailSummaryBytes            = 4096
+	LongContextInputTokenThreshold = int64(272_000)
+	CacheInputModeIncluded         = "included_in_input"
+	CacheInputModeSeparate         = "separate_from_input"
+)
+
+type CacheAccounting struct {
+	Mode                string
+	UncachedInputTokens int64
+	TotalInputTokens    int64
+	CacheReadTokens     int64
+	CacheCreationTokens int64
+}
+
+type CacheInputContext struct {
+	ExplicitMode     string
+	ExecutorType     string
+	Provider         string
+	ProviderSnapshot string
+	AuthType         string
+	ResolvedModel    string
+	RequestedModel   string
+	DisplayModel     string
+}
+
+// EffectiveServiceTier returns the tier used for billing and aggregation.
+// Codex reports default/auto even when Fast Mode was requested, so Codex uses
+// the request tier. Other providers retain response-tier precedence.
+func EffectiveServiceTier(context CacheInputContext, requestTier, legacyTier, responseTier string) string {
+	identity := strings.ToLower(strings.Join([]string{
+		context.ExecutorType,
+		context.Provider,
+		context.ProviderSnapshot,
+		context.AuthType,
+	}, " "))
+	if strings.Contains(identity, "codex") {
+		if requestTier != "" {
+			return requestTier
+		}
+		if legacyTier != "" {
+			return legacyTier
+		}
+		return responseTier
+	}
+	if responseTier != "" {
+		return responseTier
+	}
+	if legacyTier != "" {
+		return legacyTier
+	}
+	return requestTier
+}
+
+type RawCacheAccountingHints struct {
+	ExplicitMode     string
+	ExplicitTotal    int64
+	HasExplicitTotal bool
+	ValidPayload     bool
+}
+
+func NormalizeCacheAccounting(context CacheInputContext, inputTokens, cachedTokens, cacheTokens, cacheReadTokens, cacheCreationTokens int64) CacheAccounting {
+	mode := InferCacheInputMode(context, cacheReadTokens, cacheCreationTokens)
+	input := maxInt64(inputTokens, 0)
+	cacheRead := CompatibleCachedTokens(cachedTokens, cacheTokens, cacheReadTokens, cacheCreationTokens) + maxInt64(cacheReadTokens, 0)
+	cacheCreation := maxInt64(cacheCreationTokens, 0)
+	accounting := CacheAccounting{
+		Mode:                mode,
+		CacheReadTokens:     cacheRead,
+		CacheCreationTokens: cacheCreation,
+	}
+	if mode == CacheInputModeSeparate {
+		accounting.UncachedInputTokens = input
+		accounting.TotalInputTokens = input + cacheRead + cacheCreation
+		return accounting
+	}
+	accounting.UncachedInputTokens = maxInt64(input-cacheRead-cacheCreation, 0)
+	accounting.TotalInputTokens = input
+	return accounting
+}
+
+func InferCacheInputMode(context CacheInputContext, cacheReadTokens, cacheCreationTokens int64) string {
+	mode := normalizeCacheInputMode(context.ExplicitMode)
+	if mode == CacheInputModeIncluded || mode == CacheInputModeSeparate {
+		return mode
+	}
+	if classified, ok := classifyExecutorCacheInputMode(context.ExecutorType); ok {
+		return classified
+	}
+	for _, provider := range []string{context.Provider, context.ProviderSnapshot} {
+		if classified, ok := classifyProviderCacheInputMode(provider); ok {
+			return classified
+		}
+	}
+	for _, model := range []string{context.ResolvedModel, context.RequestedModel, context.DisplayModel} {
+		if classified, ok := classifyModelCacheInputMode(model); ok {
+			return classified
+		}
+	}
+	if cacheReadTokens > 0 || cacheCreationTokens > 0 {
+		return CacheInputModeSeparate
+	}
+	return CacheInputModeIncluded
+}
+
+func normalizeCacheInputMode(mode string) string {
+	return strings.ToLower(strings.TrimSpace(mode))
+}
+
+func classifyExecutorCacheInputMode(executorType string) (string, bool) {
+	executor := strings.ToLower(strings.TrimSpace(executorType))
+	if executor == "" {
+		return "", false
+	}
+	if strings.Contains(executor, "claude") {
+		return CacheInputModeSeparate, true
+	}
+	for _, marker := range []string{
+		"openaicompat", "openai_compat", "openai-compat", "openai",
+		"codex", "gemini", "aistudio", "ai_studio", "ai-studio",
+		"antigravity", "xai", "kimi",
+	} {
+		if strings.Contains(executor, marker) {
+			return CacheInputModeIncluded, true
+		}
+	}
+	return "", false
+}
+
+func classifyProviderCacheInputMode(provider string) (string, bool) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return "", false
+	}
+	if strings.Contains(provider, "anthropic") || strings.Contains(provider, "claude") {
+		return CacheInputModeSeparate, true
+	}
+	for _, marker := range []string{
+		"openai", "codex", "gemini", "vertex", "aistudio", "ai_studio",
+		"ai-studio", "interaction", "antigravity", "xai", "kimi", "moonshot",
+	} {
+		if strings.Contains(provider, marker) {
+			return CacheInputModeIncluded, true
+		}
+	}
+	return "", false
+}
+
+func classifyModelCacheInputMode(model string) (string, bool) {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if model == "" {
+		return "", false
+	}
+	if strings.Contains(model, "anthropic") || strings.Contains(model, "claude") {
+		return CacheInputModeSeparate, true
+	}
+	for _, marker := range []string{
+		"gpt-", "openai", "codex", "gemini", "vertex", "aistudio",
+		"antigravity", "grok", "xai", "kimi", "moonshot",
+	} {
+		if strings.Contains(model, marker) {
+			return CacheInputModeIncluded, true
+		}
+	}
+	return "", false
+}
+
+func RawCacheAccountingHintsFromJSON(raw string) RawCacheAccountingHints {
+	return rawCacheAccountingHintsFromJSON(raw, 0)
+}
+
+func rawCacheAccountingHintsFromJSON(raw string, depth int) RawCacheAccountingHints {
+	if depth > 1 || strings.TrimSpace(raw) == "" {
+		return RawCacheAccountingHints{}
+	}
+	var payload any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return RawCacheAccountingHints{}
+	}
+	record, ok := payload.(map[string]any)
+	if !ok {
+		return RawCacheAccountingHints{}
+	}
+	if detail, ok := record["detail"].(map[string]any); ok {
+		record = detail
+	}
+	hints := RawCacheAccountingHints{ExplicitMode: cacheInputModeFromRecord(record), ValidPayload: true}
+	if total, ok := explicitPositiveTotalFromRecord(record); ok {
+		hints.ExplicitTotal = total
+		hints.HasExplicitTotal = true
+	}
+	if nestedRaw := readString(record, "raw_json", "rawJson"); nestedRaw != "" {
+		nested := rawCacheAccountingHintsFromJSON(nestedRaw, depth+1)
+		if hints.ExplicitMode == "" {
+			hints.ExplicitMode = nested.ExplicitMode
+		}
+		if !hints.HasExplicitTotal && nested.HasExplicitTotal {
+			hints.ExplicitTotal = nested.ExplicitTotal
+			hints.HasExplicitTotal = true
+		}
+	}
+	return hints
+}
+
+func cacheInputModeFromRecord(record map[string]any) string {
+	for _, parent := range []string{"tokens", "usage"} {
+		mode := normalizeCacheInputMode(readStringFromNested(record, parent, "cache_input_mode", "cacheInputMode"))
+		if mode == CacheInputModeIncluded || mode == CacheInputModeSeparate {
+			return mode
+		}
+	}
+	mode := normalizeCacheInputMode(readString(record, "cache_input_mode", "cacheInputMode"))
+	if mode == CacheInputModeIncluded || mode == CacheInputModeSeparate {
+		return mode
+	}
+	return ""
+}
+
+func explicitPositiveTotalFromRecord(record map[string]any) (int64, bool) {
+	for _, parent := range []string{"tokens", "usage"} {
+		if nested, ok := record[parent].(map[string]any); ok {
+			if total, ok := positiveIntValue(first(nested, "total_tokens", "totalTokens", "total")); ok {
+				return total, true
+			}
+		}
+	}
+	return positiveIntValue(first(record, "total_tokens", "totalTokens", "total"))
+}
+
+func positiveIntValue(value any) (int64, bool) {
+	switch typed := value.(type) {
+	case float64:
+		if typed > 0 {
+			return int64(typed), true
+		}
+	case json.Number:
+		if parsed, err := typed.Int64(); err == nil && parsed > 0 {
+			return parsed, true
+		}
+	case string:
+		if parsed, err := strconv.ParseInt(strings.TrimSpace(typed), 10, 64); err == nil && parsed > 0 {
+			return parsed, true
+		}
+	case int64:
+		if typed > 0 {
+			return typed, true
+		}
+	case int:
+		if typed > 0 {
+			return int64(typed), true
+		}
+	}
+	return 0, false
+}
+
+func IsLongContextInput(inputTokens int64) bool {
+	return inputTokens > LongContextInputTokenThreshold
+}
 
 var (
 	endpointPattern          = regexp.MustCompile(`^(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s+(\S+)`)
@@ -158,6 +457,35 @@ func CompatibleCachedTokens(cachedTokens, cacheTokens, cacheReadTokens, cacheCre
 	return cached - fineGrained
 }
 
+// CacheHitTotals computes a hit-rate numerator from normalized aggregate token
+// buckets. inputTokens must be the normalized total input produced by
+// NormalizeCacheAccounting or repository aggregation.
+func CacheHitTotals(modelName string, inputTokens, cachedTokens, cacheReadTokens, cacheCreationTokens int64) (int64, int64) {
+	_ = modelName
+	_ = cacheCreationTokens
+	input := maxInt64(inputTokens, 0)
+	cached := maxInt64(cachedTokens, 0)
+	cacheRead := maxInt64(cacheReadTokens, 0)
+	hitTokens := cached + cacheRead
+	return hitTokens, input
+}
+
+func CacheHitRate(modelName string, inputTokens, cachedTokens, cacheReadTokens, cacheCreationTokens int64) float64 {
+	hitTokens, totalInput := CacheHitTotals(modelName, inputTokens, cachedTokens, cacheReadTokens, cacheCreationTokens)
+	return CacheHitRateFromTotals(hitTokens, totalInput)
+}
+
+func CacheHitRateFromTotals(hitTokens, inputTokens int64) float64 {
+	if inputTokens <= 0 {
+		return 0
+	}
+	rate := float64(maxInt64(hitTokens, 0)) / float64(inputTokens)
+	if rate > 1 {
+		return 1
+	}
+	return rate
+}
+
 func NormalizeRaw(raw []byte) (Event, error) {
 	var payload any
 	if err := json.Unmarshal(raw, &payload); err != nil {
@@ -190,11 +518,6 @@ func NormalizeRaw(raw []byte) (Event, error) {
 	}
 
 	inputTokens, outputTokens, reasoningTokens, cachedTokens, cacheTokens, cacheReadTokens, cacheCreationTokens, totalTokens := readTokenFields(record)
-	if totalTokens <= 0 {
-		totalTokens = inputTokens + outputTokens + reasoningTokens +
-			CompatibleCachedTokens(cachedTokens, cacheTokens, cacheReadTokens, cacheCreationTokens) +
-			maxInt64(cacheReadTokens, 0) + maxInt64(cacheCreationTokens, 0)
-	}
 
 	latencyMS := readOptionalInt(record, "latency_ms", "latencyMs", "duration_ms", "durationMs", "elapsed_ms", "elapsedMs")
 	ttftMS := readOptionalInt(record, "ttft_ms", "ttftMs", "time_to_first_token_ms", "timeToFirstTokenMs")
@@ -208,53 +531,81 @@ func NormalizeRaw(raw []byte) (Event, error) {
 	apiKey := readString(record, "api_key", "apiKey", "key")
 	authIndex := readString(record, "auth_index", "authIndex", "AuthIndex")
 	requestedModel := readString(record, "alias", "requested_model", "requestedModel")
-	resolvedModel := readString(record, "model", "model_name", "modelName", "resolved_model", "resolvedModel")
+	resolvedModel := readString(record, "resolved_model", "resolvedModel", "model", "model_name", "modelName")
 	model := requestedModel
 	if model == "" {
 		model = resolvedModel
 	}
+	provider := readString(record, "provider", "type", "auth_type", "authType")
+	executorType := readString(record, "executor_type", "executorType")
+	authType := readString(record, "auth_type", "authType")
+	requestServiceTier := readString(record, "request_service_tier", "requestServiceTier", "service_tier", "serviceTier")
+	responseServiceTier := readString(record, "response_service_tier", "responseServiceTier")
+	authProviderSnapshot := readString(record, "auth_provider_snapshot", "authProviderSnapshot")
+	usageContext := CacheInputContext{
+		ExplicitMode:     cacheInputModeFromRecord(record),
+		ExecutorType:     executorType,
+		Provider:         provider,
+		ProviderSnapshot: authProviderSnapshot,
+		AuthType:         authType,
+		ResolvedModel:    resolvedModel,
+		RequestedModel:   requestedModel,
+		DisplayModel:     model,
+	}
+	serviceTier := EffectiveServiceTier(usageContext, requestServiceTier, "", responseServiceTier)
+	cacheAccounting := NormalizeCacheAccounting(usageContext, inputTokens, cachedTokens, cacheTokens, cacheReadTokens, cacheCreationTokens)
+	if totalTokens <= 0 {
+		totalTokens = cacheAccounting.TotalInputTokens + maxInt64(outputTokens, 0) + maxInt64(reasoningTokens, 0)
+	}
 
 	event := Event{
-		RequestID:             readString(record, "request_id", "requestId", "id"),
-		TimestampMS:           timestampMS,
-		Timestamp:             timestamp,
-		Provider:              readString(record, "provider", "type", "auth_type", "authType"),
-		ExecutorType:          readString(record, "executor_type", "executorType"),
-		Model:                 model,
-		RequestedModel:        requestedModel,
-		ResolvedModel:         resolvedModel,
-		Endpoint:              endpoint,
-		Method:                method,
-		Path:                  path,
-		AuthType:              readString(record, "auth_type", "authType"),
-		AuthIndex:             authIndex,
-		Source:                source,
-		SourceHash:            hashString(sourceRaw),
-		APIKeyHash:            hashString(apiKey),
-		AccountSnapshot:       readString(record, "account_snapshot", "accountSnapshot"),
-		AuthLabelSnapshot:     readString(record, "auth_label_snapshot", "authLabelSnapshot"),
-		AuthFileSnapshot:      readString(record, "auth_file_snapshot", "authFileSnapshot"),
-		AuthProviderSnapshot:  readString(record, "auth_provider_snapshot", "authProviderSnapshot"),
-		AuthProjectIDSnapshot: readString(record, "auth_project_id_snapshot", "authProjectIdSnapshot", "project_id", "projectId"),
-		AuthSnapshotAtMS:      readInt(record, "auth_snapshot_at_ms", "authSnapshotAtMs"),
-		ReasoningEffort:       readString(record, "reasoning_effort", "reasoningEffort"),
-		ServiceTier:           readString(record, "service_tier", "serviceTier"),
-		InputTokens:           inputTokens,
-		OutputTokens:          outputTokens,
-		ReasoningTokens:       reasoningTokens,
-		CachedTokens:          cachedTokens,
-		CacheTokens:           cacheTokens,
-		CacheReadTokens:       cacheReadTokens,
-		CacheCreationTokens:   cacheCreationTokens,
-		TotalTokens:           totalTokens,
-		LatencyMS:             latencyMS,
-		TTFTMS:                ttftMS,
-		Failed:                failed,
-		FailStatusCode:        int(failStatusCode),
-		FailSummary:           failSummary,
-		FailBody:              failBody,
-		RawJSON:               string(redactedJSON),
-		CreatedAtMS:           time.Now().UnixMilli(),
+		RequestID:                     readString(record, "request_id", "requestId", "id"),
+		TimestampMS:                   timestampMS,
+		Timestamp:                     timestamp,
+		Provider:                      provider,
+		ExecutorType:                  executorType,
+		Model:                         model,
+		RequestedModel:                requestedModel,
+		ResolvedModel:                 resolvedModel,
+		Endpoint:                      endpoint,
+		Method:                        method,
+		Path:                          path,
+		AuthType:                      authType,
+		AuthIndex:                     authIndex,
+		Source:                        source,
+		SourceHash:                    hashString(sourceRaw),
+		APIKeyHash:                    hashString(apiKey),
+		AccountSnapshot:               readString(record, "account_snapshot", "accountSnapshot"),
+		AuthLabelSnapshot:             readString(record, "auth_label_snapshot", "authLabelSnapshot"),
+		AuthFileSnapshot:              readString(record, "auth_file_snapshot", "authFileSnapshot"),
+		AuthProviderSnapshot:          authProviderSnapshot,
+		AuthProjectIDSnapshot:         readString(record, "auth_project_id_snapshot", "authProjectIdSnapshot", "project_id", "projectId"),
+		AuthSnapshotAtMS:              readInt(record, "auth_snapshot_at_ms", "authSnapshotAtMs"),
+		ReasoningEffort:               readString(record, "reasoning_effort", "reasoningEffort"),
+		ServiceTier:                   serviceTier,
+		RequestServiceTier:            requestServiceTier,
+		ResponseServiceTier:           responseServiceTier,
+		CacheInputMode:                cacheAccounting.Mode,
+		InputTokens:                   inputTokens,
+		OutputTokens:                  outputTokens,
+		ReasoningTokens:               reasoningTokens,
+		CachedTokens:                  cachedTokens,
+		CacheTokens:                   cacheTokens,
+		CacheReadTokens:               cacheReadTokens,
+		CacheCreationTokens:           cacheCreationTokens,
+		NormalizedUncachedInputTokens: cacheAccounting.UncachedInputTokens,
+		NormalizedTotalInputTokens:    cacheAccounting.TotalInputTokens,
+		NormalizedCacheReadTokens:     cacheAccounting.CacheReadTokens,
+		NormalizedCacheCreationTokens: cacheAccounting.CacheCreationTokens,
+		TotalTokens:                   totalTokens,
+		LatencyMS:                     latencyMS,
+		TTFTMS:                        ttftMS,
+		Failed:                        failed,
+		FailStatusCode:                int(failStatusCode),
+		FailSummary:                   failSummary,
+		FailBody:                      failBody,
+		RawJSON:                       string(redactedJSON),
+		CreatedAtMS:                   time.Now().UnixMilli(),
 	}
 	if event.Model == "" {
 		event.Model = "-"
@@ -315,6 +666,9 @@ func BuildPayload(events []Event) Payload {
 			ResolvedModel:         event.ResolvedModel,
 			ReasoningEffort:       event.ReasoningEffort,
 			ServiceTier:           event.ServiceTier,
+			RequestServiceTier:    event.RequestServiceTier,
+			ResponseServiceTier:   event.ResponseServiceTier,
+			CacheInputMode:        event.CacheInputMode,
 			ExecutorType:          event.ExecutorType,
 			Failed:                event.Failed,
 			FailStatusCode:        event.FailStatusCode,
@@ -366,67 +720,40 @@ func readTimestamp(record map[string]any) (int64, string) {
 }
 
 func readTokenFields(record map[string]any) (int64, int64, int64, int64, int64, int64, int64, int64) {
-	tokens := map[string]any{}
-	if nested, ok := first(record, "tokens", "usage").(map[string]any); ok {
-		tokens = nested
-	}
-	input := readIntFrom(tokens, "input_tokens", "inputTokens", "prompt_tokens", "promptTokens")
-	if input == 0 {
-		input = readInt(record, "input_tokens", "inputTokens", "prompt_tokens", "promptTokens")
-	}
-	output := readIntFrom(tokens, "output_tokens", "outputTokens", "completion_tokens", "completionTokens")
-	if output == 0 {
-		output = readInt(record, "output_tokens", "outputTokens", "completion_tokens", "completionTokens")
-	}
-	reasoning := readIntFrom(tokens, "reasoning_tokens", "reasoningTokens")
-	if reasoning == 0 {
-		reasoning = readInt(record, "reasoning_tokens", "reasoningTokens")
-	}
-	cached := readIntFrom(tokens, "cached_tokens", "cachedTokens")
-	if cached == 0 {
-		cached = readInt(record, "cached_tokens", "cachedTokens")
-	}
-	cache := readIntFrom(tokens, "cache_tokens", "cacheTokens")
-	if cache == 0 {
-		cache = readInt(record, "cache_tokens", "cacheTokens")
-	}
-	cacheRead := readFirstIntFrom(tokens,
+	input := readNestedThenTopInt(record, []string{"input_tokens", "inputTokens", "prompt_tokens", "promptTokens"})
+	output := readNestedThenTopInt(record, []string{"output_tokens", "outputTokens", "completion_tokens", "completionTokens"})
+	reasoning := readNestedThenTopInt(record, []string{"reasoning_tokens", "reasoningTokens"})
+	cached := readNestedThenTopInt(record, []string{"cached_tokens", "cachedTokens"})
+	cache := readNestedThenTopInt(record, []string{"cache_tokens", "cacheTokens"})
+	cacheRead := readNestedThenTopInt(record, []string{
 		"cache_read_tokens",
 		"cacheReadTokens",
 		"cache_read_input_tokens",
 		"cacheReadInputTokens",
-	)
-	if cacheRead == 0 {
-		cacheRead = readFirstIntFrom(record,
-			"cache_read_tokens",
-			"cacheReadTokens",
-			"cache_read_input_tokens",
-			"cacheReadInputTokens",
-		)
-	}
-	cacheCreation := readFirstIntFrom(tokens,
+	})
+	cacheCreation := readNestedThenTopInt(record, []string{
 		"cache_creation_tokens",
 		"cacheCreationTokens",
 		"cache_creation_input_tokens",
 		"cacheCreationInputTokens",
+		"cache_write_tokens",
+		"cacheWriteTokens",
 		"cache_write_input_tokens",
 		"cacheWriteInputTokens",
-	)
-	if cacheCreation == 0 {
-		cacheCreation = readFirstIntFrom(record,
-			"cache_creation_tokens",
-			"cacheCreationTokens",
-			"cache_creation_input_tokens",
-			"cacheCreationInputTokens",
-			"cache_write_input_tokens",
-			"cacheWriteInputTokens",
-		)
-	}
-	total := readIntFrom(tokens, "total_tokens", "totalTokens", "total")
-	if total == 0 {
-		total = readInt(record, "total_tokens", "totalTokens", "total")
-	}
+	})
+	total := readNestedThenTopInt(record, []string{"total_tokens", "totalTokens", "total"})
 	return input, output, reasoning, cached, cache, cacheRead, cacheCreation, total
+}
+
+func readNestedThenTopInt(record map[string]any, keys []string) int64 {
+	for _, parent := range []string{"tokens", "usage"} {
+		if nested, ok := record[parent].(map[string]any); ok {
+			if value := readFirstIntFrom(nested, keys...); value != 0 {
+				return value
+			}
+		}
+	}
+	return readFirstIntFrom(record, keys...)
 }
 
 func readFailed(record map[string]any) bool {
@@ -503,6 +830,14 @@ func readString(record map[string]any, keys ...string) string {
 	default:
 		return strings.TrimSpace(fmt.Sprint(value))
 	}
+}
+
+func readStringFromNested(record map[string]any, parent string, keys ...string) string {
+	nested, ok := record[parent].(map[string]any)
+	if !ok {
+		return ""
+	}
+	return readString(nested, keys...)
 }
 
 func readInt(record map[string]any, keys ...string) int64 {

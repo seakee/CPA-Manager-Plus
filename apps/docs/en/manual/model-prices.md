@@ -1,45 +1,82 @@
-# Model Prices
+---
+title: Model Prices And Cost Estimation
+description: Configure model prices, service tiers, long-context multipliers, and cache read/write/creation billing for local CPAMP cost estimates.
+---
 
-Model Prices maintains the price table used by CPAMP cost estimates. It only affects cost displayed in the panel. It does not change provider bills or model routing.
+# Model Prices And Cost Estimation
 
-Use [Usage Analytics](./usage-analytics.md) to see where cost went.
+Model Prices maintains CPAMP's local cost-estimation rules. It affects Dashboard, Monitoring, and Usage Analytics; it does not change provider billing or CPA routing.
 
-## When To Edit Prices
+Open the [Model Prices Demo](https://seakee.github.io/CPA-Manager-Plus/#/demo/model-prices) to inspect fictional prices and model usage.
 
-- A model in Usage Analytics has empty or clearly low cost.
-- Clients use custom model names, aliases, or internal names.
-- Upstream pricing changed.
-- You want to use LiteLLM or OpenRouter public prices as the estimate baseline.
+## Price Sources
 
-The price name must match the model name seen in Monitoring. If client aliases, provider model names, and price-table names differ, add the name recorded in request events.
+- Public metadata synchronized from models.dev first, with LiteLLM and OpenRouter used as fallbacks when the preferred source is unavailable or lacks a model.
+- Local prices added or overridden by the user.
+- Entries for aliases, internal names, or provider-specific variants.
 
-## Common Actions
+Synchronization only occurs when the user triggers it and may use the current Manager Server proxy configuration.
 
-- Search model prices.
-- Add or edit a model price.
-- Delete prices that are no longer used.
-- Manually sync from external price sources.
-- Return to Usage Analytics and confirm cost is calculated.
+Automatic matching runs strictly in models.dev, LiteLLM, then OpenRouter order. CPAMP uses the canonical model metadata in the models.dev catalog to prefer the first-party official entry. A source is saved automatically only when it has one clear, strong identity match; fuzzy similarities are never auto-confirmed. An ambiguous source falls through to the next source. If none of the three sources yields a unique match, the confirmation list keeps candidates from each source separately, even when they share the same original model ID.
 
-External price sync happens only when you trigger it. Check server network and proxy policy before syncing.
+The current sync maps models.dev `cost.input`, `cost.output`, `cost.cache_read`, and `cost.cache_write`, converts valid `cost.tiers` context tiers into CPAMP billing rules, and maps `experimental.modes.fast.cost` to short-context Fast/Priority prices. The complete model object remains available in raw metadata; reasoning prices, unknown experimental modes, unknown tier types, and rules that cannot be validated safely do not activate automatic billing.
 
-## Field Guidance
+### Sync failures and last-known-good prices
 
-Different models have different price structures. Common fields include input tokens, output tokens, cache read/write, reasoning tokens, or request-level fees. Follow the provider's published pricing.
+- When models.dev is temporarily unavailable, CPAMP continues with LiteLLM and OpenRouter.
+- A transient models.dev failure cannot automatically replace a stored models.dev price with a lower-priority source; fallback sources may still fill models that have no local price.
+- When models.dev responds successfully but has no official entry or remains ambiguous, fallback sources are tried in order; only a unique strong identity match may replace the model.
+- If every source fails, synchronization stops before any database write and existing prices remain unchanged.
+- A synchronized price remains the last-known-good value until a later successful sync or a manual edit; `syncedAtMs` indicates its freshness.
 
-If a field has no corresponding price, leave it empty or handle it according to the provider's billing model. Do not fill uncertain values just to make cost look complete.
+## Supported Billing Semantics
 
-## Verification
+A price rule may include:
 
-1. Find a request for the target model in [Monitoring](./monitoring.md).
-2. Note the model name recorded on the request.
-3. Confirm a matching price exists on this page.
-4. Refresh [Usage Analytics](./usage-analytics.md) and check estimated cost for that model.
+- Input and output tokens.
+- Reasoning tokens.
+- Cache read, cache write, and cache creation.
+- Fixed per-request cost.
+- `service_tier` differences.
+- models.dev context-price tiers.
+- Long-context thresholds and multipliers.
+- Model alias and billing-model mapping.
 
-## Accuracy Boundary
+Models such as GPT-5.6 may vary by context length, service tier, and cache type. CPAMP can only apply a rule when both the request event and price entry contain the required fields.
 
-- Provider invoices are always authoritative.
-- CPAMP estimates from collected requests and the current price table.
-- Missing token fields, rewritten model names, or stale prices all affect estimates.
-- Multi-currency pricing, tiers, monthly allowances, and free credits may not fit a single price-table row.
+### Context-tier semantics
 
+- A tier matches only when normalized input tokens are **strictly greater than** `tier.size`; an exact-threshold request stays in the lower band.
+- When multiple tiers match, CPAMP selects the highest matching threshold.
+- The selected tier's rates apply to the entire request, not only to tokens above the threshold.
+- Input, output, or cache rates omitted by a tier inherit the base price; an explicit zero from models.dev remains zero.
+- CPAMP currently activates only safely validated tiers with `tier.type = context` and a positive threshold. Other rules remain in raw metadata for inspection.
+
+### Fast/Priority semantics
+
+- `experimental.modes.fast.cost` matches both `fast` usage telemetry and API `priority` telemetry.
+- Short-context requests prefer explicit Fast/Priority prices. Missing fields inherit base rates, while explicit zeros remain zero.
+- A matched context tier or the legacy GPT long-context rule uses its standard context price without stacking Fast/Priority pricing.
+- Non-models.dev entries, older data, and models without an explicit mode price retain the existing multiplier as a compatibility fallback.
+
+Model Prices displays synchronized context tiers and service-tier prices as read-only rules. The current manual editor manages base prices only; saving a manual price explicitly clears existing synchronized advanced rules, with a warning shown before saving.
+
+## Matching Model Names
+
+The client model, CPA alias, provider model, and price-table name may differ. When cost is missing:
+
+1. Inspect the event model and billing model in [Monitoring](./monitoring.md).
+2. Search for matching entries in Model Prices.
+3. Add a local alias or override when required.
+4. Refresh [Usage Analytics](./usage-analytics.md).
+
+## Usage Summary
+
+The page uses a compact model-usage summary to show which prices are active. It does not download full request history just to count model calls.
+
+## Accuracy Boundaries
+
+- Provider billing remains authoritative.
+- Missing token, service tier, long-context, or cache fields reduce estimate accuracy.
+- Subscriptions, grants, non-context tiers, unsupported dynamic-mode prices, and multiple currencies may not fit a single price entry.
+- Historical cost may be displayed using current prices after an update; the price table is not an immutable billing snapshot.

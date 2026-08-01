@@ -11,6 +11,9 @@ const GENERIC_PROVIDER_LABELS = new Set([
   'gemini',
   'claude',
   'vertex',
+  'xai',
+  'x-ai',
+  'grok',
 ]);
 
 const hasReadableValue = (value: string | null | undefined) => {
@@ -20,6 +23,34 @@ const hasReadableValue = (value: string | null | undefined) => {
 
 export const isGenericMonitoringProviderLabel = (value: string) =>
   GENERIC_PROVIDER_LABELS.has(value.trim().toLowerCase());
+
+/**
+ * True when `refined` is a key/provider ordinal disambiguation of `base`
+ * (for example base=`kuaileshifu`, refined=`kuaileshifu #1`).
+ */
+export const isKeyDisambiguatedLabel = (
+  refined: string | null | undefined,
+  base: string | null | undefined
+) => {
+  const refinedValue = readString(refined);
+  const baseValue = readString(base);
+  if (!refinedValue || !baseValue || refinedValue === baseValue) return false;
+  return refinedValue.toLowerCase().startsWith(`${baseValue.toLowerCase()} #`);
+};
+
+export const isRedundantMonitoringLabel = (
+  candidate: string | null | undefined,
+  primary: string | null | undefined
+) => {
+  const candidateValue = readString(candidate);
+  const primaryValue = readString(primary);
+  if (!candidateValue || !primaryValue) return false;
+  if (candidateValue === primaryValue) return true;
+  return (
+    isKeyDisambiguatedLabel(primaryValue, candidateValue) ||
+    isKeyDisambiguatedLabel(candidateValue, primaryValue)
+  );
+};
 
 const firstReadable = (...values: Array<string | null | undefined>) =>
   values.find(hasReadableValue)?.trim() || '';
@@ -118,24 +149,46 @@ export const buildMonitoringSourceDisplay = (
     explicitLabel,
     snapshotLabel
   );
-  const sourceLabel = firstReadable(
-    authMeta?.label,
-    explicitLabel,
-    snapshotLabel,
-    account,
-    sourceMeta.displayName
-  );
   const provider = firstReadable(authMeta?.provider, snapshotProvider, sourceMeta.type);
   const channel = firstReadable(channelMeta?.name, explicitChannel, provider);
   const channelHost = firstReadable(channelMeta?.host);
+  const resolvedSourceName = firstReadable(sourceMeta.displayName);
+  const labelCandidates = firstReadable(authMeta?.label, explicitLabel, snapshotLabel);
+  // Prefer key-disambiguated source names (e.g. "kuaileshifu #1") over the bare
+  // OpenAI-compatible provider/channel name when multi-key providers share a label.
+  const sourceLabel = firstReadable(
+    resolvedSourceName &&
+      (isKeyDisambiguatedLabel(resolvedSourceName, channel) ||
+        isKeyDisambiguatedLabel(resolvedSourceName, channelHost) ||
+        isKeyDisambiguatedLabel(resolvedSourceName, labelCandidates) ||
+        isKeyDisambiguatedLabel(resolvedSourceName, account))
+      ? resolvedSourceName
+      : '',
+    labelCandidates,
+    account,
+    resolvedSourceName
+  );
   const sourceMasked = maskEmailLike(sourceLabel || sourceMeta.displayName);
   const accountMasked = maskEmailLike(account || sourceLabel);
   const fallbackId = shortHash(input.sourceHash || input.apiKeyHash || authIndex);
+  const nonGenericChannel =
+    channel && !isGenericMonitoringProviderLabel(channel) ? channel : '';
+  const nonGenericSource =
+    sourceMasked && !isGenericMonitoringProviderLabel(sourceMasked) ? sourceMasked : '';
+  const keyDisambiguatedSource =
+    nonGenericSource &&
+    (isKeyDisambiguatedLabel(nonGenericSource, channel) ||
+      isKeyDisambiguatedLabel(nonGenericSource, channelHost) ||
+      isKeyDisambiguatedLabel(nonGenericSource, labelCandidates) ||
+      isKeyDisambiguatedLabel(nonGenericSource, account))
+      ? nonGenericSource
+      : '';
   const primary =
     firstReadable(
-      channel && !isGenericMonitoringProviderLabel(channel) ? channel : '',
+      keyDisambiguatedSource,
+      nonGenericChannel,
       channelHost,
-      sourceMasked,
+      nonGenericSource,
       provider && !isGenericMonitoringProviderLabel(provider) ? provider : '',
       accountMasked,
       apiKeyAlias,
@@ -144,11 +197,12 @@ export const buildMonitoringSourceDisplay = (
       fallbackId
     ) || '-';
   const meta = firstReadable(
-    provider && provider !== primary ? provider : '',
-    channelHost && channelHost !== primary ? channelHost : '',
-    accountMasked && accountMasked !== primary ? accountMasked : '',
-    sourceMasked && sourceMasked !== primary ? sourceMasked : '',
-    apiKeyAlias && apiKeyAlias !== primary ? apiKeyAlias : ''
+    provider && !isRedundantMonitoringLabel(provider, primary) ? provider : '',
+    channelHost && !isRedundantMonitoringLabel(channelHost, primary) ? channelHost : '',
+    accountMasked && !isRedundantMonitoringLabel(accountMasked, primary) ? accountMasked : '',
+    sourceMasked && !isRedundantMonitoringLabel(sourceMasked, primary) ? sourceMasked : '',
+    apiKeyAlias && !isRedundantMonitoringLabel(apiKeyAlias, primary) ? apiKeyAlias : '',
+    channel && !isRedundantMonitoringLabel(channel, primary) ? channel : ''
   );
   const title = Array.from(
     new Set(

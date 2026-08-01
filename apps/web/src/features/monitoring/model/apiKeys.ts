@@ -6,6 +6,7 @@ import { formatApiKeyHashLabel, readString } from './base';
 export type ApiKeyDisplayInfo = {
   label: string;
   masked: string;
+  copyValue?: string;
 };
 
 export const sanitizeApiKeyDisplayText = (value: string, fallback = '') => {
@@ -23,7 +24,7 @@ export const buildApiKeyDisplayMap = (
     const hash = sha256Hex(apiKey).toLowerCase();
     if (!hash || map.has(hash)) return;
     const masked = maskApiKey(apiKey) || formatApiKeyHashLabel(hash);
-    map.set(hash, { label: masked, masked });
+    map.set(hash, { label: masked, masked, copyValue: apiKey });
   });
   apiKeyAliases.forEach((entry) => {
     const hash = readString(entry.apiKeyHash).toLowerCase();
@@ -33,6 +34,7 @@ export const buildApiKeyDisplayMap = (
     map.set(hash, {
       label: alias,
       masked: existing?.masked || existing?.label || formatApiKeyHashLabel(hash),
+      copyValue: existing?.copyValue,
     });
   });
   return map;

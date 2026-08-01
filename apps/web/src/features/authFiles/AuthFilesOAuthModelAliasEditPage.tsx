@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Card } from '@/components/ui/Card';
@@ -9,11 +9,14 @@ import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import { IconInfo, IconX } from '@/components/ui/icons';
 import { SecondaryScreenShell } from '@/components/common/SecondaryScreenShell';
 import { useEdgeSwipeBack } from '@/hooks/useEdgeSwipeBack';
+import { useUnsavedChangesGuard } from '@/hooks/useUnsavedChangesGuard';
 import { useAuthStore, useNotificationStore } from '@/stores';
 import { authFilesApi } from '@/services/api';
 import type { AuthFileItem, OAuthModelAliasEntry } from '@/types';
-import { generateId } from '@/utils/helpers';
+import { generateId, getErrorMessage } from '@/utils/helpers';
 import styles from './AuthFilesOAuthModelAliasEditPage.module.scss';
+import { isOAuthAliasDraftDirty } from './oauthEditorState';
+import { normalizeOAuthAliasEntries } from './oauthAliasValidation';
 
 type AuthFileModelItem = { id: string; display_name?: string; type?: string; owned_by?: string };
 
@@ -41,6 +44,7 @@ const buildEmptyMappingEntry = (): OAuthModelMappingFormEntry => ({
   name: '',
   alias: '',
   fork: true,
+  forceMapping: false,
 });
 
 const normalizeMappingEntries = (
@@ -54,6 +58,7 @@ const normalizeMappingEntries = (
     name: entry.name ?? '',
     alias: entry.alias ?? '',
     fork: Boolean(entry.fork),
+    forceMapping: Boolean(entry.forceMapping),
   }));
 };
 
@@ -73,9 +78,14 @@ export function AuthFilesOAuthModelAliasEditPage() {
   const [excluded, setExcluded] = useState<Record<string, string[]>>({});
   const [modelAlias, setModelAlias] = useState<Record<string, OAuthModelAliasEntry[]>>({});
   const [initialLoading, setInitialLoading] = useState(true);
+  const [initialLoadError, setInitialLoadError] = useState<string | null>(null);
+  const [baselineReady, setBaselineReady] = useState(false);
   const [modelAliasUnsupported, setModelAliasUnsupported] = useState(false);
+  const loadRequestRef = useRef(0);
 
-  const [mappings, setMappings] = useState<OAuthModelMappingFormEntry[]>([buildEmptyMappingEntry()]);
+  const [mappings, setMappings] = useState<OAuthModelMappingFormEntry[]>([
+    buildEmptyMappingEntry(),
+  ]);
   const [modelsList, setModelsList] = useState<AuthFileModelItem[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState<'unsupported' | null>(null);
@@ -122,6 +132,22 @@ export function AuthFilesOAuthModelAliasEditPage() {
   );
 
   const resolvedProviderKey = useMemo(() => normalizeProviderKey(provider), [provider]);
+  const initialMappings = useMemo(
+    () => modelAlias[resolvedProviderKey] ?? [],
+    [modelAlias, resolvedProviderKey]
+  );
+  const isDirty = isOAuthAliasDraftDirty(mappings, initialMappings);
+  const { allowNextNavigation } = useUnsavedChangesGuard({
+    enabled: !initialLoading && !saving,
+    shouldBlock: isDirty,
+    dialog: {
+      title: t('common.unsaved_changes_title'),
+      message: t('common.unsaved_changes_message'),
+      confirmText: t('common.leave'),
+      cancelText: t('common.stay'),
+      variant: 'danger',
+    },
+  });
   const title = useMemo(() => t('oauth_model_alias.add_title'), [t]);
   const headerHint = useMemo(() => {
     if (!provider.trim()) {
@@ -157,61 +183,60 @@ export function AuthFilesOAuthModelAliasEditPage() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [handleBack]);
 
-  useEffect(() => {
-    let cancelled = false;
+  const loadInitialData = useCallback(async () => {
+    const requestId = ++loadRequestRef.current;
+    setInitialLoading(true);
+    setInitialLoadError(null);
+    setBaselineReady(false);
+    setModelAliasUnsupported(false);
+    try {
+      const [filesResult, excludedResult, aliasResult] = await Promise.allSettled([
+        authFilesApi.list(),
+        authFilesApi.getOauthExcludedModels(),
+        authFilesApi.getOauthModelAlias(),
+      ]);
 
-    const load = async () => {
-      setInitialLoading(true);
-      setModelAliasUnsupported(false);
-      try {
-        const [filesResult, excludedResult, aliasResult] = await Promise.allSettled([
-          authFilesApi.list(),
-          authFilesApi.getOauthExcludedModels(),
-          authFilesApi.getOauthModelAlias(),
-        ]);
+      if (requestId !== loadRequestRef.current) return;
 
-        if (cancelled) return;
-
-        if (filesResult.status === 'fulfilled') {
-          setFiles(filesResult.value?.files ?? []);
-        }
-
-        if (excludedResult.status === 'fulfilled') {
-          setExcluded(excludedResult.value ?? {});
-        }
-
-        if (aliasResult.status === 'fulfilled') {
-          setModelAlias(aliasResult.value ?? {});
-          return;
-        }
-
-        const err = aliasResult.status === 'rejected' ? aliasResult.reason : null;
-        const status =
-          typeof err === 'object' && err !== null && 'status' in err
-            ? (err as { status?: unknown }).status
-            : undefined;
-
-        if (status === 404) {
-          setModelAliasUnsupported(true);
-          return;
-        }
-      } finally {
-        if (!cancelled) {
-          setInitialLoading(false);
-        }
+      if (filesResult.status === 'fulfilled') {
+        setFiles(filesResult.value?.files ?? []);
       }
-    };
+      if (excludedResult.status === 'fulfilled') {
+        setExcluded(excludedResult.value ?? {});
+      }
+      if (aliasResult.status === 'fulfilled') {
+        setModelAlias(aliasResult.value ?? {});
+        setBaselineReady(true);
+        return;
+      }
 
-    load().catch(() => {
-      if (!cancelled) {
+      const err = aliasResult.reason;
+      const status =
+        typeof err === 'object' && err !== null && 'status' in err
+          ? (err as { status?: unknown }).status
+          : undefined;
+      if (status === 404) {
+        setModelAliasUnsupported(true);
+        return;
+      }
+      setInitialLoadError(getErrorMessage(err));
+    } catch (err: unknown) {
+      if (requestId === loadRequestRef.current) {
+        setInitialLoadError(getErrorMessage(err));
+      }
+    } finally {
+      if (requestId === loadRequestRef.current) {
         setInitialLoading(false);
       }
-    });
-
-    return () => {
-      cancelled = true;
-    };
+    }
   }, []);
+
+  useEffect(() => {
+    void loadInitialData();
+    return () => {
+      loadRequestRef.current += 1;
+    };
+  }, [loadInitialData]);
 
   useEffect(() => {
     if (!resolvedProviderKey) {
@@ -302,24 +327,44 @@ export function AuthFilesOAuthModelAliasEditPage() {
   }, []);
 
   const handleSave = useCallback(async () => {
+    if (!baselineReady || initialLoadError !== null) {
+      showNotification(t('notification.refresh_failed'), 'error');
+      return;
+    }
     const channel = provider.trim();
     if (!channel) {
       showNotification(t('oauth_model_alias.provider_required'), 'error');
       return;
     }
 
-    const seen = new Set<string>();
-    const normalized = mappings
-      .map((entry) => {
-        const name = String(entry.name ?? '').trim();
-        const alias = String(entry.alias ?? '').trim();
-        if (!name || !alias) return null;
-        const key = `${name.toLowerCase()}::${alias.toLowerCase()}::${entry.fork ? '1' : '0'}`;
-        if (seen.has(key)) return null;
-        seen.add(key);
-        return entry.fork ? { name, alias, fork: true } : { name, alias };
-      })
-      .filter(Boolean) as OAuthModelAliasEntry[];
+    const normalization = normalizeOAuthAliasEntries(mappings);
+    // Whole-form validation: refuse to save when any row would be dropped by CPA rules.
+    // This keeps the draft visible so the user can fix invalid rows instead of silently
+    // persisting a partial subset.
+    const firstIssue = normalization.issues[0];
+    if (firstIssue) {
+      if (firstIssue.code === 'same_as_name') {
+        showNotification(t('oauth_model_alias.alias_same_as_name'), 'error');
+        return;
+      }
+      if (firstIssue.code === 'duplicate_alias') {
+        showNotification(
+          t('oauth_model_alias.alias_duplicate', { alias: firstIssue.alias ?? '' }),
+          'error'
+        );
+        return;
+      }
+      if (firstIssue.code === 'empty_fields' || firstIssue.code === 'duplicate_entry') {
+        showNotification(t('oauth_model_alias.alias_incomplete'), 'error');
+        return;
+      }
+    }
+
+    const normalized = normalization.accepted;
+    if (normalized.length === 0 && mappings.some((entry) => entry.name.trim() || entry.alias.trim())) {
+      showNotification(t('oauth_model_alias.alias_incomplete'), 'error');
+      return;
+    }
 
     setSaving(true);
     try {
@@ -329,6 +374,7 @@ export function AuthFilesOAuthModelAliasEditPage() {
         await authFilesApi.deleteOauthModelAlias(channel);
       }
       showNotification(t('oauth_model_alias.save_success'), 'success');
+      allowNextNavigation();
       handleBack();
     } catch (err: unknown) {
       const errorMessage = err instanceof Error ? err.message : '';
@@ -336,9 +382,23 @@ export function AuthFilesOAuthModelAliasEditPage() {
     } finally {
       setSaving(false);
     }
-  }, [handleBack, mappings, provider, showNotification, t]);
+  }, [
+    allowNextNavigation,
+    baselineReady,
+    handleBack,
+    initialLoadError,
+    mappings,
+    provider,
+    showNotification,
+    t,
+  ]);
 
-  const canSave = !disableControls && !saving && !modelAliasUnsupported;
+  const canSave =
+    !disableControls &&
+    !saving &&
+    baselineReady &&
+    !modelAliasUnsupported &&
+    initialLoadError === null;
 
   return (
     <SecondaryScreenShell
@@ -363,6 +423,18 @@ export function AuthFilesOAuthModelAliasEditPage() {
             description={t('oauth_model_alias.upgrade_required_desc')}
           />
         </Card>
+      ) : initialLoadError !== null ? (
+        <Card>
+          <EmptyState
+            title={t('notification.refresh_failed')}
+            description={initialLoadError || t('notification.refresh_failed')}
+            action={
+              <Button variant="secondary" size="sm" onClick={() => void loadInitialData()}>
+                {t('common.refresh')}
+              </Button>
+            }
+          />
+        </Card>
       ) : (
         <>
           <Card className={styles.settingsCard}>
@@ -375,9 +447,16 @@ export function AuthFilesOAuthModelAliasEditPage() {
             </div>
 
             <div className={styles.settingsSection}>
+              <div className={styles.settingsDesc}>{t('oauth_model_alias.scope_hint')}</div>
+              <div className={styles.settingsDesc}>{t('oauth_model_alias.usage_hint')}</div>
+            </div>
+
+            <div className={styles.settingsSection}>
               <div className={styles.settingsRow}>
                 <div className={styles.settingsInfo}>
-                  <div className={styles.settingsLabel}>{t('oauth_model_alias.provider_label')}</div>
+                  <div className={styles.settingsLabel}>
+                    {t('oauth_model_alias.provider_label')}
+                  </div>
                   <div className={styles.settingsDesc}>{t('oauth_model_alias.provider_hint')}</div>
                 </div>
                 <div className={styles.settingsControl}>
@@ -458,6 +537,15 @@ export function AuthFilesOAuthModelAliasEditPage() {
                       labelPosition="left"
                       checked={Boolean(entry.fork)}
                       onChange={(value) => updateMappingEntry(index, 'fork', value)}
+                      disabled={disableControls || saving}
+                    />
+                  </div>
+                  <div className={styles.mappingFork}>
+                    <ToggleSwitch
+                      label={t('oauth_model_alias.alias_force_mapping_label')}
+                      labelPosition="left"
+                      checked={Boolean(entry.forceMapping)}
+                      onChange={(value) => updateMappingEntry(index, 'forceMapping', value)}
                       disabled={disableControls || saving}
                     />
                   </div>

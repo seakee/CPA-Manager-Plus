@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildAuthJsonFilePayloads,
   convertAuthJsonInput,
-  getDefaultSub2ApiAuthFileName,
   getDefaultSessionAuthFileName,
+  isSub2ApiAuthJsonInput,
 } from '@/features/authFiles/sessionAuthConverter';
 
 const encodeBase64UrlJson = (value: unknown) =>
@@ -1107,50 +1108,153 @@ describe('convertAuthJsonInput', () => {
     });
   });
 
-  it('converts multiple sub2api OpenAI OAuth accounts to a CPA auth array', () => {
-    const result = convertAuthJsonInput(
+  it('converts multiple sub2api OpenAI OAuth accounts to separate CPA auth files', () => {
+    const input = JSON.stringify({
+      exported_at: '2026-06-01T12:00:00.000Z',
+      proxies: [],
+      accounts: [
+        {
+          name: 'First OpenAI',
+          platform: 'openai',
+          type: 'oauth',
+          credentials: {
+            access_token: 'first-access-token',
+            email: 'first@example.com',
+          },
+        },
+        {
+          name: 'Second OpenAI',
+          platform: 'openai',
+          type: 'oauth',
+          credentials: {
+            access_token: 'second-access-token',
+            email: 'second@example.com',
+          },
+        },
+      ],
+    });
+
+    const result = buildAuthJsonFilePayloads(
+      'sub2api',
+      'codex-account.json',
+      input,
+      new Date('2026-06-02T00:00:00.000Z')
+    );
+
+    expect(isSub2ApiAuthJsonInput(input)).toBe(true);
+    expect(result).toEqual([
+      {
+        fileName: expect.stringMatching(/^codex-[a-f0-9]{8}-first@example\.com\.json$/),
+        authJson: expect.objectContaining({
+          type: 'codex',
+          name: 'First OpenAI',
+          email: 'first@example.com',
+          access_token: 'first-access-token',
+        }),
+      },
+      {
+        fileName: expect.stringMatching(/^codex-[a-f0-9]{8}-second@example\.com\.json$/),
+        authJson: expect.objectContaining({
+          type: 'codex',
+          name: 'Second OpenAI',
+          email: 'second@example.com',
+          access_token: 'second-access-token',
+        }),
+      },
+    ]);
+    expect(result[0].fileName).not.toBe(result[1].fileName);
+    expect(result.map((item) => JSON.stringify(item.authJson))).toEqual([
+      expect.stringMatching(/^\{/),
+      expect.stringMatching(/^\{/),
+    ]);
+  });
+
+  it('deduplicates generated sub2api auth file names within one import', () => {
+    const result = buildAuthJsonFilePayloads(
+      'sub2api',
+      'codex-account.json',
       JSON.stringify({
         exported_at: '2026-06-01T12:00:00.000Z',
         proxies: [],
         accounts: [
           {
-            name: 'First OpenAI',
+            name: 'Shared OpenAI',
             platform: 'openai',
             type: 'oauth',
             credentials: {
               access_token: 'first-access-token',
-              email: 'first@example.com',
+              email: 'shared@example.com',
             },
           },
           {
-            name: 'Second OpenAI',
+            name: 'Shared OpenAI',
             platform: 'openai',
             type: 'oauth',
             credentials: {
               access_token: 'second-access-token',
-              email: 'second@example.com',
+              email: 'shared@example.com',
             },
           },
         ],
       }),
-      'sub2api'
+      new Date('2026-06-02T00:00:00.000Z')
     );
 
-    expect(result).toEqual([
-      expect.objectContaining({
-        type: 'codex',
-        name: 'First OpenAI',
-        email: 'first@example.com',
-        access_token: 'first-access-token',
-      }),
-      expect.objectContaining({
-        type: 'codex',
-        name: 'Second OpenAI',
-        email: 'second@example.com',
-        access_token: 'second-access-token',
-      }),
-    ]);
-    expect(getDefaultSub2ApiAuthFileName(result)).toBe('sub2api-codex-accounts.codex.json');
+    expect(result[1].fileName).toBe(result[0].fileName.replace(/\.json$/, '-2.json'));
+  });
+
+  it('does not auto-detect ordinary CPA auth JSON as sub2api', () => {
+    expect(
+      isSub2ApiAuthJsonInput(
+        JSON.stringify({ type: 'codex', email: 'user@example.com', access_token: 'token' })
+      )
+    ).toBe(false);
+  });
+
+  it('does not auto-detect valid CPA auth JSON with export-like metadata as sub2api', () => {
+    const input = JSON.stringify({
+      type: 'custom-provider',
+      token: 'provider-secret',
+      exported_at: '2026-06-01T12:00:00.000Z',
+      proxies: [],
+    });
+
+    expect(convertAuthJsonInput(input, 'cpa')).toEqual({
+      type: 'custom-provider',
+      token: 'provider-secret',
+      exported_at: '2026-06-01T12:00:00.000Z',
+      proxies: [],
+    });
+    expect(isSub2ApiAuthJsonInput(input)).toBe(false);
+  });
+
+  it.each([
+    { label: 'null', accounts: null },
+    { label: 'object', accounts: {} },
+    { label: 'string', accounts: 'invalid' },
+  ])('detects and rejects a sub2api export whose accounts value is $label', ({ accounts }) => {
+    const input = JSON.stringify({
+      exported_at: '2026-06-01T12:00:00.000Z',
+      proxies: [],
+      accounts,
+    });
+
+    expect(isSub2ApiAuthJsonInput(input)).toBe(true);
+    expect(() => convertAuthJsonInput(input, 'sub2api')).toThrow(
+      'sub2api export accounts must be an array'
+    );
+  });
+
+  it('detects and rejects a sub2api export whose accounts field is missing', () => {
+    const input = JSON.stringify({
+      exported_at: '2026-06-01T12:00:00.000Z',
+      proxies: [],
+    });
+
+    expect(isSub2ApiAuthJsonInput(input)).toBe(true);
+    expect(() => convertAuthJsonInput(input, 'sub2api')).toThrow(
+      'sub2api export accounts must be an array'
+    );
   });
 
   it('uses sub2api account expires_at when credential expiry is absent', () => {
@@ -1293,6 +1397,40 @@ describe('convertAuthJsonInput', () => {
     expect(getDefaultSessionAuthFileName(sameIdentityWithDifferentToken)).toBe(
       getDefaultSessionAuthFileName(authJson)
     );
+  });
+
+  it('keeps generated sub2api file names stable across token and timestamp changes', () => {
+    const buildExport = (exportedAt: string, expiresAt: string, accessToken: string) =>
+      JSON.stringify({
+        exported_at: exportedAt,
+        proxies: [],
+        accounts: [
+          {
+            name: 'Stable OpenAI',
+            platform: 'openai',
+            type: 'oauth',
+            credentials: {
+              access_token: accessToken,
+              email: 'stable@example.com',
+              expires_at: expiresAt,
+            },
+          },
+        ],
+      });
+
+    const first = buildAuthJsonFilePayloads(
+      'sub2api',
+      'codex-account.json',
+      buildExport('2026-06-01T12:00:00.000Z', '2026-07-01T00:00:00.000Z', 'token-one')
+    );
+    const second = buildAuthJsonFilePayloads(
+      'sub2api',
+      'codex-account.json',
+      buildExport('2026-06-15T12:00:00.000Z', '2026-08-01T00:00:00.000Z', 'token-two')
+    );
+
+    expect(first[0].fileName).toMatch(/^codex-[a-f0-9]{8}-stable@example\.com\.json$/);
+    expect(second[0].fileName).toBe(first[0].fileName);
   });
 
   it.each(['con', 'AUX', 'lpt1'])(

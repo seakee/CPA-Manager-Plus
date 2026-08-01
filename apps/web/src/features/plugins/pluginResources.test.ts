@@ -135,6 +135,7 @@ describe('plugin resource helpers', () => {
     expect(isOfficialRepository('https://github.com.evil.test/router-for-me/demo')).toBe(false);
     expect(isOfficialRepository('other/demo')).toBe(false);
     expect(isOfficialPlugin(createStoreEntry())).toBe(true);
+    expect(isOfficialPlugin(createStoreEntry({ sourceId: 'third-party' }))).toBe(false);
     expect(isOfficialPlugin(createStoreEntry({ repository: 'other/demo' }))).toBe(false);
   });
 

@@ -1,12 +1,19 @@
-# Monitoring
+---
+title: CPA Request Monitoring And Failure Diagnosis
+description: Persist and filter CPA requests by account, caller API key, provider, model, trace, latency, cache, and status while inspecting sanitized failure evidence.
+---
+
+# CPA Request Monitoring And Failure Diagnosis
 
 Monitoring is the main entry point for request failures. Dashboard tells you something is wrong. Monitoring tells you which request type, account, model, or caller is involved.
 
 Account handling is documented separately in [Account Action Queue](./account-actions.md). This page focuses on request events.
 
+Open the [Monitoring Demo](https://seakee.github.io/CPA-Manager-Plus/#/demo/monitoring) to browse fictional account overview, API key summary, and realtime request data.
+
 ## Availability
 
-Monitoring requires Manager Server collection and CPA usage publishing. Usage features may be unavailable in the CPA-hosted panel compatibility mode or before Manager Server is bound.
+Monitoring is available only in the Manager Server-hosted panel and requires CPA usage publishing. The CPAMP Lightweight Panel does not connect to Manager Server or read its SQLite data; open `http://<cpamp-host>:18317/management.html` when monitoring is required.
 
 If the page says request monitoring is disabled, enable it in [Configuration](./configuration.md) under Manager Server configuration.
 
@@ -39,6 +46,8 @@ Failure summaries are sanitized. Raw failure bodies stay in local SQLite and are
 - **Latency and cache state**: inspect slow requests, cache misses, or streaming behavior.
 
 Filters should lead to the next action. Cost issues go to [Usage Analytics](./usage-analytics.md). Auth issues go to [Account Action Queue](./account-actions.md).
+
+Caller API keys remain masked. Copy appears only when the key still exists in the current configuration and can be read safely; historical or deleted keys are not restored.
 
 ## Empty Monitoring
 

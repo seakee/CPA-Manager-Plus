@@ -50,12 +50,16 @@ const COOLING_PROVIDER_KEY_FIELDS = [
   ...DISABLE_COOLING_FIELDS,
 ] as const;
 const CODEX_KEY_FIELDS = [...COOLING_PROVIDER_KEY_FIELDS, 'websockets'] as const;
+const XAI_KEY_FIELDS = CODEX_KEY_FIELDS;
 const CLAUDE_KEY_FIELDS = [
   ...COOLING_PROVIDER_KEY_FIELDS,
   'cloak',
   'experimental-cch-signing',
   'experimentalCchSigning',
   'experimental_cch_signing',
+  'rebuild-mid-system-message',
+  'rebuildMidSystemMessage',
+  'rebuild_mid_system_message',
 ] as const;
 const GEMINI_KEY_FIELDS = COOLING_PROVIDER_KEY_FIELDS;
 const VERTEX_KEY_FIELDS = COMMON_PROVIDER_KEY_FIELDS;
@@ -97,6 +101,15 @@ const MODEL_ALIAS_FIELDS = [
   'testModel',
   'test_model',
   'image',
+  'force-mapping',
+  'forceMapping',
+  'force_mapping',
+  'input-modalities',
+  'inputModalities',
+  'input_modalities',
+  'output-modalities',
+  'outputModalities',
+  'output_modalities',
   'thinking',
 ] as const;
 
@@ -126,7 +139,9 @@ const CLOAK_FIELDS = [
 
 const RAW_SECTION_ALIASES: Record<string, readonly string[]> = {
   'gemini-api-key': ['gemini-api-key', 'geminiApiKey', 'geminiApiKeys'],
+  'interactions-api-key': ['interactions-api-key', 'interactionsApiKey', 'interactionsApiKeys'],
   'codex-api-key': ['codex-api-key', 'codexApiKey', 'codexApiKeys'],
+  'xai-api-key': ['xai-api-key', 'xaiApiKey', 'xaiApiKeys'],
   'claude-api-key': ['claude-api-key', 'claudeApiKey', 'claudeApiKeys'],
   'vertex-api-key': ['vertex-api-key', 'vertexApiKey', 'vertexApiKeys'],
   'openai-compatibility': ['openai-compatibility', 'openaiCompatibility', 'openAICompatibility'],
@@ -270,6 +285,21 @@ const mergeModelPayloads = (raw: unknown, models: unknown) =>
           const rawModel = findRawRecord(rawRecords, usedIndexes, payload, index, modelIdentity);
           const next = mergeKnownFields(rawModel, payload, MODEL_ALIAS_FIELDS);
           preserveOmittedRawField(rawModel, payload, next, ['image']);
+          preserveOmittedRawField(rawModel, payload, next, [
+            'force-mapping',
+            'forceMapping',
+            'force_mapping',
+          ]);
+          preserveOmittedRawField(rawModel, payload, next, [
+            'input-modalities',
+            'inputModalities',
+            'input_modalities',
+          ]);
+          preserveOmittedRawField(rawModel, payload, next, [
+            'output-modalities',
+            'outputModalities',
+            'output_modalities',
+          ]);
           preserveOmittedRawField(rawModel, payload, next, ['thinking']);
           return next;
         });
@@ -351,6 +381,71 @@ const buildPreservedList = async <T>(
   });
 };
 
+type ProviderRecordMerger = (
+  raw: unknown,
+  payload: Record<string, unknown>
+) => Record<string, unknown>;
+
+export const appendLatestProviderRecord = (
+  latestItems: unknown[],
+  payload: Record<string, unknown>,
+  mergePayload: ProviderRecordMerger
+): unknown[] => [...latestItems, mergePayload(undefined, payload)];
+
+export const replaceLatestProviderRecord = (
+  latestItems: unknown[],
+  isTarget: (record: Record<string, unknown>, index: number) => boolean,
+  payload: Record<string, unknown>,
+  mergePayload: ProviderRecordMerger
+): unknown[] => {
+  const targetIndex = latestItems.findIndex(
+    (item, index) => isRecord(item) && isTarget(item, index)
+  );
+  if (targetIndex < 0) {
+    throw new Error('Provider configuration changed; refresh and try again.');
+  }
+  return latestItems.map((item, index) =>
+    index === targetIndex ? mergePayload(item, payload) : item
+  );
+};
+
+/** Serializes read-modify-write updates per CPA config section to avoid lost updates. */
+const providerSectionWriteQueues = new Map<string, Promise<unknown>>();
+
+const enqueueProviderSectionWrite = <T>(section: string, task: () => Promise<T>): Promise<T> => {
+  const previous = providerSectionWriteQueues.get(section) ?? Promise.resolve();
+  const run = previous.then(task, task);
+  providerSectionWriteQueues.set(
+    section,
+    run.then(
+      () => undefined,
+      () => undefined
+    )
+  );
+  return run;
+};
+
+const mutateLatestProviderList = async (
+  section: string,
+  mutate: (latestItems: unknown[]) => unknown[]
+) =>
+  enqueueProviderSectionWrite(section, async () => {
+    const rawConfig = await apiClient.get('/config');
+    const latestItems = getRawSectionList(rawConfig, section);
+    await apiClient.put(`/${section}`, mutate(latestItems));
+  });
+
+const matchesProviderConfig = (
+  record: Record<string, unknown>,
+  original: GeminiKeyConfig | ProviderKeyConfig
+) =>
+  providerKeyIdentity(record) ===
+  providerKeyIdentity({
+    'auth-index': original.authIndex,
+    'api-key': original.apiKey,
+    'base-url': original.baseUrl,
+  });
+
 const extractArrayPayload = (data: unknown, key: string): unknown[] => {
   if (Array.isArray(data)) return data;
   if (!isRecord(data)) return [];
@@ -429,6 +524,15 @@ const serializeModelAliases = (models?: ModelAlias[]) =>
           if (model.image !== undefined) {
             payload.image = model.image;
           }
+          if (model.forceMapping !== undefined) {
+            payload['force-mapping'] = model.forceMapping;
+          }
+          if (model.inputModalities !== undefined) {
+            payload['input-modalities'] = model.inputModalities;
+          }
+          if (model.outputModalities !== undefined) {
+            payload['output-modalities'] = model.outputModalities;
+          }
           if (isRecord(model.thinking)) {
             payload.thinking = model.thinking;
           }
@@ -467,6 +571,9 @@ const serializeProviderKey = (config: ProviderKeyConfig) => {
   if (config.disableCooling !== undefined) payload['disable-cooling'] = config.disableCooling;
   if (config.experimentalCchSigning !== undefined) {
     payload['experimental-cch-signing'] = config.experimentalCchSigning;
+  }
+  if (config.rebuildMidSystemMessage !== undefined) {
+    payload['rebuild-mid-system-message'] = config.rebuildMidSystemMessage;
   }
   if (config.proxyUrl) payload['proxy-url'] = config.proxyUrl;
   const headers = serializeHeaders(config.headers);
@@ -530,9 +637,10 @@ const serializeVertexKey = (config: ProviderKeyConfig) => {
 const serializeGeminiKey = (config: GeminiKeyConfig) => {
   const payload: Record<string, unknown> = {};
   const apiKey = config.apiKey?.trim();
-  if (apiKey) payload['api-key'] = apiKey;
-  const authIndex = serializeAuthIndex(config.authIndex);
-  if (authIndex) payload['auth-index'] = authIndex;
+  if (!apiKey) {
+    throw new Error('API key is required for Gemini and Interactions providers');
+  }
+  payload['api-key'] = apiKey;
   if (config.priority !== undefined) payload.priority = config.priority;
   if (config.prefix?.trim()) payload.prefix = config.prefix.trim();
   if (config.baseUrl) payload['base-url'] = config.baseUrl;
@@ -589,11 +697,63 @@ export const providersApi = {
       )
     ),
 
-  updateGeminiKey: (index: number, value: GeminiKeyConfig) =>
-    apiClient.patch('/gemini-api-key', { index, value: serializeGeminiKey(value) }),
+  createGeminiKey: (config: GeminiKeyConfig) =>
+    mutateLatestProviderList('gemini-api-key', (latestItems) =>
+      appendLatestProviderRecord(latestItems, serializeGeminiKey(config), (raw, payload) =>
+        mergeProviderKeyPayload(raw, payload, GEMINI_KEY_FIELDS)
+      )
+    ),
+
+  updateGeminiKey: (original: GeminiKeyConfig, value: GeminiKeyConfig) =>
+    mutateLatestProviderList('gemini-api-key', (latestItems) =>
+      replaceLatestProviderRecord(
+        latestItems,
+        (record) => matchesProviderConfig(record, original),
+        serializeGeminiKey(value),
+        (raw, payload) => mergeProviderKeyPayload(raw, payload, GEMINI_KEY_FIELDS)
+      )
+    ),
 
   deleteGeminiKey: (apiKey: string, baseUrl?: string) =>
     apiClient.delete(`/gemini-api-key${buildProviderDeleteQuery(apiKey, baseUrl)}`),
+
+  async getInteractionsKeys(): Promise<GeminiKeyConfig[]> {
+    const data = await apiClient.get('/interactions-api-key');
+    const list = extractArrayPayload(data, 'interactions-api-key');
+    return list.map((item) => normalizeGeminiKeyConfig(item)).filter(Boolean) as GeminiKeyConfig[];
+  },
+
+  saveInteractionsKeys: async (configs: GeminiKeyConfig[]) =>
+    apiClient.put(
+      '/interactions-api-key',
+      await buildPreservedList(
+        'interactions-api-key',
+        configs,
+        serializeGeminiKey,
+        (raw, payload) => mergeProviderKeyPayload(raw, payload, GEMINI_KEY_FIELDS),
+        providerKeyIdentity
+      )
+    ),
+
+  createInteractionsKey: (config: GeminiKeyConfig) =>
+    mutateLatestProviderList('interactions-api-key', (latestItems) =>
+      appendLatestProviderRecord(latestItems, serializeGeminiKey(config), (raw, payload) =>
+        mergeProviderKeyPayload(raw, payload, GEMINI_KEY_FIELDS)
+      )
+    ),
+
+  updateInteractionsKey: (original: GeminiKeyConfig, value: GeminiKeyConfig) =>
+    mutateLatestProviderList('interactions-api-key', (latestItems) =>
+      replaceLatestProviderRecord(
+        latestItems,
+        (record) => matchesProviderConfig(record, original),
+        serializeGeminiKey(value),
+        (raw, payload) => mergeProviderKeyPayload(raw, payload, GEMINI_KEY_FIELDS)
+      )
+    ),
+
+  deleteInteractionsKey: (apiKey: string, baseUrl?: string) =>
+    apiClient.delete(`/interactions-api-key${buildProviderDeleteQuery(apiKey, baseUrl)}`),
 
   async getCodexConfigs(): Promise<ProviderKeyConfig[]> {
     const data = await apiClient.get('/codex-api-key');
@@ -615,11 +775,65 @@ export const providersApi = {
       )
     ),
 
-  updateCodexConfig: (index: number, value: ProviderKeyConfig) =>
-    apiClient.patch('/codex-api-key', { index, value: serializeProviderKey(value) }),
+  createCodexConfig: (config: ProviderKeyConfig) =>
+    mutateLatestProviderList('codex-api-key', (latestItems) =>
+      appendLatestProviderRecord(latestItems, serializeProviderKey(config), (raw, payload) =>
+        mergeProviderKeyPayload(raw, payload, CODEX_KEY_FIELDS)
+      )
+    ),
+
+  updateCodexConfig: (original: ProviderKeyConfig, value: ProviderKeyConfig) =>
+    mutateLatestProviderList('codex-api-key', (latestItems) =>
+      replaceLatestProviderRecord(
+        latestItems,
+        (record) => matchesProviderConfig(record, original),
+        serializeProviderKey(value),
+        (raw, payload) => mergeProviderKeyPayload(raw, payload, CODEX_KEY_FIELDS)
+      )
+    ),
 
   deleteCodexConfig: (apiKey: string, baseUrl?: string) =>
     apiClient.delete(`/codex-api-key${buildProviderDeleteQuery(apiKey, baseUrl)}`),
+
+  async getXAIConfigs(): Promise<ProviderKeyConfig[]> {
+    const data = await apiClient.get('/xai-api-key');
+    const list = extractArrayPayload(data, 'xai-api-key');
+    return list
+      .map((item) => normalizeProviderKeyConfig(item))
+      .filter(Boolean) as ProviderKeyConfig[];
+  },
+
+  saveXAIConfigs: async (configs: ProviderKeyConfig[]) =>
+    apiClient.put(
+      '/xai-api-key',
+      await buildPreservedList(
+        'xai-api-key',
+        configs,
+        serializeProviderKey,
+        (raw, payload) => mergeProviderKeyPayload(raw, payload, XAI_KEY_FIELDS),
+        providerKeyIdentity
+      )
+    ),
+
+  createXAIConfig: (config: ProviderKeyConfig) =>
+    mutateLatestProviderList('xai-api-key', (latestItems) =>
+      appendLatestProviderRecord(latestItems, serializeProviderKey(config), (raw, payload) =>
+        mergeProviderKeyPayload(raw, payload, XAI_KEY_FIELDS)
+      )
+    ),
+
+  updateXAIConfig: (original: ProviderKeyConfig, value: ProviderKeyConfig) =>
+    mutateLatestProviderList('xai-api-key', (latestItems) =>
+      replaceLatestProviderRecord(
+        latestItems,
+        (record) => matchesProviderConfig(record, original),
+        serializeProviderKey(value),
+        (raw, payload) => mergeProviderKeyPayload(raw, payload, XAI_KEY_FIELDS)
+      )
+    ),
+
+  deleteXAIConfig: (apiKey: string, baseUrl?: string) =>
+    apiClient.delete(`/xai-api-key${buildProviderDeleteQuery(apiKey, baseUrl)}`),
 
   async getClaudeConfigs(): Promise<ProviderKeyConfig[]> {
     const data = await apiClient.get('/claude-api-key');
@@ -641,8 +855,22 @@ export const providersApi = {
       )
     ),
 
-  updateClaudeConfig: (index: number, value: ProviderKeyConfig) =>
-    apiClient.patch('/claude-api-key', { index, value: serializeProviderKey(value) }),
+  createClaudeConfig: (config: ProviderKeyConfig) =>
+    mutateLatestProviderList('claude-api-key', (latestItems) =>
+      appendLatestProviderRecord(latestItems, serializeProviderKey(config), (raw, payload) =>
+        mergeProviderKeyPayload(raw, payload, CLAUDE_KEY_FIELDS)
+      )
+    ),
+
+  updateClaudeConfig: (original: ProviderKeyConfig, value: ProviderKeyConfig) =>
+    mutateLatestProviderList('claude-api-key', (latestItems) =>
+      replaceLatestProviderRecord(
+        latestItems,
+        (record) => matchesProviderConfig(record, original),
+        serializeProviderKey(value),
+        (raw, payload) => mergeProviderKeyPayload(raw, payload, CLAUDE_KEY_FIELDS)
+      )
+    ),
 
   deleteClaudeConfig: (apiKey: string, baseUrl?: string) =>
     apiClient.delete(`/claude-api-key${buildProviderDeleteQuery(apiKey, baseUrl)}`),
@@ -667,8 +895,22 @@ export const providersApi = {
       )
     ),
 
-  updateVertexConfig: (index: number, value: ProviderKeyConfig) =>
-    apiClient.patch('/vertex-api-key', { index, value: serializeVertexKey(value) }),
+  createVertexConfig: (config: ProviderKeyConfig) =>
+    mutateLatestProviderList('vertex-api-key', (latestItems) =>
+      appendLatestProviderRecord(latestItems, serializeVertexKey(config), (raw, payload) =>
+        mergeProviderKeyPayload(raw, payload, VERTEX_KEY_FIELDS)
+      )
+    ),
+
+  updateVertexConfig: (original: ProviderKeyConfig, value: ProviderKeyConfig) =>
+    mutateLatestProviderList('vertex-api-key', (latestItems) =>
+      replaceLatestProviderRecord(
+        latestItems,
+        (record) => matchesProviderConfig(record, original),
+        serializeVertexKey(value),
+        (raw, payload) => mergeProviderKeyPayload(raw, payload, VERTEX_KEY_FIELDS)
+      )
+    ),
 
   deleteVertexConfig: (apiKey: string, baseUrl?: string) =>
     apiClient.delete(`/vertex-api-key${buildProviderDeleteQuery(apiKey, baseUrl)}`),
@@ -694,11 +936,29 @@ export const providersApi = {
       )
     ),
 
-  updateOpenAIProvider: (index: number, value: OpenAIProviderConfig) =>
-    apiClient.patch('/openai-compatibility', { index, value: serializeOpenAIProvider(value) }),
+  createOpenAIProvider: (provider: OpenAIProviderConfig) =>
+    mutateLatestProviderList('openai-compatibility', (latestItems) =>
+      appendLatestProviderRecord(
+        latestItems,
+        serializeOpenAIProvider(provider),
+        mergeOpenAIProviderPayload
+      )
+    ),
 
-  updateOpenAIProviderDisabled: (index: number, disabled: boolean) =>
-    apiClient.patch('/openai-compatibility', { index, value: { disabled } }),
+  updateOpenAIProvider: (
+    originalName: string,
+    originalIndex: number,
+    value: OpenAIProviderConfig
+  ) =>
+    mutateLatestProviderList('openai-compatibility', (latestItems) =>
+      replaceLatestProviderRecord(
+        latestItems,
+        (record, index) =>
+          index === originalIndex && openAIProviderIdentity(record) === originalName.trim(),
+        serializeOpenAIProvider(value),
+        mergeOpenAIProviderPayload
+      )
+    ),
 
   deleteOpenAIProvider: (name: string) =>
     apiClient.delete(`/openai-compatibility?name=${encodeURIComponent(name)}`),
