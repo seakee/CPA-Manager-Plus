@@ -161,6 +161,9 @@ export async function handleDemoApiRequest<T = unknown>(
   if (pathname === '/request-error-logs') return getDemoErrorLogsResponse() as T;
 
   if (pathname === '/plugins') return getDemoPlugins() as T;
+  if (method === 'get' && pathname === '/plugins/cpa-key-policy/keys') {
+    return { keys: [] } as T;
+  }
   if (/^\/plugins\/[^/]+\/enabled$/.test(pathname)) return ok as T;
   if (/^\/plugins\/[^/]+\/config$/.test(pathname)) {
     if (method === 'get') return { sampleWindow: 30, enabled: true } as T;
