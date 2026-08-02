@@ -22,6 +22,7 @@ import { formatPercent } from '@/features/monitoring/components/accountOverviewP
 import { buildRealtimeSourceDisplay } from '@/features/monitoring/realtimeSourceDisplay';
 import type { MonitoringEventRow } from '@/features/monitoring/hooks/useMonitoringData';
 import type { AccountDisplayMode } from '@/features/monitoring/accountOverviewState';
+import type { StatusFilter } from '@/features/monitoring/model/monitoringCenterPageModel';
 import { useNotificationStore } from '@/stores';
 import { copyToClipboard } from '@/utils/clipboard';
 import { maskSensitiveText, truncateText } from '@/utils/format';
@@ -48,8 +49,10 @@ type RealtimeEventsPanelProps = {
   rows: RealtimeLogRow[];
   pagination: PaginationState<RealtimeLogRow>;
   pageSize: number;
+  queryLimit: number;
+  queryLimitOptions: readonly number[];
   scopedFailureCount: number;
-  failedOnlyActive: boolean;
+  statusFilter: StatusFilter;
   eventsHasMore: boolean;
   eventsLoadingMore: boolean;
   eventsRetentionLimited: boolean;
@@ -61,21 +64,24 @@ type RealtimeEventsPanelProps = {
   locale: string;
   emptyState: ReactNode;
   t: TFunction;
-  onToggleFailedOnly: () => void;
+  onStatusFilterChange: (status: Exclude<StatusFilter, 'all'>) => void;
   onAccountDisplayModeChange: (mode: AccountDisplayMode) => void;
   onPageChange: (page: number) => void;
   onPageSizeChange: (pageSize: number) => void;
+  onQueryLimitChange: (limit: number) => void;
   onLoadMoreEvents: () => void;
 };
 
 export type RealtimeEventsPanelActionsProps = {
-  rowCount: number;
+  queryLimit: number;
+  queryLimitOptions: readonly number[];
   scopedFailureCount: number;
-  failedOnlyActive: boolean;
+  statusFilter: StatusFilter;
   accountDisplayMode: AccountDisplayMode;
   t: TFunction;
-  onToggleFailedOnly: () => void;
+  onStatusFilterChange: (status: Exclude<StatusFilter, 'all'>) => void;
   onAccountDisplayModeChange: (mode: AccountDisplayMode) => void;
+  onQueryLimitChange: (limit: number) => void;
 };
 
 const REALTIME_PAGE_SIZE_OPTIONS = [10, 50, 100, 150, 300] as const;
@@ -728,14 +734,26 @@ type RealtimeTokenUsageDetails = {
 
 const buildRealtimeTokenUsageDetails = (row: MonitoringEventRow, t: TFunction) => {
   const fields = [
-    { label: t('monitoring.realtime_usage_total_label'), value: formatCompactNumber(row.totalTokens) },
-    { label: t('monitoring.realtime_usage_input_label'), value: formatCompactNumber(row.inputTokens) },
-    { label: t('monitoring.realtime_usage_output_label'), value: formatCompactNumber(row.outputTokens) },
+    {
+      label: t('monitoring.realtime_usage_total_label'),
+      value: formatCompactNumber(row.totalTokens),
+    },
+    {
+      label: t('monitoring.realtime_usage_input_label'),
+      value: formatCompactNumber(row.inputTokens),
+    },
+    {
+      label: t('monitoring.realtime_usage_output_label'),
+      value: formatCompactNumber(row.outputTokens),
+    },
     {
       label: t('monitoring.realtime_usage_reasoning_label'),
       value: formatCompactNumber(row.reasoningTokens),
     },
-    { label: t('monitoring.realtime_usage_cached_label'), value: formatCompactNumber(row.cachedTokens) },
+    {
+      label: t('monitoring.realtime_usage_cached_label'),
+      value: formatCompactNumber(row.cachedTokens),
+    },
     {
       label: t('monitoring.realtime_usage_cache_read_label'),
       value: formatCompactNumber(row.cacheReadTokens),
@@ -914,18 +932,24 @@ function RealtimeTokenUsage({ details, tooltipId }: RealtimeTokenUsageProps) {
 }
 
 export function RealtimeEventsPanelActions({
-  rowCount,
+  queryLimit,
+  queryLimitOptions,
   scopedFailureCount,
-  failedOnlyActive,
+  statusFilter,
   accountDisplayMode,
   t,
-  onToggleFailedOnly,
+  onStatusFilterChange,
   onAccountDisplayModeChange,
+  onQueryLimitChange,
 }: RealtimeEventsPanelActionsProps) {
   const nextAccountDisplayMode: AccountDisplayMode =
     accountDisplayMode === 'masked' ? 'full' : 'masked';
   const AccountDisplayIcon = accountDisplayMode === 'masked' ? IconEyeOff : IconEye;
-  const logRowsLabel = shortLabel(t, 'monitoring.log_rows_short', 'monitoring.log_rows');
+  const queryLimitLabel = shortLabel(
+    t,
+    'monitoring.realtime_query_limit_short',
+    'monitoring.realtime_query_limit'
+  );
   const recentFailuresLabel = shortLabel(
     t,
     'monitoring.recent_failures_short',
@@ -936,6 +960,11 @@ export function RealtimeEventsPanelActions({
     'monitoring.filter_status_failed_short',
     'monitoring.filter_status_failed'
   );
+  const successOnlyLabel = shortLabel(
+    t,
+    'monitoring.filter_status_success_short',
+    'monitoring.filter_status_success'
+  );
   const accountDisplayHint = t(
     accountDisplayMode === 'masked'
       ? 'monitoring.account_overview_show_full_accounts_hint'
@@ -944,7 +973,24 @@ export function RealtimeEventsPanelActions({
 
   return (
     <div className={`${styles.inlineMetrics} ${styles.realtimeHeaderActions}`}>
-      <span title={t('monitoring.log_rows')}>{`${logRowsLabel}: ${rowCount}`}</span>
+      <label
+        className={styles.realtimeQueryLimitField}
+        title={t('monitoring.realtime_query_limit_title')}
+      >
+        <span>{`${queryLimitLabel}:`}</span>
+        <select
+          className={styles.realtimeQueryLimitSelect}
+          value={queryLimit}
+          aria-label={t('monitoring.realtime_query_limit')}
+          onChange={(event) => onQueryLimitChange(Number(event.target.value))}
+        >
+          {queryLimitOptions.map((option) => (
+            <option key={option} value={option}>
+              {option}
+            </option>
+          ))}
+        </select>
+      </label>
       <span title={t('monitoring.recent_failures')}>
         {`${recentFailuresLabel}: ${scopedFailureCount}`}
       </span>
@@ -971,11 +1017,32 @@ export function RealtimeEventsPanelActions({
       </button>
       <button
         type="button"
-        className={[styles.filterToggleChip, failedOnlyActive ? styles.filterToggleChipActive : '']
+        className={[
+          styles.filterToggleChip,
+          styles.filterToggleChipSuccess,
+          statusFilter === 'success' ? styles.filterToggleChipSuccessActive : '',
+        ]
           .filter(Boolean)
           .join(' ')}
-        onClick={onToggleFailedOnly}
+        onClick={() => onStatusFilterChange('success')}
+        title={t('monitoring.filter_status_success')}
+        aria-pressed={statusFilter === 'success'}
+      >
+        <IconFilter size={14} aria-hidden="true" />
+        {successOnlyLabel}
+      </button>
+      <button
+        type="button"
+        className={[
+          styles.filterToggleChip,
+          styles.filterToggleChipFailed,
+          statusFilter === 'failed' ? styles.filterToggleChipFailedActive : '',
+        ]
+          .filter(Boolean)
+          .join(' ')}
+        onClick={() => onStatusFilterChange('failed')}
         title={t('monitoring.filter_status_failed')}
+        aria-pressed={statusFilter === 'failed'}
       >
         <IconFilter size={14} aria-hidden="true" />
         {failedOnlyLabel}
@@ -989,8 +1056,10 @@ export function RealtimeEventsPanel({
   rows,
   pagination,
   pageSize,
+  queryLimit,
+  queryLimitOptions,
   scopedFailureCount,
-  failedOnlyActive,
+  statusFilter,
   eventsHasMore,
   eventsLoadingMore,
   eventsRetentionLimited,
@@ -1002,10 +1071,11 @@ export function RealtimeEventsPanel({
   locale,
   emptyState,
   t,
-  onToggleFailedOnly,
+  onStatusFilterChange,
   onAccountDisplayModeChange,
   onPageChange,
   onPageSizeChange,
+  onQueryLimitChange,
   onLoadMoreEvents,
 }: RealtimeEventsPanelProps) {
   const tooltipIdPrefix = useId();
@@ -1052,13 +1122,15 @@ export function RealtimeEventsPanel({
   };
   const actions = (
     <RealtimeEventsPanelActions
-      rowCount={rows.length}
+      queryLimit={queryLimit}
+      queryLimitOptions={queryLimitOptions}
       scopedFailureCount={scopedFailureCount}
-      failedOnlyActive={failedOnlyActive}
+      statusFilter={statusFilter}
       accountDisplayMode={accountDisplayMode}
       t={t}
-      onToggleFailedOnly={onToggleFailedOnly}
+      onStatusFilterChange={onStatusFilterChange}
       onAccountDisplayModeChange={onAccountDisplayModeChange}
+      onQueryLimitChange={onQueryLimitChange}
     />
   );
   const content = (

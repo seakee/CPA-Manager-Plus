@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   DEFAULT_MONITORING_DATA_TAB,
+  DEFAULT_MONITORING_EVENTS_QUERY_LIMIT,
   MONITORING_CENTER_UI_STATE_STORAGE_KEY,
   getDefaultMonitoringCenterUiState,
   normalizeMonitoringCenterUiState,
   normalizeMonitoringAutoRefreshMs,
   normalizeMonitoringDataTab,
+  normalizeMonitoringEventsQueryLimit,
   normalizeMonitoringStatusFilter,
   normalizeMonitoringTimeRange,
   readMonitoringCenterUiState,
@@ -53,6 +55,11 @@ describe('monitoringCenterUiState', () => {
     }
   });
 
+  it('defaults realtime analytics queries to 50 events', () => {
+    expect(DEFAULT_MONITORING_EVENTS_QUERY_LIMIT).toBe(50);
+    expect(getDefaultMonitoringCenterUiState().realtimeQueryLimit).toBe(50);
+  });
+
   it('falls back to default tab for unknown values', () => {
     expect(normalizeMonitoringDataTab('weird')).toBe(DEFAULT_MONITORING_DATA_TAB);
     expect(normalizeMonitoringDataTab(undefined)).toBe(DEFAULT_MONITORING_DATA_TAB);
@@ -72,6 +79,9 @@ describe('monitoringCenterUiState', () => {
     expect(normalizeMonitoringStatusFilter('bad')).toBe('all');
     expect(normalizeMonitoringAutoRefreshMs(30000)).toBe('30000');
     expect(normalizeMonitoringAutoRefreshMs('123')).toBe('30000');
+    expect(normalizeMonitoringEventsQueryLimit(100)).toBe(100);
+    expect(normalizeMonitoringEventsQueryLimit('500')).toBe(500);
+    expect(normalizeMonitoringEventsQueryLimit(10)).toBe(DEFAULT_MONITORING_EVENTS_QUERY_LIMIT);
   });
 
   it('normalizes ui state from arbitrary input', () => {
@@ -96,6 +106,7 @@ describe('monitoringCenterUiState', () => {
         selectedStatus: 'failed',
         apiKeyPageSize: 50,
         realtimePageSize: 150,
+        realtimeQueryLimit: 200,
       })
     ).toEqual({
       ...getDefaultMonitoringCenterUiState(),
@@ -113,6 +124,7 @@ describe('monitoringCenterUiState', () => {
       selectedStatus: 'failed',
       apiKeyPageSize: 50,
       realtimePageSize: 150,
+      realtimeQueryLimit: 200,
     });
   });
 
@@ -121,18 +133,21 @@ describe('monitoringCenterUiState', () => {
       activeDataTab: 'apiKeys',
       selectedProvider: 'claude',
       apiKeyPageSize: 20,
+      realtimeQueryLimit: 100,
     });
     expect(JSON.parse(storage.getItem(MONITORING_CENTER_UI_STATE_STORAGE_KEY) ?? '{}')).toEqual({
       ...getDefaultMonitoringCenterUiState(),
       activeDataTab: 'apiKeys',
       selectedProvider: 'claude',
       apiKeyPageSize: 20,
+      realtimeQueryLimit: 100,
     });
     expect(readMonitoringCenterUiState()).toEqual({
       ...getDefaultMonitoringCenterUiState(),
       activeDataTab: 'apiKeys',
       selectedProvider: 'claude',
       apiKeyPageSize: 20,
+      realtimeQueryLimit: 100,
     });
   });
 

@@ -15,6 +15,7 @@ import {
   type MonitoringEventRow,
   type MonitoringPresentationSnapshot,
 } from './useMonitoringData';
+import { countConfiguredApiKeys } from '../model/apiKeys';
 import {
   buildAccountRowsFromAnalytics,
   buildApiKeyRowsFromAnalytics,
@@ -306,6 +307,101 @@ describe('buildApiKeyDisplayMap', () => {
     expect(map.get(apiKeyHash)?.label).toContain('**');
     expect(map.get(apiKeyHash)?.label).not.toContain('secret-value');
   });
+
+  it('merges plugin catalog names without copyValue; manual alias wins over plugin name', () => {
+    const pluginId = 'team-plugin-1';
+    const hash = sha256Hex(pluginId).toLowerCase();
+    const map = buildApiKeyDisplayMap(
+      [],
+      [{ apiKeyHash: hash, alias: 'Manual Alias', updatedAtMs: 1 }],
+      [
+        {
+          id: pluginId,
+          name: 'Plugin Display Name',
+          keyPreview: 'cpa_pl...01',
+          apiKeyHash: hash,
+          source: 'plugin:cpa-key-policy',
+        },
+      ]
+    );
+    expect(map.get(hash)?.label).toBe('Manual Alias');
+    expect(map.get(hash)?.copyValue).toBeUndefined();
+    expect(map.get(hash)?.source).toBe('plugin:cpa-key-policy');
+  });
+
+  it('falls back to plugin name then id when no alias exists', () => {
+    const hashNamed = sha256Hex('named-key').toLowerCase();
+    const hashIdOnly = sha256Hex('id-only-key').toLowerCase();
+    const map = buildApiKeyDisplayMap(
+      [],
+      [],
+      [
+        {
+          id: 'named-key',
+          name: 'Nice Name',
+          keyPreview: 'cpa_..n',
+          apiKeyHash: hashNamed,
+          source: 'plugin:cpa-key-policy',
+        },
+        {
+          id: 'id-only-key',
+          name: '',
+          keyPreview: 'cpa_..i',
+          apiKeyHash: hashIdOnly,
+          source: 'plugin:cpa-key-policy',
+        },
+      ]
+    );
+    expect(map.get(hashNamed)?.label).toBe('Nice Name');
+    expect(map.get(hashIdOnly)?.label).toBe('id-only-key');
+    expect(map.get(hashNamed)?.copyValue).toBeUndefined();
+    expect(map.get(hashIdOnly)?.copyValue).toBeUndefined();
+  });
+});
+
+describe('countConfiguredApiKeys', () => {
+  it('counts every catalog key, including keys with no usage in range', () => {
+    const pluginKeys = Array.from({ length: 6 }, (_, i) => {
+      const id = `plugin-key-${i + 1}`;
+      return {
+        id,
+        name: `Key ${i + 1}`,
+        apiKeyHash: sha256Hex(id).toLowerCase(),
+        source: 'plugin:cpa-key-policy' as const,
+      };
+    });
+    expect(countConfiguredApiKeys([], pluginKeys, true)).toBe(6);
+
+    // A newly configured key that was never called in range raises "configured"
+    // only; "active" and "result" are owned by the analytics selectors and rows.
+    const unused = {
+      id: 'plugin-key-unused',
+      name: 'Unused',
+      apiKeyHash: sha256Hex('plugin-key-unused').toLowerCase(),
+    };
+    expect(countConfiguredApiKeys([], [...pluginKeys, unused], true)).toBe(7);
+  });
+
+  it('dedupes a native key against the plugin entry that shares its hash', () => {
+    const shared = 'shared-key';
+    expect(
+      countConfiguredApiKeys(
+        [shared],
+        [{ id: shared, apiKeyHash: sha256Hex(shared).toLowerCase() }],
+        true
+      )
+    ).toBe(1);
+  });
+
+  it('hashes native keys the way Manager records them, ignoring surrounding blanks', () => {
+    expect(countConfiguredApiKeys(['  sk-native  ', 'sk-native'], [], true)).toBe(1);
+  });
+
+  it('does not count plugin keys as configured when catalog is unavailable', () => {
+    const pluginKeys = [{ id: 'p1', apiKeyHash: sha256Hex('p1') }];
+    expect(countConfiguredApiKeys(['sk-native'], pluginKeys, false)).toBe(1);
+    expect(countConfiguredApiKeys(['sk-native'], pluginKeys, true)).toBe(2);
+  });
 });
 
 describe('buildApiKeyRows', () => {
@@ -489,9 +585,8 @@ describe('buildScopeFilteredRows', () => {
 
   it('clamps local summary cache rates and respects resolved GPT-5.6 aliases', () => {
     expect(
-      buildMonitoringSummary([
-        createMonitoringEventRow({ inputTokens: 10, cachedTokens: 100 }),
-      ]).cacheHitRate
+      buildMonitoringSummary([createMonitoringEventRow({ inputTokens: 10, cachedTokens: 100 })])
+        .cacheHitRate
     ).toBe(1);
 
     expect(
@@ -517,7 +612,8 @@ describe('buildMonitoringEventsScopeKey', () => {
       '',
       '',
       {},
-      'hour'
+      'hour',
+      50
     );
     const second = buildMonitoringEventsScopeKey(
       'today',
@@ -525,7 +621,8 @@ describe('buildMonitoringEventsScopeKey', () => {
       '',
       '',
       {},
-      'hour'
+      'hour',
+      50
     );
 
     expect(second).toBe(first);
@@ -538,7 +635,8 @@ describe('buildMonitoringEventsScopeKey', () => {
       '',
       '',
       {},
-      'hour'
+      'hour',
+      50
     );
     const second = buildMonitoringEventsScopeKey(
       'custom',
@@ -546,10 +644,26 @@ describe('buildMonitoringEventsScopeKey', () => {
       '',
       '',
       {},
-      'hour'
+      'hour',
+      50
     );
 
     expect(second).not.toBe(first);
+  });
+
+  it('treats the event query limit as part of the paginated event scope', () => {
+    const buildScope = (queryLimit: number) =>
+      buildMonitoringEventsScopeKey(
+        'today',
+        { startMs: 1_768_755_200_000, endMs: 1_768_759_000_000 },
+        '',
+        '',
+        {},
+        'hour',
+        queryLimit
+      );
+
+    expect(buildScope(100)).not.toBe(buildScope(50));
   });
 });
 
@@ -717,32 +831,28 @@ describe('resolveMonitoringDisplayEventItems', () => {
 });
 
 describe('resolveMonitoringPresentationSnapshot', () => {
-  it('keeps the last stable presentation while a new uncached scope is loading', () => {
+  it('never reuses another scope presentation while a new uncached scope is loading', () => {
     const computed = createPresentationSnapshot('computed-empty-transition');
-    const stable = createPresentationSnapshot('stable-all');
     const result = resolveMonitoringPresentationSnapshot({
       computedSnapshot: computed,
       scopeKey: 'failed',
       dataStale: true,
       cachedSnapshots: new Map(),
-      lastStableSnapshot: stable,
     });
 
-    expect(result.snapshot).toBe(stable);
-    expect(result.hasPresentationSnapshot).toBe(true);
-    expect(result.usingSnapshotFallback).toBe(true);
+    expect(result.snapshot).toBe(computed);
+    expect(result.hasPresentationSnapshot).toBe(false);
+    expect(result.usingSnapshotFallback).toBe(false);
   });
 
-  it('prefers a cached target scope presentation over the last stable scope', () => {
+  it('reuses only the cached presentation for the exact target scope', () => {
     const computed = createPresentationSnapshot('computed-transition');
-    const stable = createPresentationSnapshot('stable-all');
     const cachedFailed = createPresentationSnapshot('cached-failed');
     const result = resolveMonitoringPresentationSnapshot({
       computedSnapshot: computed,
       scopeKey: 'failed',
       dataStale: true,
       cachedSnapshots: new Map([['failed', cachedFailed]]),
-      lastStableSnapshot: stable,
     });
 
     expect(result.snapshot).toBe(cachedFailed);
@@ -758,7 +868,6 @@ describe('resolveMonitoringPresentationSnapshot', () => {
       scopeKey: 'all',
       dataStale: false,
       cachedSnapshots: new Map([['all', stable]]),
-      lastStableSnapshot: stable,
     });
 
     expect(result.snapshot).toBe(computed);

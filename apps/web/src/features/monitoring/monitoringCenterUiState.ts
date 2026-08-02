@@ -13,6 +13,8 @@ export const DEFAULT_MONITORING_TIME_RANGE: MonitoringCenterTimeRange = 'today';
 export const DEFAULT_MONITORING_AUTO_REFRESH_MS = '30000';
 export const DEFAULT_MONITORING_TABLE_PAGE_SIZE = 12;
 export const DEFAULT_MONITORING_REALTIME_PAGE_SIZE = 10;
+export const DEFAULT_MONITORING_EVENTS_QUERY_LIMIT = 50;
+export const MONITORING_EVENTS_QUERY_LIMIT_OPTIONS = [50, 100, 200, 500] as const;
 
 export const MONITORING_CENTER_UI_STATE_STORAGE_KEY = 'monitoring.centerUiState';
 
@@ -32,6 +34,7 @@ export type MonitoringCenterUiState = {
   selectedStatus: MonitoringCenterStatusFilter;
   apiKeyPageSize: number;
   realtimePageSize: number;
+  realtimeQueryLimit: number;
 };
 
 const TAB_SET = new Set<MonitoringDataTab>(MONITORING_DATA_TABS);
@@ -87,6 +90,13 @@ const normalizePageSize = (
   return typeof parsed === 'number' && options.includes(parsed) ? parsed : fallback;
 };
 
+export const normalizeMonitoringEventsQueryLimit = (value: unknown): number =>
+  normalizePageSize(
+    value,
+    MONITORING_EVENTS_QUERY_LIMIT_OPTIONS,
+    DEFAULT_MONITORING_EVENTS_QUERY_LIMIT
+  );
+
 export const getDefaultMonitoringCenterUiState = (): MonitoringCenterUiState => ({
   activeDataTab: DEFAULT_MONITORING_DATA_TAB,
   timeRange: DEFAULT_MONITORING_TIME_RANGE,
@@ -103,6 +113,7 @@ export const getDefaultMonitoringCenterUiState = (): MonitoringCenterUiState => 
   selectedStatus: 'all',
   apiKeyPageSize: DEFAULT_MONITORING_TABLE_PAGE_SIZE,
   realtimePageSize: DEFAULT_MONITORING_REALTIME_PAGE_SIZE,
+  realtimeQueryLimit: DEFAULT_MONITORING_EVENTS_QUERY_LIMIT,
 });
 
 export const normalizeMonitoringCenterUiState = (value: unknown): MonitoringCenterUiState => {
@@ -138,6 +149,7 @@ export const normalizeMonitoringCenterUiState = (value: unknown): MonitoringCent
       REALTIME_PAGE_SIZE_OPTIONS,
       defaults.realtimePageSize
     ),
+    realtimeQueryLimit: normalizeMonitoringEventsQueryLimit(record.realtimeQueryLimit),
   };
 };
 

@@ -7,7 +7,7 @@ import {
   buildPrimarySummaryCards,
   buildSecondarySummaryCards,
 } from '@/features/monitoring/model/monitoringCenterPageModel';
-import { resolveMonitoringDimensionCounts } from '@/features/monitoring/model/monitoringAnalyticsModel';
+import { resolveMonitoringAccountCount } from '@/features/monitoring/model/monitoringAnalyticsModel';
 import type { MonitoringSummary } from '@/features/monitoring/hooks/useMonitoringData';
 import {
   buildEmptyMonitoringStatusData,
@@ -90,35 +90,29 @@ const t = ((key: string, options?: Record<string, unknown>) => {
 const createAuthState = (overrides: MonitoringAccountAuthState): MonitoringAccountAuthState =>
   overrides;
 
-describe('MonitoringCenterPage dimension counts', () => {
-  it('uses scoped rows for the active aggregate tab and selector counts elsewhere', () => {
+describe('resolveMonitoringAccountCount', () => {
+  it('shows rendered rows on the accounts tab and in-range accounts elsewhere', () => {
     expect(
-      resolveMonitoringDimensionCounts({
+      resolveMonitoringAccountCount({
         activeDataTab: 'accounts',
         accountRowCount: 2,
-        apiKeyRowCount: 3,
         accountSelectorCount: 9,
-        apiKeySelectorCount: 8,
       })
-    ).toEqual({ accountCount: 2, apiKeyCount: 8 });
+    ).toBe(2);
     expect(
-      resolveMonitoringDimensionCounts({
+      resolveMonitoringAccountCount({
         activeDataTab: 'apiKeys',
         accountRowCount: 2,
-        apiKeyRowCount: 3,
         accountSelectorCount: 9,
-        apiKeySelectorCount: 8,
       })
-    ).toEqual({ accountCount: 9, apiKeyCount: 3 });
+    ).toBe(9);
     expect(
-      resolveMonitoringDimensionCounts({
+      resolveMonitoringAccountCount({
         activeDataTab: 'realtime',
         accountRowCount: 2,
-        apiKeyRowCount: 3,
         accountSelectorCount: 9,
-        apiKeySelectorCount: 8,
       })
-    ).toEqual({ accountCount: 9, apiKeyCount: 8 });
+    ).toBe(9);
   });
 });
 

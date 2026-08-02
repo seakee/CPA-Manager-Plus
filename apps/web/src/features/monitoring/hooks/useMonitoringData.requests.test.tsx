@@ -246,7 +246,13 @@ describe('useMonitoringData analytics requests', () => {
     return calls[calls.length - 1];
   };
 
-  function Harness({ activeDataTab }: { activeDataTab: MonitoringDataTab }) {
+  function Harness({
+    activeDataTab,
+    eventsPageLimit,
+  }: {
+    activeDataTab: MonitoringDataTab;
+    eventsPageLimit?: number;
+  }) {
     const result = useMonitoringData({
       config: null,
       modelPrices,
@@ -254,6 +260,7 @@ describe('useMonitoringData analytics requests', () => {
       searchQuery: '',
       scopeFilters,
       activeDataTab,
+      eventsPageLimit,
     });
     useEffect(() => {
       latestResult = result;
@@ -277,12 +284,16 @@ describe('useMonitoringData analytics requests', () => {
     vi.restoreAllMocks();
   });
 
-  const renderTab = async (activeDataTab: MonitoringDataTab) => {
+  const renderTab = async (activeDataTab: MonitoringDataTab, eventsPageLimit?: number) => {
     await act(async () => {
       if (renderer) {
-        renderer.update(<Harness activeDataTab={activeDataTab} />);
+        renderer.update(
+          <Harness activeDataTab={activeDataTab} eventsPageLimit={eventsPageLimit} />
+        );
       } else {
-        renderer = create(<Harness activeDataTab={activeDataTab} />);
+        renderer = create(
+          <Harness activeDataTab={activeDataTab} eventsPageLimit={eventsPageLimit} />
+        );
       }
       await Promise.resolve();
       await Promise.resolve();
@@ -298,7 +309,7 @@ describe('useMonitoringData analytics requests', () => {
       summary: true,
       summary_profile: 'compact',
       account_stats: true,
-      events_page: { limit: 500, before_ms: null, before_id: null },
+      events_page: { limit: 50, before_ms: null, before_id: null },
       granularity: 'hour',
     });
     expect(JSON.parse(accounts?.dataScopeKey ?? '{}')).toMatchObject({
@@ -315,7 +326,7 @@ describe('useMonitoringData analytics requests', () => {
       summary: true,
       summary_profile: 'compact',
       api_key_stats: true,
-      events_page: { limit: 500, before_ms: null, before_id: null },
+      events_page: { limit: 50, before_ms: null, before_id: null },
       granularity: 'hour',
     });
     expect(JSON.parse(apiKeys?.dataScopeKey ?? '{}')).toMatchObject({
@@ -340,7 +351,7 @@ describe('useMonitoringData analytics requests', () => {
     await renderTab('realtime');
 
     expect(lastParams((params) => Boolean(params.include?.summary))?.include?.events_page).toEqual({
-      limit: 500,
+      limit: 50,
       before_ms: null,
       before_id: null,
     });
@@ -353,25 +364,52 @@ describe('useMonitoringData analytics requests', () => {
     });
 
     expect(lastParams((params) => Boolean(params.include?.summary))?.include?.events_page).toEqual({
-      limit: 500,
+      limit: 50,
       before_ms: 1_799_999_999_000,
       before_id: 7,
     });
 
     await renderTab('accounts');
     expect(lastParams((params) => Boolean(params.include?.summary))?.include?.events_page).toEqual({
-      limit: 500,
+      limit: 50,
       before_ms: null,
       before_id: null,
     });
 
     await renderTab('realtime');
     expect(lastParams((params) => Boolean(params.include?.summary))?.include?.events_page).toEqual({
-      limit: 500,
+      limit: 50,
       before_ms: null,
       before_id: null,
     });
     expect(useMonitoringAnalyticsMock.mock.calls.length).toBeLessThan(30);
+  });
+
+  it('uses the configured event query limit and resets the cursor when it changes', async () => {
+    await renderTab('realtime', 50);
+    expect(lastParams((params) => Boolean(params.include?.summary))?.include?.events_page).toEqual({
+      limit: 50,
+      before_ms: null,
+      before_id: null,
+    });
+
+    await act(async () => {
+      latestResult?.loadMoreEvents();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(lastParams((params) => Boolean(params.include?.summary))?.include?.events_page).toEqual({
+      limit: 50,
+      before_ms: 1_799_999_999_000,
+      before_id: 7,
+    });
+
+    await renderTab('realtime', 100);
+    expect(lastParams((params) => Boolean(params.include?.summary))?.include?.events_page).toEqual({
+      limit: 100,
+      before_ms: null,
+      before_id: null,
+    });
   });
 
   it('uses legacy selector rows for counts without collapsing distinct filter identities', async () => {

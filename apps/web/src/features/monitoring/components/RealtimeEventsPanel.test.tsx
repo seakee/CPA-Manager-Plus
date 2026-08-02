@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { AccountDisplayMode } from '@/features/monitoring/accountOverviewState';
 import type { MonitoringEventRow } from '@/features/monitoring/hooks/useMonitoringData';
 import styles from '../MonitoringCenterPage.module.scss';
-import { RealtimeEventsPanel } from './RealtimeEventsPanel';
+import { RealtimeEventsPanel, RealtimeEventsPanelActions } from './RealtimeEventsPanel';
 
 const t = ((key: string, options?: Record<string, unknown>) => {
   const messages: Record<string, string> = {
@@ -32,6 +32,7 @@ const t = ((key: string, options?: Record<string, unknown>) => {
     'monitoring.header_should_retry': 'Should retry',
     'monitoring.filter_account': 'Account',
     'monitoring.filter_status_failed': 'Failed only',
+    'monitoring.filter_status_success': 'Success only',
     'monitoring.filter_provider': 'Provider',
     'monitoring.cached_tokens': 'Cached Tokens',
     'monitoring.cache_read_tokens': 'Cache Read Tokens',
@@ -44,7 +45,9 @@ const t = ((key: string, options?: Record<string, unknown>) => {
     'monitoring.realtime_usage_cache_read_label': 'Cache Read',
     'monitoring.realtime_usage_cache_creation_label': 'Cache Creation',
     'monitoring.load_more_events': 'Load more',
-    'monitoring.log_rows': 'Rows',
+    'monitoring.realtime_query_limit': 'Fetch Rows',
+    'monitoring.realtime_query_limit_short': 'Rows',
+    'monitoring.realtime_query_limit_title': 'Maximum event rows requested per page',
     'monitoring.no_more_events': 'No more events',
     'monitoring.events_loaded_summary': 'Loaded {{loaded}} of {{total}} events',
     'monitoring.events_all_loaded': 'All {{total}} events loaded',
@@ -168,8 +171,10 @@ const renderPanel = (row: PanelRow, overrides: PanelOverrides = {}) =>
         endItem: 1,
       }}
       pageSize={10}
+      queryLimit={50}
+      queryLimitOptions={[50, 100, 200, 500]}
       scopedFailureCount={row.failed ? 1 : 0}
-      failedOnlyActive={false}
+      statusFilter="all"
       eventsHasMore={overrides.eventsHasMore ?? false}
       eventsLoadingMore={overrides.eventsLoadingMore ?? false}
       eventsRetentionLimited={overrides.eventsRetentionLimited ?? false}
@@ -181,10 +186,11 @@ const renderPanel = (row: PanelRow, overrides: PanelOverrides = {}) =>
       locale="en-US"
       emptyState={<span>empty</span>}
       t={t}
-      onToggleFailedOnly={noop}
+      onStatusFilterChange={noop}
       onAccountDisplayModeChange={noop}
       onPageChange={noop}
       onPageSizeChange={noop}
+      onQueryLimitChange={noop}
       onLoadMoreEvents={noop}
     />
   );
@@ -200,6 +206,59 @@ describe('RealtimeEventsPanel', () => {
     minute: '2-digit',
     second: '2-digit',
     hour12: false,
+  });
+
+  it('renders explicit neutral, success, and failed filter states', () => {
+    const renderActions = (statusFilter: 'all' | 'success' | 'failed') =>
+      renderToStaticMarkup(
+        <RealtimeEventsPanelActions
+          queryLimit={50}
+          queryLimitOptions={[50, 100, 200, 500]}
+          scopedFailureCount={1}
+          statusFilter={statusFilter}
+          accountDisplayMode="masked"
+          t={t}
+          onStatusFilterChange={noop}
+          onAccountDisplayModeChange={noop}
+          onQueryLimitChange={noop}
+        />
+      );
+
+    const neutralMarkup = renderActions('all');
+    expect(neutralMarkup.match(/aria-pressed="false"/g)).toHaveLength(2);
+    expect(neutralMarkup).not.toContain(styles.filterToggleChipSuccessActive);
+    expect(neutralMarkup).not.toContain(styles.filterToggleChipFailedActive);
+
+    const successMarkup = renderActions('success');
+    expect(successMarkup).toContain(styles.filterToggleChipSuccessActive);
+    expect(successMarkup).not.toContain(styles.filterToggleChipFailedActive);
+    expect(successMarkup.match(/aria-pressed="true"/g)).toHaveLength(1);
+
+    const failedMarkup = renderActions('failed');
+    expect(failedMarkup).toContain(styles.filterToggleChipFailedActive);
+    expect(failedMarkup).not.toContain(styles.filterToggleChipSuccessActive);
+    expect(failedMarkup.match(/aria-pressed="true"/g)).toHaveLength(1);
+  });
+
+  it('renders the event query limit as a configurable control', () => {
+    const markup = renderToStaticMarkup(
+      <RealtimeEventsPanelActions
+        queryLimit={50}
+        queryLimitOptions={[50, 100, 200, 500]}
+        scopedFailureCount={1}
+        statusFilter="all"
+        accountDisplayMode="masked"
+        t={t}
+        onStatusFilterChange={noop}
+        onAccountDisplayModeChange={noop}
+        onQueryLimitChange={noop}
+      />
+    );
+
+    expect(markup).toContain('aria-label="Fetch Rows"');
+    expect(markup).toContain('title="Maximum event rows requested per page"');
+    expect(markup).toContain('<option value="50" selected="">50</option>');
+    expect(markup).toContain('<option value="500">500</option>');
   });
 
   it('renders CPA v7.1.18 usage details for failed rows', () => {
@@ -219,9 +278,7 @@ describe('RealtimeEventsPanel', () => {
       })
     );
 
-    expect(markup).toContain(
-      `class="${styles.realtimeSettingsColumn}">Reasoning / Tier</th>`
-    );
+    expect(markup).toContain(`class="${styles.realtimeSettingsColumn}">Reasoning / Tier</th>`);
     expect(markup).toContain('>TPS</th>');
     expect(markup).toContain(styles.realtimeTpsColumn);
     expect(markup).toContain(styles.realtimeLatencyColumn);
@@ -349,9 +406,7 @@ describe('RealtimeEventsPanel', () => {
     expect(
       markup.match(new RegExp(`class="[^"]*${styles.realtimeSettingValue}[^"]*">-</span>`, 'g'))
     ).toHaveLength(2);
-    expect(markup).toContain(
-      `class="${styles.realtimeSettingsColumn}">Reasoning / Tier</th>`
-    );
+    expect(markup).toContain(`class="${styles.realtimeSettingsColumn}">Reasoning / Tier</th>`);
     expect(markup).toContain('>TPS</th>');
     expect(markup).toContain('Success');
     expect(markup).toContain('>Elapsed</th>');
@@ -501,7 +556,9 @@ describe('RealtimeEventsPanel', () => {
     expect(markup).toContain('>Cache Creation</span><span class=');
     expect(markup).toContain('>151.0K</span>');
     expect(markup).toContain('>1.0K</span>');
-    expect(markup).toContain('aria-label="Total: 33, Input: 152.6K, Output: 20, Reasoning: 3, Cached: 0, Cache Read: 151.0K, Cache Creation: 1.0K"');
+    expect(markup).toContain(
+      'aria-label="Total: 33, Input: 152.6K, Output: 20, Reasoning: 3, Cached: 0, Cache Read: 151.0K, Cache Creation: 1.0K"'
+    );
     expect(markup).toContain('tabindex="0"');
   });
 

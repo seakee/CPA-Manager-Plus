@@ -21,12 +21,15 @@ vi.mock('./client', () => ({
 }));
 
 import {
+  normalizeKeyPolicyKeys,
   normalizePluginDeleteResult,
   normalizePluginList,
   normalizePluginStoreList,
   normalizePluginStoreInstallResult,
+  pluginsApi,
   pluginStoreApi,
 } from './plugins';
+import { sha256Hex } from '@/utils/apiKeyHash';
 
 beforeEach(() => {
   mocks.get.mockReset();
@@ -266,4 +269,107 @@ describe('plugin API normalizers', () => {
       id: 'demo/plugin',
     });
   });
+});
+
+describe('normalizeKeyPolicyKeys', () => {
+  it('parses safe fields, trims id, hashes with SHA-256, and ignores secrets', () => {
+    const id = ' team-alpha ';
+    const expectedHash = sha256Hex(id.trim()).toLowerCase();
+    const result = normalizeKeyPolicyKeys({
+      keys: [
+        {
+          id,
+          name: 'Alpha Team',
+          enabled: true,
+          key_preview: 'cpa_ab...ha',
+          plain_key: 'SECRET-SHOULD-NOT-LEAK',
+          key_hash: 'raw-hash-should-not-be-used',
+          models: [{ alias: 'fast' }],
+          daily_limit_usd: 10,
+        },
+        { id: '' },
+        { name: 'missing-id' },
+        null,
+        {
+          id: 'team-beta',
+          name: '',
+          enabled: false,
+          keyPreview: 'cpa_be...ta',
+        },
+      ],
+    });
+
+    expect(result).toHaveLength(2);
+    expect(result[0]).toEqual({
+      id: 'team-alpha',
+      name: 'Alpha Team',
+      enabled: true,
+      keyPreview: 'cpa_ab...ha',
+      apiKeyHash: expectedHash,
+      source: 'plugin:cpa-key-policy',
+    });
+    expect(JSON.stringify(result)).not.toContain('SECRET-SHOULD-NOT-LEAK');
+    expect(JSON.stringify(result)).not.toContain('raw-hash-should-not-be-used');
+    expect(result[0]).not.toHaveProperty('plain_key');
+    expect(result[0]).not.toHaveProperty('key_hash');
+    expect(result[1]).toMatchObject({
+      id: 'team-beta',
+      name: '',
+      enabled: false,
+      keyPreview: 'cpa_be...ta',
+      apiKeyHash: sha256Hex('team-beta').toLowerCase(),
+      source: 'plugin:cpa-key-policy',
+    });
+  });
+
+  it('accepts a bare array payload and dedupes by hash', () => {
+    const result = normalizeKeyPolicyKeys([{ id: 'same' }, { id: ' same ' }, { id: 'other' }]);
+    expect(result.map((k) => k.id)).toEqual(['same', 'other']);
+  });
+
+  it('returns empty for malformed payloads without throwing', () => {
+    expect(normalizeKeyPolicyKeys(null)).toEqual([]);
+    expect(normalizeKeyPolicyKeys(undefined)).toEqual([]);
+    expect(normalizeKeyPolicyKeys({ keys: 'nope' })).toEqual([]);
+    expect(normalizeKeyPolicyKeys({ keys: [{ foo: 1 }] })).toEqual([]);
+  });
+});
+
+describe('pluginsApi.listKeyPolicyKeys', () => {
+  it('requests the cpa-key-policy keys management path and normalizes the response', async () => {
+    mocks.get.mockResolvedValue({
+      keys: [{ id: 'k1', name: 'One', enabled: true, key_preview: 'cpa_..1' }],
+    });
+    const result = await pluginsApi.listKeyPolicyKeys();
+    expect(mocks.get).toHaveBeenCalledWith('/plugins/cpa-key-policy/keys');
+    expect(result.status).toBe('ready');
+    const keys = result.status === 'ready' ? result.keys : [];
+    expect(keys).toHaveLength(1);
+    expect(keys[0]?.apiKeyHash).toBe(sha256Hex('k1').toLowerCase());
+    expect(keys[0]?.source).toBe('plugin:cpa-key-policy');
+  });
+
+  it.each([404, 501])(
+    'reports %i as an absent catalog so deployments without the plugin stay quiet',
+    async (status) => {
+      mocks.get.mockRejectedValue(Object.assign(new Error('not found'), { status }));
+      await expect(pluginsApi.listKeyPolicyKeys()).resolves.toEqual({ status: 'absent' });
+    }
+  );
+
+  it('propagates real failures instead of downgrading them to an absent catalog', async () => {
+    const err = Object.assign(new Error('forbidden'), { status: 403 });
+    mocks.get.mockRejectedValue(err);
+    await expect(pluginsApi.listKeyPolicyKeys()).rejects.toMatchObject({ status: 403 });
+  });
+
+  it.each([null, { keys: 'not-an-array' }, { keys: [{ name: 'missing-id' }] }])(
+    'rejects malformed catalog payloads instead of reporting an available empty catalog',
+    async (payload) => {
+      mocks.get.mockResolvedValue(payload);
+      await expect(pluginsApi.listKeyPolicyKeys()).rejects.toThrow(
+        'Invalid cpa-key-policy key catalog response'
+      );
+    }
+  );
 });

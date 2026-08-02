@@ -97,7 +97,8 @@ import {
   type FocusSnapshot,
   type StatusFilter,
 } from '@/features/monitoring/model/monitoringCenterPageModel';
-import { resolveMonitoringDimensionCounts } from '@/features/monitoring/model/monitoringAnalyticsModel';
+import { resolveMonitoringAccountCount } from '@/features/monitoring/model/monitoringAnalyticsModel';
+import { countConfiguredApiKeys } from '@/features/monitoring/model/apiKeys';
 import { useUsageData } from '@/features/monitoring/hooks/useUsageData';
 import {
   isUsageImportCancelledError,
@@ -105,7 +106,10 @@ import {
   type UsageImportProgress,
 } from '@/features/monitoring/services/usageImportSession';
 import { monitoringAnalyticsApi, type UsageHeaderSnapshot } from '@/services/api/usageService';
+import { pluginsApi, type KeyPolicyKeyPublicMeta } from '@/services/api/plugins';
 import {
+  MONITORING_EVENTS_QUERY_LIMIT_OPTIONS,
+  normalizeMonitoringEventsQueryLimit,
   readMonitoringCenterUiState,
   writeMonitoringCenterUiState,
   type MonitoringDataTab,
@@ -142,6 +146,16 @@ const shortLabel = (t: TFunction, shortKey: string, fallbackKey: string) => {
   const label = t(shortKey, { defaultValue: fallback });
   return label === shortKey ? fallback : label;
 };
+
+/**
+ * Load state of the optional cpa-key-policy key catalog.
+ * - `pending`: not read yet.
+ * - `ready`: current list in hand; plugin keys count toward "configured".
+ * - `absent`: this deployment has no such plugin. Expected — stays silent.
+ * - `error`: the plugin exists but the read failed; the configured count is
+ *   knowingly incomplete, which is the only case worth warning about.
+ */
+type PluginKeyCatalogStatus = 'pending' | 'ready' | 'absent' | 'error';
 
 export function MonitoringCenterPage() {
   const { t, i18n } = useTranslation();
@@ -196,6 +210,10 @@ export function MonitoringCenterPage() {
     () => typeof document === 'undefined' || document.visibilityState !== 'hidden'
   );
   const [headerSnapshots, setHeaderSnapshots] = useState<UsageHeaderSnapshot[]>([]);
+  /** In-memory cpa-key-policy public key catalog (never persisted). */
+  const [pluginKeyCatalog, setPluginKeyCatalog] = useState<KeyPolicyKeyPublicMeta[]>([]);
+  const [pluginKeyCatalogStatus, setPluginKeyCatalogStatus] =
+    useState<PluginKeyCatalogStatus>('pending');
   const [selectedAccount, setSelectedAccount] = useState(
     () => initialMonitoringCenterUiState.current.selectedAccount
   );
@@ -274,10 +292,14 @@ export function MonitoringCenterPage() {
   const [realtimePageSize, setRealtimePageSize] = useState(
     initialMonitoringCenterUiState.current.realtimePageSize
   );
+  const [realtimeQueryLimit, setRealtimeQueryLimit] = useState(
+    initialMonitoringCenterUiState.current.realtimeQueryLimit
+  );
   const focusSnapshotRef = useRef<FocusSnapshot | null>(null);
   const previousAccountPageResetStateRef = useRef<AccountOverviewPageResetState | null>(null);
   const accountQuotaStatesRef = useRef<Record<string, AccountQuotaState>>({});
   const accountQuotaRequestIdsRef = useRef<Record<string, number>>({});
+  const pluginKeyCatalogRequestIdRef = useRef(0);
   const usageImportInputRef = useRef<HTMLInputElement | null>(null);
   const usageImportAbortRef = useRef<AbortController | null>(null);
   const usageImportCancelPendingRef = useRef(false);
@@ -400,12 +422,14 @@ export function MonitoringCenterPage() {
     config,
     modelPrices,
     apiKeyAliases,
+    pluginKeyCatalog,
     timeRange,
     customTimeRange,
     searchQuery: deferredSearch,
     searchApiKeyHash: deferredSearchApiKeyHash,
     scopeFilters: monitoringScopeFilters,
     activeDataTab,
+    eventsPageLimit: realtimeQueryLimit,
   });
 
   const loadHeaderSnapshots = useCallback(async () => {
@@ -425,9 +449,32 @@ export function MonitoringCenterPage() {
     }
   }, [managementKey, requestMonitoringAvailability.serviceBase]);
 
-  const refreshAll = useCallback(async () => {
+  const loadPluginKeyCatalog = useCallback(async () => {
+    // Probe this read-only endpoint directly instead of gating on the generic
+    // capability header. That header is learned from CPA-proxied responses, so
+    // using it as a prerequisite can prevent the first plugin request forever.
+    // The API adapter turns 404/501 into the expected silent `absent` state.
+    const requestId = ++pluginKeyCatalogRequestIdRef.current;
+    try {
+      const result = await pluginsApi.listKeyPolicyKeys();
+      if (requestId !== pluginKeyCatalogRequestIdRef.current) return;
+      setPluginKeyCatalog(result.status === 'ready' ? result.keys : []);
+      setPluginKeyCatalogStatus(result.status);
+    } catch {
+      if (requestId !== pluginKeyCatalogRequestIdRef.current) return;
+      // Keep the last catalog for labels, but stop counting it as configured:
+      // a stale list must never be reported as the current key set.
+      setPluginKeyCatalogStatus('error');
+    }
+  }, []);
+
+  const refreshMonitoringData = useCallback(async () => {
     await Promise.all([loadApiKeyAliases(), refreshMeta(false), loadHeaderSnapshots()]);
   }, [loadApiKeyAliases, loadHeaderSnapshots, refreshMeta]);
+
+  const refreshAll = useCallback(async () => {
+    await Promise.all([refreshMonitoringData(), loadPluginKeyCatalog()]);
+  }, [loadPluginKeyCatalog, refreshMonitoringData]);
 
   const setCurrentAccountPage = useCallback(
     (page: number) => {
@@ -452,7 +499,7 @@ export function MonitoringCenterPage() {
   }, []);
   useInterval(
     () => {
-      void refreshAll().catch(() => {});
+      void refreshMonitoringData().catch(() => {});
     },
     isCurrentLayer &&
       documentVisible &&
@@ -466,6 +513,14 @@ export function MonitoringCenterPage() {
     if (!isCurrentLayer || !requestMonitoringAvailability.serviceBase) return;
     void loadHeaderSnapshots();
   }, [isCurrentLayer, loadHeaderSnapshots, requestMonitoringAvailability.serviceBase]);
+
+  useEffect(() => {
+    if (!isCurrentLayer) return;
+    void loadPluginKeyCatalog().catch(() => {});
+    return () => {
+      pluginKeyCatalogRequestIdRef.current += 1;
+    };
+  }, [isCurrentLayer, loadPluginKeyCatalog]);
 
   const monitoringUnavailable =
     !requestMonitoringAvailability.checking && !requestMonitoringAvailability.available;
@@ -528,6 +583,7 @@ export function MonitoringCenterPage() {
       selectedStatus,
       apiKeyPageSize,
       realtimePageSize,
+      realtimeQueryLimit,
     });
   }, [
     activeDataTab,
@@ -536,6 +592,7 @@ export function MonitoringCenterPage() {
     customEndInput,
     customStartInput,
     realtimePageSize,
+    realtimeQueryLimit,
     searchInput,
     selectedAccount,
     selectedApiKeyHash,
@@ -614,27 +671,38 @@ export function MonitoringCenterPage() {
   const scopedSummary = monitoringSummary;
   const accountRows = monitoringAccountRows;
   const apiKeyRows = monitoringApiKeyRows;
-  const { accountCount, apiKeyCount } = useMemo(
+  const accountCount = resolveMonitoringAccountCount({
+    activeDataTab,
+    accountRowCount: accountRows.length,
+    accountSelectorCount:
+      monitoringFilterOptions.accountCount ?? monitoringFilterOptions.accountRows.length,
+  });
+  // Three distinct caller-key cardinalities, never collapsed into one number:
+  // configured (native + plugin keys that exist), active (used in range) and
+  // result (rows left after every current filter).
+  const configuredApiKeyCount = useMemo(
     () =>
-      resolveMonitoringDimensionCounts({
-        activeDataTab,
-        accountRowCount: accountRows.length,
-        apiKeyRowCount: apiKeyRows.length,
-        accountSelectorCount:
-          monitoringFilterOptions.accountCount ?? monitoringFilterOptions.accountRows.length,
-        apiKeySelectorCount:
-          monitoringFilterOptions.apiKeyCount ?? monitoringFilterOptions.apiKeyRows.length,
-      }),
-    [
-      accountRows.length,
-      activeDataTab,
-      apiKeyRows.length,
-      monitoringFilterOptions.accountCount,
-      monitoringFilterOptions.accountRows.length,
-      monitoringFilterOptions.apiKeyCount,
-      monitoringFilterOptions.apiKeyRows.length,
-    ]
+      countConfiguredApiKeys(
+        config?.apiKeys ?? [],
+        pluginKeyCatalog,
+        pluginKeyCatalogStatus === 'ready'
+      ),
+    [config?.apiKeys, pluginKeyCatalog, pluginKeyCatalogStatus]
   );
+  const activeApiKeyCount =
+    monitoringFilterOptions.apiKeyCount ?? monitoringFilterOptions.apiKeyRows.length;
+  const apiKeyResultCount = apiKeyRows.length;
+  const selectedApiKeyFilterLabel = useMemo(() => {
+    if (selectedApiKeyHash === 'all') return '';
+    const match = monitoringFilterOptions.apiKeyRows.find(
+      (row) => row.apiKeyHash === selectedApiKeyHash
+    );
+    return (
+      match?.apiKeyLabel ||
+      match?.apiKeyMasked ||
+      (selectedApiKeyHash ? `sha256:${selectedApiKeyHash.slice(0, 12)}` : '')
+    );
+  }, [monitoringFilterOptions.apiKeyRows, selectedApiKeyHash]);
   const accountStatusDataByRowId = useMemo(
     () => buildMonitoringAccountStatusDataMap(scopedRows, accountStatusBounds),
     [accountStatusBounds, scopedRows]
@@ -782,7 +850,6 @@ export function MonitoringCenterPage() {
     Boolean(drilldownCacheStatus);
   const hasActiveDataFilter = hasSearchFilter || hasScopeFilter;
   const failedGroupCount = groupedRealtimeRows.filter((row) => row.failureCalls > 0).length;
-  const failedOnlyActive = selectedStatus === 'failed';
   const hasMonitoringDisplayData =
     scopedSummary.totalCalls > 0 ||
     accountRows.length > 0 ||
@@ -850,8 +917,14 @@ export function MonitoringCenterPage() {
         label: shortLabel(t, 'monitoring.data_tab_api_keys_short', 'monitoring.data_tab_api_keys'),
         fullLabel: t('monitoring.data_tab_api_keys'),
         icon: 'apiKeys',
-        badge: apiKeyCount,
-        badgeTitle: t('monitoring.data_tab_api_keys_badge_title', { count: apiKeyCount }),
+        // Badge shows active-in-range count (not filtered result / configured).
+        badge: activeApiKeyCount,
+        badgeTitle: t('monitoring.data_tab_api_keys_badge_title', {
+          configured: configuredApiKeyCount,
+          active: activeApiKeyCount,
+          result: apiKeyResultCount,
+          count: activeApiKeyCount,
+        }),
       },
       {
         id: 'realtime',
@@ -866,10 +939,23 @@ export function MonitoringCenterPage() {
         }),
       },
     ];
-  }, [accountCount, apiKeyCount, scopedFailureCount, scopedSummary.totalCalls, t]);
+  }, [
+    accountCount,
+    activeApiKeyCount,
+    apiKeyResultCount,
+    configuredApiKeyCount,
+    scopedFailureCount,
+    scopedSummary.totalCalls,
+    t,
+  ]);
 
   const handleDataTabChange = useCallback((tab: MonitoringDataTab) => {
+    // Only switch tab — never clear user filters (accounts / apiKeys / realtime).
     setActiveDataTab(tab);
+  }, []);
+
+  const clearApiKeyFilter = useCallback(() => {
+    setSelectedApiKeyHash('all');
   }, []);
 
   const restoreFocusSnapshot = useCallback(() => {
@@ -961,8 +1047,8 @@ export function MonitoringCenterPage() {
     setIsCustomRangeModalOpen(false);
   }, [customDraftEndInput, customDraftStartInput, customDraftTimeRangeError]);
 
-  const toggleFailedOnly = useCallback(() => {
-    setSelectedStatus((previous) => (previous === 'failed' ? 'all' : 'failed'));
+  const setRealtimeStatusFilter = useCallback((status: Exclude<StatusFilter, 'all'>) => {
+    setSelectedStatus((previous) => (previous === status ? 'all' : status));
   }, []);
 
   const toggleApiKeyExpanded = useCallback((apiKeyId: string) => {
@@ -1163,6 +1249,11 @@ export function MonitoringCenterPage() {
     setRealtimePage(1);
   }, []);
 
+  const handleRealtimeQueryLimitChange = useCallback((limit: number) => {
+    setRealtimeQueryLimit(normalizeMonitoringEventsQueryLimit(limit));
+    setRealtimePage(1);
+  }, []);
+
   const handleAccountSortKeyChange = useCallback(
     (key: AccountSortKey) => {
       resetCurrentAccountPage();
@@ -1217,18 +1308,31 @@ export function MonitoringCenterPage() {
     }
 
     if (activeDataTab === 'apiKeys') {
-      return <ApiKeySummaryPanelActions rowCount={apiKeyRows.length} t={t} />;
+      return (
+        <ApiKeySummaryPanelActions
+          configuredCount={configuredApiKeyCount}
+          activeCount={activeApiKeyCount}
+          resultCount={apiKeyResultCount}
+          pluginCatalogUnavailable={pluginKeyCatalogStatus === 'error'}
+          selectedApiKeyHash={selectedApiKeyHash}
+          selectedApiKeyLabel={selectedApiKeyFilterLabel}
+          t={t}
+          onClearApiKeyFilter={clearApiKeyFilter}
+        />
+      );
     }
 
     return (
       <RealtimeEventsPanelActions
-        rowCount={realtimeLogRows.length}
+        queryLimit={realtimeQueryLimit}
+        queryLimitOptions={MONITORING_EVENTS_QUERY_LIMIT_OPTIONS}
         scopedFailureCount={scopedFailureCount}
-        failedOnlyActive={failedOnlyActive}
+        statusFilter={selectedStatus}
         accountDisplayMode={accountDisplayMode}
         t={t}
-        onToggleFailedOnly={toggleFailedOnly}
+        onStatusFilterChange={setRealtimeStatusFilter}
         onAccountDisplayModeChange={setAccountDisplayMode}
+        onQueryLimitChange={handleRealtimeQueryLimitChange}
       />
     );
   }, [
@@ -1237,16 +1341,23 @@ export function MonitoringCenterPage() {
     accountSort,
     accountSortOptions,
     activeDataTab,
-    apiKeyRows.length,
-    failedOnlyActive,
+    activeApiKeyCount,
+    apiKeyResultCount,
+    configuredApiKeyCount,
+    clearApiKeyFilter,
     handleAccountSortKeyChange,
+    handleRealtimeQueryLimitChange,
     overallLoading,
-    realtimeLogRows.length,
+    pluginKeyCatalogStatus,
+    realtimeQueryLimit,
     refreshAll,
     scopedFailureCount,
     searchInput,
+    selectedApiKeyFilterLabel,
+    selectedApiKeyHash,
+    selectedStatus,
+    setRealtimeStatusFilter,
     t,
-    toggleFailedOnly,
   ]);
 
   const handleAccountPageChange = useCallback(
@@ -1540,9 +1651,8 @@ export function MonitoringCenterPage() {
     <div className={styles.page}>
       <MonitoringStatusHeader
         showLoadingOverlay={
-          overallLoading &&
-          !hasMonitoringDisplayData &&
-          (!monitoringScopeTransitioning || !hasMonitoringPresentationSnapshot)
+          (overallLoading && !hasMonitoringDisplayData) ||
+          (monitoringBlockingLoading && monitoringScopeTransitioning)
         }
         monitoringUnavailable={monitoringUnavailable}
         monitoringUnavailableTitle={monitoringUnavailableTitle}
@@ -1687,8 +1797,10 @@ export function MonitoringCenterPage() {
               rows={realtimeLogRows}
               pagination={realtimePagination}
               pageSize={realtimePageSize}
+              queryLimit={realtimeQueryLimit}
+              queryLimitOptions={MONITORING_EVENTS_QUERY_LIMIT_OPTIONS}
               scopedFailureCount={scopedFailureCount}
-              failedOnlyActive={failedOnlyActive}
+              statusFilter={selectedStatus}
               eventsHasMore={eventsHasMore}
               eventsLoadingMore={eventsLoadingMore}
               eventsRetentionLimited={eventsRetentionLimited}
@@ -1700,10 +1812,11 @@ export function MonitoringCenterPage() {
               locale={i18n.language}
               emptyState={renderMonitoringEmptyState()}
               t={t}
-              onToggleFailedOnly={toggleFailedOnly}
+              onStatusFilterChange={setRealtimeStatusFilter}
               onAccountDisplayModeChange={setAccountDisplayMode}
               onPageChange={setRealtimePage}
               onPageSizeChange={handleRealtimePageSizeChange}
+              onQueryLimitChange={handleRealtimeQueryLimitChange}
               onLoadMoreEvents={loadMoreEvents}
             />
           );

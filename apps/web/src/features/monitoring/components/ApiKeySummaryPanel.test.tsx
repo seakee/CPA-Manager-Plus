@@ -3,7 +3,7 @@ import { create, type ReactTestRenderer } from 'react-test-renderer';
 import type { TFunction } from 'i18next';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MonitoringApiKeyRow } from '@/features/monitoring/hooks/useMonitoringData';
-import { ApiKeySummaryPanel } from './ApiKeySummaryPanel';
+import { ApiKeySummaryPanel, ApiKeySummaryPanelActions } from './ApiKeySummaryPanel';
 
 const { copyToClipboard } = vi.hoisted(() => ({
   copyToClipboard: vi.fn(async () => true),
@@ -98,5 +98,75 @@ describe('ApiKeySummaryPanel', () => {
     expect(
       renderer.root.findAllByType('button').some((node) => node.props['aria-label'] === 'Copy')
     ).toBe(false);
+  });
+
+  it('shows configured/active/result counts and clears only the key filter', () => {
+    const onClear = vi.fn();
+    const t = ((key: string, options?: Record<string, unknown>) => {
+      if (key === 'monitoring.api_key_count_configured') return `Configured ${options?.count}`;
+      if (key === 'monitoring.api_key_count_active') return `Active ${options?.count}`;
+      if (key === 'monitoring.api_key_count_result') return `Results ${options?.count}`;
+      if (key === 'monitoring.api_key_filter_active') return `Filter: ${options?.label}`;
+      if (key === 'monitoring.api_key_filter_clear') return 'Clear key';
+      return key;
+    }) as unknown as TFunction;
+
+    let renderer!: ReactTestRenderer;
+    act(() => {
+      renderer = create(
+        <ApiKeySummaryPanelActions
+          configuredCount={6}
+          activeCount={6}
+          resultCount={1}
+          selectedApiKeyHash="hash-1"
+          selectedApiKeyLabel="Key 1"
+          t={t}
+          onClearApiKeyFilter={onClear}
+        />
+      );
+    });
+
+    const text = renderer.toJSON();
+    const flattened = JSON.stringify(text);
+    expect(flattened).toContain('Configured 6');
+    expect(flattened).toContain('Active 6');
+    expect(flattened).toContain('Results 1');
+    expect(flattened).toContain('Filter: Key 1');
+
+    const clearButton = renderer.root
+      .findAllByType('button')
+      .find((node) => node.children.includes('Clear key'));
+    if (!clearButton) throw new Error('clear key button missing');
+    act(() => {
+      clearButton.props.onClick();
+    });
+    expect(onClear).toHaveBeenCalledTimes(1);
+  });
+
+  it('warns about an incomplete configured count only when a catalog read failed', () => {
+    const t = ((key: string, options?: Record<string, unknown>) => {
+      if (key === 'monitoring.api_key_count_configured') return `Configured ${options?.count}`;
+      if (key === 'monitoring.api_key_plugin_catalog_unavailable') return 'catalog unavailable';
+      return key;
+    }) as unknown as TFunction;
+
+    const render = (pluginCatalogUnavailable: boolean) => {
+      let renderer!: ReactTestRenderer;
+      act(() => {
+        renderer = create(
+          <ApiKeySummaryPanelActions
+            configuredCount={2}
+            activeCount={2}
+            resultCount={2}
+            pluginCatalogUnavailable={pluginCatalogUnavailable}
+            t={t}
+          />
+        );
+      });
+      return JSON.stringify(renderer.toJSON());
+    };
+
+    expect(render(false)).not.toContain('catalog unavailable');
+    expect(render(true)).toContain('catalog unavailable');
   });
 });

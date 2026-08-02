@@ -362,17 +362,33 @@ export interface MonitoringScopeFilters {
   headerTraceId?: string;
 }
 
+/** In-memory plugin public key catalog used only for display/configured counts. */
+export type MonitoringPluginKeyCatalogEntry = {
+  id: string;
+  name?: string;
+  keyPreview?: string;
+  apiKeyHash: string;
+  source?: string;
+};
+
 export interface UseMonitoringDataParams {
   usage?: unknown;
   config: Config | null | undefined;
   modelPrices: Record<string, ModelPrice>;
   apiKeyAliases?: ApiKeyAlias[];
+  /**
+   * Plugin public keys (cpa-key-policy), used for caller labels only. The caller
+   * owns load state; an empty list simply means no plugin labels are available.
+   */
+  pluginKeyCatalog?: MonitoringPluginKeyCatalogEntry[];
   timeRange: MonitoringTimeRange;
   customTimeRange?: MonitoringCustomTimeRange | null;
   searchQuery: string;
   searchApiKeyHash?: string;
   scopeFilters?: MonitoringScopeFilters;
   activeDataTab?: MonitoringDataTab;
+  /** Maximum event rows requested per analytics page. */
+  eventsPageLimit?: number;
 }
 
 export interface UseMonitoringDataReturn {

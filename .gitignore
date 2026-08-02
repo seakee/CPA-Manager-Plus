@@ -27,6 +27,7 @@ skills
 
 # Editor directories and files
 settings.local.json
+deploy/.env.local
 .codex
 .vscode/*
 !.vscode/extensions.json

@@ -62,6 +62,7 @@ import type {
 } from '../model/types';
 import { loadMonitoringMetaPayload } from '../services/monitoringMetaService';
 import { useMonitoringAnalytics } from './useMonitoringAnalytics';
+import { normalizeMonitoringEventsQueryLimit } from '../monitoringCenterUiState';
 
 export type {
   MonitoringAccountModelSpendRow,
@@ -101,7 +102,6 @@ export {
   buildRealtimeMonitorRows,
 } from '../model/rowBuilders';
 
-const MONITORING_EVENTS_PAGE_LIMIT = 500;
 export const MONITORING_EVENTS_RETENTION_LIMIT = 2_000;
 const MONITORING_PRESENTATION_CACHE_LIMIT = 4;
 const EMPTY_MONITORING_ANALYTICS_EVENT_ROWS: MonitoringAnalyticsEventRow[] = [];
@@ -148,7 +148,6 @@ export interface MonitoringPresentationSnapshotResolution {
 
 interface MonitoringPresentationSnapshotStore {
   cachedSnapshots: Map<string, MonitoringPresentationSnapshot>;
-  lastStableSnapshot: MonitoringPresentationSnapshot | null;
 }
 
 const createEventsPageState = (scopeKey = ''): MonitoringEventsPageState => ({
@@ -182,7 +181,8 @@ export const buildMonitoringEventsScopeKey = (
   searchQuery: string,
   searchApiKeyHash: string | undefined,
   filters: unknown,
-  granularity: string
+  granularity: string,
+  eventsPageLimit: number
 ) =>
   JSON.stringify({
     range: timeRange,
@@ -196,6 +196,7 @@ export const buildMonitoringEventsScopeKey = (
     searchApiKeyHash,
     filters,
     granularity,
+    eventsPageLimit,
   });
 
 export const mergeMonitoringEventsPageItems = (
@@ -284,13 +285,11 @@ export const resolveMonitoringPresentationSnapshot = ({
   scopeKey,
   dataStale,
   cachedSnapshots,
-  lastStableSnapshot,
 }: {
   computedSnapshot: MonitoringPresentationSnapshot;
   scopeKey: string;
   dataStale: boolean;
   cachedSnapshots: ReadonlyMap<string, MonitoringPresentationSnapshot>;
-  lastStableSnapshot: MonitoringPresentationSnapshot | null;
 }): MonitoringPresentationSnapshotResolution => {
   if (!dataStale) {
     return {
@@ -300,7 +299,7 @@ export const resolveMonitoringPresentationSnapshot = ({
     };
   }
 
-  const snapshot = cachedSnapshots.get(scopeKey) ?? lastStableSnapshot;
+  const snapshot = cachedSnapshots.get(scopeKey);
   return {
     snapshot: snapshot ?? computedSnapshot,
     hasPresentationSnapshot: Boolean(snapshot),
@@ -313,12 +312,14 @@ export function useMonitoringData({
   config,
   modelPrices,
   apiKeyAliases,
+  pluginKeyCatalog,
   timeRange,
   customTimeRange,
   searchQuery,
   searchApiKeyHash,
   scopeFilters,
   activeDataTab = 'accounts',
+  eventsPageLimit,
 }: UseMonitoringDataParams): UseMonitoringDataReturn {
   const [authFiles, setAuthFiles] = useState<AuthFileItem[]>([]);
   const [channels, setChannels] = useState<MonitoringChannelMeta[]>([]);
@@ -331,8 +332,8 @@ export function useMonitoringData({
   const [presentationSnapshotStore, setPresentationSnapshotStore] =
     useState<MonitoringPresentationSnapshotStore>(() => ({
       cachedSnapshots: new Map(),
-      lastStableSnapshot: null,
     }));
+  const normalizedEventsPageLimit = normalizeMonitoringEventsQueryLimit(eventsPageLimit);
 
   const analyticsBounds = useMemo(() => {
     const bounds = getRangeBounds(timeRange, analyticsNowMs, customTimeRange);
@@ -433,8 +434,10 @@ export function useMonitoringData({
   }, [channels]);
 
   const apiKeyDisplayMap = useMemo(() => {
-    return buildApiKeyDisplayMap(config?.apiKeys || [], apiKeyAliases || []);
-  }, [apiKeyAliases, config?.apiKeys]);
+    // Names are display-only: keep showing the last catalog we managed to read
+    // even while a refresh is failing. Freshness only gates the configured count.
+    return buildApiKeyDisplayMap(config?.apiKeys || [], apiKeyAliases || [], pluginKeyCatalog || []);
+  }, [apiKeyAliases, config?.apiKeys, pluginKeyCatalog]);
 
   const analyticsFilters = useMemo(
     () => buildAnalyticsFilters(scopeFilters, authMetaMap, channels),
@@ -454,7 +457,8 @@ export function useMonitoringData({
         searchQuery,
         searchApiKeyHash,
         analyticsFilters,
-        analyticsGranularity
+        analyticsGranularity,
+        normalizedEventsPageLimit
       ),
     [
       analyticsBounds,
@@ -463,6 +467,7 @@ export function useMonitoringData({
       searchApiKeyHash,
       searchQuery,
       timeRange,
+      normalizedEventsPageLimit,
     ]
   );
 
@@ -482,11 +487,11 @@ export function useMonitoringData({
   const analyticsInclude = useMemo(
     () =>
       buildMonitoringCenterAnalyticsInclude(activeDataTab, analyticsGranularity, {
-        limit: MONITORING_EVENTS_PAGE_LIMIT,
+        limit: normalizedEventsPageLimit,
         before_ms: eventsBeforeMs,
         before_id: eventsBeforeId,
       }),
-    [activeDataTab, analyticsGranularity, eventsBeforeId, eventsBeforeMs]
+    [activeDataTab, analyticsGranularity, eventsBeforeId, eventsBeforeMs, normalizedEventsPageLimit]
   );
   const requestedEventsBeforeMs = analyticsInclude.events_page?.before_ms ?? null;
   const requestedEventsBeforeId = analyticsInclude.events_page?.before_id ?? null;
@@ -831,9 +836,7 @@ export function useMonitoringData({
       channels: uniqueOptionValues(rangeFilteredRows.map((row) => row.channel)),
       headerTraceIds: uniqueOptionValues(rangeFilteredRows.map((row) => row.headerTraceId)),
     };
-  },
-    [apiKeyDisplayMap, rangeFilteredRows]
-  );
+  }, [apiKeyDisplayMap, rangeFilteredRows]);
   const analyticsFilterOptions =
     currentFilterSelectorsData?.filter_options ?? currentAnalyticsData?.filter_options;
   const filterOptions = useMemo(() => {
@@ -949,13 +952,6 @@ export function useMonitoringData({
     queueMicrotask(() => {
       if (cancelled) return;
       setPresentationSnapshotStore((previous) => {
-        if (
-          previous.lastStableSnapshot === computedPresentationSnapshot &&
-          previous.cachedSnapshots.get(analyticsScopeKey) === computedPresentationSnapshot
-        ) {
-          return previous;
-        }
-
         const cachedSnapshot = withoutMonitoringSnapshotEvents(computedPresentationSnapshot);
         const cachedSnapshots = new Map(previous.cachedSnapshots);
         cachedSnapshots.delete(analyticsScopeKey);
@@ -965,10 +961,7 @@ export function useMonitoringData({
           if (oldestKey === undefined) break;
           cachedSnapshots.delete(oldestKey);
         }
-        return {
-          cachedSnapshots,
-          lastStableSnapshot: cachedSnapshot,
-        };
+        return { cachedSnapshots };
       });
     });
     return () => {
@@ -983,14 +976,12 @@ export function useMonitoringData({
         scopeKey: analyticsScopeKey,
         dataStale: analytics.dataStale,
         cachedSnapshots: presentationSnapshotStore.cachedSnapshots,
-        lastStableSnapshot: presentationSnapshotStore.lastStableSnapshot,
       }),
     [
       analytics.dataStale,
       computedPresentationSnapshot,
       analyticsScopeKey,
       presentationSnapshotStore.cachedSnapshots,
-      presentationSnapshotStore.lastStableSnapshot,
     ]
   );
   const presentationSnapshot = presentationResolution.snapshot;

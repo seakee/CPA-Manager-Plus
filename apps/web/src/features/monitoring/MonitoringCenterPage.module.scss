@@ -1216,6 +1216,35 @@
   font-size: 12px;
 }
 
+.realtimeQueryLimitField {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding-left: 10px;
+  border: 1px solid var(--monitor-line);
+  border-radius: 12px;
+  background: var(--monitor-surface-elevated);
+  color: var(--monitor-muted);
+  font-size: 12px;
+}
+
+.realtimeQueryLimitSelect {
+  min-height: 28px;
+  padding: 0 8px 0 4px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.realtimeQueryLimitSelect:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--monitor-accent) 55%, transparent);
+  outline-offset: -2px;
+  border-radius: 8px;
+}
+
 .apiKeySummaryActions {
   align-items: center;
   justify-content: flex-end;
@@ -1228,6 +1257,34 @@
   font-weight: 800;
 }
 
+.apiKeyFilterChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--monitor-accent) 36%, var(--monitor-line));
+  background: color-mix(in srgb, var(--monitor-accent) 12%, var(--monitor-surface));
+  color: var(--monitor-accent-strong);
+  font-size: 12px;
+  font-weight: 700;
+  max-width: min(360px, 50vw);
+}
+
+.apiKeyFilterClearButton {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 800;
+  text-decoration: underline;
+  padding: 0;
+  white-space: nowrap;
+}
+
 .filterToggleChip {
   display: inline-flex;
   align-items: center;
@@ -1236,18 +1293,34 @@
   height: 32px;
   min-height: 32px;
   padding: 0 12px;
-  border: 1px solid color-mix(in srgb, var(--monitor-red) 30%, var(--monitor-line));
+  border: 1px solid var(--monitor-line);
   border-radius: 10px;
-  background: color-mix(in srgb, var(--monitor-red) 8%, var(--monitor-surface));
-  color: var(--monitor-red);
+  background: var(--monitor-surface-elevated);
+  color: var(--monitor-muted);
   font-size: 12px;
   font-weight: 800;
 }
 
-.filterToggleChipActive {
+.filterToggleChipFailed:hover {
+  border-color: color-mix(in srgb, var(--monitor-red) 34%, var(--monitor-line));
+  color: var(--monitor-red);
+}
+
+.filterToggleChipFailedActive {
   border-color: color-mix(in srgb, var(--monitor-red) 44%, var(--monitor-line));
   background: color-mix(in srgb, var(--monitor-red) 14%, var(--monitor-surface));
   color: var(--monitor-red);
+}
+
+.filterToggleChipSuccess:hover {
+  border-color: color-mix(in srgb, var(--monitor-green) 34%, var(--monitor-line));
+  color: var(--monitor-green);
+}
+
+.filterToggleChipSuccessActive {
+  border-color: color-mix(in srgb, var(--monitor-green) 44%, var(--monitor-line));
+  background: color-mix(in srgb, var(--monitor-green) 14%, var(--monitor-surface));
+  color: var(--monitor-green);
 }
 
 .errorBox,
@@ -1581,7 +1654,6 @@
 .realtimeMetricText.badText {
   color: var(--monitor-red);
 }
-
 
 .logTypeCell {
   display: block;
@@ -2106,6 +2178,7 @@
 
   .refreshButton,
   .clearButton,
+  .realtimeQueryLimitField,
   .realtimeHeaderActions > span,
   .realtimeHeaderActions > button {
     width: 100%;
@@ -2242,6 +2315,7 @@
   }
 
   .statusMeta span,
+  .realtimeQueryLimitField,
   .realtimeHeaderActions > span,
   .realtimeHeaderActions > button {
     width: 100%;

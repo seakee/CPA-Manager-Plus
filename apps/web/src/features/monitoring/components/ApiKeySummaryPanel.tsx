@@ -43,8 +43,18 @@ type ApiKeySummaryPanelProps = {
 };
 
 export type ApiKeySummaryPanelActionsProps = {
-  rowCount: number;
+  /** Caller keys that exist (native + plugin catalog). */
+  configuredCount: number;
+  /** Caller keys with usage in the selected time range. */
+  activeCount: number;
+  /** Caller keys left after every current filter. */
+  resultCount: number;
+  /** Only true when a catalog read failed, i.e. configuredCount is incomplete. */
+  pluginCatalogUnavailable?: boolean;
+  selectedApiKeyHash?: string;
+  selectedApiKeyLabel?: string;
   t: TFunction;
+  onClearApiKeyFilter?: () => void;
 };
 
 const joinShort = (values: string[], limit = 2) => {
@@ -245,12 +255,49 @@ function ApiKeyExpandedDetails({
   );
 }
 
-export function ApiKeySummaryPanelActions({ rowCount, t }: ApiKeySummaryPanelActionsProps) {
+export function ApiKeySummaryPanelActions({
+  configuredCount,
+  activeCount,
+  resultCount,
+  pluginCatalogUnavailable = false,
+  selectedApiKeyHash = 'all',
+  selectedApiKeyLabel = '',
+  t,
+  onClearApiKeyFilter,
+}: ApiKeySummaryPanelActionsProps) {
+  const hasKeyFilter = Boolean(selectedApiKeyHash && selectedApiKeyHash !== 'all');
+
   return (
     <div className={`${styles.inlineMetrics} ${styles.apiKeySummaryActions}`}>
-      <span className={styles.apiKeyCountPill}>
-        {t('monitoring.api_key_summary_keys_count', { count: rowCount })}
+      <span
+        className={styles.apiKeyCountPill}
+        title={t('monitoring.api_key_count_configured_title')}
+      >
+        {t('monitoring.api_key_count_configured', { count: configuredCount })}
+        {pluginCatalogUnavailable ? ` · ${t('monitoring.api_key_plugin_catalog_unavailable')}` : ''}
       </span>
+      <span className={styles.apiKeyCountPill} title={t('monitoring.api_key_count_active_title')}>
+        {t('monitoring.api_key_count_active', { count: activeCount })}
+      </span>
+      <span className={styles.apiKeyCountPill} title={t('monitoring.api_key_count_result_title')}>
+        {t('monitoring.api_key_count_result', { count: resultCount })}
+      </span>
+      {hasKeyFilter ? (
+        <span className={styles.apiKeyFilterChip} title={selectedApiKeyLabel || selectedApiKeyHash}>
+          {t('monitoring.api_key_filter_active', {
+            label: selectedApiKeyLabel || selectedApiKeyHash,
+          })}
+          {onClearApiKeyFilter ? (
+            <button
+              type="button"
+              className={styles.apiKeyFilterClearButton}
+              onClick={onClearApiKeyFilter}
+            >
+              {t('monitoring.api_key_filter_clear')}
+            </button>
+          ) : null}
+        </span>
+      ) : null}
     </div>
   );
 }
@@ -279,7 +326,6 @@ export function ApiKeySummaryPanel({
       copied ? 'success' : 'error'
     );
   };
-  const actions = <ApiKeySummaryPanelActions rowCount={rows.length} t={t} />;
   const content = (
     <>
       <div className={`${styles.tableWrapper} ${styles.apiKeySummaryTableWrapper}`}>
@@ -391,7 +437,6 @@ export function ApiKeySummaryPanel({
       }
       subtitle={t('monitoring.api_key_summary_desc')}
       className={styles.apiKeyPanel}
-      extra={actions}
     >
       {content}
     </MonitoringPanel>

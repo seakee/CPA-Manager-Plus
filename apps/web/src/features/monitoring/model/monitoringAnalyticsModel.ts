@@ -106,19 +106,20 @@ export const mergeMonitoringAccountOptionRows = (
   });
 };
 
-export const resolveMonitoringDimensionCounts = ({
+/**
+ * Account tab badge shows the rows it is currently rendering; the other tabs
+ * show how many accounts exist in range, which is what the selector reports.
+ *
+ * The API Key badge deliberately has no equivalent here: it always shows the
+ * active-in-range count, and its configured / active / result breakdown is
+ * assembled by the page (see ApiKeySummaryPanelActions).
+ */
+export const resolveMonitoringAccountCount = ({
   activeDataTab,
   accountRowCount,
-  apiKeyRowCount,
   accountSelectorCount,
-  apiKeySelectorCount,
 }: {
   activeDataTab: MonitoringDataTab;
   accountRowCount: number;
-  apiKeyRowCount: number;
   accountSelectorCount: number;
-  apiKeySelectorCount: number;
-}) => ({
-  accountCount: activeDataTab === 'accounts' ? accountRowCount : accountSelectorCount,
-  apiKeyCount: activeDataTab === 'apiKeys' ? apiKeyRowCount : apiKeySelectorCount,
-});
+}) => (activeDataTab === 'accounts' ? accountRowCount : accountSelectorCount);

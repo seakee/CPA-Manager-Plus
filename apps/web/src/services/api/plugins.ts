@@ -1,5 +1,6 @@
 import { apiClient } from './client';
 import type {
+  ApiError,
   PluginConfigField,
   PluginConfigObject,
   PluginDeleteResult,
@@ -14,7 +15,22 @@ import type {
   PluginStoreSource,
   PluginStoreSourceError,
 } from '@/types';
+import { sha256Hex } from '@/utils/apiKeyHash';
 import { isRecord } from '@/utils/helpers';
+
+/** Public key metadata from cpa-key-policy GET /keys (safe fields only). */
+export type KeyPolicyKeyPublicMeta = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  keyPreview: string;
+  /** SHA-256(trim(id)), aligns with usage_events.api_key_hash for plugin keys. */
+  apiKeyHash: string;
+  source: 'plugin:cpa-key-policy';
+};
+
+export const KEY_POLICY_PLUGIN_ID = 'cpa-key-policy';
+export const KEY_POLICY_KEY_SOURCE = 'plugin:cpa-key-policy' as const;
 
 const asString = (value: unknown): string => {
   if (value === undefined || value === null) return '';
@@ -283,6 +299,57 @@ export interface PluginStoreInstallOptions {
   version?: string;
 }
 
+/**
+ * Normalize cpa-key-policy public key list. Only safe fields (id/name/enabled/
+ * key_preview) are kept; secrets (plain_key / key_hash) are never read or stored.
+ * apiKeyHash is always SHA-256(trim(id)) to match usage_events.api_key_hash.
+ */
+const readKeyPolicyKeyItems = (value: unknown): unknown[] | null => {
+  if (Array.isArray(value)) return value;
+  if (isRecord(value) && Array.isArray(value.keys)) return value.keys;
+  return null;
+};
+
+const isValidKeyPolicyKeyItem = (value: unknown): value is Record<string, unknown> =>
+  isRecord(value) && Boolean(asString(value.id).trim());
+
+/**
+ * Statuses that mean "this deployment does not expose a cpa-key-policy key
+ * catalog": the plugin is missing, disabled, or the CPA build predates plugin
+ * management. They are indistinguishable from the Manager proxy and all lead to
+ * the same conclusion — there are no plugin caller keys to show.
+ */
+export const isKeyPolicyCatalogAbsentStatus = (status: number | undefined): boolean =>
+  status === 404 || status === 501;
+
+export type KeyPolicyKeyCatalogResult =
+  | { status: 'ready'; keys: KeyPolicyKeyPublicMeta[] }
+  | { status: 'absent' };
+
+export const normalizeKeyPolicyKeys = (value: unknown): KeyPolicyKeyPublicMeta[] => {
+  const rawKeys = readKeyPolicyKeyItems(value) ?? [];
+
+  const out: KeyPolicyKeyPublicMeta[] = [];
+  const seen = new Set<string>();
+  for (const item of rawKeys) {
+    if (!isRecord(item)) continue;
+    const id = asString(item.id).trim();
+    if (!id) continue;
+    const apiKeyHash = sha256Hex(id).toLowerCase();
+    if (!apiKeyHash || seen.has(apiKeyHash)) continue;
+    seen.add(apiKeyHash);
+    out.push({
+      id,
+      name: asString(item.name).trim(),
+      enabled: item.enabled !== false,
+      keyPreview: asString(item.key_preview ?? item.keyPreview).trim(),
+      apiKeyHash,
+      source: KEY_POLICY_KEY_SOURCE,
+    });
+  }
+  return out;
+};
+
 export const pluginsApi = {
   async list(): Promise<PluginListResponse> {
     const data = await apiClient.get('/plugins');
@@ -307,6 +374,31 @@ export const pluginsApi = {
 
   patchConfig: (id: string, patch: PluginConfigObject) =>
     apiClient.patch(`/plugins/${encodeURIComponent(id)}/config`, patch),
+
+  /**
+   * Read-only public key metadata from cpa-key-policy via the existing management
+   * proxy. Does not persist results; caller keeps them in memory for display.
+   *
+   * `absent` means the deployment simply has no cpa-key-policy endpoint (plugin
+   * not installed or disabled) — an expected state, not a failure. Anything else
+   * rejects, so a real outage is never reported as "this deployment has no keys".
+   */
+  async listKeyPolicyKeys(): Promise<KeyPolicyKeyCatalogResult> {
+    let data: unknown;
+    try {
+      data = await apiClient.get(`/plugins/${encodeURIComponent(KEY_POLICY_PLUGIN_ID)}/keys`);
+    } catch (error) {
+      if (isKeyPolicyCatalogAbsentStatus((error as ApiError)?.status)) {
+        return { status: 'absent' };
+      }
+      throw error;
+    }
+    const rawKeys = readKeyPolicyKeyItems(data);
+    if (rawKeys === null || rawKeys.some((item) => !isValidKeyPolicyKeyItem(item))) {
+      throw new Error('Invalid cpa-key-policy key catalog response');
+    }
+    return { status: 'ready', keys: normalizeKeyPolicyKeys(data) };
+  },
 };
 
 export const pluginStoreApi = {
