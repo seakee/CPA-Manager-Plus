@@ -144,6 +144,23 @@
   max-width: 100%;
 }
 
+.deviceCodeValue {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  line-height: 1.4;
+  user-select: all;
+}
+
+.deviceCodeHint {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+  margin-bottom: $spacing-sm;
+}
+
 .authUrlActions {
   display: flex;
   flex-wrap: wrap;

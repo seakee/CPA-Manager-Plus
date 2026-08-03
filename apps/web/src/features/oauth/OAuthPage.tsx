@@ -19,6 +19,7 @@ import {
   resolvePluginOAuthProviderId,
   shouldShowPluginOAuthProvider,
 } from './oauthProviderHelpers';
+import { extractDeviceFlowDetails } from './deviceFlowHelpers';
 import styles from './OAuthPage.module.scss';
 import iconCodex from '@/assets/icons/codex.svg';
 import iconClaude from '@/assets/icons/claude.svg';
@@ -31,6 +32,8 @@ import iconGrokDark from '@/assets/icons/grok-dark.svg';
 
 interface ProviderState {
   url?: string;
+  userCode?: string;
+  verificationUrl?: string;
   state?: string;
   status?: 'idle' | 'waiting' | 'success' | 'error';
   error?: string;
@@ -370,6 +373,8 @@ export function OAuthPage() {
     clearSuccessResetTimer(provider);
     updateProviderState(provider, {
       url: undefined,
+      userCode: undefined,
+      verificationUrl: undefined,
       state: undefined,
       status: 'success',
       error: undefined,
@@ -428,10 +433,13 @@ export function OAuthPage() {
     });
     try {
       const res = await oauthApi.startAuth(provider);
+      const deviceFlow = extractDeviceFlowDetails(res.url);
       if (!res.state) {
         const message = t('auth_login.missing_state');
         updateProviderState(provider, {
           url: res.url,
+          userCode: deviceFlow?.userCode,
+          verificationUrl: deviceFlow?.verificationUrl,
           state: undefined,
           status: 'error',
           error: message,
@@ -442,6 +450,8 @@ export function OAuthPage() {
       }
       updateProviderState(provider, {
         url: res.url,
+        userCode: deviceFlow?.userCode,
+        verificationUrl: deviceFlow?.verificationUrl,
         state: res.state,
         status: 'waiting',
         polling: true,
@@ -462,6 +472,15 @@ export function OAuthPage() {
     const copied = await copyToClipboard(url);
     showNotification(
       t(copied ? 'notification.link_copied' : 'notification.copy_failed'),
+      copied ? 'success' : 'error'
+    );
+  };
+
+  const copyDeviceCode = async (userCode?: string) => {
+    if (!userCode) return;
+    const copied = await copyToClipboard(userCode);
+    showNotification(
+      t(copied ? 'auth_login.device_code_copied' : 'notification.copy_failed'),
       copied ? 'success' : 'error'
     );
   };
@@ -623,16 +642,49 @@ export function OAuthPage() {
                   <div className={styles.cardHint}>{provider.hint}</div>
                   {state.url && (
                     <div className={styles.authUrlBox}>
+                      {state.userCode && (
+                        <>
+                          <div className={styles.authUrlLabel}>
+                            {t('auth_login.device_code_label')}
+                          </div>
+                          <div className={styles.deviceCodeValue}>{state.userCode}</div>
+                          <div className={styles.deviceCodeHint}>
+                            {t('auth_login.device_code_hint')}
+                          </div>
+                        </>
+                      )}
                       <div className={styles.authUrlLabel}>{provider.urlLabel}</div>
-                      <div className={styles.authUrlValue}>{state.url}</div>
+                      <div className={styles.authUrlValue}>
+                        {state.verificationUrl || state.url}
+                      </div>
                       <div className={styles.authUrlActions}>
-                        <Button variant="secondary" size="sm" onClick={() => copyLink(state.url!)}>
-                          {getProviderActionText(provider.id, 'copy_link')}
-                        </Button>
+                        {state.userCode ? (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => copyDeviceCode(state.userCode)}
+                          >
+                            {t('auth_login.copy_device_code')}
+                          </Button>
+                        ) : (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => copyLink(state.url!)}
+                          >
+                            {getProviderActionText(provider.id, 'copy_link')}
+                          </Button>
+                        )}
                         <Button
                           variant="secondary"
                           size="sm"
-                          onClick={() => window.open(state.url, '_blank', 'noopener,noreferrer')}
+                          onClick={() =>
+                            window.open(
+                              state.verificationUrl || state.url,
+                              '_blank',
+                              'noopener,noreferrer'
+                            )
+                          }
                         >
                           {getProviderActionText(provider.id, 'open_link')}
                         </Button>
