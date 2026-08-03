@@ -476,13 +476,16 @@ export function OAuthPage() {
     );
   };
 
-  const copyDeviceCode = async (userCode?: string) => {
-    if (!userCode) return;
-    const copied = await copyToClipboard(userCode);
-    showNotification(
-      t(copied ? 'auth_login.device_code_copied' : 'notification.copy_failed'),
-      copied ? 'success' : 'error'
-    );
+  const copyDeviceCodeAndOpen = (userCode?: string, verificationUrl?: string) => {
+    if (!userCode || !verificationUrl) return;
+    const copyResult = copyToClipboard(userCode);
+    window.open(verificationUrl, '_blank', 'noopener,noreferrer');
+    void copyResult.then((copied) => {
+      showNotification(
+        t(copied ? 'auth_login.device_code_copied' : 'notification.copy_failed'),
+        copied ? 'success' : 'error'
+      );
+    });
   };
 
   const submitCallback = async (provider: OAuthProvider) => {
@@ -662,9 +665,14 @@ export function OAuthPage() {
                           <Button
                             variant="secondary"
                             size="sm"
-                            onClick={() => copyDeviceCode(state.userCode)}
+                            onClick={() =>
+                              copyDeviceCodeAndOpen(
+                                state.userCode,
+                                state.verificationUrl || state.url
+                              )
+                            }
                           >
-                            {t('auth_login.copy_device_code')}
+                            {t('auth_login.copy_device_code_and_open')}
                           </Button>
                         ) : (
                           <Button
@@ -675,19 +683,21 @@ export function OAuthPage() {
                             {getProviderActionText(provider.id, 'copy_link')}
                           </Button>
                         )}
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          onClick={() =>
-                            window.open(
-                              state.verificationUrl || state.url,
-                              '_blank',
-                              'noopener,noreferrer'
-                            )
-                          }
-                        >
-                          {getProviderActionText(provider.id, 'open_link')}
-                        </Button>
+                        {!state.userCode && (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() =>
+                              window.open(
+                                state.verificationUrl || state.url,
+                                '_blank',
+                                'noopener,noreferrer'
+                              )
+                            }
+                          >
+                            {getProviderActionText(provider.id, 'open_link')}
+                          </Button>
+                        )}
                       </div>
                     </div>
                   )}
