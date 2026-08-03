@@ -21,6 +21,13 @@ type PolicyListResponse = {
 };
 
 export const nativeKeyPolicyApi = {
+  async isNativeAccessAvailable(): Promise<boolean> {
+    const response = await apiClient.get<{ mode?: string }>(
+      '/plugins/cpa-key-policy/status'
+    );
+    return response?.mode === 'native-access';
+  },
+
   async list(): Promise<NativeKeyPolicy[]> {
     const response = await apiClient.get<PolicyListResponse>(
       '/plugins/cpa-key-policy/policies'
