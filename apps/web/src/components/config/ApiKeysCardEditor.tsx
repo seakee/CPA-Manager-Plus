@@ -14,6 +14,7 @@ import { sha256Hex } from '@/utils/apiKeyHash';
 import { isValidApiKeyCharset } from '@/utils/validation';
 import { makeClientId } from '@/types/visualConfig';
 import styles from './VisualConfigEditor.module.scss';
+import { ApiKeyAccessPolicyModal } from './ApiKeyAccessPolicyModal';
 
 type OrphanAliasConflict = {
   apiKeyHash: string;
@@ -71,6 +72,8 @@ export const ApiKeysCardEditor = memo(function ApiKeysCardEditor({
   const [aliasInputValue, setAliasInputValue] = useState('');
   const [aliasFormError, setAliasFormError] = useState('');
   const [aliasSaving, setAliasSaving] = useState(false);
+  const [policyKeyHash, setPolicyKeyHash] = useState('');
+  const [policyKeyLabel, setPolicyKeyLabel] = useState('');
 
   const aliasByHash = useMemo(() => {
     const map = new Map<string, ApiKeyAlias>();
@@ -537,6 +540,17 @@ export const ApiKeysCardEditor = memo(function ApiKeysCardEditor({
                   <Button
                     variant="secondary"
                     size="xs"
+                    onClick={() => {
+                      setPolicyKeyHash(apiKeyHash);
+                      setPolicyKeyLabel(alias || maskApiKey(String(key || '')));
+                    }}
+                    disabled={disabled}
+                  >
+                    {t('config_management.visual.api_keys.policy_action')}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="xs"
                     onClick={() => openAliasModal(renderApiKeyIds[index] ?? '')}
                     disabled={disabled || aliasesLoading || !aliasesAvailable}
                   >
@@ -709,6 +723,16 @@ export const ApiKeysCardEditor = memo(function ApiKeysCardEditor({
           )}
         </div>
       </Modal>
+      <ApiKeyAccessPolicyModal
+        open={Boolean(policyKeyHash)}
+        keyHash={policyKeyHash}
+        keyLabel={policyKeyLabel}
+        disabled={disabled}
+        onClose={() => {
+          setPolicyKeyHash('');
+          setPolicyKeyLabel('');
+        }}
+      />
     </div>
   );
 });
