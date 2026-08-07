@@ -14,6 +14,8 @@ import { sha256Hex } from '@/utils/apiKeyHash';
 import { isValidApiKeyCharset } from '@/utils/validation';
 import { makeClientId } from '@/types/visualConfig';
 import styles from './VisualConfigEditor.module.scss';
+import { ApiKeyAccessPolicyModal } from './ApiKeyAccessPolicyModal';
+import { nativeKeyPolicyApi } from '@/services/api/nativeKeyPolicy';
 
 type OrphanAliasConflict = {
   apiKeyHash: string;
@@ -71,6 +73,9 @@ export const ApiKeysCardEditor = memo(function ApiKeysCardEditor({
   const [aliasInputValue, setAliasInputValue] = useState('');
   const [aliasFormError, setAliasFormError] = useState('');
   const [aliasSaving, setAliasSaving] = useState(false);
+  const [policyKeyHash, setPolicyKeyHash] = useState('');
+  const [policyKeyLabel, setPolicyKeyLabel] = useState('');
+  const [nativePolicyAvailable, setNativePolicyAvailable] = useState(false);
 
   const aliasByHash = useMemo(() => {
     const map = new Map<string, ApiKeyAlias>();
@@ -125,6 +130,21 @@ export const ApiKeysCardEditor = memo(function ApiKeysCardEditor({
       cancelled = true;
     };
   }, [managementKey, resolveAliasServiceBase]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void nativeKeyPolicyApi
+      .isNativeAccessAvailable()
+      .then((available) => {
+        if (!cancelled) setNativePolicyAvailable(available);
+      })
+      .catch(() => {
+        if (!cancelled) setNativePolicyAvailable(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   function generateSecureApiKey(): string {
     const charset = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -534,6 +554,19 @@ export const ApiKeysCardEditor = memo(function ApiKeysCardEditor({
                   <div className="item-subtitle">{maskApiKey(String(key || ''))}</div>
                 </div>
                 <div className="item-actions">
+                  {nativePolicyAvailable ? (
+                    <Button
+                      variant="secondary"
+                      size="xs"
+                      onClick={() => {
+                        setPolicyKeyHash(apiKeyHash);
+                        setPolicyKeyLabel(alias || maskApiKey(String(key || '')));
+                      }}
+                      disabled={disabled}
+                    >
+                      {t('config_management.visual.api_keys.policy_action')}
+                    </Button>
+                  ) : null}
                   <Button
                     variant="secondary"
                     size="xs"
@@ -709,6 +742,16 @@ export const ApiKeysCardEditor = memo(function ApiKeysCardEditor({
           )}
         </div>
       </Modal>
+      <ApiKeyAccessPolicyModal
+        open={Boolean(policyKeyHash)}
+        keyHash={policyKeyHash}
+        keyLabel={policyKeyLabel}
+        disabled={disabled}
+        onClose={() => {
+          setPolicyKeyHash('');
+          setPolicyKeyLabel('');
+        }}
+      />
     </div>
   );
 });
