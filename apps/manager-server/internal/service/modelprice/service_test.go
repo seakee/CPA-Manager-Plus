@@ -1276,3 +1276,53 @@ func closePrice(left float64, right float64) bool {
 	}
 	return right-left < 0.0000001
 }
+
+func TestFilterSelectionFeedbackDropsPricedModels(t *testing.T) {
+	selection := priceSelectionResult{
+		Prices:  map[string]store.ModelPrice{},
+		Matched: map[string]store.ModelPrice{},
+		Candidates: []SyncCandidateSet{
+			{
+				Model: "priced-ambiguous",
+				Candidates: []SyncCandidate{
+					{SourceModelID: "vendor/priced-ambiguous", Score: 0.9, Price: store.ModelPrice{Prompt: 1, Completion: 2}},
+				},
+			},
+			{
+				Model: "unpriced-ambiguous",
+				Candidates: []SyncCandidate{
+					{SourceModelID: "vendor/unpriced-ambiguous", Score: 0.9, Price: store.ModelPrice{Prompt: 3, Completion: 4}},
+				},
+			},
+		},
+		Unmatched: []string{"priced-unmatched", "unpriced-unmatched"},
+	}
+	stored := map[string]store.ModelPrice{
+		"priced-ambiguous": {Prompt: 5, Completion: 6},
+		"priced-unmatched": {Prompt: 7, Completion: 8},
+	}
+
+	filtered := filterSelectionFeedback(selection, stored)
+
+	if len(filtered.Candidates) != 1 || filtered.Candidates[0].Model != "unpriced-ambiguous" {
+		t.Fatalf("candidates = %#v", filtered.Candidates)
+	}
+	if len(filtered.Unmatched) != 1 || filtered.Unmatched[0] != "unpriced-unmatched" {
+		t.Fatalf("unmatched = %#v", filtered.Unmatched)
+	}
+}
+
+func TestFilterSelectionFeedbackKeepsEverythingWithoutStoredPrices(t *testing.T) {
+	selection := priceSelectionResult{
+		Candidates: []SyncCandidateSet{
+			{Model: "unpriced-ambiguous", Candidates: []SyncCandidate{{SourceModelID: "vendor/x", Score: 0.9}}},
+		},
+		Unmatched: []string{"unpriced-unmatched"},
+	}
+
+	filtered := filterSelectionFeedback(selection, nil)
+
+	if len(filtered.Candidates) != 1 || len(filtered.Unmatched) != 1 {
+		t.Fatalf("filtered = %#v", filtered)
+	}
+}
