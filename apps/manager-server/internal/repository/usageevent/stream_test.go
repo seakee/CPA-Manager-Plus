@@ -167,6 +167,49 @@ func TestValidatedMetadataJSONRequiresJSONObject(t *testing.T) {
 	}
 }
 
+func TestWriteCompatibleUsageCrossesBatchBoundary(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repo := New(db)
+
+	events := make([]usage.Event, 0, usageExportBatchSize+3)
+	for index := 1; index <= usageExportBatchSize+3; index++ {
+		endpoint := "POST /v1/responses"
+		model := "gpt-batch"
+		if index%2 == 0 {
+			endpoint = "GET /v1/models"
+			model = "gpt-batch-a"
+		}
+		events = append(events, streamTestEvent(fmt.Sprintf("batch-%03d", index), int64(index), endpoint, model))
+	}
+	if _, err := repo.InsertBatch(context.Background(), events); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	recent, err := repo.ListRecent(context.Background(), usageExportBatchSize+3)
+	if err != nil {
+		t.Fatalf("list recent: %v", err)
+	}
+	expected := usage.BuildPayload(recent)
+	var output bytes.Buffer
+	if err := repo.WriteCompatibleUsage(context.Background(), &output, usageExportBatchSize+3); err != nil {
+		t.Fatalf("write compatible usage: %v", err)
+	}
+	if !json.Valid(output.Bytes()) {
+		t.Fatalf("invalid JSON: %s", output.String())
+	}
+	var actual usage.Payload
+	if err := json.Unmarshal(output.Bytes(), &actual); err != nil {
+		t.Fatalf("decode compatible usage: %v", err)
+	}
+	if !reflect.DeepEqual(actual, expected) {
+		t.Fatalf("batched payload mismatch\nactual: %#v\nexpected: %#v", actual, expected)
+	}
+}
+
 func streamTestEvent(hash string, timestampMS int64, endpoint, model string) usage.Event {
 	return usage.Event{
 		EventHash:    hash,
