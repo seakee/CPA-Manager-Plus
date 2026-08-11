@@ -1359,6 +1359,19 @@ export function AuthFilesPage() {
     await loadCodexInspectionSnapshots();
     if (!target?.fileName) return;
 
+    if (managerServiceBase) {
+      try {
+        await usageServiceApi.resolveAccountActionCandidatesByAuthFile(
+          managerServiceBase,
+          managementKey,
+          target.fileName
+        );
+      } catch {
+        // Best-effort cleanup; the 60s candidate poll stays as a fallback.
+      }
+      await loadAccountActionCandidates();
+    }
+
     const targetKey = getAuthFileCodexInspectionKeyForIdentity({
       fileName: target.fileName,
       runtimeId: target.runtimeId,
@@ -1373,7 +1386,14 @@ export function AuthFilesPage() {
         return itemKey !== targetKey || !isStaleCodexReauthSnapshot(item);
       })
     );
-  }, [codexReauthTarget, loadCodexInspectionSnapshots, loadFiles]);
+  }, [
+    codexReauthTarget,
+    loadAccountActionCandidates,
+    loadCodexInspectionSnapshots,
+    loadFiles,
+    managementKey,
+    managerServiceBase,
+  ]);
 
   const openExcludedEditor = useCallback(
     (provider?: string) => {

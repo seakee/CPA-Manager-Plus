@@ -1,6 +1,7 @@
 package accountaction
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -24,6 +25,11 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimRight(r.URL.Path, "/")
 	if path == "/v0/management/account-action-candidates" {
 		h.handleList(w, r)
+		return
+	}
+
+	if path == "/v0/management/account-action-candidates/resolve-reauth-by-auth-file" {
+		h.handleResolveReauthByAuthFile(w, r)
 		return
 	}
 
@@ -94,6 +100,30 @@ func (h *Handler) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.JSON(w, http.StatusOK, result)
+}
+
+func (h *Handler) handleResolveReauthByAuthFile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		response.MethodNotAllowed(w)
+		return
+	}
+	var body struct {
+		FileName string `json:"fileName"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		response.Error(w, http.StatusBadRequest, errors.New("invalid body"))
+		return
+	}
+	if strings.TrimSpace(body.FileName) == "" {
+		response.Error(w, http.StatusBadRequest, errors.New("auth file name is required"))
+		return
+	}
+	resolved, err := h.App.AccountActionService.ResolveReauthByAuthFileName(r.Context(), body.FileName)
+	if err != nil {
+		response.Error(w, http.StatusInternalServerError, err)
+		return
+	}
+	response.JSON(w, http.StatusOK, map[string]any{"resolved": resolved})
 }
 
 func (h *Handler) writeCandidateResult(w http.ResponseWriter, item any, err error) {

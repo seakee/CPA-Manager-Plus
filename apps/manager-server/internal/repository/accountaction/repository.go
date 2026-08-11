@@ -19,6 +19,7 @@ type Repository interface {
 	Get(ctx context.Context, id int64) (model.AccountActionCandidate, bool, error)
 	UpdateStatus(ctx context.Context, id int64, status string) (model.AccountActionCandidate, error)
 	UpdatePendingStatus(ctx context.Context, id int64, status string) (model.AccountActionCandidate, error)
+	ResolvePendingReauthByAuthFileName(ctx context.Context, authFileName string) (int64, error)
 	RecordFailure(ctx context.Context, id int64, reason string) error
 	MarkAutoDisabled(ctx context.Context, id int64, disabledAtMS int64) error
 }
@@ -329,6 +330,21 @@ func (r *repository) updateStatus(ctx context.Context, id int64, status string, 
 		return model.AccountActionCandidate{}, sql.ErrNoRows
 	}
 	return r.mustGet(ctx, id)
+}
+
+func (r *repository) ResolvePendingReauthByAuthFileName(ctx context.Context, authFileName string) (int64, error) {
+	authFileName = strings.TrimSpace(authFileName)
+	if authFileName == "" {
+		return 0, errors.New("auth file name is required")
+	}
+	res, err := r.db.ExecContext(ctx, `update account_action_candidates set status = ?, last_error = null, updated_at_ms = ?
+		where status = ? and action_type = ? and auth_file_name = ?`,
+		model.AccountActionStatusResolved, time.Now().UnixMilli(),
+		model.AccountActionStatusPending, model.AccountActionTypeReauth, authFileName)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 func (r *repository) RecordFailure(ctx context.Context, id int64, reason string) error {

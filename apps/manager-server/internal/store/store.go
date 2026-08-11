@@ -289,6 +289,10 @@ func (s *Store) UpdatePendingAccountActionCandidateStatus(ctx context.Context, i
 	return s.AccountActions.UpdatePendingStatus(ctx, id, status)
 }
 
+func (s *Store) ResolvePendingReauthAccountActionCandidatesByAuthFileName(ctx context.Context, authFileName string) (int64, error) {
+	return s.AccountActions.ResolvePendingReauthByAuthFileName(ctx, authFileName)
+}
+
 func (s *Store) RecordAccountActionCandidateFailure(ctx context.Context, id int64, reason string) error {
 	return s.AccountActions.RecordFailure(ctx, id, reason)
 }

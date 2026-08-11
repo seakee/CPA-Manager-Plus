@@ -91,6 +91,12 @@ func (s *Service) Resolve(ctx context.Context, id int64) (model.AccountActionCan
 	return s.updatePendingStatus(ctx, id, model.AccountActionStatusResolved)
 }
 
+// ResolveReauthByAuthFileName marks all pending reauth candidates for an auth
+// file as resolved, e.g. after the user re-authenticates that credential.
+func (s *Service) ResolveReauthByAuthFileName(ctx context.Context, authFileName string) (int64, error) {
+	return s.store.ResolvePendingReauthAccountActionCandidatesByAuthFileName(ctx, strings.TrimSpace(authFileName))
+}
+
 func (s *Service) Enable(ctx context.Context, id int64) (model.AccountActionCandidate, error) {
 	unlock := s.lockCandidateAction(id)
 	defer unlock()

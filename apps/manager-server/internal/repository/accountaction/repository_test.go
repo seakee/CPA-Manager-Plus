@@ -283,3 +283,68 @@ func TestUpsertUpgradesFallbackIdentityWhenStableLocatorAppears(t *testing.T) {
 		t.Fatalf("upgraded candidate = %#v, first = %#v", upgraded, first)
 	}
 }
+
+func TestResolvePendingReauthByAuthFileName(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewStore(t, testutil.NewConfig(t))
+	repo := st.AccountActions
+
+	upsert := func(actionType, fileName, reasonCode string) model.AccountActionCandidate {
+		t.Helper()
+		item, err := repo.Upsert(ctx, model.AccountActionCandidateUpsert{
+			ActionType:   actionType,
+			Provider:     "codex",
+			AuthFileName: fileName,
+			ReasonCode:   reasonCode,
+			Reason:       "test",
+			SeenAtMS:     1000,
+		})
+		if err != nil {
+			t.Fatalf("upsert %s/%s: %v", actionType, fileName, err)
+		}
+		return item
+	}
+
+	targetA := upsert(model.AccountActionTypeReauth, "codex-a.json", "token_revoked")
+	targetB := upsert(model.AccountActionTypeReauth, "codex-a.json", "auth_expired")
+	otherFile := upsert(model.AccountActionTypeReauth, "codex-b.json", "token_revoked")
+	otherAction := upsert(model.AccountActionTypeReview, "codex-a.json", "rate_limited")
+
+	resolved, err := repo.ResolvePendingReauthByAuthFileName(ctx, "codex-a.json")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if resolved != 2 {
+		t.Fatalf("resolved = %d, want 2", resolved)
+	}
+
+	for _, item := range []model.AccountActionCandidate{targetA, targetB} {
+		current, ok, err := repo.Get(ctx, item.ID)
+		if err != nil || !ok {
+			t.Fatalf("get candidate %d: ok=%v err=%v", item.ID, ok, err)
+		}
+		if current.Status != model.AccountActionStatusResolved {
+			t.Fatalf("candidate %d status = %q, want resolved", item.ID, current.Status)
+		}
+	}
+	otherFileCurrent, ok, err := repo.Get(ctx, otherFile.ID)
+	if err != nil || !ok || otherFileCurrent.Status != model.AccountActionStatusPending {
+		t.Fatalf("other file candidate = %#v ok=%v err=%v, want still pending", otherFileCurrent, ok, err)
+	}
+	otherActionCurrent, ok, err := repo.Get(ctx, otherAction.ID)
+	if err != nil || !ok || otherActionCurrent.Status != model.AccountActionStatusPending {
+		t.Fatalf("other action candidate = %#v ok=%v err=%v, want still pending", otherActionCurrent, ok, err)
+	}
+
+	again, err := repo.ResolvePendingReauthByAuthFileName(ctx, "codex-a.json")
+	if err != nil {
+		t.Fatalf("resolve again: %v", err)
+	}
+	if again != 0 {
+		t.Fatalf("second resolve affected = %d, want 0", again)
+	}
+
+	if _, err := repo.ResolvePendingReauthByAuthFileName(ctx, "  "); err == nil {
+		t.Fatal("empty auth file name should error")
+	}
+}

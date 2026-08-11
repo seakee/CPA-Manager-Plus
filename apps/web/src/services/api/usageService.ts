@@ -3046,6 +3046,31 @@ export const usageServiceApi = {
     });
   },
 
+  resolveAccountActionCandidatesByAuthFile: async (
+    base: string,
+    managementKey: string | undefined,
+    fileName: string
+  ): Promise<{ resolved: number }> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return { resolved: 0 };
+    }
+
+    return withUsageServiceError(async () => {
+      const response = await axios.post<{ resolved: number }>(
+        buildUrl(
+          base,
+          '/v0/management/account-action-candidates/resolve-reauth-by-auth-file'
+        ),
+        { fileName },
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+        }
+      );
+      return response.data;
+    });
+  },
+
   enableAccountActionCandidate: async (
     base: string,
     managementKey: string | undefined,
