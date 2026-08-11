@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -52,6 +53,24 @@ type rawMetadataEvent struct {
 	ResponseMetadata json.RawMessage `json:"response_metadata,omitempty"`
 }
 
+type compatibleExportRow struct {
+	id          int64
+	timestampMS int64
+	endpoint    string
+	model       string
+	detail      rawMetadataDetail
+}
+
+type compatibleStreamState struct {
+	currentEndpoint string
+	currentModel    string
+	endpointOpen    bool
+	modelOpen       bool
+	firstEndpoint   bool
+	firstModel      bool
+	firstDetail     bool
+}
+
 func (r *repository) WriteCompatibleUsage(ctx context.Context, writer io.Writer, limit int) error {
 	limit = normalizeUsageStreamLimit(limit)
 	snapshot, err := r.captureUsageSnapshot(ctx, limit)
@@ -74,7 +93,68 @@ func (r *repository) WriteCompatibleUsage(ctx context.Context, writer io.Writer,
 		return buffer.Flush()
 	}
 
-	rows, err := r.db.QueryContext(ctx, `select
+	ids, err := r.compatibleSnapshotIDs(ctx, snapshot)
+	if err != nil {
+		return err
+	}
+	rows := make([]compatibleExportRow, 0, len(ids))
+	for start := 0; start < len(ids); start += usageExportBatchSize {
+		end := start + usageExportBatchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batch, err := r.compatibleDetailBatch(ctx, ids[start:end])
+		if err != nil {
+			return err
+		}
+		rows = append(rows, batch...)
+	}
+	sortCompatibleRows(rows)
+
+	state := &compatibleStreamState{firstEndpoint: true, firstModel: true, firstDetail: true}
+	if err := writeCompatibleRows(buffer, rows, state); err != nil {
+		return err
+	}
+	if err := finishCompatibleUsage(buffer, state); err != nil {
+		return err
+	}
+	return buffer.Flush()
+}
+
+func (r *repository) compatibleSnapshotIDs(ctx context.Context, snapshot usageSnapshot) ([]int64, error) {
+	rows, err := r.db.QueryContext(ctx, `select id
+	from usage_events
+	where id <= ? and (
+		timestamp_ms > ? or (timestamp_ms = ? and id >= ?)
+	)
+	order by timestamp_ms desc, id desc`,
+		snapshot.maxID,
+		snapshot.cutoffTimestampMS,
+		snapshot.cutoffTimestampMS,
+		snapshot.cutoffID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	ids := make([]int64, 0)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+func (r *repository) compatibleDetailBatch(ctx context.Context, ids []int64) ([]compatibleExportRow, error) {
+	placeholders := strings.Repeat("?,", len(ids)-1) + "?"
+	query := `select id, timestamp_ms,
 		coalesce(nullif(endpoint, ''), '-') as group_endpoint,
 		coalesce(nullif(model, ''), '-') as group_model,
 		timestamp,
@@ -109,118 +189,147 @@ func (r *repository) WriteCompatibleUsage(ctx context.Context, writer io.Writer,
 		coalesce(fail_summary, ''),
 		coalesce(response_metadata_json, '')
 	from usage_events
-	where id <= ? and (
-		timestamp_ms > ? or (timestamp_ms = ? and id >= ?)
-	)
-	order by group_endpoint asc, group_model asc, timestamp_ms desc, id desc`,
-		snapshot.maxID,
-		snapshot.cutoffTimestampMS,
-		snapshot.cutoffTimestampMS,
-		snapshot.cutoffID,
-	)
+	where id in (` + placeholders + `)
+	order by timestamp_ms desc, id desc`
+	args := make([]any, len(ids))
+	for index, id := range ids {
+		args[index] = id
+	}
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer rows.Close()
 
-	var currentEndpoint string
-	var currentModel string
-	endpointOpen := false
-	modelOpen := false
-	firstEndpoint := true
-	firstModel := true
-	firstDetail := true
-
+	byID := make(map[int64]compatibleExportRow, len(ids))
 	for rows.Next() {
-		endpoint, modelName, detail, err := scanCompatibleDetail(rows)
+		id, timestampMS, endpoint, modelName, detail, err := scanCompatibleDetail(rows)
 		if err != nil {
-			return err
+			return nil, err
 		}
+		byID[id] = compatibleExportRow{
+			id:          id,
+			timestampMS: timestampMS,
+			endpoint:    endpoint,
+			model:       modelName,
+			detail:      detail,
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
-		if !endpointOpen || endpoint != currentEndpoint {
-			if modelOpen {
+	ordered := make([]compatibleExportRow, 0, len(ids))
+	for _, id := range ids {
+		row, ok := byID[id]
+		if !ok {
+			return nil, errors.New("usage event id missing from detail batch: " + strconv.FormatInt(id, 10))
+		}
+		ordered = append(ordered, row)
+	}
+	return ordered, nil
+}
+
+func sortCompatibleRows(rows []compatibleExportRow) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].endpoint != rows[j].endpoint {
+			return rows[i].endpoint < rows[j].endpoint
+		}
+		if rows[i].model != rows[j].model {
+			return rows[i].model < rows[j].model
+		}
+		if rows[i].timestampMS != rows[j].timestampMS {
+			return rows[i].timestampMS > rows[j].timestampMS
+		}
+		return rows[i].id > rows[j].id
+	})
+}
+
+func writeCompatibleRows(buffer *bufio.Writer, rows []compatibleExportRow, state *compatibleStreamState) error {
+	for _, row := range rows {
+		if !state.endpointOpen || row.endpoint != state.currentEndpoint {
+			if state.modelOpen {
 				if _, err := io.WriteString(buffer, "]}"); err != nil {
 					return err
 				}
-				modelOpen = false
+				state.modelOpen = false
 			}
-			if endpointOpen {
+			if state.endpointOpen {
 				if _, err := io.WriteString(buffer, "}}"); err != nil {
 					return err
 				}
 			}
-			if !firstEndpoint {
+			if !state.firstEndpoint {
 				if err := buffer.WriteByte(','); err != nil {
 					return err
 				}
 			}
-			if err := writeJSONString(buffer, endpoint); err != nil {
+			if err := writeJSONString(buffer, row.endpoint); err != nil {
 				return err
 			}
 			if _, err := io.WriteString(buffer, `:{"models":{`); err != nil {
 				return err
 			}
-			currentEndpoint = endpoint
-			currentModel = ""
-			endpointOpen = true
-			firstEndpoint = false
-			firstModel = true
+			state.currentEndpoint = row.endpoint
+			state.currentModel = ""
+			state.endpointOpen = true
+			state.firstEndpoint = false
+			state.firstModel = true
 		}
 
-		if !modelOpen || modelName != currentModel {
-			if modelOpen {
+		if !state.modelOpen || row.model != state.currentModel {
+			if state.modelOpen {
 				if _, err := io.WriteString(buffer, "]}"); err != nil {
 					return err
 				}
 			}
-			if !firstModel {
+			if !state.firstModel {
 				if err := buffer.WriteByte(','); err != nil {
 					return err
 				}
 			}
-			if err := writeJSONString(buffer, modelName); err != nil {
+			if err := writeJSONString(buffer, row.model); err != nil {
 				return err
 			}
 			if _, err := io.WriteString(buffer, `:{"details":[`); err != nil {
 				return err
 			}
-			currentModel = modelName
-			modelOpen = true
-			firstModel = false
-			firstDetail = true
+			state.currentModel = row.model
+			state.modelOpen = true
+			state.firstModel = false
+			state.firstDetail = true
 		}
 
-		if !firstDetail {
+		if !state.firstDetail {
 			if err := buffer.WriteByte(','); err != nil {
 				return err
 			}
 		}
-		encoded, err := json.Marshal(detail)
+		encoded, err := json.Marshal(row.detail)
 		if err != nil {
 			return err
 		}
 		if _, err := buffer.Write(encoded); err != nil {
 			return err
 		}
-		firstDetail = false
+		state.firstDetail = false
 	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	if modelOpen {
+	return nil
+}
+
+func finishCompatibleUsage(buffer *bufio.Writer, state *compatibleStreamState) error {
+	if state.modelOpen {
 		if _, err := io.WriteString(buffer, "]}"); err != nil {
 			return err
 		}
 	}
-	if endpointOpen {
+	if state.endpointOpen {
 		if _, err := io.WriteString(buffer, "}}"); err != nil {
 			return err
 		}
 	}
-	if _, err := io.WriteString(buffer, "}}\n"); err != nil {
-		return err
-	}
-	return buffer.Flush()
+	_, err := io.WriteString(buffer, "}}\n")
+	return err
 }
 
 func (r *repository) WriteExportJSONL(ctx context.Context, writer io.Writer, limit int) error {
@@ -376,7 +485,9 @@ func (r *repository) exportBatch(ctx context.Context, snapshot usageSnapshot, cu
 	return batch, nil
 }
 
-func scanCompatibleDetail(rows *sql.Rows) (string, string, rawMetadataDetail, error) {
+func scanCompatibleDetail(rows *sql.Rows) (int64, int64, string, string, rawMetadataDetail, error) {
+	var id int64
+	var timestampMS int64
 	var endpoint string
 	var modelName string
 	var detail usage.Detail
@@ -390,6 +501,8 @@ func scanCompatibleDetail(rows *sql.Rows) (string, string, rawMetadataDetail, er
 	var cacheTokens int64
 
 	err := rows.Scan(
+		&id,
+		&timestampMS,
 		&endpoint,
 		&modelName,
 		&detail.Timestamp,
@@ -425,7 +538,7 @@ func scanCompatibleDetail(rows *sql.Rows) (string, string, rawMetadataDetail, er
 		&responseMetadataJSON,
 	)
 	if err != nil {
-		return "", "", rawMetadataDetail{}, err
+		return 0, 0, "", "", rawMetadataDetail{}, err
 	}
 	if authSnapshotAt.Valid {
 		detail.AuthSnapshotAtMS = authSnapshotAt.Int64
@@ -450,7 +563,7 @@ func scanCompatibleDetail(rows *sql.Rows) (string, string, rawMetadataDetail, er
 	)
 	detail.Tokens.CachedTokens = compatibleCachedTokens
 	detail.Tokens.CacheTokens = compatibleCachedTokens
-	return endpoint, modelName, rawMetadataDetail{
+	return id, timestampMS, endpoint, modelName, rawMetadataDetail{
 		Detail:           detail,
 		ResponseMetadata: validatedMetadataJSON(responseMetadataJSON),
 	}, nil

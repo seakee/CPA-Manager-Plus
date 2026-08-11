@@ -66,6 +66,145 @@ func TestWriteCompatibleUsageMatchesBuildPayload(t *testing.T) {
 	}
 }
 
+func TestWriteCompatibleUsageMatchesBuildPayloadAcrossBatchBoundary(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repo := &repository{db: db}
+
+	total := usageExportBatchSize + 3
+	events := make([]usage.Event, 0, total)
+	for index := 1; index <= total; index++ {
+		events = append(events, streamTestEvent(fmt.Sprintf("batch-%03d", index), int64(index), "POST /v1/responses", "gpt-test"))
+	}
+	if _, err := repo.InsertBatch(context.Background(), events); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	recent, err := repo.ListRecent(context.Background(), total)
+	if err != nil {
+		t.Fatalf("list recent: %v", err)
+	}
+	expected := usage.BuildPayload(recent)
+	var output bytes.Buffer
+	if err := repo.WriteCompatibleUsage(context.Background(), &output, total); err != nil {
+		t.Fatalf("write compatible usage: %v", err)
+	}
+	if !json.Valid(output.Bytes()) {
+		t.Fatalf("invalid JSON: %s", output.String())
+	}
+	var actual usage.Payload
+	if err := json.Unmarshal(output.Bytes(), &actual); err != nil {
+		t.Fatalf("decode compatible usage: %v", err)
+	}
+	if !reflect.DeepEqual(actual, expected) {
+		t.Fatalf("streamed payload mismatch\nactual: %#v\nexpected: %#v", actual, expected)
+	}
+}
+
+func TestCompatibleDetailBatchPreservesSnapshotIDOrderWithNonContiguousIDs(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repo := &repository{db: db}
+
+	total := usageExportBatchSize + 3
+	events := make([]usage.Event, 0, total)
+	for index := 1; index <= total; index++ {
+		events = append(events, streamTestEvent(fmt.Sprintf("noncontig-%03d", index), int64(index), "POST /v1/responses", "gpt-test"))
+	}
+	if _, err := repo.InsertBatch(context.Background(), events); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `delete from usage_events where id = 3`); err != nil {
+		t.Fatalf("delete event: %v", err)
+	}
+
+	snapshot, err := repo.captureUsageSnapshot(context.Background(), total)
+	if err != nil {
+		t.Fatalf("capture snapshot: %v", err)
+	}
+	ids, err := repo.compatibleSnapshotIDs(context.Background(), snapshot)
+	if err != nil {
+		t.Fatalf("snapshot ids: %v", err)
+	}
+	if len(ids) != total-1 {
+		t.Fatalf("snapshot id count = %d, want %d", len(ids), total-1)
+	}
+	for _, id := range ids {
+		if id == 3 {
+			t.Fatalf("snapshot ids include deleted id 3: %v", ids)
+		}
+	}
+	for index := 1; index < len(ids); index++ {
+		if ids[index] >= ids[index-1] {
+			t.Fatalf("snapshot ids not descending: %v", ids)
+		}
+	}
+
+	rows, err := repo.compatibleDetailBatch(context.Background(), ids)
+	if err != nil {
+		t.Fatalf("detail batch: %v", err)
+	}
+	if len(rows) != len(ids) {
+		t.Fatalf("detail row count = %d, want %d", len(rows), len(ids))
+	}
+	for index, row := range rows {
+		if row.id != ids[index] {
+			t.Fatalf("detail row %d id = %d, want %d", index, row.id, ids[index])
+		}
+	}
+}
+
+func TestCompatibleSnapshotIDsExcludeRowsInsertedAfterSnapshot(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repo := &repository{db: db}
+
+	initial := []usage.Event{
+		streamTestEvent("snapshot-1", 1, "POST /v1/responses", "gpt-test"),
+		streamTestEvent("snapshot-2", 2, "POST /v1/responses", "gpt-test"),
+		streamTestEvent("snapshot-3", 3, "POST /v1/responses", "gpt-test"),
+		streamTestEvent("snapshot-4", 4, "POST /v1/responses", "gpt-test"),
+		streamTestEvent("snapshot-5", 5, "POST /v1/responses", "gpt-test"),
+	}
+	if _, err := repo.InsertBatch(context.Background(), initial); err != nil {
+		t.Fatalf("insert initial events: %v", err)
+	}
+	snapshot, err := repo.captureUsageSnapshot(context.Background(), len(initial))
+	if err != nil {
+		t.Fatalf("capture snapshot: %v", err)
+	}
+
+	extra := []usage.Event{
+		streamTestEvent("snapshot-after-1", 6, "POST /v1/responses", "gpt-test"),
+		streamTestEvent("snapshot-after-2", 7, "POST /v1/responses", "gpt-test"),
+	}
+	if _, err := repo.InsertBatch(context.Background(), extra); err != nil {
+		t.Fatalf("insert extra events: %v", err)
+	}
+
+	ids, err := repo.compatibleSnapshotIDs(context.Background(), snapshot)
+	if err != nil {
+		t.Fatalf("snapshot ids: %v", err)
+	}
+	if len(ids) != len(initial) {
+		t.Fatalf("snapshot id count = %d, want %d", len(ids), len(initial))
+	}
+	for _, id := range ids {
+		if id > snapshot.maxID {
+			t.Fatalf("snapshot ids include rows inserted after snapshot: %v", ids)
+		}
+	}
+}
+
 func TestInsertBatchSelectsServiceTierByProviderSemantics(t *testing.T) {
 	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
 	if err != nil {
