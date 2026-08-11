@@ -2125,6 +2125,8 @@
     "filter_saved": "Saved",
     "calls": "Calls",
     "source": "Source",
+    "billing_unit": "Billing unit",
+    "billing_rate": "Billing rate",
     "pricing_rules": "Pricing rules",
     "manual_clears_pricing_rules": "Saving a manual price removes {{count}} synchronized context or service-tier rule(s).",
     "needs_confirmation": "Candidate confirmation needed",

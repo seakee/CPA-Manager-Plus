@@ -249,6 +249,13 @@
   padding-right: 9px;
 }
 
+.billingFields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(140px, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
 .compactEditorActions {
   flex-wrap: nowrap;
   justify-content: flex-end;
@@ -372,6 +379,11 @@
 .sourceContent small,
 .sourcePlaceholder {
   font: inherit;
+}
+
+.billingRate {
+  color: var(--pricing-accent-strong);
+  font-weight: 700;
 }
 
 .actionsCell {

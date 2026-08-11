@@ -2907,6 +2907,14 @@ func TestEnsureModelPriceColumnsPreservesLegacyZeroBasePrices(t *testing.T) {
 	if promptConfigured != 1 || completionConfigured != 1 || cacheReadConfigured != 0 || cacheCreationConfigured != 0 {
 		t.Fatalf("configured flags = %d/%d/%d/%d", promptConfigured, completionConfigured, cacheReadConfigured, cacheCreationConfigured)
 	}
+	var billingUnit, billingRate sql.NullString
+	if err := db.QueryRow(`select billing_unit, billing_rate
+    from model_prices where model = 'gpt-5.6-sol'`).Scan(&billingUnit, &billingRate); err != nil {
+		t.Fatalf("read migrated billing metadata: %v", err)
+	}
+	if billingUnit.Valid || billingRate.Valid {
+		t.Fatalf("billing metadata unexpectedly populated: %q / %q", billingUnit.String, billingRate.String)
+	}
 }
 
 func TestMigrateCreatesModelPriceServiceTierTableWithCascade(t *testing.T) {

@@ -622,6 +622,8 @@ func Migrate(db *sql.DB) error {
 			cache_creation_configured integer not null default 0,
 			source text,
 			source_model_id text,
+			billing_unit text,
+			billing_rate text,
 			raw_json text,
 			updated_at_ms integer not null,
 			synced_at_ms integer
@@ -2732,6 +2734,8 @@ func ensureModelPriceColumns(db *sql.DB) error {
 		{name: "completion_configured", definition: "integer not null default 0"},
 		{name: "cache_read_configured", definition: "integer not null default 0"},
 		{name: "cache_creation_configured", definition: "integer not null default 0"},
+		{name: "billing_unit", definition: "text"},
+		{name: "billing_rate", definition: "text"},
 	}
 	added := map[string]bool{}
 	for _, column := range columns {

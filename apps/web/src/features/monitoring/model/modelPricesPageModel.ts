@@ -14,6 +14,8 @@ export type PriceDraft = {
   cache: string;
   cacheRead: string;
   cacheCreation: string;
+  billingUnit: string;
+  billingRate: string;
 };
 
 export type ModelPriceRow = {
@@ -45,6 +47,8 @@ export const createEmptyPriceDraft = (): PriceDraft => ({
   cache: '',
   cacheRead: '',
   cacheCreation: '',
+  billingUnit: '',
+  billingRate: '',
 });
 
 const createConfiguredDraftValue = (value: number | undefined, configured?: boolean): string =>
@@ -59,6 +63,8 @@ export const createPriceDraft = (model: string, price?: ModelPrice): PriceDraft 
   cacheCreation: price
     ? createConfiguredDraftValue(price.cacheCreation, price.cacheCreationConfigured)
     : '',
+  billingUnit: price?.billingUnit ?? '',
+  billingRate: price?.billingRate ?? '',
 });
 
 export const parsePriceValue = (value: string) => {
@@ -72,6 +78,8 @@ export const buildPriceFromDraft = (draft: PriceDraft): ModelPrice | null => {
   const prompt = parsePriceValue(draft.prompt);
   const completion = parsePriceValue(draft.completion);
   const cache = draft.cache.trim() === '' ? prompt : parsePriceValue(draft.cache);
+  const billingUnit = draft.billingUnit.trim();
+  const billingRate = draft.billingRate.trim();
   return {
     prompt,
     completion,
@@ -83,6 +91,8 @@ export const buildPriceFromDraft = (draft: PriceDraft): ModelPrice | null => {
     cacheReadConfigured: draft.cacheRead.trim() !== '',
     cacheCreationConfigured: draft.cacheCreation.trim() !== '',
     source: 'manual',
+    ...(billingUnit ? { billingUnit } : {}),
+    ...(billingRate ? { billingRate } : {}),
     contextTiers: [],
     serviceTiers: [],
   };

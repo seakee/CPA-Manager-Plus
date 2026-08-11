@@ -352,6 +352,22 @@ export function ModelPricesPage() {
                 placeholder={t('model_prices.optional_price_placeholder')}
                 step="0.0001"
               />
+              <div className={styles.billingFields}>
+                <Input
+                  label={t('model_prices.billing_unit')}
+                  className={styles.compactInput}
+                  value={draft.billingUnit}
+                  onChange={(event) => setDraftField('billingUnit', event.target.value)}
+                  placeholder="image"
+                />
+                <Input
+                  label={t('model_prices.billing_rate')}
+                  className={styles.compactInput}
+                  value={draft.billingRate}
+                  onChange={(event) => setDraftField('billingRate', event.target.value)}
+                  placeholder="$0.02/image"
+                />
+              </div>
             </div>
             <div className={styles.compactEditorActions}>
               <Button
@@ -493,6 +509,15 @@ export function ModelPricesPage() {
                             </span>
                             {row.price.sourceModelId ? (
                               <small>{row.price.sourceModelId}</small>
+                            ) : null}
+                            {row.price.billingRate ? (
+                              <small className={styles.billingRate}>
+                                {row.price.billingRate}
+                              </small>
+                            ) : row.price.billingUnit ? (
+                              <small className={styles.billingRate}>
+                                {row.price.billingUnit}
+                              </small>
                             ) : null}
                           </div>
                         ) : selectedCandidate ? (

@@ -2125,6 +2125,8 @@
     "filter_saved": "已儲存",
     "calls": "呼叫",
     "source": "來源",
+    "billing_unit": "計費單位",
+    "billing_rate": "計費單價",
     "pricing_rules": "計費規則",
     "manual_clears_pricing_rules": "儲存手動價格將移除 {{count}} 條已同步的上下文或服務層級規則。",
     "needs_confirmation": "需要確認價格",
