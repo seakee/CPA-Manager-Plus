@@ -173,14 +173,42 @@ $table-columns: 92px minmax(132px, 0.72fr) minmax(180px, 1fr) 96px 72px minmax(2
 }
 
 .cellUrl {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
   font-size: 12px;
   color: var(--text-secondary);
-  @include text-ellipsis;
 
   @include provider-card-layout {
     grid-area: url;
     white-space: normal;
     overflow-wrap: anywhere;
+  }
+}
+
+.urlText {
+  min-width: 0;
+  @include text-ellipsis;
+
+  @include provider-card-layout {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
+
+.urlLink {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  color: var(--text-secondary);
+  border-radius: $radius-sm;
+  transition: color $transition-fast, background $transition-fast;
+
+  &:hover {
+    color: var(--text-primary);
+    background: var(--surface-subtle);
   }
 }
 

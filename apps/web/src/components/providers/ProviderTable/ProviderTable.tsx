@@ -12,6 +12,7 @@ import { Button } from '@/components/ui/Button';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import {
   IconCheck,
+  IconExternalLink,
   IconEye,
   IconPencil,
   IconTrash2,
@@ -19,6 +20,7 @@ import {
 } from '@/components/ui/icons';
 import { ProviderStatusBar } from '../ProviderStatusBar';
 import { getProviderKindIcon, PROVIDER_KIND_LABELS } from './kindMeta';
+import { resolveProviderHomepage } from './homepage';
 import type { ProviderRow } from './rowData';
 import styles from './ProviderTable.module.scss';
 
@@ -211,6 +213,7 @@ export function ProviderTable({
 
       {rows.map((row) => {
         const kindLabel = PROVIDER_KIND_LABELS[row.kind];
+        const homepageUrl = resolveProviderHomepage(row.baseUrl);
         return (
           <div
             key={row.key}
@@ -252,7 +255,26 @@ export function ProviderTable({
             </div>
 
             <div className={styles.cellUrl} role="cell" title={row.baseUrl || undefined}>
-              {row.baseUrl || '—'}
+              {row.baseUrl ? (
+                <>
+                  {homepageUrl && (
+                    <a
+                      className={styles.urlLink}
+                      href={homepageUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      aria-label={t('ai_providers.open_homepage')}
+                      title={t('ai_providers.open_homepage')}
+                      onClick={stopPropagation}
+                    >
+                      <IconExternalLink size={13} />
+                    </a>
+                  )}
+                  <span className={styles.urlText}>{row.baseUrl}</span>
+                </>
+              ) : (
+                '—'
+              )}
             </div>
 
             <div className={`${styles.cellModels} ${styles.cellNumeric}`} role="cell">

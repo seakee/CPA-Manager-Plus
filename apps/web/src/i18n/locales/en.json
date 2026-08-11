@@ -724,6 +724,7 @@
     "add_config_menu_aria": "Choose a provider type to add",
     "row_actions_aria": "More actions",
     "detail_button": "Details",
+    "open_homepage": "Open homepage",
     "detail_section_headers": "Custom Headers",
     "table_empty_title": "No provider configurations",
     "table_empty_desc": "Click \"Add Configuration\" in the top-right corner to create your first one",

@@ -724,6 +724,7 @@
     "add_config_menu_aria": "選擇要新增的提供商類型",
     "row_actions_aria": "更多操作",
     "detail_button": "詳情",
+    "open_homepage": "訪問主站",
     "detail_section_headers": "自訂 Header",
     "table_empty_title": "暫無提供商設定",
     "table_empty_desc": "點擊右上角「新增設定」建立第一個設定",

@@ -378,4 +378,35 @@ describe('ProviderTable', () => {
     expect(getText(renderedRows[1])).toContain('status_bar.no_requests');
     expect(renderedRows[1].findAllByType(ProviderStatusBar)).toHaveLength(0);
   });
+
+  it('renders an external homepage link derived from the base url', () => {
+    const rows = buildProviderRows({
+      ...emptyInput,
+      codex: [{ apiKey: 'k1', baseUrl: 'https://low.example.com/v1' }],
+    });
+    const renderer = renderTable(rows);
+
+    const link = getRows(renderer)[0]
+      .findAll((node) => node.type === 'a')
+      .find((node) => node.props['aria-label'] === 'ai_providers.open_homepage');
+    expect(link).toBeTruthy();
+    expect(link?.props.href).toBe('https://low.example.com');
+    expect(link?.props.target).toBe('_blank');
+    expect(link?.props.rel).toBe('noopener noreferrer');
+  });
+
+  it('skips the homepage link when the base url is missing or malformed', () => {
+    const rows = buildProviderRows({
+      ...emptyInput,
+      codex: [
+        { apiKey: 'k2', baseUrl: '' },
+        { apiKey: 'k3', baseUrl: 'https://' },
+      ],
+    });
+    const renderer = renderTable(rows);
+
+    for (const row of getRows(renderer)) {
+      expect(row.findAll((node) => node.type === 'a')).toHaveLength(0);
+    }
+  });
 });
