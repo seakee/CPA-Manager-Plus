@@ -113,6 +113,7 @@ export type VisualConfigValues = {
   commercialMode: boolean;
   usageStatisticsEnabled: boolean;
   loggingToFile: boolean;
+  requestLog: boolean;
   logsMaxTotalSizeMb: string;
   errorLogsMaxFiles: string;
   redisUsageQueueRetentionSeconds: string;
@@ -187,6 +188,7 @@ export const DEFAULT_VISUAL_VALUES: VisualConfigValues = {
   commercialMode: false,
   usageStatisticsEnabled: false,
   loggingToFile: false,
+  requestLog: false,
   logsMaxTotalSizeMb: '',
   errorLogsMaxFiles: '',
   redisUsageQueueRetentionSeconds: '',

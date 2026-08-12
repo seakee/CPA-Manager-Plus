@@ -301,7 +301,7 @@ export function SystemPage() {
             </a>
 
             <a
-              href="https://help.router-for.me/"
+              href="https://seakee.github.io/CPA-Manager-Plus/docs/"
               target="_blank"
               rel="noopener noreferrer"
               className={styles.linkCard}

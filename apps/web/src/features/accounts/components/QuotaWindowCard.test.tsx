@@ -111,6 +111,7 @@ describe('QuotaWindowCard', () => {
     expect(forecastText).toContain('accounts.detail_forecast_requests');
     expect(forecastText).toContain('accounts.detail_forecast_tokens');
     expect(forecastText).toContain('accounts.detail_forecast_cost');
+    expect(forecastText).toContain('$200.000');
     expect(forecastText).toContain('accounts.detail_forecast_basis_quota');
     expect(forecastText).not.toContain('accounts.detail_success_rate');
     expect(
@@ -121,6 +122,7 @@ describe('QuotaWindowCard', () => {
     const previous = renderer.root.findByProps({ 'data-quota-usage-period': 'previous' });
     const previousText = readText(previous);
     expect(previousText).toContain('accounts.detail_success_rate');
+    expect(previousText).toContain('$100.000');
     expect(previousText).not.toContain('accounts.detail_used');
   });
 
@@ -128,8 +130,7 @@ describe('QuotaWindowCard', () => {
     const renderer = renderCard(makeWindow());
     const current = renderer.root.findByProps({ 'data-quota-usage-period': 'current' });
     const icons = current.findAll(
-      (node) =>
-        typeof node.props.className === 'string' && node.props.className.includes('rowIcon')
+      (node) => typeof node.props.className === 'string' && node.props.className.includes('rowIcon')
     );
 
     expect(icons).toHaveLength(4);
@@ -147,8 +148,7 @@ describe('QuotaWindowCard', () => {
     )[0];
     if (!forecast) throw new Error('forecast column not found');
     const forecastIcons = forecast.findAll(
-      (node) =>
-        typeof node.props.className === 'string' && node.props.className.includes('rowIcon')
+      (node) => typeof node.props.className === 'string' && node.props.className.includes('rowIcon')
     );
     expect(forecastIcons.map((node) => node.props.className)).toEqual([
       expect.stringContaining('rowIconBlue'),
@@ -175,6 +175,42 @@ describe('QuotaWindowCard', () => {
 
       expect(currentText).toContain(formatDisplayRange(cycleStartMs, cycleEndMs));
       expect(currentText).not.toContain(formatDisplayRange(cycleStartMs, dataEndMs));
+    }
+  });
+
+  it('shows scheduled previous-cycle bounds while retaining actual usage bounds', () => {
+    const scheduledStartMs = Date.parse('2026-08-09T00:28:00Z');
+    const scheduledEndMs = Date.parse('2026-08-16T00:28:00Z');
+    const actualEndMs = Date.parse('2026-08-11T00:00:00Z');
+    const window = makeWindow({
+      previousCycle: {
+        id: 1,
+        activationId: 1,
+        state: 'closed',
+        scheduledStartMs,
+        scheduledEndMs,
+        actualStartMs: scheduledStartMs,
+        actualEndMs,
+        durationSeconds: 7 * 24 * 60 * 60,
+        boundaryAccuracy: 'exact',
+        endReason: 'early_reset',
+        parentCycleId: null,
+        forecastEligible: false,
+      },
+      previousUsage: usage({ fromMs: scheduledStartMs, toMs: actualEndMs }),
+    });
+
+    for (const mode of ['standard', 'model'] as const) {
+      const renderer = renderCard(window, mode);
+      const previous = renderer.root.findByProps({ 'data-quota-usage-period': 'previous' });
+      const previousText = readText(previous);
+
+      expect(previousText).toContain(formatDisplayRange(scheduledStartMs, scheduledEndMs));
+      expect(previousText).not.toContain(formatDisplayRange(scheduledStartMs, actualEndMs));
+      expect(window.previousUsage).toMatchObject({
+        fromMs: scheduledStartMs,
+        toMs: actualEndMs,
+      });
     }
   });
 

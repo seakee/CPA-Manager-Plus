@@ -17,6 +17,7 @@ import {
   formatCompactNumber,
   formatQuotaResetTimestamp,
 } from '@/features/accounts/model/accountsPagePresentation';
+import { formatUsd } from '@/utils/usage';
 import { QuotaWindowCard } from '../QuotaWindowCard';
 import styles from '@/features/accounts/AccountsPage.module.scss';
 
@@ -130,7 +131,6 @@ export function AccountQuotaTab({
   const otherQuotaItems = allWindows.filter((window) => !isIntervalQuotaWindow(window));
 
   const formatNumber = (value: number) => new Intl.NumberFormat(i18n.language).format(value);
-  const formatMoney = (value: number) => `$${value.toFixed(2)}`;
   const formatTime = (value: number | null) =>
     value
       ? new Intl.DateTimeFormat(i18n.language, {
@@ -200,7 +200,7 @@ export function AccountQuotaTab({
             icon={<IconDollarSign size={20} />}
             tone="amber"
             label={t('accounts.detail_total_cost')}
-            value={history ? formatMoney(history.totalCost) : '-'}
+            value={history ? formatUsd(history.totalCost) : '-'}
           />
           <MetricCell
             icon={<IconCheck size={20} />}

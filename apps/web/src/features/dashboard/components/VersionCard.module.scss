@@ -58,17 +58,6 @@
   }
 }
 
-.tapItem {
-  cursor: pointer;
-
-  &:focus-visible {
-    outline: none;
-    background: var(--focus-bg);
-    border-color: var(--focus-border);
-    box-shadow: inset 0 0 0 1px var(--focus-inset);
-  }
-}
-
 .healthLink {
   cursor: pointer;
 

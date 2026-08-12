@@ -16,6 +16,7 @@ import {
 } from '@/features/authFiles/model/authFilesPageModel';
 import type { MonitoringAccountHistoryItem, MonitoringAnalyticsEventRow } from '@/services/api';
 import { parseQuotaResetLabelMs } from '@/utils/quota/formatters';
+import { formatUsd } from '@/utils/usage';
 
 export type AccountsView = 'accounts' | 'health' | 'oauth';
 export type DetailTab = 'overview' | 'quota' | 'config' | 'models' | 'diagnostics';
@@ -103,7 +104,7 @@ export const getProviderLabel = (provider: string, t: TFunction) => {
 export const formatPercent = (value: number | null, digits = 0) =>
   value === null ? '-' : `${value.toFixed(digits)}%`;
 
-export const formatMoney = (value: number) => `$${value.toFixed(2)}`;
+export const formatMoney = (value: number) => formatUsd(value);
 
 export const formatCompactNumber = (value: number) => {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;

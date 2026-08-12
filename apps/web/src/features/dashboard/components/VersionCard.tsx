@@ -1,11 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { Button } from '@/components/ui/Button';
-import { Modal } from '@/components/ui/Modal';
-import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import {
   IconCheck,
   IconExternalLink,
@@ -15,8 +13,8 @@ import {
   IconSettings,
   IconTimer,
 } from '@/components/ui/icons';
-import { useConfigStore, useNotificationStore } from '@/stores';
-import { configApi, versionApi } from '@/services/api';
+import { useNotificationStore } from '@/stores';
+import { versionApi } from '@/services/api';
 import type { UsageServiceStatus } from '@/services/api/usageService';
 import type { ConnectionStatus } from '@/types';
 import { compareVersions, type VersionComparison } from '@/utils/version';
@@ -92,23 +90,9 @@ export function VersionCard({
 }: VersionCardProps) {
   const { t, i18n } = useTranslation();
   const showNotification = useNotificationStore((state) => state.showNotification);
-  const config = useConfigStore((state) => state.config);
-  const fetchConfig = useConfigStore((state) => state.fetchConfig);
-  const clearCache = useConfigStore((state) => state.clearCache);
-  const updateConfigValue = useConfigStore((state) => state.updateConfigValue);
   const [latest, setLatest] = useState<LatestVersions>({ latestApp: '', latestApi: '' });
   const [checkingAppVersion, setCheckingAppVersion] = useState(false);
   const [checkingApiVersion, setCheckingApiVersion] = useState(false);
-  const [requestLogModalOpen, setRequestLogModalOpen] = useState(false);
-  const [requestLogDraft, setRequestLogDraft] = useState(false);
-  const [requestLogTouched, setRequestLogTouched] = useState(false);
-  const [requestLogSaving, setRequestLogSaving] = useState(false);
-  const versionTapCount = useRef(0);
-  const versionTapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const requestLogEnabled = config?.requestLog ?? false;
-  const requestLogDirty = requestLogDraft !== requestLogEnabled;
-  const canEditRequestLog = connectionStatus === 'connected' && Boolean(config);
 
   useEffect(() => {
     let cancelled = false;
@@ -145,74 +129,6 @@ export function VersionCard({
       cancelled = true;
     };
   }, [connectionStatus, refreshSignal]);
-
-  const openRequestLogModal = useCallback(() => {
-    setRequestLogTouched(false);
-    setRequestLogDraft(requestLogEnabled);
-    setRequestLogModalOpen(true);
-
-    if (!config && connectionStatus === 'connected') {
-      fetchConfig().catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
-        showNotification(
-          `${t('notification.update_failed')}${message ? `: ${message}` : ''}`,
-          'error'
-        );
-      });
-    }
-  }, [config, connectionStatus, fetchConfig, requestLogEnabled, showNotification, t]);
-
-  const handleInfoVersionTap = useCallback(() => {
-    versionTapCount.current += 1;
-    if (versionTapTimer.current) {
-      clearTimeout(versionTapTimer.current);
-    }
-
-    if (versionTapCount.current >= 7) {
-      versionTapCount.current = 0;
-      versionTapTimer.current = null;
-      openRequestLogModal();
-      return;
-    }
-
-    versionTapTimer.current = setTimeout(() => {
-      versionTapCount.current = 0;
-      versionTapTimer.current = null;
-    }, 1500);
-  }, [openRequestLogModal]);
-
-  const handleRequestLogClose = useCallback(() => {
-    setRequestLogModalOpen(false);
-    setRequestLogTouched(false);
-  }, []);
-
-  const handleRequestLogSave = async () => {
-    if (!canEditRequestLog) return;
-    if (!requestLogDirty) {
-      setRequestLogModalOpen(false);
-      return;
-    }
-
-    const previous = requestLogEnabled;
-    setRequestLogSaving(true);
-    updateConfigValue('request-log', requestLogDraft);
-
-    try {
-      await configApi.updateRequestLog(requestLogDraft);
-      clearCache('request-log');
-      showNotification(t('notification.request_log_updated'), 'success');
-      setRequestLogModalOpen(false);
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
-      updateConfigValue('request-log', previous);
-      showNotification(
-        `${t('notification.update_failed')}${message ? `: ${message}` : ''}`,
-        'error'
-      );
-    } finally {
-      setRequestLogSaving(false);
-    }
-  };
 
   const handleAppVersionCheck = useCallback(async () => {
     setCheckingAppVersion(true);
@@ -280,20 +196,6 @@ export function VersionCard({
       setCheckingApiVersion(false);
     }
   }, [apiVersion, showNotification, t]);
-
-  useEffect(() => {
-    if (requestLogModalOpen && !requestLogTouched) {
-      setRequestLogDraft(requestLogEnabled);
-    }
-  }, [requestLogModalOpen, requestLogTouched, requestLogEnabled]);
-
-  useEffect(() => {
-    return () => {
-      if (versionTapTimer.current) {
-        clearTimeout(versionTapTimer.current);
-      }
-    };
-  }, []);
 
   const appBadge = useMemo(
     () => renderBadge(compareVersions(latest.latestApp, appVersion), latest.latestApp, t),
@@ -399,18 +301,7 @@ export function VersionCard({
       <section className={styles.section}>
         <h2 className={styles.heading}>{t('dashboard.system_overview')}</h2>
         <div className={`${styles.grid} ${styles.systemGrid}`}>
-          <div
-            className={`${styles.item} ${styles.tapItem}`}
-            role="button"
-            tabIndex={0}
-            onClick={handleInfoVersionTap}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' || event.key === ' ') {
-                event.preventDefault();
-                handleInfoVersionTap();
-              }
-            }}
-          >
+          <div className={styles.item}>
             <div className={styles.icon}><IconSettings size={18} /></div>
             <div className={styles.content}>
               <div className={styles.versionHeader}>
@@ -421,11 +312,7 @@ export function VersionCard({
                   size="xs"
                   iconOnly
                   className={styles.versionAction}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    void handleAppVersionCheck();
-                  }}
-                  onKeyDown={(event) => event.stopPropagation()}
+                  onClick={() => void handleAppVersionCheck()}
                   loading={checkingAppVersion}
                   title={t('system_info.version_check_button')}
                   aria-label={t('system_info.version_check_button')}
@@ -511,39 +398,6 @@ export function VersionCard({
         </div>
       </section>
 
-      <Modal
-        open={requestLogModalOpen}
-        onClose={handleRequestLogClose}
-        title={t('basic_settings.request_log_title')}
-        footer={
-          <>
-            <Button variant="secondary" onClick={handleRequestLogClose} disabled={requestLogSaving}>
-              {t('common.cancel')}
-            </Button>
-            <Button
-              onClick={handleRequestLogSave}
-              loading={requestLogSaving}
-              disabled={!canEditRequestLog || !requestLogDirty}
-            >
-              {t('common.save')}
-            </Button>
-          </>
-        }
-      >
-        <div className="request-log-modal">
-          <div className="status-badge warning">{t('basic_settings.request_log_warning')}</div>
-          <ToggleSwitch
-            label={t('basic_settings.request_log_enable')}
-            labelPosition="left"
-            checked={requestLogDraft}
-            disabled={!canEditRequestLog || requestLogSaving}
-            onChange={(value) => {
-              setRequestLogDraft(value);
-              setRequestLogTouched(true);
-            }}
-          />
-        </div>
-      </Modal>
     </div>
   );
 }

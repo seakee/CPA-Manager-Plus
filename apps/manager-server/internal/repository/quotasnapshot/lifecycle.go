@@ -861,28 +861,42 @@ func reconcileCycle(
 		}
 		return active.ID, 0, false, nil
 	}
+	if activeErr == nil && isReliableLifecycleBoundary(*snapshot) && active.ScheduledEndMS != nil &&
+		*snapshot.CycleStartMS >= *active.ScheduledEndMS {
+		actualEndMS := *active.ScheduledEndMS
+		if actualEndMS < active.ActualStartMS {
+			actualEndMS = active.ActualStartMS
+		}
+		if _, err := tx.ExecContext(ctx, `update account_quota_cycles set
+			state = 'closed', actual_end_ms = ?, end_reason = 'scheduled',
+			last_observation_id = ?, updated_at_ms = ? where id = ?`,
+			actualEndMS, observationID, snapshot.CreatedAtMS, active.ID); err != nil {
+			return 0, 0, false, err
+		}
+		id, err := restoreOrInsertCycle(ctx, tx, activationID, observationID, snapshot)
+		return id, active.ID, false, err
+	}
+	if isProvisionalZeroAPIBoundary(*snapshot) {
+		// A zero-use Codex API response whose calculated start follows the query
+		// time is not proof that a provider cycle has started. Keep the evidence,
+		// but do not let it establish, split, or reset lifecycle state. Marking the
+		// persisted boundary unknown also prevents consumers from deriving usage
+		// ranges from this snapshot when there is no confirmed active cycle yet.
+		snapshot.BoundaryAccuracy = "unknown"
+		return 0, 0, false, nil
+	}
 	if errors.Is(activeErr, sql.ErrNoRows) {
 		id, restoreErr := restoreOrInsertCycle(ctx, tx, activationID, observationID, snapshot)
 		return id, 0, false, restoreErr
 	}
 	cycleMatches := cycleMatchesSnapshot(active, *snapshot)
-	if !cycleMatches && isReliableLifecycleHeaderFixedBoundary(*snapshot) {
-		provisional, err := activeCycleHasOnlyProvisionalZeroBoundaries(ctx, tx, active.ID)
-		if err != nil {
-			return 0, 0, false, err
-		}
-		cycleMatches = provisional && provisionalBoundaryFallsWithinCycle(active, *snapshot)
-	}
-	if cycleMatches {
+	if isConfirmedLifecycleBoundary(*snapshot) {
 		counterReset, err := quotaCounterResetDetected(ctx, tx, active, *snapshot)
 		if err != nil {
 			return 0, 0, false, err
 		}
 		if counterReset {
-			transitionMS := snapshot.ObservedAtMS
-			if transitionMS < active.ActualStartMS {
-				transitionMS = active.ActualStartMS
-			}
+			transitionMS := confirmedResetTransitionMS(active, *snapshot, cycleMatches)
 			if _, err := tx.ExecContext(ctx, `update account_quota_cycles set
 				state = 'closed', actual_end_ms = ?, end_reason = 'early_reset',
 				last_observation_id = ?, updated_at_ms = ? where id = ?`,
@@ -892,6 +906,8 @@ func reconcileCycle(
 			id, err := insertCounterResetCycle(ctx, tx, activationID, observationID, transitionMS, *snapshot)
 			return id, active.ID, true, err
 		}
+	}
+	if cycleMatches {
 		if cycleBoundaryShouldUpgrade(active, *snapshot) {
 			if _, err := tx.ExecContext(ctx, `update account_quota_cycles set
 				scheduled_start_ms = ?, scheduled_end_ms = ?, actual_start_ms = ?,
@@ -918,42 +934,67 @@ func reconcileCycle(
 		}
 		return active.ID, 0, false, nil
 	}
-
-	transitionMS := *snapshot.CycleStartMS
-	actualEndMS := transitionMS
-	endReason := "unknown"
-	if active.ScheduledEndMS != nil {
-		delta := transitionMS - *active.ScheduledEndMS
-		switch {
-		case absInt64(delta) <= quotaBoundaryJitterMS:
-			actualEndMS = transitionMS
-			endReason = "scheduled"
-		case transitionMS < *active.ScheduledEndMS:
-			actualEndMS = transitionMS
-			endReason = "early_reset"
-		default:
-			actualEndMS = *active.ScheduledEndMS
-			endReason = "scheduled"
+	if isConfirmedLifecycleBoundary(*snapshot) && cycleBoundaryShouldUpgrade(active, *snapshot) {
+		if _, err := tx.ExecContext(ctx, `update account_quota_cycles set
+			scheduled_start_ms = ?, scheduled_end_ms = ?, actual_start_ms = ?,
+			duration_seconds = ?, boundary_accuracy = ?, last_observation_id = ?, updated_at_ms = ?
+			where id = ?`,
+			snapshot.CycleStartMS,
+			snapshot.CycleEndMS,
+			*snapshot.CycleStartMS,
+			snapshot.DurationSeconds,
+			snapshot.BoundaryAccuracy,
+			observationID,
+			snapshot.CreatedAtMS,
+			active.ID,
+		); err != nil {
+			return 0, 0, false, err
 		}
+		return active.ID, 0, false, nil
 	}
-	if actualEndMS < active.ActualStartMS {
-		actualEndMS = active.ActualStartMS
-		endReason = "unknown"
-	}
+
+	// A boundary change before the confirmed scheduled end is not sufficient
+	// evidence of a reset. Preserve the confirmed cycle until a counter reset,
+	// scheduled rollover, or stronger boundary correction proves otherwise.
+	applyActiveCycleBoundary(snapshot, active)
 	if _, err := tx.ExecContext(ctx, `update account_quota_cycles set
-		state = 'closed', actual_end_ms = ?, end_reason = ?, last_observation_id = ?, updated_at_ms = ?
-		where id = ?`, actualEndMS, endReason, observationID, snapshot.CreatedAtMS, active.ID); err != nil {
+		last_observation_id = ?, updated_at_ms = ? where id = ?`,
+		observationID, snapshot.CreatedAtMS, active.ID); err != nil {
 		return 0, 0, false, err
 	}
-	id, err := restoreOrInsertCycle(ctx, tx, activationID, observationID, snapshot)
-	return id, active.ID, endReason == "early_reset", err
+	return active.ID, 0, false, nil
 }
 
-func isReliableLifecycleHeaderFixedBoundary(snapshot model.AccountQuotaSnapshot) bool {
-	return snapshot.Source == "response_header" &&
-		snapshot.WindowMode == "fixed" &&
+func isConfirmedLifecycleBoundary(snapshot model.AccountQuotaSnapshot) bool {
+	return isReliableLifecycleBoundary(snapshot) && !isProvisionalZeroAPIBoundary(snapshot)
+}
+
+func isReliableLifecycleBoundary(snapshot model.AccountQuotaSnapshot) bool {
+	return (snapshot.Source == "response_header" || snapshot.Source == "api_query" || snapshot.Source == "inspection") &&
+		(snapshot.WindowMode == "fixed" || snapshot.WindowMode == "calendar") &&
 		(snapshot.BoundaryAccuracy == "exact" || snapshot.BoundaryAccuracy == "derived") &&
 		snapshot.CycleStartMS != nil && snapshot.CycleEndMS != nil && snapshot.DurationSeconds != nil
+}
+
+func isProvisionalZeroAPIBoundary(snapshot model.AccountQuotaSnapshot) bool {
+	return snapshot.Provider == "codex" &&
+		snapshot.Source == "api_query" &&
+		snapshot.WindowMode == "fixed" &&
+		(snapshot.BoundaryAccuracy == "exact" || snapshot.BoundaryAccuracy == "derived") &&
+		snapshot.UsedPercent != nil && *snapshot.UsedPercent == 0 &&
+		snapshot.CycleStartMS != nil && snapshot.CycleEndMS != nil && snapshot.DurationSeconds != nil &&
+		absInt64(*snapshot.CycleStartMS-snapshot.ObservedAtMS) <= quotaProvisionalStartJitterMS
+}
+
+func confirmedResetTransitionMS(cycle model.AccountQuotaCycle, snapshot model.AccountQuotaSnapshot, sameBoundary bool) int64 {
+	transitionMS := *snapshot.CycleStartMS
+	if sameBoundary {
+		transitionMS = snapshot.ObservedAtMS
+	}
+	if transitionMS < cycle.ActualStartMS {
+		transitionMS = cycle.ActualStartMS
+	}
+	return transitionMS
 }
 
 func cycleBoundaryShouldUpgrade(cycle model.AccountQuotaCycle, snapshot model.AccountQuotaSnapshot) bool {
@@ -984,14 +1025,16 @@ func quotaCounterResetDetected(
 		return false, err
 	}
 	current := *snapshot.UsedPercent
+	return quotaCounterResetValues(previous, current), nil
+}
+
+func quotaCounterResetValues(previous, current float64) bool {
 	if previous < quotaResetMinimumPriorPercent || current >= previous {
-		return false, nil
+		return false
 	}
 	drop := previous - current
-	if current <= quotaResetNearZeroPercent {
-		return true, nil
-	}
-	return drop >= quotaResetLargeDropPercent && current <= previous/2, nil
+	return current <= quotaResetNearZeroPercent ||
+		(drop >= quotaResetLargeDropPercent && current <= previous/2)
 }
 
 func boundaryAccuracyValue(value string) int {
@@ -1071,53 +1114,6 @@ func matchingClosedCycle(
 		quotaBoundaryJitterMS,
 		cycleKey,
 	))
-}
-
-func isProvisionalZeroHeaderBoundary(snapshot model.AccountQuotaSnapshot) bool {
-	return snapshot.Source == "response_header" &&
-		snapshot.WindowMode == "fixed" &&
-		snapshot.BoundaryAccuracy == "derived" &&
-		snapshot.UsedPercent != nil && *snapshot.UsedPercent == 0 &&
-		snapshot.CycleStartMS != nil && snapshot.DurationSeconds != nil &&
-		absInt64(*snapshot.CycleStartMS-snapshot.ObservedAtMS) <= quotaProvisionalStartJitterMS
-}
-
-func activeCycleHasOnlyProvisionalZeroBoundaries(
-	ctx context.Context,
-	tx *sql.Tx,
-	cycleID int64,
-) (bool, error) {
-	var total, provisional int
-	if err := tx.QueryRowContext(ctx, `select count(*), coalesce(sum(case
-		when source = 'response_header' and window_mode = 'fixed'
-			and boundary_accuracy = 'derived' and used_percent = 0
-			and cycle_start_ms is not null
-			and abs(cycle_start_ms - observed_at_ms) <= ?
-		then 1 else 0 end), 0)
-		from account_quota_snapshots where cycle_id = ?`,
-		quotaProvisionalStartJitterMS,
-		cycleID,
-	).Scan(&total, &provisional); err != nil {
-		return false, err
-	}
-	return total > 0 && total == provisional, nil
-}
-
-func provisionalBoundaryFallsWithinCycle(
-	cycle model.AccountQuotaCycle,
-	snapshot model.AccountQuotaSnapshot,
-) bool {
-	if cycle.DurationSeconds == nil || snapshot.DurationSeconds == nil ||
-		*cycle.DurationSeconds != *snapshot.DurationSeconds {
-		return false
-	}
-	if snapshot.ObservedAtMS+quotaBoundaryJitterMS < cycle.ActualStartMS {
-		return false
-	}
-	if cycle.ScheduledEndMS != nil {
-		return snapshot.ObservedAtMS < *cycle.ScheduledEndMS
-	}
-	return snapshot.ObservedAtMS-cycle.ActualStartMS < *cycle.DurationSeconds*1000
 }
 
 func applyActiveCycleBoundary(snapshot *model.AccountQuotaSnapshot, cycle model.AccountQuotaCycle) {
@@ -1642,6 +1638,7 @@ func (r *repository) ListWindowStates(ctx context.Context, accountKey, provider 
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
+	cycleAliases := make(map[int64]int64)
 	for index := range states {
 		state := &states[index]
 		activationID, err := latestActivationID(ctx, r.db, state.ID, state.Generation)
@@ -1655,18 +1652,34 @@ func (r *repository) ListWindowStates(ctx context.Context, accountKey, provider 
 				return nil, currentErr
 			}
 			if currentErr == nil {
-				state.CurrentCycle = &current
-				previous, previousErr := previousCycle(ctx, r.db, activationID, current.ActualStartMS)
-				if previousErr != nil && !errors.Is(previousErr, sql.ErrNoRows) {
-					return nil, previousErr
+				normalizedCurrent, normalizedPrevious, aliases, normalizeErr := normalizeCycleView(ctx, r.db, activationID, current)
+				if normalizeErr != nil {
+					return nil, normalizeErr
 				}
-				if previousErr == nil {
-					state.PreviousCycle = &previous
+				for cycleID, canonicalID := range aliases {
+					cycleAliases[cycleID] = canonicalID
 				}
+				state.CurrentCycle = &normalizedCurrent
+				state.PreviousCycle = normalizedPrevious
 			}
 		}
 	}
+	for index := range states {
+		applyCycleParentAliases(states[index].CurrentCycle, cycleAliases)
+		applyCycleParentAliases(states[index].PreviousCycle, cycleAliases)
+	}
 	return states, nil
+}
+
+func applyCycleParentAliases(cycle *model.AccountQuotaCycle, aliases map[int64]int64) {
+	if cycle == nil || cycle.ParentCycleID == nil {
+		return
+	}
+	canonicalID, ok := aliases[*cycle.ParentCycleID]
+	if !ok {
+		return
+	}
+	cycle.ParentCycleID = &canonicalID
 }
 
 func latestActivationID(ctx context.Context, db *sql.DB, windowID int64, generation int) (int64, error) {
@@ -1687,6 +1700,267 @@ func previousCycle(ctx context.Context, db *sql.DB, activationID, currentStartMS
 			and actual_start_ms < ? and abs(actual_end_ms - ?) <= ?
 		order by actual_end_ms desc, id desc limit 1`,
 		activationID, currentStartMS, currentStartMS, quotaBoundaryJitterMS))
+}
+
+type quotaCycleEvidence struct {
+	firstObservedAtMS  int64
+	firstUsedPercent   *float64
+	lastUsedPercent    *float64
+	confirmed          bool
+	confirmedAtMS      int64
+	onlyProvisionalAPI bool
+}
+
+func normalizeCycleView(
+	ctx context.Context,
+	db *sql.DB,
+	activationID int64,
+	current model.AccountQuotaCycle,
+) (model.AccountQuotaCycle, *model.AccountQuotaCycle, map[int64]int64, error) {
+	currentOnlyProvisionalAPI, err := cycleHasOnlyProvisionalZeroAPIBoundaries(ctx, db, current.ID)
+	if err != nil {
+		return model.AccountQuotaCycle{}, nil, nil, err
+	}
+
+	canonical := current
+	canonicalEvidence := quotaCycleEvidence{onlyProvisionalAPI: currentOnlyProvisionalAPI}
+	next := current
+	var nextEvidence quotaCycleEvidence
+	evidenceLoaded := false
+	lookupStartMS := current.ActualStartMS
+	collapsed := false
+	collapsedCycleIDs := []int64{current.ID}
+	var previousResult *model.AccountQuotaCycle
+	for {
+		previous, previousErr := previousCycle(ctx, db, activationID, lookupStartMS)
+		if errors.Is(previousErr, sql.ErrNoRows) {
+			break
+		}
+		if previousErr != nil {
+			return model.AccountQuotaCycle{}, nil, nil, previousErr
+		}
+		if !structurallyCollapsibleEarlyResetFragment(previous, next) {
+			previousResult = &previous
+			break
+		}
+		if !evidenceLoaded {
+			currentEvidence, evidenceErr := loadQuotaCycleEvidence(ctx, db, current.ID)
+			if evidenceErr != nil {
+				return model.AccountQuotaCycle{}, nil, nil, evidenceErr
+			}
+			canonicalEvidence = currentEvidence
+			nextEvidence = currentEvidence
+			evidenceLoaded = true
+		}
+		previousEvidence, evidenceErr := loadQuotaCycleEvidence(ctx, db, previous.ID)
+		if evidenceErr != nil {
+			return model.AccountQuotaCycle{}, nil, nil, evidenceErr
+		}
+		if !collapsibleEarlyResetFragment(previous, next, previousEvidence, nextEvidence) {
+			previousResult = &previous
+			break
+		}
+		collapsed = true
+		collapsedCycleIDs = append(collapsedCycleIDs, previous.ID)
+		if quotaCycleEvidencePreferred(previous, previousEvidence, canonical, canonicalEvidence) {
+			canonical = previous
+			canonicalEvidence = previousEvidence
+		}
+		lookupStartMS = previous.ActualStartMS
+		next = previous
+		nextEvidence = previousEvidence
+	}
+
+	if canonical.ID != current.ID {
+		current.ID = canonical.ID
+		current.ActivationID = canonical.ActivationID
+		current.ProviderCycleKey = canonical.ProviderCycleKey
+		current.ScheduledStartMS = copyInt64(canonical.ScheduledStartMS)
+		current.ScheduledEndMS = copyInt64(canonical.ScheduledEndMS)
+		current.ActualStartMS = canonical.ActualStartMS
+		current.DurationSeconds = copyInt64(canonical.DurationSeconds)
+		current.BoundaryAccuracy = canonical.BoundaryAccuracy
+		current.FirstObservationID = copyInt64(canonical.FirstObservationID)
+		current.ParentCycleID = copyInt64(canonical.ParentCycleID)
+		current.CreatedAtMS = canonical.CreatedAtMS
+	}
+	if canonicalEvidence.onlyProvisionalAPI {
+		current.State = "provisional"
+		current.BoundaryAccuracy = "unknown"
+	}
+	if collapsed && previousResult != nil && previousResult.ActualEndMS != nil {
+		actualEndMS := current.ActualStartMS
+		previousResult.ActualEndMS = &actualEndMS
+	}
+	aliases := make(map[int64]int64)
+	if collapsed {
+		for _, cycleID := range collapsedCycleIDs {
+			if cycleID != canonical.ID {
+				aliases[cycleID] = canonical.ID
+			}
+		}
+	}
+	return current, previousResult, aliases, nil
+}
+
+func cycleHasOnlyProvisionalZeroAPIBoundaries(ctx context.Context, db *sql.DB, cycleID int64) (bool, error) {
+	var hasSnapshots, hasNonProvisional, hasScheduledPredecessor int
+	err := db.QueryRowContext(ctx, `select
+		exists(select 1 from account_quota_snapshots where cycle_id = ? limit 1),
+		exists(select 1 from account_quota_snapshots where cycle_id = ? and coalesce((
+			provider = 'codex' and source = 'api_query' and window_mode = 'fixed'
+			and boundary_accuracy in ('exact', 'derived') and used_percent = 0
+			and cycle_start_ms is not null and cycle_end_ms is not null
+			and duration_seconds is not null
+			and abs(cycle_start_ms - observed_at_ms) <= ?
+		), 0) = 0 limit 1),
+		exists(select 1
+			from account_quota_cycles current
+			join account_quota_cycles previous
+				on previous.activation_id = current.activation_id
+				and previous.actual_start_ms < current.actual_start_ms
+			where current.id = ? and previous.end_reason = 'scheduled'
+				and previous.actual_end_ms is not null
+				and abs(previous.actual_end_ms - current.actual_start_ms) <= ?
+			limit 1)`,
+		cycleID,
+		cycleID,
+		quotaProvisionalStartJitterMS,
+		cycleID,
+		quotaBoundaryJitterMS,
+	).Scan(&hasSnapshots, &hasNonProvisional, &hasScheduledPredecessor)
+	if err != nil {
+		return false, err
+	}
+	return hasSnapshots != 0 && hasNonProvisional == 0 && hasScheduledPredecessor == 0, nil
+}
+
+func loadQuotaCycleEvidence(ctx context.Context, db *sql.DB, cycleID int64) (quotaCycleEvidence, error) {
+	rows, err := db.QueryContext(ctx, `select
+		provider, source, window_mode, boundary_accuracy, cycle_start_ms, cycle_end_ms,
+		duration_seconds, used_percent, observed_at_ms
+		from account_quota_snapshots where cycle_id = ?
+		order by observed_at_ms asc, id asc`, cycleID)
+	if err != nil {
+		return quotaCycleEvidence{}, err
+	}
+	defer func() { _ = rows.Close() }()
+	evidence := quotaCycleEvidence{onlyProvisionalAPI: true}
+	total := 0
+	for rows.Next() {
+		var snapshot model.AccountQuotaSnapshot
+		var cycleStart, cycleEnd, duration sql.NullInt64
+		var used sql.NullFloat64
+		if err := rows.Scan(
+			&snapshot.Provider,
+			&snapshot.Source,
+			&snapshot.WindowMode,
+			&snapshot.BoundaryAccuracy,
+			&cycleStart,
+			&cycleEnd,
+			&duration,
+			&used,
+			&snapshot.ObservedAtMS,
+		); err != nil {
+			return quotaCycleEvidence{}, err
+		}
+		snapshot.CycleStartMS = int64Pointer(cycleStart)
+		snapshot.CycleEndMS = int64Pointer(cycleEnd)
+		snapshot.DurationSeconds = int64Pointer(duration)
+		if used.Valid {
+			value := used.Float64
+			snapshot.UsedPercent = &value
+			if evidence.firstUsedPercent == nil {
+				evidence.firstUsedPercent = copyFloat64(snapshot.UsedPercent)
+			}
+			evidence.lastUsedPercent = copyFloat64(snapshot.UsedPercent)
+		}
+		if total == 0 {
+			evidence.firstObservedAtMS = snapshot.ObservedAtMS
+		}
+		total++
+		provisional := isProvisionalZeroAPIBoundary(snapshot)
+		evidence.onlyProvisionalAPI = evidence.onlyProvisionalAPI && provisional
+		if isConfirmedLifecycleBoundary(snapshot) {
+			evidence.confirmed = true
+			if evidence.confirmedAtMS == 0 || snapshot.ObservedAtMS < evidence.confirmedAtMS {
+				evidence.confirmedAtMS = snapshot.ObservedAtMS
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return quotaCycleEvidence{}, err
+	}
+	evidence.onlyProvisionalAPI = total > 0 && evidence.onlyProvisionalAPI
+	return evidence, nil
+}
+
+func collapsibleEarlyResetFragment(
+	previous model.AccountQuotaCycle,
+	next model.AccountQuotaCycle,
+	previousEvidence quotaCycleEvidence,
+	nextEvidence quotaCycleEvidence,
+) bool {
+	if !structurallyCollapsibleEarlyResetFragment(previous, next) ||
+		previousEvidence.firstObservedAtMS == 0 || nextEvidence.firstObservedAtMS == 0 ||
+		previousEvidence.lastUsedPercent == nil || nextEvidence.firstUsedPercent == nil {
+		return false
+	}
+	startShiftMS := *next.ScheduledStartMS - *previous.ScheduledStartMS
+	endShiftMS := *next.ScheduledEndMS - *previous.ScheduledEndMS
+	observationShiftMS := nextEvidence.firstObservedAtMS - previousEvidence.firstObservedAtMS
+	if absInt64(startShiftMS-endShiftMS) > quotaBoundaryJitterMS ||
+		absInt64(startShiftMS-observationShiftMS) > quotaBoundaryJitterMS {
+		return false
+	}
+	return !quotaCounterResetValues(*previousEvidence.lastUsedPercent, *nextEvidence.firstUsedPercent)
+}
+
+func structurallyCollapsibleEarlyResetFragment(previous, next model.AccountQuotaCycle) bool {
+	return previous.EndReason == "early_reset" && previous.ActualEndMS != nil &&
+		absInt64(*previous.ActualEndMS-next.ActualStartMS) <= quotaBoundaryJitterMS &&
+		previous.ScheduledStartMS != nil && previous.ScheduledEndMS != nil &&
+		next.ScheduledStartMS != nil && next.ScheduledEndMS != nil &&
+		previous.DurationSeconds != nil && next.DurationSeconds != nil &&
+		*previous.DurationSeconds == *next.DurationSeconds &&
+		next.ActualStartMS < *previous.ScheduledEndMS
+}
+
+func quotaCycleEvidencePreferred(
+	candidate model.AccountQuotaCycle,
+	candidateEvidence quotaCycleEvidence,
+	current model.AccountQuotaCycle,
+	currentEvidence quotaCycleEvidence,
+) bool {
+	if candidateEvidence.confirmed != currentEvidence.confirmed {
+		return candidateEvidence.confirmed
+	}
+	if candidateEvidence.onlyProvisionalAPI != currentEvidence.onlyProvisionalAPI {
+		return !candidateEvidence.onlyProvisionalAPI
+	}
+	candidateAccuracy := boundaryAccuracyValue(candidate.BoundaryAccuracy)
+	currentAccuracy := boundaryAccuracyValue(current.BoundaryAccuracy)
+	if candidateAccuracy != currentAccuracy {
+		return candidateAccuracy > currentAccuracy
+	}
+	if candidateEvidence.confirmedAtMS != currentEvidence.confirmedAtMS {
+		if candidateEvidence.confirmedAtMS == 0 {
+			return false
+		}
+		if currentEvidence.confirmedAtMS == 0 {
+			return true
+		}
+		return candidateEvidence.confirmedAtMS < currentEvidence.confirmedAtMS
+	}
+	return candidate.ActualStartMS < current.ActualStartMS
+}
+
+func copyFloat64(value *float64) *float64 {
+	if value == nil {
+		return nil
+	}
+	result := *value
+	return &result
 }
 
 func activationStart(snapshot model.AccountQuotaSnapshot, fallback int64) int64 {

@@ -30,7 +30,6 @@ import { PluginsPage } from '@/pages/PluginsPage';
 import { SystemPage } from '@/pages/SystemPage';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
-import { isLogsRouteAvailable } from '@/features/logs/logFeatureAvailability';
 import { ensureRouteBasePathname, isDemoMode } from '@/features/demo/demoMode';
 import { useAuthStore, useConfigStore } from '@/stores';
 
@@ -100,7 +99,6 @@ function FeatureGate({
 }
 
 function LogsGate({ children }: { children: ReactElement }) {
-  const location = useLocation();
   const config = useConfigStore((state) => state.config);
   const fetchConfig = useConfigStore((state) => state.fetchConfig);
   const requestedRef = useRef(false);
@@ -114,10 +112,6 @@ function LogsGate({ children }: { children: ReactElement }) {
 
   if (!config && !failed) {
     return <LoadingSpinner />;
-  }
-
-  if (!isLogsRouteAvailable(config, location.search)) {
-    return <Navigate to="/config" replace />;
   }
 
   return children;

@@ -10,6 +10,7 @@ import {
   compatibleCachedTokens,
   extractTotalTokens,
   formatCompactNumber,
+  formatUsd,
   getServiceTierMultiplier,
   inferCacheInputMode,
   loadModelPrices,
@@ -32,6 +33,14 @@ describe('formatCompactNumber', () => {
     expect(formatCompactNumber(1_200_000_000_000)).toBe('1.2T');
     expect(formatCompactNumber(-2_500_000_000_000_000)).toBe('-2.5P');
     expect(formatCompactNumber(Number.POSITIVE_INFINITY)).toBe('0');
+  });
+});
+
+describe('formatUsd', () => {
+  it('formats costs globally to three decimal places', () => {
+    expect(formatUsd(19.99)).toBe('$19.990');
+    expect(formatUsd(0.0006)).toBe('$0.001');
+    expect(formatUsd(Number.NaN)).toBe('$0.000');
   });
 });
 

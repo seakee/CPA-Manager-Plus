@@ -3,6 +3,7 @@ import {
   buildAntigravityQuotaMatrix,
   formatCompactNumber,
   formatHistorySuccessRate,
+  formatMoney,
   formatQuotaResetDisplay,
   formatQuotaResetTimestamp,
   formatQuotaResetTooltipParams,
@@ -21,6 +22,7 @@ describe('accountsPagePresentation', () => {
     expect(formatCompactNumber(999)).toBe('999');
     expect(formatCompactNumber(12_500)).toBe('12.5K');
     expect(formatHistorySuccessRate(0.975)).toBe('97.5%');
+    expect(formatMoney(12.34)).toBe('$12.340');
     expect(quotaStatusLabelKey('exhausted')).toBe('accounts.quota_status_exhausted');
   });
 

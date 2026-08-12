@@ -1490,12 +1490,12 @@ export function formatCompactNumber(value: number): string {
 
 export function formatUsd(value: number): string {
   const num = Number(value);
-  if (!Number.isFinite(num)) return '$0.00';
+  if (!Number.isFinite(num)) return '$0.000';
 
-  const fixed = num.toFixed(2);
+  const fixed = num.toFixed(3);
   const parts = Number(fixed).toLocaleString(undefined, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
+    minimumFractionDigits: 3,
+    maximumFractionDigits: 3,
   });
   return `$${parts}`;
 }

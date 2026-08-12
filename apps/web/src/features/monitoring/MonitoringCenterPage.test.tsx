@@ -217,7 +217,7 @@ describe('MonitoringCenterPage summary cards', () => {
     expect(html).toContain('2,795,200,000');
     expect(html).toContain('2,783,500,000');
     expect(html).toContain('3,595,200,000');
-    expect(html).toContain('$9,999,999.99');
+    expect(html).toContain('$9,999,999.990');
     expect(html).toContain('Reasoning 5.0M');
     expect(html).toContain('Share 99.6%');
     expect(html).toContain('Share 0.4%');
@@ -639,7 +639,7 @@ describe('MonitoringCenterPage account card', () => {
     expect(html).toContain('<small>Calls</small><strong>196</strong>');
     expect(html).toContain('<small>Success</small><strong class="_goodText');
     expect(html).toContain('<small>Total Tokens</small><strong>33.5M</strong>');
-    expect(html).toContain('<small>Total Cost</small><strong>$23.04</strong>');
+    expect(html).toContain('<small>Total Cost</small><strong>$23.040</strong>');
     expect(html).not.toContain('<table');
   });
 

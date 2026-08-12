@@ -464,6 +464,7 @@ export function AccountsPage() {
   const [quotaRefreshing, setQuotaRefreshing] = useState(false);
   const [historyRefreshing, setHistoryRefreshing] = useState(false);
   const [accountHistoryRefreshRevision, setAccountHistoryRefreshRevision] = useState(0);
+  const [accountQuotaRefreshRevision, setAccountQuotaRefreshRevision] = useState(0);
   const [statusUpdating, setStatusUpdating] = useState(false);
   const [selectedRowKey, setSelectedRowKey] = useState<string | null>(
     () => initialWorkspaceUrlState.current.account
@@ -1690,9 +1691,11 @@ export function AccountsPage() {
         selectedRowKey: selectedRow?.selectionKey ?? selectedRowKey,
         selectedHeaderSnapshotRevision,
         historyRevision: accountHistoryRefreshRevision,
+        quotaRevision: accountQuotaRefreshRevision,
       }),
     [
       accountHistoryRefreshRevision,
+      accountQuotaRefreshRevision,
       featureAvailability.checking,
       featureAvailability.managerServiceBase,
       featureAvailability.requestMonitoringAvailable,
@@ -2116,6 +2119,7 @@ export function AccountsPage() {
     setHistoryRefreshing(false);
     usageValuesRequestIdRef.current += 1;
     usageValuesAutoLoadKeyRef.current = null;
+    accountWindowUsageAutoLoadKeyRef.current = null;
     setAccountWindowUsageQueryContext(null);
     detailEventsRequestIdRef.current += 1;
     detailEventsAutoLoadKeyRef.current = null;
@@ -2713,7 +2717,12 @@ export function AccountsPage() {
   );
 
   const refreshAccountQuota = useCallback(
-    (row: AccountRow) => refreshQuotaRows([row]),
+    async (row: AccountRow): Promise<void> => {
+      await refreshQuotaRows([row]);
+      if (selectedRowKeyRef.current === row.selectionKey) {
+        setAccountQuotaRefreshRevision((current) => current + 1);
+      }
+    },
     [refreshQuotaRows]
   );
 
@@ -2779,12 +2788,12 @@ export function AccountsPage() {
   );
 
   useEffect(() => {
-    if (activeView !== 'accounts' || detailTab !== 'quota' || !selectedRowKey) {
+    if (activeView !== 'accounts' || detailTab !== 'quota' || !selectedRowKey || !selectedRow) {
       const hadInFlightRequest = accountWindowUsageAbortRef.current !== null;
       accountWindowUsageReqIdRef.current += 1;
       accountWindowUsageAbortRef.current?.abort();
       accountWindowUsageAbortRef.current = null;
-      if (hadInFlightRequest) {
+      if (hadInFlightRequest || !selectedRow) {
         accountWindowUsageAutoLoadKeyRef.current = null;
       }
       return;

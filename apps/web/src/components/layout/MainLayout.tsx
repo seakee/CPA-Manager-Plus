@@ -46,7 +46,6 @@ import {
 } from '@/features/plugins/pluginResources';
 import { triggerHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
-import { isFileLogsAvailable } from '@/features/logs/logFeatureAvailability';
 import { getDemoLogoutPath, prefixRouteBase, stripRouteBase } from '@/features/demo/demoMode';
 import { LANGUAGE_LABEL_KEYS, LANGUAGE_ORDER, STORAGE_KEY_SIDEBAR } from '@/utils/constants';
 import { isSupportedLanguage } from '@/utils/language';
@@ -273,8 +272,11 @@ export function MainLayout({ routeBase = '', demoMode = false }: MainLayoutProps
   const isLogsPage = routePathname.startsWith('/logs');
   const isPluginResourcePage = routePathname.startsWith('/plugin-pages');
   const showSidebarLabels = !sidebarCollapsed || sidebarOpen;
-  const pluginControlMenuVisible = isPluginManagementNavVisible({ supportsPlugin });
   const configPluginsEnabled = config?.pluginsEnabled;
+  const pluginControlMenuVisible = isPluginManagementNavVisible({
+    supportsPlugin,
+    pluginsEnabled: configPluginsEnabled,
+  });
 
   // 将顶部悬浮控制区高度写入 CSS 变量，供移动端粘性元素和浮层避让。
   useLayoutEffect(() => {
@@ -500,7 +502,6 @@ export function MainLayout({ routeBase = '', demoMode = false }: MainLayoutProps
     };
   }, [apiBase, configPluginsEnabled, loadPluginResources]);
 
-  const fileLogsAvailable = isFileLogsAvailable(config);
   const navShortLabel = (key: string, fallback: string) => {
     const shortKey = `${key}_short`;
     const label = t(shortKey, { defaultValue: fallback });
@@ -529,16 +530,12 @@ export function MainLayout({ routeBase = '', demoMode = false }: MainLayoutProps
       }
     : null;
   const operationNavItems: NavItem[] = [
-    ...(fileLogsAvailable
-      ? [
-          {
-            path: '/logs',
-            label: t('nav.logs'),
-            shortLabel: navShortLabel('nav.logs', t('nav.logs')),
-            icon: sidebarIcons.logs,
-          },
-        ]
-      : []),
+    {
+      path: '/logs',
+      label: t('nav.logs'),
+      shortLabel: navShortLabel('nav.logs', t('nav.logs')),
+      icon: sidebarIcons.logs,
+    },
   ];
   const pluginControlNavItems: NavItem[] = pluginControlMenuVisible
     ? [

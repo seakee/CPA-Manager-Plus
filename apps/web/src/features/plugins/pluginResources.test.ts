@@ -70,9 +70,17 @@ const createStoreEntry = (patch: Partial<PluginStoreEntry> = {}): PluginStoreEnt
 });
 
 describe('plugin resource helpers', () => {
-  it('keeps the plugin management nav visible whenever the backend supports plugins', () => {
+  it('hides the plugin management nav when plugins are explicitly disabled', () => {
+    expect(
+      isPluginManagementNavVisible({ supportsPlugin: true, pluginsEnabled: true })
+    ).toBe(true);
+    expect(
+      isPluginManagementNavVisible({ supportsPlugin: true, pluginsEnabled: false })
+    ).toBe(false);
     expect(isPluginManagementNavVisible({ supportsPlugin: true })).toBe(true);
-    expect(isPluginManagementNavVisible({ supportsPlugin: false })).toBe(false);
+    expect(
+      isPluginManagementNavVisible({ supportsPlugin: false, pluginsEnabled: true })
+    ).toBe(false);
   });
 
   it('shows plugin resource nav only when supported and globally enabled', () => {

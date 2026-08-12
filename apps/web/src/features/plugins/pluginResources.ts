@@ -16,9 +16,11 @@ export const notifyPluginResourcesChanged = (options?: { delayMs?: number }) => 
 
 export const isPluginManagementNavVisible = ({
   supportsPlugin,
+  pluginsEnabled,
 }: {
   supportsPlugin: boolean;
-}) => supportsPlugin;
+  pluginsEnabled?: boolean | null;
+}) => supportsPlugin && pluginsEnabled !== false;
 
 export const isPluginResourceNavVisible = ({
   supportsPlugin,

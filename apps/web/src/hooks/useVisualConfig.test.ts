@@ -137,6 +137,30 @@ describe('useVisualConfig', () => {
     harness.unmount();
   });
 
+  it('loads and writes request logging through the visual config editor', () => {
+    const harness = mountUseVisualConfig();
+    const yaml = ['request-log: true', 'logging-to-file: false', ''].join('\n');
+
+    act(() => {
+      const result = harness.getCurrent().loadVisualValuesFromYaml(yaml);
+      expect(result.ok).toBe(true);
+    });
+    expect(harness.getCurrent().visualValues.requestLog).toBe(true);
+
+    act(() => {
+      harness.getCurrent().setVisualValues({ requestLog: false });
+    });
+
+    const parsed = parseYaml(harness.getCurrent().applyVisualChangesToYaml(yaml)) as Record<
+      string,
+      unknown
+    >;
+    expect(parsed['request-log']).toBe(false);
+    expect(parsed['logging-to-file']).toBe(false);
+
+    harness.unmount();
+  });
+
   it('writes plugin directory and store sources while preserving plugin configs', () => {
     const harness = mountUseVisualConfig();
     const yaml = ['plugins:', '  configs:', '    demo:', '      enabled: true', ''].join('\n');

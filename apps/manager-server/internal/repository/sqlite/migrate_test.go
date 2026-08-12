@@ -170,6 +170,7 @@ func TestMigrateCreatesAccountQuotaSnapshotSchema(t *testing.T) {
 		"idx_quota_snapshots_latest",
 		"idx_quota_snapshots_observation",
 		"idx_quota_snapshots_window_cycle",
+		"idx_quota_snapshots_cycle_evidence",
 	} {
 		if !indexes[name] {
 			t.Fatalf("account quota snapshot indexes = %#v, missing %s", indexes, name)

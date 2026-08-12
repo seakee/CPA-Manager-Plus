@@ -531,6 +531,9 @@ function getNextDirtyFields(
   if (Object.prototype.hasOwnProperty.call(patch, 'loggingToFile')) {
     updateDirty('loggingToFile', nextValues.loggingToFile === baselineValues.loggingToFile);
   }
+  if (Object.prototype.hasOwnProperty.call(patch, 'requestLog')) {
+    updateDirty('requestLog', nextValues.requestLog === baselineValues.requestLog);
+  }
   if (Object.prototype.hasOwnProperty.call(patch, 'logsMaxTotalSizeMb')) {
     updateDirty(
       'logsMaxTotalSizeMb',
@@ -786,6 +789,7 @@ export function useVisualConfig() {
           parsed['usage-statistics-enabled'] ?? parsed.usageStatisticsEnabled
         ),
         loggingToFile: Boolean(parsed['logging-to-file']),
+        requestLog: Boolean(parsed['request-log']),
         logsMaxTotalSizeMb: String(parsed['logs-max-total-size-mb'] ?? ''),
         errorLogsMaxFiles: String(parsed['error-logs-max-files'] ?? ''),
         redisUsageQueueRetentionSeconds: String(
@@ -995,6 +999,9 @@ export function useVisualConfig() {
         }
         if (isDirty('loggingToFile')) {
           setBooleanInDoc(doc, ['logging-to-file'], values.loggingToFile);
+        }
+        if (isDirty('requestLog')) {
+          setBooleanInDoc(doc, ['request-log'], values.requestLog);
         }
         if (isDirty('logsMaxTotalSizeMb')) {
           setIntFromStringInDoc(doc, ['logs-max-total-size-mb'], values.logsMaxTotalSizeMb);

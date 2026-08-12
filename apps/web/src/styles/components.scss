@@ -714,17 +714,6 @@ textarea {
   }
 }
 
-.request-log-modal {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: $spacing-md;
-
-  .status-badge {
-    margin-bottom: 0;
-  }
-}
-
 .empty-state {
   border: 1px dashed var(--border-subtle-dashed);
   border-radius: $radius-lg;

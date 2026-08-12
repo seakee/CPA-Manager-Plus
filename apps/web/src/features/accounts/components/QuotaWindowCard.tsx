@@ -31,6 +31,7 @@ import type {
   AccountDetailWindowUsageSummary,
 } from '@/features/accounts/model/accountDetailViewModel';
 import { formatQuotaResetDisplay } from '@/features/accounts/model/accountsPagePresentation';
+import { formatUsd } from '@/utils/usage';
 import styles from './QuotaWindowCard.module.scss';
 
 export type QuotaWindowCardMode = 'standard' | 'model' | 'other';
@@ -64,7 +65,7 @@ const formatCompactNumber = (value: number | null | undefined): string => {
 
 const formatMoney = (value: number | null | undefined): string => {
   if (typeof value !== 'number' || !Number.isFinite(value)) return '-';
-  return `$${value.toFixed(2)}`;
+  return formatUsd(value);
 };
 
 const formatRange = (
@@ -98,6 +99,26 @@ const formatCurrentWindowRange = (
     cycleStartMs < cycleEndMs
   ) {
     return formatRange(cycleStartMs, cycleEndMs, locale);
+  }
+  return formatRange(usage?.fromMs, usage?.toMs, locale);
+};
+
+const formatPreviousWindowRange = (
+  window: AccountDetailQuotaWindow,
+  usage: AccountDetailWindowUsageSummary | null | undefined,
+  locale: string
+): string => {
+  const scheduledStartMs = window.previousCycle?.scheduledStartMs;
+  const scheduledEndMs = window.previousCycle?.scheduledEndMs;
+  if (
+    (window.windowMode === 'fixed' || window.windowMode === 'calendar') &&
+    typeof scheduledStartMs === 'number' &&
+    Number.isFinite(scheduledStartMs) &&
+    typeof scheduledEndMs === 'number' &&
+    Number.isFinite(scheduledEndMs) &&
+    scheduledStartMs < scheduledEndMs
+  ) {
+    return formatRange(scheduledStartMs, scheduledEndMs, locale);
   }
   return formatRange(usage?.fromMs, usage?.toMs, locale);
 };
@@ -622,7 +643,7 @@ export const QuotaWindowCard = ({
                   ? t('accounts.detail_previous_equal_range', { defaultValue: '前一等长区间' })
                   : t('accounts.detail_previous_usage', { defaultValue: '上个窗口用量' })
               }
-              subtitle={formatRange(previousUsage?.fromMs, previousUsage?.toMs, resolvedLocale)}
+              subtitle={formatPreviousWindowRange(q, previousUsage, resolvedLocale)}
               period="previous"
               usage={previousUsage}
               labels={usageLabels}
@@ -677,7 +698,7 @@ export const QuotaWindowCard = ({
               ? t('accounts.detail_previous_equal_range', { defaultValue: '前一等长区间' })
               : t('accounts.detail_previous_usage', { defaultValue: '上个窗口用量' })
           }
-          subtitle={formatRange(previousUsage?.fromMs, previousUsage?.toMs, resolvedLocale)}
+          subtitle={formatPreviousWindowRange(q, previousUsage, resolvedLocale)}
           period="previous"
           usage={previousUsage}
           labels={usageLabels}

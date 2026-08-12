@@ -1770,6 +1770,7 @@ func ensureQuotaSnapshotLifecycleColumns(db *sql.DB) error {
 	for _, statement := range []string{
 		`create index if not exists idx_quota_snapshots_observation on account_quota_snapshots(observation_id)`,
 		`create index if not exists idx_quota_snapshots_window_cycle on account_quota_snapshots(logical_window_id, cycle_id, observed_at_ms desc)`,
+		`create index if not exists idx_quota_snapshots_cycle_evidence on account_quota_snapshots(cycle_id, observed_at_ms, id)`,
 	} {
 		if _, err := db.Exec(statement); err != nil {
 			return err
