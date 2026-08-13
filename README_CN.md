@@ -90,6 +90,7 @@ CPA / CLIProxyAPI 可以在 `:8317` 直接托管官方 Management Center，也�
 ### 生产运维
 
 - 使用单 Docker 容器，或 Linux、macOS、Windows 的 amd64/arm64 原生包运行；完整栈可以与 CPA 一起部署。
+- 符合条件、由官方控制脚本管理的原生包可以在面板中完成校验、离线备份、更新、稳定性验证和自动回滚；Docker 与自定义服务布局仍按设计手动更新。
 - 请求历史、Manager 配置、账号自动化和模型价格都保存在本地文件，不需要注册账号，也不包含遥测 SDK。
 - 备份 SQLite 时同时保存 `data.key`，才能恢复加密后的 CPA Management Key。
 

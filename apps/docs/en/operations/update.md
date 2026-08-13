@@ -15,6 +15,42 @@ This guide explains how to upgrade CPAMP without losing SQLite data, `data.key`,
 
 See [Backup And Restore](./backup.md) for safe procedures. A CPA Management Key encrypted in SQLite cannot be recovered if `data.key` is lost.
 
+## In-Panel Backup And Update
+
+Starting with a compatible native release, a fixed-directory installation run by the bundled control script can expose “Backup & update” on the Dashboard. The capability is disabled by default. Upgrade manually to the first compatible release, then run once from the native package directory:
+
+```bash
+./cpa-manager-plusctl enable-updates
+./cpa-manager-plusctl restart
+```
+
+Windows PowerShell:
+
+```powershell
+.\cpa-manager-plusctl.ps1 enable-updates
+.\cpa-manager-plusctl.ps1 restart
+```
+
+Manager Server then accepts only stable Releases from the official GitHub repository. A release must contain the native archive, `checksums.txt`, `update-manifest.json`, and valid GitHub asset SHA-256 metadata. The operation has two phases:
+
+1. “Prepare update” downloads, extracts, and verifies the target package while the service remains online. It does not modify active program files.
+2. “Restart and update” launches an independent updater, stops the service cleanly, creates an offline backup of managed program files, `config.json`, the data directory, and `secrets/`, replaces managed files, then verifies `/health` and the target runtime version.
+
+The backup manifest records every file's size and SHA-256. Startup or validation failure automatically restores the old program and data. If the host is interrupted during switching, the next start through the official control script recovers the incomplete transaction first.
+
+The support boundary is intentionally strict:
+
+- Supported: a fixed-directory native package, launched with the bundled control script, after explicit `enable-updates` enrollment.
+- Unsupported: Docker, `docker run`, the installer's versioned runtime/systemd layout, custom systemd/launchd/Windows Services, custom supervisors, and the CPA-hosted lightweight panel on `:8317`.
+- Managed updates require the control script's default launch and do not support extra `start [args...]` arguments. Put ports, data paths, and similar settings in `config.json` or environment variables. `enable-updates` refuses enrollment while an argument-based process is running.
+- The data directory must be a dedicated child of the installation directory, with SQLite and `data.key` beneath it. The backup directory must not contain the data directory or be contained by it.
+
+On Windows, `.update`, rollback snapshots, and their sensitive files receive protected NTFS ACLs granting full control only to the current user, SYSTEM, and local Administrators. Preparation or backup fails closed if a private ACL cannot be established; program replacement does not continue.
+
+After a successful update, the transaction's downloaded archive and extracted staging directory are removed while transaction metadata remains. Preparing a later update retains only the two newest safely removable old transactions. Backup snapshots are not deleted automatically; manage `backups/` according to your retention and off-host backup policy.
+
+Unsupported installations continue to receive normal Release notifications, but the managed update action remains hidden. Follow the manual section for that deployment type.
+
 ## What Happens After Startup
 
 - Manager Server applies compatible SQLite schema and metadata migrations automatically; do not run SQL manually.

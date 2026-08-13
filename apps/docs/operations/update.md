@@ -15,6 +15,42 @@
 
 详细备份方法见 [备份与恢复](./backup.md)。`data.key` 丢失后，SQLite 中加密保存的 CPA Management Key 无法恢复。
 
+## 面板内“备份并更新”
+
+从支持该能力的原生版本开始，使用发布包自带控制脚本运行的固定目录安装可以在 Dashboard 里执行“备份并更新”。此能力默认关闭；第一次仍需手动升级到支持版本，然后在原生包目录执行一次：
+
+```bash
+./cpa-manager-plusctl enable-updates
+./cpa-manager-plusctl restart
+```
+
+Windows PowerShell：
+
+```powershell
+.\cpa-manager-plusctl.ps1 enable-updates
+.\cpa-manager-plusctl.ps1 restart
+```
+
+启用后，Manager Server 只接受当前官方 GitHub 仓库的稳定 Release，并要求 Release 同时提供原生包、`checksums.txt`、`update-manifest.json` 和 GitHub 资产 SHA-256。流程分成两步：
+
+1. “准备更新”在服务在线时下载、解压和校验目标包，不修改运行文件。
+2. “重启并更新”启动独立更新器，安全停止服务，离线备份程序、`config.json`、数据目录和 `secrets/`，替换受管文件，再验证 `/health` 和目标运行版本。
+
+备份清单会记录每个文件的大小和 SHA-256。验证或启动失败时会自动恢复旧程序和旧数据；如果主机在切换期间意外中断，下一次使用官方控制脚本启动时会先恢复未完成事务。
+
+支持范围有意保持严格：
+
+- 支持：同一固定目录内、通过发布包官方控制脚本启动、明确执行过 `enable-updates` 的原生安装。
+- 不支持：Docker、`docker run`、安装器的版本化 runtime/systemd 布局、自定义 systemd/launchd/Windows Service、自定义进程管理器、CPA `:8317` 轻量面板。
+- 托管更新只支持控制脚本的默认启动方式，不支持 `start [args...]` 额外启动参数。请将端口、数据路径等设置放入 `config.json` 或环境变量；带额外参数运行时，`enable-updates` 会拒绝启用。
+- 数据目录必须是安装目录内的独立子目录，SQLite 和 `data.key` 必须位于该目录内；备份目录不能包含数据目录或被数据目录包含。
+
+Windows 上，`.update`、备份快照和其中的敏感文件会使用受保护的 NTFS ACL，仅允许当前用户、SYSTEM 和本机 Administrators 完全控制。无法建立私有 ACL 时，准备或备份会安全失败，不会继续替换程序。
+
+更新成功后会删除该事务的下载包和解压目录，只保留事务元数据；准备下一次更新时只保留最近两个可安全清理的旧事务。备份快照不会自动删除，请按自己的保留和异地备份策略管理 `backups/`。
+
+不满足这些条件时，面板继续显示 Release 版本提示，但不会显示一键更新按钮。请使用本页对应部署方式的手动流程。
+
 ## 更新后会发生什么
 
 - Manager Server 启动时自动执行兼容的 SQLite schema 和 metadata 迁移，不需要手工运行 SQL。
