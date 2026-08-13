@@ -83,14 +83,21 @@ func TestServerCompatHealthInfoAndPanel(t *testing.T) {
 	infoRR := testutil.Request(t, handler, http.MethodGet, "/usage-service/info", "", "")
 	testutil.RequireStatus(t, infoRR, http.StatusOK)
 	var info struct {
-		Service    string `json:"service"`
-		Mode       string `json:"mode"`
-		StartedAt  int64  `json:"startedAt"`
-		Configured bool   `json:"configured"`
+		Service        string `json:"service"`
+		Mode           string `json:"mode"`
+		RuntimeVersion string `json:"runtimeVersion"`
+		StartedAt      int64  `json:"startedAt"`
+		Configured     bool   `json:"configured"`
 	}
 	testutil.DecodeJSON(t, infoRR, &info)
-	if info.Service != serviceID || info.Mode != "embedded" || info.StartedAt <= 0 || info.Configured {
+	if info.Service != serviceID || info.Mode != "embedded" || info.RuntimeVersion == "" || info.StartedAt <= 0 || info.Configured {
 		t.Fatalf("info response = %#v", info)
+	}
+
+	capabilityRR := testutil.Request(t, handler, http.MethodGet, "/v0/management/update/capability", "", testutil.AdminKey)
+	testutil.RequireStatus(t, capabilityRR, http.StatusOK)
+	if !strings.Contains(capabilityRR.Body.String(), `"supported":false`) || !strings.Contains(capabilityRR.Body.String(), `"managed_updates_not_enabled"`) {
+		t.Fatalf("update capability body = %s", capabilityRR.Body.String())
 	}
 
 	rootRR := testutil.Request(t, handler, http.MethodGet, "/", "", "")

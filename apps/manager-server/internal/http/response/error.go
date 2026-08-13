@@ -7,7 +7,40 @@ import (
 )
 
 func Error(w http.ResponseWriter, status int, err error) {
-	JSON(w, status, map[string]any{"error": err.Error(), "code": UsageServiceErrorCode(err)})
+	code := UsageServiceErrorCode(err)
+	JSON(w, status, map[string]any{"error": PublicErrorMessage(code, err), "code": code})
+}
+
+func PublicErrorMessage(code string, err error) string {
+	switch code {
+	case "update_staged_version_changed":
+		return "the running version changed after this update was prepared; prepare the update again"
+	case "update_target_not_newer":
+		return "the prepared update is no longer newer than the running version"
+	case "update_manual_recovery_required":
+		return "manual update recovery is required before another update can be prepared"
+	case "update_target_unstable":
+		return "the target version did not remain healthy; the previous version was restored"
+	case "update_private_storage_unavailable":
+		return "private update storage could not be secured; no program files were replaced"
+	case "request_failed":
+		if managedUpdateError(err) {
+			return "managed update failed; review the update status and Manager Server logs"
+		}
+	}
+	return err.Error()
+}
+
+func managedUpdateError(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "managed update") ||
+		strings.Contains(message, "update transaction") ||
+		strings.Contains(message, "staged update") ||
+		strings.Contains(message, "rollback snapshot") ||
+		strings.Contains(message, "target version") ||
+		strings.Contains(message, "control script") ||
+		strings.Contains(message, "private directory") ||
+		strings.Contains(message, "private file")
 }
 
 func MethodNotAllowed(w http.ResponseWriter) {
@@ -106,6 +139,32 @@ func UsageServiceErrorCode(err error) string {
 		return "api_key_alias_duplicate"
 	case strings.Contains(message, "model price sync failed"):
 		return "model_price_sync_failed"
+	case strings.Contains(message, "managed native updates are not supported"):
+		return "managed_updates_not_supported"
+	case strings.Contains(message, "an update transaction is already active"):
+		return "update_already_active"
+	case strings.Contains(message, "no staged update is ready to apply"):
+		return "update_not_staged"
+	case strings.Contains(message, "managed shutdown is unavailable"):
+		return "managed_shutdown_unavailable"
+	case strings.Contains(message, "no newer stable release is available"):
+		return "no_update_available"
+	case strings.Contains(message, "not ready for managed updates"):
+		return "release_not_update_ready"
+	case strings.Contains(message, "backup preflight failed"):
+		return "update_backup_preflight_failed"
+	case strings.Contains(message, "managed update is still active"):
+		return "update_still_active"
+	case strings.Contains(message, "staged update no longer matches"):
+		return "update_staged_version_changed"
+	case strings.Contains(message, "staged update target is not newer"):
+		return "update_target_not_newer"
+	case strings.Contains(message, "manual update recovery is required"):
+		return "update_manual_recovery_required"
+	case strings.Contains(message, "did not remain healthy"):
+		return "update_target_unstable"
+	case strings.Contains(message, "restrict private"):
+		return "update_private_storage_unavailable"
 	case strings.Contains(message, "method not allowed"):
 		return "method_not_allowed"
 	default:

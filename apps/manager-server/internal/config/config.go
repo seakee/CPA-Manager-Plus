@@ -97,6 +97,18 @@ func LoadWithoutCreatingDefault() (Config, error) {
 	return LoadWithOptions(LoadOptions{})
 }
 
+func InstallRoot() string {
+	executable, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	root, err := filepath.Abs(filepath.Dir(executable))
+	if err != nil {
+		return ""
+	}
+	return root
+}
+
 func LoadWithOptions(options LoadOptions) (Config, error) {
 	cfgFile, cfgDir, err := loadFileConfig(options)
 	if err != nil {
@@ -134,7 +146,6 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 	if dataKeyPath == "" {
 		dataKeyPath = filepath.Join(dataDir, "data.key")
 	}
-
 	return Config{
 		HTTPAddr:                     env("HTTP_ADDR", stringFallback(cfgFile.HTTPAddr, "0.0.0.0:18317")),
 		DataDir:                      dataDir,

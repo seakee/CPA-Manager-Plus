@@ -11,12 +11,15 @@ RUN VERSION=$VERSION npm run build
 FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS service-build
 ARG TARGETOS
 ARG TARGETARCH
+ARG VERSION=dev
 WORKDIR /src
 COPY apps/manager-server ./apps/manager-server
 COPY --from=web-build /app/apps/web/dist/index.html ./apps/manager-server/internal/httpapi/web/management.html
 WORKDIR /src/apps/manager-server
 RUN go mod download
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/cpa-manager-plus ./cmd/cpa-manager-plus
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
+    -ldflags "-s -w -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.Version=$VERSION" \
+    -o /out/cpa-manager-plus ./cmd/cpa-manager-plus
 
 FROM alpine:3.21
 RUN apk add --no-cache ca-certificates wget tzdata

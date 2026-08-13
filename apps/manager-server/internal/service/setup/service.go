@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	collectorservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
@@ -36,6 +37,7 @@ type Result struct {
 type InfoResult struct {
 	Service            string `json:"service"`
 	Mode               string `json:"mode"`
+	RuntimeVersion     string `json:"runtimeVersion"`
 	StartedAt          int64  `json:"startedAt"`
 	Configured         bool   `json:"configured"`
 	AdminReady         bool   `json:"adminReady"`
@@ -86,6 +88,7 @@ func (s *Service) Info(ctx context.Context) (InfoResult, error) {
 	return InfoResult{
 		Service:            s.serviceID,
 		Mode:               "embedded",
+		RuntimeVersion:     buildinfo.RuntimeVersion(),
 		StartedAt:          s.startedAt,
 		Configured:         projectInitialized,
 		AdminReady:         adminReady,

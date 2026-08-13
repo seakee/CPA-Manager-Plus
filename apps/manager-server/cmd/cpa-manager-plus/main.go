@@ -25,6 +25,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	bootstrapservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrap"
 	collectorservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/collector"
+	updateservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/update"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/worker"
 )
@@ -118,6 +119,7 @@ func runServer() {
 	}
 
 	serverApp := httpapi.New(cfg, db, manager)
+	serverApp.AppContext().ShutdownRequester = updateservice.NewShutdownCoordinator(stop)
 	serverApp.AppContext().DatabaseMaintenance = walMaintenance
 	recoveryCtx, cancelRecovery := context.WithTimeout(context.Background(), 10*time.Second)
 	if err := serverApp.AppContext().CodexInspectionService.Recover(recoveryCtx); err != nil {

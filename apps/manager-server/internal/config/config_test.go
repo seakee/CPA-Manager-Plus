@@ -61,6 +61,20 @@ func TestLoadWithoutCreatingDefaultDoesNotCreateConfig(t *testing.T) {
 	}
 }
 
+func TestInstallRootUsesExecutableDirectory(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.Abs(filepath.Dir(executable))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := InstallRoot(); got != want {
+		t.Fatalf("InstallRoot() = %q, want %q", got, want)
+	}
+}
+
 func TestLoadReadsConfigAndResolvesRelativePaths(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()
