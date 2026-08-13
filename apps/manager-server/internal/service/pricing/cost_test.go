@@ -132,7 +132,7 @@ func TestContextTierOverridesLegacyLongContextPricing(t *testing.T) {
 	}
 }
 
-func TestContextTierDoesNotStackPriorityMultiplier(t *testing.T) {
+func TestGPT56ContextTierStacksAPIPriorityMultiplier(t *testing.T) {
 	prices := map[string]model.ModelPrice{
 		"gpt-5.6-sol": {
 			Prompt: 5, Completion: 30,
@@ -151,8 +151,8 @@ func TestContextTierDoesNotStackPriorityMultiplier(t *testing.T) {
 	}
 	standard := CostForModelWithServiceTier("gpt-5.6-sol", "default", tokens, prices)
 	priority := CostForModelWithServiceTier("gpt-5.6-sol", "priority", tokens, prices)
-	if math.Abs(priority-standard) > 0.000001 {
-		t.Fatalf("priority context-tier cost = %v, want standard context-tier cost %v", priority, standard)
+	if math.Abs(priority-standard*2) > 0.000001 {
+		t.Fatalf("priority context-tier cost = %v, want %v", priority, standard*2)
 	}
 }
 
@@ -588,12 +588,13 @@ func TestLongContextPremiumCoversGPT54AndGPT55(t *testing.T) {
 	}
 }
 
-func TestLongContextDoesNotStackPriorityMultiplier(t *testing.T) {
-	tokens := ModelTokens{InputTokens: 300_000, OutputTokens: 100_000, LongInputTokens: 300_000, LongOutputTokens: 100_000}
+func TestGPT56APIPriorityStacksOnLongContext(t *testing.T) {
+	settings := model.FastBillingSettings{Mode: model.FastBillingModeAPIPriority}
+	tokens := ModelTokens{InputTokens: 300_000, OutputTokens: 100_000, LongInputTokens: 300_000, LongOutputTokens: 100_000, FastBillingSettings: &settings}
 	standard := CostForModelWithServiceTier("gpt-5.6-luna", "default", tokens, nil)
 	priority := CostForModelWithServiceTier("gpt-5.6-luna", "priority", tokens, nil)
-	if math.Abs(priority-standard) > 0.000001 {
-		t.Fatalf("priority long cost = %v, want standard long cost %v", priority, standard)
+	if math.Abs(priority-standard*2) > 0.000001 {
+		t.Fatalf("priority long cost = %v, want %v", priority, standard*2)
 	}
 }
 
@@ -629,5 +630,53 @@ func BenchmarkCostForModelWithExplicitServiceTier(b *testing.B) {
 	}
 	if cost == 0 {
 		b.Fatal("cost = 0")
+	}
+}
+
+func TestCodexCreditsFastBillingUsesTwoPointFiveMultiplier(t *testing.T) {
+	prices := map[string]model.ModelPrice{
+		"gpt-5.6-sol": {
+			Prompt: 5, Completion: 30, Cache: 0.5,
+			ContextTiers: []model.ModelPriceContextTier{{
+				ThresholdTokens: 272_000, Prompt: 10, Completion: 45,
+				PromptConfigured: true, CompletionConfigured: true,
+			}},
+			ServiceTiers: []model.ModelPriceServiceTier{{
+				Mode: "fast", ServiceTier: "priority", Prompt: 10, Completion: 60,
+				PromptConfigured: true, CompletionConfigured: true,
+			}},
+		},
+	}
+	settings := model.FastBillingSettings{Mode: model.FastBillingModeCodexCredits}
+	short := ModelTokens{InputTokens: 100_000, OutputTokens: 10_000, FastBillingSettings: &settings}
+	standardShort := CostForModelWithServiceTier("gpt-5.6-sol", "auto", short, prices)
+	fastShort := CostForModelWithServiceTier("gpt-5.6-sol", "priority", short, prices)
+	if math.Abs(fastShort-standardShort*2.5) > 0.000001 {
+		t.Fatalf("short fast cost = %v, want %v", fastShort, standardShort*2.5)
+	}
+
+	long := ModelTokens{
+		InputTokens: 300_000, OutputTokens: 10_000,
+		LongInputTokens: 300_000, LongOutputTokens: 10_000,
+		ContextThresholdTokens: 272_000,
+		FastBillingSettings:    &settings,
+	}
+	standardLong := CostForModelWithServiceTier("gpt-5.6-sol", "auto", long, prices)
+	fastLong := CostForModelWithServiceTier("gpt-5.6-sol", "priority", long, prices)
+	if math.Abs(fastLong-standardLong*2.5) > 0.000001 {
+		t.Fatalf("long fast cost = %v, want %v", fastLong, standardLong*2.5)
+	}
+}
+
+func TestAutomaticFastBillingUsesProvider(t *testing.T) {
+	prices := map[string]model.ModelPrice{"gpt-5.6-sol": {Prompt: 5, Completion: 30, Cache: 0.5}}
+	settings := model.FastBillingSettings{Mode: model.FastBillingModeAutomatic}
+	codexTokens := ModelTokens{InputTokens: 1_000_000, Provider: "codex", FastBillingSettings: &settings}
+	apiTokens := ModelTokens{InputTokens: 1_000_000, Provider: "openai", FastBillingSettings: &settings}
+	if got := CostForModelWithServiceTier("gpt-5.6-sol", "priority", codexTokens, prices); math.Abs(got-12.5) > 0.000001 {
+		t.Fatalf("codex automatic cost = %v, want 12.5", got)
+	}
+	if got := CostForModelWithServiceTier("gpt-5.6-sol", "priority", apiTokens, prices); math.Abs(got-10) > 0.000001 {
+		t.Fatalf("api automatic cost = %v, want 10", got)
 	}
 }

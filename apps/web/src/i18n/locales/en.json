@@ -2135,7 +2135,18 @@
     "add_manual": "Add manually",
     "unmatched_title": "Unmatched models",
     "optional_price_placeholder": "Auto when blank",
-    "empty": "No matching model prices"
+    "empty": "No matching model prices",
+    "fast_billing_title": "GPT-5.6 Fast/Priority billing mode",
+    "fast_billing_hint": "Choose how CPAMP estimates GPT-5.6 requests marked fast or priority. Standard requests always remain 1×.",
+    "fast_billing_api": "API Priority · 2×",
+    "fast_billing_codex": "Codex Fast credits · 2.5×",
+    "fast_billing_auto": "Automatic by provider",
+    "fast_billing_auto_hint": "Automatic uses 2.5× for the codex provider and 2× for other providers. Provider overrides are supported by the API.",
+    "fast_billing_saved": "Fast billing mode saved",
+    "fast_billing_save_failed": "Failed to save Fast billing mode",
+    "fast_billing_provider_placeholder": "Provider/channel, e.g. codex",
+    "fast_billing_override_mode": "Provider billing mode",
+    "fast_billing_add_override": "Add provider override"
   },
   "usage_stats": {
     "title": "Usage Statistics",

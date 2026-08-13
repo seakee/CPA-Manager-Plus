@@ -137,12 +137,12 @@ func (r *repository) LoadModelStats(ctx context.Context, filter AnalyticsFilter)
 	source, args := filteredEventSourceSQL(
 		filter,
 		state.CoverageEventID,
-		`p.requested_model as model, p.analytics_model, p.resolved_model, p.service_tier, p.failed,
+		`p.requested_model as model, p.analytics_model, p.resolved_model, p.service_tier, coalesce(nullif(p.auth_provider_snapshot, ''), p.provider, '') as provider, p.failed,
 		p.normalized_total_input_tokens, p.output_tokens, p.reasoning_tokens,
 		p.cached_tokens, p.cache_tokens, p.cache_read_tokens,
 		p.cache_creation_tokens, p.total_tokens`,
 		usageidentity.SQLEffectiveRequestedModelExpression("e.model", "e.requested_model")+`, `+usageidentity.SQLRequestAnalyticsModelExpression("e.model", "e.requested_model")+`, coalesce(e.resolved_model, ''),
-		coalesce(e.service_tier, ''), coalesce(e.failed, 0),
+		coalesce(e.service_tier, ''), coalesce(nullif(e.auth_provider_snapshot, ''), e.provider, ''), coalesce(e.failed, 0),
 		coalesce(e.normalized_total_input_tokens, e.input_tokens, 0),
 		coalesce(e.output_tokens, 0), coalesce(e.reasoning_tokens, 0),
 		coalesce(e.cached_tokens, 0), coalesce(e.cache_tokens, 0),
@@ -181,6 +181,7 @@ func (r *repository) LoadModelStats(ctx context.Context, filter AnalyticsFilter)
 		pricing_model_value,
 		context_threshold_tokens_value,
 		service_tier,
+		provider,
 		count(*),
 		coalesce(sum(case when failed = 0 then 1 else 0 end), 0),
 		coalesce(sum(normalized_total_input_tokens), 0),
@@ -197,7 +198,7 @@ func (r *repository) LoadModelStats(ctx context.Context, filter AnalyticsFilter)
 		coalesce(sum(total_tokens), 0)
 	from banded_events
 		group by analytics_model, billing_model_value, pricing_model_value,
-		context_threshold_tokens_value, service_tier
+		context_threshold_tokens_value, service_tier, provider
 	order by count(*) desc`, source, model.ModelPriceBaseContextThreshold, usage.LongContextInputTokenThreshold)
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -213,6 +214,7 @@ func (r *repository) LoadModelStats(ctx context.Context, filter AnalyticsFilter)
 			&stat.PricingModel,
 			&stat.ContextThresholdTokens,
 			&stat.ServiceTier,
+			&stat.Provider,
 			&stat.Calls,
 			&stat.SuccessCalls,
 			&stat.InputTokens,

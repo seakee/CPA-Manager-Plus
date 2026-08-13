@@ -364,6 +364,23 @@ export interface ModelPricesResponse {
   prices: Record<string, ModelPrice>;
 }
 
+export type FastBillingMode = 'api_priority' | 'codex_credits' | 'automatic';
+
+export interface FastBillingProviderOverride {
+  provider: string;
+  mode: FastBillingMode;
+}
+
+export interface FastBillingSettings {
+  mode: FastBillingMode;
+  providerOverrides?: FastBillingProviderOverride[];
+  updatedAtMs?: number;
+}
+
+export interface FastBillingSettingsResponse {
+  settings: FastBillingSettings;
+}
+
 export interface ModelPriceUsageStat {
   model: string;
   calls: number;
@@ -466,12 +483,7 @@ export interface UsageImportResponse {
 }
 
 export type UsageImportSessionStatus =
-  | 'uploading'
-  | 'ready'
-  | 'processing'
-  | 'completed'
-  | 'failed'
-  | 'cancelled';
+  'uploading' | 'ready' | 'processing' | 'completed' | 'failed' | 'cancelled';
 
 export interface UsageImportSession {
   id: string;
@@ -929,16 +941,9 @@ export interface MonitoringAccountWindowUsageResponse {
 }
 
 export type AccountQuotaSnapshotWindowMode =
-  | 'fixed'
-  | 'calendar'
-  | 'rolling'
-  | 'non_window'
-  | 'unknown';
+  'fixed' | 'calendar' | 'rolling' | 'non_window' | 'unknown';
 export type AccountQuotaSnapshotSource =
-  | 'api_query'
-  | 'response_header'
-  | 'response_body'
-  | 'inspection';
+  'api_query' | 'response_header' | 'response_body' | 'inspection';
 export type AccountQuotaSnapshotBoundaryAccuracy = 'exact' | 'derived' | 'estimated' | 'unknown';
 export type AccountQuotaSnapshotInventoryMode = 'complete' | 'partial' | 'delta';
 
@@ -2853,6 +2858,48 @@ export const usageServiceApi = {
     return withUsageServiceError(async () => {
       const response = await axios.get<ModelPricesResponse>(
         buildUrl(base, '/v0/management/model-prices'),
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+        }
+      );
+      return response.data;
+    });
+  },
+
+  getFastBillingSettings: async (
+    base: string,
+    managementKey?: string
+  ): Promise<FastBillingSettingsResponse> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return { settings: { mode: 'api_priority' } };
+    }
+
+    return withUsageServiceError(async () => {
+      const response = await axios.get<FastBillingSettingsResponse>(
+        buildUrl(base, '/v0/management/model-prices/fast-billing-settings'),
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+        }
+      );
+      return response.data;
+    });
+  },
+
+  saveFastBillingSettings: async (
+    base: string,
+    settings: FastBillingSettings,
+    managementKey?: string
+  ): Promise<FastBillingSettingsResponse> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return { settings };
+    }
+
+    return withUsageServiceError(async () => {
+      const response = await axios.put<FastBillingSettingsResponse>(
+        buildUrl(base, '/v0/management/model-prices/fast-billing-settings'),
+        { settings },
         {
           timeout: USAGE_SERVICE_TIMEOUT_MS,
           headers: authHeaders(managementKey),

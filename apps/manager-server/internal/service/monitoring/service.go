@@ -3513,6 +3513,7 @@ func buildAccountHistoryTotals(rows []store.AccountHistoryRollupRow, prices map[
 			[]string{row.BillingModel, row.Model},
 			row.ServiceTier,
 			pricing.ModelTokens{
+				Provider:                row.AuthProviderSnapshot,
 				InputTokens:             row.InputTokens,
 				OutputTokens:            row.OutputTokens,
 				CachedTokens:            row.CachedTokens,
@@ -3552,6 +3553,7 @@ func buildPricingAccountHistoryTotals(rows []store.UsagePricingAccountRow, price
 			[]string{row.BillingModel, row.Model},
 			row.ServiceTier,
 			pricing.ModelTokens{
+				Provider:                row.AuthProviderSnapshot,
 				PricingModel:            row.PricingModel,
 				ContextThresholdTokens:  row.ContextThresholdTokens,
 				InputTokens:             row.InputTokens,
@@ -3810,6 +3812,7 @@ func buildAccountWindowUsageTotals(rows []store.AccountWindowModelStat, prices m
 			[]string{row.BillingModel, row.Model},
 			row.ServiceTier,
 			pricing.ModelTokens{
+				Provider:                row.Provider,
 				PricingModel:            row.PricingModel,
 				ContextThresholdTokens:  row.ContextThresholdTokens,
 				InputTokens:             row.InputTokens,
@@ -3860,6 +3863,7 @@ func sumCost(stats []store.ModelStat, prices map[string]store.ModelPrice) float6
 func costForStat(stat store.ModelStat, prices map[string]store.ModelPrice) float64 {
 	return pricing.CostForModelCandidatesWithServiceTier([]string{stat.BillingModel, stat.Model}, stat.ServiceTier, pricing.ModelTokens{
 		PricingModel:            stat.PricingModel,
+		Provider:                stat.Provider,
 		ContextThresholdTokens:  stat.ContextThresholdTokens,
 		InputTokens:             stat.InputTokens,
 		OutputTokens:            stat.OutputTokens,
@@ -3876,6 +3880,7 @@ func costForStat(stat store.ModelStat, prices map[string]store.ModelPrice) float
 
 func costForTimelinePoint(point store.TimelinePoint, prices map[string]store.ModelPrice) float64 {
 	return pricing.CostForModelCandidatesWithServiceTier([]string{point.BillingModel, point.Model}, point.ServiceTier, pricing.ModelTokens{
+		Provider:                point.Provider,
 		PricingModel:            point.PricingModel,
 		ContextThresholdTokens:  point.ContextThresholdTokens,
 		InputTokens:             point.InputTokens,
@@ -3893,6 +3898,7 @@ func costForTimelinePoint(point store.TimelinePoint, prices map[string]store.Mod
 
 func costForHeatmapPoint(point store.HeatmapPoint, prices map[string]store.ModelPrice) float64 {
 	return pricing.CostForModelCandidatesWithServiceTier([]string{point.BillingModel, point.Model}, point.ServiceTier, pricing.ModelTokens{
+		Provider:                point.Provider,
 		PricingModel:            point.PricingModel,
 		ContextThresholdTokens:  point.ContextThresholdTokens,
 		InputTokens:             point.InputTokens,
@@ -3910,6 +3916,7 @@ func costForHeatmapPoint(point store.HeatmapPoint, prices map[string]store.Model
 
 func costForChannelStat(stat store.ChannelModelStat, prices map[string]store.ModelPrice) float64 {
 	return pricing.CostForModelCandidatesWithServiceTier([]string{stat.BillingModel, stat.Model}, stat.ServiceTier, pricing.ModelTokens{
+		Provider:                stat.AuthProviderSnapshot,
 		PricingModel:            stat.PricingModel,
 		ContextThresholdTokens:  stat.ContextThresholdTokens,
 		InputTokens:             stat.InputTokens,
@@ -3927,6 +3934,7 @@ func costForChannelStat(stat store.ChannelModelStat, prices map[string]store.Mod
 
 func costForAccountModelStat(stat store.AccountModelStat, prices map[string]store.ModelPrice) float64 {
 	return pricing.CostForModelCandidatesWithServiceTier([]string{stat.BillingModel, stat.Model}, stat.ServiceTier, pricing.ModelTokens{
+		Provider:                stat.Provider,
 		PricingModel:            stat.PricingModel,
 		ContextThresholdTokens:  stat.ContextThresholdTokens,
 		InputTokens:             stat.InputTokens,
@@ -3944,6 +3952,7 @@ func costForAccountModelStat(stat store.AccountModelStat, prices map[string]stor
 
 func costForAPIKeyModelStat(stat store.APIKeyModelStat, prices map[string]store.ModelPrice) float64 {
 	return pricing.CostForModelCandidatesWithServiceTier([]string{stat.BillingModel, stat.Model}, stat.ServiceTier, pricing.ModelTokens{
+		Provider:                stat.AuthProviderSnapshot,
 		PricingModel:            stat.PricingModel,
 		ContextThresholdTokens:  stat.ContextThresholdTokens,
 		InputTokens:             stat.InputTokens,
@@ -3961,6 +3970,7 @@ func costForAPIKeyModelStat(stat store.APIKeyModelStat, prices map[string]store.
 
 func costForCredentialModelStat(stat store.CredentialModelStat, prices map[string]store.ModelPrice) float64 {
 	return pricing.CostForModelCandidatesWithServiceTier([]string{stat.BillingModel, stat.Model}, stat.ServiceTier, pricing.ModelTokens{
+		Provider:                stat.AuthProviderSnapshot,
 		PricingModel:            stat.PricingModel,
 		ContextThresholdTokens:  stat.ContextThresholdTokens,
 		InputTokens:             stat.InputTokens,
@@ -3978,6 +3988,7 @@ func costForCredentialModelStat(stat store.CredentialModelStat, prices map[strin
 
 func costForCredentialTimelinePoint(point store.CredentialTimelinePoint, prices map[string]store.ModelPrice) float64 {
 	return pricing.CostForModelCandidatesWithServiceTier([]string{point.BillingModel, point.Model}, point.ServiceTier, pricing.ModelTokens{
+		Provider:                point.AuthProviderSnapshot,
 		PricingModel:            point.PricingModel,
 		ContextThresholdTokens:  point.ContextThresholdTokens,
 		InputTokens:             point.InputTokens,
@@ -3995,6 +4006,7 @@ func costForCredentialTimelinePoint(point store.CredentialTimelinePoint, prices 
 
 func costForAPIKeyTimelinePoint(point store.APIKeyTimelinePoint, prices map[string]store.ModelPrice) float64 {
 	return pricing.CostForModelCandidatesWithServiceTier([]string{point.BillingModel, point.Model}, point.ServiceTier, pricing.ModelTokens{
+		Provider:                point.Provider,
 		PricingModel:            point.PricingModel,
 		ContextThresholdTokens:  point.ContextThresholdTokens,
 		InputTokens:             point.InputTokens,

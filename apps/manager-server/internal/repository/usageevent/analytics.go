@@ -115,6 +115,7 @@ type TimelinePoint struct {
 	usage.PricingBand
 	BucketMS            int64
 	Model               string
+	Provider            string
 	BillingModel        string
 	ServiceTier         string
 	Calls               int64
@@ -243,6 +244,7 @@ type AccountWindowModelStat struct {
 	usage.PricingBand
 	RequestIndex        int
 	Model               string
+	Provider            string
 	BillingModel        string
 	ServiceTier         string
 	Calls               int64
@@ -322,6 +324,7 @@ type APIKeyTimelinePoint struct {
 	APIKeyHash          string
 	BucketMS            int64
 	Model               string
+	Provider            string
 	BillingModel        string
 	ServiceTier         string
 	Calls               int64
@@ -513,6 +516,7 @@ select
 	pricing_model_value,
 	context_threshold_tokens_value,
 	coalesce(service_tier, '') as service_tier,
+	coalesce(provider, '') as provider,
 	count(*) as calls,
 	sum(case when failed = 0 then 1 else 0 end) as success,
 	coalesce(sum(` + normalizedInputExpr + `), 0),
@@ -528,7 +532,7 @@ select
 	coalesce(sum(` + longCacheCreationExpr + `), 0),
 	coalesce(sum(total_tokens), 0)
 from banded_usage_events ` + where + `
-group by analytics_model_value, billing_model, pricing_model_value, context_threshold_tokens_value, coalesce(service_tier, '')
+group by analytics_model_value, billing_model, pricing_model_value, context_threshold_tokens_value, coalesce(service_tier, ''), coalesce(provider, '')
 order by calls desc`
 	if limit > 0 {
 		query = pricingBandedUsageEventsCTE + `, filtered as (
@@ -547,6 +551,7 @@ select
 	f.pricing_model_value,
 	f.context_threshold_tokens_value,
 	coalesce(f.service_tier, '') as service_tier,
+	coalesce(f.provider, '') as provider,
 	count(*) as calls,
 	sum(case when f.failed = 0 then 1 else 0 end) as success,
 	coalesce(sum(f.input_tokens), 0),
@@ -563,7 +568,7 @@ select
 	coalesce(sum(f.total_tokens), 0)
 from filtered f
 join top_models t on t.model = f.analytics_model_value
-group by f.analytics_model_value, billing_model, f.pricing_model_value, f.context_threshold_tokens_value, coalesce(f.service_tier, '')
+group by f.analytics_model_value, billing_model, f.pricing_model_value, f.context_threshold_tokens_value, coalesce(f.service_tier, ''), coalesce(f.provider, '')
 order by max(t.model_calls) desc, f.analytics_model_value, calls desc`
 		args = append(args, limit)
 	}
@@ -582,6 +587,7 @@ order by max(t.model_calls) desc, f.analytics_model_value, calls desc`
 			&stat.PricingModel,
 			&stat.ContextThresholdTokens,
 			&stat.ServiceTier,
+			&stat.Provider,
 			&stat.Calls,
 			&stat.SuccessCalls,
 			&stat.InputTokens,
@@ -614,6 +620,7 @@ select
 	pricing_model_value,
 	context_threshold_tokens_value,
 	coalesce(service_tier, '') as service_tier,
+	coalesce(provider, '') as provider,
 		failed,
 		`+normalizedInputExpr+`,
 	output_tokens,
@@ -637,6 +644,7 @@ order by timestamp_ms, analytics_model_value`, where)
 		billingModel           string
 		pricingModel           string
 		serviceTier            string
+		provider               string
 		contextThresholdTokens int64
 	}
 	grouped := map[key]*TimelinePoint{}
@@ -647,6 +655,7 @@ order by timestamp_ms, analytics_model_value`, where)
 		var billingModel string
 		var pricingModel string
 		var serviceTier string
+		var provider string
 		var contextThresholdTokens int64
 		var failed int
 		var latency sql.NullFloat64
@@ -664,6 +673,7 @@ order by timestamp_ms, analytics_model_value`, where)
 			&pricingModel,
 			&contextThresholdTokens,
 			&serviceTier,
+			&provider,
 			&failed,
 			&inputTokens,
 			&outputTokens,
@@ -682,6 +692,7 @@ order by timestamp_ms, analytics_model_value`, where)
 			billingModel:           billingModel,
 			pricingModel:           pricingModel,
 			serviceTier:            serviceTier,
+			provider:               provider,
 			contextThresholdTokens: contextThresholdTokens,
 		}
 		point := grouped[mapKey]
@@ -695,6 +706,7 @@ order by timestamp_ms, analytics_model_value`, where)
 				Model:        model,
 				BillingModel: billingModel,
 				ServiceTier:  serviceTier,
+				Provider:     provider,
 			}
 			grouped[mapKey] = point
 			order = append(order, mapKey)
@@ -747,6 +759,7 @@ select
 	pricing_model_value,
 	context_threshold_tokens_value,
 	coalesce(service_tier, '') as service_tier,
+	coalesce(provider, '') as provider,
 	failed,
 	`+normalizedInputExpr+`,
 	output_tokens,
@@ -771,6 +784,7 @@ order by timestamp_ms, api_key_hash, analytics_model_value`, where)
 		billingModel           string
 		pricingModel           string
 		serviceTier            string
+		provider               string
 		contextThresholdTokens int64
 	}
 	grouped := map[key]*APIKeyTimelinePoint{}
@@ -789,6 +803,7 @@ order by timestamp_ms, api_key_hash, analytics_model_value`, where)
 			&point.PricingModel,
 			&point.ContextThresholdTokens,
 			&point.ServiceTier,
+			&point.Provider,
 			&failed,
 			&point.InputTokens,
 			&point.OutputTokens,
@@ -808,6 +823,7 @@ order by timestamp_ms, api_key_hash, analytics_model_value`, where)
 			billingModel:           point.BillingModel,
 			pricingModel:           point.PricingModel,
 			serviceTier:            point.ServiceTier,
+			provider:               point.Provider,
 			contextThresholdTokens: point.ContextThresholdTokens,
 		}
 		entry := grouped[mapKey]
@@ -819,6 +835,7 @@ order by timestamp_ms, api_key_hash, analytics_model_value`, where)
 				Model:        point.Model,
 				BillingModel: point.BillingModel,
 				ServiceTier:  point.ServiceTier,
+				Provider:     point.Provider,
 			}
 			grouped[mapKey] = entry
 			order = append(order, mapKey)
@@ -1606,6 +1623,7 @@ select
 	e.pricing_model_value,
 	e.context_threshold_tokens_value,
 	coalesce(e.service_tier, '') as service_tier,
+	coalesce(max(e.auth_provider_snapshot), max(e.provider), '') as provider,
 	count(*),
 	sum(case when e.failed = 0 then 1 else 0 end),
 	sum(case when e.failed = 1 then 1 else 0 end),
@@ -1643,6 +1661,7 @@ order by w.request_index, max(e.timestamp_ms) desc`, args...)
 			&stat.PricingModel,
 			&stat.ContextThresholdTokens,
 			&stat.ServiceTier,
+			&stat.Provider,
 			&stat.Calls,
 			&stat.SuccessCalls,
 			&stat.FailureCalls,

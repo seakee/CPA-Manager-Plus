@@ -56,8 +56,16 @@ description: 配置 CPA Manager Plus 模型价格、service tier、长上下文�
 
 - `experimental.modes.fast.cost` 同时匹配使用数据中的 `fast` 和 API `priority`。
 - 短上下文优先使用显式 Fast/Priority 价格；缺失字段继承基础价格，显式零值保持为零。
-- 命中上下文阶梯或旧版 GPT 长上下文规则时，使用对应的标准上下文价格，不再叠加 Fast/Priority。
+- Fast/Priority 倍率应用于选中的完整标准价格，包括已命中的上下文阶梯；不会只对短上下文部分生效。
 - 非 models.dev、旧数据或没有显式模式价格的模型继续使用现有倍率作为兼容回退。
+
+模型价格页为 GPT-5.6 系列提供 **Fast/Priority 计费模式**：
+
+- **API Priority（2×）**：按 API Priority Processing 的显式价格或兼容倍率估算。
+- **Codex Fast 额度（2.5×）**：按基础价格（包括已命中的长上下文阶梯）整体乘以 2.5，用于估算 Codex 订阅额度消耗。
+- **按提供商自动判断**：`codex` 提供商使用 2.5×，其他提供商使用 2×。管理 API 还支持通过 `providerOverrides` 为特定 CPA provider 覆盖模式。
+
+该设置只影响 CPAMP 的本地成本估算，不改变 CPA 转发的 Token，也不修改上游实际扣费。普通（非 `fast`/`priority`）请求始终按 1×计算。
 
 模型价格页只读展示已同步的上下文阶梯和服务层级价格。当前手动编辑器只维护基础价格；保存手动价格会明确清除该模型已有的同步高级规则，界面会在保存前提示。
 

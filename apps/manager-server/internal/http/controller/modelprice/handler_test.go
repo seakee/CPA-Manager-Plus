@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/app"
@@ -55,5 +56,53 @@ func TestHandleUsageSummaryUsesQueryLimitAndPanelAuthorization(t *testing.T) {
 	}
 	if len(summary.Models) != 1 || summary.Models[0].Model != "gpt-new" || summary.Models[0].Calls != 1 || summary.Models[0].RequestedCalls != 1 {
 		t.Fatalf("models = %#v", summary.Models)
+	}
+}
+
+func TestFastBillingSettingsRoundTrip(t *testing.T) {
+	cfg := testutil.NewConfig(t)
+	st := testutil.NewStore(t, cfg)
+	handler := &Handler{App: &app.Context{
+		AdminAuthService:  adminauthsvc.New(cfg, st),
+		ModelPriceService: modelpricesvc.New(st, nil),
+	}}
+
+	put := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/v0/management/model-prices/fast-billing-settings", strings.NewReader(`{"settings":{"mode":"automatic","providerOverrides":[{"provider":"openai","mode":"api_priority"}]}}`))
+	req.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+	handler.Handle(put, req)
+	if put.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body = %s", put.Code, put.Body.String())
+	}
+
+	get := httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/model-prices/fast-billing-settings", nil)
+	req.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+	handler.Handle(get, req)
+	if get.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, body = %s", get.Code, get.Body.String())
+	}
+	if !strings.Contains(get.Body.String(), `"mode":"automatic"`) || !strings.Contains(get.Body.String(), `"provider":"openai"`) {
+		t.Fatalf("unexpected GET body: %s", get.Body.String())
+	}
+}
+
+func TestFastBillingSettingsDefaultsToAPIPriority(t *testing.T) {
+	cfg := testutil.NewConfig(t)
+	st := testutil.NewStore(t, cfg)
+	handler := &Handler{App: &app.Context{
+		AdminAuthService:  adminauthsvc.New(cfg, st),
+		ModelPriceService: modelpricesvc.New(st, nil),
+	}}
+
+	get := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/model-prices/fast-billing-settings", nil)
+	req.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+	handler.Handle(get, req)
+	if get.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, body = %s", get.Code, get.Body.String())
+	}
+	if !strings.Contains(get.Body.String(), `"mode":"api_priority"`) {
+		t.Fatalf("unexpected default body: %s", get.Body.String())
 	}
 }

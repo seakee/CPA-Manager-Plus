@@ -2135,7 +2135,18 @@
     "add_manual": "Добавить вручную",
     "unmatched_title": "Модели без совпадений",
     "optional_price_placeholder": "Автоматически, если пусто",
-    "empty": "Подходящих цен моделей нет"
+    "empty": "Подходящих цен моделей нет",
+    "fast_billing_title": "Режим тарификации GPT-5.6 Fast/Priority",
+    "fast_billing_hint": "Выберите, как CPAMP оценивает запросы GPT-5.6 fast или priority. Обычные запросы всегда остаются 1×.",
+    "fast_billing_api": "API Priority · 2×",
+    "fast_billing_codex": "Codex Fast credits · 2.5×",
+    "fast_billing_auto": "Автоматически по провайдеру",
+    "fast_billing_auto_hint": "Автоматический режим использует 2.5× для провайдера codex и 2× для остальных; API поддерживает переопределения.",
+    "fast_billing_saved": "Режим Fast сохранён",
+    "fast_billing_save_failed": "Не удалось сохранить режим Fast",
+    "fast_billing_provider_placeholder": "Провайдер/канал, например codex",
+    "fast_billing_override_mode": "Режим канала",
+    "fast_billing_add_override": "Добавить правило канала"
   },
   "usage_stats": {
     "title": "Статистика использования",

@@ -476,3 +476,64 @@
     grid-template-columns: 1fr;
   }
 }
+
+.fastBillingPanel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 360px);
+  align-items: center;
+  gap: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--pricing-line);
+  border-radius: 14px;
+  background: var(--pricing-surface);
+  box-shadow: var(--shadow);
+}
+
+.fastBillingPanel p,
+.fastBillingControl small {
+  margin: 4px 0 0;
+  color: var(--pricing-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.fastBillingControl {
+  display: grid;
+  gap: 4px;
+}
+
+@media (max-width: 720px) {
+  .fastBillingPanel {
+    grid-template-columns: 1fr;
+  }
+}
+
+.fastBillingOverrides {
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.fastBillingOverrideRow {
+  display: grid;
+  grid-template-columns: minmax(110px, 1fr) minmax(150px, 1fr) 32px;
+  align-items: center;
+  gap: 6px;
+}
+
+.fastBillingOverrideRow :global(.form-group) {
+  margin: 0;
+}
+
+.fastBillingActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+@media (max-width: 520px) {
+  .fastBillingOverrideRow {
+    grid-template-columns: 1fr 1fr 32px;
+  }
+}

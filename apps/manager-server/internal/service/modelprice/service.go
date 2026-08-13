@@ -17,6 +17,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/pricing"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
 
@@ -39,6 +40,10 @@ const defaultSyncProxyResolutionTimeout = 5 * time.Second
 
 type UpdateRequest struct {
 	Prices map[string]store.ModelPrice `json:"prices"`
+}
+
+type FastBillingSettingsResponse struct {
+	Settings store.FastBillingSettings `json:"settings"`
 }
 
 type SyncRequest struct {
@@ -268,6 +273,22 @@ func newMultiSource(
 
 func (s *Service) List(ctx context.Context) (map[string]store.ModelPrice, error) {
 	return s.store.LoadModelPrices(ctx)
+}
+
+func (s *Service) FastBillingSettings(ctx context.Context) (store.FastBillingSettings, error) {
+	settings, err := s.store.LoadFastBillingSettings(ctx)
+	if err == nil {
+		pricing.SetFastBillingSettings(settings)
+	}
+	return settings, err
+}
+
+func (s *Service) UpdateFastBillingSettings(ctx context.Context, settings store.FastBillingSettings) (store.FastBillingSettings, error) {
+	saved, err := s.store.SaveFastBillingSettings(ctx, settings)
+	if err == nil {
+		pricing.SetFastBillingSettings(saved)
+	}
+	return saved, err
 }
 
 func (s *Service) UsageSummary(ctx context.Context, limit int) (store.ModelUsageSummary, error) {

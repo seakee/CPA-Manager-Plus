@@ -22,6 +22,7 @@ import (
 	modelpricesvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/modelprice"
 	monitoringsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/monitoring"
 	panelsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/panel"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/pricing"
 	proxysvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/proxy"
 	quotasnapshotsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/quotasnapshot"
 	setupsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/setup"
@@ -148,6 +149,9 @@ func fromExisting(
 		TTL:            cfg.UsageImportSessionTTL,
 	}))
 	authFileMutationCoordinator := cpaauthfiles.NewMutationCoordinator()
+	if fastBilling, err := st.LoadFastBillingSettings(context.Background()); err == nil {
+		pricing.SetFastBillingSettings(fastBilling)
+	}
 	return &Context{
 		Config:               cfg,
 		Store:                st,

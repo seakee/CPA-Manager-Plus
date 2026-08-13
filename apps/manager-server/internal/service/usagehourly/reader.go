@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/pricing"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
@@ -118,7 +119,7 @@ func SupportsAnalyticsFilter(filter store.AnalyticsFilter) bool {
 }
 
 func (r *Reader) loadRows(ctx context.Context, filter store.AnalyticsFilter, dashboardTimelineReady bool, analyticsTimelineReady bool) (Snapshot, bool) {
-	if !r.enabled {
+	if !r.enabled || pricing.FastBillingSettings().ProviderAware() {
 		return Snapshot{}, false
 	}
 	if filter.FromMS >= filter.ToMS {

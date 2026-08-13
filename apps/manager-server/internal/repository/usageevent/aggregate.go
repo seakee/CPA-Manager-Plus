@@ -80,6 +80,7 @@ type ModelStat struct {
 	usage.PricingBand
 	Model               string
 	BillingModel        string
+	Provider            string
 	ServiceTier         string
 	Calls               int64
 	SuccessCalls        int64
@@ -186,6 +187,7 @@ select
 	e.pricing_model_value,
 	e.context_threshold_tokens_value,
 	coalesce(e.service_tier, '') as service_tier,
+	coalesce(e.provider, '') as provider,
 	count(*) as calls,
 	sum(case when e.failed = 0 then 1 else 0 end) as success,
 	coalesce(sum(coalesce(e.normalized_total_input_tokens, e.input_tokens)), 0),
@@ -202,7 +204,7 @@ select
 	coalesce(sum(e.total_tokens), 0)
 from banded_usage_events e
 join top_models t on t.model = e.analytics_model_value
-group by e.analytics_model_value, billing_model, e.pricing_model_value, e.context_threshold_tokens_value, coalesce(e.service_tier, '')
+group by e.analytics_model_value, billing_model, e.pricing_model_value, e.context_threshold_tokens_value, coalesce(e.service_tier, ''), coalesce(e.provider, '')
 order by max(t.model_calls) desc, e.analytics_model_value, calls desc`, usage.LongContextInputTokenThreshold)
 
 // TopModelsBetween returns the most active models ordered by call count.
@@ -225,6 +227,7 @@ func (r *repository) TopModelsBetween(ctx context.Context, fromMs, toMs int64, l
 			&stat.PricingModel,
 			&stat.ContextThresholdTokens,
 			&stat.ServiceTier,
+			&stat.Provider,
 			&stat.Calls,
 			&stat.SuccessCalls,
 			&stat.InputTokens,
@@ -254,6 +257,7 @@ select
 	pricing_model_value,
 	context_threshold_tokens_value,
 	coalesce(service_tier, '') as service_tier,
+	coalesce(provider, '') as provider,
 	count(*) as calls,
 	sum(case when failed = 0 then 1 else 0 end) as success,
 	coalesce(sum(coalesce(normalized_total_input_tokens, input_tokens)), 0),
@@ -270,7 +274,7 @@ select
 	coalesce(sum(total_tokens), 0)
 from banded_usage_events
 where timestamp_ms >= ? and timestamp_ms < ?
-group by analytics_model_value, billing_model, pricing_model_value, context_threshold_tokens_value, coalesce(service_tier, '')
+group by analytics_model_value, billing_model, pricing_model_value, context_threshold_tokens_value, coalesce(service_tier, ''), coalesce(provider, '')
 order by calls desc`, usage.LongContextInputTokenThreshold)
 
 // ModelStatsBetween returns per-model totals for all models in a window.
@@ -290,6 +294,7 @@ func (r *repository) ModelStatsBetween(ctx context.Context, fromMs, toMs int64) 
 			&stat.PricingModel,
 			&stat.ContextThresholdTokens,
 			&stat.ServiceTier,
+			&stat.Provider,
 			&stat.Calls,
 			&stat.SuccessCalls,
 			&stat.InputTokens,

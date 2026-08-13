@@ -2135,7 +2135,18 @@
     "add_manual": "手动添加",
     "unmatched_title": "未匹配模型",
     "optional_price_placeholder": "留空时自动计算",
-    "empty": "没有符合条件的模型价格"
+    "empty": "没有符合条件的模型价格",
+    "fast_billing_title": "GPT-5.6 Fast/Priority 计费模式",
+    "fast_billing_hint": "选择 CPAMP 如何估算标记为 fast 或 priority 的 GPT-5.6 请求；普通请求始终保持 1×。",
+    "fast_billing_api": "API Priority · 2×",
+    "fast_billing_codex": "Codex Fast 额度 · 2.5×",
+    "fast_billing_auto": "按提供商自动判断",
+    "fast_billing_auto_hint": "自动模式对 codex 提供商使用 2.5×，其他提供商使用 2×；API 支持提供商覆盖配置。",
+    "fast_billing_saved": "Fast 计费模式已保存",
+    "fast_billing_save_failed": "Fast 计费模式保存失败",
+    "fast_billing_provider_placeholder": "提供商/渠道，例如 codex",
+    "fast_billing_override_mode": "渠道计费模式",
+    "fast_billing_add_override": "添加渠道覆盖"
   },
   "usage_stats": {
     "title": "使用统计",

@@ -63,6 +63,7 @@ type accountWindowStatKey struct {
 	pricingModel     string
 	contextThreshold int64
 	serviceTier      string
+	provider         string
 }
 
 func mergeProjectedAccountWindowStats(
@@ -90,6 +91,7 @@ func mergeProjectedAccountWindowStats(
 		pricing_model_value,
 		context_threshold_tokens_value,
 		coalesce(service_tier, ''),
+		coalesce(provider, ''),
 		count(*),
 		coalesce(sum(case when failed = 0 then 1 else 0 end), 0),
 		coalesce(sum(case when failed = 1 then 1 else 0 end), 0),
@@ -107,7 +109,7 @@ func mergeProjectedAccountWindowStats(
 		max(timestamp_ms)
 	from banded_events
 		group by request_index, analytics_model, billing_model_value, pricing_model_value,
-		context_threshold_tokens_value, coalesce(service_tier, '')`, monitoringBandedProjectedEventsCTE(source))
+		context_threshold_tokens_value, coalesce(service_tier, ''), coalesce(provider, '')`, monitoringBandedProjectedEventsCTE(source))
 	args = appendLongContextThresholdArgs(args)
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -158,6 +160,7 @@ func mergeStoredAccountWindowStats(
 		d.pricing_model,
 		d.context_threshold_tokens,
 		coalesce(d.service_tier, ''),
+		coalesce(nullif(d.auth_provider_snapshot, ''), d.provider, ''),
 		coalesce(sum(d.calls), 0),
 		coalesce(sum(case when d.failed = 0 then d.calls else 0 end), 0),
 		coalesce(sum(case when d.failed = 1 then d.calls else 0 end), 0),
@@ -189,7 +192,7 @@ func mergeStoredAccountWindowStats(
 			)
 		)
 	group by w.request_index, d.model, d.billing_model, d.pricing_model,
-		d.context_threshold_tokens, coalesce(d.service_tier, '')`, args...)
+		d.context_threshold_tokens, coalesce(d.service_tier, ''), coalesce(nullif(d.auth_provider_snapshot, ''), d.provider, '')`, args...)
 	if err != nil {
 		return err
 	}
@@ -207,6 +210,7 @@ func mergeAccountWindowStatRows(rows *sql.Rows, grouped map[accountWindowStatKey
 			&stat.PricingModel,
 			&stat.ContextThresholdTokens,
 			&stat.ServiceTier,
+			&stat.Provider,
 			&stat.Calls,
 			&stat.SuccessCalls,
 			&stat.FailureCalls,
@@ -232,6 +236,7 @@ func mergeAccountWindowStatRows(rows *sql.Rows, grouped map[accountWindowStatKey
 			pricingModel:     stat.PricingModel,
 			contextThreshold: stat.ContextThresholdTokens,
 			serviceTier:      stat.ServiceTier,
+			provider:         stat.Provider,
 		}
 		current := grouped[key]
 		if current == nil {
@@ -316,7 +321,7 @@ func accountWindowEventSourceSQL(
 		values ` + strings.Join(values, ",") + `
 	)
 	select
-		w.request_index, p.requested_model as model, p.analytics_model, p.resolved_model, p.service_tier, p.failed,
+		w.request_index, p.requested_model as model, p.analytics_model, p.resolved_model, p.service_tier, coalesce(nullif(p.auth_provider_snapshot, ''), p.provider, '') as provider, p.failed,
 		p.normalized_total_input_tokens, p.output_tokens, p.cached_tokens,
 		p.cache_tokens, p.cache_read_tokens, p.cache_creation_tokens,
 		p.total_tokens, p.timestamp_ms
@@ -345,7 +350,7 @@ func accountWindowEventSourceSQL(
 	union all
 	select
 		w.request_index, ` + usageidentity.SQLEffectiveRequestedModelExpression("e.model", "e.requested_model") + `, ` + usageidentity.SQLRequestAnalyticsModelExpression("e.model", "e.requested_model") + `, coalesce(e.resolved_model, ''),
-		coalesce(e.service_tier, ''), coalesce(e.failed, 0),
+		coalesce(e.service_tier, ''), coalesce(nullif(e.auth_provider_snapshot, ''), e.provider, ''), coalesce(e.failed, 0),
 		coalesce(e.normalized_total_input_tokens, e.input_tokens, 0),
 		coalesce(e.output_tokens, 0), coalesce(e.cached_tokens, 0),
 		coalesce(e.cache_tokens, 0), coalesce(e.cache_read_tokens, 0),

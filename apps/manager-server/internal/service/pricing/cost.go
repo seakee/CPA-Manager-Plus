@@ -3,6 +3,7 @@ package pricing
 
 import (
 	"strings"
+	"sync/atomic"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 )
@@ -15,6 +16,8 @@ const PerMillion = 1_000_000.0
 // fine-grained cache_read/cache_creation values have already been removed.
 type ModelTokens struct {
 	PricingModel            string
+	Provider                string
+	FastBillingSettings     *model.FastBillingSettings
 	ContextThresholdTokens  int64
 	InputTokens             int64
 	OutputTokens            int64
@@ -26,6 +29,20 @@ type ModelTokens struct {
 	LongCachedTokens        int64
 	LongCacheReadTokens     int64
 	LongCacheCreationTokens int64
+}
+
+var fastBillingSettings atomic.Value
+
+func init() {
+	fastBillingSettings.Store(model.DefaultFastBillingSettings())
+}
+
+func SetFastBillingSettings(settings model.FastBillingSettings) {
+	fastBillingSettings.Store(model.NormalizeFastBillingSettings(settings))
+}
+
+func FastBillingSettings() model.FastBillingSettings {
+	return fastBillingSettings.Load().(model.FastBillingSettings)
 }
 
 // CostForModel computes the dollar cost for a single (model, tokens) pair.
@@ -274,6 +291,18 @@ func supportsLongContextPremium(modelName string) bool {
 }
 
 func costForPriceWithServiceTier(modelName, serviceTier string, tokens ModelTokens, price model.ModelPrice) float64 {
+	settings := FastBillingSettings()
+	if tokens.FastBillingSettings != nil {
+		settings = model.NormalizeFastBillingSettings(*tokens.FastBillingSettings)
+	}
+	if isFastServiceTier(serviceTier) && isGPT56Model(modelName) {
+		switch settings.ResolveMode(tokens.Provider) {
+		case model.FastBillingModeCodexCredits:
+			return costForPrice(modelName, tokens, price) * 2.5
+		case model.FastBillingModeAPIPriority:
+			return costForPrice(modelName, tokens, price) * 2
+		}
+	}
 	if activeContextTier(tokens, price) {
 		return costForPrice(modelName, tokens, price)
 	}
@@ -297,6 +326,11 @@ func costForPriceWithServiceTier(modelName, serviceTier string, tokens ModelToke
 		return costForPriceWithLegacyLongContext(modelName, tokens, effectivePrice, len(price.ContextTiers) == 0)
 	}
 	return costForPrice(modelName, tokens, price) * ServiceTierMultiplier(modelName, serviceTier)
+}
+
+func isFastServiceTier(serviceTier string) bool {
+	tier := strings.ToLower(strings.TrimSpace(serviceTier))
+	return tier == "priority" || tier == "fast"
 }
 
 func splitLegacyLongContextTokens(tokens ModelTokens) (ModelTokens, ModelTokens) {

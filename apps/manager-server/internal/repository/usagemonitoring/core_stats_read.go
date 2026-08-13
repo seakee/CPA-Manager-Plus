@@ -22,6 +22,7 @@ type dailyModelStatKey struct {
 	pricingModel     string
 	contextThreshold int64
 	serviceTier      string
+	provider         string
 }
 
 func loadDailyAggregate(
@@ -294,7 +295,7 @@ func mergeStoredModelStats(
 	conditions, args := storedStatsConditions(filter, revision, fromMS, toMS)
 	rows, err := tx.QueryContext(ctx, `select
 		model, billing_model, pricing_model, context_threshold_tokens,
-		service_tier, sum(calls),
+		service_tier, coalesce(nullif(auth_provider_snapshot, ''), provider, '') as effective_provider, sum(calls),
 		sum(case when failed = 0 then calls else 0 end),
 		sum(input_tokens), sum(output_tokens), sum(reasoning_tokens),
 		sum(cached_tokens), sum(cache_read_tokens), sum(cache_creation_tokens),
@@ -304,7 +305,7 @@ func mergeStoredModelStats(
 	from usage_monitoring_account_daily_rollups_v1
 	where `+strings.Join(conditions, " and ")+`
 	group by model, billing_model, pricing_model, context_threshold_tokens,
-		service_tier`, args...)
+		service_tier, coalesce(nullif(auth_provider_snapshot, ''), provider, '')`, args...)
 	if err != nil {
 		return err
 	}
@@ -328,12 +329,12 @@ func mergeProjectedModelStats(
 	source, args := filteredEventSourceSQL(
 		filter,
 		projectionCoverageEventID,
-		`p.requested_model as model, p.analytics_model, p.resolved_model, p.service_tier, p.failed,
+		`p.requested_model as model, p.analytics_model, p.resolved_model, p.service_tier, coalesce(nullif(p.auth_provider_snapshot, ''), p.provider, '') as provider, p.failed,
 		p.normalized_total_input_tokens, p.output_tokens, p.reasoning_tokens,
 		p.cached_tokens, p.cache_tokens, p.cache_read_tokens,
 		p.cache_creation_tokens, p.total_tokens`,
 		usageidentity.SQLEffectiveRequestedModelExpression("e.model", "e.requested_model")+`, `+usageidentity.SQLRequestAnalyticsModelExpression("e.model", "e.requested_model")+`, coalesce(e.resolved_model, ''),
-		coalesce(e.service_tier, ''), coalesce(e.failed, 0),
+		coalesce(e.service_tier, ''), coalesce(nullif(e.auth_provider_snapshot, ''), e.provider, ''), coalesce(e.failed, 0),
 		coalesce(e.normalized_total_input_tokens, e.input_tokens, 0),
 		coalesce(e.output_tokens, 0), coalesce(e.reasoning_tokens, 0),
 		coalesce(e.cached_tokens, 0), coalesce(e.cache_tokens, 0),
@@ -348,7 +349,7 @@ func mergeProjectedModelStats(
 	query := fmt.Sprintf(`%s
 	select
 		analytics_model, billing_model_value, pricing_model_value,
-		context_threshold_tokens_value, service_tier,
+		context_threshold_tokens_value, service_tier, provider,
 		count(*), coalesce(sum(case when failed = 0 then 1 else 0 end), 0),
 		coalesce(sum(normalized_total_input_tokens), 0),
 		coalesce(sum(output_tokens), 0), coalesce(sum(reasoning_tokens), 0),
@@ -362,7 +363,7 @@ func mergeProjectedModelStats(
 		coalesce(sum(total_tokens), 0)
 	from banded_events
 	group by analytics_model, billing_model_value, pricing_model_value,
-		context_threshold_tokens_value, service_tier`, monitoringBandedProjectedEventsCTE(source))
+		context_threshold_tokens_value, service_tier, provider`, monitoringBandedProjectedEventsCTE(source))
 	args = appendLongContextThresholdArgs(args)
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -381,6 +382,7 @@ func scanDailyModelStats(rows *sql.Rows, grouped map[dailyModelStatKey]*ModelSta
 			&row.PricingModel,
 			&row.ContextThresholdTokens,
 			&row.ServiceTier,
+			&row.Provider,
 			&row.Calls,
 			&row.SuccessCalls,
 			&row.InputTokens,
@@ -404,6 +406,7 @@ func scanDailyModelStats(rows *sql.Rows, grouped map[dailyModelStatKey]*ModelSta
 			pricingModel:     row.PricingModel,
 			contextThreshold: row.ContextThresholdTokens,
 			serviceTier:      row.ServiceTier,
+			provider:         row.Provider,
 		}
 		entry := grouped[key]
 		if entry == nil {
@@ -438,19 +441,21 @@ func sortedDailyModelStats(grouped map[dailyModelStatKey]*ModelStat) []ModelStat
 		if result[i].Calls != result[j].Calls {
 			return result[i].Calls > result[j].Calls
 		}
-		left := fmt.Sprintf("%s\x00%s\x00%s\x00%020d\x00%s",
+		left := fmt.Sprintf("%s\x00%s\x00%s\x00%020d\x00%s\x00%s",
 			result[i].Model,
 			result[i].BillingModel,
 			result[i].PricingModel,
 			result[i].ContextThresholdTokens,
 			result[i].ServiceTier,
+			result[i].Provider,
 		)
-		right := fmt.Sprintf("%s\x00%s\x00%s\x00%020d\x00%s",
+		right := fmt.Sprintf("%s\x00%s\x00%s\x00%020d\x00%s\x00%s",
 			result[j].Model,
 			result[j].BillingModel,
 			result[j].PricingModel,
 			result[j].ContextThresholdTokens,
 			result[j].ServiceTier,
+			result[j].Provider,
 		)
 		return left < right
 	})

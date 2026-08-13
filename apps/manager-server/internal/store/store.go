@@ -47,6 +47,7 @@ type ModelPrice = model.ModelPrice
 type ModelPriceContextTier = model.ModelPriceContextTier
 type ModelPriceServiceTier = model.ModelPriceServiceTier
 type ModelPriceSyncResult = model.ModelPriceSyncResult
+type FastBillingSettings = model.FastBillingSettings
 type ModelUsageStat = model.ModelUsageStat
 type ModelUsageSummary = model.ModelUsageSummary
 type APIKeyAlias = model.APIKeyAlias
@@ -215,6 +216,15 @@ func (s *Store) SaveBootstrapState(ctx context.Context, state BootstrapState) er
 
 func (s *Store) LoadBootstrapState(ctx context.Context) (BootstrapState, bool, error) {
 	return s.Settings.LoadBootstrapState(ctx)
+}
+
+func (s *Store) SaveFastBillingSettings(ctx context.Context, settings model.FastBillingSettings) (model.FastBillingSettings, error) {
+	return s.Settings.SaveFastBillingSettings(ctx, settings)
+}
+
+func (s *Store) LoadFastBillingSettings(ctx context.Context) (model.FastBillingSettings, error) {
+	settings, _, err := s.Settings.LoadFastBillingSettings(ctx)
+	return settings, err
 }
 
 func (s *Store) HasHistoricalData(ctx context.Context) (bool, error) {

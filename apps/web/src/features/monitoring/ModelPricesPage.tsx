@@ -3,10 +3,13 @@ import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
+import { Select } from '@/components/ui/Select';
 import { IconPencil, IconSearch, IconTrash2, IconX } from '@/components/ui/icons';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import {
   usageServiceApi,
+  type FastBillingMode,
+  type FastBillingSettings,
   type ModelPriceSyncCandidate,
   type ModelPriceSyncResponse,
   type ModelPriceUsageSummaryResponse,
@@ -61,6 +64,10 @@ export function ModelPricesPage() {
   const [selectedCandidates, setSelectedCandidates] = useState<Record<string, string>>({});
   const [draft, setDraft] = useState<PriceDraft>(() => createEmptyPriceDraft());
   const [manualEditorOpen, setManualEditorOpen] = useState(false);
+  const [fastBillingSettings, setFastBillingSettings] = useState<FastBillingSettings>({
+    mode: 'api_priority',
+  });
+  const [fastBillingSaving, setFastBillingSaving] = useState(false);
   const modelPriceServiceBase = featureAvailability.modelPricesAvailable
     ? featureAvailability.managerServiceBase
     : '';
@@ -126,6 +133,64 @@ export function ModelPricesPage() {
 
     return () => controller.abort();
   }, [managementKey, modelPriceServiceBase]);
+
+  useEffect(() => {
+    if (!modelPriceServiceBase) return;
+    void usageServiceApi
+      .getFastBillingSettings(modelPriceServiceBase, managementKey)
+      .then((response) => setFastBillingSettings(response.settings))
+      .catch(() => undefined);
+  }, [managementKey, modelPriceServiceBase]);
+
+  const handleSaveFastBillingSettings = async () => {
+    setFastBillingSaving(true);
+    try {
+      const response = await usageServiceApi.saveFastBillingSettings(
+        modelPriceServiceBase,
+        fastBillingSettings,
+        managementKey
+      );
+      setFastBillingSettings(response.settings);
+      showNotification(t('model_prices.fast_billing_saved'), 'success');
+    } catch (error: unknown) {
+      showNotification(`${t('model_prices.fast_billing_save_failed')}: ${String(error)}`, 'error');
+    } finally {
+      setFastBillingSaving(false);
+    }
+  };
+
+  const updateFastBillingOverride = (index: number, field: 'provider' | 'mode', value: string) => {
+    setFastBillingSettings((previous) => ({
+      ...previous,
+      providerOverrides: (previous.providerOverrides ?? []).map((override, itemIndex) =>
+        itemIndex === index
+          ? {
+              ...override,
+              [field]: field === 'mode' ? (value as FastBillingMode) : value,
+            }
+          : override
+      ),
+    }));
+  };
+
+  const addFastBillingOverride = () => {
+    setFastBillingSettings((previous) => ({
+      ...previous,
+      providerOverrides: [
+        ...(previous.providerOverrides ?? []),
+        { provider: '', mode: 'api_priority' },
+      ],
+    }));
+  };
+
+  const removeFastBillingOverride = (index: number) => {
+    setFastBillingSettings((previous) => ({
+      ...previous,
+      providerOverrides: (previous.providerOverrides ?? []).filter(
+        (_, itemIndex) => itemIndex !== index
+      ),
+    }));
+  };
 
   const handleSync = async () => {
     if (syncModels.length === 0) {
@@ -246,6 +311,76 @@ export function ModelPricesPage() {
           <Button size="xs" onClick={() => void handleSync()} loading={syncing}>
             {t('usage_stats.model_price_sync')}
           </Button>
+        </div>
+      </section>
+
+      <section className={styles.fastBillingPanel}>
+        <div>
+          <strong>{t('model_prices.fast_billing_title')}</strong>
+          <p>{t('model_prices.fast_billing_hint')}</p>
+        </div>
+        <div className={styles.fastBillingControl}>
+          <Select
+            value={fastBillingSettings.mode}
+            disabled={!modelPriceServiceBase || fastBillingSaving}
+            ariaLabel={t('model_prices.fast_billing_title')}
+            options={[
+              { value: 'api_priority', label: t('model_prices.fast_billing_api') },
+              { value: 'codex_credits', label: t('model_prices.fast_billing_codex') },
+              { value: 'automatic', label: t('model_prices.fast_billing_auto') },
+            ]}
+            onChange={(value) =>
+              setFastBillingSettings((previous) => ({
+                ...previous,
+                mode: value as FastBillingMode,
+              }))
+            }
+          />
+          <small>{t('model_prices.fast_billing_auto_hint')}</small>
+          <div className={styles.fastBillingOverrides}>
+            {(fastBillingSettings.providerOverrides ?? []).map((override, index) => (
+              <div className={styles.fastBillingOverrideRow} key={`${index}-${override.provider}`}>
+                <Input
+                  value={override.provider}
+                  placeholder={t('model_prices.fast_billing_provider_placeholder')}
+                  onChange={(event) =>
+                    updateFastBillingOverride(index, 'provider', event.target.value)
+                  }
+                />
+                <Select
+                  value={override.mode}
+                  ariaLabel={t('model_prices.fast_billing_override_mode')}
+                  options={[
+                    { value: 'api_priority', label: t('model_prices.fast_billing_api') },
+                    { value: 'codex_credits', label: t('model_prices.fast_billing_codex') },
+                  ]}
+                  onChange={(value) => updateFastBillingOverride(index, 'mode', value)}
+                />
+                <button
+                  type="button"
+                  className={styles.iconAction}
+                  title={t('common.delete')}
+                  aria-label={t('common.delete')}
+                  onClick={() => removeFastBillingOverride(index)}
+                >
+                  <IconTrash2 size={14} />
+                </button>
+              </div>
+            ))}
+          </div>
+          <div className={styles.fastBillingActions}>
+            <Button size="xs" variant="secondary" onClick={addFastBillingOverride}>
+              {t('model_prices.fast_billing_add_override')}
+            </Button>
+            <Button
+              size="xs"
+              loading={fastBillingSaving}
+              disabled={!modelPriceServiceBase}
+              onClick={() => void handleSaveFastBillingSettings()}
+            >
+              {t('common.save')}
+            </Button>
+          </div>
         </div>
       </section>
 
@@ -413,8 +548,7 @@ export function ModelPricesPage() {
                     candidates.find(
                       (candidate) =>
                         getModelPriceCandidateIdentity(candidate) === requestedCandidateIdentity
-                    ) ??
-                    candidates[0];
+                    ) ?? candidates[0];
                   const selectedCandidateIdentity = selectedCandidate
                     ? getModelPriceCandidateIdentity(selectedCandidate)
                     : '';

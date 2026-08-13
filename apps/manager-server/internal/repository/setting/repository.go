@@ -15,6 +15,7 @@ const managerConfigKey = "manager_config_v1"
 const automationSettingsKey = "automation_settings_v1"
 const adminCredentialKey = "admin_credential_v1"
 const bootstrapStateKey = "bootstrap_state_v1"
+const fastBillingSettingsKey = "fast_billing_settings_v1"
 
 type Repository interface {
 	SaveManagerConfig(ctx context.Context, cfg model.ManagerConfig) error
@@ -27,7 +28,42 @@ type Repository interface {
 	LoadAdminCredential(ctx context.Context) (model.AdminCredential, bool, error)
 	SaveBootstrapState(ctx context.Context, state model.BootstrapState) error
 	LoadBootstrapState(ctx context.Context) (model.BootstrapState, bool, error)
+	SaveFastBillingSettings(ctx context.Context, settings model.FastBillingSettings) (model.FastBillingSettings, error)
+	LoadFastBillingSettings(ctx context.Context) (model.FastBillingSettings, bool, error)
 	HasHistoricalData(ctx context.Context) (bool, error)
+}
+
+func (r *repository) SaveFastBillingSettings(ctx context.Context, settings model.FastBillingSettings) (model.FastBillingSettings, error) {
+	settings = model.NormalizeFastBillingSettings(settings)
+	settings.UpdatedAtMS = time.Now().UnixMilli()
+	data, err := json.Marshal(settings)
+	if err != nil {
+		return model.FastBillingSettings{}, err
+	}
+	_, err = r.db.ExecContext(ctx, `insert into settings(key, value, updated_at_ms)
+		 values(?, ?, ?)
+		 on conflict(key) do update set value = excluded.value, updated_at_ms = excluded.updated_at_ms`,
+		fastBillingSettingsKey, string(data), settings.UpdatedAtMS)
+	if err != nil {
+		return model.FastBillingSettings{}, err
+	}
+	return settings, nil
+}
+
+func (r *repository) LoadFastBillingSettings(ctx context.Context) (model.FastBillingSettings, bool, error) {
+	var raw string
+	err := r.db.QueryRowContext(ctx, `select value from settings where key = ?`, fastBillingSettingsKey).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.DefaultFastBillingSettings(), false, nil
+	}
+	if err != nil {
+		return model.FastBillingSettings{}, false, err
+	}
+	var settings model.FastBillingSettings
+	if err := json.Unmarshal([]byte(raw), &settings); err != nil {
+		return model.FastBillingSettings{}, false, err
+	}
+	return model.NormalizeFastBillingSettings(settings), true, nil
 }
 
 type repository struct {

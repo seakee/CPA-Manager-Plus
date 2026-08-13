@@ -8,6 +8,7 @@ import (
 	"time"
 
 	monitoringrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagemonitoring"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/pricing"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
 
@@ -35,7 +36,7 @@ func PrefersEventProjection(filter store.AnalyticsFilter) bool {
 }
 
 func (r *Reader) AccountStats(ctx context.Context, filter store.AnalyticsFilter) ([]store.AccountModelStat, bool) {
-	if r == nil || r.store == nil {
+	if r == nil || r.store == nil || pricing.FastBillingSettings().ProviderAware() {
 		return nil, false
 	}
 	if !monitoringrepo.SupportsEventProjectionFilter(filter) {
@@ -54,7 +55,7 @@ func (r *Reader) AccountStats(ctx context.Context, filter store.AnalyticsFilter)
 }
 
 func (r *Reader) AccountWindowStats(ctx context.Context, windows []store.AccountWindowUsageQuery) ([]store.AccountWindowModelStat, bool) {
-	if r == nil || r.store == nil {
+	if r == nil || r.store == nil || pricing.FastBillingSettings().ProviderAware() {
 		return nil, false
 	}
 	rows, state, available, err := r.store.UsageMonitoringAccountWindowStats(ctx, windows)
@@ -70,7 +71,7 @@ func (r *Reader) AccountWindowStats(ctx context.Context, windows []store.Account
 }
 
 func (r *Reader) APIKeyStats(ctx context.Context, filter store.AnalyticsFilter) ([]store.APIKeyModelStat, bool) {
-	if r == nil || r.store == nil {
+	if r == nil || r.store == nil || pricing.FastBillingSettings().ProviderAware() {
 		return nil, false
 	}
 	if !monitoringrepo.SupportsEventProjectionFilter(filter) {
@@ -146,7 +147,7 @@ func (r *Reader) Aggregate(ctx context.Context, filter store.AnalyticsFilter) (s
 }
 
 func (r *Reader) ModelStats(ctx context.Context, filter store.AnalyticsFilter) ([]store.ModelStat, bool) {
-	if r == nil || r.store == nil {
+	if r == nil || r.store == nil || pricing.FastBillingSettings().ProviderAware() {
 		return nil, false
 	}
 	if !monitoringrepo.SupportsEventProjectionFilter(filter) {

@@ -24,6 +24,25 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	path := strings.TrimRight(r.URL.Path, "/")
 	switch {
+	case path == "/v0/management/model-prices/fast-billing-settings" && r.Method == http.MethodGet:
+		settings, err := h.App.ModelPriceService.FastBillingSettings(r.Context())
+		if err != nil {
+			response.Error(w, http.StatusInternalServerError, err)
+			return
+		}
+		response.JSON(w, http.StatusOK, modelpricesvc.FastBillingSettingsResponse{Settings: settings})
+	case path == "/v0/management/model-prices/fast-billing-settings" && r.Method == http.MethodPut:
+		var req modelpricesvc.FastBillingSettingsResponse
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			response.Error(w, http.StatusBadRequest, err)
+			return
+		}
+		settings, err := h.App.ModelPriceService.UpdateFastBillingSettings(r.Context(), req.Settings)
+		if err != nil {
+			response.Error(w, http.StatusBadRequest, err)
+			return
+		}
+		response.JSON(w, http.StatusOK, modelpricesvc.FastBillingSettingsResponse{Settings: settings})
 	case path == "/v0/management/model-prices/usage-summary" && r.Method == http.MethodGet:
 		summary, err := h.App.ModelPriceService.UsageSummary(r.Context(), h.App.Config.QueryLimit)
 		if err != nil {
