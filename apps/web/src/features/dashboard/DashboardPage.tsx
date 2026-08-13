@@ -18,6 +18,7 @@ import {
   type UsageServiceStatus,
 } from '@/services/api/usageService';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
+import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import { loadMonitoringMetaPayload } from '@/features/monitoring/services/monitoringMetaService';
 import { buildMonitoringAuthMetaMap } from '@/features/monitoring/model/authMeta';
 import { buildAuthFileMapFromMeta } from '@/features/monitoring/model/sourceDisplay';
@@ -69,6 +70,7 @@ export function DashboardPage() {
   const managementKey = useAuthStore((state) => state.managementKey);
   const config = useConfigStore((state) => state.config);
   const usageSummary = useDashboardUsageSummary();
+  const panelAvailability = usePanelFeatureAvailability();
   const refreshUsageSummary = usageSummary.refresh;
 
   const models = useModelsStore((state) => state.models);
@@ -511,6 +513,7 @@ export function DashboardPage() {
           collectorError={collectorError}
           errorLogCount={errorLogs.length}
           errorLogsLoading={errorLogsLoading}
+          managerEmbedded={panelAvailability.panelHostMode === 'manager_embedded'}
         />
       </section>
 

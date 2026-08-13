@@ -1,9 +1,9 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { viteSingleFile } from 'vite-plugin-singlefile';
-import path from 'path';
-import { execSync } from 'child_process';
-import fs from 'fs';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
 
 // Get version from environment, git tag, or package.json
 function getVersion(): string {
@@ -13,13 +13,22 @@ function getVersion(): string {
   }
 
   // 2. Try git tag
-  try {
-    const gitTag = execSync('git describe --tags --exact-match 2>/dev/null || git describe --tags 2>/dev/null || echo ""', { encoding: 'utf8' }).trim();
-    if (gitTag) {
-      return gitTag;
+  for (const args of [
+    ['describe', '--tags', '--exact-match'],
+    ['describe', '--tags'],
+  ]) {
+    try {
+      const gitTag = execFileSync('git', args, {
+        cwd: path.resolve(__dirname, '../..'),
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
+      if (gitTag) {
+        return gitTag;
+      }
+    } catch {
+      // Try the next Git lookup before falling back to package metadata.
     }
-  } catch {
-    // Git not available or no tags
   }
 
   // 3. Fall back to package.json version
