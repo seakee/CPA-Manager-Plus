@@ -1,3 +1,6 @@
 # CPAMP frontend is part of the application,
 # but exclude it from GitHub repository language statistics.
 apps/web/** -linguist-detectable
+
+# Native Unix and release scripts must stay executable under Linux runners and packages.
+*.sh text eol=lf

@@ -26,6 +26,8 @@ record_pid=""
 record_start=""
 record_binary=""
 record_command=""
+record_arg_count=""
+record_arg_metadata="false"
 record_state=""
 
 usage() {
@@ -39,6 +41,7 @@ Commands:
   status           Show process status
   logs [lines|-f|--follow]
                    Print recent logs, or follow with -f/--follow
+  enable-updates   Explicitly enable managed native updates for this package
 
 Environment overrides:
   CPA_MANAGER_PLUS_BIN       Binary path
@@ -55,6 +58,8 @@ reset_record() {
   record_start=""
   record_binary=""
   record_command=""
+  record_arg_count=""
+  record_arg_metadata="false"
   record_state=""
 }
 
@@ -85,6 +90,11 @@ read_pid_record() {
         ;;
       command=*)
         record_command="${line#command=}"
+        saw_metadata=1
+        ;;
+      arg_count=*)
+        record_arg_count="${line#arg_count=}"
+        record_arg_metadata="true"
         saw_metadata=1
         ;;
       '')
@@ -384,6 +394,7 @@ prepare_runtime_paths() {
 
 write_pid_record() {
   local pid="$1"
+  local arg_count="$2"
   local current_binary current_command current_start tmp_file
 
   current_start="$(process_start_marker "${pid}")"
@@ -401,6 +412,7 @@ write_pid_record() {
     printf 'start=%s\n' "${current_start}"
     printf 'binary=%s\n' "${current_binary}"
     printf 'command=%s\n' "${current_command}"
+    printf 'arg_count=%s\n' "${arg_count}"
   } >"${tmp_file}"
   chmod 600 "${tmp_file}"
   mv -f "${tmp_file}" "${pid_file}"
@@ -408,6 +420,9 @@ write_pid_record() {
 }
 
 start_app() {
+  if [ -z "${CPA_MANAGER_PLUS_UPDATE_STARTING:-}" ]; then
+    recover_update
+  fi
   local launch_binary="${binary}"
   if [[ "${launch_binary}" != /* ]]; then
     launch_binary="$(resolve_path "${launch_binary}")"
@@ -449,7 +464,7 @@ start_app() {
   pid="$!"
 
   sleep 1
-  if write_pid_record "${pid}" && pid="$(running_pid)"; then
+  if write_pid_record "${pid}" "$#" && pid="$(running_pid)"; then
     echo "${app_name} started with PID ${pid}"
     echo "Log: ${log_file}"
     return 0
@@ -547,6 +562,51 @@ show_logs() {
   tail -n "${option}" "${log_file}"
 }
 
+recover_update() {
+  local updater="${script_dir}/${app_name}-updater"
+  local manifest="${script_dir}/.update/install.json"
+  if [ ! -f "${manifest}" ]; then
+    return 0
+  fi
+  if [ ! -x "${updater}" ]; then
+    echo "Managed update recovery is required but the updater is unavailable: ${updater}" >&2
+    return 1
+  fi
+  "${updater}" recover --manifest "${manifest}"
+}
+
+enable_updates() {
+  local updater="${script_dir}/${app_name}-updater"
+  local manifest="${script_dir}/.update/install.json"
+  local backups="${script_dir}/backups"
+
+  if [ ! -x "${updater}" ]; then
+    echo "Updater binary is unavailable or not executable: ${updater}" >&2
+    exit 1
+  fi
+  set_pid_record_state
+  if [ "${record_state}" = "active" ]; then
+    if [ "${record_arg_metadata}" != "true" ] || ! [[ "${record_arg_count}" =~ ^[0-9]+$ ]]; then
+      echo "Managed updates cannot verify how the running process was started. Restart it without startup arguments, then enable updates." >&2
+      exit 1
+    fi
+    if [ "${record_arg_count}" -gt 0 ]; then
+      echo "Managed updates require the default control-script launch without extra startup arguments. Move runtime settings to config.json or environment variables, restart without arguments, then enable updates." >&2
+      exit 1
+    fi
+  fi
+  "${updater}" enable \
+    --manifest "${manifest}" \
+    --install-root "${script_dir}" \
+    --binary "${binary}" \
+    --control-script "${script_dir}/$(basename "$0")" \
+    --updater "${updater}" \
+    --backup-root "${backups}"
+  chmod 700 "${script_dir}/.update"
+  chmod 600 "${manifest}"
+  echo "Restart ${app_name} to expose managed update capability in the panel."
+}
+
 command="${1:-status}"
 if [ "$#" -gt 0 ]; then
   shift
@@ -568,6 +628,9 @@ case "${command}" in
     ;;
   logs)
     show_logs "$@"
+    ;;
+  enable-updates)
+    enable_updates
     ;;
   help | -h | --help)
     usage

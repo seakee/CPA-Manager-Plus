@@ -626,6 +626,7 @@ jobs:
           set -euo pipefail
           test -s dist/release/management.html
           test -s dist/release/release-notes.md
+          test -s dist/release/native/update-manifest.json
           test -n "$(find dist/release/native -type f -maxdepth 1 -print -quit)"
 
       - name: Reuse matching GitHub Release

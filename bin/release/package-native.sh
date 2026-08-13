@@ -38,15 +38,22 @@ for target in "${targets[@]}"; do
   package_name="${binary_name}_${version}_${goos}_${goarch}"
   package_dir="${work_dir}/${package_name}"
   exe_name="${binary_name}"
+  updater_name="${binary_name}-updater"
 
   if [ "${goos}" = "windows" ]; then
     exe_name="${binary_name}.exe"
+    updater_name="${binary_name}-updater.exe"
   fi
 
   mkdir -p "${package_dir}"
   (
     cd "${work_dir}/manager-server"
-    CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" go build -trimpath -ldflags "-s -w" -o "${package_dir}/${exe_name}" ./cmd/cpa-manager-plus
+    CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" go build -trimpath \
+      -ldflags "-s -w -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.Version=${version}" \
+      -o "${package_dir}/${exe_name}" ./cmd/cpa-manager-plus
+    CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" go build -trimpath \
+      -ldflags "-s -w -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.Version=${version}" \
+      -o "${package_dir}/${updater_name}" ./cmd/cpa-manager-plus-updater
   )
 
   cp "${repo_root}/README.md" "${package_dir}/README.md"
@@ -72,6 +79,9 @@ for target in "${targets[@]}"; do
     )
   fi
 done
+
+VERSION="${version}" NATIVE_DIR="${out_dir}" \
+  node "${repo_root}/bin/release/generate-update-manifest.mjs"
 
 (
   cd "${out_dir}"

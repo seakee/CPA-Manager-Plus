@@ -78,8 +78,8 @@ describe('published release verification', () => {
         assets,
       })
     ).toEqual({
-      expectedAssets: 8,
-      publishedAssets: 8,
+      expectedAssets: 9,
+      publishedAssets: 9,
       missingAssets: [],
       complete: true,
       immutable: true,
@@ -98,8 +98,8 @@ describe('published release verification', () => {
         assets,
       })
     ).toEqual({
-      expectedAssets: 8,
-      publishedAssets: 8,
+      expectedAssets: 9,
+      publishedAssets: 9,
       missingAssets: [],
       complete: true,
       immutable: false,
@@ -130,8 +130,8 @@ describe('published release verification', () => {
         allowMissingAssets: true,
       })
     ).toMatchObject({
-      expectedAssets: 8,
-      publishedAssets: 7,
+      expectedAssets: 9,
+      publishedAssets: 8,
       missingAssets: [{ name: assets[0].name, filePath: assets[0].filePath }],
       complete: false,
       immutable: false,
@@ -165,8 +165,8 @@ describe('published release verification', () => {
         allowMissingAssets: true,
       })
     ).toMatchObject({
-      expectedAssets: 8,
-      publishedAssets: 7,
+      expectedAssets: 9,
+      publishedAssets: 8,
       missingAssets: [{ name: assets[0].name, filePath: assets[0].filePath }],
       complete: false,
     });
@@ -268,7 +268,7 @@ describe('published release verification', () => {
         prerelease: true,
         body: '# Release',
       })
-    ).toMatchObject({ complete: true, expectedAssets: 8, publishedAssets: 8 });
+    ).toMatchObject({ complete: true, expectedAssets: 9, publishedAssets: 9 });
 
     expect(() =>
       verifyPublishedReleaseMetadata({

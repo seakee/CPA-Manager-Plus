@@ -5,12 +5,13 @@ import { describe, expect, it } from 'vitest';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const workflowDir = path.join(repoRoot, '.github', 'workflows');
-const readWorkflow = (name) => readFileSync(path.join(workflowDir, name), 'utf8');
-const dependabotConfig = readFileSync(path.join(repoRoot, '.github', 'dependabot.yml'), 'utf8');
+const readText = (filePath) => readFileSync(filePath, 'utf8').replace(/\r\n?/g, '\n');
+const readWorkflow = (name) => readText(path.join(workflowDir, name));
+const dependabotConfig = readText(path.join(repoRoot, '.github', 'dependabot.yml'));
 const telegramScript = readFileSync(
   path.join(repoRoot, 'bin', 'release', 'send-telegram-release.sh'),
   'utf8'
-);
+).replace(/\r\n?/g, '\n');
 
 const externalActions = (workflow) =>
   [...workflow.matchAll(/^\s*uses:\s*([^\s#]+)@([^\s#]+)/gm)]
@@ -27,6 +28,14 @@ const jobBlock = (workflow, jobName) => {
 };
 
 describe('GitHub Actions workflow integrity', () => {
+  it('resolves the web version without Unix-only shell syntax', () => {
+    const viteConfig = readText(path.join(repoRoot, 'apps', 'web', 'vite.config.ts'));
+
+    expect(viteConfig).toContain("execFileSync('git', args");
+    expect(viteConfig).not.toContain('2>/dev/null');
+    expect(viteConfig).not.toContain('|| echo');
+  });
+
   it('pins every external action to a full commit SHA', () => {
     const workflowFiles = readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(file));
     const actions = workflowFiles.flatMap((file) => externalActions(readWorkflow(file)));

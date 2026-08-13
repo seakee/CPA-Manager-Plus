@@ -25,6 +25,7 @@ Commands:
   status           Show process status
   logs [lines|-f|--follow]
                    Print recent logs, or follow with -f/--follow
+  enable-updates   Explicitly enable managed native updates for this package
 
 Environment overrides:
   CPA_MANAGER_PLUS_BIN          Binary path
@@ -182,20 +183,36 @@ function Set-PrivateAcl {
     New-Object System.Security.AccessControl.FileSecurity
   }
 
-  $acl.SetOwner($CurrentUserSid)
   $acl.SetAccessRuleProtection($true, $false)
-  $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-    $CurrentUserSid,
-    [System.Security.AccessControl.FileSystemRights]::FullControl,
-    $inheritFlags,
-    [System.Security.AccessControl.PropagationFlags]::None,
-    [System.Security.AccessControl.AccessControlType]::Allow
+  $privateSids = @(
+    $CurrentUserSid
+    (New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-18')
+    (New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544')
   )
-  [void]$acl.AddAccessRule($rule)
+  foreach ($sid in $privateSids) {
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+      $sid,
+      [System.Security.AccessControl.FileSystemRights]::FullControl,
+      $inheritFlags,
+      [System.Security.AccessControl.PropagationFlags]::None,
+      [System.Security.AccessControl.AccessControlType]::Allow
+    )
+    [void]$acl.AddAccessRule($rule)
+  }
   if ($Directory) {
-    [System.IO.Directory]::SetAccessControl($Path, $acl)
+    $item = Get-Item -LiteralPath $Path -Force
+    if ([System.IO.Directory].GetMethod('SetAccessControl', [type[]]@([string], [System.Security.AccessControl.DirectorySecurity]))) {
+      [System.IO.Directory]::SetAccessControl($item.FullName, $acl)
+    } else {
+      [System.IO.FileSystemAclExtensions]::SetAccessControl([System.IO.DirectoryInfo]$item, $acl)
+    }
   } else {
-    [System.IO.File]::SetAccessControl($Path, $acl)
+    $item = Get-Item -LiteralPath $Path -Force
+    if ([System.IO.File].GetMethod('SetAccessControl', [type[]]@([string], [System.Security.AccessControl.FileSecurity]))) {
+      [System.IO.File]::SetAccessControl($item.FullName, $acl)
+    } else {
+      [System.IO.FileSystemAclExtensions]::SetAccessControl([System.IO.FileInfo]$item, $acl)
+    }
   }
 }
 
@@ -272,25 +289,24 @@ function Get-ProcessSnapshot {
   } catch {
   }
 
-  $cimProcess = $null
+  $binaryPath = $null
   try {
-    $cimProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction Stop
+    $binaryPath = Resolve-NormalizedPath $process.MainModule.FileName
   } catch {
   }
 
-  $binaryPath = $null
-  if ($cimProcess -and $cimProcess.ExecutablePath) {
-    $binaryPath = Resolve-NormalizedPath $cimProcess.ExecutablePath
-  } else {
+  $commandLine = $null
+  if (-not $binaryPath) {
     try {
-      $binaryPath = Resolve-NormalizedPath $process.MainModule.FileName
+      $cimProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction Stop
+      if ($cimProcess.ExecutablePath) {
+        $binaryPath = Resolve-NormalizedPath $cimProcess.ExecutablePath
+      }
+      if ($cimProcess.CommandLine) {
+        $commandLine = $cimProcess.CommandLine.Trim()
+      }
     } catch {
     }
-  }
-
-  $commandLine = $null
-  if ($cimProcess -and $cimProcess.CommandLine) {
-    $commandLine = $cimProcess.CommandLine.Trim()
   }
 
   [pscustomobject]@{
@@ -333,12 +349,15 @@ function Read-PidRecord {
     return [pscustomobject]@{ Format = 'invalid' }
   }
 
+  $hasLaunchArguments = $null -ne $record.PSObject.Properties['launchArguments']
   [pscustomobject]@{
     Format       = 'metadata'
     Pid          = $pidValue
     StartTimeUtc = [string]$record.startTimeUtc
     BinaryPath   = [string]$record.binaryPath
     CommandLine  = [string]$record.commandLine
+    HasLaunchArguments = $hasLaunchArguments
+    LaunchArguments = if ($hasLaunchArguments) { @($record.launchArguments) } else { @() }
   }
 }
 
@@ -381,7 +400,10 @@ function Get-PidRecordState {
 }
 
 function Write-PidRecord {
-  param([int]$ProcessId)
+  param(
+    [int]$ProcessId,
+    [string[]]$AppArgs = @()
+  )
 
   $snapshot = Get-ProcessSnapshot -ProcessId $ProcessId
   if (-not $snapshot -or -not $snapshot.StartTimeUtc -or (-not $snapshot.BinaryPath -and -not $snapshot.CommandLine)) {
@@ -394,6 +416,7 @@ function Write-PidRecord {
     startTimeUtc = $snapshot.StartTimeUtc
     binaryPath   = $snapshot.BinaryPath
     commandLine  = $snapshot.CommandLine
+    launchArguments = @($AppArgs)
   }
 
   Prepare-PrivateFile -Path $tmpFile
@@ -531,6 +554,10 @@ function Prepare-RuntimePaths {
 function Start-App {
   param([string[]]$AppArgs)
 
+  if (-not $env:CPA_MANAGER_PLUS_UPDATE_STARTING) {
+    Invoke-UpdateRecovery
+  }
+
   if (-not (Test-Path -LiteralPath $Binary)) {
     throw "Binary does not exist: $Binary"
   }
@@ -560,7 +587,7 @@ function Start-App {
   $processId = Start-DetachedProcess -AppArgs $AppArgs
   Start-Sleep -Seconds 1
 
-  if ((Write-PidRecord -ProcessId $processId) -and (Get-PidRecordState).State -eq 'active') {
+  if ((Write-PidRecord -ProcessId $processId -AppArgs $AppArgs) -and (Get-PidRecordState).State -eq 'active') {
     Write-Host "$AppName started with PID $processId"
     Write-Host "Log: $LogFile"
     Write-Host "Error log: $ErrLogFile"
@@ -668,6 +695,54 @@ function Show-Logs {
   Get-Content -LiteralPath $LogFile, $ErrLogFile -Tail $lineCount -ErrorAction SilentlyContinue
 }
 
+function Invoke-UpdateRecovery {
+  $updater = Join-Path $ScriptDir "$AppName-updater.exe"
+  $manifest = Join-Path $ScriptDir '.update\install.json'
+  if (-not (Test-Path -LiteralPath $manifest)) {
+    return
+  }
+  if (-not (Test-Path -LiteralPath $updater)) {
+    throw "Managed update recovery is required but the updater is unavailable: $updater"
+  }
+  & $updater recover --manifest $manifest
+  if ($LASTEXITCODE -ne 0) {
+    throw "Managed update recovery failed. Review .update\status.json before starting."
+  }
+}
+
+function Enable-Updates {
+  $updater = Join-Path $ScriptDir "$AppName-updater.exe"
+  $updateDir = Join-Path $ScriptDir '.update'
+  $manifest = Join-Path $updateDir 'install.json'
+  $backupRoot = Join-Path $ScriptDir 'backups'
+
+  if (-not (Test-Path -LiteralPath $updater)) {
+    throw "Updater binary is unavailable: $updater"
+  }
+  $state = Get-PidRecordState
+  if ($state.State -eq 'active') {
+    if (-not $state.Record.HasLaunchArguments) {
+      throw "Managed updates cannot verify how the running process was started. Restart it without startup arguments, then enable updates."
+    }
+    if (@($state.Record.LaunchArguments).Count -gt 0) {
+      throw "Managed updates require the default control-script launch without extra startup arguments. Move runtime settings to config.json or environment variables, restart without arguments, then enable updates."
+    }
+  }
+  & $updater enable `
+    --manifest $manifest `
+    --install-root $ScriptDir `
+    --binary $Binary `
+    --control-script $PSCommandPath `
+    --updater $updater `
+    --backup-root $backupRoot
+  if ($LASTEXITCODE -ne 0) {
+    throw "Failed to enable managed native updates."
+  }
+  Ensure-PrivateDirectory -Path $updateDir -ManageExisting
+  Set-PrivateAcl -Path $manifest
+  Write-Host "Restart $AppName to expose managed update capability in the panel."
+}
+
 $Command = if ($args.Count -gt 0) { $args[0] } else { 'status' }
 $AppArgs = if ($args.Count -gt 1) { $args[1..($args.Count - 1)] } else { @() }
 
@@ -680,6 +755,7 @@ switch ($Command) {
   }
   'status' { Show-Status }
   'logs' { Show-Logs -Options $AppArgs }
+  'enable-updates' { Enable-Updates }
   { $_ -in @('help', '-h', '--help') } { Show-Usage }
   default {
     Show-Usage
