@@ -11,6 +11,7 @@ import (
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	usageaggregaterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageaggregate"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagemonitoring"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagepricing"
 )
 
 func TestDiscoverUsageCacheAccountingCompletesEmptyDatabaseWithoutResettingRollups(t *testing.T) {
@@ -125,7 +126,7 @@ func TestUsageCacheAccountingRefreshesMonitoringProjectionAndInvalidatesStats(t 
 	if _, err := monitoringRepo.CatchUpStats(ctx, 10, 1); err != nil {
 		t.Fatalf("catch up monitoring stats: %v", err)
 	}
-	assertMonitoringProjectionTokens(t, db, "legacy-monitoring", 100, 0)
+	assertMonitoringProjectionTokens(t, db, "legacy-monitoring", 0, 100)
 	assertCount(t, db, "usage_monitoring_account_daily_rollups_v1", 1)
 	assertCount(t, db, "usage_monitoring_api_key_daily_rollups_v1", 1)
 
@@ -141,7 +142,7 @@ func TestUsageCacheAccountingRefreshesMonitoringProjectionAndInvalidatesStats(t 
 		t.Fatalf("migration result = %#v", result)
 	}
 
-	assertMonitoringProjectionTokens(t, db, "legacy-monitoring", 130, 0)
+	assertMonitoringProjectionTokens(t, db, "legacy-monitoring", 0, 100)
 	assertCount(t, db, "usage_monitoring_account_daily_rollups_v1", 0)
 	assertCount(t, db, "usage_monitoring_api_key_daily_rollups_v1", 0)
 	assertMonitoringRollupState(t, db, "stats_v1", "pending", 0, 1)
@@ -155,8 +156,8 @@ func TestUsageCacheAccountingRefreshesMonitoringProjectionAndInvalidatesStats(t 
 		from usage_monitoring_account_daily_rollups_v1`).Scan(&inputTokens, &totalTokens); err != nil {
 		t.Fatalf("read rebuilt monitoring stats: %v", err)
 	}
-	if inputTokens != 130 || totalTokens != 0 {
-		t.Fatalf("rebuilt monitoring tokens = (%d, %d), want (130, 0)", inputTokens, totalTokens)
+	if inputTokens != 0 || totalTokens != 100 {
+		t.Fatalf("rebuilt monitoring tokens = (%d, %d), want (0, 100)", inputTokens, totalTokens)
 	}
 }
 
@@ -182,6 +183,10 @@ func TestUsageCacheAccountingUsesPriorityAndPreservesExplicitProvenance(t *testi
 		Hash: "unknown-total-provenance", Provider: "anthropic", Model: "claude-sonnet",
 		Input: 100, CacheRead: 50, Output: 20, StoredMode: "included_in_input", StoredUncached: 50, StoredTotalInput: 100, StoredRead: 50, Total: 120,
 	})
+	insertAccountingEvent(t, db, accountingFixture{
+		Hash: "auth-type-claude-alias", AuthType: "codex", Model: "claude-sonnet", RawJSON: `{}`,
+		Input: 100, CacheRead: 50, Output: 20, StoredMode: "separate_from_input", StoredUncached: 100, StoredTotalInput: 150, StoredRead: 50, Total: 170,
+	})
 	markMigrationDiscovering(t, db)
 
 	repo := New(db)
@@ -192,7 +197,7 @@ func TestUsageCacheAccountingUsesPriorityAndPreservesExplicitProvenance(t *testi
 	if err != nil {
 		t.Fatalf("run migration: %v", err)
 	}
-	if !result.Completed || result.State.ChangedRows != 5 {
+	if !result.Completed || result.State.ChangedRows != 6 {
 		t.Fatalf("result = %#v", result)
 	}
 
@@ -201,6 +206,7 @@ func TestUsageCacheAccountingUsesPriorityAndPreservesExplicitProvenance(t *testi
 	assertAccounting(t, db, "explicit-separate", "separate_from_input", 100, 150, 50, 0, 150)
 	assertAccounting(t, db, "explicit-total", "separate_from_input", 100, 150, 50, 0, 999)
 	assertAccounting(t, db, "unknown-total-provenance", "separate_from_input", 100, 150, 50, 0, 120)
+	assertAccounting(t, db, "auth-type-claude-alias", "included_in_input", 50, 100, 50, 0, 120)
 }
 
 func TestUsageCacheAccountingSecondRunIsIdempotentAndKeepsRollups(t *testing.T) {
@@ -416,6 +422,7 @@ type accountingFixture struct {
 	Hash             string
 	Provider         string
 	Executor         string
+	AuthType         string
 	Model            string
 	RawJSON          string
 	Input            int64
@@ -455,16 +462,17 @@ func insertLegacyUsageEvent(t *testing.T, db *sql.DB, hash, provider, executor, 
 func insertAccountingEvent(t *testing.T, db *sql.DB, fixture accountingFixture) {
 	t.Helper()
 	if _, err := db.Exec(`insert into usage_events (
-		event_hash, timestamp_ms, timestamp, provider, executor_type, model,
+		event_hash, timestamp_ms, timestamp, provider, executor_type, auth_type, model,
 		input_tokens, output_tokens, reasoning_tokens, cached_tokens,
 		cache_read_tokens, cache_creation_tokens, cache_input_mode,
 		normalized_uncached_input_tokens, normalized_total_input_tokens,
 		normalized_cache_read_tokens, normalized_cache_creation_tokens,
 		total_tokens, raw_json, created_at_ms
-	) values (?, 1, '1', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+	) values (?, 1, '1', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
 		fixture.Hash,
 		fixture.Provider,
 		fixture.Executor,
+		fixture.AuthType,
 		fixture.Model,
 		fixture.Input,
 		fixture.Output,
@@ -578,8 +586,8 @@ func insertPricingRollupFixtures(t *testing.T, db *sql.DB, checkpoint, coverage,
 				backfill_last_event_id = ?, coverage_event_id = ?, target_event_id = ?,
 				processed_events = 1, min_bucket_ms = 0, max_bucket_ms = 0,
 				updated_at_ms = 1, finished_at_ms = null
-			where rollup_name = 'pricing_v1' and schema_version = 1`,
-			args: []any{checkpoint, coverage, target},
+			where rollup_name = 'pricing_v1' and schema_version = ?`,
+			args: []any{checkpoint, coverage, target, usagepricing.SchemaVersion},
 		},
 	}
 	for _, statement := range statements {

@@ -29,6 +29,7 @@ const (
 	usageMonitoringStatsRollupName      = "stats_v1"
 	usageMonitoringMetadataRollupName   = "metadata_v1"
 	usageMonitoringProjectionRollupName = "projection_v1"
+	usageMonitoringRollupSchemaVersion  = 2
 
 	usageHourlyAggregateTable = "usage_hourly_aggregate_v1"
 	usageHourlyAggregateState = "usage_hourly_aggregate_state"
@@ -53,7 +54,10 @@ const (
 		failure_calls integer not null default 0,
 		input_tokens integer not null default 0,
 		output_tokens integer not null default 0,
+		non_reasoning_output_tokens integer not null default 0,
 		reasoning_tokens integer not null default 0,
+		unclassified_tokens integer not null default 0,
+		incomplete_accounting_calls integer not null default 0,
 		cached_tokens integer not null default 0,
 		cache_read_tokens integer not null default 0,
 		cache_creation_tokens integer not null default 0,
@@ -88,7 +92,10 @@ const (
 		failure_calls integer not null default 0,
 		input_tokens integer not null default 0,
 		output_tokens integer not null default 0,
+		non_reasoning_output_tokens integer not null default 0,
 		reasoning_tokens integer not null default 0,
+		unclassified_tokens integer not null default 0,
+		incomplete_accounting_calls integer not null default 0,
 		cached_tokens integer not null default 0,
 		cache_read_tokens integer not null default 0,
 		cache_creation_tokens integer not null default 0,
@@ -173,6 +180,9 @@ func Migrate(db *sql.DB) error {
 			request_service_tier text,
 			response_service_tier text,
 			cache_input_mode text,
+			accounting_version integer not null default 0,
+			accounting_valid integer not null default 0,
+			accounting_quality text,
 			input_tokens integer not null default 0,
 			output_tokens integer not null default 0,
 			reasoning_tokens integer not null default 0,
@@ -184,6 +194,10 @@ func Migrate(db *sql.DB) error {
 			normalized_total_input_tokens integer,
 			normalized_cache_read_tokens integer,
 			normalized_cache_creation_tokens integer,
+			normalized_non_reasoning_output_tokens integer,
+			normalized_reasoning_output_tokens integer,
+			normalized_total_output_tokens integer,
+			unclassified_tokens integer,
 			total_tokens integer not null default 0,
 			latency_ms integer,
 			ttft_ms integer,
@@ -227,7 +241,10 @@ func Migrate(db *sql.DB) error {
 			failure_calls integer not null default 0,
 			input_tokens integer not null default 0,
 			output_tokens integer not null default 0,
+			non_reasoning_output_tokens integer not null default 0,
 			reasoning_tokens integer not null default 0,
+			unclassified_tokens integer not null default 0,
+			incomplete_accounting_calls integer not null default 0,
 			cached_tokens integer not null default 0,
 			cache_read_tokens integer not null default 0,
 			cache_creation_tokens integer not null default 0,
@@ -252,7 +269,10 @@ func Migrate(db *sql.DB) error {
 			calls integer not null default 0,
 			input_tokens integer not null default 0,
 			output_tokens integer not null default 0,
+			non_reasoning_output_tokens integer not null default 0,
 			reasoning_tokens integer not null default 0,
+			unclassified_tokens integer not null default 0,
+			incomplete_accounting_calls integer not null default 0,
 			cached_tokens integer not null default 0,
 			cache_read_tokens integer not null default 0,
 			cache_creation_tokens integer not null default 0,
@@ -313,7 +333,10 @@ func Migrate(db *sql.DB) error {
 			calls integer not null default 0,
 			input_tokens integer not null default 0,
 			output_tokens integer not null default 0,
+			non_reasoning_output_tokens integer not null default 0,
 			reasoning_tokens integer not null default 0,
+			unclassified_tokens integer not null default 0,
+			incomplete_accounting_calls integer not null default 0,
 			cached_tokens integer not null default 0,
 			cache_read_tokens integer not null default 0,
 			cache_creation_tokens integer not null default 0,
@@ -357,7 +380,7 @@ func Migrate(db *sql.DB) error {
 			rollup_name, schema_version, structure_revision, status,
 			backfill_last_event_id, coverage_event_id, target_event_id,
 			processed_events, updated_at_ms
-		) values ('pricing_v1', 1, '', 'pending', 0, 0, 0, 0, 0)`,
+		) values ('pricing_v1', 2, '', 'pending', 0, 0, 0, 0, 0)`,
 		`create table if not exists usage_monitoring_account_daily_rollups_v1 (
 			structure_revision text not null,
 			bucket_ms integer not null,
@@ -380,7 +403,10 @@ func Migrate(db *sql.DB) error {
 			calls integer not null default 0,
 			input_tokens integer not null default 0,
 			output_tokens integer not null default 0,
+			non_reasoning_output_tokens integer not null default 0,
 			reasoning_tokens integer not null default 0,
+			unclassified_tokens integer not null default 0,
+			incomplete_accounting_calls integer not null default 0,
 			cached_tokens integer not null default 0,
 			cache_read_tokens integer not null default 0,
 			cache_creation_tokens integer not null default 0,
@@ -390,6 +416,15 @@ func Migrate(db *sql.DB) error {
 			long_cache_read_tokens integer not null default 0,
 			long_cache_creation_tokens integer not null default 0,
 			total_tokens integer not null default 0,
+			display_input_tokens integer not null default 0,
+			display_output_tokens integer not null default 0,
+			display_non_reasoning_output_tokens integer not null default 0,
+			display_reasoning_tokens integer not null default 0,
+			display_unclassified_tokens integer not null default 0,
+			display_cached_tokens integer not null default 0,
+			display_cache_read_tokens integer not null default 0,
+			display_cache_creation_tokens integer not null default 0,
+			display_total_tokens integer not null default 0,
 			zero_token_calls integer not null default 0,
 			latency_sum_ms integer not null default 0,
 			latency_samples integer not null default 0,
@@ -434,7 +469,10 @@ func Migrate(db *sql.DB) error {
 			calls integer not null default 0,
 			input_tokens integer not null default 0,
 			output_tokens integer not null default 0,
+			non_reasoning_output_tokens integer not null default 0,
 			reasoning_tokens integer not null default 0,
+			unclassified_tokens integer not null default 0,
+			incomplete_accounting_calls integer not null default 0,
 			cached_tokens integer not null default 0,
 			cache_read_tokens integer not null default 0,
 			cache_creation_tokens integer not null default 0,
@@ -500,16 +538,29 @@ func Migrate(db *sql.DB) error {
 			auth_project_id_snapshot text not null,
 			reasoning_effort text not null,
 			service_tier text not null,
+			cache_input_mode text not null default '',
+			accounting_version integer not null default 0,
+			accounting_valid integer not null default 0,
+			accounting_quality text not null default '',
 			failed integer not null,
 			latency_ms integer,
 			input_tokens integer not null,
 			output_tokens integer not null,
+			non_reasoning_output_tokens integer not null default 0,
 			reasoning_tokens integer not null,
 			cached_tokens integer not null,
 			cache_tokens integer not null,
 			cache_read_tokens integer not null,
 			cache_creation_tokens integer not null,
+			normalized_uncached_input_tokens integer not null default 0,
 			normalized_total_input_tokens integer not null,
+			normalized_cache_read_tokens integer not null default 0,
+			normalized_cache_creation_tokens integer not null default 0,
+			normalized_non_reasoning_output_tokens integer not null default 0,
+			normalized_reasoning_output_tokens integer not null default 0,
+			normalized_total_output_tokens integer not null default 0,
+			unclassified_tokens integer not null default 0,
+			incomplete_accounting_calls integer not null default 0,
 			total_tokens integer not null,
 			header_quota_plan_type text not null,
 			header_error_kind text not null,
@@ -559,17 +610,17 @@ func Migrate(db *sql.DB) error {
 		)`,
 		`insert or ignore into usage_monitoring_rollup_state (
 			rollup_name, schema_version, status, target_event_id, updated_at_ms
-		) select 'stats_v1', 1,
+		) select 'stats_v1', 2,
 			case when exists (select 1 from usage_events limit 1) then 'pending' else 'ready' end,
 			coalesce((select max(id) from usage_events), 0), 0`,
 		`insert or ignore into usage_monitoring_rollup_state (
 			rollup_name, schema_version, status, target_event_id, updated_at_ms
-		) select 'metadata_v1', 1,
+		) select 'metadata_v1', 2,
 			case when exists (select 1 from usage_events limit 1) then 'pending' else 'ready' end,
 			coalesce((select max(id) from usage_events), 0), 0`,
 		`insert or ignore into usage_monitoring_rollup_state (
 			rollup_name, schema_version, status, target_event_id, updated_at_ms
-		) select 'projection_v1', 1,
+		) select 'projection_v1', 2,
 			case when exists (select 1 from usage_events limit 1) then 'pending' else 'ready' end,
 			coalesce((select max(id) from usage_events), 0), 0`,
 		`create table if not exists usage_event_identity_ledger (
@@ -605,6 +656,11 @@ func Migrate(db *sql.DB) error {
 		) select 'usage_cache_accounting_v2',
 			case when exists (select 1 from usage_events limit 1) then 'discovering' else 'completed' end,
 			0, 0, 0, 0`,
+		`insert or ignore into usage_data_migrations (
+			name, status, last_event_id, target_event_id, processed_rows, updated_at_ms
+		) select 'usage_token_accounting_v2',
+			case when exists (select 1 from usage_events limit 1) then 'discovering' else 'completed' end,
+			0, 0, 0, 0`,
 		`create table if not exists usage_cache_accounting_v2_changes (
 			event_id integer primary key,
 			cache_input_mode text not null,
@@ -612,6 +668,22 @@ func Migrate(db *sql.DB) error {
 			normalized_total_input_tokens integer not null,
 			normalized_cache_read_tokens integer not null,
 			normalized_cache_creation_tokens integer not null,
+			total_tokens integer not null
+		)`,
+		`create table if not exists usage_token_accounting_v2_changes (
+			event_id integer primary key,
+			cache_input_mode text not null,
+			accounting_version integer not null default 0,
+			accounting_valid integer not null default 0,
+			accounting_quality text not null,
+			normalized_uncached_input_tokens integer not null,
+			normalized_total_input_tokens integer not null,
+			normalized_cache_read_tokens integer not null,
+			normalized_cache_creation_tokens integer not null,
+			normalized_non_reasoning_output_tokens integer not null,
+			normalized_reasoning_output_tokens integer not null,
+			normalized_total_output_tokens integer not null,
+			unclassified_tokens integer not null,
 			total_tokens integer not null
 		)`,
 		`create table if not exists dead_letter_events (
@@ -1000,6 +1072,9 @@ func Migrate(db *sql.DB) error {
 	if err := ensureUsageRollupLongContextColumns(db); err != nil {
 		return err
 	}
+	if err := ensureUsageTokenAccountingAggregateColumns(db); err != nil {
+		return err
+	}
 	if err := ensureUsageHourlyAggregateSchemaVersion(db); err != nil {
 		return err
 	}
@@ -1047,7 +1122,87 @@ func validateUsageDerivedSchemaVersions(db *sql.DB, hourlySnapshot usageHourlyAg
 	if hourlySnapshot.stateRowExists && hourlySnapshot.stateSchemaVersion != 1 && hourlySnapshot.stateSchemaVersion != 2 {
 		return fmt.Errorf("unsupported usage hourly aggregate schema version %d", hourlySnapshot.stateSchemaVersion)
 	}
+	pricingVersion, pricingPresent, err := existingAggregateSchemaVersion(
+		db,
+		"usage_pricing_rollup_state",
+		"rollup_name",
+		"pricing_v1",
+	)
+	if err != nil {
+		return fmt.Errorf("inspect usage pricing rollup schema version: %w", err)
+	}
+	if pricingPresent && pricingVersion > 2 {
+		return fmt.Errorf("unsupported usage pricing rollup schema version %d", pricingVersion)
+	}
+	for _, rollupName := range []string{
+		usageMonitoringStatsRollupName,
+		usageMonitoringMetadataRollupName,
+		usageMonitoringProjectionRollupName,
+	} {
+		version, present, err := existingAggregateSchemaVersion(
+			db,
+			usageMonitoringRollupStateTable,
+			"rollup_name",
+			rollupName,
+		)
+		if err != nil {
+			return fmt.Errorf("inspect usage monitoring rollup schema version %s: %w", rollupName, err)
+		}
+		if present && version > usageMonitoringRollupSchemaVersion {
+			return fmt.Errorf("unsupported usage monitoring rollup schema version %s=%d", rollupName, version)
+		}
+	}
 	return nil
+}
+
+func sqliteTableExists(db *sql.DB, table string) (bool, error) {
+	var exists int
+	if err := db.QueryRow(`select exists(
+		select 1 from sqlite_master where type = 'table' and name = ?
+	)`, table).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists != 0, nil
+}
+
+func existingAggregateSchemaVersion(db *sql.DB, table, nameColumn, name string) (int, bool, error) {
+	exists, err := sqliteTableExists(db, table)
+	if err != nil || !exists {
+		return 0, false, err
+	}
+	var version int
+	err = db.QueryRow(fmt.Sprintf(
+		`select schema_version from %s where %s = ?`,
+		table,
+		nameColumn,
+	), name).Scan(&version)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return version, true, nil
+}
+
+func sqliteTableColumnsInTx(tx *sql.Tx, table string) (map[string]bool, error) {
+	rows, err := tx.Query(`pragma table_info(` + table + `)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, primaryKey int
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return nil, err
+		}
+		columns[name] = true
+	}
+	return columns, rows.Err()
 }
 
 func ensureUsageAccountModelRollupPrimaryKeys(db *sql.DB) error {
@@ -1365,6 +1520,7 @@ func resetUsageDerivedDataWithoutSource(db *sql.DB, snapshot usageMonitoringMigr
 		"usage_pricing_hourly_rollups_v1",
 		"usage_pricing_account_rollups_v1",
 		"usage_cache_accounting_v2_changes",
+		"usage_token_accounting_v2_changes",
 		"usage_rollup_checkpoints",
 		"usage_pricing_rollup_state",
 		"usage_data_migrations",
@@ -1407,6 +1563,7 @@ func resetUsageDerivedDataWithoutSource(db *sql.DB, snapshot usageMonitoringMigr
 		"usage_pricing_hourly_rollups_v1",
 		"usage_pricing_account_rollups_v1",
 		"usage_cache_accounting_v2_changes",
+		"usage_token_accounting_v2_changes",
 	} {
 		if present[tableName] {
 			statements = append(statements, `delete from `+tableName)
@@ -1431,7 +1588,7 @@ func resetUsageDerivedDataWithoutSource(db *sql.DB, snapshot usageMonitoringMigr
 			processed_rows = 0, changed_rows = 0,
 			started_at_ms = null, updated_at_ms = 0,
 			finished_at_ms = null, last_error = null
-			where name in ('usage_cache_accounting_v1', 'usage_cache_accounting_v2')`)
+			where name in ('usage_cache_accounting_v1', 'usage_cache_accounting_v2', 'usage_token_accounting_v2')`)
 	}
 	for _, statement := range statements {
 		if _, err := tx.Exec(statement); err != nil {
@@ -1467,6 +1624,9 @@ func ensureUsageMonitoringProjectionIdentity(db *sql.DB) error {
 	hasAccountKey := false
 	hasRequestedModel := false
 	hasAnalyticsModel := false
+	existingProjectionColumns := make(map[string]bool)
+	projectionColumnsChanged := false
+	statsColumnsChanged := false
 	for rows.Next() {
 		var cid int
 		var name, columnType string
@@ -1485,6 +1645,7 @@ func ensureUsageMonitoringProjectionIdentity(db *sql.DB) error {
 		if name == "analytics_model" {
 			hasAnalyticsModel = true
 		}
+		existingProjectionColumns[name] = true
 	}
 	if err := rows.Close(); err != nil {
 		return fmt.Errorf("close usage monitoring projection column inspection: %w", err)
@@ -1508,9 +1669,108 @@ func ensureUsageMonitoringProjectionIdentity(db *sql.DB) error {
 			return fmt.Errorf("add usage monitoring projection analytics model: %w", err)
 		}
 	}
+	for _, column := range []struct {
+		name       string
+		definition string
+	}{
+		{name: "cache_input_mode", definition: "text not null default ''"},
+		{name: "accounting_version", definition: "integer not null default 0"},
+		{name: "accounting_valid", definition: "integer not null default 0"},
+		{name: "accounting_quality", definition: "text not null default ''"},
+		{name: "non_reasoning_output_tokens", definition: "integer not null default 0"},
+		{name: "normalized_uncached_input_tokens", definition: "integer not null default 0"},
+		{name: "normalized_cache_read_tokens", definition: "integer not null default 0"},
+		{name: "normalized_cache_creation_tokens", definition: "integer not null default 0"},
+		{name: "normalized_non_reasoning_output_tokens", definition: "integer not null default 0"},
+		{name: "normalized_reasoning_output_tokens", definition: "integer not null default 0"},
+		{name: "normalized_total_output_tokens", definition: "integer not null default 0"},
+		{name: "unclassified_tokens", definition: "integer not null default 0"},
+		{name: "incomplete_accounting_calls", definition: "integer not null default 0"},
+	} {
+		if existingProjectionColumns[column.name] {
+			continue
+		}
+		if _, err := tx.Exec(`alter table ` + usageprojection.EventTable + ` add column ` + column.name + ` ` + column.definition); err != nil {
+			return fmt.Errorf("add usage monitoring projection %s: %w", column.name, err)
+		}
+		existingProjectionColumns[column.name] = true
+		projectionColumnsChanged = true
+	}
+	for _, table := range []string{usageMonitoringAccountDailyTable, usageMonitoringAPIKeyDailyTable} {
+		existingColumns, err := sqliteTableColumnsInTx(tx, table)
+		if err != nil {
+			return fmt.Errorf("inspect usage monitoring accounting columns for %s: %w", table, err)
+		}
+		columns := []struct {
+			name       string
+			definition string
+		}{
+			{name: "non_reasoning_output_tokens", definition: "integer not null default 0"},
+			{name: "unclassified_tokens", definition: "integer not null default 0"},
+			{name: "incomplete_accounting_calls", definition: "integer not null default 0"},
+		}
+		if table == usageMonitoringAccountDailyTable {
+			displayColumns := []struct {
+				name       string
+				definition string
+			}{
+				{name: "display_input_tokens", definition: "integer not null default 0"},
+				{name: "display_output_tokens", definition: "integer not null default 0"},
+				{name: "display_non_reasoning_output_tokens", definition: "integer not null default 0"},
+				{name: "display_reasoning_tokens", definition: "integer not null default 0"},
+				{name: "display_unclassified_tokens", definition: "integer not null default 0"},
+				{name: "display_cached_tokens", definition: "integer not null default 0"},
+				{name: "display_cache_read_tokens", definition: "integer not null default 0"},
+				{name: "display_cache_creation_tokens", definition: "integer not null default 0"},
+				{name: "display_total_tokens", definition: "integer not null default 0"},
+			}
+			columns = append(columns, displayColumns...)
+		}
+		for _, column := range columns {
+			if existingColumns[column.name] {
+				continue
+			}
+			if _, err := tx.Exec(`alter table ` + table + ` add column ` + column.name + ` ` + column.definition); err != nil {
+				return fmt.Errorf("add usage monitoring accounting column %s.%s: %w", table, column.name, err)
+			}
+			existingColumns[column.name] = true
+			statsColumnsChanged = true
+		}
+	}
 
-	needsRebuild := versionErr != nil || !hasAccountKey || !hasRequestedModel || !hasAnalyticsModel
-	if needsRebuild {
+	var legacyMonitoringSchema int
+	if err := tx.QueryRow(`select count(*) from usage_monitoring_rollup_state where schema_version <> 2`).Scan(&legacyMonitoringSchema); err != nil {
+		return fmt.Errorf("inspect usage monitoring rollup schema version: %w", err)
+	}
+	projectionNeedsRebuild := versionErr != nil || !hasAccountKey || !hasRequestedModel || !hasAnalyticsModel ||
+		projectionColumnsChanged || legacyMonitoringSchema > 0
+	statsNeedsRebuild := projectionNeedsRebuild || statsColumnsChanged
+	var latestEventID int64
+	status := "ready"
+	if projectionNeedsRebuild || statsNeedsRebuild {
+		if err := tx.QueryRow(`select coalesce(max(id), 0) from usage_events`).Scan(&latestEventID); err != nil {
+			return fmt.Errorf("read latest event for usage monitoring rebuild: %w", err)
+		}
+		if latestEventID != 0 {
+			status = "pending"
+		}
+		if statsNeedsRebuild {
+			for _, tableName := range []string{usageMonitoringAccountDailyTable, usageMonitoringAPIKeyDailyTable} {
+				if _, err := tx.Exec(`delete from ` + tableName); err != nil {
+					return fmt.Errorf("clear usage monitoring stats derivation %s: %w", tableName, err)
+				}
+			}
+			if _, err := tx.Exec(`update usage_monitoring_rollup_state set
+				schema_version = 2, structure_revision = '', status = ?, backfill_last_event_id = 0,
+				coverage_event_id = 0, target_event_id = ?, processed_events = 0,
+				last_run_started_at_ms = null, updated_at_ms = 0,
+				finished_at_ms = null, last_error = null
+				where rollup_name = ?`, status, latestEventID, usageMonitoringStatsRollupName); err != nil {
+				return fmt.Errorf("reset usage monitoring stats state: %w", err)
+			}
+		}
+	}
+	if projectionNeedsRebuild {
 		var searchIndexExists int
 		if err := tx.QueryRow(`select count(*) from sqlite_master where type = 'table' and name = ?`, usageprojection.SearchIndexTable).Scan(&searchIndexExists); err != nil {
 			return fmt.Errorf("inspect usage monitoring model search index: %w", err)
@@ -1520,33 +1780,19 @@ func ensureUsageMonitoringProjectionIdentity(db *sql.DB) error {
 				return err
 			}
 		}
-		for _, tableName := range []string{
-			usageMonitoringAccountDailyTable,
-			usageMonitoringAPIKeyDailyTable,
-			usageMonitoringSelectorDailyTable,
-			usageprojection.EventTable,
-		} {
+		for _, tableName := range []string{usageMonitoringSelectorDailyTable, usageprojection.EventTable} {
 			if _, err := tx.Exec(`delete from ` + tableName); err != nil {
 				return fmt.Errorf("clear usage monitoring model derivation %s: %w", tableName, err)
 			}
 		}
-		var latestEventID int64
-		if err := tx.QueryRow(`select coalesce(max(id), 0) from usage_events`).Scan(&latestEventID); err != nil {
-			return fmt.Errorf("read latest event for usage monitoring model rebuild: %w", err)
-		}
-		status := "pending"
-		if latestEventID == 0 {
-			status = "ready"
-		}
 		if _, err := tx.Exec(`update usage_monitoring_rollup_state set
-			structure_revision = '', status = ?, backfill_last_event_id = 0,
+			schema_version = 2, structure_revision = '', status = ?, backfill_last_event_id = 0,
 			coverage_event_id = 0, target_event_id = ?, processed_events = 0,
 			last_run_started_at_ms = null, updated_at_ms = 0,
 			finished_at_ms = null, last_error = null
-			where rollup_name in (?, ?, ?)`,
+			where rollup_name in (?, ?)`,
 			status,
 			latestEventID,
-			usageMonitoringStatsRollupName,
 			usageMonitoringMetadataRollupName,
 			usageMonitoringProjectionRollupName,
 		); err != nil {
@@ -2174,6 +2420,97 @@ func ensureUsageRollupLongContextColumns(db *sql.DB) error {
 	return tx.Commit()
 }
 
+func ensureUsageTokenAccountingAggregateColumns(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var hourlySchemaVersion, pricingSchemaVersion int
+	if err := tx.QueryRow(`select schema_version from usage_hourly_aggregate_state where aggregate_name = 'hourly_core'`).Scan(&hourlySchemaVersion); err != nil {
+		return err
+	}
+	if err := tx.QueryRow(`select schema_version from usage_pricing_rollup_state where rollup_name = 'pricing_v1'`).Scan(&pricingSchemaVersion); err != nil {
+		return err
+	}
+	if hourlySchemaVersion > 2 || pricingSchemaVersion > 2 {
+		return fmt.Errorf(
+			"unsupported usage accounting aggregate schema versions hourly=%d pricing=%d",
+			hourlySchemaVersion,
+			pricingSchemaVersion,
+		)
+	}
+
+	columns := []struct {
+		name       string
+		definition string
+	}{
+		{name: "non_reasoning_output_tokens", definition: "integer not null default 0"},
+		{name: "unclassified_tokens", definition: "integer not null default 0"},
+		{name: "incomplete_accounting_calls", definition: "integer not null default 0"},
+	}
+	tables := []string{
+		"usage_account_model_rollups",
+		"usage_dashboard_hourly_rollups",
+		"usage_hourly_aggregate_v1",
+		"usage_pricing_hourly_rollups_v1",
+		"usage_pricing_account_rollups_v1",
+	}
+	changed := false
+	for _, table := range tables {
+		existing, err := sqliteTableColumnsInTx(tx, table)
+		if err != nil {
+			return fmt.Errorf("inspect usage accounting aggregate columns for %s: %w", table, err)
+		}
+		for _, column := range columns {
+			if existing[column.name] {
+				continue
+			}
+			if _, err := tx.Exec(fmt.Sprintf(`alter table %s add column %s %s`, table, column.name, column.definition)); err != nil {
+				return fmt.Errorf("add usage accounting aggregate column %s.%s: %w", table, column.name, err)
+			}
+			existing[column.name] = true
+			changed = true
+		}
+	}
+
+	if !changed && hourlySchemaVersion == 2 && pricingSchemaVersion == 2 {
+		return tx.Commit()
+	}
+
+	for _, statement := range []string{
+		`delete from usage_account_model_rollups`,
+		`delete from usage_dashboard_hourly_rollups`,
+		`update usage_rollup_checkpoints set last_event_id = 0, updated_at_ms = 0, last_error = null
+			where name in ('account_history', 'dashboard_hourly')`,
+		`delete from usage_hourly_aggregate_v1`,
+		`update usage_event_identity_ledger set aggregate_schema_version = 0 where aggregate_schema_version in (1, 2)`,
+		`update usage_hourly_aggregate_state set schema_version = 2,
+			status = case when exists (select 1 from usage_events limit 1) then 'pending' else 'ready' end,
+			backfill_last_event_id = 0, coverage_event_id = 0,
+			target_event_id = coalesce((select max(id) from usage_events), 0), processed_events = 0,
+			min_bucket_ms = null, max_bucket_ms = null, last_run_started_at_ms = null,
+			updated_at_ms = 0, finished_at_ms = null, last_error = null
+		where aggregate_name = 'hourly_core'`,
+		`delete from usage_pricing_hourly_rollups_v1`,
+		`delete from usage_pricing_account_rollups_v1`,
+		`update usage_pricing_rollup_state set schema_version = 2,
+			structure_revision = '',
+			status = case when exists (select 1 from usage_events limit 1) then 'pending' else 'ready' end,
+			backfill_last_event_id = 0, coverage_event_id = 0,
+			target_event_id = coalesce((select max(id) from usage_events), 0), processed_events = 0,
+			min_bucket_ms = null, max_bucket_ms = null, last_run_started_at_ms = null,
+			updated_at_ms = 0, finished_at_ms = null, last_error = null
+		where rollup_name = 'pricing_v1'`,
+	} {
+		if _, err := tx.Exec(statement); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func ensureAccountActionCandidateColumns(db *sql.DB) error {
 	rows, err := db.Query(`pragma table_info(account_action_candidates)`)
 	if err != nil {
@@ -2494,12 +2831,19 @@ func ensureUsageEventSnapshotColumns(db *sql.DB) error {
 		{name: "request_service_tier", definition: "text"},
 		{name: "response_service_tier", definition: "text"},
 		{name: "cache_input_mode", definition: "text"},
+		{name: "accounting_version", definition: "integer not null default 0"},
+		{name: "accounting_valid", definition: "integer not null default 0"},
+		{name: "accounting_quality", definition: "text"},
 		{name: "cache_read_tokens", definition: "integer not null default 0"},
 		{name: "cache_creation_tokens", definition: "integer not null default 0"},
 		{name: "normalized_uncached_input_tokens", definition: "integer"},
 		{name: "normalized_total_input_tokens", definition: "integer"},
 		{name: "normalized_cache_read_tokens", definition: "integer"},
 		{name: "normalized_cache_creation_tokens", definition: "integer"},
+		{name: "normalized_non_reasoning_output_tokens", definition: "integer"},
+		{name: "normalized_reasoning_output_tokens", definition: "integer"},
+		{name: "normalized_total_output_tokens", definition: "integer"},
+		{name: "unclassified_tokens", definition: "integer"},
 		{name: "ttft_ms", definition: "integer"},
 		{name: "fail_status_code", definition: "integer"},
 		{name: "fail_summary", definition: "text"},

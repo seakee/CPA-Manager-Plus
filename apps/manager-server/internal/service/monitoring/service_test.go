@@ -123,7 +123,7 @@ func TestAnalyticsBuildsIncludedSections(t *testing.T) {
 		t.Fatalf("save model prices: %v", err)
 	}
 	_, err := db.InsertEvents(ctx, []usage.Event{
-		monitoringEvent("analytics-a", fromMS+1_000, "gpt-a", "auth-1", "source-a", false, 1_000_000, 500_000, 0, 100, 1_500_100, &latency),
+		monitoringEvent("analytics-a", fromMS+1_000, "gpt-a", "auth-1", "source-a", false, 1_000_000, 500_000, 0, 100, 1_500_000, &latency),
 		monitoringEvent("analytics-b", fromMS+2_000, "gpt-b", "auth-2", "source-b", true, 10, 20, 0, 0, 30, nil),
 		monitoringEvent("analytics-outside", toMS, "gpt-a", "auth-1", "source-a", false, 1, 1, 0, 0, 2, nil),
 	})
@@ -172,7 +172,8 @@ func TestAnalyticsBuildsIncludedSections(t *testing.T) {
 	timelinePoint := resp.Timeline[0]
 	if timelinePoint.Calls != 2 || timelinePoint.Success != 1 || timelinePoint.Failure != 1 ||
 		timelinePoint.InputTokens != 1_000_010 || timelinePoint.OutputTokens != 500_020 ||
-		timelinePoint.CachedTokens != 100 || timelinePoint.TotalTokens != 1_500_130 {
+		timelinePoint.CachedTokens != 0 || timelinePoint.CacheReadTokens != 100 || timelinePoint.TotalTokens != 1_500_030 ||
+		timelinePoint.UnclassifiedTokens != 0 || timelinePoint.IncompleteAccountingCalls != 0 {
 		t.Fatalf("timeline metrics = %#v", timelinePoint)
 	}
 	if timelinePoint.AvgLatencyMS == nil || math.Abs(*timelinePoint.AvgLatencyMS-250) > 0.000001 {
@@ -199,6 +200,109 @@ func TestAnalyticsBuildsIncludedSections(t *testing.T) {
 	if resp.Events == nil || len(resp.Events.Items) != 1 || !resp.Events.HasMore {
 		t.Fatalf("events page = %#v", resp.Events)
 	}
+}
+
+func TestMonitoringRollupSeparatesDisplayAndPricingBuckets(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	ctx := context.Background()
+	fromMS := time.Date(2026, 5, 6, 0, 0, 0, 0, time.UTC).UnixMilli()
+	toMS := fromMS + 24*time.Hour.Milliseconds()
+
+	event := monitoringEvent("inconsistent-pricing", fromMS+time.Hour.Milliseconds(), "gpt-a", "auth-1", "source-a", false, 999, 999, 999, 0, 1_998, nil)
+	event.AuthFileSnapshot = "codex.json"
+	event.AuthProviderSnapshot = "openai"
+	event.AccountingVersion = usage.TokenAccountingSchemaVersion
+	event.AccountingValid = true
+	event.TokenBreakdown = usage.TokenBreakdown{
+		SchemaVersion: usage.TokenAccountingSchemaVersion,
+		Quality:       usage.TokenAccountingQualityInconsistent,
+		TotalTokens:   110,
+		Input: usage.TokenInputBreakdown{
+			TotalTokens:    100,
+			UncachedTokens: 100,
+		},
+		Output: usage.TokenOutputBreakdown{
+			TotalTokens:        10,
+			NonReasoningTokens: 10,
+		},
+	}
+	if _, err := db.InsertEvents(ctx, []usage.Event{event}); err != nil {
+		t.Fatalf("insert event: %v", err)
+	}
+	catchUpMonitoringProjection(t, ctx, db)
+	for {
+		result, err := db.CatchUpUsageMonitoringStats(ctx, 100, time.Now().UnixMilli())
+		if err != nil {
+			t.Fatalf("catch up monitoring stats: %v", err)
+		}
+		if !result.Pending {
+			break
+		}
+	}
+
+	service := New(db)
+	filter := store.AnalyticsFilter{FromMS: fromMS, ToMS: toMS, IncludeFailed: true}
+	displayAggregate, available := service.monitoringReader.Aggregate(ctx, filter)
+	if !available || displayAggregate.InputTokens != 100 || displayAggregate.OutputTokens != 10 ||
+		displayAggregate.UnclassifiedTokens != 0 || displayAggregate.TotalTokens != 110 ||
+		displayAggregate.IncompleteAccountingCalls != 1 {
+		t.Fatalf("display aggregate: available=%v aggregate=%#v", available, displayAggregate)
+	}
+	projectedModels, available := service.monitoringReader.ModelStats(ctx, filter)
+	if !available || len(projectedModels) != 1 {
+		t.Fatalf("projected model stats: available=%v rows=%#v", available, projectedModels)
+	}
+	assertPricingSafe := func(name string, inputTokens, outputTokens, unclassifiedTokens, totalTokens, incompleteCalls int64) {
+		t.Helper()
+		if inputTokens != 0 || outputTokens != 0 || unclassifiedTokens != 110 || totalTokens != 110 || incompleteCalls != 1 {
+			t.Fatalf("%s pricing buckets = input:%d output:%d unclassified:%d total:%d incomplete:%d",
+				name, inputTokens, outputTokens, unclassifiedTokens, totalTokens, incompleteCalls)
+		}
+	}
+	assertPricingSafe("projected model", projectedModels[0].InputTokens, projectedModels[0].OutputTokens, projectedModels[0].UnclassifiedTokens, projectedModels[0].TotalTokens, projectedModels[0].IncompleteAccountingCalls)
+
+	models, err := service.modelStats(ctx, filter)
+	if err != nil || len(models) != 1 {
+		t.Fatalf("model stats: err=%v rows=%#v", err, models)
+	}
+	assertPricingSafe("model", models[0].InputTokens, models[0].OutputTokens, models[0].UnclassifiedTokens, models[0].TotalTokens, models[0].IncompleteAccountingCalls)
+
+	accounts, err := service.accountModelStats(ctx, filter)
+	if err != nil || len(accounts) != 1 {
+		t.Fatalf("account stats: err=%v rows=%#v", err, accounts)
+	}
+	assertPricingSafe("account", accounts[0].InputTokens, accounts[0].OutputTokens, accounts[0].UnclassifiedTokens, accounts[0].TotalTokens, accounts[0].IncompleteAccountingCalls)
+
+	apiKeys, err := service.apiKeyModelStats(ctx, filter)
+	if err != nil || len(apiKeys) != 1 {
+		t.Fatalf("api key stats: err=%v rows=%#v", err, apiKeys)
+	}
+	assertPricingSafe("api key", apiKeys[0].InputTokens, apiKeys[0].OutputTokens, apiKeys[0].UnclassifiedTokens, apiKeys[0].TotalTokens, apiKeys[0].IncompleteAccountingCalls)
+
+	accountKey, valid := usageidentity.AccountKey(usageidentity.Fields{
+		AuthFileSnapshot:     event.AuthFileSnapshot,
+		AuthIndex:            event.AuthIndex,
+		AuthProviderSnapshot: event.AuthProviderSnapshot,
+		AccountSnapshot:      event.AccountSnapshot,
+	})
+	if !valid {
+		t.Fatal("invalid account key fixture")
+	}
+	windowStats, available := service.monitoringReader.AccountWindowStats(ctx, []store.AccountWindowUsageQuery{{
+		RequestIndex:         0,
+		FromMS:               fromMS,
+		ToMS:                 toMS,
+		AccountKey:           accountKey,
+		AccountSnapshot:      event.AccountSnapshot,
+		AuthFileSnapshot:     event.AuthFileSnapshot,
+		AuthProviderSnapshot: event.AuthProviderSnapshot,
+		AuthIndex:            event.AuthIndex,
+		Source:               event.Source,
+	}})
+	if !available || len(windowStats) != 1 {
+		t.Fatalf("account window stats: available=%v rows=%#v", available, windowStats)
+	}
+	assertPricingSafe("account window", windowStats[0].InputTokens, windowStats[0].OutputTokens, windowStats[0].UnclassifiedTokens, windowStats[0].TotalTokens, windowStats[0].IncompleteAccountingCalls)
 }
 
 func TestAnalyticsHeatmapIncludesTopContributors(t *testing.T) {
@@ -643,7 +747,7 @@ func TestModelCacheHitRateUsesBillingModelBeforeAliasAggregation(t *testing.T) {
 	}
 
 	models := map[string]*AccountModelStatRow{}
-	addAccountModelStat(models, "internal-fast", "openai/gpt-5.6-sol", 1, 1, 0, 100, 0, 0, 90, 0, 100, 0, 1)
+	addAccountModelStat(models, "internal-fast", "openai/gpt-5.6-sol", 1, 1, 0, 100, 0, 0, 0, 0, 0, 0, 90, 0, 100, 0, 1)
 	if model := models["internal-fast"]; model == nil || model.CacheHitInputTokens != 100 ||
 		math.Abs(model.CacheHitRate-0.9) > 1e-9 {
 		t.Fatalf("account model cache hit metrics = %#v", model)
@@ -688,15 +792,21 @@ func TestAnalyticsExposesCPA7118UsageFields(t *testing.T) {
 		t.Fatalf("analytics: %v", err)
 	}
 	if resp.Summary == nil || resp.Summary.CacheReadTokens != 4 ||
-		resp.Summary.CacheCreationTokens != 1 || resp.Summary.CachedTokens != 0 {
+		resp.Summary.CacheCreationTokens != 1 || resp.Summary.CachedTokens != 0 ||
+		resp.Summary.NonReasoningOutputTokens != 17 || resp.Summary.ReasoningTokens != 3 ||
+		resp.Summary.UnclassifiedTokens != 3 || resp.Summary.IncompleteAccountingCalls != 1 {
 		t.Fatalf("summary = %#v", resp.Summary)
 	}
 	if len(resp.TaskBuckets) != 1 || resp.TaskBuckets[0].CacheReadTokens != 4 ||
-		resp.TaskBuckets[0].CacheCreationTokens != 1 || resp.TaskBuckets[0].CachedTokens != 0 {
+		resp.TaskBuckets[0].CacheCreationTokens != 1 || resp.TaskBuckets[0].CachedTokens != 0 ||
+		resp.TaskBuckets[0].NonReasoningOutputTokens != 17 || resp.TaskBuckets[0].ReasoningTokens != 3 ||
+		resp.TaskBuckets[0].UnclassifiedTokens != 3 || resp.TaskBuckets[0].IncompleteAccountingCalls != 1 {
 		t.Fatalf("task buckets = %#v", resp.TaskBuckets)
 	}
 	if len(resp.ModelStats) != 1 || resp.ModelStats[0].CacheReadTokens != 4 ||
-		resp.ModelStats[0].CacheCreationTokens != 1 || resp.ModelStats[0].CachedTokens != 0 {
+		resp.ModelStats[0].CacheCreationTokens != 1 || resp.ModelStats[0].CachedTokens != 0 ||
+		resp.ModelStats[0].NonReasoningOutputTokens != 17 || resp.ModelStats[0].ReasoningTokens != 3 ||
+		resp.ModelStats[0].UnclassifiedTokens != 3 || resp.ModelStats[0].IncompleteAccountingCalls != 1 {
 		t.Fatalf("model stats = %#v", resp.ModelStats)
 	}
 	if resp.Events == nil || len(resp.Events.Items) != 1 {
@@ -704,7 +814,9 @@ func TestAnalyticsExposesCPA7118UsageFields(t *testing.T) {
 	}
 	item := resp.Events.Items[0]
 	if item.ExecutorType != "codex" || item.ReasoningEffort != "medium" ||
-		item.ServiceTier != "priority" || item.CacheReadTokens != 4 ||
+		item.ServiceTier != "priority" || item.CacheInputMode != usage.CacheInputModeIncluded ||
+		item.AccountingVersion != 0 || item.AccountingValid || item.AccountingQuality != usage.TokenAccountingQualityUnclassified ||
+		item.CacheReadTokens != 4 || item.NonReasoningOutputTokens != 17 || item.UnclassifiedTokens != 3 || !item.IncompleteAccounting ||
 		item.CacheCreationTokens != 1 || item.CachedTokens != 0 || item.FailStatusCode == nil ||
 		*item.FailStatusCode != 429 || item.FailSummary != "rate limit exceeded" ||
 		item.LatencyMS == nil || *item.LatencyMS != 1500 || item.TTFTMS == nil ||
@@ -713,12 +825,78 @@ func TestAnalyticsExposesCPA7118UsageFields(t *testing.T) {
 	}
 }
 
+func TestAnalyticsPricesCanonicalOutputOnceAndLeavesUnclassifiedUnpriced(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	ctx := context.Background()
+	fromMS := int64(1_778_000_000_000)
+	toMS := fromMS + 60*60*1000
+	if err := db.SaveModelPrices(ctx, map[string]store.ModelPrice{
+		"gpt-accounting": {Prompt: 1, Completion: 2},
+	}); err != nil {
+		t.Fatalf("save prices: %v", err)
+	}
+	event := monitoringEvent("canonical-pricing", fromMS+1_000, "gpt-accounting", "auth-1", "source-a", false, 999, 999, 999, 0, 999, nil)
+	event.AccountingVersion = usage.TokenAccountingSchemaVersion
+	event.AccountingValid = true
+	event.TokenBreakdown = usage.TokenBreakdown{
+		SchemaVersion: usage.TokenAccountingSchemaVersion,
+		Quality:       usage.TokenAccountingQualityUnclassified,
+		TotalTokens:   230,
+		Input: usage.TokenInputBreakdown{
+			TotalTokens:    100,
+			UncachedTokens: 100,
+		},
+		Output: usage.TokenOutputBreakdown{
+			TotalTokens:        100,
+			NonReasoningTokens: 60,
+			ReasoningTokens:    40,
+		},
+		UnclassifiedTokens: 30,
+	}
+	if _, err := db.InsertEvents(ctx, []usage.Event{event}); err != nil {
+		t.Fatalf("insert event: %v", err)
+	}
+
+	resp, err := New(db).Analytics(ctx, Request{
+		FromMS: fromMS,
+		ToMS:   toMS,
+		NowMS:  toMS,
+		Include: Include{
+			Summary:    true,
+			EventsPage: &EventsPage{Limit: 10},
+		},
+	})
+	if err != nil {
+		t.Fatalf("analytics: %v", err)
+	}
+	if resp.Summary == nil || resp.Summary.InputTokens != 100 || resp.Summary.OutputTokens != 100 ||
+		resp.Summary.NonReasoningOutputTokens != 60 || resp.Summary.ReasoningTokens != 40 ||
+		resp.Summary.UnclassifiedTokens != 30 || resp.Summary.IncompleteAccountingCalls != 1 ||
+		resp.Summary.TotalTokens != 230 {
+		t.Fatalf("summary accounting = %#v", resp.Summary)
+	}
+	if math.Abs(resp.Summary.TotalCost-0.0003) > 0.000000001 {
+		t.Fatalf("summary cost = %v, want canonical input plus output once", resp.Summary.TotalCost)
+	}
+	if resp.Events == nil || len(resp.Events.Items) != 1 {
+		t.Fatalf("events = %#v", resp.Events)
+	}
+	item := resp.Events.Items[0]
+	if item.AccountingVersion != usage.TokenAccountingSchemaVersion || !item.AccountingValid ||
+		item.AccountingQuality != usage.TokenAccountingQualityUnclassified ||
+		item.NonReasoningOutputTokens != 60 || item.ReasoningTokens != 40 ||
+		item.UnclassifiedTokens != 30 || !item.IncompleteAccounting {
+		t.Fatalf("event accounting = %#v", item)
+	}
+}
+
 func TestAnalyticsKeepsCompatCachedSeparateFromFineGrainedCache(t *testing.T) {
 	db := newMonitoringTestStore(t)
 	ctx := context.Background()
 	fromMS := int64(1_778_000_000_000)
 	toMS := fromMS + 60*60*1000
-	event := monitoringEvent("claude-cache-mirror", fromMS+1_000, "claude-sonnet", "auth-1", "source-a", false, 100, 20, 0, 500, 120, nil)
+	event := monitoringEvent("claude-cache-mirror", fromMS+1_000, "claude-sonnet", "auth-1", "source-a", false, 100, 20, 0, 500, 620, nil)
+	event.Provider = "anthropic"
 	event.CacheReadTokens = 500
 
 	if _, err := db.InsertEvents(ctx, []usage.Event{event}); err != nil {
@@ -1447,7 +1625,7 @@ func TestAnalyticsAppliesCacheStatusFilter(t *testing.T) {
 	}{
 		{name: "hit", status: "hit", wantHashes: []string{"cache-legacy", "cache-creation", "cache-read"}},
 		{name: "miss", status: "miss", wantHashes: []string{"cache-miss"}},
-		{name: "read", status: "read", wantHashes: []string{"cache-read"}},
+		{name: "read", status: "read", wantHashes: []string{"cache-legacy", "cache-read"}},
 		{name: "creation", status: "creation", wantHashes: []string{"cache-creation"}},
 	}
 	for _, tt := range tests {
@@ -1935,9 +2113,53 @@ func TestAnalyticsEventsPageUsesNormalizedTotalInput(t *testing.T) {
 	inputs := map[string]int64{}
 	for _, item := range resp.Events.Items {
 		inputs[item.EventHash] = item.InputTokens
+		if !item.TokenBreakdown.Valid() || item.TokenBreakdown.TotalTokens != item.TotalTokens ||
+			item.TokenBreakdown.Input.TotalTokens != item.InputTokens ||
+			item.TokenBreakdown.Output.TotalTokens != item.OutputTokens {
+			t.Fatalf("event token breakdown = %#v", item)
+		}
 	}
 	if inputs["xai-included"] != 100 || inputs["claude-separate"] != 140 {
 		t.Fatalf("normalized event inputs = %#v", inputs)
+	}
+}
+
+func TestBuildEventsKeepsFlatAccountingAlignedWithFallbackBreakdown(t *testing.T) {
+	response := buildEvents(store.EventsPage{Items: []store.EventPageItem{{
+		EventHash:                "invalid-persisted-breakdown",
+		AccountingVersion:        usage.TokenAccountingSchemaVersion,
+		AccountingValid:          true,
+		AccountingQuality:        usage.TokenAccountingQualityComplete,
+		InputTokens:              10,
+		OutputTokens:             5,
+		NonReasoningOutputTokens: 6,
+		ReasoningTokens:          1,
+		CachedTokens:             7,
+		CacheReadTokens:          3,
+		CacheCreationTokens:      2,
+		TotalTokens:              15,
+	}}}, 1)
+	if response == nil || len(response.Items) != 1 {
+		t.Fatalf("events response = %#v", response)
+	}
+	item := response.Items[0]
+	if item.AccountingValid || item.AccountingQuality != usage.TokenAccountingQualityInconsistent ||
+		!item.IncompleteAccounting || item.AccountingVersion != usage.TokenAccountingSchemaVersion {
+		t.Fatalf("accounting metadata = %#v", item)
+	}
+	if !item.TokenBreakdown.Valid() || item.TokenBreakdown.TotalTokens != 15 ||
+		item.TokenBreakdown.UnclassifiedTokens != 15 {
+		t.Fatalf("fallback token breakdown = %#v", item.TokenBreakdown)
+	}
+	if item.InputTokens != item.TokenBreakdown.Input.TotalTokens ||
+		item.OutputTokens != item.TokenBreakdown.Output.TotalTokens ||
+		item.NonReasoningOutputTokens != item.TokenBreakdown.Output.NonReasoningTokens ||
+		item.ReasoningTokens != item.TokenBreakdown.Output.ReasoningTokens ||
+		item.CacheReadTokens != item.TokenBreakdown.Input.CacheReadTokens ||
+		item.CacheCreationTokens != item.TokenBreakdown.Input.CacheWriteTokens ||
+		item.UnclassifiedTokens != item.TokenBreakdown.UnclassifiedTokens ||
+		item.TotalTokens != item.TokenBreakdown.TotalTokens || item.CachedTokens != 0 {
+		t.Fatalf("flat accounting diverged from fallback = %#v", item)
 	}
 }
 
@@ -2154,7 +2376,7 @@ func TestAccountHistoryReturnsRollupTotalsAndCost(t *testing.T) {
 		t.Fatalf("save model prices: %v", err)
 	}
 
-	first := monitoringEvent("history-a-1", baseMS+1_000, "alias-a", "auth-1", "source-a", false, 1_000_000, 500_000, 0, 100_000, 1_530_000, nil)
+	first := monitoringEvent("history-a-1", baseMS+1_000, "alias-a", "auth-1", "source-a", false, 1_000_000, 500_000, 0, 100_000, 1_500_000, nil)
 	first.ResolvedModel = "resolved-a"
 	first.AccountSnapshot = "hist@example.com"
 	first.Source = "hist@example.com"
@@ -2205,13 +2427,13 @@ func TestAccountHistoryReturnsRollupTotalsAndCost(t *testing.T) {
 	if history.RowKey != "row-history" || history.AccountKey != historyKey || !history.Matched || history.SyncStatus != "ready" {
 		t.Fatalf("history item = %#v", history)
 	}
-	if history.TotalRequests != 2 || history.SuccessCalls != 1 || history.FailureCalls != 1 || history.TotalTokens != 1_530_000 {
+	if history.TotalRequests != 2 || history.SuccessCalls != 1 || history.FailureCalls != 1 || history.TotalTokens != 1_500_000 {
 		t.Fatalf("history totals = %#v", history)
 	}
 	if history.SuccessRate == nil || math.Abs(*history.SuccessRate-0.5) > 0.000001 {
 		t.Fatalf("success rate = %#v", history.SuccessRate)
 	}
-	if math.Abs(history.TotalCost-2.055) > 0.000001 {
+	if math.Abs(history.TotalCost-1.9375) > 0.000001 {
 		t.Fatalf("total cost = %v", history.TotalCost)
 	}
 	if history.FirstSeenMS == nil || *history.FirstSeenMS != baseMS+1_000 || history.LastSeenMS == nil || *history.LastSeenMS != baseMS+2_000 {
@@ -3218,6 +3440,7 @@ func monitoringEvent(
 		EventHash:       hash,
 		TimestampMS:     timestampMS,
 		Timestamp:       time.UnixMilli(timestampMS).UTC().Format(time.RFC3339Nano),
+		Provider:        "openai",
 		Model:           model,
 		Endpoint:        "POST /v1/chat/completions",
 		Method:          "POST",
@@ -3235,6 +3458,19 @@ func monitoringEvent(
 		LatencyMS:       latencyMS,
 		Failed:          failed,
 		CreatedAtMS:     timestampMS,
+	}
+}
+
+func catchUpMonitoringProjection(t *testing.T, ctx context.Context, db *store.Store) {
+	t.Helper()
+	for {
+		result, err := db.CatchUpUsageMonitoringProjection(ctx, 100, time.Now().UnixMilli())
+		if err != nil {
+			t.Fatalf("catch up monitoring projection: %v", err)
+		}
+		if !result.Pending {
+			return
+		}
 	}
 }
 

@@ -423,6 +423,29 @@ func (s *Store) RecordUsageCacheAccountingFailure(ctx context.Context, migration
 	return s.DataMigrations.RecordUsageCacheAccountingFailure(ctx, migrationErr)
 }
 
+func (s *Store) UsageTokenAccountingMigrationState(ctx context.Context) (DataMigrationState, error) {
+	state, found, err := s.DataMigrations.UsageTokenAccountingState(ctx)
+	if err != nil {
+		return DataMigrationState{}, err
+	}
+	if found {
+		return state, nil
+	}
+	return DataMigrationState{Name: datamigration.UsageTokenAccountingMigrationName, Status: datamigration.StatusDiscovering}, nil
+}
+
+func (s *Store) DiscoverUsageTokenAccounting(ctx context.Context) (DataMigrationState, error) {
+	return s.DataMigrations.DiscoverUsageTokenAccounting(ctx)
+}
+
+func (s *Store) RunUsageTokenAccountingBatch(ctx context.Context, batchSize int) (DataMigrationBatchResult, error) {
+	return s.DataMigrations.RunUsageTokenAccountingBatch(ctx, batchSize)
+}
+
+func (s *Store) RecordUsageTokenAccountingFailure(ctx context.Context, migrationErr error) error {
+	return s.DataMigrations.RecordUsageTokenAccountingFailure(ctx, migrationErr)
+}
+
 func (s *Store) UsageCacheAccountingMigrationReady(ctx context.Context) (bool, error) {
 	state, err := s.UsageCacheAccountingMigrationState(ctx)
 	if err != nil {
@@ -431,8 +454,24 @@ func (s *Store) UsageCacheAccountingMigrationReady(ctx context.Context) (bool, e
 	return state.Status == datamigration.StatusCompleted, nil
 }
 
+func (s *Store) UsageTokenAccountingMigrationReady(ctx context.Context) (bool, error) {
+	state, err := s.UsageTokenAccountingMigrationState(ctx)
+	if err != nil {
+		return false, err
+	}
+	return state.Status == datamigration.StatusCompleted, nil
+}
+
+func (s *Store) UsageAccountingMigrationsReady(ctx context.Context) (bool, error) {
+	cacheReady, err := s.UsageCacheAccountingMigrationReady(ctx)
+	if err != nil || !cacheReady {
+		return false, err
+	}
+	return s.UsageTokenAccountingMigrationReady(ctx)
+}
+
 func (s *Store) CatchUpUsageHourlyAggregate(ctx context.Context, limit int, nowMS int64) (UsageHourlyAggregateCatchUpResult, error) {
-	ready, err := s.UsageCacheAccountingMigrationReady(ctx)
+	ready, err := s.UsageAccountingMigrationsReady(ctx)
 	if err != nil {
 		return UsageHourlyAggregateCatchUpResult{}, err
 	}
@@ -455,7 +494,7 @@ func (s *Store) UsageHourlyAggregateRows(ctx context.Context, filter UsageHourly
 }
 
 func (s *Store) CatchUpUsagePricing(ctx context.Context, limit int, nowMS int64) (UsagePricingCatchUpResult, error) {
-	ready, err := s.UsageCacheAccountingMigrationReady(ctx)
+	ready, err := s.UsageAccountingMigrationsReady(ctx)
 	if err != nil {
 		return UsagePricingCatchUpResult{}, err
 	}
@@ -470,7 +509,7 @@ func (s *Store) RecordUsagePricingFailure(ctx context.Context, rollupErr error, 
 }
 
 func (s *Store) CatchUpUsageMonitoringStats(ctx context.Context, limit int, nowMS int64) (UsageMonitoringCatchUpResult, error) {
-	ready, err := s.UsageCacheAccountingMigrationReady(ctx)
+	ready, err := s.UsageAccountingMigrationsReady(ctx)
 	if err != nil {
 		return UsageMonitoringCatchUpResult{}, err
 	}
@@ -481,7 +520,7 @@ func (s *Store) CatchUpUsageMonitoringStats(ctx context.Context, limit int, nowM
 }
 
 func (s *Store) CatchUpUsageMonitoringProjection(ctx context.Context, limit int, nowMS int64) (UsageMonitoringCatchUpResult, error) {
-	ready, err := s.UsageCacheAccountingMigrationReady(ctx)
+	ready, err := s.UsageAccountingMigrationsReady(ctx)
 	if err != nil {
 		return UsageMonitoringCatchUpResult{}, err
 	}
@@ -618,7 +657,7 @@ func (s *Store) LoadUsagePricingAccountSnapshot(ctx context.Context, accountKeys
 }
 
 func (s *Store) CatchUpAccountHistoryRollups(ctx context.Context, limit int, nowMS int64) (UsageRollupCatchUpResult, error) {
-	ready, err := s.UsageCacheAccountingMigrationReady(ctx)
+	ready, err := s.UsageAccountingMigrationsReady(ctx)
 	if err != nil {
 		return UsageRollupCatchUpResult{}, err
 	}
@@ -629,7 +668,7 @@ func (s *Store) CatchUpAccountHistoryRollups(ctx context.Context, limit int, now
 }
 
 func (s *Store) CatchUpDashboardHourlyRollups(ctx context.Context, limit int, nowMS int64) (UsageRollupCatchUpResult, error) {
-	ready, err := s.UsageCacheAccountingMigrationReady(ctx)
+	ready, err := s.UsageAccountingMigrationsReady(ctx)
 	if err != nil {
 		return UsageRollupCatchUpResult{}, err
 	}

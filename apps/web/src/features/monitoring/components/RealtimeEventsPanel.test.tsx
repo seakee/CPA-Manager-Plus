@@ -43,10 +43,15 @@ const t = ((key: string, options?: Record<string, unknown>) => {
     'monitoring.realtime_usage_total_label': 'Total',
     'monitoring.realtime_usage_input_label': 'Input',
     'monitoring.realtime_usage_output_label': 'Output',
+    'monitoring.realtime_usage_non_reasoning_label': 'Non-reasoning',
     'monitoring.realtime_usage_reasoning_label': 'Reasoning',
     'monitoring.realtime_usage_cached_label': 'Cached',
     'monitoring.realtime_usage_cache_read_label': 'Cache Read',
     'monitoring.realtime_usage_cache_creation_label': 'Cache Creation',
+    'monitoring.realtime_usage_unclassified_label': 'Unclassified',
+    'monitoring.realtime_usage_accounting_label': 'Accounting',
+    'monitoring.realtime_usage_incomplete_suffix': 'incomplete',
+    'monitoring.accounting_quality_legacy': 'Legacy',
     'monitoring.load_more_events': 'Load more',
     'monitoring.log_rows': 'Rows',
     'monitoring.no_more_events': 'No more events',
@@ -145,12 +150,15 @@ const baseRow = (overrides: Partial<PanelRow> = {}): PanelRow => ({
   tokensPerSecond: 13.3,
   inputTokens: 10,
   outputTokens: 20,
+  nonReasoningOutputTokens: 17,
   reasoningTokens: 3,
+  unclassifiedTokens: 0,
   cachedTokens: 5,
   cacheReadTokens: 0,
   cacheCreationTokens: 0,
   totalTokens: 33,
   totalCost: 0,
+  incompleteAccounting: false,
   taskKey: 'task-1',
   searchText: '',
   requestCount: 1,
@@ -224,9 +232,7 @@ describe('RealtimeEventsPanel', () => {
       })
     );
 
-    expect(markup).toContain(
-      `class="${styles.realtimeSettingsColumn}">Reasoning / Tier</th>`
-    );
+    expect(markup).toContain(`class="${styles.realtimeSettingsColumn}">Reasoning / Tier</th>`);
     expect(markup).toContain('>TPS</th>');
     expect(markup).toContain(styles.realtimeTpsColumn);
     expect(markup).toContain(styles.realtimeLatencyColumn);
@@ -354,9 +360,7 @@ describe('RealtimeEventsPanel', () => {
     expect(
       markup.match(new RegExp(`class="[^"]*${styles.realtimeSettingValue}[^"]*">-</span>`, 'g'))
     ).toHaveLength(2);
-    expect(markup).toContain(
-      `class="${styles.realtimeSettingsColumn}">Reasoning / Tier</th>`
-    );
+    expect(markup).toContain(`class="${styles.realtimeSettingsColumn}">Reasoning / Tier</th>`);
     expect(markup).toContain('>TPS</th>');
     expect(markup).toContain('Success');
     expect(markup).toContain('>Elapsed</th>');
@@ -419,9 +423,7 @@ describe('RealtimeEventsPanel', () => {
       })
     );
 
-    expect(markup).toContain(
-      'title="deepseek-v4-flash(max)\nresolved-deepseek-v4-flash"'
-    );
+    expect(markup).toContain('title="deepseek-v4-flash(max)\nresolved-deepseek-v4-flash"');
     expect(markup.indexOf('>deepseek-v4-flash(max)</span>')).toBeLessThan(
       markup.indexOf('>resolved-deepseek-v4-flash</small>')
     );
@@ -502,9 +504,7 @@ describe('RealtimeEventsPanel', () => {
     expect(fullMarkup).toContain(`<details class="${styles.realtimeRequestMetadata}">`);
     expect(fullMarkup).toContain('<summary>Request metadata</summary>');
     expect(fullMarkup).toContain('Client IP: 192.0.2.10');
-    expect(fullMarkup).toContain(
-      'Forwarded chain (unverified): 203.0.113.5, 198.51.100.8'
-    );
+    expect(fullMarkup).toContain('Forwarded chain (unverified): 203.0.113.5, 198.51.100.8');
     expect(fullMarkup).toContain('User-Agent: test-client/1.0');
   });
 
@@ -568,7 +568,9 @@ describe('RealtimeEventsPanel', () => {
     expect(markup).toContain('>Cache Creation</span><span class=');
     expect(markup).toContain('>151.0K</span>');
     expect(markup).toContain('>1.0K</span>');
-    expect(markup).toContain('aria-label="Total: 33, Input: 152.6K, Output: 20, Reasoning: 3, Cached: 0, Cache Read: 151.0K, Cache Creation: 1.0K"');
+    expect(markup).toContain(
+      'aria-label="Total: 33, Input: 152.6K, Output: 20, Non-reasoning: 17, Reasoning: 3, Cached: 0, Cache Read: 151.0K, Cache Creation: 1.0K, Unclassified: 0, Accounting: Legacy"'
+    );
     expect(markup).toContain('tabindex="0"');
   });
 

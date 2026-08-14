@@ -173,6 +173,18 @@ export const buildUsageOverviewSummaryCards = ({
       ? t('usage_analytics.metric_p95_ttft')
       : t('usage_analytics.metric_p95_latency');
   const p95LatencyValue = summary.p95LatencyMs ?? summary.p95TtftMs;
+  const costMeta = deltaMeta(
+    summaryDelta,
+    'estimatedCost',
+    t,
+    t('usage_analytics.summary_cost_meta')
+  );
+  const accountingMeta =
+    summary.incompleteAccountingCalls > 0
+      ? `${costMeta} · ${t('usage_analytics.summary_cost_incomplete', {
+          count: summary.incompleteAccountingCalls,
+        })}`
+      : costMeta;
 
   return [
     {
@@ -208,7 +220,8 @@ export const buildUsageOverviewSummaryCards = ({
       fullLabel: t('usage_analytics.metric_estimated_cost'),
       icon: 'cost',
       label: t('usage_analytics.metric_estimated_cost'),
-      meta: deltaMeta(summaryDelta, 'estimatedCost', t, t('usage_analytics.summary_cost_meta')),
+      meta: accountingMeta,
+      tone: summary.incompleteAccountingCalls > 0 ? 'warn' : undefined,
       value: formatMetricValue('estimatedCost', summary.estimatedCost),
     },
     {
@@ -216,7 +229,14 @@ export const buildUsageOverviewSummaryCards = ({
       fullLabel: t('usage_analytics.metric_total_tokens'),
       icon: 'tokens',
       label: t('usage_analytics.metric_total_tokens'),
-      meta: `${t('usage_analytics.metric_reasoning_tokens')} ${formatCompactNumber(reasoningTokens)}`,
+      meta: [
+        `${t('usage_analytics.metric_reasoning_tokens')} ${formatCompactNumber(reasoningTokens)}`,
+        summary.unclassifiedTokens > 0
+          ? `${t('usage_analytics.metric_unclassified_tokens')} ${formatCompactNumber(summary.unclassifiedTokens)}`
+          : '',
+      ]
+        .filter(Boolean)
+        .join(' · '),
       value: formatMetricValue('totalTokens', summary.totalTokens),
       valueTitle: formatFullNumber(summary.totalTokens, locale),
       variant: 'secondary',

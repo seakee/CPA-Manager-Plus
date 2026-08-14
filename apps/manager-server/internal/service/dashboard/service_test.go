@@ -135,7 +135,7 @@ func TestSummaryAggregatesCostsAndWindows(t *testing.T) {
 		resp.RequestHealth.Points[7].Tone != "future" {
 		t.Fatalf("request health timeline points = %#v", resp.RequestHealth.Points[:8])
 	}
-	if len(resp.TokenMix) != 4 || resp.TokenMix[0].Key != "input" ||
+	if len(resp.TokenMix) != 5 || resp.TokenMix[0].Key != "input" ||
 		resp.TokenMix[0].Tokens != 750_000 ||
 		math.Abs(resp.TokenMix[0].Share-(750000.0/1500100.0)) > 0.000001 {
 		t.Fatalf("token mix = %#v", resp.TokenMix)
@@ -151,6 +151,10 @@ func TestSummaryAggregatesCostsAndWindows(t *testing.T) {
 	if resp.TokenMix[3].Key != "reasoning" || resp.TokenMix[3].Tokens != 0 ||
 		resp.TokenMix[3].Share != 0 {
 		t.Fatalf("token mix reasoning = %#v", resp.TokenMix)
+	}
+	if resp.TokenMix[4].Key != "unclassified" || resp.TokenMix[4].Tokens != 0 ||
+		resp.TokenMix[4].Share != 0 {
+		t.Fatalf("token mix unclassified = %#v", resp.TokenMix)
 	}
 	if len(resp.ModelCostRank) != 1 || resp.ModelCostRank[0].Model != "gpt-a" ||
 		resp.ModelCostRank[0].CostShare != 1 {
@@ -174,19 +178,20 @@ func TestSummaryAggregatesCostsAndWindows(t *testing.T) {
 	}
 }
 
-func TestBuildTokenMixRestoresFourVisibleBuckets(t *testing.T) {
+func TestBuildTokenMixUsesCanonicalBuckets(t *testing.T) {
 	mix := buildTokenMix(TodaySummary{
-		InputTokens:         1_800,
-		OutputTokens:        200,
-		CachedTokens:        300,
-		CacheReadTokens:     400,
-		CacheCreationTokens: 100,
-		ReasoningTokens:     150,
-		TotalTokens:         2_150,
+		InputTokens:              1_800,
+		OutputTokens:             350,
+		NonReasoningOutputTokens: 200,
+		CachedTokens:             300,
+		CacheReadTokens:          400,
+		CacheCreationTokens:      100,
+		ReasoningTokens:          150,
+		TotalTokens:              2_150,
 	})
 
-	if len(mix) != 4 {
-		t.Fatalf("token mix length = %d, want 4: %#v", len(mix), mix)
+	if len(mix) != 5 {
+		t.Fatalf("token mix length = %d, want 5: %#v", len(mix), mix)
 	}
 	if mix[0].Key != "input" || mix[0].Tokens != 1_000 ||
 		math.Abs(mix[0].Share-(1000.0/2150.0)) > 0.000001 {
@@ -204,19 +209,24 @@ func TestBuildTokenMixRestoresFourVisibleBuckets(t *testing.T) {
 		math.Abs(mix[3].Share-(150.0/2150.0)) > 0.000001 {
 		t.Fatalf("reasoning mix = %#v", mix[3])
 	}
+	if mix[4].Key != "unclassified" || mix[4].Tokens != 0 || mix[4].Share != 0 {
+		t.Fatalf("unclassified mix = %#v", mix[4])
+	}
 }
 
-func TestBuildTokenMixDeduplicatesNestedCacheAndReasoning(t *testing.T) {
+func TestBuildTokenMixIncludesUnclassifiedTokens(t *testing.T) {
 	mix := buildTokenMix(TodaySummary{
-		InputTokens:     20_700,
-		OutputTokens:    245,
-		CachedTokens:    18_300,
-		ReasoningTokens: 90,
-		TotalTokens:     20_945,
+		InputTokens:              20_700,
+		OutputTokens:             245,
+		NonReasoningOutputTokens: 155,
+		CachedTokens:             18_300,
+		ReasoningTokens:          90,
+		UnclassifiedTokens:       30,
+		TotalTokens:              20_975,
 	})
 
-	if len(mix) != 4 {
-		t.Fatalf("token mix length = %d, want 4: %#v", len(mix), mix)
+	if len(mix) != 5 {
+		t.Fatalf("token mix length = %d, want 5: %#v", len(mix), mix)
 	}
 	if mix[0].Key != "input" || mix[0].Tokens != 2_400 {
 		t.Fatalf("input mix = %#v", mix[0])
@@ -230,15 +240,19 @@ func TestBuildTokenMixDeduplicatesNestedCacheAndReasoning(t *testing.T) {
 	if mix[3].Key != "reasoning" || mix[3].Tokens != 90 {
 		t.Fatalf("reasoning mix = %#v", mix[3])
 	}
+	if mix[4].Key != "unclassified" || mix[4].Tokens != 30 {
+		t.Fatalf("unclassified mix = %#v", mix[4])
+	}
 }
 
-func TestBuildTokenMixDeduplicatesOnlyNestedReasoning(t *testing.T) {
+func TestBuildTokenMixUsesExplicitNonReasoningOutput(t *testing.T) {
 	mix := buildTokenMix(TodaySummary{
-		InputTokens:     1_500,
-		OutputTokens:    400,
-		CachedTokens:    500,
-		ReasoningTokens: 150,
-		TotalTokens:     1_950,
+		InputTokens:              1_500,
+		OutputTokens:             450,
+		NonReasoningOutputTokens: 300,
+		CachedTokens:             500,
+		ReasoningTokens:          150,
+		TotalTokens:              1_950,
 	})
 
 	if mix[0].Tokens != 1_000 || mix[1].Tokens != 500 ||
@@ -678,6 +692,7 @@ func dashboardEvent(
 		EventHash:       hash,
 		TimestampMS:     timestampMS,
 		Timestamp:       time.UnixMilli(timestampMS).UTC().Format(time.RFC3339Nano),
+		Provider:        "openai",
 		Model:           model,
 		Endpoint:        "POST /v1/chat/completions",
 		Method:          "POST",

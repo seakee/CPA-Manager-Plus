@@ -23,7 +23,9 @@ import {
 import {
   normalizeAnalyticsModel,
   normalizeAuthIndex,
+  resolveTokenAccounting,
   type UsageDetailWithEndpoint,
+  type UsageTokenBreakdown,
 } from '@/utils/usage';
 import {
   formatApiKeyHashLabel,
@@ -262,6 +264,10 @@ const buildModelSpendRowsFromAnalytics = (
       successRate: row.success_rate,
       inputTokens: row.input_tokens,
       outputTokens: row.output_tokens,
+      nonReasoningOutputTokens: row.non_reasoning_output_tokens ?? 0,
+      reasoningTokens: row.reasoning_tokens ?? 0,
+      unclassifiedTokens: row.unclassified_tokens ?? 0,
+      incompleteAccountingCalls: row.incomplete_accounting_calls ?? 0,
       cachedTokens: row.cached_tokens,
       cacheReadTokens: row.cache_read_tokens ?? 0,
       cacheCreationTokens: row.cache_creation_tokens ?? 0,
@@ -404,7 +410,10 @@ export const buildSummaryFromAnalytics = (
   successRate: summary.success_rate,
   inputTokens: summary.input_tokens,
   outputTokens: summary.output_tokens,
+  nonReasoningOutputTokens: summary.non_reasoning_output_tokens ?? 0,
   reasoningTokens: summary.reasoning_tokens,
+  unclassifiedTokens: summary.unclassified_tokens ?? 0,
+  incompleteAccountingCalls: summary.incomplete_accounting_calls ?? 0,
   cachedTokens: summary.cached_tokens,
   cacheReadTokens: summary.cache_read_tokens ?? 0,
   cacheCreationTokens: summary.cache_creation_tokens ?? 0,
@@ -638,6 +647,10 @@ export const buildAccountRowsFromAnalytics = (
         successRate: row.success_rate,
         inputTokens: row.input_tokens,
         outputTokens: row.output_tokens,
+        nonReasoningOutputTokens: row.non_reasoning_output_tokens ?? 0,
+        reasoningTokens: row.reasoning_tokens ?? 0,
+        unclassifiedTokens: row.unclassified_tokens ?? 0,
+        incompleteAccountingCalls: row.incomplete_accounting_calls ?? 0,
         cachedTokens: row.cached_tokens,
         cacheReadTokens: row.cache_read_tokens ?? 0,
         cacheCreationTokens: row.cache_creation_tokens ?? 0,
@@ -727,6 +740,10 @@ export const buildApiKeyRowsFromAnalytics = (
         successRate: row.success_rate,
         inputTokens: row.input_tokens,
         outputTokens: row.output_tokens,
+        nonReasoningOutputTokens: row.non_reasoning_output_tokens ?? 0,
+        reasoningTokens: row.reasoning_tokens ?? 0,
+        unclassifiedTokens: row.unclassified_tokens ?? 0,
+        incompleteAccountingCalls: row.incomplete_accounting_calls ?? 0,
         cachedTokens: row.cached_tokens,
         cacheReadTokens: row.cache_read_tokens ?? 0,
         cacheCreationTokens: row.cache_creation_tokens ?? 0,
@@ -987,7 +1004,45 @@ export const buildUsageDetailsFromAnalyticsEvents = (
 ): UsageDetailWithEndpoint[] =>
   items.map((item) => {
     const requestedModel = readString(item.requested_model) || item.model;
-    const analyticsModel = readString(item.analytics_model) || normalizeAnalyticsModel(requestedModel);
+    const analyticsModel =
+      readString(item.analytics_model) || normalizeAnalyticsModel(requestedModel);
+    const accounting = resolveTokenAccounting(
+      {
+        ...item,
+        provider: item.auth_provider_snapshot,
+        tokens: {
+          input_tokens: item.input_tokens,
+          output_tokens: item.output_tokens,
+          ...(item.non_reasoning_output_tokens === undefined
+            ? {}
+            : { non_reasoning_output_tokens: item.non_reasoning_output_tokens }),
+          reasoning_tokens: item.reasoning_tokens,
+          cached_tokens: item.cached_tokens,
+          cache_read_tokens: item.cache_read_tokens,
+          cache_creation_tokens: item.cache_creation_tokens,
+          unclassified_tokens: item.unclassified_tokens,
+          total_tokens: item.total_tokens,
+        },
+      },
+      item.resolved_model || item.model
+    );
+    const tokenBreakdown: UsageTokenBreakdown = {
+      schema_version: 2,
+      quality: accounting.quality,
+      total_tokens: accounting.totalTokens,
+      input: {
+        total_tokens: accounting.inputTokens,
+        uncached_tokens: accounting.uncachedInputTokens,
+        cache_read_tokens: accounting.cacheReadTokens,
+        cache_write_tokens: accounting.cacheCreationTokens,
+      },
+      output: {
+        total_tokens: accounting.outputTokens,
+        non_reasoning_tokens: accounting.nonReasoningOutputTokens,
+        reasoning_tokens: accounting.reasoningTokens,
+      },
+      unclassified_tokens: accounting.unclassifiedTokens,
+    };
     return {
       timestamp: new Date(item.timestamp_ms).toISOString(),
       source: readString(item.source),
@@ -1004,16 +1059,24 @@ export const buildUsageDetailsFromAnalyticsEvents = (
       reasoning_effort: readString(item.reasoning_effort),
       service_tier: readString(item.service_tier),
       executor_type: readString(item.executor_type),
+      cache_input_mode: accounting.cacheInputMode,
+      accounting_version: accounting.accountingVersion,
+      accounting_valid: accounting.sourceValid,
+      accounting_quality: accounting.quality,
+      incomplete_accounting: accounting.incomplete || item.incomplete_accounting === true,
+      token_breakdown: tokenBreakdown,
       latency_ms: item.latency_ms ?? undefined,
       ttft_ms: item.ttft_ms ?? undefined,
       tokens: {
-        input_tokens: item.input_tokens,
-        output_tokens: item.output_tokens,
-        reasoning_tokens: item.reasoning_tokens,
-        cached_tokens: item.cached_tokens,
-        cache_read_tokens: item.cache_read_tokens ?? 0,
-        cache_creation_tokens: item.cache_creation_tokens ?? 0,
-        total_tokens: item.total_tokens,
+        input_tokens: accounting.inputTokens,
+        output_tokens: accounting.outputTokens,
+        non_reasoning_output_tokens: accounting.nonReasoningOutputTokens,
+        reasoning_tokens: accounting.reasoningTokens,
+        cached_tokens: accounting.cachedTokens,
+        cache_read_tokens: accounting.cacheReadTokens,
+        cache_creation_tokens: accounting.cacheCreationTokens,
+        unclassified_tokens: accounting.unclassifiedTokens,
+        total_tokens: accounting.totalTokens,
       },
       failed: item.failed === true,
       fail_status_code: item.fail_status_code ?? null,

@@ -45,8 +45,9 @@ func TestAggregateBetween(t *testing.T) {
 	if agg.TotalCalls != 3 || agg.SuccessCalls != 2 || agg.FailureCalls != 1 {
 		t.Fatalf("aggregate counts = %#v", agg)
 	}
-	if agg.InputTokens != 11 || agg.OutputTokens != 22 || agg.ReasoningTokens != 3 ||
-		agg.CachedTokens != 9 || agg.TotalTokens != 40 || agg.ZeroTokenCalls != 1 {
+	if agg.InputTokens != 10 || agg.OutputTokens != 20 || agg.NonReasoningOutputTokens != 17 ||
+		agg.ReasoningTokens != 3 || agg.UnclassifiedTokens != 14 || agg.IncompleteAccountingCalls != 2 ||
+		agg.CachedTokens != 0 || agg.CacheReadTokens != 4 || agg.TotalTokens != 44 || agg.ZeroTokenCalls != 1 {
 		t.Fatalf("aggregate tokens = %#v", agg)
 	}
 	if !agg.AvgLatencyMS.Valid || agg.AvgLatencyMS.Float64 != 120 {
@@ -89,6 +90,78 @@ func TestAggregateBetween(t *testing.T) {
 		buckets[1].BucketMS != 1_500 || buckets[1].Calls != 2 || buckets[1].Failure != 1 {
 		t.Fatalf("bucket timeline = %#v", buckets)
 	}
+}
+
+func TestPricingStatsExcludeInconsistentCanonicalBuckets(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	event := aggregationEvent("inconsistent-pricing", 1_000, "gpt-a", false, 999, 999, 999, 0, 0, 1_998, nil)
+	event.AccountingVersion = usage.TokenAccountingSchemaVersion
+	event.AccountingValid = true
+	event.TokenBreakdown = usage.TokenBreakdown{
+		SchemaVersion: usage.TokenAccountingSchemaVersion,
+		Quality:       usage.TokenAccountingQualityInconsistent,
+		TotalTokens:   110,
+		Input: usage.TokenInputBreakdown{
+			TotalTokens:    100,
+			UncachedTokens: 100,
+		},
+		Output: usage.TokenOutputBreakdown{
+			TotalTokens:        10,
+			NonReasoningTokens: 10,
+		},
+	}
+	if !event.TokenBreakdown.Valid() {
+		t.Fatalf("test breakdown is invalid: %#v", event.TokenBreakdown)
+	}
+	if _, err := db.InsertEvents(context.Background(), []usage.Event{event}); err != nil {
+		t.Fatalf("insert event: %v", err)
+	}
+
+	agg, err := db.AggregateBetween(context.Background(), 1_000, 2_000)
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if agg.InputTokens != 100 || agg.OutputTokens != 10 || agg.NonReasoningOutputTokens != 10 ||
+		agg.UnclassifiedTokens != 0 || agg.TotalTokens != 110 || agg.IncompleteAccountingCalls != 1 {
+		t.Fatalf("display aggregate = %#v", agg)
+	}
+
+	assertPricingSafe := func(name string, stats []ModelStat) {
+		t.Helper()
+		if len(stats) != 1 {
+			t.Fatalf("%s stats = %#v", name, stats)
+		}
+		stat := stats[0]
+		if stat.InputTokens != 0 || stat.OutputTokens != 0 || stat.NonReasoningOutputTokens != 0 ||
+			stat.ReasoningTokens != 0 || stat.CachedTokens != 0 || stat.CacheReadTokens != 0 ||
+			stat.CacheCreationTokens != 0 || stat.UnclassifiedTokens != 110 || stat.TotalTokens != 110 ||
+			stat.IncompleteAccountingCalls != 1 {
+			t.Fatalf("%s pricing stat = %#v", name, stat)
+		}
+	}
+
+	stats, err := db.ModelStatsBetween(context.Background(), 1_000, 2_000)
+	if err != nil {
+		t.Fatalf("model stats: %v", err)
+	}
+	assertPricingSafe("dashboard", stats)
+
+	filtered, err := db.ModelStatsWithFilter(context.Background(), AnalyticsFilter{
+		FromMS:        1_000,
+		ToMS:          2_000,
+		IncludeFailed: true,
+	}, 0)
+	if err != nil {
+		t.Fatalf("filtered model stats: %v", err)
+	}
+	assertPricingSafe("monitoring", filtered)
 }
 
 func TestFilterOptionValuesWithFilterIncludesHeaderTraceIDs(t *testing.T) {

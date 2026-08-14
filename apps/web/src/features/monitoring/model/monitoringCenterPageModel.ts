@@ -627,8 +627,14 @@ export const buildPrimarySummaryCards = ({
     fullLabel: t('monitoring.estimated_cost'),
     value: hasPrices ? formatUsd(summary.totalCost) : '--',
     valueTitle: hasPrices ? formatUsd(summary.totalCost) : undefined,
-    meta: hasPrices ? t('monitoring.estimated_cost_hint') : t('monitoring.estimated_cost_missing'),
-    tone: hasPrices ? undefined : 'warn',
+    meta: !hasPrices
+      ? t('monitoring.estimated_cost_missing')
+      : summary.incompleteAccountingCalls > 0
+        ? t('monitoring.estimated_cost_incomplete', {
+            count: summary.incompleteAccountingCalls,
+          })
+        : t('monitoring.estimated_cost_hint'),
+    tone: !hasPrices || summary.incompleteAccountingCalls > 0 ? 'warn' : undefined,
     icon: 'cost',
     accent: 'amber',
   },
@@ -641,15 +647,11 @@ export const buildSecondarySummaryCards = (
 ): SummaryCardProps[] => {
   const totalCacheTokens =
     summary.cachedTokens + summary.cacheCreationTokens + summary.cacheReadTokens;
-  const fallbackCacheInputTokens =
-    Math.max(summary.inputTokens, summary.cachedTokens) +
-    summary.cacheReadTokens +
-    summary.cacheCreationTokens;
   const cacheHitRate =
     summary.cacheHitRate === undefined
       ? calculateCacheHitRateFromTotals(
           summary.cachedTokens + summary.cacheReadTokens,
-          fallbackCacheInputTokens
+          summary.inputTokens
         )
       : calculateCacheHitRateFromTotals(summary.cacheHitRate, 1);
 
@@ -1087,8 +1089,7 @@ const buildXaiAccountQuotaWindows = (
     (billing.usagePercent !== null ||
       Boolean(billing.periodEnd) ||
       billing.productUsage.length > 0);
-  const hasMonthlyData =
-    billing.usedPercent !== null || billing.monthlyLimitCents !== null;
+  const hasMonthlyData = billing.usedPercent !== null || billing.monthlyLimitCents !== null;
 
   if (hasWeeklyData) {
     windows.push({

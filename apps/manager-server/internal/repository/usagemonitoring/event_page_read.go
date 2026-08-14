@@ -5,9 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageaccountingsql"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
+
+var eventPageAccountingSQL = usageaccountingsql.For("")
 
 type eventPageCandidate struct {
 	ID          int64
@@ -169,13 +172,20 @@ func loadEventPageItemsByCandidates(ctx context.Context, tx *sql.Tx, candidates 
 		coalesce(reasoning_effort, ''),
 		coalesce(service_tier, ''),
 		coalesce(executor_type, ''),
-		coalesce(normalized_total_input_tokens, input_tokens, 0),
-		coalesce(output_tokens, 0),
-		max(max(coalesce(cached_tokens, 0), coalesce(cache_tokens, 0)) - max(coalesce(cache_read_tokens, 0), 0) - max(coalesce(cache_creation_tokens, 0), 0), 0),
-		coalesce(cache_read_tokens, 0),
-		coalesce(cache_creation_tokens, 0),
-		coalesce(reasoning_tokens, 0),
-		coalesce(total_tokens, 0),
+		coalesce(cache_input_mode, ''),
+		coalesce(accounting_version, 0),
+		`+eventPageAccountingSQL.Valid+`,
+		`+eventPageAccountingSQL.Quality+`,
+		`+eventPageAccountingSQL.TotalInput+`,
+		`+eventPageAccountingSQL.TotalOutput+`,
+		`+eventPageAccountingSQL.NonReasoningOutput+`,
+		`+eventPageAccountingSQL.CompatibleCached+`,
+		`+eventPageAccountingSQL.CacheRead+`,
+		`+eventPageAccountingSQL.CacheCreation+`,
+		`+eventPageAccountingSQL.ReasoningOutput+`,
+		`+eventPageAccountingSQL.Unclassified+`,
+		`+eventPageAccountingSQL.Incomplete+`,
+		`+eventPageAccountingSQL.Total+`,
 		latency_ms,
 		ttft_ms,
 		failed,
@@ -200,6 +210,7 @@ func loadEventPageItemsByCandidates(ctx context.Context, tx *sql.Tx, candidates 
 	for rows.Next() {
 		var item EventPageItem
 		var failed int
+		var accountingValid int
 		var responseMetadataJSON string
 		if err := rows.Scan(
 			&item.ID,
@@ -226,12 +237,19 @@ func loadEventPageItemsByCandidates(ctx context.Context, tx *sql.Tx, candidates 
 			&item.ReasoningEffort,
 			&item.ServiceTier,
 			&item.ExecutorType,
+			&item.CacheInputMode,
+			&item.AccountingVersion,
+			&accountingValid,
+			&item.AccountingQuality,
 			&item.InputTokens,
 			&item.OutputTokens,
+			&item.NonReasoningOutputTokens,
 			&item.CachedTokens,
 			&item.CacheReadTokens,
 			&item.CacheCreationTokens,
 			&item.ReasoningTokens,
+			&item.UnclassifiedTokens,
+			&item.IncompleteAccounting,
 			&item.TotalTokens,
 			&item.LatencyMS,
 			&item.TTFTMS,
@@ -249,6 +267,7 @@ func loadEventPageItemsByCandidates(ctx context.Context, tx *sql.Tx, candidates 
 			return nil, err
 		}
 		item.Failed = failed != 0
+		item.AccountingValid = accountingValid != 0
 		item.ResponseMetadata = usage.ResponseHeaderMetadataFromJSON(responseMetadataJSON)
 		items = append(items, item)
 	}

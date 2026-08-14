@@ -6,26 +6,44 @@ import (
 	"fmt"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageaccountingsql"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
 
+var monitoringAccountingSQL = usageaccountingsql.For("e")
+
 func monitoringBandedEventsCTE(whereClause string) string {
 	requestedModelExpression := usageidentity.SQLEffectiveRequestedModelExpression("e.model", "e.requested_model")
 	analyticsModelExpression := usageidentity.SQLRequestAnalyticsModelExpression("e.model", "e.requested_model")
+	pricingBucket := func(expression string) string {
+		return "case when " + monitoringAccountingSQL.PricingSafe + " then " + expression + " else 0 end"
+	}
+	pricingUnclassified := "case when " + monitoringAccountingSQL.PricingSafe + " then " + monitoringAccountingSQL.Unclassified + " else " + monitoringAccountingSQL.Total + " end"
 	return fmt.Sprintf(`with base_events as (
 		select
 			e.*,
 			%s as requested_model_value,
 			%s as analytics_model_value,
 			coalesce(nullif(e.resolved_model, ''), %s) as billing_model_value,
-			coalesce(e.normalized_total_input_tokens, e.input_tokens, 0) as normalized_input_tokens_value,
-			max(
-				max(coalesce(e.cached_tokens, 0), coalesce(e.cache_tokens, 0)) -
-				max(coalesce(e.cache_read_tokens, 0), 0) -
-				max(coalesce(e.cache_creation_tokens, 0), 0),
-				0
-			) as compatible_cached_tokens_value
+			%s as normalized_input_tokens_value,
+			%s as normalized_output_tokens_value,
+			%s as non_reasoning_output_tokens_value,
+			%s as reasoning_tokens_value,
+			%s as unclassified_tokens_value,
+			%s as incomplete_accounting_value,
+			%s as compatible_cached_tokens_value,
+			%s as cache_read_tokens_value,
+			%s as cache_creation_tokens_value,
+			%s as total_tokens_value,
+			%s as pricing_input_tokens_value,
+			%s as pricing_output_tokens_value,
+			%s as pricing_non_reasoning_output_tokens_value,
+			%s as pricing_reasoning_tokens_value,
+			%s as pricing_unclassified_tokens_value,
+			%s as pricing_compatible_cached_tokens_value,
+			%s as pricing_cache_read_tokens_value,
+			%s as pricing_cache_creation_tokens_value
 		from usage_events e
 		where %s
 	), priced_events as (
@@ -48,10 +66,29 @@ func monitoringBandedEventsCTE(whereClause string) string {
 				select max(tier.threshold_tokens)
 				from model_price_context_tiers tier
 				where tier.model = priced_events.pricing_model_value
-					and priced_events.normalized_input_tokens_value > tier.threshold_tokens
+					and priced_events.pricing_input_tokens_value > tier.threshold_tokens
 			), %d) as context_threshold_tokens_value
 		from priced_events
-	)`, requestedModelExpression, analyticsModelExpression, analyticsModelExpression, whereClause, model.ModelPriceBaseContextThreshold)
+	)`, requestedModelExpression, analyticsModelExpression, analyticsModelExpression,
+		monitoringAccountingSQL.TotalInput,
+		monitoringAccountingSQL.TotalOutput,
+		monitoringAccountingSQL.NonReasoningOutput,
+		monitoringAccountingSQL.ReasoningOutput,
+		monitoringAccountingSQL.Unclassified,
+		monitoringAccountingSQL.Incomplete,
+		monitoringAccountingSQL.CompatibleCached,
+		monitoringAccountingSQL.CacheRead,
+		monitoringAccountingSQL.CacheCreation,
+		monitoringAccountingSQL.Total,
+		pricingBucket(monitoringAccountingSQL.TotalInput),
+		pricingBucket(monitoringAccountingSQL.TotalOutput),
+		pricingBucket(monitoringAccountingSQL.NonReasoningOutput),
+		pricingBucket(monitoringAccountingSQL.ReasoningOutput),
+		pricingUnclassified,
+		pricingBucket(monitoringAccountingSQL.CompatibleCached),
+		pricingBucket(monitoringAccountingSQL.CacheRead),
+		pricingBucket(monitoringAccountingSQL.CacheCreation),
+		whereClause, model.ModelPriceBaseContextThreshold)
 }
 
 func upsertAccountDailyBatch(ctx context.Context, tx *sql.Tx, revision string, afterID, throughID, nowMS int64) error {
@@ -61,10 +98,15 @@ func upsertAccountDailyBatch(ctx context.Context, tx *sql.Tx, revision string, a
 		provider, auth_provider_snapshot, auth_index, source, source_hash,
 		auth_file_snapshot, api_key_hash, executor_type, model, billing_model,
 			pricing_model, service_tier, context_threshold_tokens, failed, calls,
-			input_tokens, output_tokens, reasoning_tokens, cached_tokens, cache_read_tokens,
+			input_tokens, output_tokens, non_reasoning_output_tokens, reasoning_tokens,
+			unclassified_tokens, incomplete_accounting_calls, cached_tokens, cache_read_tokens,
 			cache_creation_tokens, long_input_tokens, long_output_tokens,
 			long_cached_tokens, long_cache_read_tokens, long_cache_creation_tokens,
-			total_tokens, zero_token_calls, latency_sum_ms, latency_samples,
+			total_tokens, display_input_tokens, display_output_tokens,
+			display_non_reasoning_output_tokens, display_reasoning_tokens,
+			display_unclassified_tokens, display_cached_tokens,
+			display_cache_read_tokens, display_cache_creation_tokens,
+			display_total_tokens, zero_token_calls, latency_sum_ms, latency_samples,
 			last_seen_ms, updated_at_ms
 	)
 	select
@@ -87,20 +129,32 @@ func upsertAccountDailyBatch(ctx context.Context, tx *sql.Tx, revision string, a
 		context_threshold_tokens_value,
 		failed,
 		count(*),
-			coalesce(sum(normalized_input_tokens_value), 0),
-			coalesce(sum(output_tokens), 0),
-			coalesce(sum(reasoning_tokens), 0),
-			coalesce(sum(compatible_cached_tokens_value), 0),
-		coalesce(sum(cache_read_tokens), 0),
-		coalesce(sum(cache_creation_tokens), 0),
-		coalesce(sum(case when normalized_input_tokens_value > %d then normalized_input_tokens_value else 0 end), 0),
-		coalesce(sum(case when normalized_input_tokens_value > %d then output_tokens else 0 end), 0),
-		coalesce(sum(case when normalized_input_tokens_value > %d then compatible_cached_tokens_value else 0 end), 0),
-		coalesce(sum(case when normalized_input_tokens_value > %d then cache_read_tokens else 0 end), 0),
-		coalesce(sum(case when normalized_input_tokens_value > %d then cache_creation_tokens else 0 end), 0),
-			coalesce(sum(total_tokens), 0),
-			coalesce(sum(case when total_tokens = 0 and failed = 0 then 1 else 0 end), 0),
-			coalesce(sum(case when latency_ms is not null and latency_ms != 0 then latency_ms else 0 end), 0),
+			coalesce(cpamp_saturating_sum(pricing_input_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(pricing_output_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(pricing_non_reasoning_output_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(pricing_reasoning_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(pricing_unclassified_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(incomplete_accounting_value), 0),
+			coalesce(cpamp_saturating_sum(pricing_compatible_cached_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(pricing_cache_read_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(pricing_cache_creation_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(case when pricing_input_tokens_value > %d then pricing_input_tokens_value else 0 end), 0),
+			coalesce(cpamp_saturating_sum(case when pricing_input_tokens_value > %d then pricing_output_tokens_value else 0 end), 0),
+			coalesce(cpamp_saturating_sum(case when pricing_input_tokens_value > %d then pricing_compatible_cached_tokens_value else 0 end), 0),
+			coalesce(cpamp_saturating_sum(case when pricing_input_tokens_value > %d then pricing_cache_read_tokens_value else 0 end), 0),
+			coalesce(cpamp_saturating_sum(case when pricing_input_tokens_value > %d then pricing_cache_creation_tokens_value else 0 end), 0),
+			coalesce(cpamp_saturating_sum(total_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(normalized_input_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(normalized_output_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(non_reasoning_output_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(reasoning_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(unclassified_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(compatible_cached_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(cache_read_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(cache_creation_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(total_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(case when total_tokens_value = 0 and failed = 0 then 1 else 0 end), 0),
+			coalesce(cpamp_saturating_sum(case when latency_ms is not null and latency_ms != 0 then latency_ms else 0 end), 0),
 		count(nullif(latency_ms, 0)),
 		max(timestamp_ms),
 		?
@@ -113,18 +167,30 @@ func upsertAccountDailyBatch(ctx context.Context, tx *sql.Tx, revision string, a
 		pricing_model, service_tier, context_threshold_tokens, failed
 	) do update set
 		calls = usage_monitoring_account_daily_rollups_v1.calls + excluded.calls,
-			input_tokens = usage_monitoring_account_daily_rollups_v1.input_tokens + excluded.input_tokens,
-			output_tokens = usage_monitoring_account_daily_rollups_v1.output_tokens + excluded.output_tokens,
-			reasoning_tokens = usage_monitoring_account_daily_rollups_v1.reasoning_tokens + excluded.reasoning_tokens,
-			cached_tokens = usage_monitoring_account_daily_rollups_v1.cached_tokens + excluded.cached_tokens,
-		cache_read_tokens = usage_monitoring_account_daily_rollups_v1.cache_read_tokens + excluded.cache_read_tokens,
-		cache_creation_tokens = usage_monitoring_account_daily_rollups_v1.cache_creation_tokens + excluded.cache_creation_tokens,
-		long_input_tokens = usage_monitoring_account_daily_rollups_v1.long_input_tokens + excluded.long_input_tokens,
-		long_output_tokens = usage_monitoring_account_daily_rollups_v1.long_output_tokens + excluded.long_output_tokens,
-		long_cached_tokens = usage_monitoring_account_daily_rollups_v1.long_cached_tokens + excluded.long_cached_tokens,
-		long_cache_read_tokens = usage_monitoring_account_daily_rollups_v1.long_cache_read_tokens + excluded.long_cache_read_tokens,
-		long_cache_creation_tokens = usage_monitoring_account_daily_rollups_v1.long_cache_creation_tokens + excluded.long_cache_creation_tokens,
-			total_tokens = usage_monitoring_account_daily_rollups_v1.total_tokens + excluded.total_tokens,
+			input_tokens = cpamp_saturating_add(usage_monitoring_account_daily_rollups_v1.input_tokens, excluded.input_tokens),
+			output_tokens = cpamp_saturating_add(usage_monitoring_account_daily_rollups_v1.output_tokens, excluded.output_tokens),
+			non_reasoning_output_tokens = cpamp_saturating_add(usage_monitoring_account_daily_rollups_v1.non_reasoning_output_tokens, excluded.non_reasoning_output_tokens),
+			reasoning_tokens = cpamp_saturating_add(usage_monitoring_account_daily_rollups_v1.reasoning_tokens, excluded.reasoning_tokens),
+			unclassified_tokens = cpamp_saturating_add(usage_monitoring_account_daily_rollups_v1.unclassified_tokens, excluded.unclassified_tokens),
+			incomplete_accounting_calls = cpamp_saturating_add(usage_monitoring_account_daily_rollups_v1.incomplete_accounting_calls, excluded.incomplete_accounting_calls),
+			cached_tokens = cpamp_saturating_add(usage_monitoring_account_daily_rollups_v1.cached_tokens, excluded.cached_tokens),
+		cache_read_tokens = cpamp_saturating_add(usage_monitoring_account_daily_rollups_v1.cache_read_tokens, excluded.cache_read_tokens),
+		cache_creation_tokens = cpamp_saturating_add(usage_monitoring_account_daily_rollups_v1.cache_creation_tokens, excluded.cache_creation_tokens),
+		long_input_tokens = cpamp_saturating_add(usage_monitoring_account_daily_rollups_v1.long_input_tokens, excluded.long_input_tokens),
+		long_output_tokens = cpamp_saturating_add(usage_monitoring_account_daily_rollups_v1.long_output_tokens, excluded.long_output_tokens),
+		long_cached_tokens = cpamp_saturating_add(usage_monitoring_account_daily_rollups_v1.long_cached_tokens, excluded.long_cached_tokens),
+		long_cache_read_tokens = cpamp_saturating_add(usage_monitoring_account_daily_rollups_v1.long_cache_read_tokens, excluded.long_cache_read_tokens),
+			long_cache_creation_tokens = cpamp_saturating_add(usage_monitoring_account_daily_rollups_v1.long_cache_creation_tokens, excluded.long_cache_creation_tokens),
+			total_tokens = cpamp_saturating_add(usage_monitoring_account_daily_rollups_v1.total_tokens, excluded.total_tokens),
+			display_input_tokens = cpamp_saturating_add(usage_monitoring_account_daily_rollups_v1.display_input_tokens, excluded.display_input_tokens),
+			display_output_tokens = cpamp_saturating_add(usage_monitoring_account_daily_rollups_v1.display_output_tokens, excluded.display_output_tokens),
+			display_non_reasoning_output_tokens = cpamp_saturating_add(usage_monitoring_account_daily_rollups_v1.display_non_reasoning_output_tokens, excluded.display_non_reasoning_output_tokens),
+			display_reasoning_tokens = cpamp_saturating_add(usage_monitoring_account_daily_rollups_v1.display_reasoning_tokens, excluded.display_reasoning_tokens),
+			display_unclassified_tokens = cpamp_saturating_add(usage_monitoring_account_daily_rollups_v1.display_unclassified_tokens, excluded.display_unclassified_tokens),
+			display_cached_tokens = cpamp_saturating_add(usage_monitoring_account_daily_rollups_v1.display_cached_tokens, excluded.display_cached_tokens),
+			display_cache_read_tokens = cpamp_saturating_add(usage_monitoring_account_daily_rollups_v1.display_cache_read_tokens, excluded.display_cache_read_tokens),
+			display_cache_creation_tokens = cpamp_saturating_add(usage_monitoring_account_daily_rollups_v1.display_cache_creation_tokens, excluded.display_cache_creation_tokens),
+			display_total_tokens = cpamp_saturating_add(usage_monitoring_account_daily_rollups_v1.display_total_tokens, excluded.display_total_tokens),
 			zero_token_calls = usage_monitoring_account_daily_rollups_v1.zero_token_calls + excluded.zero_token_calls,
 			latency_sum_ms = usage_monitoring_account_daily_rollups_v1.latency_sum_ms + excluded.latency_sum_ms,
 		latency_samples = usage_monitoring_account_daily_rollups_v1.latency_samples + excluded.latency_samples,
@@ -148,8 +214,9 @@ func upsertAPIKeyDailyBatch(ctx context.Context, tx *sql.Tx, revision string, af
 		auth_label_snapshot, provider, auth_provider_snapshot, auth_index,
 		source, source_hash, auth_file_snapshot, executor_type, model,
 		billing_model, pricing_model, service_tier, context_threshold_tokens,
-			failed, calls, input_tokens, output_tokens, cached_tokens,
-			reasoning_tokens, cache_read_tokens, cache_creation_tokens, long_input_tokens,
+			failed, calls, input_tokens, output_tokens, non_reasoning_output_tokens,
+			cached_tokens, reasoning_tokens, unclassified_tokens, incomplete_accounting_calls,
+			cache_read_tokens, cache_creation_tokens, long_input_tokens,
 			long_output_tokens, long_cached_tokens, long_cache_read_tokens,
 			long_cache_creation_tokens, total_tokens, zero_token_calls, latency_sum_ms,
 			latency_samples, last_seen_ms, updated_at_ms
@@ -174,20 +241,23 @@ func upsertAPIKeyDailyBatch(ctx context.Context, tx *sql.Tx, revision string, af
 		context_threshold_tokens_value,
 		failed,
 		count(*),
-			coalesce(sum(normalized_input_tokens_value), 0),
-			coalesce(sum(output_tokens), 0),
-			coalesce(sum(compatible_cached_tokens_value), 0),
-			coalesce(sum(reasoning_tokens), 0),
-			coalesce(sum(cache_read_tokens), 0),
-		coalesce(sum(cache_creation_tokens), 0),
-		coalesce(sum(case when normalized_input_tokens_value > %d then normalized_input_tokens_value else 0 end), 0),
-		coalesce(sum(case when normalized_input_tokens_value > %d then output_tokens else 0 end), 0),
-		coalesce(sum(case when normalized_input_tokens_value > %d then compatible_cached_tokens_value else 0 end), 0),
-		coalesce(sum(case when normalized_input_tokens_value > %d then cache_read_tokens else 0 end), 0),
-		coalesce(sum(case when normalized_input_tokens_value > %d then cache_creation_tokens else 0 end), 0),
-			coalesce(sum(total_tokens), 0),
-			coalesce(sum(case when total_tokens = 0 and failed = 0 then 1 else 0 end), 0),
-			coalesce(sum(case when latency_ms is not null and latency_ms != 0 then latency_ms else 0 end), 0),
+			coalesce(cpamp_saturating_sum(pricing_input_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(pricing_output_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(pricing_non_reasoning_output_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(pricing_compatible_cached_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(pricing_reasoning_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(pricing_unclassified_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(incomplete_accounting_value), 0),
+			coalesce(cpamp_saturating_sum(pricing_cache_read_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(pricing_cache_creation_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(case when pricing_input_tokens_value > %d then pricing_input_tokens_value else 0 end), 0),
+			coalesce(cpamp_saturating_sum(case when pricing_input_tokens_value > %d then pricing_output_tokens_value else 0 end), 0),
+			coalesce(cpamp_saturating_sum(case when pricing_input_tokens_value > %d then pricing_compatible_cached_tokens_value else 0 end), 0),
+			coalesce(cpamp_saturating_sum(case when pricing_input_tokens_value > %d then pricing_cache_read_tokens_value else 0 end), 0),
+			coalesce(cpamp_saturating_sum(case when pricing_input_tokens_value > %d then pricing_cache_creation_tokens_value else 0 end), 0),
+			coalesce(cpamp_saturating_sum(total_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(case when total_tokens_value = 0 and failed = 0 then 1 else 0 end), 0),
+			coalesce(cpamp_saturating_sum(case when latency_ms is not null and latency_ms != 0 then latency_ms else 0 end), 0),
 		count(nullif(latency_ms, 0)),
 		max(timestamp_ms),
 		?
@@ -200,18 +270,21 @@ func upsertAPIKeyDailyBatch(ctx context.Context, tx *sql.Tx, revision string, af
 		billing_model, pricing_model, service_tier, context_threshold_tokens, failed
 	) do update set
 		calls = usage_monitoring_api_key_daily_rollups_v1.calls + excluded.calls,
-			input_tokens = usage_monitoring_api_key_daily_rollups_v1.input_tokens + excluded.input_tokens,
-			output_tokens = usage_monitoring_api_key_daily_rollups_v1.output_tokens + excluded.output_tokens,
-			reasoning_tokens = usage_monitoring_api_key_daily_rollups_v1.reasoning_tokens + excluded.reasoning_tokens,
-			cached_tokens = usage_monitoring_api_key_daily_rollups_v1.cached_tokens + excluded.cached_tokens,
-		cache_read_tokens = usage_monitoring_api_key_daily_rollups_v1.cache_read_tokens + excluded.cache_read_tokens,
-		cache_creation_tokens = usage_monitoring_api_key_daily_rollups_v1.cache_creation_tokens + excluded.cache_creation_tokens,
-		long_input_tokens = usage_monitoring_api_key_daily_rollups_v1.long_input_tokens + excluded.long_input_tokens,
-		long_output_tokens = usage_monitoring_api_key_daily_rollups_v1.long_output_tokens + excluded.long_output_tokens,
-		long_cached_tokens = usage_monitoring_api_key_daily_rollups_v1.long_cached_tokens + excluded.long_cached_tokens,
-		long_cache_read_tokens = usage_monitoring_api_key_daily_rollups_v1.long_cache_read_tokens + excluded.long_cache_read_tokens,
-		long_cache_creation_tokens = usage_monitoring_api_key_daily_rollups_v1.long_cache_creation_tokens + excluded.long_cache_creation_tokens,
-			total_tokens = usage_monitoring_api_key_daily_rollups_v1.total_tokens + excluded.total_tokens,
+			input_tokens = cpamp_saturating_add(usage_monitoring_api_key_daily_rollups_v1.input_tokens, excluded.input_tokens),
+			output_tokens = cpamp_saturating_add(usage_monitoring_api_key_daily_rollups_v1.output_tokens, excluded.output_tokens),
+			non_reasoning_output_tokens = cpamp_saturating_add(usage_monitoring_api_key_daily_rollups_v1.non_reasoning_output_tokens, excluded.non_reasoning_output_tokens),
+			reasoning_tokens = cpamp_saturating_add(usage_monitoring_api_key_daily_rollups_v1.reasoning_tokens, excluded.reasoning_tokens),
+			unclassified_tokens = cpamp_saturating_add(usage_monitoring_api_key_daily_rollups_v1.unclassified_tokens, excluded.unclassified_tokens),
+			incomplete_accounting_calls = cpamp_saturating_add(usage_monitoring_api_key_daily_rollups_v1.incomplete_accounting_calls, excluded.incomplete_accounting_calls),
+			cached_tokens = cpamp_saturating_add(usage_monitoring_api_key_daily_rollups_v1.cached_tokens, excluded.cached_tokens),
+		cache_read_tokens = cpamp_saturating_add(usage_monitoring_api_key_daily_rollups_v1.cache_read_tokens, excluded.cache_read_tokens),
+		cache_creation_tokens = cpamp_saturating_add(usage_monitoring_api_key_daily_rollups_v1.cache_creation_tokens, excluded.cache_creation_tokens),
+		long_input_tokens = cpamp_saturating_add(usage_monitoring_api_key_daily_rollups_v1.long_input_tokens, excluded.long_input_tokens),
+		long_output_tokens = cpamp_saturating_add(usage_monitoring_api_key_daily_rollups_v1.long_output_tokens, excluded.long_output_tokens),
+		long_cached_tokens = cpamp_saturating_add(usage_monitoring_api_key_daily_rollups_v1.long_cached_tokens, excluded.long_cached_tokens),
+		long_cache_read_tokens = cpamp_saturating_add(usage_monitoring_api_key_daily_rollups_v1.long_cache_read_tokens, excluded.long_cache_read_tokens),
+		long_cache_creation_tokens = cpamp_saturating_add(usage_monitoring_api_key_daily_rollups_v1.long_cache_creation_tokens, excluded.long_cache_creation_tokens),
+			total_tokens = cpamp_saturating_add(usage_monitoring_api_key_daily_rollups_v1.total_tokens, excluded.total_tokens),
 			zero_token_calls = usage_monitoring_api_key_daily_rollups_v1.zero_token_calls + excluded.zero_token_calls,
 			latency_sum_ms = usage_monitoring_api_key_daily_rollups_v1.latency_sum_ms + excluded.latency_sum_ms,
 		latency_samples = usage_monitoring_api_key_daily_rollups_v1.latency_samples + excluded.latency_samples,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -14,6 +15,95 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageevent"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
+
+func TestCatchUpSaturatesTokenTotalsAcrossBatches(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	events := usageevent.New(db)
+	repo := New(db)
+	baseMS := int64(1_800_000_000_000)
+	baseMS -= baseMS % hourMS
+	if _, err := events.InsertBatch(ctx, []usage.Event{
+		aggregateTestEvent("saturating-first", baseMS+1_000, "model-a", false, math.MaxInt64, 0, nil),
+		aggregateTestEvent("saturating-second", baseMS+2_000, "model-a", false, math.MaxInt64, 0, nil),
+	}); err != nil {
+		t.Fatalf("insert saturating events: %v", err)
+	}
+	if result, err := repo.CatchUp(ctx, 1, baseMS+hourMS); err != nil || result.Processed != 1 || !result.Pending {
+		t.Fatalf("first catch-up = %#v err=%v", result, err)
+	}
+	if result, err := repo.CatchUp(ctx, 1, baseMS+hourMS); err != nil || result.Processed != 1 {
+		t.Fatalf("second catch-up = %#v err=%v", result, err)
+	}
+	rows, _, available, err := repo.LoadRows(ctx, Filter{
+		FromMS:        baseMS,
+		ToMS:          baseMS + hourMS,
+		IncludeFailed: true,
+	})
+	if err != nil || !available {
+		t.Fatalf("load rows: available=%v err=%v", available, err)
+	}
+	if len(rows) != 1 || rows[0].Calls != 2 || rows[0].InputTokens != math.MaxInt64 ||
+		rows[0].LongInputTokens != math.MaxInt64 || rows[0].TotalTokens != math.MaxInt64 {
+		t.Fatalf("rows = %#v", rows)
+	}
+}
+
+func TestCatchUpSaturatesIncompleteAccountingCallsAcrossBatches(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	events := usageevent.New(db)
+	repo := New(db)
+	baseMS := int64(1_800_000_000_000)
+	baseMS -= baseMS % hourMS
+	inconsistentEvent := func(hash string, timestampMS int64) usage.Event {
+		event := aggregateTestEvent(hash, timestampMS, "model-a", false, 10, 0, nil)
+		event.AccountingVersion = usage.TokenAccountingSchemaVersion
+		event.AccountingValid = true
+		event.TokenBreakdown = usage.TokenBreakdown{
+			SchemaVersion:      usage.TokenAccountingSchemaVersion,
+			Quality:            usage.TokenAccountingQualityInconsistent,
+			TotalTokens:        10,
+			UnclassifiedTokens: 10,
+		}
+		return event
+	}
+
+	if _, err := events.InsertBatch(ctx, []usage.Event{inconsistentEvent("incomplete-first", baseMS+1_000)}); err != nil {
+		t.Fatalf("insert first event: %v", err)
+	}
+	if result, err := repo.CatchUp(ctx, 1, baseMS+hourMS); err != nil || result.Processed != 1 {
+		t.Fatalf("first catch-up = %#v err=%v", result, err)
+	}
+	if _, err := db.Exec(`update usage_hourly_aggregate_v1 set incomplete_accounting_calls = ?`, int64(math.MaxInt64)); err != nil {
+		t.Fatalf("seed saturated incomplete count: %v", err)
+	}
+	if _, err := events.InsertBatch(ctx, []usage.Event{inconsistentEvent("incomplete-second", baseMS+2_000)}); err != nil {
+		t.Fatalf("insert second event: %v", err)
+	}
+	if result, err := repo.CatchUp(ctx, 1, baseMS+hourMS); err != nil || result.Processed != 1 {
+		t.Fatalf("second catch-up = %#v err=%v", result, err)
+	}
+	rows, _, available, err := repo.LoadRows(ctx, Filter{
+		FromMS:        baseMS,
+		ToMS:          baseMS + hourMS,
+		IncludeFailed: true,
+	})
+	if err != nil || !available {
+		t.Fatalf("load rows: available=%v err=%v", available, err)
+	}
+	if len(rows) != 1 || rows[0].IncompleteAccountingCalls != math.MaxInt64 {
+		t.Fatalf("rows = %#v", rows)
+	}
+}
 
 func TestCatchUpAndLoadRowsMergeCoverageDeltaAndLateEvents(t *testing.T) {
 	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))

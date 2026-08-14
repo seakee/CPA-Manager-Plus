@@ -56,6 +56,8 @@ export interface ModelPrice {
 export interface UsageTokens {
   input_tokens?: number;
   output_tokens?: number;
+  non_reasoning_output_tokens?: number;
+  nonReasoningOutputTokens?: number;
   reasoning_tokens?: number;
   cached_tokens?: number;
   cache_tokens?: number;
@@ -69,9 +71,46 @@ export interface UsageTokens {
   cacheWriteTokens?: number;
   cache_write_input_tokens?: number;
   cacheWriteInputTokens?: number;
+  unclassified_tokens?: number;
+  unclassifiedTokens?: number;
   total_tokens?: number;
+  token_breakdown?: UsageTokenBreakdown;
+  tokenBreakdown?: UsageTokenBreakdown;
   cache_input_mode?: CacheInputMode | string;
   cacheInputMode?: CacheInputMode | string;
+}
+
+export interface UsageTokenInputBreakdown {
+  total_tokens?: number;
+  totalTokens?: number;
+  uncached_tokens?: number;
+  uncachedTokens?: number;
+  cache_read_tokens?: number;
+  cacheReadTokens?: number;
+  cache_write_tokens?: number;
+  cacheWriteTokens?: number;
+}
+
+export interface UsageTokenOutputBreakdown {
+  total_tokens?: number;
+  totalTokens?: number;
+  non_reasoning_tokens?: number;
+  nonReasoningTokens?: number;
+  reasoning_tokens?: number;
+  reasoningTokens?: number;
+}
+
+/** CPA accounting-v2's non-overlapping token contract. */
+export interface UsageTokenBreakdown {
+  schema_version?: number;
+  schemaVersion?: number;
+  quality?: string;
+  total_tokens?: number;
+  totalTokens?: number;
+  input?: UsageTokenInputBreakdown;
+  output?: UsageTokenOutputBreakdown;
+  unclassified_tokens?: number;
+  unclassifiedTokens?: number;
 }
 
 export type CacheInputMode = 'included_in_input' | 'separate_from_input';
@@ -208,6 +247,16 @@ export interface UsageDetail {
   responseServiceTier?: string;
   cache_input_mode?: CacheInputMode | string;
   cacheInputMode?: CacheInputMode | string;
+  accounting_version?: number;
+  accountingVersion?: number;
+  accounting_valid?: boolean;
+  accountingValid?: boolean;
+  accounting_quality?: string;
+  accountingQuality?: string;
+  incomplete_accounting?: boolean;
+  incompleteAccounting?: boolean;
+  token_breakdown?: UsageTokenBreakdown;
+  tokenBreakdown?: UsageTokenBreakdown;
   executor_type?: string;
   executorType?: string;
   provider?: string;
@@ -298,14 +347,6 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const toFiniteNumber = (value: unknown): number => {
   const numberValue = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(numberValue) ? numberValue : 0;
-};
-
-const readFirstTokenNumber = (record: Record<string, unknown>, keys: readonly string[]): number => {
-  for (const key of keys) {
-    const value = toFiniteNumber(record[key]);
-    if (value !== 0) return value;
-  }
-  return 0;
 };
 
 const toPositiveNumber = (value: unknown): number | undefined => {
@@ -478,6 +519,7 @@ export interface CacheInputContext {
   executorType?: unknown;
   provider?: unknown;
   providerSnapshot?: unknown;
+  authType?: unknown;
   resolvedModel?: unknown;
   requestedModel?: unknown;
   displayModel?: unknown;
@@ -505,7 +547,12 @@ const classifyExecutorCacheInputMode = (value: unknown): CacheInputMode | undefi
       'ai-studio',
       'antigravity',
       'xai',
+      'grok',
       'kimi',
+      'moonshot',
+      'qwen',
+      'deepseek',
+      'openrouter',
     ].some((marker) => executor.includes(marker))
   ) {
     return 'included_in_input';
@@ -516,6 +563,9 @@ const classifyExecutorCacheInputMode = (value: unknown): CacheInputMode | undefi
 const classifyProviderCacheInputMode = (value: unknown): CacheInputMode | undefined => {
   const provider = normalizeCacheIdentity(value);
   if (!provider) return undefined;
+  if (provider === 'openai-compatibility' || provider.startsWith('openai-compatible-')) {
+    return 'included_in_input';
+  }
   if (provider.includes('anthropic') || provider.includes('claude')) {
     return 'separate_from_input';
   }
@@ -531,8 +581,12 @@ const classifyProviderCacheInputMode = (value: unknown): CacheInputMode | undefi
       'interaction',
       'antigravity',
       'xai',
+      'grok',
       'kimi',
       'moonshot',
+      'qwen',
+      'deepseek',
+      'openrouter',
     ].some((marker) => provider.includes(marker))
   ) {
     return 'included_in_input';
@@ -559,6 +613,9 @@ const classifyModelCacheInputMode = (value: unknown): CacheInputMode | undefined
       'xai',
       'kimi',
       'moonshot',
+      'qwen',
+      'deepseek',
+      'openrouter',
     ].some((marker) => model.includes(marker))
   ) {
     return 'included_in_input';
@@ -576,7 +633,7 @@ export const inferCacheInputMode = (
   if (normalizedMode === 'included_in_input') return 'included_in_input';
   const executorMode = classifyExecutorCacheInputMode(context.executorType);
   if (executorMode) return executorMode;
-  for (const provider of [context.provider, context.providerSnapshot]) {
+  for (const provider of [context.provider, context.providerSnapshot, context.authType]) {
     const providerMode = classifyProviderCacheInputMode(provider);
     if (providerMode) return providerMode;
   }
@@ -618,6 +675,783 @@ export const normalizeCacheAccounting = (input: {
       mode === 'separate_from_input' ? rawInput : Math.max(rawInput - read - creation, 0),
   };
 };
+
+export type TokenAccountingQuality = 'complete' | 'inconsistent' | 'unclassified' | string;
+
+export interface TokenAccountingResolution {
+  accountingVersion: number;
+  sourceValid: boolean;
+  quality: TokenAccountingQuality;
+  cacheInputMode: CacheInputMode;
+  inputTokens: number;
+  uncachedInputTokens: number;
+  outputTokens: number;
+  nonReasoningOutputTokens: number;
+  reasoningTokens: number;
+  cachedTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  unclassifiedTokens: number;
+  totalTokens: number;
+  incomplete: boolean;
+  /** Whether known buckets are safe to use for a cost estimate. */
+  pricingSafe: boolean;
+}
+
+type ReadField = { present: boolean; value: unknown };
+
+const readField = (record: Record<string, unknown>, keys: readonly string[]): ReadField => {
+  for (const key of keys) {
+    if (
+      Object.prototype.hasOwnProperty.call(record, key) &&
+      record[key] !== null &&
+      record[key] !== undefined
+    ) {
+      return { present: true, value: record[key] };
+    }
+  }
+  return { present: false, value: undefined };
+};
+
+const readMarkerField = (record: Record<string, unknown>, keys: readonly string[]): ReadField => {
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(record, key)) {
+      return { present: true, value: record[key] };
+    }
+  }
+  return { present: false, value: undefined };
+};
+
+const readNumberField = (record: Record<string, unknown>, keys: readonly string[]) => {
+  const field = readField(record, keys);
+  if (!field.present) return { present: false, valid: true, value: 0 };
+  const value = Number(field.value);
+  return {
+    present: true,
+    valid: typeof field.value === 'number' && Number.isFinite(value),
+    value,
+  };
+};
+
+const readMarkerNumberField = (record: Record<string, unknown>, keys: readonly string[]) => {
+  const field = readMarkerField(record, keys);
+  if (!field.present) return { present: false, valid: true, value: 0 };
+  const value = Number(field.value);
+  return {
+    present: true,
+    valid: typeof field.value === 'number' && Number.isFinite(value),
+    value,
+  };
+};
+
+const readMarkerBooleanField = (record: Record<string, unknown>, keys: readonly string[]) => {
+  const field = readMarkerField(record, keys);
+  return {
+    present: field.present,
+    valid: !field.present || typeof field.value === 'boolean',
+    value: field.value === true,
+  };
+};
+
+const readStringField = (record: Record<string, unknown>, keys: readonly string[]) => {
+  const field = readField(record, keys);
+  return field.present ? readDetailString(field.value) || '' : '';
+};
+
+const readTokenField = (
+  tokenRecord: Record<string, unknown>,
+  detailRecord: Record<string, unknown>,
+  keys: readonly string[]
+) => {
+  const nested = readField(tokenRecord, keys);
+  return nested.present ? nested : readField(detailRecord, keys);
+};
+
+const readTokenNumberField = (
+  tokenRecord: Record<string, unknown>,
+  detailRecord: Record<string, unknown>,
+  keys: readonly string[]
+) => {
+  const field = readTokenField(tokenRecord, detailRecord, keys);
+  if (!field.present) return { present: false, valid: true, canonicalValid: true, value: 0 };
+  const value = Number(field.value);
+  return {
+    present: true,
+    valid: Number.isFinite(value),
+    canonicalValid: typeof field.value === 'number' && Number.isFinite(value),
+    value,
+  };
+};
+
+const asRecord = (value: unknown): Record<string, unknown> | null => {
+  if (isRecord(value)) return value;
+  if (typeof value !== 'string' || value.trim() === '') return null;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+};
+
+const nonNegative = (value: number): number => (Number.isFinite(value) ? Math.max(value, 0) : 0);
+
+const isNonNegativeToken = (value: number): boolean =>
+  Number.isFinite(value) && Number.isInteger(value) && value >= 0;
+
+const sumTokens = (...values: number[]): number => values.reduce((sum, value) => sum + value, 0);
+
+const classifyLegacyOutputSemantics = (
+  value: unknown
+): 'unknown' | 'reasoning_subset' | 'separate_reasoning' => {
+  const normalized = normalizeCacheIdentity(value);
+  if (!normalized || normalized === 'unknown') return 'unknown';
+  if (
+    normalized === 'openaicompatexecutor' ||
+    normalized === 'openai-compatibility' ||
+    normalized.startsWith('openai-compatible-')
+  ) {
+    return 'reasoning_subset';
+  }
+  if (normalized.includes('claude') || normalized.includes('anthropic')) {
+    return 'separate_reasoning';
+  }
+  if (
+    ['gemini', 'aistudio', 'ai_studio', 'ai-studio', 'antigravity', 'vertex', 'interaction'].some(
+      (marker) => normalized.includes(marker)
+    )
+  ) {
+    return 'separate_reasoning';
+  }
+  if (
+    [
+      'openaicompat',
+      'openai_compat',
+      'openai-compat',
+      'openai',
+      'gpt-',
+      'codex',
+      'xai',
+      'grok',
+      'kimi',
+      'qwen',
+      'deepseek',
+      'openrouter',
+    ].some((marker) => normalized.includes(marker))
+  ) {
+    return 'reasoning_subset';
+  }
+  return 'unknown';
+};
+
+const inferLegacyOutputSemantics = (context: CacheInputContext) => {
+  for (const value of [
+    context.executorType,
+    context.provider,
+    context.providerSnapshot,
+    context.authType,
+    context.resolvedModel,
+    context.requestedModel,
+    context.displayModel,
+  ]) {
+    const semantics = classifyLegacyOutputSemantics(value);
+    if (semantics !== 'unknown') return semantics;
+  }
+  return 'unknown' as const;
+};
+
+const buildAccountingResolution = (input: {
+  accountingVersion: number;
+  sourceValid: boolean;
+  quality: TokenAccountingQuality;
+  cacheInputMode: CacheInputMode;
+  inputTokens: number;
+  uncachedInputTokens: number;
+  outputTokens: number;
+  nonReasoningOutputTokens: number;
+  reasoningTokens: number;
+  cachedTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  unclassifiedTokens: number;
+  totalTokens: number;
+  pricingSafe?: boolean;
+}): TokenAccountingResolution => ({
+  ...input,
+  incomplete: input.quality !== 'complete' || input.unclassifiedTokens > 0,
+  pricingSafe: input.pricingSafe ?? input.quality !== 'inconsistent',
+});
+
+const parseNestedTokenBreakdown = (
+  raw: unknown,
+  present: boolean
+): {
+  present: boolean;
+  valid: boolean;
+  schemaVersion: number;
+  quality: string;
+  inputTokens: number;
+  uncachedInputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  outputTokens: number;
+  nonReasoningOutputTokens: number;
+  reasoningTokens: number;
+  unclassifiedTokens: number;
+  totalTokens: number;
+} | null => {
+  if (!present) return null;
+  const record = asRecord(raw);
+  if (!record)
+    return {
+      present: true,
+      valid: false,
+      schemaVersion: 0,
+      quality: '',
+      inputTokens: 0,
+      uncachedInputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      outputTokens: 0,
+      nonReasoningOutputTokens: 0,
+      reasoningTokens: 0,
+      unclassifiedTokens: 0,
+      totalTokens: 0,
+    };
+  const inputRecord = asRecord(readField(record, ['input']).value) || {};
+  const outputRecord = asRecord(readField(record, ['output']).value) || {};
+  const schema = readNumberField(record, ['schema_version', 'schemaVersion']);
+  const total = readNumberField(record, ['total_tokens', 'totalTokens']);
+  const quality = readStringField(record, ['quality']).toLowerCase();
+  const inputTotal = readNumberField(inputRecord, ['total_tokens', 'totalTokens']);
+  const uncached = readNumberField(inputRecord, ['uncached_tokens', 'uncachedTokens']);
+  const cacheRead = readNumberField(inputRecord, ['cache_read_tokens', 'cacheReadTokens']);
+  const cacheWrite = readNumberField(inputRecord, ['cache_write_tokens', 'cacheWriteTokens']);
+  const outputTotal = readNumberField(outputRecord, ['total_tokens', 'totalTokens']);
+  const nonReasoning = readNumberField(outputRecord, [
+    'non_reasoning_tokens',
+    'nonReasoningTokens',
+  ]);
+  const reasoning = readNumberField(outputRecord, ['reasoning_tokens', 'reasoningTokens']);
+  const unclassified = readNumberField(record, ['unclassified_tokens', 'unclassifiedTokens']);
+  const numbers = [
+    schema,
+    total,
+    inputTotal,
+    uncached,
+    cacheRead,
+    cacheWrite,
+    outputTotal,
+    nonReasoning,
+    reasoning,
+    unclassified,
+  ];
+  const validNumbers = numbers.every(
+    (field) => field.present && field.valid && isNonNegativeToken(field.value)
+  );
+  const validQuality = ['complete', 'inconsistent', 'unclassified'].includes(quality);
+  const valid =
+    validNumbers &&
+    schema.value === 2 &&
+    validQuality &&
+    inputTotal.value === sumTokens(uncached.value, cacheRead.value, cacheWrite.value) &&
+    outputTotal.value === sumTokens(nonReasoning.value, reasoning.value) &&
+    total.value === sumTokens(inputTotal.value, outputTotal.value, unclassified.value) &&
+    (quality !== 'complete' || unclassified.value === 0);
+  return {
+    present: true,
+    valid,
+    schemaVersion: schema.value,
+    quality,
+    inputTokens: inputTotal.value,
+    uncachedInputTokens: uncached.value,
+    cacheReadTokens: cacheRead.value,
+    cacheCreationTokens: cacheWrite.value,
+    outputTokens: outputTotal.value,
+    nonReasoningOutputTokens: nonReasoning.value,
+    reasoningTokens: reasoning.value,
+    unclassifiedTokens: unclassified.value,
+    totalTokens: total.value,
+  };
+};
+
+/**
+ * Resolve any usage detail (CPA v2, analytics flat fields, or legacy fields)
+ * into one non-overlapping accounting view. Unknown legacy semantics are kept
+ * in the unclassified bucket instead of being assigned to a billable bucket.
+ */
+export const resolveTokenAccounting = (
+  detail: unknown,
+  modelName = ''
+): TokenAccountingResolution => {
+  const detailRecord = isRecord(detail) ? detail : {};
+  const tokenRecord = isRecord(detailRecord.tokens) ? detailRecord.tokens : {};
+  const context: CacheInputContext = {
+    explicitMode:
+      readField(detailRecord, ['cache_input_mode', 'cacheInputMode']).value ??
+      readField(tokenRecord, ['cache_input_mode', 'cacheInputMode']).value,
+    executorType: detailRecord.executor_type ?? detailRecord.executorType,
+    provider:
+      detailRecord.provider ?? detailRecord.type ?? detailRecord.auth_type ?? detailRecord.authType,
+    providerSnapshot: detailRecord.auth_provider_snapshot ?? detailRecord.authProviderSnapshot,
+    authType: detailRecord.auth_type ?? detailRecord.authType,
+    resolvedModel:
+      detailRecord.resolved_model ?? detailRecord.resolvedModel ?? detailRecord.__resolvedModel,
+    requestedModel:
+      detailRecord.requested_model ??
+      detailRecord.requestedModel ??
+      detailRecord.alias ??
+      detailRecord.__modelName,
+    displayModel: modelName || String(detailRecord.model ?? detailRecord.__modelName ?? ''),
+  };
+  const cacheReadRaw = readTokenNumberField(tokenRecord, detailRecord, CACHE_READ_TOKEN_KEYS);
+  const cacheCreationRaw = readTokenNumberField(
+    tokenRecord,
+    detailRecord,
+    CACHE_CREATION_TOKEN_KEYS
+  );
+  const cachedRaw = readTokenNumberField(tokenRecord, detailRecord, [
+    'cached_tokens',
+    'cachedTokens',
+  ]);
+  const cacheRaw = readTokenNumberField(tokenRecord, detailRecord, ['cache_tokens', 'cacheTokens']);
+  const inputRaw = readTokenNumberField(tokenRecord, detailRecord, [
+    'input_tokens',
+    'inputTokens',
+    'prompt_tokens',
+    'promptTokens',
+  ]);
+  const outputRaw = readTokenNumberField(tokenRecord, detailRecord, [
+    'output_tokens',
+    'outputTokens',
+    'completion_tokens',
+    'completionTokens',
+  ]);
+  const reasoningRaw = readTokenNumberField(tokenRecord, detailRecord, [
+    'reasoning_tokens',
+    'reasoningTokens',
+  ]);
+  const nonReasoningRaw = readTokenNumberField(tokenRecord, detailRecord, [
+    'non_reasoning_output_tokens',
+    'nonReasoningOutputTokens',
+  ]);
+  const unclassifiedRaw = readTokenNumberField(tokenRecord, detailRecord, [
+    'unclassified_tokens',
+    'unclassifiedTokens',
+  ]);
+  const totalRaw = readTokenNumberField(tokenRecord, detailRecord, [
+    'total_tokens',
+    'totalTokens',
+    'total',
+  ]);
+  const accountingVersionRaw = readMarkerNumberField(detailRecord, [
+    'accounting_version',
+    'accountingVersion',
+  ]);
+  const accountingValidity = readMarkerBooleanField(detailRecord, [
+    'accounting_valid',
+    'accountingValid',
+  ]);
+  const accountingQualityField = readMarkerField(detailRecord, [
+    'accounting_quality',
+    'accountingQuality',
+  ]);
+  const accountingQuality = (
+    accountingQualityField.present ? readDetailString(accountingQualityField.value) || '' : ''
+  ).toLowerCase();
+  const mode = inferCacheInputMode(
+    context,
+    nonNegative(cacheReadRaw.value),
+    nonNegative(cacheCreationRaw.value)
+  );
+  const detailBreakdown = readMarkerField(detailRecord, ['token_breakdown', 'tokenBreakdown']);
+  const tokenBreakdown = readMarkerField(tokenRecord, ['token_breakdown', 'tokenBreakdown']);
+  const nestedRaw = detailBreakdown.present ? detailBreakdown.value : tokenBreakdown.value;
+  const nested = parseNestedTokenBreakdown(
+    nestedRaw,
+    detailBreakdown.present || tokenBreakdown.present
+  );
+  const explicitAccountingVersion =
+    accountingVersionRaw.present &&
+    accountingVersionRaw.valid &&
+    Number.isInteger(accountingVersionRaw.value)
+      ? accountingVersionRaw.value
+      : 0;
+  const explicitNestedAccountingVersionValid =
+    accountingVersionRaw.present &&
+    accountingVersionRaw.valid &&
+      Number.isInteger(accountingVersionRaw.value) &&
+      (explicitAccountingVersion === 0 || explicitAccountingVersion === nested?.schemaVersion);
+  const explicitFlatAccountingVersionValid =
+    !accountingVersionRaw.present ||
+    (accountingVersionRaw.valid &&
+      Number.isInteger(accountingVersionRaw.value) &&
+      (explicitAccountingVersion === 0 || explicitAccountingVersion === 2));
+  const nestedVersion = accountingVersionRaw.present ? explicitAccountingVersion : 0;
+  const rawValues = [
+    inputRaw,
+    outputRaw,
+    reasoningRaw,
+    cachedRaw,
+    cacheRaw,
+    cacheReadRaw,
+    cacheCreationRaw,
+    totalRaw,
+  ];
+  const conservativeCacheTokens =
+    nonNegative(cacheReadRaw.value) +
+    nonNegative(cacheCreationRaw.value) +
+    compatibleCachedTokens(
+      cachedRaw.value,
+      cacheRaw.value,
+      cacheReadRaw.value,
+      cacheCreationRaw.value
+    );
+  const conservativeInputTokens =
+    mode === 'separate_from_input'
+      ? nonNegative(inputRaw.value) + conservativeCacheTokens
+      : Math.max(nonNegative(inputRaw.value), conservativeCacheTokens);
+  const conservativeTotal = Math.max(
+    nonNegative(totalRaw.value),
+    nonNegative(unclassifiedRaw.value),
+    nonNegative(nested?.totalTokens ?? 0),
+    nonNegative(nested?.unclassifiedTokens ?? 0),
+    conservativeInputTokens +
+      Math.max(nonNegative(outputRaw.value), nonNegative(reasoningRaw.value))
+  );
+  const invalidCanonicalResolution = (version: number): TokenAccountingResolution =>
+    buildAccountingResolution({
+      accountingVersion: version,
+      sourceValid: false,
+      quality: 'inconsistent',
+      cacheInputMode: mode,
+      inputTokens: 0,
+      uncachedInputTokens: 0,
+      outputTokens: 0,
+      nonReasoningOutputTokens: 0,
+      reasoningTokens: 0,
+      cachedTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      unclassifiedTokens: conservativeTotal,
+      totalTokens: conservativeTotal,
+      pricingSafe: false,
+    });
+  if (nested?.valid && explicitNestedAccountingVersionValid && accountingValidity.valid) {
+    const reportedVersion = explicitAccountingVersion;
+    return buildAccountingResolution({
+      accountingVersion: reportedVersion,
+      sourceValid:
+        reportedVersion === 2 && (!accountingValidity.present || accountingValidity.value),
+      quality: nested.quality,
+      cacheInputMode: mode,
+      inputTokens: nested.inputTokens,
+      uncachedInputTokens: nested.uncachedInputTokens,
+      outputTokens: nested.outputTokens,
+      nonReasoningOutputTokens: nested.nonReasoningOutputTokens,
+      reasoningTokens: nested.reasoningTokens,
+      cachedTokens: 0,
+      cacheReadTokens: nested.cacheReadTokens,
+      cacheCreationTokens: nested.cacheCreationTokens,
+      unclassifiedTokens: nested.unclassifiedTokens,
+      totalTokens: nested.totalTokens,
+      pricingSafe: nested.quality !== 'inconsistent',
+    });
+  }
+  if (nested?.present) {
+    return invalidCanonicalResolution(nestedVersion);
+  }
+
+  // Analytics endpoints expose the canonical buckets as flat columns. Treat
+  // them as canonical only when CPA explicitly marks the row as v2 (or when
+  // the non-reasoning bucket itself is present).
+  const flatCanonical =
+    (accountingVersionRaw.value === 2 &&
+      (accountingValidity.value || nonReasoningRaw.present || accountingQuality !== '')) ||
+    (nonReasoningRaw.present && totalRaw.present);
+  if (flatCanonical) {
+    if (!explicitFlatAccountingVersionValid) {
+      return invalidCanonicalResolution(nestedVersion);
+    }
+    const reportedVersion = accountingVersionRaw.present ? explicitAccountingVersion : 2;
+    const inputTotal = nonNegative(inputRaw.value);
+    const cacheRead = nonNegative(cacheReadRaw.value);
+    const cacheWrite = nonNegative(cacheCreationRaw.value);
+    const outputTotal = nonNegative(outputRaw.value);
+    const reasoning = nonNegative(reasoningRaw.value);
+    const nonReasoning = nonNegative(nonReasoningRaw.value);
+    const unclassified = nonNegative(unclassifiedRaw.value);
+    const total = nonNegative(totalRaw.value);
+    const uncached = inputTotal - cacheRead - cacheWrite;
+    const quality = accountingQuality || (unclassified > 0 ? 'unclassified' : 'complete');
+    const valid =
+      [
+        inputRaw,
+        outputRaw,
+        reasoningRaw,
+        nonReasoningRaw,
+        cacheReadRaw,
+        cacheCreationRaw,
+        unclassifiedRaw,
+        totalRaw,
+      ].every(
+        (field) => field.present && field.canonicalValid && isNonNegativeToken(field.value)
+      ) &&
+      accountingValidity.valid &&
+      isNonNegativeToken(uncached) &&
+      inputTotal === sumTokens(uncached, cacheRead, cacheWrite) &&
+      outputTotal === sumTokens(nonReasoning, reasoning) &&
+      total === sumTokens(inputTotal, outputTotal, unclassified) &&
+      ['complete', 'inconsistent', 'unclassified'].includes(quality) &&
+      (quality !== 'complete' || unclassified === 0);
+    if (valid) {
+      return buildAccountingResolution({
+        accountingVersion: reportedVersion,
+        sourceValid:
+          reportedVersion === 2 && accountingValidity.present && accountingValidity.value,
+        quality,
+        cacheInputMode: mode,
+        inputTokens: inputTotal,
+        uncachedInputTokens: uncached,
+        outputTokens: outputTotal,
+        nonReasoningOutputTokens: nonReasoning,
+        reasoningTokens: reasoning,
+        cachedTokens: 0,
+        cacheReadTokens: cacheRead,
+        cacheCreationTokens: cacheWrite,
+        unclassifiedTokens: unclassified,
+        totalTokens: total,
+        pricingSafe: quality !== 'inconsistent',
+      });
+    }
+    return invalidCanonicalResolution(accountingVersionRaw.value || 2);
+  }
+  const unsupportedOrMalformedVersionClaim =
+    accountingVersionRaw.present &&
+    (!accountingVersionRaw.valid ||
+      !Number.isInteger(accountingVersionRaw.value) ||
+      accountingVersionRaw.value !== 0);
+  if (
+    unsupportedOrMalformedVersionClaim ||
+    accountingValidity.present ||
+    accountingQualityField.present
+  ) {
+    return invalidCanonicalResolution(explicitAccountingVersion);
+  }
+
+  const hasNegativeOrInvalid = rawValues.some((field) => !field.valid || field.value < 0);
+  const semantics = inferLegacyOutputSemantics(context);
+  const rawInput = inputRaw.value;
+  let rawCached = cachedRaw.value;
+  const rawCache = cacheRaw.value;
+  let rawCacheRead = cacheReadRaw.value;
+  const rawCacheCreation = cacheCreationRaw.value;
+  const rawOutput = outputRaw.value;
+  const rawReasoning = reasoningRaw.value;
+  const hasExplicitTotal = totalRaw.present;
+  const explicitTotal = totalRaw.value;
+
+  if (
+    !hasNegativeOrInvalid &&
+    rawCacheRead === 0 &&
+    rawCached > 0 &&
+    rawInput === 0 &&
+    rawOutput === 0 &&
+    rawReasoning === 0 &&
+    rawCacheCreation === 0 &&
+    (!hasExplicitTotal || explicitTotal === 0) &&
+    semantics !== 'unknown'
+  ) {
+    rawCacheRead = rawCached;
+    rawCached = 0;
+  }
+
+  if (hasNegativeOrInvalid) {
+    const fallback = conservativeTotal;
+    return buildAccountingResolution({
+      accountingVersion: accountingVersionRaw.value,
+      sourceValid: false,
+      quality: 'inconsistent',
+      cacheInputMode: mode,
+      inputTokens: 0,
+      uncachedInputTokens: 0,
+      outputTokens: 0,
+      nonReasoningOutputTokens: 0,
+      reasoningTokens: 0,
+      cachedTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      unclassifiedTokens: fallback,
+      totalTokens: fallback,
+      pricingSafe: false,
+    });
+  }
+
+  const normalizedCache = normalizeCacheAccounting({
+    context,
+    inputTokens: rawInput,
+    cachedTokens: rawCached,
+    cacheTokens: rawCache,
+    cacheReadTokens: rawCacheRead,
+    cacheCreationTokens: rawCacheCreation,
+  });
+  const normalizedCacheReadTokens = normalizedCache.cacheReadTokens + normalizedCache.legacyRead;
+  const inputBucketTotal =
+    normalizedCache.uncachedInputTokens +
+    normalizedCacheReadTokens +
+    normalizedCache.cacheCreationTokens;
+  const inputLowerBound = Math.max(normalizedCache.totalInputTokens, inputBucketTotal);
+  const outputLowerBound = Math.max(rawOutput, rawReasoning);
+  const lowerBound = inputLowerBound + outputLowerBound;
+
+  if (normalizedCache.totalInputTokens !== inputBucketTotal) {
+    const total = Math.max(conservativeTotal, lowerBound);
+    return buildAccountingResolution({
+      accountingVersion: accountingVersionRaw.value,
+      sourceValid: false,
+      quality: 'inconsistent',
+      cacheInputMode: mode,
+      inputTokens: 0,
+      uncachedInputTokens: 0,
+      outputTokens: 0,
+      nonReasoningOutputTokens: 0,
+      reasoningTokens: 0,
+      cachedTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      unclassifiedTokens: total,
+      totalTokens: total,
+      pricingSafe: false,
+    });
+  }
+
+  if (semantics === 'unknown') {
+    const total = Math.max(hasExplicitTotal && explicitTotal > 0 ? explicitTotal : 0, lowerBound);
+    return buildAccountingResolution({
+      accountingVersion: accountingVersionRaw.value,
+      sourceValid: false,
+      quality: total > 0 ? 'unclassified' : 'complete',
+      cacheInputMode: mode,
+      inputTokens: 0,
+      uncachedInputTokens: 0,
+      outputTokens: 0,
+      nonReasoningOutputTokens: 0,
+      reasoningTokens: 0,
+      cachedTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      unclassifiedTokens: total,
+      totalTokens: total,
+      pricingSafe: false,
+    });
+  }
+
+  const separateReasoning = semantics === 'separate_reasoning';
+  const outputTotal = separateReasoning ? rawOutput + rawReasoning : rawOutput;
+  const nonReasoning = separateReasoning ? rawOutput : rawOutput - rawReasoning;
+  const expected = normalizedCache.totalInputTokens + outputTotal;
+  if (nonReasoning < 0) {
+    const total = Math.max(conservativeTotal, expected);
+    return buildAccountingResolution({
+      accountingVersion: accountingVersionRaw.value,
+      sourceValid: false,
+      quality: 'inconsistent',
+      cacheInputMode: mode,
+      inputTokens: 0,
+      uncachedInputTokens: 0,
+      outputTokens: 0,
+      nonReasoningOutputTokens: 0,
+      reasoningTokens: 0,
+      cachedTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      unclassifiedTokens: total,
+      totalTokens: total,
+      pricingSafe: false,
+    });
+  }
+  if (hasExplicitTotal && explicitTotal > 0 && explicitTotal < expected) {
+    const total = Math.max(conservativeTotal, expected);
+    return buildAccountingResolution({
+      accountingVersion: accountingVersionRaw.value,
+      sourceValid: false,
+      quality: 'inconsistent',
+      cacheInputMode: mode,
+      inputTokens: 0,
+      uncachedInputTokens: 0,
+      outputTokens: 0,
+      nonReasoningOutputTokens: 0,
+      reasoningTokens: 0,
+      cachedTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      unclassifiedTokens: total,
+      totalTokens: total,
+      pricingSafe: false,
+    });
+  }
+  const total = hasExplicitTotal && explicitTotal > 0 ? explicitTotal : expected;
+  const unclassified = Math.max(total - expected, 0);
+  return buildAccountingResolution({
+    accountingVersion: accountingVersionRaw.value,
+    sourceValid: false,
+    quality: unclassified > 0 ? 'unclassified' : 'complete',
+    cacheInputMode: mode,
+    inputTokens: normalizedCache.totalInputTokens,
+    uncachedInputTokens: normalizedCache.uncachedInputTokens,
+    outputTokens: outputTotal,
+    nonReasoningOutputTokens: nonReasoning,
+    reasoningTokens: rawReasoning,
+    cachedTokens: 0,
+    cacheReadTokens: normalizedCacheReadTokens,
+    cacheCreationTokens: normalizedCache.cacheCreationTokens,
+    unclassifiedTokens: unclassified,
+    totalTokens: total,
+    pricingSafe: true,
+  });
+};
+
+const resolvedAccountingVersionForDetail = (
+  detail: Record<string, unknown>,
+  accounting: TokenAccountingResolution
+): number => {
+  if (accounting.accountingVersion > 0) return accounting.accountingVersion;
+  const raw = readNumberField(detail, ['accounting_version', 'accountingVersion']);
+  return raw.present && raw.valid && raw.value === 0 ? 0 : accounting.accountingVersion;
+};
+
+const tokenBreakdownFromResolution = (
+  accounting: TokenAccountingResolution
+): UsageTokenBreakdown => ({
+  schema_version: 2,
+  quality: accounting.quality,
+  total_tokens: accounting.totalTokens,
+  input: {
+    total_tokens: accounting.inputTokens,
+    uncached_tokens: accounting.uncachedInputTokens,
+    cache_read_tokens: accounting.cacheReadTokens,
+    cache_write_tokens: accounting.cacheCreationTokens,
+  },
+  output: {
+    total_tokens: accounting.outputTokens,
+    non_reasoning_tokens: accounting.nonReasoningOutputTokens,
+    reasoning_tokens: accounting.reasoningTokens,
+  },
+  unclassified_tokens: accounting.unclassifiedTokens,
+});
+
+const usageTokensFromResolution = (accounting: TokenAccountingResolution): UsageTokens => ({
+  input_tokens: accounting.inputTokens,
+  output_tokens: accounting.outputTokens,
+  non_reasoning_output_tokens: accounting.nonReasoningOutputTokens,
+  reasoning_tokens: accounting.reasoningTokens,
+  cached_tokens: accounting.cachedTokens,
+  cache_tokens: accounting.cachedTokens,
+  cache_read_tokens: accounting.cacheReadTokens,
+  cache_creation_tokens: accounting.cacheCreationTokens,
+  unclassified_tokens: accounting.unclassifiedTokens,
+  total_tokens: accounting.totalTokens,
+});
 
 export type CacheHitMetricsInput = {
   modelName?: string;
@@ -808,48 +1642,6 @@ export function extractTTFTMs(detail: unknown): number | null {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
-const readTokens = (detail: Record<string, unknown>, modelName: string): UsageTokens => {
-  const tokensRaw = isRecord(detail.tokens) ? detail.tokens : {};
-  const cacheReadTokens = readFirstTokenNumber(tokensRaw, CACHE_READ_TOKEN_KEYS);
-  const cacheCreationTokens = readFirstTokenNumber(tokensRaw, CACHE_CREATION_TOKEN_KEYS);
-  const accounting = normalizeCacheAccounting({
-    context: {
-      explicitMode:
-        tokensRaw.cache_input_mode ??
-        tokensRaw.cacheInputMode ??
-        detail.cache_input_mode ??
-        detail.cacheInputMode,
-      executorType: detail.executor_type ?? detail.executorType,
-      provider: detail.provider,
-      providerSnapshot: detail.auth_provider_snapshot ?? detail.authProviderSnapshot,
-      resolvedModel: detail.resolved_model ?? detail.resolvedModel,
-      requestedModel: detail.requested_model ?? detail.requestedModel ?? detail.alias,
-      displayModel: modelName,
-    },
-    inputTokens: tokensRaw.input_tokens ?? tokensRaw.inputTokens,
-    cachedTokens: tokensRaw.cached_tokens ?? tokensRaw.cachedTokens,
-    cacheTokens: tokensRaw.cache_tokens ?? tokensRaw.cacheTokens,
-    cacheReadTokens,
-    cacheCreationTokens,
-  });
-  const inputTokens = accounting.totalInputTokens;
-  const outputTokens = toFiniteNumber(tokensRaw.output_tokens ?? tokensRaw.outputTokens);
-  const reasoningTokens = toFiniteNumber(tokensRaw.reasoning_tokens ?? tokensRaw.reasoningTokens);
-  const explicitTotalTokens = toFiniteNumber(tokensRaw.total_tokens ?? tokensRaw.totalTokens);
-  const totalTokens =
-    explicitTotalTokens > 0 ? explicitTotalTokens : inputTokens + outputTokens + reasoningTokens;
-  return {
-    input_tokens: inputTokens,
-    output_tokens: outputTokens,
-    reasoning_tokens: reasoningTokens,
-    cached_tokens: accounting.legacyRead,
-    cache_tokens: accounting.legacyRead,
-    cache_read_tokens: cacheReadTokens,
-    cache_creation_tokens: cacheCreationTokens,
-    total_tokens: totalTokens,
-  };
-};
-
 const normalizeSourceWithCache = (sourceCache: Map<string, string>, value: unknown): string => {
   const raw =
     typeof value === 'string' ? value : value === null || value === undefined ? '' : String(value);
@@ -893,6 +1685,7 @@ export function collectUsageDetails(usageData: unknown): UsageDetail[] {
         const latencyMs = extractLatencyMs(detailRaw);
         const ttftMs = extractTTFTMs(detailRaw);
         const failRaw = isRecord(detailRaw.fail) ? detailRaw.fail : {};
+        const accounting = resolveTokenAccounting(detailRaw, modelName);
         const requestedModel =
           readDetailString(
             detailRaw.requested_model ?? detailRaw.requestedModel ?? detailRaw.alias
@@ -947,7 +1740,12 @@ export function collectUsageDetails(usageData: unknown): UsageDetail[] {
           cache_input_mode: readDetailString(
             detailRaw.cache_input_mode ?? detailRaw.cacheInputMode
           ),
-          tokens: readTokens(detailRaw, modelName),
+          accounting_version: resolvedAccountingVersionForDetail(detailRaw, accounting),
+          accounting_valid: accounting.sourceValid,
+          accounting_quality: accounting.quality,
+          incomplete_accounting: accounting.incomplete,
+          token_breakdown: tokenBreakdownFromResolution(accounting),
+          tokens: usageTokensFromResolution(accounting),
           failed: detailRaw.failed === true,
           fail_status_code:
             toOptionalNumber(
@@ -1025,6 +1823,7 @@ export function collectUsageDetailsWithEndpoint(usageData: unknown): UsageDetail
         const latencyMs = extractLatencyMs(detailRaw);
         const ttftMs = extractTTFTMs(detailRaw);
         const failRaw = isRecord(detailRaw.fail) ? detailRaw.fail : {};
+        const accounting = resolveTokenAccounting(detailRaw, modelName);
         const requestedModel =
           readDetailString(
             detailRaw.requested_model ?? detailRaw.requestedModel ?? detailRaw.alias
@@ -1077,9 +1876,14 @@ export function collectUsageDetailsWithEndpoint(usageData: unknown): UsageDetail
           cache_input_mode: readDetailString(
             detailRaw.cache_input_mode ?? detailRaw.cacheInputMode
           ),
+          accounting_version: resolvedAccountingVersionForDetail(detailRaw, accounting),
+          accounting_valid: accounting.sourceValid,
+          accounting_quality: accounting.quality,
+          incomplete_accounting: accounting.incomplete,
+          token_breakdown: tokenBreakdownFromResolution(accounting),
           latency_ms: latencyMs ?? undefined,
           ttft_ms: ttftMs ?? undefined,
-          tokens: readTokens(detailRaw, modelName),
+          tokens: usageTokensFromResolution(accounting),
           failed: detailRaw.failed === true,
           fail_status_code:
             toOptionalNumber(
@@ -1128,31 +1932,9 @@ export function collectUsageDetailsWithEndpoint(usageData: unknown): UsageDetail
 }
 
 export function extractTotalTokens(detail: unknown): number {
-  const record = isRecord(detail) ? detail : null;
-  const tokens = record && isRecord(record.tokens) ? record.tokens : {};
-  const cacheReadTokens = Math.max(readFirstTokenNumber(tokens, CACHE_READ_TOKEN_KEYS), 0);
-  const cacheCreationTokens = Math.max(readFirstTokenNumber(tokens, CACHE_CREATION_TOKEN_KEYS), 0);
-  const explicitTotal = toFiniteNumber(tokens.total_tokens ?? tokens.totalTokens);
-  if (explicitTotal > 0) return explicitTotal;
-
-  const inputTokens = toFiniteNumber(tokens.input_tokens ?? tokens.inputTokens);
-  const outputTokens = toFiniteNumber(tokens.output_tokens ?? tokens.outputTokens);
-  const reasoningTokens = toFiniteNumber(tokens.reasoning_tokens ?? tokens.reasoningTokens);
-  const cachedTokens = compatibleCachedTokens(
-    tokens.cached_tokens ?? tokens.cachedTokens,
-    tokens.cache_tokens ?? tokens.cacheTokens,
-    cacheReadTokens,
-    cacheCreationTokens
-  );
-
-  return (
-    inputTokens +
-    outputTokens +
-    reasoningTokens +
-    cachedTokens +
-    cacheReadTokens +
-    cacheCreationTokens
-  );
+  const record = isRecord(detail) ? detail : {};
+  return resolveTokenAccounting(detail, String(record.model ?? record.__modelName ?? ''))
+    .totalTokens;
 }
 
 export function calculateCost(
@@ -1175,6 +1957,16 @@ export function calculateCost(
     | 'authProviderSnapshot'
     | 'auth_type'
     | 'authType'
+    | 'cache_input_mode'
+    | 'cacheInputMode'
+    | 'accounting_version'
+    | 'accountingVersion'
+    | 'accounting_valid'
+    | 'accountingValid'
+    | 'accounting_quality'
+    | 'accountingQuality'
+    | 'token_breakdown'
+    | 'tokenBreakdown'
   >,
   modelPrices: Record<string, ModelPrice>
 ): number {
@@ -1207,6 +1999,9 @@ export function calculateCost(
     : officialCandidatePrice;
   if (!basePrice) return 0;
 
+  const accounting = resolveTokenAccounting(detail, behaviorModel);
+  if (!accounting.pricingSafe) return 0;
+
   const identity = [
     detail.executor_type,
     detail.executorType,
@@ -1233,14 +2028,11 @@ export function calculateCost(
       detail.request_service_tier ||
       detail.requestServiceTier;
 
-  const inputTokens = Math.max(toFiniteNumber(detail.tokens.input_tokens), 0);
-  const completionTokens = Math.max(toFiniteNumber(detail.tokens.output_tokens), 0);
-  const cachedTokens = Math.max(
-    Math.max(toFiniteNumber(detail.tokens.cached_tokens), 0),
-    Math.max(toFiniteNumber(detail.tokens.cache_tokens), 0)
-  );
-  const cacheReadTokens = Math.max(toFiniteNumber(detail.tokens.cache_read_tokens), 0);
-  const cacheCreationTokens = Math.max(toFiniteNumber(detail.tokens.cache_creation_tokens), 0);
+  const inputTokens = accounting.inputTokens;
+  const completionTokens = accounting.outputTokens;
+  const cachedTokens = accounting.cachedTokens;
+  const cacheReadTokens = accounting.cacheReadTokens;
+  const cacheCreationTokens = accounting.cacheCreationTokens;
   const hasContextPricing = Boolean(basePrice.contextTiers?.length);
   const contextTier = selectContextTierPrice(basePrice, inputTokens);
   const longContext =
@@ -1274,8 +2066,7 @@ export function calculateCost(
   )
     ? configuredCacheCreationPrice
     : promptPrice * (isGpt56Model(behaviorModel) ? 1.25 : 1);
-  const readTokens = cachedTokens + cacheReadTokens;
-  const promptTokens = Math.max(inputTokens - readTokens - cacheCreationTokens, 0);
+  const promptTokens = accounting.uncachedInputTokens;
   const inputMultiplier = longContext ? 2 : 1;
   const outputMultiplier = longContext ? 1.5 : 1;
   const standardCost =
@@ -1545,9 +2336,7 @@ export function formatCompactNumber(value: number): string {
 
 export function formatUsd(value: number, fractionDigits = 2): string {
   const num = Number(value);
-  const digits = Number.isInteger(fractionDigits)
-    ? Math.max(0, Math.min(6, fractionDigits))
-    : 2;
+  const digits = Number.isInteger(fractionDigits) ? Math.max(0, Math.min(6, fractionDigits)) : 2;
   if (!Number.isFinite(num)) return `$${(0).toFixed(digits)}`;
 
   const fixed = num.toFixed(digits);

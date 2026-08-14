@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
 
@@ -93,17 +94,21 @@ func mergeProjectedAccountWindowStats(
 		count(*),
 		coalesce(sum(case when failed = 0 then 1 else 0 end), 0),
 		coalesce(sum(case when failed = 1 then 1 else 0 end), 0),
-		coalesce(sum(normalized_total_input_tokens), 0),
-		coalesce(sum(output_tokens), 0),
-		coalesce(sum(compatible_cached_tokens_value), 0),
-		coalesce(sum(cache_read_tokens), 0),
-		coalesce(sum(cache_creation_tokens), 0),
-		coalesce(sum(case when normalized_total_input_tokens > ? then normalized_total_input_tokens else 0 end), 0),
-		coalesce(sum(case when normalized_total_input_tokens > ? then output_tokens else 0 end), 0),
-		coalesce(sum(case when normalized_total_input_tokens > ? then compatible_cached_tokens_value else 0 end), 0),
-		coalesce(sum(case when normalized_total_input_tokens > ? then cache_read_tokens else 0 end), 0),
-		coalesce(sum(case when normalized_total_input_tokens > ? then cache_creation_tokens else 0 end), 0),
-		coalesce(sum(total_tokens), 0),
+			coalesce(cpamp_saturating_sum(pricing_input_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(pricing_output_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(pricing_non_reasoning_output_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(pricing_reasoning_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(pricing_unclassified_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(incomplete_accounting_value), 0),
+			coalesce(cpamp_saturating_sum(pricing_compatible_cached_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(pricing_cache_read_tokens_value), 0),
+			coalesce(cpamp_saturating_sum(pricing_cache_creation_tokens_value), 0),
+		coalesce(cpamp_saturating_sum(case when pricing_input_tokens_value > ? then pricing_input_tokens_value else 0 end), 0),
+		coalesce(cpamp_saturating_sum(case when pricing_input_tokens_value > ? then pricing_output_tokens_value else 0 end), 0),
+		coalesce(cpamp_saturating_sum(case when pricing_input_tokens_value > ? then pricing_compatible_cached_tokens_value else 0 end), 0),
+		coalesce(cpamp_saturating_sum(case when pricing_input_tokens_value > ? then pricing_cache_read_tokens_value else 0 end), 0),
+		coalesce(cpamp_saturating_sum(case when pricing_input_tokens_value > ? then pricing_cache_creation_tokens_value else 0 end), 0),
+		coalesce(cpamp_saturating_sum(total_tokens_value), 0),
 		max(timestamp_ms)
 	from banded_events
 		group by request_index, analytics_model, billing_model_value, pricing_model_value,
@@ -161,17 +166,21 @@ func mergeStoredAccountWindowStats(
 		coalesce(sum(d.calls), 0),
 		coalesce(sum(case when d.failed = 0 then d.calls else 0 end), 0),
 		coalesce(sum(case when d.failed = 1 then d.calls else 0 end), 0),
-		coalesce(sum(d.input_tokens), 0),
-		coalesce(sum(d.output_tokens), 0),
-		coalesce(sum(d.cached_tokens), 0),
-		coalesce(sum(d.cache_read_tokens), 0),
-		coalesce(sum(d.cache_creation_tokens), 0),
-		coalesce(sum(d.long_input_tokens), 0),
-		coalesce(sum(d.long_output_tokens), 0),
-		coalesce(sum(d.long_cached_tokens), 0),
-		coalesce(sum(d.long_cache_read_tokens), 0),
-		coalesce(sum(d.long_cache_creation_tokens), 0),
-		coalesce(sum(d.total_tokens), 0),
+		coalesce(cpamp_saturating_sum(d.input_tokens), 0),
+		coalesce(cpamp_saturating_sum(d.output_tokens), 0),
+		coalesce(cpamp_saturating_sum(d.non_reasoning_output_tokens), 0),
+		coalesce(cpamp_saturating_sum(d.reasoning_tokens), 0),
+		coalesce(cpamp_saturating_sum(d.unclassified_tokens), 0),
+		coalesce(cpamp_saturating_sum(d.incomplete_accounting_calls), 0),
+		coalesce(cpamp_saturating_sum(d.cached_tokens), 0),
+		coalesce(cpamp_saturating_sum(d.cache_read_tokens), 0),
+		coalesce(cpamp_saturating_sum(d.cache_creation_tokens), 0),
+		coalesce(cpamp_saturating_sum(d.long_input_tokens), 0),
+		coalesce(cpamp_saturating_sum(d.long_output_tokens), 0),
+		coalesce(cpamp_saturating_sum(d.long_cached_tokens), 0),
+		coalesce(cpamp_saturating_sum(d.long_cache_read_tokens), 0),
+		coalesce(cpamp_saturating_sum(d.long_cache_creation_tokens), 0),
+		coalesce(cpamp_saturating_sum(d.total_tokens), 0),
 		max(d.last_seen_ms)
 	from window_targets w
 	join usage_monitoring_account_daily_rollups_v1 d
@@ -212,6 +221,10 @@ func mergeAccountWindowStatRows(rows *sql.Rows, grouped map[accountWindowStatKey
 			&stat.FailureCalls,
 			&stat.InputTokens,
 			&stat.OutputTokens,
+			&stat.NonReasoningOutputTokens,
+			&stat.ReasoningTokens,
+			&stat.UnclassifiedTokens,
+			&stat.IncompleteAccountingCalls,
 			&stat.CachedTokens,
 			&stat.CacheReadTokens,
 			&stat.CacheCreationTokens,
@@ -242,17 +255,21 @@ func mergeAccountWindowStatRows(rows *sql.Rows, grouped map[accountWindowStatKey
 		current.Calls += stat.Calls
 		current.SuccessCalls += stat.SuccessCalls
 		current.FailureCalls += stat.FailureCalls
-		current.InputTokens += stat.InputTokens
-		current.OutputTokens += stat.OutputTokens
-		current.CachedTokens += stat.CachedTokens
-		current.CacheReadTokens += stat.CacheReadTokens
-		current.CacheCreationTokens += stat.CacheCreationTokens
-		current.LongInputTokens += stat.LongInputTokens
-		current.LongOutputTokens += stat.LongOutputTokens
-		current.LongCachedTokens += stat.LongCachedTokens
-		current.LongCacheReadTokens += stat.LongCacheReadTokens
-		current.LongCacheCreationTokens += stat.LongCacheCreationTokens
-		current.TotalTokens += stat.TotalTokens
+		current.InputTokens = usage.SaturatingTokenSum(current.InputTokens, stat.InputTokens)
+		current.OutputTokens = usage.SaturatingTokenSum(current.OutputTokens, stat.OutputTokens)
+		current.NonReasoningOutputTokens = usage.SaturatingTokenSum(current.NonReasoningOutputTokens, stat.NonReasoningOutputTokens)
+		current.ReasoningTokens = usage.SaturatingTokenSum(current.ReasoningTokens, stat.ReasoningTokens)
+		current.UnclassifiedTokens = usage.SaturatingTokenSum(current.UnclassifiedTokens, stat.UnclassifiedTokens)
+		current.IncompleteAccountingCalls = usage.SaturatingTokenSum(current.IncompleteAccountingCalls, stat.IncompleteAccountingCalls)
+		current.CachedTokens = usage.SaturatingTokenSum(current.CachedTokens, stat.CachedTokens)
+		current.CacheReadTokens = usage.SaturatingTokenSum(current.CacheReadTokens, stat.CacheReadTokens)
+		current.CacheCreationTokens = usage.SaturatingTokenSum(current.CacheCreationTokens, stat.CacheCreationTokens)
+		current.LongInputTokens = usage.SaturatingTokenSum(current.LongInputTokens, stat.LongInputTokens)
+		current.LongOutputTokens = usage.SaturatingTokenSum(current.LongOutputTokens, stat.LongOutputTokens)
+		current.LongCachedTokens = usage.SaturatingTokenSum(current.LongCachedTokens, stat.LongCachedTokens)
+		current.LongCacheReadTokens = usage.SaturatingTokenSum(current.LongCacheReadTokens, stat.LongCacheReadTokens)
+		current.LongCacheCreationTokens = usage.SaturatingTokenSum(current.LongCacheCreationTokens, stat.LongCacheCreationTokens)
+		current.TotalTokens = usage.SaturatingTokenSum(current.TotalTokens, stat.TotalTokens)
 		current.LastSeenMS = max(current.LastSeenMS, stat.LastSeenMS)
 	}
 	return rows.Err()
@@ -317,9 +334,13 @@ func accountWindowEventSourceSQL(
 	)
 	select
 		w.request_index, p.requested_model as model, p.analytics_model, p.resolved_model, p.service_tier, p.failed,
-		p.normalized_total_input_tokens, p.output_tokens, p.cached_tokens,
+		p.accounting_version, p.accounting_valid, p.accounting_quality,
+		p.input_tokens, p.output_tokens, p.reasoning_tokens, p.cached_tokens,
 		p.cache_tokens, p.cache_read_tokens, p.cache_creation_tokens,
-		p.total_tokens, p.timestamp_ms
+		p.normalized_uncached_input_tokens, p.normalized_total_input_tokens,
+		p.normalized_cache_read_tokens, p.normalized_cache_creation_tokens,
+		p.normalized_non_reasoning_output_tokens, p.normalized_reasoning_output_tokens,
+		p.normalized_total_output_tokens, p.unclassified_tokens, p.total_tokens, p.timestamp_ms
 	from window_targets w
 	join usage_monitoring_event_projection_v1 p
 		on p.event_id <= ?
@@ -346,10 +367,15 @@ func accountWindowEventSourceSQL(
 	select
 		w.request_index, ` + usageidentity.SQLEffectiveRequestedModelExpression("e.model", "e.requested_model") + `, ` + usageidentity.SQLRequestAnalyticsModelExpression("e.model", "e.requested_model") + `, coalesce(e.resolved_model, ''),
 		coalesce(e.service_tier, ''), coalesce(e.failed, 0),
-		coalesce(e.normalized_total_input_tokens, e.input_tokens, 0),
-		coalesce(e.output_tokens, 0), coalesce(e.cached_tokens, 0),
-		coalesce(e.cache_tokens, 0), coalesce(e.cache_read_tokens, 0),
-		coalesce(e.cache_creation_tokens, 0), coalesce(e.total_tokens, 0),
+		coalesce(e.accounting_version, 0), coalesce(e.accounting_valid, 0),
+		coalesce(e.accounting_quality, ''), coalesce(e.input_tokens, 0),
+		coalesce(e.output_tokens, 0), coalesce(e.reasoning_tokens, 0),
+		coalesce(e.cached_tokens, 0), coalesce(e.cache_tokens, 0),
+		coalesce(e.cache_read_tokens, 0), coalesce(e.cache_creation_tokens, 0),
+		e.normalized_uncached_input_tokens, e.normalized_total_input_tokens,
+		e.normalized_cache_read_tokens, e.normalized_cache_creation_tokens,
+		e.normalized_non_reasoning_output_tokens, e.normalized_reasoning_output_tokens,
+		e.normalized_total_output_tokens, e.unclassified_tokens, e.total_tokens,
 		e.timestamp_ms
 	from window_targets w
 	join usage_events e

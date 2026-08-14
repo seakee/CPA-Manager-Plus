@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
 
 // PerMillion divides by one million to convert token-priced units (per 1M tokens).
@@ -124,8 +125,8 @@ func costForSegment(
 	inputMultiplier float64,
 	outputMultiplier float64,
 ) float64 {
-	readTokens := cachedTokens + cacheReadTokens
-	promptTokens := maxInt64(inputTokens-readTokens-cacheCreationTokens, 0)
+	readTokens := usage.SaturatingTokenSum(cachedTokens, cacheReadTokens)
+	promptTokens := usage.TokenRemainder(inputTokens, readTokens, cacheCreationTokens)
 	cacheReadPrice := price.CacheRead
 	if !configuredPriceValue(cacheReadPrice, price.CacheReadConfigured) {
 		cacheReadPrice = fallbackPrice(price.Cache, price.Prompt*0.1)

@@ -116,12 +116,22 @@ func (r *repository) InsertBatch(ctx context.Context, events []model.UsageEvent)
 		auth_type, auth_index, source, source_hash, api_key_hash,
 		account_snapshot, auth_label_snapshot, auth_file_snapshot, auth_provider_snapshot, auth_project_id_snapshot, auth_snapshot_at_ms,
 		requested_model, resolved_model, reasoning_effort, service_tier, request_service_tier, response_service_tier, cache_input_mode,
+		accounting_version, accounting_valid, accounting_quality,
 		input_tokens, output_tokens, reasoning_tokens, cached_tokens, cache_tokens, cache_read_tokens, cache_creation_tokens,
-		normalized_uncached_input_tokens, normalized_total_input_tokens, normalized_cache_read_tokens, normalized_cache_creation_tokens, total_tokens,
+		normalized_uncached_input_tokens, normalized_total_input_tokens, normalized_cache_read_tokens, normalized_cache_creation_tokens,
+		normalized_non_reasoning_output_tokens, normalized_reasoning_output_tokens, normalized_total_output_tokens, unclassified_tokens, total_tokens,
 		latency_ms, ttft_ms, failed, fail_status_code, fail_summary,
 		response_metadata_json, header_quota_recover_at_ms, header_quota_used_percent, header_quota_plan_type, header_error_kind, header_error_code, header_trace_id,
 		fail_body, raw_json, created_at_ms
-		) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		) values (
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?
+		)`)
 	if err != nil {
 		return model.InsertResult{}, err
 	}
@@ -152,23 +162,7 @@ func (r *repository) InsertBatch(ctx context.Context, events []model.UsageEvent)
 		}
 
 		usage.NormalizeRequestMetadata(&event)
-		accounting := usage.NormalizeCacheAccounting(usage.CacheInputContext{
-			ExplicitMode:     event.CacheInputMode,
-			ExecutorType:     event.ExecutorType,
-			Provider:         event.Provider,
-			ProviderSnapshot: event.AuthProviderSnapshot,
-			ResolvedModel:    event.ResolvedModel,
-			RequestedModel:   event.RequestedModel,
-			DisplayModel:     event.Model,
-		}, event.InputTokens, event.CachedTokens, event.CacheTokens, event.CacheReadTokens, event.CacheCreationTokens)
-		event.CacheInputMode = accounting.Mode
-		event.NormalizedUncachedInputTokens = accounting.UncachedInputTokens
-		event.NormalizedTotalInputTokens = accounting.TotalInputTokens
-		event.NormalizedCacheReadTokens = accounting.CacheReadTokens
-		event.NormalizedCacheCreationTokens = accounting.CacheCreationTokens
-		if event.TotalTokens <= 0 {
-			event.TotalTokens = accounting.TotalInputTokens + max(event.OutputTokens, int64(0)) + max(event.ReasoningTokens, int64(0))
-		}
+		usage.ApplyTokenAccounting(&event, nil)
 		if event.RequestServiceTier == "" {
 			event.RequestServiceTier = event.ServiceTier
 		}
@@ -222,6 +216,9 @@ func (r *repository) InsertBatch(ctx context.Context, events []model.UsageEvent)
 			nullString(event.RequestServiceTier),
 			nullString(event.ResponseServiceTier),
 			nullString(event.CacheInputMode),
+			event.AccountingVersion,
+			boolInt(event.AccountingValid),
+			nullString(event.TokenBreakdown.Quality),
 			event.InputTokens,
 			event.OutputTokens,
 			event.ReasoningTokens,
@@ -233,6 +230,10 @@ func (r *repository) InsertBatch(ctx context.Context, events []model.UsageEvent)
 			event.NormalizedTotalInputTokens,
 			event.NormalizedCacheReadTokens,
 			event.NormalizedCacheCreationTokens,
+			event.NormalizedNonReasoningOutputTokens,
+			event.NormalizedReasoningOutputTokens,
+			event.NormalizedTotalOutputTokens,
+			event.UnclassifiedTokens,
 			event.TotalTokens,
 			nullInt(event.LatencyMS),
 			nullInt(event.TTFTMS),
@@ -302,8 +303,10 @@ func (r *repository) ListRecent(ctx context.Context, limit int) ([]model.UsageEv
 		auth_type, auth_index, source, source_hash, api_key_hash,
 		account_snapshot, auth_label_snapshot, auth_file_snapshot, auth_provider_snapshot, auth_project_id_snapshot, auth_snapshot_at_ms,
 		requested_model, resolved_model, reasoning_effort, service_tier, request_service_tier, response_service_tier, cache_input_mode,
+		accounting_version, accounting_valid, accounting_quality,
 		input_tokens, output_tokens, reasoning_tokens, cached_tokens, cache_tokens, cache_read_tokens, cache_creation_tokens,
-		normalized_uncached_input_tokens, normalized_total_input_tokens, normalized_cache_read_tokens, normalized_cache_creation_tokens, total_tokens,
+		normalized_uncached_input_tokens, normalized_total_input_tokens, normalized_cache_read_tokens, normalized_cache_creation_tokens,
+		normalized_non_reasoning_output_tokens, normalized_reasoning_output_tokens, normalized_total_output_tokens, unclassified_tokens, total_tokens,
 		latency_ms, ttft_ms, failed, fail_status_code, fail_summary,
 		coalesce(response_metadata_json, ''), header_quota_recover_at_ms, header_quota_used_percent, coalesce(header_quota_plan_type, ''), coalesce(header_error_kind, ''), coalesce(header_error_code, ''), coalesce(header_trace_id, ''),
 		coalesce(raw_json, ''), created_at_ms
@@ -325,7 +328,10 @@ func (r *repository) ListRecent(ctx context.Context, limit int) ([]model.UsageEv
 		var failStatusCode sql.NullInt64
 		var quotaRecoverAt sql.NullInt64
 		var quotaUsedPercent sql.NullFloat64
+		var accountingVersion, accountingValid sql.NullInt64
+		var accountingQuality sql.NullString
 		var normalizedUncachedInput, normalizedTotalInput, normalizedCacheRead, normalizedCacheCreation sql.NullInt64
+		var normalizedNonReasoningOutput, normalizedReasoningOutput, normalizedTotalOutput, unclassifiedTokens sql.NullInt64
 		var failed int
 		if err := rows.Scan(
 			&requestID,
@@ -359,6 +365,9 @@ func (r *repository) ListRecent(ctx context.Context, limit int) ([]model.UsageEv
 			&requestServiceTier,
 			&responseServiceTier,
 			&cacheInputMode,
+			&accountingVersion,
+			&accountingValid,
+			&accountingQuality,
 			&event.InputTokens,
 			&event.OutputTokens,
 			&event.ReasoningTokens,
@@ -370,6 +379,10 @@ func (r *repository) ListRecent(ctx context.Context, limit int) ([]model.UsageEv
 			&normalizedTotalInput,
 			&normalizedCacheRead,
 			&normalizedCacheCreation,
+			&normalizedNonReasoningOutput,
+			&normalizedReasoningOutput,
+			&normalizedTotalOutput,
+			&unclassifiedTokens,
 			&event.TotalTokens,
 			&latency,
 			&ttft,
@@ -414,12 +427,26 @@ func (r *repository) ListRecent(ctx context.Context, limit int) ([]model.UsageEv
 		event.ServiceTier = serviceTier.String
 		event.RequestServiceTier = requestServiceTier.String
 		event.ResponseServiceTier = responseServiceTier.String
+		if accountingVersion.Valid {
+			event.AccountingVersion = int(accountingVersion.Int64)
+		}
+		if accountingValid.Valid {
+			event.AccountingValid = accountingValid.Int64 != 0
+		}
+		if accountingQuality.Valid {
+			event.TokenBreakdown.Quality = accountingQuality.String
+		}
 		hints := usage.RawCacheAccountingHintsFromJSON(rawJSON)
+		explicitCacheInputMode := cacheInputMode.String
+		if explicitCacheInputMode == "" {
+			explicitCacheInputMode = hints.ExplicitMode
+		}
 		accounting := usage.NormalizeCacheAccounting(usage.CacheInputContext{
-			ExplicitMode:     hints.ExplicitMode,
+			ExplicitMode:     explicitCacheInputMode,
 			ExecutorType:     event.ExecutorType,
 			Provider:         event.Provider,
 			ProviderSnapshot: event.AuthProviderSnapshot,
+			AuthType:         event.AuthType,
 			ResolvedModel:    event.ResolvedModel,
 			RequestedModel:   event.RequestedModel,
 			DisplayModel:     event.Model,
@@ -440,6 +467,22 @@ func (r *repository) ListRecent(ctx context.Context, limit int) ([]model.UsageEv
 		}
 		if normalizedCacheCreation.Valid {
 			event.NormalizedCacheCreationTokens = normalizedCacheCreation.Int64
+		}
+		if normalizedNonReasoningOutput.Valid {
+			event.NormalizedNonReasoningOutputTokens = normalizedNonReasoningOutput.Int64
+		}
+		if normalizedReasoningOutput.Valid {
+			event.NormalizedReasoningOutputTokens = normalizedReasoningOutput.Int64
+		}
+		if normalizedTotalOutput.Valid {
+			event.NormalizedTotalOutputTokens = normalizedTotalOutput.Int64
+		}
+		if unclassifiedTokens.Valid {
+			event.UnclassifiedTokens = unclassifiedTokens.Int64
+		}
+		event.RawJSON = rawJSON
+		if !usage.RestorePersistedTokenAccounting(&event, accountingQuality.String) {
+			usage.ApplyTokenAccounting(&event, nil)
 		}
 		if authSnapshotAt.Valid {
 			event.AuthSnapshotAtMS = authSnapshotAt.Int64
@@ -509,6 +552,13 @@ func nullPositiveInt64(value int64) any {
 		return nil
 	}
 	return value
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func responseHeaderDerivedForInsert(event model.UsageEvent) (string, int64, *float64, string, string, string, string) {

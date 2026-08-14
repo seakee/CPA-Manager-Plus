@@ -190,13 +190,16 @@ func runServer() {
 		serverResult <- err
 	}()
 
-	usageCacheAccountingMigrationWorker := worker.NewUsageCacheAccountingMigrationWorker(db, func() {
+	usageTokenAccountingMigrationWorker := worker.NewUsageTokenAccountingMigrationWorker(db, func() {
 		accountHistoryRollupWorker.Wake()
 		usageDerivedRollupWorker.Wake()
 		if usageHourlyAggregateWorker != nil {
 			usageHourlyAggregateWorker.Wake()
 		}
+	})
+	usageCacheAccountingMigrationWorker := worker.NewUsageCacheAccountingMigrationWorker(db, func() {
 		go runUsageResponseMetadataBackfill(ctx, db)
+		usageTokenAccountingMigrationWorker.Start(ctx)
 	})
 	usageCacheAccountingMigrationWorker.Start(ctx)
 

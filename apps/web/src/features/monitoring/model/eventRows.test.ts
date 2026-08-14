@@ -85,6 +85,28 @@ describe('buildEventRows', () => {
     expect(row.totalCost).toBeCloseTo(0.000104);
   });
 
+  it('preserves explicit legacy accounting provenance in event rows', () => {
+    const [row] = buildRows({
+      accounting_version: 0,
+      accounting_valid: false,
+      accounting_quality: 'complete',
+      tokens: {
+        input_tokens: 100,
+        output_tokens: 40,
+        non_reasoning_output_tokens: 30,
+        reasoning_tokens: 10,
+        cache_read_tokens: 20,
+        cache_creation_tokens: 0,
+        unclassified_tokens: 0,
+        total_tokens: 140,
+      },
+    });
+
+    expect(row.accountingVersion).toBe(0);
+    expect(row.accountingValid).toBe(false);
+    expect(row.accountingQuality).toBe('complete');
+  });
+
   it('keeps CPA executor and service tier metadata searchable', () => {
     const [row] = buildRows({
       executor_type: 'codex',

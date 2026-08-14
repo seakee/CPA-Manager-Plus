@@ -67,7 +67,10 @@ func TestCatchUpAccountHistoryAggregatesByCheckpoint(t *testing.T) {
 	if alice.BillingModel != "resolved-a" || alice.Model != "alias-a" {
 		t.Fatalf("alice model fields = %#v", alice)
 	}
-	if alice.InputTokens != 120 || alice.OutputTokens != 60 || alice.CachedTokens != 25 || alice.TotalTokens != 195 {
+	if alice.InputTokens != 120 || alice.OutputTokens != 60 || alice.NonReasoningOutputTokens != 50 ||
+		alice.ReasoningTokens != 10 || alice.UnclassifiedTokens != 15 ||
+		alice.IncompleteAccountingCalls != 1 || alice.CachedTokens != 0 ||
+		alice.CacheReadTokens != 35 || alice.CacheCreationTokens != 5 || alice.TotalTokens != 195 {
 		t.Fatalf("alice token totals = %#v", alice)
 	}
 
@@ -107,6 +110,67 @@ func TestCatchUpAccountHistoryAggregatesByCheckpoint(t *testing.T) {
 	}
 	if checkpoint.LastEventID != 3 {
 		t.Fatalf("checkpoint = %#v", checkpoint)
+	}
+}
+
+func TestCatchUpAccountHistoryKeepsInconsistentAccountingOutOfPricingBuckets(t *testing.T) {
+	db := newRollupTestDB(t)
+	ctx := context.Background()
+	events := usageevent.New(db)
+	repo := New(db)
+
+	event := rollupTestEvent(
+		"account-inconsistent-pricing",
+		1_700_000_001_000,
+		"gpt-a",
+		"",
+		"alice@example.com",
+		"",
+		"auth-a",
+		false,
+		999,
+		999,
+		0,
+		0,
+		0,
+		0,
+		1_998,
+	)
+	event.AccountingVersion = usage.TokenAccountingSchemaVersion
+	event.AccountingValid = true
+	event.TokenBreakdown = usage.TokenBreakdown{
+		SchemaVersion: usage.TokenAccountingSchemaVersion,
+		Quality:       usage.TokenAccountingQualityInconsistent,
+		TotalTokens:   110,
+		Input: usage.TokenInputBreakdown{
+			TotalTokens:    100,
+			UncachedTokens: 100,
+		},
+		Output: usage.TokenOutputBreakdown{
+			TotalTokens:        10,
+			NonReasoningTokens: 10,
+		},
+	}
+	if _, err := events.InsertBatch(ctx, []usage.Event{event}); err != nil {
+		t.Fatalf("insert event: %v", err)
+	}
+	if _, err := repo.CatchUpAccountHistory(ctx, 10, 1_700_000_010_000); err != nil {
+		t.Fatalf("catch up: %v", err)
+	}
+
+	rows, err := repo.AccountHistoryRows(ctx, []string{
+		rollupTestAccountKey("alice@example.com", "", "auth-a"),
+	})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("account rows = %#v, err = %v", rows, err)
+	}
+	row := rows[0]
+	if row.InputTokens != 0 || row.OutputTokens != 0 || row.NonReasoningOutputTokens != 0 ||
+		row.ReasoningTokens != 0 || row.CachedTokens != 0 || row.CacheReadTokens != 0 ||
+		row.CacheCreationTokens != 0 || row.UnclassifiedTokens != 110 || row.TotalTokens != 110 ||
+		row.IncompleteAccountingCalls != 1 || row.LongInputTokens != 0 || row.LongOutputTokens != 0 ||
+		row.LongCachedTokens != 0 || row.LongCacheReadTokens != 0 || row.LongCacheCreationTokens != 0 {
+		t.Fatalf("account pricing buckets = %#v", row)
 	}
 }
 

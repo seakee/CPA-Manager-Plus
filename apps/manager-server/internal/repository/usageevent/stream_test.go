@@ -78,6 +78,70 @@ func TestWriteCompatibleUsageMatchesBuildPayload(t *testing.T) {
 	}
 }
 
+func TestListRecentPreservesPersistedCacheInputModeForUnknownProvider(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage-cache-input-mode.sqlite"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repo := New(db)
+
+	event := streamTestEvent("persisted-cache-input-mode", 100, "POST /v1/messages", "custom-model")
+	event.Provider = "custom-provider"
+	event.CacheInputMode = usage.CacheInputModeSeparate
+	event.AccountingVersion = usage.TokenAccountingSchemaVersion
+	event.AccountingValid = true
+	event.TokenBreakdown = usage.TokenBreakdown{
+		SchemaVersion: usage.TokenAccountingSchemaVersion,
+		Quality:       usage.TokenAccountingQualityComplete,
+		TotalTokens:   3,
+		Input: usage.TokenInputBreakdown{
+			TotalTokens:    1,
+			UncachedTokens: 1,
+		},
+		Output: usage.TokenOutputBreakdown{
+			TotalTokens:        2,
+			NonReasoningTokens: 2,
+		},
+	}
+	if _, err := repo.InsertBatch(context.Background(), []usage.Event{event}); err != nil {
+		t.Fatalf("insert event: %v", err)
+	}
+
+	recent, err := repo.ListRecent(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("list recent: %v", err)
+	}
+	if len(recent) != 1 || recent[0].CacheInputMode != usage.CacheInputModeSeparate {
+		t.Fatalf("recent cache input mode = %#v", recent)
+	}
+}
+
+func TestListRecentUsesAuthTypeBeforeModelAliasForLegacyCacheAccounting(t *testing.T) {
+	db, repo := openCompatibleUsageStreamTestRepository(t)
+	if _, err := db.Exec(`insert into usage_events (
+		event_hash, timestamp_ms, timestamp, auth_type, model,
+		input_tokens, output_tokens, cache_read_tokens, total_tokens, created_at_ms
+	) values (
+		'legacy-auth-cache-mode', 100, '2026-01-01T00:00:00Z', 'codex', 'claude-alias',
+		100, 20, 20, 120, 100
+	)`); err != nil {
+		t.Fatalf("insert legacy auth cache event: %v", err)
+	}
+
+	recent, err := repo.ListRecent(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("list recent: %v", err)
+	}
+	if len(recent) != 1 || recent[0].CacheInputMode != usage.CacheInputModeIncluded ||
+		recent[0].NormalizedTotalInputTokens != 100 ||
+		recent[0].NormalizedUncachedInputTokens != 80 ||
+		recent[0].TokenBreakdown.Quality != usage.TokenAccountingQualityComplete ||
+		recent[0].TotalTokens != 120 {
+		t.Fatalf("legacy auth cache accounting = %#v", recent)
+	}
+}
+
 func TestWriteCompatibleUsagePreservesExplicitRequestedModel(t *testing.T) {
 	_, repo := openCompatibleUsageStreamTestRepository(t)
 	ctx := context.Background()
@@ -594,6 +658,213 @@ func TestWriteExportJSONLUsesRecentLimitAndAscendingKeysetOrder(t *testing.T) {
 	}
 	if last.ResponseMetadata == nil || last.ResponseMetadata.Trace == nil || last.ResponseMetadata.Trace.PrimaryTraceID != "trace-export" {
 		t.Fatalf("last metadata = %#v", last.ResponseMetadata)
+	}
+}
+
+func TestCompatibleAndExportUseRawCanonicalAccountingBeforeMigrationCompletes(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repo := New(db)
+
+	raw := `{
+		"accounting_version":2,
+		"secret":"must-not-export",
+		"token_breakdown":{
+			"schema_version":2,"quality":"complete","total_tokens":140,
+			"input":{"total_tokens":100,"uncached_tokens":70,"cache_read_tokens":20,"cache_write_tokens":10},
+			"output":{"total_tokens":40,"non_reasoning_tokens":30,"reasoning_tokens":10},
+			"unclassified_tokens":0
+		}
+	}`
+	if _, err := db.Exec(`insert into usage_events (
+		event_hash, timestamp_ms, timestamp, provider, model, endpoint,
+		input_tokens, output_tokens, reasoning_tokens, total_tokens, raw_json, created_at_ms
+	) values ('raw-canonical', 100, '2026-01-01T00:00:00Z', 'plugin-provider', 'alias-model',
+		'POST /v1/responses', 999, 888, 777, 2664, ?, 100)`, raw); err != nil {
+		t.Fatalf("insert pre-migration event: %v", err)
+	}
+
+	var compatible bytes.Buffer
+	if err := repo.WriteCompatibleUsage(context.Background(), &compatible, 1); err != nil {
+		t.Fatalf("write compatible usage: %v", err)
+	}
+	var payload usage.Payload
+	if err := json.Unmarshal(compatible.Bytes(), &payload); err != nil {
+		t.Fatalf("decode compatible usage: %v", err)
+	}
+	if payload.TotalTokens != 140 {
+		t.Fatalf("compatible total = %d, want raw canonical total 140", payload.TotalTokens)
+	}
+	api := payload.APIs["POST /v1/responses"]
+	if api == nil || api.Models["alias-model"] == nil || len(api.Models["alias-model"].Details) != 1 {
+		t.Fatalf("compatible payload = %#v", payload)
+	}
+	detail := api.Models["alias-model"].Details[0]
+	if !detail.AccountingValid || detail.AccountingVersion != usage.TokenAccountingSchemaVersion ||
+		detail.TokenBreakdown.TotalTokens != 140 || detail.Tokens.TotalTokens != 140 {
+		t.Fatalf("compatible accounting = %#v", detail)
+	}
+
+	var exported bytes.Buffer
+	if err := repo.WriteExportJSONL(context.Background(), &exported, 1); err != nil {
+		t.Fatalf("write export: %v", err)
+	}
+	if strings.Contains(exported.String(), "must-not-export") || strings.Contains(exported.String(), "raw_json") {
+		t.Fatalf("export exposes raw payload: %s", exported.String())
+	}
+	var event usage.Event
+	if err := json.Unmarshal(bytes.TrimSpace(exported.Bytes()), &event); err != nil {
+		t.Fatalf("decode exported event: %v", err)
+	}
+	if !event.AccountingValid || event.AccountingVersion != usage.TokenAccountingSchemaVersion ||
+		event.TokenBreakdown.TotalTokens != 140 || event.TotalTokens != 140 || event.RawJSON != "" {
+		t.Fatalf("exported accounting = %#v", event)
+	}
+}
+
+func TestReadAndExportKeepInvalidPersistedCanonicalWithoutRawProvenanceUnclassified(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repo := New(db)
+
+	if _, err := db.Exec(`insert into usage_events (
+		event_hash, timestamp_ms, timestamp, provider, model, endpoint,
+		accounting_version, accounting_valid, accounting_quality,
+		input_tokens, output_tokens, reasoning_tokens,
+		normalized_uncached_input_tokens, normalized_total_input_tokens,
+		normalized_cache_read_tokens, normalized_cache_creation_tokens,
+		normalized_non_reasoning_output_tokens, normalized_reasoning_output_tokens,
+		normalized_total_output_tokens, unclassified_tokens, total_tokens, created_at_ms
+	) values (
+		'invalid-canonical-no-raw', 100, '2026-01-01T00:00:00Z', 'anthropic', 'gpt-5', 'POST /v1/responses',
+		2, 1, 'complete', 100, 20, 5, 100, 99, 0, 0, 20, 5, 25, 0, 0, 100
+	)`); err != nil {
+		t.Fatalf("insert invalid persisted canonical event: %v", err)
+	}
+
+	recent, err := repo.ListRecent(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("list recent: %v", err)
+	}
+	if len(recent) != 1 || recent[0].AccountingVersion != 2 || recent[0].AccountingValid ||
+		recent[0].TokenBreakdown.Quality != usage.TokenAccountingQualityInconsistent ||
+		recent[0].UnclassifiedTokens != 120 || recent[0].TotalTokens != 120 {
+		t.Fatalf("recent accounting = %+v", recent)
+	}
+
+	var compatible bytes.Buffer
+	if err := repo.WriteCompatibleUsage(context.Background(), &compatible, 1); err != nil {
+		t.Fatalf("write compatible usage: %v", err)
+	}
+	var payload usage.Payload
+	if err := json.Unmarshal(compatible.Bytes(), &payload); err != nil {
+		t.Fatalf("decode compatible usage: %v", err)
+	}
+	if payload.TotalTokens != 120 {
+		t.Fatalf("compatible total = %d, want conservative invalid-canonical total 120", payload.TotalTokens)
+	}
+	detail := payload.APIs["POST /v1/responses"].Models["gpt-5"].Details[0]
+	if detail.AccountingVersion != 2 || detail.AccountingValid ||
+		detail.AccountingQuality != usage.TokenAccountingQualityInconsistent ||
+		!detail.IncompleteAccounting || detail.TokenBreakdown.UnclassifiedTokens != 120 ||
+		detail.Tokens.TotalTokens != 120 {
+		t.Fatalf("compatible accounting = %+v", detail)
+	}
+
+	var exported bytes.Buffer
+	if err := repo.WriteExportJSONL(context.Background(), &exported, 1); err != nil {
+		t.Fatalf("write export: %v", err)
+	}
+	var event usage.Event
+	if err := json.Unmarshal(bytes.TrimSpace(exported.Bytes()), &event); err != nil {
+		t.Fatalf("decode exported event: %v", err)
+	}
+	if event.AccountingVersion != 2 || event.AccountingValid ||
+		event.TokenBreakdown.Quality != usage.TokenAccountingQualityInconsistent ||
+		event.TokenBreakdown.UnclassifiedTokens != 120 || event.TotalTokens != 120 {
+		t.Fatalf("exported accounting = %+v", event)
+	}
+}
+
+func TestExportImportRoundTripPreservesInvalidAccountingProvenance(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repo := New(db)
+
+	event := streamTestEvent("invalid-provenance", 100, "POST /v1/responses", "gpt-test")
+	event.Provider = "openai"
+	event.InputTokens = 999
+	event.OutputTokens = 888
+	event.ReasoningTokens = 777
+	event.TotalTokens = 2_664
+	event.AccountingVersion = 0
+	event.AccountingValid = false
+	event.TokenBreakdown = usage.TokenBreakdown{
+		SchemaVersion: usage.TokenAccountingSchemaVersion,
+		Quality:       usage.TokenAccountingQualityComplete,
+		TotalTokens:   3,
+		Input: usage.TokenInputBreakdown{
+			TotalTokens:    1,
+			UncachedTokens: 1,
+		},
+		Output: usage.TokenOutputBreakdown{
+			TotalTokens:        2,
+			NonReasoningTokens: 2,
+		},
+	}
+	if _, err := repo.InsertBatch(context.Background(), []usage.Event{event}); err != nil {
+		t.Fatalf("insert event: %v", err)
+	}
+	if _, err := db.Exec(`update usage_events set accounting_valid = 1 where event_hash = ?`, event.EventHash); err != nil {
+		t.Fatalf("set invalid version zero validity flag: %v", err)
+	}
+	recent, err := repo.ListRecent(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("list recent: %v", err)
+	}
+	if len(recent) != 1 || recent[0].AccountingVersion != 0 || recent[0].AccountingValid ||
+		recent[0].TokenBreakdown != event.TokenBreakdown || recent[0].TotalTokens != 3 {
+		t.Fatalf("recent accounting = %+v", recent)
+	}
+
+	var compatible bytes.Buffer
+	if err := repo.WriteCompatibleUsage(context.Background(), &compatible, 1); err != nil {
+		t.Fatalf("write compatible usage: %v", err)
+	}
+	var compatiblePayload usage.Payload
+	if err := json.Unmarshal(compatible.Bytes(), &compatiblePayload); err != nil {
+		t.Fatalf("decode compatible usage: %v", err)
+	}
+	details := compatiblePayload.APIs["POST /v1/responses"].Models["gpt-test"].Details
+	if len(details) != 1 || details[0].AccountingVersion != 0 || details[0].AccountingValid ||
+		details[0].TokenBreakdown != event.TokenBreakdown || details[0].Tokens.TotalTokens != 3 {
+		t.Fatalf("compatible accounting = %+v", details)
+	}
+
+	var exported bytes.Buffer
+	if err := repo.WriteExportJSONL(context.Background(), &exported, 1); err != nil {
+		t.Fatalf("write export: %v", err)
+	}
+	parsed, err := usage.ParseImportPayload(exported.Bytes())
+	if err != nil {
+		t.Fatalf("parse export: %v", err)
+	}
+	if len(parsed.Events) != 1 {
+		t.Fatalf("parsed events = %#v", parsed.Events)
+	}
+	imported := parsed.Events[0]
+	if imported.AccountingVersion != 0 || imported.AccountingValid ||
+		imported.TokenBreakdown != event.TokenBreakdown || imported.TotalTokens != 3 {
+		t.Fatalf("round-trip accounting = %+v", imported)
 	}
 }
 

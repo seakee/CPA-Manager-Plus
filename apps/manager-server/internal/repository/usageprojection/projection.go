@@ -9,6 +9,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageaccountingsql"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
 
@@ -42,6 +43,8 @@ var SearchColumns = []string{
 	"auth_project_id_snapshot",
 	"reasoning_effort",
 	"service_tier",
+	"cache_input_mode",
+	"accounting_quality",
 	"executor_type",
 	"fail_summary",
 	"header_quota_plan_type",
@@ -50,19 +53,31 @@ var SearchColumns = []string{
 	"header_trace_id",
 }
 
+var projectionAccountingSQL = usageaccountingsql.For("")
+
 // SearchTextExpression builds one lowercase search document per event. The
 // control-character separator prevents ordinary substring searches from
 // matching text created only by concatenating two adjacent fields.
 func SearchTextExpression(prefix string) string {
 	parts := make([]string, 0, len(SearchColumns))
 	for _, column := range SearchColumns {
-		expression := prefix + column
-		if column == "analytics_model" {
-			expression = usageidentity.SQLRequestAnalyticsModelExpression(prefix+"model", prefix+"requested_model")
-		}
+		expression := SearchColumnExpression(prefix, column)
 		parts = append(parts, fmt.Sprintf("coalesce(%s, '')", expression))
 	}
 	return "lower(" + strings.Join(parts, " || char(31) || ") + ")"
+}
+
+// SearchColumnExpression keeps raw-event and projected-event search semantics
+// aligned for derived fields that are not represented by one source column.
+func SearchColumnExpression(prefix, column string) string {
+	switch column {
+	case "analytics_model":
+		return usageidentity.SQLRequestAnalyticsModelExpression(prefix+"model", prefix+"requested_model")
+	case "accounting_quality":
+		return usageaccountingsql.For(strings.TrimSuffix(prefix, ".")).Quality
+	default:
+		return prefix + column
+	}
 }
 
 // SearchIndexLikePattern returns a LIKE pattern that SQLite's FTS5 trigram
@@ -124,9 +139,13 @@ func upsertEvents(ctx context.Context, tx *sql.Tx, whereClause string, whereArgs
 		requested_model, analytics_model, resolved_model, auth_index, source, source_hash, api_key_hash,
 		account_snapshot, auth_label_snapshot, auth_file_snapshot,
 		auth_provider_snapshot, auth_project_id_snapshot, reasoning_effort,
-		service_tier, failed, latency_ms, input_tokens, output_tokens,
+		service_tier, cache_input_mode, accounting_version, accounting_valid, accounting_quality,
+		failed, latency_ms, input_tokens, output_tokens, non_reasoning_output_tokens,
 		reasoning_tokens, cached_tokens, cache_tokens, cache_read_tokens,
-		cache_creation_tokens, normalized_total_input_tokens, total_tokens,
+		cache_creation_tokens, normalized_uncached_input_tokens, normalized_total_input_tokens,
+		normalized_cache_read_tokens, normalized_cache_creation_tokens,
+		normalized_non_reasoning_output_tokens, normalized_reasoning_output_tokens,
+		normalized_total_output_tokens, unclassified_tokens, incomplete_accounting_calls, total_tokens,
 		header_quota_plan_type, header_error_kind, header_error_code,
 		header_trace_id, updated_at_ms
 	)
@@ -152,17 +171,30 @@ func upsertEvents(ctx context.Context, tx *sql.Tx, whereClause string, whereArgs
 		coalesce(auth_project_id_snapshot, ''),
 		coalesce(reasoning_effort, ''),
 		coalesce(service_tier, ''),
+		coalesce(cache_input_mode, ''),
+		coalesce(accounting_version, 0),
+		`+projectionAccountingSQL.Valid+`,
+		`+projectionAccountingSQL.Quality+`,
 		coalesce(failed, 0),
 		latency_ms,
-		coalesce(input_tokens, 0),
-		coalesce(output_tokens, 0),
-		coalesce(reasoning_tokens, 0),
-		coalesce(cached_tokens, 0),
+		`+projectionAccountingSQL.TotalInput+`,
+		`+projectionAccountingSQL.TotalOutput+`,
+		`+projectionAccountingSQL.NonReasoningOutput+`,
+		`+projectionAccountingSQL.ReasoningOutput+`,
+		`+projectionAccountingSQL.CompatibleCached+`,
 		coalesce(cache_tokens, 0),
-		coalesce(cache_read_tokens, 0),
-		coalesce(cache_creation_tokens, 0),
-		coalesce(normalized_total_input_tokens, input_tokens, 0),
-		coalesce(total_tokens, 0),
+		`+projectionAccountingSQL.CacheRead+`,
+		`+projectionAccountingSQL.CacheCreation+`,
+		`+projectionAccountingSQL.UncachedInput+`,
+		`+projectionAccountingSQL.TotalInput+`,
+		`+projectionAccountingSQL.CacheRead+`,
+		`+projectionAccountingSQL.CacheCreation+`,
+		`+projectionAccountingSQL.NonReasoningOutput+`,
+		`+projectionAccountingSQL.ReasoningOutput+`,
+		`+projectionAccountingSQL.TotalOutput+`,
+		`+projectionAccountingSQL.Unclassified+`,
+		`+projectionAccountingSQL.Incomplete+`,
+		`+projectionAccountingSQL.Total+`,
 		coalesce(header_quota_plan_type, ''),
 		coalesce(header_error_kind, ''),
 		coalesce(header_error_code, ''),
@@ -191,16 +223,29 @@ func upsertEvents(ctx context.Context, tx *sql.Tx, whereClause string, whereArgs
 		auth_project_id_snapshot = excluded.auth_project_id_snapshot,
 		reasoning_effort = excluded.reasoning_effort,
 		service_tier = excluded.service_tier,
+		cache_input_mode = excluded.cache_input_mode,
+		accounting_version = excluded.accounting_version,
+		accounting_valid = excluded.accounting_valid,
+		accounting_quality = excluded.accounting_quality,
 		failed = excluded.failed,
 		latency_ms = excluded.latency_ms,
 		input_tokens = excluded.input_tokens,
 		output_tokens = excluded.output_tokens,
+		non_reasoning_output_tokens = excluded.non_reasoning_output_tokens,
 		reasoning_tokens = excluded.reasoning_tokens,
 		cached_tokens = excluded.cached_tokens,
 		cache_tokens = excluded.cache_tokens,
 		cache_read_tokens = excluded.cache_read_tokens,
 		cache_creation_tokens = excluded.cache_creation_tokens,
+		normalized_uncached_input_tokens = excluded.normalized_uncached_input_tokens,
 		normalized_total_input_tokens = excluded.normalized_total_input_tokens,
+		normalized_cache_read_tokens = excluded.normalized_cache_read_tokens,
+		normalized_cache_creation_tokens = excluded.normalized_cache_creation_tokens,
+		normalized_non_reasoning_output_tokens = excluded.normalized_non_reasoning_output_tokens,
+		normalized_reasoning_output_tokens = excluded.normalized_reasoning_output_tokens,
+		normalized_total_output_tokens = excluded.normalized_total_output_tokens,
+		unclassified_tokens = excluded.unclassified_tokens,
+		incomplete_accounting_calls = excluded.incomplete_accounting_calls,
 		total_tokens = excluded.total_tokens,
 		header_quota_plan_type = excluded.header_quota_plan_type,
 		header_error_kind = excluded.header_error_kind,

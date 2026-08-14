@@ -57,6 +57,25 @@ func TestMigrationCreatesUsageMonitoringRollupSchema(t *testing.T) {
 	if accountKeyColumns != 1 {
 		t.Fatalf("projection account key columns = %d, want 1", accountKeyColumns)
 	}
+	for _, column := range []string{
+		"display_input_tokens",
+		"display_output_tokens",
+		"display_non_reasoning_output_tokens",
+		"display_reasoning_tokens",
+		"display_unclassified_tokens",
+		"display_cached_tokens",
+		"display_cache_read_tokens",
+		"display_cache_creation_tokens",
+		"display_total_tokens",
+	} {
+		var count int
+		if err := sqlDB.QueryRow(`select count(*) from pragma_table_info('usage_monitoring_account_daily_rollups_v1') where name = ?`, column).Scan(&count); err != nil {
+			t.Fatalf("inspect account daily display column %s: %v", column, err)
+		}
+		if count != 1 {
+			t.Fatalf("account daily display column %s count = %d, want 1", column, count)
+		}
+	}
 	var accountWindowIndexes int
 	if err := sqlDB.QueryRow(`select count(*) from sqlite_master where type = 'index' and name = 'idx_usage_monitoring_event_projection_account_window'`).Scan(&accountWindowIndexes); err != nil {
 		t.Fatalf("inspect projection account window index: %v", err)
@@ -1018,6 +1037,177 @@ func TestUsageMonitoringCanonicalModelMatchesProjectionTailSelectorsSearchAndPri
 			}
 		} else if item.RequestedModel != item.Model {
 			t.Fatalf("event page requested model = %q, want raw fallback %q", item.RequestedModel, item.Model)
+		}
+	}
+}
+
+func TestUsageMonitoringCacheStatusPrefersCanonicalBucketsAcrossProjectionAndTail(t *testing.T) {
+	_, db := newMonitoringRepositoryStore(t)
+	ctx := context.Background()
+	baseMS := int64(1_800_057_600_000)
+
+	projectedHit := monitoringRepositoryEvent(
+		"canonical-cache-projected", baseMS+1_000, "gpt-cache", "key-a",
+		"alice@example.com", "auth-a", "source-a", false, 10, 5, 10,
+	)
+	projectedHit.CachedTokens = 0
+	projectedHit.CacheReadTokens = 0
+	projectedHit.CacheCreationTokens = 0
+	projectedHit.AccountingVersion = usage.TokenAccountingSchemaVersion
+	projectedHit.AccountingValid = true
+	projectedHit.TokenBreakdown = usage.TokenBreakdown{
+		SchemaVersion: usage.TokenAccountingSchemaVersion,
+		Quality:       usage.TokenAccountingQualityComplete,
+		TotalTokens:   15,
+		Input: usage.TokenInputBreakdown{
+			TotalTokens:     10,
+			UncachedTokens:  5,
+			CacheReadTokens: 5,
+		},
+		Output: usage.TokenOutputBreakdown{TotalTokens: 5, NonReasoningTokens: 5},
+	}
+	projectedMiss := monitoringRepositoryEvent(
+		"canonical-cache-miss", baseMS+2_000, "gpt-cache", "key-b",
+		"bob@example.com", "auth-b", "source-b", false, 10, 5, 10,
+	)
+	projectedMiss.CachedTokens = 999
+	projectedMiss.CacheReadTokens = 999
+	projectedMiss.CacheCreationTokens = 999
+	projectedMiss.AccountingVersion = usage.TokenAccountingSchemaVersion
+	projectedMiss.AccountingValid = true
+	projectedMiss.TokenBreakdown = usage.TokenBreakdown{
+		SchemaVersion: usage.TokenAccountingSchemaVersion,
+		Quality:       usage.TokenAccountingQualityComplete,
+		TotalTokens:   15,
+		Input:         usage.TokenInputBreakdown{TotalTokens: 10, UncachedTokens: 10},
+		Output:        usage.TokenOutputBreakdown{TotalTokens: 5, NonReasoningTokens: 5},
+	}
+	if _, err := db.InsertEvents(ctx, []usage.Event{projectedHit, projectedMiss}); err != nil {
+		t.Fatalf("insert projected cache events: %v", err)
+	}
+	catchUpMonitoringRepository(t, ctx, db)
+
+	tailHit := projectedHit
+	tailHit.EventHash = "canonical-cache-tail"
+	tailHit.TimestampMS = baseMS + 3_000
+	tailHit.Timestamp = time.UnixMilli(tailHit.TimestampMS).UTC().Format(time.RFC3339Nano)
+	tailHit.CreatedAtMS = tailHit.TimestampMS
+	tailHit.APIKeyHash = "key-c"
+	tailHit.AuthIndex = "auth-c"
+	tailHit.AuthFileSnapshot = "auth-c.json"
+	if _, err := db.InsertEvents(ctx, []usage.Event{tailHit}); err != nil {
+		t.Fatalf("insert cache tail: %v", err)
+	}
+
+	filter := store.AnalyticsFilter{
+		FromMS:        baseMS,
+		ToMS:          baseMS + testDayMS,
+		IncludeFailed: true,
+		CacheStatus:   "hit",
+	}
+	page, _, available, err := db.UsageMonitoringEventsPage(ctx, filter, 0, 0, 10)
+	if err != nil || !available || len(page.Items) != 2 {
+		t.Fatalf("canonical cache hit page: available=%v err=%v items=%#v", available, err, page.Items)
+	}
+	wantHashes := map[string]bool{"canonical-cache-projected": true, "canonical-cache-tail": true}
+	for _, item := range page.Items {
+		if !wantHashes[item.EventHash] {
+			t.Fatalf("unexpected canonical cache hit item: %#v", item)
+		}
+	}
+	assertMonitoringReadersMatchRaw(t, ctx, db, filter)
+	assertProjectionCoreReadersMatchRaw(t, ctx, db, filter)
+
+	filter.CacheStatus = "miss"
+	page, _, available, err = db.UsageMonitoringEventsPage(ctx, filter, 0, 0, 10)
+	if err != nil || !available || len(page.Items) != 1 || page.Items[0].EventHash != "canonical-cache-miss" {
+		t.Fatalf("canonical cache miss page: available=%v err=%v items=%#v", available, err, page.Items)
+	}
+}
+
+func TestUsageMonitoringEventPagesFailClosedAccountingValidity(t *testing.T) {
+	sqlDB, db := newMonitoringRepositoryStore(t)
+	ctx := context.Background()
+	baseMS := int64(1_800_057_600_000)
+	events := []usage.Event{
+		monitoringRepositoryEvent(
+			"corrupt-canonical-validity", baseMS+1_000, "gpt-a", "key-a",
+			"alice@example.com", "auth-a", "source-a", false, 10, 5, 10,
+		),
+		monitoringRepositoryEvent(
+			"version-zero-validity", baseMS+2_000, "gpt-a", "key-b",
+			"bob@example.com", "auth-b", "source-b", false, 10, 5, 10,
+		),
+	}
+	if _, err := db.InsertEvents(ctx, events); err != nil {
+		t.Fatalf("insert validity events: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx, `update usage_events set
+		accounting_version = 2, accounting_valid = 1, accounting_quality = 'complete',
+		normalized_uncached_input_tokens = 9, normalized_total_input_tokens = 10,
+		normalized_cache_read_tokens = 0, normalized_cache_creation_tokens = 0,
+		normalized_non_reasoning_output_tokens = 5, normalized_reasoning_output_tokens = 0,
+		normalized_total_output_tokens = 5, unclassified_tokens = 0, total_tokens = 15
+		where event_hash = 'corrupt-canonical-validity'`); err != nil {
+		t.Fatalf("corrupt canonical event: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx, `update usage_events set
+		accounting_version = 0, accounting_valid = 1, accounting_quality = 'complete',
+		normalized_uncached_input_tokens = 10, normalized_total_input_tokens = 10,
+		normalized_cache_read_tokens = 0, normalized_cache_creation_tokens = 0,
+		normalized_non_reasoning_output_tokens = 5, normalized_reasoning_output_tokens = 0,
+		normalized_total_output_tokens = 5, unclassified_tokens = 0, total_tokens = 15
+		where event_hash = 'version-zero-validity'`); err != nil {
+		t.Fatalf("set version zero validity event: %v", err)
+	}
+
+	catchUpMonitoringRepository(t, ctx, db)
+	rows, err := sqlDB.QueryContext(ctx, `select e.event_hash, p.accounting_valid
+		from usage_monitoring_event_projection_v1 p
+		join usage_events e on e.id = p.event_id
+		where e.event_hash in ('corrupt-canonical-validity', 'version-zero-validity')`)
+	if err != nil {
+		t.Fatalf("read projected validity: %v", err)
+	}
+	defer rows.Close()
+	projected := map[string]int{}
+	for rows.Next() {
+		var eventHash string
+		var valid int
+		if err := rows.Scan(&eventHash, &valid); err != nil {
+			t.Fatalf("scan projected validity: %v", err)
+		}
+		projected[eventHash] = valid
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read projected validity rows: %v", err)
+	}
+	if !reflect.DeepEqual(projected, map[string]int{
+		"corrupt-canonical-validity": 0,
+		"version-zero-validity":      0,
+	}) {
+		t.Fatalf("projected validity = %#v", projected)
+	}
+
+	filter := store.AnalyticsFilter{
+		FromMS:        baseMS,
+		ToMS:          baseMS + testDayMS,
+		IncludeFailed: true,
+	}
+	rawPage, err := db.EventsPageWithFilter(ctx, filter, 0, 0, 10)
+	if err != nil {
+		t.Fatalf("load raw validity page: %v", err)
+	}
+	projectedPage, _, available, err := db.UsageMonitoringEventsPage(ctx, filter, 0, 0, 10)
+	if err != nil || !available {
+		t.Fatalf("load projected validity page: available=%v err=%v", available, err)
+	}
+	if !reflect.DeepEqual(projectedPage, rawPage) || len(projectedPage.Items) != 2 {
+		t.Fatalf("validity pages mismatch\nprojection=%#v\nraw=%#v", projectedPage, rawPage)
+	}
+	for _, item := range projectedPage.Items {
+		if item.AccountingValid {
+			t.Fatalf("event %q exposed invalid accounting as valid: %#v", item.EventHash, item)
 		}
 	}
 }

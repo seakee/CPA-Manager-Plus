@@ -61,12 +61,15 @@ const createMonitoringEventRow = (
   tokensPerSecond: overrides.tokensPerSecond ?? 5,
   inputTokens: overrides.inputTokens ?? 10,
   outputTokens: overrides.outputTokens ?? 5,
+  nonReasoningOutputTokens: overrides.nonReasoningOutputTokens ?? 5,
   reasoningTokens: overrides.reasoningTokens ?? 0,
+  unclassifiedTokens: overrides.unclassifiedTokens ?? 0,
   cachedTokens: overrides.cachedTokens ?? 3,
   cacheReadTokens: overrides.cacheReadTokens ?? 0,
   cacheCreationTokens: overrides.cacheCreationTokens ?? 0,
   totalTokens: overrides.totalTokens ?? 18,
   totalCost: overrides.totalCost ?? 0.12,
+  incompleteAccounting: overrides.incompleteAccounting ?? false,
   taskKey: overrides.taskKey ?? 'task-1',
   searchText: overrides.searchText ?? 'amount myth resend',
 });
@@ -489,9 +492,8 @@ describe('buildScopeFilteredRows', () => {
 
   it('clamps local summary cache rates and respects resolved GPT-5.6 aliases', () => {
     expect(
-      buildMonitoringSummary([
-        createMonitoringEventRow({ inputTokens: 10, cachedTokens: 100 }),
-      ]).cacheHitRate
+      buildMonitoringSummary([createMonitoringEventRow({ inputTokens: 10, cachedTokens: 100 })])
+        .cacheHitRate
     ).toBe(1);
 
     expect(

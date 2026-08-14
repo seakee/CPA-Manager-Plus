@@ -343,6 +343,7 @@ func readerEvent(hash string, timestampMS int64, model string, failed bool, inpu
 		EventHash:    hash,
 		TimestampMS:  timestampMS,
 		Timestamp:    time.UnixMilli(timestampMS).UTC().Format(time.RFC3339Nano),
+		Provider:     "openai",
 		Model:        model,
 		Endpoint:     "POST /v1/chat/completions",
 		Method:       "POST",

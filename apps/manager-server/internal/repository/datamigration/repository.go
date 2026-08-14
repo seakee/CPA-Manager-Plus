@@ -8,6 +8,9 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageaggregate"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagemonitoring"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagepricing"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageprojection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
 
@@ -55,6 +58,10 @@ type Repository interface {
 	DiscoverUsageCacheAccounting(ctx context.Context) (State, error)
 	RunUsageCacheAccountingBatch(ctx context.Context, batchSize int) (BatchResult, error)
 	RecordUsageCacheAccountingFailure(ctx context.Context, err error) error
+	UsageTokenAccountingState(ctx context.Context) (State, bool, error)
+	DiscoverUsageTokenAccounting(ctx context.Context) (State, error)
+	RunUsageTokenAccountingBatch(ctx context.Context, batchSize int) (BatchResult, error)
+	RecordUsageTokenAccountingFailure(ctx context.Context, err error) error
 }
 
 type repository struct {
@@ -66,6 +73,7 @@ type cacheAccountingRow struct {
 	Provider                string
 	ExecutorType            string
 	ProviderSnapshot        string
+	AuthType                string
 	ResolvedModel           string
 	RequestedModel          string
 	DisplayModel            string
@@ -298,7 +306,7 @@ func (r *repository) RecordUsageCacheAccountingFailure(ctx context.Context, migr
 
 func readCacheAccountingBatch(ctx context.Context, tx *sql.Tx, lastEventID, targetEventID int64, batchSize int) ([]cacheAccountingRow, error) {
 	result, err := tx.QueryContext(ctx, `select
-		id, coalesce(provider, ''), coalesce(executor_type, ''), coalesce(auth_provider_snapshot, ''),
+		id, coalesce(provider, ''), coalesce(executor_type, ''), coalesce(auth_provider_snapshot, ''), coalesce(auth_type, ''),
 		coalesce(resolved_model, ''), coalesce(requested_model, ''), model, cache_input_mode,
 		input_tokens, output_tokens, reasoning_tokens, cached_tokens, cache_tokens,
 		cache_read_tokens, cache_creation_tokens,
@@ -323,6 +331,7 @@ func readCacheAccountingBatch(ctx context.Context, tx *sql.Tx, lastEventID, targ
 			&row.Provider,
 			&row.ExecutorType,
 			&row.ProviderSnapshot,
+			&row.AuthType,
 			&row.ResolvedModel,
 			&row.RequestedModel,
 			&row.DisplayModel,
@@ -361,6 +370,7 @@ func stageCacheAccountingRow(ctx context.Context, tx *sql.Tx, row cacheAccountin
 		ExecutorType:     row.ExecutorType,
 		Provider:         row.Provider,
 		ProviderSnapshot: row.ProviderSnapshot,
+		AuthType:         row.AuthType,
 		ResolvedModel:    row.ResolvedModel,
 		RequestedModel:   row.RequestedModel,
 		DisplayModel:     row.DisplayModel,
@@ -475,6 +485,9 @@ func readState(row rowScanner) (State, error) {
 func completeInTx(ctx context.Context, tx *sql.Tx, state State) (State, error) {
 	nowMS := time.Now().UnixMilli()
 	if state.ChangedRows > 0 {
+		if err := validateSupportedUsageDerivedSchemasInTx(ctx, tx); err != nil {
+			return State{}, err
+		}
 		for _, statement := range []string{
 			`update usage_events set
 				cache_input_mode = (select cache_input_mode from usage_cache_accounting_v2_changes where event_id = usage_events.id),
@@ -506,7 +519,7 @@ func completeInTx(ctx context.Context, tx *sql.Tx, state State) (State, error) {
 				where aggregate_name = 'hourly_core' and schema_version = %d`, usageaggregate.SchemaVersion),
 			`delete from usage_pricing_hourly_rollups_v1`,
 			`delete from usage_pricing_account_rollups_v1`,
-			`update usage_pricing_rollup_state set
+			fmt.Sprintf(`update usage_pricing_rollup_state set
 					status = case when exists (select 1 from usage_events limit 1) then 'pending' else 'ready' end,
 					backfill_last_event_id = 0,
 					coverage_event_id = 0,
@@ -518,10 +531,10 @@ func completeInTx(ctx context.Context, tx *sql.Tx, state State) (State, error) {
 					updated_at_ms = 0,
 					finished_at_ms = null,
 					last_error = null
-					where rollup_name = 'pricing_v1' and schema_version = 1`,
+					where rollup_name = 'pricing_v1' and schema_version = %d`, usagepricing.SchemaVersion),
 			`delete from usage_monitoring_account_daily_rollups_v1`,
 			`delete from usage_monitoring_api_key_daily_rollups_v1`,
-			`update usage_monitoring_rollup_state set
+			fmt.Sprintf(`update usage_monitoring_rollup_state set
 					status = case when exists (select 1 from usage_events limit 1) then 'pending' else 'ready' end,
 					backfill_last_event_id = 0,
 					coverage_event_id = 0,
@@ -531,27 +544,17 @@ func completeInTx(ctx context.Context, tx *sql.Tx, state State) (State, error) {
 					updated_at_ms = 0,
 					finished_at_ms = null,
 					last_error = null
-				where rollup_name = 'stats_v1' and schema_version = 1`,
+				where rollup_name = 'stats_v1' and schema_version = %d`, usagemonitoring.SchemaVersion),
 		} {
 			if _, err := tx.ExecContext(ctx, statement); err != nil {
 				return State{}, err
 			}
 		}
-		if _, err := tx.ExecContext(ctx, `update usage_monitoring_event_projection_v1 set
-			normalized_total_input_tokens = coalesce(
-				(select normalized_total_input_tokens from usage_events
-					where id = usage_monitoring_event_projection_v1.event_id),
-				(select input_tokens from usage_events
-					where id = usage_monitoring_event_projection_v1.event_id),
-				0
-			),
-			total_tokens = coalesce(
-				(select total_tokens from usage_events
-					where id = usage_monitoring_event_projection_v1.event_id),
-				0
-			),
-			updated_at_ms = ?
-		where event_id in (select event_id from usage_cache_accounting_v2_changes)`, nowMS); err != nil {
+		eventIDs, err := stagedCacheAccountingEventIDs(ctx, tx)
+		if err != nil {
+			return State{}, err
+		}
+		if err := usageprojection.UpsertEventIDs(ctx, tx, eventIDs, nowMS); err != nil {
 			return State{}, err
 		}
 	}
@@ -578,4 +581,21 @@ func completeInTx(ctx context.Context, tx *sql.Tx, state State) (State, error) {
 	state.FinishedAtMS = nowMS
 	state.LastError = ""
 	return state, nil
+}
+
+func stagedCacheAccountingEventIDs(ctx context.Context, tx *sql.Tx) ([]int64, error) {
+	rows, err := tx.QueryContext(ctx, `select event_id from usage_cache_accounting_v2_changes order by event_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	eventIDs := make([]int64, 0)
+	for rows.Next() {
+		var eventID int64
+		if err := rows.Scan(&eventID); err != nil {
+			return nil, err
+		}
+		eventIDs = append(eventIDs, eventID)
+	}
+	return eventIDs, rows.Err()
 }

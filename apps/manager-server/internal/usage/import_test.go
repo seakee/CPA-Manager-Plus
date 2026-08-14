@@ -90,7 +90,8 @@ func TestParseImportPayloadLegacyUsageExport(t *testing.T) {
 	}
 
 	second := result.Events[1]
-	if second.TotalTokens != 18 || !second.Failed || second.AuthIndex != "auth-2" {
+	if second.TotalTokens != 15 || second.TokenBreakdown.Quality != TokenAccountingQualityInconsistent ||
+		second.UnclassifiedTokens != 15 || !second.Failed || second.AuthIndex != "auth-2" {
 		t.Fatalf("second event = %#v", second)
 	}
 
@@ -793,8 +794,8 @@ func TestNormalizeRawFallbackTotalAvoidsIncludedCacheDuplication(t *testing.T) {
 	if err != nil {
 		t.Fatalf("normalize fallback total: %v", err)
 	}
-	if event.TotalTokens != 33 {
-		t.Fatalf("total tokens = %d, want 33", event.TotalTokens)
+	if event.TotalTokens != 30 {
+		t.Fatalf("total tokens = %d, want 30", event.TotalTokens)
 	}
 }
 

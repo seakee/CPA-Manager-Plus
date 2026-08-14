@@ -57,23 +57,29 @@ func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, http.StatusInternalServerError, err)
 		return
 	}
+	tokenMigration, err := h.App.Store.UsageTokenAccountingMigrationState(r.Context())
+	if err != nil {
+		response.Error(w, http.StatusInternalServerError, err)
+		return
+	}
+	cacheStatus := dataMigrationStatus{
+		Name: migration.Name, Status: migration.Status, LastEventID: migration.LastEventID,
+		TargetEventID: migration.TargetEventID, ProcessedRows: migration.ProcessedRows, ChangedRows: migration.ChangedRows,
+		StartedAtMS: migration.StartedAtMS, UpdatedAtMS: migration.UpdatedAtMS, FinishedAtMS: migration.FinishedAtMS,
+	}
+	tokenStatus := dataMigrationStatus{
+		Name: tokenMigration.Name, Status: tokenMigration.Status, LastEventID: tokenMigration.LastEventID,
+		TargetEventID: tokenMigration.TargetEventID, ProcessedRows: tokenMigration.ProcessedRows, ChangedRows: tokenMigration.ChangedRows,
+		StartedAtMS: tokenMigration.StartedAtMS, UpdatedAtMS: tokenMigration.UpdatedAtMS, FinishedAtMS: tokenMigration.FinishedAtMS,
+	}
 	payload := map[string]any{
-		"service":     h.App.ServiceID,
-		"dbPath":      h.App.Config.DBPath,
-		"events":      events,
-		"deadLetters": deadLetters,
-		"collector":   status,
-		"dataMigration": dataMigrationStatus{
-			Name:          migration.Name,
-			Status:        migration.Status,
-			LastEventID:   migration.LastEventID,
-			TargetEventID: migration.TargetEventID,
-			ProcessedRows: migration.ProcessedRows,
-			ChangedRows:   migration.ChangedRows,
-			StartedAtMS:   migration.StartedAtMS,
-			UpdatedAtMS:   migration.UpdatedAtMS,
-			FinishedAtMS:  migration.FinishedAtMS,
-		},
+		"service":        h.App.ServiceID,
+		"dbPath":         h.App.Config.DBPath,
+		"events":         events,
+		"deadLetters":    deadLetters,
+		"collector":      status,
+		"dataMigration":  cacheStatus,
+		"dataMigrations": []dataMigrationStatus{cacheStatus, tokenStatus},
 	}
 	if h.App.DatabaseMaintenance != nil {
 		payload["database"] = h.App.DatabaseMaintenance.Snapshot()

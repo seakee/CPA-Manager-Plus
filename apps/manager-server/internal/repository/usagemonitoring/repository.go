@@ -13,7 +13,7 @@ const (
 	StatsRollupName      = "stats_v1"
 	MetadataRollupName   = "metadata_v1"
 	ProjectionRollupName = "projection_v1"
-	SchemaVersion        = 1
+	SchemaVersion        = 2
 	defaultBatchLimit    = 1000
 )
 

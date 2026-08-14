@@ -259,18 +259,21 @@ func coreFromRows(rows []store.UsageHourlyAggregateRow) (store.Aggregate, []stor
 		} else {
 			agg.SuccessCalls += row.Calls
 		}
-		agg.InputTokens += row.InputTokens
-		agg.OutputTokens += row.OutputTokens
-		agg.ReasoningTokens += row.ReasoningTokens
-		agg.CachedTokens += row.CachedTokens
-		agg.CacheReadTokens += row.CacheReadTokens
-		agg.CacheCreationTokens += row.CacheCreationTokens
-		agg.LongInputTokens += row.LongInputTokens
-		agg.LongOutputTokens += row.LongOutputTokens
-		agg.LongCachedTokens += row.LongCachedTokens
-		agg.LongCacheReadTokens += row.LongCacheReadTokens
-		agg.LongCacheCreationTokens += row.LongCacheCreationTokens
-		agg.TotalTokens += row.TotalTokens
+		agg.InputTokens = usage.SaturatingTokenSum(agg.InputTokens, row.InputTokens)
+		agg.OutputTokens = usage.SaturatingTokenSum(agg.OutputTokens, row.OutputTokens)
+		agg.NonReasoningOutputTokens = usage.SaturatingTokenSum(agg.NonReasoningOutputTokens, row.NonReasoningOutputTokens)
+		agg.ReasoningTokens = usage.SaturatingTokenSum(agg.ReasoningTokens, row.ReasoningTokens)
+		agg.UnclassifiedTokens = usage.SaturatingTokenSum(agg.UnclassifiedTokens, row.UnclassifiedTokens)
+		agg.IncompleteAccountingCalls = usage.SaturatingTokenSum(agg.IncompleteAccountingCalls, row.IncompleteAccountingCalls)
+		agg.CachedTokens = usage.SaturatingTokenSum(agg.CachedTokens, row.CachedTokens)
+		agg.CacheReadTokens = usage.SaturatingTokenSum(agg.CacheReadTokens, row.CacheReadTokens)
+		agg.CacheCreationTokens = usage.SaturatingTokenSum(agg.CacheCreationTokens, row.CacheCreationTokens)
+		agg.LongInputTokens = usage.SaturatingTokenSum(agg.LongInputTokens, row.LongInputTokens)
+		agg.LongOutputTokens = usage.SaturatingTokenSum(agg.LongOutputTokens, row.LongOutputTokens)
+		agg.LongCachedTokens = usage.SaturatingTokenSum(agg.LongCachedTokens, row.LongCachedTokens)
+		agg.LongCacheReadTokens = usage.SaturatingTokenSum(agg.LongCacheReadTokens, row.LongCacheReadTokens)
+		agg.LongCacheCreationTokens = usage.SaturatingTokenSum(agg.LongCacheCreationTokens, row.LongCacheCreationTokens)
+		agg.TotalTokens = usage.SaturatingTokenSum(agg.TotalTokens, row.TotalTokens)
 		agg.LatencySamples += row.LatencySamples
 		agg.ZeroTokenCalls += row.ZeroTokenCalls
 		latencySum += row.LatencySumMS
@@ -279,19 +282,22 @@ func coreFromRows(rows []store.UsageHourlyAggregateRow) (store.Aggregate, []stor
 			successCalls = row.Calls
 		}
 		addModelStat(modelStats, store.ModelStat{
-			Model:               row.Model,
-			BillingModel:        row.BillingModel,
-			ServiceTier:         row.ServiceTier,
-			Calls:               row.Calls,
-			SuccessCalls:        successCalls,
-			InputTokens:         row.InputTokens,
-			OutputTokens:        row.OutputTokens,
-			ReasoningTokens:     row.ReasoningTokens,
-			CachedTokens:        row.CachedTokens,
-			CacheReadTokens:     row.CacheReadTokens,
-			CacheCreationTokens: row.CacheCreationTokens,
-			LongContextTokens:   row.LongContextTokens,
-			TotalTokens:         row.TotalTokens,
+			Model:                     row.Model,
+			BillingModel:              row.BillingModel,
+			ServiceTier:               row.ServiceTier,
+			Calls:                     row.Calls,
+			SuccessCalls:              successCalls,
+			InputTokens:               row.InputTokens,
+			OutputTokens:              row.OutputTokens,
+			NonReasoningOutputTokens:  row.NonReasoningOutputTokens,
+			ReasoningTokens:           row.ReasoningTokens,
+			UnclassifiedTokens:        row.UnclassifiedTokens,
+			IncompleteAccountingCalls: row.IncompleteAccountingCalls,
+			CachedTokens:              row.CachedTokens,
+			CacheReadTokens:           row.CacheReadTokens,
+			CacheCreationTokens:       row.CacheCreationTokens,
+			LongContextTokens:         row.LongContextTokens,
+			TotalTokens:               row.TotalTokens,
 		})
 	}
 	if agg.LatencySamples > 0 {
@@ -317,18 +323,21 @@ func addModelStat(grouped map[modelStatKey]*store.ModelStat, stat store.ModelSta
 	}
 	entry.Calls += stat.Calls
 	entry.SuccessCalls += stat.SuccessCalls
-	entry.InputTokens += stat.InputTokens
-	entry.OutputTokens += stat.OutputTokens
-	entry.ReasoningTokens += stat.ReasoningTokens
-	entry.CachedTokens += stat.CachedTokens
-	entry.CacheReadTokens += stat.CacheReadTokens
-	entry.CacheCreationTokens += stat.CacheCreationTokens
-	entry.LongInputTokens += stat.LongInputTokens
-	entry.LongOutputTokens += stat.LongOutputTokens
-	entry.LongCachedTokens += stat.LongCachedTokens
-	entry.LongCacheReadTokens += stat.LongCacheReadTokens
-	entry.LongCacheCreationTokens += stat.LongCacheCreationTokens
-	entry.TotalTokens += stat.TotalTokens
+	entry.InputTokens = usage.SaturatingTokenSum(entry.InputTokens, stat.InputTokens)
+	entry.OutputTokens = usage.SaturatingTokenSum(entry.OutputTokens, stat.OutputTokens)
+	entry.NonReasoningOutputTokens = usage.SaturatingTokenSum(entry.NonReasoningOutputTokens, stat.NonReasoningOutputTokens)
+	entry.ReasoningTokens = usage.SaturatingTokenSum(entry.ReasoningTokens, stat.ReasoningTokens)
+	entry.UnclassifiedTokens = usage.SaturatingTokenSum(entry.UnclassifiedTokens, stat.UnclassifiedTokens)
+	entry.IncompleteAccountingCalls = usage.SaturatingTokenSum(entry.IncompleteAccountingCalls, stat.IncompleteAccountingCalls)
+	entry.CachedTokens = usage.SaturatingTokenSum(entry.CachedTokens, stat.CachedTokens)
+	entry.CacheReadTokens = usage.SaturatingTokenSum(entry.CacheReadTokens, stat.CacheReadTokens)
+	entry.CacheCreationTokens = usage.SaturatingTokenSum(entry.CacheCreationTokens, stat.CacheCreationTokens)
+	entry.LongInputTokens = usage.SaturatingTokenSum(entry.LongInputTokens, stat.LongInputTokens)
+	entry.LongOutputTokens = usage.SaturatingTokenSum(entry.LongOutputTokens, stat.LongOutputTokens)
+	entry.LongCachedTokens = usage.SaturatingTokenSum(entry.LongCachedTokens, stat.LongCachedTokens)
+	entry.LongCacheReadTokens = usage.SaturatingTokenSum(entry.LongCacheReadTokens, stat.LongCacheReadTokens)
+	entry.LongCacheCreationTokens = usage.SaturatingTokenSum(entry.LongCacheCreationTokens, stat.LongCacheCreationTokens)
+	entry.TotalTokens = usage.SaturatingTokenSum(entry.TotalTokens, stat.TotalTokens)
 }
 
 func sortedModelStats(grouped map[modelStatKey]*store.ModelStat) []store.ModelStat {
@@ -365,20 +374,23 @@ func modelStatsFromPricingRows(rows []store.UsagePricingHourlyRow) []store.Model
 			successCalls = row.Calls
 		}
 		addModelStat(grouped, store.ModelStat{
-			LongContextTokens:   row.LongContextTokens,
-			PricingBand:         row.PricingBand,
-			Model:               row.Model,
-			BillingModel:        row.BillingModel,
-			ServiceTier:         row.ServiceTier,
-			Calls:               row.Calls,
-			SuccessCalls:        successCalls,
-			InputTokens:         row.InputTokens,
-			OutputTokens:        row.OutputTokens,
-			ReasoningTokens:     row.ReasoningTokens,
-			CachedTokens:        row.CachedTokens,
-			CacheReadTokens:     row.CacheReadTokens,
-			CacheCreationTokens: row.CacheCreationTokens,
-			TotalTokens:         row.TotalTokens,
+			LongContextTokens:         row.LongContextTokens,
+			PricingBand:               row.PricingBand,
+			Model:                     row.Model,
+			BillingModel:              row.BillingModel,
+			ServiceTier:               row.ServiceTier,
+			Calls:                     row.Calls,
+			SuccessCalls:              successCalls,
+			InputTokens:               row.InputTokens,
+			OutputTokens:              row.OutputTokens,
+			NonReasoningOutputTokens:  row.NonReasoningOutputTokens,
+			ReasoningTokens:           row.ReasoningTokens,
+			UnclassifiedTokens:        row.UnclassifiedTokens,
+			IncompleteAccountingCalls: row.IncompleteAccountingCalls,
+			CachedTokens:              row.CachedTokens,
+			CacheReadTokens:           row.CacheReadTokens,
+			CacheCreationTokens:       row.CacheCreationTokens,
+			TotalTokens:               row.TotalTokens,
 		})
 	}
 	return sortedModelStats(grouped)
@@ -393,7 +405,7 @@ func dashboardTimelineFromRows(rows []store.UsageHourlyAggregateRow) []store.Tim
 			grouped[row.BucketMS] = point
 		}
 		point.Calls += row.Calls
-		point.Tokens += row.TotalTokens
+		point.Tokens = usage.SaturatingTokenSum(point.Tokens, row.TotalTokens)
 		if row.Failed {
 			point.Failure += row.Calls
 		} else {
@@ -412,21 +424,24 @@ func analyticsTimelineFromPricingRows(rows []store.UsagePricingHourlyRow, granul
 	grouped := make(map[analyticsTimelineKey]*analyticsTimelineAccumulator)
 	for _, row := range rows {
 		point := store.TimelinePoint{
-			LongContextTokens:   row.LongContextTokens,
-			PricingBand:         row.PricingBand,
-			BucketMS:            usage.AnalyticsBucketMS(row.BucketMS, granularity, location),
-			Model:               row.Model,
-			BillingModel:        row.BillingModel,
-			ServiceTier:         row.ServiceTier,
-			Calls:               row.Calls,
-			Tokens:              row.TotalTokens,
-			InputTokens:         row.InputTokens,
-			OutputTokens:        row.OutputTokens,
-			ReasoningTokens:     row.ReasoningTokens,
-			CachedTokens:        row.CachedTokens,
-			CacheReadTokens:     row.CacheReadTokens,
-			CacheCreationTokens: row.CacheCreationTokens,
-			LatencySamples:      row.LatencySamples,
+			LongContextTokens:         row.LongContextTokens,
+			PricingBand:               row.PricingBand,
+			BucketMS:                  usage.AnalyticsBucketMS(row.BucketMS, granularity, location),
+			Model:                     row.Model,
+			BillingModel:              row.BillingModel,
+			ServiceTier:               row.ServiceTier,
+			Calls:                     row.Calls,
+			Tokens:                    row.TotalTokens,
+			InputTokens:               row.InputTokens,
+			OutputTokens:              row.OutputTokens,
+			NonReasoningOutputTokens:  row.NonReasoningOutputTokens,
+			ReasoningTokens:           row.ReasoningTokens,
+			UnclassifiedTokens:        row.UnclassifiedTokens,
+			IncompleteAccountingCalls: row.IncompleteAccountingCalls,
+			CachedTokens:              row.CachedTokens,
+			CacheReadTokens:           row.CacheReadTokens,
+			CacheCreationTokens:       row.CacheCreationTokens,
+			LatencySamples:            row.LatencySamples,
 		}
 		if row.Failed {
 			point.Failure = row.Calls
@@ -456,20 +471,23 @@ func addAnalyticsTimelinePoint(grouped map[analyticsTimelineKey]*analyticsTimeli
 		return
 	}
 	entry.point.Calls += point.Calls
-	entry.point.Tokens += point.Tokens
+	entry.point.Tokens = usage.SaturatingTokenSum(entry.point.Tokens, point.Tokens)
 	entry.point.Success += point.Success
 	entry.point.Failure += point.Failure
-	entry.point.InputTokens += point.InputTokens
-	entry.point.OutputTokens += point.OutputTokens
-	entry.point.ReasoningTokens += point.ReasoningTokens
-	entry.point.CachedTokens += point.CachedTokens
-	entry.point.CacheReadTokens += point.CacheReadTokens
-	entry.point.CacheCreationTokens += point.CacheCreationTokens
-	entry.point.LongInputTokens += point.LongInputTokens
-	entry.point.LongOutputTokens += point.LongOutputTokens
-	entry.point.LongCachedTokens += point.LongCachedTokens
-	entry.point.LongCacheReadTokens += point.LongCacheReadTokens
-	entry.point.LongCacheCreationTokens += point.LongCacheCreationTokens
+	entry.point.InputTokens = usage.SaturatingTokenSum(entry.point.InputTokens, point.InputTokens)
+	entry.point.OutputTokens = usage.SaturatingTokenSum(entry.point.OutputTokens, point.OutputTokens)
+	entry.point.NonReasoningOutputTokens = usage.SaturatingTokenSum(entry.point.NonReasoningOutputTokens, point.NonReasoningOutputTokens)
+	entry.point.ReasoningTokens = usage.SaturatingTokenSum(entry.point.ReasoningTokens, point.ReasoningTokens)
+	entry.point.UnclassifiedTokens = usage.SaturatingTokenSum(entry.point.UnclassifiedTokens, point.UnclassifiedTokens)
+	entry.point.IncompleteAccountingCalls = usage.SaturatingTokenSum(entry.point.IncompleteAccountingCalls, point.IncompleteAccountingCalls)
+	entry.point.CachedTokens = usage.SaturatingTokenSum(entry.point.CachedTokens, point.CachedTokens)
+	entry.point.CacheReadTokens = usage.SaturatingTokenSum(entry.point.CacheReadTokens, point.CacheReadTokens)
+	entry.point.CacheCreationTokens = usage.SaturatingTokenSum(entry.point.CacheCreationTokens, point.CacheCreationTokens)
+	entry.point.LongInputTokens = usage.SaturatingTokenSum(entry.point.LongInputTokens, point.LongInputTokens)
+	entry.point.LongOutputTokens = usage.SaturatingTokenSum(entry.point.LongOutputTokens, point.LongOutputTokens)
+	entry.point.LongCachedTokens = usage.SaturatingTokenSum(entry.point.LongCachedTokens, point.LongCachedTokens)
+	entry.point.LongCacheReadTokens = usage.SaturatingTokenSum(entry.point.LongCacheReadTokens, point.LongCacheReadTokens)
+	entry.point.LongCacheCreationTokens = usage.SaturatingTokenSum(entry.point.LongCacheCreationTokens, point.LongCacheCreationTokens)
 	entry.point.LatencySamples += point.LatencySamples
 	entry.latencySumMS += latencySumMS
 }

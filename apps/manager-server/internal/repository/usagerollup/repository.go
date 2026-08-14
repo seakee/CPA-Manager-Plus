@@ -6,12 +6,15 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageaccountingsql"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
 
 const AccountHistoryCheckpointName = "account_history"
 const DashboardHourlyCheckpointName = "dashboard_hourly"
+
+var accountRollupAccountingSQL = usageaccountingsql.For("")
 
 type Repository interface {
 	CatchUpAccountHistory(ctx context.Context, limit int, nowMS int64) (CatchUpResult, error)
@@ -41,29 +44,32 @@ type CatchUpResult struct {
 
 type AccountHistoryRow struct {
 	usage.LongContextTokens
-	AccountKey           string
-	AccountSnapshot      string
-	AuthLabelSnapshot    string
-	AuthProviderSnapshot string
-	AuthIndex            string
-	Source               string
-	SourceHash           string
-	Model                string
-	BillingModel         string
-	ServiceTier          string
-	Calls                int64
-	SuccessCalls         int64
-	FailureCalls         int64
-	InputTokens          int64
-	OutputTokens         int64
-	ReasoningTokens      int64
-	CachedTokens         int64
-	CacheReadTokens      int64
-	CacheCreationTokens  int64
-	TotalTokens          int64
-	FirstSeenMS          int64
-	LastSeenMS           int64
-	UpdatedAtMS          int64
+	AccountKey                string
+	AccountSnapshot           string
+	AuthLabelSnapshot         string
+	AuthProviderSnapshot      string
+	AuthIndex                 string
+	Source                    string
+	SourceHash                string
+	Model                     string
+	BillingModel              string
+	ServiceTier               string
+	Calls                     int64
+	SuccessCalls              int64
+	FailureCalls              int64
+	InputTokens               int64
+	OutputTokens              int64
+	NonReasoningOutputTokens  int64
+	ReasoningTokens           int64
+	UnclassifiedTokens        int64
+	IncompleteAccountingCalls int64
+	CachedTokens              int64
+	CacheReadTokens           int64
+	CacheCreationTokens       int64
+	TotalTokens               int64
+	FirstSeenMS               int64
+	LastSeenMS                int64
+	UpdatedAtMS               int64
 }
 
 type repository struct {
@@ -79,28 +85,30 @@ func New(db *sql.DB) Repository {
 }
 
 type eventRow struct {
-	ID                    int64
-	TimestampMS           int64
-	AccountSnapshot       string
-	AuthLabelSnapshot     string
-	AuthFileSnapshot      string
-	AuthProviderSnapshot  string
-	AuthProjectIDSnapshot string
-	AuthIndex             string
-	Source                string
-	SourceHash            string
-	Model                 string
-	BillingModel          string
-	ServiceTier           string
-	Failed                bool
-	InputTokens           int64
-	OutputTokens          int64
-	ReasoningTokens       int64
-	CachedTokens          int64
-	CacheTokens           int64
-	CacheReadTokens       int64
-	CacheCreationTokens   int64
-	TotalTokens           int64
+	ID                        int64
+	TimestampMS               int64
+	AccountSnapshot           string
+	AuthLabelSnapshot         string
+	AuthFileSnapshot          string
+	AuthProviderSnapshot      string
+	AuthProjectIDSnapshot     string
+	AuthIndex                 string
+	Source                    string
+	SourceHash                string
+	Model                     string
+	BillingModel              string
+	ServiceTier               string
+	Failed                    bool
+	InputTokens               int64
+	OutputTokens              int64
+	NonReasoningOutputTokens  int64
+	ReasoningTokens           int64
+	UnclassifiedTokens        int64
+	IncompleteAccountingCalls int64
+	CachedTokens              int64
+	CacheReadTokens           int64
+	CacheCreationTokens       int64
+	TotalTokens               int64
 }
 
 func (r *repository) CatchUpAccountHistory(ctx context.Context, limit int, nowMS int64) (CatchUpResult, error) {
@@ -220,7 +228,10 @@ func (r *repository) AccountHistoryRows(ctx context.Context, accountKeys []strin
 	failure_calls,
 	input_tokens,
 	output_tokens,
+	non_reasoning_output_tokens,
 	reasoning_tokens,
+	unclassified_tokens,
+	incomplete_accounting_calls,
 	cached_tokens,
 	cache_read_tokens,
 	cache_creation_tokens,
@@ -260,7 +271,10 @@ order by account_key, last_seen_ms desc`, args...)
 			&row.FailureCalls,
 			&row.InputTokens,
 			&row.OutputTokens,
+			&row.NonReasoningOutputTokens,
 			&row.ReasoningTokens,
+			&row.UnclassifiedTokens,
+			&row.IncompleteAccountingCalls,
 			&row.CachedTokens,
 			&row.CacheReadTokens,
 			&row.CacheCreationTokens,
@@ -344,6 +358,10 @@ func latestEventIDInTx(ctx context.Context, tx *sql.Tx) (int64, error) {
 }
 
 func eventsAfterCheckpoint(ctx context.Context, tx *sql.Tx, lastEventID int64, limit int) ([]eventRow, error) {
+	pricingBucket := func(expression string) string {
+		return "case when " + accountRollupAccountingSQL.PricingSafe + " then " + expression + " else 0 end"
+	}
+	pricingUnclassified := "case when " + accountRollupAccountingSQL.PricingSafe + " then " + accountRollupAccountingSQL.Unclassified + " else " + accountRollupAccountingSQL.Total + " end"
 	rows, err := tx.QueryContext(ctx, `select
 	id,
 	timestamp_ms,
@@ -359,14 +377,16 @@ func eventsAfterCheckpoint(ctx context.Context, tx *sql.Tx, lastEventID int64, l
 	coalesce(nullif(resolved_model, ''), `+usageidentity.SQLRequestAnalyticsModelExpression("model", "requested_model")+`) as billing_model,
 	coalesce(service_tier, '') as service_tier,
 	failed,
-	coalesce(normalized_total_input_tokens, input_tokens, 0),
-	coalesce(output_tokens, 0),
-	coalesce(reasoning_tokens, 0),
-	coalesce(cached_tokens, 0),
-	coalesce(cache_tokens, 0),
-	coalesce(cache_read_tokens, 0),
-	coalesce(cache_creation_tokens, 0),
-	coalesce(total_tokens, 0)
+	`+pricingBucket(accountRollupAccountingSQL.TotalInput)+`,
+	`+pricingBucket(accountRollupAccountingSQL.TotalOutput)+`,
+	`+pricingBucket(accountRollupAccountingSQL.NonReasoningOutput)+`,
+	`+pricingBucket(accountRollupAccountingSQL.ReasoningOutput)+`,
+	`+pricingUnclassified+`,
+	`+accountRollupAccountingSQL.Incomplete+`,
+	`+pricingBucket(accountRollupAccountingSQL.CompatibleCached)+`,
+	`+pricingBucket(accountRollupAccountingSQL.CacheRead)+`,
+	`+pricingBucket(accountRollupAccountingSQL.CacheCreation)+`,
+	`+accountRollupAccountingSQL.Total+`
 from usage_events
 where id > ?
 order by id
@@ -397,9 +417,11 @@ limit ?`, lastEventID, limit)
 			&failed,
 			&row.InputTokens,
 			&row.OutputTokens,
+			&row.NonReasoningOutputTokens,
 			&row.ReasoningTokens,
+			&row.UnclassifiedTokens,
+			&row.IncompleteAccountingCalls,
 			&row.CachedTokens,
-			&row.CacheTokens,
 			&row.CacheReadTokens,
 			&row.CacheCreationTokens,
 			&row.TotalTokens,
@@ -407,12 +429,6 @@ limit ?`, lastEventID, limit)
 			return nil, err
 		}
 		row.Failed = failed != 0
-		row.CachedTokens = usage.CompatibleCachedTokens(
-			row.CachedTokens,
-			row.CacheTokens,
-			row.CacheReadTokens,
-			row.CacheCreationTokens,
-		)
 		events = append(events, row)
 	}
 	return events, rows.Err()
@@ -484,14 +500,17 @@ func aggregateAccountHistory(events []eventRow, nowMS int64) []AccountHistoryRow
 		} else {
 			row.SuccessCalls++
 		}
-		row.InputTokens += event.InputTokens
-		row.OutputTokens += event.OutputTokens
-		row.ReasoningTokens += event.ReasoningTokens
-		row.CachedTokens += event.CachedTokens
-		row.CacheReadTokens += event.CacheReadTokens
-		row.CacheCreationTokens += event.CacheCreationTokens
+		row.InputTokens = usage.SaturatingTokenSum(row.InputTokens, event.InputTokens)
+		row.OutputTokens = usage.SaturatingTokenSum(row.OutputTokens, event.OutputTokens)
+		row.NonReasoningOutputTokens = usage.SaturatingTokenSum(row.NonReasoningOutputTokens, event.NonReasoningOutputTokens)
+		row.ReasoningTokens = usage.SaturatingTokenSum(row.ReasoningTokens, event.ReasoningTokens)
+		row.UnclassifiedTokens = usage.SaturatingTokenSum(row.UnclassifiedTokens, event.UnclassifiedTokens)
+		row.IncompleteAccountingCalls = usage.SaturatingTokenSum(row.IncompleteAccountingCalls, event.IncompleteAccountingCalls)
+		row.CachedTokens = usage.SaturatingTokenSum(row.CachedTokens, event.CachedTokens)
+		row.CacheReadTokens = usage.SaturatingTokenSum(row.CacheReadTokens, event.CacheReadTokens)
+		row.CacheCreationTokens = usage.SaturatingTokenSum(row.CacheCreationTokens, event.CacheCreationTokens)
 		row.AddIfLongContext(event.InputTokens, event.OutputTokens, event.CachedTokens, event.CacheReadTokens, event.CacheCreationTokens)
-		row.TotalTokens += event.TotalTokens
+		row.TotalTokens = usage.SaturatingTokenSum(row.TotalTokens, event.TotalTokens)
 		if event.TimestampMS < row.FirstSeenMS {
 			row.FirstSeenMS = event.TimestampMS
 		}
@@ -547,7 +566,10 @@ func upsertAccountRollups(ctx context.Context, tx *sql.Tx, rows []AccountHistory
 	failure_calls,
 	input_tokens,
 	output_tokens,
+	non_reasoning_output_tokens,
 	reasoning_tokens,
+	unclassified_tokens,
+	incomplete_accounting_calls,
 	cached_tokens,
 	cache_read_tokens,
 	cache_creation_tokens,
@@ -560,7 +582,7 @@ func upsertAccountRollups(ctx context.Context, tx *sql.Tx, rows []AccountHistory
 	first_seen_ms,
 	last_seen_ms,
 	updated_at_ms
-) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 on conflict(account_key, model, billing_model, service_tier) do update set
 	account_snapshot = coalesce(nullif(excluded.account_snapshot, ''), usage_account_model_rollups.account_snapshot),
 	auth_label_snapshot = coalesce(nullif(excluded.auth_label_snapshot, ''), usage_account_model_rollups.auth_label_snapshot),
@@ -572,18 +594,21 @@ on conflict(account_key, model, billing_model, service_tier) do update set
 	calls = usage_account_model_rollups.calls + excluded.calls,
 	success_calls = usage_account_model_rollups.success_calls + excluded.success_calls,
 	failure_calls = usage_account_model_rollups.failure_calls + excluded.failure_calls,
-	input_tokens = usage_account_model_rollups.input_tokens + excluded.input_tokens,
-	output_tokens = usage_account_model_rollups.output_tokens + excluded.output_tokens,
-	reasoning_tokens = usage_account_model_rollups.reasoning_tokens + excluded.reasoning_tokens,
-	cached_tokens = usage_account_model_rollups.cached_tokens + excluded.cached_tokens,
-	cache_read_tokens = usage_account_model_rollups.cache_read_tokens + excluded.cache_read_tokens,
-	cache_creation_tokens = usage_account_model_rollups.cache_creation_tokens + excluded.cache_creation_tokens,
-	long_input_tokens = usage_account_model_rollups.long_input_tokens + excluded.long_input_tokens,
-	long_output_tokens = usage_account_model_rollups.long_output_tokens + excluded.long_output_tokens,
-	long_cached_tokens = usage_account_model_rollups.long_cached_tokens + excluded.long_cached_tokens,
-	long_cache_read_tokens = usage_account_model_rollups.long_cache_read_tokens + excluded.long_cache_read_tokens,
-	long_cache_creation_tokens = usage_account_model_rollups.long_cache_creation_tokens + excluded.long_cache_creation_tokens,
-	total_tokens = usage_account_model_rollups.total_tokens + excluded.total_tokens,
+	input_tokens = cpamp_saturating_add(usage_account_model_rollups.input_tokens, excluded.input_tokens),
+	output_tokens = cpamp_saturating_add(usage_account_model_rollups.output_tokens, excluded.output_tokens),
+	non_reasoning_output_tokens = cpamp_saturating_add(usage_account_model_rollups.non_reasoning_output_tokens, excluded.non_reasoning_output_tokens),
+	reasoning_tokens = cpamp_saturating_add(usage_account_model_rollups.reasoning_tokens, excluded.reasoning_tokens),
+	unclassified_tokens = cpamp_saturating_add(usage_account_model_rollups.unclassified_tokens, excluded.unclassified_tokens),
+	incomplete_accounting_calls = cpamp_saturating_add(usage_account_model_rollups.incomplete_accounting_calls, excluded.incomplete_accounting_calls),
+	cached_tokens = cpamp_saturating_add(usage_account_model_rollups.cached_tokens, excluded.cached_tokens),
+	cache_read_tokens = cpamp_saturating_add(usage_account_model_rollups.cache_read_tokens, excluded.cache_read_tokens),
+	cache_creation_tokens = cpamp_saturating_add(usage_account_model_rollups.cache_creation_tokens, excluded.cache_creation_tokens),
+	long_input_tokens = cpamp_saturating_add(usage_account_model_rollups.long_input_tokens, excluded.long_input_tokens),
+	long_output_tokens = cpamp_saturating_add(usage_account_model_rollups.long_output_tokens, excluded.long_output_tokens),
+	long_cached_tokens = cpamp_saturating_add(usage_account_model_rollups.long_cached_tokens, excluded.long_cached_tokens),
+	long_cache_read_tokens = cpamp_saturating_add(usage_account_model_rollups.long_cache_read_tokens, excluded.long_cache_read_tokens),
+	long_cache_creation_tokens = cpamp_saturating_add(usage_account_model_rollups.long_cache_creation_tokens, excluded.long_cache_creation_tokens),
+	total_tokens = cpamp_saturating_add(usage_account_model_rollups.total_tokens, excluded.total_tokens),
 	first_seen_ms = min(usage_account_model_rollups.first_seen_ms, excluded.first_seen_ms),
 	last_seen_ms = max(usage_account_model_rollups.last_seen_ms, excluded.last_seen_ms),
 	updated_at_ms = excluded.updated_at_ms`)
@@ -610,7 +635,10 @@ on conflict(account_key, model, billing_model, service_tier) do update set
 			row.FailureCalls,
 			row.InputTokens,
 			row.OutputTokens,
+			row.NonReasoningOutputTokens,
 			row.ReasoningTokens,
+			row.UnclassifiedTokens,
+			row.IncompleteAccountingCalls,
 			row.CachedTokens,
 			row.CacheReadTokens,
 			row.CacheCreationTokens,

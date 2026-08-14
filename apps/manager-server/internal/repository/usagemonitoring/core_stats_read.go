@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
 
@@ -119,13 +120,16 @@ func mergeStoredAggregate(
 		coalesce(sum(calls), 0),
 		coalesce(sum(case when failed = 0 then calls else 0 end), 0),
 		coalesce(sum(case when failed = 1 then calls else 0 end), 0),
-		coalesce(sum(input_tokens), 0),
-		coalesce(sum(output_tokens), 0),
-		coalesce(sum(reasoning_tokens), 0),
-		coalesce(sum(cached_tokens), 0),
-		coalesce(sum(cache_read_tokens), 0),
-		coalesce(sum(cache_creation_tokens), 0),
-		coalesce(sum(total_tokens), 0),
+		coalesce(cpamp_saturating_sum(display_input_tokens), 0),
+		coalesce(cpamp_saturating_sum(display_output_tokens), 0),
+		coalesce(cpamp_saturating_sum(display_non_reasoning_output_tokens), 0),
+		coalesce(cpamp_saturating_sum(display_reasoning_tokens), 0),
+		coalesce(cpamp_saturating_sum(display_unclassified_tokens), 0),
+		coalesce(cpamp_saturating_sum(incomplete_accounting_calls), 0),
+		coalesce(cpamp_saturating_sum(display_cached_tokens), 0),
+		coalesce(cpamp_saturating_sum(display_cache_read_tokens), 0),
+		coalesce(cpamp_saturating_sum(display_cache_creation_tokens), 0),
+		coalesce(cpamp_saturating_sum(display_total_tokens), 0),
 		coalesce(sum(zero_token_calls), 0),
 		coalesce(sum(latency_sum_ms), 0),
 		coalesce(sum(latency_samples), 0)
@@ -149,38 +153,50 @@ func mergeProjectedAggregate(
 	source, args := filteredEventSourceSQL(
 		filter,
 		projectionCoverageEventID,
-		`p.failed, p.normalized_total_input_tokens, p.output_tokens,
-		p.reasoning_tokens, p.cached_tokens, p.cache_tokens,
-		p.cache_read_tokens, p.cache_creation_tokens, p.total_tokens,
-		p.latency_ms`,
-		`coalesce(e.failed, 0),
-		coalesce(e.normalized_total_input_tokens, e.input_tokens, 0),
+		`p.requested_model as model, p.analytics_model, p.resolved_model, p.service_tier, p.failed,
+		p.accounting_version, p.accounting_valid, p.accounting_quality,
+		p.input_tokens, p.output_tokens, p.reasoning_tokens, p.cached_tokens,
+		p.cache_tokens, p.cache_read_tokens, p.cache_creation_tokens,
+		p.normalized_uncached_input_tokens, p.normalized_total_input_tokens,
+		p.normalized_cache_read_tokens, p.normalized_cache_creation_tokens,
+		p.normalized_non_reasoning_output_tokens, p.normalized_reasoning_output_tokens,
+		p.normalized_total_output_tokens, p.unclassified_tokens, p.total_tokens, p.latency_ms`,
+		usageidentity.SQLEffectiveRequestedModelExpression("e.model", "e.requested_model")+`, `+usageidentity.SQLRequestAnalyticsModelExpression("e.model", "e.requested_model")+`, coalesce(e.resolved_model, ''),
+		coalesce(e.service_tier, ''), coalesce(e.failed, 0),
+		coalesce(e.accounting_version, 0), coalesce(e.accounting_valid, 0),
+		coalesce(e.accounting_quality, ''), coalesce(e.input_tokens, 0),
 		coalesce(e.output_tokens, 0), coalesce(e.reasoning_tokens, 0),
 		coalesce(e.cached_tokens, 0), coalesce(e.cache_tokens, 0),
 		coalesce(e.cache_read_tokens, 0), coalesce(e.cache_creation_tokens, 0),
-		coalesce(e.total_tokens, 0), e.latency_ms`,
+		e.normalized_uncached_input_tokens, e.normalized_total_input_tokens,
+		e.normalized_cache_read_tokens, e.normalized_cache_creation_tokens,
+		e.normalized_non_reasoning_output_tokens, e.normalized_reasoning_output_tokens,
+		e.normalized_total_output_tokens, e.unclassified_tokens, e.total_tokens, e.latency_ms`,
 		eventSourceOptions{
 			AfterID:            afterID,
 			UseAfter:           useAfterID,
 			ProjectionComplete: projectionComplete,
 		},
 	)
-	return scanAggregateContribution(tx.QueryRowContext(ctx, `with filtered_events as (`+source+`)
+	return scanAggregateContribution(tx.QueryRowContext(ctx, monitoringBandedProjectedEventsCTE(source)+`
 	select
 		count(*),
-		coalesce(sum(case when failed = 0 then 1 else 0 end), 0),
-		coalesce(sum(case when failed = 1 then 1 else 0 end), 0),
-		coalesce(sum(normalized_total_input_tokens), 0),
-		coalesce(sum(output_tokens), 0),
-		coalesce(sum(reasoning_tokens), 0),
-		coalesce(sum(max(max(cached_tokens, cache_tokens) - max(cache_read_tokens, 0) - max(cache_creation_tokens, 0), 0)), 0),
-		coalesce(sum(cache_read_tokens), 0),
-		coalesce(sum(cache_creation_tokens), 0),
-		coalesce(sum(total_tokens), 0),
-		coalesce(sum(case when total_tokens = 0 and failed = 0 then 1 else 0 end), 0),
-		coalesce(sum(case when latency_ms is not null and latency_ms != 0 then latency_ms else 0 end), 0),
+		coalesce(cpamp_saturating_sum(case when failed = 0 then 1 else 0 end), 0),
+		coalesce(cpamp_saturating_sum(case when failed = 1 then 1 else 0 end), 0),
+		coalesce(cpamp_saturating_sum(normalized_input_tokens_value), 0),
+		coalesce(cpamp_saturating_sum(normalized_output_tokens_value), 0),
+		coalesce(cpamp_saturating_sum(non_reasoning_output_tokens_value), 0),
+		coalesce(cpamp_saturating_sum(reasoning_tokens_value), 0),
+		coalesce(cpamp_saturating_sum(unclassified_tokens_value), 0),
+		coalesce(cpamp_saturating_sum(incomplete_accounting_value), 0),
+		coalesce(cpamp_saturating_sum(compatible_cached_tokens_value), 0),
+		coalesce(cpamp_saturating_sum(normalized_cache_read_tokens_value), 0),
+		coalesce(cpamp_saturating_sum(normalized_cache_creation_tokens_value), 0),
+		coalesce(cpamp_saturating_sum(total_tokens_value), 0),
+		coalesce(cpamp_saturating_sum(case when total_tokens_value = 0 and failed = 0 then 1 else 0 end), 0),
+		coalesce(cpamp_saturating_sum(case when latency_ms is not null and latency_ms != 0 then latency_ms else 0 end), 0),
 		count(nullif(latency_ms, 0))
-	from filtered_events`, args...), accumulator)
+	from banded_events`, args...), accumulator)
 }
 
 func scanAggregateContribution(row *sql.Row, accumulator *dailyAggregateAccumulator) error {
@@ -193,7 +209,10 @@ func scanAggregateContribution(row *sql.Row, accumulator *dailyAggregateAccumula
 		&contribution.FailureCalls,
 		&contribution.InputTokens,
 		&contribution.OutputTokens,
+		&contribution.NonReasoningOutputTokens,
 		&contribution.ReasoningTokens,
+		&contribution.UnclassifiedTokens,
+		&contribution.IncompleteAccountingCalls,
 		&contribution.CachedTokens,
 		&contribution.CacheReadTokens,
 		&contribution.CacheCreationTokens,
@@ -207,13 +226,16 @@ func scanAggregateContribution(row *sql.Row, accumulator *dailyAggregateAccumula
 	accumulator.value.TotalCalls += contribution.TotalCalls
 	accumulator.value.SuccessCalls += contribution.SuccessCalls
 	accumulator.value.FailureCalls += contribution.FailureCalls
-	accumulator.value.InputTokens += contribution.InputTokens
-	accumulator.value.OutputTokens += contribution.OutputTokens
-	accumulator.value.ReasoningTokens += contribution.ReasoningTokens
-	accumulator.value.CachedTokens += contribution.CachedTokens
-	accumulator.value.CacheReadTokens += contribution.CacheReadTokens
-	accumulator.value.CacheCreationTokens += contribution.CacheCreationTokens
-	accumulator.value.TotalTokens += contribution.TotalTokens
+	accumulator.value.InputTokens = usage.SaturatingTokenSum(accumulator.value.InputTokens, contribution.InputTokens)
+	accumulator.value.OutputTokens = usage.SaturatingTokenSum(accumulator.value.OutputTokens, contribution.OutputTokens)
+	accumulator.value.NonReasoningOutputTokens = usage.SaturatingTokenSum(accumulator.value.NonReasoningOutputTokens, contribution.NonReasoningOutputTokens)
+	accumulator.value.ReasoningTokens = usage.SaturatingTokenSum(accumulator.value.ReasoningTokens, contribution.ReasoningTokens)
+	accumulator.value.UnclassifiedTokens = usage.SaturatingTokenSum(accumulator.value.UnclassifiedTokens, contribution.UnclassifiedTokens)
+	accumulator.value.IncompleteAccountingCalls = usage.SaturatingTokenSum(accumulator.value.IncompleteAccountingCalls, contribution.IncompleteAccountingCalls)
+	accumulator.value.CachedTokens = usage.SaturatingTokenSum(accumulator.value.CachedTokens, contribution.CachedTokens)
+	accumulator.value.CacheReadTokens = usage.SaturatingTokenSum(accumulator.value.CacheReadTokens, contribution.CacheReadTokens)
+	accumulator.value.CacheCreationTokens = usage.SaturatingTokenSum(accumulator.value.CacheCreationTokens, contribution.CacheCreationTokens)
+	accumulator.value.TotalTokens = usage.SaturatingTokenSum(accumulator.value.TotalTokens, contribution.TotalTokens)
 	accumulator.value.ZeroTokenCalls += contribution.ZeroTokenCalls
 	accumulator.latencySumMS += latencySumMS
 	accumulator.latencySamples += latencySamples
@@ -296,11 +318,21 @@ func mergeStoredModelStats(
 		model, billing_model, pricing_model, context_threshold_tokens,
 		service_tier, sum(calls),
 		sum(case when failed = 0 then calls else 0 end),
-		sum(input_tokens), sum(output_tokens), sum(reasoning_tokens),
-		sum(cached_tokens), sum(cache_read_tokens), sum(cache_creation_tokens),
-		sum(long_input_tokens), sum(long_output_tokens), sum(long_cached_tokens),
-		sum(long_cache_read_tokens), sum(long_cache_creation_tokens),
-		sum(total_tokens)
+		coalesce(cpamp_saturating_sum(input_tokens), 0),
+		coalesce(cpamp_saturating_sum(output_tokens), 0),
+		coalesce(cpamp_saturating_sum(non_reasoning_output_tokens), 0),
+		coalesce(cpamp_saturating_sum(reasoning_tokens), 0),
+		coalesce(cpamp_saturating_sum(unclassified_tokens), 0),
+		coalesce(cpamp_saturating_sum(incomplete_accounting_calls), 0),
+		coalesce(cpamp_saturating_sum(cached_tokens), 0),
+		coalesce(cpamp_saturating_sum(cache_read_tokens), 0),
+		coalesce(cpamp_saturating_sum(cache_creation_tokens), 0),
+		coalesce(cpamp_saturating_sum(long_input_tokens), 0),
+		coalesce(cpamp_saturating_sum(long_output_tokens), 0),
+		coalesce(cpamp_saturating_sum(long_cached_tokens), 0),
+		coalesce(cpamp_saturating_sum(long_cache_read_tokens), 0),
+		coalesce(cpamp_saturating_sum(long_cache_creation_tokens), 0),
+		coalesce(cpamp_saturating_sum(total_tokens), 0)
 	from usage_monitoring_account_daily_rollups_v1
 	where `+strings.Join(conditions, " and ")+`
 	group by model, billing_model, pricing_model, context_threshold_tokens,
@@ -329,16 +361,24 @@ func mergeProjectedModelStats(
 		filter,
 		projectionCoverageEventID,
 		`p.requested_model as model, p.analytics_model, p.resolved_model, p.service_tier, p.failed,
-		p.normalized_total_input_tokens, p.output_tokens, p.reasoning_tokens,
-		p.cached_tokens, p.cache_tokens, p.cache_read_tokens,
-		p.cache_creation_tokens, p.total_tokens`,
+		p.accounting_version, p.accounting_valid, p.accounting_quality,
+		p.input_tokens, p.output_tokens, p.reasoning_tokens, p.cached_tokens,
+		p.cache_tokens, p.cache_read_tokens, p.cache_creation_tokens,
+		p.normalized_uncached_input_tokens, p.normalized_total_input_tokens,
+		p.normalized_cache_read_tokens, p.normalized_cache_creation_tokens,
+		p.normalized_non_reasoning_output_tokens, p.normalized_reasoning_output_tokens,
+		p.normalized_total_output_tokens, p.unclassified_tokens, p.total_tokens`,
 		usageidentity.SQLEffectiveRequestedModelExpression("e.model", "e.requested_model")+`, `+usageidentity.SQLRequestAnalyticsModelExpression("e.model", "e.requested_model")+`, coalesce(e.resolved_model, ''),
 		coalesce(e.service_tier, ''), coalesce(e.failed, 0),
-		coalesce(e.normalized_total_input_tokens, e.input_tokens, 0),
+		coalesce(e.accounting_version, 0), coalesce(e.accounting_valid, 0),
+		coalesce(e.accounting_quality, ''), coalesce(e.input_tokens, 0),
 		coalesce(e.output_tokens, 0), coalesce(e.reasoning_tokens, 0),
 		coalesce(e.cached_tokens, 0), coalesce(e.cache_tokens, 0),
 		coalesce(e.cache_read_tokens, 0), coalesce(e.cache_creation_tokens, 0),
-		coalesce(e.total_tokens, 0)`,
+		e.normalized_uncached_input_tokens, e.normalized_total_input_tokens,
+		e.normalized_cache_read_tokens, e.normalized_cache_creation_tokens,
+		e.normalized_non_reasoning_output_tokens, e.normalized_reasoning_output_tokens,
+		e.normalized_total_output_tokens, e.unclassified_tokens, e.total_tokens`,
 		eventSourceOptions{
 			AfterID:            afterID,
 			UseAfter:           useAfterID,
@@ -350,16 +390,21 @@ func mergeProjectedModelStats(
 		analytics_model, billing_model_value, pricing_model_value,
 		context_threshold_tokens_value, service_tier,
 		count(*), coalesce(sum(case when failed = 0 then 1 else 0 end), 0),
-		coalesce(sum(normalized_total_input_tokens), 0),
-		coalesce(sum(output_tokens), 0), coalesce(sum(reasoning_tokens), 0),
-		coalesce(sum(compatible_cached_tokens_value), 0),
-		coalesce(sum(cache_read_tokens), 0), coalesce(sum(cache_creation_tokens), 0),
-		coalesce(sum(case when normalized_total_input_tokens > ? then normalized_total_input_tokens else 0 end), 0),
-		coalesce(sum(case when normalized_total_input_tokens > ? then output_tokens else 0 end), 0),
-		coalesce(sum(case when normalized_total_input_tokens > ? then compatible_cached_tokens_value else 0 end), 0),
-		coalesce(sum(case when normalized_total_input_tokens > ? then cache_read_tokens else 0 end), 0),
-		coalesce(sum(case when normalized_total_input_tokens > ? then cache_creation_tokens else 0 end), 0),
-		coalesce(sum(total_tokens), 0)
+		coalesce(cpamp_saturating_sum(pricing_input_tokens_value), 0),
+		coalesce(cpamp_saturating_sum(pricing_output_tokens_value), 0),
+		coalesce(cpamp_saturating_sum(pricing_non_reasoning_output_tokens_value), 0),
+		coalesce(cpamp_saturating_sum(pricing_reasoning_tokens_value), 0),
+		coalesce(cpamp_saturating_sum(pricing_unclassified_tokens_value), 0),
+		coalesce(cpamp_saturating_sum(incomplete_accounting_value), 0),
+		coalesce(cpamp_saturating_sum(pricing_compatible_cached_tokens_value), 0),
+		coalesce(cpamp_saturating_sum(pricing_cache_read_tokens_value), 0),
+		coalesce(cpamp_saturating_sum(pricing_cache_creation_tokens_value), 0),
+		coalesce(cpamp_saturating_sum(case when pricing_input_tokens_value > ? then pricing_input_tokens_value else 0 end), 0),
+		coalesce(cpamp_saturating_sum(case when pricing_input_tokens_value > ? then pricing_output_tokens_value else 0 end), 0),
+		coalesce(cpamp_saturating_sum(case when pricing_input_tokens_value > ? then pricing_compatible_cached_tokens_value else 0 end), 0),
+		coalesce(cpamp_saturating_sum(case when pricing_input_tokens_value > ? then pricing_cache_read_tokens_value else 0 end), 0),
+		coalesce(cpamp_saturating_sum(case when pricing_input_tokens_value > ? then pricing_cache_creation_tokens_value else 0 end), 0),
+		coalesce(cpamp_saturating_sum(total_tokens_value), 0)
 	from banded_events
 	group by analytics_model, billing_model_value, pricing_model_value,
 		context_threshold_tokens_value, service_tier`, monitoringBandedProjectedEventsCTE(source))
@@ -385,7 +430,10 @@ func scanDailyModelStats(rows *sql.Rows, grouped map[dailyModelStatKey]*ModelSta
 			&row.SuccessCalls,
 			&row.InputTokens,
 			&row.OutputTokens,
+			&row.NonReasoningOutputTokens,
 			&row.ReasoningTokens,
+			&row.UnclassifiedTokens,
+			&row.IncompleteAccountingCalls,
 			&row.CachedTokens,
 			&row.CacheReadTokens,
 			&row.CacheCreationTokens,
@@ -413,18 +461,21 @@ func scanDailyModelStats(rows *sql.Rows, grouped map[dailyModelStatKey]*ModelSta
 		}
 		entry.Calls += row.Calls
 		entry.SuccessCalls += row.SuccessCalls
-		entry.InputTokens += row.InputTokens
-		entry.OutputTokens += row.OutputTokens
-		entry.ReasoningTokens += row.ReasoningTokens
-		entry.CachedTokens += row.CachedTokens
-		entry.CacheReadTokens += row.CacheReadTokens
-		entry.CacheCreationTokens += row.CacheCreationTokens
-		entry.LongInputTokens += row.LongInputTokens
-		entry.LongOutputTokens += row.LongOutputTokens
-		entry.LongCachedTokens += row.LongCachedTokens
-		entry.LongCacheReadTokens += row.LongCacheReadTokens
-		entry.LongCacheCreationTokens += row.LongCacheCreationTokens
-		entry.TotalTokens += row.TotalTokens
+		entry.InputTokens = usage.SaturatingTokenSum(entry.InputTokens, row.InputTokens)
+		entry.OutputTokens = usage.SaturatingTokenSum(entry.OutputTokens, row.OutputTokens)
+		entry.NonReasoningOutputTokens = usage.SaturatingTokenSum(entry.NonReasoningOutputTokens, row.NonReasoningOutputTokens)
+		entry.ReasoningTokens = usage.SaturatingTokenSum(entry.ReasoningTokens, row.ReasoningTokens)
+		entry.UnclassifiedTokens = usage.SaturatingTokenSum(entry.UnclassifiedTokens, row.UnclassifiedTokens)
+		entry.IncompleteAccountingCalls = usage.SaturatingTokenSum(entry.IncompleteAccountingCalls, row.IncompleteAccountingCalls)
+		entry.CachedTokens = usage.SaturatingTokenSum(entry.CachedTokens, row.CachedTokens)
+		entry.CacheReadTokens = usage.SaturatingTokenSum(entry.CacheReadTokens, row.CacheReadTokens)
+		entry.CacheCreationTokens = usage.SaturatingTokenSum(entry.CacheCreationTokens, row.CacheCreationTokens)
+		entry.LongInputTokens = usage.SaturatingTokenSum(entry.LongInputTokens, row.LongInputTokens)
+		entry.LongOutputTokens = usage.SaturatingTokenSum(entry.LongOutputTokens, row.LongOutputTokens)
+		entry.LongCachedTokens = usage.SaturatingTokenSum(entry.LongCachedTokens, row.LongCachedTokens)
+		entry.LongCacheReadTokens = usage.SaturatingTokenSum(entry.LongCacheReadTokens, row.LongCacheReadTokens)
+		entry.LongCacheCreationTokens = usage.SaturatingTokenSum(entry.LongCacheCreationTokens, row.LongCacheCreationTokens)
+		entry.TotalTokens = usage.SaturatingTokenSum(entry.TotalTokens, row.TotalTokens)
 	}
 	return rows.Err()
 }

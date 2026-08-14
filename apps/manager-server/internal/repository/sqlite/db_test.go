@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -10,6 +11,27 @@ import (
 	"testing"
 	"time"
 )
+
+func TestTokenMathFunctionsSaturateSQLiteIntegerOverflow(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "token-math.sqlite"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	var aggregate, scalar int64
+	if err := db.QueryRow(`with token_values(value) as (values (?), (?))
+		select cpamp_saturating_sum(value), cpamp_saturating_add(?, ?)
+		from token_values`, int64(math.MaxInt64), int64(1), int64(math.MaxInt64), int64(1)).Scan(
+		&aggregate,
+		&scalar,
+	); err != nil {
+		t.Fatalf("query token math functions: %v", err)
+	}
+	if aggregate != math.MaxInt64 || scalar != math.MaxInt64 {
+		t.Fatalf("token math = aggregate:%d scalar:%d, want %d", aggregate, scalar, int64(math.MaxInt64))
+	}
+}
 
 func TestDataSourceNameEncodesWindowsDrivePath(t *testing.T) {
 	dsn := dataSourceName("C:/CPA Manager/data/usage ? #.sqlite")

@@ -334,32 +334,35 @@ type AccountWindowUsageItem struct {
 }
 
 type Summary struct {
-	TotalCalls            int64    `json:"total_calls"`
-	SuccessCalls          int64    `json:"success_calls"`
-	FailureCalls          int64    `json:"failure_calls"`
-	SuccessRate           float64  `json:"success_rate"`
-	InputTokens           int64    `json:"input_tokens"`
-	OutputTokens          int64    `json:"output_tokens"`
-	CachedTokens          int64    `json:"cached_tokens"`
-	CacheReadTokens       int64    `json:"cache_read_tokens"`
-	CacheCreationTokens   int64    `json:"cache_creation_tokens"`
-	CacheHitRate          float64  `json:"cache_hit_rate"`
-	ReasoningTokens       int64    `json:"reasoning_tokens"`
-	TotalTokens           int64    `json:"total_tokens"`
-	TotalCost             float64  `json:"total_cost"`
-	AverageCostPerCall    float64  `json:"average_cost_per_call"`
-	AverageLatencyMS      *float64 `json:"average_latency_ms"`
-	P95LatencyMS          *float64 `json:"p95_latency_ms"`
-	P95TTFTMS             *float64 `json:"p95_ttft_ms"`
-	ZeroTokenCalls        int64    `json:"zero_token_calls"`
-	RPM30M                float64  `json:"rpm_30m"`
-	TPM30M                float64  `json:"tpm_30m"`
-	AvgDailyRequests      float64  `json:"avg_daily_requests"`
-	AvgDailyTokens        float64  `json:"avg_daily_tokens"`
-	ApproxTasks           int64    `json:"approx_tasks"`
-	ApproxTaskFailures    int64    `json:"approx_task_failures"`
-	ApproxTaskSuccessRate float64  `json:"approx_task_success_rate"`
-	ZeroTokenModels       []string `json:"zero_token_models"`
+	TotalCalls                int64    `json:"total_calls"`
+	SuccessCalls              int64    `json:"success_calls"`
+	FailureCalls              int64    `json:"failure_calls"`
+	SuccessRate               float64  `json:"success_rate"`
+	InputTokens               int64    `json:"input_tokens"`
+	OutputTokens              int64    `json:"output_tokens"`
+	NonReasoningOutputTokens  int64    `json:"non_reasoning_output_tokens"`
+	CachedTokens              int64    `json:"cached_tokens"`
+	CacheReadTokens           int64    `json:"cache_read_tokens"`
+	CacheCreationTokens       int64    `json:"cache_creation_tokens"`
+	CacheHitRate              float64  `json:"cache_hit_rate"`
+	ReasoningTokens           int64    `json:"reasoning_tokens"`
+	UnclassifiedTokens        int64    `json:"unclassified_tokens"`
+	IncompleteAccountingCalls int64    `json:"incomplete_accounting_calls"`
+	TotalTokens               int64    `json:"total_tokens"`
+	TotalCost                 float64  `json:"total_cost"`
+	AverageCostPerCall        float64  `json:"average_cost_per_call"`
+	AverageLatencyMS          *float64 `json:"average_latency_ms"`
+	P95LatencyMS              *float64 `json:"p95_latency_ms"`
+	P95TTFTMS                 *float64 `json:"p95_ttft_ms"`
+	ZeroTokenCalls            int64    `json:"zero_token_calls"`
+	RPM30M                    float64  `json:"rpm_30m"`
+	TPM30M                    float64  `json:"tpm_30m"`
+	AvgDailyRequests          float64  `json:"avg_daily_requests"`
+	AvgDailyTokens            float64  `json:"avg_daily_tokens"`
+	ApproxTasks               int64    `json:"approx_tasks"`
+	ApproxTaskFailures        int64    `json:"approx_task_failures"`
+	ApproxTaskSuccessRate     float64  `json:"approx_task_success_rate"`
+	ZeroTokenModels           []string `json:"zero_token_models"`
 }
 
 // SummaryComparison holds previous-period aggregates computed with the same
@@ -378,26 +381,29 @@ type SummaryComparison struct {
 }
 
 type TimelinePoint struct {
-	BucketMS            int64    `json:"bucket_ms"`
-	Label               string   `json:"label"`
-	Calls               int64    `json:"calls"`
-	Tokens              int64    `json:"tokens"`
-	Success             int64    `json:"success"`
-	Failure             int64    `json:"failure"`
-	InputTokens         int64    `json:"input_tokens"`
-	OutputTokens        int64    `json:"output_tokens"`
-	CachedTokens        int64    `json:"cached_tokens"`
-	CacheReadTokens     int64    `json:"cache_read_tokens"`
-	CacheCreationTokens int64    `json:"cache_creation_tokens"`
-	CacheHitRate        float64  `json:"cache_hit_rate"`
-	ReasoningTokens     int64    `json:"reasoning_tokens"`
-	TotalTokens         int64    `json:"total_tokens"`
-	Cost                float64  `json:"cost"`
-	AvgLatencyMS        *float64 `json:"average_latency_ms"`
-	P95LatencyMS        *float64 `json:"p95_latency_ms"`
-	P95TTFTMS           *float64 `json:"p95_ttft_ms"`
-	SuccessRate         float64  `json:"success_rate"`
-	FailureRate         float64  `json:"failure_rate"`
+	BucketMS                  int64    `json:"bucket_ms"`
+	Label                     string   `json:"label"`
+	Calls                     int64    `json:"calls"`
+	Tokens                    int64    `json:"tokens"`
+	Success                   int64    `json:"success"`
+	Failure                   int64    `json:"failure"`
+	InputTokens               int64    `json:"input_tokens"`
+	OutputTokens              int64    `json:"output_tokens"`
+	NonReasoningOutputTokens  int64    `json:"non_reasoning_output_tokens"`
+	CachedTokens              int64    `json:"cached_tokens"`
+	CacheReadTokens           int64    `json:"cache_read_tokens"`
+	CacheCreationTokens       int64    `json:"cache_creation_tokens"`
+	CacheHitRate              float64  `json:"cache_hit_rate"`
+	ReasoningTokens           int64    `json:"reasoning_tokens"`
+	UnclassifiedTokens        int64    `json:"unclassified_tokens"`
+	IncompleteAccountingCalls int64    `json:"incomplete_accounting_calls"`
+	TotalTokens               int64    `json:"total_tokens"`
+	Cost                      float64  `json:"cost"`
+	AvgLatencyMS              *float64 `json:"average_latency_ms"`
+	P95LatencyMS              *float64 `json:"p95_latency_ms"`
+	P95TTFTMS                 *float64 `json:"p95_ttft_ms"`
+	SuccessRate               float64  `json:"success_rate"`
+	FailureRate               float64  `json:"failure_rate"`
 }
 
 type HourlyPoint struct {
@@ -458,21 +464,25 @@ type ModelShareRow struct {
 }
 
 type ModelStat struct {
-	Model               string  `json:"model"`
-	Calls               int64   `json:"calls"`
-	SuccessCalls        int64   `json:"success_calls"`
-	FailureCalls        int64   `json:"failure_calls"`
-	SuccessRate         float64 `json:"success_rate"`
-	InputTokens         int64   `json:"input_tokens"`
-	OutputTokens        int64   `json:"output_tokens"`
-	CachedTokens        int64   `json:"cached_tokens"`
-	CacheReadTokens     int64   `json:"cache_read_tokens"`
-	CacheCreationTokens int64   `json:"cache_creation_tokens"`
-	CacheHitTokens      int64   `json:"cache_hit_tokens"`
-	CacheHitInputTokens int64   `json:"cache_hit_input_tokens"`
-	CacheHitRate        float64 `json:"cache_hit_rate"`
-	TotalTokens         int64   `json:"total_tokens"`
-	Cost                float64 `json:"cost"`
+	Model                     string  `json:"model"`
+	Calls                     int64   `json:"calls"`
+	SuccessCalls              int64   `json:"success_calls"`
+	FailureCalls              int64   `json:"failure_calls"`
+	SuccessRate               float64 `json:"success_rate"`
+	InputTokens               int64   `json:"input_tokens"`
+	OutputTokens              int64   `json:"output_tokens"`
+	NonReasoningOutputTokens  int64   `json:"non_reasoning_output_tokens"`
+	ReasoningTokens           int64   `json:"reasoning_tokens"`
+	UnclassifiedTokens        int64   `json:"unclassified_tokens"`
+	IncompleteAccountingCalls int64   `json:"incomplete_accounting_calls"`
+	CachedTokens              int64   `json:"cached_tokens"`
+	CacheReadTokens           int64   `json:"cache_read_tokens"`
+	CacheCreationTokens       int64   `json:"cache_creation_tokens"`
+	CacheHitTokens            int64   `json:"cache_hit_tokens"`
+	CacheHitInputTokens       int64   `json:"cache_hit_input_tokens"`
+	CacheHitRate              float64 `json:"cache_hit_rate"`
+	TotalTokens               int64   `json:"total_tokens"`
+	Cost                      float64 `json:"cost"`
 }
 
 type ChannelShareRow struct {
@@ -503,149 +513,171 @@ type FailureSourceRow struct {
 }
 
 type AccountStatRow struct {
-	ID                   string                `json:"id"`
-	AccountSnapshot      string                `json:"account_snapshot,omitempty"`
-	AuthLabelSnapshot    string                `json:"auth_label_snapshot,omitempty"`
-	AuthProviderSnapshot string                `json:"auth_provider_snapshot,omitempty"`
-	AuthIndices          []string              `json:"auth_indices,omitempty"`
-	Sources              []string              `json:"sources,omitempty"`
-	SourceHashes         []string              `json:"source_hashes,omitempty"`
-	Calls                int64                 `json:"calls"`
-	SuccessCalls         int64                 `json:"success_calls"`
-	FailureCalls         int64                 `json:"failure_calls"`
-	SuccessRate          float64               `json:"success_rate"`
-	InputTokens          int64                 `json:"input_tokens"`
-	OutputTokens         int64                 `json:"output_tokens"`
-	CachedTokens         int64                 `json:"cached_tokens"`
-	CacheReadTokens      int64                 `json:"cache_read_tokens"`
-	CacheCreationTokens  int64                 `json:"cache_creation_tokens"`
-	TotalTokens          int64                 `json:"total_tokens"`
-	Cost                 float64               `json:"cost"`
-	AvgLatencyMS         *float64              `json:"average_latency_ms"`
-	LastSeenMS           int64                 `json:"last_seen_ms"`
-	Models               []AccountModelStatRow `json:"models,omitempty"`
+	ID                        string                `json:"id"`
+	AccountSnapshot           string                `json:"account_snapshot,omitempty"`
+	AuthLabelSnapshot         string                `json:"auth_label_snapshot,omitempty"`
+	AuthProviderSnapshot      string                `json:"auth_provider_snapshot,omitempty"`
+	AuthIndices               []string              `json:"auth_indices,omitempty"`
+	Sources                   []string              `json:"sources,omitempty"`
+	SourceHashes              []string              `json:"source_hashes,omitempty"`
+	Calls                     int64                 `json:"calls"`
+	SuccessCalls              int64                 `json:"success_calls"`
+	FailureCalls              int64                 `json:"failure_calls"`
+	SuccessRate               float64               `json:"success_rate"`
+	InputTokens               int64                 `json:"input_tokens"`
+	OutputTokens              int64                 `json:"output_tokens"`
+	NonReasoningOutputTokens  int64                 `json:"non_reasoning_output_tokens"`
+	ReasoningTokens           int64                 `json:"reasoning_tokens"`
+	UnclassifiedTokens        int64                 `json:"unclassified_tokens"`
+	IncompleteAccountingCalls int64                 `json:"incomplete_accounting_calls"`
+	CachedTokens              int64                 `json:"cached_tokens"`
+	CacheReadTokens           int64                 `json:"cache_read_tokens"`
+	CacheCreationTokens       int64                 `json:"cache_creation_tokens"`
+	TotalTokens               int64                 `json:"total_tokens"`
+	Cost                      float64               `json:"cost"`
+	AvgLatencyMS              *float64              `json:"average_latency_ms"`
+	LastSeenMS                int64                 `json:"last_seen_ms"`
+	Models                    []AccountModelStatRow `json:"models,omitempty"`
 }
 
 type CredentialStatRow struct {
-	ID                    string                `json:"id"`
-	AuthFileSnapshot      string                `json:"auth_file_snapshot,omitempty"`
-	AuthIndex             string                `json:"auth_index,omitempty"`
-	Source                string                `json:"source,omitempty"`
-	SourceHash            string                `json:"source_hash,omitempty"`
-	AccountSnapshot       string                `json:"account_snapshot,omitempty"`
-	AuthLabelSnapshot     string                `json:"auth_label_snapshot,omitempty"`
-	AuthProviderSnapshot  string                `json:"auth_provider_snapshot,omitempty"`
-	AuthProjectIDSnapshot string                `json:"auth_project_id_snapshot,omitempty"`
-	Calls                 int64                 `json:"calls"`
-	SuccessCalls          int64                 `json:"success_calls"`
-	FailureCalls          int64                 `json:"failure_calls"`
-	SuccessRate           float64               `json:"success_rate"`
-	InputTokens           int64                 `json:"input_tokens"`
-	OutputTokens          int64                 `json:"output_tokens"`
-	CachedTokens          int64                 `json:"cached_tokens"`
-	CacheReadTokens       int64                 `json:"cache_read_tokens"`
-	CacheCreationTokens   int64                 `json:"cache_creation_tokens"`
-	TotalTokens           int64                 `json:"total_tokens"`
-	Cost                  float64               `json:"cost"`
-	AvgLatencyMS          *float64              `json:"average_latency_ms"`
-	LastSeenMS            int64                 `json:"last_seen_ms"`
-	Models                []AccountModelStatRow `json:"models,omitempty"`
+	ID                        string                `json:"id"`
+	AuthFileSnapshot          string                `json:"auth_file_snapshot,omitempty"`
+	AuthIndex                 string                `json:"auth_index,omitempty"`
+	Source                    string                `json:"source,omitempty"`
+	SourceHash                string                `json:"source_hash,omitempty"`
+	AccountSnapshot           string                `json:"account_snapshot,omitempty"`
+	AuthLabelSnapshot         string                `json:"auth_label_snapshot,omitempty"`
+	AuthProviderSnapshot      string                `json:"auth_provider_snapshot,omitempty"`
+	AuthProjectIDSnapshot     string                `json:"auth_project_id_snapshot,omitempty"`
+	Calls                     int64                 `json:"calls"`
+	SuccessCalls              int64                 `json:"success_calls"`
+	FailureCalls              int64                 `json:"failure_calls"`
+	SuccessRate               float64               `json:"success_rate"`
+	InputTokens               int64                 `json:"input_tokens"`
+	OutputTokens              int64                 `json:"output_tokens"`
+	NonReasoningOutputTokens  int64                 `json:"non_reasoning_output_tokens"`
+	ReasoningTokens           int64                 `json:"reasoning_tokens"`
+	UnclassifiedTokens        int64                 `json:"unclassified_tokens"`
+	IncompleteAccountingCalls int64                 `json:"incomplete_accounting_calls"`
+	CachedTokens              int64                 `json:"cached_tokens"`
+	CacheReadTokens           int64                 `json:"cache_read_tokens"`
+	CacheCreationTokens       int64                 `json:"cache_creation_tokens"`
+	TotalTokens               int64                 `json:"total_tokens"`
+	Cost                      float64               `json:"cost"`
+	AvgLatencyMS              *float64              `json:"average_latency_ms"`
+	LastSeenMS                int64                 `json:"last_seen_ms"`
+	Models                    []AccountModelStatRow `json:"models,omitempty"`
 }
 
 type CredentialTimelinePoint struct {
-	ID                    string   `json:"id"`
-	Label                 string   `json:"label"`
-	AuthFileSnapshot      string   `json:"auth_file_snapshot,omitempty"`
-	AuthIndex             string   `json:"auth_index,omitempty"`
-	Source                string   `json:"source,omitempty"`
-	SourceHash            string   `json:"source_hash,omitempty"`
-	AccountSnapshot       string   `json:"account_snapshot,omitempty"`
-	AuthLabelSnapshot     string   `json:"auth_label_snapshot,omitempty"`
-	AuthProviderSnapshot  string   `json:"auth_provider_snapshot,omitempty"`
-	AuthProjectIDSnapshot string   `json:"auth_project_id_snapshot,omitempty"`
-	BucketMS              int64    `json:"bucket_ms"`
-	BucketLabel           string   `json:"bucket_label"`
-	Calls                 int64    `json:"calls"`
-	Tokens                int64    `json:"tokens"`
-	Success               int64    `json:"success"`
-	Failure               int64    `json:"failure"`
-	InputTokens           int64    `json:"input_tokens"`
-	OutputTokens          int64    `json:"output_tokens"`
-	CachedTokens          int64    `json:"cached_tokens"`
-	CacheReadTokens       int64    `json:"cache_read_tokens"`
-	CacheCreationTokens   int64    `json:"cache_creation_tokens"`
-	ReasoningTokens       int64    `json:"reasoning_tokens"`
-	TotalTokens           int64    `json:"total_tokens"`
-	Cost                  float64  `json:"cost"`
-	AvgLatencyMS          *float64 `json:"average_latency_ms"`
-	SuccessRate           float64  `json:"success_rate"`
-	FailureRate           float64  `json:"failure_rate"`
+	ID                        string   `json:"id"`
+	Label                     string   `json:"label"`
+	AuthFileSnapshot          string   `json:"auth_file_snapshot,omitempty"`
+	AuthIndex                 string   `json:"auth_index,omitempty"`
+	Source                    string   `json:"source,omitempty"`
+	SourceHash                string   `json:"source_hash,omitempty"`
+	AccountSnapshot           string   `json:"account_snapshot,omitempty"`
+	AuthLabelSnapshot         string   `json:"auth_label_snapshot,omitempty"`
+	AuthProviderSnapshot      string   `json:"auth_provider_snapshot,omitempty"`
+	AuthProjectIDSnapshot     string   `json:"auth_project_id_snapshot,omitempty"`
+	BucketMS                  int64    `json:"bucket_ms"`
+	BucketLabel               string   `json:"bucket_label"`
+	Calls                     int64    `json:"calls"`
+	Tokens                    int64    `json:"tokens"`
+	Success                   int64    `json:"success"`
+	Failure                   int64    `json:"failure"`
+	InputTokens               int64    `json:"input_tokens"`
+	OutputTokens              int64    `json:"output_tokens"`
+	NonReasoningOutputTokens  int64    `json:"non_reasoning_output_tokens"`
+	CachedTokens              int64    `json:"cached_tokens"`
+	CacheReadTokens           int64    `json:"cache_read_tokens"`
+	CacheCreationTokens       int64    `json:"cache_creation_tokens"`
+	ReasoningTokens           int64    `json:"reasoning_tokens"`
+	UnclassifiedTokens        int64    `json:"unclassified_tokens"`
+	IncompleteAccountingCalls int64    `json:"incomplete_accounting_calls"`
+	TotalTokens               int64    `json:"total_tokens"`
+	Cost                      float64  `json:"cost"`
+	AvgLatencyMS              *float64 `json:"average_latency_ms"`
+	SuccessRate               float64  `json:"success_rate"`
+	FailureRate               float64  `json:"failure_rate"`
 }
 
 type APIKeyTimelinePoint struct {
-	APIKeyHash          string   `json:"api_key_hash"`
-	BucketMS            int64    `json:"bucket_ms"`
-	BucketLabel         string   `json:"bucket_label"`
-	Calls               int64    `json:"calls"`
-	Tokens              int64    `json:"tokens"`
-	Success             int64    `json:"success"`
-	Failure             int64    `json:"failure"`
-	InputTokens         int64    `json:"input_tokens"`
-	OutputTokens        int64    `json:"output_tokens"`
-	CachedTokens        int64    `json:"cached_tokens"`
-	CacheReadTokens     int64    `json:"cache_read_tokens"`
-	CacheCreationTokens int64    `json:"cache_creation_tokens"`
-	ReasoningTokens     int64    `json:"reasoning_tokens"`
-	TotalTokens         int64    `json:"total_tokens"`
-	Cost                float64  `json:"cost"`
-	AvgLatencyMS        *float64 `json:"average_latency_ms"`
-	SuccessRate         float64  `json:"success_rate"`
-	FailureRate         float64  `json:"failure_rate"`
+	APIKeyHash                string   `json:"api_key_hash"`
+	BucketMS                  int64    `json:"bucket_ms"`
+	BucketLabel               string   `json:"bucket_label"`
+	Calls                     int64    `json:"calls"`
+	Tokens                    int64    `json:"tokens"`
+	Success                   int64    `json:"success"`
+	Failure                   int64    `json:"failure"`
+	InputTokens               int64    `json:"input_tokens"`
+	OutputTokens              int64    `json:"output_tokens"`
+	NonReasoningOutputTokens  int64    `json:"non_reasoning_output_tokens"`
+	CachedTokens              int64    `json:"cached_tokens"`
+	CacheReadTokens           int64    `json:"cache_read_tokens"`
+	CacheCreationTokens       int64    `json:"cache_creation_tokens"`
+	ReasoningTokens           int64    `json:"reasoning_tokens"`
+	UnclassifiedTokens        int64    `json:"unclassified_tokens"`
+	IncompleteAccountingCalls int64    `json:"incomplete_accounting_calls"`
+	TotalTokens               int64    `json:"total_tokens"`
+	Cost                      float64  `json:"cost"`
+	AvgLatencyMS              *float64 `json:"average_latency_ms"`
+	SuccessRate               float64  `json:"success_rate"`
+	FailureRate               float64  `json:"failure_rate"`
 }
 
 type AccountModelStatRow struct {
-	Model               string  `json:"model"`
-	Calls               int64   `json:"calls"`
-	SuccessCalls        int64   `json:"success_calls"`
-	FailureCalls        int64   `json:"failure_calls"`
-	SuccessRate         float64 `json:"success_rate"`
-	InputTokens         int64   `json:"input_tokens"`
-	OutputTokens        int64   `json:"output_tokens"`
-	CachedTokens        int64   `json:"cached_tokens"`
-	CacheReadTokens     int64   `json:"cache_read_tokens"`
-	CacheCreationTokens int64   `json:"cache_creation_tokens"`
-	CacheHitTokens      int64   `json:"cache_hit_tokens"`
-	CacheHitInputTokens int64   `json:"cache_hit_input_tokens"`
-	CacheHitRate        float64 `json:"cache_hit_rate"`
-	TotalTokens         int64   `json:"total_tokens"`
-	Cost                float64 `json:"cost"`
-	LastSeenMS          int64   `json:"last_seen_ms"`
+	Model                     string  `json:"model"`
+	Calls                     int64   `json:"calls"`
+	SuccessCalls              int64   `json:"success_calls"`
+	FailureCalls              int64   `json:"failure_calls"`
+	SuccessRate               float64 `json:"success_rate"`
+	InputTokens               int64   `json:"input_tokens"`
+	OutputTokens              int64   `json:"output_tokens"`
+	NonReasoningOutputTokens  int64   `json:"non_reasoning_output_tokens"`
+	ReasoningTokens           int64   `json:"reasoning_tokens"`
+	UnclassifiedTokens        int64   `json:"unclassified_tokens"`
+	IncompleteAccountingCalls int64   `json:"incomplete_accounting_calls"`
+	CachedTokens              int64   `json:"cached_tokens"`
+	CacheReadTokens           int64   `json:"cache_read_tokens"`
+	CacheCreationTokens       int64   `json:"cache_creation_tokens"`
+	CacheHitTokens            int64   `json:"cache_hit_tokens"`
+	CacheHitInputTokens       int64   `json:"cache_hit_input_tokens"`
+	CacheHitRate              float64 `json:"cache_hit_rate"`
+	TotalTokens               int64   `json:"total_tokens"`
+	Cost                      float64 `json:"cost"`
+	LastSeenMS                int64   `json:"last_seen_ms"`
 }
 
 type APIKeyStatRow struct {
-	ID                   string                `json:"id"`
-	APIKeyHash           string                `json:"api_key_hash"`
-	AccountSnapshot      string                `json:"account_snapshot,omitempty"`
-	AuthLabelSnapshot    string                `json:"auth_label_snapshot,omitempty"`
-	AuthProviderSnapshot string                `json:"auth_provider_snapshot,omitempty"`
-	AuthIndices          []string              `json:"auth_indices,omitempty"`
-	Sources              []string              `json:"sources,omitempty"`
-	SourceHashes         []string              `json:"source_hashes,omitempty"`
-	Calls                int64                 `json:"calls"`
-	SuccessCalls         int64                 `json:"success_calls"`
-	FailureCalls         int64                 `json:"failure_calls"`
-	SuccessRate          float64               `json:"success_rate"`
-	InputTokens          int64                 `json:"input_tokens"`
-	OutputTokens         int64                 `json:"output_tokens"`
-	CachedTokens         int64                 `json:"cached_tokens"`
-	CacheReadTokens      int64                 `json:"cache_read_tokens"`
-	CacheCreationTokens  int64                 `json:"cache_creation_tokens"`
-	TotalTokens          int64                 `json:"total_tokens"`
-	Cost                 float64               `json:"cost"`
-	AvgLatencyMS         *float64              `json:"average_latency_ms"`
-	LastSeenMS           int64                 `json:"last_seen_ms"`
-	Models               []AccountModelStatRow `json:"models,omitempty"`
-	Contexts             []APIKeyContextRow    `json:"contexts,omitempty"`
+	ID                        string                `json:"id"`
+	APIKeyHash                string                `json:"api_key_hash"`
+	AccountSnapshot           string                `json:"account_snapshot,omitempty"`
+	AuthLabelSnapshot         string                `json:"auth_label_snapshot,omitempty"`
+	AuthProviderSnapshot      string                `json:"auth_provider_snapshot,omitempty"`
+	AuthIndices               []string              `json:"auth_indices,omitempty"`
+	Sources                   []string              `json:"sources,omitempty"`
+	SourceHashes              []string              `json:"source_hashes,omitempty"`
+	Calls                     int64                 `json:"calls"`
+	SuccessCalls              int64                 `json:"success_calls"`
+	FailureCalls              int64                 `json:"failure_calls"`
+	SuccessRate               float64               `json:"success_rate"`
+	InputTokens               int64                 `json:"input_tokens"`
+	OutputTokens              int64                 `json:"output_tokens"`
+	NonReasoningOutputTokens  int64                 `json:"non_reasoning_output_tokens"`
+	ReasoningTokens           int64                 `json:"reasoning_tokens"`
+	UnclassifiedTokens        int64                 `json:"unclassified_tokens"`
+	IncompleteAccountingCalls int64                 `json:"incomplete_accounting_calls"`
+	CachedTokens              int64                 `json:"cached_tokens"`
+	CacheReadTokens           int64                 `json:"cache_read_tokens"`
+	CacheCreationTokens       int64                 `json:"cache_creation_tokens"`
+	TotalTokens               int64                 `json:"total_tokens"`
+	Cost                      float64               `json:"cost"`
+	AvgLatencyMS              *float64              `json:"average_latency_ms"`
+	LastSeenMS                int64                 `json:"last_seen_ms"`
+	Models                    []AccountModelStatRow `json:"models,omitempty"`
+	Contexts                  []APIKeyContextRow    `json:"contexts,omitempty"`
 }
 
 type APIKeyContextRow struct {
@@ -688,25 +720,29 @@ type FilterOptions struct {
 }
 
 type TaskBucketRow struct {
-	BucketKey           string   `json:"bucket_key"`
-	Total               int64    `json:"total"`
-	Success             int64    `json:"success"`
-	Failure             int64    `json:"failure"`
-	FirstMS             int64    `json:"first_ms"`
-	LastMS              int64    `json:"last_ms"`
-	Source              string   `json:"source"`
-	SourceHash          string   `json:"source_hash"`
-	AuthIndex           string   `json:"auth_index"`
-	Models              []string `json:"models"`
-	Endpoints           []string `json:"endpoints"`
-	InputTokens         int64    `json:"input_tokens"`
-	OutputTokens        int64    `json:"output_tokens"`
-	CachedTokens        int64    `json:"cached_tokens"`
-	CacheReadTokens     int64    `json:"cache_read_tokens"`
-	CacheCreationTokens int64    `json:"cache_creation_tokens"`
-	TotalTokens         int64    `json:"total_tokens"`
-	AvgLatencyMS        *float64 `json:"average_latency_ms"`
-	MaxLatencyMS        *int64   `json:"max_latency_ms"`
+	BucketKey                 string   `json:"bucket_key"`
+	Total                     int64    `json:"total"`
+	Success                   int64    `json:"success"`
+	Failure                   int64    `json:"failure"`
+	FirstMS                   int64    `json:"first_ms"`
+	LastMS                    int64    `json:"last_ms"`
+	Source                    string   `json:"source"`
+	SourceHash                string   `json:"source_hash"`
+	AuthIndex                 string   `json:"auth_index"`
+	Models                    []string `json:"models"`
+	Endpoints                 []string `json:"endpoints"`
+	InputTokens               int64    `json:"input_tokens"`
+	OutputTokens              int64    `json:"output_tokens"`
+	NonReasoningOutputTokens  int64    `json:"non_reasoning_output_tokens"`
+	ReasoningTokens           int64    `json:"reasoning_tokens"`
+	UnclassifiedTokens        int64    `json:"unclassified_tokens"`
+	IncompleteAccountingCalls int64    `json:"incomplete_accounting_calls"`
+	CachedTokens              int64    `json:"cached_tokens"`
+	CacheReadTokens           int64    `json:"cache_read_tokens"`
+	CacheCreationTokens       int64    `json:"cache_creation_tokens"`
+	TotalTokens               int64    `json:"total_tokens"`
+	AvgLatencyMS              *float64 `json:"average_latency_ms"`
+	MaxLatencyMS              *int64   `json:"max_latency_ms"`
 }
 
 type RecentFailure struct {
@@ -762,50 +798,58 @@ type EventsResponse struct {
 }
 
 type EventRow struct {
-	RequestID              string                        `json:"request_id,omitempty"`
-	EventHash              string                        `json:"event_hash"`
-	TimestampMS            int64                         `json:"timestamp_ms"`
-	Model                  string                        `json:"model"`
-	AnalyticsModel         string                        `json:"analytics_model,omitempty"`
-	RequestedModel         string                        `json:"requested_model,omitempty"`
-	ResolvedModel          string                        `json:"resolved_model,omitempty"`
-	Endpoint               string                        `json:"endpoint"`
-	Method                 string                        `json:"method"`
-	Path                   string                        `json:"path"`
-	ClientIP               string                        `json:"client_ip,omitempty"`
-	XForwardedFor          string                        `json:"x_forwarded_for,omitempty"`
-	UserAgent              string                        `json:"user_agent,omitempty"`
-	AuthIndex              string                        `json:"auth_index"`
-	Source                 string                        `json:"source"`
-	SourceHash             string                        `json:"source_hash"`
-	APIKeyHash             string                        `json:"api_key_hash"`
-	AccountSnapshot        string                        `json:"account_snapshot"`
-	AuthLabelSnapshot      string                        `json:"auth_label_snapshot"`
-	AuthFileSnapshot       string                        `json:"auth_file_snapshot,omitempty"`
-	AuthProviderSnapshot   string                        `json:"auth_provider_snapshot"`
-	AuthProjectIDSnapshot  string                        `json:"auth_project_id_snapshot,omitempty"`
-	ReasoningEffort        string                        `json:"reasoning_effort,omitempty"`
-	ServiceTier            string                        `json:"service_tier,omitempty"`
-	ExecutorType           string                        `json:"executor_type,omitempty"`
-	InputTokens            int64                         `json:"input_tokens"`
-	OutputTokens           int64                         `json:"output_tokens"`
-	CachedTokens           int64                         `json:"cached_tokens"`
-	CacheReadTokens        int64                         `json:"cache_read_tokens"`
-	CacheCreationTokens    int64                         `json:"cache_creation_tokens"`
-	ReasoningTokens        int64                         `json:"reasoning_tokens"`
-	TotalTokens            int64                         `json:"total_tokens"`
-	LatencyMS              *int64                        `json:"latency_ms"`
-	TTFTMS                 *int64                        `json:"ttft_ms"`
-	Failed                 bool                          `json:"failed"`
-	FailStatusCode         *int64                        `json:"fail_status_code,omitempty"`
-	FailSummary            string                        `json:"fail_summary,omitempty"`
-	ResponseMetadata       *usage.ResponseHeaderMetadata `json:"response_metadata,omitempty"`
-	HeaderQuotaRecoverAtMS *int64                        `json:"header_quota_recover_at_ms,omitempty"`
-	HeaderQuotaUsedPercent *float64                      `json:"header_quota_used_percent,omitempty"`
-	HeaderQuotaPlanType    string                        `json:"header_quota_plan_type,omitempty"`
-	HeaderErrorKind        string                        `json:"header_error_kind,omitempty"`
-	HeaderErrorCode        string                        `json:"header_error_code,omitempty"`
-	HeaderTraceID          string                        `json:"header_trace_id,omitempty"`
+	RequestID                string                        `json:"request_id,omitempty"`
+	EventHash                string                        `json:"event_hash"`
+	TimestampMS              int64                         `json:"timestamp_ms"`
+	Model                    string                        `json:"model"`
+	AnalyticsModel           string                        `json:"analytics_model,omitempty"`
+	RequestedModel           string                        `json:"requested_model,omitempty"`
+	ResolvedModel            string                        `json:"resolved_model,omitempty"`
+	Endpoint                 string                        `json:"endpoint"`
+	Method                   string                        `json:"method"`
+	Path                     string                        `json:"path"`
+	ClientIP                 string                        `json:"client_ip,omitempty"`
+	XForwardedFor            string                        `json:"x_forwarded_for,omitempty"`
+	UserAgent                string                        `json:"user_agent,omitempty"`
+	AuthIndex                string                        `json:"auth_index"`
+	Source                   string                        `json:"source"`
+	SourceHash               string                        `json:"source_hash"`
+	APIKeyHash               string                        `json:"api_key_hash"`
+	AccountSnapshot          string                        `json:"account_snapshot"`
+	AuthLabelSnapshot        string                        `json:"auth_label_snapshot"`
+	AuthFileSnapshot         string                        `json:"auth_file_snapshot,omitempty"`
+	AuthProviderSnapshot     string                        `json:"auth_provider_snapshot"`
+	AuthProjectIDSnapshot    string                        `json:"auth_project_id_snapshot,omitempty"`
+	ReasoningEffort          string                        `json:"reasoning_effort,omitempty"`
+	ServiceTier              string                        `json:"service_tier,omitempty"`
+	ExecutorType             string                        `json:"executor_type,omitempty"`
+	CacheInputMode           string                        `json:"cache_input_mode,omitempty"`
+	AccountingVersion        int                           `json:"accounting_version"`
+	AccountingValid          bool                          `json:"accounting_valid"`
+	AccountingQuality        string                        `json:"accounting_quality"`
+	InputTokens              int64                         `json:"input_tokens"`
+	OutputTokens             int64                         `json:"output_tokens"`
+	NonReasoningOutputTokens int64                         `json:"non_reasoning_output_tokens"`
+	CachedTokens             int64                         `json:"cached_tokens"`
+	CacheReadTokens          int64                         `json:"cache_read_tokens"`
+	CacheCreationTokens      int64                         `json:"cache_creation_tokens"`
+	ReasoningTokens          int64                         `json:"reasoning_tokens"`
+	UnclassifiedTokens       int64                         `json:"unclassified_tokens"`
+	IncompleteAccounting     bool                          `json:"incomplete_accounting"`
+	TokenBreakdown           usage.TokenBreakdown          `json:"token_breakdown"`
+	TotalTokens              int64                         `json:"total_tokens"`
+	LatencyMS                *int64                        `json:"latency_ms"`
+	TTFTMS                   *int64                        `json:"ttft_ms"`
+	Failed                   bool                          `json:"failed"`
+	FailStatusCode           *int64                        `json:"fail_status_code,omitempty"`
+	FailSummary              string                        `json:"fail_summary,omitempty"`
+	ResponseMetadata         *usage.ResponseHeaderMetadata `json:"response_metadata,omitempty"`
+	HeaderQuotaRecoverAtMS   *int64                        `json:"header_quota_recover_at_ms,omitempty"`
+	HeaderQuotaUsedPercent   *float64                      `json:"header_quota_used_percent,omitempty"`
+	HeaderQuotaPlanType      string                        `json:"header_quota_plan_type,omitempty"`
+	HeaderErrorKind          string                        `json:"header_error_kind,omitempty"`
+	HeaderErrorCode          string                        `json:"header_error_code,omitempty"`
+	HeaderTraceID            string                        `json:"header_trace_id,omitempty"`
 }
 
 func (s *Service) Analytics(ctx context.Context, req Request) (Response, error) {
@@ -1849,17 +1893,21 @@ func channelModelStatsFromAccountStats(stats []store.AccountModelStat) []store.C
 		entry.row.Calls += stat.Calls
 		entry.row.SuccessCalls += stat.SuccessCalls
 		entry.row.FailureCalls += stat.FailureCalls
-		entry.row.InputTokens += stat.InputTokens
-		entry.row.OutputTokens += stat.OutputTokens
-		entry.row.CachedTokens += stat.CachedTokens
-		entry.row.CacheReadTokens += stat.CacheReadTokens
-		entry.row.CacheCreationTokens += stat.CacheCreationTokens
-		entry.row.LongInputTokens += stat.LongInputTokens
-		entry.row.LongOutputTokens += stat.LongOutputTokens
-		entry.row.LongCachedTokens += stat.LongCachedTokens
-		entry.row.LongCacheReadTokens += stat.LongCacheReadTokens
-		entry.row.LongCacheCreationTokens += stat.LongCacheCreationTokens
-		entry.row.TotalTokens += stat.TotalTokens
+		entry.row.InputTokens = usage.SaturatingTokenSum(entry.row.InputTokens, stat.InputTokens)
+		entry.row.OutputTokens = usage.SaturatingTokenSum(entry.row.OutputTokens, stat.OutputTokens)
+		entry.row.NonReasoningOutputTokens = usage.SaturatingTokenSum(entry.row.NonReasoningOutputTokens, stat.NonReasoningOutputTokens)
+		entry.row.ReasoningTokens = usage.SaturatingTokenSum(entry.row.ReasoningTokens, stat.ReasoningTokens)
+		entry.row.UnclassifiedTokens = usage.SaturatingTokenSum(entry.row.UnclassifiedTokens, stat.UnclassifiedTokens)
+		entry.row.IncompleteAccountingCalls = usage.SaturatingTokenSum(entry.row.IncompleteAccountingCalls, stat.IncompleteAccountingCalls)
+		entry.row.CachedTokens = usage.SaturatingTokenSum(entry.row.CachedTokens, stat.CachedTokens)
+		entry.row.CacheReadTokens = usage.SaturatingTokenSum(entry.row.CacheReadTokens, stat.CacheReadTokens)
+		entry.row.CacheCreationTokens = usage.SaturatingTokenSum(entry.row.CacheCreationTokens, stat.CacheCreationTokens)
+		entry.row.LongInputTokens = usage.SaturatingTokenSum(entry.row.LongInputTokens, stat.LongInputTokens)
+		entry.row.LongOutputTokens = usage.SaturatingTokenSum(entry.row.LongOutputTokens, stat.LongOutputTokens)
+		entry.row.LongCachedTokens = usage.SaturatingTokenSum(entry.row.LongCachedTokens, stat.LongCachedTokens)
+		entry.row.LongCacheReadTokens = usage.SaturatingTokenSum(entry.row.LongCacheReadTokens, stat.LongCacheReadTokens)
+		entry.row.LongCacheCreationTokens = usage.SaturatingTokenSum(entry.row.LongCacheCreationTokens, stat.LongCacheCreationTokens)
+		entry.row.TotalTokens = usage.SaturatingTokenSum(entry.row.TotalTokens, stat.TotalTokens)
 		if stat.LatencySamples > 0 {
 			entry.latencySumMS += stat.LatencySumMS
 			entry.row.LatencySamples += stat.LatencySamples
@@ -2057,32 +2105,35 @@ func buildSummary(agg store.Aggregate, latencySummary store.LatencySummary, roll
 	approxTasks := int64(len(taskBuckets))
 	totalCost := sumCost(modelStats, prices)
 	return &Summary{
-		TotalCalls:            agg.TotalCalls,
-		SuccessCalls:          agg.SuccessCalls,
-		FailureCalls:          agg.FailureCalls,
-		SuccessRate:           ratio(agg.SuccessCalls, agg.TotalCalls),
-		InputTokens:           agg.InputTokens,
-		OutputTokens:          agg.OutputTokens,
-		CachedTokens:          agg.CachedTokens,
-		CacheReadTokens:       agg.CacheReadTokens,
-		CacheCreationTokens:   agg.CacheCreationTokens,
-		CacheHitRate:          cacheHitRateForModelStats(modelStats),
-		ReasoningTokens:       agg.ReasoningTokens,
-		TotalTokens:           agg.TotalTokens,
-		TotalCost:             totalCost,
-		AverageCostPerCall:    ratioFloat(totalCost, agg.TotalCalls),
-		AverageLatencyMS:      nullableFloat(agg.AvgLatencyMS.Valid, agg.AvgLatencyMS.Float64),
-		P95LatencyMS:          nullableFloat(latencySummary.P95LatencyMS.Valid, latencySummary.P95LatencyMS.Float64),
-		P95TTFTMS:             nullableFloat(latencySummary.P95TTFTMS.Valid, latencySummary.P95TTFTMS.Float64),
-		ZeroTokenCalls:        agg.ZeroTokenCalls,
-		RPM30M:                float64(rolling.TotalCalls) / 30,
-		TPM30M:                float64(rolling.TotalTokens) / 30,
-		AvgDailyRequests:      float64(agg.TotalCalls) / float64(dayCount),
-		AvgDailyTokens:        float64(agg.TotalTokens) / float64(dayCount),
-		ApproxTasks:           approxTasks,
-		ApproxTaskFailures:    taskFailures,
-		ApproxTaskSuccessRate: ratio(approxTasks-taskFailures, approxTasks),
-		ZeroTokenModels:       zeroTokenModels,
+		TotalCalls:                agg.TotalCalls,
+		SuccessCalls:              agg.SuccessCalls,
+		FailureCalls:              agg.FailureCalls,
+		SuccessRate:               ratio(agg.SuccessCalls, agg.TotalCalls),
+		InputTokens:               agg.InputTokens,
+		OutputTokens:              agg.OutputTokens,
+		NonReasoningOutputTokens:  agg.NonReasoningOutputTokens,
+		CachedTokens:              agg.CachedTokens,
+		CacheReadTokens:           agg.CacheReadTokens,
+		CacheCreationTokens:       agg.CacheCreationTokens,
+		CacheHitRate:              cacheHitRateForModelStats(modelStats),
+		ReasoningTokens:           agg.ReasoningTokens,
+		UnclassifiedTokens:        agg.UnclassifiedTokens,
+		IncompleteAccountingCalls: agg.IncompleteAccountingCalls,
+		TotalTokens:               agg.TotalTokens,
+		TotalCost:                 totalCost,
+		AverageCostPerCall:        ratioFloat(totalCost, agg.TotalCalls),
+		AverageLatencyMS:          nullableFloat(agg.AvgLatencyMS.Valid, agg.AvgLatencyMS.Float64),
+		P95LatencyMS:              nullableFloat(latencySummary.P95LatencyMS.Valid, latencySummary.P95LatencyMS.Float64),
+		P95TTFTMS:                 nullableFloat(latencySummary.P95TTFTMS.Valid, latencySummary.P95TTFTMS.Float64),
+		ZeroTokenCalls:            agg.ZeroTokenCalls,
+		RPM30M:                    float64(rolling.TotalCalls) / 30,
+		TPM30M:                    float64(rolling.TotalTokens) / 30,
+		AvgDailyRequests:          float64(agg.TotalCalls) / float64(dayCount),
+		AvgDailyTokens:            float64(agg.TotalTokens) / float64(dayCount),
+		ApproxTasks:               approxTasks,
+		ApproxTaskFailures:        taskFailures,
+		ApproxTaskSuccessRate:     ratio(approxTasks-taskFailures, approxTasks),
+		ZeroTokenModels:           zeroTokenModels,
 	}
 }
 
@@ -2137,16 +2188,19 @@ func buildTimeline(points []store.TimelinePoint, percentiles []store.LatencyPerc
 			order = append(order, point.BucketMS)
 		}
 		bucket.point.Calls += point.Calls
-		bucket.point.Tokens += point.Tokens
-		bucket.point.TotalTokens += point.Tokens
+		bucket.point.Tokens = usage.SaturatingTokenSum(bucket.point.Tokens, point.Tokens)
+		bucket.point.TotalTokens = usage.SaturatingTokenSum(bucket.point.TotalTokens, point.Tokens)
 		bucket.point.Success += point.Success
 		bucket.point.Failure += point.Failure
-		bucket.point.InputTokens += point.InputTokens
-		bucket.point.OutputTokens += point.OutputTokens
-		bucket.point.CachedTokens += point.CachedTokens
-		bucket.point.CacheReadTokens += point.CacheReadTokens
-		bucket.point.CacheCreationTokens += point.CacheCreationTokens
-		bucket.point.ReasoningTokens += point.ReasoningTokens
+		bucket.point.InputTokens = usage.SaturatingTokenSum(bucket.point.InputTokens, point.InputTokens)
+		bucket.point.OutputTokens = usage.SaturatingTokenSum(bucket.point.OutputTokens, point.OutputTokens)
+		bucket.point.NonReasoningOutputTokens = usage.SaturatingTokenSum(bucket.point.NonReasoningOutputTokens, point.NonReasoningOutputTokens)
+		bucket.point.CachedTokens = usage.SaturatingTokenSum(bucket.point.CachedTokens, point.CachedTokens)
+		bucket.point.CacheReadTokens = usage.SaturatingTokenSum(bucket.point.CacheReadTokens, point.CacheReadTokens)
+		bucket.point.CacheCreationTokens = usage.SaturatingTokenSum(bucket.point.CacheCreationTokens, point.CacheCreationTokens)
+		bucket.point.ReasoningTokens = usage.SaturatingTokenSum(bucket.point.ReasoningTokens, point.ReasoningTokens)
+		bucket.point.UnclassifiedTokens = usage.SaturatingTokenSum(bucket.point.UnclassifiedTokens, point.UnclassifiedTokens)
+		bucket.point.IncompleteAccountingCalls = usage.SaturatingTokenSum(bucket.point.IncompleteAccountingCalls, point.IncompleteAccountingCalls)
 		bucket.point.Cost += costForTimelinePoint(point, prices)
 		behaviorModel := point.BillingModel
 		if strings.TrimSpace(behaviorModel) == "" {
@@ -2159,8 +2213,8 @@ func buildTimeline(points []store.TimelinePoint, percentiles []store.LatencyPerc
 			point.CacheReadTokens,
 			point.CacheCreationTokens,
 		)
-		bucket.cacheHitTokens += cacheHitTokens
-		bucket.cacheHitInputTokens += cacheHitInputTokens
+		bucket.cacheHitTokens = usage.SaturatingTokenSum(bucket.cacheHitTokens, cacheHitTokens)
+		bucket.cacheHitInputTokens = usage.SaturatingTokenSum(bucket.cacheHitInputTokens, cacheHitInputTokens)
 		if point.AvgLatencyMS.Valid && point.LatencySamples > 0 {
 			bucket.latencyTotal += point.AvgLatencyMS.Float64 * float64(point.LatencySamples)
 			bucket.latencySample += point.LatencySamples
@@ -2239,7 +2293,7 @@ func buildHeatmap(points []store.HeatmapPoint, prices map[string]store.ModelPric
 		entry.point.Calls += point.Calls
 		entry.point.Success += point.SuccessCalls
 		entry.point.Failure += point.FailureCalls
-		entry.point.Tokens += point.TotalTokens
+		entry.point.Tokens = usage.SaturatingTokenSum(entry.point.Tokens, point.TotalTokens)
 		entry.point.Cost += cost
 		addHeatmapContributor(entry.models, heatmapContributorKey(point.Model), point.Model, point, cost)
 		addHeatmapContributor(entry.apiKeys, strings.TrimSpace(point.APIKeyHash), point.APIKeyHash, point, cost)
@@ -2278,7 +2332,7 @@ func addHeatmapContributor(group map[string]*HeatmapContributor, key string, lab
 	entry.Calls += point.Calls
 	entry.Success += point.SuccessCalls
 	entry.Failure += point.FailureCalls
-	entry.Tokens += point.TotalTokens
+	entry.Tokens = usage.SaturatingTokenSum(entry.Tokens, point.TotalTokens)
 	entry.Cost += cost
 }
 
@@ -2400,39 +2454,47 @@ func buildModelStats(stats []store.ModelStat, prices map[string]store.ModelPrice
 	result := make([]ModelStat, 0, len(aggregated))
 	for _, stat := range aggregated {
 		result = append(result, ModelStat{
-			Model:               stat.Model,
-			Calls:               stat.Calls,
-			SuccessCalls:        stat.SuccessCalls,
-			FailureCalls:        stat.Calls - stat.SuccessCalls,
-			SuccessRate:         ratio(stat.SuccessCalls, stat.Calls),
-			InputTokens:         stat.InputTokens,
-			OutputTokens:        stat.OutputTokens,
-			CachedTokens:        stat.CachedTokens,
-			CacheReadTokens:     stat.CacheReadTokens,
-			CacheCreationTokens: stat.CacheCreationTokens,
-			CacheHitTokens:      stat.CacheHitTokens,
-			CacheHitInputTokens: stat.CacheHitInputTokens,
-			CacheHitRate:        usage.CacheHitRateFromTotals(stat.CacheHitTokens, stat.CacheHitInputTokens),
-			TotalTokens:         stat.TotalTokens,
-			Cost:                stat.Cost,
+			Model:                     stat.Model,
+			Calls:                     stat.Calls,
+			SuccessCalls:              stat.SuccessCalls,
+			FailureCalls:              stat.Calls - stat.SuccessCalls,
+			SuccessRate:               ratio(stat.SuccessCalls, stat.Calls),
+			InputTokens:               stat.InputTokens,
+			OutputTokens:              stat.OutputTokens,
+			NonReasoningOutputTokens:  stat.NonReasoningOutputTokens,
+			ReasoningTokens:           stat.ReasoningTokens,
+			UnclassifiedTokens:        stat.UnclassifiedTokens,
+			IncompleteAccountingCalls: stat.IncompleteAccountingCalls,
+			CachedTokens:              stat.CachedTokens,
+			CacheReadTokens:           stat.CacheReadTokens,
+			CacheCreationTokens:       stat.CacheCreationTokens,
+			CacheHitTokens:            stat.CacheHitTokens,
+			CacheHitInputTokens:       stat.CacheHitInputTokens,
+			CacheHitRate:              usage.CacheHitRateFromTotals(stat.CacheHitTokens, stat.CacheHitInputTokens),
+			TotalTokens:               stat.TotalTokens,
+			Cost:                      stat.Cost,
 		})
 	}
 	return result
 }
 
 type aggregatedModelStat struct {
-	Model               string
-	Calls               int64
-	SuccessCalls        int64
-	InputTokens         int64
-	OutputTokens        int64
-	CachedTokens        int64
-	CacheReadTokens     int64
-	CacheCreationTokens int64
-	CacheHitTokens      int64
-	CacheHitInputTokens int64
-	TotalTokens         int64
-	Cost                float64
+	Model                     string
+	Calls                     int64
+	SuccessCalls              int64
+	InputTokens               int64
+	OutputTokens              int64
+	NonReasoningOutputTokens  int64
+	ReasoningTokens           int64
+	UnclassifiedTokens        int64
+	IncompleteAccountingCalls int64
+	CachedTokens              int64
+	CacheReadTokens           int64
+	CacheCreationTokens       int64
+	CacheHitTokens            int64
+	CacheHitInputTokens       int64
+	TotalTokens               int64
+	Cost                      float64
 }
 
 func aggregateModelStats(stats []store.ModelStat, prices map[string]store.ModelPrice) []aggregatedModelStat {
@@ -2447,11 +2509,15 @@ func aggregateModelStats(stats []store.ModelStat, prices map[string]store.ModelP
 		}
 		entry.Calls += stat.Calls
 		entry.SuccessCalls += stat.SuccessCalls
-		entry.InputTokens += stat.InputTokens
-		entry.OutputTokens += stat.OutputTokens
-		entry.CachedTokens += stat.CachedTokens
-		entry.CacheReadTokens += stat.CacheReadTokens
-		entry.CacheCreationTokens += stat.CacheCreationTokens
+		entry.InputTokens = usage.SaturatingTokenSum(entry.InputTokens, stat.InputTokens)
+		entry.OutputTokens = usage.SaturatingTokenSum(entry.OutputTokens, stat.OutputTokens)
+		entry.NonReasoningOutputTokens = usage.SaturatingTokenSum(entry.NonReasoningOutputTokens, stat.NonReasoningOutputTokens)
+		entry.ReasoningTokens = usage.SaturatingTokenSum(entry.ReasoningTokens, stat.ReasoningTokens)
+		entry.UnclassifiedTokens = usage.SaturatingTokenSum(entry.UnclassifiedTokens, stat.UnclassifiedTokens)
+		entry.IncompleteAccountingCalls = usage.SaturatingTokenSum(entry.IncompleteAccountingCalls, stat.IncompleteAccountingCalls)
+		entry.CachedTokens = usage.SaturatingTokenSum(entry.CachedTokens, stat.CachedTokens)
+		entry.CacheReadTokens = usage.SaturatingTokenSum(entry.CacheReadTokens, stat.CacheReadTokens)
+		entry.CacheCreationTokens = usage.SaturatingTokenSum(entry.CacheCreationTokens, stat.CacheCreationTokens)
 		behaviorModel := stat.BillingModel
 		if strings.TrimSpace(behaviorModel) == "" {
 			behaviorModel = stat.Model
@@ -2463,9 +2529,9 @@ func aggregateModelStats(stats []store.ModelStat, prices map[string]store.ModelP
 			stat.CacheReadTokens,
 			stat.CacheCreationTokens,
 		)
-		entry.CacheHitTokens += cacheHitTokens
-		entry.CacheHitInputTokens += cacheHitInputTokens
-		entry.TotalTokens += stat.TotalTokens
+		entry.CacheHitTokens = usage.SaturatingTokenSum(entry.CacheHitTokens, cacheHitTokens)
+		entry.CacheHitInputTokens = usage.SaturatingTokenSum(entry.CacheHitInputTokens, cacheHitInputTokens)
+		entry.TotalTokens = usage.SaturatingTokenSum(entry.TotalTokens, stat.TotalTokens)
 		entry.Cost += costForStat(stat, prices)
 	}
 	result := make([]aggregatedModelStat, 0, len(order))
@@ -2505,7 +2571,7 @@ func buildChannelShare(stats []store.ChannelModelStat, prices map[string]store.M
 		entry.row.Calls += stat.Calls
 		entry.row.Success += stat.SuccessCalls
 		entry.row.Failure += stat.FailureCalls
-		entry.row.Tokens += stat.TotalTokens
+		entry.row.Tokens = usage.SaturatingTokenSum(entry.row.Tokens, stat.TotalTokens)
 		entry.row.Cost += costForChannelStat(stat, prices)
 		if stat.AvgLatencyMS.Valid && stat.LatencySamples > 0 {
 			entry.latencySum += stat.AvgLatencyMS.Float64 * float64(stat.LatencySamples)
@@ -2623,6 +2689,10 @@ func buildAccountStats(stats []store.AccountModelStat, prices map[string]store.M
 			stat.TotalTokens,
 			cost,
 		)
+		entry.row.NonReasoningOutputTokens = usage.SaturatingTokenSum(entry.row.NonReasoningOutputTokens, stat.NonReasoningOutputTokens)
+		entry.row.ReasoningTokens = usage.SaturatingTokenSum(entry.row.ReasoningTokens, stat.ReasoningTokens)
+		entry.row.UnclassifiedTokens = usage.SaturatingTokenSum(entry.row.UnclassifiedTokens, stat.UnclassifiedTokens)
+		entry.row.IncompleteAccountingCalls = usage.SaturatingTokenSum(entry.row.IncompleteAccountingCalls, stat.IncompleteAccountingCalls)
 		if stat.LastSeenMS > entry.row.LastSeenMS {
 			entry.row.LastSeenMS = stat.LastSeenMS
 		}
@@ -2630,7 +2700,10 @@ func buildAccountStats(stats []store.AccountModelStat, prices map[string]store.M
 			entry.latencySum += stat.AvgLatencyMS.Float64 * float64(stat.LatencySamples)
 			entry.latencySamples += stat.LatencySamples
 		}
-		addAccountModelStat(entry.models, stat.Model, stat.BillingModel, stat.Calls, stat.SuccessCalls, stat.FailureCalls, stat.InputTokens, stat.OutputTokens, stat.CachedTokens, stat.CacheReadTokens, stat.CacheCreationTokens, stat.TotalTokens, cost, stat.LastSeenMS)
+		addAccountModelStat(entry.models, stat.Model, stat.BillingModel, stat.Calls, stat.SuccessCalls, stat.FailureCalls,
+			stat.InputTokens, stat.OutputTokens, stat.NonReasoningOutputTokens, stat.ReasoningTokens,
+			stat.UnclassifiedTokens, stat.IncompleteAccountingCalls, stat.CachedTokens, stat.CacheReadTokens,
+			stat.CacheCreationTokens, stat.TotalTokens, cost, stat.LastSeenMS)
 	}
 
 	result := make([]AccountStatRow, 0, len(grouped))
@@ -2700,6 +2773,10 @@ func buildCredentialStats(stats []store.CredentialModelStat, prices map[string]s
 			stat.TotalTokens,
 			cost,
 		)
+		entry.row.NonReasoningOutputTokens = usage.SaturatingTokenSum(entry.row.NonReasoningOutputTokens, stat.NonReasoningOutputTokens)
+		entry.row.ReasoningTokens = usage.SaturatingTokenSum(entry.row.ReasoningTokens, stat.ReasoningTokens)
+		entry.row.UnclassifiedTokens = usage.SaturatingTokenSum(entry.row.UnclassifiedTokens, stat.UnclassifiedTokens)
+		entry.row.IncompleteAccountingCalls = usage.SaturatingTokenSum(entry.row.IncompleteAccountingCalls, stat.IncompleteAccountingCalls)
 		if stat.LastSeenMS > entry.row.LastSeenMS {
 			entry.row.LastSeenMS = stat.LastSeenMS
 		}
@@ -2707,7 +2784,10 @@ func buildCredentialStats(stats []store.CredentialModelStat, prices map[string]s
 			entry.latencySum += stat.AvgLatencyMS.Float64 * float64(stat.LatencySamples)
 			entry.latencySamples += stat.LatencySamples
 		}
-		addAccountModelStat(entry.models, stat.Model, stat.BillingModel, stat.Calls, stat.SuccessCalls, stat.FailureCalls, stat.InputTokens, stat.OutputTokens, stat.CachedTokens, stat.CacheReadTokens, stat.CacheCreationTokens, stat.TotalTokens, cost, stat.LastSeenMS)
+		addAccountModelStat(entry.models, stat.Model, stat.BillingModel, stat.Calls, stat.SuccessCalls, stat.FailureCalls,
+			stat.InputTokens, stat.OutputTokens, stat.NonReasoningOutputTokens, stat.ReasoningTokens,
+			stat.UnclassifiedTokens, stat.IncompleteAccountingCalls, stat.CachedTokens, stat.CacheReadTokens,
+			stat.CacheCreationTokens, stat.TotalTokens, cost, stat.LastSeenMS)
 	}
 
 	result := make([]CredentialStatRow, 0, len(grouped))
@@ -2767,16 +2847,19 @@ func buildCredentialTimeline(points []store.CredentialTimelinePoint, granularity
 		}
 		fillCredentialTimelineSnapshots(&entry.point, point)
 		entry.point.Calls += point.Calls
-		entry.point.Tokens += point.Tokens
-		entry.point.TotalTokens += point.Tokens
+		entry.point.Tokens = usage.SaturatingTokenSum(entry.point.Tokens, point.Tokens)
+		entry.point.TotalTokens = usage.SaturatingTokenSum(entry.point.TotalTokens, point.Tokens)
 		entry.point.Success += point.Success
 		entry.point.Failure += point.Failure
-		entry.point.InputTokens += point.InputTokens
-		entry.point.OutputTokens += point.OutputTokens
-		entry.point.CachedTokens += point.CachedTokens
-		entry.point.CacheReadTokens += point.CacheReadTokens
-		entry.point.CacheCreationTokens += point.CacheCreationTokens
-		entry.point.ReasoningTokens += point.ReasoningTokens
+		entry.point.InputTokens = usage.SaturatingTokenSum(entry.point.InputTokens, point.InputTokens)
+		entry.point.OutputTokens = usage.SaturatingTokenSum(entry.point.OutputTokens, point.OutputTokens)
+		entry.point.NonReasoningOutputTokens = usage.SaturatingTokenSum(entry.point.NonReasoningOutputTokens, point.NonReasoningOutputTokens)
+		entry.point.CachedTokens = usage.SaturatingTokenSum(entry.point.CachedTokens, point.CachedTokens)
+		entry.point.CacheReadTokens = usage.SaturatingTokenSum(entry.point.CacheReadTokens, point.CacheReadTokens)
+		entry.point.CacheCreationTokens = usage.SaturatingTokenSum(entry.point.CacheCreationTokens, point.CacheCreationTokens)
+		entry.point.ReasoningTokens = usage.SaturatingTokenSum(entry.point.ReasoningTokens, point.ReasoningTokens)
+		entry.point.UnclassifiedTokens = usage.SaturatingTokenSum(entry.point.UnclassifiedTokens, point.UnclassifiedTokens)
+		entry.point.IncompleteAccountingCalls = usage.SaturatingTokenSum(entry.point.IncompleteAccountingCalls, point.IncompleteAccountingCalls)
 		entry.point.Cost += costForCredentialTimelinePoint(point, prices)
 		if point.AvgLatencyMS.Valid && point.LatencySamples > 0 {
 			entry.latencySum += point.AvgLatencyMS.Float64 * float64(point.LatencySamples)
@@ -2830,16 +2913,19 @@ func buildAPIKeyTimeline(points []store.APIKeyTimelinePoint, granularity string,
 			order = append(order, mapKey)
 		}
 		entry.point.Calls += point.Calls
-		entry.point.Tokens += point.Tokens
-		entry.point.TotalTokens += point.Tokens
+		entry.point.Tokens = usage.SaturatingTokenSum(entry.point.Tokens, point.Tokens)
+		entry.point.TotalTokens = usage.SaturatingTokenSum(entry.point.TotalTokens, point.Tokens)
 		entry.point.Success += point.Success
 		entry.point.Failure += point.Failure
-		entry.point.InputTokens += point.InputTokens
-		entry.point.OutputTokens += point.OutputTokens
-		entry.point.CachedTokens += point.CachedTokens
-		entry.point.CacheReadTokens += point.CacheReadTokens
-		entry.point.CacheCreationTokens += point.CacheCreationTokens
-		entry.point.ReasoningTokens += point.ReasoningTokens
+		entry.point.InputTokens = usage.SaturatingTokenSum(entry.point.InputTokens, point.InputTokens)
+		entry.point.OutputTokens = usage.SaturatingTokenSum(entry.point.OutputTokens, point.OutputTokens)
+		entry.point.NonReasoningOutputTokens = usage.SaturatingTokenSum(entry.point.NonReasoningOutputTokens, point.NonReasoningOutputTokens)
+		entry.point.CachedTokens = usage.SaturatingTokenSum(entry.point.CachedTokens, point.CachedTokens)
+		entry.point.CacheReadTokens = usage.SaturatingTokenSum(entry.point.CacheReadTokens, point.CacheReadTokens)
+		entry.point.CacheCreationTokens = usage.SaturatingTokenSum(entry.point.CacheCreationTokens, point.CacheCreationTokens)
+		entry.point.ReasoningTokens = usage.SaturatingTokenSum(entry.point.ReasoningTokens, point.ReasoningTokens)
+		entry.point.UnclassifiedTokens = usage.SaturatingTokenSum(entry.point.UnclassifiedTokens, point.UnclassifiedTokens)
+		entry.point.IncompleteAccountingCalls = usage.SaturatingTokenSum(entry.point.IncompleteAccountingCalls, point.IncompleteAccountingCalls)
 		entry.point.Cost += costForAPIKeyTimelinePoint(point, prices)
 		if point.AvgLatencyMS.Valid && point.LatencySamples > 0 {
 			entry.latencySum += point.AvgLatencyMS.Float64 * float64(point.LatencySamples)
@@ -2910,6 +2996,10 @@ func buildAPIKeyStats(stats []store.APIKeyModelStat, prices map[string]store.Mod
 			stat.TotalTokens,
 			cost,
 		)
+		entry.row.NonReasoningOutputTokens = usage.SaturatingTokenSum(entry.row.NonReasoningOutputTokens, stat.NonReasoningOutputTokens)
+		entry.row.ReasoningTokens = usage.SaturatingTokenSum(entry.row.ReasoningTokens, stat.ReasoningTokens)
+		entry.row.UnclassifiedTokens = usage.SaturatingTokenSum(entry.row.UnclassifiedTokens, stat.UnclassifiedTokens)
+		entry.row.IncompleteAccountingCalls = usage.SaturatingTokenSum(entry.row.IncompleteAccountingCalls, stat.IncompleteAccountingCalls)
 		if stat.LastSeenMS > entry.row.LastSeenMS {
 			entry.row.LastSeenMS = stat.LastSeenMS
 		}
@@ -2918,7 +3008,10 @@ func buildAPIKeyStats(stats []store.APIKeyModelStat, prices map[string]store.Mod
 			entry.latencySamples += stat.LatencySamples
 		}
 		addAPIKeyContextStat(entry.contexts, stat, cost)
-		addAccountModelStat(entry.models, stat.Model, stat.BillingModel, stat.Calls, stat.SuccessCalls, stat.FailureCalls, stat.InputTokens, stat.OutputTokens, stat.CachedTokens, stat.CacheReadTokens, stat.CacheCreationTokens, stat.TotalTokens, cost, stat.LastSeenMS)
+		addAccountModelStat(entry.models, stat.Model, stat.BillingModel, stat.Calls, stat.SuccessCalls, stat.FailureCalls,
+			stat.InputTokens, stat.OutputTokens, stat.NonReasoningOutputTokens, stat.ReasoningTokens,
+			stat.UnclassifiedTokens, stat.IncompleteAccountingCalls, stat.CachedTokens, stat.CacheReadTokens,
+			stat.CacheCreationTokens, stat.TotalTokens, cost, stat.LastSeenMS)
 	}
 
 	result := make([]APIKeyStatRow, 0, len(grouped))
@@ -3152,12 +3245,12 @@ func addAccountTotals(
 	*calls += addCalls
 	*successCalls += addSuccessCalls
 	*failureCalls += addFailureCalls
-	*inputTokens += addInputTokens
-	*outputTokens += addOutputTokens
-	*cachedTokens += addCachedTokens
-	*cacheReadTokens += addCacheReadTokens
-	*cacheCreationTokens += addCacheCreationTokens
-	*totalTokens += addTotalTokens
+	*inputTokens = usage.SaturatingTokenSum(*inputTokens, addInputTokens)
+	*outputTokens = usage.SaturatingTokenSum(*outputTokens, addOutputTokens)
+	*cachedTokens = usage.SaturatingTokenSum(*cachedTokens, addCachedTokens)
+	*cacheReadTokens = usage.SaturatingTokenSum(*cacheReadTokens, addCacheReadTokens)
+	*cacheCreationTokens = usage.SaturatingTokenSum(*cacheCreationTokens, addCacheCreationTokens)
+	*totalTokens = usage.SaturatingTokenSum(*totalTokens, addTotalTokens)
 	*cost += addCost
 }
 
@@ -3170,6 +3263,10 @@ func addAccountModelStat(
 	failureCalls int64,
 	inputTokens int64,
 	outputTokens int64,
+	nonReasoningOutputTokens int64,
+	reasoningTokens int64,
+	unclassifiedTokens int64,
+	incompleteAccountingCalls int64,
 	cachedTokens int64,
 	cacheReadTokens int64,
 	cacheCreationTokens int64,
@@ -3189,11 +3286,15 @@ func addAccountModelStat(
 	entry.Calls += calls
 	entry.SuccessCalls += successCalls
 	entry.FailureCalls += failureCalls
-	entry.InputTokens += inputTokens
-	entry.OutputTokens += outputTokens
-	entry.CachedTokens += cachedTokens
-	entry.CacheReadTokens += cacheReadTokens
-	entry.CacheCreationTokens += cacheCreationTokens
+	entry.InputTokens = usage.SaturatingTokenSum(entry.InputTokens, inputTokens)
+	entry.OutputTokens = usage.SaturatingTokenSum(entry.OutputTokens, outputTokens)
+	entry.NonReasoningOutputTokens = usage.SaturatingTokenSum(entry.NonReasoningOutputTokens, nonReasoningOutputTokens)
+	entry.ReasoningTokens = usage.SaturatingTokenSum(entry.ReasoningTokens, reasoningTokens)
+	entry.UnclassifiedTokens = usage.SaturatingTokenSum(entry.UnclassifiedTokens, unclassifiedTokens)
+	entry.IncompleteAccountingCalls = usage.SaturatingTokenSum(entry.IncompleteAccountingCalls, incompleteAccountingCalls)
+	entry.CachedTokens = usage.SaturatingTokenSum(entry.CachedTokens, cachedTokens)
+	entry.CacheReadTokens = usage.SaturatingTokenSum(entry.CacheReadTokens, cacheReadTokens)
+	entry.CacheCreationTokens = usage.SaturatingTokenSum(entry.CacheCreationTokens, cacheCreationTokens)
 	behaviorModel := billingModel
 	if strings.TrimSpace(behaviorModel) == "" {
 		behaviorModel = modelKey
@@ -3205,10 +3306,10 @@ func addAccountModelStat(
 		cacheReadTokens,
 		cacheCreationTokens,
 	)
-	entry.CacheHitTokens += cacheHitTokens
-	entry.CacheHitInputTokens += cacheHitInputTokens
+	entry.CacheHitTokens = usage.SaturatingTokenSum(entry.CacheHitTokens, cacheHitTokens)
+	entry.CacheHitInputTokens = usage.SaturatingTokenSum(entry.CacheHitInputTokens, cacheHitInputTokens)
 	entry.CacheHitRate = usage.CacheHitRateFromTotals(entry.CacheHitTokens, entry.CacheHitInputTokens)
-	entry.TotalTokens += totalTokens
+	entry.TotalTokens = usage.SaturatingTokenSum(entry.TotalTokens, totalTokens)
 	entry.Cost += cost
 	if lastSeenMS > entry.LastSeenMS {
 		entry.LastSeenMS = lastSeenMS
@@ -3256,7 +3357,7 @@ func addAPIKeyContextStat(contexts map[string]*apiKeyContextAccumulator, stat st
 	entry.row.Calls += stat.Calls
 	entry.row.SuccessCalls += stat.SuccessCalls
 	entry.row.FailureCalls += stat.FailureCalls
-	entry.row.TotalTokens += stat.TotalTokens
+	entry.row.TotalTokens = usage.SaturatingTokenSum(entry.row.TotalTokens, stat.TotalTokens)
 	entry.row.Cost += cost
 	if stat.LastSeenMS > entry.row.LastSeenMS {
 		entry.row.LastSeenMS = stat.LastSeenMS
@@ -3304,25 +3405,29 @@ func buildTaskBuckets(buckets []store.TaskBucket) []TaskBucketRow {
 	result := make([]TaskBucketRow, 0, len(buckets))
 	for _, bucket := range buckets {
 		result = append(result, TaskBucketRow{
-			BucketKey:           bucket.BucketKey,
-			Total:               bucket.Total,
-			Success:             bucket.Success,
-			Failure:             bucket.Failure,
-			FirstMS:             bucket.FirstMS,
-			LastMS:              bucket.LastMS,
-			Source:              bucket.Source,
-			SourceHash:          bucket.SourceHash,
-			AuthIndex:           bucket.AuthIndex,
-			Models:              splitCSV(bucket.Models),
-			Endpoints:           splitCSV(bucket.Endpoints),
-			InputTokens:         bucket.InputTokens,
-			OutputTokens:        bucket.OutputTokens,
-			CachedTokens:        bucket.CachedTokens,
-			CacheReadTokens:     bucket.CacheReadTokens,
-			CacheCreationTokens: bucket.CacheCreationTokens,
-			TotalTokens:         bucket.TotalTokens,
-			AvgLatencyMS:        nullableFloat(bucket.AvgLatencyMS.Valid, bucket.AvgLatencyMS.Float64),
-			MaxLatencyMS:        nullableInt(bucket.MaxLatencyMS.Valid, bucket.MaxLatencyMS.Int64),
+			BucketKey:                 bucket.BucketKey,
+			Total:                     bucket.Total,
+			Success:                   bucket.Success,
+			Failure:                   bucket.Failure,
+			FirstMS:                   bucket.FirstMS,
+			LastMS:                    bucket.LastMS,
+			Source:                    bucket.Source,
+			SourceHash:                bucket.SourceHash,
+			AuthIndex:                 bucket.AuthIndex,
+			Models:                    splitCSV(bucket.Models),
+			Endpoints:                 splitCSV(bucket.Endpoints),
+			InputTokens:               bucket.InputTokens,
+			OutputTokens:              bucket.OutputTokens,
+			NonReasoningOutputTokens:  bucket.NonReasoningOutputTokens,
+			ReasoningTokens:           bucket.ReasoningTokens,
+			UnclassifiedTokens:        bucket.UnclassifiedTokens,
+			IncompleteAccountingCalls: bucket.IncompleteAccountingCalls,
+			CachedTokens:              bucket.CachedTokens,
+			CacheReadTokens:           bucket.CacheReadTokens,
+			CacheCreationTokens:       bucket.CacheCreationTokens,
+			TotalTokens:               bucket.TotalTokens,
+			AvgLatencyMS:              nullableFloat(bucket.AvgLatencyMS.Valid, bucket.AvgLatencyMS.Float64),
+			MaxLatencyMS:              nullableInt(bucket.MaxLatencyMS.Valid, bucket.MaxLatencyMS.Int64),
 		})
 	}
 	return result
@@ -3361,51 +3466,99 @@ func buildRecentFailures(failures []store.RecentFailure) []RecentFailure {
 func buildEvents(page store.EventsPage, totalCount int64) *EventsResponse {
 	items := make([]EventRow, 0, len(page.Items))
 	for _, item := range page.Items {
+		quality := item.AccountingQuality
+		if quality == "" {
+			quality = usage.TokenAccountingQualityComplete
+			if item.UnclassifiedTokens > 0 {
+				quality = usage.TokenAccountingQualityUnclassified
+			}
+		}
+		tokenBreakdown := usage.TokenBreakdown{
+			SchemaVersion: usage.TokenAccountingSchemaVersion,
+			Quality:       quality,
+			TotalTokens:   item.TotalTokens,
+			Input: usage.TokenInputBreakdown{
+				TotalTokens:      item.InputTokens,
+				UncachedTokens:   usage.TokenRemainder(item.InputTokens, item.CacheReadTokens, item.CacheCreationTokens),
+				CacheReadTokens:  item.CacheReadTokens,
+				CacheWriteTokens: item.CacheCreationTokens,
+			},
+			Output: usage.TokenOutputBreakdown{
+				TotalTokens:        item.OutputTokens,
+				NonReasoningTokens: item.NonReasoningOutputTokens,
+				ReasoningTokens:    item.ReasoningTokens,
+			},
+			UnclassifiedTokens: item.UnclassifiedTokens,
+		}
+		accountingValid := item.AccountingValid
+		cachedTokens := item.CachedTokens
+		if !tokenBreakdown.Valid() {
+			fallbackTotal := max(
+				item.TotalTokens,
+				usage.SaturatingTokenSum(item.InputTokens, item.OutputTokens, item.UnclassifiedTokens),
+			)
+			tokenBreakdown = usage.TokenBreakdown{
+				SchemaVersion:      usage.TokenAccountingSchemaVersion,
+				Quality:            usage.TokenAccountingQualityInconsistent,
+				TotalTokens:        fallbackTotal,
+				UnclassifiedTokens: fallbackTotal,
+			}
+			accountingValid = false
+			cachedTokens = 0
+		}
 		items = append(items, EventRow{
-			RequestID:              item.RequestID,
-			EventHash:              item.EventHash,
-			TimestampMS:            item.TimestampMS,
-			Model:                  item.Model,
-			AnalyticsModel:         item.AnalyticsModel,
-			RequestedModel:         item.RequestedModel,
-			ResolvedModel:          item.ResolvedModel,
-			Endpoint:               item.Endpoint,
-			Method:                 item.Method,
-			Path:                   item.Path,
-			ClientIP:               item.ClientIP,
-			XForwardedFor:          item.XForwardedFor,
-			UserAgent:              item.UserAgent,
-			AuthIndex:              item.AuthIndex,
-			Source:                 item.Source,
-			SourceHash:             item.SourceHash,
-			APIKeyHash:             item.APIKeyHash,
-			AccountSnapshot:        item.AccountSnapshot,
-			AuthLabelSnapshot:      item.AuthLabelSnapshot,
-			AuthFileSnapshot:       item.AuthFileSnapshot,
-			AuthProviderSnapshot:   item.AuthProviderSnapshot,
-			AuthProjectIDSnapshot:  item.AuthProjectIDSnapshot,
-			ReasoningEffort:        item.ReasoningEffort,
-			ServiceTier:            item.ServiceTier,
-			ExecutorType:           item.ExecutorType,
-			InputTokens:            item.InputTokens,
-			OutputTokens:           item.OutputTokens,
-			CachedTokens:           item.CachedTokens,
-			CacheReadTokens:        item.CacheReadTokens,
-			CacheCreationTokens:    item.CacheCreationTokens,
-			ReasoningTokens:        item.ReasoningTokens,
-			TotalTokens:            item.TotalTokens,
-			LatencyMS:              nullableInt(item.LatencyMS.Valid, item.LatencyMS.Int64),
-			TTFTMS:                 nullableInt(item.TTFTMS.Valid, item.TTFTMS.Int64),
-			Failed:                 item.Failed,
-			FailStatusCode:         nullableInt(item.FailStatusCode.Valid, item.FailStatusCode.Int64),
-			FailSummary:            item.FailSummary,
-			ResponseMetadata:       item.ResponseMetadata,
-			HeaderQuotaRecoverAtMS: nullableInt(item.HeaderQuotaRecoverAtMS.Valid, item.HeaderQuotaRecoverAtMS.Int64),
-			HeaderQuotaUsedPercent: nullableFloat(item.HeaderQuotaUsedPercent.Valid, item.HeaderQuotaUsedPercent.Float64),
-			HeaderQuotaPlanType:    item.HeaderQuotaPlanType,
-			HeaderErrorKind:        item.HeaderErrorKind,
-			HeaderErrorCode:        item.HeaderErrorCode,
-			HeaderTraceID:          item.HeaderTraceID,
+			RequestID:                item.RequestID,
+			EventHash:                item.EventHash,
+			TimestampMS:              item.TimestampMS,
+			Model:                    item.Model,
+			AnalyticsModel:           item.AnalyticsModel,
+			RequestedModel:           item.RequestedModel,
+			ResolvedModel:            item.ResolvedModel,
+			Endpoint:                 item.Endpoint,
+			Method:                   item.Method,
+			Path:                     item.Path,
+			ClientIP:                 item.ClientIP,
+			XForwardedFor:            item.XForwardedFor,
+			UserAgent:                item.UserAgent,
+			AuthIndex:                item.AuthIndex,
+			Source:                   item.Source,
+			SourceHash:               item.SourceHash,
+			APIKeyHash:               item.APIKeyHash,
+			AccountSnapshot:          item.AccountSnapshot,
+			AuthLabelSnapshot:        item.AuthLabelSnapshot,
+			AuthFileSnapshot:         item.AuthFileSnapshot,
+			AuthProviderSnapshot:     item.AuthProviderSnapshot,
+			AuthProjectIDSnapshot:    item.AuthProjectIDSnapshot,
+			ReasoningEffort:          item.ReasoningEffort,
+			ServiceTier:              item.ServiceTier,
+			ExecutorType:             item.ExecutorType,
+			CacheInputMode:           item.CacheInputMode,
+			AccountingVersion:        item.AccountingVersion,
+			AccountingValid:          accountingValid,
+			AccountingQuality:        tokenBreakdown.Quality,
+			InputTokens:              tokenBreakdown.Input.TotalTokens,
+			OutputTokens:             tokenBreakdown.Output.TotalTokens,
+			NonReasoningOutputTokens: tokenBreakdown.Output.NonReasoningTokens,
+			CachedTokens:             cachedTokens,
+			CacheReadTokens:          tokenBreakdown.Input.CacheReadTokens,
+			CacheCreationTokens:      tokenBreakdown.Input.CacheWriteTokens,
+			ReasoningTokens:          tokenBreakdown.Output.ReasoningTokens,
+			UnclassifiedTokens:       tokenBreakdown.UnclassifiedTokens,
+			IncompleteAccounting:     item.IncompleteAccounting || tokenBreakdown.Quality != usage.TokenAccountingQualityComplete,
+			TokenBreakdown:           tokenBreakdown,
+			TotalTokens:              tokenBreakdown.TotalTokens,
+			LatencyMS:                nullableInt(item.LatencyMS.Valid, item.LatencyMS.Int64),
+			TTFTMS:                   nullableInt(item.TTFTMS.Valid, item.TTFTMS.Int64),
+			Failed:                   item.Failed,
+			FailStatusCode:           nullableInt(item.FailStatusCode.Valid, item.FailStatusCode.Int64),
+			FailSummary:              item.FailSummary,
+			ResponseMetadata:         item.ResponseMetadata,
+			HeaderQuotaRecoverAtMS:   nullableInt(item.HeaderQuotaRecoverAtMS.Valid, item.HeaderQuotaRecoverAtMS.Int64),
+			HeaderQuotaUsedPercent:   nullableFloat(item.HeaderQuotaUsedPercent.Valid, item.HeaderQuotaUsedPercent.Float64),
+			HeaderQuotaPlanType:      item.HeaderQuotaPlanType,
+			HeaderErrorKind:          item.HeaderErrorKind,
+			HeaderErrorCode:          item.HeaderErrorCode,
+			HeaderTraceID:            item.HeaderTraceID,
 		})
 	}
 	return &EventsResponse{Items: items, NextBeforeMS: page.NextBeforeMS, NextBeforeID: page.NextBeforeID, HasMore: page.HasMore, TotalCount: totalCount}
@@ -3508,7 +3661,7 @@ func buildAccountHistoryTotals(rows []store.AccountHistoryRollupRow, prices map[
 		total.requests += row.Calls
 		total.successCalls += row.SuccessCalls
 		total.failureCalls += row.FailureCalls
-		total.totalTokens += row.TotalTokens
+		total.totalTokens = usage.SaturatingTokenSum(total.totalTokens, row.TotalTokens)
 		total.cost += pricing.CostForModelCandidatesWithServiceTier(
 			[]string{row.BillingModel, row.Model},
 			row.ServiceTier,
@@ -3547,7 +3700,7 @@ func buildPricingAccountHistoryTotals(rows []store.UsagePricingAccountRow, price
 		total.requests += row.Calls
 		total.successCalls += row.SuccessCalls
 		total.failureCalls += row.FailureCalls
-		total.totalTokens += row.TotalTokens
+		total.totalTokens = usage.SaturatingTokenSum(total.totalTokens, row.TotalTokens)
 		total.cost += pricing.CostForModelCandidatesWithServiceTier(
 			[]string{row.BillingModel, row.Model},
 			row.ServiceTier,
@@ -3805,7 +3958,7 @@ func buildAccountWindowUsageTotals(rows []store.AccountWindowModelStat, prices m
 		total.requests += row.Calls
 		total.successCalls += row.SuccessCalls
 		total.failureCalls += row.FailureCalls
-		total.totalTokens += row.TotalTokens
+		total.totalTokens = usage.SaturatingTokenSum(total.totalTokens, row.TotalTokens)
 		total.cost += pricing.CostForModelCandidatesWithServiceTier(
 			[]string{row.BillingModel, row.Model},
 			row.ServiceTier,
@@ -4067,8 +4220,8 @@ func cacheHitRateForModelStats(stats []store.ModelStat) float64 {
 			stat.CacheReadTokens,
 			stat.CacheCreationTokens,
 		)
-		hitTokens += statHitTokens
-		inputTokens += statInputTokens
+		hitTokens = usage.SaturatingTokenSum(hitTokens, statHitTokens)
+		inputTokens = usage.SaturatingTokenSum(inputTokens, statInputTokens)
 	}
 	return usage.CacheHitRateFromTotals(hitTokens, inputTokens)
 }

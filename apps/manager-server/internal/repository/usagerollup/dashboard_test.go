@@ -63,7 +63,10 @@ func TestCatchUpDashboardHourlyAggregatesByCheckpoint(t *testing.T) {
 	if standard.BucketMS != firstHour || standard.Calls != 3 || standard.SuccessCalls != 2 || standard.FailureCalls != 1 {
 		t.Fatalf("standard counts = %#v", standard)
 	}
-	if standard.InputTokens != 101 || standard.OutputTokens != 52 || standard.CachedTokens != 25 || standard.TotalTokens != 168 {
+	if standard.InputTokens != 101 || standard.OutputTokens != 52 || standard.NonReasoningOutputTokens != 42 ||
+		standard.ReasoningTokens != 10 || standard.UnclassifiedTokens != 15 ||
+		standard.IncompleteAccountingCalls != 1 || standard.CachedTokens != 0 ||
+		standard.CacheReadTokens != 35 || standard.CacheCreationTokens != 5 || standard.TotalTokens != 168 {
 		t.Fatalf("standard tokens = %#v", standard)
 	}
 	if standard.LatencySumMS != 300 || standard.LatencySamples != 2 || standard.ZeroTokenCalls != 1 {

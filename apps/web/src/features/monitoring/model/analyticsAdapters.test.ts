@@ -116,7 +116,7 @@ describe('buildUsageDetailsFromAnalyticsEvents', () => {
     });
   });
 
-  it('trusts backend-deduped cached tokens from analytics events', () => {
+  it('trusts canonical cache buckets from analytics events', () => {
     const events: MonitoringAnalyticsEventRow[] = [
       {
         event_hash: 'event-cache',
@@ -131,13 +131,18 @@ describe('buildUsageDetailsFromAnalyticsEvents', () => {
         api_key_hash: 'api-key-hash',
         account_snapshot: '',
         auth_label_snapshot: '',
-        auth_provider_snapshot: '',
-        input_tokens: 100,
+        auth_provider_snapshot: 'anthropic',
+        accounting_version: 2,
+        accounting_valid: true,
+        accounting_quality: 'complete',
+        input_tokens: 110,
         output_tokens: 20,
-        cached_tokens: 5,
-        cache_read_tokens: 4,
+        non_reasoning_output_tokens: 20,
+        cached_tokens: 0,
+        cache_read_tokens: 9,
         cache_creation_tokens: 1,
         reasoning_tokens: 0,
+        unclassified_tokens: 0,
         total_tokens: 130,
         latency_ms: null,
         failed: false,
@@ -146,9 +151,49 @@ describe('buildUsageDetailsFromAnalyticsEvents', () => {
 
     const details = buildUsageDetailsFromAnalyticsEvents(events);
 
-    expect(details[0].tokens.cached_tokens).toBe(5);
-    expect(details[0].tokens.cache_read_tokens).toBe(4);
+    expect(details[0].tokens.cached_tokens).toBe(0);
+    expect(details[0].tokens.cache_read_tokens).toBe(9);
     expect(details[0].tokens.cache_creation_tokens).toBe(1);
+  });
+
+  it('preserves explicit legacy provenance from migrated analytics events', () => {
+    const events: MonitoringAnalyticsEventRow[] = [
+      {
+        event_hash: 'event-legacy-accounting',
+        timestamp_ms: Date.UTC(2026, 4, 20, 1, 2, 3),
+        model: 'gpt-5.4',
+        endpoint: 'POST /v1/responses',
+        method: 'POST',
+        path: '/v1/responses',
+        auth_index: 'auth-1',
+        source: 'source.json',
+        source_hash: 'source-hash',
+        api_key_hash: 'api-key-hash',
+        account_snapshot: '',
+        auth_label_snapshot: '',
+        auth_provider_snapshot: 'codex',
+        accounting_version: 0,
+        accounting_valid: false,
+        accounting_quality: 'complete',
+        input_tokens: 100,
+        output_tokens: 40,
+        non_reasoning_output_tokens: 30,
+        cached_tokens: 0,
+        cache_read_tokens: 20,
+        cache_creation_tokens: 0,
+        reasoning_tokens: 10,
+        unclassified_tokens: 0,
+        total_tokens: 140,
+        latency_ms: null,
+        failed: false,
+      },
+    ];
+
+    expect(buildUsageDetailsFromAnalyticsEvents(events)[0]).toMatchObject({
+      accounting_version: 0,
+      accounting_valid: false,
+      accounting_quality: 'complete',
+    });
   });
 });
 

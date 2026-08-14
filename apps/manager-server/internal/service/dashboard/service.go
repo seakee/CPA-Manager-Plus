@@ -54,20 +54,23 @@ type Window struct {
 }
 
 type TodaySummary struct {
-	TotalCalls          int64    `json:"total_calls"`
-	SuccessCalls        int64    `json:"success_calls"`
-	FailureCalls        int64    `json:"failure_calls"`
-	SuccessRate         float64  `json:"success_rate"`
-	InputTokens         int64    `json:"input_tokens"`
-	OutputTokens        int64    `json:"output_tokens"`
-	CachedTokens        int64    `json:"cached_tokens"`
-	CacheReadTokens     int64    `json:"cache_read_tokens"`
-	CacheCreationTokens int64    `json:"cache_creation_tokens"`
-	ReasoningTokens     int64    `json:"reasoning_tokens"`
-	TotalTokens         int64    `json:"total_tokens"`
-	TotalCost           float64  `json:"total_cost"`
-	AverageLatencyMS    *float64 `json:"average_latency_ms"`
-	ZeroTokenCalls      int64    `json:"zero_token_calls"`
+	TotalCalls                int64    `json:"total_calls"`
+	SuccessCalls              int64    `json:"success_calls"`
+	FailureCalls              int64    `json:"failure_calls"`
+	SuccessRate               float64  `json:"success_rate"`
+	InputTokens               int64    `json:"input_tokens"`
+	OutputTokens              int64    `json:"output_tokens"`
+	NonReasoningOutputTokens  int64    `json:"non_reasoning_output_tokens"`
+	CachedTokens              int64    `json:"cached_tokens"`
+	CacheReadTokens           int64    `json:"cache_read_tokens"`
+	CacheCreationTokens       int64    `json:"cache_creation_tokens"`
+	ReasoningTokens           int64    `json:"reasoning_tokens"`
+	UnclassifiedTokens        int64    `json:"unclassified_tokens"`
+	IncompleteAccountingCalls int64    `json:"incomplete_accounting_calls"`
+	TotalTokens               int64    `json:"total_tokens"`
+	TotalCost                 float64  `json:"total_cost"`
+	AverageLatencyMS          *float64 `json:"average_latency_ms"`
+	ZeroTokenCalls            int64    `json:"zero_token_calls"`
 }
 
 type RollingSummary struct {
@@ -421,20 +424,23 @@ func selectTopModelStats(stats []store.ModelStat, limit int) []store.ModelStat {
 
 func buildTodaySummary(agg store.Aggregate, modelStats []store.ModelStat, prices map[string]store.ModelPrice) TodaySummary {
 	return TodaySummary{
-		TotalCalls:          agg.TotalCalls,
-		SuccessCalls:        agg.SuccessCalls,
-		FailureCalls:        agg.FailureCalls,
-		SuccessRate:         rate(agg.SuccessCalls, agg.TotalCalls),
-		InputTokens:         agg.InputTokens,
-		OutputTokens:        agg.OutputTokens,
-		CachedTokens:        agg.CachedTokens,
-		CacheReadTokens:     agg.CacheReadTokens,
-		CacheCreationTokens: agg.CacheCreationTokens,
-		ReasoningTokens:     agg.ReasoningTokens,
-		TotalTokens:         agg.TotalTokens,
-		TotalCost:           totalCost(modelStats, prices),
-		AverageLatencyMS:    nullableFloat(agg.AvgLatencyMS.Valid, agg.AvgLatencyMS.Float64),
-		ZeroTokenCalls:      agg.ZeroTokenCalls,
+		TotalCalls:                agg.TotalCalls,
+		SuccessCalls:              agg.SuccessCalls,
+		FailureCalls:              agg.FailureCalls,
+		SuccessRate:               rate(agg.SuccessCalls, agg.TotalCalls),
+		InputTokens:               agg.InputTokens,
+		OutputTokens:              agg.OutputTokens,
+		NonReasoningOutputTokens:  agg.NonReasoningOutputTokens,
+		CachedTokens:              agg.CachedTokens,
+		CacheReadTokens:           agg.CacheReadTokens,
+		CacheCreationTokens:       agg.CacheCreationTokens,
+		ReasoningTokens:           agg.ReasoningTokens,
+		UnclassifiedTokens:        agg.UnclassifiedTokens,
+		IncompleteAccountingCalls: agg.IncompleteAccountingCalls,
+		TotalTokens:               agg.TotalTokens,
+		TotalCost:                 totalCost(modelStats, prices),
+		AverageLatencyMS:          nullableFloat(agg.AvgLatencyMS.Valid, agg.AvgLatencyMS.Float64),
+		ZeroTokenCalls:            agg.ZeroTokenCalls,
 	}
 }
 
@@ -577,38 +583,23 @@ func requestHealthTone(calls int64, failureRate float64, future bool) string {
 
 func buildTokenMix(today TodaySummary) []TokenMixSegment {
 	totalInputTokens := max(today.InputTokens, int64(0))
-	cachedTokens := max(today.CachedTokens, int64(0)) +
-		max(today.CacheReadTokens, int64(0)) +
-		max(today.CacheCreationTokens, int64(0))
+	cachedTokens := usage.SaturatingTokenSum(
+		today.CachedTokens,
+		today.CacheReadTokens,
+		today.CacheCreationTokens,
+	)
 	// InputTokens is normalized total input, so cache buckets are already included in it.
-	inputTokens := max(totalInputTokens-cachedTokens, int64(0))
-	outputTokens := max(today.OutputTokens, int64(0))
+	inputTokens := usage.TokenRemainder(totalInputTokens, cachedTokens)
+	outputTokens := max(today.NonReasoningOutputTokens, int64(0))
 	reasoningTokens := max(today.ReasoningTokens, int64(0))
-
-	if today.TotalTokens > 0 {
-		overflow := inputTokens + cachedTokens + outputTokens + reasoningTokens - today.TotalTokens
-		if overflow > 0 {
-			reasoningDeduction := min(min(outputTokens, reasoningTokens), overflow)
-			outputTokens -= reasoningDeduction
-			overflow -= reasoningDeduction
-		}
-		if overflow > 0 {
-			outputDeduction := min(outputTokens, overflow)
-			outputTokens -= outputDeduction
-			overflow -= outputDeduction
-		}
-		if overflow > 0 {
-			inputDeduction := min(inputTokens, overflow)
-			inputTokens -= inputDeduction
-		}
-	}
-
-	total := inputTokens + cachedTokens + outputTokens + reasoningTokens
+	unclassifiedTokens := max(today.UnclassifiedTokens, int64(0))
+	total := usage.SaturatingTokenSum(inputTokens, cachedTokens, outputTokens, reasoningTokens, unclassifiedTokens)
 	return []TokenMixSegment{
 		{Key: "input", Tokens: inputTokens, Share: rate(inputTokens, total)},
 		{Key: "cached", Tokens: cachedTokens, Share: rate(cachedTokens, total)},
 		{Key: "output", Tokens: outputTokens, Share: rate(outputTokens, total)},
 		{Key: "reasoning", Tokens: reasoningTokens, Share: rate(reasoningTokens, total)},
+		{Key: "unclassified", Tokens: unclassifiedTokens, Share: rate(unclassifiedTokens, total)},
 	}
 }
 
@@ -669,7 +660,7 @@ func buildChannelHealth(stats []store.ChannelModelStat, prices map[string]store.
 		fillChannelHealthSnapshots(&entry.row, stat)
 		entry.row.Calls += stat.Calls
 		entry.row.Failures += stat.FailureCalls
-		entry.row.Tokens += stat.TotalTokens
+		entry.row.Tokens = usage.SaturatingTokenSum(entry.row.Tokens, stat.TotalTokens)
 		entry.row.Cost += costForChannelStat(stat, prices)
 		if stat.AvgLatencyMS.Valid && stat.LatencySamples > 0 {
 			entry.latencySum += stat.AvgLatencyMS.Float64 * float64(stat.LatencySamples)
@@ -808,7 +799,7 @@ func aggregateModelStats(stats []store.ModelStat, prices map[string]store.ModelP
 		}
 		entry.Calls += stat.Calls
 		entry.SuccessCalls += stat.SuccessCalls
-		entry.TotalTokens += stat.TotalTokens
+		entry.TotalTokens = usage.SaturatingTokenSum(entry.TotalTokens, stat.TotalTokens)
 		entry.Cost += costForStat(stat, prices)
 	}
 	result := make([]aggregatedModelStat, 0, len(order))

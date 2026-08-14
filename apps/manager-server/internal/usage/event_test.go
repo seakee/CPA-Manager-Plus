@@ -77,6 +77,43 @@ func TestNormalizeCacheAccounting(t *testing.T) {
 	}
 }
 
+func TestNormalizeCacheAccountingSaturatesOverflow(t *testing.T) {
+	got := NormalizeCacheAccounting(
+		CacheInputContext{Provider: "anthropic"},
+		math.MaxInt64,
+		0,
+		0,
+		1,
+		0,
+	)
+	if got.TotalInputTokens != math.MaxInt64 || got.TotalInputTokens < 0 {
+		t.Fatalf("overflowing cache accounting = %+v", got)
+	}
+
+	hitTokens, totalInput := CacheHitTotals("gpt-test", math.MaxInt64, math.MaxInt64, 1, 0)
+	if hitTokens != math.MaxInt64 || totalInput != math.MaxInt64 {
+		t.Fatalf("overflowing cache hit totals = hit:%d input:%d", hitTokens, totalInput)
+	}
+	if compatible := CompatibleCachedTokens(math.MaxInt64, 0, math.MaxInt64, math.MaxInt64); compatible != 0 {
+		t.Fatalf("overflowing compatible cached tokens = %d, want 0", compatible)
+	}
+}
+
+func TestTokenSumHelpersSaturateAndAvoidUnderflow(t *testing.T) {
+	if got := SaturatingTokenSum(math.MaxInt64, 1); got != math.MaxInt64 {
+		t.Fatalf("saturating sum = %d, want max int64", got)
+	}
+	if got := SaturatingTokenSum(-1, 2); got != 2 {
+		t.Fatalf("negative-clamped sum = %d, want 2", got)
+	}
+	if got := TokenRemainder(10, 3, 2); got != 5 {
+		t.Fatalf("token remainder = %d, want 5", got)
+	}
+	if got := TokenRemainder(math.MaxInt64, math.MaxInt64, 1); got != 0 {
+		t.Fatalf("overflowing token remainder = %d, want 0", got)
+	}
+}
+
 func TestInferCacheInputModeUsesStrictFieldPriority(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -90,11 +127,16 @@ func TestInferCacheInputModeUsesStrictFieldPriority(t *testing.T) {
 		{name: "claude executor beats kimi alias", context: CacheInputContext{ExecutorType: "ClaudeExecutor", RequestedModel: "kimi-k2"}, want: CacheInputModeSeparate},
 		{name: "xai executor beats claude alias", context: CacheInputContext{ExecutorType: "XAIWebsocketsExecutor", DisplayModel: "claude-alias"}, want: CacheInputModeIncluded},
 		{name: "provider beats snapshot", context: CacheInputContext{Provider: "anthropic", ProviderSnapshot: "openai"}, want: CacheInputModeSeparate},
+		{name: "openai compatible provider beats anthropic suffix", context: CacheInputContext{Provider: "openai-compatible-anthropic"}, want: CacheInputModeIncluded},
 		{name: "snapshot beats model", context: CacheInputContext{ProviderSnapshot: "moonshot", ResolvedModel: "claude-sonnet"}, want: CacheInputModeIncluded},
+		{name: "auth type beats model", context: CacheInputContext{AuthType: "codex", ResolvedModel: "claude-sonnet"}, want: CacheInputModeIncluded},
 		{name: "resolved beats requested", context: CacheInputContext{ResolvedModel: "claude-sonnet", RequestedModel: "gpt-5"}, want: CacheInputModeSeparate},
 		{name: "requested beats display", context: CacheInputContext{RequestedModel: "grok-4", DisplayModel: "claude-sonnet"}, want: CacheInputModeIncluded},
 		{name: "xai model fallback", context: CacheInputContext{DisplayModel: "grok-4"}, want: CacheInputModeIncluded},
 		{name: "kimi model fallback", context: CacheInputContext{DisplayModel: "moonshot/kimi-k2"}, want: CacheInputModeIncluded},
+		{name: "openrouter provider fallback", context: CacheInputContext{Provider: "openrouter"}, want: CacheInputModeIncluded},
+		{name: "qwen auth type fallback", context: CacheInputContext{AuthType: "qwen"}, want: CacheInputModeIncluded},
+		{name: "deepseek model fallback", context: CacheInputContext{DisplayModel: "deepseek-chat"}, want: CacheInputModeIncluded},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -112,18 +154,49 @@ func TestRawCacheAccountingHintsFromJSON(t *testing.T) {
 		wantMode  string
 		wantTotal int64
 		hasTotal  bool
+		invalid   bool
 	}{
 		{name: "tokens snake case", raw: `{"tokens":{"cache_input_mode":"included_in_input","total_tokens":123}}`, wantMode: CacheInputModeIncluded, wantTotal: 123, hasTotal: true},
 		{name: "usage camel case", raw: `{"usage":{"cacheInputMode":"separate_from_input","totalTokens":"456"}}`, wantMode: CacheInputModeSeparate, wantTotal: 456, hasTotal: true},
 		{name: "legacy detail wrapper", raw: `{"detail":{"tokens":{"cache_input_mode":"included_in_input","total_tokens":789}}}`, wantMode: CacheInputModeIncluded, wantTotal: 789, hasTotal: true},
 		{name: "nested raw json", raw: `{"raw_json":"{\"tokens\":{\"cache_input_mode\":\"separate_from_input\",\"total_tokens\":321}}"}`, wantMode: CacheInputModeSeparate, wantTotal: 321, hasTotal: true},
-		{name: "invalid values", raw: `{"cache_input_mode":"legacy","total_tokens":0}`, wantMode: "", hasTotal: false},
+		{name: "zero is derivable", raw: `{"cache_input_mode":"legacy","total_tokens":0}`, wantMode: "", hasTotal: false},
+		{name: "negative is invalid", raw: `{"tokens":{"total_tokens":-1}}`, invalid: true},
+		{name: "fractional is invalid", raw: `{"usage":{"total_tokens":1.5}}`, invalid: true},
+		{name: "wrong type is invalid", raw: `{"total_tokens":{}}`, invalid: true},
+		{name: "nested invalid is preserved", raw: `{"raw_json":"{\"tokens\":{\"total_tokens\":\"bad\"}}"}`, invalid: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := RawCacheAccountingHintsFromJSON(tt.raw)
-			if got.ExplicitMode != tt.wantMode || got.ExplicitTotal != tt.wantTotal || got.HasExplicitTotal != tt.hasTotal || !got.ValidPayload {
-				t.Fatalf("hints = %+v, want mode=%q total=%d hasTotal=%v", got, tt.wantMode, tt.wantTotal, tt.hasTotal)
+			if got.ExplicitMode != tt.wantMode || got.ExplicitTotal != tt.wantTotal || got.HasExplicitTotal != tt.hasTotal || got.HasInvalidExplicitTotal != tt.invalid || !got.ValidPayload {
+				t.Fatalf("hints = %+v, want mode=%q total=%d hasTotal=%v invalid=%v", got, tt.wantMode, tt.wantTotal, tt.hasTotal, tt.invalid)
+			}
+		})
+	}
+}
+
+func TestNormalizeRawKeepsMalformedLegacyTotalsInconsistent(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		total string
+	}{
+		{name: "negative", total: `-1`},
+		{name: "fractional", total: `1.5`},
+		{name: "wrong type", total: `{}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			event, err := NormalizeRaw([]byte(`{
+				"provider":"openai",
+				"tokens":{"input_tokens":100,"output_tokens":20,"total_tokens":` + tt.total + `}
+			}`))
+			if err != nil {
+				t.Fatalf("normalize malformed total: %v", err)
+			}
+			if event.TokenBreakdown.Quality != TokenAccountingQualityInconsistent ||
+				event.TokenBreakdown.TotalTokens != 120 || event.UnclassifiedTokens != 120 ||
+				!event.TokenBreakdown.Valid() {
+				t.Fatalf("malformed total accounting = %+v", event.TokenBreakdown)
 			}
 		})
 	}
@@ -148,6 +221,38 @@ func TestNormalizeRawPrefersResolvedModelOverRequestedAndDisplayAliases(t *testi
 	}
 	if event.CacheInputMode != CacheInputModeSeparate || event.NormalizedTotalInputTokens != 120 {
 		t.Fatalf("accounting = mode:%q total:%d", event.CacheInputMode, event.NormalizedTotalInputTokens)
+	}
+}
+
+func TestNormalizeRawPreservesNumericTimestampsWithUseNumber(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		timestamp     string
+		wantMS        int64
+		wantTimestamp string
+	}{
+		{
+			name:          "seconds",
+			timestamp:     "1700000000",
+			wantMS:        1_700_000_000_000,
+			wantTimestamp: "2023-11-14T22:13:20Z",
+		},
+		{
+			name:          "milliseconds",
+			timestamp:     "1700000000123",
+			wantMS:        1_700_000_000_123,
+			wantTimestamp: "2023-11-14T22:13:20.123Z",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			event, err := NormalizeRaw([]byte(`{"timestamp":` + tt.timestamp + `}`))
+			if err != nil {
+				t.Fatalf("normalize raw: %v", err)
+			}
+			if event.TimestampMS != tt.wantMS || event.Timestamp != tt.wantTimestamp {
+				t.Fatalf("timestamp = %d/%q, want %d/%q", event.TimestampMS, event.Timestamp, tt.wantMS, tt.wantTimestamp)
+			}
+		})
 	}
 }
 

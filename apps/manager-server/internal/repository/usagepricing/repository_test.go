@@ -114,6 +114,127 @@ func TestPricingAccountRollupSeparatesSharedAccountByAuthIndex(t *testing.T) {
 	}
 }
 
+func TestPricingRollupExcludesInconsistentCanonicalBuckets(t *testing.T) {
+	ctx := context.Background()
+	cfg := testutil.NewConfig(t)
+	st := testutil.NewStore(t, cfg)
+	event := pricingEvent("inconsistent", 3_600_001, 100)
+	event.AccountingVersion = usage.TokenAccountingSchemaVersion
+	event.AccountingValid = true
+	event.TokenBreakdown = usage.TokenBreakdown{
+		SchemaVersion: usage.TokenAccountingSchemaVersion,
+		Quality:       usage.TokenAccountingQualityInconsistent,
+		TotalTokens:   110,
+		Input: usage.TokenInputBreakdown{
+			TotalTokens:    100,
+			UncachedTokens: 100,
+		},
+		Output: usage.TokenOutputBreakdown{
+			TotalTokens:        10,
+			NonReasoningTokens: 10,
+		},
+	}
+	if !event.TokenBreakdown.Valid() {
+		t.Fatalf("test breakdown is invalid: %#v", event.TokenBreakdown)
+	}
+	if _, err := st.UsageEvents.InsertBatch(ctx, []usage.Event{event}); err != nil {
+		t.Fatalf("insert event: %v", err)
+	}
+	if _, err := st.CatchUpUsagePricing(ctx, 10, 10_000); err != nil {
+		t.Fatalf("catch up pricing: %v", err)
+	}
+
+	rows, _, available, err := st.UsagePricingHourlyRows(ctx, store.UsagePricingHourlyFilter{
+		FromMS:        3_600_000,
+		ToMS:          7_200_000,
+		IncludeFailed: true,
+	})
+	if err != nil || !available || len(rows) != 1 {
+		t.Fatalf("pricing rows available=%v err=%v rows=%#v", available, err, rows)
+	}
+	row := rows[0]
+	if row.InputTokens != 0 || row.OutputTokens != 0 || row.NonReasoningOutputTokens != 0 ||
+		row.ReasoningTokens != 0 || row.CacheReadTokens != 0 || row.CacheCreationTokens != 0 ||
+		row.UnclassifiedTokens != 110 || row.TotalTokens != 110 || row.IncompleteAccountingCalls != 1 {
+		t.Fatalf("inconsistent pricing row = %#v", row)
+	}
+}
+
+func TestPricingAccountRowsPreserveCanonicalStoredAndRawTailBuckets(t *testing.T) {
+	ctx := context.Background()
+	cfg := testutil.NewConfig(t)
+	st := testutil.NewStore(t, cfg)
+
+	stored := pricingEvent("canonical-stored", 3_600_001, 999)
+	stored.OutputTokens = 999
+	stored.ReasoningTokens = 999
+	stored.CachedTokens = 999
+	stored.CacheReadTokens = 999
+	stored.CacheCreationTokens = 999
+	stored.TotalTokens = 1_998
+	stored.AccountingVersion = usage.TokenAccountingSchemaVersion
+	stored.AccountingValid = true
+	stored.TokenBreakdown = usage.TokenBreakdown{
+		SchemaVersion: usage.TokenAccountingSchemaVersion,
+		Quality:       usage.TokenAccountingQualityComplete,
+		TotalTokens:   100,
+		Input: usage.TokenInputBreakdown{
+			TotalTokens:     70,
+			UncachedTokens:  50,
+			CacheReadTokens: 20,
+		},
+		Output: usage.TokenOutputBreakdown{
+			TotalTokens:        30,
+			NonReasoningTokens: 23,
+			ReasoningTokens:    7,
+		},
+	}
+	if !stored.TokenBreakdown.Valid() {
+		t.Fatalf("stored breakdown is invalid: %#v", stored.TokenBreakdown)
+	}
+	if _, err := st.UsageEvents.InsertBatch(ctx, []usage.Event{stored}); err != nil {
+		t.Fatalf("insert stored event: %v", err)
+	}
+	if result, err := st.CatchUpUsagePricing(ctx, 1, 10_000); err != nil || result.Processed != 1 || result.Pending {
+		t.Fatalf("catch up stored event: result=%#v err=%v", result, err)
+	}
+
+	rawTail := pricingEvent("canonical-raw-tail", 3_600_002, 999)
+	rawTail.OutputTokens = 999
+	rawTail.ReasoningTokens = 999
+	rawTail.CachedTokens = 999
+	rawTail.CacheReadTokens = 999
+	rawTail.CacheCreationTokens = 999
+	rawTail.TotalTokens = 1_998
+	rawTail.AccountingVersion = usage.TokenAccountingSchemaVersion
+	rawTail.AccountingValid = true
+	rawTail.TokenBreakdown = usage.TokenBreakdown{
+		SchemaVersion:      usage.TokenAccountingSchemaVersion,
+		Quality:            usage.TokenAccountingQualityInconsistent,
+		TotalTokens:        110,
+		UnclassifiedTokens: 110,
+	}
+	if !rawTail.TokenBreakdown.Valid() {
+		t.Fatalf("raw-tail breakdown is invalid: %#v", rawTail.TokenBreakdown)
+	}
+	if _, err := st.UsageEvents.InsertBatch(ctx, []usage.Event{rawTail}); err != nil {
+		t.Fatalf("insert raw-tail event: %v", err)
+	}
+
+	rows, _, available, err := st.UsagePricingAccountRows(ctx, []string{pricingAccountKey("team-a.json", "auth-team-a")})
+	if err != nil || !available || len(rows) != 1 {
+		t.Fatalf("load canonical account rows: available=%v err=%v rows=%#v", available, err, rows)
+	}
+	row := rows[0]
+	if row.Calls != 2 || row.SuccessCalls != 2 || row.FailureCalls != 0 ||
+		row.InputTokens != 70 || row.OutputTokens != 30 || row.NonReasoningOutputTokens != 23 ||
+		row.ReasoningTokens != 7 || row.UnclassifiedTokens != 110 || row.IncompleteAccountingCalls != 1 ||
+		row.CachedTokens != 0 || row.CacheReadTokens != 20 || row.CacheCreationTokens != 0 ||
+		row.TotalTokens != 210 {
+		t.Fatalf("canonical account row = %#v", row)
+	}
+}
+
 func TestPricingRollupRateUpdatesKeepRevisionAndThresholdUpdatesRebuild(t *testing.T) {
 	ctx := context.Background()
 	cfg := testutil.NewConfig(t)

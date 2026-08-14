@@ -223,6 +223,7 @@ func snapshotTestEvent(hash string, timestampMS, inputTokens int64) usage.Event 
 		EventHash:     hash,
 		TimestampMS:   timestampMS,
 		Timestamp:     time.UnixMilli(timestampMS).UTC().Format(time.RFC3339Nano),
+		Provider:      "openai",
 		Model:         "model-a",
 		Endpoint:      "POST /v1/chat/completions",
 		Method:        "POST",

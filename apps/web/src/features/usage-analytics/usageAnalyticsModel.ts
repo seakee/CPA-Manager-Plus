@@ -95,10 +95,13 @@ export type UsageTimelinePoint = {
   totalTokens: number;
   inputTokens: number;
   outputTokens: number;
+  nonReasoningOutputTokens: number;
   cachedTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
   reasoningTokens: number;
+  unclassifiedTokens: number;
+  incompleteAccountingCalls: number;
   estimatedCost: number;
   successCount: number;
   failureCount: number;
@@ -116,9 +119,13 @@ export type UsageSummaryMetrics = {
   totalTokens: number;
   inputTokens: number;
   outputTokens: number;
+  nonReasoningOutputTokens: number;
   cachedTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
+  reasoningTokens: number;
+  unclassifiedTokens: number;
+  incompleteAccountingCalls: number;
   cacheHitRate?: number;
   estimatedCost: number;
   averageCostPerCall: number;
@@ -796,9 +803,16 @@ export const buildUsageSummary = (
   totalTokens: toNumber(summary?.total_tokens),
   inputTokens: toNumber(summary?.input_tokens),
   outputTokens: toNumber(summary?.output_tokens),
+  nonReasoningOutputTokens:
+    summary?.non_reasoning_output_tokens !== undefined
+      ? toNumber(summary.non_reasoning_output_tokens)
+      : toNumber(summary?.output_tokens),
   cachedTokens: toNumber(summary?.cached_tokens),
   cacheReadTokens: toNumber(summary?.cache_read_tokens),
   cacheCreationTokens: toNumber(summary?.cache_creation_tokens),
+  reasoningTokens: toNumber(summary?.reasoning_tokens),
+  unclassifiedTokens: toNumber(summary?.unclassified_tokens),
+  incompleteAccountingCalls: toNumber(summary?.incomplete_accounting_calls),
   cacheHitRate:
     typeof summary?.cache_hit_rate === 'number' && Number.isFinite(summary.cache_hit_rate)
       ? Math.min(1, Math.max(0, summary.cache_hit_rate))
@@ -879,6 +893,8 @@ export const buildUsageTimeline = (
     const totalTokens = toNumber(point.total_tokens ?? point.tokens);
     const cacheReadTokens = toNumber(point.cache_read_tokens);
     const inputTokens = toNumber(point.input_tokens);
+    const outputTokens = toNumber(point.output_tokens);
+    const reasoningTokens = toNumber(point.reasoning_tokens);
     const successCount = toNumber(point.success);
     const failureCount = toNumber(point.failure);
     const bucketMs = toNumber(point.bucket_ms);
@@ -889,11 +905,17 @@ export const buildUsageTimeline = (
       requestCount,
       totalTokens,
       inputTokens,
-      outputTokens: toNumber(point.output_tokens),
+      outputTokens,
+      nonReasoningOutputTokens:
+        point.non_reasoning_output_tokens !== undefined
+          ? toNumber(point.non_reasoning_output_tokens)
+          : outputTokens,
       cachedTokens: toNumber(point.cached_tokens),
       cacheReadTokens,
       cacheCreationTokens: toNumber(point.cache_creation_tokens),
-      reasoningTokens: toNumber(point.reasoning_tokens),
+      reasoningTokens,
+      unclassifiedTokens: toNumber(point.unclassified_tokens),
+      incompleteAccountingCalls: toNumber(point.incomplete_accounting_calls),
       estimatedCost: toNumber(point.cost),
       successCount,
       failureCount,

@@ -17,6 +17,7 @@ import {
   normalizeAnalyticsModel,
   normalizeCacheAccounting,
   normalizeUsageSourceId,
+  resolveTokenAccounting,
 } from './usage';
 import { maskSensitiveText } from './format';
 import cacheInputAccountingFixtures from './cacheInputAccounting.fixtures.json';
@@ -407,9 +408,96 @@ describe('usage detail collection', () => {
     expect(detail.tokens.cache_read_tokens).toBe(23);
     expect(detail.tokens.total_tokens).toBe(154);
   });
+
+  it('preserves explicit legacy accounting provenance through detail collectors', () => {
+    const usageData = {
+      apis: {
+        'POST /v1/responses': {
+          models: {
+            'gpt-5.4': {
+              details: [
+                {
+                  timestamp: '2026-07-20T00:00:00Z',
+                  source: 'codex-account',
+                  auth_index: 'auth-1',
+                  accounting_version: 0,
+                  token_breakdown: {
+                    schema_version: 2,
+                    quality: 'complete',
+                    total_tokens: 140,
+                    input: {
+                      total_tokens: 100,
+                      uncached_tokens: 80,
+                      cache_read_tokens: 20,
+                      cache_write_tokens: 0,
+                    },
+                    output: {
+                      total_tokens: 40,
+                      non_reasoning_tokens: 30,
+                      reasoning_tokens: 10,
+                    },
+                    unclassified_tokens: 0,
+                  },
+                  tokens: {
+                    input_tokens: 100,
+                    output_tokens: 40,
+                    reasoning_tokens: 10,
+                    total_tokens: 140,
+                  },
+                  failed: false,
+                },
+              ],
+            },
+          },
+        },
+      },
+    };
+
+    for (const detail of [
+      collectUsageDetails(usageData)[0],
+      collectUsageDetailsWithEndpoint(usageData)[0],
+    ]) {
+      expect(detail).toMatchObject({
+        accounting_version: 0,
+        accounting_valid: false,
+        accounting_quality: 'complete',
+      });
+    }
+  });
 });
 
 describe('usage token helpers', () => {
+  const canonicalDetailForValidation = (
+    accountingVersion: unknown = 2,
+    unclassifiedTokens: unknown = 0
+  ) => ({
+    accounting_version: accountingVersion,
+    token_breakdown: {
+      schema_version: 2,
+      quality: 'complete',
+      total_tokens: 140,
+      input: {
+        total_tokens: 100,
+        uncached_tokens: 100,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+      },
+      output: {
+        total_tokens: 40,
+        non_reasoning_tokens: 30,
+        reasoning_tokens: 10,
+      },
+      unclassified_tokens: unclassifiedTokens,
+    },
+    provider: 'openai',
+    tokens: {
+      input_tokens: 100,
+      output_tokens: 40,
+      reasoning_tokens: 10,
+      total_tokens: 140,
+    },
+  });
+
   it('keeps legacy cached tokens separate from fine-grained cache buckets', () => {
     expect(compatibleCachedTokens(5, 0, 4, 1)).toBe(0);
     expect(compatibleCachedTokens(10, 0, 4, 1)).toBe(5);
@@ -450,7 +538,7 @@ describe('usage token helpers', () => {
     expect(calculateCacheHitRateFromTotals(1_500, 1_000)).toBe(1);
   });
 
-  it('uses fine-grained cache fields when total tokens are missing', () => {
+  it('keeps ambiguous unknown-provider legacy fields in one unclassified lower bound', () => {
     expect(
       extractTotalTokens({
         tokens: {
@@ -462,7 +550,715 @@ describe('usage token helpers', () => {
           cache_creation_tokens: 1,
         },
       })
-    ).toBe(43);
+    ).toBe(40);
+  });
+
+  it('keeps unknown-provider legacy fields unclassified even without reasoning tokens', () => {
+    expect(
+      resolveTokenAccounting({
+        tokens: {
+          input_tokens: 10,
+          output_tokens: 20,
+          reasoning_tokens: 0,
+          total_tokens: 30,
+        },
+      })
+    ).toMatchObject({
+      sourceValid: false,
+      quality: 'unclassified',
+      inputTokens: 0,
+      outputTokens: 0,
+      unclassifiedTokens: 30,
+      totalTokens: 30,
+      pricingSafe: false,
+    });
+  });
+
+  it('marks included cache buckets larger than input as inconsistent', () => {
+    expect(
+      resolveTokenAccounting({
+        provider: 'openai',
+        tokens: {
+          input_tokens: 1,
+          output_tokens: 2,
+          cached_tokens: 5,
+          total_tokens: 3,
+        },
+      })
+    ).toMatchObject({
+      quality: 'inconsistent',
+      inputTokens: 0,
+      outputTokens: 0,
+      unclassifiedTokens: 7,
+      totalTokens: 7,
+      pricingSafe: false,
+    });
+  });
+
+  it('uses a valid nested CPA v2 breakdown as the authoritative contract', () => {
+    const accounting = resolveTokenAccounting({
+      accounting_version: 2,
+      accounting_valid: true,
+      token_breakdown: {
+        schema_version: 2,
+        quality: 'complete',
+        total_tokens: 165,
+        input: {
+          total_tokens: 125,
+          uncached_tokens: 100,
+          cache_read_tokens: 20,
+          cache_write_tokens: 5,
+        },
+        output: {
+          total_tokens: 40,
+          non_reasoning_tokens: 30,
+          reasoning_tokens: 10,
+        },
+        unclassified_tokens: 0,
+      },
+      tokens: {
+        input_tokens: 999,
+        output_tokens: 888,
+        reasoning_tokens: 777,
+        total_tokens: 2_664,
+      },
+    });
+
+    expect(accounting).toMatchObject({
+      sourceValid: true,
+      quality: 'complete',
+      inputTokens: 125,
+      uncachedInputTokens: 100,
+      cacheReadTokens: 20,
+      cacheCreationTokens: 5,
+      outputTokens: 40,
+      nonReasoningOutputTokens: 30,
+      reasoningTokens: 10,
+      unclassifiedTokens: 0,
+      totalTokens: 165,
+      incomplete: false,
+    });
+  });
+
+  it('preserves a migrated canonical breakdown with legacy accounting provenance', () => {
+    expect(
+      resolveTokenAccounting({
+        accounting_version: 0,
+        accounting_valid: false,
+        token_breakdown: {
+          schema_version: 2,
+          quality: 'complete',
+          total_tokens: 165,
+          input: {
+            total_tokens: 125,
+            uncached_tokens: 100,
+            cache_read_tokens: 20,
+            cache_write_tokens: 5,
+          },
+          output: {
+            total_tokens: 40,
+            non_reasoning_tokens: 30,
+            reasoning_tokens: 10,
+          },
+          unclassified_tokens: 0,
+        },
+        tokens: {
+          input_tokens: 999,
+          output_tokens: 888,
+          reasoning_tokens: 777,
+          total_tokens: 2_664,
+        },
+      })
+    ).toMatchObject({
+      accountingVersion: 0,
+      sourceValid: false,
+      quality: 'complete',
+      inputTokens: 125,
+      outputTokens: 40,
+      nonReasoningOutputTokens: 30,
+      reasoningTokens: 10,
+      unclassifiedTokens: 0,
+      totalTokens: 165,
+      pricingSafe: true,
+    });
+  });
+
+  it('does not mark explicit legacy nested provenance valid when accounting_valid is absent', () => {
+    const detail = canonicalDetailForValidation(0);
+
+    expect(resolveTokenAccounting(detail)).toMatchObject({
+      accountingVersion: 0,
+      sourceValid: false,
+      quality: 'complete',
+      pricingSafe: true,
+    });
+  });
+
+  it('preserves migrated flat canonical buckets with legacy accounting provenance', () => {
+    expect(
+      resolveTokenAccounting({
+        accounting_version: 0,
+        accounting_valid: false,
+        accounting_quality: 'complete',
+        input_tokens: 125,
+        output_tokens: 40,
+        non_reasoning_output_tokens: 30,
+        reasoning_tokens: 10,
+        cache_read_tokens: 20,
+        cache_creation_tokens: 5,
+        unclassified_tokens: 0,
+        total_tokens: 165,
+      })
+    ).toMatchObject({
+      accountingVersion: 0,
+      sourceValid: false,
+      quality: 'complete',
+      inputTokens: 125,
+      uncachedInputTokens: 100,
+      outputTokens: 40,
+      nonReasoningOutputTokens: 30,
+      reasoningTokens: 10,
+      cacheReadTokens: 20,
+      cacheCreationTokens: 5,
+      unclassifiedTokens: 0,
+      totalTokens: 165,
+      pricingSafe: true,
+    });
+  });
+
+  it('keeps an invalid claimed CPA v2 breakdown incomplete and unpriced', () => {
+    const detail = {
+      accounting_version: 2,
+      token_breakdown: {
+        schema_version: 2,
+        quality: 'complete',
+        total_tokens: 139,
+        input: {
+          total_tokens: 100,
+          uncached_tokens: 100,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
+        },
+        output: {
+          total_tokens: 40,
+          non_reasoning_tokens: 30,
+          reasoning_tokens: 10,
+        },
+        unclassified_tokens: 0,
+      },
+      provider: 'openai',
+      tokens: {
+        input_tokens: 100,
+        output_tokens: 40,
+        reasoning_tokens: 10,
+        total_tokens: 140,
+      },
+      __modelName: 'gpt-invalid-v2',
+    };
+
+    expect(resolveTokenAccounting(detail)).toMatchObject({
+      accountingVersion: 2,
+      sourceValid: false,
+      quality: 'inconsistent',
+      inputTokens: 0,
+      outputTokens: 0,
+      unclassifiedTokens: 140,
+      totalTokens: 140,
+      incomplete: true,
+      pricingSafe: false,
+    });
+    expect(
+      calculateCost(detail, {
+        'gpt-invalid-v2': { prompt: 1, completion: 2, cache: 0 },
+      })
+    ).toBe(0);
+  });
+
+  it('rejects a canonical breakdown with missing required fields', () => {
+    const detail = {
+      accounting_version: 2,
+      token_breakdown: {
+        schema_version: 2,
+        quality: 'complete',
+      },
+      provider: 'openai',
+      tokens: {
+        input_tokens: 100,
+        output_tokens: 40,
+        reasoning_tokens: 10,
+        total_tokens: 140,
+      },
+    };
+
+    expect(resolveTokenAccounting(detail)).toMatchObject({
+      accountingVersion: 2,
+      sourceValid: false,
+      quality: 'inconsistent',
+      inputTokens: 0,
+      outputTokens: 0,
+      unclassifiedTokens: 140,
+      totalTokens: 140,
+      pricingSafe: false,
+    });
+  });
+
+  it('rejects a string-encoded canonical accounting version', () => {
+    expect(resolveTokenAccounting(canonicalDetailForValidation('2'))).toMatchObject({
+      accountingVersion: 0,
+      sourceValid: false,
+      quality: 'inconsistent',
+      unclassifiedTokens: 140,
+      totalTokens: 140,
+      pricingSafe: false,
+    });
+  });
+
+  it('rejects string-encoded canonical token buckets', () => {
+    expect(resolveTokenAccounting(canonicalDetailForValidation(2, '0'))).toMatchObject({
+      accountingVersion: 2,
+      sourceValid: false,
+      quality: 'inconsistent',
+      unclassifiedTokens: 140,
+      totalTokens: 140,
+      pricingSafe: false,
+    });
+  });
+
+  it('rejects a non-boolean canonical validity flag', () => {
+    expect(
+      resolveTokenAccounting({
+        ...canonicalDetailForValidation(2),
+        accounting_valid: 'false',
+      })
+    ).toMatchObject({
+      accountingVersion: 2,
+      sourceValid: false,
+      quality: 'inconsistent',
+      unclassifiedTokens: 140,
+      totalTokens: 140,
+      pricingSafe: false,
+    });
+  });
+
+  it('treats an isolated canonical validity flag as an incomplete canonical claim', () => {
+    expect(
+      resolveTokenAccounting({
+        accounting_valid: false,
+        provider: 'openai',
+        tokens: { input_tokens: 100, output_tokens: 20, total_tokens: 120 },
+      })
+    ).toMatchObject({
+      accountingVersion: 0,
+      sourceValid: false,
+      quality: 'inconsistent',
+      unclassifiedTokens: 120,
+      totalTokens: 120,
+      pricingSafe: false,
+    });
+  });
+
+  it('keeps an explicit legacy accounting version without canonical markers on the legacy path', () => {
+    expect(
+      resolveTokenAccounting({
+        accounting_version: 0,
+        provider: 'openai',
+        tokens: { input_tokens: 100, output_tokens: 20, total_tokens: 120 },
+      })
+    ).toMatchObject({
+      accountingVersion: 0,
+      sourceValid: false,
+      quality: 'complete',
+      inputTokens: 100,
+      outputTokens: 20,
+      unclassifiedTokens: 0,
+      totalTokens: 120,
+      pricingSafe: true,
+    });
+  });
+
+  it.each([
+    {
+      name: 'string cache read',
+      overrides: { cache_read_tokens: '20' },
+    },
+    {
+      name: 'fractional cache write',
+      overrides: {
+        input_tokens: 125.5,
+        cache_creation_tokens: 5.5,
+        total_tokens: 165.5,
+      },
+    },
+    {
+      name: 'negative unclassified',
+      overrides: { unclassified_tokens: -1 },
+    },
+    {
+      name: 'fractional reasoning',
+      overrides: {
+        output_tokens: 40.5,
+        reasoning_tokens: 10.5,
+        total_tokens: 165.5,
+      },
+    },
+    {
+      name: 'negative input',
+      overrides: {
+        input_tokens: -1,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+        output_tokens: 40,
+        total_tokens: 40,
+      },
+    },
+  ])('rejects flat canonical $name tokens', ({ overrides }) => {
+    const detail = {
+      accounting_version: 2,
+      accounting_valid: true,
+      accounting_quality: 'complete',
+      input_tokens: 125,
+      output_tokens: 40,
+      non_reasoning_output_tokens: 30,
+      reasoning_tokens: 10,
+      cache_read_tokens: 20,
+      cache_creation_tokens: 5,
+      unclassified_tokens: 0,
+      total_tokens: 165,
+      ...overrides,
+    };
+
+    expect(resolveTokenAccounting(detail)).toMatchObject({
+      accountingVersion: 2,
+      sourceValid: false,
+      quality: 'inconsistent',
+      pricingSafe: false,
+    });
+  });
+
+  it.each(['cache_read_tokens', 'cache_creation_tokens', 'unclassified_tokens'])(
+    'rejects a flat canonical breakdown missing %s',
+    (field) => {
+      const detail: Record<string, unknown> = {
+        accounting_version: 2,
+        accounting_valid: true,
+        accounting_quality: 'complete',
+        input_tokens: 125,
+        output_tokens: 40,
+        non_reasoning_output_tokens: 30,
+        reasoning_tokens: 10,
+        cache_read_tokens: 20,
+        cache_creation_tokens: 5,
+        unclassified_tokens: 0,
+        total_tokens: 165,
+      };
+      delete detail[field];
+
+      expect(resolveTokenAccounting(detail)).toMatchObject({
+        sourceValid: false,
+        quality: 'inconsistent',
+        pricingSafe: false,
+      });
+    }
+  );
+
+  it('rejects an explicit accounting version that conflicts with the breakdown schema', () => {
+    const detail = {
+      accounting_version: 3,
+      accounting_valid: true,
+      token_breakdown: {
+        schema_version: 2,
+        quality: 'complete',
+        total_tokens: 140,
+        input: {
+          total_tokens: 100,
+          uncached_tokens: 100,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
+        },
+        output: {
+          total_tokens: 40,
+          non_reasoning_tokens: 30,
+          reasoning_tokens: 10,
+        },
+        unclassified_tokens: 0,
+      },
+      provider: 'openai',
+      tokens: {
+        input_tokens: 100,
+        output_tokens: 40,
+        reasoning_tokens: 10,
+        total_tokens: 140,
+      },
+      __modelName: 'gpt-version-conflict',
+    };
+
+    expect(resolveTokenAccounting(detail)).toMatchObject({
+      accountingVersion: 3,
+      sourceValid: false,
+      quality: 'inconsistent',
+      inputTokens: 0,
+      outputTokens: 0,
+      unclassifiedTokens: 140,
+      totalTokens: 140,
+      pricingSafe: false,
+    });
+    expect(
+      calculateCost(detail, {
+        'gpt-version-conflict': { prompt: 1, completion: 2, cache: 0 },
+      })
+    ).toBe(0);
+  });
+
+  it('rejects a canonical breakdown without an explicit accounting version', () => {
+    const detail = {
+      accounting_valid: true,
+      token_breakdown: {
+        schema_version: 2,
+        quality: 'complete',
+        total_tokens: 140,
+        input: {
+          total_tokens: 100,
+          uncached_tokens: 100,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
+        },
+        output: {
+          total_tokens: 40,
+          non_reasoning_tokens: 30,
+          reasoning_tokens: 10,
+        },
+        unclassified_tokens: 0,
+      },
+      provider: 'openai',
+      tokens: {
+        input_tokens: 100,
+        output_tokens: 40,
+        reasoning_tokens: 10,
+        total_tokens: 140,
+      },
+    };
+
+    expect(resolveTokenAccounting(detail)).toMatchObject({
+      accountingVersion: 0,
+      sourceValid: false,
+      quality: 'inconsistent',
+      inputTokens: 0,
+      outputTokens: 0,
+      unclassifiedTokens: 140,
+      totalTokens: 140,
+      pricingSafe: false,
+    });
+  });
+
+  it('treats an explicit null token breakdown as invalid canonical metadata', () => {
+    expect(
+      resolveTokenAccounting({
+        token_breakdown: null,
+        provider: 'openai',
+        tokens: { input_tokens: 100, output_tokens: 20, total_tokens: 120 },
+      })
+    ).toMatchObject({
+      accountingVersion: 0,
+      sourceValid: false,
+      quality: 'inconsistent',
+      inputTokens: 0,
+      outputTokens: 0,
+      unclassifiedTokens: 120,
+      totalTokens: 120,
+      pricingSafe: false,
+    });
+  });
+
+  it.each([
+    { name: 'null accounting version', marker: { accounting_version: null } },
+    { name: 'null accounting validity', marker: { accounting_valid: null } },
+    { name: 'empty accounting quality', marker: { accounting_quality: '' } },
+  ])('treats $name as invalid canonical metadata', ({ marker }) => {
+    expect(
+      resolveTokenAccounting({
+        ...marker,
+        provider: 'openai',
+        tokens: { input_tokens: 100, output_tokens: 20, total_tokens: 120 },
+      })
+    ).toMatchObject({
+      sourceValid: false,
+      quality: 'inconsistent',
+      inputTokens: 0,
+      outputTokens: 0,
+      unclassifiedTokens: 120,
+      totalTokens: 120,
+      pricingSafe: false,
+    });
+  });
+
+  it('does not infer a missing canonical non-reasoning bucket from legacy output fields', () => {
+    const detail = {
+      accounting_version: 2,
+      accounting_valid: true,
+      accounting_quality: 'complete',
+      provider: 'anthropic',
+      tokens: {
+        input_tokens: 100,
+        output_tokens: 50,
+        reasoning_tokens: 10,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+        unclassified_tokens: 0,
+        total_tokens: 150,
+      },
+      __modelName: 'claude-invalid-flat-v2',
+    };
+
+    expect(resolveTokenAccounting(detail)).toMatchObject({
+      quality: 'inconsistent',
+      inputTokens: 0,
+      outputTokens: 0,
+      unclassifiedTokens: 150,
+      totalTokens: 150,
+      pricingSafe: false,
+    });
+    expect(
+      calculateCost(detail, {
+        'claude-invalid-flat-v2': { prompt: 1, completion: 2, cache: 0 },
+      })
+    ).toBe(0);
+  });
+
+  it.each([
+    {
+      name: 'OpenAI output includes reasoning',
+      detail: {
+        provider: 'openai',
+        tokens: { input_tokens: 100, output_tokens: 40, reasoning_tokens: 10 },
+      },
+      expected: {
+        inputTokens: 100,
+        outputTokens: 40,
+        nonReasoningOutputTokens: 30,
+        totalTokens: 140,
+      },
+    },
+    {
+      name: 'Claude cache and reasoning are independent',
+      detail: {
+        provider: 'anthropic',
+        tokens: {
+          input_tokens: 100,
+          output_tokens: 40,
+          reasoning_tokens: 10,
+          cache_read_tokens: 20,
+          cache_creation_tokens: 5,
+        },
+      },
+      expected: {
+        inputTokens: 125,
+        outputTokens: 50,
+        nonReasoningOutputTokens: 40,
+        totalTokens: 175,
+      },
+    },
+    {
+      name: 'Gemini reasoning is separate while cache is included',
+      detail: {
+        executor_type: 'GeminiExecutor',
+        tokens: {
+          input_tokens: 100,
+          output_tokens: 40,
+          reasoning_tokens: 10,
+          cache_read_tokens: 20,
+        },
+      },
+      expected: {
+        inputTokens: 100,
+        outputTokens: 50,
+        nonReasoningOutputTokens: 40,
+        totalTokens: 150,
+      },
+    },
+    {
+      name: 'OpenRouter output includes reasoning',
+      detail: {
+        provider: 'openrouter',
+        tokens: {
+          input_tokens: 100,
+          output_tokens: 40,
+          reasoning_tokens: 10,
+          cache_read_tokens: 20,
+        },
+      },
+      expected: {
+        inputTokens: 100,
+        outputTokens: 40,
+        nonReasoningOutputTokens: 30,
+        totalTokens: 140,
+      },
+    },
+    {
+      name: 'Anthropic marker wins over a generic OpenAI marker',
+      detail: {
+        provider: 'anthropic-openai-gateway',
+        tokens: {
+          input_tokens: 100,
+          output_tokens: 40,
+          reasoning_tokens: 10,
+          cache_read_tokens: 20,
+        },
+      },
+      expected: {
+        inputTokens: 120,
+        outputTokens: 50,
+        nonReasoningOutputTokens: 40,
+        totalTokens: 170,
+      },
+    },
+    {
+      name: 'Explicit OpenAI-compatible provider wins over an Anthropic suffix',
+      detail: {
+        provider: 'openai-compatible-anthropic',
+        tokens: {
+          input_tokens: 100,
+          output_tokens: 40,
+          reasoning_tokens: 10,
+          cache_read_tokens: 20,
+        },
+      },
+      expected: {
+        inputTokens: 100,
+        outputTokens: 40,
+        nonReasoningOutputTokens: 30,
+        totalTokens: 140,
+      },
+    },
+  ])('$name', ({ detail, expected }) => {
+    expect(resolveTokenAccounting(detail)).toMatchObject({
+      ...expected,
+      quality: 'complete',
+      unclassifiedTokens: 0,
+    });
+  });
+
+  it('does not price ambiguous unknown-provider legacy buckets', () => {
+    const detail = {
+      tokens: {
+        input_tokens: 100_000,
+        output_tokens: 20_000,
+        reasoning_tokens: 5_000,
+      },
+      __modelName: 'custom-model',
+    };
+
+    expect(resolveTokenAccounting(detail)).toMatchObject({
+      inputTokens: 0,
+      outputTokens: 0,
+      unclassifiedTokens: 120_000,
+      totalTokens: 120_000,
+      pricingSafe: false,
+    });
+    expect(
+      calculateCost(detail, {
+        'custom-model': { prompt: 1, completion: 2, cache: 0.1 },
+      })
+    ).toBe(0);
   });
 
   it('uses Anthropic cache input fields when total tokens are missing', () => {
@@ -517,8 +1313,28 @@ describe('cache input accounting semantics', () => {
       mode: 'included_in_input',
     },
     {
+      name: 'Grok executor beats Claude alias',
+      context: { executorType: 'GrokExecutor', displayModel: 'claude-alias' },
+      mode: 'included_in_input',
+    },
+    {
+      name: 'Moonshot executor beats Claude alias',
+      context: { executorType: 'MoonshotExecutor', displayModel: 'claude-alias' },
+      mode: 'included_in_input',
+    },
+    {
+      name: 'Grok provider beats Claude alias',
+      context: { provider: 'grok', resolvedModel: 'claude-sonnet' },
+      mode: 'included_in_input',
+    },
+    {
       name: 'provider snapshot beats model',
       context: { providerSnapshot: 'moonshot', resolvedModel: 'claude-sonnet' },
+      mode: 'included_in_input',
+    },
+    {
+      name: 'OpenAI-compatible provider beats Anthropic suffix',
+      context: { provider: 'openai-compatible-anthropic' },
       mode: 'included_in_input',
     },
     {
@@ -769,25 +1585,51 @@ describe('calculateCost model price preference', () => {
   });
 
   it('charges cached input tokens only at the cache price', () => {
-    const cost = calculateCost(
-      {
-        tokens: {
-          input_tokens: 100_000,
-          output_tokens: 50_000,
-          cached_tokens: 25_000,
-        },
-        __modelName: 'gpt-5.5',
+    const detail = {
+      tokens: {
+        input_tokens: 100_000,
+        output_tokens: 50_000,
+        cached_tokens: 25_000,
       },
-      {
-        'gpt-5.5': { prompt: 2, completion: 4, cache: 1 },
-      }
-    );
+      __modelName: 'gpt-5.5',
+    };
+    expect(resolveTokenAccounting(detail, 'gpt-5.5')).toMatchObject({
+      quality: 'complete',
+      uncachedInputTokens: 75_000,
+      cachedTokens: 0,
+      cacheReadTokens: 25_000,
+      outputTokens: 50_000,
+      totalTokens: 150_000,
+      pricingSafe: true,
+    });
+    const cost = calculateCost(detail, {
+      'gpt-5.5': { prompt: 2, completion: 4, cache: 1 },
+    });
     expect(cost).toBeCloseTo(0.375);
   });
 
-  it('prices fine-grained cache buckets outside input while preserving residual cached input', () => {
+  it('prices canonical cache buckets without a legacy cached-token guess', () => {
     const cost = calculateCost(
       {
+        accounting_version: 2,
+        accounting_valid: true,
+        token_breakdown: {
+          schema_version: 2,
+          quality: 'complete',
+          total_tokens: 1_300_000,
+          input: {
+            total_tokens: 1_300_000,
+            uncached_tokens: 900_000,
+            cache_read_tokens: 300_000,
+            cache_write_tokens: 100_000,
+          },
+          output: {
+            total_tokens: 0,
+            non_reasoning_tokens: 0,
+            reasoning_tokens: 0,
+          },
+          unclassified_tokens: 0,
+        },
         tokens: {
           input_tokens: 1_300_000,
           cached_tokens: 100_000,
@@ -807,7 +1649,7 @@ describe('calculateCost model price preference', () => {
       }
     );
 
-    expect(cost).toBeCloseTo(2.3);
+    expect(cost).toBeCloseTo(2.25);
   });
 
   it('applies gpt-5.4 priority service tier multiplier', () => {
@@ -976,6 +1818,25 @@ describe('calculateCost model price preference', () => {
   it('uses official gpt-5.6 prices when the current price book has no entry', () => {
     const cost = calculateCost(
       {
+        accounting_version: 2,
+        accounting_valid: true,
+        token_breakdown: {
+          schema_version: 2,
+          quality: 'complete',
+          total_tokens: 220_000,
+          input: {
+            total_tokens: 200_000,
+            uncached_tokens: 120_000,
+            cache_read_tokens: 60_000,
+            cache_write_tokens: 20_000,
+          },
+          output: {
+            total_tokens: 20_000,
+            non_reasoning_tokens: 20_000,
+            reasoning_tokens: 0,
+          },
+          unclassified_tokens: 0,
+        },
         tokens: {
           input_tokens: 200_000,
           output_tokens: 20_000,
@@ -1126,6 +1987,7 @@ describe('calculateCost model price preference', () => {
       {
         tokens: { input_tokens: 1_000_000 },
         __modelName: 'unknown-model',
+        provider: 'openai',
         service_tier: 'priority',
       },
       {
@@ -1288,13 +2150,22 @@ describe('calculateCost model price preference', () => {
     };
 
     expect(
-      calculateCost({ tokens: { input_tokens: 32_000 }, __modelName: 'tiered-model' }, modelPrices)
+      calculateCost(
+        { tokens: { input_tokens: 32_000 }, __modelName: 'tiered-model', provider: 'openai' },
+        modelPrices
+      )
     ).toBeCloseTo(0.032);
     expect(
-      calculateCost({ tokens: { input_tokens: 200_000 }, __modelName: 'tiered-model' }, modelPrices)
+      calculateCost(
+        { tokens: { input_tokens: 200_000 }, __modelName: 'tiered-model', provider: 'openai' },
+        modelPrices
+      )
     ).toBeCloseTo(0.6);
     expect(
-      calculateCost({ tokens: { input_tokens: 200_001 }, __modelName: 'tiered-model' }, modelPrices)
+      calculateCost(
+        { tokens: { input_tokens: 200_001 }, __modelName: 'tiered-model', provider: 'openai' },
+        modelPrices
+      )
     ).toBeCloseTo(1.000005);
   });
 
@@ -1344,6 +2215,25 @@ describe('calculateCost model price preference', () => {
   it('inherits missing tier cache rates and preserves explicit zero overrides', () => {
     const cost = calculateCost(
       {
+        accounting_version: 2,
+        accounting_valid: true,
+        token_breakdown: {
+          schema_version: 2,
+          quality: 'complete',
+          total_tokens: 1_000_000,
+          input: {
+            total_tokens: 1_000_000,
+            uncached_tokens: 700_000,
+            cache_read_tokens: 200_000,
+            cache_write_tokens: 100_000,
+          },
+          output: {
+            total_tokens: 0,
+            non_reasoning_tokens: 0,
+            reasoning_tokens: 0,
+          },
+          unclassified_tokens: 0,
+        },
         tokens: {
           input_tokens: 1_000_000,
           cache_read_tokens: 200_000,

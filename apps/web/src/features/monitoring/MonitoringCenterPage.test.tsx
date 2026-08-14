@@ -159,7 +159,10 @@ describe('MonitoringCenterPage summary cards', () => {
       successRate: 0.999,
       inputTokens: 2_783_500_000,
       outputTokens: 11_700_000,
+      nonReasoningOutputTokens: 6_700_000,
       reasoningTokens: 5_000_000,
+      unclassifiedTokens: 0,
+      incompleteAccountingCalls: 0,
       cachedTokens: 2_595_300_000,
       cacheReadTokens: 444_400_000,
       cacheCreationTokens: 555_500_000,
@@ -221,7 +224,7 @@ describe('MonitoringCenterPage summary cards', () => {
     expect(html).toContain('Reasoning 5.0M');
     expect(html).toContain('Share 99.6%');
     expect(html).toContain('Share 0.4%');
-    expect(html).toContain('Hit rate 80.3%');
+    expect(html).toContain('Hit rate 100.0%');
     expect(html).not.toContain('Create 555.5M');
     expect(html).not.toContain('Read 444.4M');
   });
@@ -235,7 +238,10 @@ describe('MonitoringCenterPage summary cards', () => {
         successRate: 1,
         inputTokens: 1_000,
         outputTokens: 0,
+        nonReasoningOutputTokens: 0,
         reasoningTokens: 0,
+        unclassifiedTokens: 0,
+        incompleteAccountingCalls: 0,
         cachedTokens: 932,
         cacheReadTokens: 0,
         cacheCreationTokens: 0,
@@ -269,7 +275,10 @@ describe('MonitoringCenterPage summary cards', () => {
         successRate: 1,
         inputTokens: 1_000,
         outputTokens: 2_000,
+        nonReasoningOutputTokens: 2_000,
         reasoningTokens: 500,
+        unclassifiedTokens: 0,
+        incompleteAccountingCalls: 0,
         cachedTokens: 200,
         cacheReadTokens: 300,
         cacheCreationTokens: 100,
@@ -291,7 +300,7 @@ describe('MonitoringCenterPage summary cards', () => {
     );
     const cachedCard = secondaryCards.find((card) => card.label === 'Cached Tokens');
 
-    expect(cachedCard?.meta).toBe('Hit rate 35.7%');
+    expect(cachedCard?.meta).toBe('Hit rate 50.0%');
   });
 
   it('uses the normalized GPT-5.6 cache hit rate from analytics', () => {
@@ -303,7 +312,10 @@ describe('MonitoringCenterPage summary cards', () => {
         successRate: 1,
         inputTokens: 152_600,
         outputTokens: 385,
+        nonReasoningOutputTokens: 147,
         reasoningTokens: 238,
+        unclassifiedTokens: 0,
+        incompleteAccountingCalls: 0,
         cachedTokens: 0,
         cacheReadTokens: 151_000,
         cacheCreationTokens: 1_000,

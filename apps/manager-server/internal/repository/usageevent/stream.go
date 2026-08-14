@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageaccountingsql"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
@@ -24,6 +25,8 @@ const (
 	usageExportBatchSize           = 512
 	compatibleUsageDetailBatchSize = 1024
 )
+
+var streamAccountingSQL = usageaccountingsql.For("")
 
 var compatibleUsageOrderedIDsQuery = `select id
 	from usage_events
@@ -40,6 +43,8 @@ var compatibleUsageDetailQueryPrefix = `select
 		id,
 		coalesce(nullif(endpoint, ''), '-') as group_endpoint,
 			` + compatibleUsageAnalyticsModelExpression + ` as group_model,
+		coalesce(provider, ''),
+		coalesce(auth_type, ''),
 		timestamp,
 		coalesce(source, ''),
 		coalesce(auth_index, ''),
@@ -60,6 +65,9 @@ var compatibleUsageDetailQueryPrefix = `select
 		coalesce(response_service_tier, ''),
 		coalesce(cache_input_mode, ''),
 		coalesce(executor_type, ''),
+		coalesce(accounting_version, 0),
+		coalesce(accounting_valid, 0),
+		coalesce(accounting_quality, ''),
 		input_tokens,
 		output_tokens,
 		reasoning_tokens,
@@ -67,7 +75,16 @@ var compatibleUsageDetailQueryPrefix = `select
 		cache_tokens,
 		cache_read_tokens,
 		cache_creation_tokens,
+		normalized_uncached_input_tokens,
+		normalized_total_input_tokens,
+		normalized_cache_read_tokens,
+		normalized_cache_creation_tokens,
+		normalized_non_reasoning_output_tokens,
+		normalized_reasoning_output_tokens,
+		normalized_total_output_tokens,
+		unclassified_tokens,
 		total_tokens,
+		coalesce(raw_json, ''),
 		failed,
 		fail_status_code,
 		coalesce(fail_summary, ''),
@@ -449,12 +466,30 @@ func (r *repository) compatibleUsageTotals(ctx context.Context, snapshot usageSn
 	if snapshot.empty {
 		return compatibleUsageTotals{}, nil
 	}
-	var totals compatibleUsageTotals
-	if err := r.db.QueryRowContext(ctx, `select
-		count(*),
-		count(*) - coalesce(sum(case when failed <> 0 then 1 else 0 end), 0),
-		coalesce(sum(case when failed <> 0 then 1 else 0 end), 0),
-		coalesce(sum(total_tokens), 0)
+	rows, err := r.db.QueryContext(ctx, `select
+		failed,
+		`+streamAccountingSQL.Ready+`,
+		`+streamAccountingSQL.Total+`,
+		coalesce(accounting_version, 0),
+		coalesce(accounting_valid, 0),
+		coalesce(accounting_quality, ''),
+		coalesce(provider, ''),
+		coalesce(executor_type, ''),
+		coalesce(auth_provider_snapshot, ''),
+		coalesce(auth_type, ''),
+		coalesce(resolved_model, ''),
+		coalesce(requested_model, ''),
+		model,
+		coalesce(cache_input_mode, ''),
+		input_tokens,
+		output_tokens,
+		reasoning_tokens,
+		cached_tokens,
+		cache_tokens,
+		cache_read_tokens,
+		cache_creation_tokens,
+		total_tokens,
+		coalesce(raw_json, '')
 	from usage_events
 	where id <= ? and (
 		timestamp_ms > ? or (timestamp_ms = ? and id >= ?)
@@ -463,7 +498,58 @@ func (r *repository) compatibleUsageTotals(ctx context.Context, snapshot usageSn
 		snapshot.cutoffTimestampMS,
 		snapshot.cutoffTimestampMS,
 		snapshot.cutoffID,
-	).Scan(&totals.totalRequests, &totals.successCount, &totals.failureCount, &totals.totalTokens); err != nil {
+	)
+	if err != nil {
+		return compatibleUsageTotals{}, err
+	}
+	defer rows.Close()
+
+	var totals compatibleUsageTotals
+	for rows.Next() {
+		var event usage.Event
+		var failed, ready, accountingValid int
+		var projectedTotal int64
+		if err := rows.Scan(
+			&failed,
+			&ready,
+			&projectedTotal,
+			&event.AccountingVersion,
+			&accountingValid,
+			&event.TokenBreakdown.Quality,
+			&event.Provider,
+			&event.ExecutorType,
+			&event.AuthProviderSnapshot,
+			&event.AuthType,
+			&event.ResolvedModel,
+			&event.RequestedModel,
+			&event.Model,
+			&event.CacheInputMode,
+			&event.InputTokens,
+			&event.OutputTokens,
+			&event.ReasoningTokens,
+			&event.CachedTokens,
+			&event.CacheTokens,
+			&event.CacheReadTokens,
+			&event.CacheCreationTokens,
+			&event.TotalTokens,
+			&event.RawJSON,
+		); err != nil {
+			return compatibleUsageTotals{}, err
+		}
+		event.AccountingValid = accountingValid != 0
+		if ready == 0 {
+			usage.ApplyTokenAccounting(&event, nil)
+			projectedTotal = event.TotalTokens
+		}
+		totals.totalRequests++
+		if failed != 0 {
+			totals.failureCount++
+		} else {
+			totals.successCount++
+		}
+		totals.totalTokens = usage.SaturatingTokenSum(totals.totalTokens, projectedTotal)
+	}
+	if err := rows.Err(); err != nil {
 		return compatibleUsageTotals{}, err
 	}
 	return totals, nil
@@ -475,10 +561,14 @@ func (r *repository) exportBatch(ctx context.Context, snapshot usageSnapshot, cu
 		request_id, event_hash, timestamp_ms, timestamp, provider, executor_type, model, endpoint, method, path,
 		auth_type, auth_index, source, source_hash, api_key_hash,
 		account_snapshot, auth_label_snapshot, auth_file_snapshot, auth_provider_snapshot, auth_project_id_snapshot, auth_snapshot_at_ms,
-		requested_model, resolved_model, reasoning_effort, service_tier,
+		requested_model, resolved_model, reasoning_effort, service_tier, cache_input_mode,
+		accounting_version, accounting_valid, coalesce(accounting_quality, ''),
 		input_tokens, output_tokens, reasoning_tokens, cached_tokens, cache_tokens, cache_read_tokens, cache_creation_tokens, total_tokens,
+		normalized_uncached_input_tokens, normalized_total_input_tokens, normalized_cache_read_tokens, normalized_cache_creation_tokens,
+		normalized_non_reasoning_output_tokens, normalized_reasoning_output_tokens, normalized_total_output_tokens, unclassified_tokens,
 		latency_ms, ttft_ms, failed, fail_status_code, fail_summary,
 		coalesce(response_metadata_json, ''), header_quota_recover_at_ms, header_quota_used_percent, coalesce(header_quota_plan_type, ''), coalesce(header_error_kind, ''), coalesce(header_error_code, ''), coalesce(header_trace_id, ''),
+		coalesce(raw_json, ''),
 		created_at_ms
 	from usage_events
 	where id <= ?
@@ -516,81 +606,123 @@ func (r *repository) exportBatch(ctx context.Context, snapshot usageSnapshot, cu
 
 func scanCompatibleDetail(rows *sql.Rows) (compatibleExportRow, error) {
 	var row compatibleExportRow
-	var detail usage.Detail
+	var event usage.Event
+	var provider, authType string
 	var authSnapshotAt sql.NullInt64
 	var latency sql.NullInt64
 	var ttft sql.NullInt64
 	var failStatusCode sql.NullInt64
 	var responseMetadataJSON string
+	var rawJSON string
+	var accountingQuality string
+	var accountingVersion, accountingValid int
 	var failed int
-	var cachedTokens int64
-	var cacheTokens int64
+	var normalizedUncachedInput, normalizedTotalInput, normalizedCacheRead, normalizedCacheCreation sql.NullInt64
+	var normalizedNonReasoningOutput, normalizedReasoningOutput, normalizedTotalOutput, unclassifiedTokens sql.NullInt64
+	var persistedTotalTokens int64
 
 	err := rows.Scan(
 		&row.id,
 		&row.endpoint,
 		&row.model,
-		&detail.Timestamp,
-		&detail.Source,
-		&detail.AuthIndex,
-		&detail.APIKeyHash,
-		&detail.AccountSnapshot,
-		&detail.AuthLabelSnapshot,
-		&detail.AuthFileSnapshot,
-		&detail.AuthProviderSnapshot,
-		&detail.AuthProjectIDSnapshot,
+		&provider,
+		&authType,
+		&event.Timestamp,
+		&event.Source,
+		&event.AuthIndex,
+		&event.APIKeyHash,
+		&event.AccountSnapshot,
+		&event.AuthLabelSnapshot,
+		&event.AuthFileSnapshot,
+		&event.AuthProviderSnapshot,
+		&event.AuthProjectIDSnapshot,
 		&authSnapshotAt,
 		&latency,
 		&ttft,
-		&detail.RequestedModel,
-		&detail.ResolvedModel,
-		&detail.ReasoningEffort,
-		&detail.ServiceTier,
-		&detail.RequestServiceTier,
-		&detail.ResponseServiceTier,
-		&detail.CacheInputMode,
-		&detail.ExecutorType,
-		&detail.Tokens.InputTokens,
-		&detail.Tokens.OutputTokens,
-		&detail.Tokens.ReasoningTokens,
-		&cachedTokens,
-		&cacheTokens,
-		&detail.Tokens.CacheReadTokens,
-		&detail.Tokens.CacheCreationTokens,
-		&detail.Tokens.TotalTokens,
+		&event.RequestedModel,
+		&event.ResolvedModel,
+		&event.ReasoningEffort,
+		&event.ServiceTier,
+		&event.RequestServiceTier,
+		&event.ResponseServiceTier,
+		&event.CacheInputMode,
+		&event.ExecutorType,
+		&accountingVersion,
+		&accountingValid,
+		&accountingQuality,
+		&event.InputTokens,
+		&event.OutputTokens,
+		&event.ReasoningTokens,
+		&event.CachedTokens,
+		&event.CacheTokens,
+		&event.CacheReadTokens,
+		&event.CacheCreationTokens,
+		&normalizedUncachedInput,
+		&normalizedTotalInput,
+		&normalizedCacheRead,
+		&normalizedCacheCreation,
+		&normalizedNonReasoningOutput,
+		&normalizedReasoningOutput,
+		&normalizedTotalOutput,
+		&unclassifiedTokens,
+		&persistedTotalTokens,
+		&rawJSON,
 		&failed,
 		&failStatusCode,
-		&detail.FailSummary,
+		&event.FailSummary,
 		&responseMetadataJSON,
 	)
 	if err != nil {
 		return compatibleExportRow{}, err
 	}
+	event.Provider = provider
+	event.AuthType = authType
+	event.Model = row.model
+	if event.Model == "-" && event.RequestedModel == "" {
+		event.Model = ""
+	}
+	event.Endpoint = row.endpoint
+	event.TotalTokens = persistedTotalTokens
+	event.RawJSON = rawJSON
+	event.AccountingVersion = accountingVersion
+	event.AccountingValid = accountingValid != 0
+	event.TokenBreakdown.Quality = accountingQuality
 	if authSnapshotAt.Valid {
-		detail.AuthSnapshotAtMS = authSnapshotAt.Int64
+		event.AuthSnapshotAtMS = authSnapshotAt.Int64
 	}
 	if latency.Valid {
 		value := latency.Int64
-		detail.LatencyMS = &value
+		event.LatencyMS = &value
 	}
 	if ttft.Valid {
 		value := ttft.Int64
-		detail.TTFTMS = &value
+		event.TTFTMS = &value
 	}
 	if failStatusCode.Valid {
-		detail.FailStatusCode = int(failStatusCode.Int64)
+		event.FailStatusCode = int(failStatusCode.Int64)
 	}
-	detail.Failed = failed != 0
-	compatibleCachedTokens := usage.CompatibleCachedTokens(
-		cachedTokens,
-		cacheTokens,
-		detail.Tokens.CacheReadTokens,
-		detail.Tokens.CacheCreationTokens,
-	)
-	detail.Tokens.CachedTokens = compatibleCachedTokens
-	detail.Tokens.CacheTokens = compatibleCachedTokens
+	event.Failed = failed != 0
+	usage.ApplyTokenAccounting(&event, nil)
+	if normalizedUncachedInput.Valid && normalizedTotalInput.Valid && normalizedCacheRead.Valid && normalizedCacheCreation.Valid &&
+		normalizedNonReasoningOutput.Valid && normalizedReasoningOutput.Valid && normalizedTotalOutput.Valid && unclassifiedTokens.Valid {
+		fallback := event
+		event.AccountingVersion = accountingVersion
+		event.AccountingValid = accountingValid != 0
+		event.NormalizedUncachedInputTokens = normalizedUncachedInput.Int64
+		event.NormalizedTotalInputTokens = normalizedTotalInput.Int64
+		event.NormalizedCacheReadTokens = normalizedCacheRead.Int64
+		event.NormalizedCacheCreationTokens = normalizedCacheCreation.Int64
+		event.NormalizedNonReasoningOutputTokens = normalizedNonReasoningOutput.Int64
+		event.NormalizedReasoningOutputTokens = normalizedReasoningOutput.Int64
+		event.NormalizedTotalOutputTokens = normalizedTotalOutput.Int64
+		event.UnclassifiedTokens = unclassifiedTokens.Int64
+		event.TotalTokens = persistedTotalTokens
+		if !usage.RestorePersistedTokenAccounting(&event, accountingQuality) {
+			event = fallback
+		}
+	}
 	row.detail = rawMetadataDetail{
-		Detail:           detail,
+		Detail:           usage.BuildDetail(event),
 		ResponseMetadata: validatedMetadataJSON(responseMetadataJSON),
 	}
 	return row, nil
@@ -599,14 +731,19 @@ func scanCompatibleDetail(rows *sql.Rows) (compatibleExportRow, error) {
 func scanExportRow(rows *sql.Rows) (exportRow, error) {
 	var row exportRow
 	event := &row.event
-	var requestID, provider, executorType, endpoint, method, path, authType, authIndex, source, sourceHash, apiKeyHash, accountSnapshot, authLabelSnapshot, authFileSnapshot, authProviderSnapshot, authProjectIDSnapshot, requestedModel, resolvedModel, reasoningEffort, serviceTier, failSummary sql.NullString
+	var requestID, provider, executorType, endpoint, method, path, authType, authIndex, source, sourceHash, apiKeyHash, accountSnapshot, authLabelSnapshot, authFileSnapshot, authProviderSnapshot, authProjectIDSnapshot, requestedModel, resolvedModel, reasoningEffort, serviceTier, cacheInputMode, failSummary sql.NullString
 	var responseMetadataJSON, quotaPlanType, errorKind, errorCode, traceID string
 	var authSnapshotAt sql.NullInt64
 	var latency, ttft sql.NullInt64
 	var failStatusCode sql.NullInt64
 	var quotaRecoverAt sql.NullInt64
 	var quotaUsedPercent sql.NullFloat64
-	var failed int
+	var normalizedUncachedInput, normalizedTotalInput, normalizedCacheRead, normalizedCacheCreation sql.NullInt64
+	var normalizedNonReasoningOutput, normalizedReasoningOutput, normalizedTotalOutput, unclassifiedTokens sql.NullInt64
+	var persistedTotalTokens int64
+	var accountingVersion, accountingValid, failed int
+	var accountingQuality string
+	var rawJSON string
 	if err := rows.Scan(
 		&row.id,
 		&requestID,
@@ -634,6 +771,10 @@ func scanExportRow(rows *sql.Rows) (exportRow, error) {
 		&resolvedModel,
 		&reasoningEffort,
 		&serviceTier,
+		&cacheInputMode,
+		&accountingVersion,
+		&accountingValid,
+		&accountingQuality,
 		&event.InputTokens,
 		&event.OutputTokens,
 		&event.ReasoningTokens,
@@ -641,7 +782,15 @@ func scanExportRow(rows *sql.Rows) (exportRow, error) {
 		&event.CacheTokens,
 		&event.CacheReadTokens,
 		&event.CacheCreationTokens,
-		&event.TotalTokens,
+		&persistedTotalTokens,
+		&normalizedUncachedInput,
+		&normalizedTotalInput,
+		&normalizedCacheRead,
+		&normalizedCacheCreation,
+		&normalizedNonReasoningOutput,
+		&normalizedReasoningOutput,
+		&normalizedTotalOutput,
+		&unclassifiedTokens,
 		&latency,
 		&ttft,
 		&failed,
@@ -654,6 +803,7 @@ func scanExportRow(rows *sql.Rows) (exportRow, error) {
 		&errorKind,
 		&errorCode,
 		&traceID,
+		&rawJSON,
 		&event.CreatedAtMS,
 	); err != nil {
 		return exportRow{}, err
@@ -679,12 +829,37 @@ func scanExportRow(rows *sql.Rows) (exportRow, error) {
 	event.ResolvedModel = resolvedModel.String
 	event.ReasoningEffort = reasoningEffort.String
 	event.ServiceTier = serviceTier.String
+	event.CacheInputMode = cacheInputMode.String
+	event.TotalTokens = persistedTotalTokens
+	event.RawJSON = rawJSON
+	event.AccountingVersion = accountingVersion
+	event.AccountingValid = accountingValid != 0
+	event.TokenBreakdown.Quality = accountingQuality
 	event.FailSummary = failSummary.String
 	event.HeaderQuotaPlanType = quotaPlanType
 	event.HeaderErrorKind = errorKind
 	event.HeaderErrorCode = errorCode
 	event.HeaderTraceID = traceID
 	event.Failed = failed != 0
+	usage.ApplyTokenAccounting(event, nil)
+	if normalizedUncachedInput.Valid && normalizedTotalInput.Valid && normalizedCacheRead.Valid && normalizedCacheCreation.Valid &&
+		normalizedNonReasoningOutput.Valid && normalizedReasoningOutput.Valid && normalizedTotalOutput.Valid && unclassifiedTokens.Valid {
+		fallback := *event
+		event.AccountingVersion = accountingVersion
+		event.AccountingValid = accountingValid != 0
+		event.NormalizedUncachedInputTokens = normalizedUncachedInput.Int64
+		event.NormalizedTotalInputTokens = normalizedTotalInput.Int64
+		event.NormalizedCacheReadTokens = normalizedCacheRead.Int64
+		event.NormalizedCacheCreationTokens = normalizedCacheCreation.Int64
+		event.NormalizedNonReasoningOutputTokens = normalizedNonReasoningOutput.Int64
+		event.NormalizedReasoningOutputTokens = normalizedReasoningOutput.Int64
+		event.NormalizedTotalOutputTokens = normalizedTotalOutput.Int64
+		event.UnclassifiedTokens = unclassifiedTokens.Int64
+		event.TotalTokens = persistedTotalTokens
+		if !usage.RestorePersistedTokenAccounting(event, accountingQuality) {
+			*event = fallback
+		}
+	}
 	if authSnapshotAt.Valid {
 		event.AuthSnapshotAtMS = authSnapshotAt.Int64
 	}
@@ -706,6 +881,7 @@ func scanExportRow(rows *sql.Rows) (exportRow, error) {
 		value := quotaUsedPercent.Float64
 		event.HeaderQuotaUsedPercent = &value
 	}
+	event.RawJSON = ""
 	row.timestampMS = event.TimestampMS
 	row.responseMetadata = validatedMetadataJSON(responseMetadataJSON)
 	return row, nil

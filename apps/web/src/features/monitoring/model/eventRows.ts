@@ -3,6 +3,7 @@ import { buildSourceInfoMap, resolveSourceDisplay } from '@/utils/sourceResolver
 import {
   calculateCost,
   normalizeAuthIndex,
+  resolveTokenAccounting,
   type ModelPrice,
   type UsageDetailWithEndpoint,
 } from '@/utils/usage';
@@ -109,25 +110,31 @@ export const buildEventRows = (
       const userAgent = readString(detail.user_agent ?? detail.userAgent);
       const resolvedModel = readString(detail.__resolvedModel);
       const projectId = readString(detail.auth_project_id_snapshot ?? detail.authProjectIdSnapshot);
-      const inputTokens = Math.max(Number(detail.tokens?.input_tokens) || 0, 0);
-      const outputTokens = Math.max(Number(detail.tokens?.output_tokens) || 0, 0);
-      const reasoningTokens = Math.max(Number(detail.tokens?.reasoning_tokens) || 0, 0);
-      const cacheReadTokens = Math.max(Number(detail.tokens?.cache_read_tokens) || 0, 0);
-      const cacheCreationTokens = Math.max(Number(detail.tokens?.cache_creation_tokens) || 0, 0);
-      const cachedTokens = Math.max(
-        Math.max(Number(detail.tokens?.cached_tokens) || 0, 0),
-        Math.max(Number(detail.tokens?.cache_tokens) || 0, 0)
-      );
-      const explicitTotalTokens = Math.max(Number(detail.tokens?.total_tokens) || 0, 0);
-      const totalTokens =
-        explicitTotalTokens > 0
-          ? explicitTotalTokens
-          : inputTokens + outputTokens + reasoningTokens;
+      const accounting = resolveTokenAccounting(detail, resolvedModel || detail.__modelName || '');
+      const inputTokens = accounting.inputTokens;
+      const outputTokens = accounting.outputTokens;
+      const nonReasoningOutputTokens = accounting.nonReasoningOutputTokens;
+      const reasoningTokens = accounting.reasoningTokens;
+      const unclassifiedTokens = accounting.unclassifiedTokens;
+      const cachedTokens = accounting.cachedTokens;
+      const cacheReadTokens = accounting.cacheReadTokens;
+      const cacheCreationTokens = accounting.cacheCreationTokens;
+      const totalTokens = accounting.totalTokens;
+      const accountingVersion = accounting.accountingVersion;
+      const hasExplicitLegacyAccountingVersion =
+        detail.accounting_version === 0 || detail.accountingVersion === 0;
+      const accountingValid = accounting.sourceValid;
+      const accountingQuality = accounting.quality;
+      const incompleteAccounting =
+        accounting.incomplete ||
+        detail.incomplete_accounting === true ||
+        detail.incompleteAccounting === true;
       const latencyMs = toDurationMs(detail.latency_ms);
       const ttftMs = toDurationMs(detail.ttft_ms);
       const tokensPerSecond = calculateOutputTokensPerSecond(outputTokens, latencyMs);
       const totalCost = calculateCost(detail, modelPrices);
-      const statsIncluded = detail.failed === true || inputTokens > 0 || outputTokens > 0;
+      const statsIncluded =
+        detail.failed === true || inputTokens > 0 || outputTokens > 0 || unclassifiedTokens > 0;
       const dayKey = buildLocalDayKey(timestampMs);
       const hourLabel = buildHourLabel(timestampMs);
       const sourceKey = sourceMeta.identityKey || `source:${sourceLabel}`;
@@ -144,6 +151,7 @@ export const buildEventRows = (
         readString(detail.service_tier ?? detail.serviceTier) ||
         responseServiceTier;
       const executorType = readString(detail.executor_type ?? detail.executorType);
+      const cacheInputMode = readString(detail.cache_input_mode ?? detail.cacheInputMode);
       const failStatusCodeRaw = detail.fail_status_code ?? detail.failStatusCode;
       const failStatusCode =
         failStatusCodeRaw === null || failStatusCodeRaw === undefined
@@ -226,12 +234,22 @@ export const buildEventRows = (
         tokensPerSecond,
         inputTokens,
         outputTokens,
+        nonReasoningOutputTokens,
         reasoningTokens,
+        unclassifiedTokens,
         cachedTokens,
         cacheReadTokens,
         cacheCreationTokens,
         totalTokens,
         totalCost,
+        cacheInputMode,
+        accountingVersion:
+          accountingVersion > 0 || hasExplicitLegacyAccountingVersion
+            ? accountingVersion
+            : undefined,
+        accountingValid,
+        accountingQuality,
+        incompleteAccounting,
         reasoningEffort,
         serviceTier,
         requestServiceTier,
@@ -273,6 +291,8 @@ export const buildEventRows = (
           requestServiceTier,
           responseServiceTier,
           executorType,
+          cacheInputMode,
+          accountingQuality,
           normalizedFailStatusCode,
           failSummary,
           headerErrorKind,

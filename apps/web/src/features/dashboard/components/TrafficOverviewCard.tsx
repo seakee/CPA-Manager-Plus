@@ -54,6 +54,7 @@ const tokenLabelMap: Record<string, string> = {
   cached: 'dashboard.token_mix_cached',
   output: 'dashboard.token_mix_output',
   reasoning: 'dashboard.token_mix_reasoning',
+  unclassified: 'dashboard.token_mix_unclassified',
 };
 
 const buildTokenColorMap = (dataPalette: DataPalette): Record<string, string> => ({
@@ -61,9 +62,10 @@ const buildTokenColorMap = (dataPalette: DataPalette): Record<string, string> =>
   cached: dataPalette.amber,
   output: dataPalette.emerald,
   reasoning: dataPalette.violet,
+  unclassified: dataPalette.red,
 });
 
-const visibleTokenMixKeys = new Set(['input', 'cached', 'output', 'reasoning']);
+const visibleTokenMixKeys = new Set(['input', 'cached', 'output', 'reasoning', 'unclassified']);
 
 const healthToneClassMap: Record<string, string> = {
   future: 'healthFuture',
@@ -149,8 +151,7 @@ const buildTrafficTrendOption = ({
     formatter: (params: unknown) => {
       const items = Array.isArray(params) ? params : [params];
       const first = items[0] as { dataIndex?: number } | undefined;
-      const point =
-        typeof first?.dataIndex === 'number' ? timeline[first.dataIndex] : undefined;
+      const point = typeof first?.dataIndex === 'number' ? timeline[first.dataIndex] : undefined;
       const rows = [
         [t('dashboard.traffic_calls'), point?.calls ?? 0],
         [t('dashboard.traffic_tokens'), point?.tokens ?? 0],
@@ -258,7 +259,9 @@ export function TrafficOverviewCard({
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
   const dataPalette = getDataPalette(resolvedTheme);
   const tokenColorMap = buildTokenColorMap(dataPalette);
-  const [activeTokenSegment, setActiveTokenSegment] = useState<DashboardTokenMixSegment | null>(null);
+  const [activeTokenSegment, setActiveTokenSegment] = useState<DashboardTokenMixSegment | null>(
+    null
+  );
   const visibleTimeline = buildVisibleTrafficTimeline(timeline, trafficNowMs);
   const hasData = visibleTimeline.some((point) => point.calls > 0 || point.tokens > 0);
   const visibleTokenMix = tokenMix.filter((segment) => visibleTokenMixKeys.has(segment.key));
@@ -266,13 +269,19 @@ export function TrafficOverviewCard({
   const displayTotalTokens = tokenMixTotal;
   const hasTokenMixData = visibleTokenMix.some((segment) => segment.tokens > 0);
   const rankedTokenMix = [...visibleTokenMix].sort((left, right) => right.tokens - left.tokens);
-  const maxTokenMixTokens = rankedTokenMix.reduce((max, segment) => Math.max(max, segment.tokens), 0);
+  const maxTokenMixTokens = rankedTokenMix.reduce(
+    (max, segment) => Math.max(max, segment.tokens),
+    0
+  );
   const healthPoints = todayRequestHealthTimeline?.points ?? [];
   const healthBucketMs = todayRequestHealthTimeline?.bucket_ms || fallbackHealthBucketMs;
   const healthRowsPerHour = Math.max(1, Math.round((60 * 60 * 1000) / healthBucketMs));
   const healthRows = healthPoints.length
     ? Array.from({ length: healthRowsPerHour }, (_, minuteIndex) =>
-        Array.from({ length: 24 }, (_, hourIndex) => healthPoints[hourIndex * healthRowsPerHour + minuteIndex])
+        Array.from(
+          { length: 24 },
+          (_, hourIndex) => healthPoints[hourIndex * healthRowsPerHour + minuteIndex]
+        )
       )
     : [];
   const hourLabelIndexes = [0, 6, 12, 18, 23];
@@ -330,7 +339,11 @@ export function TrafficOverviewCard({
             <p>{t('dashboard.request_health_timeline_desc')}</p>
           </div>
           <div className={styles.healthSummary}>
-            <strong>{todayRequestHealthTimeline ? formatPercent(todayRequestHealthTimeline.success_rate) : '-'}</strong>
+            <strong>
+              {todayRequestHealthTimeline
+                ? formatPercent(todayRequestHealthTimeline.success_rate)
+                : '-'}
+            </strong>
             <div className={styles.healthCounts}>
               <span>
                 <i className={styles.healthGood} />{' '}
@@ -388,11 +401,21 @@ export function TrafficOverviewCard({
           ) : null}
         </div>
         <div className={styles.healthLegend}>
-          <span><i className={styles.healthEmpty} /> {t('dashboard.request_health_no_request')}</span>
-          <span><i className={styles.healthGood} /> {t('dashboard.request_health_success')}</span>
-          <span><i className={styles.healthWarn} /> {t('dashboard.request_health_warning')}</span>
-          <span><i className={styles.healthBad} /> {t('dashboard.request_health_failure')}</span>
-          <span><i className={styles.healthFuture} /> {t('dashboard.request_health_future')}</span>
+          <span>
+            <i className={styles.healthEmpty} /> {t('dashboard.request_health_no_request')}
+          </span>
+          <span>
+            <i className={styles.healthGood} /> {t('dashboard.request_health_success')}
+          </span>
+          <span>
+            <i className={styles.healthWarn} /> {t('dashboard.request_health_warning')}
+          </span>
+          <span>
+            <i className={styles.healthBad} /> {t('dashboard.request_health_failure')}
+          </span>
+          <span>
+            <i className={styles.healthFuture} /> {t('dashboard.request_health_future')}
+          </span>
         </div>
       </section>
 
@@ -404,7 +427,9 @@ export function TrafficOverviewCard({
         <div className={styles.tokenRankSection}>
           <div className={styles.tokenSummary}>
             <span>{t('dashboard.total_tokens')}</span>
-            <strong>{loading && !hasTokenMixData ? '...' : formatCompactNumber(displayTotalTokens)}</strong>
+            <strong>
+              {loading && !hasTokenMixData ? '...' : formatCompactNumber(displayTotalTokens)}
+            </strong>
           </div>
           {hasTokenMixData ? (
             <div className={styles.tokenRankList}>
@@ -440,7 +465,8 @@ export function TrafficOverviewCard({
                       className={styles.tokenRankBar}
                       style={
                         {
-                          '--rank-share': maxTokenMixTokens > 0 ? segment.tokens / maxTokenMixTokens : 0,
+                          '--rank-share':
+                            maxTokenMixTokens > 0 ? segment.tokens / maxTokenMixTokens : 0,
                           '--rank-color': tokenColorMap[segment.key] || dataPalette.slateMuted,
                         } as TokenRankStyle
                       }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageaccountingsql"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageprojection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
@@ -102,10 +103,7 @@ func eventFilterConditions(filter AnalyticsFilter, prefix string, projected bool
 			}
 		} else {
 			for _, searchColumn := range usageprojection.SearchColumns {
-				expression := column(searchColumn)
-				if searchColumn == "analytics_model" {
-					expression = usageidentity.SQLRequestAnalyticsModelExpression(column("model"), column("requested_model"))
-				}
+				expression := usageprojection.SearchColumnExpression(prefix, searchColumn)
 				searchConditions = append(searchConditions, fmt.Sprintf("lower(coalesce(%s, '')) like ?", expression))
 				args = append(args, like)
 			}
@@ -157,21 +155,28 @@ func eventFilterConditions(filter AnalyticsFilter, prefix string, projected bool
 		conditions = append(conditions, column("latency_ms")+" >= ?")
 		args = append(args, filter.MinLatencyMS)
 	}
-	cacheHitCondition := strings.Join([]string{
+	legacyCacheHitCondition := strings.Join([]string{
 		"(coalesce(" + column("cached_tokens") + ", 0) > 0",
 		"or coalesce(" + column("cache_tokens") + ", 0) > 0",
 		"or coalesce(" + column("cache_read_tokens") + ", 0) > 0",
 		"or coalesce(" + column("cache_creation_tokens") + ", 0) > 0)",
 	}, " ")
+	accounting := usageaccountingsql.For(strings.TrimSuffix(prefix, "."))
+	cacheHitCondition := "((" + accounting.Ready + " and (" + accounting.CacheRead + " > 0 or " + accounting.CacheCreation + " > 0)) or (not " +
+		accounting.Ready + " and " + legacyCacheHitCondition + "))"
+	cacheReadCondition := "((" + accounting.Ready + " and " + accounting.CacheRead + " > 0) or (not " +
+		accounting.Ready + " and coalesce(" + column("cache_read_tokens") + ", 0) > 0))"
+	cacheCreationCondition := "((" + accounting.Ready + " and " + accounting.CacheCreation + " > 0) or (not " +
+		accounting.Ready + " and coalesce(" + column("cache_creation_tokens") + ", 0) > 0))"
 	switch strings.TrimSpace(strings.ToLower(filter.CacheStatus)) {
 	case "hit":
 		conditions = append(conditions, cacheHitCondition)
 	case "miss":
 		conditions = append(conditions, "not "+cacheHitCondition)
 	case "read":
-		conditions = append(conditions, "coalesce("+column("cache_read_tokens")+", 0) > 0")
+		conditions = append(conditions, cacheReadCondition)
 	case "creation":
-		conditions = append(conditions, "coalesce("+column("cache_creation_tokens")+", 0) > 0")
+		conditions = append(conditions, cacheCreationCondition)
 	}
 	return conditions, args
 }

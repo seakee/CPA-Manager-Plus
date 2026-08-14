@@ -42,8 +42,8 @@ const resolveAccountDisplayName = (account: string, channels: Iterable<string>) 
 };
 
 export const shouldIncludeInStats = (
-  row: Pick<MonitoringEventRow, 'failed' | 'inputTokens' | 'outputTokens'>
-) => row.failed || row.inputTokens > 0 || row.outputTokens > 0;
+  row: Pick<MonitoringEventRow, 'failed' | 'inputTokens' | 'outputTokens' | 'unclassifiedTokens'>
+) => row.failed || row.inputTokens > 0 || row.outputTokens > 0 || row.unclassifiedTokens > 0;
 
 export const buildRangeFilteredRows = (
   rows: MonitoringEventRow[],
@@ -231,7 +231,13 @@ export const buildMonitoringSummary = (rows: MonitoringEventRow[]): MonitoringSu
   const successCalls = Math.max(totalCalls - failureCalls, 0);
   const inputTokens = rows.reduce((sum, row) => sum + row.inputTokens, 0);
   const outputTokens = rows.reduce((sum, row) => sum + row.outputTokens, 0);
+  const nonReasoningOutputTokens = rows.reduce((sum, row) => sum + row.nonReasoningOutputTokens, 0);
   const reasoningTokens = rows.reduce((sum, row) => sum + row.reasoningTokens, 0);
+  const unclassifiedTokens = rows.reduce((sum, row) => sum + row.unclassifiedTokens, 0);
+  const incompleteAccountingCalls = rows.reduce(
+    (sum, row) => sum + (row.incompleteAccounting ? 1 : 0),
+    0
+  );
   const cachedTokens = rows.reduce((sum, row) => sum + row.cachedTokens, 0);
   const cacheReadTokens = rows.reduce((sum, row) => sum + (row.cacheReadTokens ?? 0), 0);
   const cacheCreationTokens = rows.reduce((sum, row) => sum + (row.cacheCreationTokens ?? 0), 0);
@@ -287,7 +293,10 @@ export const buildMonitoringSummary = (rows: MonitoringEventRow[]): MonitoringSu
     successRate: totalCalls > 0 ? successCalls / totalCalls : 1,
     inputTokens,
     outputTokens,
+    nonReasoningOutputTokens,
     reasoningTokens,
+    unclassifiedTokens,
+    incompleteAccountingCalls,
     cachedTokens,
     cacheReadTokens,
     cacheCreationTokens,
@@ -332,6 +341,10 @@ export const buildAccountRows = (rows: MonitoringEventRow[]): MonitoringAccountR
           failureCalls: number;
           inputTokens: number;
           outputTokens: number;
+          nonReasoningOutputTokens: number;
+          reasoningTokens: number;
+          unclassifiedTokens: number;
+          incompleteAccountingCalls: number;
           cachedTokens: number;
           cacheReadTokens: number;
           cacheCreationTokens: number;
@@ -346,6 +359,10 @@ export const buildAccountRows = (rows: MonitoringEventRow[]): MonitoringAccountR
       failureCalls: number;
       inputTokens: number;
       outputTokens: number;
+      nonReasoningOutputTokens: number;
+      reasoningTokens: number;
+      unclassifiedTokens: number;
+      incompleteAccountingCalls: number;
       cachedTokens: number;
       cacheReadTokens: number;
       cacheCreationTokens: number;
@@ -375,6 +392,10 @@ export const buildAccountRows = (rows: MonitoringEventRow[]): MonitoringAccountR
       failureCalls: 0,
       inputTokens: 0,
       outputTokens: 0,
+      nonReasoningOutputTokens: 0,
+      reasoningTokens: 0,
+      unclassifiedTokens: 0,
+      incompleteAccountingCalls: 0,
       cachedTokens: 0,
       cacheReadTokens: 0,
       cacheCreationTokens: 0,
@@ -398,6 +419,10 @@ export const buildAccountRows = (rows: MonitoringEventRow[]): MonitoringAccountR
     existing.failureCalls += row.failed ? 1 : 0;
     existing.inputTokens += row.inputTokens;
     existing.outputTokens += row.outputTokens;
+    existing.nonReasoningOutputTokens += row.nonReasoningOutputTokens;
+    existing.reasoningTokens += row.reasoningTokens;
+    existing.unclassifiedTokens += row.unclassifiedTokens;
+    existing.incompleteAccountingCalls += row.incompleteAccounting ? 1 : 0;
     existing.cachedTokens += row.cachedTokens;
     existing.cacheReadTokens += row.cacheReadTokens;
     existing.cacheCreationTokens += row.cacheCreationTokens;
@@ -417,6 +442,10 @@ export const buildAccountRows = (rows: MonitoringEventRow[]): MonitoringAccountR
       failureCalls: 0,
       inputTokens: 0,
       outputTokens: 0,
+      nonReasoningOutputTokens: 0,
+      reasoningTokens: 0,
+      unclassifiedTokens: 0,
+      incompleteAccountingCalls: 0,
       cachedTokens: 0,
       cacheReadTokens: 0,
       cacheCreationTokens: 0,
@@ -430,6 +459,10 @@ export const buildAccountRows = (rows: MonitoringEventRow[]): MonitoringAccountR
     modelEntry.failureCalls += row.failed ? 1 : 0;
     modelEntry.inputTokens += row.inputTokens;
     modelEntry.outputTokens += row.outputTokens;
+    modelEntry.nonReasoningOutputTokens += row.nonReasoningOutputTokens;
+    modelEntry.reasoningTokens += row.reasoningTokens;
+    modelEntry.unclassifiedTokens += row.unclassifiedTokens;
+    modelEntry.incompleteAccountingCalls += row.incompleteAccounting ? 1 : 0;
     modelEntry.cachedTokens += row.cachedTokens;
     modelEntry.cacheReadTokens += row.cacheReadTokens;
     modelEntry.cacheCreationTokens += row.cacheCreationTokens;
@@ -468,6 +501,10 @@ export const buildAccountRows = (rows: MonitoringEventRow[]): MonitoringAccountR
         successRate: item.totalCalls > 0 ? item.successCalls / item.totalCalls : 1,
         inputTokens: item.inputTokens,
         outputTokens: item.outputTokens,
+        nonReasoningOutputTokens: item.nonReasoningOutputTokens,
+        reasoningTokens: item.reasoningTokens,
+        unclassifiedTokens: item.unclassifiedTokens,
+        incompleteAccountingCalls: item.incompleteAccountingCalls,
         cachedTokens: item.cachedTokens,
         cacheReadTokens: item.cacheReadTokens,
         cacheCreationTokens: item.cacheCreationTokens,
@@ -519,6 +556,10 @@ export const buildApiKeyRows = (
           failureCalls: number;
           inputTokens: number;
           outputTokens: number;
+          nonReasoningOutputTokens: number;
+          reasoningTokens: number;
+          unclassifiedTokens: number;
+          incompleteAccountingCalls: number;
           cachedTokens: number;
           cacheReadTokens: number;
           cacheCreationTokens: number;
@@ -532,6 +573,10 @@ export const buildApiKeyRows = (
       failureCalls: number;
       inputTokens: number;
       outputTokens: number;
+      nonReasoningOutputTokens: number;
+      reasoningTokens: number;
+      unclassifiedTokens: number;
+      incompleteAccountingCalls: number;
       cachedTokens: number;
       cacheReadTokens: number;
       cacheCreationTokens: number;
@@ -570,6 +615,10 @@ export const buildApiKeyRows = (
       failureCalls: 0,
       inputTokens: 0,
       outputTokens: 0,
+      nonReasoningOutputTokens: 0,
+      reasoningTokens: 0,
+      unclassifiedTokens: 0,
+      incompleteAccountingCalls: 0,
       cachedTokens: 0,
       cacheReadTokens: 0,
       cacheCreationTokens: 0,
@@ -606,6 +655,10 @@ export const buildApiKeyRows = (
     existing.failureCalls += row.failed ? 1 : 0;
     existing.inputTokens += row.inputTokens;
     existing.outputTokens += row.outputTokens;
+    existing.nonReasoningOutputTokens += row.nonReasoningOutputTokens;
+    existing.reasoningTokens += row.reasoningTokens;
+    existing.unclassifiedTokens += row.unclassifiedTokens;
+    existing.incompleteAccountingCalls += row.incompleteAccounting ? 1 : 0;
     existing.cachedTokens += row.cachedTokens;
     existing.cacheReadTokens += row.cacheReadTokens;
     existing.cacheCreationTokens += row.cacheCreationTokens;
@@ -625,6 +678,10 @@ export const buildApiKeyRows = (
       failureCalls: 0,
       inputTokens: 0,
       outputTokens: 0,
+      nonReasoningOutputTokens: 0,
+      reasoningTokens: 0,
+      unclassifiedTokens: 0,
+      incompleteAccountingCalls: 0,
       cachedTokens: 0,
       cacheReadTokens: 0,
       cacheCreationTokens: 0,
@@ -638,6 +695,10 @@ export const buildApiKeyRows = (
     modelEntry.failureCalls += row.failed ? 1 : 0;
     modelEntry.inputTokens += row.inputTokens;
     modelEntry.outputTokens += row.outputTokens;
+    modelEntry.nonReasoningOutputTokens += row.nonReasoningOutputTokens;
+    modelEntry.reasoningTokens += row.reasoningTokens;
+    modelEntry.unclassifiedTokens += row.unclassifiedTokens;
+    modelEntry.incompleteAccountingCalls += row.incompleteAccounting ? 1 : 0;
     modelEntry.cachedTokens += row.cachedTokens;
     modelEntry.cacheReadTokens += row.cacheReadTokens;
     modelEntry.cacheCreationTokens += row.cacheCreationTokens;
@@ -666,6 +727,10 @@ export const buildApiKeyRows = (
       successRate: item.totalCalls > 0 ? item.successCalls / item.totalCalls : 1,
       inputTokens: item.inputTokens,
       outputTokens: item.outputTokens,
+      nonReasoningOutputTokens: item.nonReasoningOutputTokens,
+      reasoningTokens: item.reasoningTokens,
+      unclassifiedTokens: item.unclassifiedTokens,
+      incompleteAccountingCalls: item.incompleteAccountingCalls,
       cachedTokens: item.cachedTokens,
       cacheReadTokens: item.cacheReadTokens,
       cacheCreationTokens: item.cacheCreationTokens,

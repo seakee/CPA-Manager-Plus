@@ -157,7 +157,7 @@ func ParseResponseHeaderMetadataFromRawJSON(rawJSON string, base time.Time) *Res
 		return nil
 	}
 	var record map[string]any
-	if err := json.Unmarshal([]byte(trimmed), &record); err != nil {
+	if err := decodeJSON([]byte(trimmed), &record); err != nil {
 		return nil
 	}
 	metadata := ParseResponseHeaderMetadata(first(record, "response_headers", "responseHeaders", "headers"), base)

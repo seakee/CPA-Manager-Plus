@@ -47,30 +47,37 @@ type Event struct {
 	AuthSnapshotAtMS      int64  `json:"auth_snapshot_at_ms,omitempty"`
 	// ReasoningEffort is the request-side effort setting added by CPA v7.1.18+.
 	// It is not the same as response-side tokens.reasoning_tokens usage.
-	ReasoningEffort     string `json:"reasoning_effort,omitempty"`
-	ServiceTier         string `json:"service_tier,omitempty"`
-	RequestServiceTier  string `json:"request_service_tier,omitempty"`
-	ResponseServiceTier string `json:"response_service_tier,omitempty"`
-	CacheInputMode      string `json:"cache_input_mode,omitempty"`
-	InputTokens         int64  `json:"input_tokens"`
-	OutputTokens        int64  `json:"output_tokens"`
-	ReasoningTokens     int64  `json:"reasoning_tokens"`
-	CachedTokens        int64  `json:"cached_tokens"`
-	CacheTokens         int64  `json:"cache_tokens"`
-	CacheReadTokens     int64  `json:"cache_read_tokens"`
-	CacheCreationTokens int64  `json:"cache_creation_tokens"`
+	ReasoningEffort     string         `json:"reasoning_effort,omitempty"`
+	ServiceTier         string         `json:"service_tier,omitempty"`
+	RequestServiceTier  string         `json:"request_service_tier,omitempty"`
+	ResponseServiceTier string         `json:"response_service_tier,omitempty"`
+	CacheInputMode      string         `json:"cache_input_mode,omitempty"`
+	AccountingVersion   int            `json:"accounting_version"`
+	AccountingValid     bool           `json:"accounting_valid"`
+	TokenBreakdown      TokenBreakdown `json:"token_breakdown"`
+	InputTokens         int64          `json:"input_tokens"`
+	OutputTokens        int64          `json:"output_tokens"`
+	ReasoningTokens     int64          `json:"reasoning_tokens"`
+	CachedTokens        int64          `json:"cached_tokens"`
+	CacheTokens         int64          `json:"cache_tokens"`
+	CacheReadTokens     int64          `json:"cache_read_tokens"`
+	CacheCreationTokens int64          `json:"cache_creation_tokens"`
 	// Normalized token buckets are persisted for aggregation and billing but are
 	// not exposed in compatible usage payloads.
-	NormalizedUncachedInputTokens int64  `json:"-"`
-	NormalizedTotalInputTokens    int64  `json:"-"`
-	NormalizedCacheReadTokens     int64  `json:"-"`
-	NormalizedCacheCreationTokens int64  `json:"-"`
-	TotalTokens                   int64  `json:"total_tokens"`
-	LatencyMS                     *int64 `json:"latency_ms,omitempty"`
-	TTFTMS                        *int64 `json:"ttft_ms,omitempty"`
-	Failed                        bool   `json:"failed"`
-	FailStatusCode                int    `json:"fail_status_code,omitempty"`
-	FailSummary                   string `json:"fail_summary,omitempty"`
+	NormalizedUncachedInputTokens      int64  `json:"-"`
+	NormalizedTotalInputTokens         int64  `json:"-"`
+	NormalizedCacheReadTokens          int64  `json:"-"`
+	NormalizedCacheCreationTokens      int64  `json:"-"`
+	NormalizedNonReasoningOutputTokens int64  `json:"-"`
+	NormalizedReasoningOutputTokens    int64  `json:"-"`
+	NormalizedTotalOutputTokens        int64  `json:"-"`
+	UnclassifiedTokens                 int64  `json:"-"`
+	TotalTokens                        int64  `json:"total_tokens"`
+	LatencyMS                          *int64 `json:"latency_ms,omitempty"`
+	TTFTMS                             *int64 `json:"ttft_ms,omitempty"`
+	Failed                             bool   `json:"failed"`
+	FailStatusCode                     int    `json:"fail_status_code,omitempty"`
+	FailSummary                        string `json:"fail_summary,omitempty"`
 	// FailBody is retained only in the local DB as a sensitive internal field.
 	// Public APIs, compatible payloads, and exports must use FailSummary instead.
 	FailBody               string                  `json:"-"`
@@ -87,14 +94,16 @@ type Event struct {
 }
 
 type Tokens struct {
-	InputTokens         int64 `json:"input_tokens"`
-	OutputTokens        int64 `json:"output_tokens"`
-	ReasoningTokens     int64 `json:"reasoning_tokens"`
-	CachedTokens        int64 `json:"cached_tokens"`
-	CacheTokens         int64 `json:"cache_tokens"`
-	CacheReadTokens     int64 `json:"cache_read_tokens"`
-	CacheCreationTokens int64 `json:"cache_creation_tokens"`
-	TotalTokens         int64 `json:"total_tokens"`
+	InputTokens              int64 `json:"input_tokens"`
+	OutputTokens             int64 `json:"output_tokens"`
+	NonReasoningOutputTokens int64 `json:"non_reasoning_output_tokens"`
+	ReasoningTokens          int64 `json:"reasoning_tokens"`
+	CachedTokens             int64 `json:"cached_tokens"`
+	CacheTokens              int64 `json:"cache_tokens"`
+	CacheReadTokens          int64 `json:"cache_read_tokens"`
+	CacheCreationTokens      int64 `json:"cache_creation_tokens"`
+	UnclassifiedTokens       int64 `json:"unclassified_tokens"`
+	TotalTokens              int64 `json:"total_tokens"`
 }
 
 // LongContextTokens preserves the portions of token aggregates that came from
@@ -120,11 +129,11 @@ func (tokens *LongContextTokens) AddIfLongContext(input, output, cached, cacheRe
 	if tokens == nil || !IsLongContextInput(input) {
 		return
 	}
-	tokens.LongInputTokens += input
-	tokens.LongOutputTokens += output
-	tokens.LongCachedTokens += cached
-	tokens.LongCacheReadTokens += cacheRead
-	tokens.LongCacheCreationTokens += cacheCreation
+	tokens.LongInputTokens = SaturatingTokenSum(tokens.LongInputTokens, input)
+	tokens.LongOutputTokens = SaturatingTokenSum(tokens.LongOutputTokens, output)
+	tokens.LongCachedTokens = SaturatingTokenSum(tokens.LongCachedTokens, cached)
+	tokens.LongCacheReadTokens = SaturatingTokenSum(tokens.LongCacheReadTokens, cacheRead)
+	tokens.LongCacheCreationTokens = SaturatingTokenSum(tokens.LongCacheCreationTokens, cacheCreation)
 }
 
 type Detail struct {
@@ -148,6 +157,11 @@ type Detail struct {
 	ResponseServiceTier   string                  `json:"response_service_tier,omitempty"`
 	CacheInputMode        string                  `json:"cache_input_mode,omitempty"`
 	ExecutorType          string                  `json:"executor_type,omitempty"`
+	AccountingVersion     int                     `json:"accounting_version"`
+	AccountingValid       bool                    `json:"accounting_valid"`
+	AccountingQuality     string                  `json:"accounting_quality"`
+	IncompleteAccounting  bool                    `json:"incomplete_accounting"`
+	TokenBreakdown        TokenBreakdown          `json:"token_breakdown"`
 	Tokens                Tokens                  `json:"tokens"`
 	Failed                bool                    `json:"failed"`
 	FailStatusCode        int                     `json:"fail_status_code,omitempty"`
@@ -229,16 +243,22 @@ func EffectiveServiceTier(context CacheInputContext, requestTier, legacyTier, re
 }
 
 type RawCacheAccountingHints struct {
-	ExplicitMode     string
-	ExplicitTotal    int64
-	HasExplicitTotal bool
-	ValidPayload     bool
+	ExplicitMode            string
+	ExplicitTotal           int64
+	HasExplicitTotal        bool
+	HasInvalidExplicitTotal bool
+	ValidPayload            bool
 }
+
+const maxRawAccountingJSONDepth = 8
 
 func NormalizeCacheAccounting(context CacheInputContext, inputTokens, cachedTokens, cacheTokens, cacheReadTokens, cacheCreationTokens int64) CacheAccounting {
 	mode := InferCacheInputMode(context, cacheReadTokens, cacheCreationTokens)
 	input := maxInt64(inputTokens, 0)
-	cacheRead := CompatibleCachedTokens(cachedTokens, cacheTokens, cacheReadTokens, cacheCreationTokens) + maxInt64(cacheReadTokens, 0)
+	cacheRead, _ := nonNegativeSum(
+		CompatibleCachedTokens(cachedTokens, cacheTokens, cacheReadTokens, cacheCreationTokens),
+		maxInt64(cacheReadTokens, 0),
+	)
 	cacheCreation := maxInt64(cacheCreationTokens, 0)
 	accounting := CacheAccounting{
 		Mode:                mode,
@@ -247,10 +267,13 @@ func NormalizeCacheAccounting(context CacheInputContext, inputTokens, cachedToke
 	}
 	if mode == CacheInputModeSeparate {
 		accounting.UncachedInputTokens = input
-		accounting.TotalInputTokens = input + cacheRead + cacheCreation
+		accounting.TotalInputTokens, _ = nonNegativeSum(input, cacheRead, cacheCreation)
 		return accounting
 	}
-	accounting.UncachedInputTokens = maxInt64(input-cacheRead-cacheCreation, 0)
+	fineGrainedCache, _ := nonNegativeSum(cacheRead, cacheCreation)
+	if fineGrainedCache < input {
+		accounting.UncachedInputTokens = input - fineGrainedCache
+	}
 	accounting.TotalInputTokens = input
 	return accounting
 }
@@ -263,7 +286,7 @@ func InferCacheInputMode(context CacheInputContext, cacheReadTokens, cacheCreati
 	if classified, ok := classifyExecutorCacheInputMode(context.ExecutorType); ok {
 		return classified
 	}
-	for _, provider := range []string{context.Provider, context.ProviderSnapshot} {
+	for _, provider := range []string{context.Provider, context.ProviderSnapshot, context.AuthType} {
 		if classified, ok := classifyProviderCacheInputMode(provider); ok {
 			return classified
 		}
@@ -294,7 +317,8 @@ func classifyExecutorCacheInputMode(executorType string) (string, bool) {
 	for _, marker := range []string{
 		"openaicompat", "openai_compat", "openai-compat", "openai",
 		"codex", "gemini", "aistudio", "ai_studio", "ai-studio",
-		"antigravity", "xai", "kimi",
+		"antigravity", "xai", "grok", "kimi", "moonshot", "qwen",
+		"deepseek", "openrouter",
 	} {
 		if strings.Contains(executor, marker) {
 			return CacheInputModeIncluded, true
@@ -308,12 +332,16 @@ func classifyProviderCacheInputMode(provider string) (string, bool) {
 	if provider == "" {
 		return "", false
 	}
+	if provider == "openai-compatibility" || strings.HasPrefix(provider, "openai-compatible-") {
+		return CacheInputModeIncluded, true
+	}
 	if strings.Contains(provider, "anthropic") || strings.Contains(provider, "claude") {
 		return CacheInputModeSeparate, true
 	}
 	for _, marker := range []string{
 		"openai", "codex", "gemini", "vertex", "aistudio", "ai_studio",
-		"ai-studio", "interaction", "antigravity", "xai", "kimi", "moonshot",
+		"ai-studio", "interaction", "antigravity", "xai", "grok", "kimi",
+		"moonshot", "qwen", "deepseek", "openrouter",
 	} {
 		if strings.Contains(provider, marker) {
 			return CacheInputModeIncluded, true
@@ -332,7 +360,8 @@ func classifyModelCacheInputMode(model string) (string, bool) {
 	}
 	for _, marker := range []string{
 		"gpt-", "openai", "codex", "gemini", "vertex", "aistudio",
-		"antigravity", "grok", "xai", "kimi", "moonshot",
+		"antigravity", "grok", "xai", "kimi", "moonshot", "qwen",
+		"deepseek", "openrouter",
 	} {
 		if strings.Contains(model, marker) {
 			return CacheInputModeIncluded, true
@@ -346,11 +375,11 @@ func RawCacheAccountingHintsFromJSON(raw string) RawCacheAccountingHints {
 }
 
 func rawCacheAccountingHintsFromJSON(raw string, depth int) RawCacheAccountingHints {
-	if depth > 1 || strings.TrimSpace(raw) == "" {
+	if depth > maxRawAccountingJSONDepth || strings.TrimSpace(raw) == "" {
 		return RawCacheAccountingHints{}
 	}
 	var payload any
-	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+	if err := decodeJSON([]byte(raw), &payload); err != nil {
 		return RawCacheAccountingHints{}
 	}
 	record, ok := payload.(map[string]any)
@@ -361,18 +390,24 @@ func rawCacheAccountingHintsFromJSON(raw string, depth int) RawCacheAccountingHi
 		record = detail
 	}
 	hints := RawCacheAccountingHints{ExplicitMode: cacheInputModeFromRecord(record), ValidPayload: true}
-	if total, ok := explicitPositiveTotalFromRecord(record); ok {
+	total, totalState := explicitTotalFromRecord(record)
+	if totalState == explicitTotalPositive {
 		hints.ExplicitTotal = total
 		hints.HasExplicitTotal = true
+	} else if totalState == explicitTotalInvalid {
+		hints.HasInvalidExplicitTotal = true
 	}
 	if nestedRaw := readString(record, "raw_json", "rawJson"); nestedRaw != "" {
 		nested := rawCacheAccountingHintsFromJSON(nestedRaw, depth+1)
 		if hints.ExplicitMode == "" {
 			hints.ExplicitMode = nested.ExplicitMode
 		}
-		if !hints.HasExplicitTotal && nested.HasExplicitTotal {
+		if !hints.HasExplicitTotal && !hints.HasInvalidExplicitTotal && nested.HasExplicitTotal {
 			hints.ExplicitTotal = nested.ExplicitTotal
 			hints.HasExplicitTotal = true
+		}
+		if !hints.HasExplicitTotal && !hints.HasInvalidExplicitTotal && nested.HasInvalidExplicitTotal {
+			hints.HasInvalidExplicitTotal = true
 		}
 	}
 	return hints
@@ -393,40 +428,62 @@ func cacheInputModeFromRecord(record map[string]any) string {
 }
 
 func explicitPositiveTotalFromRecord(record map[string]any) (int64, bool) {
+	total, state := explicitTotalFromRecord(record)
+	return total, state == explicitTotalPositive
+}
+
+type explicitTotalState uint8
+
+const (
+	explicitTotalMissing explicitTotalState = iota
+	explicitTotalZero
+	explicitTotalPositive
+	explicitTotalInvalid
+)
+
+func explicitTotalFromRecord(record map[string]any) (int64, explicitTotalState) {
 	for _, parent := range []string{"tokens", "usage"} {
 		if nested, ok := record[parent].(map[string]any); ok {
-			if total, ok := positiveIntValue(first(nested, "total_tokens", "totalTokens", "total")); ok {
-				return total, true
+			if total, state := explicitTotalValue(first(nested, "total_tokens", "totalTokens", "total")); state != explicitTotalMissing && state != explicitTotalZero {
+				return total, state
 			}
 		}
 	}
-	return positiveIntValue(first(record, "total_tokens", "totalTokens", "total"))
+	return explicitTotalValue(first(record, "total_tokens", "totalTokens", "total"))
 }
 
-func positiveIntValue(value any) (int64, bool) {
+func explicitTotalValue(value any) (int64, explicitTotalState) {
+	if value == nil {
+		return 0, explicitTotalMissing
+	}
+	var parsed int64
+	valid := false
 	switch typed := value.(type) {
 	case float64:
-		if typed > 0 {
-			return int64(typed), true
-		}
+		parsed = int64(typed)
+		valid = float64(parsed) == typed
 	case json.Number:
-		if parsed, err := typed.Int64(); err == nil && parsed > 0 {
-			return parsed, true
-		}
+		var err error
+		parsed, err = typed.Int64()
+		valid = err == nil
 	case string:
-		if parsed, err := strconv.ParseInt(strings.TrimSpace(typed), 10, 64); err == nil && parsed > 0 {
-			return parsed, true
-		}
+		var err error
+		parsed, err = strconv.ParseInt(strings.TrimSpace(typed), 10, 64)
+		valid = err == nil
 	case int64:
-		if typed > 0 {
-			return typed, true
-		}
+		parsed, valid = typed, true
 	case int:
-		if typed > 0 {
-			return int64(typed), true
-		}
+		parsed, valid = int64(typed), true
+	default:
+		return 0, explicitTotalInvalid
 	}
-	return 0, false
+	if !valid || parsed < 0 {
+		return 0, explicitTotalInvalid
+	}
+	if parsed == 0 {
+		return 0, explicitTotalZero
+	}
+	return parsed, explicitTotalPositive
 }
 
 func IsLongContextInput(inputTokens int64) bool {
@@ -457,13 +514,7 @@ func CompatibleCachedTokens(cachedTokens, cacheTokens, cacheReadTokens, cacheCre
 	if cached <= 0 {
 		return 0
 	}
-	fineGrained := int64(0)
-	if cacheReadTokens > 0 {
-		fineGrained += cacheReadTokens
-	}
-	if cacheCreationTokens > 0 {
-		fineGrained += cacheCreationTokens
-	}
+	fineGrained := SaturatingTokenSum(cacheReadTokens, cacheCreationTokens)
 	if cached <= fineGrained {
 		return 0
 	}
@@ -479,7 +530,7 @@ func CacheHitTotals(modelName string, inputTokens, cachedTokens, cacheReadTokens
 	input := maxInt64(inputTokens, 0)
 	cached := maxInt64(cachedTokens, 0)
 	cacheRead := maxInt64(cacheReadTokens, 0)
-	hitTokens := cached + cacheRead
+	hitTokens := SaturatingTokenSum(cached, cacheRead)
 	return hitTokens, input
 }
 
@@ -501,7 +552,7 @@ func CacheHitRateFromTotals(hitTokens, inputTokens int64) float64 {
 
 func NormalizeRaw(raw []byte) (Event, error) {
 	var payload any
-	if err := json.Unmarshal(raw, &payload); err != nil {
+	if err := decodeJSON(raw, &payload); err != nil {
 		return Event{}, err
 	}
 	record, ok := payload.(map[string]any)
@@ -569,64 +620,56 @@ func NormalizeRaw(raw []byte) (Event, error) {
 		DisplayModel:     model,
 	}
 	serviceTier := EffectiveServiceTier(usageContext, requestServiceTier, "", responseServiceTier)
-	cacheAccounting := NormalizeCacheAccounting(usageContext, inputTokens, cachedTokens, cacheTokens, cacheReadTokens, cacheCreationTokens)
-	if totalTokens <= 0 {
-		totalTokens = cacheAccounting.TotalInputTokens + maxInt64(outputTokens, 0) + maxInt64(reasoningTokens, 0)
-	}
-
 	event := Event{
-		RequestID:                     readString(record, "request_id", "requestId", "id"),
-		TimestampMS:                   timestampMS,
-		Timestamp:                     timestamp,
-		Provider:                      provider,
-		ExecutorType:                  executorType,
-		Model:                         model,
-		AnalyticsModel:                usageidentity.AnalyticsModelForRequest(model, requestedModel),
-		RequestedModel:                requestedModel,
-		ResolvedModel:                 resolvedModel,
-		Endpoint:                      endpoint,
-		Method:                        method,
-		Path:                          path,
-		ClientIP:                      clientIP,
-		XForwardedFor:                 xForwardedFor,
-		UserAgent:                     userAgent,
-		AuthType:                      authType,
-		AuthIndex:                     authIndex,
-		Source:                        source,
-		SourceHash:                    hashString(sourceRaw),
-		APIKeyHash:                    hashString(apiKey),
-		AccountSnapshot:               readString(record, "account_snapshot", "accountSnapshot"),
-		AuthLabelSnapshot:             readString(record, "auth_label_snapshot", "authLabelSnapshot"),
-		AuthFileSnapshot:              readString(record, "auth_file_snapshot", "authFileSnapshot"),
-		AuthProviderSnapshot:          authProviderSnapshot,
-		AuthProjectIDSnapshot:         readString(record, "auth_project_id_snapshot", "authProjectIdSnapshot", "project_id", "projectId"),
-		AuthSnapshotAtMS:              readInt(record, "auth_snapshot_at_ms", "authSnapshotAtMs"),
-		ReasoningEffort:               readString(record, "reasoning_effort", "reasoningEffort"),
-		ServiceTier:                   serviceTier,
-		RequestServiceTier:            requestServiceTier,
-		ResponseServiceTier:           responseServiceTier,
-		CacheInputMode:                cacheAccounting.Mode,
-		InputTokens:                   inputTokens,
-		OutputTokens:                  outputTokens,
-		ReasoningTokens:               reasoningTokens,
-		CachedTokens:                  cachedTokens,
-		CacheTokens:                   cacheTokens,
-		CacheReadTokens:               cacheReadTokens,
-		CacheCreationTokens:           cacheCreationTokens,
-		NormalizedUncachedInputTokens: cacheAccounting.UncachedInputTokens,
-		NormalizedTotalInputTokens:    cacheAccounting.TotalInputTokens,
-		NormalizedCacheReadTokens:     cacheAccounting.CacheReadTokens,
-		NormalizedCacheCreationTokens: cacheAccounting.CacheCreationTokens,
-		TotalTokens:                   totalTokens,
-		LatencyMS:                     latencyMS,
-		TTFTMS:                        ttftMS,
-		Failed:                        failed,
-		FailStatusCode:                int(failStatusCode),
-		FailSummary:                   failSummary,
-		FailBody:                      failBody,
-		RawJSON:                       string(redactedJSON),
-		CreatedAtMS:                   time.Now().UnixMilli(),
+		RequestID:             readString(record, "request_id", "requestId", "id"),
+		TimestampMS:           timestampMS,
+		Timestamp:             timestamp,
+		Provider:              provider,
+		ExecutorType:          executorType,
+		Model:                 model,
+		AnalyticsModel:        usageidentity.AnalyticsModelForRequest(model, requestedModel),
+		RequestedModel:        requestedModel,
+		ResolvedModel:         resolvedModel,
+		Endpoint:              endpoint,
+		Method:                method,
+		Path:                  path,
+		ClientIP:              clientIP,
+		XForwardedFor:         xForwardedFor,
+		UserAgent:             userAgent,
+		AuthType:              authType,
+		AuthIndex:             authIndex,
+		Source:                source,
+		SourceHash:            hashString(sourceRaw),
+		APIKeyHash:            hashString(apiKey),
+		AccountSnapshot:       readString(record, "account_snapshot", "accountSnapshot"),
+		AuthLabelSnapshot:     readString(record, "auth_label_snapshot", "authLabelSnapshot"),
+		AuthFileSnapshot:      readString(record, "auth_file_snapshot", "authFileSnapshot"),
+		AuthProviderSnapshot:  authProviderSnapshot,
+		AuthProjectIDSnapshot: readString(record, "auth_project_id_snapshot", "authProjectIdSnapshot", "project_id", "projectId"),
+		AuthSnapshotAtMS:      readInt(record, "auth_snapshot_at_ms", "authSnapshotAtMs"),
+		ReasoningEffort:       readString(record, "reasoning_effort", "reasoningEffort"),
+		ServiceTier:           serviceTier,
+		RequestServiceTier:    requestServiceTier,
+		ResponseServiceTier:   responseServiceTier,
+		CacheInputMode:        cacheInputModeFromRecord(record),
+		InputTokens:           inputTokens,
+		OutputTokens:          outputTokens,
+		ReasoningTokens:       reasoningTokens,
+		CachedTokens:          cachedTokens,
+		CacheTokens:           cacheTokens,
+		CacheReadTokens:       cacheReadTokens,
+		CacheCreationTokens:   cacheCreationTokens,
+		TotalTokens:           totalTokens,
+		LatencyMS:             latencyMS,
+		TTFTMS:                ttftMS,
+		Failed:                failed,
+		FailStatusCode:        int(failStatusCode),
+		FailSummary:           failSummary,
+		FailBody:              failBody,
+		RawJSON:               string(redactedJSON),
+		CreatedAtMS:           time.Now().UnixMilli(),
 	}
+	ApplyTokenAccounting(&event, record)
 	if event.Model == "" {
 		event.Model = "-"
 	}
@@ -637,16 +680,76 @@ func NormalizeRaw(raw []byte) (Event, error) {
 	return event, nil
 }
 
+// BuildDetail creates the backwards-compatible detail while adding the
+// canonical accounting-v2 fields. Legacy token fields remain available.
+func BuildDetail(event Event) Detail {
+	ApplyTokenAccounting(&event, nil)
+	requestedModel := event.RequestedModel
+	if requestedModel == "" {
+		requestedModel = event.Model
+	}
+	compatCachedTokens := CompatibleCachedTokens(
+		event.CachedTokens,
+		event.CacheTokens,
+		event.CacheReadTokens,
+		event.CacheCreationTokens,
+	)
+	return Detail{
+		Timestamp:             event.Timestamp,
+		Source:                event.Source,
+		AuthIndex:             event.AuthIndex,
+		APIKeyHash:            event.APIKeyHash,
+		AccountSnapshot:       event.AccountSnapshot,
+		AuthLabelSnapshot:     event.AuthLabelSnapshot,
+		AuthFileSnapshot:      event.AuthFileSnapshot,
+		AuthProviderSnapshot:  event.AuthProviderSnapshot,
+		AuthProjectIDSnapshot: event.AuthProjectIDSnapshot,
+		AuthSnapshotAtMS:      event.AuthSnapshotAtMS,
+		LatencyMS:             event.LatencyMS,
+		TTFTMS:                event.TTFTMS,
+		RequestedModel:        requestedModel,
+		ResolvedModel:         event.ResolvedModel,
+		ReasoningEffort:       event.ReasoningEffort,
+		ServiceTier:           event.ServiceTier,
+		RequestServiceTier:    event.RequestServiceTier,
+		ResponseServiceTier:   event.ResponseServiceTier,
+		CacheInputMode:        event.CacheInputMode,
+		ExecutorType:          event.ExecutorType,
+		AccountingVersion:     event.AccountingVersion,
+		AccountingValid:       event.AccountingValid,
+		AccountingQuality:     event.TokenBreakdown.Quality,
+		IncompleteAccounting:  event.UnclassifiedTokens > 0 || event.TokenBreakdown.Quality != TokenAccountingQualityComplete,
+		TokenBreakdown:        event.TokenBreakdown,
+		Failed:                event.Failed,
+		FailStatusCode:        event.FailStatusCode,
+		FailSummary:           event.FailSummary,
+		ResponseMetadata:      event.ResponseMetadata,
+		Tokens: Tokens{
+			InputTokens:              event.InputTokens,
+			OutputTokens:             event.OutputTokens,
+			NonReasoningOutputTokens: event.NormalizedNonReasoningOutputTokens,
+			ReasoningTokens:          event.ReasoningTokens,
+			CachedTokens:             compatCachedTokens,
+			CacheTokens:              compatCachedTokens,
+			CacheReadTokens:          event.CacheReadTokens,
+			CacheCreationTokens:      event.CacheCreationTokens,
+			UnclassifiedTokens:       event.UnclassifiedTokens,
+			TotalTokens:              event.TotalTokens,
+		},
+	}
+}
+
 func BuildPayload(events []Event) Payload {
 	payload := Payload{APIs: map[string]*APIAggregate{}}
 	for _, event := range events {
+		detail := BuildDetail(event)
 		payload.TotalRequests++
 		if event.Failed {
 			payload.FailureCount++
 		} else {
 			payload.SuccessCount++
 		}
-		payload.TotalTokens += event.TotalTokens
+		payload.TotalTokens = SaturatingTokenSum(payload.TotalTokens, detail.Tokens.TotalTokens)
 
 		endpoint := event.Endpoint
 		if endpoint == "" {
@@ -666,52 +769,7 @@ func BuildPayload(events []Event) Payload {
 			modelEntry = &ModelAggregate{}
 			apiEntry.Models[model] = modelEntry
 		}
-		compatCachedTokens := CompatibleCachedTokens(
-			event.CachedTokens,
-			event.CacheTokens,
-			event.CacheReadTokens,
-			event.CacheCreationTokens,
-		)
-		requestedModel := event.RequestedModel
-		if requestedModel == "" {
-			requestedModel = event.Model
-		}
-		modelEntry.Details = append(modelEntry.Details, Detail{
-			Timestamp:             event.Timestamp,
-			Source:                event.Source,
-			AuthIndex:             event.AuthIndex,
-			APIKeyHash:            event.APIKeyHash,
-			AccountSnapshot:       event.AccountSnapshot,
-			AuthLabelSnapshot:     event.AuthLabelSnapshot,
-			AuthFileSnapshot:      event.AuthFileSnapshot,
-			AuthProviderSnapshot:  event.AuthProviderSnapshot,
-			AuthProjectIDSnapshot: event.AuthProjectIDSnapshot,
-			AuthSnapshotAtMS:      event.AuthSnapshotAtMS,
-			LatencyMS:             event.LatencyMS,
-			TTFTMS:                event.TTFTMS,
-			RequestedModel:        requestedModel,
-			ResolvedModel:         event.ResolvedModel,
-			ReasoningEffort:       event.ReasoningEffort,
-			ServiceTier:           event.ServiceTier,
-			RequestServiceTier:    event.RequestServiceTier,
-			ResponseServiceTier:   event.ResponseServiceTier,
-			CacheInputMode:        event.CacheInputMode,
-			ExecutorType:          event.ExecutorType,
-			Failed:                event.Failed,
-			FailStatusCode:        event.FailStatusCode,
-			FailSummary:           event.FailSummary,
-			ResponseMetadata:      event.ResponseMetadata,
-			Tokens: Tokens{
-				InputTokens:         event.InputTokens,
-				OutputTokens:        event.OutputTokens,
-				ReasoningTokens:     event.ReasoningTokens,
-				CachedTokens:        compatCachedTokens,
-				CacheTokens:         compatCachedTokens,
-				CacheReadTokens:     event.CacheReadTokens,
-				CacheCreationTokens: event.CacheCreationTokens,
-				TotalTokens:         event.TotalTokens,
-			},
-		})
+		modelEntry.Details = append(modelEntry.Details, detail)
 	}
 	return payload
 }
@@ -722,20 +780,26 @@ func readTimestamp(record map[string]any) (int64, string) {
 	if raw == nil {
 		return now.UnixMilli(), now.UTC().Format(time.RFC3339Nano)
 	}
-	switch value := raw.(type) {
-	case float64:
-		ms := int64(value)
-		if ms < 10_000_000_000 {
-			ms *= 1000
+	fromNumber := func(value int64) (int64, string) {
+		if value < 10_000_000_000 {
+			value *= 1000
 		}
-		return ms, time.UnixMilli(ms).UTC().Format(time.RFC3339Nano)
+		return value, time.UnixMilli(value).UTC().Format(time.RFC3339Nano)
+	}
+	switch value := raw.(type) {
+	case json.Number:
+		if number, err := value.Int64(); err == nil {
+			return fromNumber(number)
+		}
+		if number, err := value.Float64(); err == nil {
+			return fromNumber(int64(number))
+		}
+	case float64:
+		return fromNumber(int64(value))
 	case string:
 		trimmed := strings.TrimSpace(value)
 		if number, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
-			if number < 10_000_000_000 {
-				number *= 1000
-			}
-			return number, time.UnixMilli(number).UTC().Format(time.RFC3339Nano)
+			return fromNumber(number)
 		}
 		for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05", "2006-01-02T15:04:05"} {
 			if parsed, err := time.Parse(layout, trimmed); err == nil {
@@ -944,6 +1008,47 @@ func maxInt64(left, right int64) int64 {
 		return left
 	}
 	return right
+}
+
+const maxInt64Value int64 = 1<<63 - 1
+
+// SaturatingTokenSum adds token buckets without wrapping int64. Negative
+// values are treated as zero because token counts cannot be negative.
+func SaturatingTokenSum(values ...int64) int64 {
+	var total int64
+	for _, value := range values {
+		value = maxInt64(value, 0)
+		if total > maxInt64Value-value {
+			return maxInt64Value
+		}
+		total += value
+	}
+	return total
+}
+
+// TokenRemainder subtracts non-overlapping buckets from a total without
+// underflow. An overflowing classified sum consumes the representable total.
+func TokenRemainder(total int64, buckets ...int64) int64 {
+	total = maxInt64(total, 0)
+	classified := SaturatingTokenSum(buckets...)
+	if classified >= total {
+		return 0
+	}
+	return total - classified
+}
+
+func nonNegativeSum(values ...int64) (int64, bool) {
+	var total int64
+	for _, value := range values {
+		if value < 0 {
+			return 0, false
+		}
+		if total > maxInt64Value-value {
+			return maxInt64Value, false
+		}
+		total += value
+	}
+	return total, true
 }
 
 func hashString(value string) string {

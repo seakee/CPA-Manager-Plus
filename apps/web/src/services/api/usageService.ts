@@ -28,7 +28,7 @@ import {
   readAuthFileStatusPhysicalName,
   resolveAuthFileStatusMutationTarget,
 } from '@/utils/authFileStatusMutation';
-import type { ModelPrice } from '@/utils/usage';
+import type { ModelPrice, UsageTokenBreakdown } from '@/utils/usage';
 
 const USAGE_SERVICE_ERROR_CODES = new Set([
   'request_failed',
@@ -574,10 +574,13 @@ export interface DashboardTodaySummary {
   success_rate: number;
   input_tokens: number;
   output_tokens: number;
+  non_reasoning_output_tokens?: number;
   cached_tokens: number;
   cache_read_tokens: number;
   cache_creation_tokens: number;
   reasoning_tokens: number;
+  unclassified_tokens?: number;
+  incomplete_accounting_calls?: number;
   total_tokens: number;
   total_cost: number;
   average_latency_ms: number | null;
@@ -643,7 +646,15 @@ export interface DashboardTodayRequestHealthTimeline {
 }
 
 export interface DashboardTokenMixSegment {
-  key: 'input' | 'output' | 'reasoning' | 'cached' | 'cache_read' | 'cache_creation' | string;
+  key:
+    | 'input'
+    | 'output'
+    | 'reasoning'
+    | 'cached'
+    | 'cache_read'
+    | 'cache_creation'
+    | 'unclassified'
+    | string;
   tokens: number;
   share: number;
 }
@@ -1229,11 +1240,14 @@ export interface MonitoringAnalyticsSummary {
   success_rate: number;
   input_tokens: number;
   output_tokens: number;
+  non_reasoning_output_tokens?: number;
   cached_tokens: number;
   cache_read_tokens: number;
   cache_creation_tokens: number;
   cache_hit_rate?: number;
   reasoning_tokens: number;
+  unclassified_tokens?: number;
+  incomplete_accounting_calls?: number;
   total_tokens: number;
   total_cost: number;
   average_cost_per_call?: number;
@@ -1272,11 +1286,14 @@ export interface MonitoringAnalyticsTimelinePoint {
   failure: number;
   input_tokens?: number;
   output_tokens?: number;
+  non_reasoning_output_tokens?: number;
   cached_tokens?: number;
   cache_read_tokens?: number;
   cache_creation_tokens?: number;
   cache_hit_rate?: number;
   reasoning_tokens?: number;
+  unclassified_tokens?: number;
+  incomplete_accounting_calls?: number;
   total_tokens?: number;
   cost?: number;
   average_latency_ms?: number | null;
@@ -1353,6 +1370,10 @@ export interface MonitoringAnalyticsModelStat {
   success_rate: number;
   input_tokens: number;
   output_tokens: number;
+  non_reasoning_output_tokens?: number;
+  reasoning_tokens?: number;
+  unclassified_tokens?: number;
+  incomplete_accounting_calls?: number;
   cached_tokens: number;
   cache_read_tokens: number;
   cache_creation_tokens: number;
@@ -1398,6 +1419,10 @@ export interface MonitoringAnalyticsAccountModelStatRow {
   success_rate: number;
   input_tokens: number;
   output_tokens: number;
+  non_reasoning_output_tokens?: number;
+  reasoning_tokens?: number;
+  unclassified_tokens?: number;
+  incomplete_accounting_calls?: number;
   cached_tokens: number;
   cache_read_tokens: number;
   cache_creation_tokens: number;
@@ -1423,6 +1448,10 @@ export interface MonitoringAnalyticsAccountStatRow {
   success_rate: number;
   input_tokens: number;
   output_tokens: number;
+  non_reasoning_output_tokens?: number;
+  reasoning_tokens?: number;
+  unclassified_tokens?: number;
+  incomplete_accounting_calls?: number;
   cached_tokens: number;
   cache_read_tokens: number;
   cache_creation_tokens: number;
@@ -1449,6 +1478,10 @@ export interface MonitoringAnalyticsCredentialStatRow {
   success_rate: number;
   input_tokens: number;
   output_tokens: number;
+  non_reasoning_output_tokens?: number;
+  reasoning_tokens?: number;
+  unclassified_tokens?: number;
+  incomplete_accounting_calls?: number;
   cached_tokens: number;
   cache_read_tokens: number;
   cache_creation_tokens: number;
@@ -1478,10 +1511,13 @@ export interface MonitoringAnalyticsCredentialTimelinePoint {
   failure: number;
   input_tokens?: number;
   output_tokens?: number;
+  non_reasoning_output_tokens?: number;
   cached_tokens?: number;
   cache_read_tokens?: number;
   cache_creation_tokens?: number;
   reasoning_tokens?: number;
+  unclassified_tokens?: number;
+  incomplete_accounting_calls?: number;
   total_tokens?: number;
   cost?: number;
   average_latency_ms?: number | null;
@@ -1499,10 +1535,13 @@ export interface MonitoringAnalyticsApiKeyTimelinePoint {
   failure: number;
   input_tokens?: number;
   output_tokens?: number;
+  non_reasoning_output_tokens?: number;
   cached_tokens?: number;
   cache_read_tokens?: number;
   cache_creation_tokens?: number;
   reasoning_tokens?: number;
+  unclassified_tokens?: number;
+  incomplete_accounting_calls?: number;
   total_tokens?: number;
   cost?: number;
   average_latency_ms?: number | null;
@@ -1525,6 +1564,10 @@ export interface MonitoringAnalyticsApiKeyStatRow {
   success_rate: number;
   input_tokens: number;
   output_tokens: number;
+  non_reasoning_output_tokens?: number;
+  reasoning_tokens?: number;
+  unclassified_tokens?: number;
+  incomplete_accounting_calls?: number;
   cached_tokens: number;
   cache_read_tokens: number;
   cache_creation_tokens: number;
@@ -1589,6 +1632,10 @@ export interface MonitoringAnalyticsTaskBucketRow {
   endpoints: string[];
   input_tokens: number;
   output_tokens: number;
+  non_reasoning_output_tokens?: number;
+  reasoning_tokens?: number;
+  unclassified_tokens?: number;
+  incomplete_accounting_calls?: number;
   cached_tokens: number;
   cache_read_tokens: number;
   cache_creation_tokens: number;
@@ -1797,12 +1844,20 @@ export interface MonitoringAnalyticsEventRow {
   reasoning_effort?: string;
   service_tier?: string;
   executor_type?: string;
+  cache_input_mode?: string;
+  accounting_version?: number;
+  accounting_valid?: boolean;
+  accounting_quality?: string;
   input_tokens: number;
   output_tokens: number;
+  non_reasoning_output_tokens?: number;
   cached_tokens: number;
   cache_read_tokens: number;
   cache_creation_tokens: number;
   reasoning_tokens: number;
+  unclassified_tokens?: number;
+  incomplete_accounting?: boolean;
+  token_breakdown?: UsageTokenBreakdown;
   total_tokens: number;
   latency_ms: number | null;
   ttft_ms?: number | null;

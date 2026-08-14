@@ -85,7 +85,7 @@ const FAILURE_TOOLTIP_MAX_WIDTH = 420;
 const FAILURE_TOOLTIP_MAX_HEIGHT = 240;
 const FAILURE_TOOLTIP_CLOSE_DELAY_MS = 120;
 const USAGE_TOOLTIP_WIDTH = 184;
-const USAGE_TOOLTIP_ESTIMATED_HEIGHT = 170;
+const USAGE_TOOLTIP_ESTIMATED_HEIGHT = 260;
 
 type FailureTooltipPlacement = 'above' | 'below';
 
@@ -727,15 +727,36 @@ type RealtimeTokenUsageDetails = {
 };
 
 const buildRealtimeTokenUsageDetails = (row: MonitoringEventRow, t: TFunction) => {
+  const quality =
+    row.accountingQuality || (row.accountingVersion === 2 ? 'inconsistent' : 'legacy');
+  const qualityLabel = t(`monitoring.accounting_quality_${quality}`, {
+    defaultValue: quality,
+  });
   const fields = [
-    { label: t('monitoring.realtime_usage_total_label'), value: formatCompactNumber(row.totalTokens) },
-    { label: t('monitoring.realtime_usage_input_label'), value: formatCompactNumber(row.inputTokens) },
-    { label: t('monitoring.realtime_usage_output_label'), value: formatCompactNumber(row.outputTokens) },
+    {
+      label: t('monitoring.realtime_usage_total_label'),
+      value: formatCompactNumber(row.totalTokens),
+    },
+    {
+      label: t('monitoring.realtime_usage_input_label'),
+      value: formatCompactNumber(row.inputTokens),
+    },
+    {
+      label: t('monitoring.realtime_usage_output_label'),
+      value: formatCompactNumber(row.outputTokens),
+    },
+    {
+      label: t('monitoring.realtime_usage_non_reasoning_label'),
+      value: formatCompactNumber(row.nonReasoningOutputTokens),
+    },
     {
       label: t('monitoring.realtime_usage_reasoning_label'),
       value: String(row.reasoningTokens),
     },
-    { label: t('monitoring.realtime_usage_cached_label'), value: formatCompactNumber(row.cachedTokens) },
+    {
+      label: t('monitoring.realtime_usage_cached_label'),
+      value: formatCompactNumber(row.cachedTokens),
+    },
     {
       label: t('monitoring.realtime_usage_cache_read_label'),
       value: formatCompactNumber(row.cacheReadTokens),
@@ -743,6 +764,16 @@ const buildRealtimeTokenUsageDetails = (row: MonitoringEventRow, t: TFunction) =
     {
       label: t('monitoring.realtime_usage_cache_creation_label'),
       value: formatCompactNumber(row.cacheCreationTokens),
+    },
+    {
+      label: t('monitoring.realtime_usage_unclassified_label'),
+      value: formatCompactNumber(row.unclassifiedTokens),
+    },
+    {
+      label: t('monitoring.realtime_usage_accounting_label'),
+      value: row.incompleteAccounting
+        ? `${qualityLabel} · ${t('monitoring.realtime_usage_incomplete_suffix')}`
+        : qualityLabel,
     },
   ];
 
@@ -1101,9 +1132,7 @@ export function RealtimeEventsPanel({
               const apiKeyDisplay = buildRealtimeApiKeyDisplay(row, t);
               const requestedModel = row.requestedModel?.trim() || row.model;
               const resolvedModel = row.resolvedModel?.trim() || '';
-              const showResolvedModel = Boolean(
-                resolvedModel && resolvedModel !== requestedModel
-              );
+              const showResolvedModel = Boolean(resolvedModel && resolvedModel !== requestedModel);
               const reasoningEffort = formatOptionalText(row.reasoningEffort);
               const serviceTier = formatOptionalText(row.serviceTier);
               const requestServiceTier = formatOptionalText(row.requestServiceTier);

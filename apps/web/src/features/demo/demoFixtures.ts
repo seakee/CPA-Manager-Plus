@@ -232,23 +232,53 @@ type DemoNestedModelRow = NonNullable<
 const safeRate = (part: number, total: number) => (total > 0 ? part / total : 0);
 const round2 = (value: number) => Number(value.toFixed(2));
 
-const splitTokens = (totalTokens: number) => {
-  const inputTokens = Math.round(totalTokens * 0.56);
-  const outputTokens = Math.round(totalTokens * 0.24);
-  const cachedTokens = Math.round(totalTokens * 0.13);
+const splitTokens = (totalTokens: number, requestedUnclassifiedTokens = 0) => {
+  const safeTotalTokens = Math.max(Math.round(totalTokens), 0);
+  const unclassifiedTokens = Math.min(
+    safeTotalTokens,
+    Math.max(Math.round(requestedUnclassifiedTokens), 0)
+  );
+  const accountedTokens = safeTotalTokens - unclassifiedTokens;
+  const inputTokens = Math.round(accountedTokens * 0.56);
+  const outputTokens = accountedTokens - inputTokens;
+  const cachedTokens = Math.round(inputTokens * 0.23);
   const cacheReadTokens = Math.round(cachedTokens * 0.78);
   const cacheCreationTokens = cachedTokens - cacheReadTokens;
-  const reasoningTokens = Math.max(0, totalTokens - inputTokens - outputTokens);
+  const reasoningTokens = Math.round(outputTokens * 0.32);
+  const nonReasoningOutputTokens = outputTokens - reasoningTokens;
   return {
     input_tokens: inputTokens,
     output_tokens: outputTokens,
+    non_reasoning_output_tokens: nonReasoningOutputTokens,
     cached_tokens: 0,
     cache_read_tokens: cacheReadTokens,
     cache_creation_tokens: cacheCreationTokens,
     reasoning_tokens: reasoningTokens,
-    total_tokens: totalTokens,
+    unclassified_tokens: unclassifiedTokens,
+    total_tokens: safeTotalTokens,
+    accounting_version: 2,
+    accounting_valid: true,
+    accounting_quality: unclassifiedTokens === 0 ? 'complete' : 'unclassified',
+    incomplete_accounting: unclassifiedTokens > 0,
+    cache_input_mode: 'included_in_input',
   };
 };
+
+const aggregateTokenFields = (
+  tokens: ReturnType<typeof splitTokens>,
+  incompleteAccountingCalls = 0
+) => ({
+  input_tokens: tokens.input_tokens,
+  output_tokens: tokens.output_tokens,
+  non_reasoning_output_tokens: tokens.non_reasoning_output_tokens,
+  reasoning_tokens: tokens.reasoning_tokens,
+  unclassified_tokens: tokens.unclassified_tokens,
+  incomplete_accounting_calls: incompleteAccountingCalls,
+  cached_tokens: tokens.cached_tokens,
+  cache_read_tokens: tokens.cache_read_tokens,
+  cache_creation_tokens: tokens.cache_creation_tokens,
+  total_tokens: tokens.total_tokens,
+});
 
 const buildNestedModelRow = (
   model: string,
@@ -256,22 +286,19 @@ const buildNestedModelRow = (
   failureCalls: number,
   totalTokens: number,
   cost: number,
-  lastSeenMs: number
+  lastSeenMs: number,
+  unclassifiedTokens = 0,
+  incompleteAccountingCalls = 0
 ): DemoNestedModelRow => {
   const successCalls = Math.max(0, calls - failureCalls);
-  const tokens = splitTokens(totalTokens);
+  const tokens = splitTokens(totalTokens, unclassifiedTokens);
   return {
     model,
     calls,
     success_calls: successCalls,
     failure_calls: failureCalls,
     success_rate: safeRate(successCalls, calls),
-    input_tokens: tokens.input_tokens,
-    output_tokens: tokens.output_tokens,
-    cached_tokens: tokens.cached_tokens,
-    cache_read_tokens: tokens.cache_read_tokens,
-    cache_creation_tokens: tokens.cache_creation_tokens,
-    total_tokens: tokens.total_tokens,
+    ...aggregateTokenFields(tokens, incompleteAccountingCalls),
     cost,
     last_seen_ms: lastSeenMs,
   };
@@ -1286,8 +1313,9 @@ const dashboardBase = (inputNow = now()): DashboardSummaryResponse => {
   const failureCalls = healthPoints.reduce((sum, point) => sum + point.failure, 0);
   const successCalls = totalCalls - failureCalls;
   const totalTokens = healthPoints.reduce((sum, point) => sum + point.tokens, 0);
-  const todayTokens = splitTokens(totalTokens);
-  const totalCost = round2((totalTokens / 1_000_000) * 22.9);
+  const todayTokens = splitTokens(totalTokens, Math.round(totalTokens * 0.001));
+  const billableTokens = todayTokens.input_tokens + todayTokens.output_tokens;
+  const totalCost = round2((billableTokens / 1_000_000) * 22.9);
   const timeline = Array.from({ length: 24 }, (_, hourIndex) => {
     const hourPoints = healthPoints.slice(
       hourIndex * bucketsPerHour,
@@ -1365,10 +1393,13 @@ const dashboardBase = (inputNow = now()): DashboardSummaryResponse => {
       success_rate: safeRate(successCalls, totalCalls),
       input_tokens: todayTokens.input_tokens,
       output_tokens: todayTokens.output_tokens,
+      non_reasoning_output_tokens: todayTokens.non_reasoning_output_tokens,
       cached_tokens: todayTokens.cached_tokens,
       cache_read_tokens: todayTokens.cache_read_tokens,
       cache_creation_tokens: todayTokens.cache_creation_tokens,
       reasoning_tokens: todayTokens.reasoning_tokens,
+      unclassified_tokens: todayTokens.unclassified_tokens,
+      incomplete_accounting_calls: Math.max(1, Math.round(totalCalls * 0.002)),
       total_tokens: todayTokens.total_tokens,
       total_cost: totalCost,
       average_latency_ms: 1280,
@@ -1403,23 +1434,51 @@ const dashboardBase = (inputNow = now()): DashboardSummaryResponse => {
     token_mix: [
       {
         key: 'input',
-        tokens: todayTokens.input_tokens,
-        share: safeRate(todayTokens.input_tokens, totalTokens),
+        tokens: Math.max(
+          todayTokens.input_tokens -
+            todayTokens.cache_read_tokens -
+            todayTokens.cache_creation_tokens -
+            todayTokens.cached_tokens,
+          0
+        ),
+        share: safeRate(
+          Math.max(
+            todayTokens.input_tokens -
+              todayTokens.cache_read_tokens -
+              todayTokens.cache_creation_tokens -
+              todayTokens.cached_tokens,
+            0
+          ),
+          totalTokens
+        ),
       },
       {
         key: 'output',
-        tokens: todayTokens.output_tokens,
-        share: safeRate(todayTokens.output_tokens, totalTokens),
+        tokens: todayTokens.non_reasoning_output_tokens,
+        share: safeRate(todayTokens.non_reasoning_output_tokens, totalTokens),
       },
       {
         key: 'cached',
-        tokens: todayTokens.cached_tokens,
-        share: safeRate(todayTokens.cached_tokens, totalTokens),
+        tokens:
+          todayTokens.cached_tokens +
+          todayTokens.cache_read_tokens +
+          todayTokens.cache_creation_tokens,
+        share: safeRate(
+          todayTokens.cached_tokens +
+            todayTokens.cache_read_tokens +
+            todayTokens.cache_creation_tokens,
+          totalTokens
+        ),
       },
       {
         key: 'reasoning',
         tokens: todayTokens.reasoning_tokens,
         share: safeRate(todayTokens.reasoning_tokens, totalTokens),
+      },
+      {
+        key: 'unclassified',
+        tokens: todayTokens.unclassified_tokens,
+        share: safeRate(todayTokens.unclassified_tokens, totalTokens),
       },
     ],
     channel_health: [
@@ -1549,7 +1608,7 @@ const buildMonitoringAnalytics = (
     const failure = index % 6 === 0 ? 54 : 18 + (index % 4) * 7;
     const success = calls - failure;
     const tokens = calls * (860 + (index % 3) * 105);
-    const tokenSplit = splitTokens(tokens);
+    const tokenSplit = splitTokens(tokens, index === 9 ? Math.round(tokens * 0.008) : 0);
     return {
       bucket_ms: bucket,
       bucket_end_ms: bucket + day,
@@ -1558,14 +1617,8 @@ const buildMonitoringAnalytics = (
       tokens,
       success,
       failure,
-      input_tokens: tokenSplit.input_tokens,
-      output_tokens: tokenSplit.output_tokens,
-      cached_tokens: tokenSplit.cached_tokens,
-      cache_read_tokens: tokenSplit.cache_read_tokens,
-      cache_creation_tokens: tokenSplit.cache_creation_tokens,
-      reasoning_tokens: tokenSplit.reasoning_tokens,
-      total_tokens: tokenSplit.total_tokens,
-      cost: round2((tokens / 1_000_000) * 18.6),
+      ...aggregateTokenFields(tokenSplit, tokenSplit.incomplete_accounting ? 1 : 0),
+      cost: round2(((tokenSplit.input_tokens + tokenSplit.output_tokens) / 1_000_000) * 18.6),
       average_latency_ms: 1100 + (index % 5) * 90,
       p95_latency_ms: 2400 + (index % 5) * 180,
       p95_ttft_ms: 720 + (index % 4) * 65,
@@ -1596,10 +1649,26 @@ const buildMonitoringAnalytics = (
   const summarySuccess = summaryCalls - summaryFailures;
   const summaryInputTokens = modelStats.reduce((sum, row) => sum + row.input_tokens, 0);
   const summaryOutputTokens = modelStats.reduce((sum, row) => sum + row.output_tokens, 0);
+  const summaryNonReasoningOutputTokens = modelStats.reduce(
+    (sum, row) => sum + (row.non_reasoning_output_tokens ?? row.output_tokens),
+    0
+  );
   const summaryCachedTokens = modelStats.reduce((sum, row) => sum + row.cached_tokens, 0);
   const summaryCacheReadTokens = modelStats.reduce((sum, row) => sum + row.cache_read_tokens, 0);
   const summaryCacheCreationTokens = modelStats.reduce(
     (sum, row) => sum + row.cache_creation_tokens,
+    0
+  );
+  const summaryReasoningTokens = modelStats.reduce(
+    (sum, row) => sum + (row.reasoning_tokens ?? 0),
+    0
+  );
+  const summaryUnclassifiedTokens = modelStats.reduce(
+    (sum, row) => sum + (row.unclassified_tokens ?? 0),
+    0
+  );
+  const summaryIncompleteAccountingCalls = modelStats.reduce(
+    (sum, row) => sum + (row.incomplete_accounting_calls ?? 0),
     0
   );
   const summaryTokens = modelStats.reduce((sum, row) => sum + row.total_tokens, 0);
@@ -2184,11 +2253,7 @@ const buildMonitoringAnalytics = (
       ...row,
       success_calls: successCalls,
       success_rate: safeRate(successCalls, row.calls),
-      input_tokens: tokenSplit.input_tokens,
-      output_tokens: tokenSplit.output_tokens,
-      cached_tokens: tokenSplit.cached_tokens,
-      cache_read_tokens: tokenSplit.cache_read_tokens,
-      cache_creation_tokens: tokenSplit.cache_creation_tokens,
+      ...aggregateTokenFields(tokenSplit),
     };
   });
   const getAccountModels = (id: string) => accountStats.find((row) => row.id === id)?.models ?? [];
@@ -3271,11 +3336,7 @@ const buildMonitoringAnalytics = (
         ...row,
         success_calls: successCalls,
         success_rate: safeRate(successCalls, row.calls),
-        input_tokens: tokenSplit.input_tokens,
-        output_tokens: tokenSplit.output_tokens,
-        cached_tokens: tokenSplit.cached_tokens,
-        cache_read_tokens: tokenSplit.cache_read_tokens,
-        cache_creation_tokens: tokenSplit.cache_creation_tokens,
+        ...aggregateTokenFields(tokenSplit),
         contexts: row.auth_indices.map((authIndex, index) => {
           const calls = Math.round(row.calls / row.auth_indices.length);
           const failureCalls = Math.max(0, Math.round(row.failure_calls / row.auth_indices.length));
@@ -3788,12 +3849,19 @@ const buildMonitoringAnalytics = (
     resolved_model: 'grok-4.5-build-free',
     service_tier: 'standard',
     executor_type: 'ops',
+    cache_input_mode: 'included_in_input',
+    accounting_version: 2,
+    accounting_valid: true,
+    accounting_quality: 'complete',
     input_tokens: 1_284,
     output_tokens: 0,
+    non_reasoning_output_tokens: 0,
     cached_tokens: 0,
     cache_read_tokens: 0,
     cache_creation_tokens: 0,
     reasoning_tokens: 0,
+    unclassified_tokens: 0,
+    incomplete_accounting: false,
     total_tokens: 1_284,
     latency_ms: 1_180,
     ttft_ms: 0,
@@ -3867,12 +3935,19 @@ const buildMonitoringAnalytics = (
     resolved_model: 'grok-4.5',
     service_tier: 'standard',
     executor_type: 'ops',
+    cache_input_mode: 'included_in_input',
+    accounting_version: 2,
+    accounting_valid: true,
+    accounting_quality: 'complete',
     input_tokens: 1_176,
     output_tokens: 562,
+    non_reasoning_output_tokens: 562,
     cached_tokens: 0,
     cache_read_tokens: 0,
     cache_creation_tokens: 0,
     reasoning_tokens: 0,
+    unclassified_tokens: 0,
+    incomplete_accounting: false,
     total_tokens: 1_738,
     latency_ms: 924,
     ttft_ms: 186,
@@ -4018,7 +4093,10 @@ const buildMonitoringAnalytics = (
       const cachedTokens = index % 3 === 0 ? 180 + ((index * 17) % 520) : 0;
       const inputTokens = uncachedInputTokens + cachedTokens;
       const reasoningTokens = index % 4 === 0 ? 80 + ((index * 13) % 360) : 0;
-      const totalTokens = inputTokens + outputTokens + reasoningTokens;
+      const nonReasoningOutputTokens = outputTokens;
+      const canonicalOutputTokens = nonReasoningOutputTokens + reasoningTokens;
+      const unclassifiedTokens = index === 7 ? 64 : 0;
+      const totalTokens = inputTokens + canonicalOutputTokens + unclassifiedTokens;
       const timestampMs = analyticsNow - (index * 5 + (index % 4)) * minute;
       return {
         request_id: `demo-request-${String(index + 1).padStart(3, '0')}`,
@@ -4044,12 +4122,19 @@ const buildMonitoringAnalytics = (
         reasoning_effort: index % 4 === 0 ? 'medium' : undefined,
         service_tier: index % 5 === 0 ? 'priority' : 'standard',
         executor_type: profile.executor,
+        cache_input_mode: 'included_in_input',
+        accounting_version: 2,
+        accounting_valid: true,
+        accounting_quality: unclassifiedTokens > 0 ? 'unclassified' : 'complete',
         input_tokens: inputTokens,
-        output_tokens: outputTokens,
+        output_tokens: canonicalOutputTokens,
+        non_reasoning_output_tokens: nonReasoningOutputTokens,
         cached_tokens: 0,
         cache_read_tokens: Math.round(cachedTokens * 0.78),
         cache_creation_tokens: Math.round(cachedTokens * 0.22),
         reasoning_tokens: reasoningTokens,
+        unclassified_tokens: unclassifiedTokens,
+        incomplete_accounting: unclassifiedTokens > 0,
         total_tokens: totalTokens,
         latency_ms: failed ? 2400 + ((index * 97) % 1800) : 780 + ((index * 83) % 1540),
         ttft_ms: failed ? 820 + ((index * 23) % 360) : 180 + ((index * 19) % 420),
@@ -4277,13 +4362,13 @@ const buildMonitoringAnalytics = (
       success_rate: safeRate(summarySuccess, summaryCalls),
       input_tokens: summaryInputTokens,
       output_tokens: summaryOutputTokens,
+      non_reasoning_output_tokens: summaryNonReasoningOutputTokens,
       cached_tokens: summaryCachedTokens,
       cache_read_tokens: summaryCacheReadTokens,
       cache_creation_tokens: summaryCacheCreationTokens,
-      reasoning_tokens: Math.max(
-        0,
-        summaryTokens - summaryInputTokens - summaryOutputTokens - summaryCachedTokens
-      ),
+      reasoning_tokens: summaryReasoningTokens,
+      unclassified_tokens: summaryUnclassifiedTokens,
+      incomplete_accounting_calls: summaryIncompleteAccountingCalls,
       total_tokens: summaryTokens,
       total_cost: summaryCost,
       average_cost_per_call: safeRate(summaryCost, summaryCalls),

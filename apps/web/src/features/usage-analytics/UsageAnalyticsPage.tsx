@@ -226,7 +226,7 @@ const lightUsageChartTheme: UsageChartTheme = {
     tooltipShadow: 'box-shadow: 0 16px 36px rgba(15, 23, 42, 0.14);',
     tooltipText: '#2c3e50',
   },
-  tokenStructureColors: ['#60a5fa', '#22c55e', '#06b6d4', '#f59e0b'],
+  tokenStructureColors: ['#60a5fa', '#22c55e', '#06b6d4', '#f59e0b', '#ef4444'],
 };
 
 const darkUsageChartTheme: UsageChartTheme = {
@@ -267,7 +267,7 @@ const darkUsageChartTheme: UsageChartTheme = {
     tooltipShadow: 'box-shadow: 0 16px 36px rgba(0, 0, 0, 0.38);',
     tooltipText: '#e5e5e5',
   },
-  tokenStructureColors: ['#60a5fa', '#95d475', '#22d3ee', '#fbbf24'],
+  tokenStructureColors: ['#60a5fa', '#95d475', '#22d3ee', '#fbbf24', '#f87171'],
 };
 
 const getUsageChartTheme = (resolvedTheme: 'light' | 'dark'): UsageChartTheme =>
@@ -1883,17 +1883,11 @@ function TokenStructureChart({ timeline }: { timeline: UsageTimelinePoint[] }) {
       series: [
         {
           barMaxWidth: 22,
-          data: timeline.map((point) => point.inputTokens),
+          data: timeline.map((point) =>
+            Math.max(point.inputTokens - getUsageCacheTokens(point), 0)
+          ),
           itemStyle: tokenBarItemStyle,
-          name: t('usage_analytics.metric_input_tokens'),
-          stack: 'tokens',
-          type: 'bar',
-        },
-        {
-          barMaxWidth: 22,
-          data: timeline.map((point) => point.outputTokens),
-          itemStyle: tokenBarItemStyle,
-          name: t('usage_analytics.metric_output_tokens'),
+          name: t('usage_analytics.metric_uncached_input_tokens'),
           stack: 'tokens',
           type: 'bar',
         },
@@ -1907,9 +1901,25 @@ function TokenStructureChart({ timeline }: { timeline: UsageTimelinePoint[] }) {
         },
         {
           barMaxWidth: 22,
+          data: timeline.map((point) => point.nonReasoningOutputTokens),
+          itemStyle: tokenBarItemStyle,
+          name: t('usage_analytics.metric_non_reasoning_output_tokens'),
+          stack: 'tokens',
+          type: 'bar',
+        },
+        {
+          barMaxWidth: 22,
           data: timeline.map((point) => point.reasoningTokens),
           itemStyle: tokenBarItemStyle,
           name: t('usage_analytics.metric_reasoning_tokens'),
+          stack: 'tokens',
+          type: 'bar',
+        },
+        {
+          barMaxWidth: 22,
+          data: timeline.map((point) => point.unclassifiedTokens),
+          itemStyle: tokenBarItemStyle,
+          name: t('usage_analytics.metric_unclassified_tokens'),
           stack: 'tokens',
           type: 'bar',
         },

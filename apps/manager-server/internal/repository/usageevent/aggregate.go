@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageaccountingsql"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
@@ -13,6 +14,7 @@ import (
 var (
 	requestedModelExpr = usageidentity.SQLEffectiveRequestedModelExpression("model", "requested_model")
 	analyticsModelExpr = usageidentity.SQLRequestAnalyticsModelExpression("model", "requested_model")
+	accountingSQL      = usageaccountingsql.For("")
 )
 
 func pricingBandedUsageEventsCTEWithBaseFilter(baseFilter string) string {
@@ -20,13 +22,27 @@ func pricingBandedUsageEventsCTEWithBaseFilter(baseFilter string) string {
 	if baseFilter != "" {
 		whereClause = "\n\twhere " + baseFilter
 	}
+	pricingSafe := accountingSQL.PricingSafe
+	pricingBucket := func(expression string) string {
+		return "case when " + pricingSafe + " then " + expression + " else 0 end"
+	}
+	pricingUnclassified := "case when " + pricingSafe + " then " + accountingSQL.Unclassified + " else " + accountingSQL.Total + " end"
 	return fmt.Sprintf(`with pricing_base_events as (
 	select
 		usage_events.*,
 		%s as requested_model_value,
 		%s as analytics_model_value,
 		coalesce(nullif(resolved_model, ''), %s) as billing_model_value,
-		coalesce(normalized_total_input_tokens, input_tokens, 0) as normalized_input_tokens_value
+		`+pricingBucket(accountingSQL.TotalInput)+` as normalized_input_tokens_value,
+		`+pricingBucket(accountingSQL.TotalOutput)+` as normalized_output_tokens_value,
+		`+pricingBucket(accountingSQL.NonReasoningOutput)+` as normalized_non_reasoning_output_tokens_value,
+		`+pricingBucket(accountingSQL.ReasoningOutput)+` as normalized_reasoning_output_tokens_value,
+		`+pricingUnclassified+` as unclassified_tokens_value,
+		`+accountingSQL.Incomplete+` as incomplete_accounting_value,
+		`+pricingBucket(accountingSQL.CompatibleCached)+` as compatible_cached_tokens_value,
+		`+pricingBucket(accountingSQL.CacheRead)+` as normalized_cache_read_tokens_value,
+		`+pricingBucket(accountingSQL.CacheCreation)+` as normalized_cache_creation_tokens_value,
+		`+accountingSQL.Total+` as accounting_total_tokens_value
 	from usage_events%s
 ), pricing_resolved_events as (
 	select
@@ -59,37 +75,43 @@ var pricingBandedUsageEventsCTE = pricingBandedUsageEventsCTEWithBaseFilter("")
 // Aggregate captures roll-up metrics for a usage_events window.
 type Aggregate struct {
 	usage.LongContextTokens
-	TotalCalls          int64
-	SuccessCalls        int64
-	FailureCalls        int64
-	InputTokens         int64
-	OutputTokens        int64
-	ReasoningTokens     int64
-	CachedTokens        int64
-	CacheReadTokens     int64
-	CacheCreationTokens int64
-	TotalTokens         int64
-	AvgLatencyMS        sql.NullFloat64
-	LatencySamples      int64
-	ZeroTokenCalls      int64
+	TotalCalls                int64
+	SuccessCalls              int64
+	FailureCalls              int64
+	InputTokens               int64
+	OutputTokens              int64
+	NonReasoningOutputTokens  int64
+	ReasoningTokens           int64
+	UnclassifiedTokens        int64
+	IncompleteAccountingCalls int64
+	CachedTokens              int64
+	CacheReadTokens           int64
+	CacheCreationTokens       int64
+	TotalTokens               int64
+	AvgLatencyMS              sql.NullFloat64
+	LatencySamples            int64
+	ZeroTokenCalls            int64
 }
 
 // ModelStat aggregates per-model totals.
 type ModelStat struct {
 	usage.LongContextTokens
 	usage.PricingBand
-	Model               string
-	BillingModel        string
-	ServiceTier         string
-	Calls               int64
-	SuccessCalls        int64
-	InputTokens         int64
-	OutputTokens        int64
-	ReasoningTokens     int64
-	CachedTokens        int64
-	CacheReadTokens     int64
-	CacheCreationTokens int64
-	TotalTokens         int64
+	Model                     string
+	BillingModel              string
+	ServiceTier               string
+	Calls                     int64
+	SuccessCalls              int64
+	InputTokens               int64
+	OutputTokens              int64
+	NonReasoningOutputTokens  int64
+	ReasoningTokens           int64
+	UnclassifiedTokens        int64
+	IncompleteAccountingCalls int64
+	CachedTokens              int64
+	CacheReadTokens           int64
+	CacheCreationTokens       int64
+	TotalTokens               int64
 }
 
 // RecentFailure holds the columns required to display a recent failure entry.
@@ -117,27 +139,30 @@ type RecentFailure struct {
 	HeaderTraceID          string
 }
 
-var aggregateSQL = fmt.Sprintf(`select
+var aggregateSQL = `select
 	count(*),
-	sum(case when failed = 0 then 1 else 0 end),
-	sum(case when failed = 1 then 1 else 0 end),
-	coalesce(sum(coalesce(normalized_total_input_tokens, input_tokens)), 0),
-	coalesce(sum(output_tokens), 0),
-	coalesce(sum(reasoning_tokens), 0),
-	coalesce(sum(max(max(cached_tokens, cache_tokens) - max(cache_read_tokens, 0) - max(cache_creation_tokens, 0), 0)), 0),
-	coalesce(sum(cache_read_tokens), 0),
-	coalesce(sum(cache_creation_tokens), 0),
-	coalesce(sum(case when coalesce(normalized_total_input_tokens, input_tokens) > %[1]d then coalesce(normalized_total_input_tokens, input_tokens) else 0 end), 0),
-	coalesce(sum(case when coalesce(normalized_total_input_tokens, input_tokens) > %[1]d then output_tokens else 0 end), 0),
-	coalesce(sum(case when coalesce(normalized_total_input_tokens, input_tokens) > %[1]d then max(max(cached_tokens, cache_tokens) - max(cache_read_tokens, 0) - max(cache_creation_tokens, 0), 0) else 0 end), 0),
-	coalesce(sum(case when coalesce(normalized_total_input_tokens, input_tokens) > %[1]d then cache_read_tokens else 0 end), 0),
-	coalesce(sum(case when coalesce(normalized_total_input_tokens, input_tokens) > %[1]d then cache_creation_tokens else 0 end), 0),
-	coalesce(sum(total_tokens), 0),
+	cpamp_saturating_sum(case when failed = 0 then 1 else 0 end),
+	cpamp_saturating_sum(case when failed = 1 then 1 else 0 end),
+	coalesce(cpamp_saturating_sum(` + accountingSQL.TotalInput + `), 0),
+	coalesce(cpamp_saturating_sum(` + accountingSQL.TotalOutput + `), 0),
+	coalesce(cpamp_saturating_sum(` + accountingSQL.NonReasoningOutput + `), 0),
+	coalesce(cpamp_saturating_sum(` + accountingSQL.ReasoningOutput + `), 0),
+	coalesce(cpamp_saturating_sum(` + accountingSQL.Unclassified + `), 0),
+	coalesce(cpamp_saturating_sum(` + accountingSQL.Incomplete + `), 0),
+	coalesce(cpamp_saturating_sum(` + accountingSQL.CompatibleCached + `), 0),
+	coalesce(cpamp_saturating_sum(` + accountingSQL.CacheRead + `), 0),
+	coalesce(cpamp_saturating_sum(` + accountingSQL.CacheCreation + `), 0),
+	coalesce(cpamp_saturating_sum(case when ` + accountingSQL.TotalInput + ` > ` + fmt.Sprint(usage.LongContextInputTokenThreshold) + ` then ` + accountingSQL.TotalInput + ` else 0 end), 0),
+	coalesce(cpamp_saturating_sum(case when ` + accountingSQL.TotalInput + ` > ` + fmt.Sprint(usage.LongContextInputTokenThreshold) + ` then ` + accountingSQL.TotalOutput + ` else 0 end), 0),
+	coalesce(cpamp_saturating_sum(case when ` + accountingSQL.TotalInput + ` > ` + fmt.Sprint(usage.LongContextInputTokenThreshold) + ` then ` + accountingSQL.CompatibleCached + ` else 0 end), 0),
+	coalesce(cpamp_saturating_sum(case when ` + accountingSQL.TotalInput + ` > ` + fmt.Sprint(usage.LongContextInputTokenThreshold) + ` then ` + accountingSQL.CacheRead + ` else 0 end), 0),
+	coalesce(cpamp_saturating_sum(case when ` + accountingSQL.TotalInput + ` > ` + fmt.Sprint(usage.LongContextInputTokenThreshold) + ` then ` + accountingSQL.CacheCreation + ` else 0 end), 0),
+	coalesce(cpamp_saturating_sum(` + accountingSQL.Total + `), 0),
 	avg(nullif(latency_ms, 0)),
 	count(nullif(latency_ms, 0)),
-	coalesce(sum(case when total_tokens = 0 and failed = 0 then 1 else 0 end), 0)
+	coalesce(cpamp_saturating_sum(case when ` + accountingSQL.Total + ` = 0 and failed = 0 then 1 else 0 end), 0)
 from usage_events
-where timestamp_ms >= ? and timestamp_ms < ?`, usage.LongContextInputTokenThreshold)
+where timestamp_ms >= ? and timestamp_ms < ?`
 
 // AggregateBetween computes summary metrics over [fromMs, toMs).
 func (r *repository) AggregateBetween(ctx context.Context, fromMs, toMs int64) (Aggregate, error) {
@@ -150,7 +175,10 @@ func (r *repository) AggregateBetween(ctx context.Context, fromMs, toMs int64) (
 		&failure,
 		&agg.InputTokens,
 		&agg.OutputTokens,
+		&agg.NonReasoningOutputTokens,
 		&agg.ReasoningTokens,
+		&agg.UnclassifiedTokens,
+		&agg.IncompleteAccountingCalls,
 		&agg.CachedTokens,
 		&agg.CacheReadTokens,
 		&agg.CacheCreationTokens,
@@ -187,19 +215,22 @@ select
 	e.context_threshold_tokens_value,
 	coalesce(e.service_tier, '') as service_tier,
 	count(*) as calls,
-	sum(case when e.failed = 0 then 1 else 0 end) as success,
-	coalesce(sum(coalesce(e.normalized_total_input_tokens, e.input_tokens)), 0),
-	coalesce(sum(e.output_tokens), 0),
-	coalesce(sum(e.reasoning_tokens), 0),
-	coalesce(sum(max(max(e.cached_tokens, e.cache_tokens) - max(e.cache_read_tokens, 0) - max(e.cache_creation_tokens, 0), 0)), 0),
-	coalesce(sum(e.cache_read_tokens), 0),
-	coalesce(sum(e.cache_creation_tokens), 0),
-	coalesce(sum(case when coalesce(e.normalized_total_input_tokens, e.input_tokens) > %[1]d then coalesce(e.normalized_total_input_tokens, e.input_tokens) else 0 end), 0),
-	coalesce(sum(case when coalesce(e.normalized_total_input_tokens, e.input_tokens) > %[1]d then e.output_tokens else 0 end), 0),
-	coalesce(sum(case when coalesce(e.normalized_total_input_tokens, e.input_tokens) > %[1]d then max(max(e.cached_tokens, e.cache_tokens) - max(e.cache_read_tokens, 0) - max(e.cache_creation_tokens, 0), 0) else 0 end), 0),
-	coalesce(sum(case when coalesce(e.normalized_total_input_tokens, e.input_tokens) > %[1]d then e.cache_read_tokens else 0 end), 0),
-	coalesce(sum(case when coalesce(e.normalized_total_input_tokens, e.input_tokens) > %[1]d then e.cache_creation_tokens else 0 end), 0),
-	coalesce(sum(e.total_tokens), 0)
+	cpamp_saturating_sum(case when e.failed = 0 then 1 else 0 end) as success,
+	coalesce(cpamp_saturating_sum(e.normalized_input_tokens_value), 0),
+	coalesce(cpamp_saturating_sum(e.normalized_output_tokens_value), 0),
+	coalesce(cpamp_saturating_sum(e.normalized_non_reasoning_output_tokens_value), 0),
+	coalesce(cpamp_saturating_sum(e.normalized_reasoning_output_tokens_value), 0),
+	coalesce(cpamp_saturating_sum(e.unclassified_tokens_value), 0),
+	coalesce(cpamp_saturating_sum(e.incomplete_accounting_value), 0),
+	coalesce(cpamp_saturating_sum(e.compatible_cached_tokens_value), 0),
+	coalesce(cpamp_saturating_sum(e.normalized_cache_read_tokens_value), 0),
+	coalesce(cpamp_saturating_sum(e.normalized_cache_creation_tokens_value), 0),
+	coalesce(cpamp_saturating_sum(case when e.normalized_input_tokens_value > %[1]d then e.normalized_input_tokens_value else 0 end), 0),
+	coalesce(cpamp_saturating_sum(case when e.normalized_input_tokens_value > %[1]d then e.normalized_output_tokens_value else 0 end), 0),
+	coalesce(cpamp_saturating_sum(case when e.normalized_input_tokens_value > %[1]d then e.compatible_cached_tokens_value else 0 end), 0),
+	coalesce(cpamp_saturating_sum(case when e.normalized_input_tokens_value > %[1]d then e.normalized_cache_read_tokens_value else 0 end), 0),
+	coalesce(cpamp_saturating_sum(case when e.normalized_input_tokens_value > %[1]d then e.normalized_cache_creation_tokens_value else 0 end), 0),
+	coalesce(cpamp_saturating_sum(e.accounting_total_tokens_value), 0)
 from banded_usage_events e
 join top_models t on t.model = e.analytics_model_value
 group by e.analytics_model_value, billing_model, e.pricing_model_value, e.context_threshold_tokens_value, coalesce(e.service_tier, '')
@@ -229,7 +260,10 @@ func (r *repository) TopModelsBetween(ctx context.Context, fromMs, toMs int64, l
 			&stat.SuccessCalls,
 			&stat.InputTokens,
 			&stat.OutputTokens,
+			&stat.NonReasoningOutputTokens,
 			&stat.ReasoningTokens,
+			&stat.UnclassifiedTokens,
+			&stat.IncompleteAccountingCalls,
 			&stat.CachedTokens,
 			&stat.CacheReadTokens,
 			&stat.CacheCreationTokens,
@@ -255,19 +289,22 @@ select
 	context_threshold_tokens_value,
 	coalesce(service_tier, '') as service_tier,
 	count(*) as calls,
-	sum(case when failed = 0 then 1 else 0 end) as success,
-	coalesce(sum(coalesce(normalized_total_input_tokens, input_tokens)), 0),
-	coalesce(sum(output_tokens), 0),
-	coalesce(sum(reasoning_tokens), 0),
-	coalesce(sum(max(max(cached_tokens, cache_tokens) - max(cache_read_tokens, 0) - max(cache_creation_tokens, 0), 0)), 0),
-	coalesce(sum(cache_read_tokens), 0),
-	coalesce(sum(cache_creation_tokens), 0),
-	coalesce(sum(case when coalesce(normalized_total_input_tokens, input_tokens) > %[1]d then coalesce(normalized_total_input_tokens, input_tokens) else 0 end), 0),
-	coalesce(sum(case when coalesce(normalized_total_input_tokens, input_tokens) > %[1]d then output_tokens else 0 end), 0),
-	coalesce(sum(case when coalesce(normalized_total_input_tokens, input_tokens) > %[1]d then max(max(cached_tokens, cache_tokens) - max(cache_read_tokens, 0) - max(cache_creation_tokens, 0), 0) else 0 end), 0),
-	coalesce(sum(case when coalesce(normalized_total_input_tokens, input_tokens) > %[1]d then cache_read_tokens else 0 end), 0),
-	coalesce(sum(case when coalesce(normalized_total_input_tokens, input_tokens) > %[1]d then cache_creation_tokens else 0 end), 0),
-	coalesce(sum(total_tokens), 0)
+	cpamp_saturating_sum(case when failed = 0 then 1 else 0 end) as success,
+	coalesce(cpamp_saturating_sum(normalized_input_tokens_value), 0),
+	coalesce(cpamp_saturating_sum(normalized_output_tokens_value), 0),
+	coalesce(cpamp_saturating_sum(normalized_non_reasoning_output_tokens_value), 0),
+	coalesce(cpamp_saturating_sum(normalized_reasoning_output_tokens_value), 0),
+	coalesce(cpamp_saturating_sum(unclassified_tokens_value), 0),
+	coalesce(cpamp_saturating_sum(incomplete_accounting_value), 0),
+	coalesce(cpamp_saturating_sum(compatible_cached_tokens_value), 0),
+	coalesce(cpamp_saturating_sum(normalized_cache_read_tokens_value), 0),
+	coalesce(cpamp_saturating_sum(normalized_cache_creation_tokens_value), 0),
+	coalesce(cpamp_saturating_sum(case when normalized_input_tokens_value > %[1]d then normalized_input_tokens_value else 0 end), 0),
+	coalesce(cpamp_saturating_sum(case when normalized_input_tokens_value > %[1]d then normalized_output_tokens_value else 0 end), 0),
+	coalesce(cpamp_saturating_sum(case when normalized_input_tokens_value > %[1]d then compatible_cached_tokens_value else 0 end), 0),
+	coalesce(cpamp_saturating_sum(case when normalized_input_tokens_value > %[1]d then normalized_cache_read_tokens_value else 0 end), 0),
+	coalesce(cpamp_saturating_sum(case when normalized_input_tokens_value > %[1]d then normalized_cache_creation_tokens_value else 0 end), 0),
+	coalesce(cpamp_saturating_sum(accounting_total_tokens_value), 0)
 from banded_usage_events
 where timestamp_ms >= ? and timestamp_ms < ?
 group by analytics_model_value, billing_model, pricing_model_value, context_threshold_tokens_value, coalesce(service_tier, '')
@@ -294,7 +331,10 @@ func (r *repository) ModelStatsBetween(ctx context.Context, fromMs, toMs int64) 
 			&stat.SuccessCalls,
 			&stat.InputTokens,
 			&stat.OutputTokens,
+			&stat.NonReasoningOutputTokens,
 			&stat.ReasoningTokens,
+			&stat.UnclassifiedTokens,
+			&stat.IncompleteAccountingCalls,
 			&stat.CachedTokens,
 			&stat.CacheReadTokens,
 			&stat.CacheCreationTokens,
@@ -397,9 +437,9 @@ func (r *repository) BucketTimelineBetween(ctx context.Context, fromMs, toMs int
 	rows, err := r.db.QueryContext(ctx, `select
 	cast((timestamp_ms - ?) / ? as integer) as bucket_index,
 	count(*),
-	coalesce(sum(total_tokens), 0),
-	sum(case when failed = 0 then 1 else 0 end),
-	sum(case when failed = 1 then 1 else 0 end)
+	coalesce(cpamp_saturating_sum(`+accountingSQL.Total+`), 0),
+	cpamp_saturating_sum(case when failed = 0 then 1 else 0 end),
+	cpamp_saturating_sum(case when failed = 1 then 1 else 0 end)
 from usage_events
 where timestamp_ms >= ? and timestamp_ms < ?
 group by bucket_index
