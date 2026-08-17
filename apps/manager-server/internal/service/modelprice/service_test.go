@@ -224,7 +224,7 @@ func TestPriceMutationsNotifyPricingRollup(t *testing.T) {
 	t.Cleanup(modelsDev.Close)
 
 	modelsDevURL := modelsDev.URL
-	service := NewMultiSourceWithModelsDev(st, &modelsDevURL, nil, nil)
+	service := NewMultiSourceWithModelsDev(st, &modelsDevURL, nil, nil, nil)
 	var notifications atomic.Int32
 	service.SetPricesChangedNotifier(func() {
 		notifications.Add(1)
@@ -439,7 +439,7 @@ func TestModelsDevCacheFailureFallsBackWithoutStalePrices(t *testing.T) {
 
 	modelsDevURL := modelsDev.URL
 	liteLLMURL := liteLLM.URL
-	service := NewMultiSourceWithModelsDev(nil, &modelsDevURL, &liteLLMURL, nil)
+	service := NewMultiSourceWithModelsDev(nil, &modelsDevURL, &liteLLMURL, nil, nil)
 	prices, _, sources, _, err := service.fetchAllModelPrices(context.Background(), modelsDev.Client(), []string{"gpt-test"})
 	if err != nil {
 		t.Fatalf("prime models.dev source: %v", err)
@@ -485,7 +485,7 @@ func TestFetchAllModelPricesFallsBackWhenPreferredSourceHangs(t *testing.T) {
 
 	modelsDevURL := modelsDev.URL
 	liteLLMURL := liteLLM.URL
-	service := NewMultiSourceWithModelsDev(nil, &modelsDevURL, &liteLLMURL, nil)
+	service := NewMultiSourceWithModelsDev(nil, &modelsDevURL, &liteLLMURL, nil, nil)
 	service.syncSourceTimeout = 25 * time.Millisecond
 
 	startedAt := time.Now()
@@ -576,7 +576,7 @@ func TestSyncPreservesLastKnownModelsDevPriceDuringPreferredSourceFailure(t *tes
 
 	modelsDevURL := modelsDev.URL
 	liteLLMURL := liteLLM.URL
-	service := NewMultiSourceWithModelsDev(st, &modelsDevURL, &liteLLMURL, nil)
+	service := NewMultiSourceWithModelsDev(st, &modelsDevURL, &liteLLMURL, nil, nil)
 	result, err := service.Sync(ctx, SyncRequest{Models: []string{"gpt-test", "fallback-only"}})
 	if err != nil {
 		t.Fatalf("sync with preferred source outage: %v", err)
@@ -636,7 +636,7 @@ func TestSyncTreatsUnusableModelsDevResponseAsFailureAndReportsAllPreservedPrice
 
 	modelsDevURL := modelsDev.URL
 	liteLLMURL := liteLLM.URL
-	service := NewMultiSourceWithModelsDev(st, &modelsDevURL, &liteLLMURL, nil)
+	service := NewMultiSourceWithModelsDev(st, &modelsDevURL, &liteLLMURL, nil, nil)
 	result, err := service.Sync(ctx, SyncRequest{Models: []string{"gpt-test", "rare-model"}})
 	if err != nil {
 		t.Fatalf("sync with unusable preferred response: %v", err)
@@ -670,7 +670,7 @@ func TestSyncAllSourceFailuresLeaveExistingPricesUnchanged(t *testing.T) {
 	t.Cleanup(failing.Close)
 	modelsDevURL := failing.URL
 	liteLLMURL := failing.URL
-	service := NewMultiSourceWithModelsDev(st, &modelsDevURL, &liteLLMURL, nil)
+	service := NewMultiSourceWithModelsDev(st, &modelsDevURL, &liteLLMURL, nil, nil)
 	if _, err := service.Sync(ctx, SyncRequest{Models: []string{"existing"}}); err == nil ||
 		!strings.Contains(err.Error(), "existing prices were not changed") {
 		t.Fatalf("all-source failure error = %v", err)
@@ -808,7 +808,7 @@ func TestModelsDevAmbiguityContinuesToLowerPriorityFallback(t *testing.T) {
 
 	modelsDevURL := modelsDev.URL
 	liteLLMURL := liteLLM.URL
-	service := NewMultiSourceWithModelsDev(nil, &modelsDevURL, &liteLLMURL, nil)
+	service := NewMultiSourceWithModelsDev(nil, &modelsDevURL, &liteLLMURL, nil, nil)
 	prices, _, sources, _, err := service.fetchAllModelPrices(context.Background(), modelsDev.Client(), nil)
 	if err != nil {
 		t.Fatalf("fetch all prices: %v", err)
@@ -867,6 +867,58 @@ func TestLiteLLMAmbiguityContinuesToOpenRouter(t *testing.T) {
 	price, ok := selection.Prices["shared"]
 	if !ok || price.Source != SyncSourceOpenRouter || price.SourceModelID != "shared" || price.Prompt != 3 {
 		t.Fatalf("OpenRouter fallback selection = %#v", selection)
+	}
+}
+
+func TestOpenRouterFallbackContinuesToOrcaRouter(t *testing.T) {
+	syncURL := "https://example.test/prices"
+	service := &Service{syncSources: []priceSyncSource{
+		{
+			Source: SyncSourceModelsDev,
+			URL:    &syncURL,
+			Fetch: wrapModelPriceMapFetcher(func(context.Context, string, *http.Client) (map[string]store.ModelPrice, int, error) {
+				return map[string]store.ModelPrice{}, 0, nil
+			}),
+		},
+		{
+			Source: SyncSourceLiteLLM,
+			URL:    &syncURL,
+			Fetch: wrapModelPriceMapFetcher(func(context.Context, string, *http.Client) (map[string]store.ModelPrice, int, error) {
+				return map[string]store.ModelPrice{
+					"provider-a/shared": {Prompt: 1, SourceModelID: "provider-a/shared"},
+					"provider-b/shared": {Prompt: 2, SourceModelID: "provider-b/shared"},
+				}, 0, nil
+			}),
+		},
+		{
+			Source: SyncSourceOpenRouter,
+			URL:    &syncURL,
+			Fetch: wrapModelPriceMapFetcher(func(context.Context, string, *http.Client) (map[string]store.ModelPrice, int, error) {
+				return map[string]store.ModelPrice{}, 0, nil
+			}),
+		},
+		{
+			Source: SyncSourceOrcaRouter,
+			URL:    &syncURL,
+			Fetch: wrapModelPriceMapFetcher(func(context.Context, string, *http.Client) (map[string]store.ModelPrice, int, error) {
+				return map[string]store.ModelPrice{
+					"shared": {Prompt: 4, SourceModelID: "shared"},
+				}, 0, nil
+			}),
+		},
+	}}
+
+	prices, _, sources, _, err := service.fetchAllModelPrices(context.Background(), nil, []string{"shared"})
+	if err != nil {
+		t.Fatalf("fetch model prices: %v", err)
+	}
+	if got := strings.Join(sources, ","); got != "models.dev,litellm,openrouter,orcarouter" {
+		t.Fatalf("sources = %q", got)
+	}
+	selection := selectModelPriceCollection(prices, []string{"shared"})
+	price, ok := selection.Prices["shared"]
+	if !ok || price.Source != SyncSourceOrcaRouter || price.SourceModelID != "shared" || price.Prompt != 4 {
+		t.Fatalf("OrcaRouter fallback selection = %#v", selection)
 	}
 }
 
@@ -1125,6 +1177,41 @@ func TestFetchOpenRouterModelPrices(t *testing.T) {
 	}
 	if !closePrice(price.Prompt, 1) || !closePrice(price.Completion, 2) || !closePrice(price.Cache, 0.25) ||
 		!price.PromptConfigured || !price.CompletionConfigured || !price.CacheReadConfigured || price.CacheCreationConfigured {
+		t.Fatalf("price = %#v", price)
+	}
+}
+
+func TestFetchOrcaRouterModelPrices(t *testing.T) {
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"data": [
+				{
+					"id": "openai/gpt-test",
+					"pricing": {
+						"prompt": "0.000001",
+						"completion": "0.000002"
+					}
+				},
+				{"id": "skip-no-pricing"}
+			]
+		}`))
+	}))
+	t.Cleanup(source.Close)
+
+	prices, skipped, err := fetchOrcaRouterModelPrices(context.Background(), source.URL, source.Client())
+	if err != nil {
+		t.Fatalf("fetch orcarouter prices: %v", err)
+	}
+	if skipped != 1 {
+		t.Fatalf("skipped = %d", skipped)
+	}
+	price := prices["openai/gpt-test"]
+	if price.Source != SyncSourceOrcaRouter || price.SourceModelID != "openai/gpt-test" {
+		t.Fatalf("source metadata = %#v", price)
+	}
+	if !closePrice(price.Prompt, 1) || !closePrice(price.Completion, 2) ||
+		!price.PromptConfigured || !price.CompletionConfigured || price.CacheReadConfigured || price.CacheCreationConfigured {
 		t.Fatalf("price = %#v", price)
 	}
 }

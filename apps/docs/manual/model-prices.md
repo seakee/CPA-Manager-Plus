@@ -11,19 +11,19 @@ description: 配置 CPA Manager Plus 模型价格、service tier、长上下文�
 
 ## 价格来源
 
-- 首选从 models.dev 主动同步的公开元数据；当该来源不可用或缺少模型时，再使用 LiteLLM 和 OpenRouter 回退。
+- 首选从 models.dev 主动同步的公开元数据；当该来源不可用或缺少模型时，再使用 LiteLLM、OpenRouter 和 OrcaRouter 回退。
 - 用户手动添加或覆盖的本地价格。
 - 为模型别名、内部名称或 Provider 特定变体维护的条目。
 
 同步只在用户主动触发时发生，可能使用当前 Manager Server 代理设置。
 
-自动匹配会严格按 models.dev、LiteLLM、OpenRouter 的顺序进行。CPAMP 使用 models.dev catalog 的规范模型元数据优先识别第一方官方条目；每个来源都只有唯一、明确的模型身份匹配才会自动保存，模糊相似项不会自动确认。某个来源存在歧义时会继续尝试下一来源；三个来源都无法唯一确认时，待确认列表会分别保留各来源的候选，即使它们的原始模型 ID 相同也不会互相覆盖。
+自动匹配会严格按 models.dev、LiteLLM、OpenRouter、OrcaRouter 的顺序进行。CPAMP 使用 models.dev catalog 的规范模型元数据优先识别第一方官方条目；每个来源都只有唯一、明确的模型身份匹配才会自动保存，模糊相似项不会自动确认。某个来源存在歧义时会继续尝试下一来源；四个来源都无法唯一确认时，待确认列表会分别保留各来源的候选，即使它们的原始模型 ID 相同也不会互相覆盖。
 
 当前同步会映射 models.dev 的 `cost.input`、`cost.output`、`cost.cache_read` 和 `cost.cache_write`，将有效的 `cost.tiers` 上下文阶梯转换为 CPAMP 计费规则，并将 `experimental.modes.fast.cost` 映射为 Fast/Priority 短上下文价格。完整模型对象仍保存在原始元数据中；reasoning、未知实验模式、未知阶梯类型或无法安全验证的规则不会激活自动计费。
 
 ### 同步失败与最后有效价格
 
-- models.dev 暂时不可用时，CPAMP 会继续尝试 LiteLLM 和 OpenRouter。
+- models.dev 暂时不可用时，CPAMP 会继续尝试 LiteLLM、OpenRouter 和 OrcaRouter。
 - 已保存的 models.dev 价格不会因为本次网络失败而被低优先级来源自动覆盖；回退来源仍可补充本地没有价格的模型。
 - models.dev 成功响应但缺少官方条目或匹配存在歧义时，会按顺序尝试回退来源；只有唯一的强身份匹配才会替换该模型。
 - 如果所有来源都失败，同步在写入数据库前终止，现有价格保持不变。

@@ -20,6 +20,7 @@ const serviceID = "cpa-manager-plus"
 var modelsDevModelPriceSyncURL = "https://models.dev/catalog.json"
 var modelPriceSyncURL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 var openRouterModelPriceSyncURL = "https://openrouter.ai/api/v1/models"
+var orcaRouterModelPriceSyncURL = "https://api.orcarouter.ai/v1/models"
 
 type Server struct {
 	handler http.Handler
@@ -37,6 +38,7 @@ func New(cfg config.Config, store *store.Store, collector *collector.Manager, au
 		&modelsDevModelPriceSyncURL,
 		&modelPriceSyncURL,
 		&openRouterModelPriceSyncURL,
+		&orcaRouterModelPriceSyncURL,
 		serviceID,
 		automationRuntimeService...,
 	)

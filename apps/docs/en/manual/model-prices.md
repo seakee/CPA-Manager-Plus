@@ -11,19 +11,19 @@ Open the [Model Prices Demo](https://seakee.github.io/CPA-Manager-Plus/#/demo/mo
 
 ## Price Sources
 
-- Public metadata synchronized from models.dev first, with LiteLLM and OpenRouter used as fallbacks when the preferred source is unavailable or lacks a model.
+- Public metadata synchronized from models.dev first, with LiteLLM, OpenRouter, and OrcaRouter used as fallbacks when the preferred source is unavailable or lacks a model.
 - Local prices added or overridden by the user.
 - Entries for aliases, internal names, or provider-specific variants.
 
 Synchronization only occurs when the user triggers it and may use the current Manager Server proxy configuration.
 
-Automatic matching runs strictly in models.dev, LiteLLM, then OpenRouter order. CPAMP uses the canonical model metadata in the models.dev catalog to prefer the first-party official entry. A source is saved automatically only when it has one clear, strong identity match; fuzzy similarities are never auto-confirmed. An ambiguous source falls through to the next source. If none of the three sources yields a unique match, the confirmation list keeps candidates from each source separately, even when they share the same original model ID.
+Automatic matching runs strictly in models.dev, LiteLLM, then OpenRouter, then OrcaRouter order. CPAMP uses the canonical model metadata in the models.dev catalog to prefer the first-party official entry. A source is saved automatically only when it has one clear, strong identity match; fuzzy similarities are never auto-confirmed. An ambiguous source falls through to the next source. If none of the four sources yields a unique match, the confirmation list keeps candidates from each source separately, even when they share the same original model ID.
 
 The current sync maps models.dev `cost.input`, `cost.output`, `cost.cache_read`, and `cost.cache_write`, converts valid `cost.tiers` context tiers into CPAMP billing rules, and maps `experimental.modes.fast.cost` to short-context Fast/Priority prices. The complete model object remains available in raw metadata; reasoning prices, unknown experimental modes, unknown tier types, and rules that cannot be validated safely do not activate automatic billing.
 
 ### Sync failures and last-known-good prices
 
-- When models.dev is temporarily unavailable, CPAMP continues with LiteLLM and OpenRouter.
+- When models.dev is temporarily unavailable, CPAMP continues with LiteLLM, OpenRouter, and OrcaRouter.
 - A transient models.dev failure cannot automatically replace a stored models.dev price with a lower-priority source; fallback sources may still fill models that have no local price.
 - When models.dev responds successfully but has no official entry or remains ambiguous, fallback sources are tried in order; only a unique strong identity match may replace the model.
 - If every source fails, synchronization stops before any database write and existing prices remain unchanged.

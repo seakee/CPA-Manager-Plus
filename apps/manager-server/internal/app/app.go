@@ -18,6 +18,7 @@ type Options struct {
 	ModelsDevModelPriceSyncURL  *string
 	ModelPriceSyncURL           *string
 	OpenRouterModelPriceSyncURL *string
+	OrcaRouterModelPriceSyncURL *string
 	ServiceID                   string
 	StartedAt                   int64
 }
@@ -61,6 +62,7 @@ func New(ctx context.Context, cfg config.Config, options Options) (*Context, err
 		options.ModelsDevModelPriceSyncURL,
 		options.ModelPriceSyncURL,
 		options.OpenRouterModelPriceSyncURL,
+		options.OrcaRouterModelPriceSyncURL,
 		serviceID,
 	)
 	appCtx.Bootstrap = bootstrapResult

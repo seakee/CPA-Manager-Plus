@@ -77,7 +77,7 @@ See [Choosing A CPA Panel](https://seakee.github.io/CPA-Manager-Plus/docs/en/gui
 
 - Break down calls, tokens, cost, latency, and failures by model, provider, account, credential, API key, project, channel, and time range.
 - Track input, output, reasoning, cache, service tier, and long-context pricing semantics.
-- Sync model prices from models.dev first, with LiteLLM and OpenRouter fallbacks plus local overrides for aliases or internal models.
+- Sync model prices from models.dev first, with LiteLLM, OpenRouter, and OrcaRouter fallbacks plus local overrides for aliases or internal models.
 - Open the [Usage Analytics Demo](https://seakee.github.io/CPA-Manager-Plus/#/demo/usage-analytics).
 
 ### Account Health, Quota, And Automation

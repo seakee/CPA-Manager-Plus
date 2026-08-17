@@ -77,7 +77,7 @@ CPA / CLIProxyAPI 可以在 `:8317` 直接托管官方 Management Center，也�
 
 - 按模型、Provider、账号、认证文件、API Key、项目、渠道和时间范围拆解请求、Token、成本、延迟和失败。
 - 追踪 input、output、reasoning、cache、service tier 和长上下文计费语义。
-- 从 LiteLLM 和 OpenRouter 同步模型价格，并为别名或内部模型保留本地覆盖。
+- 从 LiteLLM、OpenRouter 和 OrcaRouter 同步模型价格，并为别名或内部模型保留本地覆盖。
 - 打开 [用量分析演示](https://seakee.github.io/CPA-Manager-Plus/#/demo/usage-analytics)。
 
 ### 账号健康、配额与自动化

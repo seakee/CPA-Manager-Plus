@@ -24,6 +24,7 @@ const (
 	SyncSourceModelsDev  = "models.dev"
 	SyncSourceLiteLLM    = "litellm"
 	SyncSourceOpenRouter = "openrouter"
+	SyncSourceOrcaRouter = "orcarouter"
 	SyncSourceMulti      = "multi"
 
 	// SyncSource is kept for existing tests and callers that still refer to the
@@ -209,7 +210,7 @@ func New(store *store.Store, syncURL *string, setupResolver ...SetupResolver) *S
 }
 
 func NewMultiSource(store *store.Store, liteLLMSyncURL *string, openRouterSyncURL *string, setupResolver ...SetupResolver) *Service {
-	return newMultiSource(store, nil, liteLLMSyncURL, openRouterSyncURL, setupResolver...)
+	return newMultiSource(store, nil, liteLLMSyncURL, openRouterSyncURL, nil, setupResolver...)
 }
 
 // NewMultiSourceWithModelsDev creates the production source chain. models.dev
@@ -220,9 +221,10 @@ func NewMultiSourceWithModelsDev(
 	modelsDevSyncURL *string,
 	liteLLMSyncURL *string,
 	openRouterSyncURL *string,
+	orcaRouterSyncURL *string,
 	setupResolver ...SetupResolver,
 ) *Service {
-	return newMultiSource(store, modelsDevSyncURL, liteLLMSyncURL, openRouterSyncURL, setupResolver...)
+	return newMultiSource(store, modelsDevSyncURL, liteLLMSyncURL, openRouterSyncURL, orcaRouterSyncURL, setupResolver...)
 }
 
 func newMultiSource(
@@ -230,13 +232,14 @@ func newMultiSource(
 	modelsDevSyncURL *string,
 	liteLLMSyncURL *string,
 	openRouterSyncURL *string,
+	orcaRouterSyncURL *string,
 	setupResolver ...SetupResolver,
 ) *Service {
 	var resolver SetupResolver
 	if len(setupResolver) > 0 {
 		resolver = setupResolver[0]
 	}
-	sources := make([]priceSyncSource, 0, 3)
+	sources := make([]priceSyncSource, 0, 4)
 	if modelsDevSyncURL != nil && strings.TrimSpace(*modelsDevSyncURL) != "" {
 		modelsDevCache := &modelsDevPriceCache{}
 		sources = append(sources, priceSyncSource{
@@ -255,6 +258,13 @@ func newMultiSource(
 			Source: SyncSourceOpenRouter,
 			URL:    openRouterSyncURL,
 			Fetch:  wrapModelPriceMapFetcher(fetchOpenRouterModelPrices),
+		})
+	}
+	if orcaRouterSyncURL != nil {
+		sources = append(sources, priceSyncSource{
+			Source: SyncSourceOrcaRouter,
+			URL:    orcaRouterSyncURL,
+			Fetch:  wrapModelPriceMapFetcher(fetchOrcaRouterModelPrices),
 		})
 	}
 	return &Service{
@@ -902,6 +912,23 @@ func fetchLiteLLMModelPrices(ctx context.Context, syncURL string, client *http.C
 }
 
 func fetchOpenRouterModelPrices(ctx context.Context, syncURL string, client *http.Client) (map[string]store.ModelPrice, int, error) {
+	return fetchPricingListModelPrices(ctx, syncURL, client, SyncSourceOpenRouter)
+}
+
+// fetchOrcaRouterModelPrices loads OrcaRouter's public model catalog
+// (https://api.orcarouter.ai/v1/models), which uses the same
+// {data: [{id, pricing: {prompt, completion, ...}}]} wire shape as the
+// OpenRouter source. OrcaRouter prices are per-token strings, same as
+// OpenRouter's; cache-read/write rates are simply absent until the upstream
+// exposes them, so those fields stay unset rather than being guessed.
+func fetchOrcaRouterModelPrices(ctx context.Context, syncURL string, client *http.Client) (map[string]store.ModelPrice, int, error) {
+	return fetchPricingListModelPrices(ctx, syncURL, client, SyncSourceOrcaRouter)
+}
+
+// fetchPricingListModelPrices is shared by the OpenRouter and OrcaRouter
+// sources: both expose a /v1/models-style list where each entry carries an
+// "id" and a "pricing" object with per-token cost strings.
+func fetchPricingListModelPrices(ctx context.Context, syncURL string, client *http.Client, source string) (map[string]store.ModelPrice, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, syncURL, nil)
 	if err != nil {
 		return nil, 0, errors.New("model price sync failed: " + err.Error())
@@ -954,7 +981,7 @@ func fetchOpenRouterModelPrices(ctx context.Context, syncURL string, client *htt
 			CompletionConfigured:    hasCompletion,
 			CacheReadConfigured:     hasCacheRead,
 			CacheCreationConfigured: hasCacheCreation,
-			Source:                  SyncSourceOpenRouter,
+			Source:                  source,
 			SourceModelID:           modelID,
 			RawJSON:                 string(rawEntry),
 			UpdatedAtMS:             now,
@@ -1279,8 +1306,10 @@ func modelPriceSourcePriority(source string) int {
 		return 1
 	case SyncSourceOpenRouter:
 		return 2
-	default:
+	case SyncSourceOrcaRouter:
 		return 3
+	default:
+		return 4
 	}
 }
 

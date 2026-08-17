@@ -85,17 +85,26 @@ func stubModelPriceSyncURLs(t *testing.T, liteLLMURL string, openRouterURL strin
 	oldModelsDevURL := modelsDevModelPriceSyncURL
 	oldLiteLLMURL := modelPriceSyncURL
 	oldOpenRouterURL := openRouterModelPriceSyncURL
+	oldOrcaRouterURL := orcaRouterModelPriceSyncURL
 	modelsDevURL := ""
+	orcaRouterURL := ""
 	if len(modelsDevURLs) > 0 {
 		modelsDevURL = modelsDevURLs[0]
+	}
+	if len(modelsDevURLs) > 1 {
+		orcaRouterURL = modelsDevURLs[1]
 	}
 	modelsDevModelPriceSyncURL = modelsDevURL
 	modelPriceSyncURL = liteLLMURL
 	openRouterModelPriceSyncURL = openRouterURL
+	// Stub the OrcaRouter source too so tests never reach the real
+	// endpoint; an empty URL fails the source like any other missing URL.
+	orcaRouterModelPriceSyncURL = orcaRouterURL
 	t.Cleanup(func() {
 		modelsDevModelPriceSyncURL = oldModelsDevURL
 		modelPriceSyncURL = oldLiteLLMURL
 		openRouterModelPriceSyncURL = oldOpenRouterURL
+		orcaRouterModelPriceSyncURL = oldOrcaRouterURL
 	})
 }
 

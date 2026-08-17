@@ -86,6 +86,7 @@ func FromExisting(
 		nil,
 		modelPriceSyncURL,
 		openRouterModelPriceSyncURL,
+		nil,
 		serviceID,
 		automationRuntimeService...,
 	)
@@ -100,6 +101,7 @@ func FromExistingWithModelsDev(
 	modelsDevModelPriceSyncURL *string,
 	modelPriceSyncURL *string,
 	openRouterModelPriceSyncURL *string,
+	orcaRouterModelPriceSyncURL *string,
 	serviceID string,
 	automationRuntimeService ...AutomationRuntimeService,
 ) *Context {
@@ -112,6 +114,7 @@ func FromExistingWithModelsDev(
 		modelsDevModelPriceSyncURL,
 		modelPriceSyncURL,
 		openRouterModelPriceSyncURL,
+		orcaRouterModelPriceSyncURL,
 		serviceID,
 		automationRuntimeService...,
 	)
@@ -126,6 +129,7 @@ func fromExisting(
 	modelsDevModelPriceSyncURL *string,
 	modelPriceSyncURL *string,
 	openRouterModelPriceSyncURL *string,
+	orcaRouterModelPriceSyncURL *string,
 	serviceID string,
 	automationRuntimeService ...AutomationRuntimeService,
 ) *Context {
@@ -167,7 +171,7 @@ func fromExisting(
 		),
 		MonitoringService:    monitoringsvc.New(st, cfg.DashboardHourlyRollupEnabled),
 		QuotaSnapshotService: quotasnapshotsvc.New(st),
-		ModelPriceService:    modelpricesvc.NewMultiSourceWithModelsDev(st, modelsDevModelPriceSyncURL, modelPriceSyncURL, openRouterModelPriceSyncURL, managerConfigService),
+		ModelPriceService:    modelpricesvc.NewMultiSourceWithModelsDev(st, modelsDevModelPriceSyncURL, modelPriceSyncURL, openRouterModelPriceSyncURL, orcaRouterModelPriceSyncURL, managerConfigService),
 		APIKeyAliasService:   apikeyaliassvc.New(st),
 		AccountActionService: accountactionsvc.NewWithMutationCoordinator(
 			st,
