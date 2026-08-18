@@ -28,6 +28,22 @@ Windows PowerShell：
 .\cpa-manager-plusctl.ps1 stop
 ```
 
+首次启用受管备份更新：
+
+```bash
+./cpa-manager-plusctl enable-updates
+./cpa-manager-plusctl restart
+```
+
+Windows：
+
+```powershell
+.\cpa-manager-plusctl.ps1 enable-updates
+.\cpa-manager-plusctl.ps1 restart
+```
+
+请先不带额外 `start` 参数启动服务；端口和数据路径等设置应放在 `config.json` 或环境变量中。命令会创建私有的 `.update/install.json`。只有固定目录、默认受管文件名和安全数据布局会在面板中显示“备份并更新”。详细边界和恢复流程见[更新 CPAMP](../operations/update.md#面板内备份并更新)。
+
 `logs [lines]` 只接受正整数行数。`logs -f` 和 `logs --follow` 会持续跟随当前日志输出。
 
 ## 运行文件

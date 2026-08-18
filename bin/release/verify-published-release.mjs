@@ -26,6 +26,7 @@ export const expectedReleaseAssetNames = (tag) => {
     `${prefix}_windows_amd64.zip`,
     `${prefix}_windows_arm64.zip`,
     'management.html',
+    'update-manifest.json',
   ].sort((left, right) => left.localeCompare(right));
 };
 

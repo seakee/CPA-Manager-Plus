@@ -28,6 +28,22 @@ Windows PowerShell:
 .\cpa-manager-plusctl.ps1 stop
 ```
 
+To enroll this fixed native package in managed backup updates:
+
+```bash
+./cpa-manager-plusctl enable-updates
+./cpa-manager-plusctl restart
+```
+
+Windows:
+
+```powershell
+.\cpa-manager-plusctl.ps1 enable-updates
+.\cpa-manager-plusctl.ps1 restart
+```
+
+Start the service without additional `start` arguments first; put ports, data paths, and similar settings in `config.json` or environment variables. The command creates a private `.update/install.json`. The Dashboard exposes “Backup & update” only for a fixed directory with managed filenames and a safe data layout. See [Upgrade CPAMP](../operations/update.md#in-panel-backup-and-update) for the support boundary and recovery behavior.
+
 `logs [lines]` accepts only a positive integer line count. `logs -f` and `logs --follow` follow the current log stream.
 
 ## Runtime Files

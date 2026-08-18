@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { Button } from '@/components/ui/Button';
+import { Modal } from '@/components/ui/Modal';
 import {
   IconCheck,
   IconExternalLink,
@@ -12,14 +13,22 @@ import {
   IconSatellite,
   IconSettings,
   IconTimer,
+  IconDownload,
 } from '@/components/ui/icons';
 import { useNotificationStore } from '@/stores';
-import { versionApi } from '@/services/api';
+import {
+  managedUpdateApi,
+  versionApi,
+  type ManagedUpdateCapability,
+  type ManagedUpdateCheck,
+  type ManagedUpdateStatus,
+} from '@/services/api';
 import type { UsageServiceStatus } from '@/services/api/usageService';
 import type { ConnectionStatus } from '@/types';
 import { compareVersions, type VersionComparison } from '@/utils/version';
 import { readApiLatestVersion, readManagerLatestTag } from '@/features/system/versionChecks';
 import { buildDashboardVersionReleaseURL } from '@/features/dashboard/versionReleaseLinks';
+import { shouldRestoreManagedUpdateStatus } from '../managedUpdateState';
 import styles from './VersionCard.module.scss';
 
 interface VersionCardProps {
@@ -37,10 +46,12 @@ interface VersionCardProps {
   collectorError?: string;
   errorLogCount: number;
   errorLogsLoading: boolean;
+  managerEmbedded: boolean;
 }
 
 interface LatestVersions {
   latestApp: string;
+  latestAppUrl: string;
   latestApi: string;
 }
 
@@ -101,12 +112,23 @@ export function VersionCard({
   collectorError,
   errorLogCount,
   errorLogsLoading,
+  managerEmbedded,
 }: VersionCardProps) {
   const { t, i18n } = useTranslation();
   const showNotification = useNotificationStore((state) => state.showNotification);
-  const [latest, setLatest] = useState<LatestVersions>({ latestApp: '', latestApi: '' });
+  const [latest, setLatest] = useState<LatestVersions>({
+    latestApp: '',
+    latestAppUrl: '',
+    latestApi: '',
+  });
   const [checkingAppVersion, setCheckingAppVersion] = useState(false);
   const [checkingApiVersion, setCheckingApiVersion] = useState(false);
+  const [updateCapability, setUpdateCapability] = useState<ManagedUpdateCapability | null>(null);
+  const [updateCheck, setUpdateCheck] = useState<ManagedUpdateCheck | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<ManagedUpdateStatus | null>(null);
+  const [updateModalOpen, setUpdateModalOpen] = useState(false);
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const applyInitiatedRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -114,7 +136,10 @@ export function VersionCard({
     const tasks: Array<Promise<Partial<LatestVersions>>> = [
       versionApi
         .checkManagerLatest()
-        .then((data) => ({ latestApp: readManagerLatestTag(data) }))
+        .then((data) => ({
+          latestApp: readManagerLatestTag(data),
+          latestAppUrl: typeof data.html_url === 'string' ? data.html_url : '',
+        }))
         .catch(() => ({})),
     ];
 
@@ -129,13 +154,11 @@ export function VersionCard({
 
     Promise.all(tasks).then((results) => {
       if (cancelled) return;
-      const merged = results.reduce<LatestVersions>(
-        (acc, partial) => ({
-          latestApp: partial.latestApp ?? acc.latestApp,
-          latestApi: partial.latestApi ?? acc.latestApi,
-        }),
-        { latestApp: '', latestApi: '' }
-      );
+      const merged = results.reduce<LatestVersions>((acc, partial) => ({ ...acc, ...partial }), {
+        latestApp: '',
+        latestAppUrl: '',
+        latestApi: '',
+      });
       setLatest(merged);
     });
 
@@ -144,13 +167,119 @@ export function VersionCard({
     };
   }, [connectionStatus, refreshSignal]);
 
+  useEffect(() => {
+    let cancelled = false;
+    if (!managerEmbedded || connectionStatus !== 'connected') {
+      setUpdateCapability(null);
+      setUpdateCheck(null);
+      setUpdateStatus(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    managedUpdateApi
+      .capability()
+      .then(async (capability) => {
+        if (cancelled) return;
+        setUpdateCapability(capability);
+        if (!capability.supported) return;
+        const [check, status] = await Promise.all([
+          managedUpdateApi.check().catch(() => null),
+          managedUpdateApi.status().catch(() => null),
+        ]);
+        if (cancelled) return;
+        setUpdateCheck(check);
+        if (status?.found) {
+          setUpdateStatus(
+            shouldRestoreManagedUpdateStatus(check, status.status) ? status.status : null
+          );
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setUpdateCapability(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [connectionStatus, managerEmbedded, refreshSignal]);
+
+  useEffect(() => {
+    if (
+      !updateModalOpen ||
+      !updateStatus ||
+      ['succeeded', 'rolled_back', 'failed', 'manual_recovery_required'].includes(
+        updateStatus.state
+      )
+    ) {
+      return;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const response = await managedUpdateApi.status();
+        if (!cancelled && response.found) setUpdateStatus(response.status);
+      } catch {
+        // The service is expected to disappear briefly while the detached updater switches versions.
+      }
+    };
+    const timer = window.setInterval(() => void poll(), 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [updateModalOpen, updateStatus]);
+
+  useEffect(() => {
+    if (updateStatus?.state !== 'succeeded' || !applyInitiatedRef.current) return;
+    applyInitiatedRef.current = false;
+    showNotification(t('dashboard.managed_update_succeeded_reload'), 'success', 4000);
+    const timer = window.setTimeout(() => window.location.reload(), 800);
+    return () => window.clearTimeout(timer);
+  }, [showNotification, t, updateStatus?.state]);
+
+  const handlePrepareUpdate = useCallback(async () => {
+    setUpdateBusy(true);
+    try {
+      const status = await managedUpdateApi.plan();
+      setUpdateStatus(status);
+      showNotification(t('dashboard.managed_update_prepared'), 'success');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : t('dashboard.managed_update_failed');
+      showNotification(message, 'error');
+    } finally {
+      setUpdateBusy(false);
+    }
+  }, [showNotification, t]);
+
+  const handleApplyUpdate = useCallback(async () => {
+    setUpdateBusy(true);
+    try {
+      applyInitiatedRef.current = true;
+      const status = await managedUpdateApi.apply();
+      setUpdateStatus(status);
+      showNotification(t('dashboard.managed_update_restarting'), 'info', 8000);
+    } catch (error) {
+      applyInitiatedRef.current = false;
+      const message = error instanceof Error ? error.message : t('dashboard.managed_update_failed');
+      showNotification(message, 'error');
+    } finally {
+      setUpdateBusy(false);
+    }
+  }, [showNotification, t]);
+
   const handleAppVersionCheck = useCallback(async () => {
     setCheckingAppVersion(true);
     try {
       const data = await versionApi.checkManagerLatest();
       const latestApp = readManagerLatestTag(data);
       const comparison = compareVersions(latestApp, appVersion);
-      setLatest((prev) => ({ ...prev, latestApp }));
+      setLatest((prev) => ({
+        ...prev,
+        latestApp,
+        latestAppUrl: typeof data.html_url === 'string' ? data.html_url : '',
+      }));
 
       if (!latestApp) {
         showNotification(t('system_info.manager_version_check_error'), 'error');
@@ -171,7 +300,8 @@ export function VersionCard({
         showNotification(t('system_info.manager_version_is_latest'), 'success');
       }
     } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+      const message =
+        error instanceof Error ? error.message : typeof error === 'string' ? error : '';
       const suffix = message ? `: ${message}` : '';
       showNotification(`${t('system_info.manager_version_check_error')}${suffix}`, 'error');
     } finally {
@@ -198,12 +328,16 @@ export function VersionCard({
       }
 
       if (comparison > 0) {
-        showNotification(t('system_info.version_update_available', { version: latestApi }), 'warning');
+        showNotification(
+          t('system_info.version_update_available', { version: latestApi }),
+          'warning'
+        );
       } else {
         showNotification(t('system_info.version_is_latest'), 'success');
       }
     } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+      const message =
+        error instanceof Error ? error.message : typeof error === 'string' ? error : '';
       const suffix = message ? `: ${message}` : '';
       showNotification(`${t('system_info.version_check_error')}${suffix}`, 'error');
     } finally {
@@ -278,7 +412,8 @@ export function VersionCard({
           }
         : {
             label: t('dashboard.collector_status_title'),
-            value: collectorLoading && !collectorStatus ? '...' : t('dashboard.health_status_normal'),
+            value:
+              collectorLoading && !collectorStatus ? '...' : t('dashboard.health_status_normal'),
             tone: collectorLoading && !collectorStatus ? 'muted' : 'ok',
             icon: <IconCheck size={16} />,
           };
@@ -299,7 +434,9 @@ export function VersionCard({
         }
       : {
           label: t('dashboard.health_queue_status'),
-          value: collector?.queue || (collectorLoading && !collectorStatus ? '...' : t('dashboard.health_status_normal')),
+          value:
+            collector?.queue ||
+            (collectorLoading && !collectorStatus ? '...' : t('dashboard.health_status_normal')),
           tone: collectorLoading && !collectorStatus ? 'muted' : 'ok',
           icon: <IconCheck size={16} />,
         };
@@ -317,6 +454,26 @@ export function VersionCard({
   };
 
   const healthItems = [usageState, collectorState, queueState, errorLogState];
+  const activeUpdateVisible = updateStatus
+    ? !['succeeded', 'failed'].includes(updateStatus.state)
+    : false;
+  const managedUpdateVisible =
+    updateCapability?.supported === true &&
+    ((updateCheck?.updateAvailable === true && updateCheck.installable === true) ||
+      activeUpdateVisible);
+  const staged = updateStatus?.state === 'staged';
+  const updateTerminal = updateStatus
+    ? ['succeeded', 'rolled_back', 'failed', 'manual_recovery_required'].includes(
+        updateStatus.state
+      )
+    : false;
+  const canPrepareUpdate = !updateStatus || ['failed', 'rolled_back'].includes(updateStatus.state);
+  const displayedAppBadge =
+    managedUpdateVisible && updateCheck ? renderBadge(1, updateCheck.latestVersion, t) : appBadge;
+  const manualReleaseVisible =
+    !managedUpdateVisible &&
+    compareVersions(latest.latestApp, appVersion) === 1 &&
+    latest.latestAppUrl.startsWith('https://github.com/seakee/CPA-Manager-Plus/releases/');
 
   return (
     <div className={styles.container}>
@@ -324,7 +481,9 @@ export function VersionCard({
         <h2 className={styles.heading}>{t('dashboard.system_overview')}</h2>
         <div className={`${styles.grid} ${styles.systemGrid}`}>
           <div className={styles.item}>
-            <div className={styles.icon}><IconSettings size={18} /></div>
+            <div className={styles.icon}>
+              <IconSettings size={18} />
+            </div>
             <div className={styles.content}>
               <div className={styles.versionHeader}>
                 <div className={styles.label}>{t('dashboard.app_version')}</div>
@@ -347,15 +506,42 @@ export function VersionCard({
                   appVersion || t('dashboard.version_unknown'),
                   appReleaseUrl
                 )}
-                {appBadge && (
-                  <span className={`${styles.badge} ${appBadge.className}`}>{appBadge.label}</span>
+                {displayedAppBadge && (
+                  <span className={`${styles.badge} ${displayedAppBadge.className}`}>
+                    {displayedAppBadge.label}
+                  </span>
+                )}
+                {managedUpdateVisible && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="xs"
+                    className={styles.updateAction}
+                    onClick={() => setUpdateModalOpen(true)}
+                  >
+                    <IconDownload size={13} />
+                    {t('dashboard.managed_update_action')}
+                  </Button>
+                )}
+                {manualReleaseVisible && (
+                  <a
+                    className={styles.releaseAction}
+                    href={latest.latestAppUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    <IconExternalLink size={13} />
+                    {t('dashboard.managed_update_view_release')}
+                  </a>
                 )}
               </div>
             </div>
           </div>
 
           <div className={styles.item}>
-            <div className={styles.icon}><IconSatellite size={18} /></div>
+            <div className={styles.icon}>
+              <IconSatellite size={18} />
+            </div>
             <div className={styles.content}>
               <div className={styles.versionHeader}>
                 <div className={styles.label}>{t('dashboard.api_version')}</div>
@@ -386,7 +572,9 @@ export function VersionCard({
           </div>
 
           <div className={styles.item}>
-            <div className={styles.icon}><IconTimer size={18} /></div>
+            <div className={styles.icon}>
+              <IconTimer size={18} />
+            </div>
             <div className={styles.content}>
               <div className={styles.label}>{t('dashboard.build_time')}</div>
               <div className={styles.value}>{buildTimeDisplay}</div>
@@ -394,7 +582,9 @@ export function VersionCard({
           </div>
 
           <div className={styles.item}>
-            <div className={styles.icon}><IconExternalLink size={18} /></div>
+            <div className={styles.icon}>
+              <IconExternalLink size={18} />
+            </div>
             <div className={styles.content}>
               <div className={styles.label}>{t('dashboard.cpa_base')}</div>
               <div className={styles.value}>{cpaBase || '-'}</div>
@@ -412,13 +602,19 @@ export function VersionCard({
                 <div className={`${styles.healthIcon} ${styles[item.tone]}`}>{item.icon}</div>
                 <div className={styles.content}>
                   <div className={styles.label}>{item.label}</div>
-                  <div className={`${styles.value} ${styles[`${item.tone}Text`]}`}>{item.value}</div>
+                  <div className={`${styles.value} ${styles[`${item.tone}Text`]}`}>
+                    {item.value}
+                  </div>
                 </div>
               </>
             );
 
             return item.to ? (
-              <Link key={item.label} to={item.to} className={`${styles.healthItem} ${styles.healthLink}`}>
+              <Link
+                key={item.label}
+                to={item.to}
+                className={`${styles.healthItem} ${styles.healthLink}`}
+              >
                 {content}
               </Link>
             ) : (
@@ -430,6 +626,75 @@ export function VersionCard({
         </div>
       </section>
 
+      <Modal
+        open={updateModalOpen}
+        onClose={() => setUpdateModalOpen(false)}
+        title={t('dashboard.managed_update_title')}
+        closeDisabled={updateBusy}
+        width={500}
+        footer={
+          <div className={styles.updateFooter}>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setUpdateModalOpen(false)}
+              disabled={updateBusy}
+            >
+              {t(updateTerminal ? 'common.close' : 'common.cancel')}
+            </Button>
+            {!staged && canPrepareUpdate && (
+              <Button size="sm" onClick={() => void handlePrepareUpdate()} loading={updateBusy}>
+                {t(
+                  updateStatus
+                    ? 'dashboard.managed_update_retry'
+                    : 'dashboard.managed_update_prepare'
+                )}
+              </Button>
+            )}
+            {staged && (
+              <Button
+                size="sm"
+                onClick={() => void handleApplyUpdate()}
+                loading={updateBusy}
+                variant="primary"
+              >
+                {t('dashboard.managed_update_apply')}
+              </Button>
+            )}
+          </div>
+        }
+      >
+        <div className={styles.updateModalBody}>
+          <div className={styles.updateVersionRow}>
+            <span>{t('dashboard.managed_update_version')}</span>
+            <strong>
+              {appVersion || t('dashboard.version_unknown')}
+              <span aria-hidden="true"> → </span>
+              {updateCheck?.latestVersion || t('dashboard.version_unknown')}
+            </strong>
+          </div>
+          <div className={styles.updateNotice}>
+            <IconInfo size={17} />
+            <div>
+              <strong>{t('dashboard.managed_update_notice_title')}</strong>
+              <span>{t('dashboard.managed_update_description')}</span>
+            </div>
+          </div>
+          {updateStatus && (
+            <div
+              className={`${styles.updateStatus} ${styles[`updateStatus_${updateStatus.state}`] || ''}`}
+            >
+              <strong>{t(`dashboard.managed_update_state_${updateStatus.state}`)}</strong>
+              {updateStatus.backupPath && (
+                <span>{t('dashboard.managed_update_backup_created')}</span>
+              )}
+            </div>
+          )}
+          {staged && (
+            <p className={styles.updateWarning}>{t('dashboard.managed_update_apply_warning')}</p>
+          )}
+        </div>
+      </Modal>
     </div>
   );
 }

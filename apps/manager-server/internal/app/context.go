@@ -25,8 +25,10 @@ import (
 	proxysvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/proxy"
 	quotasnapshotsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/quotasnapshot"
 	setupsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/setup"
+	updatesvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/update"
 	usagesvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/usage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
+	updatecore "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/update"
 )
 
 type AutomationRuntimeService interface {
@@ -35,6 +37,10 @@ type AutomationRuntimeService interface {
 
 type DatabaseMaintenanceStatusProvider interface {
 	Snapshot() sqliterepo.WALMaintenanceSnapshot
+}
+
+type ShutdownRequester interface {
+	RequestShutdown() error
 }
 
 type Context struct {
@@ -62,8 +68,10 @@ type Context struct {
 	AuthFileMutationCoordinator    *cpaauthfiles.MutationCoordinator
 	ProxyService                   *proxysvc.Service
 	PanelService                   *panelsvc.Service
+	UpdateService                  *updatesvc.Service
 	AutomationRuntimeService       AutomationRuntimeService
 	DatabaseMaintenance            DatabaseMaintenanceStatusProvider
+	ShutdownRequester              ShutdownRequester
 }
 
 func FromExisting(
@@ -182,6 +190,7 @@ func fromExisting(
 			st,
 		),
 		PanelService:             panelsvc.New(cfg.PanelPath, embeddedPanel),
+		UpdateService:            updatesvc.New(filepath.Join(config.InstallRoot(), ".update", "install.json"), cfg.DataDir, cfg.DBPath, cfg.DataKeyPath, updatecore.ReleaseClient{}),
 		AutomationRuntimeService: runtimeService,
 	}
 }

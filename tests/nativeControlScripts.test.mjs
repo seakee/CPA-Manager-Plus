@@ -70,10 +70,10 @@ const runPowerShellControl = (env, args, options = {}) => {
   }
 };
 
-const spawnPowerShellControl = (env, args) => {
+const spawnPowerShellControl = (env, args, script = windowsControlScript) => {
   const result = spawnSync(
     windowsPowerShell(),
-    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', windowsControlScript, ...args],
+    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, ...args],
     {
       env,
       encoding: 'utf8',
@@ -491,6 +491,7 @@ describe('native control scripts', () => {
       expect(pidRecord.pid).toBeGreaterThan(0);
       expect(pidRecord.startTimeUtc).toBeTruthy();
       expect(pidRecord.binaryPath || pidRecord.commandLine).toBeTruthy();
+      expect(pidRecord.launchArguments).toEqual([childScript]);
 
       runPowerShell([
         '-Command',
@@ -522,7 +523,7 @@ describe('native control scripts', () => {
         encoding: 'utf8',
       });
     }
-  }, 30000);
+  }, 45000);
 
   it('rejects unsafe Windows custom runtime parents', () => {
     if (process.platform !== 'win32') {
@@ -576,6 +577,90 @@ describe('native control scripts', () => {
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain('unsafe runtime directory');
   });
+
+  it('rejects managed-update enrollment for a Windows process with startup arguments', () => {
+    if (process.platform !== 'win32') {
+      return;
+    }
+
+    const tempDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-native-win-update-args-'));
+    tempDirs.push(tempDir);
+    const packageDir = path.join(tempDir, 'package');
+    mkdirSync(packageDir, { recursive: true });
+    const controlScript = path.join(packageDir, 'cpa-manager-plusctl.ps1');
+    const updater = path.join(packageDir, 'cpa-manager-plus-updater.exe');
+    const childScript = path.join(packageDir, 'child.js');
+    writeFileSync(controlScript, readFileSync(windowsControlScript));
+    writeFileSync(updater, 'test');
+    writeFileSync(childScript, 'setTimeout(() => {}, 30000);\r\n');
+
+    const env = {
+      ...process.env,
+      CPA_MANAGER_PLUS_BIN: process.execPath,
+      CPA_MANAGER_PLUS_RUN_DIR: path.join(tempDir, 'run'),
+      CPA_MANAGER_PLUS_LOG_DIR: path.join(tempDir, 'logs'),
+    };
+    try {
+      spawnPowerShellControl(env, ['start', childScript], controlScript);
+      const result = spawnSync(
+        windowsPowerShell(),
+        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', controlScript, 'enable-updates'],
+        { env, encoding: 'utf8' },
+      );
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('without extra startup arguments');
+    } finally {
+      spawnSync(
+        windowsPowerShell(),
+        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', controlScript, 'stop'],
+        { env, encoding: 'utf8' },
+      );
+    }
+  }, 30000);
+
+  it('rejects managed-update enrollment for a legacy Windows PID record without launch metadata', () => {
+    if (process.platform !== 'win32') {
+      return;
+    }
+
+    const tempDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-native-win-update-legacy-'));
+    tempDirs.push(tempDir);
+    const packageDir = path.join(tempDir, 'package');
+    mkdirSync(packageDir, { recursive: true });
+    const controlScript = path.join(packageDir, 'cpa-manager-plusctl.ps1');
+    const updater = path.join(packageDir, 'cpa-manager-plus-updater.exe');
+    const childScript = path.join(packageDir, 'child.js');
+    const pidFile = path.join(tempDir, 'run', 'manager.pid');
+    writeFileSync(controlScript, readFileSync(windowsControlScript));
+    writeFileSync(updater, 'test');
+    writeFileSync(childScript, 'setTimeout(() => {}, 30000);\r\n');
+
+    const env = {
+      ...process.env,
+      CPA_MANAGER_PLUS_BIN: process.execPath,
+      CPA_MANAGER_PLUS_PID_FILE: pidFile,
+      CPA_MANAGER_PLUS_LOG_DIR: path.join(tempDir, 'logs'),
+    };
+    try {
+      spawnPowerShellControl(env, ['start', childScript], controlScript);
+      const record = JSON.parse(readFileSync(pidFile, 'utf8'));
+      delete record.launchArguments;
+      writeFileSync(pidFile, `${JSON.stringify(record)}\r\n`);
+      const result = spawnSync(
+        windowsPowerShell(),
+        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', controlScript, 'enable-updates'],
+        { env, encoding: 'utf8' },
+      );
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('cannot verify how the running process was started');
+    } finally {
+      spawnSync(
+        windowsPowerShell(),
+        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', controlScript, 'stop'],
+        { env, encoding: 'utf8' },
+      );
+    }
+  }, 30000);
 
   it('rejects reparse-point Windows PID files on status and stop', () => {
     if (process.platform !== 'win32') {

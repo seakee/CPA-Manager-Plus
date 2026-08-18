@@ -90,6 +90,7 @@ See [Choosing A CPA Panel](https://seakee.github.io/CPA-Manager-Plus/docs/en/gui
 ### Production Operations
 
 - Run CPAMP Full Mode as one Docker container or a native Linux, macOS, or Windows package for amd64/arm64; the full stack can run alongside CPA.
+- Enroll eligible control-script-managed native packages for an in-panel, checksum-verified backup, update, health validation, and automatic rollback flow. Docker and custom service layouts remain manual by design.
 - Keep request history, Manager configuration, automation state, and model prices in local files with no account registration or telemetry SDK.
 - Back up SQLite files together with `data.key` to preserve encrypted CPA Management Keys.
 
