@@ -12,6 +12,11 @@ export interface QuotaResetResolution {
   resetAccuracy: QuotaResetAccuracy;
 }
 
+export interface QuotaResetTimeFormatOptions {
+  locale?: string;
+  timeZone?: string;
+}
+
 export type CodexQuotaResetSource = 'provider_api' | 'response_header';
 
 const LEGACY_RESET_ROLLOVER_MS = 30 * 24 * 60 * 60 * 1000;
@@ -170,17 +175,21 @@ export function resolveCodexQuotaReset(
   return resolveRelativeQuotaReset(resetAfterSeconds, observedAtMs);
 }
 
-export function formatQuotaResetTime(value?: string | number | null): string {
+export function formatQuotaResetTime(
+  value?: string | number | null,
+  options: QuotaResetTimeFormatOptions = {}
+): string {
   const resetAtMs = parseAbsoluteQuotaResetMs(value);
   if (resetAtMs === null) return '-';
   const date = new Date(resetAtMs);
-  return date.toLocaleString(undefined, {
+  return new Intl.DateTimeFormat(options.locale, {
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
     hour12: false,
-  });
+    ...(options.timeZone ? { timeZone: options.timeZone } : {}),
+  }).format(date);
 }
 
 export function formatUnixSeconds(value: number | null): string {

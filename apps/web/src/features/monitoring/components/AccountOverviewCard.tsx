@@ -30,6 +30,7 @@ import {
   buildAccountSecondaryText,
   buildAccountSummaryMetrics,
   buildCacheTokenPresentation,
+  formatAccountQuotaResetDisplay,
   formatPercent,
   getAccountStatusDotClassName,
   getAccountStatusLabel,
@@ -221,7 +222,7 @@ function AccountQuotaPanel({
               <span className={styles.quotaProgressBar} style={barStyle} />
             </div>
             <div className={styles.quotaWindowMeta}>
-              <small>{`${t('monitoring.account_quota_reset_at')}: ${window.resetLabel}`}</small>
+              <small>{`${t('monitoring.account_quota_reset_at')}: ${formatAccountQuotaResetDisplay(window.resetAtMs, window.resetLabel)}`}</small>
               {window.usageLabel ? <small>{window.usageLabel}</small> : null}
             </div>
           </div>

@@ -565,16 +565,32 @@ const getResetForLimitKind = (
     };
   }
 
-  const codexResetLabel =
+  const codexReset =
     kind === 'monthly'
-      ? codexStatus?.monthlyResetLabel
+      ? {
+          resetLabel: codexStatus?.monthlyResetLabel,
+          resetAtMs: codexStatus?.monthlyResetAtMs ?? null,
+          resetAccuracy: codexStatus?.monthlyResetAccuracy ?? 'unknown',
+        }
       : kind === 'weekly'
-        ? codexStatus?.weeklyResetLabel
+        ? {
+            resetLabel: codexStatus?.weeklyResetLabel,
+            resetAtMs: codexStatus?.weeklyResetAtMs ?? null,
+            resetAccuracy: codexStatus?.weeklyResetAccuracy ?? 'unknown',
+          }
         : kind === 'five_hour'
-          ? codexStatus?.fiveHourResetLabel
+          ? {
+              resetLabel: codexStatus?.fiveHourResetLabel,
+              resetAtMs: codexStatus?.fiveHourResetAtMs ?? null,
+              resetAccuracy: codexStatus?.fiveHourResetAccuracy ?? 'unknown',
+            }
           : null;
-  if (codexResetLabel) {
-    return { resetLabel: codexResetLabel, resetAtMs: null, resetAccuracy: 'unknown' };
+  if (codexReset && (codexReset.resetLabel || codexReset.resetAtMs !== null)) {
+    return {
+      resetLabel: codexReset.resetLabel ?? fallback.resetLabel,
+      resetAtMs: codexReset.resetAtMs ?? null,
+      resetAccuracy: codexReset.resetAccuracy ?? 'unknown',
+    };
   }
   return fallback;
 };

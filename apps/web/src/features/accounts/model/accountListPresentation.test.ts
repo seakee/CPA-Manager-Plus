@@ -130,6 +130,25 @@ describe('accountListPresentation', () => {
     expect(item.recommendation.actionLabelKey).toBe('accounts.recommend_action_reauth');
   });
 
+  it('uses Codex status reset timestamps when quota windows are unavailable', () => {
+    const resetAtMs = Date.parse('2026-08-20T03:40:00Z');
+    const item = buildAccountListItem(makeRow(), {
+      codexStatus: makeCodexStatus({
+        isFiveHourLimited: true,
+        isQuotaLimited: true,
+        fiveHourResetLabel: '08/20 03:40',
+        fiveHourResetAtMs: resetAtMs,
+        fiveHourResetAccuracy: 'exact',
+      }),
+    });
+
+    expect(item.health).toMatchObject({
+      status: 'five_hour_exhausted',
+      resetAtMs,
+    });
+    expect(item.health.tooltipParams.resetAt).toBe('08/20 03:40');
+  });
+
   it('lets a newer successful request clear stale inspection health and advice', () => {
     const row = makeRow({
       inspection: {

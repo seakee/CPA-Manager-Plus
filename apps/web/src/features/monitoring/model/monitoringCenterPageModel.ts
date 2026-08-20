@@ -45,6 +45,7 @@ import {
   filterFreshCodexQuotaWindows,
   formatKimiResetHint,
   formatQuotaResetTime,
+  resolveAbsoluteQuotaReset,
 } from '@/utils/quota';
 import {
   buildObservedCodexQuotaFromHeaderSnapshot,
@@ -799,6 +800,8 @@ const buildCodexAccountQuotaWindows = (
         : window.label,
       remainingPercent,
       resetLabel: window.resetLabel,
+      resetAtMs: window.resetAtMs ?? null,
+      resetAccuracy: window.resetAccuracy ?? 'unknown',
       usageLabel,
     };
   });
@@ -815,21 +818,40 @@ const readFiniteTimestamp = (value: unknown): number | null =>
 const mergeAccountQuotaWindow = (
   activeWindow: AccountQuotaWindow,
   observedWindow: AccountQuotaWindow
-): AccountQuotaWindow => ({
-  ...activeWindow,
-  ...(observedWindow.label.trim() ? { label: observedWindow.label } : {}),
-  ...(observedWindow.remainingPercent !== null &&
-  observedWindow.remainingPercent !== undefined &&
-  Number.isFinite(observedWindow.remainingPercent)
-    ? { remainingPercent: observedWindow.remainingPercent }
-    : {}),
-  ...(hasKnownAccountQuotaResetLabel(observedWindow.resetLabel)
-    ? { resetLabel: observedWindow.resetLabel }
-    : {}),
-  ...(observedWindow.usageLabel && observedWindow.usageLabel.trim()
-    ? { usageLabel: observedWindow.usageLabel }
-    : {}),
-});
+): AccountQuotaWindow => {
+  const hasObservedResetAt =
+    typeof observedWindow.resetAtMs === 'number' &&
+    Number.isFinite(observedWindow.resetAtMs) &&
+    observedWindow.resetAtMs > 0;
+  const hasObservedResetLabel = hasKnownAccountQuotaResetLabel(observedWindow.resetLabel);
+  const resetMetadata = hasObservedResetAt
+    ? {
+        resetLabel: hasObservedResetLabel ? observedWindow.resetLabel : activeWindow.resetLabel,
+        resetAtMs: observedWindow.resetAtMs,
+        resetAccuracy: observedWindow.resetAccuracy,
+      }
+    : hasObservedResetLabel
+      ? {
+          resetLabel: observedWindow.resetLabel,
+          resetAtMs: null,
+          resetAccuracy: 'unknown' as const,
+        }
+      : {};
+
+  return {
+    ...activeWindow,
+    ...(observedWindow.label.trim() ? { label: observedWindow.label } : {}),
+    ...(observedWindow.remainingPercent !== null &&
+    observedWindow.remainingPercent !== undefined &&
+    Number.isFinite(observedWindow.remainingPercent)
+      ? { remainingPercent: observedWindow.remainingPercent }
+      : {}),
+    ...resetMetadata,
+    ...(observedWindow.usageLabel && observedWindow.usageLabel.trim()
+      ? { usageLabel: observedWindow.usageLabel }
+      : {}),
+  };
+};
 
 const mergeAccountQuotaWindows = (
   activeWindows: AccountQuotaWindow[],
@@ -1028,6 +1050,8 @@ const buildClaudeAccountQuotaWindows = (
     label: window.labelKey ? t(window.labelKey) : window.label,
     remainingPercent: buildRemainingFromUsedPercent(window.usedPercent),
     resetLabel: window.resetLabel,
+    resetAtMs: window.resetAtMs ?? null,
+    resetAccuracy: window.resetAccuracy ?? 'unknown',
     usageLabel: null,
   }));
 
@@ -1035,13 +1059,18 @@ const buildAntigravityAccountQuotaWindows = (
   groups: AntigravityQuotaGroup[]
 ): AccountQuotaWindow[] =>
   groups.flatMap((group) =>
-    group.buckets.map((bucket) => ({
-      id: `${group.id}:${bucket.id}`,
-      label: `${group.label} · ${bucket.label}`,
-      remainingPercent: clampRemainingPercent(bucket.remainingFraction * 100),
-      resetLabel: formatQuotaResetTime(bucket.resetTime),
-      usageLabel: bucket.description ?? group.description ?? null,
-    }))
+    group.buckets.map((bucket) => {
+      const reset = resolveAbsoluteQuotaReset(bucket.resetTime);
+      return {
+        id: `${group.id}:${bucket.id}`,
+        label: `${group.label} · ${bucket.label}`,
+        remainingPercent: clampRemainingPercent(bucket.remainingFraction * 100),
+        resetLabel: formatQuotaResetTime(bucket.resetTime),
+        resetAtMs: reset.resetAtMs,
+        resetAccuracy: reset.resetAccuracy,
+        usageLabel: bucket.description ?? group.description ?? null,
+      };
+    })
   );
 
 const buildKimiAccountQuotaWindows = (rows: KimiQuotaRow[], t: TFunction): AccountQuotaWindow[] =>
@@ -1064,6 +1093,8 @@ const buildKimiAccountQuotaWindows = (rows: KimiQuotaRow[], t: TFunction): Accou
       label: rowLabel,
       remainingPercent,
       resetLabel: resetLabel || '-',
+      resetAtMs: row.resetAtMs ?? null,
+      resetAccuracy: row.resetAccuracy ?? 'unknown',
       usageLabel: null,
     };
   });
@@ -1082,13 +1113,17 @@ const buildXaiAccountQuotaWindows = (
       ? Math.max(0, billing.monthlyLimitCents - billing.includedUsedCents)
       : null;
   const windows: AccountQuotaWindow[] = [];
+  const weeklyReset = resolveAbsoluteQuotaReset(billing.periodEnd);
+  const monthlyReset = resolveAbsoluteQuotaReset(billing.billingPeriodEnd);
+  // Product usage belongs to the current period window. A billing-period end
+  // is a separate monthly boundary and must not be inferred as its reset.
+  const productReset = weeklyReset;
   const hasWeeklyData =
     billing.periodType === 'weekly' &&
     (billing.usagePercent !== null ||
       Boolean(billing.periodEnd) ||
       billing.productUsage.length > 0);
-  const hasMonthlyData =
-    billing.usedPercent !== null || billing.monthlyLimitCents !== null;
+  const hasMonthlyData = billing.usedPercent !== null || billing.monthlyLimitCents !== null;
 
   if (hasWeeklyData) {
     windows.push({
@@ -1096,6 +1131,8 @@ const buildXaiAccountQuotaWindows = (
       label: t('xai_quota.weekly_limit'),
       remainingPercent: buildRemainingFromUsedPercent(billing.usagePercent),
       resetLabel: billing.periodEnd ? formatQuotaResetTime(billing.periodEnd) : '-',
+      resetAtMs: weeklyReset.resetAtMs,
+      resetAccuracy: weeklyReset.resetAccuracy,
       usageLabel: t('xai_quota.used_percent', {
         percent: billing.usagePercent === null ? '--' : `${Math.round(billing.usagePercent)}%`,
       }),
@@ -1107,7 +1144,10 @@ const buildXaiAccountQuotaWindows = (
       id: `product-${index}-${item.product}`,
       label: t('xai_quota.product_usage', { product: item.product }),
       remainingPercent: buildRemainingFromUsedPercent(item.usagePercent),
-      resetLabel: '-',
+      resetLabel:
+        productReset.resetAtMs !== null ? formatQuotaResetTime(productReset.resetAtMs) : '-',
+      resetAtMs: productReset.resetAtMs,
+      resetAccuracy: productReset.resetAccuracy,
       usageLabel: t('xai_quota.used_percent', {
         percent: item.usagePercent === null ? '--' : `${Math.round(item.usagePercent)}%`,
       }),
@@ -1120,6 +1160,8 @@ const buildXaiAccountQuotaWindows = (
       label: t('xai_quota.monthly_credits'),
       remainingPercent: buildRemainingFromUsedPercent(billing.usedPercent),
       resetLabel: billing.billingPeriodEnd ? formatQuotaResetTime(billing.billingPeriodEnd) : '-',
+      resetAtMs: monthlyReset.resetAtMs,
+      resetAccuracy: monthlyReset.resetAccuracy,
       usageLabel: t('xai_quota.usage_amount', {
         remaining: formatXaiCurrency(remainingCents),
         limit: formatXaiCurrency(billing.monthlyLimitCents),
@@ -1136,7 +1178,10 @@ const buildXaiAccountQuotaWindows = (
       id: 'pay-as-you-go',
       label: t('xai_quota.pay_as_you_go_label'),
       remainingPercent: buildRemainingFromUsedPercent(billing.onDemandUsedPercent),
-      resetLabel: '-',
+      resetLabel:
+        monthlyReset.resetAtMs !== null ? formatQuotaResetTime(monthlyReset.resetAtMs) : '-',
+      resetAtMs: monthlyReset.resetAtMs,
+      resetAccuracy: monthlyReset.resetAccuracy,
       usageLabel: t('xai_quota.usage_amount', {
         remaining: formatXaiCurrency(onDemandRemainingCents),
         limit: formatXaiCurrency(billing.onDemandCapCents),
@@ -1284,6 +1329,8 @@ export const buildObservedCodexAccountQuotaEntry = (
               resetLabel: fallbackRecoverAtMS
                 ? new Date(fallbackRecoverAtMS).toLocaleString()
                 : '-',
+              resetAtMs: fallbackRecoverAtMS,
+              resetAccuracy: fallbackRecoverAtMS ? 'exact' : 'unknown',
               usageLabel:
                 fallbackUsedPercent !== null
                   ? t('monitoring.account_quota_observed_used', {

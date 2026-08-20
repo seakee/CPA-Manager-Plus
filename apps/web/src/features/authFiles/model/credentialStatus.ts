@@ -1,6 +1,7 @@
-import type { AuthFileItem, CodexQuotaState } from '@/types';
+import type { AuthFileItem, CodexQuotaState, CodexQuotaWindow, QuotaResetAccuracy } from '@/types';
 import type { UsageHeaderSnapshot } from '@/services/api/usageService';
 import { getXaiProbeIssueKey } from '@/utils/quota/xaiPresentation';
+import { formatQuotaResetTime, isValidQuotaResetAtMs } from '@/utils/quota/formatters';
 import {
   getHeaderSnapshotErrorCode,
   getHeaderSnapshotErrorKind,
@@ -73,9 +74,17 @@ export type AuthFileCodexStatusSummary = {
   isMonthlyLimited: boolean;
   hasDisabledRecoveryReset: boolean;
   fiveHourResetLabel: string | null;
+  fiveHourResetAtMs?: number | null;
+  fiveHourResetAccuracy?: QuotaResetAccuracy;
   weeklyResetLabel: string | null;
+  weeklyResetAtMs?: number | null;
+  weeklyResetAccuracy?: QuotaResetAccuracy;
   monthlyResetLabel: string | null;
+  monthlyResetAtMs?: number | null;
+  monthlyResetAccuracy?: QuotaResetAccuracy;
   recoveryResetLabel: string | null;
+  recoveryResetAtMs?: number | null;
+  recoveryResetAccuracy?: QuotaResetAccuracy;
   fiveHourUsedPercent: number | null;
   weeklyUsedPercent: number | null;
   monthlyUsedPercent: number | null;
@@ -164,6 +173,23 @@ const formatObservedRecoverLabel = (value: number | null) => {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return null;
   return date.toLocaleString();
+};
+
+type CodexStatusReset = {
+  label: string | null;
+  resetAtMs: number | null;
+  resetAccuracy: QuotaResetAccuracy;
+};
+
+const resolveCodexStatusReset = (window?: CodexQuotaWindow | null): CodexStatusReset => {
+  const resetAtMs = isValidQuotaResetAtMs(window?.resetAtMs) ? (window?.resetAtMs ?? null) : null;
+  const legacyLabel = isKnownResetLabel(window?.resetLabel) ? window.resetLabel.trim() : null;
+  const canonicalLabel = resetAtMs === null ? null : formatQuotaResetTime(resetAtMs);
+  return {
+    label: canonicalLabel && canonicalLabel !== '-' ? canonicalLabel : legacyLabel,
+    resetAtMs,
+    resetAccuracy: resetAtMs === null ? 'unknown' : (window?.resetAccuracy ?? 'unknown'),
+  };
 };
 
 const OBSERVED_AUTH_ERROR_PATTERNS = [
@@ -1077,9 +1103,17 @@ export const getAuthFileCodexStatus = (
       isMonthlyLimited: false,
       hasDisabledRecoveryReset: false,
       fiveHourResetLabel: null,
+      fiveHourResetAtMs: null,
+      fiveHourResetAccuracy: 'unknown',
       weeklyResetLabel: null,
+      weeklyResetAtMs: null,
+      weeklyResetAccuracy: 'unknown',
       monthlyResetLabel: null,
+      monthlyResetAtMs: null,
+      monthlyResetAccuracy: 'unknown',
       recoveryResetLabel: null,
+      recoveryResetAtMs: null,
+      recoveryResetAccuracy: 'unknown',
       fiveHourUsedPercent: null,
       weeklyUsedPercent: null,
       monthlyUsedPercent: null,
@@ -1152,15 +1186,12 @@ export const getAuthFileCodexStatus = (
   const longWindowUsedPercent = weeklyWindowUsedPercent ?? monthlyUsedPercent;
   const weeklyUsedPercent =
     weeklyWindowUsedPercent ?? (!monthlyWindow ? inspectionUsedPercent : null);
-  const fiveHourResetLabel = isKnownResetLabel(fiveHourWindow?.resetLabel)
-    ? fiveHourWindow.resetLabel.trim()
-    : null;
-  const weeklyResetLabel = isKnownResetLabel(weeklyWindow?.resetLabel)
-    ? weeklyWindow.resetLabel.trim()
-    : null;
-  const monthlyResetLabel = isKnownResetLabel(monthlyWindow?.resetLabel)
-    ? monthlyWindow.resetLabel.trim()
-    : null;
+  const fiveHourReset = resolveCodexStatusReset(fiveHourWindow);
+  const weeklyReset = resolveCodexStatusReset(weeklyWindow);
+  const monthlyReset = resolveCodexStatusReset(monthlyWindow);
+  const fiveHourResetLabel = fiveHourReset.label;
+  const weeklyResetLabel = weeklyReset.label;
+  const monthlyResetLabel = monthlyReset.label;
   const credentialEvidences = [
     options.ignoreRawStatusCode ? null : getAuthFileCredentialEvidence(file),
     getInspectionCredentialEvidence(inspection),
@@ -1198,12 +1229,20 @@ export const getAuthFileCodexStatus = (
     (observedQuotaLimitedStatus && !isFiveHourLimited && !isWeeklyLimited && !isMonthlyLimited);
   const isQuotaLimited =
     isFiveHourLimited || isWeeklyLimited || isMonthlyLimited || isUnknownQuotaLimited;
-  const recoveryResetLabel =
-    (isMonthlyLimited && monthlyResetLabel) ||
-    (isWeeklyLimited && weeklyResetLabel) ||
-    (isFiveHourLimited && fiveHourResetLabel) ||
-    (observedQuotaLimitedStatus && observedRecoverLabel) ||
-    null;
+  const recoveryReset =
+    (isMonthlyLimited && monthlyResetLabel ? monthlyReset : null) ||
+    (isWeeklyLimited && weeklyResetLabel ? weeklyReset : null) ||
+    (isFiveHourLimited && fiveHourResetLabel ? fiveHourReset : null) ||
+    (observedQuotaLimitedStatus && observedRecoverLabel
+      ? {
+          label: observedRecoverLabel,
+          resetAtMs: observedRecoverAtMS,
+          resetAccuracy: 'exact' as const,
+        }
+      : null);
+  const recoveryResetLabel = recoveryReset?.label ?? null;
+  const recoveryResetAtMs = recoveryReset?.resetAtMs ?? null;
+  const recoveryResetAccuracy = recoveryReset?.resetAccuracy ?? 'unknown';
   const hasDisabledRecoveryReset = effectiveDisabled && recoveryResetLabel !== null;
   const badges: AuthFileCodexStatusBadge[] = [];
 
@@ -1350,9 +1389,17 @@ export const getAuthFileCodexStatus = (
     isMonthlyLimited,
     hasDisabledRecoveryReset,
     fiveHourResetLabel,
+    fiveHourResetAtMs: fiveHourReset.resetAtMs,
+    fiveHourResetAccuracy: fiveHourReset.resetAccuracy,
     weeklyResetLabel,
+    weeklyResetAtMs: weeklyReset.resetAtMs,
+    weeklyResetAccuracy: weeklyReset.resetAccuracy,
     monthlyResetLabel,
+    monthlyResetAtMs: monthlyReset.resetAtMs,
+    monthlyResetAccuracy: monthlyReset.resetAccuracy,
     recoveryResetLabel,
+    recoveryResetAtMs,
+    recoveryResetAccuracy,
     fiveHourUsedPercent,
     weeklyUsedPercent,
     monthlyUsedPercent,

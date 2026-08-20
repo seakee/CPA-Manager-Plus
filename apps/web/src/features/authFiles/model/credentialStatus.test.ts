@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AuthFileItem, CodexQuotaState } from '@/types';
 import type { UsageHeaderSnapshot } from '@/services/api/usageService';
+import { formatQuotaResetTime } from '@/utils/quota/formatters';
 import {
   authFileMatchesCodexStatusFilter,
   buildAuthFileCodexInspectionMap,
@@ -211,6 +212,36 @@ describe('auth file Codex status helpers', () => {
     expect(authFileMatchesCodexStatusFilter(status, 'five_hour_limited')).toBe(true);
     expect(authFileMatchesCodexStatusFilter(status, 'weekly_limited')).toBe(false);
     expect(status.badges.map((badge) => badge.kind)).toContain('five_hour_limited');
+  });
+
+  it('uses the absolute reset timestamp for disabled recovery status display', () => {
+    const resetAtMs = Date.parse('2026-08-20T03:40:00Z');
+    const status = getAuthFileCodexStatus(
+      codexFile({ disabled: true }),
+      codexQuota({
+        windows: [
+          {
+            id: 'five-hour',
+            label: '5-hour limit',
+            usedPercent: 100,
+            resetLabel: '08/20 03:40',
+            resetAtMs,
+            resetAccuracy: 'exact',
+            limitWindowSeconds: 18_000,
+          },
+        ],
+      })
+    );
+
+    expect(status.fiveHourResetAtMs).toBe(resetAtMs);
+    expect(status.fiveHourResetAccuracy).toBe('exact');
+    expect(status.fiveHourResetLabel).toBe(formatQuotaResetTime(resetAtMs));
+    expect(status.recoveryResetAtMs).toBe(resetAtMs);
+    expect(status.recoveryResetAccuracy).toBe('exact');
+    expect(status.recoveryResetLabel).toBe(formatQuotaResetTime(resetAtMs));
+    expect(status.badges.find((badge) => badge.kind === 'disabled_with_reset')).toMatchObject({
+      labelParams: { reset: formatQuotaResetTime(resetAtMs) },
+    });
   });
 
   it('detects monthly-limited Codex quota without treating it as weekly-limited', () => {
