@@ -19,6 +19,7 @@ import {
   getDemoQuotaStoreState,
   getDemoRawConfig,
   resetDemoCredentialRefresh,
+  resetDemoUsageArchiveState,
 } from '@/features/demo/demoFixtures';
 import {
   CODEX_INSPECTION_LAST_RUN_STORAGE_KEY,
@@ -169,6 +170,7 @@ export function DemoPage() {
     const restoreDemoInspectionState = installDemoInspectionState();
 
     resetDemoCredentialRefresh();
+    resetDemoUsageArchiveState();
     resetDemoAuthFileConfiguration();
     resetDemoCodexInspectionRunState();
     setDemoMode(true);
@@ -218,6 +220,7 @@ export function DemoPage() {
 
     return () => {
       resetDemoCredentialRefresh();
+      resetDemoUsageArchiveState();
       resetDemoAuthFileConfiguration();
       resetDemoCodexInspectionRunState();
       setDemoMode(false);

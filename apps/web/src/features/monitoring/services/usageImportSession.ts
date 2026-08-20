@@ -4,6 +4,7 @@ import {
   type UsageImportResponse,
   type UsageImportSession,
   type UsageImportSessionStatus,
+  type UsageServiceApiError,
 } from '@/services/api/usageService';
 
 const STORAGE_KEY = 'cpa-manager-plus:usage-import-sessions:v1';
@@ -58,6 +59,13 @@ export interface UploadUsageImportFileOptions {
   base: string;
   managementKey?: string;
   file: File;
+  /**
+   * Optional server-side session selected from the maintenance session list.
+   * When present, the client validates the file against that session before
+   * uploading, which makes resumability survive a page reload even when the
+   * browser-local resume key is no longer available.
+   */
+  sessionId?: string;
   signal?: AbortSignal;
   onProgress?: (progress: UsageImportProgress) => void;
   pollIntervalMs?: number;
@@ -317,15 +325,20 @@ async function resolveOrCreateSession(
 ): Promise<UsageImportSession> {
   const stored = readStoredSession(options.storage, options.base, options.file);
   let resumeKey = stored?.resumeKey ?? '';
-  if (stored?.sessionId) {
+  const requestedSessionId = options.sessionId?.trim() || stored?.sessionId || '';
+  if (requestedSessionId) {
     try {
       const storedSession = await options.client.getUsageImportSession(
         options.base,
-        stored.sessionId,
+        requestedSessionId,
         options.managementKey,
         options.signal
       );
-      if (storedSession.size_bytes === options.file.size) {
+      if (
+        storedSession.size_bytes === options.file.size &&
+        (!options.sessionId ||
+          storedSession.filename === normalizeImportFilename(options.file.name))
+      ) {
         if (
           storedSession.status !== 'cancelled' &&
           !(storedSession.status === 'failed' && !storedSession.retryable)
@@ -333,13 +346,23 @@ async function resolveOrCreateSession(
           return storedSession;
         }
       }
+      if (options.sessionId) {
+        const mismatch = new Error(
+          'usage import session does not match the selected file'
+        ) as UsageServiceApiError;
+        mismatch.code = 'usage_import_session_conflict';
+        throw mismatch;
+      }
       clearStoredSession(options.storage, options.base, options.file, storedSession.id);
       resumeKey = '';
     } catch (error) {
       if (getUsageServiceErrorCode(error) !== 'usage_import_session_not_found') {
         throw error;
       }
-      clearStoredSession(options.storage, options.base, options.file, stored.sessionId);
+      if (options.sessionId) throw error;
+      if (stored?.sessionId) {
+        clearStoredSession(options.storage, options.base, options.file, stored.sessionId);
+      }
     }
   }
 
@@ -358,6 +381,14 @@ async function resolveOrCreateSession(
   );
   storeSession(options.storage, options.base, options.file, created.id, resumeKey);
   return created;
+}
+
+function normalizeImportFilename(value: string): string {
+  let filename = value.trim().split(String.fromCharCode(0)).join('');
+  const basenameStart = filename.lastIndexOf('/');
+  if (basenameStart >= 0) filename = filename.slice(basenameStart + 1);
+  if (!filename || filename === '.') filename = 'usage-import.jsonl';
+  return Array.from(filename).slice(0, 240).join('');
 }
 
 function resolvePhase(session: UsageImportSession): UsageImportPhase {

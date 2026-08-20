@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -59,6 +60,57 @@ func TestNewPprofServer(t *testing.T) {
 				t.Fatalf("newPprofServer(%q) = nil", tt.addr)
 			}
 		})
+	}
+}
+
+func TestWaitForBackfillReadinessRetriesUntilSuccess(t *testing.T) {
+	attempts := 0
+	wantErr := errors.New("temporary backfill failure")
+	err := waitForBackfillReadiness(context.Background(), time.Millisecond, func(context.Context) error {
+		attempts++
+		if attempts < 3 {
+			return wantErr
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("waitForBackfillReadiness error = %v", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("attempts = %d, want 3", attempts)
+	}
+}
+
+func TestWaitForBackfillReadinessStopsWhenContextIsCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	attempts := 0
+	err := waitForBackfillReadiness(ctx, time.Hour, func(context.Context) error {
+		attempts++
+		cancel()
+		return errors.New("temporary backfill failure")
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitForBackfillReadiness error = %v, want context canceled", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}
+
+func TestWaitForBackfillReadinessRejectsNilRunAndAcceptsNonPositiveDelay(t *testing.T) {
+	if err := waitForBackfillReadiness(context.Background(), time.Millisecond, nil); err == nil {
+		t.Fatal("nil run unexpectedly succeeded")
+	}
+	attempts := 0
+	if err := waitForBackfillReadiness(context.Background(), 0, func(context.Context) error {
+		attempts++
+		return nil
+	}); err != nil {
+		t.Fatalf("zero-delay backfill error = %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("zero-delay attempts = %d, want 1", attempts)
 	}
 }
 
@@ -126,6 +178,9 @@ func TestDerivedMigrationsStartAfterHTTPListenerIsBound(t *testing.T) {
 		"db.StartDerivedMaintenance(ctx)",
 		"collectorWorker.Start(ctx)",
 		"NewLegacyQuotaSnapshotMigrationWorker(db).Start(ctx)",
+		"usageCacheAccountingMigrationWorker.Start(ctx)",
+		"waitForUsageResponseMetadataBackfill(ctx, db)",
+		"usageArchiveRetentionWorker.Start(ctx)",
 	} {
 		startAt := strings.Index(source, startCall)
 		if startAt < serveAt {
@@ -136,6 +191,24 @@ func TestDerivedMigrationsStartAfterHTTPListenerIsBound(t *testing.T) {
 	collectorAt := strings.Index(source, "collectorWorker.Start(ctx)")
 	if maintenanceAt < serveAt || collectorAt < maintenanceAt {
 		t.Fatalf("startup maintenance/collector ordering invalid: serve=%d maintenance=%d collector=%d", serveAt, maintenanceAt, collectorAt)
+	}
+	migrationWorkerAt := strings.Index(source, "usageCacheAccountingMigrationWorker :=")
+	migrationStartAt := strings.Index(source, "usageCacheAccountingMigrationWorker.Start(ctx)")
+	backfillAt := strings.Index(source, "waitForUsageResponseMetadataBackfill(ctx, db)")
+	retentionAt := strings.Index(source, "usageArchiveRetentionWorker.Start(ctx)")
+	if migrationWorkerAt < serveAt || migrationStartAt < migrationWorkerAt ||
+		backfillAt < migrationWorkerAt || retentionAt < backfillAt {
+		t.Fatalf(
+			"retention readiness ordering invalid: serve=%d migration_worker=%d migration_start=%d backfill=%d retention=%d",
+			serveAt,
+			migrationWorkerAt,
+			migrationStartAt,
+			backfillAt,
+			retentionAt,
+		)
+	}
+	if !strings.Contains(source, "cfg.UsageArchiveRetentionEnabled && cfg.UsageArchiveRetentionDays > 0 && cfg.DashboardHourlyRollupEnabled") {
+		t.Fatal("retention worker construction is not gated by explicit enablement, positive days, and hourly rollups")
 	}
 	if !strings.Contains(source, "continuing without blocking background workers") {
 		t.Fatal("post-listen index failure does not explicitly preserve background worker startup")
@@ -171,6 +244,26 @@ func TestCleanupDerivedCommandUsesSignalContext(t *testing.T) {
 	runAt := strings.Index(commandSource, "derivedmaintenance.Run(ctx, os.Args[2:], os.Stdout, os.Stderr)")
 	if contextAt < 0 || runAt < contextAt {
 		t.Fatalf("cleanup-derived signal context ordering invalid: context=%d run=%d", contextAt, runAt)
+	}
+}
+
+func TestCompactUsageCommandUsesSignalContextAndHandlesHelp(t *testing.T) {
+	content, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	source := string(content)
+	commandAt := strings.Index(source, `case "compact-usage":`)
+	if commandAt < 0 {
+		t.Fatal("compact-usage command entry not found")
+	}
+	commandSource := source[commandAt:]
+	contextAt := strings.Index(commandSource, "signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)")
+	runAt := strings.Index(commandSource, "usagecompact.Run(ctx, os.Args[2:], os.Stdout, os.Stderr)")
+	helpAt := strings.Index(commandSource, "usagecompact.IsHelp(err)")
+	returnAt := strings.Index(commandSource, "return")
+	if contextAt < 0 || runAt < contextAt || helpAt < runAt || returnAt < helpAt {
+		t.Fatalf("compact-usage command ordering invalid: context=%d run=%d help=%d return=%d", contextAt, runAt, helpAt, returnAt)
 	}
 }
 

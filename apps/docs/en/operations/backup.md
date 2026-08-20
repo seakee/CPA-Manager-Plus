@@ -10,6 +10,7 @@ Back up these files as a set:
 - `usage.sqlite-wal`
 - `usage.sqlite-shm`
 - `data.key`
+- `usage-archives/` when historical archiving has been used
 
 If your deployment directory contains custom configuration files, back them up too. With the one-click installer, also back up `secrets/` under the install directory; full installation and env/secret-managed connections store the CPA Management Key in `secrets/cpa-management-key`.
 
@@ -22,6 +23,8 @@ CPA connections saved through setup or the panel encrypt the CPA Management Key 
 - If `data.key` is lost, the saved CPA Management Key cannot be recovered. You must save the CPA connection configuration again.
 
 If the CPA connection is managed by environment variables or secret files, the CPA Management Key is not written to SQLite. Back up the related secret files together with the data directory.
+
+Archive files may contain event-level `fail_body` and `raw_json`, so protect them as sensitive data. SQLite, WAL/SHM, `data.key`, and `usage-archives/` must come from the same consistent backup point. With custom `dataDir` or `dbPath` settings, confirm the resolved archive location in the [Manager Server Guide](./manager-server.md); it can be separate from the SQLite directory. Never delete WAL manually or restore only selected archive runs.
 
 ## Docker Backup Example
 
@@ -64,11 +67,57 @@ Copy-Item -Recurse .\data .\data.backup
 1. Stop CPAMP.
 2. Restore the full data directory.
 3. Confirm that `usage.sqlite` and `data.key` come from the same backup.
-4. If the CPA connection is env/secret-managed, also restore `secrets/` from the install directory.
-5. Start CPAMP.
-6. Log in and check configuration, monitoring data, and collector status.
+4. When historical archiving has been used, restore the matching `usage-archives/` directory.
+5. If the CPA connection is env/secret-managed, also restore `secrets/` from the install directory.
+6. Start CPAMP.
+7. Log in and check configuration, monitoring data, Usage Maintenance status, and collector status.
 
 If restore produces decryption errors, first check whether `data.key` matches the SQLite database.
+
+## Restore Raw Request History From A Verified Archive
+
+Prefer a complete restore from SQLite, WAL/SHM, `data.key`, and `usage-archives/` captured at the same point in time. The segment-import procedure below is for recovering archived request history into an isolated environment when the original database is unavailable. It is not a table-level merge procedure for a live production database.
+
+Archive segments are `.jsonl.gz` files, while usage import reads decompressed JSONL. Renaming the file is not sufficient: neither the panel file picker nor the import endpoint transparently decompresses gzip. Recover as follows:
+
+1. Use only a run whose status is `verified` or `completed`. Preserve its manifest and original segments; do not edit the archive files in place.
+2. Start an isolated recovery instance with an empty data directory and therefore an empty `usage.sqlite`. Do not import the segments into the source database that still contains the original identity ledger. That database intentionally skips the archived identities, which validates idempotency but does not restore raw rows.
+3. Copy the segments to a restricted scratch directory and decompress them in filename sequence. For example:
+
+```bash
+mkdir -p ./archive-restore
+chmod 700 ./archive-restore
+gzip -dc -- "./usage-archives/<run-id>/<segment-name>.jsonl.gz" \
+  > "./archive-restore/<segment-name>.jsonl"
+chmod 600 "./archive-restore/<segment-name>.jsonl"
+```
+
+On Windows, use a trusted gzip tool to produce the same `.jsonl` file. The decompressed file can still contain `fail_body` and `raw_json`, so continue to handle it as sensitive data.
+
+4. Sign in to the isolated recovery instance and import each decompressed `.jsonl` through Request Monitoring in segment-number order. Do not select the `.jsonl.gz` file directly.
+5. On an empty recovery instance, each segment's `added` count should equal its manifest `event_count`, and `skipped` should be `0`. The sum across all segments should equal the manifest event total. Then verify Request Monitoring, Usage Analytics, and sampled event fields.
+6. Keep the original archive and complete backup until validation is finished. Do not overwrite a live production data directory with the recovery instance's SQLite file, and do not merge tables manually. A complete production rollback must restore the consistent backup set.
+
+If importing the same decompressed segment into the source database reports every event as `skipped`, the identity ledger is correctly preventing archived events from being resurrected. That is an idempotency check, not a failed recovery.
+
+## Reclaim Physical Space After Logical Deletion
+
+Deletion in the Usage Maintenance page removes only archived and verified raw rows. It does not immediately shrink the SQLite file. After completing the stopped backup above, run:
+
+```bash
+cpa-manager-plus compact-usage --db-path ./data/usage.sqlite
+```
+
+For a Docker named volume, run the offline command through the same image:
+
+```bash
+docker compose stop cpa-manager-plus
+docker compose run --rm --no-deps cpa-manager-plus \
+  compact-usage --db-path /data/usage.sqlite
+docker compose up -d cpa-manager-plus
+```
+
+Stop every Manager Server connected to the database before running the command. The process-level database lock rejects a running Manager Server, and SQLite exclusive access rejects conflicting transactions. Any recorded maintenance lock or active `archiving`/`verifying`/`deleting` stage also blocks compaction; static `previewed`, `archived`, `verified`, and `failed` runs are allowed. Pending derived-data migrations are preserved exactly and continue after the server restarts; `compact-usage` does not advance, reset, or rewrite their checkpoints. If a lock belongs to a resumable active or failed run, start Manager Server and resume that run before retrying. If a lock remains for an inactive or terminal run, preserve the backup and logs and stop for diagnosis; never delete the lock or WAL manually. Keep the complete backup and reserve temporary free space conservatively equal to at least the current database-file size. After compaction, start the server and verify `/health`, `/status`, Dashboard, Usage Analytics, and Usage Maintenance. After decompressing one archive sample as described above, re-importing it into the source database should remain an idempotent skip, while importing it into an empty isolated recovery instance should add the event.
 
 ## Move Manager Configuration Without Request History
 

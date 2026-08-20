@@ -14,6 +14,7 @@ type eventSourceOptions struct {
 	BeforeMS           int64
 	BeforeID           int64
 	ProjectionComplete bool
+	RequireRawEvent    bool
 }
 
 func filteredEventSourceSQL(
@@ -43,6 +44,12 @@ func filteredEventSourceSQL(
 			rawConditions = append(rawConditions, "e.timestamp_ms < ?")
 			rawArgs = append(rawArgs, options.BeforeMS)
 		}
+	}
+	if options.RequireRawEvent {
+		projectionConditions = append(
+			projectionConditions,
+			"exists (select 1 from usage_events raw_event where raw_event.id = p.event_id)",
+		)
 	}
 
 	if options.ProjectionComplete {

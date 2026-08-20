@@ -189,6 +189,49 @@ describe('usage import session orchestration', () => {
     expect(storage.values.size).toBe(0);
   });
 
+  it('resumes an explicitly selected session when the server truncates its filename', async () => {
+    const { client, getSession, setSession } = createClient();
+    const file = new File(['0123456789'], `${'a'.repeat(250)}.jsonl`, {
+      lastModified: 655,
+    });
+    setSession({
+      ...getSession(),
+      filename: Array.from(file.name).slice(0, 240).join(''),
+    });
+
+    const result = await uploadUsageImportFile({
+      base: 'http://manager.local',
+      file,
+      sessionId: 'session-1',
+      client,
+      storage: new MemoryStorage(),
+      pollIntervalMs: 0,
+    });
+
+    expect(result.added).toBe(2);
+    expect(client.createUsageImportSession).not.toHaveBeenCalled();
+  });
+
+  it('rejects an explicitly selected session when the file name does not match', async () => {
+    const { client } = createClient();
+    const file = new File(['0123456789'], 'different-history.jsonl');
+
+    await expect(
+      uploadUsageImportFile({
+        base: 'http://manager.local',
+        file,
+        sessionId: 'session-1',
+        client,
+        storage: new MemoryStorage(),
+        pollIntervalMs: 0,
+      })
+    ).rejects.toMatchObject({
+      message: 'usage import session does not match the selected file',
+      code: 'usage_import_session_conflict',
+    });
+    expect(client.createUsageImportSession).not.toHaveBeenCalled();
+  });
+
   it('reuses a persisted resume key when the create response is lost', async () => {
     const { client } = createClient();
     const storage = new MemoryStorage();

@@ -16,6 +16,33 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
 
+func TestIsCurrentStructureRevision(t *testing.T) {
+	for _, revision := range []string{
+		StructureRevision,
+		StructureRevision + ":rebuild-0123456789abcdef0123456789abcdef",
+		StructureRevision + ":cache-accounting-v2-1700000000000-42",
+		StructureRevision + ":rebuild-0123456789abcdef0123456789abcdef:cache-accounting-v2-1700000000000-42",
+	} {
+		if !IsCurrentStructureRevision(revision) {
+			t.Fatalf("current structure revision rejected: %q", revision)
+		}
+	}
+	for _, revision := range []string{
+		"",
+		"stale",
+		StructureRevision + ":rebuild-short",
+		StructureRevision + ":rebuild-0123456789abcdef0123456789abcdeg",
+		StructureRevision + ":cache-accounting-v2-0-42",
+		StructureRevision + ":cache-accounting-v2-1700000000000-0",
+		StructureRevision + ":cache-accounting-v2-invalid-42",
+		StructureRevision + ":cache-accounting-v2-1700000000000",
+	} {
+		if IsCurrentStructureRevision(revision) {
+			t.Fatalf("invalid structure revision accepted: %q", revision)
+		}
+	}
+}
+
 func TestCatchUpAndLoadRowsMergeCoverageDeltaAndLateEvents(t *testing.T) {
 	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
 	if err != nil {

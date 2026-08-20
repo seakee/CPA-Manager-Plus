@@ -7,6 +7,10 @@ import {
   type UseMonitoringAnalyticsParams,
   type UseMonitoringAnalyticsReturn,
 } from '@/features/monitoring/hooks/useMonitoringAnalytics';
+import type {
+  MonitoringAnalyticsCoverage,
+  MonitoringAnalyticsResponse,
+} from '@/services/api/usageService';
 import { useUsageAnalytics } from './useUsageAnalytics';
 
 vi.mock('@/features/monitoring/hooks/useMonitoringAnalytics', () => ({
@@ -29,9 +33,22 @@ const useMonitoringAnalyticsMock = vi.mocked(useMonitoringAnalytics);
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const emptyAnalyticsResponse = {
+const archivedCoverage: MonitoringAnalyticsCoverage = {
+  scope: 'time_range',
+  mode: 'mixed',
+  raw_complete: false,
+  core_aggregate_used: true,
+  raw_event_count: 4,
+  raw_deleted_event_count: 2,
+  min_deleted_timestamp_ms: 1,
+  max_deleted_timestamp_ms: 2,
+  fidelity_limitations: ['event_details_require_raw_events'],
+};
+
+const emptyAnalyticsResponse: MonitoringAnalyticsResponse = {
   generated_at_ms: 1,
   granularity: 'hour',
+  coverage: archivedCoverage,
 };
 
 describe('useUsageAnalytics request orchestration', () => {
@@ -243,6 +260,7 @@ describe('useUsageAnalytics request orchestration', () => {
       models: ['gpt-a'],
       api_key_hashes: ['key-a'],
     });
+    expect(latestResult?.coverage).toEqual(archivedCoverage);
 
     const selectorScope = selectors?.dataScopeKey;
     await act(async () => {

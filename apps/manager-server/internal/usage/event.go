@@ -61,16 +61,20 @@ type Event struct {
 	CacheCreationTokens int64  `json:"cache_creation_tokens"`
 	// Normalized token buckets are persisted for aggregation and billing but are
 	// not exposed in compatible usage payloads.
-	NormalizedUncachedInputTokens int64  `json:"-"`
-	NormalizedTotalInputTokens    int64  `json:"-"`
-	NormalizedCacheReadTokens     int64  `json:"-"`
-	NormalizedCacheCreationTokens int64  `json:"-"`
-	TotalTokens                   int64  `json:"total_tokens"`
-	LatencyMS                     *int64 `json:"latency_ms,omitempty"`
-	TTFTMS                        *int64 `json:"ttft_ms,omitempty"`
-	Failed                        bool   `json:"failed"`
-	FailStatusCode                int    `json:"fail_status_code,omitempty"`
-	FailSummary                   string `json:"fail_summary,omitempty"`
+	NormalizedUncachedInputTokens int64 `json:"-"`
+	NormalizedTotalInputTokens    int64 `json:"-"`
+	NormalizedCacheReadTokens     int64 `json:"-"`
+	NormalizedCacheCreationTokens int64 `json:"-"`
+	TotalTokens                   int64 `json:"total_tokens"`
+	// PreserveArchiveDerivedFields is set only after an internal archive record
+	// passes schema validation. It keeps persisted accounting and service-tier
+	// semantics stable when an archive is restored by a newer CPAMP version.
+	PreserveArchiveDerivedFields bool   `json:"-"`
+	LatencyMS                    *int64 `json:"latency_ms,omitempty"`
+	TTFTMS                       *int64 `json:"ttft_ms,omitempty"`
+	Failed                       bool   `json:"failed"`
+	FailStatusCode               int    `json:"fail_status_code,omitempty"`
+	FailSummary                  string `json:"fail_summary,omitempty"`
 	// FailBody is retained only in the local DB as a sensitive internal field.
 	// Public APIs, compatible payloads, and exports must use FailSummary instead.
 	FailBody               string                  `json:"-"`
@@ -253,6 +257,31 @@ func NormalizeCacheAccounting(context CacheInputContext, inputTokens, cachedToke
 	accounting.UncachedInputTokens = maxInt64(input-cacheRead-cacheCreation, 0)
 	accounting.TotalInputTokens = input
 	return accounting
+}
+
+func ValidateArchiveDerivedFields(event Event) error {
+	if !event.PreserveArchiveDerivedFields {
+		return nil
+	}
+	mode := normalizeCacheInputMode(event.CacheInputMode)
+	if mode != CacheInputModeIncluded && mode != CacheInputModeSeparate {
+		return fmt.Errorf("archive cache input mode %q is invalid", event.CacheInputMode)
+	}
+	for _, field := range []struct {
+		name  string
+		value int64
+	}{
+		{name: "normalized_uncached_input_tokens", value: event.NormalizedUncachedInputTokens},
+		{name: "normalized_total_input_tokens", value: event.NormalizedTotalInputTokens},
+		{name: "normalized_cache_read_tokens", value: event.NormalizedCacheReadTokens},
+		{name: "normalized_cache_creation_tokens", value: event.NormalizedCacheCreationTokens},
+		{name: "total_tokens", value: event.TotalTokens},
+	} {
+		if field.value < 0 {
+			return fmt.Errorf("archive %s must not be negative", field.name)
+		}
+	}
+	return nil
 }
 
 func InferCacheInputMode(context CacheInputContext, cacheReadTokens, cacheCreationTokens int64) string {
@@ -834,6 +863,29 @@ func compactJSON(value any) (string, bool) {
 func readOptionalInt(record map[string]any, keys ...string) *int64 {
 	value := readInt(record, keys...)
 	if value == 0 && first(record, keys...) == nil {
+		return nil
+	}
+	return &value
+}
+
+func readOptionalFloat(record map[string]any, keys ...string) *float64 {
+	raw := first(record, keys...)
+	if raw == nil {
+		return nil
+	}
+	var value float64
+	var err error
+	switch number := raw.(type) {
+	case json.Number:
+		value, err = strconv.ParseFloat(number.String(), 64)
+	case float64:
+		value = number
+	case string:
+		value, err = strconv.ParseFloat(strings.TrimSpace(number), 64)
+	default:
+		return nil
+	}
+	if err != nil {
 		return nil
 	}
 	return &value

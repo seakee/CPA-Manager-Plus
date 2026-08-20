@@ -209,6 +209,8 @@ Manager Server 管理：
 | `USAGE_POLL_INTERVAL_MS`                | `500`                                                       | 空闲轮询间隔。                                                                                                                                             |
 | `USAGE_QUERY_LIMIT`                     | `50000`                                                     | 最近 usage events 返回上限。                                                                                                                               |
 | `USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED` | `true`                                                      | 启用小时汇总 worker，以及 Dashboard 和严格无筛选 Usage Analytics 的 rollup 查询；排查 SQLite 写竞争或汇总异常时可临时设为 `false`，查询会回退 raw events。 |
+| `USAGE_ARCHIVE_RETENTION_ENABLED`       | `false`                                                     | 启用启动时及每 24 小时一次的历史归档、校验和有界删除 worker；默认关闭，要求小时汇总保持启用，修改后需重启 Manager Server。                                 |
+| `USAGE_ARCHIVE_RETENTION_DAYS`          | `30`                                                        | 自动 retention 的保留天数；仅在 retention 与小时汇总同时启用时生效。                                                                                       |
 | `USAGE_CORS_ORIGINS`                    | `*`                                                         | 兼容接口 CORS origin。                                                                                                                                     |
 | `USAGE_RESP_TLS_SKIP_VERIFY`            | `false`                                                     | RESP 跳过 TLS 校验。                                                                                                                                       |
 | `USAGE_QUOTA_COOLDOWN_ENABLED`          | `false`                                                     | 启用多供应商额度冷却 worker，严格处理 Codex usage-limit 和 xAI free-usage-exhausted 信号。                                                                 |
@@ -238,6 +240,51 @@ USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED=false
 ```
 
 关闭后需重启 Manager Server，Dashboard 和 Usage Analytics 将始终读取 raw events。除下述启动时的一次性格式升级外，关闭该运行时开关本身不会删除当前格式的 rollup 数据。该开关不接入 UI。
+
+历史用量归档位于解析后数据目录中的 `usage-archives/`。每个 segment 都是按顺序编号的 gzip JSONL 文件（`segment-*.jsonl.gz`）；用量导入只读取解压后的 JSONL，不会根据 `.gz` 后缀自动解压，恢复时应按 [备份与恢复](./backup.md) 的归档恢复步骤处理。如果只通过 `USAGE_DB_PATH` 或 `dbPath` 覆盖数据库位置、没有显式配置数据目录，归档目录会放在该 SQLite 文件旁；如果数据目录和数据库路径都显式配置，则归档目录跟随数据目录，因此备份时必须包含这个可能独立的位置。POSIX 系统上，Manager Server 将目录创建为 `0700`、文件创建为 `0600`；Windows 会继承父目录 ACL，因此应确保归档父目录仅服务账号和授权管理员可访问。SQLite 中保存 archive run、segment、维护锁和 event identity ledger。手动维护接口只接受 CPAMP Admin Key：
+
+- `POST /v0/management/usage/archives/preview`：提交 `{"cutoff_timestamp_ms": ...}`，只读预览可归档事件数量和估算大小。
+- `POST /v0/management/usage/archives`：提交相同的 `{"cutoff_timestamp_ms": ...}` 请求体并创建 `previewed` run。
+- `GET /v0/management/usage/archives?limit=20`：读取最近的脱敏 run 摘要。
+- `GET /v0/management/usage/archives/{id}`：读取脱敏进度和 segment 元数据。
+- `POST /v0/management/usage/archives/{id}/resume`：继续 archive 或失败恢复。
+- `POST /v0/management/usage/archives/{id}/verify`：重新读取 manifest、segment checksum 和 event digest。
+- `POST /v0/management/usage/archives/{id}/delete`：仅在归档已验证且所有必需派生读路径覆盖 run target 后，按批次删除 raw rows。
+- `HEAD /v0/management/usage/maintenance`：仅 Admin Key 可用的 capability probe；支持该功能的 Manager Server 返回 `204 No Content`。
+- `GET /v0/management/usage/maintenance`：读取 raw/已删除数量、活动 run/锁、迁移与 aggregate readiness，以及 SQLite page/freelist 和文件大小统计。
+
+创建 run 不会立即删除 raw。手动执行 `resume` 时，如果 cache-accounting migration 尚未完成会返回 coverage conflict；迁移完成后会先补齐仍待处理的 response metadata，再写入第一个 segment。稳定的手动 `archived` 和 `verified` run 不会阻止后续手动归档，因此无需启用删除也可以持续使用 archive/verify；自动 retention run 则会保持活动状态，直到 delete 阶段完成。只有 archive 文件、manifest 和 identity ledger 已验证，并且 cache-accounting migration、永久小时 aggregate、pricing/monitoring rollup、监控搜索索引以及 account-history/dashboard checkpoint 都已追平 run target 后，才允许删除。`GET /v0/management/usage/maintenance` 汇总主要 readiness 信号，而 delete 会在每个有界事务内重新执行完整门禁。服务重启或进程中断后可用同一个 run 继续。删除只清理 `usage_events` 行，归档文件和 identity ledger 会保留，因此重复导入已归档事件仍会被幂等跳过。该流程不会在线执行 SQLite `VACUUM`。自动 retention 默认关闭；当 `USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED=false` 时不会启动，启用前应确认归档目录有足够空间并演练恢复。
+
+当当前查询范围或 summary comparison 范围命中已完成验证归档并删除的 raw 历史时，Monitoring analytics 响应会返回 `coverage` 对象。当前范围与对比范围的 raw/deleted 数量分别报告；这些数量只按时间范围统计，不会被提供方、模型、账号、搜索或其他 analytics 筛选条件缩小。对象同时包含 `core_aggregate_used` 和机器可读的 `fidelity_limitations`。永久小时 aggregate 与 event projection 仍可准确提供受支持的 summary、model 和 timeline 核心统计，但仅依赖 raw 的事件明细、延迟百分位、分布、失败诊断、凭证时间线或不受支持的搜索可能不完整。Monitoring 与 Usage Analytics 页面会明确展示该限制，不会把缺失的 raw rows 或仅 raw 指标中的零值误认为完整历史。
+
+只有面板由 Manager Server 托管且 Manager Service 可用时，才会显示“用量维护”页面；普通 CPA 托管面板不会显示该入口。页面可以执行 preview/create/resume/verify/delete 并显示可回收空间，但物理压缩始终是离线 CLI 操作。
+
+### 停服回收 SQLite 空间
+
+逻辑删除后，SQLite 文件通常不会立即缩小。执行压缩前，先按 [备份与恢复](./backup.md) 备份完整数据组，停止所有连接同一数据库的 Manager Server，并保守预留至少相当于当前数据库文件大小的临时空间。静态的 `previewed`、`archived`、`verified` 和 `failed` run 不会阻断压缩；维护锁以及处于 `archiving`、`verifying`、`deleting` 的活动阶段会阻断。未完成的派生数据迁移可以保留，其 checkpoint 会被原样保存。不要手工删除 WAL、SHM 或维护锁。
+
+原生包：
+
+```bash
+cpa-manager-plus compact-usage --db-path ./data/usage.sqlite
+```
+
+Docker Compose（服务已停止）：
+
+```bash
+docker compose stop cpa-manager-plus
+docker compose run --rm --no-deps cpa-manager-plus \
+  compact-usage --db-path /data/usage.sqlite
+docker compose up -d cpa-manager-plus
+```
+
+Windows PowerShell 在停止服务后运行：
+
+```powershell
+.\cpa-manager-plus.exe compact-usage --db-path .\data\usage.sqlite
+```
+
+命令会取得 Manager Server 使用的同一进程级数据库锁，通过单一 SQLite 连接获取独占访问，依次执行 `quick_check`、外键检查、`wal_checkpoint(TRUNCATE)`、`VACUUM`、`integrity_check` 和第二次外键检查，再比较压缩前后的逻辑用量摘要。输出包含压缩前后的数据库、WAL、SHM、page 和 freelist 统计。它不会创建归档、删除 raw rows、重写归档文件、推进派生数据迁移或触碰 `data.key`。残留维护锁仍会阻断压缩：若锁属于可恢复的活动或 `failed` run，应启动 Manager Server 并继续该 run；若锁仍关联非活动或终态 run，应保留备份和日志并停止压缩以进一步诊断。不得手工删除维护锁。失败后保留数据库现场和完整备份。
 
 升级到使用无损 model 编码的版本时，Manager Server 会清空旧的 `usage_dashboard_hourly_rollups` 并重置 `dashboard_hourly` checkpoint。小时汇总启用时，后台 worker 会随后分批重建；禁用时则保持为空，直到重新启用。该格式迁移本身不会修改或删除 `usage_events`，也不会重置 account-history rollup；重建完成前相关长窗口查询会临时回退 raw events。新的编码会区分空 model、字面量 `-` 和包含前后空格的 model，避免合法的 `-` model 使整个查询回退。
 
@@ -270,35 +317,44 @@ cpa-manager-plus cleanup-derived --db-path /data/usage.sqlite
 
 ## 运行时接口
 
-| Endpoint                                                         | 用途                                                     |
-| ---------------------------------------------------------------- | -------------------------------------------------------- |
-| `GET /health`                                                    | 健康检查。                                               |
-| `GET /status`                                                    | 采集器、SQLite、事件计数和后台数据迁移进度。             |
-| `GET /usage-service/info`                                        | Manager Server 模式探测。                                |
-| `GET /usage-service/config`                                      | 读取 CPAMP Manager Server 配置。                         |
-| `PUT /usage-service/config`                                      | 保存 CPAMP 配置，必要时重启采集器。                      |
-| `GET /usage-service/account-processing-policy`                   | 读取配额冷却、账号处理队列和自动禁用策略。               |
-| `PATCH /usage-service/account-processing-policy`                 | 更新账号处理策略；被环境变量锁定的字段不能通过接口修改。 |
-| `GET /usage-service/quota-cooldowns`                             | 读取当前活跃的配额冷却，用于凭证管理展示恢复提示。       |
-| `POST /setup`                                                    | 首次 setup。                                             |
-| `GET /v0/management/usage`                                       | 兼容 usage data。                                        |
-| `GET /v0/management/usage/export`                                | 导出 JSONL usage events。                                |
-| `POST /v0/management/usage/import`                               | 导入 JSONL 或兼容旧快照。                                |
-| `GET /v0/management/model-prices/usage-summary`                  | 返回模型价格页使用的轻量模型调用汇总。                   |
-| `GET /v0/management/model-prices`                                | 模型价格。                                               |
-| `PUT /v0/management/model-prices`                                | 替换保存的模型价格。                                     |
-| `POST /v0/management/model-prices/sync`                          | 价格同步。                                               |
-| `GET /v0/management/api-key-aliases`                             | API 密钥别名。                                           |
-| `GET /v0/management/account-action-candidates`                   | 认证问题处理队列。                                       |
-| `POST /v0/management/account-action-candidates/{id}/ignore`      | 忽略账号处理候选项。                                     |
-| `POST /v0/management/account-action-candidates/{id}/resolve`     | 标记账号处理候选项已处理。                               |
-| `POST /v0/management/account-action-candidates/{id}/enable`      | 重新启用候选项关联的认证文件。                           |
-| `DELETE /v0/management/account-action-candidates/{id}/auth-file` | 删除候选项关联的认证文件。                               |
-| `GET /v0/management/dashboard/*`                                 | 仪表盘数据。                                             |
-| `GET /v0/management/monitoring/*`                                | 请求监控数据。                                           |
-| `GET /v0/management/codex-inspection/*`                          | 服务端 Codex 巡检。                                      |
-| `GET /models`, `GET /v1/models`                                  | setup 后代理 model-list 请求到 CPA。                     |
-| `/v0/management/*`                                               | CPAMP 未处理的路径代理到 CPA。                           |
+| Endpoint                                                         | 用途                                                          |
+| ---------------------------------------------------------------- | ------------------------------------------------------------- |
+| `GET /health`                                                    | 健康检查。                                                    |
+| `GET /status`                                                    | 采集器、SQLite、事件计数和后台数据迁移进度。                  |
+| `GET /usage-service/info`                                        | Manager Server 模式探测。                                     |
+| `GET /usage-service/config`                                      | 读取 CPAMP Manager Server 配置。                              |
+| `PUT /usage-service/config`                                      | 保存 CPAMP 配置，必要时重启采集器。                           |
+| `GET /usage-service/account-processing-policy`                   | 读取配额冷却、账号处理队列和自动禁用策略。                    |
+| `PATCH /usage-service/account-processing-policy`                 | 更新账号处理策略；被环境变量锁定的字段不能通过接口修改。      |
+| `GET /usage-service/quota-cooldowns`                             | 读取当前活跃的配额冷却，用于凭证管理展示恢复提示。            |
+| `POST /setup`                                                    | 首次 setup。                                                  |
+| `GET /v0/management/usage`                                       | 兼容 usage data。                                             |
+| `GET /v0/management/usage/export`                                | 导出 JSONL usage events。                                     |
+| `POST /v0/management/usage/import`                               | 导入 JSONL 或兼容旧快照。                                     |
+| `POST /v0/management/usage/archives/preview`                     | 预览历史归档范围（仅 Admin Key）。                            |
+| `POST /v0/management/usage/archives`                             | 创建历史归档 run（仅 Admin Key）。                            |
+| `GET /v0/management/usage/archives?limit=20`                     | 读取最近归档 run 的脱敏摘要（仅 Admin Key）。                 |
+| `GET /v0/management/usage/archives/{id}`                         | 查询脱敏归档 run 状态和 segment 元数据（仅 Admin Key）。      |
+| `POST /v0/management/usage/archives/{id}/resume`                 | 恢复归档 run（仅 Admin Key）。                                |
+| `POST /v0/management/usage/archives/{id}/verify`                 | 校验归档 manifest/segment（仅 Admin Key）。                   |
+| `POST /v0/management/usage/archives/{id}/delete`                 | 有界删除已验证 raw 数据（仅 Admin Key）。                     |
+| `HEAD /v0/management/usage/maintenance`                          | 探测用量维护能力；成功返回 `204 No Content`（仅 Admin Key）。 |
+| `GET /v0/management/usage/maintenance`                           | 读取维护 readiness 和 SQLite 可回收空间（仅 Admin Key）。     |
+| `GET /v0/management/model-prices/usage-summary`                  | 返回模型价格页使用的轻量模型调用汇总。                        |
+| `GET /v0/management/model-prices`                                | 模型价格。                                                    |
+| `PUT /v0/management/model-prices`                                | 替换保存的模型价格。                                          |
+| `POST /v0/management/model-prices/sync`                          | 价格同步。                                                    |
+| `GET /v0/management/api-key-aliases`                             | API 密钥别名。                                                |
+| `GET /v0/management/account-action-candidates`                   | 认证问题处理队列。                                            |
+| `POST /v0/management/account-action-candidates/{id}/ignore`      | 忽略账号处理候选项。                                          |
+| `POST /v0/management/account-action-candidates/{id}/resolve`     | 标记账号处理候选项已处理。                                    |
+| `POST /v0/management/account-action-candidates/{id}/enable`      | 重新启用候选项关联的认证文件。                                |
+| `DELETE /v0/management/account-action-candidates/{id}/auth-file` | 删除候选项关联的认证文件。                                    |
+| `GET /v0/management/dashboard/*`                                 | 仪表盘数据。                                                  |
+| `GET /v0/management/monitoring/*`                                | 请求监控数据。                                                |
+| `GET /v0/management/codex-inspection/*`                          | 服务端 Codex 巡检。                                           |
+| `GET /models`, `GET /v1/models`                                  | setup 后代理 model-list 请求到 CPA。                          |
+| `/v0/management/*`                                               | CPAMP 未处理的路径代理到 CPA。                                |
 
 setup 后，Manager Server 管理接口需要：
 
@@ -317,6 +373,7 @@ usage.sqlite
 usage.sqlite-wal
 usage.sqlite-shm
 data.key
+usage-archives/
 ```
 
 安全边界：
@@ -329,6 +386,7 @@ data.key
 - 如果 CPA 连接由 env/secret 管理，同时备份安装目录里的 secret 文件。
 - 请求元数据可能包含模型名、端点、账号标签、项目快照、Token 用量、延迟和失败摘要。
 - 原始失败 body 只保存在本地 SQLite；普通 API 和 JSONL 导出只暴露脱敏摘要。
+- 归档 JSONL 可能包含事件级 `fail_body` 和 `raw_json`，应使用与在线 SQLite 相同的访问控制保护。
 
 ## 导入和导出
 
@@ -338,5 +396,7 @@ Manager Server 可以导出 JSONL / NDJSON usage events。
 
 - Manager Server 导出的 JSONL / NDJSON。
 - 带 request-level details 的旧 usage snapshot。
+
+大文件通过可恢复分块会话上传，总文件大小受 `USAGE_IMPORT_DISK_QUOTA_BYTES` 限制；单条 JSONL 记录或旧快照 `details` 数组中的单个对象不得超过 10 MiB。该单记录限制不会因分块上传而放宽。
 
 只有聚合数据的旧文件不能重建请求级 monitoring。对准确性有要求时，先在备份或 staging 数据库上测试导入。

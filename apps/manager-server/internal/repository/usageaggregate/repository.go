@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,14 +15,56 @@ import (
 )
 
 const (
-	AggregateName = "hourly_core"
-	SchemaVersion = 3
-	hourMS        = int64(time.Hour / time.Millisecond)
+	AggregateName     = "hourly_core"
+	SchemaVersion     = 3
+	StructureRevision = "schema-3:model-1"
+	hourMS            = int64(time.Hour / time.Millisecond)
 )
 
 var analyticsModelExpression = usageidentity.SQLRequestAnalyticsModelExpression("model", "requested_model")
 
 var ErrUnsupportedSchema = errors.New("unsupported usage hourly aggregate schema")
+
+func IsCurrentStructureRevision(revision string) bool {
+	coreRevision, valid := stripAccountingMigrationRevision(revision)
+	if !valid {
+		return false
+	}
+	if coreRevision == StructureRevision {
+		return true
+	}
+	suffix, ok := strings.CutPrefix(coreRevision, StructureRevision+":rebuild-")
+	if !ok || len(suffix) != 32 {
+		return false
+	}
+	for _, value := range suffix {
+		if (value < '0' || value > '9') &&
+			(value < 'a' || value > 'f') &&
+			(value < 'A' || value > 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+func stripAccountingMigrationRevision(revision string) (string, bool) {
+	const marker = ":cache-accounting-v2-"
+	index := strings.LastIndex(revision, marker)
+	if index < 0 {
+		return revision, true
+	}
+	parts := strings.Split(revision[index+len(marker):], "-")
+	if len(parts) != 2 {
+		return "", false
+	}
+	for _, part := range parts {
+		value, err := strconv.ParseInt(part, 10, 64)
+		if err != nil || value <= 0 {
+			return "", false
+		}
+	}
+	return revision[:index], true
+}
 
 type Repository interface {
 	CatchUp(ctx context.Context, limit int, nowMS int64) (CatchUpResult, error)

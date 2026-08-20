@@ -16,7 +16,12 @@ import type {
   MonitoringAnalyticsRequest,
   MonitoringAnalyticsResponse,
   QuotaCooldownInfo,
+  UsageArchiveList,
+  UsageArchivePreview,
+  UsageArchiveRunSummary,
+  UsageArchiveStatus,
   UsageHeaderSnapshotsResponse,
+  UsageMaintenanceStatus,
   UsageServiceInfo,
   UsageServiceStatus,
 } from '@/services/api/usageService';
@@ -73,6 +78,319 @@ const minute = 60 * 1000;
 const hour = 60 * minute;
 const day = 24 * hour;
 const demoOAuthAccountProviders = new Set(['codex', 'claude', 'antigravity', 'kimi', 'xai']);
+
+let demoUsageArchiveSequence = 2;
+const createDemoUsageArchiveStatuses = (): UsageArchiveStatus[] => [
+  {
+    run: {
+      id: 'demo-archive-2',
+      mode: 'retention',
+      status: 'completed',
+      cutoff_timestamp_ms: now() - 30 * day,
+      target_event_id: 142_000,
+      event_count: 37_000,
+      estimated_bytes: 48_200_000,
+      last_archived_event_id: 142_000,
+      archived_event_count: 37_000,
+      archived_uncompressed_bytes: 45_900_000,
+      archived_compressed_bytes: 7_800_000,
+      last_deleted_event_id: 142_000,
+      deleted_event_count: 37_000,
+      created_at_ms: now() - 29 * day,
+      updated_at_ms: now() - 29 * day + 120_000,
+      completed_at_ms: now() - 29 * day + 120_000,
+      has_error: false,
+    },
+    segments: [],
+  },
+  {
+    run: {
+      id: 'demo-archive-1',
+      mode: 'manual',
+      status: 'completed',
+      cutoff_timestamp_ms: now() - 60 * day,
+      target_event_id: 105_000,
+      event_count: 25_000,
+      estimated_bytes: 31_400_000,
+      last_archived_event_id: 105_000,
+      archived_event_count: 25_000,
+      archived_uncompressed_bytes: 30_100_000,
+      archived_compressed_bytes: 5_200_000,
+      last_deleted_event_id: 105_000,
+      deleted_event_count: 25_000,
+      created_at_ms: now() - 59 * day,
+      updated_at_ms: now() - 59 * day + 90_000,
+      completed_at_ms: now() - 59 * day + 90_000,
+      has_error: false,
+    },
+    segments: [],
+  },
+];
+let demoUsageArchiveStatuses = createDemoUsageArchiveStatuses();
+
+export const resetDemoUsageArchiveState = (): void => {
+  demoUsageArchiveSequence = 2;
+  demoUsageArchiveStatuses = createDemoUsageArchiveStatuses();
+};
+
+const summarizeDemoUsageArchive = (run: UsageArchiveRunSummary): UsageArchiveRunSummary => ({
+  ...run,
+});
+
+const createDemoUsageArchiveError = (code: string, status: number, message: string) => {
+  const error = new Error(message) as Error & { code?: string; status?: number };
+  error.code = code;
+  error.status = status;
+  return error;
+};
+
+const demoUsageArchiveIsActive = (run: UsageArchiveRunSummary) =>
+  !['completed', 'cancelled'].includes(run.status) &&
+  (run.mode === 'retention' || !['archived', 'verified'].includes(run.status));
+
+const requireDemoUsageArchive = (runId: string): UsageArchiveStatus => {
+  const status = demoUsageArchiveStatuses.find((item) => item.run.id === runId);
+  if (!status) {
+    throw createDemoUsageArchiveError(
+      'usage_archive_not_found',
+      404,
+      'usage archive run not found'
+    );
+  }
+  return status;
+};
+
+export const previewDemoUsageArchive = (cutoffTimestampMs: number): UsageArchivePreview => ({
+  cutoff_timestamp_ms: cutoffTimestampMs,
+  target_event_id: 184_260,
+  event_count: 12_480,
+  estimated_bytes: 18_600_000,
+  min_timestamp_ms: cutoffTimestampMs - 7 * day,
+  max_timestamp_ms: cutoffTimestampMs - 1,
+});
+
+export const createDemoUsageArchive = (cutoffTimestampMs: number): UsageArchiveStatus => {
+  const active = demoUsageArchiveStatuses.find((item) => demoUsageArchiveIsActive(item.run));
+  if (active) {
+    throw createDemoUsageArchiveError(
+      'usage_archive_maintenance_locked',
+      409,
+      `usage maintenance is already active: run ${active.run.id}`
+    );
+  }
+  const preview = previewDemoUsageArchive(cutoffTimestampMs);
+  const timestamp = now();
+  const status: UsageArchiveStatus = {
+    run: {
+      id: `demo-archive-${++demoUsageArchiveSequence}`,
+      mode: 'manual',
+      status: 'previewed',
+      cutoff_timestamp_ms: preview.cutoff_timestamp_ms,
+      target_event_id: preview.target_event_id,
+      event_count: preview.event_count,
+      estimated_bytes: preview.estimated_bytes,
+      last_archived_event_id: 0,
+      archived_event_count: 0,
+      archived_uncompressed_bytes: 0,
+      archived_compressed_bytes: 0,
+      last_deleted_event_id: 0,
+      deleted_event_count: 0,
+      created_at_ms: timestamp,
+      updated_at_ms: timestamp,
+      has_error: false,
+    },
+    segments: [],
+  };
+  demoUsageArchiveStatuses.unshift(status);
+  return clone(status);
+};
+
+export const getDemoUsageArchive = (runId: string): UsageArchiveStatus =>
+  clone(requireDemoUsageArchive(runId));
+
+export const getDemoUsageArchives = (limit = 20): UsageArchiveList => {
+  const runs = demoUsageArchiveStatuses
+    .slice()
+    .sort((left, right) => right.run.created_at_ms - left.run.created_at_ms)
+    .slice(0, limit)
+    .map((item) => summarizeDemoUsageArchive(item.run));
+  return {
+    runs,
+    total: demoUsageArchiveStatuses.length,
+    status_counts: demoUsageArchiveStatuses.reduce<Record<string, number>>((counts, item) => {
+      counts[item.run.status] = (counts[item.run.status] ?? 0) + 1;
+      return counts;
+    }, {}),
+  };
+};
+
+export const resumeDemoUsageArchive = (runId: string): UsageArchiveStatus => {
+  const status = requireDemoUsageArchive(runId);
+  const resumeStatus =
+    status.run.status === 'failed' ? status.run.resume_status : status.run.status;
+  if (resumeStatus === 'previewed' || resumeStatus === 'archiving') {
+    const timestamp = now();
+    status.run.status = 'archived';
+    status.run.resume_status = undefined;
+    status.run.has_error = false;
+    status.run.last_archived_event_id = status.run.target_event_id;
+    status.run.archived_event_count = status.run.event_count;
+    status.run.archived_uncompressed_bytes = status.run.estimated_bytes;
+    status.run.archived_compressed_bytes = Math.round(status.run.estimated_bytes * 0.18);
+    status.run.archived_at_ms = timestamp;
+    status.run.updated_at_ms = timestamp;
+    status.segments = [
+      {
+        run_id: status.run.id,
+        sequence: 1,
+        status: 'published',
+        first_event_id: Math.max(1, status.run.target_event_id - status.run.event_count + 1),
+        last_event_id: status.run.target_event_id,
+        min_timestamp_ms: status.run.cutoff_timestamp_ms - 7 * day,
+        max_timestamp_ms: status.run.cutoff_timestamp_ms - 1,
+        event_count: status.run.event_count,
+        uncompressed_bytes: status.run.archived_uncompressed_bytes,
+        compressed_bytes: status.run.archived_compressed_bytes,
+        created_at_ms: timestamp,
+      },
+    ];
+  } else if (resumeStatus === 'verifying') {
+    const timestamp = now();
+    status.run.status = 'verified';
+    status.run.resume_status = undefined;
+    status.run.has_error = false;
+    status.run.verified_at_ms = timestamp;
+    status.run.updated_at_ms = timestamp;
+    status.segments = status.segments.map((segment) => ({
+      ...segment,
+      status: 'verified',
+      verified_at_ms: timestamp,
+    }));
+  } else if (resumeStatus === 'deleting') {
+    const timestamp = now();
+    status.run.status = 'completed';
+    status.run.resume_status = undefined;
+    status.run.has_error = false;
+    status.run.deleted_event_count = status.run.event_count;
+    status.run.last_deleted_event_id = status.run.target_event_id;
+    status.run.completed_at_ms = timestamp;
+    status.run.updated_at_ms = timestamp;
+  } else {
+    throw createDemoUsageArchiveError(
+      'usage_archive_invalid_state',
+      409,
+      'usage archive run is in an invalid state'
+    );
+  }
+  return clone(status);
+};
+
+export const verifyDemoUsageArchive = (runId: string): UsageArchiveStatus => {
+  const status = requireDemoUsageArchive(runId);
+  if (status.run.status !== 'archived' && status.run.status !== 'verifying') {
+    throw createDemoUsageArchiveError(
+      'usage_archive_invalid_state',
+      409,
+      'usage archive run is in an invalid state'
+    );
+  }
+  const timestamp = now();
+  status.run.status = 'verified';
+  status.run.resume_status = undefined;
+  status.run.has_error = false;
+  status.run.verified_at_ms = timestamp;
+  status.run.updated_at_ms = timestamp;
+  status.segments = status.segments.map((segment) => ({
+    ...segment,
+    status: 'verified',
+    verified_at_ms: timestamp,
+  }));
+  return clone(status);
+};
+
+export const deleteDemoUsageArchive = (runId: string): UsageArchiveStatus => {
+  const status = requireDemoUsageArchive(runId);
+  if (status.run.status !== 'verified' && status.run.status !== 'deleting') {
+    throw createDemoUsageArchiveError(
+      'usage_archive_invalid_state',
+      409,
+      'usage archive run is in an invalid state'
+    );
+  }
+  const timestamp = now();
+  status.run.status = 'completed';
+  status.run.resume_status = undefined;
+  status.run.has_error = false;
+  status.run.deleted_event_count = status.run.event_count;
+  status.run.last_deleted_event_id = status.run.target_event_id;
+  status.run.completed_at_ms = timestamp;
+  status.run.updated_at_ms = timestamp;
+  return clone(status);
+};
+
+export const getDemoUsageMaintenance = (): UsageMaintenanceStatus => {
+  const active = demoUsageArchiveStatuses.find((item) => demoUsageArchiveIsActive(item.run));
+  const dynamicArchived = demoUsageArchiveStatuses.reduce(
+    (sum, item) => sum + Math.max(0, item.run.archived_event_count - item.run.deleted_event_count),
+    0
+  );
+  const dynamicDeleted = demoUsageArchiveStatuses
+    .slice(0, Math.max(0, demoUsageArchiveStatuses.length - 2))
+    .reduce((sum, item) => sum + item.run.deleted_event_count, 0);
+  return {
+    raw_event_count: Math.max(0, 184_260 - dynamicDeleted),
+    raw_min_timestamp_ms: now() - 120 * day,
+    raw_max_timestamp_ms: now() - minute,
+    raw_archived_event_count: dynamicArchived,
+    raw_deleted_event_count: 62_000 + dynamicDeleted,
+    active_run: active ? summarizeDemoUsageArchive(active.run) : undefined,
+    migration: {
+      name: 'usage_cache_accounting_v2',
+      status: 'completed',
+      last_event_id: 184_260,
+      target_event_id: 184_260,
+      processed_rows: 184_260,
+      changed_rows: 1_420,
+      updated_at_ms: now() - 3 * day,
+    },
+    hourly_aggregate: {
+      name: 'hourly_core',
+      schema_version: 1,
+      status: 'ready',
+      coverage_event_id: 184_260,
+      target_event_id: 184_260,
+      updated_at_ms: now() - minute,
+    },
+    readiness: {
+      migration_ready: true,
+      hourly_aggregate_ready: true,
+      archive_delete_enabled: true,
+    },
+    migration_coverage: {
+      status: 'completed',
+      watermark_event_id: 184_260,
+      target_event_id: 184_260,
+      complete: true,
+    },
+    hourly_aggregate_coverage: {
+      status: 'ready',
+      watermark_event_id: 184_260,
+      target_event_id: 184_260,
+      complete: true,
+    },
+    storage: {
+      page_size: 4_096,
+      page_count: 78_400,
+      freelist_count: 12_360,
+      reclaimable_bytes: 50_626_560,
+      database_bytes: 321_126_400,
+      wal_bytes: 0,
+      shm_bytes: 0,
+      total_bytes: 321_126_400,
+    },
+    compact_requires_stopped_server: true,
+  };
+};
 
 type DemoCredentialFilterable = {
   id?: string;

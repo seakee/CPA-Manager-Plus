@@ -75,6 +75,17 @@ const createPresentationSnapshot = (id: string): MonitoringPresentationSnapshot 
   const row = createMonitoringEventRow({ id });
   return {
     summary: buildMonitoringSummary([row]),
+    coverage: {
+      scope: 'time_range',
+      mode: 'mixed',
+      raw_complete: false,
+      core_aggregate_used: true,
+      raw_event_count: 1,
+      raw_deleted_event_count: id.length,
+      min_deleted_timestamp_ms: 1,
+      max_deleted_timestamp_ms: 2,
+      fidelity_limitations: [],
+    },
     timeline: [{ label: id, requests: 1, tokens: row.totalTokens, cost: row.totalCost }],
     timelineGranularity: 'hour',
     hourlyDistribution: [],
@@ -489,9 +500,8 @@ describe('buildScopeFilteredRows', () => {
 
   it('clamps local summary cache rates and respects resolved GPT-5.6 aliases', () => {
     expect(
-      buildMonitoringSummary([
-        createMonitoringEventRow({ inputTokens: 10, cachedTokens: 100 }),
-      ]).cacheHitRate
+      buildMonitoringSummary([createMonitoringEventRow({ inputTokens: 10, cachedTokens: 100 })])
+        .cacheHitRate
     ).toBe(1);
 
     expect(
@@ -620,6 +630,7 @@ describe('withoutMonitoringSnapshotEvents', () => {
     const cached = withoutMonitoringSnapshotEvents(snapshot);
 
     expect(cached.summary).toBe(snapshot.summary);
+    expect(cached.coverage).toBe(snapshot.coverage);
     expect(cached.filteredRows).toEqual([]);
     expect(cached.eventsLoadedCount).toBe(0);
     expect(cached.eventsTotalCount).toBe(0);

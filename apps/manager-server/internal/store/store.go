@@ -20,6 +20,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageaggregate"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagearchive"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageevent"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagemonitoring"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagepricing"
@@ -105,6 +106,18 @@ type UsagePricingHourlyRow = usagepricing.HourlyRow
 type UsagePricingAccountRow = usagepricing.AccountRow
 type UsageMonitoringState = usagemonitoring.State
 type UsageMonitoringCatchUpResult = usagemonitoring.CatchUpResult
+type UsageArchivePreview = usagearchive.Preview
+type UsageArchiveRun = usagearchive.Run
+type UsageArchiveRunListFilter = usagearchive.RunListFilter
+type UsageArchiveRunListResult = usagearchive.RunListResult
+type UsageArchiveSegment = usagearchive.Segment
+type UsageArchiveRecord = usagearchive.Record
+type UsageArchiveRecordRef = usagearchive.RecordRef
+type UsageArchiveDeleteBatchResult = usagearchive.DeleteBatchResult
+type UsageArchiveRawCoverage = usagearchive.RawCoverage
+type UsageMaintenanceLock = usagearchive.MaintenanceLock
+type UsageMaintenanceCounts = usagearchive.MaintenanceCounts
+type SQLitePageStats = sqliterepo.PageStats
 
 type UsageHourlyPricingSnapshot struct {
 	AggregateRows      []UsageHourlyAggregateRow
@@ -138,6 +151,7 @@ type Store struct {
 	QuotaCooldowns   quotacooldown.Repository
 	QuotaSnapshots   quotasnapshot.Repository
 	UsageAggregates  usageaggregate.Repository
+	UsageArchives    *usagearchive.Repository
 	UsagePricing     usagepricing.Repository
 	UsageMonitoring  usagemonitoring.Repository
 	UsageRollups     usagerollup.Repository
@@ -165,6 +179,7 @@ func New(db *sql.DB, protector ...*security.Protector) *Store {
 		QuotaCooldowns:   quotacooldown.New(db),
 		QuotaSnapshots:   quotasnapshot.New(db),
 		UsageAggregates:  usageaggregate.New(db),
+		UsageArchives:    usagearchive.New(db),
 		UsagePricing:     usagepricing.New(db),
 		UsageMonitoring:  usagemonitoring.New(db),
 		UsageRollups:     usagerollup.New(db),
@@ -481,6 +496,26 @@ func (s *Store) UsageHourlyAggregateState(ctx context.Context) (UsageHourlyAggre
 
 func (s *Store) UsageHourlyAggregateRows(ctx context.Context, filter UsageHourlyAggregateFilter) ([]UsageHourlyAggregateRow, UsageHourlyAggregateState, bool, error) {
 	return s.UsageAggregates.LoadRows(ctx, filter)
+}
+
+func (s *Store) ActiveUsageArchiveRun(ctx context.Context) (UsageArchiveRun, bool, error) {
+	return s.UsageArchives.ActiveRun(ctx)
+}
+
+func (s *Store) ListUsageArchiveRuns(ctx context.Context, filter UsageArchiveRunListFilter) (UsageArchiveRunListResult, error) {
+	return s.UsageArchives.ListRuns(ctx, filter)
+}
+
+func (s *Store) UsageMaintenanceLock(ctx context.Context) (UsageMaintenanceLock, bool, error) {
+	return s.UsageArchives.MaintenanceLock(ctx)
+}
+
+func (s *Store) UsageMaintenanceCounts(ctx context.Context) (UsageMaintenanceCounts, error) {
+	return s.UsageArchives.MaintenanceCounts(ctx)
+}
+
+func (s *Store) SQLitePageStats(ctx context.Context) (SQLitePageStats, error) {
+	return sqliterepo.ReadPageStats(ctx, s.db)
 }
 
 func (s *Store) CatchUpUsagePricing(ctx context.Context, limit int, nowMS int64) (UsagePricingCatchUpResult, error) {

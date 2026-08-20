@@ -627,6 +627,34 @@ describe('UsageAnalyticsPage', () => {
     expect(getText(renderer.root)).toContain('analytics failed');
   });
 
+  it('shows current and comparison archive coverage separately', () => {
+    mocks.usageState = createUsageState({
+      coverage: {
+        scope: 'time_range',
+        mode: 'mixed',
+        raw_complete: false,
+        core_aggregate_used: true,
+        raw_event_count: 4,
+        raw_deleted_event_count: 2,
+        min_deleted_timestamp_ms: 1,
+        max_deleted_timestamp_ms: 2,
+        comparison_raw_event_count: 0,
+        comparison_raw_deleted_event_count: 3,
+        comparison_min_deleted_timestamp_ms: 3,
+        comparison_max_deleted_timestamp_ms: 4,
+        fidelity_limitations: ['event_details_require_raw_events'],
+      },
+    });
+
+    const renderer = renderPage();
+    const text = getText(renderer.root);
+
+    expect(text).toContain('monitoring.coverage_warning_title');
+    expect(text).toContain('monitoring.coverage_warning_current');
+    expect(text).toContain('monitoring.coverage_warning_comparison');
+    expect(text).toContain('monitoring.coverage_warning_limited');
+  });
+
   it('navigates to request monitoring details for a selected anomaly bucket', () => {
     mocks.usageState = createUsageState({
       filters: {

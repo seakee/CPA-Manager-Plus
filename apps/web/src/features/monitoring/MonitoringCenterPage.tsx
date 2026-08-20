@@ -58,6 +58,7 @@ import { MonitoringCustomRangeModal } from '@/features/monitoring/components/Mon
 import { MonitoringFiltersPanel } from '@/features/monitoring/components/MonitoringFiltersPanel';
 import { UsageImportProgressModal } from '@/features/monitoring/components/UsageImportProgressModal';
 import { usePageTransitionLayer } from '@/components/common/PageTransitionLayer';
+import { UsageCoverageWarning } from '@/components/usage/UsageCoverageWarning';
 import { IconInbox } from '@/components/ui/icons';
 import {
   MonitoringStatusHeader,
@@ -411,6 +412,7 @@ export function MonitoringCenterPage() {
     error: monitoringError,
     authFiles,
     summary: monitoringSummary,
+    coverage: monitoringCoverage,
     accountRows: monitoringAccountRows,
     apiKeyRows: monitoringApiKeyRows,
     filterOptions: monitoringFilterOptions,
@@ -1686,6 +1688,8 @@ export function MonitoringCenterPage() {
         onSearchChange={setSearchInput}
         onClearFilters={clearFilters}
       />
+
+      <UsageCoverageWarning coverage={monitoringCoverage} t={t} />
 
       <MonitoringSummarySection
         primaryCards={primarySummaryCards}

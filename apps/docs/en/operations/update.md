@@ -10,6 +10,7 @@ This guide explains how to upgrade CPAMP without losing SQLite data, `data.key`,
 4. Back up:
    - `usage.sqlite`, `usage.sqlite-wal`, and `usage.sqlite-shm`.
    - `data.key`.
+   - `usage-archives/` when historical archiving has been used.
    - Installer-managed `secrets/`, `.env`, `compose.yaml`, or `config.json`.
    - Custom reverse-proxy, systemd, launchd, or Windows service configuration.
 
@@ -22,6 +23,7 @@ See [Backup And Restore](./backup.md) for safe procedures. A CPA Management Key 
 - Account-history or dashboard-hourly rollups may pause during migration. Related pages temporarily fall back to raw events and can be slower until catch-up completes.
 - Do not start a second Manager Server against the same SQLite database or CPA queue to accelerate migration or rollup rebuilds.
 - Use authenticated `GET /status` to inspect migration, collector, and event state.
+- The Usage Maintenance page in a Manager Server-hosted panel shows migration, aggregate, active archive, and reclaimable SQLite state. A regular CPA-hosted panel does not show this entry.
 
 ## Docker Deployment Created By The Installer
 
@@ -235,13 +237,16 @@ Confirm:
 - `collector.lastError` is empty or understood.
 - `lastConsumedAt`, `lastInsertedAt`, and `eventCount` update normally.
 - Dashboard, Request Monitoring, and Usage Analytics load data.
+- Usage Maintenance loads recent archive runs and maintenance state. A mismatched old panel or Manager Server should report the feature as unsupported instead of presenting empty data.
 - Background migration completes and rollup checkpoints continue advancing in `/status`.
 - Reverse-proxied `/management.html`, `/usage-service/*`, and management API paths still route to the correct service.
+
+For releases involving historical archives or large databases, rehearse on staging: complete backup → reserve temporary free space at least equal to the database-file size → stop every Manager Server → `compact-usage` → start service → check health/status/analytics → decompress an archive sample as documented in [Backup And Restore](./backup.md) and confirm that the source database skips it idempotently → confirm that the same sample is added to an empty isolated recovery instance → restore the complete backup into a separate directory and verify again. Physical compaction is not an automatic upgrade step; run it only after logical deletion when disk space must be reclaimed. Pending derived-data migration checkpoints are preserved by compaction and continue after restart.
 
 ## Rollback Principles
 
 - Docker: restore the previous image tag and recreate the container while mounting the pre-upgrade data backup.
 - Native: stop the new version and restore the old binary, configuration, and pre-upgrade data backup.
 - Single-file panel: restore the previous `management.html`.
-- Do not assume an older binary can read a database migrated by a newer version. For schema or data-semantics changes, restore the pre-upgrade SQLite, WAL/SHM, and `data.key` together.
+- Do not assume an older binary can read a database migrated by a newer version. For schema or data-semantics changes, restore the pre-upgrade SQLite, WAL/SHM, `data.key`, and matching `usage-archives/` together.
 - If the cause is unclear, preserve both versions' logs and database copies. Do not repeatedly start different versions against the same live database.

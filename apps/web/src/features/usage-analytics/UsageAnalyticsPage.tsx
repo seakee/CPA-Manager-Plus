@@ -12,6 +12,7 @@ import type {
 import type { BarSeriesOption, HeatmapSeriesOption, LineSeriesOption } from 'echarts/charts';
 import type { ComposeOption, ECElementEvent } from 'echarts/core';
 import { EChartsView } from '@/components/charts/EChartsView';
+import { UsageCoverageWarning } from '@/components/usage/UsageCoverageWarning';
 import { Button } from '@/components/ui/Button';
 import { Select, type SelectOption } from '@/components/ui/Select';
 import { SegmentedTabs, type SegmentedTabItem } from '@/components/ui/SegmentedTabs';
@@ -2884,6 +2885,8 @@ function UsageAnalyticsPageInner() {
           </div>
         </section>
       ) : null}
+
+      <UsageCoverageWarning coverage={usage.coverage} t={t} />
 
       {noData ? (
         <EmptyState

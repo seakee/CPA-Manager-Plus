@@ -1,0 +1,19 @@
+.notice {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--warning-color) 45%, var(--border-color));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--warning-color) 9%, var(--bg-primary));
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.notice strong {
+  color: var(--warning-color);
+  font-size: 13px;
+}
+
+.notice span {
+  color: var(--text-secondary);
+}

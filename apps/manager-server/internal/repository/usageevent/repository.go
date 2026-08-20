@@ -3,6 +3,7 @@ package usageevent
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"io"
 	"time"
 
@@ -152,43 +153,55 @@ func (r *repository) InsertBatch(ctx context.Context, events []model.UsageEvent)
 		}
 
 		usage.NormalizeRequestMetadata(&event)
-		accounting := usage.NormalizeCacheAccounting(usage.CacheInputContext{
-			ExplicitMode:     event.CacheInputMode,
-			ExecutorType:     event.ExecutorType,
-			Provider:         event.Provider,
-			ProviderSnapshot: event.AuthProviderSnapshot,
-			ResolvedModel:    event.ResolvedModel,
-			RequestedModel:   event.RequestedModel,
-			DisplayModel:     event.Model,
-		}, event.InputTokens, event.CachedTokens, event.CacheTokens, event.CacheReadTokens, event.CacheCreationTokens)
-		event.CacheInputMode = accounting.Mode
-		event.NormalizedUncachedInputTokens = accounting.UncachedInputTokens
-		event.NormalizedTotalInputTokens = accounting.TotalInputTokens
-		event.NormalizedCacheReadTokens = accounting.CacheReadTokens
-		event.NormalizedCacheCreationTokens = accounting.CacheCreationTokens
-		if event.TotalTokens <= 0 {
-			event.TotalTokens = accounting.TotalInputTokens + max(event.OutputTokens, int64(0)) + max(event.ReasoningTokens, int64(0))
+		if event.PreserveArchiveDerivedFields {
+			if err := usage.ValidateArchiveDerivedFields(event); err != nil {
+				return model.InsertResult{}, fmt.Errorf("restore archive event %q: %w", event.EventHash, err)
+			}
+		} else {
+			accounting := usage.NormalizeCacheAccounting(usage.CacheInputContext{
+				ExplicitMode:     event.CacheInputMode,
+				ExecutorType:     event.ExecutorType,
+				Provider:         event.Provider,
+				ProviderSnapshot: event.AuthProviderSnapshot,
+				ResolvedModel:    event.ResolvedModel,
+				RequestedModel:   event.RequestedModel,
+				DisplayModel:     event.Model,
+			}, event.InputTokens, event.CachedTokens, event.CacheTokens, event.CacheReadTokens, event.CacheCreationTokens)
+			event.CacheInputMode = accounting.Mode
+			event.NormalizedUncachedInputTokens = accounting.UncachedInputTokens
+			event.NormalizedTotalInputTokens = accounting.TotalInputTokens
+			event.NormalizedCacheReadTokens = accounting.CacheReadTokens
+			event.NormalizedCacheCreationTokens = accounting.CacheCreationTokens
+			if event.TotalTokens <= 0 {
+				event.TotalTokens = accounting.TotalInputTokens + max(event.OutputTokens, int64(0)) + max(event.ReasoningTokens, int64(0))
+			}
+			if event.RequestServiceTier == "" {
+				event.RequestServiceTier = event.ServiceTier
+			}
+			event.ServiceTier = usage.EffectiveServiceTier(usage.CacheInputContext{
+				ExecutorType:     event.ExecutorType,
+				Provider:         event.Provider,
+				ProviderSnapshot: event.AuthProviderSnapshot,
+				AuthType:         event.AuthType,
+			}, event.RequestServiceTier, event.ServiceTier, event.ResponseServiceTier)
 		}
-		if event.RequestServiceTier == "" {
-			event.RequestServiceTier = event.ServiceTier
-		}
-		event.ServiceTier = usage.EffectiveServiceTier(usage.CacheInputContext{
-			ExecutorType:     event.ExecutorType,
-			Provider:         event.Provider,
-			ProviderSnapshot: event.AuthProviderSnapshot,
-			AuthType:         event.AuthType,
-		}, event.RequestServiceTier, event.ServiceTier, event.ResponseServiceTier)
 		failed := 0
 		if event.Failed {
 			failed = 1
 		}
 		metadataJSON, quotaRecoverAtMS, quotaUsedPercent, quotaPlanType, errorKind, errorCode, traceID := responseHeaderDerivedForInsert(event)
-		failSummarySource := event.FailSummary
-		if failSummarySource == "" {
-			failSummarySource = event.FailBody
+		failSummary := event.FailSummary
+		if !event.PreserveArchiveDerivedFields {
+			failSummarySource := event.FailSummary
+			if failSummarySource == "" {
+				failSummarySource = event.FailBody
+			}
+			failSummary = usage.FailSummaryFromBody(failSummarySource)
 		}
-		failSummary := usage.FailSummaryFromBody(failSummarySource)
-		rawJSON := usage.SafeRawJSON(event.RawJSON)
+		rawJSON := event.RawJSON
+		if !event.PreserveArchiveDerivedFields {
+			rawJSON = usage.SafeRawJSON(event.RawJSON)
+		}
 		res, err := stmt.ExecContext(
 			ctx,
 			nullString(event.RequestID),
@@ -519,6 +532,9 @@ func responseHeaderDerivedForInsert(event model.UsageEvent) (string, int64, *flo
 	errorKind := event.HeaderErrorKind
 	errorCode := event.HeaderErrorCode
 	traceID := event.HeaderTraceID
+	if event.PreserveArchiveDerivedFields {
+		return metadataJSON, quotaRecoverAtMS, quotaUsedPercent, quotaPlanType, errorKind, errorCode, traceID
+	}
 
 	derived := usage.DeriveResponseHeaderMetadata(event.ResponseMetadata)
 	if metadataJSON == "" {

@@ -14,6 +14,9 @@ import (
 	"testing"
 	"time"
 
+	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
+	monitoringrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagemonitoring"
+	usageservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/usage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
@@ -3162,6 +3165,364 @@ func TestAnalyticsHourlyRollupEligibilityIsStrict(t *testing.T) {
 	} {
 		if !analyticsHourlyRollupEligible(supported) {
 			t.Fatalf("supported filter unexpectedly ineligible: %#v", supported)
+		}
+	}
+}
+
+func TestAnalyticsReportsArchivedCoverageAndKeepsProjectionBackedCoreExact(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	ctx := context.Background()
+	fromMS := time.Date(2026, time.August, 1, 0, 0, 0, 0, time.UTC).UnixMilli()
+	toMS := fromMS + 2*time.Hour.Milliseconds()
+	events := []usage.Event{
+		monitoringEvent("coverage-archived-a", fromMS+1_000, "gpt-a", "auth-1", "source-a", false, 10, 2, 0, 0, 12, nil),
+		monitoringEvent("coverage-archived-b", fromMS+2_000, "gpt-b", "auth-2", "source-b", true, 20, 3, 0, 0, 23, nil),
+		monitoringEvent("coverage-hot", fromMS+time.Hour.Milliseconds()+1_000, "gpt-a", "auth-1", "source-a", false, 30, 4, 0, 0, 34, nil),
+	}
+	for index := range events {
+		events[index].AccountSnapshot = "user@example.com"
+		events[index].AuthFileSnapshot = "user.json"
+	}
+	if _, err := db.InsertEvents(ctx, events); err != nil {
+		t.Fatalf("insert coverage events: %v", err)
+	}
+	catchUpMonitoringArchiveDeleteReadiness(t, ctx, db)
+	archiveMonitoringEventsThrough(t, ctx, db, fromMS+time.Hour.Milliseconds())
+
+	compact, err := New(db, true).Analytics(ctx, Request{
+		FromMS: fromMS,
+		ToMS:   toMS,
+		Include: Include{
+			Summary:        true,
+			SummaryProfile: "compact",
+			ModelStats:     true,
+			Granularity:    "hour",
+		},
+	})
+	if err != nil {
+		t.Fatalf("compact coverage analytics: %v", err)
+	}
+	if compact.Summary == nil || compact.Summary.TotalCalls != 3 {
+		t.Fatalf("compact summary = %#v", compact.Summary)
+	}
+	if compact.Coverage == nil || compact.Coverage.Scope != "time_range" || compact.Coverage.Mode != "mixed" ||
+		compact.Coverage.RawComplete || !compact.Coverage.CoreAggregateUsed || compact.Coverage.RawEventCount != 1 ||
+		compact.Coverage.RawDeletedEventCount != 2 || len(compact.Coverage.FidelityLimitations) != 0 {
+		t.Fatalf("compact coverage = %#v", compact.Coverage)
+	}
+
+	partial, err := New(db, true).Analytics(ctx, Request{
+		FromMS: fromMS + 500,
+		ToMS:   toMS,
+		Filters: Filters{
+			Accounts: []string{"user@example.com"},
+		},
+		Include: Include{
+			Summary:         true,
+			SummaryProfile:  "compact",
+			CredentialStats: true,
+			EventsPage:      &EventsPage{Limit: 1},
+		},
+	})
+	if err != nil {
+		t.Fatalf("partial coverage analytics: %v", err)
+	}
+	if partial.Summary == nil || partial.Summary.TotalCalls != 3 || partial.Events == nil ||
+		partial.Events.TotalCount != 1 || len(partial.Events.Items) != 1 || partial.Events.HasMore ||
+		partial.Events.NextBeforeMS != 0 || partial.Events.NextBeforeID != 0 {
+		t.Fatalf("partial analytics summary=%#v events=%#v", partial.Summary, partial.Events)
+	}
+	if partial.Coverage == nil || !partial.Coverage.CoreAggregateUsed ||
+		slices.Contains(partial.Coverage.FidelityLimitations, "core_metrics_require_raw_events") {
+		t.Fatalf("partial coverage = %#v", partial.Coverage)
+	}
+	for _, limitation := range []string{
+		"credential_metrics_require_raw_events",
+		"event_details_require_raw_events",
+	} {
+		if !slices.Contains(partial.Coverage.FidelityLimitations, limitation) {
+			t.Fatalf("partial limitations = %#v, missing %s", partial.Coverage.FidelityLimitations, limitation)
+		}
+	}
+
+	rawOnlyCore, err := New(db, true).Analytics(ctx, Request{
+		FromMS:      fromMS,
+		ToMS:        toMS,
+		SearchQuery: "%",
+		Include: Include{
+			Summary:        true,
+			SummaryProfile: "compact",
+		},
+	})
+	if err != nil {
+		t.Fatalf("raw-only core coverage analytics: %v", err)
+	}
+	if rawOnlyCore.Coverage == nil || !slices.Contains(rawOnlyCore.Coverage.FidelityLimitations, "core_metrics_require_raw_events") {
+		t.Fatalf("raw-only core coverage = %#v", rawOnlyCore.Coverage)
+	}
+}
+
+func TestAnalyticsReportsComparisonCoverageSeparately(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	ctx := context.Background()
+	previousFromMS := time.Date(2026, time.August, 2, 0, 0, 0, 0, time.UTC).UnixMilli()
+	currentFromMS := previousFromMS + time.Hour.Milliseconds()
+	currentToMS := currentFromMS + time.Hour.Milliseconds()
+	if _, err := db.InsertEvents(ctx, []usage.Event{
+		monitoringEvent("comparison-archived-a", previousFromMS+1_000, "gpt-a", "auth-1", "source-a", false, 10, 2, 0, 0, 12, nil),
+		monitoringEvent("comparison-archived-b", previousFromMS+2_000, "gpt-b", "auth-2", "source-b", true, 20, 3, 0, 0, 23, nil),
+		monitoringEvent("comparison-current", currentFromMS+1_000, "gpt-a", "auth-1", "source-a", false, 30, 4, 0, 0, 34, nil),
+	}); err != nil {
+		t.Fatalf("insert comparison events: %v", err)
+	}
+	catchUpMonitoringArchiveDeleteReadiness(t, ctx, db)
+	archiveMonitoringEventsThrough(t, ctx, db, currentFromMS)
+
+	response, err := New(db, true).Analytics(ctx, Request{
+		FromMS: currentFromMS,
+		ToMS:   currentToMS,
+		Include: Include{
+			Summary:           true,
+			SummaryProfile:    "compact",
+			SummaryComparison: true,
+			Granularity:       "hour",
+		},
+	})
+	if err != nil {
+		t.Fatalf("comparison coverage analytics: %v", err)
+	}
+	if response.Summary == nil || response.Summary.TotalCalls != 1 ||
+		response.SummaryComparison == nil || response.SummaryComparison.TotalCalls != 2 {
+		t.Fatalf("comparison summaries current=%#v previous=%#v", response.Summary, response.SummaryComparison)
+	}
+	if response.Coverage == nil || response.Coverage.Scope != "time_range" || response.Coverage.Mode != "mixed" ||
+		response.Coverage.RawEventCount != 1 || response.Coverage.RawDeletedEventCount != 0 ||
+		response.Coverage.ComparisonRawEventCount != 0 || response.Coverage.ComparisonRawDeletedEventCount != 2 ||
+		!response.Coverage.CoreAggregateUsed || len(response.Coverage.FidelityLimitations) != 0 {
+		t.Fatalf("comparison coverage = %#v", response.Coverage)
+	}
+}
+
+func TestAnalyticsReportsIndependentRollingAndDrilldownCoverage(t *testing.T) {
+	sqlDB, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open auxiliary coverage store: %v", err)
+	}
+	db := store.New(sqlDB)
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+	ctx := context.Background()
+	baseMS := time.Date(2026, time.August, 4, 0, 0, 0, 0, time.UTC).UnixMilli()
+	mainFromMS := baseMS + 2*time.Hour.Milliseconds()
+	mainToMS := mainFromMS + time.Hour.Milliseconds()
+	rollingNowMS := baseMS + 30*time.Minute.Milliseconds()
+	if _, err := db.InsertEvents(ctx, []usage.Event{
+		monitoringEvent("auxiliary-archived", baseMS+5*time.Minute.Milliseconds(), "gpt-a", "auth-1", "source-a", false, 10, 2, 0, 0, 12, nil),
+		monitoringEvent("auxiliary-current", mainFromMS+time.Minute.Milliseconds(), "gpt-b", "auth-2", "source-b", false, 20, 3, 0, 0, 23, nil),
+	}); err != nil {
+		t.Fatalf("insert auxiliary coverage events: %v", err)
+	}
+	catchUpMonitoringArchiveDeleteReadiness(t, ctx, db)
+	archiveMonitoringEventsThrough(t, ctx, db, baseMS+time.Hour.Milliseconds())
+
+	findRange := func(t *testing.T, coverage *AnalyticsCoverage, scope string) AnalyticsCoverageRange {
+		t.Helper()
+		if coverage == nil {
+			t.Fatal("coverage is nil")
+		}
+		for _, item := range coverage.AuxiliaryRanges {
+			if item.Scope == scope {
+				return item
+			}
+		}
+		t.Fatalf("coverage range %q not found in %#v", scope, coverage.AuxiliaryRanges)
+		return AnalyticsCoverageRange{}
+	}
+
+	rolling, err := New(db, true).Analytics(ctx, Request{
+		FromMS: mainFromMS,
+		ToMS:   mainToMS,
+		NowMS:  rollingNowMS,
+		Include: Include{
+			Summary:     true,
+			Granularity: "hour",
+		},
+	})
+	if err != nil {
+		t.Fatalf("rolling auxiliary coverage analytics: %v", err)
+	}
+	if rolling.Summary == nil || rolling.Summary.TotalCalls != 1 || rolling.Summary.RPM30M != float64(1)/30 || rolling.Summary.TPM30M != float64(12)/30 {
+		t.Fatalf("rolling summary = %#v", rolling.Summary)
+	}
+	rollingRange := findRange(t, rolling.Coverage, "rolling_30m")
+	if rolling.Coverage.Scope != "requested_ranges" || rolling.Coverage.RawDeletedEventCount != 0 ||
+		rolling.Coverage.RawEventCount != 1 || rollingRange.RawDeletedEventCount != 1 ||
+		rollingRange.RawEventCount != 0 || len(rolling.Coverage.FidelityLimitations) != 0 {
+		t.Fatalf("rolling coverage = %#v range=%#v", rolling.Coverage, rollingRange)
+	}
+
+	drilldown, err := New(db, true).Analytics(ctx, Request{
+		FromMS: mainFromMS,
+		ToMS:   mainToMS,
+		Include: Include{
+			DrilldownPreview: &DrilldownPreview{
+				FromMS: baseMS,
+				ToMS:   baseMS + time.Hour.Milliseconds(),
+				Limit:  10,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("drilldown auxiliary coverage analytics: %v", err)
+	}
+	if drilldown.DrilldownPreview == nil || len(drilldown.DrilldownPreview.Items) != 0 {
+		t.Fatalf("drilldown preview = %#v", drilldown.DrilldownPreview)
+	}
+	drilldownRange := findRange(t, drilldown.Coverage, "drilldown_preview")
+	if drilldown.Coverage.Scope != "requested_ranges" || drilldownRange.RawDeletedEventCount != 1 ||
+		!slices.Contains(drilldown.Coverage.FidelityLimitations, "event_details_require_raw_events") {
+		t.Fatalf("drilldown coverage = %#v range=%#v", drilldown.Coverage, drilldownRange)
+	}
+
+	if _, err := sqlDB.ExecContext(ctx, `update usage_monitoring_rollup_state set schema_version = 0
+		where rollup_name = ?`, monitoringrepo.ProjectionRollupName); err != nil {
+		t.Fatalf("mark projection unavailable for rolling coverage: %v", err)
+	}
+	degraded, err := New(db, true).Analytics(ctx, Request{
+		FromMS: mainFromMS,
+		ToMS:   mainToMS,
+		NowMS:  rollingNowMS,
+		Include: Include{
+			Summary:     true,
+			Granularity: "hour",
+		},
+	})
+	if err != nil {
+		t.Fatalf("degraded rolling auxiliary coverage analytics: %v", err)
+	}
+	if degraded.Summary == nil || degraded.Summary.RPM30M != 0 || degraded.Summary.TPM30M != 0 ||
+		!slices.Contains(degraded.Coverage.FidelityLimitations, "rolling_window_metrics_require_raw_events") {
+		t.Fatalf("degraded rolling response summary=%#v coverage=%#v", degraded.Summary, degraded.Coverage)
+	}
+}
+
+func TestAnalyticsReportsActualDerivedReaderFallbacksAfterArchivedDeletion(t *testing.T) {
+	sqlDB, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open fallback store: %v", err)
+	}
+	db := store.New(sqlDB)
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+	ctx := context.Background()
+	fromMS := time.Date(2026, time.August, 3, 0, 0, 0, 0, time.UTC).UnixMilli()
+	toMS := fromMS + 2*time.Hour.Milliseconds()
+	events := []usage.Event{
+		monitoringEvent("fallback-archived-a", fromMS+1_000, "gpt-a", "auth-1", "source-a", false, 10, 2, 0, 0, 12, nil),
+		monitoringEvent("fallback-archived-b", fromMS+2_000, "gpt-b", "auth-2", "source-b", true, 20, 3, 0, 0, 23, nil),
+		monitoringEvent("fallback-hot", fromMS+time.Hour.Milliseconds()+1_000, "gpt-a", "auth-1", "source-a", false, 30, 4, 0, 0, 34, nil),
+	}
+	for index := range events {
+		events[index].AccountSnapshot = "user@example.com"
+		events[index].AuthFileSnapshot = "user.json"
+	}
+	if _, err := db.InsertEvents(ctx, events); err != nil {
+		t.Fatalf("insert fallback events: %v", err)
+	}
+	catchUpMonitoringArchiveDeleteReadiness(t, ctx, db)
+	archiveMonitoringEventsThrough(t, ctx, db, fromMS+time.Hour.Milliseconds())
+	if _, err := sqlDB.ExecContext(ctx, `update usage_monitoring_rollup_state set schema_version = 0
+		where rollup_name = ?`, monitoringrepo.ProjectionRollupName); err != nil {
+		t.Fatalf("mark projection unavailable: %v", err)
+	}
+
+	response, err := New(db, true).Analytics(ctx, Request{
+		FromMS: fromMS,
+		ToMS:   toMS,
+		Include: Include{
+			Summary:         true,
+			SummaryProfile:  "compact",
+			AccountStats:    true,
+			FilterSelectors: true,
+			Granularity:     "hour",
+		},
+	})
+	if err != nil {
+		t.Fatalf("fallback coverage analytics: %v", err)
+	}
+	if response.Summary == nil || response.Summary.TotalCalls != 3 ||
+		len(response.AccountStats) != 1 || response.AccountStats[0].Calls != 1 {
+		t.Fatalf("fallback response summary=%#v accounts=%#v", response.Summary, response.AccountStats)
+	}
+	if response.Coverage == nil || !response.Coverage.CoreAggregateUsed ||
+		slices.Contains(response.Coverage.FidelityLimitations, "core_metrics_require_raw_events") ||
+		!slices.Contains(response.Coverage.FidelityLimitations, "identity_metrics_require_raw_events") ||
+		!slices.Contains(response.Coverage.FidelityLimitations, "filter_options_require_raw_events") {
+		t.Fatalf("fallback coverage = %#v", response.Coverage)
+	}
+}
+
+func archiveMonitoringEventsThrough(t *testing.T, ctx context.Context, db *store.Store, cutoffTimestampMS int64) {
+	t.Helper()
+	archiveService := usageservice.New(db, usageservice.WithArchive(usageservice.ArchiveConfig{
+		Directory:             filepath.Join(t.TempDir(), "usage-archives"),
+		SegmentEventLimit:     1,
+		DeleteBatchSize:       1,
+		AggregateReadsEnabled: true,
+	}))
+	created, err := archiveService.CreateArchive(ctx, cutoffTimestampMS)
+	if err != nil {
+		t.Fatalf("create coverage archive: %v", err)
+	}
+	if _, err := archiveService.ResumeArchive(ctx, created.Run.ID); err != nil {
+		t.Fatalf("write coverage archive: %v", err)
+	}
+	if _, err := archiveService.VerifyArchive(ctx, created.Run.ID); err != nil {
+		t.Fatalf("verify coverage archive: %v", err)
+	}
+	if _, err := archiveService.DeleteArchive(ctx, created.Run.ID); err != nil {
+		t.Fatalf("delete coverage raw rows: %v", err)
+	}
+}
+
+func catchUpMonitoringArchiveDeleteReadiness(t *testing.T, ctx context.Context, db *store.Store) {
+	t.Helper()
+	catchUpMonitoringHourlyRollup(t, ctx, db)
+	for _, catchUp := range []struct {
+		name string
+		run  func(context.Context, int, int64) (store.UsageMonitoringCatchUpResult, error)
+	}{
+		{name: "stats", run: db.CatchUpUsageMonitoringStats},
+		{name: "metadata", run: db.CatchUpUsageMonitoringMetadata},
+		{name: "projection", run: db.CatchUpUsageMonitoringProjection},
+	} {
+		for {
+			result, err := catchUp.run(ctx, 100, time.Now().UnixMilli())
+			if err != nil {
+				t.Fatalf("catch up monitoring %s: %v", catchUp.name, err)
+			}
+			if !result.Pending {
+				break
+			}
+		}
+	}
+	for _, catchUp := range []struct {
+		name string
+		run  func(context.Context, int, int64) (store.UsageRollupCatchUpResult, error)
+	}{
+		{name: "account history", run: db.CatchUpAccountHistoryRollups},
+		{name: "dashboard hourly", run: db.CatchUpDashboardHourlyRollups},
+	} {
+		for {
+			result, err := catchUp.run(ctx, 100, time.Now().UnixMilli())
+			if err != nil {
+				t.Fatalf("catch up %s: %v", catchUp.name, err)
+			}
+			if !result.Pending {
+				break
+			}
 		}
 	}
 }

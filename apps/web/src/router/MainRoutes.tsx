@@ -20,6 +20,7 @@ import { AiProvidersOpenAIModelsPage } from '@/pages/AiProvidersOpenAIModelsPage
 import { AiProvidersVertexEditPage } from '@/pages/AiProvidersVertexEditPage';
 import { OAuthPage } from '@/pages/OAuthPage';
 import { UsageAnalyticsPage } from '@/pages/UsageAnalyticsPage';
+import { UsageMaintenancePage } from '@/pages/UsageMaintenancePage';
 import { MonitoringCenterPage } from '@/pages/MonitoringCenterPage';
 import { AccountActionCandidatesPage } from '@/pages/AccountActionCandidatesPage';
 import { ModelPricesPage } from '@/pages/ModelPricesPage';
@@ -75,6 +76,24 @@ function FeatureGate({
   }
 
   if (!enabled) {
+    return <Navigate to="/config" replace />;
+  }
+
+  return children;
+}
+
+function UsageMaintenanceGate({ children }: { children: ReactElement }) {
+  const availability = usePanelFeatureAvailability();
+
+  if (availability.checking) {
+    return <LoadingSpinner />;
+  }
+
+  if (availability.panelHostMode !== 'manager_embedded') {
+    return <Navigate to="/" replace />;
+  }
+
+  if (!availability.managerServiceAvailable) {
     return <Navigate to="/config" replace />;
   }
 
@@ -177,6 +196,14 @@ const mainRoutes: RouteObject[] = [
       <FeatureGate feature="requestMonitoring">
         <MonitoringCenterPage />
       </FeatureGate>
+    ),
+  },
+  {
+    path: '/usage-maintenance',
+    element: (
+      <UsageMaintenanceGate>
+        <UsageMaintenancePage />
+      </UsageMaintenanceGate>
     ),
   },
   {

@@ -11,6 +11,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	quotasnapshotrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotasnapshot"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageaggregate"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageprojection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
@@ -64,6 +65,216 @@ func TestUsageDataMigrationInitialStateMatchesExistingUsageData(t *testing.T) {
 		if !columns[column] {
 			t.Fatalf("staging columns = %#v, missing %s", columns, column)
 		}
+	}
+}
+
+func TestUsageHourlyAggregateMigrationContractMatchesRepository(t *testing.T) {
+	if usageHourlyAggregateSchemaVersion != usageaggregate.SchemaVersion {
+		t.Fatalf(
+			"hourly aggregate schema contract drifted: migration=%d repository=%d",
+			usageHourlyAggregateSchemaVersion,
+			usageaggregate.SchemaVersion,
+		)
+	}
+	if usageHourlyAggregateStructureRevision != usageaggregate.StructureRevision {
+		t.Fatalf(
+			"hourly aggregate revision contract drifted: migration=%q repository=%q",
+			usageHourlyAggregateStructureRevision,
+			usageaggregate.StructureRevision,
+		)
+	}
+}
+
+func TestUsageArchiveRunMigrationAddsRequestedStageColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage-archive-requested-stage.sqlite")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if _, err := db.Exec(`alter table usage_archive_runs drop column requested_stage`); err != nil {
+		_ = db.Close()
+		t.Fatalf("remove requested stage column fixture: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close legacy sqlite: %v", err)
+	}
+	db, err = Open(path)
+	if err != nil {
+		t.Fatalf("reopen migrated sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	columns := migrationTableColumns(t, db, "usage_archive_runs")
+	if !columns["requested_stage"] {
+		t.Fatalf("usage archive run columns = %#v", columns)
+	}
+}
+
+func TestUsageArchiveMigrationIsAdditiveAndStartupBoundedWithLargeLedger(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage-archive-large-ledger.sqlite")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	const rowCount = 100_001
+	if _, err := db.Exec(`with digits(value) as (
+		values (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)
+	), numbers(value) as (
+		select
+			ones.value +
+			tens.value * 10 +
+			hundreds.value * 100 +
+			thousands.value * 1000 +
+			ten_thousands.value * 10000 +
+			hundred_thousands.value * 100000
+		from digits ones
+		cross join digits tens
+		cross join digits hundreds
+		cross join digits thousands
+		cross join digits ten_thousands
+		cross join digits hundred_thousands
+	)
+	insert into usage_events (
+		event_hash, timestamp_ms, timestamp, model, created_at_ms
+	)
+	select
+		printf('archive-migration-%06d', value + 1),
+		value + 1,
+		cast(value + 1 as text),
+		'gpt-test',
+		value + 1
+	from numbers
+	where value < ?`, rowCount); err != nil {
+		_ = db.Close()
+		t.Fatalf("seed large usage event table: %v", err)
+	}
+	if _, err := db.Exec(`insert into usage_event_identity_ledger (
+		event_hash, raw_event_id, timestamp_ms, bucket_ms,
+		aggregate_schema_version, aggregate_structure_revision,
+		first_seen_at_ms, updated_at_ms
+	)
+	select event_hash, id, timestamp_ms, 0, 0, '', created_at_ms, created_at_ms
+	from usage_events`); err != nil {
+		_ = db.Close()
+		t.Fatalf("seed large identity ledger: %v", err)
+	}
+
+	ledgerColumnsBefore := migrationTableColumns(t, db, "usage_event_identity_ledger")
+	var ledgerCountBefore, rawIDSumBefore, timestampSumBefore int64
+	if err := db.QueryRow(`select count(*), coalesce(sum(raw_event_id), 0), coalesce(sum(timestamp_ms), 0)
+		from usage_event_identity_ledger`).Scan(
+		&ledgerCountBefore,
+		&rawIDSumBefore,
+		&timestampSumBefore,
+	); err != nil {
+		_ = db.Close()
+		t.Fatalf("read identity ledger baseline: %v", err)
+	}
+	for _, statement := range []string{
+		`drop table usage_maintenance_locks`,
+		`drop table usage_archive_event_refs`,
+		`drop table usage_archive_segments`,
+		`drop table usage_archive_runs`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			_ = db.Close()
+			t.Fatalf("remove archive schema fixture: %v", err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close legacy sqlite: %v", err)
+	}
+
+	db, err = Open(path)
+	if err != nil {
+		t.Fatalf("reopen migrated sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	for _, table := range []string{
+		"usage_archive_runs",
+		"usage_archive_segments",
+		"usage_archive_event_refs",
+		"usage_maintenance_locks",
+	} {
+		var count int
+		if err := db.QueryRow(`select count(*) from sqlite_master
+			where type = 'table' and name = ?`, table).Scan(&count); err != nil {
+			t.Fatalf("inspect archive table %s: %v", table, err)
+		}
+		if count != 1 {
+			t.Fatalf("archive table %s count = %d, want 1", table, count)
+		}
+		assertTableCount(t, db, table, 0)
+	}
+	for _, index := range []string{
+		"idx_usage_archive_runs_status_updated",
+		"idx_usage_archive_segments_run_event",
+		"idx_usage_archive_event_refs_run_deleted",
+		"idx_usage_archive_event_refs_timestamp_deleted",
+	} {
+		var table string
+		if err := db.QueryRow(`select tbl_name from sqlite_master
+			where type = 'index' and name = ?`, index).Scan(&table); err != nil {
+			t.Fatalf("inspect archive index %s: %v", index, err)
+		}
+		if !strings.HasPrefix(table, "usage_archive_") {
+			t.Fatalf("archive index %s unexpectedly targets %s", index, table)
+		}
+	}
+	var coverageIndexSQL string
+	if err := db.QueryRow(`select sql from sqlite_master
+		where type = 'index' and name = 'idx_usage_archive_event_refs_timestamp_deleted'`).Scan(&coverageIndexSQL); err != nil {
+		t.Fatalf("inspect archive coverage index definition: %v", err)
+	}
+	if !strings.Contains(strings.Join(strings.Fields(coverageIndexSQL), " "),
+		"usage_archive_event_refs(timestamp_ms, raw_deleted_at_ms)") {
+		t.Fatalf("archive coverage index is not time-range first: %s", coverageIndexSQL)
+	}
+	var largeTableArchiveIndexes int
+	if err := db.QueryRow(`select count(*) from sqlite_master
+		where type = 'index'
+			and tbl_name in ('usage_events', 'usage_event_identity_ledger')
+			and lower(name) like '%archive%'`).Scan(&largeTableArchiveIndexes); err != nil {
+		t.Fatalf("inspect large-table archive indexes: %v", err)
+	}
+	if largeTableArchiveIndexes != 0 {
+		t.Fatalf("archive migration created %d large-table indexes", largeTableArchiveIndexes)
+	}
+
+	ledgerColumnsAfter := migrationTableColumns(t, db, "usage_event_identity_ledger")
+	if len(ledgerColumnsAfter) != len(ledgerColumnsBefore) {
+		t.Fatalf("identity ledger columns changed: before=%#v after=%#v", ledgerColumnsBefore, ledgerColumnsAfter)
+	}
+	for column := range ledgerColumnsBefore {
+		if !ledgerColumnsAfter[column] {
+			t.Fatalf("identity ledger lost column %s: before=%#v after=%#v", column, ledgerColumnsBefore, ledgerColumnsAfter)
+		}
+	}
+	for _, forbidden := range []string{"archive_run_id", "archive_segment_sequence", "archived_at_ms", "raw_deleted_at_ms"} {
+		if ledgerColumnsAfter[forbidden] {
+			t.Fatalf("identity ledger unexpectedly gained archive column %s", forbidden)
+		}
+	}
+	var ledgerCountAfter, rawIDSumAfter, timestampSumAfter int64
+	if err := db.QueryRow(`select count(*), coalesce(sum(raw_event_id), 0), coalesce(sum(timestamp_ms), 0)
+		from usage_event_identity_ledger`).Scan(
+		&ledgerCountAfter,
+		&rawIDSumAfter,
+		&timestampSumAfter,
+	); err != nil {
+		t.Fatalf("read migrated identity ledger: %v", err)
+	}
+	if ledgerCountBefore != rowCount || ledgerCountAfter != ledgerCountBefore ||
+		rawIDSumAfter != rawIDSumBefore || timestampSumAfter != timestampSumBefore {
+		t.Fatalf(
+			"identity ledger changed: before=(%d,%d,%d) after=(%d,%d,%d)",
+			ledgerCountBefore,
+			rawIDSumBefore,
+			timestampSumBefore,
+			ledgerCountAfter,
+			rawIDSumAfter,
+			timestampSumAfter,
+		)
 	}
 }
 

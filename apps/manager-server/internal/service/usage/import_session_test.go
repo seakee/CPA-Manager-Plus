@@ -217,6 +217,95 @@ func TestImportSessionAllowsDeclaredFilesLargerThanLegacyRequestLimit(t *testing
 	}
 }
 
+func TestImportSessionListProvidesHistoryCountsCapabilitiesAndCursor(t *testing.T) {
+	now := time.UnixMilli(1_000)
+	manager := newImportSessionManager(ImportSessionConfig{
+		Directory:      filepath.Join(t.TempDir(), "imports"),
+		ChunkSizeBytes: 4 * 1024 * 1024,
+		DiskQuotaBytes: 16 * 1024 * 1024,
+		MaxSessions:    2,
+		TTL:            24 * time.Hour,
+		Now:            func() time.Time { return now },
+	})
+	first, err := manager.Create(context.Background(), "first.jsonl", 10, "")
+	if err != nil {
+		t.Fatalf("create first session: %v", err)
+	}
+	now = now.Add(time.Second)
+	if _, err := manager.Cancel(context.Background(), first.ID); err != nil {
+		t.Fatalf("cancel first session: %v", err)
+	}
+	now = now.Add(time.Second)
+	second, err := manager.Create(context.Background(), "second.jsonl", 10, "")
+	if err != nil {
+		t.Fatalf("create second session: %v", err)
+	}
+	now = now.Add(time.Second)
+	third, err := manager.Create(context.Background(), "third.jsonl", 10, "")
+	if err != nil {
+		t.Fatalf("create third session: %v", err)
+	}
+
+	firstPage, err := manager.List(context.Background(), ImportSessionListOptions{Limit: 2})
+	if err != nil {
+		t.Fatalf("list first page: %v", err)
+	}
+	if firstPage.Total != 3 || len(firstPage.Sessions) != 2 || firstPage.NextCursor == "" ||
+		firstPage.Sessions[0].ID != third.ID || firstPage.Sessions[1].ID != second.ID ||
+		firstPage.StatusCounts[ImportSessionStatusUploading] != 2 ||
+		firstPage.StatusCounts[ImportSessionStatusCancelled] != 1 ||
+		firstPage.ActiveSessions != 2 || firstPage.MaxSessions != 2 ||
+		firstPage.ChunkSizeBytes != 4*1024*1024 || firstPage.DiskQuotaBytes != 16*1024*1024 ||
+		firstPage.TTLSeconds != int64((24*time.Hour)/time.Second) {
+		t.Fatalf("first import session page = %#v", firstPage)
+	}
+	secondPage, err := manager.List(context.Background(), ImportSessionListOptions{
+		Limit:  2,
+		Cursor: firstPage.NextCursor,
+	})
+	if err != nil {
+		t.Fatalf("list second page: %v", err)
+	}
+	if secondPage.Total != 3 || len(secondPage.Sessions) != 1 || secondPage.Sessions[0].ID != first.ID || secondPage.NextCursor != "" {
+		t.Fatalf("second import session page = %#v", secondPage)
+	}
+	cancelled, err := manager.List(context.Background(), ImportSessionListOptions{
+		Status: string(ImportSessionStatusCancelled),
+		Limit:  10,
+	})
+	if err != nil || cancelled.Total != 1 || len(cancelled.Sessions) != 1 || cancelled.Sessions[0].ID != first.ID {
+		t.Fatalf("cancelled import sessions = %#v err=%v", cancelled, err)
+	}
+	if _, err := manager.List(context.Background(), ImportSessionListOptions{Cursor: "invalid"}); err == nil {
+		t.Fatal("invalid import session cursor was accepted")
+	}
+}
+
+func TestImportSessionSummarySanitizesFailuresWithoutMislabelingCancellation(t *testing.T) {
+	failed := NewImportSessionSummary(ImportSession{
+		ID:       strings.Repeat("a", 32),
+		Filename: "usage.jsonl",
+		Status:   ImportSessionStatusFailed,
+		Error:    "/private/import/session.part: database secret failure",
+	})
+	if !failed.HasError || failed.Error != "usage import session needs attention" || failed.ErrorCode != "usage_import_session_failed" {
+		t.Fatalf("failed summary = %#v", failed)
+	}
+	if strings.Contains(failed.Error, "/private/import") || strings.Contains(failed.Error, "database secret") {
+		t.Fatalf("failed summary leaked internal error: %#v", failed)
+	}
+
+	cancelled := NewImportSessionSummary(ImportSession{
+		ID:       strings.Repeat("b", 32),
+		Filename: "usage.jsonl",
+		Status:   ImportSessionStatusCancelled,
+		Error:    "usage import cancelled",
+	})
+	if cancelled.HasError || cancelled.Error != "" || cancelled.ErrorCode != "" {
+		t.Fatalf("cancelled summary was labeled as a failure: %#v", cancelled)
+	}
+}
+
 func TestImportSessionStreamsFilesLargerThanLegacyRequestLimit(t *testing.T) {
 	const legacyLimit = int64(64 * 1024 * 1024)
 	const chunkSize = int64(4 * 1024 * 1024)

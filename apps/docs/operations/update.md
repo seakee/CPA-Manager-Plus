@@ -10,6 +10,7 @@
 4. 备份完整数据和配置：
    - `usage.sqlite`、`usage.sqlite-wal`、`usage.sqlite-shm`。
    - `data.key`。
+   - 使用过历史归档时的 `usage-archives/`。
    - 安装器目录中的 `secrets/`、`.env`、`compose.yaml` 或 `config.json`。
    - 自定义反向代理、systemd、launchd 或 Windows 服务配置。
 
@@ -22,6 +23,7 @@
 - migration 期间 account-history 或 dashboard-hourly rollup 可能暂停追平；相关页面会临时回退 raw events，性能可能暂时降低。
 - 不要为了加速 migration 或 rollup 重建而启动第二个 Manager Server 连接同一 SQLite 或消费同一 CPA 队列。
 - 可通过带管理员密钥的 `GET /status` 查看迁移、采集器和事件状态。
+- Manager Server 托管面板中的“用量维护”页面会显示迁移、aggregate、活动归档任务和可回收 SQLite 空间；普通 CPA 托管面板不会显示该入口。
 
 ## 一键安装器生成的 Docker 部署
 
@@ -235,13 +237,16 @@ curl -f -H "Authorization: Bearer <CPAMP_ADMIN_KEY>" \
 - `collector.lastError` 为空或可解释。
 - `lastConsumedAt`、`lastInsertedAt` 和 `eventCount` 正常更新。
 - Dashboard、请求监控和 Usage Analytics 能读取数据。
+- “用量维护”页面能读取最近归档任务和维护状态；旧前端或旧 Manager Server 混用时应明确显示功能不支持，而不是显示空数据。
 - `/status` 中的后台 migration 最终完成，rollup checkpoint 继续推进。
 - 反向代理部署的 `/management.html`、`/usage-service/*` 和管理 API 路径仍指向正确服务。
+
+涉及历史归档或大数据库的版本，建议在 staging 复现一次发布演练：完整备份 → 预留至少相当于数据库文件大小的临时空间 → 停止所有 Manager Server → `compact-usage` → 启动 → 检查 health/status/analytics → 按 [备份与恢复](./backup.md) 解压归档样本并确认源数据库幂等跳过 → 在空的隔离恢复实例确认同一样本可以新增 → 将完整备份恢复到另一目录并再次验证。物理压缩不是更新的自动步骤，只有已逻辑删除数据且确实需要回收磁盘空间时才执行。压缩会保留未完成派生数据迁移的 checkpoint，服务重启后继续执行。
 
 ## 回滚原则
 
 - Docker：将镜像标签改回旧版本并重建容器，继续挂载更新前的数据备份。
 - 原生包：停止新版本，恢复旧二进制、配置和更新前的数据备份后再启动。
 - 单文件面板：恢复旧 `management.html`。
-- 不要假设旧程序一定能读取新版本迁移后的数据库。涉及 schema 或数据语义变更时，应同时恢复更新前的 SQLite、WAL/SHM 和 `data.key`。
+- 不要假设旧程序一定能读取新版本迁移后的数据库。涉及 schema 或数据语义变更时，应同时恢复更新前的 SQLite、WAL/SHM、`data.key` 和匹配的 `usage-archives/`。
 - 如果失败原因不明确，保留新旧日志和数据库副本，不要反复启动多个版本写入同一数据库。

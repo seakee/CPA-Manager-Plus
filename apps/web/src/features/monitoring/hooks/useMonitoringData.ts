@@ -119,6 +119,7 @@ interface MonitoringEventsPageState {
 export type MonitoringPresentationSnapshot = Pick<
   UseMonitoringDataReturn,
   | 'summary'
+  | 'coverage'
   | 'timeline'
   | 'timelineGranularity'
   | 'hourlyDistribution'
@@ -831,9 +832,7 @@ export function useMonitoringData({
       channels: uniqueOptionValues(rangeFilteredRows.map((row) => row.channel)),
       headerTraceIds: uniqueOptionValues(rangeFilteredRows.map((row) => row.headerTraceId)),
     };
-  },
-    [apiKeyDisplayMap, rangeFilteredRows]
-  );
+  }, [apiKeyDisplayMap, rangeFilteredRows]);
   const analyticsFilterOptions =
     currentFilterSelectorsData?.filter_options ?? currentAnalyticsData?.filter_options;
   const filterOptions = useMemo(() => {
@@ -898,6 +897,7 @@ export function useMonitoringData({
   const computedPresentationSnapshot = useMemo<MonitoringPresentationSnapshot>(
     () => ({
       summary,
+      coverage: currentAnalyticsData?.coverage,
       timeline: timelineData.points,
       timelineGranularity: timelineData.granularity,
       hourlyDistribution,
@@ -923,6 +923,7 @@ export function useMonitoringData({
       accountRows,
       apiKeyRows,
       channelRows,
+      currentAnalyticsData?.coverage,
       displayEventsHasMore,
       displayEventsTotalCount,
       eventsLoadedCount,
@@ -1022,6 +1023,7 @@ export function useMonitoringData({
     authFiles,
     channels,
     summary: presentationSnapshot.summary,
+    coverage: presentationSnapshot.coverage,
     metadata,
     statusChips,
     timeline: presentationSnapshot.timeline,

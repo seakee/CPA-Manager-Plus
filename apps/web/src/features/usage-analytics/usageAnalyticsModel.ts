@@ -2393,6 +2393,7 @@ export const adaptUsageAnalyticsData = (
     summary
   );
   return {
+    coverage: data?.coverage,
     summary,
     summaryComparison: data?.summary_comparison,
     timeline,

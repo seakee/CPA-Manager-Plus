@@ -3,6 +3,7 @@ package usage
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -85,6 +87,63 @@ type ImportSession struct {
 	Result          *ImportResult       `json:"result,omitempty"`
 	resumeKey       string
 	cancelRequested bool
+}
+
+type ImportSessionSummary struct {
+	ID             string              `json:"id"`
+	Filename       string              `json:"filename"`
+	Status         ImportSessionStatus `json:"status"`
+	SizeBytes      int64               `json:"size_bytes"`
+	ReceivedBytes  int64               `json:"received_bytes"`
+	ChunkSizeBytes int64               `json:"chunk_size_bytes"`
+	CreatedAtMS    int64               `json:"created_at_ms"`
+	UpdatedAtMS    int64               `json:"updated_at_ms"`
+	ExpiresAtMS    int64               `json:"expires_at_ms"`
+	Retryable      bool                `json:"retryable"`
+	HasError       bool                `json:"has_error"`
+	Error          string              `json:"error,omitempty"`
+	ErrorCode      string              `json:"error_code,omitempty"`
+	Result         *ImportResult       `json:"result,omitempty"`
+}
+
+type ImportSessionListOptions struct {
+	Status string
+	Limit  int
+	Cursor string
+}
+
+type ImportSessionList struct {
+	Sessions       []ImportSessionSummary      `json:"sessions"`
+	Total          int                         `json:"total"`
+	StatusCounts   map[ImportSessionStatus]int `json:"status_counts"`
+	NextCursor     string                      `json:"next_cursor,omitempty"`
+	ActiveSessions int                         `json:"active_sessions"`
+	MaxSessions    int                         `json:"max_sessions"`
+	ChunkSizeBytes int64                       `json:"chunk_size_bytes"`
+	DiskQuotaBytes int64                       `json:"disk_quota_bytes"`
+	TTLSeconds     int64                       `json:"ttl_seconds"`
+}
+
+func NewImportSessionSummary(session ImportSession) ImportSessionSummary {
+	summary := ImportSessionSummary{
+		ID:             session.ID,
+		Filename:       session.Filename,
+		Status:         session.Status,
+		SizeBytes:      session.SizeBytes,
+		ReceivedBytes:  session.ReceivedBytes,
+		ChunkSizeBytes: session.ChunkSizeBytes,
+		CreatedAtMS:    session.CreatedAtMS,
+		UpdatedAtMS:    session.UpdatedAtMS,
+		ExpiresAtMS:    session.ExpiresAtMS,
+		Retryable:      session.Retryable,
+		Result:         cloneImportResult(session.Result),
+	}
+	if session.Status == ImportSessionStatusFailed {
+		summary.HasError = true
+		summary.Error = "usage import session needs attention"
+		summary.ErrorCode = "usage_import_session_failed"
+	}
+	return summary
 }
 
 type importSessionMetadata struct {
@@ -299,6 +358,133 @@ func (m *importSessionManager) Get(ctx context.Context, id string) (ImportSessio
 		return ImportSession{}, err
 	}
 	return cloneImportSession(state.session), nil
+}
+
+func (m *importSessionManager) List(ctx context.Context, options ImportSessionListOptions) (ImportSessionList, error) {
+	if err := ctx.Err(); err != nil {
+		return ImportSessionList{}, err
+	}
+	if options.Limit <= 0 {
+		options.Limit = 20
+	}
+	if options.Limit > 100 {
+		return ImportSessionList{}, newImportSessionError(
+			ImportSessionErrorInvalidRequest,
+			"usage import session limit must be between 1 and 100",
+			nil,
+		)
+	}
+	status := ImportSessionStatus(strings.TrimSpace(options.Status))
+	if status != "" && !validImportSessionStatus(status) {
+		return ImportSessionList{}, newImportSessionError(
+			ImportSessionErrorInvalidRequest,
+			"usage import session status filter is invalid",
+			nil,
+		)
+	}
+	beforeUpdatedAtMS, beforeID, err := decodeImportSessionCursor(options.Cursor)
+	if err != nil {
+		return ImportSessionList{}, err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.ensureInitializedLocked(); err != nil {
+		return ImportSessionList{}, err
+	}
+	m.cleanupExpiredForRequestLocked(m.nowMS())
+	all := make([]ImportSession, 0, len(m.sessions))
+	statusCounts := make(map[ImportSessionStatus]int)
+	for _, state := range m.sessions {
+		statusCounts[state.session.Status]++
+		if status != "" && state.session.Status != status {
+			continue
+		}
+		all = append(all, cloneImportSession(state.session))
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].UpdatedAtMS != all[j].UpdatedAtMS {
+			return all[i].UpdatedAtMS > all[j].UpdatedAtMS
+		}
+		return all[i].ID > all[j].ID
+	})
+	total := len(all)
+	page := make([]ImportSession, 0, min(options.Limit+1, len(all)))
+	for _, session := range all {
+		if beforeUpdatedAtMS > 0 &&
+			(session.UpdatedAtMS > beforeUpdatedAtMS ||
+				(session.UpdatedAtMS == beforeUpdatedAtMS && session.ID >= beforeID)) {
+			continue
+		}
+		page = append(page, session)
+		if len(page) > options.Limit {
+			break
+		}
+	}
+	hasMore := len(page) > options.Limit
+	if hasMore {
+		page = page[:options.Limit]
+	}
+	nextCursor := ""
+	if hasMore && len(page) > 0 {
+		last := page[len(page)-1]
+		nextCursor = encodeImportSessionCursor(last.UpdatedAtMS, last.ID)
+	}
+	return ImportSessionList{
+		Sessions:       summarizeImportSessions(page),
+		Total:          total,
+		StatusCounts:   statusCounts,
+		NextCursor:     nextCursor,
+		ActiveSessions: m.activeSessionCountLocked(),
+		MaxSessions:    m.config.MaxSessions,
+		ChunkSizeBytes: m.config.ChunkSizeBytes,
+		DiskQuotaBytes: m.config.DiskQuotaBytes,
+		TTLSeconds:     int64(m.config.TTL / time.Second),
+	}, nil
+}
+
+func summarizeImportSessions(sessions []ImportSession) []ImportSessionSummary {
+	summaries := make([]ImportSessionSummary, 0, len(sessions))
+	for _, session := range sessions {
+		summaries = append(summaries, NewImportSessionSummary(session))
+	}
+	return summaries
+}
+
+func encodeImportSessionCursor(updatedAtMS int64, id string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(updatedAtMS, 10) + ":" + id))
+}
+
+func decodeImportSessionCursor(cursor string) (int64, string, error) {
+	cursor = strings.TrimSpace(cursor)
+	if cursor == "" {
+		return 0, "", nil
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return 0, "", newImportSessionError(
+			ImportSessionErrorInvalidRequest,
+			"usage import session cursor is invalid",
+			err,
+		)
+	}
+	parts := strings.SplitN(string(decoded), ":", 2)
+	if len(parts) != 2 || !validImportSessionID(parts[1]) {
+		return 0, "", newImportSessionError(
+			ImportSessionErrorInvalidRequest,
+			"usage import session cursor is invalid",
+			nil,
+		)
+	}
+	updatedAtMS, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || updatedAtMS <= 0 {
+		return 0, "", newImportSessionError(
+			ImportSessionErrorInvalidRequest,
+			"usage import session cursor is invalid",
+			err,
+		)
+	}
+	return updatedAtMS, parts[1], nil
 }
 
 func (m *importSessionManager) WriteChunk(
@@ -1179,12 +1365,17 @@ func sessionReservesDisk(session ImportSession) bool {
 
 func cloneImportSession(session ImportSession) ImportSession {
 	clone := session
-	if session.Result != nil {
-		result := *session.Result
-		result.Warnings = append([]string(nil), session.Result.Warnings...)
-		clone.Result = &result
-	}
+	clone.Result = cloneImportResult(session.Result)
 	return clone
+}
+
+func cloneImportResult(result *ImportResult) *ImportResult {
+	if result == nil {
+		return nil
+	}
+	clone := *result
+	clone.Warnings = append([]string(nil), result.Warnings...)
+	return &clone
 }
 
 func newImportSessionID() (string, error) {

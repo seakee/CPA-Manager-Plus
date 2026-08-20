@@ -1290,6 +1290,48 @@ func TestUsageMonitoringProjectionTailKeysetMatchesRawWithOutOfOrderTimestamps(t
 	assertProjectionPagesMatchRaw(t, ctx, db, filter, 2, len(initial)+len(tail))
 }
 
+func TestUsageMonitoringEventPaginationSkipsDeletedProjectionRows(t *testing.T) {
+	sqlDB, db := newMonitoringRepositoryStore(t)
+	ctx := context.Background()
+	baseMS := int64(1_800_057_700_000)
+	events := make([]usage.Event, 0, 5)
+	for index := 1; index <= 5; index++ {
+		events = append(events, monitoringRepositoryEvent(
+			fmt.Sprintf("archived-page-%d", index),
+			baseMS+1_000,
+			"gpt-page",
+			"key-a",
+			"alice@example.com",
+			"auth-a",
+			"source-a",
+			false,
+			10,
+			5,
+			10,
+		))
+	}
+	if _, err := db.InsertEvents(ctx, events); err != nil {
+		t.Fatalf("insert archived page events: %v", err)
+	}
+	catchUpMonitoringRepository(t, ctx, db)
+	if _, err := sqlDB.ExecContext(ctx, `delete from usage_events where event_hash in (?, ?)`,
+		"archived-page-5", "archived-page-3"); err != nil {
+		t.Fatalf("delete archived page raw rows: %v", err)
+	}
+
+	filter := store.AnalyticsFilter{
+		FromMS:        baseMS,
+		ToMS:          baseMS + testDayMS,
+		Models:        []string{"gpt-page"},
+		IncludeFailed: true,
+	}
+	total, _, available, err := db.UsageMonitoringEventsCount(ctx, filter)
+	if err != nil || !available || total != 3 {
+		t.Fatalf("archived page count available=%v total=%d err=%v", available, total, err)
+	}
+	assertProjectionPagesMatchRaw(t, ctx, db, filter, 2, 3)
+}
+
 func TestUsageMonitoringMetadataBackfillRefreshesHistoricalHeadersWithoutReset(t *testing.T) {
 	sqlDB, db := newMonitoringRepositoryStore(t)
 	ctx := context.Background()

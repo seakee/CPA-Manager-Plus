@@ -28,6 +28,7 @@ func NewConfig(t testing.TB) config.Config {
 		UsageImportDiskQuotaBytes: config.DefaultUsageImportDiskQuotaBytes,
 		UsageImportMaxSessions:    config.DefaultUsageImportMaxSessions,
 		UsageImportSessionTTL:     config.DefaultUsageImportSessionTTL,
+		UsageArchiveDir:           filepath.Join(dir, "usage-archives"),
 	}
 }
 

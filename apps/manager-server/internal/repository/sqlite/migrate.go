@@ -566,6 +566,85 @@ func Migrate(db *sql.DB) error {
 			first_seen_at_ms integer not null,
 			updated_at_ms integer not null
 		)`,
+		`create table if not exists usage_archive_runs (
+			id text primary key,
+			mode text not null default 'manual',
+			schema_version integer not null,
+			format text not null,
+			status text not null,
+			resume_status text,
+			requested_stage text,
+			cutoff_timestamp_ms integer not null,
+			target_event_id integer not null,
+			event_count integer not null,
+			estimated_bytes integer not null default 0,
+			last_archived_event_id integer not null default 0,
+			archived_event_count integer not null default 0,
+			archived_uncompressed_bytes integer not null default 0,
+			archived_compressed_bytes integer not null default 0,
+			archive_digest text,
+			manifest_file text,
+			manifest_sha256 text,
+			last_deleted_event_id integer not null default 0,
+			deleted_event_count integer not null default 0,
+			created_at_ms integer not null,
+			updated_at_ms integer not null,
+			started_at_ms integer,
+			archived_at_ms integer,
+			verified_at_ms integer,
+			delete_started_at_ms integer,
+			completed_at_ms integer,
+			last_error text
+		)`,
+		`create index if not exists idx_usage_archive_runs_status_updated
+			on usage_archive_runs(status, updated_at_ms)`,
+		`create table if not exists usage_archive_segments (
+			run_id text not null,
+			sequence integer not null,
+			status text not null,
+			file_name text not null,
+			first_event_id integer not null,
+			last_event_id integer not null,
+			min_timestamp_ms integer not null,
+			max_timestamp_ms integer not null,
+			event_count integer not null,
+			uncompressed_bytes integer not null,
+			compressed_bytes integer not null,
+			content_sha256 text not null,
+			event_hash_digest text not null,
+			created_at_ms integer not null,
+			verified_at_ms integer,
+			primary key (run_id, sequence),
+			unique (file_name),
+			foreign key (run_id) references usage_archive_runs(id) on delete cascade
+		)`,
+		`create index if not exists idx_usage_archive_segments_run_event
+			on usage_archive_segments(run_id, last_event_id)`,
+		`create table if not exists usage_archive_event_refs (
+			event_hash text primary key,
+			run_id text not null,
+			segment_sequence integer not null,
+			raw_event_id integer not null,
+			timestamp_ms integer not null,
+			archived_at_ms integer not null,
+			raw_deleted_at_ms integer,
+			unique (run_id, raw_event_id),
+			foreign key (run_id, segment_sequence)
+				references usage_archive_segments(run_id, sequence) on delete cascade,
+			foreign key (event_hash) references usage_event_identity_ledger(event_hash)
+		)`,
+		`create index if not exists idx_usage_archive_event_refs_run_deleted
+			on usage_archive_event_refs(run_id, raw_deleted_at_ms, raw_event_id)`,
+		`create index if not exists idx_usage_archive_event_refs_timestamp_deleted
+			on usage_archive_event_refs(timestamp_ms, raw_deleted_at_ms)`,
+		`create table if not exists usage_maintenance_locks (
+			name text primary key,
+			run_id text not null,
+			operation text not null,
+			acquired_at_ms integer not null,
+			updated_at_ms integer not null,
+			foreign key (run_id) references usage_archive_runs(id) on delete cascade
+		)`,
 		`create table if not exists usage_data_migrations (
 			name text primary key,
 			status text not null,
@@ -920,6 +999,9 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 	if err := ensureUsageDataMigrationColumns(db); err != nil {
+		return err
+	}
+	if err := ensureUsageArchiveRunColumns(db); err != nil {
 		return err
 	}
 	if err := ensureUsageEventSnapshotColumns(db); err != nil {
@@ -2142,6 +2224,41 @@ func ensureUsageDataMigrationColumns(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func ensureUsageArchiveRunColumns(db *sql.DB) error {
+	rows, err := db.Query(`pragma table_info(usage_archive_runs)`)
+	if err != nil {
+		return err
+	}
+	existing := map[string]struct{}{}
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		existing[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if len(existing) == 0 {
+		return nil
+	}
+	if _, ok := existing["requested_stage"]; ok {
+		return nil
+	}
+	_, err = db.Exec(`alter table usage_archive_runs add column requested_stage text`)
+	return err
 }
 
 func ensureCodexInspectionOwnershipColumns(db *sql.DB) error {
