@@ -5,6 +5,7 @@ import {
   buildModelPriceRows,
   buildModelPriceSummary,
   buildSyncPriceModelsFromSummary,
+  createPriceDraft,
   filterModelPriceRows,
   formatContextThreshold,
   formatServiceTierRule,
@@ -117,6 +118,55 @@ describe('modelPricesPageModel', () => {
     });
   });
 
+  it('round-trips non-token billing metadata into a manual price draft', () => {
+    expect(
+      createPriceDraft('grok-imagine-image', {
+        prompt: 0,
+        completion: 0,
+        cache: 0,
+        cacheRead: 0,
+        cacheCreation: 0,
+        billingUnit: 'image',
+        billingRate: '$0.02/image',
+      })
+    ).toMatchObject({
+      billingUnit: 'image',
+      billingRate: '$0.02/image',
+    });
+  });
+
+  it('preserves billing metadata and omits blank metadata from built prices', () => {
+    expect(
+      buildPriceFromDraft({
+        model: 'grok-imagine-video',
+        prompt: '0',
+        completion: '0',
+        cache: '',
+        cacheRead: '',
+        cacheCreation: '',
+        billingUnit: 'video second',
+        billingRate: '$0.05/s (480p) · $0.07/s (720p)',
+      })
+    ).toMatchObject({
+      billingUnit: 'video second',
+      billingRate: '$0.05/s (480p) · $0.07/s (720p)',
+    });
+    const plain = buildPriceFromDraft({
+      model: 'gpt-5.6-sol',
+      prompt: '0',
+      completion: '0',
+      cache: '',
+      cacheRead: '',
+      cacheCreation: '',
+      billingUnit: '  ',
+      billingRate: '',
+    });
+    if (!plain) {
+      throw new Error('expected built price');
+    }
+    expect('billingUnit' in plain).toBe(false);
+    expect('billingRate' in plain).toBe(false);
+  });
   it('keeps identical source model IDs distinct and groups candidates by source', () => {
     const candidates = [
       {
@@ -151,6 +201,8 @@ describe('modelPricesPageModel', () => {
         cache: '',
         cacheRead: '',
         cacheCreation: '',
+        billingUnit: '',
+        billingRate: '',
       })
     ).toMatchObject({
       prompt: 1,
@@ -175,6 +227,8 @@ describe('modelPricesPageModel', () => {
         cache: '',
         cacheRead: '0',
         cacheCreation: '0',
+        billingUnit: '',
+        billingRate: '',
       })
     ).toMatchObject({
       prompt: 0,

@@ -46,6 +46,8 @@ export interface ModelPrice {
   cacheCreationConfigured?: boolean;
   source?: string;
   sourceModelId?: string;
+  billingUnit?: string;
+  billingRate?: string;
   rawJson?: string;
   contextTiers?: ModelPriceContextTier[];
   serviceTiers?: ModelPriceServiceTier[];
@@ -1484,6 +1486,8 @@ export function loadModelPrices(): Record<string, ModelPrice> {
         cacheCreationConfigured: price.cacheCreationConfigured === true,
         source: readDetailString(price.source),
         sourceModelId: readDetailString(price.sourceModelId),
+        billingUnit: readDetailString(price.billingUnit),
+        billingRate: readDetailString(price.billingRate),
         rawJson: readDetailString(price.rawJson),
         contextTiers: normalizeContextTiers(price.contextTiers),
         serviceTiers: normalizeServiceTiers(price.serviceTiers),

@@ -12,6 +12,8 @@ type ModelPrice struct {
 	CacheCreationConfigured bool                    `json:"cacheCreationConfigured,omitempty"`
 	Source                  string                  `json:"source,omitempty"`
 	SourceModelID           string                  `json:"sourceModelId,omitempty"`
+	BillingUnit             string                  `json:"billingUnit,omitempty"`
+	BillingRate             string                  `json:"billingRate,omitempty"`
 	RawJSON                 string                  `json:"rawJson,omitempty"`
 	ContextTiers            []ModelPriceContextTier `json:"contextTiers,omitempty"`
 	ServiceTiers            []ModelPriceServiceTier `json:"serviceTiers,omitempty"`
