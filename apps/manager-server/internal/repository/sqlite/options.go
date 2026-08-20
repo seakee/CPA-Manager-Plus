@@ -13,6 +13,10 @@ type Options struct {
 	MaxOpenConns    int
 	MaxIdleConns    int
 	ConnMaxIdleTime time.Duration
+	// RepairCorruptDerived runs a table-scoped integrity check before Migrate
+	// and quarantines corrupt recomputable tables so the migration rebuilds
+	// them. Off by default: it adds startup I/O and rewrites schema.
+	RepairCorruptDerived bool
 }
 
 func (o Options) maxOpenConns() int {

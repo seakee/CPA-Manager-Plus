@@ -27,6 +27,11 @@ func TestLoadCreatesDefaultConfig(t *testing.T) {
 	if !cfg.DashboardHourlyRollupEnabled {
 		t.Fatal("DashboardHourlyRollupEnabled = false by default")
 	}
+	// Corrupt-derived repair rewrites schema during startup, so an operator has to
+	// ask for it; a default-on rollout would change every existing deployment.
+	if cfg.RepairCorruptDerived {
+		t.Fatal("RepairCorruptDerived = true by default")
+	}
 	if cfg.UsageImportChunkBytes != DefaultUsageImportChunkBytes ||
 		cfg.UsageImportDiskQuotaBytes != DefaultUsageImportDiskQuotaBytes ||
 		cfg.UsageImportMaxSessions != DefaultUsageImportMaxSessions ||
@@ -87,6 +92,7 @@ func TestLoadReadsConfigAndResolvesRelativePaths(t *testing.T) {
   "quotaCooldownEnabled": true,
 	  "accountActionsEnabled": true,
 	  "accountActionsAutoDisable": true,
+	  "repairCorruptDerived": true,
 	  "usageImportChunkBytes": 1048576,
 	  "usageImportDiskQuotaBytes": 1073741824,
 	  "usageImportMaxSessions": 3,
@@ -139,6 +145,9 @@ func TestLoadReadsConfigAndResolvesRelativePaths(t *testing.T) {
 	if !cfg.AccountActionsAutoDisable {
 		t.Fatal("AccountActionsAutoDisable = false")
 	}
+	if !cfg.RepairCorruptDerived {
+		t.Fatal("RepairCorruptDerived = false")
+	}
 	if cfg.UsageImportChunkBytes != 1048576 || cfg.UsageImportDiskQuotaBytes != 1073741824 ||
 		cfg.UsageImportMaxSessions != 3 || cfg.UsageImportSessionTTL != 2*time.Hour {
 		t.Fatalf("usage import config = %#v", cfg)
@@ -164,6 +173,7 @@ func TestLoadEnvOverridesConfig(t *testing.T) {
 	t.Setenv("USAGE_BATCH_SIZE", "12")
 	t.Setenv("CPA_MANAGER_PPROF_ADDR", "[::1]:6061")
 	t.Setenv("USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED", "false")
+	t.Setenv("USAGE_REPAIR_CORRUPT_DERIVED", "true")
 	t.Setenv("USAGE_IMPORT_CHUNK_BYTES", "2097152")
 	t.Setenv("USAGE_IMPORT_DISK_QUOTA_BYTES", "2147483648")
 	t.Setenv("USAGE_IMPORT_MAX_SESSIONS", "4")
@@ -190,6 +200,11 @@ func TestLoadEnvOverridesConfig(t *testing.T) {
 	}
 	if cfg.DashboardHourlyRollupEnabled {
 		t.Fatal("DashboardHourlyRollupEnabled = true, want false")
+	}
+	// Recovering an already-corrupt database has to be reachable without editing
+	// config.json, because the panel is down when an operator needs it.
+	if !cfg.RepairCorruptDerived {
+		t.Fatal("RepairCorruptDerived = false, want true")
 	}
 	if cfg.UsageImportChunkBytes != 2097152 || cfg.UsageImportDiskQuotaBytes != 2147483648 ||
 		cfg.UsageImportMaxSessions != 4 || cfg.UsageImportSessionTTL != 30*time.Minute {
@@ -241,6 +256,7 @@ func clearConfigEnv(t *testing.T) {
 		"USAGE_ACCOUNT_ACTIONS_ENABLED",
 		"USAGE_ACCOUNT_ACTIONS_AUTO_DISABLE",
 		"USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED",
+		"USAGE_REPAIR_CORRUPT_DERIVED",
 		"USAGE_IMPORT_CHUNK_BYTES",
 		"USAGE_IMPORT_DISK_QUOTA_BYTES",
 		"USAGE_IMPORT_MAX_SESSIONS",

@@ -144,7 +144,22 @@ type Store struct {
 }
 
 func Open(path string, protector ...*security.Protector) (*Store, error) {
-	db, err := sqliterepo.Open(path)
+	return OpenWithOptions(OpenOptions{Path: path}, protector...)
+}
+
+// OpenOptions carries the database settings the server chooses at startup.
+type OpenOptions struct {
+	Path string
+	// RepairCorruptDerived lets the repository quarantine corrupt recomputable
+	// tables during open so they are rebuilt instead of failing every worker.
+	RepairCorruptDerived bool
+}
+
+func OpenWithOptions(options OpenOptions, protector ...*security.Protector) (*Store, error) {
+	db, err := sqliterepo.OpenWithOptions(sqliterepo.Options{
+		Path:                 options.Path,
+		RepairCorruptDerived: options.RepairCorruptDerived,
+	})
 	if err != nil {
 		return nil, err
 	}
