@@ -118,17 +118,23 @@ export function resolveManagerCPAConnection({
   const savedConnection = managerConfig?.cpaConnection;
   const nextCPABaseUrl =
     cpaBaseUrlInput === undefined ? savedConnection?.cpaBaseUrl || '' : cpaBaseUrlInput.trim();
-  const nextManagementKey = managementKeyInput.trim() || savedConnection?.managementKey || '';
+  const nextManagementKey = managementKeyInput.trim();
+  const managementKeyConfigured = Boolean(
+    savedConnection?.managementKeyConfigured || savedConnection?.managementKey
+  );
+  const sanitizedConnection: ManagerConfig['cpaConnection'] = {
+    cpaBaseUrl: nextCPABaseUrl,
+    managementKeyConfigured,
+  };
 
   if (panelHostedByUsageService === true) {
     return {
-      ...(savedConnection ?? {}),
-      cpaBaseUrl: nextCPABaseUrl,
-      managementKey: nextManagementKey,
+      ...sanitizedConnection,
+      ...(nextManagementKey ? { managementKey: nextManagementKey } : {}),
     };
   }
 
-  return savedConnection ?? { cpaBaseUrl: '', managementKey: '' };
+  return sanitizedConnection;
 }
 
 function parseManagerPositiveIntegerInput(value: string): number | null {
@@ -182,9 +188,7 @@ export function resolveManagerFormDirty({
   if (savedCPABase !== nextCPABase) return true;
 
   const nextManagementKey = managementKeyInput.trim();
-  if (nextManagementKey && nextManagementKey !== (savedConnection?.managementKey || '')) {
-    return true;
-  }
+  if (nextManagementKey) return true;
 
   if (requestMonitoringEnabled !== (savedCollector.enabled !== false)) return true;
   const savedCollectorMode =
@@ -473,7 +477,16 @@ export function ConfigPage() {
 
   const applyManagerConfigResponse = useCallback(
     (response: ManagerConfigResponse) => {
-      const nextConfig = response.config;
+      const receivedConnection = response.config.cpaConnection;
+      const nextConfig: ManagerConfig = {
+        ...response.config,
+        cpaConnection: {
+          cpaBaseUrl: receivedConnection?.cpaBaseUrl || '',
+          managementKeyConfigured: Boolean(
+            receivedConnection?.managementKeyConfigured || receivedConnection?.managementKey
+          ),
+        },
+      };
       const collector = nextConfig.collector ?? MANAGER_COLLECTOR_DEFAULT;
 
       setManagerConfig(nextConfig);
@@ -1201,7 +1214,8 @@ export function ConfigPage() {
     Boolean(
       managerServiceTarget &&
         managerCPABaseInput.trim() &&
-        (managerCPAManagementKeyInput.trim() || managerConfig?.cpaConnection?.managementKey)
+        (managerCPAManagementKeyInput.trim() ||
+          managerConfig?.cpaConnection?.managementKeyConfigured)
     );
   const managerRuntimeModeLabel =
     panelHostedByUsageService === true
@@ -1264,7 +1278,7 @@ export function ConfigPage() {
               detectedPanelBase={detectedPanelBase}
               managerRuntimeModeLabel={managerRuntimeModeLabel}
               managerHasBoundCPAManagementKey={Boolean(
-                managerConfig?.cpaConnection?.managementKey
+                managerConfig?.cpaConnection?.managementKeyConfigured
               )}
               managerCPABaseInput={managerCPABaseInput}
               managerCPAManagementKeyInput={managerCPAManagementKeyInput}

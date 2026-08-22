@@ -46,7 +46,7 @@ If you see login instead of setup, Manager Server is already configured. Use the
 | `GET /v1/models`                      | CPA API Key                                        |
 | CPAMP Manager Server APIs after setup | CPAMP Admin Key                                    |
 
-Do not mix these keys. CPA connections saved through setup or the panel are encrypted with `data.key` and written to SQLite. Installer env/secret-managed connections read the key from the install directory and are not written to SQLite. In the CPAMP Lightweight Panel, the browser holds the CPA Management Key.
+Do not mix these keys. CPA connections saved through setup or the panel are encrypted with `data.key` and written to SQLite. The one-click installer uses env/secret input only for a one-time import; after a successful import it is encrypted into SQLite and removed from the final runtime configuration. Manual env/secret deployments still read the key from their deployment environment. In the CPAMP Lightweight Panel, the browser holds the CPA Management Key.
 
 ## Full Docker Opens Login Instead Of Setup
 
@@ -281,7 +281,7 @@ data.key
 
 CPA connections saved through setup or the panel are encrypted with `data.key` before being written to SQLite. If `data.key` is lost, the encrypted CPA Management Key cannot be recovered and the CPA connection must be saved again.
 
-If the installer manages the connection through env/secrets, the CPA Management Key is usually stored in `secrets/cpa-management-key` under the install directory and is not written to SQLite. Back up `secrets/` together with the data directory.
+After a successful one-click import, the CPA Management Key is stored in the encrypted SQLite configuration; back up `data.key` together with SQLite. The installer's temporary `secrets/cpa-management-key` is normally removed, but may remain after a failed upgrade or skipped execution for a retry. Manual env/secret deployments must still back up their matching secret files together with the data directory.
 
 ## 401 From Manager Server
 

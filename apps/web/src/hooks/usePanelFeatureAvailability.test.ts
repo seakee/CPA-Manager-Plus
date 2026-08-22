@@ -14,7 +14,7 @@ import {
 const buildManagerConfig = (overrides: Partial<ManagerConfig> = {}): ManagerConfig => ({
   cpaConnection: {
     cpaBaseUrl: 'http://cpa.local:8317',
-    managementKey: 'management-key',
+    managementKeyConfigured: true,
   },
   collector: {
     enabled: true,
@@ -125,7 +125,7 @@ describe('panel feature availability', () => {
       managerConfig: buildManagerConfig({
         cpaConnection: {
           cpaBaseUrl: '',
-          managementKey: '',
+          managementKeyConfigured: false,
         },
       }),
       hasManagerCandidate: true,
@@ -133,6 +133,46 @@ describe('panel feature availability', () => {
     });
 
     expect(availability.managerServiceAvailable).toBe(true);
+    expect(availability.serverCodexInspectionAvailable).toBe(false);
+    expect(availability.requestMonitoringAvailable).toBe(false);
+    expect(availability.reason).toBe('service_not_configured');
+  });
+
+  it('keeps compatibility with older Manager responses that still include the CPA key', () => {
+    const availability = resolvePanelFeatureAvailability({
+      panelHostedByUsageService: true,
+      panelBase: 'http://manager.local:18317',
+      managerServiceBase: 'http://manager.local:18317',
+      managerConfig: buildManagerConfig({
+        cpaConnection: {
+          cpaBaseUrl: 'http://cpa.local:8317',
+          managementKey: 'legacy-management-key',
+        },
+      }),
+      hasManagerCandidate: true,
+      managementKey: 'manager-key',
+    });
+
+    expect(availability.serverCodexInspectionAvailable).toBe(true);
+    expect(availability.requestMonitoringAvailable).toBe(true);
+    expect(availability.reason).toBe('');
+  });
+
+  it('treats a CPA URL without a configured key as unconfigured', () => {
+    const availability = resolvePanelFeatureAvailability({
+      panelHostedByUsageService: true,
+      panelBase: 'http://manager.local:18317',
+      managerServiceBase: 'http://manager.local:18317',
+      managerConfig: buildManagerConfig({
+        cpaConnection: {
+          cpaBaseUrl: 'http://cpa.local:8317',
+          managementKeyConfigured: false,
+        },
+      }),
+      hasManagerCandidate: true,
+      managementKey: 'manager-key',
+    });
+
     expect(availability.serverCodexInspectionAvailable).toBe(false);
     expect(availability.requestMonitoringAvailable).toBe(false);
     expect(availability.reason).toBe('service_not_configured');

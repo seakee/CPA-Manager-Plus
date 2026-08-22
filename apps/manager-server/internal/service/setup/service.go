@@ -179,10 +179,7 @@ func (s *Service) Setup(ctx context.Context, req Request, _ string) (Result, err
 		Queue:          req.Queue,
 		PopSide:        req.PopSide,
 	}
-	if err := s.store.SaveSetup(ctx, setup); err != nil {
-		return Result{}, err
-	}
-	if err := s.store.SaveManagerConfig(ctx, managerCfg); err != nil {
+	if err := s.store.SaveManagerConfigAndSetup(ctx, managerCfg, setup); err != nil {
 		return Result{}, err
 	}
 	if err := s.markBootstrapReady(ctx); err != nil {

@@ -61,6 +61,8 @@ usage-statistics-enabled: true
 
 也可以由 CPAMP 在首次 setup 或保存配置时启用。
 
+本页的环境变量示例属于手动 Docker 部署和旧版本兼容路径。一键安装脚本不会把 CPA URL 或 CPA Management Key 留在最终 Compose 环境中，而是先执行一次 `store-cpa-connection`，使用 `/data/data.key` 加密写入 SQLite。配置 API 也只返回 `managementKeyConfigured`，不会把已保存的 CPA Key 回传浏览器。
+
 ## CPA + CPAMP 一起部署
 
 如果还没有运行 CPA，用下面的 Compose 文件同时启动 CPA 和 CPAMP：
@@ -233,7 +235,7 @@ docker run --rm \
 - `usage.sqlite` 保存用量数据和加密后的 CPAMP 配置。
 - `data.key` 用来解密通过 setup / 面板保存到 SQLite 的 CPA Management Key。
 - 如果 `data.key` 丢失，保存到 SQLite 的 CPA Management Key 无法恢复，只能重新保存 CPA 连接。
-- 如果使用安装器 env/secret 管理连接，同时备份安装目录里的 `secrets/`。
+- 如果是手动 env/secret 部署，或安装器尚未完成/跳过 CPA 连接导入，同时备份安装目录里的 `secrets/`。
 
 ::: details 高级：采集协议和网络要求
 
@@ -336,5 +338,5 @@ databaseMaintenance.offlineJobs
 - 镜像变为 `seakee/cpa-manager-plus`。
 - 容器通常命名为 `cpa-manager-plus`。
 - Full Docker / Manager Server 模式登录使用 CPAMP 管理员密钥，不使用 CPA Management Key。
-- setup / 面板保存的 CPA Management Key 使用 `/data/data.key` 加密保存；安装器 env/secret 模式从安装目录读取。
+- setup / 面板保存的 CPA Management Key 使用 `/data/data.key` 加密保存；安装器提供的 env/secret 输入只用于一次性导入，成功后从最终运行配置移除。
 - CPAMP 轻量面板不会配置或挂接外部 Manager Server 统计。

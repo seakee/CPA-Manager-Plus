@@ -11,7 +11,7 @@ import {
 const buildManagerConfig = (overrides: Partial<ManagerConfig> = {}): ManagerConfig => ({
   cpaConnection: {
     cpaBaseUrl: 'http://cpa.local:8317',
-    managementKey: 'management-key',
+    managementKeyConfigured: true,
   },
   collector: {
     enabled: true,
@@ -50,20 +50,20 @@ describe('resolveManagerRequestAuthKey', () => {
 });
 
 describe('resolveManagerCPAConnection', () => {
-  it('keeps the saved embedded CPA URL and key when no new key is submitted', () => {
+  it('keeps the saved embedded CPA URL while omitting the write-only key', () => {
     expect(
       resolveManagerCPAConnection({
         panelHostedByUsageService: true,
         managerConfig: buildManagerConfig({
           cpaConnection: {
             cpaBaseUrl: 'http://saved-cpa.local:8317',
-            managementKey: 'old-cpa-key',
+            managementKey: 'legacy-readable-key',
           },
         }),
       })
     ).toEqual({
       cpaBaseUrl: 'http://saved-cpa.local:8317',
-      managementKey: 'old-cpa-key',
+      managementKeyConfigured: true,
     });
   });
 
@@ -74,13 +74,14 @@ describe('resolveManagerCPAConnection', () => {
         managerConfig: buildManagerConfig({
           cpaConnection: {
             cpaBaseUrl: 'http://saved-cpa.local:8317',
-            managementKey: 'old-cpa-key',
+            managementKeyConfigured: true,
           },
         }),
         managementKeyInput: ' new-cpa-key ',
       })
     ).toEqual({
       cpaBaseUrl: 'http://saved-cpa.local:8317',
+      managementKeyConfigured: true,
       managementKey: 'new-cpa-key',
     });
   });
@@ -92,14 +93,14 @@ describe('resolveManagerCPAConnection', () => {
         managerConfig: buildManagerConfig({
           cpaConnection: {
             cpaBaseUrl: 'http://saved-cpa.local:8317',
-            managementKey: 'old-cpa-key',
+            managementKeyConfigured: true,
           },
         }),
         cpaBaseUrlInput: ' http://next-cpa.local:9009 ',
       })
     ).toEqual({
       cpaBaseUrl: 'http://next-cpa.local:9009',
-      managementKey: 'old-cpa-key',
+      managementKeyConfigured: true,
     });
   });
 
@@ -110,7 +111,7 @@ describe('resolveManagerCPAConnection', () => {
         managerConfig: buildManagerConfig({
           cpaConnection: {
             cpaBaseUrl: 'http://saved-cpa.local:8317',
-            managementKey: 'old-cpa-key',
+            managementKeyConfigured: true,
           },
         }),
         cpaBaseUrlInput: ' http://next-cpa.local:9009 ',
@@ -118,6 +119,7 @@ describe('resolveManagerCPAConnection', () => {
       })
     ).toEqual({
       cpaBaseUrl: 'http://next-cpa.local:9009',
+      managementKeyConfigured: true,
       managementKey: 'next-cpa-key',
     });
   });
@@ -130,7 +132,7 @@ describe('resolveManagerCPAConnection', () => {
       })
     ).toEqual({
       cpaBaseUrl: '',
-      managementKey: '',
+      managementKeyConfigured: false,
     });
   });
 
@@ -142,7 +144,7 @@ describe('resolveManagerCPAConnection', () => {
       })
     ).toEqual({
       cpaBaseUrl: 'http://cpa.local:8317',
-      managementKey: 'management-key',
+      managementKeyConfigured: true,
     });
 
     expect(
@@ -152,7 +154,7 @@ describe('resolveManagerCPAConnection', () => {
       })
     ).toEqual({
       cpaBaseUrl: '',
-      managementKey: '',
+      managementKeyConfigured: false,
     });
   });
 });
@@ -183,7 +185,7 @@ describe('resolveManagerFormDirty', () => {
         managerConfig: buildManagerConfig({
           cpaConnection: {
             cpaBaseUrl: 'http://cpa.local:8317',
-            managementKey: 'saved-key',
+            managementKeyConfigured: true,
           },
         }),
         ...cleanForm,
@@ -192,13 +194,13 @@ describe('resolveManagerFormDirty', () => {
     ).toBe(false);
   });
 
-  it('marks the form dirty only when a submitted CPA key differs from the saved key', () => {
+  it('treats every non-empty CPA key input as an explicit rotation', () => {
     expect(
       resolveManagerFormDirty({
         managerConfig: buildManagerConfig({
           cpaConnection: {
             cpaBaseUrl: 'http://cpa.local:8317',
-            managementKey: 'saved-key',
+            managementKeyConfigured: true,
           },
         }),
         ...cleanForm,
@@ -211,13 +213,13 @@ describe('resolveManagerFormDirty', () => {
         managerConfig: buildManagerConfig({
           cpaConnection: {
             cpaBaseUrl: 'http://cpa.local:8317',
-            managementKey: 'saved-key',
+            managementKeyConfigured: true,
           },
         }),
         ...cleanForm,
         managementKeyInput: ' saved-key ',
       })
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it('normalizes CPA base URLs and numeric inputs before comparing dirty state', () => {

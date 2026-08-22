@@ -481,6 +481,11 @@ func TestManagerConfigReadsLegacySetup(t *testing.T) {
 	if !strings.Contains(rr.Body.String(), upstream.URL) {
 		t.Fatalf("response body = %s", rr.Body.String())
 	}
+	if !strings.Contains(rr.Body.String(), `"managementKeyConfigured":true`) ||
+		strings.Contains(rr.Body.String(), `"managementKey"`) ||
+		strings.Contains(rr.Body.String(), "management-key") {
+		t.Fatalf("legacy config response leaked CPA management key: %s", rr.Body.String())
+	}
 	if !strings.Contains(rr.Body.String(), `"enabled":true`) {
 		t.Fatalf("response body = %s", rr.Body.String())
 	}

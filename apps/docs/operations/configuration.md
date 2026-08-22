@@ -45,9 +45,11 @@ CPA Management Key 用于访问 CPA 管理接口。
 它的保存位置取决于配置来源：
 
 - 通过 setup 或面板保存的 CPA 连接，会使用 `data.key` 加密后写入 SQLite。
-- 通过安装器或环境变量管理的 CPA 连接，来自 `CPA_UPSTREAM_URL` 和 `CPA_MANAGEMENT_KEY` / `CPA_MANAGEMENT_KEY_FILE`。这种连接不写入 SQLite；如果使用一键安装脚本，密钥通常在安装目录的 `secrets/cpa-management-key`。
+- 一键安装器接收的 `CPA_UPSTREAM_URL` 和 `CPA_MANAGEMENT_KEY` / `CPA_MANAGEMENT_KEY_FILE` 只作为一次性导入输入，成功后会使用 `data.key` 加密写入 SQLite，并删除临时 `secrets/cpa-management-key`。手动部署仍可使用这些环境变量作为运行时兼容方式，但不属于安装器的最终配置。
 
-CPAMP 轻量面板由 CPA 托管，浏览器持有 CPA Management Key，符合 CPA 端口访问方式。
+配置 API 只返回 `managementKeyConfigured` 状态，不返回可逆解密后的 CPA Management Key。CPAMP 服务端在代理请求时读取并解密该密钥；浏览器和第三方 iframe 不需要接触它。
+
+CPAMP 轻量面板由 CPA 托管，仍遵循 CPA 端口访问方式；它与 Manager Server 的服务端密钥存储是两条独立链路。
 
 ## 采集配置
 

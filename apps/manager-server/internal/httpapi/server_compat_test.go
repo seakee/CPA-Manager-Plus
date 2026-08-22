@@ -165,23 +165,55 @@ func TestServerCompatSetupConfigAndEnvLock(t *testing.T) {
 	testutil.RequireStatus(t, configRR, http.StatusOK)
 	if !strings.Contains(configRR.Body.String(), `"source":"db"`) ||
 		!strings.Contains(configRR.Body.String(), `"cpaBaseUrl":"`+cpa.URL()+`"`) ||
+		!strings.Contains(configRR.Body.String(), `"managementKeyConfigured":true`) ||
 		!strings.Contains(configRR.Body.String(), `"cpaUsage"`) {
 		t.Fatalf("config body = %s", configRR.Body.String())
 	}
+	if strings.Contains(configRR.Body.String(), `"managementKey"`) ||
+		strings.Contains(configRR.Body.String(), "management-key") {
+		t.Fatalf("config response leaked CPA management key: %s", configRR.Body.String())
+	}
 
-	updateBody := `{"config":{"cpaConnection":{"cpaBaseUrl":"` + cpa.URL() + `","managementKey":"management-key"},"collector":{"enabled":false,"collectorMode":"auto","queue":"usage","popSide":"right","batchSize":100,"pollIntervalMs":500,"queryLimit":50000},"externalUsageService":{"enabled":true,"serviceBase":"http://usage.local"}}}`
+	updateBody := `{"config":{"cpaConnection":{"cpaBaseUrl":"` + cpa.URL() + `"},"collector":{"enabled":false,"collectorMode":"auto","queue":"usage","popSide":"right","batchSize":100,"pollIntervalMs":500,"queryLimit":50000},"externalUsageService":{"enabled":true,"serviceBase":"http://usage.local"}}}`
 	updateRR := testutil.Request(t, handler, http.MethodPut, "/usage-service/config", updateBody, testutil.AdminKey)
 	testutil.RequireStatus(t, updateRR, http.StatusOK)
 	if !strings.Contains(updateRR.Body.String(), `"externalUsageService":{"enabled":false}`) ||
-		strings.Contains(updateRR.Body.String(), "http://usage.local") {
+		!strings.Contains(updateRR.Body.String(), `"managementKeyConfigured":true`) ||
+		strings.Contains(updateRR.Body.String(), "http://usage.local") ||
+		strings.Contains(updateRR.Body.String(), `"managementKey"`) ||
+		strings.Contains(updateRR.Body.String(), "management-key") {
 		t.Fatalf("updated config body = %s", updateRR.Body.String())
+	}
+	preservedSetup, ok, err := db.LoadSetup(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("load preserved setup ok=%v err=%v", ok, err)
+	}
+	if preservedSetup.ManagementKey != "management-key" {
+		t.Fatalf("management key changed when omitted: %#v", preservedSetup)
+	}
+
+	blankKeyBody := `{"config":{"cpaConnection":{"cpaBaseUrl":"` + cpa.URL() + `","managementKey":"   "},"collector":{"enabled":false,"collectorMode":"auto","queue":"usage","popSide":"right","batchSize":100,"pollIntervalMs":500,"queryLimit":50000}}}`
+	blankKeyRR := testutil.Request(t, handler, http.MethodPut, "/usage-service/config", blankKeyBody, testutil.AdminKey)
+	testutil.RequireStatus(t, blankKeyRR, http.StatusOK)
+	if strings.Contains(blankKeyRR.Body.String(), `"managementKey"`) ||
+		strings.Contains(blankKeyRR.Body.String(), "management-key") {
+		t.Fatalf("blank-key response leaked CPA management key: %s", blankKeyRR.Body.String())
+	}
+	blankPreservedSetup, ok, err := db.LoadSetup(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("load blank-key setup ok=%v err=%v", ok, err)
+	}
+	if blankPreservedSetup.ManagementKey != "management-key" {
+		t.Fatalf("blank management key replaced saved key: %#v", blankPreservedSetup)
 	}
 
 	cpa.ManagementKey = "rotated-management-key"
 	rotateKeyBody := `{"config":{"cpaConnection":{"cpaBaseUrl":"` + cpa.URL() + `","managementKey":"rotated-management-key"},"collector":{"enabled":false,"collectorMode":"auto","queue":"usage","popSide":"right","batchSize":100,"pollIntervalMs":500,"queryLimit":50000}}}`
 	rotateKeyRR := testutil.Request(t, handler, http.MethodPut, "/usage-service/config", rotateKeyBody, testutil.AdminKey)
 	testutil.RequireStatus(t, rotateKeyRR, http.StatusOK)
-	if !strings.Contains(rotateKeyRR.Body.String(), `"cpaBaseUrl":"`+cpa.URL()+`"`) {
+	if !strings.Contains(rotateKeyRR.Body.String(), `"cpaBaseUrl":"`+cpa.URL()+`"`) ||
+		!strings.Contains(rotateKeyRR.Body.String(), `"managementKeyConfigured":true`) ||
+		strings.Contains(rotateKeyRR.Body.String(), "rotated-management-key") {
 		t.Fatalf("rotated key config body = %s", rotateKeyRR.Body.String())
 	}
 	rotatedSetup, ok, err := db.LoadSetup(context.Background())
@@ -905,13 +937,22 @@ func TestServerCompatPluginProxyRoutes(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	setup := &store.Setup{
-		CPAUpstreamURL: upstream.URL,
-		ManagementKey:  "management-key",
-		Queue:          "usage",
-		PopSide:        "right",
+	handler, db := newCompatHandler(t, testutil.NewConfig(t), nil)
+	collectorDisabled := false
+	if err := db.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{
+			CPABaseURL:    upstream.URL,
+			ManagementKey: "management-key",
+		},
+		Collector: store.ManagerCollectorConfig{
+			Enabled:       &collectorDisabled,
+			CollectorMode: "auto",
+			Queue:         "usage",
+			PopSide:       "right",
+		},
+	}); err != nil {
+		t.Fatalf("save DB-only manager config: %v", err)
 	}
-	handler, _ := newCompatHandler(t, testutil.NewConfig(t), setup)
 
 	assertObserved := func(path string, want observedRequest) {
 		t.Helper()

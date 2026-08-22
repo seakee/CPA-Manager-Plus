@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
@@ -19,6 +20,14 @@ type Result struct {
 	HasHistoricalData bool
 	State             store.BootstrapState
 }
+
+// currentConnectionStorageMigrationVersion is the version of the
+// manager_config/setup normalization migration. Version 1 is the legacy
+// MigratedLegacy boolean; version 2 adds authoritative reconciliation,
+// partial-manager repair, and encrypted rewrites. Databases migrated by older
+// releases carry no version field and decode as 0, so the migration runs once
+// more under this release.
+const currentConnectionStorageMigrationVersion = 2
 
 func Run(ctx context.Context, cfg config.Config, st *store.Store, dataKeyCreated bool) (Result, error) {
 	result := Result{DataKeyCreated: dataKeyCreated}
@@ -39,12 +48,26 @@ func Run(ctx context.Context, cfg config.Config, st *store.Store, dataKeyCreated
 	if err != nil {
 		return Result{}, err
 	}
-	if !stateFound || !previousState.MigratedLegacy {
+	connectionStorageMigrationVersion := 0
+	if stateFound {
+		connectionStorageMigrationVersion = previousState.ConnectionStorageMigrationVersion
+	}
+	// The version gate, not MigratedLegacy, decides whether the connection
+	// normalization runs: older releases already set MigratedLegacy=true
+	// without performing it. The version is only persisted after the
+	// migration succeeds, so a failed normalization retries on the next boot.
+	needsConnectionStorageMigration := !stateFound ||
+		!previousState.MigratedLegacy ||
+		previousState.ConnectionStorageMigrationVersion < currentConnectionStorageMigrationVersion
+	if needsConnectionStorageMigration {
 		migrated, err := migrateLegacyConfig(ctx, cfg, st)
 		if err != nil {
 			return Result{}, err
 		}
-		result.MigratedLegacy = migrated
+		if migrated || (stateFound && previousState.MigratedLegacy) {
+			result.MigratedLegacy = true
+		}
+		connectionStorageMigrationVersion = currentConnectionStorageMigrationVersion
 	} else {
 		result.MigratedLegacy = previousState.MigratedLegacy
 	}
@@ -54,13 +77,14 @@ func Run(ctx context.Context, cfg config.Config, st *store.Store, dataKeyCreated
 		return Result{}, err
 	}
 	state := store.BootstrapState{
-		Version:            1,
-		Status:             bootstrapStatus(projectInitialized, historical),
-		AdminReady:         true,
-		ProjectInitialized: projectInitialized,
-		DataKeyReady:       true,
-		MigratedLegacy:     result.MigratedLegacy,
-		HasHistoricalData:  historical,
+		Version:                           1,
+		Status:                            bootstrapStatus(projectInitialized, historical),
+		AdminReady:                        true,
+		ProjectInitialized:                projectInitialized,
+		DataKeyReady:                      true,
+		MigratedLegacy:                    result.MigratedLegacy,
+		HasHistoricalData:                 historical,
+		ConnectionStorageMigrationVersion: connectionStorageMigrationVersion,
 	}
 	if err := st.SaveBootstrapState(ctx, state); err != nil {
 		return Result{}, err
@@ -98,7 +122,6 @@ func ensureAdminCredential(ctx context.Context, cfg config.Config, st *store.Sto
 }
 
 func migrateLegacyConfig(ctx context.Context, cfg config.Config, st *store.Store) (bool, error) {
-	migrated := false
 	managerCfg, managerOK, err := st.LoadManagerConfig(ctx)
 	if err != nil {
 		return false, err
@@ -107,25 +130,64 @@ func migrateLegacyConfig(ctx context.Context, cfg config.Config, st *store.Store
 	if err != nil {
 		return false, err
 	}
-	if !managerOK && setupOK && setup.CPAUpstreamURL != "" && setup.ManagementKey != "" {
+	setupUsable := setupOK && managerconfig.SetupConnectionComplete(setup)
+	if managerOK {
+		if managerconfig.ConnectionComplete(managerCfg) {
+			// A complete manager_config_v1 is the current schema's authority.
+			// Rewrite legacy setup from it so stale/partial plaintext history is
+			// normalized and encrypted without changing the active connection.
+			managerconfig.MergeLegacyCollectorSettings(&managerCfg, setup, setupUsable)
+			if err := st.SaveManagerConfigAndSetup(ctx, managerCfg, managerconfig.SetupFromManagerConfig(managerCfg)); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+		if setupUsable {
+			// A complete legacy setup is the only unambiguous source when the
+			// manager config is missing either side of its connection.
+			mergeLegacySetupConnection(&managerCfg, setup)
+			if err := st.SaveManagerConfigAndSetup(ctx, managerCfg, managerconfig.SetupFromManagerConfig(managerCfg)); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+		if err := st.SaveManagerConfig(ctx, managerCfg); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if setupUsable {
 		managerCfg = managerConfigFromSetup(cfg, setup)
-		if err := st.SaveManagerConfig(ctx, managerCfg); err != nil {
+		if err := st.SaveManagerConfigAndSetup(ctx, managerCfg, managerconfig.SetupFromManagerConfig(managerCfg)); err != nil {
 			return false, err
 		}
-		migrated = true
-	} else if managerOK {
-		if err := st.SaveManagerConfig(ctx, managerCfg); err != nil {
-			return false, err
-		}
-		migrated = true
+		return true, nil
 	}
-	if setupOK && setup.CPAUpstreamURL != "" && setup.ManagementKey != "" {
-		if err := st.SaveSetup(ctx, setup); err != nil {
-			return false, err
-		}
-		migrated = true
+	return false, nil
+}
+
+// mergeLegacySetupConnection repairs a partial manager config from the
+// complete legacy setup. It is called only when manager_config_v1 is missing a
+// URL or key, so the complete setup is the only usable connection source.
+func mergeLegacySetupConnection(managerCfg *store.ManagerConfig, setup store.Setup) {
+	if managerCfg == nil {
+		return
 	}
-	return migrated, nil
+
+	managerURL := cpa.NormalizeBaseURL(managerCfg.CPAConnection.CPABaseURL)
+	managerKey := strings.TrimSpace(managerCfg.CPAConnection.ManagementKey)
+	setupURL := cpa.NormalizeBaseURL(setup.CPAUpstreamURL)
+	setupKey := strings.TrimSpace(setup.ManagementKey)
+	if setupURL == "" || setupKey == "" {
+		return
+	}
+
+	if managerURL == "" || managerKey == "" {
+		managerCfg.CPAConnection.CPABaseURL = setupURL
+		managerCfg.CPAConnection.ManagementKey = setupKey
+	}
+
+	managerconfig.MergeLegacyCollectorSettings(managerCfg, setup, true)
 }
 
 func managerConfigFromSetup(cfg config.Config, setup store.Setup) store.ManagerConfig {

@@ -2,6 +2,8 @@
 
 Use the installer for a first deployment, or when CPA is already running and you only want to bring up CPAMP. It does not overwrite existing config files by default. Before it writes files or starts services, it shows a summary and asks for confirmation.
 
+When the installer receives a CPA URL and CPA Management Key, they are one-time import inputs. The installer runs `store-cpa-connection`, encrypts the connection into CPAMP's SQLite configuration with `data.key`, and removes the temporary key file only after health, admin-auth, and proxied CPA Management API checks succeed. The final runtime configuration no longer contains `CPA_UPSTREAM_URL`, `CPA_MANAGEMENT_KEY_FILE`, or a long-lived CPA-key secret mount.
+
 Most users only need four steps: run the script, choose the install scope, choose Docker or a native package, and confirm the summary. After installation, use the address and key printed by the installer.
 
 ## Run It
@@ -26,7 +28,7 @@ The wizard walks through:
 2. Choosing the operation language.
 3. Choosing the install scope: CPA + CPAMP, or CPAMP only.
 4. Choosing the deployment method: Docker, or CPAMP native package.
-5. Generating minimal config files and local secret files.
+5. Generating minimal config files and local secret files (the CPA Management Key file is temporary and used only during import).
 6. Showing a summary so you can confirm, modify, or abort.
 7. Running the install only after confirmation.
 
@@ -51,7 +53,7 @@ When you choose CPA + CPAMP, the script generates:
 compose.yaml
 .env
 secrets/cpamp-admin-key
-secrets/cpa-management-key
+secrets/cpa-management-key       # temporary import input
 secrets/cpa-demo-client-key
 cliproxyapi/config.yaml
 cliproxyapi/auths/
@@ -92,13 +94,13 @@ The generated Compose file uses the paths expected by the CPA image:
 
 CPA hashes a plaintext `remote-management.secret-key` back into `cliproxyapi/config.yaml` on startup, so that file must remain writable.
 
-CPAMP reads the CPA Management Key from a Docker secret and connects to CPA through the Docker internal URL:
+Before CPAMP starts, the installer performs one offline import and uses the Docker internal URL:
 
 ```text
 http://cli-proxy-api:8317
 ```
 
-This connection is managed by `compose.yaml` and `secrets/cpa-management-key` in the install directory. Open the panel and log in with the CPAMP Admin Key; first setup is not required.
+The import encrypts the CPA URL and CPA Management Key into `/data/usage.sqlite`, protected by `/data/data.key`. After the install passes health, admin-auth, and proxied CPA Management API checks, `secrets/cpa-management-key` is deleted; the final `compose.yaml` no longer passes the CPA Key to Manager Server. Open the panel and log in with the CPAMP Admin Key; first setup is not required.
 
 After deployment, open:
 
@@ -114,14 +116,15 @@ The script saves the CPAMP Admin Key and prints its file path and view command. 
 
 If CPA is already running, choose CPAMP only. The interactive wizard first asks whether you want to enter the CPA URL and CPA Management Key now.
 
-If you choose to enter them now and skip first setup, the installer stores the connection in:
+If you choose to enter them now and skip first setup, the installer imports the connection into SQLite once:
 
 ```text
-.env
-secrets/cpa-management-key
+.env                    # non-sensitive runtime settings only
+data/usage.sqlite       # encrypted Manager configuration
+data/data.key
 ```
 
-After startup, log in with the CPAMP Admin Key; first setup is not required. This is environment-managed configuration: CPA URL and CPA Management Key come from the install directory, and the panel cannot directly replace that connection. To change it, update the install directory config and secret, then restart CPAMP.
+After startup, log in with the CPAMP Admin Key; first setup is not required. After import, CPAMP reads the CPA URL and CPA Management Key from encrypted SQLite; the panel never returns the saved CPA Key to the browser. To change the connection, submit a new CPA Key in the panel. The offline import command accepts only a first import or an identical idempotent retry and refuses to overwrite a conflicting connection.
 
 If you choose to enter it later, the installer does not write the CPA Management Key into environment-managed config. Open the panel and complete setup with:
 
@@ -131,7 +134,7 @@ CPA Management Key
 Request monitoring preference
 ```
 
-If you want the connection to be managed by files, choose the option that stores the CPA connection in local secret files. In that mode, CPA URL and CPA Management Key come from config files, and the panel cannot directly replace that connection.
+Manual deployments may still use `CPA_UPSTREAM_URL`, `CPA_MANAGEMENT_KEY`, or `CPA_MANAGEMENT_KEY_FILE`, but that is not the installer's final state; the installer migrates those inputs into encrypted SQLite. With `CPAMP_SKIP_EXECUTE=1`, it does not run the import or delete the temporary file; it prints the import and cleanup commands for manual review.
 
 For CPAMP-only Docker installs where CPA runs on the same host, the installer defaults to:
 
@@ -149,13 +152,14 @@ For CPAMP-only installs, you can choose the native package. The script downloads
 runtime/<package>/
 data/
 secrets/cpamp-admin-key
+secrets/cpa-management-key       # deleted after import
 run.sh
 cpa-manager-plus.service  # Linux
 cpa-manager-plus.log
 cpa-manager-plus.pid
 ```
 
-The native package is started in the background. On Linux the installer also creates `cpa-manager-plus.service`; copy it into your systemd service directory and enable it according to your host policy. On macOS, or with another process manager, keep using `run.sh` as the integration point.
+The native package imports the CPA connection offline before starting in the background. The installer verifies health, admin authentication, and a CPA Management API request proxied through CPAMP, then removes the temporary `secrets/cpa-management-key` only after all checks pass. On Linux it also creates `cpa-manager-plus.service`; copy it into your systemd service directory and enable it according to your host policy. On macOS, or with another process manager, keep using `run.sh` as the integration point.
 
 ::: details Automation, reruns, and repair
 
@@ -172,6 +176,8 @@ Generate config but skip startup:
 ```bash
 CPAMP_SKIP_EXECUTE=1 bash install-cpamp.sh
 ```
+
+This mode keeps the temporary CPA Key and prints manual commands in the order import -> start -> health check -> admin authentication -> proxied CPA Management API check -> temporary-key removal. For a Docker upgrade that still uses legacy env/secret wiring, the script leaves the runtime config untouched and prints one full upgrade command without `CPAMP_SKIP_EXECUTE`; the normal upgrade flow then owns backup, rollback, and final cleanup.
 
 Non-interactive full Docker install:
 
@@ -198,9 +204,9 @@ Common variables:
 | `CPAMP_IMAGE`               | CPAMP Docker image.                                                                                                  |
 | `CPAMP_CPA_IMAGE`           | CPA Docker image.                                                                                                    |
 | `CPAMP_VERSION`             | Native package version. Defaults to `latest`.                                                                        |
-| `CPAMP_CPA_CONNECTION_MODE` | `setup` or `env`.                                                                                                    |
+| `CPAMP_CPA_CONNECTION_MODE` | `setup` or `env`; `env` means one-time import input from the environment/prompt.                                     |
 | `CPAMP_CPA_URL`             | CPA URL for `env` mode.                                                                                              |
-| `CPAMP_CPA_MANAGEMENT_KEY`  | CPA Management Key for `env` mode.                                                                                   |
+| `CPAMP_CPA_MANAGEMENT_KEY`  | One-time CPA Management Key input for `env` mode; not retained in the final Compose config.                          |
 | `CPAMP_OPERATION`           | `install`, `upgrade`, `repair`, or `regenerate`. Existing non-interactive deployments require an explicit operation. |
 | `CPAMP_PROJECT_NAME`        | Docker Compose project name. Defaults to `cpamp`; use another name for an isolated deployment on the same host.      |
 
@@ -210,7 +216,7 @@ The following `CPAMP_OPERATION` modes apply to Docker deployments. Native packag
 
 Before writing files, the installer checks both the install directory and Docker data volume. When it detects an existing deployment, interactive mode offers:
 
-1. **Upgrade existing deployment**: pull and recreate containers without changing config or secrets.
+1. **Upgrade existing deployment**: pull and recreate containers; if a legacy env/secret CPA connection is found, import it into SQLite and remove the old runtime fields.
 2. **Repair admin login**: stop CPAMP, synchronize the SQLite admin credential with `secrets/cpamp-admin-key`, restart, and verify login. CPA and application data are not deleted.
 3. **Regenerate deployment config**: back up generated config before replacing it while preserving secrets and the data volume.
 4. **Exit**.
@@ -245,10 +251,16 @@ CPAMP_OPERATION=regenerate bash install-cpamp.sh
 
 `CPAMP_OVERWRITE=1` remains compatible with the old workflow and maps to config regeneration. The installer backs up the previous `.env`, `compose.yaml`, CPA config, `run.sh`, and service file under `backups/installer-*`. You should still separately back up `secrets/`, `data/`, and `cliproxyapi/`. If `data.key` is lost, stored CPA Management Keys cannot be recovered.
 
+When upgrading a legacy env/secret Docker deployment, the installer first stops Manager Server and creates a protected offline snapshot inside the data volume. The snapshot records the original presence and contents of `usage.sqlite`, `-wal`, `-shm`, `-journal`, and `data.key`. Import and any SQLite schema migration start only after the complete snapshot exists. The snapshot is deleted only after health, admin authentication, and CPA proxy validation all pass. On failure, the installer stops the replacement process, restores the data and old config, and then starts the previous service. A snapshot whose restore fails is retained and its path is reported for manual recovery.
+
+The installer also keeps timestamped `compose.yaml.cpa-key-migration.bak.*` and `.env.cpa-key-migration.bak.*` files. Legacy CPA inputs are resolved only from sources actually referenced by the `cpa-manager-plus` Compose service, with the process environment overriding `.env`; unreferenced legacy `.env` declarations and stale secret files do not trigger migration. The installer may restrict and remove its managed `secrets/cpa-management-key`. An external `CPA_MANAGEMENT_KEY_FILE` is read only: its contents, permissions, and file remain unchanged.
+
+Native-package upgrades likewise back up SQLite sidecars and `data.key` before switching runtime entry files. The new binary sanitizes the old `config.json` with Go's JSON parser, deleting only `cpaUpstreamUrl` and `managementKeyFile` while preserving unknown fields. The common exit handler also rolls back unhandled shell failures.
+
 :::
 
 ## Startup And Login Verification
 
-After Docker installation, upgrade, or repair, the script waits for CPAMP health and then uses the current admin key against a protected Manager Server endpoint. It reports the install as completed only after both checks pass.
+After Docker installation, upgrade, or repair, and after native-package installation, the script waits for CPAMP health and then uses the current admin key against a protected Manager Server endpoint. For a CPA connection imported in this run, it also requests the CPA management configuration through CPAMP's server-side proxy to confirm that the URL and key actually work. It reports the install as completed only after all checks pass, then removes the temporary CPA Key file used for import.
 
-If the container is healthy but the key is rejected, interactive mode offers to stop CPAMP and repair the database credential automatically. Non-interactive mode exits with a failure and instructs the operator to use `CPAMP_OPERATION=repair`. This prevents the installer from presenting a newly generated key that does not match an existing database.
+If import, health, admin-key verification, or the proxied CPA connection check fails, the temporary CPA Key file remains available for a retry; legacy upgrades also restore the previous config. If the container is healthy but the admin key is rejected, interactive mode offers to stop CPAMP and repair the database credential automatically. Non-interactive mode exits with a failure and instructs the operator to use `CPAMP_OPERATION=repair`. This prevents the installer from presenting a newly generated key that does not match an existing database or deleting an unverified CPA Key.

@@ -22,9 +22,22 @@ const (
 )
 
 type Response struct {
-	Config   store.ManagerConfig `json:"config"`
+	Config   PublicManagerConfig `json:"config"`
 	Source   string              `json:"source"`
 	CPAUsage *cpa.UsageConfig    `json:"cpaUsage,omitempty"`
+}
+
+type PublicManagerConfig struct {
+	CPAConnection        PublicManagerCPAConnectionConfig        `json:"cpaConnection"`
+	Collector            store.ManagerCollectorConfig            `json:"collector"`
+	CodexInspection      store.ManagerCodexInspectionConfig      `json:"codexInspection"`
+	ExternalUsageService store.ManagerExternalUsageServiceConfig `json:"externalUsageService"`
+	UpdatedAtMS          int64                                   `json:"updatedAtMs,omitempty"`
+}
+
+type PublicManagerCPAConnectionConfig struct {
+	CPABaseURL              string `json:"cpaBaseUrl"`
+	ManagementKeyConfigured bool   `json:"managementKeyConfigured"`
 }
 
 type Service struct {
@@ -57,7 +70,7 @@ func (s *Service) Get(ctx context.Context) (Response, error) {
 		}
 	}
 	return Response{
-		Config:   cfg,
+		Config:   PublicConfig(cfg),
 		Source:   string(source),
 		CPAUsage: cpaUsage,
 	}, nil
@@ -113,15 +126,12 @@ func (s *Service) Update(ctx context.Context, submitted store.ManagerConfig) (Re
 		}
 		_ = s.collector.Stop(context.Background())
 		return Response{
-			Config: next,
+			Config: PublicConfig(next),
 			Source: string(SourceDB),
 		}, nil
 	}
-	if err := s.store.SaveManagerConfig(ctx, next); err != nil {
-		return Response{}, err
-	}
 	setup := SetupFromManagerConfig(next)
-	if err := s.store.SaveSetup(ctx, setup); err != nil {
+	if err := s.store.SaveManagerConfigAndSetup(ctx, next, setup); err != nil {
 		return Response{}, err
 	}
 	if ManagerCollectorEnabled(next) {
@@ -130,7 +140,7 @@ func (s *Service) Update(ctx context.Context, submitted store.ManagerConfig) (Re
 		_ = s.collector.Stop(context.Background())
 	}
 	return Response{
-		Config: next,
+		Config: PublicConfig(next),
 		Source: string(SourceDB),
 	}, nil
 }
@@ -222,8 +232,10 @@ func (s *Service) DefaultManagerConfig() store.ManagerConfig {
 func (s *Service) MergeSubmittedManagerConfig(base store.ManagerConfig, submitted store.ManagerConfig) store.ManagerConfig {
 	next := base
 
-	if submitted.CPAConnection.CPABaseURL != "" || submitted.CPAConnection.ManagementKey != "" {
+	if strings.TrimSpace(submitted.CPAConnection.CPABaseURL) != "" {
 		next.CPAConnection.CPABaseURL = cpa.NormalizeBaseURL(submitted.CPAConnection.CPABaseURL)
+	}
+	if strings.TrimSpace(submitted.CPAConnection.ManagementKey) != "" {
 		next.CPAConnection.ManagementKey = strings.TrimSpace(submitted.CPAConnection.ManagementKey)
 	}
 
@@ -246,12 +258,56 @@ func (s *Service) MergeSubmittedManagerConfig(base store.ManagerConfig, submitte
 	return next
 }
 
+func PublicConfig(cfg store.ManagerConfig) PublicManagerConfig {
+	return PublicManagerConfig{
+		CPAConnection: PublicManagerCPAConnectionConfig{
+			CPABaseURL:              cfg.CPAConnection.CPABaseURL,
+			ManagementKeyConfigured: strings.TrimSpace(cfg.CPAConnection.ManagementKey) != "",
+		},
+		Collector:            cfg.Collector,
+		CodexInspection:      cfg.CodexInspection,
+		ExternalUsageService: cfg.ExternalUsageService,
+		UpdatedAtMS:          cfg.UpdatedAtMS,
+	}
+}
+
 func SetupFromManagerConfig(cfg store.ManagerConfig) store.Setup {
 	return store.Setup{
 		CPAUpstreamURL: cfg.CPAConnection.CPABaseURL,
 		ManagementKey:  cfg.CPAConnection.ManagementKey,
 		Queue:          cfg.Collector.Queue,
 		PopSide:        cfg.Collector.PopSide,
+	}
+}
+
+// ConnectionComplete reports whether manager_config_v1 carries both sides of
+// the CPA connection. A complete manager config is the authority for the
+// active connection; bootstrap normalization and the offline importer must
+// agree on this definition.
+func ConnectionComplete(cfg store.ManagerConfig) bool {
+	return cpa.NormalizeBaseURL(cfg.CPAConnection.CPABaseURL) != "" &&
+		strings.TrimSpace(cfg.CPAConnection.ManagementKey) != ""
+}
+
+// SetupConnectionComplete mirrors ConnectionComplete for the legacy setup row.
+func SetupConnectionComplete(setup store.Setup) bool {
+	return cpa.NormalizeBaseURL(setup.CPAUpstreamURL) != "" &&
+		strings.TrimSpace(setup.ManagementKey) != ""
+}
+
+// MergeLegacyCollectorSettings fills empty manager collector fields from a
+// usable legacy setup. It is used when the manager config is authoritative,
+// so legacy collector choices are preserved without overriding manager
+// settings that already carry a value.
+func MergeLegacyCollectorSettings(managerCfg *store.ManagerConfig, setup store.Setup, setupUsable bool) {
+	if managerCfg == nil || !setupUsable {
+		return
+	}
+	if strings.TrimSpace(managerCfg.Collector.Queue) == "" {
+		managerCfg.Collector.Queue = ValueOr(setup.Queue, managerCfg.Collector.Queue)
+	}
+	if strings.TrimSpace(managerCfg.Collector.PopSide) == "" {
+		managerCfg.Collector.PopSide = NormalizePopSide(setup.PopSide, managerCfg.Collector.PopSide)
 	}
 }
 

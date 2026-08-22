@@ -18,6 +18,7 @@ const bootstrapStateKey = "bootstrap_state_v1"
 
 type Repository interface {
 	SaveManagerConfig(ctx context.Context, cfg model.ManagerConfig) error
+	SaveManagerConfigAndSetup(ctx context.Context, cfg model.ManagerConfig, setup model.Setup) error
 	LoadManagerConfig(ctx context.Context) (model.ManagerConfig, bool, error)
 	SaveAutomationSettings(ctx context.Context, settings model.AutomationSettings) (model.AutomationSettings, error)
 	LoadAutomationSettings(ctx context.Context) (model.AutomationSettings, bool, error)
@@ -44,14 +45,7 @@ func New(db *sql.DB, protector ...*security.Protector) Repository {
 }
 
 func (r *repository) SaveSetup(ctx context.Context, setup model.Setup) error {
-	if setup.CPAUpstreamURL == "" || setup.ManagementKey == "" {
-		return errors.New("cpaBaseUrl and managementKey are required")
-	}
-	protected, err := r.protectSetup(setup)
-	if err != nil {
-		return err
-	}
-	data, err := json.Marshal(protected)
+	data, err := r.marshalSetup(setup)
 	if err != nil {
 		return err
 	}
@@ -64,6 +58,36 @@ func (r *repository) SaveSetup(ctx context.Context, setup model.Setup) error {
 		time.Now().UnixMilli(),
 	)
 	return err
+}
+
+func (r *repository) SaveManagerConfigAndSetup(ctx context.Context, cfg model.ManagerConfig, setup model.Setup) error {
+	cfg.UpdatedAtMS = time.Now().UnixMilli()
+	cfgData, err := r.marshalManagerConfig(cfg)
+	if err != nil {
+		return err
+	}
+	setupData, err := r.marshalSetup(setup)
+	if err != nil {
+		return err
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	updatedAtMS := cfg.UpdatedAtMS
+	if updatedAtMS == 0 {
+		updatedAtMS = time.Now().UnixMilli()
+	}
+	if err := upsertSetting(ctx, tx, managerConfigKey, cfgData, updatedAtMS); err != nil {
+		return err
+	}
+	if err := upsertSetting(ctx, tx, "setup", setupData, time.Now().UnixMilli()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (r *repository) LoadSetup(ctx context.Context) (model.Setup, bool, error) {
@@ -88,24 +112,47 @@ func (r *repository) LoadSetup(ctx context.Context) (model.Setup, bool, error) {
 
 func (r *repository) SaveManagerConfig(ctx context.Context, cfg model.ManagerConfig) error {
 	cfg.UpdatedAtMS = time.Now().UnixMilli()
-	protected, err := r.protectManagerConfig(cfg)
+	data, err := r.marshalManagerConfig(cfg)
 	if err != nil {
 		return err
 	}
-	data, err := json.Marshal(protected)
-	if err != nil {
-		return err
-	}
-	_, err = r.db.ExecContext(
+	return upsertSetting(ctx, r.db, managerConfigKey, data, cfg.UpdatedAtMS)
+}
+
+type settingWriter interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func upsertSetting(ctx context.Context, writer settingWriter, key string, data []byte, updatedAtMS int64) error {
+	_, err := writer.ExecContext(
 		ctx,
 		`insert into settings(key, value, updated_at_ms)
 		 values(?, ?, ?)
 		 on conflict(key) do update set value = excluded.value, updated_at_ms = excluded.updated_at_ms`,
-		managerConfigKey,
+		key,
 		string(data),
-		cfg.UpdatedAtMS,
+		updatedAtMS,
 	)
 	return err
+}
+
+func (r *repository) marshalSetup(setup model.Setup) ([]byte, error) {
+	if setup.CPAUpstreamURL == "" || setup.ManagementKey == "" {
+		return nil, errors.New("cpaBaseUrl and managementKey are required")
+	}
+	protected, err := r.protectSetup(setup)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(protected)
+}
+
+func (r *repository) marshalManagerConfig(cfg model.ManagerConfig) ([]byte, error) {
+	protected, err := r.protectManagerConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(protected)
 }
 
 func (r *repository) LoadManagerConfig(ctx context.Context) (model.ManagerConfig, bool, error) {

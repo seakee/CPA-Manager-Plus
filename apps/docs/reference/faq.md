@@ -46,7 +46,7 @@ http://<cpa-host>:8317/management.html
 | `GET /v1/models`                    | CPA API 密钥                              |
 | setup 后的 CPAMP Manager Server API | CPAMP 管理员密钥                          |
 
-不要混用这些密钥。通过 setup 或面板保存的 CPA 连接会把 CPA Management Key 用 `data.key` 加密后写入 SQLite；安装器 env/secret 管理的连接从安装目录读取密钥，不写入 SQLite。CPAMP 轻量面板由浏览器持有 CPA Management Key。
+不要混用这些密钥。通过 setup 或面板保存的 CPA 连接会把 CPA Management Key 用 `data.key` 加密后写入 SQLite；一键安装器提供的 env/secret 只作为一次性导入输入，成功后也会写入 SQLite 并从最终运行配置移除。手工 env/secret 部署仍从部署环境读取密钥。CPAMP 轻量面板由浏览器持有 CPA Management Key。
 
 ## Full Docker 打开的是登录页，不是 setup
 
@@ -281,7 +281,7 @@ data.key
 
 通过 setup 或面板保存的 CPA 连接会把 CPA Management Key 用 `data.key` 加密后写入 SQLite。丢失 `data.key` 后，已加密的 CPA Management Key 无法恢复，只能重新保存 CPA 连接。
 
-如果使用安装器 env/secret 管理连接，CPA Management Key 通常在安装目录的 `secrets/cpa-management-key`，不写入 SQLite。备份时要把安装目录里的 `secrets/` 和数据目录一起保存。
+一键安装器成功导入后，CPA Management Key 位于 SQLite 的加密配置中，`data.key` 与 SQLite 必须成对备份；安装器临时的 `secrets/cpa-management-key` 通常会被删除，但升级失败或跳过执行时可能仍需保留以便重试。手工 env/secret 部署则仍需备份对应的 secret 文件和数据目录。
 
 ## Manager Server 返回 401
 

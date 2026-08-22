@@ -225,6 +225,10 @@ func (s *Store) SaveManagerConfig(ctx context.Context, cfg ManagerConfig) error 
 	return s.Settings.SaveManagerConfig(ctx, cfg)
 }
 
+func (s *Store) SaveManagerConfigAndSetup(ctx context.Context, cfg ManagerConfig, setup Setup) error {
+	return s.Settings.SaveManagerConfigAndSetup(ctx, cfg, setup)
+}
+
 func (s *Store) LoadManagerConfig(ctx context.Context) (ManagerConfig, bool, error) {
 	return s.Settings.LoadManagerConfig(ctx)
 }

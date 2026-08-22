@@ -45,9 +45,11 @@ CPAMP uses the CPA Management Key to access the CPA management API.
 Where it is stored depends on the configuration source:
 
 - CPA connections saved through setup or the panel are encrypted with `data.key` and written to SQLite.
-- CPA connections managed by the installer or environment variables come from `CPA_UPSTREAM_URL` and `CPA_MANAGEMENT_KEY` / `CPA_MANAGEMENT_KEY_FILE`. That connection is not written to SQLite; with the one-click installer, the key is usually in `secrets/cpa-management-key` under the install directory.
+- The one-click installer accepts `CPA_UPSTREAM_URL` and `CPA_MANAGEMENT_KEY` / `CPA_MANAGEMENT_KEY_FILE` as one-time import inputs. After a successful import, it encrypts the connection into SQLite with `data.key` and removes the temporary `secrets/cpa-management-key`. Manual deployments may still use these environment variables as a compatibility runtime mode, but that is not the installer's final state.
 
-The CPAMP Lightweight Panel is hosted by CPA, and the browser holds the CPA Management Key, matching CPA-port access semantics.
+The configuration API returns only the `managementKeyConfigured` status; it never returns a reversibly decrypted CPA Management Key. Manager Server decrypts the key only when proxying requests, so the browser and third-party iframes do not need to receive it.
+
+The CPAMP Lightweight Panel is hosted by CPA and continues to follow CPA-port access semantics; its browser-held key path is separate from Manager Server's server-side storage.
 
 ## Collection Configuration
 

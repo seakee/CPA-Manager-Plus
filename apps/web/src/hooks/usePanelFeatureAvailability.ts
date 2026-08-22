@@ -81,7 +81,8 @@ export function resolvePanelFeatureAvailability(
 
   const hasCPAConnection = Boolean(
     input.managerConfig.cpaConnection?.cpaBaseUrl &&
-    input.managerConfig.cpaConnection?.managementKey
+    (input.managerConfig.cpaConnection?.managementKeyConfigured ||
+      input.managerConfig.cpaConnection?.managementKey)
   );
   const collectorEnabled = input.managerConfig.collector?.enabled !== false;
   const requestMonitoringAvailable = hasCPAConnection && collectorEnabled;

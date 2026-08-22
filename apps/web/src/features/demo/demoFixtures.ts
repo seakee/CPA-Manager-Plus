@@ -1129,7 +1129,7 @@ const demoManagerConfig: ManagerConfigResponse = {
   config: {
     cpaConnection: {
       cpaBaseUrl: DEMO_API_BASE,
-      managementKey: 'demo-cpa-management-key',
+      managementKeyConfigured: true,
     },
     collector: {
       enabled: true,

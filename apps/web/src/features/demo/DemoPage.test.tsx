@@ -216,6 +216,16 @@ describe('DemoPage', () => {
     expect(visibleData.toLowerCase()).not.toContain(historicalAnalysisLabel);
   });
 
+  it('does not expose a readable CPA Management Key in demo Manager config', () => {
+    const connection = getDemoManagerConfig().config.cpaConnection;
+
+    expect(connection).toEqual({
+      cpaBaseUrl: expect.any(String),
+      managementKeyConfigured: true,
+    });
+    expect(JSON.stringify(connection)).not.toContain('demo-cpa-management-key');
+  });
+
   it('fills accounts with realistic OAuth login data across statuses and quota providers', () => {
     const authFiles = getDemoAuthFiles();
     const fileNames = new Set(authFiles.files.map((file) => file.name));

@@ -11,7 +11,7 @@ Back up these files as a set:
 - `usage.sqlite-shm`
 - `data.key`
 
-If your deployment directory contains custom configuration files, back them up too. With the one-click installer, also back up `secrets/` under the install directory; full installation and env/secret-managed connections store the CPA Management Key in `secrets/cpa-management-key`.
+If your deployment directory contains custom configuration files, back them up too. With the one-click installer, also back up `secrets/` and `data/` under the install directory; after a successful import, `secrets/cpa-management-key` is normally gone, but it may remain after a failed upgrade or with `CPAMP_SKIP_EXECUTE=1` for retry. Manual env/secret deployments should back up their matching secret files.
 
 ## Why data.key Is Required
 
@@ -21,7 +21,7 @@ CPA connections saved through setup or the panel encrypt the CPA Management Key 
 - If both `usage.sqlite` and `data.key` leak, the CPA Management Key can be decrypted.
 - If `data.key` is lost, the saved CPA Management Key cannot be recovered. You must save the CPA connection configuration again.
 
-If the CPA connection is managed by environment variables or secret files, the CPA Management Key is not written to SQLite. Back up the related secret files together with the data directory.
+If a CPA connection is managed by manual environment variables or secret files, the CPA Management Key may not be written to SQLite. Back up the related secret files together with the data directory. The installer's env input is migrated into SQLite after success, so do not rely on the one-time input file alone.
 
 ## Docker Backup Example
 
@@ -72,7 +72,7 @@ If restore produces decryption errors, first check whether `data.key` matches th
 
 ## Move Manager Configuration Without Request History
 
-If the old `usage.sqlite` is large and request history is no longer needed, start the replacement instance with an empty data directory and use the existing Manager configuration API to move the CPA connection, collector, Codex inspection, and External Usage Service settings. This does not copy `usage_events`, rollups, inspection run history, model prices, API Key aliases, or account-processing policy.
+If the old `usage.sqlite` is large and request history is no longer needed, start the replacement instance with an empty data directory and use the existing Manager configuration API to move the non-sensitive CPA URL, collector, Codex inspection, and External Usage Service settings. This does not copy `usage_events`, rollups, inspection run history, model prices, API Key aliases, or account-processing policy, and it does not export the CPA Management Key.
 
 Export while the old instance is still reachable:
 
@@ -88,9 +88,19 @@ curl -fsS \
 chmod 600 manager-config.json
 ```
 
-`manager-config.json` may contain the CPA Management Key in plaintext. Treat it as a secret, do not commit it, and do not attach it to an issue.
+The new `manager-config.json` does not contain the CPA Management Key; still treat the configuration file as sensitive and do not commit or attach it to an issue. An export from an older version may contain the plaintext key, so handle it as a secret and delete it after migration.
 
-Stop the old instance and start the new instance with an empty data directory. Record the new administrator key generated during first startup, then import the configuration:
+Stop the old instance and prepare an empty data directory for the replacement. While Manager Server is not running, provide the CPA Management Key with the offline command:
+
+```bash
+cpa-manager-plus store-cpa-connection \
+  --cpa-base-url 'http://cpa:8317' \
+  --management-key-file '/secure/cpa-management-key' \
+  --db-path './data/usage.sqlite' \
+  --data-key-path './data/data.key'
+```
+
+Stop Manager Server before running this command. It encrypts the key into SQLite and never echoes it. Start the new instance, then import the remaining configuration:
 
 ```bash
 export NEW_CPAMP_URL='http://new-host:18317'
@@ -104,6 +114,6 @@ curl -fsS \
   "${NEW_CPAMP_URL}/usage-service/config"
 ```
 
-The import validates the CPA Management API. After it succeeds, verify collector status and the related settings, then securely delete the exported file.
+The import validates the CPA Management API. After it succeeds, verify collector status and the related settings, then securely delete the exported file and temporary key file.
 
-If the connection is managed through environment variables or secret files, the API reports `source` as `env` and an import cannot override the connection fields. Move `CPA_UPSTREAM_URL`, `CPA_MANAGEMENT_KEY`, or the matching secret files through the deployment environment instead. Administrator credentials are also outside the Manager configuration export; the new instance uses its newly generated or explicitly configured `CPA_MANAGER_ADMIN_KEY`.
+If the old connection is managed through environment variables or secret files, the API reports `source` as `env` and an API import cannot override the connection fields. Use the offline command above to write the CPA connection into the new SQLite database, or enter it again during setup. Administrator credentials are also outside the Manager configuration export; the new instance uses its newly generated or explicitly configured `CPA_MANAGER_ADMIN_KEY`.

@@ -17,7 +17,10 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/adminreset"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/cpaconnection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/derivedmaintenance"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/managerdatasnapshot"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/runtimeconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/httpapi"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
@@ -43,6 +46,24 @@ func main() {
 			defer stop()
 			if err := derivedmaintenance.Run(ctx, os.Args[2:], os.Stdout, os.Stderr); err != nil {
 				log.Printf("cleanup derived data: %v", err)
+				os.Exit(1)
+			}
+			return
+		case "store-cpa-connection":
+			if err := cpaconnection.Run(context.Background(), os.Args[2:], os.Stdout, os.Stderr); err != nil {
+				log.Printf("store CPA connection: %v", err)
+				os.Exit(1)
+			}
+			return
+		case "manager-data-snapshot":
+			if err := managerdatasnapshot.Run(context.Background(), os.Args[2:], os.Stdout, os.Stderr); err != nil {
+				log.Printf("manage Manager data snapshot: %v", err)
+				os.Exit(1)
+			}
+			return
+		case "sanitize-runtime-config":
+			if err := runtimeconfig.Run(os.Args[2:], os.Stdout, os.Stderr); err != nil {
+				log.Printf("sanitize runtime config: %v", err)
 				os.Exit(1)
 			}
 			return

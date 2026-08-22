@@ -19,4 +19,9 @@ type BootstrapState struct {
 	MigratedLegacy     bool   `json:"migratedLegacy"`
 	HasHistoricalData  bool   `json:"hasHistoricalData"`
 	UpdatedAtMS        int64  `json:"updatedAtMs"`
+	// ConnectionStorageMigrationVersion tracks the connection-storage
+	// normalization migration independently of MigratedLegacy, because older
+	// releases already set MigratedLegacy=true without performing this
+	// normalization. States persisted before the field existed decode as 0.
+	ConnectionStorageMigrationVersion int `json:"connectionStorageMigrationVersion,omitempty"`
 }
