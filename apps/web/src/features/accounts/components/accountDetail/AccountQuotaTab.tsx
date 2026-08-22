@@ -13,6 +13,7 @@ import type {
   AccountDetailQuotaWindow,
   AccountDetailViewModel,
 } from '@/features/accounts/model/accountDetailViewModel';
+import type { CodexResetActionPresentation } from '@/features/accounts/model/codexResetAction';
 import {
   formatCompactNumber,
   formatQuotaResetTimestamp,
@@ -110,7 +111,7 @@ interface AccountQuotaTabProps {
   historyRefreshing: boolean;
   onRefreshHistory: () => void;
   onResetQuota: () => void;
-  resetQuotaDisabled: boolean;
+  resetQuotaAction: CodexResetActionPresentation;
 }
 
 export function AccountQuotaTab({
@@ -120,7 +121,7 @@ export function AccountQuotaTab({
   historyRefreshing,
   onRefreshHistory,
   onResetQuota,
-  resetQuotaDisabled,
+  resetQuotaAction,
 }: AccountQuotaTabProps) {
   const { t, i18n } = useTranslation();
   const history = detailView.history;
@@ -329,9 +330,11 @@ export function AccountQuotaTab({
                   className={styles.quotaResetAction}
                   data-quota-reset-action="true"
                   onClick={onResetQuota}
-                  disabled={resetQuotaDisabled}
+                  disabled={resetQuotaAction.disabled}
+                  loading={resetQuotaAction.busy}
+                  title={resetQuotaAction.titleKey ? t(resetQuotaAction.titleKey) : undefined}
                 >
-                  <IconRefreshCw size={14} />
+                  {!resetQuotaAction.busy ? <IconRefreshCw size={14} /> : null}
                   {t('codex_quota.reset_action_button')}
                 </Button>
               </div>

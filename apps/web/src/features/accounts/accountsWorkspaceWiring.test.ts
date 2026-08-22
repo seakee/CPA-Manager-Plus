@@ -128,6 +128,18 @@ describe('accounts workspace wiring', () => {
     expect(accounts).not.toHaveProperty('detail_tab_credential');
   });
 
+  it.each([en, ru, zhCN, zhTW])('keeps codex reset action copy complete', (locale) => {
+    const codexQuota = locale.codex_quota as Record<string, unknown>;
+    [
+      'reset_verify_in_progress',
+      'reset_unavailable_no_credits',
+      'reset_unsupported_credential',
+      'reset_requires_verification_hint',
+      'reset_verify_failed_message',
+      'reset_no_credits_message',
+    ].forEach((key) => expect(codexQuota[key]).toBeTypeOf('string'));
+  });
+
   it.each([
     [en, 'OAuth Configuration'],
     [ru, 'Настройки OAuth'],
