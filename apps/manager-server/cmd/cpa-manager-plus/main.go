@@ -74,7 +74,10 @@ func runServer() {
 	if err != nil {
 		log.Fatalf("initialize secret protector: %v", err)
 	}
-	db, err := store.Open(cfg.DBPath, protector)
+	db, err := store.OpenWithOptions(store.OpenOptions{
+		Path:                 cfg.DBPath,
+		RepairCorruptDerived: cfg.RepairCorruptDerived,
+	}, protector)
 	if err != nil {
 		log.Fatalf("open sqlite: %v", err)
 	}

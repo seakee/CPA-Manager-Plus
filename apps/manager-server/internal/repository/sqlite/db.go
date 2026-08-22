@@ -29,6 +29,12 @@ func OpenWithOptions(options Options) (*sql.DB, error) {
 	db.SetMaxOpenConns(options.maxOpenConns())
 	db.SetMaxIdleConns(options.maxIdleConns())
 	db.SetConnMaxIdleTime(options.connMaxIdleTime())
+	if options.RepairCorruptDerived {
+		if err := repairCorruptDerivedTables(db); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+	}
 	if err := Migrate(db); err != nil {
 		_ = db.Close()
 		return nil, err

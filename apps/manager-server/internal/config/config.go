@@ -48,6 +48,7 @@ type Config struct {
 	AccountActionsEnabled        bool
 	AccountActionsAutoDisable    bool
 	DashboardHourlyRollupEnabled bool
+	RepairCorruptDerived         bool
 	UsageImportChunkBytes        int64
 	UsageImportDiskQuotaBytes    int64
 	UsageImportMaxSessions       int
@@ -83,6 +84,7 @@ type fileConfig struct {
 	QuotaCooldownEnabled      bool     `json:"quotaCooldownEnabled,omitempty"`
 	AccountActionsEnabled     bool     `json:"accountActionsEnabled,omitempty"`
 	AccountActionsAutoDisable bool     `json:"accountActionsAutoDisable,omitempty"`
+	RepairCorruptDerived      bool     `json:"repairCorruptDerived,omitempty"`
 	UsageImportChunkBytes     int64    `json:"usageImportChunkBytes,omitempty"`
 	UsageImportDiskQuotaBytes int64    `json:"usageImportDiskQuotaBytes,omitempty"`
 	UsageImportMaxSessions    int      `json:"usageImportMaxSessions,omitempty"`
@@ -158,6 +160,7 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 		AccountActionsEnabled:        envBool("USAGE_ACCOUNT_ACTIONS_ENABLED", cfgFile.AccountActionsEnabled),
 		AccountActionsAutoDisable:    envBool("USAGE_ACCOUNT_ACTIONS_AUTO_DISABLE", cfgFile.AccountActionsAutoDisable),
 		DashboardHourlyRollupEnabled: envBool("USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED", true),
+		RepairCorruptDerived:         envBool("USAGE_REPAIR_CORRUPT_DERIVED", cfgFile.RepairCorruptDerived),
 		UsageImportChunkBytes: envInt64(
 			"USAGE_IMPORT_CHUNK_BYTES",
 			int64Fallback(cfgFile.UsageImportChunkBytes, DefaultUsageImportChunkBytes),

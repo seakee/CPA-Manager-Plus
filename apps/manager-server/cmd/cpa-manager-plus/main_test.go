@@ -149,7 +149,7 @@ func TestManagerDatabaseProcessLockPrecedesStoreOpen(t *testing.T) {
 	}
 	source := string(content)
 	lockAt := strings.Index(source, "processlock.Acquire(cfg.DBPath)")
-	storeOpenAt := strings.Index(source, "store.Open(cfg.DBPath, protector)")
+	storeOpenAt := strings.Index(source, "store.OpenWithOptions(store.OpenOptions{")
 	lockCloseAt := strings.Index(source, "databaseLock.Close()")
 	if lockAt < 0 || storeOpenAt < lockAt || lockCloseAt < lockAt {
 		t.Fatalf("database lock ordering invalid: lock=%d open=%d close=%d", lockAt, storeOpenAt, lockCloseAt)
