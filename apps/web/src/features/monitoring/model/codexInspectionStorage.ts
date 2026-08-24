@@ -11,6 +11,12 @@ import type {
 } from '@/features/monitoring/codexInspection';
 import { normalizeNumberValue } from '@/utils/quota';
 import {
+  canonicalizeCodexProviderWindowId,
+  inferCodexQuotaScopeFromProviderWindowId,
+  normalizeCodexModelId,
+} from '@/utils/quota/codexQuota';
+import type { QuotaModelScope, QuotaModelScopeKind } from '@/types';
+import {
   DEFAULT_CODEX_INSPECTION_SETTINGS,
   clampPositiveInteger,
   isRecord,
@@ -140,25 +146,127 @@ const normalizeQuotaResetAccuracy = (
   }
 };
 
+const QUOTA_MODEL_SCOPE_KINDS = new Set<QuotaModelScopeKind>([
+  'all',
+  'family',
+  'models',
+  'product',
+  'feature',
+]);
+
+const inferStoredCodexWindowKind = (
+  providerWindowId: string,
+  limitWindowSeconds: number | null,
+  labelKey?: string
+): string | undefined => {
+  if (limitWindowSeconds !== null) {
+    if (limitWindowSeconds === 18_000) return 'five_hour';
+    if (limitWindowSeconds === 604_800) return 'weekly';
+    if (limitWindowSeconds >= 28 * 24 * 60 * 60 && limitWindowSeconds <= 31 * 24 * 60 * 60) {
+      return 'monthly';
+    }
+  }
+  const identity = `${providerWindowId} ${labelKey ?? ''}`.toLowerCase();
+  if (/(^|[-_.])five[-_ ]?hour($|[-_.])/.test(identity)) return 'five_hour';
+  if (/(^|[-_.])weekly($|[-_.])/.test(identity)) return 'weekly';
+  if (/(^|[-_.])monthly($|[-_.])/.test(identity)) return 'monthly';
+  return undefined;
+};
+
+const canonicalizeStoredCodexProviderWindowId = (
+  value: string,
+  windowKind?: string
+): string => {
+  const raw = value.trim().toLowerCase();
+  // `secondary` was used for both weekly and Team monthly windows. Preserve
+  // it when no duration/label evidence is available instead of silently
+  // assigning the legacy record to weekly.
+  if (raw === 'secondary' && !windowKind) return raw;
+  return canonicalizeCodexProviderWindowId(raw, windowKind);
+};
+
+const normalizeStoredQuotaModelScope = (
+  value: unknown,
+  providerWindowId: string
+): QuotaModelScope => {
+  const inferredScope = inferCodexQuotaScopeFromProviderWindowId(providerWindowId);
+  if (!isRecord(value)) return inferredScope;
+  const kind = readString(value.kind) as QuotaModelScopeKind;
+  if (!QUOTA_MODEL_SCOPE_KINDS.has(kind)) {
+    return inferredScope;
+  }
+  // Pre-scope inspection records explicitly persisted every quota as `all`.
+  // Reinterpret that legacy value from the stable provider window identity so
+  // Spark/additional windows cannot regain account-wide usage on restore.
+  if (kind === 'all' && inferredScope.kind !== 'all') return inferredScope;
+  const models = Array.isArray(value.models)
+    ? Array.from(
+        new Set(value.models.map(readString).map(normalizeCodexModelId).filter(Boolean))
+      ).sort()
+    : undefined;
+  const key = readString(value.key).trim().toLowerCase() || undefined;
+  const defaultComplete =
+    kind === 'all' ||
+    (kind === 'models' && (models?.length ?? 0) > 0) ||
+    (kind === 'family' && (Boolean(key) || (models?.length ?? 0) > 0)) ||
+    ((kind === 'product' || kind === 'feature') && (models?.length ?? 0) > 0);
+  return {
+    kind,
+    key,
+    models,
+    complete: readBoolean(value.complete, defaultComplete),
+  };
+};
+
+const normalizeProviderWindowAliases = (
+  value: unknown,
+  providerWindowId: string,
+  windowKind?: string
+): string[] | undefined => {
+  if (!Array.isArray(value)) return undefined;
+  const aliases = Array.from(
+    new Set(
+      value
+        .map(readString)
+        .map((alias) => canonicalizeStoredCodexProviderWindowId(alias, windowKind))
+        .filter((alias) => alias && alias !== providerWindowId)
+    )
+  ).sort();
+  return aliases.length > 0 ? aliases : undefined;
+};
+
 const serializeQuotaWindow = (window: CodexInspectionQuotaWindow): CodexInspectionQuotaWindow => {
+  const rawId = readString(window.id);
+  const limitWindowSeconds = readNullableNumber(window.limitWindowSeconds);
+  const windowKind = inferStoredCodexWindowKind(rawId, limitWindowSeconds, window.labelKey);
+  const id = canonicalizeStoredCodexProviderWindowId(rawId, windowKind);
   const resetAtMs = readNullableNumber(window.resetAtMs);
   const resetAccuracy = normalizeQuotaResetAccuracy(window.resetAccuracy);
   return {
-    id: readString(window.id),
+    id,
     labelKey: readString(window.labelKey),
     labelParams: normalizeQuotaWindowLabelParams(window.labelParams),
     usedPercent: readNullableNumber(window.usedPercent),
     resetLabel: readString(window.resetLabel),
     ...(resetAtMs !== null ? { resetAtMs } : {}),
     ...(resetAccuracy ? { resetAccuracy } : {}),
-    limitWindowSeconds: readNullableNumber(window.limitWindowSeconds),
+    limitWindowSeconds,
+    modelScope: normalizeStoredQuotaModelScope(window.modelScope, id),
+    providerWindowAliases: normalizeProviderWindowAliases(
+      window.providerWindowAliases,
+      id,
+      windowKind
+    ),
   };
 };
 
 const hydrateQuotaWindow = (value: unknown): CodexInspectionQuotaWindow | null => {
   if (!isRecord(value)) return null;
-  const id = readString(value.id);
+  const rawId = readString(value.id);
   const labelKey = readString(value.labelKey);
+  const limitWindowSeconds = readNullableNumber(value.limitWindowSeconds);
+  const windowKind = inferStoredCodexWindowKind(rawId, limitWindowSeconds, labelKey);
+  const id = canonicalizeStoredCodexProviderWindowId(rawId, windowKind);
   if (!id || !labelKey) return null;
   const resetAtMs = readNullableNumber(value.resetAtMs);
   const resetAccuracy = normalizeQuotaResetAccuracy(value.resetAccuracy);
@@ -171,7 +279,13 @@ const hydrateQuotaWindow = (value: unknown): CodexInspectionQuotaWindow | null =
     resetLabel: readString(value.resetLabel),
     ...(resetAtMs !== null ? { resetAtMs } : {}),
     ...(resetAccuracy ? { resetAccuracy } : {}),
-    limitWindowSeconds: readNullableNumber(value.limitWindowSeconds),
+    limitWindowSeconds,
+    modelScope: normalizeStoredQuotaModelScope(value.modelScope, id),
+    providerWindowAliases: normalizeProviderWindowAliases(
+      value.providerWindowAliases,
+      id,
+      windowKind
+    ),
   };
 };
 

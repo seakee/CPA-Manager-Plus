@@ -7,6 +7,8 @@ import { buildAccountListItem, buildRecommendationBySelectionKey } from './accou
 import { summarizeGroupedQuotaAvailability } from './accountQuotaSummary';
 import type { AccountRecommendation } from './quotaRecommendations';
 
+const CODEX_MAIN_SCOPE = { kind: 'family', key: 'codex_main', complete: true } as const;
+
 type AccountRowOverrides = Omit<Partial<AccountRow>, 'quota'> & {
   quota?: Partial<AccountRow['quota']>;
 };
@@ -891,6 +893,7 @@ describe('accountListPresentation', () => {
             remainingPercent: 0,
             usedPercent: 100,
             resetLabel: '-',
+            modelScope: CODEX_MAIN_SCOPE,
           },
         ],
       }
@@ -919,6 +922,7 @@ describe('accountListPresentation', () => {
             remainingPercent: 0,
             usedPercent: 100,
             resetLabel: 'month-end',
+            modelScope: CODEX_MAIN_SCOPE,
           },
         ],
       }
@@ -1083,6 +1087,7 @@ describe('accountListPresentation', () => {
             resetLabel: '2026-07-30T04:00:00Z',
             resetAtMs: earlierResetAtMs,
             resetAccuracy: 'exact',
+            modelScope: CODEX_MAIN_SCOPE,
           },
           {
             key: 'weekly-model',
@@ -1093,6 +1098,7 @@ describe('accountListPresentation', () => {
             resetLabel: '2026-07-30T06:00:00Z',
             resetAtMs: laterResetAtMs,
             resetAccuracy: 'exact',
+            modelScope: CODEX_MAIN_SCOPE,
           },
         ],
       }
@@ -1126,6 +1132,7 @@ describe('accountListPresentation', () => {
             resetLabel: '2026-07-30T04:00:00Z',
             resetAtMs: Date.parse('2026-07-30T04:00:00Z'),
             resetAccuracy: 'exact',
+            modelScope: CODEX_MAIN_SCOPE,
           },
           {
             key: 'weekly-unknown',
@@ -1136,6 +1143,7 @@ describe('accountListPresentation', () => {
             resetLabel: '-',
             resetAtMs: null,
             resetAccuracy: 'unknown',
+            modelScope: CODEX_MAIN_SCOPE,
           },
         ],
       }

@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { MonitoringAccountRow } from './hooks/useMonitoringData';
 import type { MonitoringAccountAuthState } from './accountOverviewState';
-import { buildMonitoringAccountQuotaTargetsByAccount } from './accountOverviewQuotaTargets';
+import { buildMonitoringAccountQuotaTargetsByRowId } from './accountOverviewQuotaTargets';
 
 const createAccountRow = (overrides: Partial<MonitoringAccountRow> = {}): MonitoringAccountRow => ({
   id: overrides.id ?? 'account@example.com',
   account: overrides.account ?? 'account@example.com',
+  provider: overrides.provider,
   displayAccount: overrides.displayAccount ?? overrides.account ?? 'account@example.com',
   accountMasked: overrides.accountMasked ?? 'acc***@example.com',
   authLabels: overrides.authLabels ?? [],
@@ -65,7 +66,7 @@ describe('accountOverviewQuotaTargets', () => {
       ],
     ]);
 
-    const result = buildMonitoringAccountQuotaTargetsByAccount(
+    const result = buildMonitoringAccountQuotaTargetsByRowId(
       [
         createAccountRow({
           id: 'account@example.com',
@@ -102,7 +103,7 @@ describe('accountOverviewQuotaTargets', () => {
       ],
     ]);
 
-    const result = buildMonitoringAccountQuotaTargetsByAccount(
+    const result = buildMonitoringAccountQuotaTargetsByRowId(
       [
         createAccountRow({
           id: 'account@example.com',
@@ -155,7 +156,7 @@ describe('accountOverviewQuotaTargets', () => {
       ],
     ]);
 
-    const result = buildMonitoringAccountQuotaTargetsByAccount(
+    const result = buildMonitoringAccountQuotaTargetsByRowId(
       [
         createAccountRow({
           id: 'account@example.com',
@@ -198,7 +199,7 @@ describe('accountOverviewQuotaTargets', () => {
       ],
     ]);
 
-    const result = buildMonitoringAccountQuotaTargetsByAccount(
+    const result = buildMonitoringAccountQuotaTargetsByRowId(
       [
         createAccountRow({
           id: 'account@example.com',
@@ -212,5 +213,64 @@ describe('accountOverviewQuotaTargets', () => {
     expect(result.get('account@example.com')).toMatchObject([
       { provider: 'codex', authIndex: '1', fileName: 'codex.json' },
     ]);
+  });
+
+  it('keeps same-email provider quota targets in independent row-id buckets', () => {
+    const codexRowId = 'monitoring-account:codex';
+    const antigravityRowId = 'monitoring-account:antigravity';
+    const authStateByRowId = new Map<string, MonitoringAccountAuthState>([
+      [
+        codexRowId,
+        createAuthState({
+          files: [
+            {
+              name: 'codex.json',
+              type: 'codex',
+              authIndex: 'codex-auth',
+              account: 'same@example.com',
+            },
+          ],
+          enabledState: 'enabled',
+        }),
+      ],
+      [
+        antigravityRowId,
+        createAuthState({
+          files: [
+            {
+              name: 'antigravity.json',
+              type: 'antigravity',
+              authIndex: 'antigravity-auth',
+              account: 'same@example.com',
+            },
+          ],
+          enabledState: 'enabled',
+        }),
+      ],
+    ]);
+
+    const result = buildMonitoringAccountQuotaTargetsByRowId(
+      [
+        createAccountRow({
+          id: codexRowId,
+          account: 'same@example.com',
+          provider: 'codex',
+          authIndices: ['codex-auth'],
+        }),
+        createAccountRow({
+          id: antigravityRowId,
+          account: 'same@example.com',
+          provider: 'antigravity',
+          authIndices: ['antigravity-auth'],
+        }),
+      ],
+      authStateByRowId
+    );
+
+    expect(result.get(codexRowId)).toMatchObject([{ provider: 'codex', fileName: 'codex.json' }]);
+    expect(result.get(antigravityRowId)).toMatchObject([
+      { provider: 'antigravity', fileName: 'antigravity.json' },
+    ]);
+    expect(result.get('same@example.com')).toBeUndefined();
   });
 });

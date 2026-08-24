@@ -14,10 +14,11 @@ import (
 )
 
 const (
-	derivedCleanupBatchLimit = 1000
-	derivedCleanupPause      = 50 * time.Millisecond
-	derivedRetryDelay        = 30 * time.Second
-	derivedCheckInterval     = 30 * time.Second
+	derivedCleanupBatchLimit    = 1000
+	derivedCleanupPause         = 50 * time.Millisecond
+	derivedRetryDelay           = 30 * time.Second
+	derivedCheckInterval        = 30 * time.Second
+	derivedDeferredIndexesTable = "usage_derived_deferred_indexes"
 )
 
 var derivedLegacyTables = []string{
@@ -72,6 +73,15 @@ func ensureDerivedCleanupJobSchema(db *sql.DB) error {
 		updated_at_ms integer not null default 0
 	)`); err != nil {
 		return fmt.Errorf("create derived cleanup cursor schema: %w", err)
+	}
+	if _, err := db.Exec(`create table if not exists usage_derived_deferred_indexes (
+		index_name text primary key,
+		table_name text not null,
+		reason text not null,
+		created_at_ms integer not null,
+		updated_at_ms integer not null
+	)`); err != nil {
+		return fmt.Errorf("create deferred derived index ledger: %w", err)
 	}
 	var ftsExists, projectionExists int
 	if err := db.QueryRow(`select count(*) from sqlite_master where type = 'table' and name = ?`, usageMonitoringSearchLegacy).Scan(&ftsExists); err != nil {
@@ -213,6 +223,9 @@ func RunDerivedStartupMaintenance(ctx context.Context, db *sql.DB) error {
 	if db == nil {
 		return nil
 	}
+	if err := ensureDerivedCleanupJobSchema(db); err != nil {
+		return err
+	}
 	log.Printf("[derived-migration] post-listen index preparation started")
 	indexResult, err := prepareDerivedIndexes(ctx, db, false)
 	if err != nil {
@@ -302,6 +315,9 @@ func prepareDerivedIndexes(ctx context.Context, db *sql.DB, allowNonEmpty bool) 
 		err := db.QueryRowContext(ctx, `select tbl_name from sqlite_master
 			where type = 'index' and name = ?`, index.name).Scan(&indexedTable)
 		if err == nil && indexedTable == index.tableName {
+			if clearErr := clearDeferredDerivedIndex(ctx, db, index.name); clearErr != nil {
+				return result, clearErr
+			}
 			continue
 		}
 		if err != nil && err != sql.ErrNoRows {
@@ -312,12 +328,20 @@ func prepareDerivedIndexes(ctx context.Context, db *sql.DB, allowNonEmpty bool) 
 			return result, fmt.Errorf("inspect derived index target %s for %s: %w", index.tableName, index.name, tableErr)
 		}
 		if !tableExists {
-			result.Deferred++
-			log.Printf("[derived-migration] deferring index %s because target table %s is missing", index.name, index.tableName)
+			// Optional derived tables are created by their owning migration. There
+			// is no index work to remember until that table exists and can contain
+			// rows; recording this as deferred would make a fresh database appear
+			// degraded forever.
+			if clearErr := clearDeferredDerivedIndex(ctx, db, index.name); clearErr != nil {
+				return result, clearErr
+			}
 			continue
 		}
 		if err == nil {
 			if !allowNonEmpty {
+				if ledgerErr := recordDeferredDerivedIndex(ctx, db, index.name, index.tableName, DerivedMaintenanceReasonLegacyIndexReplaced); ledgerErr != nil {
+					return result, ledgerErr
+				}
 				result.Deferred++
 				log.Printf("[derived-migration] deferring index %s because its name is retained by %s", index.name, indexedTable)
 				continue
@@ -333,14 +357,23 @@ func prepareDerivedIndexes(ctx context.Context, db *sql.DB, allowNonEmpty bool) 
 				return result, fmt.Errorf("inspect derived index target %s for %s: %w", index.tableName, index.name, err)
 			}
 			if hasRows {
+				if ledgerErr := recordDeferredDerivedIndex(ctx, db, index.name, index.tableName, DerivedMaintenanceReasonDeferredIndexes); ledgerErr != nil {
+					return result, ledgerErr
+				}
 				result.Deferred++
 				log.Printf("[derived-migration] deferring index %s because %s is non-empty", index.name, index.tableName)
 				continue
 			}
 		}
 		log.Printf("[derived-migration] creating index %s", index.name)
+		if ledgerErr := recordDeferredDerivedIndex(ctx, db, index.name, index.tableName, DerivedMaintenanceReasonDeferredIndexes); ledgerErr != nil {
+			return result, ledgerErr
+		}
 		if _, err := db.ExecContext(ctx, index.sql); err != nil {
 			return result, fmt.Errorf("create derived index %s: %w", index.name, err)
+		}
+		if clearErr := clearDeferredDerivedIndex(ctx, db, index.name); clearErr != nil {
+			return result, clearErr
 		}
 		result.Created++
 	}
@@ -389,6 +422,9 @@ func ensureLegacyDerivedIndexReplaced(
 	err = db.QueryRowContext(ctx, `select tbl_name from sqlite_master
 		where type = 'index' and name = ?`, legacyIndexName).Scan(&legacyTable)
 	if errors.Is(err, sql.ErrNoRows) {
+		if clearErr := clearDeferredDerivedIndex(ctx, db, replacementIndexName); clearErr != nil {
+			return false, false, clearErr
+		}
 		return false, false, nil
 	}
 	if err != nil {
@@ -402,7 +438,13 @@ func ensureLegacyDerivedIndexReplaced(
 		where type = 'index' and name = ?`, replacementIndexName).Scan(&replacementTable)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && replacementTable != tableName) {
 		if allowNonEmpty {
+			if ledgerErr := recordDeferredDerivedIndex(ctx, db, replacementIndexName, tableName, DerivedMaintenanceReasonLegacyIndexReplaced); ledgerErr != nil {
+				return false, false, ledgerErr
+			}
 			return false, false, fmt.Errorf("replacement index %s is not ready", replacementIndexName)
+		}
+		if ledgerErr := recordDeferredDerivedIndex(ctx, db, replacementIndexName, tableName, DerivedMaintenanceReasonLegacyIndexReplaced); ledgerErr != nil {
+			return false, false, ledgerErr
 		}
 		return false, true, nil
 	}
@@ -412,7 +454,37 @@ func ensureLegacyDerivedIndexReplaced(
 	if _, err := db.ExecContext(ctx, `drop index `+legacyIndexName); err != nil {
 		return false, false, err
 	}
+	if err := clearDeferredDerivedIndex(ctx, db, replacementIndexName); err != nil {
+		return false, false, err
+	}
 	return true, false, nil
+}
+
+func recordDeferredDerivedIndex(ctx context.Context, db *sql.DB, indexName, tableName, reason string) error {
+	nowMS := time.Now().UnixMilli()
+	if _, err := db.ExecContext(ctx, `insert into `+derivedDeferredIndexesTable+` (
+		index_name, table_name, reason, created_at_ms, updated_at_ms
+	) values (?, ?, ?, ?, ?)
+	on conflict(index_name) do update set
+		table_name = excluded.table_name,
+		reason = excluded.reason,
+		updated_at_ms = excluded.updated_at_ms`,
+		indexName,
+		tableName,
+		reason,
+		nowMS,
+		nowMS,
+	); err != nil {
+		return fmt.Errorf("record deferred derived index %s: %w", indexName, err)
+	}
+	return nil
+}
+
+func clearDeferredDerivedIndex(ctx context.Context, db *sql.DB, indexName string) error {
+	if _, err := db.ExecContext(ctx, `delete from `+derivedDeferredIndexesTable+` where index_name = ?`, indexName); err != nil {
+		return fmt.Errorf("clear deferred derived index %s: %w", indexName, err)
+	}
+	return nil
 }
 
 func cleanupDerivedBatch(ctx context.Context, db *sql.DB, limit int) (int64, bool, error) {

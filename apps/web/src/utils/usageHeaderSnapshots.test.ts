@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AuthFileItem } from '@/types';
 import type { UsageHeaderSnapshot } from '@/services/api/usageService';
-import { buildCodexQuotaWindowInfos } from './quota/codexQuota';
+import { buildCodexQuotaWindowInfos, CODEX_SPARK_MODEL_ID } from './quota/codexQuota';
 import {
   buildObservedCodexQuotaFromHeaderSnapshot,
   buildUsageHeaderSnapshotLookup,
@@ -23,6 +23,7 @@ describe('buildObservedCodexQuotaFromHeaderSnapshot', () => {
     const snapshot: UsageHeaderSnapshot = {
       event_hash: 'event-test',
       timestamp_ms: 1_700_000_000_000,
+      model: 'gpt-5.6-sol',
       response_metadata: {
         quota: {
           plan_type: 'free',
@@ -93,6 +94,7 @@ describe('buildObservedCodexQuotaFromHeaderSnapshot', () => {
     const snapshot: UsageHeaderSnapshot = {
       event_hash: 'event-multi-window',
       timestamp_ms: 1_700_000_000_000,
+      model: 'gpt-5.6-sol',
       response_metadata: {
         quota: {
           plan_type: 'plus',
@@ -138,6 +140,46 @@ describe('buildObservedCodexQuotaFromHeaderSnapshot', () => {
         labelKey: 'codex_quota.secondary_window',
         usedPercent: 25,
         limitWindowSeconds: 604_800,
+      },
+    ]);
+  });
+
+  it('binds Spark header quota evidence to the resolved request model scope', () => {
+    const snapshot: UsageHeaderSnapshot = {
+      event_hash: 'event-spark-alias',
+      timestamp_ms: 1_700_000_000_000,
+      model: 'my-spark',
+      analytics_model: 'my-spark',
+      requested_model: 'my-spark',
+      resolved_model: CODEX_SPARK_MODEL_ID,
+      response_metadata: {
+        quota: {
+          primary: {
+            used_percent: 0,
+            reset_at_ms: 1_700_604_800_000,
+            window_minutes: 10_080,
+          },
+        },
+      },
+    };
+
+    const observed = buildObservedCodexQuotaFromHeaderSnapshot(snapshot);
+    expect(observed?.quotaScope).toMatchObject({
+      providerWindowIdPrefix: 'spark',
+      modelScope: { kind: 'models', models: [CODEX_SPARK_MODEL_ID], complete: true },
+    });
+    expect(
+      buildCodexQuotaWindowInfos(observed?.payload ?? {}, {
+        observedAtMs: snapshot.timestamp_ms,
+        source: 'response_header',
+        rateLimitScope: observed?.quotaScope,
+      })
+    ).toMatchObject([
+      {
+        id: 'spark-weekly-0',
+        usedPercent: 0,
+        modelScope: { kind: 'models', models: [CODEX_SPARK_MODEL_ID], complete: true },
+        providerWindowAliases: expect.arrayContaining(['fast-coding-weekly-0']),
       },
     ]);
   });

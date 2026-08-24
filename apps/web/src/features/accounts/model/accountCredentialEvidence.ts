@@ -2,6 +2,10 @@ import type { AuthFileItem, CodexQuotaState, CodexQuotaWindow } from '@/types';
 import type { CodexInspectionQuotaWindow } from '@/services/api/usageService';
 import { resolveQuotaDisplayState } from '@/components/quota';
 import { buildQuotaCredentialIdentity } from '@/utils/quota/credentialScope';
+import {
+  canonicalizeCodexProviderWindowId,
+  inferCodexQuotaScopeFromProviderWindowId,
+} from '@/utils/quota/codexQuota';
 import { hasActiveCodexInspectionAuthenticationFailure } from '@/features/authFiles/model/credentialStatus';
 
 export interface AccountInspectionSummary {
@@ -118,20 +122,25 @@ export const stripSupersededAccountInspectionStatus = (
 
 const buildInspectionQuotaWindows = (inspection: AccountInspectionSummary): CodexQuotaWindow[] => {
   const observedAtMs = readFiniteTimestamp(inspection.createdAtMs);
-  const windows = (inspection.quotaWindows ?? []).map((window) => ({
-    id: window.id,
-    label: window.labelKey || window.id,
-    labelKey: window.labelKey || undefined,
-    labelParams: window.labelParams,
-    usedPercent: readFinitePercent(window.usedPercent),
-    resetLabel: window.resetLabel || '-',
-    resetAtMs: readFiniteTimestamp(window.resetAtMs),
-    resetAccuracy:
-      window.resetAccuracy === 'derived' ? 'estimated' : (window.resetAccuracy ?? 'unknown'),
-    limitWindowSeconds: readFinitePercent(window.limitWindowSeconds),
-    observationSource: 'inspection' as const,
-    observedAtMs,
-  }));
+  const windows = (inspection.quotaWindows ?? []).map((window) => {
+    const id = canonicalizeCodexProviderWindowId(window.id);
+    return {
+      id,
+      label: window.labelKey || id,
+      labelKey: window.labelKey || undefined,
+      labelParams: window.labelParams,
+      usedPercent: readFinitePercent(window.usedPercent),
+      resetLabel: window.resetLabel || '-',
+      resetAtMs: readFiniteTimestamp(window.resetAtMs),
+      resetAccuracy:
+        window.resetAccuracy === 'derived' ? 'estimated' : (window.resetAccuracy ?? 'unknown'),
+      limitWindowSeconds: readFinitePercent(window.limitWindowSeconds),
+      observationSource: 'inspection' as const,
+      observedAtMs,
+      modelScope: window.modelScope ?? inferCodexQuotaScopeFromProviderWindowId(id),
+      providerWindowAliases: window.providerWindowAliases,
+    };
+  });
   if (windows.length > 0 || inspection.usedPercent === null) return windows;
   return [
     {
@@ -144,6 +153,11 @@ const buildInspectionQuotaWindows = (inspection: AccountInspectionSummary): Code
       resetAccuracy: 'unknown',
       observationSource: 'inspection',
       observedAtMs,
+      modelScope: {
+        kind: 'feature',
+        key: 'inspection_summary',
+        complete: false,
+      },
     },
   ];
 };

@@ -30,6 +30,25 @@
   min-width: 0;
 }
 
+.databaseMaintenanceHint {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--monitor-amber) 38%, var(--monitor-line));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--monitor-amber) 8%, var(--monitor-surface));
+  color: var(--monitor-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.databaseMaintenanceHint strong {
+  color: var(--monitor-ink);
+  font-weight: 750;
+}
+
 .statusBar {
   display: flex;
   align-items: center;
@@ -1615,7 +1634,6 @@
 .realtimeMetricText.badText {
   color: var(--monitor-red);
 }
-
 
 .logTypeCell {
   display: block;

@@ -41,7 +41,10 @@ describe('accountWindowUsageRows', () => {
     expect(entries[0]).toMatchObject({
       rowKey: row.selectionKey,
       windowKey: '5h',
-      requestKey: accountWindowUsageRequestKey(row.selectionKey, '5h'),
+      requestKey: accountWindowUsageRequestKey(row.selectionKey, '5h', 'current', {
+        kind: 'all',
+        complete: true,
+      }),
       target: {
         row_key: row.selectionKey,
         window_key: '5h',
@@ -108,7 +111,14 @@ describe('accountWindowUsageRows', () => {
       },
     ]);
 
-    expect(byKey.get(accountWindowUsageRequestKey(row.selectionKey, '5h'))).toMatchObject({
+    expect(
+      byKey.get(
+        accountWindowUsageRequestKey(row.selectionKey, '5h', 'current', {
+          kind: 'all',
+          complete: true,
+        })
+      )
+    ).toMatchObject({
       matched: true,
       total_requests: 32,
       total_cost: 5.2,
@@ -285,7 +295,7 @@ describe('accountWindowUsageRows', () => {
     expect(byKey).toHaveLength(0);
   });
 
-  it('skips an incomplete model scope without dropping other quota windows', () => {
+  it('skips incomplete model and feature scopes without dropping other quota windows', () => {
     const row = makeRow({});
     const incompleteDefinition = {
       key: 'weekly-scoped-label-only',
@@ -317,11 +327,31 @@ describe('accountWindowUsageRows', () => {
         toMs: 5_000,
       },
     } satisfies AccountQuotaWindowDefinition;
+    const incompleteFeatureDefinition = {
+      ...incompleteDefinition,
+      key: 'future-feature-weekly-0',
+      providerWindowId: 'future-feature-weekly-0',
+      provider: 'codex',
+      label: 'Future Feature',
+      modelScope: { kind: 'feature', key: 'future_feature', complete: false },
+      display: {
+        ...incompleteDefinition.display,
+        key: 'future-feature-weekly-0',
+        label: 'Future Feature',
+      },
+    } satisfies AccountQuotaWindowDefinition;
 
     const entries = buildAccountWindowUsageTargetEntries(
       [row],
       new Map([
-        [row.selectionKey, [{ key: '5h', fromMs: 1000, toMs: 2000 }, incompleteDefinition]],
+        [
+          row.selectionKey,
+          [
+            { key: '5h', fromMs: 1000, toMs: 2000 },
+            incompleteDefinition,
+            incompleteFeatureDefinition,
+          ],
+        ],
       ]),
       5_000
     );

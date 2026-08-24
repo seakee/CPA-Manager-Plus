@@ -40,7 +40,7 @@ interface NotificationState {
   advanceConfirmation: () => void;
 }
 
-export const useNotificationStore = create<NotificationState>((set) => ({
+export const useNotificationStore = create<NotificationState>((set, get) => ({
   notifications: [],
   confirmation: {
     isOpen: false,
@@ -83,6 +83,14 @@ export const useNotificationStore = create<NotificationState>((set) => ({
   },
 
   showConfirmation: (options) => {
+    const active = get().confirmation;
+    if (active.isOpen && active.options) {
+      if (active.isLoading) {
+        options.onCancel?.();
+        return;
+      }
+      active.options.onCancel?.();
+    }
     set({
       confirmation: {
         isOpen: true,

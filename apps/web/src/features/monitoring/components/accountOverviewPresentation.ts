@@ -2,7 +2,7 @@ import type { TFunction } from 'i18next';
 import type { MonitoringAccountAuthState } from '@/features/monitoring/accountOverviewState';
 import type { MonitoringAccountQuotaProvider } from '@/features/monitoring/accountOverviewQuotaTargets';
 import type { MonitoringAccountRow } from '@/features/monitoring/hooks/useMonitoringData';
-import type { QuotaResetAccuracy } from '@/types';
+import type { QuotaModelScope, QuotaResetAccuracy } from '@/types';
 import { normalizePlanType } from '@/utils/quota';
 import {
   formatQuotaResetTime,
@@ -21,6 +21,8 @@ export type AccountQuotaWindow = {
   resetAtMs?: number | null;
   resetAccuracy?: QuotaResetAccuracy;
   usageLabel: string | null;
+  modelScope?: QuotaModelScope;
+  providerWindowAliases?: string[];
 };
 
 export type AccountQuotaEntry = {

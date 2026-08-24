@@ -6,6 +6,7 @@ import type { MonitoringAuthMeta, MonitoringChannelMeta } from './types';
 
 const GENERIC_PROVIDER_LABELS = new Set([
   'codex',
+  'antigravity',
   'openai',
   'openai-compatibility',
   'gemini',
@@ -171,8 +172,7 @@ export const buildMonitoringSourceDisplay = (
   const sourceMasked = maskEmailLike(sourceLabel || sourceMeta.displayName);
   const accountMasked = maskEmailLike(account || sourceLabel);
   const fallbackId = shortHash(input.sourceHash || input.apiKeyHash || authIndex);
-  const nonGenericChannel =
-    channel && !isGenericMonitoringProviderLabel(channel) ? channel : '';
+  const nonGenericChannel = channel && !isGenericMonitoringProviderLabel(channel) ? channel : '';
   const nonGenericSource =
     sourceMasked && !isGenericMonitoringProviderLabel(sourceMasked) ? sourceMasked : '';
   const keyDisambiguatedSource =

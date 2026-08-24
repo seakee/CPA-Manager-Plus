@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AccountQuotaSnapshotWindow } from '@/services/api/usageService';
+import { CODEX_SPARK_MODEL_ID } from '@/utils/quota/codexQuota';
 import type { AccountQuotaWindowDefinition } from './accountQuotaWindowDefinitions';
 import {
   buildAccountQuotaSnapshotWriteEntries,
@@ -81,6 +82,85 @@ describe('account quota snapshots', () => {
       stale: true,
       modelScope: { kind: 'all', complete: true },
     });
+  });
+
+  it('merges legacy primary and secondary ids into the current Codex main windows', () => {
+    const primary = makeDefinition({
+      key: 'five-hour',
+      providerWindowId: 'five-hour',
+      kind: 'five_hour',
+      modelScope: { kind: 'family', key: 'codex_main', complete: true },
+    });
+    const monthly = makeDefinition({
+      key: 'monthly',
+      providerWindowId: 'monthly',
+      kind: 'monthly',
+      modelScope: { kind: 'family', key: 'codex_main', complete: true },
+    });
+    const merged = mergeAccountQuotaSnapshotWindows(
+      [primary, monthly],
+      [
+        makeSnapshot({
+          provider_window_id: 'primary',
+          window_kind: 'five_hour',
+          model_scope_kind: 'all',
+          used_percent: 11,
+        }),
+        makeSnapshot({
+          provider_window_id: 'secondary',
+          window_kind: 'monthly',
+          model_scope_kind: 'all',
+          used_percent: 22,
+        }),
+      ],
+      { provider: 'codex' }
+    );
+
+    expect(merged).toHaveLength(2);
+    expect(merged.find((window) => window.providerWindowId === 'five-hour')).toMatchObject({
+      usedPercent: 11,
+      modelScope: { kind: 'family', key: 'codex_main', complete: true },
+    });
+    expect(merged.find((window) => window.providerWindowId === 'monthly')).toMatchObject({
+      usedPercent: 22,
+      modelScope: { kind: 'family', key: 'codex_main', complete: true },
+    });
+  });
+
+  it('does not apply Codex legacy suppression rules to another provider', () => {
+    const accountWide = makeDefinition({
+      key: 'shared-all',
+      provider: 'antigravity',
+      providerWindowId: 'shared-window',
+      modelScope: { kind: 'all', complete: true },
+    });
+    const scoped = makeDefinition({
+      key: 'shared-model',
+      provider: 'antigravity',
+      providerWindowId: 'shared-window',
+      modelScope: { kind: 'models', models: ['model-alpha'], complete: true },
+    });
+    const merged = mergeAccountQuotaSnapshotWindows(
+      [accountWide, scoped],
+      [
+        makeSnapshot({
+          provider_window_id: 'shared-window',
+          model_scope_kind: 'all',
+          used_percent: 12,
+        }),
+        makeSnapshot({
+          provider_window_id: 'shared-window',
+          model_scope_kind: 'models',
+          model_ids: ['model-alpha'],
+          used_percent: 34,
+        }),
+      ],
+      { provider: 'antigravity' }
+    );
+
+    expect(merged).toHaveLength(2);
+    expect(merged.find((window) => window.key === 'shared-all')?.usedPercent).toBe(12);
+    expect(merged.find((window) => window.key === 'shared-model')?.usedPercent).toBe(34);
   });
 
   it('keeps newer live quota definitions ahead of an older persisted snapshot', () => {
@@ -242,6 +322,73 @@ describe('account quota snapshots', () => {
     });
   });
 
+  it('encodes an incomplete all scope as fail-closed feature scope', () => {
+    const incomplete = makeDefinition({
+      key: 'unknown-window',
+      providerWindowId: 'future-feature-weekly-0',
+      modelScope: { kind: 'all', complete: false },
+      boundaryAccuracy: 'unknown',
+      windowMode: 'unknown',
+    });
+    const row = {
+      selectionKey: 'codex.json\u0000auth-1',
+      fileName: 'codex.json',
+      provider: 'codex',
+      authIndex: 'auth-1',
+      accountLabel: 'user@example.com',
+      raw: {
+        name: 'codex.json',
+        provider: 'codex',
+        type: 'codex',
+        auth_index: 'auth-1',
+        account: 'user@example.com',
+      },
+    } as unknown as AccountRow;
+    const [entry] = buildAccountQuotaSnapshotWriteEntries(
+      [row],
+      new Map([[row.selectionKey, [incomplete]]]),
+      { nowMs: 20_000 }
+    );
+
+    expect(entry.windows[0]).toMatchObject({
+      model_scope_kind: 'feature',
+      model_scope_key: 'scope_unknown',
+      model_ids: undefined,
+      window_mode: 'unknown',
+      boundary_accuracy: 'unknown',
+    });
+
+    const merged = mergeAccountQuotaSnapshotWindows([], [makeSnapshot({
+      ...entry.windows[0],
+      provider_window_id: 'future-feature-weekly-0',
+      window_kind: 'weekly',
+      stale: false,
+    })], { provider: 'codex' });
+    expect(merged).toMatchObject([
+      expect.objectContaining({
+        providerWindowId: 'future-feature-weekly-0',
+        modelScope: { kind: 'models', models: [], complete: false },
+      }),
+    ]);
+  });
+
+  it('suppresses a legacy non-main all-scope snapshot when no replacement is complete', () => {
+    const merged = mergeAccountQuotaSnapshotWindows(
+      [],
+      [
+        makeSnapshot({
+          provider_window_id: 'fast-coding-weekly-0',
+          window_kind: 'weekly',
+          model_scope_kind: 'all',
+          used_percent: 50,
+        }),
+      ],
+      { provider: 'codex' }
+    );
+
+    expect(merged).toEqual([]);
+  });
+
   it('gives snapshot-only model scopes distinct display keys while preserving provider identity', () => {
     const snapshots = [
       makeSnapshot({
@@ -270,6 +417,148 @@ describe('account quota snapshots', () => {
         .map((item) => item.key)
         .sort()
     ).toEqual([...keys].sort());
+  });
+
+  it('suppresses a legacy Spark all-scope snapshot when scoped evidence exists', () => {
+    const merged = mergeAccountQuotaSnapshotWindows(
+      [],
+      [
+        makeSnapshot({
+          provider_window_id: 'gpt-5-3-codex-spark-weekly-0',
+          window_kind: 'weekly',
+          model_scope_kind: 'all',
+          used_percent: 50,
+          observed_at_ms: 10_000,
+        }),
+        makeSnapshot({
+          provider_window_id: 'spark-weekly-0',
+          window_kind: 'weekly',
+          model_scope_kind: 'models',
+          model_ids: [CODEX_SPARK_MODEL_ID],
+          used_percent: 0,
+          observed_at_ms: 20_000,
+        }),
+      ],
+      { provider: 'codex' }
+    );
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({
+      providerWindowId: 'spark-weekly-0',
+      usedPercent: 0,
+      modelScope: {
+        kind: 'models',
+        models: [CODEX_SPARK_MODEL_ID],
+        complete: true,
+      },
+    });
+  });
+
+  it('suppresses a legacy display-label Spark snapshot through the live alias', () => {
+    const definition = makeDefinition({
+      key: 'spark-weekly-0',
+      providerWindowId: 'spark-weekly-0',
+      provider: 'codex',
+      modelScope: {
+        kind: 'models',
+        models: [CODEX_SPARK_MODEL_ID],
+        complete: true,
+      },
+      providerWindowAliases: ['fast-coding-weekly-0'],
+    });
+    const merged = mergeAccountQuotaSnapshotWindows(
+      [definition],
+      [
+        makeSnapshot({
+          provider_window_id: 'fast-coding-weekly-0',
+          window_kind: 'weekly',
+          model_scope_kind: 'all',
+          used_percent: 50,
+          observed_at_ms: 10_000,
+        }),
+      ],
+      { provider: 'codex' }
+    );
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({
+      providerWindowId: 'spark-weekly-0',
+      usedPercent: definition.usedPercent,
+      modelScope: definition.modelScope,
+    });
+  });
+
+  it('suppresses only the matching legacy all-scope snapshot for an incomplete feature', () => {
+    const merged = mergeAccountQuotaSnapshotWindows(
+      [],
+      [
+        makeSnapshot({
+          provider_window_id: 'future-feature-weekly-0',
+          window_kind: 'weekly',
+          model_scope_kind: 'all',
+          used_percent: 50,
+          observed_at_ms: 10_000,
+        }),
+        makeSnapshot({
+          provider_window_id: 'future-feature-weekly-0',
+          window_kind: 'weekly',
+          model_scope_kind: 'feature',
+          model_scope_key: 'future_feature',
+          used_percent: 0,
+          observed_at_ms: 20_000,
+        }),
+        makeSnapshot({
+          provider_window_id: 'other-feature-weekly-0',
+          window_kind: 'weekly',
+          model_scope_kind: 'all',
+          used_percent: 25,
+          observed_at_ms: 15_000,
+        }),
+      ],
+      { provider: 'codex' }
+    );
+
+    expect(merged).toHaveLength(2);
+    expect(
+      merged.find((item) => item.providerWindowId === 'future-feature-weekly-0')
+    ).toMatchObject({
+      usedPercent: 0,
+      modelScope: { kind: 'feature', key: 'future_feature', complete: false },
+    });
+    expect(merged.find((item) => item.providerWindowId === 'other-feature-weekly-0')).toMatchObject(
+      {
+        usedPercent: 25,
+        modelScope: { kind: 'all', complete: true },
+      }
+    );
+  });
+
+  it('keeps an explicitly incomplete all-scope replacement from restoring legacy account-wide usage', () => {
+    const definition = makeDefinition({
+      key: 'future-feature-weekly-0',
+      providerWindowId: 'future-feature-weekly-0',
+      provider: 'codex',
+      kind: 'weekly',
+      modelScope: { kind: 'all', complete: false },
+      windowMode: 'unknown',
+      boundaryAccuracy: 'unknown',
+    });
+    const merged = mergeAccountQuotaSnapshotWindows(
+      [definition],
+      [
+        makeSnapshot({
+          provider_window_id: 'future-feature-weekly-0',
+          window_kind: 'weekly',
+          model_scope_kind: 'all',
+          used_percent: 75,
+        }),
+      ],
+      { provider: 'codex' }
+    );
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toBe(definition);
+    expect(merged[0].modelScope).toEqual({ kind: 'all', complete: false });
   });
 
   it('adds snapshot-only rolling windows and keeps them ahead of non-window quotas', () => {

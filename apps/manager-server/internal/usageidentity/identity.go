@@ -138,6 +138,8 @@ func effectiveAuthFile(fields Fields) string {
 	return source
 }
 
+// normalizeProvider normalizes provider namespaces for persisted credential
+// identity and account history identity keys.
 func normalizeProvider(value string) string {
 	normalized := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), "_", "-"))
 	switch normalized {

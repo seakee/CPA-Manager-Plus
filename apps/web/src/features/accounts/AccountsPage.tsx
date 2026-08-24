@@ -257,6 +257,7 @@ import {
 } from '@/features/accounts/components';
 import {
   accountQuotaSnapshotApi,
+  consumeCodexRateLimitResetCredit,
   monitoringAnalyticsApi,
   usageServiceApi,
   type AuthFilesApiRequestScope,
@@ -275,6 +276,7 @@ import {
   type UsageHeaderSnapshotsResponse,
 } from '@/services/api';
 import type { AuthFileItem, CodexQuotaState, XaiQuotaState } from '@/types';
+import type { CodexQuotaData } from '@/utils/quota';
 import type { AuthJsonInputType } from '@/features/authFiles/sessionAuthConverter';
 import {
   maskQuotaAccountText,
@@ -1129,6 +1131,9 @@ export function AccountsPage() {
   const [quotaSnapshotWindowsByRowKey, setQuotaSnapshotWindowsByRowKey] = useState<
     Map<string, AccountQuotaSnapshotWindow[]>
   >(() => new Map());
+  const [resettingQuotaKeys, setResettingQuotaKeys] = useState<ReadonlySet<string>>(
+    () => new Set()
+  );
   const [accountActionCandidates, setAccountActionCandidates] = useState<AccountActionCandidate[]>(
     []
   );
@@ -1328,6 +1333,7 @@ export function AccountsPage() {
   );
   const pendingExternalHashNavigationRef = useRef('');
   const quotaRequestVersionsRef = useRef<Map<string, number>>(new Map());
+  const resettingQuotaKeysRef = useRef<Set<string>>(new Set());
   const identityCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const accountSortDropdownRef = useRef<HTMLDivElement | null>(null);
   const accountSortTriggerRef = useRef<HTMLButtonElement | null>(null);
@@ -3144,6 +3150,14 @@ export function AccountsPage() {
       getCredentialEvidenceBoundary,
       getFreshCodexHeaderQuota,
     ]
+  );
+  const getDisplayCodexResetEvidenceQuota = useCallback(
+    (row: AccountRow): CodexQuotaState | undefined =>
+      mergeCodexResetCreditsFromQuotaSnapshots(
+        getDisplayCodexQuota(row.raw),
+        quotaSnapshotWindowsByRowKey.get(row.selectionKey) ?? []
+      ),
+    [getDisplayCodexQuota, quotaSnapshotWindowsByRowKey]
   );
   const getQuotaSnapshotObservation = useCallback(
     (row: AccountRow): AccountQuotaSnapshotObservationInput | undefined => {
@@ -5411,84 +5425,183 @@ export function AccountsPage() {
 
   const canResetCodexQuota = useCallback(
     (row: AccountRow) => {
-      if (row.provider !== CODEX_CONFIG.type || row.disabled || row.runtimeOnly) return false;
-      return CODEX_CONFIG.canResetQuota?.(row.raw, getDisplayCodexQuota(row.raw)) === true;
+      if (row.provider !== CODEX_CONFIG.type || row.runtimeOnly) return false;
+      if (normalizeAuthIndex(row.raw['auth_index'] ?? row.raw.authIndex) === null) return false;
+      const evidence = getDisplayCodexResetEvidenceQuota(row);
+      return (
+        (evidence?.rateLimitResetCreditsAvailableCount ?? 0) > 0 ||
+        (evidence?.rateLimitResetCredits?.length ?? 0) > 0
+      );
     },
-    [getDisplayCodexQuota]
+    [getDisplayCodexResetEvidenceQuota]
   );
 
   const resetCodexQuotaForRow = useCallback(
     (row: AccountRow) => {
-      if (!canResetCodexQuota(row) || !CODEX_CONFIG.resetQuota) return;
-      const quota = getDisplayCodexQuota(row.raw);
+      if (!canResetCodexQuota(row)) return;
       const storeKey = CODEX_CONFIG.getStoreKey?.(row.raw) ?? row.fileName;
-      const resetCount = quota?.rateLimitResetCreditsAvailableCount ?? 0;
+      const requestKey = `${CODEX_CONFIG.type}:${storeKey}`;
+      if (resettingQuotaKeysRef.current.has(requestKey)) return;
+      resettingQuotaKeysRef.current.add(requestKey);
+      setResettingQuotaKeys((prev) => new Set(prev).add(requestKey));
+      const endResetTransaction = () => {
+        if (!resettingQuotaKeysRef.current.delete(requestKey)) return;
+        setResettingQuotaKeys((prev) => {
+          if (!prev.has(requestKey)) return prev;
+          const next = new Set(prev);
+          next.delete(requestKey);
+          return next;
+        });
+      };
       const displayName = getDisplayAccount(row);
+      // Bumping the per-credential request version invalidates quota requests
+      // started before this transaction, so their responses cannot overwrite
+      // post-reset state.
+      const cacheGeneration = captureQuotaCacheGeneration();
+      const isCurrent = beginAccountQuotaRequest(quotaRequestVersionsRef.current, requestKey);
 
-      showConfirmation({
-        title: t('codex_quota.reset_confirm_title'),
-        message: t('codex_quota.reset_confirm_message', {
-          name: displayName,
-          count: resetCount,
-        }),
-        confirmText: t('codex_quota.reset_button', { count: resetCount }),
-        cancelText: t('common.cancel'),
-        variant: 'primary',
-        onConfirm: async () => {
-          const cacheGeneration = captureQuotaCacheGeneration();
-          const isCurrent = beginAccountQuotaRequest(
-            quotaRequestVersionsRef.current,
-            `${CODEX_CONFIG.type}:${storeKey}`
+      const runResetTransaction = async () => {
+        let fresh: CodexQuotaData;
+        try {
+          fresh = await CODEX_CONFIG.fetchQuota(row.raw, t, authFilesRequestScope);
+        } catch (err: unknown) {
+          endResetTransaction();
+          if (!isCurrent()) return;
+          const message = err instanceof Error ? err.message : t('common.unknown_error');
+          const status =
+            typeof err === 'object' && err !== null && 'status' in err
+              ? Number((err as { status?: unknown }).status)
+              : undefined;
+          commitIfQuotaCacheCurrent(cacheGeneration, () => {
+            setCodexQuota((prev) => ({
+              ...prev,
+              [storeKey]: buildQuotaFailureState(
+                CODEX_CONFIG,
+                message,
+                Number.isFinite(status) ? status : undefined,
+                row.raw,
+                getScopedQuotaState(CODEX_CONFIG, prev, row.raw)
+              ),
+            }));
+          });
+          showNotification(
+            t('codex_quota.reset_verify_failed', { name: displayName, message }),
+            'error'
           );
-          try {
-            const data = await CODEX_CONFIG.resetQuota?.(row.raw, t, authFilesRequestScope);
-            if (data === undefined) {
-              throw new Error(t('common.unknown_error'));
+          return;
+        }
+        if (!isCurrent()) {
+          endResetTransaction();
+          return;
+        }
+        if (
+          fresh.rateLimitResetCreditsAvailableCount === null &&
+          fresh.rateLimitResetCredits.length === 0 &&
+          fresh.rateLimitResetCreditsError
+        ) {
+          endResetTransaction();
+          showNotification(
+            t('codex_quota.reset_verify_failed', {
+              name: displayName,
+              message: fresh.rateLimitResetCreditsError,
+            }),
+            'error'
+          );
+          return;
+        }
+        const verifiedCount =
+          fresh.rateLimitResetCreditsAvailableCount ?? fresh.rateLimitResetCredits.length;
+        const verifiedState = CODEX_CONFIG.buildSuccessState(fresh, row.raw);
+        commitIfQuotaCacheCurrent(cacheGeneration, () => {
+          setCodexQuota((prev) => ({ ...prev, [storeKey]: verifiedState }));
+        });
+        if (verifiedCount <= 0) {
+          endResetTransaction();
+          showNotification(t('codex_quota.reset_no_credits', { name: displayName }), 'info');
+          return;
+        }
+        let confirmed = false;
+        showConfirmation({
+          title: t('codex_quota.reset_confirm_title'),
+          message: t('codex_quota.reset_confirm_message', {
+            name: displayName,
+            count: verifiedCount,
+          }),
+          confirmText: t('codex_quota.reset_button', { count: verifiedCount }),
+          cancelText: t('common.cancel'),
+          variant: 'primary',
+          onCancel: endResetTransaction,
+          onConfirm: async () => {
+            if (confirmed) return;
+            confirmed = true;
+            try {
+              await consumeCodexRateLimitResetCredit(row.raw, t, authFilesRequestScope);
+            } catch (err: unknown) {
+              endResetTransaction();
+              const message = err instanceof Error ? err.message : t('common.unknown_error');
+              showNotification(
+                t('codex_quota.reset_failed', { name: displayName, message }),
+                'error'
+              );
+              return;
             }
-            if (!isCurrent()) return;
-            const committed = commitIfQuotaCacheCurrent(cacheGeneration, () => {
+            const postMutationIsCurrent = beginAccountQuotaRequest(
+              quotaRequestVersionsRef.current,
+              requestKey
+            );
+            // The reset mutation has happened; drop the pre-reset evidence so
+            // the UI cannot keep offering it until the refreshed quota lands.
+            commitIfQuotaCacheCurrent(cacheGeneration, () => {
               setCodexQuota((prev) => ({
                 ...prev,
-                [storeKey]: CODEX_CONFIG.buildSuccessState(data, row.raw),
+                [storeKey]: {
+                  ...(getScopedQuotaState(CODEX_CONFIG, prev, row.raw) ?? verifiedState),
+                  rateLimitResetCreditsAvailableCount: null,
+                  rateLimitResetCredits: [],
+                },
               }));
             });
-            if (!committed) return;
-            showNotification(t('codex_quota.reset_success', { name: displayName }), 'success');
-          } catch (err: unknown) {
-            if (!isCurrent()) return;
-            const message = err instanceof Error ? err.message : t('common.unknown_error');
-            const status =
-              typeof err === 'object' && err !== null && 'status' in err
-                ? Number((err as { status?: unknown }).status)
-                : undefined;
-            const committed = commitIfQuotaCacheCurrent(cacheGeneration, () => {
-              setCodexQuota((prev) => {
-                const previousState = getScopedQuotaState(CODEX_CONFIG, prev, row.raw);
-                return {
-                  ...prev,
-                  [storeKey]: buildQuotaFailureState(
-                    CODEX_CONFIG,
-                    message,
-                    Number.isFinite(status) ? status : undefined,
-                    row.raw,
-                    previousState
-                  ),
-                };
-              });
+            setQuotaSnapshotWindowsByRowKey((current) => {
+              const windows = current.get(row.selectionKey);
+              if (!windows) return current;
+              const next = new Map(current);
+              next.set(
+                row.selectionKey,
+                windows.map((window) => ({
+                  ...window,
+                  reset_credits_available: undefined,
+                  reset_credits: undefined,
+                }))
+              );
+              return next;
             });
-            if (!committed) return;
-            showNotification(
-              t('codex_quota.reset_failed', { name: displayName, message }),
-              'error'
-            );
-          }
-        },
-      });
+            try {
+              const data = await CODEX_CONFIG.fetchQuota(row.raw, t, authFilesRequestScope);
+              endResetTransaction();
+              if (postMutationIsCurrent()) {
+                commitIfQuotaCacheCurrent(cacheGeneration, () => {
+                  setCodexQuota((prev) => ({
+                    ...prev,
+                    [storeKey]: CODEX_CONFIG.buildSuccessState(data, row.raw),
+                  }));
+                });
+              }
+              showNotification(t('codex_quota.reset_success', { name: displayName }), 'success');
+            } catch {
+              endResetTransaction();
+              showNotification(
+                t('codex_quota.reset_partial_success', { name: displayName }),
+                'warning'
+              );
+            }
+          },
+        });
+      };
+      void runResetTransaction();
     },
     [
       canResetCodexQuota,
       getDisplayAccount,
-      getDisplayCodexQuota,
       setCodexQuota,
       showConfirmation,
       showNotification,
@@ -6863,11 +6976,13 @@ export function AccountsPage() {
     const selectedQuotaCooldown = quotaCooldownsByRowKey.get(selectedRow.selectionKey)?.[0] ?? null;
     const selectedCodexQuota =
       selectedRow.provider === CODEX_CONFIG.type
-        ? mergeCodexResetCreditsFromQuotaSnapshots(
-            getDisplayCodexQuota(selectedRow.raw),
-            quotaSnapshotWindowsByRowKey.get(selectedRow.selectionKey) ?? []
-          )
+        ? getDisplayCodexResetEvidenceQuota(selectedRow)
         : undefined;
+    const resettingSelectedQuota =
+      selectedRow.provider === CODEX_CONFIG.type &&
+      resettingQuotaKeys.has(
+        `${CODEX_CONFIG.type}:${CODEX_CONFIG.getStoreKey?.(selectedRow.raw) ?? selectedRow.fileName}`
+      );
     const selectedCodexStatus = codexStatusBySelectionKey.get(selectedRow.selectionKey) ?? null;
     const hasMatchingDetailEvents = detailEventsRowKey === selectedRow.selectionKey;
     const rowEvents = hasMatchingDetailEvents ? detailEvents : [];
@@ -6910,7 +7025,9 @@ export function AccountsPage() {
             historyRefreshing={historyRefreshing}
             onRefreshHistory={() => void refreshAccountHistory(selectedRow)}
             onResetQuota={() => resetCodexQuotaForRow(selectedRow)}
-            resetQuotaDisabled={!canResetCodexQuota(selectedRow) || configurationSaving}
+            resetQuotaDisabled={
+              !canResetCodexQuota(selectedRow) || resettingSelectedQuota || configurationSaving
+            }
           />
         );
       }
@@ -7030,7 +7147,7 @@ export function AccountsPage() {
               label: t('codex_quota.reset_action_button'),
               icon: <IconRefreshCw size={15} />,
               onClick: () => resetCodexQuotaForRow(selectedRow),
-              disabled: configurationSaving,
+              disabled: configurationSaving || resettingSelectedQuota,
             } satisfies DropdownMenuItem,
           ]
         : []),

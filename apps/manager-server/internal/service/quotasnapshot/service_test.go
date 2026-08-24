@@ -11,7 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/codexquota"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	quotasnapshotrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotasnapshot"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
@@ -530,6 +532,27 @@ func TestWriteRejectsConflictingWindowMutations(t *testing.T) {
 	}
 }
 
+func TestNormalizeRemovedWindowRequiresKindForCodexSecondaryAlias(t *testing.T) {
+	if _, err := normalizeRemovedWindow("codex", RemovedWindowInput{
+		ProviderWindowID: "secondary",
+		ModelScopeKind:   "all",
+	}); err == nil || !strings.Contains(err.Error(), "window_kind") {
+		t.Fatalf("secondary removal without window kind error = %v", err)
+	}
+
+	removed, err := normalizeRemovedWindow("codex", RemovedWindowInput{
+		ProviderWindowID: "secondary",
+		WindowKind:       "monthly",
+		ModelScopeKind:   "all",
+	})
+	if err != nil {
+		t.Fatalf("monthly secondary removal: %v", err)
+	}
+	if removed.ProviderWindowID != "monthly" || removed.ScopeFingerprint == "" {
+		t.Fatalf("monthly secondary removal = %#v", removed)
+	}
+}
+
 func TestWriteRejectsTooManyWindowMutations(t *testing.T) {
 	service := newQuotaSnapshotTestService(t, 20_000)
 	_, err := service.Write(context.Background(), WriteRequest{Entries: []WriteEntry{{
@@ -743,6 +766,8 @@ func TestWriteUsageEventsPersistsCodexHeaderWindows(t *testing.T) {
 	event := usage.Event{
 		TimestampMS:          observedAtMS,
 		Provider:             "codex",
+		Model:                "gpt-5.6-sol",
+		AnalyticsModel:       "gpt-5.6-sol",
 		AuthFileSnapshot:     "codex.json",
 		AuthProviderSnapshot: "codex",
 		AuthIndex:            "auth-1",
@@ -782,6 +807,94 @@ func TestWriteUsageEventsPersistsCodexHeaderWindows(t *testing.T) {
 	}
 }
 
+func TestWriteUsageEventsKeepsCodexMainAndSparkHeaderWindowsIndependent(t *testing.T) {
+	const observedAtMS = int64(1_780_000_100_000)
+	service := newQuotaSnapshotTestService(t, observedAtMS+2_000)
+	mainUsed := 36.0
+	sparkUsed := 0.0
+	resetAfter := float64(7 * 24 * 60 * 60)
+	minutes := float64(7 * 24 * 60)
+	mainResetAtMS := observedAtMS + int64(resetAfter*1000)
+	sparkResetAtMS := mainResetAtMS + 1_000
+	events := []usage.Event{
+		{
+			TimestampMS:          observedAtMS,
+			Provider:             "codex",
+			Model:                "gpt-5.6-sol",
+			AnalyticsModel:       "gpt-5.6-sol",
+			AuthFileSnapshot:     "codex.json",
+			AuthProviderSnapshot: "codex",
+			AuthIndex:            "auth-1",
+			AccountSnapshot:      "user@example.com",
+			RequestID:            "req-codex-main-header",
+			ResponseMetadata: &usage.ResponseHeaderMetadata{Quota: &usage.HeaderQuotaMetadata{
+				PlanType: "plus",
+				Primary: &usage.HeaderQuotaWindow{
+					UsedPercent: &mainUsed, ResetAtMS: mainResetAtMS,
+					ResetAfterSeconds: &resetAfter, WindowMinutes: &minutes,
+				},
+			}},
+		},
+		{
+			TimestampMS:          observedAtMS + 1_000,
+			Provider:             "codex",
+			Model:                "my-spark",
+			AnalyticsModel:       "my-spark",
+			RequestedModel:       "my-spark",
+			ResolvedModel:        codexquota.SparkModelID,
+			AuthFileSnapshot:     "codex.json",
+			AuthProviderSnapshot: "codex",
+			AuthIndex:            "auth-1",
+			AccountSnapshot:      "user@example.com",
+			RequestID:            "req-codex-spark-header",
+			ResponseMetadata: &usage.ResponseHeaderMetadata{Quota: &usage.HeaderQuotaMetadata{
+				PlanType: "plus",
+				Primary: &usage.HeaderQuotaWindow{
+					UsedPercent: &sparkUsed, ResetAtMS: sparkResetAtMS,
+					ResetAfterSeconds: &resetAfter, WindowMinutes: &minutes,
+				},
+			}},
+		},
+	}
+	if err := service.WriteUsageEvents(context.Background(), events); err != nil {
+		t.Fatalf("write scoped usage evidence: %v", err)
+	}
+	result, err := service.Query(context.Background(), QueryRequest{Accounts: []QueryAccount{{
+		RowKey: "row-1", Provider: "codex", Account: quotaSnapshotTestAccount(),
+	}}})
+	if err != nil {
+		t.Fatalf("query scoped usage evidence: %v", err)
+	}
+	if len(result.Items) != 1 || len(result.Items[0].Windows) != 2 {
+		t.Fatalf("scoped header windows = %#v", result)
+	}
+	byID := make(map[string]Window, len(result.Items[0].Windows))
+	for _, window := range result.Items[0].Windows {
+		byID[window.ProviderWindowID] = window
+	}
+	mainWindow := byID["weekly"]
+	if mainWindow.ModelScopeKind != "family" || mainWindow.ModelScopeKey != codexquota.MainScopeKey ||
+		mainWindow.UsedPercent == nil || *mainWindow.UsedPercent != mainUsed {
+		t.Fatalf("main Header window = %#v", mainWindow)
+	}
+	sparkWindow := byID["spark-weekly-0"]
+	if sparkWindow.ModelScopeKind != "models" || len(sparkWindow.ModelIDs) != 1 ||
+		sparkWindow.ModelIDs[0] != codexquota.SparkModelID || sparkWindow.UsedPercent == nil ||
+		*sparkWindow.UsedPercent != sparkUsed {
+		t.Fatalf("Spark Header window = %#v", sparkWindow)
+	}
+	hasLegacySparkAlias := false
+	for _, alias := range sparkWindow.ProviderWindowAliases {
+		if alias == "fast-coding-weekly-0" {
+			hasLegacySparkAlias = true
+			break
+		}
+	}
+	if !hasLegacySparkAlias {
+		t.Fatalf("Spark Header aliases = %#v, want legacy fast-coding alias", sparkWindow.ProviderWindowAliases)
+	}
+}
+
 func TestWriteUsageEventAndFrontendHeaderObservationUseSameDerivedCycle(t *testing.T) {
 	const observedAtMS = int64(1_780_000_000_638)
 	service, path := newQuotaSnapshotTestServiceWithPath(t, observedAtMS+1_000)
@@ -793,6 +906,8 @@ func TestWriteUsageEventAndFrontendHeaderObservationUseSameDerivedCycle(t *testi
 		EventHash:            "zz-header-event",
 		TimestampMS:          observedAtMS,
 		Provider:             "codex",
+		Model:                "gpt-5.6-sol",
+		AnalyticsModel:       "gpt-5.6-sol",
 		AuthFileSnapshot:     "codex.json",
 		AuthProviderSnapshot: "codex",
 		AuthIndex:            "auth-1",
@@ -823,7 +938,8 @@ func TestWriteUsageEventAndFrontendHeaderObservationUseSameDerivedCycle(t *testi
 		},
 		Windows: []WindowInput{{
 			ProviderWindowID: "five-hour", WindowKind: "five_hour", WindowMode: "fixed",
-			ModelScopeKind: "all", Source: "response_header", SourceObservationID: event.EventHash,
+			ModelScopeKind: "family", ModelScopeKey: "codex_main",
+			Source: "response_header", SourceObservationID: event.EventHash,
 			ObservedAtMS: observedAtMS, BoundaryAccuracy: "derived",
 			CycleStartMS: &cycleStartMS, CycleEndMS: &resetAtMS, DurationSeconds: &durationSeconds,
 			UsedPercent: &used, RemainingPercent: &remaining, PlanType: "plus",
@@ -1030,6 +1146,8 @@ func TestWriteUsageEventsKeepsFirstNonZeroAfterProvisionalBoundaryInCurrentCycle
 		event := usage.Event{
 			TimestampMS:          observedAt[index],
 			Provider:             "codex",
+			Model:                "gpt-5.6-sol",
+			AnalyticsModel:       "gpt-5.6-sol",
 			AuthFileSnapshot:     "codex.json",
 			AuthProviderSnapshot: "codex",
 			AuthIndex:            "auth-1",
@@ -1080,6 +1198,8 @@ func TestWriteUsageEventsKeepsProvisionalZeroCodexBoundaryInOneCycle(t *testing.
 		events = append(events, usage.Event{
 			TimestampMS:          observedAt[index],
 			Provider:             "codex",
+			Model:                "gpt-5.6-sol",
+			AnalyticsModel:       "gpt-5.6-sol",
 			AuthFileSnapshot:     "codex.json",
 			AuthProviderSnapshot: "codex",
 			AuthIndex:            "auth-1",
@@ -1120,6 +1240,8 @@ func TestWriteUsageEventsSkipsZeroOnlyCodexHeaderPlaceholder(t *testing.T) {
 	event := usage.Event{
 		TimestampMS:          observedAtMS,
 		Provider:             "codex",
+		Model:                "gpt-5.6-sol",
+		AnalyticsModel:       "gpt-5.6-sol",
 		AuthFileSnapshot:     "codex.json",
 		AuthProviderSnapshot: "codex",
 		AuthIndex:            "auth-1",
@@ -1275,6 +1397,42 @@ func TestWriteCodexInspectionResultRequiresNormalizedResetBoundary(t *testing.T)
 	}
 	if byID["monthly"].WindowMode != "fixed" || byID["monthly"].BoundaryAccuracy != "derived" {
 		t.Fatalf("estimated reset was not normalized into a derived boundary: %#v", byID["monthly"])
+	}
+}
+
+func TestWriteCodexInspectionResultReclassifiesLegacyScopedAllScope(t *testing.T) {
+	const observedAtMS = int64(1_780_000_000_000)
+	service := newQuotaSnapshotTestService(t, observedAtMS+1_000)
+	statusCode := 200
+	duration := float64(7 * 24 * 60 * 60)
+	used := 0.0
+	result := model.CodexInspectionResult{
+		ID: 8, RunID: 4, Provider: "codex", FileName: "codex.json", AuthIndex: "auth-1",
+		AccountSnapshot: "user@example.com", CreatedAtMS: observedAtMS, PlanType: "plus",
+		StatusCode: &statusCode, QuotaInventoryObserved: true,
+		QuotaWindows: []model.CodexInspectionQuotaWindow{{
+			ID: "gpt-5-3-codex-spark-weekly-0", UsedPercent: &used,
+			ResetAtMS: observedAtMS + 604_800_000, ResetAccuracy: "exact",
+			LimitWindowSeconds: &duration,
+			ModelScope:         &model.CodexInspectionQuotaModelScope{Kind: "all", Complete: true},
+		}},
+	}
+	if err := service.WriteCodexInspectionResult(context.Background(), result); err != nil {
+		t.Fatalf("write legacy scoped inspection evidence: %v", err)
+	}
+	query, err := service.Query(context.Background(), QueryRequest{Accounts: []QueryAccount{{
+		RowKey: "row-legacy-scoped", Provider: "codex", Account: quotaSnapshotTestAccount(),
+	}}})
+	if err != nil {
+		t.Fatalf("query legacy scoped inspection evidence: %v", err)
+	}
+	if len(query.Items) != 1 || len(query.Items[0].Windows) != 1 {
+		t.Fatalf("legacy scoped inspection windows = %#v", query)
+	}
+	window := query.Items[0].Windows[0]
+	if window.ProviderWindowID != "spark-weekly-0" || window.ModelScopeKind != "models" ||
+		len(window.ModelIDs) != 1 || window.ModelIDs[0] != codexquota.SparkModelID {
+		t.Fatalf("legacy scoped inspection scope = %#v", window)
 	}
 }
 
@@ -3246,6 +3404,393 @@ func TestQuotaLifecycleRejectsUnreliableScheduledRolloverBoundary(t *testing.T) 
 	}
 }
 
+func TestQuotaLifecycleReclassifiesLegacyCodexSparkAllScope(t *testing.T) {
+	service, path := newQuotaSnapshotTestServiceWithPath(t, quotaLifecycleBaseMS+quotaLifecycleDayMS)
+	legacy := quotaLifecycleFixedWindow(
+		"legacy-codex-window",
+		"weekly",
+		quotaLifecycleBaseMS,
+		7*24*60*60,
+		0,
+	)
+	writeQuotaLifecycleObservation(
+		t,
+		service,
+		"complete",
+		quotaLifecycleBaseMS+quotaLifecycleHourMS,
+		[]WindowInput{legacy},
+	)
+	rewriteQuotaLifecycleProviderWindowID(t, path, "legacy-codex-window", "fast-coding-weekly-0")
+
+	scoped := quotaLifecycleFixedWindow(
+		"spark-weekly-0",
+		"weekly",
+		quotaLifecycleBaseMS,
+		7*24*60*60,
+		0,
+	)
+	scoped.ModelScopeKind = "models"
+	scoped.ModelIDs = []string{codexquota.SparkModelID}
+	scoped.ProviderWindowAliases = []string{"fast-coding-weekly-0"}
+	writeQuotaLifecycleObservation(
+		t,
+		service,
+		"complete",
+		quotaLifecycleBaseMS+2*quotaLifecycleHourMS,
+		[]WindowInput{scoped},
+	)
+
+	result, err := service.Query(context.Background(), QueryRequest{Accounts: []QueryAccount{{
+		RowKey: "row-lifecycle", Provider: "codex", Account: quotaSnapshotTestAccount(),
+	}}})
+	if err != nil {
+		t.Fatalf("query active reclassified Spark window: %v", err)
+	}
+	if len(result.Items) != 1 || len(result.Items[0].Windows) != 1 {
+		t.Fatalf("active reclassified Spark windows = %#v", result)
+	}
+	active := result.Items[0].Windows[0]
+	if active.ProviderWindowID != "spark-weekly-0" || active.ModelScopeKind != "models" ||
+		len(active.ModelIDs) != 1 || active.ModelIDs[0] != codexquota.SparkModelID || active.Availability != "active" {
+		t.Fatalf("active reclassified Spark window = %#v", active)
+	}
+
+	all, err := service.Query(context.Background(), QueryRequest{
+		Accounts: []QueryAccount{{
+			RowKey: "row-lifecycle", Provider: "codex", Account: quotaSnapshotTestAccount(),
+		}},
+		IncludeInactive: true,
+	})
+	if err != nil {
+		t.Fatalf("query inactive reclassified Spark window: %v", err)
+	}
+	if len(all.Items) != 1 || len(all.Items[0].Windows) != 2 {
+		t.Fatalf("all reclassified Spark windows = %#v", all)
+	}
+	var legacyInactive bool
+	for _, window := range all.Items[0].Windows {
+		if window.ModelScopeKind == "all" && window.Availability == "inactive" {
+			legacyInactive = true
+		}
+	}
+	if !legacyInactive {
+		t.Fatalf("legacy Spark all-scope window was not retained as inactive: %#v", all.Items[0].Windows)
+	}
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open reclassification database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	var activationReason, cycleReason string
+	if err := db.QueryRow(`select a.deactivation_reason
+		from account_quota_window_activations a
+		join account_quota_windows w on w.id = a.window_id
+		where w.provider_window_id = 'fast-coding-weekly-0' and lower(trim(w.model_scope_kind)) = 'all'
+		order by a.id desc limit 1`).Scan(&activationReason); err != nil {
+		t.Fatalf("read Spark reclassification activation reason: %v", err)
+	}
+	if err := db.QueryRow(`select c.end_reason
+		from account_quota_cycles c
+		join account_quota_window_activations a on a.id = c.activation_id
+		join account_quota_windows w on w.id = a.window_id
+		where w.provider_window_id = 'fast-coding-weekly-0' and lower(trim(w.model_scope_kind)) = 'all'
+		order by c.id desc limit 1`).Scan(&cycleReason); err != nil {
+		t.Fatalf("read Spark reclassification cycle reason: %v", err)
+	}
+	if activationReason != "scope_reclassified" || cycleReason != "scope_reclassified" {
+		t.Fatalf("Spark reclassification reasons = activation:%q cycle:%q", activationReason, cycleReason)
+	}
+}
+
+func TestQuotaLifecycleReclassifiesLegacyCodexIncompleteFeatureAllScope(t *testing.T) {
+	tests := []struct {
+		name             string
+		providerWindowID string
+		scopeKey         string
+	}{
+		{name: "code review", providerWindowID: "code-review-weekly-0", scopeKey: codexquota.CodeReviewScopeKey},
+		{name: "unknown additional feature", providerWindowID: "future-feature-weekly-0", scopeKey: "future_feature"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service, path := newQuotaSnapshotTestServiceWithPath(t, quotaLifecycleBaseMS+quotaLifecycleDayMS)
+			legacy := quotaLifecycleFixedWindow(
+				"legacy-codex-window",
+				"weekly",
+				quotaLifecycleBaseMS,
+				7*24*60*60,
+				50,
+			)
+			unrelated := quotaLifecycleFixedWindow(
+				"unrelated-feature-weekly-0",
+				"weekly",
+				quotaLifecycleBaseMS,
+				7*24*60*60,
+				25,
+			)
+			writeQuotaLifecycleObservation(
+				t,
+				service,
+				"complete",
+				quotaLifecycleBaseMS+quotaLifecycleHourMS,
+				[]WindowInput{legacy, unrelated},
+			)
+			rewriteQuotaLifecycleProviderWindowID(t, path, "legacy-codex-window", test.providerWindowID)
+
+			scoped := quotaLifecycleFixedWindow(
+				test.providerWindowID,
+				"weekly",
+				quotaLifecycleBaseMS,
+				7*24*60*60,
+				0,
+			)
+			scoped.ModelScopeKind = "feature"
+			scoped.ModelScopeKey = test.scopeKey
+			writeQuotaLifecycleObservation(
+				t,
+				service,
+				"partial",
+				quotaLifecycleBaseMS+2*quotaLifecycleHourMS,
+				[]WindowInput{scoped},
+			)
+
+			result, err := service.Query(context.Background(), QueryRequest{Accounts: []QueryAccount{{
+				RowKey: "row-lifecycle", Provider: "codex", Account: quotaSnapshotTestAccount(),
+			}}})
+			if err != nil {
+				t.Fatalf("query active reclassified feature window: %v", err)
+			}
+			if len(result.Items) != 1 || len(result.Items[0].Windows) != 2 {
+				t.Fatalf("active reclassified feature windows = %#v", result)
+			}
+			var scopedActive, unrelatedActive bool
+			for _, window := range result.Items[0].Windows {
+				switch window.ProviderWindowID {
+				case test.providerWindowID:
+					scopedActive = window.ModelScopeKind == "feature" &&
+						window.ModelScopeKey == test.scopeKey && window.Availability == "active"
+				case "unrelated-feature-weekly-0":
+					unrelatedActive = window.ModelScopeKind == "feature" &&
+						window.ModelScopeKey == "unrelated_feature" && window.Availability == "active"
+				}
+			}
+			if !scopedActive || !unrelatedActive {
+				t.Fatalf("scoped/unrelated active windows = %#v", result.Items[0].Windows)
+			}
+
+			all, err := service.Query(context.Background(), QueryRequest{
+				Accounts: []QueryAccount{{
+					RowKey: "row-lifecycle", Provider: "codex", Account: quotaSnapshotTestAccount(),
+				}},
+				IncludeInactive: true,
+			})
+			if err != nil {
+				t.Fatalf("query inactive reclassified feature window: %v", err)
+			}
+			if len(all.Items) != 1 || len(all.Items[0].Windows) != 3 {
+				t.Fatalf("all reclassified feature windows = %#v", all)
+			}
+			var legacyInactive bool
+			for _, window := range all.Items[0].Windows {
+				if window.ProviderWindowID == test.providerWindowID &&
+					window.ModelScopeKind == "all" && window.Availability == "inactive" {
+					legacyInactive = true
+				}
+			}
+			if !legacyInactive {
+				t.Fatalf("legacy feature all-scope window was not retained as inactive: %#v", all.Items[0].Windows)
+			}
+		})
+	}
+}
+
+func TestQuerySuppressesUnmigratedLegacyCodexSparkAllScope(t *testing.T) {
+	service, path := newQuotaSnapshotTestServiceWithPath(t, 40_000)
+	scoped := quotaLifecycleFixedWindow(
+		"spark-weekly-0",
+		"weekly",
+		10_000,
+		7*24*60*60,
+		0,
+	)
+	scoped.ModelScopeKind = "models"
+	scoped.ModelIDs = []string{codexquota.SparkModelID}
+	writeQuotaLifecycleObservation(t, service, "partial", 20_000, []WindowInput{scoped})
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open unmigrated quota database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	var accountKey string
+	if err := db.QueryRow(`select account_key from account_quota_snapshots limit 1`).Scan(&accountKey); err != nil {
+		t.Fatalf("read quota account key: %v", err)
+	}
+	if _, err := db.Exec(`insert into account_quota_snapshots (
+		account_key, provider, provider_window_id, window_kind, window_mode,
+		model_scope_kind, source, source_observation_id, observed_at_ms,
+		boundary_accuracy, used_percent, remaining_percent, created_at_ms
+	) values (?, 'codex', 'fast-coding-weekly-0', 'weekly', 'unknown', 'all',
+		'inspection', 'legacy-unmigrated', 30_000, 'unknown', 99, 1, 30_000)`, accountKey); err != nil {
+		t.Fatalf("insert unmigrated Spark snapshot: %v", err)
+	}
+
+	result, err := service.Query(context.Background(), QueryRequest{Accounts: []QueryAccount{{
+		RowKey: "row-unmigrated", Provider: "codex", Account: quotaSnapshotTestAccount(),
+	}}})
+	if err != nil {
+		t.Fatalf("query unmigrated Spark snapshots: %v", err)
+	}
+	if len(result.Items) != 1 || len(result.Items[0].Windows) != 1 {
+		t.Fatalf("unmigrated Spark snapshots were duplicated: %#v", result)
+	}
+	window := result.Items[0].Windows[0]
+	if window.ProviderWindowID != "spark-weekly-0" || window.ModelScopeKind != "models" ||
+		len(window.ModelIDs) != 1 || window.ModelIDs[0] != codexquota.SparkModelID ||
+		window.UsedPercent == nil || *window.UsedPercent != 0 {
+		t.Fatalf("unmigrated Spark snapshot replaced scoped evidence: %#v", window)
+	}
+}
+
+func TestQuotaLifecycleMigratesLegacyCodexMainAllScopeInPlace(t *testing.T) {
+	service, path := newQuotaSnapshotTestServiceWithPath(t, quotaLifecycleBaseMS+quotaLifecycleDayMS)
+	legacy := quotaLifecycleFixedWindow(
+		"weekly",
+		"weekly",
+		quotaLifecycleBaseMS,
+		7*24*60*60,
+		36,
+	)
+	writeQuotaLifecycleObservation(
+		t,
+		service,
+		"complete",
+		quotaLifecycleBaseMS+quotaLifecycleHourMS,
+		[]WindowInput{legacy},
+	)
+	legacyWindow := queryQuotaLifecycleWindows(t, service, false)["weekly"]
+	if legacyWindow.LogicalWindowID == 0 {
+		t.Fatalf("legacy main logical window = %#v", legacyWindow)
+	}
+
+	scoped := quotaLifecycleFixedWindow(
+		"weekly",
+		"weekly",
+		quotaLifecycleBaseMS,
+		7*24*60*60,
+		36,
+	)
+	scoped.ModelScopeKind = "family"
+	scoped.ModelScopeKey = codexquota.MainScopeKey
+	writeQuotaLifecycleObservation(
+		t,
+		service,
+		"complete",
+		quotaLifecycleBaseMS+2*quotaLifecycleHourMS,
+		[]WindowInput{scoped},
+	)
+
+	windows := queryQuotaLifecycleWindows(t, service, false)
+	window, ok := windows["weekly"]
+	if !ok || window.ModelScopeKind != "family" || window.ModelScopeKey != codexquota.MainScopeKey ||
+		window.Availability != "active" || window.LogicalWindowID == 0 || window.CurrentCycle == nil {
+		t.Fatalf("main window was not migrated in place: %#v", windows)
+	}
+	if window.LogicalWindowID != legacyWindow.LogicalWindowID {
+		t.Fatalf("main logical window changed from %d to %d", legacyWindow.LogicalWindowID, window.LogicalWindowID)
+	}
+	if window.CurrentCycle.ActualStartMS != quotaLifecycleBaseMS {
+		t.Fatalf("main cycle start changed during migration: %#v", window.CurrentCycle)
+	}
+
+	all := queryQuotaLifecycleWindows(t, service, true)
+	if len(all) != 1 {
+		t.Fatalf("main migration created duplicate logical windows: %#v", all)
+	}
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open main migration database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	var storedKind, storedKey string
+	if err := db.QueryRow(`select model_scope_kind, coalesce(model_scope_key, '')
+		from account_quota_windows where id = ?`, window.LogicalWindowID).Scan(&storedKind, &storedKey); err != nil {
+		t.Fatalf("read stored main lifecycle scope: %v", err)
+	}
+	if storedKind != "all" || storedKey != "" {
+		t.Fatalf("stored main lifecycle scope = %q/%q, want legacy all identity", storedKind, storedKey)
+	}
+}
+
+func TestQuotaLifecycleReconcilesLegacyCodexPrimaryAndSecondaryAliases(t *testing.T) {
+	tests := []struct {
+		name       string
+		legacyID   string
+		currentID  string
+		windowKind string
+		duration   int64
+	}{
+		{name: "primary to five hour", legacyID: "primary", currentID: "five-hour", windowKind: "five_hour", duration: 5 * 60 * 60},
+		{name: "secondary to weekly", legacyID: "secondary", currentID: "weekly", windowKind: "weekly", duration: 7 * 24 * 60 * 60},
+		{name: "secondary to team monthly", legacyID: "secondary", currentID: "monthly", windowKind: "monthly", duration: 30 * 24 * 60 * 60},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := newQuotaSnapshotTestService(t, quotaLifecycleBaseMS+quotaLifecycleDayMS)
+			legacy := quotaLifecycleFixedWindow(
+				test.legacyID,
+				test.windowKind,
+				quotaLifecycleBaseMS,
+				test.duration,
+				40,
+			)
+			writeQuotaLifecycleObservation(
+				t,
+				service,
+				"complete",
+				quotaLifecycleBaseMS+quotaLifecycleHourMS,
+				[]WindowInput{legacy},
+			)
+
+			scoped := quotaLifecycleFixedWindow(
+				test.currentID,
+				test.windowKind,
+				quotaLifecycleBaseMS,
+				test.duration,
+				35,
+			)
+			scoped.ModelScopeKind = "family"
+			scoped.ModelScopeKey = codexquota.MainScopeKey
+			writeQuotaLifecycleObservation(
+				t,
+				service,
+				"complete",
+				quotaLifecycleBaseMS+2*quotaLifecycleHourMS,
+				[]WindowInput{scoped},
+			)
+
+			active := queryQuotaLifecycleWindows(t, service, false)
+			if len(active) != 1 {
+				t.Fatalf("legacy %s produced duplicate active windows: %#v", test.legacyID, active)
+			}
+			for _, window := range active {
+				if window.ModelScopeKind != "family" || window.ModelScopeKey != codexquota.MainScopeKey {
+					t.Fatalf("legacy %s active scope = %#v", test.legacyID, window)
+				}
+			}
+
+			all := queryQuotaLifecycleWindows(t, service, true)
+			if len(all) != 1 {
+				t.Fatalf("legacy %s produced duplicate lifecycle windows: %#v", test.legacyID, all)
+			}
+		})
+	}
+}
+
 func quotaLifecycleFixedWindow(id, kind string, startMS, durationSeconds int64, usedPercent float64) WindowInput {
 	endMS := startMS + durationSeconds*1000
 	return WindowInput{
@@ -3269,6 +3814,26 @@ func writeQuotaLifecycleObservation(t *testing.T, service *Service, inventoryMod
 	}})
 	if err != nil {
 		t.Fatalf("write %s quota lifecycle observation at %d: %v", inventoryMode, observedAtMS, err)
+	}
+}
+
+func rewriteQuotaLifecycleProviderWindowID(t *testing.T, path, from, to string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open legacy quota database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	legacyScopeFingerprint := quotasnapshotrepo.ScopeFingerprint("all", "", nil)
+	if _, err := db.Exec(`update account_quota_windows set
+		provider_window_id = ?, model_scope_kind = 'all', model_scope_key = '',
+		model_ids_json = '', scope_fingerprint = ? where provider_window_id = ?`, to, legacyScopeFingerprint, from); err != nil {
+		t.Fatalf("rewrite legacy quota window state: %v", err)
+	}
+	if _, err := db.Exec(`update account_quota_snapshots set
+		provider_window_id = ?, model_scope_kind = 'all', model_scope_key = '',
+		model_ids_json = '', scope_fingerprint = ? where provider_window_id = ?`, to, legacyScopeFingerprint, from); err != nil {
+		t.Fatalf("rewrite legacy quota snapshot: %v", err)
 	}
 }
 

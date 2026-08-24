@@ -77,6 +77,7 @@ vi.mock('@/utils/clipboard', () => ({
 const TARGET = {
   account: 'codex@example.com',
   fileName: 'codex.json',
+  accountId: 'acct-1',
   provider: 'codex',
   authIndex: 'auth-1',
 };
@@ -368,6 +369,127 @@ describe('CodexReauthDialog connection lifecycle', () => {
       'error'
     );
     expect(textContent(renderer.root)).toContain('temporary Accounts reload failure');
+
+    act(() => renderer.unmount());
+  });
+
+  it('does not restart OAuth while Accounts is still synchronizing after a successful callback', async () => {
+    const synchronization = deferred<void>();
+    mocks.startAuth.mockResolvedValue({ url: 'https://auth.example/codex', state: 'state-1' });
+    mocks.submitCallback.mockResolvedValue({ status: 'ok' });
+    const onSuccess = vi.fn(() => synchronization.promise);
+
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <CodexReauthDialog
+          open
+          target={TARGET}
+          requestScope={REQUEST_SCOPE}
+          onClose={vi.fn()}
+          onSuccess={onSuccess}
+        />
+      );
+    });
+    await flushEffects();
+    const startCount = mocks.startAuth.mock.calls.length;
+
+    const input = renderer.root.findByType('input');
+    act(() => input.props.onChange({ target: { value: 'http://localhost/callback?code=1' } }));
+    await act(async () => {
+      findButton(renderer, 'codex_reauth.submit_callback').props.onClick();
+      await Promise.resolve();
+    });
+
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+    expect(textContent(renderer.root)).toContain('codex_reauth.synchronizing');
+    expect(mocks.showNotification).not.toHaveBeenCalledWith('codex_reauth.success', 'success');
+
+    await act(async () => {
+      renderer.update(
+        <CodexReauthDialog
+          open
+          target={{ ...TARGET, authIndex: 'auth-2' }}
+          requestScope={{ ...REQUEST_SCOPE }}
+          onClose={vi.fn()}
+          onSuccess={vi.fn()}
+        />
+      );
+    });
+    await flushEffects();
+
+    expect(mocks.startAuth).toHaveBeenCalledTimes(startCount);
+    expect(textContent(renderer.root)).toContain('codex_reauth.synchronizing');
+
+    await act(async () => {
+      synchronization.resolve();
+      await flush();
+    });
+
+    expect(mocks.startAuth).toHaveBeenCalledTimes(startCount);
+    expect(mocks.showNotification).toHaveBeenCalledWith('codex_reauth.success', 'success');
+    expect(textContent(renderer.root)).toContain('codex_reauth.success');
+
+    act(() => renderer.unmount());
+  });
+
+  it('does not restart OAuth while Accounts is still synchronizing after polling success', async () => {
+    const synchronization = deferred<void>();
+    mocks.startAuth.mockResolvedValue({ url: 'https://auth.example/codex', state: 'state-1' });
+    mocks.getAuthStatus.mockResolvedValue({ status: 'ok' });
+    const onSuccess = vi.fn(() => synchronization.promise);
+
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <CodexReauthDialog
+          open
+          target={TARGET}
+          requestScope={REQUEST_SCOPE}
+          onClose={vi.fn()}
+          onSuccess={onSuccess}
+        />
+      );
+    });
+    await flushEffects();
+    const startCount = mocks.startAuth.mock.calls.length;
+    expect(mocks.intervalCallback).not.toBeNull();
+
+    let pollingPromise!: Promise<void>;
+    act(() => {
+      pollingPromise = Promise.resolve(mocks.intervalCallback?.());
+    });
+    await flushEffects();
+
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+    expect(textContent(renderer.root)).toContain('codex_reauth.synchronizing');
+    expect(mocks.showNotification).not.toHaveBeenCalledWith('codex_reauth.success', 'success');
+
+    await act(async () => {
+      renderer.update(
+        <CodexReauthDialog
+          open
+          target={{ ...TARGET, authIndex: 'auth-2' }}
+          requestScope={{ ...REQUEST_SCOPE }}
+          onClose={vi.fn()}
+          onSuccess={vi.fn()}
+        />
+      );
+    });
+    await flushEffects();
+
+    expect(mocks.startAuth).toHaveBeenCalledTimes(startCount);
+    expect(textContent(renderer.root)).toContain('codex_reauth.synchronizing');
+
+    await act(async () => {
+      synchronization.resolve();
+      await pollingPromise;
+      await flush();
+    });
+
+    expect(mocks.startAuth).toHaveBeenCalledTimes(startCount);
+    expect(mocks.showNotification).toHaveBeenCalledWith('codex_reauth.success', 'success');
+    expect(textContent(renderer.root)).toContain('codex_reauth.success');
 
     act(() => renderer.unmount());
   });

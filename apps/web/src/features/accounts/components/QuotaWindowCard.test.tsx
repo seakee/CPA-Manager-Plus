@@ -126,6 +126,20 @@ describe('QuotaWindowCard', () => {
     expect(previousText).not.toContain('accounts.detail_used');
   });
 
+  it('treats the Codex main family scope as an account-wide standard quota', () => {
+    const renderer = renderCard(
+      makeWindow({
+        modelScope: { kind: 'family', key: 'codex_main', complete: true },
+      })
+    );
+
+    expect(renderer.root.findAllByProps({ 'data-quota-card-mode': 'standard' })).toHaveLength(1);
+    expect(renderer.root.findAllByProps({ 'data-quota-standard-comparison': 'true' })).toHaveLength(
+      1
+    );
+    expect(renderer.root.findAllByProps({ 'data-quota-model-comparison': 'true' })).toHaveLength(0);
+  });
+
   it('uses semantic colors for the current usage metric icons', () => {
     const renderer = renderCard(makeWindow());
     const current = renderer.root.findByProps({ 'data-quota-usage-period': 'current' });
@@ -417,13 +431,29 @@ describe('QuotaWindowCard', () => {
   it('explains when provider model scope is not queryable', () => {
     const renderer = renderCard(
       makeWindow({
-        modelScope: { kind: 'models', models: [], complete: false },
+        modelScope: { kind: 'feature', key: 'future_feature', complete: false },
         usage: null,
         currentUsage: null,
         previousUsage: null,
         forecast: null,
       })
     );
+    expect(readText(renderer.root)).toContain('accounts.detail_scope_unknown');
+  });
+
+  it('fails closed for an incomplete all scope instead of rendering account-wide comparison stats', () => {
+    const renderer = renderCard(
+      makeWindow({
+        modelScope: { kind: 'all', complete: false },
+        usage: usage({ totalRequests: 250, totalTokens: 29_000_000, totalCost: 21.23 }),
+        currentUsage: usage({ totalRequests: 250, totalTokens: 29_000_000, totalCost: 21.23 }),
+        previousUsage: usage({ totalRequests: 250, totalTokens: 29_000_000, totalCost: 21.23 }),
+        forecast: { requests: 250, tokens: 29_000_000, cost: 21.23, basis: 'previous' },
+      })
+    );
+
+    expect(renderer.root.findAllByProps({ 'data-quota-card-mode': 'model' })).toHaveLength(1);
+    expect(renderer.root.findAllByProps({ 'data-quota-model-comparison': 'true' })).toHaveLength(0);
     expect(readText(renderer.root)).toContain('accounts.detail_scope_unknown');
   });
 
@@ -473,6 +503,9 @@ describe('QuotaWindowCard', () => {
     const warnings = renderer.root.findByProps({ 'data-quota-source-warnings': 'true' });
     const text = readText(warnings);
     expect(text).toContain('accounts.detail_quota_snapshot_stale');
-    expect(text).toContain('accounts.detail_scope_unknown');
+    expect(text).not.toContain('accounts.detail_scope_unknown');
+    expect(readText(renderer.root.findByProps({ 'data-quota-model-warning': 'true' }))).toContain(
+      'accounts.detail_scope_unknown'
+    );
   });
 });

@@ -16,9 +16,13 @@ const formatBytes = (value: number | undefined) =>
 const formatCount = (value: number | undefined, locale: string) =>
   Number.isFinite(value) ? Number(value).toLocaleString(locale) : '-';
 
+const normalizeMaintenanceCount = (value: number | undefined) =>
+  Number.isFinite(value) && Number(value) >= 0 ? Number(value) : 0;
+
 export function DatabaseStatusCard({ status, loading, error }: DatabaseStatusCardProps) {
   const { t, i18n } = useTranslation();
   const database = status?.database;
+  const databaseMaintenance = status?.databaseMaintenance;
   const checkpoint = database?.checkpoint;
   const checkpointError = checkpoint?.error;
   const statusError = !database ? error : '';
@@ -44,6 +48,18 @@ export function DatabaseStatusCard({ status, loading, error }: DatabaseStatusCar
     walOverLimit
   );
   const initialLoading = loading && !database;
+  const maintenanceDeferredIndexes = normalizeMaintenanceCount(
+    databaseMaintenance?.deferredIndexes
+  );
+  const maintenanceOfflineJobs = normalizeMaintenanceCount(databaseMaintenance?.offlineJobs);
+  const maintenanceDeferredIndexLabel = t('database_maintenance.query_index_count', {
+    count: maintenanceDeferredIndexes,
+    formattedCount: formatCount(maintenanceDeferredIndexes, i18n.language),
+  });
+  const maintenanceOfflineJobLabel = t('database_maintenance.offline_job_count', {
+    count: maintenanceOfflineJobs,
+    formattedCount: formatCount(maintenanceOfflineJobs, i18n.language),
+  });
 
   const checkpointMode = (() => {
     switch (checkpoint?.mode?.trim().toLowerCase()) {
@@ -147,6 +163,19 @@ export function DatabaseStatusCard({ status, loading, error }: DatabaseStatusCar
           </div>
         ))}
       </div>
+
+      {databaseMaintenance?.required ? (
+        <div className={styles.maintenanceNotice} role="status" aria-live="polite">
+          <strong>{t('system_info.database_maintenance_title')}</strong>
+          <span>
+            {t('system_info.database_maintenance_counts', {
+              indexes: maintenanceDeferredIndexLabel,
+              jobs: maintenanceOfflineJobLabel,
+            })}
+          </span>
+          <span>{t('system_info.database_maintenance_hint')}</span>
+        </div>
+      ) : null}
 
       {checkpointError || statusError ? (
         <div className={styles.errorStack}>

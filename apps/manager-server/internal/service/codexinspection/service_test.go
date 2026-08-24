@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/codexquota"
 	collectorpkg "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
@@ -483,6 +484,59 @@ func TestBuildCodexInspectionQuotaWindowsKeepsGenericFamiliesDistinct(t *testing
 		}
 		seen[window.ID] = true
 	}
+}
+
+func TestBuildCodexInspectionQuotaWindowsAssignsCodexScopes(t *testing.T) {
+	weekly := func(usedPercent float64) map[string]any {
+		return map[string]any{
+			"secondary_window": map[string]any{
+				"used_percent": usedPercent, "limit_window_seconds": 7 * 24 * 60 * 60,
+			},
+		}
+	}
+	windows := buildCodexInspectionQuotaWindows(map[string]any{
+		"rate_limit":             weekly(36),
+		"code_review_rate_limit": weekly(20),
+		"additional_rate_limits": []any{
+			map[string]any{
+				"limit_name": "Fast coding", "metered_feature": "codex_spark", "rate_limit": weekly(0),
+			},
+			map[string]any{
+				"limit_name": "Future Feature", "metered_feature": "future_feature", "rate_limit": weekly(10),
+			},
+		},
+	}, "")
+	byID := make(map[string]model.CodexInspectionQuotaWindow, len(windows))
+	for _, window := range windows {
+		byID[window.ID] = window
+	}
+	assertScope := func(id, kind, key string, models []string, complete bool) {
+		t.Helper()
+		window, ok := byID[id]
+		if !ok || window.ModelScope == nil {
+			t.Fatalf("quota window %q scope missing: %#v", id, windows)
+		}
+		if window.ModelScope.Kind != kind || window.ModelScope.Key != key ||
+			!reflect.DeepEqual(window.ModelScope.Models, models) || window.ModelScope.Complete != complete {
+			t.Fatalf("quota window %q scope = %#v", id, window.ModelScope)
+		}
+	}
+	assertScope("weekly", "family", codexquota.MainScopeKey, nil, true)
+	assertScope("spark-weekly-0", "models", "", []string{codexquota.SparkModelID}, true)
+	if !containsString(byID["spark-weekly-0"].ProviderWindowAliases, "fast-coding-weekly-0") {
+		t.Fatalf("Spark legacy provider aliases = %#v", byID["spark-weekly-0"].ProviderWindowAliases)
+	}
+	assertScope("code-review-weekly", "feature", codexquota.CodeReviewScopeKey, nil, false)
+	assertScope("future-feature-weekly-0", "feature", "future_feature", nil, false)
+}
+
+func containsString(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func TestBuildCodexInspectionQuotaWindowsKeepsDistinctAdditionalFamiliesStableAcrossReorder(t *testing.T) {

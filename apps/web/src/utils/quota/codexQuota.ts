@@ -3,6 +3,7 @@ import type {
   CodexRateLimitInfo,
   CodexUsagePayload,
   CodexUsageWindow,
+  QuotaModelScope,
 } from '@/types';
 import {
   formatCodexResetLabel,
@@ -10,12 +11,34 @@ import {
   type CodexQuotaResetSource,
 } from './formatters';
 import { normalizeNumberValue, normalizePlanType, normalizeStringValue } from './parsers';
+import { normalizeAnalyticsModel } from '@/utils/analyticsModel';
 
 const FIVE_HOUR_SECONDS = 18_000;
 const WEEK_SECONDS = 604_800;
 const MONTH_SECONDS = 2_592_000;
 const MIN_MONTH_SECONDS = 28 * 24 * 60 * 60;
 const MAX_MONTH_SECONDS = 31 * 24 * 60 * 60;
+
+export const CODEX_MAIN_QUOTA_SCOPE_KEY = 'codex_main';
+export const CODEX_SPARK_MODEL_ID = 'gpt-5.3-codex-spark';
+export const CODEX_CODE_REVIEW_SCOPE_KEY = 'code_review';
+export const CODEX_UNKNOWN_REQUEST_SCOPE_KEY = 'request_scope_unknown';
+
+const CODEX_SPARK_PROVIDER_WINDOW_PREFIX = 'spark';
+const CODEX_SPARK_QUOTA_IDENTIFIERS = new Set(['spark', 'codex_spark', 'gpt_5_3_codex_spark']);
+const CODEX_SPARK_PROVIDER_WINDOW_PREFIXES = [
+  'gpt-5-3-codex-spark',
+  'codex-spark',
+  CODEX_SPARK_PROVIDER_WINDOW_PREFIX,
+];
+const CODEX_SPARK_LEGACY_PROVIDER_WINDOW_PREFIXES = ['fast-coding'];
+const CODEX_MAIN_PROVIDER_WINDOW_IDS = new Set([
+  'five-hour',
+  'weekly',
+  'monthly',
+  'primary',
+  'secondary',
+]);
 
 type CodexQuotaWindowMeta = {
   id: string;
@@ -49,12 +72,29 @@ export type CodexQuotaWindowInfo = {
   resetAtMs: number | null;
   resetAccuracy: 'exact' | 'estimated' | 'unknown';
   limitWindowSeconds: number | null;
+  modelScope: QuotaModelScope;
+  providerWindowAliases?: string[];
+};
+
+export type CodexQuotaScopeResolution = {
+  modelScope: QuotaModelScope;
+  providerWindowIdPrefix: string;
+  legacyProviderWindowIdPrefixes?: string[];
+  labelName?: string;
+};
+
+export type CodexUsageModelIdentity = {
+  model?: string | null;
+  analyticsModel?: string | null;
+  requestedModel?: string | null;
+  resolvedModel?: string | null;
 };
 
 export type CodexQuotaWindowBuildOptions = {
   planType?: string | null;
   observedAtMs?: number;
   source?: CodexQuotaResetSource;
+  rateLimitScope?: CodexQuotaScopeResolution;
 };
 
 export const isCodexQuotaWindowExpired = (
@@ -85,6 +125,398 @@ const normalizeWindowId = (raw: string) =>
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
+
+const normalizeFeatureKey = (raw: string | null | undefined) =>
+  (raw ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+
+const codexAdditionalWindowIdentityPart = (window?: CodexUsageWindow | null): string => {
+  if (!window) return 'none';
+  const seconds = getWindowSeconds(window);
+  return seconds === null ? 'unknown' : String(seconds);
+};
+
+const anonymousCodexAdditionalIdentity = (limitItem: CodexAdditionalRateLimit): string => {
+  const rateInfo = limitItem.rate_limit ?? limitItem.rateLimit;
+  return [
+    'additional',
+    'p',
+    codexAdditionalWindowIdentityPart(rateInfo?.primary_window ?? rateInfo?.primaryWindow),
+    's',
+    codexAdditionalWindowIdentityPart(rateInfo?.secondary_window ?? rateInfo?.secondaryWindow),
+  ].join('-');
+};
+
+const codexAdditionalWindowSortKey = (window?: CodexUsageWindow | null): string => {
+  if (!window) return 'none';
+  const values = [
+    getWindowSeconds(window),
+    normalizeNumberValue(window.used_percent ?? window.usedPercent),
+    normalizeNumberValue(window.reset_after_seconds ?? window.resetAfterSeconds),
+    normalizeNumberValue(window.reset_at ?? window.resetAt),
+  ];
+  return values.map((value) => (value === null ? '' : String(value))).join(':');
+};
+
+const codexAdditionalRateLimitSortKey = (rateInfo: CodexRateLimitInfo): string =>
+  [
+    codexAdditionalWindowSortKey(rateInfo.primary_window ?? rateInfo.primaryWindow),
+    codexAdditionalWindowSortKey(rateInfo.secondary_window ?? rateInfo.secondaryWindow),
+    rateInfo.allowed === undefined ? '' : String(rateInfo.allowed),
+    String(rateInfo.limit_reached === true || rateInfo.limitReached === true),
+  ].join('|');
+
+const mainCodexQuotaScope = (): QuotaModelScope => ({
+  kind: 'family',
+  key: CODEX_MAIN_QUOTA_SCOPE_KEY,
+  complete: true,
+});
+
+const sparkCodexQuotaScope = (): QuotaModelScope => ({
+  kind: 'models',
+  models: [CODEX_SPARK_MODEL_ID],
+  complete: true,
+});
+
+const incompleteCodexFeatureScope = (key: string): QuotaModelScope => ({
+  kind: 'feature',
+  key: normalizeFeatureKey(key) || 'unknown',
+  complete: false,
+});
+
+const normalizedUniqueWindowIds = (values: Array<string | null | undefined>): string[] =>
+  Array.from(new Set(values.map((value) => normalizeWindowId(value ?? '')).filter(Boolean))).sort();
+
+export const normalizeCodexModelId = (value: string | null | undefined): string => {
+  return normalizeAnalyticsModel(value ?? '')
+    .trim()
+    .toLowerCase();
+};
+
+export const canonicalizeCodexProviderWindowId = (
+  value: string,
+  windowKind?: string
+): string => {
+  const id = value.trim().toLowerCase();
+  const normalizedWindowKind = windowKind?.trim().toLowerCase().replace(/_/g, '-');
+  if (id === 'primary') return 'five-hour';
+  if (id === 'secondary') return normalizedWindowKind === 'monthly' ? 'monthly' : 'weekly';
+  for (const prefix of CODEX_SPARK_PROVIDER_WINDOW_PREFIXES) {
+    if (id === prefix) return CODEX_SPARK_PROVIDER_WINDOW_PREFIX;
+    if (id.startsWith(`${prefix}-`)) {
+      return `${CODEX_SPARK_PROVIDER_WINDOW_PREFIX}${id.slice(prefix.length)}`;
+    }
+  }
+  return id;
+};
+
+export type CodexProviderWindowIdentity = {
+  id: string;
+  providerWindowAliases?: string[];
+};
+
+const normalizeCodexProviderWindowToken = (value: string): string =>
+  value.trim().toLowerCase();
+
+const inferCodexProviderWindowKind = (value: string): string | undefined => {
+  const id = normalizeCodexProviderWindowToken(value);
+  if (id === 'primary' || id === 'five-hour' || /(?:^|-)five-hour(?:-|$)/.test(id)) {
+    return 'five_hour';
+  }
+  if (id === 'weekly' || /(?:^|-)weekly(?:-|$)/.test(id)) return 'weekly';
+  if (id === 'monthly' || /(?:^|-)monthly(?:-|$)/.test(id)) return 'monthly';
+  return undefined;
+};
+
+const codexProviderWindowIdsEquivalent = (left: string, right: string): boolean => {
+  const leftToken = normalizeCodexProviderWindowToken(left);
+  const rightToken = normalizeCodexProviderWindowToken(right);
+  if (!leftToken || !rightToken) return false;
+  if (leftToken === rightToken) return true;
+
+  const kinds = Array.from(
+    new Set([
+      inferCodexProviderWindowKind(leftToken),
+      inferCodexProviderWindowKind(rightToken),
+      undefined,
+    ])
+  );
+  return kinds.some(
+    (kind) =>
+      canonicalizeCodexProviderWindowId(leftToken, kind) ===
+      canonicalizeCodexProviderWindowId(rightToken, kind)
+  );
+};
+
+const CODEX_AMBIGUOUS_PROVIDER_WINDOW_ALIASES = new Set(['secondary']);
+
+const providerWindowAliasMatches = (
+  active: CodexProviderWindowIdentity,
+  observed: CodexProviderWindowIdentity
+): string[] => {
+  const activeID = normalizeCodexProviderWindowToken(active.id);
+  const observedID = normalizeCodexProviderWindowToken(observed.id);
+  const activeAliases = new Set(
+    (active.providerWindowAliases ?? []).map(normalizeCodexProviderWindowToken).filter(Boolean)
+  );
+  const observedAliases = new Set(
+    (observed.providerWindowAliases ?? []).map(normalizeCodexProviderWindowToken).filter(Boolean)
+  );
+  const matches = new Set<string>();
+
+  activeAliases.forEach((alias) => {
+    if (alias === observedID || observedAliases.has(alias)) matches.add(alias);
+  });
+  observedAliases.forEach((alias) => {
+    if (alias === activeID || activeAliases.has(alias)) matches.add(alias);
+  });
+  return Array.from(matches);
+};
+
+/**
+ * Finds a safe active/observed Codex window match. Provider aliases are only
+ * used after exact/canonical IDs fail, and an alias must identify exactly one
+ * active and one observed window. In particular, `secondary` is deliberately
+ * treated as ambiguous because both weekly and Team monthly windows used it.
+ */
+export const findCodexProviderWindowMatch = (
+  activeWindows: readonly CodexProviderWindowIdentity[],
+  observedWindows: readonly CodexProviderWindowIdentity[],
+  activeIndex: number,
+  usedObserved: ReadonlySet<number> = new Set()
+): number => {
+  const activeWindow = activeWindows[activeIndex];
+  if (!activeWindow) return -1;
+  const available = observedWindows
+    .map((window, index) => ({ window, index }))
+    .filter(({ index }) => !usedObserved.has(index));
+
+  const exactCandidates = available.filter(
+    ({ window }) =>
+      normalizeCodexProviderWindowToken(window.id) ===
+      normalizeCodexProviderWindowToken(activeWindow.id)
+  );
+  if (exactCandidates.length === 1) return exactCandidates[0].index;
+
+  const canonicalCandidates = available.filter(({ window }) =>
+    codexProviderWindowIdsEquivalent(activeWindow.id, window.id)
+  );
+  if (canonicalCandidates.length === 1) {
+    const observed = canonicalCandidates[0].window;
+    const matchingActiveWindows = activeWindows.filter((candidate) =>
+      codexProviderWindowIdsEquivalent(candidate.id, observed.id)
+    );
+    if (matchingActiveWindows.length === 1) return canonicalCandidates[0].index;
+  }
+
+  const aliasCandidates = available
+    .map(({ window, index }) => ({
+      window,
+      index,
+      aliases: providerWindowAliasMatches(activeWindow, window),
+    }))
+    .filter(({ aliases }) =>
+      aliases.some((alias) => !CODEX_AMBIGUOUS_PROVIDER_WINDOW_ALIASES.has(alias))
+    );
+  if (aliasCandidates.length !== 1) return -1;
+
+  const candidate = aliasCandidates[0];
+  const usableAliases = candidate.aliases.filter(
+    (alias) => !CODEX_AMBIGUOUS_PROVIDER_WINDOW_ALIASES.has(alias)
+  );
+  const matchingActiveWindows = activeWindows.filter((window) =>
+    usableAliases.some((alias) => providerWindowAliasMatches(window, candidate.window).includes(alias))
+  );
+  if (matchingActiveWindows.length !== 1) return -1;
+  return candidate.index;
+};
+
+const isCodexSparkProviderWindowId = (value: string): boolean => {
+  const raw = value.trim().toLowerCase();
+  const id = canonicalizeCodexProviderWindowId(raw);
+  return (
+    id === CODEX_SPARK_PROVIDER_WINDOW_PREFIX ||
+    id.startsWith(`${CODEX_SPARK_PROVIDER_WINDOW_PREFIX}-`) ||
+    CODEX_SPARK_LEGACY_PROVIDER_WINDOW_PREFIXES.some(
+      (prefix) => raw === prefix || raw.startsWith(`${prefix}-`)
+    )
+  );
+};
+
+export const isCodexMainQuotaModelScope = (scope: QuotaModelScope | null | undefined): boolean =>
+  scope?.kind === 'family' &&
+  scope.key?.trim().toLowerCase() === CODEX_MAIN_QUOTA_SCOPE_KEY &&
+  scope.complete !== false;
+
+export const isCodexSparkModelScope = (
+  scope: QuotaModelScope | null | undefined
+): boolean =>
+  scope?.kind === 'models' &&
+  scope.complete !== false &&
+  (scope.models ?? []).some((model) => normalizeCodexModelId(model) === CODEX_SPARK_MODEL_ID);
+
+export const canonicalizeCodexProviderWindowIdForScope = (
+  providerWindowId: string,
+  windowKind?: string,
+  modelScope?: QuotaModelScope
+): string => {
+  const raw = providerWindowId.trim().toLowerCase();
+  const canonical = canonicalizeCodexProviderWindowId(raw, windowKind);
+  if (isCodexSparkModelScope(modelScope) && raw.startsWith('fast-coding-')) {
+    return `spark${raw.slice('fast-coding'.length)}`;
+  }
+  return canonical;
+};
+
+const codexMainProviderWindowAliases = (
+  providerWindowId: string,
+  modelScope: QuotaModelScope
+): string[] => {
+  if (!isCodexMainQuotaModelScope(modelScope)) return [];
+  switch (canonicalizeCodexProviderWindowId(providerWindowId)) {
+    case 'five-hour':
+      return ['primary'];
+    case 'weekly':
+    case 'monthly':
+      return ['secondary'];
+    default:
+      return [];
+  }
+};
+
+export const isCodexMainProviderWindowId = (providerWindowId: string): boolean => {
+  const id = canonicalizeCodexProviderWindowId(providerWindowId);
+  return CODEX_MAIN_PROVIDER_WINDOW_IDS.has(id) || id.startsWith('window-');
+};
+
+export const isCodexLegacyAllScopeReplacement = (
+  providerWindowId: string,
+  modelScope: QuotaModelScope
+): boolean => {
+  if (isCodexMainProviderWindowId(providerWindowId)) return false;
+  return modelScope.kind !== 'all' || modelScope.complete === false;
+};
+
+export const isCodexMainQuotaWindow = (window: {
+  id?: string;
+  key?: string;
+  providerWindowId?: string;
+  modelScope?: QuotaModelScope;
+}): boolean => {
+  if (isCodexMainQuotaModelScope(window.modelScope)) return true;
+  // An explicitly incomplete scope must never regain account-wide meaning
+  // merely because a legacy/provider window id happens to be `five-hour`,
+  // `weekly`, or `monthly`.
+  if (window.modelScope?.complete === false) return false;
+  if (window.modelScope && window.modelScope.kind !== 'all') return false;
+  const providerWindowId = canonicalizeCodexProviderWindowId(
+    window.providerWindowId ?? window.id ?? window.key ?? ''
+  );
+  return isCodexMainProviderWindowId(providerWindowId);
+};
+
+export const resolveCodexAdditionalQuotaScope = (
+  limitItem: CodexAdditionalRateLimit
+): CodexQuotaScopeResolution => {
+  const meteredFeature = normalizeStringValue(
+    limitItem?.metered_feature ?? limitItem?.meteredFeature
+  );
+  const limitName = normalizeStringValue(limitItem?.limit_name ?? limitItem?.limitName);
+  const featureKey = normalizeFeatureKey(meteredFeature);
+  const nameKey = normalizeFeatureKey(limitName);
+  if (
+    CODEX_SPARK_QUOTA_IDENTIFIERS.has(featureKey) ||
+    (!featureKey && CODEX_SPARK_QUOTA_IDENTIFIERS.has(nameKey))
+  ) {
+    return {
+      modelScope: sparkCodexQuotaScope(),
+      providerWindowIdPrefix: CODEX_SPARK_PROVIDER_WINDOW_PREFIX,
+      legacyProviderWindowIdPrefixes: normalizedUniqueWindowIds([
+        meteredFeature,
+        limitName,
+        ...CODEX_SPARK_PROVIDER_WINDOW_PREFIXES,
+        ...CODEX_SPARK_LEGACY_PROVIDER_WINDOW_PREFIXES,
+      ]),
+      labelName: limitName ?? meteredFeature ?? CODEX_SPARK_MODEL_ID,
+    };
+  }
+
+  const anonymousIdentity = anonymousCodexAdditionalIdentity(limitItem);
+  const key =
+    featureKey || nameKey || normalizeFeatureKey(anonymousIdentity) || 'additional_unknown';
+  const conflictingKnownName = Boolean(featureKey && CODEX_SPARK_QUOTA_IDENTIFIERS.has(nameKey));
+  return {
+    modelScope: incompleteCodexFeatureScope(key),
+    providerWindowIdPrefix:
+      (conflictingKnownName ? normalizeWindowId(meteredFeature ?? '') : '') ||
+      normalizeWindowId(limitName ?? '') ||
+      normalizeWindowId(meteredFeature ?? '') ||
+      normalizeWindowId(anonymousIdentity) ||
+      'additional-unknown',
+    labelName: limitName ?? meteredFeature ?? anonymousIdentity,
+  };
+};
+
+export const resolveCodexUsageQuotaScope = (
+  identity: CodexUsageModelIdentity
+): CodexQuotaScopeResolution => {
+  const resolvedModel = normalizeCodexModelId(identity.resolvedModel);
+  const effectiveModel =
+    resolvedModel ||
+    normalizeCodexModelId(identity.analyticsModel) ||
+    normalizeCodexModelId(identity.requestedModel) ||
+    normalizeCodexModelId(identity.model);
+  if (effectiveModel === CODEX_SPARK_MODEL_ID) {
+    return {
+      modelScope: sparkCodexQuotaScope(),
+      providerWindowIdPrefix: CODEX_SPARK_PROVIDER_WINDOW_PREFIX,
+      legacyProviderWindowIdPrefixes: CODEX_SPARK_LEGACY_PROVIDER_WINDOW_PREFIXES,
+      labelName: CODEX_SPARK_MODEL_ID,
+    };
+  }
+  if (!effectiveModel) {
+    return {
+      modelScope: incompleteCodexFeatureScope(CODEX_UNKNOWN_REQUEST_SCOPE_KEY),
+      providerWindowIdPrefix: 'request-scope-unknown',
+      labelName: CODEX_UNKNOWN_REQUEST_SCOPE_KEY,
+    };
+  }
+  return { modelScope: mainCodexQuotaScope(), providerWindowIdPrefix: '' };
+};
+
+export const inferCodexQuotaScopeFromProviderWindowId = (
+  providerWindowId: string
+): QuotaModelScope => {
+  const id = canonicalizeCodexProviderWindowId(providerWindowId);
+  if (isCodexMainProviderWindowId(id)) {
+    return mainCodexQuotaScope();
+  }
+  if (isCodexSparkProviderWindowId(providerWindowId)) {
+    return sparkCodexQuotaScope();
+  }
+  if (id === 'code-review' || id.startsWith('code-review-')) {
+    return incompleteCodexFeatureScope(CODEX_CODE_REVIEW_SCOPE_KEY);
+  }
+  const familyMatch = id.match(/^(.*)-(?:five-hour|weekly|monthly)-(\d+)$/);
+  const genericMatch = id.match(/^(.*)-window-/);
+  return incompleteCodexFeatureScope(familyMatch?.[1] ?? genericMatch?.[1] ?? id);
+};
+
+export const isCodexKnownScopedProviderWindowId = (providerWindowId: string): boolean => {
+  const raw = providerWindowId.trim().toLowerCase();
+  const id = canonicalizeCodexProviderWindowId(raw);
+  return (
+    isCodexSparkProviderWindowId(raw) ||
+    id === 'code-review' ||
+    id.startsWith('code-review-') ||
+    CODEX_SPARK_LEGACY_PROVIDER_WINDOW_PREFIXES.some(
+      (prefix) => raw === prefix || raw.startsWith(`${prefix}-`)
+    )
+  );
+};
 
 const formatWindowDuration = (seconds: number | null): string => {
   if (seconds === null || seconds <= 0) return 'unknown';
@@ -207,6 +639,8 @@ const addCodexWindowInfo = (
   id: string,
   labelKey: string,
   labelParams: Record<string, string | number> | undefined,
+  modelScope: QuotaModelScope,
+  providerWindowAliases: string[] | undefined,
   window?: CodexUsageWindow | null,
   limitReached?: boolean,
   allowed?: boolean,
@@ -220,6 +654,9 @@ const addCodexWindowInfo = (
   const usedPercentRaw = getCodexQuotaWindowUsedPercent(window);
   const isLimitReached = Boolean(limitReached) || allowed === false;
   const usedPercent = usedPercentRaw ?? (isLimitReached && resetLabel !== '-' ? 100 : null);
+  const aliases = Array.from(
+    new Set([...(providerWindowAliases ?? []), ...codexMainProviderWindowAliases(id, modelScope)])
+  ).sort();
 
   windows.push({
     id,
@@ -230,6 +667,8 @@ const addCodexWindowInfo = (
     resetAtMs: reset.resetAtMs,
     resetAccuracy: reset.resetAccuracy,
     limitWindowSeconds: getWindowSeconds(window),
+    modelScope,
+    ...(aliases.length ? { providerWindowAliases: aliases } : {}),
   });
 };
 
@@ -246,18 +685,35 @@ const addCodexRateLimitWindows = (
     observedAtMs?: number;
     source?: CodexQuotaResetSource;
     genericIdPrefix?: string;
+    modelScope: QuotaModelScope;
+    providerWindowAliasesById?: ReadonlyMap<string, string[]>;
+    providerWindowAliasPrefixes?: string[];
+    providerWindowAliasBasePrefix?: string;
   }
 ) => {
   const limitReached = limitInfo?.limit_reached ?? limitInfo?.limitReached;
   const allowed = limitInfo?.allowed;
   const classified = pickClassifiedWindows(limitInfo, { teamPlan: options?.teamPlan });
   const added = new Set<CodexUsageWindow>();
+  const aliasesForWindow = (id: string): string[] | undefined => {
+    const explicit = options?.providerWindowAliasesById?.get(id);
+    if (explicit !== undefined) return explicit;
+    const basePrefix = normalizeWindowId(options?.providerWindowAliasBasePrefix ?? '');
+    const aliasPrefixes = (options?.providerWindowAliasPrefixes ?? [])
+      .map((prefix) => normalizeWindowId(prefix))
+      .filter((prefix) => prefix && prefix !== basePrefix);
+    if (!basePrefix || !aliasPrefixes.length || !id.startsWith(basePrefix)) return undefined;
+    const suffix = id.slice(basePrefix.length);
+    return normalizedUniqueWindowIds(aliasPrefixes.map((prefix) => `${prefix}${suffix}`));
+  };
 
   addCodexWindowInfo(
     windows,
     fiveHourMeta.id,
     fiveHourMeta.labelKey,
     genericLabelParams,
+    options?.modelScope ?? incompleteCodexFeatureScope('scope_unknown'),
+    aliasesForWindow(fiveHourMeta.id),
     classified.fiveHourWindow,
     limitReached,
     allowed,
@@ -270,6 +726,8 @@ const addCodexRateLimitWindows = (
     weeklyMeta.id,
     weeklyMeta.labelKey,
     genericLabelParams,
+    options?.modelScope ?? incompleteCodexFeatureScope('scope_unknown'),
+    aliasesForWindow(weeklyMeta.id),
     classified.weeklyWindow,
     limitReached,
     allowed,
@@ -282,6 +740,8 @@ const addCodexRateLimitWindows = (
     monthlyMeta.id,
     monthlyMeta.labelKey,
     genericLabelParams,
+    options?.modelScope ?? incompleteCodexFeatureScope('scope_unknown'),
+    aliasesForWindow(monthlyMeta.id),
     classified.monthlyWindow,
     limitReached,
     allowed,
@@ -300,6 +760,8 @@ const addCodexRateLimitWindows = (
       `${genericIdPrefix ? `${genericIdPrefix}-` : ''}window-${duration}-${index}`,
       genericLabelKey,
       { ...genericLabelParams, duration },
+      options?.modelScope ?? incompleteCodexFeatureScope('scope_unknown'),
+      aliasesForWindow(`${genericIdPrefix ? `${genericIdPrefix}-` : ''}window-${duration}-${index}`),
       window,
       limitReached,
       allowed,
@@ -326,50 +788,128 @@ const addAdditionalRateLimitWindows = (
       normalizeStringValue(limitItem?.limit_name ?? limitItem?.limitName) ??
       meteredFeature ??
       `additional-${index + 1}`;
+    const legacyBaseIdPrefix = normalizeWindowId(limitName) || `additional-${index + 1}`;
+    const scopeResolution = resolveCodexAdditionalQuotaScope(limitItem);
     return [
       {
+        sourceIndex: index,
         rateInfo,
         limitName,
-        baseIdPrefix: normalizeWindowId(limitName) || `additional-${index + 1}`,
+        modelScope: scopeResolution.modelScope,
+        baseIdPrefix:
+          scopeResolution.providerWindowIdPrefix ||
+          normalizeWindowId(limitName) ||
+          `additional-${index + 1}`,
         featureIdPrefix: normalizeWindowId(meteredFeature ?? ''),
+        legacyBaseIdPrefix,
+        sortKey: codexAdditionalRateLimitSortKey(rateInfo),
+        legacyIdPrefixes: scopeResolution.legacyProviderWindowIdPrefixes ?? [],
       },
     ];
   });
   const baseIdPrefixCounts = new Map<string, number>();
+  const legacyBaseIdPrefixCounts = new Map<string, number>();
   families.forEach(({ baseIdPrefix }) => {
     baseIdPrefixCounts.set(baseIdPrefix, (baseIdPrefixCounts.get(baseIdPrefix) ?? 0) + 1);
   });
-  const occurrencesByIdPrefix = new Map<string, number>();
-  families.forEach(({ rateInfo, limitName, baseIdPrefix, featureIdPrefix }) => {
-    const idPrefix =
-      (baseIdPrefixCounts.get(baseIdPrefix) ?? 0) > 1 &&
-      featureIdPrefix &&
-      featureIdPrefix !== baseIdPrefix
-        ? `${baseIdPrefix}--${featureIdPrefix}`
-        : baseIdPrefix;
-    const familyIndex = occurrencesByIdPrefix.get(idPrefix) ?? 0;
-    occurrencesByIdPrefix.set(idPrefix, familyIndex + 1);
-
-    addCodexRateLimitWindows(
-      windows,
-      rateInfo,
-      {
-        id: `${idPrefix}-five-hour-${familyIndex}`,
-        labelKey: 'codex_quota.additional_primary_window',
-      },
-      {
-        id: `${idPrefix}-weekly-${familyIndex}`,
-        labelKey: 'codex_quota.additional_secondary_window',
-      },
-      {
-        id: `${idPrefix}-monthly-${familyIndex}`,
-        labelKey: 'codex_quota.additional_monthly_window',
-      },
-      'codex_quota.additional_generic_window',
-      { name: limitName },
-      { ...options, genericIdPrefix: `${idPrefix}-${familyIndex}` }
+  families.forEach(({ legacyBaseIdPrefix }) => {
+    legacyBaseIdPrefixCounts.set(
+      legacyBaseIdPrefix,
+      (legacyBaseIdPrefixCounts.get(legacyBaseIdPrefix) ?? 0) + 1
     );
   });
+  const resolvedFamilies = families.map((family) => ({
+    ...family,
+    idPrefix:
+      (baseIdPrefixCounts.get(family.baseIdPrefix) ?? 0) > 1 &&
+      family.featureIdPrefix &&
+      family.featureIdPrefix !== family.baseIdPrefix
+        ? `${family.baseIdPrefix}--${family.featureIdPrefix}`
+        : family.baseIdPrefix,
+    legacyIdPrefixes: [
+      ...family.legacyIdPrefixes,
+      (legacyBaseIdPrefixCounts.get(family.legacyBaseIdPrefix) ?? 0) > 1 &&
+      family.featureIdPrefix &&
+      family.featureIdPrefix !== family.legacyBaseIdPrefix
+        ? `${family.legacyBaseIdPrefix}--${family.featureIdPrefix}`
+        : family.legacyBaseIdPrefix,
+    ],
+  }));
+  const familiesByIdPrefix = new Map<string, typeof resolvedFamilies>();
+  resolvedFamilies.forEach((family) => {
+    const group = familiesByIdPrefix.get(family.idPrefix) ?? [];
+    group.push(family);
+    familiesByIdPrefix.set(family.idPrefix, group);
+  });
+  const familyIndexes = new Map<number, number>();
+  familiesByIdPrefix.forEach((group) => {
+    [...group]
+      .sort((left, right) => {
+        if (left.sortKey !== right.sortKey) return left.sortKey.localeCompare(right.sortKey);
+        return left.sourceIndex - right.sourceIndex;
+      })
+      .forEach((family, familyIndex) => familyIndexes.set(family.sourceIndex, familyIndex));
+  });
+  resolvedFamilies.forEach(
+    ({ sourceIndex, rateInfo, limitName, modelScope, idPrefix, legacyIdPrefixes }) => {
+      const familyIndex = familyIndexes.get(sourceIndex) ?? 0;
+      const aliasPrefixes = normalizedUniqueWindowIds(legacyIdPrefixes).filter(
+        (prefix) => prefix !== idPrefix
+      );
+      const providerWindowAliasesById = new Map<string, string[]>();
+      const addAliases = (id: string) => {
+        if (!aliasPrefixes.length || !id.startsWith(idPrefix)) return;
+        const suffix = id.slice(idPrefix.length);
+        providerWindowAliasesById.set(
+          id,
+          aliasPrefixes.map((prefix) => `${prefix}${suffix}`)
+        );
+      };
+      const fiveHourId = `${idPrefix}-five-hour-${familyIndex}`;
+      const weeklyId = `${idPrefix}-weekly-${familyIndex}`;
+      const monthlyId = `${idPrefix}-monthly-${familyIndex}`;
+      addAliases(fiveHourId);
+      addAliases(weeklyId);
+      addAliases(monthlyId);
+      const classified = pickClassifiedWindows(rateInfo, { teamPlan: options?.teamPlan });
+      classified.windows.forEach((window, index) => {
+        if (
+          window === classified.fiveHourWindow ||
+          window === classified.weeklyWindow ||
+          window === classified.monthlyWindow
+        ) {
+          return;
+        }
+        const duration = formatWindowDuration(getWindowSeconds(window));
+        addAliases(`${idPrefix}-${familyIndex}-window-${duration}-${index}`);
+      });
+
+      addCodexRateLimitWindows(
+        windows,
+        rateInfo,
+        {
+          id: fiveHourId,
+          labelKey: 'codex_quota.additional_primary_window',
+        },
+        {
+          id: weeklyId,
+          labelKey: 'codex_quota.additional_secondary_window',
+        },
+        {
+          id: monthlyId,
+          labelKey: 'codex_quota.additional_monthly_window',
+        },
+        'codex_quota.additional_generic_window',
+        { name: limitName },
+        {
+          ...options,
+          genericIdPrefix: `${idPrefix}-${familyIndex}`,
+          modelScope,
+          providerWindowAliasesById,
+        }
+      );
+    }
+  );
 };
 
 export const buildCodexQuotaWindowInfos = (
@@ -385,16 +925,50 @@ export const buildCodexQuotaWindowInfos = (
   const teamPlan = planType === 'team';
   const observedAtMs = options?.observedAtMs ?? Date.now();
   const source = options?.source ?? 'provider_api';
+  const rateLimitScope = options?.rateLimitScope ?? {
+    modelScope: mainCodexQuotaScope(),
+    providerWindowIdPrefix: '',
+  };
+  const scopedRateLimit = Boolean(rateLimitScope.providerWindowIdPrefix);
+  const rateLimitPrefix = normalizeWindowId(rateLimitScope.providerWindowIdPrefix);
+  const rateLimitLabelParams = scopedRateLimit
+    ? { name: rateLimitScope.labelName ?? rateLimitScope.providerWindowIdPrefix }
+    : undefined;
 
   addCodexRateLimitWindows(
     windows,
     rateLimit,
-    CODEX_WINDOW_META.codeFiveHour,
-    CODEX_WINDOW_META.codeWeekly,
-    CODEX_WINDOW_META.codeMonthly,
-    'codex_quota.generic_window',
-    undefined,
-    { teamPlan, observedAtMs, source }
+    scopedRateLimit
+      ? {
+          id: `${rateLimitPrefix}-five-hour-0`,
+          labelKey: 'codex_quota.additional_primary_window',
+        }
+      : CODEX_WINDOW_META.codeFiveHour,
+    scopedRateLimit
+      ? {
+          id: `${rateLimitPrefix}-weekly-0`,
+          labelKey: 'codex_quota.additional_secondary_window',
+        }
+      : CODEX_WINDOW_META.codeWeekly,
+    scopedRateLimit
+      ? {
+          id: `${rateLimitPrefix}-monthly-0`,
+          labelKey: 'codex_quota.additional_monthly_window',
+        }
+      : CODEX_WINDOW_META.codeMonthly,
+    scopedRateLimit ? 'codex_quota.additional_generic_window' : 'codex_quota.generic_window',
+    rateLimitLabelParams,
+    {
+      teamPlan,
+      observedAtMs,
+      source,
+      genericIdPrefix: scopedRateLimit ? `${rateLimitPrefix}-0` : undefined,
+      modelScope: rateLimitScope.modelScope,
+      providerWindowAliasPrefixes: scopedRateLimit
+        ? rateLimitScope.legacyProviderWindowIdPrefixes
+        : undefined,
+      providerWindowAliasBasePrefix: scopedRateLimit ? rateLimitPrefix : undefined,
+    }
   );
   addCodexRateLimitWindows(
     windows,
@@ -404,7 +978,13 @@ export const buildCodexQuotaWindowInfos = (
     CODEX_WINDOW_META.codeReviewMonthly,
     'codex_quota.code_review_generic_window',
     undefined,
-    { teamPlan, observedAtMs, source, genericIdPrefix: 'code-review' }
+    {
+      teamPlan,
+      observedAtMs,
+      source,
+      genericIdPrefix: 'code-review',
+      modelScope: incompleteCodexFeatureScope(CODEX_CODE_REVIEW_SCOPE_KEY),
+    }
   );
   addAdditionalRateLimitWindows(windows, additionalRateLimits, { teamPlan, observedAtMs, source });
 

@@ -256,13 +256,46 @@ After completion, the response-metadata backfill and both rollup workers continu
 
 Historical rollup rebuilding and stale-row cleanup run only after the HTTP listener is available. Startup index preparation is deliberately bounded: Manager Server creates a missing index only when its target table is empty and the index name is not retained by a parked table. Indexes for non-empty tables and retained names are logged as deferred so collector startup is not delayed by a large index build. During a rebuild, queries use the current complete revision or fall back to raw `usage_events`; an interrupted batch resumes from its committed checkpoint after restart. These tasks must not modify or delete `usage_events`.
 
-An upgraded database can retain an old request-monitoring FTS generation after its paired projection rows have been removed in bounded online batches. It can also have deferred indexes for populated tables or an obsolete quota-cooldown identity index that must be replaced offline. In the exceptional case where one legacy quota observation group exceeds the safe online batch limit, the migration enters a failed state and logs `offline cleanup required`; the original snapshot fallback remains available. When the log reports deferred index preparation, `cleanup requires offline finalization`, or `offline cleanup required`, stop every Manager Server process using the database, run the same-version binary once, and then restart the service:
+This listener-first policy lets a large historical database expose HTTP promptly after an upgrade. Until deferred indexes or offline cleanup are complete, however, historical queries can fall back to wider scans and temporary sorts. Manager Server exposes a stable, sanitized, automatically recoverable summary under `databaseMaintenance` in `GET /status`; System Info, the global warning, and Request Monitoring all use the same state:
 
-```bash
-cpa-manager-plus cleanup-derived --db-path /data/usage.sqlite
+```json
+{
+  "databaseMaintenance": {
+    "required": true,
+    "performanceDegraded": true,
+    "deferredIndexes": 10,
+    "offlineJobs": 1,
+    "reasons": ["deferred_indexes", "offline_derived_cleanup"],
+    "command": "cleanup-derived"
+  }
+}
 ```
 
-For a native installation using the default database path, `cpa-manager-plus cleanup-derived` is sufficient. Manager Server holds an operating-system lock at `<absolute-database-path>.manager.lock` for its entire lifetime, and the command refuses to run while that lock is held. The lock file itself is persistent and does not need to be deleted; stop the Manager Server process and retry instead. Symbolic-link aliases resolve to the same lock, while databases with multiple hard links are rejected because SQLite WAL/SHM sidecars cannot safely share those aliases. Back up the SQLite database plus `data.key` before offline maintenance. The command prepares deferred indexes, replaces obsolete derived indexes, completes oversized legacy quota observation groups, removes obsolete derived FTS/projection generations, and leaves `usage_events` intact.
+The maintenance check reads SQLite schema metadata and cleanup-job metadata, plus bounded existence probes for target tables whose indexes are missing. It does not scan or count all of `usage_events`. The global warning refreshes through the same `/status` endpoint with the lightweight `?scope=database-maintenance` view, avoiding the full runtime counters. The `databaseMaintenance` object adds no absolute database path, raw SQL, or index names; the full `/status` response retains its existing fields for compatibility. After offline maintenance completes and Manager Server restarts, it derives the state again from the real database metadata, so `required`, `deferredIndexes`, and `offlineJobs` return to clean automatically without a manual reset.
+
+An upgraded database can retain an old request-monitoring FTS generation after its paired projection rows have been removed in bounded online batches. It can also have deferred indexes for populated tables or an obsolete quota-cooldown identity index that must be replaced offline. In the exceptional case where one legacy quota observation group exceeds the safe online batch limit, the migration is marked `offline_required` and logs `offline cleanup required`; the original snapshot fallback remains available. When logs report deferred index preparation, `cleanup requires offline finalization`, or `offline cleanup required`, or when the UI or `/status` reports unfinished database maintenance, stop every Manager Server process using the database and run the same-version binary once.
+
+Docker Compose:
+
+```bash
+docker compose stop cpa-manager-plus
+
+docker compose run --rm --no-deps \
+  cpa-manager-plus \
+  cleanup-derived --db-path /data/usage.sqlite
+
+docker compose start cpa-manager-plus
+```
+
+Native installation:
+
+```bash
+cpa-manager-plus cleanup-derived
+# Or select the database explicitly
+cpa-manager-plus cleanup-derived --db-path /path/to/usage.sqlite
+```
+
+Manager Server holds an operating-system lock at `<absolute-database-path>.manager.lock` for its entire lifetime, and the command refuses to run while that lock is held. The web UI therefore detects, explains, and shows the steps only; it does not offer an online repair button, spawn the cleanup command, or bypass the process lock. The lock file itself is persistent and does not need to be deleted; stop the Manager Server process and retry instead. Symbolic-link aliases resolve to the same lock, while databases with multiple hard links are rejected because SQLite WAL/SHM sidecars cannot safely share those aliases. Back up the SQLite database plus `data.key` before offline maintenance. The command prepares deferred indexes, replaces obsolete derived indexes, completes oversized legacy quota observation groups, and removes obsolete derived FTS/projection generations. It never deletes, rebuilds, or rewrites authoritative `usage_events`.
 
 See the [July 10, 2026 Performance Optimization Report](./performance-optimization-2026-07-10.md) for the causes, delivery stages, and complete 100k benchmark evidence.
 
@@ -275,7 +308,7 @@ When `USAGE_QUOTA_COOLDOWN_ENABLED`, `USAGE_ACCOUNT_ACTIONS_ENABLED`, or `USAGE_
 | Endpoint                                                         | Purpose                                                                                                      |
 | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
 | `GET /health`                                                    | Health check.                                                                                                |
-| `GET /status`                                                    | Collector, SQLite, event count, and background data-migration progress.                                      |
+| `GET /status`                                                    | Collector, SQLite, event count, background migration, and sanitized database-maintenance state.              |
 | `GET /usage-service/info`                                        | Manager Server mode detection.                                                                               |
 | `GET /usage-service/config`                                      | Read CPAMP Manager Server config.                                                                            |
 | `PUT /usage-service/config`                                      | Save CPAMP config and restart collector if needed.                                                           |

@@ -18,6 +18,7 @@ import {
   formatQuotaResetTimestamp,
 } from '@/features/accounts/model/accountsPagePresentation';
 import { formatUsd } from '@/utils/usage';
+import { isCodexMainQuotaModelScope } from '@/utils/quota/codexQuota';
 import { QuotaWindowCard } from '../QuotaWindowCard';
 import styles from '@/features/accounts/AccountsPage.module.scss';
 
@@ -27,7 +28,9 @@ const isIntervalQuotaWindow = (window: AccountDetailQuotaWindow): boolean =>
   window.windowMode === 'rolling';
 
 const isModelScopedQuotaWindow = (window: AccountDetailQuotaWindow): boolean =>
-  window.modelScope?.kind !== undefined && window.modelScope.kind !== 'all';
+  window.modelScope?.kind !== undefined &&
+  window.modelScope.kind !== 'all' &&
+  !(window.source === 'codex' && isCodexMainQuotaModelScope(window.modelScope));
 
 type MetricTone = 'blue' | 'green' | 'teal' | 'amber';
 

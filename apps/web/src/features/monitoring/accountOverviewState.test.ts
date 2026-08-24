@@ -16,13 +16,17 @@ import {
   normalizeAccountOverviewUiState,
   normalizeAccountSortState,
   resolveAccountDisplayText,
+  resolveMonitoringAccountFocusAction,
   sortAccountRows,
 } from './accountOverviewState';
+import { buildMonitoringAccountRowId } from './model/accountIdentity';
 import type { AuthFileItem } from '@/types';
 
 const createAccountRow = (overrides: Partial<MonitoringAccountRow> = {}): MonitoringAccountRow => ({
   id: overrides.id ?? 'account',
   account: overrides.account ?? 'account@example.com',
+  provider: overrides.provider ?? 'codex',
+  filterValue: overrides.filterValue,
   displayAccount: overrides.displayAccount ?? overrides.account ?? 'account@example.com',
   accountMasked: overrides.accountMasked ?? 'acc***@example.com',
   authLabels: overrides.authLabels ?? [],
@@ -58,17 +62,23 @@ const createEventRow = (overrides: Partial<MonitoringEventRow> = {}): Monitoring
   endpointPath: overrides.endpointPath ?? '/v1/chat/completions',
   sourceKey: overrides.sourceKey ?? 'source-1',
   source: overrides.source ?? 'source-1',
+  sourceIdentity: overrides.sourceIdentity,
+  sourceHashIdentity: overrides.sourceHashIdentity,
   sourceMasked: overrides.sourceMasked ?? 'source-1',
   account: overrides.account ?? 'account@example.com',
+  accountIdentity: overrides.accountIdentity,
   accountMasked: overrides.accountMasked ?? 'acc***@example.com',
   authIndex: overrides.authIndex ?? '1',
+  authIndexIdentity: overrides.authIndexIdentity,
   authIndexMasked: overrides.authIndexMasked ?? '1',
   authLabel: overrides.authLabel ?? 'account@example.com',
+  authLabelIdentity: overrides.authLabelIdentity,
   projectId: overrides.projectId ?? 'project-1',
   apiKeyHash: overrides.apiKeyHash ?? 'api-key-hash',
   apiKeyLabel: overrides.apiKeyLabel ?? 'ak********sh',
   apiKeyMasked: overrides.apiKeyMasked ?? 'ak********sh',
   provider: overrides.provider ?? 'codex',
+  providerIdentity: overrides.providerIdentity,
   planType: overrides.planType ?? 'plus',
   channel: overrides.channel ?? 'default',
   channelHost: overrides.channelHost ?? 'localhost',
@@ -166,6 +176,33 @@ describe('accountOverviewState', () => {
     expect(resolveAccountDisplayText(row, 'full')).toMatchObject({
       primary: 'Primary Channel',
       secondary: 'account@example.com',
+    });
+  });
+
+  it('uses provider metadata to disambiguate same-email account rows', () => {
+    const codex = resolveAccountDisplayText(
+      createAccountRow({
+        account: 'same@example.com',
+        accountMasked: 'sam***@example.com',
+        provider: 'codex',
+        channels: ['Codex'],
+      }),
+      'full'
+    );
+    const antigravity = resolveAccountDisplayText(
+      createAccountRow({
+        account: 'same@example.com',
+        accountMasked: 'sam***@example.com',
+        provider: 'antigravity',
+        channels: ['Antigravity'],
+      }),
+      'full'
+    );
+
+    expect(codex).toMatchObject({ primary: 'same@example.com', secondary: 'Codex' });
+    expect(antigravity).toMatchObject({
+      primary: 'same@example.com',
+      secondary: 'Antigravity',
     });
   });
 
@@ -547,6 +584,70 @@ describe('accountOverviewState', () => {
     expect(accountState?.enabledState).toBe('enabled');
   });
 
+  it('resolves auth state from the row authIndices (provider-scoped by backend grouping)', () => {
+    const authFilesByIndex = new Map<string, AuthFileItem>([
+      [
+        'codex-auth',
+        {
+          name: 'codex.json',
+          type: 'codex',
+          authIndex: 'codex-auth',
+          account: 'same@example.com',
+        },
+      ],
+      [
+        'antigravity-auth',
+        {
+          name: 'antigravity.json',
+          type: 'antigravity',
+          authIndex: 'antigravity-auth',
+          account: 'same@example.com',
+        },
+      ],
+    ]);
+    const states = buildMonitoringAccountAuthStateMap(
+      [
+        createAccountRow({ id: 'codex-row', provider: 'codex', authIndices: ['codex-auth'] }),
+        createAccountRow({
+          id: 'antigravity-row',
+          provider: 'antigravity',
+          authIndices: ['antigravity-auth'],
+        }),
+      ],
+      authFilesByIndex
+    );
+
+    expect(states.get('codex-row')?.files.map((file) => file.name)).toEqual(['codex.json']);
+    expect(states.get('antigravity-row')?.files.map((file) => file.name)).toEqual([
+      'antigravity.json',
+    ]);
+  });
+
+  it('uses row id for focus toggle while preserving filter value as query scope', () => {
+    const codex = createAccountRow({
+      id: 'codex-row',
+      account: 'same@example.com',
+      filterValue: 'auth:codex-auth',
+    });
+    const antigravity = createAccountRow({
+      id: 'antigravity-row',
+      account: 'same@example.com',
+      filterValue: 'auth:antigravity-auth',
+    });
+
+    expect(resolveMonitoringAccountFocusAction(null, codex)).toEqual({
+      type: 'focus',
+      rowId: 'codex-row',
+      filterValue: 'auth:codex-auth',
+    });
+    expect(resolveMonitoringAccountFocusAction('codex-row', antigravity)).toEqual({
+      type: 'focus',
+      rowId: 'antigravity-row',
+      filterValue: 'auth:antigravity-auth',
+    });
+    expect(resolveMonitoringAccountFocusAction('codex-row', codex)).toEqual({ type: 'restore' });
+  });
+
   it('builds account health status from filtered monitoring rows within the selected range', () => {
     const startMs = Date.UTC(2026, 4, 10, 0, 0, 0);
     const endMs = Date.UTC(2026, 4, 17, 0, 0, 0) - 1;
@@ -578,7 +679,13 @@ describe('accountOverviewState', () => {
       }),
     ];
 
-    const result = buildMonitoringAccountStatusDataMap(rows, { startMs, endMs });
+    const result = buildMonitoringAccountStatusDataMap(rows, { startMs, endMs }, [
+      createAccountRow({ id: 'account@example.com' }),
+      createAccountRow({
+        id: 'other@example.com',
+        account: 'other@example.com',
+      }),
+    ]);
     const accountStatus = result.get('account@example.com');
     const otherStatus = result.get('other@example.com');
 
@@ -591,6 +698,74 @@ describe('accountOverviewState', () => {
 
     expect(otherStatus?.totalSuccess).toBe(1);
     expect(otherStatus?.totalFailure).toBe(0);
+  });
+
+  it('keeps same-email account health state isolated by provider row id', () => {
+    const startMs = Date.UTC(2026, 4, 10, 0, 0, 0);
+    const endMs = startMs + 60_000;
+    const result = buildMonitoringAccountStatusDataMap(
+      [
+        createEventRow({
+          id: 'codex-success',
+          timestampMs: startMs,
+          account: 'same@example.com',
+          provider: 'codex',
+          failed: false,
+        }),
+        createEventRow({
+          id: 'antigravity-failure',
+          timestampMs: startMs + 1,
+          account: 'same@example.com',
+          provider: 'antigravity',
+          failed: true,
+        }),
+      ],
+      { startMs, endMs },
+      [
+        createAccountRow({ id: 'codex-row', account: 'same@example.com', provider: 'codex' }),
+        createAccountRow({
+          id: 'antigravity-row',
+          account: 'same@example.com',
+          provider: 'antigravity',
+        }),
+      ]
+    );
+
+    expect(result.get('codex-row')).toMatchObject({ totalSuccess: 1, totalFailure: 0 });
+    expect(result.get('antigravity-row')).toMatchObject({ totalSuccess: 0, totalFailure: 1 });
+  });
+
+  it('maps label-scoped status to the backend row id when display account is enriched', () => {
+    const startMs = Date.UTC(2026, 4, 10, 0, 0, 0);
+    const rowId = buildMonitoringAccountRowId({
+      provider: 'codex',
+      authLabel: 'Shared Label',
+    });
+    const result = buildMonitoringAccountStatusDataMap(
+      [
+        createEventRow({
+          id: 'label-scoped-event',
+          timestampMs: startMs,
+          account: 'metadata@example.com',
+          accountIdentity: '',
+          authLabel: 'Shared Label',
+          authLabelIdentity: 'Shared Label',
+          provider: 'codex',
+          failed: false,
+        }),
+      ],
+      { startMs, endMs: startMs + 60_000 },
+      [
+        createAccountRow({
+          id: rowId,
+          account: 'metadata@example.com',
+          authLabels: ['Shared Label'],
+          provider: 'codex',
+        }),
+      ]
+    );
+
+    expect(result.get(rowId)).toMatchObject({ totalSuccess: 1, totalFailure: 0 });
   });
 
   it('builds 20 idle buckets for empty account health fallback data', () => {
@@ -632,10 +807,14 @@ describe('accountOverviewState', () => {
       }),
     ];
 
-    const result = buildMonitoringAccountStatusDataMap(rows, {
-      startMs: Number.NEGATIVE_INFINITY,
-      endMs,
-    });
+    const result = buildMonitoringAccountStatusDataMap(
+      rows,
+      {
+        startMs: Number.NEGATIVE_INFINITY,
+        endMs,
+      },
+      [createAccountRow({ id: 'account@example.com' })]
+    );
     const accountStatus = result.get('account@example.com');
 
     expect(accountStatus).toBeDefined();

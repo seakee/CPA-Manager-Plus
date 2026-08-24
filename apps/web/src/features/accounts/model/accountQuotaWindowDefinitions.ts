@@ -31,6 +31,7 @@ export interface AccountQuotaWindowDefinition {
   kind: AccountQuotaWindowKind;
   windowMode: QuotaWindowMode;
   modelScope: QuotaModelScope;
+  providerWindowAliases?: string[];
   observationSource: QuotaObservationSource;
   observedAtMs: number | null;
   boundaryAccuracy: AccountQuotaBoundaryAccuracy;
@@ -105,6 +106,7 @@ export const buildAccountQuotaWindowDefinitions = (
         kind: window.kind ?? 'unknown',
         windowMode: window.windowMode ?? 'unknown',
         modelScope: window.modelScope ?? { kind: 'all', complete: false },
+        providerWindowAliases: window.providerWindowAliases,
         observationSource: window.observationSource ?? 'api_query',
         observedAtMs: window.observedAtMs ?? null,
         boundaryAccuracy,

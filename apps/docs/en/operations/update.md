@@ -21,7 +21,33 @@ See [Backup And Restore](./backup.md) for safe procedures. A CPA Management Key 
 - Large historical corrections may continue in the background after the HTTP server starts listening.
 - Account-history or dashboard-hourly rollups may pause during migration. Related pages temporarily fall back to raw events and can be slower until catch-up completes.
 - Do not start a second Manager Server against the same SQLite database or CPA queue to accelerate migration or rollup rebuilds.
-- Use authenticated `GET /status` to inspect migration, collector, and event state.
+- Use authenticated `GET /status` to inspect migration, collector, event, and `databaseMaintenance` state. The global warning, System Info, and Request Monitoring explain when offline maintenance is required.
+
+### If Database Maintenance Is Degraded
+
+Manager Server binds HTTP before running work whose cost grows with historical data. Missing indexes on populated tables and some legacy-derived cleanup are therefore not executed without a bound during startup. This does not mean data is missing, but historical request queries can become noticeably slower or time out until the query indexes are prepared.
+
+Docker Compose:
+
+```bash
+docker compose stop cpa-manager-plus
+
+docker compose run --rm --no-deps \
+  cpa-manager-plus \
+  cleanup-derived --db-path /data/usage.sqlite
+
+docker compose start cpa-manager-plus
+```
+
+Native installation:
+
+```bash
+cpa-manager-plus cleanup-derived
+# Non-default path
+cpa-manager-plus cleanup-derived --db-path /path/to/usage.sqlite
+```
+
+Stop Manager Server first because the offline command requires the exclusive SQLite process lock. The web UI does not run cleanup automatically, spawn a cleanup subprocess, or create large-table indexes online. The global warning reads bounded metadata through `/status?scope=database-maintenance`, so maintenance polling does not scan or count `usage_events`. After the command completes and Manager Server restarts, `/status.databaseMaintenance` recovers from the real metadata automatically. `cleanup-derived` never deletes, rebuilds, or rewrites authoritative `usage_events`.
 
 ## Docker Deployment Created By The Installer
 
@@ -236,6 +262,7 @@ Confirm:
 - `lastConsumedAt`, `lastInsertedAt`, and `eventCount` update normally.
 - Dashboard, Request Monitoring, and Usage Analytics load data.
 - Background migration completes and rollup checkpoints continue advancing in `/status`.
+- `/status.databaseMaintenance.required` is `false`. If it is `true`, inspect the deferred-index and offline-job counts and follow the offline steps above.
 - Reverse-proxied `/management.html`, `/usage-service/*`, and management API paths still route to the correct service.
 
 ## Rollback Principles

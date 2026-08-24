@@ -3,6 +3,9 @@ export const DEMO_API_BASE = 'http://demo.local';
 export const DEMO_MANAGEMENT_KEY = 'demo-management-key';
 export const DEMO_SERVER_VERSION = 'v7.1.18-demo';
 export const DEMO_SERVER_COMMIT = '5bffd1514fba2ca7cbfd13bb6530a6f7d9d72d43';
+export const DEMO_MAINTENANCE_QUERY_KEY = 'maintenance';
+
+export type DemoMaintenanceScenario = 'clean' | 'degraded';
 
 export const formatDemoDate = (input = Date.now()): string => {
   const date = new Date(input);
@@ -57,6 +60,26 @@ const readCurrentHashPathname = (): string => {
   if (!hash) return '/';
   const [pathname = '/'] = hash.split(/[?#]/);
   return normalizePathname(pathname || '/');
+};
+
+// This switch exists only for the frontend demo's visual acceptance path. The
+// production panel never calls the demo fixture that consumes it.
+export const getDemoMaintenanceScenario = (): DemoMaintenanceScenario => {
+  if (typeof window === 'undefined' || !window.location) return 'clean';
+
+  const queries = [typeof window.location.search === 'string' ? window.location.search : ''];
+  const hash =
+    typeof window.location.hash === 'string' ? window.location.hash.replace(/^#/, '') : '';
+  const hashQueryIndex = hash.indexOf('?');
+  if (hashQueryIndex >= 0) {
+    queries.push(hash.slice(hashQueryIndex));
+  }
+
+  for (const query of queries) {
+    const value = new URLSearchParams(query).get(DEMO_MAINTENANCE_QUERY_KEY);
+    if (value?.trim().toLowerCase() === 'degraded') return 'degraded';
+  }
+  return 'clean';
 };
 
 export const setDemoMode = (enabled: boolean): void => {

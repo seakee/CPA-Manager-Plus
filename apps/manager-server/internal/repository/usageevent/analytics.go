@@ -447,6 +447,10 @@ type HeaderSnapshot struct {
 	ID                     int64
 	EventHash              string
 	TimestampMS            int64
+	Model                  string
+	AnalyticsModel         string
+	RequestedModel         string
+	ResolvedModel          string
 	AuthFileSnapshot       string
 	AuthIndex              string
 	AccountSnapshot        string
@@ -2578,6 +2582,10 @@ func (r *repository) LatestHeaderSnapshots(ctx context.Context, sinceMS int64, l
 		id,
 		event_hash,
 		timestamp_ms,
+		coalesce(model, '') as model,
+		`+usageidentity.SQLRequestAnalyticsModelExpression("model", "requested_model")+` as analytics_model,
+		coalesce(requested_model, '') as requested_model,
+		coalesce(resolved_model, '') as resolved_model,
 		coalesce(auth_file_snapshot, '') as auth_file_snapshot,
 		coalesce(auth_index, '') as auth_index,
 		coalesce(account_snapshot, '') as account_snapshot,
@@ -2626,6 +2634,10 @@ select
 	id,
 	event_hash,
 	timestamp_ms,
+	model,
+	analytics_model,
+	requested_model,
+	resolved_model,
 	auth_file_snapshot,
 	auth_index,
 	account_snapshot,
@@ -2658,6 +2670,10 @@ limit ?`, sinceMS, limit)
 			&item.ID,
 			&item.EventHash,
 			&item.TimestampMS,
+			&item.Model,
+			&item.AnalyticsModel,
+			&item.RequestedModel,
+			&item.ResolvedModel,
 			&item.AuthFileSnapshot,
 			&item.AuthIndex,
 			&item.AccountSnapshot,

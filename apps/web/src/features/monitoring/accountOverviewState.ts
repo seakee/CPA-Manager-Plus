@@ -2,6 +2,7 @@ import type { AuthFileItem } from '@/types';
 import type { SourceProviderEnabledState } from '@/types/sourceInfo';
 import { isDisabledAuthFile } from '@/utils/quota';
 import { normalizeRecentRequestAuthIndex, type StatusBarData } from '@/utils/recentRequests';
+import { buildMonitoringAccountRowId, normalizeMonitoringProvider } from './model/accountIdentity';
 import type {
   MonitoringAccountRow,
   MonitoringEventRow,
@@ -75,6 +76,18 @@ export type MonitoringAccountOverviewUiState = {
   sort: AccountSortState;
   cardPagination: MonitoringAccountOverviewCardPaginationState;
 };
+
+export type MonitoringAccountFocusAction =
+  | { type: 'restore' }
+  | { type: 'focus'; rowId: string; filterValue: string };
+
+export const resolveMonitoringAccountFocusAction = (
+  focusedAccountId: string | null,
+  row: Pick<MonitoringAccountRow, 'id' | 'filterValue' | 'account'>
+): MonitoringAccountFocusAction =>
+  focusedAccountId === row.id
+    ? { type: 'restore' }
+    : { type: 'focus', rowId: row.id, filterValue: row.filterValue || row.account };
 
 export type MonitoringAccountAuthState = {
   files: AuthFileItem[];
@@ -226,7 +239,7 @@ const isRedundantAccountLabel = (
 export const resolveAccountDisplayText = (
   row: Pick<
     MonitoringAccountRow,
-    'account' | 'accountMasked' | 'displayAccount' | 'authLabels' | 'channels'
+    'account' | 'accountMasked' | 'displayAccount' | 'authLabels' | 'channels' | 'provider'
   >,
   displayMode: AccountDisplayMode
 ) => {
@@ -244,10 +257,16 @@ export const resolveAccountDisplayText = (
   const primary = primaryIsAccount
     ? firstReadableAccountValue(maskedAccount, fullAccount, configuredPrimary, '-')
     : configuredPrimary;
+  const provider = normalizeMonitoringProvider(row.provider);
+  const providerLabel =
+    row.channels.find(
+      (label) => normalizeMonitoringProvider(label) === provider && hasReadableAccountValue(label)
+    ) || row.provider;
   const secondaryCandidates = primaryIsAccount
     ? [
-        ...row.authLabels.filter((label) => label && label !== primary && label !== fullAccount),
+        providerLabel,
         ...row.channels.filter((label) => label && label !== '-' && label !== primary),
+        ...row.authLabels.filter((label) => label && label !== primary && label !== fullAccount),
       ]
     : [maskedAccount, fullAccount];
   const secondary =
@@ -547,10 +566,24 @@ const buildStatusDataForRows = (
 
 export const buildMonitoringAccountStatusDataMap = (
   rows: MonitoringEventRow[],
-  bounds: MonitoringStatusRangeBounds | null | undefined
+  bounds: MonitoringStatusRangeBounds | null | undefined,
+  accountRows: MonitoringAccountRow[] = []
 ) => {
   const resolvedBounds = resolveMonitoringStatusRangeBounds(rows, bounds);
   const grouped = new Map<string, MonitoringEventRow[]>();
+  const rowIdByFallbackIdentity = new Map<string, string>();
+  accountRows.forEach((row) => {
+    rowIdByFallbackIdentity.set(row.id, row.id);
+    rowIdByFallbackIdentity.set(
+      buildMonitoringAccountRowId({
+        provider: row.provider,
+        account: row.account,
+        authLabel: row.authLabels[0],
+        authIndex: row.authIndices[0],
+      }),
+      row.id
+    );
+  });
 
   if (!resolvedBounds) {
     return new Map<string, StatusBarData>();
@@ -561,10 +594,18 @@ export const buildMonitoringAccountStatusDataMap = (
       return;
     }
 
-    const accountKey = row.account || row.authLabel || row.source;
-    const existing = grouped.get(accountKey) ?? [];
+    const fallbackIdentity = buildMonitoringAccountRowId({
+      provider: row.providerIdentity ?? row.provider,
+      account: row.accountIdentity ?? row.account,
+      authLabel: row.authLabelIdentity ?? row.authLabel,
+      source: row.sourceIdentity ?? row.source,
+      authIndex: row.authIndexIdentity ?? row.authIndex,
+      sourceHash: row.sourceHashIdentity,
+    });
+    const rowId = rowIdByFallbackIdentity.get(fallbackIdentity) || fallbackIdentity;
+    const existing = grouped.get(rowId) ?? [];
     existing.push(row);
-    grouped.set(accountKey, existing);
+    grouped.set(rowId, existing);
   });
 
   return new Map(

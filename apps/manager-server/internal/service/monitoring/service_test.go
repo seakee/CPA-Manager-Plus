@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/codexquota"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
@@ -1210,6 +1211,201 @@ func TestAnalyticsAppliesFilters(t *testing.T) {
 	}
 	if resp.Events == nil || len(resp.Events.Items) != 1 || resp.Events.Items[0].EventHash != "filter-c" {
 		t.Fatalf("api key hash search events = %#v", resp.Events)
+	}
+}
+
+func TestAnalyticsAccountStatsUseProviderScopedLogicalAccountIdentity(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	ctx := context.Background()
+	fromMS := int64(1_778_025_000_000)
+	toMS := fromMS + 60*60*1000
+	events := make([]usage.Event, 0, 214)
+	for index := range 197 {
+		authIndex := "codex-auth-a"
+		if index >= 100 {
+			authIndex = "codex-auth-b"
+		}
+		event := monitoringEvent(
+			fmt.Sprintf("provider-account-codex-%03d", index),
+			fromMS+int64(index+1),
+			"model-x",
+			authIndex,
+			"codex.json",
+			false,
+			10,
+			5,
+			0,
+			0,
+			15,
+			nil,
+		)
+		event.AccountSnapshot = "same@example.com"
+		event.AuthLabelSnapshot = "Shared Account"
+		event.AuthProviderSnapshot = "codex"
+		event.Provider = "codex"
+		events = append(events, event)
+	}
+	for index := range 17 {
+		event := monitoringEvent(
+			fmt.Sprintf("provider-account-antigravity-%03d", index),
+			fromMS+int64(1_000+index),
+			"model-x",
+			"antigravity-auth",
+			"antigravity.json",
+			false,
+			20,
+			10,
+			0,
+			0,
+			30,
+			nil,
+		)
+		event.AccountSnapshot = "same@example.com"
+		event.AuthLabelSnapshot = "Shared Account"
+		event.AuthProviderSnapshot = ""
+		event.Provider = "antigravity"
+		events = append(events, event)
+	}
+	if _, err := db.InsertEvents(ctx, events); err != nil {
+		t.Fatalf("insert provider-scoped account events: %v", err)
+	}
+
+	run := func(t *testing.T, providers []string, wantProvider string, wantCalls int64) Response {
+		t.Helper()
+		resp, err := New(db).Analytics(ctx, Request{
+			FromMS:  fromMS,
+			ToMS:    toMS,
+			Filters: Filters{Providers: providers},
+			Include: Include{
+				Summary:         true,
+				AccountStats:    true,
+				FilterOptions:   true,
+				FilterSelectors: true,
+			},
+		})
+		if err != nil {
+			t.Fatalf("analytics providers=%v: %v", providers, err)
+		}
+		if resp.Summary == nil || resp.Summary.TotalCalls != wantCalls {
+			t.Fatalf("summary providers=%v = %#v, want calls=%d", providers, resp.Summary, wantCalls)
+		}
+		if wantProvider != "" {
+			if len(resp.AccountStats) != 1 {
+				t.Fatalf("account stats providers=%v = %#v", providers, resp.AccountStats)
+			}
+			row := resp.AccountStats[0]
+			if row.AuthProviderSnapshot != wantProvider || row.Calls != wantCalls || len(row.Models) != 1 || row.Models[0].Calls != wantCalls {
+				t.Fatalf("account row providers=%v = %#v", providers, row)
+			}
+		}
+		return resp
+	}
+
+	resp := run(t, nil, "", 214)
+	if len(resp.AccountStats) != 2 {
+		t.Fatalf("provider-scoped account stats = %#v, want two rows", resp.AccountStats)
+	}
+	byProvider := make(map[string]AccountStatRow, len(resp.AccountStats))
+	for _, row := range resp.AccountStats {
+		if _, exists := byProvider[row.AuthProviderSnapshot]; exists {
+			t.Fatalf("duplicate provider bucket %q: %#v", row.AuthProviderSnapshot, resp.AccountStats)
+		}
+		byProvider[row.AuthProviderSnapshot] = row
+	}
+	codex := byProvider["codex"]
+	antigravity := byProvider["antigravity"]
+	if codex.Calls != 197 || !slices.Equal(codex.AuthIndices, []string{"codex-auth-a", "codex-auth-b"}) || len(codex.Models) != 1 || codex.Models[0].Calls != 197 {
+		t.Fatalf("codex account row = %#v", codex)
+	}
+	if antigravity.Calls != 17 || !slices.Equal(antigravity.AuthIndices, []string{"antigravity-auth"}) || len(antigravity.Models) != 1 || antigravity.Models[0].Calls != 17 {
+		t.Fatalf("antigravity account row = %#v", antigravity)
+	}
+	if codex.ID == antigravity.ID || codex.AccountSnapshot != antigravity.AccountSnapshot {
+		t.Fatalf("provider-scoped ids/accounts = codex:%#v antigravity:%#v", codex, antigravity)
+	}
+	if resp.FilterOptions == nil || len(resp.FilterOptions.AccountStats) != 2 {
+		t.Fatalf("provider-scoped account selectors = %#v", resp.FilterOptions)
+	}
+
+	run(t, []string{"codex"}, "codex", 197)
+	run(t, []string{"antigravity"}, "antigravity", 17)
+}
+
+func TestAnalyticsAccountStatsProviderScopeFallbackIdentity(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	ctx := context.Background()
+	fromMS := int64(1_778_045_000_000)
+	toMS := fromMS + 60*60*1000
+	events := []usage.Event{
+		monitoringEvent("provider-label-codex", fromMS+1_000, "model-x", "codex-auth", "codex.json", false, 1, 1, 0, 0, 2, nil),
+		monitoringEvent("provider-label-antigravity", fromMS+2_000, "model-x", "antigravity-auth", "antigravity.json", false, 1, 1, 0, 0, 2, nil),
+	}
+	for index := range events {
+		events[index].AccountSnapshot = ""
+		events[index].AuthLabelSnapshot = "Shared Label"
+	}
+	events[0].AuthProviderSnapshot = "codex"
+	events[0].Provider = "codex"
+	events[1].AuthProviderSnapshot = ""
+	events[1].Provider = "antigravity"
+	if _, err := db.InsertEvents(ctx, events); err != nil {
+		t.Fatalf("insert provider label events: %v", err)
+	}
+
+	resp, err := New(db).Analytics(ctx, Request{
+		FromMS:  fromMS,
+		ToMS:    toMS,
+		Include: Include{AccountStats: true, FilterOptions: true, FilterSelectors: true},
+	})
+	if err != nil {
+		t.Fatalf("analytics: %v", err)
+	}
+	if len(resp.AccountStats) != 2 || resp.AccountStats[0].ID == resp.AccountStats[1].ID {
+		t.Fatalf("provider-scoped label account stats = %#v", resp.AccountStats)
+	}
+	if resp.FilterOptions == nil || len(resp.FilterOptions.AccountStats) != 2 {
+		t.Fatalf("provider-scoped label selectors = %#v", resp.FilterOptions)
+	}
+}
+
+func TestBuildAccountStatsDoesNotMergeProviderAliasesAcrossMonitoringIdentity(t *testing.T) {
+	stats := []store.AccountModelStat{
+		{
+			AccountSnapshot:      "same@example.com",
+			AuthProviderSnapshot: "x-ai",
+			AuthIndex:            "xai-auth-a",
+			Model:                "grok-model",
+			Calls:                1,
+			SuccessCalls:         1,
+			TotalTokens:          10,
+		},
+		{
+			AccountSnapshot:      "same@example.com",
+			AuthProviderSnapshot: "grok",
+			AuthIndex:            "xai-auth-b",
+			Model:                "grok-model",
+			Calls:                1,
+			SuccessCalls:         1,
+			TotalTokens:          20,
+		},
+	}
+
+	rows := buildAccountStats(stats, nil)
+	// Monitoring identity deliberately keeps x-ai and grok distinct (no alias
+	// folding); the persisted Account History contract (usageidentity) still
+	// folds them, but monitoring account identity does not.
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 distinct monitoring account rows, got %d: %#v", len(rows), rows)
+	}
+	if rows[0].ID == rows[1].ID {
+		t.Fatalf("expected distinct monitoring account ids, got duplicate %q", rows[0].ID)
+	}
+	providers := map[string]bool{}
+	for _, row := range rows {
+		providers[row.AuthProviderSnapshot] = true
+	}
+	if !providers["x-ai"] || !providers["grok"] {
+		t.Fatalf("expected x-ai and grok to remain distinct, got %#v", providers)
 	}
 }
 
@@ -2724,8 +2920,157 @@ func TestAccountWindowUsageSeparatesPeriodsAndAppliesModelScopeAcrossOverlapping
 	if resp.Items[3].RequestKey != "exact-billing-model" || resp.Items[3].TotalRequests != 1 || resp.Items[3].ScopeMatchStatus != "complete" {
 		t.Fatalf("exact billing-model scope = %#v", resp.Items[3])
 	}
-	if resp.Items[4].RequestKey != "exact-unmatched" || resp.Items[4].Matched || resp.Items[4].ScopeMatchStatus != "unmatched" {
+	if resp.Items[4].RequestKey != "exact-unmatched" || resp.Items[4].Matched || resp.Items[4].ScopeMatchStatus != "complete" {
 		t.Fatalf("unmatched exact scope = %#v", resp.Items[4])
+	}
+}
+
+func TestAccountWindowUsageScopeCompletenessCompatibility(t *testing.T) {
+	tests := []struct {
+		name         string
+		payload      string
+		wantKind     string
+		wantComplete bool
+		wantValid    bool
+	}{
+		{name: "omitted legacy scope", payload: `{}`, wantKind: "all", wantComplete: true, wantValid: true},
+		{name: "legacy all without complete", payload: `{"model_scope":{"kind":"all"}}`, wantKind: "all", wantComplete: true, wantValid: true},
+		{name: "legacy models without complete", payload: `{"model_scope":{"kind":"models","models":["gpt-5.6-sol"]}}`, wantKind: "models", wantComplete: true, wantValid: true},
+		{name: "nested scope metadata remains forward compatible", payload: `{"model_scope":{"kind":"all","future_scope_metadata":{"source":"new-client"}}}`, wantKind: "all", wantComplete: true, wantValid: true},
+		{name: "feature defaults incomplete", payload: `{"model_scope":{"kind":"feature","key":"future_feature"}}`, wantKind: "feature", wantComplete: false, wantValid: true},
+		{name: "explicit incomplete all fails closed", payload: `{"model_scope":{"kind":"all","complete":false}}`, wantKind: "all", wantComplete: false, wantValid: true},
+		{name: "explicit incomplete models fail closed", payload: `{"model_scope":{"kind":"models","models":["gpt-5.6-sol"],"complete":false}}`, wantKind: "models", wantComplete: false, wantValid: true},
+		{name: "explicit empty scope is invalid", payload: `{"model_scope":{}}`, wantValid: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var target AccountWindowUsageTarget
+			if err := json.Unmarshal([]byte(test.payload), &target); err != nil {
+				t.Fatalf("unmarshal target: %v", err)
+			}
+			provided := target.ModelScopeProvided ||
+				strings.TrimSpace(target.ModelScope.Kind) != "" ||
+				strings.TrimSpace(target.ModelScope.Key) != "" ||
+				len(target.ModelScope.Models) > 0 || target.ModelScope.Complete
+			completeSet := target.ModelScopeCompleteSet || target.ModelScope.Complete
+			scope := normalizeAccountWindowModelScope(target.ModelScope, provided, completeSet)
+			if !test.wantValid {
+				if scope.Kind != "" {
+					t.Fatalf("scope = %#v, want invalid", scope)
+				}
+				return
+			}
+			if scope.Kind != test.wantKind || scope.Complete != test.wantComplete {
+				t.Fatalf("scope = %#v, want kind=%q complete=%v", scope, test.wantKind, test.wantComplete)
+			}
+		})
+	}
+}
+
+func TestAccountWindowUsageIsolatesCodexMainSparkAndUnknownFeatureScopes(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	ctx := context.Background()
+	baseMS := int64(1_700_100_500_000)
+	events := []usage.Event{
+		monitoringEvent("codex-main-direct", baseMS+1_000, "gpt-5.6-sol", "auth-1", "source-a", false, 60, 40, 0, 0, 100, nil),
+		monitoringEvent("codex-main-alias", baseMS+2_000, "my-codex", "auth-1", "source-a", false, 180, 120, 0, 0, 300, nil),
+		monitoringEvent("codex-spark-direct", baseMS+3_000, codexquota.SparkModelID, "auth-1", "source-a", false, 120, 80, 0, 0, 200, nil),
+		monitoringEvent("codex-spark-alias", baseMS+4_000, "my-spark", "auth-1", "source-a", false, 240, 160, 0, 0, 400, nil),
+	}
+	events[1].RequestedModel = "my-codex"
+	events[1].ResolvedModel = "gpt-5.6-sol"
+	events[3].RequestedModel = "my-spark"
+	events[3].ResolvedModel = codexquota.SparkModelID
+	for index := range events {
+		events[index].AccountSnapshot = "quota@example.com"
+		events[index].AuthFileSnapshot = "codex.json"
+		events[index].AuthProviderSnapshot = "codex"
+	}
+	if _, err := db.InsertEvents(ctx, events); err != nil {
+		t.Fatalf("insert scoped Codex events: %v", err)
+	}
+
+	target := func(requestKey string, fromMS, toMS int64, scope AccountWindowModelScope) AccountWindowUsageTarget {
+		return AccountWindowUsageTarget{
+			RequestKey: requestKey, RowKey: "row-1", ProviderWindowID: requestKey,
+			Period: "current", FromMS: fromMS, ToMS: toMS, ModelScope: scope,
+			AccountSnapshot: "quota@example.com", AuthFileSnapshot: "codex.json",
+			AuthProviderSnapshot: "codex", AuthIndex: "auth-1", Source: "source-a",
+		}
+	}
+	incompleteTarget := func(requestKey string, scope AccountWindowModelScope) AccountWindowUsageTarget {
+		value := target(requestKey, baseMS, baseMS+5_000, scope)
+		value.ModelScopeCompleteSet = true
+		return value
+	}
+	response, err := New(db).AccountWindowUsage(ctx, AccountWindowUsageRequest{Windows: []AccountWindowUsageTarget{
+		target("main", baseMS, baseMS+5_000, AccountWindowModelScope{Kind: "family", Key: codexquota.MainScopeKey, Complete: true}),
+		target("spark", baseMS, baseMS+5_000, AccountWindowModelScope{Kind: "models", Models: []string{codexquota.SparkModelID}, Complete: true}),
+		target("spark-zero", baseMS, baseMS+2_500, AccountWindowModelScope{Kind: "models", Models: []string{codexquota.SparkModelID}, Complete: true}),
+		incompleteTarget("future-feature", AccountWindowModelScope{Kind: "feature", Key: "future_feature"}),
+		incompleteTarget("future-feature-models", AccountWindowModelScope{Kind: "feature", Key: "future_feature", Models: []string{"gpt-5.6-sol"}}),
+		incompleteTarget("incomplete-all", AccountWindowModelScope{Kind: "all"}),
+	}})
+	if err != nil {
+		t.Fatalf("account window usage: %v", err)
+	}
+	if len(response.Items) != 6 {
+		t.Fatalf("items = %#v", response.Items)
+	}
+	if item := response.Items[0]; !item.Matched || item.TotalRequests != 2 || item.TotalTokens != 400 || item.ScopeMatchStatus != "complete" {
+		t.Fatalf("main Codex usage = %#v", item)
+	}
+	if item := response.Items[1]; !item.Matched || item.TotalRequests != 2 || item.TotalTokens != 600 || item.ScopeMatchStatus != "complete" {
+		t.Fatalf("Spark usage = %#v", item)
+	}
+	if item := response.Items[2]; item.Matched || item.SyncStatus != "empty" || item.TotalRequests != 0 || item.TotalTokens != 0 || item.TotalCost != 0 || item.ScopeMatchStatus != "complete" {
+		t.Fatalf("unused Spark window = %#v", item)
+	}
+	if item := response.Items[3]; item.Matched || item.SyncStatus != "empty" || item.TotalRequests != 0 || item.TotalTokens != 0 || item.TotalCost != 0 || item.ScopeMatchStatus != "unmatched" {
+		t.Fatalf("unknown feature usage = %#v", item)
+	}
+	for _, index := range []int{4, 5} {
+		if item := response.Items[index]; item.Matched || item.SyncStatus != "empty" || item.TotalRequests != 0 || item.TotalTokens != 0 || item.TotalCost != 0 || item.ScopeMatchStatus != "unmatched" {
+			t.Fatalf("incomplete scope usage = %#v", item)
+		}
+	}
+}
+
+func TestAccountWindowUsagePrefersResolvedBillingIdentityOverSparkShapedRequestAlias(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	ctx := context.Background()
+	baseMS := int64(1_700_100_750_000)
+	event := monitoringEvent("codex-reverse-alias", baseMS+1_000, codexquota.SparkModelID, "auth-1", "source-a", false, 60, 40, 0, 0, 100, nil)
+	event.RequestedModel = codexquota.SparkModelID
+	event.ResolvedModel = "gpt-5.6-sol"
+	event.AccountSnapshot = "reverse-alias@example.com"
+	event.AuthFileSnapshot = "codex.json"
+	event.AuthProviderSnapshot = "codex"
+	if _, err := db.InsertEvents(ctx, []usage.Event{event}); err != nil {
+		t.Fatalf("insert reverse alias event: %v", err)
+	}
+
+	target := func(requestKey string, scope AccountWindowModelScope) AccountWindowUsageTarget {
+		return AccountWindowUsageTarget{
+			RequestKey: requestKey, RowKey: "row-1", ProviderWindowID: requestKey,
+			Period: "current", FromMS: baseMS, ToMS: baseMS + 2_000, ModelScope: scope,
+			AccountSnapshot: "reverse-alias@example.com", AuthFileSnapshot: "codex.json",
+			AuthProviderSnapshot: "codex", AuthIndex: "auth-1", Source: "source-a",
+		}
+	}
+	response, err := New(db).AccountWindowUsage(ctx, AccountWindowUsageRequest{Windows: []AccountWindowUsageTarget{
+		target("main", AccountWindowModelScope{Kind: "family", Key: codexquota.MainScopeKey, Complete: true}),
+		target("spark", AccountWindowModelScope{Kind: "models", Models: []string{codexquota.SparkModelID}, Complete: true}),
+	}})
+	if err != nil {
+		t.Fatalf("account window usage: %v", err)
+	}
+	if item := response.Items[0]; !item.Matched || item.TotalRequests != 1 || item.TotalTokens != 100 || item.ScopeMatchStatus != "complete" {
+		t.Fatalf("main reverse alias usage = %#v", item)
+	}
+	if item := response.Items[1]; item.Matched || item.TotalRequests != 0 || item.TotalTokens != 0 || item.ScopeMatchStatus != "complete" {
+		t.Fatalf("spark reverse alias usage = %#v", item)
 	}
 }
 

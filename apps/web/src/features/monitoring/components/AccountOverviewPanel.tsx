@@ -66,11 +66,11 @@ type AccountOverviewPanelProps = {
   accountSort: AccountSortState;
   accountSortOptions: ReadonlyArray<SelectOption>;
   expandedAccounts: Record<string, boolean>;
-  focusedAccount: string | null;
+  focusedAccountId: string | null;
   accountAuthStateByRowId: ReadonlyMap<string, MonitoringAccountAuthState>;
   accountStatusDataByRowId: ReadonlyMap<string, StatusBarData>;
   emptyAccountStatusData: StatusBarData;
-  accountQuotaStates: Record<string, AccountQuotaState>;
+  accountQuotaStatesByRowId: Record<string, AccountQuotaState>;
   accountPageSize: number;
   accountPageSizeOptions: readonly number[];
   accountOverviewScopeText: string;
@@ -85,8 +85,8 @@ type AccountOverviewPanelProps = {
   onModeChange: (mode: MonitoringAccountOverviewMode) => void;
   onAccountDisplayModeChange: (mode: AccountDisplayMode) => void;
   onAccountSort: (sortKey: AccountSortKey) => void;
-  onLoadAccountQuota: (account: string, force: boolean) => void | Promise<void>;
-  onToggleExpanded: (rowId: string, account: string) => void;
+  onLoadAccountQuota: (rowId: string, force: boolean) => void | Promise<void>;
+  onToggleExpanded: (rowId: string) => void;
   onFocusAccount: (row: MonitoringAccountRow) => void;
   onPageChange: (page: number) => void;
   onPageSizeChange: (pageSize: number) => void;
@@ -123,13 +123,7 @@ const getAccountColumnInfo = (columnKey: string, t: TFunction) => {
   return '';
 };
 
-function AccountColumnLabel({
-  column,
-  t,
-}: {
-  column: AccountOverviewColumn;
-  t: TFunction;
-}) {
+function AccountColumnLabel({ column, t }: { column: AccountOverviewColumn; t: TFunction }) {
   const info = getAccountColumnInfo(column.key, t);
   const labelTitle = column.fullLabel ?? column.label;
 
@@ -258,11 +252,11 @@ export function AccountOverviewPanel({
   accountSort,
   accountSortOptions,
   expandedAccounts,
-  focusedAccount,
+  focusedAccountId,
   accountAuthStateByRowId,
   accountStatusDataByRowId,
   emptyAccountStatusData,
-  accountQuotaStates,
+  accountQuotaStatesByRowId,
   accountPageSize,
   accountPageSizeOptions,
   accountOverviewScopeText,
@@ -364,7 +358,7 @@ export function AccountOverviewPanel({
             <tbody>
               {pagination.pageItems.map((row) => {
                 const isExpanded = Boolean(expandedAccounts[row.id]);
-                const isFocused = focusedAccount === row.account;
+                const isFocused = focusedAccountId === row.id;
                 const authState = accountAuthStateByRowId.get(row.id) ?? EMPTY_ACCOUNT_AUTH_STATE;
                 const statusTone = getAccountStatusTone(authState);
                 const summaryMetrics = buildAccountSummaryMetrics(row, hasPrices, locale, t);
@@ -381,7 +375,7 @@ export function AccountOverviewPanel({
                   {
                     key: 'refresh-quota',
                     label: t('monitoring.account_overview_row_menu_refresh_quota'),
-                    onClick: () => void onLoadAccountQuota(row.account, true),
+                    onClick: () => void onLoadAccountQuota(row.id, true),
                   },
                 ];
 
@@ -392,7 +386,7 @@ export function AccountOverviewPanel({
                         <AccountSummaryPrimary
                           row={row}
                           expanded={isExpanded}
-                          onToggle={() => onToggleExpanded(row.id, row.account)}
+                          onToggle={() => onToggleExpanded(row.id)}
                           accountDisplayMode={accountDisplayMode}
                           statusTone={statusTone}
                         />
@@ -445,8 +439,8 @@ export function AccountOverviewPanel({
                             locale={locale}
                             t={t}
                             summaryMetrics={summaryMetrics}
-                            quotaState={accountQuotaStates[row.account]}
-                            onRefreshQuota={() => void onLoadAccountQuota(row.account, true)}
+                            quotaState={accountQuotaStatesByRowId[row.id]}
+                            onRefreshQuota={() => void onLoadAccountQuota(row.id, true)}
                             variant="table"
                           />
                         </td>
@@ -478,13 +472,13 @@ export function AccountOverviewPanel({
                 t={t}
                 accountDisplayMode={accountDisplayMode}
                 isExpanded={Boolean(expandedAccounts[row.id])}
-                isFocused={focusedAccount === row.account}
+                isFocused={focusedAccountId === row.id}
                 statusData={accountStatusDataByRowId.get(row.id) ?? emptyAccountStatusData}
                 scopeText={accountOverviewScopeText}
-                quotaState={accountQuotaStates[row.account]}
-                onToggle={() => onToggleExpanded(row.id, row.account)}
+                quotaState={accountQuotaStatesByRowId[row.id]}
+                onToggle={() => onToggleExpanded(row.id)}
                 onFocus={() => onFocusAccount(row)}
-                onRefreshQuota={() => void onLoadAccountQuota(row.account, true)}
+                onRefreshQuota={() => void onLoadAccountQuota(row.id, true)}
               />
             );
           })}

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { AuthFileItem, CodexQuotaState } from '@/types';
 import type { UsageHeaderSnapshot } from '@/services/api/usageService';
 import { formatQuotaResetTime } from '@/utils/quota/formatters';
+import { CODEX_SPARK_MODEL_ID } from '@/utils/quota/codexQuota';
 import {
   authFileMatchesCodexStatusFilter,
   buildAuthFileCodexInspectionMap,
@@ -33,6 +34,9 @@ const codexFile = (overrides: Partial<AuthFileItem> = {}): AuthFileItem => ({
   ...overrides,
 });
 
+const CODEX_MAIN_MODEL = 'gpt-5.6-sol';
+const CODEX_MAIN_SCOPE = { kind: 'family', key: 'codex_main', complete: true } as const;
+
 const codexQuota = (overrides: Partial<CodexQuotaState> = {}): CodexQuotaState => ({
   status: 'success',
   windows: [
@@ -42,6 +46,7 @@ const codexQuota = (overrides: Partial<CodexQuotaState> = {}): CodexQuotaState =
       usedPercent: 10,
       resetLabel: '06/01 17:00',
       limitWindowSeconds: 18_000,
+      modelScope: CODEX_MAIN_SCOPE,
     },
     {
       id: 'weekly',
@@ -49,6 +54,7 @@ const codexQuota = (overrides: Partial<CodexQuotaState> = {}): CodexQuotaState =
       usedPercent: 100,
       resetLabel: '06/04 12:00',
       limitWindowSeconds: 604_800,
+      modelScope: CODEX_MAIN_SCOPE,
     },
   ],
   ...overrides,
@@ -468,6 +474,7 @@ describe('auth file Codex status helpers', () => {
     const usageLimitSnapshot: UsageHeaderSnapshot = {
       event_hash: 'usage-limit',
       timestamp_ms: 1_700_000_000_000,
+      model: CODEX_MAIN_MODEL,
       response_metadata: {
         quota: {
           rate_limit_reached_type: 'workspace_member_credits_depleted',
@@ -496,6 +503,7 @@ describe('auth file Codex status helpers', () => {
       const status = getAuthFileCodexStatus(codexFile(), undefined, undefined, {
         event_hash: `quota-error-${errorCode}`,
         timestamp_ms: 1_700_000_000_000,
+        model: CODEX_MAIN_MODEL,
         header_error_kind: 'rate_limit',
         header_error_code: errorCode,
       });
@@ -505,10 +513,40 @@ describe('auth file Codex status helpers', () => {
     }
   );
 
+  it('does not promote Spark-only quota headers to account credential status', () => {
+    const status = getAuthFileCodexStatus(codexFile(), undefined, undefined, {
+      event_hash: 'spark-quota-error',
+      timestamp_ms: 1_700_000_000_000,
+      model: CODEX_SPARK_MODEL_ID,
+      header_error_kind: 'rate_limit',
+      header_error_code: 'insufficient_quota',
+    });
+
+    expect(status.isQuotaLimited).toBe(false);
+    expect(status.badges.map((badge) => badge.kind)).not.toContain('observed_quota');
+    expect(status.badges.map((badge) => badge.kind)).not.toContain('observed_error');
+  });
+
+  it('does not promote quota metadata without model identity to account credential status', () => {
+    const status = getAuthFileCodexStatus(codexFile(), undefined, undefined, {
+      event_hash: 'unknown-scope-quota-error',
+      timestamp_ms: 1_700_000_000_000,
+      header_quota_used_percent: 100,
+      header_quota_recover_at_ms: 1_700_000_060_000,
+      header_error_kind: 'rate_limit',
+      header_error_code: 'insufficient_quota',
+    });
+
+    expect(status.isQuotaLimited).toBe(false);
+    expect(status.badges.map((badge) => badge.kind)).not.toContain('observed_quota');
+    expect(status.badges.map((badge) => badge.kind)).not.toContain('observed_error');
+  });
+
   it('uses observed reached window metadata for specific quota status filters', () => {
     const usageLimitSnapshot: UsageHeaderSnapshot = {
       event_hash: 'usage-limit-weekly',
       timestamp_ms: 1_700_000_000_000,
+      model: CODEX_MAIN_MODEL,
       response_metadata: {
         quota: {
           rate_limit_reached_type: 'secondary',
@@ -536,6 +574,7 @@ describe('auth file Codex status helpers', () => {
     const usageLimitSnapshot: UsageHeaderSnapshot = {
       event_hash: 'usage-limit-five-hour-under-limit',
       timestamp_ms: 1_700_000_000_000,
+      model: CODEX_MAIN_MODEL,
       response_metadata: {
         quota: {
           rate_limit_reached_type: 'primary',
@@ -567,6 +606,7 @@ describe('auth file Codex status helpers', () => {
     const usageLimitSnapshot: UsageHeaderSnapshot = {
       event_hash: 'usage-limit-weekly-under-limit',
       timestamp_ms: 1_700_000_000_000,
+      model: CODEX_MAIN_MODEL,
       response_metadata: {
         quota: {
           rate_limit_reached_type: 'secondary',
@@ -598,6 +638,7 @@ describe('auth file Codex status helpers', () => {
     const usageLimitSnapshot: UsageHeaderSnapshot = {
       event_hash: 'usage-limit-monthly-under-limit',
       timestamp_ms: 1_700_000_000_000,
+      model: CODEX_MAIN_MODEL,
       response_metadata: {
         quota: {
           rate_limit_reached_type: 'secondary',
@@ -629,6 +670,7 @@ describe('auth file Codex status helpers', () => {
     const usageLimitSnapshot: UsageHeaderSnapshot = {
       event_hash: 'usage-limit-five-hour-full',
       timestamp_ms: 1_700_000_000_000,
+      model: CODEX_MAIN_MODEL,
       response_metadata: {
         quota: {
           rate_limit_reached_type: 'primary',
@@ -1030,6 +1072,7 @@ describe('auth file Codex status helpers', () => {
     const headerSnapshot: UsageHeaderSnapshot = {
       event_hash: 'newer-authenticated-quota',
       timestamp_ms: 1_700_000_001_000,
+      model: CODEX_MAIN_MODEL,
       header_quota_used_percent: 100,
       header_quota_recover_at_ms: 1_700_000_100_000,
     };
@@ -1198,6 +1241,7 @@ describe('auth file Codex status helpers', () => {
     const status = getAuthFileCodexStatus(codexFile(), undefined, undefined, {
       event_hash: 'rate-limit-reached',
       timestamp_ms: 1_000,
+      model: CODEX_MAIN_MODEL,
       header_error_kind: 'rate_limit',
       header_error_code: 'rate_limit_reached',
     });
@@ -1215,6 +1259,7 @@ describe('auth file Codex status helpers', () => {
       const status = getAuthFileCodexStatus(codexFile(), undefined, undefined, {
         event_hash: code,
         timestamp_ms: 1_000,
+        model: CODEX_MAIN_MODEL,
         header_error_kind: 'rate_limit',
         header_error_code: code,
       });
@@ -1229,6 +1274,7 @@ describe('auth file Codex status helpers', () => {
     const headerSnapshot: UsageHeaderSnapshot = {
       event_hash: 'mixed-auth-quota-header',
       timestamp_ms: 1_000,
+      model: CODEX_MAIN_MODEL,
       header_error_kind: 'auth',
       header_error_code: 'invalid_api_key',
       header_quota_used_percent: 100,
@@ -1320,6 +1366,7 @@ describe('auth file Codex status helpers', () => {
     const headerSnapshot: UsageHeaderSnapshot = {
       event_hash: 'older-quota-header',
       timestamp_ms: 1_000,
+      model: CODEX_MAIN_MODEL,
       header_error_kind: 'rate_limit',
       header_error_code: 'quota_exceeded',
     };
@@ -1348,6 +1395,7 @@ describe('auth file Codex status helpers', () => {
     const headerSnapshot: UsageHeaderSnapshot = {
       event_hash: 'same-time-mixed-header',
       timestamp_ms: 2_000,
+      model: CODEX_MAIN_MODEL,
       header_error_kind: 'auth',
       header_error_code: 'invalid_api_key',
       header_quota_used_percent: 100,
@@ -1546,6 +1594,7 @@ describe('auth file Codex status helpers', () => {
     const headerSnapshot: UsageHeaderSnapshot = {
       event_hash: 'unknown-window-exhausted',
       timestamp_ms: 2_000,
+      model: CODEX_MAIN_MODEL,
       response_metadata: {
         quota: {
           primary: { used_percent: 100, window_minutes: 60 },

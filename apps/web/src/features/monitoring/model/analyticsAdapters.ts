@@ -33,6 +33,7 @@ import {
   readString,
 } from './base';
 import { sanitizeApiKeyDisplayText, type ApiKeyDisplayInfo } from './apiKeys';
+import { buildMonitoringAccountRowId, normalizeMonitoringProvider } from './accountIdentity';
 import { buildDayLabel, buildHourLabel, buildLocalDayKey, padNumber } from './range';
 import { buildMonitoringSourceDisplay } from './sourceDisplay';
 import type {
@@ -106,6 +107,7 @@ const ACCOUNT_FILTER_PREFIXES = {
   source: 'source:',
   apiKey: 'api-key:',
   account: 'account:',
+  accountProvider: 'account-provider:',
 } as const;
 
 const NO_MATCH_FILTER_VALUE = '__no_matching_filter_value__';
@@ -115,6 +117,7 @@ export type MonitoringAccountFilterCriteria = {
   authIndices: string[];
   sourceHashes: string[];
   apiKeyHashes: string[];
+  provider?: string;
 };
 
 const normalizeAccountFilterValues = (values: Array<string | null | undefined> = []) =>
@@ -155,11 +158,13 @@ const buildAccountFilterToken = (prefix: string, values: string[]) =>
 
 export const buildMonitoringAccountFilterValue = ({
   account,
+  provider,
   authIndices,
   sourceHashes,
   apiKeyHashes,
 }: {
   account?: string | null;
+  provider?: string | null;
   authIndices?: Array<string | null | undefined>;
   sourceHashes?: Array<string | null | undefined>;
   apiKeyHashes?: Array<string | null | undefined>;
@@ -179,7 +184,11 @@ export const buildMonitoringAccountFilterValue = ({
     return buildAccountFilterToken(ACCOUNT_FILTER_PREFIXES.apiKey, normalizedApiKeyHashes);
   }
 
+  const normalizedProvider = normalizeMonitoringProvider(provider);
   const normalizedAccounts = normalizeAccountFilterValues([account]);
+  if (normalizedProvider && normalizedAccounts.length > 0) {
+    return `${ACCOUNT_FILTER_PREFIXES.accountProvider}${encodeURIComponent(normalizedProvider)}|${encodeAccountFilterValues(normalizedAccounts)}`;
+  }
   return buildAccountFilterToken(ACCOUNT_FILTER_PREFIXES.account, normalizedAccounts);
 };
 
@@ -219,6 +228,19 @@ export const parseMonitoringAccountFilterValue = (
       apiKeyHashes: normalizeApiKeyHashValues(
         decodeAccountFilterValues(text.slice(ACCOUNT_FILTER_PREFIXES.apiKey.length))
       ),
+    };
+  }
+
+  if (text.startsWith(ACCOUNT_FILTER_PREFIXES.accountProvider)) {
+    const body = text.slice(ACCOUNT_FILTER_PREFIXES.accountProvider.length);
+    const delimiter = body.indexOf('|');
+    const providerPart = delimiter >= 0 ? body.slice(0, delimiter) : '';
+    const accountPart = delimiter >= 0 ? body.slice(delimiter + 1) : body;
+    const provider = decodeAccountFilterValue(providerPart);
+    return {
+      ...emptyCriteria,
+      accounts: normalizeAccountFilterValues([decodeAccountFilterValue(accountPart)]),
+      provider: readString(provider),
     };
   }
 
@@ -354,15 +376,25 @@ export const buildAnalyticsFilters = (
       accountCriteria.sourceHashes.length === 0 &&
       accountCriteria.apiKeyHashes.length === 0
     ) {
-      const legacyAccount = accountCriteria.accounts[0] || account;
-      const normalizedAccount = normalizeFilterText(legacyAccount);
-      const accountAuthIndices = Array.from(authMetaMap.entries())
-        .filter(([, meta]) => normalizeFilterText(meta.account) === normalizedAccount)
-        .map(([authIndex]) => authIndex);
-      authIndices = addAuthIndexConstraint(authIndices, accountAuthIndices);
-      if (accountAuthIndices.length === 0) {
+      if (accountCriteria.provider) {
+        // Provider-scoped logical account selector (account-provider:...).
+        // Query persisted data directly; do not re-interpret through current
+        // auth metadata, whose auth indices may differ from historical events.
         filters.accounts =
           accountCriteria.accounts.length > 0 ? accountCriteria.accounts : [account];
+        filters.providers = [accountCriteria.provider];
+      } else {
+        // Legacy account selector (account:...) keeps authMeta-based expansion.
+        const legacyAccount = accountCriteria.accounts[0] || account;
+        const normalizedAccount = normalizeFilterText(legacyAccount);
+        const accountAuthIndices = Array.from(authMetaMap.entries())
+          .filter(([, meta]) => normalizeFilterText(meta.account) === normalizedAccount)
+          .map(([authIndex]) => authIndex);
+        authIndices = addAuthIndexConstraint(authIndices, accountAuthIndices);
+        if (accountAuthIndices.length === 0) {
+          filters.accounts =
+            accountCriteria.accounts.length > 0 ? accountCriteria.accounts : [account];
+        }
       }
     }
   }
@@ -609,7 +641,16 @@ export const buildAccountRowsFromAnalytics = (
         { authMetaMap, authFileMap, sourceInfoMap, channelByAuthIndex }
       );
       const account = firstReadableValue(display.account, row.account_snapshot, row.id);
+      const provider = normalizeMonitoringProvider(
+        firstReadableValue(row.auth_provider_snapshot, display.provider)
+      );
       const displayAccount = firstReadableValue(display.primary, account);
+      const filterAccount = firstReadableValue(
+        row.account_snapshot,
+        row.auth_label_snapshot,
+        row.sources?.[0],
+        account
+      );
       const authLabels = uniqueReadableValues([
         ...authMetas.map((meta) => meta.label),
         row.auth_label_snapshot,
@@ -624,8 +665,18 @@ export const buildAccountRowsFromAnalytics = (
       );
 
       return {
-        id: account || row.id,
+        id:
+          firstReadableValue(row.id) ||
+          buildMonitoringAccountRowId({
+            provider,
+            account: row.account_snapshot,
+            authLabel: row.auth_label_snapshot,
+            source: row.sources?.[0],
+            authIndex,
+            sourceHash: row.source_hashes?.[0],
+          }),
         account,
+        provider,
         displayAccount,
         accountMasked: display.accountMasked || maskEmailLike(account),
         authLabels,
@@ -648,7 +699,8 @@ export const buildAccountRowsFromAnalytics = (
         recentPattern: [],
         filterValue:
           buildMonitoringAccountFilterValue({
-            account,
+            account: filterAccount,
+            provider,
             authIndices: row.auth_indices,
             sourceHashes: row.source_hashes,
           }) || account,
@@ -780,6 +832,7 @@ export const buildFilterOptionsFromAnalytics = (
       (account): MonitoringAccountRow => ({
         id: `selector:${normalizeFilterText(account)}`,
         account,
+        provider: '',
         filterValue: buildMonitoringAccountFilterValue({ account }) || account,
         displayAccount: account,
         accountMasked: maskEmailLike(account),
@@ -987,10 +1040,12 @@ export const buildUsageDetailsFromAnalyticsEvents = (
 ): UsageDetailWithEndpoint[] =>
   items.map((item) => {
     const requestedModel = readString(item.requested_model) || item.model;
-    const analyticsModel = readString(item.analytics_model) || normalizeAnalyticsModel(requestedModel);
+    const analyticsModel =
+      readString(item.analytics_model) || normalizeAnalyticsModel(requestedModel);
     return {
       timestamp: new Date(item.timestamp_ms).toISOString(),
       source: readString(item.source),
+      source_hash: readString(item.source_hash),
       auth_index: item.auth_index || null,
       api_key_hash: readString(item.api_key_hash),
       account_snapshot: readString(item.account_snapshot),

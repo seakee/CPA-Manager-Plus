@@ -46,6 +46,8 @@ import {
   formatKimiResetHint,
   formatQuotaResetTime,
   resolveAbsoluteQuotaReset,
+  findCodexProviderWindowMatch,
+  resolveCodexUsageQuotaScope,
 } from '@/utils/quota';
 import {
   buildObservedCodexQuotaFromHeaderSnapshot,
@@ -803,6 +805,8 @@ const buildCodexAccountQuotaWindows = (
       resetAtMs: window.resetAtMs ?? null,
       resetAccuracy: window.resetAccuracy ?? 'unknown',
       usageLabel,
+      modelScope: window.modelScope,
+      providerWindowAliases: window.providerWindowAliases,
     };
   });
 
@@ -850,6 +854,10 @@ const mergeAccountQuotaWindow = (
     ...(observedWindow.usageLabel && observedWindow.usageLabel.trim()
       ? { usageLabel: observedWindow.usageLabel }
       : {}),
+    ...(observedWindow.modelScope ? { modelScope: observedWindow.modelScope } : {}),
+    ...(observedWindow.providerWindowAliases
+      ? { providerWindowAliases: observedWindow.providerWindowAliases }
+      : {}),
   };
 };
 
@@ -860,15 +868,32 @@ const mergeAccountQuotaWindows = (
   if (observedWindows.length === 0) return activeWindows;
   if (activeWindows.length === 0) return observedWindows;
 
-  const observedById = new Map(observedWindows.map((window) => [window.id, window]));
-  const mergedWindows = activeWindows.map((window) => {
-    const observedWindow = observedById.get(window.id);
-    if (!observedWindow) return window;
-    observedById.delete(window.id);
-    return mergeAccountQuotaWindow(window, observedWindow);
+  const usedObserved = new Set<number>();
+  const mergedWindows = activeWindows.map((window, activeIndex) => {
+    const observedIndex = findCodexProviderWindowMatch(
+      activeWindows,
+      observedWindows,
+      activeIndex,
+      usedObserved
+    );
+    if (observedIndex < 0) return window;
+    usedObserved.add(observedIndex);
+    const observedWindow = observedWindows[observedIndex];
+    const aliases = Array.from(
+      new Set([
+        ...(window.providerWindowAliases ?? []),
+        ...(observedWindow.providerWindowAliases ?? []),
+        window.id,
+      ])
+    ).filter((alias) => alias && alias !== observedWindow.id);
+    return {
+      ...mergeAccountQuotaWindow(window, observedWindow),
+      id: observedWindow.id,
+      ...(aliases.length > 0 ? { providerWindowAliases: aliases } : {}),
+    };
   });
 
-  return [...mergedWindows, ...observedById.values()];
+  return [...mergedWindows, ...observedWindows.filter((_, index) => !usedObserved.has(index))];
 };
 
 const mergeAccountQuotaMetaLabels = (
@@ -1040,6 +1065,12 @@ export const mergeObservedAccountQuotaState = (
     failedAtMs: firstError ? state.failedAtMs : undefined,
   };
 };
+
+export const updateMonitoringAccountQuotaStateByRowId = (
+  states: Record<string, AccountQuotaState>,
+  rowId: string,
+  state: AccountQuotaState
+) => ({ ...states, [rowId]: state });
 
 const buildClaudeAccountQuotaWindows = (
   windows: ClaudeQuotaWindow[],
@@ -1269,6 +1300,14 @@ export const buildObservedCodexAccountQuotaEntry = (
   if (target.provider !== 'codex' || !hasUsageHeaderQuotaSignal(snapshot)) return null;
   const planType = target.planType ?? getHeaderSnapshotPlanType(snapshot) ?? null;
   const observedQuota = buildObservedCodexQuotaFromHeaderSnapshot(snapshot);
+  const observedScope =
+    observedQuota?.quotaScope ??
+    resolveCodexUsageQuotaScope({
+      model: snapshot?.model,
+      analyticsModel: snapshot?.analytics_model,
+      requestedModel: snapshot?.requested_model,
+      resolvedModel: snapshot?.resolved_model,
+    });
   const planLabel = getCodexPlanLabel(planType, t);
   const observedAtMs = readFiniteTimestamp(snapshot?.timestamp_ms) ?? undefined;
   const observedAt = observedAtMs ? new Date(observedAtMs).toLocaleString() : '';
@@ -1296,6 +1335,7 @@ export const buildObservedCodexAccountQuotaEntry = (
         planType,
         observedAtMs,
         source: 'response_header',
+        rateLimitScope: observedScope,
       })
     : [];
   const observedWindows: CodexQuotaWindow[] = filterFreshCodexQuotaWindows(
@@ -1313,6 +1353,8 @@ export const buildObservedCodexAccountQuotaEntry = (
     limitWindowSeconds: window.limitWindowSeconds,
     observationSource: 'response_header',
     observedAtMs,
+    modelScope: window.modelScope,
+    providerWindowAliases: window.providerWindowAliases,
   }));
   const fallbackExpired = recoverAtMS !== null && recoverAtMS <= nowMs;
   const fallbackUsedPercent = fallbackExpired ? null : usedPercent;
@@ -1323,7 +1365,9 @@ export const buildObservedCodexAccountQuotaEntry = (
       : fallbackUsedPercent !== null || fallbackRecoverAtMS
         ? [
             {
-              id: 'usage-header-observed',
+              id: observedScope.providerWindowIdPrefix
+                ? `${observedScope.providerWindowIdPrefix}-observed`
+                : 'usage-header-observed',
               label: t('codex_quota.observed_window', { defaultValue: 'Latest request' }),
               remainingPercent: buildRemainingFromUsedPercent(fallbackUsedPercent),
               resetLabel: fallbackRecoverAtMS
@@ -1338,6 +1382,7 @@ export const buildObservedCodexAccountQuotaEntry = (
                       defaultValue: `Observed used ${Math.round(fallbackUsedPercent)}%`,
                     })
                   : null,
+              modelScope: observedScope.modelScope,
             },
           ]
         : [];

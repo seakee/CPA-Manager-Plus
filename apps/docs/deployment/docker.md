@@ -276,6 +276,26 @@ docker run -d \
   seakee/cpa-manager-plus:latest
 ```
 
+### 升级后显示数据库维护未完成
+
+为避免大型历史数据库在升级时因无界 `CREATE INDEX` 或派生清理而阻塞 HTTP 监听，Manager Server 只会在启动阶段处理有界 schema/metadata 工作。若全局 Warning、系统信息页或 `/status.databaseMaintenance.required` 表示仍需维护，服务可以继续采集和响应，但历史请求查询可能明显变慢或超时。
+
+在 Compose 文件所在目录执行：
+
+```bash
+docker compose stop cpa-manager-plus
+
+docker compose run --rm --no-deps \
+  cpa-manager-plus \
+  cleanup-derived --db-path /data/usage.sqlite
+
+docker compose start cpa-manager-plus
+```
+
+如果 Compose 服务名不是 `cpa-manager-plus`，请替换为实际服务名。不要在 Manager Server 仍运行时执行，也不要从 Web UI 在线触发清理；该命令需要独占 SQLite 进程锁。完成后重新启动，维护状态会从数据库 metadata 自动恢复为 clean，UI Warning 也会自动消失。
+
+`cleanup-derived` 只处理派生清理、延后索引和旧索引替换，不会删除、重建或改写 authoritative `usage_events`。执行前仍应备份 `/data` 和 `data.key`。
+
 ## 验证
 
 基础健康检查：
@@ -300,7 +320,12 @@ collector.lastError
 lastConsumedAt
 lastInsertedAt
 eventCount
+databaseMaintenance.required
+databaseMaintenance.deferredIndexes
+databaseMaintenance.offlineJobs
 ```
+
+`databaseMaintenance.required=true` 表示服务可运行但查询性能可能降级；按上面的离线步骤处理。维护完成并重启后，应为 `false`，两个计数应为 `0`。
 
 如果监控页面为空，继续按 [请求监控排障](../troubleshooting/request-monitoring.md) 检查。
 

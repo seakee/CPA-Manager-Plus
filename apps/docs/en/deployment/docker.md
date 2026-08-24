@@ -276,6 +276,26 @@ docker run -d \
   seakee/cpa-manager-plus:latest
 ```
 
+### Database Maintenance Is Pending After Upgrade
+
+To keep HTTP startup bounded on large historical databases, Manager Server does not run unbounded `CREATE INDEX` or derived cleanup before listening. If the global warning, System Info, or `/status.databaseMaintenance.required` reports pending maintenance, collection and HTTP remain available, but historical request queries can become noticeably slower or time out.
+
+Run these commands from the Compose directory:
+
+```bash
+docker compose stop cpa-manager-plus
+
+docker compose run --rm --no-deps \
+  cpa-manager-plus \
+  cleanup-derived --db-path /data/usage.sqlite
+
+docker compose start cpa-manager-plus
+```
+
+Replace `cpa-manager-plus` if your Compose service uses another name. Do not run cleanup while Manager Server is still active, and do not trigger it from the web UI; the command requires the exclusive SQLite process lock. After restart, Manager Server derives the state from database metadata again, so the warning disappears automatically when maintenance is clean.
+
+`cleanup-derived` handles derived cleanup, deferred indexes, and legacy index replacement only. It never deletes, rebuilds, or rewrites authoritative `usage_events`. Back up `/data` and `data.key` first.
+
 ## Verification
 
 Basic health checks:
@@ -300,7 +320,12 @@ collector.lastError
 lastConsumedAt
 lastInsertedAt
 eventCount
+databaseMaintenance.required
+databaseMaintenance.deferredIndexes
+databaseMaintenance.offlineJobs
 ```
+
+`databaseMaintenance.required=true` means the service is running but query performance may be degraded. Follow the offline steps above. After maintenance and restart, it should be `false`, with both counts at `0`.
 
 If the monitoring page is empty, continue with [Request Monitoring Troubleshooting](../troubleshooting/request-monitoring.md).
 

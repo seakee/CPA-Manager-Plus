@@ -139,14 +139,23 @@ func NormalizeCodexInspectionRunStatus(status string) string {
 }
 
 type CodexInspectionQuotaWindow struct {
-	ID                 string         `json:"id"`
-	LabelKey           string         `json:"labelKey"`
-	LabelParams        map[string]any `json:"labelParams,omitempty"`
-	UsedPercent        *float64       `json:"usedPercent,omitempty"`
-	ResetLabel         string         `json:"resetLabel"`
-	ResetAtMS          int64          `json:"resetAtMs,omitempty"`
-	ResetAccuracy      string         `json:"resetAccuracy,omitempty"`
-	LimitWindowSeconds *float64       `json:"limitWindowSeconds,omitempty"`
+	ID                    string                          `json:"id"`
+	LabelKey              string                          `json:"labelKey"`
+	LabelParams           map[string]any                  `json:"labelParams,omitempty"`
+	UsedPercent           *float64                        `json:"usedPercent,omitempty"`
+	ResetLabel            string                          `json:"resetLabel"`
+	ResetAtMS             int64                           `json:"resetAtMs,omitempty"`
+	ResetAccuracy         string                          `json:"resetAccuracy,omitempty"`
+	LimitWindowSeconds    *float64                        `json:"limitWindowSeconds,omitempty"`
+	ModelScope            *CodexInspectionQuotaModelScope `json:"modelScope,omitempty"`
+	ProviderWindowAliases []string                        `json:"providerWindowAliases,omitempty"`
+}
+
+type CodexInspectionQuotaModelScope struct {
+	Kind     string   `json:"kind"`
+	Key      string   `json:"key,omitempty"`
+	Models   []string `json:"models,omitempty"`
+	Complete bool     `json:"complete"`
 }
 
 type CodexInspectionResult struct {

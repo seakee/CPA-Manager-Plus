@@ -16,9 +16,10 @@ import (
 )
 
 const (
-	defaultCandidateLimit       = 1000
-	candidateRowsPerSource      = 8
-	LegacySnapshotMigrationName = "quota_snapshot_lifecycle_v1"
+	defaultCandidateLimit            = 1000
+	candidateRowsPerSource           = 8
+	LegacySnapshotMigrationName      = "quota_snapshot_lifecycle_v1"
+	LegacySnapshotOfflineErrorMarker = "legacy quota observation group exceeds safe batch limit"
 )
 
 var ErrLegacySnapshotGroupTooLarge = errors.New("legacy quota observation group exceeds online batch limit")
@@ -305,12 +306,19 @@ func RecordLegacyBackfillFailure(ctx context.Context, db *sql.DB, migrationErr e
 		return nil
 	}
 	nowMS := time.Now().UnixMilli()
+	status := "failed"
+	finishedAt := any(nowMS)
+	if errors.Is(migrationErr, ErrLegacySnapshotGroupTooLarge) {
+		status = "offline_required"
+		finishedAt = nil
+	}
 	_, err := db.ExecContext(ctx, `update usage_data_migrations set
-		status = 'failed', started_at_ms = coalesce(started_at_ms, ?),
+		status = ?, started_at_ms = coalesce(started_at_ms, ?),
 		updated_at_ms = ?, finished_at_ms = ?, last_error = ? where name = ?`,
+		status,
 		nowMS,
 		nowMS,
-		nowMS,
+		finishedAt,
 		migrationErr.Error(),
 		LegacySnapshotMigrationName,
 	)

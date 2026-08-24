@@ -20,6 +20,7 @@ describe('isGenericMonitoringProviderLabel', () => {
     expect(isGenericMonitoringProviderLabel('XAI')).toBe(true);
     expect(isGenericMonitoringProviderLabel('x-ai')).toBe(true);
     expect(isGenericMonitoringProviderLabel('grok')).toBe(true);
+    expect(isGenericMonitoringProviderLabel('antigravity')).toBe(true);
     expect(isGenericMonitoringProviderLabel('anyrouter.top #1')).toBe(false);
   });
 });

@@ -144,6 +144,47 @@ func TestBackfillLegacySnapshotsBatchRejectsOversizedGroupAtomically(t *testing.
 	}
 }
 
+func TestRecordLegacyBackfillFailureMarksOversizedGroupOfflineRequired(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	migrationErr := quotasnapshotrepo.LegacySnapshotGroupTooLargeError{Limit: 1}
+	if err := quotasnapshotrepo.RecordLegacyBackfillFailure(context.Background(), db, migrationErr); err != nil {
+		t.Fatalf("record oversized migration state: %v", err)
+	}
+	var status string
+	var finishedAt sql.NullInt64
+	if err := db.QueryRow(`select status, finished_at_ms from usage_data_migrations
+		where name = ?`, quotasnapshotrepo.LegacySnapshotMigrationName).Scan(&status, &finishedAt); err != nil {
+		t.Fatalf("read oversized migration state: %v", err)
+	}
+	if status != "offline_required" || finishedAt.Valid {
+		t.Fatalf("oversized migration state = status:%q finished:%v", status, finishedAt)
+	}
+}
+
+func TestRecordLegacyBackfillFailureKeepsRetryableFailureState(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := quotasnapshotrepo.RecordLegacyBackfillFailure(context.Background(), db, errors.New("temporary failure")); err != nil {
+		t.Fatalf("record retryable migration failure: %v", err)
+	}
+	var status string
+	var finishedAt sql.NullInt64
+	if err := db.QueryRow(`select status, finished_at_ms from usage_data_migrations
+		where name = ?`, quotasnapshotrepo.LegacySnapshotMigrationName).Scan(&status, &finishedAt); err != nil {
+		t.Fatalf("read retryable migration state: %v", err)
+	}
+	if status != "failed" || !finishedAt.Valid {
+		t.Fatalf("retryable migration state = status:%q finished:%v", status, finishedAt)
+	}
+}
+
 func TestBackfillLegacySnapshotsBatchRepairsUnattachedSnapshotsForExistingObservation(t *testing.T) {
 	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
 	if err != nil {

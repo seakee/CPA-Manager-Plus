@@ -76,7 +76,7 @@ func TestLegacyQuotaSnapshotMigrationWorkerPausesOversizedGroupForOfflineCleanup
 	w.groupLimit = 1
 	w.retryDelay = time.Millisecond
 	w.Start(ctx)
-	waitForLegacyMigrationStatus(t, rawDB, "failed")
+	waitForLegacyMigrationStatus(t, rawDB, "offline_required")
 	time.Sleep(20 * time.Millisecond)
 	cancel()
 
@@ -91,7 +91,7 @@ func TestLegacyQuotaSnapshotMigrationWorkerPausesOversizedGroupForOfflineCleanup
 		t.Fatalf("count snapshots after failed worker batch: %v", err)
 	}
 	if !strings.Contains(lastError, "exceeds safe batch limit 1") || attachedSnapshots != 0 {
-		t.Fatalf("failed worker state = error:%q attached:%d", lastError, attachedSnapshots)
+		t.Fatalf("offline worker state = error:%q attached:%d", lastError, attachedSnapshots)
 	}
 	if !strings.Contains(logs.String(), "[quota-snapshot-migration] paused; offline cleanup required") {
 		t.Fatalf("worker offline cleanup log missing: %s", logs.String())

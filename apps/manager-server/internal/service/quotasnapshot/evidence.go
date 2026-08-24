@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/codexquota"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
@@ -65,6 +66,25 @@ func (s *Service) WriteCodexInspectionResult(ctx context.Context, result model.C
 			continue
 		}
 		duration := roundedPositiveInt64(window.LimitWindowSeconds)
+		windowKind := quotaWindowKind(duration)
+		providerWindowID := codexquota.CanonicalProviderWindowID(window.ID, windowKind)
+		inferredScope := codexquota.InferScopeFromProviderWindowID(providerWindowID)
+		modelScope := inferredScope
+		if window.ModelScope != nil {
+			providedScope := codexquota.NormalizeScope(codexquota.ModelScope{
+				Kind:     window.ModelScope.Kind,
+				Key:      window.ModelScope.Key,
+				Models:   window.ModelScope.Models,
+				Complete: window.ModelScope.Complete,
+			})
+			// Older inspection clients persisted every window as `all`. Stable
+			// Codex provider-window identities are stronger evidence for known
+			// scoped limits, so do not let that legacy value restore account-wide
+			// attribution for Spark or another additional feature.
+			if providedScope.Kind != "all" || inferredScope.Kind == "all" {
+				modelScope = providedScope
+			}
+		}
 		mode := "unknown"
 		accuracy := normalizeInspectionAccuracy(window.ResetAccuracy)
 		var cycleStartMS, cycleEndMS *int64
@@ -84,20 +104,23 @@ func (s *Service) WriteCodexInspectionResult(ctx context.Context, result model.C
 		}
 		usedPercent := validPercent(window.UsedPercent)
 		windows = append(windows, WindowInput{
-			ProviderWindowID:    strings.TrimSpace(window.ID),
-			WindowKind:          quotaWindowKind(duration),
-			WindowMode:          mode,
-			ModelScopeKind:      "all",
-			Source:              "inspection",
-			SourceObservationID: inspectionObservationID(result),
-			ObservedAtMS:        observedAtMS,
-			BoundaryAccuracy:    accuracy,
-			CycleStartMS:        cycleStartMS,
-			CycleEndMS:          cycleEndMS,
-			DurationSeconds:     duration,
-			UsedPercent:         usedPercent,
-			RemainingPercent:    remainingPercent(usedPercent),
-			PlanType:            result.PlanType,
+			ProviderWindowID:      providerWindowID,
+			ProviderWindowAliases: append([]string(nil), window.ProviderWindowAliases...),
+			WindowKind:            windowKind,
+			WindowMode:            mode,
+			ModelScopeKind:        modelScope.Kind,
+			ModelScopeKey:         modelScope.Key,
+			ModelIDs:              append([]string(nil), modelScope.Models...),
+			Source:                "inspection",
+			SourceObservationID:   inspectionObservationID(result),
+			ObservedAtMS:          observedAtMS,
+			BoundaryAccuracy:      accuracy,
+			CycleStartMS:          cycleStartMS,
+			CycleEndMS:            cycleEndMS,
+			DurationSeconds:       duration,
+			UsedPercent:           usedPercent,
+			RemainingPercent:      remainingPercent(usedPercent),
+			PlanType:              result.PlanType,
 		})
 	}
 	if len(windows) == 0 && inventoryMode != "complete" {
@@ -182,9 +205,15 @@ func quotaSnapshotEntryFromUsageEvent(event usage.Event) (WriteEntry, bool) {
 			return WriteEntry{}, false
 		}
 		quota := event.ResponseMetadata.Quota
+		quotaScope := codexquota.ResolveUsageScope(
+			event.Model,
+			event.AnalyticsModel,
+			event.RequestedModel,
+			event.ResolvedModel,
+		)
 		windows := make([]WindowInput, 0, 2)
 		for index, item := range []*usage.HeaderQuotaWindow{quota.Primary, quota.Secondary} {
-			if window, ok := codexHeaderWindowInput(item, index, event.TimestampMS, quota.PlanType, observationID); ok {
+			if window, ok := codexHeaderWindowInput(item, index, event.TimestampMS, quota.PlanType, observationID, quotaScope); ok {
 				windows = append(windows, window)
 			}
 		}
@@ -326,7 +355,14 @@ func codexWindowFamilyRole(providerWindowID string) (string, string, bool) {
 	return "", "", false
 }
 
-func codexHeaderWindowInput(window *usage.HeaderQuotaWindow, index int, observedAtMS int64, planType, observationID string) (WindowInput, bool) {
+func codexHeaderWindowInput(
+	window *usage.HeaderQuotaWindow,
+	index int,
+	observedAtMS int64,
+	planType string,
+	observationID string,
+	quotaScope codexquota.UsageScopeResolution,
+) (WindowInput, bool) {
 	if window == nil {
 		return WindowInput{}, false
 	}
@@ -357,42 +393,58 @@ func codexHeaderWindowInput(window *usage.HeaderQuotaWindow, index int, observed
 	if duration == nil && cycleEndMS == nil && (usedPercent == nil || *usedPercent == 0) {
 		return WindowInput{}, false
 	}
+	providerWindowID := codexHeaderWindowID(duration, index, planType, quotaScope.ProviderWindowPrefix)
 	return WindowInput{
-		ProviderWindowID:    codexWindowID(duration, index),
-		WindowKind:          quotaWindowKind(duration),
-		WindowMode:          mode,
-		ModelScopeKind:      "all",
-		Source:              "response_header",
-		SourceObservationID: observationID,
-		ObservedAtMS:        observedAtMS,
-		BoundaryAccuracy:    accuracy,
-		CycleStartMS:        cycleStartMS,
-		CycleEndMS:          cycleEndMS,
-		DurationSeconds:     duration,
-		UsedPercent:         usedPercent,
-		RemainingPercent:    remainingPercent(usedPercent),
-		PlanType:            planType,
+		ProviderWindowID:      providerWindowID,
+		ProviderWindowAliases: codexquota.ProviderWindowAliases(providerWindowID, quotaScope.Scope),
+		WindowKind:            quotaWindowKind(duration),
+		WindowMode:            mode,
+		ModelScopeKind:        quotaScope.Scope.Kind,
+		ModelScopeKey:         quotaScope.Scope.Key,
+		ModelIDs:              append([]string(nil), quotaScope.Scope.Models...),
+		Source:                "response_header",
+		SourceObservationID:   observationID,
+		ObservedAtMS:          observedAtMS,
+		BoundaryAccuracy:      accuracy,
+		CycleStartMS:          cycleStartMS,
+		CycleEndMS:            cycleEndMS,
+		DurationSeconds:       duration,
+		UsedPercent:           usedPercent,
+		RemainingPercent:      remainingPercent(usedPercent),
+		PlanType:              planType,
 	}, true
 }
 
-func codexWindowID(duration *int64, index int) string {
+func codexHeaderWindowID(duration *int64, index int, planType, scopePrefix string) string {
+	role := ""
 	if duration != nil {
 		switch *duration {
 		case codexFiveHourSeconds:
-			return "five-hour"
+			role = "five-hour"
 		case codexWeekSeconds:
-			return "weekly"
+			role = "weekly"
 		default:
 			if *duration >= 28*24*60*60 && *duration <= 31*24*60*60 {
-				return "monthly"
+				role = "monthly"
+			} else {
+				id := fmt.Sprintf("window-%s-%d", formatDuration(*duration), index)
+				if scopePrefix != "" {
+					return fmt.Sprintf("%s-0-%s", scopePrefix, id)
+				}
+				return id
 			}
-			return fmt.Sprintf("window-%s-%d", formatDuration(*duration), index)
 		}
+	} else if index == 0 {
+		role = "five-hour"
+	} else if strings.EqualFold(strings.TrimSpace(planType), "team") {
+		role = "monthly"
+	} else {
+		role = "weekly"
 	}
-	if index == 0 {
-		return "primary"
+	if scopePrefix != "" {
+		return fmt.Sprintf("%s-%s-0", scopePrefix, role)
 	}
-	return "secondary"
+	return role
 }
 
 func quotaWindowKind(duration *int64) string {

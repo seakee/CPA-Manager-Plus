@@ -164,4 +164,21 @@ describe('mergeMonitoringAccountOptionRows', () => {
     ]);
     expect(rows[0]?.totalCalls).toBe(2);
   });
+
+  it('keeps same-email provider account options when their selectors are distinct', () => {
+    const rows = mergeMonitoringAccountOptionRows([
+      accountOptionRow({
+        id: 'codex-row',
+        account: 'same@example.com',
+        filterValue: 'auth:codex-auth',
+      }),
+      accountOptionRow({
+        id: 'antigravity-row',
+        account: 'same@example.com',
+        filterValue: 'auth:antigravity-auth',
+      }),
+    ]);
+
+    expect(rows.map((row) => row.id)).toEqual(['codex-row', 'antigravity-row']);
+  });
 });

@@ -635,6 +635,8 @@ export function toServerResultItem(
       resetAtMs: window.resetAtMs ?? null,
       resetAccuracy: window.resetAccuracy,
       limitWindowSeconds: window.limitWindowSeconds ?? null,
+      modelScope: window.modelScope,
+      providerWindowAliases: window.providerWindowAliases,
     })),
     quotaInventoryObserved: item.quotaInventoryObserved,
     errorKind: item.errorKind,

@@ -14,6 +14,11 @@ import {
   hasUsageHeaderQuotaSignal,
 } from '@/utils/usageHeaderSnapshots';
 import {
+  isCodexMainQuotaModelScope,
+  isCodexMainQuotaWindow,
+  resolveCodexUsageQuotaScope,
+} from '@/utils/quota/codexQuota';
+import {
   getAuthFileStatusMessage,
   isHealthyAuthFileStatusMessage,
   isRuntimeOnlyAuthFile,
@@ -290,13 +295,52 @@ const findCodexQuotaWindow = (
   preferredMatch: (window: CodexQuotaState['windows'][number]) => boolean,
   limitWindowSeconds: number
 ) => {
-  const windows = quota?.windows ?? [];
+  const windows = (quota?.windows ?? []).filter(isCodexMainQuotaWindow);
   return (
     windows.find(preferredMatch) ??
     windows.find(
       (window) => normalizeWindowSeconds(window.limitWindowSeconds) === limitWindowSeconds
     ) ??
     null
+  );
+};
+
+const isMainCodexHeaderQuota = (snapshot: UsageHeaderSnapshot | undefined): boolean => {
+  if (!snapshot) return true;
+  const hasModelIdentity = [
+    snapshot.model,
+    snapshot.analytics_model,
+    snapshot.requested_model,
+    snapshot.resolved_model,
+  ].some((value) => typeof value === 'string' && value.trim() !== '');
+  if (!hasModelIdentity) {
+    // Preserve neutral diagnostics such as Retry-After/request errors, but do
+    // not let any quota-bearing or quota-limit header without model identity
+    // become account-wide Codex evidence.
+    const hasQuotaMetadata =
+      (snapshot.header_quota_used_percent !== null &&
+        snapshot.header_quota_used_percent !== undefined) ||
+      (snapshot.header_quota_recover_at_ms !== null &&
+        snapshot.header_quota_recover_at_ms !== undefined) ||
+      Boolean(snapshot.header_quota_plan_type?.trim()) ||
+      Boolean(snapshot.response_metadata?.quota) ||
+      Boolean(snapshot.response_metadata?.rate_limit) ||
+      Boolean(snapshot.response_metadata?.provider_usage);
+    return (
+      !hasQuotaMetadata &&
+      !isObservedQuotaLimitError(
+        getHeaderSnapshotErrorKind(snapshot),
+        getHeaderSnapshotErrorCode(snapshot)
+      )
+    );
+  }
+  return isCodexMainQuotaModelScope(
+    resolveCodexUsageQuotaScope({
+      model: snapshot.model,
+      analyticsModel: snapshot.analytics_model,
+      requestedModel: snapshot.requested_model,
+      resolvedModel: snapshot.resolved_model,
+    }).modelScope
   );
 };
 
@@ -812,7 +856,8 @@ const getQuotaCredentialEvidence = (
 
 const getHeaderCredentialEvidence = (
   headerSnapshot: UsageHeaderSnapshot | undefined,
-  nowMs: number
+  nowMs: number,
+  isCodex: boolean
 ): AuthFileCredentialEvidence | null => {
   if (!headerSnapshot) return null;
   const errorKind = getHeaderSnapshotErrorKind(headerSnapshot);
@@ -825,6 +870,10 @@ const getHeaderCredentialEvidence = (
   if (authorizationError || isObservedAuthError(errorKind, `${errorCode} ${authorizationError}`)) {
     return { direction: 'negative', observedAtMs, statusCode };
   }
+  // A scoped Codex response can legitimately report its own quota state. It
+  // must not become positive credential evidence or suppress a real account
+  // failure; explicit authentication errors above remain credential-wide.
+  if (isCodex && !isMainCodexHeaderQuota(headerSnapshot)) return null;
   if (isQualifiedHeaderCredentialStatusSource(headerSnapshot, nowMs)) {
     return { direction: 'positive', observedAtMs, statusCode };
   }
@@ -1135,34 +1184,41 @@ export const getAuthFileCodexStatus = (
   const inspectionUsedPercent =
     inspection?.isQuota === true ? normalizeNumber(inspection?.usedPercent) : null;
   const action = typeof inspection?.action === 'string' ? inspection.action : '';
-  const providerUsage = headerSnapshot?.response_metadata?.provider_usage;
+  const accountHeaderSnapshot =
+    !isCodex || isMainCodexHeaderQuota(headerSnapshot) ? headerSnapshot : undefined;
+  const providerUsage = accountHeaderSnapshot?.response_metadata?.provider_usage;
   const observedProviderUsageLimited = isProviderUsageQuotaLimited(providerUsage, nowMs);
-  const observedUsedPercent = getHeaderSnapshotUsedPercent(headerSnapshot);
+  const observedUsedPercent = getHeaderSnapshotUsedPercent(accountHeaderSnapshot);
   const observedRecoverAtMS =
-    getHeaderSnapshotRecoverAtMs(headerSnapshot) ??
+    getHeaderSnapshotRecoverAtMs(accountHeaderSnapshot) ??
     (observedProviderUsageLimited ? normalizeNumber(providerUsage?.recover_at_ms) : null);
   const observedRecoverLabel = formatObservedRecoverLabel(observedRecoverAtMS);
-  const observedErrorKind = getHeaderSnapshotErrorKind(headerSnapshot);
-  const observedErrorCode = getHeaderSnapshotErrorCode(headerSnapshot);
-  const observedTraceID = getHeaderSnapshotTraceId(headerSnapshot);
-  const observedReachedWindowKind = getHeaderSnapshotReachedWindowKind(headerSnapshot);
-  const observedSummaryWindowKind = getHeaderSnapshotSummaryWindowKind(headerSnapshot);
+  const observedErrorKind = getHeaderSnapshotErrorKind(accountHeaderSnapshot);
+  const observedErrorCode = getHeaderSnapshotErrorCode(accountHeaderSnapshot);
+  const observedTraceID = getHeaderSnapshotTraceId(accountHeaderSnapshot);
+  const observedAccountQuotaErrorKind = getHeaderSnapshotErrorKind(accountHeaderSnapshot);
+  const observedAccountQuotaErrorCode = getHeaderSnapshotErrorCode(accountHeaderSnapshot);
+  const observedReachedWindowKind = getHeaderSnapshotReachedWindowKind(accountHeaderSnapshot);
+  const observedSummaryWindowKind = getHeaderSnapshotSummaryWindowKind(accountHeaderSnapshot);
   const observedRateLimitReachedType =
-    typeof headerSnapshot?.response_metadata?.quota?.rate_limit_reached_type === 'string'
-      ? headerSnapshot.response_metadata.quota.rate_limit_reached_type.trim()
+    typeof accountHeaderSnapshot?.response_metadata?.quota?.rate_limit_reached_type === 'string'
+      ? accountHeaderSnapshot.response_metadata.quota.rate_limit_reached_type.trim()
       : '';
-  const observedUnknownUsedPercent = getHeaderSnapshotWindowUsedPercent(headerSnapshot, 'unknown');
+  const observedUnknownUsedPercent = getHeaderSnapshotWindowUsedPercent(
+    accountHeaderSnapshot,
+    'unknown'
+  );
   const observedQuotaLimited =
     (observedUsedPercent !== null && observedUsedPercent >= 100) ||
     (observedUnknownUsedPercent !== null && observedUnknownUsedPercent >= 100) ||
     observedProviderUsageLimited ||
     Boolean(observedRateLimitReachedType) ||
-    isObservedQuotaLimitError(observedErrorKind, observedErrorCode);
+    isObservedQuotaLimitError(observedAccountQuotaErrorKind, observedAccountQuotaErrorCode);
   const observedLimitWindowKind =
     observedReachedWindowKind ??
     (observedUsedPercent !== null && observedUsedPercent >= 100 ? observedSummaryWindowKind : null);
   const getObservedWindowUsedPercent = (windowKind: 'five_hour' | 'weekly' | 'monthly') =>
-    getHeaderSnapshotWindowUsedPercent(headerSnapshot, windowKind) ??
+    getHeaderSnapshotWindowUsedPercent(accountHeaderSnapshot, windowKind) ??
     (observedLimitWindowKind === windowKind ? observedUsedPercent : null);
   const observedFiveHourUsedPercent = getObservedWindowUsedPercent('five_hour');
   const observedWeeklyUsedPercent = getObservedWindowUsedPercent('weekly');
@@ -1196,7 +1252,7 @@ export const getAuthFileCodexStatus = (
     options.ignoreRawStatusCode ? null : getAuthFileCredentialEvidence(file),
     getInspectionCredentialEvidence(inspection),
     getQuotaCredentialEvidence(file, quota),
-    getHeaderCredentialEvidence(headerSnapshot, nowMs),
+    getHeaderCredentialEvidence(headerSnapshot, nowMs, isCodex),
   ];
   const currentAuthenticationFailure = selectCurrentAuthenticationFailure(credentialEvidences);
   const inspectionErrorKind =

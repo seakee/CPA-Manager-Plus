@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { TFunction } from 'i18next';
 import { AccountExpandedDetails, AccountOverviewCard } from './MonitoringCenterPage';
 import monitoringCenterPageSource from './MonitoringCenterPage.tsx?raw';
+import accountOverviewPanelSource from './components/AccountOverviewPanel.tsx?raw';
 import { MonitoringSummarySection } from '@/features/monitoring/components/MonitoringSummarySection';
 import {
   buildPrimarySummaryCards,
@@ -144,8 +145,25 @@ describe('MonitoringCenterPage quota refresh wiring', () => {
       'targets.map((target) => requestAccountQuota(target, t))'
     );
     expect(monitoringCenterPageSource).toContain('useHeaderSnapshotsLoader({');
-    expect(monitoringCenterPageSource).toContain('const accounts = new Set([');
-    expect(monitoringCenterPageSource).toContain('...accountQuotaTargetsByAccount.keys()');
+    expect(monitoringCenterPageSource).toContain('const rowIds = new Set([');
+    expect(monitoringCenterPageSource).toContain('...accountQuotaTargetsByRowId.keys()');
+    expect(monitoringCenterPageSource).toContain(
+      'resolveMonitoringAccountFocusAction(focusedAccountId, row)'
+    );
+    expect(monitoringCenterPageSource).toContain('accountQuotaTargetsByRowId.get(rowId)');
+    expect(monitoringCenterPageSource).toContain('accountQuotaRequestIdsByRowIdRef.current[rowId]');
+    expect(monitoringCenterPageSource).toContain('commitAccountQuotaState(rowId, {');
+    expect(monitoringCenterPageSource).toContain(
+      '${accountQuotaContextKey}\\u0000${rowId}\\u0000${targetKey}'
+    );
+    expect(monitoringCenterPageSource).toContain('setFocusedAccountId(action.rowId)');
+    expect(monitoringCenterPageSource).not.toContain('focusedAccount === account');
+    expect(monitoringCenterPageSource).not.toContain('accountQuotaTargetsByAccount');
+    expect(accountOverviewPanelSource).toContain('expandedAccounts[row.id]');
+    expect(accountOverviewPanelSource).toContain('focusedAccountId === row.id');
+    expect(accountOverviewPanelSource).toContain('accountAuthStateByRowId.get(row.id)');
+    expect(accountOverviewPanelSource).toContain('accountQuotaStatesByRowId[row.id]');
+    expect(accountOverviewPanelSource).not.toContain('accountQuotaStates[row.account]');
     expect(monitoringCenterPageSource).not.toContain('onResponse: (response) =>');
   });
 });

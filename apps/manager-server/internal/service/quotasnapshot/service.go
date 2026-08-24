@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/codexquota"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	quotasnapshotrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotasnapshot"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
@@ -63,6 +64,7 @@ type ResetCredit struct {
 
 type WindowInput struct {
 	ProviderWindowID      string        `json:"provider_window_id"`
+	ProviderWindowAliases []string      `json:"provider_window_aliases,omitempty"`
 	WindowKind            string        `json:"window_kind"`
 	WindowMode            string        `json:"window_mode"`
 	ModelScopeKind        string        `json:"model_scope_kind"`
@@ -97,6 +99,7 @@ type ObservationInput struct {
 
 type RemovedWindowInput struct {
 	ProviderWindowID string   `json:"provider_window_id"`
+	WindowKind       string   `json:"window_kind,omitempty"`
 	ModelScopeKind   string   `json:"model_scope_kind,omitempty"`
 	ModelScopeKey    string   `json:"model_scope_key,omitempty"`
 	ModelIDs         []string `json:"model_ids,omitempty"`
@@ -146,6 +149,7 @@ type FieldSource struct {
 
 type Window struct {
 	ProviderWindowID      string                 `json:"provider_window_id"`
+	ProviderWindowAliases []string               `json:"provider_window_aliases,omitempty"`
 	WindowKind            string                 `json:"window_kind"`
 	WindowMode            string                 `json:"window_mode"`
 	ModelScopeKind        string                 `json:"model_scope_kind"`
@@ -261,7 +265,7 @@ func (s *Service) Write(ctx context.Context, req WriteRequest) (WriteResponse, e
 			write.Snapshots = append(write.Snapshots, snapshot)
 		}
 		for _, input := range entry.RemovedWindows {
-			removed, err := normalizeRemovedWindow(input)
+			removed, err := normalizeRemovedWindow(provider, input)
 			if err != nil {
 				return WriteResponse{}, err
 			}
@@ -345,10 +349,17 @@ func normalizeObservationInput(accountKey, provider string, entry WriteEntry, no
 	}, nil
 }
 
-func normalizeRemovedWindow(input RemovedWindowInput) (model.AccountQuotaWindowRemoval, error) {
+func normalizeRemovedWindow(provider string, input RemovedWindowInput) (model.AccountQuotaWindowRemoval, error) {
 	providerWindowID := strings.TrimSpace(input.ProviderWindowID)
 	if providerWindowID == "" {
 		return model.AccountQuotaWindowRemoval{}, errors.New("removed provider_window_id is required")
+	}
+	windowKind := strings.TrimSpace(input.WindowKind)
+	if provider == "codex" {
+		if strings.EqualFold(providerWindowID, "secondary") && windowKind == "" {
+			return model.AccountQuotaWindowRemoval{}, errors.New("removed window_kind is required for Codex secondary windows")
+		}
+		providerWindowID = codexquota.CanonicalProviderWindowID(providerWindowID, windowKind)
 	}
 	scopeKind := strings.ToLower(strings.TrimSpace(input.ModelScopeKind))
 	if scopeKind == "" {
@@ -366,6 +377,16 @@ func normalizeRemovedWindow(input RemovedWindowInput) (model.AccountQuotaWindowR
 	}
 	modelIDsJSON := marshalAllowlist(modelIDs)
 	scopeKey := strings.TrimSpace(input.ModelScopeKey)
+	if provider == "codex" {
+		scope := codexquota.ResolveProviderWindowScope(
+			providerWindowID,
+			windowKind,
+			codexquota.ScopeFromFields(scopeKind, scopeKey, modelIDs),
+		)
+		providerWindowID = codexquota.CanonicalProviderWindowIDForScope(providerWindowID, windowKind, scope)
+		scopeKind, scopeKey, modelIDs = scope.Kind, scope.Key, scope.Models
+		modelIDsJSON = marshalAllowlist(modelIDs)
+	}
 	return model.AccountQuotaWindowRemoval{
 		ProviderWindowID: providerWindowID,
 		ModelScopeKind:   scopeKind,
@@ -502,12 +523,142 @@ func (s *Service) Query(ctx context.Context, req QueryRequest) (QueryResponse, e
 		if err != nil {
 			return QueryResponse{}, err
 		}
+		stateByID := make(map[int64]model.AccountQuotaWindowState, len(states))
+		for _, state := range states {
+			stateByID[state.ID] = state
+		}
+		explicitScopedCandidates := make(map[string]struct{})
+		for _, candidate := range candidates {
+			state, hasState := stateByID[candidate.LogicalWindowID]
+			if hasState && state.Availability == "inactive" {
+				continue
+			}
+			scope := codexquota.ScopeFromFields(
+				candidate.ModelScopeKind,
+				candidate.ModelScopeKey,
+				unmarshalStringList(candidate.ModelIDsJSON),
+			)
+			if provider == "codex" && scope.Kind != "all" {
+				explicitScopedCandidates[codexQueryScopeKey(candidate.ProviderWindowID, candidate.WindowKind, scope)] = struct{}{}
+			}
+		}
+		normalizedCandidates := candidates[:0]
+		for index := range candidates {
+			state, hasState := stateByID[candidates[index].LogicalWindowID]
+			if hasState && state.Availability == "inactive" {
+				normalizedCandidates = append(normalizedCandidates, candidates[index])
+				continue
+			}
+			wasLegacyScoped := normalizeCodexSnapshotForQuery(&candidates[index])
+			if wasLegacyScoped {
+				scope := codexquota.ScopeFromFields(
+					candidates[index].ModelScopeKind,
+					candidates[index].ModelScopeKey,
+					unmarshalStringList(candidates[index].ModelIDsJSON),
+				)
+				if _, exists := explicitScopedCandidates[codexQueryScopeKey(candidates[index].ProviderWindowID, candidates[index].WindowKind, scope)]; exists {
+					continue
+				}
+			}
+			normalizedCandidates = append(normalizedCandidates, candidates[index])
+		}
+		candidates = normalizedCandidates
+		explicitScopedStates := make(map[string]struct{})
+		for _, state := range states {
+			if state.Availability == "inactive" {
+				continue
+			}
+			scope := codexquota.ScopeFromFields(state.ModelScopeKind, state.ModelScopeKey, unmarshalStringList(state.ModelIDsJSON))
+			if provider == "codex" && scope.Kind != "all" {
+				explicitScopedStates[codexQueryScopeKey(state.ProviderWindowID, state.WindowKind, scope)] = struct{}{}
+			}
+		}
+		normalizedStates := states[:0]
+		for index := range states {
+			if states[index].Availability == "inactive" {
+				normalizedStates = append(normalizedStates, states[index])
+				continue
+			}
+			wasLegacyScoped := normalizeCodexWindowStateForQuery(&states[index])
+			if wasLegacyScoped {
+				scope := codexquota.ScopeFromFields(states[index].ModelScopeKind, states[index].ModelScopeKey, unmarshalStringList(states[index].ModelIDsJSON))
+				if _, exists := explicitScopedStates[codexQueryScopeKey(states[index].ProviderWindowID, states[index].WindowKind, scope)]; exists {
+					continue
+				}
+			}
+			normalizedStates = append(normalizedStates, states[index])
+		}
+		states = normalizedStates
 		items = append(items, QueryItem{
 			RowKey: account.RowKey, AccountKey: accountKey, Provider: provider,
 			Windows: mergeLifecycleWindows(selectWindows(candidates, states, nowMS), states, nowMS, req.IncludeInactive),
 		})
 	}
 	return QueryResponse{GeneratedAtMS: nowMS, Items: items}, nil
+}
+
+// normalizeCodexSnapshotForQuery is the read-side compatibility shield for
+// rows written before scoped Codex fields were available. It runs before
+// grouping so an unattached legacy `all` Spark row cannot sit beside the new
+// model-scoped row while deferred lifecycle migration is still pending.
+func normalizeCodexSnapshotForQuery(snapshot *model.AccountQuotaSnapshot) bool {
+	if snapshot == nil || normalizeProvider(snapshot.Provider) != "codex" {
+		return false
+	}
+	modelIDs := unmarshalStringList(snapshot.ModelIDsJSON)
+	providedScope := codexquota.ScopeFromFields(snapshot.ModelScopeKind, snapshot.ModelScopeKey, modelIDs)
+	scope := codexquota.ResolveProviderWindowScope(
+		snapshot.ProviderWindowID,
+		snapshot.WindowKind,
+		codexquota.ScopeFromFields(snapshot.ModelScopeKind, snapshot.ModelScopeKey, modelIDs),
+	)
+	snapshot.ProviderWindowID = codexquota.CanonicalProviderWindowIDForScope(
+		snapshot.ProviderWindowID,
+		snapshot.WindowKind,
+		scope,
+	)
+	snapshot.ModelScopeKind = scope.Kind
+	snapshot.ModelScopeKey = scope.Key
+	snapshot.ModelIDsJSON = marshalAllowlist(scope.Models)
+	snapshot.ScopeFingerprint = quotasnapshotrepo.ScopeFingerprint(scope.Kind, scope.Key, scope.Models)
+	if snapshot.ContainerWindowID != "" {
+		snapshot.ContainerWindowID = codexquota.CanonicalProviderWindowID(snapshot.ContainerWindowID)
+	}
+	return providedScope.Kind == "all" && scope.Kind != "all"
+}
+
+func normalizeCodexWindowStateForQuery(state *model.AccountQuotaWindowState) bool {
+	if state == nil || normalizeProvider(state.Provider) != "codex" {
+		return false
+	}
+	if state.Availability == "inactive" {
+		return false
+	}
+	modelIDs := unmarshalStringList(state.ModelIDsJSON)
+	providedScope := codexquota.ScopeFromFields(state.ModelScopeKind, state.ModelScopeKey, modelIDs)
+	scope := codexquota.ResolveProviderWindowScope(
+		state.ProviderWindowID,
+		state.WindowKind,
+		codexquota.ScopeFromFields(state.ModelScopeKind, state.ModelScopeKey, modelIDs),
+	)
+	state.ProviderWindowID = codexquota.CanonicalProviderWindowIDForScope(
+		state.ProviderWindowID,
+		state.WindowKind,
+		scope,
+	)
+	state.ModelScopeKind = scope.Kind
+	state.ModelScopeKey = scope.Key
+	state.ModelIDsJSON = marshalAllowlist(scope.Models)
+	state.ScopeFingerprint = quotasnapshotrepo.ScopeFingerprint(scope.Kind, scope.Key, scope.Models)
+	if state.ContainerProviderWindowID != "" {
+		state.ContainerProviderWindowID = codexquota.CanonicalProviderWindowID(state.ContainerProviderWindowID)
+	}
+	return providedScope.Kind == "all" && scope.Kind != "all"
+}
+
+func codexQueryScopeKey(providerWindowID, windowKind string, scope codexquota.ModelScope) string {
+	providerWindowID = codexquota.CanonicalProviderWindowIDForScope(providerWindowID, windowKind, scope)
+	return providerWindowID + "\x00" + quotasnapshotrepo.ScopeFingerprint(scope.Kind, scope.Key, scope.Models)
 }
 
 func normalizeWindowInput(accountKey, provider string, input WindowInput, nowMS int64) (model.AccountQuotaSnapshot, error) {
@@ -569,14 +720,47 @@ func normalizeWindowInput(accountKey, provider string, input WindowInput, nowMS 
 	if scopeKind == "models" && len(modelIDs) == 0 {
 		return model.AccountQuotaSnapshot{}, errors.New("model_ids are required for models scope")
 	}
+	scopeKey := strings.TrimSpace(input.ModelScopeKey)
+	if provider == "codex" {
+		scope := codexquota.ResolveProviderWindowScope(
+			providerWindowID,
+			input.WindowKind,
+			codexquota.ScopeFromFields(scopeKind, scopeKey, modelIDs),
+		)
+		providerWindowID = codexquota.CanonicalProviderWindowIDForScope(providerWindowID, input.WindowKind, scope)
+		scopeKind, scopeKey, modelIDs = scope.Kind, scope.Key, scope.Models
+	}
 	modelIDsJSON := marshalAllowlist(modelIDs)
-	scopeFingerprint := quotasnapshotrepo.ScopeFingerprint(scopeKind, input.ModelScopeKey, modelIDs)
+	providerWindowAliases, err := normalizeStringList(input.ProviderWindowAliases, 32)
+	if err != nil {
+		return model.AccountQuotaSnapshot{}, fmt.Errorf("provider_window_aliases: %w", err)
+	}
+	if provider == "codex" {
+		filtered := providerWindowAliases[:0]
+		for _, alias := range providerWindowAliases {
+			rawAlias := strings.ToLower(strings.TrimSpace(alias))
+			canonicalAlias := codexquota.CanonicalProviderWindowIDForScope(alias, input.WindowKind, codexquota.ScopeFromFields(scopeKind, scopeKey, modelIDs))
+			for _, candidate := range []string{rawAlias, canonicalAlias} {
+				if candidate != "" && candidate != providerWindowID {
+					filtered = append(filtered, candidate)
+				}
+			}
+		}
+		providerWindowAliases, err = normalizeStringList(filtered, 32)
+		if err != nil {
+			return model.AccountQuotaSnapshot{}, fmt.Errorf("provider_window_aliases: %w", err)
+		}
+	}
+	scopeFingerprint := quotasnapshotrepo.ScopeFingerprint(scopeKind, scopeKey, modelIDs)
 	resetCredits, err := normalizeResetCredits(input.ResetCredits)
 	if err != nil {
 		return model.AccountQuotaSnapshot{}, err
 	}
 	relationshipKind := strings.ToLower(strings.TrimSpace(input.RelationshipKind))
 	containerWindowID := strings.TrimSpace(input.ContainerWindowID)
+	if provider == "codex" && containerWindowID != "" {
+		containerWindowID = codexquota.CanonicalProviderWindowID(containerWindowID)
+	}
 	if relationshipKind == "" && containerWindowID != "" {
 		return model.AccountQuotaSnapshot{}, errors.New("relationship_kind is required with container_provider_window_id")
 	}
@@ -597,8 +781,9 @@ func normalizeWindowInput(accountKey, provider string, input WindowInput, nowMS 
 	}
 	return model.AccountQuotaSnapshot{
 		AccountKey: accountKey, Provider: provider, ProviderWindowID: providerWindowID,
-		WindowKind: strings.TrimSpace(input.WindowKind), WindowMode: mode,
-		ModelScopeKind: scopeKind, ModelScopeKey: strings.TrimSpace(input.ModelScopeKey),
+		ProviderWindowAliases: providerWindowAliases,
+		WindowKind:            strings.TrimSpace(input.WindowKind), WindowMode: mode,
+		ModelScopeKind: scopeKind, ModelScopeKey: scopeKey,
 		ModelIDsJSON: modelIDsJSON, ScopeFingerprint: scopeFingerprint, Source: source,
 		SourceObservationID: sourceObservationID, ObservedAtMS: observedAtMS,
 		BoundaryAccuracy: accuracy, CycleStartMS: cycleStart, CycleEndMS: cycleEnd,
@@ -692,7 +877,11 @@ func selectWindows(
 	}
 	lifecycleLastSeen := make(map[string]int64, len(states))
 	for _, state := range states {
-		lifecycleLastSeen[state.ProviderWindowID+"\x00"+state.ScopeFingerprint] = state.LastSeenAtMS
+		normalizeCodexWindowStateForQuery(&state)
+		key := state.ProviderWindowID + "\x00" + state.ScopeFingerprint
+		if previous, ok := lifecycleLastSeen[key]; !ok || state.LastSeenAtMS > previous {
+			lifecycleLastSeen[key] = state.LastSeenAtMS
+		}
 	}
 	result := make([]Window, 0, len(groups))
 	for key, group := range groups {
@@ -805,7 +994,13 @@ func mergeLifecycleWindows(
 ) []Window {
 	statesByKey := make(map[string]model.AccountQuotaWindowState, len(states))
 	for _, state := range states {
-		statesByKey[state.ProviderWindowID+"\x00"+state.ScopeFingerprint] = state
+		normalizeCodexWindowStateForQuery(&state)
+		key := state.ProviderWindowID + "\x00" + state.ScopeFingerprint
+		// ListWindowStates is ordered newest-first. Keep the first state when
+		// legacy and scoped rows normalize to one logical identity.
+		if _, exists := statesByKey[key]; !exists {
+			statesByKey[key] = state
+		}
 	}
 	result := make([]Window, 0, len(windows))
 	for _, window := range windows {
@@ -967,9 +1162,13 @@ func copyInt64Pointer(value *int64) *int64 {
 }
 
 func isZeroOnlyHeaderPlaceholder(snapshot model.AccountQuotaSnapshot) bool {
+	providerWindowID := snapshot.ProviderWindowID
+	if snapshot.Provider == "codex" {
+		providerWindowID = codexquota.CanonicalProviderWindowID(providerWindowID, snapshot.WindowKind)
+	}
 	if snapshot.Source != "response_header" ||
 		snapshot.WindowMode != "unknown" ||
-		(snapshot.ProviderWindowID != "primary" && snapshot.ProviderWindowID != "secondary") ||
+		(providerWindowID != "five-hour" && providerWindowID != "weekly" && providerWindowID != "monthly") ||
 		snapshot.CycleStartMS != nil || snapshot.CycleEndMS != nil || snapshot.DurationSeconds != nil ||
 		snapshot.UsedValue != nil || snapshot.LimitValue != nil || strings.TrimSpace(snapshot.QuotaUnit) != "" ||
 		snapshot.UsedPercent == nil || *snapshot.UsedPercent != 0 {
@@ -1018,11 +1217,36 @@ func isStale(snapshot model.AccountQuotaSnapshot, nowMS int64) bool {
 }
 
 func snapshotWindow(snapshot model.AccountQuotaSnapshot, stale bool) Window {
+	modelScopeKind := snapshot.ModelScopeKind
+	modelScopeKey := snapshot.ModelScopeKey
+	modelIDs := unmarshalStringList(snapshot.ModelIDsJSON)
+	if snapshot.Provider == "codex" && strings.EqualFold(strings.TrimSpace(modelScopeKind), "all") &&
+		codexquota.IsMainProviderWindowID(snapshot.ProviderWindowID) {
+		mainScope := codexquota.MainScope()
+		modelScopeKind = mainScope.Kind
+		modelScopeKey = mainScope.Key
+		modelIDs = nil
+	}
+	providerWindowAliases := []string(nil)
+	if snapshot.Provider == "codex" {
+		for _, alias := range codexquota.ProviderWindowAliases(
+			snapshot.ProviderWindowID,
+			codexquota.ModelScope{Kind: modelScopeKind, Key: modelScopeKey, Models: modelIDs, Complete: true},
+		) {
+			if alias != snapshot.ProviderWindowID {
+				providerWindowAliases = append(providerWindowAliases, alias)
+			}
+		}
+	}
 	return Window{
-		ProviderWindowID: snapshot.ProviderWindowID, WindowKind: snapshot.WindowKind,
-		WindowMode: snapshot.WindowMode, ModelScopeKind: snapshot.ModelScopeKind,
-		ModelScopeKey: snapshot.ModelScopeKey, ModelIDs: unmarshalStringList(snapshot.ModelIDsJSON),
-		Source: snapshot.Source, SourceObservationID: snapshot.SourceObservationID,
+		ProviderWindowID:      snapshot.ProviderWindowID,
+		ProviderWindowAliases: providerWindowAliases,
+		WindowKind:            snapshot.WindowKind,
+		WindowMode:            snapshot.WindowMode,
+		ModelScopeKind:        modelScopeKind,
+		ModelScopeKey:         modelScopeKey,
+		ModelIDs:              modelIDs,
+		Source:                snapshot.Source, SourceObservationID: snapshot.SourceObservationID,
 		ObservedAtMS: snapshot.ObservedAtMS, BoundaryAccuracy: snapshot.BoundaryAccuracy,
 		CycleStartMS: snapshot.CycleStartMS, CycleEndMS: snapshot.CycleEndMS,
 		DurationSeconds: snapshot.DurationSeconds, UsedPercent: snapshot.UsedPercent,

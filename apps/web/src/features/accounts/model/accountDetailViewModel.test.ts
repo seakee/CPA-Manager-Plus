@@ -13,6 +13,8 @@ import { buildAccountDetailViewModel } from './accountDetailViewModel';
 import { accountWindowUsageRequestKey } from './accountWindowUsageRows';
 import type { UsageValueRow } from './usageValueRows';
 
+const CODEX_MAIN_SCOPE = { kind: 'family', key: 'codex_main', complete: true } as const;
+
 type AccountRowOverrides = Omit<Partial<AccountRow>, 'quota'> & {
   quota?: Partial<AccountRow['quota']>;
 };
@@ -473,6 +475,69 @@ describe('accountDetailViewModel', () => {
       scopeMatchStatus: 'partial',
       unmatchedRequests: 2,
     });
+    expect(viewModel.quota.windows[0].forecast).toBeNull();
+  });
+
+  it('does not forecast an incomplete quota scope even when cached usage is present', () => {
+    const row = makeRow({ provider: 'codex' });
+    const nowMs = Date.now();
+    const modelScope = { kind: 'feature' as const, key: 'future_feature', complete: false };
+    const currentKey = accountWindowUsageRequestKey(
+      row.selectionKey,
+      'future-feature-weekly-0',
+      'current',
+      modelScope
+    );
+    const previousKey = accountWindowUsageRequestKey(
+      row.selectionKey,
+      'future-feature-weekly-0',
+      'previous',
+      modelScope
+    );
+    const windowUsageByKey = new Map<string, MonitoringAccountWindowUsageItem>([
+      [
+        currentKey,
+        makeWindowUsage({
+          window_key: 'future-feature-weekly-0',
+          total_requests: 250,
+          total_tokens: 29_000_000,
+          total_cost: 21.23,
+        }),
+      ],
+      [
+        previousKey,
+        makeWindowUsage({
+          window_key: 'future-feature-weekly-0',
+          total_requests: 250,
+          total_tokens: 29_000_000,
+          total_cost: 21.23,
+        }),
+      ],
+    ]);
+
+    const viewModel = buildAccountDetailViewModel(row, {
+      quotaWindows: [
+        {
+          key: 'future-feature-weekly-0',
+          providerWindowId: 'future-feature-weekly-0',
+          label: 'Future Feature',
+          kind: 'weekly',
+          remainingPercent: 100,
+          usedPercent: 0,
+          resetLabel: 'later',
+          resetAtMs: nowMs + 7 * 24 * 60 * 60 * 1000,
+          resetAccuracy: 'exact',
+          observedAtMs: nowMs,
+          limitWindowSeconds: 7 * 24 * 60 * 60,
+          windowMode: 'fixed',
+          cycleStartMs: nowMs - 60 * 60 * 1000,
+          cycleEndMs: nowMs + 7 * 24 * 60 * 60 * 1000,
+          modelScope,
+        },
+      ],
+      windowUsageByKey,
+    });
+
     expect(viewModel.quota.windows[0].forecast).toBeNull();
   });
 
@@ -1674,6 +1739,7 @@ describe('accountDetailViewModel', () => {
           resetLabel: '2026-07-30T04:00:00Z',
           resetAtMs: earlierResetAtMs,
           resetAccuracy: 'exact',
+          modelScope: CODEX_MAIN_SCOPE,
         },
         {
           key: 'weekly-model',
@@ -1684,6 +1750,7 @@ describe('accountDetailViewModel', () => {
           resetLabel: '2026-07-30T06:00:00Z',
           resetAtMs: laterResetAtMs,
           resetAccuracy: 'exact',
+          modelScope: CODEX_MAIN_SCOPE,
         },
       ],
     });
@@ -1724,6 +1791,7 @@ describe('accountDetailViewModel', () => {
             resetLabel: '2026-07-30T04:00:00Z',
             resetAtMs: Date.parse('2026-07-30T04:00:00Z'),
             resetAccuracy: 'exact',
+            modelScope: CODEX_MAIN_SCOPE,
           },
           {
             key: 'weekly-unknown',
@@ -1734,6 +1802,7 @@ describe('accountDetailViewModel', () => {
             resetLabel: '-',
             resetAtMs: null,
             resetAccuracy: 'unknown',
+            modelScope: CODEX_MAIN_SCOPE,
           },
         ],
       }

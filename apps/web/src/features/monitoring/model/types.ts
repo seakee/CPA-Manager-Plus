@@ -158,17 +158,23 @@ export type MonitoringEventRow = {
   userAgent?: string;
   sourceKey: string;
   source: string;
+  sourceIdentity?: string;
+  sourceHashIdentity?: string;
   sourceMasked: string;
   account: string;
+  accountIdentity?: string;
   accountMasked: string;
   authIndex: string;
+  authIndexIdentity?: string;
   authIndexMasked: string;
   authLabel: string;
+  authLabelIdentity?: string;
   projectId: string;
   apiKeyHash: string;
   apiKeyLabel: string;
   apiKeyMasked: string;
   provider: string;
+  providerIdentity?: string;
   planType: string;
   channel: string;
   channelHost: string;
@@ -249,6 +255,7 @@ export type MonitoringAccountModelSpendRow = {
 export type MonitoringAccountRow = {
   id: string;
   account: string;
+  provider?: string;
   filterValue?: string;
   displayAccount: string;
   accountMasked: string;

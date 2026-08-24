@@ -67,6 +67,41 @@ func TestUsageDataMigrationInitialStateMatchesExistingUsageData(t *testing.T) {
 	}
 }
 
+func TestMigrateWithoutUsageEventsClearsDeferredIndexLedger(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing-source-deferred-index.sqlite")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if _, err := db.Exec(`insert into usage_derived_deferred_indexes (
+		index_name, table_name, reason, created_at_ms, updated_at_ms
+	) values ('idx_usage_account_model_rollups_last_seen',
+		'usage_account_model_rollups', 'deferred_indexes', 1, 1)`); err != nil {
+		_ = db.Close()
+		t.Fatalf("seed deferred index ledger: %v", err)
+	}
+	if _, err := db.Exec(`drop table usage_events`); err != nil {
+		_ = db.Close()
+		t.Fatalf("drop authoritative source fixture: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close source-missing fixture: %v", err)
+	}
+
+	db, err = Open(path)
+	if err != nil {
+		t.Fatalf("reopen source-missing fixture: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	var deferredIndexes int
+	if err := db.QueryRow(`select count(*) from usage_derived_deferred_indexes`).Scan(&deferredIndexes); err != nil {
+		t.Fatalf("count reset deferred index ledger: %v", err)
+	}
+	if deferredIndexes != 0 {
+		t.Fatalf("deferred index ledger after source recovery = %d, want 0", deferredIndexes)
+	}
+}
+
 func TestMigrateCreatesLatestAccountRequestIndexes(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "latest-account-request-indexes.sqlite"))
 	if err != nil {

@@ -17,6 +17,7 @@ import {
   parseQuotaResetLabelMs,
   resolveAbsoluteQuotaReset,
 } from '@/utils/quota/formatters';
+import { inferCodexQuotaScopeFromProviderWindowId } from '@/utils/quota/codexQuota';
 import type { AccountRow } from './accountRows';
 import type { AccountQuotaStores } from './accountQuotaSummary';
 
@@ -61,6 +62,7 @@ export interface AccountQuotaDisplayWindow {
   cycleStartMs?: number | null;
   cycleEndMs?: number | null;
   modelScope?: QuotaModelScope;
+  providerWindowAliases?: string[];
 }
 
 export type TranslateQuotaWindowLabel = (
@@ -299,6 +301,7 @@ export const buildAccountQuotaDisplayWindow = ({
   cycleStartMs,
   cycleEndMs,
   modelScope = { kind: 'all', complete: true },
+  providerWindowAliases,
   nowMs,
 }: {
   key: string;
@@ -320,6 +323,7 @@ export const buildAccountQuotaDisplayWindow = ({
   cycleStartMs?: number | null;
   cycleEndMs?: number | null;
   modelScope?: QuotaModelScope;
+  providerWindowAliases?: string[];
   nowMs?: number;
 }): AccountQuotaDisplayWindow => {
   const normalizedResetLabel = resetLabel || '-';
@@ -368,6 +372,7 @@ export const buildAccountQuotaDisplayWindow = ({
     cycleStartMs: cycleStartMs ?? range.fromMs,
     cycleEndMs: cycleEndMs ?? range.resetAtMs,
     modelScope,
+    providerWindowAliases,
     ...range,
   };
 };
@@ -390,6 +395,8 @@ const buildCodexQuotaDisplayWindows = (
       resetAtMs: window.resetAtMs,
       resetAccuracy: window.resetAccuracy,
       limitWindowSeconds: window.limitWindowSeconds ?? null,
+      modelScope: window.modelScope ?? inferCodexQuotaScopeFromProviderWindowId(window.id),
+      providerWindowAliases: window.providerWindowAliases,
       source: 'codex',
       observationSource:
         window.observationSource ??
@@ -590,10 +597,7 @@ const buildXaiQuotaDisplayWindows = (
       ? clampDisplayPercent(billing.usedPercent)
       : null;
 
-  if (
-    monthlyUsedPercent !== null ||
-    billing.monthlyLimitCents !== null
-  ) {
+  if (monthlyUsedPercent !== null || billing.monthlyLimitCents !== null) {
     windows.push(
       buildAccountQuotaDisplayWindow({
         key: 'billing',

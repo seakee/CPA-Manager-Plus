@@ -21,7 +21,33 @@
 - 大型历史数据修正可能在 HTTP 服务开始监听后继续后台执行。
 - migration 期间 account-history 或 dashboard-hourly rollup 可能暂停追平；相关页面会临时回退 raw events，性能可能暂时降低。
 - 不要为了加速 migration 或 rollup 重建而启动第二个 Manager Server 连接同一 SQLite 或消费同一 CPA 队列。
-- 可通过带管理员密钥的 `GET /status` 查看迁移、采集器和事件状态。
+- 可通过带管理员密钥的 `GET /status` 查看迁移、采集器、事件和 `databaseMaintenance` 状态。全局 Warning、系统信息页和请求监控页会在需要离线维护时显示明确提示。
+
+### 如果数据库维护状态为 degraded
+
+为保证大型数据库升级时 Manager Server 能先监听 HTTP，非空大表的缺失索引和部分旧派生数据清理不会在启动阶段无界执行。这不代表数据丢失，但缺失查询索引可能让历史请求查询明显变慢或超时。
+
+Docker Compose：
+
+```bash
+docker compose stop cpa-manager-plus
+
+docker compose run --rm --no-deps \
+  cpa-manager-plus \
+  cleanup-derived --db-path /data/usage.sqlite
+
+docker compose start cpa-manager-plus
+```
+
+原生安装：
+
+```bash
+cpa-manager-plus cleanup-derived
+# 非默认路径
+cpa-manager-plus cleanup-derived --db-path /path/to/usage.sqlite
+```
+
+必须先停止 Manager Server，因为离线命令需要独占 SQLite 进程锁。Web UI 不会自动执行、启动 cleanup 子进程或在线创建大表索引。全局提示通过 `/status?scope=database-maintenance` 读取有界 metadata，不会为轮询维护状态扫描或统计 `usage_events`。命令完成并重启后，`/status.databaseMaintenance` 会从真实 metadata 自动恢复为 clean。`cleanup-derived` 不会删除、重建或改写 authoritative `usage_events`。
 
 ## 一键安装器生成的 Docker 部署
 
@@ -236,6 +262,7 @@ curl -f -H "Authorization: Bearer <CPAMP_ADMIN_KEY>" \
 - `lastConsumedAt`、`lastInsertedAt` 和 `eventCount` 正常更新。
 - Dashboard、请求监控和 Usage Analytics 能读取数据。
 - `/status` 中的后台 migration 最终完成，rollup checkpoint 继续推进。
+- `/status.databaseMaintenance.required` 为 `false`；若为 `true`，确认 deferred index 和 offline job 数量，并按上面的离线步骤处理。
 - 反向代理部署的 `/management.html`、`/usage-service/*` 和管理 API 路径仍指向正确服务。
 
 ## 回滚原则

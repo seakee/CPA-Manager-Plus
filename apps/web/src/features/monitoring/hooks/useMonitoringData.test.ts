@@ -19,6 +19,7 @@ import {
   buildAccountRowsFromAnalytics,
   buildApiKeyRowsFromAnalytics,
 } from '../model/analyticsAdapters';
+import { buildMonitoringAccountRowId } from '../model/accountIdentity';
 import type { MonitoringAnalyticsEventRow } from '@/services/api/usageService';
 import { buildSourceInfoMap } from '@/utils/sourceResolver';
 import { sha256Hex } from '@/utils/apiKeyHash';
@@ -39,17 +40,23 @@ const createMonitoringEventRow = (
   endpointPath: overrides.endpointPath ?? '/v1/chat/completions',
   sourceKey: overrides.sourceKey ?? 'source:alpha',
   source: overrides.source ?? 'alpha.json',
+  sourceIdentity: overrides.sourceIdentity,
+  sourceHashIdentity: overrides.sourceHashIdentity,
   sourceMasked: overrides.sourceMasked ?? 'a***',
   account: overrides.account ?? 'amount-myth-resend@duck.com',
+  accountIdentity: overrides.accountIdentity,
   accountMasked: overrides.accountMasked ?? 'amo***@duck.com',
   authIndex: overrides.authIndex ?? 'auth-123456',
+  authIndexIdentity: overrides.authIndexIdentity,
   authIndexMasked: overrides.authIndexMasked ?? 'auth...3456',
   authLabel: overrides.authLabel ?? 'alpha.json',
+  authLabelIdentity: overrides.authLabelIdentity,
   projectId: overrides.projectId ?? 'project-alpha',
   apiKeyHash: overrides.apiKeyHash ?? 'api-key-hash',
   apiKeyLabel: overrides.apiKeyLabel ?? 'ak********sh',
   apiKeyMasked: overrides.apiKeyMasked ?? 'ak********sh',
   provider: overrides.provider ?? 'codex',
+  providerIdentity: overrides.providerIdentity,
   planType: overrides.planType ?? 'pro',
   channel: overrides.channel ?? 'codex',
   channelHost: overrides.channelHost ?? 'example.com',
@@ -192,6 +199,95 @@ describe('analytics aggregate row adapters', () => {
     expect(rows[0].models[0]).toMatchObject({ model: 'gpt-4.1', totalCalls: 3 });
   });
 
+  it('preserves provider-scoped backend account ids for the same account display value', () => {
+    const base = {
+      account_snapshot: 'same@example.com',
+      auth_label_snapshot: 'Shared Account',
+      sources: [] as string[],
+      source_hashes: [] as string[],
+      success_calls: 1,
+      failure_calls: 0,
+      success_rate: 1,
+      input_tokens: 10,
+      output_tokens: 5,
+      cached_tokens: 0,
+      cache_read_tokens: 0,
+      cache_creation_tokens: 0,
+      total_tokens: 15,
+      cost: 0,
+      average_latency_ms: null,
+      last_seen_ms: 1_768_759_000_000,
+      models: [],
+    };
+    const rows = buildAccountRowsFromAnalytics(
+      [
+        {
+          ...base,
+          id: 'codex-specific-id',
+          auth_provider_snapshot: 'codex',
+          auth_indices: ['codex-auth'],
+          calls: 197,
+          success_calls: 197,
+        },
+        {
+          ...base,
+          id: 'antigravity-specific-id',
+          auth_provider_snapshot: 'antigravity',
+          auth_indices: ['antigravity-auth'],
+          calls: 17,
+          success_calls: 17,
+        },
+      ],
+      new Map(),
+      new Map(),
+      sourceInfoMap,
+      new Map()
+    );
+
+    expect(rows.map((row) => row.id)).toEqual(['codex-specific-id', 'antigravity-specific-id']);
+    expect(rows.map((row) => row.account)).toEqual(['same@example.com', 'same@example.com']);
+    expect(rows.map((row) => row.provider)).toEqual(['codex', 'antigravity']);
+  });
+
+  it('builds a legacy analytics fallback id from persisted identity rather than display metadata', () => {
+    const rows = buildAccountRowsFromAnalytics(
+      [
+        {
+          id: '',
+          account_snapshot: '',
+          auth_label_snapshot: 'Team Account',
+          auth_provider_snapshot: 'codex',
+          auth_indices: ['auth-123456'],
+          sources: ['team.json'],
+          source_hashes: ['source-hash'],
+          calls: 1,
+          success_calls: 1,
+          failure_calls: 0,
+          success_rate: 1,
+          input_tokens: 1,
+          output_tokens: 1,
+          cached_tokens: 0,
+          cache_read_tokens: 0,
+          cache_creation_tokens: 0,
+          total_tokens: 2,
+          cost: 0,
+          average_latency_ms: null,
+          last_seen_ms: 1,
+          models: [],
+        },
+      ],
+      authMetaMap,
+      authFileMap,
+      sourceInfoMap,
+      channelByAuthIndex
+    );
+
+    expect(rows[0]).toMatchObject({
+      id: buildMonitoringAccountRowId({ provider: 'codex', authLabel: 'Team Account' }),
+      account: 'team@example.com',
+    });
+  });
+
   it('builds api key rows from full backend aggregates and keeps aliases', () => {
     const rows = buildApiKeyRowsFromAnalytics(
       [
@@ -261,6 +357,127 @@ describe('buildAccountRows', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].authIndices).toEqual(['auth-123456', 'auth-999999']);
     expect(rows[0].sourceKeys).toEqual(['source:alpha', 'source:beta']);
+  });
+
+  it('uses provider-scoped logical account identity in the fallback path', () => {
+    const rows = buildAccountRows([
+      createMonitoringEventRow({
+        id: 'codex-a',
+        account: 'same@example.com',
+        provider: 'codex',
+        authIndex: 'codex-auth-a',
+        model: 'model-x',
+      }),
+      createMonitoringEventRow({
+        id: 'codex-b',
+        account: 'same@example.com',
+        provider: 'codex',
+        authIndex: 'codex-auth-b',
+        model: 'model-x',
+      }),
+      createMonitoringEventRow({
+        id: 'antigravity',
+        account: 'same@example.com',
+        provider: 'antigravity',
+        authIndex: 'antigravity-auth',
+        model: 'model-x',
+      }),
+    ]);
+
+    expect(rows).toHaveLength(2);
+    const byProvider = new Map(rows.map((row) => [row.provider, row]));
+    expect(byProvider.get('codex')).toMatchObject({
+      account: 'same@example.com',
+      totalCalls: 2,
+      authIndices: ['codex-auth-a', 'codex-auth-b'],
+    });
+    expect(byProvider.get('codex')?.models).toMatchObject([{ model: 'model-x', totalCalls: 2 }]);
+    expect(byProvider.get('antigravity')).toMatchObject({
+      account: 'same@example.com',
+      totalCalls: 1,
+      authIndices: ['antigravity-auth'],
+    });
+    expect(byProvider.get('codex')?.id).not.toBe(byProvider.get('antigravity')?.id);
+  });
+
+  it('uses persisted fallback identity instead of an enriched display account', () => {
+    const rows = buildAccountRows([
+      createMonitoringEventRow({
+        id: 'codex-label',
+        account: 'metadata@example.com',
+        accountIdentity: '',
+        authLabel: 'Shared Label',
+        authLabelIdentity: 'Shared Label',
+        provider: 'codex',
+        providerIdentity: 'codex',
+        authIndex: 'codex-auth',
+      }),
+      createMonitoringEventRow({
+        id: 'antigravity-label',
+        account: 'metadata@example.com',
+        accountIdentity: '',
+        authLabel: 'Shared Label',
+        authLabelIdentity: 'Shared Label',
+        provider: 'antigravity',
+        providerIdentity: 'antigravity',
+        authIndex: 'antigravity-auth',
+      }),
+    ]);
+
+    expect(rows.map((row) => row.id).sort()).toEqual(
+      [
+        buildMonitoringAccountRowId({ provider: 'codex', authLabel: 'Shared Label' }),
+        buildMonitoringAccountRowId({ provider: 'antigravity', authLabel: 'Shared Label' }),
+      ].sort()
+    );
+  });
+
+  it('keeps provider scope when only a persisted source hash identifies the account', () => {
+    const rows = buildAccountRows([
+      createMonitoringEventRow({
+        id: 'codex-source-hash',
+        account: '-',
+        accountIdentity: '',
+        authLabel: '-',
+        authLabelIdentity: '',
+        source: '-',
+        sourceIdentity: '',
+        sourceHashIdentity: 'codex-source-hash',
+        authIndex: '-',
+        authIndexIdentity: '',
+        provider: 'codex',
+        providerIdentity: 'codex',
+      }),
+      createMonitoringEventRow({
+        id: 'antigravity-source-hash',
+        account: '-',
+        accountIdentity: '',
+        authLabel: '-',
+        authLabelIdentity: '',
+        source: '-',
+        sourceIdentity: '',
+        sourceHashIdentity: 'antigravity-source-hash',
+        authIndex: '-',
+        authIndexIdentity: '',
+        provider: 'antigravity',
+        providerIdentity: 'antigravity',
+      }),
+    ]);
+
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row.id).sort()).toEqual(
+      [
+        buildMonitoringAccountRowId({ provider: 'codex', sourceHash: 'codex-source-hash' }),
+        buildMonitoringAccountRowId({
+          provider: 'antigravity',
+          sourceHash: 'antigravity-source-hash',
+        }),
+      ].sort()
+    );
+    expect(rows.map((row) => row.filterValue).sort()).toEqual([
+      'source:antigravity-source-hash',
+      'source:codex-source-hash',
+    ]);
   });
 });
 
@@ -489,9 +706,8 @@ describe('buildScopeFilteredRows', () => {
 
   it('clamps local summary cache rates and respects resolved GPT-5.6 aliases', () => {
     expect(
-      buildMonitoringSummary([
-        createMonitoringEventRow({ inputTokens: 10, cachedTokens: 100 }),
-      ]).cacheHitRate
+      buildMonitoringSummary([createMonitoringEventRow({ inputTokens: 10, cachedTokens: 100 })])
+        .cacheHitRate
     ).toBe(1);
 
     expect(

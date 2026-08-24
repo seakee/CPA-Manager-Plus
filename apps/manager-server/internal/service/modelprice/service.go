@@ -329,6 +329,7 @@ func (s *Service) Sync(ctx context.Context, req SyncRequest) (SyncResult, error)
 	if err != nil {
 		return SyncResult{}, err
 	}
+	selection = filterSelectionFeedback(selection, prices)
 	return SyncResult{
 		Source:        syncResultSource(sources),
 		Sources:       sources,
@@ -1777,4 +1778,30 @@ func readString(entry map[string]any, key string) string {
 	default:
 		return ""
 	}
+}
+
+// filterSelectionFeedback drops candidate and unmatched entries for models that
+// already have a stored price. Sync feedback should only report models the user
+// can still act on; the prices page intentionally hides priced rows from the
+// pending-confirmation filter to protect manually configured prices, so reporting
+// them here only produces misleading counts.
+func filterSelectionFeedback(selection priceSelectionResult, prices map[string]store.ModelPrice) priceSelectionResult {
+	if len(selection.Candidates) == 0 && len(selection.Unmatched) == 0 {
+		return selection
+	}
+	candidates := make([]SyncCandidateSet, 0, len(selection.Candidates))
+	for _, set := range selection.Candidates {
+		if _, priced := prices[set.Model]; !priced {
+			candidates = append(candidates, set)
+		}
+	}
+	unmatched := make([]string, 0, len(selection.Unmatched))
+	for _, model := range selection.Unmatched {
+		if _, priced := prices[model]; !priced {
+			unmatched = append(unmatched, model)
+		}
+	}
+	selection.Candidates = candidates
+	selection.Unmatched = unmatched
+	return selection
 }

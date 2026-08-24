@@ -12,6 +12,13 @@ vi.mock('react-i18next', () => ({
 }));
 
 const status: UsageServiceStatus = {
+  databaseMaintenance: {
+    required: false,
+    performanceDegraded: false,
+    deferredIndexes: 0,
+    offlineJobs: 0,
+    reasons: [],
+  },
   database: {
     databaseBytes: 1024 ** 3,
     walBytes: 64 * 1024 ** 2,
@@ -70,6 +77,33 @@ describe('DatabaseStatusCard', () => {
     expect(markup).toContain('system_info.database_checkpoint_error');
     expect(markup).toContain('checkpoint deadline exceeded');
     expect(markup).toContain('64.00 MB');
+  });
+
+  it('shows the bounded maintenance summary without exposing internal index names', () => {
+    const markup = renderToStaticMarkup(
+      <DatabaseStatusCard
+        status={{
+          ...status,
+          databaseMaintenance: {
+            required: true,
+            performanceDegraded: true,
+            deferredIndexes: 10,
+            offlineJobs: 1,
+            reasons: ['deferred_indexes', 'offline_derived_cleanup'],
+            command: 'cleanup-derived',
+          },
+        }}
+        loading={false}
+        error=""
+      />
+    );
+
+    expect(markup).toContain('system_info.database_maintenance_title');
+    expect(markup).toContain('database_maintenance.query_index_count');
+    expect(markup).toContain('database_maintenance.offline_job_count');
+    expect(markup).toContain('system_info.database_maintenance_counts');
+    expect(markup).toContain('system_info.database_maintenance_hint');
+    expect(markup).not.toContain('idx_usage_');
   });
 
   it('labels a failed status request separately from a checkpoint failure', () => {

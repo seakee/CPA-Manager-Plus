@@ -1,6 +1,8 @@
 package system
 
 import (
+	"errors"
+	"log"
 	"net/http"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/app"
@@ -46,6 +48,18 @@ func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 	if !middleware.AuthorizePanel(w, r, h.App.AdminAuthService) {
 		return
 	}
+	databaseMaintenance, err := h.App.Store.DerivedMaintenanceStatus(r.Context())
+	if err != nil {
+		log.Printf("read database maintenance status: %v", err)
+		response.Error(w, http.StatusInternalServerError, errors.New("database maintenance status unavailable"))
+		return
+	}
+	if r.URL.Query().Get("scope") == "database-maintenance" {
+		response.JSON(w, http.StatusOK, map[string]any{
+			"databaseMaintenance": databaseMaintenance,
+		})
+		return
+	}
 	events, deadLetters, err := h.App.UsageService.Counts(r.Context())
 	if err != nil {
 		response.Error(w, http.StatusInternalServerError, err)
@@ -76,6 +90,7 @@ func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 			UpdatedAtMS:   migration.UpdatedAtMS,
 			FinishedAtMS:  migration.FinishedAtMS,
 		},
+		"databaseMaintenance": databaseMaintenance,
 	}
 	if h.App.DatabaseMaintenance != nil {
 		payload["database"] = h.App.DatabaseMaintenance.Snapshot()

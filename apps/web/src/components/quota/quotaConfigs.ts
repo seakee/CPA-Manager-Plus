@@ -19,7 +19,6 @@ import type {
   CodexQuotaData,
   KimiQuotaData,
 } from '@/utils/quota';
-import { resetCodexQuota } from '@/services/api/codexQuota';
 import {
   buildCodexQuotaWindows,
   fetchAntigravityQuota,
@@ -28,7 +27,10 @@ import {
   fetchKimiQuota,
   fetchXaiQuota,
   filterFreshCodexQuotaWindows,
+  findCodexProviderWindowMatch,
+  isCodexMainQuotaModelScope,
   isValidQuotaResetAtMs,
+  resolveCodexUsageQuotaScope,
   resolveCodexPlanType,
 } from '@/utils/quota';
 import {
@@ -74,12 +76,6 @@ export interface QuotaConfig<TState, TData> {
     snapshot: UsageHeaderSnapshot | undefined,
     t: TFunction
   ) => TState | undefined;
-  resetQuota?: (
-    file: AuthFileItem,
-    t: TFunction,
-    requestScope?: AuthFilesApiRequestScope
-  ) => Promise<TData>;
-  canResetQuota?: (file: AuthFileItem, quota: TState | undefined) => boolean;
 }
 
 export const getQuotaStoreKey = <TState, TData>(
@@ -194,6 +190,10 @@ const mergeCodexQuotaWindow = (
     ...(readFiniteTimestamp(observedWindow.observedAtMs) !== null
       ? { observedAtMs: observedWindow.observedAtMs }
       : {}),
+    ...(observedWindow.modelScope ? { modelScope: observedWindow.modelScope } : {}),
+    ...(observedWindow.providerWindowAliases
+      ? { providerWindowAliases: observedWindow.providerWindowAliases }
+      : {}),
   };
 };
 
@@ -204,14 +204,35 @@ const mergeCodexQuotaWindows = (
   if (!observedWindows || observedWindows.length === 0) return activeWindows;
   if (!activeWindows || activeWindows.length === 0) return observedWindows;
 
-  const observedById = new Map(observedWindows.map((window) => [window.id, window]));
-  const mergedWindows = activeWindows.map((window) => {
-    const observedWindow = observedById.get(window.id);
-    if (!observedWindow) return window;
-    observedById.delete(window.id);
-    return mergeCodexQuotaWindow(window, observedWindow);
+  const usedObserved = new Set<number>();
+  const mergedWindows = activeWindows.map((window, activeIndex) => {
+    const observedIndex = findCodexProviderWindowMatch(
+      activeWindows,
+      observedWindows,
+      activeIndex,
+      usedObserved
+    );
+    if (observedIndex < 0) return window;
+    usedObserved.add(observedIndex);
+    const observedWindow = observedWindows[observedIndex];
+    const merged = mergeCodexQuotaWindow(window, observedWindow);
+    const aliases = Array.from(
+      new Set([
+        ...(window.providerWindowAliases ?? []),
+        ...(observedWindow.providerWindowAliases ?? []),
+        window.id,
+      ])
+    ).filter((alias) => alias && alias !== observedWindow.id);
+    return {
+      ...merged,
+      id: observedWindow.id,
+      ...(aliases.length > 0 ? { providerWindowAliases: aliases } : {}),
+    };
   });
-  return [...mergedWindows, ...observedById.values()];
+  return [
+    ...mergedWindows,
+    ...observedWindows.filter((_, index) => !usedObserved.has(index)),
+  ];
 };
 
 const hasKnownResetCreditCount = (quota: CodexQuotaMergeState): boolean => {
@@ -236,25 +257,33 @@ const mergeObservedQuotaIntoActive = <TState extends DisplayQuotaState>(
     'response_header',
     readFiniteTimestamp(observed.observedAtMs)
   );
+  const scopedObservation =
+    observed.observedFromUsageHeaders === true &&
+    (observed.observedModelScope === undefined ||
+      !isCodexMainQuotaModelScope(observed.observedModelScope));
   const scalarKeys: Array<keyof CodexQuotaMergeState> = [
     'status',
     'planType',
-    'activeLimit',
-    'creditsHasCredits',
-    'creditsUnlimited',
-    'creditsBalance',
-    'creditsOverageLimitReached',
-    'creditsApproxLocalMessages',
-    'creditsApproxCloudMessages',
-    'spendControlReached',
-    'spendControlIndividualLimit',
-    'rateLimitReachedType',
-    'primaryOverSecondaryLimitPercent',
     'observedAtMs',
     'observedTraceId',
     'observedErrorKind',
     'observedErrorCode',
   ];
+  if (!scopedObservation) {
+    scalarKeys.push(
+      'activeLimit',
+      'creditsHasCredits',
+      'creditsUnlimited',
+      'creditsBalance',
+      'creditsOverageLimitReached',
+      'creditsApproxLocalMessages',
+      'creditsApproxCloudMessages',
+      'spendControlReached',
+      'spendControlIndividualLimit',
+      'rateLimitReachedType',
+      'primaryOverSecondaryLimitPercent'
+    );
+  }
   scalarKeys.forEach((key) => {
     const value = observed[key];
     if (hasObservedValue(value)) {
@@ -263,6 +292,7 @@ const mergeObservedQuotaIntoActive = <TState extends DisplayQuotaState>(
   });
   merged.windows = mergeCodexQuotaWindows(activeWindows, observedWindows);
   if (observed.observedFromUsageHeaders === true) merged.observedFromUsageHeaders = true;
+  if (observed.observedModelScope) merged.observedModelScope = observed.observedModelScope;
   if (observed.observedResetCreditsUnknown === true && !hasKnownResetCreditCount(active)) {
     merged.observedResetCreditsUnknown = true;
   }
@@ -284,13 +314,24 @@ const appendMissingObservedQuotaWindows = <TState extends DisplayQuotaState>(
       'response_header',
       readFiniteTimestamp(observed.observedAtMs)
     ) ?? [];
-  const activeWindowIDs = new Set(activeWindows.map((window) => window.id));
-  const missingWindows = observedWindows.filter((window) => !activeWindowIDs.has(window.id));
+  const isAlreadyRepresented = (observedIndex: number): boolean => {
+    return activeWindows.some(
+      (_, activeIndex) =>
+        findCodexProviderWindowMatch(
+          activeWindows,
+          observedWindows,
+          activeIndex,
+          new Set<number>()
+        ) === observedIndex
+    );
+  };
+  const missingWindows = observedWindows.filter((_, observedIndex) => !isAlreadyRepresented(observedIndex));
   if (missingWindows.length === 0) return activeQuota;
   const merged: CodexQuotaMergeState = {
     ...active,
     windows: [...activeWindows, ...missingWindows],
     observedFromUsageHeaders: true,
+    observedModelScope: observed.observedModelScope,
   };
   const observedAtMs = readFiniteTimestamp(observed.observedAtMs);
   if (observedAtMs !== null) merged.observedAtMs = observedAtMs;
@@ -394,6 +435,14 @@ export const buildObservedCodexQuotaState = (
 ): CodexQuotaState | undefined => {
   if (!hasUsageHeaderQuotaSignal(snapshot)) return undefined;
   const observedQuota = buildObservedCodexQuotaFromHeaderSnapshot(snapshot);
+  const observedScope =
+    observedQuota?.quotaScope ??
+    resolveCodexUsageQuotaScope({
+      model: snapshot?.model,
+      analyticsModel: snapshot?.analytics_model,
+      requestedModel: snapshot?.requested_model,
+      resolvedModel: snapshot?.resolved_model,
+    });
   const usedPercent = getHeaderSnapshotUsedPercent(snapshot);
   const recoverAtMS = getHeaderSnapshotRecoverAtMs(snapshot);
   const recoverLabel = recoverAtMS ? new Date(recoverAtMS).toLocaleString() : '-';
@@ -405,7 +454,8 @@ export const buildObservedCodexQuotaState = (
         t,
         planType,
         snapshot?.timestamp_ms ?? nowMs,
-        'response_header'
+        'response_header',
+        observedScope
       )
     : [];
   const observedWindows = filterFreshCodexQuotaWindows(rawObservedWindows, nowMs);
@@ -418,7 +468,9 @@ export const buildObservedCodexQuotaState = (
       : fallbackUsedPercent !== null || fallbackRecoverAtMS
         ? [
             {
-              id: 'usage-header-observed',
+              id: observedScope.providerWindowIdPrefix
+                ? `${observedScope.providerWindowIdPrefix}-observed`
+                : 'usage-header-observed',
               label: t('codex_quota.observed_window', { defaultValue: 'Latest request' }),
               usedPercent: fallbackUsedPercent,
               resetLabel: fallbackRecoverAtMS ? recoverLabel : '-',
@@ -426,6 +478,7 @@ export const buildObservedCodexQuotaState = (
               resetAccuracy: fallbackRecoverAtMS ? 'estimated' : 'unknown',
               observationSource: 'response_header',
               observedAtMs: snapshot?.timestamp_ms ?? null,
+              modelScope: observedScope.modelScope,
             },
           ]
         : [];
@@ -441,6 +494,7 @@ export const buildObservedCodexQuotaState = (
     rateLimitReachedType: observedQuota?.rateLimitReachedType ?? null,
     primaryOverSecondaryLimitPercent: observedQuota?.primaryOverSecondaryLimitPercent ?? null,
     observedFromUsageHeaders: true,
+    observedModelScope: observedScope.modelScope,
     observedResetCreditsUnknown: true,
     observedAtMs: snapshot?.timestamp_ms,
     observedTraceId: getHeaderSnapshotTraceId(snapshot),
@@ -581,9 +635,6 @@ export const CODEX_CONFIG: QuotaConfig<CodexQuotaState, CodexQuotaData> = {
   buildFailureState: buildCodexQuotaFailureState,
   scopeState: scopeCredentialQuotaState,
   buildObservedState: buildObservedCodexQuotaState,
-  resetQuota: resetCodexQuota,
-  canResetQuota: (_file, quota) =>
-    quota?.status === 'success' && (quota.rateLimitResetCreditsAvailableCount ?? 0) > 0,
 };
 
 export const KIMI_CONFIG: QuotaConfig<KimiQuotaState, KimiQuotaData> = {

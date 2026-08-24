@@ -11,6 +11,8 @@ import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
 import { PageTransition } from '@/components/common/PageTransition';
+import { DatabaseMaintenanceBanner } from '@/components/common/DatabaseMaintenanceBanner';
+import { DatabaseMaintenanceProvider } from '@/components/common/DatabaseMaintenanceContext';
 import { MainRoutes } from '@/router/MainRoutes';
 import {
   IconGithub,
@@ -227,7 +229,7 @@ interface MainLayoutProps {
   demoMode?: boolean;
 }
 
-export function MainLayout({ routeBase = '', demoMode = false }: MainLayoutProps = {}) {
+function MainLayoutContent({ routeBase = '', demoMode = false }: MainLayoutProps = {}) {
   const { t } = useTranslation();
   const { showNotification } = useNotificationStore();
   const location = useLocation();
@@ -984,6 +986,7 @@ export function MainLayout({ routeBase = '', demoMode = false }: MainLayoutProps
               .filter(Boolean)
               .join(' ')}
           >
+            <DatabaseMaintenanceBanner />
             <PageTransition
               key={routeBase || 'main'}
               render={(location) => <MainRoutes location={location} routeBase={routeBase} />}
@@ -1000,5 +1003,13 @@ export function MainLayout({ routeBase = '', demoMode = false }: MainLayoutProps
         </div>
       </div>
     </div>
+  );
+}
+
+export function MainLayout(props: MainLayoutProps = {}) {
+  return (
+    <DatabaseMaintenanceProvider>
+      <MainLayoutContent {...props} />
+    </DatabaseMaintenanceProvider>
   );
 }

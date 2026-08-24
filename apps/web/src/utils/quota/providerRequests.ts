@@ -75,7 +75,7 @@ import {
   parseXaiBillingPayload,
 } from './parsers';
 import { resolveCodexChatgptAccountId, resolveCodexPlanType } from './resolvers';
-import { buildCodexQuotaWindowInfos } from './codexQuota';
+import { buildCodexQuotaWindowInfos, type CodexQuotaScopeResolution } from './codexQuota';
 import {
   buildCodexResetCreditsRequestHeaders,
   buildCodexUsageRequestHeaders,
@@ -347,21 +347,26 @@ export const buildCodexQuotaWindows = (
   t: TFunction,
   planType?: string | null,
   observedAtMs = Date.now(),
-  source: CodexQuotaResetSource = 'provider_api'
+  source: CodexQuotaResetSource = 'provider_api',
+  rateLimitScope?: CodexQuotaScopeResolution
 ): CodexQuotaWindow[] =>
-  buildCodexQuotaWindowInfos(payload, { planType, observedAtMs, source }).map((window) => ({
-    id: window.id,
-    label: t(window.labelKey, window.labelParams),
-    labelKey: window.labelKey,
-    labelParams: window.labelParams,
-    usedPercent: window.usedPercent,
-    resetLabel: window.resetLabel,
-    resetAtMs: window.resetAtMs,
-    resetAccuracy: window.resetAccuracy,
-    limitWindowSeconds: window.limitWindowSeconds,
-    observationSource: source === 'response_header' ? 'response_header' : 'api_query',
-    observedAtMs,
-  }));
+  buildCodexQuotaWindowInfos(payload, { planType, observedAtMs, source, rateLimitScope }).map(
+    (window) => ({
+      id: window.id,
+      label: t(window.labelKey, window.labelParams),
+      labelKey: window.labelKey,
+      labelParams: window.labelParams,
+      usedPercent: window.usedPercent,
+      resetLabel: window.resetLabel,
+      resetAtMs: window.resetAtMs,
+      resetAccuracy: window.resetAccuracy,
+      limitWindowSeconds: window.limitWindowSeconds,
+      observationSource: source === 'response_header' ? 'response_header' : 'api_query',
+      observedAtMs,
+      modelScope: window.modelScope,
+      providerWindowAliases: window.providerWindowAliases,
+    })
+  );
 
 const resolveCodexRateLimitResetCreditsAvailableCount = (
   payload: CodexUsagePayload

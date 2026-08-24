@@ -96,6 +96,46 @@ func TestRunRejectsMissingDatabase(t *testing.T) {
 	}
 }
 
+func TestRunIsIdempotentAndLeavesMaintenanceStatusClean(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.sqlite")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	var firstStdout, firstStderr bytes.Buffer
+	if err := Run(context.Background(), []string{"--db-path", dbPath}, &firstStdout, &firstStderr); err != nil {
+		t.Fatalf("run initial derived cleanup: %v stderr=%s", err, firstStderr.String())
+	}
+	if !strings.Contains(firstStdout.String(), "Derived cleanup completed:") {
+		t.Fatalf("initial cleanup output = %q", firstStdout.String())
+	}
+
+	var secondStdout, secondStderr bytes.Buffer
+	if err := Run(context.Background(), []string{"--db-path", dbPath}, &secondStdout, &secondStderr); err != nil {
+		t.Fatalf("run repeated derived cleanup: %v stderr=%s", err, secondStderr.String())
+	}
+	if strings.TrimSpace(secondStdout.String()) != "No pending derived cleanup jobs." {
+		t.Fatalf("repeated cleanup output = %q", secondStdout.String())
+	}
+
+	st, err = store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer st.Close()
+	status, err := st.DerivedMaintenanceStatus(context.Background())
+	if err != nil {
+		t.Fatalf("read maintenance status: %v", err)
+	}
+	if status.Required || status.PerformanceDegraded || status.DeferredIndexes != 0 || status.OfflineJobs != 0 {
+		t.Fatalf("maintenance status after repeated cleanup = %+v", status)
+	}
+}
+
 func TestRunRejectsActiveManagerBeforeMutatingCleanupState(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "usage.sqlite")
 	st, err := store.Open(dbPath)

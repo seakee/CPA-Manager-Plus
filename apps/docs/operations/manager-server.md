@@ -254,13 +254,46 @@ USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED=false
 
 历史 rollup 重建和过期行清理只会在 HTTP 监听可用后执行。启动阶段的索引准备严格受限：仅当目标表为空且索引名未被 parked 表保留时，Manager Server 才会创建缺失索引。非空表索引和被旧表占用的索引名会记录为 deferred，避免大表建索引延迟采集器启动。重建期间，查询使用当前完整 revision，尚未完成时回退到原始 `usage_events`；批次中断后，进程重启会从已提交 checkpoint 继续。这些任务不得修改或删除 `usage_events`。
 
-数据库升级后，旧的请求监控 FTS generation 可能在配对投影行完成分批在线清理后继续保留；非空表索引也可能被延后，旧 quota cooldown identity 索引则可能需要离线替换。极端情况下，单个旧 quota observation group 超过在线安全批次限制时，迁移会进入 failed 状态并记录 `offline cleanup required`，原始 snapshot fallback 仍继续可用。日志出现 deferred index preparation、`cleanup requires offline finalization` 或 `offline cleanup required` 时，先停止所有使用该数据库的 Manager Server 进程，再使用同版本二进制执行一次命令，完成后重启服务：
+这种 listener-first 策略保证大型历史数据库升级时 HTTP 服务能够尽快监听，但 deferred indexes 或离线清理尚未完成时，历史查询可能退化为更大的扫描和临时排序。Manager Server 会通过 `GET /status` 的 `databaseMaintenance` 返回稳定、脱敏且可自动恢复的维护状态；系统信息页、全局 Warning 和请求监控页会使用同一状态提示用户：
 
-```bash
-cpa-manager-plus cleanup-derived --db-path /data/usage.sqlite
+```json
+{
+  "databaseMaintenance": {
+    "required": true,
+    "performanceDegraded": true,
+    "deferredIndexes": 10,
+    "offlineJobs": 1,
+    "reasons": ["deferred_indexes", "offline_derived_cleanup"],
+    "command": "cleanup-derived"
+  }
+}
 ```
 
-原生安装若使用默认数据库路径，可直接运行 `cpa-manager-plus cleanup-derived`。Manager Server 在整个生命周期内都会持有 `<数据库绝对路径>.manager.lock` 操作系统锁；锁仍被持有时，该命令会直接拒绝执行。锁文件会持久保留，无需手工删除，应停止 Manager Server 进程后重试。符号链接别名会解析到同一个锁；具有多个硬链接的数据库会被拒绝，因为 SQLite WAL/SHM 侧车文件无法安全共享这些别名。离线维护前应备份 SQLite 和 `data.key`。该命令会创建延后的索引、替换过期派生索引、完成超大旧 quota observation group 的迁移并删除已过期的 FTS/投影 generation，不会修改 `usage_events`。
+该维护状态只读取 SQLite schema metadata、清理任务 metadata，并对缺索引的目标表执行有界的存在性探测；不会扫描或统计整个 `usage_events`。全局 Warning 使用同一 `/status` 的 `?scope=database-maintenance` 轻量视图定时刷新，避免连带读取完整运行统计。`databaseMaintenance` 对象不新增数据库绝对路径、原始 SQL 或索引名称；完整 `/status` 为兼容既有客户端仍保留原有字段。离线维护完成并重新启动 Manager Server 后，服务会从数据库真实 metadata 重新计算状态，`required`、`deferredIndexes` 和 `offlineJobs` 会自动恢复为 clean，无需手工清除标记。
+
+数据库升级后，旧的请求监控 FTS generation 可能在配对投影行完成分批在线清理后继续保留；非空表索引也可能被延后，旧 quota cooldown identity 索引则可能需要离线替换。极端情况下，单个旧 quota observation group 超过在线安全批次限制时，迁移会标记为 `offline_required` 并记录 `offline cleanup required`，原始 snapshot fallback 仍继续可用。日志出现 deferred index preparation、`cleanup requires offline finalization`、`offline cleanup required`，或 UI / `/status` 显示数据库维护未完成时，先停止所有使用该数据库的 Manager Server 进程，再使用同版本二进制执行一次离线维护。
+
+Docker Compose：
+
+```bash
+docker compose stop cpa-manager-plus
+
+docker compose run --rm --no-deps \
+  cpa-manager-plus \
+  cleanup-derived --db-path /data/usage.sqlite
+
+docker compose start cpa-manager-plus
+```
+
+原生安装：
+
+```bash
+cpa-manager-plus cleanup-derived
+# 或显式指定数据库
+cpa-manager-plus cleanup-derived --db-path /path/to/usage.sqlite
+```
+
+Manager Server 在整个生命周期内都会持有 `<数据库绝对路径>.manager.lock` 操作系统锁；锁仍被持有时，该命令会直接拒绝执行。因此 Web UI 只检测、解释和展示步骤，不会提供在线修复按钮、启动子进程或绕过进程锁。锁文件会持久保留，无需手工删除，应停止 Manager Server 进程后重试。符号链接别名会解析到同一个锁；具有多个硬链接的数据库会被拒绝，因为 SQLite WAL/SHM 侧车文件无法安全共享这些别名。离线维护前应备份 SQLite 和 `data.key`。该命令会创建延后的索引、替换过期派生索引、完成超大旧 quota observation group 的迁移并删除已过期的 FTS/投影 generation；它不会删除、重建或改写 authoritative `usage_events`。
 
 完整的优化原因、实现阶段和 100k benchmark 数据见 [2026-07-10 性能优化报告](./performance-optimization-2026-07-10.md)。
 
@@ -273,7 +306,7 @@ cpa-manager-plus cleanup-derived --db-path /data/usage.sqlite
 | Endpoint                                                         | 用途                                                     |
 | ---------------------------------------------------------------- | -------------------------------------------------------- |
 | `GET /health`                                                    | 健康检查。                                               |
-| `GET /status`                                                    | 采集器、SQLite、事件计数和后台数据迁移进度。             |
+| `GET /status`                                                    | 采集器、SQLite、事件计数、后台迁移和脱敏数据库维护状态。 |
 | `GET /usage-service/info`                                        | Manager Server 模式探测。                                |
 | `GET /usage-service/config`                                      | 读取 CPAMP Manager Server 配置。                         |
 | `PUT /usage-service/config`                                      | 保存 CPAMP 配置，必要时重启采集器。                      |

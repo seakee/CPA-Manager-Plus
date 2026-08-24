@@ -26,6 +26,8 @@ import {
 } from '@/utils/quota/credentialScope';
 import type { AccountCredentialEvidenceBoundary } from './accountCredentialEvidence';
 
+const CODEX_MAIN_SCOPE = { kind: 'family', key: 'codex_main', complete: true } as const;
+
 const emptyStores = (): AccountQuotaStores => ({
   antigravityQuota: {},
   claudeQuota: {},
@@ -428,6 +430,7 @@ describe('accountRows', () => {
               resetLabel: '2026-07-30T04:00:00Z',
               resetAtMs: earlierResetAtMs,
               resetAccuracy: 'exact',
+              modelScope: CODEX_MAIN_SCOPE,
             },
             {
               id: 'weekly-model',
@@ -436,6 +439,7 @@ describe('accountRows', () => {
               resetLabel: '2026-07-30T06:00:00Z',
               resetAtMs: laterResetAtMs,
               resetAccuracy: 'exact',
+              modelScope: CODEX_MAIN_SCOPE,
             },
           ],
         },
@@ -464,6 +468,7 @@ describe('accountRows', () => {
               resetLabel: '2026-07-30T04:00:00Z',
               resetAtMs: Date.parse('2026-07-30T04:00:00Z'),
               resetAccuracy: 'exact',
+              modelScope: CODEX_MAIN_SCOPE,
             },
             {
               id: 'weekly-unknown',
@@ -472,6 +477,7 @@ describe('accountRows', () => {
               resetLabel: '-',
               resetAtMs: null,
               resetAccuracy: 'unknown',
+              modelScope: CODEX_MAIN_SCOPE,
             },
           ],
         },
@@ -652,9 +658,11 @@ describe('accountRows', () => {
                 label: 'Latest request',
                 usedPercent: 100,
                 resetLabel: '2026-06-25 10:00',
+                modelScope: CODEX_MAIN_SCOPE,
               },
             ],
             observedFromUsageHeaders: true,
+            observedModelScope: CODEX_MAIN_SCOPE,
             observedAtMs: 1000,
             observedTraceId: 'trace-observed',
             observedErrorKind: 'rate_limit',
@@ -752,15 +760,32 @@ describe('accountRows', () => {
             'shared.codex.json\u00000',
             {
               status: 'success',
-              windows: [{ id: 'a', label: 'A', usedPercent: 10, resetLabel: 'A reset' }],
+              windows: [
+                {
+                  id: 'a',
+                  label: 'A',
+                  usedPercent: 10,
+                  resetLabel: 'A reset',
+                  modelScope: CODEX_MAIN_SCOPE,
+                },
+              ],
             },
           ],
           [
             'shared.codex.json\u00001',
             {
               status: 'success',
-              windows: [{ id: 'b', label: 'B', usedPercent: 90, resetLabel: 'B reset' }],
+              windows: [
+                {
+                  id: 'b',
+                  label: 'B',
+                  usedPercent: 90,
+                  resetLabel: 'B reset',
+                  modelScope: CODEX_MAIN_SCOPE,
+                },
+              ],
               observedFromUsageHeaders: true,
+              observedModelScope: CODEX_MAIN_SCOPE,
               observedTraceId: 'trace-auth-index-1',
             },
           ],

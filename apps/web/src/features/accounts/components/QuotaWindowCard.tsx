@@ -31,6 +31,7 @@ import type {
 } from '@/features/accounts/model/accountDetailViewModel';
 import { formatQuotaResetDisplay } from '@/features/accounts/model/accountsPagePresentation';
 import { formatUsd } from '@/utils/usage';
+import { isCodexMainQuotaModelScope } from '@/utils/quota/codexQuota';
 import { QuotaProgressBar } from './QuotaProgressBar';
 import styles from './QuotaWindowCard.module.scss';
 
@@ -141,6 +142,8 @@ const isIntervalWindow = (window: AccountDetailQuotaWindow): boolean =>
 
 const inferCardMode = (window: AccountDetailQuotaWindow): QuotaWindowCardMode => {
   if (!isIntervalWindow(window)) return 'other';
+  if (window.source === 'codex' && isCodexMainQuotaModelScope(window.modelScope)) return 'standard';
+  if (window.modelScope?.complete === false) return 'model';
   return window.modelScope?.kind && window.modelScope.kind !== 'all' ? 'model' : 'standard';
 };
 
@@ -409,7 +412,9 @@ export const QuotaWindowCard = ({
     0
   );
   const modelHasUsableUsage =
-    resolvedMode === 'model' && Boolean(usage?.matched || previousUsage?.matched || q.forecast);
+    resolvedMode === 'model' &&
+    q.modelScope?.complete !== false &&
+    Boolean(usage?.matched || previousUsage?.matched || q.forecast);
   const modelWindowStatsUnavailable = resolvedMode === 'model' && !modelHasUsableUsage;
   const lifecycleUnavailable = q.availability === 'pending_absent' || q.availability === 'inactive';
   const reopened = q.availability === 'active' && (q.activationGeneration ?? 0) > 1;

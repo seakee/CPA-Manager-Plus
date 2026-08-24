@@ -2,7 +2,7 @@ import { authFilesApi, type AuthFilesApiRequestScope } from '@/services/api/auth
 import { createScopedApiRequestConfig } from '@/services/api/client';
 import type { TFunction } from 'i18next';
 import { getApiCallErrorMessage } from '@/services/api/apiCall';
-import type { AuthFileItem, Config } from '@/types';
+import type { AuthFileItem, Config, QuotaModelScope } from '@/types';
 import {
   CODEX_INSPECTION_AUTO_ACTION_MODES,
   CODEX_INSPECTION_SETTINGS_STORAGE_KEY,
@@ -155,6 +155,8 @@ export interface CodexInspectionQuotaWindow {
   resetAtMs?: number | null;
   resetAccuracy?: 'exact' | 'derived' | 'estimated' | 'unknown';
   limitWindowSeconds: number | null;
+  modelScope?: QuotaModelScope;
+  providerWindowAliases?: string[];
 }
 
 export interface CodexInspectionResultItem extends CodexInspectionAccount {

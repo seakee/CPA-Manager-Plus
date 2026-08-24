@@ -14,6 +14,7 @@ import type { AuthFileCodexStatusSummary } from '@/features/authFiles/model/cred
 import { normalizePlanType, parseIdTokenPayload } from '@/utils/quota/parsers';
 import { isValidQuotaResetAtMs } from '@/utils/quota/formatters';
 import { resolveCodexPlanType } from '@/utils/quota/resolvers';
+import { isCodexMainQuotaWindow } from '@/utils/quota/codexQuota';
 import { parseTimestampMs } from '@/utils/timestamp';
 import { sumRecentRequests, type RecentRequestBucket } from '@/utils/recentRequests';
 import type { AccountRow } from './accountRows';
@@ -631,8 +632,10 @@ const buildQuotaWindows = (
           kind: window.modelScope.kind,
           key: window.modelScope.key,
           models: window.modelScope.models,
+          complete: window.modelScope.complete,
         }
       : undefined;
+    const scopeAllowsUsage = modelScope?.complete !== false;
     const currentUsage = toWindowUsageSummary(
       windowUsageByKey.get(
         accountWindowUsageRequestKey(row.selectionKey, providerWindowId, 'current', modelScope)
@@ -687,6 +690,7 @@ const buildQuotaWindows = (
           }
         : null;
     const forecast =
+      scopeAllowsUsage &&
       lifecycleActive &&
       (window.windowMode === 'fixed' || window.windowMode === 'calendar') &&
       typeof window.cycleStartMs === 'number' &&
@@ -1517,11 +1521,13 @@ export const buildAccountDetailViewModel = (
       };
     }
   );
+  const accountQuotaWindows =
+    row.provider === 'codex' ? quotaWindows.filter(isCodexMainQuotaWindow) : quotaWindows;
   const listItem = buildAccountListItem(row, {
     recommendation,
     quotaCooldown,
     codexStatus: options.codexStatus ?? null,
-    quotaWindows,
+    quotaWindows: accountQuotaWindows,
     requestEvidence,
   });
   const value = buildValueSummary(row, options.valueRow);
@@ -1553,7 +1559,7 @@ export const buildAccountDetailViewModel = (
   const overviewDecision = buildOverviewDecision(row, listItem, quotaCooldown);
   const overview = {
     decision: overviewDecision,
-    capacity: buildOverviewCapacity(row, quotaWindows, listItem),
+    capacity: buildOverviewCapacity(row, accountQuotaWindows, listItem),
     credential: buildOverviewCredential(row, options.codexQuota),
     recentStatus: buildOverviewRecentStatus(
       row,

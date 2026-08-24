@@ -415,15 +415,20 @@ func (r *repository) LoadHeaderSnapshots(ctx context.Context, sinceMS int64, lim
 
 func mergeStoredHeaderRows(ctx context.Context, tx *sql.Tx, sinceMS int64, limit int, grouped map[string]headerRow) error {
 	rows, err := tx.QueryContext(ctx, `select
-		snapshot_key, event_id, event_hash, timestamp_ms, auth_file_snapshot,
-		auth_index, account_snapshot, auth_label_snapshot,
-		auth_provider_snapshot, auth_project_id_snapshot, source, source_hash,
-		response_metadata_json, header_quota_recover_at_ms,
-		header_quota_used_percent, header_quota_plan_type, header_error_kind,
-		header_error_code, header_trace_id
-	from usage_monitoring_header_latest_v1
-	where timestamp_ms >= ?
-	order by timestamp_ms desc, event_id desc
+		stored.snapshot_key, stored.event_id, stored.event_hash, stored.timestamp_ms,
+		coalesce(usage_event.model, ''),
+		`+usageidentity.SQLRequestAnalyticsModelExpression("usage_event.model", "usage_event.requested_model")+`,
+		coalesce(usage_event.requested_model, ''), coalesce(usage_event.resolved_model, ''),
+		stored.auth_file_snapshot,
+		stored.auth_index, stored.account_snapshot, stored.auth_label_snapshot,
+		stored.auth_provider_snapshot, stored.auth_project_id_snapshot, stored.source, stored.source_hash,
+		stored.response_metadata_json, stored.header_quota_recover_at_ms,
+		stored.header_quota_used_percent, stored.header_quota_plan_type, stored.header_error_kind,
+		stored.header_error_code, stored.header_trace_id
+	from usage_monitoring_header_latest_v1 stored
+	left join usage_events usage_event on usage_event.id = stored.event_id
+	where stored.timestamp_ms >= ?
+	order by stored.timestamp_ms desc, stored.event_id desc
 	limit ?`, sinceMS, limit)
 	if err != nil {
 		return err
@@ -438,6 +443,10 @@ func mergeRawHeaderRows(ctx context.Context, tx *sql.Tx, sinceMS, afterID int64,
 			id,
 			event_hash,
 			timestamp_ms,
+			coalesce(model, '') as model,
+			`+usageidentity.SQLRequestAnalyticsModelExpression("model", "requested_model")+` as analytics_model,
+			coalesce(requested_model, '') as requested_model,
+			coalesce(resolved_model, '') as resolved_model,
 			coalesce(auth_file_snapshot, '') as auth_file_snapshot,
 			coalesce(auth_index, '') as auth_index,
 			coalesce(account_snapshot, '') as account_snapshot,
@@ -478,7 +487,9 @@ func mergeRawHeaderRows(ctx context.Context, tx *sql.Tx, sinceMS, afterID int64,
 		from candidates
 	)
 	select
-		snapshot_key, id, event_hash, timestamp_ms, auth_file_snapshot,
+		snapshot_key, id, event_hash, timestamp_ms,
+		model, analytics_model, requested_model, resolved_model,
+		auth_file_snapshot,
 		auth_index, account_snapshot, auth_label_snapshot,
 		auth_provider_snapshot, auth_project_id_snapshot, source, source_hash,
 		response_metadata_json, header_quota_recover_at_ms,
@@ -504,6 +515,10 @@ func scanHeaderRows(rows *sql.Rows, grouped map[string]headerRow) error {
 			&row.Item.ID,
 			&row.Item.EventHash,
 			&row.Item.TimestampMS,
+			&row.Item.Model,
+			&row.Item.AnalyticsModel,
+			&row.Item.RequestedModel,
+			&row.Item.ResolvedModel,
 			&row.Item.AuthFileSnapshot,
 			&row.Item.AuthIndex,
 			&row.Item.AccountSnapshot,

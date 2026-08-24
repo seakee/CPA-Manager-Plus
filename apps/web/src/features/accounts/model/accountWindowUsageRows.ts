@@ -33,6 +33,7 @@ const modelScopeRequestPart = (scope: MonitoringAccountWindowModelScope | undefi
   JSON.stringify([
     (scope?.kind ?? 'all').trim().toLowerCase(),
     scope?.key?.trim().toLowerCase() ?? '',
+    scope?.complete !== false,
     ...Array.from(
       new Set((scope?.models ?? []).map((model) => model.trim().toLowerCase()).filter(Boolean))
     ).sort(),
@@ -105,8 +106,9 @@ export const buildAccountWindowUsageTargetEntries = (
             kind: window.modelScope.kind,
             key: window.modelScope.key,
             models: window.modelScope.models,
+            complete: window.modelScope.complete !== false,
           }
-        : (window.modelScope ?? { kind: 'all' });
+        : (window.modelScope ?? { kind: 'all', complete: true });
       const ranges = isQuotaWindowDefinition(window)
         ? buildAccountQuotaUsageRanges(window, nowMs)
         : window.fromMs && window.toMs && window.fromMs < window.toMs

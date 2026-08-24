@@ -207,6 +207,13 @@ func (s *Store) RunDerivedStartupMaintenance(ctx context.Context) error {
 	return sqliterepo.RunDerivedStartupMaintenance(ctx, s.db)
 }
 
+func (s *Store) DerivedMaintenanceStatus(ctx context.Context) (sqliterepo.DerivedMaintenanceStatus, error) {
+	if s == nil {
+		return sqliterepo.DerivedMaintenanceStatus{Reasons: []string{}}, nil
+	}
+	return sqliterepo.ReadDerivedMaintenanceStatus(ctx, s.db)
+}
+
 func (s *Store) BackfillLegacyQuotaSnapshotsBatch(ctx context.Context, maxGroupSize int) (LegacyQuotaSnapshotBackfillResult, error) {
 	if s == nil {
 		return LegacyQuotaSnapshotBackfillResult{Completed: true}, nil

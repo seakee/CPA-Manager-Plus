@@ -20,6 +20,14 @@ import type {
   AccountQuotaWindowKind,
   AccountQuotaWindowSource,
 } from './accountQuotaDisplayWindows';
+import {
+  CODEX_MAIN_QUOTA_SCOPE_KEY,
+  canonicalizeCodexProviderWindowIdForScope,
+  isCodexKnownScopedProviderWindowId,
+  isCodexLegacyAllScopeReplacement,
+  isCodexMainProviderWindowId,
+  inferCodexQuotaScopeFromProviderWindowId,
+} from '@/utils/quota/codexQuota';
 
 const INCOMPLETE_MODEL_SCOPE_KIND = 'feature';
 const INCOMPLETE_MODEL_SCOPE_KEY = 'scope_unknown';
@@ -159,23 +167,34 @@ const toSnapshotWindow = (
   const scopeComplete = definition.modelScope.complete !== false;
   const hasModels =
     definition.modelScope.kind !== 'models' || (definition.modelScope.models?.length ?? 0) > 0;
+  // The snapshot schema predates the explicit `complete` bit. Encode every
+  // incomplete scope as a feature scope so a round-trip cannot silently turn
+  // `all`/`family`/`models` back into a complete account-wide scope.
+  const persistedScopeKind =
+    !scopeComplete && definition.modelScope.kind !== 'feature'
+      ? INCOMPLETE_MODEL_SCOPE_KIND
+      : definition.modelScope.kind === 'models' && !hasModels
+        ? INCOMPLETE_MODEL_SCOPE_KIND
+        : definition.modelScope.kind;
+  const persistedScopeKey =
+    !scopeComplete && definition.modelScope.kind !== 'feature'
+      ? INCOMPLETE_MODEL_SCOPE_KEY
+      : definition.modelScope.kind === 'models' && !hasModels
+        ? INCOMPLETE_MODEL_SCOPE_KEY
+        : definition.modelScope.key;
+  const persistedModelIDs = scopeComplete && hasModels ? definition.modelScope.models : undefined;
   const boundaryAccuracy =
     scopeComplete && hasModels ? definition.boundaryAccuracy : ('unknown' as const);
   const windowMode = scopeComplete && hasModels ? definition.windowMode : ('unknown' as const);
   const resetCredits = definition.provider === 'codex' ? toResetCredits(codexQuota) : [];
   return {
     provider_window_id: definition.providerWindowId,
+    provider_window_aliases: definition.providerWindowAliases,
     window_kind: definition.kind,
     window_mode: windowMode,
-    model_scope_kind:
-      definition.modelScope.kind === 'models' && !hasModels
-        ? INCOMPLETE_MODEL_SCOPE_KIND
-        : definition.modelScope.kind,
-    model_scope_key:
-      definition.modelScope.kind === 'models' && !hasModels
-        ? INCOMPLETE_MODEL_SCOPE_KEY
-        : definition.modelScope.key,
-    model_ids: hasModels ? definition.modelScope.models : undefined,
+    model_scope_kind: persistedScopeKind,
+    model_scope_key: persistedScopeKey,
+    model_ids: persistedModelIDs,
     source: observation?.source ?? definition.observationSource,
     source_observation_id: observation?.source_observation_id,
     observed_at_ms: observation?.observed_at_ms ?? definition.observedAtMs ?? nowMs,
@@ -354,29 +373,31 @@ const normalizedSnapshotModelIDs = (modelIDs: string[] | undefined): string[] =>
     new Set((modelIDs ?? []).map((model) => model.trim().toLowerCase()).filter(Boolean))
   ).sort();
 
-const snapshotScopeParts = (window: {
-  provider_window_id: string;
-  model_scope_kind: string;
-  model_scope_key?: string;
-  model_ids?: string[];
-}) => {
+const snapshotScopeParts = (
+  window: {
+    provider_window_id: string;
+    model_scope_kind: string;
+    model_scope_key?: string;
+    model_ids?: string[];
+  }
+) => {
   if (isIncompleteModelScopeSnapshot(window)) {
     return [window.provider_window_id.trim(), 'models', ''];
   }
-  return [
-    window.provider_window_id.trim(),
-    window.model_scope_kind.trim().toLowerCase(),
-    window.model_scope_key?.trim().toLowerCase() ?? '',
-    ...normalizedSnapshotModelIDs(window.model_ids),
-  ];
+  const kind = window.model_scope_kind.trim().toLowerCase();
+  const key = window.model_scope_key?.trim().toLowerCase() ?? '';
+  const models = normalizedSnapshotModelIDs(window.model_ids);
+  return [window.provider_window_id.trim(), kind, key, ...models];
 };
 
-const snapshotScopeKey = (window: {
-  provider_window_id: string;
-  model_scope_kind: string;
-  model_scope_key?: string;
-  model_ids?: string[];
-}) => snapshotScopeParts(window).join('\u0000');
+const snapshotScopeKey = (
+  window: {
+    provider_window_id: string;
+    model_scope_kind: string;
+    model_scope_key?: string;
+    model_ids?: string[];
+  }
+) => snapshotScopeParts(window).join('\u0000');
 
 const snapshotDisplayKey = (snapshot: AccountQuotaSnapshotWindow): string =>
   [
@@ -412,8 +433,119 @@ export const mergeAccountQuotaSnapshotWindows = (
     getLabel?: (snapshot: AccountQuotaSnapshotWindow) => string;
   } = {}
 ): AccountQuotaWindowDefinition[] => {
+  const canonicalProviderWindowId = (
+    providerWindowId: string,
+    windowKind?: string,
+    modelScope?: QuotaModelScope
+  ) => {
+    if (options.provider !== 'codex') return providerWindowId;
+    return canonicalizeCodexProviderWindowIdForScope(providerWindowId, windowKind, modelScope);
+  };
+  const canonicalDefinitions = definitions.map((definition) => {
+    const modelScope =
+      options.provider === 'codex' &&
+      definition.modelScope.kind === 'all' &&
+      definition.modelScope.complete !== false &&
+      isCodexKnownScopedProviderWindowId(definition.providerWindowId) &&
+      !isCodexMainProviderWindowId(definition.providerWindowId)
+        ? inferCodexQuotaScopeFromProviderWindowId(definition.providerWindowId)
+        : definition.modelScope;
+    const providerWindowId = canonicalProviderWindowId(
+      definition.providerWindowId,
+      definition.kind,
+      modelScope
+    );
+    const providerWindowAliases = Array.from(
+      new Set(
+        (definition.providerWindowAliases ?? [])
+          .map((alias) => alias.trim().toLowerCase())
+          .filter((alias) => alias && alias !== providerWindowId)
+      )
+    ).sort();
+    return providerWindowId === definition.providerWindowId &&
+      providerWindowAliases.length === 0 &&
+      modelScope === definition.modelScope
+      ? definition
+      : {
+          ...definition,
+          providerWindowId,
+          modelScope,
+          display:
+            modelScope === definition.modelScope
+              ? definition.display
+              : { ...definition.display, modelScope },
+          providerWindowAliases:
+            providerWindowAliases.length > 0 ? providerWindowAliases : undefined,
+        };
+  });
+  const canonicalSnapshots = snapshots.map((snapshot) => {
+    const inferredScope =
+      options.provider === 'codex' &&
+      snapshot.model_scope_kind.trim().toLowerCase() === 'all' &&
+      isCodexKnownScopedProviderWindowId(snapshot.provider_window_id)
+        ? inferCodexQuotaScopeFromProviderWindowId(snapshot.provider_window_id)
+        : options.provider === 'codex'
+          ? snapshotModelScope(snapshot)
+          : undefined;
+    const providerWindowId = canonicalProviderWindowId(
+      snapshot.provider_window_id,
+      snapshot.window_kind,
+      inferredScope
+    );
+    const normalizedSnapshot =
+      options.provider === 'codex' &&
+      isCodexMainProviderWindowId(providerWindowId) &&
+      snapshot.model_scope_kind.trim().toLowerCase() === 'all'
+        ? {
+            ...snapshot,
+            model_scope_kind: 'family' as const,
+            model_scope_key: CODEX_MAIN_QUOTA_SCOPE_KEY,
+            model_ids: undefined,
+          }
+        : snapshot;
+    return providerWindowId === snapshot.provider_window_id && normalizedSnapshot === snapshot
+      ? snapshot
+      : { ...normalizedSnapshot, provider_window_id: providerWindowId };
+  });
+  const scopedProviderWindowIds = new Set<string>();
+  const scopedProviderWindowAliases = new Set<string>();
+  if (options.provider === 'codex') {
+    canonicalDefinitions
+      .filter((definition) =>
+        isCodexLegacyAllScopeReplacement(definition.providerWindowId, definition.modelScope)
+      )
+      .forEach((definition) => {
+        scopedProviderWindowIds.add(definition.providerWindowId);
+        for (const alias of definition.providerWindowAliases ?? []) {
+          scopedProviderWindowAliases.add(alias);
+        }
+      });
+    canonicalSnapshots
+      .filter((snapshot) => snapshot.model_scope_kind.trim().toLowerCase() !== 'all')
+      .forEach((snapshot) => scopedProviderWindowIds.add(snapshot.provider_window_id));
+  }
+  const compatibleDefinitions = canonicalDefinitions.filter(
+    (definition) =>
+      definition.modelScope.kind !== 'all' ||
+      definition.modelScope.complete === false ||
+      !scopedProviderWindowIds.has(definition.providerWindowId)
+  );
+  const compatibleSnapshots = canonicalSnapshots.filter(
+    (snapshot) => {
+      if (snapshot.model_scope_kind.trim().toLowerCase() !== 'all') return true;
+      if (options.provider !== 'codex') return true;
+      const isKnownScopedLegacy = isCodexKnownScopedProviderWindowId(
+        snapshot.provider_window_id
+      );
+      return (
+        !isKnownScopedLegacy &&
+        !scopedProviderWindowIds.has(snapshot.provider_window_id) &&
+        !scopedProviderWindowAliases.has(snapshot.provider_window_id)
+      );
+    }
+  );
   const snapshotsByKey = new Map<string, AccountQuotaSnapshotWindow>();
-  snapshots.forEach((snapshot) => {
+  compatibleSnapshots.forEach((snapshot) => {
     const key = snapshotScopeKey(snapshot);
     const current = snapshotsByKey.get(key);
     if (!current || compareSnapshotFreshness(current, snapshot) < 0) {
@@ -421,13 +553,18 @@ export const mergeAccountQuotaSnapshotWindows = (
     }
   });
   const matchedSnapshotKeys = new Set<string>();
-  const merged = definitions.map((definition) => {
-    const key = snapshotScopeKey({
-      provider_window_id: definition.providerWindowId,
-      model_scope_kind: definition.modelScope.kind,
-      model_scope_key: definition.modelScope.key,
-      model_ids: definition.modelScope.models,
-    });
+  const merged = compatibleDefinitions.map((definition) => {
+    if (definition.modelScope.kind === 'all' && definition.modelScope.complete === false) {
+      return definition;
+    }
+    const key = snapshotScopeKey(
+      {
+        provider_window_id: definition.providerWindowId,
+        model_scope_kind: definition.modelScope.kind,
+        model_scope_key: definition.modelScope.key,
+        model_ids: definition.modelScope.models,
+      },
+    );
     const snapshot = snapshotsByKey.get(key);
     if (!snapshot) return definition;
     matchedSnapshotKeys.add(key);
@@ -465,7 +602,7 @@ export const mergeAccountQuotaSnapshotWindows = (
       (appendedProviderCounts.get(snapshot.provider_window_id) ?? 0) + 1
     );
   });
-  const usedDisplayKeys = new Set(definitions.map((definition) => definition.key));
+  const usedDisplayKeys = new Set(compatibleDefinitions.map((definition) => definition.key));
   const appended = unmatchedSnapshots.map((snapshot) => {
     const providerKey = snapshot.provider_window_id;
     const requiresScopedKey =
@@ -482,15 +619,27 @@ export const mergeAccountQuotaSnapshotWindows = (
   });
 };
 
-const snapshotModelScope = (snapshot: AccountQuotaSnapshotWindow): QuotaModelScope =>
-  isIncompleteModelScopeSnapshot(snapshot)
-    ? { kind: 'models', models: [], complete: false }
-    : {
-        kind: snapshot.model_scope_kind,
-        key: snapshot.model_scope_key,
-        models: snapshot.model_ids,
-        complete: snapshot.model_scope_kind !== 'models' || (snapshot.model_ids?.length ?? 0) > 0,
-      };
+const snapshotModelScope = (
+  snapshot: AccountQuotaSnapshotWindow
+): QuotaModelScope => {
+  if (isIncompleteModelScopeSnapshot(snapshot)) {
+    return { kind: 'models', models: [], complete: false };
+  }
+  const kind = snapshot.model_scope_kind.trim().toLowerCase() as QuotaModelScope['kind'];
+  const key = snapshot.model_scope_key?.trim();
+  const models = normalizedSnapshotModelIDs(snapshot.model_ids);
+  const complete =
+    kind === 'all' ||
+    (kind === 'models' && models.length > 0) ||
+    (kind === 'family' && (Boolean(key) || models.length > 0)) ||
+    ((kind === 'product' || kind === 'feature') && models.length > 0);
+  return {
+    kind,
+    key: key || undefined,
+    models: models.length > 0 ? models : undefined,
+    complete,
+  };
+};
 
 const snapshotCycleDefinition = (
   cycle: AccountQuotaSnapshotCycle | undefined
@@ -612,6 +761,7 @@ const snapshotDefinition = (
     cycleStartMs: currentStartMs,
     cycleEndMs: currentEndMs,
     modelScope,
+    providerWindowAliases: snapshot.provider_window_aliases,
   };
   return {
     key,
@@ -621,6 +771,7 @@ const snapshotDefinition = (
     kind: display.kind ?? 'unknown',
     windowMode: snapshot.window_mode,
     modelScope,
+    providerWindowAliases: snapshot.provider_window_aliases,
     observationSource: snapshot.source,
     observedAtMs: snapshot.observed_at_ms,
     boundaryAccuracy: snapshot.boundary_accuracy,

@@ -46,7 +46,10 @@ export const buildEventRows = (
         return null;
       }
 
-      const authIndex = normalizeAuthIndex(detail.auth_index) ?? '-';
+      const authIndexIdentity = normalizeAuthIndex(detail.auth_index) ?? '';
+      const authIndex = authIndexIdentity || '-';
+      const sourceIdentity = readString(detail.source);
+      const sourceHashIdentity = readString(detail.source_hash ?? detail.sourceHash);
       const authMeta = authMetaMap.get(authIndex);
       const sourceMeta = resolveSourceDisplay(
         detail.source,
@@ -64,6 +67,8 @@ export const buildEventRows = (
       const snapshotProvider = readString(
         detail.auth_provider_snapshot ?? detail.authProviderSnapshot
       );
+      const eventProvider = readString(detail.provider);
+      const effectiveProvider = snapshotProvider || eventProvider;
       const snapshotDisplay = snapshotAccount || snapshotLabel;
       const channelMeta =
         channelByAuthIndex.get(authIndex) ||
@@ -204,17 +209,23 @@ export const buildEventRows = (
         userAgent,
         sourceKey,
         source: sourceLabel,
+        sourceIdentity,
+        sourceHashIdentity,
         sourceMasked,
         account,
+        accountIdentity: snapshotAccount,
         accountMasked,
         authIndex,
+        authIndexIdentity,
         authIndexMasked: maskAuthIndex(authIndex),
         authLabel: authMeta?.label || snapshotLabel || sourceMasked,
+        authLabelIdentity: snapshotLabel,
         projectId,
         apiKeyHash,
         apiKeyLabel,
         apiKeyMasked,
-        provider: authMeta?.provider || snapshotProvider || sourceMeta.type || '-',
+        provider: authMeta?.provider || snapshotProvider || eventProvider || sourceMeta.type || '-',
+        providerIdentity: effectiveProvider,
         planType: authMeta?.planType || '-',
         channel: channelLabel,
         channelHost: channelMeta?.host || '-',

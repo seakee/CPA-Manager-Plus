@@ -1367,6 +1367,7 @@ func resetUsageDerivedDataWithoutSource(db *sql.DB, snapshot usageMonitoringMigr
 		"usage_rollup_rebuild_state",
 		"usage_pricing_rollup_state",
 		"usage_data_migrations",
+		derivedDeferredIndexesTable,
 	}
 	placeholders := make([]string, len(existingTables))
 	args := make([]any, len(existingTables))
@@ -1436,7 +1437,10 @@ func resetUsageDerivedDataWithoutSource(db *sql.DB, snapshot usageMonitoringMigr
 				processed_rows = 0, changed_rows = 0, applied_rows = 0,
 				started_at_ms = null, updated_at_ms = 0,
 			finished_at_ms = null, last_error = null
-			where name in ('usage_cache_accounting_v1', 'usage_cache_accounting_v2')`)
+				where name in ('usage_cache_accounting_v1', 'usage_cache_accounting_v2')`)
+	}
+	if present[derivedDeferredIndexesTable] {
+		statements = append(statements, `delete from `+derivedDeferredIndexesTable)
 	}
 	for _, statement := range statements {
 		if _, err := tx.Exec(statement); err != nil {

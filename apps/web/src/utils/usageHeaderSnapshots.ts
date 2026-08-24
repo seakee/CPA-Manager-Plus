@@ -5,6 +5,10 @@ import type {
 } from '@/services/api/usageService';
 import type { AuthFileItem, CodexUsagePayload, CodexUsageWindow } from '@/types';
 import { normalizeAuthIndex } from '@/utils/authIndex';
+import {
+  resolveCodexUsageQuotaScope,
+  type CodexQuotaScopeResolution,
+} from '@/utils/quota/codexQuota';
 
 export type UsageHeaderSnapshotLookup = {
   byFileName: Map<string, UsageHeaderSnapshot>;
@@ -485,6 +489,7 @@ export type ObservedCodexHeaderQuota = {
   reachedWindowKind: string | null;
   reachedWindowSource: string | null;
   primaryOverSecondaryLimitPercent: number | null;
+  quotaScope: CodexQuotaScopeResolution;
 };
 
 const buildCodexWindowFromHeaderQuota = (
@@ -517,6 +522,12 @@ export const buildObservedCodexQuotaFromHeaderSnapshot = (
 ): ObservedCodexHeaderQuota | null => {
   const quota = getHeaderSnapshotQuotaMetadata(snapshot);
   if (!quota) return null;
+  const quotaScope = resolveCodexUsageQuotaScope({
+    model: snapshot?.model,
+    analyticsModel: snapshot?.analytics_model,
+    requestedModel: snapshot?.requested_model,
+    resolvedModel: snapshot?.resolved_model,
+  });
 
   const planType = readString(quota.plan_type) || null;
   const activeLimit = readString(quota.active_limit) || null;
@@ -587,6 +598,7 @@ export const buildObservedCodexQuotaFromHeaderSnapshot = (
     reachedWindowKind,
     reachedWindowSource,
     primaryOverSecondaryLimitPercent,
+    quotaScope,
   };
 };
 

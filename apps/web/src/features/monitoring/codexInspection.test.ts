@@ -4888,6 +4888,14 @@ describe('Codex inspection last-run cache', () => {
               resetAtMs: Date.parse('2026-06-18T04:00:00Z'),
               resetAccuracy: 'exact',
               limitWindowSeconds: 2_592_000,
+              modelScope: { kind: 'family', key: 'codex_main', complete: true },
+            },
+            {
+              id: 'gpt-5-3-codex-spark-weekly-0',
+              labelKey: 'codex_quota.additional_secondary_window',
+              usedPercent: 0,
+              resetLabel: '06/20 12:00',
+              limitWindowSeconds: 604_800,
             },
           ],
           error: 'HTTP 402',
@@ -4912,10 +4920,104 @@ describe('Codex inspection last-run cache', () => {
         resetAtMs: Date.parse('2026-06-18T04:00:00Z'),
         resetAccuracy: 'exact',
         limitWindowSeconds: 2_592_000,
+        modelScope: { kind: 'family', key: 'codex_main', models: undefined, complete: true },
+      },
+      {
+        id: 'spark-weekly-0',
+        labelKey: 'codex_quota.additional_secondary_window',
+        labelParams: undefined,
+        usedPercent: 0,
+        resetLabel: '06/20 12:00',
+        limitWindowSeconds: 604_800,
+        modelScope: {
+          kind: 'models',
+          key: undefined,
+          models: ['gpt-5.3-codex-spark'],
+          complete: true,
+        },
       },
     ]);
     expect(loaded?.result.results[0].errorKind).toBe('http_status');
     expect(loaded?.result.results[0].errorDetail).toContain('limit reached');
+  });
+
+  it('reclassifies legacy Spark inspection windows that were persisted as account-wide', () => {
+    const storage = createStorage();
+    vi.stubGlobal('localStorage', storage);
+    const baseResult = createRunResult();
+
+    storage.setItem(
+      CODEX_INSPECTION_LAST_RUN_STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        savedAt: 2000,
+        result: {
+          ...baseResult,
+          results: [
+            createResultItem('keep', {
+              quotaWindows: [
+                {
+                  id: 'fast-coding-weekly-0',
+                  labelKey: 'codex_quota.additional_secondary_window',
+                  usedPercent: 0,
+                  resetLabel: '06/20 12:00',
+                  limitWindowSeconds: 604_800,
+                  modelScope: { kind: 'all', complete: true },
+                },
+              ],
+            }),
+          ],
+        },
+        logs: [],
+      })
+    );
+
+    const loaded = loadCodexInspectionLastRun();
+    expect(loaded?.result.results[0].quotaWindows).toEqual([
+      expect.objectContaining({
+        id: 'fast-coding-weekly-0',
+        modelScope: {
+          kind: 'models',
+          models: ['gpt-5.3-codex-spark'],
+          complete: true,
+        },
+      }),
+    ]);
+  });
+
+  it('restores a legacy Team monthly secondary window using its duration', () => {
+    const baseResult = createRunResult();
+    const restored = hydrateCodexInspectionLastRun({
+      version: 1,
+      savedAt: 2000,
+      result: {
+        ...baseResult,
+        results: [
+          createResultItem('keep', {
+            planType: 'team',
+            quotaWindows: [
+              {
+                id: 'secondary',
+                labelKey: 'codex_quota.monthly_window',
+                usedPercent: 12,
+                resetLabel: '07/20 12:00',
+                limitWindowSeconds: 2_592_000,
+                modelScope: { kind: 'all', complete: true },
+              },
+            ],
+          }),
+        ],
+      },
+      logs: [],
+    });
+
+    expect(restored?.result.results[0].quotaWindows).toEqual([
+      expect.objectContaining({
+        id: 'monthly',
+        limitWindowSeconds: 2_592_000,
+        modelScope: { kind: 'family', key: 'codex_main', complete: true },
+      }),
+    ]);
   });
 
   it('stores and restores terminal local action handling state', () => {

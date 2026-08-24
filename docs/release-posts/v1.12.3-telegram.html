@@ -1,0 +1,18 @@
+🚀 <b>8 月 23 日 · v1.12.3</b>
+
+✨ <b>更新内容</b>
+
+• Accounts 中显示 <code>reset credit</code> 的 Codex 凭证可直接发起重置，并会在消耗前实时校验可用次数。
+• Codex 重置会拦截重复点击与并发操作，成功后刷新失败时会明确提示手动刷新。
+• Model Prices 同步结果会排除已保存价格的模型，pending 和 unmatched 数量与可处理条目保持一致。
+• Full Docker 与原生 Manager Server 的内嵌面板支持 ETag 复验，重复打开可返回 304，避免重复传输完整页面。
+
+⚠️ <b>注意事项</b>
+
+• Codex 重置仍以实时校验结果为准；若校验失败或已无可用次数，不会消耗 <code>reset credit</code>。
+
+🤝 <b>致谢</b>
+
+• <a href="https://github.com/riba2534">@riba2534</a> - 定位内嵌面板重复传输问题并提供测量依据。
+• <a href="https://github.com/YogaSakti">@YogaSakti</a> - 为内嵌面板补全 HTTP 缓存复验，减少重复加载传输。
+• <a href="https://github.com/Lxcardoza993">@Lxcardoza993</a> - 修正模型价格同步反馈，让统计与可处理条目一致。

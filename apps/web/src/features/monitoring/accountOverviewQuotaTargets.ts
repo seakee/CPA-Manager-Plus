@@ -13,12 +13,7 @@ import {
 import type { MonitoringAccountAuthState } from './accountOverviewState';
 import type { MonitoringAccountRow } from './hooks/useMonitoringData';
 
-export type MonitoringAccountQuotaProvider =
-  | 'antigravity'
-  | 'claude'
-  | 'codex'
-  | 'kimi'
-  | 'xai';
+export type MonitoringAccountQuotaProvider = 'antigravity' | 'claude' | 'codex' | 'kimi' | 'xai';
 
 export type MonitoringAccountQuotaTarget = {
   key: string;
@@ -86,7 +81,7 @@ const resolveActiveQuotaProvidersForRow = (
   return activeProviders;
 };
 
-export const buildMonitoringAccountQuotaTargetsByAccount = (
+export const buildMonitoringAccountQuotaTargetsByRowId = (
   rows: MonitoringAccountRow[],
   authStateByRowId: Map<string, MonitoringAccountAuthState>
 ) =>
@@ -118,7 +113,7 @@ export const buildMonitoringAccountQuotaTargetsByAccount = (
       });
 
       return [
-        row.account,
+        row.id,
         Array.from(bucket.values()).sort(
           (left, right) =>
             left.authLabel.localeCompare(right.authLabel) ||

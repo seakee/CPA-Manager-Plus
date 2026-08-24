@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/codexquota"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 )
 
@@ -121,6 +122,9 @@ func persistObservationSnapshots(ctx context.Context, tx *sql.Tx, write *model.A
 	for snapshotIndex := range write.Snapshots {
 		snapshot := &write.Snapshots[snapshotIndex]
 		snapshot.ObservationID = observationID
+		if err := reclassifyLegacyCodexAllScope(ctx, tx, write.Observation, snapshot); err != nil {
+			return err
+		}
 		window, activationID, lifecycleOwned, err := reconcileReportedWindow(ctx, tx, write.Observation, snapshot)
 		if err != nil {
 			return err
@@ -506,6 +510,148 @@ func reconcileReportedWindow(
 		return logicalWindowRow{}, 0, false, err
 	}
 	return window, activationID, true, nil
+}
+
+func reclassifyLegacyCodexAllScope(
+	ctx context.Context,
+	tx *sql.Tx,
+	observation model.AccountQuotaObservation,
+	snapshot *model.AccountQuotaSnapshot,
+) error {
+	if snapshot == nil || observation.Provider != "codex" || strings.EqualFold(strings.TrimSpace(snapshot.ModelScopeKind), "all") {
+		return nil
+	}
+	scope := codexquota.NormalizeScope(codexquota.ModelScope{
+		Kind:     snapshot.ModelScopeKind,
+		Key:      snapshot.ModelScopeKey,
+		Models:   legacyModelIDs(snapshot.ModelIDsJSON),
+		Complete: false,
+	})
+	scope.Complete = len(scope.Models) > 0 || codexquota.IsMainScope(scope.Kind, scope.Key)
+	migrateMainScope := codexquota.IsLegacyMainAllScopeMigration(snapshot.ProviderWindowID, scope)
+	deactivateLegacyScope := codexquota.IsLegacyAllScopeReplacement(snapshot.ProviderWindowID, scope)
+	if !migrateMainScope && !deactivateLegacyScope {
+		return nil
+	}
+	aliases := codexquota.ProviderWindowAliases(
+		snapshot.ProviderWindowID,
+		scope,
+		snapshot.ProviderWindowAliases...,
+	)
+	if len(aliases) == 0 {
+		return nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(aliases)), ",")
+	args := make([]any, 0, 3+len(aliases))
+	args = append(args, observation.AccountKey, observation.Provider, observation.InventoryScopeKey)
+	for _, alias := range aliases {
+		args = append(args, alias)
+	}
+	rows, err := tx.QueryContext(ctx, `select
+		id, provider_window_id, window_kind, window_mode, scope_fingerprint,
+		inventory_scope_key, availability, generation, absence_count,
+		first_seen_at_ms, last_seen_at_ms, missing_since_ms, deactivated_at_ms,
+		coalesce(relationship_kind, ''), coalesce(container_provider_window_id, '')
+		from account_quota_windows
+		where account_key = ? and provider = ? and inventory_scope_key = ?
+			and lower(trim(model_scope_kind)) = 'all' and availability <> 'inactive'
+			and lower(trim(provider_window_id)) in (`+placeholders+`)`, args...)
+	if err != nil {
+		return err
+	}
+	legacyWindows := make([]logicalWindowRow, 0)
+	for rows.Next() {
+		var window logicalWindowRow
+		if err := rows.Scan(
+			&window.id,
+			&window.providerWindowID,
+			&window.windowKind,
+			&window.windowMode,
+			&window.scopeFingerprint,
+			&window.inventoryScopeKey,
+			&window.availability,
+			&window.generation,
+			&window.absenceCount,
+			&window.firstSeenAtMS,
+			&window.lastSeenAtMS,
+			&window.missingSinceMS,
+			&window.deactivatedAtMS,
+			&window.relationshipKind,
+			&window.containerProviderWindowID,
+		); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		legacyWindows = append(legacyWindows, window)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if migrateMainScope && len(legacyWindows) > 0 {
+		var targetExists int
+		if err := tx.QueryRowContext(ctx, `select exists (
+			select 1 from account_quota_windows
+			where account_key = ? and provider = ? and provider_window_id = ?
+				and scope_fingerprint = ?
+		)`, observation.AccountKey, observation.Provider, snapshot.ProviderWindowID, snapshot.ScopeFingerprint).Scan(&targetExists); err != nil {
+			return err
+		}
+		if targetExists == 0 {
+			keeperIndex := 0
+			for index, window := range legacyWindows {
+				if strings.EqualFold(strings.TrimSpace(window.providerWindowID), strings.TrimSpace(snapshot.ProviderWindowID)) {
+					keeperIndex = index
+					break
+				}
+			}
+			keeper := legacyWindows[keeperIndex]
+			snapshot.ProviderWindowID = keeper.providerWindowID
+			snapshot.ModelScopeKind = "all"
+			snapshot.ModelScopeKey = ""
+			snapshot.ModelIDsJSON = ""
+			snapshot.ScopeFingerprint = keeper.scopeFingerprint
+			for index, window := range legacyWindows {
+				if index == keeperIndex {
+					continue
+				}
+				if err := deactivateWindowWithReason(
+					ctx,
+					tx,
+					window,
+					observation.ID,
+					observation.ObservedAtMS,
+					observation.CreatedAtMS,
+					"scope_reclassified",
+					"scope_reclassified",
+					false,
+				); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}
+
+	for _, window := range legacyWindows {
+		if err := deactivateWindowWithReason(
+			ctx,
+			tx,
+			window,
+			observation.ID,
+			observation.ObservedAtMS,
+			observation.CreatedAtMS,
+			"scope_reclassified",
+			"scope_reclassified",
+			false,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func restoreSameTimestampRemoval(
@@ -1339,8 +1485,29 @@ func deactivateWindow(
 	window logicalWindowRow,
 	observationID, observedAtMS, updatedAtMS int64,
 ) error {
+	return deactivateWindowWithReason(
+		ctx,
+		tx,
+		window,
+		observationID,
+		observedAtMS,
+		updatedAtMS,
+		"provider_removed",
+		"window_removed",
+		true,
+	)
+}
+
+func deactivateWindowWithReason(
+	ctx context.Context,
+	tx *sql.Tx,
+	window logicalWindowRow,
+	observationID, observedAtMS, updatedAtMS int64,
+	activationReason, cycleReason string,
+	preferMissingSince bool,
+) error {
 	transitionMS := observedAtMS
-	if window.missingSinceMS.Valid {
+	if preferMissingSince && window.missingSinceMS.Valid {
 		transitionMS = window.missingSinceMS.Int64
 	}
 	if _, err := tx.ExecContext(ctx, `update account_quota_windows set
@@ -1357,9 +1524,9 @@ func deactivateWindow(
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `update account_quota_window_activations set
-		status = 'inactive', deactivated_at_ms = ?, deactivation_reason = 'provider_removed',
+		status = 'inactive', deactivated_at_ms = ?, deactivation_reason = ?,
 		deactivate_observation_id = ?, updated_at_ms = ? where id = ?`,
-		transitionMS, observationID, updatedAtMS, activationID); err != nil {
+		transitionMS, activationReason, observationID, updatedAtMS, activationID); err != nil {
 		return err
 	}
 	active, err := activeCycle(ctx, tx, activationID)
@@ -1374,9 +1541,9 @@ func deactivateWindow(
 		endMS = active.ActualStartMS
 	}
 	_, err = tx.ExecContext(ctx, `update account_quota_cycles set
-		state = 'closed', actual_end_ms = ?, end_reason = 'window_removed',
+		state = 'closed', actual_end_ms = ?, end_reason = ?,
 		last_observation_id = ?, updated_at_ms = ? where id = ?`,
-		endMS, observationID, updatedAtMS, active.ID)
+		endMS, cycleReason, observationID, updatedAtMS, active.ID)
 	return err
 }
 

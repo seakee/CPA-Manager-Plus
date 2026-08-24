@@ -1,6 +1,7 @@
 import type { TFunction } from 'i18next';
 import { describe, expect, it } from 'vitest';
 import type { CodexQuotaState } from '@/types';
+import { CODEX_SPARK_MODEL_ID } from '@/utils/quota/codexQuota';
 import {
   ANTIGRAVITY_CONFIG,
   buildObservedCodexQuotaState,
@@ -322,6 +323,49 @@ describe('resolveQuotaDisplayState', () => {
     ]);
   });
 
+  it('does not append a legacy Spark alias when the partial inventory already has the canonical window', () => {
+    const sparkScope = {
+      kind: 'models' as const,
+      models: [CODEX_SPARK_MODEL_ID],
+      complete: true,
+    };
+    const activeQuota: CodexQuotaState = {
+      status: 'success',
+      fetchedAtMs: 2_000,
+      quotaInventoryObserved: false,
+      windows: [
+        {
+          id: 'spark-weekly-0',
+          label: 'Spark weekly',
+          resetLabel: '-',
+          usedPercent: 0,
+          modelScope: sparkScope,
+          providerWindowAliases: ['fast-coding-weekly-0'],
+        },
+      ],
+    };
+    const observedQuota: CodexQuotaState = {
+      status: 'success',
+      observedAtMs: 1_000,
+      observedFromUsageHeaders: true,
+      observedModelScope: sparkScope,
+      windows: [
+        {
+          id: 'fast-coding-weekly-0',
+          label: 'Spark weekly',
+          resetLabel: '-',
+          usedPercent: 0,
+          modelScope: sparkScope,
+        },
+      ],
+    };
+
+    const result = resolveQuotaDisplayState(activeQuota, observedQuota) as CodexQuotaState;
+
+    expect(result.windows).toHaveLength(1);
+    expect(result.windows[0].id).toBe('spark-weekly-0');
+  });
+
   it('merges a newer header snapshot into the manual quota refresh', () => {
     const activeQuota: TestQuotaState = {
       status: 'success',
@@ -619,6 +663,132 @@ describe('resolveQuotaDisplayState', () => {
       resetLabel: '07/01 01:00',
     });
   });
+
+  it('does not let scoped Header scalars replace account-wide Codex state', () => {
+    const activeQuota: CodexQuotaState = {
+      status: 'success',
+      fetchedAtMs: 1_000,
+      activeLimit: 'main',
+      windows: [
+        {
+          id: 'weekly',
+          label: 'Weekly limit',
+          usedPercent: 36,
+          resetLabel: '07/07 00:00',
+          modelScope: { kind: 'family', key: 'codex_main', complete: true },
+        },
+      ],
+    };
+    const sparkScope = {
+      kind: 'models' as const,
+      models: [CODEX_SPARK_MODEL_ID],
+      complete: true,
+    };
+    const observedQuota: CodexQuotaState = {
+      status: 'success',
+      observedFromUsageHeaders: true,
+      observedAtMs: 2_000,
+      observedModelScope: sparkScope,
+      activeLimit: 'spark',
+      windows: [
+        {
+          id: 'spark-weekly-0',
+          label: 'Spark weekly limit',
+          usedPercent: 0,
+          resetLabel: '07/07 00:00',
+          modelScope: sparkScope,
+        },
+      ],
+    };
+
+    const result = resolveQuotaDisplayState(activeQuota, observedQuota) as CodexQuotaState;
+
+    expect(result.activeLimit).toBe('main');
+    expect(result.windows.map((window) => window.id)).toEqual(['weekly', 'spark-weekly-0']);
+  });
+
+  it('merges a legacy Spark window into the canonical header window instead of duplicating it', () => {
+    const sparkScope = {
+      kind: 'models' as const,
+      models: [CODEX_SPARK_MODEL_ID],
+      complete: true,
+    };
+    const result = resolveQuotaDisplayState(
+      {
+        status: 'success',
+        fetchedAtMs: 1_000,
+        quotaInventoryObserved: true,
+        windows: [
+          {
+            id: 'fast-coding-weekly-0',
+            usedPercent: 50,
+            modelScope: sparkScope,
+          },
+        ],
+      },
+      {
+        status: 'success',
+        observedAtMs: 2_000,
+        observedFromUsageHeaders: true,
+        observedModelScope: sparkScope,
+        windows: [
+          {
+            id: 'spark-weekly-0',
+            usedPercent: 0,
+            modelScope: sparkScope,
+            providerWindowAliases: ['fast-coding-weekly-0'],
+          },
+        ],
+      }
+    ) as CodexQuotaState;
+
+    expect(result.windows).toHaveLength(1);
+    expect(result.windows[0]).toMatchObject({ id: 'spark-weekly-0', usedPercent: 0 });
+    expect(result.windows[0].providerWindowAliases).toContain('fast-coding-weekly-0');
+  });
+
+  it('does not resolve an ambiguous secondary alias between weekly and monthly windows', () => {
+    const result = resolveQuotaDisplayState(
+      {
+        status: 'success',
+        fetchedAtMs: 1_000,
+        quotaInventoryObserved: true,
+        windows: [
+          {
+            id: 'weekly',
+            usedPercent: 36,
+            modelScope: { kind: 'family', key: 'codex_main', complete: true },
+            providerWindowAliases: ['secondary'],
+          },
+          {
+            id: 'monthly',
+            usedPercent: 10,
+            modelScope: { kind: 'family', key: 'codex_main', complete: true },
+            providerWindowAliases: ['secondary'],
+          },
+        ],
+      },
+      {
+        status: 'success',
+        observedAtMs: 2_000,
+        observedFromUsageHeaders: true,
+        observedModelScope: { kind: 'family', key: 'codex_main', complete: true },
+        windows: [
+          {
+            id: 'monthly',
+            usedPercent: 45,
+            modelScope: { kind: 'family', key: 'codex_main', complete: true },
+            providerWindowAliases: ['secondary'],
+          },
+        ],
+      }
+    ) as CodexQuotaState;
+
+    expect(result.windows).toEqual([
+      expect.objectContaining({ id: 'weekly', usedPercent: 36 }),
+      expect.objectContaining({ id: 'monthly', usedPercent: 45 }),
+    ]);
+  });
 });
 
 describe('Codex plan precedence', () => {
@@ -634,6 +804,7 @@ describe('Codex plan precedence', () => {
       {
         event_hash: 'event-1',
         timestamp_ms: 2_000,
+        model: 'gpt-5.6-sol',
         header_quota_plan_type: 'free',
         header_quota_used_percent: 25,
       },
@@ -650,6 +821,7 @@ describe('Codex plan precedence', () => {
       {
         event_hash: 'mixed-window-event',
         timestamp_ms: nowMs - 60_000,
+        model: 'gpt-5.6-sol',
         response_metadata: {
           quota: {
             primary: {
@@ -675,6 +847,49 @@ describe('Codex plan precedence', () => {
         usedPercent: 40,
         observationSource: 'response_header',
         observedAtMs: nowMs - 60_000,
+      },
+    ]);
+  });
+
+  it('builds a Spark-scoped Header observation from an alias-resolved request', () => {
+    const nowMs = 1_800_000_000_000;
+    const state = buildObservedCodexQuotaState(
+      { name: 'spark.codex.json', type: 'codex' },
+      {
+        event_hash: 'spark-alias-event',
+        timestamp_ms: nowMs - 1_000,
+        model: 'my-spark',
+        analytics_model: 'my-spark',
+        requested_model: 'my-spark',
+        resolved_model: CODEX_SPARK_MODEL_ID,
+        response_metadata: {
+          quota: {
+            primary: {
+              used_percent: 0,
+              reset_at_ms: nowMs + 7 * 24 * 60 * 60 * 1000,
+              window_minutes: 10_080,
+            },
+          },
+        },
+      },
+      t,
+      nowMs
+    );
+
+    expect(state?.observedModelScope).toEqual({
+      kind: 'models',
+      models: [CODEX_SPARK_MODEL_ID],
+      complete: true,
+    });
+    expect(state?.windows).toMatchObject([
+      {
+        id: 'spark-weekly-0',
+        usedPercent: 0,
+        modelScope: {
+          kind: 'models',
+          models: [CODEX_SPARK_MODEL_ID],
+          complete: true,
+        },
       },
     ]);
   });

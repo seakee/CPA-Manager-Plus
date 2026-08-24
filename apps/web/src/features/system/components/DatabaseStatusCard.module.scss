@@ -112,6 +112,25 @@
   color: var(--text-secondary);
 }
 
+.maintenanceNotice {
+  display: grid;
+  gap: 3px;
+  margin-top: v.$spacing-lg;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, #f59e0b 34%, var(--border-subtle));
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, #f59e0b 8%, var(--surface-subtle));
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+
+  strong {
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 750;
+  }
+}
+
 .errorStack {
   display: grid;
   gap: v.$spacing-sm;

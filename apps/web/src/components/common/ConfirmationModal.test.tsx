@@ -119,10 +119,12 @@ describe('ConfirmationModal', () => {
   });
 
   it('starts a replacement confirmation from the first step', async () => {
+    const replacedOnCancel = vi.fn();
     useNotificationStore.getState().showConfirmation({
       message: 'First warning',
       secondConfirmation: { message: 'Final warning' },
       onConfirm: vi.fn(),
+      onCancel: replacedOnCancel,
     });
     useNotificationStore.getState().advanceConfirmation();
 
@@ -132,6 +134,7 @@ describe('ConfirmationModal', () => {
       onConfirm: vi.fn(),
     });
 
+    expect(replacedOnCancel).toHaveBeenCalledTimes(1);
     expect(useNotificationStore.getState().confirmation).toMatchObject({
       isOpen: true,
       isLoading: false,
@@ -140,5 +143,32 @@ describe('ConfirmationModal', () => {
     expect(useNotificationStore.getState().confirmation.options?.message).toBe(
       'Replacement warning'
     );
+  });
+
+  it('keeps a loading confirmation and cancels its replacement request', () => {
+    const activeOnCancel = vi.fn();
+    const replacementOnCancel = vi.fn();
+    const activeOptions = {
+      message: 'Running action',
+      onConfirm: vi.fn(),
+      onCancel: activeOnCancel,
+    };
+    useNotificationStore.getState().showConfirmation(activeOptions);
+    useNotificationStore.getState().setConfirmationLoading(true);
+
+    useNotificationStore.getState().showConfirmation({
+      message: 'Replacement warning',
+      onConfirm: vi.fn(),
+      onCancel: replacementOnCancel,
+    });
+
+    expect(activeOnCancel).not.toHaveBeenCalled();
+    expect(replacementOnCancel).toHaveBeenCalledTimes(1);
+    expect(useNotificationStore.getState().confirmation).toMatchObject({
+      isOpen: true,
+      isLoading: true,
+      step: 1,
+      options: activeOptions,
+    });
   });
 });

@@ -1,0 +1,19 @@
+🚀 <b>8 月 21 日 · v1.12.2</b>
+
+✨ <b>更新内容</b>
+
+• Codex Spark 配额只统计 Spark 使用量，主配额与未知功能范围不会相互污染。
+• Codex 和 xAI 配额重置时间按浏览器本地时区显示，并保留准确的产品重置语义。
+• Manager Server 会在 <code>/status</code> 和面板中显示 deferred indexes、offline cleanup 与查询性能降级状态。
+• Request Monitoring 和 System Info 会提示历史查询风险，Accounts 最近请求改为有界读取以减少大历史数据库扫描。
+• 中英文 README 和文档首页更新为当前面板截图。
+
+⚠️ <b>注意事项</b>
+
+• 升级前请备份 SQLite、WAL、SHM 与 <code>data.key</code>。
+• 若维护状态为 required，请先停止 Manager Server，再运行 <code>cleanup-derived</code>；Docker Compose 用户按操作文档执行一次性容器命令。
+• 不要从 Web UI 在线执行 cleanup；离线命令需要独占 SQLite，且不会删除或改写 <code>usage_events</code>。
+
+🤝 <b>致谢</b>
+
+• <a href="https://github.com/HuiCheng">@HuiCheng</a> - 改进大历史数据库中的 Accounts 最近请求读取。
