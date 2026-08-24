@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -188,6 +189,19 @@ const (
 )
 
 func Migrate(db *sql.DB) error {
+	return MigrateWithOptions(db, Options{})
+}
+
+func MigrateWithOptions(db *sql.DB, options Options) error {
+	if err := options.validate(); err != nil {
+		return err
+	}
+	if options.hasCustomDataSourceName() {
+		if err := validateCustomConnectionPragmas(context.Background(), db, options); err != nil {
+			return err
+		}
+	}
+
 	monitoringSnapshot, err := inspectUsageMonitoringMigrationSnapshot(db)
 	if err != nil {
 		return err
@@ -212,11 +226,21 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 
-	statements := []string{
+	defaultPragmaStatements := []string{
 		`pragma journal_mode = WAL`,
 		`pragma synchronous = FULL`,
 		`pragma busy_timeout = 5000`,
 		`pragma foreign_keys = ON`,
+	}
+	if !options.hasCustomDataSourceName() {
+		for _, statement := range defaultPragmaStatements {
+			if _, err := db.Exec(statement); err != nil {
+				return err
+			}
+		}
+	}
+
+	schemaStatements := []string{
 		`create table if not exists usage_events (
 			id integer primary key autoincrement,
 			request_id text,
@@ -905,7 +929,7 @@ func Migrate(db *sql.DB) error {
 			created_at_ms integer not null
 		)`,
 	}
-	for _, statement := range statements {
+	for _, statement := range schemaStatements {
 		if _, err := db.Exec(statement); err != nil {
 			return err
 		}

@@ -274,14 +274,18 @@ Back up the full data directory:
 
 ```text
 usage.sqlite
-usage.sqlite-wal
-usage.sqlite-shm
 data.key
+usage.sqlite-wal  # when WAL mode is active and the file exists
+usage.sqlite-shm  # when WAL mode is active and the file exists
 ```
 
 CPA connections saved through setup or the panel are encrypted with `data.key` before being written to SQLite. If `data.key` is lost, the encrypted CPA Management Key cannot be recovered and the CPA connection must be saved again.
 
 If the installer manages the connection through env/secrets, the CPA Management Key is usually stored in `secrets/cpa-management-key` under the install directory and is not written to SQLite. Back up `secrets/` together with the data directory.
+
+## Should I Use `USAGE_DB_URL` Or `USAGE_DB_PATH`?
+
+Use `USAGE_DB_PATH` for normal deployments. Use `USAGE_DB_URL` only when complete SQLite driver parameters are required. They are mutually exclusive; setting both fails startup so the database path, process lock, and actual connection cannot point to different targets. See [Manager Server Guide](../operations/manager-server.md#advanced-sqlite-database-urls) for the complete URL syntax and safety constraints.
 
 ## 401 From Manager Server
 

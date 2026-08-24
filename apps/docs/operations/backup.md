@@ -1,15 +1,17 @@
 # 备份与恢复
 
-CPAMP 的请求历史、配置和加密凭证都在本机。备份时最容易犯的错，是只复制 `usage.sqlite`，漏掉 WAL/SHM、`data.key` 或安装目录里的 secret 文件。
+CPAMP 的请求历史、配置和加密凭证都在本机。备份时最容易犯的错，是在进程运行时只复制 `usage.sqlite`，或漏掉当前存在的 WAL/SHM、`data.key` 和安装目录里的 secret 文件。
 
 ## 必备备份文件
 
-至少把这些文件作为一组备份：
+停止 Manager Server 后，至少把这些文件作为一组备份：
 
 - `usage.sqlite`
-- `usage.sqlite-wal`
-- `usage.sqlite-shm`
 - `data.key`
+- `usage.sqlite-wal`（WAL 模式且文件存在时）
+- `usage.sqlite-shm`（WAL 模式且文件存在时）
+
+`journal_mode=DELETE` 正常情况下没有 WAL/SHM；不要为了得到“整洁”目录而手工删除 sidecar。只备份停止后实际存在的文件。
 
 如果部署目录还有自定义配置文件，也应一起备份。使用一键安装脚本时，至少额外备份安装目录中的 `secrets/`；完整安装和 env/secret 管理模式会把 CPA Management Key 放在 `secrets/cpa-management-key`。
 
@@ -63,10 +65,11 @@ Copy-Item -Recurse .\data .\data.backup
 
 1. 停止 CPAMP。
 2. 恢复完整数据目录。
-3. 确认 `usage.sqlite` 和 `data.key` 来自同一次备份。
-4. 如果使用 env/secret 管理 CPA 连接，同时恢复安装目录里的 `secrets/`。
-5. 启动 CPAMP。
-6. 登录后检查配置、监控数据和采集器状态。
+3. 确认 `usage.sqlite`、`data.key` 和任何 sidecar 来自同一次备份。
+4. 如果使用 `USAGE_DB_URL`，确认恢复路径是 URL 的 path，且恢复后的 journal mode 与 URL 中声明的模式一致。
+5. 如果使用 env/secret 管理 CPA 连接，同时恢复安装目录里的 `secrets/`。
+6. 启动 CPAMP。
+7. 登录后检查配置、监控数据和采集器状态。
 
 如果恢复后出现解密失败，优先检查 `data.key` 是否和 SQLite 匹配。
 

@@ -274,14 +274,18 @@ Plus 示例 volume:   cpa-manager-plus-data
 
 ```text
 usage.sqlite
-usage.sqlite-wal
-usage.sqlite-shm
 data.key
+usage.sqlite-wal  # WAL 模式且文件存在时
+usage.sqlite-shm  # WAL 模式且文件存在时
 ```
 
 通过 setup 或面板保存的 CPA 连接会把 CPA Management Key 用 `data.key` 加密后写入 SQLite。丢失 `data.key` 后，已加密的 CPA Management Key 无法恢复，只能重新保存 CPA 连接。
 
 如果使用安装器 env/secret 管理连接，CPA Management Key 通常在安装目录的 `secrets/cpa-management-key`，不写入 SQLite。备份时要把安装目录里的 `secrets/` 和数据目录一起保存。
+
+## `USAGE_DB_URL` 和 `USAGE_DB_PATH` 应该用哪个？
+
+普通部署使用 `USAGE_DB_PATH`。只有需要传入完整 SQLite driver 参数时才使用 `USAGE_DB_URL`。两者互斥；同时设置会拒绝启动，避免数据库 path、进程锁和实际连接指向不同目标。URL 的完整格式和安全约束见 [Manager Server 指南](../operations/manager-server.md#高级-sqlite-database-url)。
 
 ## Manager Server 返回 401
 

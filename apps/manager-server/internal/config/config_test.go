@@ -225,6 +225,7 @@ func clearConfigEnv(t *testing.T) {
 		"HTTP_ADDR",
 		"USAGE_DATA_DIR",
 		"USAGE_DB_PATH",
+		"USAGE_DB_URL",
 		"CPA_UPSTREAM_URL",
 		"CPA_MANAGEMENT_KEY",
 		"CPA_MANAGEMENT_KEY_FILE",

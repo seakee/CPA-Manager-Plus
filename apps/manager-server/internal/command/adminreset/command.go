@@ -2,7 +2,6 @@ package adminreset
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,9 +11,9 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
+	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	adminauthsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/adminauth"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
-	_ "modernc.org/sqlite"
 )
 
 func Run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer) error {
@@ -30,26 +29,26 @@ func Run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	if err != nil {
 		return err
 	}
-	dbPath, err := resolveDBPath(opts.DBPath)
+	databaseOptions, err := resolveDatabaseOptions(opts.DBPath)
 	if err != nil {
 		return err
 	}
-	if err := validateDatabaseFile(dbPath); err != nil {
+	if err := validateDatabaseFile(databaseOptions.Path); err != nil {
 		return err
 	}
-	databaseLock, err := processlock.Acquire(dbPath)
+	databaseLock, err := processlock.Acquire(databaseOptions.Path)
 	if err != nil {
 		return fmt.Errorf("acquire admin reset lock; stop Manager Server and retry: %w", err)
 	}
 	defer func() { _ = databaseLock.Close() }()
-	dbPath = databaseLock.DatabasePath()
-	if err := ensureManagerDB(ctx, dbPath); err != nil {
+	databaseOptions.Path = databaseLock.DatabasePath()
+	if err := ensureManagerDB(ctx, databaseOptions.Path); err != nil {
 		return err
 	}
 
-	st, err := store.Open(dbPath)
+	st, err := store.OpenWithOptions(databaseOptions)
 	if err != nil {
-		return fmt.Errorf("open sqlite %s: %w", dbPath, err)
+		return fmt.Errorf("open sqlite %s: %w", databaseOptions.Path, err)
 	}
 	defer st.Close()
 
@@ -112,18 +111,24 @@ func resolveAdminKey(opts options) (string, error) {
 	return adminKey, nil
 }
 
-func resolveDBPath(override string) (string, error) {
+func resolveDatabaseOptions(override string) (sqliterepo.Options, error) {
 	if strings.TrimSpace(override) != "" {
-		return strings.TrimSpace(override), nil
+		return sqliterepo.Options{Path: strings.TrimSpace(override)}, nil
 	}
 	cfg, err := config.LoadWithoutCreatingDefault()
 	if err != nil {
-		return "", fmt.Errorf("load config: %w", err)
+		return sqliterepo.Options{}, fmt.Errorf("load config: %w", err)
 	}
 	if strings.TrimSpace(cfg.DBPath) == "" {
-		return "", errors.New("SQLite database path is empty; pass --db-path")
+		return sqliterepo.Options{}, errors.New("SQLite database path is empty; pass --db-path")
 	}
-	return cfg.DBPath, nil
+	return sqliterepo.Options{
+		Path:                cfg.DBPath,
+		DataSourceName:      cfg.DBURL,
+		ExpectedJournalMode: cfg.DBJournalMode,
+		ExpectedSynchronous: cfg.DBSynchronous,
+		ExpectedBusyTimeout: cfg.DBBusyTimeout,
+	}, nil
 }
 
 func validateDatabaseFile(dbPath string) error {
@@ -147,8 +152,11 @@ func ensureManagerDB(ctx context.Context, dbPath string) error {
 	if err := validateDatabaseFile(dbPath); err != nil {
 		return err
 	}
-
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sqliterepo.OpenUnmigratedWithOptions(sqliterepo.Options{
+		Path:         dbPath,
+		MaxOpenConns: 1,
+		MaxIdleConns: 1,
+	})
 	if err != nil {
 		return fmt.Errorf("open sqlite %s for validation: %w", dbPath, err)
 	}

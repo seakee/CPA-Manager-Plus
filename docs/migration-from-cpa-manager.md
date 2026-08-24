@@ -18,11 +18,10 @@ This guide is for users migrating from the old `seakee/cpa-manager` / CPA-Manage
    - Docker volume is commonly `cpa-manager-data`.
    - Host directory mounts usually map to container `/data`.
    - Native packages default to `data/usage.sqlite` next to the binary.
-3. Stop the old container or process so SQLite WAL files are no longer being written.
+3. Stop the old container or process so the SQLite files stop changing.
 4. Back up the full old data directory, not only a single database file. Keep at least:
    - `usage.sqlite`
-   - `usage.sqlite-wal`
-   - `usage.sqlite-shm`
+   - Any current `usage.sqlite-wal` / `usage.sqlite-shm` files when WAL mode is active
 5. Decide the admin-key strategy. During migration, prefer setting `CPA_MANAGER_ADMIN_KEY` or `CPA_MANAGER_ADMIN_KEY_FILE` explicitly instead of relying on the first startup log.
 
 ## Docker Volume Migration
@@ -48,13 +47,15 @@ services:
     image: seakee/cpa-manager-plus:latest
     restart: unless-stopped
     ports:
-      - "18317:18317"
+      - '18317:18317'
     environment:
-      HTTP_ADDR: "0.0.0.0:18317"
-      USAGE_DB_PATH: "/data/usage.sqlite"
-      CPA_MANAGER_DATA_KEY_PATH: "/data/data.key"
-      CPA_MANAGER_ADMIN_KEY: "replace-with-a-long-random-admin-key"
-      USAGE_COLLECTOR_MODE: "auto"
+      HTTP_ADDR: '0.0.0.0:18317'
+      USAGE_DB_PATH: '/data/usage.sqlite'
+      # Advanced alternative: remove the previous line before setting a complete USAGE_DB_URL.
+      # USAGE_DB_URL: "file:///data/usage.sqlite?_txlock=immediate&_pragma=journal_mode(DELETE)&_pragma=synchronous(EXTRA)&_pragma=busy_timeout(15000)&_pragma=foreign_keys(1)"
+      CPA_MANAGER_DATA_KEY_PATH: '/data/data.key'
+      CPA_MANAGER_ADMIN_KEY: 'replace-with-a-long-random-admin-key'
+      USAGE_COLLECTOR_MODE: 'auto'
     volumes:
       - cpa-manager-data:/data
 
@@ -99,7 +100,7 @@ Then open `http://<host>:18317/management.html` and log in with the admin key.
 1. Stop the old `cpa-manager` process.
 2. Back up the old program directory, especially `data/usage.sqlite*`.
 3. Extract `cpa-manager-plus_<version>_<os>_<arch>`.
-4. Copy the old `data` directory into the new package directory, or set `USAGE_DATA_DIR` / `USAGE_DB_PATH` to the old data path.
+4. Copy the old `data` directory into the new package directory, or set `USAGE_DATA_DIR`, `USAGE_DB_PATH`, or `USAGE_DB_URL` to the old database. The URL and path cannot both be set.
 5. Prefer setting the admin key on first startup:
 
 ```bash

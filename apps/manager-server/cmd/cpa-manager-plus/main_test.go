@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -149,11 +150,61 @@ func TestManagerDatabaseProcessLockPrecedesStoreOpen(t *testing.T) {
 	}
 	source := string(content)
 	lockAt := strings.Index(source, "processlock.Acquire(cfg.DBPath)")
-	storeOpenAt := strings.Index(source, "store.Open(cfg.DBPath, protector)")
+	storeOpenAt := strings.Index(source, "store.OpenWithOptions(sqliterepo.Options{")
 	lockCloseAt := strings.Index(source, "databaseLock.Close()")
 	if lockAt < 0 || storeOpenAt < lockAt || lockCloseAt < lockAt {
 		t.Fatalf("database lock ordering invalid: lock=%d open=%d close=%d", lockAt, storeOpenAt, lockCloseAt)
 	}
+}
+
+func TestWALMaintenanceStartsOnlyForEffectiveWALMode(t *testing.T) {
+	content, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	source := string(content)
+	readAt := strings.Index(source, "db.SQLiteJournalMode(context.Background())")
+	gateAt := strings.Index(source, `if journalMode == "wal"`)
+	workerAt := strings.Index(source, "sqliterepo.NewWALMaintenance(cfg.DBPath)")
+	disabledAt := strings.Index(source, "SQLite WAL maintenance disabled")
+	if readAt < 0 || gateAt < readAt || workerAt < gateAt || disabledAt < workerAt {
+		t.Fatalf("WAL maintenance gating invalid: read=%d gate=%d worker=%d disabled=%d", readAt, gateAt, workerAt, disabledAt)
+	}
+}
+
+func TestManagerServerCustomDatabaseURLDisablesWALMaintenanceAndRestarts(t *testing.T) {
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(dataDir, "usage.sqlite")
+	dbURL := managerServerDatabaseURL(dbPath)
+	first := startManagerServerProcessWithEnvironment(t, managerServerURLTestEnvironment(dataDir, dbPath, dbURL))
+	firstStopped := false
+	t.Cleanup(func() {
+		if !firstStopped {
+			first.stop(t)
+		}
+	})
+	assertManagerEndpoint(t, first.addr, "/management.html")
+	assertManagerEndpoint(t, first.addr, "/usage-service/info")
+	if logs := first.logs.String(); !strings.Contains(logs, "custom SQLite database URL enabled") ||
+		!strings.Contains(logs, "SQLite WAL maintenance disabled: journal_mode=delete") {
+		t.Fatalf("custom database startup logs missing:\n%s", logs)
+	}
+	first.stop(t)
+	firstStopped = true
+	assertManagerDatabaseModeAndSchema(t, dbPath, "delete")
+
+	second := startManagerServerProcessWithEnvironment(t, managerServerURLTestEnvironment(dataDir, dbPath, dbURL))
+	secondStopped := false
+	t.Cleanup(func() {
+		if !secondStopped {
+			second.stop(t)
+		}
+	})
+	assertManagerEndpoint(t, second.addr, "/management.html")
+	assertManagerEndpoint(t, second.addr, "/usage-service/info")
+	second.stop(t)
+	secondStopped = true
+	assertManagerDatabaseModeAndSchema(t, dbPath, "delete")
 }
 
 func TestCleanupDerivedCommandUsesSignalContext(t *testing.T) {
@@ -312,8 +363,13 @@ func (l *synchronizedLog) String() string {
 
 func startManagerServerProcess(t testing.TB, dataDir, dbPath string) *managerServerProcess {
 	t.Helper()
+	return startManagerServerProcessWithEnvironment(t, managerServerTestEnvironment(dataDir, dbPath))
+}
+
+func startManagerServerProcessWithEnvironment(t testing.TB, environment []string) *managerServerProcess {
+	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestManagerServerHelperProcess$")
-	cmd.Env = managerServerTestEnvironment(dataDir, dbPath)
+	cmd.Env = environment
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		t.Fatalf("open manager server stderr: %v", err)
@@ -369,6 +425,7 @@ func managerServerTestEnvironment(dataDir, dbPath string) []string {
 		"HTTP_ADDR":                             "127.0.0.1:0",
 		"USAGE_DATA_DIR":                        dataDir,
 		"USAGE_DB_PATH":                         dbPath,
+		"USAGE_DB_URL":                          "",
 		"USAGE_COLLECTOR_MODE":                  "http",
 		"USAGE_POLL_INTERVAL_MS":                "1000",
 		"USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED": "false",
@@ -384,6 +441,70 @@ func managerServerTestEnvironment(dataDir, dbPath string) []string {
 		environment = append(environment, key+"="+value)
 	}
 	return environment
+}
+
+func managerServerURLTestEnvironment(dataDir, dbPath, dbURL string) []string {
+	environment := managerServerTestEnvironment(dataDir, dbPath)
+	for index, entry := range environment {
+		key, _, _ := strings.Cut(entry, "=")
+		switch key {
+		case "USAGE_DB_PATH":
+			environment[index] = "USAGE_DB_PATH="
+		case "USAGE_DB_URL":
+			environment[index] = "USAGE_DB_URL=" + dbURL
+		}
+	}
+	return environment
+}
+
+func managerServerDatabaseURL(dbPath string) string {
+	uriPath := filepath.ToSlash(dbPath)
+	if !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	dsn := url.URL{Scheme: "file", Path: uriPath}
+	query := url.Values{}
+	query.Add("_txlock", "immediate")
+	query.Add("_pragma", "journal_mode(DELETE)")
+	query.Add("_pragma", "synchronous(EXTRA)")
+	query.Add("_pragma", "busy_timeout(15000)")
+	query.Add("_pragma", "foreign_keys(1)")
+	query.Add("_pragma", "mmap_size(0)")
+	query.Add("_pragma", "cell_size_check(1)")
+	query.Add("_pragma", "temp_store(FILE)")
+	dsn.RawQuery = query.Encode()
+	return dsn.String()
+}
+
+func assertManagerDatabaseModeAndSchema(t testing.TB, dbPath, wantMode string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open manager database: %v", err)
+	}
+	defer db.Close()
+	var mode string
+	if err := db.QueryRow(`pragma journal_mode`).Scan(&mode); err != nil {
+		t.Fatalf("read manager journal mode: %v", err)
+	}
+	if !strings.EqualFold(mode, wantMode) {
+		t.Fatalf("manager journal mode = %q, want %q", mode, wantMode)
+	}
+	var tables int
+	if err := db.QueryRow(`select count(*) from sqlite_schema where type = 'table'
+		and name in ('settings', 'usage_events')`).Scan(&tables); err != nil {
+		t.Fatalf("read manager schema: %v", err)
+	}
+	if tables != 2 {
+		t.Fatalf("manager schema table count = %d, want 2", tables)
+	}
+	var integrity string
+	if err := db.QueryRow(`pragma integrity_check`).Scan(&integrity); err != nil {
+		t.Fatalf("run manager integrity check: %v", err)
+	}
+	if integrity != "ok" {
+		t.Fatalf("manager integrity check = %q, want ok", integrity)
+	}
 }
 
 func (p *managerServerProcess) stop(t testing.TB) {

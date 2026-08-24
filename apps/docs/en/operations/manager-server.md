@@ -195,7 +195,8 @@ Saving CPAMP configuration does not rewrite the full CPA `config.yaml`.
 | `HTTP_ADDR`                             | `0.0.0.0:18317`                                             | Manager Server listen address.                                                                                                                                                                                                     |
 | `CPA_MANAGER_PPROF_ADDR`                | empty                                                       | Optional Go pprof listen address; only `localhost`, `127.0.0.1`, or `::1` is accepted.                                                                                                                                             |
 | `USAGE_DATA_DIR`                        | Docker: `/data`; native: `./data`                           | Base data directory.                                                                                                                                                                                                               |
-| `USAGE_DB_PATH`                         | Docker: `/data/usage.sqlite`; native: `./data/usage.sqlite` | SQLite database path.                                                                                                                                                                                                              |
+| `USAGE_DB_URL`                          | empty                                                       | Advanced SQLite `file:` URL; mutually exclusive with `USAGE_DB_PATH`, for passing complete connection parameters.                                                                                                                  |
+| `USAGE_DB_PATH`                         | Docker: `/data/usage.sqlite`; native: `./data/usage.sqlite` | SQLite database path; remove it when `USAGE_DB_URL` is set.                                                                                                                                                                        |
 | `CPA_MANAGER_ADMIN_KEY`                 | empty                                                       | Optional admin key.                                                                                                                                                                                                                |
 | `CPA_MANAGER_ADMIN_KEY_FILE`            | `/run/secrets/cpa_admin_key`                                | Optional admin key file.                                                                                                                                                                                                           |
 | `CPA_MANAGER_DATA_KEY`                  | empty                                                       | Optional data encryption key.                                                                                                                                                                                                      |
@@ -223,6 +224,32 @@ Startup precedence:
 ```text
 environment variables > config.json > defaults
 ```
+
+The complete database-location precedence is environment `USAGE_DB_URL` / `USAGE_DB_PATH`, then environment `USAGE_DATA_DIR`, then `dbUrl` / `dbPath` in `config.json`, and finally the default data directory. A URL and path at the same level are mutually exclusive. Manager Server fails startup on a conflict instead of guessing which value to use.
+
+### Advanced SQLite database URLs
+
+Default deployments should keep using `USAGE_DB_PATH`. Their behavior remains WAL, `synchronous=FULL`, `busy_timeout=5000`, four maximum connections, and two idle connections. Use `USAGE_DB_URL` only when SQLite driver parameters must be supplied as a complete URL. It must be an absolute, local, persistent, hierarchical `file:` URI. Hosts, userinfo, fragments, relative paths, `:memory:`, `mode=memory`, `immutable`, `nolock`, and custom VFS selections are rejected.
+
+The URL must explicitly include these safety settings:
+
+```text
+_txlock=immediate
+_pragma=foreign_keys(1)        # or foreign_keys(ON)
+_pragma=journal_mode(WAL)      # or journal_mode(DELETE)
+_pragma=synchronous(FULL)      # or synchronous(EXTRA)
+_pragma=busy_timeout(a positive integer)
+```
+
+For example, to use a rollback journal and disable mmap:
+
+```bash
+USAGE_DB_URL='file:///var/lib/cpa-manager-plus/usage.sqlite?_txlock=immediate&_pragma=journal_mode(DELETE)&_pragma=synchronous(EXTRA)&_pragma=busy_timeout(15000)&_pragma=foreign_keys(1)&_pragma=mmap_size(0)&_pragma=cell_size_check(1)&_pragma=temp_store(FILE)'
+```
+
+SQLite executes `_pragma` values through the driver, so only a trusted deployment administrator may control this URL. At startup, Manager Server reads back and validates the journal mode, foreign keys, synchronous level, and busy timeout; it exits if the configured values did not take effect. The WAL checkpoint worker is not started when the effective mode is `DELETE`.
+
+Before changing journal mode, stop every Manager Server connected to the database, back up the database together with any existing sidecar files, and restart as a single instance. A `file:` URL, rollback journal, and process lock do not make SQLite automatically safe on a network filesystem. SMB/CIFS/NFS remains best-effort and requires strict single-instance operation.
 
 Temporarily enable the loopback-only pprof server when diagnosing CPU, heap, or goroutine behavior:
 
@@ -295,6 +322,8 @@ cpa-manager-plus cleanup-derived
 cpa-manager-plus cleanup-derived --db-path /path/to/usage.sqlite
 ```
 
+Deployments using `USAGE_DB_URL` should omit `--db-path` in the same configured environment so the offline command inherits the complete URL parameters; an explicit `--db-path` selects the default SQLite connection settings. If the Compose service is configured with a URL, also remove `--db-path /data/usage.sqlite` from the example above.
+
 Manager Server holds an operating-system lock at `<absolute-database-path>.manager.lock` for its entire lifetime, and the command refuses to run while that lock is held. The web UI therefore detects, explains, and shows the steps only; it does not offer an online repair button, spawn the cleanup command, or bypass the process lock. The lock file itself is persistent and does not need to be deleted; stop the Manager Server process and retry instead. Symbolic-link aliases resolve to the same lock, while databases with multiple hard links are rejected because SQLite WAL/SHM sidecars cannot safely share those aliases. Back up the SQLite database plus `data.key` before offline maintenance. The command prepares deferred indexes, replaces obsolete derived indexes, completes oversized legacy quota observation groups, and removes obsolete derived FTS/projection generations. It never deletes, rebuilds, or rewrites authoritative `usage_events`.
 
 See the [July 10, 2026 Performance Optimization Report](./performance-optimization-2026-07-10.md) for the causes, delivery stages, and complete 100k benchmark evidence.
@@ -349,10 +378,12 @@ Back up:
 
 ```text
 usage.sqlite
-usage.sqlite-wal
-usage.sqlite-shm
 data.key
+usage.sqlite-wal  # when journal_mode=WAL and the file exists
+usage.sqlite-shm  # when journal_mode=WAL and the file exists
 ```
+
+After stopping the process, back up the database, `data.key`, and every sidecar file that actually exists as one set. Do not copy only the main database while it is running, and do not manually delete WAL/SHM files.
 
 Security notes:
 

@@ -8,7 +8,7 @@ This guide explains how to upgrade CPAMP without losing SQLite data, `data.key`,
 2. Record the current image tag or native version, launch command, environment variables, and data directory.
 3. Stop extra instances that could write to the same SQLite database. Only one Manager Server may consume a CPA usage queue.
 4. Back up:
-   - `usage.sqlite`, `usage.sqlite-wal`, and `usage.sqlite-shm`.
+   - `usage.sqlite`, plus any current `usage.sqlite-wal` / `usage.sqlite-shm` files when WAL mode is active.
    - `data.key`.
    - Installer-managed `secrets/`, `.env`, `compose.yaml`, or `config.json`.
    - Custom reverse-proxy, systemd, launchd, or Windows service configuration.
@@ -158,7 +158,7 @@ Do not overwrite the running version directory:
 6. If the generated systemd unit is installed, update `WorkingDirectory` and `ExecStart`, then run `systemctl daemon-reload`.
 7. Start and verify the new version before deciding whether to remove the old runtime.
 
-Do not copy only `usage.sqlite` and omit WAL/SHM. Back up while the process is stopped or use a safe SQLite method from [Backup And Restore](./backup.md).
+Do not copy only `usage.sqlite` while the process is running. After shutdown, include every WAL/SHM file that actually exists, or use a safe SQLite method from [Backup And Restore](./backup.md). Having no WAL/SHM in DELETE mode is normal.
 
 ## Manual Native Packages
 
@@ -167,7 +167,7 @@ Do not copy only `usage.sqlite` and omit WAL/SHM. Back up while the process is s
 1. Run `./cpa-manager-plusctl stop`, or stop your process supervisor.
 2. Back up the data directory and `data.key`.
 3. Extract the new package into a new version directory.
-4. Continue using the external `USAGE_DATA_DIR` / `USAGE_DB_PATH`, or copy `config.json` and `data/` while the process is stopped.
+4. Continue using the external `USAGE_DATA_DIR`, `USAGE_DB_PATH`, or `USAGE_DB_URL`, or copy `config.json` and `data/` while the process is stopped. The URL and path remain mutually exclusive.
 5. Start with the control script from the new directory:
 
 ```bash
@@ -270,5 +270,5 @@ Confirm:
 - Docker: restore the previous image tag and recreate the container while mounting the pre-upgrade data backup.
 - Native: stop the new version and restore the old binary, configuration, and pre-upgrade data backup.
 - Single-file panel: restore the previous `management.html`.
-- Do not assume an older binary can read a database migrated by a newer version. For schema or data-semantics changes, restore the pre-upgrade SQLite, WAL/SHM, and `data.key` together.
+- Do not assume an older binary can read a database migrated by a newer version. For schema or data-semantics changes, restore the pre-upgrade SQLite, `data.key`, every WAL/SHM file that existed in the backup, and the original `USAGE_DB_URL` / journal-mode configuration together.
 - If the cause is unclear, preserve both versions' logs and database copies. Do not repeatedly start different versions against the same live database.

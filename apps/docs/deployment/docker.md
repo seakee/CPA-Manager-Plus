@@ -85,6 +85,8 @@ services:
     environment:
       HTTP_ADDR: '0.0.0.0:18317'
       USAGE_DB_PATH: '/data/usage.sqlite'
+      # 高级替代：删除上一行后启用完整 SQLite URL：
+      # USAGE_DB_URL: 'file:///data/usage.sqlite?_txlock=immediate&_pragma=journal_mode(DELETE)&_pragma=synchronous(EXTRA)&_pragma=busy_timeout(15000)&_pragma=foreign_keys(1)&_pragma=mmap_size(0)'
       CPA_MANAGER_DATA_KEY_PATH: '/data/data.key'
       # 托管部署建议显式设置：
       # CPA_MANAGER_ADMIN_KEY: "replace-with-a-long-random-admin-key"
@@ -189,7 +191,8 @@ http://host.docker.internal:8317
 | ---------------------------- | --------------------------------- | --------------------------------------- |
 | `HTTP_ADDR`                  | `0.0.0.0:18317`                   | Manager Server 监听地址。               |
 | `USAGE_DATA_DIR`             | `/data`                           | 数据目录。                              |
-| `USAGE_DB_PATH`              | `/data/usage.sqlite`              | SQLite 数据库路径。                     |
+| `USAGE_DB_URL`               | 空                                | 高级 SQLite `file:` URL；与 path 互斥。 |
+| `USAGE_DB_PATH`              | `/data/usage.sqlite`              | SQLite 数据库路径；URL 模式时移除。     |
 | `CPA_MANAGER_DATA_KEY_PATH`  | `/data/data.key`                  | 数据密钥路径。                          |
 | `CPA_MANAGER_ADMIN_KEY`      | 空                                | 显式设置 Manager Server 管理员密钥。    |
 | `CPA_MANAGER_ADMIN_KEY_FILE` | `/run/secrets/cpa_admin_key`      | 从文件读取管理员密钥。                  |
@@ -203,6 +206,8 @@ http://host.docker.internal:8317
 | `USAGE_POLL_INTERVAL_MS`     | `500`                             | 空闲轮询间隔。                          |
 | `USAGE_QUERY_LIMIT`          | `50000`                           | 最近用量事件返回上限。                  |
 
+普通部署保留 `USAGE_DB_PATH` 即可。使用 `USAGE_DB_URL` 时必须从 Compose 中删除 `USAGE_DB_PATH`，不能同时保留两个非空值。URL 中的 `&` 位于 YAML 单引号内，不需要额外转义。完整约束见 [Manager Server 指南](../operations/manager-server.md#高级-sqlite-database-url)。
+
 更多运行时配置见 [Manager Server 指南](../operations/manager-server.md)。
 
 :::
@@ -213,12 +218,12 @@ http://host.docker.internal:8317
 
 ```text
 /data/usage.sqlite
-/data/usage.sqlite-wal
-/data/usage.sqlite-shm
 /data/data.key
+/data/usage.sqlite-wal  # WAL 模式且文件存在时
+/data/usage.sqlite-shm  # WAL 模式且文件存在时
 ```
 
-备份必须包含 SQLite 文件和 `data.key`：
+备份必须包含 SQLite 主数据库、`data.key` 和当前实际存在的 sidecar 文件：
 
 ```bash
 docker run --rm \
@@ -291,6 +296,8 @@ docker compose run --rm --no-deps \
 
 docker compose start cpa-manager-plus
 ```
+
+如果 service 使用 `USAGE_DB_URL`，运行中间命令时删除 `--db-path /data/usage.sqlite`，让容器继承完整 URL；显式 path 会选择默认 SQLite 连接设置。
 
 如果 Compose 服务名不是 `cpa-manager-plus`，请替换为实际服务名。不要在 Manager Server 仍运行时执行，也不要从 Web UI 在线触发清理；该命令需要独占 SQLite 进程锁。完成后重新启动，维护状态会从数据库 metadata 自动恢复为 clean，UI Warning 也会自动消失。
 

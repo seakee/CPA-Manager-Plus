@@ -22,7 +22,7 @@ The alias `reset-admin-password` is also accepted for users who think of the adm
 3. Make sure you are pointing at the real Manager Server database:
    - Docker default: `/data/usage.sqlite`
    - Native default: `data/usage.sqlite` next to the binary
-   - Custom deployments: the value of `USAGE_DB_PATH`
+   - Custom deployments: the `USAGE_DB_PATH` value or the local path in `USAGE_DB_URL`
 
 ## Docker Compose
 
@@ -57,7 +57,7 @@ docker run --rm \
 docker start cpa-manager-plus
 ```
 
-If you use the GitHub Container Registry image, replace `seakee/cpa-manager-plus:latest` with `ghcr.io/seakee/cpa-manager-plus:latest`.
+If you use the GitHub Container Registry image, replace `seakee/cpa-manager-plus:latest` with `ghcr.io/seakee/cpa-manager-plus:latest`. A manual `docker run` for a URL deployment must also pass the original `USAGE_DB_URL`; Compose is preferred because it inherits the service environment.
 
 ## Docker Host Directory Mount
 
@@ -110,7 +110,9 @@ Windows PowerShell:
 .\cpa-manager-plus.exe reset-admin-key
 ```
 
-If your SQLite database is not in the default package data directory, pass it explicitly:
+If the deployment uses `USAGE_DB_URL`, run in the same configured environment and omit `--db-path` so the URL parameters are preserved. Passing `--db-path` selects the default SQLite settings.
+
+If a path-only SQLite database is not in the default package data directory, pass it explicitly:
 
 macOS / Linux:
 
@@ -128,7 +130,7 @@ Then restart the native process and log in with the new admin key.
 
 ## Troubleshooting
 
-- **`SQLite database not found`**: you are not running the command in the same configured environment as Manager Server. Pass `--db-path`, or mount the correct Docker volume/host directory.
+- **`SQLite database not found`**: you are not running the command in the same configured environment as Manager Server. URL deployments should pass the original `USAGE_DB_URL` and omit `--db-path`; path deployments may pass `--db-path`. Also mount the correct Docker volume/host directory.
 - **`is empty` / `does not look like a CPA Manager Plus Manager Server database`**: the path points to the wrong file or to a newly created empty file. Find the real `usage.sqlite` from the Manager Server data directory.
 - **`database is locked`**: Manager Server or another process is still using SQLite. Stop it and rerun the command.
 - **Login still fails**: confirm the panel is using the same Manager Server whose database was reset. For Docker, verify the volume name or host mount path.

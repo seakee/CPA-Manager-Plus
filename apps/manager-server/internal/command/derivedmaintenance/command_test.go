@@ -5,11 +5,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
+	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
 
@@ -88,6 +90,100 @@ func TestRunFinalizesPairedAndOrphanMonitoringFTSJobs(t *testing.T) {
 	}
 }
 
+func TestRunUsesConfiguredDatabaseURL(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.sqlite")
+	databaseOptions := cleanupDatabaseOptions(dbPath)
+	st, err := store.OpenWithOptions(databaseOptions)
+	if err != nil {
+		t.Fatalf("open DELETE cleanup fixture: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close DELETE cleanup fixture: %v", err)
+	}
+	for key, value := range map[string]string{
+		"CPA_MANAGER_CONFIG": "",
+		"USAGE_DATA_DIR":     "",
+		"USAGE_DB_PATH":      "",
+		"USAGE_DB_URL":       databaseOptions.DataSourceName,
+	} {
+		t.Setenv(key, value)
+	}
+	resolved, err := resolveDatabaseOptions("")
+	if err != nil {
+		t.Fatalf("resolve configured database URL: %v", err)
+	}
+	if resolved.DataSourceName != databaseOptions.DataSourceName ||
+		resolved.ExpectedJournalMode != "delete" ||
+		resolved.ExpectedSynchronous != 3 ||
+		resolved.ExpectedBusyTimeout != 15000 {
+		t.Fatalf("resolved database options = %+v", resolved)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := Run(context.Background(), nil, &stdout, &stderr); err != nil {
+		t.Fatalf("run cleanup with configured URL: %v stderr=%s", err, stderr.String())
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("reopen configured cleanup database: %v", err)
+	}
+	defer db.Close()
+	var journalMode string
+	if err := db.QueryRow(`pragma journal_mode`).Scan(&journalMode); err != nil {
+		t.Fatalf("read cleanup journal mode: %v", err)
+	}
+	if !strings.EqualFold(journalMode, "delete") {
+		t.Fatalf("cleanup journal mode = %q, want delete", journalMode)
+	}
+}
+
+func TestRunValidatesConfiguredDatabaseURLBeforeApplyingPragmas(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "unrelated.sqlite")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open unrelated sqlite: %v", err)
+	}
+	if _, err := db.Exec(`create table unrelated(id integer primary key); pragma user_version = 7`); err != nil {
+		t.Fatalf("create unrelated fixture: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close unrelated fixture: %v", err)
+	}
+	databaseOptions := cleanupDatabaseOptions(dbPath)
+	dsn, err := url.Parse(databaseOptions.DataSourceName)
+	if err != nil {
+		t.Fatalf("parse test database URL: %v", err)
+	}
+	query := dsn.Query()
+	query.Add("_pragma", "user_version(123)")
+	dsn.RawQuery = query.Encode()
+	for key, value := range map[string]string{
+		"CPA_MANAGER_CONFIG": "",
+		"USAGE_DATA_DIR":     "",
+		"USAGE_DB_PATH":      "",
+		"USAGE_DB_URL":       dsn.String(),
+	} {
+		t.Setenv(key, value)
+	}
+	var stdout, stderr bytes.Buffer
+	err = Run(context.Background(), nil, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "does not look like a CPA Manager Plus") {
+		t.Fatalf("Run() error = %v", err)
+	}
+	db, err = sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("reopen unrelated sqlite: %v", err)
+	}
+	defer db.Close()
+	var userVersion int
+	if err := db.QueryRow(`pragma user_version`).Scan(&userVersion); err != nil {
+		t.Fatalf("read unrelated user_version: %v", err)
+	}
+	if userVersion != 7 {
+		t.Fatalf("unrelated user_version = %d, want 7", userVersion)
+	}
+}
+
 func TestRunRejectsMissingDatabase(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	err := Run(context.Background(), []string{"--db-path", filepath.Join(t.TempDir(), "missing.sqlite")}, &stdout, &stderr)
@@ -133,6 +229,28 @@ func TestRunIsIdempotentAndLeavesMaintenanceStatusClean(t *testing.T) {
 	}
 	if status.Required || status.PerformanceDegraded || status.DeferredIndexes != 0 || status.OfflineJobs != 0 {
 		t.Fatalf("maintenance status after repeated cleanup = %+v", status)
+	}
+}
+
+func cleanupDatabaseOptions(dbPath string) sqliterepo.Options {
+	uriPath := filepath.ToSlash(dbPath)
+	if !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	dsn := url.URL{Scheme: "file", Path: uriPath}
+	query := url.Values{}
+	query.Add("_txlock", "immediate")
+	query.Add("_pragma", "journal_mode(DELETE)")
+	query.Add("_pragma", "synchronous(EXTRA)")
+	query.Add("_pragma", "busy_timeout(15000)")
+	query.Add("_pragma", "foreign_keys(1)")
+	dsn.RawQuery = query.Encode()
+	return sqliterepo.Options{
+		Path:                dbPath,
+		DataSourceName:      dsn.String(),
+		ExpectedJournalMode: "delete",
+		ExpectedSynchronous: 3,
+		ExpectedBusyTimeout: 15000,
 	}
 }
 

@@ -132,13 +132,21 @@ or:
 USAGE_DB_PATH=/var/lib/cpa-manager-plus/usage.sqlite ./cpa-manager-plus
 ```
 
+When complete SQLite driver parameters are required, set only `USAGE_DB_URL` instead:
+
+```bash
+USAGE_DB_URL='file:///var/lib/cpa-manager-plus/usage.sqlite?_txlock=immediate&_pragma=journal_mode(DELETE)&_pragma=synchronous(EXTRA)&_pragma=busy_timeout(15000)&_pragma=foreign_keys(1)&_pragma=mmap_size(0)' ./cpa-manager-plus
+```
+
+`USAGE_DB_URL` and `USAGE_DB_PATH` are mutually exclusive; do not set both. See [Manager Server Guide](../operations/manager-server.md#advanced-sqlite-database-urls) for the complete constraints.
+
 Back up:
 
 ```text
 data/usage.sqlite
-data/usage.sqlite-wal
-data/usage.sqlite-shm
 data/data.key
+data/usage.sqlite-wal  # when WAL mode is active and the file exists
+data/usage.sqlite-shm  # when WAL mode is active and the file exists
 ```
 
 `data.key` decrypts the saved CPA Management Key. If it is lost, save the CPA connection again.
@@ -231,7 +239,7 @@ For production, you can also run the process through systemd, launchd, Windows S
 1. Stop the native process.
 2. Back up the data directory, including `data.key`.
 3. Extract the new package.
-4. Copy over `config.json` and `data/`, or keep using `USAGE_DATA_DIR` / `USAGE_DB_PATH`.
+4. Copy over `config.json` and `data/`, or keep using `USAGE_DATA_DIR`, `USAGE_DB_PATH`, or `USAGE_DB_URL`. The URL and path cannot both be set.
 5. Start the new binary.
 
 systemd example:

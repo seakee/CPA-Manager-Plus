@@ -19,11 +19,10 @@ If you never used the old `seakee/cpa-manager`, skip this page and use [Quick St
    - Docker volume is commonly `cpa-manager-data`.
    - Host directory mounts usually map to container `/data`.
    - Native packages default to `data/usage.sqlite` under the program directory.
-3. Stop the old container or process so SQLite WAL files stop changing.
+3. Stop the old container or process so the SQLite files stop changing.
 4. Back up the whole old data directory. Keep at least:
    - `usage.sqlite`
-   - `usage.sqlite-wal`
-   - `usage.sqlite-shm`
+   - Any current `usage.sqlite-wal` / `usage.sqlite-shm` files when WAL mode is active
 5. Decide the admin key strategy. During migration, explicitly setting `CPA_MANAGER_ADMIN_KEY` or `CPA_MANAGER_ADMIN_KEY_FILE` is recommended.
 
 ## Docker Volume Migration
@@ -53,6 +52,8 @@ services:
     environment:
       HTTP_ADDR: '0.0.0.0:18317'
       USAGE_DB_PATH: '/data/usage.sqlite'
+      # Advanced alternative: remove the previous line before setting a complete USAGE_DB_URL.
+      # USAGE_DB_URL: 'file:///data/usage.sqlite?_txlock=immediate&_pragma=journal_mode(DELETE)&_pragma=synchronous(EXTRA)&_pragma=busy_timeout(15000)&_pragma=foreign_keys(1)'
       CPA_MANAGER_DATA_KEY_PATH: '/data/data.key'
       CPA_MANAGER_ADMIN_KEY: 'replace-with-a-long-random-admin-key'
       USAGE_COLLECTOR_MODE: 'auto'
@@ -88,7 +89,7 @@ After startup, open `http://<host>:18317/management.html` and log in with the ad
 1. Stop the old `cpa-manager` process.
 2. Back up the old program directory, especially `data/usage.sqlite*`.
 3. Extract `cpa-manager-plus_<version>_<os>_<arch>`.
-4. Copy the old `data` directory into the new package directory, or set `USAGE_DATA_DIR` / `USAGE_DB_PATH` to the old data directory.
+4. Copy the old `data` directory into the new package directory, or set `USAGE_DATA_DIR`, `USAGE_DB_PATH`, or `USAGE_DB_URL` to the old database. The URL and path cannot both be set.
 5. Set an admin key for the first startup:
 
 ```bash

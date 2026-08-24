@@ -7,8 +7,8 @@ CPAMP stores its core data locally. During deployment, identify three things fir
 | File               | Description                                                                           |
 | ------------------ | ------------------------------------------------------------------------------------- |
 | `usage.sqlite`     | SQLite database for request events, configuration, prices, aliases, and related data. |
-| `usage.sqlite-wal` | SQLite WAL file. Back it up when present.                                             |
-| `usage.sqlite-shm` | SQLite SHM file. Back it up when present.                                             |
+| `usage.sqlite-wal` | May exist in WAL mode. Back it up when present.                                       |
+| `usage.sqlite-shm` | May exist in WAL mode. Back it up when present.                                       |
 | `data.key`         | Data key used to encrypt sensitive configuration written to SQLite.                   |
 
 Docker defaults:
@@ -24,6 +24,23 @@ Native package defaults:
 ./data/usage.sqlite
 ./data/data.key
 ```
+
+## SQLite Database Location
+
+Use `USAGE_DATA_DIR` or `USAGE_DB_PATH` for normal deployments. When complete SQLite driver parameters are required, use the single `USAGE_DB_URL` setting instead; it is mutually exclusive with `USAGE_DB_PATH`. The equivalent `config.json` fields are `dbUrl` and `dbPath`, which are also mutually exclusive.
+
+Database-location precedence:
+
+```text
+environment USAGE_DB_URL / USAGE_DB_PATH
+> environment USAGE_DATA_DIR
+> config.json dbUrl / dbPath
+> default data/usage.sqlite
+```
+
+`USAGE_DB_URL` accepts only an absolute, local, persistent `file:` URI and requires explicit `_txlock=immediate`, foreign-key, journal-mode, synchronous, and positive busy-timeout settings. See [Manager Server Guide](./manager-server.md#advanced-sqlite-database-urls) for the complete syntax, examples, journal-mode transition rules, and network-filesystem limitations.
+
+When a URL is used and `CPA_MANAGER_DATA_KEY_PATH` is not set explicitly, `data.key` defaults to the URL database directory. With every database-location method, back up the database, `data.key`, and every SQLite sidecar file that currently exists as one set.
 
 ## Admin Key
 

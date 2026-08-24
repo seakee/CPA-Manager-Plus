@@ -130,13 +130,21 @@ USAGE_DATA_DIR=/var/lib/cpa-manager-plus ./cpa-manager-plus
 USAGE_DB_PATH=/var/lib/cpa-manager-plus/usage.sqlite ./cpa-manager-plus
 ```
 
+需要完整 SQLite driver 参数时，也可以只设置 `USAGE_DB_URL`：
+
+```bash
+USAGE_DB_URL='file:///var/lib/cpa-manager-plus/usage.sqlite?_txlock=immediate&_pragma=journal_mode(DELETE)&_pragma=synchronous(EXTRA)&_pragma=busy_timeout(15000)&_pragma=foreign_keys(1)&_pragma=mmap_size(0)' ./cpa-manager-plus
+```
+
+`USAGE_DB_URL` 与 `USAGE_DB_PATH` 互斥；不要同时设置。完整约束见 [Manager Server 指南](../operations/manager-server.md#高级-sqlite-database-url)。
+
 需要备份：
 
 ```text
 data/usage.sqlite
-data/usage.sqlite-wal
-data/usage.sqlite-shm
 data/data.key
+data/usage.sqlite-wal  # WAL 模式且文件存在时
+data/usage.sqlite-shm  # WAL 模式且文件存在时
 ```
 
 `data.key` 用来解密已保存的 CPA Management Key。丢失后只能重新保存 CPA 连接。
@@ -229,7 +237,7 @@ setup 后：
 1. 停止原生进程。
 2. 备份数据目录，包括 `data.key`。
 3. 解压新包。
-4. 复制 `config.json` 和 `data/`，或继续使用 `USAGE_DATA_DIR` / `USAGE_DB_PATH`。
+4. 复制 `config.json` 和 `data/`，或继续使用 `USAGE_DATA_DIR`、`USAGE_DB_PATH` 或 `USAGE_DB_URL`。URL 与 path 不能同时设置。
 5. 启动新二进制。
 
 systemd 示例：

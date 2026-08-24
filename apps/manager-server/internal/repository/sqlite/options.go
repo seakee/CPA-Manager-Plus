@@ -1,6 +1,10 @@
 package sqlite
 
-import "time"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
 
 const (
 	defaultMaxOpenConns    = 4
@@ -9,10 +13,14 @@ const (
 )
 
 type Options struct {
-	Path            string
-	MaxOpenConns    int
-	MaxIdleConns    int
-	ConnMaxIdleTime time.Duration
+	Path                string
+	DataSourceName      string
+	ExpectedJournalMode string
+	ExpectedSynchronous int
+	ExpectedBusyTimeout int
+	MaxOpenConns        int
+	MaxIdleConns        int
+	ConnMaxIdleTime     time.Duration
 }
 
 func (o Options) maxOpenConns() int {
@@ -34,4 +42,25 @@ func (o Options) connMaxIdleTime() time.Duration {
 		return o.ConnMaxIdleTime
 	}
 	return defaultConnMaxIdleTime
+}
+
+func (o Options) hasCustomDataSourceName() bool {
+	return strings.TrimSpace(o.DataSourceName) != ""
+}
+
+func (o Options) validate() error {
+	if !o.hasCustomDataSourceName() {
+		return nil
+	}
+	mode := strings.ToLower(strings.TrimSpace(o.ExpectedJournalMode))
+	if mode != "wal" && mode != "delete" {
+		return fmt.Errorf("custom SQLite data source must declare expected journal mode WAL or DELETE")
+	}
+	if o.ExpectedSynchronous != 2 && o.ExpectedSynchronous != 3 {
+		return fmt.Errorf("custom SQLite data source must declare expected synchronous mode FULL or EXTRA")
+	}
+	if o.ExpectedBusyTimeout <= 0 {
+		return fmt.Errorf("custom SQLite data source must declare a positive expected busy timeout")
+	}
+	return nil
 }
