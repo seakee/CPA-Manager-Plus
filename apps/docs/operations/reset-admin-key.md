@@ -32,11 +32,11 @@
 ## 执行前检查
 
 1. 停止 Manager Server。
-2. 备份完整数据目录，包含 `usage.sqlite`、`usage.sqlite-wal`、`usage.sqlite-shm` 和 `data.key`。
+2. 备份完整数据目录：`usage.sqlite`、`data.key`，以及 WAL 模式下当前存在的 `usage.sqlite-wal` / `usage.sqlite-shm`。
 3. 确认命令指向真实的 Manager Server 数据库：
    - Docker 默认：`/data/usage.sqlite`
    - 原生包默认：二进制旁边的 `data/usage.sqlite`
-   - 自定义部署：`USAGE_DB_PATH` 的值
+   - 自定义部署：`USAGE_DB_PATH` 的值，或 `USAGE_DB_URL` 的本地 path
 
 ## Docker Compose
 
@@ -89,7 +89,7 @@ docker run --rm \
 docker start cpa-manager-plus
 ```
 
-如果使用 GitHub Container Registry 镜像，把 `seakee/cpa-manager-plus:latest` 替换为 `ghcr.io/seakee/cpa-manager-plus:latest`。
+如果使用 GitHub Container Registry 镜像，把 `seakee/cpa-manager-plus:latest` 替换为 `ghcr.io/seakee/cpa-manager-plus:latest`。若原部署使用 `USAGE_DB_URL`，手工 `docker run` 时还必须用 `-e USAGE_DB_URL='原 URL'` 传入同一值；更推荐使用会继承 service environment 的 Compose 命令。
 
 ## 指定管理员密钥
 
@@ -120,7 +120,9 @@ Windows PowerShell：
 .\cpa-manager-plus.exe reset-admin-key
 ```
 
-如果 SQLite 数据库不在默认数据目录，显式指定路径：
+如果部署使用 `USAGE_DB_URL`，应在同一配置环境中直接运行命令并省略 `--db-path`，这样命令会保留 URL 中的 SQLite 参数。显式传入 `--db-path` 会改用默认 SQLite 设置。
+
+仅使用自定义 path 且数据库不在默认目录时，可显式指定：
 
 ```bash
 ./cpa-manager-plus reset-admin-key --db-path /path/to/usage.sqlite
@@ -128,7 +130,7 @@ Windows PowerShell：
 
 ## 排障
 
-- `SQLite database not found`：当前命令没有运行在真实配置环境中。请传入 `--db-path`，或挂载正确的 Docker volume / 宿主机目录。
+- `SQLite database not found`：当前命令没有运行在真实配置环境中。URL 部署应传入原来的 `USAGE_DB_URL` 并省略 `--db-path`；path 部署可传入 `--db-path`。Docker 中还要挂载正确的 volume / 宿主机目录。
 - `is empty` / `does not look like a CPA Manager Plus Manager Server database`：路径指向了错误文件或新建的空文件。
 - `database is locked`：Manager Server 或其他进程仍在使用 SQLite。停止相关进程后重试。
 - 重置后仍无法登录：确认面板访问的是同一个 Manager Server。

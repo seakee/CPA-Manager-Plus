@@ -1,15 +1,17 @@
 # Backup And Restore
 
-CPAMP keeps request history, configuration, and encrypted credentials on the host. The common mistake is backing up only `usage.sqlite` and missing WAL/SHM files, `data.key`, or secret files in the install directory.
+CPAMP keeps request history, configuration, and encrypted credentials on the host. The common mistake is copying only `usage.sqlite` while the process is running, or missing current WAL/SHM files, `data.key`, or secret files in the install directory.
 
 ## Required Backup Files
 
-Back up these files as a set:
+After stopping Manager Server, back up these files as one set:
 
 - `usage.sqlite`
-- `usage.sqlite-wal`
-- `usage.sqlite-shm`
 - `data.key`
+- `usage.sqlite-wal` (when WAL mode is active and the file exists)
+- `usage.sqlite-shm` (when WAL mode is active and the file exists)
+
+`journal_mode=DELETE` normally has no WAL/SHM files. Do not manually delete sidecars to make the directory look clean; back up every file that actually exists after shutdown.
 
 If your deployment directory contains custom configuration files, back them up too. With the one-click installer, also back up `secrets/` under the install directory; full installation and env/secret-managed connections store the CPA Management Key in `secrets/cpa-management-key`.
 
@@ -63,10 +65,11 @@ Copy-Item -Recurse .\data .\data.backup
 
 1. Stop CPAMP.
 2. Restore the full data directory.
-3. Confirm that `usage.sqlite` and `data.key` come from the same backup.
-4. If the CPA connection is env/secret-managed, also restore `secrets/` from the install directory.
-5. Start CPAMP.
-6. Log in and check configuration, monitoring data, and collector status.
+3. Confirm that `usage.sqlite`, `data.key`, and any sidecars come from the same backup.
+4. If `USAGE_DB_URL` is used, confirm that the restore target is the URL path and that its declared journal mode matches the restored deployment.
+5. If the CPA connection is env/secret-managed, also restore `secrets/` from the install directory.
+6. Start CPAMP.
+7. Log in and check configuration, monitoring data, and collector status.
 
 If restore produces decryption errors, first check whether `data.key` matches the SQLite database.
 

@@ -8,7 +8,7 @@
 2. 记录当前镜像标签、原生包版本、启动命令、环境变量和数据目录。
 3. 停止会修改相同 SQLite 的额外实例。同一个 CPA 用量队列只能由一个 Manager Server 消费。
 4. 备份完整数据和配置：
-   - `usage.sqlite`、`usage.sqlite-wal`、`usage.sqlite-shm`。
+   - `usage.sqlite`，以及 WAL 模式下当前存在的 `usage.sqlite-wal` / `usage.sqlite-shm`。
    - `data.key`。
    - 安装器目录中的 `secrets/`、`.env`、`compose.yaml` 或 `config.json`。
    - 自定义反向代理、systemd、launchd 或 Windows 服务配置。
@@ -158,7 +158,7 @@ cpa-manager-plus.service
 6. 如果使用安装器生成的 systemd 文件，同步更新 `WorkingDirectory` 和 `ExecStart`，然后执行 `systemctl daemon-reload`。
 7. 启动并完成验证后再决定是否清理旧 runtime；保留旧包可以缩短程序回滚时间。
 
-不要只复制 `usage.sqlite` 而遗漏 WAL/SHM；备份应在进程停止后进行，或使用 [备份与恢复](./backup.md) 中的 SQLite 安全方法。
+不要在进程运行时只复制 `usage.sqlite`；停止后应同时保存当前实际存在的 WAL/SHM，或使用 [备份与恢复](./backup.md) 中的 SQLite 安全方法。DELETE 模式没有 WAL/SHM 属于正常情况。
 
 ## 手动原生包
 
@@ -167,7 +167,7 @@ cpa-manager-plus.service
 1. 执行 `./cpa-manager-plusctl stop`，或停止你自己的进程管理器。
 2. 备份数据目录和 `data.key`。
 3. 解压新包到新的版本目录。
-4. 继续使用原来的外部 `USAGE_DATA_DIR` / `USAGE_DB_PATH`，或在停机状态下把 `config.json` 和 `data/` 复制到新目录。
+4. 继续使用原来的外部 `USAGE_DATA_DIR`、`USAGE_DB_PATH` 或 `USAGE_DB_URL`，或在停机状态下把 `config.json` 和 `data/` 复制到新目录。URL 与 path 仍必须互斥。
 5. 使用新目录里的控制脚本启动：
 
 ```bash
@@ -270,5 +270,5 @@ curl -f -H "Authorization: Bearer <CPAMP_ADMIN_KEY>" \
 - Docker：将镜像标签改回旧版本并重建容器，继续挂载更新前的数据备份。
 - 原生包：停止新版本，恢复旧二进制、配置和更新前的数据备份后再启动。
 - 单文件面板：恢复旧 `management.html`。
-- 不要假设旧程序一定能读取新版本迁移后的数据库。涉及 schema 或数据语义变更时，应同时恢复更新前的 SQLite、WAL/SHM 和 `data.key`。
+- 不要假设旧程序一定能读取新版本迁移后的数据库。涉及 schema 或数据语义变更时，应同时恢复更新前的 SQLite、`data.key` 和备份时实际存在的 WAL/SHM，并恢复原来的 `USAGE_DB_URL` / journal mode 配置。
 - 如果失败原因不明确，保留新旧日志和数据库副本，不要反复启动多个版本写入同一数据库。

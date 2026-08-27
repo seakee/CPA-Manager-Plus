@@ -193,7 +193,8 @@ Manager Server 管理：
 | `HTTP_ADDR`                             | `0.0.0.0:18317`                                             | Manager Server 监听地址。                                                                                                                                  |
 | `CPA_MANAGER_PPROF_ADDR`                | 空                                                          | 可选 Go pprof 监听地址；仅接受 `localhost`、`127.0.0.1` 或 `::1`。                                                                                         |
 | `USAGE_DATA_DIR`                        | Docker: `/data`; native: `./data`                           | 数据目录。                                                                                                                                                 |
-| `USAGE_DB_PATH`                         | Docker: `/data/usage.sqlite`; native: `./data/usage.sqlite` | SQLite 路径。                                                                                                                                              |
+| `USAGE_DB_URL`                          | 空                                                          | 高级 SQLite `file:` URL；与 `USAGE_DB_PATH` 互斥，用于传入完整连接参数。                                                                                   |
+| `USAGE_DB_PATH`                         | Docker: `/data/usage.sqlite`; native: `./data/usage.sqlite` | SQLite 路径；设置 `USAGE_DB_URL` 时必须移除。                                                                                                              |
 | `CPA_MANAGER_ADMIN_KEY`                 | 空                                                          | 可选管理员密钥。                                                                                                                                           |
 | `CPA_MANAGER_ADMIN_KEY_FILE`            | `/run/secrets/cpa_admin_key`                                | 可选管理员密钥文件。                                                                                                                                       |
 | `CPA_MANAGER_DATA_KEY`                  | 空                                                          | 可选数据加密 key。                                                                                                                                         |
@@ -221,6 +222,32 @@ Manager Server 管理：
 ```text
 environment variables > config.json > defaults
 ```
+
+数据库位置的完整优先级是：环境变量 `USAGE_DB_URL` / `USAGE_DB_PATH`，然后是环境变量 `USAGE_DATA_DIR`，再然后是 `config.json` 的 `dbUrl` / `dbPath`，最后才是默认数据目录。同一层的 URL 和 path 不能同时设置；冲突时 Manager Server 会拒绝启动，而不会猜测要使用哪一个。
+
+### 高级 SQLite database URL
+
+默认部署继续使用 `USAGE_DB_PATH`，行为保持为 WAL、`synchronous=FULL`、`busy_timeout=5000`、4 个最大连接和 2 个空闲连接。只有需要向 SQLite driver 传递完整连接参数时才使用 `USAGE_DB_URL`。它必须是绝对、本地、持久化的分层 `file:` URI；不接受 host、userinfo、fragment、相对路径、`:memory:`、`mode=memory`、`immutable`、`nolock` 或自定义 VFS。
+
+URL 必须显式包含以下安全参数：
+
+```text
+_txlock=immediate
+_pragma=foreign_keys(1)        # 或 foreign_keys(ON)
+_pragma=journal_mode(WAL)      # 或 journal_mode(DELETE)
+_pragma=synchronous(FULL)      # 或 synchronous(EXTRA)
+_pragma=busy_timeout(正整数)
+```
+
+例如，使用 rollback journal 并关闭 mmap：
+
+```bash
+USAGE_DB_URL='file:///var/lib/cpa-manager-plus/usage.sqlite?_txlock=immediate&_pragma=journal_mode(DELETE)&_pragma=synchronous(EXTRA)&_pragma=busy_timeout(15000)&_pragma=foreign_keys(1)&_pragma=mmap_size(0)&_pragma=cell_size_check(1)&_pragma=temp_store(FILE)'
+```
+
+`_pragma` 会由 SQLite driver 执行，因此该 URL 只能由受信任的部署管理员控制。Manager Server 会在启动时回读并验证 journal mode、foreign keys、synchronous 和 busy timeout；配置的 journal mode 无法生效时会直接退出。实际模式为 `DELETE` 时不会启动 WAL checkpoint worker。
+
+切换 journal mode 前必须停止所有连接同一数据库的 Manager Server，备份数据库和当前存在的 sidecar 文件，再以单实例启动。`file:` URL、rollback journal 和进程锁都不能让 SQLite 自动变成网络文件系统安全方案；SMB/CIFS/NFS 上仍是 best-effort，且必须严格单实例运行。
 
 需要诊断 CPU、堆或 goroutine 时，可临时启用仅本机可访问的 pprof 服务：
 
@@ -293,6 +320,8 @@ cpa-manager-plus cleanup-derived
 cpa-manager-plus cleanup-derived --db-path /path/to/usage.sqlite
 ```
 
+使用 `USAGE_DB_URL` 的部署应在同一配置环境中省略 `--db-path`，让离线命令继承完整 URL 参数；显式 `--db-path` 会选择默认 SQLite 连接设置。Compose service 已配置 URL 时，也应删除上面示例中的 `--db-path /data/usage.sqlite`。
+
 Manager Server 在整个生命周期内都会持有 `<数据库绝对路径>.manager.lock` 操作系统锁；锁仍被持有时，该命令会直接拒绝执行。因此 Web UI 只检测、解释和展示步骤，不会提供在线修复按钮、启动子进程或绕过进程锁。锁文件会持久保留，无需手工删除，应停止 Manager Server 进程后重试。符号链接别名会解析到同一个锁；具有多个硬链接的数据库会被拒绝，因为 SQLite WAL/SHM 侧车文件无法安全共享这些别名。离线维护前应备份 SQLite 和 `data.key`。该命令会创建延后的索引、替换过期派生索引、完成超大旧 quota observation group 的迁移并删除已过期的 FTS/投影 generation；它不会删除、重建或改写 authoritative `usage_events`。
 
 完整的优化原因、实现阶段和 100k benchmark 数据见 [2026-07-10 性能优化报告](./performance-optimization-2026-07-10.md)。
@@ -347,10 +376,12 @@ Authorization: Bearer <CPAMP_ADMIN_KEY>
 
 ```text
 usage.sqlite
-usage.sqlite-wal
-usage.sqlite-shm
 data.key
+usage.sqlite-wal  # journal_mode=WAL 且文件存在时
+usage.sqlite-shm  # journal_mode=WAL 且文件存在时
 ```
+
+停止进程后把数据库、`data.key` 和当前实际存在的 sidecar 文件作为同一组备份。不要在运行期间只复制主数据库，也不要手工删除 WAL/SHM。
 
 安全边界：
 

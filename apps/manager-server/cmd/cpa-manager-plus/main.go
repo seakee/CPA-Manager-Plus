@@ -10,6 +10,7 @@ import (
 	httppprof "net/http/pprof"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -74,7 +75,13 @@ func runServer() {
 	if err != nil {
 		log.Fatalf("initialize secret protector: %v", err)
 	}
-	db, err := store.Open(cfg.DBPath, protector)
+	db, err := store.OpenWithOptions(sqliterepo.Options{
+		Path:                cfg.DBPath,
+		DataSourceName:      cfg.DBURL,
+		ExpectedJournalMode: cfg.DBJournalMode,
+		ExpectedSynchronous: cfg.DBSynchronous,
+		ExpectedBusyTimeout: cfg.DBBusyTimeout,
+	}, protector)
 	if err != nil {
 		log.Fatalf("open sqlite: %v", err)
 	}
@@ -83,6 +90,17 @@ func runServer() {
 			log.Printf("close sqlite: %v", err)
 		}
 	}()
+	journalMode, err := db.SQLiteJournalMode(context.Background())
+	if err != nil {
+		log.Fatalf("read SQLite journal mode: %v", err)
+	}
+	if cfg.DBURL != "" {
+		log.Printf(
+			"[startup] custom SQLite database URL enabled: database=%s journal_mode=%s",
+			filepath.Base(cfg.DBPath),
+			journalMode,
+		)
+	}
 
 	bootstrapResult, err := bootstrapservice.Run(context.Background(), cfg, db, dataKeyCreated)
 	if err != nil {
@@ -105,16 +123,21 @@ func runServer() {
 	collectorWorker := worker.NewCollectorWorker(cfg, db, collectorService)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	walMaintenance, err := sqliterepo.NewWALMaintenance(cfg.DBPath)
-	if err != nil {
-		log.Printf("configure SQLite WAL maintenance: %v", err)
+	var walMaintenance *sqliterepo.WALMaintenance
+	if journalMode == "wal" {
+		walMaintenance, err = sqliterepo.NewWALMaintenance(cfg.DBPath)
+		if err != nil {
+			log.Printf("configure SQLite WAL maintenance: %v", err)
+		} else {
+			walMaintenance.Start(ctx)
+			defer func() {
+				if err := walMaintenance.Close(); err != nil {
+					log.Printf("close SQLite WAL maintenance: %v", err)
+				}
+			}()
+		}
 	} else {
-		walMaintenance.Start(ctx)
-		defer func() {
-			if err := walMaintenance.Close(); err != nil {
-				log.Printf("close SQLite WAL maintenance: %v", err)
-			}
-		}()
+		log.Printf("[startup] SQLite WAL maintenance disabled: journal_mode=%s", journalMode)
 	}
 
 	serverApp := httpapi.New(cfg, db, manager)

@@ -7,8 +7,8 @@ CPAMP 的核心数据都在本地。部署时先搞清楚三件事：SQLite 放�
 | 文件               | 说明                                                  |
 | ------------------ | ----------------------------------------------------- |
 | `usage.sqlite`     | SQLite 数据库，保存请求事件、配置、价格、别名等数据。 |
-| `usage.sqlite-wal` | SQLite WAL 文件，存在时必须一起备份。                 |
-| `usage.sqlite-shm` | SQLite SHM 文件，存在时必须一起备份。                 |
+| `usage.sqlite-wal` | WAL 模式下可能存在；存在时必须一起备份。              |
+| `usage.sqlite-shm` | WAL 模式下可能存在；存在时必须一起备份。              |
 | `data.key`         | 数据密钥，用于加密写入 SQLite 的敏感配置。            |
 
 Docker 默认路径：
@@ -24,6 +24,23 @@ Docker 默认路径：
 ./data/usage.sqlite
 ./data/data.key
 ```
+
+## SQLite 数据库位置
+
+默认使用 `USAGE_DATA_DIR` 或 `USAGE_DB_PATH`。需要把完整 SQLite 连接参数传给 driver 时，可以改用单一的 `USAGE_DB_URL`；它与 `USAGE_DB_PATH` 互斥。配置文件中的等价字段是 `dbUrl` 和 `dbPath`，同样不能同时设置。
+
+数据库位置优先级：
+
+```text
+环境变量 USAGE_DB_URL / USAGE_DB_PATH
+> 环境变量 USAGE_DATA_DIR
+> config.json dbUrl / dbPath
+> 默认 data/usage.sqlite
+```
+
+`USAGE_DB_URL` 只接受绝对、本地、持久化的 `file:` URI，并要求显式设置 `_txlock=immediate`、foreign keys、journal mode、synchronous 和正数 busy timeout。完整格式、示例、journal mode 切换和网络文件系统限制见 [Manager Server 指南](./manager-server.md#高级-sqlite-database-url)。
+
+使用 URL 且未显式设置 `CPA_MANAGER_DATA_KEY_PATH` 时，`data.key` 默认放在 URL 数据库的同一目录。无论使用哪种数据库位置配置，都应把数据库、`data.key` 和当前存在的 SQLite sidecar 文件作为一组备份。
 
 ## 管理员密钥
 

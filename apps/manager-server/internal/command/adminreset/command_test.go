@@ -5,12 +5,14 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
+	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
@@ -51,6 +53,34 @@ func TestRunUsesProvidedAdminKeyWithoutEchoingIt(t *testing.T) {
 		t.Fatalf("stdout leaked provided admin key: %s", stdout.String())
 	}
 	requireAdminKeyVerifies(t, dbPath, adminKey)
+}
+
+func TestRunUsesConfiguredDatabaseURLWithoutChangingJournalMode(t *testing.T) {
+	dbPath := newCommandTestDB(t)
+	databaseOptions := commandDatabaseOptions(dbPath)
+	st, err := store.OpenWithOptions(databaseOptions)
+	if err != nil {
+		t.Fatalf("switch command fixture to DELETE mode: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close DELETE fixture: %v", err)
+	}
+	for key, value := range map[string]string{
+		"CPA_MANAGER_CONFIG": "",
+		"USAGE_DATA_DIR":     "",
+		"USAGE_DB_PATH":      "",
+		"USAGE_DB_URL":       databaseOptions.DataSourceName,
+	} {
+		t.Setenv(key, value)
+	}
+	const adminKey = "cpamp_from_database_url"
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if err := Run(context.Background(), []string{"--admin-key", adminKey}, &stdout, &stderr); err != nil {
+		t.Fatalf("run reset command with configured URL: %v stderr=%s", err, stderr.String())
+	}
+	requireAdminKeyVerifiesWithOptions(t, databaseOptions, adminKey)
+	requireJournalMode(t, dbPath, "delete")
 }
 
 func TestRunRejectsMissingDB(t *testing.T) {
@@ -96,6 +126,54 @@ func TestRunRejectsUnrelatedSQLiteDBWithoutMigratingIt(t *testing.T) {
 	err = Run(context.Background(), []string{"--db-path", dbPath}, &stdout, &stderr)
 	if err == nil || !strings.Contains(err.Error(), "does not look like a CPA Manager Plus") {
 		t.Fatalf("err = %v", err)
+	}
+	requireNoManagerTables(t, dbPath)
+}
+
+func TestRunValidatesConfiguredDatabaseURLBeforeApplyingPragmas(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "unrelated.sqlite")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open unrelated sqlite: %v", err)
+	}
+	if _, err := db.Exec(`create table unrelated(id integer primary key); pragma user_version = 7`); err != nil {
+		t.Fatalf("create unrelated fixture: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close unrelated fixture: %v", err)
+	}
+	databaseOptions := commandDatabaseOptions(dbPath)
+	dsn, err := url.Parse(databaseOptions.DataSourceName)
+	if err != nil {
+		t.Fatalf("parse test database URL: %v", err)
+	}
+	query := dsn.Query()
+	query.Add("_pragma", "user_version(123)")
+	dsn.RawQuery = query.Encode()
+	for key, value := range map[string]string{
+		"CPA_MANAGER_CONFIG": "",
+		"USAGE_DATA_DIR":     "",
+		"USAGE_DB_PATH":      "",
+		"USAGE_DB_URL":       dsn.String(),
+	} {
+		t.Setenv(key, value)
+	}
+	var stdout, stderr bytes.Buffer
+	err = Run(context.Background(), nil, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "does not look like a CPA Manager Plus") {
+		t.Fatalf("Run() error = %v", err)
+	}
+	db, err = sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("reopen unrelated sqlite: %v", err)
+	}
+	defer db.Close()
+	var userVersion int
+	if err := db.QueryRow(`pragma user_version`).Scan(&userVersion); err != nil {
+		t.Fatalf("read unrelated user_version: %v", err)
+	}
+	if userVersion != 7 {
+		t.Fatalf("unrelated user_version = %d, want 7", userVersion)
 	}
 	requireNoManagerTables(t, dbPath)
 }
@@ -150,6 +228,60 @@ func newCommandTestDB(t testing.TB) string {
 		t.Fatalf("close store: %v", err)
 	}
 	return dbPath
+}
+
+func commandDatabaseOptions(dbPath string) sqliterepo.Options {
+	uriPath := filepath.ToSlash(dbPath)
+	if !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	dsn := url.URL{Scheme: "file", Path: uriPath}
+	query := url.Values{}
+	query.Add("_txlock", "immediate")
+	query.Add("_pragma", "journal_mode(DELETE)")
+	query.Add("_pragma", "synchronous(EXTRA)")
+	query.Add("_pragma", "busy_timeout(15000)")
+	query.Add("_pragma", "foreign_keys(1)")
+	dsn.RawQuery = query.Encode()
+	return sqliterepo.Options{
+		Path:                dbPath,
+		DataSourceName:      dsn.String(),
+		ExpectedJournalMode: "delete",
+		ExpectedSynchronous: 3,
+		ExpectedBusyTimeout: 15000,
+	}
+}
+
+func requireAdminKeyVerifiesWithOptions(t testing.TB, options sqliterepo.Options, adminKey string) {
+	t.Helper()
+	st, err := store.OpenWithOptions(options)
+	if err != nil {
+		t.Fatalf("open custom store: %v", err)
+	}
+	defer st.Close()
+	credential, ok, err := st.LoadAdminCredential(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("load credential ok=%v err=%v", ok, err)
+	}
+	if !security.VerifyAdminKey(credential, adminKey) {
+		t.Fatalf("admin key %q does not verify", adminKey)
+	}
+}
+
+func requireJournalMode(t testing.TB, dbPath string, want string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite journal check: %v", err)
+	}
+	defer db.Close()
+	var got string
+	if err := db.QueryRow(`pragma journal_mode`).Scan(&got); err != nil {
+		t.Fatalf("read journal mode: %v", err)
+	}
+	if !strings.EqualFold(got, want) {
+		t.Fatalf("journal mode = %q, want %q", got, want)
+	}
 }
 
 func requireNoManagerTables(t testing.TB, dbPath string) {

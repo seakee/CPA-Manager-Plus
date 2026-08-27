@@ -32,11 +32,11 @@ The alias `reset-admin-password` is also available.
 ## Before You Run It
 
 1. Stop Manager Server.
-2. Back up the full data directory, including `usage.sqlite`, `usage.sqlite-wal`, `usage.sqlite-shm`, and `data.key`.
+2. Back up the full data directory: `usage.sqlite`, `data.key`, and any current `usage.sqlite-wal` / `usage.sqlite-shm` files when WAL mode is active.
 3. Confirm the command points to the real Manager Server database:
    - Docker default: `/data/usage.sqlite`
    - Native package default: `data/usage.sqlite` next to the binary
-   - Custom deployment: the value of `USAGE_DB_PATH`
+   - Custom deployment: the `USAGE_DB_PATH` value or the local path in `USAGE_DB_URL`
 
 ## Docker Compose
 
@@ -89,7 +89,7 @@ docker run --rm \
 docker start cpa-manager-plus
 ```
 
-If you use the GitHub Container Registry image, replace `seakee/cpa-manager-plus:latest` with `ghcr.io/seakee/cpa-manager-plus:latest`.
+If you use the GitHub Container Registry image, replace `seakee/cpa-manager-plus:latest` with `ghcr.io/seakee/cpa-manager-plus:latest`. If the original deployment uses `USAGE_DB_URL`, a manual `docker run` must also pass the same value with `-e USAGE_DB_URL='original URL'`; the Compose command is preferred because it inherits the service environment.
 
 ## Provide A Specific Admin Key
 
@@ -120,7 +120,9 @@ Windows PowerShell:
 .\cpa-manager-plus.exe reset-admin-key
 ```
 
-If the SQLite database is not in the default data directory, pass the path explicitly:
+If the deployment uses `USAGE_DB_URL`, run the command in the same configured environment and omit `--db-path` so the command preserves the SQLite URL parameters. Passing `--db-path` explicitly selects the default SQLite settings.
+
+For a custom path-only deployment outside the default data directory, pass the path explicitly:
 
 ```bash
 ./cpa-manager-plus reset-admin-key --db-path /path/to/usage.sqlite
@@ -128,7 +130,7 @@ If the SQLite database is not in the default data directory, pass the path expli
 
 ## Troubleshooting
 
-- `SQLite database not found`: the command is not running against the real configured environment. Pass `--db-path`, or mount the correct Docker volume or host directory.
+- `SQLite database not found`: the command is not running against the real configured environment. For a URL deployment, pass the original `USAGE_DB_URL` and omit `--db-path`; for a path deployment, pass `--db-path`. In Docker, also mount the correct volume or host directory.
 - `is empty` / `does not look like a CPA Manager Plus Manager Server database`: the path points to the wrong file or a newly created empty file.
 - `database is locked`: Manager Server or another process is still using SQLite. Stop related processes and retry.
 - Login still fails after reset: confirm the panel is accessing the same Manager Server.

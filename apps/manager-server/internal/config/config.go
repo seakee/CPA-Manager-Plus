@@ -29,6 +29,10 @@ type Config struct {
 	HTTPAddr                     string
 	DataDir                      string
 	DBPath                       string
+	DBURL                        string
+	DBJournalMode                string
+	DBSynchronous                int
+	DBBusyTimeout                int
 	CPAUpstreamURL               string
 	ManagementKey                string
 	AdminKey                     string
@@ -65,6 +69,7 @@ type fileConfig struct {
 	HTTPAddr                  string   `json:"httpAddr,omitempty"`
 	DataDir                   string   `json:"dataDir,omitempty"`
 	DBPath                    string   `json:"dbPath,omitempty"`
+	DBURL                     string   `json:"dbUrl,omitempty"`
 	CPAUpstreamURL            string   `json:"cpaUpstreamUrl,omitempty"`
 	ManagementKeyFile         string   `json:"managementKeyFile,omitempty"`
 	AdminKeyFile              string   `json:"adminKeyFile,omitempty"`
@@ -111,9 +116,9 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 	}
 	dataDir := env("USAGE_DATA_DIR", dataDirFallback)
 
-	dbPathFallback := filepath.Join(dataDir, "usage.sqlite")
-	if !hasEnv("USAGE_DATA_DIR") && cfgFile.DBPath != "" {
-		dbPathFallback = resolveConfigPath(cfgFile.DBPath, cfgDir)
+	database, err := resolveDatabaseConfig(cfgFile, cfgDir, dataDir)
+	if err != nil {
+		return Config{}, err
 	}
 
 	managementKeyFile := defaultSecretFile
@@ -132,13 +137,21 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 	}
 	dataKeyPath := resolveConfigPath(cfgFile.DataKeyPath, cfgDir)
 	if dataKeyPath == "" {
-		dataKeyPath = filepath.Join(dataDir, "data.key")
+		dataKeyDir := dataDir
+		if database.dataSourceName != "" {
+			dataKeyDir = filepath.Dir(database.path)
+		}
+		dataKeyPath = filepath.Join(dataKeyDir, "data.key")
 	}
 
 	return Config{
 		HTTPAddr:                     env("HTTP_ADDR", stringFallback(cfgFile.HTTPAddr, "0.0.0.0:18317")),
 		DataDir:                      dataDir,
-		DBPath:                       env("USAGE_DB_PATH", dbPathFallback),
+		DBPath:                       database.path,
+		DBURL:                        database.dataSourceName,
+		DBJournalMode:                database.journalMode,
+		DBSynchronous:                database.synchronous,
+		DBBusyTimeout:                database.busyTimeout,
 		CPAUpstreamURL:               env("CPA_UPSTREAM_URL", cfgFile.CPAUpstreamURL),
 		ManagementKey:                readSecret("CPA_MANAGEMENT_KEY", "CPA_MANAGEMENT_KEY_FILE", managementKeyFile),
 		AdminKey:                     readSecret("CPA_MANAGER_ADMIN_KEY", "CPA_MANAGER_ADMIN_KEY_FILE", adminKeyFile),
@@ -200,7 +213,7 @@ func loadFileConfig(options LoadOptions) (fileConfig, string, error) {
 	if err != nil || ok {
 		return cfg, cfgDir, err
 	}
-	if hasEnv("USAGE_DATA_DIR") || hasEnv("USAGE_DB_PATH") {
+	if hasEnv("USAGE_DATA_DIR") || hasEnv(usageDBPathEnvKey) || hasEnv(usageDBURLEnvKey) {
 		return fileConfig{}, "", nil
 	}
 	if !options.CreateDefaultConfig {

@@ -19,11 +19,10 @@
    - Docker volume 常见为 `cpa-manager-data`。
    - 宿主机目录挂载通常映射到容器 `/data`。
    - 原生包默认在程序目录下的 `data/usage.sqlite`。
-3. 停止旧容器或旧进程，避免 SQLite WAL 文件继续写入。
+3. 停止旧容器或旧进程，避免 SQLite 文件继续变化。
 4. 备份整个旧数据目录。至少保留：
    - `usage.sqlite`
-   - `usage.sqlite-wal`
-   - `usage.sqlite-shm`
+   - WAL 模式下当前存在的 `usage.sqlite-wal` / `usage.sqlite-shm`
 5. 决定管理员密钥策略。推荐迁移时显式设置 `CPA_MANAGER_ADMIN_KEY` 或 `CPA_MANAGER_ADMIN_KEY_FILE`。
 
 ## Docker Volume 迁移
@@ -53,6 +52,8 @@ services:
     environment:
       HTTP_ADDR: '0.0.0.0:18317'
       USAGE_DB_PATH: '/data/usage.sqlite'
+      # 高级替代：删除上一行后设置完整 USAGE_DB_URL。
+      # USAGE_DB_URL: 'file:///data/usage.sqlite?_txlock=immediate&_pragma=journal_mode(DELETE)&_pragma=synchronous(EXTRA)&_pragma=busy_timeout(15000)&_pragma=foreign_keys(1)'
       CPA_MANAGER_DATA_KEY_PATH: '/data/data.key'
       CPA_MANAGER_ADMIN_KEY: 'replace-with-a-long-random-admin-key'
       USAGE_COLLECTOR_MODE: 'auto'
@@ -88,7 +89,7 @@ docker run -d \
 1. 停止旧 `cpa-manager` 进程。
 2. 备份旧程序目录，尤其是 `data/usage.sqlite*`。
 3. 解压 `cpa-manager-plus_<version>_<os>_<arch>`。
-4. 将旧 `data` 目录复制到新包目录，或设置 `USAGE_DATA_DIR` / `USAGE_DB_PATH` 指向旧数据目录。
+4. 将旧 `data` 目录复制到新包目录，或设置 `USAGE_DATA_DIR`、`USAGE_DB_PATH` 或 `USAGE_DB_URL` 指向旧数据库。URL 与 path 不能同时设置。
 5. 首次启动时建议设置管理员密钥：
 
 ```bash

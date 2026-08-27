@@ -8,6 +8,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
+	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	bootstrapsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
@@ -34,7 +35,13 @@ func New(ctx context.Context, cfg config.Config, options Options) (*Context, err
 	if err != nil {
 		return nil, err
 	}
-	st, err := store.Open(cfg.DBPath, protector)
+	st, err := store.OpenWithOptions(sqliterepo.Options{
+		Path:                cfg.DBPath,
+		DataSourceName:      cfg.DBURL,
+		ExpectedJournalMode: cfg.DBJournalMode,
+		ExpectedSynchronous: cfg.DBSynchronous,
+		ExpectedBusyTimeout: cfg.DBBusyTimeout,
+	}, protector)
 	if err != nil {
 		return nil, err
 	}

@@ -85,6 +85,8 @@ services:
     environment:
       HTTP_ADDR: '0.0.0.0:18317'
       USAGE_DB_PATH: '/data/usage.sqlite'
+      # Advanced alternative: remove the previous line before enabling a complete SQLite URL:
+      # USAGE_DB_URL: 'file:///data/usage.sqlite?_txlock=immediate&_pragma=journal_mode(DELETE)&_pragma=synchronous(EXTRA)&_pragma=busy_timeout(15000)&_pragma=foreign_keys(1)&_pragma=mmap_size(0)'
       CPA_MANAGER_DATA_KEY_PATH: '/data/data.key'
       # Recommended for managed deployments:
       # CPA_MANAGER_ADMIN_KEY: "replace-with-a-long-random-admin-key"
@@ -185,23 +187,26 @@ Do not use `127.0.0.1` from inside a container to reach CPA on the host. Inside 
 
 ## Common Environment Variables
 
-| Variable                     | Default                           | Description                                      |
-| ---------------------------- | --------------------------------- | ------------------------------------------------ |
-| `HTTP_ADDR`                  | `0.0.0.0:18317`                   | Manager Server listen address.                   |
-| `USAGE_DATA_DIR`             | `/data`                           | Data directory.                                  |
-| `USAGE_DB_PATH`              | `/data/usage.sqlite`              | SQLite database path.                            |
-| `CPA_MANAGER_DATA_KEY_PATH`  | `/data/data.key`                  | Data key path.                                   |
-| `CPA_MANAGER_ADMIN_KEY`      | empty                             | Explicit Manager Server admin key.               |
-| `CPA_MANAGER_ADMIN_KEY_FILE` | `/run/secrets/cpa_admin_key`      | Read the admin key from a file.                  |
-| `CPA_MANAGER_DATA_KEY`       | empty                             | Explicit data encryption key.                    |
-| `CPA_MANAGER_DATA_KEY_FILE`  | `/run/secrets/cpa_data_key`       | Read the data encryption key from a file.        |
-| `CPA_UPSTREAM_URL`           | empty                             | Optional environment-managed CPA URL.            |
-| `CPA_MANAGEMENT_KEY`         | empty                             | Optional environment-managed CPA Management Key. |
-| `CPA_MANAGEMENT_KEY_FILE`    | `/run/secrets/cpa_management_key` | Read the CPA Management Key from a file.         |
-| `USAGE_COLLECTOR_MODE`       | `auto`                            | `auto`, `subscribe`, `http`, or `resp`.          |
-| `USAGE_BATCH_SIZE`           | `100`                             | Max collected records per batch.                 |
-| `USAGE_POLL_INTERVAL_MS`     | `500`                             | Idle poll interval.                              |
-| `USAGE_QUERY_LIMIT`          | `50000`                           | Max recent usage events returned.                |
+| Variable                     | Default                           | Description                                                    |
+| ---------------------------- | --------------------------------- | -------------------------------------------------------------- |
+| `HTTP_ADDR`                  | `0.0.0.0:18317`                   | Manager Server listen address.                                 |
+| `USAGE_DATA_DIR`             | `/data`                           | Data directory.                                                |
+| `USAGE_DB_URL`               | empty                             | Advanced SQLite `file:` URL; mutually exclusive with the path. |
+| `USAGE_DB_PATH`              | `/data/usage.sqlite`              | SQLite database path; remove it in URL mode.                   |
+| `CPA_MANAGER_DATA_KEY_PATH`  | `/data/data.key`                  | Data key path.                                                 |
+| `CPA_MANAGER_ADMIN_KEY`      | empty                             | Explicit Manager Server admin key.                             |
+| `CPA_MANAGER_ADMIN_KEY_FILE` | `/run/secrets/cpa_admin_key`      | Read the admin key from a file.                                |
+| `CPA_MANAGER_DATA_KEY`       | empty                             | Explicit data encryption key.                                  |
+| `CPA_MANAGER_DATA_KEY_FILE`  | `/run/secrets/cpa_data_key`       | Read the data encryption key from a file.                      |
+| `CPA_UPSTREAM_URL`           | empty                             | Optional environment-managed CPA URL.                          |
+| `CPA_MANAGEMENT_KEY`         | empty                             | Optional environment-managed CPA Management Key.               |
+| `CPA_MANAGEMENT_KEY_FILE`    | `/run/secrets/cpa_management_key` | Read the CPA Management Key from a file.                       |
+| `USAGE_COLLECTOR_MODE`       | `auto`                            | `auto`, `subscribe`, `http`, or `resp`.                        |
+| `USAGE_BATCH_SIZE`           | `100`                             | Max collected records per batch.                               |
+| `USAGE_POLL_INTERVAL_MS`     | `500`                             | Idle poll interval.                                            |
+| `USAGE_QUERY_LIMIT`          | `50000`                           | Max recent usage events returned.                              |
+
+Keep `USAGE_DB_PATH` for normal deployments. When using `USAGE_DB_URL`, remove `USAGE_DB_PATH` from Compose; the two values cannot both be non-empty. The `&` characters are inside a YAML single-quoted scalar and do not need additional escaping. See [Manager Server Guide](../operations/manager-server.md#advanced-sqlite-database-urls) for the complete constraints.
 
 For the full runtime reference, see [Manager Server Guide](../operations/manager-server.md).
 
@@ -213,12 +218,12 @@ Always mount `/data`. Docker defaults:
 
 ```text
 /data/usage.sqlite
-/data/usage.sqlite-wal
-/data/usage.sqlite-shm
 /data/data.key
+/data/usage.sqlite-wal  # when WAL mode is active and the file exists
+/data/usage.sqlite-shm  # when WAL mode is active and the file exists
 ```
 
-Backups must include both SQLite files and `data.key`:
+Backups must include the main SQLite database, `data.key`, and every sidecar file that currently exists:
 
 ```bash
 docker run --rm \
@@ -291,6 +296,8 @@ docker compose run --rm --no-deps \
 
 docker compose start cpa-manager-plus
 ```
+
+If the service uses `USAGE_DB_URL`, remove `--db-path /data/usage.sqlite` from the middle command so the container inherits the complete URL; an explicit path selects the default SQLite connection settings.
 
 Replace `cpa-manager-plus` if your Compose service uses another name. Do not run cleanup while Manager Server is still active, and do not trigger it from the web UI; the command requires the exclusive SQLite process lock. After restart, Manager Server derives the state from database metadata again, so the warning disappears automatically when maintenance is clean.
 

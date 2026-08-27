@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"io"
 	"sync"
 	"time"
@@ -144,7 +145,11 @@ type Store struct {
 }
 
 func Open(path string, protector ...*security.Protector) (*Store, error) {
-	db, err := sqliterepo.Open(path)
+	return OpenWithOptions(sqliterepo.Options{Path: path}, protector...)
+}
+
+func OpenWithOptions(options sqliterepo.Options, protector ...*security.Protector) (*Store, error) {
+	db, err := sqliterepo.OpenWithOptions(options)
 	if err != nil {
 		return nil, err
 	}
@@ -176,6 +181,13 @@ func (s *Store) Close() error {
 		return nil
 	}
 	return s.db.Close()
+}
+
+func (s *Store) SQLiteJournalMode(ctx context.Context) (string, error) {
+	if s == nil {
+		return "", errors.New("store is nil")
+	}
+	return sqliterepo.JournalMode(ctx, s.db)
 }
 
 func (s *Store) StartDerivedMaintenance(ctx context.Context) {

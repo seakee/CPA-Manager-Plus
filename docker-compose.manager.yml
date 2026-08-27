@@ -10,6 +10,8 @@ services:
     environment:
       HTTP_ADDR: "0.0.0.0:18317"
       USAGE_DB_PATH: "/data/usage.sqlite"
+      # Advanced alternative: remove USAGE_DB_PATH before enabling USAGE_DB_URL.
+      # USAGE_DB_URL: "file:///data/usage.sqlite?_txlock=immediate&_pragma=journal_mode(DELETE)&_pragma=synchronous(EXTRA)&_pragma=busy_timeout(15000)&_pragma=foreign_keys(1)&_pragma=mmap_size(0)"
       CPA_MANAGER_DATA_KEY_PATH: "/data/data.key"
       # Optional: set CPA_MANAGER_ADMIN_KEY or CPA_MANAGER_ADMIN_KEY_FILE to provide
       # a stable admin key. If omitted, the first startup log prints a generated key once.

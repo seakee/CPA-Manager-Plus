@@ -22,7 +22,7 @@
 3. 确认命令指向真实的 Manager Server 数据库：
    - Docker 默认：`/data/usage.sqlite`
    - 原生包默认：二进制旁边的 `data/usage.sqlite`
-   - 自定义部署：`USAGE_DB_PATH` 的值
+   - 自定义部署：`USAGE_DB_PATH` 的值，或 `USAGE_DB_URL` 的本地 path
 
 ## Docker Compose
 
@@ -57,7 +57,7 @@ docker run --rm \
 docker start cpa-manager-plus
 ```
 
-如果使用 GitHub Container Registry 镜像，请把 `seakee/cpa-manager-plus:latest` 替换为 `ghcr.io/seakee/cpa-manager-plus:latest`。
+如果使用 GitHub Container Registry 镜像，请把 `seakee/cpa-manager-plus:latest` 替换为 `ghcr.io/seakee/cpa-manager-plus:latest`。URL 部署手工 `docker run` 时还必须传入原来的 `USAGE_DB_URL`；更推荐会继承 service environment 的 Compose 命令。
 
 ## Docker 宿主机目录挂载
 
@@ -110,7 +110,9 @@ Windows PowerShell：
 .\cpa-manager-plus.exe reset-admin-key
 ```
 
-如果 SQLite 数据库不在默认数据目录，显式指定路径：
+如果部署使用 `USAGE_DB_URL`，请在同一配置环境中省略 `--db-path`，以保留 URL 参数。显式传入 `--db-path` 会选择默认 SQLite 设置。
+
+仅使用 path 且 SQLite 数据库不在默认数据目录时，显式指定路径：
 
 macOS / Linux：
 
@@ -128,7 +130,7 @@ Windows PowerShell：
 
 ## 排障
 
-- **`SQLite database not found`**：当前命令没有运行在 Manager Server 的真实配置环境中。请传入 `--db-path`，或挂载正确的 Docker volume / 宿主机目录。
+- **`SQLite database not found`**：当前命令没有运行在 Manager Server 的真实配置环境中。URL 部署应传入原来的 `USAGE_DB_URL` 并省略 `--db-path`；path 部署可传入 `--db-path`。同时确认已挂载正确的 Docker volume / 宿主机目录。
 - **`is empty` / `does not look like a CPA Manager Plus Manager Server database`**：路径指向了错误文件或新建的空文件。请从 Manager Server 数据目录中找到真实的 `usage.sqlite`。
 - **`database is locked`**：Manager Server 或其他进程仍在使用 SQLite。停止相关进程后重试。
 - **重置后仍无法登录**：确认面板访问的是同一个 Manager Server。Docker 场景请检查 volume 名称或宿主机挂载路径。
