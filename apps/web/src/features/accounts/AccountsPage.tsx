@@ -160,8 +160,10 @@ import {
 import {
   buildAccountQuotaDisplayWindows,
   getQuotaWindowShortLabel,
+  isBuiltInAccountQuotaProvider,
   type AccountQuotaDisplayWindow,
 } from '@/features/accounts/model/accountQuotaDisplayWindows';
+import { parsePluginQuotaContract } from '@/utils/quota/pluginQuota';
 import {
   buildAccountQuotaWindowDefinitions,
   type AccountQuotaWindowDefinition,
@@ -3475,6 +3477,17 @@ export function AccountsPage() {
       freshAccountInspectionBySelectionKey,
     ]
   );
+  const pluginQuotaContractByRowKey = useMemo(() => {
+    const nowMs = Date.now();
+    return new Map(
+      rows.map((row) => [
+        row.selectionKey,
+        isBuiltInAccountQuotaProvider(row.provider)
+          ? null
+          : parsePluginQuotaContract(row.raw, nowMs),
+      ])
+    );
+  }, [rows]);
   const codexStatusBySelectionKey = useMemo(() => {
     const statusMap = new Map<string, ReturnType<typeof getAuthFileCodexStatus>>();
     rows.forEach((row) => {
@@ -4155,9 +4168,16 @@ export function AccountsPage() {
         getDisplayCodexQuota,
         translateQuotaWindowLabel,
         t,
+        pluginQuotaContract: pluginQuotaContractByRowKey.get(row.selectionKey) ?? null,
       });
     },
-    [baseQuotaStores, getDisplayCodexQuota, t, translateQuotaWindowLabel]
+    [
+      baseQuotaStores,
+      getDisplayCodexQuota,
+      pluginQuotaContractByRowKey,
+      t,
+      translateQuotaWindowLabel,
+    ]
   );
   const buildCodexSnapshotDefinitions = useCallback(
     (row: AccountRow, quota: CodexQuotaState | undefined): AccountQuotaWindowDefinition[] =>
@@ -7228,6 +7248,7 @@ export function AccountsPage() {
       diagnosticsRecentFailure: rowEventsRecentFailure,
       diagnosticsEvents: rowEvents,
       diagnosticsTotalCount: rowEventsTotalCount,
+      pluginQuotaContract: pluginQuotaContractByRowKey.get(selectedRow.selectionKey) ?? null,
     });
     const eventsUnavailable =
       !featureAvailability.requestMonitoringAvailable ||

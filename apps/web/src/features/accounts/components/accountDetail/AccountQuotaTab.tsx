@@ -144,6 +144,34 @@ export function AccountQuotaTab({
           minute: '2-digit',
         }).format(value)
       : '-';
+  const plugin = detailView.quota.plugin;
+  const formatPluginCost = (value: number) => {
+    if (plugin?.currency && plugin.minorUnit !== null) {
+      return `${new Intl.NumberFormat(i18n.language, {
+        minimumFractionDigits: plugin.minorUnit,
+        maximumFractionDigits: plugin.minorUnit,
+      }).format(value / 10 ** plugin.minorUnit)} ${plugin.currency}`;
+    }
+    return `${formatNumber(value)} ${t('accounts.detail_plugin_minor_units', {
+      defaultValue: 'minor units',
+    })}`;
+  };
+  const showPluginState =
+    plugin !== null && plugin.windows.length === 0 && plugin.availability === 'unavailable';
+  const pluginStateLabel = plugin?.stale
+    ? t('accounts.detail_quota_snapshot_stale')
+    : t('accounts.detail_plugin_quota_unavailable', {
+        defaultValue: 'Plugin quota data is unavailable',
+      });
+  const maxDailyCost = Math.max(0, ...(plugin?.daily.map((day) => day.costMinorUnits) ?? []));
+  const spend = plugin?.spend;
+  const pluginMetrics = [
+    [spend?.meteredMinorUnits, 'accounts.detail_plugin_metered_spend', 'Metered spend', true],
+    [spend?.todayMinorUnits, 'accounts.detail_plugin_today', 'Today', true],
+    [spend?.periodMinorUnits, 'accounts.detail_plugin_period_spend', 'Period spend', true],
+    [spend?.latestTokens, 'accounts.detail_plugin_latest_tokens', 'Latest tokens', false],
+    [spend?.periodTokens, 'accounts.detail_plugin_period_tokens', 'Period tokens', false],
+  ] as const;
 
   const hasResetRecords =
     detailView.quota.resetCreditsAvailableCount !== null ||
@@ -215,8 +243,90 @@ export function AccountQuotaTab({
                 : '-'
             }
           />
+          {pluginMetrics.map(([value, labelKey, defaultLabel, money]) =>
+            value === null || value === undefined ? null : (
+              <MetricCell
+                key={labelKey}
+                icon={money ? <IconDollarSign size={20} /> : <IconBinary size={20} />}
+                tone={money ? 'amber' : 'teal'}
+                label={t(labelKey, { defaultValue: defaultLabel })}
+                value={money ? formatPluginCost(value) : formatCompactNumber(value)}
+                valueTitle={money ? undefined : formatNumber(value)}
+              />
+            )
+          )}
         </div>
       </section>
+
+      {plugin &&
+      (showPluginState ||
+        plugin.daily.length > 0 ||
+        plugin.topModel ||
+        plugin.provenance.length > 0) ? (
+        <section className={styles.quotaSection} data-account-plugin-quota="true">
+          <div className={styles.quotaSectionHeading}>
+            <h3>{t('accounts.detail_plugin_quota_title', { defaultValue: 'Plugin quota' })}</h3>
+            <span>
+              {t('accounts.detail_plugin_quota_desc', {
+                defaultValue: 'Provider-reported spend and token usage',
+              })}
+            </span>
+          </div>
+          {showPluginState ? (
+            <p className={styles.quotaEmpty} data-account-plugin-quota-state="true">
+              {pluginStateLabel}
+            </p>
+          ) : null}
+          {plugin.daily.length > 0 ? (
+            <div className={styles.pluginQuotaDaily}>
+              <h4>
+                {t('accounts.detail_plugin_daily_usage', { defaultValue: 'Daily plugin usage' })}
+              </h4>
+              <ul className={styles.pluginQuotaHistogram} data-account-quota-daily-chart="true">
+                {plugin.daily.map((day) => {
+                  const height =
+                    maxDailyCost > 0 ? Math.max(4, (day.costMinorUnits / maxDailyCost) * 100) : 4;
+                  return (
+                    <li
+                      key={day.date}
+                      className={styles.pluginQuotaDailyItem}
+                      data-account-quota-daily-bar="true"
+                    >
+                      <span className={styles.pluginQuotaBarTrack} aria-hidden="true">
+                        <span className={styles.pluginQuotaBar} style={{ height: `${height}%` }} />
+                      </span>
+                      <strong>{day.date}</strong>
+                      <span>{formatPluginCost(day.costMinorUnits)}</span>
+                      {day.tokens !== null ? (
+                        <span>
+                          {formatNumber(day.tokens)} {t('accounts.detail_usage_tokens')}
+                        </span>
+                      ) : null}
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ) : null}
+
+          {plugin.topModel || plugin.provenance.length > 0 ? (
+            <div className={styles.quotaSummaryMeta}>
+              {plugin.topModel ? (
+                <span>
+                  {t('accounts.detail_plugin_top_model', { defaultValue: 'Top model' })}:{' '}
+                  <strong>{plugin.topModel}</strong>
+                </span>
+              ) : null}
+              {plugin.provenance.length > 0 ? (
+                <span data-account-plugin-quota-provenance="true">
+                  {t('accounts.detail_plugin_provenance', { defaultValue: 'Sources' })}:{' '}
+                  <strong>{plugin.provenance.join(', ')}</strong>
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+        </section>
+      ) : null}
 
       {windowUsageError ? <div className={styles.errorBox}>{windowUsageError}</div> : null}
 

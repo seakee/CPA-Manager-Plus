@@ -13,6 +13,8 @@ import {
   buildQuotaCredentialIdentity,
   getQuotaCredentialStoreKey,
 } from '@/utils/quota/credentialScope';
+import { buildAccountDetailViewModel } from './accountDetailViewModel';
+import { parsePluginQuotaContract } from '@/utils/quota/pluginQuota';
 
 const emptyStores = (): AccountQuotaStores => ({
   antigravityQuota: {},
@@ -34,6 +36,7 @@ const t = ((key: string, options?: Record<string, string | number>) => {
     'xai_quota.pay_as_you_go_label': 'Pay-as-you-go',
     'xai_quota.usage_amount': `${options?.remaining ?? '--'} / ${options?.limit ?? '--'} remaining`,
     'accounts.col_quota': 'Quota',
+    'accounts.credits_unlimited': 'Unlimited',
   };
   return translations[key] ?? key;
 }) as TFunction;
@@ -60,6 +63,147 @@ const buildRow = (file: AuthFileItem, stores: AccountQuotaStores = emptyStores()
 };
 
 describe('accountQuotaDisplayWindows', () => {
+  it('uses central plugin windows consistently in list and detail models', () => {
+    const nowMs = Date.parse('2026-08-28T12:00:00Z');
+    const file = {
+      name: 'plugin.json',
+      type: 'example-plugin',
+      provider: 'example-plugin',
+      plugin_quota: {
+        schema: 'cliproxy.plugin.quota',
+        version: 2,
+        availability: 'available',
+        observed_at: '2026-08-28T11:55:00Z',
+        ttl_seconds: 3600,
+        windows: [
+          {
+            id: 'monthly',
+            label: 'Monthly allowance',
+            kind: 'monthly',
+            unit: 'currency_minor_units',
+            currency: 'EUR',
+            minor_unit: 3,
+            used: 25000,
+            limit: 100000,
+            remaining: 75000,
+            window_start: '2026-08-01T00:00:00Z',
+            window_end: '2026-09-01T00:00:00Z',
+            reset_at: '2026-09-01T00:00:00Z',
+            reset_accuracy: 'exact',
+          },
+          { id: 'daily', label: 'Daily', kind: 'daily', used_percent: 10 },
+          { id: 'weekly', label: 'Weekly', kind: 'weekly', used_percent: 20 },
+          { id: 'requests', label: 'Requests', kind: 'product', unlimited: true },
+        ],
+      },
+    } as AuthFileItem;
+    const row = buildRow(file);
+    const windows = buildAccountQuotaDisplayWindows(row, {
+      stores: emptyStores(),
+      translateQuotaWindowLabel,
+      t,
+      nowMs,
+    });
+    const detail = buildAccountDetailViewModel(row, { quotaWindows: windows, nowMs });
+
+    expect(windows).toHaveLength(4);
+    expect(windows[0]).toMatchObject({
+      key: 'plugin:monthly',
+      source: 'plugin',
+      observedAtMs: Date.parse('2026-08-28T11:55:00Z'),
+      resetAccuracy: 'exact',
+      windowMode: 'fixed',
+      cycleStartMs: Date.parse('2026-08-01T00:00:00Z'),
+      cycleEndMs: Date.parse('2026-09-01T00:00:00Z'),
+      amountLabel: '75.000 / 100.000 EUR',
+    });
+    expect(windows[3].amountLabel).toBe('Unlimited');
+    expect(detail.quota.windows.map((window) => window.key)).toEqual(
+      windows.map((window) => window.key)
+    );
+    expect(detail.quota.plugin).toMatchObject({ stale: false, availability: 'available' });
+  });
+
+  it('shares one parsed plugin snapshot across list and detail at the expiry boundary', () => {
+    const expiresAtMs = Date.parse('2026-08-28T12:00:00Z');
+    const file = {
+      name: 'boundary.json',
+      type: 'example-plugin',
+      provider: 'example-plugin',
+      plugin_quota: {
+        schema: 'cliproxy.plugin.quota',
+        version: 2,
+        availability: 'available',
+        observed_at: '2026-08-28T11:00:00Z',
+        ttl_seconds: 3600,
+        windows: [{ id: 'daily', used: 25, limit: 100 }],
+      },
+    } as AuthFileItem;
+    const row = buildRow(file);
+    const pluginQuotaContract = parsePluginQuotaContract(file, expiresAtMs - 1);
+    const windows = buildAccountQuotaDisplayWindows(row, {
+      stores: emptyStores(),
+      translateQuotaWindowLabel,
+      t,
+      nowMs: expiresAtMs,
+      pluginQuotaContract,
+    });
+    const detail = buildAccountDetailViewModel(row, {
+      quotaWindows: windows,
+      nowMs: expiresAtMs,
+      pluginQuotaContract,
+    });
+
+    expect(windows[0]).toMatchObject({
+      key: 'plugin:daily',
+      remainingPercent: 75,
+      amountLabel: '75 / 100',
+    });
+    expect(detail.quota.plugin).toBe(pluginQuotaContract);
+    expect(detail.quota.windows[0].key).toBe('plugin:daily');
+  });
+
+  it('keeps built-in provider windows authoritative over plugin metadata', () => {
+    const file = {
+      name: 'codex.json',
+      type: 'codex',
+      plugin_quota: {
+        schema: 'cliproxy.plugin.quota',
+        version: 2,
+        availability: 'available',
+        observed_at: '2026-08-28T11:55:00Z',
+        ttl_seconds: 3600,
+        windows: [{ id: 'plugin', used_percent: 10 }],
+      },
+    } as AuthFileItem;
+    const row = buildRow(file);
+    const pluginQuotaContract = parsePluginQuotaContract(file, Date.parse('2026-08-28T12:00:00Z'));
+    const windows = buildAccountQuotaDisplayWindows(row, {
+      stores: emptyStores(),
+      getDisplayCodexQuota: () => ({
+        status: 'success',
+        windows: [
+          {
+            id: 'native',
+            label: 'Native',
+            usedPercent: 25,
+            resetLabel: '-',
+            resetAtMs: null,
+            resetAccuracy: 'unknown',
+          },
+        ],
+      }),
+      translateQuotaWindowLabel,
+      t,
+      nowMs: Date.parse('2026-08-28T12:00:00Z'),
+      pluginQuotaContract,
+    });
+    const detail = buildAccountDetailViewModel(row, { quotaWindows: windows, pluginQuotaContract });
+
+    expect(windows).toHaveLength(1);
+    expect(windows[0]).toMatchObject({ key: 'native', source: 'codex' });
+    expect(detail.quota.plugin).toBeNull();
+  });
   it('rolls legacy yearless reset labels into the next calendar year', () => {
     const nowMs = new Date(2026, 11, 31, 23, 0, 0, 0).getTime();
 
