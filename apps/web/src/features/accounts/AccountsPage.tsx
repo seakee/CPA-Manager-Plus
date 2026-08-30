@@ -868,6 +868,11 @@ const getRemainingBarClass = (row: AccountRow) => {
   return styles.quotaBarNeutral;
 };
 
+const isCurrentAccountListQuotaWindow = (definition: AccountQuotaWindowDefinition): boolean =>
+  !definition.stale &&
+  definition.availability !== 'pending_absent' &&
+  definition.availability !== 'inactive';
+
 export function AccountsPage() {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
@@ -4185,16 +4190,21 @@ export function AccountsPage() {
     return result;
   }, [quotaDisplayWindowsByRowKey]);
   const effectiveQuotaWindowDefinitionsByRowKey = useMemo(() => {
+    const providerByRowKey = new Map(
+      [...pageRows, ...(selectedRow ? [selectedRow] : [])].map((row) => [
+        row.selectionKey,
+        row.provider,
+      ])
+    );
     const result = new Map<string, AccountQuotaWindowDefinition[]>();
     quotaWindowDefinitionsByRowKey.forEach((definitions, rowKey) => {
-      const provider = selectedRow?.selectionKey === rowKey ? selectedRow.provider : undefined;
       result.set(
         rowKey,
         mergeAccountQuotaSnapshotWindows(
           definitions,
           quotaSnapshotWindowsByRowKey.get(rowKey) ?? [],
           {
-            provider,
+            provider: providerByRowKey.get(rowKey),
             getLabel: (snapshot) => {
               const kind = snapshot.window_kind;
               if (kind === 'rolling_24h') {
@@ -4211,7 +4221,7 @@ export function AccountsPage() {
       );
     });
     return result;
-  }, [quotaSnapshotWindowsByRowKey, quotaWindowDefinitionsByRowKey, selectedRow, t]);
+  }, [pageRows, quotaSnapshotWindowsByRowKey, quotaWindowDefinitionsByRowKey, selectedRow, t]);
   const accountWindowUsageTargets = useMemo(() => {
     if (!selectedRow) return [];
     const windowsByRowKey = new Map<string, AccountQuotaWindowDefinition[]>();
@@ -6796,8 +6806,42 @@ export function AccountsPage() {
           {rowsToRender.map((row) => {
             const recommendation = recommendationBySelectionKey.get(row.selectionKey) ?? null;
             const accountHistory = accountHistoryByRowKey.get(row.selectionKey) ?? null;
-            const quotaWindows =
+            const baseQuotaWindows =
               quotaDisplayWindowsByRowKey.get(row.selectionKey) ?? buildQuotaDisplayWindows(row);
+            const snapshotWindows = quotaSnapshotWindowsByRowKey.get(row.selectionKey);
+            const effectiveDefinitions = snapshotWindows
+              ? mergeAccountQuotaSnapshotWindows(
+                  buildAccountQuotaWindowDefinitions(baseQuotaWindows),
+                  snapshotWindows,
+                  { provider: row.provider }
+                )
+              : null;
+            const quotaWindows = effectiveDefinitions
+              ? effectiveDefinitions
+                  .filter(isCurrentAccountListQuotaWindow)
+                  .map((definition) => ({
+                    ...definition.display,
+                    remainingPercent: definition.remainingPercent,
+                    usedPercent: definition.usedPercent,
+                    resetAtMs: definition.cycleEndMs,
+                    resetAccuracy:
+                      definition.boundaryAccuracy === 'exact'
+                        ? ('exact' as const)
+                        : definition.boundaryAccuracy === 'derived' ||
+                            definition.boundaryAccuracy === 'estimated'
+                          ? ('estimated' as const)
+                          : ('unknown' as const),
+                    fromMs: definition.cycleStartMs,
+                    toMs: definition.cycleEndMs,
+                    observationSource: definition.observationSource,
+                    observedAtMs: definition.observedAtMs,
+                    windowMode: definition.windowMode,
+                    cycleStartMs: definition.cycleStartMs,
+                    cycleEndMs: definition.cycleEndMs,
+                    limitWindowSeconds: definition.durationSeconds,
+                    modelScope: definition.modelScope,
+                  }))
+              : baseQuotaWindows;
             const quotaCooldown = quotaCooldownsByRowKey.get(row.selectionKey)?.[0] ?? null;
             const codexStatus = codexStatusBySelectionKey.get(row.selectionKey) ?? null;
             const item = buildAccountListItem(row, {
