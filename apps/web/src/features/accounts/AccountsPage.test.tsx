@@ -7168,6 +7168,141 @@ describe('AccountsPage replacement flows', () => {
     expect(treeText(renderer)).not.toContain('SUM');
   });
 
+  it('does not render a stale persisted quota snapshot as current account-list quota', async () => {
+    const nowMs = Date.now();
+    const rowKey = 'codex.json\u0000auth-1';
+    mocks.files = [
+      {
+        ...makeCodexFile('codex.json', 'auth-1', 'codex@example.com'),
+        disabled: true,
+      } as AuthFileItem,
+    ];
+    mocks.location = {
+      pathname: '/accounts',
+      search: `?account=${encodeURIComponent(rowKey)}&tab=quota`,
+    };
+    mocks.quotaState.codexQuota = buildCredentialScopedQuotaRecord(mocks.files[0], {
+      status: 'success',
+      fetchedAtMs: nowMs - 1_000,
+      quotaInventoryObserved: true,
+      windows: [
+        {
+          id: 'five-hour',
+          label: 'Five hours',
+          usedPercent: 20,
+          resetLabel: new Date(nowMs + 5 * 60 * 60 * 1000).toISOString(),
+          resetAtMs: nowMs + 5 * 60 * 60 * 1000,
+          resetAccuracy: 'exact',
+          limitWindowSeconds: 5 * 60 * 60,
+        },
+      ],
+    });
+    vi.mocked(accountQuotaSnapshotApi.query).mockResolvedValue({
+      generated_at_ms: nowMs,
+      items: [
+        {
+          row_key: rowKey,
+          account_key: rowKey,
+          provider: 'codex',
+          windows: [
+            {
+              provider_window_id: 'five-hour',
+              window_kind: 'five_hour',
+              window_mode: 'fixed',
+              model_scope_kind: 'all',
+              source: 'response_header',
+              observed_at_ms: nowMs,
+              boundary_accuracy: 'derived',
+              cycle_start_ms: nowMs - 5 * 60 * 60 * 1000,
+              cycle_end_ms: nowMs - 1,
+              duration_seconds: 5 * 60 * 60,
+              used_percent: 95,
+              remaining_percent: 5,
+              stale: true,
+            },
+          ],
+        },
+      ],
+    });
+
+    const renderer = await renderAccountsPage();
+    await flushPromises();
+    await flushPromises();
+
+    const accountCard = findAccountCardByKey(renderer, rowKey);
+    expect(accountCard.findAllByProps({ 'data-account-quota-empty': 'true' })).toHaveLength(1);
+    expect(readText(accountCard)).not.toContain('20%');
+    expect(readText(accountCard)).not.toContain('5%');
+  });
+
+  it('renders a current merged quota snapshot on the account list', async () => {
+    const nowMs = Date.now();
+    const rowKey = 'codex.json\u0000auth-1';
+    mocks.files = [
+      {
+        ...makeCodexFile('codex.json', 'auth-1', 'codex@example.com'),
+        disabled: true,
+      } as AuthFileItem,
+    ];
+    mocks.location = {
+      pathname: '/accounts',
+      search: `?account=${encodeURIComponent(rowKey)}&tab=quota`,
+    };
+    mocks.quotaState.codexQuota = buildCredentialScopedQuotaRecord(mocks.files[0], {
+      status: 'success',
+      fetchedAtMs: nowMs - 1_000,
+      quotaInventoryObserved: true,
+      windows: [
+        {
+          id: 'five-hour',
+          label: 'Five hours',
+          usedPercent: 20,
+          resetLabel: new Date(nowMs + 5 * 60 * 60 * 1000).toISOString(),
+          resetAtMs: nowMs + 5 * 60 * 60 * 1000,
+          resetAccuracy: 'exact',
+          limitWindowSeconds: 5 * 60 * 60,
+        },
+      ],
+    });
+    vi.mocked(accountQuotaSnapshotApi.query).mockResolvedValue({
+      generated_at_ms: nowMs,
+      items: [
+        {
+          row_key: rowKey,
+          account_key: rowKey,
+          provider: 'codex',
+          windows: [
+            {
+              provider_window_id: 'five-hour',
+              window_kind: 'five_hour',
+              window_mode: 'fixed',
+              model_scope_kind: 'all',
+              source: 'response_header',
+              observed_at_ms: nowMs,
+              boundary_accuracy: 'derived',
+              cycle_start_ms: nowMs - 60 * 60 * 1000,
+              cycle_end_ms: nowMs + 4 * 60 * 60 * 1000,
+              duration_seconds: 5 * 60 * 60,
+              used_percent: 65,
+              remaining_percent: 35,
+              stale: false,
+              availability: 'active',
+            },
+          ],
+        },
+      ],
+    });
+
+    const renderer = await renderAccountsPage();
+    await flushPromises();
+    await flushPromises();
+
+    const accountCard = findAccountCardByKey(renderer, rowKey);
+    expect(accountCard.findAllByProps({ 'data-account-quota-empty': 'true' })).toHaveLength(0);
+    expect(readText(accountCard)).toContain('35%');
+    expect(readText(accountCard)).not.toContain('80%');
+  });
+
   it('selects account cards by row click while selection mode is active', async () => {
     const renderer = await renderAccountsPage();
 
