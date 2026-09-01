@@ -19,8 +19,8 @@ const startOfTodayMs = (nowMs: number) => {
 };
 
 const startOfPreviousLocalDayMs = (todayStartMs: number) => {
-  const previousDay = new Date(todayStartMs);
-  previousDay.setDate(previousDay.getDate() - 1);
+  const previousDay = new Date(todayStartMs - 24 * 60 * 60 * 1000);
+  previousDay.setHours(0, 0, 0, 0);
   return previousDay.getTime();
 };
 
