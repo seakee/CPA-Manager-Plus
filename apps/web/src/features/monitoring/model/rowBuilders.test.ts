@@ -25,6 +25,7 @@ const buildRow = (timestampMs: number): MonitoringEventRow => ({
   apiKeyLabel: 'h',
   apiKeyMasked: 'h',
   provider: 'openai',
+  planType: '-',
   channel: 'c',
   channelHost: 'h',
   channelDisabled: false,
