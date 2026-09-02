@@ -1101,7 +1101,7 @@
 
 .quotaMatrixCells {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
   align-items: center;
   gap: 8px;
   min-width: 0;
@@ -1127,6 +1127,7 @@
 }
 
 .quotaMatrixTrack {
+  display: block;
   height: 4px;
   min-width: 0;
 }
@@ -5457,6 +5458,7 @@
   }
 
   .quotaMatrixCells {
+    grid-template-columns: repeat(auto-fit, minmax(106px, 1fr));
     gap: 6px;
   }
 

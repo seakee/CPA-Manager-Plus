@@ -21,15 +21,15 @@ const getRemainingPercentBarClass = (remainingPercent: number | null) => {
 export function AccountQuotaMatrix({ accountKey, matrix }: AccountQuotaMatrixProps) {
   const { t, i18n } = useTranslation();
   return (
-    <div className={styles.quotaMatrix} data-account-quota-matrix={accountKey}>
+    <span className={styles.quotaMatrix} data-account-quota-matrix={accountKey}>
       {matrix.rows.map((matrixRow) => (
-        <div
+        <span
           key={matrixRow.key}
           className={styles.quotaMatrixRow}
           data-account-quota-matrix-row={matrixRow.key}
         >
           <span className={styles.quotaMatrixWindowLabel}>{matrixRow.label}</span>
-          <div className={styles.quotaMatrixCells}>
+          <span className={styles.quotaMatrixCells}>
             {matrixRow.cells.map((cell) => {
               const windowRemaining = cell.window.remainingPercent;
               const windowWidth = Math.max(0, Math.min(100, windowRemaining ?? 0));
@@ -45,7 +45,7 @@ export function AccountQuotaMatrix({ accountKey, matrix }: AccountQuotaMatrixPro
                 .filter(Boolean)
                 .join(' · ');
               return (
-                <div
+                <span
                   key={cell.window.key}
                   className={styles.quotaMatrixCell}
                   data-account-quota-matrix-cell={`${matrixRow.key}:${cell.groupLabel}`}
@@ -54,7 +54,7 @@ export function AccountQuotaMatrix({ accountKey, matrix }: AccountQuotaMatrixPro
                   <span className={styles.quotaMatrixGroupLabel} title={cell.groupLabel}>
                     {cell.displayLabel}
                   </span>
-                  <div
+                  <span
                     className={`${styles.quotaTrack} ${styles.quotaMatrixTrack}`}
                     aria-hidden="true"
                   >
@@ -64,16 +64,16 @@ export function AccountQuotaMatrix({ accountKey, matrix }: AccountQuotaMatrixPro
                       )}`}
                       style={{ width: `${windowWidth}%` }}
                     />
-                  </div>
+                  </span>
                   <strong className={styles.quotaMatrixPercent}>
                     {windowRemaining !== null ? formatPercent(windowRemaining) : '-'}
                   </strong>
-                </div>
+                </span>
               );
             })}
-          </div>
-        </div>
+          </span>
+        </span>
       ))}
-    </div>
+    </span>
   );
 }

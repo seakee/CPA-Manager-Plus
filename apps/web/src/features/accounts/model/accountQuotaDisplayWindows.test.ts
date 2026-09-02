@@ -373,6 +373,9 @@ describe('accountQuotaDisplayWindows', () => {
       limitWindowSeconds: 7 * 24 * 60 * 60,
       modelScope: { kind: 'family', key: 'claude_gpt', complete: true },
     });
+    expect(windows.map(isIntervalAccountQuotaWindow)).toEqual([true, true, true]);
+    expect(windows.map(isModelScopedAccountQuotaWindow)).toEqual([true, true, true]);
+    expect(windows.map(isStandardAccountQuotaListWindow)).toEqual([false, false, false]);
   });
 
   it('adds Kimi usage amounts and formatted reset hints', () => {

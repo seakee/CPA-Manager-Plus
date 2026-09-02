@@ -7047,7 +7047,7 @@ describe('AccountsPage replacement flows', () => {
     expect(readText(otherGroup)).toContain('Grok Code Fast');
   });
 
-  it('keeps Antigravity Pro model groups out of the list and in quota details', async () => {
+  it('renders Antigravity Pro model groups in the quota matrix and keeps them in quota details', async () => {
     mocks.files = [
       {
         name: 'antigravity-pro-matrix.json',
@@ -7112,13 +7112,17 @@ describe('AccountsPage replacement flows', () => {
     });
 
     const renderer = await renderAccountsPage();
-    const matrices = renderer.root.findAll(
-      (node) => typeof node.props['data-account-quota-matrix'] === 'string'
+    const card = findAccountCardByKey(renderer, getAuthFileSelectionKey(mocks.files[0]));
+    card.findByProps({
+      'data-account-quota-matrix': getAuthFileSelectionKey(mocks.files[0]),
+    });
+    expect(card.findAllByProps({ 'data-account-quota-matrix-row': 'five_hour' })).toHaveLength(1);
+    expect(card.findAllByProps({ 'data-account-quota-matrix-row': 'weekly' })).toHaveLength(1);
+    const cells = card.findAll(
+      (node) => typeof node.props['data-account-quota-matrix-cell'] === 'string'
     );
-    expect(matrices).toHaveLength(0);
-    expect(
-      readText(findAccountCardByKey(renderer, getAuthFileSelectionKey(mocks.files[0])))
-    ).toContain('accounts.quota_details_only');
+    expect(cells).toHaveLength(4);
+    expect(readText(card)).not.toContain('accounts.quota_details_only');
 
     await act(async () => {
       findAccountDetailRegion(
@@ -7135,7 +7139,7 @@ describe('AccountsPage replacement flows', () => {
     expect(renderer.root.findAllByProps({ 'data-quota-window-group': 'standard' })).toHaveLength(0);
   });
 
-  it('keeps Antigravity Free model groups out of the list and in quota details', async () => {
+  it('renders Antigravity Free model groups in the quota matrix when two groups exist and keeps them in quota details', async () => {
     mocks.files = [
       {
         name: 'antigravity-free-weekly.json',
@@ -7186,13 +7190,17 @@ describe('AccountsPage replacement flows', () => {
     });
 
     const renderer = await renderAccountsPage();
-    const matrices = renderer.root.findAll(
-      (node) => typeof node.props['data-account-quota-matrix'] === 'string'
+    const card = findAccountCardByKey(renderer, getAuthFileSelectionKey(mocks.files[0]));
+    card.findByProps({
+      'data-account-quota-matrix': getAuthFileSelectionKey(mocks.files[0]),
+    });
+    expect(card.findAllByProps({ 'data-account-quota-matrix-row': 'five_hour' })).toHaveLength(0);
+    expect(card.findAllByProps({ 'data-account-quota-matrix-row': 'weekly' })).toHaveLength(1);
+    const cells = card.findAll(
+      (node) => typeof node.props['data-account-quota-matrix-cell'] === 'string'
     );
-    expect(matrices).toHaveLength(0);
-    expect(
-      readText(findAccountCardByKey(renderer, getAuthFileSelectionKey(mocks.files[0])))
-    ).toContain('accounts.quota_details_only');
+    expect(cells).toHaveLength(2);
+    expect(readText(card)).not.toContain('accounts.quota_details_only');
 
     await act(async () => {
       findAccountDetailRegion(
@@ -7207,6 +7215,148 @@ describe('AccountsPage replacement flows', () => {
     expect(readText(modelQuotaGroup)).toContain('antigravity_quota.group_claude_gpt_models');
     expect(readText(modelQuotaGroup)).toContain('antigravity_quota.group_gemini_models');
     expect(renderer.root.findAllByProps({ 'data-quota-window-group': 'standard' })).toHaveLength(0);
+  });
+
+  it('keeps Antigravity with a single model group in quota details only', async () => {
+    mocks.files = [
+      {
+        name: 'antigravity-single-group.json',
+        type: 'antigravity',
+        provider: 'antigravity',
+        authIndex: 'antigravity-single-group-01',
+        account: 'AG Single Group',
+        label: 'Antigravity Single Group',
+        priority: 0,
+        disabled: false,
+      } as AuthFileItem,
+    ];
+    mocks.quotaState.antigravityQuota = buildCredentialScopedQuotaRecord(mocks.files[0], {
+      status: 'success',
+      subscription: { plan: 'free', tierName: 'Free', tierId: 'g1-free' },
+      groups: [
+        {
+          id: 'gemini-models',
+          label: 'Gemini Models',
+          description: 'Models within this group: Gemini Flash, Gemini Pro',
+          models: ['gemini-2.5-flash', 'gemini-2.5-pro'],
+          buckets: [
+            {
+              id: 'gemini-weekly',
+              label: 'Weekly Limit',
+              window: 'weekly',
+              remainingFraction: 0.76,
+              resetTime: '2026-07-15T12:00:00Z',
+            },
+          ],
+        },
+      ],
+    });
+
+    const renderer = await renderAccountsPage();
+    const card = findAccountCardByKey(renderer, getAuthFileSelectionKey(mocks.files[0]));
+    const matrices = card.findAll(
+      (node) => typeof node.props['data-account-quota-matrix'] === 'string'
+    );
+    expect(matrices).toHaveLength(0);
+    expect(readText(card)).toContain('accounts.quota_details_only');
+
+    await act(async () => {
+      findAccountDetailRegion(
+        renderer,
+        getAuthFileSelectionKey(mocks.files[0]),
+        'quota'
+      ).props.onClick();
+    });
+
+    const modelQuotaGroup = renderer.root.findByProps({ 'data-quota-window-group': 'model' });
+    expect(modelQuotaGroup.findAllByType(QuotaWindowCard)).toHaveLength(1);
+  });
+
+  it('renders Antigravity quota matrix in selection mode and uses card selection instead of opening details', async () => {
+    mocks.files = [
+      {
+        name: 'antigravity-pro-matrix.json',
+        type: 'antigravity',
+        provider: 'antigravity',
+        authIndex: 'antigravity-pro-matrix-04',
+        account: 'AG Pro Matrix',
+        label: 'Antigravity Pro Matrix',
+        priority: 0,
+        disabled: false,
+      } as AuthFileItem,
+    ];
+    mocks.quotaState.antigravityQuota = buildCredentialScopedQuotaRecord(mocks.files[0], {
+      status: 'success',
+      subscription: { plan: 'pro', tierName: 'Pro', tierId: 'g1-pro' },
+      groups: [
+        {
+          id: 'gemini-models',
+          label: 'Gemini Models',
+          description: 'Models within this group: Gemini Flash, Gemini Pro',
+          models: ['gemini-2.5-flash', 'gemini-2.5-pro'],
+          buckets: [
+            {
+              id: 'gemini-5h',
+              label: 'Five Hour Limit',
+              window: '5h',
+              remainingFraction: 0.96,
+              resetTime: '2026-07-09T12:00:00Z',
+            },
+            {
+              id: 'gemini-weekly',
+              label: 'Weekly Limit',
+              window: 'weekly',
+              remainingFraction: 0.04,
+              resetTime: '2026-07-15T12:00:00Z',
+            },
+          ],
+        },
+        {
+          id: 'claude-gpt-models',
+          label: 'Claude and GPT models',
+          description: 'Models within this group: Claude Sonnet, GPT-OSS',
+          models: ['claude-sonnet-4-5', 'gpt-oss-120b-medium'],
+          buckets: [
+            {
+              id: '3p-5h',
+              label: 'Five Hour Limit',
+              window: '5h',
+              remainingFraction: 0.11,
+              resetTime: '2026-07-09T11:00:00Z',
+            },
+            {
+              id: '3p-weekly',
+              label: 'Weekly Limit',
+              window: 'weekly',
+              remainingFraction: 0.19,
+              resetTime: '2026-07-13T12:00:00Z',
+            },
+          ],
+        },
+      ],
+    });
+
+    const selectionKey = getAuthFileSelectionKey(mocks.files[0]);
+    const renderer = await renderAccountsPage();
+
+    await act(async () => {
+      findHostButtonByText(renderer, 'accounts.selection_mode_enter').props.onClick();
+    });
+
+    const card = findAccountCardByKey(renderer, selectionKey);
+    const quotaRegion = findAccountDetailRegion(renderer, selectionKey, 'quota');
+    expect(quotaRegion.type).toBe('div');
+    expect(quotaRegion.props['data-account-detail-trigger']).toBeUndefined();
+    expect(quotaRegion.props.onClick).toBeUndefined();
+    expect(card.findByProps({ 'data-account-quota-matrix': selectionKey })).toBeTruthy();
+
+    await act(async () => {
+      card.props.onClick();
+    });
+
+    expect(mocks.toggleSelect).toHaveBeenCalledWith(selectionKey);
+    expect(renderer.root.findAllByType(AccountQuotaTab)).toHaveLength(0);
+    expect(mocks.navigate).not.toHaveBeenCalled();
   });
 
   it('keeps the accounts view in card mode without table controls', async () => {
@@ -12889,10 +13039,7 @@ describe('AccountsPage replacement flows', () => {
     const secondMarker = recordAccountCredentialMutationMarker({
       connectionFingerprint: 'http://cpa-a.local:8317:manager-key',
       provider: 'codex',
-      baseline: createAccountCredentialMutationBaseline(
-        [existingFile, firstOauthFile],
-        'codex'
-      ),
+      baseline: createAccountCredentialMutationBaseline([existingFile, firstOauthFile], 'codex'),
       requireObservedMutation: true,
       createdAtMs: secondMarkerAtMs,
     });
@@ -12962,10 +13109,7 @@ describe('AccountsPage replacement flows', () => {
     const secondMarker = recordAccountCredentialMutationMarker({
       connectionFingerprint: 'http://cpa-a.local:8317:manager-key',
       provider: 'codex',
-      baseline: createAccountCredentialMutationBaseline(
-        [existingFile, firstOauthFile],
-        'codex'
-      ),
+      baseline: createAccountCredentialMutationBaseline([existingFile, firstOauthFile], 'codex'),
       requireObservedMutation: true,
       createdAtMs: secondMarkerAtMs,
     });
