@@ -274,6 +274,7 @@ describe('accountQuotaDisplayWindows', () => {
       resetAccuracy: 'exact',
       limitWindowSeconds: 7 * 24 * 60 * 60,
       modelScope: { kind: 'all', complete: true },
+      scopeDisplayName: undefined,
       source: 'claude',
     });
     expect(windows[1]).toMatchObject({
@@ -285,6 +286,61 @@ describe('accountQuotaDisplayWindows', () => {
       amountLabel: '$1.50 / $5.00',
       source: 'claude',
     });
+  });
+
+  it('preserves Claude dynamic model scope display names without marking incomplete scopes complete', () => {
+    const stores = {
+      ...emptyStores(),
+      claudeQuota: {
+        'claude.json': {
+          status: 'success',
+          windows: [
+            {
+              id: 'weekly-scoped-model-id',
+              label: 'Demo Model A',
+              usedPercent: 40,
+              resetLabel: '2026-07-10T12:00:00Z',
+              resetAtMs: Date.parse('2026-07-10T12:00:00Z'),
+              resetAccuracy: 'exact',
+              limitWindowSeconds: 7 * 24 * 60 * 60,
+              modelScope: { kind: 'models', models: ['model-a'], complete: true },
+            },
+            {
+              id: 'weekly-scoped-label-only',
+              label: 'Demo Model B',
+              usedPercent: 50,
+              resetLabel: '2026-07-10T12:00:00Z',
+              resetAtMs: Date.parse('2026-07-10T12:00:00Z'),
+              resetAccuracy: 'exact',
+              limitWindowSeconds: 7 * 24 * 60 * 60,
+              modelScope: { kind: 'models', models: [], complete: false },
+            },
+          ],
+        },
+      },
+    } satisfies AccountQuotaStores;
+    const row = buildRow({ name: 'claude.json', type: 'claude' }, stores);
+
+    const windows = buildAccountQuotaDisplayWindows(row, {
+      stores,
+      translateQuotaWindowLabel,
+      t,
+    });
+
+    expect(windows).toMatchObject([
+      {
+        key: 'weekly-scoped-model-id',
+        label: 'Demo Model A',
+        scopeDisplayName: 'Demo Model A',
+        modelScope: { kind: 'models', models: ['model-a'], complete: true },
+      },
+      {
+        key: 'weekly-scoped-label-only',
+        label: 'Demo Model B',
+        scopeDisplayName: 'Demo Model B',
+        modelScope: { kind: 'models', models: [], complete: false },
+      },
+    ]);
   });
 
   it('flattens Antigravity groups while retaining group and bucket metadata', () => {

@@ -193,6 +193,7 @@ const toSnapshotWindow = (
     provider_window_aliases: definition.providerWindowAliases,
     window_kind: definition.kind,
     window_mode: windowMode,
+    scope_display_name: definition.display.scopeDisplayName,
     model_scope_kind: persistedScopeKind,
     model_scope_key: persistedScopeKey,
     model_ids: persistedModelIDs,
@@ -739,9 +740,11 @@ const snapshotDefinition = (
   const durationSeconds =
     lifecycle.currentCycle?.durationSeconds ?? snapshot.duration_seconds ?? null;
   const modelScope = snapshotModelScope(snapshot);
+  const scopeDisplayName = snapshot.scope_display_name?.trim() || undefined;
+  const label = scopeDisplayName ?? options.getLabel?.(snapshot) ?? snapshot.provider_window_id;
   const display: AccountQuotaDisplayWindow = {
     key,
-    label: options.getLabel?.(snapshot) ?? snapshot.provider_window_id,
+    label,
     kind: snapshotWindowKind(snapshot.window_kind),
     remainingPercent: snapshot.remaining_percent ?? null,
     usedPercent: snapshot.used_percent ?? null,
@@ -762,6 +765,7 @@ const snapshotDefinition = (
     cycleStartMs: currentStartMs,
     cycleEndMs: currentEndMs,
     modelScope,
+    scopeDisplayName,
     providerWindowAliases: snapshot.provider_window_aliases,
   };
   return {

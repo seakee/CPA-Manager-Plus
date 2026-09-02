@@ -64,6 +64,22 @@ const makeSnapshot = (
   ...overrides,
 });
 
+const makeSnapshotTestRow = (provider: AccountRow['provider'] = 'antigravity'): AccountRow =>
+  ({
+    selectionKey: `${provider}.json\u0000auth-1`,
+    fileName: `${provider}.json`,
+    provider,
+    authIndex: 'auth-1',
+    accountLabel: 'user@example.com',
+    raw: {
+      name: `${provider}.json`,
+      provider,
+      type: provider,
+      auth_index: 'auth-1',
+      account: 'user@example.com',
+    },
+  }) as unknown as AccountRow;
+
 describe('account quota snapshots', () => {
   it('overlays server provenance, boundaries, scope, and stale state', () => {
     const merged = mergeAccountQuotaSnapshotWindows(
@@ -270,10 +286,18 @@ describe('account quota snapshots', () => {
       key: 'shared-incomplete',
       providerWindowId: 'shared-window',
       provider: 'antigravity',
+      label: 'Demo Model A',
       modelScope: { kind: 'models', models: [], complete: false },
       boundaryAccuracy: 'unknown',
       windowMode: 'unknown',
     });
+    incomplete.display = {
+      ...incomplete.display,
+      label: 'Demo Model A',
+      scopeDisplayName: 'Demo Model A',
+      modelScope: incomplete.modelScope,
+      source: 'antigravity',
+    };
     const row = {
       selectionKey: 'antigravity.json\u0000auth-1',
       fileName: 'antigravity.json',
@@ -300,6 +324,7 @@ describe('account quota snapshots', () => {
         model_scope_kind: 'feature',
         model_scope_key: 'scope_unknown',
         model_ids: undefined,
+        scope_display_name: 'Demo Model A',
       }),
     ]);
 
@@ -319,6 +344,93 @@ describe('account quota snapshots', () => {
       key: 'shared-incomplete',
       providerWindowId: 'shared-window',
       modelScope: { kind: 'models', models: [], complete: false },
+      display: { label: 'Demo Model A', scopeDisplayName: 'Demo Model A' },
+    });
+  });
+
+  it('restores a snapshot-only scoped model name and preserves it on write-back', () => {
+    const snapshot = makeSnapshot({
+      provider_window_id: 'weekly-scoped-demo',
+      window_kind: 'weekly',
+      model_scope_kind: 'feature',
+      model_scope_key: 'scope_unknown',
+      model_ids: undefined,
+      scope_display_name: 'Demo Model A',
+    });
+    const merged = mergeAccountQuotaSnapshotWindows([], [snapshot], {
+      provider: 'claude',
+      getLabel: () => 'detail_snapshot_window_weekly',
+    });
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({
+      label: 'Demo Model A',
+      modelScope: { kind: 'models', models: [], complete: false },
+      display: { label: 'Demo Model A', scopeDisplayName: 'Demo Model A' },
+    });
+
+    const row = makeSnapshotTestRow('claude');
+    const [entry] = buildAccountQuotaSnapshotWriteEntries(
+      [row],
+      new Map([[row.selectionKey, merged]])
+    );
+    expect(entry.windows[0]).toMatchObject({
+      model_scope_kind: 'feature',
+      model_scope_key: 'scope_unknown',
+      model_ids: undefined,
+      scope_display_name: 'Demo Model A',
+    });
+  });
+
+  it('uses the legacy snapshot label fallback when no display name was stored', () => {
+    const merged = mergeAccountQuotaSnapshotWindows(
+      [],
+      [
+        makeSnapshot({
+          provider_window_id: 'weekly',
+          window_kind: 'weekly',
+          scope_display_name: undefined,
+        }),
+      ],
+      {
+        provider: 'claude',
+        getLabel: () => 'detail_snapshot_window_weekly',
+      }
+    );
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0].label).toBe('detail_snapshot_window_weekly');
+    expect(merged[0].display.scopeDisplayName).toBeUndefined();
+  });
+
+  it('keeps the live definition label ahead of an older snapshot display name', () => {
+    const live = makeDefinition({
+      provider: 'claude',
+      label: 'New Model Name',
+      observedAtMs: 10_000,
+    });
+    live.display = {
+      ...live.display,
+      label: 'New Model Name',
+      scopeDisplayName: 'New Model Name',
+      source: 'claude',
+      modelScope: live.modelScope,
+    };
+    const merged = mergeAccountQuotaSnapshotWindows(
+      [live],
+      [
+        makeSnapshot({
+          observed_at_ms: 20_000,
+          scope_display_name: 'Old Model Name',
+        }),
+      ],
+      { provider: 'claude' }
+    );
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({
+      label: 'New Model Name',
+      display: { label: 'New Model Name', scopeDisplayName: 'New Model Name' },
     });
   });
 
