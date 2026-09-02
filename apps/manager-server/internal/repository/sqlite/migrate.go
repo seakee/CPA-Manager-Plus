@@ -819,6 +819,7 @@ func Migrate(db *sql.DB) error {
 			provider_window_id text not null,
 			window_kind text not null,
 			window_mode text not null,
+			scope_display_name text not null default '',
 			model_scope_kind text not null,
 			model_scope_key text,
 			model_ids_json text,
@@ -2655,6 +2656,7 @@ func ensureQuotaSnapshotLifecycleColumns(db *sql.DB) error {
 		{name: "logical_window_id", definition: "integer"},
 		{name: "activation_id", definition: "integer"},
 		{name: "cycle_id", definition: "integer"},
+		{name: "scope_display_name", definition: "text not null default ''"},
 		{name: "scope_fingerprint", definition: "text not null default ''"},
 		{name: "content_hash", definition: "text not null default ''"},
 	}

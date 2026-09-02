@@ -172,6 +172,7 @@ func TestMigrateCreatesAccountQuotaSnapshotSchema(t *testing.T) {
 		"provider_window_id",
 		"window_kind",
 		"window_mode",
+		"scope_display_name",
 		"model_scope_kind",
 		"model_scope_key",
 		"model_ids_json",
@@ -1625,6 +1626,17 @@ func TestMigrateDefersLegacyQuotaSnapshotLifecycleBackfill(t *testing.T) {
 	if err := Migrate(db); err != nil {
 		t.Fatalf("migrate legacy quota snapshots: %v", err)
 	}
+	columns := migrationTableColumns(t, db, "account_quota_snapshots")
+	if !columns["scope_display_name"] {
+		t.Fatalf("migrated account quota snapshot columns = %#v, missing scope_display_name", columns)
+	}
+	var legacyDisplayName string
+	if err := db.QueryRow(`select scope_display_name from account_quota_snapshots where id = 1`).Scan(&legacyDisplayName); err != nil {
+		t.Fatalf("read migrated legacy display name: %v", err)
+	}
+	if legacyDisplayName != "" {
+		t.Fatalf("legacy display name = %q, want empty", legacyDisplayName)
+	}
 	var pendingBeforeWorker int
 	if err := db.QueryRow(`select count(*) from account_quota_snapshots where observation_id is null`).Scan(&pendingBeforeWorker); err != nil {
 		t.Fatalf("count deferred legacy quota snapshots: %v", err)
@@ -1707,6 +1719,7 @@ func TestMigrateDefersLegacyQuotaSnapshotLifecycleBackfill(t *testing.T) {
 		ModelIDsJSON:        `["grok-4.5-build-free"]`,
 		ScopeFingerprint:    quotasnapshotrepo.ScopeFingerprint("models", "grok-4.5-build-free", modelIDs),
 		ContentHash:         "live-xai-content",
+		ScopeDisplayName:    "Grok 4.5 Build Free",
 		InventoryScopeKey:   "xai:included-free",
 		Source:              "response_body",
 		SourceObservationID: "live-xai-body",
@@ -1742,6 +1755,28 @@ func TestMigrateDefersLegacyQuotaSnapshotLifecycleBackfill(t *testing.T) {
 	}
 	if liveXAIWindowID != legacyXAIWindowID {
 		t.Fatalf("live xai logical window = %d, want migrated window %d", liveXAIWindowID, legacyXAIWindowID)
+	}
+	var liveDisplayName string
+	if err := db.QueryRow(`select scope_display_name from account_quota_snapshots
+		where source_observation_id = 'live-xai-body'`).Scan(&liveDisplayName); err != nil {
+		t.Fatalf("read live xai display name: %v", err)
+	}
+	if liveDisplayName != "Grok 4.5 Build Free" {
+		t.Fatalf("live xai display name = %q", liveDisplayName)
+	}
+	candidates, err := repository.ListCandidates(context.Background(), "account-xai", "xai", 10)
+	if err != nil {
+		t.Fatalf("list migrated xai quota candidates: %v", err)
+	}
+	var foundLiveDisplayName string
+	for _, candidate := range candidates {
+		if candidate.SourceObservationID == "live-xai-body" {
+			foundLiveDisplayName = candidate.ScopeDisplayName
+			break
+		}
+	}
+	if foundLiveDisplayName != "Grok 4.5 Build Free" {
+		t.Fatalf("migrated xai candidates = %#v", candidates)
 	}
 
 	for index, observedAtMS := range []int64{3000, 4000} {
