@@ -1785,12 +1785,13 @@ func insertSnapshot(ctx context.Context, tx *sql.Tx, snapshot model.AccountQuota
 	_, err := tx.ExecContext(ctx, `insert into account_quota_snapshots (
 		observation_id, logical_window_id, activation_id, cycle_id,
 		account_key, provider, provider_window_id, window_kind, window_mode,
+		scope_display_name,
 		model_scope_kind, model_scope_key, model_ids_json, scope_fingerprint, content_hash,
 		source, source_observation_id, observed_at_ms, boundary_accuracy,
 		cycle_start_ms, cycle_end_ms, duration_seconds, used_percent,
 		remaining_percent, used_value, limit_value, quota_unit,
 		reset_credits_available, reset_credits_json, plan_type, created_at_ms
-	) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		nullInt64(snapshot.ObservationID),
 		nullInt64(snapshot.LogicalWindowID),
 		nullInt64(snapshot.ActivationID),
@@ -1800,6 +1801,7 @@ func insertSnapshot(ctx context.Context, tx *sql.Tx, snapshot model.AccountQuota
 		snapshot.ProviderWindowID,
 		snapshot.WindowKind,
 		snapshot.WindowMode,
+		snapshot.ScopeDisplayName,
 		snapshot.ModelScopeKind,
 		nullString(snapshot.ModelScopeKey),
 		nullString(snapshot.ModelIDsJSON),

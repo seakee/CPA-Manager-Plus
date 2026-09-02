@@ -19,10 +19,11 @@ import (
 )
 
 const (
-	maxWriteEntries      = 400
-	maxQueryAccounts     = 200
-	maxModelIDs          = 200
-	maxSnapshotsPerQuery = 2000
+	maxWriteEntries          = 400
+	maxQueryAccounts         = 200
+	maxModelIDs              = 200
+	maxSnapshotsPerQuery     = 2000
+	maxQuotaDisplayNameRunes = 256
 	// Codex fixed-window reset timestamps can move by a few seconds between
 	// responses. Keep that transport jitter inside one canonical provider cycle.
 	derivedFixedBoundaryJitterMS = int64(60 * 1000)
@@ -68,6 +69,7 @@ type WindowInput struct {
 	ProviderWindowAliases []string      `json:"provider_window_aliases,omitempty"`
 	WindowKind            string        `json:"window_kind"`
 	WindowMode            string        `json:"window_mode"`
+	ScopeDisplayName      string        `json:"scope_display_name,omitempty"`
 	ModelScopeKind        string        `json:"model_scope_kind"`
 	ModelScopeKey         string        `json:"model_scope_key,omitempty"`
 	ModelIDs              []string      `json:"model_ids,omitempty"`
@@ -153,6 +155,7 @@ type Window struct {
 	ProviderWindowAliases []string               `json:"provider_window_aliases,omitempty"`
 	WindowKind            string                 `json:"window_kind"`
 	WindowMode            string                 `json:"window_mode"`
+	ScopeDisplayName      string                 `json:"scope_display_name,omitempty"`
 	ModelScopeKind        string                 `json:"model_scope_kind"`
 	ModelScopeKey         string                 `json:"model_scope_key,omitempty"`
 	ModelIDs              []string               `json:"model_ids,omitempty"`
@@ -690,6 +693,7 @@ func normalizeWindowInput(accountKey, provider string, input WindowInput, nowMS 
 	if observedAtMS > observationFutureLimitMS(nowMS) {
 		return model.AccountQuotaSnapshot{}, errors.New("observed_at_ms is too far in the future")
 	}
+	scopeDisplayName := normalizeQuotaDisplayName(input.ScopeDisplayName)
 	cycleStart, cycleEnd, duration, err := normalizeBoundaries(mode, accuracy, input.CycleStartMS, input.CycleEndMS, input.DurationSeconds)
 	if err != nil {
 		return model.AccountQuotaSnapshot{}, err
@@ -784,7 +788,8 @@ func normalizeWindowInput(accountKey, provider string, input WindowInput, nowMS 
 		AccountKey: accountKey, Provider: provider, ProviderWindowID: providerWindowID,
 		ProviderWindowAliases: providerWindowAliases,
 		WindowKind:            strings.TrimSpace(input.WindowKind), WindowMode: mode,
-		ModelScopeKind: scopeKind, ModelScopeKey: scopeKey,
+		ScopeDisplayName: scopeDisplayName,
+		ModelScopeKind:   scopeKind, ModelScopeKey: scopeKey,
 		ModelIDsJSON: modelIDsJSON, ScopeFingerprint: scopeFingerprint, Source: source,
 		SourceObservationID: sourceObservationID, ObservedAtMS: observedAtMS,
 		BoundaryAccuracy: accuracy, CycleStartMS: cycleStart, CycleEndMS: cycleEnd,
@@ -920,6 +925,7 @@ func selectWindows(
 			applySnapshotBoundary(&selected, boundary)
 			boundarySource = boundary
 		}
+		selected.ScopeDisplayName = selectScopeDisplayName(selected, group)
 		window := snapshotWindow(selected, isStale(selected, nowMS))
 		window.FieldSources = map[string]FieldSource{
 			"quota": {Source: selected.Source, ObservedAtMS: selected.ObservedAtMS},
@@ -985,6 +991,34 @@ func selectWindows(
 		return result[i].ProviderWindowID < result[j].ProviderWindowID
 	})
 	return result
+}
+
+func selectScopeDisplayName(
+	selected model.AccountQuotaSnapshot,
+	candidates []model.AccountQuotaSnapshot,
+) string {
+	if name := strings.TrimSpace(selected.ScopeDisplayName); name != "" {
+		return name
+	}
+
+	var latestName string
+	var latestObservedAtMS int64
+	var latestID int64
+	hasName := false
+	for _, candidate := range candidates {
+		name := strings.TrimSpace(candidate.ScopeDisplayName)
+		if name == "" {
+			continue
+		}
+		if !hasName || candidate.ObservedAtMS > latestObservedAtMS ||
+			(candidate.ObservedAtMS == latestObservedAtMS && candidate.ID > latestID) {
+			latestName = name
+			latestObservedAtMS = candidate.ObservedAtMS
+			latestID = candidate.ID
+			hasName = true
+		}
+	}
+	return latestName
 }
 
 func mergeLifecycleWindows(
@@ -1247,6 +1281,7 @@ func snapshotWindow(snapshot model.AccountQuotaSnapshot, stale bool) Window {
 		ModelScopeKind:        modelScopeKind,
 		ModelScopeKey:         modelScopeKey,
 		ModelIDs:              modelIDs,
+		ScopeDisplayName:      snapshot.ScopeDisplayName,
 		Source:                snapshot.Source, SourceObservationID: snapshot.SourceObservationID,
 		ObservedAtMS: snapshot.ObservedAtMS, BoundaryAccuracy: snapshot.BoundaryAccuracy,
 		CycleStartMS: snapshot.CycleStartMS, CycleEndMS: snapshot.CycleEndMS,
@@ -1322,6 +1357,18 @@ func normalizeStringList(values []string, limit int) ([]string, error) {
 		return result[i] < result[j]
 	})
 	return result, nil
+}
+
+func normalizeQuotaDisplayName(value string) string {
+	normalized := strings.TrimSpace(string([]rune(value)))
+	if normalized == "" {
+		return ""
+	}
+	runes := []rune(normalized)
+	if len(runes) > maxQuotaDisplayNameRunes {
+		runes = runes[:maxQuotaDisplayNameRunes]
+	}
+	return strings.TrimSpace(string(runes))
 }
 
 func normalizeObservationID(value string) (string, error) {
@@ -1407,6 +1454,7 @@ func snapshotContentHash(snapshot model.AccountQuotaSnapshot) string {
 		ModelScopeKind        string
 		ModelScopeKey         string
 		ModelIDsJSON          string
+		ScopeDisplayName      string
 		ScopeFingerprint      string
 		InventoryScopeKey     string
 		RelationshipKind      string
@@ -1432,6 +1480,7 @@ func snapshotContentHash(snapshot model.AccountQuotaSnapshot) string {
 		ModelScopeKind:        snapshot.ModelScopeKind,
 		ModelScopeKey:         snapshot.ModelScopeKey,
 		ModelIDsJSON:          snapshot.ModelIDsJSON,
+		ScopeDisplayName:      snapshot.ScopeDisplayName,
 		ScopeFingerprint:      snapshot.ScopeFingerprint,
 		InventoryScopeKey:     snapshot.InventoryScopeKey,
 		RelationshipKind:      snapshot.RelationshipKind,

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/codexquota"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
@@ -42,6 +43,165 @@ func quotaSnapshotTestAccount() AccountTarget {
 		AuthProviderSnapshot: "codex",
 		AuthIndex:            "auth-1",
 		AccountSnapshot:      "user@example.com",
+	}
+}
+
+func claudeQuotaSnapshotTestAccount() AccountTarget {
+	return AccountTarget{
+		AuthFileSnapshot:     "claude.json",
+		AuthProviderSnapshot: "claude",
+		AuthIndex:            "auth-1",
+		AccountSnapshot:      "user@example.com",
+	}
+}
+
+func claudeScopedWindowInput(name string, observedAtMS int64) WindowInput {
+	return WindowInput{
+		ProviderWindowID: "weekly-scoped-demo",
+		WindowKind:       "weekly",
+		WindowMode:       "unknown",
+		ScopeDisplayName: name,
+		ModelScopeKind:   "feature",
+		ModelScopeKey:    "scope_unknown",
+		Source:           "api_query",
+		ObservedAtMS:     observedAtMS,
+		BoundaryAccuracy: "unknown",
+	}
+}
+
+func TestScopeDisplayNameWriteQueryAndNormalization(t *testing.T) {
+	service := newQuotaSnapshotTestService(t, 100_000)
+	_, err := service.Write(context.Background(), WriteRequest{Entries: []WriteEntry{{
+		Provider: "claude", Account: claudeQuotaSnapshotTestAccount(),
+		Windows: []WindowInput{claudeScopedWindowInput("  Demo Model A  ", 10_000)},
+	}}})
+	if err != nil {
+		t.Fatalf("write scoped quota snapshot: %v", err)
+	}
+
+	result, err := service.Query(context.Background(), QueryRequest{Accounts: []QueryAccount{{
+		RowKey: "claude-row", Provider: "claude", Account: claudeQuotaSnapshotTestAccount(),
+	}}})
+	if err != nil {
+		t.Fatalf("query scoped quota snapshot: %v", err)
+	}
+	if len(result.Items) != 1 || len(result.Items[0].Windows) != 1 {
+		t.Fatalf("query result = %#v", result)
+	}
+	if got := result.Items[0].Windows[0].ScopeDisplayName; got != "Demo Model A" {
+		t.Fatalf("scope display name = %q, want Demo Model A", got)
+	}
+
+	base := claudeScopedWindowInput("", 10_000)
+	for _, test := range []struct {
+		name  string
+		input string
+		want  string
+		runes int
+	}{
+		{name: "empty", input: "    ", want: ""},
+		{name: "unicode", input: "  Claude 模型 日本語 😀  ", want: "Claude 模型 日本語 😀"},
+		{name: "length bound", input: strings.Repeat("界", maxQuotaDisplayNameRunes+10), runes: maxQuotaDisplayNameRunes},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			input := base
+			input.ScopeDisplayName = test.input
+			snapshot, err := normalizeWindowInput("account", "claude", input, 100_000)
+			if err != nil {
+				t.Fatalf("normalize display name: %v", err)
+			}
+			if test.runes > 0 {
+				if got := utf8.RuneCountInString(snapshot.ScopeDisplayName); got != test.runes {
+					t.Fatalf("rune count = %d, want %d", got, test.runes)
+				}
+				if !utf8.ValidString(snapshot.ScopeDisplayName) {
+					t.Fatal("normalized display name is not valid UTF-8")
+				}
+				return
+			}
+			if snapshot.ScopeDisplayName != test.want {
+				t.Fatalf("normalized display name = %q, want %q", snapshot.ScopeDisplayName, test.want)
+			}
+		})
+	}
+}
+
+func TestScopeDisplayNameChangesContentHashWithoutChangingIdentity(t *testing.T) {
+	base := model.AccountQuotaSnapshot{
+		ProviderWindowID: "weekly-scoped-demo",
+		WindowKind:       "weekly",
+		WindowMode:       "unknown",
+		ModelScopeKind:   "feature",
+		ModelScopeKey:    "scope_unknown",
+		Source:           "api_query",
+		BoundaryAccuracy: "unknown",
+	}
+	base.ScopeFingerprint = quotasnapshotrepo.ScopeFingerprint(
+		base.ModelScopeKind, base.ModelScopeKey, nil,
+	)
+	first := base
+	first.ScopeDisplayName = "Model A"
+	second := base
+	second.ScopeDisplayName = "Model B"
+
+	if snapshotContentHash(first) == snapshotContentHash(second) {
+		t.Fatal("display name change did not change snapshot content hash")
+	}
+	if first.ScopeFingerprint != second.ScopeFingerprint {
+		t.Fatalf("display name changed scope fingerprint: %q != %q", first.ScopeFingerprint, second.ScopeFingerprint)
+	}
+}
+
+func TestScopeDisplayNameKeepsLifecycleIdentityAndCandidateFallback(t *testing.T) {
+	service := newQuotaSnapshotTestService(t, 100_000)
+	account := claudeQuotaSnapshotTestAccount()
+	write := func(name string, observedAtMS int64) {
+		t.Helper()
+		if _, err := service.Write(context.Background(), WriteRequest{Entries: []WriteEntry{{
+			Provider: "claude", Account: account,
+			Windows: []WindowInput{claudeScopedWindowInput(name, observedAtMS)},
+		}}}); err != nil {
+			t.Fatalf("write %q snapshot: %v", name, err)
+		}
+	}
+	query := func() Window {
+		t.Helper()
+		result, err := service.Query(context.Background(), QueryRequest{Accounts: []QueryAccount{{
+			RowKey: "claude-row", Provider: "claude", Account: account,
+		}}})
+		if err != nil {
+			t.Fatalf("query snapshots: %v", err)
+		}
+		if len(result.Items) != 1 || len(result.Items[0].Windows) != 1 {
+			t.Fatalf("query result = %#v", result)
+		}
+		return result.Items[0].Windows[0]
+	}
+
+	write("Model A", 10_000)
+	first := query()
+	if first.ScopeDisplayName != "Model A" {
+		t.Fatalf("first display name = %q", first.ScopeDisplayName)
+	}
+
+	write("", 20_000)
+	withFallback := query()
+	if withFallback.ScopeDisplayName != "Model A" {
+		t.Fatalf("candidate display fallback = %q, want Model A", withFallback.ScopeDisplayName)
+	}
+	if withFallback.LogicalWindowID != first.LogicalWindowID ||
+		withFallback.ActivationGeneration != first.ActivationGeneration {
+		t.Fatalf("empty-name observation changed lifecycle identity: first=%#v current=%#v", first, withFallback)
+	}
+
+	write("Model B", 30_000)
+	newer := query()
+	if newer.ScopeDisplayName != "Model B" {
+		t.Fatalf("newer display name = %q, want Model B", newer.ScopeDisplayName)
+	}
+	if newer.LogicalWindowID != first.LogicalWindowID ||
+		newer.ActivationGeneration != first.ActivationGeneration {
+		t.Fatalf("renamed quota changed lifecycle identity: first=%#v newer=%#v", first, newer)
 	}
 }
 
