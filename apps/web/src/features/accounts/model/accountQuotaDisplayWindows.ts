@@ -428,6 +428,7 @@ const buildCodexQuotaDisplayWindows = (
       resetAccuracy: window.resetAccuracy,
       limitWindowSeconds: window.limitWindowSeconds ?? null,
       modelScope: window.modelScope ?? inferCodexQuotaScopeFromProviderWindowId(window.id),
+      scopeDisplayName: window.scopeDisplayName,
       providerWindowAliases: window.providerWindowAliases,
       source: 'codex',
       observationSource:

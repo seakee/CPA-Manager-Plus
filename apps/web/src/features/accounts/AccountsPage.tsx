@@ -4574,6 +4574,7 @@ export function AccountsPage() {
           quotaSnapshotWindowsByRowKey.get(rowKey) ?? [],
           {
             provider,
+            t,
             getLabel: (snapshot) => {
               const kind = snapshot.window_kind;
               if (kind === 'rolling_24h') {
@@ -5293,7 +5294,7 @@ export function AccountsPage() {
             featureAvailability.managerServiceBase,
             managementKey,
             queryAccounts,
-            { includeInactive: true },
+            { includeInactive: false },
             controller.signal
           );
           if (!isCurrentRequest()) return;
@@ -5309,7 +5310,21 @@ export function AccountsPage() {
             const mergedDefinitions = mergeAccountQuotaSnapshotWindows(
               localDefinitions,
               snapshotWindows,
-              { provider: selectedRow.provider }
+              {
+                provider: selectedRow.provider,
+                t,
+                getLabel: (snapshot) => {
+                  const kind = snapshot.window_kind;
+                  if (kind === 'rolling_24h') {
+                    return t('accounts.detail_snapshot_window_rolling_24h');
+                  }
+                  if (kind === 'five_hour') return t('accounts.detail_snapshot_window_five_hour');
+                  if (kind === 'daily') return t('accounts.detail_snapshot_window_daily');
+                  if (kind === 'weekly') return t('accounts.detail_snapshot_window_weekly');
+                  if (kind === 'monthly') return t('accounts.detail_snapshot_window_monthly');
+                  return snapshot.provider_window_id;
+                },
+              }
             );
             entries = buildAccountWindowUsageTargetEntries(
               [selectedRow],

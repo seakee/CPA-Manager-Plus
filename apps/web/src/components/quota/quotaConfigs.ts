@@ -209,6 +209,9 @@ const mergeCodexQuotaWindow = (
       ? { observedAtMs: observedWindow.observedAtMs }
       : {}),
     ...(observedWindow.modelScope ? { modelScope: observedWindow.modelScope } : {}),
+    ...(hasObservedValue(observedWindow.scopeDisplayName)
+      ? { scopeDisplayName: observedWindow.scopeDisplayName?.trim() }
+      : {}),
     ...(observedWindow.providerWindowAliases
       ? { providerWindowAliases: observedWindow.providerWindowAliases }
       : {}),

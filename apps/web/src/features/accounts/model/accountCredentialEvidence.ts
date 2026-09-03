@@ -151,6 +151,7 @@ const buildInspectionQuotaWindows = (inspection: AccountInspectionSummary): Code
       observationSource: 'inspection' as const,
       observedAtMs,
       modelScope: window.modelScope ?? inferCodexQuotaScopeFromProviderWindowId(id),
+      scopeDisplayName: window.scopeDisplayName,
       providerWindowAliases: window.providerWindowAliases,
     };
   });

@@ -356,6 +356,7 @@ export const buildCodexQuotaWindows = (
       label: t(window.labelKey, window.labelParams),
       labelKey: window.labelKey,
       labelParams: window.labelParams,
+      scopeDisplayName: window.scopeDisplayName,
       usedPercent: window.usedPercent,
       resetLabel: window.resetLabel,
       resetAtMs: window.resetAtMs,

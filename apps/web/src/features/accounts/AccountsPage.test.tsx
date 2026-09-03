@@ -12110,7 +12110,7 @@ describe('AccountsPage replacement flows', () => {
     ]);
     const queryCalls = vi.mocked(accountQuotaSnapshotApi.query).mock.calls;
     expect(queryCalls[queryCalls.length - 1]?.[3]).toEqual({
-      includeInactive: true,
+      includeInactive: false,
     });
   });
 

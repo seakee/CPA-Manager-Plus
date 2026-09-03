@@ -1,3 +1,4 @@
+import type { TFunction } from 'i18next';
 import type { CodexQuotaState, QuotaModelScope } from '@/types';
 import type {
   AccountQuotaSnapshotCycle,
@@ -27,6 +28,7 @@ import {
   isCodexLegacyAllScopeReplacement,
   isCodexMainProviderWindowId,
   inferCodexQuotaScopeFromProviderWindowId,
+  resolveCodexSnapshotQuotaLabel,
 } from '@/utils/quota/codexQuota';
 
 const INCOMPLETE_MODEL_SCOPE_KIND = 'feature';
@@ -433,6 +435,7 @@ export const mergeAccountQuotaSnapshotWindows = (
   options: {
     provider?: string;
     getLabel?: (snapshot: AccountQuotaSnapshotWindow) => string;
+    t?: TFunction;
   } = {}
 ): AccountQuotaWindowDefinition[] => {
   const canonicalProviderWindowId = (
@@ -710,6 +713,43 @@ const snapshotResetAccuracy = (
   return 'unknown';
 };
 
+type SnapshotLabelOptions = {
+  provider?: string;
+  getLabel?: (snapshot: AccountQuotaSnapshotWindow) => string;
+  t?: TFunction;
+};
+
+const resolveSnapshotQuotaLabel = (
+  snapshot: AccountQuotaSnapshotWindow,
+  options: SnapshotLabelOptions,
+  modelScope: QuotaModelScope,
+  durationSeconds: number | null
+): string => {
+  const scopeDisplayName = snapshot.scope_display_name?.trim() || undefined;
+
+  if (options.provider === 'claude' && scopeDisplayName) return scopeDisplayName;
+
+  if (options.provider === 'codex') {
+    const metadata = resolveCodexSnapshotQuotaLabel({
+      providerWindowId: snapshot.provider_window_id,
+      windowKind: snapshot.window_kind,
+      modelScope,
+      scopeDisplayName,
+      durationSeconds,
+    });
+    if (metadata) {
+      if (options.t) {
+        return options.t(metadata.labelKey, metadata.labelParams);
+      }
+      if (scopeDisplayName) return scopeDisplayName;
+    }
+  } else if (scopeDisplayName) {
+    return scopeDisplayName;
+  }
+
+  return options.getLabel?.(snapshot) ?? snapshot.provider_window_id;
+};
+
 const definitionSortRank = (definition: AccountQuotaWindowDefinition): number => {
   if (definition.windowMode === 'non_window' || definition.windowMode === 'unknown') {
     return Number.MAX_SAFE_INTEGER;
@@ -719,10 +759,7 @@ const definitionSortRank = (definition: AccountQuotaWindowDefinition): number =>
 
 const snapshotDefinition = (
   snapshot: AccountQuotaSnapshotWindow,
-  options: {
-    provider?: string;
-    getLabel?: (snapshot: AccountQuotaSnapshotWindow) => string;
-  },
+  options: SnapshotLabelOptions,
   key: string
 ): AccountQuotaWindowDefinition => {
   const provider: AccountQuotaWindowSource =
@@ -741,7 +778,7 @@ const snapshotDefinition = (
     lifecycle.currentCycle?.durationSeconds ?? snapshot.duration_seconds ?? null;
   const modelScope = snapshotModelScope(snapshot);
   const scopeDisplayName = snapshot.scope_display_name?.trim() || undefined;
-  const label = scopeDisplayName ?? options.getLabel?.(snapshot) ?? snapshot.provider_window_id;
+  const label = resolveSnapshotQuotaLabel(snapshot, options, modelScope, durationSeconds);
   const display: AccountQuotaDisplayWindow = {
     key,
     label,

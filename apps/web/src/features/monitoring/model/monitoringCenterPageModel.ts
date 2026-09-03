@@ -805,6 +805,7 @@ const buildCodexAccountQuotaWindows = (
       resetAccuracy: window.resetAccuracy ?? 'unknown',
       usageLabel,
       modelScope: window.modelScope,
+      scopeDisplayName: window.scopeDisplayName,
       providerWindowAliases: window.providerWindowAliases,
     };
   });
@@ -1604,6 +1605,7 @@ export const buildObservedCodexAccountQuotaEntry = (
     observationSource: 'response_header',
     observedAtMs,
     modelScope: window.modelScope,
+    scopeDisplayName: window.scopeDisplayName,
     providerWindowAliases: window.providerWindowAliases,
   }));
   const fallbackExpired = recoverAtMS !== null && recoverAtMS <= nowMs;

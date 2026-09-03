@@ -1,3 +1,4 @@
+import type { TFunction } from 'i18next';
 import { describe, expect, it } from 'vitest';
 import type { AccountQuotaSnapshotWindow } from '@/services/api/usageService';
 import { CODEX_SPARK_MODEL_ID } from '@/utils/quota/codexQuota';
@@ -79,6 +80,22 @@ const makeSnapshotTestRow = (provider: AccountRow['provider'] = 'antigravity'): 
       account: 'user@example.com',
     },
   }) as unknown as AccountRow;
+
+const codexSnapshotT = ((key: string, options?: Record<string, string | number>) => {
+  const name = options?.name ?? '';
+  const duration = options?.duration ?? '';
+  const labels: Record<string, string> = {
+    'codex_quota.additional_primary_window': `${name} 5-hour limit`,
+    'codex_quota.additional_secondary_window': `${name} weekly limit`,
+    'codex_quota.additional_monthly_window': `${name} monthly limit`,
+    'codex_quota.additional_generic_window': `${name} ${duration} limit`,
+    'codex_quota.code_review_primary_window': 'Code review 5-hour limit',
+    'codex_quota.code_review_secondary_window': 'Code review weekly limit',
+    'codex_quota.code_review_monthly_window': 'Code review monthly limit',
+    'codex_quota.code_review_generic_window': `Code review ${duration} limit`,
+  };
+  return labels[key] ?? key;
+}) as TFunction;
 
 describe('account quota snapshots', () => {
   it('overlays server provenance, boundaries, scope, and stale state', () => {
@@ -401,6 +418,86 @@ describe('account quota snapshots', () => {
     expect(merged).toHaveLength(1);
     expect(merged[0].label).toBe('detail_snapshot_window_weekly');
     expect(merged[0].display.scopeDisplayName).toBeUndefined();
+  });
+
+  it('restores a Codex dynamic Additional Rate Limit with the current locale label', () => {
+    const snapshot = makeSnapshot({
+      provider_window_id: 'gpt-reserve-weekly-0',
+      window_kind: 'weekly',
+      model_scope_kind: 'feature',
+      model_scope_key: 'gpt_reserve',
+      scope_display_name: 'gpt-reserve',
+    });
+    const merged = mergeAccountQuotaSnapshotWindows([], [snapshot], {
+      provider: 'codex',
+      t: codexSnapshotT,
+      getLabel: () => 'detail_snapshot_window_weekly',
+    });
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({
+      label: 'gpt-reserve weekly limit',
+      display: { label: 'gpt-reserve weekly limit', scopeDisplayName: 'gpt-reserve' },
+    });
+  });
+
+  it('restores Codex canonical Code Review and Spark labels without persisted translations', () => {
+    const codeReview = mergeAccountQuotaSnapshotWindows(
+      [],
+      [
+        makeSnapshot({
+          provider_window_id: 'code-review-weekly',
+          window_kind: 'weekly',
+          model_scope_kind: 'feature',
+          model_scope_key: 'code_review',
+          scope_display_name: undefined,
+        }),
+      ],
+      { provider: 'codex', t: codexSnapshotT }
+    );
+    const spark = mergeAccountQuotaSnapshotWindows(
+      [],
+      [
+        makeSnapshot({
+          provider_window_id: 'spark-weekly-0',
+          window_kind: 'weekly',
+          model_scope_kind: 'models',
+          model_ids: [CODEX_SPARK_MODEL_ID],
+          scope_display_name: undefined,
+        }),
+      ],
+      { provider: 'codex', t: codexSnapshotT }
+    );
+
+    expect(codeReview[0]?.label).toBe('Code review weekly limit');
+    expect(spark[0]?.label).toBe('Spark weekly limit');
+  });
+
+  it('rebuilds a dynamic Codex label from the same raw snapshot name in another locale', () => {
+    const snapshot = makeSnapshot({
+      provider_window_id: 'gpt-reserve-weekly-0',
+      window_kind: 'weekly',
+      model_scope_kind: 'feature',
+      model_scope_key: 'gpt_reserve',
+      scope_display_name: 'gpt-reserve',
+    });
+    const english = mergeAccountQuotaSnapshotWindows([], [snapshot], {
+      provider: 'codex',
+      t: codexSnapshotT,
+    });
+    const chineseT = ((key: string, options?: Record<string, string | number>) =>
+      key === 'codex_quota.additional_secondary_window'
+        ? `${options?.name ?? ''} 周限额`
+        : key) as TFunction;
+    const chinese = mergeAccountQuotaSnapshotWindows([], [snapshot], {
+      provider: 'codex',
+      t: chineseT,
+    });
+
+    expect(english[0]?.label).toBe('gpt-reserve weekly limit');
+    expect(chinese[0]?.label).toBe('gpt-reserve 周限额');
+    expect(english[0]?.display.scopeDisplayName).toBe('gpt-reserve');
+    expect(chinese[0]?.display.scopeDisplayName).toBe('gpt-reserve');
   });
 
   it('keeps the live definition label ahead of an older snapshot display name', () => {

@@ -333,7 +333,33 @@ describe('buildCodexQuotaWindowInfos', () => {
         id: 'code-review-premium-weekly-0',
         labelKey: 'codex_quota.additional_secondary_window',
         labelParams: { name: 'Code Review Premium' },
+        scopeDisplayName: 'Code Review Premium',
         usedPercent: 55,
+      },
+    ]);
+  });
+
+  it('keeps a dynamic Additional Rate Limit name separate from its localized label', () => {
+    const windows = buildCodexQuotaWindowInfos({
+      additional_rate_limits: [
+        {
+          limit_name: 'gpt-reserve',
+          rate_limit: {
+            secondary_window: {
+              used_percent: 25,
+              limit_window_seconds: 604_800,
+            },
+          },
+        },
+      ],
+    });
+
+    expect(windows).toMatchObject([
+      {
+        id: 'gpt-reserve-weekly-0',
+        labelKey: 'codex_quota.additional_secondary_window',
+        labelParams: { name: 'gpt-reserve' },
+        scopeDisplayName: 'gpt-reserve',
       },
     ]);
   });
@@ -377,6 +403,8 @@ describe('buildCodexQuotaWindowInfos', () => {
       complete: true,
     });
     expect(byId.get('spark-weekly-0')?.providerWindowAliases).toContain('codex-spark-weekly-0');
+    expect(byId.get('spark-weekly-0')?.scopeDisplayName).toBeUndefined();
+    expect(byId.get('weekly')?.scopeDisplayName).toBeUndefined();
     expect(byId.get('code-review-weekly')?.modelScope).toEqual({
       kind: 'feature',
       key: CODEX_CODE_REVIEW_SCOPE_KEY,

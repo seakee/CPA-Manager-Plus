@@ -643,6 +643,7 @@ export function toServerResultItem(
       resetAccuracy: window.resetAccuracy,
       limitWindowSeconds: window.limitWindowSeconds ?? null,
       modelScope: window.modelScope,
+      scopeDisplayName: window.scopeDisplayName,
       providerWindowAliases: window.providerWindowAliases,
     })),
     quotaInventoryObserved: item.quotaInventoryObserved,

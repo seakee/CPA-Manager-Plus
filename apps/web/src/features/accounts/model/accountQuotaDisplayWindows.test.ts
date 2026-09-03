@@ -36,6 +36,9 @@ const t = ((key: string, options?: Record<string, string | number>) => {
     'xai_quota.monthly_credits': 'Monthly credits',
     'xai_quota.pay_as_you_go_label': 'Pay-as-you-go',
     'xai_quota.usage_amount': `${options?.remaining ?? '--'} / ${options?.limit ?? '--'} remaining`,
+    'codex_quota.additional_primary_window': `${options?.name ?? ''} 5-hour limit`,
+    'codex_quota.additional_secondary_window': `${options?.name ?? ''} weekly limit`,
+    'codex_quota.additional_monthly_window': `${options?.name ?? ''} monthly limit`,
     'accounts.col_quota': 'Quota',
   };
   return translations[key] ?? key;
@@ -226,6 +229,39 @@ describe('accountQuotaDisplayWindows', () => {
     expect(windows[0].fromMs).toBe(Date.parse('2026-07-09T09:00:00Z'));
     expect(windows[0].toMs).toBe(Date.parse('2026-07-09T12:00:00Z'));
     expect(getQuotaWindowShortLabel(windows[0])).toBe('5H');
+  });
+
+  it('preserves the raw display name for a dynamic Codex additional quota', () => {
+    const quota: CodexQuotaState = {
+      status: 'success',
+      windows: [
+        {
+          id: 'gpt-reserve-weekly-0',
+          label: 'gpt-reserve weekly limit',
+          labelKey: 'codex_quota.additional_secondary_window',
+          labelParams: { name: 'gpt-reserve' },
+          scopeDisplayName: 'gpt-reserve',
+          usedPercent: 25,
+          resetLabel: '-',
+          limitWindowSeconds: 604_800,
+          modelScope: { kind: 'feature', key: 'gpt_reserve', complete: false },
+        },
+      ],
+    };
+    const row = buildRow({ name: 'codex.json', type: 'codex', authIndex: '1' });
+
+    const [window] = buildAccountQuotaDisplayWindows(row, {
+      stores: emptyStores(),
+      getDisplayCodexQuota: () => quota,
+      translateQuotaWindowLabel,
+      t,
+    });
+
+    expect(window).toMatchObject({
+      label: 'gpt-reserve weekly limit',
+      scopeDisplayName: 'gpt-reserve',
+      modelScope: { kind: 'feature', key: 'gpt_reserve', complete: false },
+    });
   });
 
   it('maps Claude quota windows through translated labels', () => {
