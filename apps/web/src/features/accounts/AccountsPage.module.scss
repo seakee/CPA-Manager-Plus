@@ -1055,6 +1055,34 @@
   white-space: nowrap;
 }
 
+.quotaWindowPrimaryLineScoped {
+  --quota-window-label-width: 84px;
+}
+
+.quotaWindowSummaryScoped {
+  justify-content: flex-start;
+  gap: 3px;
+  padding-inline: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quotaWindowSummaryScoped > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quotaWindowSummaryScoped > span:last-child {
+  flex-shrink: 0;
+}
+
+.quotaWindowScopeLabel {
+  flex-shrink: 1;
+}
+
 .quotaWindowPercent {
   color: var(--text-primary);
   font-size: 12px;
@@ -1127,6 +1155,7 @@
 }
 
 .quotaMatrixTrack {
+  display: block;
   height: 4px;
   min-width: 0;
 }
@@ -1137,6 +1166,43 @@
   font-weight: 850;
   line-height: 1;
   text-align: right;
+}
+
+@media (min-width: #{$breakpoint-tablet + 1}) and (max-width: 1535px) {
+  .quotaWindowPrimaryLineScoped {
+    --quota-window-label-width: 64px;
+    gap: 6px;
+  }
+
+  .quotaWindowSummaryScoped {
+    gap: 2px;
+    padding-inline: 4px;
+  }
+
+  .quotaMatrixRow {
+    grid-template-columns: 28px minmax(0, 1fr);
+    gap: 4px;
+  }
+
+  .quotaMatrixWindowLabel {
+    width: 28px;
+    min-width: 28px;
+    font-size: 9px;
+  }
+
+  .quotaMatrixCells {
+    gap: 4px;
+  }
+
+  .quotaMatrixCell {
+    grid-template-columns: 35px minmax(0, 1fr) 26px;
+    gap: 3px;
+  }
+
+  .quotaMatrixGroupLabel,
+  .quotaMatrixPercent {
+    font-size: 9.5px;
+  }
 }
 
 .providerPill,

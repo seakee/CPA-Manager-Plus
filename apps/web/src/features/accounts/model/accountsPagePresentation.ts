@@ -281,6 +281,67 @@ export const quotaStatusLabelKey = (status: AccountRow['quota']['status']) => {
   }
 };
 
+export type AccountQuotaLifecycleBarOverride = 'bad' | 'neutral' | null;
+
+export const getAccountQuotaLifecycleBarOverride = (
+  status: AccountRow['quota']['status']
+): AccountQuotaLifecycleBarOverride => {
+  switch (status) {
+    case 'error':
+      return 'bad';
+    case 'loading':
+    case 'disabled':
+    case 'unknown':
+      return 'neutral';
+    case 'ok':
+    case 'low':
+    case 'exhausted':
+    default:
+      return null;
+  }
+};
+
+const selectXaiQuotaListFallbackWindows = (
+  windows: AccountQuotaDisplayWindow[]
+): AccountQuotaDisplayWindow[] => {
+  const billing =
+    windows.find((window) => window.source === 'xai' && window.key === 'billing') ??
+    windows.find(
+      (window) =>
+        window.source === 'xai' && window.key === 'credits-period' && window.kind === 'billing'
+    );
+  const payg = windows.find((window) => window.source === 'xai' && window.key === 'pay-as-you-go');
+
+  return [billing, payg].filter((window): window is AccountQuotaDisplayWindow => Boolean(window));
+};
+
+export const selectAccountQuotaListWindows = (
+  row: AccountRow,
+  quotaWindows: AccountQuotaDisplayWindow[],
+  standardQuotaWindows: AccountQuotaDisplayWindow[]
+): AccountQuotaDisplayWindow[] => {
+  if (standardQuotaWindows.length > 0) return standardQuotaWindows;
+
+  switch (row.provider) {
+    case 'codex':
+      return [];
+    case 'xai':
+      return selectXaiQuotaListFallbackWindows(quotaWindows);
+    case 'antigravity':
+      return quotaWindows.slice(0, 2);
+    case 'kimi': {
+      const summary = quotaWindows.find(
+        (window) => window.source === 'kimi' && window.key === 'summary'
+      );
+      return summary ? [summary] : [];
+    }
+    case 'claude':
+      return [];
+    default:
+      return [];
+  }
+};
+
 const getAntigravityGroupRank = (label: string) => {
   const normalized = label.toLowerCase();
   if (normalized.includes('claude') || normalized.includes('gpt')) return 0;
@@ -293,6 +354,15 @@ const getAntigravityMatrixGroupDisplayLabel = (label: string) => {
   if (normalized.includes('claude') || normalized.includes('gpt')) return 'Claude';
   if (normalized.includes('gemini')) return 'Gemini';
   return label;
+};
+
+export const getAccountQuotaFallbackVisibleScopeLabel = (
+  row: AccountRow,
+  window: AccountQuotaDisplayWindow
+): string | null => {
+  if (row.provider !== ANTIGRAVITY_CONFIG.type || window.source !== 'antigravity') return null;
+  const groupLabel = window.groupLabel?.trim();
+  return groupLabel ? getAntigravityMatrixGroupDisplayLabel(groupLabel) : null;
 };
 
 export const buildAntigravityQuotaMatrix = (

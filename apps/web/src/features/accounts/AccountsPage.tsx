@@ -190,17 +190,22 @@ import {
   DETAIL_EVENTS_LIMIT,
   DETAIL_EVENTS_RANGE_MS,
   PAGE_SIZE_OPTIONS,
+  buildAntigravityQuotaMatrix,
   formatHistoryNumber,
   formatHistorySuccessRate,
   formatPercent,
   formatQuotaResetDisplay,
   formatQuotaResetTooltipParams,
+  getAccountQuotaLifecycleBarOverride,
+  getAccountQuotaFallbackVisibleScopeLabel,
   getAccountHistoryTitle,
   getAccountSortFieldOption,
   getProviderLabel,
   parsePriorityValue,
+  selectAccountQuotaListWindows,
   toAuthFileCodexInspectionSnapshot,
   type AccountSortFieldValue,
+  type AccountQuotaLifecycleBarOverride,
   type AccountsView,
   type DetailTab,
 } from '@/features/accounts/model/accountsPagePresentation';
@@ -269,6 +274,7 @@ import {
   AccountModelsTab,
   AccountOverviewTab,
   AccountProviderTabs,
+  AccountQuotaMatrix,
   AccountQuotaTab,
   AccountsBatchDeletePreview,
 } from '@/features/accounts/components';
@@ -1099,6 +1105,22 @@ const getRemainingBarClass = (row: AccountRow) => {
   if (row.quota.status === 'low') return styles.quotaBarWarn;
   if (row.quota.status === 'ok') return styles.quotaBarGood;
   return styles.quotaBarNeutral;
+};
+
+const getWindowRemainingBarClass = (remainingPercent: number | null) => {
+  if (remainingPercent === null) return styles.quotaBarNeutral;
+  if (remainingPercent <= 0) return styles.quotaBarBad;
+  if (remainingPercent < 20) return styles.quotaBarWarn;
+  return styles.quotaBarGood;
+};
+
+const getFallbackWindowBarClass = (
+  lifecycleBarOverride: AccountQuotaLifecycleBarOverride,
+  remainingPercent: number | null
+) => {
+  if (lifecycleBarOverride === 'bad') return styles.quotaBarBad;
+  if (lifecycleBarOverride === 'neutral') return styles.quotaBarNeutral;
+  return getWindowRemainingBarClass(remainingPercent);
 };
 
 export function AccountsPage() {
@@ -7165,6 +7187,15 @@ export function AccountsPage() {
             const quotaWindows =
               quotaDisplayWindowsByRowKey.get(row.selectionKey) ?? buildQuotaDisplayWindows(row);
             const standardQuotaWindows = quotaWindows.filter(isStandardAccountQuotaListWindow);
+            const antigravityQuotaMatrix = buildAntigravityQuotaMatrix(row, quotaWindows);
+            const quotaLifecycleBarOverride = getAccountQuotaLifecycleBarOverride(row.quota.status);
+            const displayQuotaWindows = antigravityQuotaMatrix
+              ? []
+              : selectAccountQuotaListWindows(row, quotaWindows, standardQuotaWindows);
+            const usesFallbackQuotaPresentation =
+              !antigravityQuotaMatrix &&
+              standardQuotaWindows.length === 0 &&
+              displayQuotaWindows.length > 0;
             const quotaCooldown = quotaCooldownsByRowKey.get(row.selectionKey)?.[0] ?? null;
             const codexStatus = codexStatusBySelectionKey.get(row.selectionKey) ?? null;
             const item = buildAccountListItem(row, {
@@ -7180,14 +7211,28 @@ export function AccountsPage() {
                 ? t('accounts.quota_details_only')
                 : t('accounts.quota_source_none');
             const quotaWindowTitle =
-              standardQuotaWindows
+              antigravityQuotaMatrix?.rows
+                .flatMap((matrixRow) =>
+                  matrixRow.cells.map(
+                    (cell) =>
+                      `${cell.displayLabel} ${matrixRow.label} ${formatPercent(cell.window.remainingPercent)}`
+                  )
+                )
+                .join(' · ') ||
+              displayQuotaWindows
                 .map((window) => {
-                  const label = window.groupLabel
-                    ? `${window.groupLabel} ${window.label}`
-                    : window.label;
+                  const visibleScopeLabel = usesFallbackQuotaPresentation
+                    ? getAccountQuotaFallbackVisibleScopeLabel(row, window)
+                    : null;
+                  const label = visibleScopeLabel
+                    ? `${visibleScopeLabel} · ${window.label}`
+                    : window.groupLabel
+                      ? `${window.groupLabel} ${window.label}`
+                      : window.label;
                   return `${label}: ${formatPercent(window.remainingPercent)}`;
                 })
-                .join('\n') || quotaEmptyLabel;
+                .join('\n') ||
+              quotaEmptyLabel;
             const healthTitle = t(
               item.health.tooltipKey,
               formatQuotaResetTooltipParams(
@@ -7428,8 +7473,14 @@ export function AccountsPage() {
                   onOpen: () => void openAccountDetail(row, 'quota'),
                   children: (
                     <span className={styles.quotaWindowGrid} title={quotaWindowTitle}>
-                      {standardQuotaWindows.length > 0 ? (
-                        standardQuotaWindows.map((window) => {
+                      {antigravityQuotaMatrix ? (
+                        <AccountQuotaMatrix
+                          accountKey={row.selectionKey}
+                          matrix={antigravityQuotaMatrix}
+                          lifecycleBarOverride={quotaLifecycleBarOverride}
+                        />
+                      ) : displayQuotaWindows.length > 0 ? (
+                        displayQuotaWindows.map((window) => {
                           const windowRemaining = window.remainingPercent;
                           const windowWidth = Math.max(0, Math.min(100, windowRemaining ?? 0));
                           const resetLabel =
@@ -7440,19 +7491,43 @@ export function AccountsPage() {
                             i18n.language
                           );
                           const shortLabel = getQuotaWindowShortLabel(window);
+                          const visibleScopeLabel = usesFallbackQuotaPresentation
+                            ? getAccountQuotaFallbackVisibleScopeLabel(row, window)
+                            : null;
+                          const quotaWindowLabel = visibleScopeLabel
+                            ? `${visibleScopeLabel} · ${window.label}`
+                            : window.label;
+                          const barClass = usesFallbackQuotaPresentation
+                            ? getFallbackWindowBarClass(quotaLifecycleBarOverride, windowRemaining)
+                            : getRemainingBarClass(row);
                           return (
                             <span
                               key={window.key}
                               className={styles.quotaWindowCard}
-                              title={`${window.label}: ${formatPercent(windowRemaining)}`}
+                              data-account-quota-window={window.key}
+                              title={`${quotaWindowLabel}: ${formatPercent(windowRemaining)}`}
                             >
-                              <span className={styles.quotaWindowPrimaryLine}>
-                                <span className={styles.quotaWindowSummary} title={window.label}>
-                                  {shortLabel}
+                              <span
+                                className={`${styles.quotaWindowPrimaryLine} ${
+                                  visibleScopeLabel ? styles.quotaWindowPrimaryLineScoped : ''
+                                }`}
+                              >
+                                <span
+                                  className={`${styles.quotaWindowSummary} ${
+                                    visibleScopeLabel ? styles.quotaWindowSummaryScoped : ''
+                                  }`}
+                                  title={quotaWindowLabel}
+                                >
+                                  {visibleScopeLabel ? (
+                                    <span className={styles.quotaWindowScopeLabel}>
+                                      {visibleScopeLabel} ·
+                                    </span>
+                                  ) : null}
+                                  <span>{shortLabel}</span>
                                 </span>
                                 <span className={styles.quotaTrack} aria-hidden="true">
                                   <span
-                                    className={`${styles.quotaBar} ${getRemainingBarClass(row)}`}
+                                    className={`${styles.quotaBar} ${barClass}`}
                                     style={{ width: `${windowWidth}%` }}
                                   />
                                 </span>

@@ -33,9 +33,7 @@ import {
   getAuthFileSelectionKey,
 } from '@/features/authFiles/model/credentialStatus';
 import type { AuthFilesCredentialMutation } from '@/features/authFiles/hooks/useAuthFilesData';
-import {
-  clearAccountCredentialEvidenceBoundaryStateCache,
-} from './model/accountCredentialEvidenceStorage';
+import { clearAccountCredentialEvidenceBoundaryStateCache } from './model/accountCredentialEvidenceStorage';
 import {
   clearAccountCredentialMutationMarkersForTests,
   createAccountCredentialMutationBaseline,
@@ -43,6 +41,7 @@ import {
   recordAccountCredentialMutationMarker,
 } from './model/accountCredentialMutationMarker';
 import type { CodexQuotaData } from '@/utils/quota/providerRequests';
+import { buildKimiQuotaRows } from '@/utils/quota/builders';
 import type {
   CredentialInspectionSnapshot,
   CredentialInspectionTarget,
@@ -54,6 +53,8 @@ import { AccountOverviewTab } from './components/accountDetail/AccountOverviewTa
 import { AccountQuotaTab } from './components/accountDetail/AccountQuotaTab';
 import { QuotaWindowCard } from './components/QuotaWindowCard';
 import { formatQuotaResetTimestamp } from './model/accountsPagePresentation';
+import { buildAccountQuotaDisplayWindow } from './model/accountQuotaDisplayWindows';
+import type { AccountQuotaDisplayWindow } from './model/accountQuotaDisplayWindows';
 import {
   completeAccountOAuthReauthSession,
   readAccountOAuthReauthSessionId,
@@ -507,6 +508,7 @@ const { mocks } = vi.hoisted(() => {
         if (typeof options.rate === 'string') parts.push(options.rate);
         return parts.length > 0 ? `${key}:${parts.join(':')}` : key;
       },
+      quotaDisplayWindowsOverride: null as AccountQuotaDisplayWindow[] | null,
     },
   };
 });
@@ -603,6 +605,17 @@ vi.mock('@/features/authFiles/hooks/useAuthFilesOauth', () => ({
     handleDeleteAlias: vi.fn(),
   }),
 }));
+vi.mock('@/features/accounts/model/accountQuotaDisplayWindows', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@/features/accounts/model/accountQuotaDisplayWindows')>();
+  return {
+    ...actual,
+    buildAccountQuotaDisplayWindows: (
+      row: Parameters<typeof actual.buildAccountQuotaDisplayWindows>[0],
+      options: Parameters<typeof actual.buildAccountQuotaDisplayWindows>[1]
+    ) => mocks.quotaDisplayWindowsOverride ?? actual.buildAccountQuotaDisplayWindows(row, options),
+  };
+});
 
 vi.mock('@/features/authFiles/hooks/useAuthFilesModels', () => ({
   useAuthFilesModels: () => ({
@@ -878,6 +891,30 @@ const readText = (value: unknown): string => {
     return readText((value as { children?: unknown }).children);
   }
   return '';
+};
+
+const findQuotaBarByWindow = (card: ReactTestInstance, windowKey: string) => {
+  const quotaWindow = card.findByProps({ 'data-account-quota-window': windowKey });
+  const bar = quotaWindow.findAll(
+    (node) =>
+      typeof node.props.className === 'string' &&
+      node.props.className.includes('quotaBar') &&
+      !node.props.className.includes('quotaTrack')
+  )[0];
+  if (!bar) throw new Error(`Quota bar not found: ${windowKey}`);
+  return bar;
+};
+
+const findQuotaBarByMatrixCell = (card: ReactTestInstance, cellKey: string) => {
+  const cell = card.findByProps({ 'data-account-quota-matrix-cell': cellKey });
+  const bar = cell.findAll(
+    (node) =>
+      typeof node.props.className === 'string' &&
+      node.props.className.includes('quotaBar') &&
+      !node.props.className.includes('quotaTrack')
+  )[0];
+  if (!bar) throw new Error(`Matrix quota bar not found: ${cellKey}`);
+  return bar;
 };
 
 const findButtonByText = (renderer: ReactTestRenderer, text: string) => {
@@ -1266,6 +1303,7 @@ describe('AccountsPage replacement flows', () => {
     mocks.quotaState.codexQuota = {};
     mocks.quotaState.kimiQuota = {};
     mocks.quotaState.xaiQuota = {};
+    mocks.quotaDisplayWindowsOverride = null;
     mocks.quotaState.setAntigravityQuota.mockReset();
     mocks.quotaState.setClaudeQuota.mockReset();
     mocks.quotaState.setCodexQuota.mockReset();
@@ -7953,7 +7991,7 @@ describe('AccountsPage replacement flows', () => {
     expect(getAccountListItemTexts(renderer)[0]).toContain('high.json');
   });
 
-  it('keeps xAI billing and pay-as-you-go windows in quota details only', async () => {
+  it('renders xAI monthly billing and pay-as-you-go fallback on account cards', async () => {
     mocks.files = [
       {
         name: 'xai.json',
@@ -7985,11 +8023,12 @@ describe('AccountsPage replacement flows', () => {
     const quotaRegion = findAccountDetailRegion(renderer, selectionKey, 'quota');
     const text = readText(card);
 
-    expect(text).toContain('accounts.quota_details_only');
+    expect(text).not.toContain('accounts.quota_details_only');
     expect(text).not.toContain('accounts.quota_source_none');
-    expect(text).not.toContain('30D');
-    expect(text).not.toContain('PAYG');
-    expect(quotaRegion.props['aria-label']).toContain('accounts.quota_details_only');
+    expect(text).toContain('30D');
+    expect(text).toContain('PAYG');
+    expect(quotaRegion.props['aria-label']).toContain('xai_quota.monthly_credits');
+    expect(quotaRegion.props['aria-label']).toContain('xai_quota.pay_as_you_go_label');
 
     await act(async () => {
       quotaRegion.props.onClick();
@@ -8001,7 +8040,129 @@ describe('AccountsPage replacement flows', () => {
     expect(renderer.root.findAllByProps({ 'data-quota-window-group': 'standard' })).toHaveLength(0);
   });
 
-  it('keeps a fixed xAI billing period in detail standard mode while hiding it from the list', async () => {
+  it('uses each xAI fallback window remaining percent for its quota bar color', async () => {
+    const file = {
+      name: 'xai-divergent-fallback.json',
+      type: 'xai',
+      provider: 'xai',
+      authIndex: 'xai-divergent-fallback-1',
+      account: 'xai-divergent@example.com',
+      priority: 0,
+      disabled: false,
+    } as AuthFileItem;
+    mocks.files = [file];
+    mocks.quotaState.xaiQuota = buildCredentialScopedQuotaRecord(file, {
+      status: 'success',
+      billing: {
+        monthlyLimitCents: 10_000,
+        usedCents: 9_000,
+        includedUsedCents: 9_000,
+        onDemandCapCents: 5_000,
+        onDemandUsedCents: 500,
+        onDemandUsedPercent: 10,
+        billingPeriodEnd: '2026-07-31T00:00:00Z',
+        usedPercent: 90,
+      },
+    });
+
+    const renderer = await renderAccountsPage();
+    const card = findAccountCardByKey(renderer, getAuthFileSelectionKey(file));
+
+    expect(findQuotaBarByWindow(card, 'billing').props.className).toContain('quotaBarWarn');
+    expect(findQuotaBarByWindow(card, 'pay-as-you-go').props.className).toContain('quotaBarGood');
+  });
+
+  it('keeps retained xAI fallback windows visible with error-tone bars after refresh failure', async () => {
+    const file = {
+      name: 'xai-retained-error.json',
+      type: 'xai',
+      provider: 'xai',
+      authIndex: 'xai-retained-error-1',
+      account: 'xai-retained-error@example.com',
+      priority: 0,
+      disabled: false,
+    } as AuthFileItem;
+    mocks.files = [file];
+    mocks.quotaState.xaiQuota = buildCredentialScopedQuotaRecord(file, {
+      status: 'error',
+      error: 'refresh failed',
+      errorStatus: 500,
+      failedAtMs: Date.now(),
+      billing: {
+        monthlyLimitCents: 10_000,
+        usedCents: 2_000,
+        includedUsedCents: 2_000,
+        onDemandCapCents: 5_000,
+        onDemandUsedCents: 500,
+        onDemandUsedPercent: 10,
+        billingPeriodEnd: '2026-07-31T00:00:00Z',
+        usedPercent: 20,
+      },
+    });
+
+    const renderer = await renderAccountsPage();
+    const card = findAccountCardByKey(renderer, getAuthFileSelectionKey(file));
+
+    expect(readText(card)).toContain('30D');
+    expect(readText(card)).toContain('PAYG');
+    expect(readText(card)).not.toContain('accounts.quota_details_only');
+    expect(findQuotaBarByWindow(card, 'billing').props.className).toContain('quotaBarBad');
+    expect(findQuotaBarByWindow(card, 'pay-as-you-go').props.className).toContain('quotaBarBad');
+  });
+
+  it('keeps healthy xAI fallback bars independent from an exhausted hidden product quota', async () => {
+    const file = {
+      name: 'xai-hidden-product-exhausted.json',
+      type: 'xai',
+      provider: 'xai',
+      authIndex: 'xai-hidden-product-exhausted-1',
+      account: 'xai-hidden-product@example.com',
+      priority: 0,
+      disabled: false,
+    } as AuthFileItem;
+    mocks.files = [file];
+    mocks.quotaState.xaiQuota = buildCredentialScopedQuotaRecord(file, {
+      status: 'success',
+      billing: {
+        periodType: 'monthly',
+        usagePercent: 20,
+        periodStart: '2026-08-01T00:00:00Z',
+        periodEnd: '2026-09-01T00:00:00Z',
+        productUsage: [{ product: 'Grok Code Fast', usagePercent: 100 }],
+        monthlyLimitCents: 10_000,
+        usedCents: 2_000,
+        includedUsedCents: 2_000,
+        onDemandCapCents: 5_000,
+        onDemandUsedCents: 500,
+        onDemandUsedPercent: 10,
+        billingPeriodStart: '2026-08-01T00:00:00Z',
+        billingPeriodEnd: '2026-09-01T00:00:00Z',
+        usedPercent: 20,
+      },
+    });
+
+    const renderer = await renderAccountsPage();
+    const selectionKey = getAuthFileSelectionKey(file);
+    const card = findAccountCardByKey(renderer, selectionKey);
+    const quotaRegion = findAccountDetailRegion(renderer, selectionKey, 'quota');
+
+    expect(readText(card)).toContain('30D');
+    expect(readText(card)).toContain('PAYG');
+    expect(readText(card)).not.toContain('Grok Code Fast');
+    expect(findQuotaBarByWindow(card, 'billing').props.className).toContain('quotaBarGood');
+    expect(findQuotaBarByWindow(card, 'pay-as-you-go').props.className).toContain('quotaBarGood');
+
+    await act(async () => {
+      quotaRegion.props.onClick();
+    });
+    await flushPromises();
+
+    expect(readText(renderer.root.findByProps({ 'data-quota-window-group': 'other' }))).toContain(
+      'Grok Code Fast'
+    );
+  });
+
+  it('keeps a fixed xAI billing period in detail standard mode while showing billing and PAYG fallbacks', async () => {
     const file = {
       name: 'xai-fixed-billing.json',
       type: 'xai',
@@ -8023,9 +8184,9 @@ describe('AccountsPage replacement flows', () => {
         monthlyLimitCents: 10_000,
         usedCents: 2_000,
         includedUsedCents: 2_000,
-        onDemandCapCents: null,
-        onDemandUsedCents: null,
-        onDemandUsedPercent: null,
+        onDemandCapCents: 5_000,
+        onDemandUsedCents: 1_750,
+        onDemandUsedPercent: 35,
         billingPeriodStart: '2026-08-01T00:00:00Z',
         billingPeriodEnd: '2026-09-01T00:00:00Z',
         usedPercent: 20,
@@ -8037,11 +8198,13 @@ describe('AccountsPage replacement flows', () => {
     const card = findAccountCardByKey(renderer, selectionKey);
     const quotaRegion = findAccountDetailRegion(renderer, selectionKey, 'quota');
     const cardText = readText(card);
-    expect(cardText).toContain('accounts.quota_details_only');
+    expect(cardText).not.toContain('accounts.quota_details_only');
     expect(cardText).not.toContain('accounts.quota_source_none');
-    expect(cardText).not.toContain('30D');
+    expect(cardText).toContain('30D');
+    expect(cardText).toContain('PAYG');
     expect(cardText).not.toContain('Grok Code Fast');
-    expect(quotaRegion.props['aria-label']).toContain('accounts.quota_details_only');
+    expect(quotaRegion.props['aria-label']).toContain('xai_quota.monthly_credits');
+    expect(quotaRegion.props['aria-label']).toContain('xai_quota.pay_as_you_go_label');
 
     await act(async () => {
       findAccountDetailRegion(renderer, selectionKey, 'quota').props.onClick();
@@ -8057,7 +8220,221 @@ describe('AccountsPage replacement flows', () => {
     expect(readText(otherGroup)).toContain('Grok Code Fast');
   });
 
-  it('keeps Antigravity Pro model groups out of the list and in quota details', async () => {
+  it('keeps xAI weekly credits standard-first without adding monthly or PAYG windows', async () => {
+    const file = {
+      name: 'xai-weekly.json',
+      type: 'xai',
+      provider: 'xai',
+      authIndex: 'xai-weekly-1',
+      account: 'xai-weekly@example.com',
+      priority: 0,
+      disabled: false,
+    } as AuthFileItem;
+    mocks.files = [file];
+    mocks.quotaState.xaiQuota = buildCredentialScopedQuotaRecord(file, {
+      status: 'success',
+      billing: {
+        periodType: 'weekly',
+        usagePercent: 20,
+        periodStart: '2026-08-31T00:00:00Z',
+        periodEnd: '2026-09-07T00:00:00Z',
+        monthlyLimitCents: 10_000,
+        usedCents: 2_000,
+        includedUsedCents: 2_000,
+        onDemandCapCents: 5_000,
+        onDemandUsedCents: 1_750,
+        onDemandUsedPercent: 35,
+        billingPeriodStart: '2026-09-01T00:00:00Z',
+        billingPeriodEnd: '2026-10-01T00:00:00Z',
+        usedPercent: 20,
+      },
+    });
+
+    const renderer = await renderAccountsPage();
+    const selectionKey = getAuthFileSelectionKey(file);
+    const card = findAccountCardByKey(renderer, selectionKey);
+    const quotaRegion = findAccountDetailRegion(renderer, selectionKey, 'quota');
+
+    expect(readText(card)).toContain('7D');
+    expect(readText(card)).not.toContain('30D');
+    expect(readText(card)).not.toContain('PAYG');
+    expect(quotaRegion.props['aria-label']).toContain('xai_quota.weekly_credits');
+    expect(quotaRegion.props['aria-label']).not.toContain('xai_quota.monthly_credits');
+  });
+
+  it('renders Kimi summary-only quota on the account card', async () => {
+    const file = {
+      name: 'kimi-summary.json',
+      type: 'kimi',
+      provider: 'kimi',
+      authIndex: 'kimi-summary-1',
+      account: 'kimi-summary@example.com',
+      priority: 0,
+      disabled: false,
+    } as AuthFileItem;
+    mocks.files = [file];
+    const rows = buildKimiQuotaRows(
+      {
+        usage: {
+          used: 20,
+          limit: 100,
+        },
+      },
+      { observedAtMs: Date.parse('2026-07-29T10:00:00Z') }
+    );
+    mocks.quotaState.kimiQuota = buildCredentialScopedQuotaRecord(file, {
+      status: 'success',
+      rows,
+    });
+
+    const renderer = await renderAccountsPage();
+    const selectionKey = getAuthFileSelectionKey(file);
+    const card = findAccountCardByKey(renderer, selectionKey);
+    const quotaRegion = findAccountDetailRegion(renderer, selectionKey, 'quota');
+
+    expect(readText(card)).toContain('7D');
+    expect(readText(card)).not.toContain('accounts.quota_details_only');
+    expect(quotaRegion.props['aria-label']).toContain('kimi_quota.weekly_limit');
+
+    await act(async () => {
+      quotaRegion.props.onClick();
+    });
+    await flushPromises();
+
+    expect(renderer.root.findAllByType(QuotaWindowCard)).toHaveLength(1);
+  });
+
+  it('keeps Kimi scoped usage summaries in quota details', async () => {
+    const file = {
+      name: 'kimi-scoped-summary.json',
+      type: 'kimi',
+      provider: 'kimi',
+      authIndex: 'kimi-scoped-summary-1',
+      account: 'kimi-scoped-summary@example.com',
+      priority: 0,
+      disabled: false,
+    } as AuthFileItem;
+    const rows = buildKimiQuotaRows(
+      {
+        usages: [
+          {
+            scope: 'FEATURE_CHAT',
+            detail: { used: 20, limit: 100 },
+          },
+        ],
+      },
+      { observedAtMs: Date.parse('2026-07-29T10:00:00Z') }
+    );
+    expect(rows[0]?.id).toBe('usage-0-summary');
+    mocks.files = [file];
+    mocks.quotaState.kimiQuota = buildCredentialScopedQuotaRecord(file, {
+      status: 'success',
+      rows,
+    });
+
+    const renderer = await renderAccountsPage();
+    const selectionKey = getAuthFileSelectionKey(file);
+    const card = findAccountCardByKey(renderer, selectionKey);
+    const quotaRegion = findAccountDetailRegion(renderer, selectionKey, 'quota');
+
+    expect(readText(card)).toContain('accounts.quota_details_only');
+    expect(quotaRegion.props['aria-label']).toContain('accounts.quota_details_only');
+
+    await act(async () => {
+      quotaRegion.props.onClick();
+    });
+    await flushPromises();
+
+    expect(renderer.root.findAllByType(QuotaWindowCard)).toHaveLength(1);
+    expect(readText(renderer.root)).toContain('kimi_quota.scoped_weekly_limit');
+  });
+
+  it('keeps Claude model-scoped-only quota in quota details', async () => {
+    const file = {
+      name: 'claude-model-only.json',
+      type: 'claude',
+      provider: 'claude',
+      authIndex: 'claude-model-only-1',
+      account: 'claude-model-only@example.com',
+      priority: 0,
+      disabled: false,
+    } as AuthFileItem;
+    mocks.files = [file];
+    mocks.quotaState.claudeQuota = buildCredentialScopedQuotaRecord(file, {
+      status: 'success',
+      windows: [
+        {
+          id: 'opus-model',
+          label: 'Opus model quota',
+          usedPercent: 70,
+          resetLabel: 'later',
+          resetAtMs: Date.now() + 7 * 24 * 60 * 60 * 1000,
+          limitWindowSeconds: null,
+          modelScope: { kind: 'models', models: ['claude-opus-4-1'], complete: true },
+        },
+      ],
+    });
+
+    const renderer = await renderAccountsPage();
+    const selectionKey = getAuthFileSelectionKey(file);
+    const card = findAccountCardByKey(renderer, selectionKey);
+    const quotaRegion = findAccountDetailRegion(renderer, selectionKey, 'quota');
+
+    expect(readText(card)).toContain('accounts.quota_details_only');
+    expect(quotaRegion.props['aria-label']).toContain('accounts.quota_details_only');
+
+    await act(async () => {
+      quotaRegion.props.onClick();
+    });
+    await flushPromises();
+
+    expect(renderer.root.findAllByType(QuotaWindowCard)).toHaveLength(1);
+    expect(readText(renderer.root)).toContain('Opus model quota');
+  });
+
+  it('keeps Kimi standard windows ahead of summary data', async () => {
+    const file = {
+      name: 'kimi-standard.json',
+      type: 'kimi',
+      provider: 'kimi',
+      authIndex: 'kimi-standard-1',
+      account: 'kimi-standard@example.com',
+      priority: 0,
+      disabled: false,
+    } as AuthFileItem;
+    mocks.files = [file];
+    mocks.quotaState.kimiQuota = buildCredentialScopedQuotaRecord(file, {
+      status: 'success',
+      rows: [
+        {
+          id: 'summary',
+          label: 'Kimi quota summary',
+          used: 20,
+          limit: 100,
+          resetAtMs: null,
+          limitWindowSeconds: null,
+        },
+        {
+          id: 'five-hour',
+          label: 'Five Hour Limit',
+          used: 30,
+          limit: 100,
+          resetAtMs: Date.now() + 4 * 60 * 60 * 1000,
+          limitWindowSeconds: 5 * 60 * 60,
+        },
+      ],
+    });
+
+    const renderer = await renderAccountsPage();
+    const selectionKey = getAuthFileSelectionKey(file);
+    const card = findAccountCardByKey(renderer, selectionKey);
+
+    expect(readText(card)).toContain('5H');
+    expect(readText(card)).not.toContain('SUM');
+    expect(readText(card)).not.toContain('accounts.quota_details_only');
+  });
+
+  it('renders Antigravity Pro model groups in the quota matrix and keeps them in quota details', async () => {
     mocks.files = [
       {
         name: 'antigravity-pro-matrix.json',
@@ -8122,13 +8499,23 @@ describe('AccountsPage replacement flows', () => {
     });
 
     const renderer = await renderAccountsPage();
-    const matrices = renderer.root.findAll(
-      (node) => typeof node.props['data-account-quota-matrix'] === 'string'
+    const card = findAccountCardByKey(renderer, getAuthFileSelectionKey(mocks.files[0]));
+    const quotaRegion = findAccountDetailRegion(
+      renderer,
+      getAuthFileSelectionKey(mocks.files[0]),
+      'quota'
     );
-    expect(matrices).toHaveLength(0);
+    card.findByProps({
+      'data-account-quota-matrix': getAuthFileSelectionKey(mocks.files[0]),
+    });
+    expect(card.findAllByProps({ 'data-account-quota-matrix-row': 'five_hour' })).toHaveLength(1);
+    expect(card.findAllByProps({ 'data-account-quota-matrix-row': 'weekly' })).toHaveLength(1);
     expect(
-      readText(findAccountCardByKey(renderer, getAuthFileSelectionKey(mocks.files[0])))
-    ).toContain('accounts.quota_details_only');
+      card.findAll((node) => typeof node.props['data-account-quota-matrix-cell'] === 'string')
+    ).toHaveLength(4);
+    expect(readText(card)).not.toContain('accounts.quota_details_only');
+    expect(quotaRegion.props['aria-label']).toContain('Claude 5H 11%');
+    expect(quotaRegion.props['aria-label']).toContain('Gemini 7D 4%');
 
     await act(async () => {
       findAccountDetailRegion(
@@ -8145,7 +8532,7 @@ describe('AccountsPage replacement flows', () => {
     expect(renderer.root.findAllByProps({ 'data-quota-window-group': 'standard' })).toHaveLength(0);
   });
 
-  it('keeps Antigravity Free model groups out of the list and in quota details', async () => {
+  it('renders Antigravity Free model groups in the quota matrix and keeps them in quota details', async () => {
     mocks.files = [
       {
         name: 'antigravity-free-weekly.json',
@@ -8196,13 +8583,16 @@ describe('AccountsPage replacement flows', () => {
     });
 
     const renderer = await renderAccountsPage();
-    const matrices = renderer.root.findAll(
-      (node) => typeof node.props['data-account-quota-matrix'] === 'string'
-    );
-    expect(matrices).toHaveLength(0);
+    const card = findAccountCardByKey(renderer, getAuthFileSelectionKey(mocks.files[0]));
+    card.findByProps({
+      'data-account-quota-matrix': getAuthFileSelectionKey(mocks.files[0]),
+    });
+    expect(card.findAllByProps({ 'data-account-quota-matrix-row': 'five_hour' })).toHaveLength(0);
+    expect(card.findAllByProps({ 'data-account-quota-matrix-row': 'weekly' })).toHaveLength(1);
     expect(
-      readText(findAccountCardByKey(renderer, getAuthFileSelectionKey(mocks.files[0])))
-    ).toContain('accounts.quota_details_only');
+      card.findAll((node) => typeof node.props['data-account-quota-matrix-cell'] === 'string')
+    ).toHaveLength(2);
+    expect(readText(card)).not.toContain('accounts.quota_details_only');
 
     await act(async () => {
       findAccountDetailRegion(
@@ -8217,6 +8607,371 @@ describe('AccountsPage replacement flows', () => {
     expect(readText(modelQuotaGroup)).toContain('antigravity_quota.group_claude_gpt_models');
     expect(readText(modelQuotaGroup)).toContain('antigravity_quota.group_gemini_models');
     expect(renderer.root.findAllByProps({ 'data-quota-window-group': 'standard' })).toHaveLength(0);
+  });
+
+  it('keeps a retained Antigravity matrix visible with error-tone bars after refresh failure', async () => {
+    const file = {
+      name: 'antigravity-retained-error.json',
+      type: 'antigravity',
+      provider: 'antigravity',
+      authIndex: 'antigravity-retained-error-01',
+      account: 'AG Retained Error',
+      label: 'Antigravity Retained Error',
+      priority: 0,
+      disabled: false,
+    } as AuthFileItem;
+    mocks.files = [file];
+    mocks.quotaState.antigravityQuota = buildCredentialScopedQuotaRecord(file, {
+      status: 'error',
+      error: 'refresh failed',
+      errorStatus: 500,
+      failedAtMs: Date.now(),
+      subscription: { plan: 'pro', tierName: 'Pro', tierId: 'g1-pro' },
+      groups: [
+        {
+          id: 'gemini-models',
+          label: 'Gemini Models',
+          buckets: [
+            {
+              id: 'gemini-5h',
+              label: 'Five Hour Limit',
+              window: '5h',
+              remainingFraction: 0.96,
+              resetTime: '2026-07-09T12:00:00Z',
+            },
+            {
+              id: 'gemini-weekly',
+              label: 'Weekly Limit',
+              window: 'weekly',
+              remainingFraction: 0.8,
+              resetTime: '2026-07-15T12:00:00Z',
+            },
+          ],
+        },
+        {
+          id: 'claude-gpt-models',
+          label: 'Claude and GPT models',
+          buckets: [
+            {
+              id: 'claude-5h',
+              label: 'Five Hour Limit',
+              window: '5h',
+              remainingFraction: 0.6,
+              resetTime: '2026-07-09T11:00:00Z',
+            },
+            {
+              id: 'claude-weekly',
+              label: 'Weekly Limit',
+              window: 'weekly',
+              remainingFraction: 0.4,
+              resetTime: '2026-07-13T12:00:00Z',
+            },
+          ],
+        },
+      ],
+    });
+
+    const renderer = await renderAccountsPage();
+    const selectionKey = getAuthFileSelectionKey(file);
+    const card = findAccountCardByKey(renderer, selectionKey);
+    const quotaRegion = findAccountDetailRegion(renderer, selectionKey, 'quota');
+
+    expect(card.findAllByProps({ 'data-account-quota-matrix': selectionKey })).toHaveLength(1);
+    expect(readText(card)).toContain('5H');
+    expect(readText(card)).toContain('7D');
+    expect(readText(card)).toContain('Gemini');
+    expect(readText(card)).toContain('Claude');
+    const matrixCells = card.findAll(
+      (node) => typeof node.props['data-account-quota-matrix-cell'] === 'string'
+    );
+    expect(matrixCells).toHaveLength(4);
+    matrixCells.forEach((cell) => {
+      expect(
+        findQuotaBarByMatrixCell(card, cell.props['data-account-quota-matrix-cell'] as string).props
+          .className
+      ).toContain('quotaBarBad');
+    });
+
+    await act(async () => {
+      quotaRegion.props.onClick();
+    });
+    await flushPromises();
+
+    expect(renderer.root.findByProps({ 'data-quota-window-group': 'model' })).toBeTruthy();
+    expect(renderer.root.findAllByType(QuotaWindowCard)).toHaveLength(4);
+  });
+
+  it('renders a single Antigravity model group through the ordinary quota fallback', async () => {
+    const file = {
+      name: 'antigravity-single-group.json',
+      type: 'antigravity',
+      provider: 'antigravity',
+      authIndex: 'antigravity-single-group-01',
+      account: 'AG Single Group',
+      label: 'Antigravity Single Group',
+      priority: 0,
+      disabled: false,
+    } as AuthFileItem;
+    mocks.files = [file];
+    mocks.quotaState.antigravityQuota = buildCredentialScopedQuotaRecord(file, {
+      status: 'success',
+      subscription: { plan: 'free', tierName: 'Free', tierId: 'g1-free' },
+      groups: [
+        {
+          id: 'gemini-models',
+          label: 'Gemini Models',
+          description: 'Models within this group: Gemini Flash, Gemini Pro',
+          models: ['gemini-2.5-flash', 'gemini-2.5-pro'],
+          buckets: [
+            {
+              id: 'gemini-weekly',
+              label: 'Weekly Limit',
+              window: 'weekly',
+              remainingFraction: 0.76,
+              resetTime: '2026-07-15T12:00:00Z',
+            },
+          ],
+        },
+      ],
+    });
+
+    const renderer = await renderAccountsPage();
+    const selectionKey = getAuthFileSelectionKey(file);
+    const card = findAccountCardByKey(renderer, selectionKey);
+    const quotaRegion = findAccountDetailRegion(renderer, selectionKey, 'quota');
+
+    expect(card.findAllByProps({ 'data-account-quota-matrix': selectionKey })).toHaveLength(0);
+    expect(readText(card)).toContain('Gemini');
+    expect(readText(card)).toContain('7D');
+    expect(readText(card)).not.toContain('accounts.quota_details_only');
+    expect(quotaRegion.props['aria-label']).toContain('76%');
+
+    await act(async () => {
+      quotaRegion.props.onClick();
+    });
+
+    expect(renderer.root.findByProps({ 'data-quota-window-group': 'model' })).toBeTruthy();
+    expect(
+      renderer.root
+        .findByProps({ 'data-quota-window-group': 'model' })
+        .findAllByType(QuotaWindowCard)
+    ).toHaveLength(1);
+  });
+
+  it('renders incomplete Antigravity matrix windows through the ordinary fallback', async () => {
+    const file = {
+      name: 'antigravity-incomplete-matrix.json',
+      type: 'antigravity',
+      provider: 'antigravity',
+      authIndex: 'antigravity-incomplete-matrix-01',
+      account: 'AG Incomplete Matrix',
+      priority: 0,
+      disabled: false,
+    } as AuthFileItem;
+    mocks.files = [file];
+    mocks.quotaState.antigravityQuota = buildCredentialScopedQuotaRecord(file, {
+      status: 'success',
+      subscription: { plan: 'pro', tierName: 'Pro', tierId: 'g1-pro' },
+      groups: [
+        {
+          id: 'gemini-models',
+          label: 'Gemini Models',
+          buckets: [
+            {
+              id: 'gemini-5h',
+              label: 'Five Hour Limit',
+              window: '5h',
+              remainingFraction: 0.1,
+              resetTime: '2026-07-09T12:00:00Z',
+            },
+          ],
+        },
+        {
+          id: 'claude-gpt-models',
+          label: 'Claude and GPT models',
+          buckets: [
+            {
+              id: 'claude-weekly',
+              label: 'Weekly Limit',
+              window: 'weekly',
+              remainingFraction: 0.8,
+              resetTime: '2026-07-13T12:00:00Z',
+            },
+          ],
+        },
+      ],
+    });
+
+    const renderer = await renderAccountsPage();
+    const selectionKey = getAuthFileSelectionKey(file);
+    const card = findAccountCardByKey(renderer, selectionKey);
+
+    expect(card.findAllByProps({ 'data-account-quota-matrix': selectionKey })).toHaveLength(0);
+    expect(readText(card)).toContain('Gemini');
+    expect(readText(card)).toContain('Claude');
+    expect(readText(card)).toContain('5H');
+    expect(readText(card)).toContain('7D');
+    expect(readText(card)).not.toContain('accounts.quota_details_only');
+    expect(findQuotaBarByWindow(card, 'gemini-models:gemini-5h').props.className).toContain(
+      'quotaBarWarn'
+    );
+    expect(findQuotaBarByWindow(card, 'claude-gpt-models:claude-weekly').props.className).toContain(
+      'quotaBarGood'
+    );
+
+    await act(async () => {
+      findAccountDetailRegion(renderer, selectionKey, 'quota').props.onClick();
+    });
+
+    const modelQuotaGroup = renderer.root.findByProps({ 'data-quota-window-group': 'model' });
+    expect(modelQuotaGroup.findAllByType(QuotaWindowCard)).toHaveLength(2);
+  });
+
+  it('prioritizes an Antigravity matrix when standard and model-family windows coexist', async () => {
+    const file = {
+      name: 'antigravity-mixed-standard.json',
+      type: 'antigravity',
+      provider: 'antigravity',
+      authIndex: 'antigravity-mixed-standard-01',
+      account: 'AG Mixed Standard',
+      priority: 0,
+      disabled: false,
+    } as AuthFileItem;
+    const nowMs = Date.now();
+    const makeMatrixWindow = (
+      key: string,
+      kind: 'five_hour' | 'weekly',
+      groupLabel: string,
+      remainingPercent: number
+    ) =>
+      buildAccountQuotaDisplayWindow({
+        key,
+        label: kind === 'five_hour' ? 'Five Hour Limit' : 'Weekly Limit',
+        kind,
+        remainingPercent,
+        usedPercent: 100 - remainingPercent,
+        resetLabel: 'later',
+        resetAtMs: nowMs + 6 * 60 * 60 * 1000,
+        limitWindowSeconds: kind === 'five_hour' ? 5 * 60 * 60 : 7 * 24 * 60 * 60,
+        groupLabel,
+        modelScope: {
+          kind: 'family',
+          key: groupLabel.includes('Gemini') ? 'gemini' : 'claude_gpt',
+          complete: true,
+        },
+        source: 'antigravity',
+        windowMode: 'fixed',
+        nowMs,
+      });
+    const standardWindow = buildAccountQuotaDisplayWindow({
+      key: 'account-weekly',
+      label: 'Account Weekly',
+      kind: 'weekly',
+      remainingPercent: 70,
+      usedPercent: 30,
+      resetLabel: 'later',
+      resetAtMs: nowMs + 6 * 24 * 60 * 60 * 1000,
+      limitWindowSeconds: 7 * 24 * 60 * 60,
+      modelScope: { kind: 'all', complete: true },
+      source: 'antigravity',
+      windowMode: 'fixed',
+      nowMs,
+    });
+    mocks.files = [file];
+    mocks.quotaDisplayWindowsOverride = [
+      standardWindow,
+      makeMatrixWindow('gemini-5h', 'five_hour', 'Gemini Models', 96),
+      makeMatrixWindow('gemini-weekly', 'weekly', 'Gemini Models', 4),
+      makeMatrixWindow('claude-5h', 'five_hour', 'Claude and GPT models', 11),
+      makeMatrixWindow('claude-weekly', 'weekly', 'Claude and GPT models', 19),
+    ];
+
+    const renderer = await renderAccountsPage();
+    const selectionKey = getAuthFileSelectionKey(file);
+    const card = findAccountCardByKey(renderer, selectionKey);
+    const quotaRegion = findAccountDetailRegion(renderer, selectionKey, 'quota');
+
+    expect(card.findAllByProps({ 'data-account-quota-matrix': selectionKey })).toHaveLength(1);
+    expect(card.findAllByProps({ 'data-account-quota-matrix-row': 'five_hour' })).toHaveLength(1);
+    expect(card.findAllByProps({ 'data-account-quota-matrix-row': 'weekly' })).toHaveLength(1);
+    expect(quotaRegion.props['aria-label']).toContain('Claude 5H 11%');
+    expect(quotaRegion.props['aria-label']).not.toContain('Account Weekly: 70%');
+
+    await act(async () => {
+      quotaRegion.props.onClick();
+    });
+
+    expect(
+      renderer.root
+        .findByProps({ 'data-quota-window-group': 'standard' })
+        .findAllByType(QuotaWindowCard)
+    ).toHaveLength(1);
+    expect(
+      renderer.root
+        .findByProps({ 'data-quota-window-group': 'model' })
+        .findAllByType(QuotaWindowCard)
+    ).toHaveLength(4);
+  });
+
+  it('keeps an Antigravity matrix non-interactive while selection mode is active', async () => {
+    const file = {
+      name: 'antigravity-selection-matrix.json',
+      type: 'antigravity',
+      provider: 'antigravity',
+      authIndex: 'antigravity-selection-matrix-01',
+      account: 'AG Selection Matrix',
+      priority: 0,
+      disabled: false,
+    } as AuthFileItem;
+    const nowMs = Date.now();
+    const makeMatrixWindow = (key: string, kind: 'five_hour' | 'weekly', groupLabel: string) =>
+      buildAccountQuotaDisplayWindow({
+        key,
+        label: kind === 'five_hour' ? 'Five Hour Limit' : 'Weekly Limit',
+        kind,
+        remainingPercent: 60,
+        usedPercent: 40,
+        resetLabel: 'later',
+        resetAtMs: nowMs + 6 * 60 * 60 * 1000,
+        limitWindowSeconds: kind === 'five_hour' ? 5 * 60 * 60 : 7 * 24 * 60 * 60,
+        groupLabel,
+        modelScope: {
+          kind: 'family',
+          key: groupLabel.includes('Gemini') ? 'gemini' : 'claude_gpt',
+          complete: true,
+        },
+        source: 'antigravity',
+        windowMode: 'fixed',
+        nowMs,
+      });
+    mocks.files = [file];
+    mocks.quotaDisplayWindowsOverride = [
+      makeMatrixWindow('gemini-5h', 'five_hour', 'Gemini Models'),
+      makeMatrixWindow('gemini-weekly', 'weekly', 'Gemini Models'),
+      makeMatrixWindow('claude-5h', 'five_hour', 'Claude and GPT models'),
+      makeMatrixWindow('claude-weekly', 'weekly', 'Claude and GPT models'),
+    ];
+
+    const renderer = await renderAccountsPage();
+    const selectionKey = getAuthFileSelectionKey(file);
+    await act(async () => {
+      findHostButtonByText(renderer, 'accounts.selection_mode_enter').props.onClick();
+    });
+
+    const card = findAccountCardByKey(renderer, selectionKey);
+    const quotaRegion = findAccountDetailRegion(renderer, selectionKey, 'quota');
+    expect(quotaRegion.type).toBe('div');
+    expect(quotaRegion.props['data-account-detail-trigger']).toBeUndefined();
+    expect(quotaRegion.props.onClick).toBeUndefined();
+    expect(card.findByProps({ 'data-account-quota-matrix': selectionKey })).toBeTruthy();
+
+    await act(async () => {
+      card.props.onClick();
+    });
+
+    expect(mocks.toggleSelect).toHaveBeenCalledWith(selectionKey);
+    expect(renderer.root.findAllByType(AccountQuotaTab)).toHaveLength(0);
+    expect(mocks.navigate).not.toHaveBeenCalled();
   });
 
   it('keeps the accounts view in card mode without table controls', async () => {
@@ -13899,10 +14654,7 @@ describe('AccountsPage replacement flows', () => {
     const secondMarker = recordAccountCredentialMutationMarker({
       connectionFingerprint: 'http://cpa-a.local:8317:manager-key',
       provider: 'codex',
-      baseline: createAccountCredentialMutationBaseline(
-        [existingFile, firstOauthFile],
-        'codex'
-      ),
+      baseline: createAccountCredentialMutationBaseline([existingFile, firstOauthFile], 'codex'),
       requireObservedMutation: true,
       createdAtMs: secondMarkerAtMs,
     });
@@ -13972,10 +14724,7 @@ describe('AccountsPage replacement flows', () => {
     const secondMarker = recordAccountCredentialMutationMarker({
       connectionFingerprint: 'http://cpa-a.local:8317:manager-key',
       provider: 'codex',
-      baseline: createAccountCredentialMutationBaseline(
-        [existingFile, firstOauthFile],
-        'codex'
-      ),
+      baseline: createAccountCredentialMutationBaseline([existingFile, firstOauthFile], 'codex'),
       requireObservedMutation: true,
       createdAtMs: secondMarkerAtMs,
     });
