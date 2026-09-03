@@ -33,6 +33,8 @@ const makeRow = (overrides: AccountRowOverrides = {}): AccountRow => {
     priority: null,
     createdAtMs: null,
     updatedAtMs: null,
+    authenticationAtMs: 0,
+    rawCredentialStatusSuperseded: false,
     quota: {
       status: 'ok',
       remainingPercent: 80,

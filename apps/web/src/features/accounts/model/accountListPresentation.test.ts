@@ -35,6 +35,8 @@ const makeRow = (overrides: AccountRowOverrides = {}): AccountRow => {
     priority: null,
     createdAtMs: null,
     updatedAtMs: null,
+    authenticationAtMs: 0,
+    rawCredentialStatusSuperseded: false,
     quota: {
       status: 'ok',
       remainingPercent: 80,
@@ -203,6 +205,21 @@ describe('accountListPresentation', () => {
       observedAtMs: 2_000,
     });
     expect(item.recommendation.hasRecommendation).toBe(false);
+  });
+
+  it('does not surface a pre-reauth success request as available', () => {
+    const row = makeRow({ authenticationAtMs: 2_000 });
+
+    expect(
+      buildAccountListItem(row, {
+        requestEvidence: { latestRequest: { timestamp_ms: 1_000, failed: false } },
+      }).health.status
+    ).toBe('raw');
+    expect(
+      buildAccountListItem(row, {
+        requestEvidence: { latestRequest: { timestamp_ms: 3_000, failed: false } },
+      }).health.status
+    ).toBe('available');
   });
 
   it('lets a newer successful request clear stale quota refresh failure advice', () => {
@@ -816,6 +833,53 @@ describe('accountListPresentation', () => {
 
     expect(item.health.status).toBe('available');
     expect(item.recommendation.hasRecommendation).toBe(false);
+  });
+
+  it('keeps pre-recovery healthy quota displayable without marking the account available', () => {
+    const item = buildAccountListItem(
+      makeRow({
+        authenticationAtMs: 2_000,
+        quota: {
+          status: 'ok',
+          remainingPercent: 70,
+          usedPercent: 30,
+          fetchedAtMs: 1_000,
+        },
+      })
+    );
+
+    expect(item.quota).toMatchObject({ statusLabelKey: 'accounts.quota_status_ok' });
+    expect(item.health.status).toBe('raw');
+  });
+
+  it('does not use pre-recovery healthy inspection as available evidence', () => {
+    const item = buildAccountListItem(
+      makeRow({
+        authenticationAtMs: 2_000,
+        quota: {
+          status: 'unknown',
+          remainingPercent: null,
+          usedPercent: null,
+          fetchedAtMs: undefined,
+          source: 'none',
+        },
+        inspection: {
+          source: 'server',
+          action: 'keep',
+          actionReason: 'healthy',
+          actionStatus: 'success',
+          statusCode: 200,
+          usedPercent: 20,
+          isQuota: false,
+          errorKind: 'inference_healthy',
+          runId: 1,
+          resultId: 3,
+          createdAtMs: 1_000,
+        },
+      })
+    );
+
+    expect(item.health.status).toBe('raw');
   });
 
   it('does not let stale derived Codex status revive a raw 401 after Provider recovery', () => {

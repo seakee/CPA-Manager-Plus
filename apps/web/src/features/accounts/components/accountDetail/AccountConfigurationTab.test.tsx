@@ -73,6 +73,8 @@ const makeRow = (provider = 'codex', overrides: Partial<AccountRow> = {}): Accou
     priority: null,
     createdAtMs: null,
     updatedAtMs: null,
+    authenticationAtMs: 0,
+    rawCredentialStatusSuperseded: false,
     raw: { name: 'credential.json', type: provider, provider },
     ...overrides,
   }) as AccountRow;

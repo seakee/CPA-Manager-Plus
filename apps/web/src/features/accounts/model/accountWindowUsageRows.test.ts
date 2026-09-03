@@ -14,6 +14,8 @@ const makeRow = (overrides: Partial<AccountRow>): AccountRow =>
     fileName: 'codex.json',
     provider: 'codex',
     authIndex: 'auth-1',
+    authenticationAtMs: 0,
+    rawCredentialStatusSuperseded: false,
     raw: {
       account: 'codex@example.com',
       label: 'Codex Seat',

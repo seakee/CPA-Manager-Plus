@@ -1636,6 +1636,28 @@ describe('auth file Codex status helpers', () => {
     expect(quota.quotaInventoryObserved).toBeUndefined();
   });
 
+  it('clears an explicitly scoped unknown-time auth quota failure without dropping quota windows', () => {
+    const quota = codexQuota({
+      status: 'error',
+      error: 'HTTP 401 unauthorized',
+      errorStatus: 401,
+      fetchedAtMs: undefined,
+      failedAtMs: undefined,
+    });
+
+    const sanitized = sanitizeSupersededAuthQuotaState(quota, 2_000, {
+      allowUnknownFailureTimestamp: true,
+    });
+
+    expect(sanitized).toMatchObject({
+      status: 'success',
+      error: undefined,
+      errorStatus: undefined,
+      windows: quota.windows,
+    });
+    expect(sanitizeSupersededAuthQuotaState(quota, 2_000)).toBe(quota);
+  });
+
   it('recognizes and clears text-only HTTP 401 quota refresh failures', () => {
     const quota = codexQuota({
       status: 'error',

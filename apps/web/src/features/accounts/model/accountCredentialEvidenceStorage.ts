@@ -1,4 +1,5 @@
 import type { AccountCredentialEvidenceBoundary } from './accountCredentialEvidence';
+import { normalizeAuthFileCredentialStatusCode } from '@/features/authFiles/model/credentialStatus';
 
 const STORAGE_KEY = 'cpa.accounts.credential-evidence-boundaries.v1';
 const STORAGE_VERSION = 1;
@@ -44,8 +45,10 @@ const emptyBoundary = (): AccountCredentialEvidenceBoundary => ({
   fallbackActionBaselinePending: false,
   fallbackCooldownAtMs: 0,
   fallbackCooldownBaselinePending: false,
+  authenticationAtMs: 0,
   rawStatusAtMs: 0,
   rawStatusMessages: [],
+  rawStatusCodes: [],
 });
 
 const readTimestamp = (value: unknown): number =>
@@ -79,6 +82,7 @@ const normalizeBoundary = (value: unknown): AccountCredentialEvidenceBoundary | 
     fallbackActionBaselinePending: readBoolean(record.fallbackActionBaselinePending),
     fallbackCooldownAtMs: readTimestamp(record.fallbackCooldownAtMs),
     fallbackCooldownBaselinePending: readBoolean(record.fallbackCooldownBaselinePending),
+    authenticationAtMs: readTimestamp(record.authenticationAtMs),
     rawStatusAtMs: readTimestamp(record.rawStatusAtMs),
     rawStatusMessages: Array.isArray(record.rawStatusMessages)
       ? record.rawStatusMessages
@@ -86,6 +90,15 @@ const normalizeBoundary = (value: unknown): AccountCredentialEvidenceBoundary | 
           .map((item) => item.trim())
           .filter(Boolean)
           .slice(0, 32)
+      : [],
+    rawStatusCodes: Array.isArray(record.rawStatusCodes)
+      ? Array.from(
+          new Set(
+            record.rawStatusCodes
+              .map(normalizeAuthFileCredentialStatusCode)
+              .filter((item): item is number => item !== null)
+          )
+        ).slice(0, 32)
       : [],
   };
 };
@@ -139,6 +152,7 @@ const getBoundaryUpdatedAtMs = (boundary: AccountCredentialEvidenceBoundary): nu
     boundary.fallbackHeaderAtMs,
     boundary.fallbackActionAtMs,
     boundary.fallbackCooldownAtMs,
+    boundary.authenticationAtMs ?? 0,
     boundary.rawStatusAtMs
   );
 
