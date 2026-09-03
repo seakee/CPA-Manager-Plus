@@ -148,6 +148,7 @@ type CodexInspectionQuotaWindow struct {
 	ResetAccuracy         string                          `json:"resetAccuracy,omitempty"`
 	LimitWindowSeconds    *float64                        `json:"limitWindowSeconds,omitempty"`
 	ModelScope            *CodexInspectionQuotaModelScope `json:"modelScope,omitempty"`
+	ScopeDisplayName      string                          `json:"scopeDisplayName,omitempty"`
 	ProviderWindowAliases []string                        `json:"providerWindowAliases,omitempty"`
 }
 

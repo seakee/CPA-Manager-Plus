@@ -205,6 +205,59 @@ func TestScopeDisplayNameKeepsLifecycleIdentityAndCandidateFallback(t *testing.T
 	}
 }
 
+func TestSelectScopeDisplayNameRespectsActivationBoundary(t *testing.T) {
+	base := model.AccountQuotaSnapshot{
+		ProviderWindowID: "gpt-reserve-weekly-0",
+		ScopeFingerprint: "same-scope",
+	}
+
+	t.Run("same activation fallback", func(t *testing.T) {
+		selected := base
+		selected.ActivationID = 2
+		selected.ObservedAtMS = 30_000
+		candidates := []model.AccountQuotaSnapshot{
+			{ID: 1, ActivationID: 1, ObservedAtMS: 40_000, ScopeDisplayName: "Old Model"},
+			{ID: 2, ActivationID: 2, ObservedAtMS: 20_000, ScopeDisplayName: "Model A"},
+		}
+		if got := selectScopeDisplayName(selected, candidates); got != "Model A" {
+			t.Fatalf("same-activation display fallback = %q, want Model A", got)
+		}
+	})
+
+	t.Run("newer name wins within activation", func(t *testing.T) {
+		selected := base
+		selected.ActivationID = 2
+		selected.ScopeDisplayName = "Model B"
+		candidates := []model.AccountQuotaSnapshot{
+			{ID: 1, ActivationID: 2, ObservedAtMS: 40_000, ScopeDisplayName: "Model A"},
+		}
+		if got := selectScopeDisplayName(selected, candidates); got != "Model B" {
+			t.Fatalf("selected display name = %q, want Model B", got)
+		}
+	})
+
+	t.Run("new activation does not inherit old name", func(t *testing.T) {
+		selected := base
+		selected.ActivationID = 2
+		candidates := []model.AccountQuotaSnapshot{
+			{ID: 1, ActivationID: 1, ObservedAtMS: 40_000, ScopeDisplayName: "Old Model"},
+		}
+		if got := selectScopeDisplayName(selected, candidates); got != "" {
+			t.Fatalf("cross-activation display fallback = %q, want empty", got)
+		}
+	})
+
+	t.Run("legacy zero activation retains fallback", func(t *testing.T) {
+		selected := base
+		candidates := []model.AccountQuotaSnapshot{
+			{ID: 1, ActivationID: 1, ObservedAtMS: 40_000, ScopeDisplayName: "Legacy Model"},
+		}
+		if got := selectScopeDisplayName(selected, candidates); got != "Legacy Model" {
+			t.Fatalf("legacy display fallback = %q, want Legacy Model", got)
+		}
+	})
+}
+
 func TestWriteQuerySelectsLatestCompleteObservationAndMergesCodexResetCredits(t *testing.T) {
 	service := newQuotaSnapshotTestService(t, 20_000)
 	cycleStart := int64(10_000)

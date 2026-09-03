@@ -1005,7 +1005,16 @@ func selectScopeDisplayName(
 	var latestObservedAtMS int64
 	var latestID int64
 	hasName := false
-	for _, candidate := range candidates {
+	eligibleCandidates := candidates
+	if selected.ActivationID != 0 {
+		eligibleCandidates = make([]model.AccountQuotaSnapshot, 0, len(candidates))
+		for _, candidate := range candidates {
+			if candidate.ActivationID == selected.ActivationID {
+				eligibleCandidates = append(eligibleCandidates, candidate)
+			}
+		}
+	}
+	for _, candidate := range eligibleCandidates {
 		name := strings.TrimSpace(candidate.ScopeDisplayName)
 		if name == "" {
 			continue

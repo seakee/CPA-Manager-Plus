@@ -199,6 +199,9 @@ func TestMigrateCreatesAccountQuotaSnapshotSchema(t *testing.T) {
 			t.Fatalf("account quota snapshot columns = %#v, missing %s", columns, column)
 		}
 	}
+	if windowColumns := migrationTableColumns(t, db, "account_quota_windows"); windowColumns["scope_display_name"] {
+		t.Fatalf("account_quota_windows unexpectedly stores presentation metadata: %#v", windowColumns)
+	}
 	for _, name := range []string{
 		"idx_quota_snapshots_latest",
 		"idx_quota_snapshots_observation",

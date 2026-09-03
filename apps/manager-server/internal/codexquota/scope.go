@@ -27,6 +27,7 @@ type AdditionalScopeResolution struct {
 	Scope                ModelScope
 	ProviderWindowPrefix string
 	LegacyPrefixes       []string
+	ScopeDisplayName     string
 }
 
 type AdditionalScopeInput struct {
@@ -215,6 +216,7 @@ func ResolveAdditionalScope(input AdditionalScopeInput) AdditionalScopeResolutio
 		Scope:                FeatureScope(key),
 		ProviderWindowPrefix: prefix,
 		LegacyPrefixes:       []string{prefix},
+		ScopeDisplayName:     strings.TrimSpace(input.LimitName),
 	}
 }
 

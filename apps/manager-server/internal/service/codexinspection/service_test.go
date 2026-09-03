@@ -528,6 +528,42 @@ func TestBuildCodexInspectionQuotaWindowsAssignsCodexScopes(t *testing.T) {
 	}
 	assertScope("code-review-weekly", "feature", codexquota.CodeReviewScopeKey, nil, false)
 	assertScope("future-feature-weekly-0", "feature", "future_feature", nil, false)
+	if got := byID["future-feature-weekly-0"].ScopeDisplayName; got != "Future Feature" {
+		t.Fatalf("dynamic additional scope display name = %q, want Future Feature", got)
+	}
+	if got := byID["weekly"].ScopeDisplayName; got != "" {
+		t.Fatalf("Codex main scope display name = %q, want empty", got)
+	}
+}
+
+func TestBuildCodexInspectionQuotaWindowsPreservesRawAdditionalScopeDisplayName(t *testing.T) {
+	windows := buildCodexInspectionQuotaWindows(map[string]any{
+		"additional_rate_limits": []any{
+			map[string]any{
+				"limit_name": "gpt-reserve",
+				"rate_limit": map[string]any{
+					"secondary_window": map[string]any{
+						"used_percent":         25,
+						"limit_window_seconds": codexWeekWindow,
+					},
+				},
+			},
+		},
+	}, "")
+
+	if len(windows) != 1 {
+		t.Fatalf("dynamic additional quota windows = %#v, want one window", windows)
+	}
+	window := windows[0]
+	if window.ID != "gpt-reserve-weekly-0" {
+		t.Fatalf("dynamic additional window id = %q, want gpt-reserve-weekly-0", window.ID)
+	}
+	if window.ScopeDisplayName != "gpt-reserve" {
+		t.Fatalf("dynamic additional scope display name = %q, want gpt-reserve", window.ScopeDisplayName)
+	}
+	if window.LabelParams["name"] != "gpt-reserve" {
+		t.Fatalf("dynamic additional label params = %#v, want raw gpt-reserve name", window.LabelParams)
+	}
 }
 
 func containsString(values []string, expected string) bool {
