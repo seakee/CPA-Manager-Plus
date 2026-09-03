@@ -1,3 +1,9 @@
+@use '@/styles/variables.scss' as *;
+
+.modelItem {
+  min-width: 0;
+}
+
 .advancedRow {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -5,4 +11,128 @@
   align-items: center;
   margin: -2px 0 8px;
   padding-left: 4px;
+}
+
+.thinkingSection {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: $spacing-sm;
+  margin-top: $spacing-sm;
+  padding-left: $spacing-xs;
+}
+
+.thinkingHeader {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 22px;
+}
+
+.thinkingLabel,
+.thinkingOptionsHeader,
+.thinkingUnknownLabel {
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.thinkingMode {
+  display: flex;
+  flex-wrap: wrap;
+  gap: $spacing-sm $spacing-md;
+}
+
+.thinkingModeOption,
+.thinkingLevelOption {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.thinkingModeOption {
+  gap: $spacing-xs;
+}
+
+.thinkingModeOption input {
+  flex: 0 0 auto;
+  margin: 0;
+  accent-color: var(--primary-color);
+}
+
+.thinkingLevelLabel {
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+
+.thinkingCustomPanel {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: $spacing-sm;
+}
+
+.thinkingOptionsHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-sm;
+  flex-wrap: wrap;
+}
+
+.thinkingActions {
+  display: inline-flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.thinkingLevels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: $spacing-sm $spacing-md;
+}
+
+.thinkingUnknown {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-xs;
+  padding-top: 2px;
+}
+
+.thinkingUnknownLevels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: $spacing-xs;
+}
+
+.thinkingUnknownChip {
+  display: inline-flex;
+  max-width: 100%;
+  padding: $spacing-xs $spacing-sm;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.thinkingUnknownHint {
+  color: var(--text-tertiary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.thinkingError {
+  color: var(--danger-color);
+  font-size: 12px;
+  line-height: 1.5;
 }

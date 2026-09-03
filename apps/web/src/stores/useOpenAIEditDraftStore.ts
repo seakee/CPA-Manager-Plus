@@ -10,7 +10,7 @@
 
 import type { SetStateAction } from 'react';
 import { create } from 'zustand';
-import type { OpenAIFormState } from '@/components/providers/types';
+import type { ModelEntry, OpenAIFormState } from '@/components/providers/types';
 import type { CoolingPolicy } from '@/types';
 import { buildApiKeyEntry } from '@/components/providers/utils';
 import type { CredentialWeightComparisonValue } from '@/utils/credentialWeight';
@@ -36,7 +36,7 @@ export type OpenAIEditBaseline = {
     authIndex: string;
     headers: Array<{ key: string; value: string }>;
   }>;
-  models: Array<{ name: string; alias: string }>;
+  models: ModelEntry[];
   testModel: string;
 };
 
@@ -68,7 +68,7 @@ interface OpenAIEditDraftState {
   clearDraft: (key: string) => void;
 }
 
-const resolveAction = <T,>(action: SetStateAction<T>, prev: T): T =>
+const resolveAction = <T>(action: SetStateAction<T>, prev: T): T =>
   typeof action === 'function' ? (action as (previous: T) => T)(prev) : action;
 
 const buildEmptyForm = (): OpenAIFormState => ({

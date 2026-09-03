@@ -17,12 +17,25 @@ import type {
   ApiKeyEntry,
   ModelAlias,
 } from '@/types';
+import {
+  hasModelThinkingLevelsClearMarker,
+  hasModelThinkingLevelsEditMarker,
+  markModelThinkingLevelsForClear,
+  markModelThinkingLevelsForEdit,
+  removeThinkingFlagAliases,
+  stripModelThinkingLevelsMarkers,
+  THINKING_DYNAMIC_ALLOWED_FIELDS,
+  THINKING_ZERO_ALLOWED_FIELDS,
+} from '@/types';
 
 const serializeHeaders = (headers?: Record<string, string>) =>
   headers && Object.keys(headers).length ? headers : undefined;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
+
+const hasOwnField = (value: unknown, field: string): value is Record<string, unknown> =>
+  isRecord(value) && Object.prototype.hasOwnProperty.call(value, field);
 
 const AUTH_INDEX_FIELDS = ['auth-index', 'authIndex', 'auth_index'] as const;
 const DISABLE_COOLING_FIELDS = ['disable-cooling', 'disableCooling', 'disable_cooling'] as const;
@@ -122,7 +135,6 @@ const MODEL_ALIAS_FIELDS = [
   'output-modalities',
   'outputModalities',
   'output_modalities',
-  'thinking',
 ] as const;
 
 const API_KEY_ENTRY_FIELDS = [
@@ -297,6 +309,10 @@ const mergeModelPayloads = (raw: unknown, models: unknown) =>
         return payloadItems.map((payload, index) => {
           const rawModel = findRawRecord(rawRecords, usedIndexes, payload, index, modelIdentity);
           const next = mergeKnownFields(rawModel, payload, MODEL_ALIAS_FIELDS);
+          const payloadThinking = payload.thinking;
+          const clearThinkingLevels =
+            hasModelThinkingLevelsClearMarker(payload) || payloadThinking === null;
+          const editThinkingLevels = hasModelThinkingLevelsEditMarker(payload);
           preserveOmittedRawField(rawModel, payload, next, ['image']);
           preserveOmittedRawField(rawModel, payload, next, [
             'force-mapping',
@@ -313,7 +329,46 @@ const mergeModelPayloads = (raw: unknown, models: unknown) =>
             'outputModalities',
             'output_modalities',
           ]);
-          preserveOmittedRawField(rawModel, payload, next, ['thinking']);
+          if (clearThinkingLevels) {
+            const rawThinking = isRecord(rawModel?.thinking) ? rawModel.thinking : undefined;
+            const nextThinking = {
+              ...(rawThinking ?? {}),
+              ...(isRecord(payloadThinking) ? payloadThinking : {}),
+            };
+            delete nextThinking.levels;
+            const preserveExplicitEmptyThinking =
+              (isRecord(rawThinking) && Object.keys(rawThinking).length === 0) ||
+              (isRecord(payloadThinking) && Object.keys(payloadThinking).length === 0);
+            if (Object.keys(nextThinking).length > 0 || preserveExplicitEmptyThinking) {
+              next.thinking = nextThinking;
+            } else {
+              delete next.thinking;
+            }
+          } else if (editThinkingLevels && isRecord(payloadThinking)) {
+            const rawThinking = isRecord(rawModel?.thinking) ? rawModel.thinking : undefined;
+            let nextThinking = {
+              ...(rawThinking ?? {}),
+              ...payloadThinking,
+            };
+            nextThinking = removeThinkingFlagAliases(nextThinking, [
+              ...THINKING_ZERO_ALLOWED_FIELDS,
+              ...THINKING_DYNAMIC_ALLOWED_FIELDS,
+            ]);
+            next.thinking = nextThinking;
+          } else if (isRecord(payloadThinking)) {
+            const rawThinking = isRecord(rawModel?.thinking) ? rawModel.thinking : undefined;
+            next.thinking = {
+              ...(rawThinking ?? {}),
+              ...payloadThinking,
+            };
+          } else if (hasOwnField(rawModel, 'thinking') && isRecord(rawModel.thinking)) {
+            // Preserve an explicitly empty or future-only Thinking container when the
+            // normalized payload does not mention it.
+            next.thinking = { ...rawModel.thinking };
+          }
+          if (next.thinking === null) {
+            delete next.thinking;
+          }
           return next;
         });
       })()
@@ -398,7 +453,35 @@ const buildPreservedList = async <T>(
   try {
     rawConfig = await apiClient.get('/config');
   } catch {
-    return payloads;
+    return payloads.map((payload) => {
+      if (!Array.isArray(payload.models)) return payload;
+      return {
+        ...payload,
+        models: payload.models.map((model) => {
+          if (!isRecord(model)) return model;
+          const next = stripModelThinkingLevelsMarkers(model);
+          if (hasModelThinkingLevelsClearMarker(model)) {
+            const nextThinking = isRecord(model.thinking) ? { ...model.thinking } : {};
+            delete nextThinking.levels;
+            const preserveExplicitEmptyThinking =
+              isRecord(model.thinking) && Object.keys(model.thinking).length === 0;
+            if (Object.keys(nextThinking).length > 0 || preserveExplicitEmptyThinking) {
+              next.thinking = nextThinking;
+            } else {
+              delete next.thinking;
+            }
+          } else if (hasModelThinkingLevelsEditMarker(model) && isRecord(next.thinking)) {
+            next.thinking = removeThinkingFlagAliases(next.thinking, [
+              ...THINKING_ZERO_ALLOWED_FIELDS,
+              ...THINKING_DYNAMIC_ALLOWED_FIELDS,
+            ]);
+          } else if (next.thinking === null) {
+            delete next.thinking;
+          }
+          return next;
+        }),
+      };
+    });
   }
 
   const rawItems = getRawSectionList(rawConfig, section);
@@ -649,6 +732,13 @@ const serializeModelAliases = (models?: ModelAlias[]) =>
           }
           if (isRecord(model.thinking)) {
             payload.thinking = model.thinking;
+          }
+          if (hasModelThinkingLevelsClearMarker(model)) {
+            // The non-enumerable marker is consumed by the raw merge layer.
+            markModelThinkingLevelsForClear(payload);
+          }
+          if (hasModelThinkingLevelsEditMarker(model)) {
+            markModelThinkingLevelsForEdit(payload);
           }
           return payload;
         })
