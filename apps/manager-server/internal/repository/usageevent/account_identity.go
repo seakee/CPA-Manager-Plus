@@ -21,10 +21,16 @@ type legacyAccountIdentityPredicate struct {
 	args []any
 }
 
+// maxCodexLegacyIdentityProbe is the largest matching set this check will
+// inspect per predicate. The request path cannot scan an unbounded
+// usage_events bucket; a larger set is treated as inconclusive and refused.
+const maxCodexLegacyIdentityProbe = 512
+
 // ResolveCodexLegacyAccountKey returns the file/index account key only when
-// every matching usage event remains attributable to the requested Codex
-// account. A false result is intentionally non-error: callers must fail
-// closed and continue with the stable key only.
+// every inspected matching usage event remains attributable to the requested
+// Codex account. Sets larger than maxCodexLegacyIdentityProbe are refused.
+// A false result is intentionally non-error: callers must fail closed and
+// continue with the stable key only.
 func ResolveCodexLegacyAccountKey(
 	ctx context.Context,
 	queryer SQLQueryer,
@@ -34,27 +40,52 @@ func ResolveCodexLegacyAccountKey(
 	if !valid {
 		return "", false, nil
 	}
-
-	for _, predicate := range legacyAccountIdentityPredicates(authFile, authIndex) {
-		rows, err := queryer.QueryContext(ctx, `select
-			coalesce(e.provider, ''),
-			coalesce(e.auth_provider_snapshot, ''),
-			coalesce(e.auth_account_id_snapshot, ''),
-			coalesce(e.auth_project_id_snapshot, '')
-		from usage_events e
-		where `+predicate.sql, predicate.args...)
-		if err != nil {
-			return "", false, err
-		}
-		allowed, err := scanLegacyAccountIdentity(rows, targetAccountID)
-		if err != nil {
-			return "", false, err
-		}
-		if !allowed {
-			return "", false, nil
-		}
+	allowed, err := inspectCodexLegacyIdentity(ctx, queryer, authFile, authIndex, targetAccountID)
+	if err != nil || !allowed {
+		return "", false, err
 	}
 	return legacyKey, true, nil
+}
+
+func inspectCodexLegacyIdentity(
+	ctx context.Context,
+	queryer SQLQueryer,
+	authFile, authIndex, targetAccountID string,
+) (bool, error) {
+	for _, predicate := range legacyAccountIdentityPredicates(authFile, authIndex) {
+		allowed, err := inspectCodexLegacyIdentityPredicate(ctx, queryer, predicate, targetAccountID)
+		if err != nil {
+			return false, err
+		}
+		if !allowed {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func inspectCodexLegacyIdentityPredicate(
+	ctx context.Context,
+	queryer SQLQueryer,
+	predicate legacyAccountIdentityPredicate,
+	targetAccountID string,
+) (bool, error) {
+	args := make([]any, 0, len(predicate.args)+1)
+	args = append(args, predicate.args...)
+	args = append(args, maxCodexLegacyIdentityProbe+1)
+	rows, err := queryer.QueryContext(ctx, `select
+		coalesce(e.provider, ''),
+		coalesce(e.auth_provider_snapshot, ''),
+		coalesce(e.auth_account_id_snapshot, ''),
+		coalesce(e.auth_project_id_snapshot, '')
+	from usage_events e
+	where `+predicate.sql+`
+	order by e.timestamp_ms desc, e.id desc
+	limit ?`, args...)
+	if err != nil {
+		return false, err
+	}
+	return scanLegacyAccountIdentity(rows, targetAccountID, maxCodexLegacyIdentityProbe)
 }
 
 // ResolveCodexLegacyAccountKey evaluates the same check through a short
@@ -79,23 +110,12 @@ func (r *repository) ResolveCodexLegacyAccountKey(
 }
 
 func codexLegacyTarget(fields usageidentity.Fields) (string, string, string, string, bool) {
-	provider := normalizeIdentityProvider(fields.AuthProviderSnapshot)
 	targetAccountID := strings.TrimSpace(fields.AuthAccountIDSnapshot)
-	if provider != "codex" || targetAccountID == "" {
+	if !codexLegacyIdentityRequested(fields) {
 		return "", "", "", "", false
 	}
-
-	authFile := strings.TrimSpace(fields.AuthFileSnapshot)
-	if authFile == "" {
-		source := strings.TrimSpace(fields.Source)
-		account := strings.TrimSpace(fields.AccountSnapshot)
-		label := strings.TrimSpace(fields.AuthLabelSnapshot)
-		if source != "" && !strings.EqualFold(source, account) && !strings.EqualFold(source, label) {
-			authFile = source
-		}
-	}
-	authIndex := strings.TrimSpace(fields.AuthIndex)
-	if authFile == "" || authIndex == "" {
+	authFile, authIndex, ok := codexLegacyCredential(fields)
+	if !ok {
 		return "", "", "", "", false
 	}
 	legacyKey, valid := usageidentity.LegacyAccountKey(fields)
@@ -103,6 +123,33 @@ func codexLegacyTarget(fields usageidentity.Fields) (string, string, string, str
 		return "", "", "", "", false
 	}
 	return legacyKey, targetAccountID, authFile, authIndex, true
+}
+
+func codexLegacyIdentityRequested(fields usageidentity.Fields) bool {
+	return normalizeIdentityProvider(fields.AuthProviderSnapshot) == "codex" &&
+		strings.TrimSpace(fields.AuthAccountIDSnapshot) != ""
+}
+
+func codexLegacyCredential(fields usageidentity.Fields) (string, string, bool) {
+	authFile := strings.TrimSpace(fields.AuthFileSnapshot)
+	if authFile == "" {
+		authFile = codexLegacySourceFile(fields)
+	}
+	authIndex := strings.TrimSpace(fields.AuthIndex)
+	if authFile == "" || authIndex == "" {
+		return "", "", false
+	}
+	return authFile, authIndex, true
+}
+
+func codexLegacySourceFile(fields usageidentity.Fields) string {
+	source := strings.TrimSpace(fields.Source)
+	account := strings.TrimSpace(fields.AccountSnapshot)
+	label := strings.TrimSpace(fields.AuthLabelSnapshot)
+	if source == "" || strings.EqualFold(source, account) || strings.EqualFold(source, label) {
+		return ""
+	}
+	return source
 }
 
 func legacyAccountIdentityPredicates(authFile, authIndex string) []legacyAccountIdentityPredicate {
@@ -144,46 +191,66 @@ func legacySourceIdentityGuards() string {
 		and (e.auth_label_snapshot is null or lower(trim(e.source)) <> lower(trim(e.auth_label_snapshot)))`
 }
 
-func scanLegacyAccountIdentity(rows *sql.Rows, targetAccountID string) (bool, error) {
+func scanLegacyAccountIdentity(rows *sql.Rows, targetAccountID string, maxRows int) (bool, error) {
 	defer rows.Close()
-	seenIDs := map[string]struct{}{}
+	seenRows := 0
 	for rows.Next() {
-		var provider, authProvider, accountID, projectID string
-		if err := rows.Scan(&provider, &authProvider, &accountID, &projectID); err != nil {
+		ok, err := consumeLegacyIdentityRow(rows, &seenRows, maxRows, targetAccountID)
+		if err != nil {
 			return false, err
 		}
-		hasProvider := false
-		for _, value := range []string{provider, authProvider} {
-			normalized := normalizeIdentityProvider(value)
-			if normalized == "" {
-				continue
-			}
-			hasProvider = true
-			if normalized != "codex" {
-				return false, nil
-			}
-		}
-		if !hasProvider {
+		if !ok {
 			return false, nil
 		}
+	}
+	return true, rows.Err()
+}
 
-		for _, value := range []string{
-			strings.TrimSpace(accountID),
-			usageidentity.CodexAccountIDFromSnapshot(projectID),
-		} {
-			if value == "" {
-				continue
-			}
-			if value != targetAccountID {
-				return false, nil
-			}
-			seenIDs[value] = struct{}{}
-			if len(seenIDs) > 1 {
-				return false, nil
-			}
+func consumeLegacyIdentityRow(rows *sql.Rows, seenRows *int, maxRows int, targetAccountID string) (bool, error) {
+	*seenRows++
+	if *seenRows > maxRows {
+		return false, nil
+	}
+	var provider, authProvider, accountID, projectID string
+	if err := rows.Scan(&provider, &authProvider, &accountID, &projectID); err != nil {
+		return false, err
+	}
+	return legacyIdentityRowAllowed(provider, authProvider, accountID, projectID, targetAccountID), nil
+}
+
+func legacyIdentityRowAllowed(provider, authProvider, accountID, projectID, targetAccountID string) bool {
+	return legacyIdentityProviderAllowed(provider, authProvider) &&
+		legacyIdentityAccountIDsAllowed(accountID, projectID, targetAccountID)
+}
+
+func legacyIdentityProviderAllowed(provider, authProvider string) bool {
+	hasProvider := false
+	for _, value := range []string{provider, authProvider} {
+		normalized := normalizeIdentityProvider(value)
+		if normalized == "" {
+			continue
+		}
+		hasProvider = true
+		if normalized != "codex" {
+			return false
 		}
 	}
-	return rows.Err() == nil, rows.Err()
+	return hasProvider
+}
+
+func legacyIdentityAccountIDsAllowed(accountID, projectID, targetAccountID string) bool {
+	for _, value := range []string{
+		strings.TrimSpace(accountID),
+		usageidentity.CodexAccountIDFromSnapshot(projectID),
+	} {
+		if value == "" {
+			continue
+		}
+		if value != targetAccountID {
+			return false
+		}
+	}
+	return true
 }
 
 func normalizeIdentityProvider(value string) string {

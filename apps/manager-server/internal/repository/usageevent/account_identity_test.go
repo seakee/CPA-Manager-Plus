@@ -2,6 +2,9 @@ package usageevent
 
 import (
 	"context"
+	"database/sql"
+	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -64,6 +67,22 @@ func TestResolveCodexLegacyAccountKeyRequiresProviderAndMatchingAccountIDs(t *te
 			name: "missing provider blocks",
 			mutate: func(events []usage.Event) []usage.Event {
 				events = append(events, identityTestEvent("missing-provider", 3, "codex-a.json", "auth-a", "", ""))
+				return events
+			},
+			wantAllowed: false,
+		},
+		{
+			name: "aliased non-codex provider blocks",
+			mutate: func(events []usage.Event) []usage.Event {
+				events = append(events, identityTestEvent("grok-provider", 3, "codex-a.json", "auth-a", "x-ai", ""))
+				return events
+			},
+			wantAllowed: false,
+		},
+		{
+			name: "marked project snapshot mismatch blocks",
+			mutate: func(events []usage.Event) []usage.Event {
+				events[0].AuthProjectIDSnapshot = usageidentity.CodexAccountIDSnapshot("account-b")
 				return events
 			},
 			wantAllowed: false,
@@ -144,6 +163,142 @@ func TestResolveCodexLegacyAccountKeyAcceptsLegacySourceFile(t *testing.T) {
 	if !allowed || !valid || key != want {
 		t.Fatalf("source legacy identity = key:%q allowed:%v, want key:%q allowed:true", key, allowed, want)
 	}
+}
+
+func TestResolveCodexLegacyAccountKeySkipsNonCodexTargets(t *testing.T) {
+	cases := []usageidentity.Fields{
+		{
+			AuthProviderSnapshot:  "openai",
+			AuthAccountIDSnapshot: "account-a",
+			AuthFileSnapshot:      "codex-a.json",
+			AuthIndex:             "auth-a",
+		},
+		{
+			AuthProviderSnapshot:  "codex",
+			AuthAccountIDSnapshot: "",
+			AuthFileSnapshot:      "codex-a.json",
+			AuthIndex:             "auth-a",
+		},
+		{
+			AuthProviderSnapshot:  "codex",
+			AuthAccountIDSnapshot: "account-a",
+			AuthFileSnapshot:      "",
+			AuthIndex:             "auth-a",
+			AccountSnapshot:       "same@example.com",
+			Source:                "same@example.com",
+		},
+		{
+			AuthProviderSnapshot:  "codex",
+			AuthAccountIDSnapshot: "account-a",
+			AuthFileSnapshot:      "codex-a.json",
+			AuthIndex:             "",
+		},
+		{
+			AuthProviderSnapshot:  "codex",
+			AuthAccountIDSnapshot: "account-a",
+			AuthFileSnapshot:      "",
+			AuthIndex:             "auth-a",
+			Source:                "",
+		},
+		{
+			AuthProviderSnapshot:  "codex",
+			AuthAccountIDSnapshot: "account-a",
+			AuthFileSnapshot:      "",
+			AuthIndex:             "auth-a",
+			AuthLabelSnapshot:     "ops",
+			Source:                "ops",
+		},
+	}
+	for _, fields := range cases {
+		key, allowed, err := ResolveCodexLegacyAccountKey(context.Background(), panicLegacyIdentityQueryer{}, fields)
+		if err != nil || allowed || key != "" {
+			t.Fatalf("non-codex target = key:%q allowed:%v err:%v, want skip", key, allowed, err)
+		}
+	}
+}
+
+func TestResolveCodexLegacyAccountKeyReturnsQueryError(t *testing.T) {
+	_, allowed, err := ResolveCodexLegacyAccountKey(
+		context.Background(),
+		stubLegacyIdentityQueryer{err: errors.New("query failed")},
+		codexLegacyIdentityTestFields(),
+	)
+	if err == nil || allowed {
+		t.Fatalf("query error = allowed:%v err:%v, want error", allowed, err)
+	}
+}
+
+func TestResolveCodexLegacyAccountKeyAllowsMatchingSetAtProbeLimit(t *testing.T) {
+	key, allowed := resolveLegacyIdentityWithMatchingEvents(t, maxCodexLegacyIdentityProbe)
+	want, valid := usageidentity.LegacyAccountKey(codexLegacyIdentityTestFields())
+	if !valid || !allowed || key != want {
+		t.Fatalf("at-limit identity = key:%q allowed:%v, want key:%q allowed:true", key, allowed, want)
+	}
+}
+
+func TestResolveCodexLegacyAccountKeyRefusesMatchingSetBeyondProbeLimit(t *testing.T) {
+	key, allowed := resolveLegacyIdentityWithMatchingEvents(t, maxCodexLegacyIdentityProbe+1)
+	if allowed || key != "" {
+		t.Fatalf("over-limit identity = key:%q allowed:%v, want refused", key, allowed)
+	}
+}
+
+func resolveLegacyIdentityWithMatchingEvents(t *testing.T, n int) (string, bool) {
+	t.Helper()
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repo := New(db)
+	events := make([]usage.Event, 0, n)
+	for i := 0; i < n; i++ {
+		accountID := ""
+		if i%3 == 0 {
+			accountID = "account-a"
+		}
+		events = append(events, identityTestEvent(
+			fmt.Sprintf("probe-%d", i),
+			int64(i+1),
+			"codex-a.json",
+			"auth-a",
+			"codex",
+			accountID,
+		))
+	}
+	if _, err := repo.InsertBatch(context.Background(), events); err != nil {
+		t.Fatalf("insert identity events: %v", err)
+	}
+	key, allowed, err := repo.ResolveCodexLegacyAccountKey(context.Background(), codexLegacyIdentityTestFields())
+	if err != nil {
+		t.Fatalf("resolve identity: %v", err)
+	}
+	return key, allowed
+}
+
+func codexLegacyIdentityTestFields() usageidentity.Fields {
+	return usageidentity.Fields{
+		AuthFileSnapshot:      "codex-a.json",
+		AuthIndex:             "auth-a",
+		AuthProviderSnapshot:  "codex",
+		AuthAccountIDSnapshot: "account-a",
+		AccountSnapshot:       "same@example.com",
+		Source:                "codex-a.json",
+	}
+}
+
+type stubLegacyIdentityQueryer struct {
+	err error
+}
+
+func (s stubLegacyIdentityQueryer) QueryContext(context.Context, string, ...any) (*sql.Rows, error) {
+	return nil, s.err
+}
+
+type panicLegacyIdentityQueryer struct{}
+
+func (panicLegacyIdentityQueryer) QueryContext(context.Context, string, ...any) (*sql.Rows, error) {
+	panic("legacy identity query should not run for skipped targets")
 }
 
 func identityTestEvent(hash string, offset int64, file, authIndex, provider, accountID string) usage.Event {
