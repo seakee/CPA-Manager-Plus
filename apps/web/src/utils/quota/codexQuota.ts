@@ -198,10 +198,7 @@ export const normalizeCodexModelId = (value: string | null | undefined): string 
     .toLowerCase();
 };
 
-export const canonicalizeCodexProviderWindowId = (
-  value: string,
-  windowKind?: string
-): string => {
+export const canonicalizeCodexProviderWindowId = (value: string, windowKind?: string): string => {
   const id = value.trim().toLowerCase();
   const normalizedWindowKind = windowKind?.trim().toLowerCase().replace(/_/g, '-');
   if (id === 'primary') return 'five-hour';
@@ -220,8 +217,7 @@ export type CodexProviderWindowIdentity = {
   providerWindowAliases?: string[];
 };
 
-const normalizeCodexProviderWindowToken = (value: string): string =>
-  value.trim().toLowerCase();
+const normalizeCodexProviderWindowToken = (value: string): string => value.trim().toLowerCase();
 
 const inferCodexProviderWindowKind = (value: string): string | undefined => {
   const id = normalizeCodexProviderWindowToken(value);
@@ -330,7 +326,9 @@ export const findCodexProviderWindowMatch = (
     (alias) => !CODEX_AMBIGUOUS_PROVIDER_WINDOW_ALIASES.has(alias)
   );
   const matchingActiveWindows = activeWindows.filter((window) =>
-    usableAliases.some((alias) => providerWindowAliasMatches(window, candidate.window).includes(alias))
+    usableAliases.some((alias) =>
+      providerWindowAliasMatches(window, candidate.window).includes(alias)
+    )
   );
   if (matchingActiveWindows.length !== 1) return -1;
   return candidate.index;
@@ -353,9 +351,7 @@ export const isCodexMainQuotaModelScope = (scope: QuotaModelScope | null | undef
   scope.key?.trim().toLowerCase() === CODEX_MAIN_QUOTA_SCOPE_KEY &&
   scope.complete !== false;
 
-export const isCodexSparkModelScope = (
-  scope: QuotaModelScope | null | undefined
-): boolean =>
+export const isCodexSparkModelScope = (scope: QuotaModelScope | null | undefined): boolean =>
   scope?.kind === 'models' &&
   scope.complete !== false &&
   (scope.models ?? []).some((model) => normalizeCodexModelId(model) === CODEX_SPARK_MODEL_ID);
@@ -459,7 +455,7 @@ export const resolveCodexAdditionalQuotaScope = (
       normalizeWindowId(anonymousIdentity) ||
       'additional-unknown',
     labelName: limitName ?? meteredFeature ?? anonymousIdentity,
-    scopeDisplayName: limitName ?? undefined,
+    scopeDisplayName: limitName ?? meteredFeature ?? undefined,
   };
 };
 
@@ -560,7 +556,10 @@ const additionalQuotaWindowLabelMetadata = (
     default:
       return {
         labelKey: 'codex_quota.additional_generic_window',
-        labelParams: { ...params, duration: formatWindowDuration(normalizeNumberValue(durationSeconds)) },
+        labelParams: {
+          ...params,
+          duration: formatWindowDuration(normalizeNumberValue(durationSeconds)),
+        },
       };
   }
 };
@@ -847,7 +846,9 @@ const addCodexRateLimitWindows = (
       genericLabelKey,
       { ...genericLabelParams, duration },
       options?.modelScope ?? incompleteCodexFeatureScope('scope_unknown'),
-      aliasesForWindow(`${genericIdPrefix ? `${genericIdPrefix}-` : ''}window-${duration}-${index}`),
+      aliasesForWindow(
+        `${genericIdPrefix ? `${genericIdPrefix}-` : ''}window-${duration}-${index}`
+      ),
       window,
       limitReached,
       allowed,

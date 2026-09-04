@@ -177,6 +177,7 @@ import {
 import {
   buildAccountQuotaSnapshotQueryAccounts,
   buildAccountQuotaSnapshotWriteEntries,
+  filterCurrentAccountQuotaWindowDefinitions,
   mergeCodexResetCreditsFromQuotaSnapshots,
   mergeAccountQuotaSnapshotWindows,
 } from '@/features/accounts/model/accountQuotaSnapshots';
@@ -4569,24 +4570,26 @@ export function AccountsPage() {
       const provider = selectedRow?.selectionKey === rowKey ? selectedRow.provider : undefined;
       result.set(
         rowKey,
-        mergeAccountQuotaSnapshotWindows(
-          definitions,
-          quotaSnapshotWindowsByRowKey.get(rowKey) ?? [],
-          {
-            provider,
-            t,
-            getLabel: (snapshot) => {
-              const kind = snapshot.window_kind;
-              if (kind === 'rolling_24h') {
-                return t('accounts.detail_snapshot_window_rolling_24h');
-              }
-              if (kind === 'five_hour') return t('accounts.detail_snapshot_window_five_hour');
-              if (kind === 'daily') return t('accounts.detail_snapshot_window_daily');
-              if (kind === 'weekly') return t('accounts.detail_snapshot_window_weekly');
-              if (kind === 'monthly') return t('accounts.detail_snapshot_window_monthly');
-              return snapshot.provider_window_id;
-            },
-          }
+        filterCurrentAccountQuotaWindowDefinitions(
+          mergeAccountQuotaSnapshotWindows(
+            definitions,
+            quotaSnapshotWindowsByRowKey.get(rowKey) ?? [],
+            {
+              provider,
+              t,
+              getLabel: (snapshot) => {
+                const kind = snapshot.window_kind;
+                if (kind === 'rolling_24h') {
+                  return t('accounts.detail_snapshot_window_rolling_24h');
+                }
+                if (kind === 'five_hour') return t('accounts.detail_snapshot_window_five_hour');
+                if (kind === 'daily') return t('accounts.detail_snapshot_window_daily');
+                if (kind === 'weekly') return t('accounts.detail_snapshot_window_weekly');
+                if (kind === 'monthly') return t('accounts.detail_snapshot_window_monthly');
+                return snapshot.provider_window_id;
+              },
+            }
+          )
         )
       );
     });
@@ -4598,7 +4601,9 @@ export function AccountsPage() {
     windowsByRowKey.set(
       selectedRow.selectionKey,
       effectiveQuotaWindowDefinitionsByRowKey.get(selectedRow.selectionKey) ??
-        buildAccountQuotaWindowDefinitions(buildQuotaDisplayWindows(selectedRow))
+        filterCurrentAccountQuotaWindowDefinitions(
+          buildAccountQuotaWindowDefinitions(buildQuotaDisplayWindows(selectedRow))
+        )
     );
     const asOfMs =
       accountWindowUsageQueryContext?.rowKey === selectedRow.selectionKey
@@ -5217,7 +5222,9 @@ export function AccountsPage() {
     const queryAsOfMs = Date.now();
     const initialDefinitions =
       effectiveQuotaWindowDefinitionsByRowKey.get(selectedRow.selectionKey) ??
-      buildAccountQuotaWindowDefinitions(buildQuotaDisplayWindows(selectedRow));
+      filterCurrentAccountQuotaWindowDefinitions(
+        buildAccountQuotaWindowDefinitions(buildQuotaDisplayWindows(selectedRow))
+      );
     let entries = buildAccountWindowUsageTargetEntries(
       [selectedRow],
       new Map([[selectedRow.selectionKey, initialDefinitions]]),
@@ -5294,7 +5301,7 @@ export function AccountsPage() {
             featureAvailability.managerServiceBase,
             managementKey,
             queryAccounts,
-            { includeInactive: false },
+            { includeInactive: true },
             controller.signal
           );
           if (!isCurrentRequest()) return;
@@ -5307,10 +5314,8 @@ export function AccountsPage() {
               next.set(selectedRow.selectionKey, snapshotWindows);
               return next;
             });
-            const mergedDefinitions = mergeAccountQuotaSnapshotWindows(
-              localDefinitions,
-              snapshotWindows,
-              {
+            const mergedDefinitions = filterCurrentAccountQuotaWindowDefinitions(
+              mergeAccountQuotaSnapshotWindows(localDefinitions, snapshotWindows, {
                 provider: selectedRow.provider,
                 t,
                 getLabel: (snapshot) => {
@@ -5324,7 +5329,7 @@ export function AccountsPage() {
                   if (kind === 'monthly') return t('accounts.detail_snapshot_window_monthly');
                   return snapshot.provider_window_id;
                 },
-              }
+              })
             );
             entries = buildAccountWindowUsageTargetEntries(
               [selectedRow],
@@ -7612,7 +7617,9 @@ export function AccountsPage() {
       usageRows.find((row) => !row.row && row.fileName === selectedRow.fileName);
     const selectedQuotaWindows = (
       effectiveQuotaWindowDefinitionsByRowKey.get(selectedRow.selectionKey) ??
-      buildAccountQuotaWindowDefinitions(buildQuotaDisplayWindows(selectedRow))
+      filterCurrentAccountQuotaWindowDefinitions(
+        buildAccountQuotaWindowDefinitions(buildQuotaDisplayWindows(selectedRow))
+      )
     ).map((definition) => ({
       ...definition.display,
       providerWindowId: definition.providerWindowId,

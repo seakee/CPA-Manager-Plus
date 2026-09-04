@@ -3,8 +3,10 @@ import { describe, expect, it } from 'vitest';
 import type { AccountQuotaSnapshotWindow } from '@/services/api/usageService';
 import { CODEX_SPARK_MODEL_ID } from '@/utils/quota/codexQuota';
 import type { AccountQuotaWindowDefinition } from './accountQuotaWindowDefinitions';
+import { buildAccountWindowUsageTargetEntries } from './accountWindowUsageRows';
 import {
   buildAccountQuotaSnapshotWriteEntries,
+  filterCurrentAccountQuotaWindowDefinitions,
   mergeCodexResetCreditsFromQuotaSnapshots,
   mergeAccountQuotaSnapshotWindows,
 } from './accountQuotaSnapshots';
@@ -531,6 +533,69 @@ describe('account quota snapshots', () => {
     });
   });
 
+  it('keeps active, pending, and legacy windows in the current view but filters inactive windows', () => {
+    const definitions = [
+      makeDefinition({ key: 'active', providerWindowId: 'active', availability: 'active' }),
+      makeDefinition({
+        key: 'pending',
+        providerWindowId: 'pending',
+        availability: 'pending_absent',
+      }),
+      makeDefinition({ key: 'inactive', providerWindowId: 'inactive', availability: 'inactive' }),
+      makeDefinition({ key: 'legacy', providerWindowId: 'legacy' }),
+    ];
+
+    expect(filterCurrentAccountQuotaWindowDefinitions(definitions).map((item) => item.key)).toEqual(
+      ['active', 'pending', 'legacy']
+    );
+  });
+
+  it('uses an inactive snapshot as a tombstone for a stale local Codex definition', () => {
+    const local = makeDefinition({
+      key: 'gpt-reserve-weekly-0',
+      providerWindowId: 'gpt-reserve-weekly-0',
+      kind: 'weekly',
+      durationSeconds: 604_800,
+      label: 'gpt-reserve weekly limit',
+      modelScope: { kind: 'feature', key: 'gpt_reserve', complete: false },
+    });
+    const snapshot = makeSnapshot({
+      provider_window_id: 'gpt-reserve-weekly-0',
+      window_kind: 'weekly',
+      model_scope_kind: 'feature',
+      model_scope_key: 'gpt_reserve',
+      availability: 'inactive',
+      observed_at_ms: 20_000,
+    });
+
+    const merged = mergeAccountQuotaSnapshotWindows([local], [snapshot], { provider: 'codex' });
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({
+      providerWindowId: 'gpt-reserve-weekly-0',
+      availability: 'inactive',
+    });
+    expect(filterCurrentAccountQuotaWindowDefinitions(merged)).toEqual([]);
+  });
+
+  it('does not create usage targets for inactive definitions after current filtering', () => {
+    const row = makeSnapshotTestRow('codex');
+    const active = makeDefinition({ key: 'active', providerWindowId: 'active' });
+    const inactive = makeDefinition({
+      key: 'gpt-reserve-weekly-0',
+      providerWindowId: 'gpt-reserve-weekly-0',
+      availability: 'inactive',
+    });
+    const current = filterCurrentAccountQuotaWindowDefinitions([active, inactive]);
+    const entries = buildAccountWindowUsageTargetEntries(
+      [row],
+      new Map([[row.selectionKey, current]]),
+      10_000
+    );
+
+    expect(entries).not.toHaveLength(0);
+    expect(entries.every((entry) => entry.windowKey !== 'gpt-reserve-weekly-0')).toBe(true);
+  });
+
   it('encodes an incomplete all scope as fail-closed feature scope', () => {
     const incomplete = makeDefinition({
       key: 'unknown-window',
@@ -567,12 +632,18 @@ describe('account quota snapshots', () => {
       boundary_accuracy: 'unknown',
     });
 
-    const merged = mergeAccountQuotaSnapshotWindows([], [makeSnapshot({
-      ...entry.windows[0],
-      provider_window_id: 'future-feature-weekly-0',
-      window_kind: 'weekly',
-      stale: false,
-    })], { provider: 'codex' });
+    const merged = mergeAccountQuotaSnapshotWindows(
+      [],
+      [
+        makeSnapshot({
+          ...entry.windows[0],
+          provider_window_id: 'future-feature-weekly-0',
+          window_kind: 'weekly',
+          stale: false,
+        }),
+      ],
+      { provider: 'codex' }
+    );
     expect(merged).toMatchObject([
       expect.objectContaining({
         providerWindowId: 'future-feature-weekly-0',

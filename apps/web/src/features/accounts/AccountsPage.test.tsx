@@ -12110,7 +12110,7 @@ describe('AccountsPage replacement flows', () => {
     ]);
     const queryCalls = vi.mocked(accountQuotaSnapshotApi.query).mock.calls;
     expect(queryCalls[queryCalls.length - 1]?.[3]).toEqual({
-      includeInactive: false,
+      includeInactive: true,
     });
   });
 
@@ -12890,6 +12890,90 @@ describe('AccountsPage replacement flows', () => {
       await quotaTab.props.onRefreshHistory();
     });
     expect(mocks.getAccountHistory).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['inactive', false],
+    ['pending_absent', true],
+  ] as const)('uses %s snapshot state for current quota visibility', async (availability, visible) => {
+    const nowMs = Date.now();
+    const file = {
+      ...makeCodexFile('codex.json', 'auth-1', 'codex@example.com'),
+      disabled: true,
+    } as AuthFileItem;
+    const rowKey = getAuthFileSelectionKey(file);
+    mocks.files = [file];
+    mocks.location = {
+      pathname: '/accounts',
+      search: `?account=${encodeURIComponent(rowKey)}&tab=quota`,
+    };
+    mocks.quotaDisplayWindowsOverride = [
+      {
+        key: 'gpt-reserve-weekly-0',
+        label: 'gpt-reserve weekly limit',
+        kind: 'weekly',
+        remainingPercent: 100,
+        usedPercent: 0,
+        resetLabel: 'later',
+        resetAccuracy: 'exact',
+        limitWindowSeconds: 7 * 24 * 60 * 60,
+        resetAtMs: nowMs + 7 * 24 * 60 * 60 * 1000,
+        fromMs: nowMs - 7 * 24 * 60 * 60 * 1000,
+        toMs: nowMs,
+        source: 'codex',
+        observationSource: 'api_query',
+        observedAtMs: nowMs - 1_000,
+        windowMode: 'fixed',
+        cycleStartMs: nowMs - 1_000,
+        cycleEndMs: nowMs + 7 * 24 * 60 * 60 * 1000,
+        modelScope: { kind: 'feature', key: 'gpt_reserve', complete: false },
+      },
+    ];
+    vi.mocked(accountQuotaSnapshotApi.query).mockResolvedValueOnce({
+      generated_at_ms: nowMs,
+      items: [
+        {
+          row_key: rowKey,
+          account_key: rowKey,
+          provider: 'codex',
+          windows: [
+            {
+              provider_window_id: 'gpt-reserve-weekly-0',
+              window_kind: 'weekly',
+              window_mode: 'fixed',
+              model_scope_kind: 'feature',
+              model_scope_key: 'gpt_reserve',
+              source: 'inspection',
+              observed_at_ms: nowMs,
+              boundary_accuracy: 'exact',
+              cycle_start_ms: nowMs - 1_000,
+              cycle_end_ms: nowMs + 7 * 24 * 60 * 60 * 1000,
+              duration_seconds: 7 * 24 * 60 * 60,
+              used_percent: 0,
+              remaining_percent: 100,
+              stale: true,
+              availability,
+            },
+          ],
+        },
+      ],
+    });
+
+    const renderer = await renderAccountsPage();
+    await flushPromises();
+    await flushPromises();
+
+    const queryCalls = vi.mocked(accountQuotaSnapshotApi.query).mock.calls;
+    expect(queryCalls[queryCalls.length - 1]?.[3]).toEqual({ includeInactive: true });
+    expect(renderer.root.findByType(AccountQuotaTab)).toBeTruthy();
+    expect(renderer.root.findAllByProps({ 'data-quota-window-group': 'model' })).toHaveLength(
+      visible ? 1 : 0
+    );
+    if (visible) {
+      expect(treeText(renderer)).toContain('gpt-reserve weekly limit');
+    } else {
+      expect(treeText(renderer)).not.toContain('gpt-reserve weekly limit');
+    }
   });
 
   it('keeps quota display available when the Manager Server monitoring path is unavailable', async () => {

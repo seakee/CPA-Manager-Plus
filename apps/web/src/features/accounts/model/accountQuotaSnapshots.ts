@@ -377,14 +377,12 @@ const normalizedSnapshotModelIDs = (modelIDs: string[] | undefined): string[] =>
     new Set((modelIDs ?? []).map((model) => model.trim().toLowerCase()).filter(Boolean))
   ).sort();
 
-const snapshotScopeParts = (
-  window: {
-    provider_window_id: string;
-    model_scope_kind: string;
-    model_scope_key?: string;
-    model_ids?: string[];
-  }
-) => {
+const snapshotScopeParts = (window: {
+  provider_window_id: string;
+  model_scope_kind: string;
+  model_scope_key?: string;
+  model_ids?: string[];
+}) => {
   if (isIncompleteModelScopeSnapshot(window)) {
     return [window.provider_window_id.trim(), 'models', ''];
   }
@@ -394,14 +392,12 @@ const snapshotScopeParts = (
   return [window.provider_window_id.trim(), kind, key, ...models];
 };
 
-const snapshotScopeKey = (
-  window: {
-    provider_window_id: string;
-    model_scope_kind: string;
-    model_scope_key?: string;
-    model_ids?: string[];
-  }
-) => snapshotScopeParts(window).join('\u0000');
+const snapshotScopeKey = (window: {
+  provider_window_id: string;
+  model_scope_kind: string;
+  model_scope_key?: string;
+  model_ids?: string[];
+}) => snapshotScopeParts(window).join('\u0000');
 
 const snapshotDisplayKey = (snapshot: AccountQuotaSnapshotWindow): string =>
   [
@@ -535,20 +531,16 @@ export const mergeAccountQuotaSnapshotWindows = (
       definition.modelScope.complete === false ||
       !scopedProviderWindowIds.has(definition.providerWindowId)
   );
-  const compatibleSnapshots = canonicalSnapshots.filter(
-    (snapshot) => {
-      if (snapshot.model_scope_kind.trim().toLowerCase() !== 'all') return true;
-      if (options.provider !== 'codex') return true;
-      const isKnownScopedLegacy = isCodexKnownScopedProviderWindowId(
-        snapshot.provider_window_id
-      );
-      return (
-        !isKnownScopedLegacy &&
-        !scopedProviderWindowIds.has(snapshot.provider_window_id) &&
-        !scopedProviderWindowAliases.has(snapshot.provider_window_id)
-      );
-    }
-  );
+  const compatibleSnapshots = canonicalSnapshots.filter((snapshot) => {
+    if (snapshot.model_scope_kind.trim().toLowerCase() !== 'all') return true;
+    if (options.provider !== 'codex') return true;
+    const isKnownScopedLegacy = isCodexKnownScopedProviderWindowId(snapshot.provider_window_id);
+    return (
+      !isKnownScopedLegacy &&
+      !scopedProviderWindowIds.has(snapshot.provider_window_id) &&
+      !scopedProviderWindowAliases.has(snapshot.provider_window_id)
+    );
+  });
   const snapshotsByKey = new Map<string, AccountQuotaSnapshotWindow>();
   compatibleSnapshots.forEach((snapshot) => {
     const key = snapshotScopeKey(snapshot);
@@ -562,14 +554,12 @@ export const mergeAccountQuotaSnapshotWindows = (
     if (definition.modelScope.kind === 'all' && definition.modelScope.complete === false) {
       return definition;
     }
-    const key = snapshotScopeKey(
-      {
-        provider_window_id: definition.providerWindowId,
-        model_scope_kind: definition.modelScope.kind,
-        model_scope_key: definition.modelScope.key,
-        model_ids: definition.modelScope.models,
-      },
-    );
+    const key = snapshotScopeKey({
+      provider_window_id: definition.providerWindowId,
+      model_scope_kind: definition.modelScope.kind,
+      model_scope_key: definition.modelScope.key,
+      model_ids: definition.modelScope.models,
+    });
     const snapshot = snapshotsByKey.get(key);
     if (!snapshot) return definition;
     matchedSnapshotKeys.add(key);
@@ -624,9 +614,12 @@ export const mergeAccountQuotaSnapshotWindows = (
   });
 };
 
-const snapshotModelScope = (
-  snapshot: AccountQuotaSnapshotWindow
-): QuotaModelScope => {
+export const filterCurrentAccountQuotaWindowDefinitions = (
+  definitions: AccountQuotaWindowDefinition[]
+): AccountQuotaWindowDefinition[] =>
+  definitions.filter((definition) => definition.availability !== 'inactive');
+
+const snapshotModelScope = (snapshot: AccountQuotaSnapshotWindow): QuotaModelScope => {
   if (isIncompleteModelScopeSnapshot(snapshot)) {
     return { kind: 'models', models: [], complete: false };
   }

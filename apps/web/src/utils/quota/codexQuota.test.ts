@@ -12,6 +12,7 @@ import {
   isCodexLegacyAllScopeReplacement,
   isCodexMainQuotaWindow,
   normalizeCodexModelId,
+  resolveCodexAdditionalQuotaScope,
   resolveCodexUsageQuotaScope,
 } from './codexQuota';
 import type { CodexQuotaWindowInfo } from './codexQuota';
@@ -362,6 +363,66 @@ describe('buildCodexQuotaWindowInfos', () => {
         scopeDisplayName: 'gpt-reserve',
       },
     ]);
+  });
+
+  it('uses metered_feature as the raw display name when limit_name is absent', () => {
+    const windows = buildCodexQuotaWindowInfos({
+      additional_rate_limits: [
+        {
+          metered_feature: 'future_feature',
+          rate_limit: {
+            secondary_window: {
+              used_percent: 25,
+              limit_window_seconds: 604_800,
+            },
+          },
+        },
+      ],
+    });
+
+    expect(windows).toMatchObject([
+      {
+        id: 'future-feature-weekly-0',
+        labelKey: 'codex_quota.additional_secondary_window',
+        labelParams: { name: 'future_feature' },
+        scopeDisplayName: 'future_feature',
+        modelScope: { kind: 'feature', key: 'future_feature', complete: false },
+      },
+    ]);
+  });
+
+  it('does not expose an anonymous structural identity as a display name', () => {
+    const [window] = buildCodexQuotaWindowInfos({
+      additional_rate_limits: [
+        {
+          rate_limit: {
+            secondary_window: {
+              used_percent: 25,
+              limit_window_seconds: 604_800,
+            },
+          },
+        },
+      ],
+    });
+
+    expect(window).toMatchObject({
+      id: 'additional-p-none-s-604800-weekly-0',
+      modelScope: { kind: 'feature', complete: false },
+    });
+    expect(window?.scopeDisplayName).toBeUndefined();
+  });
+
+  it('keeps a provider feature identity separate from a conflicting raw label', () => {
+    const resolution = resolveCodexAdditionalQuotaScope({
+      metered_feature: 'future_feature',
+      limit_name: 'Spark',
+      rate_limit: { secondary_window: { limit_window_seconds: 604_800 } },
+    });
+
+    expect(resolution).toMatchObject({
+      modelScope: { kind: 'feature', key: 'future_feature', complete: false },
+      scopeDisplayName: 'Spark',
+    });
   });
 
   it('assigns account-wide, model, and fail-closed feature scopes', () => {
