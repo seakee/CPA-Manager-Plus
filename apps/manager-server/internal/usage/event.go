@@ -1019,13 +1019,59 @@ func redactCredentialText(value string) string {
 // earlier for display and aggregation, but no event should reach storage
 // without passing through this function.
 func SanitizeForPersistence(event Event) Event {
-	// Preserve existing source identity semantics (including account emails)
-	// while removing credentials that slipped past producer normalization.
-	event.Source = redactCredentialText(event.Source)
+	redact := redactCredentialText
+	event.RequestID = redact(event.RequestID)
+	event.EventHash = hashIfCredentialBearing(event.EventHash)
+	event.Timestamp = redact(event.Timestamp)
+	event.Provider = redact(event.Provider)
+	event.ExecutorType = redact(event.ExecutorType)
+	event.Model = redact(event.Model)
+	event.AnalyticsModel = redact(event.AnalyticsModel)
+	event.RequestedModel = redact(event.RequestedModel)
+	event.ResolvedModel = redact(event.ResolvedModel)
+	event.Endpoint = redact(event.Endpoint)
+	event.Method = redact(event.Method)
+	event.Path = redact(event.Path)
+	event.ClientIP = redact(event.ClientIP)
+	event.XForwardedFor = redact(event.XForwardedFor)
+	event.UserAgent = redact(event.UserAgent)
+	event.AuthType = redact(event.AuthType)
+	event.AuthIndex = redact(event.AuthIndex)
+	event.Source = redact(event.Source)
+	event.SourceHash = hashIfCredentialBearing(event.SourceHash)
+	event.APIKeyHash = hashIfCredentialBearing(event.APIKeyHash)
+	event.AccountSnapshot = redact(event.AccountSnapshot)
+	event.AuthLabelSnapshot = redact(event.AuthLabelSnapshot)
+	event.AuthFileSnapshot = redact(event.AuthFileSnapshot)
+	event.AuthProviderSnapshot = redact(event.AuthProviderSnapshot)
+	event.AuthAccountIDSnapshot = redact(event.AuthAccountIDSnapshot)
+	event.AuthProjectIDSnapshot = redact(event.AuthProjectIDSnapshot)
+	event.ReasoningEffort = redact(event.ReasoningEffort)
+	event.ServiceTier = redact(event.ServiceTier)
+	event.RequestServiceTier = redact(event.RequestServiceTier)
+	event.ResponseServiceTier = redact(event.ResponseServiceTier)
+	event.CacheInputMode = redact(event.CacheInputMode)
 	event.FailSummary = FailSummaryFromBody(event.FailSummary)
-	event.FailBody = redactCredentialText(event.FailBody)
+	event.FailBody = redact(event.FailBody)
+	event.ResponseMetadataJSON = SafeRawJSON(event.ResponseMetadataJSON)
+	event.HeaderQuotaPlanType = redact(event.HeaderQuotaPlanType)
+	event.HeaderErrorKind = redact(event.HeaderErrorKind)
+	event.HeaderErrorCode = redact(event.HeaderErrorCode)
+	event.HeaderTraceID = redact(event.HeaderTraceID)
 	event.RawJSON = SafeRawJSON(event.RawJSON)
+	if event.ResponseMetadata != nil {
+		if raw, err := json.Marshal(event.ResponseMetadata); err == nil {
+			event.ResponseMetadata = ResponseHeaderMetadataFromJSON(SafeRawJSON(string(raw)))
+		}
+	}
 	return event
+}
+
+func hashIfCredentialBearing(value string) string {
+	if redactCredentialText(value) == value {
+		return value
+	}
+	return hashString(value)
 }
 
 func SafeRawJSON(raw string) string {

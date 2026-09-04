@@ -1,6 +1,8 @@
 package usage
 
 import (
+	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -72,5 +74,37 @@ func TestSanitizeForPersistenceKeepsCompleteRedactedFailBody(t *testing.T) {
 	}
 	if len(event.FailBody) <= maxFailSummaryBytes {
 		t.Fatalf("fail body length=%d, want complete diagnostic", len(event.FailBody))
+	}
+}
+
+func TestSanitizeForPersistenceCoversEveryEventTextField(t *testing.T) {
+	const syntheticToken = "sk-proj-synthetic0123456789"
+	event := Event{}
+	value := reflect.ValueOf(&event).Elem()
+	typeOfEvent := value.Type()
+	for index := 0; index < value.NumField(); index++ {
+		field := value.Field(index)
+		if field.Kind() == reflect.String && field.CanSet() {
+			field.SetString("metadata " + syntheticToken)
+		}
+	}
+	event.ResponseMetadata = &ResponseHeaderMetadata{
+		Errors: &HeaderErrorMetadata{AuthorizationError: syntheticToken},
+	}
+
+	sanitized := SanitizeForPersistence(event)
+	sanitizedValue := reflect.ValueOf(sanitized)
+	for index := 0; index < sanitizedValue.NumField(); index++ {
+		field := sanitizedValue.Field(index)
+		if field.Kind() == reflect.String && strings.Contains(field.String(), syntheticToken) {
+			t.Errorf("%s contains synthetic credential marker", typeOfEvent.Field(index).Name)
+		}
+	}
+	metadataJSON, err := json.Marshal(sanitized.ResponseMetadata)
+	if err != nil {
+		t.Fatalf("marshal sanitized response metadata: %v", err)
+	}
+	if strings.Contains(string(metadataJSON), syntheticToken) {
+		t.Fatalf("response metadata contains synthetic credential marker")
 	}
 }
