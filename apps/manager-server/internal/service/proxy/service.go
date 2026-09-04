@@ -11,6 +11,7 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -250,6 +251,14 @@ func (s *Service) proxyToSavedSetup(w http.ResponseWriter, r *http.Request, writ
 		req.Host = target.Host
 		if useSavedManagementKey {
 			req.Header.Set("Authorization", "Bearer "+setup.ManagementKey)
+			// Authenticated Manager requests to a local CPA are server-to-server
+			// management calls, not direct management access from the browser IP.
+			if ip := net.ParseIP(target.Hostname()); ip != nil && ip.IsLoopback() {
+				req.Header.Del("Forwarded")
+				req.Header.Del("X-Real-IP")
+				// A nil entry also prevents ReverseProxy from appending RemoteAddr.
+				req.Header["X-Forwarded-For"] = nil
+			}
 		}
 		if rewritePluginOrigin {
 			rewriteCodexInviteOrigin(req.Header, target)
