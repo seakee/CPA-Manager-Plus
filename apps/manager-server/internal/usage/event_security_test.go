@@ -20,6 +20,11 @@ func TestSanitizeForPersistenceRedactsCredentialText(t *testing.T) {
 		{name: "OAuth identity token", value: "id_token=synthetic0123456789"},
 		{name: "management key field", value: "management-key=synthetic0123456789"},
 		{name: "CPAMP management key", value: "cpamp_0123456789abcdefghijklmnopqrstuv"},
+		{name: "session token", value: "sess-synthetic0123456789abc"},
+		{name: "GitHub token", value: "ghp_synthetic0123456789abc"},
+		{name: "Hugging Face token", value: "hf_synthetic0123456789abc"},
+		{name: "publishable key", value: "pk_synthetic0123456789abc"},
+		{name: "restricted key", value: "rk_synthetic0123456789abc"},
 		{name: "authorization header", value: "Authorization: Bearer synthetic0123456789"},
 	}
 	for _, test := range tests {
@@ -39,7 +44,15 @@ func TestSanitizeForPersistenceRedactsCredentialText(t *testing.T) {
 }
 
 func TestSanitizeForPersistencePreservesCredentialFilename(t *testing.T) {
-	for _, filename := range []string{"codex-account.json", "cpamp_account.json"} {
+	for _, filename := range []string{
+		"codex-account.json",
+		"cpamp_account.json",
+		"ghp_account.json",
+		"hf_account.json",
+		"pk_account.json",
+		"rk_account.json",
+		"sess-account.json",
+	} {
 		event := SanitizeForPersistence(Event{Source: filename, RawJSON: `{"source":"` + filename + `"}`})
 		if event.Source != filename {
 			t.Fatalf("source = %q, want %q", event.Source, filename)
@@ -50,13 +63,23 @@ func TestSanitizeForPersistencePreservesCredentialFilename(t *testing.T) {
 	}
 }
 
-func TestSanitizeForPersistenceRedactsStructuredManagementKey(t *testing.T) {
+func TestSanitizeForPersistenceRedactsStructuredCredentialAliases(t *testing.T) {
 	const secretMarker = "ordinary-unprefixed-synthetic0123456789"
-	event := SanitizeForPersistence(Event{
-		RawJSON: `{"managementKey":"` + secretMarker + `"}`,
-	})
-	if strings.Contains(event.RawJSON, secretMarker) {
-		t.Fatalf("raw JSON contains structured management key: %q", event.RawJSON)
+	for _, key := range []string{
+		"managementKey",
+		"cpaManagementKey",
+		"cpa-management-key",
+		"x-api-key",
+		"xApiKey",
+	} {
+		t.Run(key, func(t *testing.T) {
+			event := SanitizeForPersistence(Event{
+				RawJSON: `{"` + key + `":"` + secretMarker + `"}`,
+			})
+			if strings.Contains(event.RawJSON, secretMarker) {
+				t.Fatalf("raw JSON contains structured %s: %q", key, event.RawJSON)
+			}
+		})
 	}
 }
 

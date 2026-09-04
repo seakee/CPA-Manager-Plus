@@ -439,7 +439,7 @@ var (
 	endpointPattern          = regexp.MustCompile(`^(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s+(\S+)`)
 	authorizationHeaderRegex = regexp.MustCompile(`(?i)\b(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,"'{}]+`)
 	bearerTokenRegex         = regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}`)
-	apiKeyTokenRegex         = regexp.MustCompile(`(sk-proj-[A-Za-z0-9-_]{6,}|sk-ant-[A-Za-z0-9-_]{6,}|sk-[A-Za-z0-9-_]{6,}|sess-[A-Za-z0-9-_]{6,}|ghp_[A-Za-z0-9]{6,}|github_pat_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z-_]{8,}|hf_[A-Za-z0-9]{6,}|pk_[A-Za-z0-9]{6,}|rk_[A-Za-z0-9]{6,}|cpamp_[A-Za-z0-9]{32}\b)`)
+	apiKeyTokenRegex         = regexp.MustCompile(`(sk-proj-[A-Za-z0-9-_]{6,}|sk-ant-[A-Za-z0-9-_]{6,}|sk-[A-Za-z0-9-_]{6,}|sess-[A-Za-z0-9-_]{20,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z-_]{8,}|hf_[A-Za-z0-9]{20,}|pk_[A-Za-z0-9_]{20,}|rk_[A-Za-z0-9_]{20,}|cpamp_[A-Za-z0-9]{32}\b)`)
 	tokenFieldRegex          = regexp.MustCompile(`(?i)\b(access_token|refresh_token|id_token)\b(\s*["']?\s*[:=]\s*["']?)[^"',\s&}]+`)
 	apiKeyFieldRegex         = regexp.MustCompile(`(?i)\b(api[-_ ]?key|x-api-key)\b(\s*["']?\s*[:=]\s*["']?)[^"',\s&}]+`)
 	managementKeyFieldRegex  = regexp.MustCompile(`(?i)\b(management[-_ ]?key)\b(\s*["']?\s*[:=]\s*["']?)[^"',\s&}]+`)
@@ -1168,8 +1168,12 @@ func isSecretKey(key string) bool {
 	normalized := normalizeSecretKey(key)
 	return normalized == "api_key" ||
 		normalized == "apikey" ||
+		normalized == "x_api_key" ||
+		normalized == "xapikey" ||
 		normalized == "management_key" ||
 		normalized == "managementkey" ||
+		normalized == "cpa_management_key" ||
+		normalized == "cpamanagementkey" ||
 		normalized == "authorization" ||
 		normalized == "cookie" ||
 		normalized == "set_cookie" ||
