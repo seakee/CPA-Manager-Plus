@@ -439,9 +439,10 @@ var (
 	endpointPattern          = regexp.MustCompile(`^(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s+(\S+)`)
 	authorizationHeaderRegex = regexp.MustCompile(`(?i)\b(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,"'{}]+`)
 	bearerTokenRegex         = regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}`)
-	apiKeyTokenRegex         = regexp.MustCompile(`(sk-proj-[A-Za-z0-9-_]{6,}|sk-ant-[A-Za-z0-9-_]{6,}|sk-[A-Za-z0-9-_]{6,}|sess-[A-Za-z0-9-_]{6,}|ghp_[A-Za-z0-9]{6,}|github_pat_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z-_]{8,}|hf_[A-Za-z0-9]{6,}|pk_[A-Za-z0-9]{6,}|rk_[A-Za-z0-9]{6,})`)
+	apiKeyTokenRegex         = regexp.MustCompile(`(sk-proj-[A-Za-z0-9-_]{6,}|sk-ant-[A-Za-z0-9-_]{6,}|sk-[A-Za-z0-9-_]{6,}|sess-[A-Za-z0-9-_]{6,}|ghp_[A-Za-z0-9]{6,}|github_pat_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z-_]{8,}|hf_[A-Za-z0-9]{6,}|pk_[A-Za-z0-9]{6,}|rk_[A-Za-z0-9]{6,}|cpamp_[A-Za-z0-9-_]{6,})`)
 	tokenFieldRegex          = regexp.MustCompile(`(?i)\b(access_token|refresh_token|id_token)\b(\s*["']?\s*[:=]\s*["']?)[^"',\s&}]+`)
 	apiKeyFieldRegex         = regexp.MustCompile(`(?i)\b(api[-_ ]?key|x-api-key)\b(\s*["']?\s*[:=]\s*["']?)[^"',\s&}]+`)
+	managementKeyFieldRegex  = regexp.MustCompile(`(?i)\b(management[-_ ]?key)\b(\s*["']?\s*[:=]\s*["']?)[^"',\s&}]+`)
 	cookieJSONFieldRegex     = regexp.MustCompile(`(?i)("?(?:cookie|set-cookie)"?\s*:\s*")[^"]*(")`)
 	cookieHeaderRegex        = regexp.MustCompile(`(?i)\b(cookie|set-cookie)\s*:\s*[^,\r\n"}]+`)
 	emailRegex               = regexp.MustCompile(`([A-Za-z0-9._%+\-])([A-Za-z0-9._%+\-]*)(@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})`)
@@ -980,7 +981,7 @@ func maskSource(value string) string {
 		}
 		return "m:" + trimmed[:4] + "..." + trimmed[len(trimmed)-4:]
 	}
-	return trimmed
+	return redactCredentialText(trimmed)
 }
 
 func looksSecret(value string) bool {
@@ -995,15 +996,36 @@ func FailSummaryFromBody(body string) string {
 	if summary == "" {
 		return ""
 	}
+	summary = redactCredentialText(summary)
+	summary = emailRegex.ReplaceAllString(summary, `${1}***${3}`)
+	return truncateUTF8Bytes(strings.TrimSpace(summary), maxFailSummaryBytes)
+}
+
+func redactCredentialText(value string) string {
+	summary := value
 	summary = authorizationHeaderRegex.ReplaceAllString(summary, `${1}[redacted]`)
 	summary = bearerTokenRegex.ReplaceAllString(summary, `Bearer [redacted]`)
 	summary = tokenFieldRegex.ReplaceAllString(summary, `${1}${2}[redacted]`)
 	summary = apiKeyFieldRegex.ReplaceAllString(summary, `${1}${2}[redacted]`)
+	summary = managementKeyFieldRegex.ReplaceAllString(summary, `${1}${2}[redacted]`)
 	summary = apiKeyTokenRegex.ReplaceAllString(summary, `[redacted]`)
 	summary = cookieJSONFieldRegex.ReplaceAllString(summary, `${1}[redacted]${2}`)
 	summary = cookieHeaderRegex.ReplaceAllString(summary, `${1}: [redacted]`)
-	summary = emailRegex.ReplaceAllString(summary, `${1}***${3}`)
-	return truncateUTF8Bytes(strings.TrimSpace(summary), maxFailSummaryBytes)
+	return summary
+}
+
+// SanitizeForPersistence applies the final credential-redaction boundary to
+// fields that may contain untrusted upstream payloads. Callers can normalize
+// earlier for display and aggregation, but no event should reach storage
+// without passing through this function.
+func SanitizeForPersistence(event Event) Event {
+	// Preserve existing source identity semantics (including account emails)
+	// while removing credentials that slipped past producer normalization.
+	event.Source = redactCredentialText(event.Source)
+	event.FailSummary = FailSummaryFromBody(event.FailSummary)
+	event.FailBody = FailSummaryFromBody(event.FailBody)
+	event.RawJSON = SafeRawJSON(event.RawJSON)
+	return event
 }
 
 func SafeRawJSON(raw string) string {
@@ -1070,6 +1092,8 @@ func redactValueWithParent(parentKey string, value any) any {
 			result = append(result, redactValueWithParent(parentKey, child))
 		}
 		return result
+	case string:
+		return redactCredentialText(item)
 	default:
 		return value
 	}

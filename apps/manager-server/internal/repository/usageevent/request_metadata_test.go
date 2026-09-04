@@ -129,3 +129,45 @@ func TestInsertBatchNormalizesRequestMetadataAtPersistenceBoundary(t *testing.T)
 		}
 	}
 }
+
+func TestInsertBatchSanitizesCredentialsAtPersistenceBoundary(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repo := New(db)
+
+	const secretMarker = "synthetic0123456789"
+	const syntheticToken = "sk-proj-" + secretMarker
+	event := streamTestEvent("credential-sanitization", 102, "POST /v1/responses", "gpt-5.4")
+	event.Source = "paid provider " + syntheticToken
+	event.RawJSON = `{"source":"paid provider ` + syntheticToken + `"}`
+	event.FailSummary = "Authorization: Bearer " + syntheticToken
+	event.FailBody = `{"access_token":"` + syntheticToken + `"}`
+	if _, err := repo.InsertBatch(context.Background(), []usage.Event{event}); err != nil {
+		t.Fatalf("insert event: %v", err)
+	}
+
+	var source, rawJSON, failSummary, failBody string
+	if err := db.QueryRow(`select
+		coalesce(source, ''), coalesce(raw_json, ''), coalesce(fail_summary, ''), coalesce(fail_body, '')
+		from usage_events where event_hash = ?`, event.EventHash).Scan(
+		&source,
+		&rawJSON,
+		&failSummary,
+		&failBody,
+	); err != nil {
+		t.Fatalf("query persisted credential-bearing fields: %v", err)
+	}
+	for field, value := range map[string]string{
+		"source":       source,
+		"raw_json":     rawJSON,
+		"fail_summary": failSummary,
+		"fail_body":    failBody,
+	} {
+		if strings.Contains(value, secretMarker) {
+			t.Errorf("persisted %s contains the synthetic credential marker", field)
+		}
+	}
+}

@@ -130,6 +130,7 @@ func (r *repository) InsertBatch(ctx context.Context, events []model.UsageEvent)
 
 	result := model.InsertResult{}
 	for _, event := range events {
+		event = usage.SanitizeForPersistence(event)
 		ledgerNowMS := event.CreatedAtMS
 		if ledgerNowMS <= 0 {
 			ledgerNowMS = time.Now().UnixMilli()
