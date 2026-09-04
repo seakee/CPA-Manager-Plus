@@ -1023,7 +1023,7 @@ func SanitizeForPersistence(event Event) Event {
 	// while removing credentials that slipped past producer normalization.
 	event.Source = redactCredentialText(event.Source)
 	event.FailSummary = FailSummaryFromBody(event.FailSummary)
-	event.FailBody = FailSummaryFromBody(event.FailBody)
+	event.FailBody = redactCredentialText(event.FailBody)
 	event.RawJSON = SafeRawJSON(event.RawJSON)
 	return event
 }
@@ -1116,6 +1116,8 @@ func isSecretKey(key string) bool {
 	normalized := normalizeSecretKey(key)
 	return normalized == "api_key" ||
 		normalized == "apikey" ||
+		normalized == "management_key" ||
+		normalized == "managementkey" ||
 		normalized == "authorization" ||
 		normalized == "cookie" ||
 		normalized == "set_cookie" ||
