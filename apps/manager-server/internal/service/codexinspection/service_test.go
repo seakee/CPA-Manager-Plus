@@ -662,6 +662,32 @@ func TestBuildCodexInspectionQuotaWindowsUsesMeteredFeatureAsRawScopeDisplayName
 	}
 }
 
+func TestBuildCodexInspectionQuotaWindowsUsesStableFeatureIdentityAndNameAlias(t *testing.T) {
+	windows := buildCodexInspectionQuotaWindows(map[string]any{
+		"additional_rate_limits": []any{
+			map[string]any{
+				"metered_feature": "future_feature",
+				"limit_name":      "Old Name",
+				"rate_limit": map[string]any{
+					"secondary_window": map[string]any{
+						"used_percent":         25,
+						"limit_window_seconds": codexWeekWindow,
+					},
+				},
+			},
+		},
+	}, "")
+
+	if len(windows) != 1 {
+		t.Fatalf("stable feature quota windows = %#v, want one window", windows)
+	}
+	window := windows[0]
+	if window.ID != "future-feature-weekly-0" || window.ScopeDisplayName != "Old Name" ||
+		window.LabelParams["name"] != "Old Name" || !containsString(window.ProviderWindowAliases, "old-name-weekly-0") {
+		t.Fatalf("stable feature inspection identity = %#v", window)
+	}
+}
+
 func containsString(values []string, expected string) bool {
 	for _, value := range values {
 		if value == expected {
@@ -726,8 +752,8 @@ func TestBuildCodexInspectionQuotaWindowsUsesMeteredFeatureForDuplicateNames(t *
 		return result
 	}
 	want := map[float64]string{
-		30: "credits--chat-completions-five-hour-0",
-		40: "credits--code-review-five-hour-0",
+		30: "chat-completions-five-hour-0",
+		40: "code-review-five-hour-0",
 		50: "credits-chat-completions-five-hour-0",
 	}
 	namedCollision := map[string]any{

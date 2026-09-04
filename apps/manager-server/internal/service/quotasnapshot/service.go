@@ -593,12 +593,35 @@ func (s *Service) Query(ctx context.Context, req QueryRequest) (QueryResponse, e
 			normalizedStates = append(normalizedStates, states[index])
 		}
 		states = normalizedStates
+		canonicalizeLinkedQueryCandidates(candidates, states)
 		items = append(items, QueryItem{
 			RowKey: account.RowKey, AccountKey: accountKey, Provider: provider,
 			Windows: mergeLifecycleWindows(selectWindows(candidates, states, nowMS), states, nowMS, req.IncludeInactive),
 		})
 	}
 	return QueryResponse{GeneratedAtMS: nowMS, Items: items}, nil
+}
+
+func canonicalizeLinkedQueryCandidates(
+	candidates []model.AccountQuotaSnapshot,
+	states []model.AccountQuotaWindowState,
+) {
+	stateByID := make(map[int64]model.AccountQuotaWindowState, len(states))
+	for _, state := range states {
+		if state.ID > 0 {
+			stateByID[state.ID] = state
+		}
+	}
+	for index := range candidates {
+		state, ok := stateByID[candidates[index].LogicalWindowID]
+		if !ok || strings.TrimSpace(state.ProviderWindowID) == "" {
+			continue
+		}
+		// Historical snapshots remain immutable. Query grouping follows the
+		// current logical state so a lazy provider-window identity migration
+		// cannot expose legacy and canonical IDs as two current windows.
+		candidates[index].ProviderWindowID = state.ProviderWindowID
+	}
 }
 
 // normalizeCodexSnapshotForQuery is the read-side compatibility shield for
@@ -925,10 +948,16 @@ func selectWindows(
 			applySnapshotBoundary(&selected, boundary)
 			boundarySource = boundary
 		}
-		selected.ScopeDisplayName = selectScopeDisplayName(selected, group)
+		displayCandidate, hasDisplayCandidate := selectScopeDisplayNameCandidate(selected, group)
+		selected.ScopeDisplayName = displayCandidate.Name
 		window := snapshotWindow(selected, isStale(selected, nowMS))
 		window.FieldSources = map[string]FieldSource{
 			"quota": {Source: selected.Source, ObservedAtMS: selected.ObservedAtMS},
+		}
+		if hasDisplayCandidate {
+			window.FieldSources["scope_display_name"] = FieldSource{
+				Source: displayCandidate.Source, ObservedAtMS: displayCandidate.ObservedAtMS,
+			}
 		}
 		if boundaryComplete(selected) {
 			window.FieldSources["boundary"] = FieldSource{
@@ -993,16 +1022,17 @@ func selectWindows(
 	return result
 }
 
-func selectScopeDisplayName(
+type scopeDisplayNameCandidate struct {
+	Name         string
+	Source       string
+	ObservedAtMS int64
+}
+
+func selectScopeDisplayNameCandidate(
 	selected model.AccountQuotaSnapshot,
 	candidates []model.AccountQuotaSnapshot,
-) string {
-	if name := strings.TrimSpace(selected.ScopeDisplayName); name != "" {
-		return name
-	}
-
-	var latestName string
-	var latestObservedAtMS int64
+) (scopeDisplayNameCandidate, bool) {
+	var latest scopeDisplayNameCandidate
 	var latestID int64
 	hasName := false
 	eligibleCandidates := candidates
@@ -1014,20 +1044,39 @@ func selectScopeDisplayName(
 			}
 		}
 	}
+	selectedIncluded := false
+	for _, candidate := range eligibleCandidates {
+		if candidate.ID == selected.ID && candidate.ID != 0 {
+			selectedIncluded = true
+			break
+		}
+	}
+	if !selectedIncluded {
+		eligibleCandidates = append(eligibleCandidates, selected)
+	}
 	for _, candidate := range eligibleCandidates {
 		name := strings.TrimSpace(candidate.ScopeDisplayName)
 		if name == "" {
 			continue
 		}
-		if !hasName || candidate.ObservedAtMS > latestObservedAtMS ||
-			(candidate.ObservedAtMS == latestObservedAtMS && candidate.ID > latestID) {
-			latestName = name
-			latestObservedAtMS = candidate.ObservedAtMS
+		if !hasName || candidate.ObservedAtMS > latest.ObservedAtMS ||
+			(candidate.ObservedAtMS == latest.ObservedAtMS && candidate.ID > latestID) {
+			latest = scopeDisplayNameCandidate{
+				Name: name, Source: candidate.Source, ObservedAtMS: candidate.ObservedAtMS,
+			}
 			latestID = candidate.ID
 			hasName = true
 		}
 	}
-	return latestName
+	return latest, hasName
+}
+
+func selectScopeDisplayName(
+	selected model.AccountQuotaSnapshot,
+	candidates []model.AccountQuotaSnapshot,
+) string {
+	candidate, _ := selectScopeDisplayNameCandidate(selected, candidates)
+	return candidate.Name
 }
 
 func mergeLifecycleWindows(

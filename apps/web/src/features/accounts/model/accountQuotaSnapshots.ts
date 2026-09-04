@@ -64,20 +64,32 @@ const toResetCredits = (quota: CodexQuotaState | undefined) =>
       (credit) => credit.id && Number.isFinite(credit.expires_at_ms) && credit.expires_at_ms > 0
     );
 
+const validEvidenceAtMs = (value: unknown): number =>
+  typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
+
 const snapshotFieldObservedAt = (snapshot: AccountQuotaSnapshotWindow, field: string) => {
-  const fieldObservedAt = snapshot.field_sources?.[field]?.observed_at_ms;
-  if (
-    typeof fieldObservedAt === 'number' &&
-    Number.isFinite(fieldObservedAt) &&
-    fieldObservedAt > 0
-  ) {
+  const fieldObservedAt = validEvidenceAtMs(snapshot.field_sources?.[field]?.observed_at_ms);
+  if (fieldObservedAt > 0) {
     return fieldObservedAt;
   }
-  return typeof snapshot.observed_at_ms === 'number' &&
-    Number.isFinite(snapshot.observed_at_ms) &&
-    snapshot.observed_at_ms > 0
-    ? snapshot.observed_at_ms
-    : 0;
+  return validEvidenceAtMs(snapshot.observed_at_ms);
+};
+
+export const snapshotLifecycleEvidenceAtMs = (snapshot: AccountQuotaSnapshotWindow): number => {
+  switch (snapshot.availability) {
+    case 'inactive':
+      return (
+        validEvidenceAtMs(snapshot.deactivated_at_ms) ||
+        validEvidenceAtMs(snapshot.missing_since_ms) ||
+        validEvidenceAtMs(snapshot.last_seen_at_ms)
+      );
+    case 'pending_absent':
+      return validEvidenceAtMs(snapshot.missing_since_ms) || validEvidenceAtMs(snapshot.last_seen_at_ms);
+    case 'active':
+      return validEvidenceAtMs(snapshot.last_seen_at_ms) || validEvidenceAtMs(snapshot.observed_at_ms);
+    default:
+      return 0;
+  }
 };
 
 const snapshotFieldTieBreakKey = (snapshot: AccountQuotaSnapshotWindow, field: string) =>
@@ -563,28 +575,76 @@ export const mergeAccountQuotaSnapshotWindows = (
     const snapshot = snapshotsByKey.get(key);
     if (!snapshot) return definition;
     matchedSnapshotKeys.add(key);
-    if (
-      definition.observedAtMs !== null &&
-      Number.isFinite(definition.observedAtMs) &&
-      snapshot.observed_at_ms < definition.observedAtMs
-    ) {
-      return definition;
-    }
+    const localObservedAt = validEvidenceAtMs(definition.observedAtMs);
+    const quotaObservedAt = snapshotFieldObservedAt(snapshot, 'quota');
+    const lifecycleObservedAt = snapshotLifecycleEvidenceAtMs(snapshot);
+    const scopeDisplayName = snapshot.scope_display_name?.trim() || '';
+    const displayObservedAt = scopeDisplayName
+      ? snapshotFieldObservedAt(snapshot, 'scope_display_name')
+      : 0;
+    const quotaIsFresh = localObservedAt <= 0 || quotaObservedAt >= localObservedAt;
+    const lifecycleIsFresh =
+      lifecycleObservedAt > 0 && (localObservedAt <= 0 || lifecycleObservedAt >= localObservedAt);
+    const displayIsFresh =
+      scopeDisplayName !== '' &&
+      displayObservedAt > 0 &&
+      (localObservedAt <= 0 || displayObservedAt >= localObservedAt);
+
+    if (!quotaIsFresh && !lifecycleIsFresh && !displayIsFresh) return definition;
+
     const currentCycle = snapshotCycleDefinition(snapshot.current_cycle);
+    const snapshotScope = snapshotModelScope(snapshot);
+    const mergedDuration = quotaIsFresh
+      ? (currentCycle?.durationSeconds ?? snapshot.duration_seconds ?? null)
+      : definition.durationSeconds;
+    const mergedScope = quotaIsFresh ? snapshotScope : definition.modelScope;
+    const quotaOverlay = quotaIsFresh
+      ? {
+          windowMode: snapshot.window_mode,
+          observationSource: snapshot.source,
+          observedAtMs: snapshot.observed_at_ms,
+          boundaryAccuracy: snapshot.boundary_accuracy,
+          cycleStartMs: currentCycle?.actualStartMs ?? snapshot.cycle_start_ms ?? null,
+          cycleEndMs: currentCycle?.scheduledEndMs ?? snapshot.cycle_end_ms ?? null,
+          durationSeconds: mergedDuration,
+          remainingPercent: snapshot.remaining_percent ?? definition.remainingPercent,
+          usedPercent: snapshot.used_percent ?? definition.usedPercent,
+          modelScope: snapshotScope,
+          stale: snapshot.stale,
+        }
+      : {};
+    const lifecycleOverlay = lifecycleIsFresh
+      ? {
+          ...snapshotLifecycleDefinition(snapshot),
+          ...(snapshot.availability === 'pending_absent' || snapshot.availability === 'inactive'
+            ? { stale: true }
+            : {}),
+        }
+      : {};
+    const displayOverlay = displayIsFresh
+      ? (() => {
+          const label = resolveSnapshotQuotaLabel(
+            snapshot,
+            options,
+            mergedScope,
+            mergedDuration
+          );
+          return {
+            label,
+            display: {
+              ...definition.display,
+              label,
+              scopeDisplayName,
+            },
+          };
+        })()
+      : {};
+
     return {
       ...definition,
-      windowMode: snapshot.window_mode,
-      observationSource: snapshot.source,
-      observedAtMs: snapshot.observed_at_ms,
-      boundaryAccuracy: snapshot.boundary_accuracy,
-      cycleStartMs: currentCycle?.actualStartMs ?? snapshot.cycle_start_ms ?? null,
-      cycleEndMs: currentCycle?.scheduledEndMs ?? snapshot.cycle_end_ms ?? null,
-      durationSeconds: currentCycle?.durationSeconds ?? snapshot.duration_seconds ?? null,
-      remainingPercent: snapshot.remaining_percent ?? definition.remainingPercent,
-      usedPercent: snapshot.used_percent ?? definition.usedPercent,
-      modelScope: snapshotModelScope(snapshot),
-      stale: snapshot.stale,
-      ...snapshotLifecycleDefinition(snapshot),
+      ...quotaOverlay,
+      ...lifecycleOverlay,
+      ...displayOverlay,
     };
   });
   const unmatchedSnapshots = Array.from(snapshotsByKey.entries())

@@ -445,15 +445,15 @@ export const resolveCodexAdditionalQuotaScope = (
   const anonymousIdentity = anonymousCodexAdditionalIdentity(limitItem);
   const key =
     featureKey || nameKey || normalizeFeatureKey(anonymousIdentity) || 'additional_unknown';
-  const conflictingKnownName = Boolean(featureKey && CODEX_SPARK_QUOTA_IDENTIFIERS.has(nameKey));
+  const providerWindowIdPrefix =
+    normalizeWindowId(meteredFeature ?? '') ||
+    normalizeWindowId(limitName ?? '') ||
+    normalizeWindowId(anonymousIdentity) ||
+    'additional-unknown';
   return {
     modelScope: incompleteCodexFeatureScope(key),
-    providerWindowIdPrefix:
-      (conflictingKnownName ? normalizeWindowId(meteredFeature ?? '') : '') ||
-      normalizeWindowId(limitName ?? '') ||
-      normalizeWindowId(meteredFeature ?? '') ||
-      normalizeWindowId(anonymousIdentity) ||
-      'additional-unknown',
+    providerWindowIdPrefix,
+    legacyProviderWindowIdPrefixes: normalizedUniqueWindowIds([limitName ?? '']),
     labelName: limitName ?? meteredFeature ?? anonymousIdentity,
     scopeDisplayName: limitName ?? meteredFeature ?? undefined,
   };

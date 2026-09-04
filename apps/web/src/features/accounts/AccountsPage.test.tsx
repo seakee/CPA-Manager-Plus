@@ -12953,6 +12953,9 @@ describe('AccountsPage replacement flows', () => {
               remaining_percent: 100,
               stale: true,
               availability,
+              ...(availability === 'inactive'
+                ? { deactivated_at_ms: nowMs }
+                : { missing_since_ms: nowMs }),
             },
           ],
         },

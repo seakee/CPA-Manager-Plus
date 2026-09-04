@@ -365,6 +365,34 @@ describe('buildCodexQuotaWindowInfos', () => {
     ]);
   });
 
+  it('keeps a metered feature as the canonical id when the raw limit name changes', () => {
+    const build = (limitName: string) =>
+      buildCodexQuotaWindowInfos({
+        additional_rate_limits: [
+          {
+            metered_feature: 'future_feature',
+            limit_name: limitName,
+            rate_limit: {
+              secondary_window: { used_percent: 25, limit_window_seconds: 604_800 },
+            },
+          },
+        ],
+      }).find((window) => window.usedPercent === 25);
+
+    const oldWindow = build('Old Name');
+    const newWindow = build('New Name');
+    expect(oldWindow).toMatchObject({
+      id: 'future-feature-weekly-0',
+      scopeDisplayName: 'Old Name',
+      providerWindowAliases: expect.arrayContaining(['old-name-weekly-0']),
+    });
+    expect(newWindow).toMatchObject({
+      id: 'future-feature-weekly-0',
+      scopeDisplayName: 'New Name',
+      providerWindowAliases: expect.arrayContaining(['new-name-weekly-0']),
+    });
+  });
+
   it('uses metered_feature as the raw display name when limit_name is absent', () => {
     const windows = buildCodexQuotaWindowInfos({
       additional_rate_limits: [
@@ -715,8 +743,8 @@ describe('buildCodexQuotaWindowInfos', () => {
     const idsByUsage = (windows: CodexQuotaWindowInfo[]) =>
       Object.fromEntries(windows.map((window) => [window.usedPercent, window.id]));
     expect(idsByUsage(forward)).toEqual({
-      30: 'credits--chat-completions-five-hour-0',
-      40: 'credits--code-review-five-hour-0',
+      30: 'chat-completions-five-hour-0',
+      40: 'code-review-five-hour-0',
       50: 'credits-chat-completions-five-hour-0',
     });
     expect(idsByUsage(reverse)).toEqual(idsByUsage(forward));

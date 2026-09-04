@@ -198,12 +198,9 @@ func ResolveAdditionalScope(input AdditionalScopeInput) AdditionalScopeResolutio
 	if key == "" {
 		key = NormalizeFeatureKey(input.AnonymousIdentity)
 	}
-	prefix := NormalizeProviderWindowPrefix(input.LimitName)
-	if featureKey != "" && isSparkQuotaIdentifier(nameKey) {
-		prefix = NormalizeProviderWindowPrefix(input.MeteredFeature)
-	}
+	prefix := NormalizeProviderWindowPrefix(input.MeteredFeature)
 	if prefix == "" {
-		prefix = NormalizeProviderWindowPrefix(input.MeteredFeature)
+		prefix = NormalizeProviderWindowPrefix(input.LimitName)
 	}
 	if prefix == "" {
 		prefix = NormalizeProviderWindowPrefix(input.AnonymousIdentity)
@@ -216,10 +213,14 @@ func ResolveAdditionalScope(input AdditionalScopeInput) AdditionalScopeResolutio
 	if scopeDisplayName == "" {
 		scopeDisplayName = strings.TrimSpace(input.MeteredFeature)
 	}
+	legacyPrefixes := []string{prefix}
+	if featureKey != "" {
+		legacyPrefixes = append(legacyPrefixes, NormalizeProviderWindowPrefix(input.LimitName))
+	}
 	return AdditionalScopeResolution{
 		Scope:                FeatureScope(key),
 		ProviderWindowPrefix: prefix,
-		LegacyPrefixes:       []string{prefix},
+		LegacyPrefixes:       normalizedUniqueStrings(legacyPrefixes),
 		ScopeDisplayName:     scopeDisplayName,
 	}
 }

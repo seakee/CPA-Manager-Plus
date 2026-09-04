@@ -519,7 +519,7 @@ describe('account quota snapshots', () => {
       [live],
       [
         makeSnapshot({
-          observed_at_ms: 20_000,
+          observed_at_ms: 5_000,
           scope_display_name: 'Old Model Name',
         }),
       ],
@@ -565,7 +565,8 @@ describe('account quota snapshots', () => {
       model_scope_kind: 'feature',
       model_scope_key: 'gpt_reserve',
       availability: 'inactive',
-      observed_at_ms: 20_000,
+      observed_at_ms: 10_000,
+      deactivated_at_ms: 30_000,
     });
 
     const merged = mergeAccountQuotaSnapshotWindows([local], [snapshot], { provider: 'codex' });
@@ -575,6 +576,124 @@ describe('account quota snapshots', () => {
       availability: 'inactive',
     });
     expect(filterCurrentAccountQuotaWindowDefinitions(merged)).toEqual([]);
+  });
+
+  it('merges newer inactive lifecycle evidence without replacing newer local quota data', () => {
+    const local = makeDefinition({ observedAtMs: 200, usedPercent: 40 });
+    const snapshot = makeSnapshot({
+      observed_at_ms: 100,
+      used_percent: 10,
+      availability: 'inactive',
+      deactivated_at_ms: 300,
+    });
+
+    const merged = mergeAccountQuotaSnapshotWindows([local], [snapshot]);
+
+    expect(merged[0]).toMatchObject({ usedPercent: 40, availability: 'inactive' });
+    expect(filterCurrentAccountQuotaWindowDefinitions(merged)).toEqual([]);
+  });
+
+  it('merges newer pending lifecycle evidence while retaining newer local quota data', () => {
+    const local = makeDefinition({ observedAtMs: 200, usedPercent: 40 });
+    const snapshot = makeSnapshot({
+      observed_at_ms: 100,
+      used_percent: 10,
+      availability: 'pending_absent',
+      missing_since_ms: 300,
+    });
+
+    const merged = mergeAccountQuotaSnapshotWindows([local], [snapshot]);
+
+    expect(merged[0]).toMatchObject({ usedPercent: 40, availability: 'pending_absent' });
+    expect(filterCurrentAccountQuotaWindowDefinitions(merged)).toHaveLength(1);
+  });
+
+  it('keeps a newer local positive observation visible over an older inactive tombstone', () => {
+    const local = makeDefinition({ observedAtMs: 400, usedPercent: 40 });
+    const snapshot = makeSnapshot({
+      observed_at_ms: 100,
+      availability: 'inactive',
+      deactivated_at_ms: 300,
+    });
+
+    const merged = mergeAccountQuotaSnapshotWindows([local], [snapshot]);
+
+    expect(merged[0]).toBe(local);
+    expect(filterCurrentAccountQuotaWindowDefinitions(merged)).toHaveLength(1);
+  });
+
+  it('applies a newer quota snapshot when its quota evidence is fresher', () => {
+    const local = makeDefinition({ observedAtMs: 100, usedPercent: 40 });
+    const snapshot = makeSnapshot({ observed_at_ms: 200, used_percent: 10 });
+
+    const merged = mergeAccountQuotaSnapshotWindows([local], [snapshot]);
+
+    expect(merged[0]).toMatchObject({ usedPercent: 10, observationSource: 'response_header' });
+  });
+
+  it('applies newer display metadata independently from older quota evidence', () => {
+    const local = makeDefinition({
+      provider: 'claude',
+      observedAtMs: 200,
+      usedPercent: 40,
+      label: 'Old Model Name',
+      display: {
+        ...makeDefinition().display,
+        label: 'Old Model Name',
+        scopeDisplayName: 'Old Model Name',
+        source: 'claude',
+      },
+    });
+    const snapshot = makeSnapshot({
+      observed_at_ms: 100,
+      used_percent: 10,
+      scope_display_name: 'New Model Name',
+      field_sources: {
+        scope_display_name: { source: 'api_query', observed_at_ms: 300 },
+      },
+    });
+
+    const merged = mergeAccountQuotaSnapshotWindows([local], [snapshot], { provider: 'claude' });
+
+    expect(merged[0]).toMatchObject({
+      usedPercent: 40,
+      label: 'New Model Name',
+      display: { label: 'New Model Name', scopeDisplayName: 'New Model Name' },
+    });
+  });
+
+  it('does not let an older or blank display snapshot replace local presentation metadata', () => {
+    const local = makeDefinition({
+      provider: 'claude',
+      observedAtMs: 300,
+      label: 'New Model Name',
+      display: {
+        ...makeDefinition().display,
+        label: 'New Model Name',
+        scopeDisplayName: 'New Model Name',
+        source: 'claude',
+      },
+    });
+    const older = makeSnapshot({
+      observed_at_ms: 200,
+      scope_display_name: 'Old Model Name',
+      field_sources: {
+        scope_display_name: { source: 'api_query', observed_at_ms: 200 },
+      },
+    });
+    const blank = makeSnapshot({ observed_at_ms: 400, scope_display_name: '   ' });
+
+    const olderMerged = mergeAccountQuotaSnapshotWindows([local], [older], { provider: 'claude' });
+    const blankMerged = mergeAccountQuotaSnapshotWindows([local], [blank], { provider: 'claude' });
+
+    expect(olderMerged[0]).toMatchObject({
+      label: 'New Model Name',
+      display: { label: 'New Model Name', scopeDisplayName: 'New Model Name' },
+    });
+    expect(blankMerged[0]).toMatchObject({
+      label: 'New Model Name',
+      display: { label: 'New Model Name', scopeDisplayName: 'New Model Name' },
+    });
   });
 
   it('does not create usage targets for inactive definitions after current filtering', () => {

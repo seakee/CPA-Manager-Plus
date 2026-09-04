@@ -14,6 +14,7 @@ func TestResolveAdditionalScope(t *testing.T) {
 		wantScope      ModelScope
 		wantPrefix     string
 		wantDisplay    string
+		wantLegacy     string
 	}{
 		{
 			name:           "provider feature identifies spark",
@@ -35,6 +36,7 @@ func TestResolveAdditionalScope(t *testing.T) {
 			wantScope:      FeatureScope("future_feature"),
 			wantPrefix:     "future-feature",
 			wantDisplay:    "Future Feature",
+			wantLegacy:     "future-feature",
 		},
 		{
 			name:           "metered feature supplies display name",
@@ -42,6 +44,7 @@ func TestResolveAdditionalScope(t *testing.T) {
 			wantScope:      FeatureScope("future_feature"),
 			wantPrefix:     "future-feature",
 			wantDisplay:    "future_feature",
+			wantLegacy:     "future-feature",
 		},
 		{
 			name:           "provider feature wins over conflicting spark label",
@@ -50,12 +53,14 @@ func TestResolveAdditionalScope(t *testing.T) {
 			wantScope:      FeatureScope("future_feature"),
 			wantPrefix:     "future-feature",
 			wantDisplay:    "Spark",
+			wantLegacy:     "future-feature",
 		},
 		{
 			name:       "anonymous feature uses structural identity",
 			anonymous:  "additional-p-18000-s-604800",
 			wantScope:  FeatureScope("additional_p_18000_s_604800"),
 			wantPrefix: "additional-p-18000-s-604800",
+			wantLegacy: "additional-p-18000-s-604800",
 		},
 		{
 			name:        "non ascii label uses structural identity consistently",
@@ -64,6 +69,7 @@ func TestResolveAdditionalScope(t *testing.T) {
 			wantScope:   FeatureScope("additional_p_18000_s_604800"),
 			wantPrefix:  "additional-p-18000-s-604800",
 			wantDisplay: "未来额度",
+			wantLegacy:  "additional-p-18000-s-604800",
 		},
 	}
 
@@ -76,6 +82,9 @@ func TestResolveAdditionalScope(t *testing.T) {
 			})
 			if !reflect.DeepEqual(got.Scope, test.wantScope) || got.ProviderWindowPrefix != test.wantPrefix || got.ScopeDisplayName != test.wantDisplay {
 				t.Fatalf("ResolveAdditionalScope() = %#v, want scope=%#v prefix=%q display=%q", got, test.wantScope, test.wantPrefix, test.wantDisplay)
+			}
+			if test.wantLegacy != "" && !containsScopeString(got.LegacyPrefixes, test.wantLegacy) {
+				t.Fatalf("ResolveAdditionalScope() legacy prefixes = %#v, want %q", got.LegacyPrefixes, test.wantLegacy)
 			}
 		})
 	}
@@ -132,6 +141,26 @@ func TestResolveUsageScopeUsesRequestAndResolvedIdentity(t *testing.T) {
 				t.Fatalf("ResolveUsageScope() = %#v, want %#v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestResolveAdditionalScopeKeepsStablePrefixAcrossDisplayRename(t *testing.T) {
+	oldName := ResolveAdditionalScope(AdditionalScopeInput{
+		MeteredFeature: "future_feature",
+		LimitName:      "Old Name",
+	})
+	newName := ResolveAdditionalScope(AdditionalScopeInput{
+		MeteredFeature: "future_feature",
+		LimitName:      "New Name",
+	})
+	if oldName.ProviderWindowPrefix != "future-feature" || newName.ProviderWindowPrefix != "future-feature" {
+		t.Fatalf("stable provider prefixes = %q/%q, want future-feature", oldName.ProviderWindowPrefix, newName.ProviderWindowPrefix)
+	}
+	if oldName.ScopeDisplayName != "Old Name" || newName.ScopeDisplayName != "New Name" {
+		t.Fatalf("display names = %q/%q", oldName.ScopeDisplayName, newName.ScopeDisplayName)
+	}
+	if !containsScopeString(oldName.LegacyPrefixes, "old-name") || !containsScopeString(newName.LegacyPrefixes, "new-name") {
+		t.Fatalf("rename aliases = old:%#v new:%#v", oldName.LegacyPrefixes, newName.LegacyPrefixes)
 	}
 }
 
