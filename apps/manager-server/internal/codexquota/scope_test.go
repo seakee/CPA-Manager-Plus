@@ -36,7 +36,6 @@ func TestResolveAdditionalScope(t *testing.T) {
 			wantScope:      FeatureScope("future_feature"),
 			wantPrefix:     "future-feature",
 			wantDisplay:    "Future Feature",
-			wantLegacy:     "future-feature",
 		},
 		{
 			name:           "metered feature supplies display name",
@@ -44,7 +43,6 @@ func TestResolveAdditionalScope(t *testing.T) {
 			wantScope:      FeatureScope("future_feature"),
 			wantPrefix:     "future-feature",
 			wantDisplay:    "future_feature",
-			wantLegacy:     "future-feature",
 		},
 		{
 			name:           "provider feature wins over conflicting spark label",
@@ -53,14 +51,13 @@ func TestResolveAdditionalScope(t *testing.T) {
 			wantScope:      FeatureScope("future_feature"),
 			wantPrefix:     "future-feature",
 			wantDisplay:    "Spark",
-			wantLegacy:     "future-feature",
+			wantLegacy:     "spark",
 		},
 		{
 			name:       "anonymous feature uses structural identity",
 			anonymous:  "additional-p-18000-s-604800",
 			wantScope:  FeatureScope("additional_p_18000_s_604800"),
 			wantPrefix: "additional-p-18000-s-604800",
-			wantLegacy: "additional-p-18000-s-604800",
 		},
 		{
 			name:        "non ascii label uses structural identity consistently",
@@ -69,7 +66,6 @@ func TestResolveAdditionalScope(t *testing.T) {
 			wantScope:   FeatureScope("additional_p_18000_s_604800"),
 			wantPrefix:  "additional-p-18000-s-604800",
 			wantDisplay: "未来额度",
-			wantLegacy:  "additional-p-18000-s-604800",
 		},
 	}
 
@@ -161,6 +157,13 @@ func TestResolveAdditionalScopeKeepsStablePrefixAcrossDisplayRename(t *testing.T
 	}
 	if !containsScopeString(oldName.LegacyPrefixes, "old-name") || !containsScopeString(newName.LegacyPrefixes, "new-name") {
 		t.Fatalf("rename aliases = old:%#v new:%#v", oldName.LegacyPrefixes, newName.LegacyPrefixes)
+	}
+	if containsScopeString(oldName.LegacyPrefixes, "future-feature") || containsScopeString(newName.LegacyPrefixes, "future-feature") {
+		t.Fatalf("stable feature was returned as a legacy alias: old:%#v new:%#v", oldName.LegacyPrefixes, newName.LegacyPrefixes)
+	}
+	meteredOnly := ResolveAdditionalScope(AdditionalScopeInput{MeteredFeature: "future_feature"})
+	if len(meteredOnly.LegacyPrefixes) != 0 {
+		t.Fatalf("metered-only legacy prefixes = %#v, want none", meteredOnly.LegacyPrefixes)
 	}
 }
 

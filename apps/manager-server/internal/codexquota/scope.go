@@ -213,9 +213,14 @@ func ResolveAdditionalScope(input AdditionalScopeInput) AdditionalScopeResolutio
 	if scopeDisplayName == "" {
 		scopeDisplayName = strings.TrimSpace(input.MeteredFeature)
 	}
-	legacyPrefixes := []string{prefix}
+	legacyPrefixes := []string{}
 	if featureKey != "" {
-		legacyPrefixes = append(legacyPrefixes, NormalizeProviderWindowPrefix(input.LimitName))
+		namePrefix := NormalizeProviderWindowPrefix(input.LimitName)
+		if namePrefix != "" && namePrefix != prefix {
+			legacyPrefixes = append(legacyPrefixes, namePrefix)
+		}
+	} else if nameKey != "" {
+		legacyPrefixes = append(legacyPrefixes, prefix)
 	}
 	return AdditionalScopeResolution{
 		Scope:                FeatureScope(key),

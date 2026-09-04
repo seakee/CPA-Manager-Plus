@@ -662,6 +662,40 @@ describe('account quota snapshots', () => {
     });
   });
 
+  it('applies server display evidence when newer local quota has no display evidence', () => {
+    const local = makeDefinition({
+      key: 'gpt-reserve-weekly-0',
+      providerWindowId: 'gpt-reserve-weekly-0',
+      kind: 'weekly',
+      observedAtMs: 300,
+      usedPercent: 40,
+      modelScope: { kind: 'feature', key: 'gpt_reserve', complete: false },
+    });
+    const snapshot = makeSnapshot({
+      provider_window_id: 'gpt-reserve-weekly-0',
+      window_kind: 'weekly',
+      model_scope_kind: 'feature',
+      model_scope_key: 'gpt_reserve',
+      observed_at_ms: 100,
+      used_percent: 10,
+      scope_display_name: 'Model A',
+      field_sources: {
+        scope_display_name: { source: 'api_query', observed_at_ms: 200 },
+      },
+    });
+
+    const merged = mergeAccountQuotaSnapshotWindows([local], [snapshot], {
+      provider: 'codex',
+      t: codexSnapshotT,
+    });
+
+    expect(merged[0]).toMatchObject({
+      usedPercent: 40,
+      label: 'Model A weekly limit',
+      display: { label: 'Model A weekly limit', scopeDisplayName: 'Model A' },
+    });
+  });
+
   it('does not let an older or blank display snapshot replace local presentation metadata', () => {
     const local = makeDefinition({
       provider: 'claude',

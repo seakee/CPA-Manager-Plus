@@ -84,9 +84,13 @@ export const snapshotLifecycleEvidenceAtMs = (snapshot: AccountQuotaSnapshotWind
         validEvidenceAtMs(snapshot.last_seen_at_ms)
       );
     case 'pending_absent':
-      return validEvidenceAtMs(snapshot.missing_since_ms) || validEvidenceAtMs(snapshot.last_seen_at_ms);
+      return (
+        validEvidenceAtMs(snapshot.missing_since_ms) || validEvidenceAtMs(snapshot.last_seen_at_ms)
+      );
     case 'active':
-      return validEvidenceAtMs(snapshot.last_seen_at_ms) || validEvidenceAtMs(snapshot.observed_at_ms);
+      return (
+        validEvidenceAtMs(snapshot.last_seen_at_ms) || validEvidenceAtMs(snapshot.observed_at_ms)
+      );
     default:
       return 0;
   }
@@ -575,20 +579,23 @@ export const mergeAccountQuotaSnapshotWindows = (
     const snapshot = snapshotsByKey.get(key);
     if (!snapshot) return definition;
     matchedSnapshotKeys.add(key);
-    const localObservedAt = validEvidenceAtMs(definition.observedAtMs);
+    const localQuotaObservedAt = validEvidenceAtMs(definition.observedAtMs);
+    const localScopeDisplayName = definition.display.scopeDisplayName?.trim() || '';
+    const localDisplayObservedAt = localScopeDisplayName ? localQuotaObservedAt : 0;
     const quotaObservedAt = snapshotFieldObservedAt(snapshot, 'quota');
     const lifecycleObservedAt = snapshotLifecycleEvidenceAtMs(snapshot);
     const scopeDisplayName = snapshot.scope_display_name?.trim() || '';
     const displayObservedAt = scopeDisplayName
       ? snapshotFieldObservedAt(snapshot, 'scope_display_name')
       : 0;
-    const quotaIsFresh = localObservedAt <= 0 || quotaObservedAt >= localObservedAt;
+    const quotaIsFresh = localQuotaObservedAt <= 0 || quotaObservedAt >= localQuotaObservedAt;
     const lifecycleIsFresh =
-      lifecycleObservedAt > 0 && (localObservedAt <= 0 || lifecycleObservedAt >= localObservedAt);
+      lifecycleObservedAt > 0 &&
+      (localQuotaObservedAt <= 0 || lifecycleObservedAt >= localQuotaObservedAt);
     const displayIsFresh =
       scopeDisplayName !== '' &&
       displayObservedAt > 0 &&
-      (localObservedAt <= 0 || displayObservedAt >= localObservedAt);
+      (localDisplayObservedAt <= 0 || displayObservedAt >= localDisplayObservedAt);
 
     if (!quotaIsFresh && !lifecycleIsFresh && !displayIsFresh) return definition;
 
@@ -623,12 +630,7 @@ export const mergeAccountQuotaSnapshotWindows = (
       : {};
     const displayOverlay = displayIsFresh
       ? (() => {
-          const label = resolveSnapshotQuotaLabel(
-            snapshot,
-            options,
-            mergedScope,
-            mergedDuration
-          );
+          const label = resolveSnapshotQuotaLabel(snapshot, options, mergedScope, mergedDuration);
           return {
             label,
             display: {

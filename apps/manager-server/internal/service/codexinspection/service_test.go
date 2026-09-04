@@ -688,6 +688,127 @@ func TestBuildCodexInspectionQuotaWindowsUsesStableFeatureIdentityAndNameAlias(t
 	}
 }
 
+func TestBuildCodexInspectionQuotaWindowsFallsBackForDuplicateMeteredFeatures(t *testing.T) {
+	family := func(name string, usedPercent, resetAfterSeconds float64) map[string]any {
+		return map[string]any{
+			"metered_feature": "future_feature",
+			"limit_name":      name,
+			"rate_limit": map[string]any{
+				"secondary_window": map[string]any{
+					"used_percent":         usedPercent,
+					"limit_window_seconds": float64(codexWeekWindow),
+					"reset_after_seconds":  resetAfterSeconds,
+					"reset_at":             1_000_000 + resetAfterSeconds,
+				},
+				"allowed":       usedPercent < 100,
+				"limit_reached": usedPercent >= 100,
+			},
+		}
+	}
+	byName := func(items []map[string]any) map[string]model.CodexInspectionQuotaWindow {
+		windows := buildCodexInspectionQuotaWindows(map[string]any{"additional_rate_limits": items}, "")
+		result := make(map[string]model.CodexInspectionQuotaWindow, len(windows))
+		for _, window := range windows {
+			result[window.ScopeDisplayName] = window
+		}
+		return result
+	}
+
+	forward := byName([]map[string]any{family("Quota A", 10, 900), family("Quota B", 80, 600)})
+	changed := byName([]map[string]any{family("Quota A", 90, 300), family("Quota B", 20, 1_200)})
+	reverse := byName([]map[string]any{family("Quota B", 20, 1_200), family("Quota A", 90, 300)})
+
+	for name, windows := range map[string]map[string]model.CodexInspectionQuotaWindow{
+		"forward": forward,
+		"changed": changed,
+		"reverse": reverse,
+	} {
+		for _, test := range []struct {
+			name string
+			id   string
+		}{
+			{name: "Quota A", id: "quota-a-weekly-0"},
+			{name: "Quota B", id: "quota-b-weekly-0"},
+		} {
+			window, ok := windows[test.name]
+			if !ok || window.ID != test.id || window.ModelScope == nil ||
+				window.ModelScope.Kind != "feature" || window.ModelScope.Key != "future_feature" ||
+				window.ModelScope.Complete {
+				t.Fatalf("%s duplicate feature %q = %#v", name, test.name, window)
+			}
+			if containsString(window.ProviderWindowAliases, "future-feature-weekly-0") {
+				t.Fatalf("%s duplicate feature %q has shared stable alias: %#v", name, test.name, window.ProviderWindowAliases)
+			}
+		}
+	}
+	if changed["Quota A"].ID != forward["Quota A"].ID || changed["Quota B"].ID != forward["Quota B"].ID ||
+		reverse["Quota A"].ID != forward["Quota A"].ID || reverse["Quota B"].ID != forward["Quota B"].ID {
+		t.Fatalf("duplicate feature ids changed across quota state/order: forward=%#v changed=%#v reverse=%#v", forward, changed, reverse)
+	}
+}
+
+func TestBuildCodexInspectionQuotaWindowsUsesStructuralIdentityForDuplicateMeteredFeatures(t *testing.T) {
+	family := func(seconds, usedPercent float64) map[string]any {
+		return map[string]any{
+			"metered_feature": "future_feature",
+			"rate_limit": map[string]any{
+				"primary_window": map[string]any{
+					"limit_window_seconds": seconds,
+					"used_percent":         usedPercent,
+				},
+			},
+		}
+	}
+	build := func(items []map[string]any) []model.CodexInspectionQuotaWindow {
+		return buildCodexInspectionQuotaWindows(map[string]any{"additional_rate_limits": items}, "")
+	}
+	initial := build([]map[string]any{family(18_000, 10), family(604_800, 80)})
+	changed := build([]map[string]any{family(18_000, 90), family(604_800, 20)})
+	if len(initial) != 2 || len(changed) != 2 {
+		t.Fatalf("structural duplicate feature windows = initial:%#v changed:%#v", initial, changed)
+	}
+	want := []string{
+		"additional-p-18000-s-none-five-hour-0",
+		"additional-p-604800-s-none-weekly-0",
+	}
+	for index, id := range want {
+		if initial[index].ID != id || changed[index].ID != id {
+			t.Fatalf("structural duplicate feature ids = initial:%#v changed:%#v want:%#v", initial, changed, want)
+		}
+	}
+}
+
+func TestBuildCodexInspectionQuotaWindowsDoesNotUseDynamicStateForFullyAmbiguousFamilies(t *testing.T) {
+	family := func(usedPercent, resetAfterSeconds float64) map[string]any {
+		return map[string]any{
+			"metered_feature": "future_feature",
+			"limit_name":      "Same Quota",
+			"rate_limit": map[string]any{
+				"secondary_window": map[string]any{
+					"limit_window_seconds": float64(codexWeekWindow),
+					"used_percent":         usedPercent,
+					"reset_after_seconds":  resetAfterSeconds,
+				},
+			},
+		}
+	}
+	initial := buildCodexInspectionQuotaWindows(map[string]any{
+		"additional_rate_limits": []any{family(10, 900), family(80, 600)},
+	}, "")
+	changed := buildCodexInspectionQuotaWindows(map[string]any{
+		"additional_rate_limits": []any{family(90, 300), family(20, 1_200)},
+	}, "")
+	want := []string{"same-quota-weekly-0", "same-quota-weekly-1"}
+	for index, id := range want {
+		if initial[index].ID != id || changed[index].ID != id {
+			t.Fatalf("fully ambiguous ids = initial:%#v changed:%#v want:%#v", initial, changed, want)
+		}
+		if containsString(initial[index].ProviderWindowAliases, "future-feature-weekly-0") {
+			t.Fatalf("fully ambiguous family has shared stable alias: %#v", initial[index].ProviderWindowAliases)
+		}
+	}
+}
+
 func containsString(values []string, expected string) bool {
 	for _, value := range values {
 		if value == expected {

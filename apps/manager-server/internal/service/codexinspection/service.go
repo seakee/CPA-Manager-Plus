@@ -267,11 +267,14 @@ type codexAdditionalRateLimitFamily struct {
 	modelScope         codexquota.ModelScope
 	baseIDPrefix       string
 	featureIDPrefix    string
+	nameIDPrefix       string
+	structuralIDPrefix string
 	legacyBaseIDPrefix string
 	legacyPrefixes     []string
 	idPrefix           string
 	sortKey            string
 	scopeDisplayName   string
+	collisionMode      bool
 }
 
 func (w codexClassifiedWindows) longWindow() *codexWindow {
@@ -4674,15 +4677,13 @@ func addAdditionalRateLimitWindows(windows *[]model.CodexInspectionQuotaWindow, 
 			meteredFeature,
 			fmt.Sprintf("additional-%d", index+1),
 		)
+		rawLimitName := readString(limitItem, "limit_name", "limitName")
 		scopeResolution := codexquota.ResolveAdditionalScope(codexquota.AdditionalScopeInput{
 			MeteredFeature:    meteredFeature,
-			LimitName:         readString(limitItem, "limit_name", "limitName"),
+			LimitName:         rawLimitName,
 			AnonymousIdentity: anonymousCodexAdditionalIdentity(rateInfo),
 		})
-		legacyBaseIDPrefix := normalizeCodexWindowID(limitName)
-		if legacyBaseIDPrefix == "" {
-			legacyBaseIDPrefix = fmt.Sprintf("additional-%d", index+1)
-		}
+		nameIDPrefix := normalizeCodexWindowID(rawLimitName)
 		families = append(families, codexAdditionalRateLimitFamily{
 			sourceIndex:        index,
 			rateInfo:           rateInfo,
@@ -4691,26 +4692,69 @@ func addAdditionalRateLimitWindows(windows *[]model.CodexInspectionQuotaWindow, 
 			scopeDisplayName:   scopeResolution.ScopeDisplayName,
 			baseIDPrefix:       scopeResolution.ProviderWindowPrefix,
 			featureIDPrefix:    normalizeCodexWindowID(meteredFeature),
-			legacyBaseIDPrefix: legacyBaseIDPrefix,
+			nameIDPrefix:       nameIDPrefix,
+			structuralIDPrefix: normalizeCodexWindowID(anonymousCodexAdditionalIdentity(rateInfo)),
+			legacyBaseIDPrefix: nameIDPrefix,
 			legacyPrefixes:     append([]string(nil), scopeResolution.LegacyPrefixes...),
 			sortKey:            codexAdditionalRateLimitSortKey(rateInfo),
 		})
 		baseIDPrefixCounts[scopeResolution.ProviderWindowPrefix]++
-		legacyBaseIDPrefixCounts[legacyBaseIDPrefix]++
+		if nameIDPrefix != "" {
+			legacyBaseIDPrefixCounts[nameIDPrefix]++
+		}
 	}
 
+	featureGroups := make(map[string][]codexAdditionalRateLimitFamily)
+	for _, family := range families {
+		if family.featureIDPrefix == "" || family.modelScope.Kind != "feature" {
+			continue
+		}
+		featureGroups[family.featureIDPrefix] = append(featureGroups[family.featureIDPrefix], family)
+	}
 	familiesByIDPrefix := make(map[string][]int)
 	for index := range families {
 		family := &families[index]
 		family.idPrefix = family.baseIDPrefix
-		if baseIDPrefixCounts[family.baseIDPrefix] > 1 && family.featureIDPrefix != "" && family.featureIDPrefix != family.baseIDPrefix {
+		featureGroup := featureGroups[family.featureIDPrefix]
+		family.collisionMode = family.featureIDPrefix != "" && family.modelScope.Kind == "feature" && len(featureGroup) > 1
+		if family.collisionMode {
+			nameCounts := codexAdditionalFamilyPrefixCounts(featureGroup, func(candidate codexAdditionalRateLimitFamily) string {
+				return candidate.nameIDPrefix
+			}, family.featureIDPrefix)
+			structuralCounts := codexAdditionalFamilyPrefixCounts(featureGroup, func(candidate codexAdditionalRateLimitFamily) string {
+				return candidate.structuralIDPrefix
+			}, family.featureIDPrefix)
+			switch {
+			case family.nameIDPrefix != "" && family.nameIDPrefix != family.featureIDPrefix && nameCounts[family.nameIDPrefix] == 1:
+				family.idPrefix = family.nameIDPrefix
+			case family.structuralIDPrefix != "" && family.structuralIDPrefix != family.featureIDPrefix && structuralCounts[family.structuralIDPrefix] == 1:
+				family.idPrefix = family.structuralIDPrefix
+			case family.nameIDPrefix != "" && family.nameIDPrefix != family.featureIDPrefix:
+				family.idPrefix = family.nameIDPrefix
+			case family.structuralIDPrefix != "" && family.structuralIDPrefix != family.featureIDPrefix:
+				family.idPrefix = family.structuralIDPrefix
+			default:
+				family.idPrefix = "additional-" + family.featureIDPrefix
+			}
+		} else if baseIDPrefixCounts[family.baseIDPrefix] > 1 && family.featureIDPrefix != "" && family.featureIDPrefix != family.baseIDPrefix {
 			family.idPrefix += "--" + family.featureIDPrefix
 		}
 		legacyPrefix := family.legacyBaseIDPrefix
-		if legacyBaseIDPrefixCounts[legacyPrefix] > 1 && family.featureIDPrefix != "" && family.featureIDPrefix != legacyPrefix {
+		if !family.collisionMode && legacyPrefix != "" && legacyBaseIDPrefixCounts[legacyPrefix] > 1 && family.featureIDPrefix != "" && family.featureIDPrefix != legacyPrefix {
 			legacyPrefix += "--" + family.featureIDPrefix
 		}
-		family.legacyPrefixes = append(family.legacyPrefixes, legacyPrefix)
+		if legacyPrefix != "" {
+			family.legacyPrefixes = append(family.legacyPrefixes, legacyPrefix)
+		}
+		if family.collisionMode {
+			filtered := family.legacyPrefixes[:0]
+			for _, prefix := range family.legacyPrefixes {
+				if prefix != family.featureIDPrefix {
+					filtered = append(filtered, prefix)
+				}
+			}
+			family.legacyPrefixes = filtered
+		}
 		familiesByIDPrefix[family.idPrefix] = append(familiesByIDPrefix[family.idPrefix], index)
 	}
 	familyIndexes := make(map[int]int, len(families))
@@ -4809,15 +4853,9 @@ func codexAdditionalRateLimitSortKey(rateInfo *codexRateLimit) string {
 	if rateInfo == nil {
 		return ""
 	}
-	allowed := ""
-	if rateInfo.Allowed != nil {
-		allowed = fmt.Sprintf("%t", *rateInfo.Allowed)
-	}
 	return strings.Join([]string{
 		codexAdditionalWindowSortKey(rateInfo.PrimaryWindow),
 		codexAdditionalWindowSortKey(rateInfo.SecondaryWindow),
-		allowed,
-		fmt.Sprintf("%t", rateInfo.LimitReached),
 	}, "|")
 }
 
@@ -4825,21 +4863,26 @@ func codexAdditionalWindowSortKey(window *codexWindow) string {
 	if window == nil {
 		return "none"
 	}
-	values := []*float64{
-		window.LimitWindowSeconds,
-		window.UsedPercent,
-		window.ResetAfterSeconds,
-		window.ResetAt,
+	if window.LimitWindowSeconds == nil {
+		return "present:unknown"
 	}
-	parts := make([]string, 0, len(values))
-	for _, value := range values {
-		if value == nil {
-			parts = append(parts, "")
+	return fmt.Sprintf("present:%g", *window.LimitWindowSeconds)
+}
+
+func codexAdditionalFamilyPrefixCounts(
+	families []codexAdditionalRateLimitFamily,
+	selector func(codexAdditionalRateLimitFamily) string,
+	excludedPrefix string,
+) map[string]int {
+	counts := make(map[string]int)
+	for _, family := range families {
+		prefix := selector(family)
+		if prefix == "" || prefix == excludedPrefix {
 			continue
 		}
-		parts = append(parts, fmt.Sprintf("%g", *value))
+		counts[prefix]++
 	}
-	return strings.Join(parts, ":")
+	return counts
 }
 
 func readMapSlice(record map[string]any, keys ...string) []map[string]any {

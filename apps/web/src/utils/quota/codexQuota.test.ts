@@ -391,6 +391,108 @@ describe('buildCodexQuotaWindowInfos', () => {
       scopeDisplayName: 'New Name',
       providerWindowAliases: expect.arrayContaining(['new-name-weekly-0']),
     });
+    expect(
+      resolveCodexAdditionalQuotaScope({
+        metered_feature: 'future_feature',
+        limit_name: 'Old Name',
+      }).legacyProviderWindowIdPrefixes
+    ).toEqual(['old-name']);
+  });
+
+  it('falls back to distinct name identities for duplicate metered features', () => {
+    const family = (name: string, usedPercent: number, resetAfterSeconds: number) => ({
+      metered_feature: 'future_feature',
+      limit_name: name,
+      rate_limit: {
+        secondary_window: {
+          used_percent: usedPercent,
+          limit_window_seconds: 604_800,
+          reset_after_seconds: resetAfterSeconds,
+          reset_at: 1_000_000 + resetAfterSeconds,
+        },
+        allowed: usedPercent < 100,
+        limit_reached: usedPercent >= 100,
+      },
+    });
+    const build = (items: ReturnType<typeof family>[]) =>
+      buildCodexQuotaWindowInfos({ additional_rate_limits: items });
+    const byName = (windows: CodexQuotaWindowInfo[]) =>
+      new Map(windows.map((window) => [window.scopeDisplayName, window]));
+
+    const forward = byName(build([family('Quota A', 10, 900), family('Quota B', 80, 600)]));
+    const changed = byName(build([family('Quota A', 90, 300), family('Quota B', 20, 1_200)]));
+    const reverse = byName(build([family('Quota B', 20, 1_200), family('Quota A', 90, 300)]));
+
+    for (const windows of [forward, changed, reverse]) {
+      expect(windows.get('Quota A')).toMatchObject({
+        id: 'quota-a-weekly-0',
+        modelScope: { kind: 'feature', key: 'future_feature', complete: false },
+      });
+      expect(windows.get('Quota B')).toMatchObject({
+        id: 'quota-b-weekly-0',
+        modelScope: { kind: 'feature', key: 'future_feature', complete: false },
+      });
+      expect(
+        [...windows.values()].flatMap((window) => window.providerWindowAliases ?? [])
+      ).not.toContain('future-feature-weekly-0');
+    }
+    expect(changed.get('Quota A')?.id).toBe(forward.get('Quota A')?.id);
+    expect(changed.get('Quota B')?.id).toBe(forward.get('Quota B')?.id);
+    expect(reverse.get('Quota A')?.id).toBe(forward.get('Quota A')?.id);
+    expect(reverse.get('Quota B')?.id).toBe(forward.get('Quota B')?.id);
+  });
+
+  it('uses structural identities for duplicate metered features without usable names', () => {
+    const family = (seconds: number, usedPercent: number) => ({
+      metered_feature: 'future_feature',
+      rate_limit: {
+        primary_window: { limit_window_seconds: seconds, used_percent: usedPercent },
+      },
+    });
+    const initial = buildCodexQuotaWindowInfos({
+      additional_rate_limits: [family(18_000, 10), family(604_800, 80)],
+    });
+    const changed = buildCodexQuotaWindowInfos({
+      additional_rate_limits: [family(18_000, 90), family(604_800, 20)],
+    });
+
+    expect(initial.map((window) => window.id)).toEqual([
+      'additional-p-18000-s-none-five-hour-0',
+      'additional-p-604800-s-none-weekly-0',
+    ]);
+    expect(changed.map((window) => window.id)).toEqual(initial.map((window) => window.id));
+    expect(initial.flatMap((window) => window.providerWindowAliases ?? [])).not.toContain(
+      'future-feature-five-hour-0'
+    );
+  });
+
+  it('keeps fully ambiguous duplicate feature families out of stable-feature identity migration', () => {
+    const family = (usedPercent: number, resetAfterSeconds: number) => ({
+      metered_feature: 'future_feature',
+      limit_name: 'Same Quota',
+      rate_limit: {
+        secondary_window: {
+          used_percent: usedPercent,
+          limit_window_seconds: 604_800,
+          reset_after_seconds: resetAfterSeconds,
+        },
+      },
+    });
+    const initial = buildCodexQuotaWindowInfos({
+      additional_rate_limits: [family(10, 900), family(80, 600)],
+    });
+    const changed = buildCodexQuotaWindowInfos({
+      additional_rate_limits: [family(90, 300), family(20, 1_200)],
+    });
+
+    expect(initial.map((window) => window.id)).toEqual([
+      'same-quota-weekly-0',
+      'same-quota-weekly-1',
+    ]);
+    expect(changed.map((window) => window.id)).toEqual(initial.map((window) => window.id));
+    expect(initial.flatMap((window) => window.providerWindowAliases ?? [])).not.toContain(
+      'future-feature-weekly-0'
+    );
   });
 
   it('uses metered_feature as the raw display name when limit_name is absent', () => {
@@ -417,6 +519,10 @@ describe('buildCodexQuotaWindowInfos', () => {
         modelScope: { kind: 'feature', key: 'future_feature', complete: false },
       },
     ]);
+    expect(
+      resolveCodexAdditionalQuotaScope({ metered_feature: 'future_feature' })
+        .legacyProviderWindowIdPrefixes
+    ).toEqual([]);
   });
 
   it('does not expose an anonymous structural identity as a display name', () => {
@@ -750,7 +856,7 @@ describe('buildCodexQuotaWindowInfos', () => {
     expect(idsByUsage(reverse)).toEqual(idsByUsage(forward));
   });
 
-  it('keeps anonymous and otherwise ambiguous additional limits stable across reorder', () => {
+  it('keeps ambiguous additional family identity independent from dynamic quota state', () => {
     const family = (usedPercent: number, seconds: number) => ({
       rate_limit: {
         primary_window: {
@@ -759,21 +865,19 @@ describe('buildCodexQuotaWindowInfos', () => {
         },
       },
     });
-    const forward = buildCodexQuotaWindowInfos({
+    const initial = buildCodexQuotaWindowInfos({
       additional_rate_limits: [family(30, 18_000), family(40, 18_000), family(50, 604_800)],
     });
-    const reverse = buildCodexQuotaWindowInfos({
-      additional_rate_limits: [family(50, 604_800), family(40, 18_000), family(30, 18_000)],
+    const changed = buildCodexQuotaWindowInfos({
+      additional_rate_limits: [family(90, 18_000), family(20, 18_000), family(5, 604_800)],
     });
 
-    const idsByUsage = (windows: CodexQuotaWindowInfo[]) =>
-      Object.fromEntries(windows.map((window) => [window.usedPercent, window.id]));
-    expect(idsByUsage(forward)).toEqual({
-      30: 'additional-p-18000-s-none-five-hour-0',
-      40: 'additional-p-18000-s-none-five-hour-1',
-      50: 'additional-p-604800-s-none-weekly-0',
-    });
-    expect(idsByUsage(reverse)).toEqual(idsByUsage(forward));
+    expect(initial.map((window) => window.id)).toEqual([
+      'additional-p-18000-s-none-five-hour-0',
+      'additional-p-18000-s-none-five-hour-1',
+      'additional-p-604800-s-none-weekly-0',
+    ]);
+    expect(changed.map((window) => window.id)).toEqual(initial.map((window) => window.id));
   });
 
   it('shares rate-limit helpers used by Codex inspection', () => {

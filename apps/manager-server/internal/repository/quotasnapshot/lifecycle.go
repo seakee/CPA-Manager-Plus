@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/codexquota"
@@ -712,63 +711,63 @@ func generatedCodexWindowSuffix(providerWindowID, canonicalPrefix string) (strin
 }
 
 func generatedCodexWindowSuffixFromID(providerWindowID string) (string, bool) {
-	providerWindowID = strings.ToLower(strings.TrimSpace(providerWindowID))
-	if providerWindowID == "" {
+	normalized := strings.ToLower(strings.TrimSpace(providerWindowID))
+	if normalized == "" {
 		return "", false
 	}
-	parts := strings.Split(providerWindowID, "-")
+	parts := strings.Split(normalized, "-")
 	for index := 1; index < len(parts); index++ {
-		if index == 0 {
-			continue
+		candidate := "-" + strings.Join(parts[index:], "-")
+		if suffix, ok := generatedCodexSuffixFromID(candidate); ok {
+			return suffix, true
 		}
-		if index+2 < len(parts) && parts[index] == "five" && parts[index+1] == "hour" {
-			if index+2 == len(parts)-1 {
-				if _, err := strconv.Atoi(parts[index+2]); err == nil {
-					return "-" + strings.Join(parts[index:], "-"), true
-				}
-			}
-			continue
-		}
-		if index+1 < len(parts) && (parts[index] == "weekly" || parts[index] == "monthly") &&
-			index+1 == len(parts)-1 {
-			if _, err := strconv.Atoi(parts[index+1]); err == nil {
-				return "-" + strings.Join(parts[index:], "-"), true
-			}
-		}
-	}
-	for index := 1; index+3 < len(parts); index++ {
-		if parts[index+1] != "window" || parts[index+2] == "" {
-			continue
-		}
-		if _, firstErr := strconv.Atoi(parts[index]); firstErr != nil {
-			continue
-		}
-		if _, lastErr := strconv.Atoi(parts[index+3]); lastErr != nil || index+3 != len(parts)-1 {
-			continue
-		}
-		return "-" + strings.Join(parts[index:], "-"), true
 	}
 	return "", false
 }
 
 func generatedCodexSuffixFromID(suffix string) (string, bool) {
-	if !strings.HasPrefix(suffix, "-") {
+	normalized := strings.ToLower(strings.TrimSpace(suffix))
+	if !strings.HasPrefix(normalized, "-") || len(normalized) == 1 {
 		return "", false
 	}
-	parts := strings.Split(strings.TrimPrefix(suffix, "-"), "-")
-	if len(parts) == 2 && (parts[0] == "five-hour" || parts[0] == "weekly" || parts[0] == "monthly") {
-		if _, err := strconv.Atoi(parts[1]); err == nil {
-			return suffix, true
-		}
+	parts := strings.Split(strings.TrimPrefix(normalized, "-"), "-")
+	if len(parts) == 3 && parts[0] == "five" && parts[1] == "hour" && isDecimalToken(parts[2]) {
+		return normalized, true
 	}
-	if len(parts) == 4 && parts[1] == "window" && parts[2] != "" {
-		if _, firstErr := strconv.Atoi(parts[0]); firstErr == nil {
-			if _, lastErr := strconv.Atoi(parts[3]); lastErr == nil {
-				return suffix, true
-			}
-		}
+	if len(parts) == 2 && (parts[0] == "weekly" || parts[0] == "monthly") && isDecimalToken(parts[1]) {
+		return normalized, true
+	}
+	if len(parts) == 4 && isDecimalToken(parts[0]) && parts[1] == "window" &&
+		isCodexWindowDurationToken(parts[2]) && isDecimalToken(parts[3]) {
+		return normalized, true
 	}
 	return "", false
+}
+
+func isDecimalToken(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func isCodexWindowDurationToken(value string) bool {
+	if value == "unknown" {
+		return true
+	}
+	if isDecimalToken(value) {
+		return true
+	}
+	if len(value) < 2 || !isDecimalToken(value[:len(value)-1]) {
+		return false
+	}
+	unit := value[len(value)-1]
+	return unit == 'd' || unit == 'h' || unit == 's'
 }
 
 func scanLogicalWindowRows(rows *sql.Rows) ([]logicalWindowRow, error) {

@@ -5354,6 +5354,52 @@ func TestQuotaLifecycleMigratesRenamedCodexScopedIdentityByExactGeneratedSuffix(
 	}
 }
 
+func TestQuotaLifecycleMigratesRenamedCodexFiveHourByExactGeneratedSuffix(t *testing.T) {
+	service, path := newQuotaSnapshotTestServiceWithPath(t, quotaLifecycleBaseMS+quotaLifecycleDayMS)
+	legacyID := "old-name-five-hour-0"
+	canonicalID := "future-feature-five-hour-0"
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+quotaLifecycleHourMS, []WindowInput{
+		codexScopedAdditionalWindowWithKind(legacyID, "Old Name", 20, "five_hour", 5*60*60),
+	})
+	initial := queryQuotaLifecycleWindows(t, service, false)[legacyID]
+	if initial.LogicalWindowID == 0 || initial.ActivationGeneration != 1 {
+		t.Fatalf("legacy five-hour lifecycle = %#v", initial)
+	}
+
+	canonical := codexScopedAdditionalWindowWithKind(canonicalID, "New Name", 30, "five_hour", 5*60*60)
+	canonical.ProviderWindowAliases = []string{"new-name-five-hour-0"}
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+2*quotaLifecycleHourMS, []WindowInput{canonical})
+
+	windows := queryQuotaLifecycleWindows(t, service, true)
+	current, ok := windows[canonicalID]
+	if !ok || len(windows) != 1 || current.LogicalWindowID != initial.LogicalWindowID ||
+		current.ActivationGeneration != 1 || current.ScopeDisplayName != "New Name" {
+		t.Fatalf("five-hour suffix migration = %#v", windows)
+	}
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open five-hour migration database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	var windowCount, snapshotCount, legacySnapshotCount, canonicalSnapshotCount int
+	if err := db.QueryRow(`select count(*) from account_quota_windows where provider = 'codex'`).Scan(&windowCount); err != nil {
+		t.Fatalf("count five-hour logical windows: %v", err)
+	}
+	if err := db.QueryRow(`select count(*) from account_quota_snapshots where provider = 'codex'`).Scan(&snapshotCount); err != nil {
+		t.Fatalf("count five-hour historical snapshots: %v", err)
+	}
+	if err := db.QueryRow(`select count(*) from account_quota_snapshots where provider_window_id = ?`, legacyID).Scan(&legacySnapshotCount); err != nil {
+		t.Fatalf("count legacy five-hour snapshot: %v", err)
+	}
+	if err := db.QueryRow(`select count(*) from account_quota_snapshots where provider_window_id = ?`, canonicalID).Scan(&canonicalSnapshotCount); err != nil {
+		t.Fatalf("count canonical five-hour snapshot: %v", err)
+	}
+	if windowCount != 1 || snapshotCount != 2 || legacySnapshotCount != 1 || canonicalSnapshotCount != 1 {
+		t.Fatalf("five-hour migration counts = windows:%d snapshots:%d legacy:%d canonical:%d", windowCount, snapshotCount, legacySnapshotCount, canonicalSnapshotCount)
+	}
+}
+
 func TestQuotaLifecycleReopensMigratedCodexScopedIdentityWithNewActivation(t *testing.T) {
 	service := newQuotaSnapshotTestService(t, quotaLifecycleBaseMS+quotaLifecycleDayMS)
 	canonicalID := "future-feature-weekly-0"
@@ -5382,6 +5428,25 @@ func TestQuotaLifecycleReopensMigratedCodexScopedIdentityWithNewActivation(t *te
 	if active.Availability != "active" || active.LogicalWindowID != initial.LogicalWindowID ||
 		active.ActivationGeneration != 2 || active.ScopeDisplayName != "Newest Name" {
 		t.Fatalf("reopened scoped lifecycle = %#v", active)
+	}
+}
+
+func TestQuotaLifecycleKeepsDuplicateCodexFeatureFamiliesIndependent(t *testing.T) {
+	service := newQuotaSnapshotTestService(t, quotaLifecycleBaseMS+quotaLifecycleDayMS)
+	a := codexScopedAdditionalWindow("quota-a-weekly-0", "Quota A", 20)
+	b := codexScopedAdditionalWindow("quota-b-weekly-0", "Quota B", 30)
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+quotaLifecycleHourMS, []WindowInput{a, b})
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+2*quotaLifecycleHourMS, []WindowInput{a})
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+3*quotaLifecycleHourMS, []WindowInput{a})
+
+	all := queryQuotaLifecycleWindows(t, service, true)
+	if len(all) != 2 || all["quota-a-weekly-0"].LogicalWindowID == all["quota-b-weekly-0"].LogicalWindowID ||
+		all["quota-a-weekly-0"].Availability != "active" || all["quota-b-weekly-0"].Availability != "inactive" {
+		t.Fatalf("duplicate feature lifecycle = %#v", all)
+	}
+	current := queryQuotaLifecycleWindows(t, service, false)
+	if len(current) != 1 || current["quota-a-weekly-0"].Availability != "active" {
+		t.Fatalf("duplicate feature current lifecycle = %#v", current)
 	}
 }
 
@@ -5455,12 +5520,15 @@ func quotaLifecycleFixedWindow(id, kind string, startMS, durationSeconds int64, 
 }
 
 func codexScopedAdditionalWindow(id, displayName string, usedPercent float64) WindowInput {
+	return codexScopedAdditionalWindowWithKind(id, displayName, usedPercent, "weekly", 7*24*60*60)
+}
+
+func codexScopedAdditionalWindowWithKind(id, displayName string, usedPercent float64, kind string, durationSeconds int64) WindowInput {
 	startMS := quotaLifecycleBaseMS
-	endMS := startMS + 7*24*60*60*1000
-	durationSeconds := int64(7 * 24 * 60 * 60)
+	endMS := startMS + durationSeconds*1000
 	return WindowInput{
 		ProviderWindowID: id,
-		WindowKind:       "weekly",
+		WindowKind:       kind,
 		WindowMode:       "fixed",
 		ScopeDisplayName: displayName,
 		ModelScopeKind:   "feature",

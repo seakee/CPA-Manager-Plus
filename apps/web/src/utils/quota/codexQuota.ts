@@ -154,21 +154,14 @@ const anonymousCodexAdditionalIdentity = (limitItem: CodexAdditionalRateLimit): 
 
 const codexAdditionalWindowSortKey = (window?: CodexUsageWindow | null): string => {
   if (!window) return 'none';
-  const values = [
-    getWindowSeconds(window),
-    normalizeNumberValue(window.used_percent ?? window.usedPercent),
-    normalizeNumberValue(window.reset_after_seconds ?? window.resetAfterSeconds),
-    normalizeNumberValue(window.reset_at ?? window.resetAt),
-  ];
-  return values.map((value) => (value === null ? '' : String(value))).join(':');
+  const seconds = getWindowSeconds(window);
+  return `present:${seconds === null ? 'unknown' : String(seconds)}`;
 };
 
 const codexAdditionalRateLimitSortKey = (rateInfo: CodexRateLimitInfo): string =>
   [
     codexAdditionalWindowSortKey(rateInfo.primary_window ?? rateInfo.primaryWindow),
     codexAdditionalWindowSortKey(rateInfo.secondary_window ?? rateInfo.secondaryWindow),
-    rateInfo.allowed === undefined ? '' : String(rateInfo.allowed),
-    String(rateInfo.limit_reached === true || rateInfo.limitReached === true),
   ].join('|');
 
 const mainCodexQuotaScope = (): QuotaModelScope => ({
@@ -450,10 +443,15 @@ export const resolveCodexAdditionalQuotaScope = (
     normalizeWindowId(limitName ?? '') ||
     normalizeWindowId(anonymousIdentity) ||
     'additional-unknown';
+  const legacyProviderWindowIdPrefixes = featureKey
+    ? normalizedUniqueWindowIds([limitName ?? '']).filter(
+        (prefix) => prefix !== providerWindowIdPrefix
+      )
+    : normalizedUniqueWindowIds([limitName ?? '']);
   return {
     modelScope: incompleteCodexFeatureScope(key),
     providerWindowIdPrefix,
-    legacyProviderWindowIdPrefixes: normalizedUniqueWindowIds([limitName ?? '']),
+    legacyProviderWindowIdPrefixes,
     labelName: limitName ?? meteredFeature ?? anonymousIdentity,
     scopeDisplayName: limitName ?? meteredFeature ?? undefined,
   };
@@ -872,11 +870,11 @@ const addAdditionalRateLimitWindows = (
     const meteredFeature = normalizeStringValue(
       limitItem?.metered_feature ?? limitItem?.meteredFeature
     );
-    const limitName =
-      normalizeStringValue(limitItem?.limit_name ?? limitItem?.limitName) ??
-      meteredFeature ??
-      `additional-${index + 1}`;
-    const legacyBaseIdPrefix = normalizeWindowId(limitName) || `additional-${index + 1}`;
+    const rawLimitName = normalizeStringValue(limitItem?.limit_name ?? limitItem?.limitName);
+    const limitName = rawLimitName ?? meteredFeature ?? `additional-${index + 1}`;
+    const nameIdPrefix = normalizeWindowId(rawLimitName ?? '');
+    const legacyBaseIdPrefix = nameIdPrefix;
+    const anonymousIdentity = anonymousCodexAdditionalIdentity(limitItem);
     const scopeResolution = resolveCodexAdditionalQuotaScope(limitItem);
     return [
       {
@@ -890,6 +888,8 @@ const addAdditionalRateLimitWindows = (
           normalizeWindowId(limitName) ||
           `additional-${index + 1}`,
         featureIdPrefix: normalizeWindowId(meteredFeature ?? ''),
+        nameIdPrefix,
+        structuralIdPrefix: normalizeWindowId(anonymousIdentity),
         legacyBaseIdPrefix,
         sortKey: codexAdditionalRateLimitSortKey(rateInfo),
         legacyIdPrefixes: scopeResolution.legacyProviderWindowIdPrefixes ?? [],
@@ -902,28 +902,94 @@ const addAdditionalRateLimitWindows = (
     baseIdPrefixCounts.set(baseIdPrefix, (baseIdPrefixCounts.get(baseIdPrefix) ?? 0) + 1);
   });
   families.forEach(({ legacyBaseIdPrefix }) => {
+    if (!legacyBaseIdPrefix) return;
     legacyBaseIdPrefixCounts.set(
       legacyBaseIdPrefix,
       (legacyBaseIdPrefixCounts.get(legacyBaseIdPrefix) ?? 0) + 1
     );
   });
-  const resolvedFamilies = families.map((family) => ({
-    ...family,
-    idPrefix:
+  const featureGroups = new Map<string, typeof families>();
+  families.forEach((family) => {
+    if (!family.featureIdPrefix || family.modelScope.kind !== 'feature') return;
+    const group = featureGroups.get(family.featureIdPrefix) ?? [];
+    group.push(family);
+    featureGroups.set(family.featureIdPrefix, group);
+  });
+  const countFamilyPrefix = (
+    group: typeof families,
+    selector: (family: (typeof families)[number]) => string,
+    excludedPrefix?: string
+  ) => {
+    const counts = new Map<string, number>();
+    group.forEach((family) => {
+      const prefix = selector(family);
+      if (!prefix || prefix === excludedPrefix) return;
+      counts.set(prefix, (counts.get(prefix) ?? 0) + 1);
+    });
+    return counts;
+  };
+  const resolvedFamilies = families.map((family) => {
+    const featureGroup = family.featureIdPrefix
+      ? (featureGroups.get(family.featureIdPrefix) ?? [])
+      : [];
+    const collisionMode = featureGroup.length > 1;
+    let idPrefix = family.baseIdPrefix;
+    if (collisionMode) {
+      const nameCounts = countFamilyPrefix(
+        featureGroup,
+        (candidate) => candidate.nameIdPrefix,
+        family.featureIdPrefix
+      );
+      const structuralCounts = countFamilyPrefix(
+        featureGroup,
+        (candidate) => candidate.structuralIdPrefix,
+        family.featureIdPrefix
+      );
+      if (
+        family.nameIdPrefix &&
+        family.nameIdPrefix !== family.featureIdPrefix &&
+        nameCounts.get(family.nameIdPrefix) === 1
+      ) {
+        idPrefix = family.nameIdPrefix;
+      } else if (
+        family.structuralIdPrefix &&
+        family.structuralIdPrefix !== family.featureIdPrefix &&
+        structuralCounts.get(family.structuralIdPrefix) === 1
+      ) {
+        idPrefix = family.structuralIdPrefix;
+      } else if (family.nameIdPrefix && family.nameIdPrefix !== family.featureIdPrefix) {
+        idPrefix = family.nameIdPrefix;
+      } else if (
+        family.structuralIdPrefix &&
+        family.structuralIdPrefix !== family.featureIdPrefix
+      ) {
+        idPrefix = family.structuralIdPrefix;
+      } else {
+        idPrefix = family.featureIdPrefix
+          ? `additional-${family.featureIdPrefix}`
+          : 'additional-unknown';
+      }
+    } else if (
       (baseIdPrefixCounts.get(family.baseIdPrefix) ?? 0) > 1 &&
       family.featureIdPrefix &&
       family.featureIdPrefix !== family.baseIdPrefix
-        ? `${family.baseIdPrefix}--${family.featureIdPrefix}`
-        : family.baseIdPrefix,
-    legacyIdPrefixes: [
-      ...family.legacyIdPrefixes,
-      (legacyBaseIdPrefixCounts.get(family.legacyBaseIdPrefix) ?? 0) > 1 &&
-      family.featureIdPrefix &&
-      family.featureIdPrefix !== family.legacyBaseIdPrefix
-        ? `${family.legacyBaseIdPrefix}--${family.featureIdPrefix}`
-        : family.legacyBaseIdPrefix,
-    ],
-  }));
+    ) {
+      idPrefix = `${family.baseIdPrefix}--${family.featureIdPrefix}`;
+    }
+
+    const legacyIdPrefixes = [...family.legacyIdPrefixes];
+    if (family.legacyBaseIdPrefix) {
+      const legacyPrefix =
+        !collisionMode &&
+        (legacyBaseIdPrefixCounts.get(family.legacyBaseIdPrefix) ?? 0) > 1 &&
+        family.featureIdPrefix &&
+        family.featureIdPrefix !== family.legacyBaseIdPrefix
+          ? `${family.legacyBaseIdPrefix}--${family.featureIdPrefix}`
+          : family.legacyBaseIdPrefix;
+      legacyIdPrefixes.push(legacyPrefix);
+    }
+    return { ...family, idPrefix, collisionMode, legacyIdPrefixes };
+  });
   const familiesByIdPrefix = new Map<string, typeof resolvedFamilies>();
   resolvedFamilies.forEach((family) => {
     const group = familiesByIdPrefix.get(family.idPrefix) ?? [];
@@ -947,11 +1013,13 @@ const addAdditionalRateLimitWindows = (
       modelScope,
       scopeDisplayName,
       idPrefix,
+      collisionMode,
+      featureIdPrefix,
       legacyIdPrefixes,
     }) => {
       const familyIndex = familyIndexes.get(sourceIndex) ?? 0;
       const aliasPrefixes = normalizedUniqueWindowIds(legacyIdPrefixes).filter(
-        (prefix) => prefix !== idPrefix
+        (prefix) => prefix !== idPrefix && (!collisionMode || prefix !== featureIdPrefix)
       );
       const providerWindowAliasesById = new Map<string, string[]>();
       const addAliases = (id: string) => {
