@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"sort"
 	"strings"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
 
 const (
@@ -52,9 +54,13 @@ limit ?`
 // snapshot captured with a request. AuthFileSnapshot is the primary identity;
 // Source is used only for records created before auth-file snapshots existed.
 type LatestAccountRequestQuery struct {
-	RequestIndex     int
-	AuthFileSnapshot string
-	AuthIndex        string
+	RequestIndex          int
+	AuthFileSnapshot      string
+	AuthIndex             string
+	Provider              string
+	AuthAccountIDSnapshot string
+	AuthProjectIDSnapshot string
+	AccountSnapshot       string
 }
 
 // LatestAccountRequest contains the safe diagnostics needed by the credential
@@ -133,7 +139,10 @@ func (r *repository) recentAccountRequestsIndexed(
 			ctx,
 			target.RequestIndex,
 			limit,
-			snapshotLatestRequestPredicates(authFileSnapshot, authIndex),
+			withLatestRequestIdentity(
+				snapshotLatestRequestPredicates(authFileSnapshot, authIndex),
+				target,
+			),
 		)
 		if err != nil {
 			return nil, err
@@ -142,7 +151,10 @@ func (r *repository) recentAccountRequestsIndexed(
 			ctx,
 			target.RequestIndex,
 			limit,
-			legacyLatestRequestPredicates(authFileSnapshot, authIndex),
+			withLatestRequestIdentity(
+				legacyLatestRequestPredicates(authFileSnapshot, authIndex),
+				target,
+			),
 		)
 		if err != nil {
 			return nil, err
@@ -150,6 +162,126 @@ func (r *repository) recentAccountRequestsIndexed(
 		requests = append(requests, mergeRecentAccountRequests(limit, snapshot, legacy)...)
 	}
 	return requests, nil
+}
+
+func withLatestRequestIdentity(
+	predicates []latestRequestPredicate,
+	target LatestAccountRequestQuery,
+) []latestRequestPredicate {
+	identitySQL, identityArgs := latestRequestIdentityPredicate(target)
+	if identitySQL == "" {
+		return predicates
+	}
+	result := make([]latestRequestPredicate, 0, len(predicates))
+	for _, predicate := range predicates {
+		args := make([]any, 0, len(predicate.args)+len(identityArgs))
+		args = append(args, predicate.args...)
+		args = append(args, identityArgs...)
+		result = append(result, latestRequestPredicate{
+			sql:  predicate.sql + identitySQL,
+			args: args,
+		})
+	}
+	return result
+}
+
+func latestRequestIdentityPredicate(target LatestAccountRequestQuery) (string, []any) {
+	if normalizeLatestRequestProvider(target.Provider) != "codex" {
+		return "", nil
+	}
+
+	workspaceID, member, identityOK, identityConflict := resolveLatestRequestCodexIdentity(target)
+	if identityConflict {
+		// Explicitly conflicting Workspace evidence must never fall back to a
+		// physical credential selector.
+		return " and 1 = 0", nil
+	}
+	if !identityOK {
+		// Missing or weak member evidence is allowed to use the exact physical
+		// credential predicate already supplied by the caller.
+		return "", nil
+	}
+	marker := usageidentity.CodexAccountIDSnapshot(workspaceID)
+	return `
+		and lower(replace(trim(coalesce(nullif(trim(e.auth_provider_snapshot), ''), e.provider, '')), '_', '-')) = 'codex'
+		and (trim(coalesce(e.provider, '')) = '' or lower(replace(trim(e.provider), '_', '-')) = 'codex')
+		and (trim(coalesce(e.auth_provider_snapshot, '')) = '' or lower(replace(trim(e.auth_provider_snapshot), '_', '-')) = 'codex')
+		and lower(trim(coalesce(e.account_snapshot, ''))) = ?
+		and (
+			(
+				trim(coalesce(e.auth_account_id_snapshot, '')) = ?
+				and (
+					trim(coalesce(e.auth_project_id_snapshot, '')) = ''
+					or substr(trim(coalesce(e.auth_project_id_snapshot, '')), 1, length('codex-account-id:v1:')) <> 'codex-account-id:v1:'
+					or trim(coalesce(e.auth_project_id_snapshot, '')) = ?
+				)
+			)
+			or (
+				trim(coalesce(e.auth_account_id_snapshot, '')) = ''
+				and trim(coalesce(e.auth_project_id_snapshot, '')) = ?
+			)
+		)`, []any{member, workspaceID, marker, marker}
+}
+
+// resolveLatestRequestCodexIdentity returns a member filter only when the
+// target has complete, non-conflicting Codex Workspace/member evidence. An
+// incomplete target deliberately falls back to its file/index predicates;
+// only explicit provenance conflicts fail closed.
+func resolveLatestRequestCodexIdentity(target LatestAccountRequestQuery) (workspace, member string, complete, conflict bool) {
+	workspaceID, workspaceOK := usageidentity.ResolveCodexWorkspace(usageidentity.Fields{
+		AuthAccountIDSnapshot: target.AuthAccountIDSnapshot,
+		AuthProjectIDSnapshot: target.AuthProjectIDSnapshot,
+	})
+	workspaceEvidence := strings.Trim(target.AuthAccountIDSnapshot, " ") != "" ||
+		strings.HasPrefix(strings.Trim(target.AuthProjectIDSnapshot, " "), "codex-account-id:v1:")
+	if workspaceEvidence && !workspaceOK {
+		return "", "", false, true
+	}
+	member, memberOK := usageidentity.NormalizeCodexMemberSnapshot(target.AccountSnapshot)
+	if !workspaceOK || !memberOK {
+		return "", "", false, false
+	}
+	return workspaceID, member, true, false
+}
+
+func latestRequestBatchedIdentityPredicate(targetAlias, eventAlias string) string {
+	return `(
+		` + targetAlias + `.provider <> 'codex'
+		or ` + targetAlias + `.identity_mode = 0
+		or (
+			` + targetAlias + `.identity_mode = 1
+			and lower(replace(trim(coalesce(nullif(trim(` + eventAlias + `.auth_provider_snapshot), ''), ` + eventAlias + `.provider, '')), '_', '-')) = 'codex'
+			and (trim(coalesce(` + eventAlias + `.provider, '')) = '' or lower(replace(trim(` + eventAlias + `.provider), '_', '-')) = 'codex')
+			and (trim(coalesce(` + eventAlias + `.auth_provider_snapshot, '')) = '' or lower(replace(trim(` + eventAlias + `.auth_provider_snapshot), '_', '-')) = 'codex')
+			and lower(trim(coalesce(` + eventAlias + `.account_snapshot, ''))) = ` + targetAlias + `.member
+			and (
+				substr(trim(coalesce(` + targetAlias + `.project_id, '')), 1, length('codex-account-id:v1:')) <> 'codex-account-id:v1:'
+				or trim(coalesce(` + targetAlias + `.project_id, '')) = 'codex-account-id:v1:' || ` + targetAlias + `.workspace_id
+			)
+			and (
+				(
+					trim(coalesce(` + eventAlias + `.auth_account_id_snapshot, '')) = ` + targetAlias + `.workspace_id
+					and (
+						trim(coalesce(` + eventAlias + `.auth_project_id_snapshot, '')) = ''
+						or substr(trim(coalesce(` + eventAlias + `.auth_project_id_snapshot, '')), 1, length('codex-account-id:v1:')) <> 'codex-account-id:v1:'
+						or trim(coalesce(` + eventAlias + `.auth_project_id_snapshot, '')) = 'codex-account-id:v1:' || ` + targetAlias + `.workspace_id
+					)
+				)
+				or (
+					trim(coalesce(` + eventAlias + `.auth_account_id_snapshot, '')) = ''
+					and trim(coalesce(` + eventAlias + `.auth_project_id_snapshot, '')) = 'codex-account-id:v1:' || ` + targetAlias + `.workspace_id
+				)
+			)
+		)
+	)`
+}
+
+func normalizeLatestRequestProvider(value string) string {
+	value = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), "_", "-"))
+	if value == "grok" || value == "x-ai" {
+		return "xai"
+	}
+	return value
 }
 
 func snapshotLatestRequestPredicates(authFileSnapshot, authIndex string) []latestRequestPredicate {
@@ -260,18 +392,36 @@ func (r *repository) recentAccountRequestsBatched(
 	limit int,
 ) ([]LatestAccountRequest, error) {
 	values := make([]string, 0, len(targets))
-	args := make([]any, 0, len(targets)*3+1)
+	args := make([]any, 0, len(targets)*8+1)
 	for _, target := range targets {
 		authFileSnapshot := strings.TrimSpace(target.AuthFileSnapshot)
 		if authFileSnapshot == "" {
 			continue
 		}
-		values = append(values, "(?, ?, ?)")
+		provider := normalizeLatestRequestProvider(target.Provider)
+		workspaceID, member := "", ""
+		identityMode := 0
+		if provider == "codex" {
+			var identityOK, identityConflict bool
+			workspaceID, member, identityOK, identityConflict = resolveLatestRequestCodexIdentity(target)
+			switch {
+			case identityConflict:
+				identityMode = 2
+			case identityOK:
+				identityMode = 1
+			}
+		}
+		values = append(values, "(?, ?, ?, ?, ?, ?, ?, ?)")
 		args = append(
 			args,
 			target.RequestIndex,
 			authFileSnapshot,
 			strings.TrimSpace(target.AuthIndex),
+			provider,
+			workspaceID,
+			member,
+			strings.TrimSpace(target.AuthProjectIDSnapshot),
+			identityMode,
 		)
 	}
 	if len(values) == 0 {
@@ -280,7 +430,7 @@ func (r *repository) recentAccountRequestsBatched(
 	args = append(args, limit)
 
 	rows, err := r.db.QueryContext(ctx, `with credential_targets(
-	request_index, auth_file_snapshot, auth_index
+	request_index, auth_file_snapshot, auth_index, provider, workspace_id, member, project_id, identity_mode
 ) as (
 	values `+strings.Join(values, ",")+`
 ), snapshot_candidates as (
@@ -298,6 +448,7 @@ func (r *repository) recentAccountRequestsBatched(
 	join usage_events e
 		on e.auth_file_snapshot collate nocase = t.auth_file_snapshot
 		and coalesce(e.auth_index, '') collate nocase = t.auth_index
+		and `+latestRequestBatchedIdentityPredicate("t", "e")+`
 ), legacy_source_candidates as (
 	select
 		t.request_index,
@@ -314,6 +465,7 @@ func (r *repository) recentAccountRequestsBatched(
 		on coalesce(e.auth_file_snapshot, '') = ''
 		and e.source collate nocase = t.auth_file_snapshot
 		and coalesce(e.auth_index, '') collate nocase = t.auth_index
+		and `+latestRequestBatchedIdentityPredicate("t", "e")+`
 ), candidates as (
 	select * from snapshot_candidates
 	union all

@@ -10,6 +10,7 @@ import (
 
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
 
 func TestRecentAccountRequestsUseSnapshotIdentityLimitAndConservativeLegacyFallback(t *testing.T) {
@@ -104,6 +105,107 @@ func TestRecentAccountRequestsUseSnapshotIdentityLimitAndConservativeLegacyFallb
 	}
 	if _, ok := byIndex[2]; ok {
 		t.Fatalf("missing credential unexpectedly matched: %#v", byIndex[2])
+	}
+}
+
+func TestRecentAccountRequestsFiltersCodexWorkspaceMembers(t *testing.T) {
+	ctx := context.Background()
+	seed := func(t *testing.T, withIndexes bool) []LatestAccountRequest {
+		t.Helper()
+		db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+		if err != nil {
+			t.Fatalf("open database: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		if withIndexes {
+			if err := sqliterepo.RunDerivedStartupMaintenance(ctx, db); err != nil {
+				t.Fatalf("prepare latest-request indexes: %v", err)
+			}
+		}
+		repo := New(db)
+		alice := latestAccountRequestEvent("codex-alice", 1_700_000_020_000, "shared.json", "auth-shared", "shared.json")
+		alice.Provider = "codex"
+		alice.AuthProviderSnapshot = "codex"
+		alice.AuthAccountIDSnapshot = "workspace-1"
+		alice.AccountSnapshot = "alice@example.com"
+		bob := latestAccountRequestEvent("codex-bob", 1_700_000_030_000, "shared.json", "auth-shared", "shared.json")
+		bob.Provider = "codex"
+		bob.AuthProviderSnapshot = "codex"
+		bob.AuthAccountIDSnapshot = "workspace-1"
+		bob.AccountSnapshot = "bob@example.com"
+		legacyAlice := latestAccountRequestEvent("codex-alice-legacy", 1_700_000_010_000, "", "auth-shared", "shared.json")
+		legacyAlice.Provider = "codex"
+		legacyAlice.AuthProviderSnapshot = "codex"
+		legacyAlice.AuthProjectIDSnapshot = usageidentity.CodexAccountIDSnapshot("workspace-1")
+		legacyAlice.AccountSnapshot = "alice@example.com"
+		legacyOtherWorkspace := latestAccountRequestEvent("codex-alice-other-workspace", 1_700_000_040_000, "", "auth-shared", "shared.json")
+		legacyOtherWorkspace.Provider = "codex"
+		legacyOtherWorkspace.AuthProviderSnapshot = "codex"
+		legacyOtherWorkspace.AuthProjectIDSnapshot = usageidentity.CodexAccountIDSnapshot("workspace-2")
+		legacyOtherWorkspace.AccountSnapshot = "alice@example.com"
+		if _, err := repo.InsertBatch(ctx, []usage.Event{alice, bob, legacyAlice, legacyOtherWorkspace}); err != nil {
+			t.Fatalf("insert shared Codex requests: %v", err)
+		}
+		requests, err := repo.RecentAccountRequests(ctx, []LatestAccountRequestQuery{
+			{
+				RequestIndex:          7,
+				AuthFileSnapshot:      "shared.json",
+				AuthIndex:             "auth-shared",
+				Provider:              "codex",
+				AuthAccountIDSnapshot: "workspace-1",
+				AccountSnapshot:       "alice@example.com",
+			},
+			{
+				RequestIndex:          8,
+				AuthFileSnapshot:      "shared.json",
+				AuthIndex:             "auth-shared",
+				Provider:              "codex",
+				AuthAccountIDSnapshot: "workspace-1",
+				AccountSnapshot:       "bob@example.com",
+			},
+			{
+				RequestIndex:          9,
+				AuthFileSnapshot:      "shared.json",
+				AuthIndex:             "auth-shared",
+				Provider:              "codex",
+				AuthAccountIDSnapshot: "workspace-1",
+			},
+			{
+				RequestIndex:          10,
+				AuthFileSnapshot:      "shared.json",
+				AuthIndex:             "auth-shared",
+				Provider:              "codex",
+				AuthAccountIDSnapshot: "workspace-1",
+				AuthProjectIDSnapshot: usageidentity.CodexAccountIDSnapshot("workspace-2"),
+				AccountSnapshot:       "alice@example.com",
+			},
+		}, 10)
+		if err != nil {
+			t.Fatalf("recent shared Codex requests: %v", err)
+		}
+		return requests
+	}
+
+	indexed := seed(t, true)
+	batched := seed(t, false)
+	if !sameLatestAccountRequests(indexed, batched) {
+		t.Fatalf("indexed = %#v, batched = %#v", indexed, batched)
+	}
+	byIndex := make(map[int][]LatestAccountRequest)
+	for _, request := range indexed {
+		byIndex[request.RequestIndex] = append(byIndex[request.RequestIndex], request)
+	}
+	if len(byIndex[7]) != 2 || byIndex[7][0].TimestampMS != 1_700_000_020_000 || byIndex[7][1].TimestampMS != 1_700_000_010_000 {
+		t.Fatalf("Alice requests included Bob/another Workspace or lost legacy Alice request: %#v", byIndex[7])
+	}
+	if len(byIndex[8]) != 1 || byIndex[8][0].TimestampMS != 1_700_000_030_000 {
+		t.Fatalf("Bob requests = %#v", byIndex[8])
+	}
+	if len(byIndex[9]) != 4 || byIndex[9][0].TimestampMS != 1_700_000_040_000 {
+		t.Fatalf("workspace-only Codex target did not use credential fallback: %#v", byIndex[9])
+	}
+	if _, ok := byIndex[10]; ok {
+		t.Fatalf("conflicting Codex target returned requests: %#v", byIndex[10])
 	}
 }
 
@@ -472,6 +574,145 @@ func TestRecentAccountRequestsMergesNewerLegacyWithoutSnapshot(t *testing.T) {
 	}
 	if len(requests) != 1 || requests[0].TimestampMS != legacyNewer.TimestampMS {
 		t.Fatalf("global top-n = %#v", requests)
+	}
+}
+
+func TestRecentAccountRequestsRejectsInvalidCodexWorkspaceTargets(t *testing.T) {
+	for _, withIndexes := range []bool{true, false} {
+		withIndexes := withIndexes
+		t.Run(map[bool]string{true: "indexed", false: "batched"}[withIndexes], func(t *testing.T) {
+			ctx := context.Background()
+			db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+			if err != nil {
+				t.Fatalf("open database: %v", err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			if withIndexes {
+				if err := sqliterepo.RunDerivedStartupMaintenance(ctx, db); err != nil {
+					t.Fatalf("prepare latest-request indexes: %v", err)
+				}
+			}
+
+			event := latestAccountRequestEvent("codex-workspace", 1_700_000_050_000, "shared.json", "auth-shared", "shared.json")
+			event.Provider = "codex"
+			event.AuthProviderSnapshot = "codex"
+			event.AuthAccountIDSnapshot = "workspace-1"
+			event.AccountSnapshot = "alice@example.com"
+			if _, err := New(db).InsertBatch(ctx, []usage.Event{event}); err != nil {
+				t.Fatalf("insert Codex request: %v", err)
+			}
+
+			for _, workspace := range []string{"workspace-1\t", "workspace-1\u00a0", "workspace-\x01-1"} {
+				requests, err := New(db).RecentAccountRequests(ctx, []LatestAccountRequestQuery{{
+					RequestIndex:          1,
+					AuthFileSnapshot:      "shared.json",
+					AuthIndex:             "auth-shared",
+					Provider:              "codex",
+					AuthAccountIDSnapshot: workspace,
+					AccountSnapshot:       "alice@example.com",
+				}}, 10)
+				if err != nil {
+					t.Fatalf("recent requests for invalid workspace %q: %v", workspace, err)
+				}
+				if len(requests) != 0 {
+					t.Fatalf("invalid Codex workspace %q returned requests: %#v", workspace, requests)
+				}
+			}
+		})
+	}
+}
+
+func TestRecentAccountRequestsRejectsConflictingCodexWorkspaceMarker(t *testing.T) {
+	for _, withIndexes := range []bool{true, false} {
+		withIndexes := withIndexes
+		t.Run(map[bool]string{true: "indexed", false: "batched"}[withIndexes], func(t *testing.T) {
+			ctx := context.Background()
+			db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+			if err != nil {
+				t.Fatalf("open database: %v", err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			if withIndexes {
+				if err := sqliterepo.RunDerivedStartupMaintenance(ctx, db); err != nil {
+					t.Fatalf("prepare latest-request indexes: %v", err)
+				}
+			}
+
+			valid := latestAccountRequestEvent("codex-project", 1_700_000_050_000, "shared.json", "auth-shared", "shared.json")
+			valid.Provider = "codex"
+			valid.AuthProviderSnapshot = "codex"
+			valid.AuthAccountIDSnapshot = "workspace-1"
+			valid.AuthProjectIDSnapshot = "project-1"
+			valid.AccountSnapshot = "alice@example.com"
+			conflicting := latestAccountRequestEvent("codex-conflicting-marker", 1_700_000_060_000, "shared.json", "auth-shared", "shared.json")
+			conflicting.Provider = "codex"
+			conflicting.AuthProviderSnapshot = "codex"
+			conflicting.AuthAccountIDSnapshot = "workspace-1"
+			conflicting.AuthProjectIDSnapshot = usageidentity.CodexAccountIDSnapshot("workspace-2")
+			conflicting.AccountSnapshot = "alice@example.com"
+			if _, err := New(db).InsertBatch(ctx, []usage.Event{valid, conflicting}); err != nil {
+				t.Fatalf("insert Codex requests: %v", err)
+			}
+
+			requests, err := New(db).RecentAccountRequests(ctx, []LatestAccountRequestQuery{{
+				RequestIndex:          1,
+				AuthFileSnapshot:      "shared.json",
+				AuthIndex:             "auth-shared",
+				Provider:              "codex",
+				AuthAccountIDSnapshot: "workspace-1",
+				AccountSnapshot:       "alice@example.com",
+			}}, 10)
+			if err != nil {
+				t.Fatalf("recent requests: %v", err)
+			}
+			if len(requests) != 1 || requests[0].TimestampMS != valid.TimestampMS {
+				t.Fatalf("requests = %#v, want only ordinary-project event at %d", requests, valid.TimestampMS)
+			}
+		})
+	}
+}
+
+func TestRecentAccountRequestsRejectsConflictingCodexTargetMarker(t *testing.T) {
+	for _, withIndexes := range []bool{true, false} {
+		withIndexes := withIndexes
+		t.Run(map[bool]string{true: "indexed", false: "batched"}[withIndexes], func(t *testing.T) {
+			ctx := context.Background()
+			db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+			if err != nil {
+				t.Fatalf("open database: %v", err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			if withIndexes {
+				if err := sqliterepo.RunDerivedStartupMaintenance(ctx, db); err != nil {
+					t.Fatalf("prepare latest-request indexes: %v", err)
+				}
+			}
+
+			event := latestAccountRequestEvent("codex-target-marker", 1_700_000_070_000, "shared.json", "auth-shared", "shared.json")
+			event.Provider = "codex"
+			event.AuthProviderSnapshot = "codex"
+			event.AuthAccountIDSnapshot = "workspace-1"
+			event.AccountSnapshot = "alice@example.com"
+			if _, err := New(db).InsertBatch(ctx, []usage.Event{event}); err != nil {
+				t.Fatalf("insert Codex request: %v", err)
+			}
+
+			requests, err := New(db).RecentAccountRequests(ctx, []LatestAccountRequestQuery{{
+				RequestIndex:          1,
+				AuthFileSnapshot:      "shared.json",
+				AuthIndex:             "auth-shared",
+				Provider:              "codex",
+				AuthAccountIDSnapshot: "workspace-1",
+				AuthProjectIDSnapshot: usageidentity.CodexAccountIDSnapshot("workspace-2"),
+				AccountSnapshot:       "alice@example.com",
+			}}, 10)
+			if err != nil {
+				t.Fatalf("recent requests for conflicting target: %v", err)
+			}
+			if len(requests) != 0 {
+				t.Fatalf("conflicting Codex target marker returned requests: %#v", requests)
+			}
+		})
 	}
 }
 

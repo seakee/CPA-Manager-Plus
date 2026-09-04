@@ -2060,6 +2060,30 @@ describe('credential identity helpers', () => {
       accountSnapshot: 'codex-main@example.com',
     });
     expect(
+      getAuthFilePatchTarget(
+        codexFile({
+          id: 'runtime-team-member',
+          account_id: 'workspace-1',
+          account: 'Alice',
+          email: 'Alice@Example.com',
+        })
+      )
+    ).toMatchObject({
+      provider: 'codex',
+      accountId: 'workspace-1',
+      accountSnapshot: 'alice@example.com',
+    });
+    expect(
+      getAuthFilePatchTarget(
+        codexFile({
+          id: 'runtime-weak-member',
+          account_id: 'workspace-1',
+          account: 'Alice',
+          email: undefined,
+        })
+      )
+    ).not.toHaveProperty('accountSnapshot');
+    expect(
       getAuthFilePatchTarget({
         id: 'runtime-unknown',
         name: 'unknown.json',
@@ -2105,7 +2129,7 @@ describe('credential identity helpers', () => {
       account: 'second@example.com',
     });
 
-    expect(getAuthFileSelectionKey(first)).toBe(getAuthFileSelectionKey(renamed));
+    expect(getAuthFileSelectionKey(first)).not.toBe(getAuthFileSelectionKey(renamed));
     expect(getAuthFileSelectionKey(first)).not.toBe(getAuthFileSelectionKey(second));
     expect(getAuthFileNameFromSelectionKey(getAuthFileSelectionKey(second))).toBe(
       'shared-codex.json'

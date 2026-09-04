@@ -29,6 +29,7 @@ import {
   getAuthFileStatusSelectionKey,
   readAuthFileStatusAccountId,
   readAuthFileStatusAccountSnapshot,
+  readAuthFileStatusCodexMember,
   readAuthFileStatusProvider,
 } from '@/utils/authFileStatusMutation';
 
@@ -491,7 +492,10 @@ export const getAuthFilePatchTarget = (file: AuthFileItem): AuthFilePatchTarget 
   const authIndex = readAuthFileAuthIndex(file);
   const provider = normalizeProviderKey(readAuthFileStatusProvider(file));
   const accountId = readAuthFileStatusAccountId(file);
-  const accountSnapshot = readAuthFileStatusAccountSnapshot(file);
+  const accountSnapshot =
+    provider === 'codex'
+      ? readAuthFileStatusCodexMember(file)
+      : readAuthFileStatusAccountSnapshot(file);
   return {
     name: file.name,
     ...(runtimeId ? { runtimeId } : {}),

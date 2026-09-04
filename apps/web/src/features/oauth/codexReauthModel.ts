@@ -1,7 +1,7 @@
 import type { AuthFileItem } from '@/types';
 import {
   readAuthFileStatusAccountId,
-  readAuthFileStatusAccountSnapshot,
+  readAuthFileStatusCodexMember,
   readAuthFileStatusProvider,
   readAuthFileStatusRuntimeId,
 } from '@/utils/authFileStatusMutation';
@@ -27,8 +27,7 @@ export class CodexReauthReconciliationError extends Error {
 
 export const isCodexReauthReconciliationError = (
   error: unknown
-): error is CodexReauthReconciliationError =>
-  error instanceof CodexReauthReconciliationError;
+): error is CodexReauthReconciliationError => error instanceof CodexReauthReconciliationError;
 
 export type CodexReauthTarget = {
   account: string;
@@ -70,6 +69,6 @@ export const createCodexReauthTargetFromAuthFile = (file: AuthFileItem): CodexRe
     provider: readAuthFileStatusProvider(file) || null,
     authIndex: (record.authIndex ?? record.auth_index ?? null) as string | number | null,
     accountId,
-    accountSnapshot: readAuthFileStatusAccountSnapshot(file) || null,
+    accountSnapshot: readAuthFileStatusCodexMember(file) || null,
   };
 };

@@ -526,12 +526,14 @@ func TestExtendExistingCooldownKeepsWinningRecoveryMetadata(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 	existingRecoverAt := now.Add(12 * time.Hour)
+	existingEvidence := fmt.Sprintf(`{"source":"codex-window","recover_at_ms":%d}`, existingRecoverAt.UnixMilli())
 	if _, err := st.UpsertQuotaCooldown(ctx, store.QuotaCooldownUpsert{
 		AuthFileName: "codex-auth.json",
 		AuthIndex:    "auth-codex-1",
 		Provider:     "codex",
 		ReasonCode:   "weekly_limit",
 		WindowKind:   "weekly",
+		EvidenceJSON: existingEvidence,
 		RecoverAtMS:  existingRecoverAt.UnixMilli(),
 		Owner:        model.QuotaCooldownOwnerUsage429,
 		EventHash:    "evt-weekly",
@@ -542,20 +544,24 @@ func TestExtendExistingCooldownKeepsWinningRecoveryMetadata(t *testing.T) {
 
 	worker := NewRateLimitAutoDisableWorker(st)
 	candidate := quotaAutoDisableCandidate{
-		FileName:   "codex-auth.json",
-		AuthIndex:  "auth-codex-1",
-		Provider:   "codex",
-		Owner:      model.QuotaCooldownOwnerUsage429,
-		ReasonCode: "five_hour_limit",
-		WindowKind: "five_hour",
-		ResetAt:    now.Add(6 * time.Hour),
-		EventHash:  "evt-five-hour",
+		FileName:        "codex-auth.json",
+		AuthIndex:       "auth-codex-1",
+		AccountSnapshot: "user@example.com",
+		AccountID:       "workspace-1",
+		Provider:        "codex",
+		Owner:           model.QuotaCooldownOwnerUsage429,
+		ReasonCode:      "five_hour_limit",
+		WindowKind:      "five_hour",
+		ResetAt:         now.Add(6 * time.Hour),
+		EventHash:       "evt-five-hour",
 	}
 	if !worker.extendExistingCooldown(ctx, candidate, authFile{
-		Name:      candidate.FileName,
-		AuthIndex: candidate.AuthIndex,
-		Provider:  candidate.Provider,
-		Disabled:  true,
+		Name:            candidate.FileName,
+		AuthIndex:       candidate.AuthIndex,
+		Provider:        candidate.Provider,
+		AccountSnapshot: candidate.AccountSnapshot,
+		AccountID:       candidate.AccountID,
+		Disabled:        true,
 	}) {
 		t.Fatal("existing cooldown was not updated")
 	}
@@ -564,7 +570,7 @@ func TestExtendExistingCooldownKeepsWinningRecoveryMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list active cooldowns: %v", err)
 	}
-	if len(active) != 1 || active[0].RecoverAtMS != existingRecoverAt.UnixMilli() || active[0].ReasonCode != "weekly_limit" || active[0].WindowKind != "weekly" || active[0].EventHash != "evt-weekly" {
+	if len(active) != 1 || active[0].RecoverAtMS != existingRecoverAt.UnixMilli() || active[0].ReasonCode != "weekly_limit" || active[0].WindowKind != "weekly" || active[0].EvidenceJSON != existingEvidence || active[0].EventHash != "evt-weekly" {
 		t.Fatalf("active cooldown = %#v", active)
 	}
 }
@@ -581,8 +587,9 @@ func TestExtendExistingCooldownUsesAuthIndexWhenDisplayAccountChanges(t *testing
 	if _, err := st.UpsertQuotaCooldown(ctx, store.QuotaCooldownUpsert{
 		AuthFileName:    "shared.json",
 		AuthIndex:       "auth-1",
-		AccountSnapshot: "old-label@example.com",
+		AccountSnapshot: "alice@example.com",
 		Provider:        "codex",
+		EvidenceJSON:    codexCooldownIdentityEvidenceJSON("workspace-1", "alice@example.com"),
 		RecoverAtMS:     now.Add(time.Hour).UnixMilli(),
 		Owner:           model.QuotaCooldownOwnerUsage429,
 		DisabledAtMS:    now.Add(-time.Hour).UnixMilli(),
@@ -592,18 +599,21 @@ func TestExtendExistingCooldownUsesAuthIndexWhenDisplayAccountChanges(t *testing
 
 	worker := NewRateLimitAutoDisableWorker(st)
 	candidate := quotaAutoDisableCandidate{
-		FileName:       "shared.json",
-		AuthIndex:      "auth-1",
-		DisplayAccount: "new-label@example.com",
-		Provider:       "codex",
-		Owner:          model.QuotaCooldownOwnerUsage429,
-		ResetAt:        now.Add(2 * time.Hour),
+		FileName:        "shared.json",
+		AuthIndex:       "auth-1",
+		DisplayAccount:  "new-label@example.com",
+		AccountSnapshot: "alice@example.com",
+		AccountID:       "workspace-1",
+		Provider:        "codex",
+		Owner:           model.QuotaCooldownOwnerUsage429,
+		ResetAt:         now.Add(2 * time.Hour),
 	}
 	if !worker.extendExistingCooldown(ctx, candidate, authFile{
 		Name:            candidate.FileName,
 		AuthIndex:       candidate.AuthIndex,
 		Provider:        candidate.Provider,
-		AccountSnapshot: candidate.DisplayAccount,
+		AccountSnapshot: candidate.AccountSnapshot,
+		AccountID:       candidate.AccountID,
 		Disabled:        true,
 	}) {
 		t.Fatal("stable auth_index cooldown was not extended after display account changed")
@@ -614,7 +624,7 @@ func TestExtendExistingCooldownUsesAuthIndexWhenDisplayAccountChanges(t *testing
 		t.Fatalf("list active cooldowns: %v", err)
 	}
 	if len(active) != 1 || active[0].RecoverAtMS != candidate.ResetAt.UnixMilli() ||
-		active[0].AuthIndex != candidate.AuthIndex || active[0].AccountSnapshot != candidate.DisplayAccount {
+		active[0].AuthIndex != candidate.AuthIndex || active[0].AccountSnapshot != candidate.AccountSnapshot {
 		t.Fatalf("active cooldown = %#v", active)
 	}
 }
@@ -678,16 +688,20 @@ func TestExtendExistingCooldownSelectsMatchingSharedFileIdentity(t *testing.T) {
 	for _, item := range []store.QuotaCooldownUpsert{
 		{
 			AuthFileName:    "shared.json",
+			AuthIndex:       "alice-auth-1",
 			AccountSnapshot: "alice@example.com",
 			Provider:        "codex",
+			EvidenceJSON:    codexCooldownIdentityEvidenceJSON("workspace-1", "alice@example.com"),
 			RecoverAtMS:     now.Add(time.Hour).UnixMilli(),
 			Owner:           model.QuotaCooldownOwnerUsage429,
 			DisabledAtMS:    now.Add(-time.Hour).UnixMilli(),
 		},
 		{
 			AuthFileName:    "shared.json",
+			AuthIndex:       "bob-auth-1",
 			AccountSnapshot: "bob@example.com",
 			Provider:        "codex",
+			EvidenceJSON:    codexCooldownIdentityEvidenceJSON("workspace-1", "bob@example.com"),
 			RecoverAtMS:     now.Add(2 * time.Hour).UnixMilli(),
 			Owner:           model.QuotaCooldownOwnerUsage429,
 			DisabledAtMS:    now.Add(-time.Hour).UnixMilli(),
@@ -701,16 +715,20 @@ func TestExtendExistingCooldownSelectsMatchingSharedFileIdentity(t *testing.T) {
 	worker := NewRateLimitAutoDisableWorker(st)
 	candidate := quotaAutoDisableCandidate{
 		FileName:        "shared.json",
+		AuthIndex:       "bob-auth-1",
 		DisplayAccount:  "bob@example.com",
 		AccountSnapshot: "bob@example.com",
+		AccountID:       "workspace-1",
 		Provider:        "codex",
 		Owner:           model.QuotaCooldownOwnerUsage429,
 		ResetAt:         now.Add(3 * time.Hour),
 	}
 	if !worker.extendExistingCooldown(ctx, candidate, authFile{
 		Name:            candidate.FileName,
+		AuthIndex:       candidate.AuthIndex,
 		Provider:        candidate.Provider,
 		AccountSnapshot: candidate.DisplayAccount,
+		AccountID:       candidate.AccountID,
 		Disabled:        true,
 	}) {
 		t.Fatal("matching shared-file cooldown was not extended")
@@ -762,6 +780,7 @@ func TestRateLimitAutoDisableWorkerSkipsOwnershipWithoutStableIdentity(t *testin
 		BaseURL:        server.URL,
 		ManagementKey:  "mgmt",
 		FileName:       "auth.json",
+		AuthIndex:      "auth-1",
 		DisplayAccount: "auth.json",
 		Provider:       "codex",
 		ResetAt:        time.Now().Add(time.Hour),
@@ -790,11 +809,13 @@ func TestRateLimitAutoDisableWorkerPersistsVerifiedFallbackSnapshot(t *testing.T
 		switch {
 		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
 			_ = json.NewEncoder(w).Encode([]map[string]any{{
-				"id":       "runtime-auth",
-				"name":     "auth.json",
-				"provider": "codex",
-				"account":  "verified@example.com",
-				"disabled": false,
+				"id":         "runtime-auth",
+				"name":       "auth.json",
+				"auth_index": "auth-1",
+				"provider":   "codex",
+				"account":    "verified@example.com",
+				"account_id": "workspace-1",
+				"disabled":   false,
 			}})
 		case r.URL.Path == "/v0/management/auth-files/status" && r.Method == http.MethodPatch:
 			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
@@ -808,6 +829,7 @@ func TestRateLimitAutoDisableWorkerPersistsVerifiedFallbackSnapshot(t *testing.T
 		BaseURL:        server.URL,
 		ManagementKey:  "mgmt",
 		FileName:       "auth.json",
+		AuthIndex:      "auth-1",
 		DisplayAccount: "auth.json",
 		ResetAt:        time.Now().Add(time.Hour),
 	})
@@ -816,7 +838,7 @@ func TestRateLimitAutoDisableWorkerPersistsVerifiedFallbackSnapshot(t *testing.T
 	if err != nil {
 		t.Fatalf("list active cooldowns: %v", err)
 	}
-	if len(active) != 1 || active[0].AuthIndex != "" || active[0].AccountSnapshot != "verified@example.com" || active[0].Provider != "codex" {
+	if len(active) != 1 || active[0].AuthIndex != "auth-1" || active[0].AccountSnapshot != "verified@example.com" || active[0].Provider != "codex" {
 		t.Fatalf("active cooldowns = %#v, want verified provider/account fallback identity", active)
 	}
 }
@@ -1192,6 +1214,7 @@ func TestRateLimitAutoDisableWorkerDoesNotRollbackSamePathReplacementAfterPersis
 				"auth_index": "auth-1",
 				"provider":   "codex",
 				"account":    account,
+				"account_id": "workspace-1",
 				"disabled":   getCalls > 1,
 			}})
 		case r.URL.Path == "/v0/management/auth-files/status" && r.Method == http.MethodPatch:
@@ -1214,14 +1237,16 @@ func TestRateLimitAutoDisableWorkerDoesNotRollbackSamePathReplacementAfterPersis
 	defer server.Close()
 
 	NewRateLimitAutoDisableWorker(st).handleCandidate(context.Background(), quotaAutoDisableCandidate{
-		BaseURL:        server.URL,
-		ManagementKey:  "mgmt",
-		FileName:       "codex-auth.json",
-		AuthIndex:      "auth-1",
-		DisplayAccount: "original@example.com",
-		Provider:       "codex",
-		ResetAt:        time.Now().Add(time.Hour),
-		EventHash:      "evt-persist-failure-replacement",
+		BaseURL:         server.URL,
+		ManagementKey:   "mgmt",
+		FileName:        "codex-auth.json",
+		AuthIndex:       "auth-1",
+		DisplayAccount:  "original@example.com",
+		AccountSnapshot: "original@example.com",
+		AccountID:       "workspace-1",
+		Provider:        "codex",
+		ResetAt:         time.Now().Add(time.Hour),
+		EventHash:       "evt-persist-failure-replacement",
 	})
 
 	if getCalls != 2 {
@@ -1249,7 +1274,7 @@ func TestRateLimitAutoDisableWorkerCompensatesAfterParentCancellation(t *testing
 			getCalls++
 			disabled := len(patchStates) > 0 && patchStates[len(patchStates)-1]
 			body := fmt.Sprintf(
-				`[{"id":"runtime-codex-7","name":"codex-auth.json","auth_index":"auth-1","provider":"codex","account":"user@example.com","disabled":%t}]`,
+				`[{"id":"runtime-codex-7","name":"codex-auth.json","auth_index":"auth-1","provider":"codex","account":"user@example.com","account_id":"workspace-1","disabled":%t}]`,
 				disabled,
 			)
 			return workerHTTPResponse(r, io.NopCloser(strings.NewReader(body))), nil
@@ -1279,6 +1304,7 @@ func TestRateLimitAutoDisableWorkerCompensatesAfterParentCancellation(t *testing
 		AuthIndex:       "auth-1",
 		DisplayAccount:  "user@example.com",
 		AccountSnapshot: "user@example.com",
+		AccountID:       "workspace-1",
 		Provider:        "codex",
 		ResetAt:         time.Now().Add(time.Hour),
 		EventHash:       "evt-parent-canceled",
@@ -1313,7 +1339,7 @@ func TestRateLimitAutoDisableWorkerCompensationHasTotalTimeout(t *testing.T) {
 				return nil, r.Context().Err()
 			}
 			return workerHTTPResponse(r, io.NopCloser(strings.NewReader(
-				`[{"id":"runtime-codex-7","name":"codex-auth.json","auth_index":"auth-1","provider":"codex","account":"user@example.com","disabled":false}]`,
+				`[{"id":"runtime-codex-7","name":"codex-auth.json","auth_index":"auth-1","provider":"codex","account":"user@example.com","account_id":"workspace-1","disabled":false}]`,
 			))), nil
 		case http.MethodPatch + " /v0/management/auth-files/status":
 			_ = st.Close()
@@ -1333,6 +1359,7 @@ func TestRateLimitAutoDisableWorkerCompensationHasTotalTimeout(t *testing.T) {
 		AuthIndex:       "auth-1",
 		DisplayAccount:  "user@example.com",
 		AccountSnapshot: "user@example.com",
+		AccountID:       "workspace-1",
 		Provider:        "codex",
 		ResetAt:         time.Now().Add(time.Hour),
 		EventHash:       "evt-compensation-timeout",
@@ -1497,8 +1524,8 @@ func TestRateLimitAutoDisableWorkerDoesNotRecoverAmbiguousStatusMutationScope(t 
 		switch {
 		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
 			_ = json.NewEncoder(w).Encode([]map[string]any{
-				{"id": "shared.json", "name": "shared.json", "auth_index": "auth-1", "provider": "codex", "account": "user@example.com", "disabled": true},
-				{"id": "runtime-auth-2", "name": "shared.json", "auth_index": "auth-2", "provider": "codex", "disabled": true},
+				{"id": "shared.json", "name": "shared.json", "auth_index": "auth-1", "provider": "codex", "account": "user@example.com", "account_id": "workspace-1", "disabled": true},
+				{"id": "runtime-auth-2", "name": "shared.json", "auth_index": "auth-2", "provider": "codex", "account": "other@example.com", "account_id": "workspace-1", "disabled": true},
 			})
 		case r.URL.Path == "/v0/management/auth-files/status" && r.Method == http.MethodPatch:
 			patchCalls++
@@ -1516,6 +1543,7 @@ func TestRateLimitAutoDisableWorkerDoesNotRecoverAmbiguousStatusMutationScope(t 
 		AuthIndex:        "auth-1",
 		AccountSnapshot:  "user@example.com",
 		Provider:         "codex",
+		EvidenceJSON:     codexCooldownIdentityEvidenceJSON("workspace-1", "user@example.com"),
 		RecoverAtMS:      now.Add(-time.Minute).UnixMilli(),
 		Owner:            model.QuotaCooldownOwnerUsage429,
 		EventHash:        "evt-ambiguous-recovery",
@@ -1543,6 +1571,244 @@ func TestRateLimitAutoDisableWorkerDoesNotRecoverAmbiguousStatusMutationScope(t 
 	}
 }
 
+func TestRateLimitAutoDisableWorkerRejectsDuplicateCodexCredentialLocator(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	patchCalls := 0
+	patchedName := ""
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v0/management/auth-files":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"id":         "runtime-alice",
+					"name":       "shared.json",
+					"auth_index": "shared-auth",
+					"provider":   "codex",
+					"account":    "alice@example.com",
+					"account_id": "workspace-1",
+					"disabled":   false,
+				},
+				{
+					"id":         "runtime-bob",
+					"name":       "shared.json",
+					"auth_index": "shared-auth",
+					"provider":   "codex",
+					"account":    "bob@example.com",
+					"account_id": "workspace-1",
+					"disabled":   false,
+				},
+			})
+		case "PATCH /v0/management/auth-files/status":
+			var payload struct {
+				Name     string `json:"name"`
+				Disabled bool   `json:"disabled"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			patchCalls++
+			patchedName = payload.Name
+			if !payload.Disabled {
+				http.Error(w, "expected disable", http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	now := time.Now()
+	NewRateLimitAutoDisableWorker(st).handleCandidate(context.Background(), quotaAutoDisableCandidate{
+		BaseURL:         server.URL,
+		ManagementKey:   "mgmt",
+		FileName:        "shared.json",
+		AuthIndex:       "shared-auth",
+		DisplayAccount:  "alice@example.com",
+		AccountSnapshot: "alice@example.com",
+		AccountID:       "workspace-1",
+		Provider:        "codex",
+		ResetAt:         now.Add(time.Hour),
+		EventHash:       "evt-shared-alice",
+	})
+
+	if patchCalls != 0 || patchedName != "" {
+		t.Fatalf("patch target = %q with %d calls, want no mutation for duplicate locator", patchedName, patchCalls)
+	}
+	active, err := st.QuotaCooldowns.ListActive(context.Background())
+	if err != nil {
+		t.Fatalf("list active cooldowns: %v", err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("active cooldowns = %#v, want no cooldown for duplicate locator", active)
+	}
+}
+
+func TestRateLimitAutoDisableWorkerRejectsDuplicateCodexRecoveryLocator(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	patchCalls := 0
+	patchedName := ""
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v0/management/auth-files":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"id":         "runtime-alice",
+					"name":       "shared.json",
+					"auth_index": "shared-auth",
+					"provider":   "codex",
+					"account":    "alice@example.com",
+					"account_id": "workspace-1",
+					"disabled":   true,
+				},
+				{
+					"id":         "runtime-bob",
+					"name":       "shared.json",
+					"auth_index": "shared-auth",
+					"provider":   "codex",
+					"account":    "bob@example.com",
+					"account_id": "workspace-1",
+					"disabled":   true,
+				},
+			})
+		case "PATCH /v0/management/auth-files/status":
+			var payload struct {
+				Name     string `json:"name"`
+				Disabled bool   `json:"disabled"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			patchCalls++
+			patchedName = payload.Name
+			if payload.Disabled {
+				http.Error(w, "expected enable", http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	if _, err := st.UpsertQuotaCooldown(ctx, store.QuotaCooldownUpsert{
+		AuthFileName:     "shared.json",
+		AuthIndex:        "shared-auth",
+		AccountSnapshot:  "alice@example.com",
+		Provider:         "codex",
+		EvidenceJSON:     codexCooldownIdentityEvidenceJSON("workspace-1", "alice@example.com"),
+		RecoverAtMS:      time.Now().Add(-time.Minute).UnixMilli(),
+		Owner:            model.QuotaCooldownOwnerUsage429,
+		EventHash:        "evt-shared-alice-recovery",
+		PreDisabledState: false,
+		DisabledAtMS:     time.Now().Add(-time.Hour).UnixMilli(),
+	}); err != nil {
+		t.Fatalf("seed cooldown: %v", err)
+	}
+
+	NewRateLimitAutoDisableWorker(st, collectorpkg.RuntimeConfig{
+		CPAUpstreamURL: server.URL,
+		ManagementKey:  "mgmt",
+	}).enableDue(ctx, time.Now())
+
+	if patchCalls != 0 || patchedName != "" {
+		t.Fatalf("patch target = %q with %d calls, want no mutation for duplicate locator", patchedName, patchCalls)
+	}
+	active, err := st.QuotaCooldowns.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("list active cooldowns: %v", err)
+	}
+	if len(active) != 1 || !strings.Contains(active[0].LastError, "scope is ambiguous") {
+		t.Fatalf("active cooldowns = %#v, want retained ambiguous failure", active)
+	}
+}
+
+func TestRateLimitAutoDisableWorkerRecoversLegacyCodexCooldownWithoutIdentityEvidence(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	patchCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v0/management/auth-files":
+			_ = json.NewEncoder(w).Encode([]map[string]any{{
+				"id":         "runtime-alice",
+				"name":       "codex-auth.json",
+				"auth_index": "auth-1",
+				"provider":   "codex",
+				"account":    "alice@example.com",
+				"account_id": "workspace-1",
+				"disabled":   true,
+			}})
+		case "PATCH /v0/management/auth-files/status":
+			var payload struct {
+				Disabled bool `json:"disabled"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			patchCalls++
+			if payload.Disabled {
+				http.Error(w, "expected enable", http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	if _, err := st.UpsertQuotaCooldown(ctx, store.QuotaCooldownUpsert{
+		AuthFileName:     "codex-auth.json",
+		AuthIndex:        "auth-1",
+		Provider:         "codex",
+		EvidenceJSON:     "",
+		RecoverAtMS:      time.Now().Add(-time.Minute).UnixMilli(),
+		Owner:            model.QuotaCooldownOwnerUsage429,
+		PreDisabledState: false,
+		DisabledAtMS:     time.Now().Add(-time.Hour).UnixMilli(),
+	}); err != nil {
+		t.Fatalf("seed legacy cooldown: %v", err)
+	}
+
+	NewRateLimitAutoDisableWorker(st, collectorpkg.RuntimeConfig{
+		CPAUpstreamURL: server.URL,
+		ManagementKey:  "mgmt",
+	}).enableDue(ctx, time.Now())
+
+	if patchCalls != 1 {
+		t.Fatalf("patch calls = %d, want one enable for legacy cooldown", patchCalls)
+	}
+	active, err := st.QuotaCooldowns.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("list active cooldowns: %v", err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("active cooldowns = %#v, want legacy cooldown recovered", active)
+	}
+}
+
 func TestRateLimitAutoDisableWorkerSkipsRecoveryAfterCredentialIdentityChanges(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
 	if err != nil {
@@ -1560,6 +1826,7 @@ func TestRateLimitAutoDisableWorkerSkipsRecoveryAfterCredentialIdentityChanges(t
 				"auth_index": "auth-1",
 				"provider":   "codex",
 				"account":    "replacement@example.com",
+				"account_id": "workspace-1",
 				"disabled":   true,
 			}})
 		case r.URL.Path == "/v0/management/auth-files/status" && r.Method == http.MethodPatch:
@@ -1578,6 +1845,7 @@ func TestRateLimitAutoDisableWorkerSkipsRecoveryAfterCredentialIdentityChanges(t
 		AuthIndex:        "auth-1",
 		AccountSnapshot:  "original@example.com",
 		Provider:         "codex",
+		EvidenceJSON:     codexCooldownIdentityEvidenceJSON("workspace-1", "original@example.com"),
 		RecoverAtMS:      now.Add(-time.Minute).UnixMilli(),
 		Owner:            model.QuotaCooldownOwnerUsage429,
 		PreDisabledState: false,
@@ -1663,6 +1931,7 @@ func TestRateLimitAutoDisableWorkerSerializesRecoveryAndCooldownExtension(t *tes
 		AuthIndex:        "auth-1",
 		AccountSnapshot:  "user@example.com",
 		Provider:         "codex",
+		EvidenceJSON:     codexCooldownIdentityEvidenceJSON("workspace-1", "user@example.com"),
 		RecoverAtMS:      now.Add(-time.Minute).UnixMilli(),
 		Owner:            model.QuotaCooldownOwnerUsage429,
 		PreDisabledState: false,
@@ -1694,6 +1963,7 @@ func TestRateLimitAutoDisableWorkerSerializesRecoveryAndCooldownExtension(t *tes
 				"auth_index": "auth-1",
 				"provider":   "codex",
 				"account":    "user@example.com",
+				"account_id": "workspace-1",
 				"disabled":   currentDisabled,
 			}})
 		case r.URL.Path == "/v0/management/auth-files/status" && r.Method == http.MethodPatch:
@@ -1728,14 +1998,16 @@ func TestRateLimitAutoDisableWorkerSerializesRecoveryAndCooldownExtension(t *tes
 	extensionDone := make(chan struct{})
 	go func() {
 		worker.handleCandidate(ctx, quotaAutoDisableCandidate{
-			BaseURL:        server.URL,
-			ManagementKey:  "mgmt",
-			FileName:       "codex-auth.json",
-			AuthIndex:      "auth-1",
-			DisplayAccount: "user@example.com",
-			Provider:       "codex",
-			ResetAt:        now.Add(time.Hour),
-			EventHash:      "evt-extended",
+			BaseURL:         server.URL,
+			ManagementKey:   "mgmt",
+			FileName:        "codex-auth.json",
+			AuthIndex:       "auth-1",
+			DisplayAccount:  "user@example.com",
+			AccountSnapshot: "user@example.com",
+			AccountID:       "workspace-1",
+			Provider:        "codex",
+			ResetAt:         now.Add(time.Hour),
+			EventHash:       "evt-extended",
 		})
 		close(extensionDone)
 	}()
@@ -1796,6 +2068,8 @@ func TestRateLimitAutoDisableWorkerRecoversDueCooldownFromManagerRuntimeConfigAf
 				"name":       "codex-auth.json",
 				"auth_index": "auth-1",
 				"provider":   "codex",
+				"account":    "user@example.com",
+				"account_id": "workspace-1",
 				"disabled":   currentDisabled,
 			}})
 		case "/v0/management/auth-files/status":
@@ -1830,7 +2104,9 @@ func TestRateLimitAutoDisableWorkerRecoversDueCooldownFromManagerRuntimeConfigAf
 	if _, err := st.UpsertQuotaCooldown(ctx, store.QuotaCooldownUpsert{
 		AuthFileName:     "codex-auth.json",
 		AuthIndex:        "auth-1",
+		AccountSnapshot:  "user@example.com",
 		Provider:         "codex",
+		EvidenceJSON:     codexCooldownIdentityEvidenceJSON("workspace-1", "user@example.com"),
 		RecoverAtMS:      time.Now().Add(-time.Minute).UnixMilli(),
 		Owner:            model.QuotaCooldownOwnerUsage429,
 		EventHash:        "evt-due",
@@ -2076,6 +2352,7 @@ func TestRateLimitAutoDisableWorkerRollsBackEnableWhenRecoveryPersistenceFails(t
 				"auth_index": "auth-1",
 				"provider":   "codex",
 				"account":    "user@example.com",
+				"account_id": "workspace-1",
 				"disabled":   disabled,
 			}})
 		case r.URL.Path == "/v0/management/auth-files/status" && r.Method == http.MethodPatch:
@@ -2102,6 +2379,7 @@ func TestRateLimitAutoDisableWorkerRollsBackEnableWhenRecoveryPersistenceFails(t
 		AuthIndex:        "auth-1",
 		AccountSnapshot:  "user@example.com",
 		Provider:         "codex",
+		EvidenceJSON:     codexCooldownIdentityEvidenceJSON("workspace-1", "user@example.com"),
 		RecoverAtMS:      now.Add(-time.Minute).UnixMilli(),
 		Owner:            model.QuotaCooldownOwnerUsage429,
 		EventHash:        "recovery-persistence-failure",
@@ -2158,12 +2436,13 @@ func TestRateLimitAutoDisableWorkerPersistsAndRecoversAfterRestart(t *testing.T)
 			currentDisabled := disabled
 			mu.Unlock()
 			_ = json.NewEncoder(w).Encode([]map[string]any{{
-				"id":        "runtime-codex-auth-1",
-				"name":      "codex-auth.json",
-				"authIndex": "auth-1",
-				"provider":  "codex",
-				"account":   "user@example.com",
-				"disabled":  currentDisabled,
+				"id":         "runtime-codex-auth-1",
+				"name":       "codex-auth.json",
+				"authIndex":  "auth-1",
+				"provider":   "codex",
+				"account":    "user@example.com",
+				"account_id": "workspace-1",
+				"disabled":   currentDisabled,
 			}})
 		case http.MethodPatch:
 			if r.URL.Path != "/v0/management/auth-files/status" {
@@ -2189,14 +2468,16 @@ func TestRateLimitAutoDisableWorkerPersistsAndRecoversAfterRestart(t *testing.T)
 	ctx := context.Background()
 	worker := NewRateLimitAutoDisableWorker(st, collectorpkg.RuntimeConfig{CPAUpstreamURL: server.URL, ManagementKey: "test-management-key"})
 	worker.handleCandidate(ctx, quotaAutoDisableCandidate{
-		BaseURL:        server.URL,
-		ManagementKey:  "test-management-key",
-		FileName:       "codex-auth.json",
-		AuthIndex:      "auth-1",
-		DisplayAccount: "user@example.com",
-		Provider:       "codex",
-		ResetAt:        time.Now().Add(time.Minute),
-		EventHash:      "evt-quota",
+		BaseURL:         server.URL,
+		ManagementKey:   "test-management-key",
+		FileName:        "codex-auth.json",
+		AuthIndex:       "auth-1",
+		DisplayAccount:  "user@example.com",
+		AccountSnapshot: "user@example.com",
+		AccountID:       "workspace-1",
+		Provider:        "codex",
+		ResetAt:         time.Now().Add(time.Minute),
+		EventHash:       "evt-quota",
 	})
 
 	mu.Lock()
@@ -2243,6 +2524,7 @@ func TestRateLimitAutoDisableWorkerStartsNewCycleAfterExternalEnable(t *testing.
 		AuthIndex:       "auth-1",
 		AccountSnapshot: "user@example.com",
 		Provider:        "codex",
+		EvidenceJSON:    codexCooldownIdentityEvidenceJSON("workspace-1", "user@example.com"),
 		ReasonCode:      "weekly_limit",
 		WindowKind:      "weekly",
 		RecoverAtMS:     now.Add(7 * 24 * time.Hour).UnixMilli(),
@@ -2269,6 +2551,7 @@ func TestRateLimitAutoDisableWorkerStartsNewCycleAfterExternalEnable(t *testing.
 				"auth_index": "auth-1",
 				"provider":   "codex",
 				"account":    "user@example.com",
+				"account_id": "workspace-1",
 				"disabled":   currentDisabled,
 			}})
 		case r.URL.Path == "/v0/management/auth-files/status" && r.Method == http.MethodPatch:
@@ -2302,6 +2585,7 @@ func TestRateLimitAutoDisableWorkerStartsNewCycleAfterExternalEnable(t *testing.
 		AuthIndex:       "auth-1",
 		DisplayAccount:  "user@example.com",
 		AccountSnapshot: "user@example.com",
+		AccountID:       "workspace-1",
 		Provider:        "codex",
 		ReasonCode:      quotaReasonCodexUsageLimit,
 		WindowKind:      "five_hour",
@@ -2361,14 +2645,14 @@ func TestRateLimitAutoDisableWorkerStartsNewCycleAfterExternalEnable(t *testing.
 	}
 }
 
-func TestRateLimitAutoDisableWorkerTargetsSameNameCredentialWithoutAuthIndex(t *testing.T) {
+func TestRateLimitAutoDisableWorkerSkipsSameNameCredentialWithoutAuthIndex(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 	defer st.Close()
 
-	patchedName := ""
+	patchCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
@@ -2377,14 +2661,7 @@ func TestRateLimitAutoDisableWorkerTargetsSameNameCredentialWithoutAuthIndex(t *
 				{"id": "runtime-second", "name": "shared.json", "provider": "codex", "account": "second@example.com", "disabled": false},
 			})
 		case r.URL.Path == "/v0/management/auth-files/status" && r.Method == http.MethodPatch:
-			var payload struct {
-				Name string `json:"name"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			patchedName = payload.Name
+			patchCalls++
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 		default:
 			http.NotFound(w, r)
@@ -2403,15 +2680,15 @@ func TestRateLimitAutoDisableWorkerTargetsSameNameCredentialWithoutAuthIndex(t *
 		EventHash:       "evt-no-auth-index",
 	})
 
-	if patchedName != "runtime-second" {
-		t.Fatalf("patched name = %q, want runtime-second", patchedName)
+	if patchCalls != 0 {
+		t.Fatalf("patch calls = %d, want 0", patchCalls)
 	}
 	active, err := st.QuotaCooldowns.ListActive(context.Background())
 	if err != nil {
 		t.Fatalf("list active cooldowns: %v", err)
 	}
-	if len(active) != 1 || active[0].AuthIndex != "" || active[0].AccountSnapshot != "second@example.com" {
-		t.Fatalf("active cooldowns = %#v, want second credential snapshot identity", active)
+	if len(active) != 0 {
+		t.Fatalf("active cooldowns = %#v, want none", active)
 	}
 }
 

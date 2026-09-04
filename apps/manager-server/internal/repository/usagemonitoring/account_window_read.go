@@ -86,7 +86,7 @@ func mergeProjectedAccountWindowStats(ctx context.Context, tx *sql.Tx, windows [
 
 func mergeStoredAccountWindowStats(ctx context.Context, tx *sql.Tx, revision string, windows []AccountWindowUsageQuery, grouped map[accountWindowStatKey]*AccountWindowModelStat) error {
 	values := make([]string, 0, len(windows))
-	args := make([]any, 0, len(windows)*5+1)
+	args := make([]any, 0, len(windows)*8+1)
 	for _, window := range windows {
 		if !accountWindowCanUseDaily(window) {
 			continue
@@ -96,14 +96,31 @@ func mergeStoredAccountWindowStats(ctx context.Context, tx *sql.Tx, revision str
 		if fullStartMS >= fullEndMS {
 			continue
 		}
-		values = append(values, "(?, ?, ?, ?, ?)")
-		args = append(args, window.RequestIndex, fullStartMS, fullEndMS, strings.TrimSpace(window.AuthFileSnapshot), strings.TrimSpace(window.AuthIndex))
+		codexMember := ""
+		if normalizeWindowProvider(window.AuthProviderSnapshot) == "codex" {
+			codexMember, _ = usageidentity.NormalizeCodexMemberSnapshot(window.AccountSnapshot)
+		}
+		accountKey, legacyAccountKey := accountWindowKeys(window)
+		values = append(values, "(?, ?, ?, ?, ?, ?, ?, ?)")
+		args = append(args,
+			window.RequestIndex,
+			fullStartMS,
+			fullEndMS,
+			strings.TrimSpace(window.AuthFileSnapshot),
+			strings.TrimSpace(window.AuthIndex),
+			accountKey,
+			legacyAccountKey,
+			codexMember,
+		)
 	}
 	if len(values) == 0 {
 		return nil
 	}
 	args = append(args, revision)
-	rows, err := tx.QueryContext(ctx, `with window_targets(request_index, full_start_ms, full_end_ms, auth_file_snapshot, auth_index) as (values `+strings.Join(values, ",")+`)
+	rows, err := tx.QueryContext(ctx, `with window_targets(
+	request_index, full_start_ms, full_end_ms, auth_file_snapshot, auth_index,
+	account_key, legacy_account_key, codex_member
+) as (values `+strings.Join(values, ",")+`)
 	select w.request_index, d.model, d.billing_model, d.pricing_model, d.context_threshold_tokens,
 		coalesce(d.service_tier, ''), coalesce(sum(d.calls), 0),
 		coalesce(sum(case when d.failed = 0 then d.calls else 0 end), 0),
@@ -115,8 +132,26 @@ func mergeStoredAccountWindowStats(ctx context.Context, tx *sql.Tx, revision str
 		coalesce(sum(d.long_cache_creation_tokens), 0), coalesce(sum(d.total_tokens), 0), max(d.last_seen_ms)
 	from window_targets w
 	join usage_monitoring_account_daily_rollups_v1 d on d.structure_revision = ?
-		and d.bucket_ms >= w.full_start_ms and d.bucket_ms < w.full_end_ms and trim(d.auth_index) = w.auth_index
-		and (trim(d.auth_file_snapshot) = w.auth_file_snapshot or (trim(d.auth_file_snapshot) = '' and trim(d.source) = w.auth_file_snapshot and trim(d.source) <> trim(d.account_snapshot) and trim(d.source) <> trim(d.auth_label_snapshot)))
+		and d.bucket_ms >= w.full_start_ms and d.bucket_ms < w.full_end_ms
+		and (
+			(
+				w.codex_member <> ''
+				and `+usageidentity.SQLAccountKeyExpressionWithoutProject("d")+` in (w.account_key, w.legacy_account_key)
+			)
+			or (
+				w.codex_member = ''
+				and trim(d.auth_index) = w.auth_index
+				and (
+					trim(d.auth_file_snapshot) = w.auth_file_snapshot
+					or (
+						trim(d.auth_file_snapshot) = ''
+						and trim(d.source) = w.auth_file_snapshot
+						and trim(d.source) <> trim(d.account_snapshot)
+						and trim(d.source) <> trim(d.auth_label_snapshot)
+					)
+				)
+			)
+		)
 	group by w.request_index, d.model, d.billing_model, d.pricing_model, d.context_threshold_tokens, coalesce(d.service_tier, '')`, args...)
 	if err != nil {
 		return err
@@ -201,7 +236,7 @@ func accountWindowEventSourceSQL(windows []AccountWindowUsageQuery, coverageEven
 	from window_targets w join usage_monitoring_event_projection_v1 p on p.event_id <= ? and p.timestamp_ms >= w.from_ms and p.timestamp_ms < w.to_ms and p.account_key in (w.account_key, w.legacy_account_key)`
 	args = append(args, coverageEventID)
 	if dailyAvailable {
-		query += ` and (w.use_daily = 0 or p.timestamp_ms < w.full_start_ms or p.timestamp_ms >= w.full_end_ms or p.event_id > ?)`
+		query += ` and (w.use_daily = 0 or p.timestamp_ms < w.full_start_ms or p.timestamp_ms >= w.full_end_ms or p.event_id > ? or (` + codexAccountDailyExcludedSQL("p") + `))`
 		args = append(args, statsCoverageEventID)
 	}
 	if projectionComplete {
@@ -211,7 +246,7 @@ func accountWindowEventSourceSQL(windows []AccountWindowUsageQuery, coverageEven
 	from window_targets w join usage_events e on e.id > ? and e.timestamp_ms >= w.from_ms and e.timestamp_ms < w.to_ms and ` + rawIdentity + ` in (w.account_key, w.legacy_account_key)`
 	args = append(args, coverageEventID)
 	if dailyAvailable {
-		query += ` and (w.use_daily = 0 or e.timestamp_ms < w.full_start_ms or e.timestamp_ms >= w.full_end_ms or e.id > ?)`
+		query += ` and (w.use_daily = 0 or e.timestamp_ms < w.full_start_ms or e.timestamp_ms >= w.full_end_ms or e.id > ? or (` + codexAccountDailyExcludedSQL("e") + `))`
 		args = append(args, statsCoverageEventID)
 	}
 	return query, args
@@ -223,16 +258,73 @@ func accountWindowCanUseDaily(window AccountWindowUsageQuery) bool {
 	if authFile == "" || authIndex == "" {
 		return false
 	}
-	expectedKey, valid := usageidentity.AccountKey(usageidentity.Fields{AuthFileSnapshot: authFile, AuthIndex: authIndex})
+	fields := usageidentity.Fields{
+		AuthFileSnapshot:      window.AuthFileSnapshot,
+		AuthIndex:             window.AuthIndex,
+		AuthProviderSnapshot:  window.AuthProviderSnapshot,
+		AuthAccountIDSnapshot: window.AuthAccountIDSnapshot,
+		AuthProjectIDSnapshot: window.AuthProjectIDSnapshot,
+		AccountSnapshot:       window.AccountSnapshot,
+		AuthLabelSnapshot:     window.AuthLabelSnapshot,
+		Source:                window.Source,
+	}
+	if normalizeWindowProvider(window.AuthProviderSnapshot) == "codex" {
+		workspace, workspaceOK := usageidentity.NormalizeCodexWorkspaceSnapshot(window.AuthAccountIDSnapshot)
+		_, memberOK := usageidentity.NormalizeCodexMemberSnapshot(window.AccountSnapshot)
+		if !workspaceOK || !memberOK {
+			return false
+		}
+		resolvedWorkspace, resolvedOK := usageidentity.ResolveCodexWorkspace(fields)
+		if !resolvedOK || resolvedWorkspace != workspace {
+			return false
+		}
+		// The daily table can safely serve only a complete workspace/member key.
+		// Events carrying the legacy Workspace provenance marker are excluded
+		// while upserting because that evidence is not persisted in the daily row;
+		// the account-window query adds those events back through
+		// projection/raw residuals. Generic Codex project IDs do not carry
+		// Workspace identity evidence and remain safe in the daily rollup.
+	}
+	expectedKey, valid := usageidentity.AccountKey(fields)
 	return valid && accountWindowKey(window) == expectedKey
 }
 
+func normalizeWindowProvider(value string) string {
+	provider := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), "_", "-"))
+	switch provider {
+	case "x-ai", "grok":
+		return "xai"
+	default:
+		return provider
+	}
+}
+
 func accountWindowKey(window AccountWindowUsageQuery) string {
+	// AccountKey is caller-provided correlation data for non-Codex targets. For
+	// Codex, always derive the key from the snapshots so a stale workspace-only
+	// key cannot expose an old shared Workspace projection bucket.
+	if normalizeWindowProvider(window.AuthProviderSnapshot) == "codex" {
+		key, _ := usageidentity.AccountKey(accountWindowIdentityFields(window))
+		return key
+	}
 	if key := strings.TrimSpace(window.AccountKey); key != "" {
 		return key
 	}
-	key, _ := usageidentity.AccountKey(usageidentity.Fields{AuthFileSnapshot: window.AuthFileSnapshot, AuthIndex: window.AuthIndex, AuthProviderSnapshot: window.AuthProviderSnapshot, AuthAccountIDSnapshot: window.AuthAccountIDSnapshot, AuthProjectIDSnapshot: window.AuthProjectIDSnapshot, AccountSnapshot: window.AccountSnapshot, AuthLabelSnapshot: window.AuthLabelSnapshot, Source: window.Source})
+	key, _ := usageidentity.AccountKey(accountWindowIdentityFields(window))
 	return key
+}
+
+func accountWindowIdentityFields(window AccountWindowUsageQuery) usageidentity.Fields {
+	return usageidentity.Fields{
+		AuthFileSnapshot:      window.AuthFileSnapshot,
+		AuthIndex:             window.AuthIndex,
+		AuthProviderSnapshot:  window.AuthProviderSnapshot,
+		AuthAccountIDSnapshot: window.AuthAccountIDSnapshot,
+		AuthProjectIDSnapshot: window.AuthProjectIDSnapshot,
+		AccountSnapshot:       window.AccountSnapshot,
+		AuthLabelSnapshot:     window.AuthLabelSnapshot,
+		Source:                window.Source,
+	}
 }
 
 func accountWindowKeys(window AccountWindowUsageQuery) (string, string) {

@@ -47,7 +47,7 @@ describe('account credential mutation markers', () => {
       provider: 'xai',
       createdAtMs,
     });
-    const rawStorage = window.sessionStorage.getItem('cpa.accounts.credential-mutation-markers.v2');
+    const rawStorage = window.sessionStorage.getItem('cpa.accounts.credential-mutation-markers.v3');
     expect(rawStorage).toContain('v1:opaque-connection');
     expect(rawStorage).not.toContain('http://');
     expect(rawStorage).not.toContain('management-key');
@@ -193,5 +193,30 @@ describe('account credential mutation markers', () => {
         createdAtMs: Date.now(),
       })
     ).toBeNull();
+  });
+
+  it('does not treat a missing Codex member snapshot as a new credential', () => {
+    const baselineFile = {
+      name: 'alice.json',
+      id: 'runtime-alice',
+      provider: 'codex',
+      account_id: 'workspace-1',
+      account: 'alice@example.com',
+      authIndex: 'auth-a',
+    } as AuthFileItem;
+    const baseline = createAccountCredentialMutationBaseline([baselineFile], 'codex');
+    const marker = recordAccountCredentialMutationMarker({
+      connectionFingerprint: 'connection-a',
+      provider: 'codex',
+      baseline,
+      requireObservedMutation: true,
+      createdAtMs: Date.now(),
+    });
+
+    expect(
+      hasAccountCredentialMutationEvidence(marker!, [
+        { ...baselineFile, account: undefined } as AuthFileItem,
+      ])
+    ).toBe(false);
   });
 });

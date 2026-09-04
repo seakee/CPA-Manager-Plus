@@ -17,6 +17,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/credentialpolicy"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
 
 const accountActionCandidateQueueSize = 256
@@ -266,12 +267,34 @@ func accountActionCandidateIdentity(item model.AccountActionCandidate) (cpaauthf
 	if accountSnapshot == fileName {
 		accountSnapshot = ""
 	}
+	provider := credentialpolicy.NormalizeProvider(item.Provider)
+	accountIDSnapshot := strings.TrimSpace(item.AccountIDSnapshot)
+	if provider == "codex" {
+		if accountIDSnapshot != "" {
+			workspace, ok := usageidentity.NormalizeCodexWorkspaceSnapshot(accountIDSnapshot)
+			if !ok {
+				return cpaauthfiles.Identity{}, fmt.Errorf("%w: candidate has invalid Codex workspace identity", cpaauthfiles.ErrIdentityMismatch)
+			}
+			accountIDSnapshot = workspace
+		}
+		if accountSnapshot != "" {
+			member, ok := usageidentity.NormalizeCodexMemberSnapshot(accountSnapshot)
+			if !ok {
+				accountSnapshot = ""
+			} else {
+				accountSnapshot = member
+			}
+		}
+		if strings.TrimSpace(item.AuthIndex) == "" {
+			return cpaauthfiles.Identity{}, fmt.Errorf("%w: Codex credential mutation requires auth_index", cpaauthfiles.ErrIdentityMismatch)
+		}
+	}
 	identity := cpaauthfiles.Identity{
 		AuthFileName:      fileName,
 		AuthIndex:         strings.TrimSpace(item.AuthIndex),
-		Provider:          strings.TrimSpace(item.Provider),
+		Provider:          provider,
 		AccountSnapshot:   accountSnapshot,
-		AccountIDSnapshot: strings.TrimSpace(item.AccountIDSnapshot),
+		AccountIDSnapshot: accountIDSnapshot,
 	}
 	if identity.AuthIndex == "" && identity.AccountSnapshot == "" && identity.AccountIDSnapshot == "" {
 		return cpaauthfiles.Identity{}, fmt.Errorf("%w: candidate has no stable auth index, account ID, or account snapshot", cpaauthfiles.ErrIdentityMismatch)

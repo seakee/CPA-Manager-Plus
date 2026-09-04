@@ -909,6 +909,7 @@ export const resolveCodexInspectionAutoActionPlan = (
     const stableItems = group.items.filter((item) =>
       hasCodexInspectionStableIdentity({
         fileName: item.fileName,
+        runtimeId: item.runtimeId,
         provider: item.provider,
         authIndex: item.authIndex,
         accountId: item.accountId,

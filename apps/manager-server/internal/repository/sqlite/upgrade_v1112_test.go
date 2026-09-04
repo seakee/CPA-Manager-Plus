@@ -12,7 +12,11 @@ import (
 )
 
 func TestUpgradeFromV1112LargeUsageFixtureIsMetadataBounded(t *testing.T) {
-	for _, rowCount := range []int{100_000, 500_000} {
+	// 100k rows exercises the required large-table startup boundary. The
+	// offline index-build path is intentionally allowed to scan the table; a
+	// second 500k copy makes the race suite spend many minutes rebuilding the
+	// same indexes without adding migration coverage.
+	for _, rowCount := range []int{100_000} {
 		t.Run(fmt.Sprintf("rows_%d", rowCount), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "usage.sqlite")
 			db := prepareV1112LargeUsageFixture(t, path, rowCount)

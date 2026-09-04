@@ -466,6 +466,86 @@ func TestAccountActionCandidateWorkerRejectsAmbiguousStatusMutationScope(t *test
 	}
 }
 
+func TestAccountActionCandidateWorkerRejectsDuplicateCodexCredentialLocator(t *testing.T) {
+	st, err := store.Open(t.TempDir() + "/usage.sqlite")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	patchCalls := 0
+	patchedName := ""
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v0/management/auth-files":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"id":         "runtime-alice",
+					"name":       "shared.json",
+					"auth_index": "shared-auth",
+					"provider":   "codex",
+					"account":    "alice@example.com",
+					"account_id": "workspace-1",
+					"disabled":   false,
+				},
+				{
+					"id":         "runtime-bob",
+					"name":       "shared.json",
+					"auth_index": "shared-auth",
+					"provider":   "codex",
+					"account":    "bob@example.com",
+					"account_id": "workspace-1",
+					"disabled":   false,
+				},
+			})
+		case "PATCH /v0/management/auth-files/status":
+			var payload struct {
+				Name     string `json:"name"`
+				Disabled bool   `json:"disabled"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			patchCalls++
+			patchedName = payload.Name
+			if !payload.Disabled {
+				http.Error(w, "expected disable", http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	NewAccountActionCandidateWorker(st, true).handleCandidate(context.Background(), accountActionCandidate{
+		BaseURL:             server.URL,
+		ManagementKey:       "mgmt",
+		FileName:            "shared.json",
+		AuthIndex:           "shared-auth",
+		DisplayAccount:      "alice@example.com",
+		AccountSnapshot:     "alice@example.com",
+		AccountID:           "workspace-1",
+		Provider:            "codex",
+		ActionType:          model.AccountActionTypeDelete,
+		AutoDisableEligible: true,
+		Reason:              "token revoked",
+	})
+
+	if patchCalls != 0 || patchedName != "" {
+		t.Fatalf("patch target = %q with %d calls, want no mutation for duplicate locator", patchedName, patchCalls)
+	}
+	items, err := st.ListAccountActionCandidates(context.Background(), model.AccountActionStatusPending, 10)
+	if err != nil {
+		t.Fatalf("list candidates: %v", err)
+	}
+	if len(items) != 1 || items[0].AutoDisabledAtMS != 0 || !strings.Contains(items[0].LastError, "scope is ambiguous") {
+		t.Fatalf("items = %#v, want pending ambiguous failure", items)
+	}
+}
+
 func TestAccountActionCandidateWorkerRollsBackWhenAutoDisableMarkerFails(t *testing.T) {
 	st, err := store.Open(t.TempDir() + "/usage.sqlite")
 	if err != nil {
@@ -873,7 +953,7 @@ func TestAccountActionCandidateWorkerAutoDisableRejectsWeakIdentity(t *testing.T
 	if err != nil {
 		t.Fatalf("list candidates: %v", err)
 	}
-	if len(items) != 1 || items[0].AutoDisabledAtMS != 0 || !strings.Contains(items[0].LastError, "no stable auth index") {
+	if len(items) != 1 || items[0].AutoDisabledAtMS != 0 || !strings.Contains(items[0].LastError, "auth_index") {
 		t.Fatalf("items = %#v, want weak-identity failure", items)
 	}
 }

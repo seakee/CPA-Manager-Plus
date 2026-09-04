@@ -125,6 +125,101 @@ describe('accountDirectReauth', () => {
     expect(result).toEqual({ status: 'ambiguous' });
   });
 
+  it('confirms Alice without treating Bob in the same Workspace as ambiguous', () => {
+    const alice = makeFile({
+      name: 'codex-alice.json',
+      id: 'runtime-alice',
+      authIndex: 'auth-alice',
+      account: 'alice@example.com',
+      account_id: 'workspace-1',
+      last_refresh: 1_000,
+      modified: 1_100,
+    });
+    const bob = makeFile({
+      name: 'codex-bob.json',
+      id: 'runtime-bob',
+      authIndex: 'auth-bob',
+      account: 'bob@example.com',
+      account_id: 'workspace-1',
+      last_refresh: 1_000,
+      modified: 1_100,
+    });
+    const baseline = createAccountDirectReauthBaseline({
+      target: {
+        account: 'alice@example.com',
+        fileName: alice.name,
+        runtimeId: alice.id,
+        provider: 'codex',
+        authIndex: alice.authIndex,
+        accountId: 'workspace-1',
+        accountSnapshot: 'Alice@Example.com',
+      },
+      file: alice,
+      files: [alice, bob],
+      resultKeys: [],
+    })!;
+
+    expect(
+      reconcileAccountDirectReauth(baseline, [
+        { ...alice, last_refresh: 2_000, modified: 2_100, status_message: '' },
+        bob,
+      ])
+    ).toMatchObject({ status: 'confirmed' });
+  });
+
+  it("reports a newly observed Bob credential as identity-changed in Alice's Workspace", () => {
+    const baseline = makeBaseline();
+    expect(
+      reconcileAccountDirectReauth(baseline, [
+        makeFile({
+          name: 'codex-bob.json',
+          id: 'runtime-bob',
+          authIndex: 'auth-bob',
+          account: 'bob@example.com',
+          last_refresh: 2_500,
+          modified: 2_550,
+          status_message: '',
+        }),
+      ])
+    ).toMatchObject({ status: 'identity-changed', observedAccountId: 'account-1' });
+  });
+
+  it('reports a newly observed Alice credential in another Workspace as identity-changed', () => {
+    const baseline = makeBaseline();
+    expect(
+      reconcileAccountDirectReauth(baseline, [
+        makeFile({
+          name: 'codex-other-workspace.json',
+          id: 'runtime-other-workspace',
+          authIndex: 'auth-other-workspace',
+          account_id: 'workspace-2',
+          account: 'alice@example.com',
+          last_refresh: 2_500,
+          modified: 2_550,
+          status_message: '',
+        }),
+      ])
+    ).toMatchObject({ status: 'identity-changed', observedAccountId: 'workspace-2' });
+  });
+
+  it('does not reconcile a Workspace-only or weak-member candidate', () => {
+    const baseline = makeBaseline();
+    expect(
+      reconcileAccountDirectReauth(baseline, [
+        makeFile({ account: 'Alice', last_refresh: 2_500, modified: 2_550, status_message: '' }),
+      ])
+    ).toEqual({ status: 'unconfirmed' });
+    expect(
+      reconcileAccountDirectReauth(
+        {
+          ...baseline,
+          target: { ...baseline.target, accountSnapshot: null },
+        },
+        [makeFile({ last_refresh: 2_500, modified: 2_550, status_message: '' })]
+      )
+    ).toEqual({ status: 'unconfirmed' });
+  });
+
   it('does not report recovery when the original credential is unchanged and a new Space appears', () => {
     const original = makeFile();
     const baseline = createAccountDirectReauthBaseline({
@@ -232,6 +327,9 @@ describe('accountDirectReauth', () => {
       storage,
     });
     expect(first).not.toBeNull();
+    const stored = JSON.parse(storage.getItem('cpa.accounts.direct-reauth.v3') ?? '{}');
+    expect(stored.version).toBe(3);
+    expect(stored.items[0].providerCredentials[0].accountSnapshot).toBe('alice@example.com');
 
     const persisted = recordPendingAccountDirectReauth({
       connectionFingerprint: 'connection-a',

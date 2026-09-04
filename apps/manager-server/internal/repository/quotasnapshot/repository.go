@@ -97,6 +97,7 @@ func BackfillLegacySnapshotsBatch(ctx context.Context, db *sql.DB, maxGroupSize 
 	defer func() { _ = tx.Rollback() }()
 
 	firstRows, err := loadLegacySnapshots(ctx, tx, `where observation_id is null
+		and `+excludeLegacyCodexWorkspaceSnapshotSQL("")+`
 		order by account_key, provider, observed_at_ms,
 			case lower(trim(source))
 				when 'response_body' then 1
@@ -121,6 +122,7 @@ func BackfillLegacySnapshotsBatch(ctx context.Context, db *sql.DB, maxGroupSize 
 	}
 	first := firstRows[0]
 	groupWhere := `where observation_id is null
+		and ` + excludeLegacyCodexWorkspaceSnapshotSQL("") + `
 		and account_key = ? and provider = ? and source = ?
 		and coalesce(source_observation_id, '') = ? and observed_at_ms = ?`
 	args := []any{first.AccountKey, first.Provider, first.Source, first.SourceObservationID, first.ObservedAtMS}
@@ -183,7 +185,8 @@ func BackfillLegacySnapshotsBatch(ctx context.Context, db *sql.DB, maxGroupSize 
 	processed := writes[0].InsertedSnapshotCount
 	var pending int
 	if err := tx.QueryRowContext(ctx, `select exists (
-		select 1 from account_quota_snapshots where observation_id is null limit 1
+		select 1 from account_quota_snapshots
+		where observation_id is null and `+excludeLegacyCodexWorkspaceSnapshotSQL("")+` limit 1
 	)`).Scan(&pending); err != nil {
 		return LegacyBackfillResult{}, err
 	}
@@ -301,6 +304,26 @@ func updateLegacyBackfillState(ctx context.Context, db legacyBackfillStateWriter
 		LegacySnapshotMigrationName,
 	)
 	return err
+}
+
+// Legacy Codex quota snapshots were keyed by chatgpt_account_id, which is a
+// shared Workspace identifier for Team/Business credentials. They cannot be
+// attributed to a member after the fact. Keep those derived rows as orphaned
+// evidence: do not attach them to the lifecycle graph or expose them through
+// the normal quota readers. The key kind is intentionally matched as a
+// segment, rather than by decoding the opaque value, so this remains valid for
+// every v3 codex-account key without adding schema or a mapping table. Do not
+// require provider='codex' here: old derived rows can have incomplete provider
+// metadata, and the opaque key kind is the stronger evidence that this is the
+// un-attributable workspace-level bucket.
+func excludeLegacyCodexWorkspaceSnapshotSQL(alias string) string {
+	column := func(name string) string {
+		if alias == "" {
+			return name
+		}
+		return alias + "." + name
+	}
+	return "not (instr(coalesce(" + column("account_key") + ", ''), ':codex-account:') > 0)"
 }
 
 func RecordLegacyBackfillFailure(ctx context.Context, db *sql.DB, migrationErr error) error {
@@ -521,6 +544,7 @@ func (r *repository) ListCandidates(ctx context.Context, accountKey, provider st
 		) as source_rank
 		from account_quota_snapshots
 		where account_key = ? and provider = ?
+			and `+excludeLegacyCodexWorkspaceSnapshotSQL("")+`
 			and (observation_id is null or (
 				logical_window_id is not null and exists (
 					select 1 from account_quota_observations observation

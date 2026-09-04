@@ -17,6 +17,7 @@ import (
 	quotasnapshotrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotasnapshot"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
 
 func newQuotaSnapshotTestService(t *testing.T, nowMS int64) *Service {
@@ -313,6 +314,106 @@ func TestWriteQuerySelectsLatestCompleteObservationAndMergesCodexResetCredits(t 
 	}
 	if got := window.FieldSources["reset_credits"].Source; got != "api_query" {
 		t.Fatalf("reset credit source = %q, want api_query", got)
+	}
+}
+
+func TestCodexQuotaSnapshotsStayMemberScopedAndIgnoreLegacyWorkspaceKey(t *testing.T) {
+	service, path := newQuotaSnapshotTestServiceWithPath(t, 50_000)
+	ctx := context.Background()
+	cycleStart := int64(100)
+	cycleEnd := int64(18_100)
+	duration := int64(18)
+	window := func(used float64, observedAtMS int64) WindowInput {
+		return WindowInput{
+			ProviderWindowID: "five-hour", WindowKind: "five_hour", WindowMode: "fixed",
+			ModelScopeKind: "all", Source: "api_query", SourceObservationID: fmt.Sprintf("observation-%d", observedAtMS),
+			ObservedAtMS: observedAtMS, BoundaryAccuracy: "exact", UsedPercent: &used,
+			CycleStartMS: &cycleStart, CycleEndMS: &cycleEnd, DurationSeconds: &duration,
+		}
+	}
+	account := func(member string) AccountTarget {
+		return AccountTarget{
+			AuthFileSnapshot:      member + ".json",
+			AuthProviderSnapshot:  "codex",
+			AuthAccountIDSnapshot: "workspace-1",
+			AuthIndex:             "auth-" + member,
+			AccountSnapshot:       member + "@example.com",
+			Source:                member + ".json",
+		}
+	}
+	for _, entry := range []WriteEntry{
+		{RowKey: "alice", Provider: "codex", Account: account("alice"), Observation: &ObservationInput{
+			Source: "api_query", SourceObservationID: "observation-1000", ObservedAtMS: 1_000,
+			InventoryScopeKey: "codex:rate-limits", InventoryMode: "partial",
+		}, Windows: []WindowInput{window(10, 1_000)}},
+		{RowKey: "bob", Provider: "codex", Account: account("bob"), Observation: &ObservationInput{
+			Source: "api_query", SourceObservationID: "observation-2000", ObservedAtMS: 2_000,
+			InventoryScopeKey: "codex:rate-limits", InventoryMode: "partial",
+		}, Windows: []WindowInput{window(20, 2_000)}},
+	} {
+		if _, err := service.Write(ctx, WriteRequest{Entries: []WriteEntry{entry}}); err != nil {
+			t.Fatalf("write %s snapshot: %v", entry.RowKey, err)
+		}
+	}
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open quota database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	// This is the v3 workspace-only key emitted before Codex member identity
+	// was introduced. It is intentionally left orphaned rather than fanned out.
+	legacyWorkspaceKey := "usage-account-history:3:codex-account:636F646578:776F726B73706163652D31"
+	if _, err := db.Exec(`insert into account_quota_snapshots (
+		account_key, provider, provider_window_id, window_kind, window_mode,
+		model_scope_kind, source, source_observation_id, observed_at_ms,
+		boundary_accuracy, used_percent, created_at_ms
+	) values (?, 'codex', 'five-hour', 'five_hour', 'fixed', 'all',
+		'api_query', 'legacy-workspace', 3_000, 'exact', 99, 3_000)`, legacyWorkspaceKey); err != nil {
+		t.Fatalf("insert legacy workspace snapshot: %v", err)
+	}
+
+	alice := account("alice")
+	bob := account("bob")
+	aliceKey, aliceOK := usageidentity.AccountKey(alice.identityFields("codex"))
+	bobKey, bobOK := usageidentity.AccountKey(bob.identityFields("codex"))
+	if !aliceOK || !bobOK || aliceKey == bobKey {
+		t.Fatalf("member account keys = alice:%q/%v bob:%q/%v", aliceKey, aliceOK, bobKey, bobOK)
+	}
+	for _, test := range []struct {
+		name    string
+		rowKey  string
+		account AccountTarget
+		want    float64
+	}{
+		{name: "Alice", rowKey: "alice", account: alice, want: 10},
+		{name: "Bob", rowKey: "bob", account: bob, want: 20},
+	} {
+		result, err := service.Query(ctx, QueryRequest{Accounts: []QueryAccount{{
+			RowKey: test.rowKey, Provider: "codex", Account: test.account,
+		}}})
+		if err != nil {
+			t.Fatalf("query %s snapshot: %v", test.name, err)
+		}
+		if len(result.Items) != 1 || result.Items[0].AccountKey == legacyWorkspaceKey || len(result.Items[0].Windows) != 1 {
+			t.Fatalf("%s query included legacy/fan-out data: %#v", test.name, result)
+		}
+		if result.Items[0].Windows[0].UsedPercent == nil || *result.Items[0].Windows[0].UsedPercent != test.want {
+			t.Fatalf("%s used percent = %#v, want %v", test.name, result.Items[0].Windows[0], test.want)
+		}
+	}
+	var aliceRows, bobRows, legacyRows int
+	if err := db.QueryRow(`select count(*) from account_quota_snapshots where account_key = ?`, aliceKey).Scan(&aliceRows); err != nil {
+		t.Fatalf("count Alice snapshots: %v", err)
+	}
+	if err := db.QueryRow(`select count(*) from account_quota_snapshots where account_key = ?`, bobKey).Scan(&bobRows); err != nil {
+		t.Fatalf("count Bob snapshots: %v", err)
+	}
+	if err := db.QueryRow(`select count(*) from account_quota_snapshots where account_key = ?`, legacyWorkspaceKey).Scan(&legacyRows); err != nil {
+		t.Fatalf("count legacy snapshots: %v", err)
+	}
+	if aliceRows != 1 || bobRows != 1 || legacyRows != 1 {
+		t.Fatalf("quota snapshot rows were migrated/fanned out: Alice=%d Bob=%d legacy=%d", aliceRows, bobRows, legacyRows)
 	}
 }
 

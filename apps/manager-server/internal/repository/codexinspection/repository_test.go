@@ -210,7 +210,7 @@ func TestDisableOwnershipCRUD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list ownership: %v", err)
 	}
-	if len(items) != 1 || items[0].FileName != "auth-a.json" || items[0].AuthIndex != "auth-1" || items[0].AccountID != "account-1" || items[0].AccountSnapshot != "" || items[0].DisabledAtMS != 123 {
+	if len(items) != 1 || items[0].FileName != "auth-a.json" || items[0].AuthIndex != "auth-1" || items[0].AccountID != "account-1" || items[0].AccountSnapshot != "alice@example.com" || items[0].DisabledAtMS != 123 {
 		t.Fatalf("inserted ownership = %#v", items)
 	}
 	if items[0].Provider != "codex" {
@@ -238,11 +238,13 @@ func TestDisableOwnershipCRUD(t *testing.T) {
 	provider := "codex"
 	authIndex := "auth-1"
 	accountID := "account-1"
+	accountSnapshot := "alice@example.com"
 	if err := repository.DeleteDisableOwnership(ctx, model.CodexInspectionDisableOwnershipTarget{
-		FileName:  "auth-a.json",
-		Provider:  &provider,
-		AuthIndex: &authIndex,
-		AccountID: &accountID,
+		FileName:        "auth-a.json",
+		Provider:        &provider,
+		AuthIndex:       &authIndex,
+		AccountID:       &accountID,
+		AccountSnapshot: &accountSnapshot,
 	}); err != nil {
 		t.Fatalf("delete ownership: %v", err)
 	}

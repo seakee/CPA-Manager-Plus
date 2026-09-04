@@ -79,6 +79,7 @@ const TARGET = {
   account: 'codex@example.com',
   fileName: 'codex.json',
   accountId: 'acct-1',
+  accountSnapshot: 'alice@example.com',
   provider: 'codex',
   authIndex: 'auth-1',
 };
@@ -140,6 +141,39 @@ describe('CodexReauthDialog connection lifecycle', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it('restarts the OAuth link when the targeted Workspace member changes', async () => {
+    mocks.startAuth.mockResolvedValue({ url: 'https://auth.example/codex', state: 'state-1' });
+
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <CodexReauthDialog
+          open
+          target={TARGET}
+          requestScope={REQUEST_SCOPE}
+          onClose={vi.fn()}
+        />
+      );
+    });
+    await flushEffects();
+    expect(mocks.startAuth).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      renderer.update(
+        <CodexReauthDialog
+          open
+          target={{ ...TARGET, accountSnapshot: 'bob@example.com' }}
+          requestScope={REQUEST_SCOPE}
+          onClose={vi.fn()}
+        />
+      );
+    });
+    await flushEffects();
+
+    expect(mocks.startAuth).toHaveBeenCalledTimes(2);
+    act(() => renderer.unmount());
   });
 
   it('ignores a late auth-link response after the CPA scope changes', async () => {

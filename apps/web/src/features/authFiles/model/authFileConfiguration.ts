@@ -14,9 +14,12 @@ import {
 } from '@/features/authFiles/constants';
 import {
   readAuthFileStatusAccountId,
+  readAuthFileStatusAccountIdInvalid,
   readAuthFileStatusAccountSnapshot,
   readAuthFileStatusAuthIndex,
   readAuthFileStatusProvider,
+  readAuthFileStatusCodexMember,
+  readAuthFileStatusCodexMemberInvalid,
 } from '@/utils/authFileStatusMutation';
 
 export const AUTH_FILE_CONFIGURATION_INVALID_JSON = 'AUTH_FILE_CONFIGURATION_INVALID_JSON';
@@ -245,6 +248,28 @@ const recordHasFileIdentityConflict = (
   const candidateAuthIndex = normalizeRecordAuthIndex(record);
   if (expectedAuthIndex && candidateAuthIndex && candidateAuthIndex !== expectedAuthIndex) {
     return true;
+  }
+
+  const identityProvider = expectedProvider || candidateProvider;
+  if (identityProvider === 'codex') {
+    if (
+      readAuthFileStatusAccountIdInvalid(file) ||
+      readAuthFileStatusAccountIdInvalid(candidate) ||
+      readAuthFileStatusCodexMemberInvalid(file) ||
+      readAuthFileStatusCodexMemberInvalid(candidate)
+    ) {
+      return true;
+    }
+
+    const expectedWorkspace = readAuthFileStatusAccountId(file);
+    const candidateWorkspace = readAuthFileStatusAccountId(candidate);
+    if (expectedWorkspace && candidateWorkspace && expectedWorkspace !== candidateWorkspace) {
+      return true;
+    }
+
+    const expectedMember = readAuthFileStatusCodexMember(file);
+    const candidateMember = readAuthFileStatusCodexMember(candidate);
+    return Boolean(expectedMember && candidateMember && expectedMember !== candidateMember);
   }
 
   const expectedAccountId = readAuthFileStatusAccountId(file);

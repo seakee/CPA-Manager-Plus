@@ -24,6 +24,7 @@ const (
 var derivedLegacyTables = []string{
 	usageAccountModelRollupsLegacy,
 	usageAccountModelIdentityLegacy,
+	usageAccountModelCodexIdentityLegacy,
 	usagePricingAccountLegacy,
 	usageDashboardHourlyLegacy,
 	usageHourlyAggregateLegacy,
@@ -31,6 +32,8 @@ var derivedLegacyTables = []string{
 	usageMonitoringAPIKeyLegacy,
 	usageMonitoringAccountIdentityLegacy,
 	usageMonitoringAPIKeyIdentityLegacy,
+	usageMonitoringAccountCodexIdentityLegacy,
+	usageMonitoringAPIKeyCodexIdentityLegacy,
 	usageMonitoringSelectorLegacy,
 	usageMonitoringHeaderLegacy,
 	usageMonitoringProjectionLegacy,
@@ -522,7 +525,6 @@ func cleanupDerivedBatch(ctx context.Context, db *sql.DB, limit int) (int64, boo
 		log.Printf("[derived-migration] removed empty legacy table %s", tableName)
 		return 0, true, nil
 	}
-
 	targets, err := staleDerivedCleanupTargets(ctx, db)
 	if err != nil {
 		return 0, false, err

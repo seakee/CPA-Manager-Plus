@@ -2041,6 +2041,7 @@ func (r *repository) ListWindowStates(ctx context.Context, accountKey, provider 
 		coalesce(container_provider_window_id, ''), availability, generation,
 		first_seen_at_ms, last_seen_at_ms, missing_since_ms, deactivated_at_ms
 		from account_quota_windows where account_key = ? and provider = ?
+			and `+excludeLegacyCodexWorkspaceSnapshotSQL("")+`
 		order by updated_at_ms desc, id desc`, strings.TrimSpace(accountKey), strings.TrimSpace(provider))
 	if err != nil {
 		return nil, err
