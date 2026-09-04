@@ -439,7 +439,7 @@ var (
 	endpointPattern          = regexp.MustCompile(`^(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s+(\S+)`)
 	authorizationHeaderRegex = regexp.MustCompile(`(?i)\b(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,"'{}]+`)
 	bearerTokenRegex         = regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}`)
-	apiKeyTokenRegex         = regexp.MustCompile(`(sk-proj-[A-Za-z0-9-_]{6,}|sk-ant-[A-Za-z0-9-_]{6,}|sk-[A-Za-z0-9-_]{6,}|sess-[A-Za-z0-9-_]{6,}|ghp_[A-Za-z0-9]{6,}|github_pat_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z-_]{8,}|hf_[A-Za-z0-9]{6,}|pk_[A-Za-z0-9]{6,}|rk_[A-Za-z0-9]{6,}|cpamp_[A-Za-z0-9-_]{6,})`)
+	apiKeyTokenRegex         = regexp.MustCompile(`(sk-proj-[A-Za-z0-9-_]{6,}|sk-ant-[A-Za-z0-9-_]{6,}|sk-[A-Za-z0-9-_]{6,}|sess-[A-Za-z0-9-_]{6,}|ghp_[A-Za-z0-9]{6,}|github_pat_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z-_]{8,}|hf_[A-Za-z0-9]{6,}|pk_[A-Za-z0-9]{6,}|rk_[A-Za-z0-9]{6,}|cpamp_[A-Za-z0-9]{32}\b)`)
 	tokenFieldRegex          = regexp.MustCompile(`(?i)\b(access_token|refresh_token|id_token)\b(\s*["']?\s*[:=]\s*["']?)[^"',\s&}]+`)
 	apiKeyFieldRegex         = regexp.MustCompile(`(?i)\b(api[-_ ]?key|x-api-key)\b(\s*["']?\s*[:=]\s*["']?)[^"',\s&}]+`)
 	managementKeyFieldRegex  = regexp.MustCompile(`(?i)\b(management[-_ ]?key)\b(\s*["']?\s*[:=]\s*["']?)[^"',\s&}]+`)
@@ -1072,6 +1072,12 @@ func hashIfCredentialBearing(value string) string {
 		return value
 	}
 	return hashString(value)
+}
+
+// EventHashForPersistence protects the identity ledger before the more
+// expensive full event sanitizer runs after its duplicate claim.
+func EventHashForPersistence(value string) string {
+	return hashIfCredentialBearing(value)
 }
 
 func SafeRawJSON(raw string) string {

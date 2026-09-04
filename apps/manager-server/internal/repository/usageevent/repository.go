@@ -130,7 +130,7 @@ func (r *repository) InsertBatch(ctx context.Context, events []model.UsageEvent)
 
 	result := model.InsertResult{}
 	for _, event := range events {
-		event = usage.SanitizeForPersistence(event)
+		event.EventHash = usage.EventHashForPersistence(event.EventHash)
 		ledgerNowMS := event.CreatedAtMS
 		if ledgerNowMS <= 0 {
 			ledgerNowMS = time.Now().UnixMilli()
@@ -153,6 +153,7 @@ func (r *repository) InsertBatch(ctx context.Context, events []model.UsageEvent)
 			continue
 		}
 
+		event = usage.SanitizeForPersistence(event)
 		usage.NormalizeRequestMetadata(&event)
 		accounting := usage.NormalizeCacheAccounting(usage.CacheInputContext{
 			ExplicitMode:     event.CacheInputMode,
@@ -190,7 +191,7 @@ func (r *repository) InsertBatch(ctx context.Context, events []model.UsageEvent)
 			failSummarySource = event.FailBody
 		}
 		failSummary := usage.FailSummaryFromBody(failSummarySource)
-		rawJSON := usage.SafeRawJSON(event.RawJSON)
+		rawJSON := event.RawJSON
 		res, err := stmt.ExecContext(
 			ctx,
 			nullString(event.RequestID),

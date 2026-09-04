@@ -19,7 +19,7 @@ func TestSanitizeForPersistenceRedactsCredentialText(t *testing.T) {
 		{name: "OAuth refresh token", value: "refresh_token=synthetic0123456789"},
 		{name: "OAuth identity token", value: "id_token=synthetic0123456789"},
 		{name: "management key field", value: "management-key=synthetic0123456789"},
-		{name: "CPAMP management key", value: "cpamp_synthetic0123456789"},
+		{name: "CPAMP management key", value: "cpamp_0123456789abcdefghijklmnopqrstuv"},
 		{name: "authorization header", value: "Authorization: Bearer synthetic0123456789"},
 	}
 	for _, test := range tests {
@@ -39,13 +39,14 @@ func TestSanitizeForPersistenceRedactsCredentialText(t *testing.T) {
 }
 
 func TestSanitizeForPersistencePreservesCredentialFilename(t *testing.T) {
-	const filename = "codex-account.json"
-	event := SanitizeForPersistence(Event{Source: filename, RawJSON: `{"source":"` + filename + `"}`})
-	if event.Source != filename {
-		t.Fatalf("source = %q, want %q", event.Source, filename)
-	}
-	if !strings.Contains(event.RawJSON, filename) {
-		t.Fatalf("raw JSON lost non-secret source filename: %q", event.RawJSON)
+	for _, filename := range []string{"codex-account.json", "cpamp_account.json"} {
+		event := SanitizeForPersistence(Event{Source: filename, RawJSON: `{"source":"` + filename + `"}`})
+		if event.Source != filename {
+			t.Fatalf("source = %q, want %q", event.Source, filename)
+		}
+		if !strings.Contains(event.RawJSON, filename) {
+			t.Fatalf("raw JSON lost non-secret source filename: %q", event.RawJSON)
+		}
 	}
 }
 
