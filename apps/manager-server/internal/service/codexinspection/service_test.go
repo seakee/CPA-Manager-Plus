@@ -566,6 +566,33 @@ func TestBuildCodexInspectionQuotaWindowsPreservesRawAdditionalScopeDisplayName(
 	}
 }
 
+func TestBuildCodexInspectionQuotaWindowsUsesMeteredFeatureAsRawScopeDisplayName(t *testing.T) {
+	windows := buildCodexInspectionQuotaWindows(map[string]any{
+		"additional_rate_limits": []any{
+			map[string]any{
+				"metered_feature": "future_feature",
+				"rate_limit": map[string]any{
+					"secondary_window": map[string]any{
+						"used_percent":         25,
+						"limit_window_seconds": codexWeekWindow,
+					},
+				},
+			},
+		},
+	}, "")
+
+	if len(windows) != 1 {
+		t.Fatalf("metered-feature-only quota windows = %#v, want one window", windows)
+	}
+	window := windows[0]
+	if window.ID != "future-feature-weekly-0" || window.ScopeDisplayName != "future_feature" {
+		t.Fatalf("metered-feature-only scope = %#v", window)
+	}
+	if window.LabelParams["name"] != "future_feature" {
+		t.Fatalf("metered-feature-only label params = %#v, want raw feature name", window.LabelParams)
+	}
+}
+
 func containsString(values []string, expected string) bool {
 	for _, value := range values {
 		if value == expected {

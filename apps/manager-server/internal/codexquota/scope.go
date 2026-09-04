@@ -212,11 +212,15 @@ func ResolveAdditionalScope(input AdditionalScopeInput) AdditionalScopeResolutio
 		key = "additional_unknown"
 		prefix = "additional-unknown"
 	}
+	scopeDisplayName := strings.TrimSpace(input.LimitName)
+	if scopeDisplayName == "" {
+		scopeDisplayName = strings.TrimSpace(input.MeteredFeature)
+	}
 	return AdditionalScopeResolution{
 		Scope:                FeatureScope(key),
 		ProviderWindowPrefix: prefix,
 		LegacyPrefixes:       []string{prefix},
-		ScopeDisplayName:     strings.TrimSpace(input.LimitName),
+		ScopeDisplayName:     scopeDisplayName,
 	}
 }
 

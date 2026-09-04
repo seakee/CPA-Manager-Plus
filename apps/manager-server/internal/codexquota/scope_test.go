@@ -10,8 +10,10 @@ func TestResolveAdditionalScope(t *testing.T) {
 		name           string
 		meteredFeature string
 		limitName      string
+		anonymous      string
 		wantScope      ModelScope
 		wantPrefix     string
+		wantDisplay    string
 	}{
 		{
 			name:           "provider feature identifies spark",
@@ -32,6 +34,14 @@ func TestResolveAdditionalScope(t *testing.T) {
 			limitName:      "Future Feature",
 			wantScope:      FeatureScope("future_feature"),
 			wantPrefix:     "future-feature",
+			wantDisplay:    "Future Feature",
+		},
+		{
+			name:           "metered feature supplies display name",
+			meteredFeature: "future_feature",
+			wantScope:      FeatureScope("future_feature"),
+			wantPrefix:     "future-feature",
+			wantDisplay:    "future_feature",
 		},
 		{
 			name:           "provider feature wins over conflicting spark label",
@@ -39,34 +49,33 @@ func TestResolveAdditionalScope(t *testing.T) {
 			limitName:      "Spark",
 			wantScope:      FeatureScope("future_feature"),
 			wantPrefix:     "future-feature",
+			wantDisplay:    "Spark",
 		},
 		{
 			name:       "anonymous feature uses structural identity",
+			anonymous:  "additional-p-18000-s-604800",
 			wantScope:  FeatureScope("additional_p_18000_s_604800"),
 			wantPrefix: "additional-p-18000-s-604800",
 		},
 		{
-			name:       "non ascii label uses structural identity consistently",
-			limitName:  "未来额度",
-			wantScope:  FeatureScope("additional_p_18000_s_604800"),
-			wantPrefix: "additional-p-18000-s-604800",
+			name:        "non ascii label uses structural identity consistently",
+			limitName:   "未来额度",
+			anonymous:   "additional-p-18000-s-604800",
+			wantScope:   FeatureScope("additional_p_18000_s_604800"),
+			wantPrefix:  "additional-p-18000-s-604800",
+			wantDisplay: "未来额度",
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			anonymousIdentity := ""
-			if test.name == "anonymous feature uses structural identity" ||
-				test.name == "non ascii label uses structural identity consistently" {
-				anonymousIdentity = "additional-p-18000-s-604800"
-			}
 			got := ResolveAdditionalScope(AdditionalScopeInput{
 				MeteredFeature:    test.meteredFeature,
 				LimitName:         test.limitName,
-				AnonymousIdentity: anonymousIdentity,
+				AnonymousIdentity: test.anonymous,
 			})
-			if !reflect.DeepEqual(got.Scope, test.wantScope) || got.ProviderWindowPrefix != test.wantPrefix {
-				t.Fatalf("ResolveAdditionalScope() = %#v, want scope=%#v prefix=%q", got, test.wantScope, test.wantPrefix)
+			if !reflect.DeepEqual(got.Scope, test.wantScope) || got.ProviderWindowPrefix != test.wantPrefix || got.ScopeDisplayName != test.wantDisplay {
+				t.Fatalf("ResolveAdditionalScope() = %#v, want scope=%#v prefix=%q display=%q", got, test.wantScope, test.wantPrefix, test.wantDisplay)
 			}
 		})
 	}

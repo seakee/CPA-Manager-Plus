@@ -1613,6 +1613,51 @@ func TestWriteCodexInspectionResultRequiresNormalizedResetBoundary(t *testing.T)
 	}
 }
 
+func TestWriteCodexInspectionResultPersistsScopeDisplayName(t *testing.T) {
+	const observedAtMS = int64(1_780_000_000_000)
+	service := newQuotaSnapshotTestService(t, observedAtMS+1_000)
+	statusCode := http.StatusOK
+	duration := float64(7 * 24 * 60 * 60)
+	used := 25.0
+	result := model.CodexInspectionResult{
+		Provider:               "codex",
+		FileName:               "codex.json",
+		AuthIndex:              "auth-1",
+		AccountSnapshot:        "user@example.com",
+		CreatedAtMS:            observedAtMS,
+		StatusCode:             &statusCode,
+		QuotaInventoryObserved: true,
+		QuotaWindows: []model.CodexInspectionQuotaWindow{{
+			ID:                 "gpt-reserve-weekly-0",
+			ScopeDisplayName:   "gpt-reserve",
+			UsedPercent:        &used,
+			ResetAtMS:          observedAtMS + int64(duration)*1000,
+			ResetAccuracy:      "exact",
+			LimitWindowSeconds: &duration,
+			ModelScope: &model.CodexInspectionQuotaModelScope{
+				Kind: "feature", Key: "gpt_reserve", Complete: false,
+			},
+		}},
+	}
+	if err := service.WriteCodexInspectionResult(context.Background(), result); err != nil {
+		t.Fatalf("write inspection evidence: %v", err)
+	}
+
+	query, err := service.Query(context.Background(), QueryRequest{Accounts: []QueryAccount{{
+		RowKey: "row-gpt-reserve", Provider: "codex", Account: quotaSnapshotTestAccount(),
+	}}})
+	if err != nil {
+		t.Fatalf("query inspection evidence: %v", err)
+	}
+	if len(query.Items) != 1 || len(query.Items[0].Windows) != 1 {
+		t.Fatalf("inspection windows = %#v", query)
+	}
+	window := query.Items[0].Windows[0]
+	if window.ProviderWindowID != "gpt-reserve-weekly-0" || window.ScopeDisplayName != "gpt-reserve" {
+		t.Fatalf("inspection scope display name round-trip = %#v", window)
+	}
+}
+
 func TestWriteCodexInspectionResultReclassifiesLegacyScopedAllScope(t *testing.T) {
 	const observedAtMS = int64(1_780_000_000_000)
 	service := newQuotaSnapshotTestService(t, observedAtMS+1_000)
