@@ -153,6 +153,7 @@ const buildInspectionQuotaWindows = (inspection: AccountInspectionSummary): Code
       modelScope: window.modelScope ?? inferCodexQuotaScopeFromProviderWindowId(id),
       scopeDisplayName: window.scopeDisplayName,
       providerWindowAliases: window.providerWindowAliases,
+      identityAmbiguous: window.identityAmbiguous,
     };
   });
   if (windows.length > 0 || inspection.usedPercent === null) return windows;

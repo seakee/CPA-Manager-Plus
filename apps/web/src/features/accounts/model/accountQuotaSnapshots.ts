@@ -27,6 +27,7 @@ import {
   isCodexKnownScopedProviderWindowId,
   isCodexLegacyAllScopeReplacement,
   isCodexMainProviderWindowId,
+  isAmbiguousCodexProviderWindowId,
   inferCodexQuotaScopeFromProviderWindowId,
   resolveCodexSnapshotQuotaLabel,
 } from '@/utils/quota/codexQuota';
@@ -293,6 +294,9 @@ const applySnapshotWindowRelationships = (
 
   definitions.forEach((definition, index) => {
     if (definition.kind !== 'five_hour') return;
+    if (definition.identityAmbiguous || isAmbiguousCodexProviderWindowId(definition.providerWindowId)) {
+      return;
+    }
     if (windows[index].relationship_kind && windows[index].container_provider_window_id) return;
     const identity = familyRole(definition.providerWindowId);
     if (identity?.role === 'five-hour') {
@@ -628,7 +632,10 @@ export const mergeAccountQuotaSnapshotWindows = (
             : {}),
         }
       : {};
-    const displayOverlay = displayIsFresh
+    const displayOverlay: {
+      label?: string;
+      display?: AccountQuotaDisplayWindow;
+    } = displayIsFresh
       ? (() => {
           const label = resolveSnapshotQuotaLabel(snapshot, options, mergedScope, mergedDuration);
           return {
@@ -637,16 +644,30 @@ export const mergeAccountQuotaSnapshotWindows = (
               ...definition.display,
               label,
               scopeDisplayName,
+              ...(snapshot.identity_ambiguous ||
+              isAmbiguousCodexProviderWindowId(snapshot.provider_window_id)
+                ? { identityAmbiguous: true }
+                : {}),
             },
           };
         })()
       : {};
+    const identityAmbiguous =
+      definition.identityAmbiguous === true ||
+      snapshot.identity_ambiguous === true ||
+      (options.provider === 'codex' && isAmbiguousCodexProviderWindowId(snapshot.provider_window_id));
 
     return {
       ...definition,
       ...quotaOverlay,
       ...lifecycleOverlay,
       ...displayOverlay,
+      ...(identityAmbiguous
+        ? {
+            identityAmbiguous: true,
+            display: { ...definition.display, ...(displayOverlay.display ?? {}), identityAmbiguous: true },
+          }
+        : {}),
     };
   });
   const unmatchedSnapshots = Array.from(snapshotsByKey.entries())
@@ -859,6 +880,9 @@ const snapshotDefinition = (
     modelScope,
     scopeDisplayName,
     providerWindowAliases: snapshot.provider_window_aliases,
+    identityAmbiguous:
+      snapshot.identity_ambiguous === true ||
+      (provider === 'codex' && isAmbiguousCodexProviderWindowId(snapshot.provider_window_id)),
   };
   return {
     key,
@@ -869,6 +893,9 @@ const snapshotDefinition = (
     windowMode: snapshot.window_mode,
     modelScope,
     providerWindowAliases: snapshot.provider_window_aliases,
+    identityAmbiguous:
+      snapshot.identity_ambiguous === true ||
+      (provider === 'codex' && isAmbiguousCodexProviderWindowId(snapshot.provider_window_id)),
     observationSource: snapshot.source,
     observedAtMs: snapshot.observed_at_ms,
     boundaryAccuracy: snapshot.boundary_accuracy,

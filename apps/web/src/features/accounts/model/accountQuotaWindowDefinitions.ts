@@ -46,6 +46,7 @@ export interface AccountQuotaWindowDefinition {
   availability?: string;
   relationshipKind?: string;
   containerProviderWindowId?: string;
+  identityAmbiguous?: boolean;
   firstSeenAtMs?: number;
   lastSeenAtMs?: number;
   missingSinceMs?: number | null;
@@ -118,6 +119,7 @@ export const buildAccountQuotaWindowDefinitions = (
         windowMode: window.windowMode ?? 'unknown',
         modelScope: window.modelScope ?? { kind: 'all', complete: false },
         providerWindowAliases: window.providerWindowAliases,
+        identityAmbiguous: window.identityAmbiguous,
         observationSource: window.observationSource ?? 'api_query',
         observedAtMs: window.observedAtMs ?? null,
         boundaryAccuracy,

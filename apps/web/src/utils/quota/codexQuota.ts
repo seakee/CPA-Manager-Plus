@@ -32,6 +32,7 @@ const CODEX_SPARK_PROVIDER_WINDOW_PREFIXES = [
   CODEX_SPARK_PROVIDER_WINDOW_PREFIX,
 ];
 const CODEX_SPARK_LEGACY_PROVIDER_WINDOW_PREFIXES = ['fast-coding'];
+const CODEX_AMBIGUOUS_PROVIDER_WINDOW_PREFIX = 'ambiguous-';
 const CODEX_MAIN_PROVIDER_WINDOW_IDS = new Set([
   'five-hour',
   'weekly',
@@ -75,6 +76,7 @@ export type CodexQuotaWindowInfo = {
   limitWindowSeconds: number | null;
   modelScope: QuotaModelScope;
   providerWindowAliases?: string[];
+  identityAmbiguous?: boolean;
 };
 
 export type CodexQuotaScopeResolution = {
@@ -127,6 +129,9 @@ const normalizeWindowId = (raw: string) =>
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
+
+export const isAmbiguousCodexProviderWindowId = (value: string): boolean =>
+  value.trim().toLowerCase().startsWith(CODEX_AMBIGUOUS_PROVIDER_WINDOW_PREFIX);
 
 const normalizeFeatureKey = (raw: string | null | undefined) =>
   (raw ?? '')
@@ -723,7 +728,8 @@ const addCodexWindowInfo = (
   allowed?: boolean,
   observedAtMs = Date.now(),
   source: CodexQuotaResetSource = 'provider_api',
-  scopeDisplayName?: string
+  scopeDisplayName?: string,
+  identityAmbiguous = false
 ) => {
   if (!window) return;
 
@@ -732,9 +738,11 @@ const addCodexWindowInfo = (
   const usedPercentRaw = getCodexQuotaWindowUsedPercent(window);
   const isLimitReached = Boolean(limitReached) || allowed === false;
   const usedPercent = usedPercentRaw ?? (isLimitReached && resetLabel !== '-' ? 100 : null);
-  const aliases = Array.from(
-    new Set([...(providerWindowAliases ?? []), ...codexMainProviderWindowAliases(id, modelScope)])
-  ).sort();
+  const aliases = identityAmbiguous
+    ? []
+    : Array.from(
+        new Set([...(providerWindowAliases ?? []), ...codexMainProviderWindowAliases(id, modelScope)])
+      ).sort();
 
   windows.push({
     id,
@@ -747,6 +755,7 @@ const addCodexWindowInfo = (
     limitWindowSeconds: getWindowSeconds(window),
     modelScope,
     ...(scopeDisplayName ? { scopeDisplayName } : {}),
+    ...(identityAmbiguous ? { identityAmbiguous: true } : {}),
     ...(aliases.length ? { providerWindowAliases: aliases } : {}),
   });
 };
@@ -769,6 +778,7 @@ const addCodexRateLimitWindows = (
     providerWindowAliasPrefixes?: string[];
     providerWindowAliasBasePrefix?: string;
     scopeDisplayName?: string;
+    identityAmbiguous?: boolean;
   }
 ) => {
   const limitReached = limitInfo?.limit_reached ?? limitInfo?.limitReached;
@@ -799,7 +809,8 @@ const addCodexRateLimitWindows = (
     allowed,
     options?.observedAtMs,
     options?.source,
-    options?.scopeDisplayName
+    options?.scopeDisplayName,
+    options?.identityAmbiguous
   );
   if (classified.fiveHourWindow) added.add(classified.fiveHourWindow);
   addCodexWindowInfo(
@@ -814,7 +825,8 @@ const addCodexRateLimitWindows = (
     allowed,
     options?.observedAtMs,
     options?.source,
-    options?.scopeDisplayName
+    options?.scopeDisplayName,
+    options?.identityAmbiguous
   );
   if (classified.weeklyWindow) added.add(classified.weeklyWindow);
   addCodexWindowInfo(
@@ -829,7 +841,8 @@ const addCodexRateLimitWindows = (
     allowed,
     options?.observedAtMs,
     options?.source,
-    options?.scopeDisplayName
+    options?.scopeDisplayName,
+    options?.identityAmbiguous
   );
   if (classified.monthlyWindow) added.add(classified.monthlyWindow);
 
@@ -852,7 +865,8 @@ const addCodexRateLimitWindows = (
       allowed,
       options?.observedAtMs,
       options?.source,
-      options?.scopeDisplayName
+      options?.scopeDisplayName,
+      options?.identityAmbiguous
     );
   });
 };
@@ -933,13 +947,15 @@ const addAdditionalRateLimitWindows = (
       ? (featureGroups.get(family.featureIdPrefix) ?? [])
       : [];
     const collisionMode = featureGroup.length > 1;
+    const collisionNameCounts = collisionMode
+      ? countFamilyPrefix(
+          featureGroup,
+          (candidate) => candidate.nameIdPrefix,
+          family.featureIdPrefix
+        )
+      : new Map<string, number>();
     let idPrefix = family.baseIdPrefix;
     if (collisionMode) {
-      const nameCounts = countFamilyPrefix(
-        featureGroup,
-        (candidate) => candidate.nameIdPrefix,
-        family.featureIdPrefix
-      );
       const structuralCounts = countFamilyPrefix(
         featureGroup,
         (candidate) => candidate.structuralIdPrefix,
@@ -948,7 +964,7 @@ const addAdditionalRateLimitWindows = (
       if (
         family.nameIdPrefix &&
         family.nameIdPrefix !== family.featureIdPrefix &&
-        nameCounts.get(family.nameIdPrefix) === 1
+        collisionNameCounts.get(family.nameIdPrefix) === 1
       ) {
         idPrefix = family.nameIdPrefix;
       } else if (
@@ -957,17 +973,8 @@ const addAdditionalRateLimitWindows = (
         structuralCounts.get(family.structuralIdPrefix) === 1
       ) {
         idPrefix = family.structuralIdPrefix;
-      } else if (family.nameIdPrefix && family.nameIdPrefix !== family.featureIdPrefix) {
-        idPrefix = family.nameIdPrefix;
-      } else if (
-        family.structuralIdPrefix &&
-        family.structuralIdPrefix !== family.featureIdPrefix
-      ) {
-        idPrefix = family.structuralIdPrefix;
       } else {
-        idPrefix = family.featureIdPrefix
-          ? `additional-${family.featureIdPrefix}`
-          : 'additional-unknown';
+        idPrefix = `${CODEX_AMBIGUOUS_PROVIDER_WINDOW_PREFIX}${family.featureIdPrefix}`;
       }
     } else if (
       (baseIdPrefixCounts.get(family.baseIdPrefix) ?? 0) > 1 &&
@@ -977,8 +984,16 @@ const addAdditionalRateLimitWindows = (
       idPrefix = `${family.baseIdPrefix}--${family.featureIdPrefix}`;
     }
 
-    const legacyIdPrefixes = [...family.legacyIdPrefixes];
-    if (family.legacyBaseIdPrefix) {
+    const identityAmbiguous =
+      collisionMode && idPrefix.startsWith(CODEX_AMBIGUOUS_PROVIDER_WINDOW_PREFIX);
+    const legacyIdPrefixes = identityAmbiguous
+      ? []
+      : [...family.legacyIdPrefixes].filter(
+          (prefix) =>
+            !collisionMode ||
+            (prefix !== family.featureIdPrefix && collisionNameCounts.get(prefix) === 1)
+        );
+    if (family.legacyBaseIdPrefix && !identityAmbiguous) {
       const legacyPrefix =
         !collisionMode &&
         (legacyBaseIdPrefixCounts.get(family.legacyBaseIdPrefix) ?? 0) > 1 &&
@@ -986,9 +1001,11 @@ const addAdditionalRateLimitWindows = (
         family.featureIdPrefix !== family.legacyBaseIdPrefix
           ? `${family.legacyBaseIdPrefix}--${family.featureIdPrefix}`
           : family.legacyBaseIdPrefix;
-      legacyIdPrefixes.push(legacyPrefix);
+      if (!collisionMode || collisionNameCounts.get(legacyPrefix) === 1) {
+        legacyIdPrefixes.push(legacyPrefix);
+      }
     }
-    return { ...family, idPrefix, collisionMode, legacyIdPrefixes };
+    return { ...family, idPrefix, collisionMode, identityAmbiguous, legacyIdPrefixes };
   });
   const familiesByIdPrefix = new Map<string, typeof resolvedFamilies>();
   resolvedFamilies.forEach((family) => {
@@ -1016,6 +1033,7 @@ const addAdditionalRateLimitWindows = (
       collisionMode,
       featureIdPrefix,
       legacyIdPrefixes,
+      identityAmbiguous,
     }) => {
       const familyIndex = familyIndexes.get(sourceIndex) ?? 0;
       const aliasPrefixes = normalizedUniqueWindowIds(legacyIdPrefixes).filter(
@@ -1072,6 +1090,7 @@ const addAdditionalRateLimitWindows = (
           modelScope,
           providerWindowAliasesById,
           scopeDisplayName,
+          identityAmbiguous,
         }
       );
     }

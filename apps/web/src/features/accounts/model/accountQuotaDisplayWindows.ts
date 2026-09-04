@@ -67,6 +67,7 @@ export interface AccountQuotaDisplayWindow {
   modelScope?: QuotaModelScope;
   scopeDisplayName?: string;
   providerWindowAliases?: string[];
+  identityAmbiguous?: boolean;
 }
 
 export type TranslateQuotaWindowLabel = (
@@ -332,6 +333,7 @@ export const buildAccountQuotaDisplayWindow = ({
   modelScope = { kind: 'all', complete: true },
   scopeDisplayName,
   providerWindowAliases,
+  identityAmbiguous,
   nowMs,
 }: {
   key: string;
@@ -355,6 +357,7 @@ export const buildAccountQuotaDisplayWindow = ({
   modelScope?: QuotaModelScope;
   scopeDisplayName?: string;
   providerWindowAliases?: string[];
+  identityAmbiguous?: boolean;
   nowMs?: number;
 }): AccountQuotaDisplayWindow => {
   const normalizedResetLabel = resetLabel || '-';
@@ -405,6 +408,7 @@ export const buildAccountQuotaDisplayWindow = ({
     modelScope,
     scopeDisplayName,
     providerWindowAliases,
+    identityAmbiguous,
     ...range,
   };
 };
@@ -430,6 +434,7 @@ const buildCodexQuotaDisplayWindows = (
       modelScope: window.modelScope ?? inferCodexQuotaScopeFromProviderWindowId(window.id),
       scopeDisplayName: window.scopeDisplayName,
       providerWindowAliases: window.providerWindowAliases,
+      identityAmbiguous: window.identityAmbiguous,
       source: 'codex',
       observationSource:
         window.observationSource ??

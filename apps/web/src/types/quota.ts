@@ -371,6 +371,7 @@ export interface CodexQuotaWindow {
   observedAtMs?: number | null;
   modelScope?: QuotaModelScope;
   providerWindowAliases?: string[];
+  identityAmbiguous?: boolean;
 }
 
 export interface CodexQuotaState extends CredentialScopedQuotaState {

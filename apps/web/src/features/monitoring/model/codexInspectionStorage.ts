@@ -260,6 +260,7 @@ const serializeQuotaWindow = (window: CodexInspectionQuotaWindow): CodexInspecti
       id,
       windowKind
     ),
+    ...(window.identityAmbiguous ? { identityAmbiguous: true } : {}),
   };
 };
 
@@ -292,6 +293,7 @@ const hydrateQuotaWindow = (value: unknown): CodexInspectionQuotaWindow | null =
       id,
       windowKind
     ),
+    ...(readBoolean(value.identityAmbiguous, false) ? { identityAmbiguous: true } : {}),
   };
 };
 

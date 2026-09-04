@@ -275,6 +275,7 @@ type codexAdditionalRateLimitFamily struct {
 	sortKey            string
 	scopeDisplayName   string
 	collisionMode      bool
+	identityAmbiguous  bool
 }
 
 func (w codexClassifiedWindows) longWindow() *codexWindow {
@@ -4507,6 +4508,7 @@ func buildCodexInspectionQuotaWindows(payload map[string]any, planType string) [
 		teamPlan,
 		codexquota.MainScope(),
 		"",
+		false,
 	)
 	addCodexRateLimitWindows(
 		&windows,
@@ -4520,6 +4522,7 @@ func buildCodexInspectionQuotaWindows(payload map[string]any, planType string) [
 		teamPlan,
 		codexquota.CodeReviewScope(),
 		"",
+		false,
 	)
 	addAdditionalRateLimitWindows(&windows, readMapSlice(payload, "additional_rate_limits", "additionalRateLimits"), teamPlan)
 	return windows
@@ -4563,21 +4566,22 @@ func addCodexRateLimitWindows(
 	teamPlan bool,
 	modelScope codexquota.ModelScope,
 	scopeDisplayName string,
+	identityAmbiguous bool,
 ) {
 	if limit == nil {
 		return
 	}
 	classified := classifyWindows(limit, codexPlanTypeForTeam(teamPlan))
 	added := make(map[*codexWindow]bool)
-	addCodexWindowInfo(windows, fiveHourMeta.ID, fiveHourMeta.LabelKey, genericLabelParams, classified.FiveHour, limit.LimitReached, limit.Allowed, modelScope, scopeDisplayName)
+	addCodexWindowInfo(windows, fiveHourMeta.ID, fiveHourMeta.LabelKey, genericLabelParams, classified.FiveHour, limit.LimitReached, limit.Allowed, modelScope, scopeDisplayName, identityAmbiguous)
 	if classified.FiveHour != nil {
 		added[classified.FiveHour] = true
 	}
-	addCodexWindowInfo(windows, weeklyMeta.ID, weeklyMeta.LabelKey, genericLabelParams, classified.Weekly, limit.LimitReached, limit.Allowed, modelScope, scopeDisplayName)
+	addCodexWindowInfo(windows, weeklyMeta.ID, weeklyMeta.LabelKey, genericLabelParams, classified.Weekly, limit.LimitReached, limit.Allowed, modelScope, scopeDisplayName, identityAmbiguous)
 	if classified.Weekly != nil {
 		added[classified.Weekly] = true
 	}
-	addCodexWindowInfo(windows, monthlyMeta.ID, monthlyMeta.LabelKey, genericLabelParams, classified.Monthly, limit.LimitReached, limit.Allowed, modelScope, scopeDisplayName)
+	addCodexWindowInfo(windows, monthlyMeta.ID, monthlyMeta.LabelKey, genericLabelParams, classified.Monthly, limit.LimitReached, limit.Allowed, modelScope, scopeDisplayName, identityAmbiguous)
 	if classified.Monthly != nil {
 		added[classified.Monthly] = true
 	}
@@ -4600,6 +4604,7 @@ func addCodexRateLimitWindows(
 			limit.Allowed,
 			modelScope,
 			scopeDisplayName,
+			identityAmbiguous,
 		)
 	}
 }
@@ -4628,6 +4633,7 @@ func addCodexWindowInfo(
 	allowed *bool,
 	modelScope codexquota.ModelScope,
 	scopeDisplayName string,
+	identityAmbiguous bool,
 ) {
 	if window == nil {
 		return
@@ -4650,6 +4656,7 @@ func addCodexWindowInfo(
 		LimitWindowSeconds: window.LimitWindowSeconds,
 		ModelScope:         codexInspectionQuotaModelScope(modelScope),
 		ScopeDisplayName:   strings.TrimSpace(scopeDisplayName),
+		IdentityAmbiguous:  identityAmbiguous,
 	})
 }
 
@@ -4717,24 +4724,22 @@ func addAdditionalRateLimitWindows(windows *[]model.CodexInspectionQuotaWindow, 
 		family.idPrefix = family.baseIDPrefix
 		featureGroup := featureGroups[family.featureIDPrefix]
 		family.collisionMode = family.featureIDPrefix != "" && family.modelScope.Kind == "feature" && len(featureGroup) > 1
+		collisionNameCounts := make(map[string]int)
 		if family.collisionMode {
-			nameCounts := codexAdditionalFamilyPrefixCounts(featureGroup, func(candidate codexAdditionalRateLimitFamily) string {
+			collisionNameCounts = codexAdditionalFamilyPrefixCounts(featureGroup, func(candidate codexAdditionalRateLimitFamily) string {
 				return candidate.nameIDPrefix
 			}, family.featureIDPrefix)
 			structuralCounts := codexAdditionalFamilyPrefixCounts(featureGroup, func(candidate codexAdditionalRateLimitFamily) string {
 				return candidate.structuralIDPrefix
 			}, family.featureIDPrefix)
 			switch {
-			case family.nameIDPrefix != "" && family.nameIDPrefix != family.featureIDPrefix && nameCounts[family.nameIDPrefix] == 1:
+			case family.nameIDPrefix != "" && family.nameIDPrefix != family.featureIDPrefix && collisionNameCounts[family.nameIDPrefix] == 1:
 				family.idPrefix = family.nameIDPrefix
 			case family.structuralIDPrefix != "" && family.structuralIDPrefix != family.featureIDPrefix && structuralCounts[family.structuralIDPrefix] == 1:
 				family.idPrefix = family.structuralIDPrefix
-			case family.nameIDPrefix != "" && family.nameIDPrefix != family.featureIDPrefix:
-				family.idPrefix = family.nameIDPrefix
-			case family.structuralIDPrefix != "" && family.structuralIDPrefix != family.featureIDPrefix:
-				family.idPrefix = family.structuralIDPrefix
 			default:
-				family.idPrefix = "additional-" + family.featureIDPrefix
+				family.idPrefix = codexquota.AmbiguousProviderWindowPrefix + family.featureIDPrefix
+				family.identityAmbiguous = true
 			}
 		} else if baseIDPrefixCounts[family.baseIDPrefix] > 1 && family.featureIDPrefix != "" && family.featureIDPrefix != family.baseIDPrefix {
 			family.idPrefix += "--" + family.featureIDPrefix
@@ -4743,13 +4748,17 @@ func addAdditionalRateLimitWindows(windows *[]model.CodexInspectionQuotaWindow, 
 		if !family.collisionMode && legacyPrefix != "" && legacyBaseIDPrefixCounts[legacyPrefix] > 1 && family.featureIDPrefix != "" && family.featureIDPrefix != legacyPrefix {
 			legacyPrefix += "--" + family.featureIDPrefix
 		}
-		if legacyPrefix != "" {
+		if legacyPrefix != "" && (!family.collisionMode || collisionNameCounts[legacyPrefix] == 1) {
 			family.legacyPrefixes = append(family.legacyPrefixes, legacyPrefix)
 		}
 		if family.collisionMode {
+			if family.identityAmbiguous {
+				family.legacyPrefixes = nil
+			}
 			filtered := family.legacyPrefixes[:0]
 			for _, prefix := range family.legacyPrefixes {
-				if prefix != family.featureIDPrefix {
+				if prefix != family.featureIDPrefix &&
+					(family.identityAmbiguous || collisionNameCounts[prefix] == 1) {
 					filtered = append(filtered, prefix)
 				}
 			}
@@ -4787,8 +4796,11 @@ func addAdditionalRateLimitWindows(windows *[]model.CodexInspectionQuotaWindow, 
 			teamPlan,
 			family.modelScope,
 			family.scopeDisplayName,
+			family.identityAmbiguous,
 		)
-		applyCodexProviderWindowAliases((*windows)[start:], family.idPrefix, family.legacyPrefixes)
+		if !family.identityAmbiguous {
+			applyCodexProviderWindowAliases((*windows)[start:], family.idPrefix, family.legacyPrefixes)
+		}
 	}
 }
 

@@ -366,6 +366,7 @@ export const buildCodexQuotaWindows = (
       observedAtMs,
       modelScope: window.modelScope,
       providerWindowAliases: window.providerWindowAliases,
+      identityAmbiguous: window.identityAmbiguous,
     })
   );
 

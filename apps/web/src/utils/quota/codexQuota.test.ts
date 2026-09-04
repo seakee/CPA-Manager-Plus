@@ -486,10 +486,12 @@ describe('buildCodexQuotaWindowInfos', () => {
     });
 
     expect(initial.map((window) => window.id)).toEqual([
-      'same-quota-weekly-0',
-      'same-quota-weekly-1',
+      'ambiguous-future-feature-weekly-0',
+      'ambiguous-future-feature-weekly-1',
     ]);
     expect(changed.map((window) => window.id)).toEqual(initial.map((window) => window.id));
+    expect(initial.every((window) => window.identityAmbiguous)).toBe(true);
+    expect(changed.every((window) => window.identityAmbiguous)).toBe(true);
     expect(initial.flatMap((window) => window.providerWindowAliases ?? [])).not.toContain(
       'future-feature-weekly-0'
     );

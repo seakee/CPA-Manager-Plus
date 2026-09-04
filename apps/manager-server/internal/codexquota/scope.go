@@ -9,11 +9,12 @@ import (
 )
 
 const (
-	MainScopeKey              = "codex_main"
-	SparkModelID              = "gpt-5.3-codex-spark"
-	CodeReviewScopeKey        = "code_review"
-	UnknownRequestScopeKey    = "request_scope_unknown"
-	SparkProviderWindowPrefix = "spark"
+	MainScopeKey                  = "codex_main"
+	SparkModelID                  = "gpt-5.3-codex-spark"
+	CodeReviewScopeKey            = "code_review"
+	UnknownRequestScopeKey        = "request_scope_unknown"
+	SparkProviderWindowPrefix     = "spark"
+	AmbiguousProviderWindowPrefix = "ambiguous-"
 )
 
 type ModelScope struct {
@@ -151,6 +152,14 @@ func NormalizeFeatureKey(value string) string {
 
 func NormalizeProviderWindowPrefix(value string) string {
 	return normalizeIdentifier(value, '-')
+}
+
+// IsAmbiguousAdditionalProviderWindowID identifies a provider-window ID that
+// represents an indistinguishable slot in the current Additional inventory.
+// The prefix is deliberately runtime-only: it is not a stable Provider
+// identity and must not participate in lifecycle migration or attribution.
+func IsAmbiguousAdditionalProviderWindowID(value string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(value)), AmbiguousProviderWindowPrefix)
 }
 
 func normalizeIdentifier(value string, separator rune) string {

@@ -206,6 +206,54 @@ func TestScopeDisplayNameKeepsLifecycleIdentityAndCandidateFallback(t *testing.T
 	}
 }
 
+func TestQuotaQueryRetainsScopeDisplayNameBeyondQuotaCandidateRetention(t *testing.T) {
+	service := newQuotaSnapshotTestService(t, quotaLifecycleBaseMS+quotaLifecycleDayMS)
+	const providerWindowID = "future-feature-weekly-0"
+	first := codexScopedAdditionalWindow(providerWindowID, "Model A", 10)
+	firstObservedAtMS := quotaLifecycleBaseMS + quotaLifecycleHourMS
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+quotaLifecycleHourMS, []WindowInput{first})
+
+	for observationIndex := 2; observationIndex <= 11; observationIndex++ {
+		blank := codexScopedAdditionalWindow(providerWindowID, "", float64(observationIndex))
+		writeQuotaLifecycleObservation(
+			t,
+			service,
+			"complete",
+			quotaLifecycleBaseMS+int64(observationIndex)*quotaLifecycleHourMS,
+			[]WindowInput{blank},
+		)
+	}
+
+	window := queryQuotaLifecycleWindows(t, service, false)[providerWindowID]
+	if window.ScopeDisplayName != "Model A" {
+		t.Fatalf("display name after more than eight blank observations = %#v", window)
+	}
+	displaySource, ok := window.FieldSources["scope_display_name"]
+	if !ok || displaySource.Source != "inspection" || displaySource.ObservedAtMS != firstObservedAtMS {
+		t.Fatalf("long-lived display provenance = %#v, want observation %d", window.FieldSources, firstObservedAtMS)
+	}
+	if window.UsedPercent == nil || *window.UsedPercent != 11 {
+		t.Fatalf("quota selection was affected by display retention = %#v", window)
+	}
+
+	newer := codexScopedAdditionalWindow(providerWindowID, "Model B", 12)
+	newerObservedAtMS := quotaLifecycleBaseMS + 12*quotaLifecycleHourMS
+	writeQuotaLifecycleObservation(t, service, "complete", newerObservedAtMS, []WindowInput{newer})
+	window = queryQuotaLifecycleWindows(t, service, false)[providerWindowID]
+	if window.ScopeDisplayName != "Model B" || window.FieldSources["scope_display_name"].ObservedAtMS != newerObservedAtMS {
+		t.Fatalf("newer non-empty display did not replace old display = %#v", window)
+	}
+
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+13*quotaLifecycleHourMS, nil)
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+14*quotaLifecycleHourMS, nil)
+	reopened := codexScopedAdditionalWindow(providerWindowID, "", 13)
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+15*quotaLifecycleHourMS, []WindowInput{reopened})
+	window = queryQuotaLifecycleWindows(t, service, false)[providerWindowID]
+	if window.ScopeDisplayName != "" || window.ActivationGeneration != 2 {
+		t.Fatalf("new activation inherited prior display name = %#v", window)
+	}
+}
+
 func TestSelectScopeDisplayNameRespectsActivationBoundary(t *testing.T) {
 	base := model.AccountQuotaSnapshot{
 		ProviderWindowID: "gpt-reserve-weekly-0",
@@ -5447,6 +5495,189 @@ func TestQuotaLifecycleKeepsDuplicateCodexFeatureFamiliesIndependent(t *testing.
 	current := queryQuotaLifecycleWindows(t, service, false)
 	if len(current) != 1 || current["quota-a-weekly-0"].Availability != "active" {
 		t.Fatalf("duplicate feature current lifecycle = %#v", current)
+	}
+}
+
+func TestQuotaLifecyclePreservesAdditionalLineageAcrossUniqueCollisionTransitions(t *testing.T) {
+	service := newQuotaSnapshotTestService(t, quotaLifecycleBaseMS+quotaLifecycleDayMS)
+	const (
+		stablePrefix    = "future-feature"
+		collisionPrefix = "quota-a"
+		siblingPrefix   = "quota-b"
+	)
+	initialParentID := stablePrefix + "-weekly-0"
+	initialChildID := stablePrefix + "-five-hour-0"
+	initialGenericID := stablePrefix + "-0-window-86400-0"
+	initial := []WindowInput{
+		codexScopedAdditionalWindow(initialParentID, "Quota A", 20),
+		codexScopedAdditionalWindowWithKind(initialChildID, "Quota A", 10, "five_hour", 5*60*60),
+		codexScopedAdditionalWindowWithKind(initialGenericID, "Quota A", 5, "daily", 24*60*60),
+	}
+	initial[1].RelationshipKind = "concurrent_subwindow"
+	initial[1].ContainerWindowID = initialParentID
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+quotaLifecycleHourMS, initial)
+	initialWindows := queryQuotaLifecycleWindows(t, service, false)
+	initialIDs := map[string]int64{
+		"weekly":    initialWindows[initialParentID].LogicalWindowID,
+		"five_hour": initialWindows[initialChildID].LogicalWindowID,
+		"generic":   initialWindows[initialGenericID].LogicalWindowID,
+	}
+	for name, id := range initialIDs {
+		if id == 0 || initialWindows[map[string]string{
+			"weekly": initialParentID, "five_hour": initialChildID, "generic": initialGenericID,
+		}[name]].ActivationGeneration != 1 {
+			t.Fatalf("initial %s lineage = %#v", name, initialWindows)
+		}
+	}
+
+	collision := []WindowInput{
+		codexScopedAdditionalWindow(collisionPrefix+"-weekly-0", "Quota A", 30),
+		codexScopedAdditionalWindowWithKind(collisionPrefix+"-five-hour-0", "Quota A", 15, "five_hour", 5*60*60),
+		codexScopedAdditionalWindowWithKind(collisionPrefix+"-0-window-86400-0", "Quota A", 8, "daily", 24*60*60),
+		codexScopedAdditionalWindow(siblingPrefix+"-weekly-0", "Quota B", 40),
+		codexScopedAdditionalWindowWithKind(siblingPrefix+"-five-hour-0", "Quota B", 35, "five_hour", 5*60*60),
+		codexScopedAdditionalWindowWithKind(siblingPrefix+"-0-window-86400-0", "Quota B", 25, "daily", 24*60*60),
+	}
+	collision[1].RelationshipKind = "concurrent_subwindow"
+	collision[1].ContainerWindowID = collision[0].ProviderWindowID
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+2*quotaLifecycleHourMS, collision)
+	transitioned := queryQuotaLifecycleWindows(t, service, false)
+	if _, exists := transitioned[initialParentID]; exists {
+		t.Fatalf("stable parent remained as a third current window: %#v", transitioned)
+	}
+	for role, id := range map[string]string{
+		"weekly":    collision[0].ProviderWindowID,
+		"five_hour": collision[1].ProviderWindowID,
+		"generic":   collision[2].ProviderWindowID,
+	} {
+		window, ok := transitioned[id]
+		if !ok || window.LogicalWindowID != initialIDs[role] || window.ActivationGeneration != 1 {
+			t.Fatalf("unique to collision %s lineage = %#v, want logical %d generation 1", role, transitioned, initialIDs[role])
+		}
+	}
+	for _, id := range []string{siblingPrefix + "-weekly-0", siblingPrefix + "-five-hour-0", siblingPrefix + "-0-window-86400-0"} {
+		if transitioned[id].LogicalWindowID == 0 || transitioned[id].LogicalWindowID == initialIDs["weekly"] {
+			t.Fatalf("collision sibling %q reused the migrated lineage: %#v", id, transitioned)
+		}
+	}
+	if transitioned[collision[1].ProviderWindowID].ContainerWindowID != collision[0].ProviderWindowID {
+		t.Fatalf("collision container relationship = %#v", transitioned[collision[1].ProviderWindowID])
+	}
+
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+3*quotaLifecycleHourMS, collision)
+	stableTransition := queryQuotaLifecycleWindows(t, service, false)
+	for role, id := range map[string]string{
+		"weekly":    collision[0].ProviderWindowID,
+		"five_hour": collision[1].ProviderWindowID,
+		"generic":   collision[2].ProviderWindowID,
+	} {
+		if stableTransition[id].LogicalWindowID != initialIDs[role] {
+			t.Fatalf("repeated collision %s changed lineage: %#v", role, stableTransition)
+		}
+	}
+
+	aOnly := collision[:3]
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+4*quotaLifecycleHourMS, aOnly)
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+5*quotaLifecycleHourMS, aOnly)
+	afterOmission := queryQuotaLifecycleWindows(t, service, true)
+	for role, id := range map[string]string{
+		"weekly": collision[0].ProviderWindowID, "five_hour": collision[1].ProviderWindowID, "generic": collision[2].ProviderWindowID,
+	} {
+		if afterOmission[id].Availability != "active" || afterOmission[id].LogicalWindowID != initialIDs[role] {
+			t.Fatalf("A lifecycle after B omission %s = %#v", role, afterOmission)
+		}
+	}
+	for _, id := range []string{siblingPrefix + "-weekly-0", siblingPrefix + "-five-hour-0", siblingPrefix + "-0-window-86400-0"} {
+		if afterOmission[id].Availability != "inactive" {
+			t.Fatalf("B lifecycle after complete omissions %q = %#v", id, afterOmission[id])
+		}
+	}
+
+	stableAgain := []WindowInput{
+		codexScopedAdditionalWindow(initialParentID, "Quota A", 12),
+		codexScopedAdditionalWindowWithKind(initialChildID, "Quota A", 7, "five_hour", 5*60*60),
+		codexScopedAdditionalWindowWithKind(initialGenericID, "Quota A", 3, "daily", 24*60*60),
+	}
+	stableAgain[0].ProviderWindowAliases = []string{collision[0].ProviderWindowID}
+	stableAgain[1].ProviderWindowAliases = []string{collision[1].ProviderWindowID}
+	stableAgain[2].ProviderWindowAliases = []string{collision[2].ProviderWindowID}
+	stableAgain[1].RelationshipKind = "concurrent_subwindow"
+	stableAgain[1].ContainerWindowID = initialParentID
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+6*quotaLifecycleHourMS, stableAgain)
+	final := queryQuotaLifecycleWindows(t, service, false)
+	for role, id := range map[string]string{
+		"weekly": initialParentID, "five_hour": initialChildID, "generic": initialGenericID,
+	} {
+		window, ok := final[id]
+		if !ok || window.LogicalWindowID != initialIDs[role] || window.ActivationGeneration != 1 {
+			t.Fatalf("collision to unique %s lineage = %#v, want logical %d generation 1", role, final, initialIDs[role])
+		}
+	}
+	if final[initialChildID].ContainerWindowID != initialParentID {
+		t.Fatalf("restored stable container relationship = %#v", final[initialChildID])
+	}
+}
+
+func TestQuotaLifecycleFailsClosedForAdditionalRenameAndCollisionWithoutDisplayEvidence(t *testing.T) {
+	service := newQuotaSnapshotTestService(t, quotaLifecycleBaseMS+quotaLifecycleDayMS)
+	stable := codexScopedAdditionalWindow("future-feature-weekly-0", "Quota A", 20)
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+quotaLifecycleHourMS, []WindowInput{stable})
+
+	renamed := codexScopedAdditionalWindow("quota-a-weekly-0", "New Name", 30)
+	sibling := codexScopedAdditionalWindow("quota-b-weekly-0", "Quota B", 40)
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+2*quotaLifecycleHourMS, []WindowInput{renamed, sibling})
+
+	windows := queryQuotaLifecycleWindows(t, service, true)
+	if len(windows) != 3 || windows["future-feature-weekly-0"].LogicalWindowID == 0 ||
+		windows["quota-a-weekly-0"].LogicalWindowID == windows["future-feature-weekly-0"].LogicalWindowID ||
+		windows["quota-b-weekly-0"].LogicalWindowID == windows["future-feature-weekly-0"].LogicalWindowID {
+		t.Fatalf("rename plus collision guessed lineage = %#v", windows)
+	}
+}
+
+func TestQuotaLifecycleDoesNotMigrateStableWindowWhenCollisionDisplayIsNotUnique(t *testing.T) {
+	service := newQuotaSnapshotTestService(t, quotaLifecycleBaseMS+quotaLifecycleDayMS)
+	stable := codexScopedAdditionalWindow("future-feature-weekly-0", "Quota A", 20)
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+quotaLifecycleHourMS, []WindowInput{stable})
+
+	first := codexScopedAdditionalWindow("quota-a-weekly-0", "Quota A", 30)
+	second := codexScopedAdditionalWindow("quota-b-weekly-0", "Quota A", 40)
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+2*quotaLifecycleHourMS, []WindowInput{first, second})
+
+	windows := queryQuotaLifecycleWindows(t, service, true)
+	if len(windows) != 3 || windows["quota-a-weekly-0"].LogicalWindowID == windows["future-feature-weekly-0"].LogicalWindowID ||
+		windows["quota-b-weekly-0"].LogicalWindowID == windows["future-feature-weekly-0"].LogicalWindowID {
+		t.Fatalf("duplicate display collision guessed stable lineage = %#v", windows)
+	}
+}
+
+func TestQuotaLifecycleTreatsFullyAmbiguousAdditionalSlotsAsCurrentObservations(t *testing.T) {
+	service := newQuotaSnapshotTestService(t, quotaLifecycleBaseMS+quotaLifecycleDayMS)
+	family := func(id string, used float64) WindowInput {
+		window := codexScopedAdditionalWindow(id, "Same Quota", used)
+		return window
+	}
+	first := []WindowInput{
+		family("ambiguous-future-feature-weekly-0", 10),
+		family("ambiguous-future-feature-weekly-1", 80),
+	}
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+quotaLifecycleHourMS, first)
+	reverse := []WindowInput{
+		family("ambiguous-future-feature-weekly-0", 90),
+		family("ambiguous-future-feature-weekly-1", 20),
+	}
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+2*quotaLifecycleHourMS, reverse)
+
+	windows := queryQuotaLifecycleWindows(t, service, false)
+	if len(windows) != 2 {
+		t.Fatalf("fully ambiguous current observations = %#v", windows)
+	}
+	for id, window := range windows {
+		if !codexquota.IsAmbiguousAdditionalProviderWindowID(id) || window.LogicalWindowID != 0 ||
+			window.ActivationGeneration != 0 || window.CurrentCycle != nil || window.PreviousCycle != nil ||
+			window.ContainerWindowID != "" || window.RelationshipKind != "" {
+			t.Fatalf("fully ambiguous observation exposed individual history %q = %#v", id, window)
+		}
 	}
 }
 

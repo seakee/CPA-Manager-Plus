@@ -158,6 +158,7 @@ export interface CodexInspectionQuotaWindow {
   limitWindowSeconds: number | null;
   modelScope?: QuotaModelScope;
   providerWindowAliases?: string[];
+  identityAmbiguous?: boolean;
 }
 
 export interface CodexInspectionResultItem extends CodexInspectionAccount {

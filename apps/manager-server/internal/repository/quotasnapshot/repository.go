@@ -46,6 +46,7 @@ type LegacyBackfillResult struct {
 type Repository interface {
 	InsertObservationWrites(ctx context.Context, writes []model.AccountQuotaObservationWrite) error
 	ListCandidates(ctx context.Context, accountKey, provider string, limit int) ([]model.AccountQuotaSnapshot, error)
+	ListLatestScopeDisplayCandidates(ctx context.Context, accountKey, provider string) ([]model.AccountQuotaSnapshot, error)
 	ListWindowStates(ctx context.Context, accountKey, provider string) ([]model.AccountQuotaWindowState, error)
 }
 
@@ -546,11 +547,15 @@ func (r *repository) ListCandidates(ctx context.Context, accountKey, provider st
 		where account_key = ? and provider = ?
 			and `+excludeLegacyCodexWorkspaceSnapshotSQL("")+`
 			and (observation_id is null or (
-				logical_window_id is not null and exists (
+				exists (
 					select 1 from account_quota_observations observation
 					where observation.id = account_quota_snapshots.observation_id
 						and observation.lifecycle_applied = 1
 				)
+				and (logical_window_id is not null or (
+					provider = 'codex' and lower(trim(model_scope_kind)) = 'feature'
+					and lower(trim(provider_window_id)) like 'ambiguous-%'
+				))
 			))
 	)
 	select
@@ -570,6 +575,129 @@ func (r *repository) ListCandidates(ctx context.Context, accountKey, provider st
 	order by case window_availability when 'active' then 0 when 'pending_absent' then 1 else 2 end,
 		source_rank, observed_at_ms desc, id desc
 	limit ?`, strings.TrimSpace(accountKey), strings.TrimSpace(provider), candidateRowsPerSource, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]model.AccountQuotaSnapshot, 0)
+	for rows.Next() {
+		var item model.AccountQuotaSnapshot
+		var cycleStart, cycleEnd, duration sql.NullInt64
+		var usedPercent, remainingPercent, usedValue, limitValue sql.NullFloat64
+		var resetCreditsAvailable sql.NullInt64
+		if err := rows.Scan(
+			&item.ID,
+			&item.ObservationID,
+			&item.LogicalWindowID,
+			&item.ActivationID,
+			&item.CycleID,
+			&item.AccountKey,
+			&item.Provider,
+			&item.ProviderWindowID,
+			&item.WindowKind,
+			&item.WindowMode,
+			&item.ScopeDisplayName,
+			&item.ModelScopeKind,
+			&item.ModelScopeKey,
+			&item.ModelIDsJSON,
+			&item.ScopeFingerprint,
+			&item.ContentHash,
+			&item.Source,
+			&item.SourceObservationID,
+			&item.ObservedAtMS,
+			&item.BoundaryAccuracy,
+			&cycleStart,
+			&cycleEnd,
+			&duration,
+			&usedPercent,
+			&remainingPercent,
+			&usedValue,
+			&limitValue,
+			&item.QuotaUnit,
+			&resetCreditsAvailable,
+			&item.ResetCreditsJSON,
+			&item.PlanType,
+			&item.CreatedAtMS,
+		); err != nil {
+			return nil, err
+		}
+		item.CycleStartMS = int64Pointer(cycleStart)
+		item.CycleEndMS = int64Pointer(cycleEnd)
+		item.DurationSeconds = int64Pointer(duration)
+		item.UsedPercent = float64Pointer(usedPercent)
+		item.RemainingPercent = float64Pointer(remainingPercent)
+		item.UsedValue = float64Pointer(usedValue)
+		item.LimitValue = float64Pointer(limitValue)
+		item.ResetCreditsAvailable = int64Pointer(resetCreditsAvailable)
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+// ListLatestScopeDisplayCandidates reads display evidence independently from
+// the ordinary quota candidate retention window. A blank observation is not
+// display evidence, so it cannot evict an older non-empty name from the same
+// logical window activation. Legacy, unattached snapshots use their provider
+// identity plus scope as the compatibility partition.
+func (r *repository) ListLatestScopeDisplayCandidates(ctx context.Context, accountKey, provider string) ([]model.AccountQuotaSnapshot, error) {
+	rows, err := r.db.QueryContext(ctx, `with ranked as (
+	select
+		id, coalesce(observation_id, 0) as observation_id,
+		coalesce(logical_window_id, 0) as logical_window_id,
+		coalesce(activation_id, 0) as activation_id,
+		coalesce(cycle_id, 0) as cycle_id,
+		account_key, provider, provider_window_id, window_kind, window_mode,
+		trim(coalesce(scope_display_name, '')) as scope_display_name,
+		model_scope_kind, coalesce(model_scope_key, '') as model_scope_key,
+		coalesce(model_ids_json, '') as model_ids_json,
+		coalesce(scope_fingerprint, '') as scope_fingerprint,
+		coalesce(content_hash, '') as content_hash,
+		source, coalesce(source_observation_id, '') as source_observation_id, observed_at_ms,
+		boundary_accuracy, cycle_start_ms, cycle_end_ms, duration_seconds,
+		used_percent, remaining_percent, used_value, limit_value,
+		coalesce(quota_unit, '') as quota_unit, reset_credits_available,
+		coalesce(reset_credits_json, '') as reset_credits_json,
+		coalesce(plan_type, '') as plan_type, created_at_ms,
+		row_number() over (
+			partition by case
+				when logical_window_id is not null and logical_window_id > 0 then
+					'logical:' || cast(logical_window_id as text) || char(0) || cast(coalesce(activation_id, 0) as text)
+				else
+					'legacy:' || lower(trim(provider_window_id)) || char(0) ||
+					lower(trim(window_kind)) || char(0) || coalesce(scope_fingerprint, '')
+			end
+			order by observed_at_ms desc, id desc
+		) as display_rank
+	from account_quota_snapshots
+	where account_key = ? and provider = ?
+		and `+excludeLegacyCodexWorkspaceSnapshotSQL("")+`
+		and trim(coalesce(scope_display_name, '')) <> ''
+		and (observation_id is null or (
+			exists (
+				select 1 from account_quota_observations observation
+				where observation.id = account_quota_snapshots.observation_id
+					and observation.lifecycle_applied = 1
+			)
+			and (logical_window_id is not null or (
+				provider = 'codex' and lower(trim(model_scope_kind)) = 'feature'
+				and lower(trim(provider_window_id)) like 'ambiguous-%'
+			))
+		))
+	)
+	select
+		id, observation_id, logical_window_id, activation_id, cycle_id,
+		account_key, provider, provider_window_id, window_kind, window_mode,
+		scope_display_name,
+		model_scope_kind, model_scope_key, model_ids_json,
+		scope_fingerprint, content_hash,
+		source, source_observation_id, observed_at_ms,
+		boundary_accuracy, cycle_start_ms, cycle_end_ms, duration_seconds,
+		used_percent, remaining_percent, used_value, limit_value,
+		quota_unit, reset_credits_available, reset_credits_json, plan_type, created_at_ms
+	from ranked
+	where display_rank = 1
+	order by observed_at_ms desc, id desc`, strings.TrimSpace(accountKey), strings.TrimSpace(provider))
 	if err != nil {
 		return nil, err
 	}

@@ -310,6 +310,7 @@ export interface CodexInspectionQuotaWindow {
   limitWindowSeconds?: number | null;
   modelScope?: QuotaModelScope;
   providerWindowAliases?: string[];
+  identityAmbiguous?: boolean;
 }
 
 export interface CodexInspectionResult {
@@ -1076,6 +1077,7 @@ export interface AccountQuotaSnapshotWindow extends AccountQuotaSnapshotWindowIn
   deactivated_at_ms?: number;
   current_cycle?: AccountQuotaSnapshotCycle;
   previous_cycle?: AccountQuotaSnapshotCycle;
+  identity_ambiguous?: boolean;
 }
 
 export interface AccountQuotaSnapshotQueryAccount {

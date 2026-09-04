@@ -798,10 +798,13 @@ func TestBuildCodexInspectionQuotaWindowsDoesNotUseDynamicStateForFullyAmbiguous
 	changed := buildCodexInspectionQuotaWindows(map[string]any{
 		"additional_rate_limits": []any{family(90, 300), family(20, 1_200)},
 	}, "")
-	want := []string{"same-quota-weekly-0", "same-quota-weekly-1"}
+	want := []string{"ambiguous-future-feature-weekly-0", "ambiguous-future-feature-weekly-1"}
 	for index, id := range want {
 		if initial[index].ID != id || changed[index].ID != id {
 			t.Fatalf("fully ambiguous ids = initial:%#v changed:%#v want:%#v", initial, changed, want)
+		}
+		if !initial[index].IdentityAmbiguous || !changed[index].IdentityAmbiguous {
+			t.Fatalf("fully ambiguous marker missing: initial:%#v changed:%#v", initial, changed)
 		}
 		if containsString(initial[index].ProviderWindowAliases, "future-feature-weekly-0") {
 			t.Fatalf("fully ambiguous family has shared stable alias: %#v", initial[index].ProviderWindowAliases)

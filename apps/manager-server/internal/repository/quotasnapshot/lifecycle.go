@@ -122,6 +122,7 @@ func persistObservationSnapshots(ctx context.Context, tx *sql.Tx, write *model.A
 	}
 	reported := make(map[string]struct{}, len(write.Snapshots))
 	migratedProviderWindowIDs := make(map[string]string)
+	collisionDisplayCounts := codexCollisionDisplayCounts(write.Observation, write.Snapshots)
 	earlyClosedCycleIDs := make([]int64, 0, len(write.Snapshots))
 	for snapshotIndex := range write.Snapshots {
 		snapshot := &write.Snapshots[snapshotIndex]
@@ -134,8 +135,13 @@ func persistObservationSnapshots(ctx context.Context, tx *sql.Tx, write *model.A
 		if err := reclassifyLegacyCodexAllScope(ctx, tx, write.Observation, snapshot); err != nil {
 			return err
 		}
-		stableAdditional := isCodexStableAdditionalSnapshot(write.Observation, snapshot)
-		window, activationID, lifecycleOwned, err := reconcileReportedWindow(ctx, tx, write.Observation, snapshot)
+		window, activationID, lifecycleOwned, err := reconcileReportedWindow(
+			ctx,
+			tx,
+			write.Observation,
+			snapshot,
+			collisionDisplayCounts,
+		)
 		if err != nil {
 			return err
 		}
@@ -149,7 +155,7 @@ func persistObservationSnapshots(ctx context.Context, tx *sql.Tx, write *model.A
 			write.InsertedSnapshotCount++
 			continue
 		}
-		if stableAdditional && window.migratedFromProviderID != "" {
+		if window.migratedFromProviderID != "" {
 			migratedProviderWindowIDs[window.migratedFromProviderID] = strings.ToLower(strings.TrimSpace(snapshot.ProviderWindowID))
 		}
 		snapshot.LogicalWindowID = window.id
@@ -374,13 +380,36 @@ func reconcileReportedWindow(
 	tx *sql.Tx,
 	observation model.AccountQuotaObservation,
 	snapshot *model.AccountQuotaSnapshot,
+	collisionDisplayCounts map[string]int,
 ) (logicalWindowRow, int64, bool, error) {
+	if isCodexAmbiguousAdditionalSnapshot(observation, snapshot) {
+		// An ambiguous slot is only a current-observation value. Assigning it to
+		// a logical window would make source order look like durable Provider
+		// identity and could cross-wire cycles, containers, or usage history.
+		return logicalWindowRow{}, 0, false, nil
+	}
 	window, err := findLogicalWindow(ctx, tx, snapshot.AccountKey, snapshot.Provider, snapshot.ProviderWindowID, snapshot.ScopeFingerprint)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return logicalWindowRow{}, 0, false, err
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		migratedWindow, migrated, migrationErr := migrateLegacyCodexScopedLogicalWindow(ctx, tx, observation, snapshot)
+		if migrationErr != nil {
+			return logicalWindowRow{}, 0, false, migrationErr
+		}
+		if migrated {
+			window = migratedWindow
+			err = nil
+		}
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		migratedWindow, migrated, migrationErr := migrateStableCodexAdditionalToCollisionWindow(
+			ctx,
+			tx,
+			observation,
+			snapshot,
+			collisionDisplayCounts,
+		)
 		if migrationErr != nil {
 			return logicalWindowRow{}, 0, false, migrationErr
 		}
@@ -610,10 +639,23 @@ func isCodexStableAdditionalSnapshot(
 		return false
 	}
 	canonicalID := strings.ToLower(strings.TrimSpace(snapshot.ProviderWindowID))
-	if canonicalID == "" || codexquota.IsMainProviderWindowID(canonicalID) || codexquota.IsSparkProviderWindowID(canonicalID) {
+	if canonicalID == "" || codexquota.IsMainProviderWindowID(canonicalID) ||
+		codexquota.IsSparkProviderWindowID(canonicalID) ||
+		codexquota.IsAmbiguousAdditionalProviderWindowID(canonicalID) {
 		return false
 	}
-	return strings.HasPrefix(canonicalID, codexStableAdditionalPrefix(snapshot)+"-")
+	_, ok := generatedCodexWindowSuffix(canonicalID, codexStableAdditionalPrefix(snapshot))
+	return ok
+}
+
+func isCodexAmbiguousAdditionalSnapshot(
+	observation model.AccountQuotaObservation,
+	snapshot *model.AccountQuotaSnapshot,
+) bool {
+	return snapshot != nil && strings.EqualFold(strings.TrimSpace(observation.Provider), "codex") &&
+		strings.EqualFold(strings.TrimSpace(snapshot.Provider), "codex") &&
+		strings.EqualFold(strings.TrimSpace(snapshot.ModelScopeKind), "feature") &&
+		codexquota.IsAmbiguousAdditionalProviderWindowID(snapshot.ProviderWindowID)
 }
 
 func codexStableAdditionalPrefix(snapshot *model.AccountQuotaSnapshot) string {
@@ -694,6 +736,9 @@ func findLogicalWindowsForCodexSuffix(
 	}
 	result := make([]logicalWindowRow, 0, len(candidates))
 	for _, candidate := range candidates {
+		if codexquota.IsAmbiguousAdditionalProviderWindowID(candidate.providerWindowID) {
+			continue
+		}
 		if candidateSuffix, ok := generatedCodexWindowSuffixFromID(candidate.providerWindowID); ok && candidateSuffix == suffix {
 			result = append(result, candidate)
 		}
@@ -804,7 +849,9 @@ func migrateCodexLogicalWindowID(
 	if err := tx.QueryRowContext(ctx, `select exists (
 		select 1 from account_quota_windows
 		where account_key = ? and provider = ? and provider_window_id = ? and scope_fingerprint = ?
-	)`, observation.AccountKey, observation.Provider, canonicalID, snapshot.ScopeFingerprint).Scan(&targetExists); err != nil {
+			and inventory_scope_key = ? and lower(trim(window_kind)) = lower(trim(?))
+	)`, observation.AccountKey, observation.Provider, canonicalID, snapshot.ScopeFingerprint,
+		observation.InventoryScopeKey, snapshot.WindowKind).Scan(&targetExists); err != nil {
 		return logicalWindowRow{}, false, err
 	}
 	if targetExists != 0 {
@@ -840,6 +887,169 @@ func migrateCodexLogicalWindowID(
 		legacy.containerProviderWindowID = canonicalID
 	}
 	return legacy, true, nil
+}
+
+// migrateStableCodexAdditionalToCollisionWindow reconciles the canonical
+// metered-feature representation with an identifiable name/structural
+// representation that is emitted when the same feature has multiple families
+// in one complete inventory. The display name is the only evidence that can
+// connect the incoming family to the old stable row; scope and suffix alone
+// are deliberately insufficient because siblings share both.
+func migrateStableCodexAdditionalToCollisionWindow(
+	ctx context.Context,
+	tx *sql.Tx,
+	observation model.AccountQuotaObservation,
+	snapshot *model.AccountQuotaSnapshot,
+	collisionDisplayCounts map[string]int,
+) (logicalWindowRow, bool, error) {
+	if !isCodexCollisionAdditionalSnapshot(observation, snapshot) {
+		return logicalWindowRow{}, false, nil
+	}
+	displayName := strings.TrimSpace(snapshot.ScopeDisplayName)
+	if displayName == "" {
+		return logicalWindowRow{}, false, nil
+	}
+	displayKey, ok := codexCollisionDisplayKey(observation, snapshot)
+	if !ok || collisionDisplayCounts[displayKey] != 1 {
+		return logicalWindowRow{}, false, nil
+	}
+	suffix, ok := generatedCodexWindowSuffixFromID(snapshot.ProviderWindowID)
+	if !ok {
+		return logicalWindowRow{}, false, nil
+	}
+	stablePrefix := codexStableAdditionalPrefix(snapshot)
+	stableCandidateID := stablePrefix + suffix
+	if stablePrefix == "" || strings.EqualFold(stableCandidateID, snapshot.ProviderWindowID) {
+		return logicalWindowRow{}, false, nil
+	}
+	candidates, err := findLogicalWindowsByProviderIDs(
+		ctx,
+		tx,
+		observation.AccountKey,
+		observation.Provider,
+		observation.InventoryScopeKey,
+		snapshot.ScopeFingerprint,
+		snapshot.WindowKind,
+		[]string{stableCandidateID},
+	)
+	if err != nil {
+		return logicalWindowRow{}, false, err
+	}
+	if len(candidates) != 1 {
+		return logicalWindowRow{}, false, nil
+	}
+	legacy := candidates[0]
+	if !isStableCodexAdditionalProviderWindowID(legacy.providerWindowID, stablePrefix) {
+		return logicalWindowRow{}, false, nil
+	}
+	historicalDisplayName, hasDisplay, err := latestLogicalWindowScopeDisplayName(ctx, tx, legacy)
+	if err != nil {
+		return logicalWindowRow{}, false, err
+	}
+	if !hasDisplay || historicalDisplayName != displayName {
+		return logicalWindowRow{}, false, nil
+	}
+	return migrateCodexLogicalWindowID(ctx, tx, observation, snapshot, legacy, snapshot.ProviderWindowID)
+}
+
+func isStableCodexAdditionalProviderWindowID(providerWindowID, stablePrefix string) bool {
+	providerWindowID = strings.ToLower(strings.TrimSpace(providerWindowID))
+	stablePrefix = strings.ToLower(strings.TrimSpace(stablePrefix))
+	if providerWindowID == "" || stablePrefix == "" ||
+		codexquota.IsAmbiguousAdditionalProviderWindowID(providerWindowID) {
+		return false
+	}
+	_, ok := generatedCodexWindowSuffix(providerWindowID, stablePrefix)
+	return ok
+}
+
+func isCodexCollisionAdditionalSnapshot(
+	observation model.AccountQuotaObservation,
+	snapshot *model.AccountQuotaSnapshot,
+) bool {
+	if snapshot == nil || observation.InventoryMode != "complete" ||
+		!strings.EqualFold(strings.TrimSpace(observation.Provider), "codex") ||
+		!strings.EqualFold(strings.TrimSpace(snapshot.Provider), "codex") ||
+		!strings.EqualFold(strings.TrimSpace(snapshot.ModelScopeKind), "feature") {
+		return false
+	}
+	scopeKey := codexquota.NormalizeFeatureKey(snapshot.ModelScopeKey)
+	if scopeKey == "" || scopeKey == codexquota.CodeReviewScopeKey {
+		return false
+	}
+	providerWindowID := strings.ToLower(strings.TrimSpace(snapshot.ProviderWindowID))
+	if providerWindowID == "" || codexquota.IsMainProviderWindowID(providerWindowID) ||
+		codexquota.IsSparkProviderWindowID(providerWindowID) ||
+		codexquota.IsAmbiguousAdditionalProviderWindowID(providerWindowID) {
+		return false
+	}
+	suffix, ok := generatedCodexWindowSuffixFromID(providerWindowID)
+	if !ok {
+		return false
+	}
+	stableCandidateID := codexquota.NormalizeProviderWindowPrefix(scopeKey) + suffix
+	return stableCandidateID != providerWindowID
+}
+
+func codexCollisionDisplayKey(
+	observation model.AccountQuotaObservation,
+	snapshot *model.AccountQuotaSnapshot,
+) (string, bool) {
+	if !isCodexCollisionAdditionalSnapshot(observation, snapshot) {
+		return "", false
+	}
+	displayName := strings.TrimSpace(snapshot.ScopeDisplayName)
+	if displayName == "" {
+		return "", false
+	}
+	suffix, ok := generatedCodexWindowSuffixFromID(snapshot.ProviderWindowID)
+	if !ok {
+		return "", false
+	}
+	return strings.Join([]string{
+		strings.TrimSpace(observation.InventoryScopeKey),
+		strings.ToLower(strings.TrimSpace(snapshot.ScopeFingerprint)),
+		strings.ToLower(strings.TrimSpace(snapshot.WindowKind)),
+		suffix,
+		displayName,
+	}, "\x00"), true
+}
+
+func codexCollisionDisplayCounts(
+	observation model.AccountQuotaObservation,
+	snapshots []model.AccountQuotaSnapshot,
+) map[string]int {
+	counts := make(map[string]int)
+	for index := range snapshots {
+		key, ok := codexCollisionDisplayKey(observation, &snapshots[index])
+		if ok {
+			counts[key]++
+		}
+	}
+	return counts
+}
+
+func latestLogicalWindowScopeDisplayName(
+	ctx context.Context,
+	tx *sql.Tx,
+	window logicalWindowRow,
+) (string, bool, error) {
+	var name string
+	err := tx.QueryRowContext(ctx, `select trim(coalesce(snapshot.scope_display_name, ''))
+		from account_quota_snapshots snapshot
+		join account_quota_window_activations activation
+			on activation.id = snapshot.activation_id
+		where snapshot.logical_window_id = ? and activation.window_id = ?
+			and activation.generation = ? and trim(coalesce(snapshot.scope_display_name, '')) <> ''
+		order by snapshot.observed_at_ms desc, snapshot.id desc limit 1`,
+		window.id, window.id, window.generation).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return strings.TrimSpace(name), true, nil
 }
 
 func reclassifyLegacyCodexAllScope(
