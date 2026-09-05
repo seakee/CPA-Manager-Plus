@@ -4,6 +4,10 @@ import { CODEX_INSPECTION_LAST_RUN_STORAGE_KEY } from '@/features/monitoring/mod
 import { CODEX_INSPECTION_SETTINGS_STORAGE_KEY } from '@/features/monitoring/model/codexInspectionSettings';
 import { accountQuotaSnapshotApi } from '@/services/api/usageService';
 import {
+  filterCurrentAccountQuotaWindowDefinitions,
+  mergeAccountQuotaSnapshotWindows,
+} from '@/features/accounts/model/accountQuotaSnapshots';
+import {
   getDemoAccountActionCandidates,
   getDemoAccountHistory,
   getDemoAccountWindowUsage,
@@ -164,16 +168,20 @@ describe('DemoPage', () => {
     const activeOnly = await accountQuotaSnapshotApi.query('', undefined, [account], {
       nowMs: generatedAtMs,
     });
+    // Contract parity with the Manager Server: only inactive evidence is
+    // filtered at the API layer; shadowed pending_absent evidence is returned
+    // with current_hidden=true and hidden by the model layer instead.
     expect(activeOnly.items[0]?.windows.map((window) => window.provider_window_id)).toEqual([
       'five-hour',
       'weekly',
+      'gpt-reserve-weekly-0',
     ]);
 
     const withInactive = await accountQuotaSnapshotApi.query('', undefined, [account], {
       nowMs: generatedAtMs,
       includeInactive: true,
     });
-    expect(withInactive.items[0]?.windows).toHaveLength(3);
+    expect(withInactive.items[0]?.windows).toHaveLength(4);
     expect(withInactive.items[0]?.windows[0]).toMatchObject({
       provider_window_id: 'five-hour',
       activation_generation: 2,
@@ -189,6 +197,19 @@ describe('DemoPage', () => {
       availability: 'inactive',
       stale: true,
     });
+    // Demo evidence contract parity: like the Manager Server, the demo API
+    // still returns shadowed pending_absent evidence when inactive windows are
+    // requested; the current-page model filter is what hides it.
+    expect(withInactive.items[0]?.windows[3]).toMatchObject({
+      provider_window_id: 'gpt-reserve-weekly-0',
+      availability: 'pending_absent',
+      current_hidden: true,
+    });
+    expect(
+      filterCurrentAccountQuotaWindowDefinitions(
+        mergeAccountQuotaSnapshotWindows([], withInactive.items[0]?.windows ?? [])
+      ).map((definition) => definition.providerWindowId)
+    ).toEqual(['five-hour', 'weekly']);
   });
 
   it('does not infer demo mode from the deployment pathname without a demo hash route', () => {

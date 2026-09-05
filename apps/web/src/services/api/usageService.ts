@@ -1224,6 +1224,30 @@ const buildDemoAccountQuotaSnapshotWindows = (
         missing_since_ms: nowMs - 4 * 24 * 60 * 60 * 1000,
         deactivated_at_ms: nowMs - 4 * 24 * 60 * 60 * 1000,
       },
+      {
+        provider_window_id: 'gpt-reserve-weekly-0',
+        window_kind: 'weekly',
+        window_mode: 'fixed',
+        model_scope_kind: 'feature',
+        model_scope_key: 'gpt_reserve',
+        scope_display_name: 'gpt-reserve',
+        source: 'api_query',
+        observed_at_ms: nowMs - 3 * 24 * 60 * 60 * 1000,
+        boundary_accuracy: 'derived',
+        cycle_start_ms: nowMs - 10 * 24 * 60 * 60 * 1000,
+        cycle_end_ms: nowMs - 3 * 24 * 60 * 60 * 1000,
+        duration_seconds: 7 * 24 * 60 * 60,
+        used_percent: 55,
+        remaining_percent: 45,
+        stale: true,
+        logical_window_id: 104,
+        activation_generation: 1,
+        availability: 'pending_absent',
+        first_seen_at_ms: nowMs - 10 * 24 * 60 * 60 * 1000,
+        last_seen_at_ms: nowMs - 3 * 24 * 60 * 60 * 1000,
+        missing_since_ms: nowMs - 2 * 24 * 60 * 60 * 1000,
+        current_hidden: true,
+      },
     ];
   }
   if (account.provider !== 'xai' || account.account.auth_index !== 'xai-ops-01') return [];
@@ -3541,11 +3565,9 @@ export const accountQuotaSnapshotApi = {
           row_key: account.row_key,
           account_key: account.row_key,
           provider: account.provider,
-          windows: buildDemoAccountQuotaSnapshotWindows(account, generatedAtMs).filter(
-            (window) =>
-              (options.includeInactive || window.availability !== 'inactive') &&
-              window.current_hidden !== true
-          ),
+        windows: buildDemoAccountQuotaSnapshotWindows(account, generatedAtMs).filter(
+          (window) => options.includeInactive || window.availability !== 'inactive'
+        ),
         })),
       };
     }
