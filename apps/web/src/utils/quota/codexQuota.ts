@@ -32,7 +32,7 @@ const CODEX_SPARK_PROVIDER_WINDOW_PREFIXES = [
   CODEX_SPARK_PROVIDER_WINDOW_PREFIX,
 ];
 const CODEX_SPARK_LEGACY_PROVIDER_WINDOW_PREFIXES = ['fast-coding'];
-const CODEX_AMBIGUOUS_PROVIDER_WINDOW_PREFIX = 'ambiguous-';
+export const CODEX_AMBIGUOUS_PROVIDER_WINDOW_PREFIX = 'cpamp:ambiguous:';
 const CODEX_MAIN_PROVIDER_WINDOW_IDS = new Set([
   'five-hour',
   'weekly',
@@ -129,6 +129,13 @@ const normalizeWindowId = (raw: string) =>
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
+
+const normalizeCodexProviderWindowPrefix = (raw: string): string => {
+  const normalized = raw.trim().toLowerCase();
+  return normalized.startsWith(CODEX_AMBIGUOUS_PROVIDER_WINDOW_PREFIX)
+    ? normalized
+    : normalizeWindowId(normalized);
+};
 
 export const isAmbiguousCodexProviderWindowId = (value: string): boolean =>
   value.trim().toLowerCase().startsWith(CODEX_AMBIGUOUS_PROVIDER_WINDOW_PREFIX);
@@ -850,7 +857,7 @@ const addCodexRateLimitWindows = (
     if (added.has(window)) return;
     const seconds = getWindowSeconds(window);
     const duration = formatWindowDuration(seconds);
-    const genericIdPrefix = normalizeWindowId(options?.genericIdPrefix ?? '');
+    const genericIdPrefix = normalizeCodexProviderWindowPrefix(options?.genericIdPrefix ?? '');
     addCodexWindowInfo(
       windows,
       `${genericIdPrefix ? `${genericIdPrefix}-` : ''}window-${duration}-${index}`,

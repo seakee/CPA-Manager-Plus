@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   CODEX_CODE_REVIEW_SCOPE_KEY,
+  CODEX_AMBIGUOUS_PROVIDER_WINDOW_PREFIX,
   CODEX_MAIN_QUOTA_SCOPE_KEY,
   CODEX_SPARK_MODEL_ID,
   classifyCodexRateLimitWindows,
@@ -9,6 +10,7 @@ import {
   buildCodexQuotaWindowInfos,
   canonicalizeCodexProviderWindowId,
   inferCodexQuotaScopeFromProviderWindowId,
+  isAmbiguousCodexProviderWindowId,
   isCodexLegacyAllScopeReplacement,
   isCodexMainQuotaWindow,
   normalizeCodexModelId,
@@ -486,8 +488,8 @@ describe('buildCodexQuotaWindowInfos', () => {
     });
 
     expect(initial.map((window) => window.id)).toEqual([
-      'ambiguous-future-feature-weekly-0',
-      'ambiguous-future-feature-weekly-1',
+      'cpamp:ambiguous:future-feature-weekly-0',
+      'cpamp:ambiguous:future-feature-weekly-1',
     ]);
     expect(changed.map((window) => window.id)).toEqual(initial.map((window) => window.id));
     expect(initial.every((window) => window.identityAmbiguous)).toBe(true);
@@ -901,5 +903,71 @@ describe('buildCodexQuotaWindowInfos', () => {
     expect(classified.weeklyWindow?.used_percent).toBe(65);
     expect(deriveCodexRateLimitUsedPercent(rateLimit)).toBe(100);
     expect(isCodexRateLimitReached(rateLimit)).toBe(true);
+  });
+
+  it('uses the reserved namespace only for fully indistinguishable families', () => {
+    const family = (usedPercent: number) => ({
+      metered_feature: 'future_feature',
+      limit_name: 'Same Quota',
+      rate_limit: {
+        secondary_window: {
+          used_percent: usedPercent,
+          limit_window_seconds: 604_800,
+        },
+      },
+    });
+    const windows = buildCodexQuotaWindowInfos({
+      additional_rate_limits: [family(10), family(90)],
+    });
+
+    expect(windows.map((window) => window.id)).toEqual([
+      `${CODEX_AMBIGUOUS_PROVIDER_WINDOW_PREFIX}future-feature-weekly-0`,
+      `${CODEX_AMBIGUOUS_PROVIDER_WINDOW_PREFIX}future-feature-weekly-1`,
+    ]);
+    expect(windows.every((window) => window.identityAmbiguous === true)).toBe(true);
+    expect(windows.every((window) => window.providerWindowAliases === undefined)).toBe(true);
+    expect(windows.every((window) => window.modelScope?.complete === false)).toBe(true);
+    expect(windows.every((window) => isAmbiguousCodexProviderWindowId(window.id))).toBe(true);
+  });
+
+  it('does not mistake legitimate ambiguous provider names for synthetic slots', () => {
+    const windows = buildCodexQuotaWindowInfos({
+      additional_rate_limits: [
+        {
+          metered_feature: 'ambiguous_feature',
+          limit_name: 'My quota',
+          rate_limit: {
+            secondary_window: { used_percent: 20, limit_window_seconds: 604_800 },
+          },
+        },
+        {
+          limit_name: 'Ambiguous Quota',
+          rate_limit: {
+            secondary_window: { used_percent: 30, limit_window_seconds: 604_800 },
+          },
+        },
+      ],
+    });
+
+    expect(windows).toHaveLength(2);
+    expect(windows[0]).toMatchObject({
+      id: 'ambiguous-feature-weekly-0',
+      scopeDisplayName: 'My quota',
+      modelScope: { kind: 'feature', key: 'ambiguous_feature', complete: false },
+    });
+    expect(windows[1]).toMatchObject({
+      id: 'ambiguous-quota-weekly-0',
+      scopeDisplayName: 'Ambiguous Quota',
+      modelScope: { kind: 'feature', key: 'ambiguous_quota', complete: false },
+    });
+    expect(windows.every((window) => window.identityAmbiguous !== true)).toBe(true);
+    expect(windows.every((window) => !isAmbiguousCodexProviderWindowId(window.id))).toBe(true);
+  });
+
+  it('preserves the reserved namespace during canonicalization', () => {
+    const syntheticID = 'cpamp:ambiguous:future-feature-weekly-0';
+    expect(canonicalizeCodexProviderWindowId(syntheticID, 'weekly')).toBe(syntheticID);
+    expect(isAmbiguousCodexProviderWindowId(syntheticID)).toBe(true);
+    expect(isAmbiguousCodexProviderWindowId('ambiguous-feature-weekly-0')).toBe(false);
   });
 });

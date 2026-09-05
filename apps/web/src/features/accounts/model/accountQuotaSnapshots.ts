@@ -294,7 +294,10 @@ const applySnapshotWindowRelationships = (
 
   definitions.forEach((definition, index) => {
     if (definition.kind !== 'five_hour') return;
-    if (definition.identityAmbiguous || isAmbiguousCodexProviderWindowId(definition.providerWindowId)) {
+    if (
+      definition.identityAmbiguous ||
+      isAmbiguousCodexProviderWindowId(definition.providerWindowId)
+    ) {
       return;
     }
     if (windows[index].relationship_kind && windows[index].container_provider_window_id) return;
@@ -600,8 +603,20 @@ export const mergeAccountQuotaSnapshotWindows = (
       scopeDisplayName !== '' &&
       displayObservedAt > 0 &&
       (localDisplayObservedAt <= 0 || displayObservedAt >= localDisplayObservedAt);
+    const localPositiveSupersedesLifecycle =
+      definition.currentHidden === true &&
+      definition.availability === 'active' &&
+      localQuotaObservedAt > 0 &&
+      (!lifecycleIsFresh || localQuotaObservedAt > lifecycleObservedAt);
 
-    if (!quotaIsFresh && !lifecycleIsFresh && !displayIsFresh) return definition;
+    if (
+      !quotaIsFresh &&
+      !lifecycleIsFresh &&
+      !displayIsFresh &&
+      !localPositiveSupersedesLifecycle
+    ) {
+      return definition;
+    }
 
     const currentCycle = snapshotCycleDefinition(snapshot.current_cycle);
     const snapshotScope = snapshotModelScope(snapshot);
@@ -655,9 +670,10 @@ export const mergeAccountQuotaSnapshotWindows = (
     const identityAmbiguous =
       definition.identityAmbiguous === true ||
       snapshot.identity_ambiguous === true ||
-      (options.provider === 'codex' && isAmbiguousCodexProviderWindowId(snapshot.provider_window_id));
+      (options.provider === 'codex' &&
+        isAmbiguousCodexProviderWindowId(snapshot.provider_window_id));
 
-    return {
+    const mergedDefinition: AccountQuotaWindowDefinition = {
       ...definition,
       ...quotaOverlay,
       ...lifecycleOverlay,
@@ -665,10 +681,29 @@ export const mergeAccountQuotaSnapshotWindows = (
       ...(identityAmbiguous
         ? {
             identityAmbiguous: true,
-            display: { ...definition.display, ...(displayOverlay.display ?? {}), identityAmbiguous: true },
+            display: {
+              ...definition.display,
+              ...(displayOverlay.display ?? {}),
+              identityAmbiguous: true,
+            },
           }
         : {}),
     };
+    if (
+      lifecycleIsFresh &&
+      (snapshot.current_hidden !== undefined || snapshot.availability === 'active')
+    ) {
+      mergedDefinition.currentHidden = snapshot.current_hidden === true;
+      mergedDefinition.display = {
+        ...mergedDefinition.display,
+        currentHidden: mergedDefinition.currentHidden,
+      };
+    }
+    if (localPositiveSupersedesLifecycle) {
+      mergedDefinition.currentHidden = false;
+      mergedDefinition.display = { ...mergedDefinition.display, currentHidden: false };
+    }
+    return mergedDefinition;
   });
   const unmatchedSnapshots = Array.from(snapshotsByKey.entries())
     .filter(([key]) => !matchedSnapshotKeys.has(key))
@@ -700,7 +735,9 @@ export const mergeAccountQuotaSnapshotWindows = (
 export const filterCurrentAccountQuotaWindowDefinitions = (
   definitions: AccountQuotaWindowDefinition[]
 ): AccountQuotaWindowDefinition[] =>
-  definitions.filter((definition) => definition.availability !== 'inactive');
+  definitions.filter(
+    (definition) => definition.availability !== 'inactive' && definition.currentHidden !== true
+  );
 
 const snapshotModelScope = (snapshot: AccountQuotaSnapshotWindow): QuotaModelScope => {
   if (isIncompleteModelScopeSnapshot(snapshot)) {
@@ -742,13 +779,16 @@ const snapshotCycleDefinition = (
       }
     : null;
 
-const snapshotLifecycleDefinition = (snapshot: AccountQuotaSnapshotWindow) => {
+const snapshotLifecycleDefinition = (
+  snapshot: AccountQuotaSnapshotWindow
+): Partial<AccountQuotaWindowDefinition> => {
   const hasLifecycle =
     snapshot.logical_window_id !== undefined ||
     snapshot.activation_generation !== undefined ||
     snapshot.availability !== undefined ||
     snapshot.current_cycle !== undefined ||
-    snapshot.previous_cycle !== undefined;
+    snapshot.previous_cycle !== undefined ||
+    snapshot.current_hidden !== undefined;
   if (!hasLifecycle) return {};
   return {
     logicalWindowId: snapshot.logical_window_id,
@@ -762,6 +802,7 @@ const snapshotLifecycleDefinition = (snapshot: AccountQuotaSnapshotWindow) => {
     deactivatedAtMs: snapshot.deactivated_at_ms ?? null,
     currentCycle: snapshotCycleDefinition(snapshot.current_cycle),
     previousCycle: snapshotCycleDefinition(snapshot.previous_cycle),
+    ...(snapshot.current_hidden !== undefined ? { currentHidden: snapshot.current_hidden } : {}),
   };
 };
 
@@ -883,6 +924,7 @@ const snapshotDefinition = (
     identityAmbiguous:
       snapshot.identity_ambiguous === true ||
       (provider === 'codex' && isAmbiguousCodexProviderWindowId(snapshot.provider_window_id)),
+    ...(snapshot.current_hidden !== undefined ? { currentHidden: snapshot.current_hidden } : {}),
   };
   return {
     key,

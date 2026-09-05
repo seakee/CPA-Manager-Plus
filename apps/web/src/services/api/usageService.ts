@@ -1071,6 +1071,7 @@ export interface AccountQuotaSnapshotWindow extends AccountQuotaSnapshotWindowIn
   logical_window_id?: number;
   activation_generation?: number;
   availability?: string;
+  current_hidden?: boolean;
   first_seen_at_ms?: number;
   last_seen_at_ms?: number;
   missing_since_ms?: number;
@@ -3541,7 +3542,9 @@ export const accountQuotaSnapshotApi = {
           account_key: account.row_key,
           provider: account.provider,
           windows: buildDemoAccountQuotaSnapshotWindows(account, generatedAtMs).filter(
-            (window) => options.includeInactive || window.availability !== 'inactive'
+            (window) =>
+              (options.includeInactive || window.availability !== 'inactive') &&
+              window.current_hidden !== true
           ),
         })),
       };

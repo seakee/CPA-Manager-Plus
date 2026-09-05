@@ -550,6 +550,74 @@ describe('account quota snapshots', () => {
     );
   });
 
+  it('filters only the shadowed pending lifecycle row from an ambiguous current set', () => {
+    const definitions = [
+      makeDefinition({
+        key: 'future-feature-weekly-0',
+        providerWindowId: 'future-feature-weekly-0',
+        availability: 'pending_absent',
+        currentHidden: true,
+      }),
+      makeDefinition({
+        key: 'cpamp:ambiguous:future-feature-weekly-0',
+        providerWindowId: 'cpamp:ambiguous:future-feature-weekly-0',
+        identityAmbiguous: true,
+      }),
+      makeDefinition({
+        key: 'cpamp:ambiguous:future-feature-weekly-1',
+        providerWindowId: 'cpamp:ambiguous:future-feature-weekly-1',
+        identityAmbiguous: true,
+      }),
+    ];
+
+    expect(filterCurrentAccountQuotaWindowDefinitions(definitions).map((item) => item.key)).toEqual(
+      ['cpamp:ambiguous:future-feature-weekly-0', 'cpamp:ambiguous:future-feature-weekly-1']
+    );
+  });
+
+  it('clears an older current-hidden flag when newer local positive quota evidence wins', () => {
+    const local = makeDefinition({
+      observedAtMs: 400,
+      availability: 'active',
+      currentHidden: true,
+      usedPercent: 40,
+    });
+    const snapshot = makeSnapshot({
+      observed_at_ms: 100,
+      availability: 'pending_absent',
+      last_seen_at_ms: 300,
+      missing_since_ms: 300,
+      current_hidden: true,
+    });
+
+    const [merged] = mergeAccountQuotaSnapshotWindows([local], [snapshot]);
+
+    expect(merged).toMatchObject({ availability: 'active', currentHidden: false });
+    expect(merged?.display.currentHidden).toBe(false);
+    expect(filterCurrentAccountQuotaWindowDefinitions(merged ? [merged] : [])).toHaveLength(1);
+  });
+
+  it('applies current-hidden lifecycle evidence without changing quota freshness', () => {
+    const local = makeDefinition({ observedAtMs: 100, usedPercent: 40 });
+    const snapshot = makeSnapshot({
+      observed_at_ms: 200,
+      used_percent: 10,
+      availability: 'pending_absent',
+      last_seen_at_ms: 200,
+      missing_since_ms: 200,
+      current_hidden: true,
+    });
+
+    const [merged] = mergeAccountQuotaSnapshotWindows([local], [snapshot]);
+
+    expect(merged).toMatchObject({
+      usedPercent: 10,
+      availability: 'pending_absent',
+      currentHidden: true,
+    });
+    expect(filterCurrentAccountQuotaWindowDefinitions(merged ? [merged] : [])).toHaveLength(0);
+  });
+
   it('uses an inactive snapshot as a tombstone for a stale local Codex definition', () => {
     const local = makeDefinition({
       key: 'gpt-reserve-weekly-0',

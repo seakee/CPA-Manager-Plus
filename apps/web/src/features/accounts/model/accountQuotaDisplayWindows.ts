@@ -68,6 +68,7 @@ export interface AccountQuotaDisplayWindow {
   scopeDisplayName?: string;
   providerWindowAliases?: string[];
   identityAmbiguous?: boolean;
+  currentHidden?: boolean;
 }
 
 export type TranslateQuotaWindowLabel = (

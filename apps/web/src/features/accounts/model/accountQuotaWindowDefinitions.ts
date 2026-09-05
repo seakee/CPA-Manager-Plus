@@ -53,6 +53,7 @@ export interface AccountQuotaWindowDefinition {
   deactivatedAtMs?: number | null;
   currentCycle?: AccountQuotaCycleDefinition | null;
   previousCycle?: AccountQuotaCycleDefinition | null;
+  currentHidden?: boolean;
   display: AccountQuotaDisplayWindow;
 }
 
@@ -120,6 +121,7 @@ export const buildAccountQuotaWindowDefinitions = (
         modelScope: window.modelScope ?? { kind: 'all', complete: false },
         providerWindowAliases: window.providerWindowAliases,
         identityAmbiguous: window.identityAmbiguous,
+        currentHidden: window.currentHidden,
         observationSource: window.observationSource ?? 'api_query',
         observedAtMs: window.observedAtMs ?? null,
         boundaryAccuracy,
