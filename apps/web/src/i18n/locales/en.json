@@ -837,6 +837,7 @@
     "sort_created_asc": "Oldest credential",
     "status_all": "All statuses",
     "status_available": "Available",
+    "status_enabled": "Enabled",
     "status_low": "Low quota",
     "status_exhausted": "Exhausted",
     "status_disabled": "Disabled",

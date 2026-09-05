@@ -85,6 +85,7 @@ export const ACCOUNT_CODEX_STATUS_FILTERS = [
 export const ACCOUNT_STATUS_FILTERS = [
   'all',
   'available',
+  'enabled',
   'unconfirmed',
   'disabled',
   'problem',
@@ -826,6 +827,7 @@ const matchesStatusFilter = (
   if (status === 'available') {
     return isAccountRowAvailable(row, context.requestEvidenceBySelectionKey);
   }
+  if (status === 'enabled') return !row.disabled;
   if (status === 'disabled') return row.disabled;
   if (status === 'unconfirmed') {
     return classifyAccountMetricStatus(row, context) === 'unconfirmed';

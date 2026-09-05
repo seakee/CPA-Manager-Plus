@@ -841,6 +841,7 @@
     "sort_created_asc": "Старые учетные данные",
     "status_all": "Все статусы",
     "status_available": "Доступен",
+    "status_enabled": "Включен",
     "status_low": "Мало квоты",
     "status_exhausted": "Исчерпан",
     "status_disabled": "Отключен",
