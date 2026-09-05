@@ -41,8 +41,11 @@ export const accountOperationalItemMatchesRow = (
 
 export const buildAccountOperationalScopeKeys = (rows: AccountRow[]): Map<string, string[]> => {
   const eligibleRows = rows.filter((row) => !row.runtimeOnly);
+  const exactCounts = new Map<string, number>();
   const fallbackCounts = new Map<string, number>();
   eligibleRows.forEach((row) => {
+    const exactKey = getAuthFileCodexInspectionKeyForFile(row.raw);
+    exactCounts.set(exactKey, (exactCounts.get(exactKey) ?? 0) + 1);
     const fallbackKey = getAuthFileCodexInspectionKey(row.fileName, null);
     fallbackCounts.set(fallbackKey, (fallbackCounts.get(fallbackKey) ?? 0) + 1);
   });
@@ -51,7 +54,12 @@ export const buildAccountOperationalScopeKeys = (rows: AccountRow[]): Map<string
     eligibleRows.map((row) => {
       const exactKey = getAuthFileCodexInspectionKeyForFile(row.raw);
       const fallbackKey = getAuthFileCodexInspectionKey(row.fileName, null);
-      const keys = [exactKey];
+      // A duplicate exact key means the current response does not contain
+      // enough credential evidence to tell these rows apart. In particular,
+      // Codex workspace-only rows intentionally share a fallback key because
+      // account_id is a Workspace, not a member identity. Do not fan out an
+      // operational item to every row (or pick one arbitrarily).
+      const keys = exactCounts.get(exactKey) === 1 ? [exactKey] : [];
       if (fallbackKey !== exactKey && fallbackCounts.get(fallbackKey) === 1) {
         keys.push(fallbackKey);
       }

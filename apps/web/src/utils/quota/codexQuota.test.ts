@@ -13,8 +13,9 @@ import {
   isCodexMainQuotaWindow,
   normalizeCodexModelId,
   resolveCodexUsageQuotaScope,
+  shouldClearInheritedCodexQuotaProgress,
 } from './codexQuota';
-import type { CodexQuotaWindowInfo } from './codexQuota';
+import type { CodexQuotaCycleEvidence, CodexQuotaWindowInfo } from './codexQuota';
 
 describe('buildCodexQuotaWindowInfos', () => {
   it('distinguishes exact absolute resets from relative estimates anchored to observation time', () => {
@@ -298,6 +299,50 @@ describe('buildCodexQuotaWindowInfos', () => {
     expect(windows.map((window) => [window.id, window.labelKey, window.usedPercent])).toEqual([
       ['five-hour', 'codex_quota.primary_window', 10],
       ['monthly', 'codex_quota.monthly_window', 70],
+    ]);
+  });
+
+  it('builds a Team weekly bonus window with its structural monthly cadence suffix', () => {
+    const windows = buildCodexQuotaWindowInfos({
+      plan_type: 'team',
+      additional_rate_limits: [
+        {
+          limit_name: 'Weekly Bonus',
+          rate_limit: {
+            secondary_window: { used_percent: 80 },
+          },
+        },
+      ],
+    });
+
+    expect(windows).toMatchObject([
+      {
+        id: 'weekly-bonus-monthly-0',
+        usedPercent: 80,
+        limitWindowSeconds: null,
+      },
+    ]);
+  });
+
+  it('builds a non-Team five hour bonus window with its structural weekly cadence suffix', () => {
+    const windows = buildCodexQuotaWindowInfos({
+      plan_type: 'plus',
+      additional_rate_limits: [
+        {
+          limit_name: 'Five Hour Bonus',
+          rate_limit: {
+            secondary_window: { used_percent: 80 },
+          },
+        },
+      ],
+    });
+
+    expect(windows).toMatchObject([
+      {
+        id: 'five-hour-bonus-weekly-0',
+        usedPercent: 80,
+        limitWindowSeconds: null,
+      },
     ]);
   });
 
@@ -678,5 +723,235 @@ describe('buildCodexQuotaWindowInfos', () => {
     expect(classified.weeklyWindow?.used_percent).toBe(65);
     expect(deriveCodexRateLimitUsedPercent(rateLimit)).toBe(100);
     expect(isCodexRateLimitReached(rateLimit)).toBe(true);
+  });
+});
+
+describe('shouldClearInheritedCodexQuotaProgress', () => {
+  const base = (overrides: Partial<CodexQuotaCycleEvidence> = {}): CodexQuotaCycleEvidence => ({
+    providerWindowId: 'five-hour',
+    endMs: 1_000_000,
+    durationSeconds: 18_000,
+    boundaryAccuracy: 'exact',
+    ...overrides,
+  });
+
+  it('keeps the same boundary within the 60 second jitter', () => {
+    expect(
+      shouldClearInheritedCodexQuotaProgress(
+        base(),
+        base({ endMs: 1_030_000, boundaryAccuracy: 'estimated' })
+      )
+    ).toBe(false);
+  });
+
+  it.each([
+    ['five-hour next cycle', 18_000_000, 'five-hour'],
+    ['skipped fixed cycles', 36_000_000, 'five-hour'],
+    ['weekly next cycle', 604_800_000, 'weekly'],
+    ['skipped weekly cycles', 1_209_600_000, 'weekly'],
+  ])('%s clears inherited progress', (_label, deltaMs, providerWindowId) => {
+    const durationSeconds = providerWindowId === 'weekly' ? 604_800 : 18_000;
+    expect(
+      shouldClearInheritedCodexQuotaProgress(
+        base({ providerWindowId, durationSeconds }),
+        base({
+          providerWindowId,
+          endMs: 1_000_000 + deltaMs,
+          durationSeconds,
+        })
+      )
+    ).toBe(true);
+  });
+
+  it.each([
+    [28 * 24 * 60 * 60, 31 * 24 * 60 * 60],
+    [30 * 24 * 60 * 60, 31 * 24 * 60 * 60],
+  ])(
+    'accepts monthly calendar variation from %sd to %sd as rollover',
+    (activeDays, observedDays) => {
+      expect(
+        shouldClearInheritedCodexQuotaProgress(
+          base({ providerWindowId: 'monthly', durationSeconds: activeDays }),
+          base({
+            providerWindowId: 'monthly',
+            endMs: 1_000_000 + observedDays * 1000,
+            durationSeconds: observedDays,
+          })
+        )
+      ).toBe(true);
+    }
+  );
+
+  it('uses the observed duration when the active duration is missing', () => {
+    expect(
+      shouldClearInheritedCodexQuotaProgress(
+        base({ providerWindowId: 'weekly', durationSeconds: null }),
+        base({ providerWindowId: 'weekly', endMs: 1_000_000 + 604_800_000 })
+      )
+    ).toBe(true);
+  });
+
+  it('uses the active duration when the observed duration is missing', () => {
+    expect(
+      shouldClearInheritedCodexQuotaProgress(
+        base({ durationSeconds: 18_000 }),
+        base({ endMs: 1_000_000 + 18_000_000, durationSeconds: null })
+      )
+    ).toBe(true);
+  });
+
+  it('uses standard cadence when both durations are missing', () => {
+    expect(
+      shouldClearInheritedCodexQuotaProgress(
+        base({ durationSeconds: null }),
+        base({ endMs: 1_000_000 + 18_000_000, durationSeconds: null })
+      )
+    ).toBe(true);
+  });
+
+  it.each([
+    ['indexed five-hour', 'spark-five-hour-0', 5 * 60 * 60 * 1000],
+    ['indexed weekly', 'spark-weekly-0', 7 * 24 * 60 * 60 * 1000],
+    ['indexed monthly', 'spark-monthly-0', 31 * 24 * 60 * 60 * 1000],
+    ['indexed generic weekly', 'future-feature-weekly-0', 7 * 24 * 60 * 60 * 1000],
+  ])(
+    '%s uses the provider window cadence when duration is missing',
+    (_label, providerWindowId, deltaMs) => {
+      expect(
+        shouldClearInheritedCodexQuotaProgress(
+          base({ providerWindowId, durationSeconds: null, boundaryAccuracy: 'estimated' }),
+          base({
+            providerWindowId,
+            endMs: 1_000_000 + deltaMs,
+            durationSeconds: null,
+            boundaryAccuracy: 'estimated',
+          })
+        )
+      ).toBe(true);
+    }
+  );
+
+  it('keeps an indexed scoped window compatible within boundary jitter when duration is missing', () => {
+    expect(
+      shouldClearInheritedCodexQuotaProgress(
+        base({ providerWindowId: 'spark-weekly-0', durationSeconds: null }),
+        base({
+          providerWindowId: 'spark-weekly-0',
+          endMs: 1_030_000,
+          durationSeconds: null,
+          boundaryAccuracy: 'estimated',
+        })
+      )
+    ).toBe(false);
+  });
+
+  it.each([
+    ['weekly bonus monthly', 'weekly-bonus-monthly-0', 30 * 24 * 60 * 60 * 1000],
+    ['five hour bonus weekly', 'five-hour-bonus-weekly-0', 7 * 24 * 60 * 60 * 1000],
+    [
+      'cadence-like prefix with five-hour suffix',
+      'monthly-preview-five-hour-3',
+      5 * 60 * 60 * 1000,
+    ],
+  ])(
+    '%s clears inherited progress from the structural cadence suffix',
+    (_label, providerWindowId, deltaMs) => {
+      expect(
+        shouldClearInheritedCodexQuotaProgress(
+          base({ providerWindowId, durationSeconds: null, boundaryAccuracy: 'estimated' }),
+          base({
+            providerWindowId,
+            endMs: 1_000_000 + deltaMs,
+            durationSeconds: null,
+            boundaryAccuracy: 'estimated',
+          })
+        )
+      ).toBe(true);
+    }
+  );
+
+  it('does not infer cadence from a feature prefix without a structural suffix', () => {
+    expect(
+      shouldClearInheritedCodexQuotaProgress(
+        base({
+          providerWindowId: 'weekly-bonus',
+          durationSeconds: null,
+          boundaryAccuracy: 'estimated',
+        }),
+        base({
+          providerWindowId: 'weekly-bonus',
+          endMs: 1_000_000 + 7 * 24 * 60 * 60 * 1000,
+          durationSeconds: null,
+          boundaryAccuracy: 'estimated',
+        })
+      )
+    ).toBe(false);
+  });
+
+  it('keeps trusted duration authoritative over a conflicting provider id suffix', () => {
+    expect(
+      shouldClearInheritedCodexQuotaProgress(
+        base({ providerWindowId: 'weekly-bonus-monthly-0', durationSeconds: 604_800 }),
+        base({
+          providerWindowId: 'weekly-bonus-monthly-0',
+          endMs: 1_000_000 + 7 * 24 * 60 * 60 * 1000,
+          durationSeconds: 604_800,
+          boundaryAccuracy: 'estimated',
+        })
+      )
+    ).toBe(true);
+
+    expect(
+      shouldClearInheritedCodexQuotaProgress(
+        base({ providerWindowId: 'weekly-bonus-monthly-0', durationSeconds: 604_800 }),
+        base({
+          providerWindowId: 'weekly-bonus-monthly-0',
+          endMs: 1_000_000 + 30 * 24 * 60 * 60 * 1000,
+          durationSeconds: 604_800,
+          boundaryAccuracy: 'estimated',
+        })
+      )
+    ).toBe(false);
+  });
+
+  it('uses strong exact boundary evidence when cadence is unavailable', () => {
+    expect(
+      shouldClearInheritedCodexQuotaProgress(
+        base({ providerWindowId: 'future-window', durationSeconds: null }),
+        base({
+          providerWindowId: 'future-window',
+          endMs: 1_120_000,
+          durationSeconds: null,
+          boundaryAccuracy: 'exact',
+        })
+      )
+    ).toBe(true);
+  });
+
+  it('keeps a small estimated boundary drift conservative', () => {
+    expect(
+      shouldClearInheritedCodexQuotaProgress(
+        base({ boundaryAccuracy: 'estimated' }),
+        base({ endMs: 1_120_000, boundaryAccuracy: 'estimated' })
+      )
+    ).toBe(false);
+  });
+
+  it('clears a materially backward boundary', () => {
+    expect(
+      shouldClearInheritedCodexQuotaProgress(
+        base(),
+        base({ endMs: 900_000, boundaryAccuracy: 'estimated' })
+      )
+    ).toBe(true);
+  });
+
+  it('clears an incompatible duration class', () => {
+    expect(
+      shouldClearInheritedCodexQuotaProgress(
+        base({ providerWindowId: 'five-hour', durationSeconds: 18_000 }),
+        base({ providerWindowId: 'five-hour', durationSeconds: 604_800 })
+      )
+    ).toBe(true);
   });
 });

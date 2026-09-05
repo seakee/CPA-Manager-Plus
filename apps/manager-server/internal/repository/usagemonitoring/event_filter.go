@@ -11,6 +11,9 @@ import (
 type eventSourceOptions struct {
 	AfterID            int64
 	UseAfter           bool
+	MaxID              int64
+	UseMax             bool
+	CodexMarkerOnly    bool
 	BeforeMS           int64
 	BeforeID           int64
 	ProjectionComplete bool
@@ -30,6 +33,16 @@ func filteredEventSourceSQL(
 		projectionArgs = append(projectionArgs, options.AfterID)
 		rawConditions = append(rawConditions, "e.id > ?")
 		rawArgs = append(rawArgs, options.AfterID)
+	}
+	if options.UseMax {
+		projectionConditions = append(projectionConditions, "p.event_id <= ?")
+		projectionArgs = append(projectionArgs, options.MaxID)
+		rawConditions = append(rawConditions, "e.id <= ?")
+		rawArgs = append(rawArgs, options.MaxID)
+	}
+	if options.CodexMarkerOnly {
+		projectionConditions = append(projectionConditions, codexAccountDailyExcludedSQL("p"))
+		rawConditions = append(rawConditions, codexAccountDailyExcludedSQL("e"))
 	}
 	if options.BeforeMS > 0 {
 		if options.BeforeID > 0 {

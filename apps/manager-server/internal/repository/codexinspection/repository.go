@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
 
 type Repository interface {
@@ -673,6 +674,14 @@ func normalizeDisableOwnership(item model.CodexInspectionDisableOwnership) model
 	item.AuthIndex = strings.TrimSpace(item.AuthIndex)
 	item.AccountID = strings.TrimSpace(item.AccountID)
 	item.AccountSnapshot = strings.TrimSpace(item.AccountSnapshot)
+	if item.Provider == "codex" {
+		if member, ok := usageidentity.NormalizeCodexMemberSnapshot(item.AccountSnapshot); ok {
+			item.AccountSnapshot = member
+		} else {
+			item.AccountSnapshot = ""
+		}
+		return item
+	}
 	if item.AccountID != "" {
 		item.AccountSnapshot = ""
 	}
@@ -707,6 +716,9 @@ func disableOwnershipMatchesTarget(item model.CodexInspectionDisableOwnership, t
 		provider := normalizeDisableOwnershipProvider(*target.Provider)
 		if item.Provider != "" && item.Provider != provider {
 			return false
+		}
+		if provider == "codex" {
+			return disableOwnershipMatchesCodexTarget(item, target)
 		}
 	}
 	if target.AuthIndex != nil {
@@ -747,6 +759,60 @@ func disableOwnershipMatchesTarget(item model.CodexInspectionDisableOwnership, t
 		} else if item.AccountSnapshot != "" && item.AccountSnapshot != accountSnapshot {
 			return false
 		}
+	}
+	return true
+}
+
+func disableOwnershipMatchesCodexTarget(item model.CodexInspectionDisableOwnership, target model.CodexInspectionDisableOwnershipTarget) bool {
+	if item.Provider != "" && item.Provider != "codex" {
+		return false
+	}
+
+	// This matcher is used for explicit cleanup, not recovery authorization.
+	// A concrete credential may therefore remove a weaker legacy record, but it
+	// must never remove a different member's workspace-qualified record.
+	if target.AuthIndex != nil {
+		targetAuthIndex := strings.TrimSpace(*target.AuthIndex)
+		if targetAuthIndex == "" {
+			if item.AuthIndex != "" {
+				return false
+			}
+		} else if item.AuthIndex != "" && item.AuthIndex != targetAuthIndex {
+			return false
+		}
+	}
+
+	targetAccountIDSet := target.AccountID != nil
+	targetAccountID := ""
+	if targetAccountIDSet {
+		targetAccountID = strings.TrimSpace(*target.AccountID)
+		if targetAccountID == "" {
+			if item.AccountID != "" {
+				return false
+			}
+		} else if item.AccountID != "" && item.AccountID != targetAccountID {
+			return false
+		}
+	} else if item.AccountID != "" {
+		// Without a target workspace, a workspace-qualified ownership record is
+		// not a compatible legacy wildcard.
+		return false
+	}
+
+	targetMemberSet := target.AccountSnapshot != nil
+	targetMember := ""
+	if targetMemberSet {
+		targetMember, _ = usageidentity.NormalizeCodexMemberSnapshot(*target.AccountSnapshot)
+	}
+	itemMember, _ := usageidentity.NormalizeCodexMemberSnapshot(item.AccountSnapshot)
+	if targetMember == "" {
+		// A target without reliable member evidence may only clean records that
+		// also lack member evidence. This prevents Alice's action from deleting
+		// Bob's member-specific ownership in a shared Workspace.
+		return itemMember == ""
+	}
+	if itemMember != "" && itemMember != targetMember {
+		return false
 	}
 	return true
 }

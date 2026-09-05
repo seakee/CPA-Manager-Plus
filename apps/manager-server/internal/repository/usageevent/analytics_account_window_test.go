@@ -68,6 +68,35 @@ func TestAccountWindowQueryKeysRequireExplicitCodexAccountIDForLegacyFallback(t 
 	}
 }
 
+func TestAccountWindowQueryKeysDoNotTrustStaleCodexCallerKey(t *testing.T) {
+	window := AccountWindowUsageQuery{
+		AccountKey:            "usage-account-history:3:codex-account:636F646578:776F726B73706163652D31",
+		AuthFileSnapshot:      "alice.json",
+		AuthIndex:             "auth-alice",
+		AuthProviderSnapshot:  "codex",
+		AuthAccountIDSnapshot: "workspace-1",
+		AccountSnapshot:       "alice@example.com",
+		Source:                "alice.json",
+	}
+
+	got, legacy := accountWindowQueryKeys(window)
+	want, valid := usageidentity.AccountKey(accountWindowFields(window))
+	if !valid {
+		t.Fatal("valid Codex member target was rejected")
+	}
+	if got != want || got == window.AccountKey || legacy != want {
+		t.Fatalf("stale Codex caller key was trusted: account=%q legacy=%q want=%q", got, legacy, want)
+	}
+
+	bob := window
+	bob.AccountSnapshot = "bob@example.com"
+	bob.AccountKey = window.AccountKey
+	bobKey, _ := accountWindowQueryKeys(bob)
+	if bobKey == got {
+		t.Fatalf("shared Workspace members still share a caller-derived key: Alice=%q Bob=%q", got, bobKey)
+	}
+}
+
 func accountWindowFields(window AccountWindowUsageQuery) usageidentity.Fields {
 	return usageidentity.Fields{
 		AuthFileSnapshot:      window.AuthFileSnapshot,

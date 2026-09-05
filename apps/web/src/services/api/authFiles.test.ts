@@ -250,6 +250,85 @@ describe('authFilesApi list normalization', () => {
     expect(result.total).toBe(2);
   });
 
+  it('preserves same-name auth file rows when authIndex matches but runtime IDs differ', async () => {
+    mocks.get.mockResolvedValue({
+      files: [
+        {
+          name: 'shared.json',
+          id: 'runtime-a',
+          type: 'codex',
+          authIndex: 'auth-1',
+          account: 'alice@example.com',
+        },
+        {
+          name: 'shared.json',
+          id: 'runtime-b',
+          type: 'codex',
+          authIndex: 'auth-1',
+          account: 'bob@example.com',
+        },
+      ],
+    });
+
+    const result = await authFilesApi.list();
+
+    expect(result.files).toEqual([
+      expect.objectContaining({
+        name: 'shared.json',
+        id: 'runtime-a',
+        authIndex: 'auth-1',
+        account: 'alice@example.com',
+      }),
+      expect.objectContaining({
+        name: 'shared.json',
+        id: 'runtime-b',
+        authIndex: 'auth-1',
+        account: 'bob@example.com',
+      }),
+    ]);
+    expect(result.total).toBe(2);
+  });
+
+  it('merges same-name auth file representations when authIndex and runtime ID match', async () => {
+    mocks.get.mockResolvedValue({
+      files: [
+        {
+          name: 'shared.json',
+          id: 'runtime-a',
+          type: 'codex',
+          authIndex: 'auth-1',
+          source: 'runtime',
+          status: 'ok',
+        },
+        {
+          name: 'shared.json',
+          id: 'runtime-a',
+          type: 'codex',
+          authIndex: 'auth-1',
+          source: 'file',
+          path: '/auth/shared.json',
+          size: 123,
+        },
+      ],
+    });
+
+    const result = await authFilesApi.list();
+
+    expect(result.files).toHaveLength(1);
+    expect(result.files[0]).toEqual(
+      expect.objectContaining({
+        name: 'shared.json',
+        id: 'runtime-a',
+        authIndex: 'auth-1',
+        source: 'file',
+        path: '/auth/shared.json',
+        size: 123,
+        status: 'ok',
+      })
+    );
+    expect(result.total).toBe(1);
+  });
+
   it('still merges duplicate same-name rows when authIndex is absent', async () => {
     mocks.get.mockResolvedValue({
       files: [
@@ -1475,6 +1554,116 @@ describe('authFilesApi patchFieldsForAuthIndexes', () => {
         ],
         { priority: 10 }
       )
+    ).rejects.toThrow('Auth file patch target changed');
+
+    expect(mocks.postForm).not.toHaveBeenCalled();
+  });
+
+  it('rejects conflicting Codex member evidence before reuploading the source file', async () => {
+    mocks.getRaw.mockResolvedValue({
+      data: new Blob([
+        JSON.stringify({
+          type: 'codex',
+          auth_index: 'auth-1',
+          account_id: 'workspace-a',
+          accountSnapshot: 'alice@example.com',
+          account_snapshot: 'bob@example.com',
+        }),
+      ]),
+    });
+    const target = {
+      name: 'codex.json',
+      runtimeId: 'runtime-1',
+      authIndex: 'auth-1',
+      provider: 'codex',
+      accountId: 'workspace-a',
+    };
+
+    await expect(
+      authFilesApi.patchFieldsForAuthIndexes('codex.json', [target], [target], { priority: 10 })
+    ).rejects.toThrow('Auth file patch target changed');
+
+    expect(mocks.postForm).not.toHaveBeenCalled();
+  });
+
+  it('allows missing Codex Workspace and member evidence for a uniquely located source record', async () => {
+    const rawText = JSON.stringify({
+      type: 'codex',
+      auth_index: 'auth-1',
+      priority: 1,
+    });
+    mocks.getRaw.mockResolvedValue({ data: new Blob([rawText]) });
+    mocks.postForm.mockResolvedValue({
+      status: 'ok',
+      uploaded: 1,
+      files: ['codex.json'],
+      failed: [],
+    });
+    const target = {
+      name: 'codex.json',
+      runtimeId: 'runtime-auth-1',
+      authIndex: 'auth-1',
+      provider: 'codex',
+      accountId: 'workspace-a',
+      accountSnapshot: 'alice@example.com',
+    };
+
+    await expect(
+      authFilesApi.patchFieldsForAuthIndexes('codex.json', [target], [target], { priority: 10 })
+    ).resolves.toBeUndefined();
+
+    await expect(getUploadedFile().text()).resolves.toBe(
+      JSON.stringify({ type: 'codex', auth_index: 'auth-1', priority: 10 })
+    );
+  });
+
+  it('uses a runtime locator when the Codex member snapshot is only a display value', async () => {
+    const rawText = JSON.stringify({
+      type: 'codex',
+      account_id: 'workspace-a',
+      account: 'Alice',
+      priority: 1,
+    });
+    mocks.getRaw.mockResolvedValue({ data: new Blob([rawText]) });
+    mocks.postForm.mockResolvedValue({
+      status: 'ok',
+      uploaded: 1,
+      files: ['codex.json'],
+      failed: [],
+    });
+    const target = {
+      name: 'codex.json',
+      runtimeId: 'runtime-auth-1',
+      provider: 'codex',
+      accountId: 'workspace-a',
+      accountSnapshot: 'Alice',
+    };
+
+    await expect(
+      authFilesApi.patchFieldsForAuthIndexes('codex.json', [target], [target], { priority: 10 })
+    ).resolves.toBeUndefined();
+
+    await expect(getUploadedFile().text()).resolves.toBe(
+      JSON.stringify({ type: 'codex', account_id: 'workspace-a', account: 'Alice', priority: 10 })
+    );
+  });
+
+  it('rejects a weak Codex member snapshot without a credential locator', async () => {
+    const rawText = JSON.stringify({
+      type: 'codex',
+      account_id: 'workspace-a',
+      account: 'Alice',
+    });
+    mocks.getRaw.mockResolvedValue({ data: new Blob([rawText]) });
+    const target = {
+      name: 'codex.json',
+      provider: 'codex',
+      accountId: 'workspace-a',
+      accountSnapshot: 'Alice',
+    };
+
+    await expect(
+      authFilesApi.patchFieldsForAuthIndexes('codex.json', [target], [target], { priority: 10 })
     ).rejects.toThrow('Auth file patch target changed');
 
     expect(mocks.postForm).not.toHaveBeenCalled();

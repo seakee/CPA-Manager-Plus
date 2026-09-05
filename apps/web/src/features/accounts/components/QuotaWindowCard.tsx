@@ -524,8 +524,8 @@ export const QuotaWindowCard = ({
             : '-'}
         </span>
         <span className={styles.sourceMetaSyncLabel}>
-          {t('accounts.detail_quota_provider_sync_time', {
-            defaultValue: 'Provider 同步时间',
+          {t('accounts.detail_quota_latest_observation_time', {
+            defaultValue: 'Most recent observation',
           })}
         </span>
         <span className={styles.sourceMetaItem}>

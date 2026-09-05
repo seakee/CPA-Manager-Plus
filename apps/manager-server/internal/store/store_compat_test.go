@@ -58,7 +58,7 @@ func TestStoreCompatMigratesLegacyCodexInspectionOwnershipIdentity(t *testing.T)
 	if err != nil {
 		t.Fatalf("list migrated ownership: %v", err)
 	}
-	if len(items) != 2 || items[0].AuthIndex != "auth-1" || items[0].AccountSnapshot != "" || items[1].AuthIndex != "auth-2" || items[1].AccountSnapshot != "" {
+	if len(items) != 2 || items[0].AuthIndex != "auth-1" || items[0].AccountSnapshot != "" || items[1].AuthIndex != "auth-2" || items[1].AccountSnapshot != "bob@example.com" {
 		t.Fatalf("migrated ownership = %#v", items)
 	}
 }

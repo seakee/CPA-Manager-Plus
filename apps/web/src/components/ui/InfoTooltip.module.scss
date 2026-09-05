@@ -1,0 +1,45 @@
+@use '@/styles/variables.scss' as *;
+
+.trigger {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: help;
+}
+
+.trigger:hover {
+  color: var(--text-secondary);
+}
+
+.trigger:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary-color) 28%, transparent);
+}
+
+.tooltip {
+  position: fixed;
+  z-index: $z-modal + 1;
+  box-sizing: border-box;
+  width: min(420px, calc(100vw - 24px));
+  padding: 8px 10px;
+  overflow-y: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--bg-primary);
+  box-shadow: var(--shadow-lg);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+  pointer-events: auto;
+  text-align: left;
+  white-space: pre-wrap;
+  transform: translateX(-50%);
+}

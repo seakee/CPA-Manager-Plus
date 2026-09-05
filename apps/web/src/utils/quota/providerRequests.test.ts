@@ -44,6 +44,7 @@ import {
 import { formatQuotaResetTime } from './formatters';
 import {
   buildXaiBillingSummary,
+  buildCodexQuotaWindows,
   fetchXaiQuota,
   fetchAntigravityQuota,
   fetchClaudeQuota,
@@ -74,6 +75,33 @@ beforeEach(() => {
   mocks.getSubscription.mockReset();
   mocks.getSubscription.mockResolvedValue(null);
   mocks.request.mockReset();
+});
+
+describe('buildCodexQuotaWindows', () => {
+  it('records progress provenance only for windows with observed usage', () => {
+    const windows = buildCodexQuotaWindows(
+      {
+        rate_limit: {
+          primary_window: { used_percent: 50, limit_window_seconds: 18_000 },
+          secondary_window: { limit_window_seconds: 604_800 },
+        },
+      },
+      t,
+      'plus',
+      1_000
+    );
+
+    expect(windows.find((window) => window.id === 'five-hour')).toMatchObject({
+      usedPercent: 50,
+      observedAtMs: 1_000,
+      quotaProgressObservedAtMs: 1_000,
+    });
+    expect(windows.find((window) => window.id === 'weekly')).toMatchObject({
+      usedPercent: null,
+      observedAtMs: 1_000,
+      quotaProgressObservedAtMs: null,
+    });
+  });
 });
 
 describe('fetchCodexQuota', () => {

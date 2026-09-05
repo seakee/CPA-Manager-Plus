@@ -9,7 +9,10 @@ import type {
   MonitoringAccountWindowUsageItem,
 } from '@/services/api';
 import type { AccountRow } from './accountRows';
-import { buildAccountDetailViewModel } from './accountDetailViewModel';
+import {
+  buildAccountDetailViewModel,
+  type AccountDetailQuotaWindowInput,
+} from './accountDetailViewModel';
 import { accountWindowUsageRequestKey } from './accountWindowUsageRows';
 import type { UsageValueRow } from './usageValueRows';
 
@@ -44,6 +47,8 @@ const makeRow = (overrides: AccountRowOverrides = {}): AccountRow => {
     priority: 0,
     createdAtMs: null,
     updatedAtMs: null,
+    authenticationAtMs: 0,
+    rawCredentialStatusSuperseded: false,
     quota: {
       status: 'ok',
       remainingPercent: 80,
@@ -105,6 +110,69 @@ const makeWindowUsage = (
   sync_status: 'ready',
   ...overrides,
 });
+
+const makeForecastWindow = (
+  overrides: Partial<AccountDetailQuotaWindowInput> = {}
+): AccountDetailQuotaWindowInput => ({
+  key: 'weekly',
+  providerWindowId: 'weekly',
+  label: 'Weekly',
+  kind: 'weekly',
+  remainingPercent: 100,
+  usedPercent: 0,
+  resetLabel: 'later',
+  resetAtMs: 10_000,
+  resetAccuracy: 'exact',
+  observedAtMs: 2_000,
+  quotaProgressObservedAtMs: 2_000,
+  limitWindowSeconds: 7 * 24 * 60 * 60,
+  windowMode: 'fixed',
+  cycleStartMs: 1_000,
+  cycleEndMs: 10_000,
+  modelScope: { kind: 'all', complete: true },
+  ...overrides,
+});
+
+const buildForecastWindow = (
+  options: {
+    current?: Partial<MonitoringAccountWindowUsageItem>;
+    previous?: Partial<MonitoringAccountWindowUsageItem>;
+    quota?: Partial<AccountDetailQuotaWindowInput>;
+  } = {}
+) => {
+  const row = makeRow({ provider: 'antigravity' });
+  const quotaWindow = makeForecastWindow(options.quota);
+  const providerWindowId = quotaWindow.providerWindowId ?? quotaWindow.key;
+  const windowUsageByKey = new Map<string, MonitoringAccountWindowUsageItem>();
+
+  if (options.current) {
+    windowUsageByKey.set(
+      accountWindowUsageRequestKey(
+        row.selectionKey,
+        providerWindowId,
+        'current',
+        quotaWindow.modelScope
+      ),
+      makeWindowUsage({ window_key: providerWindowId, ...options.current })
+    );
+  }
+  if (options.previous) {
+    windowUsageByKey.set(
+      accountWindowUsageRequestKey(
+        row.selectionKey,
+        providerWindowId,
+        'previous',
+        quotaWindow.modelScope
+      ),
+      makeWindowUsage({ window_key: providerWindowId, ...options.previous })
+    );
+  }
+
+  return buildAccountDetailViewModel(row, {
+    quotaWindows: [quotaWindow],
+    windowUsageByKey,
+  }).quota.windows[0];
+};
 
 const makeHistory = (
   overrides: Partial<MonitoringAccountHistoryItem> = {}
@@ -352,6 +420,7 @@ describe('accountDetailViewModel', () => {
           resetAtMs: nowMs + 60 * 60 * 1000,
           resetAccuracy: 'exact',
           observedAtMs: nowMs,
+          quotaProgressObservedAtMs: nowMs,
           limitWindowSeconds: 7 * 24 * 60 * 60,
           windowMode: 'calendar',
           cycleStartMs: nowMs - 60 * 60 * 1000,
@@ -424,6 +493,7 @@ describe('accountDetailViewModel', () => {
           resetAtMs: nowMs + 24 * 60 * 60 * 1000,
           resetAccuracy: 'exact',
           observedAtMs: nowMs,
+          quotaProgressObservedAtMs: nowMs,
           limitWindowSeconds: 24 * 60 * 60,
           windowMode: 'fixed',
           cycleStartMs: nowMs - 60 * 60 * 1000,
@@ -588,7 +658,7 @@ describe('accountDetailViewModel', () => {
     expect(viewModel.quota.windows[0].forecast).toBeNull();
   });
 
-  it('falls back to an eligible previous cycle when usage is newer than quota progress', () => {
+  it('does not fall back to an eligible previous cycle when usage is newer than quota observation', () => {
     const row = makeRow({ provider: 'antigravity' });
     const nowMs = Date.now();
     const modelScope = { kind: 'family' as const, key: 'gemini', complete: true };
@@ -609,9 +679,9 @@ describe('accountDetailViewModel', () => {
         currentKey,
         makeWindowUsage({
           window_key: 'antigravity-gemini',
-          total_requests: 2,
-          total_tokens: 6_400,
-          total_cost: 0.02,
+          total_requests: 1_300,
+          total_tokens: 181_600_000,
+          total_cost: 6.95,
           last_seen_ms: nowMs,
         }),
       ],
@@ -639,6 +709,7 @@ describe('accountDetailViewModel', () => {
           resetAtMs: nowMs + 24 * 60 * 60 * 1000,
           resetAccuracy: 'exact',
           observedAtMs: nowMs - 1_000,
+          quotaProgressObservedAtMs: nowMs - 1_000,
           limitWindowSeconds: 24 * 60 * 60,
           windowMode: 'fixed',
           cycleStartMs: nowMs - 60 * 60 * 1000,
@@ -679,14 +750,220 @@ describe('accountDetailViewModel', () => {
     });
 
     expect(viewModel.quota.windows[0].currentUsage).toMatchObject({
-      totalRequests: 2,
+      totalRequests: 1_300,
+      totalTokens: 181_600_000,
+      totalCost: 6.95,
       lastSeenMs: nowMs,
     });
-    expect(viewModel.quota.windows[0].forecast).toEqual({
+    expect(viewModel.quota.windows[0].forecast).toBeNull();
+  });
+
+  it('resumes quota projection once the quota progress observation catches up with current usage', () => {
+    const current = {
+      total_requests: 1_300,
+      total_tokens: 181_600_000,
+      total_cost: 6.95,
+      last_seen_ms: 1_500,
+    };
+    const previous = {
+      total_requests: 149,
+      total_tokens: 20_100_000,
+      total_cost: 0.68,
+    };
+
+    const delayed = buildForecastWindow({
+      current,
+      previous,
+      quota: { usedPercent: 66, observedAtMs: 2_000, quotaProgressObservedAtMs: 1_499 },
+    });
+    expect(delayed.forecast).toBeNull();
+
+    const recovered = buildForecastWindow({
+      current,
+      previous,
+      quota: { usedPercent: 66, observedAtMs: 2_000, quotaProgressObservedAtMs: 1_500 },
+    });
+    expect(recovered.forecast).toEqual({
+      requests: 1_970,
+      tokens: 275_151_515,
+      cost: 10.53,
+      basis: 'quota',
+    });
+    expect(recovered.forecast?.requests).toBeGreaterThan(current.total_requests);
+    expect(recovered.forecast?.tokens).toBeGreaterThan(current.total_tokens);
+    expect(recovered.forecast?.cost).toBeGreaterThanOrEqual(current.total_cost);
+  });
+
+  it('rejects previous fallback when current usage is ahead of quota progress provenance', () => {
+    const window = buildForecastWindow({
+      current: {
+        total_requests: 100,
+        total_tokens: 1_000_000,
+        total_cost: 5,
+        last_seen_ms: 1_500,
+      },
+      previous: {
+        total_requests: 200,
+        total_tokens: 2_000_000,
+        total_cost: 10,
+      },
+      quota: {
+        usedPercent: 50,
+        observedAtMs: 2_000,
+        quotaProgressObservedAtMs: 1_000,
+      },
+    });
+
+    expect(window.forecast).toBeNull();
+  });
+
+  it('does not use quota provenance without a finite used percentage', () => {
+    const window = buildForecastWindow({
+      current: {
+        total_requests: 100,
+        total_tokens: 1_000_000,
+        total_cost: 5,
+        last_seen_ms: 1_900,
+      },
+      previous: {
+        total_requests: 200,
+        total_tokens: 2_000_000,
+        total_cost: 10,
+      },
+      quota: {
+        usedPercent: null,
+        observedAtMs: 2_000,
+        quotaProgressObservedAtMs: 2_000,
+      },
+    });
+
+    expect(window.forecast).toEqual({
+      requests: 200,
+      tokens: 2_000_000,
+      cost: 10,
       basis: 'previous',
-      requests: 20,
-      tokens: 200_000,
-      cost: 2,
+    });
+  });
+
+  it('preserves previous fallback when current usage is unavailable', () => {
+    const window = buildForecastWindow({
+      previous: {
+        total_requests: 149,
+        total_tokens: 20_100_000,
+        total_cost: 0.68,
+      },
+      quota: { usedPercent: null, observedAtMs: null },
+    });
+
+    expect(window.forecast).toEqual({
+      requests: 149,
+      tokens: 20_100_000,
+      cost: 0.68,
+      basis: 'previous',
+    });
+  });
+
+  it('preserves previous fallback when current usage has no quota-aligned observation timestamp', () => {
+    const window = buildForecastWindow({
+      current: {
+        total_requests: 100,
+        total_tokens: 1_000_000,
+        total_cost: 5,
+        last_seen_ms: null,
+      },
+      previous: {
+        total_requests: 200,
+        total_tokens: 2_000_000,
+        total_cost: 10,
+      },
+      quota: { usedPercent: null, observedAtMs: null },
+    });
+
+    expect(window.forecast).toEqual({
+      requests: 200,
+      tokens: 2_000_000,
+      cost: 10,
+      basis: 'previous',
+    });
+  });
+
+  it('invalidates a forecast that is below every trusted current actual metric', () => {
+    const window = buildForecastWindow({
+      current: {
+        total_requests: 1_000,
+        total_tokens: 100_000_000,
+        total_cost: 5,
+        last_seen_ms: null,
+      },
+      previous: {
+        total_requests: 100,
+        total_tokens: 10_000_000,
+        total_cost: 0.5,
+      },
+      quota: { usedPercent: null, observedAtMs: null },
+    });
+
+    expect(window.forecast).toBeNull();
+  });
+
+  it('invalidates a forecast when any metric is below trusted current actual', () => {
+    const current = {
+      total_requests: 1_000,
+      total_tokens: 100_000_000,
+      total_cost: 5,
+      last_seen_ms: null,
+    };
+    const previousCases = [
+      { total_requests: 999, total_tokens: 100_000_000, total_cost: 5 },
+      { total_requests: 1_000, total_tokens: 99_999_999, total_cost: 5 },
+      { total_requests: 1_000, total_tokens: 100_000_000, total_cost: 4.99 },
+    ];
+
+    for (const previous of previousCases) {
+      const window = buildForecastWindow({
+        current,
+        previous,
+        quota: { usedPercent: null, observedAtMs: null },
+      });
+      expect(window.forecast).toBeNull();
+    }
+  });
+
+  it('keeps a normal quota forecast that covers trusted current actual', () => {
+    const window = buildForecastWindow({
+      current: {
+        total_requests: 100,
+        total_tokens: 1_000_000,
+        total_cost: 5,
+        last_seen_ms: 1_900,
+      },
+      quota: { usedPercent: 50, observedAtMs: 2_000 },
+    });
+
+    expect(window.forecast).toEqual({
+      requests: 200,
+      tokens: 2_000_000,
+      cost: 10,
+      basis: 'quota',
+    });
+  });
+
+  it('allows a quota forecast equal to trusted current actual at full provider usage', () => {
+    const window = buildForecastWindow({
+      current: {
+        total_requests: 100,
+        total_tokens: 1_000_000,
+        total_cost: 5,
+        last_seen_ms: 1_900,
+      },
+      quota: { usedPercent: 100, observedAtMs: 2_000 },
+    });
+
+    expect(window.forecast).toEqual({
+      requests: 100,
+      tokens: 1_000_000,
+      cost: 5,
+      basis: 'quota',
     });
   });
 

@@ -6,6 +6,7 @@ import {
   getAuthFileStatusIdentityKey,
   readAuthFileStatusAccountId,
   readAuthFileStatusAccountSnapshot,
+  readAuthFileStatusCodexMember,
 } from '@/utils/authFileStatusMutation';
 import {
   buildCodexQuotaWindowInfos,
@@ -96,10 +97,13 @@ export const toInspectionAccount = (file: AuthFileItem): CodexInspectionAccount 
   const runtimeId = readString(file.id) || null;
   const fileName = readAuthFileName(file);
   const displayAccount = readDisplayAccount(file);
-  const accountSnapshot = readAuthFileStatusAccountSnapshot(file) || null;
   const authIndex = normalizeAuthIndex(file['auth_index'] ?? file.authIndex);
   const accountId = readAuthFileStatusAccountId(file);
   const provider = resolveAuthProvider(file);
+  const accountSnapshot =
+    (provider === 'codex'
+      ? readAuthFileStatusCodexMember(file)
+      : readAuthFileStatusAccountSnapshot(file)) || null;
   return {
     key: buildInspectionAccountKey({
       fileName,

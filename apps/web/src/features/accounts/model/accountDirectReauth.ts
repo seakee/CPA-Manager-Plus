@@ -11,13 +11,15 @@ import type { CodexReauthTarget } from '@/features/oauth/codexReauthModel';
 import {
   readAuthFileStatusAccountId,
   readAuthFileStatusAuthIndex,
+  readAuthFileStatusCodexMember,
   readAuthFileStatusPhysicalName,
   readAuthFileStatusProvider,
   readAuthFileStatusRuntimeId,
+  normalizeCodexMemberSnapshot,
 } from '@/utils/authFileCredentialIdentity';
 
-const STORAGE_KEY = 'cpa.accounts.direct-reauth.v2';
-const STORAGE_VERSION = 2;
+const STORAGE_KEY = 'cpa.accounts.direct-reauth.v3';
+const STORAGE_VERSION = 3;
 const MAX_PENDING_REAUTHS = 16;
 const MAX_PENDING_REAUTH_AGE_MS = 24 * 60 * 60 * 1000;
 
@@ -37,6 +39,7 @@ export interface AccountDirectReauthBaseline {
 export interface AccountDirectReauthCredentialEvidence {
   identityKey: string;
   accountId: string;
+  accountSnapshot: string;
   credentialRefreshAtMs: number;
   updatedAtMs: number;
   statusMessage: string;
@@ -116,6 +119,7 @@ const normalizeProviderCredentialEvidence = (
   return {
     identityKey,
     accountId: normalizeString(record.accountId),
+    accountSnapshot: normalizeCodexMemberSnapshot(record.accountSnapshot),
     credentialRefreshAtMs: normalizeTimestamp(record.credentialRefreshAtMs),
     updatedAtMs: normalizeTimestamp(record.updatedAtMs),
     statusMessage: normalizeString(record.statusMessage),
@@ -230,18 +234,19 @@ const createPendingReauthId = (startedAtMs: number): string => {
 
 const buildTargetIdentityKey = (target: CodexReauthTarget): string =>
   JSON.stringify([
-    normalizeString(target.fileName),
     normalizeProvider(target.provider),
-    normalizeString(target.authIndex === null ? '' : String(target.authIndex ?? '')),
     normalizeString(target.accountId),
-    normalizeString(target.accountSnapshot),
+    normalizeCodexMemberSnapshot(target.accountSnapshot),
+    normalizeString(target.fileName),
     normalizeString(target.runtimeId),
+    normalizeString(target.authIndex === null ? '' : String(target.authIndex ?? '')),
   ]);
 
 const buildCredentialIdentityKey = (file: AuthFileItem): string =>
   JSON.stringify([
     readAuthFileStatusProvider(file),
     readAuthFileStatusAccountId(file),
+    readAuthFileStatusCodexMember(file),
     readAuthFileStatusPhysicalName(file),
     readAuthFileStatusRuntimeId(file),
     readAuthFileStatusAuthIndex(file) ?? '',
@@ -252,6 +257,7 @@ const buildProviderCredentialEvidence = (
 ): AccountDirectReauthCredentialEvidence => ({
   identityKey: buildCredentialIdentityKey(file),
   accountId: readAuthFileStatusAccountId(file),
+  accountSnapshot: readAuthFileStatusCodexMember(file),
   credentialRefreshAtMs: readAuthFileCredentialRefreshAtMs(file) ?? 0,
   updatedAtMs: readAuthFileUpdatedAtMs(file) ?? 0,
   statusMessage: getAuthFileStatusMessage(file),
@@ -356,53 +362,51 @@ export const reconcileAccountDirectReauth = (
   files: readonly AuthFileItem[]
 ): AccountDirectReauthReconciliation => {
   const providerFiles = files.filter((file) => readAuthFileStatusProvider(file) === 'codex');
-  const expectedAccountId = normalizeString(pending.target.accountId);
+  const expectedWorkspace = normalizeString(pending.target.accountId);
+  const expectedMember = normalizeCodexMemberSnapshot(pending.target.accountSnapshot);
 
-  // A display account/email can locate the original row in the UI, but it cannot
-  // prove that an OAuth result belongs to the same ChatGPT Space. Without a
-  // trusted baseline account_id, fail closed instead of auto-confirming by email.
-  if (!expectedAccountId) return { status: 'unconfirmed' };
+  // A Workspace id without a strong member snapshot is not enough to identify a
+  // Team credential. Fail closed instead of treating a display value or a
+  // shared Workspace id as a user identity.
+  if (!expectedWorkspace || !expectedMember) return { status: 'unconfirmed' };
 
   const baselineByIdentity = new Map(
     pending.providerCredentials.map((item) => [item.identityKey, item])
   );
-  const matchingFiles = providerFiles.filter(
-    (file) => readAuthFileStatusAccountId(file) === expectedAccountId
-  );
-  if (matchingFiles.length > 1) return { status: 'ambiguous' };
-  if (matchingFiles.length === 1) {
-    const file = matchingFiles[0];
+  const matchingFiles = providerFiles.filter((file) => {
     const evidence = buildProviderCredentialEvidence(file);
-    if (hasChangedCredentialEvidence(evidence, baselineByIdentity.get(evidence.identityKey))) {
-      return { status: 'confirmed', file };
-    }
+    return evidence.accountId === expectedWorkspace && evidence.accountSnapshot === expectedMember;
+  });
+  const changedMatchingFiles = matchingFiles.filter((file) => {
+    const evidence = buildProviderCredentialEvidence(file);
+    return hasChangedCredentialEvidence(evidence, baselineByIdentity.get(evidence.identityKey));
+  });
+  if (changedMatchingFiles.length > 1) return { status: 'ambiguous' };
+  if (changedMatchingFiles.length === 1) {
+    return { status: 'confirmed', file: changedMatchingFiles[0] };
   }
 
-  // Timestamp/status changes on another credential are not causal evidence for
-  // this reauth: CPA may refresh unrelated Codex credentials in the background.
-  // Only a structurally new credential identity (including an account_id
-  // replacement that changes the identity key) is strong enough to flag a
-  // different Space.
-  const changedDifferentAccountFiles = providerFiles.filter((file) => {
+  // Timestamp/status changes on an existing unrelated credential are not causal
+  // evidence for this reauth: CPA may refresh other Codex credentials in the
+  // background. A new credential identity with a strong Workspace/member pair
+  // is the only evidence strong enough to report a different identity.
+  const changedDifferentIdentityFiles = providerFiles.filter((file) => {
     const evidence = buildProviderCredentialEvidence(file);
     return (
-      Boolean(evidence.accountId) &&
-      evidence.accountId !== expectedAccountId &&
+      Boolean(evidence.accountId && evidence.accountSnapshot) &&
+      (evidence.accountId !== expectedWorkspace || evidence.accountSnapshot !== expectedMember) &&
       !baselineByIdentity.has(evidence.identityKey)
     );
   });
-  const observedAccountIds = new Set(
-    changedDifferentAccountFiles.map((file) => readAuthFileStatusAccountId(file))
-  );
-  if (changedDifferentAccountFiles.length === 1 && observedAccountIds.size === 1) {
-    const file = changedDifferentAccountFiles[0];
+  if (changedDifferentIdentityFiles.length === 1) {
+    const file = changedDifferentIdentityFiles[0];
     return {
       status: 'identity-changed',
       file,
       observedAccountId: readAuthFileStatusAccountId(file),
     };
   }
-  if (changedDifferentAccountFiles.length > 1) return { status: 'ambiguous' };
+  if (changedDifferentIdentityFiles.length > 1) return { status: 'ambiguous' };
   return { status: 'unconfirmed' };
 };
 

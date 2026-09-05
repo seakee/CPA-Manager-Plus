@@ -17,10 +17,12 @@ import { normalizeAuthIndex } from '@/utils/authIndex';
 import {
   readAuthFileStatusAccountId,
   readAuthFileStatusAccountSnapshot,
+  readAuthFileStatusCodexMember,
   readAuthFileStatusRuntimeId,
   resolveAuthFileStatusMutationTarget,
   type AuthFileStatusMutationResolution,
 } from '@/utils/authFileStatusMutation';
+import { normalizeCodexMemberSnapshot } from '@/utils/authFileCredentialIdentity';
 import { resolveAuthProvider } from '@/utils/quota/validators';
 import { clampPositiveInteger } from './codexInspectionSettings';
 import {
@@ -35,6 +37,8 @@ import {
 const identityT = ((key: string) => key) as TFunction;
 const STATUS_MUTATION_SCOPE_REASON =
   '认证凭证缺少唯一 runtime ID，或 runtime ID 与物理文件选择器冲突，已阻止状态修改，请人工确认';
+const AUTOMATIC_PERSISTED_LOCATOR_REASON =
+  '自动禁用凭证的物理文件与 authIndex 不是唯一定位，已阻止状态修改，请人工确认';
 const FILE_DELETE_COVERAGE_REASON =
   '删除动作未完整覆盖该物理认证文件当前包含的全部凭证，已阻止删除，请人工确认';
 const PLUGIN_SOURCE_STATUS_CHANGED_REASON =
@@ -288,7 +292,8 @@ const buildExecutionActionGroups = (items: CodexInspectionResultItem[]) => {
 
 const planExecutionItems = (
   items: CodexInspectionResultItem[],
-  referenceItems: CodexInspectionResultItem[]
+  referenceItems: CodexInspectionResultItem[],
+  requireAuthIndex: boolean
 ) => {
   const preflightOutcomes: CodexInspectionExecutionOutcome[] = [];
   const { groupByItemKey } = buildExecutionActionGroups(
@@ -306,15 +311,17 @@ const planExecutionItems = (
       );
       return;
     }
-    if (
-      !hasCodexInspectionStableIdentity({
-        fileName: item.fileName,
-        provider: item.provider,
-        authIndex: item.authIndex,
-        accountId: item.accountId,
-        accountSnapshot: item.accountSnapshot,
-      })
-    ) {
+    const hasStableIdentity = requireAuthIndex
+      ? hasCodexInspectionStableIdentity({
+          fileName: item.fileName,
+          runtimeId: item.runtimeId,
+          provider: item.provider,
+          authIndex: item.authIndex,
+          accountId: item.accountId,
+          accountSnapshot: item.accountSnapshot,
+        })
+      : hasManualInspectionIdentity(item);
+    if (!hasStableIdentity) {
       preflightOutcomes.push(
         buildPreflightOutcome(
           item,
@@ -388,51 +395,197 @@ const normalizeProvider = (value: unknown): string => {
   return normalized;
 };
 
+const hasManualInspectionIdentity = (item: CodexInspectionResultItem): boolean => {
+  if (normalizeProvider(item.provider) !== 'codex') {
+    return hasCodexInspectionStableIdentity({
+      fileName: item.fileName,
+      runtimeId: item.runtimeId,
+      provider: item.provider,
+      authIndex: item.authIndex,
+      accountId: item.accountId,
+      accountSnapshot: item.accountSnapshot,
+    });
+  }
+  return Boolean(
+    item.fileName.trim() && (item.runtimeId?.trim() || normalizeAuthIndex(item.authIndex))
+  );
+};
+
 const readCurrentFileName = (file: AuthFileItem): string => String(file.name ?? '').trim();
 
-const buildDeleteIdentityTarget = (file: AuthFileItem): AuthFileDeleteIdentityTarget => ({
-  name: readCurrentFileName(file),
-  runtimeId: readAuthFileStatusRuntimeId(file) || null,
-  authIndex: normalizeAuthIndex(file['auth_index'] ?? file.authIndex ?? file['auth-index']),
-  provider: resolveAuthProvider(file),
-  accountId: readAuthFileStatusAccountId(file) || null,
-  accountSnapshot: readAuthFileStatusAccountSnapshot(file) || null,
-});
+const buildDeleteIdentityTarget = (file: AuthFileItem): AuthFileDeleteIdentityTarget => {
+  const provider = normalizeProvider(resolveAuthProvider(file));
+  return {
+    name: readCurrentFileName(file),
+    runtimeId: readAuthFileStatusRuntimeId(file) || null,
+    authIndex: normalizeAuthIndex(file['auth_index'] ?? file.authIndex ?? file['auth-index']),
+    provider,
+    accountId: readAuthFileStatusAccountId(file) || null,
+    accountSnapshot:
+      (provider === 'codex'
+        ? readAuthFileStatusCodexMember(file)
+        : readAuthFileStatusAccountSnapshot(file)) || null,
+  };
+};
 
 const getAuthFileSourceMemberIdentityKey = (file: AuthFileItem): string =>
+  JSON.stringify([
+    readCurrentFileName(file),
+    normalizeProvider(resolveAuthProvider(file)),
+    readAuthFileStatusRuntimeId(file),
+    normalizeAuthIndex(file['auth_index'] ?? file.authIndex ?? file['auth-index']),
+  ]);
+
+const getAuthFileSourceMemberEvidenceKey = (file: AuthFileItem): string =>
   JSON.stringify(buildDeleteIdentityTarget(file));
+
+const matchesAuthFileIdentityTarget = (
+  file: AuthFileItem,
+  target: AuthFileStatusTarget
+): boolean => {
+  const resolution = resolveAuthFileStatusMutationTarget([file], target);
+  // The caller may still need the resolver's scope/failure to reject a missing
+  // runtime ID or an ambiguous mutation target. This helper only answers the
+  // identity question, so retain a uniquely matched file when the resolver's
+  // later operational checks report ambiguity.
+  return (
+    resolution.target === file &&
+    (resolution.failure === null || resolution.failure === 'ambiguous')
+  );
+};
+
+const authFileSourceMemberMatches = (
+  expectedMember: AuthFileItem,
+  currentMember: AuthFileItem
+): boolean => {
+  if (
+    getAuthFileSourceMemberIdentityKey(expectedMember) !==
+    getAuthFileSourceMemberIdentityKey(currentMember)
+  ) {
+    return false;
+  }
+
+  const expectedProvider = normalizeProvider(resolveAuthProvider(expectedMember));
+  if (expectedProvider !== 'codex') {
+    return (
+      getAuthFileSourceMemberEvidenceKey(expectedMember) ===
+      getAuthFileSourceMemberEvidenceKey(currentMember)
+    );
+  }
+
+  return matchesAuthFileIdentityTarget(currentMember, buildDeleteIdentityTarget(expectedMember));
+};
 
 const authFileSourceMembershipMatches = (
   expectedMembers: AuthFileItem[],
   currentMembers: AuthFileItem[]
 ): boolean => {
   if (expectedMembers.length !== currentMembers.length) return false;
-  const expectedKeys = expectedMembers.map(getAuthFileSourceMemberIdentityKey).sort();
-  const currentKeys = currentMembers.map(getAuthFileSourceMemberIdentityKey).sort();
-  return expectedKeys.every((key, index) => key === currentKeys[index]);
+  const usedCurrentIndexes = new Set<number>();
+  return expectedMembers.every((expectedMember) => {
+    const currentIndex = currentMembers.findIndex(
+      (currentMember, index) =>
+        !usedCurrentIndexes.has(index) && authFileSourceMemberMatches(expectedMember, currentMember)
+    );
+    if (currentIndex < 0) return false;
+    usedCurrentIndexes.add(currentIndex);
+    return true;
+  });
+};
+
+const hasAmbiguousCredentialLocator = (
+  currentCandidates: AuthFileItem[],
+  referenceItems: CodexInspectionResultItem[]
+): boolean => {
+  const candidatesByAuthIndex = new Map<string, number>();
+  currentCandidates.forEach((file) => {
+    const authIndex = normalizeAuthIndex(
+      file['auth_index'] ?? file.authIndex ?? file['auth-index']
+    );
+    if (authIndex === null) return;
+    candidatesByAuthIndex.set(authIndex, (candidatesByAuthIndex.get(authIndex) ?? 0) + 1);
+  });
+  return referenceItems.some((item) => {
+    if (item.runtimeId?.trim()) return false;
+    const authIndex = normalizeAuthIndex(item.authIndex);
+    return authIndex !== null && (candidatesByAuthIndex.get(authIndex) ?? 0) > 1;
+  });
+};
+
+const getCodexPersistedLocatorKey = (
+  fileName: unknown,
+  provider: unknown,
+  authIndex: unknown
+): string | null => {
+  const normalizedFileName = String(fileName ?? '').trim();
+  const normalizedProvider = normalizeProvider(provider);
+  const normalizedAuthIndex = normalizeAuthIndex(authIndex);
+  if (!normalizedFileName || normalizedProvider !== 'codex' || normalizedAuthIndex === null) {
+    return null;
+  }
+  return JSON.stringify([normalizedFileName, normalizedProvider, normalizedAuthIndex]);
+};
+
+const hasDuplicateCodexPersistedLocator = (
+  currentFiles: AuthFileItem[],
+  item: CodexInspectionResultItem
+): boolean => {
+  const locatorKey = getCodexPersistedLocatorKey(item.fileName, item.provider, item.authIndex);
+  if (!locatorKey) return false;
+  return (
+    currentFiles.filter(
+      (file) =>
+        getCodexPersistedLocatorKey(
+          readCurrentFileName(file),
+          resolveAuthProvider(file),
+          file['auth_index'] ?? file.authIndex ?? file['auth-index']
+        ) === locatorKey
+    ).length > 1
+  );
+};
+
+const hasUniqueCodexPersistedLocator = (
+  currentFiles: AuthFileItem[],
+  item: CodexInspectionResultItem
+): boolean => {
+  const locatorKey = getCodexPersistedLocatorKey(item.fileName, item.provider, item.authIndex);
+  if (!locatorKey) return false;
+  return (
+    currentFiles.filter(
+      (file) =>
+        getCodexPersistedLocatorKey(
+          readCurrentFileName(file),
+          resolveAuthProvider(file),
+          file['auth_index'] ?? file.authIndex ?? file['auth-index']
+        ) === locatorKey
+    ).length === 1
+  );
 };
 
 const readInspectionAccountSnapshot = (item: CodexInspectionResultItem): string => {
   const snapshot = item.accountSnapshot?.trim() ?? '';
-  return snapshot && snapshot !== item.fileName.trim() ? snapshot : '';
+  if (!snapshot || snapshot === item.fileName.trim()) return '';
+  return normalizeProvider(item.provider) === 'codex'
+    ? normalizeCodexMemberSnapshot(snapshot)
+    : snapshot;
 };
 
 const matchesCurrentActionIdentity = (
   file: AuthFileItem,
   item: CodexInspectionResultItem
 ): boolean => {
-  if (readCurrentFileName(file) !== item.fileName) return false;
-  const currentProvider = normalizeProvider(resolveAuthProvider(file));
-  const expectedProvider = normalizeProvider(item.provider);
-  if (!currentProvider || !expectedProvider || currentProvider !== expectedProvider) return false;
-  const authIndex = normalizeAuthIndex(file['auth_index'] ?? file.authIndex ?? file['auth-index']);
-  if (item.authIndex && authIndex !== normalizeAuthIndex(item.authIndex)) return false;
-  const accountId = readAuthFileStatusAccountId(file);
-  const expectedAccountId = item.accountId?.trim() ?? '';
-  if (expectedAccountId) return accountId === expectedAccountId;
-  const expectedSnapshot = readInspectionAccountSnapshot(item);
-  if (!expectedSnapshot) return normalizeAuthIndex(item.authIndex) !== null;
-  return readAuthFileStatusAccountSnapshot(file) === expectedSnapshot;
+  const resolution = resolveAuthFileStatusMutationTarget([file], {
+    name: item.fileName,
+    runtimeId: item.runtimeId,
+    authIndex: item.authIndex,
+    provider: item.provider,
+    accountId: item.accountId,
+    accountSnapshot: readInspectionAccountSnapshot(item),
+  });
+  return (
+    resolution.target === file &&
+    (resolution.failure === null || resolution.failure === 'ambiguous')
+  );
 };
 
 type ResolvedStatusActionItem = {
@@ -448,6 +601,13 @@ type StatusActionGroupPlan = {
   affectedFiles: AuthFileItem[];
 };
 
+type AutomaticSourceFallbackPlan = {
+  canonicalKey: string;
+  action: 'disable' | 'enable';
+  members: CodexInspectionResultItem[];
+  affectedFiles: AuthFileItem[];
+};
+
 const isStatusExecutionAction = (
   item: CodexInspectionResultItem
 ): item is CodexInspectionResultItem & { action: 'disable' | 'enable' } =>
@@ -455,7 +615,8 @@ const isStatusExecutionAction = (
 
 const buildStatusActionGroupPlans = (
   resolvedItems: Map<string, ResolvedStatusActionItem>,
-  currentFilesByName: Map<string, AuthFileItem[]>
+  currentFilesByName: Map<string, AuthFileItem[]>,
+  automatic: boolean
 ): Map<string, StatusActionGroupPlan> => {
   const plans = new Map<string, StatusActionGroupPlan>();
   const entriesByFile = new Map<string, ResolvedStatusActionItem[]>();
@@ -484,6 +645,7 @@ const buildStatusActionGroupPlans = (
     const sourceEntries = matchedEntries.filter(
       (entry) => entry.resolution.scope === 'source-file'
     );
+    if (automatic && sourceEntries.length === 0) return;
     if (!action || sourceEntries.length > 1) return;
     const canonicalEntry = sourceEntries[0] ?? matchedEntries[0];
     if (!canonicalEntry) return;
@@ -498,6 +660,56 @@ const buildStatusActionGroupPlans = (
   return plans;
 };
 
+const buildAutomaticSourceFallbackPlans = (
+  resolvedItems: Map<string, ResolvedStatusActionItem>,
+  currentFilesByName: Map<string, AuthFileItem[]>,
+  currentFiles: AuthFileItem[]
+): Map<string, AutomaticSourceFallbackPlan> => {
+  const plans = new Map<string, AutomaticSourceFallbackPlan>();
+  const entriesByFile = new Map<string, ResolvedStatusActionItem[]>();
+  resolvedItems.forEach((entry) => {
+    const fileName = readCurrentFileName(entry.currentFile);
+    const entries = entriesByFile.get(fileName) ?? [];
+    entries.push(entry);
+    entriesByFile.set(fileName, entries);
+  });
+
+  currentFilesByName.forEach((affectedFiles, fileName) => {
+    const entries = entriesByFile.get(fileName) ?? [];
+    if (entries.length !== affectedFiles.length || affectedFiles.length === 0) return;
+
+    const members: CodexInspectionResultItem[] = [];
+    let action: 'disable' | 'enable' | null = null;
+    for (const affectedFile of affectedFiles) {
+      const matches = entries.filter((entry) => entry.currentFile === affectedFile);
+      const entry = matches[0];
+      if (!entry || matches.length !== 1 || !isStatusExecutionAction(entry.item)) return;
+      if (
+        entry.resolution.scope !== 'credential' ||
+        normalizeProvider(entry.item.provider) !== 'codex' ||
+        !hasUniqueCodexPersistedLocator(currentFiles, entry.item)
+      ) {
+        return;
+      }
+      if (action === null) action = entry.item.action;
+      if (entry.item.action !== action) return;
+      members.push(entry.item);
+    }
+
+    if (!action || !statusActionCoversCurrentFile(affectedFiles, members, fileName)) return;
+    const canonical = members[0];
+    if (!canonical) return;
+    plans.set(fileName, {
+      canonicalKey: canonical.key,
+      action,
+      members,
+      affectedFiles,
+    });
+  });
+
+  return plans;
+};
+
 const deleteActionCoversCurrentFile = (
   currentFiles: AuthFileItem[],
   referenceItems: CodexInspectionResultItem[],
@@ -505,6 +717,10 @@ const deleteActionCoversCurrentFile = (
 ): boolean => {
   if (currentFiles.length === 0) return false;
   const normalizedFileName = fileName.trim();
+  const currentCandidates = currentFiles.filter(
+    (file) => readCurrentFileName(file) === normalizedFileName
+  );
+  if (hasAmbiguousCredentialLocator(currentCandidates, referenceItems)) return false;
   const deleteByIdentity = new Map<string, CodexInspectionResultItem>();
   for (const item of referenceItems) {
     if (item.fileName.trim() !== normalizedFileName) continue;
@@ -623,6 +839,11 @@ const verifyPluginSourceStatusFallback = async (
   if (
     !authFileSourceMembershipMatches(snapshotMembers, freshMembers) ||
     !statusActionCoversCurrentFile(freshMembers, actionMembers, physicalName) ||
+    actionMembers.some(
+      (member) =>
+        normalizeProvider(member.provider) === 'codex' &&
+        !hasUniqueCodexPersistedLocator(freshFiles, member)
+    ) ||
     !resolution.target ||
     resolution.failure !== null ||
     resolution.scope !== 'credential' ||
@@ -727,6 +948,21 @@ type PatchedStatusActionMember = {
   item: CodexInspectionResultItem;
   originalDisabled: boolean;
 };
+
+type StatusChangeMutationScope = 'credential' | 'source-file' | null;
+
+type StatusChangeExecutionResult = {
+  outcome: CodexInspectionExecutionOutcome;
+  mutationScope: StatusChangeMutationScope;
+};
+
+const buildStatusChangeExecutionResult = (
+  outcome: CodexInspectionExecutionOutcome,
+  mutationScope: StatusChangeMutationScope = null
+): StatusChangeExecutionResult => ({
+  outcome,
+  mutationScope,
+});
 
 const rollbackPatchedStatusActionMembers = async (
   patchedMembers: PatchedStatusActionMember[],
@@ -910,29 +1146,48 @@ const executeStatusChange = async (
   item: CodexInspectionResultItem,
   disabled: boolean,
   actionMembers: CodexInspectionResultItem[] = [],
-  requestScope?: AuthFilesApiRequestScope
-): Promise<CodexInspectionExecutionOutcome> => {
+  requestScope?: AuthFilesApiRequestScope,
+  automatic = false,
+  sourceFallbackMembers?: CodexInspectionResultItem[]
+): Promise<StatusChangeExecutionResult> => {
   let snapshotMembers: AuthFileItem[] = [];
   let singleMember: VerifiedStatusActionMember | null = null;
   let actionGroup: VerifiedStatusActionGroup | null = null;
   try {
     const response = await listAuthFiles(requestScope);
     const currentFiles = Array.isArray(response.files) ? response.files : [];
+    const mutationLocatorMembers = actionMembers.length > 0 ? actionMembers : [item];
+    if (
+      automatic &&
+      disabled &&
+      normalizeProvider(item.provider) === 'codex' &&
+      mutationLocatorMembers.some((member) =>
+        hasDuplicateCodexPersistedLocator(currentFiles, member)
+      )
+    ) {
+      return buildStatusChangeExecutionResult(
+        buildActionValidationOutcome(item, 'needs_review', AUTOMATIC_PERSISTED_LOCATOR_REASON)
+      );
+    }
     if (actionMembers.length > 0) {
       actionGroup = resolveVerifiedStatusActionGroup(currentFiles, actionMembers, item.fileName);
       if (!actionGroup) {
-        return buildActionValidationOutcome(
-          item,
-          'failed',
-          '认证文件成员、Provider 或账号标识已变化，已拒绝状态修改'
+        return buildStatusChangeExecutionResult(
+          buildActionValidationOutcome(
+            item,
+            'failed',
+            '认证文件成员、Provider 或账号标识已变化，已拒绝状态修改'
+          )
         );
       }
       snapshotMembers = actionGroup.affectedFiles;
       if (actionGroup.affectedFiles.every((file) => (file.disabled === true) === disabled)) {
-        return buildActionValidationOutcome(
-          item,
-          'skipped',
-          disabled ? '账号已是禁用状态，未重复执行' : '账号已是启用状态，未重复执行'
+        return buildStatusChangeExecutionResult(
+          buildActionValidationOutcome(
+            item,
+            'skipped',
+            disabled ? '账号已是禁用状态，未重复执行' : '账号已是启用状态，未重复执行'
+          )
         );
       }
     } else {
@@ -946,45 +1201,56 @@ const executeStatusChange = async (
       });
       const currentFile = resolution.target;
       if (!currentFile || !matchesCurrentActionIdentity(currentFile, item)) {
-        return buildActionValidationOutcome(
-          item,
-          'failed',
-          '认证文件不存在、Provider 不匹配或账号标识已变化，已拒绝执行'
+        return buildStatusChangeExecutionResult(
+          buildActionValidationOutcome(
+            item,
+            'failed',
+            '认证文件不存在、Provider 不匹配或账号标识已变化，已拒绝执行'
+          )
         );
       }
       if (resolution.failure !== null || resolution.scope === 'ambiguous') {
-        return buildActionValidationOutcome(item, 'failed', STATUS_MUTATION_SCOPE_REASON);
+        return buildStatusChangeExecutionResult(
+          buildActionValidationOutcome(item, 'failed', STATUS_MUTATION_SCOPE_REASON)
+        );
       }
       if (resolution.scope !== 'credential') {
-        return buildActionValidationOutcome(item, 'failed', STATUS_MUTATION_SCOPE_REASON);
+        return buildStatusChangeExecutionResult(
+          buildActionValidationOutcome(item, 'failed', STATUS_MUTATION_SCOPE_REASON)
+        );
       }
 
       snapshotMembers = currentFiles.filter(
         (file) => readCurrentFileName(file) === readCurrentFileName(currentFile)
       );
 
-      if ((currentFile.disabled === true) === disabled) {
-        return buildActionValidationOutcome(
-          item,
-          'skipped',
-          disabled ? '账号已是禁用状态，未重复执行' : '账号已是启用状态，未重复执行'
+      if ((currentFile.disabled === true) === disabled && sourceFallbackMembers === undefined) {
+        return buildStatusChangeExecutionResult(
+          buildActionValidationOutcome(
+            item,
+            'skipped',
+            disabled ? '账号已是禁用状态，未重复执行' : '账号已是启用状态，未重复执行'
+          )
         );
       }
       singleMember = { item, currentFile, resolution };
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error || '未知错误');
-    return buildActionValidationOutcome(
-      item,
-      'failed',
-      `执行状态修改前刷新认证文件失败，已拒绝执行：${message}`
+    return buildStatusChangeExecutionResult(
+      buildActionValidationOutcome(
+        item,
+        'failed',
+        `执行状态修改前刷新认证文件失败，已拒绝执行：${message}`
+      )
     );
   }
 
   try {
+    let mutationScope: StatusChangeMutationScope = null;
     if (actionGroup) {
       if (actionGroup.sourceMember) {
-        await setVerifiedSourceFileStatus(
+        const result = await setVerifiedSourceFileStatus(
           buildStatusActionTarget(
             actionGroup.sourceMember.item,
             actionGroup.sourceMember.currentFile
@@ -993,6 +1259,7 @@ const executeStatusChange = async (
           actionGroup.affectedFiles.map(buildDeleteIdentityTarget),
           requestScope
         );
+        mutationScope = result.mutationScope;
       } else {
         const patchedMembers: PatchedStatusActionMember[] = [];
         for (let index = 0; index < actionGroup.members.length; index++) {
@@ -1015,6 +1282,7 @@ const executeStatusChange = async (
                     requestScope
                   )
                 : await setAuthFileStatusWithFallback(target, disabled, undefined, requestScope);
+            mutationScope = result.mutationScope ?? null;
             if (result.mutationScope === 'source-file') break;
             patchedMembers.push({
               item: member.item,
@@ -1035,33 +1303,43 @@ const executeStatusChange = async (
       }
     } else if (singleMember) {
       const target = buildStatusActionTarget(singleMember.item, singleMember.currentFile);
-      await setAuthFileStatusWithFallback(
+      const isAutomaticCodex =
+        automatic && normalizeProvider(singleMember.item.provider) === 'codex';
+      const verifyPluginSourceFallback =
+        isAutomaticCodex && sourceFallbackMembers === undefined && snapshotMembers.length > 1
+          ? undefined
+          : () =>
+              verifyPluginSourceStatusFallback(
+                snapshotMembers,
+                sourceFallbackMembers ?? [singleMember.item],
+                singleMember.item,
+                readAuthFileStatusRuntimeId(singleMember.currentFile),
+                requestScope
+              );
+      const result = await setAuthFileStatusWithFallback(
         target,
         disabled,
-        () =>
-          verifyPluginSourceStatusFallback(
-            snapshotMembers,
-            [singleMember.item],
-            singleMember.item,
-            readAuthFileStatusRuntimeId(singleMember.currentFile),
-            requestScope
-          ),
+        verifyPluginSourceFallback,
         requestScope
       );
+      mutationScope = result.mutationScope ?? null;
     } else {
       throw new Error('认证凭证状态修改目标未通过校验');
     }
-    return {
-      accountKey: item.key,
-      action: disabled ? 'disable' : 'enable',
-      fileName: item.fileName,
-      displayAccount: item.displayAccount,
-      status: 'success',
-      success: true,
-      error: '',
-    };
+    return buildStatusChangeExecutionResult(
+      {
+        accountKey: item.key,
+        action: disabled ? 'disable' : 'enable',
+        fileName: item.fileName,
+        displayAccount: item.displayAccount,
+        status: 'success',
+        success: true,
+        error: '',
+      },
+      mutationScope
+    );
   } catch (error) {
-    return {
+    return buildStatusChangeExecutionResult({
       accountKey: item.key,
       action: disabled ? 'disable' : 'enable',
       fileName: item.fileName,
@@ -1069,7 +1347,7 @@ const executeStatusChange = async (
       status: 'failed',
       success: false,
       error: error instanceof Error ? error.message : String(error || '状态更新失败'),
-    };
+    });
   }
 };
 
@@ -1091,7 +1369,8 @@ export const executeCodexInspectionActions = async ({
   const actionReferenceItems = mergeExecutionReferenceItems(items, referenceItems ?? items);
   const plan = planExecutionItems(
     items,
-    (referenceItems ?? items).filter((item) => !suppliedPreflightAccountKeys.has(item.key))
+    (referenceItems ?? items).filter((item) => !suppliedPreflightAccountKeys.has(item.key)),
+    source === 'auto'
   );
   const dedupedItems = plan.items;
   const outcomes: CodexInspectionExecutionOutcome[] = [
@@ -1101,6 +1380,8 @@ export const executeCodexInspectionActions = async ({
   let executableItems = dedupedItems;
   let preflightFiles: AuthFileItem[] | null = null;
   const statusGroupMembersByAccountKey = new Map<string, CodexInspectionResultItem[]>();
+  const automaticSourceFileMembersByAccountKey = new Map<string, CodexInspectionResultItem[]>();
+  let automaticSourceFallbackPlans = new Map<string, AutomaticSourceFallbackPlan>();
 
   if (source === 'manual' || source === 'auto') {
     onLog?.(
@@ -1138,6 +1419,22 @@ export const executeCodexInspectionActions = async ({
         filesByName.set(fileName, siblings);
         return filesByName;
       }, new Map<string, AuthFileItem[]>());
+      const automaticDuplicatePersistedLocatorKeys =
+        source === 'auto'
+          ? new Set(
+              dedupedItems
+                .filter(
+                  (item) =>
+                    item.action === 'disable' &&
+                    normalizeProvider(item.provider) === 'codex' &&
+                    hasDuplicateCodexPersistedLocator(currentFiles, item)
+                )
+                .map((item) =>
+                  getCodexPersistedLocatorKey(item.fileName, item.provider, item.authIndex)
+                )
+                .filter((key): key is string => key !== null)
+            )
+          : new Set<string>();
       const statusResolutionByKey = new Map<string, AuthFileStatusMutationResolution>();
       const resolvedStatusItems = new Map<string, ResolvedStatusActionItem>();
       dedupedItems.filter(isStatusExecutionAction).forEach((item) => {
@@ -1164,8 +1461,13 @@ export const executeCodexInspectionActions = async ({
       });
       const statusActionGroupPlans = buildStatusActionGroupPlans(
         resolvedStatusItems,
-        currentFilesByName
+        currentFilesByName,
+        source === 'auto'
       );
+      automaticSourceFallbackPlans =
+        source === 'auto'
+          ? buildAutomaticSourceFallbackPlans(resolvedStatusItems, currentFilesByName, currentFiles)
+          : new Map<string, AutomaticSourceFallbackPlan>();
       const validatedItems: CodexInspectionResultItem[] = [];
       dedupedItems.forEach((item) => {
         const currentCandidates = currentFilesByName.get(item.fileName.trim()) ?? [];
@@ -1183,8 +1485,32 @@ export const executeCodexInspectionActions = async ({
               currentFile ? readCurrentFileName(currentFile) : item.fileName.trim()
             )
           : undefined;
+        const automaticSourceFallbackPlan = isStatusExecutionAction(item)
+          ? automaticSourceFallbackPlans.get(
+              currentFile ? readCurrentFileName(currentFile) : item.fileName.trim()
+            )
+          : undefined;
+        const automaticSourceFallbackNeedsMutation = Boolean(
+          automaticSourceFallbackPlan &&
+          !automaticSourceFallbackPlan.affectedFiles.every(
+            (file) => (file.disabled === true) === (item.action === 'disable')
+          )
+        );
+        const automaticPersistedLocatorAmbiguous =
+          source === 'auto' &&
+          item.action === 'disable' &&
+          normalizeProvider(item.provider) === 'codex' &&
+          automaticDuplicatePersistedLocatorKeys.has(
+            getCodexPersistedLocatorKey(item.fileName, item.provider, item.authIndex) ?? ''
+          );
         let outcome: CodexInspectionExecutionOutcome | null = null;
-        if (!currentFile) {
+        if (automaticPersistedLocatorAmbiguous) {
+          outcome = buildActionValidationOutcome(
+            item,
+            'needs_review',
+            AUTOMATIC_PERSISTED_LOCATOR_REASON
+          );
+        } else if (!currentFile) {
           outcome = buildActionValidationOutcome(
             item,
             'failed',
@@ -1236,6 +1562,7 @@ export const executeCodexInspectionActions = async ({
           outcome = buildActionValidationOutcome(item, 'needs_review', FILE_DELETE_COVERAGE_REASON);
         } else if (
           item.action === 'disable' &&
+          !automaticSourceFallbackNeedsMutation &&
           (statusActionGroupPlan
             ? statusActionGroupPlan.affectedFiles.every((file) => file.disabled === true)
             : currentFile.disabled === true)
@@ -1243,6 +1570,7 @@ export const executeCodexInspectionActions = async ({
           outcome = buildActionValidationOutcome(item, 'skipped', '账号已是禁用状态，未重复执行');
         } else if (
           item.action === 'enable' &&
+          !automaticSourceFallbackNeedsMutation &&
           (statusActionGroupPlan
             ? statusActionGroupPlan.affectedFiles.every((file) => file.disabled !== true)
             : currentFile.disabled !== true)
@@ -1314,6 +1642,84 @@ export const executeCodexInspectionActions = async ({
   const disableItems = executableItems.filter((item) => item.action === 'disable');
   const enableItems = executableItems.filter((item) => item.action === 'enable');
 
+  const executeStatusItems = async (
+    items: CodexInspectionResultItem[],
+    disabled: boolean
+  ): Promise<CodexInspectionExecutionOutcome[]> => {
+    type StatusExecutionUnit = {
+      item: CodexInspectionResultItem;
+      sourceFallbackMembers?: CodexInspectionResultItem[];
+    };
+
+    const units: StatusExecutionUnit[] = [];
+    const plannedKeys = new Set<string>();
+    const itemsByKey = new Map(items.map((item) => [item.key, item] as const));
+    automaticSourceFallbackPlans.forEach((plan) => {
+      if (plan.action !== (disabled ? 'disable' : 'enable')) return;
+      const members = plan.members.map((member) => itemsByKey.get(member.key));
+      if (members.some((member) => !member)) return;
+      const resolvedMembers = members as CodexInspectionResultItem[];
+      const canonical = resolvedMembers[0];
+      if (!canonical) return;
+      units.push({ item: canonical, sourceFallbackMembers: resolvedMembers });
+      resolvedMembers.forEach((member) => plannedKeys.add(member.key));
+    });
+    items.forEach((item) => {
+      if (!plannedKeys.has(item.key)) units.push({ item });
+    });
+
+    const unitOutcomes = await runConcurrently(
+      units,
+      settings.deleteWorkers,
+      async (unit): Promise<CodexInspectionExecutionOutcome[]> => {
+        const result = await executeStatusChange(
+          unit.item,
+          disabled,
+          statusGroupMembersByAccountKey.get(unit.item.key),
+          requestScope,
+          source === 'auto',
+          unit.sourceFallbackMembers
+        );
+        const resultOutcomes = [result.outcome];
+        const fallbackMembers = unit.sourceFallbackMembers;
+        if (!fallbackMembers) return resultOutcomes;
+
+        if (result.outcome.success && result.mutationScope === 'source-file') {
+          automaticSourceFileMembersByAccountKey.set(result.outcome.accountKey, fallbackMembers);
+          if (fallbackMembers.length <= 1) return resultOutcomes;
+          resultOutcomes.push(
+            ...fallbackMembers
+              .slice(1)
+              .map((member) =>
+                buildActionValidationOutcome(
+                  member,
+                  'skipped',
+                  '该认证目标已由另一条结果处理',
+                  result.outcome.accountKey
+                )
+              )
+          );
+          return resultOutcomes;
+        }
+
+        if (fallbackMembers.length <= 1) return resultOutcomes;
+
+        for (const member of fallbackMembers.slice(1)) {
+          const siblingResult = await executeStatusChange(
+            member,
+            disabled,
+            statusGroupMembersByAccountKey.get(member.key),
+            requestScope,
+            source === 'auto'
+          );
+          resultOutcomes.push(siblingResult.outcome);
+        }
+        return resultOutcomes;
+      }
+    );
+    return unitOutcomes.flat();
+  };
+
   if (deleteItems.length > 0) {
     const deleteOutcomes = await runConcurrently(deleteItems, settings.deleteWorkers, (item) =>
       executeDelete(item, actionReferenceItems, requestScope)
@@ -1323,9 +1729,7 @@ export const executeCodexInspectionActions = async ({
   }
 
   if (disableItems.length > 0) {
-    const disableOutcomes = await runConcurrently(disableItems, settings.deleteWorkers, (item) =>
-      executeStatusChange(item, true, statusGroupMembersByAccountKey.get(item.key), requestScope)
-    );
+    const disableOutcomes = await executeStatusItems(disableItems, true);
     if (source === 'auto') {
       const itemByAccountKey = new Map(disableItems.map((item) => [item.key, item] as const));
       for (const outcome of disableOutcomes) {
@@ -1333,11 +1737,15 @@ export const executeCodexInspectionActions = async ({
         const item = itemByAccountKey.get(outcome.accountKey);
         if (!item) continue;
         const statusGroupMembers = statusGroupMembersByAccountKey.get(outcome.accountKey);
-        const persisted = statusGroupMembers
+        const automaticSourceFileMembers = automaticSourceFileMembersByAccountKey.get(
+          outcome.accountKey
+        );
+        const ownershipMembers = automaticSourceFileMembers ?? statusGroupMembers;
+        const persisted = ownershipMembers
           ? replaceCodexInspectionDisableOwnershipForFile(
               connectionFingerprint,
               item.fileName,
-              statusGroupMembers.map((member) => ({
+              ownershipMembers.map((member) => ({
                 fileName: member.fileName,
                 provider: member.provider,
                 authIndex: member.authIndex,
@@ -1358,17 +1766,20 @@ export const executeCodexInspectionActions = async ({
           item,
           false,
           statusGroupMembers,
-          requestScope
+          requestScope,
+          source === 'auto',
+          automaticSourceFileMembersByAccountKey.get(outcome.accountKey)
         );
         const rolledBack =
-          rollbackOutcome.success &&
-          (rollbackOutcome.status === 'success' || rollbackOutcome.status === 'skipped');
+          rollbackOutcome.outcome.success &&
+          (rollbackOutcome.outcome.status === 'success' ||
+            rollbackOutcome.outcome.status === 'skipped');
         outcome.status = 'failed';
         outcome.success = false;
         outcome.error = rolledBack
           ? '自动禁用所有权保存失败，禁用操作已回滚'
           : `自动禁用所有权保存失败，且禁用回滚失败：${
-              rollbackOutcome.error || '未知错误'
+              rollbackOutcome.outcome.error || '未知错误'
             }；请到凭证管理中手动恢复`;
       }
     }
@@ -1377,9 +1788,7 @@ export const executeCodexInspectionActions = async ({
   }
 
   if (enableItems.length > 0) {
-    const enableOutcomes = await runConcurrently(enableItems, settings.deleteWorkers, (item) =>
-      executeStatusChange(item, false, statusGroupMembersByAccountKey.get(item.key), requestScope)
-    );
+    const enableOutcomes = await executeStatusItems(enableItems, false);
     enableOutcomes.forEach((outcome) => logExecutionOutcome(outcome, onLog, t));
     outcomes.push(...enableOutcomes);
   }
@@ -1390,10 +1799,13 @@ export const executeCodexInspectionActions = async ({
     const item = itemByAccountKey.get(outcome.accountKey);
     if (!item) return;
     const statusGroupMembers = statusGroupMembersByAccountKey.get(outcome.accountKey);
+    const automaticSourceFileMembers = automaticSourceFileMembersByAccountKey.get(
+      outcome.accountKey
+    );
     if (outcome.action === 'disable' && source === 'auto') {
       return;
     }
-    if (outcome.action === 'delete' || statusGroupMembers) {
+    if (outcome.action === 'delete' || statusGroupMembers || automaticSourceFileMembers) {
       clearCodexInspectionDisableOwnershipForFile(connectionFingerprint, item.fileName);
       return;
     }

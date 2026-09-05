@@ -95,7 +95,7 @@ describe('toInspectionAccount', () => {
     ).toBe(first.key);
   });
 
-  it('uses the account ID before a mutable display label for a missing auth_index', () => {
+  it('keeps same-Workspace Codex members distinct without an auth_index', () => {
     const first = toInspectionAccount({
       name: 'shared.json',
       type: 'codex',
@@ -109,7 +109,7 @@ describe('toInspectionAccount', () => {
       account_id: 'account-1',
     });
 
-    expect(renamed.key).toBe(first.key);
+    expect(renamed.key).not.toBe(first.key);
   });
 
   it('uses generic project identity and display-account aliases', () => {

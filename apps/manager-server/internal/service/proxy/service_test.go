@@ -446,6 +446,7 @@ func TestPrepareAuthFileFieldsMutationVerifiesIdentityAndRewritesRuntimeSelector
 			"auth_index": "auth-1",
 			"provider":   "codex",
 			"account_id": "account-1",
+			"account":    "user@example.com",
 		}})
 	}))
 	defer server.Close()
@@ -545,6 +546,7 @@ func TestPrepareAuthFileStatusMutationStripsCPAMPIdentityBeforeForwarding(t *tes
 			"auth_index": "auth-1",
 			"provider":   "codex",
 			"account_id": "account-1",
+			"account":    "user@example.com",
 		}})
 	}))
 	defer server.Close()

@@ -7,8 +7,13 @@ import type { AuthFilesResponse } from '@/types/authFile';
 import type { AuthFileItem, OAuthModelAliasEntry } from '@/types';
 import {
   readAuthFileStatusAccountId,
+  readAuthFileStatusAccountIdInvalid,
   readAuthFileStatusAccountSnapshot,
+  readAuthFileStatusCodexMember,
+  readAuthFileStatusCodexMemberInvalid,
   readAuthFileStatusProvider,
+  readAuthFileStatusRuntimeId,
+  normalizeCodexMemberSnapshot,
 } from '@/utils/authFileStatusMutation';
 import { sha256RawTextHex } from '@/utils/apiKeyHash';
 import { parseTimestampMs } from '@/utils/timestamp';
@@ -433,6 +438,10 @@ const readAuthIndexField = (entry: AuthFileEntry): string => {
 const getAuthFileDedupeKey = (entry: AuthFileEntry): string => {
   const name = readTextField(entry, 'name');
   const authIndex = readAuthIndexField(entry);
+  const runtimeId = readAuthFileStatusRuntimeId(entry);
+  if (name && authIndex && runtimeId) {
+    return `${name}\u0000${authIndex}\u0000${runtimeId}`;
+  }
   if (name && authIndex) return `${name}\u0000${authIndex}`;
   return name || JSON.stringify(entry);
 };
@@ -847,19 +856,47 @@ const authFileRecordMatchesPatchTarget = (
   target: AuthFileStatusTarget
 ): boolean => {
   const authFileRecord = { name: '', ...record } as AuthFileItem;
+  const credentialLocatorPresent = Boolean(
+    String(target.runtimeId ?? '').trim() || normalizePatchAuthIndex(target.authIndex)
+  );
   const expectedProvider = normalizePatchProviderIdentity(target.provider);
   const actualProvider = normalizePatchProviderIdentity(readAuthFileStatusProvider(authFileRecord));
   if (expectedProvider && actualProvider && actualProvider !== expectedProvider) {
     return false;
   }
+  if (actualProvider === 'codex' && readAuthFileStatusAccountIdInvalid(authFileRecord)) {
+    return false;
+  }
 
   const expectedAccountId = String(target.accountId ?? '').trim();
   if (expectedAccountId) {
-    return readAuthFileStatusAccountId(authFileRecord) === expectedAccountId;
+    if (actualProvider === 'codex') {
+      const currentWorkspace = readAuthFileStatusAccountId(authFileRecord);
+      if (currentWorkspace && currentWorkspace !== expectedAccountId) return false;
+      const expectedSnapshot = String(target.accountSnapshot ?? '').trim();
+      const expectedMember = normalizeCodexMemberSnapshot(expectedSnapshot);
+      if (!expectedMember) {
+        // A Workspace-only target must still carry a credential locator. The
+        // raw source record may be one of several Team members in one file.
+        return credentialLocatorPresent && !readAuthFileStatusCodexMemberInvalid(authFileRecord);
+      }
+      if (readAuthFileStatusCodexMemberInvalid(authFileRecord)) return false;
+      const currentMember = readAuthFileStatusCodexMember(authFileRecord);
+      return !currentMember || currentMember === expectedMember;
+    }
+    if (readAuthFileStatusAccountId(authFileRecord) !== expectedAccountId) return false;
+    return true;
   }
 
   const expectedAccountSnapshot = String(target.accountSnapshot ?? '').trim();
   if (expectedAccountSnapshot) {
+    if (actualProvider === 'codex') {
+      const expectedMember = normalizeCodexMemberSnapshot(expectedAccountSnapshot);
+      if (!credentialLocatorPresent || !expectedMember) return false;
+      if (readAuthFileStatusCodexMemberInvalid(authFileRecord)) return false;
+      const currentMember = readAuthFileStatusCodexMember(authFileRecord);
+      return !currentMember || currentMember === expectedMember;
+    }
     return readAuthFileStatusAccountSnapshot(authFileRecord) === expectedAccountSnapshot;
   }
 

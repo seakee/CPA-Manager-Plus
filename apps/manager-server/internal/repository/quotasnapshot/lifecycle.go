@@ -11,6 +11,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/codexquota"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
 
 const (
@@ -2032,6 +2033,29 @@ func resolveContainerCycleID(
 }
 
 func (r *repository) ListWindowStates(ctx context.Context, accountKey, provider string) ([]model.AccountQuotaWindowState, error) {
+	return r.listWindowStates(ctx, accountKey, provider, false)
+}
+
+func (r *repository) ListLegacyCodexWorkspaceWindowStates(
+	ctx context.Context,
+	accountKey, provider string,
+) ([]model.AccountQuotaWindowState, error) {
+	legacyPrefix := "usage-account-history:" + usageidentity.FormatVersion + ":codex-account:"
+	if !strings.EqualFold(strings.TrimSpace(provider), "codex") || !strings.HasPrefix(strings.TrimSpace(accountKey), legacyPrefix) {
+		return []model.AccountQuotaWindowState{}, nil
+	}
+	return r.listWindowStates(ctx, accountKey, provider, true)
+}
+
+func (r *repository) listWindowStates(
+	ctx context.Context,
+	accountKey, provider string,
+	includeLegacyCodexWorkspace bool,
+) ([]model.AccountQuotaWindowState, error) {
+	legacyFilter := `and ` + excludeLegacyCodexWorkspaceSnapshotSQL("")
+	if includeLegacyCodexWorkspace {
+		legacyFilter = ""
+	}
 	rows, err := r.db.QueryContext(ctx, `select
 		id, account_key, provider, provider_window_id, window_kind, window_mode,
 		model_scope_kind, coalesce(model_scope_key, ''), coalesce(model_ids_json, ''),
@@ -2039,6 +2063,7 @@ func (r *repository) ListWindowStates(ctx context.Context, accountKey, provider 
 		coalesce(container_provider_window_id, ''), availability, generation,
 		first_seen_at_ms, last_seen_at_ms, missing_since_ms, deactivated_at_ms
 		from account_quota_windows where account_key = ? and provider = ?
+			`+legacyFilter+`
 		order by updated_at_ms desc, id desc`, strings.TrimSpace(accountKey), strings.TrimSpace(provider))
 	if err != nil {
 		return nil, err

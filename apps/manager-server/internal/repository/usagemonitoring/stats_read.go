@@ -108,7 +108,7 @@ func (r *repository) LoadAccountStats(ctx context.Context, filter AnalyticsFilte
 	if dailyAvailable && SupportsStatsFilter(filter) {
 		err = loadAccountRange(ctx, tx, state, projectionState.CoverageEventID, projectionComplete, revision, filter, grouped)
 	} else {
-		err = mergeProjectedAccountStats(ctx, tx, projectionState.CoverageEventID, projectionComplete, filter, 0, false, grouped)
+		err = mergeProjectedAccountStats(ctx, tx, projectionState.CoverageEventID, projectionComplete, filter, eventSourceOptions{}, grouped)
 	}
 	if err != nil {
 		return nil, projectionState, false, err
@@ -183,7 +183,7 @@ func loadAccountRange(
 	fullStartMS := ceilDayMS(filter.FromMS)
 	fullEndMS := floorDayMS(filter.ToMS)
 	if fullStartMS >= fullEndMS {
-		return mergeProjectedAccountStats(ctx, tx, projectionCoverageEventID, projectionComplete, filter, 0, false, grouped)
+		return mergeProjectedAccountStats(ctx, tx, projectionCoverageEventID, projectionComplete, filter, eventSourceOptions{}, grouped)
 	}
 	if err := mergeStoredAccountStats(ctx, tx, revision, filter, fullStartMS, fullEndMS, grouped); err != nil {
 		return err
@@ -191,20 +191,35 @@ func loadAccountRange(
 	tailFilter := filter
 	tailFilter.FromMS = fullStartMS
 	tailFilter.ToMS = fullEndMS
-	if err := mergeProjectedAccountStats(ctx, tx, projectionCoverageEventID, projectionComplete, tailFilter, state.CoverageEventID, true, grouped); err != nil {
+	if err := mergeProjectedAccountStats(ctx, tx, projectionCoverageEventID, projectionComplete, tailFilter, eventSourceOptions{AfterID: state.CoverageEventID, UseAfter: true}, grouped); err != nil {
+		return err
+	}
+	if err := mergeProjectedAccountStats(
+		ctx,
+		tx,
+		projectionCoverageEventID,
+		projectionComplete,
+		tailFilter,
+		eventSourceOptions{
+			MaxID:           state.CoverageEventID,
+			UseMax:          true,
+			CodexMarkerOnly: true,
+		},
+		grouped,
+	); err != nil {
 		return err
 	}
 	if filter.FromMS < fullStartMS {
 		edgeFilter := filter
 		edgeFilter.ToMS = fullStartMS
-		if err := mergeProjectedAccountStats(ctx, tx, projectionCoverageEventID, projectionComplete, edgeFilter, 0, false, grouped); err != nil {
+		if err := mergeProjectedAccountStats(ctx, tx, projectionCoverageEventID, projectionComplete, edgeFilter, eventSourceOptions{}, grouped); err != nil {
 			return err
 		}
 	}
 	if fullEndMS < filter.ToMS {
 		edgeFilter := filter
 		edgeFilter.FromMS = fullEndMS
-		if err := mergeProjectedAccountStats(ctx, tx, projectionCoverageEventID, projectionComplete, edgeFilter, 0, false, grouped); err != nil {
+		if err := mergeProjectedAccountStats(ctx, tx, projectionCoverageEventID, projectionComplete, edgeFilter, eventSourceOptions{}, grouped); err != nil {
 			return err
 		}
 	}
@@ -312,8 +327,7 @@ func mergeProjectedAccountStats(
 	projectionCoverageEventID int64,
 	projectionComplete bool,
 	filter AnalyticsFilter,
-	afterID int64,
-	useAfterID bool,
+	options eventSourceOptions,
 	grouped map[accountStatKey]*accountStatAccumulator,
 ) error {
 	if filter.FromMS >= filter.ToMS {
@@ -341,8 +355,11 @@ func mergeProjectedAccountStats(
 		coalesce(e.cache_creation_tokens, 0), coalesce(e.total_tokens, 0),
 		e.latency_ms`,
 		eventSourceOptions{
-			AfterID:            afterID,
-			UseAfter:           useAfterID,
+			AfterID:            options.AfterID,
+			UseAfter:           options.UseAfter,
+			MaxID:              options.MaxID,
+			UseMax:             options.UseMax,
+			CodexMarkerOnly:    options.CodexMarkerOnly,
 			ProjectionComplete: projectionComplete,
 		},
 	)

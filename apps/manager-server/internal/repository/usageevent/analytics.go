@@ -1767,12 +1767,19 @@ func ResolveAccountWindowLegacyKeys(
 }
 
 func codexLegacyOwnerKey(window AccountWindowUsageQuery) string {
-	return normalizeIdentityProvider(window.AuthProviderSnapshot) + "\x00" + strings.TrimSpace(window.AuthAccountIDSnapshot)
+	member, _ := usageidentity.NormalizeCodexMemberSnapshot(window.AccountSnapshot)
+	return strings.Join([]string{
+		normalizeIdentityProvider(window.AuthProviderSnapshot),
+		strings.TrimSpace(window.AuthAccountIDSnapshot),
+		member,
+	}, "\x00")
 }
 
 func codexLegacyWindowTarget(window AccountWindowUsageQuery) bool {
+	_, memberOK := usageidentity.NormalizeCodexMemberSnapshot(window.AccountSnapshot)
 	return strings.TrimSpace(window.AuthAccountIDSnapshot) != "" &&
-		normalizeIdentityProvider(window.AuthProviderSnapshot) == "codex"
+		normalizeIdentityProvider(window.AuthProviderSnapshot) == "codex" &&
+		memberOK
 }
 
 func codexLegacyWindowCacheKey(window AccountWindowUsageQuery) string {
@@ -1802,19 +1809,18 @@ func accountWindowIdentityFields(window AccountWindowUsageQuery) usageidentity.F
 }
 
 func accountWindowQueryKey(window AccountWindowUsageQuery) string {
+	// AccountKey is a caller-side correlation value, not an authority to
+	// select a Codex bucket. Recompute Codex keys from the credential snapshots
+	// so an old workspace-level codex-account key cannot reach stale derived
+	// data after the member-aware identity revision.
+	if normalizeIdentityProvider(window.AuthProviderSnapshot) == "codex" {
+		key, _ := usageidentity.AccountKey(accountWindowIdentityFields(window))
+		return key
+	}
 	if key := strings.TrimSpace(window.AccountKey); key != "" {
 		return key
 	}
-	key, _ := usageidentity.AccountKey(usageidentity.Fields{
-		AuthFileSnapshot:      window.AuthFileSnapshot,
-		AuthIndex:             window.AuthIndex,
-		AuthProviderSnapshot:  window.AuthProviderSnapshot,
-		AuthAccountIDSnapshot: window.AuthAccountIDSnapshot,
-		AuthProjectIDSnapshot: window.AuthProjectIDSnapshot,
-		AccountSnapshot:       window.AccountSnapshot,
-		AuthLabelSnapshot:     window.AuthLabelSnapshot,
-		Source:                window.Source,
-	})
+	key, _ := usageidentity.AccountKey(accountWindowIdentityFields(window))
 	return key
 }
 

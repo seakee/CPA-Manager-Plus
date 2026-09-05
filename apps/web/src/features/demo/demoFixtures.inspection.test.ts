@@ -468,7 +468,7 @@ describe('credential health inspection demo fixtures', () => {
     ).toBe(0);
   });
 
-  it('keeps account IDs distinct from account snapshots in demo action identity', () => {
+  it('does not promote workspace IDs or weak snapshots to demo member identity', () => {
     const base = getDemoCodexInspectionRun().results.find((item) => item.id === 503);
     if (!base) throw new Error('missing demo Codex inspection result 503');
 
@@ -489,7 +489,8 @@ describe('credential health inspection demo fixtures', () => {
       accountSnapshot: 'shared-identity',
     });
 
-    expect(accountIdIdentity).not.toBe(accountSnapshotIdentity);
+    expect(accountIdIdentity).toBe('shared.json::-');
+    expect(accountSnapshotIdentity).toBe('shared.json::-');
   });
 
   it('marks executed demo actions as handled in the returned detail', async () => {

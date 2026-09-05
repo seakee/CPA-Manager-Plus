@@ -5,6 +5,7 @@ import {
   getAuthFileStatusMutationLockKeys,
   getAuthFileStatusSelectionKey,
   readAuthFileStatusAccountId,
+  readAuthFileStatusAccountIdInvalid,
   readAuthFileStatusAccountSnapshot,
   readAuthFileStatusProvider,
   resolveAuthFileStatusMutationTarget,
@@ -57,9 +58,22 @@ describe('auth file status identity keys', () => {
       account: 'second@example.com',
     } as AuthFileItem;
 
-    expect(getAuthFileStatusIdentityKey(first)).toBe(getAuthFileStatusIdentityKey(renamed));
+    expect(getAuthFileStatusIdentityKey(first)).not.toBe(getAuthFileStatusIdentityKey(renamed));
     expect(getAuthFileStatusIdentityKey(first)).not.toBe(getAuthFileStatusIdentityKey(second));
     expect(getAuthFileStatusSelectionKey(first)).not.toBe(getAuthFileStatusSelectionKey(second));
+  });
+
+  it('keeps the existing account-ID precedence for non-Codex providers', () => {
+    const original = {
+      id: 'runtime-auth-1',
+      name: 'shared.json',
+      type: 'xai',
+      account_id: 'account-1',
+      account: 'original@example.com',
+    } as AuthFileItem;
+    const refreshed = { ...original, account: 'display-changed@example.com' } as AuthFileItem;
+
+    expect(getAuthFileStatusIdentityKey(original)).toBe(getAuthFileStatusIdentityKey(refreshed));
   });
 
   it('uses a normalized provider plus runtime ID when account metadata is absent', () => {
@@ -120,6 +134,18 @@ describe('auth file status identity keys', () => {
 
     expect(readAuthFileStatusProvider(file)).toBe('vertex');
     expect(readAuthFileStatusAccountSnapshot(file)).toBe('project@example.com');
+  });
+
+  it('marks conflicting Codex Workspace evidence invalid', () => {
+    const file = {
+      name: 'codex.json',
+      type: 'codex',
+      account_id: 'workspace-a',
+      metadata: { id_token: { account_id: 'workspace-b' } },
+    } as AuthFileItem;
+
+    expect(readAuthFileStatusAccountId(file)).toBe('');
+    expect(readAuthFileStatusAccountIdInvalid(file)).toBe(true);
   });
 });
 
@@ -196,7 +222,7 @@ describe('resolveAuthFileStatusMutationTarget', () => {
     });
   });
 
-  it('keeps an account-ID match authoritative when the display snapshot changes', () => {
+  it('rejects a Codex member change even when the Workspace ID is unchanged', () => {
     const current = {
       id: 'runtime-auth-1',
       name: 'same.json',
@@ -215,7 +241,213 @@ describe('resolveAuthFileStatusMutationTarget', () => {
         accountId: 'account-1',
         accountSnapshot: 'original@example.com',
       })
+    ).toMatchObject({ target: current, scope: 'ambiguous', failure: 'identity-changed' });
+  });
+
+  it('allows missing Codex Workspace and member evidence for a uniquely located credential', () => {
+    const current = {
+      id: 'runtime-auth-1',
+      name: 'same.json',
+      auth_index: 'auth-1',
+      type: 'codex',
+      disabled: true,
+    } as AuthFileItem;
+
+    expect(
+      resolveAuthFileStatusMutationTarget([current], {
+        name: 'same.json',
+        runtimeId: 'runtime-auth-1',
+        authIndex: 'auth-1',
+        provider: 'codex',
+        accountId: 'workspace-1',
+        accountSnapshot: 'alice@example.com',
+      })
     ).toMatchObject({ target: current, scope: 'credential', failure: null });
+  });
+
+  it('checks a strong account/email member on an AuthFileItem target', () => {
+    const requested = {
+      id: 'runtime-auth-1',
+      name: 'same.json',
+      auth_index: 'auth-1',
+      type: 'codex',
+      account_id: 'workspace-1',
+      account: 'alice@example.com',
+    } as AuthFileItem;
+    const current = { ...requested, account: 'bob@example.com' } as AuthFileItem;
+
+    expect(resolveAuthFileStatusMutationTarget([current], requested)).toMatchObject({
+      target: current,
+      scope: 'ambiguous',
+      failure: 'identity-changed',
+    });
+  });
+
+  it('keeps a duplicate file/auth-index selector ambiguous despite Codex member evidence', () => {
+    const alice = {
+      id: 'runtime-alice',
+      name: 'team.json',
+      auth_index: 'auth-1',
+      type: 'codex',
+      account_id: 'workspace-1',
+      account: 'alice@example.com',
+    } as AuthFileItem;
+    const bob = {
+      id: 'runtime-bob',
+      name: 'team.json',
+      auth_index: 'auth-1',
+      type: 'codex',
+      account_id: 'workspace-1',
+      account: 'bob@example.com',
+    } as AuthFileItem;
+
+    expect(
+      resolveAuthFileStatusMutationTarget([alice, bob], {
+        name: 'team.json',
+        authIndex: 'auth-1',
+        provider: 'codex',
+        accountId: 'workspace-1',
+        accountSnapshot: 'ALICE@EXAMPLE.COM',
+      })
+    ).toMatchObject({ target: null, scope: 'ambiguous', failure: 'ambiguous' });
+  });
+
+  it('keeps a shared selector ambiguous when a sibling lacks member evidence', () => {
+    const alice = {
+      id: 'runtime-alice',
+      name: 'team.json',
+      auth_index: 'auth-1',
+      type: 'codex',
+      account_id: 'workspace-1',
+      account: 'alice@example.com',
+    } as AuthFileItem;
+    const unknown = {
+      id: 'runtime-unknown',
+      name: 'team.json',
+      auth_index: 'auth-1',
+      type: 'codex',
+      account_id: 'workspace-1',
+    } as AuthFileItem;
+
+    expect(
+      resolveAuthFileStatusMutationTarget([alice, unknown], {
+        name: 'team.json',
+        authIndex: 'auth-1',
+        provider: 'codex',
+        accountId: 'workspace-1',
+        accountSnapshot: 'alice@example.com',
+      })
+    ).toMatchObject({ target: null, scope: 'ambiguous', failure: 'ambiguous' });
+  });
+
+  it('rejects a Codex mutation when Workspace evidence is invalid even if the auth index matches', () => {
+    const current = {
+      id: 'runtime-auth-1',
+      name: 'same.json',
+      auth_index: 'auth-1',
+      type: 'codex',
+      account_id: 'workspace-a',
+      metadata: { id_token: { account_id: 'workspace-b' } },
+      account: 'alice@example.com',
+    } as AuthFileItem;
+
+    const resolution = resolveAuthFileStatusMutationTarget([current], {
+      name: 'same.json',
+      runtimeId: 'runtime-auth-1',
+      authIndex: 'auth-1',
+      provider: 'codex',
+      accountId: 'workspace-a',
+      accountSnapshot: 'alice@example.com',
+    });
+
+    expect(resolution).toMatchObject({
+      target: current,
+      scope: 'ambiguous',
+      failure: 'identity-changed',
+    });
+  });
+
+  it('fails closed when a Codex member evidence snapshot is conflicting even without a target member', () => {
+    const current = {
+      id: 'runtime-auth-1',
+      name: 'same.json',
+      auth_index: 'auth-1',
+      type: 'codex',
+      account_id: 'workspace-a',
+      accountSnapshot: 'alice@example.com',
+      account_snapshot: 'bob@example.com',
+    } as AuthFileItem;
+
+    expect(
+      resolveAuthFileStatusMutationTarget([current], {
+        name: 'same.json',
+        runtimeId: 'runtime-auth-1',
+        authIndex: 'auth-1',
+        provider: 'codex',
+        accountId: 'workspace-a',
+      })
+    ).toMatchObject({ target: current, scope: 'ambiguous', failure: 'identity-changed' });
+  });
+
+  it('uses the credential locator when a Codex target carries a weak member snapshot', () => {
+    const current = {
+      id: 'runtime-auth-1',
+      name: 'same.json',
+      auth_index: 'auth-1',
+      type: 'codex',
+      account_id: 'account-1',
+      account: 'Alice',
+    } as AuthFileItem;
+
+    expect(
+      resolveAuthFileStatusMutationTarget([current], {
+        name: 'same.json',
+        runtimeId: 'runtime-auth-1',
+        authIndex: 'auth-1',
+        provider: 'codex',
+        accountId: 'account-1',
+        accountSnapshot: 'Alice',
+      })
+    ).toMatchObject({ target: current, scope: 'credential', failure: null });
+  });
+
+  it('does not use Workspace/member alone for a Codex mutation', () => {
+    const current = {
+      id: 'runtime-auth-1',
+      name: 'same.json',
+      type: 'codex',
+      account_id: 'workspace-1',
+      account: 'alice@example.com',
+    } as AuthFileItem;
+
+    expect(
+      resolveAuthFileStatusMutationTarget([current], {
+        name: 'same.json',
+        provider: 'codex',
+        accountId: 'workspace-1',
+        accountSnapshot: 'alice@example.com',
+      })
+    ).toMatchObject({ target: current, scope: 'ambiguous', failure: 'identity-changed' });
+  });
+
+  it('fails closed for a weak Codex member snapshot without a credential locator', () => {
+    const current = {
+      id: 'runtime-auth-1',
+      name: 'same.json',
+      auth_index: 'auth-1',
+      type: 'codex',
+      account_id: 'account-1',
+      account: 'Alice',
+    } as AuthFileItem;
+
+    expect(
+      resolveAuthFileStatusMutationTarget([current], {
+        name: 'same.json',
+        provider: 'codex',
+        accountId: 'account-1',
+        accountSnapshot: 'Alice',
+      })
+    ).toMatchObject({ target: current, scope: 'ambiguous', failure: 'identity-changed' });
   });
 
   it('rejects a status mutation when either side is missing a real provider', () => {

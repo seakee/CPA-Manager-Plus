@@ -43,8 +43,7 @@ func loadDailyAggregate(
 			projectionCoverageEventID,
 			projectionComplete,
 			filter,
-			0,
-			false,
+			eventSourceOptions{},
 			&accumulator,
 		); err != nil {
 			return Aggregate{}, err
@@ -64,8 +63,23 @@ func loadDailyAggregate(
 		projectionCoverageEventID,
 		projectionComplete,
 		tailFilter,
-		state.CoverageEventID,
-		true,
+		eventSourceOptions{AfterID: state.CoverageEventID, UseAfter: true},
+		&accumulator,
+	); err != nil {
+		return Aggregate{}, err
+	}
+	markerFilter := tailFilter
+	if err := mergeProjectedAggregate(
+		ctx,
+		tx,
+		projectionCoverageEventID,
+		projectionComplete,
+		markerFilter,
+		eventSourceOptions{
+			MaxID:           state.CoverageEventID,
+			UseMax:          true,
+			CodexMarkerOnly: true,
+		},
 		&accumulator,
 	); err != nil {
 		return Aggregate{}, err
@@ -79,8 +93,7 @@ func loadDailyAggregate(
 			projectionCoverageEventID,
 			projectionComplete,
 			edgeFilter,
-			0,
-			false,
+			eventSourceOptions{},
 			&accumulator,
 		); err != nil {
 			return Aggregate{}, err
@@ -95,8 +108,7 @@ func loadDailyAggregate(
 			projectionCoverageEventID,
 			projectionComplete,
 			edgeFilter,
-			0,
-			false,
+			eventSourceOptions{},
 			&accumulator,
 		); err != nil {
 			return Aggregate{}, err
@@ -139,8 +151,7 @@ func mergeProjectedAggregate(
 	projectionCoverageEventID int64,
 	projectionComplete bool,
 	filter AnalyticsFilter,
-	afterID int64,
-	useAfterID bool,
+	options eventSourceOptions,
 	accumulator *dailyAggregateAccumulator,
 ) error {
 	if filter.FromMS >= filter.ToMS {
@@ -160,8 +171,11 @@ func mergeProjectedAggregate(
 		coalesce(e.cache_read_tokens, 0), coalesce(e.cache_creation_tokens, 0),
 		coalesce(e.total_tokens, 0), e.latency_ms`,
 		eventSourceOptions{
-			AfterID:            afterID,
-			UseAfter:           useAfterID,
+			AfterID:            options.AfterID,
+			UseAfter:           options.UseAfter,
+			MaxID:              options.MaxID,
+			UseMax:             options.UseMax,
+			CodexMarkerOnly:    options.CodexMarkerOnly,
 			ProjectionComplete: projectionComplete,
 		},
 	)
@@ -241,7 +255,7 @@ func loadDailyModelStats(
 	fullStartMS := ceilDayMS(filter.FromMS)
 	fullEndMS := floorDayMS(filter.ToMS)
 	if fullStartMS >= fullEndMS {
-		if err := mergeProjectedModelStats(ctx, tx, projectionCoverageEventID, projectionComplete, filter, 0, false, grouped); err != nil {
+		if err := mergeProjectedModelStats(ctx, tx, projectionCoverageEventID, projectionComplete, filter, eventSourceOptions{}, grouped); err != nil {
 			return nil, err
 		}
 		return sortedDailyModelStats(grouped), nil
@@ -259,8 +273,22 @@ func loadDailyModelStats(
 		projectionCoverageEventID,
 		projectionComplete,
 		tailFilter,
-		state.CoverageEventID,
-		true,
+		eventSourceOptions{AfterID: state.CoverageEventID, UseAfter: true},
+		grouped,
+	); err != nil {
+		return nil, err
+	}
+	if err := mergeProjectedModelStats(
+		ctx,
+		tx,
+		projectionCoverageEventID,
+		projectionComplete,
+		tailFilter,
+		eventSourceOptions{
+			MaxID:           state.CoverageEventID,
+			UseMax:          true,
+			CodexMarkerOnly: true,
+		},
 		grouped,
 	); err != nil {
 		return nil, err
@@ -268,14 +296,14 @@ func loadDailyModelStats(
 	if filter.FromMS < fullStartMS {
 		edgeFilter := filter
 		edgeFilter.ToMS = fullStartMS
-		if err := mergeProjectedModelStats(ctx, tx, projectionCoverageEventID, projectionComplete, edgeFilter, 0, false, grouped); err != nil {
+		if err := mergeProjectedModelStats(ctx, tx, projectionCoverageEventID, projectionComplete, edgeFilter, eventSourceOptions{}, grouped); err != nil {
 			return nil, err
 		}
 	}
 	if fullEndMS < filter.ToMS {
 		edgeFilter := filter
 		edgeFilter.FromMS = fullEndMS
-		if err := mergeProjectedModelStats(ctx, tx, projectionCoverageEventID, projectionComplete, edgeFilter, 0, false, grouped); err != nil {
+		if err := mergeProjectedModelStats(ctx, tx, projectionCoverageEventID, projectionComplete, edgeFilter, eventSourceOptions{}, grouped); err != nil {
 			return nil, err
 		}
 	}
@@ -318,8 +346,7 @@ func mergeProjectedModelStats(
 	projectionCoverageEventID int64,
 	projectionComplete bool,
 	filter AnalyticsFilter,
-	afterID int64,
-	useAfterID bool,
+	options eventSourceOptions,
 	grouped map[dailyModelStatKey]*ModelStat,
 ) error {
 	if filter.FromMS >= filter.ToMS {
@@ -340,8 +367,11 @@ func mergeProjectedModelStats(
 		coalesce(e.cache_read_tokens, 0), coalesce(e.cache_creation_tokens, 0),
 		coalesce(e.total_tokens, 0)`,
 		eventSourceOptions{
-			AfterID:            afterID,
-			UseAfter:           useAfterID,
+			AfterID:            options.AfterID,
+			UseAfter:           options.UseAfter,
+			MaxID:              options.MaxID,
+			UseMax:             options.UseMax,
+			CodexMarkerOnly:    options.CodexMarkerOnly,
 			ProjectionComplete: projectionComplete,
 		},
 	)

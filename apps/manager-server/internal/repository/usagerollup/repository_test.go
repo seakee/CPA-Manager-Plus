@@ -603,6 +603,91 @@ func TestCatchUpAccountHistorySeparatesSharedAccountByAuthIndex(t *testing.T) {
 	}
 }
 
+func TestCatchUpAccountHistoryRebuildSeparatesCodexWorkspaceMembers(t *testing.T) {
+	db := newRollupTestDB(t)
+	ctx := context.Background()
+	events := usageevent.New(db)
+	repo := New(db)
+
+	alice := rollupTestEvent("codex-team-alice", 1_700_000_001_000, "gpt-5", "", "alice@example.com", "", "auth-alice", false, 100, 0, 0, 0, 0, 0, 100)
+	alice.Provider = "codex"
+	alice.AuthProviderSnapshot = "codex"
+	alice.AuthFileSnapshot = "alice-free.json"
+	alice.Source = alice.AuthFileSnapshot
+	alice.AuthAccountIDSnapshot = "workspace-1"
+
+	bob := rollupTestEvent("codex-team-bob", 1_700_000_002_000, "gpt-5", "", "bob@example.com", "", "auth-bob", false, 200, 0, 0, 0, 0, 0, 200)
+	bob.Provider = "codex"
+	bob.AuthProviderSnapshot = "codex"
+	bob.AuthFileSnapshot = "bob-team.json"
+	bob.Source = bob.AuthFileSnapshot
+	bob.AuthAccountIDSnapshot = "workspace-1"
+
+	if _, err := events.InsertBatch(ctx, []usage.Event{alice, bob}); err != nil {
+		t.Fatalf("insert Codex team events: %v", err)
+	}
+	if _, err := db.Exec(`delete from usage_account_model_rollups`); err != nil {
+		t.Fatalf("clear account rollups: %v", err)
+	}
+	scheduleRollupRebuildForTest(t, db, AccountHistoryCheckpointName, 2)
+
+	for attempt := 0; attempt < 2; attempt++ {
+		result, err := repo.CatchUpAccountHistory(ctx, 1, 1_700_000_010_000+int64(attempt))
+		if err != nil {
+			t.Fatalf("Codex rebuild batch %d: %v", attempt, err)
+		}
+		if !result.Rebuilt {
+			t.Fatalf("Codex rebuild batch %d was not marked rebuilt: %#v", attempt, result)
+		}
+	}
+
+	aliceKey, aliceOK := usageidentity.AccountKey(usageidentity.Fields{
+		AuthFileSnapshot:      alice.AuthFileSnapshot,
+		AuthIndex:             alice.AuthIndex,
+		AuthProviderSnapshot:  alice.AuthProviderSnapshot,
+		AuthAccountIDSnapshot: alice.AuthAccountIDSnapshot,
+		AccountSnapshot:       alice.AccountSnapshot,
+		Source:                alice.Source,
+	})
+	bobKey, bobOK := usageidentity.AccountKey(usageidentity.Fields{
+		AuthFileSnapshot:      bob.AuthFileSnapshot,
+		AuthIndex:             bob.AuthIndex,
+		AuthProviderSnapshot:  bob.AuthProviderSnapshot,
+		AuthAccountIDSnapshot: bob.AuthAccountIDSnapshot,
+		AccountSnapshot:       bob.AccountSnapshot,
+		Source:                bob.Source,
+	})
+	if !aliceOK || !bobOK || aliceKey == bobKey {
+		t.Fatalf("Codex team identities = alice:%q (%v), bob:%q (%v)", aliceKey, aliceOK, bobKey, bobOK)
+	}
+
+	rows, err := repo.AccountHistoryRows(ctx, []string{aliceKey, bobKey})
+	if err != nil {
+		t.Fatalf("query rebuilt Codex team history: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rebuilt Codex team rows = %#v, want two member rows", rows)
+	}
+	byKey := make(map[string]AccountHistoryRow, len(rows))
+	for _, row := range rows {
+		byKey[row.AccountKey] = row
+	}
+	if row := byKey[aliceKey]; row.Calls != 1 || row.TotalTokens != 100 {
+		t.Fatalf("rebuilt Alice history = %#v, want 100 tokens", row)
+	}
+	if row := byKey[bobKey]; row.Calls != 1 || row.TotalTokens != 200 {
+		t.Fatalf("rebuilt Bob history = %#v, want 200 tokens", row)
+	}
+
+	var rawCount int
+	if err := db.QueryRow(`select count(*) from usage_events`).Scan(&rawCount); err != nil {
+		t.Fatalf("count raw events: %v", err)
+	}
+	if rawCount != 2 {
+		t.Fatalf("raw event count = %d, want 2 after rebuild", rawCount)
+	}
+}
+
 func newRollupTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))

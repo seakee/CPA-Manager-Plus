@@ -1,21 +1,29 @@
 import type { AuthFileItem } from '@/types';
 import {
   readAuthFileStatusAccountId,
+  readAuthFileStatusAccountIdInvalid,
   readAuthFileStatusAccountSnapshot,
   readAuthFileStatusAuthIndex,
+  readAuthFileStatusCodexMember,
+  readAuthFileStatusCodexMemberInvalid,
   readAuthFileStatusPhysicalName,
   readAuthFileStatusProvider,
   readAuthFileStatusRuntimeId,
+  normalizeCodexMemberSnapshot,
   resolveCredentialIdentity,
 } from '@/utils/authFileCredentialIdentity';
 
 export {
   readAuthFileStatusAccountId,
+  readAuthFileStatusAccountIdInvalid,
   readAuthFileStatusAccountSnapshot,
   readAuthFileStatusAuthIndex,
+  readAuthFileStatusCodexMember,
+  readAuthFileStatusCodexMemberInvalid,
   readAuthFileStatusPhysicalName,
   readAuthFileStatusProvider,
   readAuthFileStatusRuntimeId,
+  normalizeCodexMemberSnapshot,
 } from '@/utils/authFileCredentialIdentity';
 
 const SELECTION_KEY_SEPARATOR = '\u0000';
@@ -53,6 +61,8 @@ export type AuthFileStatusMutationResolution = {
 
 const normalizeIdentityTarget = (target: AuthFileStatusIdentityTarget) => {
   const identity = resolveCredentialIdentity(target as AuthFileItem & AuthFileStatusMutationTarget);
+  const requestedAccountSnapshot =
+    typeof target.accountSnapshot === 'string' ? target.accountSnapshot.trim() : '';
   return {
     name: identity.physicalName,
     runtimeId: identity.runtimeId,
@@ -60,26 +70,37 @@ const normalizeIdentityTarget = (target: AuthFileStatusIdentityTarget) => {
     provider: identity.provider,
     accountId: identity.accountId,
     accountSnapshot: identity.accountSnapshot,
+    accountSnapshotProvided:
+      requestedAccountSnapshot.length > 0 || Boolean(identity.accountSnapshot),
   };
 };
 
 const normalizeTarget = (target: AuthFileStatusMutationTarget) => normalizeIdentityTarget(target);
+
+const hasCredentialLocator = (target: ReturnType<typeof normalizeTarget>): boolean =>
+  Boolean(target.runtimeId || target.authIndex);
 
 export const getAuthFileStatusIdentityKey = (target: AuthFileStatusIdentityTarget): string => {
   const normalized = normalizeIdentityTarget(target);
   if (normalized.authIndex) return `${normalized.name}::${normalized.authIndex}`;
 
   const accountSnapshot =
-    normalized.accountSnapshot && normalized.accountSnapshot !== normalized.name
-      ? normalized.accountSnapshot
-      : '';
-  if (normalized.accountId || accountSnapshot) {
+    normalized.provider === 'codex'
+      ? normalizeCodexMemberSnapshot(normalized.accountSnapshot)
+      : normalized.accountSnapshot && normalized.accountSnapshot !== normalized.name
+        ? normalized.accountSnapshot
+        : '';
+  const fallbackAccountSnapshot =
+    normalized.accountId && normalized.provider !== 'codex' ? '' : accountSnapshot;
+  const stableAccountId =
+    normalized.provider === 'codex' && !accountSnapshot ? '' : normalized.accountId;
+  if (stableAccountId || fallbackAccountSnapshot) {
     return `${normalized.name}::-::${JSON.stringify([
       normalized.name,
       normalized.provider,
       null,
-      normalized.accountId || null,
-      normalized.accountId ? null : accountSnapshot || null,
+      stableAccountId || null,
+      fallbackAccountSnapshot || null,
     ])}`;
   }
 
@@ -97,20 +118,44 @@ const authFileMatchesRequestedIdentity = (
   target: ReturnType<typeof normalizeTarget>
 ): boolean => {
   const provider = readAuthFileStatusProvider(file);
+  const credentialLocatorPresent = hasCredentialLocator(target);
   if (!provider || !target.provider || provider !== target.provider) return false;
+  if (provider === 'codex' && readAuthFileStatusAccountIdInvalid(file)) return false;
+  if (provider === 'codex' && readAuthFileStatusCodexMemberInvalid(file)) return false;
 
   if (target.accountId) {
-    return readAuthFileStatusAccountId(file) === target.accountId;
+    if (target.provider === 'codex') {
+      const currentWorkspace = readAuthFileStatusAccountId(file);
+      if (currentWorkspace && currentWorkspace !== target.accountId) return false;
+      const expectedMember = target.accountSnapshotProvided
+        ? normalizeCodexMemberSnapshot(target.accountSnapshot)
+        : '';
+      // Workspace/member is verification evidence, not a credential locator.
+      // Require runtime ID or auth index before any Codex mutation can use it.
+      if (!credentialLocatorPresent) return false;
+      const currentMember = readAuthFileStatusCodexMember(file);
+      return !expectedMember || !currentMember || currentMember === expectedMember;
+    }
+    if (readAuthFileStatusAccountId(file) !== target.accountId) return false;
+    return true;
   }
 
   if (target.accountSnapshot && target.accountSnapshot !== target.name) {
+    if (target.provider === 'codex') {
+      const expectedMember = normalizeCodexMemberSnapshot(target.accountSnapshot);
+      // Member email without its Workspace is not a complete Codex identity;
+      // use it only as an additional check on an exact credential locator.
+      if (!credentialLocatorPresent || !expectedMember) return false;
+      const currentMember = readAuthFileStatusCodexMember(file);
+      return !currentMember || currentMember === expectedMember;
+    }
     return readAuthFileStatusAccountSnapshot(file) === target.accountSnapshot;
   }
 
   // CPA auth entries are allowed to omit account metadata. A stable auth index,
   // together with the already-checked runtime ID, physical name, and provider,
   // still identifies the current credential without falling back to a filename-only match.
-  return target.authIndex !== null;
+  return credentialLocatorPresent;
 };
 
 export const getAuthFileStatusSelectionKey = (target: AuthFileStatusIdentityTarget): string => {

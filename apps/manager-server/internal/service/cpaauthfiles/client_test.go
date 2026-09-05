@@ -51,8 +51,143 @@ func TestParseAndVerifyIdentity(t *testing.T) {
 		Provider:          "codex",
 		AccountIDSnapshot: "acct-123",
 		AccountSnapshot:   "renamed@example.com",
+	}); !errors.Is(err, ErrIdentityMismatch) || !strings.Contains(err.Error(), "account_snapshot mismatch") {
+		t.Fatalf("Codex member mismatch err = %v, want ErrIdentityMismatch", err)
+	}
+	if _, err := VerifyIdentity(files, Identity{
+		AuthFileName:      "codex-auth.json",
+		AuthIndex:         "7",
+		Provider:          "codex",
+		AccountIDSnapshot: "acct-123",
+		AccountSnapshot:   "USER@EXAMPLE.COM",
 	}); err != nil {
-		t.Fatalf("stable account id should remain authoritative after display account change: %v", err)
+		t.Fatalf("normalized Codex member should verify: %v", err)
+	}
+}
+
+func TestVerifyIdentityKeepsDuplicateCodexSelectorAmbiguous(t *testing.T) {
+	files := []File{
+		FromMap(map[string]any{
+			"id":         "runtime-alice",
+			"name":       "team.json",
+			"auth_index": "auth-1",
+			"provider":   "codex",
+			"account_id": "workspace-1",
+			"account":    "alice@example.com",
+		}),
+		FromMap(map[string]any{
+			"id":         "runtime-bob",
+			"name":       "team.json",
+			"auth_index": "auth-1",
+			"provider":   "codex",
+			"account_id": "workspace-1",
+			"account":    "bob@example.com",
+		}),
+	}
+
+	if _, err := VerifyIdentity(files, Identity{
+		AuthFileName:      "team.json",
+		AuthIndex:         "auth-1",
+		Provider:          "codex",
+		AccountIDSnapshot: "workspace-1",
+		AccountSnapshot:   "alice@example.com",
+	}); !errors.Is(err, ErrAuthFileAmbiguous) {
+		t.Fatalf("duplicate selector verification error = %v, want ErrAuthFileAmbiguous", err)
+	}
+	if found, ok := Find(files, "team.json", "auth-1"); !ok || found.ID != "runtime-alice" {
+		t.Fatalf("legacy Find semantics = %#v, %t; want first match", found, ok)
+	}
+}
+
+func TestVerifyIdentityKeepsDuplicateSelectorAmbiguousWithoutCompleteCodexEvidence(t *testing.T) {
+	files := []File{
+		FromMap(map[string]any{
+			"id":         "runtime-alice",
+			"name":       "team.json",
+			"auth_index": "auth-1",
+			"provider":   "codex",
+			"account_id": "workspace-1",
+			"account":    "alice@example.com",
+		}),
+		FromMap(map[string]any{
+			"id":         "runtime-unknown",
+			"name":       "team.json",
+			"auth_index": "auth-1",
+			"provider":   "codex",
+			"account_id": "workspace-1",
+		}),
+	}
+
+	if _, err := VerifyIdentity(files, Identity{
+		AuthFileName:      "team.json",
+		AuthIndex:         "auth-1",
+		Provider:          "codex",
+		AccountIDSnapshot: "workspace-1",
+		AccountSnapshot:   "alice@example.com",
+	}); !errors.Is(err, ErrAuthFileAmbiguous) {
+		t.Fatalf("incomplete duplicate selector verification error = %v, want ErrAuthFileAmbiguous", err)
+	}
+}
+
+func TestVerifyIdentityPreservesNonCodexFirstMatch(t *testing.T) {
+	files := []File{
+		FromMap(map[string]any{
+			"id":         "runtime-first",
+			"name":       "shared.json",
+			"auth_index": "auth-1",
+			"provider":   "gemini",
+			"account":    "first@example.com",
+		}),
+		FromMap(map[string]any{
+			"id":         "runtime-second",
+			"name":       "shared.json",
+			"auth_index": "auth-1",
+			"provider":   "gemini",
+			"account":    "second@example.com",
+		}),
+	}
+
+	file, err := VerifyIdentity(files, Identity{
+		AuthFileName: "shared.json",
+		AuthIndex:    "auth-1",
+		Provider:     "gemini",
+	})
+	if err != nil || file.ID != "runtime-first" {
+		t.Fatalf("non-Codex duplicate selector verification = %#v, %v; want first match", file, err)
+	}
+}
+
+func TestClientVerifyKeepsDuplicateCodexSelectorAmbiguousWithoutChangingLegacyFindSemantics(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("name"); got != "team.json" {
+			t.Fatalf("name query = %q", got)
+		}
+		if got := r.URL.Query().Get("auth_index"); got != "auth-1" {
+			t.Fatalf("auth_index query = %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"files": []map[string]any{
+				{"id": "runtime-alice", "name": "team.json", "auth_index": "auth-1", "provider": "codex", "account_id": "workspace-1", "account": "alice@example.com"},
+				{"id": "runtime-bob", "name": "team.json", "auth_index": "auth-1", "provider": "codex", "account_id": "workspace-1", "account": "bob@example.com"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := New(server.Client())
+	identity := Identity{
+		AuthFileName:      "team.json",
+		AuthIndex:         "auth-1",
+		Provider:          "codex",
+		AccountIDSnapshot: "workspace-1",
+		AccountSnapshot:   "alice@example.com",
+	}
+	if found, ok, err := client.Find(context.Background(), server.URL, "mgmt", identity.AuthFileName, identity.AuthIndex); err != nil || !ok || found.ID != "runtime-alice" {
+		t.Fatalf("Client.Find() = %#v, ok:%t err:%v; want legacy first match", found, ok, err)
+	}
+	file, err := client.Verify(context.Background(), server.URL, "mgmt", identity)
+	if !errors.Is(err, ErrAuthFileAmbiguous) {
+		t.Fatalf("Client.Verify() = %#v, %v; want ErrAuthFileAmbiguous", file, err)
 	}
 }
 
@@ -200,6 +335,174 @@ func TestFromMapExtractsNestedAccountIDs(t *testing.T) {
 				t.Fatalf("AccountID = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestFromMapDoesNotDecodeJWTClaimsForNonCodexProviders(t *testing.T) {
+	file := FromMap(map[string]any{
+		"id":       "runtime-jwt-claude",
+		"provider": "claude",
+		"id_token": "header.eyJzdWIiOiJhY2N0LWp3dCJ9.signature",
+	})
+	if file.AccountID != "" {
+		t.Fatalf("non-Codex JWT AccountID = %q, want empty", file.AccountID)
+	}
+}
+
+func TestFromMapRejectsConflictingCodexAccountIDs(t *testing.T) {
+	file := FromMap(map[string]any{
+		"id":         "runtime-conflict",
+		"provider":   "codex",
+		"account_id": "workspace-a",
+		"metadata": map[string]any{
+			"id_token": map[string]any{"chatgpt_account_id": "workspace-b"},
+		},
+	})
+	if file.AccountID != "" || !file.AccountIDInvalid {
+		t.Fatalf("conflicting account identity = %#v, want empty invalid evidence", file)
+	}
+	if err := VerifyResolvedIdentity(file, Identity{
+		Provider:          "codex",
+		AccountIDSnapshot: "workspace-a",
+	}); !errors.Is(err, ErrIdentityMismatch) {
+		t.Fatalf("conflicting account identity verification error = %v, want mismatch", err)
+	}
+}
+
+func TestFromMapRejectsConflictingCodexMemberSnapshots(t *testing.T) {
+	file := FromMap(map[string]any{
+		"id":               "runtime-member-conflict",
+		"provider":         "codex",
+		"account_id":       "workspace-a",
+		"account_snapshot": "bob@example.com",
+		"accountSnapshot":  "alice@example.com",
+		"account":          "stale@example.com",
+	})
+	if file.AccountSnapshot != "" || !file.AccountSnapshotInvalid {
+		t.Fatalf("conflicting member identity = %#v, want empty invalid evidence", file)
+	}
+	if err := VerifyResolvedIdentity(file, Identity{
+		Provider:          "codex",
+		AccountIDSnapshot: "workspace-a",
+		AccountSnapshot:   "alice@example.com",
+	}); !errors.Is(err, ErrIdentityMismatch) {
+		t.Fatalf("conflicting member identity verification error = %v, want mismatch", err)
+	}
+}
+
+func TestFromMapRejectsStrongCodexMemberSnapshotConflictingWithDisplayEmail(t *testing.T) {
+	for _, field := range []string{"account", "email"} {
+		t.Run(field, func(t *testing.T) {
+			file := FromMap(map[string]any{
+				"id":               "runtime-member-display-conflict",
+				"provider":         "codex",
+				"account_id":       "workspace-a",
+				"account_snapshot": "alice@example.com",
+				field:              "bob@example.com",
+			})
+			if file.AccountSnapshot != "" || !file.AccountSnapshotInvalid {
+				t.Fatalf("conflicting member identity = %#v, want empty invalid evidence", file)
+			}
+		})
+	}
+}
+
+func TestFromMapIgnoresWeakExplicitCodexMemberSnapshot(t *testing.T) {
+	file := FromMap(map[string]any{
+		"id":               "runtime-member-invalid",
+		"provider":         "codex",
+		"auth_index":       "auth-1",
+		"account_id":       "workspace-a",
+		"account_snapshot": "Alice",
+		"email":            "alice@example.com",
+	})
+	if file.AccountSnapshot != "alice@example.com" || file.AccountSnapshotInvalid {
+		t.Fatalf("weak member identity = %#v, want strong email without invalid evidence", file)
+	}
+	if err := VerifyResolvedIdentity(file, Identity{
+		AuthIndex:         "auth-1",
+		Provider:          "codex",
+		AccountIDSnapshot: "workspace-a",
+		AccountSnapshot:   "alice@example.com",
+	}); err != nil {
+		t.Fatalf("weak display value must not block credential verification: %v", err)
+	}
+}
+
+func TestFromMapDoesNotTrimUnicodeWhitespaceBeforeCodexMemberNormalization(t *testing.T) {
+	for _, field := range []string{"account_snapshot", "accountSnapshot", "account", "email"} {
+		t.Run(field, func(t *testing.T) {
+			file := FromMap(map[string]any{
+				"id":       "runtime-unicode-member",
+				"provider": "codex",
+				field:      "\u2003alice@example.com",
+			})
+			if file.AccountSnapshot != "" || file.AccountSnapshotInvalid {
+				t.Fatalf("Unicode-whitespace member field = %#v, want no strong member evidence", file)
+			}
+		})
+	}
+}
+
+func TestVerifyResolvedIdentityIgnoresWeakCodexMemberWithCredentialLocator(t *testing.T) {
+	file := FromMap(map[string]any{
+		"id":         "runtime-member-locator",
+		"name":       "codex-auth.json",
+		"auth_index": "auth-1",
+		"provider":   "codex",
+		"account_id": "workspace-a",
+		"account":    "alice@example.com",
+	})
+
+	for _, identity := range []Identity{
+		{
+			AuthFileName:      "codex-auth.json",
+			AuthIndex:         "auth-1",
+			Provider:          "codex",
+			AccountIDSnapshot: "workspace-a",
+			AccountSnapshot:   "Alice",
+		},
+		{
+			AuthFileName:    "codex-auth.json",
+			RuntimeID:       "runtime-member-locator",
+			Provider:        "codex",
+			AccountSnapshot: "Alice",
+		},
+	} {
+		if err := VerifyResolvedIdentity(file, identity); err != nil {
+			t.Fatalf("weak member with credential locator rejected: identity=%#v err=%v", identity, err)
+		}
+	}
+
+	if err := VerifyResolvedIdentity(file, Identity{
+		AuthFileName:      "codex-auth.json",
+		Provider:          "codex",
+		AccountIDSnapshot: "workspace-a",
+		AccountSnapshot:   "Alice",
+	}); !errors.Is(err, ErrIdentityMismatch) {
+		t.Fatalf("weak member without credential locator error = %v, want ErrIdentityMismatch", err)
+	}
+}
+
+func TestVerifyResolvedIdentityRejectsProviderMismatchBeforeWeakCodexMemberReturn(t *testing.T) {
+	file := FromMap(map[string]any{
+		"id":         "runtime-provider-mismatch",
+		"name":       "codex-auth.json",
+		"auth_index": "auth-1",
+		"provider":   "codex",
+		"account_id": "workspace-a",
+		"account":    "Alice",
+	})
+
+	err := VerifyResolvedIdentity(file, Identity{
+		AuthFileName:      "codex-auth.json",
+		AuthIndex:         "auth-1",
+		Provider:          "gemini",
+		AccountIDSnapshot: "workspace-a",
+		AccountSnapshot:   "Alice",
+	})
+	if !errors.Is(err, ErrIdentityMismatch) || !strings.Contains(err.Error(), "provider mismatch") {
+		t.Fatalf("provider mismatch error = %v, want ErrIdentityMismatch/provider mismatch", err)
 	}
 }
 
@@ -362,7 +665,7 @@ func TestClientPatchDisabledTargetKeepsVerifiedRuntimeIdentity(t *testing.T) {
 	}
 }
 
-func TestClientResolveVerifiedStatusMutationTargetUsesAccountIdentityWithoutAuthIndex(t *testing.T) {
+func TestClientResolveVerifiedStatusMutationTargetRejectsWorkspaceMemberWithoutCredentialLocator(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v0/management/auth-files" {
 			http.NotFound(w, r)
@@ -370,18 +673,52 @@ func TestClientResolveVerifiedStatusMutationTargetUsesAccountIdentityWithoutAuth
 		}
 		_ = json.NewEncoder(w).Encode([]map[string]any{
 			{
-				"id":       "runtime-first",
-				"name":     "shared.json",
-				"provider": "codex",
-				"account":  "first@example.com",
+				"id":         "runtime-first",
+				"name":       "shared.json",
+				"account_id": "workspace-1",
+				"provider":   "codex",
+				"account":    "first@example.com",
 			},
 			{
-				"id":       "runtime-second",
-				"name":     "shared.json",
-				"provider": "codex",
-				"account":  "second@example.com",
+				"id":         "runtime-second",
+				"name":       "shared.json",
+				"account_id": "workspace-1",
+				"provider":   "codex",
+				"account":    "second@example.com",
 			},
 		})
+	}))
+	defer server.Close()
+
+	_, err := New(server.Client()).ResolveVerifiedStatusMutationTarget(
+		context.Background(),
+		server.URL,
+		"mgmt",
+		Identity{
+			AuthFileName:      "shared.json",
+			Provider:          "codex",
+			AccountIDSnapshot: "workspace-1",
+			AccountSnapshot:   "second@example.com",
+		},
+	)
+	if !errors.Is(err, ErrStatusMutationScopeAmbiguous) {
+		t.Fatalf("resolve verified target by workspace+member error = %v, want ErrStatusMutationScopeAmbiguous", err)
+	}
+}
+
+func TestClientResolveVerifiedStatusMutationTargetAllowsUniqueCredentialWithoutMember(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v0/management/auth-files" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{{
+			"id":         "runtime-alice",
+			"name":       "team.json",
+			"auth_index": "auth-1",
+			"provider":   "codex",
+			"account_id": "workspace-1",
+		}})
 	}))
 	defer server.Close()
 
@@ -390,16 +727,17 @@ func TestClientResolveVerifiedStatusMutationTargetUsesAccountIdentityWithoutAuth
 		server.URL,
 		"mgmt",
 		Identity{
-			AuthFileName:    "shared.json",
-			Provider:        "codex",
-			AccountSnapshot: "second@example.com",
+			AuthFileName:      "team.json",
+			AuthIndex:         "auth-1",
+			Provider:          "codex",
+			AccountIDSnapshot: "workspace-1",
 		},
 	)
 	if err != nil {
-		t.Fatalf("resolve verified target without auth index: %v", err)
+		t.Fatalf("resolve verified target without member: %v", err)
 	}
-	if target.Selector != "runtime-second" || target.File.AccountSnapshot != "second@example.com" || target.Scope != StatusMutationScopeCredential {
-		t.Fatalf("target = %#v, want second credential runtime target", target)
+	if target.Selector != "runtime-alice" || target.Scope != StatusMutationScopeCredential {
+		t.Fatalf("target = %#v, want unique credential runtime target", target)
 	}
 }
 

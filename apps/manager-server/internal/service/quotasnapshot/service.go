@@ -36,6 +36,7 @@ var (
 	validAccuracy       = stringSet("exact", "derived", "estimated", "unknown")
 	validInventoryModes = stringSet("complete", "partial", "delta")
 	validRelationships  = stringSet("concurrent_subwindow")
+	codexPersonalPlans  = stringSet("free", "plus", "pro", "go")
 )
 
 type Service struct {
@@ -524,6 +525,16 @@ func (s *Service) Query(ctx context.Context, req QueryRequest) (QueryResponse, e
 		if err != nil {
 			return QueryResponse{}, err
 		}
+		if legacyAccountKey, bridgeEligible := legacyCodexWorkspaceQuotaKey(account.Account, provider); bridgeEligible {
+			legacyStates, legacyErr := s.store.QuotaSnapshots.ListLegacyCodexWorkspaceWindowStates(ctx, legacyAccountKey, provider)
+			if legacyErr != nil {
+				return QueryResponse{}, legacyErr
+			}
+			states, legacyErr = bridgeLegacyCodexWorkspacePreviousCycles(ctx, s.store.QuotaSnapshots, states, legacyStates)
+			if legacyErr != nil {
+				return QueryResponse{}, legacyErr
+			}
+		}
 		stateByID := make(map[int64]model.AccountQuotaWindowState, len(states))
 		for _, state := range states {
 			stateByID[state.ID] = state
@@ -596,6 +607,173 @@ func (s *Service) Query(ctx context.Context, req QueryRequest) (QueryResponse, e
 		})
 	}
 	return QueryResponse{GeneratedAtMS: nowMS, Items: items}, nil
+}
+
+type legacyCodexPreviousCycleBridgeCandidate struct {
+	stateIndex int
+	cycleIDs   [3]int64
+	previous   model.AccountQuotaCycle
+}
+
+func legacyCodexWorkspaceQuotaKey(account AccountTarget, provider string) (string, bool) {
+	if normalizeProvider(provider) != "codex" || strings.Trim(account.AuthAccountIDSnapshot, " ") == "" {
+		return "", false
+	}
+	fields := account.identityFields(provider)
+	workspace, workspaceOK := usageidentity.ResolveCodexWorkspace(fields)
+	_, memberOK := usageidentity.NormalizeCodexMemberSnapshot(fields.AccountSnapshot)
+	if !workspaceOK || !memberOK {
+		return "", false
+	}
+	return usageidentity.LegacyCodexWorkspaceAccountKey(provider, workspace)
+}
+
+func bridgeLegacyCodexWorkspacePreviousCycles(
+	ctx context.Context,
+	repository quotasnapshotrepo.Repository,
+	states, legacyStates []model.AccountQuotaWindowState,
+) ([]model.AccountQuotaWindowState, error) {
+	if len(states) == 0 || len(legacyStates) == 0 {
+		return states, nil
+	}
+	legacyByWindow := make(map[string][]model.AccountQuotaWindowState, len(legacyStates))
+	for _, legacyState := range legacyStates {
+		normalized := legacyState
+		normalizeCodexWindowStateForQuery(&normalized)
+		key := legacyCodexQuotaBridgeWindowKey(normalized)
+		legacyByWindow[key] = append(legacyByWindow[key], normalized)
+	}
+
+	candidates := make([]legacyCodexPreviousCycleBridgeCandidate, 0)
+	cycleIDs := make([]int64, 0)
+	for stateIndex := range states {
+		if states[stateIndex].PreviousCycle != nil {
+			continue
+		}
+		current := states[stateIndex]
+		normalizeCodexWindowStateForQuery(&current)
+		matches := make([]model.AccountQuotaWindowState, 0, 1)
+		for _, legacyState := range legacyByWindow[legacyCodexQuotaBridgeWindowKey(current)] {
+			if legacyCodexQuotaBridgeCyclesMatch(current, legacyState) {
+				matches = append(matches, legacyState)
+			}
+		}
+		if len(matches) != 1 {
+			continue
+		}
+		legacyState := matches[0]
+		candidate := legacyCodexPreviousCycleBridgeCandidate{
+			stateIndex: stateIndex,
+			cycleIDs: [3]int64{
+				current.CurrentCycle.ID,
+				legacyState.CurrentCycle.ID,
+				legacyState.PreviousCycle.ID,
+			},
+			previous: *legacyState.PreviousCycle,
+		}
+		candidates = append(candidates, candidate)
+		cycleIDs = append(cycleIDs, candidate.cycleIDs[:]...)
+	}
+	if len(candidates) == 0 {
+		return states, nil
+	}
+	evidenceByCycle, err := repository.ListCyclePlanEvidence(ctx, cycleIDs)
+	if err != nil {
+		return nil, err
+	}
+	for _, candidate := range candidates {
+		if !legacyCodexQuotaBridgeHasPersonalPlan(evidenceByCycle, candidate.cycleIDs) {
+			continue
+		}
+		previous := candidate.previous
+		states[candidate.stateIndex].PreviousCycle = &previous
+	}
+	return states, nil
+}
+
+func legacyCodexQuotaBridgeWindowKey(state model.AccountQuotaWindowState) string {
+	return strings.Join([]string{
+		strings.ToLower(strings.TrimSpace(state.Provider)),
+		state.ProviderWindowID,
+		state.WindowKind,
+		state.WindowMode,
+		state.ModelScopeKind,
+		state.ModelScopeKey,
+		state.ModelIDsJSON,
+		state.ScopeFingerprint,
+		state.InventoryScopeKey,
+		state.RelationshipKind,
+		state.ContainerProviderWindowID,
+	}, "\x00")
+}
+
+func legacyCodexQuotaBridgeCyclesMatch(
+	current, legacy model.AccountQuotaWindowState,
+) bool {
+	if current.Availability != "active" || legacy.Availability != "active" ||
+		(current.WindowMode != "fixed" && current.WindowMode != "calendar") ||
+		current.CurrentCycle == nil || legacy.CurrentCycle == nil || legacy.PreviousCycle == nil {
+		return false
+	}
+	currentCycle := current.CurrentCycle
+	legacyCurrent := legacy.CurrentCycle
+	legacyPrevious := legacy.PreviousCycle
+	if currentCycle.State != "active" || legacyCurrent.State != "active" ||
+		currentCycle.ActualEndMS != nil || legacyCurrent.ActualEndMS != nil ||
+		!reliableQuotaCycleBoundary(currentCycle) ||
+		!reliableQuotaCycleBoundary(legacyCurrent) ||
+		!reliableQuotaCycleBoundary(legacyPrevious) ||
+		currentCycle.ActualStartMS != legacyCurrent.ActualStartMS ||
+		!equalOptionalInt64(currentCycle.ScheduledStartMS, legacyCurrent.ScheduledStartMS) ||
+		!equalOptionalInt64(currentCycle.ScheduledEndMS, legacyCurrent.ScheduledEndMS) ||
+		!equalOptionalInt64(currentCycle.DurationSeconds, legacyCurrent.DurationSeconds) ||
+		currentCycle.DurationSeconds == nil || *currentCycle.DurationSeconds <= 0 {
+		return false
+	}
+	if legacyPrevious.State != "closed" || legacyPrevious.ActualEndMS == nil ||
+		legacyPrevious.ActualStartMS >= *legacyPrevious.ActualEndMS ||
+		*legacyPrevious.ActualEndMS > legacyCurrent.ActualStartMS {
+		return false
+	}
+	switch legacyPrevious.EndReason {
+	case "scheduled", "provider_reset", "early_reset":
+		return true
+	default:
+		return false
+	}
+}
+
+func reliableQuotaCycleBoundary(cycle *model.AccountQuotaCycle) bool {
+	return cycle != nil && (cycle.BoundaryAccuracy == "exact" || cycle.BoundaryAccuracy == "derived")
+}
+
+func equalOptionalInt64(left, right *int64) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func legacyCodexQuotaBridgeHasPersonalPlan(
+	evidenceByCycle map[int64]quotasnapshotrepo.CyclePlanEvidence,
+	cycleIDs [3]int64,
+) bool {
+	planType := ""
+	for _, cycleID := range cycleIDs {
+		evidence, ok := evidenceByCycle[cycleID]
+		if !ok || evidence.SnapshotCount == 0 || evidence.MissingPlanCount != 0 || len(evidence.PlanTypes) != 1 {
+			return false
+		}
+		candidate := evidence.PlanTypes[0]
+		if _, personal := codexPersonalPlans[candidate]; !personal {
+			return false
+		}
+		if planType != "" && candidate != planType {
+			return false
+		}
+		planType = candidate
+	}
+	return planType != ""
 }
 
 // normalizeCodexSnapshotForQuery is the read-side compatibility shield for

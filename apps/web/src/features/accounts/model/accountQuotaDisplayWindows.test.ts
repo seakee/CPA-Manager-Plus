@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { TFunction } from 'i18next';
 import type { AuthFileItem, CodexQuotaState, CredentialScopedQuotaState } from '@/types';
+import type { MonitoringAccountWindowUsageItem } from '@/services/api';
 import { buildAccountRows, type AccountQuotaStores } from './accountRows';
 import {
   buildAccountQuotaDisplayWindow,
@@ -16,6 +17,9 @@ import {
   buildQuotaCredentialIdentity,
   getQuotaCredentialStoreKey,
 } from '@/utils/quota/credentialScope';
+import { buildAccountDetailViewModel } from './accountDetailViewModel';
+import { buildAccountQuotaWindowDefinitions } from './accountQuotaWindowDefinitions';
+import { accountWindowUsageRequestKey } from './accountWindowUsageRows';
 
 const emptyStores = (): AccountQuotaStores => ({
   antigravityQuota: {},
@@ -184,6 +188,52 @@ describe('accountQuotaDisplayWindows', () => {
 
     expect(window.resetAtMs).toBe(new Date(2027, 0, 1, 1, 30, 0, 0).getTime());
     expect(window.resetAccuracy).toBe('unknown');
+  });
+
+  it.each(['claude', 'antigravity', 'kimi', 'xai'] as const)(
+    'keeps observedAt compatibility for %s when progress provenance is absent',
+    (source) => {
+      const window = buildAccountQuotaDisplayWindow({
+        key: `${source}-window`,
+        label: 'Quota',
+        remainingPercent: 60,
+        usedPercent: 40,
+        resetLabel: '-',
+        source,
+        observedAtMs: 2_000,
+      });
+
+      expect(window.quotaProgressObservedAtMs).toBe(2_000);
+    }
+  );
+
+  it('keeps Codex explicit unknown progress provenance from falling back to observedAt', () => {
+    const window = buildAccountQuotaDisplayWindow({
+      key: 'five-hour',
+      label: '5H',
+      remainingPercent: 40,
+      usedPercent: 60,
+      resetLabel: '-',
+      source: 'codex',
+      observedAtMs: 2_000,
+      quotaProgressObservedAtMs: null,
+    });
+
+    expect(window.quotaProgressObservedAtMs).toBeNull();
+  });
+
+  it('falls back to observedAt for legacy Codex windows without explicit provenance', () => {
+    const window = buildAccountQuotaDisplayWindow({
+      key: 'five-hour',
+      label: '5H',
+      remainingPercent: 40,
+      usedPercent: 60,
+      resetLabel: '-',
+      source: 'codex',
+      observedAtMs: 2_000,
+    });
+
+    expect(window.quotaProgressObservedAtMs).toBe(2_000);
   });
 
   it('uses auth-index scoped Codex quota and preserves request window ranges', () => {
@@ -373,6 +423,86 @@ describe('accountQuotaDisplayWindows', () => {
       limitWindowSeconds: 7 * 24 * 60 * 60,
       modelScope: { kind: 'family', key: 'claude_gpt', complete: true },
     });
+  });
+
+  it('carries non-Codex fetchedAt through the production forecast chain', () => {
+    const fetchedAtMs = Date.parse('2026-07-01T00:00:00Z');
+    const resetAtMs = fetchedAtMs + 5 * 60 * 60 * 1000;
+    const nowMs = fetchedAtMs + 60 * 60 * 1000;
+    const stores = {
+      ...emptyStores(),
+      antigravityQuota: {
+        'ag.json': {
+          status: 'success',
+          fetchedAtMs,
+          groups: [
+            {
+              id: 'gemini',
+              label: 'Gemini models',
+              models: ['gemini-3-pro'],
+              buckets: [
+                {
+                  id: 'five-hour',
+                  label: '5 Hour Limit',
+                  window: '5h',
+                  remainingFraction: 0.5,
+                  resetTime: new Date(resetAtMs).toISOString(),
+                },
+              ],
+            },
+          ],
+        },
+      },
+    } satisfies AccountQuotaStores;
+    const row = buildRow({ name: 'ag.json', type: 'antigravity' }, stores);
+    const displayWindows = buildAccountQuotaDisplayWindows(row, {
+      stores,
+      translateQuotaWindowLabel,
+      t,
+      nowMs,
+    });
+    const [definition] = buildAccountQuotaWindowDefinitions(displayWindows, nowMs);
+    const currentUsage: MonitoringAccountWindowUsageItem = {
+      row_key: row.selectionKey,
+      window_key: definition.providerWindowId,
+      from_ms: definition.cycleStartMs ?? fetchedAtMs,
+      to_ms: nowMs,
+      matched: true,
+      total_requests: 100,
+      success_calls: 100,
+      failure_calls: 0,
+      total_tokens: 1_000_000,
+      total_cost: 5,
+      success_rate: 1,
+      last_seen_ms: fetchedAtMs - 100,
+      sync_status: 'ready',
+      scope_match_status: 'complete',
+    };
+    const detail = buildAccountDetailViewModel(row, {
+      quotaWindows: [{ ...definition, resetLabel: definition.display.resetLabel }],
+      windowUsageByKey: new Map([
+        [
+          accountWindowUsageRequestKey(
+            row.selectionKey,
+            definition.providerWindowId,
+            'current',
+            definition.modelScope
+          ),
+          currentUsage,
+        ],
+      ]),
+    });
+
+    expect(displayWindows[0]).toMatchObject({
+      usedPercent: 50,
+      observedAtMs: fetchedAtMs,
+      quotaProgressObservedAtMs: fetchedAtMs,
+    });
+    expect(definition).toMatchObject({
+      observedAtMs: fetchedAtMs,
+      quotaProgressObservedAtMs: fetchedAtMs,
+    });
+    expect(detail.quota.windows[0].forecast).toMatchObject({ basis: 'quota' });
   });
 
   it('adds Kimi usage amounts and formatted reset hints', () => {

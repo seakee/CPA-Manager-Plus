@@ -1,4 +1,9 @@
-import type { ApiKeyEntry, ClaudeFingerprintProfile, OpenAIProviderConfig } from '@/types';
+import {
+  toCommittedModelThinkingSnapshot,
+  type ApiKeyEntry,
+  type ClaudeFingerprintProfile,
+  type OpenAIProviderConfig,
+} from '@/types';
 import {
   buildRecentRequestCompositeKey,
   mergeRecentRequestBucketGroups,
@@ -10,6 +15,16 @@ import {
   type StatusBarData,
 } from '@/utils/recentRequests';
 export const DISABLE_ALL_MODELS_RULE = '*';
+
+export const toCommittedOpenAIProviderSnapshot = (
+  provider: OpenAIProviderConfig
+): OpenAIProviderConfig => {
+  const next = { ...provider };
+  if (Array.isArray(provider.models)) {
+    next.models = provider.models.map(toCommittedModelThinkingSnapshot);
+  }
+  return next;
+};
 
 export const hasDisableAllModelsRule = (models?: string[]) =>
   Array.isArray(models) &&

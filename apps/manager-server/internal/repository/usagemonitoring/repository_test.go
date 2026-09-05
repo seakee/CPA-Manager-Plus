@@ -450,11 +450,12 @@ func TestCodexAccountWindowKeepsHistoryAcrossSameAccountReauth(t *testing.T) {
 
 	projectedEvents := []usage.Event{
 		makeEvent("previous-old-credential", previousFromMS+1_000, "codex-a-free.json", "auth-1", "account-a", 10),
-		makeEvent("previous-new-credential", previousFromMS+2_000, "codex-a-pro.json", "auth-2", "account-a", 20),
+		makeEvent("previous-new-credential-before-workspace", previousFromMS+2_000, "codex-a-pro.json", "auth-2", "", 20),
 		makeEvent("current-old-credential", currentFromMS+1_000, "codex-a-free.json", "auth-1", "account-a", 30),
 		makeEvent("different-space-same-email", currentFromMS+2_000, "codex-b.json", "auth-3", "account-b", 9_000),
 	}
 	legacyCurrentCredential := makeEvent("current-new-credential-before-account-snapshot", currentFromMS+2_500, "codex-a-pro.json", "auth-2", "", 5)
+	legacyCurrentCredential.AuthAccountIDSnapshot = "account-a"
 	projectedEvents = append(projectedEvents, legacyCurrentCredential)
 	if _, err := db.InsertEvents(ctx, projectedEvents); err != nil {
 		t.Fatalf("insert projected reauth events: %v", err)
@@ -517,6 +518,141 @@ func TestCodexAccountWindowKeepsHistoryAcrossSameAccountReauth(t *testing.T) {
 	assertStats("projection plus raw tail", 3, 75)
 }
 
+func TestCodexAccountWindowSeparatesMembersSharingWorkspace(t *testing.T) {
+	_, db := newMonitoringRepositoryStore(t)
+	ctx := context.Background()
+	fromMS := int64(1_800_057_600_000)
+	toMS := fromMS + testDayMS
+
+	makeEvent := func(hash, member, file, authIndex string, input int64) usage.Event {
+		event := monitoringRepositoryEvent(hash, fromMS+input, "gpt-team-window", "key-"+member, member, authIndex, file, false, input, 10, 1)
+		event.AuthFileSnapshot = file
+		event.AuthIndex = authIndex
+		event.AuthAccountIDSnapshot = "workspace-team"
+		return event
+	}
+	if _, err := db.InsertEvents(ctx, []usage.Event{
+		makeEvent("team-alice", "alice@example.com", "alice.json", "auth-alice", 100),
+		makeEvent("team-bob", "bob@example.com", "bob.json", "auth-bob", 200),
+	}); err != nil {
+		t.Fatalf("insert shared-workspace events: %v", err)
+	}
+	catchUpMonitoringRepository(t, ctx, db)
+
+	windows := []store.AccountWindowUsageQuery{
+		{
+			RequestIndex:          0,
+			FromMS:                fromMS,
+			ToMS:                  toMS,
+			AccountSnapshot:       "alice@example.com",
+			AuthFileSnapshot:      "alice.json",
+			AuthProviderSnapshot:  "codex",
+			AuthAccountIDSnapshot: "workspace-team",
+			AuthIndex:             "auth-alice",
+			Source:                "alice.json",
+			AccountKey:            "usage-account-history:3:codex-account:636F646578:776F726B73706163652D31",
+		},
+		{
+			RequestIndex:          1,
+			FromMS:                fromMS,
+			ToMS:                  toMS,
+			AccountSnapshot:       "bob@example.com",
+			AuthFileSnapshot:      "bob.json",
+			AuthProviderSnapshot:  "codex",
+			AuthAccountIDSnapshot: "workspace-team",
+			AuthIndex:             "auth-bob",
+			Source:                "bob.json",
+			AccountKey:            "usage-account-history:3:codex-account:636F646578:776F726B73706163652D31",
+		},
+	}
+
+	raw, err := db.AccountWindowModelStats(ctx, windows)
+	if err != nil {
+		t.Fatalf("raw shared-workspace account window stats: %v", err)
+	}
+	projected, _, available, err := db.UsageMonitoringAccountWindowStats(ctx, windows)
+	if err != nil || !available {
+		t.Fatalf("projected shared-workspace account window stats: available=%v err=%v", available, err)
+	}
+	if !reflect.DeepEqual(projected, raw) {
+		t.Fatalf("shared-workspace projection/raw mismatch\nprojection=%#v\nraw=%#v", projected, raw)
+	}
+	if len(projected) != 2 {
+		t.Fatalf("shared-workspace stats = %#v, want one row per member", projected)
+	}
+	if projected[0].RequestIndex != 0 || projected[0].Calls != 1 || projected[0].InputTokens != 100 {
+		t.Fatalf("Alice account window stats = %#v, want one call and 100 input tokens", projected[0])
+	}
+	if projected[1].RequestIndex != 1 || projected[1].Calls != 1 || projected[1].InputTokens != 200 {
+		t.Fatalf("Bob account window stats = %#v, want one call and 200 input tokens", projected[1])
+	}
+
+	tail := makeEvent("team-alice-tail", "alice@example.com", "alice.json", "auth-alice", 300)
+	if _, err := db.InsertEvents(ctx, []usage.Event{tail}); err != nil {
+		t.Fatalf("insert Alice raw tail: %v", err)
+	}
+	raw, err = db.AccountWindowModelStats(ctx, windows)
+	if err != nil {
+		t.Fatalf("raw shared-workspace account window stats with tail: %v", err)
+	}
+	projected, _, available, err = db.UsageMonitoringAccountWindowStats(ctx, windows)
+	if err != nil || !available {
+		t.Fatalf("projected shared-workspace account window stats with tail: available=%v err=%v", available, err)
+	}
+	if !reflect.DeepEqual(projected, raw) {
+		t.Fatalf("shared-workspace tail projection/raw mismatch\nprojection=%#v\nraw=%#v", projected, raw)
+	}
+	if projected[0].Calls != 2 || projected[0].InputTokens != 400 || projected[1].Calls != 1 || projected[1].InputTokens != 200 {
+		t.Fatalf("shared-workspace tail stats = %#v, want Alice 2/400 and Bob 1/200", projected)
+	}
+}
+
+func TestCodexAccountWindowDoesNotUseDailyCredentialFallbackWithoutMember(t *testing.T) {
+	_, db := newMonitoringRepositoryStore(t)
+	ctx := context.Background()
+	fromMS := int64(1_800_057_600_000)
+	toMS := fromMS + testDayMS
+
+	makeEvent := func(hash, member string, input int64) usage.Event {
+		event := monitoringRepositoryEvent(hash, fromMS+input, "gpt-team-window", "key-shared", member, "auth-shared", "shared.json", false, input, 1, 1)
+		event.AuthFileSnapshot = "shared.json"
+		event.AuthIndex = "auth-shared"
+		event.AuthProviderSnapshot = "codex"
+		event.AuthAccountIDSnapshot = "workspace-team"
+		return event
+	}
+	if _, err := db.InsertEvents(ctx, []usage.Event{
+		makeEvent("team-shared-alice", "alice@example.com", 100),
+		makeEvent("team-shared-bob", "bob@example.com", 200),
+	}); err != nil {
+		t.Fatalf("insert shared-credential events: %v", err)
+	}
+	catchUpMonitoringRepository(t, ctx, db)
+
+	windows := []store.AccountWindowUsageQuery{{
+		RequestIndex:          0,
+		FromMS:                fromMS,
+		ToMS:                  toMS,
+		AuthFileSnapshot:      "shared.json",
+		AuthProviderSnapshot:  "codex",
+		AuthAccountIDSnapshot: "workspace-team",
+		AuthIndex:             "auth-shared",
+		Source:                "shared.json",
+	}}
+
+	raw, err := db.AccountWindowModelStats(ctx, windows)
+	if err != nil {
+		t.Fatalf("raw workspace-only account window stats: %v", err)
+	}
+	projected, _, available, err := db.UsageMonitoringAccountWindowStats(ctx, windows)
+	if err != nil || !available {
+		t.Fatalf("projected workspace-only account window stats: available=%v err=%v", available, err)
+	}
+	if len(raw) != 0 || len(projected) != 0 {
+		t.Fatalf("workspace-only target inherited member daily rows: raw=%#v projected=%#v", raw, projected)
+	}
+}
+
 func TestCodexAccountWindowRejectsConflictingLegacyFileIndex(t *testing.T) {
 	_, db := newMonitoringRepositoryStore(t)
 	ctx := context.Background()
@@ -565,6 +701,125 @@ func TestCodexAccountWindowRejectsConflictingLegacyFileIndex(t *testing.T) {
 	}
 }
 
+func TestCodexAccountWindowUsesRawProjectionForConflictingWorkspaceEvidence(t *testing.T) {
+	_, db := newMonitoringRepositoryStore(t)
+	ctx := context.Background()
+	fromMS := int64(1_800_057_600_000)
+	toMS := fromMS + testDayMS
+
+	event := monitoringRepositoryEvent(
+		"window-conflicting-workspace-evidence",
+		fromMS+1_000,
+		"gpt-team-window",
+		"key-alice",
+		"alice@example.com",
+		"auth-alice",
+		"alice.json",
+		false,
+		100,
+		10,
+		1,
+	)
+	event.AuthFileSnapshot = "alice.json"
+	event.AuthIndex = "auth-alice"
+	event.AuthProviderSnapshot = "codex"
+	event.AuthAccountIDSnapshot = "workspace-1"
+	event.AuthProjectIDSnapshot = usageidentity.CodexAccountIDSnapshot("workspace-2")
+	if _, err := db.InsertEvents(ctx, []usage.Event{event}); err != nil {
+		t.Fatalf("insert conflicting workspace evidence event: %v", err)
+	}
+	catchUpMonitoringRepository(t, ctx, db)
+
+	window := store.AccountWindowUsageQuery{
+		RequestIndex:          0,
+		FromMS:                fromMS,
+		ToMS:                  toMS,
+		AccountSnapshot:       "alice@example.com",
+		AuthFileSnapshot:      "alice.json",
+		AuthProviderSnapshot:  "codex",
+		AuthAccountIDSnapshot: "workspace-1",
+		AuthProjectIDSnapshot: usageidentity.CodexAccountIDSnapshot("workspace-2"),
+		AuthIndex:             "auth-alice",
+		Source:                "alice.json",
+	}
+	raw, err := db.AccountWindowModelStats(ctx, []store.AccountWindowUsageQuery{window})
+	if err != nil {
+		t.Fatalf("raw conflicting workspace-evidence stats: %v", err)
+	}
+	projected, _, available, err := db.UsageMonitoringAccountWindowStats(ctx, []store.AccountWindowUsageQuery{window})
+	if err != nil || !available {
+		t.Fatalf("projected conflicting workspace-evidence stats: available=%v err=%v", available, err)
+	}
+	if !reflect.DeepEqual(projected, raw) {
+		t.Fatalf("conflicting workspace-evidence projection/raw mismatch\nprojection=%#v\nraw=%#v", projected, raw)
+	}
+	if len(projected) != 1 || projected[0].Calls != 1 || projected[0].InputTokens != 100 {
+		t.Fatalf("conflicting workspace-evidence stats = %#v, want one raw-equivalent event", projected)
+	}
+}
+
+func TestCodexAccountWindowDoesNotMergeConflictingWorkspaceEvidenceFromDailyRollup(t *testing.T) {
+	_, db := newMonitoringRepositoryStore(t)
+	ctx := context.Background()
+	fromMS := int64(1_800_057_600_000)
+	toMS := fromMS + testDayMS
+
+	valid := monitoringRepositoryEvent(
+		"window-daily-valid-workspace-evidence",
+		fromMS+1_000,
+		"gpt-team-window",
+		"key-alice",
+		"alice@example.com",
+		"auth-alice",
+		"alice.json",
+		false,
+		100,
+		10,
+		1,
+	)
+	valid.AuthFileSnapshot = "alice.json"
+	valid.AuthIndex = "auth-alice"
+	valid.AuthProviderSnapshot = "codex"
+	valid.AuthAccountIDSnapshot = "workspace-1"
+
+	conflicting := valid
+	conflicting.EventHash = "window-daily-conflicting-workspace-evidence"
+	conflicting.TimestampMS = fromMS + 2_000
+	conflicting.AuthProjectIDSnapshot = usageidentity.CodexAccountIDSnapshot("workspace-2")
+	conflicting.InputTokens = 200
+	conflicting.TotalTokens = 20
+	if _, err := db.InsertEvents(ctx, []usage.Event{valid, conflicting}); err != nil {
+		t.Fatalf("insert daily workspace-evidence events: %v", err)
+	}
+	catchUpMonitoringRepository(t, ctx, db)
+
+	window := store.AccountWindowUsageQuery{
+		RequestIndex:          0,
+		FromMS:                fromMS,
+		ToMS:                  toMS,
+		AccountSnapshot:       "alice@example.com",
+		AuthFileSnapshot:      "alice.json",
+		AuthProviderSnapshot:  "codex",
+		AuthAccountIDSnapshot: "workspace-1",
+		AuthIndex:             "auth-alice",
+		Source:                "alice.json",
+	}
+	raw, err := db.AccountWindowModelStats(ctx, []store.AccountWindowUsageQuery{window})
+	if err != nil {
+		t.Fatalf("raw daily workspace-evidence stats: %v", err)
+	}
+	projected, _, available, err := db.UsageMonitoringAccountWindowStats(ctx, []store.AccountWindowUsageQuery{window})
+	if err != nil || !available {
+		t.Fatalf("projected daily workspace-evidence stats: available=%v err=%v", available, err)
+	}
+	if !reflect.DeepEqual(projected, raw) {
+		t.Fatalf("daily workspace-evidence projection/raw mismatch\nprojection=%#v\nraw=%#v", projected, raw)
+	}
+	if len(projected) != 1 || projected[0].Calls != 1 || projected[0].InputTokens != 100 {
+		t.Fatalf("daily conflicting workspace evidence was merged = %#v, want only valid event", projected)
+	}
+}
+
 func TestAccountWindowProjectionUsesDailyStatsWithEdgesAndRawTail(t *testing.T) {
 	sqlDB, db := newMonitoringRepositoryStore(t)
 	ctx := context.Background()
@@ -580,8 +835,9 @@ func TestAccountWindowProjectionUsesDailyStatsWithEdgesAndRawTail(t *testing.T) 
 		monitoringRepositoryEvent("window-daily-other-credential", dayStartMS+testDayMS+2*int64(time.Hour/time.Millisecond), "gpt-window", "key-b", "daily@example.com", "auth-other", "other.json", false, 9_000, 9_000, 10),
 	}
 	for index := range events {
+		events[index].Provider = "openai"
 		events[index].AuthFileSnapshot = events[index].Source
-		events[index].AuthProviderSnapshot = "codex"
+		events[index].AuthProviderSnapshot = "openai"
 		events[index].AuthProjectIDSnapshot = ""
 	}
 	if _, err := db.InsertEvents(ctx, events); err != nil {
@@ -611,7 +867,8 @@ func TestAccountWindowProjectionUsesDailyStatsWithEdgesAndRawTail(t *testing.T) 
 		10,
 	)
 	tail.AuthFileSnapshot = "daily.json"
-	tail.AuthProviderSnapshot = "codex"
+	tail.Provider = "openai"
+	tail.AuthProviderSnapshot = "openai"
 	tail.AuthProjectIDSnapshot = ""
 	if _, err := db.InsertEvents(ctx, []usage.Event{tail}); err != nil {
 		t.Fatalf("insert daily account window raw tail: %v", err)
@@ -623,7 +880,7 @@ func TestAccountWindowProjectionUsesDailyStatsWithEdgesAndRawTail(t *testing.T) 
 		ToMS:                 toMS,
 		AccountSnapshot:      "daily@example.com",
 		AuthFileSnapshot:     "daily.json",
-		AuthProviderSnapshot: "codex",
+		AuthProviderSnapshot: "openai",
 		AuthIndex:            "auth-daily",
 		Source:               "daily.json",
 	}}
@@ -769,6 +1026,36 @@ func TestUsageMonitoringSearchDoesNotIndexHistoricalCodexProjectMarker(t *testin
 		t.Fatalf("raw-tail marker search count = %d, want 0", count)
 	}
 }
+
+func TestUsageMonitoringStatsIncludeHistoricalCodexProjectMarker(t *testing.T) {
+	_, db := newMonitoringRepositoryStore(t)
+	ctx := context.Background()
+	fromMS := int64(1_800_057_600_000)
+	toMS := fromMS + testDayMS
+	event := monitoringRepositoryEvent(
+		"stats-legacy-codex-marker",
+		fromMS+1_000,
+		"gpt-marker",
+		"key-marker",
+		"alice@example.com",
+		"auth-marker",
+		"marker.json",
+		false,
+		100,
+		20,
+		10,
+	)
+	event.AuthProjectIDSnapshot = usageidentity.CodexAccountIDSnapshot("workspace-marker")
+	if _, err := db.InsertEvents(ctx, []usage.Event{event}); err != nil {
+		t.Fatalf("insert historical Codex marker event: %v", err)
+	}
+	catchUpMonitoringRepository(t, ctx, db)
+
+	filter := store.AnalyticsFilter{FromMS: fromMS, ToMS: toMS, IncludeFailed: true}
+	assertProjectionCoreReadersMatchRaw(t, ctx, db, filter)
+	assertMonitoringReadersMatchRaw(t, ctx, db, filter)
+}
+
 func TestSuccessfulResponseHeadersDoNotEnterFailureSearchStorage(t *testing.T) {
 	sqlDB, db := newMonitoringRepositoryStore(t)
 	ctx := context.Background()
