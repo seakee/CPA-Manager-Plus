@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -10,6 +11,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 )
@@ -313,5 +317,73 @@ func assertConnectionPragmas(t *testing.T, conn *sql.Conn) {
 		if got != test.want {
 			t.Fatalf("%s = %d, want %d", test.name, got, test.want)
 		}
+	}
+}
+
+func TestOpenDiagnosticForGetTempPath(t *testing.T) {
+	message := openDiagnostic(sqlite3.SQLITE_IOERR_GETTEMPPATH, "/data/usage.sqlite")
+	for _, want := range []string{"temporary directory", "writable"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("diagnostic %q does not mention %q", message, want)
+		}
+	}
+	for _, platformSpecific := range []string{"/tmp", "SQLITE_TMPDIR"} {
+		if strings.Contains(message, platformSpecific) {
+			t.Fatalf("diagnostic %q must not hard-code platform-specific guidance %q", message, platformSpecific)
+		}
+	}
+}
+
+func TestOpenDiagnosticForReadonly(t *testing.T) {
+	message := openDiagnostic(sqlite3.SQLITE_READONLY, "/data/usage.sqlite")
+	for _, want := range []string{"not writable", "/data/usage.sqlite", "ownership", "permissions"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("diagnostic %q does not mention %q", message, want)
+		}
+	}
+}
+
+func TestOpenDiagnosticForUnrecognizedCodes(t *testing.T) {
+	for _, code := range []int{
+		sqlite3.SQLITE_CANTOPEN,
+		sqlite3.SQLITE_BUSY,
+		sqlite3.SQLITE_IOERR,
+		sqlite3.SQLITE_NOTADB,
+		sqlite3.SQLITE_READONLY_DIRECTORY,
+		sqlite3.SQLITE_READONLY_DBMOVED,
+	} {
+		if message := openDiagnostic(code, "/data/usage.sqlite"); message != "" {
+			t.Fatalf("diagnostic %q returned for code %d, want no diagnostic", message, code)
+		}
+	}
+}
+
+func TestEnrichOpenErrorPassesUnknownErrorsThrough(t *testing.T) {
+	plainErr := errors.New("boom")
+	err := enrichOpenError("/data/usage.sqlite", plainErr)
+	if err != plainErr || !errors.Is(err, plainErr) {
+		t.Fatalf("enrichOpenError(plain error) = %v (%T), want the original error", err, err)
+	}
+}
+
+func TestOpenWithOptionsPreservesUnrecognizedSQLiteError(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.sqlite")
+	if err := os.WriteFile(dbPath, []byte("this is not a sqlite database"), 0o644); err != nil {
+		t.Fatalf("write fixture sqlite: %v", err)
+	}
+	db, err := OpenWithOptions(Options{Path: dbPath})
+	if err == nil {
+		_ = db.Close()
+		t.Fatal("open garbage sqlite: expected error")
+	}
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		t.Fatalf("error %q (%T) does not carry a *sqlite.Error", err, err)
+	}
+	if code := sqliteErr.Code(); code != sqlite3.SQLITE_NOTADB {
+		t.Fatalf("fixture error code = %d, want SQLITE_NOTADB (%d)", code, sqlite3.SQLITE_NOTADB)
+	}
+	if message := err.Error(); strings.Contains(message, "temporary directory") || strings.Contains(message, "not writable") {
+		t.Fatalf("unrecognized SQLite error was misclassified: %q", message)
 	}
 }

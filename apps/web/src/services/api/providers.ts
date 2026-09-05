@@ -3,7 +3,9 @@
  */
 
 import { apiClient } from './client';
+import { configApi } from './config';
 import {
+  normalizeClaudeFingerprintProfile,
   normalizeGeminiKeyConfig,
   normalizeOpenAIProvider,
   normalizeProviderKeyConfig,
@@ -15,6 +17,16 @@ import type {
   ApiKeyEntry,
   ModelAlias,
 } from '@/types';
+import {
+  hasModelThinkingLevelsClearMarker,
+  hasModelThinkingLevelsEditMarker,
+  markModelThinkingLevelsForClear,
+  markModelThinkingLevelsForEdit,
+  removeThinkingFlagAliases,
+  stripModelThinkingLevelsMarkers,
+  THINKING_DYNAMIC_ALLOWED_FIELDS,
+  THINKING_ZERO_ALLOWED_FIELDS,
+} from '@/types';
 
 const serializeHeaders = (headers?: Record<string, string>) =>
   headers && Object.keys(headers).length ? headers : undefined;
@@ -22,8 +34,21 @@ const serializeHeaders = (headers?: Record<string, string>) =>
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
 
+const hasOwnField = (value: unknown, field: string): value is Record<string, unknown> =>
+  isRecord(value) && Object.prototype.hasOwnProperty.call(value, field);
+
 const AUTH_INDEX_FIELDS = ['auth-index', 'authIndex', 'auth_index'] as const;
 const DISABLE_COOLING_FIELDS = ['disable-cooling', 'disableCooling', 'disable_cooling'] as const;
+const FINGERPRINT_PROFILE_FIELDS = [
+  'fingerprint-profile',
+  'fingerprintProfile',
+  'fingerprint_profile',
+] as const;
+const LEGACY_CCH_FIELDS = [
+  'experimental-cch-signing',
+  'experimentalCchSigning',
+  'experimental_cch_signing',
+] as const;
 
 const COMMON_PROVIDER_KEY_FIELDS = [
   'api-key',
@@ -55,9 +80,8 @@ const XAI_KEY_FIELDS = CODEX_KEY_FIELDS;
 const CLAUDE_KEY_FIELDS = [
   ...COOLING_PROVIDER_KEY_FIELDS,
   'cloak',
-  'experimental-cch-signing',
-  'experimentalCchSigning',
-  'experimental_cch_signing',
+  ...FINGERPRINT_PROFILE_FIELDS,
+  ...LEGACY_CCH_FIELDS,
   'rebuild-mid-system-message',
   'rebuildMidSystemMessage',
   'rebuild_mid_system_message',
@@ -111,7 +135,6 @@ const MODEL_ALIAS_FIELDS = [
   'output-modalities',
   'outputModalities',
   'output_modalities',
-  'thinking',
 ] as const;
 
 const API_KEY_ENTRY_FIELDS = [
@@ -286,6 +309,10 @@ const mergeModelPayloads = (raw: unknown, models: unknown) =>
         return payloadItems.map((payload, index) => {
           const rawModel = findRawRecord(rawRecords, usedIndexes, payload, index, modelIdentity);
           const next = mergeKnownFields(rawModel, payload, MODEL_ALIAS_FIELDS);
+          const payloadThinking = payload.thinking;
+          const clearThinkingLevels =
+            hasModelThinkingLevelsClearMarker(payload) || payloadThinking === null;
+          const editThinkingLevels = hasModelThinkingLevelsEditMarker(payload);
           preserveOmittedRawField(rawModel, payload, next, ['image']);
           preserveOmittedRawField(rawModel, payload, next, [
             'force-mapping',
@@ -302,7 +329,46 @@ const mergeModelPayloads = (raw: unknown, models: unknown) =>
             'outputModalities',
             'output_modalities',
           ]);
-          preserveOmittedRawField(rawModel, payload, next, ['thinking']);
+          if (clearThinkingLevels) {
+            const rawThinking = isRecord(rawModel?.thinking) ? rawModel.thinking : undefined;
+            const nextThinking = {
+              ...(rawThinking ?? {}),
+              ...(isRecord(payloadThinking) ? payloadThinking : {}),
+            };
+            delete nextThinking.levels;
+            const preserveExplicitEmptyThinking =
+              (isRecord(rawThinking) && Object.keys(rawThinking).length === 0) ||
+              (isRecord(payloadThinking) && Object.keys(payloadThinking).length === 0);
+            if (Object.keys(nextThinking).length > 0 || preserveExplicitEmptyThinking) {
+              next.thinking = nextThinking;
+            } else {
+              delete next.thinking;
+            }
+          } else if (editThinkingLevels && isRecord(payloadThinking)) {
+            const rawThinking = isRecord(rawModel?.thinking) ? rawModel.thinking : undefined;
+            let nextThinking = {
+              ...(rawThinking ?? {}),
+              ...payloadThinking,
+            };
+            nextThinking = removeThinkingFlagAliases(nextThinking, [
+              ...THINKING_ZERO_ALLOWED_FIELDS,
+              ...THINKING_DYNAMIC_ALLOWED_FIELDS,
+            ]);
+            next.thinking = nextThinking;
+          } else if (isRecord(payloadThinking)) {
+            const rawThinking = isRecord(rawModel?.thinking) ? rawModel.thinking : undefined;
+            next.thinking = {
+              ...(rawThinking ?? {}),
+              ...payloadThinking,
+            };
+          } else if (hasOwnField(rawModel, 'thinking') && isRecord(rawModel.thinking)) {
+            // Preserve an explicitly empty or future-only Thinking container when the
+            // normalized payload does not mention it.
+            next.thinking = { ...rawModel.thinking };
+          }
+          if (next.thinking === null) {
+            delete next.thinking;
+          }
           return next;
         });
       })()
@@ -313,13 +379,32 @@ const mergeProviderKeyPayload = (
   payload: Record<string, unknown>,
   knownFields: readonly string[]
 ) => {
+  // Fingerprint and legacy CCH round-trip independently:
+  // - untouched (no fingerprint variant in the payload): both raw groups are
+  //   preserved verbatim, including unknown future fingerprint-profile values.
+  // - explicitly enabled (payload carries a profile): the raw fingerprint is
+  //   replaced and the legacy CCH field is kept, so moving a config to the
+  //   new profile never silently drops its previous CCH setting (older CPA
+  //   builds ignore fingerprint-profile and would otherwise lose both).
+  // - explicitly cleared (payload carries ''): the raw fingerprint and the
+  //   legacy CCH field are both dropped.
+  const fingerprintDefined = hasDefinedField(payload, FINGERPRINT_PROFILE_FIELDS);
+  const fingerprintCleared = FINGERPRINT_PROFILE_FIELDS.some((field) => payload[field] === '');
   const next = mergeKnownFields(raw, payload, knownFields);
+  if (fingerprintDefined) {
+    FINGERPRINT_PROFILE_FIELDS.forEach((field) => {
+      if (next[field] === '') {
+        delete next[field];
+      }
+    });
+  }
   preserveOmittedRawField(raw, payload, next, DISABLE_COOLING_FIELDS);
-  preserveOmittedRawField(raw, payload, next, [
-    'experimental-cch-signing',
-    'experimentalCchSigning',
-    'experimental_cch_signing',
-  ]);
+  if (!fingerprintDefined) {
+    preserveOmittedRawField(raw, payload, next, FINGERPRINT_PROFILE_FIELDS);
+  }
+  if (!fingerprintCleared) {
+    preserveOmittedRawField(raw, payload, next, LEGACY_CCH_FIELDS);
+  }
   const models = mergeModelPayloads(raw, payload.models);
   if (models) next.models = models;
   if (isRecord(payload.cloak)) {
@@ -368,7 +453,35 @@ const buildPreservedList = async <T>(
   try {
     rawConfig = await apiClient.get('/config');
   } catch {
-    return payloads;
+    return payloads.map((payload) => {
+      if (!Array.isArray(payload.models)) return payload;
+      return {
+        ...payload,
+        models: payload.models.map((model) => {
+          if (!isRecord(model)) return model;
+          const next = stripModelThinkingLevelsMarkers(model);
+          if (hasModelThinkingLevelsClearMarker(model)) {
+            const nextThinking = isRecord(model.thinking) ? { ...model.thinking } : {};
+            delete nextThinking.levels;
+            const preserveExplicitEmptyThinking =
+              isRecord(model.thinking) && Object.keys(model.thinking).length === 0;
+            if (Object.keys(nextThinking).length > 0 || preserveExplicitEmptyThinking) {
+              next.thinking = nextThinking;
+            } else {
+              delete next.thinking;
+            }
+          } else if (hasModelThinkingLevelsEditMarker(model) && isRecord(next.thinking)) {
+            next.thinking = removeThinkingFlagAliases(next.thinking, [
+              ...THINKING_ZERO_ALLOWED_FIELDS,
+              ...THINKING_DYNAMIC_ALLOWED_FIELDS,
+            ]);
+          } else if (next.thinking === null) {
+            delete next.thinking;
+          }
+          return next;
+        }),
+      };
+    });
   }
 
   const rawItems = getRawSectionList(rawConfig, section);
@@ -447,6 +560,88 @@ const matchesProviderConfig = (
     'api-key': original.apiKey,
     'base-url': original.baseUrl,
   });
+
+export type ClaudeFingerprintVerification = 'confirmed' | 'not-applied' | 'not-found';
+
+export type ClaudeFingerprintVerificationTarget =
+  | { mode: 'edit'; index: number; apiKey?: string; baseUrl?: string }
+  | { mode: 'create'; apiKey?: string; baseUrl?: string };
+
+// One GET /config after a committed save: the normalized section refreshes the
+// global config store, while the raw section is the verification source of
+// truth. The raw section is required because an unknown future fingerprint
+// value normalizes to undefined and would otherwise make an explicit Default
+// look confirmed even though the raw field is still present.
+export const readBackClaudeConfigAfterSave = async (): Promise<{
+  claudeApiKeys: ProviderKeyConfig[];
+  rawRecords: Array<Record<string, unknown>>;
+}> => {
+  const config = await configApi.getConfig();
+  return {
+    claudeApiKeys: config.claudeApiKeys ?? [],
+    rawRecords: getRawSectionList(config.raw, 'claude-api-key'),
+  };
+};
+
+const matchesPersistedIdentity = (
+  record: Record<string, unknown>,
+  apiKey?: string,
+  baseUrl?: string
+) => {
+  const targetApiKey = (apiKey ?? '').trim();
+  const targetBaseUrl = (baseUrl ?? '').trim();
+  if (!targetApiKey && !targetBaseUrl) return true;
+  const recordApiKey = (getStringField(record, ['api-key', 'apiKey']) ?? '').trim();
+  const recordBaseUrl = (getStringField(record, ['base-url', 'baseUrl', 'base_url']) ?? '').trim();
+  return recordApiKey === targetApiKey && recordBaseUrl === targetBaseUrl;
+};
+
+// Read-back check for explicit fingerprint changes against the persisted raw
+// /config list. Older CPA builds unmarshal config sections into structs
+// without fingerprint-profile, silently ignore the field, and still answer
+// 200 — so a successful PUT alone proves nothing. The runtime auth-index from
+// /claude-api-key deliberately plays no part because /config entries never
+// carry it: Edit verifies positionally (the PUT replaced the record in place)
+// with an apiKey + baseUrl fallback; Create verifies the appended last record,
+// because duplicate api-key/base-url entries are legal (they differ in
+// proxy/prefix/headers) and an identity find() could verify an older record.
+export const verifyClaudeFingerprintInRawConfig = (
+  rawRecords: Array<Record<string, unknown>>,
+  expected: ProviderKeyConfig['fingerprintProfile'],
+  target: ClaudeFingerprintVerificationTarget
+): ClaudeFingerprintVerification => {
+  let saved: Record<string, unknown> | undefined;
+  if (target.mode === 'create') {
+    const last = rawRecords[rawRecords.length - 1];
+    // Sanity check only: on mismatch we cannot tell which record was written,
+    // and falling back to find() could verify an older duplicate record.
+    if (isRecord(last) && matchesPersistedIdentity(last, target.apiKey, target.baseUrl)) {
+      saved = last;
+    }
+  } else {
+    const byIndex = rawRecords[target.index];
+    if (isRecord(byIndex) && matchesPersistedIdentity(byIndex, target.apiKey, target.baseUrl)) {
+      saved = byIndex;
+    } else if ((target.apiKey ?? '').trim() || (target.baseUrl ?? '').trim()) {
+      saved = rawRecords.find((record) =>
+        matchesPersistedIdentity(record, target.apiKey, target.baseUrl)
+      );
+    }
+  }
+  if (!isRecord(saved)) return 'not-found';
+  const rawValue =
+    saved['fingerprint-profile'] ?? saved.fingerprintProfile ?? saved.fingerprint_profile;
+  const actual = normalizeClaudeFingerprintProfile(rawValue);
+  if (expected === 'claude-code-cli') {
+    return actual === 'claude-code-cli' ? 'confirmed' : 'not-applied';
+  }
+  // Explicit Default is only confirmed when the raw field is really gone;
+  // an unknown future value reads as undefined through the recognized-alias
+  // normalization but must count as not-applied here.
+  const rawFieldAbsent =
+    rawValue === undefined || (typeof rawValue === 'string' && rawValue.trim() === '');
+  return rawFieldAbsent ? 'confirmed' : 'not-applied';
+};
 
 const extractArrayPayload = (data: unknown, key: string): unknown[] => {
   if (Array.isArray(data)) return data;
@@ -538,6 +733,13 @@ const serializeModelAliases = (models?: ModelAlias[]) =>
           if (isRecord(model.thinking)) {
             payload.thinking = model.thinking;
           }
+          if (hasModelThinkingLevelsClearMarker(model)) {
+            // The non-enumerable marker is consumed by the raw merge layer.
+            markModelThinkingLevelsForClear(payload);
+          }
+          if (hasModelThinkingLevelsEditMarker(model)) {
+            markModelThinkingLevelsForEdit(payload);
+          }
           return payload;
         })
         .filter(Boolean)
@@ -573,8 +775,10 @@ const serializeProviderKey = (config: ProviderKeyConfig) => {
   if (config.baseUrl) payload['base-url'] = config.baseUrl;
   if (config.websockets !== undefined) payload.websockets = config.websockets;
   if (config.disableCooling !== undefined) payload['disable-cooling'] = config.disableCooling;
-  if (config.experimentalCchSigning !== undefined) {
-    payload['experimental-cch-signing'] = config.experimentalCchSigning;
+  if (config.fingerprintProfile !== undefined) {
+    // '' is the form's explicit "clear fingerprint-profile" signal; the
+    // merge layer strips the empty key instead of writing it to CPA.
+    payload['fingerprint-profile'] = config.fingerprintProfile.trim();
   }
   if (config.rebuildMidSystemMessage !== undefined) {
     payload['rebuild-mid-system-message'] = config.rebuildMidSystemMessage;
@@ -617,6 +821,17 @@ const serializeVertexModelAliases = (models?: ModelAlias[]) =>
         })
         .filter(Boolean)
     : undefined;
+
+// An update that leaves the fingerprint untouched must not carry it in the
+// payload: the round-tripped form value would otherwise read as an explicit
+// change and make the merge layer drop legacy CCH fields from the raw config.
+const serializeClaudeUpdatePayload = (original: ProviderKeyConfig, value: ProviderKeyConfig) => {
+  const payload = serializeProviderKey(value);
+  if (value.fingerprintProfile === original.fingerprintProfile) {
+    delete payload['fingerprint-profile'];
+  }
+  return payload;
+};
 
 const serializeVertexKey = (config: ProviderKeyConfig) => {
   const payload: Record<string, unknown> = {};
@@ -874,7 +1089,7 @@ export const providersApi = {
       replaceLatestProviderRecord(
         latestItems,
         (record) => matchesProviderConfig(record, original),
-        serializeProviderKey(value),
+        serializeClaudeUpdatePayload(original, value),
         (raw, payload) => mergeProviderKeyPayload(raw, payload, CLAUDE_KEY_FIELDS)
       )
     ),

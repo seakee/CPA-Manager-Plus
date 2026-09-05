@@ -3,7 +3,11 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Outlet, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useUnsavedChangesGuard } from '@/hooks/useUnsavedChangesGuard';
-import { providersApi } from '@/services/api';
+import {
+  providersApi,
+  readBackClaudeConfigAfterSave,
+  verifyClaudeFingerprintInRawConfig,
+} from '@/services/api';
 import {
   useAuthStore,
   useClaudeEditDraftStore,
@@ -13,6 +17,7 @@ import {
 import {
   coolingPolicyFromOverride,
   coolingPolicyToOverride,
+  type NotificationType,
   type ProviderKeyConfig,
 } from '@/types';
 import type { ModelInfo } from '@/utils/models';
@@ -126,6 +131,8 @@ const buildClaudeBaseline = (form: ProviderFormState): ClaudeEditBaseline => ({
   baseUrl: String(form.baseUrl ?? '').trim(),
   proxyUrl: String(form.proxyUrl ?? '').trim(),
   disableCooling: form.disableCooling,
+  fingerprintProfile:
+    typeof form.fingerprintProfile === 'string' ? form.fingerprintProfile : undefined,
   rebuildMidSystemMessage: Boolean(form.rebuildMidSystemMessage),
   headers: normalizeHeaderEntries(form.headers),
   models: normalizeClaudeModelEntries(form.modelEntries),
@@ -349,6 +356,7 @@ export function AiProvidersClaudeEditLayout() {
       baseline.baseUrl !== String(form.baseUrl ?? '').trim() ||
       baseline.proxyUrl !== String(form.proxyUrl ?? '').trim() ||
       baseline.disableCooling !== form.disableCooling ||
+      baseline.fingerprintProfile !== form.fingerprintProfile ||
       baseline.rebuildMidSystemMessage !== Boolean(form.rebuildMidSystemMessage) ||
       isHeadersDirty ||
       isModelsDirty ||
@@ -466,29 +474,62 @@ export function AiProvidersClaudeEditLayout() {
         cloak: form.cloak,
         authIndex: normalizeAuthIndex(form.authIndex) ?? undefined,
         disableCooling: coolingPolicyToOverride(form.disableCooling),
-        experimentalCchSigning: form.experimentalCchSigning,
+        fingerprintProfile: form.fingerprintProfile,
         rebuildMidSystemMessage: form.rebuildMidSystemMessage,
       };
+
+      const fingerprintExplicitlyChanged =
+        editIndex !== null
+          ? configs[editIndex].fingerprintProfile !== payload.fingerprintProfile
+          : payload.fingerprintProfile !== undefined;
 
       if (editIndex !== null) {
         await providersApi.updateClaudeConfig(configs[editIndex], payload);
       } else {
         await providersApi.createClaudeConfig(payload);
       }
-      const syncedList = await providersApi.getClaudeConfigs().catch(() =>
-        editIndex !== null
-          ? configs.map((item, index) => (index === editIndex ? payload : item))
-          : [...configs, payload]
-      );
-      setConfigs(syncedList);
-      updateConfigValue('claude-api-key', syncedList);
+
+      // The PUT succeeded: the config write is committed no matter what the
+      // fingerprint verification below concludes. Verification reads the
+      // persisted /config (never the runtime /claude-api-key endpoint, whose
+      // auth-index is derived and absent from /config) and only decides which
+      // notification the user gets.
+      let readBack: Awaited<ReturnType<typeof readBackClaudeConfigAfterSave>> | null = null;
+      try {
+        readBack = await readBackClaudeConfigAfterSave();
+      } catch {
+        readBack = null;
+      }
+      if (readBack) {
+        setConfigs(readBack.claudeApiKeys);
+        updateConfigValue('claude-api-key', readBack.claudeApiKeys);
+      }
       clearCache('claude-api-key');
-      showNotification(
+
+      let notificationKey =
         editIndex !== null
-          ? t('notification.claude_config_updated')
-          : t('notification.claude_config_added'),
-        'success'
-      );
+          ? 'notification.claude_config_updated'
+          : 'notification.claude_config_added';
+      let notificationType: NotificationType = 'success';
+      if (!readBack) {
+        if (fingerprintExplicitlyChanged) {
+          notificationKey = 'notification.claude_fingerprint_verify_unavailable';
+          notificationType = 'warning';
+        }
+      } else if (fingerprintExplicitlyChanged) {
+        const verification = verifyClaudeFingerprintInRawConfig(
+          readBack.rawRecords,
+          payload.fingerprintProfile,
+          editIndex !== null
+            ? { mode: 'edit', index: editIndex, apiKey: payload.apiKey, baseUrl: payload.baseUrl }
+            : { mode: 'create', apiKey: payload.apiKey, baseUrl: payload.baseUrl }
+        );
+        if (verification !== 'confirmed') {
+          notificationKey = 'notification.claude_fingerprint_not_applied';
+          notificationType = 'warning';
+        }
+      }
+      showNotification(t(notificationKey), notificationType);
       allowNextNavigation();
       setDraftBaseline(draftKey, buildClaudeBaseline(form));
       handleBack();

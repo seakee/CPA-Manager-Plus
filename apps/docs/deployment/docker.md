@@ -237,6 +237,26 @@ docker run --rm \
 - 如果 `data.key` 丢失，保存到 SQLite 的 CPA Management Key 无法恢复，只能重新保存 CPA 连接。
 - 如果是手动 env/secret 部署，或安装器尚未完成/跳过 CPA 连接导入，同时备份安装目录里的 `secrets/`。
 
+## 只读根文件系统
+
+标准 CPAMP Docker/Compose 部署的根文件系统默认可写，不需要额外的临时卷配置。
+
+如果给 Manager Server 容器启用 `readOnlyRootFilesystem: true` 等加固配置，SQLite 仍需要一个可写的临时目录。Kubernetes 可以在 `/tmp` 挂载可写临时卷：
+
+```yaml
+volumeMounts:
+  - name: tmp
+    mountPath: /tmp
+
+volumes:
+  - name: tmp
+    emptyDir: {}
+```
+
+如果自行设置 `emptyDir.sizeLimit`，应根据数据库规模和实际工作负载评估容量。Unix 类环境也可以通过 `SQLITE_TMPDIR` 指向其他可写临时路径。
+
+同时要确保数据库文件及 WAL/SHM 伴生文件对 Manager Server 运行用户可写。CPAMP 不会自动修改文件属主或权限，也不会迁移 SQLite 临时文件。
+
 ::: details 高级：采集协议和网络要求
 
 ## 采集路径

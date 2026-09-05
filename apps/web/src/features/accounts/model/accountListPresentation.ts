@@ -642,6 +642,12 @@ const getAvailableQuotaObservedAtMs = (row: AccountRow): number | null =>
       : (row.quota.fetchedAtMs ?? row.quota.observedQuotaAtMs ?? row.quota.observedAtMs)
   );
 
+const hasCurrentAvailableQuotaEvidence = (row: AccountRow): boolean => {
+  if (row.authenticationAtMs <= 0) return true;
+  const observedAtMs = getAvailableQuotaObservedAtMs(row);
+  return observedAtMs !== null && observedAtMs >= row.authenticationAtMs;
+};
+
 const getAvailableQuotaBasisLabelKey = (row: AccountRow): string => {
   if (row.quota.source === 'observed-header') return 'accounts.quota_source_observed_header';
   if (row.quota.source === 'cache') return 'accounts.quota_source_cache';
@@ -654,7 +660,7 @@ const resolveLatestAvailableEvidence = (
   requestEvidence: AccountRequestHealthEvidence | null
 ): AccountAvailableEvidence | null => {
   const candidates: AccountAvailableEvidence[] = [];
-  if (hasAvailableQuota) {
+  if (hasAvailableQuota && hasCurrentAvailableQuotaEvidence(row)) {
     candidates.push({
       source: 'quota',
       observedAtMs: getAvailableQuotaObservedAtMs(row),

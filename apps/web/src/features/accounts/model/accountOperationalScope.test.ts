@@ -80,7 +80,7 @@ describe('buildAccountOperationalItemsByRowKey', () => {
     expect(result.get(rows[1].selectionKey)).toEqual([item]);
   });
 
-  it('scopes same-file action candidates by account ID snapshot', () => {
+  it('does not scope same-file action candidates by a Codex workspace ID', () => {
     const files: AuthFileItem[] = [
       {
         name: 'shared.json',
@@ -105,6 +105,6 @@ describe('buildAccountOperationalItemsByRowKey', () => {
     const result = buildAccountOperationalItemsByRowKey(rows, [item]);
 
     expect(result.get(rows[0].selectionKey)).toEqual([]);
-    expect(result.get(rows[1].selectionKey)).toEqual([item]);
+    expect(result.get(rows[1].selectionKey)).toEqual([]);
   });
 });

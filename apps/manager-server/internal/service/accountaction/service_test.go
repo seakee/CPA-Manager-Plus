@@ -641,7 +641,7 @@ func TestAccountActionsRejectCandidateWithoutStableIdentity(t *testing.T) {
 			if getErr != nil || !ok {
 				t.Fatalf("get candidate: %v ok=%t", getErr, ok)
 			}
-			if current.Status != model.AccountActionStatusPending || !strings.Contains(current.LastError, "no stable auth index") {
+			if current.Status != model.AccountActionStatusPending || !strings.Contains(current.LastError, "auth_index") {
 				t.Fatalf("candidate = %#v, want pending stable-identity failure", current)
 			}
 		})

@@ -19,7 +19,6 @@ import type { AccountDetailViewModel } from '@/features/accounts/model/accountDe
 import type { AccountRow } from '@/features/accounts/model/accountRows';
 import type { MonitoringAnalyticsEventRow } from '@/services/api';
 import {
-  formatCompactNumber,
   formatDurationMs,
   formatPercent,
   formatTimestamp,
@@ -27,6 +26,7 @@ import {
   getEventStatusText,
   translateDetailEnum,
 } from '@/features/accounts/model/accountsPagePresentation';
+import { formatCompactNumber } from '@/utils/usage';
 import { CopyableText } from '../CopyableText';
 import { AccountDetailFieldList } from './AccountDetailFieldList';
 import styles from '@/features/accounts/AccountsPage.module.scss';

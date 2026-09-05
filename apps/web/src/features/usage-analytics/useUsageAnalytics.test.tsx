@@ -7,6 +7,7 @@ import {
   type UseMonitoringAnalyticsParams,
   type UseMonitoringAnalyticsReturn,
 } from '@/features/monitoring/hooks/useMonitoringAnalytics';
+import type { MonitoringAnalyticsApiKeyStatRow } from '@/services/api/usageService';
 import { useUsageAnalytics } from './useUsageAnalytics';
 
 vi.mock('@/features/monitoring/hooks/useMonitoringAnalytics', () => ({
@@ -35,6 +36,27 @@ const emptyAnalyticsResponse = {
 };
 const HOUR_MS = 60 * 60 * 1000;
 
+const createApiKeyStatRow = (
+  overrides: Partial<MonitoringAnalyticsApiKeyStatRow> = {}
+): MonitoringAnalyticsApiKeyStatRow => ({
+  id: 'key-a',
+  api_key_hash: 'key-a',
+  calls: 6,
+  success_calls: 6,
+  failure_calls: 0,
+  success_rate: 1,
+  input_tokens: 600,
+  output_tokens: 0,
+  cached_tokens: 0,
+  cache_read_tokens: 0,
+  cache_creation_tokens: 0,
+  total_tokens: 600,
+  cost: 0.6,
+  average_latency_ms: null,
+  last_seen_ms: 1,
+  ...overrides,
+});
+
 const localHourStartMs = (timestampMs: number) => {
   const date = new Date(timestampMs);
   date.setMinutes(0, 0, 0);
@@ -47,6 +69,9 @@ describe('useUsageAnalytics request orchestration', () => {
   let selectorError = '';
   let credentialTimelineError = '';
   let credentialTimelineLoading = false;
+  let apiKeyTimelineAvailable = true;
+  let mainTimelineBucketCalls = 5;
+  let apiKeyStats: MonitoringAnalyticsApiKeyStatRow[] = [createApiKeyStatRow()];
   const mainRefresh = vi.fn();
   const selectorRefresh = vi.fn();
   const auxiliaryRefresh = vi.fn();
@@ -88,39 +113,21 @@ describe('useUsageAnalytics request orchestration', () => {
               {
                 bucket_ms: mainTimelineStartMs,
                 label: '00:00',
-                calls: 5,
-                tokens: 500,
-                success: 5,
+                calls: mainTimelineBucketCalls,
+                tokens: mainTimelineBucketCalls * 100,
+                success: mainTimelineBucketCalls,
                 failure: 0,
               },
               {
                 bucket_ms: mainTimelineStartMs + 2 * HOUR_MS,
                 label: '01:00',
-                calls: 5,
-                tokens: 500,
-                success: 5,
+                calls: mainTimelineBucketCalls,
+                tokens: mainTimelineBucketCalls * 100,
+                success: mainTimelineBucketCalls,
                 failure: 0,
               },
             ],
-            api_key_stats: [
-              {
-                id: 'key-a',
-                api_key_hash: 'key-a',
-                calls: 6,
-                success_calls: 6,
-                failure_calls: 0,
-                success_rate: 1,
-                input_tokens: 600,
-                output_tokens: 0,
-                cached_tokens: 0,
-                cache_read_tokens: 0,
-                cache_creation_tokens: 0,
-                total_tokens: 600,
-                cost: 0.6,
-                average_latency_ms: null,
-                last_seen_ms: 1,
-              },
-            ],
+            api_key_stats: apiKeyStats,
           }
         : emptyAnalyticsResponse;
     return {
@@ -141,7 +148,7 @@ describe('useUsageAnalytics request orchestration', () => {
             }
         : main
           ? mainData
-          : apiKeyTimeline
+          : apiKeyTimeline && apiKeyTimelineAvailable
             ? {
                 ...emptyAnalyticsResponse,
                 api_key_timeline: [
@@ -204,6 +211,9 @@ describe('useUsageAnalytics request orchestration', () => {
     selectorError = '';
     credentialTimelineError = '';
     credentialTimelineLoading = false;
+    apiKeyTimelineAvailable = true;
+    mainTimelineBucketCalls = 5;
+    apiKeyStats = [createApiKeyStatRow()];
     latestResult = null;
     mainRefresh.mockReset();
     selectorRefresh.mockReset();
@@ -217,10 +227,10 @@ describe('useUsageAnalytics request orchestration', () => {
     renderer = null;
   });
 
-  const renderHook = async () => {
+  const renderHook = async (initialEntry = '/usage-analytics') => {
     await act(async () => {
       renderer = create(
-        <MemoryRouter initialEntries={['/usage-analytics']}>
+        <MemoryRouter initialEntries={[initialEntry]}>
           <Harness />
         </MemoryRouter>
       );
@@ -303,9 +313,9 @@ describe('useUsageAnalytics request orchestration', () => {
       activeTab: 'overview',
       apiKeyHashes: ['key-a'],
     });
-    expect(latestResult?.apiKeyTrendSeries[0].points.slice(0, 3).map((point) => point.value)).toEqual(
-      [2, 0, 4]
-    );
+    expect(
+      latestResult?.apiKeyTrendSeries[0].points.slice(0, 3).map((point) => point.value)
+    ).toEqual([2, 0, 4]);
 
     await act(async () => {
       latestResult?.setActiveTab('trends');
@@ -317,6 +327,149 @@ describe('useUsageAnalytics request orchestration', () => {
       activeTab: 'trends',
       apiKeyHashes: ['key-a'],
     });
+  });
+
+  it('never uses fallback API key IDs for default selections or timeline requests', async () => {
+    apiKeyStats = [
+      createApiKeyStatRow({
+        id: 'unknown-client-api-key:missing-client-key',
+        api_key_hash: '',
+      }),
+      createApiKeyStatRow({ id: 'real-key-row', api_key_hash: ' real-key-hash ' }),
+    ];
+    await renderHook();
+
+    const overviewTimeline = lastParams((params) => Boolean(params.include?.api_key_timeline));
+    expect(overviewTimeline?.filters).toMatchObject({ api_key_hashes: ['real-key-hash'] });
+    expect(latestResult?.selectedApiKey?.apiKeyHash).toBe('real-key-hash');
+
+    await act(async () => {
+      latestResult?.setActiveTab('apiKeys');
+      await Promise.resolve();
+    });
+
+    const selectedTimeline = lastParams(
+      (params) => Boolean(params.include?.timeline) && !params.include?.summary
+    );
+    expect(selectedTimeline?.filters).toMatchObject({ api_key_hashes: ['real-key-hash'] });
+
+    await act(async () => {
+      latestResult?.setSelectedApiKeyHash('unknown-client-api-key:missing-client-key');
+      await Promise.resolve();
+    });
+
+    const fallbackSelectionTimeline = lastParams(
+      (params) => Boolean(params.include?.timeline) && !params.include?.summary
+    );
+    expect(fallbackSelectionTimeline?.filters).toMatchObject({ api_key_hashes: ['real-key-hash'] });
+    expect(latestResult?.selectedApiKey?.apiKeyHash).toBe('real-key-hash');
+  });
+
+  it('uses only real API keys for exact trend series while keeping a leading fallback rank row', async () => {
+    apiKeyStats = [
+      createApiKeyStatRow({
+        id: 'unknown-client-api-key:missing-client-key',
+        api_key_hash: '',
+        calls: 100,
+        cost: 100,
+      }),
+      ...['key-a', 'key-b', 'key-c', 'key-d'].map((apiKeyHash, index) =>
+        createApiKeyStatRow({
+          id: apiKeyHash,
+          api_key_hash: apiKeyHash,
+          calls: 10 - index,
+          cost: 10 - index,
+        })
+      ),
+    ];
+
+    await renderHook();
+
+    const apiKeyTimeline = lastParams((params) => Boolean(params.include?.api_key_timeline));
+    expect(latestResult?.apiKeyRows[0].id).toBe('unknown-client-api-key:missing-client-key');
+    expect(apiKeyTimeline?.filters).toMatchObject({
+      api_key_hashes: ['key-a', 'key-b', 'key-c', 'key-d'],
+    });
+    expect(latestResult?.apiKeyTrendSeries.map((series) => series.id)).toEqual([
+      'key-a',
+      'key-b',
+      'key-c',
+      'key-d',
+    ]);
+    expect(
+      latestResult?.apiKeyTrendSeries[0].points.slice(0, 3).map((point) => point.value)
+    ).toEqual([2, 0, 4]);
+  });
+
+  it('does not approximate fallback-only API key rows as trend series', async () => {
+    apiKeyStats = [
+      createApiKeyStatRow({
+        id: 'unknown-client-api-key:missing-client-key',
+        api_key_hash: '',
+        calls: 100,
+        cost: 100,
+      }),
+    ];
+    apiKeyTimelineAvailable = false;
+
+    await renderHook();
+
+    expect(latestResult?.apiKeyRows).toHaveLength(1);
+    expect(latestResult?.apiKeyRows[0].id).toBe('unknown-client-api-key:missing-client-key');
+    expect(latestResult?.apiKeyTrendSeries).toEqual([]);
+  });
+
+  it('uses complete API key totals for approximate trend shares while hiding fallback rows', async () => {
+    apiKeyStats = [
+      createApiKeyStatRow({
+        id: 'unknown-client-api-key:missing-client-key',
+        api_key_hash: '',
+        calls: 90,
+      }),
+      createApiKeyStatRow({
+        id: 'real-key-row',
+        api_key_hash: 'real-key-hash',
+        calls: 10,
+      }),
+    ];
+    mainTimelineBucketCalls = 50;
+    apiKeyTimelineAvailable = false;
+
+    await renderHook();
+
+    expect(latestResult?.apiKeyRows.map((row) => row.id)).toEqual([
+      'unknown-client-api-key:missing-client-key',
+      'real-key-hash',
+    ]);
+    expect(latestResult?.apiKeyTrendSeries.map((series) => series.id)).toEqual(['real-key-hash']);
+    expect(
+      latestResult?.apiKeyTrendSeries[0].points.slice(0, 3).map((point) => point.value)
+    ).toEqual([5, 0, 5]);
+  });
+
+  it('omits an initial fallback API key filter from analytics requests', async () => {
+    await renderHook('/usage-analytics?api_key_hash=unknown-client-api-key%3Alegacy-filter');
+
+    const main = lastParams((params) => Boolean(params.include?.summary));
+    expect(main?.filters).not.toHaveProperty('api_key_hashes');
+  });
+
+  it('keeps a fallback-only aggregate visible without enabling a key timeline request', async () => {
+    apiKeyStats = [
+      createApiKeyStatRow({
+        id: 'unknown-client-api-key:missing-client-key',
+        api_key_hash: '',
+      }),
+    ];
+    await renderHook();
+
+    const selectedTimeline = lastParams(
+      (params) => Boolean(params.include?.timeline) && !params.include?.summary
+    );
+    expect(latestResult?.selectedApiKey?.id).toBe('unknown-client-api-key:missing-client-key');
+    expect(selectedTimeline?.fromMs).toBeUndefined();
+    expect(selectedTimeline?.toMs).toBeUndefined();
+    expect(selectedTimeline?.filters).not.toHaveProperty('api_key_hashes');
   });
 
   it('does not couple selector failures to the main page error and refreshes both requests', async () => {

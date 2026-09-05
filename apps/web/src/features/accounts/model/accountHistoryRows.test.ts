@@ -22,6 +22,8 @@ const makeRow = (overrides: Partial<AccountRow>): AccountRow =>
     authIndex: 'auth-1',
     projectId: '',
     priority: 0,
+    authenticationAtMs: 0,
+    rawCredentialStatusSuperseded: false,
     quota: {
       status: 'unknown',
       remainingPercent: null,

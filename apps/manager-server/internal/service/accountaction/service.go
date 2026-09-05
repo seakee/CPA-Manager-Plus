@@ -14,6 +14,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
 	managerconfigsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
 
 var ErrCandidateNotFound = errors.New("account action candidate not found")
@@ -361,12 +362,41 @@ func accountActionIdentity(item model.AccountActionCandidate) (cpaauthfiles.Iden
 	if accountSnapshot == fileName {
 		accountSnapshot = ""
 	}
+	authIndex := strings.TrimSpace(item.AuthIndex)
+	provider := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(item.Provider), "_", "-"))
+	if provider == "x-ai" || provider == "grok" {
+		provider = "xai"
+	}
+	accountIDSnapshot := strings.TrimSpace(item.AccountIDSnapshot)
+	if provider == "codex" {
+		if accountIDSnapshot != "" {
+			workspace, ok := usageidentity.NormalizeCodexWorkspaceSnapshot(accountIDSnapshot)
+			if !ok {
+				return cpaauthfiles.Identity{}, fmt.Errorf("%w: candidate has invalid Codex workspace identity", cpaauthfiles.ErrIdentityMismatch)
+			}
+			accountIDSnapshot = workspace
+		}
+		if accountSnapshot != "" {
+			member, ok := usageidentity.NormalizeCodexMemberSnapshot(accountSnapshot)
+			if ok {
+				accountSnapshot = member
+			} else {
+				// A display label is not a Codex member identity. An explicit
+				// auth_index may still identify the credential, but the weak
+				// display value must not be used as an ownership check.
+				accountSnapshot = ""
+			}
+		}
+		if authIndex == "" {
+			return cpaauthfiles.Identity{}, fmt.Errorf("%w: Codex credential mutation requires auth_index", cpaauthfiles.ErrIdentityMismatch)
+		}
+	}
 	identity := cpaauthfiles.Identity{
 		AuthFileName:      fileName,
-		AuthIndex:         strings.TrimSpace(item.AuthIndex),
-		Provider:          strings.TrimSpace(item.Provider),
+		AuthIndex:         authIndex,
+		Provider:          provider,
 		AccountSnapshot:   accountSnapshot,
-		AccountIDSnapshot: strings.TrimSpace(item.AccountIDSnapshot),
+		AccountIDSnapshot: accountIDSnapshot,
 	}
 	if identity.AuthIndex == "" && identity.AccountSnapshot == "" && identity.AccountIDSnapshot == "" {
 		return cpaauthfiles.Identity{}, fmt.Errorf("%w: candidate has no stable auth index, account ID, or account snapshot", cpaauthfiles.ErrIdentityMismatch)

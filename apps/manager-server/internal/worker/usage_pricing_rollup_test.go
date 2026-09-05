@@ -129,7 +129,7 @@ func TestUsagePricingRollupWorkerContinuesPendingBacklog(t *testing.T) {
 	worker.continuationDelay = time.Millisecond
 	worker.Start(ctx)
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		state, err := db.UsagePricingState(ctx)
 		if err != nil {

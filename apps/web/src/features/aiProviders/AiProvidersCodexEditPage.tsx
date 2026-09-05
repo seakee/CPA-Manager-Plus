@@ -659,7 +659,6 @@ export function AiProvidersCodexEditPage() {
         excludedModels: parseExcludedModels(form.excludedText),
         authIndex: normalizeAuthIndex(form.authIndex) ?? undefined,
         disableCooling: coolingPolicyToOverride(form.disableCooling),
-        experimentalCchSigning: form.experimentalCchSigning,
       };
 
       if (editIndex !== null) {

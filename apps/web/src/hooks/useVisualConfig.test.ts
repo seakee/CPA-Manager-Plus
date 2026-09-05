@@ -42,6 +42,87 @@ const mountUseVisualConfig = (): UseVisualConfigHarness => {
 };
 
 describe('useVisualConfig', () => {
+  it('clears the page dirty state when API keys are the only changed field', () => {
+    const harness = mountUseVisualConfig();
+    const initialYaml = ['proxy-url: http://proxy.local:8080', 'api-keys:', '  - old-key', ''].join(
+      '\n'
+    );
+
+    act(() => {
+      expect(harness.getCurrent().loadVisualValuesFromYaml(initialYaml).ok).toBe(true);
+      harness.getCurrent().setVisualValues({ apiKeysText: 'old-key\nnew-key' });
+    });
+    expect(harness.getCurrent().visualDirty).toBe(true);
+
+    act(() => {
+      harness.getCurrent().commitApiKeysText('old-key\nnew-key');
+    });
+
+    expect(harness.getCurrent().visualDirty).toBe(false);
+    expect(harness.getCurrent().applyVisualChangesToYaml(initialYaml)).toBe(
+      initialYaml
+    );
+    harness.unmount();
+  });
+
+  it('applies ordinary Visual changes to latest YAML without overwriting an immediate API key', () => {
+    const harness = mountUseVisualConfig();
+    const initialYaml = ['proxy-url: http://proxy.local:8080', 'api-keys:', '  - old-key', ''].join(
+      '\n'
+    );
+    const latestYaml = [
+      'proxy-url: http://proxy.local:8080',
+      'api-keys:',
+      '  - old-key',
+      '  - new-key',
+      '',
+    ].join('\n');
+
+    act(() => {
+      expect(harness.getCurrent().loadVisualValuesFromYaml(initialYaml).ok).toBe(true);
+      harness.getCurrent().setVisualValues({ proxyUrl: 'http://next-proxy.local:8080' });
+      harness.getCurrent().commitApiKeysText('old-key\nnew-key');
+    });
+
+    const parsed = parseYaml(
+      harness.getCurrent().applyVisualChangesToYaml(latestYaml)
+    ) as { ['api-keys']?: string[]; ['proxy-url']?: string };
+    expect(parsed['proxy-url']).toBe('http://next-proxy.local:8080');
+    expect(parsed['api-keys']).toEqual(['old-key', 'new-key']);
+    expect(harness.getCurrent().visualDirty).toBe(true);
+    harness.unmount();
+  });
+
+  it('commits only API keys while preserving other visual dirty fields', () => {
+    const harness = mountUseVisualConfig();
+    const yaml = ['proxy-url: http://proxy.local:8080', 'api-keys:', '  - old-key', ''].join('\n');
+
+    act(() => {
+      expect(harness.getCurrent().loadVisualValuesFromYaml(yaml).ok).toBe(true);
+      harness.getCurrent().setVisualValues({
+        proxyUrl: 'http://next-proxy.local:8080',
+        apiKeysText: 'old-key\nnew-key',
+      });
+    });
+
+    expect(harness.getCurrent().visualDirty).toBe(true);
+
+    act(() => {
+      harness.getCurrent().commitApiKeysText('old-key\nnew-key');
+    });
+
+    expect(harness.getCurrent().visualValues.apiKeysText).toBe('old-key\nnew-key');
+    expect(harness.getCurrent().visualValues.proxyUrl).toBe('http://next-proxy.local:8080');
+    expect(harness.getCurrent().visualDirty).toBe(true);
+
+    act(() => {
+      harness.getCurrent().setVisualValues({ proxyUrl: 'http://proxy.local:8080' });
+    });
+
+    expect(harness.getCurrent().visualDirty).toBe(false);
+    harness.unmount();
+  });
+
   it('loads CPA weighted routing aliases and writes the canonical strategy', () => {
     const harness = mountUseVisualConfig();
     const yaml = ['routing:', '  strategy: wrr', ''].join('\n');

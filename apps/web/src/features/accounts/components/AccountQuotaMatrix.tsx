@@ -1,6 +1,7 @@
 import {
   formatPercent,
   formatQuotaResetDisplay,
+  type AccountQuotaLifecycleBarOverride,
   type AntigravityQuotaMatrix,
 } from '@/features/accounts/model/accountsPagePresentation';
 import { useTranslation } from 'react-i18next';
@@ -9,6 +10,7 @@ import styles from '../AccountsPage.module.scss';
 interface AccountQuotaMatrixProps {
   accountKey: string;
   matrix: AntigravityQuotaMatrix;
+  lifecycleBarOverride?: AccountQuotaLifecycleBarOverride;
 }
 
 const getRemainingPercentBarClass = (remainingPercent: number | null) => {
@@ -18,18 +20,31 @@ const getRemainingPercentBarClass = (remainingPercent: number | null) => {
   return styles.quotaBarGood;
 };
 
-export function AccountQuotaMatrix({ accountKey, matrix }: AccountQuotaMatrixProps) {
+const getMatrixBarClass = (
+  remainingPercent: number | null,
+  lifecycleBarOverride: AccountQuotaLifecycleBarOverride
+) => {
+  if (lifecycleBarOverride === 'bad') return styles.quotaBarBad;
+  if (lifecycleBarOverride === 'neutral') return styles.quotaBarNeutral;
+  return getRemainingPercentBarClass(remainingPercent);
+};
+
+export function AccountQuotaMatrix({
+  accountKey,
+  matrix,
+  lifecycleBarOverride = null,
+}: AccountQuotaMatrixProps) {
   const { t, i18n } = useTranslation();
   return (
-    <div className={styles.quotaMatrix} data-account-quota-matrix={accountKey}>
+    <span className={styles.quotaMatrix} data-account-quota-matrix={accountKey}>
       {matrix.rows.map((matrixRow) => (
-        <div
+        <span
           key={matrixRow.key}
           className={styles.quotaMatrixRow}
           data-account-quota-matrix-row={matrixRow.key}
         >
           <span className={styles.quotaMatrixWindowLabel}>{matrixRow.label}</span>
-          <div className={styles.quotaMatrixCells}>
+          <span className={styles.quotaMatrixCells}>
             {matrixRow.cells.map((cell) => {
               const windowRemaining = cell.window.remainingPercent;
               const windowWidth = Math.max(0, Math.min(100, windowRemaining ?? 0));
@@ -45,7 +60,7 @@ export function AccountQuotaMatrix({ accountKey, matrix }: AccountQuotaMatrixPro
                 .filter(Boolean)
                 .join(' · ');
               return (
-                <div
+                <span
                   key={cell.window.key}
                   className={styles.quotaMatrixCell}
                   data-account-quota-matrix-cell={`${matrixRow.key}:${cell.groupLabel}`}
@@ -54,26 +69,27 @@ export function AccountQuotaMatrix({ accountKey, matrix }: AccountQuotaMatrixPro
                   <span className={styles.quotaMatrixGroupLabel} title={cell.groupLabel}>
                     {cell.displayLabel}
                   </span>
-                  <div
+                  <span
                     className={`${styles.quotaTrack} ${styles.quotaMatrixTrack}`}
                     aria-hidden="true"
                   >
                     <span
-                      className={`${styles.quotaBar} ${getRemainingPercentBarClass(
-                        windowRemaining
+                      className={`${styles.quotaBar} ${getMatrixBarClass(
+                        windowRemaining,
+                        lifecycleBarOverride
                       )}`}
                       style={{ width: `${windowWidth}%` }}
                     />
-                  </div>
+                  </span>
                   <strong className={styles.quotaMatrixPercent}>
                     {windowRemaining !== null ? formatPercent(windowRemaining) : '-'}
                   </strong>
-                </div>
+                </span>
               );
             })}
-          </div>
-        </div>
+          </span>
+        </span>
       ))}
-    </div>
+    </span>
   );
 }

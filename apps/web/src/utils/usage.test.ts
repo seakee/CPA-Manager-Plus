@@ -10,6 +10,7 @@ import {
   compatibleCachedTokens,
   extractTotalTokens,
   formatCompactNumber,
+  formatCompactUsd,
   formatUsd,
   getServiceTierMultiplier,
   inferCacheInputMode,
@@ -26,14 +27,44 @@ afterEach(() => {
 });
 
 describe('formatCompactNumber', () => {
-  it('keeps large values compact as data grows beyond millions', () => {
+  it('keeps large values compact across units and rounding boundaries', () => {
+    expect(formatCompactNumber(0)).toBe('0');
     expect(formatCompactNumber(999)).toBe('999');
-    expect(formatCompactNumber(1_200)).toBe('1.2K');
-    expect(formatCompactNumber(999_950)).toBe('1.0M');
-    expect(formatCompactNumber(2_795_200_000)).toBe('2.8B');
-    expect(formatCompactNumber(1_200_000_000_000)).toBe('1.2T');
+    expect(formatCompactNumber(1_000)).toBe('1.0K');
+    expect(formatCompactNumber(777_770)).toBe('777.8K');
+    expect(formatCompactNumber(888_880_000)).toBe('888.9M');
+    expect(formatCompactNumber(999_999_999)).toBe('1.0B');
+    expect(formatCompactNumber(1_000_000_000)).toBe('1.0B');
+    expect(formatCompactNumber(1_000_190_000)).toBe('1.0B');
+    expect(formatCompactNumber(1_250_000_000)).toBe('1.3B');
+    expect(formatCompactNumber(1_000_000_000_000)).toBe('1.0T');
     expect(formatCompactNumber(-2_500_000_000_000_000)).toBe('-2.5P');
     expect(formatCompactNumber(Number.POSITIVE_INFINITY)).toBe('0');
+  });
+});
+
+describe('formatCompactUsd', () => {
+  it('keeps small amounts precise and compacts larger amounts with rollover', () => {
+    expect(formatCompactUsd(0)).toBe('$0.00');
+    expect(formatCompactUsd(12.3)).toBe('$12.30');
+    expect(formatCompactUsd(999.99)).toBe('$999.99');
+    expect(formatCompactUsd(1_000)).toBe('$1.00K');
+    expect(formatCompactUsd(1_234.56)).toBe('$1.23K');
+    expect(formatCompactUsd(12_345.67)).toBe('$12.35K');
+    expect(formatCompactUsd(999_999.99)).toBe('$1.00M');
+    expect(formatCompactUsd(1_000_000)).toBe('$1.00M');
+    expect(formatCompactUsd(1_234_567.89)).toBe('$1.23M');
+    expect(formatCompactUsd(1_000_000_000)).toBe('$1.00B');
+    expect(formatCompactUsd(999.994)).toBe('$999.99');
+    expect(formatCompactUsd(999.999)).toBe('$1.00K');
+    expect(formatCompactUsd(999_999.999)).toBe('$1.00M');
+    expect(formatCompactUsd(999_999_999.999)).toBe('$1.00B');
+    expect(formatCompactUsd(-999.999)).toBe('$-1.00K');
+  });
+
+  it('uses the existing invalid-value fallback', () => {
+    expect(formatCompactUsd(Number.NaN)).toBe('$0.00');
+    expect(formatCompactUsd(Number.POSITIVE_INFINITY)).toBe('$0.00');
   });
 });
 

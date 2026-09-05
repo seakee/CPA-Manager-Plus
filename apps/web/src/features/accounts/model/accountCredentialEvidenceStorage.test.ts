@@ -7,20 +7,36 @@ import {
 } from './accountCredentialEvidenceStorage';
 import { createCredentialInspectionSnapshotScopeKey } from '../hooks/useCredentialInspectionSnapshot';
 
-const boundary = (localAtMs: number): AccountCredentialEvidenceBoundary => ({
+const boundary = (
+  localAtMs: number,
+  overrides: Partial<AccountCredentialEvidenceBoundary> = {}
+): AccountCredentialEvidenceBoundary => ({
   localAtMs,
   inspectionAtMs: 0,
+  inspectionBaselinePending: false,
   headerAtMs: 0,
+  headerBaselinePending: false,
   actionAtMs: 0,
+  actionBaselinePending: false,
   authenticationActionAtMs: 0,
+  authenticationActionBaselinePending: false,
   quotaActionAtMs: 0,
+  quotaActionBaselinePending: false,
   cooldownAtMs: 0,
+  cooldownBaselinePending: false,
   fallbackInspectionAtMs: 0,
+  fallbackInspectionBaselinePending: false,
   fallbackHeaderAtMs: 0,
+  fallbackHeaderBaselinePending: false,
   fallbackActionAtMs: 0,
+  fallbackActionBaselinePending: false,
   fallbackCooldownAtMs: 0,
+  fallbackCooldownBaselinePending: false,
+  authenticationAtMs: 0,
   rawStatusAtMs: 0,
   rawStatusMessages: [],
+  rawStatusCodes: [],
+  ...overrides,
 });
 
 const createStorage = (): Storage => {
@@ -63,6 +79,41 @@ describe('account credential evidence boundary storage', () => {
     const stored = loadAccountCredentialEvidenceBoundaryState('scope-a');
     expect(stored.evidence.size).toBe(256);
     expect(stored.evidence.has('updated-old-key')).toBe(true);
+    expect(stored.evidence.has('key-1')).toBe(false);
+  });
+
+  it('persists authentication recovery boundaries and raw status codes', () => {
+    const original = boundary(1_000, {
+      authenticationAtMs: 12_345,
+      rawStatusAtMs: 12_300,
+      rawStatusMessages: ['token_expired'],
+      rawStatusCodes: [401],
+    });
+
+    saveAccountCredentialEvidenceBoundaryState('scope-a', {
+      evidence: new Map([['credential-a', original]]),
+      status: new Map(),
+    });
+
+    expect(
+      loadAccountCredentialEvidenceBoundaryState('scope-a').evidence.get('credential-a')
+    ).toEqual(original);
+  });
+
+  it('retains a boundary whose only recent evidence is authentication recovery', () => {
+    const evidence = new Map<string, AccountCredentialEvidenceBoundary>();
+    evidence.set('reauthenticated-key', boundary(0, { authenticationAtMs: 10_000 }));
+    for (let index = 1; index <= 256; index += 1) {
+      evidence.set(`key-${index}`, boundary(index));
+    }
+
+    saveAccountCredentialEvidenceBoundaryState('scope-a', {
+      evidence,
+      status: new Map(),
+    });
+
+    const stored = loadAccountCredentialEvidenceBoundaryState('scope-a');
+    expect(stored.evidence.has('reauthenticated-key')).toBe(true);
     expect(stored.evidence.has('key-1')).toBe(false);
   });
 

@@ -20,6 +20,7 @@ export type PanelFeatureUnavailableReason =
 
 export interface PanelFeatureAvailability {
   checking: boolean;
+  panelHostConfirmed: boolean;
   panelHostMode: PanelHostMode;
   panelBase: string;
   managerServiceBase: string;
@@ -34,6 +35,7 @@ export interface PanelFeatureAvailability {
 
 export interface ResolvePanelFeatureAvailabilityInput {
   checking?: boolean;
+  panelHostConfirmed: boolean;
   panelHostedByUsageService: boolean;
   panelBase: string;
   managerServiceBase: string;
@@ -49,6 +51,7 @@ const buildUnavailableState = (
   reason: PanelFeatureUnavailableReason
 ): PanelFeatureAvailability => ({
   checking: input.checking === true,
+  panelHostConfirmed: input.panelHostConfirmed,
   panelHostMode: input.panelHostedByUsageService ? 'manager_embedded' : 'external_panel',
   panelBase: normalizeBase(input.panelBase),
   managerServiceBase: '',
@@ -66,6 +69,9 @@ export function resolvePanelFeatureAvailability(
 ): PanelFeatureAvailability {
   if (!input.managementKey) {
     return buildUnavailableState(input, 'service_not_configured');
+  }
+  if (!input.panelHostConfirmed) {
+    return buildUnavailableState(input, 'service_unavailable');
   }
   if (!input.panelHostedByUsageService) {
     return buildUnavailableState(input, 'service_not_configured');
@@ -89,6 +95,7 @@ export function resolvePanelFeatureAvailability(
 
   return {
     checking: input.checking === true,
+    panelHostConfirmed: input.panelHostConfirmed,
     panelHostMode: input.panelHostedByUsageService ? 'manager_embedded' : 'external_panel',
     panelBase: normalizeBase(input.panelBase),
     managerServiceBase,
@@ -107,16 +114,18 @@ export function resolvePanelFeatureAvailability(
 }
 
 export interface BuildPanelManagerServiceCandidatesInput {
+  panelHostConfirmed: boolean;
   panelHostedByUsageService: boolean;
   panelBase: string;
 }
 
 export function buildPanelManagerServiceCandidates({
+  panelHostConfirmed,
   panelHostedByUsageService,
   panelBase,
 }: BuildPanelManagerServiceCandidatesInput): string[] {
   const normalizedPanelBase = normalizeBase(panelBase);
-  if (panelHostedByUsageService) {
+  if (panelHostConfirmed && panelHostedByUsageService) {
     return normalizedPanelBase ? [normalizedPanelBase] : [];
   }
 
@@ -147,6 +156,7 @@ type PanelFeatureAvailabilityRequest = {
 
 const initialAvailability: PanelFeatureAvailability = {
   checking: true,
+  panelHostConfirmed: false,
   panelHostMode: 'external_panel',
   panelBase: '',
   managerServiceBase: '',
@@ -161,6 +171,7 @@ const initialAvailability: PanelFeatureAvailability = {
 
 const demoAvailability: PanelFeatureAvailability = {
   checking: false,
+  panelHostConfirmed: true,
   panelHostMode: 'manager_embedded',
   panelBase: DEMO_API_BASE,
   managerServiceBase: DEMO_API_BASE,
@@ -191,6 +202,9 @@ const buildAvailabilityRequestKey = ({
     String(usageServiceRevision),
   ].join('\u001f');
 
+const isConfirmedExternalPanelProbeFailure = (error: unknown): boolean =>
+  error !== null && typeof error === 'object' && (error as { status?: unknown }).status === 404;
+
 async function detectPanelFeatureAvailability({
   apiBase,
   managementKey,
@@ -200,6 +214,7 @@ async function detectPanelFeatureAvailability({
   if (!managementKey) {
     return resolvePanelFeatureAvailability({
       checking: false,
+      panelHostConfirmed: false,
       panelHostedByUsageService: false,
       panelBase: normalizedPanelBase,
       managerServiceBase: '',
@@ -210,14 +225,18 @@ async function detectPanelFeatureAvailability({
   }
 
   let panelHostedByUsageService = false;
+  let panelHostConfirmed = false;
   try {
     const info = await usageServiceApi.getInfo(normalizedPanelBase);
+    panelHostConfirmed = true;
     panelHostedByUsageService = isUsageServiceId(info.service);
-  } catch {
+  } catch (error) {
+    panelHostConfirmed = isConfirmedExternalPanelProbeFailure(error);
     panelHostedByUsageService = false;
   }
 
   const candidates = buildPanelManagerServiceCandidates({
+    panelHostConfirmed,
     panelHostedByUsageService,
     panelBase: normalizedPanelBase,
   });
@@ -238,6 +257,7 @@ async function detectPanelFeatureAvailability({
       }
       return resolvePanelFeatureAvailability({
         checking: false,
+        panelHostConfirmed,
         panelHostedByUsageService,
         panelBase: normalizedPanelBase,
         managerServiceBase: candidate,
@@ -252,6 +272,7 @@ async function detectPanelFeatureAvailability({
 
   const unavailableState = resolvePanelFeatureAvailability({
     checking: false,
+    panelHostConfirmed,
     panelHostedByUsageService,
     panelBase: normalizedPanelBase,
     managerServiceBase: '',

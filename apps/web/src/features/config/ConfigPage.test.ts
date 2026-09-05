@@ -1,11 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import type { ManagerConfig } from '@/services/api/usageService';
+import enLocale from '@/i18n/locales/en.json';
+import ruLocale from '@/i18n/locales/ru.json';
+import zhCNLocale from '@/i18n/locales/zh-CN.json';
+import zhTWLocale from '@/i18n/locales/zh-TW.json';
 import {
   resolveManagerCPAConnection,
   resolveManagerBindingStatus,
   resolveManagerFormDirty,
   resolveManagerRequestAuthKey,
   resolveManagerSaveState,
+  resolveApiKeyOperationBlockReason,
+  resolveApiKeyReplacePreflight,
+  shouldBlockStaleSourceSave,
 } from './ConfigPage';
 
 const buildManagerConfig = (overrides: Partial<ManagerConfig> = {}): ManagerConfig => ({
@@ -325,5 +332,139 @@ describe('resolveManagerSaveState', () => {
       hasPendingSave: false,
       canSave: false,
     });
+  });
+});
+
+describe('resolveApiKeyOperationBlockReason', () => {
+  it('blocks API key CRUD for an unsaved Source draft', () => {
+    expect(
+      resolveApiKeyOperationBlockReason({
+        sourceDirty: true,
+        saving: false,
+        managerSaving: false,
+        apiKeyMutationInFlight: false,
+        diffModalOpen: false,
+      })
+    ).toBe('source_config_dirty');
+  });
+
+  it('allows API key CRUD alongside ordinary Visual dirty state', () => {
+    expect(
+      resolveApiKeyOperationBlockReason({
+        sourceDirty: false,
+        saving: false,
+        managerSaving: false,
+        apiKeyMutationInFlight: false,
+        diffModalOpen: false,
+      })
+    ).toBeNull();
+  });
+
+  it.each([
+    { saving: true, managerSaving: false, apiKeyMutationInFlight: false, diffModalOpen: false },
+    { saving: false, managerSaving: true, apiKeyMutationInFlight: false, diffModalOpen: false },
+    { saving: false, managerSaving: false, apiKeyMutationInFlight: true, diffModalOpen: false },
+    { saving: false, managerSaving: false, apiKeyMutationInFlight: false, diffModalOpen: true },
+  ])('blocks concurrent operations: %j', (state) => {
+    expect(
+      resolveApiKeyOperationBlockReason({
+        sourceDirty: false,
+        ...state,
+      })
+    ).toBe('api_key_operation_busy');
+  });
+});
+
+describe('API-key locale parity', () => {
+  it('keeps API-key persistence keys in every supported locale', () => {
+    const locales = [enLocale, zhCNLocale, zhTWLocale, ruLocale];
+    const expectedKeys = Object.keys(enLocale.config_management.visual.api_keys).sort();
+
+    for (const locale of locales) {
+      expect(Object.keys(locale.config_management.visual.api_keys).sort()).toEqual(expectedKeys);
+      for (const key of expectedKeys) {
+        expect(
+          locale.config_management.visual.api_keys[
+            key as keyof typeof locale.config_management.visual.api_keys
+          ]
+        ).toBeTypeOf('string');
+      }
+    }
+  });
+});
+
+describe('resolveApiKeyReplacePreflight', () => {
+  it('rejects a replace when the old key is no longer in CPA', () => {
+    expect(
+      resolveApiKeyReplacePreflight({
+        currentKeys: ['sk-other'],
+        oldApiKey: ' sk-old ',
+        newApiKey: ' sk-new ',
+      })
+    ).toEqual({ ok: false, reason: 'api_key_stale' });
+  });
+
+  it('rejects a replace when the new key already exists in CPA', () => {
+    expect(
+      resolveApiKeyReplacePreflight({
+        currentKeys: ['sk-old', 'sk-new'],
+        oldApiKey: 'sk-old',
+        newApiKey: 'sk-new',
+      })
+    ).toEqual({ ok: false, reason: 'api_key_duplicate' });
+  });
+
+  it('returns the unique raw canonical old key for a safe replace', () => {
+    expect(
+      resolveApiKeyReplacePreflight({
+        currentKeys: ['sk-old'],
+        oldApiKey: ' sk-old ',
+        newApiKey: ' sk-new ',
+      })
+    ).toEqual({ ok: true, canonicalOldApiKey: 'sk-old' });
+  });
+
+  it('preserves whitespace in the unique raw canonical old key', () => {
+    expect(
+      resolveApiKeyReplacePreflight({
+        currentKeys: ['  sk-old  '],
+        oldApiKey: 'sk-old',
+        newApiKey: 'sk-new',
+      })
+    ).toEqual({ ok: true, canonicalOldApiKey: '  sk-old  ' });
+  });
+
+  it('rejects multiple canonical entries with the same runtime identity', () => {
+    expect(
+      resolveApiKeyReplacePreflight({
+        currentKeys: ['sk-old', '  sk-old  '],
+        oldApiKey: 'sk-old',
+        newApiKey: 'sk-new',
+      })
+    ).toEqual({ ok: false, reason: 'api_key_ambiguous' });
+  });
+
+  it('detects a normalized duplicate replacement target', () => {
+    expect(
+      resolveApiKeyReplacePreflight({
+        currentKeys: ['sk-old', '  sk-new  '],
+        oldApiKey: 'sk-old',
+        newApiKey: 'sk-new',
+      })
+    ).toEqual({ ok: false, reason: 'api_key_duplicate' });
+  });
+});
+
+describe('shouldBlockStaleSourceSave', () => {
+  it('blocks a Source save while the snapshot is stale', () => {
+    expect(shouldBlockStaleSourceSave({ activeTab: 'source', sourceSnapshotStale: true })).toBe(
+      true
+    );
+  });
+
+  it('does not block Visual save because of a stale Source snapshot', () => {
+    expect(shouldBlockStaleSourceSave({ activeTab: 'visual', sourceSnapshotStale: true })).toBe(
+      false
+    );
   });
 });

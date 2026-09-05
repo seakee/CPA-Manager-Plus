@@ -21,6 +21,8 @@ const mocks = vi.hoisted(() => ({
   getOpenAIProviders: vi.fn(),
   showNotification: vi.fn(),
   showConfirmation: vi.fn(),
+  cacheValid: true,
+  transitionLayer: null as { status: string } | null,
 }));
 
 vi.mock('react-i18next', () => ({
@@ -29,7 +31,7 @@ vi.mock('react-i18next', () => ({
 
 vi.mock('@/hooks/useHeaderRefresh', () => ({ useHeaderRefresh: () => undefined }));
 vi.mock('@/components/common/PageTransitionLayer', () => ({
-  usePageTransitionLayer: () => null,
+  usePageTransitionLayer: () => mocks.transitionLayer,
 }));
 
 vi.mock('@/stores', () => ({
@@ -43,7 +45,7 @@ vi.mock('@/stores', () => ({
       fetchConfig: mocks.fetchConfig,
       updateConfigValue: mocks.updateConfigValue,
       clearCache: mocks.clearCache,
-      isCacheValid: () => true,
+      isCacheValid: () => mocks.cacheValid,
     }),
   useNotificationStore: () => ({
     showNotification: mocks.showNotification,
@@ -181,6 +183,8 @@ const openDetail = async (renderer: ReactTestRenderer) => {
 describe('AiProvidersPage cooling policy mutation', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.cacheValid = true;
+    mocks.transitionLayer = null;
     mocks.config = {
       geminiApiKeys: [{ apiKey: 'gemini-key' }],
       interactionsApiKeys: [],
@@ -350,6 +354,73 @@ describe('AiProvidersPage cooling policy mutation', () => {
       'error'
     );
 
+    act(() => renderer.unmount());
+  });
+});
+
+describe('AiProvidersPage current-layer config refresh', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.cacheValid = true;
+    mocks.transitionLayer = null;
+    mocks.config = {
+      geminiApiKeys: [],
+      interactionsApiKeys: [],
+      codexApiKeys: [],
+      xaiApiKeys: [],
+      claudeApiKeys: [],
+      vertexApiKeys: [],
+      openaiCompatibility: [],
+    };
+    mocks.fetchConfig.mockImplementation(async () => mocks.config);
+    mocks.getVertexConfigs.mockImplementation(async () => mocks.config.vertexApiKeys);
+    mocks.getOpenAIProviders.mockResolvedValue([]);
+    mocks.updateGeminiKey.mockResolvedValue(undefined);
+    mocks.updateVertexConfig.mockResolvedValue(undefined);
+  });
+
+  const renderPage = async () => {
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(<AiProvidersPage />);
+    });
+    await flush();
+    return renderer;
+  };
+
+  const updatePage = async (renderer: ReactTestRenderer) => {
+    await act(async () => {
+      renderer.update(<AiProvidersPage />);
+    });
+    await flush();
+  };
+
+  it('reloads provider configs when the invalidated cache meets the current layer again', async () => {
+    const renderer = await renderPage();
+    expect(mocks.fetchConfig).toHaveBeenCalledTimes(1);
+
+    mocks.transitionLayer = { status: 'background' };
+    await updatePage(renderer);
+
+    mocks.cacheValid = false;
+    mocks.transitionLayer = { status: 'current' };
+    await updatePage(renderer);
+
+    expect(mocks.fetchConfig).toHaveBeenCalledTimes(2);
+    act(() => renderer.unmount());
+  });
+
+  it('does not reload provider configs when the cache is still valid on re-entry', async () => {
+    const renderer = await renderPage();
+    expect(mocks.fetchConfig).toHaveBeenCalledTimes(1);
+
+    mocks.transitionLayer = { status: 'background' };
+    await updatePage(renderer);
+
+    mocks.transitionLayer = { status: 'current' };
+    await updatePage(renderer);
+
+    expect(mocks.fetchConfig).toHaveBeenCalledTimes(1);
     act(() => renderer.unmount());
   });
 });

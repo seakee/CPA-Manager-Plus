@@ -237,6 +237,26 @@ Why `data.key` matters:
 - If `data.key` is lost, CPA Management Keys saved to SQLite cannot be recovered; save the CPA connection again.
 - If this is a manual env/secret deployment, or the installer has not completed/skipped the CPA connection import, also back up `secrets/` in the install directory.
 
+## Read-Only Root Filesystem
+
+Standard CPAMP Docker/Compose deployments use a writable root filesystem and require no additional temporary-volume configuration.
+
+If you harden the Manager Server container with `readOnlyRootFilesystem: true`, SQLite still needs a writable temporary directory. For Kubernetes, mount a writable ephemeral volume at `/tmp`:
+
+```yaml
+volumeMounts:
+  - name: tmp
+    mountPath: /tmp
+
+volumes:
+  - name: tmp
+    emptyDir: {}
+```
+
+If you set an `emptyDir.sizeLimit`, size it for your database size and workload. On Unix-like environments you can alternatively point `SQLITE_TMPDIR` at a writable ephemeral path.
+
+The database file and its WAL/SHM sidecars must also be writable by the Manager Server process. CPAMP does not automatically change file ownership or permissions, and does not relocate SQLite temporary files.
+
 ::: details Advanced: collection protocols and network requirements
 
 ## Collection Paths

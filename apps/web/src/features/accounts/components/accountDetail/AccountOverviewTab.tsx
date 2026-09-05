@@ -14,13 +14,13 @@ import type {
 } from '@/features/accounts/model/accountDetailViewModel';
 import type { AccountListHealthStatusKey } from '@/features/accounts/model/accountListPresentation';
 import {
-  formatCompactNumber,
   formatMoney,
   formatPercent,
   formatQuotaResetTooltipParams,
   formatTimestamp,
   formatTimestampTitle,
 } from '@/features/accounts/model/accountsPagePresentation';
+import { formatCompactNumber } from '@/utils/usage';
 import { UsageSummaryGrid } from '@/features/usage-analytics/components/UsageSummaryCards';
 import type {
   UsageSummaryCard,

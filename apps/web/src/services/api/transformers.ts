@@ -1,6 +1,7 @@
 import {
   readCoolingOverride,
   type ApiKeyEntry,
+  type ClaudeFingerprintProfile,
   type CloakConfig,
   type GeminiKeyConfig,
   type ModelAlias,
@@ -24,6 +25,17 @@ const normalizeBoolean = (value: unknown): boolean | undefined => {
     if (['false', '0', 'no', 'n', 'off'].includes(trimmed)) return false;
   }
   return Boolean(value);
+};
+
+export const normalizeClaudeFingerprintProfile = (
+  value: unknown
+): ClaudeFingerprintProfile | undefined => {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'claude-code-cli' || normalized === 'oauth-cli') {
+    return 'claude-code-cli';
+  }
+  return undefined;
 };
 
 const normalizeString = (value: unknown): string | undefined => {
@@ -216,6 +228,10 @@ const normalizeProviderKeyConfig = (item: unknown): ProviderKeyConfig | null => 
       record?.experimental_cch_signing
   );
   if (experimentalCchSigning !== undefined) config.experimentalCchSigning = experimentalCchSigning;
+  const fingerprintProfile = normalizeClaudeFingerprintProfile(
+    record?.['fingerprint-profile'] ?? record?.fingerprintProfile ?? record?.fingerprint_profile
+  );
+  if (fingerprintProfile !== undefined) config.fingerprintProfile = fingerprintProfile;
   const rebuildMidSystemMessage = normalizeBoolean(
     record?.['rebuild-mid-system-message'] ??
       record?.rebuildMidSystemMessage ??

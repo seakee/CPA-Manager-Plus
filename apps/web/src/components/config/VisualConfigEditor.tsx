@@ -44,6 +44,7 @@ import {
   PayloadRulesEditor,
   PluginStoreAuthEditor,
 } from './VisualConfigEditorBlocks';
+import type { ApiKeyMutation } from './ApiKeysCardEditor';
 import styles from './VisualConfigEditor.module.scss';
 
 type VisualSectionId =
@@ -71,6 +72,10 @@ interface VisualConfigEditorProps {
   hasPayloadValidationErrors?: boolean;
   disabled?: boolean;
   onChange: (values: Partial<VisualConfigValues>) => void;
+  onPersistApiKeyMutation: (mutation: ApiKeyMutation) => Promise<string[]>;
+  onRefreshApiKeys: () => Promise<string[]>;
+  onApiKeyOperationStart: () => void;
+  onApiKeyOperationEnd: () => void;
 }
 
 function getValidationMessage(
@@ -178,6 +183,10 @@ export function VisualConfigEditor({
   hasPayloadValidationErrors = false,
   disabled = false,
   onChange,
+  onPersistApiKeyMutation,
+  onRefreshApiKeys,
+  onApiKeyOperationStart,
+  onApiKeyOperationEnd,
 }: VisualConfigEditorProps) {
   const { t } = useTranslation();
   const pageTransitionLayer = usePageTransitionLayer();
@@ -242,10 +251,6 @@ export function VisualConfigEditor({
     validationErrors?.['streaming.nonstreamKeepaliveInterval']
   );
 
-  const handleApiKeysTextChange = useCallback(
-    (apiKeysText: string) => onChange({ apiKeysText }),
-    [onChange]
-  );
   const handlePayloadDefaultRulesChange = useCallback(
     (payloadDefaultRules: PayloadRule[]) => onChange({ payloadDefaultRules }),
     [onChange]
@@ -772,7 +777,10 @@ export function VisualConfigEditor({
                 <ApiKeysCardEditor
                   value={values.apiKeysText}
                   disabled={disabled}
-                  onChange={handleApiKeysTextChange}
+                  onPersistApiKeyMutation={onPersistApiKeyMutation}
+                  onRefreshApiKeys={onRefreshApiKeys}
+                  onApiKeyOperationStart={onApiKeyOperationStart}
+                  onApiKeyOperationEnd={onApiKeyOperationEnd}
                 />
               </div>
             </SectionStack>

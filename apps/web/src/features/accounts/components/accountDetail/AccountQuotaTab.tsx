@@ -9,28 +9,18 @@ import {
   IconDollarSign,
   IconRefreshCw,
 } from '@/components/ui/icons';
-import type {
-  AccountDetailQuotaWindow,
-  AccountDetailViewModel,
-} from '@/features/accounts/model/accountDetailViewModel';
+import type { AccountDetailViewModel } from '@/features/accounts/model/accountDetailViewModel';
 import {
-  formatCompactNumber,
+  formatPercent,
   formatQuotaResetTimestamp,
 } from '@/features/accounts/model/accountsPagePresentation';
-import { formatUsd } from '@/utils/usage';
-import { isCodexMainQuotaModelScope } from '@/utils/quota/codexQuota';
+import {
+  isIntervalAccountQuotaWindow,
+  isModelScopedAccountQuotaWindow,
+} from '@/features/accounts/model/accountQuotaDisplayWindows';
+import { formatCompactNumber, formatUsd } from '@/utils/usage';
 import { QuotaWindowCard } from '../QuotaWindowCard';
 import styles from '@/features/accounts/AccountsPage.module.scss';
-
-const isIntervalQuotaWindow = (window: AccountDetailQuotaWindow): boolean =>
-  window.windowMode === 'fixed' ||
-  window.windowMode === 'calendar' ||
-  window.windowMode === 'rolling';
-
-const isModelScopedQuotaWindow = (window: AccountDetailQuotaWindow): boolean =>
-  window.modelScope?.kind !== undefined &&
-  window.modelScope.kind !== 'all' &&
-  !(window.source === 'codex' && isCodexMainQuotaModelScope(window.modelScope));
 
 type MetricTone = 'blue' | 'green' | 'teal' | 'amber';
 
@@ -126,12 +116,12 @@ export function AccountQuotaTab({
   const history = detailView.history;
   const allWindows = detailView.quota.windows;
   const standardWindows = allWindows.filter(
-    (window) => isIntervalQuotaWindow(window) && !isModelScopedQuotaWindow(window)
+    (window) => isIntervalAccountQuotaWindow(window) && !isModelScopedAccountQuotaWindow(window)
   );
   const modelWindows = allWindows.filter(
-    (window) => isIntervalQuotaWindow(window) && isModelScopedQuotaWindow(window)
+    (window) => isIntervalAccountQuotaWindow(window) && isModelScopedAccountQuotaWindow(window)
   );
-  const otherQuotaItems = allWindows.filter((window) => !isIntervalQuotaWindow(window));
+  const otherQuotaItems = allWindows.filter((window) => !isIntervalAccountQuotaWindow(window));
 
   const formatNumber = (value: number) => new Intl.NumberFormat(i18n.language).format(value);
   const formatTime = (value: number | null) =>
@@ -237,11 +227,7 @@ export function AccountQuotaTab({
             icon={<IconCheck size={20} />}
             tone="green"
             label={t('accounts.detail_success_rate')}
-            value={
-              history?.successRate !== null && history?.successRate !== undefined
-                ? `${history.successRate.toFixed(2)}%`
-                : '-'
-            }
+            value={formatPercent(history?.successRate, 2)}
           />
           {pluginMetrics.map(([value, labelKey, defaultLabel, money]) =>
             value === null || value === undefined ? null : (

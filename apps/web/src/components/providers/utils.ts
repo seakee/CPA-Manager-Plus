@@ -1,4 +1,9 @@
-import type { ApiKeyEntry, OpenAIProviderConfig } from '@/types';
+import {
+  toCommittedModelThinkingSnapshot,
+  type ApiKeyEntry,
+  type ClaudeFingerprintProfile,
+  type OpenAIProviderConfig,
+} from '@/types';
 import {
   buildRecentRequestCompositeKey,
   mergeRecentRequestBucketGroups,
@@ -10,6 +15,16 @@ import {
   type StatusBarData,
 } from '@/utils/recentRequests';
 export const DISABLE_ALL_MODELS_RULE = '*';
+
+export const toCommittedOpenAIProviderSnapshot = (
+  provider: OpenAIProviderConfig
+): OpenAIProviderConfig => {
+  const next = { ...provider };
+  if (Array.isArray(provider.models)) {
+    next.models = provider.models.map(toCommittedModelThinkingSnapshot);
+  }
+  return next;
+};
 
 export const hasDisableAllModelsRule = (models?: string[]) =>
   Array.isArray(models) &&
@@ -285,3 +300,15 @@ export const buildApiKeyEntry = (input?: Partial<ApiKeyEntry>): ApiKeyEntry => (
   authIndex: input?.authIndex ?? '',
   headers: input?.headers ?? {},
 });
+
+// undefined (untouched / preserve raw) and '' (explicit Default / clear raw)
+// both display as Default in the select; re-picking the displayed Default must
+// not silently turn an untouched config into an explicit clear. A real
+// explicit clear requires going through Claude Code CLI first.
+export const resolveClaudeFingerprintSelection = (
+  current: ClaudeFingerprintProfile | undefined,
+  next: string
+): ClaudeFingerprintProfile | undefined => {
+  if (current === undefined && next === '') return undefined;
+  return next as ClaudeFingerprintProfile;
+};

@@ -29,6 +29,7 @@ import {
   getAuthFileStatusSelectionKey,
   readAuthFileStatusAccountId,
   readAuthFileStatusAccountSnapshot,
+  readAuthFileStatusCodexMember,
   readAuthFileStatusProvider,
 } from '@/utils/authFileStatusMutation';
 
@@ -143,6 +144,33 @@ const normalizeNumber = (value: unknown): number | null => {
   const parsed = Number(trimmed);
   return Number.isFinite(parsed) ? parsed : null;
 };
+
+export const normalizeAuthFileCredentialStatusCode = (value: unknown): number | null => {
+  const normalized = normalizeNumber(value);
+  return normalized !== null &&
+    Number.isInteger(normalized) &&
+    normalized >= 100 &&
+    normalized <= 599
+    ? normalized
+    : null;
+};
+
+export const getAuthFileCredentialStatusCodes = (file: AuthFileItem): number[] => {
+  const statusCodes = new Set<number>();
+  for (const value of [
+    file.errorStatus,
+    file['error_status'],
+    file.statusCode,
+    file['status_code'],
+  ]) {
+    const statusCode = normalizeAuthFileCredentialStatusCode(value);
+    if (statusCode !== null) statusCodes.add(statusCode);
+  }
+  return Array.from(statusCodes);
+};
+
+export const getAuthFileCredentialStatusCode = (file: AuthFileItem): number | null =>
+  getAuthFileCredentialStatusCodes(file)[0] ?? null;
 
 const HANDLED_CODEX_INSPECTION_ACTION_STATUSES = new Set([
   'success',
@@ -464,7 +492,10 @@ export const getAuthFilePatchTarget = (file: AuthFileItem): AuthFilePatchTarget 
   const authIndex = readAuthFileAuthIndex(file);
   const provider = normalizeProviderKey(readAuthFileStatusProvider(file));
   const accountId = readAuthFileStatusAccountId(file);
-  const accountSnapshot = readAuthFileStatusAccountSnapshot(file);
+  const accountSnapshot =
+    provider === 'codex'
+      ? readAuthFileStatusCodexMember(file)
+      : readAuthFileStatusAccountSnapshot(file);
   return {
     name: file.name,
     ...(runtimeId ? { runtimeId } : {}),
@@ -776,9 +807,7 @@ const readCredentialText = (...values: unknown[]): string =>
     .join(' ');
 
 const getAuthFileCredentialEvidence = (file: AuthFileItem): AuthFileCredentialEvidence | null => {
-  const statusCode = normalizeNumber(
-    file.errorStatus ?? file['error_status'] ?? file.statusCode ?? file['status_code']
-  );
+  const statusCode = getAuthFileCredentialStatusCode(file);
   const statusValues = [
     file.statusMessage,
     file['status_message'],
@@ -931,9 +960,7 @@ const hasCurrentAuthFileRawStatusWarning = (
   if (!statusMessage || isHealthyAuthFileStatusMessage(statusMessage)) return false;
 
   const statusCode =
-    normalizeNumber(
-      file.errorStatus ?? file['error_status'] ?? file.statusCode ?? file['status_code']
-    ) ?? readHttpStatusCodeFromText(statusMessage);
+    getAuthFileCredentialStatusCode(file) ?? readHttpStatusCodeFromText(statusMessage);
   const statusText = readCredentialText(statusMessage, file.status, file.state, file.error);
   if (statusCode === 401 || isObservedAuthError('', statusText)) {
     return currentAuthenticationFailure !== null;
@@ -959,7 +986,8 @@ const hasCurrentAuthFileRawStatusWarning = (
 
 export const sanitizeSupersededAuthQuotaState = (
   quota: CodexQuotaState | undefined,
-  newerSuccessfulRequestAtMs: unknown
+  newerSuccessfulRequestAtMs: unknown,
+  options: { allowUnknownFailureTimestamp?: boolean } = {}
 ): CodexQuotaState | undefined => {
   if (!quota) return quota;
   const successfulRequestAtMs = readFiniteTimestamp(newerSuccessfulRequestAtMs);
@@ -971,16 +999,16 @@ export const sanitizeSupersededAuthQuotaState = (
   );
   const supersedesQuotaFailure =
     quota.status === 'error' &&
-    quotaFailureAtMs > 0 &&
-    successfulRequestAtMs > quotaFailureAtMs &&
+    ((quotaFailureAtMs > 0 && successfulRequestAtMs > quotaFailureAtMs) ||
+      (options.allowUnknownFailureTimestamp === true && quotaFailureAtMs === 0)) &&
     (quota.errorStatus === 401 ||
       readHttpStatusCodeFromText(quota.error) === 401 ||
       isObservedAuthError('', quota.error ?? ''));
   const observedAtMs = readFiniteTimestamp(quota.observedAtMs);
   const supersedesObservedAuth =
-    observedAtMs !== null &&
-    successfulRequestAtMs > observedAtMs &&
-    isObservedAuthError(quota.observedErrorKind ?? '', quota.observedErrorCode ?? '');
+    isObservedAuthError(quota.observedErrorKind ?? '', quota.observedErrorCode ?? '') &&
+    ((observedAtMs !== null && successfulRequestAtMs > observedAtMs) ||
+      (options.allowUnknownFailureTimestamp === true && observedAtMs === null));
   if (!supersedesQuotaFailure && !supersedesObservedAuth) return quota;
 
   return {

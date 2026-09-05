@@ -15,13 +15,15 @@ import (
 const authSnapshotCacheTTL = 30 * time.Second
 
 type authSnapshot struct {
-	Account      string
-	AccountID    string
-	Label        string
-	FileName     string
-	Provider     string
-	ProjectID    string
-	CapturedAtMS int64
+	AccountSnapshotInvalid bool
+	AccountIDInvalid       bool
+	Account                string
+	AccountID              string
+	Label                  string
+	FileName               string
+	Provider               string
+	ProjectID              string
+	CapturedAtMS           int64
 }
 
 type authSnapshotResolver struct {
@@ -31,6 +33,7 @@ type authSnapshotResolver struct {
 	managementKey string
 	expiresAt     time.Time
 	snapshots     map[string]authSnapshot
+	ambiguous     map[string]struct{}
 }
 
 func newAuthSnapshotResolver() *authSnapshotResolver {
@@ -47,6 +50,7 @@ func (r *authSnapshotResolver) clear() {
 	r.managementKey = ""
 	r.expiresAt = time.Time{}
 	r.snapshots = nil
+	r.ambiguous = nil
 }
 
 func (r *authSnapshotResolver) lookup(ctx context.Context, cfg RuntimeConfig, authIndices map[string]struct{}) map[string]authSnapshot {
@@ -69,7 +73,7 @@ func (r *authSnapshotResolver) lookup(ctx context.Context, cfg RuntimeConfig, au
 	}
 	r.mu.Unlock()
 
-	snapshots, err := r.fetch(ctx, baseURL, managementKey)
+	snapshots, ambiguous, err := r.fetch(ctx, baseURL, managementKey)
 	if err != nil {
 		r.mu.Lock()
 		var result map[string]authSnapshot
@@ -85,16 +89,20 @@ func (r *authSnapshotResolver) lookup(ctx context.Context, cfg RuntimeConfig, au
 	r.managementKey = managementKey
 	r.expiresAt = now.Add(authSnapshotCacheTTL)
 	r.snapshots = snapshots
+	r.ambiguous = ambiguous
 	result := r.lookupLocked(authIndices)
 	r.mu.Unlock()
 	return result
 }
 
 func (r *authSnapshotResolver) hasAllLocked(authIndices map[string]struct{}) bool {
-	if len(r.snapshots) == 0 {
+	if len(r.snapshots) == 0 && len(r.ambiguous) == 0 {
 		return false
 	}
 	for authIndex := range authIndices {
+		if _, ambiguous := r.ambiguous[authIndex]; ambiguous {
+			continue
+		}
 		if _, ok := r.snapshots[authIndex]; !ok {
 			return false
 		}
@@ -108,6 +116,9 @@ func (r *authSnapshotResolver) lookupLocked(authIndices map[string]struct{}) map
 	}
 	result := make(map[string]authSnapshot, len(authIndices))
 	for authIndex := range authIndices {
+		if _, ambiguous := r.ambiguous[authIndex]; ambiguous {
+			continue
+		}
 		if snapshot, ok := r.snapshots[authIndex]; ok {
 			result[authIndex] = snapshot
 		}
@@ -115,38 +126,67 @@ func (r *authSnapshotResolver) lookupLocked(authIndices map[string]struct{}) map
 	return result
 }
 
-func (r *authSnapshotResolver) fetch(ctx context.Context, baseURL string, managementKey string) (map[string]authSnapshot, error) {
+func (r *authSnapshotResolver) fetch(ctx context.Context, baseURL string, managementKey string) (map[string]authSnapshot, map[string]struct{}, error) {
 	client := r.client
 	if client == nil {
 		client = http.DefaultClient
 	}
 	capturedAt := time.Now().UnixMilli()
 	snapshots := make(map[string]authSnapshot)
+	ambiguous := make(map[string]struct{})
 	err := cpaauthfiles.New(client).Visit(ctx, baseURL, managementKey, func(item cpaauthfiles.File) (bool, error) {
 		file := item.Raw
-		authIndex := readAuthFileString(file, "auth_index", "authIndex", "auth-index")
+		authIndex := item.AuthIndex
 		if authIndex == "" {
 			return false, nil
 		}
-		account := firstSafeAccount(readAuthFileString(file, "account"), readAuthFileString(file, "email"))
-		label := firstNonEmpty(readAuthFileString(file, "label"), readAuthFileString(file, "name"), readAuthFileString(file, "email"), account)
-		fileName := readAuthFileString(file, "name")
-		provider := firstNonEmpty(readAuthFileString(file, "provider"), readAuthFileString(file, "type"))
+		if _, alreadyAmbiguous := ambiguous[authIndex]; alreadyAmbiguous {
+			return false, nil
+		}
+		if _, duplicate := snapshots[authIndex]; duplicate {
+			delete(snapshots, authIndex)
+			ambiguous[authIndex] = struct{}{}
+			return false, nil
+		}
+		account := ""
+		fileName := item.Name
+		provider := item.Provider
 		accountID := ""
 		projectID := firstNonEmpty(readAuthFileString(file, "project_id"), readAuthFileString(file, "projectId"), readAuthFileString(file, "gemini_virtual_project"), readAuthFileString(file, "geminiVirtualProject"))
 		if strings.EqualFold(provider, "codex") {
-			accountID = readCodexAccountID(file)
+			if !item.AccountIDInvalid {
+				accountID = item.AccountID
+			}
+			account = item.AccountSnapshot
+		} else {
+			account = firstSafeAccount(readAuthFileString(file, "account"), readAuthFileString(file, "email"))
 		}
-		if account == "" {
+		// Keep the pre-existing non-Codex display fallback: when CPA exposes an
+		// account value but no explicit label/name/email, label still carries that
+		// account. For Codex, item.AccountSnapshot is already limited to strong
+		// member evidence, so it is also safe as a display label; it is never used
+		// as a member identity unless the shared identity normalizer accepts it.
+		label := firstNonEmpty(readAuthFileString(file, "label"), readAuthFileString(file, "name"), readAuthFileString(file, "email"), account)
+		if account == "" && !strings.EqualFold(provider, "codex") {
 			account = firstNonEmpty(label, fileName)
 		}
-		snapshots[authIndex] = authSnapshot{Account: account, AccountID: accountID, Label: label, FileName: fileName, Provider: provider, ProjectID: projectID, CapturedAtMS: capturedAt}
+		snapshots[authIndex] = authSnapshot{
+			AccountSnapshotInvalid: item.AccountSnapshotInvalid,
+			AccountIDInvalid:       item.AccountIDInvalid,
+			Account:                account,
+			AccountID:              accountID,
+			Label:                  label,
+			FileName:               fileName,
+			Provider:               provider,
+			ProjectID:              projectID,
+			CapturedAtMS:           capturedAt,
+		}
 		return false, nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return snapshots, nil
+	return snapshots, ambiguous, nil
 }
 
 func readAuthFileString(file map[string]any, keys ...string) string {
@@ -158,22 +198,6 @@ func readAuthFileString(file map[string]any, keys ...string) string {
 		text := strings.TrimSpace(toString(value))
 		if text != "" {
 			return text
-		}
-	}
-	return ""
-}
-
-func readCodexAccountID(file map[string]any) string {
-	if accountID := readAuthFileString(file, "account_id", "accountId", "chatgpt_account_id", "chatgptAccountId"); accountID != "" {
-		return accountID
-	}
-	for _, key := range []string{"id_token", "idToken", "metadata", "attributes"} {
-		child, ok := file[key].(map[string]any)
-		if !ok {
-			continue
-		}
-		if accountID := readCodexAccountID(child); accountID != "" {
-			return accountID
 		}
 	}
 	return ""

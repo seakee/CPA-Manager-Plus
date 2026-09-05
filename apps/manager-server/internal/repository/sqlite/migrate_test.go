@@ -11,6 +11,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	quotasnapshotrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotasnapshot"
+	pricingrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagepricing"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageprojection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
@@ -2395,6 +2396,8 @@ func TestAccountHistoryIdentityFormatUpgradeRebuildsDerivedDataOnce(t *testing.T
 		) values ('legacy', '-', '-', '', 1, 1, 1)`,
 		`create table usage_account_model_rollups_legacy_v1120_rc2 (id integer primary key)`,
 		`insert into usage_account_model_rollups_legacy_v1120_rc2 (id) values (1)`,
+		`create table usage_account_model_rollups_legacy_identity_v3 (id integer primary key)`,
+		`insert into usage_account_model_rollups_legacy_identity_v3 (id) values (1)`,
 		`insert into usage_dashboard_hourly_rollups (
 			bucket_ms, model, billing_model, service_tier, updated_at_ms
 		) values (0, '-', '-', '', 1)`,
@@ -2419,6 +2422,7 @@ func TestAccountHistoryIdentityFormatUpgradeRebuildsDerivedDataOnce(t *testing.T
 	assertTableCount(t, db, "usage_account_model_rollups", 0)
 	assertTableCount(t, db, usageAccountModelRollupsLegacy, 1)
 	assertTableCount(t, db, usageAccountModelIdentityLegacy, 1)
+	assertTableCount(t, db, usageAccountModelCodexIdentityLegacy, 1)
 	assertTableCount(t, db, "usage_dashboard_hourly_rollups", 1)
 	var accountCheckpoints, dashboardCheckpoints int
 	if err := db.QueryRow(`select count(*) from usage_rollup_checkpoints where name = 'account_history'`).Scan(&accountCheckpoints); err != nil {
@@ -2507,7 +2511,8 @@ func TestAccountHistoryIdentityFormatUpgradeDoesNotDeleteDerivedRows(t *testing.
 	}
 	assertTableCount(t, db, "usage_events", 1)
 	assertTableCount(t, db, "usage_account_model_rollups", 0)
-	assertTableCount(t, db, usageAccountModelIdentityLegacy, 1)
+	assertTableCount(t, db, usageAccountModelCodexIdentityLegacy, 1)
+	assertTableAbsent(t, db, usageAccountModelIdentityLegacy)
 	assertTableCount(t, db, "usage_rollup_checkpoints", 1)
 	var version string
 	if err := db.QueryRow(`select value from settings where key = ?`, accountHistoryIdentityFormatVersionKey).Scan(&version); err != nil {
@@ -2525,7 +2530,8 @@ func TestAccountHistoryIdentityFormatUpgradeDoesNotDeleteDerivedRows(t *testing.
 	}
 	assertTableCount(t, db, "usage_events", 1)
 	assertTableCount(t, db, "usage_account_model_rollups", 0)
-	assertTableCount(t, db, usageAccountModelIdentityLegacy, 1)
+	assertTableCount(t, db, usageAccountModelCodexIdentityLegacy, 1)
+	assertTableAbsent(t, db, usageAccountModelIdentityLegacy)
 	var accountCheckpoints, dashboardCheckpoints int
 	if err := db.QueryRow(`select count(*) from usage_rollup_checkpoints where name = 'account_history'`).Scan(&accountCheckpoints); err != nil {
 		t.Fatalf("read account checkpoint count: %v", err)
@@ -2535,6 +2541,271 @@ func TestAccountHistoryIdentityFormatUpgradeDoesNotDeleteDerivedRows(t *testing.
 	}
 	if accountCheckpoints != 0 || dashboardCheckpoints != 1 {
 		t.Fatalf("checkpoint counts after retry = account:%d dashboard:%d", accountCheckpoints, dashboardCheckpoints)
+	}
+}
+
+func TestAccountHistoryIdentityFormatUpgradeUsesDedicatedCodexLegacyTable(t *testing.T) {
+	tests := []struct {
+		name                string
+		version             string
+		wantLegacyTable     string
+		unwantedLegacyTable string
+	}{
+		{
+			name:                "v2-structured",
+			version:             legacyAccountHistoryStructureRevisionV2,
+			wantLegacyTable:     usageAccountModelCodexIdentityLegacy,
+			unwantedLegacyTable: usageAccountModelIdentityLegacy,
+		},
+		{
+			name:                "v3-structured",
+			version:             legacyAccountHistoryStructureRevisionV3,
+			wantLegacyTable:     usageAccountModelCodexIdentityLegacy,
+			unwantedLegacyTable: usageAccountModelIdentityLegacy,
+		},
+		{
+			name:                "v1",
+			version:             "1",
+			wantLegacyTable:     usageAccountModelCodexIdentityLegacy,
+			unwantedLegacyTable: usageAccountModelIdentityLegacy,
+		},
+		{
+			name:                "v2",
+			version:             "2",
+			wantLegacyTable:     usageAccountModelCodexIdentityLegacy,
+			unwantedLegacyTable: usageAccountModelIdentityLegacy,
+		},
+		{
+			name:                "v3",
+			version:             "3",
+			wantLegacyTable:     usageAccountModelCodexIdentityLegacy,
+			unwantedLegacyTable: usageAccountModelIdentityLegacy,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db, err := sql.Open("sqlite", dataSourceName(filepath.Join(t.TempDir(), "account-history-identity-selection.sqlite")))
+			if err != nil {
+				t.Fatalf("open sqlite: %v", err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			for _, statement := range []string{
+				`create table settings (key text primary key, value text not null, updated_at_ms integer not null)`,
+				`create table usage_events (id integer primary key)`,
+				`create table usage_account_model_rollups (id integer primary key)`,
+				`create table usage_rollup_checkpoints (name text primary key)`,
+				`insert into settings (key, value, updated_at_ms)
+				 values ('usage_account_history_identity_format_version', '` + test.version + `', 1)`,
+				`insert into usage_events (id) values (1)`,
+				`insert into usage_account_model_rollups (id) values (1)`,
+			} {
+				if _, err := db.Exec(statement); err != nil {
+					t.Fatalf("setup %s: %v", test.name, err)
+				}
+			}
+
+			if err := ensureAccountHistoryIdentityFormatVersion(db); err != nil {
+				t.Fatalf("migrate %s: %v", test.name, err)
+			}
+			assertTableCount(t, db, usageAccountModelRollupsTable, 0)
+			assertTableCount(t, db, test.wantLegacyTable, 1)
+			assertTableAbsent(t, db, test.unwantedLegacyTable)
+
+			if err := ensureAccountHistoryIdentityFormatVersion(db); err != nil {
+				t.Fatalf("repeat migrate %s: %v", test.name, err)
+			}
+			assertTableCount(t, db, test.wantLegacyTable, 1)
+		})
+	}
+}
+
+func TestLegacyIdentityV3UpgradePreservesRawEventsAndSchedulesAllIdentityRollups(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-identity-v3.sqlite")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	for _, statement := range []string{
+		`insert into usage_events (
+			event_hash, timestamp_ms, timestamp, model, raw_json, created_at_ms
+		) values ('legacy-v3-raw', 1700000000000, '2023-11-14T22:13:20Z', 'gpt-team', '{"immutable":true}', 1700000000000)`,
+		`insert into usage_account_model_rollups (
+			account_key, model, billing_model, service_tier, first_seen_ms, last_seen_ms, updated_at_ms
+		) values ('legacy-workspace-key', 'gpt-team', 'gpt-team', '', 1700000000000, 1700000000000, 1)`,
+		`update settings set value = 'identity-3:model-1'
+			where key = 'usage_account_history_identity_format_version'`,
+		`update usage_monitoring_rollup_state set
+			structure_revision = 'identity-3:model-1:project-v1', status = 'ready',
+			coverage_event_id = 1, target_event_id = 1
+			where rollup_name in ('stats_v1', 'metadata_v1', 'projection_v1')`,
+		`update usage_pricing_rollup_state set
+			structure_revision = 'model-1:identity-3:legacy-price', status = 'ready',
+			coverage_event_id = 1, target_event_id = 1
+			where rollup_name = 'pricing_v1'`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			_ = db.Close()
+			t.Fatalf("setup legacy identity v3 database: %v", err)
+		}
+	}
+	var beforeCount int
+	var beforeHash, beforeRawJSON string
+	if err := db.QueryRow(`select count(*), max(event_hash), max(raw_json) from usage_events`).Scan(&beforeCount, &beforeHash, &beforeRawJSON); err != nil {
+		_ = db.Close()
+		t.Fatalf("capture legacy raw event: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close legacy sqlite: %v", err)
+	}
+
+	db, err = Open(path)
+	if err != nil {
+		t.Fatalf("upgrade legacy identity v3 sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	var afterCount int
+	var afterHash, afterRawJSON string
+	if err := db.QueryRow(`select count(*), max(event_hash), max(raw_json) from usage_events`).Scan(&afterCount, &afterHash, &afterRawJSON); err != nil {
+		t.Fatalf("read upgraded raw event: %v", err)
+	}
+	if afterCount != beforeCount || afterHash != beforeHash || afterRawJSON != beforeRawJSON {
+		t.Fatalf("raw event changed by identity migration: before=%d/%q/%q after=%d/%q/%q", beforeCount, beforeHash, beforeRawJSON, afterCount, afterHash, afterRawJSON)
+	}
+	assertTableCount(t, db, usageAccountModelRollupsTable, 0)
+	assertTableCount(t, db, usageAccountModelCodexIdentityLegacy, 1)
+	var accountRevision string
+	if err := db.QueryRow(`select value from settings where key = ?`, accountHistoryIdentityFormatVersionKey).Scan(&accountRevision); err != nil {
+		t.Fatalf("read upgraded account identity revision: %v", err)
+	}
+	if accountRevision != usageidentity.AccountHistoryStructureRevision() {
+		t.Fatalf("account identity revision = %q, want %q", accountRevision, usageidentity.AccountHistoryStructureRevision())
+	}
+	for _, rollupName := range []string{usageMonitoringStatsRollupName, usageMonitoringMetadataRollupName, usageMonitoringProjectionRollupName} {
+		var revision, status string
+		if err := db.QueryRow(`select structure_revision, status from usage_monitoring_rollup_state where rollup_name = ?`, rollupName).Scan(&revision, &status); err != nil {
+			t.Fatalf("read upgraded monitoring state %s: %v", rollupName, err)
+		}
+		if status != "pending" {
+			t.Fatalf("monitoring state %s status = %q, want pending", rollupName, status)
+		}
+		if rollupName == usageMonitoringProjectionRollupName && revision != usageidentity.MonitoringProjectionStructureRevision() {
+			t.Fatalf("monitoring projection revision = %q, want %q", revision, usageidentity.MonitoringProjectionStructureRevision())
+		}
+	}
+
+	wantPricingRevision, err := pricingrepo.StructureRevision(context.Background(), db)
+	if err != nil {
+		t.Fatalf("calculate current pricing revision: %v", err)
+	}
+	pricingResult, err := pricingrepo.New(db).CatchUp(context.Background(), 1, time.Now().UnixMilli())
+	if err != nil {
+		t.Fatalf("start pricing identity rebuild: %v", err)
+	}
+	if !pricingResult.Rebuilt {
+		t.Fatalf("pricing identity rebuild result = %#v, want rebuilt", pricingResult)
+	}
+	pricingState, err := pricingrepo.New(db).State(context.Background())
+	if err != nil {
+		t.Fatalf("read rebuilding pricing state: %v", err)
+	}
+	if pricingState.StructureRevision != wantPricingRevision {
+		t.Fatalf("pricing state revision after catch-up = %q, want %q", pricingState.StructureRevision, wantPricingRevision)
+	}
+
+	if err := Migrate(db); err != nil {
+		t.Fatalf("repeat identity v3 migration: %v", err)
+	}
+	assertTableCount(t, db, usageAccountModelCodexIdentityLegacy, 1)
+	if err := db.QueryRow(`select count(*), max(event_hash), max(raw_json) from usage_events`).Scan(&afterCount, &afterHash, &afterRawJSON); err != nil {
+		t.Fatalf("read raw event after repeat migration: %v", err)
+	}
+	if afterCount != beforeCount || afterHash != beforeHash || afterRawJSON != beforeRawJSON {
+		t.Fatalf("repeat identity migration changed raw event: %d/%q/%q", afterCount, afterHash, afterRawJSON)
+	}
+}
+
+func TestLegacyAccountHistoryV3UpgradeSchedulesProjectionWhenProjectionRevisionIsCurrent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-account-history-v3-current-projection.sqlite")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	const rawJSON = `{"immutable":true,"member":"alice@example.com"}`
+	if _, err := db.Exec(`insert into usage_events (
+		event_hash, timestamp_ms, timestamp, model, raw_json, created_at_ms
+	) values ('legacy-v3-current-projection', 1700000000000, '2023-11-14T22:13:20Z', 'gpt-team', ?, 1700000000000)`, rawJSON); err != nil {
+		t.Fatalf("insert immutable raw event: %v", err)
+	}
+	if _, err := db.Exec(`insert into usage_account_model_rollups (
+		account_key, model, billing_model, service_tier, first_seen_ms, last_seen_ms, updated_at_ms
+	) values ('legacy-workspace-key', 'gpt-team', 'gpt-team', '', 1700000000000, 1700000000000, 1)`); err != nil {
+		t.Fatalf("insert legacy account rollup: %v", err)
+	}
+	if _, err := db.Exec(`update settings set value = 'identity-3:model-1'
+		where key = 'usage_account_history_identity_format_version'`); err != nil {
+		t.Fatalf("set legacy account history revision: %v", err)
+	}
+	if _, err := db.Exec(`update usage_monitoring_rollup_state set
+		structure_revision = ?, status = 'ready', coverage_event_id = 1, target_event_id = 1
+		where rollup_name = ?`, usageidentity.MonitoringProjectionStructureRevision(), usageMonitoringProjectionRollupName); err != nil {
+		t.Fatalf("set current monitoring projection revision: %v", err)
+	}
+	if _, err := db.Exec(`update usage_pricing_rollup_state set
+		structure_revision = 'current-pricing', status = 'ready', coverage_event_id = 1, target_event_id = 1
+		where rollup_name = 'pricing_v1'`); err != nil {
+		t.Fatalf("set current pricing revision: %v", err)
+	}
+
+	var beforeCount int
+	var beforeHash, beforeRawJSON string
+	if err := db.QueryRow(`select count(*), max(event_hash), max(raw_json) from usage_events`).Scan(&beforeCount, &beforeHash, &beforeRawJSON); err != nil {
+		t.Fatalf("capture raw event before migration: %v", err)
+	}
+
+	if err := Migrate(db); err != nil {
+		t.Fatalf("upgrade mixed identity revisions: %v", err)
+	}
+
+	var afterCount int
+	var afterHash, afterRawJSON string
+	if err := db.QueryRow(`select count(*), max(event_hash), max(raw_json) from usage_events`).Scan(&afterCount, &afterHash, &afterRawJSON); err != nil {
+		t.Fatalf("read raw event after migration: %v", err)
+	}
+	if afterCount != beforeCount || afterHash != beforeHash || afterRawJSON != beforeRawJSON {
+		t.Fatalf("mixed identity migration changed raw event: before=%d/%q/%q after=%d/%q/%q", beforeCount, beforeHash, beforeRawJSON, afterCount, afterHash, afterRawJSON)
+	}
+	assertTableCount(t, db, usageAccountModelRollupsTable, 0)
+	assertTableCount(t, db, usageAccountModelCodexIdentityLegacy, 1)
+
+	var accountRevision string
+	if err := db.QueryRow(`select value from settings where key = ?`, accountHistoryIdentityFormatVersionKey).Scan(&accountRevision); err != nil {
+		t.Fatalf("read upgraded account history revision: %v", err)
+	}
+	if accountRevision != usageidentity.AccountHistoryStructureRevision() {
+		t.Fatalf("account history revision = %q, want %q", accountRevision, usageidentity.AccountHistoryStructureRevision())
+	}
+	var projectionRevision, projectionStatus string
+	var projectionCoverage, projectionTarget int64
+	if err := db.QueryRow(`select structure_revision, status, coverage_event_id, target_event_id
+		from usage_monitoring_rollup_state where rollup_name = ?`, usageMonitoringProjectionRollupName).
+		Scan(&projectionRevision, &projectionStatus, &projectionCoverage, &projectionTarget); err != nil {
+		t.Fatalf("read scheduled projection state: %v", err)
+	}
+	if projectionRevision != usageidentity.MonitoringProjectionStructureRevision() || projectionStatus != "pending" || projectionCoverage != 0 || projectionTarget != 1 {
+		t.Fatalf("scheduled projection state = revision:%q status:%q coverage:%d target:%d", projectionRevision, projectionStatus, projectionCoverage, projectionTarget)
+	}
+
+	if err := Migrate(db); err != nil {
+		t.Fatalf("repeat mixed identity migration: %v", err)
+	}
+	assertTableCount(t, db, usageAccountModelCodexIdentityLegacy, 1)
+	if err := db.QueryRow(`select count(*), max(event_hash), max(raw_json) from usage_events`).Scan(&afterCount, &afterHash, &afterRawJSON); err != nil {
+		t.Fatalf("read raw event after repeated migration: %v", err)
+	}
+	if afterCount != beforeCount || afterHash != beforeHash || afterRawJSON != beforeRawJSON {
+		t.Fatalf("repeat mixed identity migration changed raw event: before=%d/%q/%q after=%d/%q/%q", beforeCount, beforeHash, beforeRawJSON, afterCount, afterHash, afterRawJSON)
 	}
 }
 
@@ -3434,5 +3705,16 @@ func assertTableCount(t *testing.T, db *sql.DB, table string, want int) {
 	}
 	if got != want {
 		t.Fatalf("%s count = %d, want %d", table, got, want)
+	}
+}
+
+func assertTableAbsent(t *testing.T, db *sql.DB, table string) {
+	t.Helper()
+	var exists int
+	if err := db.QueryRow(`select count(*) from sqlite_master where type = 'table' and name = ?`, table).Scan(&exists); err != nil {
+		t.Fatalf("inspect %s: %v", table, err)
+	}
+	if exists != 0 {
+		t.Fatalf("table %s exists, want absent", table)
 	}
 }

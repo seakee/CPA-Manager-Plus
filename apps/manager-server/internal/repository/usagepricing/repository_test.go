@@ -3,6 +3,7 @@ package usagepricing_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
@@ -200,6 +201,70 @@ func TestPricingAccountRollupSeparatesSharedAccountByAuthIndex(t *testing.T) {
 	}
 	if byKey[secondKey].Calls != 1 || byKey[secondKey].TotalTokens != 30 {
 		t.Fatalf("second shared pricing row = %#v", byKey[secondKey])
+	}
+}
+
+func TestPricingAccountRollupSeparatesCodexMembersSharingWorkspace(t *testing.T) {
+	ctx := context.Background()
+	cfg := testutil.NewConfig(t)
+	st := testutil.NewStore(t, cfg)
+
+	makeEvent := func(hash, member, file, authIndex string, inputTokens int64) usage.Event {
+		event := pricingEvent(hash, 3_600_001+inputTokens, inputTokens)
+		event.Provider = "codex"
+		event.AccountSnapshot = member
+		event.AuthFileSnapshot = file
+		event.AuthIndex = authIndex
+		event.AuthProviderSnapshot = "codex"
+		event.AuthAccountIDSnapshot = "workspace-team"
+		event.Source = file
+		return event
+	}
+	if _, err := st.UsageEvents.InsertBatch(ctx, []usage.Event{
+		makeEvent("codex-pricing-alice", "alice@example.com", "alice.json", "auth-alice", 100),
+		makeEvent("codex-pricing-bob", "bob@example.com", "bob.json", "auth-bob", 200),
+	}); err != nil {
+		t.Fatalf("insert shared-workspace Codex pricing events: %v", err)
+	}
+	if _, err := st.CatchUpUsagePricing(ctx, 10, 10_000); err != nil {
+		t.Fatalf("catch up shared-workspace Codex pricing events: %v", err)
+	}
+
+	accountKey := func(member string) string {
+		key, valid := usageidentity.AccountKey(usageidentity.Fields{
+			AuthFileSnapshot:      member + ".json",
+			AuthIndex:             "auth-" + strings.Split(member, "@")[0],
+			AuthProviderSnapshot:  "codex",
+			AuthAccountIDSnapshot: "workspace-team",
+			AccountSnapshot:       member,
+		})
+		if !valid {
+			t.Fatalf("invalid Codex pricing identity for %s", member)
+		}
+		return key
+	}
+	aliceKey := accountKey("alice@example.com")
+	bobKey := accountKey("bob@example.com")
+	if aliceKey == bobKey {
+		t.Fatalf("shared-workspace Codex members merged into %q", aliceKey)
+	}
+
+	rows, _, available, err := st.UsagePricingAccountRows(ctx, []string{aliceKey, bobKey})
+	if err != nil {
+		t.Fatalf("load shared-workspace Codex pricing rows: %v", err)
+	}
+	if !available || len(rows) != 2 {
+		t.Fatalf("shared-workspace Codex pricing rows available=%v rows=%#v", available, rows)
+	}
+	byKey := make(map[string]store.UsagePricingAccountRow, len(rows))
+	for _, row := range rows {
+		byKey[row.AccountKey] = row
+	}
+	if row := byKey[aliceKey]; row.Calls != 1 || row.InputTokens != 100 || row.TotalTokens != 110 {
+		t.Fatalf("Alice shared-workspace Codex pricing row = %#v", row)
+	}
+	if row := byKey[bobKey]; row.Calls != 1 || row.InputTokens != 200 || row.TotalTokens != 210 {
+		t.Fatalf("Bob shared-workspace Codex pricing row = %#v", row)
 	}
 }
 

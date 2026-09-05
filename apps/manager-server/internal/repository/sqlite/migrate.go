@@ -15,13 +15,15 @@ import (
 )
 
 const (
-	accountHistoryIdentityFormatVersionKey = "usage_account_history_identity_format_version"
-	legacyAccountHistoryStructureRevision  = "identity-2:model-1"
-	dashboardHourlyRollupFormatVersionKey  = "usage_dashboard_hourly_format_version"
-	dashboardHourlyRollupFormatVersion     = "3"
-	usageMonitoringModelFormatVersionKey   = "usage_monitoring_model_format_version"
-	usageHourlyAggregateSchemaVersion      = 3
-	usageHourlyAggregateStructureRevision  = "schema-3:model-1"
+	accountHistoryIdentityFormatVersionKey  = "usage_account_history_identity_format_version"
+	legacyAccountHistoryStructureRevisionV2 = "identity-2:model-1"
+	legacyAccountHistoryStructureRevisionV3 = "identity-3:model-1"
+	legacyMonitoringProjectionRevisionV3    = legacyAccountHistoryStructureRevisionV3 + ":project-v1"
+	dashboardHourlyRollupFormatVersionKey   = "usage_dashboard_hourly_format_version"
+	dashboardHourlyRollupFormatVersion      = "3"
+	usageMonitoringModelFormatVersionKey    = "usage_monitoring_model_format_version"
+	usageHourlyAggregateSchemaVersion       = 3
+	usageHourlyAggregateStructureRevision   = "schema-3:model-1"
 
 	usageMonitoringAccountDailyTable  = "usage_monitoring_account_daily_rollups_v1"
 	usageMonitoringAPIKeyDailyTable   = "usage_monitoring_api_key_daily_rollups_v1"
@@ -38,28 +40,34 @@ const (
 	usageHourlyAggregateState = "usage_hourly_aggregate_state"
 	usageEventIdentityLedger  = "usage_event_identity_ledger"
 
-	usageAccountModelRollupsTable         = "usage_account_model_rollups"
-	usagePricingAccountRollupsTable       = "usage_pricing_account_rollups_v1"
-	usageAccountModelRollupsLegacy        = "usage_account_model_rollups_legacy_v1120_rc2"
-	usageAccountModelIdentityLegacy       = "usage_account_model_rollups_legacy_identity_v3"
-	usagePricingAccountLegacy             = "usage_pricing_account_rollups_v1_legacy_v1120_rc2"
-	usageDashboardHourlyLegacy            = "usage_dashboard_hourly_rollups_legacy_v1120_rc2"
-	usageHourlyAggregateLegacy            = "usage_hourly_aggregate_v1_legacy_v1120_rc2"
-	usageMonitoringSearchLegacy           = "usage_monitoring_event_search_v1_legacy_v1120_rc2"
-	usageMonitoringSearchLegacyPrefix     = "usage_monitoring_event_search_v1_legacy_g"
-	usageMonitoringProjectionLegacyPrefix = "usage_monitoring_event_projection_v1_legacy_g"
-	usageMonitoringAccountLegacy          = "usage_monitoring_account_daily_rollups_v1_legacy_recovery"
-	usageMonitoringAPIKeyLegacy           = "usage_monitoring_api_key_daily_rollups_v1_legacy_recovery"
-	usageMonitoringAccountIdentityLegacy  = "usage_monitoring_account_daily_rollups_v1_legacy_identity_v3"
-	usageMonitoringAPIKeyIdentityLegacy   = "usage_monitoring_api_key_daily_rollups_v1_legacy_identity_v3"
-	usageMonitoringSelectorLegacy         = "usage_monitoring_selector_daily_rollups_v1_legacy_recovery"
-	usageMonitoringHeaderLegacy           = "usage_monitoring_header_latest_v1_legacy_recovery"
-	usageMonitoringProjectionLegacy       = "usage_monitoring_event_projection_v1_legacy_recovery"
-	usageDashboardHourlySourceLegacy      = "usage_dashboard_hourly_rollups_legacy_source_recovery"
-	usagePricingHourlySourceLegacy        = "usage_pricing_hourly_rollups_v1_legacy_source_recovery"
-	usageCacheChangesSourceLegacy         = "usage_cache_accounting_v2_changes_legacy_source_recovery"
-	usageAccountModelSourceLegacy         = "usage_account_model_rollups_legacy_source_recovery"
-	usagePricingAccountSourceLegacy       = "usage_pricing_account_rollups_v1_legacy_source_recovery"
+	usageAccountModelRollupsTable   = "usage_account_model_rollups"
+	usagePricingAccountRollupsTable = "usage_pricing_account_rollups_v1"
+	usageAccountModelRollupsLegacy  = "usage_account_model_rollups_legacy_v1120_rc2"
+	// Keep the unsuffixed identity-v3 name for cleanup of databases migrated by
+	// the previous identity revision. New Codex identity rebuilds use a
+	// revision-specific name so pending old cleanup cannot block startup.
+	usageAccountModelIdentityLegacy           = "usage_account_model_rollups_legacy_identity_v3"
+	usageAccountModelCodexIdentityLegacy      = "usage_account_model_rollups_legacy_identity_v3_codex_v2"
+	usagePricingAccountLegacy                 = "usage_pricing_account_rollups_v1_legacy_v1120_rc2"
+	usageDashboardHourlyLegacy                = "usage_dashboard_hourly_rollups_legacy_v1120_rc2"
+	usageHourlyAggregateLegacy                = "usage_hourly_aggregate_v1_legacy_v1120_rc2"
+	usageMonitoringSearchLegacy               = "usage_monitoring_event_search_v1_legacy_v1120_rc2"
+	usageMonitoringSearchLegacyPrefix         = "usage_monitoring_event_search_v1_legacy_g"
+	usageMonitoringProjectionLegacyPrefix     = "usage_monitoring_event_projection_v1_legacy_g"
+	usageMonitoringAccountLegacy              = "usage_monitoring_account_daily_rollups_v1_legacy_recovery"
+	usageMonitoringAPIKeyLegacy               = "usage_monitoring_api_key_daily_rollups_v1_legacy_recovery"
+	usageMonitoringAccountIdentityLegacy      = "usage_monitoring_account_daily_rollups_v1_legacy_identity_v3"
+	usageMonitoringAPIKeyIdentityLegacy       = "usage_monitoring_api_key_daily_rollups_v1_legacy_identity_v3"
+	usageMonitoringAccountCodexIdentityLegacy = "usage_monitoring_account_daily_rollups_v1_legacy_identity_v3_codex_v2"
+	usageMonitoringAPIKeyCodexIdentityLegacy  = "usage_monitoring_api_key_daily_rollups_v1_legacy_identity_v3_codex_v2"
+	usageMonitoringSelectorLegacy             = "usage_monitoring_selector_daily_rollups_v1_legacy_recovery"
+	usageMonitoringHeaderLegacy               = "usage_monitoring_header_latest_v1_legacy_recovery"
+	usageMonitoringProjectionLegacy           = "usage_monitoring_event_projection_v1_legacy_recovery"
+	usageDashboardHourlySourceLegacy          = "usage_dashboard_hourly_rollups_legacy_source_recovery"
+	usagePricingHourlySourceLegacy            = "usage_pricing_hourly_rollups_v1_legacy_source_recovery"
+	usageCacheChangesSourceLegacy             = "usage_cache_accounting_v2_changes_legacy_source_recovery"
+	usageAccountModelSourceLegacy             = "usage_account_model_rollups_legacy_source_recovery"
+	usagePricingAccountSourceLegacy           = "usage_pricing_account_rollups_v1_legacy_source_recovery"
 
 	createUsageAccountModelRollupsTable = `create table if not exists usage_account_model_rollups (
 		account_key text not null,
@@ -1001,7 +1009,7 @@ func validateUsageDerivedSchemaVersions(db *sql.DB, hourlySnapshot usageHourlyAg
 		var accountHistoryVersion string
 		err = db.QueryRow(`select value from settings where key = ?`, accountHistoryIdentityFormatVersionKey).Scan(&accountHistoryVersion)
 		switch {
-		case err == nil && accountHistoryVersion != "1" && accountHistoryVersion != "2" && accountHistoryVersion != legacyAccountHistoryStructureRevision && accountHistoryVersion != usageidentity.FormatVersion && accountHistoryVersion != usageidentity.AccountHistoryStructureRevision():
+		case err == nil && !supportedAccountHistoryIdentityRevision(accountHistoryVersion):
 			return fmt.Errorf("unsupported account history identity format version %q", accountHistoryVersion)
 		case err != nil && !errors.Is(err, sql.ErrNoRows):
 			return fmt.Errorf("inspect account history identity format version: %w", err)
@@ -1618,6 +1626,7 @@ func ensureUsageMonitoringProjectionIdentity(db *sql.DB) error {
 
 	statsNeedsIdentityUpgrade := !statsHasAuthAccountID || !statsPKHasAuthAccountID
 	apiKeyStatsNeedsIdentityUpgrade := !apiKeyStatsHasAuthAccountID || !apiKeyStatsPKHasAuthAccountID
+	codexIdentityRevisionUpgrade := projectionRevisionMismatch && projectionRevision == legacyMonitoringProjectionRevisionV3
 	needsRebuild := versionErr != nil || projectionRevisionMismatch || !hasAccountKey || !hasRequestedModel || !hasAnalyticsModel || !hasAuthAccountID || !headerHasAuthAccountID || !selectorHasRevision || statsNeedsIdentityUpgrade || apiKeyStatsNeedsIdentityUpgrade
 	if needsRebuild {
 		if err := dropUsageMonitoringSearchTriggers(tx); err != nil {
@@ -1660,13 +1669,24 @@ func ensureUsageMonitoringProjectionIdentity(db *sql.DB) error {
 			if !hasRows && !identitySchemaUpgrade {
 				continue
 			}
+			identityLegacyName := legacyName
+			switch {
+			case tableName == usageMonitoringAccountDailyTable && statsNeedsIdentityUpgrade:
+				identityLegacyName = usageMonitoringAccountIdentityLegacy
+			case tableName == usageMonitoringAPIKeyDailyTable && apiKeyStatsNeedsIdentityUpgrade:
+				identityLegacyName = usageMonitoringAPIKeyIdentityLegacy
+			case tableName == usageMonitoringAccountDailyTable && codexIdentityRevisionUpgrade:
+				identityLegacyName = usageMonitoringAccountCodexIdentityLegacy
+			case tableName == usageMonitoringAPIKeyDailyTable && codexIdentityRevisionUpgrade:
+				identityLegacyName = usageMonitoringAPIKeyCodexIdentityLegacy
+			}
 			var rebuildErr error
 			if tableName == usageMonitoringAccountDailyTable && statsNeedsIdentityUpgrade {
-				rebuildErr = parkAndRecreateMonitoringIdentityTable(tx, tableName, usageMonitoringAccountIdentityLegacy, "auth_provider_snapshot, auth_index")
+				rebuildErr = parkAndRecreateMonitoringIdentityTable(tx, tableName, identityLegacyName, "auth_provider_snapshot, auth_index")
 			} else if tableName == usageMonitoringAPIKeyDailyTable && apiKeyStatsNeedsIdentityUpgrade {
-				rebuildErr = parkAndRecreateMonitoringIdentityTable(tx, tableName, usageMonitoringAPIKeyIdentityLegacy, "auth_provider_snapshot, auth_index")
+				rebuildErr = parkAndRecreateMonitoringIdentityTable(tx, tableName, identityLegacyName, "auth_provider_snapshot, auth_index")
 			} else {
-				rebuildErr = parkAndRecreateDerivedTable(tx, tableName, legacyName)
+				rebuildErr = parkAndRecreateDerivedTable(tx, tableName, identityLegacyName)
 			}
 			if err := rebuildErr; err != nil {
 				return err
@@ -1958,7 +1978,7 @@ func ensureAccountHistoryIdentityFormatVersion(db *sql.DB) error {
 	switch {
 	case err == nil && version == usageidentity.AccountHistoryStructureRevision():
 		return tx.Commit()
-	case err == nil && version != "1" && version != "2" && version != legacyAccountHistoryStructureRevision && version != usageidentity.FormatVersion:
+	case err == nil && !supportedAccountHistoryIdentityRevision(version):
 		return fmt.Errorf("unsupported account history identity format version %q", version)
 	case err != nil && !errors.Is(err, sql.ErrNoRows):
 		return err
@@ -1969,7 +1989,7 @@ func ensureAccountHistoryIdentityFormatVersion(db *sql.DB) error {
 		return err
 	}
 	if hasRows {
-		if err := parkDerivedTable(tx, usageAccountModelRollupsTable, usageAccountModelIdentityLegacy); err != nil {
+		if err := parkDerivedTable(tx, usageAccountModelRollupsTable, usageAccountModelCodexIdentityLegacy); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(createUsageAccountModelRollupsTable); err != nil {
@@ -2019,6 +2039,18 @@ func ensureAccountHistoryIdentityFormatVersion(db *sql.DB) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+func supportedAccountHistoryIdentityRevision(value string) bool {
+	switch value {
+	case "1", "2", usageidentity.FormatVersion,
+		legacyAccountHistoryStructureRevisionV2,
+		legacyAccountHistoryStructureRevisionV3,
+		usageidentity.AccountHistoryStructureRevision():
+		return true
+	default:
+		return false
+	}
 }
 
 func ensureDashboardHourlyRollupFormatVersion(db *sql.DB) error {

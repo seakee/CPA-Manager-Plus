@@ -683,7 +683,7 @@ export const isActionableServerCodexInspectionResult = (
     Partial<
       Pick<
         CodexInspectionResult,
-        'fileName' | 'provider' | 'authIndex' | 'accountId' | 'accountSnapshot'
+        'fileName' | 'runtimeId' | 'provider' | 'authIndex' | 'accountId' | 'accountSnapshot'
       >
     >
 ) => {
@@ -694,6 +694,7 @@ export const isActionableServerCodexInspectionResult = (
     (status === 'pending' || status === 'failed') &&
     hasCodexInspectionStableIdentity({
       fileName: item.fileName ?? '',
+      runtimeId: item.runtimeId,
       provider: item.provider,
       authIndex: item.authIndex,
       accountId: item.accountId,
@@ -722,7 +723,7 @@ type ServerActionIdentity = Pick<CodexInspectionResult, 'id' | 'fileName' | 'act
   Partial<
     Pick<
       CodexInspectionResult,
-      'provider' | 'authIndex' | 'accountId' | 'accountSnapshot' | 'actionStatus'
+      'runtimeId' | 'provider' | 'authIndex' | 'accountId' | 'accountSnapshot' | 'actionStatus'
     >
   >;
 
@@ -768,7 +769,10 @@ export const getCanonicalServerCodexInspectionActionIds = (
   results: Array<
     Pick<CodexInspectionResult, 'id' | 'fileName' | 'action' | 'actionStatus'> &
       Partial<
-        Pick<CodexInspectionResult, 'provider' | 'authIndex' | 'accountId' | 'accountSnapshot'>
+        Pick<
+          CodexInspectionResult,
+          'runtimeId' | 'provider' | 'authIndex' | 'accountId' | 'accountSnapshot'
+        >
       >
   >
 ) => {
@@ -788,7 +792,10 @@ export const getMixedServerCodexInspectionActionIds = (
   results: Array<
     Pick<CodexInspectionResult, 'id' | 'fileName' | 'action'> &
       Partial<
-        Pick<CodexInspectionResult, 'provider' | 'authIndex' | 'accountId' | 'accountSnapshot'>
+        Pick<
+          CodexInspectionResult,
+          'runtimeId' | 'provider' | 'authIndex' | 'accountId' | 'accountSnapshot'
+        >
       >
   >
 ) => {

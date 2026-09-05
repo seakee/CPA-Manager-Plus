@@ -3,68 +3,112 @@
  */
 
 import type { AuthFileItem } from '@/types';
-import { normalizeStringValue, normalizePlanType, parseIdTokenPayload } from './parsers';
+import { normalizePlanType, parseIdTokenPayload } from './parsers';
 
-const resolveAccountIdCandidate = (value: unknown): string | null => {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const record = value as Record<string, unknown>;
-  return normalizeStringValue(
-    record.chatgpt_account_id ?? record.chatgptAccountId ?? record.account_id ?? record.accountId
-  );
+const CODEX_ACCOUNT_ID_FIELDS = [
+  'chatgpt_account_id',
+  'chatgptAccountId',
+  'account_id',
+  'accountId',
+] as const;
+
+const CODEX_NESTED_EVIDENCE_FIELDS = ['id_token', 'idToken', 'metadata', 'attributes'] as const;
+
+export type CodexChatgptAccountIdEvidence = {
+  accountId: string | null;
+  invalid: boolean;
+};
+
+const readRecord = (value: unknown): Record<string, unknown> | null =>
+  value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+
+// Workspace IDs are opaque. Match the backend/SQLite rule: trim only ASCII
+// spaces and preserve every other byte of a non-empty value.
+const normalizeCodexWorkspaceId = (value: unknown): string | null => {
+  let normalized: string;
+  if (typeof value === 'string') {
+    normalized = value.replace(/^ +| +$/g, '');
+  } else if (typeof value === 'number' && Number.isFinite(value)) {
+    normalized = String(value);
+  } else {
+    return null;
+  }
+  return normalized || null;
+};
+
+const readCodexAccountIdCandidate = (
+  value: unknown
+): { value: string | null; present: boolean; valid: boolean } => {
+  if (value === undefined || value === null) {
+    return { value: null, present: false, valid: true };
+  }
+  if (typeof value === 'string' && value.trim() === '') {
+    return { value: null, present: false, valid: true };
+  }
+  const normalized = normalizeCodexWorkspaceId(value);
+  return normalized
+    ? { value: normalized, present: true, valid: true }
+    : { value: null, present: true, valid: false };
+};
+
+const resolveCodexChatgptAccountIdEvidenceFromValue = (
+  value: unknown
+): CodexChatgptAccountIdEvidence => {
+  const candidates = new Set<string>();
+  let invalid = false;
+  const visited = new Set<object>();
+
+  const visit = (input: unknown) => {
+    const record = readRecord(input);
+    if (!record) {
+      const payload = parseIdTokenPayload(input);
+      if (payload) visit(payload);
+      return;
+    }
+    if (visited.has(record)) return;
+    visited.add(record);
+
+    CODEX_ACCOUNT_ID_FIELDS.forEach((field) => {
+      if (!(field in record)) return;
+      const candidate = readCodexAccountIdCandidate(record[field]);
+      if (!candidate.present) return;
+      if (!candidate.valid || !candidate.value) {
+        invalid = true;
+        return;
+      }
+      candidates.add(candidate.value);
+    });
+
+    CODEX_NESTED_EVIDENCE_FIELDS.forEach((field) => {
+      const nested = record[field];
+      if (nested === undefined || nested === null) return;
+      visit(nested);
+    });
+  };
+
+  visit(value);
+  if (invalid || candidates.size > 1) return { accountId: null, invalid: true };
+  return { accountId: candidates.values().next().value ?? null, invalid: false };
 };
 
 export function extractCodexChatgptAccountId(value: unknown): string | null {
-  const direct = resolveAccountIdCandidate(value);
-  if (direct) return direct;
+  return resolveCodexChatgptAccountIdEvidenceFromValue(value).accountId;
+}
 
-  const payload = parseIdTokenPayload(value);
-  if (!payload) return null;
-  return normalizeStringValue(
-    payload.chatgpt_account_id ??
-      payload.chatgptAccountId ??
-      payload.account_id ??
-      payload.accountId
-  );
+export function resolveCodexChatgptAccountIdEvidence(
+  file: AuthFileItem
+): CodexChatgptAccountIdEvidence {
+  return resolveCodexChatgptAccountIdEvidenceFromValue(file);
 }
 
 export function resolveCodexChatgptAccountId(file: AuthFileItem): string | null {
-  const metadata =
-    file && typeof file.metadata === 'object' && file.metadata !== null
-      ? (file.metadata as Record<string, unknown>)
-      : null;
-  const attributes =
-    file && typeof file.attributes === 'object' && file.attributes !== null
-      ? (file.attributes as Record<string, unknown>)
-      : null;
+  return resolveCodexChatgptAccountIdEvidenceFromValue(file).accountId;
+}
 
-  const directCandidates = [
-    file.chatgpt_account_id,
-    file.chatgptAccountId,
-    file.account_id,
-    file.accountId,
-    metadata?.chatgpt_account_id,
-    metadata?.chatgptAccountId,
-    metadata?.account_id,
-    metadata?.accountId,
-    attributes?.chatgpt_account_id,
-    attributes?.chatgptAccountId,
-    attributes?.account_id,
-    attributes?.accountId,
-  ];
-
-  for (const candidate of directCandidates) {
-    const id = normalizeStringValue(candidate) ?? resolveAccountIdCandidate(candidate);
-    if (id) return id;
-  }
-
-  const tokenCandidates = [file.id_token, metadata?.id_token, attributes?.id_token];
-
-  for (const candidate of tokenCandidates) {
-    const id = extractCodexChatgptAccountId(candidate);
-    if (id) return id;
-  }
-
-  return null;
+export function isCodexChatgptAccountIdInvalid(file: AuthFileItem): boolean {
+  return resolveCodexChatgptAccountIdEvidenceFromValue(file).invalid;
 }
 
 export function resolveCodexPlanType(file: AuthFileItem): string | null {

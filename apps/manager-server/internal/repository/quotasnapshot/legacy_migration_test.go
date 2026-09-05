@@ -111,6 +111,189 @@ func TestBackfillLegacySnapshotsBatchProcessesWholeGroupsAndResumes(t *testing.T
 	}
 }
 
+func TestBackfillLegacySnapshotsBatchLeavesLegacyCodexWorkspaceSnapshotsOrphaned(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	legacyKey := "usage-account-history:3:codex-account:636F646578:776F726B73706163652D31"
+	seedLegacySnapshot(t, db, legacyKey, "codex", "five-hour", "five_hour", "api_query", "legacy-workspace", 1000)
+
+	result, err := quotasnapshotrepo.BackfillLegacySnapshotsBatch(context.Background(), db, 1000)
+	if err != nil {
+		t.Fatalf("backfill legacy Codex workspace snapshot: %v", err)
+	}
+	if result.Processed != 0 || result.Pending || !result.Completed {
+		t.Fatalf("legacy Codex workspace backfill result = %#v", result)
+	}
+	assertLegacySnapshotAttachment(t, db, 1, false)
+
+	var windowCount int
+	if err := db.QueryRow(`select count(*) from account_quota_windows where account_key = ?`, legacyKey).Scan(&windowCount); err != nil {
+		t.Fatalf("count orphaned Codex workspace windows: %v", err)
+	}
+	if windowCount != 0 {
+		t.Fatalf("orphaned Codex workspace snapshot created %d lifecycle windows", windowCount)
+	}
+	candidates, err := quotasnapshotrepo.New(db).ListCandidates(context.Background(), legacyKey, "codex", 10)
+	if err != nil {
+		t.Fatalf("list orphaned Codex workspace candidates: %v", err)
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("orphaned Codex workspace candidates = %#v, want none", candidates)
+	}
+	states, err := quotasnapshotrepo.New(db).ListWindowStates(context.Background(), legacyKey, "codex")
+	if err != nil {
+		t.Fatalf("list orphaned Codex workspace states: %v", err)
+	}
+	if len(states) != 0 {
+		t.Fatalf("orphaned Codex workspace states = %#v, want none", states)
+	}
+	var status string
+	if err := db.QueryRow(`select status from usage_data_migrations where name = ?`, quotasnapshotrepo.LegacySnapshotMigrationName).Scan(&status); err != nil {
+		t.Fatalf("read orphaned Codex workspace migration status: %v", err)
+	}
+	if status != "completed" {
+		t.Fatalf("orphaned Codex workspace migration status = %q, want completed", status)
+	}
+}
+
+func TestQuotaReadersHideAttachedLegacyCodexWorkspaceRows(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	legacyKey := "usage-account-history:3:codex-account:636F646578:776F726B73706163652D31"
+	scopeFingerprint := quotasnapshotrepo.ScopeFingerprint("all", "", nil)
+	observationResult, err := db.Exec(`insert into account_quota_observations (
+		observation_hash, account_key, provider, source, source_observation_id,
+		inventory_scope_key, inventory_mode, observed_at_ms, window_count,
+		lifecycle_applied, created_at_ms
+	) values ('legacy-observation-hash', ?, 'codex', 'api_query', 'legacy-observation',
+		'codex:rate-limits', 'partial', 1000, 1, 1, 1000)`, legacyKey)
+	if err != nil {
+		t.Fatalf("insert legacy observation: %v", err)
+	}
+	observationID, err := observationResult.LastInsertId()
+	if err != nil {
+		t.Fatalf("read legacy observation id: %v", err)
+	}
+	windowResult, err := db.Exec(`insert into account_quota_windows (
+		account_key, provider, provider_window_id, window_kind, window_mode,
+		model_scope_kind, model_scope_key, model_ids_json, scope_fingerprint,
+		inventory_scope_key, relationship_kind, container_provider_window_id,
+		availability, generation, absence_count, first_seen_at_ms, last_seen_at_ms,
+		last_observation_id, created_at_ms, updated_at_ms
+	) values (?, 'codex', 'five-hour', 'five_hour', 'fixed', 'all', null, '[]', ?,
+		'codex:rate-limits', null, null, 'active', 1, 0, 1000, 1000, ?, 1000, 1000)`,
+		legacyKey, scopeFingerprint, observationID)
+	if err != nil {
+		t.Fatalf("insert legacy lifecycle window: %v", err)
+	}
+	windowID, err := windowResult.LastInsertId()
+	if err != nil {
+		t.Fatalf("read legacy lifecycle window id: %v", err)
+	}
+	if _, err := db.Exec(`insert into account_quota_snapshots (
+		observation_id, logical_window_id, account_key, provider, provider_window_id,
+		window_kind, window_mode, model_scope_kind, model_ids_json, scope_fingerprint,
+		source, source_observation_id, observed_at_ms, boundary_accuracy,
+		duration_seconds, used_percent, remaining_percent, created_at_ms
+	) values (?, ?, ?, 'codex', 'five-hour', 'five_hour', 'fixed', 'all', '[]', ?,
+		'api_query', 'legacy-observation', 1000, 'exact', 18000, 99, 1, 1000)`,
+		observationID, windowID, legacyKey, scopeFingerprint); err != nil {
+		t.Fatalf("insert attached legacy snapshot: %v", err)
+	}
+
+	repository := quotasnapshotrepo.New(db)
+	candidates, err := repository.ListCandidates(context.Background(), legacyKey, "codex", 10)
+	if err != nil {
+		t.Fatalf("list attached legacy candidates: %v", err)
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("attached legacy Codex candidates = %#v, want none", candidates)
+	}
+	states, err := repository.ListWindowStates(context.Background(), legacyKey, "codex")
+	if err != nil {
+		t.Fatalf("list attached legacy window states: %v", err)
+	}
+	if len(states) != 0 {
+		t.Fatalf("attached legacy Codex window states = %#v, want none", states)
+	}
+	legacyStates, err := repository.ListLegacyCodexWorkspaceWindowStates(context.Background(), legacyKey, "codex")
+	if err != nil {
+		t.Fatalf("list attached legacy window states through compatibility reader: %v", err)
+	}
+	if len(legacyStates) != 1 || legacyStates[0].ID != windowID || legacyStates[0].AccountKey != legacyKey {
+		t.Fatalf("legacy compatibility window states = %#v, want window %d", legacyStates, windowID)
+	}
+
+	memberKey := strings.Replace(legacyKey, ":codex-account:", ":codex-member:", 1)
+	memberWindowResult, err := db.Exec(`insert into account_quota_windows (
+		account_key, provider, provider_window_id, window_kind, window_mode,
+		model_scope_kind, model_scope_key, model_ids_json, scope_fingerprint,
+		inventory_scope_key, relationship_kind, container_provider_window_id,
+		availability, generation, absence_count, first_seen_at_ms, last_seen_at_ms,
+		last_observation_id, created_at_ms, updated_at_ms
+	) select ?, provider, provider_window_id, window_kind, window_mode,
+		model_scope_kind, model_scope_key, model_ids_json, scope_fingerprint,
+		inventory_scope_key, relationship_kind, container_provider_window_id,
+		availability, generation, absence_count, first_seen_at_ms, last_seen_at_ms,
+		last_observation_id, created_at_ms, updated_at_ms
+		from account_quota_windows where id = ?`, memberKey, windowID)
+	if err != nil {
+		t.Fatalf("insert member lifecycle window: %v", err)
+	}
+	memberWindowID, err := memberWindowResult.LastInsertId()
+	if err != nil {
+		t.Fatalf("read member lifecycle window id: %v", err)
+	}
+	memberStates, err := repository.ListWindowStates(context.Background(), memberKey, "codex")
+	if err != nil {
+		t.Fatalf("list member window states: %v", err)
+	}
+	if len(memberStates) != 1 || memberStates[0].ID != memberWindowID {
+		t.Fatalf("member window states = %#v, want window %d", memberStates, memberWindowID)
+	}
+	legacyMemberStates, err := repository.ListLegacyCodexWorkspaceWindowStates(context.Background(), memberKey, "codex")
+	if err != nil {
+		t.Fatalf("list member states through legacy compatibility reader: %v", err)
+	}
+	if len(legacyMemberStates) != 0 {
+		t.Fatalf("legacy compatibility reader exposed member states = %#v", legacyMemberStates)
+	}
+}
+
+func TestQuotaReadersHideLegacyCodexWorkspaceRowsWithoutProviderMetadata(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	legacyKey := "usage-account-history:3:codex-account:636F646578:776F726B73706163652D31"
+	if _, err := db.Exec(`insert into account_quota_snapshots (
+		account_key, provider, provider_window_id, window_kind, window_mode,
+		model_scope_kind, source, source_observation_id, observed_at_ms,
+		boundary_accuracy, used_percent, created_at_ms
+	) values (?, '', 'five-hour', 'five_hour', 'fixed', 'all',
+		'api_query', 'legacy-without-provider', 1000, 'exact', 99, 1000)`, legacyKey); err != nil {
+		t.Fatalf("insert legacy snapshot without provider: %v", err)
+	}
+
+	repository := quotasnapshotrepo.New(db)
+	candidates, err := repository.ListCandidates(context.Background(), legacyKey, "", 10)
+	if err != nil {
+		t.Fatalf("list legacy candidates without provider: %v", err)
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("legacy candidates without provider = %#v, want none", candidates)
+	}
+}
+
 func TestBackfillLegacySnapshotsBatchRejectsOversizedGroupAtomically(t *testing.T) {
 	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
 	if err != nil {

@@ -608,6 +608,13 @@ const isActiveSelectValue = (value: string | null | undefined) => {
 
 const normalizeLowerSelectValue = (value: string) => value.trim().toLowerCase();
 
+const UNKNOWN_CLIENT_API_KEY_PREFIX = 'unknown-client-api-key:';
+
+export const getSelectableApiKeyHash = (value: string | null | undefined) => {
+  const hash = normalizeLowerSelectValue(String(value ?? ''));
+  return hash && hash !== 'all' && !hash.startsWith(UNKNOWN_CLIENT_API_KEY_PREFIX) ? hash : '';
+};
+
 export const padDateUnit = (value: number) => String(value).padStart(2, '0');
 
 export const formatDateTimeLocalValue = (date: Date) =>
@@ -735,14 +742,14 @@ export const buildUsageAnalyticsFilters = (
 ): MonitoringAnalyticsFilters => {
   const payload: MonitoringAnalyticsFilters = {};
   const model = filters.model ?? 'all';
-  const apiKeyHash = filters.apiKeyHash ?? 'all';
+  const apiKeyHash = getSelectableApiKeyHash(filters.apiKeyHash);
   const provider = filters.provider ?? 'all';
   const authFile = filters.authFile ?? 'all';
   if (isActiveSelectValue(model)) {
     payload.models = [model.trim()];
   }
-  if (isActiveSelectValue(apiKeyHash)) {
-    payload.api_key_hashes = [normalizeLowerSelectValue(apiKeyHash)];
+  if (apiKeyHash) {
+    payload.api_key_hashes = [apiKeyHash];
   }
   if (isActiveSelectValue(provider)) {
     payload.providers = [normalizeLowerSelectValue(provider)];
@@ -1921,9 +1928,10 @@ export const buildEntityTrendSeries = (
   rows: UsageRankRow[],
   timeline: UsageTimelinePoint[],
   metric: UsageTrendMetricKey,
-  limit = 4
+  limit = 4,
+  shareRows = rows
 ): UsageEntityTrendSeries[] => {
-  const total = sumUsageRows(rows, metric);
+  const total = sumUsageRows(shareRows, metric);
   const colors = ['#2563eb', '#0ea5a7', '#f59e0b', '#ef4444', '#64748b'];
   return rows
     .filter((row) => usageRankMetricValue(row, metric) > 0)
@@ -2741,7 +2749,7 @@ export const buildMonitoringDetailUrl = (
   params.set('from_ms', String(point.bucketMs));
   params.set('to_ms', String(point.bucketEndMs));
   const model = filters.model ?? 'all';
-  const apiKeyHash = filters.apiKeyHash ?? 'all';
+  const apiKeyHash = getSelectableApiKeyHash(filters.apiKeyHash);
   const provider = filters.provider ?? 'all';
   const authFile = filters.authFile ?? 'all';
   const searchQuery = filters.searchQuery ?? '';
@@ -2750,8 +2758,8 @@ export const buildMonitoringDetailUrl = (
   if (isActiveSelectValue(model)) {
     params.set('model', model.trim());
   }
-  if (isActiveSelectValue(apiKeyHash)) {
-    params.set('api_key_hash', normalizeLowerSelectValue(apiKeyHash));
+  if (apiKeyHash) {
+    params.set('api_key_hash', apiKeyHash);
   }
   if (isActiveSelectValue(provider)) {
     params.set('provider', normalizeLowerSelectValue(provider));

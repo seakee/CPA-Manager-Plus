@@ -30,6 +30,7 @@ export type ClaudeEditBaseline = {
   baseUrl: string;
   proxyUrl: string;
   disableCooling: CoolingPolicy;
+  fingerprintProfile: string | undefined;
   rebuildMidSystemMessage: boolean;
   headers: Array<{ key: string; value: string }>;
   models: Array<{

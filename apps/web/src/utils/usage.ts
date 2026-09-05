@@ -1497,24 +1497,25 @@ export function clearModelPrices(): void {
   }
 }
 
+const COMPACT_NUMBER_UNITS = [
+  { threshold: 1_000_000_000_000_000, suffix: 'P' },
+  { threshold: 1_000_000_000_000, suffix: 'T' },
+  { threshold: 1_000_000_000, suffix: 'B' },
+  { threshold: 1_000_000, suffix: 'M' },
+  { threshold: 1_000, suffix: 'K' },
+];
+
 export function formatCompactNumber(value: number): string {
   const num = Number(value);
   if (!Number.isFinite(num)) return '0';
 
   const abs = Math.abs(num);
   if (abs === 0) return '0';
-  const units = [
-    { threshold: 1_000_000_000_000_000, suffix: 'P' },
-    { threshold: 1_000_000_000_000, suffix: 'T' },
-    { threshold: 1_000_000_000, suffix: 'B' },
-    { threshold: 1_000_000, suffix: 'M' },
-    { threshold: 1_000, suffix: 'K' },
-  ];
-  const unit = units.find((item) => abs >= item.threshold);
+  const unit = COMPACT_NUMBER_UNITS.find((item) => abs >= item.threshold);
 
   if (unit) {
     const formatted = (num / unit.threshold).toFixed(1);
-    const nextUnit = units[units.indexOf(unit) - 1];
+    const nextUnit = COMPACT_NUMBER_UNITS[COMPACT_NUMBER_UNITS.indexOf(unit) - 1];
     if (nextUnit && Math.abs(Number(formatted)) >= 1000) {
       return `${(num / nextUnit.threshold).toFixed(1)}${nextUnit.suffix}`;
     }
@@ -1535,6 +1536,25 @@ export function formatUsd(value: number, fractionDigits = 2): string {
     maximumFractionDigits: digits,
   });
   return `$${parts}`;
+}
+
+export function formatCompactUsd(value: number): string {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return '$0.00';
+
+  const rounded = Number(num.toFixed(2));
+  const roundedAbs = Math.abs(rounded);
+  if (roundedAbs < 1_000) return formatUsd(num);
+
+  const unit = COMPACT_NUMBER_UNITS.find((item) => roundedAbs >= item.threshold);
+  if (!unit) return formatUsd(num);
+
+  const formatted = (num / unit.threshold).toFixed(2);
+  const nextUnit = COMPACT_NUMBER_UNITS[COMPACT_NUMBER_UNITS.indexOf(unit) - 1];
+  if (nextUnit && Math.abs(Number(formatted)) >= 1000) {
+    return `${formatUsd(num / nextUnit.threshold)}${nextUnit.suffix}`;
+  }
+  return `${formatUsd(num / unit.threshold)}${unit.suffix}`;
 }
 
 const resolveDurationLocale = (locale?: string): string | undefined =>

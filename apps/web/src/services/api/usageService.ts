@@ -2371,6 +2371,7 @@ const getDemoCodexInspectionActionsResponse = (
     if (
       !hasCodexInspectionStableIdentity({
         fileName: result.fileName,
+        runtimeId: result.runtimeId,
         provider: result.provider,
         authIndex: result.authIndex,
         accountId: result.accountId,

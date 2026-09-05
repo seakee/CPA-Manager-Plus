@@ -8,6 +8,7 @@ import { oauthApi } from '@/services/api';
 import type { ApiClientRequestScope } from '@/services/api/client';
 import { useNotificationStore } from '@/stores';
 import { copyToClipboard } from '@/utils/clipboard';
+import { normalizeCodexMemberSnapshot } from '@/utils/authFileCredentialIdentity';
 import {
   isCodexReauthReconciliationError,
   type CodexReauthTarget,
@@ -90,10 +91,17 @@ export function CodexReauthDialog({
 
   const targetKey = useMemo(
     () =>
-      target ? [target.account, target.fileName ?? '', target.accountId ?? ''].join('\u0000') : '',
+      target
+        ? [
+            target.account,
+            target.fileName ?? '',
+            target.accountId ?? '',
+            normalizeCodexMemberSnapshot(target.accountSnapshot),
+          ].join('\u0000')
+        : '',
     // Keep primitive fields only. Including `target` would restart OAuth after Accounts reload.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- stable session identity
-    [target?.account, target?.accountId, target?.fileName]
+    [target?.account, target?.accountId, target?.accountSnapshot, target?.fileName]
   );
   const dialogContext = useMemo<CodexReauthDialogContext>(
     () => ({

@@ -102,35 +102,36 @@ export const getProviderLabel = (provider: string, t: TFunction) => {
   return provider.charAt(0).toUpperCase() + provider.slice(1);
 };
 
-export const formatPercent = (value: number | null, digits = 0) =>
-  value === null ? '-' : `${value.toFixed(digits)}%`;
+export const formatPercent = (value: number | null | undefined, digits = 0) =>
+  typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(digits)}%` : '-';
 
 export const formatMoney = (value: number) => formatUsd(value);
 
-export const formatCompactNumber = (value: number) => {
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
-  return String(value);
+export const formatHistoryNumber = (value: number, locale: string) => {
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue)) return '-';
+  return new Intl.NumberFormat(locale || undefined).format(numberValue);
 };
 
-export const formatHistorySuccessRate = (value: number | null | undefined) =>
-  typeof value === 'number' && Number.isFinite(value) ? formatPercent(value * 100, 1) : '-';
+export const formatHistorySuccessRate = (value: number | null | undefined, digits = 1) =>
+  typeof value === 'number' && Number.isFinite(value) ? formatPercent(value * 100, digits) : '-';
 
 export const getAccountHistoryTitle = (
   t: TFunction,
   item: MonitoringAccountHistoryItem | null,
   loading: boolean,
-  error: string
+  error: string,
+  locale = 'en-US'
 ) => {
   if (error) return t('accounts.history_unavailable');
   if (loading && !item) return t('accounts.history_loading');
   if (!item || !item.matched) return t('accounts.history_empty');
   if (item.sync_status === 'pending') return t('accounts.history_pending_title');
   return t('accounts.history_title', {
-    requests: formatCompactNumber(item.total_requests),
-    tokens: formatCompactNumber(item.total_tokens),
+    requests: formatHistoryNumber(item.total_requests, locale),
+    tokens: formatHistoryNumber(item.total_tokens, locale),
     cost: formatMoney(item.total_cost),
-    rate: formatHistorySuccessRate(item.success_rate),
+    rate: formatHistorySuccessRate(item.success_rate, 2),
   });
 };
 
@@ -280,6 +281,67 @@ export const quotaStatusLabelKey = (status: AccountRow['quota']['status']) => {
   }
 };
 
+export type AccountQuotaLifecycleBarOverride = 'bad' | 'neutral' | null;
+
+export const getAccountQuotaLifecycleBarOverride = (
+  status: AccountRow['quota']['status']
+): AccountQuotaLifecycleBarOverride => {
+  switch (status) {
+    case 'error':
+      return 'bad';
+    case 'loading':
+    case 'disabled':
+    case 'unknown':
+      return 'neutral';
+    case 'ok':
+    case 'low':
+    case 'exhausted':
+    default:
+      return null;
+  }
+};
+
+const selectXaiQuotaListFallbackWindows = (
+  windows: AccountQuotaDisplayWindow[]
+): AccountQuotaDisplayWindow[] => {
+  const billing =
+    windows.find((window) => window.source === 'xai' && window.key === 'billing') ??
+    windows.find(
+      (window) =>
+        window.source === 'xai' && window.key === 'credits-period' && window.kind === 'billing'
+    );
+  const payg = windows.find((window) => window.source === 'xai' && window.key === 'pay-as-you-go');
+
+  return [billing, payg].filter((window): window is AccountQuotaDisplayWindow => Boolean(window));
+};
+
+export const selectAccountQuotaListWindows = (
+  row: AccountRow,
+  quotaWindows: AccountQuotaDisplayWindow[],
+  standardQuotaWindows: AccountQuotaDisplayWindow[]
+): AccountQuotaDisplayWindow[] => {
+  if (standardQuotaWindows.length > 0) return standardQuotaWindows;
+
+  switch (row.provider) {
+    case 'codex':
+      return [];
+    case 'xai':
+      return selectXaiQuotaListFallbackWindows(quotaWindows);
+    case 'antigravity':
+      return quotaWindows.slice(0, 2);
+    case 'kimi': {
+      const summary = quotaWindows.find(
+        (window) => window.source === 'kimi' && window.key === 'summary'
+      );
+      return summary ? [summary] : [];
+    }
+    case 'claude':
+      return [];
+    default:
+      return [];
+  }
+};
+
 const getAntigravityGroupRank = (label: string) => {
   const normalized = label.toLowerCase();
   if (normalized.includes('claude') || normalized.includes('gpt')) return 0;
@@ -292,6 +354,15 @@ const getAntigravityMatrixGroupDisplayLabel = (label: string) => {
   if (normalized.includes('claude') || normalized.includes('gpt')) return 'Claude';
   if (normalized.includes('gemini')) return 'Gemini';
   return label;
+};
+
+export const getAccountQuotaFallbackVisibleScopeLabel = (
+  row: AccountRow,
+  window: AccountQuotaDisplayWindow
+): string | null => {
+  if (row.provider !== ANTIGRAVITY_CONFIG.type || window.source !== 'antigravity') return null;
+  const groupLabel = window.groupLabel?.trim();
+  return groupLabel ? getAntigravityMatrixGroupDisplayLabel(groupLabel) : null;
 };
 
 export const buildAntigravityQuotaMatrix = (

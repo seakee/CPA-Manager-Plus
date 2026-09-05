@@ -34,6 +34,7 @@ export interface AccountQuotaWindowDefinition {
   providerWindowAliases?: string[];
   observationSource: QuotaObservationSource;
   observedAtMs: number | null;
+  quotaProgressObservedAtMs: number | null;
   boundaryAccuracy: AccountQuotaBoundaryAccuracy;
   cycleStartMs: number | null;
   cycleEndMs: number | null;
@@ -120,6 +121,7 @@ export const buildAccountQuotaWindowDefinitions = (
         providerWindowAliases: window.providerWindowAliases,
         observationSource: window.observationSource ?? 'api_query',
         observedAtMs: window.observedAtMs ?? null,
+        quotaProgressObservedAtMs: window.quotaProgressObservedAtMs ?? null,
         boundaryAccuracy,
         cycleStartMs: window.cycleStartMs ?? null,
         cycleEndMs: window.cycleEndMs ?? null,

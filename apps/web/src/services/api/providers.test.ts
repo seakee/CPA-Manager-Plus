@@ -1,4 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  MODEL_THINKING_LEVELS_CLEAR_MARKER,
+  MODEL_THINKING_LEVELS_EDIT_MARKER,
+  hasModelThinkingLevelsEditMarker,
+  markModelThinkingLevelsForClear,
+  markModelThinkingLevelsForEdit,
+} from '@/types';
 
 const { mocks } = vi.hoisted(() => ({
   mocks: {
@@ -14,7 +21,7 @@ vi.mock('./client', () => ({
   },
 }));
 
-import { providersApi } from './providers';
+import { providersApi, verifyClaudeFingerprintInRawConfig } from './providers';
 
 beforeEach(() => {
   mocks.get.mockReset();
@@ -390,7 +397,7 @@ describe('providersApi v1.16 provider fields', () => {
     expect(mocks.get).toHaveBeenNthCalledWith(2, '/config');
   });
 
-  it('serializes Claude disable-cooling, cch signing, cloak cache, and model metadata', async () => {
+  it('serializes Claude disable-cooling, rebuild flag, cloak cache, and model metadata without legacy cch writes', async () => {
     mocks.get.mockResolvedValue({
       'claude-api-key': [
         {
@@ -428,7 +435,6 @@ describe('providersApi v1.16 provider fields', () => {
         'raw-field': 'keep',
         'auth-index': 'auth-4',
         'disable-cooling': true,
-        'experimental-cch-signing': true,
         'rebuild-mid-system-message': true,
         cloak: {
           'raw-cloak-field': 'keep-cloak',
@@ -445,6 +451,184 @@ describe('providersApi v1.16 provider fields', () => {
             thinking: { budget_tokens: 1024 },
           },
         ],
+      },
+    ]);
+  });
+
+  it('serializes Claude fingerprint-profile without creating legacy cch fields', async () => {
+    mocks.get.mockResolvedValue({ 'claude-api-key': [] });
+    mocks.put.mockResolvedValue({});
+
+    await providersApi.createClaudeConfig({
+      apiKey: 'key',
+      fingerprintProfile: 'claude-code-cli',
+    });
+
+    expect(mocks.put).toHaveBeenLastCalledWith('/claude-api-key', [
+      { 'api-key': 'key', 'fingerprint-profile': 'claude-code-cli' },
+    ]);
+  });
+
+  it('omits fingerprint and legacy cch fields when a new Claude config uses the default profile', async () => {
+    mocks.get.mockResolvedValue({ 'claude-api-key': [] });
+    mocks.put.mockResolvedValue({});
+
+    await providersApi.createClaudeConfig({
+      apiKey: 'key',
+      fingerprintProfile: '',
+    });
+
+    expect(mocks.put).toHaveBeenLastCalledWith('/claude-api-key', [{ 'api-key': 'key' }]);
+  });
+
+  it('preserves raw legacy cch signing when the fingerprint is untouched', async () => {
+    mocks.get.mockResolvedValue({
+      'claude-api-key': [
+        {
+          'api-key': 'claude-key',
+          'base-url': 'https://api.anthropic.com',
+          'experimental-cch-signing': true,
+          priority: 1,
+        },
+      ],
+    });
+    mocks.put.mockResolvedValue({});
+
+    await providersApi.saveClaudeConfigs([
+      { apiKey: 'claude-key', baseUrl: 'https://api.anthropic.com', priority: 10 },
+    ]);
+
+    expect(mocks.put).toHaveBeenLastCalledWith('/claude-api-key', [
+      {
+        'api-key': 'claude-key',
+        'base-url': 'https://api.anthropic.com',
+        'experimental-cch-signing': true,
+        priority: 10,
+      },
+    ]);
+  });
+
+  it('keeps fingerprint and legacy cch when an update leaves the fingerprint untouched', async () => {
+    mocks.get.mockResolvedValue({
+      'claude-api-key': [
+        {
+          'api-key': 'claude-key',
+          'base-url': 'https://api.anthropic.com',
+          'fingerprint-profile': 'claude-code-cli',
+          'experimental-cch-signing': true,
+          priority: 1,
+        },
+      ],
+    });
+    mocks.put.mockResolvedValue({});
+
+    await providersApi.updateClaudeConfig(
+      {
+        apiKey: 'claude-key',
+        baseUrl: 'https://api.anthropic.com',
+        fingerprintProfile: 'claude-code-cli',
+        priority: 1,
+      },
+      {
+        apiKey: 'claude-key',
+        baseUrl: 'https://api.anthropic.com',
+        fingerprintProfile: 'claude-code-cli',
+        priority: 2,
+      }
+    );
+
+    expect(mocks.put).toHaveBeenLastCalledWith('/claude-api-key', [
+      {
+        'api-key': 'claude-key',
+        'base-url': 'https://api.anthropic.com',
+        'fingerprint-profile': 'claude-code-cli',
+        'experimental-cch-signing': true,
+        priority: 2,
+      },
+    ]);
+  });
+
+  it('preserves raw legacy cch signing when the user explicitly enables the fingerprint profile', async () => {
+    mocks.get.mockResolvedValue({
+      'claude-api-key': [
+        {
+          'api-key': 'claude-key',
+          'base-url': 'https://api.anthropic.com',
+          'experimental-cch-signing': true,
+        },
+      ],
+    });
+    mocks.put.mockResolvedValue({});
+
+    await providersApi.updateClaudeConfig(
+      { apiKey: 'claude-key', baseUrl: 'https://api.anthropic.com' },
+      {
+        apiKey: 'claude-key',
+        baseUrl: 'https://api.anthropic.com',
+        fingerprintProfile: 'claude-code-cli',
+      }
+    );
+
+    expect(mocks.put).toHaveBeenLastCalledWith('/claude-api-key', [
+      {
+        'api-key': 'claude-key',
+        'base-url': 'https://api.anthropic.com',
+        'fingerprint-profile': 'claude-code-cli',
+        'experimental-cch-signing': true,
+      },
+    ]);
+  });
+
+  it('removes fingerprint-profile and legacy cch when the user explicitly selects the default profile', async () => {
+    mocks.get.mockResolvedValue({
+      'claude-api-key': [
+        {
+          'api-key': 'claude-key',
+          'base-url': 'https://api.anthropic.com',
+          'fingerprint-profile': 'claude-code-cli',
+          'experimental-cch-signing': true,
+        },
+      ],
+    });
+    mocks.put.mockResolvedValue({});
+
+    await providersApi.updateClaudeConfig(
+      {
+        apiKey: 'claude-key',
+        baseUrl: 'https://api.anthropic.com',
+        fingerprintProfile: 'claude-code-cli',
+      },
+      { apiKey: 'claude-key', baseUrl: 'https://api.anthropic.com', fingerprintProfile: '' }
+    );
+
+    expect(mocks.put).toHaveBeenLastCalledWith('/claude-api-key', [
+      { 'api-key': 'claude-key', 'base-url': 'https://api.anthropic.com' },
+    ]);
+  });
+
+  it('preserves unknown future fingerprint-profile values on unrelated edits', async () => {
+    mocks.get.mockResolvedValue({
+      'claude-api-key': [
+        {
+          'api-key': 'claude-key',
+          'base-url': 'https://api.anthropic.com',
+          'fingerprint-profile': 'claude-desktop',
+          weight: 1,
+        },
+      ],
+    });
+    mocks.put.mockResolvedValue({});
+
+    await providersApi.saveClaudeConfigs([
+      { apiKey: 'claude-key', baseUrl: 'https://api.anthropic.com', weight: 2 },
+    ]);
+
+    expect(mocks.put).toHaveBeenLastCalledWith('/claude-api-key', [
+      {
+        'api-key': 'claude-key',
+        'base-url': 'https://api.anthropic.com',
+        'fingerprint-profile': 'claude-desktop',
+        weight: 2,
       },
     ]);
   });
@@ -707,6 +891,339 @@ describe('providersApi v1.16 provider fields', () => {
     ]);
   });
 
+  it('merges custom thinking levels without dropping raw-only thinking fields', async () => {
+    mocks.get.mockResolvedValueOnce({
+      'openai-compatibility': [
+        {
+          name: 'openai-compatible',
+          'base-url': 'https://api.example.com/v1',
+          'api-key-entries': [],
+          models: [
+            {
+              name: 'openai-model',
+              thinking: {
+                levels: ['high'],
+                'future-option': { enabled: true },
+                'future-value': 123,
+              },
+            },
+          ],
+        },
+      ],
+    });
+    mocks.put.mockResolvedValue({});
+
+    await providersApi.saveOpenAIProviders([
+      {
+        name: 'openai-compatible',
+        baseUrl: 'https://api.example.com/v1',
+        apiKeyEntries: [],
+        models: [
+          {
+            name: 'openai-model',
+            thinking: { levels: ['high', 'max'] },
+          },
+        ],
+      },
+    ]);
+
+    expect(mocks.put).toHaveBeenCalledWith('/openai-compatibility', [
+      {
+        name: 'openai-compatible',
+        'base-url': 'https://api.example.com/v1',
+        'api-key-entries': [],
+        models: [
+          {
+            name: 'openai-model',
+            thinking: {
+              levels: ['high', 'max'],
+              'future-option': { enabled: true },
+              'future-value': 123,
+            },
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('removes only thinking levels when leaving them unconfigured', async () => {
+    mocks.get.mockResolvedValueOnce({
+      'openai-compatibility': [
+        {
+          name: 'openai-compatible',
+          'base-url': 'https://api.example.com/v1',
+          'api-key-entries': [],
+          models: [
+            {
+              name: 'openai-model',
+              thinking: { levels: ['high'], 'future-option': { enabled: true } },
+            },
+          ],
+        },
+      ],
+    });
+    mocks.put.mockResolvedValue({});
+
+    await providersApi.saveOpenAIProviders([
+      {
+        name: 'openai-compatible',
+        baseUrl: 'https://api.example.com/v1',
+        apiKeyEntries: [],
+        models: [markModelThinkingLevelsForClear({ name: 'openai-model' })],
+      },
+    ]);
+
+    expect(mocks.put).toHaveBeenCalledWith('/openai-compatibility', [
+      {
+        name: 'openai-compatible',
+        'base-url': 'https://api.example.com/v1',
+        'api-key-entries': [],
+        models: [
+          {
+            name: 'openai-model',
+            thinking: { 'future-option': { enabled: true } },
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('removes only thinking levels when no future thinking fields remain', async () => {
+    mocks.get.mockResolvedValueOnce({
+      'openai-compatibility': [
+        {
+          name: 'openai-compatible',
+          'base-url': 'https://api.example.com/v1',
+          'api-key-entries': [],
+          models: [{ name: 'openai-model', thinking: { levels: ['high'] } }],
+        },
+      ],
+    });
+    mocks.put.mockResolvedValue({});
+
+    await providersApi.saveOpenAIProviders([
+      {
+        name: 'openai-compatible',
+        baseUrl: 'https://api.example.com/v1',
+        apiKeyEntries: [],
+        models: [markModelThinkingLevelsForClear({ name: 'openai-model' })],
+      },
+    ]);
+
+    expect(mocks.put).toHaveBeenCalledWith('/openai-compatibility', [
+      {
+        name: 'openai-compatible',
+        'base-url': 'https://api.example.com/v1',
+        'api-key-entries': [],
+        models: [{ name: 'openai-model' }],
+      },
+    ]);
+  });
+
+  it('preserves an explicitly empty thinking container during a normal save', async () => {
+    mocks.get.mockResolvedValueOnce({
+      'openai-compatibility': [
+        {
+          name: 'openai-compatible',
+          'base-url': 'https://api.example.com/v1',
+          'api-key-entries': [],
+          models: [{ name: 'openai-model', thinking: {} }],
+        },
+      ],
+    });
+    mocks.put.mockResolvedValue({});
+
+    await providersApi.saveOpenAIProviders([
+      {
+        name: 'openai-compatible',
+        baseUrl: 'https://api.example.com/v1',
+        apiKeyEntries: [],
+        models: [{ name: 'openai-model', thinking: {} }],
+      },
+    ]);
+
+    expect(mocks.put).toHaveBeenCalledWith('/openai-compatibility', [
+      {
+        name: 'openai-compatible',
+        'base-url': 'https://api.example.com/v1',
+        'api-key-entries': [],
+        models: [{ name: 'openai-model', thinking: {} }],
+      },
+    ]);
+  });
+
+  it('keeps an explicitly empty thinking container when levels are cleared', async () => {
+    mocks.get.mockResolvedValueOnce({
+      'openai-compatibility': [
+        {
+          name: 'openai-compatible',
+          'base-url': 'https://api.example.com/v1',
+          'api-key-entries': [],
+          models: [{ name: 'openai-model', thinking: {} }],
+        },
+      ],
+    });
+    mocks.put.mockResolvedValue({});
+
+    await providersApi.saveOpenAIProviders([
+      {
+        name: 'openai-compatible',
+        baseUrl: 'https://api.example.com/v1',
+        apiKeyEntries: [],
+        models: [markModelThinkingLevelsForClear({ name: 'openai-model', thinking: {} })],
+      },
+    ]);
+
+    expect(mocks.put).toHaveBeenCalledWith('/openai-compatibility', [
+      {
+        name: 'openai-compatible',
+        'base-url': 'https://api.example.com/v1',
+        'api-key-entries': [],
+        models: [{ name: 'openai-model', thinking: {} }],
+      },
+    ]);
+  });
+
+  it('preserves unknown thinking levels and future fields during a custom update', async () => {
+    mocks.get.mockResolvedValueOnce({
+      'openai-compatibility': [
+        {
+          name: 'openai-compatible',
+          'base-url': 'https://api.example.com/v1',
+          'api-key-entries': [],
+          models: [
+            {
+              name: 'openai-model',
+              thinking: {
+                levels: ['high', 'ultra'],
+                'future-option': { enabled: true },
+              },
+            },
+          ],
+        },
+      ],
+    });
+    mocks.put.mockResolvedValue({});
+
+    await providersApi.saveOpenAIProviders([
+      {
+        name: 'openai-compatible',
+        baseUrl: 'https://api.example.com/v1',
+        apiKeyEntries: [],
+        models: [{ name: 'openai-model', thinking: { levels: ['max', 'ultra'] } }],
+      },
+    ]);
+
+    expect(mocks.put).toHaveBeenCalledWith('/openai-compatibility', [
+      {
+        name: 'openai-compatible',
+        'base-url': 'https://api.example.com/v1',
+        'api-key-entries': [],
+        models: [
+          {
+            name: 'openai-model',
+            thinking: {
+              levels: ['max', 'ultra'],
+              'future-option': { enabled: true },
+            },
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('does not leak a clear marker or null when raw config loading fails', async () => {
+    mocks.get.mockRejectedValueOnce(new Error('forbidden'));
+    mocks.put.mockResolvedValue({});
+
+    await providersApi.saveOpenAIProviders([
+      {
+        name: 'openai-compatible',
+        baseUrl: 'https://api.example.com/v1',
+        apiKeyEntries: [],
+        models: [
+          markModelThinkingLevelsForClear({
+            name: 'openai-model',
+            thinking: { 'future-option': { enabled: true } },
+          }),
+        ],
+      },
+    ]);
+
+    expect(mocks.put).toHaveBeenCalledWith('/openai-compatibility', [
+      {
+        name: 'openai-compatible',
+        'base-url': 'https://api.example.com/v1',
+        'api-key-entries': [],
+        models: [{ name: 'openai-model', thinking: { 'future-option': { enabled: true } } }],
+      },
+    ]);
+    const written = mocks.put.mock.calls[0]?.[1];
+    expect(JSON.stringify(written)).not.toContain('null');
+    const writtenModel = (written as Array<{ models?: unknown[] }>)[0]?.models?.[0];
+    expect(writtenModel && Reflect.ownKeys(writtenModel)).not.toContain(
+      MODEL_THINKING_LEVELS_CLEAR_MARKER
+    );
+  });
+
+  it('serializes custom thinking levels on the OpenAI create path', async () => {
+    mocks.get.mockResolvedValueOnce({ 'openai-compatibility': [] });
+    mocks.put.mockResolvedValue({});
+
+    await providersApi.createOpenAIProvider({
+      name: 'new-openai',
+      baseUrl: 'https://api.example.com/v1',
+      apiKeyEntries: [],
+      models: [
+        markModelThinkingLevelsForEdit({
+          name: 'new-model',
+          thinking: { levels: ['high', 'max'], zero_allowed: true },
+        }),
+      ],
+    });
+
+    expect(mocks.put).toHaveBeenCalledWith('/openai-compatibility', [
+      {
+        name: 'new-openai',
+        'base-url': 'https://api.example.com/v1',
+        'api-key-entries': [],
+        models: [{ name: 'new-model', thinking: { levels: ['high', 'max'] } }],
+      },
+    ]);
+  });
+
+  it('does not write a legacy raw thinking null value back to CPA', async () => {
+    mocks.get.mockResolvedValueOnce({
+      'openai-compatibility': [
+        {
+          name: 'openai-compatible',
+          'base-url': 'https://api.example.com/v1',
+          'api-key-entries': [],
+          models: [{ name: 'openai-model', thinking: null }],
+        },
+      ],
+    });
+    mocks.put.mockResolvedValue({});
+
+    await providersApi.saveOpenAIProviders([
+      {
+        name: 'openai-compatible',
+        baseUrl: 'https://api.example.com/v1',
+        apiKeyEntries: [],
+        models: [{ name: 'openai-model' }],
+      },
+    ]);
+
+    expect(mocks.put).toHaveBeenCalledWith('/openai-compatibility', [
+      {
+        name: 'openai-compatible',
+        'base-url': 'https://api.example.com/v1',
+        'api-key-entries': [],
+        models: [{ name: 'openai-model' }],
+      },
+    ]);
+  });
+
   it('lets explicit false values override preserved raw booleans', async () => {
     mocks.get.mockResolvedValueOnce({
       'openai-compatibility': [
@@ -834,6 +1351,195 @@ describe('providersApi v1.16 provider fields', () => {
   });
 });
 
+it('preserves legacy thinking flags when levels are cleared', async () => {
+  mocks.get.mockResolvedValueOnce({
+    'openai-compatibility': [
+      {
+        name: 'openai-compatible',
+        'base-url': 'https://api.example.com/v1',
+        'api-key-entries': [],
+        models: [
+          {
+            name: 'openai-model',
+            thinking: {
+              levels: ['high'],
+              zero_allowed: true,
+              'dynamic-allowed': true,
+              future: { enabled: true },
+            },
+          },
+        ],
+      },
+    ],
+  });
+  mocks.put.mockResolvedValue({});
+
+  await providersApi.saveOpenAIProviders([
+    {
+      name: 'openai-compatible',
+      baseUrl: 'https://api.example.com/v1',
+      apiKeyEntries: [],
+      models: [
+        markModelThinkingLevelsForClear({
+          name: 'openai-model',
+          thinking: {
+            zero_allowed: true,
+            'dynamic-allowed': true,
+          },
+        }),
+      ],
+    },
+  ]);
+
+  expect(mocks.put).toHaveBeenCalledWith('/openai-compatibility', [
+    {
+      name: 'openai-compatible',
+      'base-url': 'https://api.example.com/v1',
+      'api-key-entries': [],
+      models: [
+        {
+          name: 'openai-model',
+          thinking: {
+            zero_allowed: true,
+            'dynamic-allowed': true,
+            future: { enabled: true },
+          },
+        },
+      ],
+    },
+  ]);
+});
+
+it('preserves untouched thinking level order during an unrelated save', async () => {
+  mocks.get.mockResolvedValueOnce({
+    'openai-compatibility': [
+      {
+        name: 'openai-compatible',
+        'base-url': 'https://api.example.com/v1',
+        'api-key-entries': [],
+        models: [{ name: 'openai-model', thinking: { levels: ['high', 'low'] } }],
+      },
+    ],
+  });
+  mocks.put.mockResolvedValue({});
+
+  await providersApi.saveOpenAIProviders([
+    {
+      name: 'openai-compatible',
+      baseUrl: 'https://api.example.com/v2',
+      apiKeyEntries: [],
+      models: [{ name: 'openai-model', thinking: { levels: ['high', 'low'] } }],
+    },
+  ]);
+
+  expect(mocks.put).toHaveBeenCalledWith('/openai-compatibility', [
+    {
+      name: 'openai-compatible',
+      'base-url': 'https://api.example.com/v2',
+      'api-key-entries': [],
+      models: [{ name: 'openai-model', thinking: { levels: ['high', 'low'] } }],
+    },
+  ]);
+});
+
+it('uses custom levels as the authority and removes legacy capability aliases', async () => {
+  mocks.get.mockResolvedValueOnce({
+    'openai-compatibility': [
+      {
+        name: 'openai-compatible',
+        'base-url': 'https://api.example.com/v1',
+        'api-key-entries': [],
+        models: [
+          {
+            name: 'openai-model',
+            thinking: {
+              levels: ['low'],
+              zero_allowed: true,
+              'zero-allowed': true,
+              zeroAllowed: true,
+              dynamic_allowed: true,
+              'dynamic-allowed': true,
+              dynamicAllowed: true,
+              future: { enabled: true },
+            },
+          },
+        ],
+      },
+    ],
+  });
+  mocks.put.mockResolvedValue({});
+
+  const model = markModelThinkingLevelsForEdit({
+    name: 'openai-model',
+    thinking: {
+      levels: ['high', 'none', 'auto'],
+    },
+  });
+  expect(hasModelThinkingLevelsEditMarker(model)).toBe(true);
+
+  await providersApi.saveOpenAIProviders([
+    {
+      name: 'openai-compatible',
+      baseUrl: 'https://api.example.com/v1',
+      apiKeyEntries: [],
+      models: [model],
+    },
+  ]);
+
+  expect(mocks.put).toHaveBeenCalledWith('/openai-compatibility', [
+    {
+      name: 'openai-compatible',
+      'base-url': 'https://api.example.com/v1',
+      'api-key-entries': [],
+      models: [
+        {
+          name: 'openai-model',
+          thinking: {
+            levels: ['high', 'none', 'auto'],
+            future: { enabled: true },
+          },
+        },
+      ],
+    },
+  ]);
+});
+
+it('strips edit markers and legacy aliases when raw config is unavailable', async () => {
+  mocks.get.mockRejectedValueOnce(new Error('forbidden'));
+  mocks.put.mockResolvedValue({});
+
+  const model = markModelThinkingLevelsForEdit({
+    name: 'openai-model',
+    thinking: {
+      levels: ['high', 'max'],
+      zeroAllowed: true,
+      'dynamic-allowed': true,
+    },
+  });
+  await providersApi.saveOpenAIProviders([
+    {
+      name: 'openai-compatible',
+      baseUrl: 'https://api.example.com/v1',
+      apiKeyEntries: [],
+      models: [model],
+    },
+  ]);
+
+  expect(mocks.put).toHaveBeenCalledWith('/openai-compatibility', [
+    {
+      name: 'openai-compatible',
+      'base-url': 'https://api.example.com/v1',
+      'api-key-entries': [],
+      models: [{ name: 'openai-model', thinking: { levels: ['high', 'max'] } }],
+    },
+  ]);
+  const writtenModel = (mocks.put.mock.calls[0]?.[1] as Array<{ models?: unknown[] }>)[0]
+    ?.models?.[0];
+  expect(writtenModel && Reflect.ownKeys(writtenModel)).not.toContain(
+    MODEL_THINKING_LEVELS_EDIT_MARKER
+  );
+});
+
 describe('providersApi optimistic provider mutations', () => {
   it('appends to the latest Gemini list without dropping concurrent records', async () => {
     mocks.get.mockResolvedValueOnce({
@@ -936,5 +1642,200 @@ describe('providersApi optimistic provider mutations', () => {
       },
       { name: 'concurrent', 'base-url': 'https://other.example/v1' },
     ]);
+  });
+
+  it('merges thinking fields on the OpenAI update path', async () => {
+    mocks.get.mockResolvedValueOnce({
+      'openai-compatibility': [
+        {
+          name: 'target',
+          'base-url': 'https://old.example/v1',
+          'api-key-entries': [],
+          models: [
+            {
+              name: 'target-model',
+              thinking: {
+                levels: ['high'],
+                'future-option': { enabled: true },
+                nested: { value: 1 },
+              },
+            },
+          ],
+        },
+      ],
+    });
+    mocks.put.mockResolvedValue({});
+
+    await providersApi.updateOpenAIProvider('target', 0, {
+      name: 'target',
+      baseUrl: 'https://new.example/v1',
+      apiKeyEntries: [],
+      models: [
+        {
+          name: 'target-model',
+          thinking: {
+            levels: ['high', 'max'],
+          },
+        },
+      ],
+    });
+
+    expect(mocks.put).toHaveBeenCalledWith('/openai-compatibility', [
+      {
+        name: 'target',
+        'base-url': 'https://new.example/v1',
+        'api-key-entries': [],
+        models: [
+          {
+            name: 'target-model',
+            thinking: {
+              levels: ['high', 'max'],
+              'future-option': { enabled: true },
+              nested: { value: 1 },
+            },
+          },
+        ],
+      },
+    ]);
+  });
+});
+
+describe('verifyClaudeFingerprintInRawConfig', () => {
+  const relayRecords = [
+    {
+      'api-key': 'same-key',
+      'base-url': 'https://relay.example',
+      'proxy-url': 'http://proxy-a',
+    },
+    {
+      'api-key': 'same-key',
+      'base-url': 'https://relay.example',
+      'proxy-url': 'http://proxy-b',
+      'fingerprint-profile': 'claude-code-cli',
+    },
+  ];
+
+  it('verifies a create against the appended record even with duplicate apiKey + baseUrl', () => {
+    expect(
+      verifyClaudeFingerprintInRawConfig(relayRecords, 'claude-code-cli', {
+        mode: 'create',
+        apiKey: 'same-key',
+        baseUrl: 'https://relay.example',
+      })
+    ).toBe('confirmed');
+  });
+
+  it('verifies a create against the appended record for header-only duplicates', () => {
+    const records = [
+      { 'base-url': 'https://relay.example', headers: { 'x-api-key': 'A' } },
+      {
+        'base-url': 'https://relay.example',
+        headers: { 'x-api-key': 'B' },
+        'fingerprint-profile': 'claude-code-cli',
+      },
+    ];
+    expect(
+      verifyClaudeFingerprintInRawConfig(records, 'claude-code-cli', {
+        mode: 'create',
+        baseUrl: 'https://relay.example',
+      })
+    ).toBe('confirmed');
+  });
+
+  it('reports not-found when the appended create record fails the identity sanity check', () => {
+    expect(
+      verifyClaudeFingerprintInRawConfig(
+        [{ 'api-key': 'other-key', 'base-url': 'https://relay.example' }],
+        'claude-code-cli',
+        { mode: 'create', apiKey: 'same-key', baseUrl: 'https://relay.example' }
+      )
+    ).toBe('not-found');
+  });
+
+  it('verifies an edit positionally and falls back to the new identity', () => {
+    expect(
+      verifyClaudeFingerprintInRawConfig(relayRecords, 'claude-code-cli', {
+        mode: 'edit',
+        index: 1,
+        apiKey: 'same-key',
+        baseUrl: 'https://relay.example',
+      })
+    ).toBe('confirmed');
+    expect(
+      verifyClaudeFingerprintInRawConfig(
+        [
+          ...relayRecords,
+          {
+            'api-key': 'moved-key',
+            'base-url': 'https://relay.example',
+            'fingerprint-profile': 'claude-code-cli',
+          },
+        ],
+        'claude-code-cli',
+        { mode: 'edit', index: 0, apiKey: 'moved-key', baseUrl: 'https://relay.example' }
+      )
+    ).toBe('confirmed');
+  });
+
+  it('only confirms an explicit Default when the raw field is really gone', () => {
+    expect(
+      verifyClaudeFingerprintInRawConfig(
+        [{ 'api-key': 'k', 'base-url': 'https://relay.example' }],
+        '',
+        { mode: 'edit', index: 0 }
+      )
+    ).toBe('confirmed');
+    expect(
+      verifyClaudeFingerprintInRawConfig(
+        [
+          {
+            'api-key': 'k',
+            'base-url': 'https://relay.example',
+            'fingerprint-profile': 'claude-desktop',
+          },
+        ],
+        '',
+        { mode: 'edit', index: 0 }
+      )
+    ).toBe('not-applied');
+  });
+
+  it('does not confirm a CLI request when the raw profile is missing or unknown', () => {
+    expect(
+      verifyClaudeFingerprintInRawConfig(
+        [{ 'api-key': 'k', 'base-url': 'https://relay.example' }],
+        'claude-code-cli',
+        { mode: 'edit', index: 0 }
+      )
+    ).toBe('not-applied');
+    expect(
+      verifyClaudeFingerprintInRawConfig(
+        [
+          {
+            'api-key': 'k',
+            'base-url': 'https://relay.example',
+            'fingerprint-profile': 'claude-desktop',
+          },
+        ],
+        'claude-code-cli',
+        { mode: 'edit', index: 0 }
+      )
+    ).toBe('not-applied');
+  });
+
+  it('accepts the canonical oauth-cli alias in the raw read-back', () => {
+    expect(
+      verifyClaudeFingerprintInRawConfig(
+        [
+          {
+            'api-key': 'k',
+            'base-url': 'https://relay.example',
+            'fingerprint-profile': 'oauth-cli',
+          },
+        ],
+        'claude-code-cli',
+        { mode: 'edit', index: 0 }
+      )
+    ).toBe('confirmed');
   });
 });

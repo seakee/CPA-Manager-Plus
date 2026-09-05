@@ -40,9 +40,12 @@ func TestAuthSnapshotResolverStreamsAuthFiles(t *testing.T) {
 
 	resolver := newAuthSnapshotResolver()
 	resolver.client = upstream.Client()
-	snapshots, err := resolver.fetch(context.Background(), upstream.URL, "management-key")
+	snapshots, ambiguous, err := resolver.fetch(context.Background(), upstream.URL, "management-key")
 	if err != nil {
 		t.Fatalf("fetch snapshots: %v", err)
+	}
+	if len(ambiguous) != 0 {
+		t.Fatalf("unexpected ambiguous auth indexes: %#v", ambiguous)
 	}
 	if snapshot := snapshots["auth-1"]; snapshot.Account != "alice@example.com" || snapshot.FileName != "alice.json" {
 		t.Fatalf("snapshot = %#v", snapshot)
@@ -294,6 +297,189 @@ func TestManagerEnrichesCodexAccountIDFromEffectiveProvider(t *testing.T) {
 	}
 	if events[0].AuthProjectIDSnapshot != "preserved-project" {
 		t.Fatalf("project snapshot overwritten = %q, want %q", events[0].AuthProjectIDSnapshot, "preserved-project")
+	}
+}
+
+func TestManagerReplacesWeakCodexAccountSnapshotWithMemberEmail(t *testing.T) {
+	db := newTestStore(t)
+	manager := NewManager(testConfig(t, "auto"), db)
+	manager.snapshotResolver.baseURL = "http://cpa.local:8317"
+	manager.snapshotResolver.managementKey = "management-key"
+	manager.snapshotResolver.expiresAt = time.Now().Add(time.Minute)
+	manager.snapshotResolver.snapshots = map[string]authSnapshot{
+		"auth-1": {
+			Account:   "alice@example.com",
+			AccountID: "workspace-1",
+			Provider:  "codex",
+		},
+	}
+
+	events := []usage.Event{{
+		Provider:              "codex",
+		AuthIndex:             "auth-1",
+		AuthProviderSnapshot:  "codex",
+		AuthAccountIDSnapshot: "workspace-1",
+		AccountSnapshot:       "Alice",
+		AuthProjectIDSnapshot: "project-1",
+	}}
+	manager.enrichAccountSnapshots(context.Background(), RuntimeConfig{
+		CPAUpstreamURL: "http://cpa.local:8317",
+		ManagementKey:  "management-key",
+	}, events)
+
+	if events[0].AccountSnapshot != "alice@example.com" {
+		t.Fatalf("account snapshot = %q, want strong Codex member email", events[0].AccountSnapshot)
+	}
+}
+
+func TestManagerDoesNotCombineConflictingCodexIdentityEvidence(t *testing.T) {
+	tests := []struct {
+		name              string
+		eventMember       string
+		eventWorkspace    string
+		snapshotMember    string
+		snapshotWorkspace string
+		wantMember        string
+		wantWorkspace     string
+		wantFile          string
+	}{
+		{
+			name:              "conflicting member",
+			eventMember:       "alice@example.com",
+			snapshotMember:    "bob@example.com",
+			snapshotWorkspace: "workspace-1",
+			wantMember:        "alice@example.com",
+		},
+		{
+			name:              "matching member",
+			eventMember:       "alice@example.com",
+			snapshotMember:    "alice@example.com",
+			snapshotWorkspace: "workspace-1",
+			wantMember:        "alice@example.com",
+			wantWorkspace:     "workspace-1",
+			wantFile:          "alice.json",
+		},
+		{
+			name:              "missing event member",
+			snapshotMember:    "alice@example.com",
+			snapshotWorkspace: "workspace-1",
+			wantMember:        "alice@example.com",
+			wantWorkspace:     "workspace-1",
+			wantFile:          "alice.json",
+		},
+		{
+			name:              "conflicting workspace",
+			eventMember:       "alice@example.com",
+			eventWorkspace:    "workspace-1",
+			snapshotMember:    "alice@example.com",
+			snapshotWorkspace: "workspace-2",
+			wantMember:        "alice@example.com",
+			wantWorkspace:     "workspace-1",
+		},
+		{
+			name:              "strong member plus workspace-only snapshot",
+			eventMember:       "alice@example.com",
+			snapshotWorkspace: "workspace-2",
+			wantMember:        "alice@example.com",
+		},
+		{
+			name:           "strong workspace plus member-only snapshot",
+			eventWorkspace: "workspace-1",
+			snapshotMember: "alice@example.com",
+			wantWorkspace:  "workspace-1",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db := newTestStore(t)
+			manager := NewManager(testConfig(t, "auto"), db)
+			manager.snapshotResolver.baseURL = "http://cpa.local:8317"
+			manager.snapshotResolver.managementKey = "management-key"
+			manager.snapshotResolver.expiresAt = time.Now().Add(time.Minute)
+			manager.snapshotResolver.snapshots = map[string]authSnapshot{
+				"auth-1": {
+					Account:   test.snapshotMember,
+					AccountID: test.snapshotWorkspace,
+					FileName:  "alice.json",
+					Provider:  "codex",
+				},
+			}
+
+			events := []usage.Event{{
+				Provider:              "codex",
+				AuthIndex:             "auth-1",
+				AuthProviderSnapshot:  "codex",
+				AuthAccountIDSnapshot: test.eventWorkspace,
+				AccountSnapshot:       test.eventMember,
+			}}
+			manager.enrichAccountSnapshots(context.Background(), RuntimeConfig{
+				CPAUpstreamURL: "http://cpa.local:8317",
+				ManagementKey:  "management-key",
+			}, events)
+
+			got := events[0]
+			if got.AccountSnapshot != test.wantMember || got.AuthAccountIDSnapshot != test.wantWorkspace || got.AuthFileSnapshot != test.wantFile {
+				t.Fatalf("enriched identity = member:%q workspace:%q file:%q, want member:%q workspace:%q file:%q", got.AccountSnapshot, got.AuthAccountIDSnapshot, got.AuthFileSnapshot, test.wantMember, test.wantWorkspace, test.wantFile)
+			}
+		})
+	}
+}
+
+func TestManagerDoesNotEnrichCodexEventFromMismatchedSnapshotProvider(t *testing.T) {
+	db := newTestStore(t)
+	manager := NewManager(testConfig(t, "auto"), db)
+	manager.snapshotResolver.baseURL = "http://cpa.local:8317"
+	manager.snapshotResolver.managementKey = "management-key"
+	manager.snapshotResolver.expiresAt = time.Now().Add(time.Minute)
+	manager.snapshotResolver.snapshots = map[string]authSnapshot{
+		"auth-1": {
+			Account:   "alice@example.com",
+			AccountID: "workspace-1",
+			Provider:  "codex",
+		},
+	}
+	events := []usage.Event{{
+		Provider:             "openai",
+		AuthIndex:            "auth-1",
+		AuthProviderSnapshot: "openai",
+	}}
+	manager.enrichAccountSnapshots(context.Background(), RuntimeConfig{
+		CPAUpstreamURL: "http://cpa.local:8317",
+		ManagementKey:  "management-key",
+	}, events)
+	if events[0].AccountSnapshot != "" || events[0].AuthAccountIDSnapshot != "" || events[0].AuthProviderSnapshot != "openai" {
+		t.Fatalf("mismatched Codex snapshot enriched non-Codex event: %#v", events[0])
+	}
+}
+
+func TestManagerDoesNotEnrichFromInvalidCodexSnapshotEvidence(t *testing.T) {
+	db := newTestStore(t)
+	manager := NewManager(testConfig(t, "auto"), db)
+	manager.snapshotResolver.baseURL = "http://cpa.local:8317"
+	manager.snapshotResolver.managementKey = "management-key"
+	manager.snapshotResolver.expiresAt = time.Now().Add(time.Minute)
+	manager.snapshotResolver.snapshots = map[string]authSnapshot{
+		"auth-1": {
+			Account:                "alice@example.com",
+			AccountID:              "workspace-1",
+			AccountSnapshotInvalid: true,
+			Provider:               "codex",
+			FileName:               "alice.json",
+		},
+	}
+	events := []usage.Event{{
+		Provider:              "codex",
+		AuthIndex:             "auth-1",
+		AuthProviderSnapshot:  "codex",
+		AuthAccountIDSnapshot: "workspace-1",
+	}}
+	manager.enrichAccountSnapshots(context.Background(), RuntimeConfig{
+		CPAUpstreamURL: "http://cpa.local:8317",
+		ManagementKey:  "management-key",
+	}, events)
+	if events[0].AccountSnapshot != "" || events[0].AuthAccountIDSnapshot != "workspace-1" || events[0].AuthFileSnapshot != "" {
+		t.Fatalf("invalid Codex auth snapshot was used for enrichment: %#v", events[0])
 	}
 }
 
@@ -677,7 +863,8 @@ func TestManagerSkipsUsageControlPayloadsAndRefreshesSnapshots(t *testing.T) {
 	if manager.snapshotResolver.baseURL != "" ||
 		manager.snapshotResolver.managementKey != "" ||
 		!manager.snapshotResolver.expiresAt.IsZero() ||
-		manager.snapshotResolver.snapshots != nil {
+		manager.snapshotResolver.snapshots != nil ||
+		manager.snapshotResolver.ambiguous != nil {
 		t.Fatalf("snapshot cache was not cleared: %#v", manager.snapshotResolver)
 	}
 }

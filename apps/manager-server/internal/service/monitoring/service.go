@@ -1431,9 +1431,13 @@ func (s *Service) accountHistory(ctx context.Context, req AccountHistoryRequest)
 		}
 		if latestAccountRequestTargetValid(account) {
 			latestRequestTargets = append(latestRequestTargets, store.LatestAccountRequestQuery{
-				RequestIndex:     index,
-				AuthFileSnapshot: accountHistoryAuthFileSnapshot(account),
-				AuthIndex:        account.AuthIndex,
+				RequestIndex:          index,
+				AuthFileSnapshot:      accountHistoryAuthFileSnapshot(account),
+				AuthIndex:             account.AuthIndex,
+				Provider:              account.AuthProviderSnapshot,
+				AuthAccountIDSnapshot: account.AuthAccountIDSnapshot,
+				AuthProjectIDSnapshot: account.AuthProjectIDSnapshot,
+				AccountSnapshot:       account.AccountSnapshot,
 			})
 		}
 	}
@@ -3640,7 +3644,7 @@ func accountHistoryTargetKey(target AccountHistoryTarget) (string, bool) {
 	if !AccountHistoryTargetHasRequiredProvider(target) {
 		return "", false
 	}
-	if key, valid := usageidentity.AccountKey(usageidentity.Fields{
+	fields := usageidentity.Fields{
 		AuthFileSnapshot:      target.AuthFileSnapshot,
 		AuthIndex:             target.AuthIndex,
 		AuthProviderSnapshot:  target.AuthProviderSnapshot,
@@ -3649,11 +3653,30 @@ func accountHistoryTargetKey(target AccountHistoryTarget) (string, bool) {
 		AccountSnapshot:       target.AccountSnapshot,
 		AuthLabelSnapshot:     target.AuthLabelSnapshot,
 		Source:                target.Source,
-	}); valid {
+	}
+	if key, valid := usageidentity.AccountKey(fields); valid {
 		return key, true
 	}
+	// The server owns the account-history identity. In particular, a Codex
+	// Workspace-only target must not smuggle the pre-member `codex-account` key
+	// back in through the request body when its canonical identity is invalid.
+	if strings.EqualFold(strings.TrimSpace(target.AuthProviderSnapshot), "codex") {
+		return "", false
+	}
 	key := strings.TrimSpace(target.AccountKey)
+	// A caller cannot establish the owner of the pre-member Codex bucket from
+	// an opaque account_key alone. Reject it even when the rest of the target
+	// omits provider/member fields; otherwise the old Workspace-level bucket
+	// remains an injectable cross-member alias.
+	if isLegacyCodexWorkspaceAccountKey(key) {
+		return "", false
+	}
 	return key, key != ""
+}
+
+func isLegacyCodexWorkspaceAccountKey(key string) bool {
+	key = strings.TrimSpace(key)
+	return strings.HasPrefix(key, "usage-account-history:") && strings.Contains(key, ":codex-account:")
 }
 
 func accountHistoryIdentityFields(target AccountHistoryTarget) usageidentity.Fields {

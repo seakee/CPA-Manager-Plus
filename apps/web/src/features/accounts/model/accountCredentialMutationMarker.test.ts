@@ -7,6 +7,7 @@ import {
   hasAccountCredentialMutationEvidence,
   listAccountCredentialMutationMarkers,
   recordAccountCredentialMutationMarker,
+  resolveAccountCredentialMutationFiles,
 } from './accountCredentialMutationMarker';
 
 const createMemoryStorage = (): Storage => {
@@ -46,7 +47,7 @@ describe('account credential mutation markers', () => {
       provider: 'xai',
       createdAtMs,
     });
-    const rawStorage = window.sessionStorage.getItem('cpa.accounts.credential-mutation-markers.v2');
+    const rawStorage = window.sessionStorage.getItem('cpa.accounts.credential-mutation-markers.v3');
     expect(rawStorage).toContain('v1:opaque-connection');
     expect(rawStorage).not.toContain('http://');
     expect(rawStorage).not.toContain('management-key');
@@ -109,6 +110,7 @@ describe('account credential mutation markers', () => {
     });
     expect(marker).not.toBeNull();
     expect(hasAccountCredentialMutationEvidence(marker!, existing)).toBe(false);
+    expect(resolveAccountCredentialMutationFiles(marker!, existing)).toEqual([]);
     expect(
       hasAccountCredentialMutationEvidence(marker!, [
         { ...existing[0], status_message: 'token_expired' },
@@ -125,6 +127,61 @@ describe('account credential mutation markers', () => {
       modified: 2_000,
     } as AuthFileItem;
     expect(hasAccountCredentialMutationEvidence(marker!, [...existing, created])).toBe(true);
+    expect(resolveAccountCredentialMutationFiles(marker!, [...existing, created])).toEqual([
+      created,
+    ]);
+  });
+
+  it('resolves new credentials by stable identity instead of file name', () => {
+    const baselineFiles = [
+      {
+        id: 'runtime-a',
+        name: 'shared.json',
+        provider: 'codex',
+        authIndex: 'auth-a',
+        account_id: 'account-a',
+      },
+      {
+        id: 'runtime-b',
+        name: 'codex-b.json',
+        provider: 'codex',
+        authIndex: 'auth-b',
+        account_id: 'account-b',
+      },
+    ] as AuthFileItem[];
+    const baseline = createAccountCredentialMutationBaseline(baselineFiles, 'codex');
+    const marker = recordAccountCredentialMutationMarker({
+      connectionFingerprint: 'connection-a',
+      provider: 'codex',
+      baseline,
+      requireObservedMutation: true,
+      createdAtMs: Date.now(),
+    });
+    const currentFiles = [
+      ...baselineFiles,
+      {
+        id: 'runtime-c',
+        name: 'shared.json',
+        provider: 'codex',
+        authIndex: 'auth-c',
+        account_id: 'account-c',
+      },
+    ] as AuthFileItem[];
+
+    expect(resolveAccountCredentialMutationFiles(marker!, currentFiles)).toEqual([currentFiles[2]]);
+    expect(hasAccountCredentialMutationEvidence(marker!, currentFiles)).toBe(true);
+    expect(
+      resolveAccountCredentialMutationFiles(marker!, [
+        ...baselineFiles,
+        {
+          id: 'runtime-claude',
+          name: 'claude.json',
+          provider: 'claude',
+          authIndex: 'auth-claude',
+          account_id: 'account-claude',
+        } as AuthFileItem,
+      ])
+    ).toEqual([]);
   });
 
   it('fails closed when an OAuth marker has no captured baseline', () => {
@@ -136,5 +193,30 @@ describe('account credential mutation markers', () => {
         createdAtMs: Date.now(),
       })
     ).toBeNull();
+  });
+
+  it('does not treat a missing Codex member snapshot as a new credential', () => {
+    const baselineFile = {
+      name: 'alice.json',
+      id: 'runtime-alice',
+      provider: 'codex',
+      account_id: 'workspace-1',
+      account: 'alice@example.com',
+      authIndex: 'auth-a',
+    } as AuthFileItem;
+    const baseline = createAccountCredentialMutationBaseline([baselineFile], 'codex');
+    const marker = recordAccountCredentialMutationMarker({
+      connectionFingerprint: 'connection-a',
+      provider: 'codex',
+      baseline,
+      requireObservedMutation: true,
+      createdAtMs: Date.now(),
+    });
+
+    expect(
+      hasAccountCredentialMutationEvidence(marker!, [
+        { ...baselineFile, account: undefined } as AuthFileItem,
+      ])
+    ).toBe(false);
   });
 });

@@ -562,6 +562,21 @@
   gap: $spacing-xs;
 }
 
+.openaiModelInputList {
+  gap: $spacing-md;
+  margin-top: $spacing-sm;
+}
+
+.openaiModelInputItem {
+  min-width: 0;
+  padding-block: $spacing-sm;
+  border-bottom: 1px solid var(--border-subtle);
+
+  &:last-of-type {
+    border-bottom: none;
+  }
+}
+
 .modelInputRow {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto;
@@ -886,10 +901,7 @@
 
 .keyTableHeader .keyTableColAction {
   z-index: 3;
-  background-image: linear-gradient(
-    var(--surface-subtle-strong),
-    var(--surface-subtle-strong)
-  );
+  background-image: linear-gradient(var(--surface-subtle-strong), var(--surface-subtle-strong));
 }
 
 .keyTableRow:hover .keyTableColAction {

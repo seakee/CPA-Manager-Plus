@@ -1,6 +1,9 @@
 import type { AuthFileItem } from '@/types';
 import { normalizeAuthIndex } from '@/utils/authIndex';
-import { resolveCodexChatgptAccountId } from '@/utils/quota/resolvers';
+import {
+  isCodexChatgptAccountIdInvalid,
+  resolveCodexChatgptAccountId,
+} from '@/utils/quota/resolvers';
 import { resolveAuthProvider } from '@/utils/quota/validators';
 
 export interface CredentialIdentity {
@@ -107,6 +110,9 @@ export const readAuthFileStatusAccountId = (file: AuthFileItem): string => {
   return '';
 };
 
+export const readAuthFileStatusAccountIdInvalid = (file: AuthFileItem): boolean =>
+  readAuthFileStatusProvider(file) === 'codex' && isCodexChatgptAccountIdInvalid(file);
+
 export const readAuthFileStatusAccountSnapshot = (file: AuthFileItem): string => {
   for (const value of [file.account, file.email, file.display_account, file.displayAccount]) {
     const normalized = normalizeIdentityValue(value);
@@ -115,6 +121,53 @@ export const readAuthFileStatusAccountSnapshot = (file: AuthFileItem): string =>
   return '';
 };
 
+// Keep this deliberately narrower than the display-account reader. The CPA
+// auth-files response may use account/label-like values for presentation, but
+// only a conservative email-shaped value is strong enough to identify a Codex
+// Workspace member.
+export const normalizeCodexMemberSnapshot = (value: unknown): string => {
+  if (typeof value !== 'string') return '';
+  // Match the backend/SQLite normalizer: only ASCII spaces are trimmed and
+  // only printable ASCII values are eligible, keeping runtime and rebuild
+  // identity keys byte-for-byte compatible.
+  const normalized = value.replace(/^ +| +$/g, '');
+  const at = normalized.indexOf('@');
+  if (
+    !normalized ||
+    at <= 0 ||
+    at === normalized.length - 1 ||
+    normalized.indexOf('@', at + 1) !== -1 ||
+    Array.from(normalized).some((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 0x20 || code >= 0x7f;
+    })
+  ) {
+    return '';
+  }
+  return normalized.toLowerCase();
+};
+
+const resolveCodexMemberSnapshot = (file: AuthFileItem): { member: string; invalid: boolean } => {
+  // accountSnapshot/account_snapshot/account/email can all carry member
+  // evidence in different response shapes. Weak display values are ignored,
+  // but every strong email-shaped value must agree; selecting an explicit
+  // field over another strong field would hide an identity conflict.
+  const members = [file.accountSnapshot, file.account_snapshot, file.account, file.email]
+    .map(normalizeCodexMemberSnapshot)
+    .filter(Boolean);
+  const member = members[0] ?? '';
+  if (members.some((candidate) => candidate !== member)) {
+    return { member: '', invalid: true };
+  }
+  return { member, invalid: false };
+};
+
+export const readAuthFileStatusCodexMember = (file: AuthFileItem): string =>
+  resolveCodexMemberSnapshot(file).member;
+
+export const readAuthFileStatusCodexMemberInvalid = (file: AuthFileItem): boolean =>
+  readAuthFileStatusProvider(file) === 'codex' && resolveCodexMemberSnapshot(file).invalid;
+
 export const readAuthFileStatusAuthLabelSnapshot = (file: AuthFileItem): string =>
   firstNonEmptyIdentityValue(file.label, file.note);
 
@@ -122,16 +175,25 @@ export const resolveCredentialIdentity = (
   target: AuthFileItem | CredentialIdentityTarget
 ): CredentialIdentity => {
   const record = target as CredentialIdentityTarget;
+  const provider = readAuthFileStatusProvider(record);
   const directAccountSnapshot = normalizeIdentityValue(record.accountSnapshot);
   const directAuthLabelSnapshot = normalizeIdentityValue(record.authLabelSnapshot);
+  const directAccountId = normalizeIdentityValue(record.accountId);
+  const accountSnapshot =
+    provider === 'codex'
+      ? readAuthFileStatusCodexMember(record)
+      : directAccountSnapshot || readAuthFileStatusAccountSnapshot(record);
   return {
     physicalName:
       normalizeIdentityValue(record.physicalName) || readAuthFileStatusPhysicalName(record),
     runtimeId: normalizeIdentityValue(record.runtimeId) || readAuthFileStatusRuntimeId(record),
     authIndex: normalizeAuthIndex(record.authIndex ?? record['auth_index'] ?? record['auth-index']),
-    provider: readAuthFileStatusProvider(record),
-    accountId: normalizeIdentityValue(record.accountId) || readAuthFileStatusAccountId(record),
-    accountSnapshot: directAccountSnapshot || readAuthFileStatusAccountSnapshot(record),
+    provider,
+    accountId:
+      provider === 'codex' && readAuthFileStatusAccountIdInvalid(record)
+        ? ''
+        : directAccountId || readAuthFileStatusAccountId(record),
+    accountSnapshot,
     authLabelSnapshot: directAuthLabelSnapshot || readAuthFileStatusAuthLabelSnapshot(record),
   };
 };
@@ -146,8 +208,8 @@ export const isCredentialIdentityVerified = (
       : '';
   return Boolean(
     identity.authIndex ||
-      identity.accountId ||
-      accountSnapshot ||
-      (identity.runtimeId && identity.runtimeId !== identity.physicalName)
+    identity.accountId ||
+    accountSnapshot ||
+    (identity.runtimeId && identity.runtimeId !== identity.physicalName)
   );
 };

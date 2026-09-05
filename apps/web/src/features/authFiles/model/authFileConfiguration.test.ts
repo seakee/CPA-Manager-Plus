@@ -140,6 +140,47 @@ describe('parseAuthFileConfigurationSource', () => {
       )
     ).toThrow(AUTH_FILE_CONFIGURATION_TARGET_NOT_FOUND);
   });
+
+  it('matches Codex shared records by member when the auth index is absent', () => {
+    const parsed = parseAuthFileConfigurationSource(
+      JSON.stringify([
+        { type: 'codex', account_id: 'workspace-1', account: 'alice@example.com' },
+        { type: 'codex', account_id: 'workspace-1', account: 'bob@example.com' },
+      ]),
+      makeFile({ authIndex: 'missing', account_id: 'workspace-1', account: 'bob@example.com' })
+    );
+
+    expect(parsed.recordIndex).toBe(1);
+    expect(parsed.record).toMatchObject({ account: 'bob@example.com' });
+  });
+
+  it('rejects a Codex record with conflicting explicit member evidence', () => {
+    expect(() =>
+      parseAuthFileConfigurationSource(
+        JSON.stringify({
+          type: 'codex',
+          account_id: 'workspace-1',
+          account_snapshot: 'bob@example.com',
+          account: 'alice@example.com',
+        }),
+        makeFile({ account_id: 'workspace-1', account: 'alice@example.com' })
+      )
+    ).toThrow(AUTH_FILE_CONFIGURATION_TARGET_NOT_FOUND);
+  });
+
+  it('rejects a Codex record with a conflicting auth index before member fallback', () => {
+    expect(() =>
+      parseAuthFileConfigurationSource(
+        JSON.stringify({
+          type: 'codex',
+          auth_index: 'auth-a',
+          account_id: 'workspace-1',
+          account: 'alice@example.com',
+        }),
+        makeFile({ authIndex: 'auth-b', account_id: 'workspace-1', account: 'alice@example.com' })
+      )
+    ).toThrow(AUTH_FILE_CONFIGURATION_TARGET_NOT_FOUND);
+  });
 });
 
 describe('buildAuthFileConfigurationPatch', () => {

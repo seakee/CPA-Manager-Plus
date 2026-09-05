@@ -183,10 +183,25 @@ export function AiProvidersPage() {
     loadConfigs();
   }, [loadConfigs]);
 
+  const leftCurrentLayerRef = useRef(false);
+
   useEffect(() => {
-    if (!isCurrentLayer) return;
+    if (!isCurrentLayer) {
+      // Editors invalidate the provider config cache before navigating back
+      // (clearCache also drops the full-config cache). When this list becomes
+      // the current layer again, reload so a committed save is never hidden
+      // behind stale data — even when its read-back failed.
+      leftCurrentLayerRef.current = true;
+      return;
+    }
+    if (leftCurrentLayerRef.current) {
+      leftCurrentLayerRef.current = false;
+      if (!isCacheValid()) {
+        void loadConfigs();
+      }
+    }
     void loadRecentRequests().catch(() => {});
-  }, [isCurrentLayer, loadRecentRequests]);
+  }, [isCurrentLayer, isCacheValid, loadConfigs, loadRecentRequests]);
 
   useEffect(() => {
     if (config?.geminiApiKeys) setGeminiKeys(config.geminiApiKeys);

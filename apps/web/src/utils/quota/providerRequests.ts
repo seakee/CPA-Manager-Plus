@@ -363,6 +363,10 @@ export const buildCodexQuotaWindows = (
       limitWindowSeconds: window.limitWindowSeconds,
       observationSource: source === 'response_header' ? 'response_header' : 'api_query',
       observedAtMs,
+      quotaProgressObservedAtMs:
+        typeof window.usedPercent === 'number' && Number.isFinite(window.usedPercent)
+          ? observedAtMs
+          : null,
       modelScope: window.modelScope,
       providerWindowAliases: window.providerWindowAliases,
     })

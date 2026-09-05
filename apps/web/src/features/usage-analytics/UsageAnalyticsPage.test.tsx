@@ -828,6 +828,43 @@ describe('UsageAnalyticsPage', () => {
     expect(text).not.toContain('usage_analytics.common_views_title');
   });
 
+  it('excludes fallback API key IDs from API key filter options', () => {
+    mocks.usageState = createUsageState({
+      filterOptions: {
+        models: ['gpt-4o'],
+        api_key_hashes: [' real-filter-hash ', 'unknown-client-api-key:filter-option'],
+        api_key_stats: [
+          {
+            id: 'unknown-client-api-key:stats-row',
+            api_key_hash: '',
+          },
+        ],
+        providers: ['openai'],
+        auth_files: ['auth.json'],
+      },
+      apiKeyRows: [
+        createRankRow({
+          id: 'real-row-hash',
+          label: 'Real API key',
+          apiKeyHash: 'real-row-hash',
+        }),
+        createRankRow({
+          id: 'unknown-client-api-key:rank-row',
+          label: 'Unknown client API key',
+          apiKeyHash: 'unknown-client-api-key:rank-row',
+        }),
+      ],
+    });
+    const renderer = renderPage();
+    const apiKeySelect = renderer.root
+      .findAllByType(Select)
+      .find((node) => node.props.ariaLabel === 'usage_analytics.filter_api_key');
+
+    const values = apiKeySelect?.props.options.map((option: { value: string }) => option.value);
+    expect(values).toEqual(expect.arrayContaining(['all', 'real-filter-hash', 'real-row-hash']));
+    expect(values).toHaveLength(3);
+  });
+
   it('does not render selected filter chips for active filters', () => {
     mocks.usageState = createUsageState({
       filters: {
@@ -878,6 +915,51 @@ describe('UsageAnalyticsPage', () => {
     expect(event.stopPropagation).toHaveBeenCalledTimes(1);
     expect(mocks.copyToClipboard).toHaveBeenCalledWith('sk-client-key-original');
     expect(usageState.setSelectedApiKeyHash).not.toHaveBeenCalled();
+  });
+
+  it('keeps fallback API key rows visible without filter or drilldown actions', () => {
+    const fallbackRow = createRankRow({
+      id: 'unknown-client-api-key:rank-row',
+      label: 'Unknown client API key',
+      apiKeyHash: 'unknown-client-api-key:rank-row',
+      model: undefined,
+      contexts: [],
+      models: [],
+    });
+    const usageState = createUsageState({
+      activeTab: 'apiKeys',
+      apiKeyRows: [fallbackRow],
+      selectedApiKey: fallbackRow,
+      keyAnomalies: [
+        {
+          id: fallbackRow.id,
+          label: fallbackRow.label,
+          severity: 'medium',
+          reasonKey: 'usage_analytics.anomaly_reason_error_rate',
+          triggeredAtMs: 1_780_000_000_000,
+          row: fallbackRow,
+        },
+      ],
+    });
+    mocks.usageState = usageState;
+    const renderer = renderPage();
+    const rankRow = renderer.root
+      .findAllByType('tr')
+      .find((node) => getText(node).includes('Unknown client API key'));
+    if (!rankRow) throw new Error('Fallback API key rank row not found');
+
+    act(() => {
+      rankRow.props.onClick();
+    });
+
+    expect(getText(renderer.root)).toContain('Unknown client API key');
+    expect(usageState.setSelectedApiKeyHash).not.toHaveBeenCalled();
+    expect(
+      renderer.root
+        .findAllByType('button')
+        .filter((node) => getText(node).includes('usage_analytics.view_request_details'))
+    ).toHaveLength(0);
+    expect(mocks.navigate).not.toHaveBeenCalled();
   });
 
   it('renders the API Key tab with key-dimension cards, unit-economics columns, and anomaly drilldown', () => {
@@ -950,11 +1032,13 @@ describe('UsageAnalyticsPage', () => {
       selectedApiKeyTrendSeries: [],
     });
     const renderer = renderPage();
-    const rankSection = renderer.root.findAllByType('section').find((section) =>
-      section
-        .findAllByType('h2')
-        .some((heading) => getText(heading) === 'usage_analytics.api_key_rank_title')
-    );
+    const rankSection = renderer.root
+      .findAllByType('section')
+      .find((section) =>
+        section
+          .findAllByType('h2')
+          .some((heading) => getText(heading) === 'usage_analytics.api_key_rank_title')
+      );
     if (!rankSection) throw new Error('API key rank section not found');
     const rankBody = rankSection.findAllByType('tbody')[0];
     if (!rankBody) throw new Error('API key rank body not found');
@@ -993,11 +1077,13 @@ describe('UsageAnalyticsPage', () => {
       selectedApiKeyTrendSeries: [],
     });
     const renderer = renderPage();
-    const rankSection = renderer.root.findAllByType('section').find((section) =>
-      section
-        .findAllByType('h2')
-        .some((heading) => getText(heading) === 'usage_analytics.api_key_rank_title')
-    );
+    const rankSection = renderer.root
+      .findAllByType('section')
+      .find((section) =>
+        section
+          .findAllByType('h2')
+          .some((heading) => getText(heading) === 'usage_analytics.api_key_rank_title')
+      );
     if (!rankSection) throw new Error('API key rank section not found');
     const rankBody = rankSection.findAllByType('tbody')[0];
     if (!rankBody) throw new Error('API key rank body not found');

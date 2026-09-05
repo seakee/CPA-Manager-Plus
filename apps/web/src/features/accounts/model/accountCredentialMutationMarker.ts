@@ -12,8 +12,8 @@ import {
   readAuthFileStatusRuntimeId,
 } from '@/utils/authFileCredentialIdentity';
 
-const STORAGE_KEY = 'cpa.accounts.credential-mutation-markers.v2';
-const STORAGE_VERSION = 2;
+const STORAGE_KEY = 'cpa.accounts.credential-mutation-markers.v3';
+const STORAGE_VERSION = 3;
 const MAX_MARKERS = 32;
 const MAX_MARKER_AGE_MS = 24 * 60 * 60 * 1000;
 
@@ -229,25 +229,29 @@ export const createAccountCredentialMutationBaseline = (
   };
 };
 
+export const resolveAccountCredentialMutationFiles = (
+  marker: AccountCredentialMutationMarker,
+  files: readonly AuthFileItem[]
+): AuthFileItem[] => {
+  if (!marker.requireObservedMutation) return [];
+  if (!marker.baseline || marker.baseline.provider !== marker.provider) return [];
+  const baselineIdentityKeys = new Set(
+    marker.baseline.credentials.map((credential) => credential.identityKey)
+  );
+  return files
+    .filter((file) => normalizeProvider(readAuthFileStatusProvider(file)) === marker.provider)
+    .filter((file) => !baselineIdentityKeys.has(buildCredentialIdentityKey(file)));
+};
+
 export const hasAccountCredentialMutationEvidence = (
   marker: AccountCredentialMutationMarker,
   files: readonly AuthFileItem[]
 ): boolean => {
   if (!marker.requireObservedMutation) return true;
-  if (!marker.baseline || marker.baseline.provider !== marker.provider) return false;
-  const baselineByIdentity = new Map(
-    marker.baseline.credentials.map((item) => [item.identityKey, item])
-  );
-  return files
-    .filter((file) => normalizeProvider(readAuthFileStatusProvider(file)) === marker.provider)
-    .map(buildCredentialEvidence)
-    .some((current) => {
-      const baseline = baselineByIdentity.get(current.identityKey);
-      // A provider-wide timestamp/status change is not attributable to the
-      // OAuth operation that created this generic marker. Only a newly
-      // observed credential identity is causal evidence without a target key.
-      return !baseline;
-    });
+  // A provider-wide timestamp/status change is not attributable to the OAuth
+  // operation that created this marker. Only a newly observed credential
+  // identity is causal evidence without a target key.
+  return resolveAccountCredentialMutationFiles(marker, files).length > 0;
 };
 
 export const listAccountCredentialMutationMarkers = (

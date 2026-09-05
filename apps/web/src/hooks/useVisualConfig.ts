@@ -391,6 +391,10 @@ type VisualConfigAction =
   | {
       type: 'set_values';
       values: Partial<VisualConfigValues>;
+    }
+  | {
+      type: 'commit_api_keys';
+      apiKeysText: string;
     };
 
 function createInitialVisualConfigState(): VisualConfigState {
@@ -696,6 +700,23 @@ function visualConfigReducer(
         ...state,
         visualValues: nextValues,
         dirtyFields: nextDirtyFields,
+      };
+    }
+    case 'commit_api_keys': {
+      const dirtyFields = new Set(state.dirtyFields);
+      dirtyFields.delete('apiKeysText');
+
+      return {
+        ...state,
+        visualValues: {
+          ...state.visualValues,
+          apiKeysText: action.apiKeysText,
+        },
+        baselineValues: {
+          ...state.baselineValues,
+          apiKeysText: action.apiKeysText,
+        },
+        dirtyFields,
       };
     }
     default:
@@ -1349,6 +1370,10 @@ export function useVisualConfig() {
     dispatch({ type: 'set_values', values: newValues });
   }, []);
 
+  const commitApiKeysText = useCallback((apiKeysText: string) => {
+    dispatch({ type: 'commit_api_keys', apiKeysText });
+  }, []);
+
   return {
     visualValues,
     visualDirty,
@@ -1358,5 +1383,6 @@ export function useVisualConfig() {
     loadVisualValuesFromYaml,
     applyVisualChangesToYaml,
     setVisualValues,
+    commitApiKeysText,
   };
 }

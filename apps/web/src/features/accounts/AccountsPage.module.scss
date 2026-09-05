@@ -629,10 +629,42 @@
   gap: 6px;
 }
 
+.accountCardDetailTrigger {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  appearance: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  cursor: pointer;
+  transition: background-color 0.14s ease;
+
+  &:hover {
+    background: color-mix(in srgb, var(--primary-color) 4%, transparent);
+  }
+
+  &:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--primary-color) 48%, transparent);
+    outline-offset: -2px;
+    border-radius: 6px;
+  }
+}
+
+.accountCardDetailTrigger.accountCardEvidence,
+.accountCardDetailTrigger.accountCardBusiness {
+  padding: 0 6px 0 10px;
+}
+
 .accountHistoryGrid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 76px));
-  justify-content: center;
+  width: 100%;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  justify-content: stretch;
   gap: 10px 8px;
   min-width: 0;
 }
@@ -642,14 +674,15 @@
   align-items: center;
   gap: 5px;
   min-width: 0;
-  max-width: 76px;
   color: var(--text-primary);
 
   strong {
+    flex: 1 1 auto;
     min-width: 0;
     overflow: hidden;
     font-size: 12.75px;
     font-weight: 800;
+    font-variant-numeric: tabular-nums;
     line-height: 1.15;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -975,10 +1008,6 @@
   min-width: 0;
 }
 
-.quotaWindowGridHasMore {
-  padding-right: 34px;
-}
-
 .quotaWindowCard {
   display: grid;
   align-content: center;
@@ -1024,6 +1053,34 @@
   line-height: 1;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.quotaWindowPrimaryLineScoped {
+  --quota-window-label-width: 84px;
+}
+
+.quotaWindowSummaryScoped {
+  justify-content: flex-start;
+  gap: 3px;
+  padding-inline: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quotaWindowSummaryScoped > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quotaWindowSummaryScoped > span:last-child {
+  flex-shrink: 0;
+}
+
+.quotaWindowScopeLabel {
+  flex-shrink: 1;
 }
 
 .quotaWindowPercent {
@@ -1098,6 +1155,7 @@
 }
 
 .quotaMatrixTrack {
+  display: block;
   height: 4px;
   min-width: 0;
 }
@@ -1110,29 +1168,40 @@
   text-align: right;
 }
 
-.quotaMoreButton {
-  position: absolute;
-  top: 50%;
-  right: 0;
-  transform: translateY(-50%);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 26px;
-  height: 22px;
-  padding: 0 7px;
-  border: 1px solid color-mix(in srgb, var(--accounts-border) 82%, transparent);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accounts-muted-surface) 82%, var(--accounts-surface));
-  color: var(--accounts-muted);
-  font-size: 11px;
-  font-weight: 800;
-  cursor: pointer;
+@media (min-width: #{$breakpoint-tablet + 1}) and (max-width: 1535px) {
+  .quotaWindowPrimaryLineScoped {
+    --quota-window-label-width: 64px;
+    gap: 6px;
+  }
 
-  &:hover {
-    border-color: color-mix(in srgb, var(--accounts-primary) 36%, var(--accounts-border));
-    background: color-mix(in srgb, var(--accounts-primary) 8%, var(--accounts-surface));
-    color: var(--accounts-primary);
+  .quotaWindowSummaryScoped {
+    gap: 2px;
+    padding-inline: 4px;
+  }
+
+  .quotaMatrixRow {
+    grid-template-columns: 28px minmax(0, 1fr);
+    gap: 4px;
+  }
+
+  .quotaMatrixWindowLabel {
+    width: 28px;
+    min-width: 28px;
+    font-size: 9px;
+  }
+
+  .quotaMatrixCells {
+    gap: 4px;
+  }
+
+  .quotaMatrixCell {
+    grid-template-columns: 35px minmax(0, 1fr) 26px;
+    gap: 3px;
+  }
+
+  .quotaMatrixGroupLabel,
+  .quotaMatrixPercent {
+    font-size: 9.5px;
   }
 }
 
@@ -5300,6 +5369,17 @@
     border-left: 0;
   }
 
+  .accountCardEvidence,
+  .accountCardBusiness {
+    padding-top: 8px;
+  }
+
+  .accountCardDetailTrigger.accountCardEvidence,
+  .accountCardDetailTrigger.accountCardBusiness {
+    padding-inline: 0;
+    padding-top: 8px;
+  }
+
   .accountCardHealth,
   .accountCardLatestRequest,
   .accountCardEvidence,
@@ -5422,6 +5502,11 @@
     border-top: 1px solid color-mix(in srgb, var(--accounts-border) 64%, transparent);
   }
 
+  .accountCardDetailTrigger.accountCardEvidence,
+  .accountCardDetailTrigger.accountCardBusiness {
+    padding-top: 8px;
+  }
+
   .accountCardLine,
   .quotaCellHeader {
     align-items: flex-start;
@@ -5505,18 +5590,6 @@
     > .badge {
       justify-self: stretch;
     }
-  }
-
-  .quotaWindowGridHasMore {
-    padding-right: 0;
-    padding-bottom: 28px;
-  }
-
-  .quotaMoreButton {
-    top: auto;
-    right: auto;
-    bottom: 0;
-    left: 0;
   }
 
   .batchActions {

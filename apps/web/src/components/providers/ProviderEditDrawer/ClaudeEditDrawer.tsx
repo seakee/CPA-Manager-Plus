@@ -10,11 +10,19 @@ import { Modal } from '@/components/ui/Modal';
 import { SelectionCheckbox } from '@/components/ui/SelectionCheckbox';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import { CoolingPolicySelect } from '@/components/providers/CoolingPolicySelect';
-import { apiCallApi, getApiCallErrorMessage, modelsApi, providersApi } from '@/services/api';
+import {
+  apiCallApi,
+  getApiCallErrorMessage,
+  modelsApi,
+  providersApi,
+  readBackClaudeConfigAfterSave,
+  verifyClaudeFingerprintInRawConfig,
+} from '@/services/api';
 import { useConfigStore, useNotificationStore } from '@/stores';
 import {
   coolingPolicyFromOverride,
   coolingPolicyToOverride,
+  type NotificationType,
   type ProviderKeyConfig,
 } from '@/types';
 import { buildHeaderObject, headersToEntries, normalizeHeaderEntries } from '@/utils/headers';
@@ -29,6 +37,7 @@ import {
   parseExcludedModels,
   buildClaudeMessagesEndpoint,
   parseTextList,
+  resolveClaudeFingerprintSelection,
 } from '@/components/providers/utils';
 import { modelsToEntries } from '@/components/ui/modelInputListUtils';
 import type { ProviderFormState } from '@/components/providers';
@@ -117,6 +126,8 @@ const buildClaudeBaseline = (form: ProviderFormState) => ({
   baseUrl: String(form.baseUrl ?? '').trim(),
   proxyUrl: String(form.proxyUrl ?? '').trim(),
   disableCooling: form.disableCooling,
+  fingerprintProfile:
+    typeof form.fingerprintProfile === 'string' ? form.fingerprintProfile : undefined,
   rebuildMidSystemMessage: Boolean(form.rebuildMidSystemMessage),
   headers: normalizeHeaderEntries(form.headers),
   models: normalizeClaudeModelEntries(form.modelEntries),
@@ -268,6 +279,7 @@ export function ClaudeEditDrawer({
       baseline.baseUrl !== String(form.baseUrl ?? '').trim() ||
       baseline.proxyUrl !== String(form.proxyUrl ?? '').trim() ||
       baseline.disableCooling !== form.disableCooling ||
+      baseline.fingerprintProfile !== form.fingerprintProfile ||
       baseline.rebuildMidSystemMessage !== Boolean(form.rebuildMidSystemMessage) ||
       !areKeyValueEntriesEqual(baseline.headers, normalizeHeaderEntries(form.headers)) ||
       !areModelEntriesEqual(baseline.models, normalizeClaudeModelEntries(form.modelEntries)) ||
@@ -337,6 +349,17 @@ export function ClaudeEditDrawer({
       { value: 'auto', label: t('ai_providers.claude_cloak_mode_auto') },
       { value: 'always', label: t('ai_providers.claude_cloak_mode_always') },
       { value: 'never', label: t('ai_providers.claude_cloak_mode_never') },
+    ],
+    [t]
+  );
+
+  const fingerprintOptions = useMemo(
+    () => [
+      { value: '', label: t('ai_providers.claude_request_fingerprint_default') },
+      {
+        value: 'claude-code-cli',
+        label: t('ai_providers.claude_request_fingerprint_claude_code_cli'),
+      },
     ],
     [t]
   );
@@ -606,27 +629,61 @@ export function ClaudeEditDrawer({
         cloak: form.cloak,
         authIndex: normalizeAuthIndex(form.authIndex) ?? undefined,
         disableCooling: coolingPolicyToOverride(form.disableCooling),
-        experimentalCchSigning: form.experimentalCchSigning,
+        fingerprintProfile: form.fingerprintProfile,
         rebuildMidSystemMessage: form.rebuildMidSystemMessage,
       };
+      const fingerprintExplicitlyChanged =
+        editIndex !== null
+          ? configs[editIndex].fingerprintProfile !== payload.fingerprintProfile
+          : payload.fingerprintProfile !== undefined;
+
       if (editIndex !== null) {
         await providersApi.updateClaudeConfig(configs[editIndex], payload);
       } else {
         await providersApi.createClaudeConfig(payload);
       }
-      const syncedList = await providersApi.getClaudeConfigs().catch(() =>
-        editIndex !== null
-          ? configs.map((item, index) => (index === editIndex ? payload : item))
-          : [...configs, payload]
-      );
-      updateConfigValue('claude-api-key', syncedList);
+
+      // The PUT succeeded: the config write is committed no matter what the
+      // fingerprint verification below concludes. Verification reads the
+      // persisted /config (never the runtime /claude-api-key endpoint, whose
+      // auth-index is derived and absent from /config) and only decides which
+      // notification the user gets.
+      let readBack: Awaited<ReturnType<typeof readBackClaudeConfigAfterSave>> | null = null;
+      try {
+        readBack = await readBackClaudeConfigAfterSave();
+      } catch {
+        readBack = null;
+      }
+      if (readBack) {
+        setConfigs(readBack.claudeApiKeys);
+        updateConfigValue('claude-api-key', readBack.claudeApiKeys);
+      }
       clearCache('claude-api-key');
-      showNotification(
+
+      let notificationKey =
         editIndex !== null
-          ? t('notification.claude_config_updated')
-          : t('notification.claude_config_added'),
-        'success'
-      );
+          ? 'notification.claude_config_updated'
+          : 'notification.claude_config_added';
+      let notificationType: NotificationType = 'success';
+      if (!readBack) {
+        if (fingerprintExplicitlyChanged) {
+          notificationKey = 'notification.claude_fingerprint_verify_unavailable';
+          notificationType = 'warning';
+        }
+      } else if (fingerprintExplicitlyChanged) {
+        const verification = verifyClaudeFingerprintInRawConfig(
+          readBack.rawRecords,
+          payload.fingerprintProfile,
+          editIndex !== null
+            ? { mode: 'edit', index: editIndex, apiKey: payload.apiKey, baseUrl: payload.baseUrl }
+            : { mode: 'create', apiKey: payload.apiKey, baseUrl: payload.baseUrl }
+        );
+        if (verification !== 'confirmed') {
+          notificationKey = 'notification.claude_fingerprint_not_applied';
+          notificationType = 'warning';
+        }
+      }
+      showNotification(t(notificationKey), notificationType);
       onSaved();
       onClose();
     } catch (err: unknown) {
@@ -743,6 +800,26 @@ export function ClaudeEditDrawer({
               <div className="hint">
                 {t('ai_providers.rebuild_mid_system_message_hint')}
               </div>
+            </div>
+
+            <div className="form-group">
+              <label>{t('ai_providers.claude_request_fingerprint_label')}</label>
+              <Select
+                value={form.fingerprintProfile ?? ''}
+                options={fingerprintOptions}
+                onChange={(value) =>
+                  setForm((prev) => ({
+                    ...prev,
+                    fingerprintProfile: resolveClaudeFingerprintSelection(
+                      prev.fingerprintProfile,
+                      value
+                    ),
+                  }))
+                }
+                ariaLabel={t('ai_providers.claude_request_fingerprint_label')}
+                disabled={saving || disabled || isTesting}
+              />
+              <div className="hint">{t('ai_providers.claude_request_fingerprint_hint')}</div>
             </div>
             <HeaderInputList
               entries={form.headers}

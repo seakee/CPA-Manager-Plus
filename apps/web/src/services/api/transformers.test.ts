@@ -70,3 +70,37 @@ describe('normalizeConfigResponse cooling overrides', () => {
     expect(config.geminiApiKeys?.[0]).not.toHaveProperty('disableCooling');
   });
 });
+
+describe('normalizeConfigResponse Claude fingerprint profile', () => {
+  it('normalizes fingerprint-profile into the typed config', () => {
+    const config = normalizeConfigResponse({
+      'claude-api-key': [{ 'api-key': 'claude-secret', 'fingerprint-profile': 'claude-code-cli' }],
+    });
+
+    expect(config.claudeApiKeys?.[0]?.fingerprintProfile).toBe('claude-code-cli');
+  });
+
+  it('canonicalizes the legacy oauth-cli alias to claude-code-cli', () => {
+    const config = normalizeConfigResponse({
+      'claude-api-key': [
+        { 'api-key': 'claude-secret', 'fingerprint-profile': '  OAuth-CLI  ' },
+        { 'api-key': 'claude-secret', fingerprintProfile: 'oauth-cli' },
+        { 'api-key': 'claude-secret', fingerprint_profile: 'claude-code-cli' },
+      ],
+    });
+
+    expect(config.claudeApiKeys?.map((key) => key.fingerprintProfile)).toEqual([
+      'claude-code-cli',
+      'claude-code-cli',
+      'claude-code-cli',
+    ]);
+  });
+
+  it('leaves unknown fingerprint profiles unset in the typed config', () => {
+    const config = normalizeConfigResponse({
+      'claude-api-key': [{ 'api-key': 'claude-secret', 'fingerprint-profile': 'claude-desktop' }],
+    });
+
+    expect(config.claudeApiKeys?.[0]).not.toHaveProperty('fingerprintProfile');
+  });
+});

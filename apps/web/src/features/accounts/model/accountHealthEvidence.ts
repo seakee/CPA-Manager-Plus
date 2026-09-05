@@ -1,4 +1,5 @@
 import type { MonitoringAccountLatestRequest } from '@/services/api';
+import { getAuthFileCredentialStatusCode } from '@/features/authFiles/model/credentialStatus';
 import type { AccountRow } from './accountRows';
 
 export type AccountRequestEvidenceKind =
@@ -157,15 +158,9 @@ const readStatusCodeFromText = (value: string): number | null => {
 };
 
 const getRawCredentialStatusCode = (row: AccountRow): number | null => {
-  for (const value of [
-    row.raw.errorStatus,
-    row.raw['error_status'],
-    row.raw.statusCode,
-    row.raw['status_code'],
-  ]) {
-    const statusCode = readStatusCode(value);
-    if (statusCode !== null) return statusCode;
-  }
+  if (row.rawCredentialStatusSuperseded) return null;
+  const statusCode = getAuthFileCredentialStatusCode(row.raw);
+  if (statusCode !== null) return statusCode;
   return readStatusCodeFromText(row.statusMessage);
 };
 
@@ -266,6 +261,7 @@ export const isAccountInspectionHealthyEvidence = (row: AccountRow): boolean => 
   const inspection = row.inspection;
   if (
     !inspection ||
+    (row.authenticationAtMs > 0 && inspection.createdAtMs < row.authenticationAtMs) ||
     isAccountInspectionAuthenticationFailure(row) ||
     isInspectionQuotaCredentialEvidence(row)
   ) {
@@ -770,6 +766,12 @@ export const isAccountRequestHealthEvidenceCurrent = (
   ) {
     return false;
   }
+  if (
+    (evidence.kind === 'success' || evidence.kind === 'credential_failure') &&
+    evidence.request.timestamp_ms <= row.authenticationAtMs
+  ) {
+    return false;
+  }
   return (
     evidence.request.timestamp_ms >
     Math.max(
@@ -788,6 +790,12 @@ export const isAccountRequestCredentialEvidenceCurrent = (
     !credentialEvidence ||
     hasUnknownConflictingCredentialState(row, credentialEvidence) ||
     hasUnknownConflictingInspectionCredentialState(row, credentialEvidence)
+  ) {
+    return false;
+  }
+  if (
+    (credentialEvidence.kind === 'success' || credentialEvidence.kind === 'credential_failure') &&
+    credentialEvidence.request.timestamp_ms <= row.authenticationAtMs
   ) {
     return false;
   }

@@ -1,0 +1,31 @@
+🚀 <b>8 月 31 日 · v1.12.7</b>
+
+✨ <b>更新内容</b>
+
+• Request Monitoring 新增“昨天”快捷范围，按本地完整日动态展示上一天数据。
+• Claude Provider 编辑器新增 Request Fingerprint，可选择 <code>claude-code-cli</code> 并核验 CPA 实际保存结果。
+• Codex 配额请求使用当前 <code>codex-tui</code> 客户端标识。
+• API Key 在弹窗确认后立即通过 CPA 保存，其他 Visual 配置草稿保持不变。
+• API Key 遇到不确定结果或格式异常的 CPA 列表时会安全停止后续操作，并要求刷新确认最新状态。
+• Manager-hosted 模式会在确认面板主机与 Alias 能力后才允许 API Key Replace/Delete，CPA panel 模式仍可直接管理。
+• Accounts 可用“待确认”状态筛选与顶部待确认指标一致的凭证。
+• Codex 5 小时配额在当前边界待确认时保留上一周期用量，并暂停当前周期范围和预测。
+• 凭证重新启用后会开启新的配额冷却周期，避免沿用旧恢复时间和 xAI 周期证据。
+• 固定和日历配额窗口在过期边界收到新证据时会稳定更新 reset 时间，避免回退到过期边界。
+• Usage Analytics 补齐无请求的小时或日期为 0，并保留无延迟样本为空。
+• Usage Analytics API Key 排名明确显示当前筛选总数、Top 8 限制和按成本排序。
+• Dashboard 更新提示可直接打开版本检查检测到的具体 Release 说明。
+• OpenAI-compatible API Key 编辑抽屉横向滚动时仍可直接使用 Test 和 Delete。
+• Manager Server 在 SQLite 临时目录或数据库文件不可写时给出可操作的启动诊断。
+
+⚠️ <b>注意事项</b>
+
+• 使用只读根文件系统部署 Manager Server 时，请为临时目录提供可写挂载，并确保 SQLite 数据库及 WAL/SHM 伴随文件可写；普通 Docker/Compose 部署无需额外配置。
+• Claude 的 Request Fingerprint 是可选配置；旧的 <code>experimental-cch-signing</code> 不会自动迁移，较旧 CPA 若未应用 <code>fingerprint-profile</code> 会在保存后提示。
+• API Key 确认后立即写入 CPA；未保存的 Source YAML 会阻止相关操作和切换 CPA 目标，结果不确定时请按提示刷新，Visual 草稿仍需单独保存。
+• 当前配额边界尚未确认时，面板会保留上一周期可靠用量，但不会显示当前周期范围或预测。
+• 本版本不新增数据库 schema、迁移或回填；<code>usage_events</code> 不会被改写，已过期边界在下一次观察或手动刷新时修正。
+
+🤝 <b>致谢</b>
+
+• <a href="https://github.com/nekopara-ai">@nekopara-ai</a> - 补充凭证重新启用后的配额冷却周期处理，避免新一轮事件沿用旧周期。

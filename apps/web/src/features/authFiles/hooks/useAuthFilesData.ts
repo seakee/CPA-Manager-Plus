@@ -46,6 +46,7 @@ import {
   getAuthFileStatusMutationLockKeys,
   readAuthFileStatusAccountId,
   readAuthFileStatusAccountSnapshot,
+  readAuthFileStatusCodexMember,
   readAuthFileStatusPhysicalName,
   readAuthFileStatusProvider,
   readAuthFileStatusRuntimeId,
@@ -142,7 +143,9 @@ const getAuthFileSourceMemberKey = (file: AuthFileItem): string =>
     readAuthFileStatusRuntimeId(file),
     readAuthFileStatusProvider(file),
     readAuthFileStatusAccountId(file),
-    readAuthFileStatusAccountSnapshot(file),
+    readAuthFileStatusProvider(file) === 'codex'
+      ? readAuthFileStatusCodexMember(file)
+      : readAuthFileStatusAccountSnapshot(file),
   ]);
 
 const getAuthFileSourceMembers = (files: AuthFileItem[], physicalName: string): AuthFileItem[] =>

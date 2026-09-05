@@ -38,6 +38,7 @@ import {
   computeRowCacheHitRate,
   getUsageCacheTokens,
   getUsageRangeBounds,
+  getSelectableApiKeyHash,
   maskApiKeyHash,
   resolveUsageGranularity,
   USAGE_ANALYTICS_DEFAULT_FILTERS,
@@ -73,6 +74,22 @@ const expectZeroTimelinePoint = (point: UsageTimelinePoint) => {
 };
 
 describe('usage analytics request model', () => {
+  it('keeps synthetic fallback groups out of API key filters', () => {
+    expect(getSelectableApiKeyHash('unknown-client-api-key:source:auth:provider')).toBe('');
+    expect(getSelectableApiKeyHash(' UNKNOWN-CLIENT-API-KEY:legacy ')).toBe('');
+    expect(getSelectableApiKeyHash('all')).toBe('');
+    expect(getSelectableApiKeyHash(' ABCDEF1234567890 ')).toBe('abcdef1234567890');
+    expect(
+      buildUsageAnalyticsFilters({ apiKeyHash: 'unknown-client-api-key:analytics-filter' })
+    ).not.toHaveProperty('api_key_hashes');
+    expect(
+      buildMonitoringDetailUrl(
+        { bucketMs: 1000, bucketEndMs: 2000 },
+        { apiKeyHash: 'unknown-client-api-key:monitoring-link' }
+      )
+    ).not.toContain('api_key_hash');
+  });
+
   it('resolves time ranges and default granularity rules', () => {
     expect(USAGE_ANALYTICS_DEFAULT_FILTERS.timeRange).toBe('24h');
     expect(getUsageRangeBounds({ timeRange: '24h', customRange: null }, NOW_MS)).toEqual({
@@ -1027,11 +1044,13 @@ describe('usage analytics adapters', () => {
       createRow('key-c', 50, 20),
     ]);
 
-    expect(rows.map(({ apiKeyHash, requestCount, estimatedCost }) => ({
-      apiKeyHash,
-      requestCount,
-      estimatedCost,
-    }))).toEqual([
+    expect(
+      rows.map(({ apiKeyHash, requestCount, estimatedCost }) => ({
+        apiKeyHash,
+        requestCount,
+        estimatedCost,
+      }))
+    ).toEqual([
       { apiKeyHash: 'key-b', requestCount: 100, estimatedCost: 20 },
       { apiKeyHash: 'key-c', requestCount: 50, estimatedCost: 20 },
       { apiKeyHash: 'key-a', requestCount: 1000, estimatedCost: 1 },

@@ -2282,17 +2282,16 @@ func TestAccountHistoryAutoMergesSafeCodexLegacyFileIndex(t *testing.T) {
 	db := newMonitoringTestStore(t)
 	ctx := context.Background()
 	baseMS := int64(1_700_006_000_000)
-	stable := monitoringEvent("history-codex-stable", baseMS+1_000, "gpt-codex", "auth-a", "codex-a.json", false, 10, 2, 0, 0, 12, nil)
+	legacy := monitoringEvent("history-codex-legacy", baseMS+1_000, "gpt-codex", "auth-a", "codex-a.json", false, 10, 2, 0, 0, 12, nil)
+	legacy.AuthFileSnapshot = "codex-a.json"
+	legacy.AuthProviderSnapshot = "codex"
+	legacy.AccountSnapshot = "same@example.com"
+	stable := monitoringEvent("history-codex-stable", baseMS+2_000, "gpt-codex", "auth-a", "codex-a.json", false, 20, 3, 0, 0, 23, nil)
 	stable.AuthFileSnapshot = "codex-a.json"
 	stable.AuthProviderSnapshot = "codex"
 	stable.AuthAccountIDSnapshot = "account-a"
 	stable.AccountSnapshot = "same@example.com"
-	legacy := monitoringEvent("history-codex-legacy", baseMS+2_000, "gpt-codex", "auth-a", "codex-a.json", false, 20, 3, 0, 0, 23, nil)
-	legacy.AuthFileSnapshot = "codex-a.json"
-	legacy.AuthProviderSnapshot = "codex"
-	legacy.AuthAccountIDSnapshot = ""
-	legacy.AccountSnapshot = "same@example.com"
-	if _, err := db.InsertEvents(ctx, []usage.Event{stable, legacy}); err != nil {
+	if _, err := db.InsertEvents(ctx, []usage.Event{legacy, stable}); err != nil {
 		t.Fatalf("insert Codex history events: %v", err)
 	}
 
@@ -2340,13 +2339,17 @@ func TestAccountHistoryRejectsConflictingCodexLegacyFileIndex(t *testing.T) {
 	stable.AuthFileSnapshot = "codex-a.json"
 	stable.AuthProviderSnapshot = "codex"
 	stable.AuthAccountIDSnapshot = "account-a"
+	stable.AccountSnapshot = "same@example.com"
 	legacy := monitoringEvent("history-codex-conflict-legacy", baseMS+2_000, "gpt-codex", "auth-a", "codex-a.json", false, 20, 3, 0, 0, 23, nil)
 	legacy.AuthFileSnapshot = "codex-a.json"
 	legacy.AuthProviderSnapshot = "codex"
+	legacy.AuthProjectIDSnapshot = usageidentity.CodexAccountIDSnapshot("account-a")
+	legacy.AccountSnapshot = "same@example.com"
 	conflicting := monitoringEvent("history-codex-conflict-other", baseMS+3_000, "gpt-codex", "auth-a", "codex-a.json", false, 90, 9, 0, 0, 99, nil)
 	conflicting.AuthFileSnapshot = "codex-a.json"
 	conflicting.AuthProviderSnapshot = "codex"
 	conflicting.AuthAccountIDSnapshot = "account-b"
+	conflicting.AccountSnapshot = "same@example.com"
 	if _, err := db.InsertEvents(ctx, []usage.Event{stable, legacy, conflicting}); err != nil {
 		t.Fatalf("insert conflicting Codex history events: %v", err)
 	}
@@ -2472,6 +2475,49 @@ func TestAccountHistoryEmptyTargetDoesNotMatchAnonymousBucket(t *testing.T) {
 	}
 }
 
+func TestAccountHistoryTargetRejectsInjectedCodexWorkspaceKeyWithoutStrongMember(t *testing.T) {
+	legacyWorkspaceKey := "usage-account-history:3:codex-account:636F646578:776F726B73706163652D31"
+	for _, test := range []struct {
+		name            string
+		accountSnapshot string
+	}{
+		{name: "missing member", accountSnapshot: ""},
+		{name: "display member", accountSnapshot: "Alice"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			key, valid := accountHistoryTargetKey(AccountHistoryTarget{
+				RowKey:                "injected-codex-workspace",
+				AccountKey:            legacyWorkspaceKey,
+				AccountSnapshot:       test.accountSnapshot,
+				AuthFileSnapshot:      "alice.json",
+				AuthProviderSnapshot:  "codex",
+				AuthAccountIDSnapshot: "workspace-1",
+				AuthIndex:             "auth-1",
+			})
+			want, wantValid := usageidentity.LegacyAccountKey(usageidentity.Fields{
+				AuthFileSnapshot:      "alice.json",
+				AuthIndex:             "auth-1",
+				AuthProviderSnapshot:  "codex",
+				AuthAccountIDSnapshot: "workspace-1",
+				AccountSnapshot:       test.accountSnapshot,
+			})
+			if !valid || !wantValid || key != want || key == legacyWorkspaceKey {
+				t.Fatalf("injected legacy Codex workspace key resolved as %q, %v; want credential key %q", key, valid, want)
+			}
+		})
+	}
+}
+
+func TestAccountHistoryTargetRejectsOpaqueCodexWorkspaceKeyWithoutIdentityFields(t *testing.T) {
+	key, valid := accountHistoryTargetKey(AccountHistoryTarget{
+		RowKey:     "opaque-codex-workspace",
+		AccountKey: "usage-account-history:3:codex-account:636F646578:776F726B73706163652D31",
+	})
+	if valid || key != "" {
+		t.Fatalf("opaque Codex workspace key resolved as %q, %v; want empty invalid target", key, valid)
+	}
+}
+
 func TestAccountHistoryRejectsFileTargetWithoutProvider(t *testing.T) {
 	db := newMonitoringTestStore(t)
 	_, err := New(db).AccountHistory(context.Background(), AccountHistoryRequest{
@@ -2521,6 +2567,11 @@ func TestAccountHistoryIncludesLatestCredentialRequestWithoutExposingRawFailureD
 		historical.AccountSnapshot = "alice@example.com"
 		events = append(events, historical)
 	}
+	for index := range events {
+		events[index].Provider = "codex"
+		events[index].AuthProviderSnapshot = "codex"
+		events[index].AuthAccountIDSnapshot = "workspace-1"
+	}
 
 	if _, err := db.InsertEvents(ctx, events); err != nil {
 		t.Fatalf("insert events: %v", err)
@@ -2528,11 +2579,12 @@ func TestAccountHistoryIncludesLatestCredentialRequestWithoutExposingRawFailureD
 
 	resp, err := New(db).AccountHistory(ctx, AccountHistoryRequest{
 		Accounts: []AccountHistoryTarget{{
-			RowKey:               "row-credential-a",
-			AccountSnapshot:      "alice@example.com",
-			AuthFileSnapshot:     "credential-a.json",
-			AuthProviderSnapshot: "codex",
-			AuthIndex:            "auth-1",
+			RowKey:                "row-credential-a",
+			AccountSnapshot:       "alice@example.com",
+			AuthFileSnapshot:      "credential-a.json",
+			AuthProviderSnapshot:  "codex",
+			AuthAccountIDSnapshot: "workspace-1",
+			AuthIndex:             "auth-1",
 		}},
 	})
 	if err != nil {

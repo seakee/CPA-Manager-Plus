@@ -6,6 +6,7 @@ import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
 import { HeaderInputList } from '@/components/ui/HeaderInputList';
 import { ModelInputList } from '@/components/ui/ModelInputList';
+import { InfoTooltip } from '@/components/ui/InfoTooltip';
 import { Modal } from '@/components/ui/Modal';
 import { SelectionCheckbox } from '@/components/ui/SelectionCheckbox';
 import { OpenAIKeyTestStatusIndicator } from '@/components/providers';
@@ -15,14 +16,24 @@ import { useConfigStore, useNotificationStore } from '@/stores';
 import {
   coolingPolicyFromOverride,
   coolingPolicyToOverride,
+  toCommittedModelThinkingSnapshot,
   type ApiKeyEntry,
   type OpenAIProviderConfig,
 } from '@/types';
 import { buildHeaderObject, headersToEntries, normalizeHeaderEntries } from '@/utils/headers';
 import { normalizeAuthIndex } from '@/utils/authIndex';
 import { areKeyValueEntriesEqual, areModelEntriesEqual } from '@/utils/compare';
-import { entriesToModels, modelsToEntries } from '@/components/ui/modelInputListUtils';
-import { buildApiKeyEntry, buildOpenAIChatCompletionsEndpoint } from '@/components/providers/utils';
+import {
+  cloneModelEntry,
+  entriesToModels,
+  hasInvalidThinkingLevels,
+  modelsToEntries,
+} from '@/components/ui/modelInputListUtils';
+import {
+  buildApiKeyEntry,
+  buildOpenAIChatCompletionsEndpoint,
+  toCommittedOpenAIProviderSnapshot,
+} from '@/components/providers/utils';
 import {
   appendIdleKeyTestStatus,
   removeKeyTestStatusAtIndex,
@@ -69,7 +80,7 @@ const normalizeModelEntries = (entries: OpenAIFormState['modelEntries']) =>
     let alias = String(entry?.alias ?? '').trim();
     if (name && (alias === '' || alias === name)) alias = '';
     if (!name && !alias) return acc;
-    acc.push({ ...entry, name, alias });
+    acc.push(cloneModelEntry(entry, { name, alias }));
     return acc;
   }, []);
 
@@ -115,7 +126,7 @@ const buildOpenAIBaseline = (form: OpenAIFormState) => ({
   disableCooling: form.disableCooling,
   headers: normalizeHeaderEntries(form.headers),
   apiKeyEntries: normalizeApiKeyEntries(form.apiKeyEntries),
-  models: normalizeModelEntries(form.modelEntries),
+  models: normalizeModelEntries(form.modelEntries).map(toCommittedModelThinkingSnapshot),
 });
 
 const areNormalizedApiKeyEntriesEqual = (
@@ -285,7 +296,13 @@ export function OpenAIEditDrawer({
     getCredentialWeightError(entry.weight)
   );
   const canSave =
-    !disabled && !loading && !saving && !invalidIndex && !isTestingKeys && !hasInvalidWeight;
+    !disabled &&
+    !loading &&
+    !saving &&
+    !invalidIndex &&
+    !isTestingKeys &&
+    !hasInvalidWeight &&
+    !hasInvalidThinkingLevels(form.modelEntries);
 
   const isDirty = useMemo(() => {
     const normalizedPriority =
@@ -364,11 +381,7 @@ export function OpenAIEditDrawer({
 
   const configuredModelNames = useMemo(
     () =>
-      new Set(
-        form.modelEntries
-          .map((entry) => entry.name.trim().toLowerCase())
-          .filter(Boolean)
-      ),
+      new Set(form.modelEntries.map((entry) => entry.name.trim().toLowerCase()).filter(Boolean)),
     [form.modelEntries]
   );
 
@@ -392,15 +405,17 @@ export function OpenAIEditDrawer({
       if (!selectedModels.length) return;
       let addedCount = 0;
       setForm((prev) => {
-        const mergedMap = new Map<string, { name: string; alias: string }>();
+        const mergedMap = new Map<string, OpenAIFormState['modelEntries'][number]>();
         prev.modelEntries.forEach((entry) => {
           const name = entry.name.trim();
           if (!name) return;
-          mergedMap.set(name.toLowerCase(), {
-            ...entry,
-            name,
-            alias: entry.alias?.trim() || '',
-          });
+          mergedMap.set(
+            name.toLowerCase(),
+            cloneModelEntry(entry, {
+              name,
+              alias: entry.alias?.trim() || '',
+            })
+          );
         });
         selectedModels.forEach((model) => {
           const name = model.name.trim();
@@ -425,7 +440,9 @@ export function OpenAIEditDrawer({
   );
 
   useEffect(() => {
-    const availableNames = new Set(discoveredModels.map((model) => String(model.name ?? '').trim()));
+    const availableNames = new Set(
+      discoveredModels.map((model) => String(model.name ?? '').trim())
+    );
     setModelDiscoverySelected((prev) => {
       let changed = false;
       const next = new Set<string>();
@@ -672,10 +689,11 @@ export function OpenAIEditDrawer({
       if (resolvedTestModel) payload.testModel = resolvedTestModel;
       const models = entriesToModels(form.modelEntries);
       if (models.length) payload.models = models;
+      const committedPayload = toCommittedOpenAIProviderSnapshot(payload);
       const nextList =
         editIndex !== null
-          ? providers.map((item, idx) => (idx === editIndex ? payload : item))
-          : [...providers, payload];
+          ? providers.map((item, idx) => (idx === editIndex ? committedPayload : item))
+          : [...providers, committedPayload];
       if (editIndex !== null) {
         await providersApi.updateOpenAIProvider(providers[editIndex].name, editIndex, payload);
       } else {
@@ -683,12 +701,18 @@ export function OpenAIEditDrawer({
       }
       let syncedProviders = nextList;
       try {
-        syncedProviders = await providersApi.getOpenAIProviders();
+        syncedProviders = (await providersApi.getOpenAIProviders()).map(
+          toCommittedOpenAIProviderSnapshot
+        );
       } catch {
         /* fallback */
       }
       setProviders(syncedProviders);
       updateConfigValue('openai-compatibility', syncedProviders);
+      setForm({
+        ...form,
+        modelEntries: form.modelEntries.map(toCommittedModelThinkingSnapshot),
+      });
       showNotification(
         editIndex !== null
           ? t('notification.openai_provider_updated')
@@ -779,7 +803,6 @@ export function OpenAIEditDrawer({
             <div className={styles.keyTableColProxy}>{t('common.proxy_url')}</div>
             <div className={styles.keyTableColAction}>{t('common.action')}</div>
           </div>
-          <div className="hint">{t('ai_providers.model_discovery_proxy_version_hint')}</div>
           {list.map((entry, index) => {
             const keyStatus = keyTestStatuses[index]?.status ?? 'idle';
             const weightError = getCredentialWeightError(entry.weight);
@@ -992,6 +1015,10 @@ export function OpenAIEditDrawer({
                   >
                     {t('ai_providers.openai_models_fetch_button')}
                   </Button>
+                  <InfoTooltip
+                    content={t('ai_providers.openai_model_discovery_proxy_version_hint')}
+                    ariaLabel={t('ai_providers.model_discovery_proxy_version_info_label')}
+                  />
                 </div>
               </div>
               <div className={styles.sectionHint}>{t('ai_providers.openai_models_hint')}</div>
@@ -1002,17 +1029,31 @@ export function OpenAIEditDrawer({
                 aliasPlaceholder={t('common.model_alias_placeholder')}
                 disabled={saving || disabled || isTestingKeys}
                 hideAddButton
-                className={styles.modelInputList}
+                className={styles.openaiModelInputList}
                 rowClassName={styles.modelInputRow}
                 inputClassName={styles.modelInputField}
+                itemClassName={styles.openaiModelInputItem}
                 removeButtonClassName={styles.modelRowRemoveButton}
                 removeButtonTitle={t('common.delete')}
                 removeButtonAriaLabel={t('common.delete')}
                 showForceMapping
                 showModalities
+                showThinkingLevels
                 forceMappingLabel={t('ai_providers.force_mapping_label')}
                 inputModalitiesPlaceholder={t('ai_providers.input_modalities_placeholder')}
                 outputModalitiesPlaceholder={t('ai_providers.output_modalities_placeholder')}
+                modelFallbackLabel={t('ai_providers.thinking_model_fallback_label')}
+                thinkingLabel={t('ai_providers.thinking_levels_label')}
+                thinkingTooltip={t('ai_providers.thinking_levels_tooltip')}
+                thinkingTooltipAriaLabel={t('ai_providers.thinking_levels_tooltip_aria_label')}
+                thinkingDefaultLabel={t('ai_providers.thinking_default_label')}
+                thinkingCustomLabel={t('ai_providers.thinking_custom_label')}
+                thinkingAllowedLevelsLabel={t('ai_providers.thinking_allowed_levels_label')}
+                thinkingSelectAllLabel={t('ai_providers.thinking_select_all_label')}
+                thinkingClearLabel={t('ai_providers.thinking_clear_label')}
+                thinkingRequiredError={t('ai_providers.thinking_required_error')}
+                thinkingUnknownLevelsLabel={t('ai_providers.thinking_unknown_levels_label')}
+                thinkingUnknownLevelsHint={t('ai_providers.thinking_unknown_levels_hint')}
               />
               <div className={styles.modelTestPanel}>
                 <div className={styles.modelTestMeta}>

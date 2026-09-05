@@ -15,7 +15,11 @@ import { apiCallApi, getApiCallErrorMessage } from '@/services/api';
 import { useNotificationStore } from '@/stores';
 import { normalizeAuthIndex } from '@/utils/authIndex';
 import { buildHeaderObject } from '@/utils/headers';
-import { buildClaudeMessagesEndpoint, parseTextList } from '@/components/providers/utils';
+import {
+  buildClaudeMessagesEndpoint,
+  parseTextList,
+  resolveClaudeFingerprintSelection,
+} from '@/components/providers/utils';
 import { CredentialWeightInput } from '@/components/providers';
 import { getCredentialWeightError } from '@/utils/credentialWeight';
 import type { ClaudeEditOutletContext } from './AiProvidersClaudeEditLayout';
@@ -121,6 +125,17 @@ export function AiProvidersClaudeEditPage() {
       { value: 'auto', label: t('ai_providers.claude_cloak_mode_auto') },
       { value: 'always', label: t('ai_providers.claude_cloak_mode_always') },
       { value: 'never', label: t('ai_providers.claude_cloak_mode_never') },
+    ],
+    [t]
+  );
+
+  const fingerprintOptions = useMemo(
+    () => [
+      { value: '', label: t('ai_providers.claude_request_fingerprint_default') },
+      {
+        value: 'claude-code-cli',
+        label: t('ai_providers.claude_request_fingerprint_claude_code_cli'),
+      },
     ],
     [t]
   );
@@ -525,6 +540,26 @@ export function AiProvidersClaudeEditPage() {
               <div className="hint">
                 {t('ai_providers.rebuild_mid_system_message_hint')}
               </div>
+            </div>
+
+            <div className="form-group">
+              <label>{t('ai_providers.claude_request_fingerprint_label')}</label>
+              <Select
+                value={form.fingerprintProfile ?? ''}
+                options={fingerprintOptions}
+                onChange={(value) =>
+                  setForm((prev) => ({
+                    ...prev,
+                    fingerprintProfile: resolveClaudeFingerprintSelection(
+                      prev.fingerprintProfile,
+                      value
+                    ),
+                  }))
+                }
+                ariaLabel={t('ai_providers.claude_request_fingerprint_label')}
+                disabled={saving || disableControls || isTesting}
+              />
+              <div className="hint">{t('ai_providers.claude_request_fingerprint_hint')}</div>
             </div>
 
             <div className={styles.modelConfigSection}>

@@ -107,6 +107,7 @@ See [Choosing A CPA Panel](https://seakee.github.io/CPA-Manager-Plus/docs/en/gui
 - Run CPAMP Full Mode as one Docker container or a native Linux, macOS, or Windows package for amd64/arm64; the full stack can run alongside CPA.
 - Keep request history, Manager configuration, automation state, and model prices in local files with no account registration or telemetry SDK.
 - Back up SQLite files together with `data.key` to preserve encrypted CPA Management Keys.
+- If you harden the runtime with a read-only root filesystem or a non-root user, give SQLite a writable temporary directory and a writable database file; see [Read-Only Root Filesystem](https://seakee.github.io/CPA-Manager-Plus/docs/en/deployment/docker.html).
 
 Want to preview the interface first? Open the [Live Demo](https://seakee.github.io/CPA-Manager-Plus/). The demo uses fictional data only. It is not a deployment or runtime mode and cannot connect to, manage, or monitor a real CPA instance.
 

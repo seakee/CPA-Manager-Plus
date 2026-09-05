@@ -1636,6 +1636,28 @@ describe('auth file Codex status helpers', () => {
     expect(quota.quotaInventoryObserved).toBeUndefined();
   });
 
+  it('clears an explicitly scoped unknown-time auth quota failure without dropping quota windows', () => {
+    const quota = codexQuota({
+      status: 'error',
+      error: 'HTTP 401 unauthorized',
+      errorStatus: 401,
+      fetchedAtMs: undefined,
+      failedAtMs: undefined,
+    });
+
+    const sanitized = sanitizeSupersededAuthQuotaState(quota, 2_000, {
+      allowUnknownFailureTimestamp: true,
+    });
+
+    expect(sanitized).toMatchObject({
+      status: 'success',
+      error: undefined,
+      errorStatus: undefined,
+      windows: quota.windows,
+    });
+    expect(sanitizeSupersededAuthQuotaState(quota, 2_000)).toBe(quota);
+  });
+
   it('recognizes and clears text-only HTTP 401 quota refresh failures', () => {
     const quota = codexQuota({
       status: 'error',
@@ -2038,6 +2060,30 @@ describe('credential identity helpers', () => {
       accountSnapshot: 'codex-main@example.com',
     });
     expect(
+      getAuthFilePatchTarget(
+        codexFile({
+          id: 'runtime-team-member',
+          account_id: 'workspace-1',
+          account: 'Alice',
+          email: 'Alice@Example.com',
+        })
+      )
+    ).toMatchObject({
+      provider: 'codex',
+      accountId: 'workspace-1',
+      accountSnapshot: 'alice@example.com',
+    });
+    expect(
+      getAuthFilePatchTarget(
+        codexFile({
+          id: 'runtime-weak-member',
+          account_id: 'workspace-1',
+          account: 'Alice',
+          email: undefined,
+        })
+      )
+    ).not.toHaveProperty('accountSnapshot');
+    expect(
       getAuthFilePatchTarget({
         id: 'runtime-unknown',
         name: 'unknown.json',
@@ -2083,7 +2129,7 @@ describe('credential identity helpers', () => {
       account: 'second@example.com',
     });
 
-    expect(getAuthFileSelectionKey(first)).toBe(getAuthFileSelectionKey(renamed));
+    expect(getAuthFileSelectionKey(first)).not.toBe(getAuthFileSelectionKey(renamed));
     expect(getAuthFileSelectionKey(first)).not.toBe(getAuthFileSelectionKey(second));
     expect(getAuthFileNameFromSelectionKey(getAuthFileSelectionKey(second))).toBe(
       'shared-codex.json'
