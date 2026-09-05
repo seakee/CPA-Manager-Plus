@@ -746,7 +746,10 @@ func TestBuildCodexInspectionQuotaWindowsFallbackAmbiguityParity(t *testing.T) {
 			},
 		}, "")
 
-		wantIDs := []string{"same-quota-five-hour-1", "same-quota-weekly-0"}
+		wantIDs := []string{
+			"same-quota--additional-p-18000-s-none-five-hour-0",
+			"same-quota--additional-p-none-s-604800-weekly-0",
+		}
 		for i, id := range wantIDs {
 			if windows[i].ID != id {
 				t.Fatalf("window[%d].ID = %q, want %q", i, windows[i].ID, id)
@@ -754,6 +757,12 @@ func TestBuildCodexInspectionQuotaWindowsFallbackAmbiguityParity(t *testing.T) {
 			if windows[i].IdentityAmbiguous {
 				t.Fatalf("window[%d] should not be ambiguous", i)
 			}
+		}
+		if !containsString(windows[0].ProviderWindowAliases, "same-quota-five-hour-0") {
+			t.Fatalf("window[0] missing legacy alias: %#v", windows[0].ProviderWindowAliases)
+		}
+		if !containsString(windows[1].ProviderWindowAliases, "same-quota-weekly-0") {
+			t.Fatalf("window[1] missing legacy alias: %#v", windows[1].ProviderWindowAliases)
 		}
 	})
 }

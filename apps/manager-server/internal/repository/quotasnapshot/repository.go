@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/codexquota"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 )
 
@@ -951,6 +952,7 @@ func (r *repository) ReadQueryEvidence(ctx context.Context, accountKey, provider
 		return QueryEvidence{}, err
 	}
 	if strings.EqualFold(strings.TrimSpace(provider), "codex") {
+		evidence.Candidates = suppressUnattachedLegacyCodexCandidates(evidence.Candidates, evidence.States)
 		if evidence.AmbiguousCandidates, err = listCurrentAmbiguousCandidates(ctx, tx, accountKey, provider); err != nil {
 			return QueryEvidence{}, err
 		}
@@ -962,4 +964,145 @@ func (r *repository) ReadQueryEvidence(ctx context.Context, accountKey, provider
 		return QueryEvidence{}, err
 	}
 	return evidence, nil
+}
+
+type unattachedLegacyGroup struct {
+	inventoryScopeKey string
+	scopeFingerprint  string
+	providerWindowID  string
+	windowKind        string
+	maxObservedAtMS   int64
+}
+
+func suppressUnattachedLegacyCodexCandidates(
+	candidates []model.AccountQuotaSnapshot,
+	states []model.AccountQuotaWindowState,
+) []model.AccountQuotaSnapshot {
+	legacyGroups := make(map[string]*unattachedLegacyGroup)
+	for _, s := range candidates {
+		if s.ObservationID != 0 || s.LogicalWindowID != 0 {
+			continue
+		}
+		id := strings.ToLower(strings.TrimSpace(s.ProviderWindowID))
+		if id == "" || codexquota.IsAmbiguousAdditionalProviderWindowID(id) ||
+			codexquota.IsMainProviderWindowID(id) || codexquota.IsSparkProviderWindowID(id) ||
+			codexquota.IsCodeReviewProviderWindowID(id) {
+			continue
+		}
+		key := s.ScopeFingerprint + "\x00" + id
+		if existing, ok := legacyGroups[key]; ok {
+			if s.ObservedAtMS > existing.maxObservedAtMS {
+				existing.maxObservedAtMS = s.ObservedAtMS
+			}
+		} else {
+			legacyGroups[key] = &unattachedLegacyGroup{
+				inventoryScopeKey: s.InventoryScopeKey,
+				scopeFingerprint:  s.ScopeFingerprint,
+				providerWindowID:  id,
+				windowKind:        strings.ToLower(strings.TrimSpace(s.WindowKind)),
+				maxObservedAtMS:   s.ObservedAtMS,
+			}
+		}
+	}
+	if len(legacyGroups) == 0 {
+		return candidates
+	}
+
+	canonicalMaxObservedAt := make(map[int64]int64)
+	for _, s := range candidates {
+		if s.LogicalWindowID > 0 {
+			if s.ObservedAtMS > canonicalMaxObservedAt[s.LogicalWindowID] {
+				canonicalMaxObservedAt[s.LogicalWindowID] = s.ObservedAtMS
+			}
+		}
+	}
+
+	type activeCanonicalWindow struct {
+		logicalWindowID   int64
+		providerWindowID  string
+		inventoryScopeKey string
+		scopeFingerprint  string
+		windowKind        string
+		maxObservedAtMS   int64
+	}
+	var canonicalWindows []activeCanonicalWindow
+	for _, st := range states {
+		if st.Availability == "inactive" {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(st.ModelScopeKind), "feature") {
+			continue
+		}
+		id := strings.ToLower(strings.TrimSpace(st.ProviderWindowID))
+		if id == "" || codexquota.IsAmbiguousAdditionalProviderWindowID(id) ||
+			codexquota.IsMainProviderWindowID(id) || codexquota.IsSparkProviderWindowID(id) ||
+			codexquota.IsCodeReviewProviderWindowID(id) {
+			continue
+		}
+		canonicalWindows = append(canonicalWindows, activeCanonicalWindow{
+			logicalWindowID:   st.ID,
+			providerWindowID:  id,
+			inventoryScopeKey: st.InventoryScopeKey,
+			scopeFingerprint:  st.ScopeFingerprint,
+			windowKind:        strings.ToLower(strings.TrimSpace(st.WindowKind)),
+			maxObservedAtMS:   canonicalMaxObservedAt[st.ID],
+		})
+	}
+	if len(canonicalWindows) == 0 {
+		return candidates
+	}
+
+	legacyToCanonical := make(map[string][]int64)
+	canonicalToLegacy := make(map[int64][]string)
+
+	for legacyKey, legacy := range legacyGroups {
+		legacySuffix, hasLegacySuffix := generatedCodexWindowSuffixFromID(legacy.providerWindowID)
+		for _, canonical := range canonicalWindows {
+			if legacy.inventoryScopeKey != "" && canonical.inventoryScopeKey != "" &&
+				legacy.inventoryScopeKey != canonical.inventoryScopeKey {
+				continue
+			}
+			if legacy.scopeFingerprint != canonical.scopeFingerprint {
+				continue
+			}
+			canonicalSuffix, hasCanonicalSuffix := generatedCodexWindowSuffixFromID(canonical.providerWindowID)
+			suffixMatch := hasLegacySuffix && hasCanonicalSuffix && legacySuffix == canonicalSuffix
+			kindMatch := legacy.windowKind != "" && canonical.windowKind != "" && legacy.windowKind == canonical.windowKind
+			if !suffixMatch && !kindMatch {
+				continue
+			}
+			// Freshness: canonical linked evidence must be at least as fresh as legacy
+			if canonical.maxObservedAtMS < legacy.maxObservedAtMS {
+				continue
+			}
+			legacyToCanonical[legacyKey] = append(legacyToCanonical[legacyKey], canonical.logicalWindowID)
+			canonicalToLegacy[canonical.logicalWindowID] = append(canonicalToLegacy[canonical.logicalWindowID], legacyKey)
+		}
+	}
+
+	suppressedLegacyKeys := make(map[string]bool)
+	for legacyKey, canonicalIDs := range legacyToCanonical {
+		if len(canonicalIDs) == 1 {
+			canonicalID := canonicalIDs[0]
+			if len(canonicalToLegacy[canonicalID]) == 1 {
+				suppressedLegacyKeys[legacyKey] = true
+			}
+		}
+	}
+	if len(suppressedLegacyKeys) == 0 {
+		return candidates
+	}
+
+	filtered := make([]model.AccountQuotaSnapshot, 0, len(candidates))
+	for _, s := range candidates {
+		if s.ObservationID == 0 && s.LogicalWindowID == 0 {
+			id := strings.ToLower(strings.TrimSpace(s.ProviderWindowID))
+			key := s.ScopeFingerprint + "\x00" + id
+			if suppressedLegacyKeys[key] {
+				continue
+			}
+		}
+		filtered = append(filtered, s)
+	}
+	return filtered
 }

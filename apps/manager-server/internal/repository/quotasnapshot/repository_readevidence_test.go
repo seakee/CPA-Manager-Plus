@@ -265,3 +265,88 @@ func deferredReaderDSN(dbPath string) string {
 	dsn.RawQuery = query.Encode()
 	return dsn.String()
 }
+
+func TestReadQueryEvidenceSuppressesUnattachedLegacyCodexCandidates(t *testing.T) {
+	fixture := newReadEvidenceFixture(t, "account-legacy-suppress", "same_quota")
+
+	canonicalID := "same-quota--additional-p-none-s-604800-weekly-0"
+	legacyAliasID := "same-quota-weekly-0"
+	scopeFP := quotasnapshot.ScopeFingerprint("feature", fixture.scopeKey, nil)
+	nowMS := int64(1000)
+
+	// 1. Insert an active canonical window state via complete observation
+	if err := fixture.repo.InsertObservationWrites(context.Background(), []model.AccountQuotaObservationWrite{
+		fixture.observation("obs-1", "complete", nowMS, []model.AccountQuotaSnapshot{
+			{
+				AccountKey: fixture.accountKey, Provider: "codex",
+				ProviderWindowID: canonicalID, WindowKind: "weekly", WindowMode: "fixed",
+				ScopeDisplayName: "Same Quota", ModelScopeKind: "feature", ModelScopeKey: fixture.scopeKey,
+				ScopeFingerprint: scopeFP, ContentHash: "hash-1", InventoryScopeKey: fixture.scopeKey,
+				Source: "inspection", SourceObservationID: "obs-1",
+				ObservedAtMS: nowMS, BoundaryAccuracy: "exact", CreatedAtMS: nowMS,
+			},
+		}),
+	}); err != nil {
+		t.Fatalf("insert canonical observation: %v", err)
+	}
+
+	// 2. Insert an unattached legacy candidate into DB directly (observation_id is NULL, logical_window_id is NULL)
+	if _, err := fixture.db.Exec(`insert into account_quota_snapshots (
+		observation_id, logical_window_id, account_key, provider, provider_window_id,
+		window_kind, window_mode, model_scope_kind, model_scope_key, model_ids_json, scope_fingerprint,
+		source, source_observation_id, observed_at_ms, boundary_accuracy,
+		duration_seconds, used_percent, remaining_percent, created_at_ms
+	) values (
+		null, null, ?, 'codex', ?,
+		'weekly', 'fixed', 'feature', ?, '[]', ?,
+		'inspection', 'legacy-unattached', ?, 'exact',
+		604800, 50, 50, ?
+	)`, fixture.accountKey, legacyAliasID, fixture.scopeKey, scopeFP, nowMS-100, nowMS-100); err != nil {
+		t.Fatalf("insert unattached legacy snapshot: %v", err)
+	}
+
+	// 3. Query evidence: canonical window is active, matching scopeFP and strict role,
+	// so the unattached legacy candidate MUST be suppressed.
+	evidence, err := fixture.repo.ReadQueryEvidence(context.Background(), fixture.accountKey, "codex", 0)
+	if err != nil {
+		t.Fatalf("read query evidence: %v", err)
+	}
+	if len(evidence.Candidates) != 1 {
+		t.Fatalf("expected 1 candidate after suppression, got %d: %#v", len(evidence.Candidates), evidence.Candidates)
+	}
+	if evidence.Candidates[0].ProviderWindowID != canonicalID {
+		t.Fatalf("expected canonical candidate %s, got %s", canonicalID, evidence.Candidates[0].ProviderWindowID)
+	}
+
+	// 4. Test safety boundary: an unattached candidate with a different scope is NEVER suppressed.
+	diffScopeFP := quotasnapshot.ScopeFingerprint("feature", "other_feature", nil)
+	unsuppressedLegacyID := "other-quota-weekly-0"
+	if _, err := fixture.db.Exec(`insert into account_quota_snapshots (
+		observation_id, logical_window_id, account_key, provider, provider_window_id,
+		window_kind, window_mode, model_scope_kind, model_scope_key, model_ids_json, scope_fingerprint,
+		source, source_observation_id, observed_at_ms, boundary_accuracy,
+		duration_seconds, used_percent, remaining_percent, created_at_ms
+	) values (
+		null, null, ?, 'codex', ?,
+		'weekly', 'fixed', 'feature', 'other_feature', '[]', ?,
+		'inspection', 'legacy-unattached-2', ?, 'exact',
+		604800, 50, 50, ?
+	)`, fixture.accountKey, unsuppressedLegacyID, diffScopeFP, nowMS-100, nowMS-100); err != nil {
+		t.Fatalf("insert unsuppressed legacy snapshot: %v", err)
+	}
+
+	evidence2, err := fixture.repo.ReadQueryEvidence(context.Background(), fixture.accountKey, "codex", 0)
+	if err != nil {
+		t.Fatalf("read query evidence 2: %v", err)
+	}
+	foundUnsuppressed := false
+	for _, c := range evidence2.Candidates {
+		if c.ProviderWindowID == unsuppressedLegacyID {
+			foundUnsuppressed = true
+			break
+		}
+	}
+	if !foundUnsuppressed {
+		t.Fatalf("unsuppressed snapshot %s should NOT have been suppressed (different scope)", unsuppressedLegacyID)
+	}
+}

@@ -5767,7 +5767,7 @@ func TestQuotaLifecycleShadowsStableHistoryWhileAmbiguousSetIsCurrent(t *testing
 		t.Fatalf("stable plus ambiguous evidence = %#v, want three rows", withAmbiguous)
 	}
 	ambiguousCount := 0
-	stableShadowed := false
+	stableInactive := false
 	for _, window := range withAmbiguous {
 		if codexquota.IsAmbiguousAdditionalProviderWindowID(window.ProviderWindowID) {
 			ambiguousCount++
@@ -5777,12 +5777,12 @@ func TestQuotaLifecycleShadowsStableHistoryWhileAmbiguousSetIsCurrent(t *testing
 			continue
 		}
 		if window.ProviderWindowID == stableID {
-			stableShadowed = window.LogicalWindowID == logicalID &&
-				window.Availability == "pending_absent" && window.CurrentPresentationHidden
+			stableInactive = window.LogicalWindowID == logicalID &&
+				window.Availability == "inactive" && window.DeactivatedAtMS != nil
 		}
 	}
-	if ambiguousCount != 2 || !stableShadowed {
-		t.Fatalf("ambiguous presentation shadow = %#v", withAmbiguous)
+	if ambiguousCount != 2 || !stableInactive {
+		t.Fatalf("ambiguous identity loss deactivation = %#v", withAmbiguous)
 	}
 	if currentAmbiguousWindowCount(withAmbiguous) != 2 {
 		t.Fatalf("current ambiguous card evidence = %#v", withAmbiguous)
@@ -5860,7 +5860,7 @@ func TestQuotaLifecycleFallbackAmbiguousCurrentObservationLifecycle(t *testing.T
 		t.Fatalf("T2 windows count = %d, want 4", len(t2Windows))
 	}
 	ambiguousCount := 0
-	stableHiddenCount := 0
+	stableInactiveCount := 0
 	for _, w := range t2Windows {
 		if codexquota.IsAmbiguousAdditionalProviderWindowID(w.ProviderWindowID) {
 			ambiguousCount++
@@ -5868,13 +5868,13 @@ func TestQuotaLifecycleFallbackAmbiguousCurrentObservationLifecycle(t *testing.T
 				t.Fatalf("T2 ambiguous window has logical lifecycle: %+v", w)
 			}
 		} else {
-			if w.Availability == "pending_absent" && w.CurrentPresentationHidden {
-				stableHiddenCount++
+			if w.Availability == "inactive" && w.DeactivatedAtMS != nil {
+				stableInactiveCount++
 			}
 		}
 	}
-	if ambiguousCount != 2 || stableHiddenCount != 2 {
-		t.Fatalf("T2 state: ambiguousCount=%d, stableHiddenCount=%d, want 2 and 2", ambiguousCount, stableHiddenCount)
+	if ambiguousCount != 2 || stableInactiveCount != 2 {
+		t.Fatalf("T2 state: ambiguousCount=%d, stableInactiveCount=%d, want 2 and 2", ambiguousCount, stableInactiveCount)
 	}
 
 	// T3: 相同 ambiguous complete observation

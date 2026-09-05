@@ -1043,8 +1043,13 @@ describe('buildCodexQuotaWindowInfos', () => {
       ],
     });
 
-    expect(windows.map((w) => w.id)).toEqual(['same-quota-five-hour-1', 'same-quota-weekly-0']);
+    expect(windows.map((w) => w.id)).toEqual([
+      'same-quota--additional-p-18000-s-none-five-hour-0',
+      'same-quota--additional-p-none-s-604800-weekly-0',
+    ]);
     expect(windows.some((w) => w.identityAmbiguous)).toBe(false);
+    expect(windows[0]?.providerWindowAliases).toContain('same-quota-five-hour-0');
+    expect(windows[1]?.providerWindowAliases).toContain('same-quota-weekly-0');
   });
 
   it('shares rate-limit helpers used by Codex inspection', () => {

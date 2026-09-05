@@ -196,7 +196,10 @@ const codexGeneratedAdditionalSuffixAfterPrefix = (
 const isCodexSparkCompatibilityProviderWindowId = (value: string): boolean => {
   const raw = value.trim().toLowerCase();
   if (!raw) return false;
-  return [...CODEX_SPARK_PROVIDER_WINDOW_PREFIXES, ...CODEX_SPARK_LEGACY_PROVIDER_WINDOW_PREFIXES].some(
+  return [
+    ...CODEX_SPARK_PROVIDER_WINDOW_PREFIXES,
+    ...CODEX_SPARK_LEGACY_PROVIDER_WINDOW_PREFIXES,
+  ].some(
     (prefix) => raw === prefix || codexGeneratedAdditionalSuffixAfterPrefix(raw, prefix) !== null
   );
 };
@@ -671,7 +674,10 @@ export const resolveCodexSnapshotQuotaLabel = ({
         normalizedScopeKey === CODEX_UNKNOWN_REQUEST_SCOPE_KEY));
   const isExplicitCodeReviewScope = normalizedScopeKey === CODEX_CODE_REVIEW_SCOPE_KEY;
 
-  if (isCodexCodeReviewProviderWindowId(id) && (isLegacyOrUnknownScope || isExplicitCodeReviewScope)) {
+  if (
+    isCodexCodeReviewProviderWindowId(id) &&
+    (isLegacyOrUnknownScope || isExplicitCodeReviewScope)
+  ) {
     if (id.startsWith('code-review-window-')) {
       return {
         labelKey: 'codex_quota.code_review_generic_window',
@@ -818,7 +824,10 @@ const addCodexWindowInfo = (
   const aliases = identityAmbiguous
     ? []
     : Array.from(
-        new Set([...(providerWindowAliases ?? []), ...codexMainProviderWindowAliases(id, modelScope)])
+        new Set([
+          ...(providerWindowAliases ?? []),
+          ...codexMainProviderWindowAliases(id, modelScope),
+        ])
       ).sort();
 
   windows.push({
@@ -987,18 +996,6 @@ const addAdditionalRateLimitWindows = (
       },
     ];
   });
-  const baseIdPrefixCounts = new Map<string, number>();
-  const legacyBaseIdPrefixCounts = new Map<string, number>();
-  families.forEach(({ baseIdPrefix }) => {
-    baseIdPrefixCounts.set(baseIdPrefix, (baseIdPrefixCounts.get(baseIdPrefix) ?? 0) + 1);
-  });
-  families.forEach(({ legacyBaseIdPrefix }) => {
-    if (!legacyBaseIdPrefix) return;
-    legacyBaseIdPrefixCounts.set(
-      legacyBaseIdPrefix,
-      (legacyBaseIdPrefixCounts.get(legacyBaseIdPrefix) ?? 0) + 1
-    );
-  });
   const featureGroups = new Map<string, typeof families>();
   families.forEach((family) => {
     if (!family.featureIdPrefix || family.modelScope.kind !== 'feature') return;
@@ -1006,122 +1003,131 @@ const addAdditionalRateLimitWindows = (
     group.push(family);
     featureGroups.set(family.featureIdPrefix, group);
   });
-  const fallbackAmbiguityPartitionKey = (family: (typeof families)[number]): string =>
-    [
-      family.modelScope.key ?? '',
-      family.baseIdPrefix,
-      family.structuralIdPrefix,
-      family.sortKey,
-    ].join('\u0000');
-
-  const fallbackAmbiguityCounts = new Map<string, number>();
+  const fallbackNameCounts = new Map<string, number>();
+  const fallbackPairCounts = new Map<string, number>();
   families.forEach((family) => {
     if (family.featureIdPrefix || family.modelScope.kind !== 'feature') return;
-    const key = fallbackAmbiguityPartitionKey(family);
-    fallbackAmbiguityCounts.set(key, (fallbackAmbiguityCounts.get(key) ?? 0) + 1);
+    fallbackNameCounts.set(
+      family.nameIdPrefix,
+      (fallbackNameCounts.get(family.nameIdPrefix) ?? 0) + 1
+    );
+    const pairKey = `${family.nameIdPrefix}\0${family.structuralIdPrefix}`;
+    fallbackPairCounts.set(pairKey, (fallbackPairCounts.get(pairKey) ?? 0) + 1);
   });
+
   const countFamilyPrefix = (
     group: typeof families,
-    selector: (family: (typeof families)[number]) => string,
-    excludedPrefix?: string
-  ) => {
+    selector: (candidate: (typeof families)[number]) => string,
+    featurePrefix: string
+  ): Map<string, number> => {
     const counts = new Map<string, number>();
-    group.forEach((family) => {
-      const prefix = selector(family);
-      if (!prefix || prefix === excludedPrefix) return;
-      counts.set(prefix, (counts.get(prefix) ?? 0) + 1);
+    group.forEach((candidate) => {
+      const prefix = selector(candidate);
+      if (prefix && prefix !== featurePrefix) {
+        counts.set(prefix, (counts.get(prefix) ?? 0) + 1);
+      }
     });
     return counts;
   };
+
   const resolvedFamilies = families.map((family) => {
     const featureGroup = family.featureIdPrefix
       ? (featureGroups.get(family.featureIdPrefix) ?? [])
       : [];
     const collisionMode = featureGroup.length > 1;
-    const fallbackPartitionKey = fallbackAmbiguityPartitionKey(family);
-    const fallbackAmbiguous =
-      !family.featureIdPrefix &&
-      family.modelScope.kind === 'feature' &&
-      (fallbackAmbiguityCounts.get(fallbackPartitionKey) ?? 0) > 1;
-    const collisionNameCounts = collisionMode
-      ? countFamilyPrefix(
-          featureGroup,
-          (candidate) => candidate.nameIdPrefix,
-          family.featureIdPrefix
-        )
-      : new Map<string, number>();
-    let idPrefix = family.baseIdPrefix;
-    if (collisionMode) {
+
+    let idPrefix = '';
+    let identityAmbiguous = false;
+    const legacyIdPrefixes = [...family.legacyIdPrefixes];
+
+    if (!family.featureIdPrefix && family.modelScope.kind === 'feature') {
+      const nameCount = fallbackNameCounts.get(family.nameIdPrefix) ?? 0;
+      if (!family.nameIdPrefix) {
+        const structCount = fallbackPairCounts.get(`\0${family.structuralIdPrefix}`) ?? 0;
+        if (structCount > 1) {
+          identityAmbiguous = true;
+          idPrefix = `${CODEX_AMBIGUOUS_PROVIDER_WINDOW_PREFIX}${family.structuralIdPrefix}`;
+          legacyIdPrefixes.length = 0;
+        } else {
+          identityAmbiguous = false;
+          idPrefix = family.structuralIdPrefix;
+        }
+      } else if (nameCount > 1) {
+        const pairKey = `${family.nameIdPrefix}\0${family.structuralIdPrefix}`;
+        if ((fallbackPairCounts.get(pairKey) ?? 0) > 1) {
+          identityAmbiguous = true;
+          idPrefix = `${CODEX_AMBIGUOUS_PROVIDER_WINDOW_PREFIX}${family.nameIdPrefix}`;
+          legacyIdPrefixes.length = 0;
+        } else {
+          identityAmbiguous = false;
+          idPrefix = `${family.nameIdPrefix}--${family.structuralIdPrefix}`;
+          if (family.nameIdPrefix !== idPrefix) {
+            legacyIdPrefixes.push(family.nameIdPrefix);
+          }
+        }
+      } else {
+        identityAmbiguous = false;
+        idPrefix = family.baseIdPrefix;
+        if (family.nameIdPrefix && family.nameIdPrefix !== idPrefix) {
+          legacyIdPrefixes.push(family.nameIdPrefix);
+        }
+      }
+    } else if (collisionMode) {
+      const collisionNameCounts = countFamilyPrefix(
+        featureGroup,
+        (candidate) => candidate.nameIdPrefix,
+        family.featureIdPrefix
+      );
       const structuralCounts = countFamilyPrefix(
         featureGroup,
         (candidate) => candidate.structuralIdPrefix,
         family.featureIdPrefix
       );
+
       if (
         family.nameIdPrefix &&
         family.nameIdPrefix !== family.featureIdPrefix &&
         collisionNameCounts.get(family.nameIdPrefix) === 1
       ) {
+        identityAmbiguous = false;
         idPrefix = family.nameIdPrefix;
       } else if (
         family.structuralIdPrefix &&
         family.structuralIdPrefix !== family.featureIdPrefix &&
         structuralCounts.get(family.structuralIdPrefix) === 1
       ) {
-        idPrefix = family.structuralIdPrefix;
+        identityAmbiguous = false;
+        if (family.nameIdPrefix && family.nameIdPrefix !== family.structuralIdPrefix) {
+          idPrefix = `${family.nameIdPrefix}--${family.structuralIdPrefix}`;
+          legacyIdPrefixes.push(family.nameIdPrefix);
+        } else {
+          idPrefix = family.structuralIdPrefix;
+        }
       } else {
+        identityAmbiguous = true;
         idPrefix = `${CODEX_AMBIGUOUS_PROVIDER_WINDOW_PREFIX}${family.featureIdPrefix}`;
+        legacyIdPrefixes.length = 0;
       }
-    } else if (fallbackAmbiguous) {
-      idPrefix = `${CODEX_AMBIGUOUS_PROVIDER_WINDOW_PREFIX}${family.baseIdPrefix}`;
-    } else if (
-      (baseIdPrefixCounts.get(family.baseIdPrefix) ?? 0) > 1 &&
-      family.featureIdPrefix &&
-      family.featureIdPrefix !== family.baseIdPrefix
-    ) {
-      idPrefix = `${family.baseIdPrefix}--${family.featureIdPrefix}`;
+    } else {
+      identityAmbiguous = false;
+      idPrefix = family.baseIdPrefix;
+      if (family.nameIdPrefix && family.nameIdPrefix !== idPrefix) {
+        legacyIdPrefixes.push(family.nameIdPrefix);
+      }
     }
 
-    const identityAmbiguous =
-      (collisionMode && idPrefix.startsWith(CODEX_AMBIGUOUS_PROVIDER_WINDOW_PREFIX)) ||
-      fallbackAmbiguous;
-    const legacyIdPrefixes = identityAmbiguous
-      ? []
-      : [...family.legacyIdPrefixes].filter(
-          (prefix) =>
-            !collisionMode ||
-            (prefix !== family.featureIdPrefix && collisionNameCounts.get(prefix) === 1)
-        );
-    if (family.legacyBaseIdPrefix && !identityAmbiguous) {
-      const legacyPrefix =
-        !collisionMode &&
-        !fallbackAmbiguous &&
-        (legacyBaseIdPrefixCounts.get(family.legacyBaseIdPrefix) ?? 0) > 1 &&
-        family.featureIdPrefix &&
-        family.featureIdPrefix !== family.legacyBaseIdPrefix
-          ? `${family.legacyBaseIdPrefix}--${family.featureIdPrefix}`
-          : family.legacyBaseIdPrefix;
-      if (!collisionMode || collisionNameCounts.get(legacyPrefix) === 1) {
-        legacyIdPrefixes.push(legacyPrefix);
-      }
-    }
     return { ...family, idPrefix, collisionMode, identityAmbiguous, legacyIdPrefixes };
   });
-  const familiesByIdPrefix = new Map<string, typeof resolvedFamilies>();
+
+  const ambiguousOrdinals = new Map<number, number>();
+  const ambiguousPrefixCounts = new Map<string, number>();
   resolvedFamilies.forEach((family) => {
-    const group = familiesByIdPrefix.get(family.idPrefix) ?? [];
-    group.push(family);
-    familiesByIdPrefix.set(family.idPrefix, group);
+    if (!family.identityAmbiguous) return;
+    const count = ambiguousPrefixCounts.get(family.idPrefix) ?? 0;
+    ambiguousOrdinals.set(family.sourceIndex, count);
+    ambiguousPrefixCounts.set(family.idPrefix, count + 1);
   });
-  const familyIndexes = new Map<number, number>();
-  familiesByIdPrefix.forEach((group) => {
-    [...group]
-      .sort((left, right) => {
-        if (left.sortKey !== right.sortKey) return left.sortKey.localeCompare(right.sortKey);
-        return left.sourceIndex - right.sourceIndex;
-      })
-      .forEach((family, familyIndex) => familyIndexes.set(family.sourceIndex, familyIndex));
-  });
+
   resolvedFamilies.forEach(
     ({
       sourceIndex,
@@ -1135,7 +1141,7 @@ const addAdditionalRateLimitWindows = (
       legacyIdPrefixes,
       identityAmbiguous,
     }) => {
-      const familyIndex = familyIndexes.get(sourceIndex) ?? 0;
+      const localOrdinal = identityAmbiguous ? (ambiguousOrdinals.get(sourceIndex) ?? 0) : 0;
       const aliasPrefixes = normalizedUniqueWindowIds(legacyIdPrefixes).filter(
         (prefix) => prefix !== idPrefix && (!collisionMode || prefix !== featureIdPrefix)
       );
@@ -1148,24 +1154,28 @@ const addAdditionalRateLimitWindows = (
           aliasPrefixes.map((prefix) => `${prefix}${suffix}`)
         );
       };
-      const fiveHourId = `${idPrefix}-five-hour-${familyIndex}`;
-      const weeklyId = `${idPrefix}-weekly-${familyIndex}`;
-      const monthlyId = `${idPrefix}-monthly-${familyIndex}`;
-      addAliases(fiveHourId);
-      addAliases(weeklyId);
-      addAliases(monthlyId);
+      const fiveHourId = `${idPrefix}-five-hour-${localOrdinal}`;
+      const weeklyId = `${idPrefix}-weekly-${localOrdinal}`;
+      const monthlyId = `${idPrefix}-monthly-${localOrdinal}`;
+      if (!identityAmbiguous) {
+        addAliases(fiveHourId);
+        addAliases(weeklyId);
+        addAliases(monthlyId);
+      }
       const classified = pickClassifiedWindows(rateInfo, { teamPlan: options?.teamPlan });
-      classified.windows.forEach((window, index) => {
-        if (
-          window === classified.fiveHourWindow ||
-          window === classified.weeklyWindow ||
-          window === classified.monthlyWindow
-        ) {
-          return;
-        }
-        const duration = formatWindowDuration(getWindowSeconds(window));
-        addAliases(`${idPrefix}-${familyIndex}-window-${duration}-${index}`);
-      });
+      if (!identityAmbiguous) {
+        classified.windows.forEach((window, index) => {
+          if (
+            window === classified.fiveHourWindow ||
+            window === classified.weeklyWindow ||
+            window === classified.monthlyWindow
+          ) {
+            return;
+          }
+          const duration = formatWindowDuration(getWindowSeconds(window));
+          addAliases(`${idPrefix}-${localOrdinal}-window-${duration}-${index}`);
+        });
+      }
 
       addCodexRateLimitWindows(
         windows,
@@ -1186,7 +1196,7 @@ const addAdditionalRateLimitWindows = (
         { name: limitName },
         {
           ...options,
-          genericIdPrefix: `${idPrefix}-${familyIndex}`,
+          genericIdPrefix: `${idPrefix}-${localOrdinal}`,
           modelScope,
           providerWindowAliasesById,
           scopeDisplayName,
