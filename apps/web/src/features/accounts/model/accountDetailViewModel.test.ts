@@ -18,6 +18,16 @@ import type { UsageValueRow } from './usageValueRows';
 
 const CODEX_MAIN_SCOPE = { kind: 'family', key: 'codex_main', complete: true } as const;
 
+const basePluginQuotaForBuiltIn = {
+  schema: 'cliproxy.plugin.quota',
+  version: 2,
+  availability: 'available',
+  observed_at: new Date().toISOString(),
+  ttl_seconds: 3600,
+  spend: { currency: 'USD', minor_unit: 2, metered_minor_units: 100 },
+  windows: [{ id: 'plugin-window', used_percent: 10 }],
+};
+
 type AccountRowOverrides = Omit<Partial<AccountRow>, 'quota'> & {
   quota?: Partial<AccountRow['quota']>;
 };
@@ -243,6 +253,69 @@ const makeMonitoringValue = (
 });
 
 describe('accountDetailViewModel', () => {
+  it('carries one deterministic plugin supplemental contract without creating windows', () => {
+    const row = makeRow({
+      provider: 'example-plugin',
+      raw: {
+        name: 'example.json',
+        type: 'example-plugin',
+        provider: 'example-plugin',
+        plugin_quota: {
+          schema: 'cliproxy.plugin.quota',
+          version: 2,
+          provider: 'example-plugin',
+          availability: 'available',
+          observed_at: '2026-08-28T11:55:00Z',
+          ttl_seconds: 60,
+          spend: {
+            currency: 'EUR',
+            minor_unit: 3,
+            metered_minor_units: 12345,
+            period_tokens: 9000,
+          },
+          daily: [{ date: '2026-08-28', cost_minor_units: 345, tokens: 700 }],
+          top_model: 'model-one',
+          provenance: ['usage_summary'],
+        },
+      } as AuthFileItem,
+    });
+
+    const viewModel = buildAccountDetailViewModel(row, {
+      nowMs: Date.parse('2026-08-28T12:00:01Z'),
+    });
+
+    expect(viewModel.quota.windows).toEqual([]);
+    expect(viewModel.quota.plugin).toMatchObject({
+      availability: 'unavailable',
+      stale: true,
+      spend: null,
+      daily: [],
+      windows: [],
+    });
+  });
+
+  it.each(['codex', 'claude', 'antigravity', 'kimi', 'xai'])(
+    'keeps the built-in %s quota path authoritative',
+    (provider) => {
+      const row = makeRow({
+        provider,
+        raw: {
+          name: `${provider}.json`,
+          type: provider,
+          provider,
+          plugin_quota: {
+            ...basePluginQuotaForBuiltIn,
+            provider,
+          },
+        } as AuthFileItem,
+      });
+
+      const viewModel = buildAccountDetailViewModel(row);
+
+      expect(viewModel.quota.plugin).toBeNull();
+      expect(viewModel.quota.windows).toEqual([]);
+    }
+  );
   it('uses the full unified plan label for credential details', () => {
     const viewModel = buildAccountDetailViewModel(
       makeRow({

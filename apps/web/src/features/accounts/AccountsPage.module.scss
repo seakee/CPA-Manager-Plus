@@ -3301,6 +3301,33 @@
   }
 }
 
+.pluginQuotaHistogram {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  gap: $spacing-sm;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pluginQuotaDailyItem {
+  display: grid;
+  grid-template-rows: 96px auto auto auto;
+  text-align: center;
+}
+
+.pluginQuotaBarTrack {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.pluginQuotaBar {
+  width: 44%;
+  min-height: 4px;
+  background: var(--accounts-brand);
+}
+
 .quotaTabStatus {
   display: inline-flex;
   align-items: center;

@@ -21,6 +21,11 @@ import {
   inferCodexQuotaScopeFromProviderWindowId,
   isCodexMainQuotaModelScope,
 } from '@/utils/quota/codexQuota';
+import {
+  parsePluginQuotaContract,
+  type PluginQuotaContract,
+  type PluginQuotaWindow,
+} from '@/utils/quota/pluginQuota';
 import type { AccountRow } from './accountRows';
 import type { AccountQuotaStores } from './accountQuotaSummary';
 
@@ -41,6 +46,7 @@ export type AccountQuotaWindowSource =
   | 'antigravity'
   | 'kimi'
   | 'xai'
+  | 'plugin'
   | 'summary';
 
 export interface AccountQuotaDisplayWindow {
@@ -81,6 +87,7 @@ export interface BuildAccountQuotaDisplayWindowsOptions {
   translateQuotaWindowLabel: TranslateQuotaWindowLabel;
   t: TFunction;
   nowMs?: number;
+  pluginQuotaContract?: PluginQuotaContract | null;
 }
 
 const ANTIGRAVITY_GROUP_LABEL_KEYS = new Map<string, string>([
@@ -749,34 +756,91 @@ const buildSummaryQuotaDisplayWindow = (
   ];
 };
 
+const formatPluginWindowAmount = (window: PluginQuotaWindow, t: TFunction): string | undefined => {
+  if (window.unlimited) {
+    return t('accounts.credits_unlimited', { defaultValue: 'Unlimited' });
+  }
+  if (window.limit === null || window.remaining === null) return undefined;
+  const format = (amount: number) =>
+    window.unit === 'currency_minor_units' && window.minorUnit !== undefined
+      ? (amount / 10 ** window.minorUnit).toFixed(window.minorUnit)
+      : String(amount);
+  const suffix = window.currency ?? window.unit;
+  return `${format(window.remaining)} / ${format(window.limit)}${suffix ? ` ${suffix}` : ''}`;
+};
+
+const buildPluginQuotaDisplayWindows = (
+  row: AccountRow,
+  options: BuildAccountQuotaDisplayWindowsOptions
+): AccountQuotaDisplayWindow[] => {
+  const contract =
+    options.pluginQuotaContract === undefined
+      ? parsePluginQuotaContract(row.raw, options.nowMs)
+      : options.pluginQuotaContract;
+  return (contract?.windows ?? []).map((window) => {
+    const hasBoundaries = window.windowStartMs !== null && window.windowEndMs !== null;
+    const limitWindowSeconds = hasBoundaries
+      ? Math.floor((window.windowEndMs! - window.windowStartMs!) / 1000)
+      : null;
+    return buildAccountQuotaDisplayWindow({
+      key: `plugin:${window.id}`,
+      label: window.label,
+      kind: window.kind,
+      remainingPercent: remainingPercentFromUsed(window.usedPercent),
+      usedPercent: window.usedPercent,
+      resetLabel: window.resetAt || '-',
+      resetAtMs: window.resetAtMs ?? window.windowEndMs,
+      resetAccuracy: window.resetAccuracy,
+      limitWindowSeconds,
+      amountLabel: formatPluginWindowAmount(window, options.t),
+      source: 'plugin',
+      observationSource: 'response_body',
+      observedAtMs: contract?.observedAtMs ?? null,
+      windowMode: hasBoundaries ? 'fixed' : undefined,
+      cycleStartMs: window.windowStartMs,
+      cycleEndMs: window.windowEndMs,
+      nowMs: options.nowMs,
+    });
+  });
+};
+
+export const isBuiltInAccountQuotaProvider = (provider: string): boolean =>
+  provider === 'codex' ||
+  provider === 'claude' ||
+  provider === 'antigravity' ||
+  provider === 'kimi' ||
+  provider === 'xai';
+
 export const buildAccountQuotaDisplayWindows = (
   row: AccountRow,
   options: BuildAccountQuotaDisplayWindowsOptions
 ): AccountQuotaDisplayWindow[] => {
   if (row.provider === 'codex') {
     const windows = buildCodexQuotaDisplayWindows(row, options);
-    if (windows.length) return windows;
+    return windows.length ? windows : buildSummaryQuotaDisplayWindow(row, options);
   }
 
   if (row.provider === 'claude') {
     const windows = buildClaudeQuotaDisplayWindows(row, options);
-    if (windows.length) return windows;
+    return windows.length ? windows : buildSummaryQuotaDisplayWindow(row, options);
   }
 
   if (row.provider === 'antigravity') {
     const windows = buildAntigravityQuotaDisplayWindows(row, options);
-    if (windows.length) return windows;
+    return windows.length ? windows : buildSummaryQuotaDisplayWindow(row, options);
   }
 
   if (row.provider === 'kimi') {
     const windows = buildKimiQuotaDisplayWindows(row, options);
-    if (windows.length) return windows;
+    return windows.length ? windows : buildSummaryQuotaDisplayWindow(row, options);
   }
 
   if (row.provider === 'xai') {
     const windows = buildXaiQuotaDisplayWindows(row, options);
-    if (windows.length) return windows;
+    return windows.length ? windows : buildSummaryQuotaDisplayWindow(row, options);
   }
 
+  const pluginWindows = buildPluginQuotaDisplayWindows(row, options);
+  if (pluginWindows.length) return pluginWindows;
   return buildSummaryQuotaDisplayWindow(row, options);
 };
