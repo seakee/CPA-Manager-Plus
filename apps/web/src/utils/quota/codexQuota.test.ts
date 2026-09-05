@@ -11,10 +11,14 @@ import {
   canonicalizeCodexProviderWindowId,
   inferCodexQuotaScopeFromProviderWindowId,
   isAmbiguousCodexProviderWindowId,
+  isCodexCodeReviewProviderWindowId,
+  isCodexKnownScopedProviderWindowId,
   isCodexLegacyAllScopeReplacement,
+  isCodexMainProviderWindowId,
   isCodexMainQuotaWindow,
   normalizeCodexModelId,
   resolveCodexAdditionalQuotaScope,
+  resolveCodexSnapshotQuotaLabel,
   resolveCodexUsageQuotaScope,
 } from './codexQuota';
 import type { CodexQuotaWindowInfo } from './codexQuota';
@@ -969,5 +973,251 @@ describe('buildCodexQuotaWindowInfos', () => {
     expect(canonicalizeCodexProviderWindowId(syntheticID, 'weekly')).toBe(syntheticID);
     expect(isAmbiguousCodexProviderWindowId(syntheticID)).toBe(true);
     expect(isAmbiguousCodexProviderWindowId('ambiguous-feature-weekly-0')).toBe(false);
+  });
+});
+
+describe('strict Codex semantic classification', () => {
+  it('never promotes a spark-prefixed provider feature into the Spark quota', () => {
+    const windows = buildCodexQuotaWindowInfos({
+      additional_rate_limits: [
+        {
+          metered_feature: 'spark_feature',
+          limit_name: 'Spark Premium',
+          rate_limit: {
+            secondary_window: { used_percent: 25, limit_window_seconds: 604_800 },
+          },
+        },
+      ],
+    });
+    const byId = new Map(windows.map((window) => [window.id, window]));
+    expect(byId.get('spark-feature-weekly-0')).toMatchObject({
+      modelScope: { kind: 'feature', key: 'spark_feature', complete: false },
+      scopeDisplayName: 'Spark Premium',
+    });
+    expect(byId.has('spark-weekly-0')).toBe(false);
+
+    expect(
+      resolveCodexSnapshotQuotaLabel({
+        providerWindowId: 'spark-feature-weekly-0',
+        windowKind: 'weekly',
+        modelScope: { kind: 'feature', key: 'spark_feature', complete: false },
+        scopeDisplayName: 'Spark Premium',
+        durationSeconds: 604_800,
+      })
+    ).toEqual({
+      labelKey: 'codex_quota.additional_secondary_window',
+      labelParams: { name: 'Spark Premium' },
+    });
+  });
+
+  it('keeps codex_spark_feature an ordinary feature while codex_spark stays verified Spark', () => {
+    const featureResolution = resolveCodexAdditionalQuotaScope({
+      metered_feature: 'codex_spark_feature',
+      rate_limit: { secondary_window: { limit_window_seconds: 604_800 } },
+    });
+    expect(featureResolution).toMatchObject({
+      modelScope: { kind: 'feature', key: 'codex_spark_feature', complete: false },
+      providerWindowIdPrefix: 'codex-spark-feature',
+    });
+    expect(inferCodexQuotaScopeFromProviderWindowId('codex-spark-feature-weekly-0')).toMatchObject({
+      kind: 'feature',
+      key: 'codex_spark_feature',
+      complete: false,
+    });
+
+    const sparkResolution = resolveCodexAdditionalQuotaScope({
+      metered_feature: 'codex_spark',
+      rate_limit: { secondary_window: { limit_window_seconds: 604_800 } },
+    });
+    expect(sparkResolution.modelScope).toEqual({
+      kind: 'models',
+      models: [CODEX_SPARK_MODEL_ID],
+      complete: true,
+    });
+  });
+
+  it('canonicalizes strict Spark compatibility ids only and keeps feature ids intact', () => {
+    expect(canonicalizeCodexProviderWindowId('spark')).toBe('spark');
+    expect(canonicalizeCodexProviderWindowId('gpt-5-3-codex-spark-weekly-0')).toBe(
+      'spark-weekly-0'
+    );
+    expect(canonicalizeCodexProviderWindowId('codex-spark-weekly-0')).toBe('spark-weekly-0');
+    expect(canonicalizeCodexProviderWindowId('spark-0-window-7d-0')).toBe('spark-0-window-7d-0');
+    expect(canonicalizeCodexProviderWindowId('codex-spark-feature-weekly-0')).toBe(
+      'codex-spark-feature-weekly-0'
+    );
+    expect(canonicalizeCodexProviderWindowId('spark-feature-weekly-0')).toBe(
+      'spark-feature-weekly-0'
+    );
+    expect(canonicalizeCodexProviderWindowId('spark-window-7d-0')).toBe('spark-window-7d-0');
+  });
+
+  it('recognizes the fast-coding legacy alias only with a strict generated suffix', () => {
+    expect(inferCodexQuotaScopeFromProviderWindowId('fast-coding-weekly-0')).toEqual({
+      kind: 'models',
+      models: [CODEX_SPARK_MODEL_ID],
+      complete: true,
+    });
+    expect(isCodexKnownScopedProviderWindowId('fast-coding-weekly-0')).toBe(true);
+    expect(isCodexKnownScopedProviderWindowId('fast-coding-feature-weekly-0')).toBe(false);
+    expect(inferCodexQuotaScopeFromProviderWindowId('fast-coding-feature-weekly-0')).toMatchObject({
+      kind: 'feature',
+      key: 'fast_coding_feature',
+      complete: false,
+    });
+  });
+
+  it('never re-interprets an explicit fast_coding feature scope as Spark', () => {
+    expect(
+      resolveCodexSnapshotQuotaLabel({
+        providerWindowId: 'fast-coding-weekly-0',
+        windowKind: 'weekly',
+        modelScope: { kind: 'feature', key: 'fast_coding', complete: false },
+        scopeDisplayName: 'Fast Coding Beta',
+        durationSeconds: 604_800,
+      })
+    ).toEqual({
+      labelKey: 'codex_quota.additional_secondary_window',
+      labelParams: { name: 'Fast Coding Beta' },
+    });
+    expect(
+      resolveCodexSnapshotQuotaLabel({
+        providerWindowId: 'fast-coding-weekly-0',
+        windowKind: 'weekly',
+        modelScope: { kind: 'feature', key: 'fast_coding', complete: false },
+      })
+    ).toBeUndefined();
+    expect(
+      resolveCodexSnapshotQuotaLabel({
+        providerWindowId: 'fast-coding-weekly-0',
+        windowKind: 'weekly',
+        modelScope: { kind: 'all', complete: true },
+      })
+    ).toEqual({
+      labelKey: 'codex_quota.additional_secondary_window',
+      labelParams: { name: 'Spark' },
+    });
+  });
+
+  it('keeps window-prefixed provider features ordinary while main generic ids stay Main', () => {
+    const windows = buildCodexQuotaWindowInfos({
+      additional_rate_limits: [
+        {
+          metered_feature: 'window_feature',
+          rate_limit: { secondary_window: { used_percent: 10, limit_window_seconds: 604_800 } },
+        },
+      ],
+    });
+    expect(windows.find((window) => window.id === 'window-feature-weekly-0')).toMatchObject({
+      modelScope: { kind: 'feature', key: 'window_feature', complete: false },
+    });
+
+    expect(isCodexMainProviderWindowId('window-7d-0')).toBe(true);
+    expect(isCodexMainProviderWindowId('window-12h-1')).toBe(true);
+    expect(isCodexMainProviderWindowId('window-unknown-0')).toBe(true);
+    expect(isCodexMainProviderWindowId('window-feature-weekly-0')).toBe(false);
+    expect(isCodexMainProviderWindowId('window-premium-weekly-0')).toBe(false);
+    expect(isCodexMainProviderWindowId('window-beta')).toBe(false);
+  });
+
+  it('separates top-level Code Review windows from ordinary code_review Additional families', () => {
+    expect(isCodexCodeReviewProviderWindowId('code-review')).toBe(true);
+    expect(isCodexCodeReviewProviderWindowId('code-review-five-hour')).toBe(true);
+    expect(isCodexCodeReviewProviderWindowId('code-review-weekly')).toBe(true);
+    expect(isCodexCodeReviewProviderWindowId('code-review-monthly')).toBe(true);
+    expect(isCodexCodeReviewProviderWindowId('code-review-window-7d-0')).toBe(true);
+    expect(isCodexCodeReviewProviderWindowId('code-review-window-unknown-0')).toBe(true);
+    expect(isCodexCodeReviewProviderWindowId('code-review-weekly-0')).toBe(false);
+    expect(isCodexCodeReviewProviderWindowId('code-review-premium-weekly-0')).toBe(false);
+
+    const premium = buildCodexQuotaWindowInfos({
+      additional_rate_limits: [
+        {
+          limit_name: 'Code Review Premium',
+          rate_limit: { secondary_window: { used_percent: 5, limit_window_seconds: 604_800 } },
+        },
+      ],
+    });
+    expect(premium.find((window) => window.id === 'code-review-premium-weekly-0')).toMatchObject({
+      modelScope: { kind: 'feature', key: 'code_review_premium', complete: false },
+    });
+
+    const ordinary = buildCodexQuotaWindowInfos({
+      additional_rate_limits: [
+        {
+          metered_feature: 'code_review',
+          rate_limit: { secondary_window: { used_percent: 5, limit_window_seconds: 604_800 } },
+        },
+      ],
+    });
+    expect(ordinary.find((window) => window.id === 'code-review-weekly-0')).toMatchObject({
+      modelScope: { kind: 'feature', key: CODEX_CODE_REVIEW_SCOPE_KEY, complete: false },
+    });
+
+    expect(inferCodexQuotaScopeFromProviderWindowId('code-review-weekly')).toMatchObject({
+      kind: 'feature',
+      key: CODEX_CODE_REVIEW_SCOPE_KEY,
+      complete: false,
+    });
+    expect(isCodexKnownScopedProviderWindowId('code-review-weekly')).toBe(true);
+    expect(isCodexKnownScopedProviderWindowId('code-review-weekly-0')).toBe(false);
+    expect(isCodexKnownScopedProviderWindowId('code-review-premium-weekly-0')).toBe(false);
+  });
+
+  it('requires an explicit or legacy scope before applying Code Review snapshot labels', () => {
+    expect(
+      resolveCodexSnapshotQuotaLabel({
+        providerWindowId: 'code-review-weekly',
+        windowKind: 'weekly',
+        modelScope: { kind: 'feature', key: CODEX_CODE_REVIEW_SCOPE_KEY, complete: false },
+      })
+    ).toEqual({ labelKey: 'codex_quota.code_review_secondary_window' });
+    expect(
+      resolveCodexSnapshotQuotaLabel({
+        providerWindowId: 'code-review-window-7d-0',
+        windowKind: 'weekly',
+        modelScope: { kind: 'all', complete: true },
+        durationSeconds: 7 * 24 * 60 * 60,
+      })
+    ).toEqual({
+      labelKey: 'codex_quota.code_review_generic_window',
+      labelParams: { duration: '7d' },
+    });
+    expect(
+      resolveCodexSnapshotQuotaLabel({
+        providerWindowId: 'code-review-weekly',
+        windowKind: 'weekly',
+        modelScope: { kind: 'feature', key: 'code_review_premium', complete: false },
+        scopeDisplayName: 'Code Review Premium',
+      })
+    ).toEqual({
+      labelKey: 'codex_quota.additional_secondary_window',
+      labelParams: { name: 'Code Review Premium' },
+    });
+  });
+
+  it('fails closed for legacy all snapshots with known-prefix impostor ids', () => {
+    expect(inferCodexQuotaScopeFromProviderWindowId('spark-feature-weekly-0')).toMatchObject({
+      kind: 'feature',
+      key: 'spark_feature',
+      complete: false,
+    });
+    expect(inferCodexQuotaScopeFromProviderWindowId('window-feature-weekly-0')).toMatchObject({
+      kind: 'feature',
+      key: 'window_feature',
+      complete: false,
+    });
+    expect(inferCodexQuotaScopeFromProviderWindowId('code-review-premium-weekly-0')).toMatchObject({
+      kind: 'feature',
+      key: 'code_review_premium',
+      complete: false,
+    });
+    expect(
+      resolveCodexSnapshotQuotaLabel({
+        providerWindowId: 'spark-feature-weekly-0',
+        windowKind: 'weekly',
+        modelScope: { kind: 'all', complete: true },
+      })
+    ).toBeUndefined();
   });
 });

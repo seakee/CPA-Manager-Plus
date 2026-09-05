@@ -1,6 +1,12 @@
 package quotasnapshot
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/codexquota"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+)
 
 func TestGeneratedCodexSuffixFromID(t *testing.T) {
 	tests := []struct {
@@ -28,17 +34,85 @@ func TestGeneratedCodexSuffixFromID(t *testing.T) {
 		{name: "invalid generic duration", input: "-0-window-invalid-0", valid: false},
 		{name: "invalid generic index", input: "-0-window-86400-x", valid: false},
 		{name: "unknown family role", input: "-foo-weekly-0", valid: false},
+		{name: "label-shaped remainder", input: "-feature-weekly-0", valid: false},
+		{name: "premium label remainder", input: "-premium-weekly-0", valid: false},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got, valid := generatedCodexSuffixFromID(test.input)
+			valid := codexquota.IsGeneratedCodexAdditionalWindowSuffix(test.input)
 			if valid != test.valid {
-				t.Fatalf("generatedCodexSuffixFromID(%q) valid = %v, want %v", test.input, valid, test.valid)
+				t.Fatalf("IsGeneratedCodexAdditionalWindowSuffix(%q) = %v, want %v", test.input, valid, test.valid)
 			}
-			if valid && got != test.want {
-				t.Fatalf("generatedCodexSuffixFromID(%q) = %q, want %q", test.input, got, test.want)
+			if valid && strings.ToLower(strings.TrimSpace(test.input)) != test.want {
+				t.Fatalf("normalized suffix %q, want %q", strings.ToLower(strings.TrimSpace(test.input)), test.want)
 			}
 		})
+	}
+}
+
+func TestGeneratedAdditionalWindowSuffixAfterPrefix(t *testing.T) {
+	tests := []struct {
+		name   string
+		id     string
+		prefix string
+		valid  bool
+	}{
+		{name: "spark weekly", id: "spark-weekly-0", prefix: "spark", valid: true},
+		{name: "spark five hour", id: "spark-five-hour-2", prefix: "spark", valid: true},
+		{name: "spark generic", id: "spark-0-window-7d-0", prefix: "spark", valid: true},
+		{name: "legacy alias", id: "fast-coding-weekly-0", prefix: "fast-coding", valid: true},
+		{name: "feature remainder", id: "spark-feature-weekly-0", prefix: "spark", valid: false},
+		{name: "premium remainder", id: "fast-coding-premium-weekly-0", prefix: "fast-coding", valid: false},
+		{name: "main generic is not additional", id: "spark-window-7d-0", prefix: "spark", valid: false},
+		{name: "exact prefix only", id: "spark", prefix: "spark", valid: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, ok := codexquota.GeneratedAdditionalWindowSuffixAfterPrefix(test.id, test.prefix); ok != test.valid {
+				t.Fatalf("GeneratedAdditionalWindowSuffixAfterPrefix(%q, %q) ok = %v, want %v", test.id, test.prefix, ok, test.valid)
+			}
+		})
+	}
+}
+
+func TestCodexAdditionalClassifiersKeepPrefixedFeaturesAndExcludeKnownScopes(t *testing.T) {
+	observation := model.AccountQuotaObservation{Provider: "codex", InventoryMode: "complete"}
+	feature := func(scopeKey, providerWindowID string) *model.AccountQuotaSnapshot {
+		return &model.AccountQuotaSnapshot{
+			Provider:         "codex",
+			ModelScopeKind:   "feature",
+			ModelScopeKey:    scopeKey,
+			ProviderWindowID: providerWindowID,
+			WindowKind:       "weekly",
+		}
+	}
+	for _, snapshot := range []*model.AccountQuotaSnapshot{
+		feature("spark_feature", "spark-feature-weekly-0"),
+		feature("codex_spark_feature", "codex-spark-feature-weekly-0"),
+		feature("window_feature", "window-feature-weekly-0"),
+		feature("fast_coding", "fast-coding-weekly-0"),
+		feature("code_review", "code-review-weekly-0"),
+	} {
+		if !isCodexStableAdditionalSnapshot(observation, snapshot) {
+			t.Fatalf("stable classifier excluded ordinary feature %#v", snapshot)
+		}
+	}
+
+	excluded := []*model.AccountQuotaSnapshot{
+		feature("code_review", "code-review-weekly"),
+		feature("code_review", "code-review-window-7d-0"),
+		{Provider: "codex", ModelScopeKind: "models", ProviderWindowID: "spark-weekly-0"},
+		{Provider: "codex", ModelScopeKind: "all", ProviderWindowID: "window-7d-0"},
+		feature("future_feature", "cpamp:ambiguous:future-feature-weekly-0"),
+	}
+	for _, snapshot := range excluded {
+		if isCodexStableAdditionalSnapshot(observation, snapshot) {
+			t.Fatalf("stable classifier admitted %#v", snapshot)
+		}
+		if isCodexCollisionAdditionalSnapshot(observation, snapshot) {
+			t.Fatalf("collision classifier admitted %#v", snapshot)
+		}
 	}
 }

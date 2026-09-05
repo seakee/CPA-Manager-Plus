@@ -147,6 +147,60 @@ const normalizeFeatureKey = (raw: string | null | undefined) =>
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '');
 
+// Strict generated Additional suffix grammar, mirrored by the Manager Server:
+//   -five-hour-<index>, -weekly-<index>, -monthly-<index> with a decimal
+//   index, or -<familyIndex>-window-<duration>-<windowIndex> where duration is
+//   "unknown", decimal seconds, or decimal seconds with a d/h/s unit.
+const CODEX_DECIMAL_TOKEN = /^[0-9]+$/;
+const CODEX_WINDOW_DURATION_TOKEN = /^(?:unknown|[0-9]+|[0-9]+[dhs])$/;
+
+const isCodexGeneratedAdditionalSuffix = (suffix: string): boolean => {
+  const normalized = suffix.trim().toLowerCase();
+  if (!normalized.startsWith('-') || normalized.length === 1) return false;
+  const parts = normalized.slice(1).split('-');
+  if (
+    parts.length === 3 &&
+    parts[0] === 'five' &&
+    parts[1] === 'hour' &&
+    CODEX_DECIMAL_TOKEN.test(parts[2])
+  ) {
+    return true;
+  }
+  if (
+    parts.length === 2 &&
+    (parts[0] === 'weekly' || parts[0] === 'monthly') &&
+    CODEX_DECIMAL_TOKEN.test(parts[1])
+  ) {
+    return true;
+  }
+  return (
+    parts.length === 4 &&
+    CODEX_DECIMAL_TOKEN.test(parts[0]) &&
+    parts[1] === 'window' &&
+    CODEX_WINDOW_DURATION_TOKEN.test(parts[2]) &&
+    CODEX_DECIMAL_TOKEN.test(parts[3])
+  );
+};
+
+const codexGeneratedAdditionalSuffixAfterPrefix = (
+  value: string,
+  prefix: string
+): string | null => {
+  const id = value.trim().toLowerCase();
+  const normalizedPrefix = prefix.trim().toLowerCase();
+  if (!id || !normalizedPrefix || !id.startsWith(`${normalizedPrefix}-`)) return null;
+  const suffix = id.slice(normalizedPrefix.length);
+  return isCodexGeneratedAdditionalSuffix(suffix) ? suffix : null;
+};
+
+const isCodexSparkCompatibilityProviderWindowId = (value: string): boolean => {
+  const raw = value.trim().toLowerCase();
+  if (!raw) return false;
+  return [...CODEX_SPARK_PROVIDER_WINDOW_PREFIXES, ...CODEX_SPARK_LEGACY_PROVIDER_WINDOW_PREFIXES].some(
+    (prefix) => raw === prefix || codexGeneratedAdditionalSuffixAfterPrefix(raw, prefix) !== null
+  );
+};
+
 const codexAdditionalWindowIdentityPart = (window?: CodexUsageWindow | null): string => {
   if (!window) return 'none';
   const seconds = getWindowSeconds(window);
@@ -210,8 +264,9 @@ export const canonicalizeCodexProviderWindowId = (value: string, windowKind?: st
   if (id === 'secondary') return normalizedWindowKind === 'monthly' ? 'monthly' : 'weekly';
   for (const prefix of CODEX_SPARK_PROVIDER_WINDOW_PREFIXES) {
     if (id === prefix) return CODEX_SPARK_PROVIDER_WINDOW_PREFIX;
-    if (id.startsWith(`${prefix}-`)) {
-      return `${CODEX_SPARK_PROVIDER_WINDOW_PREFIX}${id.slice(prefix.length)}`;
+    const suffix = codexGeneratedAdditionalSuffixAfterPrefix(id, prefix);
+    if (suffix !== null) {
+      return `${CODEX_SPARK_PROVIDER_WINDOW_PREFIX}${suffix}`;
     }
   }
   return id;
@@ -339,17 +394,8 @@ export const findCodexProviderWindowMatch = (
   return candidate.index;
 };
 
-const isCodexSparkProviderWindowId = (value: string): boolean => {
-  const raw = value.trim().toLowerCase();
-  const id = canonicalizeCodexProviderWindowId(raw);
-  return (
-    id === CODEX_SPARK_PROVIDER_WINDOW_PREFIX ||
-    id.startsWith(`${CODEX_SPARK_PROVIDER_WINDOW_PREFIX}-`) ||
-    CODEX_SPARK_LEGACY_PROVIDER_WINDOW_PREFIXES.some(
-      (prefix) => raw === prefix || raw.startsWith(`${prefix}-`)
-    )
-  );
-};
+const isCodexSparkProviderWindowId = (value: string): boolean =>
+  isCodexSparkCompatibilityProviderWindowId(value);
 
 export const isCodexMainQuotaModelScope = (scope: QuotaModelScope | null | undefined): boolean =>
   scope?.kind === 'family' &&
@@ -390,9 +436,29 @@ const codexMainProviderWindowAliases = (
   }
 };
 
+const CODEX_MAIN_GENERIC_WINDOW_ID = /^window-(?:unknown|[0-9]+|[0-9]+[dhs])-[0-9]+$/;
+const CODEX_CODE_REVIEW_PROVIDER_WINDOW_IDS = new Set([
+  'code-review',
+  'code-review-five-hour',
+  'code-review-weekly',
+  'code-review-monthly',
+]);
+const CODEX_CODE_REVIEW_GENERIC_WINDOW_ID =
+  /^code-review-window-(?:unknown|[0-9]+|[0-9]+[dhs])-[0-9]+$/;
+
 export const isCodexMainProviderWindowId = (providerWindowId: string): boolean => {
   const id = canonicalizeCodexProviderWindowId(providerWindowId);
-  return CODEX_MAIN_PROVIDER_WINDOW_IDS.has(id) || id.startsWith('window-');
+  return CODEX_MAIN_PROVIDER_WINDOW_IDS.has(id) || CODEX_MAIN_GENERIC_WINDOW_ID.test(id);
+};
+
+// Only the canonical top-level Code Review identities count as the known Code
+// Review quota. Generated family windows such as `code-review-weekly-0` belong
+// to an ordinary metered_feature=code_review Additional family.
+export const isCodexCodeReviewProviderWindowId = (providerWindowId: string): boolean => {
+  const id = providerWindowId.trim().toLowerCase();
+  return (
+    CODEX_CODE_REVIEW_PROVIDER_WINDOW_IDS.has(id) || CODEX_CODE_REVIEW_GENERIC_WINDOW_ID.test(id)
+  );
 };
 
 export const isCodexLegacyAllScopeReplacement = (
@@ -499,14 +565,14 @@ export const resolveCodexUsageQuotaScope = (
 export const inferCodexQuotaScopeFromProviderWindowId = (
   providerWindowId: string
 ): QuotaModelScope => {
+  if (isCodexSparkProviderWindowId(providerWindowId)) {
+    return sparkCodexQuotaScope();
+  }
   const id = canonicalizeCodexProviderWindowId(providerWindowId);
   if (isCodexMainProviderWindowId(id)) {
     return mainCodexQuotaScope();
   }
-  if (isCodexSparkProviderWindowId(providerWindowId)) {
-    return sparkCodexQuotaScope();
-  }
-  if (id === 'code-review' || id.startsWith('code-review-')) {
+  if (isCodexCodeReviewProviderWindowId(id)) {
     return incompleteCodexFeatureScope(CODEX_CODE_REVIEW_SCOPE_KEY);
   }
   const familyMatch = id.match(/^(.*)-(?:five-hour|weekly|monthly)-(\d+)$/);
@@ -514,18 +580,9 @@ export const inferCodexQuotaScopeFromProviderWindowId = (
   return incompleteCodexFeatureScope(familyMatch?.[1] ?? genericMatch?.[1] ?? id);
 };
 
-export const isCodexKnownScopedProviderWindowId = (providerWindowId: string): boolean => {
-  const raw = providerWindowId.trim().toLowerCase();
-  const id = canonicalizeCodexProviderWindowId(raw);
-  return (
-    isCodexSparkProviderWindowId(raw) ||
-    id === 'code-review' ||
-    id.startsWith('code-review-') ||
-    CODEX_SPARK_LEGACY_PROVIDER_WINDOW_PREFIXES.some(
-      (prefix) => raw === prefix || raw.startsWith(`${prefix}-`)
-    )
-  );
-};
+export const isCodexKnownScopedProviderWindowId = (providerWindowId: string): boolean =>
+  isCodexSparkProviderWindowId(providerWindowId) ||
+  isCodexCodeReviewProviderWindowId(providerWindowId);
 
 const formatWindowDuration = (seconds: number | null): string => {
   if (seconds === null || seconds <= 0) return 'unknown';
@@ -600,21 +657,34 @@ export const resolveCodexSnapshotQuotaLabel = ({
     weekly: 'codex_quota.code_review_secondary_window',
     monthly: 'codex_quota.code_review_monthly_window',
   };
-  if (
-    id === 'code-review-five-hour' ||
-    id === 'code-review-weekly' ||
-    id === 'code-review-monthly'
-  ) {
+  // Provider-window string semantics only apply when the persisted scope is
+  // legacy `all`, unknown, or missing. An explicit scoped identity always
+  // wins, even when its provider ID resembles a known window name.
+  const normalizedScopeKey = modelScope?.key?.trim().toLowerCase() ?? '';
+  const isLegacyOrUnknownScope =
+    !modelScope ||
+    modelScope.kind === 'all' ||
+    (modelScope.kind === 'models' && (modelScope.models?.length ?? 0) === 0) ||
+    (modelScope.kind === 'feature' &&
+      (normalizedScopeKey === '' ||
+        normalizedScopeKey === 'scope_unknown' ||
+        normalizedScopeKey === CODEX_UNKNOWN_REQUEST_SCOPE_KEY));
+  const isExplicitCodeReviewScope = normalizedScopeKey === CODEX_CODE_REVIEW_SCOPE_KEY;
+
+  if (isCodexCodeReviewProviderWindowId(id) && (isLegacyOrUnknownScope || isExplicitCodeReviewScope)) {
+    if (id.startsWith('code-review-window-')) {
+      return {
+        labelKey: 'codex_quota.code_review_generic_window',
+        labelParams: { duration: formatWindowDuration(normalizeNumberValue(durationSeconds)) },
+      };
+    }
     const labelKey = codeReviewLabelKeys[normalizedKind];
     if (labelKey) return { labelKey };
   }
-  if (id.startsWith('code-review-window-') && modelScope?.key === CODEX_CODE_REVIEW_SCOPE_KEY) {
-    return {
-      labelKey: 'codex_quota.code_review_generic_window',
-      labelParams: { duration: formatWindowDuration(normalizeNumberValue(durationSeconds)) },
-    };
+  if (isCodexSparkModelScope(modelScope)) {
+    return additionalQuotaWindowLabelMetadata(windowKind, 'Spark', durationSeconds);
   }
-  if (isCodexSparkProviderWindowId(providerWindowId) || isCodexSparkModelScope(modelScope)) {
+  if (isLegacyOrUnknownScope && isCodexSparkProviderWindowId(providerWindowId)) {
     return additionalQuotaWindowLabelMetadata(windowKind, 'Spark', durationSeconds);
   }
   const dynamicName = scopeDisplayName?.trim();

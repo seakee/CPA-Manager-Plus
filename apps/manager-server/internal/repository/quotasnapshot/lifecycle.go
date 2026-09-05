@@ -634,14 +634,17 @@ func isCodexStableAdditionalSnapshot(
 	if !strings.EqualFold(strings.TrimSpace(snapshot.ModelScopeKind), "feature") {
 		return false
 	}
+	// An explicit feature scope makes this an ordinary Additional family even
+	// when its provider-window ID resembles a known Spark/Main name; only the
+	// reserved ambiguous namespace and canonical top-level Code Review windows
+	// stay outside the Additional lineage.
 	scopeKey := codexquota.NormalizeFeatureKey(snapshot.ModelScopeKey)
-	if scopeKey == "" || scopeKey == codexquota.CodeReviewScopeKey {
+	if scopeKey == "" {
 		return false
 	}
 	canonicalID := strings.ToLower(strings.TrimSpace(snapshot.ProviderWindowID))
-	if canonicalID == "" || codexquota.IsMainProviderWindowID(canonicalID) ||
-		codexquota.IsSparkProviderWindowID(canonicalID) ||
-		codexquota.IsAmbiguousAdditionalProviderWindowID(canonicalID) {
+	if canonicalID == "" || codexquota.IsAmbiguousAdditionalProviderWindowID(canonicalID) ||
+		codexquota.IsCodeReviewProviderWindowID(canonicalID) {
 		return false
 	}
 	_, ok := generatedCodexWindowSuffix(canonicalID, codexStableAdditionalPrefix(snapshot))
@@ -747,12 +750,7 @@ func findLogicalWindowsForCodexSuffix(
 }
 
 func generatedCodexWindowSuffix(providerWindowID, canonicalPrefix string) (string, bool) {
-	providerWindowID = strings.ToLower(strings.TrimSpace(providerWindowID))
-	canonicalPrefix = strings.ToLower(strings.TrimSpace(canonicalPrefix))
-	if providerWindowID == "" || canonicalPrefix == "" || !strings.HasPrefix(providerWindowID, canonicalPrefix+"-") {
-		return "", false
-	}
-	return generatedCodexSuffixFromID(providerWindowID[len(canonicalPrefix):])
+	return codexquota.GeneratedAdditionalWindowSuffixAfterPrefix(providerWindowID, canonicalPrefix)
 }
 
 func generatedCodexWindowSuffixFromID(providerWindowID string) (string, bool) {
@@ -763,8 +761,8 @@ func generatedCodexWindowSuffixFromID(providerWindowID string) (string, bool) {
 	parts := strings.Split(normalized, "-")
 	for index := 1; index < len(parts); index++ {
 		candidate := "-" + strings.Join(parts[index:], "-")
-		if suffix, ok := generatedCodexSuffixFromID(candidate); ok {
-			return suffix, true
+		if codexquota.IsGeneratedCodexAdditionalWindowSuffix(candidate) {
+			return candidate, true
 		}
 	}
 	return "", false
@@ -776,51 +774,6 @@ func generatedCodexWindowSuffixFromID(providerWindowID string) (string, bool) {
 // lifecycle migration code.
 func GeneratedCodexWindowSuffixFromID(providerWindowID string) (string, bool) {
 	return generatedCodexWindowSuffixFromID(providerWindowID)
-}
-
-func generatedCodexSuffixFromID(suffix string) (string, bool) {
-	normalized := strings.ToLower(strings.TrimSpace(suffix))
-	if !strings.HasPrefix(normalized, "-") || len(normalized) == 1 {
-		return "", false
-	}
-	parts := strings.Split(strings.TrimPrefix(normalized, "-"), "-")
-	if len(parts) == 3 && parts[0] == "five" && parts[1] == "hour" && isDecimalToken(parts[2]) {
-		return normalized, true
-	}
-	if len(parts) == 2 && (parts[0] == "weekly" || parts[0] == "monthly") && isDecimalToken(parts[1]) {
-		return normalized, true
-	}
-	if len(parts) == 4 && isDecimalToken(parts[0]) && parts[1] == "window" &&
-		isCodexWindowDurationToken(parts[2]) && isDecimalToken(parts[3]) {
-		return normalized, true
-	}
-	return "", false
-}
-
-func isDecimalToken(value string) bool {
-	if value == "" {
-		return false
-	}
-	for _, char := range value {
-		if char < '0' || char > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-func isCodexWindowDurationToken(value string) bool {
-	if value == "unknown" {
-		return true
-	}
-	if isDecimalToken(value) {
-		return true
-	}
-	if len(value) < 2 || !isDecimalToken(value[:len(value)-1]) {
-		return false
-	}
-	unit := value[len(value)-1]
-	return unit == 'd' || unit == 'h' || unit == 's'
 }
 
 func scanLogicalWindowRows(rows *sql.Rows) ([]logicalWindowRow, error) {
@@ -982,13 +935,15 @@ func isCodexCollisionAdditionalSnapshot(
 		return false
 	}
 	scopeKey := codexquota.NormalizeFeatureKey(snapshot.ModelScopeKey)
-	if scopeKey == "" || scopeKey == codexquota.CodeReviewScopeKey {
+	if scopeKey == "" {
 		return false
 	}
+	// Prefix similarity to Spark/Main names does not disqualify an explicit
+	// feature scope from collision reconciliation; only the reserved ambiguous
+	// namespace and canonical top-level Code Review windows do.
 	providerWindowID := strings.ToLower(strings.TrimSpace(snapshot.ProviderWindowID))
-	if providerWindowID == "" || codexquota.IsMainProviderWindowID(providerWindowID) ||
-		codexquota.IsSparkProviderWindowID(providerWindowID) ||
-		codexquota.IsAmbiguousAdditionalProviderWindowID(providerWindowID) {
+	if providerWindowID == "" || codexquota.IsAmbiguousAdditionalProviderWindowID(providerWindowID) ||
+		codexquota.IsCodeReviewProviderWindowID(providerWindowID) {
 		return false
 	}
 	suffix, ok := generatedCodexWindowSuffixFromID(providerWindowID)
@@ -2579,8 +2534,19 @@ func resolveContainerCycleID(
 	return 0, false, nil
 }
 
+// quotaSnapshotQueryer abstracts the read surface shared by *sql.DB and
+// *sql.Tx so the same SELECT helpers can run inside one read transaction.
+type quotaSnapshotQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
 func (r *repository) ListWindowStates(ctx context.Context, accountKey, provider string) ([]model.AccountQuotaWindowState, error) {
-	rows, err := r.db.QueryContext(ctx, `select
+	return listWindowStates(ctx, r.db, accountKey, provider)
+}
+
+func listWindowStates(ctx context.Context, db quotaSnapshotQueryer, accountKey, provider string) ([]model.AccountQuotaWindowState, error) {
+	rows, err := db.QueryContext(ctx, `select
 		id, account_key, provider, provider_window_id, window_kind, window_mode,
 		model_scope_kind, coalesce(model_scope_key, ''), coalesce(model_ids_json, ''),
 		scope_fingerprint, inventory_scope_key, coalesce(relationship_kind, ''),
@@ -2620,18 +2586,18 @@ func (r *repository) ListWindowStates(ctx context.Context, accountKey, provider 
 	cycleAliases := make(map[int64]int64)
 	for index := range states {
 		state := &states[index]
-		activationID, err := latestActivationID(ctx, r.db, state.ID, state.Generation)
+		activationID, err := latestActivationID(ctx, db, state.ID, state.Generation)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return nil, err
 		}
 		if err == nil {
 			state.ActivationID = activationID
-			current, currentErr := activeCycle(ctx, r.db, activationID)
+			current, currentErr := activeCycle(ctx, db, activationID)
 			if currentErr != nil && !errors.Is(currentErr, sql.ErrNoRows) {
 				return nil, currentErr
 			}
 			if currentErr == nil {
-				normalizedCurrent, normalizedPrevious, aliases, normalizeErr := normalizeCycleView(ctx, r.db, activationID, current)
+				normalizedCurrent, normalizedPrevious, aliases, normalizeErr := normalizeCycleView(ctx, db, activationID, current)
 				if normalizeErr != nil {
 					return nil, normalizeErr
 				}
@@ -2661,7 +2627,7 @@ func applyCycleParentAliases(cycle *model.AccountQuotaCycle, aliases map[int64]i
 	cycle.ParentCycleID = &canonicalID
 }
 
-func latestActivationID(ctx context.Context, db *sql.DB, windowID int64, generation int) (int64, error) {
+func latestActivationID(ctx context.Context, db quotaSnapshotQueryer, windowID int64, generation int) (int64, error) {
 	var id int64
 	err := db.QueryRowContext(ctx, `select id from account_quota_window_activations
 		where window_id = ? and generation = ? limit 1`, windowID, generation).Scan(&id)
@@ -2671,7 +2637,7 @@ func latestActivationID(ctx context.Context, db *sql.DB, windowID int64, generat
 // adjacentPreviousCycle returns the cycle immediately preceding currentStartMS.
 // The jitter bound is intentional: this helper is used only while normalizing
 // early-reset fragments, where time adjacency is part of the collapse proof.
-func adjacentPreviousCycle(ctx context.Context, db *sql.DB, activationID, currentStartMS int64) (model.AccountQuotaCycle, error) {
+func adjacentPreviousCycle(ctx context.Context, db quotaSnapshotQueryer, activationID, currentStartMS int64) (model.AccountQuotaCycle, error) {
 	return scanCycle(db.QueryRowContext(ctx, `select
 		id, activation_id, provider_cycle_key, state, scheduled_start_ms, scheduled_end_ms,
 		actual_start_ms, actual_end_ms, duration_seconds, boundary_accuracy,
@@ -2689,7 +2655,7 @@ func adjacentPreviousCycle(ctx context.Context, db *sql.DB, activationID, curren
 // permits observation gaps; activation identity provides the lifecycle fence.
 // A mode change is an explicit boundary between fixed/calendar cycle histories,
 // so candidates before that boundary are not exposed as a previous quota cycle.
-func latestClosedCycleBefore(ctx context.Context, db *sql.DB, activationID, cutoffMS int64) (model.AccountQuotaCycle, error) {
+func latestClosedCycleBefore(ctx context.Context, db quotaSnapshotQueryer, activationID, cutoffMS int64) (model.AccountQuotaCycle, error) {
 	overlapCutoffMS := cutoffMS
 	if overlapCutoffMS > math.MaxInt64-quotaPreviousCycleOverlapJitterMS {
 		overlapCutoffMS = math.MaxInt64
@@ -2731,7 +2697,7 @@ type quotaCycleEvidence struct {
 
 func normalizeCycleView(
 	ctx context.Context,
-	db *sql.DB,
+	db quotaSnapshotQueryer,
 	activationID int64,
 	current model.AccountQuotaCycle,
 ) (model.AccountQuotaCycle, *model.AccountQuotaCycle, map[int64]int64, error) {
@@ -2839,7 +2805,7 @@ func normalizeCycleView(
 	return current, previousResult, aliases, nil
 }
 
-func cycleHasOnlyProvisionalZeroAPIBoundaries(ctx context.Context, db *sql.DB, cycleID int64) (bool, error) {
+func cycleHasOnlyProvisionalZeroAPIBoundaries(ctx context.Context, db quotaSnapshotQueryer, cycleID int64) (bool, error) {
 	var hasSnapshots, hasNonProvisional, hasScheduledPredecessor int
 	err := db.QueryRowContext(ctx, `select
 		exists(select 1 from account_quota_snapshots where cycle_id = ? limit 1),
@@ -2871,7 +2837,7 @@ func cycleHasOnlyProvisionalZeroAPIBoundaries(ctx context.Context, db *sql.DB, c
 	return hasSnapshots != 0 && hasNonProvisional == 0 && hasScheduledPredecessor == 0, nil
 }
 
-func loadQuotaCycleEvidence(ctx context.Context, db *sql.DB, cycleID int64) (quotaCycleEvidence, error) {
+func loadQuotaCycleEvidence(ctx context.Context, db quotaSnapshotQueryer, cycleID int64) (quotaCycleEvidence, error) {
 	rows, err := db.QueryContext(ctx, `select
 		provider, source, window_mode, boundary_accuracy, cycle_start_ms, cycle_end_ms,
 		duration_seconds, used_percent, observed_at_ms

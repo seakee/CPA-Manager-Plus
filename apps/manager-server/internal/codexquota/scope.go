@@ -131,8 +131,7 @@ func ResolveProviderWindowScope(providerWindowID, windowKind string, provided Mo
 	if IsSparkProviderWindowID(providerWindowID) {
 		return SparkScope()
 	}
-	canonical = CanonicalProviderWindowID(providerWindowID, windowKind)
-	if canonical == "code-review" || strings.HasPrefix(canonical, "code-review-") {
+	if IsCodeReviewProviderWindowID(canonical) {
 		return CodeReviewScope()
 	}
 	// An arbitrary additional ID is not enough evidence to establish an
@@ -160,6 +159,93 @@ func NormalizeProviderWindowPrefix(value string) string {
 // identity and must not participate in lifecycle migration or attribution.
 func IsAmbiguousAdditionalProviderWindowID(value string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(value)), AmbiguousProviderWindowPrefix)
+}
+
+// IsCodexWindowDurationToken reports whether value is a valid generated
+// generic-window duration: "unknown", decimal seconds, or decimal seconds
+// with a d/h/s unit.
+func IsCodexWindowDurationToken(value string) bool {
+	if value == "unknown" {
+		return true
+	}
+	if isDecimalToken(value) {
+		return true
+	}
+	if len(value) < 2 || !isDecimalToken(value[:len(value)-1]) {
+		return false
+	}
+	unit := value[len(value)-1]
+	return unit == 'd' || unit == 'h' || unit == 's'
+}
+
+func isDecimalToken(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// IsGeneratedCodexAdditionalWindowSuffix reports whether value is a strictly
+// generated Additional provider-window suffix: -five-hour-<index>,
+// -weekly-<index>, -monthly-<index> with a decimal index, or
+// -<familyIndex>-window-<duration>-<windowIndex>. Anything else — including
+// provider labels that merely begin with a known word — is not a generated
+// identity and must never drive semantic classification.
+func IsGeneratedCodexAdditionalWindowSuffix(value string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	if !strings.HasPrefix(normalized, "-") || len(normalized) == 1 {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(normalized, "-"), "-")
+	if len(parts) == 3 && parts[0] == "five" && parts[1] == "hour" && isDecimalToken(parts[2]) {
+		return true
+	}
+	if len(parts) == 2 && (parts[0] == "weekly" || parts[0] == "monthly") && isDecimalToken(parts[1]) {
+		return true
+	}
+	return len(parts) == 4 && isDecimalToken(parts[0]) && parts[1] == "window" &&
+		IsCodexWindowDurationToken(parts[2]) && isDecimalToken(parts[3])
+}
+
+// GeneratedAdditionalWindowSuffixAfterPrefix returns the generated suffix when
+// the provider-window ID is exactly prefix plus one strictly generated
+// Additional suffix.
+func GeneratedAdditionalWindowSuffixAfterPrefix(value, prefix string) (string, bool) {
+	id := strings.ToLower(strings.TrimSpace(value))
+	normalizedPrefix := strings.ToLower(strings.TrimSpace(prefix))
+	if id == "" || normalizedPrefix == "" || !strings.HasPrefix(id, normalizedPrefix+"-") {
+		return "", false
+	}
+	suffix := strings.TrimPrefix(id, normalizedPrefix)
+	if !IsGeneratedCodexAdditionalWindowSuffix(suffix) {
+		return "", false
+	}
+	return suffix, true
+}
+
+// IsCodeReviewProviderWindowID reports whether the provider-window ID is a
+// canonical top-level Code Review identity: code-review,
+// code-review-five-hour, code-review-weekly, code-review-monthly, or the
+// strict generated generic form code-review-window-<duration>-<index>.
+// Generated family windows such as code-review-weekly-0 are ordinary
+// metered_feature=code_review Additional families, not top-level Code Review.
+func IsCodeReviewProviderWindowID(providerWindowID string) bool {
+	id := strings.ToLower(strings.TrimSpace(providerWindowID))
+	switch id {
+	case "code-review", "code-review-five-hour", "code-review-weekly", "code-review-monthly":
+		return true
+	}
+	suffix, ok := strings.CutPrefix(id, "code-review-window-")
+	if !ok {
+		return false
+	}
+	parts := strings.Split(suffix, "-")
+	return len(parts) == 2 && IsCodexWindowDurationToken(parts[0]) && isDecimalToken(parts[1])
 }
 
 func normalizeIdentifier(value string, separator rune) string {
@@ -287,8 +373,20 @@ func IsMainProviderWindowID(providerWindowID string) bool {
 	case "five-hour", "weekly", "monthly", "primary", "secondary":
 		return true
 	default:
-		return strings.HasPrefix(id, "window-")
+		return isCodexMainGenericWindowID(id)
 	}
+}
+
+// isCodexMainGenericWindowID matches only the strict generated Main generic
+// grammar window-<duration>-<index>. Provider features whose names merely
+// begin with `window` must not be classified as Codex Main.
+func isCodexMainGenericWindowID(id string) bool {
+	suffix, ok := strings.CutPrefix(id, "window-")
+	if !ok {
+		return false
+	}
+	parts := strings.Split(suffix, "-")
+	return len(parts) == 2 && IsCodexWindowDurationToken(parts[0]) && isDecimalToken(parts[1])
 }
 
 func IsLegacyAllScopeReplacement(providerWindowID string, scope ModelScope) bool {
@@ -354,8 +452,8 @@ func CanonicalProviderWindowID(value string, windowKind ...string) string {
 		if id == prefix {
 			return SparkProviderWindowPrefix
 		}
-		if strings.HasPrefix(id, prefix+"-") {
-			return SparkProviderWindowPrefix + strings.TrimPrefix(id, prefix)
+		if suffix, ok := GeneratedAdditionalWindowSuffixAfterPrefix(id, prefix); ok {
+			return SparkProviderWindowPrefix + suffix
 		}
 	}
 	return id
@@ -371,8 +469,10 @@ func IsSparkScope(scope ModelScope) bool {
 }
 
 // CanonicalProviderWindowIDForScope canonicalizes legacy Spark identifiers
-// only when the matching model scope is known. The raw legacy identifier is
-// still retained by lifecycle alias queries so old rows can be suppressed.
+// only when the matching model scope is known and the identifier is exactly a
+// Spark compatibility ID (exact prefix or prefix plus a strictly generated
+// Additional suffix). The raw legacy identifier is still retained by lifecycle
+// alias queries so old rows can be suppressed.
 func CanonicalProviderWindowIDForScope(value, windowKind string, scope ModelScope) string {
 	canonical := CanonicalProviderWindowID(value, windowKind)
 	if !IsSparkScope(scope) {
@@ -383,8 +483,8 @@ func CanonicalProviderWindowIDForScope(value, windowKind string, scope ModelScop
 		if raw == prefix {
 			return SparkProviderWindowPrefix
 		}
-		if strings.HasPrefix(raw, prefix+"-") {
-			return SparkProviderWindowPrefix + strings.TrimPrefix(raw, prefix)
+		if suffix, ok := GeneratedAdditionalWindowSuffixAfterPrefix(raw, prefix); ok {
+			return SparkProviderWindowPrefix + suffix
 		}
 	}
 	return canonical
@@ -427,10 +527,7 @@ func InferScopeFromProviderWindowID(providerWindowID string) ModelScope {
 	if IsMainProviderWindowID(id) {
 		return MainScope()
 	}
-	if id == SparkProviderWindowPrefix || strings.HasPrefix(id, SparkProviderWindowPrefix+"-") {
-		return SparkScope()
-	}
-	if id == "code-review" || strings.HasPrefix(id, "code-review-") {
+	if IsCodeReviewProviderWindowID(id) {
 		return CodeReviewScope()
 	}
 	return FeatureScope(additionalProviderWindowFamily(id))
@@ -438,12 +535,14 @@ func InferScopeFromProviderWindowID(providerWindowID string) ModelScope {
 
 func IsSparkProviderWindowID(providerWindowID string) bool {
 	raw := strings.ToLower(strings.TrimSpace(providerWindowID))
-	id := CanonicalProviderWindowID(raw)
-	if id == SparkProviderWindowPrefix || strings.HasPrefix(id, SparkProviderWindowPrefix+"-") {
-		return true
+	if raw == "" {
+		return false
 	}
-	for _, prefix := range sparkLegacyProviderWindowPrefixes {
-		if raw == prefix || strings.HasPrefix(raw, prefix+"-") {
+	for _, prefix := range append(append([]string{}, sparkProviderWindowPrefixes...), sparkLegacyProviderWindowPrefixes...) {
+		if raw == prefix {
+			return true
+		}
+		if _, ok := GeneratedAdditionalWindowSuffixAfterPrefix(raw, prefix); ok {
 			return true
 		}
 	}

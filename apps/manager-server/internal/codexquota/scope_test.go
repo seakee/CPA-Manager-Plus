@@ -358,3 +358,131 @@ func TestLegacyAllScopeReplacementUsesKnownQuotaIdentityNotUsageCompleteness(t *
 		})
 	}
 }
+
+func TestStrictSemanticClassificationIsNotPrefixBased(t *testing.T) {
+	tests := []struct {
+		name             string
+		providerWindowID string
+		wantSpark        bool
+		wantMain         bool
+		wantCodeReview   bool
+		wantFeatureKey   string
+	}{
+		{name: "real spark", providerWindowID: "spark-weekly-0", wantSpark: true},
+		{name: "real spark canonical alias", providerWindowID: "gpt-5-3-codex-spark-weekly-0", wantSpark: true},
+		{name: "real spark generic", providerWindowID: "spark-0-window-7d-0", wantSpark: true},
+		{name: "legacy fast coding alias", providerWindowID: "fast-coding-weekly-0", wantSpark: true},
+		{name: "spark prefixed feature", providerWindowID: "spark-feature-weekly-0", wantFeatureKey: "spark_feature"},
+		{name: "codex spark prefixed feature", providerWindowID: "codex-spark-feature-weekly-0", wantFeatureKey: "codex_spark_feature"},
+		{name: "fast coding prefixed feature", providerWindowID: "fast-coding-premium-weekly-0", wantFeatureKey: "fast_coding_premium"},
+		{name: "real main five hour", providerWindowID: "five-hour", wantMain: true},
+		{name: "real main generic", providerWindowID: "window-7d-0", wantMain: true},
+		{name: "real main generic unknown", providerWindowID: "window-unknown-0", wantMain: true},
+		{name: "window prefixed feature", providerWindowID: "window-feature-weekly-0", wantFeatureKey: "window_feature"},
+		{name: "window beta is not main", providerWindowID: "window-beta", wantFeatureKey: "window_beta"},
+		{name: "real code review weekly", providerWindowID: "code-review-weekly", wantCodeReview: true},
+		{name: "real code review generic", providerWindowID: "code-review-window-7d-0", wantCodeReview: true},
+		{name: "code review family window", providerWindowID: "code-review-weekly-0", wantFeatureKey: "code_review"},
+		{name: "code review premium family", providerWindowID: "code-review-premium-weekly-0", wantFeatureKey: "code_review_premium"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := IsSparkProviderWindowID(test.providerWindowID); got != test.wantSpark {
+				t.Fatalf("IsSparkProviderWindowID(%q) = %v, want %v", test.providerWindowID, got, test.wantSpark)
+			}
+			if got := IsMainProviderWindowID(test.providerWindowID); got != test.wantMain {
+				t.Fatalf("IsMainProviderWindowID(%q) = %v, want %v", test.providerWindowID, got, test.wantMain)
+			}
+			if got := IsCodeReviewProviderWindowID(test.providerWindowID); got != test.wantCodeReview {
+				t.Fatalf("IsCodeReviewProviderWindowID(%q) = %v, want %v", test.providerWindowID, got, test.wantCodeReview)
+			}
+			scope := InferScopeFromProviderWindowID(test.providerWindowID)
+			switch {
+			case test.wantSpark:
+				if !IsSparkScope(scope) {
+					t.Fatalf("InferScopeFromProviderWindowID(%q) = %#v, want Spark", test.providerWindowID, scope)
+				}
+			case test.wantMain:
+				if !IsMainScope(scope.Kind, scope.Key) {
+					t.Fatalf("InferScopeFromProviderWindowID(%q) = %#v, want Main", test.providerWindowID, scope)
+				}
+			case test.wantCodeReview:
+				if scope.Kind != "feature" || scope.Key != CodeReviewScopeKey || scope.Complete {
+					t.Fatalf("InferScopeFromProviderWindowID(%q) = %#v, want code review", test.providerWindowID, scope)
+				}
+			default:
+				if scope.Kind != "feature" || scope.Key != test.wantFeatureKey || scope.Complete {
+					t.Fatalf("InferScopeFromProviderWindowID(%q) = %#v, want incomplete feature %q", test.providerWindowID, scope, test.wantFeatureKey)
+				}
+			}
+		})
+	}
+}
+
+func TestCanonicalProviderWindowIDKeepsImpostorIdsIntact(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "spark exact", value: "spark", want: "spark"},
+		{name: "spark alias suffix", value: "codex-spark-weekly-0", want: "spark-weekly-0"},
+		{name: "spark generic suffix", value: "gpt-5-3-codex-spark-0-window-7d-0", want: "spark-0-window-7d-0"},
+		{name: "spark prefixed feature stays", value: "codex-spark-feature-weekly-0", want: "codex-spark-feature-weekly-0"},
+		{name: "spark feature stays", value: "spark-feature-weekly-0", want: "spark-feature-weekly-0"},
+		{name: "spark main-shaped stays", value: "spark-window-7d-0", want: "spark-window-7d-0"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := CanonicalProviderWindowID(test.value); got != test.want {
+				t.Fatalf("CanonicalProviderWindowID(%q) = %q, want %q", test.value, got, test.want)
+			}
+		})
+	}
+}
+
+func TestResolveProviderWindowScopeKeepsExplicitScopeAndFailsClosed(t *testing.T) {
+	explicit := FeatureScope("fast_coding")
+	got := ResolveProviderWindowScope("fast-coding-weekly-0", "weekly", explicit)
+	if got.Kind != explicit.Kind || got.Key != explicit.Key || got.Complete != explicit.Complete {
+		t.Fatalf("explicit scope was overridden: %#v", got)
+	}
+
+	legacyAll := ModelScope{Kind: "all", Complete: true}
+	if got := ResolveProviderWindowScope("spark-feature-weekly-0", "weekly", legacyAll); got.Kind != "feature" ||
+		got.Key != "spark_feature" || got.Complete {
+		t.Fatalf("legacy all spark-feature = %#v, want incomplete spark_feature feature", got)
+	}
+	if got := ResolveProviderWindowScope("window-feature-weekly-0", "weekly", legacyAll); got.Kind != "feature" ||
+		got.Key != "window_feature" || got.Complete {
+		t.Fatalf("legacy all window-feature = %#v, want incomplete window_feature feature", got)
+	}
+	if got := ResolveProviderWindowScope("code-review-premium-weekly-0", "weekly", legacyAll); got.Kind != "feature" ||
+		got.Key != "code_review_premium" || got.Complete {
+		t.Fatalf("legacy all code-review-premium = %#v, want incomplete code_review_premium feature", got)
+	}
+	if got := ResolveProviderWindowScope("fast-coding-weekly-0", "weekly", legacyAll); !IsSparkScope(got) {
+		t.Fatalf("legacy all fast-coding-weekly-0 = %#v, want Spark", got)
+	}
+	if got := ResolveProviderWindowScope("code-review-weekly", "weekly", legacyAll); got.Kind != "feature" ||
+		got.Key != CodeReviewScopeKey {
+		t.Fatalf("legacy all code-review-weekly = %#v, want code review", got)
+	}
+	if got := ResolveProviderWindowScope("window-7d-0", "weekly", legacyAll); !got.Complete ||
+		got.Kind != "all" {
+		t.Fatalf("legacy all window-7d-0 = %#v, want preserved all", got)
+	}
+}
+
+func TestCanonicalProviderWindowIDForScopeRequiresVerifiedSparkScope(t *testing.T) {
+	if got := CanonicalProviderWindowIDForScope("fast-coding-weekly-0", "weekly", FeatureScope("fast_coding")); got != "fast-coding-weekly-0" {
+		t.Fatalf("explicit feature scope rewrote id: %q", got)
+	}
+	if got := CanonicalProviderWindowIDForScope("fast-coding-feature-weekly-0", "weekly", SparkScope()); got != "fast-coding-feature-weekly-0" {
+		t.Fatalf("spark scope rewrote impostor id: %q", got)
+	}
+	if got := CanonicalProviderWindowIDForScope("fast-coding-weekly-0", "weekly", SparkScope()); got != "spark-weekly-0" {
+		t.Fatalf("spark scope canonicalization = %q, want spark-weekly-0", got)
+	}
+}
