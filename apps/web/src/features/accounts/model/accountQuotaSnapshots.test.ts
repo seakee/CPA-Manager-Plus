@@ -1680,4 +1680,414 @@ describe('stale server ambiguous current-set suppression', () => {
 
     expect(merged).toHaveLength(1);
   });
+
+  describe('8.1 alias reconciliation', () => {
+    it('Case A: reconciles local canonical with older active server snapshot by alias', () => {
+      const local = makeDefinition({
+        key: 'future-feature-weekly-0',
+        providerWindowId: 'future-feature-weekly-0',
+        providerWindowAliases: ['old-name-weekly-0'],
+        kind: 'weekly',
+        modelScope: { kind: 'feature', key: 'future_feature', complete: false },
+        observedAtMs: 200,
+        usedPercent: 40,
+        availability: 'active',
+      });
+      const server = makeSnapshot({
+        provider_window_id: 'old-name-weekly-0',
+        window_kind: 'weekly',
+        model_scope_kind: 'feature',
+        model_scope_key: 'future_feature',
+        observed_at_ms: 100,
+        used_percent: 10,
+        availability: 'active',
+      });
+
+      const merged = mergeAccountQuotaSnapshotWindows([local], [server], {
+        provider: 'codex',
+      });
+
+      expect(merged).toHaveLength(1);
+      expect(merged[0].providerWindowId).toBe('future-feature-weekly-0');
+      expect(merged[0].usedPercent).toBe(40);
+    });
+
+    it('Case B: server pending absent evidence is applied while preserving local canonical quota', () => {
+      const local = makeDefinition({
+        key: 'future-feature-weekly-0',
+        providerWindowId: 'future-feature-weekly-0',
+        providerWindowAliases: ['old-name-weekly-0'],
+        kind: 'weekly',
+        modelScope: { kind: 'feature', key: 'future_feature', complete: false },
+        observedAtMs: 200,
+        usedPercent: 40,
+        availability: 'active',
+      });
+      const server = makeSnapshot({
+        provider_window_id: 'old-name-weekly-0',
+        window_kind: 'weekly',
+        model_scope_kind: 'feature',
+        model_scope_key: 'future_feature',
+        observed_at_ms: 100,
+        missing_since_ms: 300,
+        availability: 'pending_absent',
+      });
+
+      const merged = mergeAccountQuotaSnapshotWindows([local], [server], {
+        provider: 'codex',
+      });
+
+      expect(merged).toHaveLength(1);
+      expect(merged[0].providerWindowId).toBe('future-feature-weekly-0');
+      expect(merged[0].usedPercent).toBe(40);
+      expect(merged[0].availability).toBe('pending_absent');
+    });
+
+    it('Case C: older server inactive tombstone does not override newer local positive observation', () => {
+      const local = makeDefinition({
+        key: 'future-feature-weekly-0',
+        providerWindowId: 'future-feature-weekly-0',
+        providerWindowAliases: ['old-name-weekly-0'],
+        kind: 'weekly',
+        modelScope: { kind: 'feature', key: 'future_feature', complete: false },
+        observedAtMs: 400,
+        usedPercent: 40,
+        availability: 'active',
+        currentHidden: false,
+      });
+      const server = makeSnapshot({
+        provider_window_id: 'old-name-weekly-0',
+        window_kind: 'weekly',
+        model_scope_kind: 'feature',
+        model_scope_key: 'future_feature',
+        observed_at_ms: 100,
+        deactivated_at_ms: 300,
+        availability: 'inactive',
+        current_hidden: true,
+      });
+
+      const merged = mergeAccountQuotaSnapshotWindows([local], [server], {
+        provider: 'codex',
+      });
+
+      expect(merged).toHaveLength(1);
+      expect(merged[0].providerWindowId).toBe('future-feature-weekly-0');
+      expect(merged[0].availability).toBe('active');
+      expect(merged[0].currentHidden).toBe(false);
+    });
+
+    it('Case D: fails closed when multiple local definitions match the same server alias', () => {
+      const local1 = makeDefinition({
+        key: 'future-feature-weekly-0',
+        providerWindowId: 'future-feature-weekly-0',
+        providerWindowAliases: ['old-name-weekly-0'],
+        kind: 'weekly',
+        modelScope: { kind: 'feature', key: 'future_feature', complete: false },
+        observedAtMs: 200,
+      });
+      const local2 = makeDefinition({
+        key: 'other-feature-weekly-0',
+        providerWindowId: 'other-feature-weekly-0',
+        providerWindowAliases: ['old-name-weekly-0'],
+        kind: 'weekly',
+        modelScope: { kind: 'feature', key: 'future_feature', complete: false },
+        observedAtMs: 200,
+      });
+      const server = makeSnapshot({
+        provider_window_id: 'old-name-weekly-0',
+        window_kind: 'weekly',
+        model_scope_kind: 'feature',
+        model_scope_key: 'future_feature',
+        observed_at_ms: 100,
+      });
+
+      const merged = mergeAccountQuotaSnapshotWindows([local1, local2], [server], {
+        provider: 'codex',
+      });
+
+      // Does not guess: both locals remain unmerged and server is appended as unmatched
+      expect(merged).toHaveLength(3);
+      expect(merged.map((m) => m.providerWindowId)).toContain('old-name-weekly-0');
+    });
+
+    it('Case E: cpamp:ambiguous:* does not participate in alias reconciliation', () => {
+      const local = makeDefinition({
+        key: 'cpamp:ambiguous:some-slot',
+        providerWindowId: 'cpamp:ambiguous:some-slot',
+        providerWindowAliases: ['old-name-weekly-0'],
+        kind: 'weekly',
+        identityAmbiguous: true,
+        modelScope: { kind: 'feature', key: 'future_feature', complete: false },
+        observedAtMs: 200,
+      });
+      const server = makeSnapshot({
+        provider_window_id: 'old-name-weekly-0',
+        window_kind: 'weekly',
+        model_scope_kind: 'feature',
+        model_scope_key: 'future_feature',
+        observed_at_ms: 100,
+      });
+
+      const merged = mergeAccountQuotaSnapshotWindows([local], [server], {
+        provider: 'codex',
+      });
+
+      // Ambiguous window does not alias match
+      expect(merged).toHaveLength(2);
+    });
+
+    it('Case F: does not match alias when semantic scopes differ', () => {
+      const local = makeDefinition({
+        key: 'future-feature-weekly-0',
+        providerWindowId: 'future-feature-weekly-0',
+        providerWindowAliases: ['shared-alias-weekly-0'],
+        kind: 'weekly',
+        modelScope: { kind: 'feature', key: 'feature_a', complete: false },
+        observedAtMs: 200,
+      });
+      const server = makeSnapshot({
+        provider_window_id: 'shared-alias-weekly-0',
+        window_kind: 'weekly',
+        model_scope_kind: 'feature',
+        model_scope_key: 'feature_b',
+        observed_at_ms: 100,
+      });
+
+      const merged = mergeAccountQuotaSnapshotWindows([local], [server], {
+        provider: 'codex',
+      });
+
+      expect(merged).toHaveLength(2);
+    });
+  });
+
+  describe('8.2 local ambiguous coverage', () => {
+    it('Case A: newer complete local ambiguous set shadows older identifiable active snapshots', () => {
+      const local1 = makeDefinition({
+        key: 'cpamp:ambiguous:same-quota-weekly-0',
+        providerWindowId: 'cpamp:ambiguous:same-quota-weekly-0',
+        kind: 'weekly',
+        identityAmbiguous: true,
+        modelScope: { kind: 'feature', key: 'same_quota', complete: false },
+        observedAtMs: 200,
+      });
+      const local2 = makeDefinition({
+        key: 'cpamp:ambiguous:same-quota-weekly-1',
+        providerWindowId: 'cpamp:ambiguous:same-quota-weekly-1',
+        kind: 'weekly',
+        identityAmbiguous: true,
+        modelScope: { kind: 'feature', key: 'same_quota', complete: false },
+        observedAtMs: 200,
+      });
+      const server1 = makeSnapshot({
+        provider_window_id: 'same-quota-weekly-0',
+        window_kind: 'weekly',
+        model_scope_kind: 'feature',
+        model_scope_key: 'same_quota',
+        observed_at_ms: 100,
+        availability: 'active',
+      });
+      const server2 = makeSnapshot({
+        provider_window_id: 'same-quota-weekly-1',
+        window_kind: 'weekly',
+        model_scope_kind: 'feature',
+        model_scope_key: 'same_quota',
+        observed_at_ms: 100,
+        availability: 'active',
+      });
+
+      const merged = mergeAccountQuotaSnapshotWindows([local1, local2], [server1, server2], {
+        provider: 'codex',
+        localObservation: completeCodexObservation(200),
+      });
+
+      expect(merged).toHaveLength(2);
+      expect(merged.map((m) => m.providerWindowId)).toEqual([
+        'cpamp:ambiguous:same-quota-weekly-0',
+        'cpamp:ambiguous:same-quota-weekly-1',
+      ]);
+    });
+
+    it('Case B: partial local observation cannot suppress identifiable server rows', () => {
+      const local = makeDefinition({
+        key: 'cpamp:ambiguous:same-quota-weekly-0',
+        providerWindowId: 'cpamp:ambiguous:same-quota-weekly-0',
+        kind: 'weekly',
+        identityAmbiguous: true,
+        modelScope: { kind: 'feature', key: 'same_quota', complete: false },
+        observedAtMs: 200,
+      });
+      const server = makeSnapshot({
+        provider_window_id: 'same-quota-weekly-0',
+        window_kind: 'weekly',
+        model_scope_kind: 'feature',
+        model_scope_key: 'same_quota',
+        observed_at_ms: 100,
+        availability: 'active',
+      });
+
+      const merged = mergeAccountQuotaSnapshotWindows([local], [server], {
+        provider: 'codex',
+        localObservation: {
+          observed_at_ms: 200,
+          inventory_scope_key: 'codex:rate-limits',
+          inventory_mode: 'partial',
+        },
+      });
+
+      expect(merged).toHaveLength(2);
+    });
+
+    it('Case C: empty complete local observation preserves omission debounce without suppressing', () => {
+      const server = makeSnapshot({
+        provider_window_id: 'same-quota-weekly-0',
+        window_kind: 'weekly',
+        model_scope_kind: 'feature',
+        model_scope_key: 'same_quota',
+        observed_at_ms: 100,
+        availability: 'active',
+      });
+
+      const merged = mergeAccountQuotaSnapshotWindows([], [server], {
+        provider: 'codex',
+        localObservation: completeCodexObservation(200),
+      });
+
+      expect(merged).toHaveLength(1);
+      expect(merged[0].providerWindowId).toBe('same-quota-weekly-0');
+    });
+
+    it('Case D: does not suppress when semantic scopes differ', () => {
+      const local = makeDefinition({
+        key: 'cpamp:ambiguous:same-quota-weekly-0',
+        providerWindowId: 'cpamp:ambiguous:same-quota-weekly-0',
+        kind: 'weekly',
+        identityAmbiguous: true,
+        modelScope: { kind: 'feature', key: 'scope_a', complete: false },
+        observedAtMs: 200,
+      });
+      const server = makeSnapshot({
+        provider_window_id: 'same-quota-weekly-0',
+        window_kind: 'weekly',
+        model_scope_kind: 'feature',
+        model_scope_key: 'scope_b',
+        observed_at_ms: 100,
+        availability: 'active',
+      });
+
+      const merged = mergeAccountQuotaSnapshotWindows([local], [server], {
+        provider: 'codex',
+        localObservation: completeCodexObservation(200),
+      });
+
+      expect(merged).toHaveLength(2);
+    });
+
+    it('Case E: does not suppress when window roles differ (weekly vs five_hour)', () => {
+      const local = makeDefinition({
+        key: 'cpamp:ambiguous:same-quota-weekly-0',
+        providerWindowId: 'cpamp:ambiguous:same-quota-weekly-0',
+        kind: 'weekly',
+        identityAmbiguous: true,
+        modelScope: { kind: 'feature', key: 'same_quota', complete: false },
+        observedAtMs: 200,
+      });
+      const server = makeSnapshot({
+        provider_window_id: 'same-quota-five-hour-0',
+        window_kind: 'five_hour',
+        model_scope_kind: 'feature',
+        model_scope_key: 'same_quota',
+        observed_at_ms: 100,
+        availability: 'active',
+      });
+
+      const merged = mergeAccountQuotaSnapshotWindows([local], [server], {
+        provider: 'codex',
+        localObservation: completeCodexObservation(200),
+      });
+
+      expect(merged).toHaveLength(2);
+    });
+
+    it('Case F: does not suppress when generic durations differ', () => {
+      const local = makeDefinition({
+        key: 'cpamp:ambiguous:custom-window-2d-0',
+        providerWindowId: 'cpamp:ambiguous:custom-window-2d-0',
+        kind: 'unknown',
+        durationSeconds: 172_800,
+        identityAmbiguous: true,
+        modelScope: { kind: 'feature', key: 'same_quota', complete: false },
+        observedAtMs: 200,
+      });
+      const server = makeSnapshot({
+        provider_window_id: 'custom-window-3d-0',
+        window_kind: 'unknown',
+        duration_seconds: 259_200,
+        model_scope_kind: 'feature',
+        model_scope_key: 'same_quota',
+        observed_at_ms: 100,
+        availability: 'active',
+      });
+
+      const merged = mergeAccountQuotaSnapshotWindows([local], [server], {
+        provider: 'codex',
+        localObservation: completeCodexObservation(200),
+      });
+
+      expect(merged).toHaveLength(2);
+    });
+
+    it('Case G: does not suppress when server lifecycle evidence is newer than local observation', () => {
+      const local = makeDefinition({
+        key: 'cpamp:ambiguous:same-quota-weekly-0',
+        providerWindowId: 'cpamp:ambiguous:same-quota-weekly-0',
+        kind: 'weekly',
+        identityAmbiguous: true,
+        modelScope: { kind: 'feature', key: 'same_quota', complete: false },
+        observedAtMs: 200,
+      });
+      const server = makeSnapshot({
+        provider_window_id: 'same-quota-weekly-0',
+        window_kind: 'weekly',
+        model_scope_kind: 'feature',
+        model_scope_key: 'same_quota',
+        observed_at_ms: 100,
+        missing_since_ms: 300,
+        availability: 'pending_absent',
+      });
+
+      const merged = mergeAccountQuotaSnapshotWindows([local], [server], {
+        provider: 'codex',
+        localObservation: completeCodexObservation(200),
+      });
+
+      expect(merged).toHaveLength(2);
+    });
+
+    it('Case H: does not suppress on equal timestamps', () => {
+      const local = makeDefinition({
+        key: 'cpamp:ambiguous:same-quota-weekly-0',
+        providerWindowId: 'cpamp:ambiguous:same-quota-weekly-0',
+        kind: 'weekly',
+        identityAmbiguous: true,
+        modelScope: { kind: 'feature', key: 'same_quota', complete: false },
+        observedAtMs: 200,
+      });
+      const server = makeSnapshot({
+        provider_window_id: 'same-quota-weekly-0',
+        window_kind: 'weekly',
+        model_scope_kind: 'feature',
+        model_scope_key: 'same_quota',
+        observed_at_ms: 200,
+        availability: 'active',
+      });
+
+      const merged = mergeAccountQuotaSnapshotWindows([local], [server], {
+        provider: 'codex',
+        localObservation: completeCodexObservation(200),
+      });
+
+      expect(merged).toHaveLength(2);
+    });
+  });
 });

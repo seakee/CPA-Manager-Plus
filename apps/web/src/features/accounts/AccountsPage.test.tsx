@@ -12941,6 +12941,204 @@ describe('AccountsPage replacement flows', () => {
     expect(renderedText).not.toContain('cpamp:ambiguous:');
   });
 
+  it('reconciles legacy alias on snapshot write failure without duplicate cards or usage targets (12.1)', async () => {
+    const fetchedAtMs = Date.now();
+    const file = {
+      ...makeCodexFile('codex.json', 'auth-1', 'codex@example.com'),
+      disabled: true,
+    } as AuthFileItem;
+    const rowKey = getAuthFileSelectionKey(file);
+    mocks.files = [file];
+    mocks.location = {
+      pathname: '/accounts',
+      search: `?account=${encodeURIComponent(rowKey)}&tab=quota`,
+    };
+    mocks.panelFeatureAvailability = {
+      checking: false,
+      managerServiceBase: 'http://manager.local:18317',
+      requestMonitoringAvailable: true,
+      serverCodexInspectionAvailable: false,
+    };
+    mocks.quotaState.codexQuota = buildCredentialScopedQuotaRecord(file, {
+      status: 'success',
+      fetchedAtMs,
+      quotaInventoryObserved: true,
+      windows: [
+        {
+          id: 'future-feature-weekly-0',
+          label: 'Future Feature',
+          usedPercent: 40,
+          resetLabel: new Date(fetchedAtMs + 7 * 24 * 60 * 60 * 1000).toISOString(),
+          resetAtMs: fetchedAtMs + 7 * 24 * 60 * 60 * 1000,
+          resetAccuracy: 'exact',
+          limitWindowSeconds: 7 * 24 * 60 * 60,
+          providerWindowAliases: ['old-name-weekly-0'],
+          modelScope: { kind: 'feature', key: 'future_feature', complete: false },
+          scopeDisplayName: 'Old Name',
+        },
+      ],
+    });
+    vi.mocked(accountQuotaSnapshotApi.write).mockRejectedValue(
+      new Error('snapshot write network error')
+    );
+    vi.mocked(accountQuotaSnapshotApi.query).mockResolvedValue({
+      generated_at_ms: fetchedAtMs,
+      items: [
+        {
+          row_key: rowKey,
+          account_key: rowKey,
+          provider: 'codex',
+          windows: [
+            {
+              provider_window_id: 'old-name-weekly-0',
+              window_kind: 'weekly',
+              window_mode: 'fixed',
+              model_scope_kind: 'feature',
+              model_scope_key: 'future_feature',
+              scope_display_name: 'Old Name',
+              source: 'api_query',
+              observed_at_ms: fetchedAtMs - 60_000,
+              boundary_accuracy: 'derived',
+              used_percent: 10,
+              remaining_percent: 90,
+              availability: 'active',
+              stale: false,
+            },
+          ],
+        },
+      ],
+    });
+
+    const renderer = await renderAccountsPage();
+    await flushPromises();
+    await flushPromises();
+
+    expect(accountQuotaSnapshotApi.write).toHaveBeenCalled();
+    expect(accountQuotaSnapshotApi.query).toHaveBeenCalled();
+
+    const renderedText = treeText(renderer);
+    expect(renderedText).toContain('Future Feature');
+
+    // Verify getAccountWindowUsage did not receive both canonical and legacy alias window IDs
+    const usageCalls = vi.mocked(mocks.getAccountWindowUsage).mock.calls;
+    for (const call of usageCalls) {
+      const request = call[2] as { targets?: Array<{ provider_window_id?: string }> } | undefined;
+      const targets = request?.targets ?? [];
+      const windowIDs = targets.map((t: { provider_window_id?: string }) => t.provider_window_id);
+      const hasCanonical = windowIDs.includes('future-feature-weekly-0');
+      const hasAlias = windowIDs.includes('old-name-weekly-0');
+      expect(hasCanonical && hasAlias).toBe(false);
+    }
+  });
+
+  it('shadows stale identifiable server rows when local ambiguous set has positive coverage on write failure (12.2)', async () => {
+    const fetchedAtMs = Date.now();
+    const file = {
+      ...makeCodexFile('codex.json', 'auth-1', 'codex@example.com'),
+      disabled: true,
+    } as AuthFileItem;
+    const rowKey = getAuthFileSelectionKey(file);
+    mocks.files = [file];
+    mocks.location = {
+      pathname: '/accounts',
+      search: `?account=${encodeURIComponent(rowKey)}&tab=quota`,
+    };
+    mocks.panelFeatureAvailability = {
+      checking: false,
+      managerServiceBase: 'http://manager.local:18317',
+      requestMonitoringAvailable: true,
+      serverCodexInspectionAvailable: false,
+    };
+    mocks.quotaState.codexQuota = buildCredentialScopedQuotaRecord(file, {
+      status: 'success',
+      fetchedAtMs,
+      quotaInventoryObserved: true,
+      windows: [
+        {
+          id: 'cpamp:ambiguous:same-quota-weekly-0',
+          label: 'Same Quota weekly limit',
+          usedPercent: 10,
+          resetLabel: new Date(fetchedAtMs + 7 * 24 * 60 * 60 * 1000).toISOString(),
+          resetAtMs: fetchedAtMs + 7 * 24 * 60 * 60 * 1000,
+          resetAccuracy: 'exact',
+          limitWindowSeconds: 7 * 24 * 60 * 60,
+          identityAmbiguous: true,
+          modelScope: { kind: 'feature', key: 'same_quota', complete: false },
+          scopeDisplayName: 'Same Quota',
+        },
+        {
+          id: 'cpamp:ambiguous:same-quota-weekly-1',
+          label: 'Same Quota weekly limit',
+          usedPercent: 80,
+          resetLabel: new Date(fetchedAtMs + 7 * 24 * 60 * 60 * 1000).toISOString(),
+          resetAtMs: fetchedAtMs + 7 * 24 * 60 * 60 * 1000,
+          resetAccuracy: 'exact',
+          limitWindowSeconds: 7 * 24 * 60 * 60,
+          identityAmbiguous: true,
+          modelScope: { kind: 'feature', key: 'same_quota', complete: false },
+          scopeDisplayName: 'Same Quota',
+        },
+      ],
+    });
+    vi.mocked(accountQuotaSnapshotApi.write).mockRejectedValue(
+      new Error('snapshot write network error')
+    );
+    vi.mocked(accountQuotaSnapshotApi.query).mockResolvedValue({
+      generated_at_ms: fetchedAtMs,
+      items: [
+        {
+          row_key: rowKey,
+          account_key: rowKey,
+          provider: 'codex',
+          windows: [
+            {
+              provider_window_id: 'same-quota-weekly-0',
+              window_kind: 'weekly',
+              window_mode: 'fixed',
+              model_scope_kind: 'feature',
+              model_scope_key: 'same_quota',
+              scope_display_name: 'Same Quota',
+              source: 'api_query',
+              observed_at_ms: fetchedAtMs - 60_000,
+              boundary_accuracy: 'derived',
+              used_percent: 10,
+              remaining_percent: 90,
+              availability: 'active',
+              stale: false,
+            },
+            {
+              provider_window_id: 'same-quota-weekly-1',
+              window_kind: 'weekly',
+              window_mode: 'fixed',
+              model_scope_kind: 'feature',
+              model_scope_key: 'same_quota',
+              scope_display_name: 'Same Quota',
+              source: 'api_query',
+              observed_at_ms: fetchedAtMs - 60_000,
+              boundary_accuracy: 'derived',
+              used_percent: 80,
+              remaining_percent: 20,
+              availability: 'active',
+              stale: false,
+            },
+          ],
+        },
+      ],
+    });
+
+    const renderer = await renderAccountsPage();
+    await flushPromises();
+    await flushPromises();
+
+    expect(accountQuotaSnapshotApi.write).toHaveBeenCalled();
+    expect(accountQuotaSnapshotApi.query).toHaveBeenCalled();
+
+    // Check rendered quota cards: exactly 2 local ambiguous cards should be displayed, not 4 cards
+    const renderedText = treeText(renderer);
+    const matches = renderedText.match(/Same Quota weekly limit/g);
+    expect(matches).toHaveLength(2);
+  });
+
   it('loads Manager quota snapshots without issuing monitoring requests when collection is disabled', async () => {
     const file = {
       ...makeCodexFile('codex.json', 'auth-1', 'codex@example.com'),

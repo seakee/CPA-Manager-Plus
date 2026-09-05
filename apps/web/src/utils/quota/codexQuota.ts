@@ -309,9 +309,9 @@ const codexProviderWindowIdsEquivalent = (left: string, right: string): boolean 
   );
 };
 
-const CODEX_AMBIGUOUS_PROVIDER_WINDOW_ALIASES = new Set(['secondary']);
+export const CODEX_AMBIGUOUS_PROVIDER_WINDOW_ALIASES = new Set(['secondary']);
 
-const providerWindowAliasMatches = (
+export const providerWindowAliasMatches = (
   active: CodexProviderWindowIdentity,
   observed: CodexProviderWindowIdentity
 ): string[] => {
@@ -1006,6 +1006,20 @@ const addAdditionalRateLimitWindows = (
     group.push(family);
     featureGroups.set(family.featureIdPrefix, group);
   });
+  const fallbackAmbiguityPartitionKey = (family: (typeof families)[number]): string =>
+    [
+      family.modelScope.key ?? '',
+      family.baseIdPrefix,
+      family.structuralIdPrefix,
+      family.sortKey,
+    ].join('\u0000');
+
+  const fallbackAmbiguityCounts = new Map<string, number>();
+  families.forEach((family) => {
+    if (family.featureIdPrefix || family.modelScope.kind !== 'feature') return;
+    const key = fallbackAmbiguityPartitionKey(family);
+    fallbackAmbiguityCounts.set(key, (fallbackAmbiguityCounts.get(key) ?? 0) + 1);
+  });
   const countFamilyPrefix = (
     group: typeof families,
     selector: (family: (typeof families)[number]) => string,
@@ -1024,6 +1038,11 @@ const addAdditionalRateLimitWindows = (
       ? (featureGroups.get(family.featureIdPrefix) ?? [])
       : [];
     const collisionMode = featureGroup.length > 1;
+    const fallbackPartitionKey = fallbackAmbiguityPartitionKey(family);
+    const fallbackAmbiguous =
+      !family.featureIdPrefix &&
+      family.modelScope.kind === 'feature' &&
+      (fallbackAmbiguityCounts.get(fallbackPartitionKey) ?? 0) > 1;
     const collisionNameCounts = collisionMode
       ? countFamilyPrefix(
           featureGroup,
@@ -1053,6 +1072,8 @@ const addAdditionalRateLimitWindows = (
       } else {
         idPrefix = `${CODEX_AMBIGUOUS_PROVIDER_WINDOW_PREFIX}${family.featureIdPrefix}`;
       }
+    } else if (fallbackAmbiguous) {
+      idPrefix = `${CODEX_AMBIGUOUS_PROVIDER_WINDOW_PREFIX}${family.baseIdPrefix}`;
     } else if (
       (baseIdPrefixCounts.get(family.baseIdPrefix) ?? 0) > 1 &&
       family.featureIdPrefix &&
@@ -1062,7 +1083,8 @@ const addAdditionalRateLimitWindows = (
     }
 
     const identityAmbiguous =
-      collisionMode && idPrefix.startsWith(CODEX_AMBIGUOUS_PROVIDER_WINDOW_PREFIX);
+      (collisionMode && idPrefix.startsWith(CODEX_AMBIGUOUS_PROVIDER_WINDOW_PREFIX)) ||
+      fallbackAmbiguous;
     const legacyIdPrefixes = identityAmbiguous
       ? []
       : [...family.legacyIdPrefixes].filter(
@@ -1073,6 +1095,7 @@ const addAdditionalRateLimitWindows = (
     if (family.legacyBaseIdPrefix && !identityAmbiguous) {
       const legacyPrefix =
         !collisionMode &&
+        !fallbackAmbiguous &&
         (legacyBaseIdPrefixCounts.get(family.legacyBaseIdPrefix) ?? 0) > 1 &&
         family.featureIdPrefix &&
         family.featureIdPrefix !== family.legacyBaseIdPrefix

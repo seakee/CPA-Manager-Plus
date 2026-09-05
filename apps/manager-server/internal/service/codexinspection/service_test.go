@@ -537,8 +537,8 @@ func TestBuildCodexInspectionQuotaWindowsKeepsGenericFamiliesDistinct(t *testing
 	want := []string{
 		"window-2d-0",
 		"code-review-window-2d-0",
-		"credits-0-window-2d-0",
-		"credits-1-window-2d-0",
+		"cpamp:ambiguous:credits-0-window-2d-0",
+		"cpamp:ambiguous:credits-1-window-2d-0",
 	}
 	if len(windows) != len(want) {
 		t.Fatalf("generic quota windows = %#v, want %d", windows, len(want))
@@ -553,6 +553,209 @@ func TestBuildCodexInspectionQuotaWindowsKeepsGenericFamiliesDistinct(t *testing
 		}
 		seen[window.ID] = true
 	}
+}
+
+func TestBuildCodexInspectionQuotaWindowsFallbackAmbiguityParity(t *testing.T) {
+	t.Run("same name no feature same weekly geometry", func(t *testing.T) {
+		windows := buildCodexInspectionQuotaWindows(map[string]any{
+			"additional_rate_limits": []any{
+				map[string]any{
+					"limit_name": "Same Quota",
+					"rate_limit": map[string]any{
+						"secondary_window": map[string]any{
+							"limit_window_seconds": 604800,
+							"used_percent":         10.0,
+						},
+					},
+				},
+				map[string]any{
+					"limit_name": "Same Quota",
+					"rate_limit": map[string]any{
+						"secondary_window": map[string]any{
+							"limit_window_seconds": 604800,
+							"used_percent":         80.0,
+						},
+					},
+				},
+			},
+		}, "")
+
+		wantIDs := []string{
+			"cpamp:ambiguous:same-quota-weekly-0",
+			"cpamp:ambiguous:same-quota-weekly-1",
+		}
+		if len(windows) != len(wantIDs) {
+			t.Fatalf("got %d windows, want %d", len(windows), len(wantIDs))
+		}
+		for i, id := range wantIDs {
+			if windows[i].ID != id {
+				t.Fatalf("window[%d].ID = %q, want %q", i, windows[i].ID, id)
+			}
+			if !windows[i].IdentityAmbiguous {
+				t.Fatalf("window[%d].IdentityAmbiguous = false, want true", i)
+			}
+			if windows[i].ModelScope == nil || windows[i].ModelScope.Kind != "feature" || windows[i].ModelScope.Key != "same_quota" || windows[i].ModelScope.Complete {
+				t.Fatalf("window[%d].ModelScope = %+v, want incomplete feature same_quota", i, windows[i].ModelScope)
+			}
+			if windows[i].ScopeDisplayName != "Same Quota" {
+				t.Fatalf("window[%d].ScopeDisplayName = %q, want Same Quota", i, windows[i].ScopeDisplayName)
+			}
+			if len(windows[i].ProviderWindowAliases) > 0 {
+				t.Fatalf("window[%d].ProviderWindowAliases = %+v, want empty", i, windows[i].ProviderWindowAliases)
+			}
+		}
+	})
+
+	t.Run("anonymous same geometry", func(t *testing.T) {
+		windows := buildCodexInspectionQuotaWindows(map[string]any{
+			"additional_rate_limits": []any{
+				map[string]any{
+					"rate_limit": map[string]any{
+						"primary_window": map[string]any{
+							"limit_window_seconds": 18000,
+							"used_percent":         10.0,
+						},
+					},
+				},
+				map[string]any{
+					"rate_limit": map[string]any{
+						"primary_window": map[string]any{
+							"limit_window_seconds": 18000,
+							"used_percent":         80.0,
+						},
+					},
+				},
+			},
+		}, "")
+
+		wantIDs := []string{
+			"cpamp:ambiguous:additional-p-18000-s-none-five-hour-0",
+			"cpamp:ambiguous:additional-p-18000-s-none-five-hour-1",
+		}
+		if len(windows) != len(wantIDs) {
+			t.Fatalf("got %d windows, want %d", len(windows), len(wantIDs))
+		}
+		for i, id := range wantIDs {
+			if windows[i].ID != id {
+				t.Fatalf("window[%d].ID = %q, want %q", i, windows[i].ID, id)
+			}
+			if !windows[i].IdentityAmbiguous {
+				t.Fatalf("window[%d].IdentityAmbiguous = false, want true", i)
+			}
+			if windows[i].ScopeDisplayName != "" {
+				t.Fatalf("window[%d].ScopeDisplayName = %q, want empty", i, windows[i].ScopeDisplayName)
+			}
+			if len(windows[i].ProviderWindowAliases) > 0 {
+				t.Fatalf("window[%d].ProviderWindowAliases = %+v, want empty", i, windows[i].ProviderWindowAliases)
+			}
+		}
+	})
+
+	t.Run("reorder keeps ambiguous slot set stable", func(t *testing.T) {
+		family := func(usedPercent float64) map[string]any {
+			return map[string]any{
+				"limit_name": "Same Quota",
+				"rate_limit": map[string]any{
+					"secondary_window": map[string]any{
+						"limit_window_seconds": 604800,
+						"used_percent":         usedPercent,
+					},
+				},
+			}
+		}
+		first := buildCodexInspectionQuotaWindows(map[string]any{
+			"additional_rate_limits": []any{family(10.0), family(80.0)},
+		}, "")
+		second := buildCodexInspectionQuotaWindows(map[string]any{
+			"additional_rate_limits": []any{family(80.0), family(10.0)},
+		}, "")
+
+		wantIDs := []string{
+			"cpamp:ambiguous:same-quota-weekly-0",
+			"cpamp:ambiguous:same-quota-weekly-1",
+		}
+		for i, id := range wantIDs {
+			if first[i].ID != id || second[i].ID != id {
+				t.Fatalf("slot %d IDs = first:%q second:%q, want %q", i, first[i].ID, second[i].ID, id)
+			}
+			if !first[i].IdentityAmbiguous || !second[i].IdentityAmbiguous {
+				t.Fatalf("slot %d should be ambiguous", i)
+			}
+		}
+	})
+
+	t.Run("different names same geometry remain identifiable", func(t *testing.T) {
+		windows := buildCodexInspectionQuotaWindows(map[string]any{
+			"additional_rate_limits": []any{
+				map[string]any{
+					"limit_name": "Quota A",
+					"rate_limit": map[string]any{
+						"secondary_window": map[string]any{
+							"limit_window_seconds": 604800,
+							"used_percent":         10.0,
+						},
+					},
+				},
+				map[string]any{
+					"limit_name": "Quota B",
+					"rate_limit": map[string]any{
+						"secondary_window": map[string]any{
+							"limit_window_seconds": 604800,
+							"used_percent":         80.0,
+						},
+					},
+				},
+			},
+		}, "")
+
+		wantIDs := []string{"quota-a-weekly-0", "quota-b-weekly-0"}
+		for i, id := range wantIDs {
+			if windows[i].ID != id {
+				t.Fatalf("window[%d].ID = %q, want %q", i, windows[i].ID, id)
+			}
+			if windows[i].IdentityAmbiguous {
+				t.Fatalf("window[%d] should not be ambiguous", i)
+			}
+		}
+		if windows[0].ScopeDisplayName != "Quota A" || windows[1].ScopeDisplayName != "Quota B" {
+			t.Fatalf("unexpected display names: %q, %q", windows[0].ScopeDisplayName, windows[1].ScopeDisplayName)
+		}
+	})
+
+	t.Run("same name distinguishable geometry remains identifiable", func(t *testing.T) {
+		windows := buildCodexInspectionQuotaWindows(map[string]any{
+			"additional_rate_limits": []any{
+				map[string]any{
+					"limit_name": "Same Quota",
+					"rate_limit": map[string]any{
+						"primary_window": map[string]any{
+							"limit_window_seconds": 18000,
+							"used_percent":         10.0,
+						},
+					},
+				},
+				map[string]any{
+					"limit_name": "Same Quota",
+					"rate_limit": map[string]any{
+						"secondary_window": map[string]any{
+							"limit_window_seconds": 604800,
+							"used_percent":         80.0,
+						},
+					},
+				},
+			},
+		}, "")
+
+		wantIDs := []string{"same-quota-five-hour-1", "same-quota-weekly-0"}
+		for i, id := range wantIDs {
+			if windows[i].ID != id {
+				t.Fatalf("window[%d].ID = %q, want %q", i, windows[i].ID, id)
+			}
+			if windows[i].IdentityAmbiguous {
+				t.Fatalf("window[%d] should not be ambiguous", i)
+			}
+		}
+	})
 }
 
 func TestBuildCodexInspectionQuotaWindowsAssignsCodexScopes(t *testing.T) {

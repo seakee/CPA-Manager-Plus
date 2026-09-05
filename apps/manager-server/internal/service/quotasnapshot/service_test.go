@@ -5810,6 +5810,103 @@ func TestQuotaLifecycleShadowsStableHistoryWhileAmbiguousSetIsCurrent(t *testing
 	}
 }
 
+func codexSameQuotaAdditionalWindow(id, displayName string, usedPercent float64) WindowInput {
+	startMS := quotaLifecycleBaseMS
+	durationSeconds := int64(7 * 24 * 60 * 60)
+	endMS := startMS + durationSeconds*1000
+	return WindowInput{
+		ProviderWindowID: id,
+		WindowKind:       "weekly",
+		WindowMode:       "fixed",
+		ScopeDisplayName: displayName,
+		ModelScopeKind:   "feature",
+		ModelScopeKey:    "same_quota",
+		Source:           "inspection",
+		BoundaryAccuracy: "exact",
+		CycleStartMS:     &startMS,
+		CycleEndMS:       &endMS,
+		DurationSeconds:  &durationSeconds,
+		UsedPercent:      &usedPercent,
+	}
+}
+
+func TestQuotaLifecycleFallbackAmbiguousCurrentObservationLifecycle(t *testing.T) {
+	service := newQuotaSnapshotTestService(t, quotaLifecycleBaseMS+quotaLifecycleDayMS)
+
+	// T1: 旧 identifiable: same-quota-weekly-0, same-quota-weekly-1, scope feature/same_quota, complete observation
+	stable0 := codexSameQuotaAdditionalWindow("same-quota-weekly-0", "Same Quota", 10)
+	stable1 := codexSameQuotaAdditionalWindow("same-quota-weekly-1", "Same Quota", 80)
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+quotaLifecycleHourMS, []WindowInput{stable0, stable1})
+
+	initial := queryQuotaLifecycleWindowList(t, service, false)
+	if len(initial) != 2 {
+		t.Fatalf("T1 initial windows count = %d, want 2", len(initial))
+	}
+	for _, w := range initial {
+		if w.LogicalWindowID == 0 || w.ActivationGeneration != 1 || w.Availability != "active" {
+			t.Fatalf("T1 window %s not properly activated: %+v", w.ProviderWindowID, w)
+		}
+	}
+
+	// T2: 新 complete observation: 2 个 cpamp:ambiguous:same-quota-weekly-*, scope feature/same_quota
+	ambiguous := []WindowInput{
+		codexSameQuotaAdditionalWindow("cpamp:ambiguous:same-quota-weekly-0", "Same Quota", 20),
+		codexSameQuotaAdditionalWindow("cpamp:ambiguous:same-quota-weekly-1", "Same Quota", 70),
+	}
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+2*quotaLifecycleHourMS, ambiguous)
+
+	t2Windows := queryQuotaLifecycleWindowList(t, service, true)
+	if len(t2Windows) != 4 {
+		t.Fatalf("T2 windows count = %d, want 4", len(t2Windows))
+	}
+	ambiguousCount := 0
+	stableHiddenCount := 0
+	for _, w := range t2Windows {
+		if codexquota.IsAmbiguousAdditionalProviderWindowID(w.ProviderWindowID) {
+			ambiguousCount++
+			if w.LogicalWindowID != 0 || w.ActivationGeneration != 0 || w.CurrentCycle != nil || w.PreviousCycle != nil {
+				t.Fatalf("T2 ambiguous window has logical lifecycle: %+v", w)
+			}
+		} else {
+			if w.Availability == "pending_absent" && w.CurrentPresentationHidden {
+				stableHiddenCount++
+			}
+		}
+	}
+	if ambiguousCount != 2 || stableHiddenCount != 2 {
+		t.Fatalf("T2 state: ambiguousCount=%d, stableHiddenCount=%d, want 2 and 2", ambiguousCount, stableHiddenCount)
+	}
+
+	// T3: 相同 ambiguous complete observation
+	// 旧 identifiable 按 omission threshold 进入 inactive
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+3*quotaLifecycleHourMS, ambiguous)
+	t3Windows := queryQuotaLifecycleWindowList(t, service, true)
+	if len(t3Windows) != 4 {
+		t.Fatalf("T3 windows count = %d, want 4", len(t3Windows))
+	}
+	inactiveCount := 0
+	for _, w := range t3Windows {
+		if !codexquota.IsAmbiguousAdditionalProviderWindowID(w.ProviderWindowID) {
+			if w.Availability == "inactive" {
+				inactiveCount++
+			}
+		}
+	}
+	if inactiveCount != 2 {
+		t.Fatalf("T3 inactive count = %d, want 2", inactiveCount)
+	}
+	if currentAmbiguousWindowCount(t3Windows) != 2 {
+		t.Fatalf("T3 current ambiguous window count = %d, want 2", currentAmbiguousWindowCount(t3Windows))
+	}
+
+	// T4: complete empty observation
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+4*quotaLifecycleHourMS, []WindowInput{})
+	t4Windows := queryQuotaLifecycleWindowList(t, service, true)
+	if currentAmbiguousWindowCount(t4Windows) != 0 {
+		t.Fatalf("T4 current ambiguous window count = %d, want 0", currentAmbiguousWindowCount(t4Windows))
+	}
+}
+
 func TestQuotaLifecycleKeepsAmbiguousSetAcrossPartialAndClearsOnLatestComplete(t *testing.T) {
 	service := newQuotaSnapshotTestService(t, quotaLifecycleBaseMS+quotaLifecycleDayMS)
 	ambiguous := []WindowInput{

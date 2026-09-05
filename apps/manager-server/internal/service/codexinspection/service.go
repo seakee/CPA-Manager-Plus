@@ -4718,12 +4718,22 @@ func addAdditionalRateLimitWindows(windows *[]model.CodexInspectionQuotaWindow, 
 		}
 		featureGroups[family.featureIDPrefix] = append(featureGroups[family.featureIDPrefix], family)
 	}
+	fallbackAmbiguityCounts := make(map[string]int)
+	for _, family := range families {
+		if family.featureIDPrefix != "" || family.modelScope.Kind != "feature" {
+			continue
+		}
+		key := family.modelScope.Key + "\x00" + family.baseIDPrefix + "\x00" + family.structuralIDPrefix + "\x00" + family.sortKey
+		fallbackAmbiguityCounts[key]++
+	}
 	familiesByIDPrefix := make(map[string][]int)
 	for index := range families {
 		family := &families[index]
 		family.idPrefix = family.baseIDPrefix
 		featureGroup := featureGroups[family.featureIDPrefix]
 		family.collisionMode = family.featureIDPrefix != "" && family.modelScope.Kind == "feature" && len(featureGroup) > 1
+		fallbackKey := family.modelScope.Key + "\x00" + family.baseIDPrefix + "\x00" + family.structuralIDPrefix + "\x00" + family.sortKey
+		fallbackAmbiguous := family.featureIDPrefix == "" && family.modelScope.Kind == "feature" && fallbackAmbiguityCounts[fallbackKey] > 1
 		collisionNameCounts := make(map[string]int)
 		if family.collisionMode {
 			collisionNameCounts = codexAdditionalFamilyPrefixCounts(featureGroup, func(candidate codexAdditionalRateLimitFamily) string {
@@ -4741,28 +4751,32 @@ func addAdditionalRateLimitWindows(windows *[]model.CodexInspectionQuotaWindow, 
 				family.idPrefix = codexquota.AmbiguousProviderWindowPrefix + family.featureIDPrefix
 				family.identityAmbiguous = true
 			}
+		} else if fallbackAmbiguous {
+			family.idPrefix = codexquota.AmbiguousProviderWindowPrefix + family.baseIDPrefix
+			family.identityAmbiguous = true
 		} else if baseIDPrefixCounts[family.baseIDPrefix] > 1 && family.featureIDPrefix != "" && family.featureIDPrefix != family.baseIDPrefix {
 			family.idPrefix += "--" + family.featureIDPrefix
 		}
 		legacyPrefix := family.legacyBaseIDPrefix
-		if !family.collisionMode && legacyPrefix != "" && legacyBaseIDPrefixCounts[legacyPrefix] > 1 && family.featureIDPrefix != "" && family.featureIDPrefix != legacyPrefix {
+		if !family.collisionMode && !fallbackAmbiguous && legacyPrefix != "" && legacyBaseIDPrefixCounts[legacyPrefix] > 1 && family.featureIDPrefix != "" && family.featureIDPrefix != legacyPrefix {
 			legacyPrefix += "--" + family.featureIDPrefix
 		}
-		if legacyPrefix != "" && (!family.collisionMode || collisionNameCounts[legacyPrefix] == 1) {
+		if legacyPrefix != "" && !family.identityAmbiguous && (!family.collisionMode || collisionNameCounts[legacyPrefix] == 1) {
 			family.legacyPrefixes = append(family.legacyPrefixes, legacyPrefix)
 		}
-		if family.collisionMode {
+		if family.collisionMode || fallbackAmbiguous {
 			if family.identityAmbiguous {
 				family.legacyPrefixes = nil
-			}
-			filtered := family.legacyPrefixes[:0]
-			for _, prefix := range family.legacyPrefixes {
-				if prefix != family.featureIDPrefix &&
-					(family.identityAmbiguous || collisionNameCounts[prefix] == 1) {
-					filtered = append(filtered, prefix)
+			} else {
+				filtered := family.legacyPrefixes[:0]
+				for _, prefix := range family.legacyPrefixes {
+					if prefix != family.featureIDPrefix &&
+						(family.identityAmbiguous || collisionNameCounts[prefix] == 1) {
+						filtered = append(filtered, prefix)
+					}
 				}
+				family.legacyPrefixes = filtered
 			}
-			family.legacyPrefixes = filtered
 		}
 		familiesByIDPrefix[family.idPrefix] = append(familiesByIDPrefix[family.idPrefix], index)
 	}

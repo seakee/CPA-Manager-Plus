@@ -786,8 +786,8 @@ describe('buildCodexQuotaWindowInfos', () => {
     expect(windows.map((window) => [window.id, window.usedPercent])).toEqual([
       ['window-2d-0', 10],
       ['code-review-window-2d-0', 20],
-      ['credits-0-window-2d-0', 30],
-      ['credits-1-window-2d-0', 40],
+      ['cpamp:ambiguous:credits-0-window-2d-0', 30],
+      ['cpamp:ambiguous:credits-1-window-2d-0', 40],
     ]);
     expect(new Set(windows.map((window) => window.id)).size).toBe(windows.length);
   });
@@ -881,11 +881,170 @@ describe('buildCodexQuotaWindowInfos', () => {
     });
 
     expect(initial.map((window) => window.id)).toEqual([
-      'additional-p-18000-s-none-five-hour-0',
-      'additional-p-18000-s-none-five-hour-1',
+      'cpamp:ambiguous:additional-p-18000-s-none-five-hour-0',
+      'cpamp:ambiguous:additional-p-18000-s-none-five-hour-1',
       'additional-p-604800-s-none-weekly-0',
     ]);
     expect(changed.map((window) => window.id)).toEqual(initial.map((window) => window.id));
+    expect(initial[0].identityAmbiguous).toBe(true);
+    expect(initial[1].identityAmbiguous).toBe(true);
+    expect(initial[2].identityAmbiguous).toBeFalsy();
+  });
+
+  it('marks duplicate fallback families without metered_feature as ambiguous when geometry matches (9.1)', () => {
+    const windows = buildCodexQuotaWindowInfos({
+      additional_rate_limits: [
+        {
+          limit_name: 'Same Quota',
+          rate_limit: {
+            secondary_window: {
+              limit_window_seconds: 604_800,
+              used_percent: 10,
+            },
+          },
+        },
+        {
+          limit_name: 'Same Quota',
+          rate_limit: {
+            secondary_window: {
+              limit_window_seconds: 604_800,
+              used_percent: 80,
+            },
+          },
+        },
+      ],
+    });
+
+    expect(windows.map((w) => w.id)).toEqual([
+      'cpamp:ambiguous:same-quota-weekly-0',
+      'cpamp:ambiguous:same-quota-weekly-1',
+    ]);
+    expect(windows.every((w) => w.identityAmbiguous === true)).toBe(true);
+    expect(windows.every((w) => w.modelScope.kind === 'feature')).toBe(true);
+    expect(windows.every((w) => w.modelScope.key === 'same_quota')).toBe(true);
+    expect(windows.every((w) => w.modelScope.complete === false)).toBe(true);
+    expect(windows.every((w) => w.scopeDisplayName === 'Same Quota')).toBe(true);
+    expect(
+      windows.every((w) => !w.providerWindowAliases || w.providerWindowAliases.length === 0)
+    ).toBe(true);
+  });
+
+  it('keeps ambiguous slot set stable across reorder without binding dynamic state (9.2)', () => {
+    const family = (usedPercent: number) => ({
+      limit_name: 'Same Quota',
+      rate_limit: {
+        secondary_window: {
+          limit_window_seconds: 604_800,
+          used_percent: usedPercent,
+        },
+      },
+    });
+    const first = buildCodexQuotaWindowInfos({
+      additional_rate_limits: [family(10), family(80)],
+    });
+    const second = buildCodexQuotaWindowInfos({
+      additional_rate_limits: [family(80), family(10)],
+    });
+
+    const expectedSlotSet = [
+      'cpamp:ambiguous:same-quota-weekly-0',
+      'cpamp:ambiguous:same-quota-weekly-1',
+    ];
+    expect(first.map((w) => w.id)).toEqual(expectedSlotSet);
+    expect(second.map((w) => w.id)).toEqual(expectedSlotSet);
+    expect(first.every((w) => w.identityAmbiguous === true)).toBe(true);
+    expect(second.every((w) => w.identityAmbiguous === true)).toBe(true);
+  });
+
+  it('marks anonymous duplicate families as ambiguous without polluting scopeDisplayName (9.3)', () => {
+    const windows = buildCodexQuotaWindowInfos({
+      additional_rate_limits: [
+        {
+          rate_limit: {
+            primary_window: {
+              limit_window_seconds: 18_000,
+              used_percent: 10,
+            },
+          },
+        },
+        {
+          rate_limit: {
+            primary_window: {
+              limit_window_seconds: 18_000,
+              used_percent: 80,
+            },
+          },
+        },
+      ],
+    });
+
+    expect(windows.map((w) => w.id)).toEqual([
+      'cpamp:ambiguous:additional-p-18000-s-none-five-hour-0',
+      'cpamp:ambiguous:additional-p-18000-s-none-five-hour-1',
+    ]);
+    expect(windows.every((w) => w.identityAmbiguous === true)).toBe(true);
+    expect(windows.every((w) => w.scopeDisplayName === undefined)).toBe(true);
+    expect(
+      windows.every((w) => !w.providerWindowAliases || w.providerWindowAliases.length === 0)
+    ).toBe(true);
+  });
+
+  it('keeps distinct fallback names identifiable despite same geometry (9.4)', () => {
+    const windows = buildCodexQuotaWindowInfos({
+      additional_rate_limits: [
+        {
+          limit_name: 'Quota A',
+          rate_limit: {
+            secondary_window: {
+              limit_window_seconds: 604_800,
+              used_percent: 10,
+            },
+          },
+        },
+        {
+          limit_name: 'Quota B',
+          rate_limit: {
+            secondary_window: {
+              limit_window_seconds: 604_800,
+              used_percent: 80,
+            },
+          },
+        },
+      ],
+    });
+
+    expect(windows.map((w) => w.id)).toEqual(['quota-a-weekly-0', 'quota-b-weekly-0']);
+    expect(windows.some((w) => w.identityAmbiguous)).toBe(false);
+    expect(windows[0].scopeDisplayName).toBe('Quota A');
+    expect(windows[1].scopeDisplayName).toBe('Quota B');
+  });
+
+  it('keeps same fallback name distinguishable when structure differs (9.5)', () => {
+    const windows = buildCodexQuotaWindowInfos({
+      additional_rate_limits: [
+        {
+          limit_name: 'Same Quota',
+          rate_limit: {
+            primary_window: {
+              limit_window_seconds: 18_000,
+              used_percent: 10,
+            },
+          },
+        },
+        {
+          limit_name: 'Same Quota',
+          rate_limit: {
+            secondary_window: {
+              limit_window_seconds: 604_800,
+              used_percent: 80,
+            },
+          },
+        },
+      ],
+    });
+
+    expect(windows.map((w) => w.id)).toEqual(['same-quota-five-hour-1', 'same-quota-weekly-0']);
+    expect(windows.some((w) => w.identityAmbiguous)).toBe(false);
   });
 
   it('shares rate-limit helpers used by Codex inspection', () => {
