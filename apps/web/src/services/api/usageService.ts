@@ -302,6 +302,7 @@ export interface CodexInspectionQuotaWindow {
   id: string;
   labelKey: string;
   labelParams?: Record<string, string | number>;
+  scopeDisplayName?: string;
   usedPercent?: number | null;
   resetLabel?: string;
   resetAtMs?: number | null;
@@ -1006,6 +1007,7 @@ export interface AccountQuotaSnapshotWindowInput {
   provider_window_aliases?: string[];
   window_kind: string;
   window_mode: AccountQuotaSnapshotWindowMode;
+  scope_display_name?: string;
   model_scope_kind: MonitoringAccountWindowModelScope['kind'];
   model_scope_key?: string;
   model_ids?: string[];

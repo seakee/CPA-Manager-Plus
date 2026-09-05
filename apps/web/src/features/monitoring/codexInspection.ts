@@ -150,6 +150,7 @@ export interface CodexInspectionQuotaWindow {
   id: string;
   labelKey: string;
   labelParams?: Record<string, string | number>;
+  scopeDisplayName?: string;
   usedPercent: number | null;
   resetLabel: string;
   resetAtMs?: number | null;

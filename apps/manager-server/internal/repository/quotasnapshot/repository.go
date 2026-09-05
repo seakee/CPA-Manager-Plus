@@ -220,6 +220,7 @@ type legacySnapshotRows interface {
 func loadLegacySnapshots(ctx context.Context, db legacySnapshotRows, suffix string, args ...any) ([]model.AccountQuotaSnapshot, error) {
 	rows, err := db.QueryContext(ctx, `select
 		id, account_key, provider, provider_window_id, window_kind, window_mode,
+		coalesce(scope_display_name, ''),
 		model_scope_kind, coalesce(model_scope_key, ''), coalesce(model_ids_json, ''),
 		source, coalesce(source_observation_id, ''), observed_at_ms,
 		boundary_accuracy, cycle_start_ms, cycle_end_ms, duration_seconds,
@@ -244,6 +245,7 @@ func loadLegacySnapshots(ctx context.Context, db legacySnapshotRows, suffix stri
 			&snapshot.ProviderWindowID,
 			&snapshot.WindowKind,
 			&snapshot.WindowMode,
+			&snapshot.ScopeDisplayName,
 			&snapshot.ModelScopeKind,
 			&snapshot.ModelScopeKey,
 			&snapshot.ModelIDsJSON,
@@ -387,6 +389,7 @@ func legacySnapshotContentHash(snapshot model.AccountQuotaSnapshot) string {
 		ProviderWindowID string
 		WindowKind       string
 		WindowMode       string
+		ScopeDisplayName string
 		ScopeFingerprint string
 		CycleStartMS     *int64
 		CycleEndMS       *int64
@@ -401,6 +404,7 @@ func legacySnapshotContentHash(snapshot model.AccountQuotaSnapshot) string {
 		ProviderWindowID: snapshot.ProviderWindowID,
 		WindowKind:       snapshot.WindowKind,
 		WindowMode:       snapshot.WindowMode,
+		ScopeDisplayName: snapshot.ScopeDisplayName,
 		ScopeFingerprint: snapshot.ScopeFingerprint,
 		CycleStartMS:     snapshot.CycleStartMS,
 		CycleEndMS:       snapshot.CycleEndMS,
@@ -522,6 +526,7 @@ func (r *repository) ListCandidates(ctx context.Context, accountKey, provider st
 		coalesce(activation_id, 0) as activation_id,
 		coalesce(cycle_id, 0) as cycle_id,
 		account_key, provider, provider_window_id, window_kind, window_mode,
+		coalesce(scope_display_name, '') as scope_display_name,
 		model_scope_kind, coalesce(model_scope_key, '') as model_scope_key,
 		coalesce(model_ids_json, '') as model_ids_json,
 		coalesce(scope_fingerprint, '') as scope_fingerprint,
@@ -560,6 +565,7 @@ func (r *repository) ListCandidates(ctx context.Context, accountKey, provider st
 		id, coalesce(observation_id, 0), coalesce(logical_window_id, 0),
 		coalesce(activation_id, 0), coalesce(cycle_id, 0),
 		account_key, provider, provider_window_id, window_kind, window_mode,
+		scope_display_name,
 		model_scope_kind, coalesce(model_scope_key, ''), coalesce(model_ids_json, ''),
 		coalesce(scope_fingerprint, ''), coalesce(content_hash, ''),
 		source, coalesce(source_observation_id, ''), observed_at_ms,
@@ -594,6 +600,7 @@ func (r *repository) ListCandidates(ctx context.Context, accountKey, provider st
 			&item.ProviderWindowID,
 			&item.WindowKind,
 			&item.WindowMode,
+			&item.ScopeDisplayName,
 			&item.ModelScopeKind,
 			&item.ModelScopeKey,
 			&item.ModelIDsJSON,

@@ -858,4 +858,57 @@ describe('accountQuotaDisplayWindows', () => {
       })
     ).toEqual([]);
   });
+
+  it('preserves scopeDisplayName for codex and claude windows', () => {
+    const stores = {
+      ...emptyStores(),
+      codexQuota: {
+        'codex.json': {
+          status: 'success',
+          windows: [
+            {
+              id: 'codex-spark',
+              label: 'Spark',
+              usedPercent: 20,
+              resetLabel: 'resets in 2h',
+              resetAtMs: 1_700_000_000_000,
+              scopeDisplayName: 'gpt-5-spark',
+              modelScope: { kind: 'models', models: ['gpt-5-spark'], complete: true },
+            },
+          ],
+        },
+      },
+      claudeQuota: {
+        'claude.json': {
+          status: 'success',
+          windows: [
+            {
+              id: 'claude-sonnet',
+              label: 'Claude 3.7 Sonnet',
+              usedPercent: 40,
+              resetLabel: 'resets in 5h',
+              resetAtMs: 1_700_000_000_000,
+              modelScope: { kind: 'models', models: ['claude-3-7-sonnet'], complete: true },
+            },
+          ],
+        },
+      },
+    } satisfies AccountQuotaStores;
+
+    const codexRow = buildRow({ name: 'codex.json', type: 'codex' }, stores);
+    const codexWindows = buildAccountQuotaDisplayWindows(codexRow, {
+      stores,
+      translateQuotaWindowLabel,
+      t,
+    });
+    expect(codexWindows[0]?.scopeDisplayName).toBe('gpt-5-spark');
+
+    const claudeRow = buildRow({ name: 'claude.json', type: 'claude' }, stores);
+    const claudeWindows = buildAccountQuotaDisplayWindows(claudeRow, {
+      stores,
+      translateQuotaWindowLabel,
+      t,
+    });
+    expect(claudeWindows[0]?.scopeDisplayName).toBe('Claude 3.7 Sonnet');
+  });
 });

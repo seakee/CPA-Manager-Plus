@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { TFunction } from 'i18next';
 import type {
   AccountQuotaSnapshotCycle,
   AccountQuotaSnapshotWindow,
@@ -111,7 +112,7 @@ const makeDefinitionCycle = (
   ...overrides,
 });
 
-const makeSnapshotRow = (provider: 'codex' | 'antigravity' = 'codex'): AccountRow =>
+const makeSnapshotRow = (provider: string = 'codex'): AccountRow =>
   ({
     selectionKey: `${provider}.json\u0000auth-1`,
     fileName: `${provider}.json`,
@@ -2007,5 +2008,242 @@ describe('account quota snapshots', () => {
 
     expect(forward?.rateLimitResetCreditsAvailableCount).toBe(3);
     expect(reverse?.rateLimitResetCreditsAvailableCount).toBe(3);
+  });
+
+  describe('scoped quota display name persistence and recovery', () => {
+    const t = ((key: string, options?: Record<string, string | number>) => {
+      if (key === 'codex_quota.additional_secondary_window') {
+        return `${options?.name ?? ''} weekly limit`;
+      }
+      if (key === 'codex_quota.additional_primary_window') {
+        return `${options?.name ?? ''} 5-hour limit`;
+      }
+      return key;
+    }) as TFunction;
+
+    it('persists Claude dynamic scope name into snapshot input', () => {
+      const definition = makeDefinition({
+        key: 'claude-sonnet',
+        providerWindowId: 'claude-sonnet',
+        provider: 'claude',
+        label: 'Claude 3.7 Sonnet',
+        modelScope: { kind: 'models', models: ['claude-3-7-sonnet'], complete: true },
+        display: {
+          ...makeDefinition().display,
+          key: 'claude-sonnet',
+          label: 'Claude 3.7 Sonnet',
+          kind: 'unknown',
+          remainingPercent: 60,
+          usedPercent: 40,
+          resetLabel: '-',
+          resetAtMs: null,
+          fromMs: null,
+          toMs: null,
+          source: 'claude',
+          scopeDisplayName: 'Claude 3.7 Sonnet',
+        },
+      });
+      const row = makeSnapshotRow('claude');
+      const [entry] = buildAccountQuotaSnapshotWriteEntries(
+        [row],
+        new Map([[row.selectionKey, [definition]]]),
+        {
+          getObservation: () => ({
+            source: 'api_query',
+            observed_at_ms: 10_000,
+            inventory_scope_key: 'claude:quota',
+            inventory_mode: 'complete',
+          }),
+        }
+      );
+      expect(entry.windows[0]).toMatchObject({
+        provider_window_id: 'claude-sonnet',
+        scope_display_name: 'Claude 3.7 Sonnet',
+      });
+    });
+
+    it('persists Codex Additional limit_name into snapshot input', () => {
+      const definition = makeDefinition({
+        key: 'spark-weekly-0',
+        providerWindowId: 'spark-weekly-0',
+        provider: 'codex',
+        label: 'Spark weekly limit',
+        modelScope: { kind: 'models', models: ['gpt-5-spark'], complete: true },
+        display: {
+          ...makeDefinition().display,
+          key: 'spark-weekly-0',
+          label: 'Spark weekly limit',
+          kind: 'weekly',
+          remainingPercent: 80,
+          usedPercent: 20,
+          resetLabel: '-',
+          resetAtMs: 20_000,
+          fromMs: 1_000,
+          toMs: 20_000,
+          source: 'codex',
+          scopeDisplayName: 'Spark',
+        },
+      });
+      const row = makeSnapshotRow('codex');
+      const [entry] = buildAccountQuotaSnapshotWriteEntries(
+        [row],
+        new Map([[row.selectionKey, [definition]]]),
+        {
+          getObservation: () => ({
+            source: 'api_query',
+            observed_at_ms: 10_000,
+            inventory_scope_key: 'codex:quota',
+            inventory_mode: 'complete',
+          }),
+        }
+      );
+      expect(entry.windows[0]).toMatchObject({
+        provider_window_id: 'spark-weekly-0',
+        scope_display_name: 'Spark',
+      });
+    });
+
+    it('reconstructs snapshot-only window with UI label containing scopeDisplayName', () => {
+      const snapshot = makeSnapshot({
+        provider_window_id: 'custom-scope-window',
+        window_kind: 'weekly',
+        model_scope_kind: 'feature',
+        model_scope_key: 'custom_feature',
+        scope_display_name: 'Model A',
+      });
+      const merged = mergeAccountQuotaSnapshotWindows([], [snapshot], {
+        provider: 'codex',
+        t,
+      });
+      expect(merged).toHaveLength(1);
+      expect(merged[0].display.scopeDisplayName).toBe('Model A');
+      expect(merged[0].display.label).toBe('Model A weekly limit');
+    });
+
+    it('formats label using current locale while storing only raw scopeDisplayName', () => {
+      const snapshot = makeSnapshot({
+        provider_window_id: 'custom-scope-window',
+        window_kind: 'weekly',
+        model_scope_kind: 'feature',
+        model_scope_key: 'custom_feature',
+        scope_display_name: 'Model A',
+      });
+      const zhT = ((key: string, options?: Record<string, string | number>) => {
+        if (key === 'codex_quota.additional_secondary_window') {
+          return `${options?.name ?? ''} 周额度`;
+        }
+        return key;
+      }) as TFunction;
+      const merged = mergeAccountQuotaSnapshotWindows([], [snapshot], {
+        provider: 'codex',
+        t: zhT,
+      });
+      expect(merged[0].display.label).toBe('Model A 周额度');
+    });
+
+    it('prefers local live non-empty display name over older snapshot name', () => {
+      const local = makeDefinition({
+        key: 'spark-weekly-0',
+        providerWindowId: 'spark-weekly-0',
+        provider: 'codex',
+        label: 'Live Spark weekly limit',
+        modelScope: { kind: 'models', models: ['gpt-5-spark'], complete: true },
+        display: {
+          ...makeDefinition().display,
+          key: 'spark-weekly-0',
+          label: 'Live Spark weekly limit',
+          kind: 'weekly',
+          remainingPercent: 80,
+          usedPercent: 20,
+          resetLabel: '-',
+          resetAtMs: 20_000,
+          fromMs: 1_000,
+          toMs: 20_000,
+          source: 'codex',
+          scopeDisplayName: 'Live Spark',
+        },
+      });
+      const snapshot = makeSnapshot({
+        provider_window_id: 'spark-weekly-0',
+        window_kind: 'weekly',
+        model_scope_kind: 'models',
+        model_ids: ['gpt-5-spark'],
+        scope_display_name: 'Stale Spark',
+        observed_at_ms: 5_000,
+      });
+      const merged = mergeAccountQuotaSnapshotWindows([local], [snapshot], {
+        provider: 'codex',
+        t,
+      });
+      expect(merged[0].display.scopeDisplayName).toBe('Live Spark');
+      expect(merged[0].display.label).toBe('Live Spark weekly limit');
+    });
+
+    it('supplements presentation when local name is blank without overriding quota numerical values', () => {
+      const local = makeDefinition({
+        key: 'spark-weekly-0',
+        providerWindowId: 'spark-weekly-0',
+        provider: 'codex',
+        label: 'spark-weekly-0',
+        modelScope: { kind: 'models', models: ['gpt-5-spark'], complete: true },
+        usedPercent: 75,
+        remainingPercent: 25,
+        observedAtMs: 30_000,
+        quotaProgressObservedAtMs: 30_000,
+        display: {
+          ...makeDefinition().display,
+          key: 'spark-weekly-0',
+          label: 'spark-weekly-0',
+          kind: 'weekly',
+          remainingPercent: 25,
+          usedPercent: 75,
+          resetLabel: '-',
+          resetAtMs: 40_000,
+          fromMs: 1_000,
+          toMs: 40_000,
+          source: 'codex',
+          observedAtMs: 30_000,
+          quotaProgressObservedAtMs: 30_000,
+          scopeDisplayName: undefined,
+        },
+      });
+      const snapshot = makeSnapshot({
+        provider_window_id: 'spark-weekly-0',
+        window_kind: 'weekly',
+        model_scope_kind: 'models',
+        model_ids: ['gpt-5-spark'],
+        scope_display_name: 'Spark',
+        used_percent: 10,
+        remaining_percent: 90,
+        observed_at_ms: 10_000,
+      });
+      const merged = mergeAccountQuotaSnapshotWindows([local], [snapshot], {
+        provider: 'codex',
+        t,
+      });
+      expect(merged[0].display.scopeDisplayName).toBe('Spark');
+      expect(merged[0].display.label).toBe('Spark weekly limit');
+      expect(merged[0].usedPercent).toBe(75);
+      expect(merged[0].remainingPercent).toBe(25);
+      expect(merged[0].display.usedPercent).toBe(75);
+      expect(merged[0].display.remainingPercent).toBe(25);
+    });
+
+    it('falls back to generic label on blank historical display without guessing provider_window_id', () => {
+      const snapshot = makeSnapshot({
+        provider_window_id: 'custom-scope-window',
+        window_kind: 'weekly',
+        model_scope_kind: 'feature',
+        model_scope_key: 'custom_feature',
+        scope_display_name: '',
+      });
+      const merged = mergeAccountQuotaSnapshotWindows([], [snapshot], {
+        provider: 'codex',
+        getLabel: () => 'Generic Quota Window',
+        t,
+      });
+      expect(merged[0].display.scopeDisplayName).toBeUndefined();
+      expect(merged[0].display.label).toBe('Generic Quota Window');
+    });
   });
 });

@@ -66,6 +66,7 @@ export interface AccountQuotaDisplayWindow {
   cycleStartMs?: number | null;
   cycleEndMs?: number | null;
   modelScope?: QuotaModelScope;
+  scopeDisplayName?: string;
   providerWindowAliases?: string[];
 }
 
@@ -353,6 +354,7 @@ export const buildAccountQuotaDisplayWindow = ({
   cycleStartMs,
   cycleEndMs,
   modelScope = { kind: 'all', complete: true },
+  scopeDisplayName,
   providerWindowAliases,
   nowMs,
 }: {
@@ -376,6 +378,7 @@ export const buildAccountQuotaDisplayWindow = ({
   cycleStartMs?: number | null;
   cycleEndMs?: number | null;
   modelScope?: QuotaModelScope;
+  scopeDisplayName?: string;
   providerWindowAliases?: string[];
   nowMs?: number;
 }): AccountQuotaDisplayWindow => {
@@ -406,6 +409,7 @@ export const buildAccountQuotaDisplayWindow = ({
           resolvedKind === 'summary'
         ? 'non_window'
         : 'unknown');
+
   return {
     key,
     label,
@@ -430,6 +434,7 @@ export const buildAccountQuotaDisplayWindow = ({
     cycleStartMs: cycleStartMs ?? range.fromMs,
     cycleEndMs: cycleEndMs ?? range.resetAtMs,
     modelScope,
+    scopeDisplayName,
     providerWindowAliases,
     ...range,
   };
@@ -454,6 +459,7 @@ const buildCodexQuotaDisplayWindows = (
       resetAccuracy: window.resetAccuracy,
       limitWindowSeconds: window.limitWindowSeconds ?? null,
       modelScope: window.modelScope ?? inferCodexQuotaScopeFromProviderWindowId(window.id),
+      scopeDisplayName: window.scopeDisplayName,
       providerWindowAliases: window.providerWindowAliases,
       source: 'codex',
       observationSource:
@@ -475,22 +481,29 @@ const buildClaudeQuotaDisplayWindows = (
   const quota = getCredentialScopedQuotaState(options.stores.claudeQuota, row.raw);
   if (!quota) return [];
   const windows =
-    quota.windows?.map((window) =>
-      buildAccountQuotaDisplayWindow({
+    quota.windows?.map((window) => {
+      const modelScope = window.modelScope ?? { kind: 'all', complete: true };
+      const label = options.translateQuotaWindowLabel(window.label, window.labelKey);
+      const scopeDisplayName =
+        modelScope.kind === 'models' && !window.labelKey
+          ? window.label.trim() || undefined
+          : undefined;
+      return buildAccountQuotaDisplayWindow({
         key: window.id,
-        label: options.translateQuotaWindowLabel(window.label, window.labelKey),
+        label,
         remainingPercent: remainingPercentFromUsed(window.usedPercent),
         usedPercent: window.usedPercent,
         resetLabel: window.resetLabel || '-',
         resetAtMs: window.resetAtMs,
         resetAccuracy: window.resetAccuracy,
         limitWindowSeconds: window.limitWindowSeconds ?? null,
-        modelScope: window.modelScope ?? { kind: 'all', complete: true },
+        modelScope,
+        scopeDisplayName,
         source: 'claude',
         observedAtMs: quota.fetchedAtMs ?? null,
         nowMs: options.nowMs,
-      })
-    ) ?? [];
+      });
+    }) ?? [];
 
   if (quota.extraUsage?.is_enabled) {
     const usedPercent = getClaudeExtraUsageUsedPercent(quota.extraUsage);

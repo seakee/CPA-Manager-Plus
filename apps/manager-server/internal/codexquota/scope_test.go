@@ -268,3 +268,20 @@ func TestLegacyAllScopeReplacementUsesKnownQuotaIdentityNotUsageCompleteness(t *
 		})
 	}
 }
+
+func TestResolveAdditionalScopePreservesRawDisplayName(t *testing.T) {
+	resolution := ResolveAdditionalScope(AdditionalScopeInput{
+		LimitName:      "gpt-reserve",
+		MeteredFeature: "gpt_reserve",
+	})
+	if resolution.ScopeDisplayName != "gpt-reserve" {
+		t.Fatalf("ScopeDisplayName = %q, want gpt-reserve", resolution.ScopeDisplayName)
+	}
+
+	fallback := ResolveAdditionalScope(AdditionalScopeInput{
+		MeteredFeature: "future_tool",
+	})
+	if fallback.ScopeDisplayName != "future_tool" {
+		t.Fatalf("ScopeDisplayName fallback = %q, want future_tool", fallback.ScopeDisplayName)
+	}
+}

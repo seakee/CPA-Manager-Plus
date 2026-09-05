@@ -265,6 +265,7 @@ type codexAdditionalRateLimitFamily struct {
 	rateInfo           *codexRateLimit
 	limitName          string
 	modelScope         codexquota.ModelScope
+	scopeDisplayName   string
 	baseIDPrefix       string
 	featureIDPrefix    string
 	legacyBaseIDPrefix string
@@ -4502,6 +4503,7 @@ func buildCodexInspectionQuotaWindows(payload map[string]any, planType string) [
 		nil,
 		teamPlan,
 		codexquota.MainScope(),
+		"",
 	)
 	addCodexRateLimitWindows(
 		&windows,
@@ -4514,6 +4516,7 @@ func buildCodexInspectionQuotaWindows(payload map[string]any, planType string) [
 		nil,
 		teamPlan,
 		codexquota.CodeReviewScope(),
+		"",
 	)
 	addAdditionalRateLimitWindows(&windows, readMapSlice(payload, "additional_rate_limits", "additionalRateLimits"), teamPlan)
 	return windows
@@ -4556,21 +4559,22 @@ func addCodexRateLimitWindows(
 	genericLabelParams map[string]any,
 	teamPlan bool,
 	modelScope codexquota.ModelScope,
+	scopeDisplayName string,
 ) {
 	if limit == nil {
 		return
 	}
 	classified := classifyWindows(limit, codexPlanTypeForTeam(teamPlan))
 	added := make(map[*codexWindow]bool)
-	addCodexWindowInfo(windows, fiveHourMeta.ID, fiveHourMeta.LabelKey, genericLabelParams, classified.FiveHour, limit.LimitReached, limit.Allowed, modelScope)
+	addCodexWindowInfo(windows, fiveHourMeta.ID, fiveHourMeta.LabelKey, genericLabelParams, classified.FiveHour, limit.LimitReached, limit.Allowed, modelScope, scopeDisplayName)
 	if classified.FiveHour != nil {
 		added[classified.FiveHour] = true
 	}
-	addCodexWindowInfo(windows, weeklyMeta.ID, weeklyMeta.LabelKey, genericLabelParams, classified.Weekly, limit.LimitReached, limit.Allowed, modelScope)
+	addCodexWindowInfo(windows, weeklyMeta.ID, weeklyMeta.LabelKey, genericLabelParams, classified.Weekly, limit.LimitReached, limit.Allowed, modelScope, scopeDisplayName)
 	if classified.Weekly != nil {
 		added[classified.Weekly] = true
 	}
-	addCodexWindowInfo(windows, monthlyMeta.ID, monthlyMeta.LabelKey, genericLabelParams, classified.Monthly, limit.LimitReached, limit.Allowed, modelScope)
+	addCodexWindowInfo(windows, monthlyMeta.ID, monthlyMeta.LabelKey, genericLabelParams, classified.Monthly, limit.LimitReached, limit.Allowed, modelScope, scopeDisplayName)
 	if classified.Monthly != nil {
 		added[classified.Monthly] = true
 	}
@@ -4592,6 +4596,7 @@ func addCodexRateLimitWindows(
 			limit.LimitReached,
 			limit.Allowed,
 			modelScope,
+			scopeDisplayName,
 		)
 	}
 }
@@ -4619,6 +4624,7 @@ func addCodexWindowInfo(
 	limitReached bool,
 	allowed *bool,
 	modelScope codexquota.ModelScope,
+	scopeDisplayName string,
 ) {
 	if window == nil {
 		return
@@ -4640,6 +4646,7 @@ func addCodexWindowInfo(
 		ResetAccuracy:      resetAccuracy,
 		LimitWindowSeconds: window.LimitWindowSeconds,
 		ModelScope:         codexInspectionQuotaModelScope(modelScope),
+		ScopeDisplayName:   strings.TrimSpace(scopeDisplayName),
 	})
 }
 
@@ -4681,6 +4688,7 @@ func addAdditionalRateLimitWindows(windows *[]model.CodexInspectionQuotaWindow, 
 			rateInfo:           rateInfo,
 			limitName:          limitName,
 			modelScope:         scopeResolution.Scope,
+			scopeDisplayName:   scopeResolution.ScopeDisplayName,
 			baseIDPrefix:       scopeResolution.ProviderWindowPrefix,
 			featureIDPrefix:    normalizeCodexWindowID(meteredFeature),
 			legacyBaseIDPrefix: legacyBaseIDPrefix,
@@ -4734,6 +4742,7 @@ func addAdditionalRateLimitWindows(windows *[]model.CodexInspectionQuotaWindow, 
 			map[string]any{"name": family.limitName},
 			teamPlan,
 			family.modelScope,
+			family.scopeDisplayName,
 		)
 		applyCodexProviderWindowAliases((*windows)[start:], family.idPrefix, family.legacyPrefixes)
 	}

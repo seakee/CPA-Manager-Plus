@@ -246,6 +246,9 @@ const serializeQuotaWindow = (window: CodexInspectionQuotaWindow): CodexInspecti
     id,
     labelKey: readString(window.labelKey),
     labelParams: normalizeQuotaWindowLabelParams(window.labelParams),
+    ...(readString(window.scopeDisplayName).trim()
+      ? { scopeDisplayName: readString(window.scopeDisplayName).trim() }
+      : {}),
     usedPercent: readNullableNumber(window.usedPercent),
     resetLabel: readString(window.resetLabel),
     ...(resetAtMs !== null ? { resetAtMs } : {}),
@@ -275,6 +278,9 @@ const hydrateQuotaWindow = (value: unknown): CodexInspectionQuotaWindow | null =
     id,
     labelKey,
     labelParams: normalizeQuotaWindowLabelParams(value.labelParams),
+    ...(readString(value.scopeDisplayName).trim()
+      ? { scopeDisplayName: readString(value.scopeDisplayName).trim() }
+      : {}),
     usedPercent: readNullableNumber(value.usedPercent),
     resetLabel: readString(value.resetLabel),
     ...(resetAtMs !== null ? { resetAtMs } : {}),

@@ -15,6 +15,7 @@ type AccountQuotaSnapshot struct {
 	ProviderWindowAliases []string
 	WindowKind            string
 	WindowMode            string
+	ScopeDisplayName      string
 	ModelScopeKind        string
 	ModelScopeKey         string
 	ModelIDsJSON          string

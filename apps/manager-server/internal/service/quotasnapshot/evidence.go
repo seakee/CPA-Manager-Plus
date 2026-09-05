@@ -109,6 +109,7 @@ func (s *Service) WriteCodexInspectionResult(ctx context.Context, result model.C
 			ProviderWindowAliases: append([]string(nil), window.ProviderWindowAliases...),
 			WindowKind:            windowKind,
 			WindowMode:            mode,
+			ScopeDisplayName:      window.ScopeDisplayName,
 			ModelScopeKind:        modelScope.Kind,
 			ModelScopeKey:         modelScope.Key,
 			ModelIDs:              append([]string(nil), modelScope.Models...),

@@ -69,6 +69,7 @@ export type CodexQuotaWindowInfo = {
   id: string;
   labelKey: string;
   labelParams?: Record<string, string | number>;
+  scopeDisplayName?: string;
   usedPercent: number | null;
   resetLabel: string;
   resetAtMs: number | null;
@@ -83,6 +84,7 @@ export type CodexQuotaScopeResolution = {
   providerWindowIdPrefix: string;
   legacyProviderWindowIdPrefixes?: string[];
   labelName?: string;
+  scopeDisplayName?: string;
 };
 
 export type CodexUsageModelIdentity = {
@@ -542,6 +544,7 @@ export const resolveCodexAdditionalQuotaScope = (
         ...CODEX_SPARK_LEGACY_PROVIDER_WINDOW_PREFIXES,
       ]),
       labelName: limitName ?? meteredFeature ?? CODEX_SPARK_MODEL_ID,
+      scopeDisplayName: limitName ?? meteredFeature ?? undefined,
     };
   }
 
@@ -558,6 +561,7 @@ export const resolveCodexAdditionalQuotaScope = (
       normalizeWindowId(anonymousIdentity) ||
       'additional-unknown',
     labelName: limitName ?? meteredFeature ?? anonymousIdentity,
+    scopeDisplayName: limitName ?? meteredFeature ?? undefined,
   };
 };
 
@@ -746,7 +750,8 @@ const addCodexWindowInfo = (
   limitReached?: boolean,
   allowed?: boolean,
   observedAtMs = Date.now(),
-  source: CodexQuotaResetSource = 'provider_api'
+  source: CodexQuotaResetSource = 'provider_api',
+  scopeDisplayName?: string
 ) => {
   if (!window) return;
 
@@ -763,6 +768,7 @@ const addCodexWindowInfo = (
     id,
     labelKey,
     labelParams,
+    scopeDisplayName: scopeDisplayName?.trim() || undefined,
     usedPercent,
     resetLabel,
     resetAtMs: reset.resetAtMs,
@@ -787,6 +793,7 @@ const addCodexRateLimitWindows = (
     source?: CodexQuotaResetSource;
     genericIdPrefix?: string;
     modelScope: QuotaModelScope;
+    scopeDisplayName?: string;
     providerWindowAliasesById?: ReadonlyMap<string, string[]>;
     providerWindowAliasPrefixes?: string[];
     providerWindowAliasBasePrefix?: string;
@@ -819,7 +826,8 @@ const addCodexRateLimitWindows = (
     limitReached,
     allowed,
     options?.observedAtMs,
-    options?.source
+    options?.source,
+    options?.scopeDisplayName
   );
   if (classified.fiveHourWindow) added.add(classified.fiveHourWindow);
   addCodexWindowInfo(
@@ -833,7 +841,8 @@ const addCodexRateLimitWindows = (
     limitReached,
     allowed,
     options?.observedAtMs,
-    options?.source
+    options?.source,
+    options?.scopeDisplayName
   );
   if (classified.weeklyWindow) added.add(classified.weeklyWindow);
   addCodexWindowInfo(
@@ -847,7 +856,8 @@ const addCodexRateLimitWindows = (
     limitReached,
     allowed,
     options?.observedAtMs,
-    options?.source
+    options?.source,
+    options?.scopeDisplayName
   );
   if (classified.monthlyWindow) added.add(classified.monthlyWindow);
 
@@ -869,7 +879,8 @@ const addCodexRateLimitWindows = (
       limitReached,
       allowed,
       options?.observedAtMs,
-      options?.source
+      options?.source,
+      options?.scopeDisplayName
     );
   });
 };
@@ -899,6 +910,7 @@ const addAdditionalRateLimitWindows = (
         rateInfo,
         limitName,
         modelScope: scopeResolution.modelScope,
+        scopeDisplayName: scopeResolution.scopeDisplayName,
         baseIdPrefix:
           scopeResolution.providerWindowIdPrefix ||
           normalizeWindowId(limitName) ||
@@ -954,7 +966,7 @@ const addAdditionalRateLimitWindows = (
       .forEach((family, familyIndex) => familyIndexes.set(family.sourceIndex, familyIndex));
   });
   resolvedFamilies.forEach(
-    ({ sourceIndex, rateInfo, limitName, modelScope, idPrefix, legacyIdPrefixes }) => {
+    ({ sourceIndex, rateInfo, limitName, modelScope, scopeDisplayName, idPrefix, legacyIdPrefixes }) => {
       const familyIndex = familyIndexes.get(sourceIndex) ?? 0;
       const aliasPrefixes = normalizedUniqueWindowIds(legacyIdPrefixes).filter(
         (prefix) => prefix !== idPrefix
@@ -1008,6 +1020,7 @@ const addAdditionalRateLimitWindows = (
           ...options,
           genericIdPrefix: `${idPrefix}-${familyIndex}`,
           modelScope,
+          scopeDisplayName,
           providerWindowAliasesById,
         }
       );
@@ -1067,6 +1080,7 @@ export const buildCodexQuotaWindowInfos = (
       source,
       genericIdPrefix: scopedRateLimit ? `${rateLimitPrefix}-0` : undefined,
       modelScope: rateLimitScope.modelScope,
+      scopeDisplayName: rateLimitScope.scopeDisplayName,
       providerWindowAliasPrefixes: scopedRateLimit
         ? rateLimitScope.legacyProviderWindowIdPrefixes
         : undefined,

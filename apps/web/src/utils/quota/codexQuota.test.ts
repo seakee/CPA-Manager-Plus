@@ -954,4 +954,22 @@ describe('shouldClearInheritedCodexQuotaProgress', () => {
       )
     ).toBe(true);
   });
+
+  it('preserves raw Additional rate limit name as scopeDisplayName', () => {
+    const windows = buildCodexQuotaWindowInfos({
+      additional_rate_limits: [
+        {
+          limit_name: 'gpt-reserve',
+          metered_feature: 'gpt_reserve',
+          rate_limit: {
+            secondary_window: { used_percent: 25, limit_window_seconds: 604_800 },
+          },
+        },
+      ],
+    });
+
+    expect(windows).toHaveLength(1);
+    expect(windows[0].scopeDisplayName).toBe('gpt-reserve');
+    expect(windows[0].id).toBe('gpt-reserve-weekly-0');
+  });
 });

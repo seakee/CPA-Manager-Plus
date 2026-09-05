@@ -16,6 +16,7 @@ export type AccountQuotaWindow = {
   resetAccuracy?: QuotaResetAccuracy;
   usageLabel: string | null;
   modelScope?: QuotaModelScope;
+  scopeDisplayName?: string;
   providerWindowAliases?: string[];
 };
 

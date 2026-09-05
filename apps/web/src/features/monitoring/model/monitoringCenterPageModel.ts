@@ -805,6 +805,7 @@ const buildCodexAccountQuotaWindows = (
       resetAccuracy: window.resetAccuracy ?? 'unknown',
       usageLabel,
       modelScope: window.modelScope,
+      scopeDisplayName: window.scopeDisplayName,
       providerWindowAliases: window.providerWindowAliases,
     };
   });
@@ -854,6 +855,7 @@ const mergeAccountQuotaWindow = (
       ? { usageLabel: observedWindow.usageLabel }
       : {}),
     ...(observedWindow.modelScope ? { modelScope: observedWindow.modelScope } : {}),
+    ...(observedWindow.scopeDisplayName ? { scopeDisplayName: observedWindow.scopeDisplayName } : {}),
     ...(observedWindow.providerWindowAliases
       ? { providerWindowAliases: observedWindow.providerWindowAliases }
       : {}),
@@ -1604,6 +1606,7 @@ export const buildObservedCodexAccountQuotaEntry = (
     observationSource: 'response_header',
     observedAtMs,
     modelScope: window.modelScope,
+    scopeDisplayName: window.scopeDisplayName,
     providerWindowAliases: window.providerWindowAliases,
   }));
   const fallbackExpired = recoverAtMS !== null && recoverAtMS <= nowMs;

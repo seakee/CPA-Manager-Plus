@@ -1,3 +1,4 @@
+import type { TFunction } from 'i18next';
 import type { CodexQuotaState, QuotaModelScope } from '@/types';
 import type {
   AccountQuotaSnapshotCycle,
@@ -318,6 +319,9 @@ const toSnapshotWindow = (
     plan_type: definition.provider === 'codex' ? (codexQuota?.planType ?? undefined) : undefined,
     relationship_kind: definition.relationshipKind,
     container_provider_window_id: definition.containerProviderWindowId,
+    ...(definition.display.scopeDisplayName?.trim()
+      ? { scope_display_name: definition.display.scopeDisplayName.trim() }
+      : {}),
   };
 };
 
@@ -527,13 +531,50 @@ const compareSnapshotFreshness = (
   return leftKey < rightKey ? -1 : 1;
 };
 
-export const mergeAccountQuotaSnapshotWindows = (
-  definitions: AccountQuotaWindowDefinition[],
-  snapshots: AccountQuotaSnapshotWindow[],
+const resolveSnapshotQuotaLabel = (
+  snapshot: AccountQuotaSnapshotWindow,
   options: {
     provider?: string;
     getLabel?: (snapshot: AccountQuotaSnapshotWindow) => string;
-  } = {}
+    t?: TFunction;
+  },
+  scopeDisplayName?: string
+): string => {
+  if (!scopeDisplayName) {
+    return options.getLabel?.(snapshot) ?? snapshot.provider_window_id;
+  }
+
+  if (options.provider === 'claude') {
+    return scopeDisplayName;
+  }
+
+  if (options.provider === 'codex') {
+    if (options.t) {
+      const windowKind = snapshot.window_kind?.toLowerCase();
+      if (windowKind === 'primary' || windowKind === '5-hour' || windowKind === 'five-hour') {
+        return options.t('codex_quota.additional_primary_window', { name: scopeDisplayName });
+      }
+      if (windowKind === 'monthly') {
+        return options.t('codex_quota.additional_monthly_window', { name: scopeDisplayName });
+      }
+      return options.t('codex_quota.additional_secondary_window', { name: scopeDisplayName });
+    }
+    return scopeDisplayName;
+  }
+
+  return scopeDisplayName;
+};
+
+export interface MergeAccountQuotaSnapshotWindowsOptions {
+  provider?: string;
+  getLabel?: (snapshot: AccountQuotaSnapshotWindow) => string;
+  t?: TFunction;
+}
+
+export const mergeAccountQuotaSnapshotWindows = (
+  definitions: AccountQuotaWindowDefinition[],
+  snapshots: AccountQuotaSnapshotWindow[],
+  options: MergeAccountQuotaSnapshotWindowsOptions = {}
 ): AccountQuotaWindowDefinition[] => {
   const canonicalProviderWindowId = (
     providerWindowId: string,
@@ -737,8 +778,26 @@ export const mergeAccountQuotaSnapshotWindows = (
       quotaProgressObservedAtMs = null;
     }
 
+    const liveScopeDisplayName = definition.display.scopeDisplayName?.trim() || undefined;
+    const snapshotScopeDisplayName = snapshot.scope_display_name?.trim() || undefined;
+    const mergedScopeDisplayName = liveScopeDisplayName ?? snapshotScopeDisplayName;
+    const isOverlayingBlankDisplayName = !liveScopeDisplayName && !!snapshotScopeDisplayName;
+    const mergedLabel = isOverlayingBlankDisplayName
+      ? resolveSnapshotQuotaLabel(snapshot, options, mergedScopeDisplayName)
+      : definition.display.label;
+
     const useSnapshotMetadata = snapshotMetadataIsNewer || snapshotCanSupersedeDifferentCycle;
-    if (!useSnapshotMetadata && !quotaChanged) return definition;
+    if (!useSnapshotMetadata && !quotaChanged) {
+      if (!isOverlayingBlankDisplayName) return definition;
+      return {
+        ...definition,
+        display: {
+          ...definition.display,
+          scopeDisplayName: mergedScopeDisplayName,
+          label: mergedLabel,
+        },
+      };
+    }
     const mergedModelScope = useSnapshotMetadata
       ? snapshotModelScope(snapshot)
       : definition.modelScope;
@@ -770,6 +829,8 @@ export const mergeAccountQuotaSnapshotWindows = (
               modelScope: mergedModelScope,
             }
           : {}),
+        scopeDisplayName: mergedScopeDisplayName,
+        ...(isOverlayingBlankDisplayName ? { label: mergedLabel } : {}),
         quotaProgressObservedAtMs,
         remainingPercent: mergedRemainingPercent,
         usedPercent: mergedUsedPercent,
@@ -899,10 +960,7 @@ const definitionSortRank = (definition: AccountQuotaWindowDefinition): number =>
 
 const snapshotDefinition = (
   snapshot: AccountQuotaSnapshotWindow,
-  options: {
-    provider?: string;
-    getLabel?: (snapshot: AccountQuotaSnapshotWindow) => string;
-  },
+  options: MergeAccountQuotaSnapshotWindowsOptions,
   key: string
 ): AccountQuotaWindowDefinition => {
   const provider: AccountQuotaWindowSource =
@@ -927,9 +985,11 @@ const snapshotDefinition = (
       ? remainingPercentFromUsed(usedPercent)
       : null;
   const quotaProgressObservedAtMs = resolveSnapshotQuotaProgressObservedAtMs(snapshot);
+  const scopeDisplayName = snapshot.scope_display_name?.trim() || undefined;
+  const label = resolveSnapshotQuotaLabel(snapshot, options, scopeDisplayName);
   const display: AccountQuotaDisplayWindow = {
     key,
-    label: options.getLabel?.(snapshot) ?? snapshot.provider_window_id,
+    label,
     kind: snapshotWindowKind(snapshot.window_kind),
     remainingPercent,
     usedPercent,
@@ -951,6 +1011,7 @@ const snapshotDefinition = (
     cycleStartMs: currentStartMs,
     cycleEndMs: currentEndMs,
     modelScope,
+    scopeDisplayName,
     providerWindowAliases: snapshot.provider_window_aliases,
   };
   return {
