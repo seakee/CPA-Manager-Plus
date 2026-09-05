@@ -49,6 +49,18 @@ type Repository interface {
 	ListCurrentAmbiguousCandidates(ctx context.Context, accountKey, provider string) ([]model.AccountQuotaSnapshot, error)
 	ListLatestScopeDisplayCandidates(ctx context.Context, accountKey, provider string) ([]model.AccountQuotaSnapshot, error)
 	ListWindowStates(ctx context.Context, accountKey, provider string) ([]model.AccountQuotaWindowState, error)
+	// ReadQueryEvidence loads every evidence group one quota query needs inside
+	// a single SQLite read transaction, so one response can never mix states
+	// from before and after a background observation commit.
+	ReadQueryEvidence(ctx context.Context, accountKey, provider string, limit int) (QueryEvidence, error)
+}
+
+// QueryEvidence bundles the raw SQLite evidence consumed by Service.Query.
+type QueryEvidence struct {
+	Candidates          []model.AccountQuotaSnapshot
+	States              []model.AccountQuotaWindowState
+	AmbiguousCandidates []model.AccountQuotaSnapshot
+	DisplayCandidates   []model.AccountQuotaSnapshot
 }
 
 type repository struct {
@@ -510,10 +522,14 @@ func codexWindowFamilyRole(providerWindowID string) (string, string, bool) {
 }
 
 func (r *repository) ListCandidates(ctx context.Context, accountKey, provider string, limit int) ([]model.AccountQuotaSnapshot, error) {
+	return listCandidates(ctx, r.db, accountKey, provider, limit)
+}
+
+func listCandidates(ctx context.Context, db quotaSnapshotQueryer, accountKey, provider string, limit int) ([]model.AccountQuotaSnapshot, error) {
 	if limit <= 0 {
 		limit = defaultCandidateLimit
 	}
-	rows, err := r.db.QueryContext(ctx, `with ranked as (
+	rows, err := db.QueryContext(ctx, `with ranked as (
 	select
 		id, coalesce(observation_id, 0) as observation_id,
 		coalesce(logical_window_id, 0) as logical_window_id,
@@ -643,7 +659,11 @@ func (r *repository) ListCandidates(ctx context.Context, accountKey, provider st
 // each inventory scope. These snapshots are current-observation evidence, not
 // lifecycle history, so they intentionally bypass ListCandidates retention.
 func (r *repository) ListCurrentAmbiguousCandidates(ctx context.Context, accountKey, provider string) ([]model.AccountQuotaSnapshot, error) {
-	rows, err := r.db.QueryContext(ctx, `with latest_complete as (
+	return listCurrentAmbiguousCandidates(ctx, r.db, accountKey, provider)
+}
+
+func listCurrentAmbiguousCandidates(ctx context.Context, db quotaSnapshotQueryer, accountKey, provider string) ([]model.AccountQuotaSnapshot, error) {
+	rows, err := db.QueryContext(ctx, `with latest_complete as (
 		select id, inventory_scope_key, observed_at_ms,
 			row_number() over (
 				partition by inventory_scope_key
@@ -747,7 +767,11 @@ func (r *repository) ListCurrentAmbiguousCandidates(ctx context.Context, account
 // logical window activation. Legacy, unattached snapshots use their provider
 // identity plus scope as the compatibility partition.
 func (r *repository) ListLatestScopeDisplayCandidates(ctx context.Context, accountKey, provider string) ([]model.AccountQuotaSnapshot, error) {
-	rows, err := r.db.QueryContext(ctx, `with ranked as (
+	return listLatestScopeDisplayCandidates(ctx, r.db, accountKey, provider)
+}
+
+func listLatestScopeDisplayCandidates(ctx context.Context, db quotaSnapshotQueryer, accountKey, provider string) ([]model.AccountQuotaSnapshot, error) {
+	rows, err := db.QueryContext(ctx, `with ranked as (
 	select
 		snapshot.id, coalesce(snapshot.observation_id, 0) as observation_id,
 		coalesce(snapshot.logical_window_id, 0) as logical_window_id,
@@ -905,4 +929,37 @@ func float64Pointer(value sql.NullFloat64) *float64 {
 	}
 	result := value.Float64
 	return &result
+}
+
+// ReadQueryEvidence runs every quota-query evidence read for one account and
+// provider inside a single short read transaction. A background inspection
+// commit can then land entirely before or entirely after the response, never
+// in between. Normalization, window selection, and presentation shadowing stay
+// outside the transaction on purpose.
+func (r *repository) ReadQueryEvidence(ctx context.Context, accountKey, provider string, limit int) (QueryEvidence, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return QueryEvidence{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	evidence := QueryEvidence{}
+	if evidence.Candidates, err = listCandidates(ctx, tx, accountKey, provider, limit); err != nil {
+		return QueryEvidence{}, err
+	}
+	if evidence.States, err = listWindowStates(ctx, tx, accountKey, provider); err != nil {
+		return QueryEvidence{}, err
+	}
+	if strings.EqualFold(strings.TrimSpace(provider), "codex") {
+		if evidence.AmbiguousCandidates, err = listCurrentAmbiguousCandidates(ctx, tx, accountKey, provider); err != nil {
+			return QueryEvidence{}, err
+		}
+	}
+	if evidence.DisplayCandidates, err = listLatestScopeDisplayCandidates(ctx, tx, accountKey, provider); err != nil {
+		return QueryEvidence{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return QueryEvidence{}, err
+	}
+	return evidence, nil
 }

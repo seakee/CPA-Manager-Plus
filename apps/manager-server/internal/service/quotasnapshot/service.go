@@ -526,21 +526,13 @@ func (s *Service) Query(ctx context.Context, req QueryRequest) (QueryResponse, e
 		if !ok {
 			return QueryResponse{}, errors.New("account identity is required")
 		}
-		candidates, err := s.store.QuotaSnapshots.ListCandidates(ctx, accountKey, provider, maxSnapshotsPerQuery)
+		evidence, err := s.store.QuotaSnapshots.ReadQueryEvidence(ctx, accountKey, provider, maxSnapshotsPerQuery)
 		if err != nil {
 			return QueryResponse{}, err
 		}
-		states, err := s.store.QuotaSnapshots.ListWindowStates(ctx, accountKey, provider)
-		if err != nil {
-			return QueryResponse{}, err
-		}
-		ambiguousCandidates := []model.AccountQuotaSnapshot(nil)
-		if provider == "codex" {
-			ambiguousCandidates, err = s.store.QuotaSnapshots.ListCurrentAmbiguousCandidates(ctx, accountKey, provider)
-			if err != nil {
-				return QueryResponse{}, err
-			}
-		}
+		candidates := evidence.Candidates
+		states := evidence.States
+		ambiguousCandidates := evidence.AmbiguousCandidates
 		stateByID := make(map[int64]model.AccountQuotaWindowState, len(states))
 		for _, state := range states {
 			stateByID[state.ID] = state
@@ -607,10 +599,7 @@ func (s *Service) Query(ctx context.Context, req QueryRequest) (QueryResponse, e
 			normalizedStates = append(normalizedStates, states[index])
 		}
 		states = normalizedStates
-		displayCandidates, err := s.store.QuotaSnapshots.ListLatestScopeDisplayCandidates(ctx, accountKey, provider)
-		if err != nil {
-			return QueryResponse{}, err
-		}
+		displayCandidates := evidence.DisplayCandidates
 		for index := range displayCandidates {
 			normalizeCodexSnapshotForQuery(&displayCandidates[index])
 		}
