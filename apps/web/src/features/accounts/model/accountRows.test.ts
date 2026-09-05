@@ -2326,6 +2326,30 @@ describe('accountRows', () => {
     ).toEqual([byName.get('unconfirmed.json')?.selectionKey]);
   });
 
+  it('filters enabled and disabled credentials independently', () => {
+    const rows = buildAccountRows(
+      [
+        { name: 'enabled-codex.json', type: 'codex', authIndex: 'enabled-codex' },
+        { name: 'enabled-xai.json', type: 'xai', authIndex: 'enabled-xai' },
+        { name: 'disabled.json', type: 'codex', authIndex: 'disabled', disabled: true },
+      ],
+      emptyStores()
+    );
+    const baseFilters = {
+      provider: 'all',
+      plan: 'all',
+      quotaBand: 'all' as const,
+      search: '',
+    };
+
+    expect(
+      filterAccountRows(rows, { ...baseFilters, status: 'enabled' }).map((row) => row.fileName)
+    ).toEqual(['enabled-codex.json', 'enabled-xai.json']);
+    expect(
+      filterAccountRows(rows, { ...baseFilters, status: 'disabled' }).map((row) => row.fileName)
+    ).toEqual(['disabled.json']);
+  });
+
   it('filters rows by quota band and search text', () => {
     const rows = buildAccountRows(
       [

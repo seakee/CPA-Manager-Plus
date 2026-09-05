@@ -849,6 +849,7 @@
     "sort_created_asc": "認證檔案最早",
     "status_all": "全部狀態",
     "status_available": "可用",
+    "status_enabled": "已啟用",
     "status_low": "低額度",
     "status_exhausted": "已耗盡",
     "status_disabled": "停用",

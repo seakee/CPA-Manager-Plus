@@ -849,6 +849,7 @@
     "sort_created_asc": "认证文件最早",
     "status_all": "全部状态",
     "status_available": "可用",
+    "status_enabled": "已启用",
     "status_low": "低额度",
     "status_exhausted": "已耗尽",
     "status_disabled": "禁用",
