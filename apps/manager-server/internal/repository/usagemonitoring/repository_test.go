@@ -450,7 +450,7 @@ func TestCodexAccountWindowKeepsHistoryAcrossSameAccountReauth(t *testing.T) {
 
 	projectedEvents := []usage.Event{
 		makeEvent("previous-old-credential", previousFromMS+1_000, "codex-a-free.json", "auth-1", "account-a", 10),
-		makeEvent("previous-new-credential", previousFromMS+2_000, "codex-a-pro.json", "auth-2", "account-a", 20),
+		makeEvent("previous-new-credential-before-workspace", previousFromMS+2_000, "codex-a-pro.json", "auth-2", "", 20),
 		makeEvent("current-old-credential", currentFromMS+1_000, "codex-a-free.json", "auth-1", "account-a", 30),
 		makeEvent("different-space-same-email", currentFromMS+2_000, "codex-b.json", "auth-3", "account-b", 9_000),
 	}

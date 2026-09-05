@@ -369,9 +369,9 @@ export interface CodexQuotaWindow {
   limitWindowSeconds?: number | null;
   observationSource?: QuotaObservationSource;
   observedAtMs?: number | null;
+  quotaProgressObservedAtMs?: number | null;
   modelScope?: QuotaModelScope;
   providerWindowAliases?: string[];
-  identityAmbiguous?: boolean;
 }
 
 export interface CodexQuotaState extends CredentialScopedQuotaState {

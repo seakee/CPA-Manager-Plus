@@ -1119,7 +1119,7 @@
     "detail_forecast_cost": "Прогноз стоимости",
     "detail_forecast_success_rate": "Успешность",
     "detail_forecast_success_rate_unavailable": "Успешность не прогнозируется",
-    "detail_quota_provider_sync_time": "Время синхронизации провайдера",
+    "detail_quota_latest_observation_time": "Время последнего наблюдения",
     "detail_model_window_stats_unavailable": "Статистика окна не предоставлена",
     "detail_model_window_stats_unavailable_desc": "Провайдер не предоставил окно для этой модели; показаны только общий объём квоты и использование.",
     "detail_usage_time_empty": "Диапазон использования отсутствует",

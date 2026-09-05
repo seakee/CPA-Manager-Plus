@@ -554,7 +554,7 @@ describe('QuotaWindowCard', () => {
     expect(renderer.root.findByProps({ 'data-quota-standard-comparison': 'true' })).toBeTruthy();
     expect(renderer.root.findAllByProps({ 'data-quota-extra-toggle': 'true' })).toHaveLength(0);
     expect(renderer.root.findAllByProps({ 'data-quota-source-warnings': 'true' })).toHaveLength(0);
-    expect(readText(renderer.root)).toContain('accounts.detail_quota_provider_sync_time');
+    expect(readText(renderer.root)).toContain('accounts.detail_quota_latest_observation_time');
   });
 
   it('hides interval usage and folds amount-only windows into the compact shape', () => {

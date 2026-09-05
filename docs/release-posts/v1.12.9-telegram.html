@@ -1,0 +1,26 @@
+🚀 <b>9 月 5 日 · v1.12.9</b>
+
+✨ <b>更新内容</b>
+
+• OpenAI Compatible Provider 的模型编辑器现在支持按模型配置 Thinking Levels，并保留未配置状态与未知配置。
+• Accounts 现在按 Workspace 与成员隔离 Codex 的用量、成本、配额和凭证操作，同一成员重认证仍能延续历史。
+• 确认 Codex OAuth 重认证后，旧的 401 证据不再持续把账户标记为需要重新登录。
+• Codex 个人账户可以从兼容的旧数据恢复上一配额窗口的请求、Token 和成本历史，身份不明确时仍保持不归属。
+• Accounts 在当前用量领先可信配额进度时暂不显示预测，等新进度到达后自动恢复。
+• Accounts 配额周期和快照按观测新鲜度处理，避免旧数据回滚新配额或混合已用量与剩余量。
+• Accounts 配额列表和详情按 Provider 保留 Antigravity 模型族、Claude 模型级额度、xAI 计费/PAYG 与 Kimi 汇总等信息，并按刷新状态显示对应颜色。
+• Codex 可识别更多五小时、周和月配额周期，缺乏证据的零值占位数据不再影响周期判断。
+• 凭证定位或所有权证据冲突时，Accounts、监控与自动状态操作会保持待确认，避免误触另一 Codex 凭证。
+• Claude、Antigravity、Kimi 和 xAI 的有效配额状态在兼容回退读取时继续保留正确的观测时间。
+• OpenAI 配置界面的 Thinking Levels 提示框按下 Escape 时只关闭提示框，不再误关闭父级编辑窗口。
+
+⚠️ <b>注意事项</b>
+
+• 本版本不新增 SQLite 表或列；usage_events 保持不可变，升级后 Codex 历史投影可能由现有后台维护流程刷新，旧 Workspace-only 数据不会自动分摊给多个成员。
+• OpenAI Compatible Provider 新发现的模型默认保持 Thinking Levels 未配置；请只为确认得到上游支持的模型配置级别。
+• 当配额进度落后当前用量时，Accounts 会暂时不显示预测，直到新的可信进度到达。
+• 兼容旧 Codex 上一窗口历史的恢复只适用于证据一致的 free、plus、pro、go 个人计划；Team、Business、Enterprise、Edu 或证据冲突的数据会继续排除。
+
+🤝 <b>致谢</b>
+
+• <a href="https://github.com/riba2534">@riba2534</a> - 贡献 Antigravity 凭证列表中的模型族配额矩阵恢复与布局可读性修正，让用户无需打开详情即可查看 5H/7D 额度。

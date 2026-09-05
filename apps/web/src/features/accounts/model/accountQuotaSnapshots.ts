@@ -21,17 +21,15 @@ import type {
   AccountQuotaWindowKind,
   AccountQuotaWindowSource,
 } from './accountQuotaDisplayWindows';
+import { remainingPercentFromUsed } from './accountQuotaDisplayWindows';
 import {
   CODEX_MAIN_QUOTA_SCOPE_KEY,
-  CODEX_AMBIGUOUS_PROVIDER_WINDOW_ALIASES,
-  providerWindowAliasMatches,
   canonicalizeCodexProviderWindowIdForScope,
   isCodexKnownScopedProviderWindowId,
   isCodexLegacyAllScopeReplacement,
   isCodexMainProviderWindowId,
-  isAmbiguousCodexProviderWindowId,
   inferCodexQuotaScopeFromProviderWindowId,
-  resolveCodexSnapshotQuotaLabel,
+  shouldClearInheritedCodexQuotaProgress,
 } from '@/utils/quota/codexQuota';
 
 const INCOMPLETE_MODEL_SCOPE_KIND = 'feature';
@@ -67,36 +65,20 @@ const toResetCredits = (quota: CodexQuotaState | undefined) =>
       (credit) => credit.id && Number.isFinite(credit.expires_at_ms) && credit.expires_at_ms > 0
     );
 
-const validEvidenceAtMs = (value: unknown): number =>
-  typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
-
 const snapshotFieldObservedAt = (snapshot: AccountQuotaSnapshotWindow, field: string) => {
-  const fieldObservedAt = validEvidenceAtMs(snapshot.field_sources?.[field]?.observed_at_ms);
-  if (fieldObservedAt > 0) {
+  const fieldObservedAt = snapshot.field_sources?.[field]?.observed_at_ms;
+  if (
+    typeof fieldObservedAt === 'number' &&
+    Number.isFinite(fieldObservedAt) &&
+    fieldObservedAt > 0
+  ) {
     return fieldObservedAt;
   }
-  return validEvidenceAtMs(snapshot.observed_at_ms);
-};
-
-export const snapshotLifecycleEvidenceAtMs = (snapshot: AccountQuotaSnapshotWindow): number => {
-  switch (snapshot.availability) {
-    case 'inactive':
-      return (
-        validEvidenceAtMs(snapshot.deactivated_at_ms) ||
-        validEvidenceAtMs(snapshot.missing_since_ms) ||
-        validEvidenceAtMs(snapshot.last_seen_at_ms)
-      );
-    case 'pending_absent':
-      return (
-        validEvidenceAtMs(snapshot.missing_since_ms) || validEvidenceAtMs(snapshot.last_seen_at_ms)
-      );
-    case 'active':
-      return (
-        validEvidenceAtMs(snapshot.last_seen_at_ms) || validEvidenceAtMs(snapshot.observed_at_ms)
-      );
-    default:
-      return 0;
-  }
+  return typeof snapshot.observed_at_ms === 'number' &&
+    Number.isFinite(snapshot.observed_at_ms) &&
+    snapshot.observed_at_ms > 0
+    ? snapshot.observed_at_ms
+    : 0;
 };
 
 const snapshotFieldTieBreakKey = (snapshot: AccountQuotaSnapshotWindow, field: string) =>
@@ -106,6 +88,93 @@ const snapshotFieldTieBreakKey = (snapshot: AccountQuotaSnapshotWindow, field: s
     snapshot.provider_window_id,
     snapshot.window_kind,
   ].join('\u0000');
+
+const isFiniteQuotaProgress = (value: number | null | undefined): value is number =>
+  typeof value === 'number' && Number.isFinite(value);
+
+const isValidQuotaProgressObservedAtMs = (value: number | null | undefined): value is number =>
+  typeof value === 'number' && Number.isFinite(value) && value > 0;
+
+const resolveSnapshotQuotaProgressObservedAtMs = (
+  snapshot: AccountQuotaSnapshotWindow
+): number | null => {
+  if (!isFiniteQuotaProgress(snapshot.used_percent)) return null;
+  const quotaObservedAtMs = snapshot.field_sources?.quota?.observed_at_ms;
+  if (isValidQuotaProgressObservedAtMs(quotaObservedAtMs)) {
+    return quotaObservedAtMs;
+  }
+  return isValidQuotaProgressObservedAtMs(snapshot.observed_at_ms) ? snapshot.observed_at_ms : null;
+};
+
+const resolveSnapshotQuotaEvidenceObservedAtMs = (
+  snapshot: AccountQuotaSnapshotWindow
+): number | null => {
+  const fieldObservedAtMs = snapshot.field_sources?.quota?.observed_at_ms;
+  if (isValidQuotaProgressObservedAtMs(fieldObservedAtMs)) return fieldObservedAtMs;
+  return isValidQuotaProgressObservedAtMs(snapshot.observed_at_ms) ? snapshot.observed_at_ms : null;
+};
+
+type SnapshotQuotaEvidenceKind = 'used-bearing' | 'remaining-only' | 'metadata-only';
+
+const snapshotQuotaEvidenceKind = (
+  snapshot: AccountQuotaSnapshotWindow
+): SnapshotQuotaEvidenceKind => {
+  if (isFiniteQuotaProgress(snapshot.used_percent)) return 'used-bearing';
+  if (isFiniteQuotaProgress(snapshot.remaining_percent)) return 'remaining-only';
+  return 'metadata-only';
+};
+
+const resolveDefinitionQuotaEvidenceObservedAtMs = (
+  definition: AccountQuotaWindowDefinition
+): number | null => {
+  if (isFiniteQuotaProgress(definition.usedPercent)) {
+    if (definition.quotaProgressObservedAtMs !== undefined) {
+      return isValidQuotaProgressObservedAtMs(definition.quotaProgressObservedAtMs)
+        ? definition.quotaProgressObservedAtMs
+        : null;
+    }
+  }
+  if (
+    isFiniteQuotaProgress(definition.usedPercent) ||
+    isFiniteQuotaProgress(definition.remainingPercent)
+  ) {
+    return isValidQuotaProgressObservedAtMs(definition.observedAtMs)
+      ? definition.observedAtMs
+      : null;
+  }
+  return null;
+};
+
+type CodexSnapshotCycleRelationship = 'same' | 'different' | 'unknown';
+
+const resolveCodexSnapshotCycleRelationship = (
+  definition: AccountQuotaWindowDefinition,
+  snapshot: AccountQuotaSnapshotWindow
+): CodexSnapshotCycleRelationship => {
+  if (definition.currentCycle && snapshot.current_cycle) {
+    return definition.currentCycle.id === snapshot.current_cycle.id &&
+      definition.currentCycle.activationId === snapshot.current_cycle.activation_id
+      ? 'same'
+      : 'different';
+  }
+
+  return shouldClearInheritedCodexQuotaProgress(
+    {
+      providerWindowId: definition.providerWindowId,
+      endMs: definition.currentCycle?.scheduledEndMs ?? definition.cycleEndMs,
+      durationSeconds: definition.currentCycle?.durationSeconds ?? definition.durationSeconds,
+      boundaryAccuracy: definition.currentCycle?.boundaryAccuracy ?? definition.boundaryAccuracy,
+    },
+    {
+      providerWindowId: snapshot.provider_window_id,
+      endMs: snapshot.current_cycle?.scheduled_end_ms ?? snapshot.cycle_end_ms,
+      durationSeconds: snapshot.current_cycle?.duration_seconds ?? snapshot.duration_seconds,
+      boundaryAccuracy: snapshot.current_cycle?.boundary_accuracy ?? snapshot.boundary_accuracy,
+    }
+  )
+    ? 'different'
+    : 'unknown';
+};
 
 const compareSnapshotFieldFreshness =
   (field: string) => (left: AccountQuotaSnapshotWindow, right: AccountQuotaSnapshotWindow) => {
@@ -209,24 +278,39 @@ const toSnapshotWindow = (
     scopeComplete && hasModels ? definition.boundaryAccuracy : ('unknown' as const);
   const windowMode = scopeComplete && hasModels ? definition.windowMode : ('unknown' as const);
   const resetCredits = definition.provider === 'codex' ? toResetCredits(codexQuota) : [];
+  const snapshotObservedAtMs = observation?.observed_at_ms ?? definition.observedAtMs ?? nowMs;
+  const quotaProgressBelongsToObservation =
+    isFiniteQuotaProgress(definition.usedPercent) &&
+    isValidQuotaProgressObservedAtMs(definition.quotaProgressObservedAtMs) &&
+    definition.quotaProgressObservedAtMs === snapshotObservedAtMs;
+  const remainingOnlyBelongsToObservation =
+    !isFiniteQuotaProgress(definition.usedPercent) &&
+    isFiniteQuotaProgress(definition.remainingPercent) &&
+    isValidQuotaProgressObservedAtMs(definition.observedAtMs) &&
+    definition.observedAtMs === snapshotObservedAtMs;
   return {
     provider_window_id: definition.providerWindowId,
     provider_window_aliases: definition.providerWindowAliases,
     window_kind: definition.kind,
     window_mode: windowMode,
-    scope_display_name: definition.display.scopeDisplayName,
     model_scope_kind: persistedScopeKind,
     model_scope_key: persistedScopeKey,
     model_ids: persistedModelIDs,
     source: observation?.source ?? definition.observationSource,
     source_observation_id: observation?.source_observation_id,
-    observed_at_ms: observation?.observed_at_ms ?? definition.observedAtMs ?? nowMs,
+    observed_at_ms: snapshotObservedAtMs,
     boundary_accuracy: boundaryAccuracy,
     cycle_start_ms: definition.cycleStartMs ?? undefined,
     cycle_end_ms: definition.cycleEndMs ?? undefined,
     duration_seconds: definition.durationSeconds ?? undefined,
-    used_percent: definition.usedPercent ?? undefined,
-    remaining_percent: definition.remainingPercent ?? undefined,
+    ...(quotaProgressBelongsToObservation
+      ? {
+          used_percent: definition.usedPercent ?? undefined,
+          remaining_percent: definition.remainingPercent ?? undefined,
+        }
+      : remainingOnlyBelongsToObservation
+        ? { remaining_percent: definition.remainingPercent ?? undefined }
+        : {}),
     reset_credits_available:
       definition.provider === 'codex'
         ? (codexQuota?.rateLimitResetCreditsAvailableCount ?? undefined)
@@ -235,6 +319,9 @@ const toSnapshotWindow = (
     plan_type: definition.provider === 'codex' ? (codexQuota?.planType ?? undefined) : undefined,
     relationship_kind: definition.relationshipKind,
     container_provider_window_id: definition.containerProviderWindowId,
+    ...(definition.display.scopeDisplayName?.trim()
+      ? { scope_display_name: definition.display.scopeDisplayName.trim() }
+      : {}),
   };
 };
 
@@ -296,12 +383,6 @@ const applySnapshotWindowRelationships = (
 
   definitions.forEach((definition, index) => {
     if (definition.kind !== 'five_hour') return;
-    if (
-      definition.identityAmbiguous ||
-      isAmbiguousCodexProviderWindowId(definition.providerWindowId)
-    ) {
-      return;
-    }
     if (windows[index].relationship_kind && windows[index].container_provider_window_id) return;
     const identity = familyRole(definition.providerWindowId);
     if (identity?.role === 'five-hour') {
@@ -450,291 +531,50 @@ const compareSnapshotFreshness = (
   return leftKey < rightKey ? -1 : 1;
 };
 
-export type AccountQuotaLocalObservationEvidence = Pick<
-  AccountQuotaSnapshotObservationInput,
-  'observed_at_ms' | 'inventory_scope_key' | 'inventory_mode'
->;
-
-const CODEX_RATE_LIMITS_INVENTORY_SCOPE_KEY = 'codex:rate-limits';
-
-// Reserved ambiguous snapshots are current-observation evidence without a
-// durable lifecycle identity, so a newer local complete Provider inventory is
-// authoritative enough to supersede an older persisted ambiguous set — even
-// when the snapshot write failed and the server never saw that inventory.
-// Identifiable lifecycle rows must never take this shortcut: they are governed
-// by the active → pending_absent → inactive debounce.
-const shouldSuppressServerAmbiguousSnapshot = (
-  snapshot: AccountQuotaSnapshotWindow,
-  provider: string | undefined,
-  localObservation: AccountQuotaLocalObservationEvidence | undefined
-): boolean => {
-  if (provider !== 'codex') return false;
-  if (!isAmbiguousCodexProviderWindowId(snapshot.provider_window_id)) return false;
-  if (!localObservation) return false;
-  if (localObservation.inventory_mode !== 'complete') return false;
-  if (localObservation.inventory_scope_key?.trim() !== CODEX_RATE_LIMITS_INVENTORY_SCOPE_KEY) {
-    return false;
-  }
-  const localObservedAtMs = validEvidenceAtMs(localObservation.observed_at_ms);
-  const snapshotObservedAtMs = validEvidenceAtMs(snapshot.observed_at_ms);
-  if (localObservedAtMs <= 0 || snapshotObservedAtMs <= 0) return false;
-  // Strictly newer only: on equal timestamps the Manager Server owns source
-  // authority ordering that the frontend merge does not reproduce.
-  return localObservedAtMs > snapshotObservedAtMs;
-};
-
-export const normalizeSemanticScopeKey = (scope: QuotaModelScope): string => {
-  if (
-    scope.complete === false &&
-    (scope.kind !== 'feature' || scope.key === INCOMPLETE_MODEL_SCOPE_KEY) &&
-    (!scope.models || scope.models.length === 0)
-  ) {
-    return 'incomplete_unknown';
-  }
-  const kind = scope.kind.trim().toLowerCase();
-  const key = (scope.key ?? '').trim().toLowerCase();
-  const complete = scope.complete !== false ? '1' : '0';
-  const models = normalizedSnapshotModelIDs(scope.models);
-  return [kind, key, complete, ...models].join('\u0000');
-};
-
-type CodexWindowRole = 'five_hour' | 'weekly' | 'monthly' | 'generic';
-
-export const resolveCodexWindowRole = (
-  providerWindowId: string,
-  kind?: string
-): CodexWindowRole => {
-  const normalizedId = providerWindowId.trim().toLowerCase();
-  const normalizedKind = kind?.trim().toLowerCase();
-  if (normalizedKind === 'five_hour' || normalizedKind === 'five-hour') return 'five_hour';
-  if (normalizedKind === 'weekly') return 'weekly';
-  if (normalizedKind === 'monthly') return 'monthly';
-  if (normalizedKind === 'generic') return 'generic';
-
-  if (normalizedId.includes('five-hour')) return 'five_hour';
-  if (normalizedId.includes('weekly')) return 'weekly';
-  if (normalizedId.includes('monthly')) return 'monthly';
-  return 'generic';
-};
-
-const codexWindowRolesCompatible = (
-  left: { providerWindowId: string; kind?: string; durationSeconds?: number | null },
-  right: { providerWindowId: string; kind?: string; durationSeconds?: number | null }
-): boolean => {
-  const leftRole = resolveCodexWindowRole(left.providerWindowId, left.kind);
-  const rightRole = resolveCodexWindowRole(right.providerWindowId, right.kind);
-  if (leftRole !== rightRole) return false;
-  if (leftRole === 'generic') {
-    const leftDur = left.durationSeconds ?? null;
-    const rightDur = right.durationSeconds ?? null;
-    return leftDur !== null && rightDur !== null && leftDur === rightDur;
-  }
-  return true;
-};
-
-const shouldPresentationShadowIdentifiableServerSnapshot = (
-  snapshot: AccountQuotaSnapshotWindow,
-  definitions: AccountQuotaWindowDefinition[],
-  provider: string | undefined,
-  localObservation: AccountQuotaLocalObservationEvidence | undefined
-): boolean => {
-  if (provider !== 'codex') return false;
-  if (
-    snapshot.identity_ambiguous === true ||
-    isAmbiguousCodexProviderWindowId(snapshot.provider_window_id)
-  ) {
-    return false;
-  }
-  if (!localObservation) return false;
-  if (localObservation.inventory_mode !== 'complete') return false;
-  if (localObservation.inventory_scope_key?.trim() !== CODEX_RATE_LIMITS_INVENTORY_SCOPE_KEY) {
-    return false;
-  }
-  const localObservedAtMs = validEvidenceAtMs(localObservation.observed_at_ms);
-  if (localObservedAtMs <= 0) return false;
-
-  const serverObservedAtMs = validEvidenceAtMs(snapshot.observed_at_ms);
-  const quotaProvenanceAtMs = snapshotFieldObservedAt(snapshot, 'quota');
-  const lifecycleEvidenceAtMs = snapshotLifecycleEvidenceAtMs(snapshot);
-  const serverCurrentEvidenceAt = Math.max(
-    serverObservedAtMs,
-    quotaProvenanceAtMs,
-    lifecycleEvidenceAtMs
-  );
-
-  // Strictly newer only: on equal timestamps the Manager Server owns source
-  // authority ordering that the frontend merge does not reproduce.
-  if (localObservedAtMs <= serverCurrentEvidenceAt) return false;
-
-  const snapshotScope = snapshotModelScope(snapshot);
-  const snapshotScopeKey = normalizeSemanticScopeKey(snapshotScope);
-  const snapshotRole = resolveCodexWindowRole(snapshot.provider_window_id, snapshot.window_kind);
-  const snapshotDuration =
-    snapshot.current_cycle?.duration_seconds ?? snapshot.duration_seconds ?? null;
-
-  return definitions.some((def) => {
-    const defObservedAtMs = validEvidenceAtMs(def.observedAtMs);
-    if (defObservedAtMs <= 0 || defObservedAtMs !== localObservedAtMs) return false;
-
-    const isAmbiguous =
-      def.identityAmbiguous === true || isAmbiguousCodexProviderWindowId(def.providerWindowId);
-    if (!isAmbiguous) return false;
-
-    const defScopeKey = normalizeSemanticScopeKey(def.modelScope);
-    if (defScopeKey !== snapshotScopeKey) return false;
-
-    const defRole = resolveCodexWindowRole(def.providerWindowId, def.kind);
-    if (defRole !== snapshotRole) return false;
-
-    if (snapshotRole === 'generic') {
-      const defDuration = def.durationSeconds ?? null;
-      if (defDuration === null || snapshotDuration === null || defDuration !== snapshotDuration) {
-        return false;
-      }
-    }
-
-    return true;
-  });
-};
-
-const applySnapshotOverlayToDefinition = (
-  definition: AccountQuotaWindowDefinition,
+const resolveSnapshotQuotaLabel = (
   snapshot: AccountQuotaSnapshotWindow,
   options: {
     provider?: string;
     getLabel?: (snapshot: AccountQuotaSnapshotWindow) => string;
     t?: TFunction;
-  }
-): AccountQuotaWindowDefinition => {
-  const localQuotaObservedAt = validEvidenceAtMs(definition.observedAtMs);
-  const localScopeDisplayName = definition.display.scopeDisplayName?.trim() || '';
-  const localDisplayObservedAt = localScopeDisplayName ? localQuotaObservedAt : 0;
-  const quotaObservedAt = snapshotFieldObservedAt(snapshot, 'quota');
-  const lifecycleObservedAt = snapshotLifecycleEvidenceAtMs(snapshot);
-  const scopeDisplayName = snapshot.scope_display_name?.trim() || '';
-  const displayObservedAt = scopeDisplayName
-    ? snapshotFieldObservedAt(snapshot, 'scope_display_name')
-    : 0;
-  const quotaIsFresh = localQuotaObservedAt <= 0 || quotaObservedAt >= localQuotaObservedAt;
-  const lifecycleIsFresh =
-    lifecycleObservedAt > 0 &&
-    (localQuotaObservedAt <= 0 || lifecycleObservedAt >= localQuotaObservedAt);
-  const displayIsFresh =
-    scopeDisplayName !== '' &&
-    displayObservedAt > 0 &&
-    (localDisplayObservedAt <= 0 || displayObservedAt >= localDisplayObservedAt);
-  const localPositiveSupersedesLifecycle =
-    definition.currentHidden === true &&
-    definition.availability === 'active' &&
-    localQuotaObservedAt > 0 &&
-    (!lifecycleIsFresh || localQuotaObservedAt > lifecycleObservedAt);
-
-  if (
-    !quotaIsFresh &&
-    !lifecycleIsFresh &&
-    !displayIsFresh &&
-    !localPositiveSupersedesLifecycle
-  ) {
-    return definition;
+  },
+  scopeDisplayName?: string
+): string => {
+  if (!scopeDisplayName) {
+    return options.getLabel?.(snapshot) ?? snapshot.provider_window_id;
   }
 
-  const currentCycle = snapshotCycleDefinition(snapshot.current_cycle);
-  const snapshotScope = snapshotModelScope(snapshot);
-  const mergedDuration = quotaIsFresh
-    ? (currentCycle?.durationSeconds ?? snapshot.duration_seconds ?? null)
-    : definition.durationSeconds;
-  const mergedScope = quotaIsFresh ? snapshotScope : definition.modelScope;
-  const quotaOverlay = quotaIsFresh
-    ? {
-        windowMode: snapshot.window_mode,
-        observationSource: snapshot.source,
-        observedAtMs: snapshot.observed_at_ms,
-        boundaryAccuracy: snapshot.boundary_accuracy,
-        cycleStartMs: currentCycle?.actualStartMs ?? snapshot.cycle_start_ms ?? null,
-        cycleEndMs: currentCycle?.scheduledEndMs ?? snapshot.cycle_end_ms ?? null,
-        durationSeconds: mergedDuration,
-        remainingPercent: snapshot.remaining_percent ?? definition.remainingPercent,
-        usedPercent: snapshot.used_percent ?? definition.usedPercent,
-        modelScope: snapshotScope,
-        stale: snapshot.stale,
+  if (options.provider === 'claude') {
+    return scopeDisplayName;
+  }
+
+  if (options.provider === 'codex') {
+    if (options.t) {
+      const windowKind = snapshot.window_kind?.toLowerCase();
+      if (windowKind === 'primary' || windowKind === '5-hour' || windowKind === 'five-hour') {
+        return options.t('codex_quota.additional_primary_window', { name: scopeDisplayName });
       }
-    : {};
-  const lifecycleOverlay = lifecycleIsFresh
-    ? {
-        ...snapshotLifecycleDefinition(snapshot),
-        ...(snapshot.availability === 'pending_absent' || snapshot.availability === 'inactive'
-          ? { stale: true }
-          : {}),
+      if (windowKind === 'monthly') {
+        return options.t('codex_quota.additional_monthly_window', { name: scopeDisplayName });
       }
-    : {};
-  const displayOverlay: {
-    label?: string;
-    display?: AccountQuotaDisplayWindow;
-  } = displayIsFresh
-    ? (() => {
-        const label = resolveSnapshotQuotaLabel(snapshot, options, mergedScope, mergedDuration);
-        return {
-          label,
-          display: {
-            ...definition.display,
-            label,
-            scopeDisplayName,
-            ...(snapshot.identity_ambiguous ||
-            isAmbiguousCodexProviderWindowId(snapshot.provider_window_id)
-              ? { identityAmbiguous: true }
-              : {}),
-          },
-        };
-      })()
-    : {};
-  const identityAmbiguous =
-    definition.identityAmbiguous === true ||
-    snapshot.identity_ambiguous === true ||
-    (options.provider === 'codex' &&
-      isAmbiguousCodexProviderWindowId(snapshot.provider_window_id));
+      return options.t('codex_quota.additional_secondary_window', { name: scopeDisplayName });
+    }
+    return scopeDisplayName;
+  }
 
-  const mergedDefinition: AccountQuotaWindowDefinition = {
-    ...definition,
-    ...quotaOverlay,
-    ...lifecycleOverlay,
-    ...displayOverlay,
-    ...(identityAmbiguous
-      ? {
-          identityAmbiguous: true,
-          display: {
-            ...definition.display,
-            ...(displayOverlay.display ?? {}),
-            identityAmbiguous: true,
-          },
-        }
-      : {}),
-  };
-  if (
-    lifecycleIsFresh &&
-    (snapshot.current_hidden !== undefined || snapshot.availability === 'active')
-  ) {
-    mergedDefinition.currentHidden = snapshot.current_hidden === true;
-    mergedDefinition.display = {
-      ...mergedDefinition.display,
-      currentHidden: mergedDefinition.currentHidden,
-    };
-  }
-  if (localPositiveSupersedesLifecycle) {
-    mergedDefinition.currentHidden = false;
-    mergedDefinition.display = { ...mergedDefinition.display, currentHidden: false };
-  }
-  return mergedDefinition;
+  return scopeDisplayName;
 };
+
+export interface MergeAccountQuotaSnapshotWindowsOptions {
+  provider?: string;
+  getLabel?: (snapshot: AccountQuotaSnapshotWindow) => string;
+  t?: TFunction;
+}
 
 export const mergeAccountQuotaSnapshotWindows = (
   definitions: AccountQuotaWindowDefinition[],
   snapshots: AccountQuotaSnapshotWindow[],
-  options: {
-    provider?: string;
-    localObservation?: AccountQuotaLocalObservationEvidence;
-    getLabel?: (snapshot: AccountQuotaSnapshotWindow) => string;
-    t?: TFunction;
-  } = {}
+  options: MergeAccountQuotaSnapshotWindowsOptions = {}
 ): AccountQuotaWindowDefinition[] => {
   const canonicalProviderWindowId = (
     providerWindowId: string,
@@ -851,13 +691,10 @@ export const mergeAccountQuotaSnapshotWindows = (
       snapshotsByKey.set(key, snapshot);
     }
   });
-
   const matchedSnapshotKeys = new Set<string>();
-  const exactMatchedSnapshotByDefIndex = new Map<number, AccountQuotaSnapshotWindow>();
-
-  compatibleDefinitions.forEach((definition, index) => {
+  const merged = compatibleDefinitions.map((definition) => {
     if (definition.modelScope.kind === 'all' && definition.modelScope.complete === false) {
-      return;
+      return definition;
     }
     const key = snapshotScopeKey({
       provider_window_id: definition.providerWindowId,
@@ -866,156 +703,143 @@ export const mergeAccountQuotaSnapshotWindows = (
       model_ids: definition.modelScope.models,
     });
     const snapshot = snapshotsByKey.get(key);
-    if (snapshot) {
-      matchedSnapshotKeys.add(key);
-      exactMatchedSnapshotByDefIndex.set(index, snapshot);
-    }
-  });
-
-  const aliasMatchedSnapshotByDefIndex = new Map<number, AccountQuotaSnapshotWindow>();
-
-  if (options.provider === 'codex') {
-    const candidateDefs: Array<{
-      index: number;
-      definition: AccountQuotaWindowDefinition;
-      partitionKey: string;
-    }> = [];
-    compatibleDefinitions.forEach((definition, index) => {
-      if (exactMatchedSnapshotByDefIndex.has(index)) return;
-      if (
-        definition.identityAmbiguous === true ||
-        isAmbiguousCodexProviderWindowId(definition.providerWindowId)
-      ) {
-        return;
-      }
-      const scopeKey = normalizeSemanticScopeKey(definition.modelScope);
-      const role = resolveCodexWindowRole(definition.providerWindowId, definition.kind);
-      const partitionKey = `${scopeKey}\u0000${role}`;
-      candidateDefs.push({ index, definition, partitionKey });
-    });
-
-    const candidateSnaps: Array<{
-      key: string;
-      snapshot: AccountQuotaSnapshotWindow;
-      partitionKey: string;
-    }> = [];
-    Array.from(snapshotsByKey.entries()).forEach(([key, snapshot]) => {
-      if (matchedSnapshotKeys.has(key)) return;
-      if (
-        snapshot.identity_ambiguous === true ||
-        isAmbiguousCodexProviderWindowId(snapshot.provider_window_id)
-      ) {
-        return;
-      }
-      const snapshotScope = snapshotModelScope(snapshot);
-      const scopeKey = normalizeSemanticScopeKey(snapshotScope);
-      const role = resolveCodexWindowRole(snapshot.provider_window_id, snapshot.window_kind);
-      const partitionKey = `${scopeKey}\u0000${role}`;
-      candidateSnaps.push({ key, snapshot, partitionKey });
-    });
-
-    const defsByPartition = new Map<string, typeof candidateDefs>();
-    candidateDefs.forEach((item) => {
-      const list = defsByPartition.get(item.partitionKey) ?? [];
-      list.push(item);
-      defsByPartition.set(item.partitionKey, list);
-    });
-
-    const snapsByPartition = new Map<string, typeof candidateSnaps>();
-    candidateSnaps.forEach((item) => {
-      const list = snapsByPartition.get(item.partitionKey) ?? [];
-      list.push(item);
-      snapsByPartition.set(item.partitionKey, list);
-    });
-
-    defsByPartition.forEach((partitionDefs, partitionKey) => {
-      const partitionSnaps = snapsByPartition.get(partitionKey);
-      if (!partitionSnaps || partitionSnaps.length === 0) return;
-
-      const defMatches = new Map<number, typeof candidateSnaps>();
-      const snapMatches = new Map<string, typeof candidateDefs>();
-
-      partitionDefs.forEach((defItem) => {
-        partitionSnaps.forEach((snapItem) => {
-          if (
-            !codexWindowRolesCompatible(
-              {
-                providerWindowId: defItem.definition.providerWindowId,
-                kind: defItem.definition.kind,
-                durationSeconds: defItem.definition.durationSeconds,
-              },
-              {
-                providerWindowId: snapItem.snapshot.provider_window_id,
-                kind: snapItem.snapshot.window_kind,
-                durationSeconds:
-                  snapItem.snapshot.current_cycle?.duration_seconds ??
-                  snapItem.snapshot.duration_seconds,
-              }
-            )
-          ) {
-            return;
-          }
-          const aliases = providerWindowAliasMatches(
-            {
-              id: defItem.definition.providerWindowId,
-              providerWindowAliases: defItem.definition.providerWindowAliases,
-            },
-            {
-              id: snapItem.snapshot.provider_window_id,
-              providerWindowAliases: snapItem.snapshot.provider_window_aliases,
-            }
-          ).filter((alias) => !CODEX_AMBIGUOUS_PROVIDER_WINDOW_ALIASES.has(alias));
-
-          if (aliases.length > 0) {
-            const defMatchedList = defMatches.get(defItem.index) ?? [];
-            defMatchedList.push(snapItem);
-            defMatches.set(defItem.index, defMatchedList);
-
-            const snapMatchedList = snapMatches.get(snapItem.key) ?? [];
-            snapMatchedList.push(defItem);
-            snapMatches.set(snapItem.key, snapMatchedList);
-          }
-        });
-      });
-
-      partitionDefs.forEach((defItem) => {
-        const matchedSnaps = defMatches.get(defItem.index);
-        if (matchedSnaps && matchedSnaps.length === 1) {
-          const snapItem = matchedSnaps[0];
-          const matchedDefs = snapMatches.get(snapItem.key);
-          if (matchedDefs && matchedDefs.length === 1 && matchedDefs[0].index === defItem.index) {
-            aliasMatchedSnapshotByDefIndex.set(defItem.index, snapItem.snapshot);
-            matchedSnapshotKeys.add(snapItem.key);
-          }
-        }
-      });
-    });
-  }
-
-  const merged = compatibleDefinitions.map((definition, index) => {
-    const snapshot =
-      exactMatchedSnapshotByDefIndex.get(index) ?? aliasMatchedSnapshotByDefIndex.get(index);
     if (!snapshot) return definition;
-    return applySnapshotOverlayToDefinition(definition, snapshot, options);
-  });
+    matchedSnapshotKeys.add(key);
+    const snapshotMetadataIsNewer =
+      definition.observedAtMs === null ||
+      !Number.isFinite(definition.observedAtMs) ||
+      snapshot.observed_at_ms >= definition.observedAtMs;
+    const currentCycle = snapshotCycleDefinition(snapshot.current_cycle);
+    const isCodex = definition.provider === 'codex' || options.provider === 'codex';
+    const cycleRelationship = isCodex
+      ? resolveCodexSnapshotCycleRelationship(definition, snapshot)
+      : 'unknown';
+    const definitionUsedPercent = isFiniteQuotaProgress(definition.usedPercent)
+      ? definition.usedPercent
+      : null;
+    const definitionRemainingPercent = isFiniteQuotaProgress(definition.remainingPercent)
+      ? definition.remainingPercent
+      : definitionUsedPercent !== null
+        ? remainingPercentFromUsed(definitionUsedPercent)
+        : null;
+    const snapshotUsedPercent = isFiniteQuotaProgress(snapshot.used_percent)
+      ? snapshot.used_percent
+      : null;
+    const snapshotRemainingPercent = isFiniteQuotaProgress(snapshot.remaining_percent)
+      ? snapshot.remaining_percent
+      : null;
+    const definitionQuotaProgressObservedAtMs =
+      resolveDefinitionQuotaEvidenceObservedAtMs(definition);
+    const snapshotQuotaProgressObservedAtMs = resolveSnapshotQuotaProgressObservedAtMs(snapshot);
+    const snapshotQuotaEvidenceObservedAtMs = resolveSnapshotQuotaEvidenceObservedAtMs(snapshot);
+    const liveQuotaEvidenceObservedAtMs = definitionQuotaProgressObservedAtMs;
+    const snapshotQuotaIsAtLeastLive =
+      liveQuotaEvidenceObservedAtMs === null ||
+      (snapshotQuotaEvidenceObservedAtMs !== null &&
+        snapshotQuotaEvidenceObservedAtMs >= liveQuotaEvidenceObservedAtMs);
+    const differentCodexCycle = cycleRelationship === 'different';
+    const snapshotCanSupersedeDifferentCycle = differentCodexCycle && snapshotMetadataIsNewer;
+    const quotaEvidenceKind = snapshotQuotaEvidenceKind(snapshot);
 
+    if (differentCodexCycle && !snapshotCanSupersedeDifferentCycle) return definition;
+
+    let mergedUsedPercent = definitionUsedPercent;
+    let mergedRemainingPercent = definitionRemainingPercent;
+    let quotaProgressObservedAtMs =
+      definitionUsedPercent !== null ? definitionQuotaProgressObservedAtMs : null;
+    let quotaChanged = false;
+
+    if (snapshotCanSupersedeDifferentCycle) {
+      quotaChanged = true;
+      if (quotaEvidenceKind === 'used-bearing') {
+        mergedUsedPercent = snapshotUsedPercent;
+        mergedRemainingPercent =
+          snapshotRemainingPercent ?? remainingPercentFromUsed(snapshotUsedPercent);
+        quotaProgressObservedAtMs = snapshotQuotaProgressObservedAtMs;
+      } else if (quotaEvidenceKind === 'remaining-only') {
+        mergedUsedPercent = null;
+        mergedRemainingPercent = snapshotRemainingPercent;
+        quotaProgressObservedAtMs = null;
+      } else {
+        mergedUsedPercent = null;
+        mergedRemainingPercent = null;
+        quotaProgressObservedAtMs = null;
+      }
+    } else if (quotaEvidenceKind === 'used-bearing' && snapshotQuotaIsAtLeastLive) {
+      quotaChanged = true;
+      mergedUsedPercent = snapshotUsedPercent;
+      mergedRemainingPercent =
+        snapshotRemainingPercent ?? remainingPercentFromUsed(snapshotUsedPercent);
+      quotaProgressObservedAtMs = snapshotQuotaProgressObservedAtMs;
+    } else if (quotaEvidenceKind === 'remaining-only' && snapshotQuotaIsAtLeastLive) {
+      quotaChanged = true;
+      mergedUsedPercent = null;
+      mergedRemainingPercent = snapshotRemainingPercent;
+      quotaProgressObservedAtMs = null;
+    }
+
+    const liveScopeDisplayName = definition.display.scopeDisplayName?.trim() || undefined;
+    const snapshotScopeDisplayName = snapshot.scope_display_name?.trim() || undefined;
+    const mergedScopeDisplayName = liveScopeDisplayName ?? snapshotScopeDisplayName;
+    const isOverlayingBlankDisplayName = !liveScopeDisplayName && !!snapshotScopeDisplayName;
+    const mergedLabel = isOverlayingBlankDisplayName
+      ? resolveSnapshotQuotaLabel(snapshot, options, mergedScopeDisplayName)
+      : definition.display.label;
+
+    const useSnapshotMetadata = snapshotMetadataIsNewer || snapshotCanSupersedeDifferentCycle;
+    if (!useSnapshotMetadata && !quotaChanged) {
+      if (!isOverlayingBlankDisplayName) return definition;
+      return {
+        ...definition,
+        display: {
+          ...definition.display,
+          scopeDisplayName: mergedScopeDisplayName,
+          label: mergedLabel,
+        },
+      };
+    }
+    const mergedModelScope = useSnapshotMetadata
+      ? snapshotModelScope(snapshot)
+      : definition.modelScope;
+    return {
+      ...definition,
+      ...(useSnapshotMetadata
+        ? {
+            windowMode: snapshot.window_mode,
+            observationSource: snapshot.source,
+            observedAtMs: snapshot.observed_at_ms,
+            boundaryAccuracy: snapshot.boundary_accuracy,
+            cycleStartMs: currentCycle?.actualStartMs ?? snapshot.cycle_start_ms ?? null,
+            cycleEndMs: currentCycle?.scheduledEndMs ?? snapshot.cycle_end_ms ?? null,
+            durationSeconds: currentCycle?.durationSeconds ?? snapshot.duration_seconds ?? null,
+            modelScope: mergedModelScope,
+            stale: snapshot.stale,
+            ...snapshotLifecycleDefinition(snapshot),
+          }
+        : {}),
+      remainingPercent: mergedRemainingPercent,
+      usedPercent: mergedUsedPercent,
+      quotaProgressObservedAtMs,
+      display: {
+        ...definition.display,
+        ...(useSnapshotMetadata
+          ? {
+              observationSource: snapshot.source,
+              observedAtMs: snapshot.observed_at_ms,
+              modelScope: mergedModelScope,
+            }
+          : {}),
+        scopeDisplayName: mergedScopeDisplayName,
+        ...(isOverlayingBlankDisplayName ? { label: mergedLabel } : {}),
+        quotaProgressObservedAtMs,
+        remainingPercent: mergedRemainingPercent,
+        usedPercent: mergedUsedPercent,
+      },
+    };
+  });
   const unmatchedSnapshots = Array.from(snapshotsByKey.entries())
     .filter(([key]) => !matchedSnapshotKeys.has(key))
-    .map(([, snapshot]) => snapshot)
-    .filter(
-      (snapshot) =>
-        !shouldSuppressServerAmbiguousSnapshot(
-          snapshot,
-          options.provider,
-          options.localObservation
-        ) &&
-        !shouldPresentationShadowIdentifiableServerSnapshot(
-          snapshot,
-          compatibleDefinitions,
-          options.provider,
-          options.localObservation
-        )
-    );
+    .map(([, snapshot]) => snapshot);
   const appendedProviderCounts = new Map<string, number>();
   unmatchedSnapshots.forEach((snapshot) => {
     appendedProviderCounts.set(
@@ -1039,13 +863,6 @@ export const mergeAccountQuotaSnapshotWindows = (
     return left.providerWindowId.localeCompare(right.providerWindowId);
   });
 };
-
-export const filterCurrentAccountQuotaWindowDefinitions = (
-  definitions: AccountQuotaWindowDefinition[]
-): AccountQuotaWindowDefinition[] =>
-  definitions.filter(
-    (definition) => definition.availability !== 'inactive' && definition.currentHidden !== true
-  );
 
 const snapshotModelScope = (snapshot: AccountQuotaSnapshotWindow): QuotaModelScope => {
   if (isIncompleteModelScopeSnapshot(snapshot)) {
@@ -1087,16 +904,13 @@ const snapshotCycleDefinition = (
       }
     : null;
 
-const snapshotLifecycleDefinition = (
-  snapshot: AccountQuotaSnapshotWindow
-): Partial<AccountQuotaWindowDefinition> => {
+const snapshotLifecycleDefinition = (snapshot: AccountQuotaSnapshotWindow) => {
   const hasLifecycle =
     snapshot.logical_window_id !== undefined ||
     snapshot.activation_generation !== undefined ||
     snapshot.availability !== undefined ||
     snapshot.current_cycle !== undefined ||
-    snapshot.previous_cycle !== undefined ||
-    snapshot.current_hidden !== undefined;
+    snapshot.previous_cycle !== undefined;
   if (!hasLifecycle) return {};
   return {
     logicalWindowId: snapshot.logical_window_id,
@@ -1110,7 +924,6 @@ const snapshotLifecycleDefinition = (
     deactivatedAtMs: snapshot.deactivated_at_ms ?? null,
     currentCycle: snapshotCycleDefinition(snapshot.current_cycle),
     previousCycle: snapshotCycleDefinition(snapshot.previous_cycle),
-    ...(snapshot.current_hidden !== undefined ? { currentHidden: snapshot.current_hidden } : {}),
   };
 };
 
@@ -1138,43 +951,6 @@ const snapshotResetAccuracy = (
   return 'unknown';
 };
 
-type SnapshotLabelOptions = {
-  provider?: string;
-  getLabel?: (snapshot: AccountQuotaSnapshotWindow) => string;
-  t?: TFunction;
-};
-
-const resolveSnapshotQuotaLabel = (
-  snapshot: AccountQuotaSnapshotWindow,
-  options: SnapshotLabelOptions,
-  modelScope: QuotaModelScope,
-  durationSeconds: number | null
-): string => {
-  const scopeDisplayName = snapshot.scope_display_name?.trim() || undefined;
-
-  if (options.provider === 'claude' && scopeDisplayName) return scopeDisplayName;
-
-  if (options.provider === 'codex') {
-    const metadata = resolveCodexSnapshotQuotaLabel({
-      providerWindowId: snapshot.provider_window_id,
-      windowKind: snapshot.window_kind,
-      modelScope,
-      scopeDisplayName,
-      durationSeconds,
-    });
-    if (metadata) {
-      if (options.t) {
-        return options.t(metadata.labelKey, metadata.labelParams);
-      }
-      if (scopeDisplayName) return scopeDisplayName;
-    }
-  } else if (scopeDisplayName) {
-    return scopeDisplayName;
-  }
-
-  return options.getLabel?.(snapshot) ?? snapshot.provider_window_id;
-};
-
 const definitionSortRank = (definition: AccountQuotaWindowDefinition): number => {
   if (definition.windowMode === 'non_window' || definition.windowMode === 'unknown') {
     return Number.MAX_SAFE_INTEGER;
@@ -1184,7 +960,7 @@ const definitionSortRank = (definition: AccountQuotaWindowDefinition): number =>
 
 const snapshotDefinition = (
   snapshot: AccountQuotaSnapshotWindow,
-  options: SnapshotLabelOptions,
+  options: MergeAccountQuotaSnapshotWindowsOptions,
   key: string
 ): AccountQuotaWindowDefinition => {
   const provider: AccountQuotaWindowSource =
@@ -1202,14 +978,21 @@ const snapshotDefinition = (
   const durationSeconds =
     lifecycle.currentCycle?.durationSeconds ?? snapshot.duration_seconds ?? null;
   const modelScope = snapshotModelScope(snapshot);
+  const usedPercent = isFiniteQuotaProgress(snapshot.used_percent) ? snapshot.used_percent : null;
+  const remainingPercent = isFiniteQuotaProgress(snapshot.remaining_percent)
+    ? snapshot.remaining_percent
+    : usedPercent !== null
+      ? remainingPercentFromUsed(usedPercent)
+      : null;
+  const quotaProgressObservedAtMs = resolveSnapshotQuotaProgressObservedAtMs(snapshot);
   const scopeDisplayName = snapshot.scope_display_name?.trim() || undefined;
-  const label = resolveSnapshotQuotaLabel(snapshot, options, modelScope, durationSeconds);
+  const label = resolveSnapshotQuotaLabel(snapshot, options, scopeDisplayName);
   const display: AccountQuotaDisplayWindow = {
     key,
     label,
     kind: snapshotWindowKind(snapshot.window_kind),
-    remainingPercent: snapshot.remaining_percent ?? null,
-    usedPercent: snapshot.used_percent ?? null,
+    remainingPercent,
+    usedPercent,
     resetLabel: '-',
     resetAtMs: currentEndMs,
     resetAccuracy: snapshotResetAccuracy(snapshot.boundary_accuracy),
@@ -1223,16 +1006,13 @@ const snapshotDefinition = (
     source: provider,
     observationSource: snapshot.source,
     observedAtMs: snapshot.observed_at_ms,
+    quotaProgressObservedAtMs,
     windowMode: snapshot.window_mode,
     cycleStartMs: currentStartMs,
     cycleEndMs: currentEndMs,
     modelScope,
     scopeDisplayName,
     providerWindowAliases: snapshot.provider_window_aliases,
-    identityAmbiguous:
-      snapshot.identity_ambiguous === true ||
-      (provider === 'codex' && isAmbiguousCodexProviderWindowId(snapshot.provider_window_id)),
-    ...(snapshot.current_hidden !== undefined ? { currentHidden: snapshot.current_hidden } : {}),
   };
   return {
     key,
@@ -1243,17 +1023,15 @@ const snapshotDefinition = (
     windowMode: snapshot.window_mode,
     modelScope,
     providerWindowAliases: snapshot.provider_window_aliases,
-    identityAmbiguous:
-      snapshot.identity_ambiguous === true ||
-      (provider === 'codex' && isAmbiguousCodexProviderWindowId(snapshot.provider_window_id)),
     observationSource: snapshot.source,
     observedAtMs: snapshot.observed_at_ms,
+    quotaProgressObservedAtMs,
     boundaryAccuracy: snapshot.boundary_accuracy,
     cycleStartMs: currentStartMs,
     cycleEndMs: currentEndMs,
     durationSeconds,
-    remainingPercent: snapshot.remaining_percent ?? null,
-    usedPercent: snapshot.used_percent ?? null,
+    remainingPercent,
+    usedPercent,
     stale: snapshot.stale,
     ...lifecycle,
     display,

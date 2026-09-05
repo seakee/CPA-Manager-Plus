@@ -35,37 +35,31 @@ func ResolveCodexLegacyAccountKey(
 		return "", false, nil
 	}
 
-	evidence := legacyAccountIdentityEvidence{}
+	events := make([]legacyAccountIdentityEvent, 0)
 	for _, predicate := range legacyAccountIdentityPredicates(authFile, authIndex) {
 		rows, err := queryer.QueryContext(ctx, `select
 			coalesce(e.provider, ''),
 			coalesce(e.auth_provider_snapshot, ''),
 			coalesce(e.auth_account_id_snapshot, ''),
 			coalesce(e.auth_project_id_snapshot, ''),
-			coalesce(e.account_snapshot, '')
+			coalesce(e.account_snapshot, ''),
+			coalesce(e.auth_snapshot_at_ms, 0),
+			coalesce(e.created_at_ms, 0)
 		from usage_events e
 		where `+predicate.sql, predicate.args...)
 		if err != nil {
 			return "", false, err
 		}
-		predicateEvidence := legacyAccountIdentityEvidence{}
-		allowed, err := scanLegacyAccountIdentity(rows, targetAccountID, targetMember, &predicateEvidence)
+		predicateEvents, err := scanLegacyAccountIdentityRows(rows)
 		if err != nil {
 			return "", false, err
 		}
-		if !allowed {
-			// An empty predicate is expected when a legacy event used one of the
-			// other physical-identity shapes. Continue so source-only history can
-			// still be inherited; any rows that were found but failed validation
-			// remain a fail-closed conflict.
-			if predicateEvidence.found {
-				return "", false, nil
-			}
-			continue
-		}
-		evidence.found = evidence.found || predicateEvidence.found
+		events = append(events, predicateEvents...)
 	}
-	return legacyKey, evidence.found, nil
+	if !legacyAccountIdentityAllowed(events, targetAccountID, targetMember) {
+		return "", false, nil
+	}
+	return legacyKey, true, nil
 }
 
 // ResolveCodexLegacyAccountKey evaluates the same check through a short
@@ -147,55 +141,135 @@ func legacySourceIdentityGuards() string {
 		and (e.auth_label_snapshot is null or lower(trim(e.source)) <> lower(trim(e.auth_label_snapshot)))`
 }
 
-type legacyAccountIdentityEvidence struct {
-	found bool
+type legacyAccountIdentityEvent struct {
+	provider         string
+	authProvider     string
+	accountID        string
+	projectID        string
+	accountSnapshot  string
+	authSnapshotAtMS int64
+	createdAtMS      int64
 }
 
-func scanLegacyAccountIdentity(
-	rows *sql.Rows,
-	targetAccountID, targetMember string,
-	evidence *legacyAccountIdentityEvidence,
-) (bool, error) {
+func scanLegacyAccountIdentityRows(rows *sql.Rows) ([]legacyAccountIdentityEvent, error) {
 	defer rows.Close()
+	events := make([]legacyAccountIdentityEvent, 0)
 	for rows.Next() {
-		evidence.found = true
-		var provider, authProvider, accountID, projectID, accountSnapshot string
-		if err := rows.Scan(&provider, &authProvider, &accountID, &projectID, &accountSnapshot); err != nil {
-			return false, err
+		var event legacyAccountIdentityEvent
+		if err := rows.Scan(
+			&event.provider,
+			&event.authProvider,
+			&event.accountID,
+			&event.projectID,
+			&event.accountSnapshot,
+			&event.authSnapshotAtMS,
+			&event.createdAtMS,
+		); err != nil {
+			return nil, err
 		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+func legacyIdentityEvidenceAtMS(event legacyAccountIdentityEvent) (int64, bool) {
+	if event.authSnapshotAtMS > 0 {
+		return event.authSnapshotAtMS, true
+	}
+	if event.createdAtMS > 0 {
+		return event.createdAtMS, true
+	}
+	return 0, false
+}
+
+func legacyAccountIdentityAllowed(
+	events []legacyAccountIdentityEvent,
+	targetAccountID, targetMember string,
+) bool {
+	trustedWorkspaceFound := false
+	directWorkspaceFound := false
+	weakFound := false
+
+	var minTrustedEvidenceAt int64
+	hasTrustedEvidenceAt := false
+	trustedChronologyKnown := true
+
+	var maxWeakEvidenceAt int64
+	hasWeakEvidenceAt := false
+	weakChronologyKnown := true
+
+	for _, event := range events {
 		hasProvider := false
-		for _, value := range []string{provider, authProvider} {
+		for _, value := range []string{event.provider, event.authProvider} {
 			normalized := normalizeIdentityProvider(value)
 			if normalized == "" {
 				continue
 			}
 			hasProvider = true
 			if normalized != "codex" {
-				return false, nil
+				return false
 			}
 		}
 		if !hasProvider {
-			return false, nil
+			return false
 		}
 
-		member, memberOK := usageidentity.NormalizeCodexMemberSnapshot(accountSnapshot)
+		member, memberOK := usageidentity.NormalizeCodexMemberSnapshot(event.accountSnapshot)
 		if !memberOK || member != targetMember {
-			return false, nil
+			return false
 		}
 
+		directWorkspacePresent := strings.Trim(event.accountID, " ") != ""
+		markedWorkspacePresent := usageidentity.HasCodexAccountIDSnapshotMarker(event.projectID)
 		workspace, workspaceOK := usageidentity.ResolveCodexWorkspace(usageidentity.Fields{
-			AuthAccountIDSnapshot: accountID,
-			AuthProjectIDSnapshot: projectID,
-			AccountSnapshot:       accountSnapshot,
+			AuthAccountIDSnapshot: event.accountID,
+			AuthProjectIDSnapshot: event.projectID,
+			AccountSnapshot:       event.accountSnapshot,
 		})
-		if !workspaceOK || workspace != targetAccountID {
-			return false, nil
+		if directWorkspacePresent || markedWorkspacePresent {
+			if !workspaceOK || workspace != targetAccountID {
+				return false
+			}
+			trustedWorkspaceFound = true
+			if directWorkspacePresent {
+				directWorkspaceFound = true
+			}
+			evidenceTime, timeOK := legacyIdentityEvidenceAtMS(event)
+			if !timeOK {
+				trustedChronologyKnown = false
+			} else if !hasTrustedEvidenceAt || evidenceTime < minTrustedEvidenceAt {
+				minTrustedEvidenceAt = evidenceTime
+				hasTrustedEvidenceAt = true
+			}
+			continue
+		}
+
+		weakFound = true
+		evidenceTime, timeOK := legacyIdentityEvidenceAtMS(event)
+		if !timeOK {
+			weakChronologyKnown = false
+		} else if !hasWeakEvidenceAt || evidenceTime > maxWeakEvidenceAt {
+			maxWeakEvidenceAt = evidenceTime
+			hasWeakEvidenceAt = true
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return false, err
+
+	if !trustedWorkspaceFound {
+		return false
 	}
-	return evidence.found, nil
+	if !weakFound {
+		return true
+	}
+	if !directWorkspaceFound {
+		return false
+	}
+	if !weakChronologyKnown || !trustedChronologyKnown || !hasWeakEvidenceAt || !hasTrustedEvidenceAt {
+		return false
+	}
+	return maxWeakEvidenceAt < minTrustedEvidenceAt
 }
 
 func normalizeIdentityProvider(value string) string {

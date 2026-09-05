@@ -150,7 +150,6 @@ type CodexInspectionQuotaWindow struct {
 	ModelScope            *CodexInspectionQuotaModelScope `json:"modelScope,omitempty"`
 	ScopeDisplayName      string                          `json:"scopeDisplayName,omitempty"`
 	ProviderWindowAliases []string                        `json:"providerWindowAliases,omitempty"`
-	IdentityAmbiguous     bool                            `json:"identityAmbiguous,omitempty"`
 }
 
 type CodexInspectionQuotaModelScope struct {

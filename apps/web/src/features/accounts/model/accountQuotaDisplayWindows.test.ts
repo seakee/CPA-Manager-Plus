@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { TFunction } from 'i18next';
 import type { AuthFileItem, CodexQuotaState, CredentialScopedQuotaState } from '@/types';
+import type { MonitoringAccountWindowUsageItem } from '@/services/api';
 import { buildAccountRows, type AccountQuotaStores } from './accountRows';
 import {
   buildAccountQuotaDisplayWindow,
@@ -16,6 +17,9 @@ import {
   buildQuotaCredentialIdentity,
   getQuotaCredentialStoreKey,
 } from '@/utils/quota/credentialScope';
+import { buildAccountDetailViewModel } from './accountDetailViewModel';
+import { buildAccountQuotaWindowDefinitions } from './accountQuotaWindowDefinitions';
+import { accountWindowUsageRequestKey } from './accountWindowUsageRows';
 
 const emptyStores = (): AccountQuotaStores => ({
   antigravityQuota: {},
@@ -36,9 +40,6 @@ const t = ((key: string, options?: Record<string, string | number>) => {
     'xai_quota.monthly_credits': 'Monthly credits',
     'xai_quota.pay_as_you_go_label': 'Pay-as-you-go',
     'xai_quota.usage_amount': `${options?.remaining ?? '--'} / ${options?.limit ?? '--'} remaining`,
-    'codex_quota.additional_primary_window': `${options?.name ?? ''} 5-hour limit`,
-    'codex_quota.additional_secondary_window': `${options?.name ?? ''} weekly limit`,
-    'codex_quota.additional_monthly_window': `${options?.name ?? ''} monthly limit`,
     'accounts.col_quota': 'Quota',
   };
   return translations[key] ?? key;
@@ -189,6 +190,52 @@ describe('accountQuotaDisplayWindows', () => {
     expect(window.resetAccuracy).toBe('unknown');
   });
 
+  it.each(['claude', 'antigravity', 'kimi', 'xai'] as const)(
+    'keeps observedAt compatibility for %s when progress provenance is absent',
+    (source) => {
+      const window = buildAccountQuotaDisplayWindow({
+        key: `${source}-window`,
+        label: 'Quota',
+        remainingPercent: 60,
+        usedPercent: 40,
+        resetLabel: '-',
+        source,
+        observedAtMs: 2_000,
+      });
+
+      expect(window.quotaProgressObservedAtMs).toBe(2_000);
+    }
+  );
+
+  it('keeps Codex explicit unknown progress provenance from falling back to observedAt', () => {
+    const window = buildAccountQuotaDisplayWindow({
+      key: 'five-hour',
+      label: '5H',
+      remainingPercent: 40,
+      usedPercent: 60,
+      resetLabel: '-',
+      source: 'codex',
+      observedAtMs: 2_000,
+      quotaProgressObservedAtMs: null,
+    });
+
+    expect(window.quotaProgressObservedAtMs).toBeNull();
+  });
+
+  it('falls back to observedAt for legacy Codex windows without explicit provenance', () => {
+    const window = buildAccountQuotaDisplayWindow({
+      key: 'five-hour',
+      label: '5H',
+      remainingPercent: 40,
+      usedPercent: 60,
+      resetLabel: '-',
+      source: 'codex',
+      observedAtMs: 2_000,
+    });
+
+    expect(window.quotaProgressObservedAtMs).toBe(2_000);
+  });
+
   it('uses auth-index scoped Codex quota and preserves request window ranges', () => {
     const resetAtMs = Date.parse('2026-07-09T14:00:00Z');
     const quota: CodexQuotaState = {
@@ -229,39 +276,6 @@ describe('accountQuotaDisplayWindows', () => {
     expect(windows[0].fromMs).toBe(Date.parse('2026-07-09T09:00:00Z'));
     expect(windows[0].toMs).toBe(Date.parse('2026-07-09T12:00:00Z'));
     expect(getQuotaWindowShortLabel(windows[0])).toBe('5H');
-  });
-
-  it('preserves the raw display name for a dynamic Codex additional quota', () => {
-    const quota: CodexQuotaState = {
-      status: 'success',
-      windows: [
-        {
-          id: 'gpt-reserve-weekly-0',
-          label: 'gpt-reserve weekly limit',
-          labelKey: 'codex_quota.additional_secondary_window',
-          labelParams: { name: 'gpt-reserve' },
-          scopeDisplayName: 'gpt-reserve',
-          usedPercent: 25,
-          resetLabel: '-',
-          limitWindowSeconds: 604_800,
-          modelScope: { kind: 'feature', key: 'gpt_reserve', complete: false },
-        },
-      ],
-    };
-    const row = buildRow({ name: 'codex.json', type: 'codex', authIndex: '1' });
-
-    const [window] = buildAccountQuotaDisplayWindows(row, {
-      stores: emptyStores(),
-      getDisplayCodexQuota: () => quota,
-      translateQuotaWindowLabel,
-      t,
-    });
-
-    expect(window).toMatchObject({
-      label: 'gpt-reserve weekly limit',
-      scopeDisplayName: 'gpt-reserve',
-      modelScope: { kind: 'feature', key: 'gpt_reserve', complete: false },
-    });
   });
 
   it('maps Claude quota windows through translated labels', () => {
@@ -310,7 +324,6 @@ describe('accountQuotaDisplayWindows', () => {
       resetAccuracy: 'exact',
       limitWindowSeconds: 7 * 24 * 60 * 60,
       modelScope: { kind: 'all', complete: true },
-      scopeDisplayName: undefined,
       source: 'claude',
     });
     expect(windows[1]).toMatchObject({
@@ -322,61 +335,6 @@ describe('accountQuotaDisplayWindows', () => {
       amountLabel: '$1.50 / $5.00',
       source: 'claude',
     });
-  });
-
-  it('preserves Claude dynamic model scope display names without marking incomplete scopes complete', () => {
-    const stores = {
-      ...emptyStores(),
-      claudeQuota: {
-        'claude.json': {
-          status: 'success',
-          windows: [
-            {
-              id: 'weekly-scoped-model-id',
-              label: 'Demo Model A',
-              usedPercent: 40,
-              resetLabel: '2026-07-10T12:00:00Z',
-              resetAtMs: Date.parse('2026-07-10T12:00:00Z'),
-              resetAccuracy: 'exact',
-              limitWindowSeconds: 7 * 24 * 60 * 60,
-              modelScope: { kind: 'models', models: ['model-a'], complete: true },
-            },
-            {
-              id: 'weekly-scoped-label-only',
-              label: 'Demo Model B',
-              usedPercent: 50,
-              resetLabel: '2026-07-10T12:00:00Z',
-              resetAtMs: Date.parse('2026-07-10T12:00:00Z'),
-              resetAccuracy: 'exact',
-              limitWindowSeconds: 7 * 24 * 60 * 60,
-              modelScope: { kind: 'models', models: [], complete: false },
-            },
-          ],
-        },
-      },
-    } satisfies AccountQuotaStores;
-    const row = buildRow({ name: 'claude.json', type: 'claude' }, stores);
-
-    const windows = buildAccountQuotaDisplayWindows(row, {
-      stores,
-      translateQuotaWindowLabel,
-      t,
-    });
-
-    expect(windows).toMatchObject([
-      {
-        key: 'weekly-scoped-model-id',
-        label: 'Demo Model A',
-        scopeDisplayName: 'Demo Model A',
-        modelScope: { kind: 'models', models: ['model-a'], complete: true },
-      },
-      {
-        key: 'weekly-scoped-label-only',
-        label: 'Demo Model B',
-        scopeDisplayName: 'Demo Model B',
-        modelScope: { kind: 'models', models: [], complete: false },
-      },
-    ]);
   });
 
   it('flattens Antigravity groups while retaining group and bucket metadata', () => {
@@ -465,6 +423,86 @@ describe('accountQuotaDisplayWindows', () => {
       limitWindowSeconds: 7 * 24 * 60 * 60,
       modelScope: { kind: 'family', key: 'claude_gpt', complete: true },
     });
+  });
+
+  it('carries non-Codex fetchedAt through the production forecast chain', () => {
+    const fetchedAtMs = Date.parse('2026-07-01T00:00:00Z');
+    const resetAtMs = fetchedAtMs + 5 * 60 * 60 * 1000;
+    const nowMs = fetchedAtMs + 60 * 60 * 1000;
+    const stores = {
+      ...emptyStores(),
+      antigravityQuota: {
+        'ag.json': {
+          status: 'success',
+          fetchedAtMs,
+          groups: [
+            {
+              id: 'gemini',
+              label: 'Gemini models',
+              models: ['gemini-3-pro'],
+              buckets: [
+                {
+                  id: 'five-hour',
+                  label: '5 Hour Limit',
+                  window: '5h',
+                  remainingFraction: 0.5,
+                  resetTime: new Date(resetAtMs).toISOString(),
+                },
+              ],
+            },
+          ],
+        },
+      },
+    } satisfies AccountQuotaStores;
+    const row = buildRow({ name: 'ag.json', type: 'antigravity' }, stores);
+    const displayWindows = buildAccountQuotaDisplayWindows(row, {
+      stores,
+      translateQuotaWindowLabel,
+      t,
+      nowMs,
+    });
+    const [definition] = buildAccountQuotaWindowDefinitions(displayWindows, nowMs);
+    const currentUsage: MonitoringAccountWindowUsageItem = {
+      row_key: row.selectionKey,
+      window_key: definition.providerWindowId,
+      from_ms: definition.cycleStartMs ?? fetchedAtMs,
+      to_ms: nowMs,
+      matched: true,
+      total_requests: 100,
+      success_calls: 100,
+      failure_calls: 0,
+      total_tokens: 1_000_000,
+      total_cost: 5,
+      success_rate: 1,
+      last_seen_ms: fetchedAtMs - 100,
+      sync_status: 'ready',
+      scope_match_status: 'complete',
+    };
+    const detail = buildAccountDetailViewModel(row, {
+      quotaWindows: [{ ...definition, resetLabel: definition.display.resetLabel }],
+      windowUsageByKey: new Map([
+        [
+          accountWindowUsageRequestKey(
+            row.selectionKey,
+            definition.providerWindowId,
+            'current',
+            definition.modelScope
+          ),
+          currentUsage,
+        ],
+      ]),
+    });
+
+    expect(displayWindows[0]).toMatchObject({
+      usedPercent: 50,
+      observedAtMs: fetchedAtMs,
+      quotaProgressObservedAtMs: fetchedAtMs,
+    });
+    expect(definition).toMatchObject({
+      observedAtMs: fetchedAtMs,
+      quotaProgressObservedAtMs: fetchedAtMs,
+    });
+    expect(detail.quota.windows[0].forecast).toMatchObject({ basis: 'quota' });
   });
 
   it('adds Kimi usage amounts and formatted reset hints', () => {
@@ -819,5 +857,58 @@ describe('accountQuotaDisplayWindows', () => {
         t,
       })
     ).toEqual([]);
+  });
+
+  it('preserves scopeDisplayName for codex and claude windows', () => {
+    const stores = {
+      ...emptyStores(),
+      codexQuota: {
+        'codex.json': {
+          status: 'success',
+          windows: [
+            {
+              id: 'codex-spark',
+              label: 'Spark',
+              usedPercent: 20,
+              resetLabel: 'resets in 2h',
+              resetAtMs: 1_700_000_000_000,
+              scopeDisplayName: 'gpt-5-spark',
+              modelScope: { kind: 'models', models: ['gpt-5-spark'], complete: true },
+            },
+          ],
+        },
+      },
+      claudeQuota: {
+        'claude.json': {
+          status: 'success',
+          windows: [
+            {
+              id: 'claude-sonnet',
+              label: 'Claude 3.7 Sonnet',
+              usedPercent: 40,
+              resetLabel: 'resets in 5h',
+              resetAtMs: 1_700_000_000_000,
+              modelScope: { kind: 'models', models: ['claude-3-7-sonnet'], complete: true },
+            },
+          ],
+        },
+      },
+    } satisfies AccountQuotaStores;
+
+    const codexRow = buildRow({ name: 'codex.json', type: 'codex' }, stores);
+    const codexWindows = buildAccountQuotaDisplayWindows(codexRow, {
+      stores,
+      translateQuotaWindowLabel,
+      t,
+    });
+    expect(codexWindows[0]?.scopeDisplayName).toBe('gpt-5-spark');
+
+    const claudeRow = buildRow({ name: 'claude.json', type: 'claude' }, stores);
+    const claudeWindows = buildAccountQuotaDisplayWindows(claudeRow, {
+      stores,
+      translateQuotaWindowLabel,
+      t,
+    });
+    expect(claudeWindows[0]?.scopeDisplayName).toBe('Claude 3.7 Sonnet');
   });
 });

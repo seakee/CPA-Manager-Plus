@@ -21,6 +21,7 @@ const makeWindow = (overrides: Partial<AccountQuotaDisplayWindow>): AccountQuota
   source: 'codex',
   observationSource: 'api_query',
   observedAtMs: 30_000_000,
+  quotaProgressObservedAtMs: 30_000_000,
   windowMode: 'fixed',
   cycleStartMs: 20_000_000,
   cycleEndMs: 38_000_000,
@@ -47,6 +48,15 @@ const makeCycle = (
 });
 
 describe('accountQuotaWindowDefinitions', () => {
+  it('propagates quota progress provenance separately from generic observation time', () => {
+    const [definition] = buildAccountQuotaWindowDefinitions([
+      makeWindow({ observedAtMs: 30_000_000, quotaProgressObservedAtMs: 20_000_000 }),
+    ]);
+
+    expect(definition.observedAtMs).toBe(30_000_000);
+    expect(definition.quotaProgressObservedAtMs).toBe(20_000_000);
+  });
+
   it('builds separate current and previous half-open ranges for fixed windows', () => {
     const [definition] = buildAccountQuotaWindowDefinitions([makeWindow({})], 30_000_000);
     expect(buildAccountQuotaUsageRanges(definition, 30_000_000)).toEqual([

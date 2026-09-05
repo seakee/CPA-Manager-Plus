@@ -45,6 +45,28 @@ func CodexAccountIDFromSnapshot(snapshot string) string {
 	return accountID
 }
 
+// HasCodexAccountIDSnapshotMarker reports whether a historical project
+// snapshot claims Codex account-id provenance, including malformed markers.
+// Callers use this to distinguish missing legacy evidence from invalid
+// evidence that must fail closed.
+func HasCodexAccountIDSnapshotMarker(snapshot string) bool {
+	return strings.HasPrefix(strings.Trim(snapshot, " "), codexAccountIDSnapshotPrefix)
+}
+
+// LegacyCodexWorkspaceAccountKey returns the v3 Workspace-only Codex key used
+// before member-aware identity was introduced. It is intentionally separate
+// from AccountKey: new writes must always remain member-aware when strong
+// member evidence is available, while narrow compatibility readers may use
+// this key to inspect orphaned legacy derived data.
+func LegacyCodexWorkspaceAccountKey(provider, workspace string) (string, bool) {
+	provider = normalizeProvider(provider)
+	workspace, workspaceOK := NormalizeCodexWorkspaceSnapshot(workspace)
+	if provider != "codex" || !workspaceOK {
+		return "", false
+	}
+	return encodeCodexKey("codex-account", provider, workspace), true
+}
+
 // ProjectIDSnapshot returns only a real provider project snapshot. The
 // pre-v3 Codex account marker is retained in immutable history for audit but
 // must never be exposed as a project identifier again.

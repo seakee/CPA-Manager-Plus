@@ -193,6 +193,7 @@ describe('accountWindowUsageRows', () => {
       modelScope: { kind: 'all', complete: true },
       observationSource: 'api_query',
       observedAtMs: 30_000,
+      quotaProgressObservedAtMs: 30_000,
       boundaryAccuracy: 'exact',
       cycleStartMs: 20_000,
       cycleEndMs: 38_000,
@@ -270,6 +271,7 @@ describe('accountWindowUsageRows', () => {
       modelScope: { kind: 'all', complete: true },
       observationSource: 'api_query',
       observedAtMs: 30_000,
+      quotaProgressObservedAtMs: 30_000,
       boundaryAccuracy: 'unknown',
       cycleStartMs: 20_000,
       cycleEndMs: 38_000,
@@ -486,6 +488,7 @@ describe('accountWindowUsageRows', () => {
       modelScope: { kind: 'models', models: [], complete: false },
       observationSource: 'api_query',
       observedAtMs: 5_000,
+      quotaProgressObservedAtMs: 5_000,
       boundaryAccuracy: 'exact',
       cycleStartMs: 1_000,
       cycleEndMs: 7_000,
@@ -537,72 +540,5 @@ describe('accountWindowUsageRows', () => {
 
     expect(entries).toHaveLength(1);
     expect(entries[0].windowKey).toBe('5h');
-  });
-
-  it('never generates window usage target when identityAmbiguous is true even with complete model scope', () => {
-    const row = makeRow({ provider: 'codex' });
-    const ambiguousCompleteWindow: AccountQuotaWindowDefinition = {
-      key: 'ambiguous-complete',
-      providerWindowId: 'cpamp:ambiguous:some-slot',
-      provider: 'codex',
-      label: 'Ambiguous Window',
-      kind: 'weekly',
-      windowMode: 'rolling',
-      boundaryAccuracy: 'exact',
-      observationSource: 'api_query',
-      observedAtMs: 1000,
-      cycleStartMs: 3_000,
-      cycleEndMs: 5_000,
-      durationSeconds: 2,
-      usedPercent: 50,
-      remainingPercent: 50,
-      stale: false,
-      identityAmbiguous: true,
-      modelScope: {
-        kind: 'models',
-        models: ['some-model'],
-        complete: true,
-      },
-      display: {
-        key: 'ambiguous-complete',
-        label: 'Ambiguous Window',
-        usedPercent: 50,
-        remainingPercent: 50,
-        resetLabel: '-',
-        resetAccuracy: 'exact',
-        limitWindowSeconds: 2,
-        resetAtMs: 5_000,
-        fromMs: 3_000,
-        toMs: 5_000,
-        identityAmbiguous: true,
-      },
-    };
-
-    const controlCompleteWindow: AccountQuotaWindowDefinition = {
-      ...ambiguousCompleteWindow,
-      key: 'control-complete',
-      providerWindowId: 'control-window-0',
-      identityAmbiguous: false,
-      display: {
-        ...ambiguousCompleteWindow.display,
-        key: 'control-complete',
-        identityAmbiguous: false,
-      },
-    };
-
-    const entries = buildAccountWindowUsageTargetEntries(
-      [row],
-      new Map([
-        [
-          row.selectionKey,
-          [ambiguousCompleteWindow, controlCompleteWindow],
-        ],
-      ]),
-      3_000
-    );
-
-    expect(entries).toHaveLength(1);
-    expect(entries[0].windowKey).toBe('control-complete');
-    expect(entries[0].providerWindowId).toBe('control-window-0');
   });
 });

@@ -2282,17 +2282,16 @@ func TestAccountHistoryAutoMergesSafeCodexLegacyFileIndex(t *testing.T) {
 	db := newMonitoringTestStore(t)
 	ctx := context.Background()
 	baseMS := int64(1_700_006_000_000)
-	stable := monitoringEvent("history-codex-stable", baseMS+1_000, "gpt-codex", "auth-a", "codex-a.json", false, 10, 2, 0, 0, 12, nil)
+	legacy := monitoringEvent("history-codex-legacy", baseMS+1_000, "gpt-codex", "auth-a", "codex-a.json", false, 10, 2, 0, 0, 12, nil)
+	legacy.AuthFileSnapshot = "codex-a.json"
+	legacy.AuthProviderSnapshot = "codex"
+	legacy.AccountSnapshot = "same@example.com"
+	stable := monitoringEvent("history-codex-stable", baseMS+2_000, "gpt-codex", "auth-a", "codex-a.json", false, 20, 3, 0, 0, 23, nil)
 	stable.AuthFileSnapshot = "codex-a.json"
 	stable.AuthProviderSnapshot = "codex"
 	stable.AuthAccountIDSnapshot = "account-a"
 	stable.AccountSnapshot = "same@example.com"
-	legacy := monitoringEvent("history-codex-legacy", baseMS+2_000, "gpt-codex", "auth-a", "codex-a.json", false, 20, 3, 0, 0, 23, nil)
-	legacy.AuthFileSnapshot = "codex-a.json"
-	legacy.AuthProviderSnapshot = "codex"
-	legacy.AuthProjectIDSnapshot = usageidentity.CodexAccountIDSnapshot("account-a")
-	legacy.AccountSnapshot = "same@example.com"
-	if _, err := db.InsertEvents(ctx, []usage.Event{stable, legacy}); err != nil {
+	if _, err := db.InsertEvents(ctx, []usage.Event{legacy, stable}); err != nil {
 		t.Fatalf("insert Codex history events: %v", err)
 	}
 

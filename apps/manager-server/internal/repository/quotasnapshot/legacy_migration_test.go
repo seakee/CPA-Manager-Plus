@@ -223,6 +223,48 @@ func TestQuotaReadersHideAttachedLegacyCodexWorkspaceRows(t *testing.T) {
 	if len(states) != 0 {
 		t.Fatalf("attached legacy Codex window states = %#v, want none", states)
 	}
+	legacyStates, err := repository.ListLegacyCodexWorkspaceWindowStates(context.Background(), legacyKey, "codex")
+	if err != nil {
+		t.Fatalf("list attached legacy window states through compatibility reader: %v", err)
+	}
+	if len(legacyStates) != 1 || legacyStates[0].ID != windowID || legacyStates[0].AccountKey != legacyKey {
+		t.Fatalf("legacy compatibility window states = %#v, want window %d", legacyStates, windowID)
+	}
+
+	memberKey := strings.Replace(legacyKey, ":codex-account:", ":codex-member:", 1)
+	memberWindowResult, err := db.Exec(`insert into account_quota_windows (
+		account_key, provider, provider_window_id, window_kind, window_mode,
+		model_scope_kind, model_scope_key, model_ids_json, scope_fingerprint,
+		inventory_scope_key, relationship_kind, container_provider_window_id,
+		availability, generation, absence_count, first_seen_at_ms, last_seen_at_ms,
+		last_observation_id, created_at_ms, updated_at_ms
+	) select ?, provider, provider_window_id, window_kind, window_mode,
+		model_scope_kind, model_scope_key, model_ids_json, scope_fingerprint,
+		inventory_scope_key, relationship_kind, container_provider_window_id,
+		availability, generation, absence_count, first_seen_at_ms, last_seen_at_ms,
+		last_observation_id, created_at_ms, updated_at_ms
+		from account_quota_windows where id = ?`, memberKey, windowID)
+	if err != nil {
+		t.Fatalf("insert member lifecycle window: %v", err)
+	}
+	memberWindowID, err := memberWindowResult.LastInsertId()
+	if err != nil {
+		t.Fatalf("read member lifecycle window id: %v", err)
+	}
+	memberStates, err := repository.ListWindowStates(context.Background(), memberKey, "codex")
+	if err != nil {
+		t.Fatalf("list member window states: %v", err)
+	}
+	if len(memberStates) != 1 || memberStates[0].ID != memberWindowID {
+		t.Fatalf("member window states = %#v, want window %d", memberStates, memberWindowID)
+	}
+	legacyMemberStates, err := repository.ListLegacyCodexWorkspaceWindowStates(context.Background(), memberKey, "codex")
+	if err != nil {
+		t.Fatalf("list member states through legacy compatibility reader: %v", err)
+	}
+	if len(legacyMemberStates) != 0 {
+		t.Fatalf("legacy compatibility reader exposed member states = %#v", legacyMemberStates)
+	}
 }
 
 func TestQuotaReadersHideLegacyCodexWorkspaceRowsWithoutProviderMetadata(t *testing.T) {

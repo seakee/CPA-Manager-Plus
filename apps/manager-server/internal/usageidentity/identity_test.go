@@ -98,6 +98,41 @@ func TestAccountKeyUsesCodexWorkspaceAndMemberAcrossMutableCredentialIdentity(t 
 	}
 }
 
+func TestLegacyCodexWorkspaceAccountKeyIsExplicitAndStable(t *testing.T) {
+	key, ok := LegacyCodexWorkspaceAccountKey(" Codex ", " workspace-1 ")
+	const want = "usage-account-history:3:codex-account:636F646578:776F726B73706163652D31"
+	if !ok || key != want {
+		t.Fatalf("LegacyCodexWorkspaceAccountKey() = %q, %v; want %q, true", key, ok, want)
+	}
+	for _, test := range []struct {
+		provider  string
+		workspace string
+	}{
+		{provider: "openai", workspace: "workspace-1"},
+		{provider: "codex", workspace: "   "},
+	} {
+		if got, valid := LegacyCodexWorkspaceAccountKey(test.provider, test.workspace); valid || got != "" {
+			t.Fatalf("LegacyCodexWorkspaceAccountKey(%q, %q) = %q, %v; want empty, false", test.provider, test.workspace, got, valid)
+		}
+	}
+}
+
+func TestHasCodexAccountIDSnapshotMarkerIncludesMalformedEvidence(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		want  bool
+	}{
+		{value: CodexAccountIDSnapshot("workspace-1"), want: true},
+		{value: " codex-account-id:v1: ", want: true},
+		{value: "workspace-1", want: false},
+		{value: "", want: false},
+	} {
+		if got := HasCodexAccountIDSnapshotMarker(test.value); got != test.want {
+			t.Fatalf("HasCodexAccountIDSnapshotMarker(%q) = %v; want %v", test.value, got, test.want)
+		}
+	}
+}
+
 func TestAccountKeyFallsBackWhenCodexMemberEvidenceIsMissingOrWeak(t *testing.T) {
 	for _, snapshot := range []string{"", "Alice", "alice@example.com@duplicate"} {
 		fields := Fields{

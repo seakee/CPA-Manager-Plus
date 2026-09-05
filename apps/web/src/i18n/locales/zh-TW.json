@@ -1113,7 +1113,7 @@
     "detail_forecast_cost": "預估花費",
     "detail_forecast_success_rate": "成功率",
     "detail_forecast_success_rate_unavailable": "暫不預測成功率",
-    "detail_quota_provider_sync_time": "Provider 同步時間",
+    "detail_quota_latest_observation_time": "最近觀測時間",
     "detail_model_window_stats_unavailable": "視窗統計暫未提供",
     "detail_model_window_stats_unavailable_desc": "Provider 未提供該模型的視窗層級資料，目前僅顯示配額總量與用量。",
     "detail_usage_time_empty": "暫無使用時間範圍",

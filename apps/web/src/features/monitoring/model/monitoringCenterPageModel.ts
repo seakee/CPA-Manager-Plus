@@ -807,7 +807,6 @@ const buildCodexAccountQuotaWindows = (
       modelScope: window.modelScope,
       scopeDisplayName: window.scopeDisplayName,
       providerWindowAliases: window.providerWindowAliases,
-      identityAmbiguous: window.identityAmbiguous,
     };
   });
 
@@ -856,10 +855,10 @@ const mergeAccountQuotaWindow = (
       ? { usageLabel: observedWindow.usageLabel }
       : {}),
     ...(observedWindow.modelScope ? { modelScope: observedWindow.modelScope } : {}),
+    ...(observedWindow.scopeDisplayName ? { scopeDisplayName: observedWindow.scopeDisplayName } : {}),
     ...(observedWindow.providerWindowAliases
       ? { providerWindowAliases: observedWindow.providerWindowAliases }
       : {}),
-    ...(observedWindow.identityAmbiguous ? { identityAmbiguous: true } : {}),
   };
 };
 
@@ -1609,7 +1608,6 @@ export const buildObservedCodexAccountQuotaEntry = (
     modelScope: window.modelScope,
     scopeDisplayName: window.scopeDisplayName,
     providerWindowAliases: window.providerWindowAliases,
-    identityAmbiguous: window.identityAmbiguous,
   }));
   const fallbackExpired = recoverAtMS !== null && recoverAtMS <= nowMs;
   const fallbackUsedPercent = fallbackExpired ? null : usedPercent;

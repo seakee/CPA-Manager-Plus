@@ -34,6 +34,7 @@ export interface AccountQuotaWindowDefinition {
   providerWindowAliases?: string[];
   observationSource: QuotaObservationSource;
   observedAtMs: number | null;
+  quotaProgressObservedAtMs: number | null;
   boundaryAccuracy: AccountQuotaBoundaryAccuracy;
   cycleStartMs: number | null;
   cycleEndMs: number | null;
@@ -46,14 +47,12 @@ export interface AccountQuotaWindowDefinition {
   availability?: string;
   relationshipKind?: string;
   containerProviderWindowId?: string;
-  identityAmbiguous?: boolean;
   firstSeenAtMs?: number;
   lastSeenAtMs?: number;
   missingSinceMs?: number | null;
   deactivatedAtMs?: number | null;
   currentCycle?: AccountQuotaCycleDefinition | null;
   previousCycle?: AccountQuotaCycleDefinition | null;
-  currentHidden?: boolean;
   display: AccountQuotaDisplayWindow;
 }
 
@@ -120,10 +119,9 @@ export const buildAccountQuotaWindowDefinitions = (
         windowMode: window.windowMode ?? 'unknown',
         modelScope: window.modelScope ?? { kind: 'all', complete: false },
         providerWindowAliases: window.providerWindowAliases,
-        identityAmbiguous: window.identityAmbiguous,
-        currentHidden: window.currentHidden,
         observationSource: window.observationSource ?? 'api_query',
         observedAtMs: window.observedAtMs ?? null,
+        quotaProgressObservedAtMs: window.quotaProgressObservedAtMs ?? null,
         boundaryAccuracy,
         cycleStartMs: window.cycleStartMs ?? null,
         cycleEndMs: window.cycleEndMs ?? null,

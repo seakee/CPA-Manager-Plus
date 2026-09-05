@@ -18,7 +18,6 @@ export type AccountQuotaWindow = {
   modelScope?: QuotaModelScope;
   scopeDisplayName?: string;
   providerWindowAliases?: string[];
-  identityAmbiguous?: boolean;
 };
 
 export type AccountQuotaEntry = {

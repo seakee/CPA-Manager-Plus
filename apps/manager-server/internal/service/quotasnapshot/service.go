@@ -37,6 +37,7 @@ var (
 	validAccuracy       = stringSet("exact", "derived", "estimated", "unknown")
 	validInventoryModes = stringSet("complete", "partial", "delta")
 	validRelationships  = stringSet("concurrent_subwindow")
+	codexPersonalPlans  = stringSet("free", "plus", "pro", "go")
 )
 
 type Service struct {
@@ -188,13 +189,6 @@ type Window struct {
 	CurrentCycle          *Cycle                 `json:"current_cycle,omitempty"`
 	PreviousCycle         *Cycle                 `json:"previous_cycle,omitempty"`
 	ScopeFingerprint      string                 `json:"-"`
-	IdentityAmbiguous     bool                   `json:"identity_ambiguous,omitempty"`
-	// CurrentPresentationHidden is derived at query time from the latest
-	// ambiguous current-observation set. Keep false explicit so a newer active
-	// provider observation can clear a previously shadowed local definition.
-	CurrentPresentationHidden bool   `json:"current_hidden"`
-	InventoryScopeKey         string `json:"-"`
-	Provider                  string `json:"-"`
 }
 
 type Cycle struct {
@@ -526,13 +520,24 @@ func (s *Service) Query(ctx context.Context, req QueryRequest) (QueryResponse, e
 		if !ok {
 			return QueryResponse{}, errors.New("account identity is required")
 		}
-		evidence, err := s.store.QuotaSnapshots.ReadQueryEvidence(ctx, accountKey, provider, maxSnapshotsPerQuery)
+		candidates, err := s.store.QuotaSnapshots.ListCandidates(ctx, accountKey, provider, maxSnapshotsPerQuery)
 		if err != nil {
 			return QueryResponse{}, err
 		}
-		candidates := evidence.Candidates
-		states := evidence.States
-		ambiguousCandidates := evidence.AmbiguousCandidates
+		states, err := s.store.QuotaSnapshots.ListWindowStates(ctx, accountKey, provider)
+		if err != nil {
+			return QueryResponse{}, err
+		}
+		if legacyAccountKey, bridgeEligible := legacyCodexWorkspaceQuotaKey(account.Account, provider); bridgeEligible {
+			legacyStates, legacyErr := s.store.QuotaSnapshots.ListLegacyCodexWorkspaceWindowStates(ctx, legacyAccountKey, provider)
+			if legacyErr != nil {
+				return QueryResponse{}, legacyErr
+			}
+			states, legacyErr = bridgeLegacyCodexWorkspacePreviousCycles(ctx, s.store.QuotaSnapshots, states, legacyStates)
+			if legacyErr != nil {
+				return QueryResponse{}, legacyErr
+			}
+		}
 		stateByID := make(map[int64]model.AccountQuotaWindowState, len(states))
 		for _, state := range states {
 			stateByID[state.ID] = state
@@ -599,46 +604,179 @@ func (s *Service) Query(ctx context.Context, req QueryRequest) (QueryResponse, e
 			normalizedStates = append(normalizedStates, states[index])
 		}
 		states = normalizedStates
-		displayCandidates := evidence.DisplayCandidates
-		for index := range displayCandidates {
-			normalizeCodexSnapshotForQuery(&displayCandidates[index])
-		}
-		canonicalizeLinkedQueryCandidates(displayCandidates, states)
-		canonicalizeLinkedQueryCandidates(candidates, states)
-		allSelectionCandidates := make([]model.AccountQuotaSnapshot, 0, len(candidates)+len(ambiguousCandidates))
-		allSelectionCandidates = append(allSelectionCandidates, candidates...)
-		allSelectionCandidates = append(allSelectionCandidates, ambiguousCandidates...)
-		selectedWindows := selectWindows(allSelectionCandidates, states, nowMS, displayCandidates)
-		mergedWindows := mergeLifecycleWindows(selectedWindows, states, nowMS, req.IncludeInactive)
-		applyCurrentAmbiguousPresentationShadow(mergedWindows, ambiguousCandidates)
 		items = append(items, QueryItem{
 			RowKey: account.RowKey, AccountKey: accountKey, Provider: provider,
-			Windows: mergedWindows,
+			Windows: mergeLifecycleWindows(selectWindows(candidates, states, nowMS), states, nowMS, req.IncludeInactive),
 		})
 	}
 	return QueryResponse{GeneratedAtMS: nowMS, Items: items}, nil
 }
 
-func canonicalizeLinkedQueryCandidates(
-	candidates []model.AccountQuotaSnapshot,
-	states []model.AccountQuotaWindowState,
-) {
-	stateByID := make(map[int64]model.AccountQuotaWindowState, len(states))
-	for _, state := range states {
-		if state.ID > 0 {
-			stateByID[state.ID] = state
-		}
+type legacyCodexPreviousCycleBridgeCandidate struct {
+	stateIndex int
+	cycleIDs   [3]int64
+	previous   model.AccountQuotaCycle
+}
+
+func legacyCodexWorkspaceQuotaKey(account AccountTarget, provider string) (string, bool) {
+	if normalizeProvider(provider) != "codex" || strings.Trim(account.AuthAccountIDSnapshot, " ") == "" {
+		return "", false
 	}
-	for index := range candidates {
-		state, ok := stateByID[candidates[index].LogicalWindowID]
-		if !ok || strings.TrimSpace(state.ProviderWindowID) == "" {
+	fields := account.identityFields(provider)
+	workspace, workspaceOK := usageidentity.ResolveCodexWorkspace(fields)
+	_, memberOK := usageidentity.NormalizeCodexMemberSnapshot(fields.AccountSnapshot)
+	if !workspaceOK || !memberOK {
+		return "", false
+	}
+	return usageidentity.LegacyCodexWorkspaceAccountKey(provider, workspace)
+}
+
+func bridgeLegacyCodexWorkspacePreviousCycles(
+	ctx context.Context,
+	repository quotasnapshotrepo.Repository,
+	states, legacyStates []model.AccountQuotaWindowState,
+) ([]model.AccountQuotaWindowState, error) {
+	if len(states) == 0 || len(legacyStates) == 0 {
+		return states, nil
+	}
+	legacyByWindow := make(map[string][]model.AccountQuotaWindowState, len(legacyStates))
+	for _, legacyState := range legacyStates {
+		normalized := legacyState
+		normalizeCodexWindowStateForQuery(&normalized)
+		key := legacyCodexQuotaBridgeWindowKey(normalized)
+		legacyByWindow[key] = append(legacyByWindow[key], normalized)
+	}
+
+	candidates := make([]legacyCodexPreviousCycleBridgeCandidate, 0)
+	cycleIDs := make([]int64, 0)
+	for stateIndex := range states {
+		if states[stateIndex].PreviousCycle != nil {
 			continue
 		}
-		// Historical snapshots remain immutable. Query grouping follows the
-		// current logical state so a lazy provider-window identity migration
-		// cannot expose legacy and canonical IDs as two current windows.
-		candidates[index].ProviderWindowID = state.ProviderWindowID
+		current := states[stateIndex]
+		normalizeCodexWindowStateForQuery(&current)
+		matches := make([]model.AccountQuotaWindowState, 0, 1)
+		for _, legacyState := range legacyByWindow[legacyCodexQuotaBridgeWindowKey(current)] {
+			if legacyCodexQuotaBridgeCyclesMatch(current, legacyState) {
+				matches = append(matches, legacyState)
+			}
+		}
+		if len(matches) != 1 {
+			continue
+		}
+		legacyState := matches[0]
+		candidate := legacyCodexPreviousCycleBridgeCandidate{
+			stateIndex: stateIndex,
+			cycleIDs: [3]int64{
+				current.CurrentCycle.ID,
+				legacyState.CurrentCycle.ID,
+				legacyState.PreviousCycle.ID,
+			},
+			previous: *legacyState.PreviousCycle,
+		}
+		candidates = append(candidates, candidate)
+		cycleIDs = append(cycleIDs, candidate.cycleIDs[:]...)
 	}
+	if len(candidates) == 0 {
+		return states, nil
+	}
+	evidenceByCycle, err := repository.ListCyclePlanEvidence(ctx, cycleIDs)
+	if err != nil {
+		return nil, err
+	}
+	for _, candidate := range candidates {
+		if !legacyCodexQuotaBridgeHasPersonalPlan(evidenceByCycle, candidate.cycleIDs) {
+			continue
+		}
+		previous := candidate.previous
+		states[candidate.stateIndex].PreviousCycle = &previous
+	}
+	return states, nil
+}
+
+func legacyCodexQuotaBridgeWindowKey(state model.AccountQuotaWindowState) string {
+	return strings.Join([]string{
+		strings.ToLower(strings.TrimSpace(state.Provider)),
+		state.ProviderWindowID,
+		state.WindowKind,
+		state.WindowMode,
+		state.ModelScopeKind,
+		state.ModelScopeKey,
+		state.ModelIDsJSON,
+		state.ScopeFingerprint,
+		state.InventoryScopeKey,
+		state.RelationshipKind,
+		state.ContainerProviderWindowID,
+	}, "\x00")
+}
+
+func legacyCodexQuotaBridgeCyclesMatch(
+	current, legacy model.AccountQuotaWindowState,
+) bool {
+	if current.Availability != "active" || legacy.Availability != "active" ||
+		(current.WindowMode != "fixed" && current.WindowMode != "calendar") ||
+		current.CurrentCycle == nil || legacy.CurrentCycle == nil || legacy.PreviousCycle == nil {
+		return false
+	}
+	currentCycle := current.CurrentCycle
+	legacyCurrent := legacy.CurrentCycle
+	legacyPrevious := legacy.PreviousCycle
+	if currentCycle.State != "active" || legacyCurrent.State != "active" ||
+		currentCycle.ActualEndMS != nil || legacyCurrent.ActualEndMS != nil ||
+		!reliableQuotaCycleBoundary(currentCycle) ||
+		!reliableQuotaCycleBoundary(legacyCurrent) ||
+		!reliableQuotaCycleBoundary(legacyPrevious) ||
+		currentCycle.ActualStartMS != legacyCurrent.ActualStartMS ||
+		!equalOptionalInt64(currentCycle.ScheduledStartMS, legacyCurrent.ScheduledStartMS) ||
+		!equalOptionalInt64(currentCycle.ScheduledEndMS, legacyCurrent.ScheduledEndMS) ||
+		!equalOptionalInt64(currentCycle.DurationSeconds, legacyCurrent.DurationSeconds) ||
+		currentCycle.DurationSeconds == nil || *currentCycle.DurationSeconds <= 0 {
+		return false
+	}
+	if legacyPrevious.State != "closed" || legacyPrevious.ActualEndMS == nil ||
+		legacyPrevious.ActualStartMS >= *legacyPrevious.ActualEndMS ||
+		*legacyPrevious.ActualEndMS > legacyCurrent.ActualStartMS {
+		return false
+	}
+	switch legacyPrevious.EndReason {
+	case "scheduled", "provider_reset", "early_reset":
+		return true
+	default:
+		return false
+	}
+}
+
+func reliableQuotaCycleBoundary(cycle *model.AccountQuotaCycle) bool {
+	return cycle != nil && (cycle.BoundaryAccuracy == "exact" || cycle.BoundaryAccuracy == "derived")
+}
+
+func equalOptionalInt64(left, right *int64) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func legacyCodexQuotaBridgeHasPersonalPlan(
+	evidenceByCycle map[int64]quotasnapshotrepo.CyclePlanEvidence,
+	cycleIDs [3]int64,
+) bool {
+	planType := ""
+	for _, cycleID := range cycleIDs {
+		evidence, ok := evidenceByCycle[cycleID]
+		if !ok || evidence.SnapshotCount == 0 || evidence.MissingPlanCount != 0 || len(evidence.PlanTypes) != 1 {
+			return false
+		}
+		candidate := evidence.PlanTypes[0]
+		if _, personal := codexPersonalPlans[candidate]; !personal {
+			return false
+		}
+		if planType != "" && candidate != planType {
+			return false
+		}
+		planType = candidate
+	}
+	return planType != ""
 }
 
 // normalizeCodexSnapshotForQuery is the read-side compatibility shield for
@@ -910,7 +1048,6 @@ func selectWindows(
 	candidates []model.AccountQuotaSnapshot,
 	states []model.AccountQuotaWindowState,
 	nowMS int64,
-	displayCandidates ...[]model.AccountQuotaSnapshot,
 ) []Window {
 	groups := make(map[string][]model.AccountQuotaSnapshot)
 	for _, candidate := range candidates {
@@ -966,20 +1103,26 @@ func selectWindows(
 			applySnapshotBoundary(&selected, boundary)
 			boundarySource = boundary
 		}
-		displayCandidate, hasDisplayCandidate := selectScopeDisplayNameCandidate(selected, group, displayCandidates...)
-		selected.ScopeDisplayName = displayCandidate.Name
+		selected.ScopeDisplayName = selectScopeDisplayName(selected, group)
 		window := snapshotWindow(selected, isStale(selected, nowMS))
 		window.FieldSources = map[string]FieldSource{
 			"quota": {Source: selected.Source, ObservedAtMS: selected.ObservedAtMS},
 		}
-		if hasDisplayCandidate {
-			window.FieldSources["scope_display_name"] = FieldSource{
-				Source: displayCandidate.Source, ObservedAtMS: displayCandidate.ObservedAtMS,
-			}
-		}
 		if boundaryComplete(selected) {
 			window.FieldSources["boundary"] = FieldSource{
 				Source: boundarySource.Source, ObservedAtMS: boundarySource.ObservedAtMS,
+			}
+		}
+		if selected.ScopeDisplayName != "" {
+			displayNameSource := selected
+			for _, candidate := range group {
+				if strings.TrimSpace(candidate.ScopeDisplayName) == selected.ScopeDisplayName &&
+					(displayNameSource.ScopeDisplayName != selected.ScopeDisplayName || candidate.ObservedAtMS >= displayNameSource.ObservedAtMS) {
+					displayNameSource = candidate
+				}
+			}
+			window.FieldSources["scope_display_name"] = FieldSource{
+				Source: displayNameSource.Source, ObservedAtMS: displayNameSource.ObservedAtMS,
 			}
 		}
 		if selected.Provider == "codex" {
@@ -1040,181 +1183,40 @@ func selectWindows(
 	return result
 }
 
-type scopeDisplayNameCandidate struct {
-	Name         string
-	Source       string
-	ObservedAtMS int64
-}
-
-func selectScopeDisplayNameCandidate(
+func selectScopeDisplayName(
 	selected model.AccountQuotaSnapshot,
 	candidates []model.AccountQuotaSnapshot,
-	displayCandidates ...[]model.AccountQuotaSnapshot,
-) (scopeDisplayNameCandidate, bool) {
-	var latest scopeDisplayNameCandidate
-	var latestID int64
-	hasName := false
-	eligibleCandidates := append([]model.AccountQuotaSnapshot(nil), candidates...)
-	if len(displayCandidates) > 0 {
-		for _, candidate := range displayCandidates[0] {
-			if sameScopeDisplayIdentity(selected, candidate) {
+) string {
+	if name := strings.TrimSpace(selected.ScopeDisplayName); name != "" {
+		return name
+	}
+	eligibleCandidates := candidates
+	if selected.ActivationID != 0 {
+		eligibleCandidates = make([]model.AccountQuotaSnapshot, 0, len(candidates))
+		for _, candidate := range candidates {
+			if candidate.ActivationID == selected.ActivationID {
 				eligibleCandidates = append(eligibleCandidates, candidate)
 			}
 		}
 	}
-	if selected.ActivationID != 0 {
-		activationCandidates := make([]model.AccountQuotaSnapshot, 0, len(eligibleCandidates))
-		for _, candidate := range eligibleCandidates {
-			if candidate.ActivationID == selected.ActivationID {
-				activationCandidates = append(activationCandidates, candidate)
-			}
-		}
-		eligibleCandidates = activationCandidates
-	}
-	selectedIncluded := false
-	for _, candidate := range eligibleCandidates {
-		if candidate.ID == selected.ID && candidate.ID != 0 {
-			selectedIncluded = true
-			break
-		}
-	}
-	if !selectedIncluded {
-		eligibleCandidates = append(eligibleCandidates, selected)
-	}
+	var latestName string
+	var latestObservedAtMS int64
+	var latestID int64
+	hasName := false
 	for _, candidate := range eligibleCandidates {
 		name := strings.TrimSpace(candidate.ScopeDisplayName)
 		if name == "" {
 			continue
 		}
-		if !hasName || candidate.ObservedAtMS > latest.ObservedAtMS ||
-			(candidate.ObservedAtMS == latest.ObservedAtMS && candidate.ID > latestID) {
-			latest = scopeDisplayNameCandidate{
-				Name: name, Source: candidate.Source, ObservedAtMS: candidate.ObservedAtMS,
-			}
+		if !hasName || candidate.ObservedAtMS > latestObservedAtMS ||
+			(candidate.ObservedAtMS == latestObservedAtMS && candidate.ID > latestID) {
+			latestName = name
+			latestObservedAtMS = candidate.ObservedAtMS
 			latestID = candidate.ID
 			hasName = true
 		}
 	}
-	return latest, hasName
-}
-
-func sameScopeDisplayIdentity(left, right model.AccountQuotaSnapshot) bool {
-	if left.LogicalWindowID > 0 || right.LogicalWindowID > 0 {
-		return left.LogicalWindowID > 0 && left.LogicalWindowID == right.LogicalWindowID &&
-			left.ActivationID == right.ActivationID
-	}
-	return strings.EqualFold(strings.TrimSpace(left.ProviderWindowID), strings.TrimSpace(right.ProviderWindowID)) &&
-		strings.EqualFold(strings.TrimSpace(left.WindowKind), strings.TrimSpace(right.WindowKind)) &&
-		strings.EqualFold(strings.TrimSpace(left.ScopeFingerprint), strings.TrimSpace(right.ScopeFingerprint))
-}
-
-type codexAmbiguousCoverageBucket struct {
-	provider          string
-	inventoryScopeKey string
-	scopeFingerprint  string
-	windowRole        string
-}
-
-func applyCurrentAmbiguousPresentationShadow(
-	windows []Window,
-	ambiguousCandidates []model.AccountQuotaSnapshot,
-) {
-	if len(windows) == 0 || len(ambiguousCandidates) == 0 {
-		return
-	}
-	buckets := make(map[codexAmbiguousCoverageBucket]struct{}, len(ambiguousCandidates))
-	for index := range ambiguousCandidates {
-		candidate := &ambiguousCandidates[index]
-		role, ok := codexAmbiguousWindowRole(candidate.ProviderWindowID, candidate.WindowKind, candidate.DurationSeconds)
-		if !ok {
-			continue
-		}
-		scopeFingerprint := strings.TrimSpace(candidate.ScopeFingerprint)
-		if scopeFingerprint == "" {
-			scopeFingerprint = quotasnapshotrepo.ScopeFingerprint(
-				candidate.ModelScopeKind,
-				candidate.ModelScopeKey,
-				unmarshalStringList(candidate.ModelIDsJSON),
-			)
-		}
-		buckets[codexAmbiguousCoverageBucket{
-			provider:          strings.ToLower(strings.TrimSpace(candidate.Provider)),
-			inventoryScopeKey: strings.TrimSpace(candidate.InventoryScopeKey),
-			scopeFingerprint:  strings.ToLower(scopeFingerprint),
-			windowRole:        role,
-		}] = struct{}{}
-	}
-	for index := range windows {
-		window := &windows[index]
-		if window.IdentityAmbiguous || codexquota.IsAmbiguousAdditionalProviderWindowID(window.ProviderWindowID) ||
-			window.Availability != "pending_absent" {
-			continue
-		}
-		role, ok := codexAmbiguousWindowRole(window.ProviderWindowID, window.WindowKind, window.DurationSeconds)
-		if !ok {
-			continue
-		}
-		bucket := codexAmbiguousCoverageBucket{
-			provider:          strings.ToLower(strings.TrimSpace(window.Provider)),
-			inventoryScopeKey: strings.TrimSpace(window.InventoryScopeKey),
-			scopeFingerprint:  strings.ToLower(strings.TrimSpace(window.ScopeFingerprint)),
-			windowRole:        role,
-		}
-		if _, covered := buckets[bucket]; covered {
-			window.CurrentPresentationHidden = true
-		}
-	}
-}
-
-func codexAmbiguousWindowRole(providerWindowID, windowKind string, durationSeconds *int64) (string, bool) {
-	kind := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(windowKind), "_", "-"))
-	switch kind {
-	case "five-hour", "weekly", "monthly":
-		return kind, true
-	}
-	suffix, ok := quotasnapshotrepo.GeneratedCodexWindowSuffixFromID(providerWindowID)
-	if !ok || !isCodexGenericWindowSuffix(suffix) ||
-		durationSeconds == nil || *durationSeconds <= 0 {
-		return "", false
-	}
-	return fmt.Sprintf("generic:%d", *durationSeconds), true
-}
-
-func isCodexGenericWindowSuffix(suffix string) bool {
-	parts := strings.Split(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(suffix)), "-"), "-")
-	return len(parts) == 4 && isDecimalToken(parts[0]) && parts[1] == "window" &&
-		isCodexWindowDurationToken(parts[2]) && isDecimalToken(parts[3])
-}
-
-func isDecimalToken(value string) bool {
-	if value == "" {
-		return false
-	}
-	for _, char := range value {
-		if char < '0' || char > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-func isCodexWindowDurationToken(value string) bool {
-	if value == "unknown" || isDecimalToken(value) {
-		return true
-	}
-	if len(value) < 2 || !isDecimalToken(value[:len(value)-1]) {
-		return false
-	}
-	unit := value[len(value)-1]
-	return unit == 'd' || unit == 'h' || unit == 's'
-}
-
-func selectScopeDisplayName(
-	selected model.AccountQuotaSnapshot,
-	candidates []model.AccountQuotaSnapshot,
-) string {
-	candidate, _ := selectScopeDisplayNameCandidate(selected, candidates)
-	return candidate.Name
+	return latestName
 }
 
 func mergeLifecycleWindows(
@@ -1235,24 +1237,6 @@ func mergeLifecycleWindows(
 	}
 	result := make([]Window, 0, len(windows))
 	for _, window := range windows {
-		if window.IdentityAmbiguous || codexquota.IsAmbiguousAdditionalProviderWindowID(window.ProviderWindowID) {
-			// Ambiguous Additional slots remain displayable current observations,
-			// but their source order is not a durable individual lineage. Never
-			// expose previous-cycle, container, or logical-window metadata for them.
-			window.LogicalWindowID = 0
-			window.ActivationGeneration = 0
-			window.Availability = ""
-			window.RelationshipKind = ""
-			window.ContainerWindowID = ""
-			window.FirstSeenAtMS = 0
-			window.LastSeenAtMS = 0
-			window.MissingSinceMS = nil
-			window.DeactivatedAtMS = nil
-			window.CurrentCycle = nil
-			window.PreviousCycle = nil
-			result = append(result, window)
-			continue
-		}
 		state, ok := statesByKey[window.ProviderWindowID+"\x00"+window.ScopeFingerprint]
 		if !ok {
 			if window.Availability == "" {
@@ -1265,9 +1249,6 @@ func mergeLifecycleWindows(
 			continue
 		}
 		window.LogicalWindowID = state.ID
-		window.Provider = state.Provider
-		window.InventoryScopeKey = state.InventoryScopeKey
-		window.ScopeFingerprint = state.ScopeFingerprint
 		window.ActivationGeneration = state.Generation
 		window.Availability = state.Availability
 		window.WindowKind = state.WindowKind
@@ -1491,7 +1472,6 @@ func snapshotWindow(snapshot model.AccountQuotaSnapshot, stale bool) Window {
 		}
 	}
 	return Window{
-		Provider:              snapshot.Provider,
 		ProviderWindowID:      snapshot.ProviderWindowID,
 		ProviderWindowAliases: providerWindowAliases,
 		WindowKind:            snapshot.WindowKind,
@@ -1509,9 +1489,6 @@ func snapshotWindow(snapshot model.AccountQuotaSnapshot, stale bool) Window {
 		ResetCreditsAvailable: snapshot.ResetCreditsAvailable,
 		ResetCredits:          unmarshalResetCredits(snapshot.ResetCreditsJSON), PlanType: snapshot.PlanType,
 		Stale: stale, ScopeFingerprint: snapshot.ScopeFingerprint,
-		InventoryScopeKey: snapshot.InventoryScopeKey,
-		IdentityAmbiguous: snapshot.Provider == "codex" &&
-			codexquota.IsAmbiguousAdditionalProviderWindowID(snapshot.ProviderWindowID),
 	}
 }
 

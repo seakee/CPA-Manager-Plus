@@ -1115,7 +1115,7 @@
     "detail_forecast_cost": "Projected cost",
     "detail_forecast_success_rate": "Success rate",
     "detail_forecast_success_rate_unavailable": "Success rate is not projected",
-    "detail_quota_provider_sync_time": "Provider sync time",
+    "detail_quota_latest_observation_time": "Most recent observation",
     "detail_model_window_stats_unavailable": "Window statistics not provided",
     "detail_model_window_stats_unavailable_desc": "The provider did not provide a model-level window, so only the quota total and usage are shown.",
     "detail_usage_time_empty": "No usage time range available",

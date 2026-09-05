@@ -19,6 +19,8 @@ const MONTH_SECONDS = 2_592_000;
 const MIN_MONTH_SECONDS = 28 * 24 * 60 * 60;
 const MAX_MONTH_SECONDS = 31 * 24 * 60 * 60;
 
+export const CODEX_QUOTA_BOUNDARY_JITTER_MS = 60_000;
+
 export const CODEX_MAIN_QUOTA_SCOPE_KEY = 'codex_main';
 export const CODEX_SPARK_MODEL_ID = 'gpt-5.3-codex-spark';
 export const CODEX_CODE_REVIEW_SCOPE_KEY = 'code_review';
@@ -32,7 +34,6 @@ const CODEX_SPARK_PROVIDER_WINDOW_PREFIXES = [
   CODEX_SPARK_PROVIDER_WINDOW_PREFIX,
 ];
 const CODEX_SPARK_LEGACY_PROVIDER_WINDOW_PREFIXES = ['fast-coding'];
-export const CODEX_AMBIGUOUS_PROVIDER_WINDOW_PREFIX = 'cpamp:ambiguous:';
 const CODEX_MAIN_PROVIDER_WINDOW_IDS = new Set([
   'five-hour',
   'weekly',
@@ -76,7 +77,6 @@ export type CodexQuotaWindowInfo = {
   limitWindowSeconds: number | null;
   modelScope: QuotaModelScope;
   providerWindowAliases?: string[];
-  identityAmbiguous?: boolean;
 };
 
 export type CodexQuotaScopeResolution = {
@@ -130,79 +130,12 @@ const normalizeWindowId = (raw: string) =>
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
 
-const normalizeCodexProviderWindowPrefix = (raw: string): string => {
-  const normalized = raw.trim().toLowerCase();
-  return normalized.startsWith(CODEX_AMBIGUOUS_PROVIDER_WINDOW_PREFIX)
-    ? normalized
-    : normalizeWindowId(normalized);
-};
-
-export const isAmbiguousCodexProviderWindowId = (value: string): boolean =>
-  value.trim().toLowerCase().startsWith(CODEX_AMBIGUOUS_PROVIDER_WINDOW_PREFIX);
-
 const normalizeFeatureKey = (raw: string | null | undefined) =>
   (raw ?? '')
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '');
-
-// Strict generated Additional suffix grammar, mirrored by the Manager Server:
-//   -five-hour-<index>, -weekly-<index>, -monthly-<index> with a decimal
-//   index, or -<familyIndex>-window-<duration>-<windowIndex> where duration is
-//   "unknown", decimal seconds, or decimal seconds with a d/h/s unit.
-const CODEX_DECIMAL_TOKEN = /^[0-9]+$/;
-const CODEX_WINDOW_DURATION_TOKEN = /^(?:unknown|[0-9]+|[0-9]+[dhs])$/;
-
-const isCodexGeneratedAdditionalSuffix = (suffix: string): boolean => {
-  const normalized = suffix.trim().toLowerCase();
-  if (!normalized.startsWith('-') || normalized.length === 1) return false;
-  const parts = normalized.slice(1).split('-');
-  if (
-    parts.length === 3 &&
-    parts[0] === 'five' &&
-    parts[1] === 'hour' &&
-    CODEX_DECIMAL_TOKEN.test(parts[2])
-  ) {
-    return true;
-  }
-  if (
-    parts.length === 2 &&
-    (parts[0] === 'weekly' || parts[0] === 'monthly') &&
-    CODEX_DECIMAL_TOKEN.test(parts[1])
-  ) {
-    return true;
-  }
-  return (
-    parts.length === 4 &&
-    CODEX_DECIMAL_TOKEN.test(parts[0]) &&
-    parts[1] === 'window' &&
-    CODEX_WINDOW_DURATION_TOKEN.test(parts[2]) &&
-    CODEX_DECIMAL_TOKEN.test(parts[3])
-  );
-};
-
-const codexGeneratedAdditionalSuffixAfterPrefix = (
-  value: string,
-  prefix: string
-): string | null => {
-  const id = value.trim().toLowerCase();
-  const normalizedPrefix = prefix.trim().toLowerCase();
-  if (!id || !normalizedPrefix || !id.startsWith(`${normalizedPrefix}-`)) return null;
-  const suffix = id.slice(normalizedPrefix.length);
-  return isCodexGeneratedAdditionalSuffix(suffix) ? suffix : null;
-};
-
-const isCodexSparkCompatibilityProviderWindowId = (value: string): boolean => {
-  const raw = value.trim().toLowerCase();
-  if (!raw) return false;
-  return [
-    ...CODEX_SPARK_PROVIDER_WINDOW_PREFIXES,
-    ...CODEX_SPARK_LEGACY_PROVIDER_WINDOW_PREFIXES,
-  ].some(
-    (prefix) => raw === prefix || codexGeneratedAdditionalSuffixAfterPrefix(raw, prefix) !== null
-  );
-};
 
 const codexAdditionalWindowIdentityPart = (window?: CodexUsageWindow | null): string => {
   if (!window) return 'none';
@@ -223,14 +156,21 @@ const anonymousCodexAdditionalIdentity = (limitItem: CodexAdditionalRateLimit): 
 
 const codexAdditionalWindowSortKey = (window?: CodexUsageWindow | null): string => {
   if (!window) return 'none';
-  const seconds = getWindowSeconds(window);
-  return `present:${seconds === null ? 'unknown' : String(seconds)}`;
+  const values = [
+    getWindowSeconds(window),
+    normalizeNumberValue(window.used_percent ?? window.usedPercent),
+    normalizeNumberValue(window.reset_after_seconds ?? window.resetAfterSeconds),
+    normalizeNumberValue(window.reset_at ?? window.resetAt),
+  ];
+  return values.map((value) => (value === null ? '' : String(value))).join(':');
 };
 
 const codexAdditionalRateLimitSortKey = (rateInfo: CodexRateLimitInfo): string =>
   [
     codexAdditionalWindowSortKey(rateInfo.primary_window ?? rateInfo.primaryWindow),
     codexAdditionalWindowSortKey(rateInfo.secondary_window ?? rateInfo.secondaryWindow),
+    rateInfo.allowed === undefined ? '' : String(rateInfo.allowed),
+    String(rateInfo.limit_reached === true || rateInfo.limitReached === true),
   ].join('|');
 
 const mainCodexQuotaScope = (): QuotaModelScope => ({
@@ -267,12 +207,120 @@ export const canonicalizeCodexProviderWindowId = (value: string, windowKind?: st
   if (id === 'secondary') return normalizedWindowKind === 'monthly' ? 'monthly' : 'weekly';
   for (const prefix of CODEX_SPARK_PROVIDER_WINDOW_PREFIXES) {
     if (id === prefix) return CODEX_SPARK_PROVIDER_WINDOW_PREFIX;
-    const suffix = codexGeneratedAdditionalSuffixAfterPrefix(id, prefix);
-    if (suffix !== null) {
-      return `${CODEX_SPARK_PROVIDER_WINDOW_PREFIX}${suffix}`;
+    if (id.startsWith(`${prefix}-`)) {
+      return `${CODEX_SPARK_PROVIDER_WINDOW_PREFIX}${id.slice(prefix.length)}`;
     }
   }
   return id;
+};
+
+export type CodexQuotaCycleEvidence = {
+  providerWindowId?: string | null;
+  endMs?: number | null;
+  durationSeconds?: number | null;
+  boundaryAccuracy?: 'exact' | 'derived' | 'estimated' | 'unknown' | null;
+};
+
+type CodexQuotaCadenceClass = 'five_hour' | 'weekly' | 'monthly';
+
+const normalizeCodexProviderWindowToken = (value: string): string => value.trim().toLowerCase();
+
+const inferCodexCadenceToken = (
+  value: string | null | undefined
+): CodexQuotaCadenceClass | null => {
+  const id = normalizeCodexProviderWindowToken(value ?? '');
+  const match = id.match(/(?:^|-)(five-hour|weekly|monthly)(?:-\d+)?$/);
+  switch (match?.[1]) {
+    case 'five-hour':
+      return 'five_hour';
+    case 'weekly':
+      return 'weekly';
+    case 'monthly':
+      return 'monthly';
+    default:
+      return null;
+  }
+};
+
+const isFinitePositive = (value: number | null | undefined): value is number =>
+  typeof value === 'number' && Number.isFinite(value) && value > 0;
+
+const codexQuotaCadenceClass = (
+  evidence: CodexQuotaCycleEvidence
+): CodexQuotaCadenceClass | null => {
+  const durationSeconds = evidence.durationSeconds;
+  if (isFinitePositive(durationSeconds)) {
+    if (Math.abs(durationSeconds - FIVE_HOUR_SECONDS) <= CODEX_QUOTA_BOUNDARY_JITTER_MS / 1000) {
+      return 'five_hour';
+    }
+    if (Math.abs(durationSeconds - WEEK_SECONDS) <= CODEX_QUOTA_BOUNDARY_JITTER_MS / 1000) {
+      return 'weekly';
+    }
+    if (durationSeconds >= MIN_MONTH_SECONDS && durationSeconds <= MAX_MONTH_SECONDS) {
+      return 'monthly';
+    }
+  }
+
+  const providerWindowId = evidence.providerWindowId?.trim().toLowerCase() ?? '';
+  const canonicalID = providerWindowId ? canonicalizeCodexProviderWindowId(providerWindowId) : '';
+  return inferCodexCadenceToken(canonicalID);
+};
+
+const readCodexCycleDurationMs = (evidence: CodexQuotaCycleEvidence): number | null => {
+  if (!isFinitePositive(evidence.durationSeconds)) return null;
+  const durationMs = evidence.durationSeconds * 1000;
+  return Number.isFinite(durationMs) && durationMs > 0 ? durationMs : null;
+};
+
+const isCodexCadenceDelta = (deltaMs: number, cadenceMs: number): boolean => {
+  const cycleCount = Math.round(deltaMs / cadenceMs);
+  return (
+    cycleCount >= 1 && Math.abs(deltaMs - cycleCount * cadenceMs) <= CODEX_QUOTA_BOUNDARY_JITTER_MS
+  );
+};
+
+/**
+ * Returns true only when newer Codex window evidence proves that an inherited
+ * quota percentage belongs to an older cycle. Boundary jitter and uncertain
+ * forward movement remain compatible so metadata-only observations do not
+ * erase usable quota evidence.
+ */
+export const shouldClearInheritedCodexQuotaProgress = (
+  active: CodexQuotaCycleEvidence,
+  observed: CodexQuotaCycleEvidence
+): boolean => {
+  const activeClass = codexQuotaCadenceClass(active);
+  const observedClass = codexQuotaCadenceClass(observed);
+  const activeDurationMs = readCodexCycleDurationMs(active);
+  const observedDurationMs = readCodexCycleDurationMs(observed);
+
+  if (activeClass !== null && observedClass !== null && activeClass !== observedClass) {
+    return true;
+  }
+
+  const activeEndMs = active.endMs;
+  const observedEndMs = observed.endMs;
+  if (!isFinitePositive(activeEndMs) || !isFinitePositive(observedEndMs)) return false;
+
+  const deltaMs = observedEndMs - activeEndMs;
+  if (deltaMs < -CODEX_QUOTA_BOUNDARY_JITTER_MS) return true;
+  if (Math.abs(deltaMs) <= CODEX_QUOTA_BOUNDARY_JITTER_MS) return false;
+
+  const cadenceMs =
+    activeDurationMs ??
+    observedDurationMs ??
+    (activeClass === 'five_hour' || observedClass === 'five_hour'
+      ? FIVE_HOUR_SECONDS * 1000
+      : activeClass === 'weekly' || observedClass === 'weekly'
+        ? WEEK_SECONDS * 1000
+        : null);
+  if (cadenceMs !== null && isCodexCadenceDelta(deltaMs, cadenceMs)) return true;
+
+  if (activeClass === 'monthly' && observedClass === 'monthly') {
+    return deltaMs >= MIN_MONTH_SECONDS * 1000 - CODEX_QUOTA_BOUNDARY_JITTER_MS;
+  }
+
+  return observed.boundaryAccuracy === 'exact' || observed.boundaryAccuracy === 'derived';
 };
 
 export type CodexProviderWindowIdentity = {
@@ -280,16 +328,10 @@ export type CodexProviderWindowIdentity = {
   providerWindowAliases?: string[];
 };
 
-const normalizeCodexProviderWindowToken = (value: string): string => value.trim().toLowerCase();
-
 const inferCodexProviderWindowKind = (value: string): string | undefined => {
   const id = normalizeCodexProviderWindowToken(value);
-  if (id === 'primary' || id === 'five-hour' || /(?:^|-)five-hour(?:-|$)/.test(id)) {
-    return 'five_hour';
-  }
-  if (id === 'weekly' || /(?:^|-)weekly(?:-|$)/.test(id)) return 'weekly';
-  if (id === 'monthly' || /(?:^|-)monthly(?:-|$)/.test(id)) return 'monthly';
-  return undefined;
+  if (id === 'primary') return 'five_hour';
+  return inferCodexCadenceToken(id) ?? undefined;
 };
 
 const codexProviderWindowIdsEquivalent = (left: string, right: string): boolean => {
@@ -312,9 +354,9 @@ const codexProviderWindowIdsEquivalent = (left: string, right: string): boolean 
   );
 };
 
-export const CODEX_AMBIGUOUS_PROVIDER_WINDOW_ALIASES = new Set(['secondary']);
+const CODEX_AMBIGUOUS_PROVIDER_WINDOW_ALIASES = new Set(['secondary']);
 
-export const providerWindowAliasMatches = (
+const providerWindowAliasMatches = (
   active: CodexProviderWindowIdentity,
   observed: CodexProviderWindowIdentity
 ): string[] => {
@@ -397,8 +439,17 @@ export const findCodexProviderWindowMatch = (
   return candidate.index;
 };
 
-const isCodexSparkProviderWindowId = (value: string): boolean =>
-  isCodexSparkCompatibilityProviderWindowId(value);
+const isCodexSparkProviderWindowId = (value: string): boolean => {
+  const raw = value.trim().toLowerCase();
+  const id = canonicalizeCodexProviderWindowId(raw);
+  return (
+    id === CODEX_SPARK_PROVIDER_WINDOW_PREFIX ||
+    id.startsWith(`${CODEX_SPARK_PROVIDER_WINDOW_PREFIX}-`) ||
+    CODEX_SPARK_LEGACY_PROVIDER_WINDOW_PREFIXES.some(
+      (prefix) => raw === prefix || raw.startsWith(`${prefix}-`)
+    )
+  );
+};
 
 export const isCodexMainQuotaModelScope = (scope: QuotaModelScope | null | undefined): boolean =>
   scope?.kind === 'family' &&
@@ -439,29 +490,9 @@ const codexMainProviderWindowAliases = (
   }
 };
 
-const CODEX_MAIN_GENERIC_WINDOW_ID = /^window-(?:unknown|[0-9]+|[0-9]+[dhs])-[0-9]+$/;
-const CODEX_CODE_REVIEW_PROVIDER_WINDOW_IDS = new Set([
-  'code-review',
-  'code-review-five-hour',
-  'code-review-weekly',
-  'code-review-monthly',
-]);
-const CODEX_CODE_REVIEW_GENERIC_WINDOW_ID =
-  /^code-review-window-(?:unknown|[0-9]+|[0-9]+[dhs])-[0-9]+$/;
-
 export const isCodexMainProviderWindowId = (providerWindowId: string): boolean => {
   const id = canonicalizeCodexProviderWindowId(providerWindowId);
-  return CODEX_MAIN_PROVIDER_WINDOW_IDS.has(id) || CODEX_MAIN_GENERIC_WINDOW_ID.test(id);
-};
-
-// Only the canonical top-level Code Review identities count as the known Code
-// Review quota. Generated family windows such as `code-review-weekly-0` belong
-// to an ordinary metered_feature=code_review Additional family.
-export const isCodexCodeReviewProviderWindowId = (providerWindowId: string): boolean => {
-  const id = providerWindowId.trim().toLowerCase();
-  return (
-    CODEX_CODE_REVIEW_PROVIDER_WINDOW_IDS.has(id) || CODEX_CODE_REVIEW_GENERIC_WINDOW_ID.test(id)
-  );
+  return CODEX_MAIN_PROVIDER_WINDOW_IDS.has(id) || id.startsWith('window-');
 };
 
 export const isCodexLegacyAllScopeReplacement = (
@@ -513,26 +544,22 @@ export const resolveCodexAdditionalQuotaScope = (
         ...CODEX_SPARK_LEGACY_PROVIDER_WINDOW_PREFIXES,
       ]),
       labelName: limitName ?? meteredFeature ?? CODEX_SPARK_MODEL_ID,
+      scopeDisplayName: limitName ?? meteredFeature ?? undefined,
     };
   }
 
   const anonymousIdentity = anonymousCodexAdditionalIdentity(limitItem);
   const key =
     featureKey || nameKey || normalizeFeatureKey(anonymousIdentity) || 'additional_unknown';
-  const providerWindowIdPrefix =
-    normalizeWindowId(meteredFeature ?? '') ||
-    normalizeWindowId(limitName ?? '') ||
-    normalizeWindowId(anonymousIdentity) ||
-    'additional-unknown';
-  const legacyProviderWindowIdPrefixes = featureKey
-    ? normalizedUniqueWindowIds([limitName ?? '']).filter(
-        (prefix) => prefix !== providerWindowIdPrefix
-      )
-    : normalizedUniqueWindowIds([limitName ?? '']);
+  const conflictingKnownName = Boolean(featureKey && CODEX_SPARK_QUOTA_IDENTIFIERS.has(nameKey));
   return {
     modelScope: incompleteCodexFeatureScope(key),
-    providerWindowIdPrefix,
-    legacyProviderWindowIdPrefixes,
+    providerWindowIdPrefix:
+      (conflictingKnownName ? normalizeWindowId(meteredFeature ?? '') : '') ||
+      normalizeWindowId(limitName ?? '') ||
+      normalizeWindowId(meteredFeature ?? '') ||
+      normalizeWindowId(anonymousIdentity) ||
+      'additional-unknown',
     labelName: limitName ?? meteredFeature ?? anonymousIdentity,
     scopeDisplayName: limitName ?? meteredFeature ?? undefined,
   };
@@ -568,14 +595,14 @@ export const resolveCodexUsageQuotaScope = (
 export const inferCodexQuotaScopeFromProviderWindowId = (
   providerWindowId: string
 ): QuotaModelScope => {
-  if (isCodexSparkProviderWindowId(providerWindowId)) {
-    return sparkCodexQuotaScope();
-  }
   const id = canonicalizeCodexProviderWindowId(providerWindowId);
   if (isCodexMainProviderWindowId(id)) {
     return mainCodexQuotaScope();
   }
-  if (isCodexCodeReviewProviderWindowId(id)) {
+  if (isCodexSparkProviderWindowId(providerWindowId)) {
+    return sparkCodexQuotaScope();
+  }
+  if (id === 'code-review' || id.startsWith('code-review-')) {
     return incompleteCodexFeatureScope(CODEX_CODE_REVIEW_SCOPE_KEY);
   }
   const familyMatch = id.match(/^(.*)-(?:five-hour|weekly|monthly)-(\d+)$/);
@@ -583,9 +610,18 @@ export const inferCodexQuotaScopeFromProviderWindowId = (
   return incompleteCodexFeatureScope(familyMatch?.[1] ?? genericMatch?.[1] ?? id);
 };
 
-export const isCodexKnownScopedProviderWindowId = (providerWindowId: string): boolean =>
-  isCodexSparkProviderWindowId(providerWindowId) ||
-  isCodexCodeReviewProviderWindowId(providerWindowId);
+export const isCodexKnownScopedProviderWindowId = (providerWindowId: string): boolean => {
+  const raw = providerWindowId.trim().toLowerCase();
+  const id = canonicalizeCodexProviderWindowId(raw);
+  return (
+    isCodexSparkProviderWindowId(raw) ||
+    id === 'code-review' ||
+    id.startsWith('code-review-') ||
+    CODEX_SPARK_LEGACY_PROVIDER_WINDOW_PREFIXES.some(
+      (prefix) => raw === prefix || raw.startsWith(`${prefix}-`)
+    )
+  );
+};
 
 const formatWindowDuration = (seconds: number | null): string => {
   if (seconds === null || seconds <= 0) return 'unknown';
@@ -600,102 +636,6 @@ const formatWindowDuration = (seconds: number | null): string => {
     return `${hours}h`;
   }
   return `${seconds}s`;
-};
-
-export type CodexQuotaWindowLabelMetadata = {
-  labelKey: string;
-  labelParams?: Record<string, string | number>;
-};
-
-const normalizeCodexQuotaWindowKind = (value: string): string =>
-  value.trim().toLowerCase().replace(/-/g, '_');
-
-const additionalQuotaWindowLabelMetadata = (
-  windowKind: string,
-  scopeDisplayName: string,
-  durationSeconds?: number | null
-): CodexQuotaWindowLabelMetadata => {
-  const params = { name: scopeDisplayName };
-  switch (normalizeCodexQuotaWindowKind(windowKind)) {
-    case 'five_hour':
-      return { labelKey: 'codex_quota.additional_primary_window', labelParams: params };
-    case 'weekly':
-      return { labelKey: 'codex_quota.additional_secondary_window', labelParams: params };
-    case 'monthly':
-      return { labelKey: 'codex_quota.additional_monthly_window', labelParams: params };
-    default:
-      return {
-        labelKey: 'codex_quota.additional_generic_window',
-        labelParams: {
-          ...params,
-          duration: formatWindowDuration(normalizeNumberValue(durationSeconds)),
-        },
-      };
-  }
-};
-
-/**
- * Returns the same label metadata used by live Codex quota windows when a
- * persisted snapshot has to reconstruct a scoped label without live state.
- * Canonical Code Review and Spark identities are resolved independently from
- * provider-derived dynamic display metadata.
- */
-export const resolveCodexSnapshotQuotaLabel = ({
-  providerWindowId,
-  windowKind,
-  modelScope,
-  scopeDisplayName,
-  durationSeconds,
-}: {
-  providerWindowId: string;
-  windowKind: string;
-  modelScope?: QuotaModelScope;
-  scopeDisplayName?: string;
-  durationSeconds?: number | null;
-}): CodexQuotaWindowLabelMetadata | undefined => {
-  const id = canonicalizeCodexProviderWindowId(providerWindowId, windowKind);
-  const normalizedKind = normalizeCodexQuotaWindowKind(windowKind);
-  const codeReviewLabelKeys: Record<string, string> = {
-    five_hour: 'codex_quota.code_review_primary_window',
-    weekly: 'codex_quota.code_review_secondary_window',
-    monthly: 'codex_quota.code_review_monthly_window',
-  };
-  // Provider-window string semantics only apply when the persisted scope is
-  // legacy `all`, unknown, or missing. An explicit scoped identity always
-  // wins, even when its provider ID resembles a known window name.
-  const normalizedScopeKey = modelScope?.key?.trim().toLowerCase() ?? '';
-  const isLegacyOrUnknownScope =
-    !modelScope ||
-    modelScope.kind === 'all' ||
-    (modelScope.kind === 'models' && (modelScope.models?.length ?? 0) === 0) ||
-    (modelScope.kind === 'feature' &&
-      (normalizedScopeKey === '' ||
-        normalizedScopeKey === 'scope_unknown' ||
-        normalizedScopeKey === CODEX_UNKNOWN_REQUEST_SCOPE_KEY));
-  const isExplicitCodeReviewScope = normalizedScopeKey === CODEX_CODE_REVIEW_SCOPE_KEY;
-
-  if (
-    isCodexCodeReviewProviderWindowId(id) &&
-    (isLegacyOrUnknownScope || isExplicitCodeReviewScope)
-  ) {
-    if (id.startsWith('code-review-window-')) {
-      return {
-        labelKey: 'codex_quota.code_review_generic_window',
-        labelParams: { duration: formatWindowDuration(normalizeNumberValue(durationSeconds)) },
-      };
-    }
-    const labelKey = codeReviewLabelKeys[normalizedKind];
-    if (labelKey) return { labelKey };
-  }
-  if (isCodexSparkModelScope(modelScope)) {
-    return additionalQuotaWindowLabelMetadata(windowKind, 'Spark', durationSeconds);
-  }
-  if (isLegacyOrUnknownScope && isCodexSparkProviderWindowId(providerWindowId)) {
-    return additionalQuotaWindowLabelMetadata(windowKind, 'Spark', durationSeconds);
-  }
-  const dynamicName = scopeDisplayName?.trim();
-  if (!dynamicName) return undefined;
-  return additionalQuotaWindowLabelMetadata(windowKind, dynamicName, durationSeconds);
 };
 
 const hasExplicitWindowSeconds = (window?: CodexUsageWindow | null): boolean =>
@@ -811,8 +751,7 @@ const addCodexWindowInfo = (
   allowed?: boolean,
   observedAtMs = Date.now(),
   source: CodexQuotaResetSource = 'provider_api',
-  scopeDisplayName?: string,
-  identityAmbiguous = false
+  scopeDisplayName?: string
 ) => {
   if (!window) return;
 
@@ -821,27 +760,21 @@ const addCodexWindowInfo = (
   const usedPercentRaw = getCodexQuotaWindowUsedPercent(window);
   const isLimitReached = Boolean(limitReached) || allowed === false;
   const usedPercent = usedPercentRaw ?? (isLimitReached && resetLabel !== '-' ? 100 : null);
-  const aliases = identityAmbiguous
-    ? []
-    : Array.from(
-        new Set([
-          ...(providerWindowAliases ?? []),
-          ...codexMainProviderWindowAliases(id, modelScope),
-        ])
-      ).sort();
+  const aliases = Array.from(
+    new Set([...(providerWindowAliases ?? []), ...codexMainProviderWindowAliases(id, modelScope)])
+  ).sort();
 
   windows.push({
     id,
     labelKey,
     labelParams,
+    scopeDisplayName: scopeDisplayName?.trim() || undefined,
     usedPercent,
     resetLabel,
     resetAtMs: reset.resetAtMs,
     resetAccuracy: reset.resetAccuracy,
     limitWindowSeconds: getWindowSeconds(window),
     modelScope,
-    ...(scopeDisplayName ? { scopeDisplayName } : {}),
-    ...(identityAmbiguous ? { identityAmbiguous: true } : {}),
     ...(aliases.length ? { providerWindowAliases: aliases } : {}),
   });
 };
@@ -860,11 +793,10 @@ const addCodexRateLimitWindows = (
     source?: CodexQuotaResetSource;
     genericIdPrefix?: string;
     modelScope: QuotaModelScope;
+    scopeDisplayName?: string;
     providerWindowAliasesById?: ReadonlyMap<string, string[]>;
     providerWindowAliasPrefixes?: string[];
     providerWindowAliasBasePrefix?: string;
-    scopeDisplayName?: string;
-    identityAmbiguous?: boolean;
   }
 ) => {
   const limitReached = limitInfo?.limit_reached ?? limitInfo?.limitReached;
@@ -895,8 +827,7 @@ const addCodexRateLimitWindows = (
     allowed,
     options?.observedAtMs,
     options?.source,
-    options?.scopeDisplayName,
-    options?.identityAmbiguous
+    options?.scopeDisplayName
   );
   if (classified.fiveHourWindow) added.add(classified.fiveHourWindow);
   addCodexWindowInfo(
@@ -911,8 +842,7 @@ const addCodexRateLimitWindows = (
     allowed,
     options?.observedAtMs,
     options?.source,
-    options?.scopeDisplayName,
-    options?.identityAmbiguous
+    options?.scopeDisplayName
   );
   if (classified.weeklyWindow) added.add(classified.weeklyWindow);
   addCodexWindowInfo(
@@ -927,8 +857,7 @@ const addCodexRateLimitWindows = (
     allowed,
     options?.observedAtMs,
     options?.source,
-    options?.scopeDisplayName,
-    options?.identityAmbiguous
+    options?.scopeDisplayName
   );
   if (classified.monthlyWindow) added.add(classified.monthlyWindow);
 
@@ -936,7 +865,7 @@ const addCodexRateLimitWindows = (
     if (added.has(window)) return;
     const seconds = getWindowSeconds(window);
     const duration = formatWindowDuration(seconds);
-    const genericIdPrefix = normalizeCodexProviderWindowPrefix(options?.genericIdPrefix ?? '');
+    const genericIdPrefix = normalizeWindowId(options?.genericIdPrefix ?? '');
     addCodexWindowInfo(
       windows,
       `${genericIdPrefix ? `${genericIdPrefix}-` : ''}window-${duration}-${index}`,
@@ -951,8 +880,7 @@ const addCodexRateLimitWindows = (
       allowed,
       options?.observedAtMs,
       options?.source,
-      options?.scopeDisplayName,
-      options?.identityAmbiguous
+      options?.scopeDisplayName
     );
   });
 };
@@ -970,11 +898,11 @@ const addAdditionalRateLimitWindows = (
     const meteredFeature = normalizeStringValue(
       limitItem?.metered_feature ?? limitItem?.meteredFeature
     );
-    const rawLimitName = normalizeStringValue(limitItem?.limit_name ?? limitItem?.limitName);
-    const limitName = rawLimitName ?? meteredFeature ?? `additional-${index + 1}`;
-    const nameIdPrefix = normalizeWindowId(rawLimitName ?? '');
-    const legacyBaseIdPrefix = nameIdPrefix;
-    const anonymousIdentity = anonymousCodexAdditionalIdentity(limitItem);
+    const limitName =
+      normalizeStringValue(limitItem?.limit_name ?? limitItem?.limitName) ??
+      meteredFeature ??
+      `additional-${index + 1}`;
+    const legacyBaseIdPrefix = normalizeWindowId(limitName) || `additional-${index + 1}`;
     const scopeResolution = resolveCodexAdditionalQuotaScope(limitItem);
     return [
       {
@@ -988,162 +916,60 @@ const addAdditionalRateLimitWindows = (
           normalizeWindowId(limitName) ||
           `additional-${index + 1}`,
         featureIdPrefix: normalizeWindowId(meteredFeature ?? ''),
-        nameIdPrefix,
-        structuralIdPrefix: normalizeWindowId(anonymousIdentity),
         legacyBaseIdPrefix,
         sortKey: codexAdditionalRateLimitSortKey(rateInfo),
         legacyIdPrefixes: scopeResolution.legacyProviderWindowIdPrefixes ?? [],
       },
     ];
   });
-  const featureGroups = new Map<string, typeof families>();
-  families.forEach((family) => {
-    if (!family.featureIdPrefix || family.modelScope.kind !== 'feature') return;
-    const group = featureGroups.get(family.featureIdPrefix) ?? [];
-    group.push(family);
-    featureGroups.set(family.featureIdPrefix, group);
+  const baseIdPrefixCounts = new Map<string, number>();
+  const legacyBaseIdPrefixCounts = new Map<string, number>();
+  families.forEach(({ baseIdPrefix }) => {
+    baseIdPrefixCounts.set(baseIdPrefix, (baseIdPrefixCounts.get(baseIdPrefix) ?? 0) + 1);
   });
-  const fallbackNameCounts = new Map<string, number>();
-  const fallbackPairCounts = new Map<string, number>();
-  families.forEach((family) => {
-    if (family.featureIdPrefix || family.modelScope.kind !== 'feature') return;
-    fallbackNameCounts.set(
-      family.nameIdPrefix,
-      (fallbackNameCounts.get(family.nameIdPrefix) ?? 0) + 1
+  families.forEach(({ legacyBaseIdPrefix }) => {
+    legacyBaseIdPrefixCounts.set(
+      legacyBaseIdPrefix,
+      (legacyBaseIdPrefixCounts.get(legacyBaseIdPrefix) ?? 0) + 1
     );
-    const pairKey = `${family.nameIdPrefix}\0${family.structuralIdPrefix}`;
-    fallbackPairCounts.set(pairKey, (fallbackPairCounts.get(pairKey) ?? 0) + 1);
   });
-
-  const countFamilyPrefix = (
-    group: typeof families,
-    selector: (candidate: (typeof families)[number]) => string,
-    featurePrefix: string
-  ): Map<string, number> => {
-    const counts = new Map<string, number>();
-    group.forEach((candidate) => {
-      const prefix = selector(candidate);
-      if (prefix && prefix !== featurePrefix) {
-        counts.set(prefix, (counts.get(prefix) ?? 0) + 1);
-      }
-    });
-    return counts;
-  };
-
-  const resolvedFamilies = families.map((family) => {
-    const featureGroup = family.featureIdPrefix
-      ? (featureGroups.get(family.featureIdPrefix) ?? [])
-      : [];
-    const collisionMode = featureGroup.length > 1;
-
-    let idPrefix = '';
-    let identityAmbiguous = false;
-    const legacyIdPrefixes = [...family.legacyIdPrefixes];
-
-    if (!family.featureIdPrefix && family.modelScope.kind === 'feature') {
-      const nameCount = fallbackNameCounts.get(family.nameIdPrefix) ?? 0;
-      if (!family.nameIdPrefix) {
-        const structCount = fallbackPairCounts.get(`\0${family.structuralIdPrefix}`) ?? 0;
-        if (structCount > 1) {
-          identityAmbiguous = true;
-          idPrefix = `${CODEX_AMBIGUOUS_PROVIDER_WINDOW_PREFIX}${family.structuralIdPrefix}`;
-          legacyIdPrefixes.length = 0;
-        } else {
-          identityAmbiguous = false;
-          idPrefix = family.structuralIdPrefix;
-        }
-      } else if (nameCount > 1) {
-        const pairKey = `${family.nameIdPrefix}\0${family.structuralIdPrefix}`;
-        if ((fallbackPairCounts.get(pairKey) ?? 0) > 1) {
-          identityAmbiguous = true;
-          idPrefix = `${CODEX_AMBIGUOUS_PROVIDER_WINDOW_PREFIX}${family.nameIdPrefix}`;
-          legacyIdPrefixes.length = 0;
-        } else {
-          identityAmbiguous = false;
-          idPrefix = `${family.nameIdPrefix}--${family.structuralIdPrefix}`;
-          if (family.nameIdPrefix !== idPrefix) {
-            legacyIdPrefixes.push(family.nameIdPrefix);
-          }
-        }
-      } else {
-        identityAmbiguous = false;
-        idPrefix = family.baseIdPrefix;
-        if (family.nameIdPrefix && family.nameIdPrefix !== idPrefix) {
-          legacyIdPrefixes.push(family.nameIdPrefix);
-        }
-      }
-    } else if (collisionMode) {
-      const collisionNameCounts = countFamilyPrefix(
-        featureGroup,
-        (candidate) => candidate.nameIdPrefix,
-        family.featureIdPrefix
-      );
-      const structuralCounts = countFamilyPrefix(
-        featureGroup,
-        (candidate) => candidate.structuralIdPrefix,
-        family.featureIdPrefix
-      );
-
-      if (
-        family.nameIdPrefix &&
-        family.nameIdPrefix !== family.featureIdPrefix &&
-        collisionNameCounts.get(family.nameIdPrefix) === 1
-      ) {
-        identityAmbiguous = false;
-        idPrefix = family.nameIdPrefix;
-      } else if (
-        family.structuralIdPrefix &&
-        family.structuralIdPrefix !== family.featureIdPrefix &&
-        structuralCounts.get(family.structuralIdPrefix) === 1
-      ) {
-        identityAmbiguous = false;
-        if (family.nameIdPrefix && family.nameIdPrefix !== family.structuralIdPrefix) {
-          idPrefix = `${family.nameIdPrefix}--${family.structuralIdPrefix}`;
-          legacyIdPrefixes.push(family.nameIdPrefix);
-        } else {
-          idPrefix = family.structuralIdPrefix;
-        }
-      } else {
-        identityAmbiguous = true;
-        idPrefix = `${CODEX_AMBIGUOUS_PROVIDER_WINDOW_PREFIX}${family.featureIdPrefix}`;
-        legacyIdPrefixes.length = 0;
-      }
-    } else {
-      identityAmbiguous = false;
-      idPrefix = family.baseIdPrefix;
-      if (family.nameIdPrefix && family.nameIdPrefix !== idPrefix) {
-        legacyIdPrefixes.push(family.nameIdPrefix);
-      }
-    }
-
-    return { ...family, idPrefix, collisionMode, identityAmbiguous, legacyIdPrefixes };
-  });
-
-  const ambiguousOrdinals = new Map<number, number>();
-  const ambiguousPrefixCounts = new Map<string, number>();
+  const resolvedFamilies = families.map((family) => ({
+    ...family,
+    idPrefix:
+      (baseIdPrefixCounts.get(family.baseIdPrefix) ?? 0) > 1 &&
+      family.featureIdPrefix &&
+      family.featureIdPrefix !== family.baseIdPrefix
+        ? `${family.baseIdPrefix}--${family.featureIdPrefix}`
+        : family.baseIdPrefix,
+    legacyIdPrefixes: [
+      ...family.legacyIdPrefixes,
+      (legacyBaseIdPrefixCounts.get(family.legacyBaseIdPrefix) ?? 0) > 1 &&
+      family.featureIdPrefix &&
+      family.featureIdPrefix !== family.legacyBaseIdPrefix
+        ? `${family.legacyBaseIdPrefix}--${family.featureIdPrefix}`
+        : family.legacyBaseIdPrefix,
+    ],
+  }));
+  const familiesByIdPrefix = new Map<string, typeof resolvedFamilies>();
   resolvedFamilies.forEach((family) => {
-    if (!family.identityAmbiguous) return;
-    const count = ambiguousPrefixCounts.get(family.idPrefix) ?? 0;
-    ambiguousOrdinals.set(family.sourceIndex, count);
-    ambiguousPrefixCounts.set(family.idPrefix, count + 1);
+    const group = familiesByIdPrefix.get(family.idPrefix) ?? [];
+    group.push(family);
+    familiesByIdPrefix.set(family.idPrefix, group);
   });
-
+  const familyIndexes = new Map<number, number>();
+  familiesByIdPrefix.forEach((group) => {
+    [...group]
+      .sort((left, right) => {
+        if (left.sortKey !== right.sortKey) return left.sortKey.localeCompare(right.sortKey);
+        return left.sourceIndex - right.sourceIndex;
+      })
+      .forEach((family, familyIndex) => familyIndexes.set(family.sourceIndex, familyIndex));
+  });
   resolvedFamilies.forEach(
-    ({
-      sourceIndex,
-      rateInfo,
-      limitName,
-      modelScope,
-      scopeDisplayName,
-      idPrefix,
-      collisionMode,
-      featureIdPrefix,
-      legacyIdPrefixes,
-      identityAmbiguous,
-    }) => {
-      const localOrdinal = identityAmbiguous ? (ambiguousOrdinals.get(sourceIndex) ?? 0) : 0;
+    ({ sourceIndex, rateInfo, limitName, modelScope, scopeDisplayName, idPrefix, legacyIdPrefixes }) => {
+      const familyIndex = familyIndexes.get(sourceIndex) ?? 0;
       const aliasPrefixes = normalizedUniqueWindowIds(legacyIdPrefixes).filter(
-        (prefix) => prefix !== idPrefix && (!collisionMode || prefix !== featureIdPrefix)
+        (prefix) => prefix !== idPrefix
       );
       const providerWindowAliasesById = new Map<string, string[]>();
       const addAliases = (id: string) => {
@@ -1154,28 +980,24 @@ const addAdditionalRateLimitWindows = (
           aliasPrefixes.map((prefix) => `${prefix}${suffix}`)
         );
       };
-      const fiveHourId = `${idPrefix}-five-hour-${localOrdinal}`;
-      const weeklyId = `${idPrefix}-weekly-${localOrdinal}`;
-      const monthlyId = `${idPrefix}-monthly-${localOrdinal}`;
-      if (!identityAmbiguous) {
-        addAliases(fiveHourId);
-        addAliases(weeklyId);
-        addAliases(monthlyId);
-      }
+      const fiveHourId = `${idPrefix}-five-hour-${familyIndex}`;
+      const weeklyId = `${idPrefix}-weekly-${familyIndex}`;
+      const monthlyId = `${idPrefix}-monthly-${familyIndex}`;
+      addAliases(fiveHourId);
+      addAliases(weeklyId);
+      addAliases(monthlyId);
       const classified = pickClassifiedWindows(rateInfo, { teamPlan: options?.teamPlan });
-      if (!identityAmbiguous) {
-        classified.windows.forEach((window, index) => {
-          if (
-            window === classified.fiveHourWindow ||
-            window === classified.weeklyWindow ||
-            window === classified.monthlyWindow
-          ) {
-            return;
-          }
-          const duration = formatWindowDuration(getWindowSeconds(window));
-          addAliases(`${idPrefix}-${localOrdinal}-window-${duration}-${index}`);
-        });
-      }
+      classified.windows.forEach((window, index) => {
+        if (
+          window === classified.fiveHourWindow ||
+          window === classified.weeklyWindow ||
+          window === classified.monthlyWindow
+        ) {
+          return;
+        }
+        const duration = formatWindowDuration(getWindowSeconds(window));
+        addAliases(`${idPrefix}-${familyIndex}-window-${duration}-${index}`);
+      });
 
       addCodexRateLimitWindows(
         windows,
@@ -1196,11 +1018,10 @@ const addAdditionalRateLimitWindows = (
         { name: limitName },
         {
           ...options,
-          genericIdPrefix: `${idPrefix}-${localOrdinal}`,
+          genericIdPrefix: `${idPrefix}-${familyIndex}`,
           modelScope,
-          providerWindowAliasesById,
           scopeDisplayName,
-          identityAmbiguous,
+          providerWindowAliasesById,
         }
       );
     }
@@ -1259,6 +1080,7 @@ export const buildCodexQuotaWindowInfos = (
       source,
       genericIdPrefix: scopedRateLimit ? `${rateLimitPrefix}-0` : undefined,
       modelScope: rateLimitScope.modelScope,
+      scopeDisplayName: rateLimitScope.scopeDisplayName,
       providerWindowAliasPrefixes: scopedRateLimit
         ? rateLimitScope.legacyProviderWindowIdPrefixes
         : undefined,

@@ -61,14 +61,13 @@ export interface AccountQuotaDisplayWindow {
   source?: AccountQuotaWindowSource;
   observationSource?: QuotaObservationSource;
   observedAtMs?: number | null;
+  quotaProgressObservedAtMs?: number | null;
   windowMode?: QuotaWindowMode;
   cycleStartMs?: number | null;
   cycleEndMs?: number | null;
   modelScope?: QuotaModelScope;
   scopeDisplayName?: string;
   providerWindowAliases?: string[];
-  identityAmbiguous?: boolean;
-  currentHidden?: boolean;
 }
 
 export type TranslateQuotaWindowLabel = (
@@ -312,6 +311,28 @@ export const buildQuotaWindowRange = (
   return { resetAtMs, fromMs, toMs };
 };
 
+const resolveQuotaProgressObservedAtMs = ({
+  usedPercent,
+  quotaProgressObservedAtMs,
+  observedAtMs,
+}: {
+  usedPercent: number | null;
+  quotaProgressObservedAtMs: number | null | undefined;
+  observedAtMs: number | null | undefined;
+}): number | null => {
+  if (typeof usedPercent !== 'number' || !Number.isFinite(usedPercent)) return null;
+  if (quotaProgressObservedAtMs !== undefined) {
+    return typeof quotaProgressObservedAtMs === 'number' &&
+      Number.isFinite(quotaProgressObservedAtMs) &&
+      quotaProgressObservedAtMs > 0
+      ? quotaProgressObservedAtMs
+      : null;
+  }
+  return typeof observedAtMs === 'number' && Number.isFinite(observedAtMs) && observedAtMs > 0
+    ? observedAtMs
+    : null;
+};
+
 export const buildAccountQuotaDisplayWindow = ({
   key,
   label,
@@ -328,13 +349,13 @@ export const buildAccountQuotaDisplayWindow = ({
   source,
   observationSource = 'api_query',
   observedAtMs = null,
+  quotaProgressObservedAtMs,
   windowMode,
   cycleStartMs,
   cycleEndMs,
   modelScope = { kind: 'all', complete: true },
   scopeDisplayName,
   providerWindowAliases,
-  identityAmbiguous,
   nowMs,
 }: {
   key: string;
@@ -352,13 +373,13 @@ export const buildAccountQuotaDisplayWindow = ({
   source?: AccountQuotaWindowSource;
   observationSource?: QuotaObservationSource;
   observedAtMs?: number | null;
+  quotaProgressObservedAtMs?: number | null;
   windowMode?: QuotaWindowMode;
   cycleStartMs?: number | null;
   cycleEndMs?: number | null;
   modelScope?: QuotaModelScope;
   scopeDisplayName?: string;
   providerWindowAliases?: string[];
-  identityAmbiguous?: boolean;
   nowMs?: number;
 }): AccountQuotaDisplayWindow => {
   const normalizedResetLabel = resetLabel || '-';
@@ -388,6 +409,7 @@ export const buildAccountQuotaDisplayWindow = ({
           resolvedKind === 'summary'
         ? 'non_window'
         : 'unknown');
+
   return {
     key,
     label,
@@ -403,13 +425,17 @@ export const buildAccountQuotaDisplayWindow = ({
     source,
     observationSource,
     observedAtMs,
+    quotaProgressObservedAtMs: resolveQuotaProgressObservedAtMs({
+      usedPercent,
+      quotaProgressObservedAtMs,
+      observedAtMs,
+    }),
     windowMode: resolvedMode,
     cycleStartMs: cycleStartMs ?? range.fromMs,
     cycleEndMs: cycleEndMs ?? range.resetAtMs,
     modelScope,
     scopeDisplayName,
     providerWindowAliases,
-    identityAmbiguous,
     ...range,
   };
 };
@@ -435,7 +461,6 @@ const buildCodexQuotaDisplayWindows = (
       modelScope: window.modelScope ?? inferCodexQuotaScopeFromProviderWindowId(window.id),
       scopeDisplayName: window.scopeDisplayName,
       providerWindowAliases: window.providerWindowAliases,
-      identityAmbiguous: window.identityAmbiguous,
       source: 'codex',
       observationSource:
         window.observationSource ??
@@ -443,6 +468,7 @@ const buildCodexQuotaDisplayWindows = (
           ? 'response_header'
           : 'api_query'),
       observedAtMs: window.observedAtMs ?? quota.observedAtMs ?? quota.fetchedAtMs ?? null,
+      quotaProgressObservedAtMs: window.quotaProgressObservedAtMs,
       nowMs: options.nowMs,
     })
   );

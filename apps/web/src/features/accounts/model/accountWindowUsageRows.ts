@@ -51,7 +51,6 @@ const isQuotaWindowDefinition = (
 ): window is AccountQuotaWindowDefinition => 'windowMode' in window;
 
 const hasQueryableModelScope = (definition: AccountQuotaWindowDefinition): boolean => {
-  if (definition.identityAmbiguous === true) return false;
   const scope = definition.modelScope;
   if (scope.complete === false) return false;
   if (scope.kind === 'all') return true;

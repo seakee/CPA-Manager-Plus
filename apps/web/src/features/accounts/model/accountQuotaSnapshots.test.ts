@@ -1,16 +1,25 @@
-import type { TFunction } from 'i18next';
 import { describe, expect, it } from 'vitest';
-import type { AccountQuotaSnapshotWindow } from '@/services/api/usageService';
+import type { TFunction } from 'i18next';
+import type {
+  AccountQuotaSnapshotCycle,
+  AccountQuotaSnapshotWindow,
+} from '@/services/api/usageService';
 import { CODEX_SPARK_MODEL_ID } from '@/utils/quota/codexQuota';
-import type { AccountQuotaWindowDefinition } from './accountQuotaWindowDefinitions';
-import { buildAccountWindowUsageTargetEntries } from './accountWindowUsageRows';
+import type {
+  AccountQuotaCycleDefinition,
+  AccountQuotaWindowDefinition,
+} from './accountQuotaWindowDefinitions';
 import {
   buildAccountQuotaSnapshotWriteEntries,
-  filterCurrentAccountQuotaWindowDefinitions,
   mergeCodexResetCreditsFromQuotaSnapshots,
   mergeAccountQuotaSnapshotWindows,
 } from './accountQuotaSnapshots';
 import type { AccountRow } from './accountRows';
+import {
+  buildAccountQuotaDisplayWindow,
+  type AccountQuotaDisplayWindow,
+} from './accountQuotaDisplayWindows';
+import { buildAccountQuotaWindowDefinitions } from './accountQuotaWindowDefinitions';
 
 const makeDefinition = (
   overrides: Partial<AccountQuotaWindowDefinition> = {}
@@ -24,6 +33,7 @@ const makeDefinition = (
   modelScope: { kind: 'all', complete: true },
   observationSource: 'api_query',
   observedAtMs: 10_000,
+  quotaProgressObservedAtMs: 10_000,
   boundaryAccuracy: 'exact',
   cycleStartMs: 1_000,
   cycleEndMs: 19_001_000,
@@ -44,6 +54,8 @@ const makeDefinition = (
     fromMs: 1_000,
     toMs: 10_000,
     source: 'codex',
+    observedAtMs: 10_000,
+    quotaProgressObservedAtMs: 10_000,
   },
   ...overrides,
 });
@@ -58,16 +70,49 @@ const makeSnapshot = (
   source: 'response_header',
   observed_at_ms: 20_000,
   boundary_accuracy: 'derived',
-  cycle_start_ms: 2_000,
-  cycle_end_ms: 20_002_000,
-  duration_seconds: 20_000,
+  cycle_start_ms: 1_000,
+  cycle_end_ms: 19_001_000,
+  duration_seconds: 19_000,
   used_percent: 35,
   remaining_percent: 65,
   stale: false,
   ...overrides,
 });
 
-const makeSnapshotTestRow = (provider: AccountRow['provider'] = 'antigravity'): AccountRow =>
+const makeSnapshotCycle = (
+  overrides: Partial<AccountQuotaSnapshotCycle> = {}
+): AccountQuotaSnapshotCycle => ({
+  id: 10,
+  activation_id: 1,
+  state: 'active',
+  scheduled_start_ms: 1_000,
+  scheduled_end_ms: 19_001_000,
+  actual_start_ms: 1_000,
+  duration_seconds: 19_000,
+  boundary_accuracy: 'exact',
+  forecast_eligible: true,
+  ...overrides,
+});
+
+const makeDefinitionCycle = (
+  overrides: Partial<AccountQuotaCycleDefinition> = {}
+): AccountQuotaCycleDefinition => ({
+  id: 10,
+  activationId: 1,
+  state: 'active',
+  scheduledStartMs: 1_000,
+  scheduledEndMs: 19_001_000,
+  actualStartMs: 1_000,
+  actualEndMs: null,
+  durationSeconds: 19_000,
+  boundaryAccuracy: 'exact',
+  endReason: '',
+  parentCycleId: null,
+  forecastEligible: true,
+  ...overrides,
+});
+
+const makeSnapshotRow = (provider: string = 'codex'): AccountRow =>
   ({
     selectionKey: `${provider}.json\u0000auth-1`,
     fileName: `${provider}.json`,
@@ -82,22 +127,6 @@ const makeSnapshotTestRow = (provider: AccountRow['provider'] = 'antigravity'): 
       account: 'user@example.com',
     },
   }) as unknown as AccountRow;
-
-const codexSnapshotT = ((key: string, options?: Record<string, string | number>) => {
-  const name = options?.name ?? '';
-  const duration = options?.duration ?? '';
-  const labels: Record<string, string> = {
-    'codex_quota.additional_primary_window': `${name} 5-hour limit`,
-    'codex_quota.additional_secondary_window': `${name} weekly limit`,
-    'codex_quota.additional_monthly_window': `${name} monthly limit`,
-    'codex_quota.additional_generic_window': `${name} ${duration} limit`,
-    'codex_quota.code_review_primary_window': 'Code review 5-hour limit',
-    'codex_quota.code_review_secondary_window': 'Code review weekly limit',
-    'codex_quota.code_review_monthly_window': 'Code review monthly limit',
-    'codex_quota.code_review_generic_window': `Code review ${duration} limit`,
-  };
-  return labels[key] ?? key;
-}) as TFunction;
 
 describe('account quota snapshots', () => {
   it('overlays server provenance, boundaries, scope, and stale state', () => {
@@ -116,6 +145,912 @@ describe('account quota snapshots', () => {
       boundaryAccuracy: 'derived',
       stale: true,
       modelScope: { kind: 'all', complete: true },
+    });
+  });
+
+  it('preserves quota progress provenance when a newer snapshot only provides metadata', () => {
+    const definition = makeDefinition({
+      observedAtMs: 1_000,
+      quotaProgressObservedAtMs: 1_000,
+      currentCycle: makeDefinitionCycle(),
+      remainingPercent: 50,
+      usedPercent: 50,
+      display: {
+        ...makeDefinition().display,
+        observedAtMs: 1_000,
+        quotaProgressObservedAtMs: 1_000,
+        remainingPercent: 50,
+        usedPercent: 50,
+      },
+    });
+    const [merged] = mergeAccountQuotaSnapshotWindows(
+      [definition],
+      [
+        makeSnapshot({
+          observed_at_ms: 2_000,
+          used_percent: undefined,
+          remaining_percent: undefined,
+          availability: 'active',
+          field_sources: {
+            quota: { source: 'response_header', observed_at_ms: 2_000 },
+          },
+          current_cycle: makeSnapshotCycle(),
+        }),
+      ]
+    );
+
+    expect(merged).toMatchObject({
+      observedAtMs: 2_000,
+      usedPercent: 50,
+      remainingPercent: 50,
+      quotaProgressObservedAtMs: 1_000,
+      display: {
+        observedAtMs: 2_000,
+        usedPercent: 50,
+        remainingPercent: 50,
+        quotaProgressObservedAtMs: 1_000,
+      },
+    });
+  });
+
+  it('uses field-level quota provenance for new snapshot progress', () => {
+    const snapshot = makeSnapshot({
+      observed_at_ms: 3_000,
+      used_percent: 60,
+      remaining_percent: 40,
+      field_sources: {
+        quota: { source: 'api_query', observed_at_ms: 2_000 },
+      },
+    });
+    const [merged] = mergeAccountQuotaSnapshotWindows(
+      [makeDefinition({ observedAtMs: 1_000, quotaProgressObservedAtMs: 1_000 })],
+      [snapshot]
+    );
+
+    expect(merged).toMatchObject({
+      observedAtMs: 3_000,
+      usedPercent: 60,
+      remainingPercent: 40,
+      quotaProgressObservedAtMs: 2_000,
+    });
+
+    const [snapshotOnly] = mergeAccountQuotaSnapshotWindows([], [snapshot]);
+    expect(snapshotOnly).toMatchObject({
+      usedPercent: 60,
+      remainingPercent: 40,
+      quotaProgressObservedAtMs: 2_000,
+      display: { quotaProgressObservedAtMs: 2_000 },
+    });
+  });
+
+  it.each([
+    { label: 'cycle id', id: 11, activationId: 1, cycle: { id: 11 } },
+    { label: 'activation id', id: 10, activationId: 2, cycle: { activation_id: 2 } },
+  ])(
+    'does not inherit quota across a different lifecycle $label',
+    ({ cycle, id, activationId }) => {
+      const [merged] = mergeAccountQuotaSnapshotWindows(
+        [
+          makeDefinition({
+            observedAtMs: 1_000,
+            usedPercent: 95,
+            remainingPercent: 5,
+            currentCycle: makeDefinitionCycle(),
+          }),
+        ],
+        [
+          makeSnapshot({
+            observed_at_ms: 2_000,
+            used_percent: undefined,
+            remaining_percent: undefined,
+            current_cycle: makeSnapshotCycle(cycle),
+          }),
+        ]
+      );
+
+      expect(merged).toMatchObject({
+        usedPercent: null,
+        remainingPercent: null,
+        quotaProgressObservedAtMs: null,
+        currentCycle: { id, activationId },
+      });
+    }
+  );
+
+  it('does not let an older different-cycle used snapshot supersede newer live quota', () => {
+    const definition = makeDefinition({
+      observedAtMs: 3_000,
+      quotaProgressObservedAtMs: 3_000,
+      usedPercent: 3,
+      remainingPercent: 97,
+      currentCycle: makeDefinitionCycle({ id: 11 }),
+      display: {
+        ...makeDefinition().display,
+        observedAtMs: 3_000,
+        quotaProgressObservedAtMs: 3_000,
+        usedPercent: 3,
+        remainingPercent: 97,
+      },
+    });
+    const [merged] = mergeAccountQuotaSnapshotWindows(
+      [definition],
+      [
+        makeSnapshot({
+          observed_at_ms: 2_000,
+          used_percent: 95,
+          remaining_percent: 5,
+          current_cycle: makeSnapshotCycle({ id: 10 }),
+        }),
+      ]
+    );
+
+    expect(merged).toBe(definition);
+    expect(merged).toMatchObject({
+      observedAtMs: 3_000,
+      usedPercent: 3,
+      remainingPercent: 97,
+      quotaProgressObservedAtMs: 3_000,
+      currentCycle: { id: 11 },
+    });
+  });
+
+  it('does not let an older different-cycle remaining snapshot clear newer live quota', () => {
+    const definition = makeDefinition({
+      observedAtMs: 3_000,
+      quotaProgressObservedAtMs: 3_000,
+      usedPercent: 3,
+      remainingPercent: 97,
+      currentCycle: makeDefinitionCycle({ id: 11 }),
+      display: {
+        ...makeDefinition().display,
+        observedAtMs: 3_000,
+        quotaProgressObservedAtMs: 3_000,
+        usedPercent: 3,
+        remainingPercent: 97,
+      },
+    });
+    const [merged] = mergeAccountQuotaSnapshotWindows(
+      [definition],
+      [
+        makeSnapshot({
+          observed_at_ms: 2_000,
+          used_percent: undefined,
+          remaining_percent: 40,
+          current_cycle: makeSnapshotCycle({ id: 10 }),
+        }),
+      ]
+    );
+
+    expect(merged).toBe(definition);
+    expect(merged).toMatchObject({
+      observedAtMs: 3_000,
+      usedPercent: 3,
+      remainingPercent: 97,
+      quotaProgressObservedAtMs: 3_000,
+      currentCycle: { id: 11 },
+    });
+  });
+
+  it('does not let an older different-cycle metadata snapshot clear newer live quota', () => {
+    const definition = makeDefinition({
+      observedAtMs: 3_000,
+      quotaProgressObservedAtMs: 3_000,
+      usedPercent: 3,
+      remainingPercent: 97,
+      currentCycle: makeDefinitionCycle({ id: 11 }),
+      display: {
+        ...makeDefinition().display,
+        observedAtMs: 3_000,
+        quotaProgressObservedAtMs: 3_000,
+        usedPercent: 3,
+        remainingPercent: 97,
+      },
+    });
+    const [merged] = mergeAccountQuotaSnapshotWindows(
+      [definition],
+      [
+        makeSnapshot({
+          observed_at_ms: 2_000,
+          used_percent: undefined,
+          remaining_percent: undefined,
+          current_cycle: makeSnapshotCycle({ id: 10 }),
+        }),
+      ]
+    );
+
+    expect(merged).toBe(definition);
+    expect(merged).toMatchObject({
+      observedAtMs: 3_000,
+      usedPercent: 3,
+      remainingPercent: 97,
+      quotaProgressObservedAtMs: 3_000,
+      currentCycle: { id: 11 },
+    });
+  });
+
+  it('does not let an older boundary-only cycle snapshot supersede newer live quota', () => {
+    const oldCycleStartMs = 1_700_000_000_000;
+    const oldCycleEndMs = oldCycleStartMs + 5 * 60 * 60 * 1000;
+    const newCycleStartMs = oldCycleEndMs;
+    const newCycleEndMs = newCycleStartMs + 5 * 60 * 60 * 1000;
+    const definition = makeDefinition({
+      observedAtMs: newCycleStartMs + 1_000,
+      quotaProgressObservedAtMs: newCycleStartMs + 1_000,
+      usedPercent: 3,
+      remainingPercent: 97,
+      cycleStartMs: newCycleStartMs,
+      cycleEndMs: newCycleEndMs,
+      durationSeconds: 18_000,
+      currentCycle: undefined,
+      display: {
+        ...makeDefinition().display,
+        observedAtMs: newCycleStartMs + 1_000,
+        quotaProgressObservedAtMs: newCycleStartMs + 1_000,
+        usedPercent: 3,
+        remainingPercent: 97,
+        resetAtMs: newCycleEndMs,
+      },
+    });
+    const [merged] = mergeAccountQuotaSnapshotWindows(
+      [definition],
+      [
+        makeSnapshot({
+          observed_at_ms: oldCycleStartMs + 1_000,
+          cycle_start_ms: oldCycleStartMs,
+          cycle_end_ms: oldCycleEndMs,
+          duration_seconds: 18_000,
+          used_percent: undefined,
+          remaining_percent: undefined,
+          current_cycle: undefined,
+        }),
+      ]
+    );
+
+    expect(merged).toBe(definition);
+    expect(merged).toMatchObject({
+      observedAtMs: newCycleStartMs + 1_000,
+      cycleStartMs: newCycleStartMs,
+      cycleEndMs: newCycleEndMs,
+      usedPercent: 3,
+      remainingPercent: 97,
+      quotaProgressObservedAtMs: newCycleStartMs + 1_000,
+    });
+  });
+
+  it('accepts new-cycle used quota without old-cycle freshness blocking it', () => {
+    const [merged] = mergeAccountQuotaSnapshotWindows(
+      [
+        makeDefinition({
+          observedAtMs: 3_000,
+          quotaProgressObservedAtMs: 2_000,
+          usedPercent: 95,
+          remainingPercent: 5,
+          currentCycle: makeDefinitionCycle(),
+        }),
+      ],
+      [
+        makeSnapshot({
+          observed_at_ms: 4_000,
+          used_percent: 3,
+          remaining_percent: 97,
+          field_sources: { quota: { source: 'api_query', observed_at_ms: 1_000 } },
+          current_cycle: makeSnapshotCycle({ id: 11 }),
+        }),
+      ]
+    );
+
+    expect(merged).toMatchObject({
+      usedPercent: 3,
+      remainingPercent: 97,
+      quotaProgressObservedAtMs: 1_000,
+      currentCycle: { id: 11 },
+    });
+  });
+
+  it('keeps only remaining evidence when a new cycle snapshot is remaining-only', () => {
+    const [merged] = mergeAccountQuotaSnapshotWindows(
+      [
+        makeDefinition({
+          usedPercent: 95,
+          remainingPercent: 5,
+          currentCycle: makeDefinitionCycle(),
+        }),
+      ],
+      [
+        makeSnapshot({
+          observed_at_ms: 20_000,
+          used_percent: undefined,
+          remaining_percent: 40,
+          current_cycle: makeSnapshotCycle({ id: 11 }),
+        }),
+      ]
+    );
+
+    expect(merged).toMatchObject({
+      usedPercent: null,
+      remainingPercent: 40,
+      quotaProgressObservedAtMs: null,
+    });
+  });
+
+  it('clears all inherited quota for a new-cycle metadata-only snapshot', () => {
+    const [merged] = mergeAccountQuotaSnapshotWindows(
+      [
+        makeDefinition({
+          usedPercent: 95,
+          remainingPercent: 5,
+          currentCycle: makeDefinitionCycle(),
+        }),
+      ],
+      [
+        makeSnapshot({
+          observed_at_ms: 20_000,
+          used_percent: undefined,
+          remaining_percent: undefined,
+          current_cycle: makeSnapshotCycle({ id: 11 }),
+        }),
+      ]
+    );
+
+    expect(merged).toMatchObject({
+      usedPercent: null,
+      remainingPercent: null,
+      quotaProgressObservedAtMs: null,
+    });
+  });
+
+  it('clears inherited quota on a boundary-only fixed-window rollover', () => {
+    const [merged] = mergeAccountQuotaSnapshotWindows(
+      [
+        makeDefinition({
+          observedAtMs: 1_000,
+          cycleEndMs: 1_000_000,
+          durationSeconds: 18_000,
+          usedPercent: 95,
+          remainingPercent: 5,
+          currentCycle: undefined,
+        }),
+      ],
+      [
+        makeSnapshot({
+          observed_at_ms: 2_000,
+          cycle_start_ms: 1_000_000,
+          cycle_end_ms: 19_000_000,
+          duration_seconds: 18_000,
+          used_percent: undefined,
+          remaining_percent: undefined,
+          current_cycle: undefined,
+        }),
+      ]
+    );
+
+    expect(merged).toMatchObject({
+      usedPercent: null,
+      remainingPercent: null,
+      quotaProgressObservedAtMs: null,
+      cycleEndMs: 19_000_000,
+    });
+  });
+
+  it('clears inherited quota after a materially backward boundary correction', () => {
+    const [merged] = mergeAccountQuotaSnapshotWindows(
+      [
+        makeDefinition({
+          observedAtMs: 1_000,
+          quotaProgressObservedAtMs: 1_000,
+          cycleEndMs: 2_000_000,
+          usedPercent: 60,
+          remainingPercent: 40,
+          currentCycle: undefined,
+        }),
+      ],
+      [
+        makeSnapshot({
+          observed_at_ms: 3_000,
+          cycle_start_ms: 1_000,
+          cycle_end_ms: 1_000_000,
+          used_percent: undefined,
+          remaining_percent: undefined,
+          boundary_accuracy: 'estimated',
+          current_cycle: undefined,
+        }),
+      ]
+    );
+
+    expect(merged).toMatchObject({
+      usedPercent: null,
+      remainingPercent: null,
+      quotaProgressObservedAtMs: null,
+    });
+  });
+
+  it('keeps newer live quota progress when persisted metadata is newer', () => {
+    const definition = makeDefinition({
+      observedAtMs: 2_500,
+      quotaProgressObservedAtMs: 2_500,
+      usedPercent: 60,
+      remainingPercent: 40,
+      display: {
+        ...makeDefinition().display,
+        observedAtMs: 2_500,
+        quotaProgressObservedAtMs: 2_500,
+        usedPercent: 60,
+        remainingPercent: 40,
+      },
+    });
+    const [merged] = mergeAccountQuotaSnapshotWindows(
+      [definition],
+      [
+        makeSnapshot({
+          observed_at_ms: 3_000,
+          used_percent: 50,
+          remaining_percent: 50,
+          field_sources: {
+            quota: { source: 'api_query', observed_at_ms: 2_000 },
+          },
+        }),
+      ]
+    );
+
+    expect(merged).toMatchObject({
+      observedAtMs: 3_000,
+      usedPercent: 60,
+      remainingPercent: 40,
+      quotaProgressObservedAtMs: 2_500,
+      display: {
+        observedAtMs: 3_000,
+        usedPercent: 60,
+        remainingPercent: 40,
+        quotaProgressObservedAtMs: 2_500,
+      },
+    });
+  });
+
+  it('keeps newer live metadata while accepting a newer persisted quota field', () => {
+    const [merged] = mergeAccountQuotaSnapshotWindows(
+      [
+        makeDefinition({
+          observedAtMs: 3_000,
+          quotaProgressObservedAtMs: 2_000,
+          usedPercent: 50,
+          remainingPercent: 50,
+          display: {
+            ...makeDefinition().display,
+            observedAtMs: 3_000,
+            quotaProgressObservedAtMs: 2_000,
+            usedPercent: 50,
+            remainingPercent: 50,
+          },
+        }),
+      ],
+      [
+        makeSnapshot({
+          observed_at_ms: 2_500,
+          used_percent: 60,
+          remaining_percent: 40,
+          field_sources: {
+            quota: { source: 'api_query', observed_at_ms: 2_500 },
+          },
+        }),
+      ]
+    );
+
+    expect(merged).toMatchObject({
+      observedAtMs: 3_000,
+      usedPercent: 60,
+      remainingPercent: 40,
+      quotaProgressObservedAtMs: 2_500,
+      display: {
+        observedAtMs: 3_000,
+        usedPercent: 60,
+        remainingPercent: 40,
+        quotaProgressObservedAtMs: 2_500,
+      },
+    });
+  });
+
+  it('uses newer persisted quota progress when live progress is older', () => {
+    const [merged] = mergeAccountQuotaSnapshotWindows(
+      [
+        makeDefinition({
+          observedAtMs: 2_500,
+          quotaProgressObservedAtMs: 1_000,
+          usedPercent: 50,
+          remainingPercent: 50,
+        }),
+      ],
+      [
+        makeSnapshot({
+          observed_at_ms: 3_000,
+          used_percent: 60,
+          remaining_percent: 40,
+          field_sources: {
+            quota: { source: 'api_query', observed_at_ms: 2_000 },
+          },
+        }),
+      ]
+    );
+
+    expect(merged).toMatchObject({
+      observedAtMs: 3_000,
+      usedPercent: 60,
+      remainingPercent: 40,
+      quotaProgressObservedAtMs: 2_000,
+    });
+  });
+
+  it('does not advance quota progress from a remaining-only snapshot', () => {
+    const [merged] = mergeAccountQuotaSnapshotWindows(
+      [makeDefinition({ observedAtMs: 1_000, quotaProgressObservedAtMs: 1_000 })],
+      [
+        makeSnapshot({
+          observed_at_ms: 2_000,
+          used_percent: undefined,
+          remaining_percent: 40,
+          field_sources: {
+            quota: { source: 'api_query', observed_at_ms: 2_000 },
+          },
+        }),
+      ]
+    );
+
+    expect(merged).toMatchObject({
+      observedAtMs: 2_000,
+      usedPercent: null,
+      remainingPercent: 40,
+      quotaProgressObservedAtMs: null,
+      display: {
+        observedAtMs: 2_000,
+        usedPercent: null,
+        remainingPercent: 40,
+        quotaProgressObservedAtMs: null,
+      },
+    });
+
+    const [snapshotOnly] = mergeAccountQuotaSnapshotWindows(
+      [],
+      [
+        makeSnapshot({
+          observed_at_ms: 2_000,
+          used_percent: undefined,
+          remaining_percent: 35,
+        }),
+      ]
+    );
+    expect(snapshotOnly).toMatchObject({
+      usedPercent: null,
+      remainingPercent: 35,
+      quotaProgressObservedAtMs: null,
+      display: {
+        usedPercent: null,
+        remainingPercent: 35,
+        quotaProgressObservedAtMs: null,
+      },
+    });
+  });
+
+  it('does not let stale remaining evidence override a newer live quota pair', () => {
+    const [merged] = mergeAccountQuotaSnapshotWindows(
+      [
+        makeDefinition({
+          observedAtMs: 3_000,
+          quotaProgressObservedAtMs: 2_500,
+          usedPercent: 20,
+          remainingPercent: 80,
+          display: {
+            ...makeDefinition().display,
+            observedAtMs: 3_000,
+            quotaProgressObservedAtMs: 2_500,
+            usedPercent: 20,
+            remainingPercent: 80,
+          },
+        }),
+      ],
+      [
+        makeSnapshot({
+          observed_at_ms: 3_000,
+          used_percent: undefined,
+          remaining_percent: 40,
+          field_sources: {
+            quota: { source: 'api_query', observed_at_ms: 2_000 },
+          },
+        }),
+      ]
+    );
+
+    expect(merged).toMatchObject({
+      observedAtMs: 3_000,
+      usedPercent: 20,
+      remainingPercent: 80,
+      quotaProgressObservedAtMs: 2_500,
+      display: {
+        observedAtMs: 3_000,
+        usedPercent: 20,
+        remainingPercent: 80,
+        quotaProgressObservedAtMs: 2_500,
+      },
+    });
+  });
+
+  it('derives the remaining percentage when a newer snapshot only has used percentage', () => {
+    const snapshot = makeSnapshot({
+      observed_at_ms: 2_000,
+      used_percent: 60,
+      remaining_percent: undefined,
+      field_sources: {
+        quota: { source: 'api_query', observed_at_ms: 2_000 },
+      },
+    });
+    const [merged] = mergeAccountQuotaSnapshotWindows(
+      [makeDefinition({ quotaProgressObservedAtMs: 1_000 })],
+      [snapshot]
+    );
+
+    expect(merged).toMatchObject({
+      usedPercent: 60,
+      remainingPercent: 40,
+      quotaProgressObservedAtMs: 2_000,
+    });
+
+    const [snapshotOnly] = mergeAccountQuotaSnapshotWindows([], [snapshot]);
+    expect(snapshotOnly).toMatchObject({
+      usedPercent: 60,
+      remainingPercent: 40,
+      quotaProgressObservedAtMs: 2_000,
+    });
+  });
+
+  it('restores legacy snapshot quota provenance from the snapshot observation time', () => {
+    const [merged] = mergeAccountQuotaSnapshotWindows(
+      [],
+      [
+        makeSnapshot({
+          observed_at_ms: 2_000,
+          used_percent: 60,
+          remaining_percent: undefined,
+        }),
+      ]
+    );
+
+    expect(merged).toMatchObject({
+      usedPercent: 60,
+      remainingPercent: 40,
+      quotaProgressObservedAtMs: 2_000,
+      display: { quotaProgressObservedAtMs: 2_000 },
+    });
+  });
+
+  it('preserves non-Codex observedAt compatibility for snapshot write and stale merge', () => {
+    const observedAtMs = 3_000;
+    const display: AccountQuotaDisplayWindow = buildAccountQuotaDisplayWindow({
+      key: 'antigravity-five-hour',
+      label: '5H',
+      kind: 'five_hour',
+      remainingPercent: 40,
+      usedPercent: 60,
+      resetLabel: '-',
+      source: 'antigravity',
+      observedAtMs,
+    });
+    const [definition] = buildAccountQuotaWindowDefinitions([display]);
+
+    expect(definition.quotaProgressObservedAtMs).toBe(observedAtMs);
+
+    const row = makeSnapshotRow('antigravity');
+    const [entry] = buildAccountQuotaSnapshotWriteEntries(
+      [row],
+      new Map([[row.selectionKey, [definition]]]),
+      {
+        getObservation: () => ({
+          source: 'api_query',
+          observed_at_ms: observedAtMs,
+          inventory_scope_key: 'antigravity:quota',
+          inventory_mode: 'complete',
+        }),
+      }
+    );
+
+    expect(entry.windows[0]).toMatchObject({
+      observed_at_ms: observedAtMs,
+      used_percent: 60,
+      remaining_percent: 40,
+    });
+
+    const [merged] = mergeAccountQuotaSnapshotWindows(
+      [definition],
+      [
+        makeSnapshot({
+          provider_window_id: definition.providerWindowId,
+          observed_at_ms: 2_000,
+          used_percent: 50,
+          remaining_percent: 50,
+        }),
+      ],
+      { provider: 'antigravity' }
+    );
+
+    expect(merged).toMatchObject({
+      observedAtMs: observedAtMs,
+      usedPercent: 60,
+      remainingPercent: 40,
+      quotaProgressObservedAtMs: observedAtMs,
+    });
+  });
+
+  it('does not persist old quota progress under a newer snapshot observation', () => {
+    const row = makeSnapshotRow();
+    const [entry] = buildAccountQuotaSnapshotWriteEntries(
+      [row],
+      new Map([
+        [
+          row.selectionKey,
+          [
+            makeDefinition({
+              observedAtMs: 2_000,
+              quotaProgressObservedAtMs: 1_000,
+              usedPercent: 50,
+              remainingPercent: 50,
+            }),
+          ],
+        ],
+      ]),
+      {
+        getObservation: () => ({
+          source: 'response_header',
+          source_observation_id: 'header-1',
+          observed_at_ms: 2_000,
+          inventory_scope_key: 'codex:rate-limits',
+          inventory_mode: 'complete',
+        }),
+      }
+    );
+
+    expect(entry.windows[0]).not.toHaveProperty('used_percent');
+    expect(entry.windows[0]).not.toHaveProperty('remaining_percent');
+    expect(entry.windows[0].observed_at_ms).toBe(2_000);
+  });
+
+  it('persists same-observation remaining-only quota without used provenance', () => {
+    const row = makeSnapshotRow();
+    const [entry] = buildAccountQuotaSnapshotWriteEntries(
+      [row],
+      new Map([
+        [
+          row.selectionKey,
+          [
+            makeDefinition({
+              observedAtMs: 2_000,
+              quotaProgressObservedAtMs: null,
+              usedPercent: null,
+              remainingPercent: 35,
+            }),
+          ],
+        ],
+      ]),
+      {
+        getObservation: () => ({
+          source: 'response_header',
+          source_observation_id: 'header-remaining-only',
+          observed_at_ms: 2_000,
+          inventory_scope_key: 'codex:rate-limits',
+          inventory_mode: 'complete',
+        }),
+      }
+    );
+
+    expect(entry.windows[0]).toMatchObject({
+      observed_at_ms: 2_000,
+      remaining_percent: 35,
+    });
+    expect(entry.windows[0]).not.toHaveProperty('used_percent');
+  });
+
+  it('round-trips remaining-only quota through snapshot write and restore', () => {
+    const row = makeSnapshotRow();
+    const [entry] = buildAccountQuotaSnapshotWriteEntries(
+      [row],
+      new Map([
+        [
+          row.selectionKey,
+          [
+            makeDefinition({
+              observedAtMs: 2_000,
+              quotaProgressObservedAtMs: null,
+              usedPercent: null,
+              remainingPercent: 35,
+            }),
+          ],
+        ],
+      ]),
+      {
+        getObservation: () => ({
+          source: 'response_header',
+          observed_at_ms: 2_000,
+          inventory_scope_key: 'codex:rate-limits',
+          inventory_mode: 'complete',
+        }),
+      }
+    );
+    const snapshot = { ...entry.windows[0], stale: false } as AccountQuotaSnapshotWindow;
+    const [restored] = mergeAccountQuotaSnapshotWindows([], [snapshot], { provider: 'codex' });
+
+    expect(restored).toMatchObject({
+      observedAtMs: 2_000,
+      usedPercent: null,
+      remainingPercent: 35,
+      quotaProgressObservedAtMs: null,
+      display: {
+        usedPercent: null,
+        remainingPercent: 35,
+        quotaProgressObservedAtMs: null,
+      },
+    });
+  });
+
+  it('does not restamp remaining-only quota under a newer snapshot observation', () => {
+    const row = makeSnapshotRow();
+    const [entry] = buildAccountQuotaSnapshotWriteEntries(
+      [row],
+      new Map([
+        [
+          row.selectionKey,
+          [
+            makeDefinition({
+              observedAtMs: 1_000,
+              quotaProgressObservedAtMs: null,
+              usedPercent: null,
+              remainingPercent: 35,
+            }),
+          ],
+        ],
+      ]),
+      {
+        getObservation: () => ({
+          source: 'response_header',
+          observed_at_ms: 2_000,
+          inventory_scope_key: 'codex:rate-limits',
+          inventory_mode: 'complete',
+        }),
+      }
+    );
+
+    expect(entry.windows[0]).toMatchObject({ observed_at_ms: 2_000 });
+    expect(entry.windows[0]).not.toHaveProperty('used_percent');
+    expect(entry.windows[0]).not.toHaveProperty('remaining_percent');
+  });
+
+  it('persists quota progress when its provenance matches the snapshot observation', () => {
+    const row = makeSnapshotRow();
+    const [entry] = buildAccountQuotaSnapshotWriteEntries(
+      [row],
+      new Map([
+        [
+          row.selectionKey,
+          [
+            makeDefinition({
+              observedAtMs: 2_000,
+              quotaProgressObservedAtMs: 2_000,
+              usedPercent: 60,
+              remainingPercent: 40,
+            }),
+          ],
+        ],
+      ]),
+      {
+        getObservation: () => ({
+          source: 'api_query',
+          source_observation_id: 'api-1',
+          observed_at_ms: 2_000,
+          inventory_scope_key: 'codex:rate-limits',
+          inventory_mode: 'complete',
+        }),
+      }
+    );
+
+    expect(entry.windows[0]).toMatchObject({
+      observed_at_ms: 2_000,
+      used_percent: 60,
+      remaining_percent: 40,
     });
   });
 
@@ -199,7 +1134,11 @@ describe('account quota snapshots', () => {
   });
 
   it('keeps newer live quota definitions ahead of an older persisted snapshot', () => {
-    const definition = makeDefinition({ observedAtMs: 30_000, usedPercent: 12 });
+    const definition = makeDefinition({
+      observedAtMs: 30_000,
+      quotaProgressObservedAtMs: 30_000,
+      usedPercent: 12,
+    });
     const merged = mergeAccountQuotaSnapshotWindows(
       [definition],
       [makeSnapshot({ observed_at_ms: 20_000, used_percent: 91 })]
@@ -305,18 +1244,10 @@ describe('account quota snapshots', () => {
       key: 'shared-incomplete',
       providerWindowId: 'shared-window',
       provider: 'antigravity',
-      label: 'Demo Model A',
       modelScope: { kind: 'models', models: [], complete: false },
       boundaryAccuracy: 'unknown',
       windowMode: 'unknown',
     });
-    incomplete.display = {
-      ...incomplete.display,
-      label: 'Demo Model A',
-      scopeDisplayName: 'Demo Model A',
-      modelScope: incomplete.modelScope,
-      source: 'antigravity',
-    };
     const row = {
       selectionKey: 'antigravity.json\u0000auth-1',
       fileName: 'antigravity.json',
@@ -343,7 +1274,6 @@ describe('account quota snapshots', () => {
         model_scope_kind: 'feature',
         model_scope_key: 'scope_unknown',
         model_ids: undefined,
-        scope_display_name: 'Demo Model A',
       }),
     ]);
 
@@ -363,458 +1293,7 @@ describe('account quota snapshots', () => {
       key: 'shared-incomplete',
       providerWindowId: 'shared-window',
       modelScope: { kind: 'models', models: [], complete: false },
-      display: { label: 'Demo Model A', scopeDisplayName: 'Demo Model A' },
     });
-  });
-
-  it('restores a snapshot-only scoped model name and preserves it on write-back', () => {
-    const snapshot = makeSnapshot({
-      provider_window_id: 'weekly-scoped-demo',
-      window_kind: 'weekly',
-      model_scope_kind: 'feature',
-      model_scope_key: 'scope_unknown',
-      model_ids: undefined,
-      scope_display_name: 'Demo Model A',
-    });
-    const merged = mergeAccountQuotaSnapshotWindows([], [snapshot], {
-      provider: 'claude',
-      getLabel: () => 'detail_snapshot_window_weekly',
-    });
-
-    expect(merged).toHaveLength(1);
-    expect(merged[0]).toMatchObject({
-      label: 'Demo Model A',
-      modelScope: { kind: 'models', models: [], complete: false },
-      display: { label: 'Demo Model A', scopeDisplayName: 'Demo Model A' },
-    });
-
-    const row = makeSnapshotTestRow('claude');
-    const [entry] = buildAccountQuotaSnapshotWriteEntries(
-      [row],
-      new Map([[row.selectionKey, merged]])
-    );
-    expect(entry.windows[0]).toMatchObject({
-      model_scope_kind: 'feature',
-      model_scope_key: 'scope_unknown',
-      model_ids: undefined,
-      scope_display_name: 'Demo Model A',
-    });
-  });
-
-  it('uses the legacy snapshot label fallback when no display name was stored', () => {
-    const merged = mergeAccountQuotaSnapshotWindows(
-      [],
-      [
-        makeSnapshot({
-          provider_window_id: 'weekly',
-          window_kind: 'weekly',
-          scope_display_name: undefined,
-        }),
-      ],
-      {
-        provider: 'claude',
-        getLabel: () => 'detail_snapshot_window_weekly',
-      }
-    );
-
-    expect(merged).toHaveLength(1);
-    expect(merged[0].label).toBe('detail_snapshot_window_weekly');
-    expect(merged[0].display.scopeDisplayName).toBeUndefined();
-  });
-
-  it('restores a Codex dynamic Additional Rate Limit with the current locale label', () => {
-    const snapshot = makeSnapshot({
-      provider_window_id: 'gpt-reserve-weekly-0',
-      window_kind: 'weekly',
-      model_scope_kind: 'feature',
-      model_scope_key: 'gpt_reserve',
-      scope_display_name: 'gpt-reserve',
-    });
-    const merged = mergeAccountQuotaSnapshotWindows([], [snapshot], {
-      provider: 'codex',
-      t: codexSnapshotT,
-      getLabel: () => 'detail_snapshot_window_weekly',
-    });
-
-    expect(merged).toHaveLength(1);
-    expect(merged[0]).toMatchObject({
-      label: 'gpt-reserve weekly limit',
-      display: { label: 'gpt-reserve weekly limit', scopeDisplayName: 'gpt-reserve' },
-    });
-  });
-
-  it('restores Codex canonical Code Review and Spark labels without persisted translations', () => {
-    const codeReview = mergeAccountQuotaSnapshotWindows(
-      [],
-      [
-        makeSnapshot({
-          provider_window_id: 'code-review-weekly',
-          window_kind: 'weekly',
-          model_scope_kind: 'feature',
-          model_scope_key: 'code_review',
-          scope_display_name: undefined,
-        }),
-      ],
-      { provider: 'codex', t: codexSnapshotT }
-    );
-    const spark = mergeAccountQuotaSnapshotWindows(
-      [],
-      [
-        makeSnapshot({
-          provider_window_id: 'spark-weekly-0',
-          window_kind: 'weekly',
-          model_scope_kind: 'models',
-          model_ids: [CODEX_SPARK_MODEL_ID],
-          scope_display_name: undefined,
-        }),
-      ],
-      { provider: 'codex', t: codexSnapshotT }
-    );
-
-    expect(codeReview[0]?.label).toBe('Code review weekly limit');
-    expect(spark[0]?.label).toBe('Spark weekly limit');
-  });
-
-  it('rebuilds a dynamic Codex label from the same raw snapshot name in another locale', () => {
-    const snapshot = makeSnapshot({
-      provider_window_id: 'gpt-reserve-weekly-0',
-      window_kind: 'weekly',
-      model_scope_kind: 'feature',
-      model_scope_key: 'gpt_reserve',
-      scope_display_name: 'gpt-reserve',
-    });
-    const english = mergeAccountQuotaSnapshotWindows([], [snapshot], {
-      provider: 'codex',
-      t: codexSnapshotT,
-    });
-    const chineseT = ((key: string, options?: Record<string, string | number>) =>
-      key === 'codex_quota.additional_secondary_window'
-        ? `${options?.name ?? ''} 周限额`
-        : key) as TFunction;
-    const chinese = mergeAccountQuotaSnapshotWindows([], [snapshot], {
-      provider: 'codex',
-      t: chineseT,
-    });
-
-    expect(english[0]?.label).toBe('gpt-reserve weekly limit');
-    expect(chinese[0]?.label).toBe('gpt-reserve 周限额');
-    expect(english[0]?.display.scopeDisplayName).toBe('gpt-reserve');
-    expect(chinese[0]?.display.scopeDisplayName).toBe('gpt-reserve');
-  });
-
-  it('keeps the live definition label ahead of an older snapshot display name', () => {
-    const live = makeDefinition({
-      provider: 'claude',
-      label: 'New Model Name',
-      observedAtMs: 10_000,
-    });
-    live.display = {
-      ...live.display,
-      label: 'New Model Name',
-      scopeDisplayName: 'New Model Name',
-      source: 'claude',
-      modelScope: live.modelScope,
-    };
-    const merged = mergeAccountQuotaSnapshotWindows(
-      [live],
-      [
-        makeSnapshot({
-          observed_at_ms: 5_000,
-          scope_display_name: 'Old Model Name',
-        }),
-      ],
-      { provider: 'claude' }
-    );
-
-    expect(merged).toHaveLength(1);
-    expect(merged[0]).toMatchObject({
-      label: 'New Model Name',
-      display: { label: 'New Model Name', scopeDisplayName: 'New Model Name' },
-    });
-  });
-
-  it('keeps active, pending, and legacy windows in the current view but filters inactive windows', () => {
-    const definitions = [
-      makeDefinition({ key: 'active', providerWindowId: 'active', availability: 'active' }),
-      makeDefinition({
-        key: 'pending',
-        providerWindowId: 'pending',
-        availability: 'pending_absent',
-      }),
-      makeDefinition({ key: 'inactive', providerWindowId: 'inactive', availability: 'inactive' }),
-      makeDefinition({ key: 'legacy', providerWindowId: 'legacy' }),
-    ];
-
-    expect(filterCurrentAccountQuotaWindowDefinitions(definitions).map((item) => item.key)).toEqual(
-      ['active', 'pending', 'legacy']
-    );
-  });
-
-  it('filters only the shadowed pending lifecycle row from an ambiguous current set', () => {
-    const definitions = [
-      makeDefinition({
-        key: 'future-feature-weekly-0',
-        providerWindowId: 'future-feature-weekly-0',
-        availability: 'pending_absent',
-        currentHidden: true,
-      }),
-      makeDefinition({
-        key: 'cpamp:ambiguous:future-feature-weekly-0',
-        providerWindowId: 'cpamp:ambiguous:future-feature-weekly-0',
-        identityAmbiguous: true,
-      }),
-      makeDefinition({
-        key: 'cpamp:ambiguous:future-feature-weekly-1',
-        providerWindowId: 'cpamp:ambiguous:future-feature-weekly-1',
-        identityAmbiguous: true,
-      }),
-    ];
-
-    expect(filterCurrentAccountQuotaWindowDefinitions(definitions).map((item) => item.key)).toEqual(
-      ['cpamp:ambiguous:future-feature-weekly-0', 'cpamp:ambiguous:future-feature-weekly-1']
-    );
-  });
-
-  it('clears an older current-hidden flag when newer local positive quota evidence wins', () => {
-    const local = makeDefinition({
-      observedAtMs: 400,
-      availability: 'active',
-      currentHidden: true,
-      usedPercent: 40,
-    });
-    const snapshot = makeSnapshot({
-      observed_at_ms: 100,
-      availability: 'pending_absent',
-      last_seen_at_ms: 300,
-      missing_since_ms: 300,
-      current_hidden: true,
-    });
-
-    const [merged] = mergeAccountQuotaSnapshotWindows([local], [snapshot]);
-
-    expect(merged).toMatchObject({ availability: 'active', currentHidden: false });
-    expect(merged?.display.currentHidden).toBe(false);
-    expect(filterCurrentAccountQuotaWindowDefinitions(merged ? [merged] : [])).toHaveLength(1);
-  });
-
-  it('applies current-hidden lifecycle evidence without changing quota freshness', () => {
-    const local = makeDefinition({ observedAtMs: 100, usedPercent: 40 });
-    const snapshot = makeSnapshot({
-      observed_at_ms: 200,
-      used_percent: 10,
-      availability: 'pending_absent',
-      last_seen_at_ms: 200,
-      missing_since_ms: 200,
-      current_hidden: true,
-    });
-
-    const [merged] = mergeAccountQuotaSnapshotWindows([local], [snapshot]);
-
-    expect(merged).toMatchObject({
-      usedPercent: 10,
-      availability: 'pending_absent',
-      currentHidden: true,
-    });
-    expect(filterCurrentAccountQuotaWindowDefinitions(merged ? [merged] : [])).toHaveLength(0);
-  });
-
-  it('uses an inactive snapshot as a tombstone for a stale local Codex definition', () => {
-    const local = makeDefinition({
-      key: 'gpt-reserve-weekly-0',
-      providerWindowId: 'gpt-reserve-weekly-0',
-      kind: 'weekly',
-      durationSeconds: 604_800,
-      label: 'gpt-reserve weekly limit',
-      modelScope: { kind: 'feature', key: 'gpt_reserve', complete: false },
-    });
-    const snapshot = makeSnapshot({
-      provider_window_id: 'gpt-reserve-weekly-0',
-      window_kind: 'weekly',
-      model_scope_kind: 'feature',
-      model_scope_key: 'gpt_reserve',
-      availability: 'inactive',
-      observed_at_ms: 10_000,
-      deactivated_at_ms: 30_000,
-    });
-
-    const merged = mergeAccountQuotaSnapshotWindows([local], [snapshot], { provider: 'codex' });
-    expect(merged).toHaveLength(1);
-    expect(merged[0]).toMatchObject({
-      providerWindowId: 'gpt-reserve-weekly-0',
-      availability: 'inactive',
-    });
-    expect(filterCurrentAccountQuotaWindowDefinitions(merged)).toEqual([]);
-  });
-
-  it('merges newer inactive lifecycle evidence without replacing newer local quota data', () => {
-    const local = makeDefinition({ observedAtMs: 200, usedPercent: 40 });
-    const snapshot = makeSnapshot({
-      observed_at_ms: 100,
-      used_percent: 10,
-      availability: 'inactive',
-      deactivated_at_ms: 300,
-    });
-
-    const merged = mergeAccountQuotaSnapshotWindows([local], [snapshot]);
-
-    expect(merged[0]).toMatchObject({ usedPercent: 40, availability: 'inactive' });
-    expect(filterCurrentAccountQuotaWindowDefinitions(merged)).toEqual([]);
-  });
-
-  it('merges newer pending lifecycle evidence while retaining newer local quota data', () => {
-    const local = makeDefinition({ observedAtMs: 200, usedPercent: 40 });
-    const snapshot = makeSnapshot({
-      observed_at_ms: 100,
-      used_percent: 10,
-      availability: 'pending_absent',
-      missing_since_ms: 300,
-    });
-
-    const merged = mergeAccountQuotaSnapshotWindows([local], [snapshot]);
-
-    expect(merged[0]).toMatchObject({ usedPercent: 40, availability: 'pending_absent' });
-    expect(filterCurrentAccountQuotaWindowDefinitions(merged)).toHaveLength(1);
-  });
-
-  it('keeps a newer local positive observation visible over an older inactive tombstone', () => {
-    const local = makeDefinition({ observedAtMs: 400, usedPercent: 40 });
-    const snapshot = makeSnapshot({
-      observed_at_ms: 100,
-      availability: 'inactive',
-      deactivated_at_ms: 300,
-    });
-
-    const merged = mergeAccountQuotaSnapshotWindows([local], [snapshot]);
-
-    expect(merged[0]).toBe(local);
-    expect(filterCurrentAccountQuotaWindowDefinitions(merged)).toHaveLength(1);
-  });
-
-  it('applies a newer quota snapshot when its quota evidence is fresher', () => {
-    const local = makeDefinition({ observedAtMs: 100, usedPercent: 40 });
-    const snapshot = makeSnapshot({ observed_at_ms: 200, used_percent: 10 });
-
-    const merged = mergeAccountQuotaSnapshotWindows([local], [snapshot]);
-
-    expect(merged[0]).toMatchObject({ usedPercent: 10, observationSource: 'response_header' });
-  });
-
-  it('applies newer display metadata independently from older quota evidence', () => {
-    const local = makeDefinition({
-      provider: 'claude',
-      observedAtMs: 200,
-      usedPercent: 40,
-      label: 'Old Model Name',
-      display: {
-        ...makeDefinition().display,
-        label: 'Old Model Name',
-        scopeDisplayName: 'Old Model Name',
-        source: 'claude',
-      },
-    });
-    const snapshot = makeSnapshot({
-      observed_at_ms: 100,
-      used_percent: 10,
-      scope_display_name: 'New Model Name',
-      field_sources: {
-        scope_display_name: { source: 'api_query', observed_at_ms: 300 },
-      },
-    });
-
-    const merged = mergeAccountQuotaSnapshotWindows([local], [snapshot], { provider: 'claude' });
-
-    expect(merged[0]).toMatchObject({
-      usedPercent: 40,
-      label: 'New Model Name',
-      display: { label: 'New Model Name', scopeDisplayName: 'New Model Name' },
-    });
-  });
-
-  it('applies server display evidence when newer local quota has no display evidence', () => {
-    const local = makeDefinition({
-      key: 'gpt-reserve-weekly-0',
-      providerWindowId: 'gpt-reserve-weekly-0',
-      kind: 'weekly',
-      observedAtMs: 300,
-      usedPercent: 40,
-      modelScope: { kind: 'feature', key: 'gpt_reserve', complete: false },
-    });
-    const snapshot = makeSnapshot({
-      provider_window_id: 'gpt-reserve-weekly-0',
-      window_kind: 'weekly',
-      model_scope_kind: 'feature',
-      model_scope_key: 'gpt_reserve',
-      observed_at_ms: 100,
-      used_percent: 10,
-      scope_display_name: 'Model A',
-      field_sources: {
-        scope_display_name: { source: 'api_query', observed_at_ms: 200 },
-      },
-    });
-
-    const merged = mergeAccountQuotaSnapshotWindows([local], [snapshot], {
-      provider: 'codex',
-      t: codexSnapshotT,
-    });
-
-    expect(merged[0]).toMatchObject({
-      usedPercent: 40,
-      label: 'Model A weekly limit',
-      display: { label: 'Model A weekly limit', scopeDisplayName: 'Model A' },
-    });
-  });
-
-  it('does not let an older or blank display snapshot replace local presentation metadata', () => {
-    const local = makeDefinition({
-      provider: 'claude',
-      observedAtMs: 300,
-      label: 'New Model Name',
-      display: {
-        ...makeDefinition().display,
-        label: 'New Model Name',
-        scopeDisplayName: 'New Model Name',
-        source: 'claude',
-      },
-    });
-    const older = makeSnapshot({
-      observed_at_ms: 200,
-      scope_display_name: 'Old Model Name',
-      field_sources: {
-        scope_display_name: { source: 'api_query', observed_at_ms: 200 },
-      },
-    });
-    const blank = makeSnapshot({ observed_at_ms: 400, scope_display_name: '   ' });
-
-    const olderMerged = mergeAccountQuotaSnapshotWindows([local], [older], { provider: 'claude' });
-    const blankMerged = mergeAccountQuotaSnapshotWindows([local], [blank], { provider: 'claude' });
-
-    expect(olderMerged[0]).toMatchObject({
-      label: 'New Model Name',
-      display: { label: 'New Model Name', scopeDisplayName: 'New Model Name' },
-    });
-    expect(blankMerged[0]).toMatchObject({
-      label: 'New Model Name',
-      display: { label: 'New Model Name', scopeDisplayName: 'New Model Name' },
-    });
-  });
-
-  it('does not create usage targets for inactive definitions after current filtering', () => {
-    const row = makeSnapshotTestRow('codex');
-    const active = makeDefinition({ key: 'active', providerWindowId: 'active' });
-    const inactive = makeDefinition({
-      key: 'gpt-reserve-weekly-0',
-      providerWindowId: 'gpt-reserve-weekly-0',
-      availability: 'inactive',
-    });
-    const current = filterCurrentAccountQuotaWindowDefinitions([active, inactive]);
-    const entries = buildAccountWindowUsageTargetEntries(
-      [row],
-      new Map([[row.selectionKey, current]]),
-      10_000
-    );
-
-    expect(entries).not.toHaveLength(0);
-    expect(entries.every((entry) => entry.windowKey !== 'gpt-reserve-weekly-0')).toBe(true);
   });
 
   it('encodes an incomplete all scope as fail-closed feature scope', () => {
@@ -1530,564 +2009,241 @@ describe('account quota snapshots', () => {
     expect(forward?.rateLimitResetCreditsAvailableCount).toBe(3);
     expect(reverse?.rateLimitResetCreditsAvailableCount).toBe(3);
   });
-});
 
-describe('stale server ambiguous current-set suppression', () => {
-  const completeCodexObservation = (observedAtMs: number) => ({
-    observed_at_ms: observedAtMs,
-    inventory_scope_key: 'codex:rate-limits',
-    inventory_mode: 'complete' as const,
-  });
-  const ambiguousSnapshot = (
-    index: number,
-    observedAtMs: number
-  ): AccountQuotaSnapshotWindow =>
-    makeSnapshot({
-      provider_window_id: `cpamp:ambiguous:future-feature-weekly-${index}`,
-      window_kind: 'weekly',
-      model_scope_kind: 'feature',
-      model_scope_key: 'future_feature',
-      observed_at_ms: observedAtMs,
-      used_percent: 30,
-      remaining_percent: 70,
-    });
-  const uniqueLocalDefinition = () =>
-    makeDefinition({
-      key: 'future-feature-weekly-0',
-      providerWindowId: 'future-feature-weekly-0',
-      modelScope: { kind: 'feature', key: 'future_feature', complete: false },
-    });
-
-  it('drops stale ambiguous snapshots when a newer local complete inventory exists', () => {
-    const merged = mergeAccountQuotaSnapshotWindows(
-      [uniqueLocalDefinition()],
-      [ambiguousSnapshot(0, 100), ambiguousSnapshot(1, 100)],
-      {
-        provider: 'codex',
-        localObservation: completeCodexObservation(200),
+  describe('scoped quota display name persistence and recovery', () => {
+    const t = ((key: string, options?: Record<string, string | number>) => {
+      if (key === 'codex_quota.additional_secondary_window') {
+        return `${options?.name ?? ''} weekly limit`;
       }
-    );
-
-    expect(merged.map((definition) => definition.providerWindowId)).toEqual([
-      'future-feature-weekly-0',
-    ]);
-  });
-
-  it('drops stale ambiguous snapshots when the newer complete inventory is empty', () => {
-    const merged = mergeAccountQuotaSnapshotWindows(
-      [],
-      [ambiguousSnapshot(0, 100), ambiguousSnapshot(1, 100)],
-      {
-        provider: 'codex',
-        localObservation: completeCodexObservation(200),
+      if (key === 'codex_quota.additional_primary_window') {
+        return `${options?.name ?? ''} 5-hour limit`;
       }
-    );
+      return key;
+    }) as TFunction;
 
-    expect(merged).toEqual([]);
-  });
-
-  it('keeps ambiguous snapshots when the newer local observation is partial', () => {
-    const merged = mergeAccountQuotaSnapshotWindows(
-      [],
-      [ambiguousSnapshot(0, 100), ambiguousSnapshot(1, 100)],
-      {
-        provider: 'codex',
-        localObservation: {
-          observed_at_ms: 200,
-          inventory_scope_key: 'codex:rate-limits',
-          inventory_mode: 'partial',
+    it('persists Claude dynamic scope name into snapshot input', () => {
+      const definition = makeDefinition({
+        key: 'claude-sonnet',
+        providerWindowId: 'claude-sonnet',
+        provider: 'claude',
+        label: 'Claude 3.7 Sonnet',
+        modelScope: { kind: 'models', models: ['claude-3-7-sonnet'], complete: true },
+        display: {
+          ...makeDefinition().display,
+          key: 'claude-sonnet',
+          label: 'Claude 3.7 Sonnet',
+          kind: 'unknown',
+          remainingPercent: 60,
+          usedPercent: 40,
+          resetLabel: '-',
+          resetAtMs: null,
+          fromMs: null,
+          toMs: null,
+          source: 'claude',
+          scopeDisplayName: 'Claude 3.7 Sonnet',
         },
-      }
-    );
-
-    expect(merged.map((definition) => definition.providerWindowId)).toEqual([
-      'cpamp:ambiguous:future-feature-weekly-0',
-      'cpamp:ambiguous:future-feature-weekly-1',
-    ]);
-  });
-
-  it('keeps ambiguous snapshots that are newer than the local observation', () => {
-    const merged = mergeAccountQuotaSnapshotWindows(
-      [uniqueLocalDefinition()],
-      [ambiguousSnapshot(0, 300)],
-      {
-        provider: 'codex',
-        localObservation: completeCodexObservation(200),
-      }
-    );
-
-    expect(merged.map((definition) => definition.providerWindowId)).toEqual([
-      'future-feature-weekly-0',
-      'cpamp:ambiguous:future-feature-weekly-0',
-    ]);
-  });
-
-  it('keeps server ambiguous evidence on equal timestamps', () => {
-    const merged = mergeAccountQuotaSnapshotWindows(
-      [uniqueLocalDefinition()],
-      [ambiguousSnapshot(0, 200)],
-      {
-        provider: 'codex',
-        localObservation: completeCodexObservation(200),
-      }
-    );
-
-    expect(merged.map((definition) => definition.providerWindowId)).toEqual([
-      'future-feature-weekly-0',
-      'cpamp:ambiguous:future-feature-weekly-0',
-    ]);
-  });
-
-  it('never suppresses identifiable lifecycle snapshots', () => {
-    const pending = makeSnapshot({
-      provider_window_id: 'future-feature-weekly-1',
-      window_kind: 'weekly',
-      model_scope_kind: 'feature',
-      model_scope_key: 'future_feature',
-      observed_at_ms: 100,
-      availability: 'pending_absent',
-      missing_since_ms: 100,
-    });
-    const inactive = makeSnapshot({
-      provider_window_id: 'legacy-quota-weekly-0',
-      window_kind: 'weekly',
-      model_scope_kind: 'feature',
-      model_scope_key: 'legacy_quota',
-      observed_at_ms: 100,
-      availability: 'inactive',
-      deactivated_at_ms: 100,
-    });
-    const merged = mergeAccountQuotaSnapshotWindows([], [pending, inactive], {
-      provider: 'codex',
-      localObservation: completeCodexObservation(200),
-    });
-
-    expect(merged.map((definition) => definition.availability)).toEqual([
-      'pending_absent',
-      'inactive',
-    ]);
-  });
-
-  it('requires the Codex rate-limits inventory scope before suppressing', () => {
-    const merged = mergeAccountQuotaSnapshotWindows([], [ambiguousSnapshot(0, 100)], {
-      provider: 'codex',
-      localObservation: {
-        observed_at_ms: 200,
-        inventory_scope_key: 'codex:other-scope',
-        inventory_mode: 'complete',
-      },
-    });
-
-    expect(merged).toHaveLength(1);
-  });
-
-  describe('8.1 alias reconciliation', () => {
-    it('Case A: reconciles local canonical with older active server snapshot by alias', () => {
-      const local = makeDefinition({
-        key: 'future-feature-weekly-0',
-        providerWindowId: 'future-feature-weekly-0',
-        providerWindowAliases: ['old-name-weekly-0'],
-        kind: 'weekly',
-        modelScope: { kind: 'feature', key: 'future_feature', complete: false },
-        observedAtMs: 200,
-        usedPercent: 40,
-        availability: 'active',
       });
-      const server = makeSnapshot({
-        provider_window_id: 'old-name-weekly-0',
+      const row = makeSnapshotRow('claude');
+      const [entry] = buildAccountQuotaSnapshotWriteEntries(
+        [row],
+        new Map([[row.selectionKey, [definition]]]),
+        {
+          getObservation: () => ({
+            source: 'api_query',
+            observed_at_ms: 10_000,
+            inventory_scope_key: 'claude:quota',
+            inventory_mode: 'complete',
+          }),
+        }
+      );
+      expect(entry.windows[0]).toMatchObject({
+        provider_window_id: 'claude-sonnet',
+        scope_display_name: 'Claude 3.7 Sonnet',
+      });
+    });
+
+    it('persists Codex Additional limit_name into snapshot input', () => {
+      const definition = makeDefinition({
+        key: 'spark-weekly-0',
+        providerWindowId: 'spark-weekly-0',
+        provider: 'codex',
+        label: 'Spark weekly limit',
+        modelScope: { kind: 'models', models: ['gpt-5-spark'], complete: true },
+        display: {
+          ...makeDefinition().display,
+          key: 'spark-weekly-0',
+          label: 'Spark weekly limit',
+          kind: 'weekly',
+          remainingPercent: 80,
+          usedPercent: 20,
+          resetLabel: '-',
+          resetAtMs: 20_000,
+          fromMs: 1_000,
+          toMs: 20_000,
+          source: 'codex',
+          scopeDisplayName: 'Spark',
+        },
+      });
+      const row = makeSnapshotRow('codex');
+      const [entry] = buildAccountQuotaSnapshotWriteEntries(
+        [row],
+        new Map([[row.selectionKey, [definition]]]),
+        {
+          getObservation: () => ({
+            source: 'api_query',
+            observed_at_ms: 10_000,
+            inventory_scope_key: 'codex:quota',
+            inventory_mode: 'complete',
+          }),
+        }
+      );
+      expect(entry.windows[0]).toMatchObject({
+        provider_window_id: 'spark-weekly-0',
+        scope_display_name: 'Spark',
+      });
+    });
+
+    it('reconstructs snapshot-only window with UI label containing scopeDisplayName', () => {
+      const snapshot = makeSnapshot({
+        provider_window_id: 'custom-scope-window',
         window_kind: 'weekly',
         model_scope_kind: 'feature',
-        model_scope_key: 'future_feature',
-        observed_at_ms: 100,
+        model_scope_key: 'custom_feature',
+        scope_display_name: 'Model A',
+      });
+      const merged = mergeAccountQuotaSnapshotWindows([], [snapshot], {
+        provider: 'codex',
+        t,
+      });
+      expect(merged).toHaveLength(1);
+      expect(merged[0].display.scopeDisplayName).toBe('Model A');
+      expect(merged[0].display.label).toBe('Model A weekly limit');
+    });
+
+    it('formats label using current locale while storing only raw scopeDisplayName', () => {
+      const snapshot = makeSnapshot({
+        provider_window_id: 'custom-scope-window',
+        window_kind: 'weekly',
+        model_scope_kind: 'feature',
+        model_scope_key: 'custom_feature',
+        scope_display_name: 'Model A',
+      });
+      const zhT = ((key: string, options?: Record<string, string | number>) => {
+        if (key === 'codex_quota.additional_secondary_window') {
+          return `${options?.name ?? ''} 周额度`;
+        }
+        return key;
+      }) as TFunction;
+      const merged = mergeAccountQuotaSnapshotWindows([], [snapshot], {
+        provider: 'codex',
+        t: zhT,
+      });
+      expect(merged[0].display.label).toBe('Model A 周额度');
+    });
+
+    it('prefers local live non-empty display name over older snapshot name', () => {
+      const local = makeDefinition({
+        key: 'spark-weekly-0',
+        providerWindowId: 'spark-weekly-0',
+        provider: 'codex',
+        label: 'Live Spark weekly limit',
+        modelScope: { kind: 'models', models: ['gpt-5-spark'], complete: true },
+        display: {
+          ...makeDefinition().display,
+          key: 'spark-weekly-0',
+          label: 'Live Spark weekly limit',
+          kind: 'weekly',
+          remainingPercent: 80,
+          usedPercent: 20,
+          resetLabel: '-',
+          resetAtMs: 20_000,
+          fromMs: 1_000,
+          toMs: 20_000,
+          source: 'codex',
+          scopeDisplayName: 'Live Spark',
+        },
+      });
+      const snapshot = makeSnapshot({
+        provider_window_id: 'spark-weekly-0',
+        window_kind: 'weekly',
+        model_scope_kind: 'models',
+        model_ids: ['gpt-5-spark'],
+        scope_display_name: 'Stale Spark',
+        observed_at_ms: 5_000,
+      });
+      const merged = mergeAccountQuotaSnapshotWindows([local], [snapshot], {
+        provider: 'codex',
+        t,
+      });
+      expect(merged[0].display.scopeDisplayName).toBe('Live Spark');
+      expect(merged[0].display.label).toBe('Live Spark weekly limit');
+    });
+
+    it('supplements presentation when local name is blank without overriding quota numerical values', () => {
+      const local = makeDefinition({
+        key: 'spark-weekly-0',
+        providerWindowId: 'spark-weekly-0',
+        provider: 'codex',
+        label: 'spark-weekly-0',
+        modelScope: { kind: 'models', models: ['gpt-5-spark'], complete: true },
+        usedPercent: 75,
+        remainingPercent: 25,
+        observedAtMs: 30_000,
+        quotaProgressObservedAtMs: 30_000,
+        display: {
+          ...makeDefinition().display,
+          key: 'spark-weekly-0',
+          label: 'spark-weekly-0',
+          kind: 'weekly',
+          remainingPercent: 25,
+          usedPercent: 75,
+          resetLabel: '-',
+          resetAtMs: 40_000,
+          fromMs: 1_000,
+          toMs: 40_000,
+          source: 'codex',
+          observedAtMs: 30_000,
+          quotaProgressObservedAtMs: 30_000,
+          scopeDisplayName: undefined,
+        },
+      });
+      const snapshot = makeSnapshot({
+        provider_window_id: 'spark-weekly-0',
+        window_kind: 'weekly',
+        model_scope_kind: 'models',
+        model_ids: ['gpt-5-spark'],
+        scope_display_name: 'Spark',
         used_percent: 10,
-        availability: 'active',
+        remaining_percent: 90,
+        observed_at_ms: 10_000,
       });
-
-      const merged = mergeAccountQuotaSnapshotWindows([local], [server], {
+      const merged = mergeAccountQuotaSnapshotWindows([local], [snapshot], {
         provider: 'codex',
+        t,
       });
-
-      expect(merged).toHaveLength(1);
-      expect(merged[0].providerWindowId).toBe('future-feature-weekly-0');
-      expect(merged[0].usedPercent).toBe(40);
+      expect(merged[0].display.scopeDisplayName).toBe('Spark');
+      expect(merged[0].display.label).toBe('Spark weekly limit');
+      expect(merged[0].usedPercent).toBe(75);
+      expect(merged[0].remainingPercent).toBe(25);
+      expect(merged[0].display.usedPercent).toBe(75);
+      expect(merged[0].display.remainingPercent).toBe(25);
     });
 
-    it('Case B: server pending absent evidence is applied while preserving local canonical quota', () => {
-      const local = makeDefinition({
-        key: 'future-feature-weekly-0',
-        providerWindowId: 'future-feature-weekly-0',
-        providerWindowAliases: ['old-name-weekly-0'],
-        kind: 'weekly',
-        modelScope: { kind: 'feature', key: 'future_feature', complete: false },
-        observedAtMs: 200,
-        usedPercent: 40,
-        availability: 'active',
-      });
-      const server = makeSnapshot({
-        provider_window_id: 'old-name-weekly-0',
+    it('falls back to generic label on blank historical display without guessing provider_window_id', () => {
+      const snapshot = makeSnapshot({
+        provider_window_id: 'custom-scope-window',
         window_kind: 'weekly',
         model_scope_kind: 'feature',
-        model_scope_key: 'future_feature',
-        observed_at_ms: 100,
-        missing_since_ms: 300,
-        availability: 'pending_absent',
+        model_scope_key: 'custom_feature',
+        scope_display_name: '',
       });
-
-      const merged = mergeAccountQuotaSnapshotWindows([local], [server], {
+      const merged = mergeAccountQuotaSnapshotWindows([], [snapshot], {
         provider: 'codex',
+        getLabel: () => 'Generic Quota Window',
+        t,
       });
-
-      expect(merged).toHaveLength(1);
-      expect(merged[0].providerWindowId).toBe('future-feature-weekly-0');
-      expect(merged[0].usedPercent).toBe(40);
-      expect(merged[0].availability).toBe('pending_absent');
-    });
-
-    it('Case C: older server inactive tombstone does not override newer local positive observation', () => {
-      const local = makeDefinition({
-        key: 'future-feature-weekly-0',
-        providerWindowId: 'future-feature-weekly-0',
-        providerWindowAliases: ['old-name-weekly-0'],
-        kind: 'weekly',
-        modelScope: { kind: 'feature', key: 'future_feature', complete: false },
-        observedAtMs: 400,
-        usedPercent: 40,
-        availability: 'active',
-        currentHidden: false,
-      });
-      const server = makeSnapshot({
-        provider_window_id: 'old-name-weekly-0',
-        window_kind: 'weekly',
-        model_scope_kind: 'feature',
-        model_scope_key: 'future_feature',
-        observed_at_ms: 100,
-        deactivated_at_ms: 300,
-        availability: 'inactive',
-        current_hidden: true,
-      });
-
-      const merged = mergeAccountQuotaSnapshotWindows([local], [server], {
-        provider: 'codex',
-      });
-
-      expect(merged).toHaveLength(1);
-      expect(merged[0].providerWindowId).toBe('future-feature-weekly-0');
-      expect(merged[0].availability).toBe('active');
-      expect(merged[0].currentHidden).toBe(false);
-    });
-
-    it('Case D: fails closed when multiple local definitions match the same server alias', () => {
-      const local1 = makeDefinition({
-        key: 'future-feature-weekly-0',
-        providerWindowId: 'future-feature-weekly-0',
-        providerWindowAliases: ['old-name-weekly-0'],
-        kind: 'weekly',
-        modelScope: { kind: 'feature', key: 'future_feature', complete: false },
-        observedAtMs: 200,
-      });
-      const local2 = makeDefinition({
-        key: 'other-feature-weekly-0',
-        providerWindowId: 'other-feature-weekly-0',
-        providerWindowAliases: ['old-name-weekly-0'],
-        kind: 'weekly',
-        modelScope: { kind: 'feature', key: 'future_feature', complete: false },
-        observedAtMs: 200,
-      });
-      const server = makeSnapshot({
-        provider_window_id: 'old-name-weekly-0',
-        window_kind: 'weekly',
-        model_scope_kind: 'feature',
-        model_scope_key: 'future_feature',
-        observed_at_ms: 100,
-      });
-
-      const merged = mergeAccountQuotaSnapshotWindows([local1, local2], [server], {
-        provider: 'codex',
-      });
-
-      // Does not guess: both locals remain unmerged and server is appended as unmatched
-      expect(merged).toHaveLength(3);
-      expect(merged.map((m) => m.providerWindowId)).toContain('old-name-weekly-0');
-    });
-
-    it('Case E: cpamp:ambiguous:* does not participate in alias reconciliation', () => {
-      const local = makeDefinition({
-        key: 'cpamp:ambiguous:some-slot',
-        providerWindowId: 'cpamp:ambiguous:some-slot',
-        providerWindowAliases: ['old-name-weekly-0'],
-        kind: 'weekly',
-        identityAmbiguous: true,
-        modelScope: { kind: 'feature', key: 'future_feature', complete: false },
-        observedAtMs: 200,
-      });
-      const server = makeSnapshot({
-        provider_window_id: 'old-name-weekly-0',
-        window_kind: 'weekly',
-        model_scope_kind: 'feature',
-        model_scope_key: 'future_feature',
-        observed_at_ms: 100,
-      });
-
-      const merged = mergeAccountQuotaSnapshotWindows([local], [server], {
-        provider: 'codex',
-      });
-
-      // Ambiguous window does not alias match
-      expect(merged).toHaveLength(2);
-    });
-
-    it('Case F: does not match alias when semantic scopes differ', () => {
-      const local = makeDefinition({
-        key: 'future-feature-weekly-0',
-        providerWindowId: 'future-feature-weekly-0',
-        providerWindowAliases: ['shared-alias-weekly-0'],
-        kind: 'weekly',
-        modelScope: { kind: 'feature', key: 'feature_a', complete: false },
-        observedAtMs: 200,
-      });
-      const server = makeSnapshot({
-        provider_window_id: 'shared-alias-weekly-0',
-        window_kind: 'weekly',
-        model_scope_kind: 'feature',
-        model_scope_key: 'feature_b',
-        observed_at_ms: 100,
-      });
-
-      const merged = mergeAccountQuotaSnapshotWindows([local], [server], {
-        provider: 'codex',
-      });
-
-      expect(merged).toHaveLength(2);
-    });
-  });
-
-  describe('8.2 local ambiguous coverage', () => {
-    it('Case A: newer complete local ambiguous set shadows older identifiable active snapshots', () => {
-      const local1 = makeDefinition({
-        key: 'cpamp:ambiguous:same-quota-weekly-0',
-        providerWindowId: 'cpamp:ambiguous:same-quota-weekly-0',
-        kind: 'weekly',
-        identityAmbiguous: true,
-        modelScope: { kind: 'feature', key: 'same_quota', complete: false },
-        observedAtMs: 200,
-      });
-      const local2 = makeDefinition({
-        key: 'cpamp:ambiguous:same-quota-weekly-1',
-        providerWindowId: 'cpamp:ambiguous:same-quota-weekly-1',
-        kind: 'weekly',
-        identityAmbiguous: true,
-        modelScope: { kind: 'feature', key: 'same_quota', complete: false },
-        observedAtMs: 200,
-      });
-      const server1 = makeSnapshot({
-        provider_window_id: 'same-quota-weekly-0',
-        window_kind: 'weekly',
-        model_scope_kind: 'feature',
-        model_scope_key: 'same_quota',
-        observed_at_ms: 100,
-        availability: 'active',
-      });
-      const server2 = makeSnapshot({
-        provider_window_id: 'same-quota-weekly-1',
-        window_kind: 'weekly',
-        model_scope_kind: 'feature',
-        model_scope_key: 'same_quota',
-        observed_at_ms: 100,
-        availability: 'active',
-      });
-
-      const merged = mergeAccountQuotaSnapshotWindows([local1, local2], [server1, server2], {
-        provider: 'codex',
-        localObservation: completeCodexObservation(200),
-      });
-
-      expect(merged).toHaveLength(2);
-      expect(merged.map((m) => m.providerWindowId)).toEqual([
-        'cpamp:ambiguous:same-quota-weekly-0',
-        'cpamp:ambiguous:same-quota-weekly-1',
-      ]);
-    });
-
-    it('Case B: partial local observation cannot suppress identifiable server rows', () => {
-      const local = makeDefinition({
-        key: 'cpamp:ambiguous:same-quota-weekly-0',
-        providerWindowId: 'cpamp:ambiguous:same-quota-weekly-0',
-        kind: 'weekly',
-        identityAmbiguous: true,
-        modelScope: { kind: 'feature', key: 'same_quota', complete: false },
-        observedAtMs: 200,
-      });
-      const server = makeSnapshot({
-        provider_window_id: 'same-quota-weekly-0',
-        window_kind: 'weekly',
-        model_scope_kind: 'feature',
-        model_scope_key: 'same_quota',
-        observed_at_ms: 100,
-        availability: 'active',
-      });
-
-      const merged = mergeAccountQuotaSnapshotWindows([local], [server], {
-        provider: 'codex',
-        localObservation: {
-          observed_at_ms: 200,
-          inventory_scope_key: 'codex:rate-limits',
-          inventory_mode: 'partial',
-        },
-      });
-
-      expect(merged).toHaveLength(2);
-    });
-
-    it('Case C: empty complete local observation preserves omission debounce without suppressing', () => {
-      const server = makeSnapshot({
-        provider_window_id: 'same-quota-weekly-0',
-        window_kind: 'weekly',
-        model_scope_kind: 'feature',
-        model_scope_key: 'same_quota',
-        observed_at_ms: 100,
-        availability: 'active',
-      });
-
-      const merged = mergeAccountQuotaSnapshotWindows([], [server], {
-        provider: 'codex',
-        localObservation: completeCodexObservation(200),
-      });
-
-      expect(merged).toHaveLength(1);
-      expect(merged[0].providerWindowId).toBe('same-quota-weekly-0');
-    });
-
-    it('Case D: does not suppress when semantic scopes differ', () => {
-      const local = makeDefinition({
-        key: 'cpamp:ambiguous:same-quota-weekly-0',
-        providerWindowId: 'cpamp:ambiguous:same-quota-weekly-0',
-        kind: 'weekly',
-        identityAmbiguous: true,
-        modelScope: { kind: 'feature', key: 'scope_a', complete: false },
-        observedAtMs: 200,
-      });
-      const server = makeSnapshot({
-        provider_window_id: 'same-quota-weekly-0',
-        window_kind: 'weekly',
-        model_scope_kind: 'feature',
-        model_scope_key: 'scope_b',
-        observed_at_ms: 100,
-        availability: 'active',
-      });
-
-      const merged = mergeAccountQuotaSnapshotWindows([local], [server], {
-        provider: 'codex',
-        localObservation: completeCodexObservation(200),
-      });
-
-      expect(merged).toHaveLength(2);
-    });
-
-    it('Case E: does not suppress when window roles differ (weekly vs five_hour)', () => {
-      const local = makeDefinition({
-        key: 'cpamp:ambiguous:same-quota-weekly-0',
-        providerWindowId: 'cpamp:ambiguous:same-quota-weekly-0',
-        kind: 'weekly',
-        identityAmbiguous: true,
-        modelScope: { kind: 'feature', key: 'same_quota', complete: false },
-        observedAtMs: 200,
-      });
-      const server = makeSnapshot({
-        provider_window_id: 'same-quota-five-hour-0',
-        window_kind: 'five_hour',
-        model_scope_kind: 'feature',
-        model_scope_key: 'same_quota',
-        observed_at_ms: 100,
-        availability: 'active',
-      });
-
-      const merged = mergeAccountQuotaSnapshotWindows([local], [server], {
-        provider: 'codex',
-        localObservation: completeCodexObservation(200),
-      });
-
-      expect(merged).toHaveLength(2);
-    });
-
-    it('Case F: does not suppress when generic durations differ', () => {
-      const local = makeDefinition({
-        key: 'cpamp:ambiguous:custom-window-2d-0',
-        providerWindowId: 'cpamp:ambiguous:custom-window-2d-0',
-        kind: 'unknown',
-        durationSeconds: 172_800,
-        identityAmbiguous: true,
-        modelScope: { kind: 'feature', key: 'same_quota', complete: false },
-        observedAtMs: 200,
-      });
-      const server = makeSnapshot({
-        provider_window_id: 'custom-window-3d-0',
-        window_kind: 'unknown',
-        duration_seconds: 259_200,
-        model_scope_kind: 'feature',
-        model_scope_key: 'same_quota',
-        observed_at_ms: 100,
-        availability: 'active',
-      });
-
-      const merged = mergeAccountQuotaSnapshotWindows([local], [server], {
-        provider: 'codex',
-        localObservation: completeCodexObservation(200),
-      });
-
-      expect(merged).toHaveLength(2);
-    });
-
-    it('Case G: does not suppress when server lifecycle evidence is newer than local observation', () => {
-      const local = makeDefinition({
-        key: 'cpamp:ambiguous:same-quota-weekly-0',
-        providerWindowId: 'cpamp:ambiguous:same-quota-weekly-0',
-        kind: 'weekly',
-        identityAmbiguous: true,
-        modelScope: { kind: 'feature', key: 'same_quota', complete: false },
-        observedAtMs: 200,
-      });
-      const server = makeSnapshot({
-        provider_window_id: 'same-quota-weekly-0',
-        window_kind: 'weekly',
-        model_scope_kind: 'feature',
-        model_scope_key: 'same_quota',
-        observed_at_ms: 100,
-        missing_since_ms: 300,
-        availability: 'pending_absent',
-      });
-
-      const merged = mergeAccountQuotaSnapshotWindows([local], [server], {
-        provider: 'codex',
-        localObservation: completeCodexObservation(200),
-      });
-
-      expect(merged).toHaveLength(2);
-    });
-
-    it('Case H: does not suppress on equal timestamps', () => {
-      const local = makeDefinition({
-        key: 'cpamp:ambiguous:same-quota-weekly-0',
-        providerWindowId: 'cpamp:ambiguous:same-quota-weekly-0',
-        kind: 'weekly',
-        identityAmbiguous: true,
-        modelScope: { kind: 'feature', key: 'same_quota', complete: false },
-        observedAtMs: 200,
-      });
-      const server = makeSnapshot({
-        provider_window_id: 'same-quota-weekly-0',
-        window_kind: 'weekly',
-        model_scope_kind: 'feature',
-        model_scope_key: 'same_quota',
-        observed_at_ms: 200,
-        availability: 'active',
-      });
-
-      const merged = mergeAccountQuotaSnapshotWindows([local], [server], {
-        provider: 'codex',
-        localObservation: completeCodexObservation(200),
-      });
-
-      expect(merged).toHaveLength(2);
+      expect(merged[0].display.scopeDisplayName).toBeUndefined();
+      expect(merged[0].display.label).toBe('Generic Quota Window');
     });
   });
 });

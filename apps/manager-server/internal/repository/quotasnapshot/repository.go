@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/codexquota"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 )
 
@@ -44,24 +43,18 @@ type LegacyBackfillResult struct {
 	Completed      bool
 }
 
+type CyclePlanEvidence struct {
+	SnapshotCount    int64
+	MissingPlanCount int64
+	PlanTypes        []string
+}
+
 type Repository interface {
 	InsertObservationWrites(ctx context.Context, writes []model.AccountQuotaObservationWrite) error
 	ListCandidates(ctx context.Context, accountKey, provider string, limit int) ([]model.AccountQuotaSnapshot, error)
-	ListCurrentAmbiguousCandidates(ctx context.Context, accountKey, provider string) ([]model.AccountQuotaSnapshot, error)
-	ListLatestScopeDisplayCandidates(ctx context.Context, accountKey, provider string) ([]model.AccountQuotaSnapshot, error)
 	ListWindowStates(ctx context.Context, accountKey, provider string) ([]model.AccountQuotaWindowState, error)
-	// ReadQueryEvidence loads every evidence group one quota query needs inside
-	// a single SQLite read transaction, so one response can never mix states
-	// from before and after a background observation commit.
-	ReadQueryEvidence(ctx context.Context, accountKey, provider string, limit int) (QueryEvidence, error)
-}
-
-// QueryEvidence bundles the raw SQLite evidence consumed by Service.Query.
-type QueryEvidence struct {
-	Candidates          []model.AccountQuotaSnapshot
-	States              []model.AccountQuotaWindowState
-	AmbiguousCandidates []model.AccountQuotaSnapshot
-	DisplayCandidates   []model.AccountQuotaSnapshot
+	ListLegacyCodexWorkspaceWindowStates(ctx context.Context, accountKey, provider string) ([]model.AccountQuotaWindowState, error)
+	ListCyclePlanEvidence(ctx context.Context, cycleIDs []int64) (map[int64]CyclePlanEvidence, error)
 }
 
 type repository struct {
@@ -523,14 +516,10 @@ func codexWindowFamilyRole(providerWindowID string) (string, string, bool) {
 }
 
 func (r *repository) ListCandidates(ctx context.Context, accountKey, provider string, limit int) ([]model.AccountQuotaSnapshot, error) {
-	return listCandidates(ctx, r.db, accountKey, provider, limit)
-}
-
-func listCandidates(ctx context.Context, db quotaSnapshotQueryer, accountKey, provider string, limit int) ([]model.AccountQuotaSnapshot, error) {
 	if limit <= 0 {
 		limit = defaultCandidateLimit
 	}
-	rows, err := db.QueryContext(ctx, `with ranked as (
+	rows, err := r.db.QueryContext(ctx, `with ranked as (
 	select
 		id, coalesce(observation_id, 0) as observation_id,
 		coalesce(logical_window_id, 0) as logical_window_id,
@@ -542,9 +531,6 @@ func listCandidates(ctx context.Context, db quotaSnapshotQueryer, accountKey, pr
 		coalesce(model_ids_json, '') as model_ids_json,
 		coalesce(scope_fingerprint, '') as scope_fingerprint,
 		coalesce(content_hash, '') as content_hash,
-		coalesce((select observation.inventory_scope_key
-			from account_quota_observations observation
-			where observation.id = account_quota_snapshots.observation_id), '') as inventory_scope_key,
 		source, coalesce(source_observation_id, '') as source_observation_id, observed_at_ms,
 		boundary_accuracy, cycle_start_ms, cycle_end_ms, duration_seconds,
 		used_percent, remaining_percent, used_value, limit_value,
@@ -568,12 +554,11 @@ func listCandidates(ctx context.Context, db quotaSnapshotQueryer, accountKey, pr
 		where account_key = ? and provider = ?
 			and `+excludeLegacyCodexWorkspaceSnapshotSQL("")+`
 			and (observation_id is null or (
-				exists (
+				logical_window_id is not null and exists (
 					select 1 from account_quota_observations observation
 					where observation.id = account_quota_snapshots.observation_id
 						and observation.lifecycle_applied = 1
 				)
-				and logical_window_id is not null
 			))
 	)
 	select
@@ -583,7 +568,6 @@ func listCandidates(ctx context.Context, db quotaSnapshotQueryer, accountKey, pr
 		scope_display_name,
 		model_scope_kind, coalesce(model_scope_key, ''), coalesce(model_ids_json, ''),
 		coalesce(scope_fingerprint, ''), coalesce(content_hash, ''),
-		coalesce(inventory_scope_key, ''),
 		source, coalesce(source_observation_id, ''), observed_at_ms,
 		boundary_accuracy, cycle_start_ms, cycle_end_ms, duration_seconds,
 		used_percent, remaining_percent, used_value, limit_value,
@@ -622,7 +606,6 @@ func listCandidates(ctx context.Context, db quotaSnapshotQueryer, accountKey, pr
 			&item.ModelIDsJSON,
 			&item.ScopeFingerprint,
 			&item.ContentHash,
-			&item.InventoryScopeKey,
 			&item.Source,
 			&item.SourceObservationID,
 			&item.ObservedAtMS,
@@ -655,250 +638,59 @@ func listCandidates(ctx context.Context, db quotaSnapshotQueryer, accountKey, pr
 	return items, rows.Err()
 }
 
-// ListCurrentAmbiguousCandidates returns only the fully ambiguous Codex
-// Additional slots from the latest lifecycle-applied complete inventory for
-// each inventory scope. These snapshots are current-observation evidence, not
-// lifecycle history, so they intentionally bypass ListCandidates retention.
-func (r *repository) ListCurrentAmbiguousCandidates(ctx context.Context, accountKey, provider string) ([]model.AccountQuotaSnapshot, error) {
-	return listCurrentAmbiguousCandidates(ctx, r.db, accountKey, provider)
-}
-
-func listCurrentAmbiguousCandidates(ctx context.Context, db quotaSnapshotQueryer, accountKey, provider string) ([]model.AccountQuotaSnapshot, error) {
-	rows, err := db.QueryContext(ctx, `with latest_complete as (
-		select id, inventory_scope_key, observed_at_ms,
-			row_number() over (
-				partition by inventory_scope_key
-				order by observed_at_ms desc, id desc
-			) as observation_rank
-		from account_quota_observations
-		where account_key = ? and lower(trim(provider)) = lower(trim(?))
-			and lower(trim(inventory_mode)) = 'complete' and lifecycle_applied = 1
-	)
-	select
-		snapshot.id, coalesce(snapshot.observation_id, 0),
-		coalesce(snapshot.logical_window_id, 0), coalesce(snapshot.activation_id, 0),
-		coalesce(snapshot.cycle_id, 0), snapshot.account_key, snapshot.provider,
-		snapshot.provider_window_id, snapshot.window_kind, snapshot.window_mode,
-		coalesce(snapshot.scope_display_name, ''), snapshot.model_scope_kind,
-		coalesce(snapshot.model_scope_key, ''), coalesce(snapshot.model_ids_json, ''),
-		coalesce(snapshot.scope_fingerprint, ''), coalesce(snapshot.content_hash, ''),
-		latest_complete.inventory_scope_key,
-		snapshot.source, coalesce(snapshot.source_observation_id, ''), snapshot.observed_at_ms,
-		snapshot.boundary_accuracy, snapshot.cycle_start_ms, snapshot.cycle_end_ms,
-		snapshot.duration_seconds, snapshot.used_percent, snapshot.remaining_percent,
-		snapshot.used_value, snapshot.limit_value, coalesce(snapshot.quota_unit, ''),
-		snapshot.reset_credits_available, coalesce(snapshot.reset_credits_json, ''),
-		coalesce(snapshot.plan_type, ''), snapshot.created_at_ms
-	from latest_complete
-	join account_quota_snapshots snapshot on snapshot.observation_id = latest_complete.id
-	where latest_complete.observation_rank = 1
-		and snapshot.account_key = ? and lower(trim(snapshot.provider)) = 'codex'
-		and lower(trim(snapshot.model_scope_kind)) = 'feature'
-		and trim(coalesce(snapshot.model_scope_key, '')) <> ''
-		and lower(trim(snapshot.provider_window_id)) like 'cpamp:ambiguous:%'
-		and coalesce(snapshot.logical_window_id, 0) = 0
-		and `+excludeLegacyCodexWorkspaceSnapshotSQL("snapshot")+`
-	order by latest_complete.observed_at_ms desc, latest_complete.id desc,
-		snapshot.observed_at_ms desc, snapshot.id desc`,
-		strings.TrimSpace(accountKey), strings.TrimSpace(provider), strings.TrimSpace(accountKey))
+func (r *repository) ListCyclePlanEvidence(ctx context.Context, cycleIDs []int64) (map[int64]CyclePlanEvidence, error) {
+	uniqueIDs := make([]int64, 0, len(cycleIDs))
+	seen := make(map[int64]struct{}, len(cycleIDs))
+	for _, cycleID := range cycleIDs {
+		if cycleID <= 0 {
+			continue
+		}
+		if _, exists := seen[cycleID]; exists {
+			continue
+		}
+		seen[cycleID] = struct{}{}
+		uniqueIDs = append(uniqueIDs, cycleID)
+	}
+	if len(uniqueIDs) == 0 {
+		return map[int64]CyclePlanEvidence{}, nil
+	}
+	sort.Slice(uniqueIDs, func(i, j int) bool { return uniqueIDs[i] < uniqueIDs[j] })
+	placeholders := make([]string, len(uniqueIDs))
+	args := make([]any, len(uniqueIDs))
+	for index, cycleID := range uniqueIDs {
+		placeholders[index] = "?"
+		args[index] = cycleID
+	}
+	rows, err := r.db.QueryContext(ctx, `select
+		cycle_id, lower(trim(coalesce(plan_type, ''))) as normalized_plan_type, count(*)
+		from account_quota_snapshots
+		where cycle_id in (`+strings.Join(placeholders, ",")+`)
+		group by cycle_id, normalized_plan_type
+		order by cycle_id, normalized_plan_type`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-
-	items := make([]model.AccountQuotaSnapshot, 0)
+	evidenceByCycle := make(map[int64]CyclePlanEvidence, len(uniqueIDs))
 	for rows.Next() {
-		var item model.AccountQuotaSnapshot
-		var cycleStart, cycleEnd, duration sql.NullInt64
-		var usedPercent, remainingPercent, usedValue, limitValue sql.NullFloat64
-		var resetCreditsAvailable sql.NullInt64
-		if err := rows.Scan(
-			&item.ID,
-			&item.ObservationID,
-			&item.LogicalWindowID,
-			&item.ActivationID,
-			&item.CycleID,
-			&item.AccountKey,
-			&item.Provider,
-			&item.ProviderWindowID,
-			&item.WindowKind,
-			&item.WindowMode,
-			&item.ScopeDisplayName,
-			&item.ModelScopeKind,
-			&item.ModelScopeKey,
-			&item.ModelIDsJSON,
-			&item.ScopeFingerprint,
-			&item.ContentHash,
-			&item.InventoryScopeKey,
-			&item.Source,
-			&item.SourceObservationID,
-			&item.ObservedAtMS,
-			&item.BoundaryAccuracy,
-			&cycleStart,
-			&cycleEnd,
-			&duration,
-			&usedPercent,
-			&remainingPercent,
-			&usedValue,
-			&limitValue,
-			&item.QuotaUnit,
-			&resetCreditsAvailable,
-			&item.ResetCreditsJSON,
-			&item.PlanType,
-			&item.CreatedAtMS,
-		); err != nil {
+		var cycleID, count int64
+		var planType string
+		if err := rows.Scan(&cycleID, &planType, &count); err != nil {
 			return nil, err
 		}
-		item.CycleStartMS = int64Pointer(cycleStart)
-		item.CycleEndMS = int64Pointer(cycleEnd)
-		item.DurationSeconds = int64Pointer(duration)
-		item.UsedPercent = float64Pointer(usedPercent)
-		item.RemainingPercent = float64Pointer(remainingPercent)
-		item.UsedValue = float64Pointer(usedValue)
-		item.LimitValue = float64Pointer(limitValue)
-		item.ResetCreditsAvailable = int64Pointer(resetCreditsAvailable)
-		items = append(items, item)
+		evidence := evidenceByCycle[cycleID]
+		evidence.SnapshotCount += count
+		if planType == "" {
+			evidence.MissingPlanCount += count
+		} else {
+			evidence.PlanTypes = append(evidence.PlanTypes, planType)
+		}
+		evidenceByCycle[cycleID] = evidence
 	}
-	return items, rows.Err()
-}
-
-// ListLatestScopeDisplayCandidates reads display evidence independently from
-// the ordinary quota candidate retention window. A blank observation is not
-// display evidence, so it cannot evict an older non-empty name from the same
-// logical window activation. Legacy, unattached snapshots use their provider
-// identity plus scope as the compatibility partition.
-func (r *repository) ListLatestScopeDisplayCandidates(ctx context.Context, accountKey, provider string) ([]model.AccountQuotaSnapshot, error) {
-	return listLatestScopeDisplayCandidates(ctx, r.db, accountKey, provider)
-}
-
-func listLatestScopeDisplayCandidates(ctx context.Context, db quotaSnapshotQueryer, accountKey, provider string) ([]model.AccountQuotaSnapshot, error) {
-	rows, err := db.QueryContext(ctx, `with ranked as (
-	select
-		snapshot.id, coalesce(snapshot.observation_id, 0) as observation_id,
-		coalesce(snapshot.logical_window_id, 0) as logical_window_id,
-		coalesce(snapshot.activation_id, 0) as activation_id,
-		coalesce(snapshot.cycle_id, 0) as cycle_id,
-		snapshot.account_key, snapshot.provider, snapshot.provider_window_id,
-		snapshot.window_kind, snapshot.window_mode,
-		trim(coalesce(snapshot.scope_display_name, '')) as scope_display_name,
-		snapshot.model_scope_kind, coalesce(snapshot.model_scope_key, '') as model_scope_key,
-		coalesce(snapshot.model_ids_json, '') as model_ids_json,
-		coalesce(snapshot.scope_fingerprint, '') as scope_fingerprint,
-		coalesce(snapshot.content_hash, '') as content_hash,
-		snapshot.source, coalesce(snapshot.source_observation_id, '') as source_observation_id, snapshot.observed_at_ms,
-		snapshot.boundary_accuracy, snapshot.cycle_start_ms, snapshot.cycle_end_ms, snapshot.duration_seconds,
-		snapshot.used_percent, snapshot.remaining_percent, snapshot.used_value, snapshot.limit_value,
-		coalesce(snapshot.quota_unit, '') as quota_unit, snapshot.reset_credits_available,
-		coalesce(snapshot.reset_credits_json, '') as reset_credits_json,
-		coalesce(snapshot.plan_type, '') as plan_type, snapshot.created_at_ms,
-		row_number() over (
-			partition by case
-				when snapshot.logical_window_id is not null and snapshot.logical_window_id > 0 then
-					'logical:' || cast(snapshot.logical_window_id as text) || char(0) || cast(coalesce(snapshot.activation_id, 0) as text)
-				else
-					'legacy:' || lower(trim(snapshot.provider_window_id)) || char(0) ||
-					lower(trim(snapshot.window_kind)) || char(0) || coalesce(snapshot.scope_fingerprint, '')
-			end
-			order by snapshot.observed_at_ms desc, snapshot.id desc
-		) as display_rank
-		from account_quota_snapshots snapshot
-		left join account_quota_windows quota_window
-			on snapshot.logical_window_id = quota_window.id
-		left join account_quota_window_activations activation
-			on snapshot.activation_id = activation.id
-		where snapshot.account_key = ? and snapshot.provider = ?
-		and `+excludeLegacyCodexWorkspaceSnapshotSQL("snapshot")+`
-			and trim(coalesce(snapshot.scope_display_name, '')) <> ''
-			and (snapshot.observation_id is null or (
-				exists (
-					select 1 from account_quota_observations observation
-					where observation.id = snapshot.observation_id
-						and observation.lifecycle_applied = 1
-				)
-				and (coalesce(snapshot.activation_id, 0) <= 0 or (
-					snapshot.logical_window_id is not null
-					and snapshot.logical_window_id > 0
-					and activation.id = snapshot.activation_id
-					and activation.window_id = quota_window.id
-					and activation.generation = quota_window.generation
-				))
-			))
-		and not (
-			lower(trim(snapshot.provider)) = 'codex'
-			and lower(trim(snapshot.provider_window_id)) like 'cpamp:ambiguous:%'
-		)
-	)
-	select
-		id, observation_id, logical_window_id, activation_id, cycle_id,
-		account_key, provider, provider_window_id, window_kind, window_mode,
-		scope_display_name,
-		model_scope_kind, model_scope_key, model_ids_json,
-		scope_fingerprint, content_hash,
-		source, source_observation_id, observed_at_ms,
-		boundary_accuracy, cycle_start_ms, cycle_end_ms, duration_seconds,
-		used_percent, remaining_percent, used_value, limit_value,
-		quota_unit, reset_credits_available, reset_credits_json, plan_type, created_at_ms
-	from ranked
-	where display_rank = 1
-	order by observed_at_ms desc, id desc`, strings.TrimSpace(accountKey), strings.TrimSpace(provider))
-	if err != nil {
+	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	items := make([]model.AccountQuotaSnapshot, 0)
-	for rows.Next() {
-		var item model.AccountQuotaSnapshot
-		var cycleStart, cycleEnd, duration sql.NullInt64
-		var usedPercent, remainingPercent, usedValue, limitValue sql.NullFloat64
-		var resetCreditsAvailable sql.NullInt64
-		if err := rows.Scan(
-			&item.ID,
-			&item.ObservationID,
-			&item.LogicalWindowID,
-			&item.ActivationID,
-			&item.CycleID,
-			&item.AccountKey,
-			&item.Provider,
-			&item.ProviderWindowID,
-			&item.WindowKind,
-			&item.WindowMode,
-			&item.ScopeDisplayName,
-			&item.ModelScopeKind,
-			&item.ModelScopeKey,
-			&item.ModelIDsJSON,
-			&item.ScopeFingerprint,
-			&item.ContentHash,
-			&item.Source,
-			&item.SourceObservationID,
-			&item.ObservedAtMS,
-			&item.BoundaryAccuracy,
-			&cycleStart,
-			&cycleEnd,
-			&duration,
-			&usedPercent,
-			&remainingPercent,
-			&usedValue,
-			&limitValue,
-			&item.QuotaUnit,
-			&resetCreditsAvailable,
-			&item.ResetCreditsJSON,
-			&item.PlanType,
-			&item.CreatedAtMS,
-		); err != nil {
-			return nil, err
-		}
-		item.CycleStartMS = int64Pointer(cycleStart)
-		item.CycleEndMS = int64Pointer(cycleEnd)
-		item.DurationSeconds = int64Pointer(duration)
-		item.UsedPercent = float64Pointer(usedPercent)
-		item.RemainingPercent = float64Pointer(remainingPercent)
-		item.UsedValue = float64Pointer(usedValue)
-		item.LimitValue = float64Pointer(limitValue)
-		item.ResetCreditsAvailable = int64Pointer(resetCreditsAvailable)
-		items = append(items, item)
-	}
-	return items, rows.Err()
+	return evidenceByCycle, nil
 }
 
 func nullString(value string) any {
@@ -930,179 +722,4 @@ func float64Pointer(value sql.NullFloat64) *float64 {
 	}
 	result := value.Float64
 	return &result
-}
-
-// ReadQueryEvidence runs every quota-query evidence read for one account and
-// provider inside a single short read transaction. A background inspection
-// commit can then land entirely before or entirely after the response, never
-// in between. Normalization, window selection, and presentation shadowing stay
-// outside the transaction on purpose.
-func (r *repository) ReadQueryEvidence(ctx context.Context, accountKey, provider string, limit int) (QueryEvidence, error) {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return QueryEvidence{}, err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	evidence := QueryEvidence{}
-	if evidence.Candidates, err = listCandidates(ctx, tx, accountKey, provider, limit); err != nil {
-		return QueryEvidence{}, err
-	}
-	if evidence.States, err = listWindowStates(ctx, tx, accountKey, provider); err != nil {
-		return QueryEvidence{}, err
-	}
-	if strings.EqualFold(strings.TrimSpace(provider), "codex") {
-		evidence.Candidates = suppressUnattachedLegacyCodexCandidates(evidence.Candidates, evidence.States)
-		if evidence.AmbiguousCandidates, err = listCurrentAmbiguousCandidates(ctx, tx, accountKey, provider); err != nil {
-			return QueryEvidence{}, err
-		}
-	}
-	if evidence.DisplayCandidates, err = listLatestScopeDisplayCandidates(ctx, tx, accountKey, provider); err != nil {
-		return QueryEvidence{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return QueryEvidence{}, err
-	}
-	return evidence, nil
-}
-
-type unattachedLegacyGroup struct {
-	inventoryScopeKey string
-	scopeFingerprint  string
-	providerWindowID  string
-	windowKind        string
-	maxObservedAtMS   int64
-}
-
-func suppressUnattachedLegacyCodexCandidates(
-	candidates []model.AccountQuotaSnapshot,
-	states []model.AccountQuotaWindowState,
-) []model.AccountQuotaSnapshot {
-	legacyGroups := make(map[string]*unattachedLegacyGroup)
-	for _, s := range candidates {
-		if s.ObservationID != 0 || s.LogicalWindowID != 0 {
-			continue
-		}
-		id := strings.ToLower(strings.TrimSpace(s.ProviderWindowID))
-		if id == "" || codexquota.IsAmbiguousAdditionalProviderWindowID(id) ||
-			codexquota.IsMainProviderWindowID(id) || codexquota.IsSparkProviderWindowID(id) ||
-			codexquota.IsCodeReviewProviderWindowID(id) {
-			continue
-		}
-		key := s.ScopeFingerprint + "\x00" + id
-		if existing, ok := legacyGroups[key]; ok {
-			if s.ObservedAtMS > existing.maxObservedAtMS {
-				existing.maxObservedAtMS = s.ObservedAtMS
-			}
-		} else {
-			legacyGroups[key] = &unattachedLegacyGroup{
-				inventoryScopeKey: s.InventoryScopeKey,
-				scopeFingerprint:  s.ScopeFingerprint,
-				providerWindowID:  id,
-				windowKind:        strings.ToLower(strings.TrimSpace(s.WindowKind)),
-				maxObservedAtMS:   s.ObservedAtMS,
-			}
-		}
-	}
-	if len(legacyGroups) == 0 {
-		return candidates
-	}
-
-	canonicalMaxObservedAt := make(map[int64]int64)
-	for _, s := range candidates {
-		if s.LogicalWindowID > 0 {
-			if s.ObservedAtMS > canonicalMaxObservedAt[s.LogicalWindowID] {
-				canonicalMaxObservedAt[s.LogicalWindowID] = s.ObservedAtMS
-			}
-		}
-	}
-
-	type activeCanonicalWindow struct {
-		logicalWindowID   int64
-		providerWindowID  string
-		inventoryScopeKey string
-		scopeFingerprint  string
-		windowKind        string
-		maxObservedAtMS   int64
-	}
-	var canonicalWindows []activeCanonicalWindow
-	for _, st := range states {
-		if st.Availability == "inactive" {
-			continue
-		}
-		if !strings.EqualFold(strings.TrimSpace(st.ModelScopeKind), "feature") {
-			continue
-		}
-		id := strings.ToLower(strings.TrimSpace(st.ProviderWindowID))
-		if id == "" || codexquota.IsAmbiguousAdditionalProviderWindowID(id) ||
-			codexquota.IsMainProviderWindowID(id) || codexquota.IsSparkProviderWindowID(id) ||
-			codexquota.IsCodeReviewProviderWindowID(id) {
-			continue
-		}
-		canonicalWindows = append(canonicalWindows, activeCanonicalWindow{
-			logicalWindowID:   st.ID,
-			providerWindowID:  id,
-			inventoryScopeKey: st.InventoryScopeKey,
-			scopeFingerprint:  st.ScopeFingerprint,
-			windowKind:        strings.ToLower(strings.TrimSpace(st.WindowKind)),
-			maxObservedAtMS:   canonicalMaxObservedAt[st.ID],
-		})
-	}
-	if len(canonicalWindows) == 0 {
-		return candidates
-	}
-
-	legacyToCanonical := make(map[string][]int64)
-	canonicalToLegacy := make(map[int64][]string)
-
-	for legacyKey, legacy := range legacyGroups {
-		legacySuffix, hasLegacySuffix := generatedCodexWindowSuffixFromID(legacy.providerWindowID)
-		for _, canonical := range canonicalWindows {
-			if legacy.inventoryScopeKey != "" && canonical.inventoryScopeKey != "" &&
-				legacy.inventoryScopeKey != canonical.inventoryScopeKey {
-				continue
-			}
-			if legacy.scopeFingerprint != canonical.scopeFingerprint {
-				continue
-			}
-			canonicalSuffix, hasCanonicalSuffix := generatedCodexWindowSuffixFromID(canonical.providerWindowID)
-			suffixMatch := hasLegacySuffix && hasCanonicalSuffix && legacySuffix == canonicalSuffix
-			kindMatch := legacy.windowKind != "" && canonical.windowKind != "" && legacy.windowKind == canonical.windowKind
-			if !suffixMatch && !kindMatch {
-				continue
-			}
-			// Freshness: canonical linked evidence must be at least as fresh as legacy
-			if canonical.maxObservedAtMS < legacy.maxObservedAtMS {
-				continue
-			}
-			legacyToCanonical[legacyKey] = append(legacyToCanonical[legacyKey], canonical.logicalWindowID)
-			canonicalToLegacy[canonical.logicalWindowID] = append(canonicalToLegacy[canonical.logicalWindowID], legacyKey)
-		}
-	}
-
-	suppressedLegacyKeys := make(map[string]bool)
-	for legacyKey, canonicalIDs := range legacyToCanonical {
-		if len(canonicalIDs) == 1 {
-			canonicalID := canonicalIDs[0]
-			if len(canonicalToLegacy[canonicalID]) == 1 {
-				suppressedLegacyKeys[legacyKey] = true
-			}
-		}
-	}
-	if len(suppressedLegacyKeys) == 0 {
-		return candidates
-	}
-
-	filtered := make([]model.AccountQuotaSnapshot, 0, len(candidates))
-	for _, s := range candidates {
-		if s.ObservationID == 0 && s.LogicalWindowID == 0 {
-			id := strings.ToLower(strings.TrimSpace(s.ProviderWindowID))
-			key := s.ScopeFingerprint + "\x00" + id
-			if suppressedLegacyKeys[key] {
-				continue
-			}
-		}
-		filtered = append(filtered, s)
-	}
-	return filtered
 }
