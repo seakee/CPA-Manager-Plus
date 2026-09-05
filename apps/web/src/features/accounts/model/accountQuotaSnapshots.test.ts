@@ -1531,3 +1531,153 @@ describe('account quota snapshots', () => {
     expect(reverse?.rateLimitResetCreditsAvailableCount).toBe(3);
   });
 });
+
+describe('stale server ambiguous current-set suppression', () => {
+  const completeCodexObservation = (observedAtMs: number) => ({
+    observed_at_ms: observedAtMs,
+    inventory_scope_key: 'codex:rate-limits',
+    inventory_mode: 'complete' as const,
+  });
+  const ambiguousSnapshot = (
+    index: number,
+    observedAtMs: number
+  ): AccountQuotaSnapshotWindow =>
+    makeSnapshot({
+      provider_window_id: `cpamp:ambiguous:future-feature-weekly-${index}`,
+      window_kind: 'weekly',
+      model_scope_kind: 'feature',
+      model_scope_key: 'future_feature',
+      observed_at_ms: observedAtMs,
+      used_percent: 30,
+      remaining_percent: 70,
+    });
+  const uniqueLocalDefinition = () =>
+    makeDefinition({
+      key: 'future-feature-weekly-0',
+      providerWindowId: 'future-feature-weekly-0',
+      modelScope: { kind: 'feature', key: 'future_feature', complete: false },
+    });
+
+  it('drops stale ambiguous snapshots when a newer local complete inventory exists', () => {
+    const merged = mergeAccountQuotaSnapshotWindows(
+      [uniqueLocalDefinition()],
+      [ambiguousSnapshot(0, 100), ambiguousSnapshot(1, 100)],
+      {
+        provider: 'codex',
+        localObservation: completeCodexObservation(200),
+      }
+    );
+
+    expect(merged.map((definition) => definition.providerWindowId)).toEqual([
+      'future-feature-weekly-0',
+    ]);
+  });
+
+  it('drops stale ambiguous snapshots when the newer complete inventory is empty', () => {
+    const merged = mergeAccountQuotaSnapshotWindows(
+      [],
+      [ambiguousSnapshot(0, 100), ambiguousSnapshot(1, 100)],
+      {
+        provider: 'codex',
+        localObservation: completeCodexObservation(200),
+      }
+    );
+
+    expect(merged).toEqual([]);
+  });
+
+  it('keeps ambiguous snapshots when the newer local observation is partial', () => {
+    const merged = mergeAccountQuotaSnapshotWindows(
+      [],
+      [ambiguousSnapshot(0, 100), ambiguousSnapshot(1, 100)],
+      {
+        provider: 'codex',
+        localObservation: {
+          observed_at_ms: 200,
+          inventory_scope_key: 'codex:rate-limits',
+          inventory_mode: 'partial',
+        },
+      }
+    );
+
+    expect(merged.map((definition) => definition.providerWindowId)).toEqual([
+      'cpamp:ambiguous:future-feature-weekly-0',
+      'cpamp:ambiguous:future-feature-weekly-1',
+    ]);
+  });
+
+  it('keeps ambiguous snapshots that are newer than the local observation', () => {
+    const merged = mergeAccountQuotaSnapshotWindows(
+      [uniqueLocalDefinition()],
+      [ambiguousSnapshot(0, 300)],
+      {
+        provider: 'codex',
+        localObservation: completeCodexObservation(200),
+      }
+    );
+
+    expect(merged.map((definition) => definition.providerWindowId)).toEqual([
+      'future-feature-weekly-0',
+      'cpamp:ambiguous:future-feature-weekly-0',
+    ]);
+  });
+
+  it('keeps server ambiguous evidence on equal timestamps', () => {
+    const merged = mergeAccountQuotaSnapshotWindows(
+      [uniqueLocalDefinition()],
+      [ambiguousSnapshot(0, 200)],
+      {
+        provider: 'codex',
+        localObservation: completeCodexObservation(200),
+      }
+    );
+
+    expect(merged.map((definition) => definition.providerWindowId)).toEqual([
+      'future-feature-weekly-0',
+      'cpamp:ambiguous:future-feature-weekly-0',
+    ]);
+  });
+
+  it('never suppresses identifiable lifecycle snapshots', () => {
+    const pending = makeSnapshot({
+      provider_window_id: 'future-feature-weekly-1',
+      window_kind: 'weekly',
+      model_scope_kind: 'feature',
+      model_scope_key: 'future_feature',
+      observed_at_ms: 100,
+      availability: 'pending_absent',
+      missing_since_ms: 100,
+    });
+    const inactive = makeSnapshot({
+      provider_window_id: 'legacy-quota-weekly-0',
+      window_kind: 'weekly',
+      model_scope_kind: 'feature',
+      model_scope_key: 'legacy_quota',
+      observed_at_ms: 100,
+      availability: 'inactive',
+      deactivated_at_ms: 100,
+    });
+    const merged = mergeAccountQuotaSnapshotWindows([], [pending, inactive], {
+      provider: 'codex',
+      localObservation: completeCodexObservation(200),
+    });
+
+    expect(merged.map((definition) => definition.availability)).toEqual([
+      'pending_absent',
+      'inactive',
+    ]);
+  });
+
+  it('requires the Codex rate-limits inventory scope before suppressing', () => {
+    const merged = mergeAccountQuotaSnapshotWindows([], [ambiguousSnapshot(0, 100)], {
+      provider: 'codex',
+      localObservation: {
+        observed_at_ms: 200,
+        inventory_scope_key: 'codex:other-scope',
+        inventory_mode: 'complete',
+      },
+    });
+
+    expect(merged).toHaveLength(1);
+  });
+});

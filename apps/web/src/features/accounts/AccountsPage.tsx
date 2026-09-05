@@ -4564,37 +4564,53 @@ export function AccountsPage() {
     });
     return result;
   }, [quotaDisplayWindowsByRowKey]);
+  const quotaRowBySelectionKey = useMemo(() => {
+    const result = new Map<string, AccountRow>();
+    pageRows.forEach((row) => {
+      result.set(row.selectionKey, row);
+    });
+    if (selectedRow && !result.has(selectedRow.selectionKey)) {
+      result.set(selectedRow.selectionKey, selectedRow);
+    }
+    return result;
+  }, [pageRows, selectedRow]);
   const effectiveQuotaWindowDefinitionsByRowKey = useMemo(() => {
     const result = new Map<string, AccountQuotaWindowDefinition[]>();
     quotaWindowDefinitionsByRowKey.forEach((definitions, rowKey) => {
-      const provider = selectedRow?.selectionKey === rowKey ? selectedRow.provider : undefined;
+      const row = quotaRowBySelectionKey.get(rowKey);
+      const provider =
+        row?.provider ?? (selectedRow?.selectionKey === rowKey ? selectedRow.provider : undefined);
       result.set(
         rowKey,
         filterCurrentAccountQuotaWindowDefinitions(
-          mergeAccountQuotaSnapshotWindows(
-            definitions,
-            quotaSnapshotWindowsByRowKey.get(rowKey) ?? [],
-            {
-              provider,
-              t,
-              getLabel: (snapshot) => {
-                const kind = snapshot.window_kind;
-                if (kind === 'rolling_24h') {
-                  return t('accounts.detail_snapshot_window_rolling_24h');
-                }
-                if (kind === 'five_hour') return t('accounts.detail_snapshot_window_five_hour');
-                if (kind === 'daily') return t('accounts.detail_snapshot_window_daily');
-                if (kind === 'weekly') return t('accounts.detail_snapshot_window_weekly');
-                if (kind === 'monthly') return t('accounts.detail_snapshot_window_monthly');
-                return snapshot.provider_window_id;
-              },
-            }
-          )
+          mergeAccountQuotaSnapshotWindows(definitions, quotaSnapshotWindowsByRowKey.get(rowKey) ?? [], {
+            provider,
+            localObservation: row ? getQuotaSnapshotObservation(row) : undefined,
+            t,
+            getLabel: (snapshot) => {
+              const kind = snapshot.window_kind;
+              if (kind === 'rolling_24h') {
+                return t('accounts.detail_snapshot_window_rolling_24h');
+              }
+              if (kind === 'five_hour') return t('accounts.detail_snapshot_window_five_hour');
+              if (kind === 'daily') return t('accounts.detail_snapshot_window_daily');
+              if (kind === 'weekly') return t('accounts.detail_snapshot_window_weekly');
+              if (kind === 'monthly') return t('accounts.detail_snapshot_window_monthly');
+              return snapshot.provider_window_id;
+            },
+          })
         )
       );
     });
     return result;
-  }, [quotaSnapshotWindowsByRowKey, quotaWindowDefinitionsByRowKey, selectedRow, t]);
+  }, [
+    getQuotaSnapshotObservation,
+    quotaRowBySelectionKey,
+    quotaSnapshotWindowsByRowKey,
+    quotaWindowDefinitionsByRowKey,
+    selectedRow,
+    t,
+  ]);
   const accountWindowUsageTargets = useMemo(() => {
     if (!selectedRow) return [];
     const windowsByRowKey = new Map<string, AccountQuotaWindowDefinition[]>();
@@ -5317,6 +5333,7 @@ export function AccountsPage() {
             const mergedDefinitions = filterCurrentAccountQuotaWindowDefinitions(
               mergeAccountQuotaSnapshotWindows(localDefinitions, snapshotWindows, {
                 provider: selectedRow.provider,
+                localObservation: getQuotaSnapshotObservation(selectedRow),
                 t,
                 getLabel: (snapshot) => {
                   const kind = snapshot.window_kind;

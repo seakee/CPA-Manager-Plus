@@ -448,11 +448,45 @@ const compareSnapshotFreshness = (
   return leftKey < rightKey ? -1 : 1;
 };
 
+export type AccountQuotaLocalObservationEvidence = Pick<
+  AccountQuotaSnapshotObservationInput,
+  'observed_at_ms' | 'inventory_scope_key' | 'inventory_mode'
+>;
+
+const CODEX_RATE_LIMITS_INVENTORY_SCOPE_KEY = 'codex:rate-limits';
+
+// Reserved ambiguous snapshots are current-observation evidence without a
+// durable lifecycle identity, so a newer local complete Provider inventory is
+// authoritative enough to supersede an older persisted ambiguous set — even
+// when the snapshot write failed and the server never saw that inventory.
+// Identifiable lifecycle rows must never take this shortcut: they are governed
+// by the active → pending_absent → inactive debounce.
+const shouldSuppressServerAmbiguousSnapshot = (
+  snapshot: AccountQuotaSnapshotWindow,
+  provider: string | undefined,
+  localObservation: AccountQuotaLocalObservationEvidence | undefined
+): boolean => {
+  if (provider !== 'codex') return false;
+  if (!isAmbiguousCodexProviderWindowId(snapshot.provider_window_id)) return false;
+  if (!localObservation) return false;
+  if (localObservation.inventory_mode !== 'complete') return false;
+  if (localObservation.inventory_scope_key?.trim() !== CODEX_RATE_LIMITS_INVENTORY_SCOPE_KEY) {
+    return false;
+  }
+  const localObservedAtMs = validEvidenceAtMs(localObservation.observed_at_ms);
+  const snapshotObservedAtMs = validEvidenceAtMs(snapshot.observed_at_ms);
+  if (localObservedAtMs <= 0 || snapshotObservedAtMs <= 0) return false;
+  // Strictly newer only: on equal timestamps the Manager Server owns source
+  // authority ordering that the frontend merge does not reproduce.
+  return localObservedAtMs > snapshotObservedAtMs;
+};
+
 export const mergeAccountQuotaSnapshotWindows = (
   definitions: AccountQuotaWindowDefinition[],
   snapshots: AccountQuotaSnapshotWindow[],
   options: {
     provider?: string;
+    localObservation?: AccountQuotaLocalObservationEvidence;
     getLabel?: (snapshot: AccountQuotaSnapshotWindow) => string;
     t?: TFunction;
   } = {}
@@ -707,7 +741,15 @@ export const mergeAccountQuotaSnapshotWindows = (
   });
   const unmatchedSnapshots = Array.from(snapshotsByKey.entries())
     .filter(([key]) => !matchedSnapshotKeys.has(key))
-    .map(([, snapshot]) => snapshot);
+    .map(([, snapshot]) => snapshot)
+    .filter(
+      (snapshot) =>
+        !shouldSuppressServerAmbiguousSnapshot(
+          snapshot,
+          options.provider,
+          options.localObservation
+        )
+    );
   const appendedProviderCounts = new Map<string, number>();
   unmatchedSnapshots.forEach((snapshot) => {
     appendedProviderCounts.set(

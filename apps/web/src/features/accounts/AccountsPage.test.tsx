@@ -12850,6 +12850,97 @@ describe('AccountsPage replacement flows', () => {
     expect(mocks.getAccountWindowUsage).toHaveBeenCalled();
   });
 
+  it('hides stale persisted ambiguous snapshots when a newer local complete inventory exists despite a write failure', async () => {
+    const fetchedAtMs = Date.now();
+    const file = {
+      ...makeCodexFile('codex.json', 'auth-1', 'codex@example.com'),
+      disabled: true,
+    } as AuthFileItem;
+    const rowKey = getAuthFileSelectionKey(file);
+    mocks.files = [file];
+    mocks.location = {
+      pathname: '/accounts',
+      search: `?account=${encodeURIComponent(rowKey)}&tab=quota`,
+    };
+    mocks.panelFeatureAvailability = {
+      checking: false,
+      managerServiceBase: 'http://manager.local:18317',
+      requestMonitoringAvailable: true,
+      serverCodexInspectionAvailable: false,
+    };
+    mocks.quotaState.codexQuota = buildCredentialScopedQuotaRecord(file, {
+      status: 'success',
+      fetchedAtMs,
+      quotaInventoryObserved: true,
+      windows: [
+        {
+          id: 'five-hour',
+          label: 'Five hours',
+          usedPercent: 20,
+          resetLabel: new Date(fetchedAtMs + 5 * 60 * 60 * 1000).toISOString(),
+          resetAtMs: fetchedAtMs + 5 * 60 * 60 * 1000,
+          resetAccuracy: 'exact',
+          limitWindowSeconds: 5 * 60 * 60,
+        },
+      ],
+    });
+    vi.mocked(accountQuotaSnapshotApi.write).mockRejectedValue(
+      new Error('snapshot write unavailable')
+    );
+    vi.mocked(accountQuotaSnapshotApi.query).mockResolvedValue({
+      generated_at_ms: fetchedAtMs,
+      items: [
+        {
+          row_key: rowKey,
+          account_key: rowKey,
+          provider: 'codex',
+          windows: [
+            {
+              provider_window_id: 'cpamp:ambiguous:future-feature-weekly-0',
+              window_kind: 'weekly',
+              window_mode: 'fixed',
+              model_scope_kind: 'feature',
+              model_scope_key: 'future_feature',
+              scope_display_name: 'Old Reserved',
+              source: 'api_query',
+              observed_at_ms: fetchedAtMs - 60_000,
+              boundary_accuracy: 'unknown',
+              used_percent: 30,
+              remaining_percent: 70,
+              stale: false,
+            },
+            {
+              provider_window_id: 'cpamp:ambiguous:future-feature-weekly-1',
+              window_kind: 'weekly',
+              window_mode: 'fixed',
+              model_scope_kind: 'feature',
+              model_scope_key: 'future_feature',
+              scope_display_name: 'Old Reserved 2',
+              source: 'api_query',
+              observed_at_ms: fetchedAtMs - 60_000,
+              boundary_accuracy: 'unknown',
+              used_percent: 30,
+              remaining_percent: 70,
+              stale: false,
+            },
+          ],
+        },
+      ],
+    });
+
+    const renderer = await renderAccountsPage();
+    await flushPromises();
+    await flushPromises();
+
+    expect(accountQuotaSnapshotApi.write).toHaveBeenCalled();
+    expect(accountQuotaSnapshotApi.query).toHaveBeenCalled();
+
+    const renderedText = treeText(renderer);
+    expect(renderedText).toContain('Five hours');
+    expect(renderedText).not.toContain('Old Reserved');
+    expect(renderedText).not.toContain('cpamp:ambiguous:');
+  });
+
   it('loads Manager quota snapshots without issuing monitoring requests when collection is disabled', async () => {
     const file = {
       ...makeCodexFile('codex.json', 'auth-1', 'codex@example.com'),
