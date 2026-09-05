@@ -798,7 +798,7 @@ func TestBuildCodexInspectionQuotaWindowsDoesNotUseDynamicStateForFullyAmbiguous
 	changed := buildCodexInspectionQuotaWindows(map[string]any{
 		"additional_rate_limits": []any{family(90, 300), family(20, 1_200)},
 	}, "")
-	want := []string{"ambiguous-future-feature-weekly-0", "ambiguous-future-feature-weekly-1"}
+	want := []string{"cpamp:ambiguous:future-feature-weekly-0", "cpamp:ambiguous:future-feature-weekly-1"}
 	for index, id := range want {
 		if initial[index].ID != id || changed[index].ID != id {
 			t.Fatalf("fully ambiguous ids = initial:%#v changed:%#v want:%#v", initial, changed, want)
@@ -808,6 +808,50 @@ func TestBuildCodexInspectionQuotaWindowsDoesNotUseDynamicStateForFullyAmbiguous
 		}
 		if containsString(initial[index].ProviderWindowAliases, "future-feature-weekly-0") {
 			t.Fatalf("fully ambiguous family has shared stable alias: %#v", initial[index].ProviderWindowAliases)
+		}
+	}
+}
+
+func TestBuildCodexInspectionQuotaWindowsDoesNotMisclassifyLegitimateAmbiguousNames(t *testing.T) {
+	window := buildCodexInspectionQuotaWindows(map[string]any{
+		"additional_rate_limits": []any{
+			map[string]any{
+				"metered_feature": "ambiguous_feature",
+				"limit_name":      "My quota",
+				"rate_limit": map[string]any{
+					"secondary_window": map[string]any{
+						"limit_window_seconds": float64(codexWeekWindow),
+						"used_percent":         20.0,
+					},
+				},
+			},
+			map[string]any{
+				"limit_name": "Ambiguous Quota",
+				"rate_limit": map[string]any{
+					"secondary_window": map[string]any{
+						"limit_window_seconds": float64(codexWeekWindow),
+						"used_percent":         30.0,
+					},
+				},
+			},
+		},
+	}, "")
+	byID := make(map[string]model.CodexInspectionQuotaWindow, len(window))
+	for _, item := range window {
+		byID[item.ID] = item
+	}
+	for _, test := range []struct {
+		id      string
+		display string
+		scope   string
+	}{
+		{id: "ambiguous-feature-weekly-0", display: "My quota", scope: "ambiguous_feature"},
+		{id: "ambiguous-quota-weekly-0", display: "Ambiguous Quota", scope: "ambiguous_quota"},
+	} {
+		item, ok := byID[test.id]
+		if !ok || item.IdentityAmbiguous || item.ScopeDisplayName != test.display || item.ModelScope == nil ||
+			item.ModelScope.Key != test.scope || item.ModelScope.Kind != "feature" {
+			t.Fatalf("legitimate ambiguous provider identity %q = %#v", test.id, item)
 		}
 	}
 }

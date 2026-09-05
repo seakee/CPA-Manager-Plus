@@ -254,6 +254,71 @@ func TestQuotaQueryRetainsScopeDisplayNameBeyondQuotaCandidateRetention(t *testi
 	}
 }
 
+func TestQuotaQueryDisplayCandidatesAreBoundToCurrentActivationGeneration(t *testing.T) {
+	service := newQuotaSnapshotTestService(t, quotaLifecycleBaseMS+quotaLifecycleDayMS)
+	providerWindowID := "future-feature-weekly-0"
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+quotaLifecycleHourMS,
+		[]WindowInput{codexScopedAdditionalWindow(providerWindowID, "Model A", 10)})
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+2*quotaLifecycleHourMS, nil)
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+3*quotaLifecycleHourMS, nil)
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+4*quotaLifecycleHourMS,
+		[]WindowInput{codexScopedAdditionalWindow(providerWindowID, "Model B", 20)})
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+5*quotaLifecycleHourMS, nil)
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+6*quotaLifecycleHourMS, nil)
+
+	thirdGeneration := codexScopedAdditionalWindow(providerWindowID, "", 30)
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+7*quotaLifecycleHourMS,
+		[]WindowInput{thirdGeneration})
+	window := queryQuotaLifecycleWindows(t, service, false)[providerWindowID]
+	if window.ScopeDisplayName != "" || window.ActivationGeneration != 3 || window.Availability != "active" {
+		t.Fatalf("current generation inherited historical display evidence = %#v", window)
+	}
+
+	accountKey, ok := usageidentity.AccountKey(quotaSnapshotTestAccount().identityFields("codex"))
+	if !ok {
+		t.Fatal("test account identity was not usable")
+	}
+	states, err := service.store.QuotaSnapshots.ListWindowStates(context.Background(), accountKey, "codex")
+	if err != nil {
+		t.Fatalf("list display lifecycle states: %v", err)
+	}
+	var currentState model.AccountQuotaWindowState
+	for _, state := range states {
+		if state.ProviderWindowID == providerWindowID && state.Generation == 3 {
+			currentState = state
+			break
+		}
+	}
+	if currentState.ID == 0 || currentState.ActivationID == 0 {
+		t.Fatalf("current generation state = %#v", states)
+	}
+	displayCandidates, err := service.store.QuotaSnapshots.ListLatestScopeDisplayCandidates(context.Background(), accountKey, "codex")
+	if err != nil {
+		t.Fatalf("list current generation display candidates: %v", err)
+	}
+	if len(displayCandidates) != 0 {
+		t.Fatalf("blank current generation retained old display candidates: %#v", displayCandidates)
+	}
+
+	newName := codexScopedAdditionalWindow(providerWindowID, "Model C", 40)
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+8*quotaLifecycleHourMS,
+		[]WindowInput{newName})
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+9*quotaLifecycleHourMS, nil)
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+10*quotaLifecycleHourMS, nil)
+	inactive := queryQuotaLifecycleWindows(t, service, true)[providerWindowID]
+	if inactive.ScopeDisplayName != "Model C" || inactive.ActivationGeneration != 3 || inactive.Availability != "inactive" {
+		t.Fatalf("inactive current generation display restore = %#v", inactive)
+	}
+	displayCandidates, err = service.store.QuotaSnapshots.ListLatestScopeDisplayCandidates(context.Background(), accountKey, "codex")
+	if err != nil {
+		t.Fatalf("list inactive current generation display candidates: %v", err)
+	}
+	if len(displayCandidates) != 1 || displayCandidates[0].ScopeDisplayName != "Model C" ||
+		displayCandidates[0].ActivationID != currentState.ActivationID {
+		t.Fatalf("inactive current generation display candidates = %#v", displayCandidates)
+	}
+}
+
 func TestSelectScopeDisplayNameRespectsActivationBoundary(t *testing.T) {
 	base := model.AccountQuotaSnapshot{
 		ProviderWindowID: "gpt-reserve-weekly-0",
@@ -5658,13 +5723,13 @@ func TestQuotaLifecycleTreatsFullyAmbiguousAdditionalSlotsAsCurrentObservations(
 		return window
 	}
 	first := []WindowInput{
-		family("ambiguous-future-feature-weekly-0", 10),
-		family("ambiguous-future-feature-weekly-1", 80),
+		family("cpamp:ambiguous:future-feature-weekly-0", 10),
+		family("cpamp:ambiguous:future-feature-weekly-1", 80),
 	}
 	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+quotaLifecycleHourMS, first)
 	reverse := []WindowInput{
-		family("ambiguous-future-feature-weekly-0", 90),
-		family("ambiguous-future-feature-weekly-1", 20),
+		family("cpamp:ambiguous:future-feature-weekly-0", 90),
+		family("cpamp:ambiguous:future-feature-weekly-1", 20),
 	}
 	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+2*quotaLifecycleHourMS, reverse)
 
@@ -5678,6 +5743,205 @@ func TestQuotaLifecycleTreatsFullyAmbiguousAdditionalSlotsAsCurrentObservations(
 			window.ContainerWindowID != "" || window.RelationshipKind != "" {
 			t.Fatalf("fully ambiguous observation exposed individual history %q = %#v", id, window)
 		}
+	}
+}
+
+func TestQuotaLifecycleShadowsStableHistoryWhileAmbiguousSetIsCurrent(t *testing.T) {
+	service := newQuotaSnapshotTestService(t, quotaLifecycleBaseMS+quotaLifecycleDayMS)
+	stableID := "future-feature-weekly-0"
+	stable := codexScopedAdditionalWindow(stableID, "Quota A", 10)
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+quotaLifecycleHourMS, []WindowInput{stable})
+	initial := queryQuotaLifecycleWindowList(t, service, false)
+	if len(initial) != 1 || initial[0].LogicalWindowID == 0 || initial[0].ActivationGeneration != 1 || initial[0].Availability != "active" {
+		t.Fatalf("initial stable lifecycle = %#v", initial)
+	}
+	logicalID := initial[0].LogicalWindowID
+
+	ambiguous := []WindowInput{
+		codexScopedAdditionalWindow("cpamp:ambiguous:future-feature-weekly-0", "Same Quota", 20),
+		codexScopedAdditionalWindow("cpamp:ambiguous:future-feature-weekly-1", "Same Quota", 80),
+	}
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+2*quotaLifecycleHourMS, ambiguous)
+	withAmbiguous := queryQuotaLifecycleWindowList(t, service, true)
+	if len(withAmbiguous) != 3 {
+		t.Fatalf("stable plus ambiguous evidence = %#v, want three rows", withAmbiguous)
+	}
+	ambiguousCount := 0
+	stableShadowed := false
+	for _, window := range withAmbiguous {
+		if codexquota.IsAmbiguousAdditionalProviderWindowID(window.ProviderWindowID) {
+			ambiguousCount++
+			if window.LogicalWindowID != 0 || window.ActivationGeneration != 0 || window.PreviousCycle != nil || window.ContainerWindowID != "" {
+				t.Fatalf("ambiguous current observation exposed lifecycle metadata = %#v", window)
+			}
+			continue
+		}
+		if window.ProviderWindowID == stableID {
+			stableShadowed = window.LogicalWindowID == logicalID &&
+				window.Availability == "pending_absent" && window.CurrentPresentationHidden
+		}
+	}
+	if ambiguousCount != 2 || !stableShadowed {
+		t.Fatalf("ambiguous presentation shadow = %#v", withAmbiguous)
+	}
+	if currentAmbiguousWindowCount(withAmbiguous) != 2 {
+		t.Fatalf("current ambiguous card evidence = %#v", withAmbiguous)
+	}
+
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+3*quotaLifecycleHourMS, ambiguous)
+	fullyAmbiguous := queryQuotaLifecycleWindowList(t, service, true)
+	if len(fullyAmbiguous) != 3 {
+		t.Fatalf("repeated ambiguous evidence = %#v", fullyAmbiguous)
+	}
+	for _, window := range fullyAmbiguous {
+		if window.ProviderWindowID == stableID &&
+			(window.Availability != "inactive" || window.CurrentPresentationHidden) {
+			t.Fatalf("stable lifecycle after confirmed omission = %#v", window)
+		}
+	}
+
+	writeQuotaLifecycleObservation(t, service, "complete", quotaLifecycleBaseMS+4*quotaLifecycleHourMS,
+		[]WindowInput{codexScopedAdditionalWindow(stableID, "Quota A", 30)})
+	reopened := queryQuotaLifecycleWindowList(t, service, false)
+	if len(reopened) != 1 || reopened[0].ProviderWindowID != stableID ||
+		reopened[0].LogicalWindowID != logicalID || reopened[0].ActivationGeneration != 2 ||
+		reopened[0].Availability != "active" {
+		t.Fatalf("stable recovery after ambiguous lifecycle = %#v", reopened)
+	}
+}
+
+func TestQuotaLifecycleKeepsAmbiguousSetAcrossPartialAndClearsOnLatestComplete(t *testing.T) {
+	service := newQuotaSnapshotTestService(t, quotaLifecycleBaseMS+quotaLifecycleDayMS)
+	ambiguous := []WindowInput{
+		codexScopedAdditionalWindow("cpamp:ambiguous:future-feature-weekly-0", "Same Quota", 10),
+		codexScopedAdditionalWindow("cpamp:ambiguous:future-feature-weekly-1", "Same Quota", 90),
+	}
+	if _, err := service.Write(context.Background(), WriteRequest{Entries: []WriteEntry{
+		quotaLifecycleWriteEntryWithObservation("complete", "inspection", "scope-a-complete-1", "scope-a", quotaLifecycleBaseMS+quotaLifecycleHourMS, ambiguous),
+		quotaLifecycleWriteEntryWithObservation("complete", "api_query", "scope-b-complete-1", "scope-b", quotaLifecycleBaseMS+quotaLifecycleHourMS, nil),
+	}}); err != nil {
+		t.Fatalf("write scoped complete observations: %v", err)
+	}
+	current := queryQuotaLifecycleWindowList(t, service, false)
+	if currentAmbiguousWindowCount(current) != 2 {
+		t.Fatalf("initial scoped ambiguous set = %#v", current)
+	}
+	for _, window := range current {
+		if codexquota.IsAmbiguousAdditionalProviderWindowID(window.ProviderWindowID) && window.InventoryScopeKey != "scope-a" {
+			t.Fatalf("ambiguous candidate crossed inventory scope = %#v", window)
+		}
+	}
+
+	partialWindow := codexScopedAdditionalWindow("partial-observation-weekly-0", "Partial", 20)
+	writeQuotaLifecycleObservationWithEntry(t, service,
+		quotaLifecycleWriteEntryWithObservation("partial", "api_query", "scope-a-partial", "scope-a", quotaLifecycleBaseMS+2*quotaLifecycleHourMS, []WindowInput{partialWindow}))
+	current = queryQuotaLifecycleWindowList(t, service, false)
+	if currentAmbiguousWindowCount(current) != 2 {
+		t.Fatalf("partial observation evicted ambiguous set = %#v", current)
+	}
+
+	writeQuotaLifecycleObservationWithEntry(t, service,
+		quotaLifecycleWriteEntryWithObservation("complete", "inspection", "scope-a-complete-2", "scope-a", quotaLifecycleBaseMS+3*quotaLifecycleHourMS, nil))
+	current = queryQuotaLifecycleWindowList(t, service, false)
+	if currentAmbiguousWindowCount(current) != 0 {
+		t.Fatalf("latest complete empty inventory retained ambiguous set = %#v", current)
+	}
+}
+
+func TestQuotaLifecycleLatestCompleteAmbiguousTieBreaksByObservationID(t *testing.T) {
+	service := newQuotaSnapshotTestService(t, quotaLifecycleBaseMS+quotaLifecycleDayMS)
+	ambiguous := []WindowInput{
+		codexScopedAdditionalWindow("cpamp:ambiguous:future-feature-weekly-0", "Same Quota", 10),
+		codexScopedAdditionalWindow("cpamp:ambiguous:future-feature-weekly-1", "Same Quota", 90),
+	}
+	// Sorting writes by source observation id makes the ambiguous observation the
+	// later inserted row. The read query must still explicitly use id DESC for a
+	// same-timestamp complete-observation tie.
+	if _, err := service.Write(context.Background(), WriteRequest{Entries: []WriteEntry{
+		quotaLifecycleWriteEntryWithObservation("complete", "inspection", "z-ambiguous", "scope-tie", quotaLifecycleBaseMS+quotaLifecycleHourMS, ambiguous),
+		quotaLifecycleWriteEntryWithObservation("complete", "inspection", "a-empty", "scope-tie", quotaLifecycleBaseMS+quotaLifecycleHourMS, nil),
+	}}); err != nil {
+		t.Fatalf("write tied complete observations: %v", err)
+	}
+	current := queryQuotaLifecycleWindowList(t, service, false)
+	if currentAmbiguousWindowCount(current) != 2 {
+		t.Fatalf("same-timestamp latest complete selection = %#v", current)
+	}
+}
+
+func TestApplyCurrentAmbiguousPresentationShadowFailsClosedForScopeAndRole(t *testing.T) {
+	durationWeek := int64(7 * 24 * 60 * 60)
+	durationDay := int64(24 * 60 * 60)
+	newCandidate := func(id, scope, fingerprint, kind string, duration *int64) model.AccountQuotaSnapshot {
+		return model.AccountQuotaSnapshot{
+			Provider:          "codex",
+			ProviderWindowID:  id,
+			WindowKind:        kind,
+			ModelScopeKind:    "feature",
+			ModelScopeKey:     "future_feature",
+			ScopeFingerprint:  fingerprint,
+			InventoryScopeKey: scope,
+			DurationSeconds:   duration,
+		}
+	}
+	newWindow := func(id, scope, fingerprint, kind, availability string, duration *int64) Window {
+		return Window{
+			Provider:          "codex",
+			ProviderWindowID:  id,
+			WindowKind:        kind,
+			WindowMode:        "fixed",
+			ScopeFingerprint:  fingerprint,
+			InventoryScopeKey: scope,
+			Availability:      availability,
+			DurationSeconds:   duration,
+		}
+	}
+	tests := []struct {
+		name       string
+		window     Window
+		candidate  model.AccountQuotaSnapshot
+		wantHidden bool
+	}{
+		{
+			name:       "matching pending weekly",
+			window:     newWindow("future-feature-weekly-0", "scope-a", "fp-a", "weekly", "pending_absent", &durationWeek),
+			candidate:  newCandidate("cpamp:ambiguous:future-feature-weekly-0", "scope-a", "fp-a", "weekly", &durationWeek),
+			wantHidden: true,
+		},
+		{
+			name:      "active identifiable sibling remains visible",
+			window:    newWindow("future-feature-weekly-0", "scope-a", "fp-a", "weekly", "active", &durationWeek),
+			candidate: newCandidate("cpamp:ambiguous:future-feature-weekly-0", "scope-a", "fp-a", "weekly", &durationWeek),
+		},
+		{
+			name:      "different inventory scope",
+			window:    newWindow("future-feature-weekly-0", "scope-b", "fp-a", "weekly", "pending_absent", &durationWeek),
+			candidate: newCandidate("cpamp:ambiguous:future-feature-weekly-0", "scope-a", "fp-a", "weekly", &durationWeek),
+		},
+		{
+			name:      "different scope fingerprint",
+			window:    newWindow("future-feature-weekly-0", "scope-a", "fp-b", "weekly", "pending_absent", &durationWeek),
+			candidate: newCandidate("cpamp:ambiguous:future-feature-weekly-0", "scope-a", "fp-a", "weekly", &durationWeek),
+		},
+		{
+			name:      "different fixed role",
+			window:    newWindow("future-feature-five-hour-0", "scope-a", "fp-a", "five_hour", "pending_absent", &durationWeek),
+			candidate: newCandidate("cpamp:ambiguous:future-feature-weekly-0", "scope-a", "fp-a", "weekly", &durationWeek),
+		},
+		{
+			name:      "different generic duration",
+			window:    newWindow("future-feature-0-window-7d-0", "scope-a", "fp-a", "daily", "pending_absent", &durationWeek),
+			candidate: newCandidate("cpamp:ambiguous:future-feature-0-window-1d-0", "scope-a", "fp-a", "daily", &durationDay),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			windows := []Window{test.window}
+			applyCurrentAmbiguousPresentationShadow(windows, []model.AccountQuotaSnapshot{test.candidate})
+			if windows[0].CurrentPresentationHidden != test.wantHidden {
+				t.Fatalf("current hidden = %v, want %v: %#v", windows[0].CurrentPresentationHidden, test.wantHidden, windows[0])
+			}
+		})
 	}
 }
 
@@ -5783,6 +6047,13 @@ func writeQuotaLifecycleObservation(t *testing.T, service *Service, inventoryMod
 	}
 }
 
+func writeQuotaLifecycleObservationWithEntry(t *testing.T, service *Service, entry WriteEntry) {
+	t.Helper()
+	if _, err := service.Write(context.Background(), WriteRequest{Entries: []WriteEntry{entry}}); err != nil {
+		t.Fatalf("write quota lifecycle observation: %v", err)
+	}
+}
+
 func rewriteQuotaLifecycleProviderWindowID(t *testing.T, path, from, to string) {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)
@@ -5850,6 +6121,16 @@ func quotaLifecycleWriteEntryWithObservation(
 
 func queryQuotaLifecycleWindows(t *testing.T, service *Service, includeInactive bool) map[string]Window {
 	t.Helper()
+	result := queryQuotaLifecycleWindowList(t, service, includeInactive)
+	windows := make(map[string]Window, len(result))
+	for _, window := range result {
+		windows[window.ProviderWindowID] = window
+	}
+	return windows
+}
+
+func queryQuotaLifecycleWindowList(t *testing.T, service *Service, includeInactive bool) []Window {
+	t.Helper()
 	result, err := service.Query(context.Background(), QueryRequest{
 		Accounts:        []QueryAccount{{RowKey: "row-lifecycle", Provider: "codex", Account: quotaSnapshotTestAccount()}},
 		IncludeInactive: includeInactive,
@@ -5860,9 +6141,15 @@ func queryQuotaLifecycleWindows(t *testing.T, service *Service, includeInactive 
 	if len(result.Items) != 1 {
 		t.Fatalf("quota lifecycle items = %#v", result.Items)
 	}
-	windows := make(map[string]Window, len(result.Items[0].Windows))
-	for _, window := range result.Items[0].Windows {
-		windows[window.ProviderWindowID] = window
+	return result.Items[0].Windows
+}
+
+func currentAmbiguousWindowCount(windows []Window) int {
+	count := 0
+	for _, window := range windows {
+		if codexquota.IsAmbiguousAdditionalProviderWindowID(window.ProviderWindowID) {
+			count++
+		}
 	}
-	return windows
+	return count
 }

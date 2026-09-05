@@ -214,6 +214,55 @@ func TestCanonicalProviderWindowIDNormalizesLegacySparkAliases(t *testing.T) {
 	}
 }
 
+func TestAmbiguousProviderWindowNamespaceIsReservedWithoutNormalizingAway(t *testing.T) {
+	const syntheticID = "cpamp:ambiguous:future-feature-weekly-0"
+	if AmbiguousProviderWindowPrefix != "cpamp:ambiguous:" {
+		t.Fatalf("ambiguous provider prefix = %q", AmbiguousProviderWindowPrefix)
+	}
+	if !IsAmbiguousAdditionalProviderWindowID(syntheticID) {
+		t.Fatalf("synthetic id was not recognized: %q", syntheticID)
+	}
+	if got := CanonicalProviderWindowID(syntheticID, "weekly"); got != syntheticID {
+		t.Fatalf("synthetic id canonicalized to %q, want %q", got, syntheticID)
+	}
+	for _, providerID := range []string{
+		"ambiguous-feature-weekly-0",
+		"ambiguous-quota-weekly-0",
+		"ambiguous-feature-0-window-1d-0",
+	} {
+		if IsAmbiguousAdditionalProviderWindowID(providerID) {
+			t.Fatalf("legitimate provider id was treated as synthetic: %q", providerID)
+		}
+	}
+}
+
+func TestResolveAdditionalScopeKeepsLegitimateAmbiguousNamesIdentifiable(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		meteredFeature string
+		limitName      string
+		wantPrefix     string
+		wantDisplay    string
+	}{
+		{name: "metered feature", meteredFeature: "ambiguous_feature", limitName: "My quota", wantPrefix: "ambiguous-feature", wantDisplay: "My quota"},
+		{name: "limit name fallback", limitName: "Ambiguous Quota", wantPrefix: "ambiguous-quota", wantDisplay: "Ambiguous Quota"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := ResolveAdditionalScope(AdditionalScopeInput{
+				MeteredFeature:    test.meteredFeature,
+				LimitName:         test.limitName,
+				AnonymousIdentity: "additional-p-18000-s-none",
+			})
+			if got.ProviderWindowPrefix != test.wantPrefix || got.ScopeDisplayName != test.wantDisplay || got.Scope.Kind != "feature" {
+				t.Fatalf("legitimate ambiguous scope = %#v", got)
+			}
+			if IsAmbiguousAdditionalProviderWindowID(got.ProviderWindowPrefix + "-weekly-0") {
+				t.Fatalf("legitimate ambiguous provider prefix was marked synthetic: %#v", got)
+			}
+		})
+	}
+}
+
 func TestResolveProviderWindowScopeFailsClosedForLegacyCodexScopedIDs(t *testing.T) {
 	tests := []struct {
 		name             string

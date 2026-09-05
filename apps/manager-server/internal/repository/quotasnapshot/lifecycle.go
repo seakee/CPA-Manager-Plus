@@ -770,6 +770,14 @@ func generatedCodexWindowSuffixFromID(providerWindowID string) (string, bool) {
 	return "", false
 }
 
+// GeneratedCodexWindowSuffixFromID exposes the strict suffix parser to the
+// read-side presentation layer without duplicating the collision identity
+// grammar. It only accepts the generated fixed/generic forms handled by the
+// lifecycle migration code.
+func GeneratedCodexWindowSuffixFromID(providerWindowID string) (string, bool) {
+	return generatedCodexWindowSuffixFromID(providerWindowID)
+}
+
 func generatedCodexSuffixFromID(suffix string) (string, bool) {
 	normalized := strings.ToLower(strings.TrimSpace(suffix))
 	if !strings.HasPrefix(normalized, "-") || len(normalized) == 1 {

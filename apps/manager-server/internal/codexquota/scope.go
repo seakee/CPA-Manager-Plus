@@ -14,7 +14,7 @@ const (
 	CodeReviewScopeKey            = "code_review"
 	UnknownRequestScopeKey        = "request_scope_unknown"
 	SparkProviderWindowPrefix     = "spark"
-	AmbiguousProviderWindowPrefix = "ambiguous-"
+	AmbiguousProviderWindowPrefix = "cpamp:ambiguous:"
 )
 
 type ModelScope struct {

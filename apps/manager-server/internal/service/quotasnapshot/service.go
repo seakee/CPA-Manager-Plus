@@ -189,6 +189,12 @@ type Window struct {
 	PreviousCycle         *Cycle                 `json:"previous_cycle,omitempty"`
 	ScopeFingerprint      string                 `json:"-"`
 	IdentityAmbiguous     bool                   `json:"identity_ambiguous,omitempty"`
+	// CurrentPresentationHidden is derived at query time from the latest
+	// ambiguous current-observation set. Keep false explicit so a newer active
+	// provider observation can clear a previously shadowed local definition.
+	CurrentPresentationHidden bool   `json:"current_hidden"`
+	InventoryScopeKey         string `json:"-"`
+	Provider                  string `json:"-"`
 }
 
 type Cycle struct {
@@ -528,6 +534,13 @@ func (s *Service) Query(ctx context.Context, req QueryRequest) (QueryResponse, e
 		if err != nil {
 			return QueryResponse{}, err
 		}
+		ambiguousCandidates := []model.AccountQuotaSnapshot(nil)
+		if provider == "codex" {
+			ambiguousCandidates, err = s.store.QuotaSnapshots.ListCurrentAmbiguousCandidates(ctx, accountKey, provider)
+			if err != nil {
+				return QueryResponse{}, err
+			}
+		}
 		stateByID := make(map[int64]model.AccountQuotaWindowState, len(states))
 		for _, state := range states {
 			stateByID[state.ID] = state
@@ -603,9 +616,15 @@ func (s *Service) Query(ctx context.Context, req QueryRequest) (QueryResponse, e
 		}
 		canonicalizeLinkedQueryCandidates(displayCandidates, states)
 		canonicalizeLinkedQueryCandidates(candidates, states)
+		allSelectionCandidates := make([]model.AccountQuotaSnapshot, 0, len(candidates)+len(ambiguousCandidates))
+		allSelectionCandidates = append(allSelectionCandidates, candidates...)
+		allSelectionCandidates = append(allSelectionCandidates, ambiguousCandidates...)
+		selectedWindows := selectWindows(allSelectionCandidates, states, nowMS, displayCandidates)
+		mergedWindows := mergeLifecycleWindows(selectedWindows, states, nowMS, req.IncludeInactive)
+		applyCurrentAmbiguousPresentationShadow(mergedWindows, ambiguousCandidates)
 		items = append(items, QueryItem{
 			RowKey: account.RowKey, AccountKey: accountKey, Provider: provider,
-			Windows: mergeLifecycleWindows(selectWindows(candidates, states, nowMS, displayCandidates), states, nowMS, req.IncludeInactive),
+			Windows: mergedWindows,
 		})
 	}
 	return QueryResponse{GeneratedAtMS: nowMS, Items: items}, nil
@@ -1100,6 +1119,107 @@ func sameScopeDisplayIdentity(left, right model.AccountQuotaSnapshot) bool {
 		strings.EqualFold(strings.TrimSpace(left.ScopeFingerprint), strings.TrimSpace(right.ScopeFingerprint))
 }
 
+type codexAmbiguousCoverageBucket struct {
+	provider          string
+	inventoryScopeKey string
+	scopeFingerprint  string
+	windowRole        string
+}
+
+func applyCurrentAmbiguousPresentationShadow(
+	windows []Window,
+	ambiguousCandidates []model.AccountQuotaSnapshot,
+) {
+	if len(windows) == 0 || len(ambiguousCandidates) == 0 {
+		return
+	}
+	buckets := make(map[codexAmbiguousCoverageBucket]struct{}, len(ambiguousCandidates))
+	for index := range ambiguousCandidates {
+		candidate := &ambiguousCandidates[index]
+		role, ok := codexAmbiguousWindowRole(candidate.ProviderWindowID, candidate.WindowKind, candidate.DurationSeconds)
+		if !ok {
+			continue
+		}
+		scopeFingerprint := strings.TrimSpace(candidate.ScopeFingerprint)
+		if scopeFingerprint == "" {
+			scopeFingerprint = quotasnapshotrepo.ScopeFingerprint(
+				candidate.ModelScopeKind,
+				candidate.ModelScopeKey,
+				unmarshalStringList(candidate.ModelIDsJSON),
+			)
+		}
+		buckets[codexAmbiguousCoverageBucket{
+			provider:          strings.ToLower(strings.TrimSpace(candidate.Provider)),
+			inventoryScopeKey: strings.TrimSpace(candidate.InventoryScopeKey),
+			scopeFingerprint:  strings.ToLower(scopeFingerprint),
+			windowRole:        role,
+		}] = struct{}{}
+	}
+	for index := range windows {
+		window := &windows[index]
+		if window.IdentityAmbiguous || codexquota.IsAmbiguousAdditionalProviderWindowID(window.ProviderWindowID) ||
+			window.Availability != "pending_absent" {
+			continue
+		}
+		role, ok := codexAmbiguousWindowRole(window.ProviderWindowID, window.WindowKind, window.DurationSeconds)
+		if !ok {
+			continue
+		}
+		bucket := codexAmbiguousCoverageBucket{
+			provider:          strings.ToLower(strings.TrimSpace(window.Provider)),
+			inventoryScopeKey: strings.TrimSpace(window.InventoryScopeKey),
+			scopeFingerprint:  strings.ToLower(strings.TrimSpace(window.ScopeFingerprint)),
+			windowRole:        role,
+		}
+		if _, covered := buckets[bucket]; covered {
+			window.CurrentPresentationHidden = true
+		}
+	}
+}
+
+func codexAmbiguousWindowRole(providerWindowID, windowKind string, durationSeconds *int64) (string, bool) {
+	kind := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(windowKind), "_", "-"))
+	switch kind {
+	case "five-hour", "weekly", "monthly":
+		return kind, true
+	}
+	suffix, ok := quotasnapshotrepo.GeneratedCodexWindowSuffixFromID(providerWindowID)
+	if !ok || !isCodexGenericWindowSuffix(suffix) ||
+		durationSeconds == nil || *durationSeconds <= 0 {
+		return "", false
+	}
+	return fmt.Sprintf("generic:%d", *durationSeconds), true
+}
+
+func isCodexGenericWindowSuffix(suffix string) bool {
+	parts := strings.Split(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(suffix)), "-"), "-")
+	return len(parts) == 4 && isDecimalToken(parts[0]) && parts[1] == "window" &&
+		isCodexWindowDurationToken(parts[2]) && isDecimalToken(parts[3])
+}
+
+func isDecimalToken(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func isCodexWindowDurationToken(value string) bool {
+	if value == "unknown" || isDecimalToken(value) {
+		return true
+	}
+	if len(value) < 2 || !isDecimalToken(value[:len(value)-1]) {
+		return false
+	}
+	unit := value[len(value)-1]
+	return unit == 'd' || unit == 'h' || unit == 's'
+}
+
 func selectScopeDisplayName(
 	selected model.AccountQuotaSnapshot,
 	candidates []model.AccountQuotaSnapshot,
@@ -1156,6 +1276,9 @@ func mergeLifecycleWindows(
 			continue
 		}
 		window.LogicalWindowID = state.ID
+		window.Provider = state.Provider
+		window.InventoryScopeKey = state.InventoryScopeKey
+		window.ScopeFingerprint = state.ScopeFingerprint
 		window.ActivationGeneration = state.Generation
 		window.Availability = state.Availability
 		window.WindowKind = state.WindowKind
@@ -1379,6 +1502,7 @@ func snapshotWindow(snapshot model.AccountQuotaSnapshot, stale bool) Window {
 		}
 	}
 	return Window{
+		Provider:              snapshot.Provider,
 		ProviderWindowID:      snapshot.ProviderWindowID,
 		ProviderWindowAliases: providerWindowAliases,
 		WindowKind:            snapshot.WindowKind,
@@ -1396,6 +1520,7 @@ func snapshotWindow(snapshot model.AccountQuotaSnapshot, stale bool) Window {
 		ResetCreditsAvailable: snapshot.ResetCreditsAvailable,
 		ResetCredits:          unmarshalResetCredits(snapshot.ResetCreditsJSON), PlanType: snapshot.PlanType,
 		Stale: stale, ScopeFingerprint: snapshot.ScopeFingerprint,
+		InventoryScopeKey: snapshot.InventoryScopeKey,
 		IdentityAmbiguous: snapshot.Provider == "codex" &&
 			codexquota.IsAmbiguousAdditionalProviderWindowID(snapshot.ProviderWindowID),
 	}

@@ -46,6 +46,7 @@ type LegacyBackfillResult struct {
 type Repository interface {
 	InsertObservationWrites(ctx context.Context, writes []model.AccountQuotaObservationWrite) error
 	ListCandidates(ctx context.Context, accountKey, provider string, limit int) ([]model.AccountQuotaSnapshot, error)
+	ListCurrentAmbiguousCandidates(ctx context.Context, accountKey, provider string) ([]model.AccountQuotaSnapshot, error)
 	ListLatestScopeDisplayCandidates(ctx context.Context, accountKey, provider string) ([]model.AccountQuotaSnapshot, error)
 	ListWindowStates(ctx context.Context, accountKey, provider string) ([]model.AccountQuotaWindowState, error)
 }
@@ -524,6 +525,9 @@ func (r *repository) ListCandidates(ctx context.Context, accountKey, provider st
 		coalesce(model_ids_json, '') as model_ids_json,
 		coalesce(scope_fingerprint, '') as scope_fingerprint,
 		coalesce(content_hash, '') as content_hash,
+		coalesce((select observation.inventory_scope_key
+			from account_quota_observations observation
+			where observation.id = account_quota_snapshots.observation_id), '') as inventory_scope_key,
 		source, coalesce(source_observation_id, '') as source_observation_id, observed_at_ms,
 		boundary_accuracy, cycle_start_ms, cycle_end_ms, duration_seconds,
 		used_percent, remaining_percent, used_value, limit_value,
@@ -552,10 +556,7 @@ func (r *repository) ListCandidates(ctx context.Context, accountKey, provider st
 					where observation.id = account_quota_snapshots.observation_id
 						and observation.lifecycle_applied = 1
 				)
-				and (logical_window_id is not null or (
-					provider = 'codex' and lower(trim(model_scope_kind)) = 'feature'
-					and lower(trim(provider_window_id)) like 'ambiguous-%'
-				))
+				and logical_window_id is not null
 			))
 	)
 	select
@@ -565,6 +566,7 @@ func (r *repository) ListCandidates(ctx context.Context, accountKey, provider st
 		scope_display_name,
 		model_scope_kind, coalesce(model_scope_key, ''), coalesce(model_ids_json, ''),
 		coalesce(scope_fingerprint, ''), coalesce(content_hash, ''),
+		coalesce(inventory_scope_key, ''),
 		source, coalesce(source_observation_id, ''), observed_at_ms,
 		boundary_accuracy, cycle_start_ms, cycle_end_ms, duration_seconds,
 		used_percent, remaining_percent, used_value, limit_value,
@@ -603,6 +605,110 @@ func (r *repository) ListCandidates(ctx context.Context, accountKey, provider st
 			&item.ModelIDsJSON,
 			&item.ScopeFingerprint,
 			&item.ContentHash,
+			&item.InventoryScopeKey,
+			&item.Source,
+			&item.SourceObservationID,
+			&item.ObservedAtMS,
+			&item.BoundaryAccuracy,
+			&cycleStart,
+			&cycleEnd,
+			&duration,
+			&usedPercent,
+			&remainingPercent,
+			&usedValue,
+			&limitValue,
+			&item.QuotaUnit,
+			&resetCreditsAvailable,
+			&item.ResetCreditsJSON,
+			&item.PlanType,
+			&item.CreatedAtMS,
+		); err != nil {
+			return nil, err
+		}
+		item.CycleStartMS = int64Pointer(cycleStart)
+		item.CycleEndMS = int64Pointer(cycleEnd)
+		item.DurationSeconds = int64Pointer(duration)
+		item.UsedPercent = float64Pointer(usedPercent)
+		item.RemainingPercent = float64Pointer(remainingPercent)
+		item.UsedValue = float64Pointer(usedValue)
+		item.LimitValue = float64Pointer(limitValue)
+		item.ResetCreditsAvailable = int64Pointer(resetCreditsAvailable)
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+// ListCurrentAmbiguousCandidates returns only the fully ambiguous Codex
+// Additional slots from the latest lifecycle-applied complete inventory for
+// each inventory scope. These snapshots are current-observation evidence, not
+// lifecycle history, so they intentionally bypass ListCandidates retention.
+func (r *repository) ListCurrentAmbiguousCandidates(ctx context.Context, accountKey, provider string) ([]model.AccountQuotaSnapshot, error) {
+	rows, err := r.db.QueryContext(ctx, `with latest_complete as (
+		select id, inventory_scope_key, observed_at_ms,
+			row_number() over (
+				partition by inventory_scope_key
+				order by observed_at_ms desc, id desc
+			) as observation_rank
+		from account_quota_observations
+		where account_key = ? and lower(trim(provider)) = lower(trim(?))
+			and lower(trim(inventory_mode)) = 'complete' and lifecycle_applied = 1
+	)
+	select
+		snapshot.id, coalesce(snapshot.observation_id, 0),
+		coalesce(snapshot.logical_window_id, 0), coalesce(snapshot.activation_id, 0),
+		coalesce(snapshot.cycle_id, 0), snapshot.account_key, snapshot.provider,
+		snapshot.provider_window_id, snapshot.window_kind, snapshot.window_mode,
+		coalesce(snapshot.scope_display_name, ''), snapshot.model_scope_kind,
+		coalesce(snapshot.model_scope_key, ''), coalesce(snapshot.model_ids_json, ''),
+		coalesce(snapshot.scope_fingerprint, ''), coalesce(snapshot.content_hash, ''),
+		latest_complete.inventory_scope_key,
+		snapshot.source, coalesce(snapshot.source_observation_id, ''), snapshot.observed_at_ms,
+		snapshot.boundary_accuracy, snapshot.cycle_start_ms, snapshot.cycle_end_ms,
+		snapshot.duration_seconds, snapshot.used_percent, snapshot.remaining_percent,
+		snapshot.used_value, snapshot.limit_value, coalesce(snapshot.quota_unit, ''),
+		snapshot.reset_credits_available, coalesce(snapshot.reset_credits_json, ''),
+		coalesce(snapshot.plan_type, ''), snapshot.created_at_ms
+	from latest_complete
+	join account_quota_snapshots snapshot on snapshot.observation_id = latest_complete.id
+	where latest_complete.observation_rank = 1
+		and snapshot.account_key = ? and lower(trim(snapshot.provider)) = 'codex'
+		and lower(trim(snapshot.model_scope_kind)) = 'feature'
+		and trim(coalesce(snapshot.model_scope_key, '')) <> ''
+		and lower(trim(snapshot.provider_window_id)) like 'cpamp:ambiguous:%'
+		and coalesce(snapshot.logical_window_id, 0) = 0
+		and `+excludeLegacyCodexWorkspaceSnapshotSQL("snapshot")+`
+	order by latest_complete.observed_at_ms desc, latest_complete.id desc,
+		snapshot.observed_at_ms desc, snapshot.id desc`,
+		strings.TrimSpace(accountKey), strings.TrimSpace(provider), strings.TrimSpace(accountKey))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]model.AccountQuotaSnapshot, 0)
+	for rows.Next() {
+		var item model.AccountQuotaSnapshot
+		var cycleStart, cycleEnd, duration sql.NullInt64
+		var usedPercent, remainingPercent, usedValue, limitValue sql.NullFloat64
+		var resetCreditsAvailable sql.NullInt64
+		if err := rows.Scan(
+			&item.ID,
+			&item.ObservationID,
+			&item.LogicalWindowID,
+			&item.ActivationID,
+			&item.CycleID,
+			&item.AccountKey,
+			&item.Provider,
+			&item.ProviderWindowID,
+			&item.WindowKind,
+			&item.WindowMode,
+			&item.ScopeDisplayName,
+			&item.ModelScopeKind,
+			&item.ModelScopeKey,
+			&item.ModelIDsJSON,
+			&item.ScopeFingerprint,
+			&item.ContentHash,
+			&item.InventoryScopeKey,
 			&item.Source,
 			&item.SourceObservationID,
 			&item.ObservedAtMS,
@@ -643,47 +749,59 @@ func (r *repository) ListCandidates(ctx context.Context, accountKey, provider st
 func (r *repository) ListLatestScopeDisplayCandidates(ctx context.Context, accountKey, provider string) ([]model.AccountQuotaSnapshot, error) {
 	rows, err := r.db.QueryContext(ctx, `with ranked as (
 	select
-		id, coalesce(observation_id, 0) as observation_id,
-		coalesce(logical_window_id, 0) as logical_window_id,
-		coalesce(activation_id, 0) as activation_id,
-		coalesce(cycle_id, 0) as cycle_id,
-		account_key, provider, provider_window_id, window_kind, window_mode,
-		trim(coalesce(scope_display_name, '')) as scope_display_name,
-		model_scope_kind, coalesce(model_scope_key, '') as model_scope_key,
-		coalesce(model_ids_json, '') as model_ids_json,
-		coalesce(scope_fingerprint, '') as scope_fingerprint,
-		coalesce(content_hash, '') as content_hash,
-		source, coalesce(source_observation_id, '') as source_observation_id, observed_at_ms,
-		boundary_accuracy, cycle_start_ms, cycle_end_ms, duration_seconds,
-		used_percent, remaining_percent, used_value, limit_value,
-		coalesce(quota_unit, '') as quota_unit, reset_credits_available,
-		coalesce(reset_credits_json, '') as reset_credits_json,
-		coalesce(plan_type, '') as plan_type, created_at_ms,
+		snapshot.id, coalesce(snapshot.observation_id, 0) as observation_id,
+		coalesce(snapshot.logical_window_id, 0) as logical_window_id,
+		coalesce(snapshot.activation_id, 0) as activation_id,
+		coalesce(snapshot.cycle_id, 0) as cycle_id,
+		snapshot.account_key, snapshot.provider, snapshot.provider_window_id,
+		snapshot.window_kind, snapshot.window_mode,
+		trim(coalesce(snapshot.scope_display_name, '')) as scope_display_name,
+		snapshot.model_scope_kind, coalesce(snapshot.model_scope_key, '') as model_scope_key,
+		coalesce(snapshot.model_ids_json, '') as model_ids_json,
+		coalesce(snapshot.scope_fingerprint, '') as scope_fingerprint,
+		coalesce(snapshot.content_hash, '') as content_hash,
+		snapshot.source, coalesce(snapshot.source_observation_id, '') as source_observation_id, snapshot.observed_at_ms,
+		snapshot.boundary_accuracy, snapshot.cycle_start_ms, snapshot.cycle_end_ms, snapshot.duration_seconds,
+		snapshot.used_percent, snapshot.remaining_percent, snapshot.used_value, snapshot.limit_value,
+		coalesce(snapshot.quota_unit, '') as quota_unit, snapshot.reset_credits_available,
+		coalesce(snapshot.reset_credits_json, '') as reset_credits_json,
+		coalesce(snapshot.plan_type, '') as plan_type, snapshot.created_at_ms,
 		row_number() over (
 			partition by case
-				when logical_window_id is not null and logical_window_id > 0 then
-					'logical:' || cast(logical_window_id as text) || char(0) || cast(coalesce(activation_id, 0) as text)
+				when snapshot.logical_window_id is not null and snapshot.logical_window_id > 0 then
+					'logical:' || cast(snapshot.logical_window_id as text) || char(0) || cast(coalesce(snapshot.activation_id, 0) as text)
 				else
-					'legacy:' || lower(trim(provider_window_id)) || char(0) ||
-					lower(trim(window_kind)) || char(0) || coalesce(scope_fingerprint, '')
+					'legacy:' || lower(trim(snapshot.provider_window_id)) || char(0) ||
+					lower(trim(snapshot.window_kind)) || char(0) || coalesce(snapshot.scope_fingerprint, '')
 			end
-			order by observed_at_ms desc, id desc
+			order by snapshot.observed_at_ms desc, snapshot.id desc
 		) as display_rank
-	from account_quota_snapshots
-	where account_key = ? and provider = ?
-		and `+excludeLegacyCodexWorkspaceSnapshotSQL("")+`
-		and trim(coalesce(scope_display_name, '')) <> ''
-		and (observation_id is null or (
-			exists (
-				select 1 from account_quota_observations observation
-				where observation.id = account_quota_snapshots.observation_id
-					and observation.lifecycle_applied = 1
-			)
-			and (logical_window_id is not null or (
-				provider = 'codex' and lower(trim(model_scope_kind)) = 'feature'
-				and lower(trim(provider_window_id)) like 'ambiguous-%'
+		from account_quota_snapshots snapshot
+		left join account_quota_windows quota_window
+			on snapshot.logical_window_id = quota_window.id
+		left join account_quota_window_activations activation
+			on snapshot.activation_id = activation.id
+		where snapshot.account_key = ? and snapshot.provider = ?
+		and `+excludeLegacyCodexWorkspaceSnapshotSQL("snapshot")+`
+			and trim(coalesce(snapshot.scope_display_name, '')) <> ''
+			and (snapshot.observation_id is null or (
+				exists (
+					select 1 from account_quota_observations observation
+					where observation.id = snapshot.observation_id
+						and observation.lifecycle_applied = 1
+				)
+				and (coalesce(snapshot.activation_id, 0) <= 0 or (
+					snapshot.logical_window_id is not null
+					and snapshot.logical_window_id > 0
+					and activation.id = snapshot.activation_id
+					and activation.window_id = quota_window.id
+					and activation.generation = quota_window.generation
+				))
 			))
-		))
+		and not (
+			lower(trim(snapshot.provider)) = 'codex'
+			and lower(trim(snapshot.provider_window_id)) like 'cpamp:ambiguous:%'
+		)
 	)
 	select
 		id, observation_id, logical_window_id, activation_id, cycle_id,

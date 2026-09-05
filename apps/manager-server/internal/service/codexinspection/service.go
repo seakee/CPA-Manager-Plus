@@ -4590,7 +4590,7 @@ func addCodexRateLimitWindows(
 			continue
 		}
 		duration := formatCodexWindowDuration(window.LimitWindowSeconds)
-		prefix := normalizeCodexWindowID(genericIDPrefix)
+		prefix := normalizeCodexProviderWindowPrefix(genericIDPrefix)
 		if prefix != "" {
 			prefix += "-"
 		}
@@ -4995,6 +4995,14 @@ func normalizeCodexWindowID(raw string) string {
 		}
 	}
 	return strings.Trim(builder.String(), "-")
+}
+
+func normalizeCodexProviderWindowPrefix(raw string) string {
+	trimmed := strings.ToLower(strings.TrimSpace(raw))
+	if strings.HasPrefix(trimmed, codexquota.AmbiguousProviderWindowPrefix) {
+		return trimmed
+	}
+	return normalizeCodexWindowID(trimmed)
 }
 
 func copyCodexLabelParams(params map[string]any) map[string]any {
