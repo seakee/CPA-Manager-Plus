@@ -193,6 +193,10 @@ Recommended CPA version: `v7.1.39+`. The HTTP usage queue needs `v6.10.8+`.
 | Migrate from the legacy CPA-Manager                       | [Migration From CPA-Manager](https://seakee.github.io/CPA-Manager-Plus/docs/en/migration/from-cpa-manager.html)                                                                                                                                                            |
 | Diagnose empty monitoring or queue problems               | [Troubleshooting](https://seakee.github.io/CPA-Manager-Plus/docs/en/troubleshooting/request-monitoring.html)                                                                                                                                                               |
 
+## ☁️ One-Click Deploy
+
+[![Deploy on RepoCloud](https://d16t0pc4846x52.cloudfront.net/deploylobe.svg)](https://repocloud.io/details/CPA%20Manager%20Plus/)
+
 ## Data, Privacy, And Security
 
 - CPAMP does not phone home, include analytics SDKs, or require account registration.
