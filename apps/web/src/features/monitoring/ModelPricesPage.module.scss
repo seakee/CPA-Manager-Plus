@@ -366,6 +366,16 @@
   font-size: 11px;
 }
 
+.modelContent .modalitySummary {
+  color: color-mix(in srgb, var(--pricing-accent-strong) 72%, var(--pricing-muted));
+  font-family: var(--font-mono);
+}
+
+.modalityTelemetryNotice {
+  color: var(--pricing-muted);
+  font-style: italic;
+}
+
 .sourceCell {
   max-width: 260px;
   color: var(--pricing-muted);

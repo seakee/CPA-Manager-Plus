@@ -62,6 +62,12 @@ Models such as GPT-5.6 may vary by context length, service tier, and cache type.
 
 Model Prices displays synchronized context tiers and service-tier prices as read-only rules. The current manual editor manages base prices only; saving a manual price explicitly clears existing synchronized advanced rules, with a warning shown before saving.
 
+## Multimodal Capability And Token Boundary
+
+When a synchronized model catalog explicitly declares input or output modalities, Model Prices shows a **model capability** such as “In: text, image · Out: text.” This describes catalog support only; it does not mean that a particular request carried an image or other media.
+
+The current CPA/CLIProxyAPI usage queue does not emit image-, audio-, or video-token counts. CPAMP therefore never infers a measured value of `0` or an estimate from model capability, request content, or a missing field; total input tokens and cost retain their existing accounting rules. A separate multimodal token metric or rate will appear only after upstream publishes a stable, explicit modality-token contract.
+
 ## Matching Model Names
 
 The client model, CPA alias, provider model, and price-table name may differ. When cost is missing:

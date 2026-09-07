@@ -23,11 +23,15 @@ import {
   buildSyncPriceModelsFromSummary,
   createEmptyPriceDraft,
   createPriceDraft,
+  extractModelPriceModalities,
   filterModelPriceRows,
   formatContextThreshold,
+  formatModelPriceModalities,
   formatPriceUnit,
   formatServiceTierRule,
   getModelPriceCandidateIdentity,
+  hasNonTextModelPriceModality,
+  isCatalogSynchronizedModelPrice,
   groupModelPriceCandidatesBySource,
   resolveContextTierDisplayPrice,
   resolveServiceTierDisplayPrice,
@@ -461,6 +465,11 @@ export function ModelPricesPage() {
                     : '';
                   const contextTiers = row.price?.contextTiers ?? [];
                   const serviceTiers = row.price?.serviceTiers ?? [];
+                  const catalogSynchronized = isCatalogSynchronizedModelPrice(row.price);
+                  const modalities = catalogSynchronized
+                    ? extractModelPriceModalities(row.price?.rawJson)
+                    : null;
+                  const hasNonTextModality = hasNonTextModelPriceModality(modalities);
 
                   return (
                     <tr key={row.model}>
@@ -471,6 +480,16 @@ export function ModelPricesPage() {
                             <span>{t('model_prices.needs_confirmation')}</span>
                           ) : !row.hasPrice ? (
                             <span>{t('model_prices.no_price')}</span>
+                          ) : modalities ? (
+                            <span
+                              className={styles.modalitySummary}
+                              title={t('model_prices.modality_capability_hint')}
+                            >
+                              {formatModelPriceModalities(modalities, {
+                                input: t('model_prices.modality_input'),
+                                output: t('model_prices.modality_output'),
+                              })}
+                            </span>
                           ) : null}
                         </div>
                       </td>
@@ -537,6 +556,11 @@ export function ModelPricesPage() {
                             ) : null}
                             {row.price.syncedAtMs ? (
                               <small>{`${t('model_prices.synced_at')}: ${formatUnixTimestamp(row.price.syncedAtMs)}`}</small>
+                            ) : null}
+                            {hasNonTextModality ? (
+                              <small className={styles.modalityTelemetryNotice}>
+                                {t('model_prices.modality_tokens_unreported')}
+                              </small>
                             ) : null}
                           </div>
                         ) : selectedCandidate ? (

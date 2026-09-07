@@ -38,6 +38,97 @@ export type ModelPriceCandidateGroup = {
   candidates: ModelPriceSyncCandidate[];
 };
 
+export type ModelPriceModalities = {
+  input: string[];
+  output: string[];
+};
+
+const MAX_MODEL_PRICE_METADATA_CHARS = 128 * 1024;
+const MAX_MODALITY_ITEMS = 8;
+const MAX_MODALITY_LENGTH = 48;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value);
+
+const normalizeModalities = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+
+  const modalities: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== 'string') continue;
+    const modality = item.trim().replace(/\s+/g, ' ').toLowerCase();
+    if (!modality || modality.length > MAX_MODALITY_LENGTH || seen.has(modality)) continue;
+    seen.add(modality);
+    modalities.push(modality);
+    if (modalities.length >= MAX_MODALITY_ITEMS) break;
+  }
+  return modalities;
+};
+
+const firstExplicitModalities = (...values: unknown[]): string[] => {
+  for (const value of values) {
+    const modalities = normalizeModalities(value);
+    if (modalities.length > 0) return modalities;
+  }
+  return [];
+};
+
+/**
+ * Reads only directional modality arrays explicitly declared by a synced model
+ * catalog. Catalog capabilities are not request measurements and are never
+ * used as a token or cost input.
+ */
+export const isCatalogSynchronizedModelPrice = (
+  price: Pick<ModelPrice, 'source' | 'syncedAtMs'> | undefined
+): boolean =>
+  Boolean(price?.syncedAtMs && ['models.dev', 'openrouter'].includes(price.source?.trim() ?? ''));
+
+export const extractModelPriceModalities = (rawJson?: string): ModelPriceModalities | null => {
+  const raw = rawJson?.trim();
+  if (!raw || raw.length > MAX_MODEL_PRICE_METADATA_CHARS) return null;
+
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!isRecord(parsed)) return null;
+    const architecture = isRecord(parsed.architecture) ? parsed.architecture : undefined;
+    const modalities = isRecord(parsed.modalities) ? parsed.modalities : undefined;
+    const input = firstExplicitModalities(
+      architecture?.input_modalities,
+      modalities?.input,
+      parsed.input_modalities,
+      parsed.inputModalities,
+      parsed['input-modalities']
+    );
+    const output = firstExplicitModalities(
+      architecture?.output_modalities,
+      modalities?.output,
+      parsed.output_modalities,
+      parsed.outputModalities,
+      parsed['output-modalities']
+    );
+    return input.length > 0 || output.length > 0 ? { input, output } : null;
+  } catch {
+    return null;
+  }
+};
+
+export const hasNonTextModelPriceModality = (modalities: ModelPriceModalities | null): boolean =>
+  Boolean(
+    modalities &&
+      [...modalities.input, ...modalities.output].some((modality) => modality !== 'text')
+  );
+
+export const formatModelPriceModalities = (
+  modalities: ModelPriceModalities,
+  labels: { input: string; output: string } = { input: 'In', output: 'Out' }
+): string => {
+  const sections: string[] = [];
+  if (modalities.input.length > 0) sections.push(`${labels.input}: ${modalities.input.join(', ')}`);
+  if (modalities.output.length > 0) sections.push(`${labels.output}: ${modalities.output.join(', ')}`);
+  return sections.join(' · ');
+};
+
 export const createEmptyPriceDraft = (): PriceDraft => ({
   model: '',
   prompt: '',
