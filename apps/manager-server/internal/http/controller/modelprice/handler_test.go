@@ -1,6 +1,7 @@
 package modelprice
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -14,6 +15,17 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/testutil"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
+
+func newModelPriceHandler(t *testing.T) *Handler {
+	t.Helper()
+	cfg := testutil.NewConfig(t)
+	st := testutil.NewStore(t, cfg)
+	return &Handler{App: &app.Context{
+		Config:            cfg,
+		AdminAuthService:  adminauthsvc.New(cfg, st),
+		ModelPriceService: modelpricesvc.New(st, nil),
+	}}
+}
 
 func TestHandleUsageSummaryUsesQueryLimitAndPanelAuthorization(t *testing.T) {
 	cfg := testutil.NewConfig(t)
@@ -55,5 +67,27 @@ func TestHandleUsageSummaryUsesQueryLimitAndPanelAuthorization(t *testing.T) {
 	}
 	if len(summary.Models) != 1 || summary.Models[0].Model != "gpt-new" || summary.Models[0].Calls != 1 || summary.Models[0].RequestedCalls != 1 {
 		t.Fatalf("models = %#v", summary.Models)
+	}
+}
+
+func TestHandleSyncRejectsInvalidSourceAndUnknownFields(t *testing.T) {
+	handler := newModelPriceHandler(t)
+	for _, body := range []string{
+		`{"source":"multi"}`,
+		`{"source":null}`,
+		`{"source":""}`,
+		`{"source":123}`,
+		`{"source":"litellm","url":"https://example.invalid"}`,
+		`{"source":"litellm"}{}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v0/management/model-prices/sync", bytes.NewBufferString(body))
+			req.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+			recorder := httptest.NewRecorder()
+			handler.Handle(recorder, req)
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d body = %s", recorder.Code, recorder.Body.String())
+			}
+		})
 	}
 }

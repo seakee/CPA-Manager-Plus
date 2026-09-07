@@ -3,7 +3,9 @@ package modelprice
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -509,6 +511,212 @@ func TestFetchAllModelPricesFallsBackWhenPreferredSourceHangs(t *testing.T) {
 	}
 	if price, ok := collectionPrice(prices, SyncSourceLiteLLM, "gpt-test"); !ok || price.Source != SyncSourceLiteLLM || price.Prompt != 1 {
 		t.Fatalf("fallback price = %#v", price)
+	}
+}
+
+func TestNormalizeSyncSource(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+		valid bool
+	}{
+		{name: "default chain", value: "", want: "", valid: true},
+		{name: "models dev", value: " models.dev ", want: SyncSourceModelsDev, valid: true},
+		{name: "litellm case", value: "LITELLM", want: SyncSourceLiteLLM, valid: true},
+		{name: "openrouter", value: SyncSourceOpenRouter, want: SyncSourceOpenRouter, valid: true},
+		{name: "response-only multi", value: SyncSourceMulti},
+		{name: "unknown", value: "unknown"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NormalizeSyncSource(tt.value)
+			if tt.valid {
+				if err != nil || got != tt.want {
+					t.Fatalf("NormalizeSyncSource(%q) = %q, %v; want %q, nil", tt.value, got, err, tt.want)
+				}
+				return
+			}
+			if !errors.Is(err, ErrInvalidSyncSource) {
+				t.Fatalf("NormalizeSyncSource(%q) error = %v, want ErrInvalidSyncSource", tt.value, err)
+			}
+		})
+	}
+}
+
+func TestSyncSelectedSourceDoesNotFallBack(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewStore(t, testutil.NewConfig(t))
+	var modelsDevRequests atomic.Int32
+	modelsDev := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		modelsDevRequests.Add(1)
+		http.Error(w, "models.dev must not be called", http.StatusInternalServerError)
+	}))
+	t.Cleanup(modelsDev.Close)
+	var liteLLMRequests atomic.Int32
+	liteLLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		liteLLMRequests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"selected":{"input_cost_per_token":0.000001,"output_cost_per_token":0.000002}}`))
+	}))
+	t.Cleanup(liteLLM.Close)
+
+	modelsDevURL := modelsDev.URL
+	liteLLMURL := liteLLM.URL
+	service := NewMultiSourceWithModelsDev(st, &modelsDevURL, &liteLLMURL, nil)
+	result, err := service.Sync(ctx, SyncRequest{
+		Models: []string{"selected"},
+		Source: SyncSourceLiteLLM,
+	})
+	if err != nil {
+		t.Fatalf("sync selected LiteLLM source: %v", err)
+	}
+	if modelsDevRequests.Load() != 0 || liteLLMRequests.Load() != 1 {
+		t.Fatalf("requests = models.dev:%d LiteLLM:%d", modelsDevRequests.Load(), liteLLMRequests.Load())
+	}
+	if result.Source != SyncSourceLiteLLM || len(result.Sources) != 1 || result.Sources[0] != SyncSourceLiteLLM {
+		t.Fatalf("result sources = %#v", result)
+	}
+	if price := result.Prices["selected"]; price.Source != SyncSourceLiteLLM || price.Prompt != 1 {
+		t.Fatalf("selected price = %#v", price)
+	}
+}
+
+func TestSyncRejectsInvalidSourceWithoutChangingPrices(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewStore(t, testutil.NewConfig(t))
+	if err := st.SaveModelPrices(ctx, map[string]store.ModelPrice{
+		"existing": {Prompt: 7, Source: SyncSourceLiteLLM},
+	}); err != nil {
+		t.Fatalf("save existing price: %v", err)
+	}
+
+	service := NewMultiSource(st, nil, nil)
+	if _, err := service.Sync(ctx, SyncRequest{Source: SyncSourceMulti}); !errors.Is(err, ErrInvalidSyncSource) {
+		t.Fatalf("sync error = %v, want ErrInvalidSyncSource", err)
+	}
+	prices, err := st.LoadModelPrices(ctx)
+	if err != nil {
+		t.Fatalf("load prices: %v", err)
+	}
+	if len(prices) != 1 || prices["existing"].Prompt != 7 {
+		t.Fatalf("prices changed after invalid source: %#v", prices)
+	}
+}
+
+func TestProductionSyncRejectsUntrustedOrPrivateSourceBeforeFetch(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewStore(t, testutil.NewConfig(t))
+	for _, tt := range []struct {
+		name    string
+		syncURL string
+		lookup  func(context.Context, string) ([]net.IP, error)
+		want    string
+	}{
+		{
+			name:    "untrusted host",
+			syncURL: "https://example.com/model-prices.json",
+			lookup: func(context.Context, string) ([]net.IP, error) {
+				return []net.IP{net.ParseIP("8.8.8.8")}, nil
+			},
+			want: "untrusted host",
+		},
+		{
+			name:    "private resolved address",
+			syncURL: "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+			lookup: func(context.Context, string) ([]net.IP, error) {
+				return []net.IP{net.ParseIP("127.0.0.1")}, nil
+			},
+			want: "blocked address",
+		},
+		{
+			name:    "reserved IPv6 address",
+			syncURL: "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+			lookup: func(context.Context, string) ([]net.IP, error) {
+				return []net.IP{net.ParseIP("2001:db8::1")}, nil
+			},
+			want: "blocked address",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fetchCalled := false
+			service := &Service{
+				store:                    st,
+				enforceTrustedSourceURLs: true,
+				lookupHost:               tt.lookup,
+				syncSources: []priceSyncSource{{
+					Source: SyncSourceLiteLLM,
+					URL:    &tt.syncURL,
+					Fetch: func(context.Context, string, *http.Client) (fetchedModelPriceSource, int, error) {
+						fetchCalled = true
+						return fetchedModelPriceSource{}, 0, nil
+					},
+				}},
+			}
+			if _, err := service.Sync(ctx, SyncRequest{Source: SyncSourceLiteLLM}); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("sync error = %v, want %q", err, tt.want)
+			}
+			if fetchCalled {
+				t.Fatal("unsafe source reached fetcher")
+			}
+		})
+	}
+}
+
+func TestProductionSyncRejectsUnsafeRedirect(t *testing.T) {
+	service := NewProductionMultiSourceWithModelsDev(nil, nil, nil, nil)
+	service.lookupHost = func(context.Context, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("8.8.8.8")}, nil
+	}
+	client, err := service.trustedSourceClient(
+		context.Background(),
+		nil,
+		SyncSourceLiteLLM,
+		"https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+	)
+	if err != nil {
+		t.Fatalf("create trusted client: %v", err)
+	}
+	redirect := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/internal", nil)
+	if err := client.CheckRedirect(redirect, nil); err == nil || !strings.Contains(err.Error(), "unsafe litellm redirect") {
+		t.Fatalf("redirect error = %v", err)
+	}
+}
+
+func TestTrustedSourceTransportPinsValidatedAddress(t *testing.T) {
+	var resolutionCalls atomic.Int32
+	var dialedAddress string
+	service := NewProductionMultiSourceWithModelsDev(nil, nil, nil, nil)
+	service.lookupHost = func(_ context.Context, host string) ([]net.IP, error) {
+		resolutionCalls.Add(1)
+		if host != "raw.githubusercontent.com" {
+			return nil, fmt.Errorf("unexpected lookup host %q", host)
+		}
+		return []net.IP{net.ParseIP("8.8.8.8")}, nil
+	}
+	service.dialContext = func(_ context.Context, _ string, address string) (net.Conn, error) {
+		dialedAddress = address
+		return nil, errors.New("stop after observing pinned address")
+	}
+	client, err := service.trustedSourceClient(
+		context.Background(),
+		&http.Client{Transport: &http.Transport{Proxy: nil}},
+		SyncSourceLiteLLM,
+		"http://raw.githubusercontent.com:8080/model-prices.json",
+	)
+	if err != nil {
+		t.Fatalf("create trusted client: %v", err)
+	}
+	_, err = client.Get("http://raw.githubusercontent.com:8080/model-prices.json")
+	if err == nil || !strings.Contains(err.Error(), "stop after observing pinned address") {
+		t.Fatalf("request error = %v", err)
+	}
+	if got := resolutionCalls.Load(); got != 1 {
+		t.Fatalf("trusted source lookups = %d, want 1", got)
+	}
+	if dialedAddress != "8.8.8.8:8080" {
+		t.Fatalf("dialed address = %q, want pinned address", dialedAddress)
 	}
 }
 

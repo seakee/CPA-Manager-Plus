@@ -12,10 +12,11 @@ Open the [Model Prices Demo](https://seakee.github.io/CPA-Manager-Plus/#/demo/mo
 ## Price Sources
 
 - Public metadata synchronized from models.dev first, with LiteLLM and OpenRouter used as fallbacks when the preferred source is unavailable or lacks a model.
+- A single source (models.dev, LiteLLM, or OpenRouter) can also be selected on the Model Prices page, including the one-click **Sync LiteLLM** action. A single-source sync never silently falls back to another source, which is useful for reproducible pricing or investigating a difference.
 - Local prices added or overridden by the user.
 - Entries for aliases, internal names, or provider-specific variants.
 
-Synchronization only occurs when the user triggers it and may use the current Manager Server proxy configuration.
+Synchronization only occurs when the user triggers it and may use the current Manager Server proxy configuration. Source URLs are fixed public endpoints: Manager Server accepts only HTTP/HTTPS, validates each source host, and rejects localhost, private/reserved addresses, and untrusted redirects.
 
 Automatic matching runs strictly in models.dev, LiteLLM, then OpenRouter order. CPAMP uses the canonical model metadata in the models.dev catalog to prefer the first-party official entry. A source is saved automatically only when it has one clear, strong identity match; fuzzy similarities are never auto-confirmed. An ambiguous source falls through to the next source. If none of the three sources yields a unique match, the confirmation list keeps candidates from each source separately, even when they share the same original model ID.
 

@@ -12,10 +12,11 @@ description: 配置 CPA Manager Plus 模型价格、service tier、长上下文�
 ## 价格来源
 
 - 首选从 models.dev 主动同步的公开元数据；当该来源不可用或缺少模型时，再使用 LiteLLM 和 OpenRouter 回退。
+- 也可在模型价格页选择单一来源（models.dev、LiteLLM 或 OpenRouter），或一键 **同步 LiteLLM**。单一来源同步不会悄悄回退到其他来源，适用于需要固定来源或排查价格差异的场景。
 - 用户手动添加或覆盖的本地价格。
 - 为模型别名、内部名称或 Provider 特定变体维护的条目。
 
-同步只在用户主动触发时发生，可能使用当前 Manager Server 代理设置。
+同步只在用户主动触发时发生，可能使用当前 Manager Server 代理设置。同步来源 URL 是内置的固定公开地址；Manager Server 只接受 HTTP/HTTPS，校验来源主机并拒绝 localhost、私有/保留地址和不受信任的重定向。
 
 自动匹配会严格按 models.dev、LiteLLM、OpenRouter 的顺序进行。CPAMP 使用 models.dev catalog 的规范模型元数据优先识别第一方官方条目；每个来源都只有唯一、明确的模型身份匹配才会自动保存，模糊相似项不会自动确认。某个来源存在歧义时会继续尝试下一来源；三个来源都无法唯一确认时，待确认列表会分别保留各来源的候选，即使它们的原始模型 ID 相同也不会互相覆盖。
 

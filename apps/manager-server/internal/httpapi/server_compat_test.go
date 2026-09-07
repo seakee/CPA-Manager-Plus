@@ -23,7 +23,12 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
 
-func newCompatHandler(t *testing.T, cfg config.Config, setup *store.Setup) (http.Handler, *store.Store) {
+func newCompatHandler(
+	t *testing.T,
+	cfg config.Config,
+	setup *store.Setup,
+	syncURLs ...modelPriceSyncURLs,
+) (http.Handler, *store.Store) {
 	t.Helper()
 	if cfg.DBPath == "" {
 		cfg.DBPath = filepath.Join(t.TempDir(), "usage.sqlite")
@@ -53,8 +58,18 @@ func newCompatHandler(t *testing.T, cfg config.Config, setup *store.Setup) (http
 			t.Fatalf("save setup: %v", err)
 		}
 	}
+	modelPriceURLs := defaultTestModelPriceSyncURLs()
+	if len(syncURLs) > 0 {
+		modelPriceURLs = syncURLs[0]
+	}
 	manager := collector.NewManager(cfg, db)
-	return New(cfg, db, manager).Handler(), db
+	return newWithModelPriceSyncURLs(
+		cfg,
+		db,
+		manager,
+		modelPriceURLs,
+		false,
+	).Handler(), db
 }
 
 type staticDatabaseMaintenanceStatus struct {
@@ -822,9 +837,18 @@ func TestServerCompatMonitoringAnalytics(t *testing.T) {
 }
 
 func TestServerCompatModelPricesAndAliases(t *testing.T) {
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "upstream failed", http.StatusInternalServerError)
+	}))
+	t.Cleanup(source.Close)
 	cpa := testutil.NewCPAMock(t)
 	setup := &store.Setup{CPAUpstreamURL: cpa.URL(), ManagementKey: "management-key", Queue: "usage", PopSide: "right"}
-	handler, _ := newCompatHandler(t, testutil.NewConfig(t), setup)
+	handler, _ := newCompatHandler(
+		t,
+		testutil.NewConfig(t),
+		setup,
+		modelPriceSyncURLs{liteLLM: source.URL},
+	)
 
 	priceRR := testutil.Request(t, handler, http.MethodPut, "/v0/management/model-prices", `{"prices":{"gpt-test":{"prompt":1,"completion":2,"cache":0.5}}}`, testutil.AdminKey)
 	testutil.RequireStatus(t, priceRR, http.StatusOK)
@@ -835,11 +859,6 @@ func TestServerCompatModelPricesAndAliases(t *testing.T) {
 		t.Fatalf("model prices body = %s", loadPriceRR.Body.String())
 	}
 
-	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "upstream failed", http.StatusInternalServerError)
-	}))
-	t.Cleanup(source.Close)
-	stubModelPriceSyncURLs(t, source.URL, "")
 	syncRR := testutil.Request(t, handler, http.MethodPost, "/v0/management/model-prices/sync", `{}`, testutil.AdminKey)
 	testutil.RequireStatus(t, syncRR, http.StatusBadGateway)
 	if !strings.Contains(syncRR.Body.String(), `"code":"model_price_sync_failed"`) {
