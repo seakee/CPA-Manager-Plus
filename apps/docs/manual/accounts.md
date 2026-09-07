@@ -13,7 +13,7 @@ description: 在统一 Accounts 工作区管理 CPA 凭证、账号健康、配�
 
 ## 先看哪些信息
 
-- **凭证和 Provider**：确认账号属于 Codex、Claude、Vertex、Antigravity、Kimi、xAI 或其他来源。
+- **凭证和 Provider**：确认账号属于 Codex、Claude、Vertex、Antigravity、Kimi、xAI、Qoder 或其他来源。
 - **`auth_index`**：账号的稳定索引。用量、配额、巡检和账号处理都依赖它做关联。
 - **启用状态**：手动禁用的账号不会被自动恢复流程覆盖。
 - **备注、优先级和项目 ID**：用于区分账号用途和路由偏好。
@@ -62,6 +62,7 @@ CPAMP 按凭证身份和观察时间合并这些证据。较新的健康结果�
 | Codex          | 5 小时/周窗口、reset、Header、workspace 和巡检状态     | 字段取决于账号计划和接口返回。                                 |
 | Claude         | 基础额度、周额度、模型级 scoped limits                 | scoped limits 可能重复、缺失或停用，CPAMP 按身份和新鲜度归并。 |
 | xAI/Grok OAuth | CLI billing 周/月数据、官方 API 身份、请求事件耗尽信号 | 官方 API 身份不等于可查询费用或剩余百分比。                    |
+| Qoder OAuth    | 认证文件状态、最近请求和响应 Header                  | 当前不假设存在通用的主动配额查询接口。                        |
 | 其他 Provider  | CPA 凭证元数据或最近响应 Header                        | 不假设存在统一主动额度接口。                                   |
 
 ## 配额冷却与账号处理

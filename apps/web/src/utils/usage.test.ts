@@ -553,6 +553,11 @@ describe('cache input accounting semantics', () => {
       mode: 'included_in_input',
     },
     {
+      name: 'Qoder provider uses included input accounting',
+      context: { provider: 'qoder' },
+      mode: 'included_in_input',
+    },
+    {
       name: 'resolved model beats requested model',
       context: { resolvedModel: 'claude-sonnet', requestedModel: 'gpt-5' },
       mode: 'separate_from_input',

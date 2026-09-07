@@ -13,6 +13,7 @@ const OAUTH_PROVIDER_BY_ACCOUNT_PROVIDER: Record<string, string> = {
   claude: 'anthropic',
   kimi: 'kimi',
   xai: 'xai',
+  qoder: 'qoder',
 };
 
 export const resolveAccountReauthAction = (file: AuthFileItem): AccountReauthAction => {

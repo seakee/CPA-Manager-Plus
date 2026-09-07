@@ -37,6 +37,16 @@ describe('oauthApi', () => {
     });
   });
 
+  it('starts Qoder through its device-flow endpoint without the WebUI flag', async () => {
+    mocks.get.mockResolvedValue({ url: 'https://auth.example/qoder', state: 'state-qoder' });
+
+    await oauthApi.startAuth('qoder');
+
+    expect(mocks.get).toHaveBeenCalledWith('/qoder-auth-url', {
+      params: undefined,
+    });
+  });
+
   it('starts plugin OAuth providers through their dynamic auth-url endpoint', async () => {
     mocks.get.mockResolvedValue({ url: 'https://auth.example/plugin', state: 'state-2' });
 

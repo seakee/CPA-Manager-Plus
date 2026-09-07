@@ -11,6 +11,7 @@ OAuth 登录页面用于添加或重新授权账号。它解决的是“如何�
 - Antigravity OAuth
 - Kimi OAuth
 - xAI OAuth
+- Qoder OAuth（需要支持该端点的 CLIProxyAPIPlus）
 - iFlow OAuth
 - 插件提供的 OAuth
 - Vertex 凭证导入
@@ -26,6 +27,17 @@ OAuth 登录页面用于添加或重新授权账号。它解决的是“如何�
 5. 发一条低成本请求，到 [请求监控](./monitoring.md) 确认请求成功。
 
 OAuth 成功不等于请求一定成功。保存后还要检查提供商配置、认证文件绑定、模型规则和配额状态。
+
+## Qoder 设备码登录
+
+Qoder 使用设备码流程，不需要粘贴浏览器回调 URL：
+
+1. 点击 **开始 Qoder 登录**。
+2. 打开或复制面板给出的授权链接。
+3. 在 Qoder 页面完成授权，保持面板打开以等待状态轮询。
+4. 登录成功后到凭证管理确认新建的 `qoder` 认证文件。
+
+该入口需要当前代理实现 `GET /v0/management/qoder-auth-url` 和认证状态轮询接口。若页面显示“端点不可用（HTTP 404）”，这表示代理兼容性或启动流程错误，而不是账号认证失败；请升级到支持 Qoder OAuth 的 CLIProxyAPIPlus/兼容发行版，或改用手动导入认证文件。
 
 ## 远程浏览器回调
 

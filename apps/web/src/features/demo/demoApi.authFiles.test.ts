@@ -368,7 +368,13 @@ describe('auth file credential refresh demo API', () => {
       '/model-definitions/codex'
     );
 
+    const qoderDefinitions = await handleDemoApiRequest<{ models: Array<{ id: string }> }>(
+      'get',
+      '/model-definitions/qoder'
+    );
+
     expect(runtime.models.map((model) => model.id)).toContain('gpt-5-codex');
     expect(definitions.models.map((model) => model.id)).toContain('o1-preview');
+    expect(qoderDefinitions.models).toEqual([]);
   });
 });

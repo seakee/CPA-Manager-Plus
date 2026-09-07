@@ -296,7 +296,7 @@ func classifyExecutorCacheInputMode(executorType string) (string, bool) {
 	for _, marker := range []string{
 		"openaicompat", "openai_compat", "openai-compat", "openai",
 		"codex", "gemini", "aistudio", "ai_studio", "ai-studio",
-		"antigravity", "xai", "kimi",
+		"antigravity", "xai", "kimi", "qoder",
 	} {
 		if strings.Contains(executor, marker) {
 			return CacheInputModeIncluded, true
@@ -315,7 +315,7 @@ func classifyProviderCacheInputMode(provider string) (string, bool) {
 	}
 	for _, marker := range []string{
 		"openai", "codex", "gemini", "vertex", "aistudio", "ai_studio",
-		"ai-studio", "interaction", "antigravity", "xai", "kimi", "moonshot",
+		"ai-studio", "interaction", "antigravity", "xai", "kimi", "qoder", "moonshot",
 	} {
 		if strings.Contains(provider, marker) {
 			return CacheInputModeIncluded, true
@@ -334,7 +334,7 @@ func classifyModelCacheInputMode(model string) (string, bool) {
 	}
 	for _, marker := range []string{
 		"gpt-", "openai", "codex", "gemini", "vertex", "aistudio",
-		"antigravity", "grok", "xai", "kimi", "moonshot",
+		"antigravity", "grok", "xai", "kimi", "qoder", "moonshot",
 	} {
 		if strings.Contains(model, marker) {
 			return CacheInputModeIncluded, true

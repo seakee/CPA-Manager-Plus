@@ -47,6 +47,7 @@ Docker 和原生包提供相同的完整模式能力，只是安装方式不同�
 | Claude                               | Provider、OAuth/Auth File                     | 基础额度、周额度、模型级 scoped limits（取决于返回字段） | 配额读取，不执行模型请求    |
 | xAI/Grok OAuth                       | Provider/Auth File/OAuth                      | CLI billing、付费 OAuth identity fallback、请求事件证据  | 本地与服务端                |
 | xAI API Key                          | `xai-api-key` 配置、优先级、模型和密钥测试    | 请求结果与 Provider 返回信息                             | Provider key test           |
+| Qoder OAuth                           | Auth File、设备码 OAuth（需 CPA 支持）        | 认证状态、最近请求和响应 Header                          | 暂不假设主动 quota API      |
 | Gemini / Vertex / Antigravity / Kimi | Provider、Auth File 或 OAuth（按 CPA 能力）   | Provider 特定 quota 或最近请求证据                       | 取决于 CPA 与 Provider 接口 |
 | OpenAI-compatible                    | Base URL、API Key、Header、模型映射和密钥测试 | 请求状态、延迟、失败摘要和成本                           | 不假设存在统一 quota API    |
 

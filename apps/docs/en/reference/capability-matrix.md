@@ -47,6 +47,7 @@ Docker and native packages provide the same Full Mode capabilities; only the ins
 | Claude                               | Provider and OAuth/Auth File                               | Base quota, weekly quota, and model-scoped limits when returned       | Quota read without model requests |
 | xAI/Grok OAuth                       | Provider/Auth File/OAuth                                   | CLI billing, paid OAuth identity fallback, and request-event evidence | Local and server                  |
 | xAI API Key                          | `xai-api-key`, priority, models, and key testing           | Request results and provider responses                                | Provider key test                 |
+| Qoder OAuth                           | Auth file and device-code OAuth (when CPA supports it)     | Auth-file state, recent requests, and response Headers                | No active quota API assumed yet   |
 | Gemini / Vertex / Antigravity / Kimi | Provider, auth file, or OAuth depending on CPA             | Provider-specific quota or recent request evidence                    | Depends on CPA and provider APIs  |
 | OpenAI-compatible                    | Base URL, API key, headers, model mapping, and key testing | Request status, latency, redacted failures, and cost                  | No assumed common quota API       |
 

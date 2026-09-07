@@ -13,7 +13,7 @@ Open the unified [Accounts Demo](https://seakee.github.io/CPA-Manager-Plus/#/dem
 
 ## What To Check First
 
-- **Credential and provider**: confirm whether the account belongs to Codex, Claude, Vertex, Antigravity, Kimi, xAI, or another source.
+- **Credential and provider**: confirm whether the account belongs to Codex, Claude, Vertex, Antigravity, Kimi, xAI, Qoder, or another source.
 - **`auth_index`**: the stable account index used to connect usage, quota, inspection, and account actions.
 - **Enabled state**: automated recovery does not override manually disabled accounts.
 - **Note, priority, and project ID**: use them to separate account purpose and routing preference.
@@ -62,6 +62,7 @@ CPAMP reconciles evidence by credential identity and observation time. Newer hea
 | Codex           | Five-hour/weekly windows, reset, Headers, workspace, and inspection state      | Fields depend on plan and API responses.                                                            |
 | Claude          | Base quota, weekly quota, and model-scoped limits                              | Scoped limits can be duplicated, missing, or inactive; CPAMP groups them by identity and freshness. |
 | xAI/Grok OAuth  | CLI billing weekly/monthly data, official API identity, and request exhaustion | Official API identity does not provide queryable cost or remaining percentages.                     |
+| Qoder OAuth     | Auth-file state, recent requests, and response Headers                         | No generic active quota lookup is assumed at this stage.                                            |
 | Other providers | CPA credential metadata or recent response Headers                             | No common active quota API is assumed.                                                              |
 
 ## Quota Cooldown And Account Actions
