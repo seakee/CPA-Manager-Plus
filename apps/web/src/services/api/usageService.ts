@@ -59,6 +59,7 @@ const USAGE_SERVICE_ERROR_CODES = new Set([
   'api_key_aliases_required',
   'api_key_alias_duplicate',
   'model_price_sync_failed',
+  'model_price_structure_locked_by_usage_archive',
   'method_not_allowed',
   'account_processing_policy_env_locked',
   'usage_import_session_invalid_request',
