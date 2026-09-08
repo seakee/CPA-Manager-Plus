@@ -309,6 +309,7 @@
     "delete_verified_state": "Archive verification",
     "delete_capability_state": "Deletion capability",
     "delete_batch_recheck_note": "The public API exposes summary readiness only. During deletion, the server rechecks exact coverage before every batch and can stop with a coverage-incomplete conflict.",
+    "delete_permanent_constraints_note": "After historical raw events are deleted, the set of models with configured pricing and the context-tier thresholds are frozen. Rate changes, including service-tier rates, remain allowed. Keep a complete pre-deletion backup. A future upgrade that requires rebuilding derived history from complete raw events may require restoring that backup or using a dedicated migration path provided by that version.",
     "delete_raw_limitations_note": "Core aggregates and long-term statistics remain available. Raw-dependent event details, failure diagnostics, latency distributions, and search may have coverage gaps; missing detail must not be interpreted as zero usage.",
     "run_status_previewed": "Previewed",
     "run_status_archiving": "Archiving",

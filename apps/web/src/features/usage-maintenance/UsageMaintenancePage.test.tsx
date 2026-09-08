@@ -1145,6 +1145,8 @@ describe('UsageMaintenancePage', () => {
     expect(message).toContain('Cutoff (strictly before)');
     expect(message).toContain('server rechecks exact coverage before every batch');
     expect(message).toContain('missing detail must not be interpreted as zero usage');
+    expect(message).toContain('frozen');
+    expect(message).toContain('complete pre-deletion backup');
     expect(confirmation.confirmText).toContain(
       (run.event_count - run.deleted_event_count).toLocaleString('en')
     );

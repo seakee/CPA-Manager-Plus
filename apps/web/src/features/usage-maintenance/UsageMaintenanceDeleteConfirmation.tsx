@@ -89,6 +89,12 @@ export function UsageMaintenanceDeleteConfirmation({ run, deletionEnabled }: Pro
             'The public API exposes summary readiness only. During deletion, the server rechecks exact coverage before every batch and can stop with a coverage-incomplete conflict.',
         })}
       </p>
+      <p className={styles.warningNote}>
+        {t('usage_maintenance.delete_permanent_constraints_note', {
+          defaultValue:
+            'After historical raw events are deleted, the set of models with configured pricing and the context-tier thresholds are frozen. Rate changes, including service-tier rates, remain allowed. Keep a complete pre-deletion backup. A future upgrade that requires rebuilding derived history from complete raw events may require restoring that backup or using a dedicated migration path provided by that version.',
+        })}
+      </p>
       <p className={styles.infoNote}>
         {t('usage_maintenance.delete_raw_limitations_note', {
           defaultValue:

@@ -307,6 +307,7 @@
     "delete_verified_state": "封存校驗狀態",
     "delete_capability_state": "刪除功能狀態",
     "delete_batch_recheck_note": "公開 API 只提供摘要 readiness。刪除時伺服器會在每個 batch 前重新校驗精確覆蓋，覆蓋不完整時可能以衝突狀態停止。",
+    "delete_permanent_constraints_note": "刪除歷史原始事件後，當前版本會凍結「已設定價格的模型集合」和上下文分層閾值；單價調整（包括服務層價格）仍可繼續。請保留刪除前的完整備份。未來若某次升級需要依賴完整 raw 歷史重建衍生資料，可能需要還原該備份，或使用對應版本提供的專用遷移路徑。",
     "delete_raw_limitations_note": "核心彙總與長期統計仍可使用。依賴原始資料的事件明細、失敗診斷、延遲分佈和搜尋可能存在覆蓋缺口；明細缺失不能解釋為用量為零。",
     "run_status_previewed": "已預覽",
     "run_status_archiving": "正在封存",
