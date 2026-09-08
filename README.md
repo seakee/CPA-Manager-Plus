@@ -24,7 +24,7 @@ Operate providers, credentials, OAuth, plugins, and configuration while keeping 
 
 - **Why are requests failing?** Inspect failure rates, status codes, affected models/accounts, and redacted evidence in persistent request history.
 - **Where is the cost going?** Break down tokens and estimated cost by model, provider, account, API key, project, channel, and time range.
-- **Are accounts and quotas healthy?** Review credential state, quota windows, reset evidence, and controlled automation for Codex and xAI accounts.
+- **Are accounts and quotas healthy?** Review credential state, quota windows, reset evidence, controlled automation for Codex and xAI, and read-only Claude OAuth usage inspection in Manager Server.
 
 ## Screenshots
 
@@ -97,8 +97,9 @@ See [Choosing A CPA Panel](https://seakee.github.io/CPA-Manager-Plus/docs/en/gui
 
 ### Account Health, Quota, And Automation
 
-- Inspect Codex and xAI accounts locally or on a Manager Server schedule.
-- Read quota windows, reset evidence, credential state, workspace state, and provider-specific health signals when available.
+- Inspect `codex` and `xai` accounts locally or on a Manager Server schedule; Manager Server also provides read-only `claude` OAuth usage inspection.
+- Claude inspection sends no model or inference request and never automatically mutates credentials; automatic inspection actions apply only to eligible `codex` and `xai` results.
+- Read quota windows, reset evidence, credential state, workspace state, provider-specific health signals, and Manager Server read-only Claude OAuth usage when available.
 - Apply controlled quota cooldowns and route credential failures into an account action queue for review and recovery.
 - Open the unified [Accounts Demo](https://seakee.github.io/CPA-Manager-Plus/#/demo/accounts).
 

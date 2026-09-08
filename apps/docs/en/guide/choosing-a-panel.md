@@ -46,7 +46,7 @@ Full Mode adds Manager Server and local SQLite for server-backed capabilities th
 - Persistent request events from the CPA usage queue.
 - Request, cost, token, latency, and failure analytics by account, model, provider, API key, project, and time range.
 - Saved model prices, API key aliases, inspection history, and automation state.
-- Server-side Codex/xAI inspection, quota cooldowns, and the account action queue.
+- Server-side `codex`/`xai` inspection, read-only `claude` OAuth usage inspection, quota cooldowns, and the account action queue.
 - Backups, background migrations, performance diagnostics, and an independent CPAMP Admin Key.
 
 ## Entry Points And Capability Boundary

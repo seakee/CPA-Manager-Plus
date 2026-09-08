@@ -9,19 +9,19 @@ Use this page to confirm which features each usage option provides and what evid
 
 ## By Usage Option
 
-| Capability                                       | CPAMP Lightweight Panel     | CPAMP Full Mode |
-| ------------------------------------------------ | --------------------------- | --------------- |
-| CPA config, providers, Accounts, OAuth, and logs | ✅                          | ✅              |
-| Plugin management and plugin pages               | Depends on CPA/plugin paths | ✅              |
-| Browser-local account checks                     | ✅                          | ✅              |
-| SQLite request history                           | ❌                          | ✅              |
-| Request monitoring and failure diagnosis         | ❌                          | ✅              |
-| Usage and cost analytics                         | ❌                          | ✅              |
-| Model prices and API key aliases                 | ❌                          | ✅              |
-| Scheduled account inspection and history         | ❌                          | ✅              |
-| Quota cooldowns and account action queue         | ❌                          | ✅              |
-| Login credential                                 | CPA Management Key          | CPAMP Admin Key |
-| Backups, migration state, and pprof              | ❌                          | ✅              |
+| Capability                                                    | CPAMP Lightweight Panel     | CPAMP Full Mode                                      |
+| ------------------------------------------------------------- | --------------------------- | ---------------------------------------------------- |
+| CPA config, providers, Accounts, OAuth, and logs              | ✅                          | ✅                                                   |
+| Plugin management and plugin pages                            | Depends on CPA/plugin paths | ✅                                                   |
+| Browser-local account inspection (`codex` / `xai` only)       | ✅                          | ✅                                                   |
+| SQLite request history                                        | ❌                          | ✅                                                   |
+| Request monitoring and failure diagnosis                      | ❌                          | ✅                                                   |
+| Usage and cost analytics                                      | ❌                          | ✅                                                   |
+| Model prices and API key aliases                              | ❌                          | ✅                                                   |
+| Server account inspection and history                         | ❌                          | ✅ (`codex`/`xai`, plus read-only `claude` OAuth usage) |
+| Quota cooldowns and account action queue                      | ❌                          | ✅                                                   |
+| Login credential                                              | CPA Management Key          | CPAMP Admin Key                                      |
+| Backups, migration state, and pprof                           | ❌                          | ✅                                                   |
 
 The CPAMP Lightweight Panel is an enhanced WebUI hosted directly by CPA and requires no additional service, just like the official panel. It does not connect to or read Manager Server. Use the Manager Server `:18317/management.html` entry for the server-backed capabilities in this table.
 
@@ -41,18 +41,21 @@ Docker and native packages provide the same Full Mode capabilities; only the ins
 
 ## By Account And Provider
 
-| Provider / account type              | Configuration                                              | Quota and health evidence                                             | Active inspection                 |
-| ------------------------------------ | ---------------------------------------------------------- | --------------------------------------------------------------------- | --------------------------------- |
-| Codex OAuth/Auth File                | Provider, auth file, OAuth, and model aliases              | Five-hour/weekly windows, reset, workspace, and credential state      | Local and server                  |
-| Claude                               | Provider and OAuth/Auth File                               | Base quota, weekly quota, and model-scoped limits when returned       | Quota read without model requests |
-| xAI/Grok OAuth                       | Provider/Auth File/OAuth                                   | CLI billing, paid OAuth identity fallback, and request-event evidence | Local and server                  |
-| xAI API Key                          | `xai-api-key`, priority, models, and key testing           | Request results and provider responses                                | Provider key test                 |
-| Qoder OAuth                           | Auth file and device-code OAuth (when CPA supports it)     | Auth-file state, recent requests, and response Headers                | No active quota API assumed yet   |
-| Gemini / Vertex / Antigravity / Kimi | Provider, auth file, or OAuth depending on CPA             | Provider-specific quota or recent request evidence                    | Depends on CPA and provider APIs  |
-| OpenAI-compatible                    | Base URL, API key, headers, model mapping, and key testing | Request status, latency, redacted failures, and cost                  | No assumed common quota API       |
+| Provider / account type              | Configuration                                                                                                      | Quota and health evidence                                             | Active inspection                                                                 |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| Codex OAuth/Auth File                | Provider, auth file, OAuth, and model aliases                                                                      | Five-hour/weekly windows, reset, workspace, and credential state     | Local and server; eligible results can use controlled automatic actions          |
+| Claude                               | Provider and OAuth/Auth File                                                                                       | Base quota, weekly quota, and model-scoped limits when returned      | Manager Server only, read-only OAuth usage inspection; no automatic actions      |
+| xAI/Grok OAuth                       | Provider/Auth File/OAuth                                                                                           | CLI billing, paid OAuth identity fallback, and request-event evidence | Local and server; eligible results can use controlled automatic actions          |
+| xAI API Key                          | `xai-api-key`, priority, models, and key testing                                                                   | Request results and provider responses                                | Provider key test                                                                 |
+| Qwen / Qoder / iFlow                 | Existing CPA-exposed OAuth/auth-file workflows; Qoder device-code OAuth remains conditional on CPA support         | Auth-file state and recent request evidence                           | Remote inspection and active quota refresh unavailable: no verified safe provider contract |
+| Gemini / Vertex / Antigravity / Kimi | Provider, auth file, or OAuth depending on CPA                                                                     | Provider-specific quota or recent request evidence                    | Depends on CPA and provider APIs                                                  |
+| OpenAI-compatible                    | Base URL, API key, headers, model mapping, and key testing                                                         | Request status, latency, redacted failures, and cost                  | No assumed common quota API                                                       |
 
 ## Data And Automation Boundaries
 
+- Browser-local inspection supports only `codex` and `xai`.
+- Manager Server also provides read-only `claude` OAuth usage inspection. It sends no model or inference request and never automatically disables, enables, deletes, reauthenticates, or otherwise mutates credentials.
+- Automatic inspection actions apply only to eligible `codex` and `xai` results, never `claude`.
 - CPAMP only uses evidence returned by the provider, exposed by CPA, or safely extracted from request events.
 - An HTTP `401/403` alone is not enough to auto-disable a credential; explicit credential semantics are required.
 - Quota cooldowns, inspection, and account actions follow “the owner that disabled is the owner that may restore.”

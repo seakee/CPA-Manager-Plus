@@ -29,7 +29,7 @@ description: 在统一 Accounts 工作区管理 CPA 凭证、账号健康、配�
 - 使用搜索、Provider、状态、计划、配额窗口和运行状态筛选账号。
 - 批量修改优先级或启用状态，并为选中的 Codex 凭证切换 WebSockets。
 - 查看账号概览、配置、支持模型、配额历史和诊断证据。
-- 在健康工作区运行本地或服务端 Codex/xAI 巡检。
+- 在健康工作区运行浏览器本地 `codex`/`xai` 巡检、Manager Server `codex`/`xai` 巡检，或 Manager Server 只读 `claude` OAuth 用量检查。
 
 不确定账号是否还要使用时，优先禁用，不要直接删除。禁用会保留历史关联；删除会降低后续巡检、配额和账号动作的可追踪性。
 
@@ -48,22 +48,23 @@ description: 在统一 Accounts 工作区管理 CPA 凭证、账号健康、配�
 账号状态可能来自：
 
 - 用户主动触发的 Provider 配额查询。
-- Codex/xAI 本地或服务端巡检结果。
+- 浏览器本地或 Manager Server `codex`/`xai` 巡检结果。
+- Manager Server 只读 `claude` OAuth 用量检查结果。
 - 最近成功请求中的安全响应 Header。
 - 请求失败摘要中的 `usage_limit_reached`、HTTP `401`、`402` 或 `429` 等信号。
 - Manager Server 保存的配额冷却和账号处理候选项。
 
-Provider 配额刷新始终由用户显式触发；打开页面、读取历史或被动加载 Header 不会自动轮询上游配额接口。
+Provider 配额刷新始终由用户显式触发；打开页面、读取历史或被动加载 Header 不会自动轮询上游配额接口。`qwen`、`qoder` 和 `iflow` 暂无主动配额刷新，因为 CPAMP 没有经过验证的安全 Provider 合约。
 
 CPAMP 按凭证身份和观察时间合并这些证据。较新的健康结果可以淘汰更旧的重新登录、限额、冷却和候选动作；较新的 `401` 或明确额度耗尽仍保持权威。重新登录完成后，旧凭证的巡检和配额证据不会重新附着到替换后的凭证。
 
-| Provider       | 可能显示的证据                                         | 边界                                                           |
-| -------------- | ------------------------------------------------------ | -------------------------------------------------------------- |
-| Codex          | 5 小时/周窗口、reset、Header、workspace 和巡检状态     | 字段取决于账号计划和接口返回。                                 |
-| Claude         | 基础额度、周额度、模型级 scoped limits                 | scoped limits 可能重复、缺失或停用，CPAMP 按身份和新鲜度归并。 |
-| xAI/Grok OAuth | CLI billing 周/月数据、官方 API 身份、请求事件耗尽信号 | 官方 API 身份不等于可查询费用或剩余百分比。                    |
-| Qoder OAuth    | 认证文件状态、最近请求和响应 Header                  | 当前不假设存在通用的主动配额查询接口。                        |
-| 其他 Provider  | CPA 凭证元数据或最近响应 Header                        | 不假设存在统一主动额度接口。                                   |
+| Provider             | 可能显示的证据                                         | 边界                                                                                              |
+| -------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| Codex                | 5 小时/周窗口、reset、Header、workspace 和巡检状态     | 字段取决于账号计划和接口返回。                                                                     |
+| Claude               | 基础额度、周额度、模型级 scoped limits 和只读 OAuth 用量检查 | 仅 Manager Server；检查不发送模型或推理请求，不修改凭证，也不执行自动动作。                       |
+| xAI/Grok OAuth       | CLI billing 周/月数据、官方 API 身份、请求事件耗尽信号 | 官方 API 身份不等于可查询费用或剩余百分比。                                                       |
+| Qwen / Qoder / iFlow | 认证文件状态和最近请求证据                             | 现有 CPA 暴露 OAuth/Auth File 工作流不受影响；因没有经过验证的安全 Provider 合约，远程巡检与主动配额刷新不可用。 |
+| 其他 Provider        | CPA 凭证元数据或最近响应 Header                        | 不假设存在统一主动额度接口。                                                                       |
 
 ## 配额冷却与账号处理
 
@@ -75,7 +76,7 @@ CPAMP 按凭证身份和观察时间合并这些证据。较新的健康结果�
 
 1. 查看 [请求监控](./monitoring.md) 中的状态码和脱敏失败摘要。
 2. 检查凭证是否手动禁用、需要重新登录或处于冷却状态。
-3. 运行 [账号巡检](./codex-inspection.md)，核对 Provider、workspace、billing 和认证证据。
+3. 对符合条件的 `codex`、`xai` 或 Manager Server `claude` OAuth 账号运行[账号巡检](./codex-inspection.md)，并核对可用证据。
 4. 检查 [账号处理队列](./account-actions.md) 是否有待处理候选项。
 5. 如果没有配额数据，确认 Provider 是否支持主动查询，或是否只能通过 Header 被动观察。
 

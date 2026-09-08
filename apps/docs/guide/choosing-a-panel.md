@@ -46,7 +46,7 @@ CPAMP 轻量面板使用同一个 CPA 端口和 Management API，用 CPAMP 的�
 - 持久化 CPA usage queue 中的请求事件。
 - 按账号、模型、Provider、API Key、项目和时间范围分析请求、成本、Token、延迟与失败。
 - 保存模型价格、API Key 别名、巡检历史和自动化状态。
-- 运行服务端 Codex/xAI 巡检、配额冷却和账号处理队列。
+- 运行服务端 `codex`/`xai` 巡检、只读 `claude` OAuth 用量检查、配额冷却和账号处理队列。
 - 提供备份、后台迁移、性能诊断和独立 CPAMP 管理员登录。
 
 ## 入口与能力边界

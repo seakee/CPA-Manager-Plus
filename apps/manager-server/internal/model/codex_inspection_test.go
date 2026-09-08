@@ -140,13 +140,22 @@ func TestCodexInspectionTargetTypesSupportLegacyAndCombinedSelection(t *testing.
 	}
 
 	combined := NormalizeCodexInspectionConfig(
-		ManagerCodexInspectionConfig{TargetTypes: []string{" XAI ", "codex", "xai"}},
+		ManagerCodexInspectionConfig{TargetTypes: []string{" claude ", " XAI ", "codex", "xai", "claude"}},
 		fallback,
 	)
-	if got := combined.TargetProviders(); len(got) != 2 || got[0] != CodexInspectionTargetCodex || got[1] != CodexInspectionTargetXAI {
-		t.Fatalf("combined target types = %#v", got)
+	want := []string{CodexInspectionTargetCodex, CodexInspectionTargetXAI, CodexInspectionTargetClaude}
+	if got := combined.TargetProviders(); len(got) != len(want) {
+		t.Fatalf("combined target types = %#v, want %#v", got, want)
+	} else {
+		for index, target := range want {
+			if got[index] != target {
+				t.Fatalf("combined target types = %#v, want %#v", got, want)
+			}
+		}
 	}
-	if combined.TargetType != CodexInspectionTargetCodex || !combined.HasTargetProvider(CodexInspectionTargetXAI) {
+	if combined.TargetType != CodexInspectionTargetCodex ||
+		!combined.HasTargetProvider(CodexInspectionTargetXAI) ||
+		!combined.HasTargetProvider(CodexInspectionTargetClaude) {
 		t.Fatalf("combined provider compatibility fields = %#v", combined)
 	}
 }
@@ -155,8 +164,13 @@ func TestValidateCodexInspectionTargetTypes(t *testing.T) {
 	if err := ValidateCodexInspectionConfig(ManagerCodexInspectionConfig{TargetTypes: []string{}}); err == nil {
 		t.Fatal("expected empty target types to be rejected")
 	}
-	if err := ValidateCodexInspectionConfig(ManagerCodexInspectionConfig{TargetTypes: []string{"codex", "anthropic"}}); err == nil {
-		t.Fatal("expected unsupported target type to be rejected")
+	for _, target := range []string{"qwen", "qoder", "iflow", "anthropic", "unknown"} {
+		if err := ValidateCodexInspectionConfig(ManagerCodexInspectionConfig{TargetTypes: []string{target}}); err == nil {
+			t.Fatalf("expected unsupported target type %q to be rejected", target)
+		}
+	}
+	if err := ValidateCodexInspectionConfig(ManagerCodexInspectionConfig{TargetType: " CLAUDE "}); err != nil {
+		t.Fatalf("expected canonical Claude target type to be accepted: %v", err)
 	}
 }
 

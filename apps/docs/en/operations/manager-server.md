@@ -25,7 +25,7 @@ When CPA itself serves this entry point, you are using the CPAMP Lightweight Pan
 http://<cpa-host>:8317/management.html
 ```
 
-The CPAMP Lightweight Panel does not connect to or read Manager Server SQLite and does not provide full historical monitoring, model prices, API key aliases, import/export, or server inspection history.
+The CPAMP Lightweight Panel does not connect to or read Manager Server SQLite and does not provide full historical monitoring, model prices, API key aliases, import/export, or server inspection history. Its browser-local inspection supports only `codex` and `xai`.
 
 ## What Manager Server Does
 
@@ -38,7 +38,7 @@ Manager Server:
 - Proxies CPA Management API calls after setup.
 - Consumes CPA usage events.
 - Persists usage events in SQLite.
-- Provides Dashboard, Request Monitoring, Usage Analytics, Model Pricing, API Key Alias, Usage Import/Export, and Server Codex Inspection APIs.
+- Provides Dashboard, Request Monitoring, Usage Analytics, Model Pricing, API Key Alias, Usage Import/Export, and Server account inspection APIs for `codex`/`xai`, plus read-only `claude` OAuth usage inspection.
 
 ::: details Advanced: architecture and data flow
 
@@ -172,7 +172,7 @@ Managed by Manager Server:
 - SQLite usage data.
 - Model pricing data.
 - API Key aliases.
-- Server inspection history.
+- Server inspection history for `codex`/`xai` and read-only `claude` OAuth usage inspection.
 
 Still managed by CPA:
 
@@ -331,7 +331,7 @@ When `USAGE_QUOTA_COOLDOWN_ENABLED`, `USAGE_ACCOUNT_ACTIONS_ENABLED`, or `USAGE_
 | `DELETE /v0/management/account-action-candidates/{id}/auth-file` | Delete the auth file linked to a candidate.                                                                  |
 | `GET /v0/management/dashboard/*`                                 | Dashboard data.                                                                                              |
 | `GET /v0/management/monitoring/*`                                | Monitoring data.                                                                                             |
-| `GET /v0/management/codex-inspection/*`                          | Server Codex inspection.                                                                                     |
+| `GET /v0/management/codex-inspection/*`                          | Server inspection for `codex`/`xai` and read-only `claude` OAuth usage inspection.                        |
 | `GET /models`, `GET /v1/models`                                  | Proxy model-list requests to CPA after setup.                                                                |
 | `/v0/management/*`                                               | Proxied to CPA unless handled by CPAMP.                                                                      |
 
@@ -342,6 +342,8 @@ Authorization: Bearer <CPAMP_ADMIN_KEY>
 ```
 
 :::
+
+Manager Server `claude` OAuth usage inspection is read-only: it sends no model or inference request and never automatically disables, enables, deletes, reauthenticates, or otherwise mutates credentials. Automatic inspection actions apply only to eligible `codex` and `xai` results.
 
 ## Data And Security
 

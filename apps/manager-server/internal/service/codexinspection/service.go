@@ -1741,8 +1741,28 @@ func (s *Service) inspectSingleAccount(
 	item account,
 	logger runLogger,
 ) model.CodexInspectionResult {
-	if item.Provider == "xai" {
+	switch normalizeInspectionProvider(item.Provider) {
+	case model.CodexInspectionTargetXAI:
 		return s.inspectSingleXAIAccount(ctx, setup, settings, item, logger)
+	case model.CodexInspectionTargetClaude:
+		return s.inspectSingleClaudeAccount(ctx, setup, settings, item, logger)
+	case model.CodexInspectionTargetCodex:
+		// Codex is the only provider permitted to call the ChatGPT usage endpoint.
+	default:
+		base := resultFromAccount(item)
+		base.Action = "keep"
+		base.ActionReason = "Unsupported provider; inspection retained account"
+		base.AutoRecoverEligible = false
+		base.IsQuota = false
+		base.Error = "unsupported provider"
+		base.ErrorKind = "unsupported_provider"
+		base.ErrorDetail = truncate("unsupported provider: "+normalizeInspectionProvider(item.Provider), maxStoredBodyText)
+		logger.warning(ctx, "Unsupported inspection provider skipped", map[string]any{
+			"provider":       normalizeInspectionProvider(item.Provider),
+			"fileName":       item.FileName,
+			"displayAccount": item.DisplayAccount,
+		})
+		return base
 	}
 	base := resultFromAccount(item)
 	if item.AuthIndex == "" {
@@ -2260,6 +2280,9 @@ func (s *Service) executeAction(
 	sourceMembers []model.CodexInspectionResult,
 	automatic bool,
 ) error {
+	if !providerActionAllowed(item.Provider, item.Action) {
+		return errors.New("inspection provider does not permit account mutation")
+	}
 	if automatic && normalizeInspectionProvider(item.Provider) == "codex" {
 		if strings.TrimSpace(item.AuthIndex) == "" {
 			return errors.New(inspectionIdentityMissingReason)
@@ -3217,6 +3240,9 @@ func hasInspectionActionIdentity(result model.CodexInspectionResult) bool {
 }
 
 func allowAutoAction(mode string, autoRecoverEnabled bool, result model.CodexInspectionResult) bool {
+	if !providerActionAllowed(result.Provider, result.Action) {
+		return false
+	}
 	if result.Action == "enable" {
 		return autoRecoverEnabled && result.AutoRecoverEligible
 	}
@@ -3418,6 +3444,13 @@ func selectManualActionItems(
 
 func isExecutableInspectionAction(action string) bool {
 	return action == "delete" || action == "disable" || action == "enable"
+}
+
+func providerActionAllowed(provider string, action string) bool {
+	if !isExecutableInspectionAction(action) && action != "reauth" {
+		return true
+	}
+	return normalizeInspectionProvider(provider) != model.CodexInspectionTargetClaude
 }
 
 func (s *Service) validateActionItems(
@@ -4326,6 +4359,8 @@ func normalizeInspectionProvider(value string) string {
 	switch normalized {
 	case "x-ai", "grok":
 		return "xai"
+	case "anthropic":
+		return model.CodexInspectionTargetClaude
 	default:
 		return normalized
 	}

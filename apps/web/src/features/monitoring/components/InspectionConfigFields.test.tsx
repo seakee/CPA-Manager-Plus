@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { describe, expect, it, vi } from 'vitest';
 import type { SharedInspectionConfigDraft } from '@/features/monitoring/model/codexInspectionPresentation';
+import { Select } from '@/components/ui/Select';
 import { InspectionConfigFields } from './InspectionConfigFields';
 
 const t = ((key: string) => key) as never;
@@ -26,12 +27,16 @@ const createDraft = (
   ...overrides,
 });
 
-const renderFields = (draft: SharedInspectionConfigDraft) =>
+const renderFields = (
+  draft: SharedInspectionConfigDraft,
+  allowClaudeTarget = false
+) =>
   renderToStaticMarkup(
     <InspectionConfigFields
       draft={draft}
       errors={{}}
       t={t}
+      allowClaudeTarget={allowClaudeTarget}
       onFieldChange={vi.fn()}
       onXaiInferenceEnabledChange={vi.fn()}
       onAutoActionModeChange={vi.fn()}
@@ -40,6 +45,57 @@ const renderFields = (draft: SharedInspectionConfigDraft) =>
   );
 
 describe('InspectionConfigFields', () => {
+  it('keeps Claude out of browser-local target options by default', () => {
+    const markup = renderFields(createDraft({ targetTypes: 'claude' }));
+
+    expect(markup).not.toContain('monitoring.codex_inspection_target_claude');
+    expect(markup).not.toContain('value="claude"');
+  });
+
+  it('offers only canonical Claude combinations when server capability is enabled', () => {
+    let renderer: ReactTestRenderer;
+    act(() => {
+      renderer = create(
+        <InspectionConfigFields
+          draft={createDraft({ targetTypes: 'claude' })}
+          errors={{}}
+          t={t}
+          allowClaudeTarget
+          onFieldChange={vi.fn()}
+          onXaiInferenceEnabledChange={vi.fn()}
+          onAutoActionModeChange={vi.fn()}
+          onAutoRecoverEnabledChange={vi.fn()}
+        />
+      );
+    });
+    const targetSelect = renderer!.root.findAllByType(Select).find((node) => node.props.id === 'targetTypes');
+    const values = targetSelect?.props.options.map((option: { value: string }) => option.value);
+
+    expect(values).toEqual([
+      'codex',
+      'xai',
+      'codex+xai',
+      'claude',
+      'codex+claude',
+      'xai+claude',
+      'codex+xai+claude',
+    ]);
+    expect(values).not.toContain('qwen');
+    expect(values).not.toContain('qoder');
+    expect(values).not.toContain('iflow');
+    act(() => renderer!.unmount());
+  });
+
+  it('does not reveal Codex or xAI advanced controls for a Claude-only target', () => {
+    const markup = renderFields(createDraft({ targetTypes: 'claude' }), true);
+
+    expect(markup).not.toContain('id="userAgent"');
+    expect(markup).not.toContain('id="xaiInferenceEnabled"');
+    expect(markup).not.toContain('id="xaiInferenceUserAgent"');
+    expect(markup).not.toContain('id="xaiInferenceModel"');
+    expect(markup).not.toContain('id="xaiInferencePrompt"');
+  });
+
   it('hides xAI inference settings when inference is off', () => {
     const markup = renderFields(createDraft());
 

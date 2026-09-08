@@ -13,7 +13,7 @@ description: 使用 CPA Manager Plus 根据脱敏认证证据集中复核、禁�
 
 ## 什么时候会出现候选项
 
-当请求监控捕获到 token 失效、OAuth 被撤销、认证文件异常或类似失败信号时，CPAMP 会把账号加入候选队列。实时请求响应和 Codex 巡检使用同一套凭证故障判定规则，避免同一种错误在两个入口得到相反结论。
+当请求监控捕获到 token 失效、OAuth 被撤销、认证文件异常或类似失败信号时，CPAMP 会把账号加入候选队列。实时请求响应和符合条件的 `codex`/`xai` 巡检结果使用同一套凭证故障判定规则，避免同一种错误在两个入口得到相反结论。只读 `claude` OAuth 用量检查绝不会产生自动巡检动作。
 
 队列是否启用由 `USAGE_ACCOUNT_ACTIONS_ENABLED` 或配置中心开关控制。自动禁用还需要 `USAGE_ACCOUNT_ACTIONS_AUTO_DISABLE`，并依赖队列启用。
 
@@ -56,7 +56,7 @@ CPAMP 不会因为 HTTP 状态码本身自动禁用账号。`401`、`403` 只是
 - 需要看失败详情：去 [请求监控](./monitoring.md)。
 - 需要重新授权：去 [OAuth 登录](./oauth.md)。
 - 需要禁用或恢复账号：去 [凭证管理](./accounts.md)。
-- 需要判断 Codex/xAI 配额和状态：去 [账号巡检](./codex-inspection.md)。
+- 需要巡检证据：`codex`/`xai` 使用[账号巡检](./codex-inspection.md)，Manager Server 还提供只读 `claude` OAuth 用量检查。
 
 ## 使用建议
 

@@ -99,7 +99,7 @@ With `disable-auto-update-panel: true`, CPA downloads the panel only when the ca
 | ------------------------------------------------------------ | --------------------------------------------------- |
 | CPA config, providers, Accounts, OAuth, and logs             | Supported                                           |
 | API keys, model aliases, priorities, and plugin management   | Supported when exposed by CPA APIs and plugin paths |
-| Browser-local account checks                                 | Supported where the page provides a local workflow  |
+| Browser-local account inspection                             | Supported for `codex` and `xai` only                |
 | SQLite request history and request monitoring                | Not supported                                       |
 | Usage and cost analytics, model prices, and API key aliases  | Not supported                                       |
 | Server inspection, quota cooldowns, and account action queue | Not supported                                       |
