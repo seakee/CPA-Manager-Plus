@@ -104,7 +104,9 @@ If importing the same decompressed segment into the source database reports ever
 
 When a browser resumes an import session with an uploaded prefix, it computes the selected file's prefix SHA-256 incrementally and the server compares it with the persisted digest. The selected file must have the same content, not merely the same filename, size, or `lastModified`; a mismatch stops resumable upload and requires a new session. Legacy sessions whose uploaded prefix has no digest are not treated as safe resume targets.
 
-The archive “Abandon task” action is allowed only for `previewed`, `archived`, `verified`, and `failed` runs that have neither published a segment nor entered raw deletion. It is rejected for `archiving`, `verifying`, `deleting`, failed runs with a published segment or partial deletion, and `completed` runs. Cancelling does not delete raw usage, published archive segments, or identity-ledger entries; a run that has started raw deletion must be resumed or completed.
+The archive “Abandon task” action is allowed only for `previewed` runs and `failed` runs that have not published any archive segments and have not entered raw deletion. Once any segment has been published (including published `archived`, `verified`, and `failed` runs), or once the run enters `deleting`, partial deletion, or `completed`, cancellation is rejected. Cancelling does not delete raw usage, published archive segments, or identity-ledger entries; a run that has started raw deletion must be resumed or completed.
+
+Note: A complete backup taken strictly before the first raw deletion (consisting of `usage.sqlite`, `usage.sqlite-wal`, `usage.sqlite-shm`, `data.key`, and `usage-archives/`) serves as the recovery boundary if a future upgrade requires complete historical raw events to rebuild derived data. After raw events are deleted, pricing model sets and context-tier thresholds are frozen, and a full historical rebuild may require restoring that pre-deletion backup or using a dedicated migration path provided by that version.
 
 ## Reclaim Physical Space After Logical Deletion
 

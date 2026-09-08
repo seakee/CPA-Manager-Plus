@@ -78,6 +78,6 @@ Manager Server environment variables control resumable imports and historical re
 - `USAGE_QUERY_LIMIT` limits compatible Usage queries only; it does not limit the complete raw JSONL export exposed by Usage Maintenance.
 - `USAGE_IMPORT_CHUNK_BYTES` is the server upload chunk size; the panel displays the session's returned `chunk_size_bytes` dynamically.
 - `USAGE_IMPORT_DISK_QUOTA_BYTES`, `USAGE_IMPORT_MAX_SESSIONS`, and `USAGE_IMPORT_SESSION_TTL_MINUTES` control the total temporary-file quota, active-session count, and session TTL.
-- `USAGE_ARCHIVE_RETENTION_ENABLED` and `USAGE_ARCHIVE_RETENTION_DAYS` control automatic retention; retention remains gated by hourly rollup and archive-coverage readiness.
+- `USAGE_ARCHIVE_RETENTION_ENABLED` and `USAGE_ARCHIVE_RETENTION_DAYS` control automatic retention; retention remains gated by hourly rollup and archive-coverage readiness. When enabled, once archive verification and deletion coverage gates are satisfied, historical raw events older than the retention window are deleted automatically. Note that after the first raw deletion occurs, the set of priced models and the context-tier threshold structure enter a fail-closed freeze and structural mutations are rejected; rate-only updates, including service-tier rates, remain allowed.
 
 The complete export covers only raw usage events still present when the export snapshot starts. It does not merge deleted archive segments back into JSONL and does not replace a backup containing SQLite, WAL/SHM, `data.key`, and `usage-archives/`.

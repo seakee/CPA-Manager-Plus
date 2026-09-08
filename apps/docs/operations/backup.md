@@ -104,7 +104,9 @@ Windows 上使用可信的 gzip 解压工具生成同样的 `.jsonl` 文件。�
 
 浏览器恢复已有 uploaded prefix 的可恢复导入会话时，会分块计算所选文件的 SHA-256 prefix，并由服务端比对持久化 digest。重新选择的文件必须与原文件内容一致，不能只依赖文件名、大小或 `lastModified`；不匹配时会停止续传并要求新建会话。旧的、已有上传 prefix 但没有 digest 的会话不会被当作安全续传目标。
 
-归档 run 的“放弃任务”只允许用于尚未发布 segment 且从未开始 raw delete 的 `previewed`、`archived`、`verified` 和 `failed` 状态；`archiving`、`verifying`、已发布 segment 或已经部分删除的 `failed`、`deleting` 以及 `completed` 不能取消。取消不会删除 raw usage、已发布归档 segment 或 identity ledger；已经开始 raw delete 的 run 必须继续恢复或完成。
+归档 run 的“放弃任务”只允许用于尚未发布任何 segment 且从未开始 raw delete 的 `previewed` 以及未发布 segment 的 `failed` 状态；一旦发布了 segment（包括已发布的 `archived`、`verified`、`failed`），或者进入 `deleting`、部分删除或 `completed`，均不能取消。取消不会删除 raw usage、已发布归档 segment 或 identity ledger；已经开始 raw delete 的 run 必须继续恢复或完成。
+
+注意：执行第一次 raw deletion 之前的完整备份（包含 `usage.sqlite`、`usage.sqlite-wal`、`usage.sqlite-shm`、`data.key` 以及 `usage-archives/`），是未来若某次升级需要依赖完整原始历史重建派生数据时的恢复边界。首次删除原始事件后，系统会冻结已配置价格的模型集合和上下文分层阈值，未来若需要依赖完整 raw 重建派生历史，可能需要恢复该备份或使用对应版本提供的专用迁移路径。
 
 ## 逻辑删除后的物理空间回收
 
