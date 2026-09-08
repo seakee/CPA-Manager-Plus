@@ -438,3 +438,51 @@ func TestCodexLegacyIdentityEvidenceBoundedTailReader(t *testing.T) {
 		}
 	}
 }
+
+func TestCodexLegacyIdentityEvidenceReaderRejectsDriftedSchemaVersion(t *testing.T) {
+	db := openIdentityEvidenceTestDB(t)
+	ctx := context.Background()
+
+	events := []usage.Event{
+		identityChronologyEvent("weak", 1000, "codex-a.json", "auth-a", "codex", "", ""),
+		identityChronologyEvent("trusted", 3000, "codex-a.json", "auth-a", "codex", "account-a", ""),
+	}
+	repo := New(db)
+	if _, err := repo.InsertBatch(ctx, events); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	var initialMaxID int64
+	if err := db.QueryRow(`select coalesce(max(id), 0) from usage_events`).Scan(&initialMaxID); err != nil {
+		t.Fatalf("query max id: %v", err)
+	}
+
+	commitIdentityEvidenceTestBatch(t, db, 0, initialMaxID)
+	if _, err := db.Exec(`update usage_monitoring_rollup_state set status = 'ready' where rollup_name = ?`, CodexLegacyIdentityRollupName); err != nil {
+		t.Fatalf("set status ready: %v", err)
+	}
+
+	// 1. Accepts CodexLegacyIdentityEvidenceSchemaVersion
+	target := identityEvidenceTestTarget()
+	key, allowed, err := ResolveCodexLegacyAccountKey(ctx, db, target)
+	if err != nil || !allowed || key == "" {
+		t.Fatalf("expected allowed key with valid schema version, got key=%q allowed=%v err=%v", key, allowed, err)
+	}
+
+	// 2. Rejects CodexLegacyIdentityEvidenceSchemaVersion + 1
+	if _, err := db.Exec(`update usage_monitoring_rollup_state set schema_version = ? where rollup_name = ?`,
+		CodexLegacyIdentityEvidenceSchemaVersion+1, CodexLegacyIdentityRollupName); err != nil {
+		t.Fatalf("corrupt schema version: %v", err)
+	}
+	spy := &identityEvidenceQuerySpy{SQLQueryer: db}
+	_, allowedDrifted, err := ResolveCodexLegacyAccountKey(ctx, spy, target)
+	if err != nil {
+		t.Fatalf("resolve key error: %v", err)
+	}
+	if spy.fullHistoryReads == 0 {
+		t.Fatalf("expected full history read fallback when cache schema version is drifted")
+	}
+	if !allowedDrifted {
+		t.Fatalf("expected key to resolve via full history read fallback")
+	}
+}

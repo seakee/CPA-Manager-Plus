@@ -4,12 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
 
 const (
 	CodexLegacyIdentityEvidenceTable         = "usage_codex_legacy_identity_evidence_v1"
 	CodexLegacyIdentityRollupName            = "codex_legacy_identity_v1"
-	CodexLegacyIdentityEvidenceSchemaVersion = 1
+	CodexLegacyIdentityEvidenceSchemaVersion = usageidentity.CodexLegacyIdentityEvidenceSchemaVersion
 	// Bump when the stored fields, physical predicates, or chronology projection
 	// change. Account-key/model revisions do not change this raw evidence.
 	CodexLegacyIdentityEvidenceRevision = "1"
@@ -150,7 +152,7 @@ func codexLegacyIdentityEvidenceReadState(ctx context.Context, queryer SQLQuerye
 	if rawMaxID > latestKnownID {
 		latestKnownID = rawMaxID
 	}
-	if version != 1 || revision != CodexLegacyIdentityEvidenceRevision || coverageID < 0 || coverageID > latestKnownID {
+	if version != CodexLegacyIdentityEvidenceSchemaVersion || revision != CodexLegacyIdentityEvidenceRevision || coverageID < 0 || coverageID > latestKnownID {
 		return 0, 0, false, nil
 	}
 	if status != "ready" && status != "catching_up" && status != "rebuilding" {

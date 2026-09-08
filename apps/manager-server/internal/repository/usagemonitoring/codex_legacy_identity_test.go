@@ -3,11 +3,13 @@ package usagemonitoring_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageevent"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagemonitoring"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
@@ -333,5 +335,34 @@ func TestCodexLegacyIdentityEvidenceSurvivesRawDeletionAndCatchUp(t *testing.T) 
 	}
 	if stateTail.CoverageEventID < 11 {
 		t.Fatalf("coverage after tail = %d, want >= 11", stateTail.CoverageEventID)
+	}
+}
+
+func TestCodexLegacyIdentityRollupDecoupledSchemaVersion(t *testing.T) {
+	ctx := context.Background()
+	db, st := newMonitoringRepositoryStore(t)
+	seedCodexLegacyIdentityEvents(t, db, 5)
+
+	if _, err := db.Exec("update usage_monitoring_rollup_state set schema_version = ? where rollup_name = ?",
+		usageidentity.CodexLegacyIdentityEvidenceSchemaVersion+1, usageevent.CodexLegacyIdentityRollupName); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := st.CatchUpCodexLegacyIdentityEvidence(ctx, 1000, 1)
+	if !errors.Is(err, usagemonitoring.ErrUnsupportedSchema) {
+		t.Fatalf("expected ErrUnsupportedSchema when schema_version is drifted, got %v", err)
+	}
+
+	if _, err := db.Exec("update usage_monitoring_rollup_state set schema_version = ? where rollup_name = ?",
+		usageidentity.CodexLegacyIdentityEvidenceSchemaVersion, usageevent.CodexLegacyIdentityRollupName); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := st.CatchUpCodexLegacyIdentityEvidence(ctx, 1000, 2)
+	if err != nil {
+		t.Fatalf("catch-up with decoupled schema version failed: %v", err)
+	}
+	if result.Processed != 5 {
+		t.Fatalf("expected processed=5, got %d", result.Processed)
 	}
 }

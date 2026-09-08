@@ -141,8 +141,9 @@ func (r *repository) catchUp(
 	if err != nil {
 		return CatchUpResult{}, err
 	}
-	if state.SchemaVersion != SchemaVersion {
-		return CatchUpResult{}, fmt.Errorf("%w: %s got %d, want %d", ErrUnsupportedSchema, rollupName, state.SchemaVersion, SchemaVersion)
+	expectedSchema := expectedSchemaVersion(rollupName)
+	if state.SchemaVersion != expectedSchema {
+		return CatchUpResult{}, fmt.Errorf("%w: %s got %d, want %d", ErrUnsupportedSchema, rollupName, state.SchemaVersion, expectedSchema)
 	}
 	latestID, err := latestEventID(ctx, tx)
 	if err != nil {
@@ -170,7 +171,7 @@ func (r *repository) catchUp(
 		}
 		state = State{
 			RollupName:        rollupName,
-			SchemaVersion:     SchemaVersion,
+			SchemaVersion:     expectedSchema,
 			StructureRevision: revision,
 			Status:            revisionResetStatus(rollupName),
 			TargetEventID:     latestID,
@@ -468,4 +469,11 @@ func setSearchIndexReady(ctx context.Context, tx *sql.Tx, rollupName string, rea
 	_, err := tx.ExecContext(ctx, `update usage_monitoring_search_index_state set
 		ready = ?, updated_at_ms = ? where id = 1`, readyValue, nowMS)
 	return err
+}
+
+func expectedSchemaVersion(rollupName string) int {
+	if rollupName == usageevent.CodexLegacyIdentityRollupName {
+		return usageevent.CodexLegacyIdentityEvidenceSchemaVersion
+	}
+	return SchemaVersion
 }

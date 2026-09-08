@@ -86,6 +86,30 @@ func TestUsageHourlyAggregateMigrationContractMatchesRepository(t *testing.T) {
 	}
 }
 
+func TestCodexLegacyIdentityEvidenceSchemaVersionDecoupledFromAggregate(t *testing.T) {
+	if usageidentity.CodexLegacyIdentityEvidenceSchemaVersion != 1 {
+		t.Fatalf("expected CodexLegacyIdentityEvidenceSchemaVersion == 1, got %d", usageidentity.CodexLegacyIdentityEvidenceSchemaVersion)
+	}
+	if usageaggregate.SchemaVersion == usageidentity.CodexLegacyIdentityEvidenceSchemaVersion {
+		t.Fatalf("expected CodexLegacyIdentityEvidenceSchemaVersion to be decoupled from usageaggregate.SchemaVersion, but both equal %d", usageaggregate.SchemaVersion)
+	}
+
+	path := filepath.Join(t.TempDir(), "identity-schema-version.sqlite")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+
+	var seededVersion int
+	if err := db.QueryRow(`select schema_version from usage_monitoring_rollup_state where rollup_name = 'codex_legacy_identity_v1'`).Scan(&seededVersion); err != nil {
+		t.Fatalf("query seed schema version: %v", err)
+	}
+	if seededVersion != usageidentity.CodexLegacyIdentityEvidenceSchemaVersion {
+		t.Fatalf("seeded schema_version = %d, want %d", seededVersion, usageidentity.CodexLegacyIdentityEvidenceSchemaVersion)
+	}
+}
+
 func TestUsageArchiveRunMigrationAddsRequestedStageColumn(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usage-archive-requested-stage.sqlite")
 	db, err := Open(path)
@@ -4340,4 +4364,3 @@ func TestMigrationEarlyRecoverySucceedsWhenArchiveRefsExistWithoutDeletion(t *te
 	}
 	_ = reopened.Close()
 }
-

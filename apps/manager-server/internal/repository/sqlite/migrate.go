@@ -559,11 +559,11 @@ func Migrate(db *sql.DB) error {
 			last_error text
 		)`,
 		createUsageCodexLegacyIdentityEvidenceTable,
-		`insert or ignore into usage_monitoring_rollup_state (
+		fmt.Sprintf(`insert or ignore into usage_monitoring_rollup_state (
 			rollup_name, schema_version, status, target_event_id, updated_at_ms
-		) select 'codex_legacy_identity_v1', 1,
+		) select 'codex_legacy_identity_v1', %d,
 			case when exists (select 1 from usage_events limit 1) then 'pending' else 'ready' end,
-			coalesce((select max(id) from usage_events), 0), 0`,
+			coalesce((select max(id) from usage_events), 0), 0`, usageidentity.CodexLegacyIdentityEvidenceSchemaVersion),
 		`insert or ignore into usage_monitoring_rollup_state (
 			rollup_name, schema_version, status, target_event_id, updated_at_ms
 		) select 'stats_v1', 1,
