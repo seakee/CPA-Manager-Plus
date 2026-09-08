@@ -370,6 +370,220 @@ func TestRepositoryCancelFailedArchivingRunWithPublishedSegmentIsRejected(t *tes
 	}
 }
 
+func TestRepositoryCancelArchivedRunWithPublishedSegmentIsRejected(t *testing.T) {
+	db := openArchiveTestDB(t)
+	ctx := context.Background()
+	events := archiveTestEvents()[:1]
+	if _, err := usageevent.New(db).InsertBatch(ctx, events); err != nil {
+		t.Fatalf("insert usage events: %v", err)
+	}
+	repository := New(db)
+	run, err := repository.CreateRun(ctx, "cancel-archived-segment", 2_000, 30_300)
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	run, err = repository.BeginArchive(ctx, run.ID, 30_301)
+	if err != nil {
+		t.Fatalf("begin archive: %v", err)
+	}
+	records, err := repository.Records(ctx, run.ID, 0, 10, 1<<20)
+	if err != nil {
+		t.Fatalf("read archive records: %v", err)
+	}
+	if _, err := repository.RecordSegment(ctx, run.ID, archiveTestSegment(run.ID, records), archiveRecordRefs(records), 30_302); err != nil {
+		t.Fatalf("record published segment: %v", err)
+	}
+	run, err = repository.MarkArchived(ctx, run.ID, "test-digest", "manifest.json", "test-manifest-sha", 30_303)
+	if err != nil || run.Status != StatusArchived {
+		t.Fatalf("mark archived: %v", err)
+	}
+
+	if _, err := repository.CancelRun(ctx, run.ID, 30_304); !errors.Is(err, ErrCancelPublished) {
+		t.Fatalf("cancel archived run error = %v, want ErrCancelPublished", err)
+	}
+
+	segments, err := repository.Segments(ctx, run.ID)
+	if err != nil || len(segments) != 1 {
+		t.Fatalf("segments after rejected cancel: len=%d err=%v", len(segments), err)
+	}
+
+	preview, err := repository.Preview(ctx, 2_000)
+	if err != nil {
+		t.Fatalf("preview after rejected cancel: %v", err)
+	}
+	if preview.EventCount != 0 {
+		t.Fatalf("published event became eligible for preview: %#v", preview)
+	}
+}
+
+func TestRepositoryCancelVerifiedRunIsRejectedAndCanDelete(t *testing.T) {
+	db := openArchiveTestDB(t)
+	ctx := context.Background()
+	events := archiveTestEvents()[:1]
+	if _, err := usageevent.New(db).InsertBatch(ctx, events); err != nil {
+		t.Fatalf("insert usage events: %v", err)
+	}
+	repository := New(db)
+	run, err := repository.CreateRun(ctx, "cancel-verified-run", 2_000, 30_400)
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	run, err = repository.BeginArchive(ctx, run.ID, 30_401)
+	if err != nil {
+		t.Fatalf("begin archive: %v", err)
+	}
+	records, err := repository.Records(ctx, run.ID, 0, 10, 1<<20)
+	if err != nil {
+		t.Fatalf("read archive records: %v", err)
+	}
+	if _, err := repository.RecordSegment(ctx, run.ID, archiveTestSegment(run.ID, records), archiveRecordRefs(records), 30_402); err != nil {
+		t.Fatalf("record published segment: %v", err)
+	}
+	if _, err := repository.MarkArchived(ctx, run.ID, "test-digest", "manifest.json", "test-manifest-sha", 30_403); err != nil {
+		t.Fatalf("mark archived: %v", err)
+	}
+	catchUpHourlyAggregate(t, ctx, db, 30_403)
+	if _, err := repository.BeginVerification(ctx, run.ID, 30_404); err != nil {
+		t.Fatalf("begin verification: %v", err)
+	}
+	run, err = repository.MarkVerified(ctx, run.ID, 30_405)
+	if err != nil || run.Status != StatusVerified {
+		t.Fatalf("mark verified: %v", err)
+	}
+
+	if _, err := repository.CancelRun(ctx, run.ID, 30_406); !errors.Is(err, ErrCancelPublished) {
+		t.Fatalf("cancel verified run error = %v, want ErrCancelPublished", err)
+	}
+
+	catchUpDeleteReadiness(t, ctx, db, 30_406)
+	deleting, err := repository.BeginDelete(ctx, run.ID, 30_407)
+	if err != nil || deleting.Status != StatusDeleting {
+		t.Fatalf("begin delete after rejected cancel: %v", err)
+	}
+	result, err := repository.DeleteBatch(ctx, run.ID, 10, 30_408)
+	if err != nil || result.Deleted != 1 || result.Run.Status != StatusCompleted {
+		t.Fatalf("delete batch after rejected cancel: result=%#v err=%v", result, err)
+	}
+}
+
+func TestRepositoryCancelFailedVerificationRunWithPublishedSegmentIsRejectedAndCanResume(t *testing.T) {
+	db := openArchiveTestDB(t)
+	ctx := context.Background()
+	events := archiveTestEvents()[:1]
+	if _, err := usageevent.New(db).InsertBatch(ctx, events); err != nil {
+		t.Fatalf("insert usage events: %v", err)
+	}
+	repository := New(db)
+	run, err := repository.CreateRun(ctx, "cancel-failed-verify", 2_000, 30_500)
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	run, err = repository.BeginArchive(ctx, run.ID, 30_501)
+	if err != nil {
+		t.Fatalf("begin archive: %v", err)
+	}
+	records, err := repository.Records(ctx, run.ID, 0, 10, 1<<20)
+	if err != nil {
+		t.Fatalf("read archive records: %v", err)
+	}
+	if _, err := repository.RecordSegment(ctx, run.ID, archiveTestSegment(run.ID, records), archiveRecordRefs(records), 30_502); err != nil {
+		t.Fatalf("record published segment: %v", err)
+	}
+	if _, err := repository.MarkArchived(ctx, run.ID, "test-digest", "manifest.json", "test-manifest-sha", 30_503); err != nil {
+		t.Fatalf("mark archived: %v", err)
+	}
+	if _, err := repository.BeginVerification(ctx, run.ID, 30_504); err != nil {
+		t.Fatalf("begin verification: %v", err)
+	}
+	if _, err := repository.RecordFailure(ctx, run.ID, StatusVerifying, errors.New("simulated verify failure"), 30_505); err != nil {
+		t.Fatalf("record failure: %v", err)
+	}
+
+	failed, err := repository.Run(ctx, run.ID)
+	if err != nil || failed.Status != StatusFailed || failed.ResumeStatus != StatusVerifying || failed.ArchivedEventCount != 1 {
+		t.Fatalf("failed run = %#v error=%v", failed, err)
+	}
+
+	if _, err := repository.CancelRun(ctx, run.ID, 30_506); !errors.Is(err, ErrCancelPublished) {
+		t.Fatalf("cancel failed verify error = %v, want ErrCancelPublished", err)
+	}
+
+	resumed, err := repository.BeginVerification(ctx, run.ID, 30_507)
+	if err != nil || resumed.Status != StatusVerifying {
+		t.Fatalf("resume verification after rejected cancel: %v", err)
+	}
+}
+
+func TestUsageArchiveSchemaContractCoversAllUsageEventColumns(t *testing.T) {
+	db := openArchiveTestDB(t)
+	ctx := context.Background()
+
+	rows, err := db.QueryContext(ctx, `pragma table_info(usage_events)`)
+	if err != nil {
+		t.Fatalf("query table_info: %v", err)
+	}
+	defer rows.Close()
+
+	var expectedColumns []string
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull, pk int
+		var dfltValue any
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
+			t.Fatalf("scan table_info: %v", err)
+		}
+		expectedColumns = append(expectedColumns, name)
+	}
+	if len(expectedColumns) == 0 {
+		t.Fatal("expected columns from usage_events table_info, got 0")
+	}
+
+	latency := int64(120)
+	ttft := int64(30)
+	quotaPct := 42.5
+	event := archiveTestEvents()[0]
+	event.LatencyMS = &latency
+	event.TTFTMS = &ttft
+	event.HeaderQuotaUsedPercent = &quotaPct
+	if _, err := usageevent.New(db).InsertBatch(ctx, []model.UsageEvent{event}); err != nil {
+		t.Fatalf("insert usage events: %v", err)
+	}
+
+	repository := New(db)
+	run, err := repository.CreateRun(ctx, "contract-test-run", 2_000, 40_000)
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	run, err = repository.BeginArchive(ctx, run.ID, 40_001)
+	if err != nil {
+		t.Fatalf("begin archive: %v", err)
+	}
+
+	records, err := repository.Records(ctx, run.ID, 0, 10, 1<<20)
+	if err != nil {
+		t.Fatalf("read records: %v", err)
+	}
+	if len(records) == 0 {
+		t.Fatal("expected at least 1 record")
+	}
+
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(records[0].Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+
+	for _, col := range expectedColumns {
+		key := col
+		if col == "id" {
+			key = "_cpamp_archive_event_id"
+		}
+		if _, ok := payload[key]; !ok {
+			t.Errorf("usage_events column %q (archive key %q) missing from archived payload", col, key)
+		}
+	}
+}
+
 func TestRepositoryCancelRunRejectsPartialDeletion(t *testing.T) {
 	db := openArchiveTestDB(t)
 	ctx := context.Background()

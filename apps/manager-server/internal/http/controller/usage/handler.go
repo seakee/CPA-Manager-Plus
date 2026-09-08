@@ -366,7 +366,7 @@ func archiveErrorMessage(err error) string {
 	case errors.Is(err, usagesvc.ErrArchiveCancelUnsafe):
 		return "usage archive task cannot be abandoned after raw deletion has started"
 	case errors.Is(err, usagesvc.ErrArchiveCancelPublished):
-		return "usage archive task cannot be abandoned after archive segments were published; continue the archive stage"
+		return "usage archive task cannot be abandoned after archive segments were published; continue the existing archive workflow or leave the archive in place"
 	case errors.Is(err, usagesvc.ErrArchiveCancelCleanupFailed):
 		return "usage archive task could not be abandoned because temporary-file cleanup failed; retry the cancel action"
 	case errors.Is(err, usagesvc.ErrArchiveCoverageIncomplete):

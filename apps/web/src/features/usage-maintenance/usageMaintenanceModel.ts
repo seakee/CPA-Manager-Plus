@@ -153,12 +153,10 @@ export const isArchiveRunCancellable = (run: {
     return false;
   }
   if (run.status === 'deleting' || run.resume_status === 'deleting') return false;
-  if (
-    run.status === 'failed' &&
-    run.resume_status === 'archiving' &&
-    run.archived_event_count > 0
-  ) {
-    return false;
+  if (run.archived_event_count > 0) return false;
+  if (run.status === 'previewed') return true;
+  if (run.status === 'failed' && (!run.resume_status || run.resume_status === 'archiving')) {
+    return true;
   }
-  return ['previewed', 'archived', 'verified', 'failed'].includes(run.status);
+  return false;
 };

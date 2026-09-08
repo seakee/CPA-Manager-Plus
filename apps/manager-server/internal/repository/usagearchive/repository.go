@@ -637,15 +637,6 @@ func (r *Repository) CancelRun(ctx context.Context, runID string, nowMS int64) (
 		(run.Status == StatusFailed && run.ResumeStatus == StatusDeleting) {
 		return Run{}, ErrCancelUnsafe
 	}
-	// A failed archiving stage may already have committed one or more
-	// published segments and their identity-ledger references. Cancelling such
-	// a run would leave those references permanently excluding still-live raw
-	// events from future previews. Keep the run resumable until the archive
-	// stage is completed instead of attempting a non-transactional filesystem
-	// rollback here.
-	if run.Status == StatusFailed && run.ResumeStatus == StatusArchiving && run.ArchivedEventCount > 0 {
-		return Run{}, ErrCancelPublished
-	}
 	if run.Status == StatusCancelled {
 		if _, err := tx.ExecContext(ctx, `update usage_archive_runs set
 			resume_status = null, requested_stage = null, last_error = null, updated_at_ms = ? where id = ?`, nowMS, runID); err != nil {
@@ -658,6 +649,9 @@ func (r *Repository) CancelRun(ctx context.Context, runID string, nowMS int64) (
 			return Run{}, err
 		}
 		return r.Run(ctx, runID)
+	}
+	if run.ArchivedEventCount > 0 {
+		return Run{}, ErrCancelPublished
 	}
 	if run.Status == StatusCompleted {
 		return Run{}, fmt.Errorf("%w: cannot cancel completed run", ErrInvalidState)
