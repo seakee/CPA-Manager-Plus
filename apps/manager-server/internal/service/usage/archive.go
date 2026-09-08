@@ -684,8 +684,7 @@ func (s *Service) CancelArchive(ctx context.Context, runID string) (ArchiveStatu
 		(current.Status == usagearchive.StatusFailed && current.ResumeStatus == usagearchive.StatusDeleting) {
 		return ArchiveStatus{}, ErrArchiveCancelUnsafe
 	}
-	if current.Status == usagearchive.StatusFailed && current.ResumeStatus == usagearchive.StatusArchiving &&
-		current.ArchivedEventCount > 0 {
+	if current.Status != usagearchive.StatusCancelled && current.ArchivedEventCount > 0 {
 		return ArchiveStatus{}, ErrArchiveCancelPublished
 	}
 	switch current.Status {
@@ -902,18 +901,14 @@ func (m *archiveManager) ensureManualArchiveReadiness(ctx context.Context) error
 	if !ready {
 		return fmt.Errorf("%w: usage cache accounting migration is not complete", ErrArchiveCoverageIncomplete)
 	}
-	for {
-		updated, err := m.store.BackfillUsageResponseMetadata(ctx, archiveReadinessBackfillBatch)
-		if err != nil {
-			return fmt.Errorf("backfill usage response metadata before archive: %w", err)
-		}
-		if updated == 0 {
-			return nil
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
+	pending, err := m.store.UsageResponseMetadataBackfillPending(ctx)
+	if err != nil {
+		return fmt.Errorf("inspect usage response metadata backfill before archive: %w", err)
 	}
+	if pending {
+		return fmt.Errorf("%w: usage response metadata backfill is not complete", ErrArchiveCoverageIncomplete)
+	}
+	return nil
 }
 
 func (m *archiveManager) verifyLocked(ctx context.Context, runID string) (ArchiveStatus, error) {

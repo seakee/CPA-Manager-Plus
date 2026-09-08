@@ -18,6 +18,7 @@ type Repository interface {
 	ListRecent(ctx context.Context, limit int) ([]model.UsageEvent, error)
 	ModelUsageSummary(ctx context.Context, limit int) (model.ModelUsageSummary, error)
 	BackfillResponseMetadata(ctx context.Context, batchLimit int) (int, error)
+	ResponseMetadataBackfillPending(ctx context.Context) (bool, error)
 	Count(ctx context.Context) (int64, error)
 	ExportJSONL(ctx context.Context) ([]byte, error)
 	WriteCompatibleUsage(ctx context.Context, writer io.Writer, limit int) error

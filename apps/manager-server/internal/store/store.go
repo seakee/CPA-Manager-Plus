@@ -790,6 +790,10 @@ func (s *Store) BackfillUsageResponseMetadata(ctx context.Context, batchLimit in
 	return s.UsageEvents.BackfillResponseMetadata(ctx, batchLimit)
 }
 
+func (s *Store) UsageResponseMetadataBackfillPending(ctx context.Context) (bool, error) {
+	return s.UsageEvents.ResponseMetadataBackfillPending(ctx)
+}
+
 func (s *Store) Counts(ctx context.Context) (events int64, deadLetters int64, err error) {
 	events, err = s.UsageEvents.Count(ctx)
 	if err != nil {

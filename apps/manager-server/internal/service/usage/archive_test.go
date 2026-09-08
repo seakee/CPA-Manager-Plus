@@ -383,7 +383,7 @@ func TestUsageMaintenanceStatusIncludesRawEventRange(t *testing.T) {
 }
 
 func TestUsageArchiveServiceBackfillsMetadataBeforeManualArchive(t *testing.T) {
-	service, _, rawDB, archiveDirectory := newRawArchiveTestService(t, 1, 1)
+	service, st, rawDB, archiveDirectory := newRawArchiveTestService(t, 1, 1)
 	ctx := context.Background()
 	rawJSON := `{"response_headers":{"X-OAI-Request-ID":["req-readiness"],"X-Codex-Plan-Type":["plus"]}}`
 	if _, err := rawDB.ExecContext(ctx, `insert into usage_events (
@@ -423,6 +423,18 @@ func TestUsageArchiveServiceBackfillsMetadataBeforeManualArchive(t *testing.T) {
 	created, err := service.CreateArchive(ctx, 2_000)
 	if err != nil {
 		t.Fatalf("create archive: %v", err)
+	}
+	if _, err := service.ResumeArchive(ctx, created.Run.ID); !errors.Is(err, ErrArchiveCoverageIncomplete) {
+		t.Fatalf("resume archive error = %v, want ErrArchiveCoverageIncomplete", err)
+	}
+	for {
+		updated, err := st.BackfillUsageResponseMetadata(ctx, 10)
+		if err != nil {
+			t.Fatalf("backfill response metadata: %v", err)
+		}
+		if updated == 0 {
+			break
+		}
 	}
 	archived, err := service.ResumeArchive(ctx, created.Run.ID)
 	if err != nil {
@@ -1853,5 +1865,124 @@ func TestUsageArchiveRoundTripPreservesCodexMemberIdentity(t *testing.T) {
 	}
 	if _, err := service.DeleteArchive(ctx, created.Run.ID); err != nil {
 		t.Fatalf("delete archive: %v", err)
+	}
+}
+
+func TestManualArchiveReadinessRequiresResponseMetadataBackfill(t *testing.T) {
+	ctx := context.Background()
+	service, st, rawDB, archiveDirectory := newRawArchiveTestService(t, 2, 1)
+
+	rawJSON := `{"response_headers":{"Retry-After":["45"],"X-Codex-Plan-Type":["plus"],"X-OAI-Request-ID":["req-readiness"],"Set-Cookie":["session=secret"]}}`
+	if _, err := rawDB.ExecContext(ctx, `insert into usage_events (
+		event_hash, timestamp_ms, timestamp, model, failed, fail_status_code,
+		cache_input_mode, normalized_uncached_input_tokens, normalized_total_input_tokens,
+		normalized_cache_read_tokens, normalized_cache_creation_tokens,
+		raw_json, created_at_ms
+	) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"event-readiness-unbackfilled",
+		int64(1_000),
+		"2026-01-01T00:00:01Z",
+		"gpt-test",
+		1,
+		429,
+		usageparser.CacheInputModeIncluded,
+		int64(0),
+		int64(0),
+		int64(0),
+		int64(0),
+		rawJSON,
+		int64(1_000),
+	); err != nil {
+		t.Fatalf("insert unbackfilled event: %v", err)
+	}
+
+	// Test A: Cache accounting migration is completed, but response metadata is unbackfilled.
+	// ResumeArchive must fail with ErrArchiveCoverageIncomplete.
+	created, err := service.CreateArchive(ctx, 2_000)
+	if err != nil {
+		t.Fatalf("create archive: %v", err)
+	}
+	if created.Run.Status != usagearchive.StatusPreviewed {
+		t.Fatalf("created run status = %s, want previewed", created.Run.Status)
+	}
+
+	if _, err := service.ResumeArchive(ctx, created.Run.ID); !errors.Is(err, ErrArchiveCoverageIncomplete) {
+		t.Fatalf("resume archive error = %v, want ErrArchiveCoverageIncomplete", err)
+	}
+
+	status, err := service.ArchiveStatus(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("archive status: %v", err)
+	}
+	if status.Run.Status != usagearchive.StatusPreviewed {
+		t.Fatalf("run status after blocked resume = %s, want previewed", status.Run.Status)
+	}
+	if len(status.Segments) != 0 {
+		t.Fatalf("segments after blocked resume = %d, want 0", len(status.Segments))
+	}
+	segmentFiles, err := filepath.Glob(filepath.Join(archiveDirectory, "*", "*.gz"))
+	if err != nil {
+		t.Fatalf("glob segment files: %v", err)
+	}
+	if len(segmentFiles) != 0 {
+		t.Fatalf("found %d segment files after blocked resume: %#v", len(segmentFiles), segmentFiles)
+	}
+	var rawCount int
+	if err := rawDB.QueryRowContext(ctx, `select count(*) from usage_events`).Scan(&rawCount); err != nil {
+		t.Fatalf("count raw events: %v", err)
+	}
+	if rawCount != 1 {
+		t.Fatalf("raw events count = %d, want 1", rawCount)
+	}
+
+	// Test B: Run backfill until no pending updates remain.
+	for {
+		updated, err := st.BackfillUsageResponseMetadata(ctx, 10)
+		if err != nil {
+			t.Fatalf("backfill response metadata: %v", err)
+		}
+		if updated == 0 {
+			break
+		}
+	}
+
+	// ResumeArchive must now succeed.
+	archived, err := service.ResumeArchive(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("resume archive after backfill: %v", err)
+	}
+	if archived.Run.Status != usagearchive.StatusArchived {
+		t.Fatalf("archived run status = %s, want archived", archived.Run.Status)
+	}
+	if len(archived.Segments) != 1 {
+		t.Fatalf("archived segments = %d, want 1", len(archived.Segments))
+	}
+
+	// Verify archived record fields match the backfilled raw event.
+	segmentPath := filepath.Join(archiveDirectory, filepath.FromSlash(archived.Segments[0].FileName))
+	file, err := os.Open(segmentPath)
+	if err != nil {
+		t.Fatalf("open archive segment: %v", err)
+	}
+	defer file.Close()
+	zipper, err := gzip.NewReader(file)
+	if err != nil {
+		t.Fatalf("open archive gzip: %v", err)
+	}
+	defer zipper.Close()
+	scanner := bufio.NewScanner(zipper)
+	if !scanner.Scan() {
+		t.Fatalf("archive segment has no records: %v", scanner.Err())
+	}
+	var recordMap map[string]any
+	if err := json.Unmarshal(scanner.Bytes(), &recordMap); err != nil {
+		t.Fatalf("unmarshal archive record payload: %v", err)
+	}
+	metaJSON, ok := recordMap["response_metadata_json"].(string)
+	if !ok || metaJSON == "" {
+		t.Fatalf("missing or empty response_metadata_json in archive record: %#v", recordMap)
+	}
+	if !strings.Contains(metaJSON, "Retry-After") && !strings.Contains(metaJSON, "45") && !strings.Contains(metaJSON, "retry_after") {
+		t.Fatalf("response_metadata_json = %q, expected retry_after data", metaJSON)
 	}
 }
