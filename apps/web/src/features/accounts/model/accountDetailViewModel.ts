@@ -15,6 +15,7 @@ import type { AuthFileCodexStatusSummary } from '@/features/authFiles/model/cred
 import { normalizeStringValue, parseIdTokenPayload } from '@/utils/quota/parsers';
 import { isValidQuotaResetAtMs } from '@/utils/quota/formatters';
 import { isCodexMainQuotaWindow } from '@/utils/quota/codexQuota';
+import { parsePluginQuotaContract, type PluginQuotaContract } from '@/utils/quota/pluginQuota';
 import { parseTimestampMs } from '@/utils/timestamp';
 import { sumRecentRequests, type RecentRequestBucket } from '@/utils/recentRequests';
 import type { AccountRow } from './accountRows';
@@ -27,6 +28,7 @@ import {
 import { summarizeGroupedQuotaAvailability } from './accountQuotaSummary';
 import {
   inferAccountQuotaWindowKind,
+  isBuiltInAccountQuotaProvider,
   type AccountQuotaDisplayWindow,
   type AccountQuotaWindowKind,
 } from './accountQuotaDisplayWindows';
@@ -321,6 +323,7 @@ export interface AccountDetailViewModel {
     cooldown: QuotaCooldownInfo | null;
     resetCreditsAvailableCount: number | null;
     resetCreditExpiries: AccountDetailResetCreditExpiry[];
+    plugin: PluginQuotaContract | null;
   };
   auth: {
     fields: AccountDetailField[];
@@ -356,6 +359,8 @@ export interface BuildAccountDetailViewModelOptions {
   diagnosticsRecentFailure?: MonitoringAnalyticsRecentFailure | null;
   diagnosticsEvents?: MonitoringAnalyticsEventRow[];
   diagnosticsTotalCount?: number | null;
+  nowMs?: number;
+  pluginQuotaContract?: PluginQuotaContract | null;
 }
 
 const normalizeAuthIndexKey = (value: unknown): string => {
@@ -1562,6 +1567,11 @@ export const buildAccountDetailViewModel = (
     computedRecommendation ??
     (providedRecommendationIsEvidenceSensitive ? null : providedRecommendation);
   const quotaCooldown = options.quotaCooldown ?? null;
+  const pluginContract = isBuiltInAccountQuotaProvider(row.provider)
+    ? null
+    : options.pluginQuotaContract === undefined
+      ? parsePluginQuotaContract(row.raw, options.nowMs)
+      : options.pluginQuotaContract;
   const quotaWindows: AccountDetailQuotaWindowInput[] = (options.quotaWindows ?? []).map(
     (window) => {
       const resetAtMs = isValidQuotaResetAtMs(window.resetAtMs) ? window.resetAtMs : null;
@@ -1673,6 +1683,7 @@ export const buildAccountDetailViewModel = (
       resetCreditExpiries: getSortedCodexResetCreditExpiries(
         options.codexQuota?.rateLimitResetCredits
       ).map((item) => ({ id: item.id, expiresAtMs: item.expiresAtMs })),
+      plugin: pluginContract,
     },
     auth: {
       fields: buildAuthFields(row),
