@@ -140,12 +140,19 @@ func fromExisting(
 	if usageImportBaseDir == "" {
 		usageImportBaseDir = filepath.Dir(cfg.DBPath)
 	}
+	usageArchiveDir := strings.TrimSpace(cfg.UsageArchiveDir)
+	if usageArchiveDir == "" {
+		usageArchiveDir = filepath.Join(usageImportBaseDir, "usage-archives")
+	}
 	usageService := usagesvc.New(st, usagesvc.WithImportSessions(usagesvc.ImportSessionConfig{
 		Directory:      filepath.Join(usageImportBaseDir, "usage-imports"),
 		ChunkSizeBytes: cfg.UsageImportChunkBytes,
 		DiskQuotaBytes: cfg.UsageImportDiskQuotaBytes,
 		MaxSessions:    cfg.UsageImportMaxSessions,
 		TTL:            cfg.UsageImportSessionTTL,
+	}), usagesvc.WithArchive(usagesvc.ArchiveConfig{
+		Directory:             usageArchiveDir,
+		AggregateReadsEnabled: cfg.DashboardHourlyRollupEnabled,
 	}))
 	authFileMutationCoordinator := cpaauthfiles.NewMutationCoordinator()
 	return &Context{

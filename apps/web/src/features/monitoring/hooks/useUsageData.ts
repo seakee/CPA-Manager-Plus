@@ -46,6 +46,7 @@ export interface UseUsageDataReturn {
 
 export interface UsageImportOptions {
   signal?: AbortSignal;
+  sessionId?: string;
   onProgress?: (progress: UsageImportProgress) => void;
 }
 
@@ -125,6 +126,7 @@ export function useUsageData({
         base: usageEventsServiceBase,
         managementKey,
         file,
+        sessionId: options?.sessionId,
         signal: options?.signal,
         onProgress: options?.onProgress,
       });

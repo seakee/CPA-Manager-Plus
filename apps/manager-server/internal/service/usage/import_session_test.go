@@ -3,6 +3,8 @@ package usage
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -38,6 +40,12 @@ func TestImportSessionUploadsChunksAndCompletesWithStreamingParser(t *testing.T)
 		t.Fatalf("created session = %#v", session)
 	}
 	for offset := int64(0); offset < int64(len(payload)); {
+		if offset > 0 {
+			digest := sha256.Sum256([]byte(payload[:offset]))
+			if _, err := service.ValidateImportSessionPrefix(context.Background(), session.ID, hex.EncodeToString(digest[:])); err != nil {
+				t.Fatalf("validate prefix at %d: %v", offset, err)
+			}
+		}
 		end := minInt64(offset+session.ChunkSizeBytes, int64(len(payload)))
 		chunk := payload[offset:end]
 		session, err = service.WriteImportSessionChunk(
@@ -115,6 +123,433 @@ func TestImportSessionRejectsOffsetMismatchAndRollsBackOversizedChunk(t *testing
 	requireImportSessionErrorCode(t, err, ImportSessionErrorConflict)
 	if info, statErr := os.Stat(dataPath); statErr != nil || info.Size() != 4 {
 		t.Fatalf("conflict changed file size = %v error = %v", info, statErr)
+	}
+}
+
+func TestImportSessionRejectsSameNameAndSizeWhenUploadedPrefixDiffers(t *testing.T) {
+	for _, fixture := range []struct {
+		name     string
+		original string
+		selected string
+	}{
+		{name: "different prefix", original: "ABCD5678", selected: "WXYZ5678"},
+		{name: "different content", original: "ABCD1234", selected: "WXYZ1234"},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			manager := newImportSessionManager(ImportSessionConfig{
+				Directory:      filepath.Join(t.TempDir(), "imports"),
+				ChunkSizeBytes: 4,
+				DiskQuotaBytes: 32,
+				MaxSessions:    1,
+				TTL:            time.Hour,
+			})
+			session, err := manager.Create(context.Background(), "same-name.jsonl", int64(len(fixture.original)), "")
+			if err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			if _, err := manager.WriteChunk(context.Background(), session.ID, 0, 4, strings.NewReader(fixture.original[:4])); err != nil {
+				t.Fatalf("write original prefix: %v", err)
+			}
+
+			selectedDigest := sha256.Sum256([]byte(fixture.selected[:4]))
+			_, err = manager.ValidatePrefix(context.Background(), session.ID, hex.EncodeToString(selectedDigest[:]))
+			requireImportSessionErrorCode(t, err, ImportSessionErrorFileMismatch)
+			_, err = manager.WriteChunk(context.Background(), session.ID, 4, 4, strings.NewReader(fixture.selected[4:]))
+			requireImportSessionErrorCode(t, err, ImportSessionErrorFileMismatch)
+
+			dataPath := filepath.Join(manager.config.Directory, session.ID+".part")
+			if info, statErr := os.Stat(dataPath); statErr != nil || info.Size() != 4 {
+				t.Fatalf("mismatched resume changed uploaded prefix: info=%v err=%v", info, statErr)
+			}
+		})
+	}
+}
+
+func TestImportSessionBindsResumeChunkToValidatedPrefixDigest(t *testing.T) {
+	manager := newImportSessionManager(ImportSessionConfig{
+		Directory:      filepath.Join(t.TempDir(), "imports"),
+		ChunkSizeBytes: 4,
+		DiskQuotaBytes: 32,
+		MaxSessions:    1,
+		TTL:            time.Hour,
+	})
+	session, err := manager.Create(context.Background(), "bound-prefix.jsonl", 8, "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	session, err = manager.WriteChunk(context.Background(), session.ID, 0, 4, strings.NewReader("ABCD"))
+	if err != nil {
+		t.Fatalf("write prefix: %v", err)
+	}
+	if _, err := manager.ValidatePrefix(context.Background(), session.ID, session.ReceivedPrefixSHA256); err != nil {
+		t.Fatalf("validate prefix: %v", err)
+	}
+	wrongPrefix := sha256.Sum256([]byte("WXYZ"))
+	_, err = manager.WriteChunk(
+		context.Background(),
+		session.ID,
+		4,
+		4,
+		strings.NewReader("EFGH"),
+		hex.EncodeToString(wrongPrefix[:]),
+	)
+	requireImportSessionErrorCode(t, err, ImportSessionErrorFileMismatch)
+	dataPath := filepath.Join(manager.config.Directory, session.ID+".part")
+	if info, statErr := os.Stat(dataPath); statErr != nil || info.Size() != 4 {
+		t.Fatalf("mismatched prefix header changed file: info=%v error=%v", info, statErr)
+	}
+	completed, err := manager.WriteChunk(
+		context.Background(),
+		session.ID,
+		4,
+		4,
+		strings.NewReader("EFGH"),
+		session.ReceivedPrefixSHA256,
+	)
+	if err != nil || completed.Status != ImportSessionStatusReady || completed.ReceivedBytes != 8 {
+		t.Fatalf("validated prefix header resume = %#v error=%v", completed, err)
+	}
+}
+
+func TestImportSessionPersistsPrefixDigestAcrossRestart(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "imports")
+	config := ImportSessionConfig{
+		Directory:      directory,
+		ChunkSizeBytes: 4,
+		DiskQuotaBytes: 32,
+		MaxSessions:    1,
+		TTL:            time.Hour,
+	}
+	manager := newImportSessionManager(config)
+	session, err := manager.Create(context.Background(), "restart.jsonl", 8, "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	session, err = manager.WriteChunk(context.Background(), session.ID, 0, 4, strings.NewReader("ABCD"))
+	if err != nil {
+		t.Fatalf("write prefix: %v", err)
+	}
+	wantPrefix := sha256.Sum256([]byte("ABCD"))
+	if session.ReceivedPrefixSHA256 != hex.EncodeToString(wantPrefix[:]) {
+		t.Fatalf("prefix digest = %q, want %x", session.ReceivedPrefixSHA256, wantPrefix)
+	}
+	metadata, err := os.ReadFile(filepath.Join(directory, session.ID+".json"))
+	if err != nil || !bytes.Contains(metadata, []byte(session.ReceivedPrefixSHA256)) {
+		t.Fatalf("persisted digest = %s error = %v", metadata, err)
+	}
+
+	restarted := newImportSessionManager(config)
+	recovered, err := restarted.Get(context.Background(), session.ID)
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if recovered.ReceivedBytes != 4 || recovered.ReceivedPrefixSHA256 != session.ReceivedPrefixSHA256 {
+		t.Fatalf("recovered prefix state = %#v", recovered)
+	}
+	if _, err := restarted.ValidatePrefix(context.Background(), session.ID, session.ReceivedPrefixSHA256); err != nil {
+		t.Fatalf("validate recovered prefix: %v", err)
+	}
+	completed, err := restarted.WriteChunk(context.Background(), session.ID, 4, 4, strings.NewReader("EFGH"))
+	if err != nil || completed.Status != ImportSessionStatusReady || completed.ReceivedBytes != 8 {
+		t.Fatalf("resume after restart = %#v error = %v", completed, err)
+	}
+}
+
+func TestImportSessionCompleteRechecksPersistedPrefixOnServer(t *testing.T) {
+	manager := newImportSessionManager(ImportSessionConfig{
+		Directory:      filepath.Join(t.TempDir(), "imports"),
+		ChunkSizeBytes: 4,
+		DiskQuotaBytes: 32,
+		MaxSessions:    1,
+		TTL:            time.Hour,
+	})
+	session, err := manager.Create(context.Background(), "complete-verify.jsonl", 4, "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := manager.WriteChunk(context.Background(), session.ID, 0, 4, strings.NewReader("ABCD")); err != nil {
+		t.Fatalf("write complete chunk: %v", err)
+	}
+	dataPath := filepath.Join(manager.config.Directory, session.ID+".part")
+	if err := os.WriteFile(dataPath, []byte("WXYZ"), 0o600); err != nil {
+		t.Fatalf("replace uploaded file: %v", err)
+	}
+	importerCalled := false
+	_, err = manager.Complete(context.Background(), session.ID, func(context.Context, io.Reader) (ImportResult, error) {
+		importerCalled = true
+		return ImportResult{}, nil
+	})
+	requireImportSessionErrorCode(t, err, ImportSessionErrorFileMismatch)
+	if importerCalled {
+		t.Fatal("importer ran after server prefix verification failed")
+	}
+}
+
+func TestImportSessionRestartRollsBackUnpublishedFileSuffix(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "imports")
+	config := ImportSessionConfig{
+		Directory:      directory,
+		ChunkSizeBytes: 4,
+		DiskQuotaBytes: 32,
+		MaxSessions:    1,
+		TTL:            time.Hour,
+	}
+	manager := newImportSessionManager(config)
+	session, err := manager.Create(context.Background(), "crash.jsonl", 8, "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	session, err = manager.WriteChunk(context.Background(), session.ID, 0, 4, strings.NewReader("ABCD"))
+	if err != nil {
+		t.Fatalf("write committed prefix: %v", err)
+	}
+	dataPath := filepath.Join(directory, session.ID+".part")
+	file, err := os.OpenFile(dataPath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatalf("open unpublished suffix: %v", err)
+	}
+	if _, err := file.WriteString("EFGH"); err != nil {
+		_ = file.Close()
+		t.Fatalf("write unpublished suffix: %v", err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		t.Fatalf("sync unpublished suffix: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close unpublished suffix: %v", err)
+	}
+
+	restarted := newImportSessionManager(config)
+	recovered, err := restarted.Get(context.Background(), session.ID)
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if recovered.ReceivedBytes != 4 || recovered.ReceivedPrefixSHA256 != session.ReceivedPrefixSHA256 {
+		t.Fatalf("recovered committed state = %#v, want old offset/digest", recovered)
+	}
+	if info, err := os.Stat(dataPath); err != nil || info.Size() != 4 {
+		t.Fatalf("unpublished suffix was not rolled back: info=%v err=%v", info, err)
+	}
+	if _, err := restarted.ValidatePrefix(context.Background(), session.ID, session.ReceivedPrefixSHA256); err != nil {
+		t.Fatalf("validate recovered prefix: %v", err)
+	}
+	resumed, err := restarted.WriteChunk(context.Background(), session.ID, 4, 4, strings.NewReader("EFGH"))
+	if err != nil || resumed.Status != ImportSessionStatusReady || resumed.ReceivedBytes != 8 {
+		t.Fatalf("resume after rollback = %#v error=%v", resumed, err)
+	}
+}
+
+func TestImportSessionChunkFailureRollsBackBytesAndDigest(t *testing.T) {
+	manager := newImportSessionManager(ImportSessionConfig{
+		Directory:      filepath.Join(t.TempDir(), "imports"),
+		ChunkSizeBytes: 4,
+		DiskQuotaBytes: 32,
+		MaxSessions:    1,
+		TTL:            time.Hour,
+	})
+	session, err := manager.Create(context.Background(), "rollback.jsonl", 8, "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	session, err = manager.WriteChunk(context.Background(), session.ID, 0, 4, strings.NewReader("ABCD"))
+	if err != nil {
+		t.Fatalf("write prefix: %v", err)
+	}
+	_, err = manager.ValidatePrefix(context.Background(), session.ID, session.ReceivedPrefixSHA256)
+	if err != nil {
+		t.Fatalf("validate prefix: %v", err)
+	}
+	_, err = manager.WriteChunk(context.Background(), session.ID, 4, 4, &failingImportReader{payload: []byte("EF"), err: errors.New("simulated chunk read failure")})
+	if err == nil || !strings.Contains(err.Error(), "simulated chunk read failure") {
+		t.Fatalf("failed chunk error = %v", err)
+	}
+	recovered, err := manager.Get(context.Background(), session.ID)
+	if err != nil {
+		t.Fatalf("get after rollback: %v", err)
+	}
+	if recovered.ReceivedBytes != 4 || recovered.ReceivedPrefixSHA256 != session.ReceivedPrefixSHA256 {
+		t.Fatalf("rollback session = %#v", recovered)
+	}
+	dataPath := filepath.Join(manager.config.Directory, session.ID+".part")
+	if info, statErr := os.Stat(dataPath); statErr != nil || info.Size() != 4 {
+		t.Fatalf("rollback file = %v error = %v", info, statErr)
+	}
+	if _, err := manager.ValidatePrefix(context.Background(), session.ID, session.ReceivedPrefixSHA256); err != nil {
+		t.Fatalf("validate prefix after rollback: %v", err)
+	}
+	completed, err := manager.WriteChunk(context.Background(), session.ID, 4, 4, strings.NewReader("EFGH"))
+	if err != nil || completed.Status != ImportSessionStatusReady {
+		t.Fatalf("retry after rollback = %#v error = %v", completed, err)
+	}
+}
+
+func TestImportSessionMetadataPersistFailureRollsBackChunkAndDigest(t *testing.T) {
+	manager := newImportSessionManager(ImportSessionConfig{
+		Directory:      filepath.Join(t.TempDir(), "imports"),
+		ChunkSizeBytes: 4,
+		DiskQuotaBytes: 32,
+		MaxSessions:    1,
+		TTL:            time.Hour,
+	})
+	session, err := manager.Create(context.Background(), "metadata-rollback.jsonl", 8, "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	session, err = manager.WriteChunk(context.Background(), session.ID, 0, 4, strings.NewReader("ABCD"))
+	if err != nil {
+		t.Fatalf("write prefix: %v", err)
+	}
+	if _, err := manager.ValidatePrefix(context.Background(), session.ID, session.ReceivedPrefixSHA256); err != nil {
+		t.Fatalf("validate prefix: %v", err)
+	}
+	metadataPath := filepath.Join(manager.config.Directory, session.ID+".json")
+	if err := os.Remove(metadataPath); err != nil {
+		t.Fatalf("remove metadata fixture: %v", err)
+	}
+	if err := os.Mkdir(metadataPath, 0o700); err != nil {
+		t.Fatalf("block metadata path: %v", err)
+	}
+	_, err = manager.WriteChunk(context.Background(), session.ID, 4, 4, strings.NewReader("EFGH"))
+	requireImportSessionErrorCode(t, err, ImportSessionErrorUnavailable)
+	recovered, err := manager.Get(context.Background(), session.ID)
+	if err != nil {
+		t.Fatalf("get after metadata rollback: %v", err)
+	}
+	if recovered.ReceivedBytes != 4 || recovered.ReceivedPrefixSHA256 != session.ReceivedPrefixSHA256 {
+		t.Fatalf("metadata rollback session = %#v", recovered)
+	}
+	dataPath := filepath.Join(manager.config.Directory, session.ID+".part")
+	if info, statErr := os.Stat(dataPath); statErr != nil || info.Size() != 4 {
+		t.Fatalf("metadata rollback file = %v error = %v", info, statErr)
+	}
+	if err := os.Remove(metadataPath); err != nil {
+		t.Fatalf("remove metadata blocker: %v", err)
+	}
+	if err := manager.writeMetadataLocked(recovered); err != nil {
+		t.Fatalf("restore metadata fixture: %v", err)
+	}
+}
+
+func TestImportSessionCancelCannotResumeUploadedPrefix(t *testing.T) {
+	manager := newImportSessionManager(ImportSessionConfig{
+		Directory:      filepath.Join(t.TempDir(), "imports"),
+		ChunkSizeBytes: 4,
+		DiskQuotaBytes: 32,
+		MaxSessions:    1,
+		TTL:            time.Hour,
+	})
+	session, err := manager.Create(context.Background(), "cancel.jsonl", 8, "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	session, err = manager.WriteChunk(context.Background(), session.ID, 0, 4, strings.NewReader("ABCD"))
+	if err != nil {
+		t.Fatalf("write prefix: %v", err)
+	}
+	if _, err := manager.Cancel(context.Background(), session.ID); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	_, err = manager.ValidatePrefix(context.Background(), session.ID, session.ReceivedPrefixSHA256)
+	requireImportSessionErrorCode(t, err, ImportSessionErrorConflict)
+	_, err = manager.WriteChunk(context.Background(), session.ID, 4, 4, strings.NewReader("EFGH"))
+	requireImportSessionErrorCode(t, err, ImportSessionErrorConflict)
+}
+
+func TestImportSessionLegacyMetadataWithoutDigestRequiresNewSession(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "imports")
+	config := ImportSessionConfig{
+		Directory:      directory,
+		ChunkSizeBytes: 4,
+		DiskQuotaBytes: 32,
+		MaxSessions:    1,
+		TTL:            time.Hour,
+	}
+	manager := newImportSessionManager(config)
+	session, err := manager.Create(context.Background(), "legacy.jsonl", 8, "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := manager.WriteChunk(context.Background(), session.ID, 0, 4, strings.NewReader("ABCD")); err != nil {
+		t.Fatalf("write prefix: %v", err)
+	}
+	metadataPath := filepath.Join(directory, session.ID+".json")
+	metadata, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatalf("read metadata: %v", err)
+	}
+	var legacy map[string]any
+	if err := json.Unmarshal(metadata, &legacy); err != nil {
+		t.Fatalf("decode metadata: %v", err)
+	}
+	delete(legacy, "received_prefix_sha256")
+	legacyMetadata, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("encode legacy metadata: %v", err)
+	}
+	if err := os.WriteFile(metadataPath, append(legacyMetadata, '\n'), 0o600); err != nil {
+		t.Fatalf("write legacy metadata: %v", err)
+	}
+
+	restarted := newImportSessionManager(config)
+	recovered, err := restarted.Get(context.Background(), session.ID)
+	if err != nil {
+		t.Fatalf("recover legacy session: %v", err)
+	}
+	if recovered.Status != ImportSessionStatusFailed || recovered.Retryable || recovered.ReceivedBytes != 0 || recovered.ReceivedPrefixSHA256 != emptyImportPrefixSHA256() {
+		t.Fatalf("legacy recovery = %#v", recovered)
+	}
+	if _, err := os.Stat(filepath.Join(directory, session.ID+".part")); !os.IsNotExist(err) {
+		t.Fatalf("legacy uploaded file still exists: %v", err)
+	}
+	if _, err := restarted.Create(context.Background(), "legacy.jsonl", 8, ""); err != nil {
+		t.Fatalf("new session after legacy recovery: %v", err)
+	}
+}
+
+func TestImportSessionLegacyEmptyMetadataIsNormalizedAtZeroOffset(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "imports")
+	config := ImportSessionConfig{
+		Directory:      directory,
+		ChunkSizeBytes: 4,
+		DiskQuotaBytes: 32,
+		MaxSessions:    1,
+		TTL:            time.Hour,
+	}
+	manager := newImportSessionManager(config)
+	session, err := manager.Create(context.Background(), "legacy-empty.jsonl", 4, "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	metadataPath := filepath.Join(directory, session.ID+".json")
+	metadata, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatalf("read metadata: %v", err)
+	}
+	var legacy map[string]any
+	if err := json.Unmarshal(metadata, &legacy); err != nil {
+		t.Fatalf("decode legacy metadata: %v", err)
+	}
+	delete(legacy, "received_prefix_sha256")
+	legacyMetadata, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("encode legacy metadata: %v", err)
+	}
+	if err := os.WriteFile(metadataPath, append(legacyMetadata, '\n'), 0o600); err != nil {
+		t.Fatalf("write legacy metadata: %v", err)
+	}
+
+	restarted := newImportSessionManager(config)
+	recovered, err := restarted.Get(context.Background(), session.ID)
+	if err != nil {
+		t.Fatalf("recover legacy empty session: %v", err)
+	}
+	if recovered.Status != ImportSessionStatusUploading || recovered.ReceivedBytes != 0 ||
+		recovered.ReceivedPrefixSHA256 != emptyImportPrefixSHA256() {
+		t.Fatalf("legacy empty recovery = %#v", recovered)
+	}
+	if _, err := restarted.WriteChunk(context.Background(), session.ID, 0, 4, strings.NewReader("ABCD")); err != nil {
+		t.Fatalf("write normalized legacy session: %v", err)
 	}
 }
 
@@ -217,6 +652,95 @@ func TestImportSessionAllowsDeclaredFilesLargerThanLegacyRequestLimit(t *testing
 	}
 }
 
+func TestImportSessionListProvidesHistoryCountsCapabilitiesAndCursor(t *testing.T) {
+	now := time.UnixMilli(1_000)
+	manager := newImportSessionManager(ImportSessionConfig{
+		Directory:      filepath.Join(t.TempDir(), "imports"),
+		ChunkSizeBytes: 4 * 1024 * 1024,
+		DiskQuotaBytes: 16 * 1024 * 1024,
+		MaxSessions:    2,
+		TTL:            24 * time.Hour,
+		Now:            func() time.Time { return now },
+	})
+	first, err := manager.Create(context.Background(), "first.jsonl", 10, "")
+	if err != nil {
+		t.Fatalf("create first session: %v", err)
+	}
+	now = now.Add(time.Second)
+	if _, err := manager.Cancel(context.Background(), first.ID); err != nil {
+		t.Fatalf("cancel first session: %v", err)
+	}
+	now = now.Add(time.Second)
+	second, err := manager.Create(context.Background(), "second.jsonl", 10, "")
+	if err != nil {
+		t.Fatalf("create second session: %v", err)
+	}
+	now = now.Add(time.Second)
+	third, err := manager.Create(context.Background(), "third.jsonl", 10, "")
+	if err != nil {
+		t.Fatalf("create third session: %v", err)
+	}
+
+	firstPage, err := manager.List(context.Background(), ImportSessionListOptions{Limit: 2})
+	if err != nil {
+		t.Fatalf("list first page: %v", err)
+	}
+	if firstPage.Total != 3 || len(firstPage.Sessions) != 2 || firstPage.NextCursor == "" ||
+		firstPage.Sessions[0].ID != third.ID || firstPage.Sessions[1].ID != second.ID ||
+		firstPage.StatusCounts[ImportSessionStatusUploading] != 2 ||
+		firstPage.StatusCounts[ImportSessionStatusCancelled] != 1 ||
+		firstPage.ActiveSessions != 2 || firstPage.MaxSessions != 2 ||
+		firstPage.ChunkSizeBytes != 4*1024*1024 || firstPage.DiskQuotaBytes != 16*1024*1024 ||
+		firstPage.TTLSeconds != int64((24*time.Hour)/time.Second) {
+		t.Fatalf("first import session page = %#v", firstPage)
+	}
+	secondPage, err := manager.List(context.Background(), ImportSessionListOptions{
+		Limit:  2,
+		Cursor: firstPage.NextCursor,
+	})
+	if err != nil {
+		t.Fatalf("list second page: %v", err)
+	}
+	if secondPage.Total != 3 || len(secondPage.Sessions) != 1 || secondPage.Sessions[0].ID != first.ID || secondPage.NextCursor != "" {
+		t.Fatalf("second import session page = %#v", secondPage)
+	}
+	cancelled, err := manager.List(context.Background(), ImportSessionListOptions{
+		Status: string(ImportSessionStatusCancelled),
+		Limit:  10,
+	})
+	if err != nil || cancelled.Total != 1 || len(cancelled.Sessions) != 1 || cancelled.Sessions[0].ID != first.ID {
+		t.Fatalf("cancelled import sessions = %#v err=%v", cancelled, err)
+	}
+	if _, err := manager.List(context.Background(), ImportSessionListOptions{Cursor: "invalid"}); err == nil {
+		t.Fatal("invalid import session cursor was accepted")
+	}
+}
+
+func TestImportSessionSummarySanitizesFailuresWithoutMislabelingCancellation(t *testing.T) {
+	failed := NewImportSessionSummary(ImportSession{
+		ID:       strings.Repeat("a", 32),
+		Filename: "usage.jsonl",
+		Status:   ImportSessionStatusFailed,
+		Error:    "/private/import/session.part: database secret failure",
+	})
+	if !failed.HasError || failed.Error != "usage import session needs attention" || failed.ErrorCode != "usage_import_session_failed" {
+		t.Fatalf("failed summary = %#v", failed)
+	}
+	if strings.Contains(failed.Error, "/private/import") || strings.Contains(failed.Error, "database secret") {
+		t.Fatalf("failed summary leaked internal error: %#v", failed)
+	}
+
+	cancelled := NewImportSessionSummary(ImportSession{
+		ID:       strings.Repeat("b", 32),
+		Filename: "usage.jsonl",
+		Status:   ImportSessionStatusCancelled,
+		Error:    "usage import cancelled",
+	})
+	if cancelled.HasError || cancelled.Error != "" || cancelled.ErrorCode != "" {
+		t.Fatalf("cancelled summary was labeled as a failure: %#v", cancelled)
+	}
+}
+
 func TestImportSessionStreamsFilesLargerThanLegacyRequestLimit(t *testing.T) {
 	const legacyLimit = int64(64 * 1024 * 1024)
 	const chunkSize = int64(4 * 1024 * 1024)
@@ -233,6 +757,12 @@ func TestImportSessionStreamsFilesLargerThanLegacyRequestLimit(t *testing.T) {
 	}
 	chunk := bytes.Repeat([]byte{'x'}, int(chunkSize))
 	for offset := int64(0); offset < session.SizeBytes; {
+		if offset > 0 {
+			digest := sha256.Sum256(bytes.Repeat([]byte{'x'}, int(offset)))
+			if _, err := manager.ValidatePrefix(context.Background(), session.ID, hex.EncodeToString(digest[:])); err != nil {
+				t.Fatalf("validate prefix at %d: %v", offset, err)
+			}
+		}
 		length := minInt64(chunkSize, session.SizeBytes-offset)
 		session, err = manager.WriteChunk(
 			context.Background(),
@@ -392,6 +922,10 @@ func TestImportSessionRestartRestoresTruncatedReadySessionToUploading(t *testing
 	}
 	if recovered.Status != ImportSessionStatusUploading || recovered.ReceivedBytes != 4 {
 		t.Fatalf("recovered session = %#v", recovered)
+	}
+	digest := sha256.Sum256([]byte("1234"))
+	if _, err := restarted.ValidatePrefix(context.Background(), session.ID, hex.EncodeToString(digest[:])); err != nil {
+		t.Fatalf("validate recovered prefix: %v", err)
 	}
 	recovered, err = restarted.WriteChunk(context.Background(), session.ID, 4, 4, strings.NewReader("5678"))
 	if err != nil || recovered.Status != ImportSessionStatusReady {
@@ -744,6 +1278,21 @@ type blockingChunkReader struct {
 	closed    chan struct{}
 	startOnce sync.Once
 	closeOnce sync.Once
+}
+
+type failingImportReader struct {
+	payload []byte
+	err     error
+	done    bool
+}
+
+func (r *failingImportReader) Read(buffer []byte) (int, error) {
+	if !r.done {
+		r.done = true
+		count := copy(buffer, r.payload)
+		return count, r.err
+	}
+	return 0, r.err
 }
 
 func newBlockingChunkReader() *blockingChunkReader {

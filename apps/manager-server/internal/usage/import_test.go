@@ -1,11 +1,13 @@
 package usage
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -214,6 +216,325 @@ func TestParseImportPayloadPreservesExportedEventHash(t *testing.T) {
 	}
 }
 
+func TestParseImportPayloadRejectsUnsupportedArchiveSchemaVersion(t *testing.T) {
+	payload := `{
+	  "_cpamp_archive_schema_version": 2,
+	  "_cpamp_archive_event_id": 1,
+	  "event_hash": "future-archive-record",
+	  "timestamp_ms": 1760000000000,
+	  "timestamp": "2025-10-09T08:53:20Z",
+	  "model": "gpt-4o"
+	}`
+	result, err := ParseImportPayload([]byte(payload))
+	if !errors.Is(err, ErrUnsupportedArchiveSchema) {
+		t.Fatalf("error = %v, result = %#v", err, result)
+	}
+	if result.Format != ImportFormatJSONL || result.Failed != 1 || len(result.Events) != 0 {
+		t.Fatalf("result = %#v", result)
+	}
+
+	consumed := 0
+	streamed, streamErr := StreamImportPayload(bytes.NewReader([]byte(payload)), 1, func(events []Event) error {
+		consumed += len(events)
+		return nil
+	})
+	if !errors.Is(streamErr, ErrUnsupportedArchiveSchema) {
+		t.Fatalf("stream error = %v, result = %#v", streamErr, streamed)
+	}
+	if streamed.Format != ImportFormatJSONL || streamed.Failed != 1 || streamed.Total != 0 || consumed != 0 {
+		t.Fatalf("stream result = %#v, consumed = %d", streamed, consumed)
+	}
+}
+
+func TestParseImportPayloadPreservesArchiveDerivedAndFlattenedFields(t *testing.T) {
+	payload := `{
+	  "_cpamp_archive_schema_version": 1,
+	  "_cpamp_archive_event_id": 7,
+	  "event_hash": "archive-preserve-fields",
+	  "timestamp_ms": 1760000000000,
+	  "timestamp": "2025-10-09T08:53:20Z",
+	  "provider": "codex",
+	  "executor_type": "CodexExecutor",
+	  "model": "gpt-5.6-sol",
+	  "service_tier": "archived-effective",
+	  "request_service_tier": "",
+	  "response_service_tier": "archived-response",
+	  "cache_input_mode": "included_in_input",
+	  "input_tokens": 100,
+	  "output_tokens": 20,
+	  "reasoning_tokens": 3,
+	  "cached_tokens": 40,
+	  "cache_tokens": 0,
+	  "cache_read_tokens": 30,
+	  "cache_creation_tokens": 10,
+	  "tokens": {
+	    "input_tokens": 999,
+	    "output_tokens": 999,
+	    "reasoning_tokens": 999,
+	    "cached_tokens": 999,
+	    "cache_tokens": 999,
+	    "cache_read_tokens": 999,
+	    "cache_creation_tokens": 999,
+	    "total_tokens": 999
+	  },
+	  "normalized_uncached_input_tokens": 11,
+	  "normalized_total_input_tokens": 222,
+	  "normalized_cache_read_tokens": 33,
+	  "normalized_cache_creation_tokens": 44,
+	  "total_tokens": 333,
+	  "header_quota_recover_at_ms": 1760000010000,
+	  "header_quota_used_percent": 87.5,
+	  "header_quota_plan_type": "archive-plan",
+	  "header_error_kind": "archive-kind",
+	  "header_error_code": "archive-code",
+	  "header_trace_id": "archive-trace",
+	  "failed": 0,
+	  "fail_status_code": 0,
+	  "fail_summary": "  archived summary  ",
+	  "fail_body": "  archived body  ",
+	  "raw_json": "  {\"archive\":true}  ",
+	  "response_metadata": {
+	    "quota": {"recover_at_ms": 999, "used_percent": 1, "plan_type": "metadata-plan"},
+	    "errors": {"kind": "metadata-kind", "code": "metadata-code"},
+	    "trace": {"primary_trace_id": "metadata-trace"}
+	  },
+	  "response_metadata_json": " {\"quota\":{\"recover_at_ms\":999,\"used_percent\":1,\"plan_type\":\"metadata-plan\"},\"errors\":{\"kind\":\"metadata-kind\",\"code\":\"metadata-code\"},\"trace\":{\"primary_trace_id\":\"metadata-trace\"},\"future_extension\":{\"value\":\"preserve-me\"}} ",
+	  "created_at_ms": 1760000000001
+	}`
+	result, err := ParseImportPayload([]byte(payload))
+	if err != nil {
+		t.Fatalf("parse archive record: %v", err)
+	}
+	if result.Format != ImportFormatJSONL || len(result.Events) != 1 {
+		t.Fatalf("result = %#v", result)
+	}
+	event := result.Events[0]
+	if !event.PreserveArchiveDerivedFields ||
+		event.InputTokens != 100 ||
+		event.OutputTokens != 20 ||
+		event.ReasoningTokens != 3 ||
+		event.CachedTokens != 40 ||
+		event.CacheTokens != 0 ||
+		event.CacheReadTokens != 30 ||
+		event.CacheCreationTokens != 10 ||
+		event.CacheInputMode != CacheInputModeIncluded ||
+		event.NormalizedUncachedInputTokens != 11 ||
+		event.NormalizedTotalInputTokens != 222 ||
+		event.NormalizedCacheReadTokens != 33 ||
+		event.NormalizedCacheCreationTokens != 44 ||
+		event.TotalTokens != 333 ||
+		event.ServiceTier != "archived-effective" ||
+		event.RequestServiceTier != "" ||
+		event.ResponseServiceTier != "archived-response" {
+		t.Fatalf("archive derived fields = %#v", event)
+	}
+	if event.HeaderQuotaRecoverAtMS != 1760000010000 || event.HeaderQuotaUsedPercent == nil ||
+		*event.HeaderQuotaUsedPercent != 87.5 || event.HeaderQuotaPlanType != "archive-plan" ||
+		event.HeaderErrorKind != "archive-kind" || event.HeaderErrorCode != "archive-code" ||
+		event.HeaderTraceID != "archive-trace" {
+		t.Fatalf("archive flattened headers = %#v", event)
+	}
+	const metadataJSON = ` {"quota":{"recover_at_ms":999,"used_percent":1,"plan_type":"metadata-plan"},"errors":{"kind":"metadata-kind","code":"metadata-code"},"trace":{"primary_trace_id":"metadata-trace"},"future_extension":{"value":"preserve-me"}} `
+	if event.ResponseMetadata == nil || event.ResponseMetadataJSON != metadataJSON {
+		t.Fatalf("archive response metadata = %#v raw=%q", event.ResponseMetadata, event.ResponseMetadataJSON)
+	}
+	if event.FailSummary != "  archived summary  " || event.FailBody != "  archived body  " ||
+		event.RawJSON != `  {"archive":true}  ` {
+		t.Fatalf("archive opaque fields = summary=%q body=%q raw=%q", event.FailSummary, event.FailBody, event.RawJSON)
+	}
+}
+
+func TestParseImportPayloadRestoresArchiveMetadataCompatibilityCases(t *testing.T) {
+	t.Run("legacy v1 without raw metadata JSON", func(t *testing.T) {
+		record := minimalArchiveImportRecord("archive-legacy-metadata")
+		record["response_metadata"] = map[string]any{
+			"trace": map[string]any{"primary_trace_id": "legacy-metadata-trace"},
+		}
+		record["header_trace_id"] = "stored-flat-trace"
+		payload, err := json.Marshal(record)
+		if err != nil {
+			t.Fatalf("marshal legacy archive record: %v", err)
+		}
+		result, err := ParseImportPayload(payload)
+		if err != nil {
+			t.Fatalf("parse legacy archive record: %v", err)
+		}
+		if len(result.Events) != 1 {
+			t.Fatalf("result = %#v", result)
+		}
+		event := result.Events[0]
+		if event.ResponseMetadataJSON != `{"trace":{"primary_trace_id":"legacy-metadata-trace"}}` ||
+			event.HeaderTraceID != "stored-flat-trace" {
+			t.Fatalf("legacy archive metadata = raw=%q flat=%q", event.ResponseMetadataJSON, event.HeaderTraceID)
+		}
+	})
+
+	t.Run("empty raw metadata JSON sentinel", func(t *testing.T) {
+		record := minimalArchiveImportRecord("archive-empty-metadata")
+		record["response_metadata_json"] = ""
+		payload, err := json.Marshal(record)
+		if err != nil {
+			t.Fatalf("marshal empty metadata archive record: %v", err)
+		}
+		result, err := ParseImportPayload(payload)
+		if err != nil {
+			t.Fatalf("parse empty metadata archive record: %v", err)
+		}
+		if len(result.Events) != 1 || result.Events[0].ResponseMetadata != nil || result.Events[0].ResponseMetadataJSON != "" {
+			t.Fatalf("empty archive metadata result = %#v", result)
+		}
+	})
+}
+
+func minimalArchiveImportRecord(eventHash string) map[string]any {
+	return map[string]any{
+		"_cpamp_archive_schema_version":    ArchiveSchemaVersion,
+		"_cpamp_archive_event_id":          int64(1),
+		"event_hash":                       eventHash,
+		"timestamp_ms":                     int64(1760000000000),
+		"timestamp":                        "2025-10-09T08:53:20Z",
+		"model":                            "gpt-4o",
+		"input_tokens":                     int64(1),
+		"output_tokens":                    int64(0),
+		"reasoning_tokens":                 int64(0),
+		"cached_tokens":                    int64(0),
+		"cache_tokens":                     int64(0),
+		"cache_read_tokens":                int64(0),
+		"cache_creation_tokens":            int64(0),
+		"normalized_uncached_input_tokens": int64(1),
+		"normalized_total_input_tokens":    int64(1),
+		"normalized_cache_read_tokens":     int64(0),
+		"normalized_cache_creation_tokens": int64(0),
+		"total_tokens":                     int64(1),
+		"cache_input_mode":                 CacheInputModeIncluded,
+		"failed":                           int64(0),
+		"fail_status_code":                 int64(0),
+		"fail_summary":                     "",
+		"fail_body":                        "",
+		"raw_json":                         "",
+		"header_quota_recover_at_ms":       int64(0),
+		"header_quota_used_percent":        nil,
+		"created_at_ms":                    int64(1760000000001),
+	}
+}
+
+func TestParseImportPayloadRejectsInvalidArchiveRecord(t *testing.T) {
+	validDerivedFields := `
+		  "_cpamp_archive_event_id": 1,
+		  "input_tokens": 1,
+		  "output_tokens": 0,
+		  "reasoning_tokens": 0,
+		  "cached_tokens": 0,
+		  "cache_tokens": 0,
+		  "cache_read_tokens": 0,
+		  "cache_creation_tokens": 0,
+		  "failed": 0,
+		  "fail_status_code": 0,
+		  "fail_summary": "",
+		  "fail_body": "",
+		  "raw_json": "",
+		  "created_at_ms": 1760000000001,
+		  "cache_input_mode": "included_in_input",
+	  "normalized_uncached_input_tokens": 1,
+	  "normalized_total_input_tokens": 1,
+	  "normalized_cache_read_tokens": 0,
+	  "normalized_cache_creation_tokens": 0,
+	  "total_tokens": 1,
+	  "header_quota_recover_at_ms": 0,
+	  "header_quota_used_percent": null`
+	tests := []struct {
+		name    string
+		payload string
+	}{
+		{
+			name: "missing event hash",
+			payload: `{
+			  "_cpamp_archive_schema_version": 1,
+			  "timestamp_ms": 1760000000000,
+			  "timestamp": "2025-10-09T08:53:20Z",
+			  "model": "gpt-4o",` + validDerivedFields + `
+			}`,
+		},
+		{
+			name: "missing normalized total",
+			payload: `{
+			  "_cpamp_archive_schema_version": 1,
+			  "event_hash": "archive-missing-normalized-total",
+			  "timestamp_ms": 1760000000000,
+			  "timestamp": "2025-10-09T08:53:20Z",
+			  "model": "gpt-4o",
+			  "cache_input_mode": "included_in_input",
+			  "normalized_uncached_input_tokens": 1,
+			  "normalized_cache_read_tokens": 0,
+			  "normalized_cache_creation_tokens": 0,
+			  "total_tokens": 1,
+			  "header_quota_recover_at_ms": 0,
+			  "header_quota_used_percent": null
+			}`,
+		},
+		{
+			name: "invalid cache mode",
+			payload: `{
+			  "_cpamp_archive_schema_version": 1,
+			  "event_hash": "archive-invalid-cache-mode",
+			  "timestamp_ms": 1760000000000,
+			  "timestamp": "2025-10-09T08:53:20Z",
+			  "model": "gpt-4o",
+			  "cache_input_mode": "future-mode",
+			  "normalized_uncached_input_tokens": 1,
+			  "normalized_total_input_tokens": 1,
+			  "normalized_cache_read_tokens": 0,
+			  "normalized_cache_creation_tokens": 0,
+			  "total_tokens": 1,
+			  "header_quota_recover_at_ms": 0,
+			  "header_quota_used_percent": null
+			}`,
+		},
+		{
+			name: "missing input tokens",
+			payload: `{
+			  "_cpamp_archive_schema_version": 1,
+			  "_cpamp_archive_event_id": 1,
+			  "event_hash": "archive-missing-input-tokens",
+			  "timestamp_ms": 1760000000000,
+			  "timestamp": "2025-10-09T08:53:20Z",
+			  "model": "gpt-4o",
+			  "output_tokens": 0,
+			  "reasoning_tokens": 0,
+			  "cached_tokens": 0,
+			  "cache_tokens": 0,
+			  "cache_read_tokens": 0,
+			  "cache_creation_tokens": 0,
+			  "failed": 0,
+			  "fail_status_code": 0,
+			  "fail_summary": "",
+			  "fail_body": "",
+			  "raw_json": "",
+			  "created_at_ms": 1760000000001,
+			  "cache_input_mode": "included_in_input",
+			  "normalized_uncached_input_tokens": 1,
+			  "normalized_total_input_tokens": 1,
+			  "normalized_cache_read_tokens": 0,
+			  "normalized_cache_creation_tokens": 0,
+			  "total_tokens": 1,
+			  "header_quota_recover_at_ms": 0,
+			  "header_quota_used_percent": null
+			}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := ParseImportPayload([]byte(tt.payload))
+			if !errors.Is(err, ErrInvalidArchiveRecord) {
+				t.Fatalf("error = %v, result = %#v", err, result)
+			}
+			if result.Format != ImportFormatJSONL || result.Failed != 1 || len(result.Events) != 0 {
+				t.Fatalf("result = %#v", result)
+			}
+		})
+	}
+}
+
 func TestParseImportPayloadJSONLCountsBadLines(t *testing.T) {
 	payload := `{"timestamp":"2026-01-02T03:04:05Z","model":"gpt-4o","endpoint":"GET /v1/models","tokens":{"input_tokens":1}}
 not-json`
@@ -249,6 +570,322 @@ func TestStreamImportPayloadBatchesJSONLAndCountsBadLines(t *testing.T) {
 	if !reflect.DeepEqual(batchSizes, []int{256, 256, 88}) {
 		t.Fatalf("batch sizes = %#v", batchSizes)
 	}
+}
+
+func TestImportBatcherFlushesByRetainedBytes(t *testing.T) {
+	largeRawJSON := strings.Repeat("x", 9*1024*1024)
+	var batchSizes []int
+	batcher := &importBatcher{
+		batchSize: 256,
+		batch:     make([]Event, 0, 256),
+		consume: func(events []Event) error {
+			batchSizes = append(batchSizes, len(events))
+			return nil
+		},
+	}
+	for index := 0; index < 4; index++ {
+		if err := batcher.add(Event{EventHash: fmt.Sprintf("large-%d", index), RawJSON: largeRawJSON}); err != nil {
+			t.Fatalf("add large event %d: %v", index, err)
+		}
+	}
+	if err := batcher.flush(); err != nil {
+		t.Fatalf("flush final batch: %v", err)
+	}
+	if !reflect.DeepEqual(batchSizes, []int{3, 1}) || batcher.total != 4 || batcher.batchBytes != 0 {
+		t.Fatalf("batch sizes=%#v total=%d bytes=%d", batchSizes, batcher.total, batcher.batchBytes)
+	}
+}
+
+func TestStreamImportPayloadEnforcesJSONLRecordLimit(t *testing.T) {
+	buildRecord := func(size int) []byte {
+		t.Helper()
+		prefix := []byte(`{"event_hash":"record-limit","timestamp_ms":1,"timestamp":"2026-01-02T03:04:05Z","model":"gpt-4o","raw_json":"`)
+		suffix := []byte(`"}`)
+		if size < len(prefix)+len(suffix) {
+			t.Fatalf("record size %d is too small", size)
+		}
+		record := make([]byte, 0, size)
+		record = append(record, prefix...)
+		record = append(record, bytes.Repeat([]byte{'x'}, size-len(prefix)-len(suffix))...)
+		record = append(record, suffix...)
+		return record
+	}
+
+	t.Run("accepts exact limit", func(t *testing.T) {
+		payload := append(buildRecord(MaxJSONLRecordBytes), '\n')
+		consumed := 0
+		result, err := StreamImportPayload(bytes.NewReader(payload), 1, func(events []Event) error {
+			consumed += len(events)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("stream exact-limit record: %v", err)
+		}
+		if result.Total != 1 || consumed != 1 {
+			t.Fatalf("exact-limit result=%#v consumed=%d", result, consumed)
+		}
+	})
+
+	t.Run("accepts exact limit after first record", func(t *testing.T) {
+		first := []byte(`{"event_hash":"record-first","timestamp_ms":1,"timestamp":"2026-01-02T03:04:05Z","model":"gpt-4o"}`)
+		payload := make([]byte, 0, len(first)+1+MaxJSONLRecordBytes+1)
+		payload = append(payload, first...)
+		payload = append(payload, '\n')
+		payload = append(payload, buildRecord(MaxJSONLRecordBytes)...)
+		payload = append(payload, '\n')
+		consumed := 0
+		result, err := StreamImportPayload(bytes.NewReader(payload), 1, func(events []Event) error {
+			consumed += len(events)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("stream later exact-limit record: %v", err)
+		}
+		if result.Total != 2 || consumed != 2 {
+			t.Fatalf("later exact-limit result=%#v consumed=%d", result, consumed)
+		}
+	})
+
+	t.Run("accepts exact limit with CRLF", func(t *testing.T) {
+		payload := append(buildRecord(MaxJSONLRecordBytes), '\r', '\n')
+		result, err := StreamImportPayload(bytes.NewReader(payload), 1, func([]Event) error { return nil })
+		if err != nil {
+			t.Fatalf("stream exact-limit CRLF record: %v", err)
+		}
+		if result.Total != 1 {
+			t.Fatalf("exact-limit CRLF result = %#v", result)
+		}
+	})
+
+	t.Run("accepts exact limit after blank line", func(t *testing.T) {
+		payload := append([]byte{'\n'}, buildRecord(MaxJSONLRecordBytes)...)
+		payload = append(payload, '\n')
+		result, err := StreamImportPayload(bytes.NewReader(payload), 1, func([]Event) error { return nil })
+		if err != nil {
+			t.Fatalf("stream exact-limit record after blank line: %v", err)
+		}
+		if result.Total != 1 {
+			t.Fatalf("blank-line exact-limit result = %#v", result)
+		}
+	})
+
+	for _, test := range []struct {
+		name    string
+		payload func() []byte
+	}{
+		{
+			name: "leading space",
+			payload: func() []byte {
+				payload := append([]byte{' '}, buildRecord(MaxJSONLRecordBytes)...)
+				return append(payload, '\n')
+			},
+		},
+		{
+			name: "trailing space",
+			payload: func() []byte {
+				payload := append(buildRecord(MaxJSONLRecordBytes), ' ')
+				return append(payload, '\n')
+			},
+		},
+		{
+			name: "trailing carriage return without LF",
+			payload: func() []byte {
+				return append(buildRecord(MaxJSONLRecordBytes), '\r')
+			},
+		},
+	} {
+		t.Run("rejects exact object plus "+test.name, func(t *testing.T) {
+			result, err := StreamImportPayload(bytes.NewReader(test.payload()), 1, func([]Event) error {
+				t.Fatal("oversized whitespace record reached consumer")
+				return nil
+			})
+			if !errors.Is(err, ErrJSONLRecordTooLarge) {
+				t.Fatalf("whitespace record error = %v", err)
+			}
+			if result.Total != 0 {
+				t.Fatalf("whitespace record result = %#v", result)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name    string
+		payload func() []byte
+	}{
+		{
+			name: "leading space",
+			payload: func() []byte {
+				payload := append([]byte{' '}, buildRecord(MaxJSONLRecordBytes-1)...)
+				return append(payload, '\n')
+			},
+		},
+		{
+			name: "trailing space with CRLF",
+			payload: func() []byte {
+				payload := append(buildRecord(MaxJSONLRecordBytes-1), ' ', '\r')
+				return append(payload, '\n')
+			},
+		},
+		{
+			name: "trailing carriage return without LF",
+			payload: func() []byte {
+				return append(buildRecord(MaxJSONLRecordBytes-1), '\r')
+			},
+		},
+	} {
+		t.Run("accepts full limit including "+test.name, func(t *testing.T) {
+			result, err := StreamImportPayload(bytes.NewReader(test.payload()), 1, func([]Event) error { return nil })
+			if err != nil {
+				t.Fatalf("stream whitespace boundary record: %v", err)
+			}
+			if result.Total != 1 {
+				t.Fatalf("whitespace boundary result = %#v", result)
+			}
+		})
+	}
+
+	t.Run("rejects later exact-limit record plus bare CR", func(t *testing.T) {
+		first := []byte(`{"event_hash":"record-first","timestamp_ms":1,"timestamp":"2026-01-02T03:04:05Z","model":"gpt-4o"}`)
+		payload := append(append(append([]byte(nil), first...), '\n'), buildRecord(MaxJSONLRecordBytes)...)
+		payload = append(payload, '\r')
+		consumed := 0
+		result, err := StreamImportPayload(bytes.NewReader(payload), 1, func(events []Event) error {
+			consumed += len(events)
+			return nil
+		})
+		if !errors.Is(err, ErrJSONLRecordTooLarge) {
+			t.Fatalf("later bare-CR record error = %v", err)
+		}
+		if result.Total != 1 || consumed != 1 {
+			t.Fatalf("later bare-CR result=%#v consumed=%d", result, consumed)
+		}
+	})
+
+	t.Run("rejects first record over limit", func(t *testing.T) {
+		payload := append(buildRecord(MaxJSONLRecordBytes+1), '\n')
+		result, err := StreamImportPayload(bytes.NewReader(payload), 1, func([]Event) error {
+			t.Fatal("oversized record reached consumer")
+			return nil
+		})
+		if !errors.Is(err, ErrJSONLRecordTooLarge) {
+			t.Fatalf("oversized record error = %v", err)
+		}
+		if result.Total != 0 {
+			t.Fatalf("oversized record result = %#v", result)
+		}
+	})
+
+	t.Run("rejects first record over limit from non-seekable reader", func(t *testing.T) {
+		pipeReader, pipeWriter := io.Pipe()
+		writeDone := make(chan error, 1)
+		go func() {
+			_, writeErr := pipeWriter.Write(append(buildRecord(MaxJSONLRecordBytes+1), '\n'))
+			writeDone <- errors.Join(writeErr, pipeWriter.Close())
+		}()
+		result, err := StreamImportPayload(pipeReader, 1, func([]Event) error {
+			t.Error("oversized non-seekable record reached consumer")
+			return nil
+		})
+		_ = pipeReader.Close()
+		writeErr := <-writeDone
+		if writeErr != nil && !errors.Is(writeErr, io.ErrClosedPipe) {
+			t.Fatalf("write non-seekable record: %v", writeErr)
+		}
+		if !errors.Is(err, ErrJSONLRecordTooLarge) {
+			t.Fatalf("non-seekable oversized record error = %v", err)
+		}
+		if result.Total != 0 {
+			t.Fatalf("non-seekable oversized record result = %#v", result)
+		}
+	})
+
+	for _, test := range []struct {
+		name       string
+		terminator string
+	}{
+		{name: "with LF", terminator: "\n"},
+		{name: "without newline"},
+	} {
+		t.Run("rejects later record over limit "+test.name, func(t *testing.T) {
+			first := []byte(`{"event_hash":"record-first","timestamp_ms":1,"timestamp":"2026-01-02T03:04:05Z","model":"gpt-4o"}`)
+			payload := make([]byte, 0, len(first)+1+MaxJSONLRecordBytes+2)
+			payload = append(payload, first...)
+			payload = append(payload, '\n')
+			payload = append(payload, buildRecord(MaxJSONLRecordBytes+1)...)
+			payload = append(payload, test.terminator...)
+			consumed := 0
+			result, err := StreamImportPayload(bytes.NewReader(payload), 1, func(events []Event) error {
+				consumed += len(events)
+				return nil
+			})
+			if !errors.Is(err, ErrJSONLRecordTooLarge) {
+				t.Fatalf("later oversized record error = %v", err)
+			}
+			if result.Total != 1 || consumed != 1 {
+				t.Fatalf("later oversized result=%#v consumed=%d", result, consumed)
+			}
+		})
+	}
+
+	t.Run("parse rejects later record over limit", func(t *testing.T) {
+		first := []byte(`{"event_hash":"record-first","timestamp_ms":1,"timestamp":"2026-01-02T03:04:05Z","model":"gpt-4o"}`)
+		payload := append(append(append([]byte(nil), first...), '\n'), buildRecord(MaxJSONLRecordBytes+1)...)
+		result, err := ParseImportPayload(payload)
+		if !errors.Is(err, ErrJSONLRecordTooLarge) {
+			t.Fatalf("parse later oversized record error = %v", err)
+		}
+		if len(result.Events) != 1 {
+			t.Fatalf("parse later oversized result = %#v", result)
+		}
+	})
+
+	t.Run("rejects oversized top-level array item", func(t *testing.T) {
+		payload := append([]byte{'['}, buildRecord(MaxJSONLRecordBytes+1)...)
+		payload = append(payload, ']')
+		result, err := StreamImportPayload(bytes.NewReader(payload), 1, func([]Event) error {
+			t.Fatal("oversized array item reached consumer")
+			return nil
+		})
+		if !errors.Is(err, ErrJSONLRecordTooLarge) {
+			t.Fatalf("oversized array item error = %v", err)
+		}
+		if result.Total != 0 {
+			t.Fatalf("oversized array item result = %#v", result)
+		}
+	})
+
+	t.Run("stops decoding far-oversized top-level array item", func(t *testing.T) {
+		record := buildRecord(MaxJSONLRecordBytes + 2*boundedJSONDecoderReadBytes + 1)
+		payload := append([]byte{'['}, record...)
+		payload = append(payload, ']')
+		reader := bytes.NewReader(payload)
+		result, err := StreamImportPayload(reader, 1, func([]Event) error {
+			t.Fatal("far-oversized array item reached consumer")
+			return nil
+		})
+		if !errors.Is(err, ErrJSONLRecordTooLarge) {
+			t.Fatalf("far-oversized array item error = %v", err)
+		}
+		if result.Total != 0 || reader.Len() == 0 {
+			t.Fatalf("far-oversized array result=%#v unread=%d", result, reader.Len())
+		}
+	})
+
+	t.Run("accepts exact-limit top-level array item", func(t *testing.T) {
+		payload := append([]byte{'['}, buildRecord(MaxJSONLRecordBytes)...)
+		payload = append(payload, ']')
+		consumed := 0
+		result, err := StreamImportPayload(bytes.NewReader(payload), 1, func(events []Event) error {
+			consumed += len(events)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("exact-limit array item error = %v", err)
+		}
+		if result.Total != 1 || consumed != 1 {
+			t.Fatalf("exact-limit array item result=%#v consumed=%d", result, consumed)
+		}
+	})
 }
 
 func TestStreamImportPayloadStreamsTopLevelArray(t *testing.T) {
@@ -395,6 +1032,153 @@ func TestStreamImportPayloadLegacyDeliversBatchesBeforeSecondPassEOF(t *testing.
 	}
 }
 
+func TestStreamImportPayloadKeepsLargeLegacyObjectsCompatibleOnNonSeekableReaders(t *testing.T) {
+	payload := buildLargeLegacyStreamFixture(1_100, 10_000)
+	if len(payload) <= MaxJSONLRecordBytes {
+		t.Fatalf("legacy fixture size=%d, want greater than %d", len(payload), MaxJSONLRecordBytes)
+	}
+	reader := nonSeekableImportReader{Reader: strings.NewReader(payload)}
+	consumed := 0
+	result, err := StreamImportPayload(reader, 256, func(events []Event) error {
+		consumed += len(events)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("stream large non-seekable legacy payload: %v", err)
+	}
+	if result.Format != ImportFormatLegacyExport || result.Total != 1_100 || consumed != 1_100 {
+		t.Fatalf("result=%#v consumed=%d", result, consumed)
+	}
+}
+
+func TestStreamImportPayloadRejectsOversizedLegacyDetail(t *testing.T) {
+	payload := buildLargeLegacyStreamFixture(1, MaxJSONLRecordBytes)
+	result, err := StreamImportPayload(bytes.NewReader([]byte(payload)), 1, func([]Event) error {
+		t.Fatal("oversized legacy detail reached consumer")
+		return nil
+	})
+	if !errors.Is(err, ErrJSONLRecordTooLarge) {
+		t.Fatalf("oversized legacy detail error = %v", err)
+	}
+	if result.Total != 0 {
+		t.Fatalf("oversized legacy detail result = %#v", result)
+	}
+}
+
+func TestInspectLegacyStreamShapeRejectsUnboundedStructuralMetadata(t *testing.T) {
+	payload := `{"usage":{"apis":{"endpoint-a":{"models":{"model-a":{"details":[]}}},"endpoint-b":{"models":{"model-b":{"details":[]}}}}}}`
+	tests := []struct {
+		name   string
+		limits legacyStreamShapeLimits
+	}{
+		{
+			name:   "key count",
+			limits: legacyStreamShapeLimits{maxKeys: 3, maxKeyBytes: 1024},
+		},
+		{
+			name:   "key bytes",
+			limits: legacyStreamShapeLimits{maxKeys: 100, maxKeyBytes: 20},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			shape, err := inspectLegacyStreamShapeWithLimits(strings.NewReader(payload), test.limits)
+			if !errors.Is(err, ErrLegacyShapeTooLarge) {
+				t.Fatalf("error = %v, shape = %#v", err, shape)
+			}
+		})
+	}
+}
+
+func TestCaptureJSONObjectWithLimitsSpoolsNestedObjectAndRemovesFile(t *testing.T) {
+	tempDir := t.TempDir()
+	object := `{"outer":{"message":"closing } and opening { with escaped quote \" still inside","items":[{"ok":true}]}}`
+	reader := bufio.NewReaderSize(strings.NewReader(object+"\nnext"), 16)
+	captured, err := captureJSONObjectWithLimits(reader, jsonObjectCaptureLimits{
+		memoryBytes: 16,
+		maxBytes:    1024,
+		tempDir:     tempDir,
+	})
+	if err != nil {
+		t.Fatalf("capture object: %v", err)
+	}
+	if captured.file == nil {
+		t.Fatal("expected captured object to use a temporary file")
+	}
+	path := captured.file.Name()
+	if captured.Size() != int64(len(object)) {
+		t.Fatalf("captured size = %d, want %d", captured.Size(), len(object))
+	}
+	replay, err := captured.Reader()
+	if err != nil {
+		t.Fatalf("open captured reader: %v", err)
+	}
+	got, err := io.ReadAll(replay)
+	if err != nil {
+		t.Fatalf("read captured object: %v", err)
+	}
+	if string(got) != object {
+		t.Fatalf("captured object = %q, want %q", got, object)
+	}
+	remaining, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read remaining input: %v", err)
+	}
+	if string(remaining) != "\nnext" {
+		t.Fatalf("remaining input = %q", remaining)
+	}
+	if err := captured.Close(); err != nil {
+		t.Fatalf("close captured object: %v", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary file still exists or stat failed: %v", err)
+	}
+	if err := captured.Close(); err != nil {
+		t.Fatalf("close captured object again: %v", err)
+	}
+}
+
+func TestCaptureJSONObjectWithLimitsCleansTemporaryFileOnFailure(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		wantErr error
+	}{
+		{
+			name:    "object exceeds maximum",
+			payload: `{"payload":"` + strings.Repeat("x", 64) + `"}`,
+			wantErr: ErrImportObjectTooLarge,
+		},
+		{
+			name:    "object ends before closing delimiter",
+			payload: `{"payload":"` + strings.Repeat("x", 32),
+			wantErr: io.ErrUnexpectedEOF,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			captured, err := captureJSONObjectWithLimits(
+				bufio.NewReaderSize(strings.NewReader(test.payload), 16),
+				jsonObjectCaptureLimits{memoryBytes: 8, maxBytes: 48, tempDir: tempDir},
+			)
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("capture error = %v, want %v", err, test.wantErr)
+			}
+			if captured != nil {
+				t.Fatalf("captured object = %#v, want nil", captured)
+			}
+			entries, readErr := os.ReadDir(tempDir)
+			if readErr != nil {
+				t.Fatalf("read temporary directory: %v", readErr)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("temporary directory contains %d entries after failure", len(entries))
+			}
+		})
+	}
+}
+
 func TestStreamImportPayloadKeepsExportedEventPrecedenceOverNestedUsage(t *testing.T) {
 	payload := `{
 	  "event_hash": "exported-event",
@@ -453,6 +1237,10 @@ type trackingReadSeeker struct {
 	*bytes.Reader
 	pass     int
 	position int64
+}
+
+type nonSeekableImportReader struct {
+	io.Reader
 }
 
 func (r *trackingReadSeeker) Read(buffer []byte) (int, error) {

@@ -41,6 +41,10 @@ description: 使用 CPA Manager Plus 按模型、账号、API Key、Provider、�
 
 如果模型名是别名或内部模型，先到 [模型价格](./model-prices.md) 补全价格，否则成本会低估或无法估算。
 
+## 用量导出与历史边界
+
+用量维护中的完整 JSONL export 导出的是当前 raw `usage_events` snapshot，不受 `USAGE_QUERY_LIMIT` 影响，并在稳定边界内按顺序流式输出。它不是完整 CPAMP backup；已经从 raw 表删除的历史不会自动从 archive segment 合并回导出文件。需要迁移或灾备时，请按[备份与恢复](../operations/backup.md)备份 SQLite、WAL/SHM、`data.key` 和 `usage-archives/`。
+
 ## 长历史数据与查询行为
 
 - 页面只请求当前 Tab 需要的数据，稳定筛选项与主统计分开加载。

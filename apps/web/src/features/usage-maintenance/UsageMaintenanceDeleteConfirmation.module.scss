@@ -1,0 +1,107 @@
+.content {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.lead {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.details {
+  display: grid;
+  margin: 2px 0 0;
+  border-top: 1px solid var(--border-color);
+}
+
+.details > div {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.8fr) minmax(0, 1.2fr);
+  gap: 16px;
+  align-items: center;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 12px;
+}
+
+.details dt {
+  color: var(--text-secondary);
+}
+
+.details dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--text-primary);
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 25px;
+  padding: 3px 10px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.success {
+  border-color: color-mix(in srgb, var(--success-color) 25%, var(--border-color));
+  background: color-mix(in srgb, var(--success-color) 10%, var(--bg-primary));
+  color: var(--success-color);
+}
+
+.warning {
+  border-color: color-mix(in srgb, var(--warning-color) 28%, var(--border-color));
+  background: color-mix(in srgb, var(--warning-color) 10%, var(--bg-primary));
+  color: var(--warning-color);
+}
+
+.danger {
+  border-color: color-mix(in srgb, var(--error-color) 28%, var(--border-color));
+  background: color-mix(in srgb, var(--error-color) 9%, var(--bg-primary));
+  color: var(--error-color);
+}
+
+.disabled {
+  border-color: var(--border-color);
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+}
+
+.warningNote,
+.infoNote {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.warningNote {
+  border: 1px solid color-mix(in srgb, var(--warning-color) 36%, var(--border-color));
+  background: color-mix(in srgb, var(--warning-color) 8%, var(--bg-primary));
+  color: color-mix(in srgb, var(--warning-color) 80%, var(--text-primary));
+}
+
+.infoNote {
+  border: 1px solid color-mix(in srgb, var(--primary-color) 24%, var(--border-color));
+  background: color-mix(in srgb, var(--primary-color) 5%, var(--bg-primary));
+  color: var(--text-secondary);
+}
+
+@media (max-width: 560px) {
+  .details > div {
+    grid-template-columns: 1fr;
+    gap: 5px;
+  }
+}

@@ -316,3 +316,173 @@ func commitIdentityEvidenceTestBatch(t testing.TB, db *sql.DB, afterID, throughI
 		t.Fatal(err)
 	}
 }
+
+func TestCodexLegacyIdentityEvidenceSurvivesRawDeletion(t *testing.T) {
+	db := openIdentityEvidenceTestDB(t)
+	ctx := context.Background()
+
+	// Insert events
+	events := []usage.Event{
+		identityChronologyEvent("weak", 1000, "codex-a.json", "auth-a", "codex", "", ""),
+		identityChronologyEvent("trusted", 3000, "codex-a.json", "auth-a", "codex", "account-a", ""),
+	}
+	repo := New(db)
+	if _, err := repo.InsertBatch(ctx, events); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	// Commit evidence batch to cover all inserted events
+	var maxID int64
+	if err := db.QueryRow(`select coalesce(max(id), 0) from usage_events`).Scan(&maxID); err != nil {
+		t.Fatalf("query max id: %v", err)
+	}
+	if maxID == 0 {
+		t.Fatal("expected non-zero maxID")
+	}
+
+	commitIdentityEvidenceTestBatch(t, db, 0, maxID)
+	// Mark status as ready
+	if _, err := db.Exec(`update usage_monitoring_rollup_state set status = 'ready' where rollup_name = ?`, CodexLegacyIdentityRollupName); err != nil {
+		t.Fatalf("set status ready: %v", err)
+	}
+
+	target := identityEvidenceTestTarget()
+	// Stored evidence is available
+	_, available, err := queryStoredCodexLegacyIdentityEvidence(ctx, db, target.AuthFileSnapshot, target.AuthIndex)
+	if err != nil {
+		t.Fatalf("query stored evidence before deletion: %v", err)
+	}
+	if !available {
+		t.Fatal("expected stored evidence to be available before deletion")
+	}
+	assertIdentityEvidenceAllowed(t, db, true)
+
+	// Now simulate archive deletion: all raw events are deleted
+	if _, err := db.Exec(`delete from usage_events`); err != nil {
+		t.Fatalf("delete raw events: %v", err)
+	}
+
+	var rawMaxID int64
+	if err := db.QueryRow(`select coalesce(max(id), 0) from usage_events`).Scan(&rawMaxID); err != nil {
+		t.Fatalf("query raw max id after deletion: %v", err)
+	}
+	if rawMaxID != 0 {
+		t.Fatalf("expected rawMaxID == 0 after deletion, got %d", rawMaxID)
+	}
+
+	// Stored evidence MUST still be available because target_event_id is preserved!
+	evidenceGroups, availableAfter, err := queryStoredCodexLegacyIdentityEvidence(ctx, db, target.AuthFileSnapshot, target.AuthIndex)
+	if err != nil {
+		t.Fatalf("query stored evidence after deletion: %v", err)
+	}
+	if !availableAfter {
+		t.Fatal("expected stored evidence to remain available after raw events are deleted")
+	}
+	if len(evidenceGroups) == 0 {
+		t.Fatal("expected non-empty evidence groups after raw deletion")
+	}
+	assertIdentityEvidenceAllowed(t, db, true)
+}
+
+func TestCodexLegacyIdentityEvidenceBoundedTailReader(t *testing.T) {
+	db := openIdentityEvidenceTestDB(t)
+	ctx := context.Background()
+
+	events := []usage.Event{
+		identityChronologyEvent("weak", 1000, "codex-a.json", "auth-a", "codex", "", ""),
+		identityChronologyEvent("trusted", 3000, "codex-a.json", "auth-a", "codex", "account-a", ""),
+	}
+	repo := New(db)
+	if _, err := repo.InsertBatch(ctx, events); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	var initialMaxID int64
+	if err := db.QueryRow(`select coalesce(max(id), 0) from usage_events`).Scan(&initialMaxID); err != nil {
+		t.Fatalf("query max id: %v", err)
+	}
+
+	commitIdentityEvidenceTestBatch(t, db, 0, initialMaxID)
+	if _, err := db.Exec(`update usage_monitoring_rollup_state set status = 'ready' where rollup_name = ?`, CodexLegacyIdentityRollupName); err != nil {
+		t.Fatalf("set status ready: %v", err)
+	}
+
+	// Insert 2 new events after initial coverage
+	tailEvents := []usage.Event{
+		identityChronologyEvent("tail-req-1", 50_000, "codex-a.json", "auth-a", "codex", "account-a", ""),
+		identityChronologyEvent("tail-req-2", 51_000, "codex-a.json", "auth-a", "codex", "account-a", ""),
+	}
+	if _, err := repo.InsertBatch(ctx, tailEvents); err != nil {
+		t.Fatalf("insert tail events: %v", err)
+	}
+
+	spy := &identityEvidenceQuerySpy{SQLQueryer: db}
+	target := identityEvidenceTestTarget()
+
+	key, allowed, err := ResolveCodexLegacyAccountKey(ctx, spy, target)
+	if err != nil {
+		t.Fatalf("resolve key: %v", err)
+	}
+	if !allowed || key == "" {
+		t.Fatalf("expected allowed key with tail scan, got key=%q allowed=%v", key, allowed)
+	}
+	if spy.fullHistoryReads != 0 {
+		t.Fatalf("expected 0 full history reads, got %d", spy.fullHistoryReads)
+	}
+	if len(spy.tailQueries) == 0 {
+		t.Fatal("expected tail queries to be executed")
+	}
+	for _, tq := range spy.tailQueries {
+		if !strings.Contains(tq.query, "e.id > ?") {
+			t.Errorf("tail query missing e.id > ? predicate: %s", tq.query)
+		}
+	}
+}
+
+func TestCodexLegacyIdentityEvidenceReaderRejectsDriftedSchemaVersion(t *testing.T) {
+	db := openIdentityEvidenceTestDB(t)
+	ctx := context.Background()
+
+	events := []usage.Event{
+		identityChronologyEvent("weak", 1000, "codex-a.json", "auth-a", "codex", "", ""),
+		identityChronologyEvent("trusted", 3000, "codex-a.json", "auth-a", "codex", "account-a", ""),
+	}
+	repo := New(db)
+	if _, err := repo.InsertBatch(ctx, events); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	var initialMaxID int64
+	if err := db.QueryRow(`select coalesce(max(id), 0) from usage_events`).Scan(&initialMaxID); err != nil {
+		t.Fatalf("query max id: %v", err)
+	}
+
+	commitIdentityEvidenceTestBatch(t, db, 0, initialMaxID)
+	if _, err := db.Exec(`update usage_monitoring_rollup_state set status = 'ready' where rollup_name = ?`, CodexLegacyIdentityRollupName); err != nil {
+		t.Fatalf("set status ready: %v", err)
+	}
+
+	// 1. Accepts CodexLegacyIdentityEvidenceSchemaVersion
+	target := identityEvidenceTestTarget()
+	key, allowed, err := ResolveCodexLegacyAccountKey(ctx, db, target)
+	if err != nil || !allowed || key == "" {
+		t.Fatalf("expected allowed key with valid schema version, got key=%q allowed=%v err=%v", key, allowed, err)
+	}
+
+	// 2. Rejects CodexLegacyIdentityEvidenceSchemaVersion + 1
+	if _, err := db.Exec(`update usage_monitoring_rollup_state set schema_version = ? where rollup_name = ?`,
+		CodexLegacyIdentityEvidenceSchemaVersion+1, CodexLegacyIdentityRollupName); err != nil {
+		t.Fatalf("corrupt schema version: %v", err)
+	}
+	spy := &identityEvidenceQuerySpy{SQLQueryer: db}
+	_, allowedDrifted, err := ResolveCodexLegacyAccountKey(ctx, spy, target)
+	if err != nil {
+		t.Fatalf("resolve key error: %v", err)
+	}
+	if spy.fullHistoryReads == 0 {
+		t.Fatalf("expected full history read fallback when cache schema version is drifted")
+	}
+	if !allowedDrifted {
+		t.Fatalf("expected key to resolve via full history read fallback")
+	}
+}

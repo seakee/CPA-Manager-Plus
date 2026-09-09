@@ -26,6 +26,10 @@ func SupportsStatsFilter(filter store.AnalyticsFilter) bool {
 	return monitoringrepo.SupportsStatsFilter(filter)
 }
 
+func SupportsEventProjectionFilter(filter store.AnalyticsFilter) bool {
+	return monitoringrepo.SupportsEventProjectionFilter(filter)
+}
+
 func SupportsSelectorFilter(filter store.AnalyticsFilter) bool {
 	return monitoringrepo.SupportsSelectorFilter(filter)
 }

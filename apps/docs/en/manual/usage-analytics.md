@@ -41,6 +41,10 @@ Filters include model, API key, provider, status, auth file, latency, and cache 
 
 If the model name is an alias or internal name, add the matching entry in [Model Prices](./model-prices.md), or cost will be underestimated or empty.
 
+## Export And Historical Boundaries
+
+The complete JSONL export in Usage Maintenance is a stable, ordered snapshot of raw `usage_events` and is independent of `USAGE_QUERY_LIMIT`. It is not a complete CPAMP backup, and history already deleted from the raw table is not automatically merged back from archive segments. For migration or disaster recovery, follow [Backup And Restore](../operations/backup.md) and back up SQLite, WAL/SHM, `data.key`, and `usage-archives/` together.
+
 ## Long Histories And Query Behavior
 
 - Each tab requests only the data it needs; stable filter selectors load separately from main analytics.

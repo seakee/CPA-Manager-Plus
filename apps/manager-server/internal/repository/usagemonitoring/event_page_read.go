@@ -32,7 +32,10 @@ func (r *repository) LoadEventsCount(ctx context.Context, filter AnalyticsFilter
 		state.CoverageEventID,
 		"p.event_id as id",
 		"e.id",
-		eventSourceOptions{ProjectionComplete: projectionComplete},
+		eventSourceOptions{
+			ProjectionComplete: projectionComplete,
+			RequireRawEvent:    true,
+		},
 	)
 	var total int64
 	if err := tx.QueryRowContext(ctx, `with filtered_events as (`+source+`)
@@ -77,6 +80,7 @@ func (r *repository) LoadEventsPage(
 			BeforeMS:           beforeMS,
 			BeforeID:           beforeID,
 			ProjectionComplete: projectionComplete,
+			RequireRawEvent:    true,
 		},
 	)
 	args = append(args, limit+1)

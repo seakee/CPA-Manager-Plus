@@ -43,6 +43,7 @@ function createClient() {
   let session = createSession();
   const offsets: number[] = [];
   const chunkSizes: number[] = [];
+  const prefixDigests: string[] = [];
   const client: UsageImportSessionClient = {
     createUsageImportSession: vi.fn(async (_base, filename, sizeBytes) => {
       session = createSession({ filename, size_bytes: sizeBytes });
@@ -58,17 +59,21 @@ function createClient() {
       }
       return { ...session };
     }),
-    uploadUsageImportSessionChunk: vi.fn(async (_base, _id, offset, chunk) => {
-      offsets.push(offset);
-      chunkSizes.push(chunk.size);
-      const received = offset + chunk.size;
-      session = {
-        ...session,
-        received_bytes: received,
-        status: received === session.size_bytes ? 'ready' : 'uploading',
-      };
-      return { ...session };
-    }),
+    validateUsageImportSessionPrefix: vi.fn(async () => ({ ...session })),
+    uploadUsageImportSessionChunk: vi.fn(
+      async (_base, _id, offset, chunk, _managementKey, _signal, prefixSha256) => {
+        offsets.push(offset);
+        chunkSizes.push(chunk.size);
+        prefixDigests.push(prefixSha256 ?? '');
+        const received = offset + chunk.size;
+        session = {
+          ...session,
+          received_bytes: received,
+          status: received === session.size_bytes ? 'ready' : 'uploading',
+        };
+        return { ...session };
+      }
+    ),
     completeUsageImportSession: vi.fn(async () => {
       session = { ...session, status: 'processing' };
       return { ...session };
@@ -82,6 +87,7 @@ function createClient() {
     client,
     offsets,
     chunkSizes,
+    prefixDigests,
     getSession: () => session,
     setSession: (next: UsageImportSession) => {
       session = next;
@@ -187,6 +193,115 @@ describe('usage import session orchestration', () => {
 
     expect(client.createUsageImportSession).toHaveBeenCalledTimes(1);
     expect(storage.values.size).toBe(0);
+  });
+
+  it('validates a server session prefix before resuming from received_bytes', async () => {
+    const { client, offsets, prefixDigests, setSession } = createClient();
+    const file = new File(['0123456789'], 'history.jsonl');
+    setSession(createSession({ received_bytes: 4, status: 'uploading' }));
+
+    await uploadUsageImportFile({
+      base: 'http://manager.local',
+      file,
+      sessionId: 'session-1',
+      client,
+      storage: new MemoryStorage(),
+      pollIntervalMs: 0,
+    });
+
+    expect(client.validateUsageImportSessionPrefix).toHaveBeenCalledTimes(3);
+    expect(offsets).toEqual([4, 8]);
+    expect(prefixDigests[0]).toBe(
+      '1be2e452b46d7a0d9656bbb1f768e8248eba1b75baed65f5d99eafa948899a6a'
+    );
+  });
+
+  it('stops before uploading when the server rejects the selected file prefix', async () => {
+    const { client, offsets, setSession } = createClient();
+    const file = new File(['0123456789'], 'history.jsonl');
+    setSession(createSession({ received_bytes: 4, status: 'uploading' }));
+    const mismatch = new Error('prefix mismatch') as UsageServiceApiError;
+    mismatch.code = 'usage_import_session_file_mismatch';
+    vi.mocked(client.validateUsageImportSessionPrefix).mockRejectedValueOnce(mismatch);
+
+    await expect(
+      uploadUsageImportFile({
+        base: 'http://manager.local',
+        file,
+        sessionId: 'session-1',
+        client,
+        storage: new MemoryStorage(),
+        pollIntervalMs: 0,
+      })
+    ).rejects.toMatchObject({ code: 'usage_import_session_file_mismatch' });
+
+    expect(offsets).toEqual([]);
+    expect(client.uploadUsageImportSessionChunk).not.toHaveBeenCalled();
+  });
+
+  it('validates a fully uploaded ready session before completing it', async () => {
+    const { client, setSession } = createClient();
+    const file = new File(['0123456789'], 'history.jsonl');
+    setSession(createSession({ received_bytes: file.size, status: 'ready' }));
+    const mismatch = new Error('prefix mismatch') as UsageServiceApiError;
+    mismatch.code = 'usage_import_session_file_mismatch';
+    vi.mocked(client.validateUsageImportSessionPrefix).mockRejectedValueOnce(mismatch);
+
+    await expect(
+      uploadUsageImportFile({
+        base: 'http://manager.local',
+        file,
+        sessionId: 'session-1',
+        client,
+        storage: new MemoryStorage(),
+        pollIntervalMs: 0,
+      })
+    ).rejects.toMatchObject({ code: 'usage_import_session_file_mismatch' });
+
+    expect(client.completeUsageImportSession).not.toHaveBeenCalled();
+  });
+
+  it('resumes an explicitly selected session when the server truncates its filename', async () => {
+    const { client, getSession, setSession } = createClient();
+    const file = new File(['0123456789'], `${'a'.repeat(250)}.jsonl`, {
+      lastModified: 655,
+    });
+    setSession({
+      ...getSession(),
+      filename: Array.from(file.name).slice(0, 240).join(''),
+    });
+
+    const result = await uploadUsageImportFile({
+      base: 'http://manager.local',
+      file,
+      sessionId: 'session-1',
+      client,
+      storage: new MemoryStorage(),
+      pollIntervalMs: 0,
+    });
+
+    expect(result.added).toBe(2);
+    expect(client.createUsageImportSession).not.toHaveBeenCalled();
+  });
+
+  it('rejects an explicitly selected session when the file name does not match', async () => {
+    const { client } = createClient();
+    const file = new File(['0123456789'], 'different-history.jsonl');
+
+    await expect(
+      uploadUsageImportFile({
+        base: 'http://manager.local',
+        file,
+        sessionId: 'session-1',
+        client,
+        storage: new MemoryStorage(),
+        pollIntervalMs: 0,
+      })
+    ).rejects.toMatchObject({
+      message: 'usage import session does not match the selected file',
+      code: 'usage_import_session_conflict',
+    });
+    expect(client.createUsageImportSession).not.toHaveBeenCalled();
   });
 
   it('reuses a persisted resume key when the create response is lost', async () => {

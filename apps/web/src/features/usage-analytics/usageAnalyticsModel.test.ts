@@ -6,8 +6,8 @@ import type {
 import { buildSourceInfoMap } from '@/utils/sourceResolver';
 import type { UsageRankRow, UsageTimelinePoint } from './usageAnalyticsModel';
 import {
-  analyzeUsageBucket,
   adaptUsageAnalyticsData,
+  analyzeUsageBucket,
   buildApiKeyTrendSeries,
   buildApiKeyRows,
   buildCredentialRows,
@@ -213,6 +213,35 @@ describe('usage analytics request model', () => {
 });
 
 describe('usage analytics adapters', () => {
+  it('preserves archive coverage metadata for presentation layers', () => {
+    const coverage: NonNullable<MonitoringAnalyticsResponse['coverage']> = {
+      scope: 'time_range',
+      mode: 'mixed',
+      raw_complete: false,
+      core_aggregate_used: true,
+      raw_event_count: 4,
+      raw_deleted_event_count: 2,
+      min_deleted_timestamp_ms: 1,
+      max_deleted_timestamp_ms: 2,
+      comparison_raw_event_count: 0,
+      comparison_raw_deleted_event_count: 3,
+      comparison_min_deleted_timestamp_ms: 3,
+      comparison_max_deleted_timestamp_ms: 4,
+      fidelity_limitations: ['event_details_require_raw_events'],
+    };
+
+    expect(
+      adaptUsageAnalyticsData(
+        {
+          generated_at_ms: NOW_MS,
+          granularity: 'hour',
+          coverage,
+        },
+        'hour'
+      ).coverage
+    ).toEqual(coverage);
+  });
+
   it('fills a missing middle hourly bucket with zero metrics', () => {
     const fromMs = localDateMs(10, 10);
     const toMs = localDateMs(10, 13);

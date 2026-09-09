@@ -597,6 +597,165 @@ func TestWriteExportJSONLUsesRecentLimitAndAscendingKeysetOrder(t *testing.T) {
 	}
 }
 
+func TestWriteFullExportJSONLIgnoresQueryLimitAndUsesSnapshotBoundary(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repo := New(db)
+	initial := make([]usage.Event, 0, 7)
+	for index, timestamp := range []int64{30, 10, 20, 10, 40, 50, 60} {
+		initial = append(initial, streamTestEvent(fmt.Sprintf("full-export-%d", index), timestamp, "POST /v1/responses", "gpt-test"))
+	}
+	if _, err := repo.InsertBatch(context.Background(), initial); err != nil {
+		t.Fatalf("insert initial events: %v", err)
+	}
+
+	inserted := false
+	writer := exportInsertWriter{onFirstWrite: func() {
+		if inserted {
+			return
+		}
+		inserted = true
+		newEvent := streamTestEvent("full-export-after-snapshot", 5, "POST /v1/responses", "gpt-test")
+		if _, err := repo.InsertBatch(context.Background(), []usage.Event{newEvent}); err != nil {
+			t.Fatalf("insert concurrent event: %v", err)
+		}
+	}}
+	if err := repo.WriteFullExportJSONL(context.Background(), &writer); err != nil {
+		t.Fatalf("write full export: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(writer.String()), "\n")
+	if len(lines) != len(initial) {
+		t.Fatalf("full export line count = %d, want %d", len(lines), len(initial))
+	}
+	previousTimestamp := int64(-1)
+	for index, line := range lines {
+		var event usage.Event
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("decode line %d: %v", index, err)
+		}
+		if event.TimestampMS < previousTimestamp {
+			t.Fatalf("line %d timestamp %d is not ordered after %d", index, event.TimestampMS, previousTimestamp)
+		}
+		previousTimestamp = event.TimestampMS
+		if event.EventHash == "full-export-after-snapshot" {
+			t.Fatal("export included event inserted after snapshot boundary")
+		}
+	}
+}
+
+func TestWriteFullExportJSONLRetainsRowsDeletedAfterSnapshot(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repo := New(db)
+	events := make([]usage.Event, 0, usageExportBatchSize+32)
+	for index := 0; index < cap(events); index++ {
+		events = append(events, streamTestEvent(
+			fmt.Sprintf("full-export-delete-%04d", index),
+			int64(index+1),
+			"POST /v1/responses",
+			"gpt-test",
+		))
+	}
+	if _, err := repo.InsertBatch(context.Background(), events); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	deleted := false
+	writer := exportInsertWriter{onFirstWrite: func() {
+		if deleted {
+			return
+		}
+		deleted = true
+		if _, err := db.Exec(`delete from usage_events where event_hash = ?`, events[0].EventHash); err != nil {
+			t.Fatalf("delete concurrent event: %v", err)
+		}
+	}}
+	if err := repo.WriteFullExportJSONL(context.Background(), &writer); err != nil {
+		t.Fatalf("write full export: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(writer.String()), "\n")
+	if len(lines) != len(events) {
+		t.Fatalf("full export line count = %d, want %d", len(lines), len(events))
+	}
+	seen := make(map[string]bool, len(lines))
+	for index, line := range lines {
+		var event usage.Event
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("decode line %d: %v", index, err)
+		}
+		seen[event.EventHash] = true
+	}
+	if !seen[events[0].EventHash] {
+		t.Fatalf("snapshot row deleted during export was missing")
+	}
+}
+
+func TestWriteFullExportJSONLStopsWhenContextIsCancelledDuringStreaming(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repo := New(db)
+	events := make([]usage.Event, 0, 4)
+	for index := 0; index < 4; index++ {
+		events = append(events, streamTestEvent(fmt.Sprintf("full-export-cancel-%d", index), int64(index+1), "POST /v1/responses", "gpt-test"))
+	}
+	if _, err := repo.InsertBatch(context.Background(), events); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	writer := &cancelExportWriter{cancel: cancel}
+	err = repo.WriteFullExportJSONL(ctx, writer)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("full export error = %v, want context canceled", err)
+	}
+}
+
+func TestWriteFullExportJSONLEmptyDatabaseReturnsEmptyJSONL(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	var output bytes.Buffer
+	if err := New(db).WriteFullExportJSONL(context.Background(), &output); err != nil {
+		t.Fatalf("empty full export: %v", err)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("empty full export bytes = %d, want zero", output.Len())
+	}
+}
+
+type exportInsertWriter struct {
+	bytes.Buffer
+	onFirstWrite func()
+}
+
+type cancelExportWriter struct {
+	cancel context.CancelFunc
+}
+
+func (w *cancelExportWriter) Write(p []byte) (int, error) {
+	w.cancel()
+	return len(p), nil
+}
+
+func (w *exportInsertWriter) Write(p []byte) (int, error) {
+	if w.onFirstWrite != nil {
+		callback := w.onFirstWrite
+		w.onFirstWrite = nil
+		callback()
+	}
+	return w.Buffer.Write(p)
+}
+
 func TestValidatedMetadataJSONRequiresJSONObject(t *testing.T) {
 	for _, raw := range []string{"", "null", "[]", `{"trace":`, `"text"`} {
 		if metadata := validatedMetadataJSON(raw); metadata != nil {

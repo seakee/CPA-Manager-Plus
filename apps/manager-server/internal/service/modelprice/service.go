@@ -16,9 +16,12 @@ import (
 	"unicode"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	modelpricerepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/modelprice"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
+
+var ErrStructureChangeAfterRawDeletion = modelpricerepo.ErrStructureChangeAfterRawDeletion
 
 const (
 	SyncSourceModelsDev  = "models.dev"
