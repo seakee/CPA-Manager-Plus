@@ -2008,7 +2008,10 @@
     "upgrade_required_desc": "Текущая версия сервера не поддерживает API псевдонимов моделей OAuth. Обновите CLI Proxy API (CPA) до последней версии."
   },
   "auth_login": {
-    "codex_oauth_title": "Codex OAuth",
+    "oauth_proxy_label": "Прокси для OAuth (необязательно)",
+    "oauth_proxy_hint": "Только для OAuth-входа на этой странице. Исходящие запросы CPA (напр. обмен code→token для codex) идут через этот прокси; пусто — глобальный proxy-url.",
+    "oauth_proxy_placeholder": "socks5://user:pass@host:port",
+        "codex_oauth_title": "Codex OAuth",
     "codex_oauth_button": "Начать вход Codex",
     "codex_oauth_hint": "Выполните вход в сервис Codex через OAuth и автоматически получите/сохраните файлы авторизации.",
     "codex_oauth_url_label": "URL авторизации:",

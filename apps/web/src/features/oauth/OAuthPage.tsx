@@ -58,6 +58,12 @@ import iconVertex from '@/assets/icons/vertex.svg';
 import iconGrok from '@/assets/icons/grok.svg';
 import iconGrokDark from '@/assets/icons/grok-dark.svg';
 
+// Per-login OAuth proxy, shown at the top of the page. When set it is sent as
+// `proxy-url` on the auth-url start request so the whole CPA-side OAuth flow
+// (code -> token exchange etc.) uses this proxy instead of the global proxy-url,
+// without leaking the CPA host's direct egress.
+const OAUTH_PROXY_STORAGE_KEY = 'oauth.login.proxy-url';
+
 interface ProviderState {
   url?: string;
   state?: string;
@@ -272,6 +278,26 @@ export function OAuthPage() {
   );
   const [states, setStates] = useState<Record<string, ProviderState>>({});
   const [pluginOAuthPlugins, setPluginOAuthPlugins] = useState<PluginListEntry[]>([]);
+  const [oauthProxyUrl, setOauthProxyUrl] = useState<string>(() => {
+    try {
+      return window.localStorage.getItem(OAUTH_PROXY_STORAGE_KEY) ?? '';
+    } catch {
+      return '';
+    }
+  });
+  const updateOauthProxyUrl = (value: string) => {
+    setOauthProxyUrl(value);
+    try {
+      const trimmed = value.trim();
+      if (trimmed) {
+        window.localStorage.setItem(OAUTH_PROXY_STORAGE_KEY, trimmed);
+      } else {
+        window.localStorage.removeItem(OAUTH_PROXY_STORAGE_KEY);
+      }
+    } catch {
+      // storage may be unavailable; the in-memory value still applies this session
+    }
+  };
   const [vertexState, setVertexState] = useState<VertexImportState>({
     fileName: '',
     location: '',
@@ -684,7 +710,10 @@ export function OAuthPage() {
         if (!isProviderAttemptCurrent(provider, attempt)) return;
         // OAuth remains available, but completion will fail closed without a mutation marker.
       }
-      const res = await oauthApi.startAuth(provider, attempt.requestScope);
+      const trimmedProxyUrl = oauthProxyUrl.trim();
+      const res = trimmedProxyUrl
+        ? await oauthApi.startAuth(provider, attempt.requestScope, trimmedProxyUrl)
+        : await oauthApi.startAuth(provider, attempt.requestScope);
       if (!isProviderAttemptCurrent(provider, attempt)) return;
       if (!res.state) {
         const message = t('auth_login.missing_state');
@@ -929,6 +958,18 @@ export function OAuthPage() {
   return (
     <div className={styles.container}>
       <div className={styles.content}>
+        <div className={styles.proxyBar}>
+          <Input
+            type="text"
+            label={t('auth_login.oauth_proxy_label')}
+            hint={t('auth_login.oauth_proxy_hint')}
+            value={oauthProxyUrl}
+            onChange={(event) => updateOauthProxyUrl(event.target.value)}
+            placeholder={t('auth_login.oauth_proxy_placeholder')}
+            spellCheck={false}
+            autoComplete="off"
+          />
+        </div>
         {providers.map((provider) => {
           const state = states[provider.id] || {};
           const canSubmitCallback = provider.supportsCallback && Boolean(state.url);

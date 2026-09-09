@@ -36,6 +36,10 @@
   gap: $spacing-xl;
 }
 
+.proxyBar {
+  max-width: 640px;
+}
+
 .cardContent {
   display: flex;
   flex-direction: column;

@@ -19,10 +19,18 @@ export interface OAuthCallbackResponse {
 const WEBUI_SUPPORTED: string[] = ['codex', 'anthropic', 'antigravity', 'xai'];
 
 export const oauthApi = {
-  startAuth: (provider: OAuthProvider, requestScope?: ApiClientRequestScope) => {
+  startAuth: (
+    provider: OAuthProvider,
+    requestScope?: ApiClientRequestScope,
+    proxyUrl?: string
+  ) => {
     const params: Record<string, string | boolean> = {};
     if (WEBUI_SUPPORTED.includes(provider)) {
       params.is_webui = true;
+    }
+    const trimmedProxy = (proxyUrl ?? '').trim();
+    if (trimmedProxy) {
+      params['proxy-url'] = trimmedProxy;
     }
     return apiClient.get<OAuthStartResponse>(`/${provider}-auth-url`, {
       ...(requestScope ? createScopedApiRequestConfig(requestScope) : {}),

@@ -2007,7 +2007,10 @@
     "upgrade_required_desc": "The current server does not support the OAuth model aliases API. Please upgrade to the latest CLI Proxy API (CPA) version."
   },
   "auth_login": {
-    "codex_oauth_title": "Codex OAuth",
+    "oauth_proxy_label": "OAuth proxy URL (optional)",
+    "oauth_proxy_hint": "Applied only to OAuth logins on this page. CPA outbound (e.g. codex code→token exchange) uses this proxy; leave empty to use the global proxy-url.",
+    "oauth_proxy_placeholder": "socks5://user:pass@host:port",
+        "codex_oauth_title": "Codex OAuth",
     "codex_oauth_button": "Start Codex Login",
     "codex_oauth_hint": "Login to Codex service through OAuth flow, automatically obtain and save authentication files.",
     "codex_oauth_url_label": "Authorization URL:",
