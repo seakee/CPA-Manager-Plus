@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - dev
+      - v2
     types:
       - opened
       - edited
