@@ -250,7 +250,9 @@
     "logs": "記錄檢視",
     "logs_short": "記錄",
     "system_info": "系統資訊",
-    "system_info_short": "系統"
+    "system_info_short": "系統",
+    "codex_client_models": "模型目錄",
+    "codex_client_models_short": "模型"
   },
   "account_actions": {
     "eyebrow": "帳號異常",
@@ -4685,5 +4687,288 @@
       "ultra": "Ultra",
       "ultra_lite": "Ultra Lite"
     }
+  },
+  "codex_client_models": {
+    "source_label": "目錄來源",
+    "source_embed": "內建目錄",
+    "revision_label": "修訂 {{revision}}",
+    "override_path_label": "覆寫檔案",
+    "override_path_missing": "未設定位置",
+    "override_error": "磁碟上的覆寫檔案已被拒絕：{{message}}",
+    "override_errors_title": "以下覆寫沒有生效：",
+    "override_errors_item": "{{slug}} 的 {{path}}：{{message}}",
+    "override_errors_whole_entry": "整條項目",
+    "status_load_failed": "模型目錄載入失敗",
+    "refresh": "重新整理",
+    "add": "新增條目",
+    "clear_all": "清空覆寫",
+    "search_placeholder": "搜尋 slug 或顯示名稱",
+    "filter_all": "全部",
+    "filter_base": "基礎",
+    "filter_override": "已覆寫",
+    "filter_custom": "自訂",
+    "filter_removed": "已刪除",
+    "column_model": "模型",
+    "column_origin": "來源",
+    "column_context_window": "上下文視窗",
+    "column_reasoning": "預設推理等級",
+    "column_visibility": "可見性",
+    "origin_base": "基礎",
+    "origin_override": "已覆寫",
+    "origin_custom": "自訂",
+    "origin_removed": "已刪除",
+    "edit_override": "編輯覆寫",
+    "delete_override": "移除覆寫",
+    "empty": "沒有符合的模型",
+    "editor_title_create": "新增模型條目",
+    "editor_title_edit": "覆寫 {{slug}}",
+    "editor_subtitle": "常用欄位可直接編輯，改動會寫入本地覆寫。",
+    "save_override": "儲存覆寫",
+    "save_success": "已儲存 {{slug}} 的覆寫",
+    "save_failed": "覆寫儲存失敗",
+    "delete_success": "已移除 {{slug}} 的覆寫",
+    "delete_confirm_title": "移除覆寫",
+    "delete_confirm_message": "移除後 {{slug}} 將恢復為目錄預設內容，或從目錄中徹底消失。確定繼續？",
+    "clear_success": "已清空本機覆寫",
+    "clear_confirm_title": "清空覆寫",
+    "clear_confirm_message": "將刪除本機覆寫檔案及其中的所有條目。確定繼續？",
+    "slug_label": "模型 slug",
+    "slug_hint": "客戶端請求此模型時使用的識別碼，例如 deepseek-chat。",
+    "slug_taken": "此 slug 已存在於目錄中，儲存後會變成覆寫條目。",
+    "editor_removed_notice": "該條目目前被 null 覆寫刪除，編輯任一欄位即可重建。",
+    "inherit_root_label": "繼承來源",
+    "inherit_root_none": "不繼承",
+    "inherit_root_hint": "沒有單獨覆寫的欄位都取自該模型，每個欄位仍可各自指定來源。",
+    "inherit_usage": "被 {{value}} 處覆寫繼承",
+    "inherit_issue_title": "繼承設定有問題：",
+    "inherit_issue_invalid_shape": "繼承指令必須是模型名稱，或「欄位路徑 → 模型名稱」的物件。",
+    "inherit_issue_invalid_path": "繼承路徑只能使用物件欄位，不能用陣列索引或空段落。",
+    "inherit_issue_non_inheritable_field": "模型識別欄位不能繼承。",
+    "inherit_issue_unknown_source": "繼承來源不在目前目錄裡。",
+    "inherit_issue_self_reference": "不能繼承自身。",
+    "inherit_issue_source_missing_path": "來源模型沒有這個欄位。",
+    "field_state_official": "目錄值",
+    "field_state_override": "已覆寫",
+    "field_state_removed": "已刪除",
+    "field_state_inherited": "繼承自 {{slug}}",
+    "field_state_mixed_source": "來源不一致",
+    "field_source_menu_label": "欄位來源",
+    "field_source_local": "設為本地值",
+    "field_source_clear": "恢復預設",
+    "field_source_inherit_from": "繼承自 {{slug}}",
+    "field_source_remove": "設為刪除",
+    "field_source_inherited_hint": "此欄位的值來自 {{slug}} 的設定。",
+    "field_source_mixed_hint": "合併框裡的兩個欄位來自不同模型，選一個來源即可讓它們重新一致。",
+    "field_source_issue": "繼承無效",
+    "field_error_array": "這裡必須是 JSON 陣列。",
+    "field_error_number": "這裡必須是數字。",
+    "field_error_empty": "這裡不能為空。",
+    "quick_select_placeholder": "選擇取值",
+    "quick_field_preview_empty": "無內容",
+    "quick_field_preview_open": "展開編輯",
+    "quick_field_preview_expand": "展開編輯（還有 {{value}} 行）",
+    "quick_group_fields": "{{value}} 個子項",
+    "quick_links": {
+      "instructions": {
+        "label": "基礎提示詞與指令模板一起覆寫",
+        "hint": "兩個欄位通常內容一致。開啟後只顯示一個輸入框，儲存時同時寫入基礎提示詞與指令模板。"
+      }
+    },
+    "quick": {
+      "sections": {
+        "basic": {
+          "title": "基本資訊",
+          "description": "模型在清單與客戶端中的標識"
+        },
+        "context": {
+          "title": "上下文與推理",
+          "description": "上下文視窗與預設推理行為"
+        },
+        "capability": {
+          "title": "能力開關",
+          "description": "該模型向客戶端宣告的能力"
+        },
+        "tools": {
+          "title": "工具與模態",
+          "description": "輸入模態與工具相關設定"
+        },
+        "prompt": {
+          "title": "提示詞",
+          "description": "下發給模型的基礎提示詞與模型訊息模板"
+        }
+      },
+      "fields": {
+        "display_name": {
+          "label": "顯示名稱",
+          "hint": "主控台與客戶端中顯示的模型名稱。"
+        },
+        "description": {
+          "label": "描述",
+          "hint": "模型選擇器中顯示的說明文字。"
+        },
+        "visibility": {
+          "label": "可見性",
+          "hint": "list 會出現在模型清單中，hide 表示隱藏。"
+        },
+        "priority": {
+          "label": "優先級",
+          "hint": "數值越小越前面。"
+        },
+        "context_window": {
+          "label": "上下文視窗",
+          "hint": "預設下發給客戶端的上下文長度。"
+        },
+        "max_context_window": {
+          "label": "最大上下文視窗",
+          "hint": "該模型允許的最大上下文長度。"
+        },
+        "default_reasoning_level": {
+          "label": "預設推理級別",
+          "hint": "請求未指定時使用的推理強度。"
+        },
+        "default_reasoning_summary": {
+          "label": "預設推理摘要",
+          "hint": "推理摘要的詳細程度。"
+        },
+        "default_verbosity": {
+          "label": "預設回覆詳略",
+          "hint": "未指定時的回覆篇幅。"
+        },
+        "support_verbosity": {
+          "label": "支援詳略控制",
+          "hint": "允許客戶端傳入詳略參數。"
+        },
+        "supported_in_api": {
+          "label": "API 可用",
+          "hint": "允許透過 API 呼叫該模型。"
+        },
+        "supports_parallel_tool_calls": {
+          "label": "並行工具呼叫",
+          "hint": "允許同時發起多個工具呼叫。"
+        },
+        "supports_reasoning_summaries": {
+          "label": "推理摘要",
+          "hint": "需要顯示推理摘要時開啟。"
+        },
+        "supports_search_tool": {
+          "label": "搜尋工具",
+          "hint": "允許該模型呼叫內建搜尋。"
+        },
+        "prefer_websockets": {
+          "label": "優先 WebSocket",
+          "hint": "可用時優先走 WebSocket 傳輸。"
+        },
+        "use_responses_lite": {
+          "label": "使用 Responses Lite",
+          "hint": "走精簡版 Responses 流程。"
+        },
+        "input_modalities": {
+          "label": "輸入模態",
+          "hint": "一行一項，例如 text、image。"
+        },
+        "apply_patch_tool_type": {
+          "label": "補丁工具類型",
+          "hint": "模型使用的 apply_patch 工具形態。"
+        },
+        "shell_type": {
+          "label": "Shell 類型",
+          "hint": "執行命令時使用的 shell 實作。"
+        },
+        "web_search_tool_type": {
+          "label": "搜尋工具類型",
+          "hint": "搜尋是否支援圖片結果。"
+        },
+        "multi_agent_version": {
+          "label": "多智能體版本",
+          "hint": "v1 或 v2，決定多智能體協作的實作。"
+        },
+        "multi_agent_reasoning_effort": {
+          "label": "多智能體推理強度",
+          "hint": "多智能體側的推理強度，例如 low、high、xhigh。"
+        },
+        "base_instructions": {
+          "label": "基礎提示詞",
+          "hint": "該模型的基礎系統提示，逐字下發。"
+        },
+        "model_messages": {
+          "label": "模型訊息",
+          "hint": "指令模板、人格變數與各類策略提示詞；子項依目錄內容多級展開。",
+          "approvals": {
+            "label": "審批策略"
+          },
+          "auto_review": {
+            "label": "自動審查"
+          },
+          "collaboration_modes": {
+            "label": "協作模式"
+          },
+          "confirmation_policies": {
+            "label": "確認策略"
+          },
+          "guardian_v2": {
+            "label": "守護策略"
+          },
+          "instructions_template": {
+            "label": "指令範本",
+            "hint": "組裝給模型的訊息範本，支援佔位變數。"
+          },
+          "instructions_variables": {
+            "label": "人格變數",
+            "personality_default": {
+              "label": "預設人格",
+              "hint": "未指定人格時使用的提示片段。"
+            },
+            "personality_friendly": {
+              "label": "友善人格",
+              "hint": "友善模式使用的提示片段。"
+            },
+            "personality_pragmatic": {
+              "label": "務實人格",
+              "hint": "務實模式使用的提示片段。"
+            }
+          },
+          "multi_agent": {
+            "label": "多智能體"
+          },
+          "permissions": {
+            "label": "權限模式"
+          },
+          "persistent_instructions": {
+            "label": "持久模式提示詞"
+          },
+          "token_budget": {
+            "label": "權杖預算"
+          },
+          "tools": {
+            "label": "工具提示"
+          }
+        }
+      }
+    },
+    "editor_advanced_fields": "進階設定：其餘欄位",
+    "editor_advanced_count": "{{value}} 個欄位",
+    "editor_advanced_hint": "物件遞迴合併、純量與陣列整體取代、null 刪除欄位。",
+    "editor_json_title": "JSON 補丁",
+    "editor_json_hint": "整體替換補丁：修改後點「套用」寫回表單，或點「還原」放棄修改。",
+    "editor_json_apply": "套用",
+    "editor_json_reset": "還原",
+    "editor_json_dirty": "未套用",
+    "editor_json_dirty_hint": "JSON 修改尚未套用，套用或還原後才能儲存。",
+    "tree_search_placeholder": "依欄位名稱篩選",
+    "tree_only_overridden": "只看已覆寫",
+    "tree_expand_all": "展開全部",
+    "tree_collapse_all": "收合全部",
+    "tree_summary_fields": "欄位：{{value}}",
+    "tree_summary_items": "項：{{value}}",
+    "tree_summary_lines": "行：{{value}}",
+    "tree_preview_expand": "展開全部（{{value}} 行）",
+    "tree_preview_collapse": "收合",
+    "tree_array_note": "陣列整體取代：在這裡編輯會把整個陣列寫入覆寫。",
+    "tree_empty_no_fields": "目前沒有可編輯的欄位。條目被 null 覆寫刪除時，可用「填入預設範本」重建。",
+    "tree_empty_filter": "沒有符合的欄位",
+    "patch_placeholder": "{ }",
+    "patch_error_empty": "補丁不能為空，填入 {} 表示不改動任何欄位。",
+    "patch_error_not_object": "補丁必須是 JSON 物件，或 null（表示將此條目從生效目錄中刪除）。",
+    "patch_error_invalid_json": "JSON 解析失敗：{{message}}"
   }
 }

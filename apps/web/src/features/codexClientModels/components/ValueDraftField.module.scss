@@ -1,0 +1,27 @@
+.root {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.mono {
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
+    monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.fixedSize {
+  resize: none;
+}
+
+.invalid {
+  box-shadow: 0 0 0 1px var(--data-badge-danger-border) inset;
+}
+
+.error {
+  font-size: 11px;
+  color: var(--data-badge-danger-text);
+}

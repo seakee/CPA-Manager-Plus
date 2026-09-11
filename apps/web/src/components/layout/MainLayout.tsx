@@ -20,6 +20,7 @@ import {
   IconSidebarConfig,
   IconSidebarDashboard,
   IconSidebarLogs,
+  IconSidebarModels,
   IconSidebarMonitor,
   IconSidebarOauth,
   IconSidebarPlugins,
@@ -66,6 +67,7 @@ const sidebarIcons: Record<string, ReactNode> = {
   oauth: <IconSidebarOauth size={SIDEBAR_ICON_SIZE} />,
   usageAnalytics: <IconSidebarUsage size={SIDEBAR_ICON_SIZE} />,
   monitoring: <IconSidebarMonitor size={SIDEBAR_ICON_SIZE} />,
+  codexClientModels: <IconSidebarModels size={SIDEBAR_ICON_SIZE} />,
   plugins: <IconSidebarPlugins size={SIDEBAR_ICON_SIZE} />,
   config: <IconSidebarConfig size={SIDEBAR_ICON_SIZE} />,
   logs: <IconSidebarLogs size={SIDEBAR_ICON_SIZE} />,
@@ -240,6 +242,9 @@ function MainLayoutContent({ routeBase = '', demoMode = false }: MainLayoutProps
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
   const apiBase = useAuthStore((state) => state.apiBase);
   const supportsPlugin = useAuthStore((state) => state.supportsPlugin);
+  const supportsCodexClientModelOverride = useAuthStore(
+    (state) => state.supportsCodexClientModelOverride
+  );
 
   const config = useConfigStore((state) => state.config);
   const fetchConfig = useConfigStore((state) => state.fetchConfig);
@@ -577,6 +582,16 @@ function MainLayoutContent({ routeBase = '', demoMode = false }: MainLayoutProps
         shortLabel: navShortLabel('nav.ai_providers', t('nav.ai_providers')),
         icon: sidebarIcons.aiProviders,
       },
+      ...(supportsCodexClientModelOverride
+        ? [
+            {
+              path: '/codex-client-models',
+              label: t('nav.codex_client_models'),
+              shortLabel: navShortLabel('nav.codex_client_models', t('nav.codex_client_models')),
+              icon: sidebarIcons.codexClientModels,
+            },
+          ]
+        : []),
       ...pluginControlNavItems,
     ],
     [

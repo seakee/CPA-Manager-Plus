@@ -252,7 +252,9 @@
     "logs": "Logs Viewer",
     "logs_short": "Logs",
     "system_info": "System Info",
-    "system_info_short": "System"
+    "system_info_short": "System",
+    "codex_client_models": "Model Catalog",
+    "codex_client_models_short": "Models"
   },
   "account_actions": {
     "eyebrow": "Account issues",
@@ -4687,5 +4689,288 @@
       "ultra": "Ultra",
       "ultra_lite": "Ultra Lite"
     }
+  },
+  "codex_client_models": {
+    "source_label": "Catalog source",
+    "source_embed": "Embedded catalog",
+    "revision_label": "Revision {{revision}}",
+    "override_path_label": "Override file",
+    "override_path_missing": "not configured",
+    "override_error": "The override file on disk was rejected: {{message}}",
+    "override_errors_title": "These overrides could not be applied:",
+    "override_errors_item": "{{slug}} field {{path}}: {{message}}",
+    "override_errors_whole_entry": "whole entry",
+    "status_load_failed": "Failed to load the model catalog",
+    "refresh": "Refresh",
+    "add": "Add entry",
+    "clear_all": "Clear overrides",
+    "search_placeholder": "Search slug or display name",
+    "filter_all": "All",
+    "filter_base": "Base",
+    "filter_override": "Overridden",
+    "filter_custom": "Custom",
+    "filter_removed": "Removed",
+    "column_model": "Model",
+    "column_origin": "Origin",
+    "column_context_window": "Context window",
+    "column_reasoning": "Default reasoning",
+    "column_visibility": "Visibility",
+    "origin_base": "Base",
+    "origin_override": "Overridden",
+    "origin_custom": "Custom",
+    "origin_removed": "Removed",
+    "edit_override": "Edit override",
+    "delete_override": "Remove override",
+    "empty": "No matching models",
+    "editor_title_create": "New model entry",
+    "editor_title_edit": "Override {{slug}}",
+    "editor_subtitle": "Edit the common fields directly; changes are written to the local override.",
+    "save_override": "Save override",
+    "save_success": "Saved the override for {{slug}}",
+    "save_failed": "Failed to save the override",
+    "delete_success": "Removed the override for {{slug}}",
+    "delete_confirm_title": "Remove override",
+    "delete_confirm_message": "Removing it restores the catalog default for {{slug}}, or drops it entirely. Continue?",
+    "clear_success": "Cleared the local overrides",
+    "clear_confirm_title": "Clear overrides",
+    "clear_confirm_message": "This deletes the local override file and every entry in it. Continue?",
+    "slug_label": "Model slug",
+    "slug_hint": "The identifier clients use to request this model, e.g. deepseek-chat.",
+    "slug_taken": "This slug already exists in the catalog; saving will turn it into an override.",
+    "editor_removed_notice": "This entry is removed by a null override. Editing any field rebuilds it.",
+    "inherit_root_label": "Inherit from",
+    "inherit_root_none": "Do not inherit",
+    "inherit_root_hint": "Fields without their own override come from this model; each field can still pick its own source.",
+    "inherit_usage": "Used by {{value}} override(s)",
+    "inherit_issue_title": "Inheritance problems:",
+    "inherit_issue_invalid_shape": "Inheritance must name a model, or map field paths to model names.",
+    "inherit_issue_invalid_path": "Inheritance paths may only use object fields, not array indices or empty segments.",
+    "inherit_issue_non_inheritable_field": "A model identity field cannot be inherited.",
+    "inherit_issue_unknown_source": "The inheritance source is not in the catalog.",
+    "inherit_issue_self_reference": "A model cannot inherit from itself.",
+    "inherit_issue_source_missing_path": "The source model does not define this field.",
+    "field_state_official": "Catalog",
+    "field_state_override": "Overridden",
+    "field_state_removed": "Removed",
+    "field_state_inherited": "From {{slug}}",
+    "field_state_mixed_source": "Mixed sources",
+    "field_source_menu_label": "Field source",
+    "field_source_local": "Use local value",
+    "field_source_clear": "Use default",
+    "field_source_inherit_from": "Inherit from {{slug}}",
+    "field_source_remove": "Remove field",
+    "field_source_inherited_hint": "This field takes its value from {{slug}}.",
+    "field_source_mixed_hint": "The merged box covers two fields with different sources. Pick one source to make them match again.",
+    "field_source_issue": "Invalid inheritance",
+    "field_error_array": "This must be a JSON array.",
+    "field_error_number": "This must be a number.",
+    "field_error_empty": "This cannot be empty.",
+    "quick_select_placeholder": "Select a value",
+    "quick_field_preview_empty": "Empty",
+    "quick_field_preview_open": "Expand to edit",
+    "quick_field_preview_expand": "Expand to edit ({{value}} more lines)",
+    "quick_group_fields": "{{value}} sub-fields",
+    "quick_links": {
+      "instructions": {
+        "label": "Override base instructions and the message template together",
+        "hint": "Both fields usually hold the same text. While this is on only one box is shown, and saving writes both of them."
+      }
+    },
+    "quick": {
+      "sections": {
+        "basic": {
+          "title": "Basic",
+          "description": "How the model is identified in the list and in clients"
+        },
+        "context": {
+          "title": "Context and reasoning",
+          "description": "Context window and default reasoning behaviour"
+        },
+        "capability": {
+          "title": "Capabilities",
+          "description": "Client capabilities this model advertises"
+        },
+        "tools": {
+          "title": "Tools and modalities",
+          "description": "Input modalities and tool related settings"
+        },
+        "prompt": {
+          "title": "Prompts",
+          "description": "Base instructions and message templates sent to the model"
+        }
+      },
+      "fields": {
+        "display_name": {
+          "label": "Display name",
+          "hint": "Model name shown in the console and in clients."
+        },
+        "description": {
+          "label": "Description",
+          "hint": "Text shown in the model picker."
+        },
+        "visibility": {
+          "label": "Visibility",
+          "hint": "list keeps the model in the model list, hide keeps it out."
+        },
+        "priority": {
+          "label": "Priority",
+          "hint": "Smaller numbers sort first."
+        },
+        "context_window": {
+          "label": "Context window",
+          "hint": "Context length sent to clients by default."
+        },
+        "max_context_window": {
+          "label": "Max context window",
+          "hint": "Largest context length this model accepts."
+        },
+        "default_reasoning_level": {
+          "label": "Default reasoning level",
+          "hint": "Reasoning effort used when the request does not set one."
+        },
+        "default_reasoning_summary": {
+          "label": "Default reasoning summary",
+          "hint": "How much reasoning detail is summarized."
+        },
+        "default_verbosity": {
+          "label": "Default verbosity",
+          "hint": "Answer length used when the request does not set one."
+        },
+        "support_verbosity": {
+          "label": "Verbosity control",
+          "hint": "Allow clients to send the verbosity parameter."
+        },
+        "supported_in_api": {
+          "label": "Available in API",
+          "hint": "Allow this model to be called through the API."
+        },
+        "supports_parallel_tool_calls": {
+          "label": "Parallel tool calls",
+          "hint": "Allow several tool calls at the same time."
+        },
+        "supports_reasoning_summaries": {
+          "label": "Reasoning summaries",
+          "hint": "Turn on when reasoning summaries have to be shown."
+        },
+        "supports_search_tool": {
+          "label": "Search tool",
+          "hint": "Allow this model to use the built-in search."
+        },
+        "prefer_websockets": {
+          "label": "Prefer WebSockets",
+          "hint": "Use the WebSocket transport when it is available."
+        },
+        "use_responses_lite": {
+          "label": "Use Responses Lite",
+          "hint": "Route through the trimmed Responses flow."
+        },
+        "input_modalities": {
+          "label": "Input modalities",
+          "hint": "One per line, for example text or image."
+        },
+        "apply_patch_tool_type": {
+          "label": "Apply patch tool",
+          "hint": "Shape of the apply_patch tool this model uses."
+        },
+        "shell_type": {
+          "label": "Shell type",
+          "hint": "Shell implementation used to run commands."
+        },
+        "web_search_tool_type": {
+          "label": "Search tool type",
+          "hint": "Whether search can return images."
+        },
+        "multi_agent_version": {
+          "label": "Multi-agent version",
+          "hint": "v1 or v2: which multi-agent collaboration implementation to use."
+        },
+        "multi_agent_reasoning_effort": {
+          "label": "Multi-agent reasoning effort",
+          "hint": "Reasoning effort for multi-agent work, for example low, high or xhigh."
+        },
+        "base_instructions": {
+          "label": "Base instructions",
+          "hint": "System prompt of this model, sent verbatim."
+        },
+        "model_messages": {
+          "label": "Model messages",
+          "hint": "Instruction template, personality variables and the policy prompts; nested keys follow the catalog.",
+          "approvals": {
+            "label": "Approval policies"
+          },
+          "auto_review": {
+            "label": "Auto review"
+          },
+          "collaboration_modes": {
+            "label": "Collaboration modes"
+          },
+          "confirmation_policies": {
+            "label": "Confirmation policies"
+          },
+          "guardian_v2": {
+            "label": "Guardian policy"
+          },
+          "instructions_template": {
+            "label": "Instructions template",
+            "hint": "Message template assembled for the model; supports variables."
+          },
+          "instructions_variables": {
+            "label": "Personality variables",
+            "personality_default": {
+              "label": "Default personality",
+              "hint": "Prompt fragment used when no personality is set."
+            },
+            "personality_friendly": {
+              "label": "Friendly personality",
+              "hint": "Prompt fragment used in friendly mode."
+            },
+            "personality_pragmatic": {
+              "label": "Pragmatic personality",
+              "hint": "Prompt fragment used in pragmatic mode."
+            }
+          },
+          "multi_agent": {
+            "label": "Multi-agent"
+          },
+          "permissions": {
+            "label": "Permission modes"
+          },
+          "persistent_instructions": {
+            "label": "Persistent mode prompt"
+          },
+          "token_budget": {
+            "label": "Token budget"
+          },
+          "tools": {
+            "label": "Tool prompts"
+          }
+        }
+      }
+    },
+    "editor_advanced_fields": "Advanced: remaining fields",
+    "editor_advanced_count": "{{value}} fields",
+    "editor_advanced_hint": "Objects merge recursively, scalars and arrays replace the base value, null removes a field.",
+    "editor_json_title": "JSON patch",
+    "editor_json_hint": "Replaces the whole patch: edit, then Apply to write it back, or Reset to discard.",
+    "editor_json_apply": "Apply",
+    "editor_json_reset": "Reset",
+    "editor_json_dirty": "not applied",
+    "editor_json_dirty_hint": "JSON changes are not applied yet. Apply or reset them before saving.",
+    "tree_search_placeholder": "Filter by field name",
+    "tree_only_overridden": "Only overridden",
+    "tree_expand_all": "Expand all",
+    "tree_collapse_all": "Collapse all",
+    "tree_summary_fields": "fields: {{value}}",
+    "tree_summary_items": "items: {{value}}",
+    "tree_summary_lines": "lines: {{value}}",
+    "tree_preview_expand": "Show all ({{value}})",
+    "tree_preview_collapse": "Collapse",
+    "tree_array_note": "Arrays replace the base value wholesale: editing here writes the whole array.",
+    "tree_empty_no_fields": "No fields to edit. A null override removes the entry; use \"Fill default template\" to rebuild it.",
+    "tree_empty_filter": "No matching fields",
+    "patch_placeholder": "{ }",
+    "patch_error_empty": "The patch cannot be empty; use {} to keep every field unchanged.",
+    "patch_error_not_object": "The patch must be a JSON object, or null to drop the entry from the effective catalog.",
+    "patch_error_invalid_json": "Invalid JSON: {{message}}"
   }
 }

@@ -32,6 +32,7 @@ const zhSidebar: DefaultTheme.Sidebar = [
     items: [
       { text: '仪表盘', link: '/manual/dashboard' },
       { text: 'AI 提供商', link: '/manual/ai-providers' },
+      { text: '模型目录', link: '/manual/codex-client-models' },
       { text: '凭证管理', link: '/manual/accounts' },
       { text: 'OAuth 登录', link: '/manual/oauth' },
       { text: '请求监控', link: '/manual/monitoring' },
@@ -98,6 +99,7 @@ const enSidebar: DefaultTheme.Sidebar = [
     items: [
       { text: 'Dashboard', link: '/en/manual/dashboard' },
       { text: 'AI Providers', link: '/en/manual/ai-providers' },
+      { text: 'Model Catalog', link: '/en/manual/codex-client-models' },
       { text: 'Accounts', link: '/en/manual/accounts' },
       { text: 'OAuth Login', link: '/en/manual/oauth' },
       { text: 'Monitoring', link: '/en/manual/monitoring' },

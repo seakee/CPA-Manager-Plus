@@ -8,6 +8,8 @@ import type { ApiClientConfig, ApiError } from '@/types';
 import {
   BUILD_DATE_HEADER_KEYS,
   COMMIT_HEADER_KEYS,
+  CPA_SUPPORT_CODEX_CLIENT_MODELS_HEADER_KEYS,
+  CPA_SUPPORT_CODEX_CLIENT_MODEL_INHERIT_HEADER_KEYS,
   CPA_SUPPORT_PLUGIN_HEADER_KEYS,
   REQUEST_TIMEOUT_MS,
   VERSION_HEADER_KEYS,
@@ -169,6 +171,14 @@ class ApiClient {
         const commit = this.readHeader(headers, COMMIT_HEADER_KEYS);
         const buildDate = this.readHeader(headers, BUILD_DATE_HEADER_KEYS);
         const supportsPlugin = this.readBooleanHeader(headers, CPA_SUPPORT_PLUGIN_HEADER_KEYS);
+        const supportsCodexClientModels = this.readBooleanHeader(
+          headers,
+          CPA_SUPPORT_CODEX_CLIENT_MODELS_HEADER_KEYS
+        );
+        const supportsCodexClientModelInherit = this.readBooleanHeader(
+          headers,
+          CPA_SUPPORT_CODEX_CLIENT_MODEL_INHERIT_HEADER_KEYS
+        );
         const targetsCurrentConfig = this.requestTargetsCurrentConfig(response.config);
 
         // 触发版本更新事件（后续通过 store 处理）
@@ -187,6 +197,20 @@ class ApiClient {
           window.dispatchEvent(
             new CustomEvent('server-plugin-support-update', {
               detail: { supportsPlugin },
+            })
+          );
+        }
+        if (targetsCurrentConfig && supportsCodexClientModels !== null) {
+          window.dispatchEvent(
+            new CustomEvent('server-codex-client-models-support-update', {
+              detail: { supported: supportsCodexClientModels },
+            })
+          );
+        }
+        if (targetsCurrentConfig && supportsCodexClientModelInherit !== null) {
+          window.dispatchEvent(
+            new CustomEvent('server-codex-client-model-inherit-support-update', {
+              detail: { supported: supportsCodexClientModelInherit },
             })
           );
         }
