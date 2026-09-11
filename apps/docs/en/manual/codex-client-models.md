@@ -95,7 +95,7 @@ The top of the page lists overrides that could not be applied, with the slug, th
 
 - When a single entry fails, the remaining entries still apply, and the failing entry falls back to its upstream catalog content or drops out of the catalog.
 - When the override file cannot be parsed at all, the page explains why and keeps using the upstream catalog.
-- After editing the override file, reload the configuration or refresh the page to read it again.
+- Saving from the page takes effect immediately; the service watches the override file, so editing it directly is picked up automatically.
 
 ## Configuration Boundaries
 
