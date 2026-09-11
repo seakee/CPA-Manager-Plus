@@ -13,7 +13,7 @@ Open the unified [Accounts Demo](https://seakee.github.io/CPA-Manager-Plus/#/dem
 
 ## What To Check First
 
-- **Credential and provider**: confirm whether the account belongs to Codex, Claude, Vertex, Antigravity, Kimi, xAI, or another source.
+- **Credential and provider**: confirm whether the account belongs to Codex, Claude, Vertex, Antigravity, Kimi, xAI, Qoder, or another source.
 - **`auth_index`**: the stable account index used to connect usage, quota, inspection, and account actions.
 - **Enabled state**: automated recovery does not override manually disabled accounts.
 - **Note, priority, and project ID**: use them to separate account purpose and routing preference.
@@ -29,7 +29,7 @@ Keep `auth_index` stable in multi-account deployments. File-name-only identity i
 - Filter by search, provider, state, plan, quota window, or operational state.
 - Batch change priority or enabled state, and toggle WebSockets for selected Codex credentials.
 - Inspect overview, configuration, supported models, quota history, and diagnostic evidence.
-- Run local or Manager Server Codex/xAI inspection from the health workspace.
+- Run browser-local `codex`/`xai` inspection, Manager Server `codex`/`xai` inspection, or Manager Server read-only `claude` OAuth usage inspection from the health workspace.
 
 If you are unsure whether an account is still needed, disable it before deleting it. Disable preserves history joins; deletion makes later inspection, quota, and action tracking harder.
 
@@ -48,21 +48,23 @@ Official Sub2API multi-account exports are converted in the browser into indepen
 Account state may come from:
 
 - Provider quota queries explicitly started by the user.
-- Local or Manager Server Codex/xAI inspection results.
+- Browser-local or Manager Server `codex`/`xai` inspection results.
+- Manager Server read-only `claude` OAuth usage inspection results.
 - Safe response Headers from recent successful requests.
 - Failure summaries such as `usage_limit_reached`, HTTP `401`, `402`, or `429`.
 - Manager Server quota cooldowns and account-action candidates.
 
-Provider quota refresh remains explicit. Opening Accounts, reading history, or passively loading Header evidence does not poll upstream quota endpoints.
+Provider quota refresh remains explicit. Opening Accounts, reading history, or passively loading Header evidence does not poll upstream quota endpoints. Active quota refresh is unavailable for `qwen`, `qoder`, and `iflow` because CPAMP has no verified safe provider contract.
 
 CPAMP reconciles evidence by credential identity and observation time. Newer healthy evidence can supersede older reauth, quota-limit, cooldown, and action-candidate state; a newer `401` or explicit quota exhaustion remains authoritative. After reauthentication, inspection and quota evidence from the replaced credential cannot reattach to the new credential.
 
-| Provider        | Possible evidence                                                              | Boundary                                                                                            |
-| --------------- | ------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
-| Codex           | Five-hour/weekly windows, reset, Headers, workspace, and inspection state      | Fields depend on plan and API responses.                                                            |
-| Claude          | Base quota, weekly quota, and model-scoped limits                              | Scoped limits can be duplicated, missing, or inactive; CPAMP groups them by identity and freshness. |
-| xAI/Grok OAuth  | CLI billing weekly/monthly data, official API identity, and request exhaustion | Official API identity does not provide queryable cost or remaining percentages.                     |
-| Other providers | CPA credential metadata or recent response Headers                             | No common active quota API is assumed.                                                              |
+| Provider        | Possible evidence                                                              | Boundary                                                                                                                        |
+| --------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| Codex           | Five-hour/weekly windows, reset, Headers, workspace, and inspection state      | Fields depend on plan and API responses.                                                                                        |
+| Claude          | Base quota, weekly quota, model-scoped limits, and read-only OAuth usage inspection | Manager Server only; the probe sends no model or inference request and never mutates credentials or receives automatic actions. |
+| xAI/Grok OAuth  | CLI billing weekly/monthly data, official API identity, and request exhaustion | Official API identity does not provide queryable cost or remaining percentages.                                                 |
+| Qwen / Qoder / iFlow | Auth-file state and recent request evidence                              | Existing CPA-exposed OAuth/auth-file workflows remain unaffected; remote inspection and active quota refresh are unavailable because no verified safe provider contract exists. |
+| Other providers | CPA credential metadata or recent response Headers                             | No common active quota API is assumed.                                                                                          |
 
 ## Quota Cooldown And Account Actions
 
@@ -74,7 +76,7 @@ Quota cooldown is for clear quota exhaustion, not expired login, upstream bans, 
 
 1. Read status codes and sanitized failure summaries in [Monitoring](./monitoring.md).
 2. Check whether the credential is manually disabled, needs reauth, or is cooling down.
-3. Run [Account Inspection](./codex-inspection.md) and review provider, workspace, billing, and authentication evidence.
+3. For eligible `codex`, `xai`, or Manager Server `claude` OAuth accounts, run [Account Inspection](./codex-inspection.md) and review the available evidence.
 4. Check [Account Action Queue](./account-actions.md) for pending candidates.
 5. If quota is unavailable, confirm whether the provider supports active lookup or only passive Header observation.
 

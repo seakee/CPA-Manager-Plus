@@ -14,10 +14,11 @@ import {
   isReauthAction,
   isSuggestedAction,
   loadCodexInspectionLastRun,
+  loadLocalCodexInspectionConfigurableSettings,
   resolveCodexInspectionAutoActionPlan,
   loadCodexInspectionConfigurableSettings,
   saveCodexInspectionLastRun,
-  saveCodexInspectionConfigurableSettings,
+  saveLocalCodexInspectionConfigurableSettings,
   toReauthDeleteExecutionItem,
   type CodexInspectionAutoActionMode,
   type CodexInspectionConfigurableSettings,
@@ -124,7 +125,7 @@ export function CodexInspectionPage({
   const initialLastRun = initialLastRunRef.current;
 
   const [inspectionSettings, setInspectionSettings] = useState<CodexInspectionConfigurableSettings>(
-    () => loadCodexInspectionConfigurableSettings(config)
+    () => loadLocalCodexInspectionConfigurableSettings(config)
   );
   const [settingsDraft, setSettingsDraft] = useState<InspectionSettingsDraft>(() =>
     toSettingsDraft(loadCodexInspectionConfigurableSettings(config))
@@ -1172,7 +1173,7 @@ export function CodexInspectionPage({
       return;
     }
 
-    const nextSettings = saveCodexInspectionConfigurableSettings(validation.values);
+    const nextSettings = saveLocalCodexInspectionConfigurableSettings(validation.values);
 
     setInspectionSettings(nextSettings);
     setSettingsDraft(toSettingsDraft(nextSettings));
@@ -1200,7 +1201,7 @@ export function CodexInspectionPage({
 
   const handleResetSettings = useCallback(() => {
     clearCodexInspectionConfigurableSettings();
-    const nextSettings = saveCodexInspectionConfigurableSettings(DEFAULT_CODEX_INSPECTION_SETTINGS);
+    const nextSettings = saveLocalCodexInspectionConfigurableSettings(DEFAULT_CODEX_INSPECTION_SETTINGS);
     setInspectionSettings(nextSettings);
     setSettingsDraft(toSettingsDraft(nextSettings));
     showNotification(t('monitoring.codex_inspection_settings_reset'), 'success');

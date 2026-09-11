@@ -5,7 +5,11 @@ import {
   buildModelPriceRows,
   buildModelPriceSummary,
   buildSyncPriceModelsFromSummary,
+  extractModelPriceModalities,
   filterModelPriceRows,
+  formatModelPriceModalities,
+  hasNonTextModelPriceModality,
+  isCatalogSynchronizedModelPrice,
   formatContextThreshold,
   formatServiceTierRule,
   getModelPriceCandidateIdentity,
@@ -141,6 +145,62 @@ describe('modelPricesPageModel', () => {
       { source: 'openrouter', candidates: [candidates[1]] },
     ]);
   });
+
+  it('extracts explicit catalog modalities without creating token metrics', () => {
+    const modalities = extractModelPriceModalities(
+      JSON.stringify({
+        architecture: {
+          input_modalities: [' text ', 'image', 'IMAGE', 'audio'],
+          output_modalities: ['text'],
+          modality: 'text->text',
+        },
+      })
+    );
+
+    expect(modalities).toEqual({ input: ['text', 'image', 'audio'], output: ['text'] });
+    expect(hasNonTextModelPriceModality(modalities)).toBe(true);
+    expect(formatModelPriceModalities(modalities!)).toBe('In: text, image, audio · Out: text');
+    expect(
+      formatModelPriceModalities(modalities!, { input: '输入', output: '输出' })
+    ).toBe('输入: text, image, audio · 输出: text');
+    expect(modalities).not.toHaveProperty('imageInputTokens');
+  });
+
+  it('requires a synchronized catalog source before labeling metadata as catalog capability', () => {
+    expect(isCatalogSynchronizedModelPrice({ source: 'models.dev', syncedAtMs: 1 })).toBe(true);
+    expect(isCatalogSynchronizedModelPrice({ source: 'openrouter', syncedAtMs: 1 })).toBe(true);
+    expect(isCatalogSynchronizedModelPrice({ source: 'litellm', syncedAtMs: 1 })).toBe(false);
+    expect(isCatalogSynchronizedModelPrice({ source: 'manual', syncedAtMs: 1 })).toBe(false);
+    expect(isCatalogSynchronizedModelPrice({ source: 'models.dev' })).toBe(false);
+  });
+
+  it('treats text-only catalog metadata as non-multimodal', () => {
+    const modalities = extractModelPriceModalities(
+      JSON.stringify({ architecture: { input_modalities: ['text'], output_modalities: ['text'] } })
+    );
+    expect(modalities).toEqual({ input: ['text'], output: ['text'] });
+    expect(hasNonTextModelPriceModality(modalities)).toBe(false);
+  });
+
+  it('uses root catalog modality arrays only when directional arrays are explicit', () => {
+    expect(
+      extractModelPriceModalities(
+        JSON.stringify({
+          modalities: { input: ['text', 'image'], output: ['text'] },
+        })
+      )
+    ).toEqual({ input: ['text', 'image'], output: ['text'] });
+    expect(extractModelPriceModalities(JSON.stringify({ architecture: { modality: 'text->image' } }))).toBe(
+      null
+    );
+  });
+
+  it.each([undefined, '', '{bad json', '[]', JSON.stringify({ architecture: { input_modalities: [] } })])(
+    'returns no capability for unusable metadata: %s',
+    (rawJson) => {
+      expect(extractModelPriceModalities(rawJson)).toBe(null);
+    }
+  );
 
   it('marks manually entered prices with a manual source', () => {
     expect(

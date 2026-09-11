@@ -14,9 +14,10 @@ const emptyContext = {
 };
 
 describe('isGenericMonitoringProviderLabel', () => {
-  it('treats codex and xAI aliases as generic provider labels', () => {
+  it('treats codex, xAI, and Qoder aliases as generic provider labels', () => {
     expect(isGenericMonitoringProviderLabel('codex')).toBe(true);
     expect(isGenericMonitoringProviderLabel('xai')).toBe(true);
+    expect(isGenericMonitoringProviderLabel('qoder')).toBe(true);
     expect(isGenericMonitoringProviderLabel('XAI')).toBe(true);
     expect(isGenericMonitoringProviderLabel('x-ai')).toBe(true);
     expect(isGenericMonitoringProviderLabel('grok')).toBe(true);

@@ -2031,6 +2031,7 @@ export function ServerCodexInspectionPage({
           draft={draft}
           errors={fieldErrors}
           t={t}
+          allowClaudeTarget
           onFieldChange={(field, value) => updateDraft(field, value)}
           onXaiInferenceEnabledChange={(value) => updateDraft('xaiInferenceEnabled', value)}
           onAutoActionModeChange={(value) => updateDraft('autoActionMode', value)}

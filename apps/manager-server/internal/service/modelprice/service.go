@@ -2,11 +2,15 @@ package modelprice
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"sort"
 	"strconv"
@@ -31,6 +35,38 @@ const (
 	SyncSource = SyncSourceLiteLLM
 )
 
+var ErrInvalidSyncSource = errors.New("invalid model price sync source")
+
+var blockedOutboundIPPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"),
+	netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("224.0.0.0/4"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("::/128"),
+	netip.MustParsePrefix("::1/128"),
+	netip.MustParsePrefix("::ffff:0:0/96"),
+	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("100::/64"),
+	netip.MustParsePrefix("2001::/23"),
+	netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("fc00::/7"),
+	netip.MustParsePrefix("fe80::/10"),
+	netip.MustParsePrefix("ff00::/8"),
+}
+
 const maxSyncCandidates = 8
 const minCandidateScore = 0.55
 const minWeakCandidateScore = 0.34
@@ -43,6 +79,7 @@ type UpdateRequest struct {
 
 type SyncRequest struct {
 	Models []string `json:"models"`
+	Source string   `json:"source,omitempty"`
 }
 
 type SyncResult struct {
@@ -83,13 +120,16 @@ type SetupResolver interface {
 }
 
 type Service struct {
-	store                 *store.Store
-	syncSources           []priceSyncSource
-	syncSourceTimeout     time.Duration
-	syncProxyTimeout      time.Duration
-	setupResolver         SetupResolver
-	notifierMu            sync.RWMutex
-	pricesChangedNotifier func()
+	store                    *store.Store
+	syncSources              []priceSyncSource
+	syncSourceTimeout        time.Duration
+	syncProxyTimeout         time.Duration
+	setupResolver            SetupResolver
+	enforceTrustedSourceURLs bool
+	lookupHost               func(context.Context, string) ([]net.IP, error)
+	dialContext              func(context.Context, string, string) (net.Conn, error)
+	notifierMu               sync.RWMutex
+	pricesChangedNotifier    func()
 }
 
 type modelPriceMatchMetadata struct {
@@ -121,6 +161,18 @@ type priceSyncSource struct {
 	Fetch  fetchModelPricesFunc
 }
 
+type trustedSourcePolicy struct {
+	source       string
+	expectedHost string
+	addresses    []netip.Addr
+	dialContext  func(context.Context, string, string) (net.Conn, error)
+}
+
+type trustedSourceTransport struct {
+	base   *http.Transport
+	policy trustedSourcePolicy
+}
+
 func wrapModelPriceMapFetcher(fetch fetchModelPriceMapFunc) fetchModelPricesFunc {
 	return func(ctx context.Context, syncURL string, client *http.Client) (fetchedModelPriceSource, int, error) {
 		prices, skipped, err := fetch(ctx, syncURL, client)
@@ -130,6 +182,18 @@ func wrapModelPriceMapFetcher(fetch fetchModelPriceMapFunc) fetchModelPricesFunc
 
 func normalizeModelPriceIdentity(identity string) string {
 	return strings.ToLower(strings.TrimSpace(identity))
+}
+
+// NormalizeSyncSource accepts one explicitly selectable price source. An empty
+// value retains the default ordered fallback chain.
+func NormalizeSyncSource(value string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	switch normalized {
+	case "", SyncSourceModelsDev, SyncSourceLiteLLM, SyncSourceOpenRouter:
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("%w: %q", ErrInvalidSyncSource, value)
+	}
 }
 
 func (metadata *modelPriceMatchMetadata) merge(other modelPriceMatchMetadata) {
@@ -225,6 +289,21 @@ func NewMultiSourceWithModelsDev(
 	return newMultiSource(store, modelsDevSyncURL, liteLLMSyncURL, openRouterSyncURL, setupResolver...)
 }
 
+// NewProductionMultiSourceWithModelsDev applies the fixed public-host policy
+// used by Manager Server. Tests and isolated parser callers should use the
+// regular constructor with their injected fixtures instead.
+func NewProductionMultiSourceWithModelsDev(
+	store *store.Store,
+	modelsDevSyncURL *string,
+	liteLLMSyncURL *string,
+	openRouterSyncURL *string,
+	setupResolver ...SetupResolver,
+) *Service {
+	service := newMultiSource(store, modelsDevSyncURL, liteLLMSyncURL, openRouterSyncURL, setupResolver...)
+	service.enforceTrustedSourceURLs = true
+	return service
+}
+
 func newMultiSource(
 	store *store.Store,
 	modelsDevSyncURL *string,
@@ -263,6 +342,9 @@ func newMultiSource(
 		syncSourceTimeout: defaultSyncSourceTimeout,
 		syncProxyTimeout:  defaultSyncProxyResolutionTimeout,
 		setupResolver:     resolver,
+		lookupHost: func(ctx context.Context, host string) ([]net.IP, error) {
+			return net.DefaultResolver.LookupIP(ctx, "ip", host)
+		},
 	}
 }
 
@@ -301,11 +383,15 @@ func (s *Service) Replace(ctx context.Context, prices map[string]store.ModelPric
 }
 
 func (s *Service) Sync(ctx context.Context, req SyncRequest) (SyncResult, error) {
+	syncSources, err := s.sourcesForSyncRequest(req.Source)
+	if err != nil {
+		return SyncResult{}, err
+	}
 	client, proxyUsed, err := s.syncHTTPClient(ctx)
 	if err != nil {
 		return SyncResult{}, err
 	}
-	remotePrices, skipped, sources, sourceResults, err := s.fetchAllModelPrices(ctx, client, req.Models)
+	remotePrices, skipped, sources, sourceResults, err := s.fetchModelPrices(ctx, client, req.Models, syncSources)
 	if err != nil {
 		return SyncResult{}, err
 	}
@@ -346,18 +432,44 @@ func (s *Service) Sync(ctx context.Context, req SyncRequest) (SyncResult, error)
 }
 
 func (s *Service) SyncFromLiteLLM(ctx context.Context, req SyncRequest) (SyncResult, error) {
+	req.Source = SyncSourceLiteLLM
 	return s.Sync(ctx, req)
 }
 
+func (s *Service) sourcesForSyncRequest(requestedSource string) ([]priceSyncSource, error) {
+	source, err := NormalizeSyncSource(requestedSource)
+	if err != nil {
+		return nil, err
+	}
+	if source == "" {
+		return s.syncSources, nil
+	}
+	for _, candidate := range s.syncSources {
+		if candidate.Source == source {
+			return []priceSyncSource{candidate}, nil
+		}
+	}
+	return nil, fmt.Errorf("model price sync failed: requested source %q is not configured", source)
+}
+
 func (s *Service) fetchAllModelPrices(ctx context.Context, client *http.Client, models []string) (modelPriceCollection, int, []string, []SyncSourceResult, error) {
+	return s.fetchModelPrices(ctx, client, models, s.syncSources)
+}
+
+func (s *Service) fetchModelPrices(
+	ctx context.Context,
+	client *http.Client,
+	models []string,
+	syncSources []priceSyncSource,
+) (modelPriceCollection, int, []string, []SyncSourceResult, error) {
 	remotePrices := modelPriceCollection{}
 	requestedModels := normalizedRequestedModels(models)
-	sources := make([]string, 0, len(s.syncSources))
-	sourceResults := make([]SyncSourceResult, 0, len(s.syncSources))
+	sources := make([]string, 0, len(syncSources))
+	sourceResults := make([]SyncSourceResult, 0, len(syncSources))
 	failures := []string{}
 	totalSkipped := 0
 
-	for _, source := range s.syncSources {
+	for _, source := range syncSources {
 		syncURL := source.currentURL()
 		result := SyncSourceResult{Source: source.Source}
 		if syncURL == "" {
@@ -366,12 +478,23 @@ func (s *Service) fetchAllModelPrices(ctx context.Context, client *http.Client, 
 			failures = append(failures, source.Source+": "+result.Error)
 			continue
 		}
+		sourceClient := client
+		if s.enforceTrustedSourceURLs {
+			var validationErr error
+			sourceClient, validationErr = s.trustedSourceClient(ctx, client, source.Source, syncURL)
+			if validationErr != nil {
+				result.Error = validationErr.Error()
+				sourceResults = append(sourceResults, result)
+				failures = append(failures, source.Source+": "+result.Error)
+				continue
+			}
+		}
 		sourceCtx := ctx
 		cancel := func() {}
 		if s.syncSourceTimeout > 0 {
 			sourceCtx, cancel = context.WithTimeout(ctx, s.syncSourceTimeout)
 		}
-		fetched, skipped, err := source.Fetch(sourceCtx, syncURL, client)
+		fetched, skipped, err := source.Fetch(sourceCtx, syncURL, sourceClient)
 		cancel()
 		result.Skipped = skipped
 		if err != nil {
@@ -512,6 +635,221 @@ func (s *Service) syncHTTPClient(ctx context.Context) (*http.Client, bool, error
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = http.ProxyURL(parsed)
 	return &http.Client{Timeout: 30 * time.Second, Transport: transport}, true, nil
+}
+
+func (s *Service) trustedSourceClient(
+	ctx context.Context,
+	base *http.Client,
+	source string,
+	rawURL string,
+) (*http.Client, error) {
+	policy, err := s.newTrustedSourcePolicy(ctx, source, rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("model price sync failed: invalid %s source URL: %w", source, err)
+	}
+	if base == nil {
+		base = defaultSyncHTTPClient()
+	}
+	client := *base
+	baseTransport := client.Transport
+	if baseTransport == nil {
+		baseTransport = http.DefaultTransport
+	}
+	transport, ok := baseTransport.(*http.Transport)
+	if !ok || transport.DialTLSContext != nil || transport.DialTLS != nil {
+		return nil, errors.New("model price sync failed: trusted source transport must use the standard HTTP dialer")
+	}
+	client.Transport = &trustedSourceTransport{base: transport, policy: policy}
+	previousCheckRedirect := client.CheckRedirect
+	client.CheckRedirect = func(request *http.Request, via []*http.Request) error {
+		if err := policy.validateURL(request.URL); err != nil {
+			return fmt.Errorf("model price sync failed: unsafe %s redirect: %w", source, err)
+		}
+		if previousCheckRedirect != nil {
+			return previousCheckRedirect(request, via)
+		}
+		return nil
+	}
+	return &client, nil
+}
+
+func (s *Service) newTrustedSourcePolicy(
+	ctx context.Context,
+	source string,
+	rawURL string,
+) (trustedSourcePolicy, error) {
+	expectedHost, ok := expectedTrustedSyncSourceHost(source)
+	if !ok {
+		return trustedSourcePolicy{}, fmt.Errorf("unknown price source %q", source)
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return trustedSourcePolicy{}, err
+	}
+	if err := validateTrustedSourceURL(parsed, source, expectedHost); err != nil {
+		return trustedSourcePolicy{}, err
+	}
+	addresses, err := s.resolvePublicHTTPHost(ctx, expectedHost)
+	if err != nil {
+		return trustedSourcePolicy{}, err
+	}
+	return trustedSourcePolicy{
+		source:       source,
+		expectedHost: expectedHost,
+		addresses:    addresses,
+		dialContext:  s.dialContext,
+	}, nil
+}
+
+func expectedTrustedSyncSourceHost(source string) (string, bool) {
+	switch source {
+	case SyncSourceModelsDev:
+		return "models.dev", true
+	case SyncSourceLiteLLM:
+		return "raw.githubusercontent.com", true
+	case SyncSourceOpenRouter:
+		return "openrouter.ai", true
+	default:
+		return "", false
+	}
+}
+
+func validateTrustedSourceURL(parsed *url.URL, source string, expectedHost string) error {
+	if parsed == nil {
+		return errors.New("URL is required")
+	}
+	scheme := strings.ToLower(strings.TrimSpace(parsed.Scheme))
+	if scheme != "http" && scheme != "https" {
+		return fmt.Errorf("URL scheme %q is not allowed", parsed.Scheme)
+	}
+	if parsed.User != nil {
+		return errors.New("URL credentials are not allowed")
+	}
+	host := normalizeURLHost(parsed.Hostname())
+	if host != expectedHost {
+		return fmt.Errorf("untrusted host %q for %s", host, source)
+	}
+	return nil
+}
+
+func (policy trustedSourcePolicy) validateURL(parsed *url.URL) error {
+	return validateTrustedSourceURL(parsed, policy.source, policy.expectedHost)
+}
+
+func (transport *trustedSourceTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request == nil || request.URL == nil {
+		return nil, errors.New("model price sync failed: request URL is required")
+	}
+	if err := transport.policy.validateURL(request.URL); err != nil {
+		return nil, fmt.Errorf("model price sync failed: unsafe %s request: %w", transport.policy.source, err)
+	}
+	if len(transport.policy.addresses) == 0 {
+		return nil, errors.New("model price sync failed: no validated source addresses")
+	}
+
+	outbound := request.Clone(request.Context())
+	outboundURL := *request.URL
+	outbound.URL = &outboundURL
+	if outbound.Host == "" {
+		outbound.Host = request.URL.Host
+	}
+	outbound.URL.Host = pinnedURLHost(transport.policy.addresses[0], request.URL.Port())
+
+	pinned := transport.base.Clone()
+	pinned.DialContext = transport.policy.dialContext
+	if pinned.DialContext == nil {
+		pinned.DialContext = (&net.Dialer{}).DialContext
+	}
+	if strings.EqualFold(outbound.URL.Scheme, "https") {
+		if pinned.TLSClientConfig == nil {
+			pinned.TLSClientConfig = &tls.Config{}
+		} else {
+			pinned.TLSClientConfig = pinned.TLSClientConfig.Clone()
+		}
+		pinned.TLSClientConfig.ServerName = transport.policy.expectedHost
+	}
+	response, err := pinned.RoundTrip(outbound)
+	if response != nil {
+		response.Request = request
+	}
+	return response, err
+}
+
+func pinnedURLHost(address netip.Addr, port string) string {
+	host := address.String()
+	if port != "" {
+		return net.JoinHostPort(host, port)
+	}
+	if address.Is6() {
+		return "[" + host + "]"
+	}
+	return host
+}
+
+func (s *Service) resolvePublicHTTPHost(ctx context.Context, host string) ([]netip.Addr, error) {
+	if literal, err := netip.ParseAddr(host); err == nil {
+		if isBlockedOutboundIP(literal) {
+			return nil, fmt.Errorf("URL address %q is not allowed", host)
+		}
+		return []netip.Addr{literal.Unmap()}, nil
+	}
+	if isBlockedOutboundHost(host) {
+		return nil, fmt.Errorf("URL host %q is not allowed", host)
+	}
+	lookupHost := s.lookupHost
+	if lookupHost == nil {
+		lookupHost = func(ctx context.Context, name string) ([]net.IP, error) {
+			return net.DefaultResolver.LookupIP(ctx, "ip", name)
+		}
+	}
+	addresses, err := lookupHost(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("could not resolve URL host %q: %w", host, err)
+	}
+	if len(addresses) == 0 {
+		return nil, fmt.Errorf("could not resolve URL host %q", host)
+	}
+	resolved := make([]netip.Addr, 0, len(addresses))
+	for _, address := range addresses {
+		parsedAddress, ok := netip.AddrFromSlice(address)
+		if !ok {
+			return nil, fmt.Errorf("URL host %q returned an invalid address", host)
+		}
+		parsedAddress = parsedAddress.Unmap()
+		if isBlockedOutboundIP(parsedAddress) {
+			return nil, fmt.Errorf("URL host %q resolved to a blocked address", host)
+		}
+		resolved = append(resolved, parsedAddress)
+	}
+	return resolved, nil
+}
+
+func normalizeURLHost(value string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(value)), ".")
+}
+
+func isBlockedOutboundHost(host string) bool {
+	return host == "localhost" ||
+		strings.HasSuffix(host, ".localhost") ||
+		strings.HasSuffix(host, ".local") ||
+		strings.HasSuffix(host, ".internal") ||
+		strings.HasSuffix(host, ".example") ||
+		strings.HasSuffix(host, ".invalid") ||
+		strings.HasSuffix(host, ".test")
+}
+
+func isBlockedOutboundIP(address netip.Addr) bool {
+	address = address.Unmap()
+	if !address.IsValid() || address.IsLoopback() || address.IsPrivate() || address.IsUnspecified() ||
+		address.IsLinkLocalUnicast() || address.IsMulticast() {
+		return true
+	}
+	for _, prefix := range blockedOutboundIPPrefixes {
+		if prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) resolveCPAProxyURL(ctx context.Context) string {

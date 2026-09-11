@@ -113,6 +113,26 @@
   text-overflow: ellipsis;
 }
 
+.syncSourceControl {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  color: var(--pricing-muted);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.syncSourceControl select {
+  min-height: 30px;
+  border: 1px solid var(--pricing-line);
+  border-radius: 10px;
+  background: var(--pricing-surface-elevated);
+  color: var(--pricing-ink);
+  font: inherit;
+}
+
 .toolbarButton :global(span),
 .actionGroup :global(.btn > span) {
   display: inline-flex;
@@ -344,6 +364,16 @@
 .modelContent span {
   color: var(--pricing-muted);
   font-size: 11px;
+}
+
+.modelContent .modalitySummary {
+  color: color-mix(in srgb, var(--pricing-accent-strong) 72%, var(--pricing-muted));
+  font-family: var(--font-mono);
+}
+
+.modalityTelemetryNotice {
+  color: var(--pricing-muted);
+  font-style: italic;
 }
 
 .sourceCell {

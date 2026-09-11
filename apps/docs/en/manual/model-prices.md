@@ -12,10 +12,11 @@ Open the [Model Prices Demo](https://seakee.github.io/CPA-Manager-Plus/#/demo/mo
 ## Price Sources
 
 - Public metadata synchronized from models.dev first, with LiteLLM and OpenRouter used as fallbacks when the preferred source is unavailable or lacks a model.
+- A single source (models.dev, LiteLLM, or OpenRouter) can also be selected on the Model Prices page, including the one-click **Sync LiteLLM** action. A single-source sync never silently falls back to another source, which is useful for reproducible pricing or investigating a difference.
 - Local prices added or overridden by the user.
 - Entries for aliases, internal names, or provider-specific variants.
 
-Synchronization only occurs when the user triggers it and may use the current Manager Server proxy configuration.
+Synchronization only occurs when the user triggers it and may use the current Manager Server proxy configuration. Source URLs are fixed public endpoints: Manager Server accepts only HTTP/HTTPS, validates each source host, and rejects localhost, private/reserved addresses, and untrusted redirects.
 
 Automatic matching runs strictly in models.dev, LiteLLM, then OpenRouter order. CPAMP uses the canonical model metadata in the models.dev catalog to prefer the first-party official entry. A source is saved automatically only when it has one clear, strong identity match; fuzzy similarities are never auto-confirmed. An ambiguous source falls through to the next source. If none of the three sources yields a unique match, the confirmation list keeps candidates from each source separately, even when they share the same original model ID.
 
@@ -60,6 +61,12 @@ Models such as GPT-5.6 may vary by context length, service tier, and cache type.
 - Non-models.dev entries, older data, and models without an explicit mode price retain the existing multiplier as a compatibility fallback.
 
 Model Prices displays synchronized context tiers and service-tier prices as read-only rules. The current manual editor manages base prices only; saving a manual price explicitly clears existing synchronized advanced rules, with a warning shown before saving.
+
+## Multimodal Capability And Token Boundary
+
+When a synchronized model catalog explicitly declares input or output modalities, Model Prices shows a **model capability** such as “In: text, image · Out: text.” This describes catalog support only; it does not mean that a particular request carried an image or other media.
+
+The current CPA/CLIProxyAPI usage queue does not emit image-, audio-, or video-token counts. CPAMP therefore never infers a measured value of `0` or an estimate from model capability, request content, or a missing field; total input tokens and cost retain their existing accounting rules. A separate multimodal token metric or rate will appear only after upstream publishes a stable, explicit modality-token contract.
 
 ## Matching Model Names
 

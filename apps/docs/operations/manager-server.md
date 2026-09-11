@@ -25,7 +25,7 @@ http://<host>:18317/management.html
 http://<cpa-host>:8317/management.html
 ```
 
-CPAMP 轻量面板不会连接或读取 Manager Server SQLite，也没有完整的历史请求监控、模型价格、API 密钥别名、导入导出和服务端巡检历史。
+CPAMP 轻量面板不会连接或读取 Manager Server SQLite，也没有完整的历史请求监控、模型价格、API 密钥别名、导入导出和服务端巡检历史。它的浏览器本地巡检仅支持 `codex` 和 `xai`。
 
 ## Manager Server 负责什么
 
@@ -36,7 +36,7 @@ CPAMP 轻量面板不会连接或读取 Manager Server SQLite，也没有完整�
 - setup 后代理 CPA Management API。
 - 消费 CPA 用量事件。
 - 将用量事件持久化到 SQLite。
-- 提供仪表盘、请求监控、用量分析、模型价格、API 密钥别名、用量导入导出和服务端 Codex 账号巡检 API。
+- 提供仪表盘、请求监控、用量分析、模型价格、API 密钥别名、用量导入导出，以及服务端 `codex`/`xai` 账号巡检和只读 `claude` OAuth 用量检查 API。
 
 ::: details 高级：架构和数据流
 
@@ -170,7 +170,7 @@ Manager Server 管理：
 - SQLite 用量数据。
 - 模型价格。
 - API 密钥别名。
-- 服务端巡检历史。
+- `codex`/`xai` 服务端巡检和只读 `claude` OAuth 用量检查的历史。
 
 仍由 CPA 管理：
 
@@ -329,7 +329,7 @@ Manager Server 在整个生命周期内都会持有 `<数据库绝对路径>.man
 | `DELETE /v0/management/account-action-candidates/{id}/auth-file` | 删除候选项关联的认证文件。                               |
 | `GET /v0/management/dashboard/*`                                 | 仪表盘数据。                                             |
 | `GET /v0/management/monitoring/*`                                | 请求监控数据。                                           |
-| `GET /v0/management/codex-inspection/*`                          | 服务端 Codex 巡检。                                      |
+| `GET /v0/management/codex-inspection/*`                          | `codex`/`xai` 服务端巡检和只读 `claude` OAuth 用量检查。                    |
 | `GET /models`, `GET /v1/models`                                  | setup 后代理 model-list 请求到 CPA。                     |
 | `/v0/management/*`                                               | CPAMP 未处理的路径代理到 CPA。                           |
 
@@ -340,6 +340,8 @@ Authorization: Bearer <CPAMP_ADMIN_KEY>
 ```
 
 :::
+
+Manager Server 的 `claude` OAuth 用量检查为只读：它不会发送模型或推理请求，也绝不会自动禁用、启用、删除、重新认证或以其他方式修改凭证。自动巡检动作仅适用于符合条件的 `codex` 和 `xai` 结果。
 
 ## 数据和安全
 
