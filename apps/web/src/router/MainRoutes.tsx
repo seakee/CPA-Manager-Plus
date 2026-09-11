@@ -23,6 +23,7 @@ import { UsageAnalyticsPage } from '@/pages/UsageAnalyticsPage';
 import { MonitoringCenterPage } from '@/pages/MonitoringCenterPage';
 import { AccountActionCandidatesPage } from '@/pages/AccountActionCandidatesPage';
 import { ModelPricesPage } from '@/pages/ModelPricesPage';
+import { CodexClientModelsPage } from '@/pages/CodexClientModelsPage';
 import { ConfigPage } from '@/pages/ConfigPage';
 import { LogsPage } from '@/pages/LogsPage';
 import { PluginResourcePage } from '@/pages/PluginResourcePage';
@@ -79,6 +80,17 @@ function FeatureGate({
     return <Navigate to="/config" replace />;
   }
 
+  return children;
+}
+
+function CodexClientModelsGate({ children }: { children: ReactElement }) {
+  const supported = useAuthStore((state) => state.supportsCodexClientModelOverride);
+  if (__DEMO_SITE__ && isDemoMode()) {
+    return children;
+  }
+  if (!supported) {
+    return <Navigate to="/config" replace />;
+  }
   return children;
 }
 
@@ -231,6 +243,14 @@ const mainRoutes: RouteObject[] = [
   { path: '/plugins/*', element: <Navigate to="/plugins" replace /> },
   { path: '/plugin-store/*', element: <Navigate to="/plugins?tab=store" replace /> },
   { path: '/plugin-pages/*', element: <Navigate to="/" replace /> },
+  {
+    path: '/codex-client-models',
+    element: (
+      <CodexClientModelsGate>
+        <CodexClientModelsPage />
+      </CodexClientModelsGate>
+    ),
+  },
   { path: '/config', element: <ConfigPage /> },
   {
     path: '/logs',

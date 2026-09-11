@@ -2,8 +2,11 @@ import type { AxiosRequestConfig, AxiosResponse } from 'axios';
 import { parse as parseYaml, parseDocument } from 'yaml';
 import {
   advanceDemoCredentialRefresh,
+  clearDemoCodexClientModelsOverride,
+  deleteDemoCodexClientModelOverrideEntry,
   getDemoApiCallResult,
   getDemoAuthFiles,
+  getDemoCodexClientModelsState,
   getDemoConfigYaml,
   getDemoErrorLogsResponse,
   getDemoLatestVersion,
@@ -12,6 +15,8 @@ import {
   getDemoPlugins,
   getDemoRawConfig,
   requestDemoCredentialRefresh,
+  setDemoCodexClientModelOverrideEntry,
+  setDemoCodexClientModelsOverride,
 } from '@/features/demo/demoFixtures';
 import type { AuthFileItem } from '@/types';
 import {
@@ -64,6 +69,8 @@ const createAxiosResponse = <T>(
       'x-cpa-commit': DEMO_SERVER_COMMIT,
       'x-cpa-build-date': getDemoServerBuildDate(),
       'x-cpa-support-plugin': 'true',
+      'x-cpa-support-codex-client-model-override': '1',
+      'x-cpa-support-codex-client-model-inherit': '1',
       ...headers,
     },
     config: config || {},
@@ -626,6 +633,22 @@ export async function handleDemoApiRequest<T = unknown>(
     return (method === 'delete' ? ok : getDemoLogsResponse()) as T;
   }
   if (pathname === '/request-error-logs') return getDemoErrorLogsResponse() as T;
+
+  if (pathname === '/codex-client-models') return getDemoCodexClientModelsState() as T;
+  if (pathname === '/codex-client-models/override') {
+    if (method === 'put') {
+      return setDemoCodexClientModelsOverride(
+        (data && typeof data === 'object' ? data : {}) as Record<string, unknown>
+      ) as T;
+    }
+    if (method === 'delete') return clearDemoCodexClientModelsOverride() as T;
+    return getDemoCodexClientModelsState() as T;
+  }
+  if (pathname.startsWith('/codex-client-models/override/')) {
+    const slug = decodeURIComponent(pathname.split('/').pop() || '');
+    if (method === 'delete') return deleteDemoCodexClientModelOverrideEntry(slug) as T;
+    return setDemoCodexClientModelOverrideEntry(slug, data) as T;
+  }
 
   if (pathname === '/plugins') return getDemoPlugins() as T;
   if (/^\/plugins\/[^/]+\/enabled$/.test(pathname)) return ok as T;

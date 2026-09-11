@@ -256,7 +256,9 @@
     "logs": "Просмотр логов",
     "logs_short": "Логи",
     "system_info": "Информация системы",
-    "system_info_short": "Система"
+    "system_info_short": "Система",
+    "codex_client_models": "Каталог моделей",
+    "codex_client_models_short": "Модели"
   },
   "account_actions": {
     "eyebrow": "Проблемы аккаунтов",
@@ -4689,5 +4691,288 @@
       "ultra": "Ultra",
       "ultra_lite": "Ultra Lite"
     }
+  },
+  "codex_client_models": {
+    "source_label": "Источник каталога",
+    "source_embed": "Встроенный каталог",
+    "revision_label": "Ревизия {{revision}}",
+    "override_path_label": "Файл переопределений",
+    "override_path_missing": "не настроен",
+    "override_error": "Файл переопределений на диске отклонён: {{message}}",
+    "override_errors_title": "Эти переопределения не применились:",
+    "override_errors_item": "{{slug}}, поле {{path}}: {{message}}",
+    "override_errors_whole_entry": "весь элемент",
+    "status_load_failed": "Не удалось загрузить каталог моделей",
+    "refresh": "Обновить",
+    "add": "Добавить запись",
+    "clear_all": "Очистить переопределения",
+    "search_placeholder": "Поиск по slug или названию",
+    "filter_all": "Все",
+    "filter_base": "Базовые",
+    "filter_override": "Изменённые",
+    "filter_custom": "Свои",
+    "filter_removed": "Удалённые",
+    "column_model": "Модель",
+    "column_origin": "Источник",
+    "column_context_window": "Контекстное окно",
+    "column_reasoning": "Уровень рассуждений",
+    "column_visibility": "Видимость",
+    "origin_base": "Базовая",
+    "origin_override": "Изменённая",
+    "origin_custom": "Своя",
+    "origin_removed": "Удалённая",
+    "edit_override": "Изменить переопределение",
+    "delete_override": "Удалить переопределение",
+    "empty": "Подходящих моделей нет",
+    "editor_title_create": "Новая запись модели",
+    "editor_title_edit": "Переопределение {{slug}}",
+    "editor_subtitle": "Общие поля редактируются напрямую, изменения попадают в локальное переопределение.",
+    "save_override": "Сохранить",
+    "save_success": "Переопределение {{slug}} сохранено",
+    "save_failed": "Не удалось сохранить переопределение",
+    "delete_success": "Переопределение {{slug}} удалено",
+    "delete_confirm_title": "Удалить переопределение",
+    "delete_confirm_message": "После удаления {{slug}} вернётся к значению каталога или исчезнет из него. Продолжить?",
+    "clear_success": "Локальные переопределения очищены",
+    "clear_confirm_title": "Очистить переопределения",
+    "clear_confirm_message": "Будет удалён локальный файл переопределений и все записи в нём. Продолжить?",
+    "slug_label": "Slug модели",
+    "slug_hint": "Идентификатор, который клиент использует в запросах, например deepseek-chat.",
+    "slug_taken": "Такой slug уже есть в каталоге: после сохранения он станет переопределением.",
+    "editor_removed_notice": "Запись удалена переопределением null. Изменение любого поля восстановит её.",
+    "inherit_root_label": "Наследовать из",
+    "inherit_root_none": "Не наследовать",
+    "inherit_root_hint": "Поля без собственного переопределения берутся из этой модели; для каждого поля источник можно задать отдельно.",
+    "inherit_usage": "Используется в {{value}} переопределениях",
+    "inherit_issue_title": "Проблемы с наследованием:",
+    "inherit_issue_invalid_shape": "Наследование должно указывать модель или отображать пути полей на модели.",
+    "inherit_issue_invalid_path": "Путь наследования может содержать только поля объектов, без индексов массива и пустых сегментов.",
+    "inherit_issue_non_inheritable_field": "Поля идентичности модели нельзя наследовать.",
+    "inherit_issue_unknown_source": "Источника наследования нет в каталоге.",
+    "inherit_issue_self_reference": "Модель не может наследовать сама себе.",
+    "inherit_issue_source_missing_path": "В модели-источнике нет этого поля.",
+    "field_state_official": "Из каталога",
+    "field_state_override": "Переопределено",
+    "field_state_removed": "Удалено",
+    "field_state_inherited": "Из {{slug}}",
+    "field_state_mixed_source": "Разные источники",
+    "field_source_menu_label": "Источник поля",
+    "field_source_local": "Локальное значение",
+    "field_source_clear": "Сбросить",
+    "field_source_inherit_from": "Наследовать из {{slug}}",
+    "field_source_remove": "Удалить поле",
+    "field_source_inherited_hint": "Значение поля берётся из {{slug}}.",
+    "field_source_mixed_hint": "Объединённое поле охватывает два поля с разными источниками. Выберите один источник, чтобы снова их согласовать.",
+    "field_source_issue": "Некорректное наследование",
+    "field_error_array": "Здесь нужен массив JSON.",
+    "field_error_number": "Здесь нужно число.",
+    "field_error_empty": "Поле не может быть пустым.",
+    "quick_select_placeholder": "Выберите значение",
+    "quick_field_preview_empty": "Пусто",
+    "quick_field_preview_open": "Развернуть для правки",
+    "quick_field_preview_expand": "Развернуть для правки (ещё строк: {{value}})",
+    "quick_group_fields": "Вложенных полей: {{value}}",
+    "quick_links": {
+      "instructions": {
+        "label": "Записывать базовые инструкции и шаблон сообщений вместе",
+        "hint": "Обычно эти поля совпадают. Пока включено, показывается одно поле, а сохраняются оба."
+      }
+    },
+    "quick": {
+      "sections": {
+        "basic": {
+          "title": "Основное",
+          "description": "Как модель отображается в списке и в клиентах"
+        },
+        "context": {
+          "title": "Контекст и рассуждения",
+          "description": "Окно контекста и поведение рассуждений по умолчанию"
+        },
+        "capability": {
+          "title": "Возможности",
+          "description": "Возможности клиента, которые заявляет модель"
+        },
+        "tools": {
+          "title": "Инструменты и модальности",
+          "description": "Входные модальности и настройки инструментов"
+        },
+        "prompt": {
+          "title": "Промпты",
+          "description": "Базовые инструкции и шаблоны сообщений, отправляемые модели"
+        }
+      },
+      "fields": {
+        "display_name": {
+          "label": "Отображаемое имя",
+          "hint": "Имя модели в панели и в клиентах."
+        },
+        "description": {
+          "label": "Описание",
+          "hint": "Текст в списке выбора модели."
+        },
+        "visibility": {
+          "label": "Видимость",
+          "hint": "list показывает модель в списке, hide скрывает её."
+        },
+        "priority": {
+          "label": "Приоритет",
+          "hint": "Чем меньше число, тем выше в списке."
+        },
+        "context_window": {
+          "label": "Окно контекста",
+          "hint": "Длина контекста, передаваемая клиентам по умолчанию."
+        },
+        "max_context_window": {
+          "label": "Максимальное окно контекста",
+          "hint": "Наибольшая длина контекста для этой модели."
+        },
+        "default_reasoning_level": {
+          "label": "Уровень рассуждений по умолчанию",
+          "hint": "Усилие рассуждений, если запрос его не задаёт."
+        },
+        "default_reasoning_summary": {
+          "label": "Сводка рассуждений по умолчанию",
+          "hint": "Насколько подробно пересказываются рассуждения."
+        },
+        "default_verbosity": {
+          "label": "Подробность по умолчанию",
+          "hint": "Длина ответа, если запрос её не задаёт."
+        },
+        "support_verbosity": {
+          "label": "Управление подробностью",
+          "hint": "Разрешить клиентам передавать параметр подробности."
+        },
+        "supported_in_api": {
+          "label": "Доступна в API",
+          "hint": "Разрешить вызовы модели через API."
+        },
+        "supports_parallel_tool_calls": {
+          "label": "Параллельные вызовы инструментов",
+          "hint": "Разрешить несколько вызовов инструментов одновременно."
+        },
+        "supports_reasoning_summaries": {
+          "label": "Сводки рассуждений",
+          "hint": "Включите, если нужно показывать сводки рассуждений."
+        },
+        "supports_search_tool": {
+          "label": "Инструмент поиска",
+          "hint": "Разрешить модели встроенный поиск."
+        },
+        "prefer_websockets": {
+          "label": "Предпочитать WebSocket",
+          "hint": "Использовать транспорт WebSocket, когда он доступен."
+        },
+        "use_responses_lite": {
+          "label": "Использовать Responses Lite",
+          "hint": "Работать через сокращённый поток Responses."
+        },
+        "input_modalities": {
+          "label": "Входные модальности",
+          "hint": "По одной в строке, например text или image."
+        },
+        "apply_patch_tool_type": {
+          "label": "Тип инструмента патчей",
+          "hint": "Форма инструмента apply_patch для этой модели."
+        },
+        "shell_type": {
+          "label": "Тип оболочки",
+          "hint": "Реализация оболочки для запуска команд."
+        },
+        "web_search_tool_type": {
+          "label": "Тип инструмента поиска",
+          "hint": "Может ли поиск возвращать изображения."
+        },
+        "multi_agent_version": {
+          "label": "Версия мультиагента",
+          "hint": "v1 или v2: какая реализация совместной работы используется."
+        },
+        "multi_agent_reasoning_effort": {
+          "label": "Усилие рассуждения мультиагента",
+          "hint": "Усилие рассуждения для мультиагента, например low, high или xhigh."
+        },
+        "base_instructions": {
+          "label": "Базовые инструкции",
+          "hint": "Системный промпт модели, отправляется дословно."
+        },
+        "model_messages": {
+          "label": "Сообщения модели",
+          "hint": "Шаблон инструкций, переменные личности и промпты политик; вложенные ключи следуют каталогу.",
+          "approvals": {
+            "label": "Политики согласования"
+          },
+          "auto_review": {
+            "label": "Автопроверка"
+          },
+          "collaboration_modes": {
+            "label": "Режимы совместной работы"
+          },
+          "confirmation_policies": {
+            "label": "Политики подтверждения"
+          },
+          "guardian_v2": {
+            "label": "Политика guardian"
+          },
+          "instructions_template": {
+            "label": "Шаблон инструкций",
+            "hint": "Шаблон сообщения для модели, поддерживает переменные."
+          },
+          "instructions_variables": {
+            "label": "Переменные личности",
+            "personality_default": {
+              "label": "Характер по умолчанию",
+              "hint": "Фрагмент промпта, когда характер не задан."
+            },
+            "personality_friendly": {
+              "label": "Дружелюбный характер",
+              "hint": "Фрагмент промпта для дружелюбного режима."
+            },
+            "personality_pragmatic": {
+              "label": "Прагматичный характер",
+              "hint": "Фрагмент промпта для прагматичного режима."
+            }
+          },
+          "multi_agent": {
+            "label": "Мультиагент"
+          },
+          "permissions": {
+            "label": "Режимы прав"
+          },
+          "persistent_instructions": {
+            "label": "Промпт постоянного режима"
+          },
+          "token_budget": {
+            "label": "Бюджет токенов"
+          },
+          "tools": {
+            "label": "Промпты инструментов"
+          }
+        }
+      }
+    },
+    "editor_advanced_fields": "Дополнительно: остальные поля",
+    "editor_advanced_count": "{{value}} полей",
+    "editor_advanced_hint": "Объекты сливаются рекурсивно, скаляры и массивы заменяются целиком, null удаляет поле.",
+    "editor_json_title": "Патч JSON",
+    "editor_json_hint": "Заменяет патч целиком: измените и нажмите «Применить» или «Сбросить».",
+    "editor_json_apply": "Применить",
+    "editor_json_reset": "Сбросить",
+    "editor_json_dirty": "не применено",
+    "editor_json_dirty_hint": "Изменения JSON не применены. Примените или сбросьте их перед сохранением.",
+    "tree_search_placeholder": "Фильтр по имени поля",
+    "tree_only_overridden": "Только изменённые",
+    "tree_expand_all": "Развернуть всё",
+    "tree_collapse_all": "Свернуть всё",
+    "tree_summary_fields": "полей: {{value}}",
+    "tree_summary_items": "элементов: {{value}}",
+    "tree_summary_lines": "строк: {{value}}",
+    "tree_preview_expand": "Показать все ({{value}})",
+    "tree_preview_collapse": "Свернуть",
+    "tree_array_note": "Массив заменяется целиком: правка здесь записывает весь массив.",
+    "tree_empty_no_fields": "Нет полей для редактирования. Если запись удалена через null, восстановите её кнопкой «Подставить шаблон».",
+    "tree_empty_filter": "Нет подходящих полей",
+    "patch_placeholder": "{ }",
+    "patch_error_empty": "Патч не может быть пустым; используйте {}, чтобы ничего не менять.",
+    "patch_error_not_object": "Патч должен быть JSON-объектом или null, чтобы убрать запись из каталога.",
+    "patch_error_invalid_json": "Некорректный JSON: {{message}}"
   }
 }
