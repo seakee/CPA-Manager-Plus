@@ -54,6 +54,13 @@ export default defineConfig(({ mode }) => {
       __APP_VERSION__: JSON.stringify(getVersion()),
       __DEMO_SITE__: JSON.stringify(demoSite || mode === 'test')
     },
+    server: {
+      // 开发时把 CPA 管理接口转发给本地后端，面板用自身地址即可，无需另外配置 API 地址。
+      // 默认指向 CPA 的 8317 端口，可用环境变量 VITE_CPA_DEV_TARGET 覆盖。
+      proxy: {
+        '/v0': process.env.VITE_CPA_DEV_TARGET || 'http://127.0.0.1:8317'
+      }
+    },
     resolve: {
       alias: [
         {
