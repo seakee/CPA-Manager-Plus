@@ -3,9 +3,11 @@ package app
 import (
 	"context"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
@@ -25,6 +27,7 @@ import (
 	proxysvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/proxy"
 	quotasnapshotsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/quotasnapshot"
 	setupsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/setup"
+	updatechecksvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/updatecheck"
 	usagesvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/usage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
@@ -38,9 +41,10 @@ type DatabaseMaintenanceStatusProvider interface {
 }
 
 type Context struct {
-	Config    config.Config
-	Store     *store.Store
-	Collector *collector.Manager
+	UpdateCheckService *updatechecksvc.Service
+	Config             config.Config
+	Store              *store.Store
+	Collector          *collector.Manager
 
 	StartedAt int64
 	ServiceID string
@@ -149,6 +153,7 @@ func fromExisting(
 	}))
 	authFileMutationCoordinator := cpaauthfiles.NewMutationCoordinator()
 	return &Context{
+		UpdateCheckService:   updatechecksvc.New(st, buildinfo.Version, buildinfo.SourceCommit, os.Getenv("CPAMP_UPDATE_CHECK_ENABLED") != "false"),
 		Config:               cfg,
 		Store:                st,
 		Collector:            collectorManager,

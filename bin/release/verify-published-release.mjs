@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { validateInfo } from './update-contract.mjs';
 import { readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,6 +20,7 @@ export const expectedReleaseAssetNames = (tag) => {
   const prefix = `cpa-manager-plus_${tag}`;
   return [
     'checksums.txt',
+    'release-info.json',
     `${prefix}_darwin_amd64.tar.gz`,
     `${prefix}_darwin_arm64.tar.gz`,
     `${prefix}_linux_amd64.tar.gz`,
@@ -45,14 +47,17 @@ const assetRecord = (filePath) => {
 };
 
 export const buildExpectedReleaseAssets = (assetsDir, tag) => {
+  validateInfo(JSON.parse(readFileSync(path.join(assetsDir, 'release-info.json'), 'utf8')), tag);
   const managementPath = path.join(assetsDir, 'management.html');
   const nativeDir = path.join(assetsDir, 'native');
   const nativeAssets = readdirSync(nativeDir, { withFileTypes: true })
     .filter((entry) => entry.isFile())
     .map((entry) => assetRecord(path.join(nativeDir, entry.name)));
-  const assets = [assetRecord(managementPath), ...nativeAssets].sort((left, right) =>
-    left.name.localeCompare(right.name)
-  );
+  const assets = [
+    assetRecord(managementPath),
+    assetRecord(path.join(assetsDir, 'release-info.json')),
+    ...nativeAssets,
+  ].sort((left, right) => left.name.localeCompare(right.name));
   const actualNames = assets.map(({ name }) => name);
   const expectedNames = expectedReleaseAssetNames(tag);
   if (

@@ -552,6 +552,14 @@ export async function handleDemoApiRequest<T = unknown>(
     return ok as T;
   }
 
+  if (pathname === '/reset-quota') {
+    const authIndex =
+      typeof data === 'object' && data !== null && 'auth_index' in data
+        ? String((data as { auth_index?: unknown }).auth_index ?? '')
+        : '';
+    return { status: 'ok', auth_index: authIndex, models: [] } as T;
+  }
+
   if (pathname === '/auth-files') {
     if (method === 'get') {
       advanceDemoCredentialRefresh();

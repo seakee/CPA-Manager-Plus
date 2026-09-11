@@ -1,0 +1,432 @@
+.page {
+  width: 100%;
+  max-width: 860px;
+  margin: 0 auto;
+  color: var(--text-primary);
+
+  a:focus-visible,
+  summary:focus-visible {
+    outline: 2px solid var(--focus-border);
+    outline-offset: 3px;
+  }
+}
+
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 20px;
+  color: var(--text-secondary);
+  font-size: 12px;
+
+  a {
+    color: inherit;
+    text-decoration: none;
+
+    &:hover {
+      color: var(--color-primary);
+    }
+  }
+}
+
+.heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 24px;
+
+  > div {
+    min-width: 0;
+  }
+
+  h1 {
+    margin: 0;
+    font-size: 24px;
+    line-height: 1.4;
+    font-weight: 650;
+    outline: none;
+  }
+
+  > button {
+    flex-shrink: 0;
+  }
+}
+
+.subtitle {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 6px 0 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.release {
+  padding: 28px;
+}
+
+.releaseTop {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.releaseHeading {
+  min-width: 0;
+}
+
+.eyebrow {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.version {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin: 10px 0;
+  font-size: 28px;
+  line-height: 1.3;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.stage {
+  padding: 3px 7px;
+  border-radius: 5px;
+  background: var(--app-accent-soft);
+  color: var(--color-primary);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.stateTitle {
+  margin: 10px 0 0;
+  font-size: 18px;
+  line-height: 1.6;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.releaseIcon {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  flex: 0 0 46px;
+  border-radius: 12px;
+  background: var(--app-accent-soft);
+  color: var(--color-primary);
+}
+
+.summary {
+  margin: 24px 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.8;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 16px;
+
+  :global(.btn) {
+    max-width: 100%;
+    white-space: normal;
+    text-align: left;
+
+    span {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+    }
+  }
+
+  svg {
+    flex-shrink: 0;
+  }
+}
+
+.secondaryLink,
+.guideLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+
+  svg {
+    flex-shrink: 0;
+  }
+
+  &:hover {
+    color: var(--color-primary);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+}
+
+.warning,
+.requirements {
+  margin: 20px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--warning-border);
+  border-radius: var(--app-radius-md);
+  background: var(--warning-bg);
+  color: var(--warning-color);
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.requirements {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+
+  svg {
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+  p {
+    margin: 0;
+  }
+  p + p {
+    margin-top: 6px;
+  }
+}
+
+.steps {
+  margin-top: 24px;
+  padding-top: 22px;
+  border-top: 1px solid var(--app-border);
+
+  h3 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+  }
+}
+
+.deploymentTabs {
+  margin: 16px 0;
+}
+
+.instructions {
+  margin: 0 0 14px;
+  padding-left: 20px;
+  list-style: decimal;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.7;
+
+  li + li {
+    margin-top: 5px;
+  }
+}
+
+.imageRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius-md);
+  background: var(--app-surface-muted);
+
+  code {
+    flex: 1 1 180px;
+    min-width: 0;
+    color: var(--text-primary);
+    font-size: 12px;
+    overflow-wrap: anywhere;
+  }
+
+  button span {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+}
+
+.copyFeedback {
+  flex-basis: 100%;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.guideLink {
+  display: flex;
+  width: fit-content;
+  margin-top: 16px;
+  color: var(--color-primary);
+}
+
+.runningVersions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 24px;
+  margin: 26px 0 0;
+  padding-top: 18px;
+  border-top: 1px solid var(--app-border);
+  font-size: 12px;
+
+  > div {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 8px;
+    min-width: 0;
+  }
+  dt {
+    color: var(--text-secondary);
+  }
+  dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+  a {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--text-primary);
+    text-decoration: none;
+
+    &:hover {
+      color: var(--color-primary);
+    }
+    svg {
+      flex-shrink: 0;
+    }
+  }
+}
+
+.settings {
+  margin-top: 18px;
+  padding: 20px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--app-radius-lg);
+  background: var(--glass-bg);
+  box-shadow: var(--glass-shadow);
+
+  > summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    list-style: none;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+
+    &::-webkit-details-marker {
+      display: none;
+    }
+    svg {
+      flex-shrink: 0;
+    }
+  }
+
+  &[open] > summary svg {
+    transform: rotate(90deg);
+  }
+}
+
+.settingBody {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--app-border);
+  font-size: 13px;
+
+  > div {
+    min-width: 0;
+  }
+}
+
+.settingDescription {
+  margin: 6px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.settings > .settingDescription {
+  margin-top: 16px;
+}
+
+.channelSelect {
+  width: 240px;
+  flex: 0 0 240px;
+  max-width: 100%;
+}
+
+@media (max-width: 560px) {
+  .deploymentTabs [role='tab'] {
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 44px;
+    padding: 6px 8px;
+    white-space: normal;
+  }
+
+  .heading {
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  .heading h1 {
+    font-size: 22px;
+  }
+  .release {
+    padding: 20px;
+  }
+  .releaseTop {
+    gap: 12px;
+  }
+  .version {
+    font-size: 24px;
+  }
+  .releaseIcon {
+    width: 36px;
+    height: 36px;
+    flex-basis: 36px;
+    border-radius: 10px;
+  }
+  .runningVersions {
+    flex-direction: column;
+  }
+  .settings {
+    padding: 16px;
+  }
+  .settingBody {
+    flex-direction: column;
+  }
+  .channelSelect {
+    width: 100%;
+    flex-basis: auto;
+  }
+  .page :global(.btn) {
+    min-height: 44px;
+  }
+  .secondaryLink,
+  .guideLink {
+    min-height: 32px;
+  }
+}

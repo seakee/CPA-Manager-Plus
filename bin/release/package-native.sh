@@ -46,7 +46,7 @@ for target in "${targets[@]}"; do
   mkdir -p "${package_dir}"
   (
     cd "${work_dir}/manager-server"
-    CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" go build -trimpath -ldflags "-s -w" -o "${package_dir}/${exe_name}" ./cmd/cpa-manager-plus
+    CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" go build -trimpath -ldflags "-s -w -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.Version=${version} -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.SourceCommit=$(git rev-parse HEAD)" -o "${package_dir}/${exe_name}" ./cmd/cpa-manager-plus
   )
 
   cp "${repo_root}/README.md" "${package_dir}/README.md"

@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { generateReleaseInfo } from './generate-release-info.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const repositoryUrl = 'https://github.com/seakee/CPA-Manager-Plus';
@@ -148,6 +149,7 @@ export const validateReleaseContent = ({
   const chinese = readFile(path.resolve(repoRoot, paths.chinese));
   const english = readFile(path.resolve(repoRoot, paths.english));
   const telegram = readFile(path.resolve(repoRoot, paths.telegram));
+  generateReleaseInfo(tag, '0'.repeat(40), chinese);
   return {
     paths,
     notes: validateReleaseNotes({ tag, chinese, english }),

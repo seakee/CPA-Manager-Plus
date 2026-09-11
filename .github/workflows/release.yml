@@ -133,7 +133,10 @@ jobs:
         run: npm ci
 
       - name: Build all-in-one HTML
-        run: npm run build
+        # Fail before building if the reviewed release metadata is absent.
+        run: |
+          node bin/release/generate-release-info.mjs "${RELEASE_TAG}"
+          npm run build
         env:
           VERSION: ${{ needs.preflight.outputs.release_tag }}
 
@@ -153,6 +156,7 @@ jobs:
           cp apps/web/dist/index.html dist/release/management.html
           cp dist/native/* dist/release/native/
           cp "docs/release-notes/${RELEASE_TAG}-zh.md" dist/release/release-notes.md
+          node bin/release/generate-release-info.mjs "${RELEASE_TAG}" dist/release/release-info.json
           find dist/release -maxdepth 2 -type f -print | sort
 
       - name: Upload release artifact
@@ -469,7 +473,7 @@ jobs:
             --header "X-GitHub-Api-Version: 2022-11-28" \
             "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}")"
           if [ "${http_code}" != "200" ]; then
-            echo "GitHub Release lookup after asset upload failed with HTTP ${http_code} for id ${RELEASE_ID}." >&2
+            echo "Published GitHub Release lookup after asset upload failed with HTTP ${http_code} for id ${RELEASE_ID}." >&2
             exit 1
           fi
           node bin/release/verify-published-release.mjs \
@@ -561,8 +565,8 @@ jobs:
           tags: |
             type=raw,value=${{ env.RELEASE_TAG }}
             type=semver,pattern={{version}},value=${{ env.RELEASE_TAG }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ env.RELEASE_TAG }},enable=${{ needs.preflight.outputs.prerelease == 'false' }}
-            type=raw,value=latest,enable=${{ needs.preflight.outputs.prerelease == 'false' }}
+          flavor: |
+            latest=false
           labels: |
             org.opencontainers.image.title=CPA Manager Plus
             org.opencontainers.image.description=CPA Manager Plus Manager Server container image
@@ -581,6 +585,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VERSION=${{ env.RELEASE_TAG }}
+            SOURCE_COMMIT=${{ github.sha }}
 
       - name: Update DockerHub overview
         if: env.DRY_RUN != 'true' && steps.docker_targets.outputs.dockerhub_enabled == 'true'
@@ -670,7 +675,7 @@ jobs:
             echo "Draft GitHub Release id changed during publication: ${RELEASE_ID} -> ${release_id}." >&2
             exit 1
           fi
-          publish_payload="$(jq -cn --argjson prerelease "${EXPECTED_PRERELEASE}" '{draft: false, prerelease: $prerelease}')"
+          publish_payload="$(jq -cn --argjson prerelease "${EXPECTED_PRERELEASE}" '{draft: false, prerelease: $prerelease, make_latest: "false"}')"
           publish_json="${RUNNER_TEMP}/published-release.json"
           publish_code="$(curl \
             --silent \
@@ -730,11 +735,21 @@ jobs:
             --prerelease "${EXPECTED_PRERELEASE}" \
             --allow-missing-assets false
 
+  publish_update_index:
+    needs: [preflight, publish_github_release]
+    if: needs.preflight.outputs.dry_run != 'true'
+    permissions:
+      contents: write
+      packages: write
+    uses: ./.github/workflows/update-index-publish.yml
+    secrets: inherit
+
   notify_telegram:
     name: Notify Telegram
     needs:
       - preflight
       - publish_github_release
+      - publish_update_index
     if: needs.preflight.outputs.dry_run != 'true' && github.run_attempt == 1
     runs-on: ubuntu-latest
     permissions:

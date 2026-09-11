@@ -19,7 +19,33 @@ const releasePaths = {
   telegram: `docs/release-posts/${releaseTag}-telegram.html`,
 };
 
-const chineseNotes = `# CPA Manager Plus ${releaseTag}
+const validMetadata = {
+  summary: {
+    zh: '更新说明',
+    en: 'Release update',
+  },
+  update: {
+    breaking: false,
+    migration_required: false,
+    minimum_direct_upgrade_version: null,
+    upgrade_guide_url: `https://github.com/seakee/CPA-Manager-Plus/releases/tag/${releaseTag}`,
+  },
+  compatibility: {
+    minimum_cpa_version: null,
+  },
+};
+
+const makeChineseNotes = (metadata = validMetadata) => `# CPA Manager Plus ${releaseTag}
+
+[English ->](https://github.com/seakee/CPA-Manager-Plus/blob/${releaseTag}/docs/release-notes/${releaseTag}-en.md)
+
+<!-- cpamp-update
+${typeof metadata === 'string' ? metadata : JSON.stringify(metadata, null, 2)}
+-->
+`;
+
+const chineseNotes = makeChineseNotes();
+const notesWithoutMetadata = `# CPA Manager Plus ${releaseTag}
 
 [English ->](https://github.com/seakee/CPA-Manager-Plus/blob/${releaseTag}/docs/release-notes/${releaseTag}-en.md)
 `;
@@ -97,7 +123,40 @@ describe('release content validation', () => {
     );
   });
 
-  it('validates every release tag represented by changed release paths', () => {
+  it('requires valid cpamp-update metadata in Chinese release notes', () => {
+    const contents = new Map([
+      [releasePaths.chinese, chineseNotes],
+      [releasePaths.english, englishNotes],
+      [releasePaths.telegram, telegramPost],
+    ]);
+    const readFile = (filePath) => contents.get(filePath.split('/').slice(-3).join('/'));
+    const fileExists = (filePath) => contents.has(filePath.split('/').slice(-3).join('/'));
+
+    // Valid release content passes.
+    expect(validateReleaseContent({ tag: releaseTag, readFile, fileExists })).toMatchObject({
+      paths: releasePaths,
+    });
+
+    // Missing metadata block fails.
+    contents.set(releasePaths.chinese, notesWithoutMetadata);
+    expect(() => validateReleaseContent({ tag: releaseTag, readFile, fileExists })).toThrow(
+      'Release notes require exactly one cpamp-update JSON comment'
+    );
+
+    // Malformed JSON fails.
+    contents.set(releasePaths.chinese, makeChineseNotes('{ invalid json'));
+    expect(() => validateReleaseContent({ tag: releaseTag, readFile, fileExists })).toThrow();
+
+    // Missing required field (breaking) fails.
+    const missingBreaking = JSON.parse(JSON.stringify(validMetadata));
+    delete missingBreaking.update.breaking;
+    contents.set(releasePaths.chinese, makeChineseNotes(missingBreaking));
+    expect(() => validateReleaseContent({ tag: releaseTag, readFile, fileExists })).toThrow(
+      'Explicit update flags required'
+    );
+  });
+
+  it('validates every release tag represented by changed release paths and fails on bad metadata', () => {
     const contents = new Map([
       [releasePaths.chinese, chineseNotes],
       [releasePaths.english, englishNotes],
@@ -116,6 +175,18 @@ describe('release content validation', () => {
       tags: [releaseTag],
       releases: [expect.objectContaining({ paths: releasePaths })],
     });
+
+    // changed-content gate fails when metadata is missing
+    contents.set(releasePaths.chinese, notesWithoutMetadata);
+    expect(() =>
+      validateChangedReleaseContent({
+        changedFiles: Object.values(releasePaths),
+        readFile,
+        fileExists,
+      })
+    ).toThrow('Release notes require exactly one cpamp-update JSON comment');
+
+    contents.set(releasePaths.chinese, chineseNotes);
     expect(() =>
       validateChangedReleaseContent({
         changedFiles: ['docs/release-notes/README.md'],

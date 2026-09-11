@@ -1,0 +1,26 @@
+name: Recover update channels
+on:
+  workflow_dispatch:
+    inputs:
+      withdraw_release:
+        description: 'Optional exact tag to stop recommending'
+        type: string
+        default: ''
+      restore_release:
+        description: 'Optional exact tag to restore to candidate selection'
+        type: string
+        default: ''
+permissions:
+  contents: write
+  packages: write
+concurrency:
+  group: release-publish
+  cancel-in-progress: false
+jobs:
+  reconcile:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/update-index-publish.yml
+    with:
+      withdraw_release: ${{ inputs.withdraw_release }}
+      restore_release: ${{ inputs.restore_release }}
+    secrets: inherit

@@ -265,12 +265,12 @@ while true; do read -r -t 1 _ || true; done
   writeFileSync(
     configPath,
     `${JSON.stringify(
-       {
-         httpAddr: '0.0.0.0:18317',
+      {
+        httpAddr: '0.0.0.0:18317',
         dataDir: configDataDir,
-         adminKeyFile: '../../secrets/cpamp-admin-key',
+        adminKeyFile: '../../secrets/cpamp-admin-key',
         dataKeyPath: configDataKeyPath,
-         cpaUpstreamUrl: 'http://127.0.0.1:8317',
+        cpaUpstreamUrl: 'http://127.0.0.1:8317',
         managementKeyFile: '../../secrets/cpa-management-key',
         collectorMode: 'http',
         queue: 'legacy-usage',
@@ -1499,9 +1499,7 @@ services:
       expect(calls).not.toContain('--data-key-path /data/data.key');
       expect(readFileSync(fixture.databasePath, 'utf8')).toContain('import-attempt');
       expect(readFileSync(fixture.dataKeyPath, 'utf8')).toContain('import-attempt');
-      expect(readFileSync(fixture.defaultDatabasePath, 'utf8')).toBe(
-        'default-database-sentinel\n'
-      );
+      expect(readFileSync(fixture.defaultDatabasePath, 'utf8')).toBe('default-database-sentinel\n');
       expect(readFileSync(fixture.defaultDataKeyPath, 'utf8')).toBe('default-data-key-sentinel\n');
     } finally {
       rmSync(installDir, { recursive: true, force: true });
@@ -1589,7 +1587,10 @@ services:
     const fixture = writeCustomDockerInstall(installDir, { environmentSyntax: 'list' });
     const composePath = path.join(installDir, 'compose.yaml');
     const compose = readFileSync(composePath, 'utf8')
-      .replace('      - USAGE_DB_PATH=${CUSTOM_DB_PATH:-/data/usage.sqlite}', '      - USAGE_DB_PATH')
+      .replace(
+        '      - USAGE_DB_PATH=${CUSTOM_DB_PATH:-/data/usage.sqlite}',
+        '      - USAGE_DB_PATH'
+      )
       .replace(
         '      - CPA_MANAGER_DATA_KEY_PATH=${CUSTOM_DATA_KEY_PATH:-/data/data.key}',
         '      - CPA_MANAGER_DATA_KEY_PATH'
@@ -1633,9 +1634,7 @@ services:
       expect(calls).toContain('--data-key-path /data/custom.key');
       expect(readFileSync(fixture.databasePath, 'utf8')).toContain('import-attempt');
       expect(readFileSync(fixture.dataKeyPath, 'utf8')).toContain('import-attempt');
-      expect(readFileSync(fixture.defaultDatabasePath, 'utf8')).toBe(
-        'default-database-sentinel\n'
-      );
+      expect(readFileSync(fixture.defaultDatabasePath, 'utf8')).toBe('default-database-sentinel\n');
       expect(readFileSync(fixture.defaultDataKeyPath, 'utf8')).toBe('default-data-key-sentinel\n');
     } finally {
       rmSync(installDir, { recursive: true, force: true });
@@ -2480,9 +2479,9 @@ secrets:
       expect(result.status).toBe(0);
       expect(readFileSync(externalKeyPath, 'utf8')).toBe('cpa_external_canonical_key\n');
       expect(statSync(externalKeyPath).mode & 0o777).toBe(0o640);
-      expect(readFileSync(path.join(installDir, 'secrets/.cpa-management-key.external'), 'utf8')).toBe(
-        'EXTERNAL=1\n'
-      );
+      expect(
+        readFileSync(path.join(installDir, 'secrets/.cpa-management-key.external'), 'utf8')
+      ).toBe('EXTERNAL=1\n');
       expect(result.stdout).not.toContain(`rm -f "${externalKeyPath}"`);
       expect(readFileSync(path.join(installDir, 'compose.yaml'), 'utf8')).not.toContain(
         'CPA_MANAGEMENT_KEY_FILE'
@@ -2572,9 +2571,9 @@ secrets:
       expect(succeeded.status).toBe(0);
       expect(readFileSync(externalKeyPath, 'utf8')).toBe('cpa_external_canonical_key\n');
       expect(statSync(externalKeyPath).mode & 0o777).toBe(0o640);
-      expect(readFileSync(path.join(installDir, 'secrets/.cpa-management-key.external'), 'utf8')).toBe(
-        'EXTERNAL=1\n'
-      );
+      expect(
+        readFileSync(path.join(installDir, 'secrets/.cpa-management-key.external'), 'utf8')
+      ).toBe('EXTERNAL=1\n');
       expect(combinedOutput(succeeded)).not.toContain(`rm -f "${externalKeyPath}"`);
     } finally {
       rmSync(installDir, { recursive: true, force: true });
@@ -4525,9 +4524,9 @@ secrets:
       expect(readFileSync(legacy.runPath, 'utf8')).toBe(beforeRun);
       expect(readFileSync(legacy.dbPath, 'utf8')).toBe(beforeDatabase);
       expect(existsSync(legacy.dataKeyPath)).toBe(false);
-      expect(existsSync(path.join(installDir, 'runtime', 'cpa-manager-plus_vnext_linux_amd64'))).toBe(
-        false
-      );
+      expect(
+        existsSync(path.join(installDir, 'runtime', 'cpa-manager-plus_vnext_linux_amd64'))
+      ).toBe(false);
     } finally {
       rmSync(installDir, { recursive: true, force: true });
     }
@@ -5518,7 +5517,7 @@ exec /bin/mv "$@"
     const fixtureDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-fixture-'));
     const platform = process.platform === 'darwin' ? 'darwin' : 'linux';
     const arch = process.arch === 'arm64' ? 'arm64' : 'amd64';
-    const packageName = `cpa-manager-plus_vtest_${platform}_${arch}`;
+    const packageName = `cpa-manager-plus_v1.2.3_${platform}_${arch}`;
     const packageDir = path.join(fixtureDir, packageName);
     const archivePath = path.join(fixtureDir, `${packageName}.tar.gz`);
     let nativePid;
@@ -5553,8 +5552,8 @@ done
 set -euo pipefail
 for arg in "$@"; do
   case "$arg" in
-    https://github.com/seakee/CPA-Manager-Plus/releases/latest)
-      printf 'https://github.com/seakee/CPA-Manager-Plus/releases/tag/vtest'
+    https://raw.githubusercontent.com/seakee/CPA-Manager-Plus/update-channel/stable-version.txt)
+      printf 'v1.2.3'
       exit 0
       ;;
     */health) exit 0 ;;
@@ -5625,7 +5624,7 @@ exit 22
     const fixtureDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-fixture-'));
     const platform = process.platform === 'darwin' ? 'darwin' : 'linux';
     const arch = process.arch === 'arm64' ? 'arm64' : 'amd64';
-    const packageName = `cpa-manager-plus_vtest_${platform}_${arch}`;
+    const packageName = `cpa-manager-plus_v1.2.3_${platform}_${arch}`;
     const packageDir = path.join(fixtureDir, packageName);
     const archivePath = path.join(fixtureDir, `${packageName}.tar.gz`);
 
@@ -5649,8 +5648,8 @@ exit 22
         `#!/usr/bin/env bash
 set -euo pipefail
 for arg in "$@"; do
-  if [ "$arg" = "https://github.com/seakee/CPA-Manager-Plus/releases/latest" ]; then
-    printf 'https://github.com/seakee/CPA-Manager-Plus/releases/tag/vtest'
+  if [ "$arg" = "https://raw.githubusercontent.com/seakee/CPA-Manager-Plus/update-channel/stable-version.txt" ]; then
+    printf 'v1.2.3'
     exit 0
   fi
 done

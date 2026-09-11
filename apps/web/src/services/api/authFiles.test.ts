@@ -4,6 +4,7 @@ const { mocks } = vi.hoisted(() => ({
   mocks: {
     get: vi.fn(),
     getRaw: vi.fn(),
+    post: vi.fn(),
     postForm: vi.fn(),
     patch: vi.fn(),
     put: vi.fn(),
@@ -15,6 +16,7 @@ vi.mock('./client', () => ({
   apiClient: {
     get: mocks.get,
     getRaw: mocks.getRaw,
+    post: mocks.post,
     postForm: mocks.postForm,
     patch: mocks.patch,
     put: mocks.put,
@@ -33,6 +35,7 @@ import { sha256RawTextHex } from '@/utils/apiKeyHash';
 beforeEach(() => {
   mocks.get.mockReset();
   mocks.getRaw.mockReset();
+  mocks.post.mockReset();
   mocks.postForm.mockReset();
   mocks.patch.mockReset();
   mocks.put.mockReset();
@@ -1803,5 +1806,40 @@ describe('applyAuthFileFieldsPatchToRecord', () => {
       cloak_sensitive_words: 'canonical',
       cloak_cache_user_id: 'false',
     });
+  });
+});
+
+describe('authFilesApi resetQuota', () => {
+  it('posts /reset-quota with normalized auth_index and scope', async () => {
+    mocks.post.mockResolvedValueOnce({
+      status: 'ok',
+      auth_index: 'idx-1',
+      models: ['gpt-6-astra'],
+    });
+
+    const result = await authFilesApi.resetQuota('  idx-1  ', {
+      apiBase: 'http://cpa.local:8317',
+      managementKey: 'secret',
+    });
+
+    expect(result).toEqual({
+      status: 'ok',
+      auth_index: 'idx-1',
+      models: ['gpt-6-astra'],
+    });
+    expect(mocks.post).toHaveBeenCalledWith(
+      '/reset-quota',
+      { auth_index: 'idx-1' },
+      expect.objectContaining({
+        baseURL: 'http://cpa.local:8317/v0/management',
+        cpampScopedRequest: true,
+      })
+    );
+  });
+
+  it('returns noop when auth_index is empty', async () => {
+    const result = await authFilesApi.resetQuota('   ');
+    expect(result).toEqual({ status: 'noop', auth_index: '', models: [] });
+    expect(mocks.post).not.toHaveBeenCalled();
   });
 });

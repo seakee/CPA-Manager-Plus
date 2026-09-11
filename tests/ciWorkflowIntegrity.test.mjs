@@ -104,6 +104,22 @@ describe('GitHub Actions workflow integrity', () => {
     expect(requiredJob).toContain('"Release Content:${RELEASE_CONTENT_RESULT}"');
   });
 
+  it('prevents metadata-action from moving the mutable latest tag', () => {
+    for (const workflowName of ['release.yml', 'release-publish-recovery.yml']) {
+      const workflow = readWorkflow(workflowName);
+      expect(workflow).toContain('flavor: |\n            latest=false');
+    }
+  });
+
+  it('runs repository-level release and installer tests from the root test entry', () => {
+    const packageJson = JSON.parse(readFileSync(path.join(repoRoot, 'package.json'), 'utf8'));
+    expect(packageJson.scripts.test).toContain('test:web');
+    expect(packageJson.scripts.test).toContain('test:repo');
+    expect(packageJson.scripts['test:repo']).toBe(
+      'vitest run tests/*.test.mjs --exclude tests/nativeControlScripts.test.mjs'
+    );
+  });
+
   it('uses NUL-delimited Git paths before classification and release validation', () => {
     const workflow = readWorkflow('pr-check.yml');
 

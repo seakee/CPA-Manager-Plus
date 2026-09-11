@@ -4,9 +4,10 @@
 
 import axios from 'axios';
 import { REQUEST_TIMEOUT_MS } from '@/utils/constants';
-import { getDemoManagerLatestRelease } from '@/features/demo/demoFixtures';
-import { isDemoMode } from '@/features/demo/demoMode';
 import { apiClient } from './client';
+
+export const CPA_MANAGER_UPDATE_INDEX_URL =
+  'https://raw.githubusercontent.com/seakee/CPA-Manager-Plus/update-channel/update-index.json';
 
 export interface ManagerLatestRelease {
   tag_name?: string;
@@ -16,23 +17,12 @@ export interface ManagerLatestRelease {
   [key: string]: unknown;
 }
 
-const CPA_MANAGER_LATEST_RELEASE_URL =
-  'https://api.github.com/repos/seakee/CPA-Manager-Plus/releases/latest';
-
 export const versionApi = {
   checkLatest: () => apiClient.get<Record<string, unknown>>('/latest-version'),
-
-  checkManagerLatest: async () => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return getDemoManagerLatestRelease();
-    }
-
-    const response = await axios.get<ManagerLatestRelease>(CPA_MANAGER_LATEST_RELEASE_URL, {
+  checkManagerUpdateIndex: async () => {
+    const response = await axios.get(CPA_MANAGER_UPDATE_INDEX_URL, {
       timeout: REQUEST_TIMEOUT_MS,
-      headers: {
-        Accept: 'application/vnd.github+json'
-      }
     });
     return response.data;
-  }
+  },
 };

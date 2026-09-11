@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { generateReleaseInfo } from '../bin/release/generate-release-info.mjs';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   buildExpectedReleaseAssets,
@@ -10,7 +11,7 @@ import {
   verifyPublishedReleaseMetadata,
 } from '../bin/release/verify-published-release.mjs';
 
-const tag = 'v1.2.3-beta1';
+const tag = 'v1.2.3-beta.1';
 const temporaryDirectories = [];
 
 const makeReleaseFixture = () => {
@@ -20,11 +21,30 @@ const makeReleaseFixture = () => {
   mkdirSync(nativeDirectory);
 
   for (const assetName of expectedReleaseAssetNames(tag)) {
-    const assetPath =
-      assetName === 'management.html'
-        ? path.join(directory, assetName)
-        : path.join(nativeDirectory, assetName);
-    writeFileSync(assetPath, `${assetName}\n`);
+    const assetPath = ['management.html', 'release-info.json'].includes(assetName)
+      ? path.join(directory, assetName)
+      : path.join(nativeDirectory, assetName);
+    const info =
+      assetName === 'release-info.json'
+        ? generateReleaseInfo(
+            tag,
+            'a'.repeat(40),
+            '<!-- cpamp-update\n' +
+              JSON.stringify({
+                summary: { zh: '更新', en: 'Update' },
+                update: {
+                  breaking: false,
+                  migration_required: false,
+                  minimum_direct_upgrade_version: null,
+                  upgrade_guide_url:
+                    'https://github.com/seakee/CPA-Manager-Plus/releases/tag/' + tag,
+                },
+                compatibility: { minimum_cpa_version: null },
+              }) +
+              '\n-->'
+          )
+        : null;
+    writeFileSync(assetPath, info ? JSON.stringify(info) : `${assetName}\n`);
   }
   return directory;
 };
@@ -78,8 +98,8 @@ describe('published release verification', () => {
         assets,
       })
     ).toEqual({
-      expectedAssets: 8,
-      publishedAssets: 8,
+      expectedAssets: 9,
+      publishedAssets: 9,
       missingAssets: [],
       complete: true,
       immutable: true,
@@ -98,8 +118,8 @@ describe('published release verification', () => {
         assets,
       })
     ).toEqual({
-      expectedAssets: 8,
-      publishedAssets: 8,
+      expectedAssets: 9,
+      publishedAssets: 9,
       missingAssets: [],
       complete: true,
       immutable: false,
@@ -130,8 +150,8 @@ describe('published release verification', () => {
         allowMissingAssets: true,
       })
     ).toMatchObject({
-      expectedAssets: 8,
-      publishedAssets: 7,
+      expectedAssets: 9,
+      publishedAssets: 8,
       missingAssets: [{ name: assets[0].name, filePath: assets[0].filePath }],
       complete: false,
       immutable: false,
@@ -165,8 +185,8 @@ describe('published release verification', () => {
         allowMissingAssets: true,
       })
     ).toMatchObject({
-      expectedAssets: 8,
-      publishedAssets: 7,
+      expectedAssets: 9,
+      publishedAssets: 8,
       missingAssets: [{ name: assets[0].name, filePath: assets[0].filePath }],
       complete: false,
     });
@@ -268,7 +288,7 @@ describe('published release verification', () => {
         prerelease: true,
         body: '# Release',
       })
-    ).toMatchObject({ complete: true, expectedAssets: 8, publishedAssets: 8 });
+    ).toMatchObject({ complete: true, expectedAssets: 9, publishedAssets: 9 });
 
     expect(() =>
       verifyPublishedReleaseMetadata({

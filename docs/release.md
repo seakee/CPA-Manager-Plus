@@ -103,6 +103,43 @@ docs/release-notes/v1.0.2-zh.md
 docs/release-notes/v1.0.2-en.md
 ```
 
+### Release Metadata Block (`cpamp-update`)
+
+Every new release's Chinese notes file (`docs/release-notes/<tag>-zh.md`) must contain **exactly one** `cpamp-update` HTML comment block containing JSON metadata.
+
+This metadata serves as the reviewed input within the Release PR. PR validation CI validates it, and the release workflow reuses this exact block to generate the immutable `release-info.json` asset. No second metadata source is maintained.
+
+Minimal template:
+
+```html
+<!-- cpamp-update
+{
+  "summary": {
+    "zh": "更新说明",
+    "en": "Release update"
+  },
+  "update": {
+    "breaking": false,
+    "migration_required": false,
+    "minimum_direct_upgrade_version": null,
+    "upgrade_guide_url": "https://github.com/seakee/CPA-Manager-Plus/releases/tag/v1.2.3"
+  },
+  "compatibility": {
+    "minimum_cpa_version": null
+  }
+}
+-->
+```
+
+Field requirements:
+- `summary.zh`: Concise summary in Chinese (required non-empty string, max 4096 bytes).
+- `summary.en`: Concise summary in English (required non-empty string, max 4096 bytes).
+- `update.breaking`: Must be an explicit boolean (`true` or `false`).
+- `update.migration_required`: Must be an explicit boolean (`true` or `false`).
+- `update.minimum_direct_upgrade_version`: Valid SemVer tag string, or `null` if there is no lower bound for direct upgrades.
+- `update.upgrade_guide_url`: Valid HTTPS URL pointing to the upgrade guide within `https://github.com/seakee/CPA-Manager-Plus/`.
+- `compatibility.minimum_cpa_version`: Valid SemVer tag string, or `null` if there is no minimum CPA version requirement.
+
 ## Community Release Post
 
 Each new release must include a reviewed Telegram post:
@@ -215,6 +252,8 @@ The preflight validates all of the following before building or publishing:
 
 - `docs/release-notes/<tag>-zh.md`, `docs/release-notes/<tag>-en.md`, and
   `docs/release-posts/<tag>-telegram.html` exist and are non-empty;
+- `docs/release-notes/<tag>-zh.md` contains exactly one valid `cpamp-update`
+  metadata JSON comment matching the update-contract specification;
 - the two release notes contain reciprocal tag-pinned GitHub blob links;
 - the candidate SHA is the current `main` tip;
 - `main` is a two-parent `dev -> main` promotion merge, and `dev` is the

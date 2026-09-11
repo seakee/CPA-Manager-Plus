@@ -1,0 +1,22 @@
+🚀 <b>9 月 10 日 · v1.12.11</b>
+
+✨ <b>更新内容</b>
+
+• 新增可信版本更新检查，支持 <code>auto</code>、<code>stable</code>、<code>rc</code>、<code>beta</code> 更新通道，并提供后台检查与手动检查。
+• 新增「系统信息 → 软件更新」页面，可查看目标版本、更新摘要、兼容性与迁移提示，并获得 Docker / 原生部署的精确版本升级指引。
+• 同一 Manager 实例对同一精确版本最多主动提示一次；关闭、查看、刷新或重启不会重复弹出。
+• 发布流程新增经过校验的 <code>release-info.json</code> 与 Update Channel，同步验证 Release、资产、源提交和双 Registry 镜像后再推进 Stable/Beta、Docker aliases 与 GitHub Latest。
+• 修复 Codex reset credit 成功消费后 CPA 仍保留旧路由 cooldown 的问题，避免额度恢复后继续被旧 429 状态阻塞。
+• Release Telegram 通知现在会等待 Update Channel 发布成功后再发送，避免公告与实际可升级版本状态不一致。
+
+⚠️ <b>注意事项</b>
+
+• 本版本首次启用新的可信 Update Channel；历史 Release 不回填新元数据，首次索引从 v1.12.11 开始建立。
+• v1 的更新功能仅负责检查、通知和提供升级指引，不会自动替换 Docker 镜像或原生二进制。
+• 如需关闭后台更新检查，可设置 <code>CPAMP_UPDATE_CHECK_ENABLED=false</code>；手动检查仍可使用。
+
+🤝 <b>致谢</b>
+
+感谢 <a href="https://github.com/212duo">@212duo</a> 贡献 Codex reset credit 后同步清理 CPA 路由冷却的修复与回归测试。
+
+<a href="https://github.com/seakee/CPA-Manager-Plus/releases/tag/v1.12.11">GitHub Release</a>

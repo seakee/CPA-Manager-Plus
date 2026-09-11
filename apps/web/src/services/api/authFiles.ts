@@ -1584,4 +1584,19 @@ export const authFilesApi = {
     const models = data.models ?? data['models'];
     return normalizeAuthFileModelItems(models);
   },
+
+  // 重置凭证配额与冷却状态 (清空 CPA 网关内存计时器与 .cds 冷却文件)
+  resetQuota: async (
+    authIndex: string,
+    requestScope?: AuthFilesApiRequestScope
+  ): Promise<{ status: string; auth_index: string; models: string[] }> => {
+    const normalizedAuthIndex = String(authIndex ?? '').trim();
+    if (!normalizedAuthIndex) {
+      return { status: 'noop', auth_index: '', models: [] };
+    }
+    const payload = { auth_index: normalizedAuthIndex };
+    return requestScope
+      ? apiClient.post('/reset-quota', payload, createScopedApiRequestConfig(requestScope))
+      : apiClient.post('/reset-quota', payload);
+  },
 };

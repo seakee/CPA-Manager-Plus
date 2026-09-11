@@ -281,6 +281,7 @@ import {
 } from '@/features/accounts/components';
 import {
   accountQuotaSnapshotApi,
+  authFilesApi,
   consumeCodexRateLimitResetCredit,
   monitoringAnalyticsApi,
   usageServiceApi,
@@ -6272,8 +6273,9 @@ export function AccountsPage() {
           onConfirm: async () => {
             if (confirmed) return;
             confirmed = true;
+            let resetResult: unknown;
             try {
-              await consumeCodexRateLimitResetCredit(row.raw, t, authFilesRequestScope);
+              resetResult = await consumeCodexRateLimitResetCredit(row.raw, t, authFilesRequestScope);
             } catch (err: unknown) {
               endResetTransaction();
               const message = err instanceof Error ? err.message : t('common.unknown_error');
@@ -6283,6 +6285,81 @@ export function AccountsPage() {
               );
               return;
             }
+
+            const parseCodexResetCreditOutcome = (result: unknown): string | undefined => {
+              if (!result || typeof result !== 'object') return undefined;
+              const typedResult = result as { body?: unknown; bodyText?: string };
+              if (typedResult.body && typeof typedResult.body === 'object' && 'code' in typedResult.body) {
+                const rawCode = (typedResult.body as { code?: unknown }).code;
+                if (typeof rawCode === 'string') {
+                  return rawCode.trim().toLowerCase();
+                }
+              }
+              if (typedResult.bodyText) {
+                try {
+                  const parsed = JSON.parse(typedResult.bodyText) as { code?: unknown };
+                  if (typeof parsed?.code === 'string') {
+                    return parsed.code.trim().toLowerCase();
+                  }
+                } catch {
+                  // ignore
+                }
+              }
+              return undefined;
+            };
+
+            const outcome = parseCodexResetCreditOutcome(resetResult);
+            // Fail-closed: only explicit 'reset' or 'already_redeemed' triggers the gateway reset
+            if (outcome !== 'reset' && outcome !== 'already_redeemed') {
+              endResetTransaction();
+              if (outcome === 'no_credit') {
+                commitIfQuotaCacheCurrent(cacheGeneration, () => {
+                  setCodexQuota((prev) => ({
+                    ...prev,
+                    [storeKey]: {
+                      ...(getScopedQuotaState(CODEX_CONFIG, prev, row.raw) ?? verifiedState),
+                      rateLimitResetCreditsAvailableCount: 0,
+                      rateLimitResetCredits: [],
+                    },
+                  }));
+                });
+                setQuotaSnapshotWindowsByRowKey((current) => {
+                  const windows = current.get(row.selectionKey);
+                  if (!windows) return current;
+                  const next = new Map(current);
+                  next.set(
+                    row.selectionKey,
+                    windows.map((window) => ({
+                      ...window,
+                      reset_credits_available: 0,
+                      reset_credits: undefined,
+                    }))
+                  );
+                  return next;
+                });
+                showNotification(t('codex_quota.reset_no_credits', { name: displayName }), 'error');
+              } else if (outcome === 'nothing_to_reset') {
+                showNotification(
+                  t('codex_quota.reset_nothing_to_reset', {
+                    name: displayName,
+                    defaultValue: `${displayName} 当前无需重置额度`,
+                  }),
+                  'warning'
+                );
+              } else {
+                const message =
+                  outcome ||
+                  t('codex_quota.reset_invalid_outcome', {
+                    defaultValue: '返回数据缺少有效重置状态',
+                  });
+                showNotification(
+                  t('codex_quota.reset_failed', { name: displayName, message }),
+                  'error'
+                );
+              }
+              return;
+            }
+
             const postMutationIsCurrent = beginAccountQuotaRequest(
               quotaRequestVersionsRef.current,
               requestKey
@@ -6313,9 +6390,25 @@ export function AccountsPage() {
               );
               return next;
             });
+
+            // Flow: reset credit succeeds → sync CPA runtime reset → refresh quota for UI
+            const authIndex = normalizeAuthIndex(row.raw['auth_index'] ?? row.raw.authIndex ?? row.authIndex);
+            let gatewaySyncSuccess = false;
+            if (authIndex && !row.raw.disabled) {
+              try {
+                await authFilesApi.resetQuota(authIndex, authFilesRequestScope);
+                gatewaySyncSuccess = true;
+              } catch (resetErr) {
+                console.warn('[Accounts] Failed to reset gateway cooldown quota after consuming reset credit:', resetErr);
+                gatewaySyncSuccess = false;
+              }
+            } else {
+              gatewaySyncSuccess = true;
+            }
+
+            let quotaRefreshSuccess = false;
             try {
               const data = await CODEX_CONFIG.fetchQuota(row.raw, t, authFilesRequestScope);
-              endResetTransaction();
               if (postMutationIsCurrent()) {
                 commitIfQuotaCacheCurrent(cacheGeneration, () => {
                   setCodexQuota((prev) => ({
@@ -6324,9 +6417,31 @@ export function AccountsPage() {
                   }));
                 });
               }
-              showNotification(t('codex_quota.reset_success', { name: displayName }), 'success');
-            } catch {
+              quotaRefreshSuccess = true;
+            } catch (refreshErr) {
+              console.warn('[Accounts] Failed to refresh quota after consuming reset credit:', refreshErr);
+              quotaRefreshSuccess = false;
+            } finally {
               endResetTransaction();
+            }
+
+            invalidateCodexCredentialStatusForSelectionKeys([row.selectionKey], {
+              supersedeAuthenticationActionEvidence: true,
+              supersedeQuotaActionEvidence: quotaRefreshSuccess,
+              supersedeCooldownEvidence: gatewaySyncSuccess,
+            });
+
+            if (gatewaySyncSuccess && quotaRefreshSuccess) {
+              showNotification(t('codex_quota.reset_success', { name: displayName }), 'success');
+            } else if (!gatewaySyncSuccess) {
+              showNotification(
+                t('codex_quota.reset_gateway_failed', {
+                  name: displayName,
+                  defaultValue: `${displayName} 已完成重置，但同步网关冷却失败，请稍后重试或手动刷新网关。`,
+                }),
+                'warning'
+              );
+            } else {
               showNotification(
                 t('codex_quota.reset_partial_success', { name: displayName }),
                 'warning'
@@ -6340,6 +6455,7 @@ export function AccountsPage() {
     [
       canResetCodexQuota,
       getDisplayAccount,
+      invalidateCodexCredentialStatusForSelectionKeys,
       setCodexQuota,
       showConfirmation,
       showNotification,

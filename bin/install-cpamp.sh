@@ -3626,8 +3626,10 @@ resolve_latest_version() {
     printf '%s\n' "$resolved"
     return
   fi
-  effective_url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${repo}/releases/latest")"
-  resolved="${effective_url##*/}"
+  resolved="$(curl --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 30 --max-filesize 128 -fsSL "https://raw.githubusercontent.com/${repo}/update-channel/stable-version.txt")"
+  if ! printf '%s\n' "$resolved" | LC_ALL=C grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+    die "Invalid stable update channel; specify CPAMP_VERSION explicitly."
+  fi
   validate_version_value "$(text version)" "$resolved"
   printf '%s\n' "$resolved"
 }

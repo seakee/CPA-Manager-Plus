@@ -358,7 +358,7 @@ jobs:
 
           asset_names="$(node --input-type=module -e '
             import { expectedReleaseAssetNames } from "./bin/release/verify-published-release.mjs";
-            process.stdout.write(expectedReleaseAssetNames(process.argv[1]).filter((name) => name !== "management.html").join("\n"));
+            process.stdout.write(expectedReleaseAssetNames(process.argv[1]).filter((name) => !["management.html", "release-info.json"].includes(name)).join("\n"));
           ' "${RELEASE_TAG}")"
           if grep -q '^$' <<< "${asset_names}"; then
             echo "Expected release asset names contain an empty entry." >&2
@@ -367,6 +367,7 @@ jobs:
           expected_files="$(
             {
               echo "management.html"
+              echo "release-info.json"
               echo "release-notes.md"
               while IFS= read -r asset_name; do
                 printf 'native/%s\n' "${asset_name}"
@@ -386,6 +387,8 @@ jobs:
             echo "Artifact release-notes.md differs from the immutable tag content." >&2
             exit 1
           fi
+          node bin/release/generate-release-info.mjs "${RELEASE_TAG}" "${RUNNER_TEMP}/expected-release-info.json" "${RELEASE_SHA}"
+          cmp "${RUNNER_TEMP}/expected-release-info.json" "${artifact_root}/release-info.json"
           (
             cd "${artifact_root}/native"
             sha256sum --check checksums.txt
@@ -768,8 +771,8 @@ jobs:
           tags: |
             type=raw,value=${{ env.RELEASE_TAG }}
             type=semver,pattern={{version}},value=${{ env.RELEASE_TAG }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ env.RELEASE_TAG }},enable=${{ env.PRERELEASE == 'false' }}
-            type=raw,value=latest,enable=${{ env.PRERELEASE == 'false' }}
+          flavor: |
+            latest=false
           labels: |
             org.opencontainers.image.title=CPA Manager Plus
             org.opencontainers.image.description=CPA Manager Plus Manager Server container image
@@ -1035,6 +1038,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VERSION=${{ env.RELEASE_TAG }}
+            SOURCE_COMMIT=${{ env.RELEASE_SHA }}
 
       - name: Verify pushed Docker tags
         shell: bash
@@ -1192,7 +1196,7 @@ jobs:
               throw new Error("Draft GitHub Release changed before publication");
             }
           ' "${release_json}" "${body_path}" "${EXPECTED_ASSET_MANIFEST}" "${RELEASE_ID}" "${RELEASE_TAG}" "${EXPECTED_PRERELEASE}"
-          publish_payload="$(jq -cn --argjson prerelease "${EXPECTED_PRERELEASE}" '{draft: false, prerelease: $prerelease}')"
+          publish_payload="$(jq -cn --argjson prerelease "${EXPECTED_PRERELEASE}" '{draft: false, prerelease: $prerelease, make_latest: "false"}')"
           published_json="${RUNNER_TEMP}/published-release.json"
           publish_code="$(curl \
             --silent \
@@ -1252,6 +1256,14 @@ jobs:
             ))
           ' "${release_json}" >/dev/null
           echo "GitHub Release is published with the exact verified asset manifest." >> "${GITHUB_STEP_SUMMARY}"
+
+  publish_update_index:
+    needs: [publish_github_release]
+    permissions:
+      contents: write
+      packages: write
+    uses: ./.github/workflows/update-index-publish.yml
+    secrets: inherit
 
   notify_telegram:
     name: Optionally recover Telegram notification
