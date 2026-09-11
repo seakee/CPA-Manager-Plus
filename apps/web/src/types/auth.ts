@@ -32,6 +32,8 @@ export interface AuthState {
   serverCommit: string | null;
   serverBuildDate: string | null;
   supportsPlugin: boolean;
+  supportsCodexClientModelOverride: boolean;
+  supportsCodexClientModelInherit: boolean;
 }
 
 // 连接状态

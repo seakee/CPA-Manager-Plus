@@ -53,6 +53,11 @@ export const getDemoCodexInspectionLocalRun = () => ({
   finishedAt: 0,
 });
 export const getDemoCodexInspectionLocalLogs = (_baseNow?: number, _t?: unknown) => [];
+export const getDemoCodexClientModelsState = () => emptyObject;
+export const setDemoCodexClientModelsOverride = (_document: Record<string, unknown>) => emptyObject;
+export const clearDemoCodexClientModelsOverride = () => emptyObject;
+export const setDemoCodexClientModelOverrideEntry = (_slug: string, _patch: unknown) => emptyObject;
+export const deleteDemoCodexClientModelOverrideEntry = (_slug: string) => emptyObject;
 export const getDemoAccountActionCandidates = () => ({ items: [], pendingCount: 0 });
 export const getDemoApiKeyAliases = () => ({ items: [] });
 export const getDemoLogsResponse = () => ({

@@ -41,6 +41,8 @@ interface AuthStoreState extends AuthState {
     commit?: string | null
   ) => void;
   updateServerPluginSupport: (supportsPlugin: boolean) => void;
+  updateServerCodexClientModelsSupport: (supported: boolean) => void;
+  updateServerCodexClientModelInheritSupport: (supported: boolean) => void;
   updateConnectionStatus: (status: ConnectionStatus, error?: string | null) => void;
 }
 
@@ -86,6 +88,8 @@ export const useAuthStore = create<AuthStoreState>()(
       serverCommit: null,
       serverBuildDate: null,
       supportsPlugin: false,
+      supportsCodexClientModelOverride: false,
+      supportsCodexClientModelInherit: false,
       sessionMode: '',
       sessionPanelBase: '',
       connectionStatus: 'disconnected',
@@ -205,6 +209,8 @@ export const useAuthStore = create<AuthStoreState>()(
           set({
             connectionStatus: 'connecting',
             supportsPlugin: false,
+            supportsCodexClientModelOverride: false,
+            supportsCodexClientModelInherit: false,
             serverVersion: null,
             serverCommit: null,
             serverBuildDate: null,
@@ -252,6 +258,8 @@ export const useAuthStore = create<AuthStoreState>()(
             connectionStatus: 'error',
             connectionError: message || 'Connection failed',
             supportsPlugin: false,
+            supportsCodexClientModelOverride: false,
+            supportsCodexClientModelInherit: false,
           });
           throw error;
         }
@@ -273,6 +281,8 @@ export const useAuthStore = create<AuthStoreState>()(
           serverCommit: null,
           serverBuildDate: null,
           supportsPlugin: false,
+          supportsCodexClientModelOverride: false,
+          supportsCodexClientModelInherit: false,
           sessionMode: '',
           sessionPanelBase: '',
           connectionStatus: 'disconnected',
@@ -294,6 +304,8 @@ export const useAuthStore = create<AuthStoreState>()(
           apiClient.setConfig({ apiBase, managementKey });
           set({
             supportsPlugin: false,
+            supportsCodexClientModelOverride: false,
+            supportsCodexClientModelInherit: false,
             serverVersion: null,
             serverCommit: null,
             serverBuildDate: null,
@@ -313,6 +325,8 @@ export const useAuthStore = create<AuthStoreState>()(
             isAuthenticated: false,
             connectionStatus: 'error',
             supportsPlugin: false,
+            supportsCodexClientModelOverride: false,
+            supportsCodexClientModelInherit: false,
           });
           return false;
         }
@@ -329,6 +343,14 @@ export const useAuthStore = create<AuthStoreState>()(
 
       updateServerPluginSupport: (supportsPlugin) => {
         set({ supportsPlugin });
+      },
+
+      updateServerCodexClientModelsSupport: (supported) => {
+        set({ supportsCodexClientModelOverride: supported });
+      },
+
+      updateServerCodexClientModelInheritSupport: (supported) => {
+        set({ supportsCodexClientModelInherit: supported });
       },
 
       // 更新连接状态
@@ -381,5 +403,15 @@ if (typeof window !== 'undefined') {
 
   window.addEventListener('server-plugin-support-update', ((e: CustomEvent) => {
     useAuthStore.getState().updateServerPluginSupport(e.detail?.supportsPlugin === true);
+  }) as EventListener);
+
+  window.addEventListener('server-codex-client-models-support-update', ((e: CustomEvent) => {
+    useAuthStore.getState().updateServerCodexClientModelsSupport(e.detail?.supported === true);
+  }) as EventListener);
+
+  window.addEventListener('server-codex-client-model-inherit-support-update', ((e: CustomEvent) => {
+    useAuthStore
+      .getState()
+      .updateServerCodexClientModelInheritSupport(e.detail?.supported === true);
   }) as EventListener);
 }

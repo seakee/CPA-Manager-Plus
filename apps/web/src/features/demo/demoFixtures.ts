@@ -7407,3 +7407,104 @@ export const getDemoApiCallResult = (payload: DemoApiCallPayload = {}) => {
     body,
   };
 };
+
+const demoCodexClientModelBaseEntries: Record<string, unknown>[] = [
+  {
+    slug: 'gpt-5.5',
+    display_name: 'GPT-5.5',
+    description: 'Default Codex client model template.',
+    base_instructions: 'You are Codex.',
+    minimal_client_version: '0.0.0',
+    visibility: 'public',
+    default_reasoning_level: 'medium',
+    context_window: 272000,
+    max_context_window: 272000,
+    priority: 100,
+    supported_reasoning_levels: ['low', 'medium', 'high'],
+    apply_patch_tool_type: 'function',
+  },
+  {
+    slug: 'gpt-5.6-sol',
+    display_name: 'GPT-5.6 Sol',
+    visibility: 'public',
+    default_reasoning_level: 'high',
+    context_window: 400000,
+    max_context_window: 400000,
+    priority: 90,
+  },
+];
+
+let demoCodexClientModelOverrides: Record<string, unknown> = {
+  'deepseek-chat': { display_name: 'DeepSeek Chat (local)' },
+};
+let demoCodexClientModelRevision = 12;
+
+const mergeDemoCodexClientModelPatch = (
+  base: Record<string, unknown> | null,
+  patch: unknown
+): Record<string, unknown> | null => {
+  if (patch === null) return null;
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return base;
+  const merged: Record<string, unknown> = { ...(base ?? {}) };
+  Object.entries(patch as Record<string, unknown>).forEach(([key, value]) => {
+    if (value === null) {
+      delete merged[key];
+      return;
+    }
+    merged[key] = value;
+  });
+  return merged;
+};
+
+export const getDemoCodexClientModelsState = () => {
+  const baseIndex = new Map(
+    demoCodexClientModelBaseEntries.map((entry) => [String(entry.slug), entry])
+  );
+  const models: Record<string, unknown>[] = [];
+  const origins: Record<string, string> = {};
+
+  baseIndex.forEach((entry, slug) => {
+    const hasOverride = Object.prototype.hasOwnProperty.call(demoCodexClientModelOverrides, slug);
+    const effective = hasOverride
+      ? mergeDemoCodexClientModelPatch(entry, demoCodexClientModelOverrides[slug])
+      : entry;
+    if (!effective) return;
+    models.push(clone(effective));
+    origins[slug] = hasOverride ? 'override' : 'base';
+  });
+
+  Object.entries(demoCodexClientModelOverrides).forEach(([slug, patch]) => {
+    if (baseIndex.has(slug)) return;
+    const effective = mergeDemoCodexClientModelPatch(null, patch);
+    if (!effective) return;
+    models.push(clone(effective));
+    origins[slug] = 'custom';
+  });
+
+  return {
+    source: 'demo',
+    revision: demoCodexClientModelRevision,
+    models,
+    origins,
+    override: clone(demoCodexClientModelOverrides),
+    override_path: '/opt/cpa/codex_client_models_override.json',
+    override_error: '',
+  };
+};
+
+export const setDemoCodexClientModelsOverride = (document: Record<string, unknown>) => {
+  demoCodexClientModelOverrides = clone(document) as Record<string, unknown>;
+  demoCodexClientModelRevision += 1;
+  return getDemoCodexClientModelsState();
+};
+
+export const clearDemoCodexClientModelsOverride = () => setDemoCodexClientModelsOverride({});
+
+export const setDemoCodexClientModelOverrideEntry = (slug: string, patch: unknown) =>
+  setDemoCodexClientModelsOverride({ ...demoCodexClientModelOverrides, [slug]: clone(patch) });
+
+export const deleteDemoCodexClientModelOverrideEntry = (slug: string) => {
+  const next: Record<string, unknown> = { ...demoCodexClientModelOverrides };
+  delete next[slug];
+  return setDemoCodexClientModelsOverride(next);
+};

@@ -1,0 +1,88 @@
+.root {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+/* 触发按钮就是状态标签本身：去掉 DropdownMenu 默认的胶囊样式，只留标签。 */
+.trigger {
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+.trigger:hover,
+.trigger:focus-visible {
+  transform: none;
+  background: transparent;
+  box-shadow: none;
+}
+
+.menu {
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.5;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.chip_official {
+  border-color: var(--border-subtle, #d8e5f2);
+  background: var(--surface-subtle, #f6f9fd);
+  color: var(--text-secondary, #64748b);
+}
+
+.chip_inherited {
+  border-color: color-mix(in srgb, var(--primary-color, #409eff) 30%, transparent);
+  background: color-mix(in srgb, var(--primary-color, #409eff) 12%, var(--bg-primary, #fff));
+  color: var(--primary-color, #409eff);
+}
+
+.chip_override {
+  border-color: color-mix(in srgb, var(--warning-color, #d97706) 34%, transparent);
+  background: color-mix(in srgb, var(--warning-color, #d97706) 14%, var(--bg-primary, #fff));
+  color: var(--warning-color, #d97706);
+}
+
+/* 合并框里的字段来源互不相同时用虚线边框区分：不是目录值，也不是单一来源。 */
+.chip_mixed {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--warning-color, #d97706) 46%, transparent);
+  background: color-mix(in srgb, var(--warning-color, #d97706) 10%, var(--bg-primary, #fff));
+  color: var(--warning-color, #d97706);
+}
+
+.chip_removed {
+  border-color: color-mix(in srgb, var(--error-color, #dc2626) 30%, transparent);
+  background: color-mix(in srgb, var(--error-color, #dc2626) 12%, var(--bg-primary, #fff));
+  color: var(--error-color, #dc2626);
+  text-decoration: line-through;
+}
+
+.issue {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--error-color, #dc2626) 12%, var(--bg-primary, #fff));
+  color: var(--error-color, #dc2626);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: help;
+}
