@@ -44,5 +44,51 @@
       }
     },
     "digest": "sha256:0fb94156f6c2a9101feb5a5eb73a7b31e64e7331ea6eb1ee781e1771407061a9"
+  },
+  "v1.12.12": {
+    "info": {
+      "schema_version": 1,
+      "release": {
+        "version": "v1.12.12",
+        "stage": "stable",
+        "source_commit": "e19d8267a52ca146c43bdb86d185bb7baed7ff38"
+      },
+      "content": {
+        "summary": {
+          "zh": "重做凭证列表的响应式额度展示，恢复历史用量，并完善多窗口额度与 xAI 额度识别。",
+          "en": "Refreshes responsive account quota presentation, restores historical usage, and improves multi-window and xAI quota handling."
+        },
+        "notes": {
+          "zh": "https://github.com/seakee/CPA-Manager-Plus/blob/v1.12.12/docs/release-notes/v1.12.12-zh.md",
+          "en": "https://github.com/seakee/CPA-Manager-Plus/blob/v1.12.12/docs/release-notes/v1.12.12-en.md"
+        }
+      },
+      "update": {
+        "breaking": false,
+        "migration_required": false,
+        "minimum_direct_upgrade_version": null,
+        "upgrade_guide_url": "https://github.com/seakee/CPA-Manager-Plus/releases/tag/v1.12.12"
+      },
+      "distribution": {
+        "docker": {
+          "image": "seakee/cpa-manager-plus",
+          "version_tag": "v1.12.12"
+        },
+        "native": {
+          "assets": [
+            "cpa-manager-plus_v1.12.12_darwin_amd64.tar.gz",
+            "cpa-manager-plus_v1.12.12_darwin_arm64.tar.gz",
+            "cpa-manager-plus_v1.12.12_linux_amd64.tar.gz",
+            "cpa-manager-plus_v1.12.12_linux_arm64.tar.gz",
+            "cpa-manager-plus_v1.12.12_windows_amd64.zip",
+            "cpa-manager-plus_v1.12.12_windows_arm64.zip"
+          ]
+        }
+      },
+      "compatibility": {
+        "minimum_cpa_version": null
+      }
+    },
+    "digest": "sha256:6662fe09faef48144e4ee4e26aed51d227610fca0e97261a1db1ddbd53076d15"
   }
 }
