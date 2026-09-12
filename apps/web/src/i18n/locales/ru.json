@@ -914,6 +914,7 @@
     "sort_descending": "Сортировать по убыванию",
     "sort_default": "По умолчанию",
     "sort_name": "Имя учетных данных",
+    "sort_remaining": "Остаток тарифа",
     "sort_reset_asc": "Сброс раньше",
     "sort_reset_desc": "Сброс позже",
     "sort_priority_desc": "Использовать раньше",

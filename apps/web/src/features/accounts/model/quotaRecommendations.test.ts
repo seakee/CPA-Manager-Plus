@@ -55,6 +55,7 @@ const makeRow = (overrides: AccountRowOverrides = {}): AccountRow => {
     inspection: null,
     raw,
     ...rowOverrides,
+    subscriptionUntilMs: rowOverrides.subscriptionUntilMs ?? null,
   };
 };
 

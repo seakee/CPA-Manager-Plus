@@ -2737,6 +2737,100 @@ describe('accountRows', () => {
     ).toEqual(['low.json', 'high.json', 'middle.json']);
   });
 
+  it('sorts paid Codex rows by subscription remaining time', () => {
+    const now = 1_800_000_000_000;
+    const rows = buildAccountRows(
+      [
+        { name: 'later.json', type: 'codex', planType: 'plus' },
+        { name: 'sooner.json', type: 'codex', planType: 'plus' },
+        { name: 'unknown.json', type: 'codex', planType: 'plus' },
+        { name: 'free.json', type: 'codex', planType: 'free' },
+      ],
+      {
+        ...emptyStores(),
+        codexQuota: {
+          'later.json': {
+            status: 'success',
+            windows: [],
+            planType: 'plus',
+            subscriptionActiveUntil: now + 20 * 86_400_000,
+          },
+          'sooner.json': {
+            status: 'success',
+            windows: [],
+            planType: 'plus',
+            subscriptionActiveUntil: now + 3 * 86_400_000,
+          },
+          'free.json': {
+            status: 'success',
+            windows: [],
+            planType: 'free',
+            subscriptionActiveUntil: now + 1 * 86_400_000,
+          },
+        },
+      }
+    );
+
+    expect(sortAccountRows(rows).map((row) => row.fileName)).toEqual([
+      'free.json',
+      'later.json',
+      'sooner.json',
+      'unknown.json',
+    ]);
+    expect(
+      sortAccountRows(rows, { key: 'remaining', direction: 'asc' }).map((row) => row.fileName)
+    ).toEqual(['sooner.json', 'later.json', 'free.json', 'unknown.json']);
+    expect(
+      sortAccountRows(rows, { key: 'remaining', direction: 'desc' }).map((row) => row.fileName)
+    ).toEqual(['later.json', 'sooner.json', 'free.json', 'unknown.json']);
+  });
+
+  it('sorts expired paid Codex remaining time by timestamp, with unknown last', () => {
+    const now = 1_800_000_000_000;
+    const expiredUntilMs = now - 2 * 86_400_000;
+    const activeUntilMs = now + 5 * 86_400_000;
+    const rows = buildAccountRows(
+      [
+        { name: 'unknown.json', type: 'codex', planType: 'plus' },
+        { name: 'active.json', type: 'codex', planType: 'plus' },
+        { name: 'expired.json', type: 'codex', planType: 'plus' },
+      ],
+      {
+        ...emptyStores(),
+        codexQuota: {
+          'expired.json': {
+            status: 'success',
+            windows: [],
+            planType: 'plus',
+            subscriptionActiveUntil: expiredUntilMs,
+          },
+          'active.json': {
+            status: 'success',
+            windows: [],
+            planType: 'plus',
+            subscriptionActiveUntil: activeUntilMs,
+          },
+          'unknown.json': {
+            status: 'success',
+            windows: [],
+            planType: 'plus',
+          },
+        },
+      }
+    );
+    const byName = Object.fromEntries(rows.map((row) => [row.fileName, row]));
+
+    expect(byName['expired.json']?.subscriptionUntilMs).toBe(expiredUntilMs);
+    expect(byName['active.json']?.subscriptionUntilMs).toBe(activeUntilMs);
+    expect(byName['unknown.json']?.subscriptionUntilMs).toBeNull();
+    expect(
+      sortAccountRows(rows, { key: 'remaining', direction: 'asc' }).map((row) => row.fileName)
+    ).toEqual(['expired.json', 'active.json', 'unknown.json']);
+    expect(
+      sortAccountRows(rows, { key: 'remaining', direction: 'desc' }).map((row) => row.fileName)
+    ).toEqual(['active.json', 'expired.json', 'unknown.json']);
+  });
+
   it('sorts the name column by account label instead of credential file name', () => {
     const rows = buildAccountRows(
       [

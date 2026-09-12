@@ -27,7 +27,7 @@ export type AccountsView = 'accounts' | 'health' | 'oauth';
 export type DetailTab = 'overview' | 'quota' | 'config' | 'models' | 'diagnostics';
 export type SortableAccountColumn = Extract<
   AccountRowSortKey,
-  'name' | 'plan' | 'note' | 'reset' | 'priority' | 'recent' | 'quota' | 'created'
+  'name' | 'plan' | 'note' | 'reset' | 'remaining' | 'priority' | 'recent' | 'quota' | 'created'
 >;
 export type AccountSortFieldValue = 'default' | SortableAccountColumn;
 type AntigravityQuotaMatrixWindowKind = Extract<AccountQuotaWindowKind, 'five_hour' | 'weekly'>;
@@ -66,6 +66,7 @@ export const ACCOUNT_SORT_DEFAULT_DIRECTIONS: Record<
   plan: 'asc',
   note: 'asc',
   reset: 'asc',
+  remaining: 'asc',
   priority: 'desc',
   recent: 'desc',
   quota: 'desc',
@@ -84,6 +85,7 @@ export const ACCOUNT_SORT_FIELD_OPTIONS: Array<{
   DEFAULT_ACCOUNT_SORT_FIELD_OPTION,
   { value: 'name', labelKey: 'accounts.sort_name' },
   { value: 'plan', labelKey: 'accounts.col_plan' },
+  { value: 'remaining', labelKey: 'accounts.sort_remaining' },
   { value: 'note', labelKey: 'auth_files.note_label' },
   { value: 'reset', labelKey: 'accounts.col_reset' },
   { value: 'quota', labelKey: 'accounts.col_quota' },
