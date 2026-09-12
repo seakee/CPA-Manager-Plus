@@ -439,9 +439,10 @@ var (
 	endpointPattern          = regexp.MustCompile(`^(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s+(\S+)`)
 	authorizationHeaderRegex = regexp.MustCompile(`(?i)\b(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,"'{}]+`)
 	bearerTokenRegex         = regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}`)
-	apiKeyTokenRegex         = regexp.MustCompile(`(sk-proj-[A-Za-z0-9-_]{6,}|sk-ant-[A-Za-z0-9-_]{6,}|sk-[A-Za-z0-9-_]{6,}|sess-[A-Za-z0-9-_]{6,}|ghp_[A-Za-z0-9]{6,}|github_pat_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z-_]{8,}|hf_[A-Za-z0-9]{6,}|pk_[A-Za-z0-9]{6,}|rk_[A-Za-z0-9]{6,})`)
+	apiKeyTokenRegex         = regexp.MustCompile(`(sk-proj-[A-Za-z0-9-_]{6,}|sk-ant-[A-Za-z0-9-_]{6,}|sk-[A-Za-z0-9-_]{6,}|sess-[A-Za-z0-9-_]{20,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z-_]{8,}|hf_[A-Za-z0-9]{20,}|pk_[A-Za-z0-9_]{20,}|rk_[A-Za-z0-9_]{20,}|cpamp_[A-Za-z0-9]{32}\b)`)
 	tokenFieldRegex          = regexp.MustCompile(`(?i)\b(access_token|refresh_token|id_token)\b(\s*["']?\s*[:=]\s*["']?)[^"',\s&}]+`)
 	apiKeyFieldRegex         = regexp.MustCompile(`(?i)\b(api[-_ ]?key|x-api-key)\b(\s*["']?\s*[:=]\s*["']?)[^"',\s&}]+`)
+	managementKeyFieldRegex  = regexp.MustCompile(`(?i)\b(management[-_ ]?key)\b(\s*["']?\s*[:=]\s*["']?)[^"',\s&}]+`)
 	cookieJSONFieldRegex     = regexp.MustCompile(`(?i)("?(?:cookie|set-cookie)"?\s*:\s*")[^"]*(")`)
 	cookieHeaderRegex        = regexp.MustCompile(`(?i)\b(cookie|set-cookie)\s*:\s*[^,\r\n"}]+`)
 	emailRegex               = regexp.MustCompile(`([A-Za-z0-9._%+\-])([A-Za-z0-9._%+\-]*)(@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})`)
@@ -980,7 +981,7 @@ func maskSource(value string) string {
 		}
 		return "m:" + trimmed[:4] + "..." + trimmed[len(trimmed)-4:]
 	}
-	return trimmed
+	return redactCredentialText(trimmed)
 }
 
 func looksSecret(value string) bool {
@@ -995,15 +996,88 @@ func FailSummaryFromBody(body string) string {
 	if summary == "" {
 		return ""
 	}
+	summary = redactCredentialText(summary)
+	summary = emailRegex.ReplaceAllString(summary, `${1}***${3}`)
+	return truncateUTF8Bytes(strings.TrimSpace(summary), maxFailSummaryBytes)
+}
+
+func redactCredentialText(value string) string {
+	summary := value
 	summary = authorizationHeaderRegex.ReplaceAllString(summary, `${1}[redacted]`)
 	summary = bearerTokenRegex.ReplaceAllString(summary, `Bearer [redacted]`)
 	summary = tokenFieldRegex.ReplaceAllString(summary, `${1}${2}[redacted]`)
 	summary = apiKeyFieldRegex.ReplaceAllString(summary, `${1}${2}[redacted]`)
+	summary = managementKeyFieldRegex.ReplaceAllString(summary, `${1}${2}[redacted]`)
 	summary = apiKeyTokenRegex.ReplaceAllString(summary, `[redacted]`)
 	summary = cookieJSONFieldRegex.ReplaceAllString(summary, `${1}[redacted]${2}`)
 	summary = cookieHeaderRegex.ReplaceAllString(summary, `${1}: [redacted]`)
-	summary = emailRegex.ReplaceAllString(summary, `${1}***${3}`)
-	return truncateUTF8Bytes(strings.TrimSpace(summary), maxFailSummaryBytes)
+	return summary
+}
+
+// SanitizeForPersistence applies the final credential-redaction boundary to
+// fields that may contain untrusted upstream payloads. Callers can normalize
+// earlier for display and aggregation, but no event should reach storage
+// without passing through this function.
+func SanitizeForPersistence(event Event) Event {
+	redact := redactCredentialText
+	event.RequestID = redact(event.RequestID)
+	event.EventHash = hashIfCredentialBearing(event.EventHash)
+	event.Timestamp = redact(event.Timestamp)
+	event.Provider = redact(event.Provider)
+	event.ExecutorType = redact(event.ExecutorType)
+	event.Model = redact(event.Model)
+	event.AnalyticsModel = redact(event.AnalyticsModel)
+	event.RequestedModel = redact(event.RequestedModel)
+	event.ResolvedModel = redact(event.ResolvedModel)
+	event.Endpoint = redact(event.Endpoint)
+	event.Method = redact(event.Method)
+	event.Path = redact(event.Path)
+	event.ClientIP = redact(event.ClientIP)
+	event.XForwardedFor = redact(event.XForwardedFor)
+	event.UserAgent = redact(event.UserAgent)
+	event.AuthType = redact(event.AuthType)
+	event.AuthIndex = redact(event.AuthIndex)
+	event.Source = redact(event.Source)
+	event.SourceHash = hashIfCredentialBearing(event.SourceHash)
+	event.APIKeyHash = hashIfCredentialBearing(event.APIKeyHash)
+	event.AccountSnapshot = redact(event.AccountSnapshot)
+	event.AuthLabelSnapshot = redact(event.AuthLabelSnapshot)
+	event.AuthFileSnapshot = redact(event.AuthFileSnapshot)
+	event.AuthProviderSnapshot = redact(event.AuthProviderSnapshot)
+	event.AuthAccountIDSnapshot = redact(event.AuthAccountIDSnapshot)
+	event.AuthProjectIDSnapshot = redact(event.AuthProjectIDSnapshot)
+	event.ReasoningEffort = redact(event.ReasoningEffort)
+	event.ServiceTier = redact(event.ServiceTier)
+	event.RequestServiceTier = redact(event.RequestServiceTier)
+	event.ResponseServiceTier = redact(event.ResponseServiceTier)
+	event.CacheInputMode = redact(event.CacheInputMode)
+	event.FailSummary = FailSummaryFromBody(event.FailSummary)
+	event.FailBody = redact(event.FailBody)
+	event.ResponseMetadataJSON = SafeRawJSON(event.ResponseMetadataJSON)
+	event.HeaderQuotaPlanType = redact(event.HeaderQuotaPlanType)
+	event.HeaderErrorKind = redact(event.HeaderErrorKind)
+	event.HeaderErrorCode = redact(event.HeaderErrorCode)
+	event.HeaderTraceID = redact(event.HeaderTraceID)
+	event.RawJSON = SafeRawJSON(event.RawJSON)
+	if event.ResponseMetadata != nil {
+		if raw, err := json.Marshal(event.ResponseMetadata); err == nil {
+			event.ResponseMetadata = ResponseHeaderMetadataFromJSON(SafeRawJSON(string(raw)))
+		}
+	}
+	return event
+}
+
+func hashIfCredentialBearing(value string) string {
+	if redactCredentialText(value) == value {
+		return value
+	}
+	return hashString(value)
+}
+
+// EventHashForPersistence protects the identity ledger before the more
+// expensive full event sanitizer runs after its duplicate claim.
+func EventHashForPersistence(value string) string {
+	return hashIfCredentialBearing(value)
 }
 
 func SafeRawJSON(raw string) string {
@@ -1070,6 +1144,8 @@ func redactValueWithParent(parentKey string, value any) any {
 			result = append(result, redactValueWithParent(parentKey, child))
 		}
 		return result
+	case string:
+		return redactCredentialText(item)
 	default:
 		return value
 	}
@@ -1092,6 +1168,12 @@ func isSecretKey(key string) bool {
 	normalized := normalizeSecretKey(key)
 	return normalized == "api_key" ||
 		normalized == "apikey" ||
+		normalized == "x_api_key" ||
+		normalized == "xapikey" ||
+		normalized == "management_key" ||
+		normalized == "managementkey" ||
+		normalized == "cpa_management_key" ||
+		normalized == "cpamanagementkey" ||
 		normalized == "authorization" ||
 		normalized == "cookie" ||
 		normalized == "set_cookie" ||
