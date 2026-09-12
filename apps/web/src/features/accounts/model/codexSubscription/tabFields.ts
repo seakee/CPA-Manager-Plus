@@ -1,6 +1,15 @@
 import type { AccountDetailField } from '@/features/accounts/model/accountDetailViewModel';
 import type { CodexSubscriptionEntry, CodexSubscriptionRecord } from './types';
 
+const SUBSCRIPTION_DAY_MS = 86_400_000;
+
+const CODEX_SUBSCRIPTION_SUMMARY_KEYS = new Set([
+  'planType',
+  'activeUntilMs',
+  'billingPeriod',
+  'willRenew',
+]);
+
 const booleanField = (
   key: string,
   labelKey: string,
@@ -13,6 +22,21 @@ const booleanField = (
     value: value ? 'common.yes' : 'common.no',
     valueKind: 'i18n',
   };
+};
+
+export const getCodexSubscriptionRemainingDays = (
+  untilMs: number | null | undefined,
+  nowMs = Date.now()
+): number | null => {
+  if (
+    typeof untilMs !== 'number' ||
+    !Number.isFinite(untilMs) ||
+    !Number.isFinite(nowMs) ||
+    untilMs <= nowMs
+  ) {
+    return null;
+  }
+  return Math.max(1, Math.ceil((untilMs - nowMs) / SUBSCRIPTION_DAY_MS));
 };
 
 export const billingPeriodLabelKey = (period: string): string => {
@@ -106,6 +130,47 @@ export const buildCodexSubscriptionDetailFields = (
   ];
   return fields.filter((field): field is AccountDetailField => field !== null);
 };
+
+export const buildCodexSubscriptionSummaryFields = (
+  record: CodexSubscriptionRecord
+): AccountDetailField[] => {
+  const billingLabel = record.billingPeriod ? billingPeriodLabelKey(record.billingPeriod) : null;
+  return [
+    {
+      key: 'planType',
+      labelKey: 'accounts.detail_subscription_plan_type',
+      value: record.planType,
+    },
+    {
+      key: 'activeUntilMs',
+      labelKey: 'accounts.detail_subscription_active_until',
+      value: record.activeUntilMs,
+      valueKind: record.activeUntilMs !== null ? 'quota_reset' : undefined,
+    },
+    {
+      key: 'billingPeriod',
+      labelKey: 'accounts.detail_subscription_billing_period',
+      value: billingLabel,
+      valueKind: billingLabel?.startsWith('accounts.')
+        ? 'i18n'
+        : billingLabel
+          ? 'text'
+          : undefined,
+    },
+    booleanField('willRenew', 'accounts.detail_subscription_will_renew', record.willRenew) ?? {
+      key: 'willRenew',
+      labelKey: 'accounts.detail_subscription_will_renew',
+      value: null,
+    },
+  ];
+};
+
+export const buildCodexSubscriptionSecondaryFields = (
+  record: CodexSubscriptionRecord
+): AccountDetailField[] =>
+  buildCodexSubscriptionDetailFields(record).filter(
+    (field) => !CODEX_SUBSCRIPTION_SUMMARY_KEYS.has(field.key)
+  );
 
 export const buildCodexSubscriptionTabFields = (
   entry: CodexSubscriptionEntry

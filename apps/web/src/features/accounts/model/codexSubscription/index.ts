@@ -18,4 +18,10 @@ export {
   useCodexSubscriptionStore,
 } from './store';
 export { collectCodexSubscriptionTargets, shouldShowCodexSubscriptionTab } from './tabGate';
-export { buildCodexSubscriptionDetailFields, buildCodexSubscriptionTabFields } from './tabFields';
+export {
+  buildCodexSubscriptionDetailFields,
+  buildCodexSubscriptionSecondaryFields,
+  buildCodexSubscriptionSummaryFields,
+  buildCodexSubscriptionTabFields,
+  getCodexSubscriptionRemainingDays,
+} from './tabFields';
