@@ -26,6 +26,22 @@ describe('API call demo fixtures', () => {
     expect(result.body).toBe(JSON.stringify({ error: { code: 16, message: 'Forbidden' } }));
   });
 
+  it('returns ChatGPT subscriptions JSON for paid Codex demo credentials', () => {
+    const result = getDemoApiCallResult({
+      authIndex: 'codex-pro-20x-01',
+      method: 'GET',
+      url: 'https://chatgpt.com/backend-api/subscriptions?account_id=acct_codex_pro_20x',
+    });
+
+    expect(result.status_code).toBe(200);
+    expect(result.body).toMatchObject({
+      plan_type: expect.any(String),
+      billing_period: 'monthly',
+      will_renew: true,
+    });
+    expect(result.body).toHaveProperty('active_until');
+  });
+
   it('keeps ordinary API calls successful', () => {
     const result = getDemoApiCallResult({
       method: 'POST',
