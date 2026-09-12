@@ -161,7 +161,9 @@ export function AccountSubscriptionTab({
         return { value: timestamp, valueTitle: title };
       }
       const remaining = t('accounts.list_plan_remaining_days', { days: remainingDays });
-      const remainingTitle = t('accounts.list_plan_remaining_days_tooltip', { days: remainingDays });
+      const remainingTitle = t('accounts.list_plan_remaining_days_tooltip', {
+        days: remainingDays,
+      });
       return {
         value: `${timestamp} · ${remaining}`,
         valueTitle: title ? `${title} · ${remainingTitle}` : remainingTitle,

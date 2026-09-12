@@ -151,11 +151,7 @@ export const buildCodexSubscriptionSummaryFields = (
       key: 'billingPeriod',
       labelKey: 'accounts.detail_subscription_billing_period',
       value: billingLabel,
-      valueKind: billingLabel?.startsWith('accounts.')
-        ? 'i18n'
-        : billingLabel
-          ? 'text'
-          : undefined,
+      valueKind: billingLabel?.startsWith('accounts.') ? 'i18n' : billingLabel ? 'text' : undefined,
     },
     booleanField('willRenew', 'accounts.detail_subscription_will_renew', record.willRenew) ?? {
       key: 'willRenew',

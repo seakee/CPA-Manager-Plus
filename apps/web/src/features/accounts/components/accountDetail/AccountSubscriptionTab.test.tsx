@@ -1,7 +1,10 @@
-import { create, type ReactTestRenderer } from 'react-test-renderer';
+import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { describe, expect, it, vi } from 'vitest';
 import { emptyCodexSubscriptionExtras } from '@/features/accounts/model/codexSubscription';
-import type { CodexSubscriptionEntry, CodexSubscriptionRecord } from '@/features/accounts/model/codexSubscription';
+import type {
+  CodexSubscriptionEntry,
+  CodexSubscriptionRecord,
+} from '@/features/accounts/model/codexSubscription';
 import { formatQuotaResetTimestamp } from '@/features/accounts/model/accountsPagePresentation';
 import { AccountSubscriptionTab } from './AccountSubscriptionTab';
 
@@ -31,6 +34,11 @@ const readText = (value: unknown): string => {
   return '';
 };
 
+const instanceText = (node: { children: Array<string | { children: unknown[] }> }): string =>
+  node.children
+    .map((child) => (typeof child === 'string' ? child : instanceText(child as never)))
+    .join('');
+
 const treeText = (renderer: ReactTestRenderer): string => readText(renderer.toJSON());
 
 const makeRecord = (overrides: Partial<CodexSubscriptionRecord> = {}): CodexSubscriptionRecord => ({
@@ -49,15 +57,20 @@ const makeRecord = (overrides: Partial<CodexSubscriptionRecord> = {}): CodexSubs
 const renderTab = (
   entry: CodexSubscriptionEntry,
   overrides: { missingAccountId?: boolean; refreshing?: boolean } = {}
-) =>
-  create(
-    <AccountSubscriptionTab
-      entry={entry}
-      missingAccountId={overrides.missingAccountId ?? false}
-      refreshing={overrides.refreshing ?? false}
-      onRefresh={() => undefined}
-    />
-  );
+): ReactTestRenderer => {
+  let renderer!: ReactTestRenderer;
+  act(() => {
+    renderer = create(
+      <AccountSubscriptionTab
+        entry={entry}
+        missingAccountId={overrides.missingAccountId ?? false}
+        refreshing={overrides.refreshing ?? false}
+        onRefresh={() => undefined}
+      />
+    );
+  });
+  return renderer;
+};
 
 describe('AccountSubscriptionTab', () => {
   it('renders Quota-style summary cards and a styled secondary grid when ready', () => {
@@ -72,7 +85,9 @@ describe('AccountSubscriptionTab', () => {
     const text = treeText(renderer);
     const summary = renderer.root.findByProps({ 'data-account-subscription-summary': 'true' });
     const details = renderer.root.findByProps({ 'data-account-subscription-details': 'true' });
-    const metrics = renderer.root.findAllByProps({ 'data-account-subscription-metric': 'planType' });
+    const metrics = renderer.root.findAllByProps({
+      'data-account-subscription-metric': 'planType',
+    });
 
     expect(summary.props.className).toContain('quotaSummaryPanel');
     expect(details.findByType('dl').props.className).toContain('overviewFieldGrid');
@@ -83,9 +98,9 @@ describe('AccountSubscriptionTab', () => {
     expect(text).toContain('accounts.list_plan_remaining_days');
     expect(text).toContain('common.yes');
     expect(text).toContain('accounts.detail_subscription_billing_monthly');
-    expect(renderer.root.findAllByProps({ 'data-account-subscription-delinquent': 'true' })).toHaveLength(
-      0
-    );
+    expect(
+      renderer.root.findAllByProps({ 'data-account-subscription-delinquent': 'true' })
+    ).toHaveLength(0);
   });
 
   it('surfaces delinquent state with the existing danger attention treatment', () => {
@@ -99,12 +114,14 @@ describe('AccountSubscriptionTab', () => {
       }),
     });
     const banner = renderer.root.findByProps({ 'data-account-subscription-delinquent': 'true' });
-    const delinquentField = renderer.root.findByProps({ 'data-subscription-field': 'isDelinquent' });
+    const delinquentField = renderer.root.findByProps({
+      'data-subscription-field': 'isDelinquent',
+    });
 
     expect(banner.props.className).toContain('overviewAttentionCard');
     expect(banner.props['data-overview-attention-priority']).toBe('high');
     expect(treeText(renderer)).toContain('accounts.detail_subscription_delinquent_notice');
-    expect(readText(delinquentField.props.children)).toContain('common.yes');
+    expect(instanceText(delinquentField)).toContain('common.yes');
   });
 
   it('keeps loading, empty, missing, and soft-failed states on native status surfaces', () => {
@@ -129,8 +146,11 @@ describe('AccountSubscriptionTab', () => {
       errorKind: 'http',
     });
     const errorBox = failed.root.find(
-      (node) => typeof node.props.className === 'string' && node.props.className.includes('errorBox')
+      (node) =>
+        typeof node.props.className === 'string' && node.props.className.includes('errorBox')
     );
-    expect(readText(errorBox.props.children)).toContain('accounts.detail_subscription_soft_failed:http');
+    expect(readText(errorBox.props.children)).toContain(
+      'accounts.detail_subscription_soft_failed:http'
+    );
   });
 });
