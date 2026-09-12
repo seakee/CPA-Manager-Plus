@@ -2269,7 +2269,7 @@ describe('accountDetailViewModel', () => {
     expect(viewModel.overview.credential.fields.map((item) => item.key)).not.toContain(
       'createdAtMs'
     );
-    expect(viewModel.overview.credential.targetTab).toBe('config');
+    expect(viewModel.overview.credential.targetTab).toBe('subscription');
   });
 
   it('falls back to the Codex ID token subscription end time and marks its source', () => {

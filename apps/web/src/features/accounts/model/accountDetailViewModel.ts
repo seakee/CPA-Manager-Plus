@@ -43,6 +43,7 @@ import {
 } from './quotaRecommendations';
 import type { UsageValueRow, UsageValueSource } from './usageValueRows';
 import { getPlanPresentation, resolveAuthFilePlanType, type PlanPresentation } from '@/utils/plans';
+import type { CodexSubscriptionRecord } from './codexSubscription';
 import { buildAccountSubscriptionPresentation } from './accountSubscriptionPresentation';
 import {
   classifyAccountCredentialStatusEvidence,
@@ -71,7 +72,7 @@ export const ACCOUNT_OVERVIEW_ACTIVITY_RANGE_DAYS = 7;
 export const ACCOUNT_OVERVIEW_ACTIVITY_RANGE_MS =
   ACCOUNT_OVERVIEW_ACTIVITY_RANGE_DAYS * 24 * 60 * 60 * 1000;
 
-export type AccountDetailOverviewTargetTab = 'quota' | 'config' | 'diagnostics';
+export type AccountDetailOverviewTargetTab = 'quota' | 'subscription' | 'config' | 'diagnostics';
 export type AccountDetailOverviewActivityScope = 'monitoring_7d' | 'recent_snapshot';
 
 export interface AccountDetailField {
@@ -350,6 +351,7 @@ export interface BuildAccountDetailViewModelOptions {
   history?: MonitoringAccountHistoryItem | null;
   valueRow?: UsageValueRow | null;
   codexQuota?: CodexQuotaState | null;
+  codexSubscription?: CodexSubscriptionRecord | null;
   xaiQuota?: XaiQuotaState | null;
   diagnosticsSummary?: MonitoringAnalyticsSummary | null;
   diagnosticsRecentFailure?: MonitoringAnalyticsRecentFailure | null;
@@ -1038,11 +1040,13 @@ const buildOverviewCapacity = (
 const buildOverviewCredential = (
   row: AccountRow,
   codexQuota: CodexQuotaState | null | undefined,
-  t?: TFunction
+  t?: TFunction,
+  subscriptionsRecord?: CodexSubscriptionRecord | null
 ): AccountDetailOverviewCredential => {
   const subscription = buildAccountSubscriptionPresentation({
     row,
     codexQuota,
+    subscriptionsRecord,
     t,
   });
 
@@ -1055,13 +1059,22 @@ const buildOverviewCredential = (
       : 'accounts.detail_local_auth_file',
     fields: compactFields([
       field('provider', 'accounts.col_provider', row.provider),
-      field('planType', 'accounts.col_plan', subscription.planPresentation?.fullLabel ?? subscription.effectivePlanType),
+      field(
+        'planType',
+        'accounts.col_plan',
+        subscription.planPresentation?.fullLabel ?? subscription.effectivePlanType
+      ),
       field('updatedAtMs', 'accounts.detail_updated_at', row.updatedAtMs, 'timestamp'),
-      field('subscriptionUntilMs', subscription.subscriptionUntilLabelKey, subscription.subscriptionUntilMs, 'quota_reset'),
+      field(
+        'subscriptionUntilMs',
+        subscription.subscriptionUntilLabelKey,
+        subscription.subscriptionUntilMs,
+        'quota_reset'
+      ),
       field('authIndex', 'accounts.detail_auth_index', presentOverviewText(row.authIndex)),
       field('priority', 'accounts.col_priority', row.priority ?? 0, 'number'),
     ]),
-    targetTab: 'config',
+    targetTab: subscription.isPaidCodex ? 'subscription' : 'config',
   };
 };
 
@@ -1422,7 +1435,12 @@ export const buildAccountDetailViewModel = (
   const overview = {
     decision: overviewDecision,
     capacity: buildOverviewCapacity(row, accountQuotaWindows, listItem),
-    credential: buildOverviewCredential(row, options.codexQuota, options.t),
+    credential: buildOverviewCredential(
+      row,
+      options.codexQuota,
+      options.t,
+      options.codexSubscription
+    ),
     recentStatus: buildOverviewRecentStatus(
       row,
       overviewDecision,

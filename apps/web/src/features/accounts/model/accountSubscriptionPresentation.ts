@@ -1,9 +1,13 @@
 import type { TFunction } from 'i18next';
 import type { CodexQuotaState } from '@/types';
 import { normalizeStringValue, parseIdTokenPayload } from '@/utils/quota/parsers';
-import { parseTimestampMs } from '@/utils/timestamp';
 import { getPlanPresentation, resolveAuthFilePlanType, type PlanPresentation } from '@/utils/plans';
+import type { CodexSubscriptionRecord } from './codexSubscription/types';
+import { parseSubscriptionTimestampMs } from './codexSubscription/parseSubscriptionTimestamp';
+import { resolveSubscriptionUntilMs } from './codexSubscription/parseSubscriptionsResponse';
 import type { AccountRow } from './accountRows';
+
+export const parseValidSubscriptionUntilMs = parseSubscriptionTimestampMs;
 
 export interface AccountSubscriptionPresentation {
   effectivePlanType: string | null;
@@ -16,31 +20,15 @@ export interface AccountSubscriptionPresentation {
   remainingDays: number | null;
 }
 
-export const parseValidSubscriptionUntilMs = (value: unknown): number | null => {
-  const numeric =
-    typeof value === 'number'
-      ? value
-      : typeof value === 'string' && /^\d+(?:\.\d+)?$/.test(value.trim())
-        ? Number(value.trim())
-        : null;
-  const parsed =
-    numeric !== null && Number.isFinite(numeric)
-      ? numeric < 1e12
-        ? numeric * 1000
-        : numeric
-      : parseTimestampMs(value);
-  if (!Number.isFinite(parsed) || parsed <= 0) return null;
-  return Number.isNaN(new Date(parsed).getTime()) ? null : parsed;
-};
-
 const asRecord = (value: unknown): Record<string, unknown> | null =>
   value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
 
 export const resolveCodexSubscriptionUntilMs = (
-  row: AccountRow,
-  codexQuota?: CodexQuotaState | null
+  row: Pick<AccountRow, 'provider' | 'raw'>,
+  codexQuota?: CodexQuotaState | null,
+  subscriptionsRecord?: CodexSubscriptionRecord | null
 ): {
   liveSubscriptionUntilMs: number | null;
   tokenSubscriptionUntilMs: number | null;
@@ -54,9 +42,9 @@ export const resolveCodexSubscriptionUntilMs = (
     };
   }
 
-  const liveSubscriptionUntilMs = parseValidSubscriptionUntilMs(
-    codexQuota?.subscriptionActiveUntil
-  );
+  const liveSubscriptionUntilMs =
+    resolveSubscriptionUntilMs(subscriptionsRecord) ??
+    parseValidSubscriptionUntilMs(codexQuota?.subscriptionActiveUntil);
 
   const metadata = asRecord(row.raw.metadata);
   const attributes = asRecord(row.raw.attributes);
@@ -82,12 +70,13 @@ export const resolveCodexSubscriptionUntilMs = (
 };
 
 export const buildAccountSubscriptionPresentation = (input: {
-  row: AccountRow;
+  row: Pick<AccountRow, 'provider' | 'planType' | 'raw'>;
   codexQuota?: CodexQuotaState | null;
+  subscriptionsRecord?: CodexSubscriptionRecord | null;
   t?: TFunction;
   nowMs?: number;
 }): AccountSubscriptionPresentation => {
-  const { row, codexQuota, t, nowMs = Date.now() } = input;
+  const { row, codexQuota, subscriptionsRecord, t, nowMs = Date.now() } = input;
   const effectivePlanType = normalizeStringValue(
     codexQuota?.planType ?? row.planType ?? resolveAuthFilePlanType(row.raw)
   );
@@ -107,7 +96,7 @@ export const buildAccountSubscriptionPresentation = (input: {
   let subscriptionUntilMs: number | null = null;
 
   if (isPaidCodex) {
-    const resolved = resolveCodexSubscriptionUntilMs(row, codexQuota);
+    const resolved = resolveCodexSubscriptionUntilMs(row, codexQuota, subscriptionsRecord);
     liveSubscriptionUntilMs = resolved.liveSubscriptionUntilMs;
     tokenSubscriptionUntilMs = resolved.tokenSubscriptionUntilMs;
     subscriptionUntilMs = resolved.subscriptionUntilMs;

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AccountRow } from './accountRows';
 import type { CodexQuotaState } from '@/types';
+import { emptyCodexSubscriptionExtras, type CodexSubscriptionRecord } from './codexSubscription';
 import {
   buildAccountSubscriptionPresentation,
   parseValidSubscriptionUntilMs,
@@ -129,6 +130,35 @@ describe('accountSubscriptionPresentation', () => {
       expect(result.subscriptionUntilMs).toBe(1_750_000_000_000);
     });
 
+    it('prioritizes subscriptions.activeUntilMs over wham and JWT', () => {
+      const row = makeAccountRow({
+        raw: {
+          name: 'codex-test.json',
+          type: 'codex',
+          id_token: `header.${btoa(JSON.stringify({ chatgpt_subscription_active_until: 1_600_000_000 }))}.sig`,
+        },
+      });
+      const quota = makeCodexQuota({
+        planType: 'plus',
+        subscriptionActiveUntil: 1_700_000_000,
+      });
+      const subscriptionsRecord: CodexSubscriptionRecord = {
+        accountId: 'acct_plus',
+        planType: 'plus',
+        activeStartMs: 1_750_000_000_000,
+        activeUntilMs: 1_800_000_000_000,
+        billingPeriod: 'monthly',
+        willRenew: true,
+        fetchedAtMs: FIXED_NOW_MS,
+        source: 'subscriptions',
+        extras: emptyCodexSubscriptionExtras(),
+      };
+      const result = resolveCodexSubscriptionUntilMs(row, quota, subscriptionsRecord);
+      expect(result.liveSubscriptionUntilMs).toBe(1_800_000_000_000);
+      expect(result.tokenSubscriptionUntilMs).toBe(1_600_000_000_000);
+      expect(result.subscriptionUntilMs).toBe(1_800_000_000_000);
+    });
+
     it('returns all nulls for non-Codex provider', () => {
       const row = makeAccountRow({ provider: 'claude' });
       const quota = makeCodexQuota({
@@ -210,6 +240,32 @@ describe('accountSubscriptionPresentation', () => {
       expect(result.isPaidCodex).toBe(true);
       expect(result.subscriptionUntilMs).toBeNull();
       expect(result.remainingDays).toBeNull();
+    });
+
+    it('uses subscriptions remainingDays for list and sort consumers', () => {
+      const subscriptionsUntil = FIXED_NOW_MS + 11 * 86_400_000;
+      const result = buildAccountSubscriptionPresentation({
+        row: makeAccountRow(),
+        codexQuota: makeCodexQuota({
+          planType: 'plus',
+          subscriptionActiveUntil: FIXED_NOW_MS + 3 * 86_400_000,
+        }),
+        subscriptionsRecord: {
+          accountId: 'acct_plus',
+          planType: 'plus',
+          activeStartMs: FIXED_NOW_MS - 20 * 86_400_000,
+          activeUntilMs: subscriptionsUntil,
+          billingPeriod: 'monthly',
+          willRenew: true,
+          fetchedAtMs: FIXED_NOW_MS,
+          source: 'subscriptions',
+          extras: emptyCodexSubscriptionExtras(),
+        },
+        nowMs: FIXED_NOW_MS,
+      });
+
+      expect(result.subscriptionUntilMs).toBe(subscriptionsUntil);
+      expect(result.remainingDays).toBe(11);
     });
 
     it('does not display remainingDays for non-Codex provider', () => {

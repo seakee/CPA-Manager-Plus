@@ -73,6 +73,15 @@ describe('accountsWorkspaceUrlState', () => {
     ).toBe('config');
   });
 
+  it('preserves the Codex subscription detail tab', () => {
+    expect(
+      readAccountsWorkspaceUrlState(
+        '?account=codex-plus.json%00auth-1&tab=subscription',
+        DEFAULT_ACCOUNTS_WORKSPACE_UI_STATE
+      ).detailTab
+    ).toBe('subscription');
+  });
+
   it('migrates legacy credential-tab links to configuration', () => {
     const state = readAccountsWorkspaceUrlState(
       '?account=shared.json%00auth-2&tab=credential',

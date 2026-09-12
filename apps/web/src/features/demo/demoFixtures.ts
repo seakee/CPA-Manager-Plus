@@ -7106,6 +7106,35 @@ export const getDemoApiCallResult = (payload: DemoApiCallPayload = {}) => {
           : new Date(now() + 23 * day).toISOString(),
       };
     }
+  } else if (requestUrl.includes('/backend-api/subscriptions')) {
+    const matchedAuthFile = getDemoAuthFiles().files.find(
+      (file) => String(file.authIndex ?? file['auth_index'] ?? '') === authIndex
+    );
+    const idToken =
+      matchedAuthFile?.id_token &&
+      typeof matchedAuthFile.id_token === 'object' &&
+      !Array.isArray(matchedAuthFile.id_token)
+        ? (matchedAuthFile.id_token as Record<string, unknown>)
+        : null;
+    const rawPlanType = matchedAuthFile?.plan_type ?? idToken?.plan_type;
+    const rawSubscriptionActiveUntil =
+      idToken?.chatgpt_subscription_active_until ?? idToken?.chatgptSubscriptionActiveUntil;
+    body = {
+      plan_type:
+        typeof rawPlanType === 'string' && rawPlanType.trim()
+          ? rawPlanType.trim().toLowerCase()
+          : 'plus',
+      active_start: new Date(now() - 8 * day).toISOString(),
+      active_until:
+        typeof rawSubscriptionActiveUntil === 'string' ||
+        (typeof rawSubscriptionActiveUntil === 'number' &&
+          Number.isFinite(rawSubscriptionActiveUntil))
+          ? rawSubscriptionActiveUntil
+          : new Date(now() + 23 * day).toISOString(),
+      billing_period: 'monthly',
+      will_renew: !isCodexExpired,
+      account_id: idToken?.chatgpt_account_id ?? `acct_${authIndex || 'demo'}`,
+    };
   } else if (requestUrl.includes('/rate-limit-reset-credits')) {
     body = {
       available_count: isCodexPro20x ? 3 : isCodexRecovered ? 1 : 2,

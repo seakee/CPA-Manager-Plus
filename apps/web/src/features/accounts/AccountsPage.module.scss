@@ -633,6 +633,11 @@
   font-weight: 750;
 }
 
+.accountPlanBadge[role='button'],
+.accountCardPlan[role='button'] {
+  cursor: pointer;
+}
+
 .accountResetCreditsButton {
   display: inline-flex;
   align-items: center;
