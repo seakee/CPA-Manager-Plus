@@ -40,6 +40,7 @@ const SORT_KEY_SET: ReadonlySet<AccountsWorkspaceUiState['accountSort']['key']> 
   'plan',
   'note',
   'reset',
+  'remaining',
   'priority',
   'recent',
   'quota',

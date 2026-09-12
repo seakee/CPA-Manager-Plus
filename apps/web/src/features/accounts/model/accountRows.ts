@@ -56,6 +56,7 @@ import {
   getPlanPresentation,
   resolveAuthFilePlanType,
 } from '@/utils/plans';
+import { buildAccountSubscriptionPresentation } from './accountSubscriptionPresentation';
 
 export {
   compareQuotaResetLabels,
@@ -193,6 +194,7 @@ export interface AccountRow {
   priority: number | null;
   createdAtMs: number | null;
   updatedAtMs: number | null;
+  subscriptionUntilMs?: number | null;
   authenticationAtMs: number;
   rawCredentialStatusSuperseded: boolean;
   quota: AccountQuotaSummary;
@@ -494,14 +496,23 @@ export const buildAccountRows = (
         updatedAtMs !== null &&
         authenticationAtMs >= updatedAtMs);
     const quota = resolveAccountQuota(effectiveFile, stores, overrides);
+    const planType = quota.planType ?? readPlanType(file);
+    const subscriptionUntilMs = buildAccountSubscriptionPresentation({
+      row: {
+        provider,
+        planType,
+        raw: file,
+      },
+      codexQuota,
+    }).subscriptionUntilMs;
     return {
       key: file.name,
       selectionKey,
       fileName: file.name,
       accountLabel: resolveAccountLabel(file),
       provider,
-      planType: quota.planType ?? readPlanType(file),
-      canonicalPlanType: getCanonicalPlanType(provider, quota.planType ?? readPlanType(file)),
+      planType,
+      canonicalPlanType: getCanonicalPlanType(provider, planType),
       disabled: effectiveFile.disabled === true,
       runtimeOnly:
         file.runtimeOnly === true || file.runtimeOnly === 'true' || file.runtime_only === true,
@@ -512,6 +523,7 @@ export const buildAccountRows = (
       priority: readNumber(file.priority),
       createdAtMs: readAuthFileCreatedAtMs(file),
       updatedAtMs,
+      subscriptionUntilMs,
       authenticationAtMs,
       rawCredentialStatusSuperseded,
       quota,
@@ -1040,6 +1052,13 @@ const compareAccountRowsBySort = (left: AccountRow, right: AccountRow, sort: Acc
   }
   if (sort.key === 'created') {
     return compareNullableNumbers(left.createdAtMs, right.createdAtMs, sort.direction);
+  }
+  if (sort.key === 'remaining') {
+    return compareNullableNumbers(
+      left.subscriptionUntilMs ?? null,
+      right.subscriptionUntilMs ?? null,
+      sort.direction
+    );
   }
   if (sort.key === 'reset') {
     return compareQuotaResets(left.quota, right.quota, sort.direction);

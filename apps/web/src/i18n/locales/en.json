@@ -910,6 +910,7 @@
     "sort_descending": "Sort descending",
     "sort_default": "Default",
     "sort_name": "Credential name",
+    "sort_remaining": "Plan remaining",
     "sort_reset_asc": "Earliest reset",
     "sort_reset_desc": "Latest reset",
     "sort_priority_desc": "Use first",

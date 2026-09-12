@@ -30,6 +30,7 @@ const SORT_KEYS = new Set([
   'plan',
   'note',
   'reset',
+  'remaining',
   'priority',
   'recent',
   'quota',

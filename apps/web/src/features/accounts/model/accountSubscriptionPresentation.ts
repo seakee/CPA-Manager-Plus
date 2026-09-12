@@ -39,7 +39,7 @@ const asRecord = (value: unknown): Record<string, unknown> | null =>
     : null;
 
 export const resolveCodexSubscriptionUntilMs = (
-  row: AccountRow,
+  row: Pick<AccountRow, 'provider' | 'raw'>,
   codexQuota?: CodexQuotaState | null
 ): {
   liveSubscriptionUntilMs: number | null;
@@ -82,7 +82,7 @@ export const resolveCodexSubscriptionUntilMs = (
 };
 
 export const buildAccountSubscriptionPresentation = (input: {
-  row: AccountRow;
+  row: Pick<AccountRow, 'provider' | 'planType' | 'raw'>;
   codexQuota?: CodexQuotaState | null;
   t?: TFunction;
   nowMs?: number;

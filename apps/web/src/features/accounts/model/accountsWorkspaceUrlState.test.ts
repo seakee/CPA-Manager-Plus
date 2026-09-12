@@ -137,6 +137,27 @@ describe('accountsWorkspaceUrlState', () => {
     expect(state.accountSort).toEqual({ key: 'name', direction: 'desc' });
   });
 
+  it('round-trips remaining-time sort from the accounts URL', () => {
+    const search = writeAccountsWorkspaceUrlSearch(
+      '',
+      {
+        ...DEFAULT_ACCOUNTS_WORKSPACE_UI_STATE,
+        view: 'accounts',
+        healthMode: 'local',
+        account: null,
+        detailTab: 'overview',
+        editor: null,
+        editorProvider: '',
+        accountSort: { key: 'remaining', direction: 'asc' },
+      },
+      DEFAULT_ACCOUNTS_WORKSPACE_UI_STATE
+    );
+    const state = readAccountsWorkspaceUrlState(search, DEFAULT_ACCOUNTS_WORKSPACE_UI_STATE);
+
+    expect(search).toBe('?sort=remaining&direction=asc');
+    expect(state.accountSort).toEqual({ key: 'remaining', direction: 'asc' });
+  });
+
   it('round-trips precise Codex status filters', () => {
     const search = writeAccountsWorkspaceUrlSearch(
       '',

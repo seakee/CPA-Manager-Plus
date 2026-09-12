@@ -8136,6 +8136,51 @@ describe('AccountsPage replacement flows', () => {
     expect(getAccountListItemTexts(renderer)[0]).toContain('high.json');
   });
 
+  it('sorts Codex account cards by paid subscription remaining time', async () => {
+    const now = Date.now();
+    mocks.files = [
+      makeCodexFile('later.json', 'auth-later', 'later@example.com'),
+      makeCodexFile('sooner.json', 'auth-sooner', 'sooner@example.com'),
+      makeCodexFile('unknown.json', 'auth-unknown', 'unknown@example.com'),
+    ];
+    mocks.quotaState.codexQuota = {
+      ...buildCredentialScopedQuotaRecord(mocks.files[0], {
+        status: 'success',
+        planType: 'plus',
+        windows: [{ id: 'weekly', label: 'Weekly', usedPercent: 10, resetLabel: '2026-01-10' }],
+        subscriptionActiveUntil: now + 20 * 86_400_000,
+      }),
+      ...buildCredentialScopedQuotaRecord(mocks.files[1], {
+        status: 'success',
+        planType: 'plus',
+        windows: [{ id: 'weekly', label: 'Weekly', usedPercent: 10, resetLabel: '2026-01-10' }],
+        subscriptionActiveUntil: now + 3 * 86_400_000,
+      }),
+      ...buildCredentialScopedQuotaRecord(mocks.files[2], {
+        status: 'success',
+        planType: 'plus',
+        windows: [{ id: 'weekly', label: 'Weekly', usedPercent: 10, resetLabel: '2026-01-10' }],
+      }),
+    };
+
+    const renderer = await renderAccountsPage();
+
+    await act(async () => {
+      findHostButtonByAriaLabel(
+        renderer,
+        'accounts.sort_label: accounts.col_recent'
+      ).props.onClick();
+    });
+    await act(async () => {
+      findHostButtonByText(renderer, 'accounts.sort_remaining').props.onClick();
+    });
+
+    const names = getAccountListItemTexts(renderer);
+    expect(names[0]).toContain('sooner.json');
+    expect(names[1]).toContain('later.json');
+    expect(names[2]).toContain('unknown.json');
+  });
+
   it('renders xAI monthly billing and pay-as-you-go fallback on account cards', async () => {
     mocks.files = [
       {
