@@ -194,7 +194,7 @@ export interface AccountRow {
   priority: number | null;
   createdAtMs: number | null;
   updatedAtMs: number | null;
-  subscriptionUntilMs?: number | null;
+  subscriptionUntilMs: number | null;
   authenticationAtMs: number;
   rawCredentialStatusSuperseded: boolean;
   quota: AccountQuotaSummary;
@@ -1054,11 +1054,7 @@ const compareAccountRowsBySort = (left: AccountRow, right: AccountRow, sort: Acc
     return compareNullableNumbers(left.createdAtMs, right.createdAtMs, sort.direction);
   }
   if (sort.key === 'remaining') {
-    return compareNullableNumbers(
-      left.subscriptionUntilMs ?? null,
-      right.subscriptionUntilMs ?? null,
-      sort.direction
-    );
+    return compareNullableNumbers(left.subscriptionUntilMs, right.subscriptionUntilMs, sort.direction);
   }
   if (sort.key === 'reset') {
     return compareQuotaResets(left.quota, right.quota, sort.direction);

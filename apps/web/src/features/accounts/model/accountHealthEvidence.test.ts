@@ -66,6 +66,7 @@ const makeRow = (overrides: Partial<AccountRow> = {}): AccountRow => {
     inspection: null,
     raw,
     ...overrides,
+    subscriptionUntilMs: overrides.subscriptionUntilMs ?? null,
   };
 };
 
