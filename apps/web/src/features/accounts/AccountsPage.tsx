@@ -223,6 +223,12 @@ import {
   type DetailTab,
 } from '@/features/accounts/model/accountsPagePresentation';
 import { buildAccountSubscriptionPresentation } from '@/features/accounts/model/accountSubscriptionPresentation';
+import {
+  collectCodexSubscriptionTargets,
+  ensureCodexSubscriptionFresh,
+  shouldShowCodexSubscriptionTab,
+  useCodexSubscriptionStore,
+} from '@/features/accounts/model/codexSubscription';
 import { resolveAccountQuotaWindowUsageAndForecast } from '@/features/accounts/model/accountQuotaWindowUsagePresentation';
 import { formatCompactNumber, formatCompactUsd, formatUsd } from '@/utils/usage';
 import {
@@ -291,6 +297,7 @@ import {
   AccountOverviewTab,
   AccountProviderTabs,
   AccountQuotaTab,
+  AccountSubscriptionTab,
   AccountsBatchDeletePreview,
 } from '@/features/accounts/components';
 import {
@@ -316,6 +323,7 @@ import {
 import type { AuthFileItem, CodexQuotaState, XaiQuotaState } from '@/types';
 import {
   fetchCodexResetCredits,
+  resolveCodexChatgptAccountId,
   type CodexResetCreditsData,
 } from '@/utils/quota';
 import type { AuthJsonInputType } from '@/features/authFiles/sessionAuthConverter';
@@ -1387,6 +1395,8 @@ export function AccountsPage() {
   const [detailTab, setDetailTab] = useState<DetailTab>(
     () => initialWorkspaceUrlState.current.detailTab
   );
+  const [subscriptionRefreshing, setSubscriptionRefreshing] = useState(false);
+  const subscriptionEntries = useCodexSubscriptionStore((state) => state.entries);
   const [providerFilter, setProviderFilter] = useState(
     () => initialWorkspaceUrlState.current.providerFilter
   );
@@ -4360,6 +4370,14 @@ export function AccountsPage() {
     () => rows.find((row) => row.selectionKey === selectedRowKey) ?? null,
     [rows, selectedRowKey]
   );
+  useEffect(() => {
+    const targets = collectCodexSubscriptionTargets(filteredRows, (row) =>
+      row.provider === CODEX_CONFIG.type ? getActiveCodexQuota(row.raw) : undefined
+    );
+    targets.forEach((target) => {
+      void ensureCodexSubscriptionFresh(target);
+    });
+  }, [filteredRows, getActiveCodexQuota]);
   const accountHistoryTargets = useMemo(() => buildAccountHistoryTargetEntries(rows), [rows]);
   const accountHistoryAutoContextKey = useMemo(
     () =>
@@ -5085,6 +5103,19 @@ export function AccountsPage() {
       selectedRowKey,
       workspaceUrlState,
     ]
+  );
+
+  const openAccountSubscriptionDetail = useCallback(
+    (row: AccountRow, event?: { stopPropagation(): void; preventDefault(): void }) => {
+      event?.stopPropagation();
+      event?.preventDefault();
+      const quota = row.provider === CODEX_CONFIG.type ? getActiveCodexQuota(row.raw) : undefined;
+      void openAccountDetail(
+        row,
+        shouldShowCodexSubscriptionTab(row, quota) ? 'subscription' : 'overview'
+      );
+    },
+    [getActiveCodexQuota, openAccountDetail]
   );
 
   const closeAccountDetail = useCallback(() => {
@@ -8459,9 +8490,14 @@ export function AccountsPage() {
     });
     const codexQuotaState =
       row.provider === CODEX_CONFIG.type ? getActiveCodexQuota(row.raw) : undefined;
+    const subscriptionAccountId = resolveCodexChatgptAccountId(row.raw);
+    const subscriptionEntry = subscriptionAccountId
+      ? subscriptionEntries[subscriptionAccountId]
+      : undefined;
     const subscriptionPresentation = buildAccountSubscriptionPresentation({
       row,
       codexQuota: codexQuotaState,
+      subscriptionsRecord: subscriptionEntry?.status === 'ready' ? subscriptionEntry.record : null,
     });
     const codexResetCreditsCount =
       codexQuotaState?.rateLimitResetCreditsAvailableCount ??
@@ -8768,11 +8804,28 @@ export function AccountsPage() {
                                 ? styles.accountPlanBadgeDaysWarning
                                 : styles.accountPlanBadgeDaysNormal
                             : '';
+                        const planOpenProps = ctx.subscriptionPresentation.isPaidCodex
+                          ? {
+                              role: 'button' as const,
+                              tabIndex: 0,
+                              onClick: (event: ReactMouseEvent) =>
+                                openAccountSubscriptionDetail(row, event),
+                              onKeyDown: (event: KeyboardEvent) => {
+                                if (event.key === 'Enter' || event.key === ' ') {
+                                  openAccountSubscriptionDetail(row, event);
+                                }
+                              },
+                              'aria-label': t('accounts.open_subscription_detail', {
+                                name: getDisplayFileName(row.fileName),
+                              }),
+                            }
+                          : {};
                         return ctx.subscriptionPresentation.planPresentation?.shortLabel &&
                           ctx.subscriptionPresentation.planPresentation.shortLabel !== '-' ? (
                           <span
                             className={styles.accountPlanBadge}
                             title={ctx.subscriptionPresentation.planPresentation?.fullLabel}
+                            {...planOpenProps}
                           >
                             {ctx.subscriptionPresentation.planPresentation.shortLabel}
                             {remainingDays !== null ? (
@@ -8794,6 +8847,7 @@ export function AccountsPage() {
                               days: remainingDays,
                               defaultValue: `剩余 ${remainingDays} 天`,
                             })}
+                            {...planOpenProps}
                           >
                             {t('accounts.list_plan_remaining_days', {
                               days: remainingDays,
@@ -9233,7 +9287,25 @@ export function AccountsPage() {
                     </div>
                   </div>
 
-                  <div className={styles.accountCardPlan}>
+                  <div
+                    className={styles.accountCardPlan}
+                    {...(ctx.subscriptionPresentation.isPaidCodex
+                      ? {
+                          role: 'button' as const,
+                          tabIndex: 0,
+                          onClick: (event: ReactMouseEvent) =>
+                            openAccountSubscriptionDetail(row, event),
+                          onKeyDown: (event: KeyboardEvent) => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              openAccountSubscriptionDetail(row, event);
+                            }
+                          },
+                          'aria-label': t('accounts.open_subscription_detail', {
+                            name: getDisplayFileName(row.fileName),
+                          }),
+                        }
+                      : {})}
+                  >
                     <span
                       className={styles.accountPlanName}
                       title={ctx.subscriptionPresentation.planPresentation?.fullLabel}
@@ -9408,9 +9480,22 @@ export function AccountsPage() {
 
     const providerIcon = getAuthFileIcon(selectedRow.provider, resolvedTheme);
 
+    const selectedSubscriptionAccountId = resolveCodexChatgptAccountId(selectedRow.raw);
+    const selectedSubscriptionEntry = selectedSubscriptionAccountId
+      ? subscriptionEntries[selectedSubscriptionAccountId] ?? { status: 'idle' as const }
+      : { status: 'idle' as const };
+    const selectedSubscriptionRecord =
+      selectedSubscriptionEntry.status === 'ready' ? selectedSubscriptionEntry.record : null;
+    const showSubscriptionTab = shouldShowCodexSubscriptionTab(
+      selectedRow,
+      selectedRow.provider === CODEX_CONFIG.type ? getActiveCodexQuota(selectedRow.raw) : undefined
+    );
     const detailTabs: Array<{ id: DetailTab; label: string }> = [
       { id: 'overview', label: t('accounts.detail_tab_overview') },
       { id: 'quota', label: t('accounts.detail_tab_quota') },
+      ...(showSubscriptionTab
+        ? [{ id: 'subscription' as const, label: t('accounts.detail_tab_subscription') }]
+        : []),
       { id: 'config', label: t('accounts.detail_tab_config') },
       { id: 'models', label: t('accounts.detail_tab_models') },
       { id: 'diagnostics', label: t('accounts.detail_tab_diagnostics') },
@@ -9482,6 +9567,7 @@ export function AccountsPage() {
       history: accountHistoryByRowKey.get(selectedRow.selectionKey) ?? null,
       valueRow,
       codexQuota: selectedCodexQuota,
+      codexSubscription: selectedSubscriptionRecord,
       xaiQuota:
         selectedRow.provider === XAI_CONFIG.type
           ? getCredentialScopedQuotaState(xaiQuota, selectedRow.raw)
@@ -9498,6 +9584,26 @@ export function AccountsPage() {
     const modelsTargetMatches = modelsSelectionKey === selectedRow.selectionKey;
 
     const renderActiveDetail = () => {
+      if (detailTab === 'subscription' && showSubscriptionTab) {
+        return (
+          <AccountSubscriptionTab
+            entry={selectedSubscriptionEntry}
+            missingAccountId={!selectedSubscriptionAccountId}
+            refreshing={subscriptionRefreshing || selectedSubscriptionEntry.status === 'loading'}
+            onRefresh={() => {
+              if (!selectedSubscriptionAccountId) return;
+              const authIndex = normalizeAuthIndex(selectedRow.authIndex);
+              if (!authIndex) return;
+              setSubscriptionRefreshing(true);
+              void ensureCodexSubscriptionFresh({
+                accountId: selectedSubscriptionAccountId,
+                authIndex,
+                force: true,
+              }).finally(() => setSubscriptionRefreshing(false));
+            }}
+          />
+        );
+      }
       if (detailTab === 'quota') {
         return (
           <AccountQuotaTab

@@ -24,7 +24,7 @@ import { formatUsd } from '@/utils/usage';
 import { getEffectiveAccountInspectionAction } from './accountCredentialEvidence';
 
 export type AccountsView = 'accounts' | 'health' | 'oauth';
-export type DetailTab = 'overview' | 'quota' | 'config' | 'models' | 'diagnostics';
+export type DetailTab = 'overview' | 'quota' | 'subscription' | 'config' | 'models' | 'diagnostics';
 export type SortableAccountColumn = Extract<
   AccountRowSortKey,
   'name' | 'plan' | 'note' | 'reset' | 'priority' | 'recent' | 'quota' | 'created'

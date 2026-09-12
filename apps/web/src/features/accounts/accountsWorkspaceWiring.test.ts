@@ -112,6 +112,7 @@ describe('accounts workspace wiring', () => {
       locale.accounts.detail_tab_models,
       locale.accounts.detail_tab_diagnostics,
     ]).toEqual(expectedLabels);
+    expect(locale.accounts.detail_tab_subscription).toBeTypeOf('string');
   });
 
   it.each([en, ru, zhCN, zhTW])('keeps credential-configuration copy complete', (locale) => {

@@ -4,3 +4,4 @@ export { AccountDetailFieldList, AccountDetailFieldValue } from './AccountDetail
 export { AccountModelsTab } from './AccountModelsTab';
 export { AccountOverviewTab } from './AccountOverviewTab';
 export { AccountQuotaTab } from './AccountQuotaTab';
+export { AccountSubscriptionTab } from './AccountSubscriptionTab';
