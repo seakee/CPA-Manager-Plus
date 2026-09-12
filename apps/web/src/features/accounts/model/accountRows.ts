@@ -103,6 +103,7 @@ export type AccountRowSortKey =
   | 'plan'
   | 'note'
   | 'reset'
+  | 'remaining'
   | 'priority'
   | 'recent'
   | 'quota'
