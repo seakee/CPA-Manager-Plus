@@ -5,7 +5,7 @@ import {
   getDemoAccountWindowUsage,
   resetDemoEvidenceEpoch,
 } from './demoFixtures';
-import { buildAccountRows } from '@/features/accounts/model/accountRows';
+import { buildAccountRows, sortAccountRows } from '@/features/accounts/model/accountRows';
 import {
   buildAccountQuotaDisplayWindows,
   type BuildAccountQuotaDisplayWindowsOptions,
@@ -51,6 +51,28 @@ describe('Demo accounts quota & usage presentation regression', () => {
     expect(plusSub.isPaidCodex).toBe(true);
     expect(plusSub.effectivePlanType).toBe('plus');
     expect(plusSub.remainingDays).toBeGreaterThan(0);
+  });
+
+  it('sorts demo Codex accounts by paid subscription remaining time', () => {
+    const authFiles = getDemoAuthFiles().files;
+    const quotaState = getDemoQuotaStoreState();
+    const rows = buildAccountRows(authFiles, quotaState).filter((row) => row.provider === 'codex');
+    const sorted = sortAccountRows(rows, { key: 'remaining', direction: 'asc' });
+    const known = sorted.filter((row) => typeof row.subscriptionUntilMs === 'number');
+    const unknown = sorted.filter((row) => typeof row.subscriptionUntilMs !== 'number');
+
+    expect(known.length).toBeGreaterThan(1);
+    for (let index = 1; index < known.length; index += 1) {
+      expect(known[index].subscriptionUntilMs ?? 0).toBeGreaterThanOrEqual(
+        known[index - 1].subscriptionUntilMs ?? 0
+      );
+    }
+    expect(unknown.every((row) => sorted.indexOf(row) > sorted.indexOf(known[known.length - 1]))).toBe(
+      true
+    );
+    expect(sortAccountRows(rows).map((row) => row.fileName)).not.toEqual(
+      sorted.map((row) => row.fileName)
+    );
   });
 
   it('selects valid quota list windows and produces reliable actual usage and forecasts', () => {
