@@ -33,6 +33,7 @@ interface MetricCellProps {
   tone: MetricTone;
   label: string;
   value: string;
+  hint?: string;
   valueTitle?: string;
   metricKey: string;
 }
@@ -72,6 +73,7 @@ const MetricCell = ({
   tone,
   label,
   value,
+  hint,
   valueTitle,
   metricKey,
 }: MetricCellProps): JSX.Element => {
@@ -104,6 +106,7 @@ const MetricCell = ({
           </span>
         ) : null}
       </span>
+      {hint ? <span className={styles.quotaSummaryMetricLabel}>{hint}</span> : null}
     </div>
   );
 };
@@ -140,7 +143,7 @@ export function AccountSubscriptionTab({
 
   const formatSummaryValue = (
     field: AccountDetailField
-  ): { value: string; valueTitle?: string } => {
+  ): { value: string; hint?: string; valueTitle?: string } => {
     if (field.key === 'planType') {
       const presentation = getPlanPresentation({
         provider: 'codex',
@@ -148,7 +151,7 @@ export function AccountSubscriptionTab({
         t,
       });
       return {
-        value: getPlanLabel(presentation, 'full') ?? (field.value ? String(field.value) : '-'),
+        value: getPlanLabel(presentation, 'compact') ?? (field.value ? String(field.value) : '-'),
       };
     }
 
@@ -165,7 +168,8 @@ export function AccountSubscriptionTab({
         days: remainingDays,
       });
       return {
-        value: `${timestamp} · ${remaining}`,
+        value: timestamp,
+        hint: remaining,
         valueTitle: title ? `${title} · ${remainingTitle}` : remainingTitle,
       };
     }
@@ -255,6 +259,7 @@ export function AccountSubscriptionTab({
                     tone={tone}
                     label={t(field.labelKey, { defaultValue: field.labelKey })}
                     value={formatted.value}
+                    hint={formatted.hint}
                     valueTitle={formatted.valueTitle}
                   />
                 );

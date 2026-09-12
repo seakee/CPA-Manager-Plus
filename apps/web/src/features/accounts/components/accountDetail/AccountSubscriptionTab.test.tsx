@@ -94,8 +94,10 @@ describe('AccountSubscriptionTab', () => {
     expect(metrics).toHaveLength(1);
     expect(text).toContain('Pro 20x');
     expect(text).not.toMatch(/(^|[^A-Za-z])pro([^A-Za-z]|$)/);
-    expect(text).toContain(formatQuotaResetTimestamp(untilMs, 'en-US'));
+    const untilStamp = formatQuotaResetTimestamp(untilMs, 'en-US');
+    expect(text).toContain(untilStamp);
     expect(text).toContain('accounts.list_plan_remaining_days');
+    expect(text).not.toContain(`${untilStamp} ·`);
     expect(text).toContain('common.yes');
     expect(text).toContain('accounts.detail_subscription_billing_monthly');
     expect(
