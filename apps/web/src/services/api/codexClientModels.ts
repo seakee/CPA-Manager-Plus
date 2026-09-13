@@ -11,6 +11,30 @@ export type CodexClientModelOrigin = 'base' | 'override' | 'custom';
 
 export type CodexClientModelEntry = Record<string, unknown>;
 
+/**
+ * 服务端下发给 Codex 客户端的单个模型摘要。
+ *
+ * 目录只定义自己的条目，实际下发的列表由「已配置的可用模型」逐个匹配目录条目得到；
+ * 匹配不到的模型整条复用默认模板，这类模型只在摘要里出现。
+ */
+export interface CodexClientServedModel {
+  /** 客户端请求该模型时使用的标识。 */
+  slug: string;
+  /** 该模型当前生效条目所基于的目录条目；没有专属条目时是默认模板。 */
+  templateSlug: string;
+  /** 该模型没有专属目录条目，正在复用默认模板。 */
+  defaultTemplate: boolean;
+  /** 当前提供该模型的服务端标识。 */
+  providers: string[];
+  displayName: string;
+  description: string;
+  contextWindow: number | null;
+  maxContextWindow: number | null;
+  visibility: string;
+  reasoningLevel: string;
+  /** 该模型当前的下发位置；排序在目录条目之后。 */
+  priority: number | null;
+}
 /** 一条未能生效的覆写：目录保留基线条目，自定义条目则不会出现在目录里。 */
 export interface CodexClientModelOverrideError {
   slug: string;
@@ -36,6 +60,8 @@ export interface CodexClientModelsState {
   overrideError: string;
   /** 逐条降级的原因：文件可解析，但其中某几条覆写没能生效。 */
   overrideErrors: CodexClientModelOverrideError[];
+  /** 当前下发给客户端的模型摘要；服务端未提供该信息时为 null。 */
+  servedModels: CodexClientServedModel[] | null;
 }
 
 const ORIGINS: CodexClientModelOrigin[] = ['base', 'override', 'custom'];
@@ -48,6 +74,11 @@ const readString = (value: unknown): string => (typeof value === 'string' ? valu
 const readNumber = (value: unknown): number => {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const readPositiveNumber = (value: unknown): number | null => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 };
 
 export function normalizeOrigin(value: unknown): CodexClientModelOrigin {
@@ -85,8 +116,31 @@ export function normalizeCodexClientModelsState(raw: unknown): CodexClientModels
     overridePath: readString(record.override_path),
     overrideError: readString(record.override_error),
     overrideErrors,
+    servedModels: normalizeServedModels(record.served_models),
   };
 }
+
+const normalizeServedModels = (value: unknown): CodexClientServedModel[] | null => {
+  if (!Array.isArray(value)) return null;
+  return value
+    .filter(isRecord)
+    .map((entry) => ({
+      slug: readString(entry.slug).trim(),
+      templateSlug: readString(entry.template_slug).trim(),
+      defaultTemplate: entry.default_template === true,
+      providers: Array.isArray(entry.providers)
+        ? entry.providers.filter((provider): provider is string => typeof provider === 'string')
+        : [],
+      displayName: readString(entry.display_name),
+      description: readString(entry.description),
+      contextWindow: readPositiveNumber(entry.context_window),
+      maxContextWindow: readPositiveNumber(entry.max_context_window),
+      visibility: readString(entry.visibility),
+      reasoningLevel: readString(entry.default_reasoning_level),
+      priority: Number.isFinite(Number(entry.priority)) ? Number(entry.priority) : null,
+    }))
+    .filter((entry) => entry.slug.length > 0);
+};
 
 const overrideEndpoint = (slug: string) =>
   `/codex-client-models/override/${encodeURIComponent(slug)}`;

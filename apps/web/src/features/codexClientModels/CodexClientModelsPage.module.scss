@@ -249,6 +249,41 @@
   color: var(--data-badge-danger-text);
 }
 
+.origin_served {
+  border-color: var(--data-badge-info-border);
+  background: var(--data-badge-info-bg);
+  color: var(--data-badge-info-text);
+}
+
+.servedState {
+  display: grid;
+  gap: 2px;
+  justify-items: start;
+}
+
+.servedBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--data-badge-success-border);
+  background: var(--data-badge-success-bg);
+  color: var(--data-badge-success-text);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.servedTemplate {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.servedMuted {
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
 .iconAction {
   display: inline-flex;
   align-items: center;

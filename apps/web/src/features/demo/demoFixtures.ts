@@ -7434,6 +7434,70 @@ const demoCodexClientModelBaseEntries: Record<string, unknown>[] = [
   },
 ];
 
+/**
+ * 演示用的已下发模型。目录里没有专属条目的模型由默认模板兜底，
+ * 因此这些条目的模板来源与 default_template 按当前覆写文档推算。
+ */
+const demoCodexClientServedModels = [
+  {
+    slug: 'gpt-5.6-sol',
+    displayName: 'GPT-5.6 Sol',
+    description: 'GPT-5.6 Sol',
+    contextWindow: 400000,
+    maxContextWindow: 400000,
+    visibility: 'public',
+    reasoningLevel: 'high',
+    priority: 90,
+    providers: ['openai-compatibility'],
+  },
+  {
+    slug: 'gpt-5.5',
+    displayName: 'GPT-5.5',
+    description: 'Default Codex client model template.',
+    contextWindow: 272000,
+    maxContextWindow: 272000,
+    visibility: 'public',
+    reasoningLevel: 'medium',
+    priority: 100,
+    providers: ['openai-compatibility'],
+  },
+  {
+    slug: 'deepseek-chat',
+    displayName: 'DeepSeek Chat (local)',
+    description: 'deepseek-chat',
+    contextWindow: 272000,
+    maxContextWindow: 272000,
+    visibility: 'public',
+    reasoningLevel: 'medium',
+    priority: 100,
+    providers: ['openai-compatibility'],
+  },
+  {
+    slug: 'qwen3.8-27b-local',
+    displayName: 'qwen3.8-27b-local',
+    description: 'qwen3.8-27b-local',
+    contextWindow: 131072,
+    maxContextWindow: 131072,
+    visibility: 'public',
+    reasoningLevel: 'medium',
+    priority: 143,
+    providers: ['openai-compatibility'],
+  },
+  {
+    slug: 'gemini-flash-local',
+    displayName: 'Gemini Flash (local)',
+    description: 'gemini-flash-local',
+    contextWindow: 1048576,
+    maxContextWindow: 1048576,
+    visibility: 'hide',
+    reasoningLevel: 'medium',
+    priority: 243,
+    providers: ['antigravity'],
+  },
+];
+
+const DEMO_DEFAULT_TEMPLATE_SLUG = 'gpt-5.5';
+
 let demoCodexClientModelOverrides: Record<string, unknown> = {
   'deepseek-chat': { display_name: 'DeepSeek Chat (local)' },
 };
@@ -7481,6 +7545,27 @@ export const getDemoCodexClientModelsState = () => {
     origins[slug] = 'custom';
   });
 
+  const served_models = demoCodexClientServedModels.map((served) => {
+    const hasOverride = Object.prototype.hasOwnProperty.call(
+      demoCodexClientModelOverrides,
+      served.slug
+    );
+    const defaultTemplate = !baseIndex.has(served.slug) && !hasOverride;
+    return {
+      slug: served.slug,
+      template_slug: defaultTemplate ? DEMO_DEFAULT_TEMPLATE_SLUG : served.slug,
+      default_template: defaultTemplate,
+      providers: served.providers,
+      display_name: served.displayName,
+      description: served.description,
+      context_window: served.contextWindow,
+      max_context_window: served.maxContextWindow,
+      visibility: served.visibility,
+      default_reasoning_level: served.reasoningLevel,
+      priority: served.priority,
+    };
+  });
+
   return {
     source: 'demo',
     revision: demoCodexClientModelRevision,
@@ -7489,6 +7574,7 @@ export const getDemoCodexClientModelsState = () => {
     override: clone(demoCodexClientModelOverrides),
     override_path: '/opt/cpa/codex_client_models_override.json',
     override_error: '',
+    served_models,
   };
 };
 

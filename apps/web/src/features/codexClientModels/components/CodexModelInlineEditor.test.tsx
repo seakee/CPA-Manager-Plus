@@ -13,6 +13,7 @@ vi.mock('@/stores', () => ({
     selector({ resolvedTheme: 'light' }),
 }));
 
+import type { CodexClientServedModel } from '@/services/api/codexClientModels';
 import { CodexModelInlineEditor, type CodexModelInlineEditorProps } from './CodexModelInlineEditor';
 
 const effectiveEntry = {
@@ -24,6 +25,21 @@ const effectiveEntry = {
 };
 
 const catalog = [effectiveEntry, { slug: 'gpt-5.6-sol', display_name: 'GPT-5.6 Sol' }];
+
+const servedModel = (overrides: Partial<CodexClientServedModel> = {}): CodexClientServedModel => ({
+  slug: 'deepseek-flash',
+  templateSlug: 'gpt-5.6-sol',
+  defaultTemplate: true,
+  providers: ['openai-compatibility'],
+  displayName: 'deepseek-flash',
+  description: 'deepseek-flash',
+  contextWindow: 272000,
+  maxContextWindow: 272000,
+  visibility: 'list',
+  reasoningLevel: 'medium',
+  priority: 143,
+  ...overrides,
+});
 
 const renderEditor = (overrides: Partial<CodexModelInlineEditorProps> = {}) =>
   renderToStaticMarkup(
@@ -123,6 +139,32 @@ describe('CodexModelInlineEditor', () => {
     // 新条目整条继承官方模板，因此面板展示的是模板的取值而不是空表单。
     expect(markup).toContain('272000');
     expect(markup).toContain('gpt-5.5');
+  });
+
+  it('locks the slug and names the template when adopting a served model', () => {
+    const markup = renderEditor({
+      mode: 'adopt',
+      slug: 'deepseek-flash',
+      effectiveEntry: null,
+      patch: undefined,
+      served: servedModel(),
+    });
+
+    expect(markup).toContain(
+      'codex_client_models.editor_title_adopt{&quot;slug&quot;:&quot;deepseek-flash&quot;}'
+    );
+    expect(markup).toContain(
+      'codex_client_models.adopt_notice{&quot;source&quot;:&quot;gpt-5.6-sol&quot;}'
+    );
+    expect(markup).toContain('codex_client_models.adopt_slug_hint');
+    expect(markup).not.toContain('codex_client_models.editor_title_create');
+    // 还没有条目，因此没有可删除的覆写。
+    expect(markup).not.toContain('codex_client_models.delete_override');
+    // 身份与客户端已看到的取值固定在自己这边，其余字段仍标记为继承模板。
+    expect(markup).toContain('value="deepseek-flash"');
+    expect(markup).toContain(
+      'codex_client_models.field_state_inherited{&quot;slug&quot;:&quot;gpt-5.6-sol&quot;}'
+    );
   });
 
   it('reports an inherit directive that points at a missing model', () => {

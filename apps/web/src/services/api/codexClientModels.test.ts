@@ -42,7 +42,60 @@ describe('normalizeCodexClientModelsState', () => {
         { slug: 'x-model', path: 'context_window', error: 'unknown path' },
         { slug: 'y-model', path: '', error: 'cycle' },
       ],
+      servedModels: null,
     });
+  });
+
+  it('normalizes the served model summaries', () => {
+    const state = normalizeCodexClientModelsState({
+      served_models: [
+        {
+          slug: ' deepseek-flash ',
+          template_slug: 'gpt-5.5',
+          default_template: true,
+          providers: ['openai-compatibility', 7],
+          display_name: 'deepseek-flash',
+          description: 'DeepSeek Flash',
+          context_window: 272000,
+          max_context_window: 272000,
+          visibility: 'list',
+          default_reasoning_level: 'medium',
+          priority: 143,
+        },
+        { slug: '', template_slug: 'gpt-5.5' },
+        { slug: 'gpt-image-2', context_window: 'nope', max_context_window: 'nope', providers: 'nope' },
+        'ignored',
+      ],
+    });
+
+    expect(state.servedModels).toEqual([
+      {
+        slug: 'deepseek-flash',
+        templateSlug: 'gpt-5.5',
+        defaultTemplate: true,
+        providers: ['openai-compatibility'],
+        displayName: 'deepseek-flash',
+        description: 'DeepSeek Flash',
+        contextWindow: 272000,
+        maxContextWindow: 272000,
+        visibility: 'list',
+        reasoningLevel: 'medium',
+        priority: 143,
+      },
+      {
+        slug: 'gpt-image-2',
+        templateSlug: '',
+        defaultTemplate: false,
+        providers: [],
+        displayName: '',
+        description: '',
+        contextWindow: null,
+        maxContextWindow: null,
+        visibility: '',
+        reasoningLevel: '',
+        priority: null,
+      },
+    ]);
   });
 
   it('tolerates missing or malformed fields', () => {
@@ -55,6 +108,7 @@ describe('normalizeCodexClientModelsState', () => {
       overridePath: '',
       overrideError: '',
       overrideErrors: [],
+      servedModels: null,
     });
     expect(normalizeCodexClientModelsState({ models: 'nope', revision: 'abc' })).toMatchObject({
       models: [],

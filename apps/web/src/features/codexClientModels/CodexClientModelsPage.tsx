@@ -21,11 +21,12 @@ import {
   buildCodexClientModelRows,
   countCodexClientModelRows,
   filterCodexClientModelRows,
+  readModelSlug,
   type CodexClientModelFilter,
 } from './model/codexClientModelsModel';
 import styles from './CodexClientModelsPage.module.scss';
 
-const TABLE_COLUMN_COUNT = 6;
+const TABLE_COLUMN_COUNT = 7;
 
 const resolveErrorMessage = (error: unknown, fallback: string): string => {
   if (error instanceof Error && error.message) return error.message;
@@ -80,15 +81,17 @@ export function CodexClientModelsPage() {
   useHeaderRefresh(() => load(), !disableControls);
 
   const rows = useMemo(() => (state ? buildCodexClientModelRows(state) : []), [state]);
-  const rowsBySlug = useMemo(() => new Map(rows.map((row) => [row.slug, row])), [rows]);
   const counts = useMemo(() => countCodexClientModelRows(rows), [rows]);
   const visibleRows = useMemo(
     () => filterCodexClientModelRows(rows, filter, search),
     [rows, filter, search]
   );
   const catalog = useMemo(() => state?.models ?? [], [state]);
+  const catalogSlugs = useMemo(() => new Set(catalog.map((entry) => readModelSlug(entry))), [catalog]);
   const overrideDocument = useMemo(() => state?.override ?? {}, [state]);
   const hasOverride = Object.keys(state?.override ?? {}).length > 0;
+  // 服务端没有返回下发列表时（旧版本 CPA）不展示下发状态，避免把未知当成未下发。
+  const servedKnown = Boolean(state && state.servedModels !== null);
 
   const closeEditor = useCallback(() => {
     setSaveError('');
@@ -191,7 +194,7 @@ export function CodexClientModelsPage() {
     });
   }, [handleClearOverride, showConfirmation, t]);
 
-  const isSlugTaken = useCallback((slug: string) => rowsBySlug.has(slug), [rowsBySlug]);
+  const isSlugTaken = useCallback((slug: string) => catalogSlugs.has(slug), [catalogSlugs]);
 
   const formatContextWindow = (value: number | null) =>
     value === null ? '--' : value.toLocaleString();
@@ -328,6 +331,7 @@ export function CodexClientModelsPage() {
                 <tr>
                   <th>{t('codex_client_models.column_model')}</th>
                   <th>{t('codex_client_models.column_origin')}</th>
+                  <th>{t('codex_client_models.column_served')}</th>
                   <th>{t('codex_client_models.column_context_window')}</th>
                   <th>{t('codex_client_models.column_reasoning')}</th>
                   <th>{t('codex_client_models.column_visibility')}</th>
@@ -374,6 +378,37 @@ export function CodexClientModelsPage() {
                             {t(`codex_client_models.origin_${row.origin}`)}
                           </span>
                         </td>
+                        <td>
+                          {!servedKnown ? (
+                            <span className={styles.servedMuted}>--</span>
+                          ) : row.served ? (
+                            <div
+                              className={styles.servedState}
+                              title={
+                                row.served.providers.length > 0
+                                  ? t('codex_client_models.served_providers', {
+                                      value: row.served.providers.join(', '),
+                                    })
+                                  : undefined
+                              }
+                            >
+                              <span className={styles.servedBadge}>
+                                {t('codex_client_models.served_yes')}
+                              </span>
+                              {row.served.defaultTemplate ? (
+                                <small className={styles.servedTemplate}>
+                                  {t('codex_client_models.served_default_template', {
+                                    slug: row.served.templateSlug,
+                                  })}
+                                </small>
+                              ) : null}
+                            </div>
+                          ) : (
+                            <span className={styles.servedMuted}>
+                              {t('codex_client_models.served_no')}
+                            </span>
+                          )}
+                        </td>
                         <td>{formatContextWindow(row.contextWindow)}</td>
                         <td>{row.reasoningLevel || '--'}</td>
                         <td>{row.visibility || '--'}</td>
@@ -402,7 +437,8 @@ export function CodexClientModelsPage() {
                           <td colSpan={TABLE_COLUMN_COUNT}>
                             <CodexModelInlineEditor
                               key={`edit:${row.slug}`}
-                              mode="edit"
+                              mode={row.origin === 'served' ? 'adopt' : 'edit'}
+                              served={row.served}
                               slug={row.slug}
                               effectiveEntry={row.entry}
                               patch={row.patch}

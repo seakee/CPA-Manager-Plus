@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import type { CodexClientModelsState } from '@/services/api/codexClientModels';
+import type {
+  CodexClientModelsState,
+  CodexClientServedModel,
+} from '@/services/api/codexClientModels';
 import {
+  buildAdoptedModelPatch,
   buildCodexClientModelRows,
   buildInheritedModelPatch,
   buildModelPatchFromTemplate,
@@ -11,6 +15,7 @@ import {
   parseOverridePatchInput,
   resolveDefaultInheritEntry,
   resolveDefaultInheritSource,
+  resolveServedInheritEntry,
 } from './codexClientModelsModel';
 
 const buildState = (overrides: Partial<CodexClientModelsState> = {}): CodexClientModelsState => ({
@@ -31,6 +36,22 @@ const buildState = (overrides: Partial<CodexClientModelsState> = {}): CodexClien
   overridePath: '/opt/cpa/codex_client_models_override.json',
   overrideError: '',
   overrideErrors: [],
+  servedModels: null,
+  ...overrides,
+});
+
+const servedModel = (overrides: Partial<CodexClientServedModel> = {}): CodexClientServedModel => ({
+  slug: 'deepseek-flash',
+  templateSlug: 'gpt-5.5',
+  defaultTemplate: true,
+  providers: ['openai-compatibility'],
+  displayName: 'deepseek-flash',
+  description: 'deepseek-flash',
+  contextWindow: 272000,
+  maxContextWindow: 272000,
+  visibility: 'public',
+  reasoningLevel: 'medium',
+  priority: 143,
   ...overrides,
 });
 
@@ -99,6 +120,7 @@ describe('filterCodexClientModelRows and counts', () => {
       override: 1,
       custom: 0,
       removed: 1,
+      served: 0,
     });
   });
 
@@ -110,6 +132,108 @@ describe('filterCodexClientModelRows and counts', () => {
       'deepseek-chat',
     ]);
     expect(filterCodexClientModelRows(rows, 'base', 'deep')).toHaveLength(0);
+  });
+});
+
+describe('served models', () => {
+  const buildServedState = (overrides: Partial<CodexClientModelsState> = {}) =>
+    buildState({
+      servedModels: [
+        servedModel(),
+        servedModel({
+          slug: 'deepseek-chat',
+          templateSlug: 'deepseek-chat',
+          defaultTemplate: false,
+          displayName: 'DeepSeek Chat',
+          contextWindow: 128000,
+          reasoningLevel: 'high',
+        }),
+      ],
+      ...overrides,
+    });
+
+  it('lists served models first and reads their values from the summary', () => {
+    const rows = buildCodexClientModelRows(buildServedState());
+    expect(rows.map((row) => row.slug)).toEqual(['deepseek-flash', 'deepseek-chat', 'gpt-5.5']);
+    expect(rows[0].origin).toBe('served');
+    expect(rows[0].entry).toBeNull();
+    expect(rows[0].displayName).toBe('deepseek-flash');
+    expect(rows[0].contextWindow).toBe(272000);
+    expect(rows[0].served?.templateSlug).toBe('gpt-5.5');
+  });
+
+  it('prefers the catalog entry for served models that have one', () => {
+    const rows = buildCodexClientModelRows(buildServedState());
+    expect(rows[1].origin).toBe('override');
+    expect(rows[1].entry).toMatchObject({ slug: 'deepseek-chat' });
+    expect(rows[1].contextWindow).toBeNull();
+    expect(rows[1].served?.defaultTemplate).toBe(false);
+    expect(rows[2].origin).toBe('base');
+    expect(rows[2].served).toBeNull();
+  });
+
+  it('keeps counting a served model as removed while its null patch stands', () => {
+    const rows = buildCodexClientModelRows(
+      buildServedState({ override: { 'deepseek-chat': { display_name: 'DeepSeek Chat' }, 'deepseek-flash': null } })
+    );
+    const flash = rows.find((row) => row.slug === 'deepseek-flash');
+    expect(flash?.origin).toBe('removed');
+    expect(flash?.served?.slug).toBe('deepseek-flash');
+  });
+
+  it('counts and filters the served rows', () => {
+    const rows = buildCodexClientModelRows(buildServedState());
+    expect(countCodexClientModelRows(rows)).toMatchObject({ all: 3, served: 1, base: 1, override: 1 });
+    expect(filterCodexClientModelRows(rows, 'served', '').map((row) => row.slug)).toEqual([
+      'deepseek-flash',
+    ]);
+  });
+
+  it('keeps the catalog order when the server does not report served models', () => {
+    const rows = buildCodexClientModelRows(buildState());
+    expect(rows.map((row) => row.slug)).toEqual(['gpt-5.5', 'deepseek-chat']);
+    expect(rows.every((row) => row.served === null)).toBe(true);
+  });
+
+  it('adopts a served model by inheriting its template and pinning what clients see', () => {
+    const patch = buildAdoptedModelPatch(buildState().models[0], servedModel());
+    expect(patch).toEqual({
+      $inherit: 'gpt-5.5',
+      slug: 'deepseek-flash',
+      display_name: 'deepseek-flash',
+      description: 'deepseek-flash',
+      context_window: 272000,
+      max_context_window: 272000,
+      priority: 143,
+    });
+  });
+
+  it('leaves the fields the summary omits to the inherited template', () => {
+    const patch = buildAdoptedModelPatch(
+      buildState().models[0],
+      servedModel({
+        displayName: '',
+        description: '',
+        contextWindow: null,
+        maxContextWindow: null,
+        priority: null,
+      })
+    );
+    expect(patch).toEqual({
+      $inherit: 'gpt-5.5',
+      slug: 'deepseek-flash',
+      display_name: 'deepseek-flash',
+    });
+  });
+
+  it('resolves the inherit source of a served model through its template', () => {
+    const models = buildState().models;
+    expect(resolveServedInheritEntry(models, 'gpt-5.5')).toBe(models[0]);
+    expect(resolveServedInheritEntry(models, 'ghost-model')).toBe(models[0]);
+    expect(resolveServedInheritEntry([{ slug: 'other-model' }], 'ghost-model')).toMatchObject({
+      slug: 'other-model',
+    });
+    expect(resolveServedInheritEntry([], 'ghost-model')).toBeNull();
   });
 });
 

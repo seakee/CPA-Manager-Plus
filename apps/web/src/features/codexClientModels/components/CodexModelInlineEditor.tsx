@@ -4,16 +4,22 @@ import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
 import { IconChevronRight } from '@/components/ui/icons';
-import type { CodexClientModelEntry } from '@/services/api/codexClientModels';
+import type {
+  CodexClientModelEntry,
+  CodexClientServedModel,
+} from '@/services/api/codexClientModels';
 import { useThemeStore } from '@/stores';
 import {
   DEFAULT_MODEL_TEMPLATE_SLUG,
+  buildAdoptedModelPatch,
   buildInheritedModelPatch,
   buildModelPatchFromTemplate,
   findModelEntry,
   formatOverridePatch,
   parseOverridePatchInput,
+  readModelSlug,
   resolveDefaultInheritEntry,
+  resolveServedInheritEntry,
 } from '../model/codexClientModelsModel';
 import {
   collectCatalogFieldOptions,
@@ -41,7 +47,11 @@ import styles from './CodexModelInlineEditor.module.scss';
 const LazyOverrideJsonEditor = lazy(() => import('./OverrideJsonEditor'));
 
 export interface CodexModelInlineEditorProps {
-  mode: 'edit' | 'create';
+  /**
+   * edit 编辑已有条目，create 新增条目，adopt 为已下发但还没有专属条目的模型建立条目。
+   * adopt 与 create 一样从继承源起步，但 slug 由模型本身决定，不能修改。
+   */
+  mode: 'edit' | 'create' | 'adopt';
   slug: string;
   /** 生效条目；被 null 补丁删除或尚未进入目录时为空。 */
   effectiveEntry: CodexClientModelEntry | null;
@@ -53,6 +63,8 @@ export interface CodexModelInlineEditorProps {
   overrideDocument: Record<string, unknown>;
   /** 服务端是否支持字段继承；老版本会忽略继承指令。 */
   supportsInherit: boolean;
+  /** adopt 模式下的已下发摘要：继承源与要保留的展示取值都来自它。 */
+  served?: CodexClientServedModel | null;
   isSlugTaken: (slug: string) => boolean;
   saving: boolean;
   serverError: string;
@@ -70,6 +82,7 @@ export function CodexModelInlineEditor({
   catalog,
   overrideDocument,
   supportsInherit,
+  served,
   isSlugTaken,
   saving,
   serverError,
@@ -84,13 +97,25 @@ export function CodexModelInlineEditor({
     () => findModelEntry(catalog, DEFAULT_MODEL_TEMPLATE_SLUG),
     [catalog]
   );
+  // 已下发模型只在 adopt 模式下参与：继承源是它当前使用的模板。
+  const adoptServed = mode === 'adopt' ? (served ?? null) : null;
+  // 新条目起步时继承的目录条目：adopt 沿用该模型当前的模板，新增则用默认继承源。
+  const inheritBaseEntry = useMemo(
+    () =>
+      mode === 'adopt'
+        ? resolveServedInheritEntry(catalog, adoptServed?.templateSlug ?? '')
+        : resolveDefaultInheritEntry(catalog),
+    [adoptServed, catalog, mode]
+  );
   const [slugInput, setSlugInput] = useState(slug);
   const [treePatch, setTreePatch] = useState<Record<string, unknown> | null>(() => {
-    if (mode !== 'create') return isPlainObject(patch) ? patch : null;
-    // 新条目默认整条继承一份现有配置，只有身份字段留给自己填。
-    return supportsInherit
-      ? buildInheritedModelPatch(resolveDefaultInheritEntry(catalog), slug)
-      : buildModelPatchFromTemplate(templateEntry, slug);
+    if (mode === 'edit') return isPlainObject(patch) ? patch : null;
+    // 老版本 CPA 不认继承指令，只能整份复制模板。
+    if (!supportsInherit) return buildModelPatchFromTemplate(templateEntry, slug);
+    // 新条目默认整条继承一份现有配置，身份字段与客户端已看到的取值留给自己填。
+    return adoptServed
+      ? buildAdoptedModelPatch(inheritBaseEntry, adoptServed)
+      : buildInheritedModelPatch(inheritBaseEntry, slug);
   });
   // 整体替换补丁（应用 JSON）后用它重建各输入框，避免残留旧草稿。
   const [revision, setRevision] = useState(0);
@@ -102,8 +127,7 @@ export function CodexModelInlineEditor({
   const directives = useMemo(() => readInheritDirectives(treePatch), [treePatch]);
   const lookup = useMemo(() => createInheritSourceLookup(catalog), [catalog]);
   const sources = useMemo(
-    () =>
-      supportsInherit ? collectInheritSources(catalog, mode === 'create' ? undefined : slug) : [],
+    () => (supportsInherit ? collectInheritSources(catalog, mode === 'edit' ? slug : undefined) : []),
     [catalog, mode, slug, supportsInherit]
   );
   const issues = useMemo(
@@ -121,9 +145,9 @@ export function CodexModelInlineEditor({
 
   // 生效参照值：本条目自身的内容，再叠上继承指令，于是字段旁预览的就是真正会生效的取值。
   const effective = useMemo(() => {
-    const base = mode === 'create' ? templateEntry : effectiveEntry;
+    const base = mode === 'edit' ? effectiveEntry : inheritBaseEntry;
     return applyInheritDirectives(base, directives, lookup);
-  }, [directives, effectiveEntry, lookup, mode, templateEntry]);
+  }, [directives, effectiveEntry, inheritBaseEntry, lookup, mode]);
 
   const sourceBinding: FieldInheritBinding = useMemo(
     () => ({
@@ -148,7 +172,7 @@ export function CodexModelInlineEditor({
     [effective, treePatch]
   );
   const inheritUsage = useMemo(
-    () => (mode === 'create' ? 0 : (countInheritUsage(overrideDocument).get(slug) ?? 0)),
+    () => (mode === 'edit' ? (countInheritUsage(overrideDocument).get(slug) ?? 0) : 0),
     [mode, overrideDocument, slug]
   );
 
@@ -163,6 +187,7 @@ export function CodexModelInlineEditor({
     return options;
   }, [rootSource, sources, t]);
 
+  const inheritSourceLabel = useMemo(() => readModelSlug(inheritBaseEntry), [inheritBaseEntry]);
   const slugMissing = mode === 'create' && !trimmedSlug;
   const slugTaken = mode === 'create' && Boolean(trimmedSlug) && isSlugTaken(trimmedSlug);
   // JSON 面板是整体替换入口：文本与当前补丁不一致时先应用或还原，避免保存出意外内容。
@@ -233,7 +258,7 @@ export function CodexModelInlineEditor({
       return;
     }
     const nextPatch: Record<string, unknown> =
-      mode === 'create' ? { ...treePatch, slug: trimmedSlug } : treePatch;
+      mode === 'edit' ? treePatch : { ...treePatch, slug: trimmedSlug };
     onSave(trimmedSlug, nextPatch);
   };
 
@@ -244,7 +269,9 @@ export function CodexModelInlineEditor({
           <h3 className={styles.title}>
             {mode === 'create'
               ? t('codex_client_models.editor_title_create')
-              : t('codex_client_models.editor_title_edit', { slug })}
+              : mode === 'adopt'
+                ? t('codex_client_models.editor_title_adopt', { slug })
+                : t('codex_client_models.editor_title_edit', { slug })}
           </h3>
           <p className={styles.subtitle}>{t('codex_client_models.editor_subtitle')}</p>
         </div>
@@ -277,6 +304,24 @@ export function CodexModelInlineEditor({
             placeholder="gpt-5.6-sol"
             hint={t('codex_client_models.slug_hint')}
           />
+        </div>
+      ) : null}
+
+      {mode === 'adopt' ? (
+        <div className={styles.slugField}>
+          <div className={styles.slugLocked}>
+            <span className={styles.slugLockedLabel}>
+              {t('codex_client_models.slug_label')}
+            </span>
+            <code className={styles.slugLockedValue}>{slug}</code>
+          </div>
+          <p className={styles.slugLockedHint}>{t('codex_client_models.adopt_slug_hint')}</p>
+        </div>
+      ) : null}
+
+      {mode === 'adopt' ? (
+        <div className={styles.notice}>
+          {t('codex_client_models.adopt_notice', { source: inheritSourceLabel })}
         </div>
       ) : null}
 
