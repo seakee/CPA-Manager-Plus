@@ -112,25 +112,38 @@ const isIdentityPath = (path: OverridePath): boolean =>
   path.length === 1 && isNonInheritablePathKey(String(path[0]));
 
 /**
+ * 服务端自己决定的字段名，按根层键给出，与下发摘要里的字段同一粒度。这些字段的默认值
+ * 就是服务端下发的取值，目录条目里的取值不会到达客户端，因此继承源不是它的来源。
+ */
+export type ServedHeldFields = ReadonlySet<string>;
+
+const isServedHeldPath = (path: OverridePath, heldFields?: ServedHeldFields): boolean =>
+  Boolean(heldFields && path.length > 0 && heldFields.has(String(path[0])));
+
+/**
  * 覆盖某条路径的继承来源：本路径自己的指令优先，否则取最近的上级指令。
  * 字段树与配置面板都用它，因此同一个字段在两种视图里显示的来源始终一致。
  *
- * 身份字段是唯一的例外：整条继承只铺普通字段，盖不到它们，所以它们的来源始终为空；
- * 直接写在身份字段上的指令后端也不会执行，界面另有问题标说明。
+ * 两类字段不接受整条继承：身份字段（slug、展示名、描述）后端不会从来源取值，
+ * heldFields 里的字段则由服务端自己决定。两者的来源因此始终为空，界面上不会把它们
+ * 标成「继承自 X」。直接写在字段路径上的指令照常生效，
+ * 界面另有问题标说明身份字段上不会执行的指令。
  */
 export function resolveInheritSource(
   directives: ReadonlyMap<string, string>,
-  path: OverridePath
+  path: OverridePath,
+  heldFields?: ServedHeldFields
 ): { source: string | null; declared: string | null } {
   const declared = directives.get(path.join('.')) ?? null;
   const inheritable = !isIdentityPath(path);
   if (declared) return { source: inheritable ? declared : null, declared };
 
+  const held = isServedHeldPath(path, heldFields);
   for (let end = path.length - 1; end >= 0; end -= 1) {
     const ancestor = directives.get(path.slice(0, end).join('.'));
     if (!ancestor) continue;
-    // 能覆盖到根层字段的上级只有整条继承，而身份字段不接受它。
-    if (!inheritable && end === 0) continue;
+    // 能覆盖到根层字段的上级只有整条继承，而这两类字段都不接受它。
+    if (end === 0 && (!inheritable || held)) continue;
     return { source: ancestor, declared: null };
   }
   return { source: null, declared: null };
@@ -182,14 +195,15 @@ function buildNodes(
   patch: unknown,
   path: OverridePath,
   insideArray: boolean,
-  directives: ReadonlyMap<string, string>
+  directives: ReadonlyMap<string, string>,
+  heldFields?: ServedHeldFields
 ): OverrideTreeNode[] {
   if (Array.isArray(effective) || Array.isArray(patch)) {
     const items = Array.isArray(patch) ? patch : Array.isArray(effective) ? effective : [];
     if (!arrayHasStructuredItems(items)) return [];
     return items.map((_item, index) => {
       const childPath: OverridePath = [...path, index];
-      const inherited = resolveInheritSource(directives, childPath);
+      const inherited = resolveInheritSource(directives, childPath, heldFields);
       return makeNode({
         key: `[${index}]`,
         path: childPath,
@@ -205,7 +219,8 @@ function buildNodes(
           Array.isArray(patch) ? patch[index] : undefined,
           childPath,
           true,
-          directives
+          directives,
+          heldFields
         ),
       });
     });
@@ -230,7 +245,7 @@ function buildNodes(
         const childPatch = inPatch ? patchSource[key] : undefined;
         const nestedSource = inPatch ? childPatch : childEffective;
         const hasChildren = isPlainObject(nestedSource) || arrayHasStructuredItems(nestedSource);
-        const inherited = resolveInheritSource(directives, childPath);
+        const inherited = resolveInheritSource(directives, childPath, heldFields);
 
         return makeNode({
           key,
@@ -243,7 +258,7 @@ function buildNodes(
           inheritSource: inherited.source,
           inheritDeclared: inherited.declared,
           children: hasChildren
-            ? buildNodes(childEffective, childPatch, childPath, insideArray, directives)
+            ? buildNodes(childEffective, childPatch, childPath, insideArray, directives, heldFields)
             : [],
         });
       })
@@ -256,8 +271,34 @@ export function buildOverrideTree(options: {
   patch: unknown;
   /** `$inherit` 指令，按点号路径索引；缺省表示字段都不带继承来源。 */
   inherit?: ReadonlyMap<string, string>;
+  /** 服务端自己决定的字段：默认值是下发取值，整体继承默认不接管它们。 */
+  heldFields?: ServedHeldFields;
 }): OverrideTreeNode[] {
-  return buildNodes(options.effective, options.patch, [], false, options.inherit ?? new Map());
+  return buildNodes(
+    options.effective,
+    options.patch,
+    [],
+    false,
+    options.inherit ?? new Map(),
+    options.heldFields
+  );
+}
+
+/**
+ * 把服务端下发的取值叠加到条目上，得到客户端当前收到的配置。
+ *
+ * 目录条目描述的是 CPA 的配置，不是客户端最终看到的内容：服务端会用模型元数据、来源
+ * 能力与可见性规则决定其中一部分字段，这些字段的取值与条目无关。编辑器把叠加后的结果
+ * 当作默认值，因此每个字段显示的就是客户端现在实际收到的取值。
+ * 条目缺失或没有下发摘要时原样返回。
+ */
+export function applyServedFields(
+  entry: unknown,
+  servedFields?: Readonly<Record<string, unknown>> | null
+): unknown {
+  if (!servedFields || !isPlainObject(entry)) return entry;
+  if (Object.keys(servedFields).length === 0) return entry;
+  return { ...entry, ...servedFields };
 }
 
 const clonePatch = (patch: unknown): Record<string, unknown> => {

@@ -14,8 +14,27 @@ import {
   type OverrideFieldState,
   type OverridePath,
   type OverrideTreeNode,
+  type ServedHeldFields,
 } from './codexClientModelsTree';
 import { formatArrayText } from './draftValues';
+
+/** 推理强度列表的字段路径：控件按强度逐项编辑，因此要单独收集候选取值。 */
+export const REASONING_LEVELS_PATH: OverridePath = ['supported_reasoning_levels'];
+
+/**
+ * 服务端认识的推理强度，按由弱到强排列。
+ * 目录里出现的其它取值也会成为候选，这里只保证常见强度的顺序稳定。
+ */
+export const REASONING_EFFORT_LEVELS: ReadonlyArray<string> = [
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+  'ultra',
+];
 
 /** 常用字段的控件类型；分组字段的子项由目录内容决定，因此没有固定路径。 */
 export type QuickFieldKind =
@@ -26,6 +45,7 @@ export type QuickFieldKind =
   | 'select'
   | 'string-list'
   | 'array'
+  | 'levels'
   | 'group';
 
 export interface QuickFieldDescriptor {
@@ -58,6 +78,79 @@ export const QUICK_FIELD_LINKS: ReadonlyArray<QuickLinkDescriptor> = [
   },
 ];
 
+/** 推理强度列表里的一项。 */
+export interface ReasoningLevelDraft {
+  effort: string;
+  description: string;
+}
+
+/** 读取推理强度列表；取值不是对象数组时当作空列表，交给用户重新补。 */
+export function readReasoningLevels(value: unknown): ReasoningLevelDraft[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter(isPlainObject)
+    .map((entry) => ({
+      effort: typeof entry.effort === 'string' ? entry.effort.trim() : '',
+      description: typeof entry.description === 'string' ? entry.description : '',
+    }))
+    .filter((level) => level.effort.length > 0);
+}
+
+/** 目录里的推理强度候选：已知强度在前，目录里出现的其它取值按字母顺序跟在后面。 */
+export function collectReasoningEfforts(models: ReadonlyArray<Record<string, unknown>>): string[] {
+  const seen = new Set<string>();
+  const extra: string[] = [];
+  models.forEach((entry) => {
+    readReasoningLevels(readPathValue(entry, REASONING_LEVELS_PATH)).forEach((level) => {
+      if (seen.has(level.effort)) return;
+      seen.add(level.effort);
+      if (!REASONING_EFFORT_LEVELS.includes(level.effort)) extra.push(level.effort);
+    });
+  });
+  extra.sort((left, right) => left.localeCompare(right));
+  return [...REASONING_EFFORT_LEVELS, ...extra];
+}
+
+/** 目录里每个推理强度的说明文字，用来在新增强度时带上默认说明。 */
+export function collectReasoningDescriptions(
+  models: ReadonlyArray<Record<string, unknown>>
+): Map<string, string> {
+  const descriptions = new Map<string, string>();
+  models.forEach((entry) => {
+    readReasoningLevels(readPathValue(entry, REASONING_LEVELS_PATH)).forEach((level) => {
+      if (!level.description || descriptions.has(level.effort)) return;
+      descriptions.set(level.effort, level.description);
+    });
+  });
+  return descriptions;
+}
+
+/**
+ * 新增一项推理强度的默认取值：按已知顺序取第一个还没用到的强度，说明沿用目录里的文字。
+ * 已知强度都已列出时返回 null，界面据此禁用新增按钮。
+ */
+export function nextReasoningLevel(
+  levels: ReadonlyArray<ReasoningLevelDraft>,
+  descriptions: ReadonlyMap<string, string>
+): ReasoningLevelDraft | null {
+  const used = new Set(levels.map((level) => level.effort));
+  const effort = REASONING_EFFORT_LEVELS.find((candidate) => !used.has(candidate));
+  if (!effort) return null;
+  return { effort, description: descriptions.get(effort) ?? '' };
+}
+
+/** 强度下拉框的候选取值：收集到的顺序加上编辑中出现的其它强度。 */
+export function mergeReasoningEfforts(
+  options: ReadonlyArray<string>,
+  levels: ReadonlyArray<ReasoningLevelDraft>
+): string[] {
+  const merged = [...options];
+  levels.forEach((level) => {
+    if (level.effort && !merged.includes(level.effort)) merged.push(level.effort);
+  });
+  return merged;
+}
+
 export type QuickSectionId = 'basic' | 'context' | 'capability' | 'tools' | 'prompt';
 
 export interface QuickSectionDescriptor {
@@ -81,6 +174,7 @@ export const QUICK_FIELD_SECTIONS: ReadonlyArray<QuickSectionDescriptor> = [
     fields: [
       { path: ['context_window'], kind: 'number' },
       { path: ['max_context_window'], kind: 'number' },
+      { path: REASONING_LEVELS_PATH, kind: 'levels', wide: true },
       { path: ['default_reasoning_level'], kind: 'select' },
       { path: ['default_reasoning_summary'], kind: 'select' },
       { path: ['default_verbosity'], kind: 'select' },
@@ -186,6 +280,8 @@ export function collectCatalogFieldOptions(
       [...values].sort((left, right) => left.localeCompare(right))
     );
   });
+  // 推理强度列表不是字符串字段，候选值单独收集。
+  options.set(quickFieldKey(REASONING_LEVELS_PATH), collectReasoningEfforts(models));
   return options;
 }
 
@@ -244,10 +340,12 @@ export const findQuickTreeNode = (
  *
  * 字段树里没有这个路径时，继承来源仍要从指令里读出来：
  * 例如只写了 model_messages 的指令时，条目里还没有对应的子键。
+ * heldFields 与字段树用同一份，两个视图对服务端自己决定的字段的判断因此始终一致。
  */
 export function buildQuickFieldViews(
   nodes: ReadonlyArray<OverrideTreeNode>,
-  directives?: ReadonlyMap<string, string>
+  directives?: ReadonlyMap<string, string>,
+  heldFields?: ServedHeldFields
 ): Map<string, QuickFieldView> {
   const views = new Map<string, QuickFieldView>();
   QUICK_VIEW_PATHS.forEach((path) => {
@@ -257,7 +355,7 @@ export function buildQuickFieldViews(
       return;
     }
     const inherited = directives
-      ? resolveInheritSource(directives, path)
+      ? resolveInheritSource(directives, path, heldFields)
       : { source: null, declared: null };
     views.set(quickFieldKey(path), { ...EMPTY_QUICK_FIELD_VIEW, ...inherited });
   });
@@ -389,6 +487,10 @@ export function formatQuickFieldText(kind: QuickFieldKind, value: unknown): stri
   if (kind === 'group') return '';
   if (value === undefined || value === null) return '';
   if (kind === 'array') return formatArrayText(value);
+  if (kind === 'levels')
+    return readReasoningLevels(value)
+      .map((level) => level.effort)
+      .join('\n');
   if (kind === 'string-list') {
     return Array.isArray(value) ? value.filter((item) => typeof item === 'string').join('\n') : '';
   }

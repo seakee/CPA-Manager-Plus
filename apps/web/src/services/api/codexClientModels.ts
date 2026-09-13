@@ -14,8 +14,9 @@ export type CodexClientModelEntry = Record<string, unknown>;
 /**
  * 服务端下发给 Codex 客户端的单个模型摘要。
  *
- * 目录只定义自己的条目，实际下发的列表由「已配置的可用模型」逐个匹配目录条目得到；
- * 匹配不到的模型整条复用默认模板，这类模型只在摘要里出现。
+ * 目录只定义自己的条目，实际下发的列表由「已配置的可用模型」逐个匹配目录条目得到：
+ * 匹配到条目时以该条目为底，匹配不到时整条复用默认模板。两种情况下服务端都会再用模型
+ * 元数据与来源能力决定一部分字段，这些字段的实际下发取值在 servedFields 里。
  */
 export interface CodexClientServedModel {
   /** 客户端请求该模型时使用的标识。 */
@@ -32,8 +33,24 @@ export interface CodexClientServedModel {
   maxContextWindow: number | null;
   visibility: string;
   reasoningLevel: string;
+  /** 该模型下发时提供的推理强度，顺序与下发内容一致。 */
+  reasoningLevels: CodexClientServedReasoningLevel[];
+  /**
+   * 服务端在目录条目之上决定的字段及其下发取值，键为字段名。这些字段由模型元数据、
+   * 来源能力与可见性规则决定，因此目录里的取值不等于客户端看到的值；编辑器把它们
+   * 叠加到条目上，用来显示真正的默认值。
+   */
+  servedFields: Record<string, unknown>;
   /** 该模型当前的下发位置；排序在目录条目之后。 */
   priority: number | null;
+}
+
+/** 服务端下发给客户端的一个推理强度。 */
+export interface CodexClientServedReasoningLevel {
+  /** 客户端请求该强度时使用的名称，例如 high。 */
+  effort: string;
+  /** 该强度的说明文字；下发内容可能省略。 */
+  description: string;
 }
 /** 一条未能生效的覆写：目录保留基线条目，自定义条目则不会出现在目录里。 */
 export interface CodexClientModelOverrideError {
@@ -75,6 +92,17 @@ const readNumber = (value: unknown): number => {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
 };
+
+const readReasoningLevels = (value: unknown): CodexClientServedReasoningLevel[] =>
+  Array.isArray(value)
+    ? value
+        .filter(isRecord)
+        .map((level) => ({
+          effort: readString(level.effort).trim(),
+          description: readString(level.description),
+        }))
+        .filter((level) => level.effort.length > 0)
+    : [];
 
 const readPositiveNumber = (value: unknown): number | null => {
   const parsed = Number(value);
@@ -137,6 +165,8 @@ const normalizeServedModels = (value: unknown): CodexClientServedModel[] | null 
       maxContextWindow: readPositiveNumber(entry.max_context_window),
       visibility: readString(entry.visibility),
       reasoningLevel: readString(entry.default_reasoning_level),
+      reasoningLevels: readReasoningLevels(entry.supported_reasoning_levels),
+      servedFields: isRecord(entry.served_fields) ? { ...entry.served_fields } : {},
       priority: Number.isFinite(Number(entry.priority)) ? Number(entry.priority) : null,
     }))
     .filter((entry) => entry.slug.length > 0);

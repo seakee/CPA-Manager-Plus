@@ -41,7 +41,7 @@
   cursor: pointer;
 }
 
-.chip_official {
+.chip_default {
   border-color: var(--border-subtle, #d8e5f2);
   background: var(--surface-subtle, #f6f9fd);
   color: var(--text-secondary, #64748b);
@@ -59,7 +59,7 @@
   color: var(--warning-color, #d97706);
 }
 
-/* 合并框里的字段来源互不相同时用虚线边框区分：不是目录值，也不是单一来源。 */
+/* 合并框里的字段来源互不相同时用虚线边框区分：不是默认值，也不是单一来源。 */
 .chip_mixed {
   border-style: dashed;
   border-color: color-mix(in srgb, var(--warning-color, #d97706) 46%, transparent);

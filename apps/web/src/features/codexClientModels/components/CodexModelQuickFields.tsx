@@ -1,14 +1,17 @@
 import { useCallback, useMemo, useState, type ComponentType, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Button } from '@/components/ui/Button';
 import { Select } from '@/components/ui/Select';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import {
   IconChevronRight,
   IconFileText,
+  IconPlus,
   IconScrollText,
   IconShieldCheck,
   IconSlidersHorizontal,
   IconTimer,
+  IconTrash2,
   type IconProps,
 } from '@/components/ui/icons';
 import {
@@ -21,9 +24,12 @@ import {
   buildQuickLinkView,
   findQuickTreeNode,
   formatQuickFieldText,
+  mergeReasoningEfforts,
   multilineRows,
+  nextReasoningLevel,
   quickFieldKey,
   quickFieldViewOf,
+  readReasoningLevels,
   type QuickFieldDescriptor,
   type QuickFieldKind,
   type QuickFieldView,
@@ -31,6 +37,7 @@ import {
   type QuickLinkView,
   type QuickSectionDescriptor,
   type QuickSectionId,
+  type ReasoningLevelDraft,
 } from '../model/codexModelQuickFields';
 import {
   buildOverrideTree,
@@ -72,9 +79,12 @@ const quickFieldLabel = (t: Translate, path: OverridePath): string =>
 const quickFieldHint = (t: Translate, path: OverridePath): string =>
   t(`codex_client_models.quick.fields.${quickFieldKey(path)}.hint`, { defaultValue: '' });
 
-/** 长文本与分组默认收起，展开后才渲染内容。 */
+/** 长文本、分组与推理强度列表默认收起，展开后才渲染内容。 */
 const hasCollapsedBody = (kind: QuickFieldKind): boolean =>
-  kind === 'multiline' || kind === 'group';
+  kind === 'multiline' || kind === 'group' || kind === 'levels';
+
+/** 没有目录说明时的空表，避免在渲染里反复新建。 */
+const EMPTY_LEVEL_DESCRIPTIONS: ReadonlyMap<string, string> = new Map();
 
 /** 单条路径的来源控制；联动组会按同样方式作用到组里的每条路径。 */
 function sourceControlFor(
@@ -105,6 +115,8 @@ export interface CodexModelQuickFieldsProps {
   patch: Record<string, unknown> | null;
   /** 枚举字段的候选值，来自现有目录。 */
   fieldOptions?: ReadonlyMap<string, ReadonlyArray<string>>;
+  /** 目录里已知的推理强度说明，用于新增级别时带上默认说明。 */
+  levelDescriptions?: ReadonlyMap<string, string>;
   /** 逐字段的继承来源与操作。 */
   sourceBinding: FieldInheritBinding;
   onChange: (patch: Record<string, unknown>) => void;
@@ -244,10 +256,92 @@ function QuickFieldShell({
   );
 }
 
+interface QuickLevelsFieldProps {
+  levels: ReadonlyArray<ReasoningLevelDraft>;
+  /** 强度下拉框的候选值，来自目录里的真实取值。 */
+  efforts: ReadonlyArray<string>;
+  /** 目录里每个强度的说明，新增时作为默认说明。 */
+  descriptions: ReadonlyMap<string, string>;
+  disabled: boolean;
+  onChange: (levels: ReasoningLevelDraft[]) => void;
+}
+
+/**
+ * 推理强度列表：逐项编辑强度与说明。
+ * 数组整体替换，因此每次改动都写回完整列表，而不是逐项打补丁。
+ */
+function QuickLevelsField({
+  levels,
+  efforts,
+  descriptions,
+  disabled,
+  onChange,
+}: QuickLevelsFieldProps) {
+  const { t } = useTranslation();
+  const options = mergeReasoningEfforts(efforts, levels);
+  const next = nextReasoningLevel(levels, descriptions);
+
+  const replaceAt = (index: number, level: ReasoningLevelDraft) =>
+    onChange(levels.map((current, position) => (position === index ? level : current)));
+
+  return (
+    <div className={styles.levels}>
+      {levels.length === 0 ? (
+        <p className={styles.levelsEmpty}>{t('codex_client_models.quick_levels_empty')}</p>
+      ) : null}
+      {levels.map((level, index) => (
+        <div className={styles.levelRow} key={`${level.effort}:${index}`}>
+          <Select
+            value={level.effort}
+            options={options.map((effort) => ({ value: effort, label: effort }))}
+            onChange={(effort) => replaceAt(index, { ...level, effort })}
+            ariaLabel={t('codex_client_models.quick_levels_effort')}
+            disabled={disabled}
+          />
+          <DraftField
+            value={level.description}
+            format={formatPlainText}
+            parse={parsePlainText}
+            onCommit={(description) =>
+              replaceAt(index, { ...level, description: formatPlainText(description) })
+            }
+            ariaLabel={t('codex_client_models.quick_levels_description')}
+            placeholder={descriptions.get(level.effort) ?? ''}
+            disabled={disabled}
+            singleLine
+          />
+          <button
+            type="button"
+            className={styles.levelRemove}
+            onClick={() => onChange(levels.filter((_, position) => position !== index))}
+            aria-label={t('codex_client_models.quick_levels_remove')}
+            title={t('codex_client_models.quick_levels_remove')}
+            disabled={disabled}
+          >
+            <IconTrash2 size={14} />
+          </button>
+        </div>
+      ))}
+      <Button
+        size="xs"
+        variant="secondary"
+        disabled={disabled || next === null}
+        onClick={() => {
+          if (next) onChange([...levels, next]);
+        }}
+      >
+        <IconPlus size={14} />
+        {t('codex_client_models.quick_levels_add')}
+      </Button>
+    </div>
+  );
+}
+
 interface QuickFieldRowProps {
   field: QuickFieldDescriptor;
   view: QuickFieldView;
   options: ReadonlyArray<string>;
+  levelDescriptions: ReadonlyMap<string, string>;
   inherit: FieldInheritBinding;
   nested?: boolean;
   disabled: boolean;
@@ -259,6 +353,7 @@ function QuickFieldRow({
   field,
   view,
   options,
+  levelDescriptions,
   inherit,
   nested,
   disabled,
@@ -365,6 +460,16 @@ function QuickFieldRow({
             resizable={false}
           />
         );
+      case 'levels':
+        return (
+          <QuickLevelsField
+            levels={readReasoningLevels(view.value)}
+            efforts={options}
+            descriptions={levelDescriptions}
+            disabled={disabled}
+            onChange={onSetValue}
+          />
+        );
       default:
         return (
           <DraftField
@@ -402,6 +507,7 @@ interface QuickFieldNodeProps {
   field: QuickFieldDescriptor;
   hiddenPaths: ReadonlySet<string>;
   options: ReadonlyMap<string, ReadonlyArray<string>> | undefined;
+  levelDescriptions: ReadonlyMap<string, string>;
   inherit: FieldInheritBinding;
   nested?: boolean;
   disabled: boolean;
@@ -417,6 +523,7 @@ function QuickFieldNode({
   field,
   hiddenPaths,
   options,
+  levelDescriptions,
   inherit,
   nested = false,
   disabled,
@@ -431,6 +538,7 @@ function QuickFieldNode({
         field={field}
         view={view}
         options={options?.get(quickFieldKey(field.path)) ?? []}
+        levelDescriptions={levelDescriptions}
         inherit={inherit}
         nested={nested}
         disabled={disabled}
@@ -461,6 +569,7 @@ function QuickFieldNode({
               field={child.field}
               hiddenPaths={hiddenPaths}
               options={options}
+              levelDescriptions={levelDescriptions}
               inherit={inherit}
               nested
               disabled={disabled}
@@ -560,18 +669,22 @@ export function CodexModelQuickFields({
   effective,
   patch,
   fieldOptions,
+  levelDescriptions = EMPTY_LEVEL_DESCRIPTIONS,
   sourceBinding,
   onChange,
   disabled = false,
 }: CodexModelQuickFieldsProps) {
   const { t } = useTranslation();
   // 字段树只构建一次：分组字段的子项与扁平字段的状态都从同一棵树上读。
-  const { directives } = sourceBinding;
+  const { directives, heldFields } = sourceBinding;
   const nodes = useMemo(
-    () => buildOverrideTree({ effective, patch, inherit: directives }),
-    [directives, effective, patch]
+    () => buildOverrideTree({ effective, patch, inherit: directives, heldFields }),
+    [directives, effective, heldFields, patch]
   );
-  const views = useMemo(() => buildQuickFieldViews(nodes, directives), [directives, nodes]);
+  const views = useMemo(
+    () => buildQuickFieldViews(nodes, directives, heldFields),
+    [directives, heldFields, nodes]
+  );
   // 内容通常一致的字段默认合并成一个输入框，用户关掉后才逐个编辑。
   const [linkedGroups, setLinkedGroups] = useState<ReadonlySet<string>>(
     () => new Set(QUICK_FIELD_LINKS.map((link) => link.id))
@@ -629,6 +742,7 @@ export function CodexModelQuickFields({
           field={field}
           hiddenPaths={hiddenPaths}
           options={fieldOptions}
+          levelDescriptions={levelDescriptions}
           inherit={sourceBinding}
           disabled={disabled}
           setValueAtPath={setValueAtPath}
@@ -641,6 +755,7 @@ export function CodexModelQuickFields({
         field={field}
         view={views.get(fieldKey) ?? EMPTY_QUICK_FIELD_VIEW}
         options={fieldOptions?.get(fieldKey) ?? []}
+        levelDescriptions={levelDescriptions}
         inherit={sourceBinding}
         disabled={disabled}
         onSetValue={(value) => setValueAtPath(field.path, value)}

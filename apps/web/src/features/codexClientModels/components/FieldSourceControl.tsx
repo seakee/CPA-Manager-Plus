@@ -36,8 +36,8 @@ export interface FieldSourceControlProps {
  * 字段来源控制：用一个状态标签同时表达「这个值从哪来」和「能改成什么」。
  *
  * 显示状态与后端一致：本地 null 是「已删除」，本地有值是「本地值」，
- * 有继承来源是「继承自 X」，两者都没有则是「目录值」。菜单负责改写继承指令，
- * 从而让每个字段都能独立选择跟随目录、继承别的模型，或保持本地值。
+ * 有继承来源是「继承自 X」，两者都没有则是「默认值」，也就是客户端当前收到的取值。
+ * 菜单负责改写继承指令，让每个字段都能独立选择保持默认、继承别的模型，或留下本地值。
  */
 export function FieldSourceControl({
   state,
@@ -64,7 +64,7 @@ export function FieldSourceControl({
           ? 'mixed'
           : source
             ? 'inherited'
-            : 'official';
+            : 'default';
   const label =
     state === 'removed'
       ? t('codex_client_models.field_state_removed')
@@ -74,7 +74,7 @@ export function FieldSourceControl({
           ? t('codex_client_models.field_state_mixed_source')
           : source
             ? t('codex_client_models.field_state_inherited', { slug: source })
-            : t('codex_client_models.field_state_official');
+            : t('codex_client_models.field_state_default');
 
   const chip = <span className={[styles.chip, styles[`chip_${tone}`]].join(' ')}>{label}</span>;
 

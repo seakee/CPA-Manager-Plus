@@ -4726,7 +4726,7 @@
     "served_providers": "提供來源：{{value}}",
     "editor_title_adopt": "為 {{slug}} 建立專屬條目",
     "adopt_slug_hint": "此識別碼來自 CPA 下發給客戶端的模型，無法修改。",
-    "adopt_notice": "此模型已下發但沒有專屬條目，儲存後會為它建立條目：保留用戶端目前看到的顯示名稱、說明、上下文視窗與排序，其餘欄位繼承 {{source}}。",
+    "adopt_notice": "此模型已下發給用戶端，但目錄裡還沒有它的項目。儲存後會為它建立項目：顯示名稱與說明取用戶端目前看到的內容，其餘欄位繼承 {{source}}；用戶端現在收到的取值都顯示為預設值，不需要逐欄覆寫。",
     "edit_override": "編輯覆寫",
     "delete_override": "移除覆寫",
     "empty": "沒有符合的模型",
@@ -4757,7 +4757,7 @@
     "inherit_issue_unknown_source": "繼承來源不在目前目錄裡。",
     "inherit_issue_self_reference": "不能繼承自身。",
     "inherit_issue_source_missing_path": "來源模型沒有這個欄位。",
-    "field_state_official": "目錄值",
+    "field_state_default": "預設值",
     "field_state_override": "已覆寫",
     "field_state_removed": "已刪除",
     "field_state_inherited": "繼承自 {{slug}}",
@@ -4777,6 +4777,11 @@
     "quick_field_preview_empty": "無內容",
     "quick_field_preview_open": "展開編輯",
     "quick_field_preview_expand": "展開編輯（還有 {{value}} 行）",
+    "quick_levels_add": "新增等級",
+    "quick_levels_remove": "移除該等級",
+    "quick_levels_effort": "推理強度",
+    "quick_levels_description": "等級說明",
+    "quick_levels_empty": "還沒有推理等級，新增一個後儲存。",
     "quick_group_fields": "{{value}} 個子項",
     "quick_links": {
       "instructions": {
@@ -4831,6 +4836,10 @@
         "max_context_window": {
           "label": "最大上下文視窗",
           "hint": "該模型允許的最大上下文長度。"
+        },
+        "supported_reasoning_levels": {
+          "label": "支援的推理等級",
+          "hint": "下發給客戶端的推理強度清單，客戶端只顯示這裡列出的等級。"
         },
         "default_reasoning_level": {
           "label": "預設推理級別",

@@ -253,3 +253,47 @@
   line-height: 1.45;
   color: var(--text-tertiary);
 }
+
+.levels {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.levelsEmpty {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-quaternary);
+}
+
+// 一行一项推理强度：强度下拉框、说明输入框、移除按钮。
+.levelRow {
+  display: grid;
+  grid-template-columns: minmax(110px, 150px) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.levelRemove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  cursor: pointer;
+
+  &:hover:not(:disabled) {
+    color: var(--danger-color);
+    border-color: var(--border-primary);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}

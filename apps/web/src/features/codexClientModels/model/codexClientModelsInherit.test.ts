@@ -171,6 +171,51 @@ describe('applyInheritDirectives', () => {
     });
   });
 
+  it('keeps the fields the server recomputes when the whole entry is inherited', () => {
+    const result = applyInheritDirectives(
+      {
+        slug: 'my-sol',
+        display_name: 'My Sol',
+        context_window: 1,
+        model_messages: { notes: 'local' },
+      },
+      new Map([['', 'gpt-5.6-sol']]),
+      lookup,
+      new Set(['context_window'])
+    );
+
+    // 服务端决定的字段保持条目自身的取值，其余字段照旧来自继承源。
+    expect(result).toEqual({
+      slug: 'my-sol',
+      display_name: 'My Sol',
+      context_window: 1,
+      model_messages: { notes: 'from sol' },
+    });
+  });
+
+  it('drops a server-decided field the local entry does not set', () => {
+    const result = applyInheritDirectives(
+      { slug: 'my-sol', display_name: 'My Sol' },
+      new Map([['', 'gpt-5.6-sol']]),
+      lookup,
+      new Set(['context_window'])
+    ) as Record<string, unknown>;
+
+    expect(result.context_window).toBeUndefined();
+    expect(result.model_messages).toEqual({ notes: 'from sol' });
+  });
+
+  it('still applies a directive written on the server-decided field itself', () => {
+    const result = applyInheritDirectives(
+      { slug: 'my-sol', display_name: 'My Sol', context_window: 1 },
+      new Map([['context_window', 'gpt-5.6-sol']]),
+      lookup,
+      new Set(['context_window'])
+    ) as Record<string, unknown>;
+
+    expect(result.context_window).toBe(400000);
+  });
+
   it('writes a field the source entry does not have and keeps the base value otherwise', () => {
     const missing = applyInheritDirectives(
       { slug: 'my-sol', display_name: 'My Sol', context_window: 1 },

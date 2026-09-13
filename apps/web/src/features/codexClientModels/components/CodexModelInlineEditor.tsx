@@ -24,9 +24,15 @@ import {
 import {
   collectCatalogFieldOptions,
   collectHiddenFieldKeys,
+  collectReasoningDescriptions,
   countAdvancedFields,
 } from '../model/codexModelQuickFields';
-import { removeOverrideKey, setOverrideValue, isPlainObject } from '../model/codexClientModelsTree';
+import {
+  applyServedFields,
+  isPlainObject,
+  removeOverrideKey,
+  setOverrideValue,
+} from '../model/codexClientModelsTree';
 import {
   applyInheritDirectives,
   clearFieldOverride,
@@ -125,9 +131,20 @@ export function CodexModelInlineEditor({
 
   const trimmedSlug = slugInput.trim();
   const directives = useMemo(() => readInheritDirectives(treePatch), [treePatch]);
+  // 默认模板是条目的起点：指向它的整条继承指令由编辑器写出来，不是用户挑的来源，
+  // 因此界面把它当作「默认值」，字段不会显示成继承自默认模板。
+  const displayDirectives = useMemo(() => {
+    if (directives.get('') !== DEFAULT_MODEL_TEMPLATE_SLUG) return directives;
+    const visible = new Map(directives);
+    visible.delete('');
+    return visible;
+  }, [directives]);
   const lookup = useMemo(() => createInheritSourceLookup(catalog), [catalog]);
+  // 服务端自己决定的字段：默认值就是下发取值，整条继承默认不接管它们。
+  const heldFields = useMemo(() => new Set(Object.keys(served?.servedFields ?? {})), [served]);
   const sources = useMemo(
-    () => (supportsInherit ? collectInheritSources(catalog, mode === 'edit' ? slug : undefined) : []),
+    () =>
+      supportsInherit ? collectInheritSources(catalog, mode === 'edit' ? slug : undefined) : [],
     [catalog, mode, slug, supportsInherit]
   );
   const issues = useMemo(
@@ -143,16 +160,19 @@ export function CodexModelInlineEditor({
   }, [issues, t]);
   const rootIssues = useMemo(() => issues.filter((issue) => issue.path === ''), [issues]);
 
-  // 生效参照值：本条目自身的内容，再叠上继承指令，于是字段旁预览的就是真正会生效的取值。
+  // 生效参照值：条目内容先换成客户端当前收到的配置，再叠上继承指令，
+  // 于是字段旁预览的既是默认值，也是真正会生效的取值。
   const effective = useMemo(() => {
     const base = mode === 'edit' ? effectiveEntry : inheritBaseEntry;
-    return applyInheritDirectives(base, directives, lookup);
-  }, [directives, effectiveEntry, inheritBaseEntry, lookup, mode]);
+    const servedBase = applyServedFields(base, served?.servedFields);
+    return applyInheritDirectives(servedBase, directives, lookup, heldFields);
+  }, [directives, effectiveEntry, heldFields, inheritBaseEntry, lookup, mode, served]);
 
   const sourceBinding: FieldInheritBinding = useMemo(
     () => ({
-      directives,
+      directives: displayDirectives,
       sources,
+      heldFields,
       issueOf: (path) => issueByPath.get(path.join('.')),
       clear: (path) => setTreePatch((previous) => clearFieldOverride(previous, path)),
       inherit: (path, sourceSlug) =>
@@ -162,10 +182,12 @@ export function CodexModelInlineEditor({
       remove: (path) =>
         setTreePatch((previous) => setOverrideValue(previous, path, null, effective)),
     }),
-    [directives, effective, issueByPath, sources]
+    [displayDirectives, effective, heldFields, issueByPath, sources]
   );
 
   const fieldOptions = useMemo(() => collectCatalogFieldOptions(catalog), [catalog]);
+  // 新增推理强度时沿用目录里已有的说明文字，避免默认说明在客户端里丢失。
+  const levelDescriptions = useMemo(() => collectReasoningDescriptions(catalog), [catalog]);
   const hiddenFieldKeys = useMemo(() => collectHiddenFieldKeys(), []);
   const advancedCount = useMemo(
     () => countAdvancedFields(effective, treePatch),
@@ -176,7 +198,7 @@ export function CodexModelInlineEditor({
     [mode, overrideDocument, slug]
   );
 
-  const rootSource = directives.get('') ?? '';
+  const rootSource = displayDirectives.get('') ?? '';
   const inheritOptions = useMemo(() => {
     const options = [{ value: '', label: t('codex_client_models.inherit_root_none') }];
     sources.forEach((source) => options.push({ value: source, label: source }));
@@ -310,9 +332,7 @@ export function CodexModelInlineEditor({
       {mode === 'adopt' ? (
         <div className={styles.slugField}>
           <div className={styles.slugLocked}>
-            <span className={styles.slugLockedLabel}>
-              {t('codex_client_models.slug_label')}
-            </span>
+            <span className={styles.slugLockedLabel}>{t('codex_client_models.slug_label')}</span>
             <code className={styles.slugLockedValue}>{slug}</code>
           </div>
           <p className={styles.slugLockedHint}>{t('codex_client_models.adopt_slug_hint')}</p>
@@ -365,6 +385,7 @@ export function CodexModelInlineEditor({
         effective={effective}
         patch={treePatch}
         fieldOptions={fieldOptions}
+        levelDescriptions={levelDescriptions}
         sourceBinding={sourceBinding}
         onChange={setTreePatch}
         disabled={saving}

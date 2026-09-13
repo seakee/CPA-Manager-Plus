@@ -23,6 +23,7 @@ const effectiveEntry = {
 const makeBinding = (overrides: Partial<FieldInheritBinding> = {}): FieldInheritBinding => ({
   directives: new Map(),
   sources: ['gpt-5.6-sol'],
+  heldFields: new Set(),
   issueOf: () => undefined,
   clear: () => undefined,
   inherit: () => undefined,
@@ -54,7 +55,7 @@ describe('OverrideTreeEditor', () => {
   it('marks every field state so an override can be told apart from the effective value', () => {
     const markup = renderEditor({ display_name: 'Local GPT-5.5', available_in_plans: null });
 
-    expect(markup).toContain('codex_client_models.field_state_official');
+    expect(markup).toContain('codex_client_models.field_state_default');
     expect(markup).toContain('codex_client_models.field_state_override');
     expect(markup).toContain('codex_client_models.field_state_removed');
     // 状态标签本身就是「改成别的来源」的入口。

@@ -37,6 +37,8 @@ const servedModel = (overrides: Partial<CodexClientServedModel> = {}): CodexClie
   maxContextWindow: 272000,
   visibility: 'list',
   reasoningLevel: 'medium',
+  reasoningLevels: [],
+  servedFields: {},
   priority: 143,
   ...overrides,
 });
@@ -68,7 +70,7 @@ describe('CodexModelInlineEditor', () => {
     expect(markup).toContain('codex_client_models.quick.sections.basic.title');
     expect(markup).toContain('codex_client_models.quick.fields.display_name.label');
     expect(markup).toContain('codex_client_models.quick.fields.context_window.label');
-    expect(markup).toContain('codex_client_models.field_state_official');
+    expect(markup).toContain('codex_client_models.field_state_default');
   });
 
   it('offers the prompt fields in the common panel instead of hiding them in the tree', () => {
@@ -127,7 +129,7 @@ describe('CodexModelInlineEditor', () => {
     );
   });
 
-  it('seeds a new entry by inheriting the official template', () => {
+  it('seeds a new entry from the official template and shows its values as defaults', () => {
     const markup = renderEditor({
       mode: 'create',
       slug: 'qwen3-max',
@@ -136,9 +138,11 @@ describe('CodexModelInlineEditor', () => {
     });
 
     expect(markup).toContain('codex_client_models.editor_title_create');
-    // 新条目整条继承官方模板，因此面板展示的是模板的取值而不是空表单。
+    // 新条目从官方模板起步，因此面板展示的是模板的取值而不是空表单。
     expect(markup).toContain('272000');
-    expect(markup).toContain('gpt-5.5');
+    // 模板只是新条目的起点，不是用户挑的来源：下拉框显示「不继承」，字段显示默认值。
+    expect(markup).toContain('codex_client_models.inherit_root_none');
+    expect(markup).not.toContain('codex_client_models.field_state_inherited');
   });
 
   it('locks the slug and names the template when adopting a served model', () => {
@@ -165,6 +169,25 @@ describe('CodexModelInlineEditor', () => {
     expect(markup).toContain(
       'codex_client_models.field_state_inherited{&quot;slug&quot;:&quot;gpt-5.6-sol&quot;}'
     );
+  });
+
+  it('keeps a field the server decides out of a whole-entry inherit', () => {
+    const markup = renderEditor({
+      patch: { $inherit: 'gpt-5.6-sol' },
+      catalog: [
+        { ...effectiveEntry, context_window: 272000 },
+        { slug: 'gpt-5.6-sol', display_name: 'GPT-5.6 Sol', context_window: 400000 },
+      ],
+      served: servedModel({
+        slug: 'gpt-5.5',
+        templateSlug: 'gpt-5.5',
+        servedFields: { context_window: 272000 },
+      }),
+    });
+
+    // 服务端下发的取值就是这个字段的默认值，整条继承不会把它换成来源的取值。
+    expect(markup).toContain('value="272000"');
+    expect(markup).not.toContain('value="400000"');
   });
 
   it('reports an inherit directive that points at a missing model', () => {

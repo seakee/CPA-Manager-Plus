@@ -60,10 +60,22 @@ describe('normalizeCodexClientModelsState', () => {
           max_context_window: 272000,
           visibility: 'list',
           default_reasoning_level: 'medium',
+          supported_reasoning_levels: [
+            { effort: ' low ', description: 'Fast responses with lighter reasoning' },
+            { effort: 'high' },
+            { effort: '' },
+            'ignored',
+          ],
+          served_fields: { context_window: 400000, max_context_window: 400000 },
           priority: 143,
         },
         { slug: '', template_slug: 'gpt-5.5' },
-        { slug: 'gpt-image-2', context_window: 'nope', max_context_window: 'nope', providers: 'nope' },
+        {
+          slug: 'gpt-image-2',
+          context_window: 'nope',
+          max_context_window: 'nope',
+          providers: 'nope',
+        },
         'ignored',
       ],
     });
@@ -80,6 +92,11 @@ describe('normalizeCodexClientModelsState', () => {
         maxContextWindow: 272000,
         visibility: 'list',
         reasoningLevel: 'medium',
+        reasoningLevels: [
+          { effort: 'low', description: 'Fast responses with lighter reasoning' },
+          { effort: 'high', description: '' },
+        ],
+        servedFields: { context_window: 400000, max_context_window: 400000 },
         priority: 143,
       },
       {
@@ -93,6 +110,8 @@ describe('normalizeCodexClientModelsState', () => {
         maxContextWindow: null,
         visibility: '',
         reasoningLevel: '',
+        reasoningLevels: [],
+        servedFields: {},
         priority: null,
       },
     ]);

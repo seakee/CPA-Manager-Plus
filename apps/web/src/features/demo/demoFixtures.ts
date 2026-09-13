@@ -6468,9 +6468,7 @@ const scopeDemoQuotaRecord = <TState extends CredentialScopedQuotaState>(
   return scoped;
 };
 
-export const getDemoQuotaStoreState = (
-  baseNow = getDemoEvidenceEpochMs()
-): DemoQuotaStoreState => {
+export const getDemoQuotaStoreState = (baseNow = getDemoEvidenceEpochMs()): DemoQuotaStoreState => {
   const raw = getDemoQuotaStoreStateByFileName(baseNow);
   const filesByName = new Map<string, AuthFileItem[]>();
   getDemoAuthFiles().files.forEach((file) => {
@@ -7408,6 +7406,22 @@ export const getDemoApiCallResult = (payload: DemoApiCallPayload = {}) => {
   };
 };
 
+/** 演示用的推理级别说明，与 CPA 下发的 supported_reasoning_levels 同形。 */
+const DEMO_CODEX_REASONING_DESCRIPTIONS: Record<string, string> = {
+  minimal: 'Minimal reasoning for the fastest responses',
+  low: 'Fast responses with lighter reasoning',
+  medium: 'Balances speed and reasoning depth for everyday tasks',
+  high: 'Greater reasoning depth for complex problems',
+  xhigh: 'Extra high reasoning depth for complex problems',
+  ultra: 'Maximum reasoning depth for the hardest problems',
+};
+
+const demoCodexReasoningLevels = (efforts: ReadonlyArray<string>) =>
+  efforts.map((effort) => ({
+    effort,
+    description: DEMO_CODEX_REASONING_DESCRIPTIONS[effort] ?? '',
+  }));
+
 const demoCodexClientModelBaseEntries: Record<string, unknown>[] = [
   {
     slug: 'gpt-5.5',
@@ -7420,7 +7434,7 @@ const demoCodexClientModelBaseEntries: Record<string, unknown>[] = [
     context_window: 272000,
     max_context_window: 272000,
     priority: 100,
-    supported_reasoning_levels: ['low', 'medium', 'high'],
+    supported_reasoning_levels: demoCodexReasoningLevels(['low', 'medium', 'high', 'xhigh']),
     apply_patch_tool_type: 'function',
   },
   {
@@ -7431,12 +7445,22 @@ const demoCodexClientModelBaseEntries: Record<string, unknown>[] = [
     context_window: 400000,
     max_context_window: 400000,
     priority: 90,
+    supported_reasoning_levels: demoCodexReasoningLevels([
+      'low',
+      'medium',
+      'high',
+      'xhigh',
+      'ultra',
+    ]),
   },
 ];
 
 /**
  * 演示用的已下发模型。目录里没有专属条目的模型由默认模板兜底，
  * 因此这些条目的模板来源与 default_template 按当前覆写文档推算。
+ *
+ * servedFields 是服务端在目录条目之外自己决定的字段及其下发取值：编辑器把它们叠加到
+ * 条目上，字段因此显示客户端当前收到的取值，而不是目录条目里的取值。
  */
 const demoCodexClientServedModels = [
   {
@@ -7447,7 +7471,9 @@ const demoCodexClientServedModels = [
     maxContextWindow: 400000,
     visibility: 'public',
     reasoningLevel: 'high',
+    reasoningLevels: demoCodexReasoningLevels(['low', 'medium', 'high', 'xhigh', 'ultra']),
     priority: 90,
+    servedFields: {},
     providers: ['openai-compatibility'],
   },
   {
@@ -7458,7 +7484,9 @@ const demoCodexClientServedModels = [
     maxContextWindow: 272000,
     visibility: 'public',
     reasoningLevel: 'medium',
+    reasoningLevels: demoCodexReasoningLevels(['low', 'medium', 'high', 'xhigh']),
     priority: 100,
+    servedFields: {},
     providers: ['openai-compatibility'],
   },
   {
@@ -7469,10 +7497,14 @@ const demoCodexClientServedModels = [
     maxContextWindow: 272000,
     visibility: 'public',
     reasoningLevel: 'medium',
+    reasoningLevels: demoCodexReasoningLevels(['low', 'medium', 'high', 'xhigh']),
     priority: 100,
+    servedFields: {},
     providers: ['openai-compatibility'],
   },
   {
+    // 目录里没有专属条目的模型由默认模板兜底，再由服务端按模型元数据与来源能力决定一部分
+    // 字段，因此这里列出与默认模板不一致、客户端实际收到的取值。
     slug: 'qwen3.8-27b-local',
     displayName: 'qwen3.8-27b-local',
     description: 'qwen3.8-27b-local',
@@ -7480,7 +7512,15 @@ const demoCodexClientServedModels = [
     maxContextWindow: 131072,
     visibility: 'public',
     reasoningLevel: 'medium',
+    reasoningLevels: demoCodexReasoningLevels(['low', 'medium', 'high', 'xhigh']),
     priority: 143,
+    servedFields: {
+      context_window: 131072,
+      max_context_window: 131072,
+      prefer_websockets: false,
+      supports_search_tool: false,
+      priority: 143,
+    },
     providers: ['openai-compatibility'],
   },
   {
@@ -7490,8 +7530,19 @@ const demoCodexClientServedModels = [
     contextWindow: 1048576,
     maxContextWindow: 1048576,
     visibility: 'hide',
-    reasoningLevel: 'medium',
+    reasoningLevel: 'minimal',
+    reasoningLevels: demoCodexReasoningLevels(['minimal', 'low', 'high', 'xhigh']),
     priority: 243,
+    servedFields: {
+      context_window: 1048576,
+      max_context_window: 1048576,
+      visibility: 'hide',
+      default_reasoning_level: 'minimal',
+      supported_reasoning_levels: demoCodexReasoningLevels(['minimal', 'low', 'high', 'xhigh']),
+      prefer_websockets: false,
+      supports_search_tool: false,
+      priority: 243,
+    },
     providers: ['antigravity'],
   },
 ];
@@ -7499,7 +7550,12 @@ const demoCodexClientServedModels = [
 const DEMO_DEFAULT_TEMPLATE_SLUG = 'gpt-5.5';
 
 let demoCodexClientModelOverrides: Record<string, unknown> = {
-  'deepseek-chat': { display_name: 'DeepSeek Chat (local)' },
+  'deepseek-chat': {
+    $inherit: DEMO_DEFAULT_TEMPLATE_SLUG,
+    slug: 'deepseek-chat',
+    display_name: 'DeepSeek Chat (local)',
+    supported_reasoning_levels: demoCodexReasoningLevels(['low', 'medium', 'high', 'xhigh']),
+  },
 };
 let demoCodexClientModelRevision = 12;
 
@@ -7562,7 +7618,9 @@ export const getDemoCodexClientModelsState = () => {
       max_context_window: served.maxContextWindow,
       visibility: served.visibility,
       default_reasoning_level: served.reasoningLevel,
+      supported_reasoning_levels: served.reasoningLevels,
       priority: served.priority,
+      served_fields: served.servedFields,
     };
   });
 

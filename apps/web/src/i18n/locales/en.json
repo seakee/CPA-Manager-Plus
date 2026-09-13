@@ -4728,7 +4728,7 @@
     "served_providers": "Served by {{value}}",
     "editor_title_adopt": "Add an entry for {{slug}}",
     "adopt_slug_hint": "Clients request the model with this id, so it cannot change.",
-    "adopt_notice": "The model is served to clients, but the catalog has no entry for it. Saving adds one that keeps the display name, description, context window and order clients see today, and inherits its remaining fields from {{source}}.",
+    "adopt_notice": "This model is served to clients while the catalog still has no entry for it. Saving adds one: the display name and description come from what clients see today, and the remaining fields are inherited from {{source}}. The values clients already receive show up as defaults, so none of them has to be overridden by hand.",
     "edit_override": "Edit override",
     "delete_override": "Remove override",
     "empty": "No matching models",
@@ -4759,7 +4759,7 @@
     "inherit_issue_unknown_source": "The inheritance source is not in the catalog.",
     "inherit_issue_self_reference": "A model cannot inherit from itself.",
     "inherit_issue_source_missing_path": "The source model does not define this field.",
-    "field_state_official": "Catalog",
+    "field_state_default": "Default",
     "field_state_override": "Overridden",
     "field_state_removed": "Removed",
     "field_state_inherited": "From {{slug}}",
@@ -4779,6 +4779,11 @@
     "quick_field_preview_empty": "Empty",
     "quick_field_preview_open": "Expand to edit",
     "quick_field_preview_expand": "Expand to edit ({{value}} more lines)",
+    "quick_levels_add": "Add level",
+    "quick_levels_remove": "Remove level",
+    "quick_levels_effort": "Effort",
+    "quick_levels_description": "Level description",
+    "quick_levels_empty": "No reasoning levels yet. Add one and save.",
     "quick_group_fields": "{{value}} sub-fields",
     "quick_links": {
       "instructions": {
@@ -4833,6 +4838,10 @@
         "max_context_window": {
           "label": "Max context window",
           "hint": "Largest context length this model accepts."
+        },
+        "supported_reasoning_levels": {
+          "label": "Supported reasoning levels",
+          "hint": "Reasoning efforts sent to Codex clients; clients only offer the levels listed here."
         },
         "default_reasoning_level": {
           "label": "Default reasoning level",

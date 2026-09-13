@@ -15,6 +15,7 @@ import {
   isPlainObject,
   removeOverrideKey,
   type OverridePath,
+  type ServedHeldFields,
 } from './codexClientModelsTree';
 
 export { INHERIT_KEY, NON_INHERITABLE_FIELDS, isNonInheritablePathKey };
@@ -170,19 +171,27 @@ export function createInheritSourceLookup(
   };
 }
 
-/** 身份字段永远来自条目自身，继承源不提供。 */
-function withIdentityFields(
+/** 字段改回条目自身的取值；条目里没有它时就从继承结果里删掉。 */
+function keepLocalField(merged: Record<string, unknown>, base: unknown, field: string): void {
+  if (isPlainObject(base) && Object.prototype.hasOwnProperty.call(base, field)) {
+    merged[field] = cloneJsonValue(base[field]);
+    return;
+  }
+  delete merged[field];
+}
+
+/**
+ * 整条继承的结果：身份字段永远是条目自身的，heldFields 里列出的服务端决定的字段也留原样。
+ * 前者后端不会从来源取值，后者的下发取值由服务端按模型元数据算出来，继承源都盖不到。
+ */
+function withLocalFields(
   source: Record<string, unknown>,
-  base: unknown
+  base: unknown,
+  heldFields?: ServedHeldFields
 ): Record<string, unknown> {
   const merged = cloneJsonValue(source);
-  NON_INHERITABLE_FIELDS.forEach((field) => {
-    if (isPlainObject(base) && Object.prototype.hasOwnProperty.call(base, field)) {
-      merged[field] = cloneJsonValue(base[field]);
-      return;
-    }
-    delete merged[field];
-  });
+  NON_INHERITABLE_FIELDS.forEach((field) => keepLocalField(merged, base, field));
+  heldFields?.forEach((field) => keepLocalField(merged, base, field));
   return merged;
 }
 
@@ -213,11 +222,15 @@ const inheritPathsShallowFirst = (directives: ReadonlyMap<string, string>): stri
  *
  * 界面用它来预览与播种：字段一旦选了继承源，展示的就不再是自身条目里的旧值，
  * 而是来源模型的取值。来源缺少该字段时保留原值，问题交给 validateInheritDirectives 提示。
+ *
+ * heldFields 是服务端自己决定的字段：整条继承默认不接管它们，取值仍按条目自身的来，
+ * 因为客户端看到的是服务端按模型元数据算出来的值，而不是继承源里的值。
  */
 export function applyInheritDirectives(
   base: unknown,
   directives: ReadonlyMap<string, string>,
-  lookup: InheritSourceLookup
+  lookup: InheritSourceLookup,
+  heldFields?: ServedHeldFields
 ): unknown {
   if (directives.size === 0) return base;
 
@@ -232,7 +245,9 @@ export function applyInheritDirectives(
 
     if (!pathKey) {
       const entry = asEntry(source.value);
-      if (entry.found) current = withIdentityFields(entry.value as Record<string, unknown>, base);
+      if (entry.found) {
+        current = withLocalFields(entry.value as Record<string, unknown>, base, heldFields);
+      }
       return;
     }
     current = writePath(current, pathSegments(pathKey), cloneJsonValue(source.value));
@@ -249,6 +264,8 @@ export interface FieldInheritBinding {
   directives: ReadonlyMap<string, string>;
   /** 可作为继承源的模型 slug。 */
   sources: ReadonlyArray<string>;
+  /** 服务端自己决定的字段：下发取值由服务端给出，整条继承默认不接管它们。 */
+  heldFields: ServedHeldFields;
   /** 该路径上继承指令的问题描述，供字段旁的警告标签显示。 */
   issueOf: (path: OverridePath) => string | undefined;
   /** 清除本地改动与自身声明的继承指令。 */

@@ -51,6 +51,11 @@ const servedModel = (overrides: Partial<CodexClientServedModel> = {}): CodexClie
   maxContextWindow: 272000,
   visibility: 'public',
   reasoningLevel: 'medium',
+  reasoningLevels: [
+    { effort: 'low', description: 'Fast responses with lighter reasoning' },
+    { effort: 'medium', description: 'Balances speed and reasoning depth for everyday tasks' },
+  ],
+  servedFields: {},
   priority: 143,
   ...overrides,
 });
@@ -174,7 +179,9 @@ describe('served models', () => {
 
   it('keeps counting a served model as removed while its null patch stands', () => {
     const rows = buildCodexClientModelRows(
-      buildServedState({ override: { 'deepseek-chat': { display_name: 'DeepSeek Chat' }, 'deepseek-flash': null } })
+      buildServedState({
+        override: { 'deepseek-chat': { display_name: 'DeepSeek Chat' }, 'deepseek-flash': null },
+      })
     );
     const flash = rows.find((row) => row.slug === 'deepseek-flash');
     expect(flash?.origin).toBe('removed');
@@ -183,7 +190,12 @@ describe('served models', () => {
 
   it('counts and filters the served rows', () => {
     const rows = buildCodexClientModelRows(buildServedState());
-    expect(countCodexClientModelRows(rows)).toMatchObject({ all: 3, served: 1, base: 1, override: 1 });
+    expect(countCodexClientModelRows(rows)).toMatchObject({
+      all: 3,
+      served: 1,
+      base: 1,
+      override: 1,
+    });
     expect(filterCodexClientModelRows(rows, 'served', '').map((row) => row.slug)).toEqual([
       'deepseek-flash',
     ]);
@@ -195,35 +207,22 @@ describe('served models', () => {
     expect(rows.every((row) => row.served === null)).toBe(true);
   });
 
-  it('adopts a served model by inheriting its template and pinning what clients see', () => {
+  it('adopts a served model by inheriting its template and keeping the identity clients see', () => {
     const patch = buildAdoptedModelPatch(buildState().models[0], servedModel());
     expect(patch).toEqual({
       $inherit: 'gpt-5.5',
       slug: 'deepseek-flash',
       display_name: 'deepseek-flash',
       description: 'deepseek-flash',
-      context_window: 272000,
-      max_context_window: 272000,
-      priority: 143,
     });
   });
 
-  it('leaves the fields the summary omits to the inherited template', () => {
+  it('keeps the served values out of the patch so the editor can show them as defaults', () => {
     const patch = buildAdoptedModelPatch(
       buildState().models[0],
-      servedModel({
-        displayName: '',
-        description: '',
-        contextWindow: null,
-        maxContextWindow: null,
-        priority: null,
-      })
+      servedModel({ contextWindow: 131072, maxContextWindow: 131072, priority: 143 })
     );
-    expect(patch).toEqual({
-      $inherit: 'gpt-5.5',
-      slug: 'deepseek-flash',
-      display_name: 'deepseek-flash',
-    });
+    expect(Object.keys(patch).sort()).toEqual(['$inherit', 'description', 'display_name', 'slug']);
   });
 
   it('resolves the inherit source of a served model through its template', () => {

@@ -241,6 +241,40 @@ describe('resolveInheritSource', () => {
     );
   });
 
+  it('keeps the fields the server decides out of a whole-entry inherit', () => {
+    const directives = new Map([['', 'whole-entry']]);
+    const heldFields = new Set(['context_window', 'supported_reasoning_levels']);
+
+    // 下发取值由服务端给出的字段显示为默认值，不该显示成「继承自 X」。
+    expect(resolveInheritSource(directives, ['context_window'], heldFields)).toEqual({
+      source: null,
+      declared: null,
+    });
+    // 服务端没决定的字段照旧跟随整条继承。
+    expect(resolveInheritSource(directives, ['priority'], heldFields).source).toBe('whole-entry');
+    // 显式写在字段路径上的指令仍然生效。
+    const declared = new Map([['context_window', 'gpt-5.6-sol']]);
+    expect(resolveInheritSource(declared, ['context_window'], heldFields)).toEqual({
+      source: 'gpt-5.6-sol',
+      declared: 'gpt-5.6-sol',
+    });
+  });
+
+  it('keeps the nested fields of a server-decided parent out of the whole-entry inherit', () => {
+    const directives = new Map([['', 'whole-entry']]);
+    const heldFields = new Set(['model_messages']);
+
+    expect(resolveInheritSource(directives, ['model_messages', 'notes'], heldFields)).toEqual({
+      source: null,
+      declared: null,
+    });
+    // 指向父路径的指令是显式选择，不受这份清单影响。
+    const parent = new Map([['model_messages', 'gpt-5.6-sol']]);
+    expect(resolveInheritSource(parent, ['model_messages', 'notes'], heldFields).source).toBe(
+      'gpt-5.6-sol'
+    );
+  });
+
   it('reports a directive on an identity field without applying it', () => {
     const directives = new Map([['display_name', 'own-source']]);
 

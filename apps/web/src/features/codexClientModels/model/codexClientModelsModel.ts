@@ -236,6 +236,7 @@ export function resolveServedInheritEntry(
  *
  * 身份字段不会从继承源取值，而目录校验要求 description 非空，
  * 因此这里从来源条目抄一份初值，用户再改成自己想要的说法。
+ * 其余字段不写进补丁：客户端的默认取值由服务端决定，界面按下发结果展示。
  */
 export function buildInheritedModelPatch(
   source: CodexClientModelEntry | null,
@@ -249,29 +250,25 @@ export function buildInheritedModelPatch(
   };
   const description = readString(seed.description).trim() || readString(source?.description).trim();
   if (description) patch.description = description;
-  if (typeof seed.contextWindow === 'number') patch.context_window = seed.contextWindow;
-  if (typeof seed.maxContextWindow === 'number') patch.max_context_window = seed.maxContextWindow;
-  if (typeof seed.priority === 'number') patch.priority = seed.priority;
   const sourceSlug = readModelSlug(source);
   return sourceSlug ? { $inherit: sourceSlug, ...patch } : patch;
 }
 
 /**
- * 采纳已下发模型时要固定的本地取值。继承源里没有这些内容，但它们对客户端可见，
- * 因此从已下发摘要里带过来，省缺时仍然沿用继承源。
+ * 采纳已下发模型时要写进条目的身份字段。继承源给不出它们（后端只从本地条目取身份
+ * 字段），所以从已下发摘要带过来，缺省时沿用 slug 与继承源的说明。
  */
 export interface InheritedModelSeed {
   displayName?: string;
   description?: string;
-  contextWindow?: number | null;
-  maxContextWindow?: number | null;
-  priority?: number | null;
 }
 
 /**
- * 采纳已下发模型的补丁：整条继承它当前使用的模板，同时固定客户端已经看到的
- * 展示名、说明、上下文窗口与排序。于是采纳只把条目变成可单独编辑，
- * 不会改变 Codex 里的显示与顺序。
+ * 采纳已下发模型的补丁：整条继承它当前使用的模板，身份字段取客户端已经看到的
+ * 展示名与说明。于是采纳只把条目变成可单独编辑，不会改变 Codex 里的显示与顺序。
+ *
+ * 其余字段不写进补丁。它们在客户端的取值由服务端决定，编辑器改为把下发结果当作
+ * 默认值显示，因此这些取值不会被标成本地覆写。
  */
 export function buildAdoptedModelPatch(
   source: CodexClientModelEntry | null,
@@ -280,9 +277,6 @@ export function buildAdoptedModelPatch(
   return buildInheritedModelPatch(source, served.slug, {
     displayName: served.displayName,
     description: served.description.trim(),
-    contextWindow: served.contextWindow,
-    maxContextWindow: served.maxContextWindow,
-    priority: served.priority,
   });
 }
 

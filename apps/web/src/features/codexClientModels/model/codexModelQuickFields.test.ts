@@ -5,18 +5,24 @@ import {
   QUICK_FIELD_LINKS,
   QUICK_FIELD_PREVIEW_LINES,
   QUICK_FIELD_SECTIONS,
+  REASONING_EFFORT_LEVELS,
   buildQuickFieldPreview,
   buildQuickFieldViews,
   buildQuickGroupChildren,
   buildQuickLinkView,
   collectCatalogFieldOptions,
   collectHiddenFieldKeys,
+  collectReasoningDescriptions,
+  collectReasoningEfforts,
   countAdvancedFields,
   findQuickTreeNode,
   formatQuickFieldText,
+  mergeReasoningEfforts,
   multilineRows,
+  nextReasoningLevel,
   quickFieldKey,
   quickFieldViewOf,
+  readReasoningLevels,
 } from './codexModelQuickFields';
 
 const effectiveEntry = {
@@ -419,5 +425,84 @@ describe('codexModelQuickFields', () => {
     expect(multilineRows('one\ntwo')).toBe(14);
     expect(multilineRows(Array.from({ length: 40 }, () => 'x').join('\n'))).toBe(30);
     expect(multilineRows(undefined)).toBe(14);
+  });
+});
+
+describe('served reasoning levels', () => {
+  it('reads the levels from objects and ignores unusable entries', () => {
+    expect(
+      readReasoningLevels([{ effort: ' high ', description: 'Deep' }, { effort: '' }, 7])
+    ).toEqual([{ effort: 'high', description: 'Deep' }]);
+    expect(readReasoningLevels('high')).toEqual([]);
+  });
+
+  it('offers the known efforts first and the catalog extras after them', () => {
+    const efforts = collectReasoningEfforts([
+      { supported_reasoning_levels: [{ effort: 'ulta' }, { effort: 'low' }] },
+    ]);
+
+    expect(efforts.slice(0, REASONING_EFFORT_LEVELS.length)).toEqual([...REASONING_EFFORT_LEVELS]);
+    expect(efforts).toEqual([...REASONING_EFFORT_LEVELS, 'ulta']);
+  });
+
+  it('picks the next unused effort and keeps the catalog description', () => {
+    const descriptions = collectReasoningDescriptions([
+      { supported_reasoning_levels: [{ effort: 'minimal', description: 'Fastest' }] },
+    ]);
+
+    expect(nextReasoningLevel([{ effort: 'none', description: '' }], descriptions)).toEqual({
+      effort: 'minimal',
+      description: 'Fastest',
+    });
+    expect(
+      nextReasoningLevel(
+        REASONING_EFFORT_LEVELS.map((effort) => ({ effort, description: '' })),
+        descriptions
+      )
+    ).toBeNull();
+  });
+
+  it('keeps an effort that only the edited entry uses in the dropdown', () => {
+    expect(mergeReasoningEfforts(['low'], [{ effort: 'ulta', description: '' }])).toEqual([
+      'low',
+      'ulta',
+    ]);
+    expect(mergeReasoningEfforts(['low', 'ulta'], [{ effort: 'ulta', description: '' }])).toEqual([
+      'low',
+      'ulta',
+    ]);
+  });
+
+  it('renders the list as one effort per line', () => {
+    expect(formatQuickFieldText('levels', [{ effort: 'low' }, { effort: 'high' }])).toBe(
+      'low\nhigh'
+    );
+  });
+});
+
+describe('fields the server decides for itself', () => {
+  const effective = {
+    slug: 'gpt-5.5',
+    display_name: 'GPT-5.5',
+    context_window: 272000,
+    visibility: 'list',
+  };
+  const directives = new Map([['', 'gpt-5.6-sol']]);
+
+  it('keeps them out of a whole-entry inherit in both views', () => {
+    const heldFields = new Set(['context_window']);
+    const nodes = buildOverrideTree({ effective, patch: {}, inherit: directives, heldFields });
+    const views = buildQuickFieldViews(nodes, directives, heldFields);
+
+    expect(views.get('context_window')?.source).toBeNull();
+    // 服务端没决定的字段照旧跟随整条继承。
+    expect(views.get('visibility')?.source).toBe('gpt-5.6-sol');
+  });
+
+  it('follows the whole-entry inherit when the model reports no server-decided fields', () => {
+    const nodes = buildOverrideTree({ effective, patch: {}, inherit: directives });
+    const views = buildQuickFieldViews(nodes, directives);
+
+    expect(views.get('context_window')?.source).toBe('gpt-5.6-sol');
   });
 });

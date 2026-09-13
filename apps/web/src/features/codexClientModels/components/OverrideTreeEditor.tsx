@@ -43,9 +43,9 @@ export function OverrideTreeEditor({
   const [onlyOverridden, setOnlyOverridden] = useState(false);
   const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(() => new Set<string>());
 
-  const { directives } = sourceBinding;
+  const { directives, heldFields } = sourceBinding;
   const nodes = useMemo(() => {
-    const built = buildOverrideTree({ effective, patch, inherit: directives });
+    const built = buildOverrideTree({ effective, patch, inherit: directives, heldFields });
     if (!hiddenKeys) return built;
     // 常用字段由配置面板负责，这里连它们的子节点一起剪掉，避免出现两个编辑入口。
     const prune = (list: ReadonlyArray<OverrideTreeNode>): OverrideTreeNode[] =>
@@ -55,7 +55,7 @@ export function OverrideTreeEditor({
           node.children.length > 0 ? { ...node, children: prune(node.children) } : node
         );
     return prune(built);
-  }, [directives, effective, hiddenKeys, patch]);
+  }, [directives, effective, heldFields, hiddenKeys, patch]);
   const visibleNodes = useMemo(
     () => filterOverrideTree(nodes, { query, onlyOverridden }),
     [nodes, query, onlyOverridden]
