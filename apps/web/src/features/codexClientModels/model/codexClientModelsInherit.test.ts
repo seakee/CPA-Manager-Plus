@@ -152,6 +152,25 @@ describe('applyInheritDirectives', () => {
     expect(result.model_messages).toEqual({ notes: 'from 5.5' });
   });
 
+  it('leaves identity fields alone when a directive names them', () => {
+    const result = applyInheritDirectives(
+      { slug: 'my-sol', display_name: 'My Sol', description: 'local', context_window: 1 },
+      new Map([
+        ['display_name', 'gpt-5.6-sol'],
+        ['description', 'gpt-5.6-sol'],
+        ['context_window', 'gpt-5.6-sol'],
+      ]),
+      lookup
+    );
+
+    expect(result).toEqual({
+      slug: 'my-sol',
+      display_name: 'My Sol',
+      description: 'local',
+      context_window: 400000,
+    });
+  });
+
   it('writes a field the source entry does not have and keeps the base value otherwise', () => {
     const missing = applyInheritDirectives(
       { slug: 'my-sol', display_name: 'My Sol', context_window: 1 },

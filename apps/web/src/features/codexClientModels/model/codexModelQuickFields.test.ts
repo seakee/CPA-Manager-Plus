@@ -206,11 +206,13 @@ describe('codexModelQuickFields', () => {
     const nodes = buildOverrideTree({ effective: effectiveEntry, patch: {}, inherit: directives });
     const views = buildQuickFieldViews(nodes, directives);
 
-    // 整条指令来自祖先，因此只报来源，不报字段自己声明的来源。
-    expect(views.get('display_name')).toMatchObject({
+    // 整条指令来自祖先，因此只报来源，不报字段自己声明的来源；
+    // 身份字段不参与继承，仍然按目录值显示。
+    expect(views.get('context_window')).toMatchObject({
       source: 'gpt-5.6-sol',
       declared: null,
     });
+    expect(views.get('display_name')).toMatchObject({ source: null, declared: null });
     // 深层字段继承自最近的上级指令，而不是整条指令。
     expect(views.get('model_messages.instructions_template')).toMatchObject({
       source: 'gpt-5.5',

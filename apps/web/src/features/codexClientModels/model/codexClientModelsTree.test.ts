@@ -220,6 +220,36 @@ describe('resolveInheritSource', () => {
       declared: null,
     });
   });
+
+  it('keeps identity fields out of an inherited whole entry', () => {
+    const directives = new Map([['', 'whole-entry']]);
+
+    // 整条继承只铺普通字段：身份字段永远来自条目自身。
+    expect(resolveInheritSource(directives, ['display_name'])).toEqual({
+      source: null,
+      declared: null,
+    });
+    expect(resolveInheritSource(directives, ['description'])).toEqual({
+      source: null,
+      declared: null,
+    });
+    expect(resolveInheritSource(directives, ['slug'])).toEqual({ source: null, declared: null });
+    expect(resolveInheritSource(directives, ['priority']).source).toBe('whole-entry');
+    // 嵌套的同名键仍然是普通字段。
+    expect(resolveInheritSource(directives, ['model_messages', 'notes']).source).toBe(
+      'whole-entry'
+    );
+  });
+
+  it('reports a directive on an identity field without applying it', () => {
+    const directives = new Map([['display_name', 'own-source']]);
+
+    // declared 仍要报出来，字段菜单里才有「恢复默认」清掉这条无效指令。
+    expect(resolveInheritSource(directives, ['display_name'])).toEqual({
+      source: null,
+      declared: 'own-source',
+    });
+  });
 });
 
 describe('seedOverrideValue', () => {

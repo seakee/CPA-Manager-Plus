@@ -9,20 +9,15 @@
 import type { useTranslation } from 'react-i18next';
 import {
   INHERIT_KEY,
+  NON_INHERITABLE_FIELDS,
   cloneJsonValue,
+  isNonInheritablePathKey,
   isPlainObject,
   removeOverrideKey,
   type OverridePath,
 } from './codexClientModelsTree';
 
-export { INHERIT_KEY };
-
-/** 模型身份字段：只能本地填写，任何继承指令都不允许指向它们。 */
-export const NON_INHERITABLE_FIELDS: ReadonlyArray<string> = [
-  'slug',
-  'display_name',
-  'description',
-];
+export { INHERIT_KEY, NON_INHERITABLE_FIELDS, isNonInheritablePathKey };
 
 /** 字段路径的点号写法；根路径为空字符串。 */
 export const inheritPathKey = (path: OverridePath): string => path.join('.');
@@ -32,10 +27,6 @@ const pathSegments = (pathKey: string): string[] => (pathKey ? pathKey.split('.'
 /** 数组下标位置无法用点号路径表达，因此不能作为继承目标。 */
 export const isInheritablePath = (path: OverridePath): boolean =>
   path.every((segment) => typeof segment === 'string');
-
-/** 身份字段不能继承。 */
-export const isNonInheritablePathKey = (pathKey: string): boolean =>
-  NON_INHERITABLE_FIELDS.includes(pathKey);
 
 /**
  * 读取补丁里的继承指令。结构非法时按「没有指令」处理，
@@ -232,6 +223,9 @@ export function applyInheritDirectives(
 
   let current = base;
   inheritPathsShallowFirst(directives).forEach((pathKey) => {
+    // 身份字段永远来自条目自身：指向它们的指令后端会拒绝整份补丁，问题由
+    // validateInheritDirectives 报出，预览保持条目自己的取值。
+    if (pathKey && isNonInheritablePathKey(pathKey)) return;
     const slug = directives.get(pathKey) as string;
     const source = lookup(slug, pathKey);
     if (!source.found) return;

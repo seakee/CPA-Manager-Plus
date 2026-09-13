@@ -95,19 +95,43 @@ export const readOverrideValue = (
 };
 
 /**
+ * 模型身份字段：slug 标明是哪条条目，展示名称与描述说明它在列表里的样子。
+ * 后端解析继承时从不让来源提供它们，界面因此也不能把这些字段标成继承来的。
+ */
+export const NON_INHERITABLE_FIELDS: ReadonlyArray<string> = [
+  'slug',
+  'display_name',
+  'description',
+];
+
+/** 身份字段只认根层的那几个键，嵌套的同名键仍然是普通字段。 */
+export const isNonInheritablePathKey = (pathKey: string): boolean =>
+  NON_INHERITABLE_FIELDS.includes(pathKey);
+
+const isIdentityPath = (path: OverridePath): boolean =>
+  path.length === 1 && isNonInheritablePathKey(String(path[0]));
+
+/**
  * 覆盖某条路径的继承来源：本路径自己的指令优先，否则取最近的上级指令。
  * 字段树与配置面板都用它，因此同一个字段在两种视图里显示的来源始终一致。
+ *
+ * 身份字段是唯一的例外：整条继承只铺普通字段，盖不到它们，所以它们的来源始终为空；
+ * 直接写在身份字段上的指令后端也不会执行，界面另有问题标说明。
  */
 export function resolveInheritSource(
   directives: ReadonlyMap<string, string>,
   path: OverridePath
 ): { source: string | null; declared: string | null } {
   const declared = directives.get(path.join('.')) ?? null;
-  if (declared) return { source: declared, declared };
+  const inheritable = !isIdentityPath(path);
+  if (declared) return { source: inheritable ? declared : null, declared };
 
   for (let end = path.length - 1; end >= 0; end -= 1) {
     const ancestor = directives.get(path.slice(0, end).join('.'));
-    if (ancestor) return { source: ancestor, declared: null };
+    if (!ancestor) continue;
+    // 能覆盖到根层字段的上级只有整条继承，而身份字段不接受它。
+    if (!inheritable && end === 0) continue;
+    return { source: ancestor, declared: null };
   }
   return { source: null, declared: null };
 }
