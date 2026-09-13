@@ -27,21 +27,16 @@ import {
   collectReasoningDescriptions,
   countAdvancedFields,
 } from '../model/codexModelQuickFields';
-import {
-  applyServedFields,
-  isPlainObject,
-  removeOverrideKey,
-  setOverrideValue,
-} from '../model/codexClientModelsTree';
+import { isPlainObject, removeOverrideKey, setOverrideValue } from '../model/codexClientModelsTree';
 import {
   applyInheritDirectives,
-  clearFieldOverride,
   clearInheritSource,
   collectInheritSources,
   countInheritUsage,
   createInheritSourceLookup,
   describeInheritIssue,
   readInheritDirectives,
+  restoreFieldDefault,
   setInheritSource,
   validateInheritDirectives,
   type FieldInheritBinding,
@@ -140,8 +135,6 @@ export function CodexModelInlineEditor({
     return visible;
   }, [directives]);
   const lookup = useMemo(() => createInheritSourceLookup(catalog), [catalog]);
-  // 服务端自己决定的字段：默认值就是下发取值，整条继承默认不接管它们。
-  const heldFields = useMemo(() => new Set(Object.keys(served?.servedFields ?? {})), [served]);
   const sources = useMemo(
     () =>
       supportsInherit ? collectInheritSources(catalog, mode === 'edit' ? slug : undefined) : [],
@@ -160,21 +153,20 @@ export function CodexModelInlineEditor({
   }, [issues, t]);
   const rootIssues = useMemo(() => issues.filter((issue) => issue.path === ''), [issues]);
 
-  // 生效参照值：条目内容先换成客户端当前收到的配置，再叠上继承指令，
+  // 生效参照值：条目就是服务端装配出的默认配置，再叠上继承指令，
   // 于是字段旁预览的既是默认值，也是真正会生效的取值。
   const effective = useMemo(() => {
     const base = mode === 'edit' ? effectiveEntry : inheritBaseEntry;
-    const servedBase = applyServedFields(base, served?.servedFields);
-    return applyInheritDirectives(servedBase, directives, lookup, heldFields);
-  }, [directives, effectiveEntry, heldFields, inheritBaseEntry, lookup, mode, served]);
+    return applyInheritDirectives(base, directives, lookup);
+  }, [directives, effectiveEntry, inheritBaseEntry, lookup, mode]);
 
   const sourceBinding: FieldInheritBinding = useMemo(
     () => ({
       directives: displayDirectives,
       sources,
-      heldFields,
       issueOf: (path) => issueByPath.get(path.join('.')),
-      clear: (path) => setTreePatch((previous) => clearFieldOverride(previous, path)),
+      // 恢复默认要在上级来源仍会覆盖时写上「不继承」，字段才不会掉回继承。
+      setDefault: (path) => setTreePatch((previous) => restoreFieldDefault(previous, path)),
       inherit: (path, sourceSlug) =>
         setTreePatch((previous) =>
           setInheritSource(removeOverrideKey(previous, path), path, sourceSlug)
@@ -182,7 +174,7 @@ export function CodexModelInlineEditor({
       remove: (path) =>
         setTreePatch((previous) => setOverrideValue(previous, path, null, effective)),
     }),
-    [displayDirectives, effective, heldFields, issueByPath, sources]
+    [displayDirectives, effective, issueByPath, sources]
   );
 
   const fieldOptions = useMemo(() => collectCatalogFieldOptions(catalog), [catalog]);

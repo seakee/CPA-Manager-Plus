@@ -48,7 +48,7 @@ A model keeps working without its own entry: it is still served through the defa
 Common fields are grouped by purpose, with the most frequently used ones visible directly:
 
 - Basic: display name, description, visibility, priority.
-- Context and reasoning: context window, max context window, supported reasoning levels, default reasoning level, default reasoning summary, default verbosity, verbosity control.
+- Context and reasoning: context window, max context window, max output tokens, auto compact token limit, supported reasoning levels, default reasoning level, default reasoning summary, default verbosity, verbosity control.
 - Capabilities: available in API, parallel tool calls, reasoning summaries, search tool, prefer WebSockets, use Responses Lite.
 - Tools and modalities: input modalities, apply patch tool, shell type, search tool type, multi-agent version, multi-agent reasoning effort.
 - Prompts: base instructions and model messages.
@@ -60,10 +60,12 @@ The remaining fields live under Advanced: remaining fields below the expanded ar
 Every field carries a source marker in its top right corner showing whether the current value is the default, a local override, or inherited from another model.
 
 - The marker expands to point a single field at a different inheritance source.
-- An overridden field can be restored to its default on its own, without discarding the rest of the entry's edits.
+- Any field can be restored to its default on its own, without discarding the rest of the entry's edits; a restored field stays on its default and is not taken over again by the entry's inheritance source.
 - When only one field needs a special value, set that field's source and leave the remaining fields on the entry's inheritance source.
 
-The default is what clients receive today: the server decides part of the configuration from model metadata, provider capabilities, and visibility rules, so those fields show the served value rather than what the catalog entry says. They do not follow a whole-entry inherit and keep their local value; to point one at a specific source anyway, set it on that field's own marker.
+A default is the entry the server assembles: a catalog template merged with the model metadata (context length, reasoning levels, provider capabilities), which is what clients receive when nothing overrides it. The override layer is applied on top of that result, so every field can be overridden, including the ones normalization used to win.
+
+Slug, display name, description, visibility, priority, the context window, and the maximum context window always come from the entry itself: no source supplies them, and directives that name them are rejected. Every other field follows the entry's inheritance source; to keep one of them on its default instead, the editor writes "do not inherit" on that path.
 
 When other overrides use the entry as their inheritance source, the editor header shows how many references it has.
 
@@ -77,7 +79,7 @@ Prompts are collapsed by default and show up to four preview lines before expand
 
 ## Inheritance File Format
 
-Overrides live in a local override file whose path is shown at the top of the page. Each entry is keyed by slug, with inheritance written in the `$inherit` field:
+The catalog the page lists is the default entry the server assembles for every model it can serve; the override layer is applied on top of those entries and lives in a local override file whose path is shown at the top of the page. Each entry is keyed by slug, with inheritance written in the `$inherit` field:
 
 ```json
 {
@@ -90,7 +92,7 @@ Overrides live in a local override file whose path is shown at the top of the pa
     "$inherit": {
       "": "gpt-5.6-sol",
       "base_instructions": "gpt-5.6-terra",
-      "context_window": "gpt-5.3-codex-spark"
+      "model_messages.instructions_template": null
     },
     "slug": "my-sol-lite",
     "display_name": "My Sol Lite"
@@ -100,11 +102,15 @@ Overrides live in a local override file whose path is shown at the top of the pa
 
 - A string `$inherit` makes the whole entry inherit from that model.
 - An object `$inherit` is a dotted-path to source-slug map, where the empty string is equivalent to inheriting the whole entry.
-- Local fields are applied last and can replace inherited values; writing `null` removes the field.
-- Slug, display name, and description always come from the local entry and never participate in inheritance.
-- Fields the server decides for itself, such as the context window and the supported reasoning levels, do not follow a whole-entry inherit and keep their local value; an `$inherit` written on that field alone still applies.
+- A path set to `null` does not inherit: the value comes from the entry itself and an ancestor directive no longer covers it. This is what the editor's restore-to-default action writes.
+- Local fields are applied last and can replace inherited values; a local `null` at a field path removes the field.
+- Slug, display name, description, visibility, priority, the context window, and the maximum context window only come from the entry itself and never participate in inheritance.
 
-Inheritance can chain to another inheriting entry, and it can point at entries in the official catalog.
+A source resolves to the **served entry** of that model, so its own overrides count as well. When no provider serves an official model, its catalog template stands in, which keeps `$inherit: "gpt-5.5"` writable on a machine with no Codex provider.
+
+Inheritance can chain to another override entry, and it can point at entries in the official catalog.
+
+An override that cannot be applied does not remove the model: the page reports it at the top and the model keeps the entry the server assembled.
 
 ## When Overrides Do Not Apply
 

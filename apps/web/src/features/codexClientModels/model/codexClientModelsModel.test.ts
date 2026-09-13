@@ -55,7 +55,6 @@ const servedModel = (overrides: Partial<CodexClientServedModel> = {}): CodexClie
     { effort: 'low', description: 'Fast responses with lighter reasoning' },
     { effort: 'medium', description: 'Balances speed and reasoning depth for everyday tasks' },
   ],
-  servedFields: {},
   priority: 143,
   ...overrides,
 });
@@ -86,10 +85,24 @@ describe('buildCodexClientModelRows', () => {
       'alpha-model',
       'zeta-model',
     ]);
-    expect(rows[2].origin).toBe('custom');
+    // 目录里没有这些 slug 的条目，也没有下发，来源标记说明覆写不会生效。
+    expect(rows[2].origin).toBe('unserved');
     expect(rows[2].entry).toBeNull();
-    expect(rows[3].origin).toBe('removed');
+    expect(rows[3].origin).toBe('unserved');
     expect(rows[3].entry).toBeNull();
+  });
+
+  it('marks a model a null patch hides as removed even though it has an entry', () => {
+    const rows = buildCodexClientModelRows(
+      buildState({
+        override: { 'gpt-5.5': null },
+        origins: { 'gpt-5.5': 'removed' },
+      })
+    );
+
+    // 服务端仍然给出这个模型的默认条目，来源标记说明它当前不下发。
+    expect(rows[0].origin).toBe('removed');
+    expect(rows[0].entry).not.toBeNull();
   });
 
   it('falls back to base when the catalog has no origin marker for a slug', () => {
@@ -115,6 +128,7 @@ describe('filterCodexClientModelRows and counts', () => {
         'deepseek-chat': { display_name: 'DeepSeek Chat' },
         'gone-model': null,
       },
+      origins: { 'gpt-5.5': 'base', 'deepseek-chat': 'override', 'gone-model': 'removed' },
     })
   );
 
@@ -123,7 +137,7 @@ describe('filterCodexClientModelRows and counts', () => {
       all: 3,
       base: 1,
       override: 1,
-      custom: 0,
+      unserved: 0,
       removed: 1,
       served: 0,
     });
@@ -141,8 +155,19 @@ describe('filterCodexClientModelRows and counts', () => {
 });
 
 describe('served models', () => {
+  // 服务端为每个可服务模型都给出默认条目：deepseek-flash 由默认模板装配，deepseek-chat 有
+  // 专属模板，两者都在 models 里，只是来源不同。
   const buildServedState = (overrides: Partial<CodexClientModelsState> = {}) =>
     buildState({
+      models: [
+        { slug: 'deepseek-flash', display_name: 'deepseek-flash', context_window: 272000 },
+        ...buildState().models,
+      ],
+      origins: {
+        'gpt-5.5': 'base',
+        'deepseek-chat': 'override',
+        'deepseek-flash': 'served',
+      },
       servedModels: [
         servedModel(),
         servedModel({
@@ -161,7 +186,7 @@ describe('served models', () => {
     const rows = buildCodexClientModelRows(buildServedState());
     expect(rows.map((row) => row.slug)).toEqual(['deepseek-flash', 'deepseek-chat', 'gpt-5.5']);
     expect(rows[0].origin).toBe('served');
-    expect(rows[0].entry).toBeNull();
+    expect(rows[0].entry).toMatchObject({ slug: 'deepseek-flash' });
     expect(rows[0].displayName).toBe('deepseek-flash');
     expect(rows[0].contextWindow).toBe(272000);
     expect(rows[0].served?.templateSlug).toBe('gpt-5.5');
@@ -171,6 +196,7 @@ describe('served models', () => {
     const rows = buildCodexClientModelRows(buildServedState());
     expect(rows[1].origin).toBe('override');
     expect(rows[1].entry).toMatchObject({ slug: 'deepseek-chat' });
+    // 条目里没有这个字段，页面就照实显示为空，而不是拿摘要里的值补上。
     expect(rows[1].contextWindow).toBeNull();
     expect(rows[1].served?.defaultTemplate).toBe(false);
     expect(rows[2].origin).toBe('base');
@@ -181,6 +207,7 @@ describe('served models', () => {
     const rows = buildCodexClientModelRows(
       buildServedState({
         override: { 'deepseek-chat': { display_name: 'DeepSeek Chat' }, 'deepseek-flash': null },
+        origins: { 'gpt-5.5': 'base', 'deepseek-chat': 'override', 'deepseek-flash': 'removed' },
       })
     );
     const flash = rows.find((row) => row.slug === 'deepseek-flash');

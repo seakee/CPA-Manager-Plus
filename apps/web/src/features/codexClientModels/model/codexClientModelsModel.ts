@@ -10,10 +10,10 @@ import type {
 } from '@/services/api/codexClientModels';
 
 /**
- * 页面行状态：目录来源标记之外，额外区分两种行。
- * removed 表示条目被 null 补丁删除，served 表示模型已下发但还没有专属目录条目。
+ * 页面行状态就是服务端给出的来源标记：base/override 有目录条目，served 用的是默认模板，
+ * removed 被 null 补丁隐藏，unserved 是当前没有下发、因而不会生效的覆写。
  */
-export type CodexClientModelRowState = CodexClientModelOrigin | 'removed' | 'served';
+export type CodexClientModelRowState = CodexClientModelOrigin;
 
 /** 新增条目时默认看向的官方模板 slug。 */
 export const DEFAULT_MODEL_TEMPLATE_SLUG = 'gpt-5.5';
@@ -40,7 +40,7 @@ export const CODEX_CLIENT_MODEL_FILTERS: ReadonlyArray<CodexClientModelFilter> =
   'all',
   'served',
   'override',
-  'custom',
+  'unserved',
   'removed',
   'base',
 ];
@@ -63,15 +63,9 @@ const buildRow = (
 ): CodexClientModelRow => {
   const hasOverride = Object.prototype.hasOwnProperty.call(state.override, slug);
   const patch = hasOverride ? state.override[slug] : undefined;
-  // 没有目录条目时先看是否被 null 补丁删除，再看模型是否已下发：
-  // 已下发但没有专属条目的模型用的是默认模板，属于正常状态而不是被删除。
-  const origin: CodexClientModelRowState = entry
-    ? state.origins[slug] || 'base'
-    : patch === null
-      ? 'removed'
-      : served
-        ? 'served'
-        : 'custom';
+  // 来源由服务端给出：基础、已覆写、默认模板、已隐藏，以及没有下发因而不生效的覆写。
+  // 缺少标记时按目录条目与否兜底，旧接口下页面仍然可用。
+  const origin: CodexClientModelRowState = state.origins[slug] ?? (entry ? 'base' : 'unserved');
 
   return {
     slug,
@@ -141,7 +135,7 @@ export function countCodexClientModelRows(
     all: rows.length,
     base: 0,
     override: 0,
-    custom: 0,
+    unserved: 0,
     removed: 0,
     served: 0,
   };

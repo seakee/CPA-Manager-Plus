@@ -11,6 +11,8 @@ import {
   inheritPathKey,
   isNonInheritablePathKey,
   readInheritDirectives,
+  restoreFieldDefault,
+  setInheritOptOut,
   setInheritSource,
   validateInheritDirectives,
 } from './codexClientModelsInherit';
@@ -46,6 +48,13 @@ describe('readInheritDirectives', () => {
     });
 
     expect([...directives]).toEqual([['model_messages.notes', 'gpt-5.5']]);
+  });
+
+  it('reads a null source as an explicit opt-out', () => {
+    expect([...directivesOf({ [INHERIT_KEY]: { model_messages: null } })]).toEqual([
+      ['model_messages', null],
+    ]);
+    expect([...directivesOf({ [INHERIT_KEY]: ' gpt-5.5 ' })]).toEqual([['', 'gpt-5.5']]);
   });
 
   it('treats a missing or malformed directive block as no inheritance', () => {
@@ -102,12 +111,12 @@ describe('clearFieldOverride', () => {
     expect(
       clearFieldOverride(
         {
-          [INHERIT_KEY]: { 'model_messages.notes': 'gpt-5.5', context_window: 'gpt-5.5' },
+          [INHERIT_KEY]: { 'model_messages.notes': 'gpt-5.5', base_instructions: 'gpt-5.5' },
           model_messages: { notes: 'local' },
         },
         ['model_messages', 'notes']
       )
-    ).toEqual({ [INHERIT_KEY]: { context_window: 'gpt-5.5' } });
+    ).toEqual({ [INHERIT_KEY]: { base_instructions: 'gpt-5.5' } });
   });
 });
 
@@ -116,18 +125,19 @@ describe('applyInheritDirectives', () => {
     expect(applyInheritDirectives(catalog[0], new Map(), lookup)).toBe(catalog[0]);
   });
 
-  it('keeps the identity fields of the local entry when the whole entry is inherited', () => {
+  it('keeps the fields only the model supplies out of a whole-entry inherit', () => {
     const result = applyInheritDirectives(
       { slug: 'my-sol', display_name: 'My Sol', description: 'local', context_window: 1 },
       new Map([['', 'gpt-5.6-sol']]),
       lookup
     );
 
+    // 身份字段与可见性、位置、上下文窗口都来自条目自身，其余字段照旧继承。
     expect(result).toEqual({
       slug: 'my-sol',
       display_name: 'My Sol',
       description: 'local',
-      context_window: 400000,
+      context_window: 1,
       model_messages: { notes: 'from sol' },
     });
   });
@@ -142,17 +152,17 @@ describe('applyInheritDirectives', () => {
       },
       new Map([
         ['', 'gpt-5.5'],
-        ['context_window', 'gpt-5.6-sol'],
+        ['model_messages.notes', 'gpt-5.6-sol'],
       ]),
       lookup
     ) as Record<string, unknown>;
 
     // 整条继承先铺底，随后的深层指令细化它已经替换掉的子树。
-    expect(result.context_window).toBe(400000);
-    expect(result.model_messages).toEqual({ notes: 'from 5.5' });
+    expect(result.context_window).toBe(1);
+    expect(result.model_messages).toEqual({ notes: 'from sol' });
   });
 
-  it('leaves identity fields alone when a directive names them', () => {
+  it('leaves the fields only the model supplies alone when a directive names them', () => {
     const result = applyInheritDirectives(
       { slug: 'my-sol', display_name: 'My Sol', description: 'local', context_window: 1 },
       new Map([
@@ -163,28 +173,29 @@ describe('applyInheritDirectives', () => {
       lookup
     );
 
+    // 后端会拒绝这些指令，预览保持条目自身的取值。
     expect(result).toEqual({
       slug: 'my-sol',
       display_name: 'My Sol',
       description: 'local',
-      context_window: 400000,
+      context_window: 1,
     });
   });
 
-  it('keeps the fields the server recomputes when the whole entry is inherited', () => {
+  it('keeps the fields only the model supplies out of a whole-entry inherit', () => {
     const result = applyInheritDirectives(
       {
         slug: 'my-sol',
         display_name: 'My Sol',
         context_window: 1,
+        supported_reasoning_levels: [{ effort: 'low' }],
         model_messages: { notes: 'local' },
       },
       new Map([['', 'gpt-5.6-sol']]),
-      lookup,
-      new Set(['context_window'])
+      lookup
     );
 
-    // 服务端决定的字段保持条目自身的取值，其余字段照旧来自继承源。
+    // 只由模型自身提供的字段保持条目自身的取值，其余字段整条换成来源的取值。
     expect(result).toEqual({
       slug: 'my-sol',
       display_name: 'My Sol',
@@ -193,27 +204,25 @@ describe('applyInheritDirectives', () => {
     });
   });
 
-  it('drops a server-decided field the local entry does not set', () => {
+  it('drops a field the entry does not set when the source does not supply it either', () => {
     const result = applyInheritDirectives(
       { slug: 'my-sol', display_name: 'My Sol' },
       new Map([['', 'gpt-5.6-sol']]),
-      lookup,
-      new Set(['context_window'])
+      lookup
     ) as Record<string, unknown>;
 
-    expect(result.context_window).toBeUndefined();
+    expect(result.supported_reasoning_levels).toBeUndefined();
     expect(result.model_messages).toEqual({ notes: 'from sol' });
   });
 
-  it('still applies a directive written on the server-decided field itself', () => {
+  it('ignores a directive written on a field only the model supplies', () => {
     const result = applyInheritDirectives(
       { slug: 'my-sol', display_name: 'My Sol', context_window: 1 },
       new Map([['context_window', 'gpt-5.6-sol']]),
-      lookup,
-      new Set(['context_window'])
+      lookup
     ) as Record<string, unknown>;
 
-    expect(result.context_window).toBe(400000);
+    expect(result.context_window).toBe(1);
   });
 
   it('writes a field the source entry does not have and keeps the base value otherwise', () => {
@@ -230,6 +239,78 @@ describe('applyInheritDirectives', () => {
       lookup
     );
     expect(unknown).toEqual({ slug: 'my-sol', display_name: 'My Sol', context_window: 1 });
+  });
+});
+
+describe('applyInheritDirectives opt-out', () => {
+  const withOptOut = (path: string) =>
+    applyInheritDirectives(
+      { slug: 'my-sol', display_name: 'My Sol', model_messages: { notes: 'local' } },
+      new Map<string, string | null>([
+        ['', 'gpt-5.6-sol'],
+        [path, null],
+      ]),
+      lookup
+    ) as Record<string, unknown>;
+
+  it('puts the entry value back at a path that opts out', () => {
+    expect(withOptOut('model_messages.notes').model_messages).toEqual({ notes: 'local' });
+  });
+
+  it('drops a path the entry does not set instead of inheriting it', () => {
+    const result = applyInheritDirectives(
+      { slug: 'my-sol', display_name: 'My Sol' },
+      new Map<string, string | null>([
+        ['', 'gpt-5.6-sol'],
+        ['model_messages', null],
+      ]),
+      lookup
+    ) as Record<string, unknown>;
+
+    expect(result.model_messages).toBeUndefined();
+  });
+});
+
+describe('restoreFieldDefault', () => {
+  it('clears the local value when nothing covers the path', () => {
+    expect(restoreFieldDefault({ display_name: 'Changed' }, ['display_name'])).toEqual({});
+  });
+
+  it('opts the path out instead of letting an ancestor take it over', () => {
+    expect(
+      restoreFieldDefault({ [INHERIT_KEY]: 'gpt-5.5', model_messages: { notes: 'local' } }, [
+        'model_messages',
+        'notes',
+      ])
+    ).toEqual({
+      [INHERIT_KEY]: { '': 'gpt-5.5', 'model_messages.notes': null },
+    });
+  });
+
+  it('leaves the path alone when the field only the model supplies is covered', () => {
+    // 上下文窗口不接受继承，清掉本地值就已经回到默认值。
+    expect(
+      restoreFieldDefault({ [INHERIT_KEY]: 'gpt-5.5', context_window: 1 }, ['context_window'])
+    ).toEqual({ [INHERIT_KEY]: 'gpt-5.5' });
+  });
+
+  it('needs no opt-out for a field a source cannot supply', () => {
+    // 这类字段本来就不接受继承，清掉本地值就已经回到默认值。
+    expect(
+      restoreFieldDefault({ [INHERIT_KEY]: 'gpt-5.5', context_window: 1 }, ['context_window'])
+    ).toEqual({ [INHERIT_KEY]: 'gpt-5.5' });
+  });
+});
+
+describe('setInheritOptOut', () => {
+  it('adds a null source next to an existing whole-entry directive', () => {
+    expect(setInheritOptOut({ [INHERIT_KEY]: 'gpt-5.5' }, ['model_messages'])).toEqual({
+      [INHERIT_KEY]: { '': 'gpt-5.5', model_messages: null },
+    });
+  });
+
+  it('drops the shorthand when the whole entry is opted out', () => {
+    expect(setInheritOptOut({ [INHERIT_KEY]: 'gpt-5.5' }, [])).toEqual({});
   });
 });
 
@@ -274,6 +355,7 @@ describe('validateInheritDirectives', () => {
   it('accepts a well formed directive', () => {
     expect(validate({ [INHERIT_KEY]: 'gpt-5.5' })).toEqual([]);
     expect(validate({ [INHERIT_KEY]: { 'model_messages.notes': 'gpt-5.5' } })).toEqual([]);
+    expect(validate({ [INHERIT_KEY]: { model_messages: null } })).toEqual([]);
   });
 
   it('reports nothing when the entry has no directive at all', () => {
@@ -302,9 +384,15 @@ describe('validateInheritDirectives', () => {
     ]);
   });
 
-  it('reports identity fields, self references and unknown sources', () => {
+  it('reports fields only the model supplies, self references and unknown sources', () => {
     expect(validate({ [INHERIT_KEY]: { display_name: 'gpt-5.5' } })).toEqual([
       { path: 'display_name', code: 'non_inheritable_field' },
+    ]);
+    expect(validate({ [INHERIT_KEY]: { visibility: 'gpt-5.5' } })).toEqual([
+      { path: 'visibility', code: 'non_inheritable_field' },
+    ]);
+    expect(validate({ [INHERIT_KEY]: { priority: null } })).toEqual([
+      { path: 'priority', code: 'non_inheritable_field' },
     ]);
     expect(validate({ [INHERIT_KEY]: { 'model_messages.notes': 'my-sol' } })).toEqual([
       { path: 'model_messages.notes', code: 'self_reference' },
@@ -319,13 +407,13 @@ describe('validateInheritDirectives', () => {
     expect(
       validateInheritDirectives({
         slug: 'my-sol',
-        patch: { [INHERIT_KEY]: { context_window: 'thin' } },
+        patch: { [INHERIT_KEY]: { base_instructions: 'thin' } },
         catalog: [source],
       })
-    ).toEqual([{ path: 'context_window', code: 'source_missing_path' }]);
+    ).toEqual([{ path: 'base_instructions', code: 'source_missing_path' }]);
   });
 
-  it('collects one issue per broken entry, keeping the others', () => {
+  it('collects one issue per broken path, keeping the others', () => {
     expect(
       validate({
         [INHERIT_KEY]: {
@@ -336,6 +424,7 @@ describe('validateInheritDirectives', () => {
       })
     ).toEqual([
       { path: 'display_name', code: 'non_inheritable_field' },
+      { path: 'context_window', code: 'non_inheritable_field' },
       { path: 'model_messages.notes', code: 'unknown_source' },
     ]);
   });

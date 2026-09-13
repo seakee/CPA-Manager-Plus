@@ -16,9 +16,8 @@ import { CodexModelQuickFields } from './CodexModelQuickFields';
 const bindingOf = (overrides: Partial<FieldInheritBinding> = {}): FieldInheritBinding => ({
   directives: new Map(),
   sources: [],
-  heldFields: new Set(),
   issueOf: () => undefined,
-  clear: () => undefined,
+  setDefault: () => undefined,
   inherit: () => undefined,
   remove: () => undefined,
   ...overrides,
@@ -187,6 +186,13 @@ describe('CodexModelQuickFields context section', () => {
           .length > 0
     )[0];
 
+  it('offers the context limits in the common panel', () => {
+    const { renderer } = renderPanel();
+
+    expect(hasField(renderer, 'max_tokens')).toBe(true);
+    expect(hasField(renderer, 'auto_compact_token_limit')).toBe(true);
+  });
+
   it('keeps the reasoning levels collapsed until the field is expanded', () => {
     const { renderer } = renderPanel({}, { effective: levelsEffective });
 
@@ -235,7 +241,6 @@ describe('CodexModelQuickFields context section', () => {
         binding: bindingOf({
           directives: new Map([['', 'gpt-5.6-sol']]),
           sources: ['gpt-5.6-sol'],
-          heldFields: new Set(['context_window']),
         }),
       }
     );

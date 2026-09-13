@@ -11,10 +11,10 @@ import {
   isPlainObject,
   isStringListArray,
   resolveInheritSource,
+  type InheritDirectives,
   type OverrideFieldState,
   type OverridePath,
   type OverrideTreeNode,
-  type ServedHeldFields,
 } from './codexClientModelsTree';
 import { formatArrayText } from './draftValues';
 
@@ -174,6 +174,8 @@ export const QUICK_FIELD_SECTIONS: ReadonlyArray<QuickSectionDescriptor> = [
     fields: [
       { path: ['context_window'], kind: 'number' },
       { path: ['max_context_window'], kind: 'number' },
+      { path: ['max_tokens'], kind: 'number' },
+      { path: ['auto_compact_token_limit'], kind: 'number' },
       { path: REASONING_LEVELS_PATH, kind: 'levels', wide: true },
       { path: ['default_reasoning_level'], kind: 'select' },
       { path: ['default_reasoning_summary'], kind: 'select' },
@@ -340,12 +342,10 @@ export const findQuickTreeNode = (
  *
  * 字段树里没有这个路径时，继承来源仍要从指令里读出来：
  * 例如只写了 model_messages 的指令时，条目里还没有对应的子键。
- * heldFields 与字段树用同一份，两个视图对服务端自己决定的字段的判断因此始终一致。
  */
 export function buildQuickFieldViews(
   nodes: ReadonlyArray<OverrideTreeNode>,
-  directives?: ReadonlyMap<string, string>,
-  heldFields?: ServedHeldFields
+  directives?: InheritDirectives
 ): Map<string, QuickFieldView> {
   const views = new Map<string, QuickFieldView>();
   QUICK_VIEW_PATHS.forEach((path) => {
@@ -355,7 +355,7 @@ export function buildQuickFieldViews(
       return;
     }
     const inherited = directives
-      ? resolveInheritSource(directives, path, heldFields)
+      ? resolveInheritSource(directives, path)
       : { source: null, declared: null };
     views.set(quickFieldKey(path), { ...EMPTY_QUICK_FIELD_VIEW, ...inherited });
   });

@@ -4706,7 +4706,7 @@
     "filter_all": "全部",
     "filter_base": "基础",
     "filter_override": "已覆写",
-    "filter_custom": "自定义",
+    "filter_unserved": "未生效",
     "filter_removed": "已删除",
     "filter_served": "默认模板",
     "column_model": "模型",
@@ -4717,7 +4717,7 @@
     "column_visibility": "可见性",
     "origin_base": "基础",
     "origin_override": "已覆写",
-    "origin_custom": "自定义",
+    "origin_unserved": "未生效",
     "origin_removed": "已删除",
     "origin_served": "默认模板",
     "served_yes": "已下发",
@@ -4753,7 +4753,7 @@
     "inherit_issue_title": "继承设置有问题：",
     "inherit_issue_invalid_shape": "继承指令必须是模型名，或「字段路径 → 模型名」的对象。",
     "inherit_issue_invalid_path": "继承路径只能使用对象字段，不能用数组下标或空段。",
-    "inherit_issue_non_inheritable_field": "模型标识字段不能继承。",
+    "inherit_issue_non_inheritable_field": "该字段只由模型自身提供，不能继承。",
     "inherit_issue_unknown_source": "继承来源不在当前目录里。",
     "inherit_issue_self_reference": "不能继承自身。",
     "inherit_issue_source_missing_path": "来源模型没有这个字段。",
@@ -4836,6 +4836,14 @@
         "max_context_window": {
           "label": "最大上下文窗口",
           "hint": "该模型允许的最大上下文长度。"
+        },
+        "max_tokens": {
+          "label": "最大输出 tokens",
+          "hint": "单次回复允许生成的最大 token 数；留空表示不声明。"
+        },
+        "auto_compact_token_limit": {
+          "label": "自动压缩阈值",
+          "hint": "上下文达到该 token 数时客户端自动压缩对话；留空表示不设置。"
         },
         "supported_reasoning_levels": {
           "label": "支持的推理级别",

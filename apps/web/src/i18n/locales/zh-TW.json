@@ -4706,7 +4706,7 @@
     "filter_all": "全部",
     "filter_base": "基礎",
     "filter_override": "已覆寫",
-    "filter_custom": "自訂",
+    "filter_unserved": "未生效",
     "filter_removed": "已刪除",
     "filter_served": "預設範本",
     "column_model": "模型",
@@ -4717,7 +4717,7 @@
     "column_visibility": "可見性",
     "origin_base": "基礎",
     "origin_override": "已覆寫",
-    "origin_custom": "自訂",
+    "origin_unserved": "未生效",
     "origin_removed": "已刪除",
     "origin_served": "預設範本",
     "served_yes": "已下發",
@@ -4753,7 +4753,7 @@
     "inherit_issue_title": "繼承設定有問題：",
     "inherit_issue_invalid_shape": "繼承指令必須是模型名稱，或「欄位路徑 → 模型名稱」的物件。",
     "inherit_issue_invalid_path": "繼承路徑只能使用物件欄位，不能用陣列索引或空段落。",
-    "inherit_issue_non_inheritable_field": "模型識別欄位不能繼承。",
+    "inherit_issue_non_inheritable_field": "該欄位只由模型本身提供，不能繼承。",
     "inherit_issue_unknown_source": "繼承來源不在目前目錄裡。",
     "inherit_issue_self_reference": "不能繼承自身。",
     "inherit_issue_source_missing_path": "來源模型沒有這個欄位。",
@@ -4836,6 +4836,14 @@
         "max_context_window": {
           "label": "最大上下文視窗",
           "hint": "該模型允許的最大上下文長度。"
+        },
+        "max_tokens": {
+          "label": "最大輸出 tokens",
+          "hint": "單次回覆允許產生的最大 token 數；留空表示不宣告。"
+        },
+        "auto_compact_token_limit": {
+          "label": "自動壓縮閾值",
+          "hint": "上下文達到該 token 數時客戶端自動壓縮對話；留空表示不設定。"
         },
         "supported_reasoning_levels": {
           "label": "支援的推理等級",

@@ -4,7 +4,9 @@ import { normalizeCodexClientModelsState, normalizeOrigin } from './codexClientM
 describe('normalizeOrigin', () => {
   it('keeps known origins and defaults everything else to base', () => {
     expect(normalizeOrigin('override')).toBe('override');
-    expect(normalizeOrigin('custom')).toBe('custom');
+    expect(normalizeOrigin('served')).toBe('served');
+    expect(normalizeOrigin('removed')).toBe('removed');
+    expect(normalizeOrigin('unserved')).toBe('unserved');
     expect(normalizeOrigin('base')).toBe('base');
     expect(normalizeOrigin('mystery')).toBe('base');
     expect(normalizeOrigin(undefined)).toBe('base');
@@ -66,7 +68,6 @@ describe('normalizeCodexClientModelsState', () => {
             { effort: '' },
             'ignored',
           ],
-          served_fields: { context_window: 400000, max_context_window: 400000 },
           priority: 143,
         },
         { slug: '', template_slug: 'gpt-5.5' },
@@ -96,7 +97,6 @@ describe('normalizeCodexClientModelsState', () => {
           { effort: 'low', description: 'Fast responses with lighter reasoning' },
           { effort: 'high', description: '' },
         ],
-        servedFields: { context_window: 400000, max_context_window: 400000 },
         priority: 143,
       },
       {
@@ -111,7 +111,6 @@ describe('normalizeCodexClientModelsState', () => {
         visibility: '',
         reasoningLevel: '',
         reasoningLevels: [],
-        servedFields: {},
         priority: null,
       },
     ]);

@@ -23,9 +23,8 @@ const effectiveEntry = {
 const makeBinding = (overrides: Partial<FieldInheritBinding> = {}): FieldInheritBinding => ({
   directives: new Map(),
   sources: ['gpt-5.6-sol'],
-  heldFields: new Set(),
   issueOf: () => undefined,
-  clear: () => undefined,
+  setDefault: () => undefined,
   inherit: () => undefined,
   remove: () => undefined,
   ...overrides,

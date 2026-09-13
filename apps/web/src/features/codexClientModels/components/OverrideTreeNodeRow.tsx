@@ -218,7 +218,7 @@ export function OverrideTreeNodeRow({
             issue={inherit.issueOf(node.path)}
             disabled={disabled}
             onSetLocal={() => onSetValue(node.path, seedOverrideValue(node))}
-            onClear={() => inherit.clear(node.path)}
+            onSetDefault={() => inherit.setDefault(node.path)}
             onInherit={(slug) => inherit.inherit(node.path, slug)}
             onRemove={() => inherit.remove(node.path)}
           />

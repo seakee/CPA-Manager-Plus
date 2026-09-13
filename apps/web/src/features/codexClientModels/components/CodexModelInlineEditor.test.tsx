@@ -38,7 +38,6 @@ const servedModel = (overrides: Partial<CodexClientServedModel> = {}): CodexClie
   visibility: 'list',
   reasoningLevel: 'medium',
   reasoningLevels: [],
-  servedFields: {},
   priority: 143,
   ...overrides,
 });
@@ -171,21 +170,17 @@ describe('CodexModelInlineEditor', () => {
     );
   });
 
-  it('keeps a field the server decides out of a whole-entry inherit', () => {
+  it('keeps a field only the model supplies out of a whole-entry inherit', () => {
     const markup = renderEditor({
       patch: { $inherit: 'gpt-5.6-sol' },
       catalog: [
         { ...effectiveEntry, context_window: 272000 },
         { slug: 'gpt-5.6-sol', display_name: 'GPT-5.6 Sol', context_window: 400000 },
       ],
-      served: servedModel({
-        slug: 'gpt-5.5',
-        templateSlug: 'gpt-5.5',
-        servedFields: { context_window: 272000 },
-      }),
+      served: servedModel({ slug: 'gpt-5.5', templateSlug: 'gpt-5.5' }),
     });
 
-    // 服务端下发的取值就是这个字段的默认值，整条继承不会把它换成来源的取值。
+    // 上下文窗口属于只由模型自身提供的字段，整条继承不会把它换成来源的取值。
     expect(markup).toContain('value="272000"');
     expect(markup).not.toContain('value="400000"');
   });

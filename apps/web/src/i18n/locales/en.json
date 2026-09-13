@@ -4708,7 +4708,7 @@
     "filter_all": "All",
     "filter_base": "Base",
     "filter_override": "Overridden",
-    "filter_custom": "Custom",
+    "filter_unserved": "Unserved",
     "filter_removed": "Removed",
     "filter_served": "Default template",
     "column_model": "Model",
@@ -4719,7 +4719,7 @@
     "column_visibility": "Visibility",
     "origin_base": "Base",
     "origin_override": "Overridden",
-    "origin_custom": "Custom",
+    "origin_unserved": "Unserved",
     "origin_removed": "Removed",
     "origin_served": "Default template",
     "served_yes": "Served",
@@ -4755,7 +4755,7 @@
     "inherit_issue_title": "Inheritance problems:",
     "inherit_issue_invalid_shape": "Inheritance must name a model, or map field paths to model names.",
     "inherit_issue_invalid_path": "Inheritance paths may only use object fields, not array indices or empty segments.",
-    "inherit_issue_non_inheritable_field": "A model identity field cannot be inherited.",
+    "inherit_issue_non_inheritable_field": "Only the model itself supplies this field, so it cannot be inherited.",
     "inherit_issue_unknown_source": "The inheritance source is not in the catalog.",
     "inherit_issue_self_reference": "A model cannot inherit from itself.",
     "inherit_issue_source_missing_path": "The source model does not define this field.",
@@ -4838,6 +4838,14 @@
         "max_context_window": {
           "label": "Max context window",
           "hint": "Largest context length this model accepts."
+        },
+        "max_tokens": {
+          "label": "Max output tokens",
+          "hint": "Largest number of tokens one reply may generate. Leave empty to declare none."
+        },
+        "auto_compact_token_limit": {
+          "label": "Auto compact token limit",
+          "hint": "The client compacts the conversation once the context reaches this many tokens. Leave empty to set none."
         },
         "supported_reasoning_levels": {
           "label": "Supported reasoning levels",

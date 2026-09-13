@@ -25,8 +25,8 @@ export interface FieldSourceControlProps {
   /** 开始本地覆写；配置面板的字段由输入框直接编辑，因此不传。 */
   onSetLocal?: () => void;
   disabled?: boolean;
-  /** 清除本字段的本地补丁与自身声明的指令。 */
-  onClear: () => void;
+  /** 恢复到默认值：丢掉本地补丁与自身指令，必要时写上「不继承」。 */
+  onSetDefault: () => void;
   onInherit: (slug: string) => void;
   /** 写入 null，把字段从生效条目里删除。 */
   onRemove: () => void;
@@ -37,7 +37,8 @@ export interface FieldSourceControlProps {
  *
  * 显示状态与后端一致：本地 null 是「已删除」，本地有值是「本地值」，
  * 有继承来源是「继承自 X」，两者都没有则是「默认值」，也就是客户端当前收到的取值。
- * 菜单负责改写继承指令，让每个字段都能独立选择保持默认、继承别的模型，或留下本地值。
+ * 菜单负责改写继承指令，让每个字段都能独立选择保持默认、继承别的模型，或留下本地值；
+ * 「恢复默认」与「继承自 X」是两条互不影响的路径，恢复默认不会被上级来源重新接管。
  */
 export function FieldSourceControl({
   state,
@@ -49,7 +50,7 @@ export function FieldSourceControl({
   issue,
   onSetLocal,
   disabled = false,
-  onClear,
+  onSetDefault,
   onInherit,
   onRemove,
 }: FieldSourceControlProps) {
@@ -93,15 +94,13 @@ export function FieldSourceControl({
       onClick: onSetLocal,
     });
   }
-  // 本地有改动、本字段自己声明过继承源，或多条路径来源不一致时，
-  // 「恢复默认」都要把这些一起清掉。
-  if (state !== 'inherit' || declared || mixed) {
-    items.push({
-      key: 'clear',
-      label: t('codex_client_models.field_source_clear'),
-      onClick: onClear,
-    });
-  }
+  // 恢复默认一直可用：字段正被上级来源覆盖时，它会把这条路径停回条目自身的取值，
+  // 而不是让字段掉回继承。
+  items.push({
+    key: 'default',
+    label: t('codex_client_models.field_source_clear'),
+    onClick: onSetDefault,
+  });
   if (inheritable && sources.length > 0) {
     items.push({ key: 'divider-inherit', type: 'divider' });
     sources.forEach((slug) => {

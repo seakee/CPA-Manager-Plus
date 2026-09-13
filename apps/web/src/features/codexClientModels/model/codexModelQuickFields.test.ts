@@ -213,11 +213,12 @@ describe('codexModelQuickFields', () => {
     const views = buildQuickFieldViews(nodes, directives);
 
     // 整条指令来自祖先，因此只报来源，不报字段自己声明的来源；
-    // 身份字段不参与继承，仍然按目录值显示。
-    expect(views.get('context_window')).toMatchObject({
+    // 只由模型自身提供的字段不参与继承，仍然按条目自身的取值显示。
+    expect(views.get('base_instructions')).toMatchObject({
       source: 'gpt-5.6-sol',
       declared: null,
     });
+    expect(views.get('context_window')).toMatchObject({ source: null, declared: null });
     expect(views.get('display_name')).toMatchObject({ source: null, declared: null });
     // 深层字段继承自最近的上级指令，而不是整条指令。
     expect(views.get('model_messages.instructions_template')).toMatchObject({
@@ -480,7 +481,7 @@ describe('served reasoning levels', () => {
   });
 });
 
-describe('fields the server decides for itself', () => {
+describe('fields only the model supplies', () => {
   const effective = {
     slug: 'gpt-5.5',
     display_name: 'GPT-5.5',
@@ -490,19 +491,34 @@ describe('fields the server decides for itself', () => {
   const directives = new Map([['', 'gpt-5.6-sol']]);
 
   it('keeps them out of a whole-entry inherit in both views', () => {
-    const heldFields = new Set(['context_window']);
-    const nodes = buildOverrideTree({ effective, patch: {}, inherit: directives, heldFields });
-    const views = buildQuickFieldViews(nodes, directives, heldFields);
-
-    expect(views.get('context_window')?.source).toBeNull();
-    // 服务端没决定的字段照旧跟随整条继承。
-    expect(views.get('visibility')?.source).toBe('gpt-5.6-sol');
-  });
-
-  it('follows the whole-entry inherit when the model reports no server-decided fields', () => {
     const nodes = buildOverrideTree({ effective, patch: {}, inherit: directives });
     const views = buildQuickFieldViews(nodes, directives);
 
-    expect(views.get('context_window')?.source).toBe('gpt-5.6-sol');
+    // 可见性与上下文窗口由模型自身提供，不跟随整条继承。
+    expect(views.get('visibility')?.source).toBeNull();
+    expect(views.get('context_window')?.source).toBeNull();
+    // 来源能供到的字段照旧跟随整条继承。
+    expect(views.get('base_instructions')?.source).toBe('gpt-5.6-sol');
+  });
+
+  it('reports a field that opts out of the whole-entry inherit as the default again', () => {
+    const directives = new Map<string, string | null>([
+      ['', 'gpt-5.6-sol'],
+      ['prefer_websockets', null],
+    ]);
+    const nodes = buildOverrideTree({ effective: effectiveEntry, patch: {}, inherit: directives });
+    const views = buildQuickFieldViews(nodes, directives);
+
+    // 显式不继承的字段停在条目自身的取值上，界面上回到「默认值」。
+    expect(views.get('prefer_websockets')).toMatchObject({ source: null, declared: null });
+    expect(views.get('base_instructions')?.source).toBe('gpt-5.6-sol');
+  });
+
+  it('follows the whole-entry inherit for the fields a source may supply', () => {
+    const nodes = buildOverrideTree({ effective, patch: {}, inherit: directives });
+    const views = buildQuickFieldViews(nodes, directives);
+
+    expect(views.get('base_instructions')?.source).toBe('gpt-5.6-sol');
+    expect(views.get('context_window')?.source).toBeNull();
   });
 });

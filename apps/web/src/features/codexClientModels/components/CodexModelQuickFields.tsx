@@ -101,7 +101,7 @@ function sourceControlFor(
       inheritable={canInheritPath(path)}
       issue={inherit.issueOf(path)}
       disabled={disabled}
-      onClear={() => inherit.clear(path)}
+      onSetDefault={() => inherit.setDefault(path)}
       onInherit={(slug) => inherit.inherit(path, slug)}
       onRemove={() => inherit.remove(path)}
     />
@@ -614,7 +614,7 @@ function QuickLinkRow({ link, view, inherit, disabled, onSetValue }: QuickLinkRo
           sources={inherit.sources}
           inheritable={link.paths.every((path) => canInheritPath(path))}
           disabled={disabled}
-          onClear={eachPath(inherit.clear)}
+          onSetDefault={eachPath(inherit.setDefault)}
           onInherit={(slug) => link.paths.forEach((path) => inherit.inherit(path, slug))}
           onRemove={eachPath(inherit.remove)}
         />
@@ -676,15 +676,12 @@ export function CodexModelQuickFields({
 }: CodexModelQuickFieldsProps) {
   const { t } = useTranslation();
   // 字段树只构建一次：分组字段的子项与扁平字段的状态都从同一棵树上读。
-  const { directives, heldFields } = sourceBinding;
+  const { directives } = sourceBinding;
   const nodes = useMemo(
-    () => buildOverrideTree({ effective, patch, inherit: directives, heldFields }),
-    [directives, effective, heldFields, patch]
+    () => buildOverrideTree({ effective, patch, inherit: directives }),
+    [directives, effective, patch]
   );
-  const views = useMemo(
-    () => buildQuickFieldViews(nodes, directives, heldFields),
-    [directives, heldFields, nodes]
-  );
+  const views = useMemo(() => buildQuickFieldViews(nodes, directives), [directives, nodes]);
   // 内容通常一致的字段默认合并成一个输入框，用户关掉后才逐个编辑。
   const [linkedGroups, setLinkedGroups] = useState<ReadonlySet<string>>(
     () => new Set(QUICK_FIELD_LINKS.map((link) => link.id))

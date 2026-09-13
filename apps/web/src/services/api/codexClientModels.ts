@@ -3,20 +3,22 @@
  *
  * 目录由 base（内置或远端）与本地覆写层组成。覆写层是 JSON Merge Patch（RFC 7386），
  * 顶层键为模型 slug，值为该 slug 的字段补丁。
+ *
+ * models 是服务端为每个可服务模型装配出的默认条目：不写覆写时客户端收到的就是它们。
+ * 覆写层叠在装配结果之上，因此任何字段都能覆写，界面上「默认值」指的就是这里的取值。
  */
 
 import { apiClient } from './client';
 
-export type CodexClientModelOrigin = 'base' | 'override' | 'custom';
+export type CodexClientModelOrigin = 'base' | 'override' | 'served' | 'removed' | 'unserved';
 
 export type CodexClientModelEntry = Record<string, unknown>;
 
 /**
  * 服务端下发给 Codex 客户端的单个模型摘要。
  *
- * 目录只定义自己的条目，实际下发的列表由「已配置的可用模型」逐个匹配目录条目得到：
- * 匹配到条目时以该条目为底，匹配不到时整条复用默认模板。两种情况下服务端都会再用模型
- * 元数据与来源能力决定一部分字段，这些字段的实际下发取值在 servedFields 里。
+ * served_models 描述客户端真正能请求到的模型：装配结果再叠上覆写层之后的样子，
+ * 附带来源、模板与优先级等列表信息。
  */
 export interface CodexClientServedModel {
   /** 客户端请求该模型时使用的标识。 */
@@ -35,12 +37,6 @@ export interface CodexClientServedModel {
   reasoningLevel: string;
   /** 该模型下发时提供的推理强度，顺序与下发内容一致。 */
   reasoningLevels: CodexClientServedReasoningLevel[];
-  /**
-   * 服务端在目录条目之上决定的字段及其下发取值，键为字段名。这些字段由模型元数据、
-   * 来源能力与可见性规则决定，因此目录里的取值不等于客户端看到的值；编辑器把它们
-   * 叠加到条目上，用来显示真正的默认值。
-   */
-  servedFields: Record<string, unknown>;
   /** 该模型当前的下发位置；排序在目录条目之后。 */
   priority: number | null;
 }
@@ -81,7 +77,7 @@ export interface CodexClientModelsState {
   servedModels: CodexClientServedModel[] | null;
 }
 
-const ORIGINS: CodexClientModelOrigin[] = ['base', 'override', 'custom'];
+const ORIGINS: CodexClientModelOrigin[] = ['base', 'override', 'served', 'removed', 'unserved'];
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -166,7 +162,6 @@ const normalizeServedModels = (value: unknown): CodexClientServedModel[] | null 
       visibility: readString(entry.visibility),
       reasoningLevel: readString(entry.default_reasoning_level),
       reasoningLevels: readReasoningLevels(entry.supported_reasoning_levels),
-      servedFields: isRecord(entry.served_fields) ? { ...entry.served_fields } : {},
       priority: Number.isFinite(Number(entry.priority)) ? Number(entry.priority) : null,
     }))
     .filter((entry) => entry.slug.length > 0);

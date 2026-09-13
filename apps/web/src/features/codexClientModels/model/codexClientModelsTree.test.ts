@@ -198,7 +198,7 @@ describe('resolveInheritSource', () => {
       declared: null,
     });
     // 祖先链上最近的指令胜出，更浅的整条指令不再参与。
-    expect(resolveInheritSource(directives, ['context_window'])).toEqual({
+    expect(resolveInheritSource(directives, ['base_instructions'])).toEqual({
       source: 'whole-entry',
       declared: null,
     });
@@ -221,67 +221,78 @@ describe('resolveInheritSource', () => {
     });
   });
 
-  it('keeps identity fields out of an inherited whole entry', () => {
+  it('keeps the fields only the model supplies out of an inherited whole entry', () => {
     const directives = new Map([['', 'whole-entry']]);
 
-    // 整条继承只铺普通字段：身份字段永远来自条目自身。
-    expect(resolveInheritSource(directives, ['display_name'])).toEqual({
-      source: null,
-      declared: null,
-    });
-    expect(resolveInheritSource(directives, ['description'])).toEqual({
-      source: null,
-      declared: null,
-    });
-    expect(resolveInheritSource(directives, ['slug'])).toEqual({ source: null, declared: null });
-    expect(resolveInheritSource(directives, ['priority']).source).toBe('whole-entry');
+    // 整条继承只铺普通字段：身份、可见性、位置与上下文窗口都来自条目自身。
+    ['display_name', 'description', 'slug', 'visibility', 'priority', 'context_window'].forEach(
+      (field) => {
+        expect(resolveInheritSource(directives, [field])).toEqual({ source: null, declared: null });
+      }
+    );
+    expect(resolveInheritSource(directives, ['base_instructions']).source).toBe('whole-entry');
     // 嵌套的同名键仍然是普通字段。
     expect(resolveInheritSource(directives, ['model_messages', 'notes']).source).toBe(
       'whole-entry'
     );
   });
 
-  it('keeps the fields the server decides out of a whole-entry inherit', () => {
+  it('keeps the fields only the model supplies out of a whole-entry inherit', () => {
     const directives = new Map([['', 'whole-entry']]);
-    const heldFields = new Set(['context_window', 'supported_reasoning_levels']);
-
-    // 下发取值由服务端给出的字段显示为默认值，不该显示成「继承自 X」。
-    expect(resolveInheritSource(directives, ['context_window'], heldFields)).toEqual({
+    // 只由模型自身提供的字段显示为默认值，不该显示成「继承自 X」。
+    expect(resolveInheritSource(directives, ['visibility'])).toEqual({
       source: null,
       declared: null,
     });
-    // 服务端没决定的字段照旧跟随整条继承。
-    expect(resolveInheritSource(directives, ['priority'], heldFields).source).toBe('whole-entry');
+    // 来源能供到的字段照旧跟随整条继承。
+    expect(resolveInheritSource(directives, ['base_instructions']).source).toBe('whole-entry');
     // 显式写在字段路径上的指令仍然生效。
-    const declared = new Map([['context_window', 'gpt-5.6-sol']]);
-    expect(resolveInheritSource(declared, ['context_window'], heldFields)).toEqual({
+    const declared = new Map([['base_instructions', 'gpt-5.6-sol']]);
+    expect(resolveInheritSource(declared, ['base_instructions'])).toEqual({
       source: 'gpt-5.6-sol',
       declared: 'gpt-5.6-sol',
     });
   });
 
-  it('keeps the nested fields of a server-decided parent out of the whole-entry inherit', () => {
-    const directives = new Map([['', 'whole-entry']]);
-    const heldFields = new Set(['model_messages']);
+  it('stops at a path that opts out of inheritance', () => {
+    const directives = new Map<string, string | null>([
+      ['', 'whole-entry'],
+      ['model_messages', null],
+    ]);
 
-    expect(resolveInheritSource(directives, ['model_messages', 'notes'], heldFields)).toEqual({
+    expect(resolveInheritSource(directives, ['model_messages', 'notes'])).toEqual({
       source: null,
       declared: null,
     });
-    // 指向父路径的指令是显式选择，不受这份清单影响。
-    const parent = new Map([['model_messages', 'gpt-5.6-sol']]);
-    expect(resolveInheritSource(parent, ['model_messages', 'notes'], heldFields).source).toBe(
-      'gpt-5.6-sol'
-    );
+    expect(resolveInheritSource(directives, ['model_messages'])).toEqual({
+      source: null,
+      declared: null,
+    });
+    // 同一个条目里的其它字段照旧继承。
+    expect(resolveInheritSource(directives, ['base_instructions']).source).toBe('whole-entry');
   });
 
-  it('reports a directive on an identity field without applying it', () => {
+  it('follows a directive written on a parent path', () => {
+    const directives = new Map([['', 'whole-entry']]);
+    const parent = new Map([['model_messages', 'gpt-5.6-sol']]);
+
+    expect(resolveInheritSource(directives, ['model_messages', 'notes']).source).toBe(
+      'whole-entry'
+    );
+    expect(resolveInheritSource(parent, ['model_messages', 'notes']).source).toBe('gpt-5.6-sol');
+  });
+
+  it('reports a directive on a field only the model supplies without applying it', () => {
     const directives = new Map([['display_name', 'own-source']]);
 
     // declared 仍要报出来，字段菜单里才有「恢复默认」清掉这条无效指令。
     expect(resolveInheritSource(directives, ['display_name'])).toEqual({
       source: null,
       declared: 'own-source',
+    });
+    expect(resolveInheritSource(directives, ['visibility'])).toEqual({
+      source: null,
+      declared: null,
     });
   });
 });

@@ -4710,7 +4710,7 @@
     "filter_all": "Все",
     "filter_base": "Базовые",
     "filter_override": "Изменённые",
-    "filter_custom": "Свои",
+    "filter_unserved": "Без эффекта",
     "filter_removed": "Удалённые",
     "filter_served": "Шаблон по умолчанию",
     "column_model": "Модель",
@@ -4721,7 +4721,7 @@
     "column_visibility": "Видимость",
     "origin_base": "Базовая",
     "origin_override": "Изменённая",
-    "origin_custom": "Своя",
+    "origin_unserved": "Без эффекта",
     "origin_removed": "Удалённая",
     "origin_served": "Шаблон по умолчанию",
     "served_yes": "Отдаётся",
@@ -4757,7 +4757,7 @@
     "inherit_issue_title": "Проблемы с наследованием:",
     "inherit_issue_invalid_shape": "Наследование должно указывать модель или отображать пути полей на модели.",
     "inherit_issue_invalid_path": "Путь наследования может содержать только поля объектов, без индексов массива и пустых сегментов.",
-    "inherit_issue_non_inheritable_field": "Поля идентичности модели нельзя наследовать.",
+    "inherit_issue_non_inheritable_field": "Это поле задаёт только сама модель, поэтому наследовать его нельзя.",
     "inherit_issue_unknown_source": "Источника наследования нет в каталоге.",
     "inherit_issue_self_reference": "Модель не может наследовать сама себе.",
     "inherit_issue_source_missing_path": "В модели-источнике нет этого поля.",
@@ -4840,6 +4840,14 @@
         "max_context_window": {
           "label": "Максимальное окно контекста",
           "hint": "Наибольшая длина контекста для этой модели."
+        },
+        "max_tokens": {
+          "label": "Максимум выходных токенов",
+          "hint": "Наибольшее число токенов, которое может породить один ответ. Пустое значение ничего не объявляет."
+        },
+        "auto_compact_token_limit": {
+          "label": "Порог автосжатия",
+          "hint": "Клиент сжимает диалог, когда контекст достигает этого числа токенов. Пустое значение ничего не задаёт."
         },
         "supported_reasoning_levels": {
           "label": "Поддерживаемые уровни рассуждений",

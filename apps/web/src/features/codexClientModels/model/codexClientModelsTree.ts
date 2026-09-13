@@ -95,55 +95,60 @@ export const readOverrideValue = (
 };
 
 /**
- * 模型身份字段：slug 标明是哪条条目，展示名称与描述说明它在列表里的样子。
- * 后端解析继承时从不让来源提供它们，界面因此也不能把这些字段标成继承来的。
+ * 来源永远供不到的字段：身份字段标明是哪条条目，服务字段描述它被下发时的样子。
+ * 后端解析继承时都不从来源取值，界面因此也不能把这些字段标成继承来的。
  */
 export const NON_INHERITABLE_FIELDS: ReadonlyArray<string> = [
   'slug',
   'display_name',
   'description',
+  'visibility',
+  'priority',
+  'context_window',
+  'max_context_window',
 ];
 
-/** 身份字段只认根层的那几个键，嵌套的同名键仍然是普通字段。 */
+/** 这些字段只认根层的那几个键，嵌套的同名键仍然是普通字段。 */
 export const isNonInheritablePathKey = (pathKey: string): boolean =>
   NON_INHERITABLE_FIELDS.includes(pathKey);
 
-const isIdentityPath = (path: OverridePath): boolean =>
+const isModelFieldPath = (path: OverridePath): boolean =>
   path.length === 1 && isNonInheritablePathKey(String(path[0]));
 
 /**
- * 服务端自己决定的字段名，按根层键给出，与下发摘要里的字段同一粒度。这些字段的默认值
- * 就是服务端下发的取值，目录条目里的取值不会到达客户端，因此继承源不是它的来源。
- */
-export type ServedHeldFields = ReadonlySet<string>;
-
-const isServedHeldPath = (path: OverridePath, heldFields?: ServedHeldFields): boolean =>
-  Boolean(heldFields && path.length > 0 && heldFields.has(String(path[0])));
+/** 继承指令的取值：模型 slug 表示继承来源，null 表示显式不继承。 */
+export type InheritDirectives = ReadonlyMap<string, string | null>;
 
 /**
  * 覆盖某条路径的继承来源：本路径自己的指令优先，否则取最近的上级指令。
  * 字段树与配置面板都用它，因此同一个字段在两种视图里显示的来源始终一致。
  *
- * 两类字段不接受整条继承：身份字段（slug、展示名、描述）后端不会从来源取值，
- * heldFields 里的字段则由服务端自己决定。两者的来源因此始终为空，界面上不会把它们
- * 标成「继承自 X」。直接写在字段路径上的指令照常生效，
- * 界面另有问题标说明身份字段上不会执行的指令。
+ * 不接受继承的字段永远来自条目自身，因此来源为空，界面上不会把它们标成「继承自 X」。
+ * 直接写在字段路径上的指令照常生效，
+ * 界面另有问题标说明这些字段上不会执行的指令。
+ *
+ * 路径上写着 null 时表示显式不继承：本路径与它下面的子路径都停在条目自身的取值上，
+ * 上级指令不再覆盖它们。
  */
 export function resolveInheritSource(
-  directives: ReadonlyMap<string, string>,
-  path: OverridePath,
-  heldFields?: ServedHeldFields
+  directives: InheritDirectives,
+  path: OverridePath
 ): { source: string | null; declared: string | null } {
-  const declared = directives.get(path.join('.')) ?? null;
-  const inheritable = !isIdentityPath(path);
+  const pathKey = path.join('.');
+  const declared = directives.get(pathKey) ?? null;
+  const inheritable = !isModelFieldPath(path);
   if (declared) return { source: inheritable ? declared : null, declared };
+  if (directives.has(pathKey)) return { source: null, declared: null };
 
-  const held = isServedHeldPath(path, heldFields);
   for (let end = path.length - 1; end >= 0; end -= 1) {
-    const ancestor = directives.get(path.slice(0, end).join('.'));
+    const ancestorKey = path.slice(0, end).join('.');
+    const ancestor = directives.get(ancestorKey);
+    if (ancestor === null && directives.has(ancestorKey)) {
+      return { source: null, declared: null };
+    }
     if (!ancestor) continue;
-    // 能覆盖到根层字段的上级只有整条继承，而这两类字段都不接受它。
-    if (end === 0 && (!inheritable || held)) continue;
+    // 能覆盖到根层字段的上级只有整条继承，而这些字段都不接受它。
+    if (end === 0 && !inheritable) continue;
     return { source: ancestor, declared: null };
   }
   return { source: null, declared: null };
@@ -195,15 +200,14 @@ function buildNodes(
   patch: unknown,
   path: OverridePath,
   insideArray: boolean,
-  directives: ReadonlyMap<string, string>,
-  heldFields?: ServedHeldFields
+  directives: InheritDirectives
 ): OverrideTreeNode[] {
   if (Array.isArray(effective) || Array.isArray(patch)) {
     const items = Array.isArray(patch) ? patch : Array.isArray(effective) ? effective : [];
     if (!arrayHasStructuredItems(items)) return [];
     return items.map((_item, index) => {
       const childPath: OverridePath = [...path, index];
-      const inherited = resolveInheritSource(directives, childPath, heldFields);
+      const inherited = resolveInheritSource(directives, childPath);
       return makeNode({
         key: `[${index}]`,
         path: childPath,
@@ -219,8 +223,7 @@ function buildNodes(
           Array.isArray(patch) ? patch[index] : undefined,
           childPath,
           true,
-          directives,
-          heldFields
+          directives
         ),
       });
     });
@@ -245,7 +248,7 @@ function buildNodes(
         const childPatch = inPatch ? patchSource[key] : undefined;
         const nestedSource = inPatch ? childPatch : childEffective;
         const hasChildren = isPlainObject(nestedSource) || arrayHasStructuredItems(nestedSource);
-        const inherited = resolveInheritSource(directives, childPath, heldFields);
+        const inherited = resolveInheritSource(directives, childPath);
 
         return makeNode({
           key,
@@ -258,7 +261,7 @@ function buildNodes(
           inheritSource: inherited.source,
           inheritDeclared: inherited.declared,
           children: hasChildren
-            ? buildNodes(childEffective, childPatch, childPath, insideArray, directives, heldFields)
+            ? buildNodes(childEffective, childPatch, childPath, insideArray, directives)
             : [],
         });
       })
@@ -270,35 +273,9 @@ export function buildOverrideTree(options: {
   effective: unknown;
   patch: unknown;
   /** `$inherit` 指令，按点号路径索引；缺省表示字段都不带继承来源。 */
-  inherit?: ReadonlyMap<string, string>;
-  /** 服务端自己决定的字段：默认值是下发取值，整体继承默认不接管它们。 */
-  heldFields?: ServedHeldFields;
+  inherit?: InheritDirectives;
 }): OverrideTreeNode[] {
-  return buildNodes(
-    options.effective,
-    options.patch,
-    [],
-    false,
-    options.inherit ?? new Map(),
-    options.heldFields
-  );
-}
-
-/**
- * 把服务端下发的取值叠加到条目上，得到客户端当前收到的配置。
- *
- * 目录条目描述的是 CPA 的配置，不是客户端最终看到的内容：服务端会用模型元数据、来源
- * 能力与可见性规则决定其中一部分字段，这些字段的取值与条目无关。编辑器把叠加后的结果
- * 当作默认值，因此每个字段显示的就是客户端现在实际收到的取值。
- * 条目缺失或没有下发摘要时原样返回。
- */
-export function applyServedFields(
-  entry: unknown,
-  servedFields?: Readonly<Record<string, unknown>> | null
-): unknown {
-  if (!servedFields || !isPlainObject(entry)) return entry;
-  if (Object.keys(servedFields).length === 0) return entry;
-  return { ...entry, ...servedFields };
+  return buildNodes(options.effective, options.patch, [], false, options.inherit ?? new Map());
 }
 
 const clonePatch = (patch: unknown): Record<string, unknown> => {

@@ -4,6 +4,10 @@
  * 指令形态与后端一致：字符串是「整条继承」的简写，对象则是「点号路径 → 模型 slug」的映射，
  * 其中空路径 `""` 表示整条继承。路径只使用对象键，数组整体替换，不能作为继承目标。
  * 同一路径既有继承指令又有本地值时，本地值胜出，所以界面把「继承来源」与「本地改动」分开表达。
+ *
+ * 路径的取值写成 null 时表示显式不继承：取值回到条目自身，上级指令不再覆盖它。
+ * 继承来源与「不继承」是两种独立的选择，因此界面才能把字段稳定地恢复到默认值。
+ * NON_INHERITABLE_FIELDS 里的字段不接受任何继承来源，后端会拒绝指向它们的指令。
  */
 
 import type { useTranslation } from 'react-i18next';
@@ -14,11 +18,13 @@ import {
   isNonInheritablePathKey,
   isPlainObject,
   removeOverrideKey,
+  resolveInheritSource,
+  type InheritDirectives,
   type OverridePath,
-  type ServedHeldFields,
 } from './codexClientModelsTree';
 
 export { INHERIT_KEY, NON_INHERITABLE_FIELDS, isNonInheritablePathKey };
+export type { InheritDirectives };
 
 /** 字段路径的点号写法；根路径为空字符串。 */
 export const inheritPathKey = (path: OverridePath): string => path.join('.');
@@ -33,8 +39,8 @@ export const isInheritablePath = (path: OverridePath): boolean =>
  * 读取补丁里的继承指令。结构非法时按「没有指令」处理，
  * 具体问题交给 validateInheritDirectives 报告，避免渲染时反复抛错。
  */
-export function readInheritDirectives(patch: unknown): Map<string, string> {
-  const directives = new Map<string, string>();
+export function readInheritDirectives(patch: unknown): Map<string, string | null> {
+  const directives = new Map<string, string | null>();
   if (!isPlainObject(patch)) return directives;
 
   const raw = patch[INHERIT_KEY];
@@ -46,6 +52,10 @@ export function readInheritDirectives(patch: unknown): Map<string, string> {
   if (!isPlainObject(raw)) return directives;
 
   Object.entries(raw).forEach(([pathKey, value]) => {
+    if (value === null) {
+      directives.set(pathKey, null);
+      return;
+    }
     if (typeof value !== 'string') return;
     const slug = value.trim();
     if (slug) directives.set(pathKey, slug);
@@ -59,19 +69,23 @@ export function readInheritDirectives(patch: unknown): Map<string, string> {
  */
 function withInheritDirectives(
   patch: unknown,
-  directives: ReadonlyMap<string, string>
+  directives: InheritDirectives
 ): Record<string, unknown> {
   const rest: Record<string, unknown> = isPlainObject(patch) ? { ...patch } : {};
   delete rest[INHERIT_KEY];
 
-  if (directives.size === 0) return rest;
-  if (directives.size === 1 && directives.has('')) {
-    return { [INHERIT_KEY]: directives.get(''), ...rest };
+  // 整条继承被显式关掉时已经没有来源可写，等价于没有指令。
+  const kept = new Map(directives);
+  if (kept.get('') === null) kept.delete('');
+
+  if (kept.size === 0) return rest;
+  if (kept.size === 1 && typeof kept.get('') === 'string') {
+    return { [INHERIT_KEY]: kept.get(''), ...rest };
   }
 
-  const object: Record<string, string> = {};
-  [...directives.keys()].sort().forEach((pathKey) => {
-    object[pathKey] = directives.get(pathKey) as string;
+  const object: Record<string, string | null> = {};
+  [...kept.keys()].sort().forEach((pathKey) => {
+    object[pathKey] = kept.get(pathKey) ?? null;
   });
   return { [INHERIT_KEY]: object, ...rest };
 }
@@ -93,6 +107,26 @@ export function clearInheritSource(patch: unknown, path: OverridePath): Record<s
   const directives = readInheritDirectives(patch);
   directives.delete(inheritPathKey(path));
   return withInheritDirectives(patch, directives);
+}
+
+/**
+ * 让该路径显式不继承：取值回到条目自身，上级指令不再覆盖它。
+ * 与「取消指令」不同，这条指令会挡住上级来源，所以字段能停在默认值上。
+ */
+export function setInheritOptOut(patch: unknown, path: OverridePath): Record<string, unknown> {
+  const directives = readInheritDirectives(patch);
+  directives.set(inheritPathKey(path), null);
+  return withInheritDirectives(patch, directives);
+}
+
+/**
+ * 把字段恢复到默认值：丢掉本地值与自身指令后，上级来源仍会覆盖它时再补上「不继承」。
+ * 没有这一步，清掉本地值只会让字段掉回继承，而不是回到默认值。
+ */
+export function restoreFieldDefault(patch: unknown, path: OverridePath): Record<string, unknown> {
+  const cleared = clearFieldOverride(patch, path);
+  const covered = resolveInheritSource(readInheritDirectives(cleared), path).source !== null;
+  return covered ? setInheritOptOut(cleared, path) : cleared;
 }
 
 /** 清除该字段的全部本地设置：本地补丁与自身声明的继承指令。 */
@@ -119,7 +153,8 @@ export function countInheritUsage(doc: Record<string, unknown>): Map<string, num
   Object.values(doc).forEach((patch) => {
     const seen = new Set<string>();
     readInheritDirectives(patch).forEach((slug) => {
-      if (seen.has(slug)) return;
+      // 显式不继承的路径不指向任何模型。
+      if (slug === null || seen.has(slug)) return;
       seen.add(slug);
       usage.set(slug, (usage.get(slug) ?? 0) + 1);
     });
@@ -181,18 +216,27 @@ function keepLocalField(merged: Record<string, unknown>, base: unknown, field: s
 }
 
 /**
- * 整条继承的结果：身份字段永远是条目自身的，heldFields 里列出的服务端决定的字段也留原样。
- * 前者后端不会从来源取值，后者的下发取值由服务端按模型元数据算出来，继承源都盖不到。
+ * 整条继承的结果：不接受继承的字段永远是条目自身的。后端不会从来源取值，
+ * 继承源也盖不到它们。
  */
-function withLocalFields(
-  source: Record<string, unknown>,
-  base: unknown,
-  heldFields?: ServedHeldFields
-): Record<string, unknown> {
+function withLocalFields(source: Record<string, unknown>, base: unknown): Record<string, unknown> {
   const merged = cloneJsonValue(source);
   NON_INHERITABLE_FIELDS.forEach((field) => keepLocalField(merged, base, field));
-  heldFields?.forEach((field) => keepLocalField(merged, base, field));
   return merged;
+}
+
+/** 按路径删掉一个键；路径中途不是对象时什么都不用做。 */
+function removePathValue(target: unknown, segments: ReadonlyArray<string>): unknown {
+  const root: Record<string, unknown> = isPlainObject(target) ? cloneJsonValue(target) : {};
+  if (segments.length === 0) return root;
+  let container = root;
+  for (let index = 0; index < segments.length - 1; index += 1) {
+    const next = container[segments[index]];
+    if (!isPlainObject(next)) return root;
+    container = next as Record<string, unknown>;
+  }
+  delete container[segments[segments.length - 1]];
+  return root;
 }
 
 /** 按路径写值与取值的对象级操作；路径只走对象键，中途不是对象就补成对象。 */
@@ -210,7 +254,7 @@ function writePath(target: unknown, segments: ReadonlyArray<string>, value: unkn
 }
 
 /** 指令按路径由浅到深应用：深层指令细化浅层已经替换掉的子树。 */
-const inheritPathsShallowFirst = (directives: ReadonlyMap<string, string>): string[] =>
+const inheritPathsShallowFirst = (directives: InheritDirectives): string[] =>
   [...directives.keys()].sort((left, right) => {
     const leftDepth = pathSegments(left).length;
     const rightDepth = pathSegments(right).length;
@@ -223,30 +267,38 @@ const inheritPathsShallowFirst = (directives: ReadonlyMap<string, string>): stri
  * 界面用它来预览与播种：字段一旦选了继承源，展示的就不再是自身条目里的旧值，
  * 而是来源模型的取值。来源缺少该字段时保留原值，问题交给 validateInheritDirectives 提示。
  *
- * heldFields 是服务端自己决定的字段：整条继承默认不接管它们，取值仍按条目自身的来，
- * 因为客户端看到的是服务端按模型元数据算出来的值，而不是继承源里的值。
  */
 export function applyInheritDirectives(
   base: unknown,
-  directives: ReadonlyMap<string, string>,
-  lookup: InheritSourceLookup,
-  heldFields?: ServedHeldFields
+  directives: InheritDirectives,
+  lookup: InheritSourceLookup
 ): unknown {
   if (directives.size === 0) return base;
 
   let current = base;
   inheritPathsShallowFirst(directives).forEach((pathKey) => {
-    // 身份字段永远来自条目自身：指向它们的指令后端会拒绝整份补丁，问题由
+    // 不接受继承的字段永远来自条目自身：指向它们的指令后端会拒绝整份补丁，问题由
     // validateInheritDirectives 报出，预览保持条目自己的取值。
     if (pathKey && isNonInheritablePathKey(pathKey)) return;
-    const slug = directives.get(pathKey) as string;
+    const slug = directives.get(pathKey) ?? null;
+    if (slug === null) {
+      // 显式不继承：把这条路径换回条目自身的取值，而不是来源的取值。
+      if (!pathKey) return;
+      const segments = pathSegments(pathKey);
+      current = removePathValue(current, segments);
+      const own = isPlainObject(base)
+        ? lookupPath(base, pathKey)
+        : { found: false, value: undefined };
+      if (own.found) current = writePath(current, segments, cloneJsonValue(own.value));
+      return;
+    }
     const source = lookup(slug, pathKey);
     if (!source.found) return;
 
     if (!pathKey) {
       const entry = asEntry(source.value);
       if (entry.found) {
-        current = withLocalFields(entry.value as Record<string, unknown>, base, heldFields);
+        current = withLocalFields(entry.value as Record<string, unknown>, base);
       }
       return;
     }
@@ -261,22 +313,23 @@ export function applyInheritDirectives(
  */
 export interface FieldInheritBinding {
   /** 覆写补丁里的继承指令，按点号路径索引。 */
-  directives: ReadonlyMap<string, string>;
+  directives: InheritDirectives;
   /** 可作为继承源的模型 slug。 */
   sources: ReadonlyArray<string>;
-  /** 服务端自己决定的字段：下发取值由服务端给出，整条继承默认不接管它们。 */
-  heldFields: ServedHeldFields;
   /** 该路径上继承指令的问题描述，供字段旁的警告标签显示。 */
   issueOf: (path: OverridePath) => string | undefined;
-  /** 清除本地改动与自身声明的继承指令。 */
-  clear: (path: OverridePath) => void;
+  /**
+   * 恢复到默认值：丢掉本地改动与自身指令，并在上级来源仍会覆盖时写上「不继承」，
+   * 因此字段一定停在条目自身的取值上，而不是掉回继承。
+   */
+  setDefault: (path: OverridePath) => void;
   /** 让该路径改为继承指定模型，同时丢掉本地值。 */
   inherit: (path: OverridePath, slug: string) => void;
   /** 写入 null，把字段从生效条目里删除。 */
   remove: (path: OverridePath) => void;
 }
 
-/** 该路径能不能选继承源：路径必须是纯对象键，且不是身份字段。 */
+/** 该路径能不能选继承源：路径必须是纯对象键，且不是不接受继承的字段。 */
 export const canInheritPath = (path: OverridePath): boolean =>
   isInheritablePath(path) && !isNonInheritablePathKey(inheritPathKey(path));
 
@@ -307,7 +360,7 @@ function pathIssue(pathKey: string): InheritIssueCode | null {
 
 /**
  * 校验补丁里的继承指令。界面用它给字段标出「这条指令后端不会接受」，
- * 例如手写 JSON 时指向了不存在的模型、身份字段，或来源没有这个字段。
+ * 例如手写 JSON 时指向了不存在的模型、不接受继承的字段，或来源没有这个字段。
  *
  * 指向整条条目的问题用空路径表示，界面放在编辑器顶部提示。
  */
@@ -330,6 +383,12 @@ export function validateInheritDirectives(options: {
 
   const issues: InheritIssue[] = [];
   entries.forEach(([pathKey, value]) => {
+    // 显式不继承不指向任何模型，只要路径本身成立。
+    if (value === null) {
+      const issue = pathIssue(pathKey);
+      if (issue) issues.push({ path: pathKey, code: issue });
+      return;
+    }
     if (typeof value !== 'string' || !value.trim()) {
       issues.push({ path: pathKey, code: 'invalid_shape' });
       return;
