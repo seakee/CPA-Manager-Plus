@@ -18,14 +18,27 @@ The page entry point requires the matching capability flag from the current CPA 
 3. Edit what you need in the common fields.
 4. Choose Save override. The change is written to the local override and takes effect for Codex clients.
 
-The list shows each model's origin, context window, default reasoning level, and visibility. There are four origins: Base comes straight from the upstream catalog, Overridden means local edits were applied to fields inside the entry, Custom means the whole entry was added locally, and Removed means the entry was written to null locally. Expanding a removed entry and editing any field rebuilds it.
+The list shows each model's origin, served state, context window, default reasoning level, and visibility. There are five origins: Base comes straight from the upstream catalog, Overridden means local edits were applied to fields inside the entry, Custom means the whole entry was added locally, Removed means the entry was written to null locally, and Default Template means the model is already served to clients while the catalog still has no entry for it. Expanding a removed entry and editing any field rebuilds it.
 
 The top of the page also shows the current catalog source, the revision, and the override file path.
+
+## Served Models Without Their Own Entry
+
+The catalog only defines its own entries. What clients actually see is built by matching every available model against the catalog, and a model without a match reuses the default template (`gpt-5.5`) as a whole. Those models used to show up only in the client's own list; they now appear here with the Default Template origin.
+
+Expanding one shows Add an entry for `<slug>`, which starts from that template:
+
+- The slug is the identifier clients request the model by, so it cannot be changed.
+- Saving adds a catalog entry for it.
+- The new entry keeps the display name, description, context window, and order clients see today, inherits its remaining fields from the template it currently uses, and can then be overridden field by field.
+
+A model keeps working without its own entry: it is still served through the default template.
 
 ## List And Filters
 
 - The search box filters by slug or display name.
-- The filter buttons group entries by origin and switch between All, Overridden, Custom, Removed, and Base.
+- The filter buttons group entries by origin and switch between All, Default Template, Overridden, Custom, Removed, and Base.
+- The Served column marks whether the model currently shows up in the list clients see; hovering it names the providers serving the model. A model reading Not Served usually means the entry was written to null locally, or the credentials supplying it are temporarily unavailable.
 - The top right can refresh the catalog, add an entry, or clear every override.
 - Entries that carry an override show a remove button on the right that affects only that entry.
 
