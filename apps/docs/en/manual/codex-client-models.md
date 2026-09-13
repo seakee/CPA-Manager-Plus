@@ -30,7 +30,8 @@ Expanding one shows Add an entry for `<slug>`, which starts from that template:
 
 - The slug is the identifier clients request the model by, so it cannot be changed.
 - Saving adds a catalog entry for it.
-- The new entry keeps the display name, description, context window, and order clients see today, inherits its remaining fields from the template it currently uses, and can then be overridden field by field.
+- The new entry takes its display name and description from what clients see today, inherits its remaining fields from the template it currently uses, and can then be overridden field by field.
+- Every value clients receive right now shows up as a default, so none of them has to be overridden just to keep the current behaviour.
 
 A model keeps working without its own entry: it is still served through the default template.
 
@@ -47,7 +48,7 @@ A model keeps working without its own entry: it is still served through the defa
 Common fields are grouped by purpose, with the most frequently used ones visible directly:
 
 - Basic: display name, description, visibility, priority.
-- Context and reasoning: context window, max context window, default reasoning level, default reasoning summary, default verbosity, verbosity control.
+- Context and reasoning: context window, max context window, supported reasoning levels, default reasoning level, default reasoning summary, default verbosity, verbosity control.
 - Capabilities: available in API, parallel tool calls, reasoning summaries, search tool, prefer WebSockets, use Responses Lite.
 - Tools and modalities: input modalities, apply patch tool, shell type, search tool type, multi-agent version, multi-agent reasoning effort.
 - Prompts: base instructions and model messages.
@@ -56,11 +57,13 @@ The remaining fields live under Advanced: remaining fields below the expanded ar
 
 ## Field-Level Sources
 
-Every field carries a source marker in its top right corner showing whether the current value is a local override, comes from the catalog, or is inherited from another model.
+Every field carries a source marker in its top right corner showing whether the current value is the default, a local override, or inherited from another model.
 
 - The marker expands to point a single field at a different inheritance source.
 - An overridden field can be restored to its default on its own, without discarding the rest of the entry's edits.
 - When only one field needs a special value, set that field's source and leave the remaining fields on the entry's inheritance source.
+
+The default is what clients receive today: the server decides part of the configuration from model metadata, provider capabilities, and visibility rules, so those fields show the served value rather than what the catalog entry says. They do not follow a whole-entry inherit and keep their local value; to point one at a specific source anyway, set it on that field's own marker.
 
 When other overrides use the entry as their inheritance source, the editor header shows how many references it has.
 
@@ -99,6 +102,7 @@ Overrides live in a local override file whose path is shown at the top of the pa
 - An object `$inherit` is a dotted-path to source-slug map, where the empty string is equivalent to inheriting the whole entry.
 - Local fields are applied last and can replace inherited values; writing `null` removes the field.
 - Slug, display name, and description always come from the local entry and never participate in inheritance.
+- Fields the server decides for itself, such as the context window and the supported reasoning levels, do not follow a whole-entry inherit and keep their local value; an `$inherit` written on that field alone still applies.
 
 Inheritance can chain to another inheriting entry, and it can point at entries in the official catalog.
 
