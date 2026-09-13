@@ -24,6 +24,7 @@ const makeBinding = (overrides: Partial<FieldInheritBinding> = {}): FieldInherit
   directives: new Map(),
   sources: ['gpt-5.6-sol'],
   issueOf: () => undefined,
+  changedOf: () => false,
   setDefault: () => undefined,
   inherit: () => undefined,
   remove: () => undefined,

@@ -74,6 +74,22 @@
   text-decoration: line-through;
 }
 
+/* 继承来的取值和默认值不同：这条继承确实改变了下发给客户端的内容。 */
+.changed {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  border: 1px solid color-mix(in srgb, var(--primary-color, #409eff) 42%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--primary-color, #409eff) 20%, var(--bg-primary, #fff));
+  color: color-mix(in srgb, var(--primary-color, #409eff) 70%, var(--text-primary, #1f2937));
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.5;
+  white-space: nowrap;
+  cursor: help;
+}
+
 .issue {
   display: inline-flex;
   align-items: center;

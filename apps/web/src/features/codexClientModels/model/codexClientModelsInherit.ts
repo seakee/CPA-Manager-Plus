@@ -307,6 +307,65 @@ export function applyInheritDirectives(
   return current;
 }
 
+/** 两个 JSON 取值是否相同：对象按键、数组按下标比较，标量要求同值同类型。 */
+const sameJsonValue = (left: unknown, right: unknown): boolean => {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+    return left.every((item, index) => sameJsonValue(item, right[index]));
+  }
+  if (!isPlainObject(left) || !isPlainObject(right)) return false;
+  const keys = Object.keys(left);
+  if (keys.length !== Object.keys(right).length) return false;
+  return keys.every(
+    (key) =>
+      Object.prototype.hasOwnProperty.call(right, key) && sameJsonValue(left[key], right[key])
+  );
+};
+
+/** 递归标出取值不同的路径；容器整体不同也算，父路径因此能提示这一组有变化。 */
+function markChangedPaths(
+  baseline: unknown,
+  effective: unknown,
+  path: OverridePath,
+  changed: Set<string>
+): void {
+  if (sameJsonValue(baseline, effective)) return;
+  if (path.length > 0) changed.add(inheritPathKey(path));
+
+  if (isPlainObject(baseline) && isPlainObject(effective)) {
+    const keys = Object.keys(baseline);
+    Object.keys(effective).forEach((key) => {
+      if (!keys.includes(key)) keys.push(key);
+    });
+    keys.forEach((key) => markChangedPaths(baseline[key], effective[key], [...path, key], changed));
+    return;
+  }
+  if (Array.isArray(baseline) && Array.isArray(effective)) {
+    const length = Math.max(baseline.length, effective.length);
+    for (let index = 0; index < length; index += 1) {
+      markChangedPaths(baseline[index], effective[index], [...path, index], changed);
+    }
+  }
+}
+
+/**
+ * 继承之后取值与默认值不同的路径，按点号路径索引。
+ *
+ * 界面用它区分「继承了个同值字段」与「继承确实改了下发内容」：前者对客户端没有影响，
+ * 后者才是要留意的改动。比对的两边是条目自身的默认配置与叠上继承指令后的结果，本地覆写
+ * 不参与，因此集合里的键都来自继承；数组下标按字段树的口径拼成「路径.下标」。
+ *
+ * 没有默认条目可比对时（新增、未下发或缺失条目）返回空集：此时每条路径都没有基准，
+ * 标出来只会是一片噪声。
+ */
+export function collectChangedPaths(baseline: unknown, effective: unknown): Set<string> {
+  const changed = new Set<string>();
+  if (!isPlainObject(baseline)) return changed;
+  markChangedPaths(baseline, effective, [], changed);
+  return changed;
+}
+
 /**
  * 界面里逐字段的继承来源与操作。配置面板与字段树共用同一套，
  * 因此同一个字段在两种视图里给出的状态、可选项与结果完全一致。
@@ -318,6 +377,8 @@ export interface FieldInheritBinding {
   sources: ReadonlyArray<string>;
   /** 该路径上继承指令的问题描述，供字段旁的警告标签显示。 */
   issueOf: (path: OverridePath) => string | undefined;
+  /** 该路径的生效取值是否与条目自身的默认值不同；继承没改变取值时为 false。 */
+  changedOf: (path: OverridePath) => boolean;
   /**
    * 恢复到默认值：丢掉本地改动与自身指令，并在上级来源仍会覆盖时写上「不继承」，
    * 因此字段一定停在条目自身的取值上，而不是掉回继承。

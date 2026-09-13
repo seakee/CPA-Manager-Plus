@@ -17,6 +17,7 @@ const bindingOf = (overrides: Partial<FieldInheritBinding> = {}): FieldInheritBi
   directives: new Map(),
   sources: [],
   issueOf: () => undefined,
+  changedOf: () => false,
   setDefault: () => undefined,
   inherit: () => undefined,
   remove: () => undefined,

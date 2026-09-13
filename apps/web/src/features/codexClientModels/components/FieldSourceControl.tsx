@@ -22,6 +22,11 @@ export interface FieldSourceControlProps {
   inheritable?: boolean;
   /** 继承指令无效时的说明。 */
   issue?: string;
+  /**
+   * 继承来的取值与该模型自身的默认值不同。两者相同时这条继承对下发内容没有影响，
+   * 界面因此只在真的改到取值时才标出来。
+   */
+  differsFromDefault?: boolean;
   /** 开始本地覆写；配置面板的字段由输入框直接编辑，因此不传。 */
   onSetLocal?: () => void;
   disabled?: boolean;
@@ -37,6 +42,7 @@ export interface FieldSourceControlProps {
  *
  * 显示状态与后端一致：本地 null 是「已删除」，本地有值是「本地值」，
  * 有继承来源是「继承自 X」，两者都没有则是「默认值」，也就是客户端当前收到的取值。
+ * 继承值与默认值不同时另外标记：同值继承对下发内容没有影响，需要和真正改掉取值的继承区分开。
  * 菜单负责改写继承指令，让每个字段都能独立选择保持默认、继承别的模型，或留下本地值；
  * 「恢复默认」与「继承自 X」是两条互不影响的路径，恢复默认不会被上级来源重新接管。
  */
@@ -48,6 +54,7 @@ export function FieldSourceControl({
   sources,
   inheritable = true,
   issue,
+  differsFromDefault = false,
   onSetLocal,
   disabled = false,
   onSetDefault,
@@ -78,6 +85,14 @@ export function FieldSourceControl({
             : t('codex_client_models.field_state_default');
 
   const chip = <span className={[styles.chip, styles[`chip_${tone}`]].join(' ')}>{label}</span>;
+
+  // 只有继承状态才标记：本地覆写与删除本来就说清了自己的来源，同值继承则是空转。
+  const changedChip =
+    differsFromDefault && tone === 'inherited' ? (
+      <span className={styles.changed} title={t('codex_client_models.field_source_changed_hint')}>
+        {t('codex_client_models.field_state_inherited_changed')}
+      </span>
+    ) : null;
 
   const issueChip = issue ? (
     <span className={styles.issue} title={issue}>
@@ -127,6 +142,7 @@ export function FieldSourceControl({
     return (
       <span className={styles.root}>
         {chip}
+        {changedChip}
         {issueChip}
       </span>
     );
@@ -149,6 +165,7 @@ export function FieldSourceControl({
         }
         disabled={disabled}
       />
+      {changedChip}
       {issueChip}
     </span>
   );

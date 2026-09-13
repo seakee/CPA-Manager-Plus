@@ -62,6 +62,7 @@ Every field carries a source marker in its top right corner showing whether the 
 - The marker expands to point a single field at a different inheritance source.
 - Any field can be restored to its default on its own, without discarding the rest of the entry's edits; a restored field stays on its default and is not taken over again by the entry's inheritance source.
 - When only one field needs a special value, set that field's source and leave the remaining fields on the entry's inheritance source.
+- When the inherited value differs from the model's own default, the marker gains a “Differs from default” note beside it; an inheritance that supplies the same value leaves what clients receive unchanged and carries no note.
 
 A default is the entry the server assembles: a catalog template merged with the model metadata (context length, reasoning levels, provider capabilities), which is what clients receive when nothing overrides it. The override layer is applied on top of that result, so every field can be overridden, including the ones normalization used to win.
 

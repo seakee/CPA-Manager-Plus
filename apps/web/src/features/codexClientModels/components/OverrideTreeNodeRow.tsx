@@ -213,6 +213,7 @@ export function OverrideTreeNodeRow({
             state={node.state}
             source={node.inheritSource}
             declared={node.inheritDeclared}
+            differsFromDefault={inherit.changedOf(node.path)}
             sources={inherit.sources}
             inheritable={canInheritPath(node.path)}
             issue={inherit.issueOf(node.path)}

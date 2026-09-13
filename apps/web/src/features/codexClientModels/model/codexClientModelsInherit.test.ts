@@ -6,6 +6,7 @@ import {
   canInheritPath,
   clearFieldOverride,
   clearInheritSource,
+  collectChangedPaths,
   collectInheritSources,
   countInheritUsage,
   createInheritSourceLookup,
@@ -477,5 +478,64 @@ describe('validateInheritDirectives', () => {
       { path: 'context_window', code: 'non_inheritable_field' },
       { path: 'model_messages.notes', code: 'unknown_source' },
     ]);
+  });
+});
+
+describe('collectChangedPaths', () => {
+  const baseline = {
+    slug: 'gpt-5.5',
+    display_name: 'GPT-5.5',
+    base_instructions: 'local prompt',
+    model_messages: { notes: 'local', extra: { deep: 'local' } },
+    supported_reasoning_levels: [{ effort: 'low' }, { effort: 'high' }],
+  };
+
+  it('marks the paths the inheritance changed and leaves the equal ones alone', () => {
+    const changed = collectChangedPaths(baseline, {
+      ...baseline,
+      base_instructions: 'inherited prompt',
+      model_messages: { notes: 'local', extra: { deep: 'inherited' } },
+    });
+
+    expect(changed.has('base_instructions')).toBe(true);
+    expect(changed.has('model_messages.extra.deep')).toBe(true);
+    expect(changed.has('display_name')).toBe(false);
+    expect(changed.has('model_messages.notes')).toBe(false);
+    // 容器整体不同时连父路径一起标，整组字段因此也能提示「这一组变了」。
+    expect(changed.has('model_messages.extra')).toBe(true);
+    expect(changed.has('model_messages')).toBe(true);
+  });
+
+  it('marks a field the inheritance dropped or added', () => {
+    const withTemplate = {
+      ...baseline,
+      model_messages: { instructions_template: 'local template', notes: 'local' },
+    };
+    const dropped = collectChangedPaths(withTemplate, {
+      ...withTemplate,
+      model_messages: { notes: 'local' },
+    });
+    // 叶子消失标在叶子自己的路径上；整棵子树消失时标在子树根上，不再列出下面的每一片叶子。
+    expect(dropped.has('model_messages.instructions_template')).toBe(true);
+    expect(dropped.has('model_messages')).toBe(true);
+
+    const added = collectChangedPaths(baseline, { ...baseline, visibility: 'hidden' });
+    expect(added.has('visibility')).toBe(true);
+  });
+
+  it('compares array items by index', () => {
+    const changed = collectChangedPaths(baseline, {
+      ...baseline,
+      supported_reasoning_levels: [{ effort: 'low' }, { effort: 'medium' }],
+    });
+
+    expect(changed.has('supported_reasoning_levels.1.effort')).toBe(true);
+    expect(changed.has('supported_reasoning_levels.0.effort')).toBe(false);
+    expect(changed.has('supported_reasoning_levels')).toBe(true);
+  });
+
+  it('reports nothing when there is no default entry to compare against', () => {
+    expect(collectChangedPaths(null, baseline)).toEqual(new Set());
+    expect(collectChangedPaths(undefined, baseline)).toEqual(new Set());
   });
 });

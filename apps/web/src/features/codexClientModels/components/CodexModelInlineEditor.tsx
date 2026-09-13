@@ -22,10 +22,12 @@ import { isPlainObject, removeOverrideKey, setOverrideValue } from '../model/cod
 import {
   applyInheritDirectives,
   clearInheritSource,
+  collectChangedPaths,
   collectInheritSources,
   countInheritUsage,
   createInheritSourceLookup,
   describeInheritIssue,
+  inheritPathKey,
   readInheritDirectives,
   restoreFieldDefault,
   setInheritSource,
@@ -121,12 +123,17 @@ export function CodexModelInlineEditor({
     () => (mode === 'create' ? findModelEntry(catalog, trimmedSlug) : null),
     [catalog, mode, trimmedSlug]
   );
-  // 生效参照值：基准条目就是服务端装配出的默认配置，再叠上继承指令，
-  // 于是字段旁预览的既是默认值，也是真正会生效的取值。
+  // 默认配置：服务端装配出的条目，也就是不写继承与覆写时客户端收到的取值。
+  const baseline = mode === 'create' ? createEntry : effectiveEntry;
+  // 生效参照值：默认配置再叠上继承指令，于是字段旁预览的既是默认值，也是真正会生效的取值。
   const effective = useMemo(
-    () =>
-      applyInheritDirectives(mode === 'create' ? createEntry : effectiveEntry, directives, lookup),
-    [createEntry, directives, effectiveEntry, lookup, mode]
+    () => applyInheritDirectives(baseline, directives, lookup),
+    [baseline, directives, lookup]
+  );
+  // 继承实际改掉的路径：字段旁的「与默认值不同」标记据此显示，让空转的继承看得出来。
+  const changedPaths = useMemo(
+    () => collectChangedPaths(baseline, effective),
+    [baseline, effective]
   );
 
   const sourceBinding: FieldInheritBinding = useMemo(
@@ -134,6 +141,7 @@ export function CodexModelInlineEditor({
       directives,
       sources,
       issueOf: (path) => issueByPath.get(path.join('.')),
+      changedOf: (path) => changedPaths.has(inheritPathKey(path)),
       // 恢复默认要在上级来源仍会覆盖时写上「不继承」，字段才不会掉回继承。
       setDefault: (path) => setTreePatch((previous) => restoreFieldDefault(previous, path)),
       inherit: (path, sourceSlug) =>
@@ -143,7 +151,7 @@ export function CodexModelInlineEditor({
       remove: (path) =>
         setTreePatch((previous) => setOverrideValue(previous, path, null, effective)),
     }),
-    [directives, effective, issueByPath, sources]
+    [changedPaths, directives, effective, issueByPath, sources]
   );
 
   const fieldOptions = useMemo(() => collectCatalogFieldOptions(catalog), [catalog]);

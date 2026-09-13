@@ -14,6 +14,7 @@ vi.mock('@/stores', () => ({
 }));
 
 import { CodexModelInlineEditor, type CodexModelInlineEditorProps } from './CodexModelInlineEditor';
+import { INHERIT_KEY } from '../model/codexClientModelsTree';
 
 const effectiveEntry = {
   slug: 'gpt-5.5',
@@ -112,6 +113,39 @@ describe('CodexModelInlineEditor', () => {
     expect(renderEditor({ supportsInherit: false })).not.toContain(
       'codex_client_models.inherit_root_label'
     );
+  });
+
+  it('flags the inherited fields whose value differs from the model default', () => {
+    const source = {
+      slug: 'gpt-5.6-sol',
+      display_name: 'GPT-5.6 Sol',
+      base_instructions: 'You are Sol.\n\nFollow the repo conventions.',
+    };
+    const markup = renderEditor({
+      catalog: [effectiveEntry, source],
+      patch: { [INHERIT_KEY]: 'gpt-5.6-sol' },
+    });
+
+    expect(markup).toContain('codex_client_models.field_state_inherited_changed');
+    expect(markup).toContain('You are Sol.');
+    // 不可继承的字段停在默认值上，不会被当成继承来的取值。
+    expect(markup).toContain('codex_client_models.field_state_default');
+  });
+
+  it('leaves an inheritance that changes nothing unmarked', () => {
+    const source = {
+      slug: 'gpt-5.6-sol',
+      display_name: 'GPT-5.6 Sol',
+      base_instructions: effectiveEntry.base_instructions,
+    };
+    const markup = renderEditor({
+      catalog: [effectiveEntry, source],
+      patch: { [INHERIT_KEY]: 'gpt-5.6-sol' },
+    });
+
+    // 继承本身照旧生效：字段仍然标着来源，只是取值和默认值一致，因此不标记改动。
+    expect(markup).toContain('codex_client_models.field_state_inherited{');
+    expect(markup).not.toContain('codex_client_models.field_state_inherited_changed');
   });
 
   it('starts a new entry from the slug alone when nothing is served under it', () => {

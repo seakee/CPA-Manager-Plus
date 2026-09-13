@@ -97,6 +97,7 @@ function sourceControlFor(
       state={view.state}
       source={view.source}
       declared={view.declared}
+      differsFromDefault={inherit.changedOf(path)}
       sources={inherit.sources}
       inheritable={canInheritPath(path)}
       issue={inherit.issueOf(path)}
@@ -611,6 +612,7 @@ function QuickLinkRow({ link, view, inherit, disabled, onSetValue }: QuickLinkRo
           source={view.source}
           declared={view.declared}
           mixed={view.mixed}
+          differsFromDefault={link.paths.some((path) => inherit.changedOf(path))}
           sources={inherit.sources}
           inheritable={link.paths.every((path) => canInheritPath(path))}
           disabled={disabled}
