@@ -62,6 +62,9 @@ describe('codexModelQuickFields', () => {
     expect(promptFields.map((field) => quickFieldKey(field.path))).toEqual([
       'base_instructions',
       'model_messages',
+      'include_skills_usage_instructions',
+      'include_plugin_usage_instructions',
+      'include_apps_usage_instructions',
     ]);
     expect(promptFields[1]).toMatchObject({ kind: 'group', defaultOpen: true });
     promptFields.forEach((field) =>

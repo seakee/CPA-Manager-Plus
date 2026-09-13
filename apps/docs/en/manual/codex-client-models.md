@@ -51,7 +51,7 @@ Common fields are grouped by purpose, with the most frequently used ones visible
 - Context and reasoning: context window, max context window, max output tokens, auto compact token limit, supported reasoning levels, default reasoning level, default reasoning summary, default verbosity, verbosity control.
 - Capabilities: available in API, parallel tool calls, reasoning summaries, search tool, prefer WebSockets, use Responses Lite.
 - Tools and modalities: input modalities, apply patch tool, shell type, search tool type, multi-agent version, multi-agent reasoning effort.
-- Prompts: base instructions and model messages.
+- Prompts: base instructions, model messages, and the switches for skill, app, and plugin usage instructions.
 
 The remaining fields live under Advanced: remaining fields below the expanded area and are collapsed by default. The raw entry JSON lives under JSON patch, also collapsed by default; it replaces the whole patch, so apply your edits back to the form or reset them, and saving stays blocked while the text is unapplied.
 

@@ -216,6 +216,10 @@ export const QUICK_FIELD_SECTIONS: ReadonlyArray<QuickSectionDescriptor> = [
         wide: true,
         defaultOpen: true,
       },
+      // 客户端据这三个开关决定是否把技能、插件与应用的使用说明写进提示词。
+      { path: ['include_skills_usage_instructions'], kind: 'boolean' },
+      { path: ['include_plugin_usage_instructions'], kind: 'boolean' },
+      { path: ['include_apps_usage_instructions'], kind: 'boolean' },
     ],
   },
 ];

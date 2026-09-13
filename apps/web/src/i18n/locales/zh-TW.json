@@ -4810,7 +4810,7 @@
         },
         "prompt": {
           "title": "提示詞",
-          "description": "下發給模型的基礎提示詞與模型訊息模板"
+          "description": "下發給模型的基礎提示詞、模型訊息模板，以及技能、外掛與應用的使用說明開關"
         }
       },
       "fields": {
@@ -4970,6 +4970,18 @@
           "tools": {
             "label": "工具提示"
           }
+        },
+        "include_skills_usage_instructions": {
+          "label": "技能使用說明",
+          "hint": "客戶端是否把技能的使用說明一併交給模型。"
+        },
+        "include_plugin_usage_instructions": {
+          "label": "外掛使用說明",
+          "hint": "客戶端是否把外掛的使用說明一併交給模型。"
+        },
+        "include_apps_usage_instructions": {
+          "label": "應用使用說明",
+          "hint": "客戶端是否把應用（Apps）的使用說明一併交給模型。"
         }
       }
     },

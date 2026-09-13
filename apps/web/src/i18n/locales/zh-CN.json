@@ -4810,7 +4810,7 @@
         },
         "prompt": {
           "title": "提示词",
-          "description": "下发给模型的基础提示词与模型消息模板"
+          "description": "下发给模型的基础提示词、模型消息模板，以及技能、应用与插件的使用说明开关"
         }
       },
       "fields": {
@@ -4970,6 +4970,18 @@
           "tools": {
             "label": "工具提示"
           }
+        },
+        "include_skills_usage_instructions": {
+          "label": "技能使用说明",
+          "hint": "客户端是否把技能的使用说明一并交给模型。"
+        },
+        "include_plugin_usage_instructions": {
+          "label": "插件使用说明",
+          "hint": "客户端是否把插件的使用说明一并交给模型。"
+        },
+        "include_apps_usage_instructions": {
+          "label": "应用使用说明",
+          "hint": "客户端是否把应用（Apps）的使用说明一并交给模型。"
         }
       }
     },

@@ -4812,7 +4812,7 @@
         },
         "prompt": {
           "title": "Prompts",
-          "description": "Base instructions and message templates sent to the model"
+          "description": "Base instructions, message templates, and the switches for skill, app, and plugin usage instructions"
         }
       },
       "fields": {
@@ -4972,6 +4972,18 @@
           "tools": {
             "label": "Tool prompts"
           }
+        },
+        "include_skills_usage_instructions": {
+          "label": "Skill usage instructions",
+          "hint": "Whether the client hands the model the instructions for using skills."
+        },
+        "include_plugin_usage_instructions": {
+          "label": "Plugin usage instructions",
+          "hint": "Whether the client hands the model the instructions for using plugins."
+        },
+        "include_apps_usage_instructions": {
+          "label": "App usage instructions",
+          "hint": "Whether the client hands the model the instructions for using apps."
         }
       }
     },
