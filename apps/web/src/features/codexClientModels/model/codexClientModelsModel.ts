@@ -22,7 +22,7 @@ export interface CodexClientModelRow {
   contextWindow: number | null;
   visibility: string;
   reasoningLevel: string;
-  /** 生效条目；被 null 补丁删除或缺少条目时为空。 */
+  /** 服务端装配出的默认条目，也是编辑器的默认值基线；目录里没有该 slug 时为 null。 */
   entry: CodexClientModelEntry | null;
   /** 覆写文档中的原始补丁值，未覆写时为 undefined。 */
   patch: unknown;
@@ -64,15 +64,18 @@ const buildRow = (
   // 缺少标记时按目录条目与否兜底，旧接口下页面仍然可用。
   const origin: CodexClientModelRowState = state.origins[slug] ?? (entry ? 'base' : 'unserved');
 
+  // 列表上的值是客户端实际拿到的值。服务端摘要是装配结果叠好覆写层之后的条目，因此摘要
+  // 优先于默认条目：编辑器拿默认条目当基线，列表则要跟着覆写变。没有下发的模型没有摘要，
+  // 退回默认条目。
+  const displayName = served ? served.displayName : readString(entry?.display_name);
+
   return {
     slug,
-    displayName: readString(entry?.display_name) || served?.displayName || slug,
+    displayName: displayName || slug,
     origin,
-    contextWindow: entry ? readNumber(entry?.context_window) : (served?.contextWindow ?? null),
-    visibility: entry ? readString(entry?.visibility) : (served?.visibility ?? ''),
-    reasoningLevel: entry
-      ? readString(entry?.default_reasoning_level)
-      : (served?.reasoningLevel ?? ''),
+    contextWindow: served ? served.contextWindow : readNumber(entry?.context_window),
+    visibility: served ? served.visibility : readString(entry?.visibility),
+    reasoningLevel: served ? served.reasoningLevel : readString(entry?.default_reasoning_level),
     entry,
     patch,
     hasOverride,

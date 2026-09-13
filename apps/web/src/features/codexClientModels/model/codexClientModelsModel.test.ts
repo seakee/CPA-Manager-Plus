@@ -183,15 +183,30 @@ describe('served models', () => {
     expect(rows[0].served?.providers).toEqual(['openai-compatibility']);
   });
 
-  it('prefers the catalog entry for served models that have one', () => {
+  it('reads a served model from the summary rather than from its default entry', () => {
     const rows = buildCodexClientModelRows(buildServedState());
     expect(rows[1].origin).toBe('override');
     expect(rows[1].entry).toMatchObject({ slug: 'deepseek-chat' });
-    // 条目里没有这个字段，页面就照实显示为空，而不是拿摘要里的值补上。
-    expect(rows[1].contextWindow).toBeNull();
-    expect(rows[1].served?.displayName).toBe('DeepSeek Chat');
+    // 默认条目里没有这个字段，客户端拿到的摘要里有，列表就显示摘要里的值。
+    expect(rows[1].contextWindow).toBe(128000);
+    expect(rows[1].reasoningLevel).toBe('high');
+    expect(rows[1].displayName).toBe('DeepSeek Chat');
     expect(rows[2].origin).toBe('base');
     expect(rows[2].served).toBeNull();
+  });
+
+  it('follows an override of a field the default entry also carries', () => {
+    const rows = buildCodexClientModelRows(
+      buildServedState({
+        override: { 'deepseek-flash': { context_window: 400000 } },
+        origins: { 'deepseek-flash': 'override', 'deepseek-chat': 'override', 'gpt-5.5': 'base' },
+        servedModels: [servedModel({ contextWindow: 400000 })],
+      })
+    );
+    const flash = rows.find((row) => row.slug === 'deepseek-flash');
+    // 默认条目里是 272000，覆写成 400000 之后客户端拿到的就是 400000。
+    expect(flash?.entry).toMatchObject({ context_window: 272000 });
+    expect(flash?.contextWindow).toBe(400000);
   });
 
   it('keeps counting a served model as removed while its null patch stands', () => {
