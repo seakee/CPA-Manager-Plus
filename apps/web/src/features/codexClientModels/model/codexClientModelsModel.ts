@@ -10,13 +10,10 @@ import type {
 } from '@/services/api/codexClientModels';
 
 /**
- * 页面行状态就是服务端给出的来源标记：base/override 有目录条目，served 用的是默认模板，
- * removed 被 null 补丁隐藏，unserved 是当前没有下发、因而不会生效的覆写。
+ * 页面行状态就是服务端给出的来源标记：base 与 served 都没有本地覆写，override 已经改过条目内
+ * 字段，removed 被 null 补丁隐藏，unserved 是当前没有下发、因而不会生效的覆写。
  */
 export type CodexClientModelRowState = CodexClientModelOrigin;
-
-/** 新增条目时默认看向的官方模板 slug。 */
-export const DEFAULT_MODEL_TEMPLATE_SLUG = 'gpt-5.5';
 
 export interface CodexClientModelRow {
   slug: string;
@@ -63,7 +60,7 @@ const buildRow = (
 ): CodexClientModelRow => {
   const hasOverride = Object.prototype.hasOwnProperty.call(state.override, slug);
   const patch = hasOverride ? state.override[slug] : undefined;
-  // 来源由服务端给出：基础、已覆写、默认模板、已隐藏，以及没有下发因而不生效的覆写。
+  // 来源由服务端给出：基础、自动装配、已覆写、已隐藏，以及没有下发因而不生效的覆写。
   // 缺少标记时按目录条目与否兜底，旧接口下页面仍然可用。
   const origin: CodexClientModelRowState = state.origins[slug] ?? (entry ? 'base' : 'unserved');
 
@@ -193,103 +190,12 @@ export function findModelEntry(
   const entry = models.find((candidate) => readModelSlug(candidate) === slug.trim());
   return entry ?? null;
 }
-
 /**
- * 新增条目的默认继承源条目：优先官方模板，其次是目录里的第一条。
- * 目录为空时返回 null，此时新条目只能完全本地填写。
- */
-export function resolveDefaultInheritEntry(
-  models: ReadonlyArray<CodexClientModelEntry>
-): CodexClientModelEntry | null {
-  const entries = models.filter((entry) => readModelSlug(entry).length > 0);
-  return (
-    entries.find((entry) => readModelSlug(entry) === DEFAULT_MODEL_TEMPLATE_SLUG) ??
-    entries[0] ??
-    null
-  );
-}
-
-/** 新增条目的默认继承源 slug；目录为空时返回空串。 */
-export const resolveDefaultInheritSource = (models: ReadonlyArray<CodexClientModelEntry>): string =>
-  readModelSlug(resolveDefaultInheritEntry(models));
-
-/**
- * 已下发模型建立专属条目时的继承源：先找它当前使用的模板条目，
- * 模板不在目录里（例如来源被删除）时退回默认模板。
- */
-export function resolveServedInheritEntry(
-  models: ReadonlyArray<CodexClientModelEntry>,
-  templateSlug: string
-): CodexClientModelEntry | null {
-  return findModelEntry(models, templateSlug) ?? resolveDefaultInheritEntry(models);
-}
-
-/**
- * 新增条目的补丁：整条继承自来源模型，只把身份字段留给自己填。
- * 比整份复制模板短得多，来源模型更新时新条目也跟着更新。
+ * 本地条目的起步补丁：只声明自己的 slug。
  *
- * 身份字段不会从继承源取值，而目录校验要求 description 非空，
- * 因此这里从来源条目抄一份初值，用户再改成自己想要的说法。
- * 其余字段不写进补丁：客户端的默认取值由服务端决定，界面按下发结果展示。
+ * 字段取值的基准是服务端装配出的默认条目，覆写层叠在它之上，因此新条目不需要先抄一份
+ * 上游配置：改到哪个字段，哪个字段才成为覆写。
  */
-export function buildInheritedModelPatch(
-  source: CodexClientModelEntry | null,
-  slug: string,
-  seed: InheritedModelSeed = {}
-): Record<string, unknown> {
-  const normalizedSlug = slug.trim();
-  const patch: Record<string, unknown> = {
-    slug: normalizedSlug,
-    display_name: readString(seed.displayName).trim() || normalizedSlug,
-  };
-  const description = readString(seed.description).trim() || readString(source?.description).trim();
-  if (description) patch.description = description;
-  const sourceSlug = readModelSlug(source);
-  return sourceSlug ? { $inherit: sourceSlug, ...patch } : patch;
-}
-
-/**
- * 采纳已下发模型时要写进条目的身份字段。继承源给不出它们（后端只从本地条目取身份
- * 字段），所以从已下发摘要带过来，缺省时沿用 slug 与继承源的说明。
- */
-export interface InheritedModelSeed {
-  displayName?: string;
-  description?: string;
-}
-
-/**
- * 采纳已下发模型的补丁：整条继承它当前使用的模板，身份字段取客户端已经看到的
- * 展示名与说明。于是采纳只把条目变成可单独编辑，不会改变 Codex 里的显示与顺序。
- *
- * 其余字段不写进补丁。它们在客户端的取值由服务端决定，编辑器改为把下发结果当作
- * 默认值显示，因此这些取值不会被标成本地覆写。
- */
-export function buildAdoptedModelPatch(
-  source: CodexClientModelEntry | null,
-  served: CodexClientServedModel
-): Record<string, unknown> {
-  return buildInheritedModelPatch(source, served.slug, {
-    displayName: served.displayName,
-    description: served.description.trim(),
-  });
-}
-
-/**
- * 以模板条目整份补全新条目，仅替换 slug 与展示名。
- * 只在服务端不支持字段继承时使用：老版本会把整份副本当成普通补丁。
- */
-export function buildModelPatchFromTemplate(
-  template: CodexClientModelEntry | null,
-  slug: string
-): Record<string, unknown> {
-  const normalizedSlug = slug.trim();
-  if (!template) {
-    return { slug: normalizedSlug };
-  }
-
-  return {
-    ...template,
-    slug: normalizedSlug,
-    display_name: normalizedSlug,
-  };
+export function buildModelIdentityPatch(slug: string): Record<string, unknown> {
+  return { slug: slug.trim() };
 }

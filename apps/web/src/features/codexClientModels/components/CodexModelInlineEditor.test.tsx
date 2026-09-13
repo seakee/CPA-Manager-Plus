@@ -13,7 +13,6 @@ vi.mock('@/stores', () => ({
     selector({ resolvedTheme: 'light' }),
 }));
 
-import type { CodexClientServedModel } from '@/services/api/codexClientModels';
 import { CodexModelInlineEditor, type CodexModelInlineEditorProps } from './CodexModelInlineEditor';
 
 const effectiveEntry = {
@@ -24,23 +23,10 @@ const effectiveEntry = {
   base_instructions: 'You are Codex.\n\nFollow the repo conventions.',
 };
 
-const catalog = [effectiveEntry, { slug: 'gpt-5.6-sol', display_name: 'GPT-5.6 Sol' }];
-
-const servedModel = (overrides: Partial<CodexClientServedModel> = {}): CodexClientServedModel => ({
-  slug: 'deepseek-flash',
-  templateSlug: 'gpt-5.6-sol',
-  defaultTemplate: true,
-  providers: ['openai-compatibility'],
-  displayName: 'deepseek-flash',
-  description: 'deepseek-flash',
-  contextWindow: 272000,
-  maxContextWindow: 272000,
-  visibility: 'list',
-  reasoningLevel: 'medium',
-  reasoningLevels: [],
-  priority: 143,
-  ...overrides,
-});
+const catalog = [
+  effectiveEntry,
+  { slug: 'gpt-5.6-sol', display_name: 'GPT-5.6 Sol', context_window: 400000 },
+];
 
 const renderEditor = (overrides: Partial<CodexModelInlineEditorProps> = {}) =>
   renderToStaticMarkup(
@@ -111,14 +97,14 @@ describe('CodexModelInlineEditor', () => {
     expect(markup).toContain('codex_client_models.field_state_override');
   });
 
-  it('remembers that an entry removed by a null override has to be rebuilt', () => {
+  it('says so when there is no default entry to compare a model against', () => {
     const markup = renderEditor({
       slug: 'gpt-5.6-sol',
       effectiveEntry: null,
       patch: null,
     });
 
-    expect(markup).toContain('codex_client_models.editor_removed_notice');
+    expect(markup).toContain('codex_client_models.editor_no_default_notice');
   });
 
   it('offers a whole-entry inherit source only when the server supports inheritance', () => {
@@ -128,7 +114,7 @@ describe('CodexModelInlineEditor', () => {
     );
   });
 
-  it('seeds a new entry from the official template and shows its values as defaults', () => {
+  it('starts a new entry from the slug alone when nothing is served under it', () => {
     const markup = renderEditor({
       mode: 'create',
       slug: 'qwen3-max',
@@ -137,37 +123,42 @@ describe('CodexModelInlineEditor', () => {
     });
 
     expect(markup).toContain('codex_client_models.editor_title_create');
-    // 新条目从官方模板起步，因此面板展示的是模板的取值而不是空表单。
-    expect(markup).toContain('272000');
-    // 模板只是新条目的起点，不是用户挑的来源：下拉框显示「不继承」，字段显示默认值。
+    // 还没有服务端装配这个 slug，因此没有可展示的默认值。
+    expect(markup).toContain('codex_client_models.editor_no_default_notice');
     expect(markup).toContain('codex_client_models.inherit_root_none');
-    expect(markup).not.toContain('codex_client_models.field_state_inherited');
   });
 
-  it('locks the slug and names the template when adopting a served model', () => {
+  it('shows the assembled values when a new entry names a served model', () => {
+    const markup = renderEditor({
+      mode: 'create',
+      slug: 'gpt-5.6-sol',
+      effectiveEntry: null,
+      patch: null,
+    });
+
+    expect(markup).toContain('value="400000"');
+    expect(markup).not.toContain('codex_client_models.editor_no_default_notice');
+  });
+
+  it('locks the slug when adopting a served model and starts from its own entry', () => {
     const markup = renderEditor({
       mode: 'adopt',
       slug: 'deepseek-flash',
-      effectiveEntry: null,
+      effectiveEntry: { ...effectiveEntry, slug: 'deepseek-flash', display_name: 'deepseek-flash' },
       patch: undefined,
-      served: servedModel(),
     });
 
     expect(markup).toContain(
       'codex_client_models.editor_title_adopt{&quot;slug&quot;:&quot;deepseek-flash&quot;}'
     );
-    expect(markup).toContain(
-      'codex_client_models.adopt_notice{&quot;source&quot;:&quot;gpt-5.6-sol&quot;}'
-    );
+    expect(markup).toContain('codex_client_models.adopt_notice');
     expect(markup).toContain('codex_client_models.adopt_slug_hint');
     expect(markup).not.toContain('codex_client_models.editor_title_create');
     // 还没有条目，因此没有可删除的覆写。
     expect(markup).not.toContain('codex_client_models.delete_override');
-    // 身份与客户端已看到的取值固定在自己这边，其余字段仍标记为继承模板。
+    // 起步补丁只有 slug，取值基准是服务端装配出的默认条目，字段因此都显示为默认值。
     expect(markup).toContain('value="deepseek-flash"');
-    expect(markup).toContain(
-      'codex_client_models.field_state_inherited{&quot;slug&quot;:&quot;gpt-5.6-sol&quot;}'
-    );
+    expect(markup).not.toContain('codex_client_models.field_state_inherited');
   });
 
   it('keeps a field only the model supplies out of a whole-entry inherit', () => {
@@ -177,7 +168,6 @@ describe('CodexModelInlineEditor', () => {
         { ...effectiveEntry, context_window: 272000 },
         { slug: 'gpt-5.6-sol', display_name: 'GPT-5.6 Sol', context_window: 400000 },
       ],
-      served: servedModel({ slug: 'gpt-5.5', templateSlug: 'gpt-5.5' }),
     });
 
     // 上下文窗口属于只由模型自身提供的字段，整条继承不会把它换成来源的取值。

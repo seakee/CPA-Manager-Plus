@@ -109,7 +109,7 @@ function sourceControlFor(
 }
 
 export interface CodexModelQuickFieldsProps {
-  /** 生效条目，作为「继承」状态的参照值；新增条目时传默认模板。 */
+  /** 生效条目，作为「继承」状态的参照值；没有可服务条目时为空。 */
   effective: unknown;
   /** 当前覆写补丁；null 表示整个条目被删除。 */
   patch: Record<string, unknown> | null;

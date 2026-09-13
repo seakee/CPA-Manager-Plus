@@ -4,18 +4,13 @@ import type {
   CodexClientServedModel,
 } from '@/services/api/codexClientModels';
 import {
-  buildAdoptedModelPatch,
   buildCodexClientModelRows,
-  buildInheritedModelPatch,
-  buildModelPatchFromTemplate,
+  buildModelIdentityPatch,
   countCodexClientModelRows,
   filterCodexClientModelRows,
   findModelEntry,
   formatOverridePatch,
   parseOverridePatchInput,
-  resolveDefaultInheritEntry,
-  resolveDefaultInheritSource,
-  resolveServedInheritEntry,
 } from './codexClientModelsModel';
 
 const buildState = (overrides: Partial<CodexClientModelsState> = {}): CodexClientModelsState => ({
@@ -42,8 +37,6 @@ const buildState = (overrides: Partial<CodexClientModelsState> = {}): CodexClien
 
 const servedModel = (overrides: Partial<CodexClientServedModel> = {}): CodexClientServedModel => ({
   slug: 'deepseek-flash',
-  templateSlug: 'gpt-5.5',
-  defaultTemplate: true,
   providers: ['openai-compatibility'],
   displayName: 'deepseek-flash',
   description: 'deepseek-flash',
@@ -155,7 +148,7 @@ describe('filterCodexClientModelRows and counts', () => {
 });
 
 describe('served models', () => {
-  // 服务端为每个可服务模型都给出默认条目：deepseek-flash 由默认模板装配，deepseek-chat 有
+  // 服务端为每个可服务模型都给出默认条目：deepseek-flash 由默认模板自动装配，deepseek-chat 有
   // 专属模板，两者都在 models 里，只是来源不同。
   const buildServedState = (overrides: Partial<CodexClientModelsState> = {}) =>
     buildState({
@@ -172,8 +165,6 @@ describe('served models', () => {
         servedModel(),
         servedModel({
           slug: 'deepseek-chat',
-          templateSlug: 'deepseek-chat',
-          defaultTemplate: false,
           displayName: 'DeepSeek Chat',
           contextWindow: 128000,
           reasoningLevel: 'high',
@@ -189,7 +180,7 @@ describe('served models', () => {
     expect(rows[0].entry).toMatchObject({ slug: 'deepseek-flash' });
     expect(rows[0].displayName).toBe('deepseek-flash');
     expect(rows[0].contextWindow).toBe(272000);
-    expect(rows[0].served?.templateSlug).toBe('gpt-5.5');
+    expect(rows[0].served?.providers).toEqual(['openai-compatibility']);
   });
 
   it('prefers the catalog entry for served models that have one', () => {
@@ -198,7 +189,7 @@ describe('served models', () => {
     expect(rows[1].entry).toMatchObject({ slug: 'deepseek-chat' });
     // 条目里没有这个字段，页面就照实显示为空，而不是拿摘要里的值补上。
     expect(rows[1].contextWindow).toBeNull();
-    expect(rows[1].served?.defaultTemplate).toBe(false);
+    expect(rows[1].served?.displayName).toBe('DeepSeek Chat');
     expect(rows[2].origin).toBe('base');
     expect(rows[2].served).toBeNull();
   });
@@ -234,32 +225,10 @@ describe('served models', () => {
     expect(rows.every((row) => row.served === null)).toBe(true);
   });
 
-  it('adopts a served model by inheriting its template and keeping the identity clients see', () => {
-    const patch = buildAdoptedModelPatch(buildState().models[0], servedModel());
-    expect(patch).toEqual({
-      $inherit: 'gpt-5.5',
-      slug: 'deepseek-flash',
-      display_name: 'deepseek-flash',
-      description: 'deepseek-flash',
-    });
-  });
-
-  it('keeps the served values out of the patch so the editor can show them as defaults', () => {
-    const patch = buildAdoptedModelPatch(
-      buildState().models[0],
-      servedModel({ contextWindow: 131072, maxContextWindow: 131072, priority: 143 })
-    );
-    expect(Object.keys(patch).sort()).toEqual(['$inherit', 'description', 'display_name', 'slug']);
-  });
-
-  it('resolves the inherit source of a served model through its template', () => {
-    const models = buildState().models;
-    expect(resolveServedInheritEntry(models, 'gpt-5.5')).toBe(models[0]);
-    expect(resolveServedInheritEntry(models, 'ghost-model')).toBe(models[0]);
-    expect(resolveServedInheritEntry([{ slug: 'other-model' }], 'ghost-model')).toMatchObject({
-      slug: 'other-model',
-    });
-    expect(resolveServedInheritEntry([], 'ghost-model')).toBeNull();
+  it('adopts a served model with a patch that only names the slug', () => {
+    // 取值基准是服务端装配出的默认条目，因此起步补丁只声明本地条目的身份，
+    // 客户端现在收到的取值不会变成逐字段的覆写。
+    expect(buildModelIdentityPatch(' deepseek-flash ')).toEqual({ slug: 'deepseek-flash' });
   });
 });
 
@@ -283,50 +252,10 @@ describe('parseOverridePatchInput', () => {
 describe('new model patches', () => {
   const models = buildState().models;
 
-  it('prefers the official template as the default inherit source', () => {
-    expect(resolveDefaultInheritEntry(models)).toBe(models[0]);
-    expect(resolveDefaultInheritSource(models)).toBe('gpt-5.5');
-  });
-
-  it('falls back to the first catalog entry and then to nothing', () => {
-    expect(resolveDefaultInheritSource([{ slug: 'other-model' }])).toBe('other-model');
-    expect(resolveDefaultInheritEntry([])).toBeNull();
-    expect(resolveDefaultInheritSource([])).toBe('');
-  });
-
-  it('inherits a whole entry and keeps only the identity fields local', () => {
-    expect(buildInheritedModelPatch(models[0], ' qwen3-max ')).toEqual({
-      $inherit: 'gpt-5.5',
-      slug: 'qwen3-max',
-      display_name: 'qwen3-max',
-    });
-  });
-
-  it('seeds the description the catalog requires from the source entry', () => {
-    expect(
-      buildInheritedModelPatch({ slug: 'base-model', description: ' 官方描述 ' }, 'qwen3-max')
-    ).toEqual({
-      $inherit: 'base-model',
-      slug: 'qwen3-max',
-      display_name: 'qwen3-max',
-      description: '官方描述',
-    });
-  });
-
-  it('omits the directive when there is no source to inherit from', () => {
-    expect(buildInheritedModelPatch(null, 'qwen3-max')).toEqual({
-      slug: 'qwen3-max',
-      display_name: 'qwen3-max',
-    });
-  });
-
-  it('copies the template verbatim when inheritance is unavailable', () => {
-    expect(buildModelPatchFromTemplate(models[0], 'qwen3-max')).toEqual({
-      ...models[0],
-      slug: 'qwen3-max',
-      display_name: 'qwen3-max',
-    });
-    expect(buildModelPatchFromTemplate(null, 'qwen3-max')).toEqual({ slug: 'qwen3-max' });
+  it('starts a new entry from its slug alone', () => {
+    expect(buildModelIdentityPatch('qwen3-max')).toEqual({ slug: 'qwen3-max' });
+    expect(buildModelIdentityPatch(' qwen3-max ')).toEqual({ slug: 'qwen3-max' });
+    expect(buildModelIdentityPatch('')).toEqual({ slug: '' });
   });
 
   it('finds a catalog entry by trimmed slug', () => {
