@@ -53,8 +53,6 @@ describe('normalizeCodexClientModelsState', () => {
       served_models: [
         {
           slug: ' deepseek-flash ',
-          template_slug: 'gpt-5.5',
-          default_template: true,
           providers: ['openai-compatibility', 7],
           display_name: 'deepseek-flash',
           description: 'DeepSeek Flash',
@@ -70,7 +68,7 @@ describe('normalizeCodexClientModelsState', () => {
           ],
           priority: 143,
         },
-        { slug: '', template_slug: 'gpt-5.5' },
+        { slug: '' },
         {
           slug: 'gpt-image-2',
           context_window: 'nope',
@@ -84,8 +82,6 @@ describe('normalizeCodexClientModelsState', () => {
     expect(state.servedModels).toEqual([
       {
         slug: 'deepseek-flash',
-        templateSlug: 'gpt-5.5',
-        defaultTemplate: true,
         providers: ['openai-compatibility'],
         displayName: 'deepseek-flash',
         description: 'DeepSeek Flash',
@@ -101,8 +97,6 @@ describe('normalizeCodexClientModelsState', () => {
       },
       {
         slug: 'gpt-image-2',
-        templateSlug: '',
-        defaultTemplate: false,
         providers: [],
         displayName: '',
         description: '',

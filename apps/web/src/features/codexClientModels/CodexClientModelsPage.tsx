@@ -87,7 +87,10 @@ export function CodexClientModelsPage() {
     [rows, filter, search]
   );
   const catalog = useMemo(() => state?.models ?? [], [state]);
-  const catalogSlugs = useMemo(() => new Set(catalog.map((entry) => readModelSlug(entry))), [catalog]);
+  const catalogSlugs = useMemo(
+    () => new Set(catalog.map((entry) => readModelSlug(entry))),
+    [catalog]
+  );
   const overrideDocument = useMemo(() => state?.override ?? {}, [state]);
   const hasOverride = Object.keys(state?.override ?? {}).length > 0;
   // 服务端没有返回下发列表时（旧版本 CPA）不展示下发状态，避免把未知当成未下发。
@@ -395,13 +398,6 @@ export function CodexClientModelsPage() {
                               <span className={styles.servedBadge}>
                                 {t('codex_client_models.served_yes')}
                               </span>
-                              {row.served.defaultTemplate ? (
-                                <small className={styles.servedTemplate}>
-                                  {t('codex_client_models.served_default_template', {
-                                    slug: row.served.templateSlug,
-                                  })}
-                                </small>
-                              ) : null}
                             </div>
                           ) : (
                             <span className={styles.servedMuted}>
@@ -437,8 +433,7 @@ export function CodexClientModelsPage() {
                           <td colSpan={TABLE_COLUMN_COUNT}>
                             <CodexModelInlineEditor
                               key={`edit:${row.slug}`}
-                              mode={row.origin === 'served' ? 'adopt' : 'edit'}
-                              served={row.served}
+                              mode={row.hasOverride ? 'edit' : 'adopt'}
                               slug={row.slug}
                               effectiveEntry={row.entry}
                               patch={row.patch}

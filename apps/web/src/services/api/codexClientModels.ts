@@ -1,11 +1,11 @@
 /**
  * Codex 客户端模型目录 API（/codex-client-models）
  *
- * 目录由 base（内置或远端）与本地覆写层组成。覆写层是 JSON Merge Patch（RFC 7386），
- * 顶层键为模型 slug，值为该 slug 的字段补丁。
+ * 目录由服务端为每个可服务模型装配出的默认条目与本地覆写层组成。覆写层是 JSON Merge Patch
+ * （RFC 7386），顶层键为模型 slug，值为该 slug 的字段补丁。
  *
- * models 是服务端为每个可服务模型装配出的默认条目：不写覆写时客户端收到的就是它们。
- * 覆写层叠在装配结果之上，因此任何字段都能覆写，界面上「默认值」指的就是这里的取值。
+ * models 是那些默认条目：不写覆写时客户端收到的就是它们。覆写层叠在装配结果之上，
+ * 因此任何字段都能覆写，界面上「默认值」指的就是这里的取值。
  */
 
 import { apiClient } from './client';
@@ -18,15 +18,11 @@ export type CodexClientModelEntry = Record<string, unknown>;
  * 服务端下发给 Codex 客户端的单个模型摘要。
  *
  * served_models 描述客户端真正能请求到的模型：装配结果再叠上覆写层之后的样子，
- * 附带来源、模板与优先级等列表信息。
+ * 附带服务端来源与优先级等列表信息。
  */
 export interface CodexClientServedModel {
   /** 客户端请求该模型时使用的标识。 */
   slug: string;
-  /** 该模型当前生效条目所基于的目录条目；没有专属条目时是默认模板。 */
-  templateSlug: string;
-  /** 该模型没有专属目录条目，正在复用默认模板。 */
-  defaultTemplate: boolean;
   /** 当前提供该模型的服务端标识。 */
   providers: string[];
   displayName: string;
@@ -61,9 +57,9 @@ export interface CodexClientModelsState {
   source: string;
   /** 生效目录内容变化时递增的修订号。 */
   revision: number;
-  /** 下发到 Codex 客户端的生效条目。 */
+  /** 服务端为每个可服务模型装配出的默认条目，不含本地覆写。 */
   models: CodexClientModelEntry[];
-  /** 生效 slug 的来源标记。 */
+  /** 每个 slug 的来源标记。 */
   origins: Record<string, CodexClientModelOrigin>;
   /** 本地覆写文档，键为 slug。 */
   override: Record<string, unknown>;
@@ -150,8 +146,6 @@ const normalizeServedModels = (value: unknown): CodexClientServedModel[] | null 
     .filter(isRecord)
     .map((entry) => ({
       slug: readString(entry.slug).trim(),
-      templateSlug: readString(entry.template_slug).trim(),
-      defaultTemplate: entry.default_template === true,
       providers: Array.isArray(entry.providers)
         ? entry.providers.filter((provider): provider is string => typeof provider === 'string')
         : [],
