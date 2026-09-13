@@ -18,29 +18,29 @@ The page entry point requires the matching capability flag from the current CPA 
 3. Edit what you need in the common fields.
 4. Choose Save override. The change is written to the local override and takes effect for Codex clients.
 
-The list shows each model's origin, served state, context window, default reasoning level, and visibility. There are five origins: Base comes straight from the upstream catalog, Overridden means local edits were applied to fields inside the entry, Custom means the whole entry was added locally, Removed means the entry was written to null locally, and Default Template means the model is already served to clients while the catalog still has no entry for it. Expanding a removed entry and editing any field rebuilds it.
+The list shows each model's origin, served state, context window, default reasoning level, and visibility. There are five origins: Base means the catalog has an entry for this model, Auto-assembled means it does not and the server built the entry from the default template, Overridden means local edits were applied to fields inside the entry, Removed means the entry was written to null locally, and Unserved means no provider currently serves the model the override names. The origin only tells where the entry comes from; the baseline for every field value is always the entry the server assembled.
 
 The top of the page also shows the current catalog source, the revision, and the override file path.
 
-## Served Models Without Their Own Entry
+## Creating A Dedicated Entry
 
-The catalog only defines its own entries. What clients actually see is built by matching every available model against the catalog, and a model without a match reuses the default template (`gpt-5.5`) as a whole. Those models used to show up only in the client's own list; they now appear here with the Default Template origin.
+What the server hands out is built by assembling an entry for every model it can currently serve: the catalog entry when there is one, and otherwise the default template plus model metadata. Those assembled entries are the default configuration, and both the catalog shown at the top of the page and the default value of every field come from them.
 
-Expanding one shows Add an entry for `<slug>`, which starts from that template:
+Expanding an entry that has no local override yet shows Create a dedicated entry for `<slug>`:
 
 - The slug is the identifier clients request the model by, so it cannot be changed.
-- Saving adds a catalog entry for it.
-- The new entry takes its display name and description from what clients see today, inherits its remaining fields from the template it currently uses, and can then be overridden field by field.
+- Saving adds a local override entry that declares nothing but its slug.
+- Every field starts from the configuration clients receive today, and only what you change becomes an override.
 - Every value clients receive right now shows up as a default, so none of them has to be overridden just to keep the current behaviour.
 
-A model keeps working without its own entry: it is still served through the default template.
+A model keeps working without its own entry: it is still served as assembled.
 
 ## List And Filters
 
 - The search box filters by slug or display name.
-- The filter buttons group entries by origin and switch between All, Default Template, Overridden, Custom, Removed, and Base.
+- The filter buttons group entries by origin and switch between All, Auto-assembled, Overridden, Unserved, Removed, and Base.
 - The Served column marks whether the model currently shows up in the list clients see; hovering it names the providers serving the model. A model reading Not Served usually means the entry was written to null locally, or the credentials supplying it are temporarily unavailable.
-- The top right can refresh the catalog, add an entry, or clear every override.
+- The top right can refresh the catalog, add an entry, or clear every override. Add entry writes an override for a slug: when the server can serve that model, its fields come with the assembled defaults; when nothing serves it yet, there are no defaults to compare against and every value you set is stored as a local override.
 - Entries that carry an override show a remove button on the right that affects only that entry.
 
 ## Common Fields
@@ -96,10 +96,14 @@ The catalog the page lists is the default entry the server assembles for every m
     },
     "slug": "my-sol-lite",
     "display_name": "My Sol Lite"
+  },
+  "gpt-5.6-terra": {
+    "slug": "gpt-5.6-terra"
   }
 }
 ```
 
+- An entry may declare nothing but its `slug`: the local entry exists and every value still matches the assembled result. This is what the editor writes for a new entry.
 - A string `$inherit` makes the whole entry inherit from that model.
 - An object `$inherit` is a dotted-path to source-slug map, where the empty string is equivalent to inheriting the whole entry.
 - A path set to `null` does not inherit: the value comes from the entry itself and an ancestor directive no longer covers it. This is what the editor's restore-to-default action writes.
@@ -116,7 +120,7 @@ An override that cannot be applied does not remove the model: the page reports i
 
 The top of the page lists overrides that could not be applied, with the slug, the offending field path, and the reason.
 
-- When a single entry fails, the remaining entries still apply, and the failing entry falls back to its upstream catalog content or drops out of the catalog.
+- When a single entry fails, the remaining entries still apply, and the failing entry falls back to the entry the server assembled.
 - When the override file cannot be parsed at all, the page explains why and keeps using the upstream catalog.
 - Saving from the page takes effect immediately; the service watches the override file, so editing it directly is picked up automatically.
 
