@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   INHERIT_KEY,
+  NON_INHERITABLE_FIELDS,
   applyInheritDirectives,
   canInheritPath,
   clearFieldOverride,
@@ -16,6 +17,7 @@ import {
   setInheritSource,
   validateInheritDirectives,
 } from './codexClientModelsInherit';
+import { resolveInheritSource } from './codexClientModelsTree';
 
 const catalog = [
   {
@@ -125,19 +127,41 @@ describe('applyInheritDirectives', () => {
     expect(applyInheritDirectives(catalog[0], new Map(), lookup)).toBe(catalog[0]);
   });
 
-  it('keeps the fields only the model supplies out of a whole-entry inherit', () => {
+  it('keeps the fields the model itself supplies out of a whole-entry inherit', () => {
     const result = applyInheritDirectives(
-      { slug: 'my-sol', display_name: 'My Sol', description: 'local', context_window: 1 },
+      {
+        slug: 'my-sol',
+        display_name: 'My Sol',
+        description: 'local',
+        context_window: 1,
+        max_context_window: 2,
+        max_tokens: 3,
+        auto_compact_token_limit: 4,
+        supported_reasoning_levels: [{ effort: 'low', description: 'Quick' }],
+        default_reasoning_level: 'low',
+        default_reasoning_summary: 'brief',
+        default_verbosity: 'low',
+        support_verbosity: true,
+      },
       new Map([['', 'gpt-5.6-sol']]),
       lookup
     );
 
-    // 身份字段与可见性、位置、上下文窗口都来自条目自身，其余字段照旧继承。
+    // 身份、位置以及上下文与推理区间都只由模型自身提供，整条继承不会覆盖它们；
+    // 其余字段照旧换成来源的取值。
     expect(result).toEqual({
       slug: 'my-sol',
       display_name: 'My Sol',
       description: 'local',
       context_window: 1,
+      max_context_window: 2,
+      max_tokens: 3,
+      auto_compact_token_limit: 4,
+      supported_reasoning_levels: [{ effort: 'low', description: 'Quick' }],
+      default_reasoning_level: 'low',
+      default_reasoning_summary: 'brief',
+      default_verbosity: 'low',
+      support_verbosity: true,
       model_messages: { notes: 'from sol' },
     });
   });
@@ -182,7 +206,7 @@ describe('applyInheritDirectives', () => {
     });
   });
 
-  it('keeps the fields only the model supplies out of a whole-entry inherit', () => {
+  it('replaces the other fields wholesale, including their local subtrees', () => {
     const result = applyInheritDirectives(
       {
         slug: 'my-sol',
@@ -195,11 +219,12 @@ describe('applyInheritDirectives', () => {
       lookup
     );
 
-    // 只由模型自身提供的字段保持条目自身的取值，其余字段整条换成来源的取值。
+    // 整条继承把条目换成来源的取值，本地子树也不例外；只由模型自身提供的字段保持原值。
     expect(result).toEqual({
       slug: 'my-sol',
       display_name: 'My Sol',
       context_window: 1,
+      supported_reasoning_levels: [{ effort: 'low' }],
       model_messages: { notes: 'from sol' },
     });
   });
@@ -338,13 +363,38 @@ describe('countInheritUsage', () => {
 });
 
 describe('inherit path rules', () => {
-  it('knows the identity fields that can never be inherited', () => {
-    expect(isNonInheritablePathKey('display_name')).toBe(true);
+  it('knows the fields that can never be inherited', () => {
+    NON_INHERITABLE_FIELDS.forEach((field) => {
+      expect(isNonInheritablePathKey(field)).toBe(true);
+      expect(canInheritPath([field])).toBe(false);
+    });
     expect(isNonInheritablePathKey('model_messages.notes')).toBe(false);
     expect(canInheritPath(['model_messages', 'notes'])).toBe(true);
-    expect(canInheritPath(['description'])).toBe(false);
     expect(inheritPathKey(['model_messages', 'notes'])).toBe('model_messages.notes');
     expect(inheritPathKey([])).toBe('');
+  });
+
+  it('keeps the context and reasoning envelope out of a whole-entry source', () => {
+    const directives = readInheritDirectives({ [INHERIT_KEY]: 'gpt-5.5' });
+
+    [
+      'context_window',
+      'max_context_window',
+      'max_tokens',
+      'auto_compact_token_limit',
+      'supported_reasoning_levels',
+      'default_reasoning_level',
+      'default_reasoning_summary',
+      'default_verbosity',
+      'support_verbosity',
+    ].forEach((field) => {
+      expect(resolveInheritSource(directives, [field])).toEqual({ source: null, declared: null });
+    });
+    // 同一层级的其它字段照旧跟随整条来源。
+    expect(resolveInheritSource(directives, ['base_instructions'])).toEqual({
+      source: 'gpt-5.5',
+      declared: null,
+    });
   });
 });
 

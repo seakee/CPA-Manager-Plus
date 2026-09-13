@@ -4749,7 +4749,7 @@
     "editor_no_default_notice": "No provider serves this model right now, so there are no default values to compare against; every value you set here is saved as a local override.",
     "inherit_root_label": "Inherit from",
     "inherit_root_none": "Do not inherit",
-    "inherit_root_hint": "Fields without their own override come from this model; each field can still pick its own source.",
+    "inherit_root_hint": "Fields without their own override come from this model, and each field can still pick its own source; the model's own identity, position, and context and reasoning settings stay its own.",
     "inherit_usage": "Used by {{value}} override(s)",
     "inherit_issue_title": "Inheritance problems:",
     "inherit_issue_invalid_shape": "Inheritance must name a model, or map field paths to model names.",

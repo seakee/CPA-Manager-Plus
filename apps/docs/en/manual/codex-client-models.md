@@ -65,7 +65,7 @@ Every field carries a source marker in its top right corner showing whether the 
 
 A default is the entry the server assembles: a catalog template merged with the model metadata (context length, reasoning levels, provider capabilities), which is what clients receive when nothing overrides it. The override layer is applied on top of that result, so every field can be overridden, including the ones normalization used to win.
 
-Slug, display name, description, visibility, priority, the context window, and the maximum context window always come from the entry itself: no source supplies them, and directives that name them are rejected. Every other field follows the entry's inheritance source; to keep one of them on its default instead, the editor writes "do not inherit" on that path.
+The model's identity, where it sits in the catalog, and its context and reasoning configuration (the windows, the token budgets, and the reasoning levels) always come from the entry itself: no source supplies them, and directives that name them are rejected. Every other field follows the entry's inheritance source; to keep one of them on its default instead, the editor writes "do not inherit" on that path.
 
 When other overrides use the entry as their inheritance source, the editor header shows how many references it has.
 
@@ -108,7 +108,7 @@ The catalog the page lists is the default entry the server assembles for every m
 - An object `$inherit` is a dotted-path to source-slug map, where the empty string is equivalent to inheriting the whole entry.
 - A path set to `null` does not inherit: the value comes from the entry itself and an ancestor directive no longer covers it. This is what the editor's restore-to-default action writes.
 - Local fields are applied last and can replace inherited values; a local `null` at a field path removes the field.
-- Slug, display name, description, visibility, priority, the context window, and the maximum context window only come from the entry itself and never participate in inheritance.
+- Slug, display name, description, visibility, priority, and the context and reasoning configuration (context_window, max_context_window, max_tokens, auto_compact_token_limit, supported_reasoning_levels, default_reasoning_level, default_reasoning_summary, default_verbosity, support_verbosity) only come from the entry itself and never participate in inheritance.
 
 A source resolves to the **served entry** of that model, so its own overrides count as well. When no provider serves an official model, its catalog template stands in, which keeps `$inherit: "gpt-5.5"` writable on a machine with no Codex provider.
 

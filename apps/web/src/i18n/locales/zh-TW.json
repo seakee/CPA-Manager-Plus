@@ -4747,7 +4747,7 @@
     "editor_no_default_notice": "服務端目前沒有下發這個模型，所以沒有可對照的預設值；這裡填的取值都會作為本地覆寫儲存。",
     "inherit_root_label": "繼承來源",
     "inherit_root_none": "不繼承",
-    "inherit_root_hint": "沒有單獨覆寫的欄位都取自該模型，每個欄位仍可各自指定來源。",
+    "inherit_root_hint": "沒有單獨覆寫的欄位都取自該模型，每個欄位仍可各自指定來源；模型自身的標識、位置與上下文推理設定不受影響。",
     "inherit_usage": "被 {{value}} 處覆寫繼承",
     "inherit_issue_title": "繼承設定有問題：",
     "inherit_issue_invalid_shape": "繼承指令必須是模型名稱，或「欄位路徑 → 模型名稱」的物件。",

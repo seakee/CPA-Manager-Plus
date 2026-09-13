@@ -4747,7 +4747,7 @@
     "editor_no_default_notice": "服务端当前没有下发这个模型，所以没有可对照的默认值；这里填的取值都会作为本地覆写保存。",
     "inherit_root_label": "继承源",
     "inherit_root_none": "不继承",
-    "inherit_root_hint": "没有单独覆写的字段都取自该模型，每个字段仍可各自指定来源。",
+    "inherit_root_hint": "没有单独覆写的字段都取自该模型，每个字段仍可各自指定来源；模型自身的标识、位置与上下文推理配置不受影响。",
     "inherit_usage": "被 {{value}} 处覆写继承",
     "inherit_issue_title": "继承设置有问题：",
     "inherit_issue_invalid_shape": "继承指令必须是模型名，或「字段路径 → 模型名」的对象。",

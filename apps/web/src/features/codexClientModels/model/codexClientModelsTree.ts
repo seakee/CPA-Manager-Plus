@@ -95,8 +95,12 @@ export const readOverrideValue = (
 };
 
 /**
- * 来源永远供不到的字段：身份字段标明是哪条条目，服务字段描述它被下发时的样子。
- * 后端解析继承时都不从来源取值，界面因此也不能把这些字段标成继承来的。
+ * 来源永远供不到的字段：它们描述的是模型本身，而不是别的模型配置能借过来的东西。
+ *
+ * 分三类：身份（slug、展示名称、描述）、在目录里的位置（可见性、优先级），
+ * 以及模型被下发时带的上下文与推理区间（窗口、token 预算与支持的推理强度）。
+ * 后端解析继承时都不从来源取值，指向它们的指令会被拒绝，
+ * 界面因此也不能把这些字段标成继承来的。
  */
 export const NON_INHERITABLE_FIELDS: ReadonlyArray<string> = [
   'slug',
@@ -106,6 +110,13 @@ export const NON_INHERITABLE_FIELDS: ReadonlyArray<string> = [
   'priority',
   'context_window',
   'max_context_window',
+  'max_tokens',
+  'auto_compact_token_limit',
+  'supported_reasoning_levels',
+  'default_reasoning_level',
+  'default_reasoning_summary',
+  'default_verbosity',
+  'support_verbosity',
 ];
 
 /** 这些字段只认根层的那几个键，嵌套的同名键仍然是普通字段。 */
