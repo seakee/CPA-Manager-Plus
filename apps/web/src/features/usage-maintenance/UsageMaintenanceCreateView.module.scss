@@ -1,0 +1,505 @@
+.view {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  color: var(--text-primary);
+}
+
+.pageHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.pageHeader h1 {
+  margin: 0;
+  font-size: clamp(23px, 4vw, 29px);
+  line-height: 1.2;
+}
+
+.pageHeader p {
+  max-width: 760px;
+  margin: 7px 0 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(270px, 0.72fr) minmax(0, 1.8fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.sideColumn,
+.mainColumn {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.card {
+  min-width: 0;
+  padding: 19px 20px;
+  border: 1px solid var(--border-color);
+  border-radius: 15px;
+  background: var(--bg-primary);
+  box-shadow: var(--shadow);
+}
+
+.card h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.sectionHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sectionHint {
+  margin: 8px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.retentionOptions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  margin-top: 18px;
+}
+
+.retentionOptions button {
+  min-width: 0;
+  min-height: 38px;
+  padding: 7px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 9px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.retentionOptions button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--primary-color) 55%, var(--border-color));
+}
+
+.retentionOptions button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--primary-color) 55%, transparent);
+  outline-offset: 2px;
+}
+
+.retentionOptions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.retentionOptions .retentionActive {
+  border-color: color-mix(in srgb, var(--primary-color) 70%, var(--border-color));
+  background: color-mix(in srgb, var(--primary-color) 8%, var(--bg-primary));
+  color: var(--primary-color);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary-color) 18%, transparent);
+}
+
+.dateField {
+  margin-top: 18px;
+}
+
+.cutoffFact {
+  display: grid;
+  gap: 5px;
+  margin-top: 20px;
+  padding: 13px;
+  border-radius: 10px;
+  background: var(--surface-subtle);
+}
+
+.cutoffFact span,
+.cutoffFact small {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.cutoffFact strong {
+  overflow-wrap: anywhere;
+  font-size: 14px;
+}
+
+.keyValues,
+.readinessList {
+  display: grid;
+  margin: 13px 0 0;
+}
+
+.keyValues > div,
+.readinessList > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.keyValues > div:last-child,
+.readinessList > div:last-child {
+  border-bottom: 0;
+}
+
+.keyValues dt,
+.readinessList dt {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.keyValues dd,
+.readinessList dd {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: right;
+}
+
+.readinessList dt {
+  display: grid;
+  gap: 3px;
+}
+
+.readinessList dt strong {
+  color: var(--text-primary);
+}
+
+.readinessList dt small {
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.ready {
+  color: var(--success-color);
+}
+
+.pending {
+  color: var(--warning-color);
+}
+
+.infoNote,
+.warningNote,
+.errorNote,
+.emptyNote,
+.previewNotes {
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.infoNote {
+  margin: 14px 0 0;
+  padding: 12px 13px;
+  border: 1px solid color-mix(in srgb, var(--primary-color) 25%, var(--border-color));
+  background: color-mix(in srgb, var(--primary-color) 5%, var(--bg-primary));
+  color: var(--text-secondary);
+}
+
+.warningNote {
+  margin: 12px 0 0;
+  padding: 11px 12px;
+  border: 1px solid color-mix(in srgb, var(--warning-color) 38%, var(--border-color));
+  background: color-mix(in srgb, var(--warning-color) 7%, var(--bg-primary));
+  color: var(--warning-color);
+}
+
+.loadingLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.timelineBlock {
+  margin-top: 30px;
+}
+
+.timeline {
+  position: relative;
+  height: 7px;
+  margin: 0 8px 18px;
+  border-radius: 99px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--primary-color) 35%, transparent) 0 var(--cutoff-position, 50%),
+    color-mix(in srgb, var(--success-color) 28%, transparent) var(--cutoff-position, 50%) 100%
+  );
+}
+
+.timeline i {
+  position: absolute;
+  top: -13px;
+  left: var(--cutoff-position);
+  width: 2px;
+  height: 34px;
+  background: var(--primary-color);
+  transform: translateX(-1px);
+}
+
+.timeline i::before {
+  position: absolute;
+  top: -5px;
+  left: -5px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--primary-color);
+  box-shadow: 0 0 0 3px var(--bg-primary);
+  content: '';
+}
+
+.timelineLabels {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.timelineLabels span {
+  display: grid;
+  gap: 4px;
+}
+
+.timelineLabels span:nth-child(2) {
+  color: var(--primary-color);
+  text-align: center;
+}
+
+.timelineLabels span:last-child {
+  text-align: right;
+}
+
+.timelineLabels strong {
+  overflow-wrap: anywhere;
+  color: currentColor;
+  font-size: 11px;
+}
+
+.previewGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.previewGrid > div {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  min-width: 0;
+  padding: 15px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--bg-primary);
+}
+
+.previewGrid span,
+.previewGrid small {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.previewGrid strong {
+  overflow: hidden;
+  font-size: clamp(16px, 2.2vw, 22px);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.previewGrid .rangeValue {
+  overflow: visible;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: normal;
+}
+
+.previewNotes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+  margin-top: 18px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--primary-color) 23%, var(--border-color));
+  background: color-mix(in srgb, var(--primary-color) 4%, var(--bg-primary));
+  color: var(--text-secondary);
+}
+
+.previewNotes p {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+}
+
+.previewNotes strong {
+  color: var(--text-primary);
+}
+
+.errorNote,
+.emptyNote {
+  display: grid;
+  gap: 9px;
+  margin-top: 18px;
+  padding: 12px;
+}
+
+.errorNote {
+  border: 1px solid color-mix(in srgb, var(--error-color) 38%, var(--border-color));
+  background: color-mix(in srgb, var(--error-color) 7%, var(--bg-primary));
+  color: var(--error-color);
+}
+
+.emptyNote {
+  border: 1px dashed color-mix(in srgb, var(--warning-color) 42%, var(--border-color));
+  background: color-mix(in srgb, var(--warning-color) 7%, var(--bg-primary));
+}
+
+.errorNote p,
+.emptyNote p,
+.guidedProgress p {
+  margin: 0;
+}
+
+.guidedProgress {
+  display: grid;
+  gap: 11px;
+  margin-top: 18px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--primary-color) 30%, var(--border-color));
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--primary-color) 6%, var(--bg-primary));
+  font-size: 11px;
+}
+
+.guidedHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.guidedHeader span,
+.guidedProgress p {
+  color: var(--text-secondary);
+}
+
+.guidedSteps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.guidedSteps > span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+}
+
+.guidedSteps i {
+  display: grid;
+  width: 17px;
+  height: 17px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.guidedSteps .guided_complete {
+  background: color-mix(in srgb, var(--success-color) 12%, transparent);
+  color: var(--success-color);
+}
+
+.guidedSteps .guided_current {
+  background: color-mix(in srgb, var(--primary-color) 13%, transparent);
+  color: var(--primary-color);
+  font-weight: 700;
+}
+
+.footerBar {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin: 0 -2px -2px;
+  padding: 16px 2px 2px;
+  border-top: 1px solid var(--border-color);
+  background: color-mix(in srgb, var(--bg-secondary) 88%, transparent);
+  backdrop-filter: blur(10px);
+}
+
+@media (max-width: 1050px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .sideColumn {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .pageHeader,
+  .sectionHeader {
+    display: grid;
+  }
+
+  .sideColumn {
+    grid-template-columns: 1fr;
+  }
+
+  .previewGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 460px) {
+  .card {
+    padding: 16px;
+  }
+
+  .retentionOptions,
+  .previewGrid,
+  .previewNotes,
+  .guidedSteps {
+    grid-template-columns: 1fr;
+  }
+
+  .timelineLabels {
+    grid-template-columns: 1fr;
+  }
+
+  .timelineLabels span,
+  .timelineLabels span:nth-child(2),
+  .timelineLabels span:last-child {
+    text-align: left;
+  }
+
+  .footerBar > * {
+    flex: 1;
+  }
+}

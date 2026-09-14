@@ -150,4 +150,3 @@ func TestImportRejectsInvalidEventHashWithoutWrappingAsPersistenceError(t *testi
 		t.Fatalf("expected ErrInvalidEventHash NOT to be wrapped as ImportPersistenceError, got: %v", err)
 	}
 }
-

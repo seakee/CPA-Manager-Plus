@@ -17,6 +17,9 @@ const (
 	// CodexIdentityRevision changes independently from FormatVersion because
 	// the other providers must retain their existing AccountKey values.
 	CodexIdentityRevision = "2"
+	// CodexLegacyIdentityEvidenceSchemaVersion changes independently from
+	// monitoring SchemaVersion.
+	CodexLegacyIdentityEvidenceSchemaVersion = 1
 )
 
 // CodexAccountIDSnapshot marks a freshly observed, explicit ChatGPT account_id

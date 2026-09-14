@@ -11,6 +11,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	quotasnapshotrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotasnapshot"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageaggregate"
 	pricingrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagepricing"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageprojection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
@@ -65,6 +66,240 @@ func TestUsageDataMigrationInitialStateMatchesExistingUsageData(t *testing.T) {
 		if !columns[column] {
 			t.Fatalf("staging columns = %#v, missing %s", columns, column)
 		}
+	}
+}
+
+func TestUsageHourlyAggregateMigrationContractMatchesRepository(t *testing.T) {
+	if usageHourlyAggregateSchemaVersion != usageaggregate.SchemaVersion {
+		t.Fatalf(
+			"hourly aggregate schema contract drifted: migration=%d repository=%d",
+			usageHourlyAggregateSchemaVersion,
+			usageaggregate.SchemaVersion,
+		)
+	}
+	if usageHourlyAggregateStructureRevision != usageaggregate.StructureRevision {
+		t.Fatalf(
+			"hourly aggregate revision contract drifted: migration=%q repository=%q",
+			usageHourlyAggregateStructureRevision,
+			usageaggregate.StructureRevision,
+		)
+	}
+}
+
+func TestCodexLegacyIdentityEvidenceSchemaVersionDecoupledFromAggregate(t *testing.T) {
+	if usageidentity.CodexLegacyIdentityEvidenceSchemaVersion != 1 {
+		t.Fatalf("expected CodexLegacyIdentityEvidenceSchemaVersion == 1, got %d", usageidentity.CodexLegacyIdentityEvidenceSchemaVersion)
+	}
+	if usageaggregate.SchemaVersion == usageidentity.CodexLegacyIdentityEvidenceSchemaVersion {
+		t.Fatalf("expected CodexLegacyIdentityEvidenceSchemaVersion to be decoupled from usageaggregate.SchemaVersion, but both equal %d", usageaggregate.SchemaVersion)
+	}
+
+	path := filepath.Join(t.TempDir(), "identity-schema-version.sqlite")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+
+	var seededVersion int
+	if err := db.QueryRow(`select schema_version from usage_monitoring_rollup_state where rollup_name = 'codex_legacy_identity_v1'`).Scan(&seededVersion); err != nil {
+		t.Fatalf("query seed schema version: %v", err)
+	}
+	if seededVersion != usageidentity.CodexLegacyIdentityEvidenceSchemaVersion {
+		t.Fatalf("seeded schema_version = %d, want %d", seededVersion, usageidentity.CodexLegacyIdentityEvidenceSchemaVersion)
+	}
+}
+
+func TestUsageArchiveRunMigrationAddsRequestedStageColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage-archive-requested-stage.sqlite")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if _, err := db.Exec(`alter table usage_archive_runs drop column requested_stage`); err != nil {
+		_ = db.Close()
+		t.Fatalf("remove requested stage column fixture: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close legacy sqlite: %v", err)
+	}
+	db, err = Open(path)
+	if err != nil {
+		t.Fatalf("reopen migrated sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	columns := migrationTableColumns(t, db, "usage_archive_runs")
+	if !columns["requested_stage"] {
+		t.Fatalf("usage archive run columns = %#v", columns)
+	}
+}
+
+func TestUsageArchiveMigrationIsAdditiveAndStartupBoundedWithLargeLedger(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage-archive-large-ledger.sqlite")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	const rowCount = 100_001
+	if _, err := db.Exec(`with digits(value) as (
+		values (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)
+	), numbers(value) as (
+		select
+			ones.value +
+			tens.value * 10 +
+			hundreds.value * 100 +
+			thousands.value * 1000 +
+			ten_thousands.value * 10000 +
+			hundred_thousands.value * 100000
+		from digits ones
+		cross join digits tens
+		cross join digits hundreds
+		cross join digits thousands
+		cross join digits ten_thousands
+		cross join digits hundred_thousands
+	)
+	insert into usage_events (
+		event_hash, timestamp_ms, timestamp, model, created_at_ms
+	)
+	select
+		printf('archive-migration-%06d', value + 1),
+		value + 1,
+		cast(value + 1 as text),
+		'gpt-test',
+		value + 1
+	from numbers
+	where value < ?`, rowCount); err != nil {
+		_ = db.Close()
+		t.Fatalf("seed large usage event table: %v", err)
+	}
+	if _, err := db.Exec(`insert into usage_event_identity_ledger (
+		event_hash, raw_event_id, timestamp_ms, bucket_ms,
+		aggregate_schema_version, aggregate_structure_revision,
+		first_seen_at_ms, updated_at_ms
+	)
+	select event_hash, id, timestamp_ms, 0, 0, '', created_at_ms, created_at_ms
+	from usage_events`); err != nil {
+		_ = db.Close()
+		t.Fatalf("seed large identity ledger: %v", err)
+	}
+
+	ledgerColumnsBefore := migrationTableColumns(t, db, "usage_event_identity_ledger")
+	var ledgerCountBefore, rawIDSumBefore, timestampSumBefore int64
+	if err := db.QueryRow(`select count(*), coalesce(sum(raw_event_id), 0), coalesce(sum(timestamp_ms), 0)
+		from usage_event_identity_ledger`).Scan(
+		&ledgerCountBefore,
+		&rawIDSumBefore,
+		&timestampSumBefore,
+	); err != nil {
+		_ = db.Close()
+		t.Fatalf("read identity ledger baseline: %v", err)
+	}
+	for _, statement := range []string{
+		`drop table usage_maintenance_locks`,
+		`drop table usage_archive_event_refs`,
+		`drop table usage_archive_segments`,
+		`drop table usage_archive_runs`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			_ = db.Close()
+			t.Fatalf("remove archive schema fixture: %v", err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close legacy sqlite: %v", err)
+	}
+
+	db, err = Open(path)
+	if err != nil {
+		t.Fatalf("reopen migrated sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	for _, table := range []string{
+		"usage_archive_runs",
+		"usage_archive_segments",
+		"usage_archive_event_refs",
+		"usage_maintenance_locks",
+	} {
+		var count int
+		if err := db.QueryRow(`select count(*) from sqlite_master
+			where type = 'table' and name = ?`, table).Scan(&count); err != nil {
+			t.Fatalf("inspect archive table %s: %v", table, err)
+		}
+		if count != 1 {
+			t.Fatalf("archive table %s count = %d, want 1", table, count)
+		}
+		assertTableCount(t, db, table, 0)
+	}
+	for _, index := range []string{
+		"idx_usage_archive_runs_status_updated",
+		"idx_usage_archive_segments_run_event",
+		"idx_usage_archive_event_refs_run_deleted",
+		"idx_usage_archive_event_refs_timestamp_deleted",
+	} {
+		var table string
+		if err := db.QueryRow(`select tbl_name from sqlite_master
+			where type = 'index' and name = ?`, index).Scan(&table); err != nil {
+			t.Fatalf("inspect archive index %s: %v", index, err)
+		}
+		if !strings.HasPrefix(table, "usage_archive_") {
+			t.Fatalf("archive index %s unexpectedly targets %s", index, table)
+		}
+	}
+	var coverageIndexSQL string
+	if err := db.QueryRow(`select sql from sqlite_master
+		where type = 'index' and name = 'idx_usage_archive_event_refs_timestamp_deleted'`).Scan(&coverageIndexSQL); err != nil {
+		t.Fatalf("inspect archive coverage index definition: %v", err)
+	}
+	if !strings.Contains(strings.Join(strings.Fields(coverageIndexSQL), " "),
+		"usage_archive_event_refs(timestamp_ms, raw_deleted_at_ms)") {
+		t.Fatalf("archive coverage index is not time-range first: %s", coverageIndexSQL)
+	}
+	var largeTableArchiveIndexes int
+	if err := db.QueryRow(`select count(*) from sqlite_master
+		where type = 'index'
+			and tbl_name in ('usage_events', 'usage_event_identity_ledger')
+			and lower(name) like '%archive%'`).Scan(&largeTableArchiveIndexes); err != nil {
+		t.Fatalf("inspect large-table archive indexes: %v", err)
+	}
+	if largeTableArchiveIndexes != 0 {
+		t.Fatalf("archive migration created %d large-table indexes", largeTableArchiveIndexes)
+	}
+
+	ledgerColumnsAfter := migrationTableColumns(t, db, "usage_event_identity_ledger")
+	if len(ledgerColumnsAfter) != len(ledgerColumnsBefore) {
+		t.Fatalf("identity ledger columns changed: before=%#v after=%#v", ledgerColumnsBefore, ledgerColumnsAfter)
+	}
+	for column := range ledgerColumnsBefore {
+		if !ledgerColumnsAfter[column] {
+			t.Fatalf("identity ledger lost column %s: before=%#v after=%#v", column, ledgerColumnsBefore, ledgerColumnsAfter)
+		}
+	}
+	for _, forbidden := range []string{"archive_run_id", "archive_segment_sequence", "archived_at_ms", "raw_deleted_at_ms"} {
+		if ledgerColumnsAfter[forbidden] {
+			t.Fatalf("identity ledger unexpectedly gained archive column %s", forbidden)
+		}
+	}
+	var ledgerCountAfter, rawIDSumAfter, timestampSumAfter int64
+	if err := db.QueryRow(`select count(*), coalesce(sum(raw_event_id), 0), coalesce(sum(timestamp_ms), 0)
+		from usage_event_identity_ledger`).Scan(
+		&ledgerCountAfter,
+		&rawIDSumAfter,
+		&timestampSumAfter,
+	); err != nil {
+		t.Fatalf("read migrated identity ledger: %v", err)
+	}
+	if ledgerCountBefore != rowCount || ledgerCountAfter != ledgerCountBefore ||
+		rawIDSumAfter != rawIDSumBefore || timestampSumAfter != timestampSumBefore {
+		t.Fatalf(
+			"identity ledger changed: before=(%d,%d,%d) after=(%d,%d,%d)",
+			ledgerCountBefore,
+			rawIDSumBefore,
+			timestampSumBefore,
+			ledgerCountAfter,
+			rawIDSumAfter,
+			timestampSumAfter,
+		)
 	}
 }
 
@@ -3727,4 +3962,405 @@ func assertTableAbsent(t *testing.T, db *sql.DB, table string) {
 	if exists != 0 {
 		t.Fatalf("table %s exists, want absent", table)
 	}
+}
+
+func TestMigrationDevDBWithoutArchiveMetadataSucceeds(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dev-db.sqlite")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("open new dev db: %v", err)
+	}
+	defer db.Close()
+
+	// Verify core tables exist and can be queried
+	for _, table := range []string{"usage_events", "usage_hourly_aggregate_v1", "usage_pricing_hourly_rollups_v1"} {
+		assertTableCount(t, db, table, 0)
+	}
+}
+
+func TestMigrationWithArchiveMetadataNoDeletionAllowsRebuild(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "archive-nodelete.sqlite")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+
+	// Insert archive run, segment, identity ledger, and ref without raw deletion
+	if _, err := db.Exec(`insert into usage_archive_runs(id, mode, schema_version, format, status, cutoff_timestamp_ms, target_event_id, event_count, created_at_ms, updated_at_ms)
+		values('run-1', 'manual', 1, 'jsonl.gz', 'archived', 2000, 10, 5, 1000, 1000)`); err != nil {
+		t.Fatalf("insert archive run: %v", err)
+	}
+	if _, err := db.Exec(`insert into usage_archive_segments(run_id, sequence, status, file_name, first_event_id, last_event_id, min_timestamp_ms, max_timestamp_ms, event_count, uncompressed_bytes, compressed_bytes, content_sha256, event_hash_digest, created_at_ms)
+		values('run-1', 1, 'published', 'run-1/seg-1.jsonl.gz', 1, 10, 1000, 2000, 5, 100, 50, 'sha', 'digest', 1000)`); err != nil {
+		t.Fatalf("insert archive segment: %v", err)
+	}
+	if _, err := db.Exec(`insert into usage_event_identity_ledger(event_hash, timestamp_ms, bucket_ms, first_seen_at_ms, updated_at_ms)
+		values('hash-1', 1000, 1000, 1000, 1000)`); err != nil {
+		t.Fatalf("insert identity ledger: %v", err)
+	}
+	if _, err := db.Exec(`insert into usage_archive_event_refs(event_hash, run_id, segment_sequence, raw_event_id, timestamp_ms, archived_at_ms, raw_deleted_at_ms)
+		values('hash-1', 'run-1', 1, 1, 1000, 1000, null)`); err != nil {
+		t.Fatalf("insert archive event ref: %v", err)
+	}
+	// Intentionally mark hourly aggregate schema version as needing upgrade (version 2)
+	if _, err := db.Exec(`update usage_hourly_aggregate_state set schema_version = 2 where aggregate_name = 'hourly_core'`); err != nil {
+		t.Fatalf("set schema_version 2: %v", err)
+	}
+	_ = db.Close()
+
+	// Re-opening should succeed because raw_deleted_at_ms is NULL everywhere
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen with no raw deletion: %v", err)
+	}
+	defer reopened.Close()
+
+	var version int
+	if err := reopened.QueryRow(`select schema_version from usage_hourly_aggregate_state where aggregate_name = 'hourly_core'`).Scan(&version); err != nil {
+		t.Fatalf("query schema version: %v", err)
+	}
+	if version != usageaggregate.SchemaVersion {
+		t.Fatalf("schema version = %d, want %d", version, usageaggregate.SchemaVersion)
+	}
+}
+
+func TestMigrationWithRawDeletionAndCurrentRevisionStartsCleanly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "archive-deleted-current.sqlite")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+
+	// Insert archive run, segment, identity ledger, and ref with raw deletion recorded
+	if _, err := db.Exec(`insert into usage_archive_runs(id, mode, schema_version, format, status, cutoff_timestamp_ms, target_event_id, event_count, created_at_ms, updated_at_ms)
+		values('run-1', 'manual', 1, 'jsonl.gz', 'completed', 2000, 10, 5, 1000, 2000)`); err != nil {
+		t.Fatalf("insert archive run: %v", err)
+	}
+	if _, err := db.Exec(`insert into usage_archive_segments(run_id, sequence, status, file_name, first_event_id, last_event_id, min_timestamp_ms, max_timestamp_ms, event_count, uncompressed_bytes, compressed_bytes, content_sha256, event_hash_digest, created_at_ms)
+		values('run-1', 1, 'published', 'run-1/seg-1.jsonl.gz', 1, 10, 1000, 2000, 5, 100, 50, 'sha', 'digest', 1000)`); err != nil {
+		t.Fatalf("insert archive segment: %v", err)
+	}
+	if _, err := db.Exec(`insert into usage_event_identity_ledger(event_hash, timestamp_ms, bucket_ms, first_seen_at_ms, updated_at_ms)
+		values('hash-1', 1000, 1000, 1000, 1000)`); err != nil {
+		t.Fatalf("insert identity ledger: %v", err)
+	}
+	if _, err := db.Exec(`insert into usage_archive_event_refs(event_hash, run_id, segment_sequence, raw_event_id, timestamp_ms, archived_at_ms, raw_deleted_at_ms)
+		values('hash-1', 'run-1', 1, 1, 1000, 1000, 1500)`); err != nil {
+		t.Fatalf("insert archive event ref: %v", err)
+	}
+	_ = db.Close()
+
+	// Reopen should succeed cleanly without error because all revisions are already current
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen with raw deletion and current revisions: %v", err)
+	}
+	defer reopened.Close()
+}
+
+func TestMigrationWithRawDeletionAndRebuildRequiredFailsClosed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "archive-deleted-rebuild.sqlite")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+
+	// Insert dummy derived rows in usage_hourly_aggregate_v1
+	if _, err := db.Exec(`insert into usage_hourly_aggregate_v1(
+		bucket_ms, model, billing_model, service_tier, failed, updated_at_ms
+	) values (
+		3600000, 'gpt-4o', 'gpt-4o', 'default', 0, 1000
+	)`); err != nil {
+		t.Fatalf("insert dummy hourly aggregate: %v", err)
+	}
+
+	// Insert archive run, segment, identity ledger, and ref with raw deletion recorded
+	if _, err := db.Exec(`insert into usage_archive_runs(id, mode, schema_version, format, status, cutoff_timestamp_ms, target_event_id, event_count, created_at_ms, updated_at_ms)
+		values('run-1', 'manual', 1, 'jsonl.gz', 'completed', 2000, 10, 5, 1000, 2000)`); err != nil {
+		t.Fatalf("insert archive run: %v", err)
+	}
+	if _, err := db.Exec(`insert into usage_archive_segments(run_id, sequence, status, file_name, first_event_id, last_event_id, min_timestamp_ms, max_timestamp_ms, event_count, uncompressed_bytes, compressed_bytes, content_sha256, event_hash_digest, created_at_ms)
+		values('run-1', 1, 'published', 'run-1/seg-1.jsonl.gz', 1, 10, 1000, 2000, 5, 100, 50, 'sha', 'digest', 1000)`); err != nil {
+		t.Fatalf("insert archive segment: %v", err)
+	}
+	if _, err := db.Exec(`insert into usage_event_identity_ledger(event_hash, timestamp_ms, bucket_ms, first_seen_at_ms, updated_at_ms)
+		values('hash-1', 1000, 1000, 1000, 1000)`); err != nil {
+		t.Fatalf("insert identity ledger: %v", err)
+	}
+	if _, err := db.Exec(`insert into usage_archive_event_refs(event_hash, run_id, segment_sequence, raw_event_id, timestamp_ms, archived_at_ms, raw_deleted_at_ms)
+		values('hash-1', 'run-1', 1, 1, 1000, 1000, 1500)`); err != nil {
+		t.Fatalf("insert archive event ref: %v", err)
+	}
+
+	// Set hourly aggregate schema version to 2 (triggering rebuild requirement)
+	if _, err := db.Exec(`update usage_hourly_aggregate_state set schema_version = 2 where aggregate_name = 'hourly_core'`); err != nil {
+		t.Fatalf("set schema_version 2: %v", err)
+	}
+	_ = db.Close()
+
+	// Reopen must FAIL CLOSED because raw usage events were deleted and rebuild requires complete raw source!
+	reopened, err := Open(path)
+	if err == nil {
+		if reopened != nil {
+			_ = reopened.Close()
+		}
+		t.Fatal("expected Open to fail closed when rebuild is required after raw deletion, but it succeeded")
+	}
+
+	wantErrSubstring := "historical raw usage events have been archived and deleted"
+	if !strings.Contains(err.Error(), wantErrSubstring) {
+		t.Fatalf("error = %q, want containing %q", err.Error(), wantErrSubstring)
+	}
+
+	// Raw SQLite connection to inspect table: ensure original derived data was NOT wiped or parked
+	rawConn, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+	defer rawConn.Close()
+
+	var aggregateCount int
+	if err := rawConn.QueryRow(`select count(*) from usage_hourly_aggregate_v1`).Scan(&aggregateCount); err != nil {
+		t.Fatalf("count hourly aggregate after failed migration: %v", err)
+	}
+	if aggregateCount != 1 {
+		t.Fatalf("hourly aggregate count = %d, want preserved 1 row", aggregateCount)
+	}
+}
+
+// Test M1：raw deleted + monitoring damage
+func TestMigrationEarlyRecoveryFailsClosedOnMonitoringDamageWithRawDeleted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.sqlite")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("initial open: %v", err)
+	}
+
+	// Insert sentinel row into usageMonitoringAccountDailyTable
+	if _, err := db.Exec(`insert into ` + usageMonitoringAccountDailyTable + ` (
+		structure_revision, bucket_ms, account_snapshot, auth_label_snapshot,
+		provider, auth_provider_snapshot, auth_account_id_snapshot, auth_index,
+		source, source_hash, auth_file_snapshot, api_key_hash, executor_type,
+		model, billing_model, pricing_model, service_tier, context_threshold_tokens, failed,
+		last_seen_ms, updated_at_ms
+	) values (
+		'1', 1000, 'acc-1', 'label-1',
+		'provider-1', 'auth-1', 'account-a', 'idx-1',
+		'src', 'srchash', 'file.json', 'keyhash', 'exec',
+		'gpt-4', 'gpt-4', 'gpt-4', 'standard', -1, 0,
+		1000, 1000
+	)`); err != nil {
+		t.Fatalf("insert sentinel: %v", err)
+	}
+
+	// Record raw deletion in archive refs
+	if _, err := db.Exec(`pragma foreign_keys = off`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into usage_archive_event_refs (
+		event_hash, run_id, segment_sequence, raw_event_id, timestamp_ms, archived_at_ms, raw_deleted_at_ms
+	) values ('hash-1', 'run-1', 1, 1, 1000, 1000, 1500)`); err != nil {
+		t.Fatalf("insert raw deletion ref: %v", err)
+	}
+
+	// Cause damage: drop usageMonitoringAPIKeyDailyTable so statsDamaged becomes true
+	if _, err := db.Exec(`drop table ` + usageMonitoringAPIKeyDailyTable); err != nil {
+		t.Fatalf("drop table to cause damage: %v", err)
+	}
+	_ = db.Close()
+
+	// Reopen must fail closed
+	reopened, err := Open(path)
+	if err == nil {
+		if reopened != nil {
+			_ = reopened.Close()
+		}
+		t.Fatal("expected Open to fail closed, but it succeeded")
+	}
+	if !strings.Contains(err.Error(), "historical raw usage events have been archived and deleted") {
+		t.Fatalf("expected raw deletion error message, got: %v", err)
+	}
+
+	// Inspect with raw connection: sentinel data must NOT be parked or deleted
+	rawConn, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+	defer rawConn.Close()
+
+	var parkedCount int
+	if err := rawConn.QueryRow(`select count(*) from sqlite_master where type = 'table' and name = '` + usageMonitoringAccountLegacy + `'`).Scan(&parkedCount); err != nil {
+		t.Fatal(err)
+	}
+	if parkedCount != 0 {
+		t.Fatalf("table was parked despite fail closed")
+	}
+
+	var sentinelCount int
+	if err := rawConn.QueryRow(`select count(*) from ` + usageMonitoringAccountDailyTable + ` where account_snapshot = 'acc-1'`).Scan(&sentinelCount); err != nil {
+		t.Fatal(err)
+	}
+	if sentinelCount != 1 {
+		t.Fatalf("sentinel row missing: got %d, want 1", sentinelCount)
+	}
+}
+
+// Test M2：raw complete + 相同 monitoring damage
+func TestMigrationEarlyRecoverySucceedsWithoutRawDeletion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.sqlite")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("initial open: %v", err)
+	}
+
+	// Cause damage: drop usageMonitoringAPIKeyDailyTable
+	if _, err := db.Exec(`drop table ` + usageMonitoringAPIKeyDailyTable); err != nil {
+		t.Fatalf("drop table to cause damage: %v", err)
+	}
+	_ = db.Close()
+
+	// Reopen must succeed and recreate damaged derivations
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("expected Open to succeed without raw deletion, got: %v", err)
+	}
+	defer reopened.Close()
+
+	var tableExists int
+	if err := reopened.QueryRow(`select count(*) from sqlite_master where type = 'table' and name = '` + usageMonitoringAPIKeyDailyTable + `'`).Scan(&tableExists); err != nil {
+		t.Fatal(err)
+	}
+	if tableExists != 1 {
+		t.Fatalf("damaged table was not recreated")
+	}
+}
+
+// Test M3：raw deleted + Codex evidence damaged recovery
+func TestMigrationEarlyRecoveryFailsClosedOnCodexEvidenceDamageWithRawDeleted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.sqlite")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("initial open: %v", err)
+	}
+
+	// Insert sentinel row into usageCodexLegacyIdentityEvidenceTable
+	if _, err := db.Exec(`insert into ` + usageCodexLegacyIdentityEvidenceTable + ` (
+		structure_revision, physical_kind, physical_file, auth_index,
+		provider, auth_provider_snapshot, auth_account_id_snapshot,
+		auth_project_id_snapshot, account_snapshot,
+		min_evidence_at_ms, max_evidence_at_ms, chronology_unknown
+	) values ('1', 0, 'codex-a.json', 'auth-a', 'codex', 'codex', 'account-a',
+		'', 'same@example.com', 1, 1, 0)`); err != nil {
+		t.Fatalf("insert sentinel evidence: %v", err)
+	}
+
+	// Record raw deletion in archive refs
+	if _, err := db.Exec(`pragma foreign_keys = off`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into usage_archive_event_refs (
+		event_hash, run_id, segment_sequence, raw_event_id, timestamp_ms, archived_at_ms, raw_deleted_at_ms
+	) values ('hash-1', 'run-1', 1, 1, 1000, 1000, 1500)`); err != nil {
+		t.Fatalf("insert raw deletion ref: %v", err)
+	}
+
+	// Cause identityEvidenceDamaged: delete state row for codex_legacy_identity_v1
+	if _, err := db.Exec(`delete from usage_monitoring_rollup_state where rollup_name = 'codex_legacy_identity_v1'`); err != nil {
+		t.Fatalf("delete state row: %v", err)
+	}
+	_ = db.Close()
+
+	// Reopen must fail closed
+	reopened, err := Open(path)
+	if err == nil {
+		if reopened != nil {
+			_ = reopened.Close()
+		}
+		t.Fatal("expected Open to fail closed, but it succeeded")
+	}
+	if !strings.Contains(err.Error(), "historical raw usage events have been archived and deleted") {
+		t.Fatalf("expected raw deletion error message, got: %v", err)
+	}
+
+	// Inspect with raw connection: evidence table must NOT be parked
+	rawConn, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+	defer rawConn.Close()
+
+	var parkedCount int
+	if err := rawConn.QueryRow(`select count(*) from sqlite_master where type = 'table' and name = '` + usageCodexLegacyIdentityEvidenceLegacy + `'`).Scan(&parkedCount); err != nil {
+		t.Fatal(err)
+	}
+	if parkedCount != 0 {
+		t.Fatalf("evidence table was parked despite fail closed")
+	}
+
+	var sentinelCount int
+	if err := rawConn.QueryRow(`select count(*) from ` + usageCodexLegacyIdentityEvidenceTable + ` where auth_account_id_snapshot = 'account-a'`).Scan(&sentinelCount); err != nil {
+		t.Fatal(err)
+	}
+	if sentinelCount != 1 {
+		t.Fatalf("sentinel evidence missing: got %d, want 1", sentinelCount)
+	}
+}
+
+// Test M4：raw deleted + healthy derived state
+func TestMigrationSucceedsWithRawDeletedWhenDerivedStateIsHealthy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.sqlite")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("initial open: %v", err)
+	}
+
+	// Record raw deletion in archive refs
+	if _, err := db.Exec(`pragma foreign_keys = off`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into usage_archive_event_refs (
+		event_hash, run_id, segment_sequence, raw_event_id, timestamp_ms, archived_at_ms, raw_deleted_at_ms
+	) values ('hash-1', 'run-1', 1, 1, 1000, 1000, 1500)`); err != nil {
+		t.Fatalf("insert raw deletion ref: %v", err)
+	}
+	_ = db.Close()
+
+	// Reopen must succeed because all derived data is healthy
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("expected Open to succeed for healthy derived state, got: %v", err)
+	}
+	_ = reopened.Close()
+}
+
+// Test M5：archive refs exist but none deleted
+func TestMigrationEarlyRecoverySucceedsWhenArchiveRefsExistWithoutDeletion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.sqlite")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("initial open: %v", err)
+	}
+
+	// Record archive ref with raw_deleted_at_ms = NULL
+	if _, err := db.Exec(`pragma foreign_keys = off`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into usage_archive_event_refs (
+		event_hash, run_id, segment_sequence, raw_event_id, timestamp_ms, archived_at_ms, raw_deleted_at_ms
+	) values ('hash-1', 'run-1', 1, 1, 1000, 1000, null)`); err != nil {
+		t.Fatalf("insert null deletion ref: %v", err)
+	}
+
+	// Cause damage: drop usageMonitoringAPIKeyDailyTable
+	if _, err := db.Exec(`drop table ` + usageMonitoringAPIKeyDailyTable); err != nil {
+		t.Fatalf("drop table: %v", err)
+	}
+	_ = db.Close()
+
+	// Reopen must succeed
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("expected Open to succeed when no raw events deleted, got: %v", err)
+	}
+	_ = reopened.Close()
 }

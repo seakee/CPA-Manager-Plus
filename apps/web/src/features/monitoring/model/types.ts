@@ -1,5 +1,8 @@
-import type { ApiKeyAlias } from '@/services/api/usageService';
-import type { ResponseHeaderMetadata } from '@/services/api/usageService';
+import type {
+  ApiKeyAlias,
+  MonitoringAnalyticsCoverage,
+  ResponseHeaderMetadata,
+} from '@/services/api/usageService';
 import type { AuthFileItem } from '@/types/authFile';
 import type { Config } from '@/types/config';
 import type { ModelPrice } from '@/utils/usage';
@@ -406,6 +409,7 @@ export interface UseMonitoringDataReturn {
   channels: MonitoringChannelMeta[];
   channelsLoaded: boolean;
   summary: MonitoringSummary;
+  coverage?: MonitoringAnalyticsCoverage;
   metadata: MonitoringMetadata;
   statusChips: MonitoringStatusChip[];
   timeline: MonitoringTimelinePoint[];

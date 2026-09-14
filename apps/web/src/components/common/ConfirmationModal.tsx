@@ -18,7 +18,7 @@ export function ConfirmationModal() {
 
   const currentStep =
     step === 2 && options.secondConfirmation ? options.secondConfirmation : options;
-  const { title, message, confirmText, cancelText, variant = 'primary' } = currentStep;
+  const { title, message, confirmText, cancelText, variant = 'primary', width } = currentStep;
 
   const handleConfirm = async () => {
     if (step === 1 && options.secondConfirmation) {
@@ -50,7 +50,13 @@ export function ConfirmationModal() {
   };
 
   return (
-    <Modal open={isOpen} onClose={handleCancel} title={title} closeDisabled={isLoading}>
+    <Modal
+      open={isOpen}
+      onClose={handleCancel}
+      title={title}
+      closeDisabled={isLoading}
+      width={width}
+    >
       {typeof message === 'string' ? (
         <p style={{ margin: '1rem 0' }}>{message}</p>
       ) : (

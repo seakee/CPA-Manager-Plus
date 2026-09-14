@@ -59,6 +59,7 @@ import {
   hasUsageHeaderQuotaSignal,
 } from '@/utils/usageHeaderSnapshots';
 import { formatXaiBillingDiagnostics } from '@/utils/quota/xaiPresentation';
+import { isUsageImportFile } from '@/utils/usageImport';
 import {
   calculateCacheHitRateFromTotals,
   formatCompactNumber,
@@ -699,16 +700,7 @@ export const buildSecondarySummaryCards = (
   ];
 };
 
-export const isUsageImportFile = (file: File) => {
-  const normalizedName = file.name.toLowerCase();
-  const normalizedType = file.type.toLowerCase();
-  return (
-    /\.(json|jsonl|ndjson|txt)$/.test(normalizedName) ||
-    normalizedType === 'application/json' ||
-    normalizedType === 'application/x-ndjson' ||
-    normalizedType === 'text/plain'
-  );
-};
+export { isUsageImportFile };
 
 export const buildPaginationState = <T>(
   items: readonly T[],

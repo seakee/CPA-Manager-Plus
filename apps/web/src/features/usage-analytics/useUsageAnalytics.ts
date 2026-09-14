@@ -792,6 +792,7 @@ export function useUsageAnalytics() {
     unavailableReason: analytics.unavailableReason,
     lastRefreshedAt: analytics.lastRefreshedAt,
     refresh,
+    coverage: adapted.coverage,
     summary: adapted.summary,
     summaryDelta,
     timeline: adapted.timeline,

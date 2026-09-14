@@ -82,7 +82,14 @@ type usageSnapshot struct {
 	maxID             int64
 	cutoffTimestampMS int64
 	cutoffID          int64
+	eventCount        int64
+	strict            bool
 	empty             bool
+}
+
+type usageStreamQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
 type compatibleUsageTotals struct {
@@ -368,15 +375,63 @@ func (r *repository) WriteExportJSONL(ctx context.Context, writer io.Writer, lim
 	if err != nil {
 		return err
 	}
+	return r.writeExportJSONL(ctx, writer, snapshot)
+}
+
+// WriteFullExportJSONL writes every raw usage event visible at a stable
+// snapshot boundary. It intentionally has no UI/query limit: the caller is
+// the data-lifecycle export path, not the bounded analytics endpoint.
+func (r *repository) WriteFullExportJSONL(ctx context.Context, writer io.Writer) error {
+	// Pin one deferred read transaction for the full export. SQLite WAL keeps
+	// writers non-blocking while this snapshot is open, and every batch closes
+	// its rows before writing to the network. That gives the export a stable
+	// visibility boundary without retaining a live sql.Rows during backpressure.
+	conn, err := r.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "begin"); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), "rollback")
+		}
+	}()
+	snapshot, err := r.captureFullUsageSnapshotOn(ctx, conn)
+	if err != nil {
+		return err
+	}
+	if err := r.writeExportJSONLOn(ctx, writer, snapshot, conn); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, "commit"); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+func (r *repository) writeExportJSONL(ctx context.Context, writer io.Writer, snapshot usageSnapshot) error {
+	return r.writeExportJSONLOn(ctx, writer, snapshot, r.db)
+}
+
+func (r *repository) writeExportJSONLOn(ctx context.Context, writer io.Writer, snapshot usageSnapshot, queryer usageStreamQueryer) error {
 	if snapshot.empty {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		return nil
 	}
 
 	buffer := bufio.NewWriterSize(writer, usageStreamBufferSize)
 	cursorTimestampMS := snapshot.cutoffTimestampMS
 	cursorID := snapshot.cutoffID - 1
+	var exportedCount int64
 	for {
-		batch, err := r.exportBatch(ctx, snapshot, cursorTimestampMS, cursorID)
+		batch, err := r.exportBatchOn(ctx, snapshot, cursorTimestampMS, cursorID, queryer)
 		if err != nil {
 			return err
 		}
@@ -391,12 +446,16 @@ func (r *repository) WriteExportJSONL(ctx context.Context, writer io.Writer, lim
 			if err != nil {
 				return err
 			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if _, err := buffer.Write(encoded); err != nil {
 				return err
 			}
 			if err := buffer.WriteByte('\n'); err != nil {
 				return err
 			}
+			exportedCount++
 		}
 		last := batch[len(batch)-1]
 		cursorTimestampMS = last.timestampMS
@@ -405,7 +464,16 @@ func (r *repository) WriteExportJSONL(ctx context.Context, writer io.Writer, lim
 			break
 		}
 	}
-	return buffer.Flush()
+	if snapshot.strict && exportedCount != snapshot.eventCount {
+		return fmt.Errorf("usage export snapshot changed during streaming: exported %d of %d events", exportedCount, snapshot.eventCount)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := buffer.Flush(); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 func (r *repository) ExportJSONL(ctx context.Context) ([]byte, error) {
@@ -446,6 +514,43 @@ func (r *repository) captureUsageSnapshot(ctx context.Context, limit int) (usage
 	return snapshot, nil
 }
 
+func (r *repository) captureFullUsageSnapshot(ctx context.Context) (usageSnapshot, error) {
+	return r.captureFullUsageSnapshotOn(ctx, r.db)
+}
+
+func (r *repository) captureFullUsageSnapshotOn(ctx context.Context, queryer usageStreamQueryer) (usageSnapshot, error) {
+	var snapshot usageSnapshot
+	snapshot.strict = true
+	// Keep the boundary and count in one SQLite statement.  Separate queries
+	// could observe different commits when a writer deletes or inserts an event
+	// between them, which would turn a supposedly stable export into a moving
+	// target.  New rows with an id above max_id are intentionally outside this
+	// snapshot; a concurrent delete is detected by the strict count check.
+	if err := queryer.QueryRowContext(ctx, `select
+		coalesce(max(id), 0),
+		count(*),
+		coalesce((select timestamp_ms from usage_events order by timestamp_ms asc, id asc limit 1), 0),
+		coalesce((select id from usage_events order by timestamp_ms asc, id asc limit 1), 0)
+		from usage_events`).Scan(
+		&snapshot.maxID,
+		&snapshot.eventCount,
+		&snapshot.cutoffTimestampMS,
+		&snapshot.cutoffID,
+	); err != nil {
+		return usageSnapshot{}, err
+	}
+	if snapshot.maxID == 0 {
+		snapshot.empty = true
+		return snapshot, nil
+	}
+	if snapshot.cutoffID == 0 {
+		// max(id) is non-zero, so this can only mean the snapshot changed while
+		// SQLite evaluated the statement or the database contains corrupt rows.
+		return usageSnapshot{}, errors.New("usage export snapshot has no cutoff row")
+	}
+	return snapshot, nil
+}
+
 func (r *repository) compatibleUsageTotals(ctx context.Context, snapshot usageSnapshot) (compatibleUsageTotals, error) {
 	if snapshot.empty {
 		return compatibleUsageTotals{}, nil
@@ -471,7 +576,11 @@ func (r *repository) compatibleUsageTotals(ctx context.Context, snapshot usageSn
 }
 
 func (r *repository) exportBatch(ctx context.Context, snapshot usageSnapshot, cursorTimestampMS, cursorID int64) ([]exportRow, error) {
-	rows, err := r.db.QueryContext(ctx, `select
+	return r.exportBatchOn(ctx, snapshot, cursorTimestampMS, cursorID, r.db)
+}
+
+func (r *repository) exportBatchOn(ctx context.Context, snapshot usageSnapshot, cursorTimestampMS, cursorID int64, queryer usageStreamQueryer) ([]exportRow, error) {
+	rows, err := queryer.QueryContext(ctx, `select
 		id,
 		request_id, event_hash, timestamp_ms, timestamp, provider, executor_type, model, endpoint, method, path,
 		auth_type, auth_index, source, source_hash, api_key_hash,

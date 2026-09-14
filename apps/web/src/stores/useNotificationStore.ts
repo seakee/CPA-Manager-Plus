@@ -15,6 +15,7 @@ interface ConfirmationStepOptions {
   confirmText?: string;
   cancelText?: string;
   variant?: 'danger' | 'primary' | 'secondary';
+  width?: number | string;
 }
 
 interface ConfirmationOptions extends ConfirmationStepOptions {

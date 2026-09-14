@@ -1,0 +1,538 @@
+.view {
+  display: grid;
+  gap: 18px;
+  color: var(--text-primary);
+}
+.pageHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: flex-start;
+}
+.pageHeader h1 {
+  margin: 0;
+  font-size: clamp(26px, 3vw, 34px);
+  line-height: 1.2;
+}
+.pageHeader p {
+  margin: 8px 0 0;
+  color: var(--text-secondary);
+}
+.headerActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.metricGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+.metricCard,
+.card {
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  border-radius: 14px;
+  box-shadow: 0 12px 32px -28px rgba(15, 23, 42, 0.55);
+}
+.metricCard {
+  min-width: 0;
+  padding: 18px;
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+}
+.metricCard > div {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+.metricCard span,
+.metricCard small {
+  color: var(--text-secondary);
+}
+.metricCard strong {
+  font-size: 23px;
+  overflow-wrap: anywhere;
+}
+.metricCard small {
+  font-size: 12px;
+  line-height: 1.4;
+}
+.metricIcon {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  font-size: 20px;
+  background: color-mix(in srgb, currentColor 12%, var(--bg-primary));
+}
+.purple {
+  color: #8b5cf6;
+}
+.cyan {
+  color: #06b6d4;
+}
+.red {
+  color: var(--danger-color);
+}
+.blue {
+  color: var(--primary-color);
+}
+.overviewGrid,
+.detailGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(280px, 0.9fr);
+  gap: 16px;
+  align-items: start;
+}
+.primaryColumn,
+.secondaryColumn {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+.card {
+  padding: 18px;
+  min-width: 0;
+}
+.card h2 {
+  margin: 0;
+  font-size: 16px;
+}
+.card > p {
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+.sectionHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 16px;
+}
+.sectionHeader > span {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+.readinessGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+  gap: 22px;
+}
+.coverageList {
+  display: grid;
+  gap: 16px;
+}
+.coverageRow {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.8fr) minmax(100px, 1fr) minmax(58px, auto);
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+.coverageRow > strong {
+  text-align: right;
+  font-size: 12px;
+}
+.progressTrack,
+.miniProgress {
+  overflow: hidden;
+  background: color-mix(in srgb, var(--border-color) 72%, var(--bg-tertiary));
+  border-radius: 999px;
+}
+.progressTrack {
+  height: 8px;
+}
+.progressTrack i,
+.miniProgress i {
+  display: block;
+  height: 100%;
+  background: var(--primary-color);
+  border-radius: inherit;
+}
+.progressTrack .indeterminate {
+  width: 36%;
+  animation: maintenance-indeterminate 1.4s ease-in-out infinite alternate;
+}
+@keyframes maintenance-indeterminate {
+  from {
+    transform: translateX(-20%);
+  }
+  to {
+    transform: translateX(220%);
+  }
+}
+.capabilityList {
+  display: grid;
+  gap: 14px;
+  border-left: 1px solid var(--border-color);
+  padding-left: 22px;
+}
+.capabilityList > div {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+}
+.capabilityList p {
+  margin: 0;
+  display: grid;
+  gap: 3px;
+}
+.capabilityList small {
+  color: var(--text-secondary);
+  line-height: 1.35;
+}
+.pill {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.toneSuccess {
+  color: var(--success-color);
+  border-color: color-mix(in srgb, var(--success-color) 30%, transparent);
+  background: color-mix(in srgb, var(--success-color) 10%, var(--bg-primary));
+}
+.toneWarning {
+  color: var(--warning-color);
+  border-color: color-mix(in srgb, var(--warning-color) 30%, transparent);
+  background: color-mix(in srgb, var(--warning-color) 10%, var(--bg-primary));
+}
+.toneDanger {
+  color: var(--danger-color);
+  border-color: color-mix(in srgb, var(--danger-color) 30%, transparent);
+  background: color-mix(in srgb, var(--danger-color) 10%, var(--bg-primary));
+}
+.toneInfo {
+  color: var(--primary-color);
+  border-color: color-mix(in srgb, var(--primary-color) 30%, transparent);
+  background: color-mix(in srgb, var(--primary-color) 10%, var(--bg-primary));
+}
+.toneNeutral {
+  color: var(--text-secondary);
+  border-color: var(--border-color);
+  background: var(--bg-tertiary);
+}
+.storageGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+.storageGrid > div {
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+  background: var(--bg-tertiary);
+  border-radius: 10px;
+}
+.storageGrid span {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.storageGrid strong {
+  font-size: 17px;
+  overflow-wrap: anywhere;
+}
+.warningNote,
+.infoNote {
+  margin: 14px 0 0;
+  padding: 11px 13px;
+  border-radius: 9px;
+  font-size: 12px;
+}
+.warningNote {
+  color: var(--warning-text);
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+}
+.infoNote {
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--primary-color) 6%, var(--bg-primary));
+  border: 1px solid color-mix(in srgb, var(--primary-color) 18%, var(--border-color));
+}
+.operationList {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+.keyValues {
+  margin: 14px 0;
+  display: grid;
+}
+.keyValues > div {
+  display: grid;
+  grid-template-columns: minmax(110px, 0.8fr) minmax(0, 1fr);
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-color);
+}
+.keyValues dt {
+  color: var(--text-secondary);
+}
+.keyValues dd {
+  margin: 0;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.legendList {
+  list-style: none;
+  padding: 0;
+  margin: 15px 0 0;
+  display: grid;
+  gap: 13px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+.legendList li {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 9px;
+}
+.legendList i {
+  width: 8px;
+  height: 8px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.tableWrap {
+  overflow-x: auto;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+}
+.tableWrap table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.tableWrap th,
+.tableWrap td {
+  padding: 11px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-color);
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.tableWrap th {
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  font-weight: 650;
+}
+.tableWrap tbody tr:last-child td {
+  border-bottom: 0;
+}
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+.linkButton {
+  appearance: none;
+  border: 0;
+  padding: 2px;
+  background: transparent;
+  color: var(--primary-color);
+  cursor: pointer;
+  font: inherit;
+}
+.linkButton:hover {
+  text-decoration: underline;
+}
+.linkButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+  text-decoration: none;
+}
+.dangerLink {
+  color: var(--danger-color);
+}
+.filterBar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.filterBar button {
+  border: 1px solid var(--border-color);
+  border-radius: 9px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  padding: 8px 12px;
+  cursor: pointer;
+}
+.filterBar button strong {
+  margin-left: 8px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--bg-tertiary);
+}
+.filterBar .filterActive {
+  color: var(--primary-color);
+  border-color: var(--primary-color);
+  background: color-mix(in srgb, var(--primary-color) 6%, var(--bg-primary));
+}
+.miniProgress {
+  width: 120px;
+  height: 5px;
+  margin-top: 5px;
+}
+.rowActions {
+  display: flex;
+  gap: 10px;
+}
+.pagination {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 16px;
+}
+.empty {
+  margin: 16px 0 0;
+  text-align: center;
+  color: var(--text-secondary);
+}
+.runHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+.runHeader > div {
+  display: grid;
+  gap: 5px;
+}
+.runHeader > div > span,
+.runHeader small {
+  color: var(--text-secondary);
+}
+.runHeader strong {
+  font-size: 18px;
+}
+.stepper {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0;
+  margin: 26px 0;
+}
+.stepper > div {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  gap: 7px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.stepper > div::before {
+  content: '';
+  position: absolute;
+  height: 2px;
+  top: 14px;
+  left: -50%;
+  width: 100%;
+  background: var(--border-color);
+  z-index: 0;
+}
+.stepper > div:first-child::before {
+  display: none;
+}
+.stepper span {
+  z-index: 1;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+}
+.stepper .stepDone,
+.stepper .stepCurrent {
+  color: var(--primary-color);
+}
+.stepper .stepDone span,
+.stepper .stepCurrent span {
+  color: var(--primary-contrast);
+  background: var(--primary-color);
+  border-color: var(--primary-color);
+}
+.stepper .stepDone::before,
+.stepper .stepCurrent::before {
+  background: var(--primary-color);
+}
+.progressLabel {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+.dangerCard {
+  border-color: color-mix(in srgb, var(--danger-color) 42%, var(--border-color));
+}
+
+@media (max-width: 1100px) {
+  .metricGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .overviewGrid,
+  .detailGrid {
+    grid-template-columns: 1fr;
+  }
+  .secondaryColumn {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .secondaryColumn > :last-child:nth-child(odd) {
+    grid-column: 1 / -1;
+  }
+}
+@media (max-width: 760px) {
+  .pageHeader {
+    flex-direction: column;
+  }
+  .headerActions {
+    justify-content: flex-start;
+  }
+  .metricGrid,
+  .storageGrid,
+  .readinessGrid,
+  .secondaryColumn {
+    grid-template-columns: 1fr;
+  }
+  .capabilityList {
+    border-left: 0;
+    border-top: 1px solid var(--border-color);
+    padding: 18px 0 0;
+  }
+  .coverageRow {
+    grid-template-columns: 1fr auto;
+  }
+  .coverageRow .progressTrack {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+  .secondaryColumn > :last-child:nth-child(odd) {
+    grid-column: auto;
+  }
+}
+@media (max-width: 440px) {
+  .metricGrid {
+    grid-template-columns: 1fr;
+  }
+  .card,
+  .metricCard {
+    padding: 14px;
+  }
+  .keyValues > div {
+    grid-template-columns: 1fr;
+  }
+  .keyValues dd {
+    text-align: left;
+  }
+}

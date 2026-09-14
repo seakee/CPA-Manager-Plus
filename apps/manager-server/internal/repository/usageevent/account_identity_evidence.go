@@ -4,11 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
 
 const (
-	CodexLegacyIdentityEvidenceTable = "usage_codex_legacy_identity_evidence_v1"
-	CodexLegacyIdentityRollupName    = "codex_legacy_identity_v1"
+	CodexLegacyIdentityEvidenceTable         = "usage_codex_legacy_identity_evidence_v1"
+	CodexLegacyIdentityRollupName            = "codex_legacy_identity_v1"
+	CodexLegacyIdentityEvidenceSchemaVersion = usageidentity.CodexLegacyIdentityEvidenceSchemaVersion
 	// Bump when the stored fields, physical predicates, or chronology projection
 	// change. Account-key/model revisions do not change this raw evidence.
 	CodexLegacyIdentityEvidenceRevision = "1"
@@ -118,7 +121,7 @@ func queryStoredCodexLegacyIdentityEvidence(ctx context.Context, queryer SQLQuer
 
 func codexLegacyIdentityEvidenceReadState(ctx context.Context, queryer SQLQueryer) (int64, int64, bool, error) {
 	rows, err := queryer.QueryContext(ctx, `select
-		s.schema_version, s.structure_revision, s.status, s.coverage_event_id,
+		s.schema_version, s.structure_revision, s.status, s.coverage_event_id, s.target_event_id,
 		coalesce((select max(id) from usage_events), 0)
 	from usage_monitoring_rollup_state s
 	where s.rollup_name = ? and exists (
@@ -129,13 +132,13 @@ func codexLegacyIdentityEvidenceReadState(ctx context.Context, queryer SQLQuerye
 	}
 	var version int
 	var revision, status string
-	var coverageID, latestID int64
+	var coverageID, targetEventID, rawMaxID int64
 	if !rows.Next() {
 		err := rows.Err()
 		_ = rows.Close()
 		return 0, 0, false, err
 	}
-	if err := rows.Scan(&version, &revision, &status, &coverageID, &latestID); err != nil {
+	if err := rows.Scan(&version, &revision, &status, &coverageID, &targetEventID, &rawMaxID); err != nil {
 		_ = rows.Close()
 		return 0, 0, false, err
 	}
@@ -145,13 +148,17 @@ func codexLegacyIdentityEvidenceReadState(ctx context.Context, queryer SQLQuerye
 	if err := rows.Err(); err != nil {
 		return 0, 0, false, err
 	}
-	if version != 1 || revision != CodexLegacyIdentityEvidenceRevision || coverageID < 0 || coverageID > latestID {
+	latestKnownID := targetEventID
+	if rawMaxID > latestKnownID {
+		latestKnownID = rawMaxID
+	}
+	if version != CodexLegacyIdentityEvidenceSchemaVersion || revision != CodexLegacyIdentityEvidenceRevision || coverageID < 0 || coverageID > latestKnownID {
 		return 0, 0, false, nil
 	}
 	if status != "ready" && status != "catching_up" && status != "rebuilding" {
 		return 0, 0, false, nil
 	}
-	if coverageID != latestID {
+	if coverageID != latestKnownID {
 		rows, err := queryer.QueryContext(ctx, `select count(*) from (
 			select id from usage_events where id > ? order by id limit ?
 		)`, coverageID, codexLegacyIdentityTailLimit+1)
@@ -178,5 +185,5 @@ func codexLegacyIdentityEvidenceReadState(ctx context.Context, queryer SQLQuerye
 			return 0, 0, false, nil
 		}
 	}
-	return coverageID, latestID, true, nil
+	return coverageID, latestKnownID, true, nil
 }

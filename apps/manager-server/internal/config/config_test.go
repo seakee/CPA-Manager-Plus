@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -27,10 +28,14 @@ func TestLoadCreatesDefaultConfig(t *testing.T) {
 	if !cfg.DashboardHourlyRollupEnabled {
 		t.Fatal("DashboardHourlyRollupEnabled = false by default")
 	}
+	if want := filepath.Join(dir, "data", "usage-archives"); cfg.UsageArchiveDir != want {
+		t.Fatalf("UsageArchiveDir = %q, want %q", cfg.UsageArchiveDir, want)
+	}
 	if cfg.UsageImportChunkBytes != DefaultUsageImportChunkBytes ||
 		cfg.UsageImportDiskQuotaBytes != DefaultUsageImportDiskQuotaBytes ||
 		cfg.UsageImportMaxSessions != DefaultUsageImportMaxSessions ||
-		cfg.UsageImportSessionTTL != DefaultUsageImportSessionTTL {
+		cfg.UsageImportSessionTTL != DefaultUsageImportSessionTTL ||
+		cfg.UsageArchiveRetentionEnabled || cfg.UsageArchiveRetentionDays != DefaultUsageArchiveRetentionDays {
 		t.Fatalf("usage import defaults = %#v", cfg)
 	}
 
@@ -90,7 +95,9 @@ func TestLoadReadsConfigAndResolvesRelativePaths(t *testing.T) {
 	  "usageImportChunkBytes": 1048576,
 	  "usageImportDiskQuotaBytes": 1073741824,
 	  "usageImportMaxSessions": 3,
-	  "usageImportSessionTTLMinutes": 120
+	  "usageImportSessionTTLMinutes": 120,
+	  "usageArchiveRetentionEnabled": true,
+	  "usageArchiveRetentionDays": 45
 }`), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -143,6 +150,12 @@ func TestLoadReadsConfigAndResolvesRelativePaths(t *testing.T) {
 		cfg.UsageImportMaxSessions != 3 || cfg.UsageImportSessionTTL != 2*time.Hour {
 		t.Fatalf("usage import config = %#v", cfg)
 	}
+	if !cfg.UsageArchiveRetentionEnabled || cfg.UsageArchiveRetentionDays != 45 {
+		t.Fatalf("usage archive retention config = %#v", cfg)
+	}
+	if want := filepath.Join(dir, "state", "usage-archives"); cfg.UsageArchiveDir != want {
+		t.Fatalf("UsageArchiveDir = %q, want %q", cfg.UsageArchiveDir, want)
+	}
 }
 
 func TestLoadEnvOverridesConfig(t *testing.T) {
@@ -168,6 +181,8 @@ func TestLoadEnvOverridesConfig(t *testing.T) {
 	t.Setenv("USAGE_IMPORT_DISK_QUOTA_BYTES", "2147483648")
 	t.Setenv("USAGE_IMPORT_MAX_SESSIONS", "4")
 	t.Setenv("USAGE_IMPORT_SESSION_TTL_MINUTES", "30")
+	t.Setenv("USAGE_ARCHIVE_RETENTION_ENABLED", "true")
+	t.Setenv("USAGE_ARCHIVE_RETENTION_DAYS", "60")
 
 	cfg, err := Load()
 	if err != nil {
@@ -195,6 +210,129 @@ func TestLoadEnvOverridesConfig(t *testing.T) {
 		cfg.UsageImportMaxSessions != 4 || cfg.UsageImportSessionTTL != 30*time.Minute {
 		t.Fatalf("usage import env config = %#v", cfg)
 	}
+	if !cfg.UsageArchiveRetentionEnabled || cfg.UsageArchiveRetentionDays != 60 {
+		t.Fatalf("usage archive retention env config = %#v", cfg)
+	}
+	if want := filepath.Join(dir, "env-data", "usage-archives"); cfg.UsageArchiveDir != want {
+		t.Fatalf("UsageArchiveDir = %q, want %q", cfg.UsageArchiveDir, want)
+	}
+}
+
+func TestLoadRejectsInvalidUsageArchiveRetentionDays(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value string
+	}{
+		{name: "zero", value: "0"},
+		{name: "negative", value: "-1"},
+		{name: "not an integer", value: "thirty"},
+		{name: "integer overflow", value: "9223372036854775808"},
+		{name: "duration overflow", value: strconv.FormatInt(maxUsageArchiveRetentionDays+1, 10)},
+	} {
+		t.Run("environment/"+test.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			dir := t.TempDir()
+			t.Setenv(configEnvKey, filepath.Join(dir, "missing-config.json"))
+			t.Setenv("USAGE_ARCHIVE_RETENTION_ENABLED", "true")
+			t.Setenv("USAGE_ARCHIVE_RETENTION_DAYS", test.value)
+			if _, err := LoadWithoutCreatingDefault(); err == nil {
+				t.Fatalf("retention days %q unexpectedly loaded", test.value)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name  string
+		value string
+	}{
+		{name: "zero", value: "0"},
+		{name: "negative", value: "-1"},
+		{name: "duration overflow", value: strconv.FormatInt(maxUsageArchiveRetentionDays+1, 10)},
+	} {
+		t.Run("config/"+test.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "config.json")
+			contents := `{"usageArchiveRetentionEnabled":true,"usageArchiveRetentionDays":` + test.value + `}`
+			if err := os.WriteFile(configPath, []byte(contents), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			t.Setenv(configEnvKey, configPath)
+			if _, err := Load(); err == nil {
+				t.Fatalf("retention days %q unexpectedly loaded", test.value)
+			}
+		})
+	}
+}
+
+func TestLoadRetentionDaysEnvironmentOverridesInvalidFileValue(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"usageArchiveRetentionEnabled":true,"usageArchiveRetentionDays":0}`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv(configEnvKey, configPath)
+	t.Setenv("USAGE_ARCHIVE_RETENTION_DAYS", "45")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load overridden retention days: %v", err)
+	}
+	if !cfg.UsageArchiveRetentionEnabled || cfg.UsageArchiveRetentionDays != 45 {
+		t.Fatalf("overridden retention config = %#v", cfg)
+	}
+}
+
+func TestLoadCustomDBPathSuppliesArchiveDirectoryWithoutMovingDataKey(t *testing.T) {
+	t.Run("environment", func(t *testing.T) {
+		clearConfigEnv(t)
+		dir := t.TempDir()
+		t.Setenv(configEnvKey, filepath.Join(dir, "missing-config.json"))
+		customDB := filepath.Join(dir, "custom", "history.sqlite")
+		t.Setenv("USAGE_DB_PATH", customDB)
+
+		cfg, err := LoadWithoutCreatingDefault()
+		if err != nil {
+			t.Fatalf("load environment DB path: %v", err)
+		}
+		wantDataDir := filepath.Join(dir, "data")
+		if cfg.DBPath != customDB || cfg.DataDir != wantDataDir {
+			t.Fatalf("custom environment DB config = %#v", cfg)
+		}
+		if want := filepath.Join(wantDataDir, "data.key"); cfg.DataKeyPath != want {
+			t.Fatalf("DataKeyPath = %q, want %q", cfg.DataKeyPath, want)
+		}
+		if want := filepath.Join(filepath.Dir(customDB), "usage-archives"); cfg.UsageArchiveDir != want {
+			t.Fatalf("UsageArchiveDir = %q, want %q", cfg.UsageArchiveDir, want)
+		}
+	})
+
+	t.Run("config file", func(t *testing.T) {
+		clearConfigEnv(t)
+		dir := t.TempDir()
+		configPath := filepath.Join(dir, "config.json")
+		if err := os.WriteFile(configPath, []byte(`{"dbPath":"state/history.sqlite"}`), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		t.Setenv(configEnvKey, configPath)
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("load config DB path: %v", err)
+		}
+		wantDB := filepath.Join(dir, "state", "history.sqlite")
+		wantDataDir := filepath.Join(dir, "data")
+		if cfg.DBPath != wantDB || cfg.DataDir != wantDataDir {
+			t.Fatalf("custom config DB config = %#v", cfg)
+		}
+		if want := filepath.Join(wantDataDir, "data.key"); cfg.DataKeyPath != want {
+			t.Fatalf("DataKeyPath = %q, want %q", cfg.DataKeyPath, want)
+		}
+		if want := filepath.Join(filepath.Dir(wantDB), "usage-archives"); cfg.UsageArchiveDir != want {
+			t.Fatalf("UsageArchiveDir = %q, want %q", cfg.UsageArchiveDir, want)
+		}
+	})
 }
 
 func TestNormalizeCollectorMode(t *testing.T) {
@@ -245,6 +383,8 @@ func clearConfigEnv(t *testing.T) {
 		"USAGE_IMPORT_DISK_QUOTA_BYTES",
 		"USAGE_IMPORT_MAX_SESSIONS",
 		"USAGE_IMPORT_SESSION_TTL_MINUTES",
+		"USAGE_ARCHIVE_RETENTION_ENABLED",
+		"USAGE_ARCHIVE_RETENTION_DAYS",
 		"PANEL_PATH",
 	} {
 		t.Setenv(key, "")
