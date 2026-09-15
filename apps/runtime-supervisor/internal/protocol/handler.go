@@ -1,7 +1,8 @@
-// Package protocol implements the read-only Runtime Protocol v1 surface.
+// Package protocol implements the Runtime Protocol v1 surface.
 package protocol
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -9,24 +10,34 @@ import (
 	"net/http"
 	"strings"
 	"unicode"
+
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/journal"
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/lifecycle"
 )
 
 const (
 	Version       = "v1"
 	handshakePath = "/v1/runtime/handshake"
 	statusPath    = "/v1/runtime/status"
+	startPath     = "/v1/runtime/operations/start"
 )
+
+// StartExecutor is the Supervisor-private application boundary used by the
+// protocol adapter. A nil executor keeps the Runtime read-only.
+type StartExecutor func(context.Context, lifecycle.StartRequest) (journal.Operation, error)
 
 type Config struct {
 	RuntimeIdentity   string
 	RuntimeGeneration uint64
 	Token             string
+	Start             StartExecutor
 }
 
 type handler struct {
 	runtimeIdentity   string
 	runtimeGeneration uint64
 	tokenDigest       [sha256.Size]byte
+	start             StartExecutor
 }
 
 type handshakeResponse struct {
@@ -72,18 +83,23 @@ func NewHandler(config Config) (http.Handler, error) {
 		runtimeIdentity:   identity,
 		runtimeGeneration: config.RuntimeGeneration,
 		tokenDigest:       sha256.Sum256([]byte(config.Token)),
+		start:             config.Start,
 	}, nil
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	var allowedMethod string
 	switch r.URL.Path {
 	case handshakePath, statusPath:
+		allowedMethod = http.MethodGet
+	case startPath:
+		allowedMethod = http.MethodPost
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "runtime endpoint not found")
 		return
 	}
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", http.MethodGet)
+	if r.Method != allowedMethod {
+		w.Header().Set("Allow", allowedMethod)
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
@@ -110,6 +126,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			CPAObservedVersion: "",
 			Capabilities:       []string{},
 		})
+	case startPath:
+		h.handleStart(w, r)
 	}
 }
 
