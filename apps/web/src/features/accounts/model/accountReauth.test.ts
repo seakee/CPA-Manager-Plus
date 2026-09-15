@@ -8,7 +8,7 @@ describe('accountReauth', () => {
     });
   });
 
-  it('routes xAI and Claude accounts to their OAuth providers', () => {
+  it('routes xAI, Claude, and Qoder accounts to their OAuth providers', () => {
     expect(resolveAccountReauthAction({ name: 'xai.json', type: 'xai' })).toEqual({
       kind: 'navigate',
       oauthProvider: 'xai',
@@ -18,6 +18,11 @@ describe('accountReauth', () => {
       kind: 'navigate',
       oauthProvider: 'anthropic',
       path: '/oauth#oauth-provider-anthropic',
+    });
+    expect(resolveAccountReauthAction({ name: 'qoder.json', type: 'qoder' })).toEqual({
+      kind: 'navigate',
+      oauthProvider: 'qoder',
+      path: '/oauth#oauth-provider-qoder',
     });
   });
 

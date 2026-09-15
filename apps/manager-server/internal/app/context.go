@@ -121,6 +121,40 @@ func FromExistingWithModelsDev(
 	)
 }
 
+func FromExistingWithTrustedModelsDev(
+	cfg config.Config,
+	st *store.Store,
+	collectorManager *collector.Manager,
+	startedAt int64,
+	embeddedPanel fs.FS,
+	modelsDevModelPriceSyncURL *string,
+	modelPriceSyncURL *string,
+	openRouterModelPriceSyncURL *string,
+	serviceID string,
+	automationRuntimeService ...AutomationRuntimeService,
+) *Context {
+	appContext := FromExistingWithModelsDev(
+		cfg,
+		st,
+		collectorManager,
+		startedAt,
+		embeddedPanel,
+		modelsDevModelPriceSyncURL,
+		modelPriceSyncURL,
+		openRouterModelPriceSyncURL,
+		serviceID,
+		automationRuntimeService...,
+	)
+	appContext.ModelPriceService = modelpricesvc.NewProductionMultiSourceWithModelsDev(
+		st,
+		modelsDevModelPriceSyncURL,
+		modelPriceSyncURL,
+		openRouterModelPriceSyncURL,
+		appContext.ManagerConfigService,
+	)
+	return appContext
+}
+
 func fromExisting(
 	cfg config.Config,
 	st *store.Store,

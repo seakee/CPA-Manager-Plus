@@ -64,6 +64,7 @@ const OAUTH_PROVIDER_PRESETS = [
   'qwen',
   'kimi',
   'iflow',
+  'qoder',
 ];
 
 const OAUTH_PROVIDER_EXCLUDES = new Set(['all', 'unknown', 'empty']);

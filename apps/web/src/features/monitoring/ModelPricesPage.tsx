@@ -8,7 +8,9 @@ import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability
 import {
   usageServiceApi,
   type ModelPriceSyncCandidate,
+  type ModelPriceSyncRequest,
   type ModelPriceSyncResponse,
+  type ModelPriceSyncSource,
   type ModelPriceUsageSummaryResponse,
 } from '@/services/api/usageService';
 import { useAuthStore, useNotificationStore } from '@/stores';
@@ -21,11 +23,15 @@ import {
   buildSyncPriceModelsFromSummary,
   createEmptyPriceDraft,
   createPriceDraft,
+  extractModelPriceModalities,
   filterModelPriceRows,
   formatContextThreshold,
+  formatModelPriceModalities,
   formatPriceUnit,
   formatServiceTierRule,
   getModelPriceCandidateIdentity,
+  hasNonTextModelPriceModality,
+  isCatalogSynchronizedModelPrice,
   groupModelPriceCandidatesBySource,
   resolveContextTierDisplayPrice,
   resolveServiceTierDisplayPrice,
@@ -33,9 +39,16 @@ import {
   type PriceDraft,
 } from '@/features/monitoring/model/modelPricesPageModel';
 import { readModelPricesPageUiState, writeModelPricesPageUiState } from './modelPricesPageUiState';
+import { formatUnixTimestamp } from '@/utils/format';
 import styles from './ModelPricesPage.module.scss';
 
 const FILTERS: ModelPriceFilter[] = ['all', 'missing', 'candidates', 'saved'];
+const SYNC_SOURCES: Array<{ value: '' | ModelPriceSyncSource; labelKey: string }> = [
+  { value: '', labelKey: 'model_prices.sync_source_auto' },
+  { value: 'models.dev', labelKey: 'model_prices.sync_source_models_dev' },
+  { value: 'litellm', labelKey: 'model_prices.sync_source_litellm' },
+  { value: 'openrouter', labelKey: 'model_prices.sync_source_openrouter' },
+];
 
 const resolveErrorMessage = (error: unknown, fallback: string) => {
   const rawMessage = error instanceof Error ? error.message : String(error || fallback);
@@ -56,6 +69,8 @@ export function ModelPricesPage() {
   const initialUiState = useRef(readModelPricesPageUiState());
   const [search, setSearch] = useState(() => initialUiState.current.search);
   const [filter, setFilter] = useState<ModelPriceFilter>(() => initialUiState.current.filter);
+  const [syncSource, setSyncSource] = useState<'' | ModelPriceSyncSource>('');
+  const [activeSyncSource, setActiveSyncSource] = useState<'' | ModelPriceSyncSource>('');
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<ModelPriceSyncResponse | null>(null);
   const [selectedCandidates, setSelectedCandidates] = useState<Record<string, string>>({});
@@ -127,14 +142,19 @@ export function ModelPricesPage() {
     return () => controller.abort();
   }, [managementKey, modelPriceServiceBase]);
 
-  const handleSync = async () => {
+  const handleSync = async (source: '' | ModelPriceSyncSource = syncSource) => {
     if (syncModels.length === 0) {
       showNotification(t('usage_stats.model_price_sync_no_models'), 'warning');
       return;
     }
     setSyncing(true);
+    setActiveSyncSource(source);
     try {
-      const result = await syncModelPrices(syncModels);
+      const request: ModelPriceSyncRequest = {
+        models: syncModels,
+        ...(source ? { source } : {}),
+      };
+      const result = await syncModelPrices(request);
       setSyncResult(result);
       showNotification(
         t('model_prices.sync_success_detail', {
@@ -157,6 +177,7 @@ export function ModelPricesPage() {
       );
     } finally {
       setSyncing(false);
+      setActiveSyncSource('');
     }
   };
 
@@ -235,6 +256,30 @@ export function ModelPricesPage() {
           <span className={styles.metaPill}>
             {t('model_prices.sync_model_count', { count: syncModels.length })}
           </span>
+          <label className={styles.syncSourceControl}>
+            <span>{t('model_prices.sync_source_label')}</span>
+            <select
+              value={syncSource}
+              disabled={syncing}
+              onChange={(event) => setSyncSource(event.target.value as '' | ModelPriceSyncSource)}
+              aria-label={t('model_prices.sync_source_label')}
+            >
+              {SYNC_SOURCES.map((source) => (
+                <option key={source.value || 'auto'} value={source.value}>
+                  {t(source.labelKey)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <Button
+            size="xs"
+            variant="secondary"
+            onClick={() => void handleSync('litellm')}
+            loading={syncing && activeSyncSource === 'litellm'}
+            disabled={syncing}
+          >
+            {t('model_prices.sync_litellm')}
+          </Button>
           <Button
             size="xs"
             variant="secondary"
@@ -420,6 +465,11 @@ export function ModelPricesPage() {
                     : '';
                   const contextTiers = row.price?.contextTiers ?? [];
                   const serviceTiers = row.price?.serviceTiers ?? [];
+                  const catalogSynchronized = isCatalogSynchronizedModelPrice(row.price);
+                  const modalities = catalogSynchronized
+                    ? extractModelPriceModalities(row.price?.rawJson)
+                    : null;
+                  const hasNonTextModality = hasNonTextModelPriceModality(modalities);
 
                   return (
                     <tr key={row.model}>
@@ -430,6 +480,16 @@ export function ModelPricesPage() {
                             <span>{t('model_prices.needs_confirmation')}</span>
                           ) : !row.hasPrice ? (
                             <span>{t('model_prices.no_price')}</span>
+                          ) : modalities ? (
+                            <span
+                              className={styles.modalitySummary}
+                              title={t('model_prices.modality_capability_hint')}
+                            >
+                              {formatModelPriceModalities(modalities, {
+                                input: t('model_prices.modality_input'),
+                                output: t('model_prices.modality_output'),
+                              })}
+                            </span>
                           ) : null}
                         </div>
                       </td>
@@ -493,6 +553,14 @@ export function ModelPricesPage() {
                             </span>
                             {row.price.sourceModelId ? (
                               <small>{row.price.sourceModelId}</small>
+                            ) : null}
+                            {row.price.syncedAtMs ? (
+                              <small>{`${t('model_prices.synced_at')}: ${formatUnixTimestamp(row.price.syncedAtMs)}`}</small>
+                            ) : null}
+                            {hasNonTextModality ? (
+                              <small className={styles.modalityTelemetryNotice}>
+                                {t('model_prices.modality_tokens_unreported')}
+                              </small>
                             ) : null}
                           </div>
                         ) : selectedCandidate ? (

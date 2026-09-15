@@ -31,6 +31,11 @@ import {
   type CodexInspectionRunResult,
 } from './codexInspection';
 import {
+  CODEX_INSPECTION_TARGET_TYPES,
+  normalizeCodexInspectionTargetTypes,
+  normalizeLocalCodexInspectionTargetTypes,
+} from './model/codexInspectionSettings';
+import {
   ACTION_FILTERS,
   buildCodexInspectionPaginationState,
   buildConfigOverviewItems,
@@ -339,6 +344,26 @@ describe('inspection quota reset presentation', () => {
 });
 
 describe('Codex inspection settings', () => {
+  it('normalizes only canonical inspection targets in stable server order', () => {
+    expect(CODEX_INSPECTION_TARGET_TYPES).toEqual(['codex', 'xai', 'claude']);
+    expect(
+      normalizeCodexInspectionTargetTypes([
+        'Qwen',
+        ' claude ',
+        'qoder',
+        'XAI',
+        'iflow',
+        'codex',
+        'anthropic',
+      ])
+    ).toEqual(['codex', 'xai', 'claude']);
+    expect(normalizeLocalCodexInspectionTargetTypes('claude+qwen+codex+xai+qoder+iflow')).toEqual([
+      'codex',
+      'xai',
+    ]);
+    expect(normalizeLocalCodexInspectionTargetTypes('claude')).toEqual([]);
+  });
+
   it('shows provider User-Agent fields only when their request path is active', () => {
     expect(getInspectionUserAgentVisibility('codex', false)).toEqual({
       codex: true,

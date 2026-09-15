@@ -1,11 +1,11 @@
 ---
-title: Account Inspection (Codex / xAI)
-description: Inspect Codex and xAI accounts locally or on a Manager Server schedule, including quota, credentials, workspace, billing evidence, and controlled actions.
+title: Account Inspection
+description: Inspect `codex` and `xai` accounts in the browser or with Manager Server. Manager Server also provides read-only `claude` OAuth usage inspection with no model or inference request and no credential mutation.
 ---
 
-# Account Inspection (Codex / xAI)
+# Account Inspection
 
-Account inspection explains why an account cannot reliably serve requests. The route and parts of the UI still use the `Codex Inspection` name, but inspection targets now include Codex and xAI.
+Account inspection explains why an account cannot reliably serve requests. The route and parts of the UI still use the `Codex Inspection` name. Browser-local targets are only `codex` and `xai`; Manager Server also adds read-only `claude` OAuth usage inspection.
 
 Open the [Account Inspection Demo](https://seakee.github.io/CPA-Manager-Plus/#/demo/codex-inspection) to inspect fictional results without contacting a provider.
 
@@ -13,10 +13,15 @@ For a single failed request, start with [Monitoring](./monitoring.md). Use inspe
 
 ## Local And Server Inspection
 
-- **Local inspection** runs in the current browser session and is useful for a few accounts or temporary diagnostics.
-- **Server inspection** runs in Manager Server and supports schedules, history, logs, and shared action policy.
+- **Local inspection** runs in the current browser session and supports only `codex` and `xai`.
+- **Server inspection** runs in Manager Server and supports schedules, history, logs, and shared action policy for `codex` and `xai`.
+- **Claude OAuth usage inspection** is available only in Manager Server. It is read-only: it sends no model or inference request and never automatically disables, enables, deletes, reauthenticates, or otherwise mutates credentials.
 
 Before server inspection, confirm the CPA URL, CPA Management Key, auth files, and stable `auth_index` values.
+
+## Unavailable Inspection Targets
+
+Remote inspection and active quota refresh are unavailable for `qwen`, `qoder`, and `iflow` because CPAMP has no verified safe provider contract. Their existing CPA-exposed OAuth/auth-file workflows remain unaffected; Qoder device OAuth remains available when CPA supports it. They are not browser-local or Manager Server inspection targets.
 
 ## Codex Evidence
 
@@ -48,6 +53,8 @@ xAI inspection prefers read-only evidence that does not send a model inference r
 - **Delete**: only after the account is clearly invalid, the file is not shared, and the user confirms.
 
 Read the provider, reason code, redacted evidence, and recent request behavior together with the action label.
+
+Only eligible `codex` and `xai` inspection results can receive automatic inspection actions. `claude` OAuth usage inspection is always read-only and never receives automatic actions.
 
 ## Scheduling And Automation Boundaries
 

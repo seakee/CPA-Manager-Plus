@@ -420,6 +420,13 @@ export interface ModelPriceSyncSourceResult {
   error?: string;
 }
 
+export type ModelPriceSyncSource = 'models.dev' | 'litellm' | 'openrouter';
+
+export interface ModelPriceSyncRequest {
+  models?: string[];
+  source?: ModelPriceSyncSource;
+}
+
 export interface ModelPriceSyncResponse extends ModelPricesResponse {
   source?: string;
   sources?: string[];
@@ -2560,9 +2567,11 @@ const getDemoCodexInspectionActionsResponse = (
   };
 };
 
-const getDemoModelPriceSyncResponse = (models?: string[]): ModelPriceSyncResponse => {
+const getDemoModelPriceSyncResponse = (
+  request: ModelPriceSyncRequest = {}
+): ModelPriceSyncResponse => {
   const prices = getDemoModelPrices().prices;
-  const selectedModels = new Set((models || []).map((model) => model.trim()).filter(Boolean));
+  const selectedModels = new Set((request.models || []).map((model) => model.trim()).filter(Boolean));
   const selectedPrices =
     selectedModels.size > 0
       ? Object.fromEntries(Object.entries(prices).filter(([model]) => selectedModels.has(model)))
@@ -3165,16 +3174,20 @@ export const usageServiceApi = {
   syncModelPrices: async (
     base: string,
     managementKey?: string,
-    models?: string[]
+    request: ModelPriceSyncRequest = {}
   ): Promise<ModelPriceSyncResponse> => {
     if (__DEMO_SITE__ && isDemoMode()) {
-      return getDemoModelPriceSyncResponse(models);
+      return getDemoModelPriceSyncResponse(request);
     }
 
+    const body: ModelPriceSyncRequest = {
+      ...(request.models ? { models: request.models } : {}),
+      ...(request.source ? { source: request.source } : {}),
+    };
     return withUsageServiceError(async () => {
       const response = await axios.post<ModelPriceSyncResponse>(
         buildUrl(base, '/v0/management/model-prices/sync'),
-        models ? { models } : {},
+        body,
         {
           timeout: 45 * 1000,
           headers: authHeaders(managementKey),

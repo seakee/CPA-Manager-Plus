@@ -11,6 +11,7 @@ import {
   loadCodexInspectionConfigurableSettings,
   normalizeAutoActionMode,
   normalizeConfigurableSettings,
+  normalizeLocalConfigurableSettings,
   readConfigurableSettingsFromConfig,
   readString,
   saveCodexInspectionConfigurableSettings,
@@ -48,6 +49,16 @@ export {
   loadCodexInspectionConfigurableSettings,
   saveCodexInspectionConfigurableSettings,
 };
+
+export const loadLocalCodexInspectionConfigurableSettings = (
+  config?: Config | null
+): CodexInspectionConfigurableSettings =>
+  normalizeLocalConfigurableSettings(readConfigurableSettingsFromConfig(config));
+
+export const saveLocalCodexInspectionConfigurableSettings = (
+  settings: Partial<CodexInspectionConfigurableSettings>
+): CodexInspectionConfigurableSettings =>
+  saveCodexInspectionConfigurableSettings(normalizeLocalConfigurableSettings(settings));
 
 export {
   CODEX_INSPECTION_LAST_RUN_STORAGE_KEY,

@@ -57,6 +57,7 @@ import iconKimiDark from '@/assets/icons/kimi-dark.svg';
 import iconVertex from '@/assets/icons/vertex.svg';
 import iconGrok from '@/assets/icons/grok.svg';
 import iconGrokDark from '@/assets/icons/grok-dark.svg';
+import iconQoder from '@/assets/icons/qoder.svg';
 
 interface ProviderState {
   url?: string;
@@ -159,6 +160,13 @@ const BUILT_IN_PROVIDERS: BuiltInProviderDefinition[] = [
     hintKey: 'auth_login.xai_oauth_hint',
     urlLabelKey: 'auth_login.xai_oauth_url_label',
     icon: { light: iconGrok, dark: iconGrokDark },
+  },
+  {
+    id: 'qoder',
+    titleKey: 'auth_login.qoder_oauth_title',
+    hintKey: 'auth_login.qoder_oauth_hint',
+    urlLabelKey: 'auth_login.qoder_oauth_url_label',
+    icon: iconQoder,
   },
 ];
 
@@ -708,7 +716,10 @@ export function OAuthPage() {
       startPolling(provider, res.state, attempt);
     } catch (err: unknown) {
       if (!isProviderAttemptCurrent(provider, attempt)) return;
-      const message = getErrorMessage(err);
+      const message =
+        provider === 'qoder' && getErrorStatus(err) === 404
+          ? t('auth_login.oauth_endpoint_missing')
+          : getErrorMessage(err);
       finishProviderAttempt(provider, attempt);
       updateProviderState(provider, { status: 'error', error: message, polling: false });
       showNotification(

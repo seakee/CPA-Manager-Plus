@@ -481,6 +481,7 @@ const classifyExecutorCacheInputMode = (value: unknown): CacheInputMode | undefi
       'antigravity',
       'xai',
       'kimi',
+      'qoder',
     ].some((marker) => executor.includes(marker))
   ) {
     return 'included_in_input';
@@ -507,6 +508,7 @@ const classifyProviderCacheInputMode = (value: unknown): CacheInputMode | undefi
       'antigravity',
       'xai',
       'kimi',
+      'qoder',
       'moonshot',
     ].some((marker) => provider.includes(marker))
   ) {
@@ -533,6 +535,7 @@ const classifyModelCacheInputMode = (value: unknown): CacheInputMode | undefined
       'grok',
       'xai',
       'kimi',
+      'qoder',
       'moonshot',
     ].some((marker) => model.includes(marker))
   ) {

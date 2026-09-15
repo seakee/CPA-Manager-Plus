@@ -24,7 +24,20 @@ type observedRequest struct {
 	auth  string
 }
 
-func newTestHandler(t *testing.T, upstreamURL string, saveSetup bool) http.Handler {
+func defaultTestModelPriceSyncURLs() modelPriceSyncURLs {
+	return modelPriceSyncURLs{
+		modelsDev:  modelsDevModelPriceSyncURL,
+		liteLLM:    modelPriceSyncURL,
+		openRouter: openRouterModelPriceSyncURL,
+	}
+}
+
+func newTestHandler(
+	t *testing.T,
+	upstreamURL string,
+	saveSetup bool,
+	syncURLs ...modelPriceSyncURLs,
+) http.Handler {
 	t.Helper()
 
 	cfg := config.Config{
@@ -54,11 +67,25 @@ func newTestHandler(t *testing.T, upstreamURL string, saveSetup bool) http.Handl
 		}
 	}
 
+	modelPriceURLs := defaultTestModelPriceSyncURLs()
+	if len(syncURLs) > 0 {
+		modelPriceURLs = syncURLs[0]
+	}
 	manager := collector.NewManager(cfg, db)
-	return New(cfg, db, manager).Handler()
+	return newWithModelPriceSyncURLs(
+		cfg,
+		db,
+		manager,
+		modelPriceURLs,
+		false,
+	).Handler()
 }
 
-func newTestHandlerWithConfig(t *testing.T, cfg config.Config) http.Handler {
+func newTestHandlerWithConfig(
+	t *testing.T,
+	cfg config.Config,
+	syncURLs ...modelPriceSyncURLs,
+) http.Handler {
 	t.Helper()
 
 	if cfg.DBPath == "" {
@@ -76,27 +103,18 @@ func newTestHandlerWithConfig(t *testing.T, cfg config.Config) http.Handler {
 		_ = db.Close()
 	})
 
-	manager := collector.NewManager(cfg, db)
-	return New(cfg, db, manager).Handler()
-}
-
-func stubModelPriceSyncURLs(t *testing.T, liteLLMURL string, openRouterURL string, modelsDevURLs ...string) {
-	t.Helper()
-	oldModelsDevURL := modelsDevModelPriceSyncURL
-	oldLiteLLMURL := modelPriceSyncURL
-	oldOpenRouterURL := openRouterModelPriceSyncURL
-	modelsDevURL := ""
-	if len(modelsDevURLs) > 0 {
-		modelsDevURL = modelsDevURLs[0]
+	modelPriceURLs := defaultTestModelPriceSyncURLs()
+	if len(syncURLs) > 0 {
+		modelPriceURLs = syncURLs[0]
 	}
-	modelsDevModelPriceSyncURL = modelsDevURL
-	modelPriceSyncURL = liteLLMURL
-	openRouterModelPriceSyncURL = openRouterURL
-	t.Cleanup(func() {
-		modelsDevModelPriceSyncURL = oldModelsDevURL
-		modelPriceSyncURL = oldLiteLLMURL
-		openRouterModelPriceSyncURL = oldOpenRouterURL
-	})
+	manager := collector.NewManager(cfg, db)
+	return newWithModelPriceSyncURLs(
+		cfg,
+		db,
+		manager,
+		modelPriceURLs,
+		false,
+	).Handler()
 }
 
 func TestModelListProxyPreservesAuthorization(t *testing.T) {
@@ -693,9 +711,15 @@ func TestModelPricesSyncFromLiteLLMFormat(t *testing.T) {
 		}`))
 	}))
 	t.Cleanup(openRouterSource.Close)
-	stubModelPriceSyncURLs(t, source.URL, openRouterSource.URL)
-
-	handler := newTestHandler(t, "http://example.test", true)
+	handler := newTestHandler(
+		t,
+		"http://example.test",
+		true,
+		modelPriceSyncURLs{
+			liteLLM:    source.URL,
+			openRouter: openRouterSource.URL,
+		},
+	)
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/v0/management/model-prices/sync",
@@ -782,9 +806,15 @@ func TestModelPricesSyncUsesModelsDevOfficialAndOrderedFallback(t *testing.T) {
 		}`))
 	}))
 	t.Cleanup(liteLLMSource.Close)
-	stubModelPriceSyncURLs(t, liteLLMSource.URL, "", modelsDevSource.URL)
-
-	handler := newTestHandler(t, "http://example.test", true)
+	handler := newTestHandler(
+		t,
+		"http://example.test",
+		true,
+		modelPriceSyncURLs{
+			modelsDev: modelsDevSource.URL,
+			liteLLM:   liteLLMSource.URL,
+		},
+	)
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/v0/management/model-prices/sync",
@@ -891,8 +921,16 @@ func TestModelPricesSyncCachesModelsDevAndSkipsCoveredFallbacks(t *testing.T) {
 	}))
 	t.Cleanup(openRouterSource.Close)
 
-	stubModelPriceSyncURLs(t, liteLLMSource.URL, openRouterSource.URL, modelsDevSource.URL)
-	handler := newTestHandler(t, "http://example.test", true)
+	handler := newTestHandler(
+		t,
+		"http://example.test",
+		true,
+		modelPriceSyncURLs{
+			modelsDev:  modelsDevSource.URL,
+			liteLLM:    liteLLMSource.URL,
+			openRouter: openRouterSource.URL,
+		},
+	)
 	for attempt := 1; attempt <= 2; attempt++ {
 		req := httptest.NewRequest(
 			http.MethodPost,
@@ -961,9 +999,12 @@ func TestModelPricesSyncUsesCPAProxyURL(t *testing.T) {
 		http.Error(w, "source should be reached through proxy", http.StatusInternalServerError)
 	}))
 	t.Cleanup(source.Close)
-	stubModelPriceSyncURLs(t, source.URL, "")
-
-	handler := newTestHandler(t, cpaMock.URL(), true)
+	handler := newTestHandler(
+		t,
+		cpaMock.URL(),
+		true,
+		modelPriceSyncURLs{liteLLM: source.URL},
+	)
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/v0/management/model-prices/sync",

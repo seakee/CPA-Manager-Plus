@@ -164,6 +164,7 @@ const DEMO_AUTH_FILE_MODELS: Record<string, DemoAuthFileModel[]> = {
       owned_by: 'moonshot',
     },
   ],
+  qoder: [],
 };
 
 const demoAuthFileConfigurationOverrides = new Map<string, Record<string, unknown>>();

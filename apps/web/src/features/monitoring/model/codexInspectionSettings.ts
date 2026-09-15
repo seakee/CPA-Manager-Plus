@@ -22,7 +22,7 @@ export const CODEX_INSPECTION_AUTO_ACTION_MODES: readonly CodexInspectionAutoAct
   'delete',
 ];
 
-export const CODEX_INSPECTION_TARGET_TYPES = ['codex', 'xai'] as const;
+export const CODEX_INSPECTION_TARGET_TYPES = ['codex', 'xai', 'claude'] as const;
 export type CodexInspectionTargetType = (typeof CODEX_INSPECTION_TARGET_TYPES)[number];
 
 export const normalizeCodexInspectionTargetTypes = (
@@ -39,7 +39,11 @@ export const normalizeCodexInspectionTargetTypes = (
   const selected = new Set<CodexInspectionTargetType>();
   values.forEach((entry) => {
     const normalized = readString(entry).toLowerCase();
-    if (normalized === 'codex' || normalized === 'xai') {
+    if (
+      normalized === 'codex' ||
+      normalized === 'xai' ||
+      normalized === 'claude'
+    ) {
       selected.add(normalized);
     }
   });
@@ -53,6 +57,8 @@ export const codexInspectionTargetTypesToSelection = (
   const targetTypes = normalizeCodexInspectionTargetTypes(value, legacyTargetType);
   return (targetTypes.length > 0 ? targetTypes : ['codex']).join('+');
 };
+
+
 
 export const DEFAULT_CODEX_INSPECTION_SETTINGS: CodexInspectionConfigurableSettings = {
   targetTypes: ['codex'],
@@ -223,6 +229,31 @@ type CodexInspectionConfigurableSettingsInput = {
   autoActionMode?: unknown;
   autoRecoverEnabled?: unknown;
 };
+
+/** Browser-local inspection can only safely dispatch Codex and xAI. */
+export const normalizeLocalCodexInspectionTargetTypes = (
+  value: unknown,
+  legacyTargetType?: unknown
+): Exclude<CodexInspectionTargetType, 'claude'>[] =>
+  normalizeCodexInspectionTargetTypes(value, legacyTargetType).filter(
+    (target): target is Exclude<CodexInspectionTargetType, 'claude'> => target !== 'claude'
+  );
+
+export const normalizeLocalConfigurableSettings = (
+  input?: CodexInspectionConfigurableSettingsInput | null
+): CodexInspectionConfigurableSettings => {
+  const normalized = normalizeConfigurableSettings(input);
+  const targetTypes = normalizeLocalCodexInspectionTargetTypes(
+    normalized.targetTypes,
+    normalized.targetType
+  );
+  return {
+    ...normalized,
+    targetTypes: targetTypes.length > 0 ? targetTypes : ['codex'],
+    targetType: targetTypes[0] ?? 'codex',
+  };
+};
+
 
 export const normalizeConfigurableSettings = (
   input?: CodexInspectionConfigurableSettingsInput | null

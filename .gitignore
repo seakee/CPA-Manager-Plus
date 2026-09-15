@@ -49,3 +49,9 @@ TODO.md
 
 # Local temp scratch files
 .tmp-*
+
+# AI tooling artifacts
+.mimosa/
+**/.mimosa/
+.zcode/
+nul

@@ -13,7 +13,7 @@ Open the [Account Action Queue Demo](https://seakee.github.io/CPA-Manager-Plus/#
 
 ## When Candidates Appear
 
-When Monitoring captures revoked tokens, invalid OAuth, auth-file failures, or similar signals, CPAMP can add the account to the candidate queue. Realtime request responses and Codex Inspection use the same credential-failure policy so the same error does not produce conflicting actions.
+When Monitoring captures revoked tokens, invalid OAuth, auth-file failures, or similar signals, CPAMP can add the account to the candidate queue. Realtime request responses and eligible `codex`/`xai` inspection results use the same credential-failure policy so the same error does not produce conflicting actions. Read-only `claude` OAuth usage inspection never creates automatic inspection actions.
 
 The queue is controlled by `USAGE_ACCOUNT_ACTIONS_ENABLED` or the Configuration switch. Automatic disable also requires `USAGE_ACCOUNT_ACTIONS_AUTO_DISABLE`, and depends on the queue being enabled.
 
@@ -56,7 +56,7 @@ Before deleting, confirm that the same auth file is not used by another model or
 - Need failure details: [Monitoring](./monitoring.md).
 - Need reauth: [OAuth Login](./oauth.md).
 - Need account enable/disable: [Accounts](./accounts.md).
-- Need Codex/xAI quota or state: [Account Inspection](./codex-inspection.md).
+- Need inspection evidence: [Account Inspection](./codex-inspection.md) for `codex`/`xai`, or Manager Server read-only `claude` OAuth usage inspection.
 
 ## Usage Advice
 

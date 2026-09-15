@@ -22,7 +22,7 @@
 
 - **请求为什么失败？** 在持久化请求历史中查看失败率、状态码、受影响的模型/账号和脱敏证据。
 - **成本花在哪里？** 按模型、Provider、账号、API Key、项目、渠道和时间范围拆解 Token 与预估成本。
-- **账号和配额是否健康？** 查看凭证状态、配额窗口、reset 证据，以及 Codex 和 xAI 的受控自动化状态。
+- **账号和配额是否健康？** 查看凭证状态、配额窗口、reset 证据、Codex 和 xAI 的受控自动化状态，以及 Manager Server 中只读的 Claude OAuth 用量检查。
 
 ## 截图
 
@@ -95,8 +95,9 @@ CPA / CLIProxyAPI 可以在 `:8317` 直接托管官方 Management Center，也�
 
 ### 账号健康、配额与自动化
 
-- 在浏览器本地或 Manager Server 定时巡检 Codex 和 xAI 账号。
-- 在 Provider 可提供信息时展示配额窗口、reset 证据、凭证状态、工作区状态和健康信号。
+- 在浏览器本地或 Manager Server 定时巡检 `codex` 和 `xai` 账号；Manager Server 还提供只读 `claude` OAuth 用量检查。
+- Claude 检查不发送模型或推理请求，绝不自动修改凭证；自动巡检动作仅适用于符合条件的 `codex` 和 `xai` 结果。
+- 在 Provider 可提供信息时展示配额窗口、reset 证据、凭证状态、工作区状态、健康信号和 Manager Server 只读 Claude OAuth 用量。
 - 对明确额度耗尽执行受控冷却，并将认证故障汇总到账号处理队列，支持复核与恢复。
 - 打开统一的 [凭证管理演示](https://seakee.github.io/CPA-Manager-Plus/#/demo/accounts)。
 

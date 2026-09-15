@@ -113,27 +113,33 @@ const createDeferred = <T,>() => {
 const readText = (value: unknown): string => {
   if (typeof value === 'string' || typeof value === 'number') return String(value);
   if (Array.isArray(value)) return value.map(readText).join('');
-  if (value && typeof value === 'object' && 'props' in value) {
-    return readText((value as { props?: { children?: unknown } }).props?.children);
+  if (value && typeof value === 'object') {
+    if ('props' in value) {
+      return readText((value as { props?: { children?: unknown } }).props?.children);
+    }
+    if ('children' in value) {
+      return readText((value as { children?: unknown }).children);
+    }
   }
   return '';
 };
 
-const findCodexOAuthButton = (renderer: ReactTestRenderer) => {
+const findOAuthButton = (renderer: ReactTestRenderer, translationKey: string) => {
   const button = renderer.root
     .findAllByType(Button)
-    .find((node) => readText(node.props.children) === 'auth_login.codex_oauth_button');
-  if (!button) throw new Error('Codex OAuth button not found');
+    .find((node) => readText(node.props.children) === translationKey);
+  if (!button) throw new Error(`OAuth button not found: ${translationKey}`);
   return button;
 };
 
-const findCallbackButton = (renderer: ReactTestRenderer) => {
-  const button = renderer.root
-    .findAllByType(Button)
-    .find((node) => readText(node.props.children) === 'auth_login.oauth_callback_button');
-  if (!button) throw new Error('OAuth callback button not found');
-  return button;
-};
+const findCodexOAuthButton = (renderer: ReactTestRenderer) =>
+  findOAuthButton(renderer, 'auth_login.codex_oauth_button');
+
+const findQoderOAuthButton = (renderer: ReactTestRenderer) =>
+  findOAuthButton(renderer, 'auth_login.qoder_oauth_button');
+
+const findCallbackButton = (renderer: ReactTestRenderer) =>
+  findOAuthButton(renderer, 'auth_login.oauth_callback_button');
 
 describe('OAuthPage request lifecycle', () => {
   let renderer: ReactTestRenderer | null = null;
@@ -213,6 +219,57 @@ describe('OAuthPage request lifecycle', () => {
     expect(pageMocks.getAuthStatus).not.toHaveBeenCalled();
   });
 
+  it('starts Qoder through device flow without rendering a callback form', async () => {
+    pageMocks.startAuth.mockResolvedValueOnce({
+      url: 'https://auth.example/qoder',
+      state: 'qoder-state',
+    });
+
+    await act(async () => {
+      renderer = create(<OAuthPage />);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await findQoderOAuthButton(renderer!).props.onClick();
+      await Promise.resolve();
+    });
+
+    expect(pageMocks.startAuth).toHaveBeenCalledWith('qoder', {
+      apiBase: 'http://cpa-a.local:8317',
+      managementKey: 'manager-key',
+    });
+    expect(findQoderOAuthButton(renderer!).props.loading).toBe(true);
+    expect(
+      renderer!.root
+        .findAllByType(Button)
+        .some((node) => readText(node.props.children) === 'auth_login.qoder_copy_link')
+    ).toBe(true);
+    expect(
+      renderer!.root
+        .findAllByType(Input)
+        .some((node) => node.props.label === 'auth_login.oauth_callback_label')
+    ).toBe(false);
+  });
+
+  it('shows an upgrade hint when the proxy lacks the Qoder OAuth endpoint', async () => {
+    pageMocks.startAuth.mockRejectedValueOnce(Object.assign(new Error('not found'), { status: 404 }));
+
+    await act(async () => {
+      renderer = create(<OAuthPage />);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await findQoderOAuthButton(renderer!).props.onClick();
+      await Promise.resolve();
+    });
+
+    expect(pageMocks.showNotification).toHaveBeenCalledWith(
+      'auth_login.qoder_oauth_start_error auth_login.oauth_endpoint_missing',
+      'error'
+    );
+    expect(findQoderOAuthButton(renderer!).props.loading).toBe(false);
+  });
+
   it('discards a late callback response after the connection changes', async () => {
     const callbackDeferred = createDeferred<void>();
     pageMocks.startAuth.mockResolvedValueOnce({
@@ -275,7 +332,7 @@ describe('OAuthPage request lifecycle', () => {
   });
 });
 
-const builtInProviderIds = new Set(['codex', 'anthropic', 'antigravity', 'kimi', 'xai']);
+const builtInProviderIds = new Set(['codex', 'anthropic', 'antigravity', 'kimi', 'xai', 'qoder']);
 
 describe('plugin OAuth provider helpers', () => {
   it('uses explicit plugin OAuth provider ids when present', () => {

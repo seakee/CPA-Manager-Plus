@@ -61,7 +61,7 @@ func New(ctx context.Context, cfg config.Config, options Options) (*Context, err
 	if startedAt <= 0 {
 		startedAt = time.Now().UnixMilli()
 	}
-	appCtx := FromExistingWithModelsDev(
+	appCtx := FromExistingWithTrustedModelsDev(
 		cfg,
 		st,
 		manager,

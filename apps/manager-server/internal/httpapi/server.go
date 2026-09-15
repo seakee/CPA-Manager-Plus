@@ -15,11 +15,18 @@ import (
 //go:embed web/management.html
 var embeddedPanel embed.FS
 
-const serviceID = "cpa-manager-plus"
+const (
+	serviceID                   = "cpa-manager-plus"
+	modelsDevModelPriceSyncURL  = "https://models.dev/catalog.json"
+	modelPriceSyncURL           = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+	openRouterModelPriceSyncURL = "https://openrouter.ai/api/v1/models"
+)
 
-var modelsDevModelPriceSyncURL = "https://models.dev/catalog.json"
-var modelPriceSyncURL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
-var openRouterModelPriceSyncURL = "https://openrouter.ai/api/v1/models"
+type modelPriceSyncURLs struct {
+	modelsDev  string
+	liteLLM    string
+	openRouter string
+}
 
 type Server struct {
 	handler http.Handler
@@ -27,19 +34,57 @@ type Server struct {
 }
 
 func New(cfg config.Config, store *store.Store, collector *collector.Manager, automationRuntimeService ...app.AutomationRuntimeService) *Server {
-	startedAt := time.Now().UnixMilli()
-	appCtx := app.FromExistingWithModelsDev(
+	return newWithModelPriceSyncURLs(
 		cfg,
 		store,
 		collector,
-		startedAt,
-		embeddedPanel,
-		&modelsDevModelPriceSyncURL,
-		&modelPriceSyncURL,
-		&openRouterModelPriceSyncURL,
-		serviceID,
+		modelPriceSyncURLs{
+			modelsDev:  modelsDevModelPriceSyncURL,
+			liteLLM:    modelPriceSyncURL,
+			openRouter: openRouterModelPriceSyncURL,
+		},
+		true,
 		automationRuntimeService...,
 	)
+}
+
+func newWithModelPriceSyncURLs(
+	cfg config.Config,
+	store *store.Store,
+	collector *collector.Manager,
+	syncURLs modelPriceSyncURLs,
+	enforceTrustedSourceURLs bool,
+	automationRuntimeService ...app.AutomationRuntimeService,
+) *Server {
+	startedAt := time.Now().UnixMilli()
+	var appCtx *app.Context
+	if enforceTrustedSourceURLs {
+		appCtx = app.FromExistingWithTrustedModelsDev(
+			cfg,
+			store,
+			collector,
+			startedAt,
+			embeddedPanel,
+			&syncURLs.modelsDev,
+			&syncURLs.liteLLM,
+			&syncURLs.openRouter,
+			serviceID,
+			automationRuntimeService...,
+		)
+	} else {
+		appCtx = app.FromExistingWithModelsDev(
+			cfg,
+			store,
+			collector,
+			startedAt,
+			embeddedPanel,
+			&syncURLs.modelsDev,
+			&syncURLs.liteLLM,
+			&syncURLs.openRouter,
+			serviceID,
+			automationRuntimeService...,
+		)
+	}
 	return &Server{
 		handler: router.New(appCtx),
 		appCtx:  appCtx,

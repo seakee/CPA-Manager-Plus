@@ -4,7 +4,7 @@
 
 import { apiClient, createScopedApiRequestConfig, type ApiClientRequestScope } from './client';
 
-export type BuiltInOAuthProvider = 'codex' | 'anthropic' | 'antigravity' | 'kimi' | 'xai';
+export type BuiltInOAuthProvider = 'codex' | 'anthropic' | 'antigravity' | 'kimi' | 'xai' | 'qoder';
 export type OAuthProvider = BuiltInOAuthProvider | (string & {});
 
 export interface OAuthStartResponse {

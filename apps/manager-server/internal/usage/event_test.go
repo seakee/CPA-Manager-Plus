@@ -95,6 +95,7 @@ func TestInferCacheInputModeUsesStrictFieldPriority(t *testing.T) {
 		{name: "requested beats display", context: CacheInputContext{RequestedModel: "grok-4", DisplayModel: "claude-sonnet"}, want: CacheInputModeIncluded},
 		{name: "xai model fallback", context: CacheInputContext{DisplayModel: "grok-4"}, want: CacheInputModeIncluded},
 		{name: "kimi model fallback", context: CacheInputContext{DisplayModel: "moonshot/kimi-k2"}, want: CacheInputModeIncluded},
+		{name: "qoder provider fallback", context: CacheInputContext{Provider: "qoder"}, want: CacheInputModeIncluded},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

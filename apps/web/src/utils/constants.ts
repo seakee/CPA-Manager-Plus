@@ -58,6 +58,7 @@ export const OAUTH_CARD_IDS = [
   'antigravity-oauth-card',
   'kimi-oauth-card',
   'xai-oauth-card',
+  'qoder-oauth-card',
 ];
 export const OAUTH_PROVIDERS = {
   CODEX: 'codex',
@@ -65,6 +66,7 @@ export const OAUTH_PROVIDERS = {
   ANTIGRAVITY: 'antigravity',
   KIMI: 'kimi',
   XAI: 'xai',
+  QODER: 'qoder',
 } as const;
 
 // API 端点

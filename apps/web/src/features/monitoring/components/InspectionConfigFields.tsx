@@ -23,6 +23,8 @@ type InspectionConfigFieldsProps = {
   draft: SharedInspectionConfigDraft;
   errors: InspectionConfigFieldErrors;
   t: TFunction;
+  /** Only the bundled server-backed inspector supports Claude. */
+  allowClaudeTarget?: boolean;
   onFieldChange: (field: SharedInspectionConfigField, value: string) => void;
   onXaiInferenceEnabledChange: (enabled: boolean) => void;
   onAutoActionModeChange: (mode: CodexInspectionAutoActionMode) => void;
@@ -35,6 +37,7 @@ export function InspectionConfigFields({
   draft,
   errors,
   t,
+  allowClaudeTarget = false,
   onFieldChange,
   onXaiInferenceEnabledChange,
   onAutoActionModeChange,
@@ -55,6 +58,31 @@ export function InspectionConfigFields({
     errors.xaiInferenceModel ||
     errors.xaiInferencePrompt
   );
+  const targetOptions = [
+    { value: 'codex', label: t('monitoring.codex_inspection_target_codex') },
+    { value: 'xai', label: t('monitoring.codex_inspection_target_xai') },
+    {
+      value: 'codex+xai',
+      label: t('monitoring.codex_inspection_target_codex_xai'),
+    },
+    ...(allowClaudeTarget
+      ? [
+          { value: 'claude', label: t('monitoring.codex_inspection_target_claude') },
+          {
+            value: 'codex+claude',
+            label: t('monitoring.codex_inspection_target_codex_claude'),
+          },
+          {
+            value: 'xai+claude',
+            label: t('monitoring.codex_inspection_target_xai_claude'),
+          },
+          {
+            value: 'codex+xai+claude',
+            label: t('monitoring.codex_inspection_target_codex_xai_claude'),
+          },
+        ]
+      : []),
+  ];
 
   useEffect(() => {
     if (hasAdvancedErrors) {
@@ -84,14 +112,7 @@ export function InspectionConfigFields({
               <Select
                 id="targetTypes"
                 value={draft.targetTypes}
-                options={[
-                  { value: 'codex', label: t('monitoring.codex_inspection_target_codex') },
-                  { value: 'xai', label: t('monitoring.codex_inspection_target_xai') },
-                  {
-                    value: 'codex+xai',
-                    label: t('monitoring.codex_inspection_target_codex_xai'),
-                  },
-                ]}
+                options={targetOptions}
                 onChange={(value) => onFieldChange('targetTypes', value)}
                 ariaLabel={t('monitoring.codex_inspection_settings_target_type_label')}
                 triggerClassName={styles.configSelectTrigger}
