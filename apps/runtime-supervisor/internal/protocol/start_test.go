@@ -53,11 +53,20 @@ func TestStartMutationRequiresAuthBeforeExecutor(t *testing.T) {
 
 func TestStartMutationUnsupportedWhenExecutorMissing(t *testing.T) {
 	h := newTestHandler(t)
-	response := startRequestFor(t, h, testRuntimeToken, `{}`)
+	response := startRequestFor(t, h, testRuntimeToken, `{"operationId":"op","expectedRuntimeIdentity":"runtime-01","expectedRuntimeGeneration":7}`)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 	assertErrorCode(t, response, "unsupported_operation")
+}
+
+func TestStartMutationValidatesBeforeSupportCheck(t *testing.T) {
+	h := newTestHandler(t)
+	response := startRequestFor(t, h, testRuntimeToken, `{}`)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	assertErrorCode(t, response, "invalid_request")
 }
 
 func TestStartMutationStrictJSON(t *testing.T) {
@@ -67,9 +76,9 @@ func TestStartMutationStrictJSON(t *testing.T) {
 		return journal.Operation{}, nil
 	})
 	for name, body := range map[string]string{
-		"malformed":    `{"operationId":`,
+		"malformed":     `{"operationId":`,
 		"unknown field": `{"operationId":"op","expectedRuntimeIdentity":"runtime-01","expectedRuntimeGeneration":7,"action":"shell"}`,
-		"trailing":     `{"operationId":"op","expectedRuntimeIdentity":"runtime-01","expectedRuntimeGeneration":7} {}`,
+		"trailing":      `{"operationId":"op","expectedRuntimeIdentity":"runtime-01","expectedRuntimeGeneration":7} {}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			response := startRequestFor(t, h, testRuntimeToken, body)
