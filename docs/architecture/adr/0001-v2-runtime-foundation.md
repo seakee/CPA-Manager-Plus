@@ -57,7 +57,6 @@ Ownership is fixed as follows:
 | Lifecycle/update operation execution | Supervisor |
 | Operation journal / rollback execution state | Supervisor private journal |
 | Usage / analytics | Manager |
-| CPA gateway/provider runtime | CPA |
 
 Invariant:
 
@@ -74,27 +73,27 @@ Transport placement:
 - Docker Embedded: private Docker network only; no host publication by default.
 - Native Linux/macOS/Windows: loopback by default.
 
-The protocol MUST be authenticated per installation and MUST support explicit timeouts. The currently implemented read-only slice contains handshake, protocol version, runtime identity/generation, capabilities, status, and running CPA version. Mutation endpoints and lifecycle side effects are separate later slices.
+The protocol MUST be authenticated per installation and MUST support explicit timeouts. The base observation surface contains handshake, protocol version, runtime identity/generation, capabilities, status, and running CPA version. Lifecycle mutations are added as operation-specific typed endpoints rather than a generic action API.
 
 #### Runtime generation
 
 Under the mutation-capable Runtime Protocol contract, `RuntimeGeneration` is the **Supervisor execution authority epoch** for one Runtime Supervisor process incarnation. Runtime Supervisor owns the current generation. Manager only observes it through handshake/status, may cache it, and echoes it as a mutation precondition. Manager MUST NOT create, increment, or persist a generation as authority.
 
-The current read-only protocol slice MAY continue to obtain `RuntimeGeneration` from `CPAMP_RUNTIME_GENERATION` as bootstrap metadata. That configured value does not satisfy or enable mutation fencing, and no mutation endpoint may rely on it as execution authority.
-
-Before the first mutation endpoint is enabled, Supervisor startup MUST replace that bootstrap mechanism. A mutation-capable Supervisor MUST establish a new execution authority epoch and freshly sample a cryptographically random, non-zero, opaque `uint64` generation for each process incarnation before serving handshake/status or accepting mutations. Phase 1 treats accidental numeric collision as negligible and does not introduce a durable generation registry or counter solely to prove uniqueness; an implementation MUST NOT intentionally reuse a known generation. Generation is compared for equality only; it has no ordering, monotonic-counter, business-version, desired-state-revision, database-generation, CPA PID, CPA-version, or CPA-restart-count semantics.
+A mutation-capable Supervisor MUST establish a new execution authority epoch and freshly sample a cryptographically random, non-zero, opaque `uint64` generation for each process incarnation before serving handshake/status or accepting mutations. Phase 1 treats accidental numeric collision as negligible and does not introduce a durable generation registry or counter solely to prove uniqueness; an implementation MUST NOT intentionally reuse a known generation. Generation is compared for equality only; it has no ordering, monotonic-counter, business-version, desired-state-revision, database-generation, CPA PID, CPA-version, or CPA-restart-count semantics.
 
 Once mutation capability is enabled, CPA stop, start, restart, crash recovery, or binary replacement does not by itself change generation while the same Supervisor process remains the execution authority. After Supervisor restart, Manager MUST observe handshake/status again before submitting another mutation instead of intentionally reusing its cached pre-restart generation. Under Phase 1's random-epoch model, the freshly sampled value makes that cached value stale except for the accepted negligible collision probability.
 
 #### Mutation operation envelope and fencing
 
-Every future mutation request MUST combine common mutation metadata with a typed operation request. The common metadata is:
+Every mutation request MUST combine common mutation metadata with a typed operation request. The common metadata is:
 
 - `operationId`: created by Manager, opaque to Supervisor, non-empty, stable across retries of the same logical mutation, and no more than 128 UTF-8 bytes. The protocol does not require a UUID format.
 - `expectedRuntimeIdentity`: the Runtime identity most recently observed by Manager.
 - `expectedRuntimeGeneration`: the Runtime generation most recently observed by Manager.
 
 Mutation requests MUST use operation-specific typed payloads. An open-ended `action` plus arbitrary `params` map is not part of Runtime Protocol v1.
+
+The first lifecycle mutation is typed Start at `POST /v1/runtime/operations/start`. Its request contains only the common mutation envelope because Start has no caller-controlled payload in this phase. In particular, Runtime Protocol callers MUST NOT supply an executable path, argv, shell command, environment, or working directory. The CPA executable used by Start is Supervisor-local execution configuration. A successful Start operation means the OS process was spawned and ownership was published; it MUST NOT be interpreted as listener readiness, CPA Management readiness, running-version verification, or overall Runtime readiness.
 
 Supervisor's durable idempotency namespace is `(RuntimeIdentity, operationId)`. If a private journal is permanently scoped to one immutable Runtime identity, `operationId` alone may be its physical key, but the protocol semantics are the same. `RuntimeGeneration` records the execution authority epoch in which an operation was created; it MUST NOT partition or reset the durable idempotency namespace.
 
