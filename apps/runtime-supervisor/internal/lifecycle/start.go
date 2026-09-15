@@ -76,7 +76,7 @@ func NewStartService(store journalStore, authority journal.Authority, process pr
 // work only until durable intent commits. After that point the Supervisor owns
 // the short execution sequence and the child lifetime.
 func (service *StartService) Start(ctx context.Context, request StartRequest) (journal.Operation, error) {
-	if err := validateStartRequest(request); err != nil {
+	if err := ValidateStartRequest(request); err != nil {
 		return journal.Operation{}, err
 	}
 
@@ -148,7 +148,10 @@ func (service *StartService) Start(ctx context.Context, request StartRequest) (j
 	return succeeded, nil
 }
 
-func validateStartRequest(request StartRequest) error {
+// ValidateStartRequest performs operation-independent envelope validation before
+// capability or execution checks. Start itself repeats this at the application
+// boundary so non-HTTP callers cannot bypass validation.
+func ValidateStartRequest(request StartRequest) error {
 	if request.OperationID == "" {
 		return fmt.Errorf("%w: operationId is required", ErrInvalidRequest)
 	}
