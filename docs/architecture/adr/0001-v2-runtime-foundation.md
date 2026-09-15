@@ -95,6 +95,8 @@ Mutation requests MUST use operation-specific typed payloads. An open-ended `act
 
 The first lifecycle mutation is typed Start at `POST /v1/runtime/operations/start`. Its request contains only the common mutation envelope because Start has no caller-controlled payload in this phase. In particular, Runtime Protocol callers MUST NOT supply an executable path, argv, shell command, environment, or working directory. The CPA executable used by Start is Supervisor-local execution configuration. A successful Start operation means the OS process was spawned and ownership was published; it MUST NOT be interpreted as listener readiness, CPA Management readiness, running-version verification, or overall Runtime readiness.
 
+When Start execution is configured, handshake and status advertise the exact `start` capability. When Start execution is not configured, that capability is absent and the Start endpoint returns `unsupported_operation` after authentication and request validation.
+
 Supervisor's durable idempotency namespace is `(RuntimeIdentity, operationId)`. If a private journal is permanently scoped to one immutable Runtime identity, `operationId` alone may be its physical key, but the protocol semantics are the same. `RuntimeGeneration` records the execution authority epoch in which an operation was created; it MUST NOT partition or reset the durable idempotency namespace.
 
 For idempotency comparison, the logical request consists of the operation type and its typed payload. `expectedRuntimeIdentity` selects the Runtime namespace, while `expectedRuntimeGeneration` is a freshness precondition for the current submission; changing only that expected generation after re-observation does not make the logical request different.
@@ -296,6 +298,6 @@ A separate local SQLite journal adds a small persistence component, but avoids u
 5. Embedded and External share the same application-level RuntimeClient contract.
 6. Privileged runtime side effects require durable operation intent first.
 7. Docker Phase 1 keeps the Manager and Runtime containers as separate deployment failure domains; Supervisor and CPA keep distinct roles, ownership, state, and authority within the shared Runtime container failure domain.
-8. Before mutation capability is enabled, each Runtime Supervisor process incarnation must establish a new authority epoch by freshly sampling an opaque random generation; Manager only observes and echoes it.
+8. Each mutation-capable Runtime Supervisor process incarnation establishes a new authority epoch by freshly sampling an opaque random generation; Manager only observes and echoes it.
 9. Mutations fence both Runtime identity and generation before idempotency resolution, durable intent, or side effects.
 10. For one Runtime identity, durable operation ID idempotency spans Supervisor generations: replaying the same logical request never executes its side effect twice, and conflicting reuse fails closed.
