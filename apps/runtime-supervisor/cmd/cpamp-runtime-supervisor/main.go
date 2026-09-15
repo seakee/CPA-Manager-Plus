@@ -16,6 +16,9 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/cpaprocess"
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/journal"
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/lifecycle"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/protocol"
 )
 
@@ -29,6 +32,8 @@ type config struct {
 	runtimeIdentity   string
 	runtimeGeneration uint64
 	token             string
+	journalPath       string
+	cpaExecutable     string
 }
 
 type generationSource func() (uint64, error)
@@ -61,6 +66,11 @@ func loadConfig(getenv func(string) string, nextGeneration generationSource) (co
 	if strings.IndexFunc(token, unicode.IsSpace) >= 0 {
 		return config{}, errors.New("CPAMP_RUNTIME_TOKEN must not contain whitespace")
 	}
+	journalPath := strings.TrimSpace(getenv("CPAMP_RUNTIME_JOURNAL_PATH"))
+	cpaExecutable := strings.TrimSpace(getenv("CPAMP_CPA_EXECUTABLE"))
+	if (journalPath == "") != (cpaExecutable == "") {
+		return config{}, errors.New("CPAMP_RUNTIME_JOURNAL_PATH and CPAMP_CPA_EXECUTABLE must be configured together")
+	}
 	var generation uint64
 	for generation == 0 {
 		var err error
@@ -74,6 +84,8 @@ func loadConfig(getenv func(string) string, nextGeneration generationSource) (co
 		runtimeIdentity:   identity,
 		runtimeGeneration: generation,
 		token:             token,
+		journalPath:       journalPath,
+		cpaExecutable:     cpaExecutable,
 	}, nil
 }
 
@@ -85,8 +97,17 @@ func randomRuntimeGeneration() (uint64, error) {
 	return binary.BigEndian.Uint64(encoded[:]), nil
 }
 
-func run(ctx context.Context, cfg config) error {
-	handler, err := newRuntimeHandler(cfg)
+func run(ctx context.Context, cfg config) (runErr error) {
+	start, store, err := newStartExecutor(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	if store != nil {
+		defer func() {
+			runErr = errors.Join(runErr, store.Close())
+		}()
+	}
+	handler, err := newRuntimeHandlerWithStart(cfg, start)
 	if err != nil {
 		return err
 	}
@@ -98,11 +119,41 @@ func run(ctx context.Context, cfg config) error {
 	return serve(ctx, listener, handler)
 }
 
+func newStartExecutor(ctx context.Context, cfg config) (protocol.StartExecutor, *journal.Store, error) {
+	if cfg.journalPath == "" {
+		return nil, nil, nil
+	}
+	store, err := journal.Open(ctx, cfg.journalPath, journal.Options{})
+	if err != nil {
+		return nil, nil, fmt.Errorf("open Runtime operation journal: %w", err)
+	}
+	child := &cpaprocess.Manager{}
+	service, err := lifecycle.NewStartService(
+		store,
+		journal.Authority{
+			RuntimeIdentity:   cfg.runtimeIdentity,
+			RuntimeGeneration: cfg.runtimeGeneration,
+		},
+		child,
+		cpaprocess.StartSpec{Executable: cfg.cpaExecutable},
+	)
+	if err != nil {
+		_ = store.Close()
+		return nil, nil, fmt.Errorf("configure Start lifecycle: %w", err)
+	}
+	return service.Start, store, nil
+}
+
 func newRuntimeHandler(cfg config) (http.Handler, error) {
+	return newRuntimeHandlerWithStart(cfg, nil)
+}
+
+func newRuntimeHandlerWithStart(cfg config, start protocol.StartExecutor) (http.Handler, error) {
 	handler, err := protocol.NewHandler(protocol.Config{
 		RuntimeIdentity:   cfg.runtimeIdentity,
 		RuntimeGeneration: cfg.runtimeGeneration,
 		Token:             cfg.token,
+		Start:             start,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("configure Runtime Protocol: %w", err)
