@@ -28,11 +28,6 @@ type operationResponse struct {
 }
 
 func (h *handler) handleStart(w http.ResponseWriter, r *http.Request) {
-	if h.start == nil {
-		writeError(w, http.StatusBadRequest, "unsupported_operation", "start operation is not configured")
-		return
-	}
-
 	var request startRequest
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxMutationBodyBytes))
 	decoder.DisallowUnknownFields()
@@ -43,6 +38,10 @@ func (h *handler) handleStart(w http.ResponseWriter, r *http.Request) {
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "request body must contain exactly one JSON object")
+		return
+	}
+	if h.start == nil {
+		writeError(w, http.StatusBadRequest, "unsupported_operation", "start operation is not configured")
 		return
 	}
 
