@@ -35,6 +35,8 @@ interface DropdownMenuProps {
   triggerLabel?: ReactNode;
   triggerIcon?: ReactNode;
   triggerClassName?: string;
+  /** 菜单容器的额外类名，用于限制高度这类与调用方相关的样式。 */
+  menuClassName?: string;
   triggerTitle?: string;
   align?: 'start' | 'end';
   disabled?: boolean;
@@ -50,6 +52,7 @@ export function DropdownMenu({
   triggerLabel,
   triggerIcon,
   triggerClassName,
+  menuClassName,
   triggerTitle,
   align = 'end',
   disabled = false,
@@ -236,7 +239,7 @@ export function DropdownMenu({
               role="menu"
               aria-label={ariaLabel}
               tabIndex={-1}
-              className={styles.menu}
+              className={[styles.menu, menuClassName].filter(Boolean).join(' ')}
               style={
                 position
                   ? { top: position.top, left: position.left }
