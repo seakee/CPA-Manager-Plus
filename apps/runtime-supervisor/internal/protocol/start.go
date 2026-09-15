@@ -40,16 +40,21 @@ func (h *handler) handleStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "request body must contain exactly one JSON object")
 		return
 	}
+	start := lifecycle.StartRequest{
+		OperationID:               request.OperationID,
+		ExpectedRuntimeIdentity:   request.ExpectedRuntimeIdentity,
+		ExpectedRuntimeGeneration: request.ExpectedRuntimeGeneration,
+	}
+	if err := lifecycle.ValidateStartRequest(start); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "start request is invalid")
+		return
+	}
 	if h.start == nil {
 		writeError(w, http.StatusBadRequest, "unsupported_operation", "start operation is not configured")
 		return
 	}
 
-	operation, err := h.start(r.Context(), lifecycle.StartRequest{
-		OperationID:               request.OperationID,
-		ExpectedRuntimeIdentity:   request.ExpectedRuntimeIdentity,
-		ExpectedRuntimeGeneration: request.ExpectedRuntimeGeneration,
-	})
+	operation, err := h.start(r.Context(), start)
 	if err != nil {
 		h.writeStartError(w, err)
 		return
