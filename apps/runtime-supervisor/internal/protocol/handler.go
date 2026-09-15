@@ -16,10 +16,11 @@ import (
 )
 
 const (
-	Version       = "v1"
-	handshakePath = "/v1/runtime/handshake"
-	statusPath    = "/v1/runtime/status"
-	startPath     = "/v1/runtime/operations/start"
+	Version         = "v1"
+	handshakePath   = "/v1/runtime/handshake"
+	statusPath      = "/v1/runtime/status"
+	startPath       = "/v1/runtime/operations/start"
+	startCapability = "start"
 )
 
 // StartExecutor is the Supervisor-private application boundary used by the
@@ -115,7 +116,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ProtocolVersion:   Version,
 			RuntimeIdentity:   h.runtimeIdentity,
 			RuntimeGeneration: h.runtimeGeneration,
-			Capabilities:      []string{},
+			Capabilities:      h.capabilities(),
 		})
 	case statusPath:
 		writeJSON(w, http.StatusOK, statusResponse{
@@ -124,11 +125,18 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			RuntimeGeneration:  h.runtimeGeneration,
 			State:              "unknown",
 			CPAObservedVersion: "",
-			Capabilities:       []string{},
+			Capabilities:       h.capabilities(),
 		})
 	case startPath:
 		h.handleStart(w, r)
 	}
+}
+
+func (h *handler) capabilities() []string {
+	if h.start != nil {
+		return []string{startCapability}
+	}
+	return []string{}
 }
 
 func (h *handler) authorized(authorization string) bool {
