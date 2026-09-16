@@ -91,3 +91,39 @@ func TestExternalClientStatusUsesCallerContext(t *testing.T) {
 		t.Fatalf("Status() = %#v, want zero value", status)
 	}
 }
+
+func TestExternalClientLifecycleMutationsFailLocally(t *testing.T) {
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		requestCount++
+	}))
+	defer server.Close()
+	client := NewExternalClient(server.URL, "management-key")
+	request := model.RuntimeMutationRequest{
+		OperationID:               "operation-1",
+		ExpectedRuntimeIdentity:   "runtime-1",
+		ExpectedRuntimeGeneration: 1,
+	}
+	mutations := []struct {
+		name string
+		run  func(context.Context, model.RuntimeMutationRequest) (model.RuntimeOperationResult, error)
+	}{
+		{name: "start", run: client.Start},
+		{name: "stop", run: client.Stop},
+		{name: "restart", run: client.Restart},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			result, err := mutation.run(t.Context(), request)
+			if !errors.Is(err, ErrRuntimeMutationUnsupported) {
+				t.Fatalf("mutation error = %v", err)
+			}
+			if !reflect.DeepEqual(result, model.RuntimeOperationResult{}) {
+				t.Fatalf("mutation result = %#v", result)
+			}
+		})
+	}
+	if requestCount != 0 {
+		t.Fatalf("external lifecycle mutations made %d network requests", requestCount)
+	}
+}

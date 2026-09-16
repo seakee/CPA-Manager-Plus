@@ -3,9 +3,11 @@ package bootstrap
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
@@ -65,6 +67,9 @@ func Run(ctx context.Context, cfg config.Config, st *store.Store, dataKeyCreated
 	} else {
 		result.MigratedLegacy = previousState.MigratedLegacy
 	}
+	if _, err := initializeEmbeddedRuntimeDesiredState(ctx, cfg, st); err != nil {
+		return Result{}, fmt.Errorf("initialize embedded Runtime desired state: %w", err)
+	}
 
 	projectInitialized, err := projectInitialized(ctx, cfg, st)
 	if err != nil {
@@ -99,6 +104,45 @@ func Run(ctx context.Context, cfg config.Config, st *store.Store, dataKeyCreated
 	result.AdminCreated = adminCreated
 	result.GeneratedAdminKey = generatedAdminKey
 	return result, nil
+}
+
+func initializeEmbeddedRuntimeDesiredState(
+	ctx context.Context,
+	cfg config.Config,
+	st *store.Store,
+) (bool, error) {
+	if !cfg.EmbeddedRuntimeConfigured() {
+		return false, nil
+	}
+	if _, found, err := st.LoadEmbeddedRuntimeDesiredState(ctx); err != nil || found {
+		return false, err
+	}
+	// A complete environment-provided CPA connection is existing external
+	// authority even when the legacy settings rows are absent.
+	if strings.TrimSpace(cfg.CPAUpstreamURL) != "" && strings.TrimSpace(cfg.ManagementKey) != "" {
+		return false, nil
+	}
+	managerCfg, managerOK, err := st.LoadManagerConfig(ctx)
+	if err != nil {
+		return false, err
+	}
+	setup, setupOK, err := st.LoadSetup(ctx)
+	if err != nil {
+		return false, err
+	}
+	resolution, err := managerconfig.ResolveLegacyConnectionAuthority(managerCfg, managerOK, setup, setupOK)
+	if err != nil {
+		// Ambiguous historical authority is never a reason to adopt Embedded
+		// lifecycle ownership.
+		return false, nil
+	}
+	if resolution.Authority != managerconfig.LegacyConnectionAuthorityNone {
+		return false, nil
+	}
+	if _, err := st.SetEmbeddedRuntimeDesiredLifecycle(ctx, model.EmbeddedRuntimeDesiredRunning); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func ensureAdminCredential(ctx context.Context, cfg config.Config, st *store.Store) (bool, string, error) {

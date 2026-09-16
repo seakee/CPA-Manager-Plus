@@ -168,6 +168,8 @@ func TestLoadEnvOverridesConfig(t *testing.T) {
 	t.Setenv("USAGE_IMPORT_DISK_QUOTA_BYTES", "2147483648")
 	t.Setenv("USAGE_IMPORT_MAX_SESSIONS", "4")
 	t.Setenv("USAGE_IMPORT_SESSION_TTL_MINUTES", "30")
+	t.Setenv("CPAMP_RUNTIME_URL", "http://cpamp-runtime:9081")
+	t.Setenv("CPAMP_RUNTIME_TOKEN_FILE", "/run/cpamp/runtime-secret/token")
 
 	cfg, err := Load()
 	if err != nil {
@@ -194,6 +196,10 @@ func TestLoadEnvOverridesConfig(t *testing.T) {
 	if cfg.UsageImportChunkBytes != 2097152 || cfg.UsageImportDiskQuotaBytes != 2147483648 ||
 		cfg.UsageImportMaxSessions != 4 || cfg.UsageImportSessionTTL != 30*time.Minute {
 		t.Fatalf("usage import env config = %#v", cfg)
+	}
+	if !cfg.EmbeddedRuntimeConfigured() || cfg.RuntimeURL != "http://cpamp-runtime:9081" ||
+		cfg.RuntimeTokenFile != "/run/cpamp/runtime-secret/token" {
+		t.Fatalf("embedded Runtime config = %#v", cfg)
 	}
 }
 
@@ -245,6 +251,8 @@ func clearConfigEnv(t *testing.T) {
 		"USAGE_IMPORT_DISK_QUOTA_BYTES",
 		"USAGE_IMPORT_MAX_SESSIONS",
 		"USAGE_IMPORT_SESSION_TTL_MINUTES",
+		"CPAMP_RUNTIME_URL",
+		"CPAMP_RUNTIME_TOKEN_FILE",
 		"PANEL_PATH",
 	} {
 		t.Setenv(key, "")

@@ -4,7 +4,48 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
+
+// EmbeddedRuntimeDesiredLifecycle is the Manager-owned desired lifecycle for
+// an Embedded Runtime. Absence of the persisted setting means unresolved; it
+// is deliberately not represented by another enum value.
+type EmbeddedRuntimeDesiredLifecycle string
+
+const (
+	EmbeddedRuntimeDesiredRunning EmbeddedRuntimeDesiredLifecycle = "running"
+	EmbeddedRuntimeDesiredStopped EmbeddedRuntimeDesiredLifecycle = "stopped"
+)
+
+func (l EmbeddedRuntimeDesiredLifecycle) IsValid() bool {
+	switch l {
+	case EmbeddedRuntimeDesiredRunning, EmbeddedRuntimeDesiredStopped:
+		return true
+	default:
+		return false
+	}
+}
+
+// EmbeddedRuntimeDesiredState is Manager product state. Revision changes only
+// when DesiredLifecycle changes and is unrelated to RuntimeGeneration.
+type EmbeddedRuntimeDesiredState struct {
+	DesiredLifecycle EmbeddedRuntimeDesiredLifecycle `json:"desiredLifecycle"`
+	Revision         uint64                          `json:"revision"`
+	UpdatedAtMS      int64                           `json:"updatedAtMs"`
+}
+
+func (s EmbeddedRuntimeDesiredState) Validate() error {
+	if !s.DesiredLifecycle.IsValid() {
+		return fmt.Errorf("invalid embedded Runtime desired lifecycle %q", s.DesiredLifecycle)
+	}
+	if s.Revision == 0 {
+		return errors.New("embedded Runtime desired revision must be positive")
+	}
+	if s.UpdatedAtMS <= 0 {
+		return errors.New("embedded Runtime desired updatedAtMs must be positive")
+	}
+	return nil
+}
 
 // RuntimeMode is the Manager-owned choice of how CPA is operated.
 type RuntimeMode string
@@ -84,6 +125,12 @@ type RuntimeRecoveryObservation struct {
 
 type RuntimeCapability string
 
+const (
+	RuntimeCapabilityStart   RuntimeCapability = "start"
+	RuntimeCapabilityStop    RuntimeCapability = "stop"
+	RuntimeCapabilityRestart RuntimeCapability = "restart"
+)
+
 type RuntimeCapabilities []RuntimeCapability
 
 func (c RuntimeCapabilities) Supports(capability RuntimeCapability) bool {
@@ -109,6 +156,105 @@ type RuntimeObservedStatus struct {
 	CPAObservedVersion CPAObservedVersion
 	Capabilities       RuntimeCapabilities
 	Recovery           *RuntimeRecoveryObservation
+}
+
+type RuntimeOperationType string
+
+const (
+	RuntimeOperationStart   RuntimeOperationType = "start"
+	RuntimeOperationStop    RuntimeOperationType = "stop"
+	RuntimeOperationRestart RuntimeOperationType = "restart"
+)
+
+func (t RuntimeOperationType) IsValid() bool {
+	switch t {
+	case RuntimeOperationStart, RuntimeOperationStop, RuntimeOperationRestart:
+		return true
+	default:
+		return false
+	}
+}
+
+type RuntimeOperationState string
+
+const (
+	RuntimeOperationAccepted  RuntimeOperationState = "accepted"
+	RuntimeOperationRunning   RuntimeOperationState = "running"
+	RuntimeOperationSucceeded RuntimeOperationState = "succeeded"
+	RuntimeOperationFailed    RuntimeOperationState = "failed"
+)
+
+func (s RuntimeOperationState) IsValid() bool {
+	switch s {
+	case RuntimeOperationAccepted,
+		RuntimeOperationRunning,
+		RuntimeOperationSucceeded,
+		RuntimeOperationFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+type RuntimeMutationRequest struct {
+	OperationID               string
+	ExpectedRuntimeIdentity   RuntimeIdentity
+	ExpectedRuntimeGeneration RuntimeGeneration
+}
+
+func (r RuntimeMutationRequest) Validate() error {
+	if strings.TrimSpace(r.OperationID) == "" {
+		return errors.New("runtime operation ID is required")
+	}
+	if !utf8.ValidString(r.OperationID) {
+		return errors.New("runtime operation ID must be valid UTF-8")
+	}
+	if len([]byte(r.OperationID)) > 128 {
+		return errors.New("runtime operation ID exceeds 128 UTF-8 bytes")
+	}
+	if strings.TrimSpace(string(r.ExpectedRuntimeIdentity)) == "" {
+		return errors.New("expected runtime identity is required")
+	}
+	if r.ExpectedRuntimeGeneration == 0 {
+		return errors.New("expected runtime generation must be positive")
+	}
+	return nil
+}
+
+type RuntimeOperationFailure struct {
+	Code    string
+	Message string
+}
+
+type RuntimeOperationResult struct {
+	OperationID       string
+	OperationType     RuntimeOperationType
+	RuntimeIdentity   RuntimeIdentity
+	RuntimeGeneration RuntimeGeneration
+	State             RuntimeOperationState
+	Failure           *RuntimeOperationFailure
+}
+
+func (r RuntimeOperationResult) Validate() error {
+	if strings.TrimSpace(r.OperationID) == "" {
+		return errors.New("runtime operation result ID is required")
+	}
+	if !r.OperationType.IsValid() {
+		return fmt.Errorf("invalid runtime operation type %q", r.OperationType)
+	}
+	if strings.TrimSpace(string(r.RuntimeIdentity)) == "" {
+		return errors.New("runtime operation identity is required")
+	}
+	if r.RuntimeGeneration == 0 {
+		return errors.New("runtime operation generation must be positive")
+	}
+	if !r.State.IsValid() {
+		return fmt.Errorf("invalid runtime operation state %q", r.State)
+	}
+	if r.Failure != nil && strings.TrimSpace(r.Failure.Code) == "" {
+		return errors.New("runtime operation failure code is required")
+	}
+	return nil
 }
 
 func (s RuntimeObservedStatus) Validate() error {

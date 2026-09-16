@@ -29,6 +29,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	bootstrapservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrap"
 	collectorservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/collector"
+	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/worker"
 )
@@ -232,6 +233,19 @@ func runServer() {
 	codexInspectionWorker := worker.NewCodexInspectionWorker(serverApp.AppContext().Store, serverApp.AppContext().CodexInspectionService)
 	serverResult := make(chan error, 1)
 	go serveHTTPServer(server, listener, stop, serverResult)
+	if cfg.EmbeddedRuntimeConfigured() {
+		runtimeClient := runtimeservice.NewEmbeddedClientWithTokenSource(
+			cfg.RuntimeURL,
+			runtimeservice.NewFileRuntimeTokenSource(cfg.RuntimeTokenFile),
+		)
+		runtimeReconciler := runtimeservice.NewReconciler(
+			runtimeClient,
+			db,
+			runtimeservice.DefaultReconcileInterval,
+			log.Printf,
+		)
+		go runtimeReconciler.Run(ctx)
+	}
 	go serverApp.AppContext().UpdateCheckService.Run(ctx)
 
 	if err := db.RunDerivedStartupMaintenance(ctx); err != nil && ctx.Err() == nil {

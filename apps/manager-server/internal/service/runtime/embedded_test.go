@@ -2,9 +2,12 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -242,5 +245,121 @@ func assertZeroStatusError(t *testing.T, status model.RuntimeObservedStatus, err
 	}
 	if !reflect.DeepEqual(status, model.RuntimeObservedStatus{}) {
 		t.Fatalf("Status() = %#v, want zero value", status)
+	}
+}
+
+func TestEmbeddedClientSubmitsTypedLifecycleMutations(t *testing.T) {
+	request := model.RuntimeMutationRequest{
+		OperationID:               "runtime-reconcile/v1:abc",
+		ExpectedRuntimeIdentity:   "runtime-01",
+		ExpectedRuntimeGeneration: 7,
+	}
+	tests := []struct {
+		name          string
+		path          string
+		operationType model.RuntimeOperationType
+		call          func(*EmbeddedClient, context.Context, model.RuntimeMutationRequest) (model.RuntimeOperationResult, error)
+	}{
+		{name: "start", path: embeddedRuntimeStartPath, operationType: model.RuntimeOperationStart, call: (*EmbeddedClient).Start},
+		{name: "stop", path: embeddedRuntimeStopPath, operationType: model.RuntimeOperationStop, call: (*EmbeddedClient).Stop},
+		{name: "restart", path: embeddedRuntimeRestartPath, operationType: model.RuntimeOperationRestart, call: (*EmbeddedClient).Restart},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != test.path {
+					t.Errorf("request = %s %s", r.Method, r.URL.Path)
+				}
+				if got := r.Header.Get("Authorization"); got != "Bearer "+testRuntimeToken {
+					t.Errorf("Authorization = %q", got)
+				}
+				if got := r.Header.Get("Content-Type"); got != "application/json" {
+					t.Errorf("Content-Type = %q", got)
+				}
+				var body embeddedMutationRequest
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Errorf("decode request: %v", err)
+				}
+				if body.OperationID != request.OperationID || body.ExpectedRuntimeIdentity != "runtime-01" ||
+					body.ExpectedRuntimeGeneration != 7 {
+					t.Errorf("request body = %#v", body)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(embeddedOperationResponse{
+					OperationID:       request.OperationID,
+					OperationType:     string(test.operationType),
+					RuntimeIdentity:   "runtime-01",
+					RuntimeGeneration: 7,
+					State:             string(model.RuntimeOperationSucceeded),
+				})
+			}))
+			defer server.Close()
+
+			result, err := test.call(NewEmbeddedClient(server.URL, testRuntimeToken), t.Context(), request)
+			if err != nil {
+				t.Fatalf("mutation error = %v", err)
+			}
+			if result.OperationID != request.OperationID || result.OperationType != test.operationType ||
+				result.State != model.RuntimeOperationSucceeded {
+				t.Fatalf("mutation result = %#v", result)
+			}
+		})
+	}
+}
+
+func TestEmbeddedClientMutationPreservesStableProtocolErrorCode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":{"code":"stale_runtime_generation","message":"do not branch on this message"}}`))
+	}))
+	defer server.Close()
+	_, err := NewEmbeddedClient(server.URL, testRuntimeToken).Start(t.Context(), model.RuntimeMutationRequest{
+		OperationID:               "operation-1",
+		ExpectedRuntimeIdentity:   "runtime-01",
+		ExpectedRuntimeGeneration: 7,
+	})
+	code, ok := ErrorCode(err)
+	if !ok || code != ProtocolErrorStaleRuntimeGeneration {
+		t.Fatalf("mutation error = %v code=%q ok=%v", err, code, ok)
+	}
+	if strings.Contains(err.Error(), "do not branch") || strings.Contains(err.Error(), testRuntimeToken) {
+		t.Fatalf("mutation error exposed unstable or secret text: %v", err)
+	}
+}
+
+func TestFileRuntimeTokenSourceRecoversAfterLateFileCreation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runtime-token")
+	client := NewEmbeddedClientWithTokenSource("http://127.0.0.1:1", NewFileRuntimeTokenSource(path))
+	if _, err := client.Status(t.Context()); err == nil || !strings.Contains(err.Error(), "token file") {
+		t.Fatalf("missing token Status error = %v", err)
+	}
+	if err := os.WriteFile(path, []byte(testRuntimeToken+"\n"), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer "+testRuntimeToken {
+			t.Errorf("Authorization = %q", got)
+		}
+		_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"offline","capabilities":[],"recovery":{"state":"inactive","attemptsRemaining":0}}`))
+	}))
+	defer server.Close()
+	client.baseURL = server.URL
+	if _, err := client.Status(t.Context()); err != nil {
+		t.Fatalf("Status after token creation: %v", err)
+	}
+}
+
+func TestEmbeddedClientRejectsUnknownMutationResultFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"operationId":"operation-1","operationType":"start","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"succeeded","unexpected":true}`))
+	}))
+	defer server.Close()
+	_, err := NewEmbeddedClient(server.URL, testRuntimeToken).Start(t.Context(), model.RuntimeMutationRequest{
+		OperationID:               "operation-1",
+		ExpectedRuntimeIdentity:   "runtime-01",
+		ExpectedRuntimeGeneration: 7,
+	})
+	if err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("mutation error = %v", err)
 	}
 }

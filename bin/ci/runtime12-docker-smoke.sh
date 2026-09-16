@@ -2,13 +2,15 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-project="${CPAMP_SMOKE_PROJECT:-cpamp-runtime12-${RANDOM}-$$}"
+project="${CPAMP_SMOKE_PROJECT:-cpamp-runtime13-${RANDOM}-$$}"
 public_port="${CPAMP_SMOKE_PORT:-28317}"
 skip_build="${CPAMP_SMOKE_SKIP_BUILD:-false}"
+snapshot_root="$(mktemp -d "${TMPDIR:-/tmp}/cpamp-runtime13-smoke.XXXXXX")"
 compose=(docker compose --project-directory "${repo_root}" -p "${project}")
 
 cleanup() {
   "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+  rm -rf "${snapshot_root}"
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -33,19 +35,6 @@ runtime_get() {
   ' sh "$request_path"
 }
 
-runtime_post() {
-  local request_path="$1"
-  local payload="$2"
-  "${compose[@]}" exec -T cpamp-manager sh -ec '
-    token="$(cat /run/cpamp/runtime-secret/token)"
-    wget -qO- \
-      --header="Authorization: Bearer ${token}" \
-      --header="Content-Type: application/json" \
-      --post-data="${2}" \
-      "http://cpamp-runtime:9081${1}"
-  ' sh "$request_path" "$payload"
-}
-
 json_field() {
   local field="$1"
   node -e '
@@ -68,22 +57,9 @@ json_uint_field() {
   ' "$field"
 }
 
-runtime_operation_payload() {
-  local operation_id="$1"
-  local status="$2"
-  local identity_json generation
-  identity_json="$(printf '%s' "$status" | node -e '
-    const status = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
-    process.stdout.write(JSON.stringify(status.runtimeIdentity));
-  ')"
-  generation="$(printf '%s' "$status" | json_uint_field runtimeGeneration)"
-  printf '{"operationId":"%s","expectedRuntimeIdentity":%s,"expectedRuntimeGeneration":%s}' \
-    "$operation_id" "$identity_json" "$generation"
-}
-
 wait_runtime_state() {
   local expected="$1"
-  local attempts="${2:-60}"
+  local attempts="${2:-90}"
   local count=0
   while [ "$count" -lt "$attempts" ]; do
     local status
@@ -97,6 +73,85 @@ wait_runtime_state() {
   return 1
 }
 
+runtime_cpa_pid() {
+  "${compose[@]}" exec -T cpamp-runtime sh -ec '
+    for process_dir in /proc/[0-9]*; do
+      if [ -r "${process_dir}/comm" ] && [ "$(cat "${process_dir}/comm")" = "cli-proxy-api" ]; then
+        printf "%s" "${process_dir##*/}"
+        exit 0
+      fi
+    done
+    exit 1
+  '
+}
+
+copy_container_file() {
+  local service="$1"
+  local source="$2"
+  local destination="$3"
+  local container_id
+  container_id="$("${compose[@]}" ps --all -q "$service")"
+  test -n "$container_id"
+  docker cp "${container_id}:${source}" "$destination" >/dev/null
+}
+
+assert_manager_desired_running() {
+  local database_path="$1"
+  python3 - "$database_path" <<'PY'
+import json
+import sqlite3
+import sys
+
+connection = sqlite3.connect(sys.argv[1])
+row = connection.execute(
+    "select value, updated_at_ms from settings where key = 'runtime_desired_v1'"
+).fetchone()
+if row is None:
+    raise SystemExit("runtime_desired_v1 is missing")
+value = json.loads(row[0])
+if value.get("desiredLifecycle") != "running":
+    raise SystemExit(f"unexpected desired lifecycle: {value!r}")
+if not isinstance(value.get("revision"), int) or value["revision"] <= 0:
+    raise SystemExit(f"invalid desired revision: {value!r}")
+if not isinstance(value.get("updatedAtMs"), int) or value["updatedAtMs"] <= 0:
+    raise SystemExit(f"invalid desired timestamp: {value!r}")
+if row[1] != value["updatedAtMs"]:
+    raise SystemExit(f"setting timestamp mismatch: row={row[1]} value={value!r}")
+PY
+}
+
+assert_reconcile_start_journal() {
+  local database_path="$1"
+  local minimum_count="$2"
+  python3 - "$database_path" "$minimum_count" <<'PY'
+import sqlite3
+import sys
+
+connection = sqlite3.connect(sys.argv[1])
+rows = connection.execute(
+    "select operation_id, runtime_generation, state from operations "
+    "where operation_type = 'start' order by created_at_ms"
+).fetchall()
+if len(rows) < int(sys.argv[2]):
+    raise SystemExit(f"expected at least {sys.argv[2]} Start operations, got {rows!r}")
+ids = []
+generations = []
+for operation_id, generation, state in rows:
+    if isinstance(operation_id, bytes):
+        operation_id = operation_id.decode("utf-8")
+    if not operation_id.startswith("runtime-reconcile/v1:"):
+        raise SystemExit(f"non-reconcile Start operation ID: {operation_id!r}")
+    if state != "succeeded":
+        raise SystemExit(f"Start operation is not succeeded: {(operation_id, state)!r}")
+    ids.append(operation_id)
+    generations.append(generation)
+if len(set(ids)) != len(ids):
+    raise SystemExit(f"duplicate reconcile operation IDs: {ids!r}")
+if len(rows) >= 2 and len(set(generations)) < 2:
+    raise SystemExit("Runtime restart did not create generation-scoped Start evidence")
+PY
+}
+
 cd "$repo_root"
 CPAMP_PUBLIC_PORT=18317 "${compose[@]}" config --format json | node bin/ci/validate-runtime12-compose.mjs
 docker compose -f docker-compose.manager.yml config >/dev/null
@@ -105,13 +160,28 @@ if [ "$skip_build" != "true" ]; then
   "${compose[@]}" build
 fi
 docker run --rm \
-  --env CPAMP_RUNTIME_TOKEN=runtime12-ci-test-only-transport-secret \
+  --env CPAMP_RUNTIME_TOKEN=runtime13-ci-test-only-transport-secret \
   seakee/cpamp-runtime:latest \
   sh -ec 'test "$(cat /run/cpamp/runtime-secret/token)" = "$CPAMP_RUNTIME_TOKEN"'
-"${compose[@]}" up -d
 
+# Start Manager before Runtime creates the token. Manager health and its HTTP
+# listener must remain independent from this expected Compose startup race.
+"${compose[@]}" up -d cpamp-manager
+retry 60 "${compose[@]}" exec -T cpamp-manager wget -qO- http://127.0.0.1:18317/health >/dev/null
+
+# This is the ordinary fresh Embedded stack path. The test never submits a
+# Supervisor mutation; Manager desired-state reconciliation must start CPA.
+"${compose[@]}" up -d
 public_origin="http://127.0.0.1:${public_port}"
 retry 90 curl --fail --silent "${public_origin}/health" >/dev/null
+retry 120 curl --fail --silent --show-error "${public_origin}/v1/models" >/dev/null
+
+ready_status="$(wait_runtime_state ready 120)"
+if [ "$(printf '%s' "$ready_status" | json_field recovery.state)" != "armed" ]; then
+  echo "Manager typed Start did not arm bounded recovery" >&2
+  exit 1
+fi
+generation_before_runtime_recreate="$(printf '%s' "$ready_status" | json_uint_field runtimeGeneration)"
 
 "${compose[@]}" exec -T cpamp-runtime sh -ec '
   test "$(tr "\000" "\n" </proc/1/cmdline | head -n1)" = "/usr/local/bin/cpamp-runtime-supervisor"
@@ -124,111 +194,69 @@ retry 90 curl --fail --silent "${public_origin}/health" >/dev/null
   ! grep -Eq "secret-key: +[^\" ]|api-keys: +\[[^]]" /runtime/gateway/config.yaml
 '
 
-initial_status="$(wait_runtime_state offline)"
-if [ "$(printf '%s' "$initial_status" | json_field recovery.state)" != "inactive" ]; then
-  echo "fresh Runtime recovery must be inactive" >&2
+healthy_cpa_pid="$(runtime_cpa_pid)"
+"${compose[@]}" restart cpamp-manager >/dev/null
+retry 90 curl --fail --silent "${public_origin}/health" >/dev/null
+sleep 7
+if [ "$(runtime_cpa_pid)" != "$healthy_cpa_pid" ]; then
+  echo "Manager restart replaced a healthy CPA child" >&2
   exit 1
 fi
-if curl --silent --output /dev/null --fail "${public_origin}/v1/models"; then
-  echo "Gateway unexpectedly auto-started with the Compose stack" >&2
+
+"${compose[@]}" up -d --force-recreate cpamp-manager >/dev/null
+retry 90 curl --fail --silent "${public_origin}/health" >/dev/null
+sleep 7
+if [ "$(runtime_cpa_pid)" != "$healthy_cpa_pid" ]; then
+  echo "Manager recreate replaced a healthy CPA child" >&2
+  exit 1
+fi
+
+"${compose[@]}" stop cpamp-manager >/dev/null
+curl --fail --silent --show-error "${public_origin}/v1/models" >/dev/null
+copy_container_file cpamp-manager /data/usage.sqlite "${snapshot_root}/manager.sqlite"
+assert_manager_desired_running "${snapshot_root}/manager.sqlite"
+"${compose[@]}" start cpamp-manager >/dev/null
+retry 90 curl --fail --silent "${public_origin}/health" >/dev/null
+retry 30 curl --fail --silent --show-error "${public_origin}/v1/models" >/dev/null
+if [ "$(runtime_cpa_pid)" != "$healthy_cpa_pid" ]; then
+  echo "Manager stop/start replaced a healthy CPA child" >&2
   exit 1
 fi
 
 secret_before="$("${compose[@]}" exec -T cpamp-manager sha256sum /run/cpamp/runtime-secret/token | awk '{print $1}')"
+"${compose[@]}" exec -T cpamp-runtime sh -ec '
+  printf "\n# runtime13-smoke-existing-config-marker\n" >> /runtime/gateway/config.yaml
+'
 config_before="$("${compose[@]}" exec -T cpamp-runtime sha256sum /runtime/gateway/config.yaml | awk '{print $1}')"
-"${compose[@]}" restart cpamp-runtime >/dev/null
-restarted_status="$(wait_runtime_state offline)"
-if [ "$(printf '%s' "$restarted_status" | json_field recovery.state)" != "inactive" ]; then
-  echo "Runtime restart restored a recovery lease" >&2
+
+"${compose[@]}" stop cpamp-runtime >/dev/null
+curl --fail --silent --show-error "${public_origin}/health" >/dev/null
+copy_container_file cpamp-runtime /runtime/supervisor/operations.sqlite "${snapshot_root}/operations-before.sqlite"
+assert_reconcile_start_journal "${snapshot_root}/operations-before.sqlite" 1
+
+"${compose[@]}" up -d --force-recreate cpamp-runtime >/dev/null
+ready_after_recreate="$(wait_runtime_state ready 120)"
+generation_after_runtime_recreate="$(printf '%s' "$ready_after_recreate" | json_uint_field runtimeGeneration)"
+if [ "$generation_after_runtime_recreate" = "$generation_before_runtime_recreate" ]; then
+  echo "Runtime recreate reused the Supervisor generation" >&2
   exit 1
 fi
+retry 30 curl --fail --silent --show-error "${public_origin}/v1/models" >/dev/null
+
 secret_after="$("${compose[@]}" exec -T cpamp-manager sha256sum /run/cpamp/runtime-secret/token | awk '{print $1}')"
 config_after="$("${compose[@]}" exec -T cpamp-runtime sha256sum /runtime/gateway/config.yaml | awk '{print $1}')"
 if [ "$secret_before" != "$secret_after" ]; then
-  echo "Runtime transport secret changed across restart" >&2
+  echo "Runtime transport secret changed across Runtime recreate" >&2
   exit 1
 fi
 if [ "$config_before" != "$config_after" ]; then
-  echo "Gateway configuration seed was overwritten across restart" >&2
-  exit 1
-fi
-
-"${compose[@]}" exec -T cpamp-runtime sh -ec '
-  printf "\n# runtime12-smoke-existing-config-marker\n" >> /runtime/gateway/config.yaml
-'
-modified_config_before_recreate="$("${compose[@]}" exec -T cpamp-runtime sha256sum /runtime/gateway/config.yaml | awk '{print $1}')"
-"${compose[@]}" up -d --force-recreate cpamp-runtime >/dev/null
-recreated_status="$(wait_runtime_state offline)"
-if [ "$(printf '%s' "$recreated_status" | json_field recovery.state)" != "inactive" ]; then
-  echo "Runtime recreate restored a recovery lease" >&2
-  exit 1
-fi
-secret_after_recreate="$("${compose[@]}" exec -T cpamp-manager sha256sum /run/cpamp/runtime-secret/token | awk '{print $1}')"
-config_after_recreate="$("${compose[@]}" exec -T cpamp-runtime sha256sum /runtime/gateway/config.yaml | awk '{print $1}')"
-if [ "$secret_before" != "$secret_after_recreate" ]; then
-  echo "Runtime transport secret changed across recreate" >&2
-  exit 1
-fi
-if [ "$modified_config_before_recreate" != "$config_after_recreate" ]; then
-  echo "Existing Gateway configuration was overwritten across recreate" >&2
-  exit 1
-fi
-
-generation_before_start="$(printf '%s' "$recreated_status" | json_uint_field runtimeGeneration)"
-start_payload="$(runtime_operation_payload runtime12-smoke-start "$recreated_status")"
-start_result="$(runtime_post /v1/runtime/operations/start "$start_payload")"
-if [ "$(printf '%s' "$start_result" | json_field state)" != "succeeded" ]; then
-  echo "Runtime Start did not succeed: ${start_result}" >&2
-  exit 1
-fi
-ready_status="$(wait_runtime_state ready 90)"
-if [ "$(printf '%s' "$ready_status" | json_field recovery.state)" != "armed" ]; then
-  echo "successful explicit Start did not arm bounded recovery" >&2
-  exit 1
-fi
-generation_after_start="$(printf '%s' "$ready_status" | json_uint_field runtimeGeneration)"
-if [ "$generation_before_start" != "$generation_after_start" ]; then
-  echo "Runtime generation changed across typed Start" >&2
-  exit 1
-fi
-"${compose[@]}" exec -T cpamp-runtime sh -ec '
-  cpa_pid=""
-  for process_dir in /proc/[0-9]*; do
-    if [ -r "${process_dir}/comm" ] && [ "$(cat "${process_dir}/comm")" = "cli-proxy-api" ]; then
-      cpa_pid="${process_dir##*/}"
-      break
-    fi
-  done
-  test -n "$cpa_pid"
-  test "$(readlink "/proc/${cpa_pid}/cwd")" = "/runtime/gateway"
-'
-
-curl --fail --silent --show-error "${public_origin}/v1/models" >/dev/null
-
-"${compose[@]}" stop cpamp-manager >/dev/null
-curl --fail --silent --show-error "${public_origin}/v1/models" >/dev/null
-"${compose[@]}" start cpamp-manager >/dev/null
-retry 90 curl --fail --silent "${public_origin}/health" >/dev/null
-
-stop_status="$(runtime_get /v1/runtime/status)"
-stop_payload="$(runtime_operation_payload runtime12-smoke-stop "$stop_status")"
-stop_result="$(runtime_post /v1/runtime/operations/stop "$stop_payload")"
-if [ "$(printf '%s' "$stop_result" | json_field state)" != "succeeded" ]; then
-  echo "Runtime Stop did not succeed: ${stop_result}" >&2
-  exit 1
-fi
-stopped_status="$(wait_runtime_state offline)"
-if [ "$(printf '%s' "$stopped_status" | json_field recovery.state)" != "inactive" ]; then
-  echo "successful typed Stop did not disarm bounded recovery" >&2
-  exit 1
-fi
-generation_after_stop="$(printf '%s' "$stopped_status" | json_uint_field runtimeGeneration)"
-if [ "$generation_before_start" != "$generation_after_stop" ]; then
-  echo "Runtime generation changed across typed Start/Stop" >&2
+  echo "Existing Gateway configuration was overwritten across Runtime recreate" >&2
   exit 1
 fi
 
 "${compose[@]}" stop cpamp-runtime >/dev/null
 curl --fail --silent --show-error "${public_origin}/health" >/dev/null
+copy_container_file cpamp-runtime /runtime/supervisor/operations.sqlite "${snapshot_root}/operations-after.sqlite"
+assert_reconcile_start_journal "${snapshot_root}/operations-after.sqlite" 2
 
-echo "Runtime 12 Docker smoke passed: restart/recreate persistence, stable Start/Stop generation, recovery disarm, single public ingress, and failure isolation"
+echo "Runtime 13 Docker smoke passed: fresh Manager-owned Start, persistent desired state, stable healthy child across Manager lifecycle, generation-scoped Runtime recovery, single public ingress, and isolated health"

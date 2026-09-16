@@ -2,6 +2,28 @@ package model
 
 import "testing"
 
+func TestEmbeddedRuntimeDesiredStateValidate(t *testing.T) {
+	valid := EmbeddedRuntimeDesiredState{
+		DesiredLifecycle: EmbeddedRuntimeDesiredRunning,
+		Revision:         1,
+		UpdatedAtMS:      1,
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid desired state: %v", err)
+	}
+	for name, state := range map[string]EmbeddedRuntimeDesiredState{
+		"invalid lifecycle": {DesiredLifecycle: "unknown", Revision: 1, UpdatedAtMS: 1},
+		"zero revision":     {DesiredLifecycle: EmbeddedRuntimeDesiredRunning, UpdatedAtMS: 1},
+		"zero timestamp":    {DesiredLifecycle: EmbeddedRuntimeDesiredStopped, Revision: 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := state.Validate(); err == nil {
+				t.Fatal("Validate() error = nil")
+			}
+		})
+	}
+}
+
 func TestRuntimeModeIsValid(t *testing.T) {
 	for _, mode := range []RuntimeMode{RuntimeModeEmbedded, RuntimeModeExternal} {
 		if !mode.IsValid() {

@@ -117,6 +117,7 @@ func TestDerivedMigrationsStartAfterHTTPListenerIsBound(t *testing.T) {
 		t.Fatalf("HTTP listener ordering not found: listen=%d log=%d serve=%d", listenAt, listeningLogAt, serveAt)
 	}
 	for _, startCall := range []string{
+		"go runtimeReconciler.Run(ctx)",
 		"db.RunDerivedStartupMaintenance(ctx)",
 		"automationRuntime.Start(ctx)",
 		"codexInspectionWorker.Start(ctx)",

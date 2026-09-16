@@ -34,6 +34,8 @@ type Config struct {
 	AdminKey                     string
 	DataKey                      string
 	DataKeyPath                  string
+	RuntimeURL                   string
+	RuntimeTokenFile             string
 	CollectorMode                string
 	Queue                        string
 	PopSide                      string
@@ -144,6 +146,8 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 		AdminKey:                     readSecret("CPA_MANAGER_ADMIN_KEY", "CPA_MANAGER_ADMIN_KEY_FILE", adminKeyFile),
 		DataKey:                      readSecret("CPA_MANAGER_DATA_KEY", "CPA_MANAGER_DATA_KEY_FILE", dataKeyFile),
 		DataKeyPath:                  env("CPA_MANAGER_DATA_KEY_PATH", dataKeyPath),
+		RuntimeURL:                   strings.TrimSpace(os.Getenv("CPAMP_RUNTIME_URL")),
+		RuntimeTokenFile:             strings.TrimSpace(os.Getenv("CPAMP_RUNTIME_TOKEN_FILE")),
 		CollectorMode:                normalizeCollectorMode(env("USAGE_COLLECTOR_MODE", stringFallback(cfgFile.CollectorMode, "auto"))),
 		Queue:                        env("USAGE_RESP_QUEUE", stringFallback(cfgFile.Queue, "usage")),
 		PopSide:                      env("USAGE_RESP_POP_SIDE", stringFallback(cfgFile.PopSide, "right")),
@@ -178,6 +182,13 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 		AccountActionsEnvSet:     hasEnv("USAGE_ACCOUNT_ACTIONS_ENABLED"),
 		AccountActionsAutoEnvSet: hasEnv("USAGE_ACCOUNT_ACTIONS_AUTO_DISABLE"),
 	}, nil
+}
+
+// EmbeddedRuntimeConfigured reports only whether the private deployment
+// transport is wired. It does not read the token file or infer product desired
+// state from Runtime availability.
+func (c Config) EmbeddedRuntimeConfigured() bool {
+	return strings.TrimSpace(c.RuntimeURL) != "" && strings.TrimSpace(c.RuntimeTokenFile) != ""
 }
 
 func loadFileConfig(options LoadOptions) (fileConfig, string, error) {

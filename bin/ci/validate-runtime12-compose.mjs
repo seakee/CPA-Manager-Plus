@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 
 const fail = (message) => {
-  throw new Error(`Runtime 12 Compose validation failed: ${message}`);
+  throw new Error(`Runtime 13 Compose validation failed: ${message}`);
 };
 
 const document = JSON.parse(readFileSync(0, 'utf8'));
@@ -33,6 +33,14 @@ if (
   fail('Ingress upstreams must address Manager and Gateway directly');
 }
 if ((ingress.volumes ?? []).length !== 0) fail('Ingress must not mount product data or secrets');
+
+const managerEnvironment = manager.environment ?? {};
+if (
+  managerEnvironment.CPAMP_RUNTIME_URL !== 'http://cpamp-runtime:9081' ||
+  managerEnvironment.CPAMP_RUNTIME_TOKEN_FILE !== '/run/cpamp/runtime-secret/token'
+) {
+  fail('Manager must consume the private Runtime endpoint and narrow token file');
+}
 
 const volumeTargets = (service) =>
   new Map((service.volumes ?? []).map((volume) => [volume.target, volume]));
@@ -78,5 +86,5 @@ for (const [name, service] of [
 }
 
 console.log(
-  'Runtime 12 Compose validation passed: one public 18317 mapping, isolated state, and restricted container privileges'
+  'Runtime 13 Compose validation passed: Manager-owned Runtime wiring, one public 18317 mapping, isolated state, and restricted container privileges'
 );

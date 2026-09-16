@@ -37,6 +37,8 @@ type ManagerCollectorConfig = model.ManagerCollectorConfig
 type ManagerCodexInspectionConfig = model.ManagerCodexInspectionConfig
 type ManagerCodexInspectionScheduleConfig = model.ManagerCodexInspectionScheduleConfig
 type ManagerExternalUsageServiceConfig = model.ManagerExternalUsageServiceConfig
+type EmbeddedRuntimeDesiredLifecycle = model.EmbeddedRuntimeDesiredLifecycle
+type EmbeddedRuntimeDesiredState = model.EmbeddedRuntimeDesiredState
 type CodexInspectionRun = model.CodexInspectionRun
 type CodexInspectionResult = model.CodexInspectionResult
 type CodexInspectionLog = model.CodexInspectionLog
@@ -235,6 +237,14 @@ func (s *Store) NormalizeLegacyConnectionStorage(ctx context.Context, cfg Manage
 
 func (s *Store) LoadManagerConfig(ctx context.Context) (ManagerConfig, bool, error) {
 	return s.Settings.LoadManagerConfig(ctx)
+}
+
+func (s *Store) SetEmbeddedRuntimeDesiredLifecycle(ctx context.Context, desired EmbeddedRuntimeDesiredLifecycle) (EmbeddedRuntimeDesiredState, error) {
+	return s.Settings.SetEmbeddedRuntimeDesiredLifecycle(ctx, desired)
+}
+
+func (s *Store) LoadEmbeddedRuntimeDesiredState(ctx context.Context) (EmbeddedRuntimeDesiredState, bool, error) {
+	return s.Settings.LoadEmbeddedRuntimeDesiredState(ctx)
 }
 
 func (s *Store) SaveAutomationSettings(ctx context.Context, settings AutomationSettings) (AutomationSettings, error) {

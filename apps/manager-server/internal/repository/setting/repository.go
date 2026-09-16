@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 )
 
 const managerConfigKey = "manager_config_v1"
+const embeddedRuntimeDesiredKey = "runtime_desired_v1"
 const automationSettingsKey = "automation_settings_v1"
 const adminCredentialKey = "admin_credential_v1"
 const bootstrapStateKey = "bootstrap_state_v1"
@@ -22,6 +25,8 @@ type Repository interface {
 	SaveManagerConfigAndSetup(ctx context.Context, cfg model.ManagerConfig, setup model.Setup) error
 	NormalizeLegacyConnectionStorage(ctx context.Context, cfg model.ManagerConfig, managerPresent bool, setup model.Setup, setupPresent bool) error
 	LoadManagerConfig(ctx context.Context) (model.ManagerConfig, bool, error)
+	SetEmbeddedRuntimeDesiredLifecycle(ctx context.Context, desired model.EmbeddedRuntimeDesiredLifecycle) (model.EmbeddedRuntimeDesiredState, error)
+	LoadEmbeddedRuntimeDesiredState(ctx context.Context) (model.EmbeddedRuntimeDesiredState, bool, error)
 	SaveAutomationSettings(ctx context.Context, settings model.AutomationSettings) (model.AutomationSettings, error)
 	LoadAutomationSettings(ctx context.Context) (model.AutomationSettings, bool, error)
 	SaveSetup(ctx context.Context, setup model.Setup) error
@@ -242,6 +247,92 @@ func (r *repository) LoadManagerConfig(ctx context.Context) (model.ManagerConfig
 		return model.ManagerConfig{}, false, err
 	}
 	return cfg, true, nil
+}
+
+func (r *repository) SetEmbeddedRuntimeDesiredLifecycle(
+	ctx context.Context,
+	desired model.EmbeddedRuntimeDesiredLifecycle,
+) (model.EmbeddedRuntimeDesiredState, error) {
+	if !desired.IsValid() {
+		return model.EmbeddedRuntimeDesiredState{}, fmt.Errorf("invalid embedded Runtime desired lifecycle %q", desired)
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.EmbeddedRuntimeDesiredState{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	current, found, err := loadEmbeddedRuntimeDesiredState(ctx, tx)
+	if err != nil {
+		return model.EmbeddedRuntimeDesiredState{}, err
+	}
+	if found && current.DesiredLifecycle == desired {
+		if err := tx.Commit(); err != nil {
+			return model.EmbeddedRuntimeDesiredState{}, err
+		}
+		return current, nil
+	}
+
+	revision := uint64(1)
+	updatedAtMS := time.Now().UnixMilli()
+	if found {
+		if current.Revision == math.MaxUint64 {
+			return model.EmbeddedRuntimeDesiredState{}, errors.New("embedded Runtime desired revision overflow")
+		}
+		revision = current.Revision + 1
+		if updatedAtMS <= current.UpdatedAtMS {
+			if current.UpdatedAtMS == math.MaxInt64 {
+				return model.EmbeddedRuntimeDesiredState{}, errors.New("embedded Runtime desired timestamp overflow")
+			}
+			updatedAtMS = current.UpdatedAtMS + 1
+		}
+	}
+	next := model.EmbeddedRuntimeDesiredState{
+		DesiredLifecycle: desired,
+		Revision:         revision,
+		UpdatedAtMS:      updatedAtMS,
+	}
+	data, err := json.Marshal(next)
+	if err != nil {
+		return model.EmbeddedRuntimeDesiredState{}, err
+	}
+	if err := upsertSetting(ctx, tx, embeddedRuntimeDesiredKey, data, next.UpdatedAtMS); err != nil {
+		return model.EmbeddedRuntimeDesiredState{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.EmbeddedRuntimeDesiredState{}, err
+	}
+	return next, nil
+}
+
+func (r *repository) LoadEmbeddedRuntimeDesiredState(ctx context.Context) (model.EmbeddedRuntimeDesiredState, bool, error) {
+	return loadEmbeddedRuntimeDesiredState(ctx, r.db)
+}
+
+type settingQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func loadEmbeddedRuntimeDesiredState(
+	ctx context.Context,
+	queryer settingQueryer,
+) (model.EmbeddedRuntimeDesiredState, bool, error) {
+	var raw string
+	err := queryer.QueryRowContext(ctx, `select value from settings where key = ?`, embeddedRuntimeDesiredKey).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.EmbeddedRuntimeDesiredState{}, false, nil
+	}
+	if err != nil {
+		return model.EmbeddedRuntimeDesiredState{}, false, err
+	}
+	var state model.EmbeddedRuntimeDesiredState
+	if err := json.Unmarshal([]byte(raw), &state); err != nil {
+		return model.EmbeddedRuntimeDesiredState{}, false, err
+	}
+	if err := state.Validate(); err != nil {
+		return model.EmbeddedRuntimeDesiredState{}, false, err
+	}
+	return state, true, nil
 }
 
 func (r *repository) SaveAutomationSettings(ctx context.Context, settings model.AutomationSettings) (model.AutomationSettings, error) {

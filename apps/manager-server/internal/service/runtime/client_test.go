@@ -9,13 +9,29 @@ import (
 )
 
 type fakeRuntimeClient struct {
-	status model.RuntimeObservedStatus
-	ctx    context.Context
+	status          model.RuntimeObservedStatus
+	operationResult model.RuntimeOperationResult
+	ctx             context.Context
 }
 
 func (f *fakeRuntimeClient) Status(ctx context.Context) (model.RuntimeObservedStatus, error) {
 	f.ctx = ctx
 	return f.status, nil
+}
+
+func (f *fakeRuntimeClient) Start(ctx context.Context, _ model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
+	f.ctx = ctx
+	return f.operationResult, nil
+}
+
+func (f *fakeRuntimeClient) Stop(ctx context.Context, _ model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
+	f.ctx = ctx
+	return f.operationResult, nil
+}
+
+func (f *fakeRuntimeClient) Restart(ctx context.Context, _ model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
+	f.ctx = ctx
+	return f.operationResult, nil
 }
 
 var _ RuntimeClient = (*fakeRuntimeClient)(nil)
@@ -43,7 +59,14 @@ func TestRuntimeClientStatusContract(t *testing.T) {
 	}
 
 	contract := reflect.TypeOf((*RuntimeClient)(nil)).Elem()
-	if contract.NumMethod() != 1 || contract.Method(0).Name != "Status" {
-		t.Fatalf("RuntimeClient methods = %v, want only Status", contract.NumMethod())
+	wantMethods := map[string]bool{"Restart": true, "Start": true, "Status": true, "Stop": true}
+	if contract.NumMethod() != len(wantMethods) {
+		t.Fatalf("RuntimeClient methods = %v, want %v", contract.NumMethod(), wantMethods)
+	}
+	for index := 0; index < contract.NumMethod(); index++ {
+		delete(wantMethods, contract.Method(index).Name)
+	}
+	if len(wantMethods) != 0 {
+		t.Fatalf("RuntimeClient missing methods: %v", wantMethods)
 	}
 }

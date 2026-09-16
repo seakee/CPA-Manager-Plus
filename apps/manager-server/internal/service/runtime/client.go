@@ -1,5 +1,5 @@
-// Package runtime defines the Manager application boundary for observing CPA
-// runtime state.
+// Package runtime defines the Manager application boundary for observing and
+// submitting typed lifecycle operations to a CPA Runtime.
 package runtime
 
 import (
@@ -15,4 +15,7 @@ import (
 // authentication failures are errors.
 type RuntimeClient interface {
 	Status(ctx context.Context) (model.RuntimeObservedStatus, error)
+	Start(ctx context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error)
+	Stop(ctx context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error)
+	Restart(ctx context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error)
 }

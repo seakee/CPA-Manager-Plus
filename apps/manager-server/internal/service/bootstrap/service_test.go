@@ -12,6 +12,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/cpaconnection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 
@@ -91,6 +92,107 @@ func TestRunMigratesLegacySetupAndEncryptsSecrets(t *testing.T) {
 		if strings.Contains(raw, "management-key") || !strings.Contains(raw, "enc:v1:") {
 			t.Fatalf("%s setting was not encrypted: %s", key, raw)
 		}
+	}
+}
+
+func TestInitializeEmbeddedRuntimeDesiredStateFreshAndPreserved(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "manager.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	cfg := config.Config{RuntimeURL: "http://cpamp-runtime:9081", RuntimeTokenFile: "/run/cpamp/runtime-secret/token"}
+
+	created, err := initializeEmbeddedRuntimeDesiredState(t.Context(), cfg, st)
+	if err != nil || !created {
+		t.Fatalf("initialize desired state created=%v err=%v", created, err)
+	}
+	initial, found, err := st.LoadEmbeddedRuntimeDesiredState(t.Context())
+	if err != nil || !found || initial.DesiredLifecycle != model.EmbeddedRuntimeDesiredRunning || initial.Revision != 1 {
+		t.Fatalf("initial desired state = %#v found=%v err=%v", initial, found, err)
+	}
+	stopped, err := st.SetEmbeddedRuntimeDesiredLifecycle(t.Context(), model.EmbeddedRuntimeDesiredStopped)
+	if err != nil {
+		t.Fatalf("set stopped desired state: %v", err)
+	}
+	created, err = initializeEmbeddedRuntimeDesiredState(t.Context(), cfg, st)
+	if err != nil || created {
+		t.Fatalf("reinitialize desired state created=%v err=%v", created, err)
+	}
+	preserved, found, err := st.LoadEmbeddedRuntimeDesiredState(t.Context())
+	if err != nil || !found || preserved != stopped {
+		t.Fatalf("preserved desired state = %#v found=%v err=%v want %#v", preserved, found, err, stopped)
+	}
+}
+
+func TestInitializeEmbeddedRuntimeDesiredStateDoesNotTakeOverExternalAuthority(t *testing.T) {
+	tests := []struct {
+		name  string
+		cfg   config.Config
+		setup func(*testing.T, *store.Store)
+	}{
+		{
+			name: "manager-only deployment",
+			cfg:  config.Config{},
+		},
+		{
+			name: "complete environment connection",
+			cfg: config.Config{
+				RuntimeURL:       "http://cpamp-runtime:9081",
+				RuntimeTokenFile: "/run/cpamp/runtime-secret/token",
+				CPAUpstreamURL:   "http://external-cpa:8317",
+				ManagementKey:    "external-key",
+			},
+		},
+		{
+			name: "complete manager authority",
+			cfg: config.Config{
+				RuntimeURL:       "http://cpamp-runtime:9081",
+				RuntimeTokenFile: "/run/cpamp/runtime-secret/token",
+			},
+			setup: func(t *testing.T, st *store.Store) {
+				t.Helper()
+				if err := st.SaveManagerConfig(t.Context(), store.ManagerConfig{CPAConnection: store.ManagerCPAConnectionConfig{
+					CPABaseURL: "http://external-cpa:8317", ManagementKey: "external-key",
+				}}); err != nil {
+					t.Fatalf("save manager authority: %v", err)
+				}
+			},
+		},
+		{
+			name: "complete legacy setup authority",
+			cfg: config.Config{
+				RuntimeURL:       "http://cpamp-runtime:9081",
+				RuntimeTokenFile: "/run/cpamp/runtime-secret/token",
+			},
+			setup: func(t *testing.T, st *store.Store) {
+				t.Helper()
+				if err := st.SaveSetup(t.Context(), store.Setup{
+					CPAUpstreamURL: "http://external-cpa:8317", ManagementKey: "external-key",
+				}); err != nil {
+					t.Fatalf("save legacy setup authority: %v", err)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			st, err := store.Open(filepath.Join(t.TempDir(), "manager.sqlite"))
+			if err != nil {
+				t.Fatalf("open store: %v", err)
+			}
+			t.Cleanup(func() { _ = st.Close() })
+			if test.setup != nil {
+				test.setup(t, st)
+			}
+			created, err := initializeEmbeddedRuntimeDesiredState(t.Context(), test.cfg, st)
+			if err != nil || created {
+				t.Fatalf("initialize desired state created=%v err=%v", created, err)
+			}
+			if state, found, err := st.LoadEmbeddedRuntimeDesiredState(t.Context()); err != nil || found {
+				t.Fatalf("unexpected desired state = %#v found=%v err=%v", state, found, err)
+			}
+		})
 	}
 }
 

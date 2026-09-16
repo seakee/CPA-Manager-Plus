@@ -39,4 +39,16 @@ func (c *ExternalClient) Status(ctx context.Context) (model.RuntimeObservedStatu
 	return status, nil
 }
 
+func (c *ExternalClient) Start(context.Context, model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
+	return model.RuntimeOperationResult{}, fmt.Errorf("start external Runtime: %w", ErrRuntimeMutationUnsupported)
+}
+
+func (c *ExternalClient) Stop(context.Context, model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
+	return model.RuntimeOperationResult{}, fmt.Errorf("stop external Runtime: %w", ErrRuntimeMutationUnsupported)
+}
+
+func (c *ExternalClient) Restart(context.Context, model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
+	return model.RuntimeOperationResult{}, fmt.Errorf("restart external Runtime: %w", ErrRuntimeMutationUnsupported)
+}
+
 var _ RuntimeClient = (*ExternalClient)(nil)

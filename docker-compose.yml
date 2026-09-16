@@ -30,6 +30,8 @@ services:
       USAGE_DB_PATH: '/data/usage.sqlite'
       CPA_MANAGER_DATA_KEY_PATH: '/data/data.key'
       CPA_UPSTREAM_URL: 'http://cpamp-runtime:8317'
+      CPAMP_RUNTIME_URL: 'http://cpamp-runtime:9081'
+      CPAMP_RUNTIME_TOKEN_FILE: '/run/cpamp/runtime-secret/token'
       USAGE_COLLECTOR_MODE: 'auto'
       USAGE_RESP_QUEUE: 'usage'
       USAGE_RESP_POP_SIDE: 'right'
