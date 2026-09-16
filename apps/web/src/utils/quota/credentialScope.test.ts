@@ -25,6 +25,36 @@ describe('quota credential scope', () => {
     expect(buildQuotaCredentialIdentity(first).authFileIdentityVerified).toBe(true);
   });
 
+  it('identifies Devin credentials with stable credential store keys', () => {
+    const devinFirst = {
+      name: 'devin-account.json',
+      provider: 'devin',
+      authIndex: 'auth-0',
+    };
+    const devinSecond = {
+      name: 'devin-account.json',
+      provider: 'devin',
+      authIndex: 'auth-1',
+    };
+    const devinSame = {
+      name: 'devin-account.json',
+      provider: 'devin',
+      authIndex: 'auth-0',
+    };
+
+    expect(getQuotaCredentialStoreKey(devinFirst)).toBe('devin-account.json::auth-0');
+    expect(getQuotaCredentialStoreKey(devinSame)).toBe(getQuotaCredentialStoreKey(devinFirst));
+    expect(getQuotaCredentialStoreKey(devinSecond)).not.toBe(
+      getQuotaCredentialStoreKey(devinFirst)
+    );
+    expect(getQuotaCredentialStoreKey(devinSecond)).toBe('devin-account.json::auth-1');
+
+    const identity = buildQuotaCredentialIdentity(devinFirst);
+    expect(identity.authFileIdentityVerified).toBe(true);
+    expect(identity.authIndex).toBe('auth-0');
+    expect(identity.authFileName).toBe('devin-account.json');
+  });
+
   it('marks filename-only identities as unverified', () => {
     expect(
       buildQuotaCredentialIdentity({ name: 'legacy.json', provider: 'kimi' })

@@ -3,6 +3,7 @@ import type {
   AntigravityQuotaState,
   ClaudeQuotaState,
   CodexQuotaState,
+  DevinQuotaState,
   KimiQuotaState,
   XaiQuotaState,
 } from '@/types';
@@ -38,6 +39,7 @@ const readPersistedQuotaState = async () => {
       antigravityQuota?: Record<string, AntigravityQuotaState>;
       claudeQuota?: Record<string, ClaudeQuotaState>;
       codexQuota?: Record<string, CodexQuotaState>;
+      devinQuota?: Record<string, DevinQuotaState>;
       kimiQuota?: Record<string, KimiQuotaState>;
       xaiQuota?: Record<string, XaiQuotaState>;
     };
@@ -177,6 +179,38 @@ describe('useQuotaStore persistence', () => {
       },
       xaiLoading: { status: 'loading', billing: null },
     });
+    useQuotaStore.getState().setDevinQuota({
+      devinSuccess: {
+        status: 'success',
+        windows: [],
+        observedAtMs: null,
+        plan: null,
+        planStartMs: null,
+        planEndMs: null,
+        authFileKey: 'devinSuccess',
+        authFileIdentityVerified: true,
+      },
+      devinError: {
+        status: 'error',
+        windows: [],
+        observedAtMs: null,
+        plan: null,
+        planStartMs: null,
+        planEndMs: null,
+        error: 'devin failed',
+        errorStatus: 500,
+        authFileKey: 'devinError',
+        authFileIdentityVerified: true,
+      },
+      devinLoading: {
+        status: 'loading',
+        windows: [],
+        observedAtMs: null,
+        plan: null,
+        planStartMs: null,
+        planEndMs: null,
+      },
+    });
 
     const persisted = await readPersistedQuotaState();
 
@@ -187,6 +221,7 @@ describe('useQuotaStore persistence', () => {
     ]);
     expect(Object.keys(persisted.kimiQuota ?? {})).toEqual(['kimiSuccess', 'kimiError']);
     expect(Object.keys(persisted.xaiQuota ?? {})).toEqual(['xaiSuccess', 'xaiError']);
+    expect(Object.keys(persisted.devinQuota ?? {})).toEqual(['devinSuccess', 'devinError']);
   });
 
   it('drops legacy and unverified quota cache entries while canonicalizing verified keys', async () => {
@@ -233,6 +268,30 @@ describe('useQuotaStore persistence', () => {
         authFileIdentityVerified: true,
       },
     });
+    useQuotaStore.getState().setDevinQuota({
+      devinSuccess: {
+        status: 'success',
+        windows: [],
+        observedAtMs: 1_000,
+        plan: 'Team',
+        planStartMs: null,
+        planEndMs: null,
+        authFileKey: 'devinSuccess',
+        authFileIdentityVerified: true,
+      },
+      devinError: {
+        status: 'error',
+        windows: [],
+        observedAtMs: null,
+        plan: null,
+        planStartMs: null,
+        planEndMs: null,
+        error: 'devin failed',
+        errorStatus: 502,
+        authFileKey: 'devinError',
+        authFileIdentityVerified: true,
+      },
+    });
 
     vi.resetModules();
     const { useQuotaStore: hydratedQuotaStore } = await import('./useQuotaStore');
@@ -243,6 +302,15 @@ describe('useQuotaStore persistence', () => {
     });
     expect(hydratedQuotaStore.getState().claudeQuota.claudeSuccess).toMatchObject({
       status: 'success',
+    });
+    expect(hydratedQuotaStore.getState().devinQuota.devinSuccess).toMatchObject({
+      status: 'success',
+      plan: 'Team',
+    });
+    expect(hydratedQuotaStore.getState().devinQuota.devinError).toMatchObject({
+      status: 'error',
+      error: 'devin failed',
+      errorStatus: 502,
     });
   });
 
@@ -266,6 +334,7 @@ describe('useQuotaStore persistence', () => {
       antigravityQuota: {},
       claudeQuota: {},
       codexQuota: {},
+      devinQuota: {},
       kimiQuota: {},
       xaiQuota: {},
     });

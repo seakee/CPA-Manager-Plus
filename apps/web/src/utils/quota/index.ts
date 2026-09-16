@@ -12,3 +12,5 @@ export * from './codexQuota';
 export * from './codexRequestHeaders';
 export * from './resetCredits';
 export * from './providerRequests';
+export * from './devinQuota';
+

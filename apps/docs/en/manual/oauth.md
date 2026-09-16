@@ -11,6 +11,7 @@ The page shows login methods based on CPA and plugin capabilities. Common entrie
 - Antigravity OAuth
 - Kimi OAuth
 - xAI OAuth
+- Devin OAuth
 - iFlow OAuth
 - Plugin-provided OAuth
 - Vertex credential import

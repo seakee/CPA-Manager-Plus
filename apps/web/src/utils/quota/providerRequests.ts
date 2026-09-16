@@ -12,6 +12,7 @@ import type {
   CodexRateLimitResetCredit,
   CodexQuotaWindow,
   CodexUsagePayload,
+  DevinQuotaData,
   KimiQuotaRow,
   KimiUsagePayload,
   XaiBillingConfig,
@@ -42,6 +43,8 @@ import {
   CLAUDE_USAGE_WINDOW_KEYS,
   CODEX_RATE_LIMIT_RESET_CREDITS_URL,
   CODEX_USAGE_URL,
+  DEVIN_GET_USER_STATUS_URL,
+  DEVIN_REQUEST_HEADERS,
   KIMI_REQUEST_HEADERS,
   KIMI_USAGE_URL,
   XAI_BILLING_MONTHLY_URL,
@@ -55,6 +58,7 @@ import {
   XAI_OFFICIAL_API_ME_URL,
   XAI_REQUEST_HEADERS,
 } from './constants';
+import { parseDevinQuotaPayload } from './devinQuota';
 import { buildAntigravityQuotaGroups, buildKimiQuotaRows } from './builders';
 import {
   createStatusError,
@@ -2046,3 +2050,53 @@ export const fetchXaiQuota = async (
       }),
     };
   });
+
+export const fetchDevinQuota = async (
+  file: AuthFileItem,
+  t: TFunction,
+  requestScope?: ApiClientRequestScope
+): Promise<DevinQuotaData> => {
+  const fileName = typeof file?.name === 'string' ? file.name.trim() : '';
+  const rawAuthIndex = file['auth_index'] ?? file.authIndex;
+  const authIndex = normalizeAuthIndex(rawAuthIndex);
+
+  if (!fileName || !authIndex) {
+    throw new Error(t('devin_quota.missing_identity'));
+  }
+
+  const result = await apiCallApi.request(
+    {
+      authIndex,
+      method: 'POST',
+      url: DEVIN_GET_USER_STATUS_URL,
+      header: { ...DEVIN_REQUEST_HEADERS },
+      data: JSON.stringify({
+        metadata: {
+          ideName: 'chisel',
+          ideVersion: '3000.10.21',
+          apiKey: '$TOKEN$',
+          locale: 'en',
+          os: 'darwin',
+          extensionVersion: '3000.10.21',
+          clientName: 'chisel',
+        },
+      }),
+    },
+    requestScope ? createScopedApiRequestConfig(requestScope) : undefined
+  );
+
+  if (result.statusCode < 200 || result.statusCode >= 300) {
+    throw createStatusError(getApiCallErrorMessage(result), result.statusCode);
+  }
+
+  const quotaData = parseDevinQuotaPayload(result.body ?? result.bodyText, {
+    observedAtMs: Date.now(),
+  });
+
+  if (!quotaData) {
+    throw new Error(t('devin_quota.empty_data'));
+  }
+
+  return quotaData;
+};
+

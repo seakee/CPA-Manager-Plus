@@ -4,6 +4,7 @@ const { mocks } = vi.hoisted(() => ({
   mocks: {
     get: vi.fn(),
     post: vi.fn(),
+    delete: vi.fn(),
   },
 }));
 
@@ -11,6 +12,7 @@ vi.mock('./client', () => ({
   apiClient: {
     get: mocks.get,
     post: mocks.post,
+    delete: mocks.delete,
   },
   createScopedApiRequestConfig: (scope: { apiBase: string; managementKey: string }) => ({
     baseURL: `${scope.apiBase.replace(/\/+$/, '')}/v0/management`,
@@ -24,6 +26,7 @@ import { oauthApi } from './oauth';
 beforeEach(() => {
   mocks.get.mockReset();
   mocks.post.mockReset();
+  mocks.delete.mockReset();
 });
 
 describe('oauthApi', () => {
@@ -82,5 +85,36 @@ describe('oauthApi', () => {
       },
       scopedConfig
     );
+  });
+
+  it('starts Devin OAuth with is_webui flag', async () => {
+    mocks.get.mockResolvedValue({ url: 'https://auth.example/devin', state: 'state-devin-1' });
+
+    await oauthApi.startAuth('devin');
+
+    expect(mocks.get).toHaveBeenCalledWith('/devin-auth-url', {
+      params: { is_webui: true },
+    });
+  });
+
+  it('cancels an active OAuth session using DELETE /oauth-session with captured scope', async () => {
+    const requestScope = {
+      apiBase: 'http://cpa.example:8317',
+      managementKey: 'cpa-key-1',
+    };
+    const scopedConfig = {
+      baseURL: 'http://cpa.example:8317/v0/management',
+      headers: { Authorization: 'Bearer cpa-key-1' },
+      cpampScopedRequest: true,
+    };
+    mocks.delete.mockResolvedValue({ status: 'ok', cancelled: true });
+
+    const result = await oauthApi.cancelSession('state-devin-1', requestScope);
+
+    expect(mocks.delete).toHaveBeenCalledWith('/oauth-session', {
+      ...scopedConfig,
+      params: { state: 'state-devin-1' },
+    });
+    expect(result).toEqual({ status: 'ok', cancelled: true });
   });
 });

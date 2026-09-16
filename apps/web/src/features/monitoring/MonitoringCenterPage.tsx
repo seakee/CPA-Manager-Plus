@@ -80,6 +80,7 @@ import {
   ANTIGRAVITY_CONFIG,
   CLAUDE_CONFIG,
   CODEX_CONFIG,
+  DEVIN_CONFIG,
   KIMI_CONFIG,
   XAI_CONFIG,
   refreshQuotaWithConfig,
@@ -270,6 +271,7 @@ export function MonitoringCenterPage() {
   const antigravityQuota = useQuotaStore((state) => state.antigravityQuota);
   const claudeQuota = useQuotaStore((state) => state.claudeQuota);
   const codexQuota = useQuotaStore((state) => state.codexQuota);
+  const devinQuota = useQuotaStore((state) => state.devinQuota);
   const kimiQuota = useQuotaStore((state) => state.kimiQuota);
   const xaiQuota = useQuotaStore((state) => state.xaiQuota);
   const sharedQuotaStores = useMemo<MonitoringQuotaStores>(
@@ -277,14 +279,16 @@ export function MonitoringCenterPage() {
       antigravityQuota,
       claudeQuota,
       codexQuota,
+      devinQuota,
       kimiQuota,
       xaiQuota,
     }),
-    [antigravityQuota, claudeQuota, codexQuota, kimiQuota, xaiQuota]
+    [antigravityQuota, claudeQuota, codexQuota, devinQuota, kimiQuota, xaiQuota]
   );
   const setAntigravityQuota = useQuotaStore((state) => state.setAntigravityQuota);
   const setClaudeQuota = useQuotaStore((state) => state.setClaudeQuota);
   const setCodexQuota = useQuotaStore((state) => state.setCodexQuota);
+  const setDevinQuota = useQuotaStore((state) => state.setDevinQuota);
   const setKimiQuota = useQuotaStore((state) => state.setKimiQuota);
   const setXaiQuota = useQuotaStore((state) => state.setXaiQuota);
   const [selectedAccount, setSelectedAccount] = useState(
@@ -1348,6 +1352,12 @@ export function MonitoringCenterPage() {
             setKimiQuota,
             getCredentialScopedQuotaState(sharedQuotaStores.kimiQuota, target.file)
           );
+        case 'devin':
+          return run(
+            DEVIN_CONFIG,
+            setDevinQuota,
+            getCredentialScopedQuotaState(sharedQuotaStores.devinQuota, target.file)
+          );
         case 'xai':
           return run(
             XAI_CONFIG,
@@ -1362,6 +1372,7 @@ export function MonitoringCenterPage() {
       setAntigravityQuota,
       setClaudeQuota,
       setCodexQuota,
+      setDevinQuota,
       setKimiQuota,
       setXaiQuota,
       t,

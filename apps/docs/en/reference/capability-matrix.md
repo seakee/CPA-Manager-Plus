@@ -48,6 +48,7 @@ Docker and native packages provide the same Full Mode capabilities; only the ins
 | xAI/Grok OAuth                       | Provider/Auth File/OAuth                                   | CLI billing, paid OAuth identity fallback, and request-event evidence | Local and server                  |
 | xAI API Key                          | `xai-api-key`, priority, models, and key testing           | Request results and provider responses                                | Provider key test                 |
 | Gemini / Vertex / Antigravity / Kimi | Provider, auth file, or OAuth depending on CPA             | Provider-specific quota or recent request evidence                    | Depends on CPA and provider APIs  |
+| Devin                                | Provider, Auth File, OAuth, `devin.sensitive-words`        | Daily/weekly quota percentages, exact reset, Devin plan metadata      | Quota read without model requests |
 | OpenAI-compatible                    | Base URL, API key, headers, model mapping, and key testing | Request status, latency, redacted failures, and cost                  | No assumed common quota API       |
 
 ## Data And Automation Boundaries

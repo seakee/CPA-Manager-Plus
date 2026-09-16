@@ -43,6 +43,7 @@ export type AccountQuotaWindowSource =
   | 'codex'
   | 'claude'
   | 'antigravity'
+  | 'devin'
   | 'kimi'
   | 'xai'
   | 'summary';
@@ -841,5 +842,51 @@ export const buildAccountQuotaDisplayWindows = (
     if (windows.length) return windows;
   }
 
+  if (row.provider === 'devin') {
+    const windows = buildDevinQuotaDisplayWindows(row, options);
+    if (windows.length) return windows;
+  }
+
   return buildSummaryQuotaDisplayWindow(row, options);
 };
+
+const buildDevinQuotaDisplayWindows = (
+  row: AccountRow,
+  options: BuildAccountQuotaDisplayWindowsOptions
+): AccountQuotaDisplayWindow[] => {
+  const quota = getCredentialScopedQuotaState(options.stores.devinQuota, row.raw);
+  if (!quota || !quota.windows?.length) return [];
+  return quota.windows.map((window) => {
+    const remainingPercent =
+      typeof window.remainingPercent === 'number' && Number.isFinite(window.remainingPercent)
+        ? clampDisplayPercent(window.remainingPercent)
+        : null;
+    const usedPercent =
+      remainingPercent === null ? null : clampDisplayPercent(100 - remainingPercent);
+    const hasReset = isValidQuotaResetAtMs(window.resetAtMs);
+    const resetLabel =
+      hasReset && window.resetAtMs !== null
+        ? formatQuotaResetTime(window.resetAtMs)
+        : '-';
+    const labelKey = window.id === 'daily' ? 'devin_quota.daily' : 'devin_quota.weekly';
+    const label = options.translateQuotaWindowLabel(undefined, labelKey);
+
+    return buildAccountQuotaDisplayWindow({
+      key: `devin:${window.id}`,
+      label,
+      kind: window.id,
+      remainingPercent,
+      usedPercent,
+      resetLabel,
+      resetAtMs: window.resetAtMs,
+      resetAccuracy: hasReset ? 'exact' : 'unknown',
+      limitWindowSeconds: window.periodHours * 3600,
+      source: 'devin',
+      modelScope: { kind: 'all', complete: true },
+      windowMode: 'unknown',
+      observedAtMs: quota.observedAtMs ?? quota.fetchedAtMs ?? null,
+      nowMs: options.nowMs,
+    });
+  });
+};
+

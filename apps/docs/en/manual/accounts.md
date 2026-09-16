@@ -13,7 +13,7 @@ Open the unified [Accounts Demo](https://seakee.github.io/CPA-Manager-Plus/#/dem
 
 ## What To Check First
 
-- **Credential and provider**: confirm whether the account belongs to Codex, Claude, Vertex, Antigravity, Kimi, xAI, or another source.
+- **Credential and provider**: confirm whether the account belongs to Codex, Claude, Vertex, Antigravity, Kimi, xAI, Devin, or another source.
 - **`auth_index`**: the stable account index used to connect usage, quota, inspection, and account actions.
 - **Enabled state**: automated recovery does not override manually disabled accounts.
 - **Note, priority, and project ID**: use them to separate account purpose and routing preference.

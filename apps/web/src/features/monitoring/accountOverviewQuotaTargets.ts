@@ -3,6 +3,7 @@ import {
   isAntigravityFile,
   isClaudeFile,
   isCodexFile,
+  isDevinFile,
   isDisabledAuthFile,
   isKimiFile,
   isXaiFile,
@@ -13,7 +14,7 @@ import {
 import type { MonitoringAccountAuthState } from './accountOverviewState';
 import type { MonitoringAccountRow } from './hooks/useMonitoringData';
 
-export type MonitoringAccountQuotaProvider = 'antigravity' | 'claude' | 'codex' | 'kimi' | 'xai';
+export type MonitoringAccountQuotaProvider = 'antigravity' | 'claude' | 'codex' | 'kimi' | 'xai' | 'devin';
 
 export type MonitoringAccountQuotaTarget = {
   key: string;
@@ -46,6 +47,7 @@ export const resolveMonitoringAccountQuotaProvider = (
   if (isCodexFile(file)) return 'codex';
   if (isClaudeFile(file)) return 'claude';
   if (isAntigravityFile(file)) return 'antigravity';
+  if (isDevinFile(file)) return 'devin';
   if (isKimiFile(file)) return 'kimi';
   if (isXaiFile(file)) return 'xai';
   return null;

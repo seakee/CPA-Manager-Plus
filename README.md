@@ -77,7 +77,7 @@ See [Choosing A CPA Panel](https://seakee.github.io/CPA-Manager-Plus/docs/en/gui
 
 ### CPA Gateway Management
 
-- Manage CPA provider configurations, including Gemini, Codex, Claude, Vertex, xAI, and OpenAI-compatible providers.
+- Manage CPA provider configurations, including Gemini, Codex, Claude, Vertex, xAI, Devin, and OpenAI-compatible providers.
 - Maintain auth files, OAuth logins, API keys, model aliases, priorities, plugins, logs, and system settings.
 - Import official Sub2API OpenAI OAuth exports and split multiple accounts into separate CPA Codex auth files.
 

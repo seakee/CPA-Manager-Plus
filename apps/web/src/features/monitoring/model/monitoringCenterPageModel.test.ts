@@ -4,6 +4,7 @@ import {
   ANTIGRAVITY_CONFIG,
   CLAUDE_CONFIG,
   CODEX_CONFIG,
+  DEVIN_CONFIG,
   KIMI_CONFIG,
   XAI_CONFIG,
 } from '@/components/quota';
@@ -11,12 +12,18 @@ import {
   fetchAntigravityQuota,
   fetchClaudeQuota,
   fetchCodexQuota,
+  fetchDevinQuota,
   fetchKimiQuota,
   fetchXaiQuota,
 } from '@/utils/quota';
 import zhCN from '@/i18n/locales/zh-CN.json';
 import zhTW from '@/i18n/locales/zh-TW.json';
-import type { AntigravityQuotaState, ClaudeQuotaState, CodexQuotaState } from '@/types';
+import type {
+  AntigravityQuotaState,
+  ClaudeQuotaState,
+  CodexQuotaState,
+  DevinQuotaState,
+} from '@/types';
 import { getQuotaCredentialStoreKey } from '@/utils/quota/credentialScope';
 import type { MonitoringAccountQuotaTarget } from '@/features/monitoring/accountOverviewQuotaTargets';
 import type {
@@ -55,6 +62,7 @@ vi.mock('@/utils/quota', async (importOriginal) => {
     fetchAntigravityQuota: vi.fn(),
     fetchClaudeQuota: vi.fn(),
     fetchCodexQuota: vi.fn(),
+    fetchDevinQuota: vi.fn(),
     fetchKimiQuota: vi.fn(),
     fetchXaiQuota: vi.fn(),
   };
@@ -74,6 +82,11 @@ const t = ((key: string, options?: Record<string, unknown>) => {
     'plans.codex.free': 'Free',
     'codex_quota.monthly_window': 'Monthly limit',
     'codex_quota.window_usage_duration': '{{used}} / {{total}} used',
+    'devin_quota.title': 'Devin Quota',
+    'devin_quota.daily': 'Daily limit',
+    'devin_quota.weekly': 'Weekly limit',
+    'devin_quota.plan_label': 'Plan',
+    'devin_quota.empty_data': 'No Devin quota data',
     'kimi_quota.title': 'Kimi Quota',
     'kimi_quota.empty_data': 'No Kimi quota data',
     'xai_quota.title': 'xAI Quota',
@@ -168,6 +181,15 @@ const buildEntryFromMockedProviderFetch = async (
       );
       break;
     }
+    case 'devin': {
+      const data = await fetchDevinQuota(target.file, translate);
+      entry = buildAccountQuotaEntryFromProviderState(
+        target,
+        DEVIN_CONFIG.buildSuccessState(data, target.file),
+        translate
+      );
+      break;
+    }
     case 'kimi': {
       const data = await fetchKimiQuota(target.file, translate);
       entry = buildAccountQuotaEntryFromProviderState(
@@ -195,8 +217,43 @@ const emptyQuotaStores = (): MonitoringQuotaStores => ({
   antigravityQuota: {},
   claudeQuota: {},
   codexQuota: {},
+  devinQuota: {},
   kimiQuota: {},
   xaiQuota: {},
+});
+
+const devinState = (
+  file: MonitoringAccountQuotaTarget['file'],
+  dailyPercent: number,
+  weeklyPercent: number,
+  fetchedAtMs = 1_000,
+  overrides: Partial<DevinQuotaState> = {}
+): DevinQuotaState => ({
+  status: 'success',
+  authFileKey: getQuotaCredentialStoreKey(file),
+  authFileName: file.name,
+  authIndex: String(file.authIndex ?? file['auth_index'] ?? ''),
+  authFileIdentityVerified: true,
+  fetchedAtMs,
+  windows: [
+    {
+      id: 'daily',
+      remainingPercent: dailyPercent,
+      resetAtMs: 1_700_000_100 * 1000,
+      periodHours: 24,
+    },
+    {
+      id: 'weekly',
+      remainingPercent: weeklyPercent,
+      resetAtMs: 1_700_000_200 * 1000,
+      periodHours: 168,
+    },
+  ],
+  observedAtMs: fetchedAtMs,
+  plan: 'Devin Pro',
+  planStartMs: Date.parse('2026-09-01T00:00:00Z'),
+  planEndMs: Date.parse('2026-10-01T00:00:00Z'),
+  ...overrides,
 });
 
 const codexState = (
@@ -451,6 +508,7 @@ describe('monitoringCenterPageModel account quota', () => {
     vi.mocked(fetchAntigravityQuota).mockReset();
     vi.mocked(fetchClaudeQuota).mockReset();
     vi.mocked(fetchCodexQuota).mockReset();
+    vi.mocked(fetchDevinQuota).mockReset();
     vi.mocked(fetchKimiQuota).mockReset();
     vi.mocked(fetchXaiQuota).mockReset();
   });
@@ -2057,5 +2115,128 @@ describe('monitoringCenterPageModel account quota', () => {
     );
     expect(metaLabels.join(' ')).not.toContain('protocol_changed');
     expect(metaLabels.join(' ')).not.toContain('HTTP 200');
+  });
+
+  it('maps Devin daily and weekly quota windows with plan into account quota entries', async () => {
+    vi.mocked(fetchDevinQuota).mockResolvedValue({
+      windows: [
+        {
+          id: 'daily',
+          remainingPercent: 75,
+          resetAtMs: 1_700_000_100 * 1000,
+          periodHours: 24,
+        },
+        {
+          id: 'weekly',
+          remainingPercent: 40,
+          resetAtMs: 1_700_000_200 * 1000,
+          periodHours: 168,
+        },
+      ],
+      observedAtMs: 1_000,
+      plan: 'Team',
+      planStartMs: Date.parse('2026-09-01T00:00:00Z'),
+      planEndMs: Date.parse('2026-10-01T00:00:00Z'),
+    });
+
+    const entry = await buildEntryFromMockedProviderFetch(
+      createTarget({
+        key: 'devin::1::devin.json',
+        provider: 'devin',
+        authIndex: '1',
+        fileName: 'devin.json',
+        file: {
+          name: 'devin.json',
+          type: 'devin',
+          provider: 'devin',
+          authIndex: '1',
+        },
+      }),
+      t
+    );
+
+    expect(entry).toMatchObject({
+      provider: 'devin',
+      providerLabel: 'Devin Quota',
+      metaLabels: ['Devin Quota', 'Plan: Team'],
+      windows: [
+        {
+          id: 'daily',
+          label: 'Daily limit',
+          remainingPercent: 75,
+          resetAtMs: 1_700_000_100 * 1000,
+          resetAccuracy: 'exact',
+        },
+        {
+          id: 'weekly',
+          label: 'Weekly limit',
+          remainingPercent: 40,
+          resetAtMs: 1_700_000_200 * 1000,
+          resetAccuracy: 'exact',
+        },
+      ],
+    });
+  });
+
+  it('reads cached Devin quota from stores without fetching', () => {
+    const file = {
+      name: 'devin-cached.json',
+      type: 'devin',
+      provider: 'devin',
+      authIndex: '1',
+    };
+    const target = createTarget({
+      key: 'devin::1::devin-cached.json',
+      provider: 'devin',
+      authIndex: '1',
+      fileName: file.name,
+      file,
+    });
+    const stores = emptyQuotaStores();
+    stores.devinQuota[getQuotaCredentialStoreKey(file)] = devinState(file, 90, 60, 2_500);
+
+    const entry = buildCachedAccountQuotaEntry(target, stores, t);
+
+    expect(fetchDevinQuota).not.toHaveBeenCalled();
+    expect(entry).toMatchObject({
+      key: target.key,
+      provider: 'devin',
+      fetchedAtMs: 2_500,
+      windows: [
+        { id: 'daily', remainingPercent: 90 },
+        { id: 'weekly', remainingPercent: 60 },
+      ],
+    });
+  });
+
+  it('handles Devin empty_data state gracefully in cached account quota entries', () => {
+    const file = {
+      name: 'devin-empty.json',
+      type: 'devin',
+      provider: 'devin',
+      authIndex: '1',
+    };
+    const target = createTarget({
+      key: 'devin::1::devin-empty.json',
+      provider: 'devin',
+      authIndex: '1',
+      fileName: file.name,
+      file,
+    });
+    const stores = emptyQuotaStores();
+    stores.devinQuota[getQuotaCredentialStoreKey(file)] = devinState(file, 0, 0, 1_000, {
+      status: 'success',
+      windows: [],
+      plan: null,
+    });
+
+    const entry = buildCachedAccountQuotaEntry(target, stores, t);
+
+    expect(entry).toMatchObject({
+      key: target.key,
+      provider: 'devin',
+      windows: [],
+      emptyMessage: 'No Devin quota data',
+    });
   });
 });

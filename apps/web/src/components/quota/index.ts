@@ -3,6 +3,7 @@ export {
   CLAUDE_CONFIG,
   CODEX_CONFIG,
   CODEX_SUMMARY_CONFIG,
+  DEVIN_CONFIG,
   KIMI_CONFIG,
   XAI_CONFIG,
   buildObservedCodexQuotaState,

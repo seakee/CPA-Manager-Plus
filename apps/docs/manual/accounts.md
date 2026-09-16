@@ -13,7 +13,7 @@ description: 在统一 Accounts 工作区管理 CPA 凭证、账号健康、配�
 
 ## 先看哪些信息
 
-- **凭证和 Provider**：确认账号属于 Codex、Claude、Vertex、Antigravity、Kimi、xAI 或其他来源。
+- **凭证和 Provider**：确认账号属于 Codex、Claude、Vertex、Antigravity、Kimi、xAI、Devin 或其他来源。
 - **`auth_index`**：账号的稳定索引。用量、配额、巡检和账号处理都依赖它做关联。
 - **启用状态**：手动禁用的账号不会被自动恢复流程覆盖。
 - **备注、优先级和项目 ID**：用于区分账号用途和路由偏好。

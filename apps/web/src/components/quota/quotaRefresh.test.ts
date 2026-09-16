@@ -1,10 +1,10 @@
 import type { TFunction } from 'i18next';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AuthFileItem } from '@/types';
-import { fetchClaudeQuota, fetchCodexQuota } from '@/utils/quota';
+import type { AuthFileItem, DevinQuotaData } from '@/types';
+import { fetchClaudeQuota, fetchCodexQuota, fetchDevinQuota } from '@/utils/quota';
 import { getQuotaCredentialStoreKey } from '@/utils/quota/credentialScope';
 import { useQuotaStore } from '@/stores/useQuotaStore';
-import { CLAUDE_CONFIG, CODEX_CONFIG, type QuotaConfig } from './quotaConfigs';
+import { CLAUDE_CONFIG, CODEX_CONFIG, DEVIN_CONFIG, type QuotaConfig } from './quotaConfigs';
 import { refreshQuotaWithConfig, type QuotaSetter } from './quotaRefresh';
 
 vi.mock('@/utils/quota', async (importOriginal) => {
@@ -13,6 +13,7 @@ vi.mock('@/utils/quota', async (importOriginal) => {
     ...actual,
     fetchClaudeQuota: vi.fn(),
     fetchCodexQuota: vi.fn(),
+    fetchDevinQuota: vi.fn(),
   };
 });
 
@@ -93,6 +94,7 @@ describe('refreshQuotaWithConfig', () => {
     useQuotaStore.getState().clearQuotaCache();
     vi.mocked(fetchClaudeQuota).mockReset();
     vi.mocked(fetchCodexQuota).mockReset();
+    vi.mocked(fetchDevinQuota).mockReset();
   });
 
   it('writes the Provider state once to the shared Codex store for all consumers', async () => {
@@ -305,5 +307,51 @@ describe('refreshQuotaWithConfig', () => {
       error: 'Rate limit exceeded',
       errorStatus: 429,
     });
+  });
+
+  it('does not commit late Devin quota response into new connection state after connection changes', async () => {
+    useQuotaStore.getState().activateQuotaCacheScope('connection-a');
+
+    const devinFile = {
+      name: 'devin.json',
+      type: 'devin',
+      provider: 'devin',
+      authIndex: 'd-1',
+    } as AuthFileItem;
+
+    const devinData: DevinQuotaData = {
+      windows: [
+        { id: 'daily', remainingPercent: 90, resetAtMs: 1726000000000, periodHours: 24 },
+        { id: 'weekly', remainingPercent: 70, resetAtMs: 1726500000000, periodHours: 168 },
+      ],
+      observedAtMs: 1725900000000,
+      plan: 'Pro',
+      planStartMs: null,
+      planEndMs: null,
+    };
+
+    const devinDeferred = deferred<DevinQuotaData>();
+    vi.mocked(fetchDevinQuota).mockReturnValueOnce(devinDeferred.promise);
+
+    let connectionIsCurrent = true;
+    const refreshPromise = runRefresh(
+      DEVIN_CONFIG,
+      devinFile,
+      useQuotaStore.getState().setDevinQuota,
+      undefined,
+      () => connectionIsCurrent
+    );
+
+    // Switch to Connection B before request completes
+    connectionIsCurrent = false;
+    useQuotaStore.getState().activateQuotaCacheScope('connection-b');
+
+    // Devin request from Connection A resolves late
+    devinDeferred.resolve(devinData);
+    const result = await refreshPromise;
+
+    expect(result).toBeNull();
+    const devinStoreKey = getQuotaCredentialStoreKey(devinFile);
+    expect(useQuotaStore.getState().devinQuota[devinStoreKey]).toBeUndefined();
   });
 });

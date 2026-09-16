@@ -11,6 +11,7 @@ OAuth 登录页面用于添加或重新授权账号。它解决的是“如何�
 - Antigravity OAuth
 - Kimi OAuth
 - xAI OAuth
+- Devin OAuth
 - iFlow OAuth
 - 插件提供的 OAuth
 - Vertex 凭证导入

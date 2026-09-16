@@ -689,4 +689,247 @@ describe('useVisualConfig', () => {
 
     harness.unmount();
   });
+
+  describe('devin sensitive words', () => {
+    it('parses devin.sensitive-words with trimming, filtering empty items, and preserving order', () => {
+      const harness = mountUseVisualConfig();
+      const yaml = [
+        'devin:',
+        '  sensitive-words:',
+        '    - "  forbidden-token  "',
+        '    - ""',
+        '    - "   "',
+        '    - "system prompt leak"',
+        '    - "secret-key"',
+        '',
+      ].join('\n');
+
+      act(() => {
+        expect(harness.getCurrent().loadVisualValuesFromYaml(yaml).ok).toBe(true);
+      });
+
+      expect(harness.getCurrent().visualValues.devinSensitiveWords).toEqual([
+        'forbidden-token',
+        'system prompt leak',
+        'secret-key',
+      ]);
+
+      // Verify non-canonical keys are ignored
+      const nonCanonicalYaml = [
+        'devin:',
+        '  sensitiveWords:',
+        '    - "bad1"',
+        'devin-sensitive-words:',
+        '  - "bad2"',
+        '',
+      ].join('\n');
+
+      act(() => {
+        expect(harness.getCurrent().loadVisualValuesFromYaml(nonCanonicalYaml).ok).toBe(true);
+      });
+      expect(harness.getCurrent().visualValues.devinSensitiveWords).toEqual([]);
+
+      harness.unmount();
+    });
+
+    it('canonically writes devin.sensitive-words into yaml', () => {
+      const harness = mountUseVisualConfig();
+      const initialYaml = ['port: 8080', ''].join('\n');
+
+      act(() => {
+        expect(harness.getCurrent().loadVisualValuesFromYaml(initialYaml).ok).toBe(true);
+        harness.getCurrent().setVisualValues({
+          devinSensitiveWords: ['word1', 'word2'],
+        });
+      });
+
+      const resultYaml = harness.getCurrent().applyVisualChangesToYaml(initialYaml);
+      const parsed = parseYaml(resultYaml) as Record<string, unknown>;
+      expect(parsed.devin).toEqual({
+        'sensitive-words': ['word1', 'word2'],
+      });
+
+      harness.unmount();
+    });
+
+    it('canonically writes devin.sensitive-words trimming items and dropping empty strings', () => {
+      const harness = mountUseVisualConfig();
+      const initialYaml = ['port: 8080', ''].join('\n');
+
+      act(() => {
+        expect(harness.getCurrent().loadVisualValuesFromYaml(initialYaml).ok).toBe(true);
+        harness.getCurrent().setVisualValues({
+          devinSensitiveWords: [' API ', '', 'Claude Code'],
+        });
+      });
+
+      const resultYaml = harness.getCurrent().applyVisualChangesToYaml(initialYaml);
+      const parsed = parseYaml(resultYaml) as Record<string, unknown>;
+      expect(parsed.devin).toEqual({
+        'sensitive-words': ['API', 'Claude Code'],
+      });
+
+      harness.unmount();
+    });
+
+    it('removes the devin map completely when clearing sensitive words and no other fields exist', () => {
+      const harness = mountUseVisualConfig();
+      const yaml = [
+        'devin:',
+        '  sensitive-words:',
+        '    - secret',
+        'port: 8080',
+        '',
+      ].join('\n');
+
+      act(() => {
+        expect(harness.getCurrent().loadVisualValuesFromYaml(yaml).ok).toBe(true);
+        harness.getCurrent().setVisualValues({
+          devinSensitiveWords: [],
+        });
+      });
+
+      const resultYaml = harness.getCurrent().applyVisualChangesToYaml(yaml);
+      const parsed = parseYaml(resultYaml) as Record<string, unknown>;
+      expect(parsed.devin).toBeUndefined();
+      expect(parsed.port).toBe(8080);
+
+      harness.unmount();
+    });
+
+    it('preserves unknown future sibling properties under devin when editing sensitive words', () => {
+      const harness = mountUseVisualConfig();
+      const yaml = [
+        'devin:',
+        '  sensitive-words:',
+        '    - old-secret',
+        '  future-option: true',
+        '  nested-config:',
+        '    feature-flag: enabled',
+        'port: 8080',
+        '',
+      ].join('\n');
+
+      act(() => {
+        expect(harness.getCurrent().loadVisualValuesFromYaml(yaml).ok).toBe(true);
+        harness.getCurrent().setVisualValues({
+          devinSensitiveWords: ['new-secret'],
+        });
+      });
+
+      const resultYaml = harness.getCurrent().applyVisualChangesToYaml(yaml);
+      const parsed = parseYaml(resultYaml) as Record<string, unknown>;
+      expect(parsed.devin).toEqual({
+        'sensitive-words': ['new-secret'],
+        'future-option': true,
+        'nested-config': {
+          'feature-flag': 'enabled',
+        },
+      });
+
+      harness.unmount();
+    });
+
+    it('preserves future sibling properties when clearing devin.sensitive-words', () => {
+      const harness = mountUseVisualConfig();
+      const yaml = [
+        'devin:',
+        '  sensitive-words:',
+        '    - secret',
+        '  future-option: "keep-me"',
+        'port: 8080',
+        '',
+      ].join('\n');
+
+      act(() => {
+        expect(harness.getCurrent().loadVisualValuesFromYaml(yaml).ok).toBe(true);
+        harness.getCurrent().setVisualValues({
+          devinSensitiveWords: [],
+        });
+      });
+
+      const resultYaml = harness.getCurrent().applyVisualChangesToYaml(yaml);
+      const parsed = parseYaml(resultYaml) as Record<string, unknown>;
+      expect(parsed.devin).toEqual({
+        'future-option': 'keep-me',
+      });
+      expect(parsed.port).toBe(8080);
+
+      harness.unmount();
+    });
+
+    it('does not touch or modify the devin subtree on unrelated visual edits', () => {
+      const harness = mountUseVisualConfig();
+      const yaml = [
+        '# Custom devin comment',
+        'devin:',
+        '  sensitive-words:',
+        '    - do-not-touch',
+        '  custom-flag: 123',
+        'port: 8080',
+        '',
+      ].join('\n');
+
+      act(() => {
+        expect(harness.getCurrent().loadVisualValuesFromYaml(yaml).ok).toBe(true);
+        harness.getCurrent().setVisualValues({
+          port: '9090',
+        });
+      });
+
+      const resultYaml = harness.getCurrent().applyVisualChangesToYaml(yaml);
+      expect(resultYaml).toContain('# Custom devin comment');
+      expect(resultYaml).toContain('custom-flag: 123');
+      const parsed = parseYaml(resultYaml) as Record<string, unknown>;
+      expect(parsed.port).toBe(9090);
+      expect(parsed.devin).toEqual({
+        'sensitive-words': ['do-not-touch'],
+        'custom-flag': 123,
+      });
+
+      harness.unmount();
+    });
+
+    it('tracks the dirty lifecycle accurately for devinSensitiveWords', () => {
+      const harness = mountUseVisualConfig();
+      const yaml = [
+        'devin:',
+        '  sensitive-words:',
+        '    - foo',
+        '    - bar',
+        '',
+      ].join('\n');
+
+      act(() => {
+        expect(harness.getCurrent().loadVisualValuesFromYaml(yaml).ok).toBe(true);
+      });
+      expect(harness.getCurrent().visualDirty).toBe(false);
+
+      // Setting to identical values does not mark dirty
+      act(() => {
+        harness.getCurrent().setVisualValues({
+          devinSensitiveWords: ['foo', 'bar'],
+        });
+      });
+      expect(harness.getCurrent().visualDirty).toBe(false);
+
+      // Editing marks dirty
+      act(() => {
+        harness.getCurrent().setVisualValues({
+          devinSensitiveWords: ['foo', 'bar', 'baz'],
+        });
+      });
+      expect(harness.getCurrent().visualDirty).toBe(true);
+
+      // Reverting clears dirty
+      act(() => {
+        harness.getCurrent().setVisualValues({
+          devinSensitiveWords: ['foo', 'bar'],
+        });
+      });
+      expect(harness.getCurrent().visualDirty).toBe(false);
+
+      harness.unmount();
+    });
+  });
 });

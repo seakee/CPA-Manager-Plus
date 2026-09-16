@@ -38,6 +38,10 @@ export const TYPE_COLORS: Record<string, TypeColorSet> = {
     light: { bg: '#f3f4f6', text: '#111827', border: '1px solid #d1d5db' },
     dark: { bg: '#111827', text: '#f9fafb', border: '1px solid #374151' },
   },
+  devin: {
+    light: { bg: '#e8f4ff', text: '#155e9b' },
+    dark: { bg: '#123b5d', text: '#8dc9f5' },
+  },
   iflow: {
     light: { bg: '#f5e3fc', text: '#9025c8' },
     dark: { bg: '#521490', text: '#d49cf5' },
@@ -218,3 +222,13 @@ export const XAI_REQUEST_HEADERS = {
   accept: '*/*',
   'user-agent': XAI_GROK_USER_AGENT,
 };
+
+// Devin API configuration
+export const DEVIN_GET_USER_STATUS_URL =
+  'https://server.codeium.com/exa.seat_management_pb.SeatManagementService/GetUserStatus';
+
+export const DEVIN_REQUEST_HEADERS = {
+  'Content-Type': 'application/json',
+  'Connect-Protocol-Version': '1',
+};
+

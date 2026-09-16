@@ -167,7 +167,7 @@ function buildProtocolOptions(
   return options;
 }
 
-const StringListEditor = memo(function StringListEditor({
+export const StringListEditor = memo(function StringListEditor({
   value,
   disabled,
   placeholder,

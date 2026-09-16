@@ -33,6 +33,7 @@ import type {
   ClaudeQuotaState,
   CodexQuotaState,
   CredentialScopedQuotaState,
+  DevinQuotaState,
   KimiQuotaState,
   XaiQuotaState,
 } from '@/types';
@@ -58,6 +59,7 @@ export type DemoQuotaStoreState = {
   antigravityQuota: Record<string, AntigravityQuotaState>;
   claudeQuota: Record<string, ClaudeQuotaState>;
   codexQuota: Record<string, CodexQuotaState>;
+  devinQuota: Record<string, DevinQuotaState>;
   kimiQuota: Record<string, KimiQuotaState>;
   xaiQuota: Record<string, XaiQuotaState>;
 };
@@ -6444,6 +6446,7 @@ const getDemoQuotaStoreStateByFileName = (
       },
     },
   },
+  devinQuota: {},
 });
 
 const scopeDemoQuotaRecord = <TState extends CredentialScopedQuotaState>(
@@ -6482,6 +6485,7 @@ export const getDemoQuotaStoreState = (
     antigravityQuota: scopeDemoQuotaRecord(raw.antigravityQuota, filesByName),
     claudeQuota: scopeDemoQuotaRecord(raw.claudeQuota, filesByName),
     codexQuota: scopeDemoQuotaRecord(raw.codexQuota, filesByName),
+    devinQuota: scopeDemoQuotaRecord(raw.devinQuota, filesByName),
     kimiQuota: scopeDemoQuotaRecord(raw.kimiQuota, filesByName),
     xaiQuota: scopeDemoQuotaRecord(raw.xaiQuota, filesByName),
   };

@@ -43,6 +43,7 @@ import {
   PayloadFilterRulesEditor,
   PayloadRulesEditor,
   PluginStoreAuthEditor,
+  StringListEditor,
 } from './VisualConfigEditorBlocks';
 import type { ApiKeyMutation } from './ApiKeysCardEditor';
 import styles from './VisualConfigEditor.module.scss';
@@ -954,6 +955,34 @@ export function VisualConfigEditor({
                   error={redisUsageQueueRetentionError}
                 />
               </SectionGrid>
+
+              <SectionSubsection
+                title={t('config_management.visual.sections.system.devin_title')}
+                description={t(
+                  'config_management.visual.sections.system.devin_sensitive_words_desc'
+                )}
+              >
+                <FieldShell
+                  label={t(
+                    'config_management.visual.sections.system.devin_sensitive_words_label'
+                  )}
+                  hint={t(
+                    'config_management.visual.sections.system.devin_sensitive_words_hint'
+                  )}
+                >
+                  <StringListEditor
+                    value={values.devinSensitiveWords}
+                    disabled={disabled}
+                    placeholder={t(
+                      'config_management.visual.sections.system.devin_sensitive_words_placeholder'
+                    )}
+                    inputAriaLabel={t(
+                      'config_management.visual.sections.system.devin_sensitive_words_label'
+                    )}
+                    onChange={(devinSensitiveWords) => onChange({ devinSensitiveWords })}
+                  />
+                </FieldShell>
+              </SectionSubsection>
             </SectionStack>
           </ConfigSection>
 

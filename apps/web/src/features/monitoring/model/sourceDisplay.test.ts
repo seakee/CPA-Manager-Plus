@@ -21,6 +21,8 @@ describe('isGenericMonitoringProviderLabel', () => {
     expect(isGenericMonitoringProviderLabel('x-ai')).toBe(true);
     expect(isGenericMonitoringProviderLabel('grok')).toBe(true);
     expect(isGenericMonitoringProviderLabel('antigravity')).toBe(true);
+    expect(isGenericMonitoringProviderLabel('devin')).toBe(true);
+    expect(isGenericMonitoringProviderLabel('Devin')).toBe(true);
     expect(isGenericMonitoringProviderLabel('anyrouter.top #1')).toBe(false);
   });
 });
@@ -110,6 +112,45 @@ describe('buildMonitoringSourceDisplay', () => {
 
     expect(display.primary).toBe('fbc***@vip.qq.com');
     expect(display.meta).toBe('codex');
+  });
+
+  it('keeps generic devin provider labels secondary to the account identity', () => {
+    const authMetaMap = new Map<string, MonitoringAuthMeta>([
+      [
+        'devin-1',
+        {
+          authIndex: 'devin-1',
+          label: 'devin',
+          account: 'user@example.com',
+          provider: 'devin',
+          status: 'active',
+          disabled: false,
+          unavailable: false,
+          runtimeOnly: false,
+          planType: '-',
+          updatedAt: '',
+        },
+      ],
+    ]);
+
+    const display = buildMonitoringSourceDisplay(
+      {
+        authIndex: 'devin-1',
+        accountSnapshot: 'user@example.com',
+        authLabelSnapshot: 'devin',
+        authProviderSnapshot: 'devin',
+        channel: 'devin',
+      },
+      {
+        authMetaMap,
+        channelByAuthIndex: new Map(),
+      }
+    );
+
+    expect(display.primary).toBe('use***@example.com');
+    expect(display.meta).toBe('devin');
+    expect(display.accountMasked).toBe('use***@example.com');
+    expect(display.provider).toBe('devin');
   });
 
   it('still prefers non-generic channel names over the account identity', () => {

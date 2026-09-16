@@ -19,6 +19,11 @@ describe('accountReauth', () => {
       oauthProvider: 'anthropic',
       path: '/oauth#oauth-provider-anthropic',
     });
+    expect(resolveAccountReauthAction({ name: 'devin.json', type: 'devin' })).toEqual({
+      kind: 'navigate',
+      oauthProvider: 'devin',
+      path: '/oauth#oauth-provider-devin',
+    });
   });
 
   it('returns an explicit unsupported action for providers without OAuth login', () => {

@@ -26,6 +26,7 @@ const emptyStores = (): AccountQuotaStores => ({
   antigravityQuota: {},
   claudeQuota: {},
   codexQuota: {},
+  devinQuota: {},
   kimiQuota: {},
   xaiQuota: {},
 });
@@ -35,6 +36,8 @@ const t = ((key: string, options?: Record<string, string | number>) => {
     'antigravity_quota.group_gemini_models': 'Gemini models',
     'antigravity_quota.daily_limit': 'Daily limit',
     'claude_quota.extra_usage_label': 'Extra Usage',
+    'devin_quota.daily': 'Daily limit',
+    'devin_quota.weekly': 'Weekly limit',
     'kimi_quota.reset_hint': `resets in ${options?.hint ?? ''}`,
     'kimi_quota.weekly_limit': 'Weekly limit',
     'xai_quota.weekly_credits': 'Weekly credits',
@@ -54,6 +57,7 @@ const buildRow = (file: AuthFileItem, stores: AccountQuotaStores = emptyStores()
     stores.antigravityQuota,
     stores.claudeQuota,
     stores.codexQuota,
+    stores.devinQuota,
     stores.kimiQuota,
     stores.xaiQuota,
   ] as Array<Record<string, CredentialScopedQuotaState>>;
@@ -679,6 +683,130 @@ describe('accountQuotaDisplayWindows', () => {
     expect(getAccountQuotaSemanticGroup(windows[0])).toBe('standard');
     expect(isIntervalAccountQuotaWindow(windows[0])).toBe(true);
     expect(isStandardAccountQuotaListWindow(windows[0])).toBe(true);
+  });
+
+  it('builds Devin daily and weekly display windows with exact reset and clamp percent', () => {
+    const stores = {
+      ...emptyStores(),
+      devinQuota: {
+        'devin.json::d-1': {
+          status: 'success',
+          authFileKey: 'devin.json::d-1',
+          authFileName: 'devin.json',
+          authIndex: 'd-1',
+          authFileIdentityVerified: true,
+          windows: [
+            {
+              id: 'daily',
+              remainingPercent: 0,
+              resetAtMs: Date.parse('2026-09-15T12:00:00Z'),
+              periodHours: 24,
+            },
+            {
+              id: 'weekly',
+              remainingPercent: 75,
+              resetAtMs: Date.parse('2026-09-22T12:00:00Z'),
+              periodHours: 168,
+            },
+          ],
+          plan: 'Pro',
+          planStartMs: null,
+          planEndMs: null,
+          observedAtMs: Date.parse('2026-09-15T10:00:00Z'),
+        },
+      },
+    } satisfies AccountQuotaStores;
+    const row = buildRow({ name: 'devin.json', type: 'devin', authIndex: 'd-1' }, stores);
+
+    const windows = buildAccountQuotaDisplayWindows(row, {
+      stores,
+      translateQuotaWindowLabel,
+      t,
+    });
+
+    expect(windows).toHaveLength(2);
+    expect(windows[0]).toMatchObject({
+      key: 'devin:daily',
+      label: 'Daily limit',
+      kind: 'daily',
+      remainingPercent: 0,
+      usedPercent: 100,
+      resetAtMs: Date.parse('2026-09-15T12:00:00Z'),
+      resetAccuracy: 'exact',
+      limitWindowSeconds: 24 * 3600,
+      source: 'devin',
+      modelScope: { kind: 'all', complete: true },
+    });
+    expect(getAccountQuotaSemanticGroup(windows[0])).toBe('standard');
+
+    expect(windows[1]).toMatchObject({
+      key: 'devin:weekly',
+      label: 'Weekly limit',
+      kind: 'weekly',
+      remainingPercent: 75,
+      usedPercent: 25,
+      resetAtMs: Date.parse('2026-09-22T12:00:00Z'),
+      resetAccuracy: 'exact',
+      limitWindowSeconds: 168 * 3600,
+      source: 'devin',
+      modelScope: { kind: 'all', complete: true },
+    });
+    expect(getAccountQuotaSemanticGroup(windows[1])).toBe('standard');
+  });
+
+  it('preserves Devin daily and weekly windows on transient refresh error when previous windows exist', () => {
+    const stores = {
+      ...emptyStores(),
+      devinQuota: {
+        'devin.json::d-1': {
+          status: 'error',
+          error: 'temporary failure',
+          errorStatus: 502,
+          failedAtMs: Date.parse('2026-09-15T10:05:00Z'),
+          authFileKey: 'devin.json::d-1',
+          authFileName: 'devin.json',
+          authIndex: 'd-1',
+          authFileIdentityVerified: true,
+          plan: 'Pro',
+          planStartMs: Date.parse('2026-09-01T00:00:00Z'),
+          planEndMs: Date.parse('2026-10-01T00:00:00Z'),
+          windows: [
+            {
+              id: 'daily',
+              remainingPercent: 50,
+              resetAtMs: Date.parse('2026-09-15T12:00:00Z'),
+              periodHours: 24,
+            },
+            {
+              id: 'weekly',
+              remainingPercent: 80,
+              resetAtMs: Date.parse('2026-09-22T12:00:00Z'),
+              periodHours: 168,
+            },
+          ],
+          observedAtMs: Date.parse('2026-09-15T10:00:00Z'),
+        },
+      },
+    } satisfies AccountQuotaStores;
+    const row = buildRow({ name: 'devin.json', type: 'devin', authIndex: 'd-1' }, stores);
+
+    const windows = buildAccountQuotaDisplayWindows(row, {
+      stores,
+      translateQuotaWindowLabel,
+      t,
+    });
+
+    expect(windows).toHaveLength(2);
+    expect(windows[0]).toMatchObject({
+      key: 'devin:daily',
+      label: 'Daily limit',
+      remainingPercent: 50,
+    });
+    expect(windows[1]).toMatchObject({
+      key: 'devin:weekly',
+      label: 'Weekly limit',
+      remainingPercent: 80,
+    });
   });
 
   it('splits xAI billing into monthly and pay-as-you-go windows', () => {

@@ -8,6 +8,7 @@ import {
   buildQuotaFailureState,
   CLAUDE_CONFIG,
   CODEX_CONFIG,
+  DEVIN_CONFIG,
   getCodexQuotaStoreKey,
   KIMI_CONFIG,
   getSortedCodexResetCreditExpiries,
@@ -47,7 +48,14 @@ describe('getCodexQuotaStoreKey', () => {
       provider: 'claude',
       authIndex: 'auth-1',
     };
-    const configs = [CLAUDE_CONFIG, ANTIGRAVITY_CONFIG, CODEX_CONFIG, KIMI_CONFIG, XAI_CONFIG];
+    const configs = [
+      CLAUDE_CONFIG,
+      ANTIGRAVITY_CONFIG,
+      CODEX_CONFIG,
+      DEVIN_CONFIG,
+      KIMI_CONFIG,
+      XAI_CONFIG,
+    ];
 
     configs.forEach((config) => {
       expect(config.getStoreKey?.(file)).toBe('shared.json::auth-1');
@@ -1486,3 +1494,56 @@ describe('Codex plan precedence', () => {
     ]);
   });
 });
+
+describe('DEVIN_CONFIG', () => {
+  it('correctly builds loading, success, and error states', () => {
+    const file = { name: 'devin.json', type: 'devin', authIndex: 'd-1' };
+
+    const loading = DEVIN_CONFIG.buildLoadingState(file);
+    expect(loading).toMatchObject({
+      status: 'loading',
+      windows: [],
+      observedAtMs: null,
+      plan: null,
+      planStartMs: null,
+      planEndMs: null,
+      authFileKey: 'devin.json::d-1',
+    });
+
+    const success = DEVIN_CONFIG.buildSuccessState(
+      {
+        windows: [
+          { id: 'daily', remainingPercent: 50, resetAtMs: 1726000000000, periodHours: 24 },
+          { id: 'weekly', remainingPercent: 80, resetAtMs: 1726500000000, periodHours: 168 },
+        ],
+        observedAtMs: 1726000000100,
+        plan: 'Team',
+        planStartMs: 1725000000000,
+        planEndMs: 1727000000000,
+      },
+      file
+    );
+    expect(success).toMatchObject({
+      status: 'success',
+      plan: 'Team',
+      planStartMs: 1725000000000,
+      planEndMs: 1727000000000,
+      windows: [
+        { id: 'daily', remainingPercent: 50 },
+        { id: 'weekly', remainingPercent: 80 },
+      ],
+      fetchedAtMs: 1726000000100,
+      authFileKey: 'devin.json::d-1',
+    });
+
+    const error = DEVIN_CONFIG.buildErrorState('quota failed', 429, file);
+    expect(error).toMatchObject({
+      status: 'error',
+      windows: [],
+      error: 'quota failed',
+      errorStatus: 429,
+      authFileKey: 'devin.json::d-1',
+    });
+  });
+});
+

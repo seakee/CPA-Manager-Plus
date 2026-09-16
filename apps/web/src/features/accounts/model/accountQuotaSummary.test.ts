@@ -13,6 +13,7 @@ const emptyStores = (): AccountQuotaStores => ({
   antigravityQuota: {},
   claudeQuota: {},
   codexQuota: {},
+  devinQuota: {},
   kimiQuota: {},
   xaiQuota: {},
 });
@@ -470,6 +471,54 @@ describe('resolveAccountQuota', () => {
     };
 
     expect(resolveAccountQuota(file, stores).planType).toBe('Antigravity Future');
+  });
+
+  it('resolves Devin quota summary choosing the limiting window and preserving live plan', () => {
+    const file = { name: 'devin.json', type: 'devin', authIndex: 'd-1' };
+    const stores = emptyStores();
+    stores.devinQuota['devin.json::d-1'] = {
+      status: 'success',
+      authFileKey: 'devin.json::d-1',
+      authFileName: 'devin.json',
+      authIndex: 'd-1',
+      authFileIdentityVerified: true,
+      windows: [
+        { id: 'daily', remainingPercent: 0, resetAtMs: 1726400000000, periodHours: 24 },
+        { id: 'weekly', remainingPercent: 80, resetAtMs: 1726900000000, periodHours: 168 },
+      ],
+      plan: 'Pro',
+      planStartMs: 1726000000000,
+      planEndMs: 1727000000000,
+      observedAtMs: 1726000000100,
+      fetchedAtMs: 1726000000100,
+    };
+
+    const exhaustedSummary = resolveAccountQuota(file, stores);
+    expect(exhaustedSummary.status).toBe('exhausted');
+    expect(exhaustedSummary.remainingPercent).toBe(0);
+    expect(exhaustedSummary.usedPercent).toBe(100);
+    expect(exhaustedSummary.planType).toBe('Pro');
+    expect(exhaustedSummary.resetAccuracy).toBe('exact');
+
+    // daily = 54, weekly = 77 -> summary = 54
+    stores.devinQuota['devin.json::d-1'].windows[0].remainingPercent = 54;
+    stores.devinQuota['devin.json::d-1'].windows[1].remainingPercent = 77;
+
+    const activeSummary = resolveAccountQuota(file, stores);
+    expect(activeSummary.status).toBe('ok');
+    expect(activeSummary.remainingPercent).toBe(54);
+    expect(activeSummary.usedPercent).toBe(46);
+    expect(activeSummary.planType).toBe('Pro');
+
+    // daily = 80, weekly = 35 -> summary = 35 (limiting window = min(daily, weekly))
+    stores.devinQuota['devin.json::d-1'].windows[0].remainingPercent = 80;
+    stores.devinQuota['devin.json::d-1'].windows[1].remainingPercent = 35;
+
+    const reverseSummary = resolveAccountQuota(file, stores);
+    expect(reverseSummary.status).toBe('ok');
+    expect(reverseSummary.remainingPercent).toBe(35);
+    expect(reverseSummary.usedPercent).toBe(65);
+    expect(reverseSummary.planType).toBe('Pro');
   });
 });
 

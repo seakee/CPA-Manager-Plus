@@ -51,6 +51,7 @@ import {
   fetchCodexQuota,
   fetchCodexQuotaSummary,
   fetchCodexResetCredits,
+  fetchDevinQuota,
   fetchKimiQuota,
   mergeXaiBillingSummaries,
   probeXaiBilling,
@@ -3831,3 +3832,114 @@ describe('CODEX_REQUEST_HEADERS', () => {
     );
   });
 });
+
+describe('fetchDevinQuota', () => {
+  it('sends POST request to GetUserStatus with exact contract and no Authorization headers', async () => {
+    mocks.request.mockResolvedValueOnce({
+      statusCode: 200,
+      hasStatusCode: true,
+      header: {},
+      bodyText: '',
+      body: {
+        userStatus: {
+          planStatus: {
+            planInfo: { planName: 'Pro' },
+            dailyQuotaRemainingPercent: 54,
+            dailyQuotaResetAtUnix: 1726400000,
+          },
+        },
+      },
+    });
+
+    const file = { name: 'devin.json', type: 'devin', authIndex: 'devin-001' };
+    const requestScope = { apiBase: 'https://cpa.example.com', managementKey: 'test-key' };
+    const result = await fetchDevinQuota(file, t, requestScope);
+
+    expect(mocks.request).toHaveBeenCalledTimes(1);
+    const [payload, config] = mocks.request.mock.calls[0];
+
+    expect(payload).toEqual({
+      authIndex: 'devin-001',
+      method: 'POST',
+      url: 'https://server.codeium.com/exa.seat_management_pb.SeatManagementService/GetUserStatus',
+      header: {
+        'Content-Type': 'application/json',
+        'Connect-Protocol-Version': '1',
+      },
+      data: JSON.stringify({
+        metadata: {
+          ideName: 'chisel',
+          ideVersion: '3000.10.21',
+          apiKey: '$TOKEN$',
+          locale: 'en',
+          os: 'darwin',
+          extensionVersion: '3000.10.21',
+          clientName: 'chisel',
+        },
+      }),
+    });
+
+    // Ensure NO Authorization or X-Api-Key headers exist on the proxied upstream request
+    expect(payload.header['Authorization']).toBeUndefined();
+    expect(payload.header['X-Api-Key']).toBeUndefined();
+
+    // Verify requestScope is captured in axios config for CPA management call
+    expect(config?.baseURL).toBe('https://cpa.example.com/v0/management');
+    expect(config?.headers?.['Authorization']).toBe('Bearer test-key');
+    expect(config?.cpampScopedRequest).toBe(true);
+
+    expect(result.plan).toBe('Pro');
+    expect(result.windows[0].remainingPercent).toBe(54);
+    expect(result.windows[0].resetAtMs).toBe(1726400000000);
+  });
+
+  it('rejects without network request when identity is missing', async () => {
+    // Missing authIndex
+    await expect(
+      fetchDevinQuota({ name: 'devin.json', type: 'devin' }, t)
+    ).rejects.toThrow('devin_quota.missing_identity');
+
+    // Missing fileName
+    await expect(
+      fetchDevinQuota({ name: '', type: 'devin', authIndex: 'devin-1' }, t)
+    ).rejects.toThrow('devin_quota.missing_identity');
+
+    expect(mocks.request).not.toHaveBeenCalled();
+  });
+
+  it('preserves error status codes like 429 and 401', async () => {
+    mocks.request.mockResolvedValueOnce({
+      statusCode: 429,
+      hasStatusCode: true,
+      header: {},
+      bodyText: 'Rate limit exceeded',
+    });
+
+    const promise = fetchDevinQuota(
+      { name: 'devin.json', type: 'devin', authIndex: 'devin-1' },
+      t
+    );
+    await expect(promise).rejects.toMatchObject({ status: 429 });
+  });
+
+  it('throws empty_data on 200 response without quota observations', async () => {
+    mocks.request.mockResolvedValueOnce({
+      statusCode: 200,
+      hasStatusCode: true,
+      header: {},
+      bodyText: '',
+      body: {
+        userStatus: {
+          planStatus: {
+            planInfo: { planName: 'Pro' },
+          },
+        },
+      },
+    });
+
+    await expect(
+      fetchDevinQuota({ name: 'devin.json', type: 'devin', authIndex: 'devin-1' }, t)
+    ).rejects.toThrow('devin_quota.empty_data');
+  });
+});
+

@@ -7,6 +7,8 @@ import type {
   CodexQuotaWindow,
   CodexRateLimitResetCredit,
   CredentialScopedQuotaState,
+  DevinQuotaData,
+  DevinQuotaState,
   KimiQuotaState,
   XaiBillingSummary,
   XaiQuotaState,
@@ -25,6 +27,7 @@ import {
   fetchClaudeQuota,
   fetchCodexQuota,
   fetchCodexQuotaSummary,
+  fetchDevinQuota,
   fetchKimiQuota,
   fetchXaiQuota,
   filterFreshCodexQuotaWindows,
@@ -52,7 +55,7 @@ import {
   scopeQuotaStateToCredential,
 } from '@/utils/quota/credentialScope';
 
-type QuotaType = 'antigravity' | 'claude' | 'codex' | 'kimi' | 'xai';
+type QuotaType = 'antigravity' | 'claude' | 'codex' | 'kimi' | 'xai' | 'devin';
 
 export interface QuotaConfig<TState, TData> {
   type: QuotaType;
@@ -771,3 +774,43 @@ export const XAI_CONFIG: QuotaConfig<XaiQuotaState, XaiBillingSummary> = {
   }),
   scopeState: scopeCredentialQuotaState,
 };
+
+export const DEVIN_CONFIG: QuotaConfig<DevinQuotaState, DevinQuotaData> = {
+  type: 'devin',
+  i18nPrefix: 'devin_quota',
+  fetchQuota: fetchDevinQuota,
+  getStoreKey: getQuotaCredentialStoreKey,
+  buildLoadingState: (file) => ({
+    status: 'loading',
+    windows: [],
+    observedAtMs: null,
+    plan: null,
+    planStartMs: null,
+    planEndMs: null,
+    ...buildQuotaCredentialIdentity(file),
+  }),
+  buildSuccessState: (data, file) => ({
+    status: 'success',
+    windows: data.windows,
+    observedAtMs: data.observedAtMs,
+    plan: data.plan,
+    planStartMs: data.planStartMs,
+    planEndMs: data.planEndMs,
+    ...buildQuotaCredentialIdentity(file),
+    fetchedAtMs: data.observedAtMs ?? Date.now(),
+  }),
+  buildErrorState: (message, status, file) => ({
+    status: 'error',
+    windows: [],
+    observedAtMs: null,
+    plan: null,
+    planStartMs: null,
+    planEndMs: null,
+    error: message,
+    errorStatus: status,
+    ...buildQuotaCredentialIdentity(file),
+    failedAtMs: Date.now(),
+  }),
+  scopeState: scopeCredentialQuotaState,
+};
+

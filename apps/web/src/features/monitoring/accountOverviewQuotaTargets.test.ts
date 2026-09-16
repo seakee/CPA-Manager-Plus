@@ -273,4 +273,40 @@ describe('accountOverviewQuotaTargets', () => {
     ]);
     expect(result.get('same@example.com')).toBeUndefined();
   });
+
+  it('builds Devin quota targets for Devin credentials', () => {
+    const authStateByRowId = new Map<string, MonitoringAccountAuthState>([
+      [
+        'devin@example.com',
+        createAuthState({
+          files: [
+            {
+              name: 'devin.json',
+              type: 'devin',
+              authIndex: 'd-1',
+              label: 'Devin Account',
+              account: 'devin@example.com',
+            },
+          ],
+          enabledState: 'enabled',
+        }),
+      ],
+    ]);
+
+    const result = buildMonitoringAccountQuotaTargetsByRowId(
+      [
+        createAccountRow({
+          id: 'devin@example.com',
+          account: 'devin@example.com',
+          authIndices: ['d-1'],
+        }),
+      ],
+      authStateByRowId
+    );
+
+    expect(result.get('devin@example.com')).toMatchObject([
+      { provider: 'devin', authIndex: 'd-1', fileName: 'devin.json', authLabel: 'Devin Account' },
+    ]);
+  });
 });
+

@@ -11,6 +11,7 @@ vi.mock('react-i18next', () => ({
         'accounts.provider_filter': 'Platform filter',
         'auth_files.filter_claude': 'Claude',
         'auth_files.filter_codex': 'Codex',
+        'auth_files.filter_devin': 'Devin',
         'auth_files.filter_xai': 'xAI',
       })[key] ?? key,
   }),
@@ -36,7 +37,7 @@ describe('AccountProviderTabs', () => {
     act(() => {
       renderer = create(
         <AccountProviderTabs
-          rows={[{ provider: 'xai' }, { provider: 'codex' }, { provider: 'xai' }]}
+          rows={[{ provider: 'xai' }, { provider: 'codex' }, { provider: 'devin' }, { provider: 'xai' }]}
           value="all"
           onChange={(provider) => changes.push(provider)}
           resolvedTheme="light"
@@ -45,17 +46,26 @@ describe('AccountProviderTabs', () => {
     });
 
     const tabs = renderer!.root.findAllByProps({ role: 'tab' });
-    expect(tabs.map((tab) => readText(tab.props.children))).toEqual(['All3', 'Codex1', 'xAI2']);
+    expect(tabs.map((tab) => readText(tab.props.children))).toEqual([
+      'All4',
+      'Codex1',
+      'Devin1',
+      'xAI2',
+    ]);
     expect(renderer!.root.findByProps({ role: 'tablist' }).props['aria-label']).toBe(
       'Platform filter'
     );
     expect(findTab(renderer!, 'all').props['aria-selected']).toBe(true);
 
     act(() => {
+      findTab(renderer!, 'devin').props.onClick({ preventDefault: () => {} });
+    });
+
+    act(() => {
       findTab(renderer!, 'xai').props.onClick({ preventDefault: () => {} });
     });
 
-    expect(changes).toEqual(['xai']);
+    expect(changes).toEqual(['devin', 'xai']);
   });
 
   it('keeps an absent deep-linked platform visible with a zero count', () => {

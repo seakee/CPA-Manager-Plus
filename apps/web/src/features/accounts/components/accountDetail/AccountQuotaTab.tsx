@@ -211,6 +211,37 @@ export function AccountQuotaTab({
 
       {windowUsageError ? <div className={styles.errorBox}>{windowUsageError}</div> : null}
 
+      {detailView.identity.provider === 'devin' && detailView.quota.devinPlan ? (
+        <section className={styles.quotaSection} data-account-quota-devin-plan="true">
+          <div className={styles.quotaResetCard}>
+            <div className={styles.quotaResetHeader}>
+              <div className={styles.quotaResetHeaderMain}>
+                <div className={styles.quotaResetTitle}>
+                  <h3>
+                    {t('devin_quota.plan_label')}: {detailView.quota.devinPlan.plan}
+                  </h3>
+                  {detailView.quota.devinPlan.planStartMs !== null ||
+                  detailView.quota.devinPlan.planEndMs !== null ? (
+                    <span>
+                      {detailView.quota.devinPlan.planStartMs !== null
+                        ? `${t('devin_quota.plan_start')}: ${formatTime(detailView.quota.devinPlan.planStartMs)}`
+                        : ''}
+                      {detailView.quota.devinPlan.planStartMs !== null &&
+                      detailView.quota.devinPlan.planEndMs !== null
+                        ? ' · '
+                        : ''}
+                      {detailView.quota.devinPlan.planEndMs !== null
+                        ? `${t('devin_quota.plan_end')}: ${formatTime(detailView.quota.devinPlan.planEndMs)}`
+                        : ''}
+                    </span>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      ) : null}
+
       {standardWindows.length > 0 || allWindows.length === 0 ? (
         <section className={styles.quotaSection} data-quota-window-group="standard">
           <div className={styles.quotaSectionHeading}>
