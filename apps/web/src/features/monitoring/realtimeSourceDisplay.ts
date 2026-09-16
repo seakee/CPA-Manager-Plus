@@ -6,6 +6,7 @@ import {
   isKeyDisambiguatedLabel,
   isRedundantMonitoringLabel,
 } from '@/features/monitoring/model/sourceDisplay';
+import { shouldPreferApiKeyAlias } from '@/features/monitoring/model/apiKeys';
 
 const hasReadableRealtimeValue = (value: string | null | undefined) => {
   const trimmed = String(value || '').trim();
@@ -14,6 +15,13 @@ const hasReadableRealtimeValue = (value: string | null | undefined) => {
 
 const firstReadable = (...values: Array<string | null | undefined>) =>
   values.find(hasReadableRealtimeValue)?.trim() || '';
+
+const isOpaqueUsageSource = (value: string | null | undefined) =>
+  /^(?:h|k|m):/i.test(String(value || '').trim());
+
+const firstReadableIdentity = (...values: Array<string | null | undefined>) =>
+  values.find((value) => hasReadableRealtimeValue(value) && !isOpaqueUsageSource(value))?.trim() ||
+  '';
 
 export const buildRealtimeSourceDisplay = (
   row: Pick<
@@ -27,19 +35,44 @@ export const buildRealtimeSourceDisplay = (
     | 'source'
     | 'sourceMasked'
   > &
-    Partial<Pick<MonitoringEventRow, 'clientIp' | 'userAgent' | 'xForwardedFor'>>,
+    Partial<
+      Pick<
+        MonitoringEventRow,
+        'apiKeyLabel' | 'apiKeyMasked' | 'clientIp' | 'userAgent' | 'xForwardedFor'
+      >
+    >,
   t: TFunction,
   accountDisplayMode: AccountDisplayMode = 'masked'
 ) => {
   const channel = hasReadableRealtimeValue(row.channel) ? row.channel.trim() : '';
   const provider = hasReadableRealtimeValue(row.provider) ? row.provider.trim() : '';
   const host = hasReadableRealtimeValue(row.channelHost) ? row.channelHost.trim() : '';
-  const fullAccount = firstReadable(row.account, row.authLabel, row.accountMasked);
-  const maskedAccount = firstReadable(row.accountMasked, row.authLabel, row.account);
+  const fullAccount = firstReadableIdentity(row.account, row.authLabel, row.accountMasked);
+  const maskedAccount = firstReadableIdentity(row.accountMasked, row.authLabel, row.account);
   const account = accountDisplayMode === 'full' ? fullAccount : maskedAccount;
-  const fullSource = firstReadable(row.source, row.account, row.authLabel, row.sourceMasked);
-  const maskedSource = firstReadable(row.sourceMasked, row.accountMasked, row.authLabel, row.source);
+  const fullSource = firstReadableIdentity(
+    row.source,
+    row.account,
+    row.authLabel,
+    row.sourceMasked
+  );
+  const maskedSource = firstReadableIdentity(
+    row.sourceMasked,
+    row.accountMasked,
+    row.authLabel,
+    row.source
+  );
   const source = accountDisplayMode === 'full' ? fullSource : maskedSource;
+  const apiKeyAlias = shouldPreferApiKeyAlias(row.apiKeyLabel || '', row.apiKeyMasked || '')
+    ? firstReadableIdentity(row.apiKeyLabel)
+    : '';
+  const opaqueSource = [
+    row.source,
+    row.sourceMasked,
+    row.account,
+    row.accountMasked,
+    row.authLabel,
+  ].find((value) => hasReadableRealtimeValue(value) && isOpaqueUsageSource(value));
   const nonGenericChannel =
     channel && !isGenericMonitoringProviderLabel(channel) ? channel : '';
   const nonGenericSource = source && !isGenericMonitoringProviderLabel(source) ? source : '';
@@ -58,8 +91,10 @@ export const buildRealtimeSourceDisplay = (
       nonGenericSource,
       provider && !isGenericMonitoringProviderLabel(provider) ? provider : '',
       account || '',
+      apiKeyAlias,
       channel,
-      provider
+      provider,
+      opaqueSource
     ) || '-';
   const metaCandidate = provider
     ? { value: provider, label: t('monitoring.filter_provider') }
@@ -102,6 +137,7 @@ export const buildRealtimeSourceDisplay = (
         maskedSource,
         fullAccount,
         maskedAccount,
+        opaqueSource,
         host,
         provider,
         ...requestMetadata,

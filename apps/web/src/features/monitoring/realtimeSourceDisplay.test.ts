@@ -16,6 +16,8 @@ const t = ((key: string) => labels[key] || key) as TFunction;
 const row = {
   account: 'alice@example.com',
   accountMasked: 'ali***@example.com',
+  apiKeyLabel: '-',
+  apiKeyMasked: '-',
   authLabel: 'alice',
   channel: 'codex',
   channelHost: 'api.openai.com',
@@ -52,5 +54,51 @@ describe('buildRealtimeSourceDisplay request metadata', () => {
       'Forwarded chain (unverified): 203.0.113.5, 198.51.100.8'
     );
     expect(display.title).toContain('User-Agent: test-client/1.0');
+  });
+});
+
+describe('buildRealtimeSourceDisplay source identity', () => {
+  it('uses a configured API key alias instead of an internal source fingerprint', () => {
+    const fingerprint = 'k:0123456789abcdef';
+    const display = buildRealtimeSourceDisplay(
+      {
+        ...row,
+        account: fingerprint,
+        accountMasked: fingerprint,
+        apiKeyLabel: 'Automation client',
+        apiKeyMasked: 'sk-...cdef',
+        authLabel: fingerprint,
+        channel: 'codex',
+        channelHost: '-',
+        provider: 'codex',
+        source: fingerprint,
+        sourceMasked: fingerprint,
+      },
+      t
+    );
+
+    expect(display.primary).toBe('Automation client');
+    expect(display.meta).toBe('Provider: codex');
+    expect(display.title).toContain(fingerprint);
+  });
+
+  it('keeps an internal source fingerprint as the final fallback', () => {
+    const fingerprint = 'h:0123456789abcdef';
+    const display = buildRealtimeSourceDisplay(
+      {
+        ...row,
+        account: fingerprint,
+        accountMasked: fingerprint,
+        authLabel: fingerprint,
+        channel: '-',
+        channelHost: '-',
+        provider: '-',
+        source: fingerprint,
+        sourceMasked: fingerprint,
+      },
+      t
+    );
+
+    expect(display.primary).toBe(fingerprint);
   });
 });
