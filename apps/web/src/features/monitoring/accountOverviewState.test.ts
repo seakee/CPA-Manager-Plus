@@ -179,6 +179,24 @@ describe('accountOverviewState', () => {
     });
   });
 
+  it('formats Command Code provider metadata without changing account identity', () => {
+    const display = resolveAccountDisplayText(
+      createAccountRow({
+        account: 'Command Code / 4',
+        accountMasked: 'Command Code / 4',
+        displayAccount: 'Command Code / 4',
+        provider: 'commandcode',
+        channels: ['commandcode'],
+      }),
+      'full'
+    );
+
+    expect(display).toMatchObject({
+      primary: 'Command Code / 4',
+      secondary: 'Command Code',
+    });
+  });
+
   it('uses provider metadata to disambiguate same-email account rows', () => {
     const codex = resolveAccountDisplayText(
       createAccountRow({

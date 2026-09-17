@@ -48,10 +48,30 @@ describe('buildRealtimeSourceDisplay request metadata', () => {
       ].join('\n')
     );
     expect(display.title).toContain('Client IP: 192.0.2.10');
-    expect(display.title).toContain(
-      'Forwarded chain (unverified): 203.0.113.5, 198.51.100.8'
-    );
+    expect(display.title).toContain('Forwarded chain (unverified): 203.0.113.5, 198.51.100.8');
     expect(display.title).toContain('User-Agent: test-client/1.0');
+  });
+});
+
+describe('buildRealtimeSourceDisplay provider labels', () => {
+  it('renders commandcode as Command Code', () => {
+    const display = buildRealtimeSourceDisplay(
+      {
+        source: 'Command Code / 4',
+        sourceMasked: 'Command Code / 4',
+        account: 'Command Code / 4',
+        accountMasked: 'Command Code / 4',
+        authLabel: 'Command Code / 4',
+        channel: 'commandcode',
+        channelHost: '',
+        provider: 'commandcode',
+      },
+      t,
+      'full'
+    );
+
+    expect(display.primary).toBe('Command Code / 4');
+    expect(display.meta).toBe('Provider: Command Code');
   });
 });
 

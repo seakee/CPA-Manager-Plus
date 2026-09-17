@@ -2,7 +2,11 @@ import type { AuthFileItem } from '@/types';
 import type { SourceProviderEnabledState } from '@/types/sourceInfo';
 import { isDisabledAuthFile } from '@/utils/quota';
 import { normalizeRecentRequestAuthIndex, type StatusBarData } from '@/utils/recentRequests';
-import { buildMonitoringAccountRowId, normalizeMonitoringProvider } from './model/accountIdentity';
+import {
+  buildMonitoringAccountRowId,
+  formatMonitoringProviderDisplay,
+  normalizeMonitoringProvider,
+} from './model/accountIdentity';
 import type {
   MonitoringAccountRow,
   MonitoringEventRow,
@@ -258,10 +262,11 @@ export const resolveAccountDisplayText = (
     ? firstReadableAccountValue(maskedAccount, fullAccount, configuredPrimary, '-')
     : configuredPrimary;
   const provider = normalizeMonitoringProvider(row.provider);
-  const providerLabel =
+  const providerLabel = formatMonitoringProviderDisplay(
     row.channels.find(
       (label) => normalizeMonitoringProvider(label) === provider && hasReadableAccountValue(label)
-    ) || row.provider;
+    ) || row.provider
+  );
   const secondaryCandidates = primaryIsAccount
     ? [
         providerLabel,

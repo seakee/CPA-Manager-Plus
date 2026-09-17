@@ -12,6 +12,12 @@ const normalizeIdentityValue = (value: string | null | undefined) => String(valu
 export const normalizeMonitoringProvider = (value: string | null | undefined) =>
   normalizeIdentityValue(value).toLowerCase();
 
+export const formatMonitoringProviderDisplay = (value: string | null | undefined) => {
+  const provider = normalizeIdentityValue(value);
+  if (provider.toLowerCase() === 'commandcode') return 'Command Code';
+  return provider;
+};
+
 const encodeIdentityPart = (value: string) =>
   Array.from(new TextEncoder().encode(value), (byte) => byte.toString(16).padStart(2, '0'))
     .join('')
