@@ -171,14 +171,15 @@ func (s *Service) mutate(ctx context.Context, phase MutationPhase, request Mutat
 		return MutationResult{}, newMutationError(MutationErrorConflict, "update_not_actionable")
 	}
 
+	prepareSupported := observed.Capabilities.Supports(model.RuntimeCapabilityPrepareUpdate)
+	activateSupported := observed.Capabilities.Supports(model.RuntimeCapabilityActivateUpdate)
+	if !prepareSupported || !activateSupported {
+		return MutationResult{}, newMutationError(MutationErrorConflict, "runtime_capability_unavailable")
+	}
+
 	expectedType := model.RuntimeOperationPrepareUpdate
-	requiredCapability := model.RuntimeCapabilityPrepareUpdate
 	if phase == MutationPhaseActivate {
 		expectedType = model.RuntimeOperationActivateUpdate
-		requiredCapability = model.RuntimeCapabilityActivateUpdate
-	}
-	if !observed.Capabilities.Supports(requiredCapability) {
-		return MutationResult{}, newMutationError(MutationErrorConflict, "runtime_capability_unavailable")
 	}
 
 	mutationRequest := model.RuntimeMutationRequest{
@@ -201,7 +202,7 @@ func (s *Service) mutate(ctx context.Context, phase MutationPhase, request Mutat
 		})
 	}
 	if err != nil {
-		return mutationRuntimeError(result, err)
+		return mutationRuntimeError(err)
 	}
 	if err := validateMutationOperation(operation, expectedType, mutationRequest); err != nil {
 		return MutationResult{}, newMutationError(MutationErrorUnavailable, "runtime_result_unreliable")
@@ -268,7 +269,7 @@ func validateMutationOperation(
 	return nil
 }
 
-func mutationRuntimeError(result MutationResult, err error) (MutationResult, error) {
+func mutationRuntimeError(err error) (MutationResult, error) {
 	code, ok := runtimeservice.ErrorCode(err)
 	if !ok {
 		return MutationResult{}, newMutationError(MutationErrorUnavailable, "runtime_transport_unavailable")
@@ -281,14 +282,12 @@ func mutationRuntimeError(result MutationResult, err error) (MutationResult, err
 		runtimeservice.ProtocolErrorActiveArtifactUnavailable,
 		runtimeservice.ProtocolErrorActiveArtifactMismatch,
 		runtimeservice.ProtocolErrorTargetStageUnavailable,
-		runtimeservice.ProtocolErrorUnsupportedOperation:
-		return MutationResult{}, newMutationError(MutationErrorConflict, string(code))
-	case runtimeservice.ProtocolErrorUnsupportedStagingPlatform,
-		runtimeservice.ProtocolErrorReleaseMetadataInvalid,
+		runtimeservice.ProtocolErrorUnsupportedOperation,
+		runtimeservice.ProtocolErrorUnsupportedStagingPlatform,
 		runtimeservice.ProtocolErrorTargetStageCorrupt:
-		result.State = string(model.RuntimeOperationFailed)
-		result.FailureCode = string(code)
-		return result, newMutationError(MutationErrorExecution, string(code))
+		return MutationResult{}, newMutationError(MutationErrorConflict, string(code))
+	case runtimeservice.ProtocolErrorReleaseMetadataInvalid:
+		return MutationResult{}, newMutationError(MutationErrorExecution, string(code))
 	default:
 		return MutationResult{}, newMutationError(MutationErrorUnavailable, "runtime_operation_unavailable")
 	}

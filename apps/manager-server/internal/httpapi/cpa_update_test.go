@@ -17,6 +17,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	cpaupdateservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaupdate"
+	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/testutil"
 )
@@ -285,6 +286,34 @@ func TestCPAUpdateMutationMapsAdmissionExecutionAndUnavailableErrors(t *testing.
 		}
 	})
 
+	t.Run("admission missing activate capability", func(t *testing.T) {
+		status := cpaUpdateReadyStatus()
+		status.Capabilities = model.RuntimeCapabilities{model.RuntimeCapabilityPrepareUpdate}
+		runtimeClient := &cpaUpdateRuntimeStub{status: status}
+		server := newCPAUpdateServer(t, runtimeClient)
+		response := submitCPAUpdateMutation(t, server, "/usage-service/runtime/updates/prepare", cpaUpdateMutationBody())
+		if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"runtime_capability_unavailable"`) {
+			t.Fatalf("response = %d, body=%s", response.Code, response.Body.String())
+		}
+		if runtimeClient.prepareCalls.Load() != 0 || runtimeClient.activateCalls.Load() != 0 {
+			t.Fatalf("unexpected calls: prepare=%d, activate=%d", runtimeClient.prepareCalls.Load(), runtimeClient.activateCalls.Load())
+		}
+	})
+
+	t.Run("admission missing prepare capability", func(t *testing.T) {
+		status := cpaUpdateReadyStatus()
+		status.Capabilities = model.RuntimeCapabilities{model.RuntimeCapabilityActivateUpdate}
+		runtimeClient := &cpaUpdateRuntimeStub{status: status}
+		server := newCPAUpdateServer(t, runtimeClient)
+		response := submitCPAUpdateMutation(t, server, "/usage-service/runtime/updates/activate", cpaUpdateMutationBody())
+		if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"runtime_capability_unavailable"`) {
+			t.Fatalf("response = %d, body=%s", response.Code, response.Body.String())
+		}
+		if runtimeClient.prepareCalls.Load() != 0 || runtimeClient.activateCalls.Load() != 0 {
+			t.Fatalf("unexpected calls: prepare=%d, activate=%d", runtimeClient.prepareCalls.Load(), runtimeClient.activateCalls.Load())
+		}
+	})
+
 	t.Run("terminal execution failure", func(t *testing.T) {
 		runtimeClient := &cpaUpdateRuntimeStub{status: cpaUpdateReadyStatus()}
 		runtimeClient.prepareFn = func(request model.RuntimePrepareUpdateRequest) (model.RuntimeOperationResult, error) {
@@ -301,6 +330,95 @@ func TestCPAUpdateMutationMapsAdmissionExecutionAndUnavailableErrors(t *testing.
 		}
 		if strings.Contains(response.Body.String(), "secret") || strings.Contains(response.Body.String(), "/stage/path") {
 			t.Fatalf("response leaked Runtime message: %s", response.Body.String())
+		}
+	})
+
+	t.Run("terminal execution failure on activate", func(t *testing.T) {
+		runtimeClient := &cpaUpdateRuntimeStub{status: cpaUpdateReadyStatus()}
+		runtimeClient.activateFn = func(request model.RuntimeActivateUpdateRequest) (model.RuntimeOperationResult, error) {
+			result := cpaUpdateOperation(request.RuntimeMutationRequest, model.RuntimeOperationActivateUpdate)
+			result.State = model.RuntimeOperationFailed
+			result.Failure = &model.RuntimeOperationFailure{Code: "activation_readiness_failed", Message: "secret /activate/path"}
+			return result, nil
+		}
+		server := newCPAUpdateServer(t, runtimeClient)
+		response := submitCPAUpdateMutation(t, server, "/usage-service/runtime/updates/activate", cpaUpdateMutationBody())
+		if response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), `"failure_code":"activation_readiness_failed"`) ||
+			!strings.Contains(response.Body.String(), `"state":"failed"`) ||
+			!strings.Contains(response.Body.String(), `"runtime_operation_id":"manager-cpa-update/v1:activate:`) {
+			t.Fatalf("response = %d, body=%s", response.Code, response.Body.String())
+		}
+		if strings.Contains(response.Body.String(), "secret") || strings.Contains(response.Body.String(), "/activate/path") {
+			t.Fatalf("response leaked Runtime message: %s", response.Body.String())
+		}
+	})
+
+	t.Run("protocol error release_metadata_invalid has no fake failed operation", func(t *testing.T) {
+		runtimeClient := &cpaUpdateRuntimeStub{status: cpaUpdateReadyStatus()}
+		runtimeClient.prepareFn = func(request model.RuntimePrepareUpdateRequest) (model.RuntimeOperationResult, error) {
+			return model.RuntimeOperationResult{}, &runtimeservice.ProtocolError{
+				Code:       runtimeservice.ProtocolErrorReleaseMetadataInvalid,
+				HTTPStatus: 502,
+			}
+		}
+		server := newCPAUpdateServer(t, runtimeClient)
+		response := submitCPAUpdateMutation(t, server, "/usage-service/runtime/updates/prepare", cpaUpdateMutationBody())
+		if response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), `"code":"release_metadata_invalid"`) {
+			t.Fatalf("response = %d, body=%s", response.Code, response.Body.String())
+		}
+		body := response.Body.String()
+		if strings.Contains(body, `"state"`) || strings.Contains(body, `"runtime_operation_id"`) ||
+			strings.Contains(body, `"phase"`) {
+			t.Fatalf("response leaked operation evidence: %s", body)
+		}
+		if runtimeClient.prepareCalls.Load() != 1 {
+			t.Fatalf("PrepareUpdate calls = %d", runtimeClient.prepareCalls.Load())
+		}
+	})
+
+	t.Run("protocol error unsupported_staging_platform has no fake failed operation", func(t *testing.T) {
+		runtimeClient := &cpaUpdateRuntimeStub{status: cpaUpdateReadyStatus()}
+		runtimeClient.prepareFn = func(request model.RuntimePrepareUpdateRequest) (model.RuntimeOperationResult, error) {
+			return model.RuntimeOperationResult{}, &runtimeservice.ProtocolError{
+				Code:       runtimeservice.ProtocolErrorUnsupportedStagingPlatform,
+				HTTPStatus: 409,
+			}
+		}
+		server := newCPAUpdateServer(t, runtimeClient)
+		response := submitCPAUpdateMutation(t, server, "/usage-service/runtime/updates/prepare", cpaUpdateMutationBody())
+		if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"unsupported_staging_platform"`) {
+			t.Fatalf("response = %d, body=%s", response.Code, response.Body.String())
+		}
+		body := response.Body.String()
+		if strings.Contains(body, `"state"`) || strings.Contains(body, `"runtime_operation_id"`) ||
+			strings.Contains(body, `"phase"`) {
+			t.Fatalf("response leaked operation evidence: %s", body)
+		}
+		if runtimeClient.prepareCalls.Load() != 1 {
+			t.Fatalf("PrepareUpdate calls = %d", runtimeClient.prepareCalls.Load())
+		}
+	})
+
+	t.Run("protocol error target_stage_corrupt has no fake failed operation", func(t *testing.T) {
+		runtimeClient := &cpaUpdateRuntimeStub{status: cpaUpdateReadyStatus()}
+		runtimeClient.activateFn = func(request model.RuntimeActivateUpdateRequest) (model.RuntimeOperationResult, error) {
+			return model.RuntimeOperationResult{}, &runtimeservice.ProtocolError{
+				Code:       runtimeservice.ProtocolErrorTargetStageCorrupt,
+				HTTPStatus: 409,
+			}
+		}
+		server := newCPAUpdateServer(t, runtimeClient)
+		response := submitCPAUpdateMutation(t, server, "/usage-service/runtime/updates/activate", cpaUpdateMutationBody())
+		if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"target_stage_corrupt"`) {
+			t.Fatalf("response = %d, body=%s", response.Code, response.Body.String())
+		}
+		body := response.Body.String()
+		if strings.Contains(body, `"state"`) || strings.Contains(body, `"runtime_operation_id"`) ||
+			strings.Contains(body, `"phase"`) {
+			t.Fatalf("response leaked operation evidence: %s", body)
+		}
+		if runtimeClient.activateCalls.Load() != 1 {
+			t.Fatalf("ActivateUpdate calls = %d", runtimeClient.activateCalls.Load())
 		}
 	})
 

@@ -202,7 +202,7 @@ func TestRuntimeOperationIDIsDeterministicAndExcludesTarget(t *testing.T) {
 	}
 	request := validMutationRequest()
 	request.RequestID = requestID
-	firstRuntime := &mutationRuntime{status: mutationReadyStatus("7.3.3", testArtifactID, model.RuntimeCapabilityPrepareUpdate)}
+	firstRuntime := &mutationRuntime{status: mutationReadyStatus("7.3.3", testArtifactID, model.RuntimeCapabilityPrepareUpdate, model.RuntimeCapabilityActivateUpdate)}
 	firstService, _, now := mutationTestService(t, firstRuntime)
 	firstResult, err := firstService.Prepare(t.Context(), request)
 	if err != nil {
@@ -212,13 +212,13 @@ func TestRuntimeOperationIDIsDeterministicAndExcludesTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondRuntime := &mutationRuntime{status: mutationReadyStatus("7.3.3", testArtifactID, model.RuntimeCapabilityPrepareUpdate)}
+	secondRuntime := &mutationRuntime{status: mutationReadyStatus("7.3.3", testArtifactID, model.RuntimeCapabilityPrepareUpdate, model.RuntimeCapabilityActivateUpdate)}
 	secondService, _, _ := mutationTestService(t, secondRuntime)
 	restartedResult, err := secondService.Prepare(t.Context(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	changedRuntime := &mutationRuntime{status: mutationReadyStatus("7.3.3", testArtifactID, model.RuntimeCapabilityPrepareUpdate)}
+	changedRuntime := &mutationRuntime{status: mutationReadyStatus("7.3.3", testArtifactID, model.RuntimeCapabilityPrepareUpdate, model.RuntimeCapabilityActivateUpdate)}
 	changedService := New(persistedDiscovery(t, "7.3.8", now), changedRuntime, model.RuntimeModeEmbedded)
 	changedService.now = func() time.Time { return now }
 	changedRequest := request
@@ -256,9 +256,11 @@ func TestMutationAdmissionRejectsWithoutRuntimeMutationOrDiscovery(t *testing.T)
 		{name: "target mismatch", phase: MutationPhasePrepare, mode: model.RuntimeModeEmbedded, request: MutationRequest{RequestID: "request", TargetVersion: "7.3.6", ExpectedActiveArtifactID: testArtifactID}, state: DiscoveryState{SchemaVersion: 1, LastAttemptAt: now, LastSuccessAt: now, TargetVersion: "7.3.7"}, status: ready(), wantKind: MutationErrorConflict},
 		{name: "artifact mismatch", phase: MutationPhaseActivate, mode: model.RuntimeModeEmbedded, request: validMutationRequest(), state: DiscoveryState{SchemaVersion: 1, LastAttemptAt: now, LastSuccessAt: now, TargetVersion: "7.3.7"}, status: mutationReadyStatus("7.3.3", testArtifactIDB, model.RuntimeCapabilityPrepareUpdate, model.RuntimeCapabilityActivateUpdate), wantKind: MutationErrorConflict, wantStatus: 1},
 		{name: "missing trusted artifact", phase: MutationPhasePrepare, mode: model.RuntimeModeEmbedded, request: validMutationRequest(), state: DiscoveryState{SchemaVersion: 1, LastAttemptAt: now, LastSuccessAt: now, TargetVersion: "7.3.7"}, status: model.RuntimeObservedStatus{Identity: "runtime", Generation: 1, ProtocolVersion: "v1", State: model.RuntimeStateReady, Capabilities: model.RuntimeCapabilities{model.RuntimeCapabilityPrepareUpdate}}, wantKind: MutationErrorConflict, wantStatus: 1},
-		{name: "invalid current version", phase: MutationPhasePrepare, mode: model.RuntimeModeEmbedded, request: validMutationRequest(), state: DiscoveryState{SchemaVersion: 1, LastAttemptAt: now, LastSuccessAt: now, TargetVersion: "7.3.7"}, status: mutationReadyStatus("7.3.7-rc.1", testArtifactID, model.RuntimeCapabilityPrepareUpdate), wantKind: MutationErrorConflict, wantStatus: 1},
-		{name: "missing prepare capability", phase: MutationPhasePrepare, mode: model.RuntimeModeEmbedded, request: validMutationRequest(), state: DiscoveryState{SchemaVersion: 1, LastAttemptAt: now, LastSuccessAt: now, TargetVersion: "7.3.7"}, status: mutationReadyStatus("7.3.3", testArtifactID, model.RuntimeCapabilityActivateUpdate), wantKind: MutationErrorConflict, wantStatus: 1},
-		{name: "missing activate capability", phase: MutationPhaseActivate, mode: model.RuntimeModeEmbedded, request: validMutationRequest(), state: DiscoveryState{SchemaVersion: 1, LastAttemptAt: now, LastSuccessAt: now, TargetVersion: "7.3.7"}, status: mutationReadyStatus("7.3.3", testArtifactID, model.RuntimeCapabilityPrepareUpdate), wantKind: MutationErrorConflict, wantStatus: 1},
+		{name: "invalid current version", phase: MutationPhasePrepare, mode: model.RuntimeModeEmbedded, request: validMutationRequest(), state: DiscoveryState{SchemaVersion: 1, LastAttemptAt: now, LastSuccessAt: now, TargetVersion: "7.3.7"}, status: mutationReadyStatus("7.3.7-rc.1", testArtifactID, model.RuntimeCapabilityPrepareUpdate, model.RuntimeCapabilityActivateUpdate), wantKind: MutationErrorConflict, wantStatus: 1},
+		{name: "prepare phase missing prepare capability", phase: MutationPhasePrepare, mode: model.RuntimeModeEmbedded, request: validMutationRequest(), state: DiscoveryState{SchemaVersion: 1, LastAttemptAt: now, LastSuccessAt: now, TargetVersion: "7.3.7"}, status: mutationReadyStatus("7.3.3", testArtifactID, model.RuntimeCapabilityActivateUpdate), wantKind: MutationErrorConflict, wantStatus: 1},
+		{name: "prepare phase missing activate capability", phase: MutationPhasePrepare, mode: model.RuntimeModeEmbedded, request: validMutationRequest(), state: DiscoveryState{SchemaVersion: 1, LastAttemptAt: now, LastSuccessAt: now, TargetVersion: "7.3.7"}, status: mutationReadyStatus("7.3.3", testArtifactID, model.RuntimeCapabilityPrepareUpdate), wantKind: MutationErrorConflict, wantStatus: 1},
+		{name: "activate phase missing prepare capability", phase: MutationPhaseActivate, mode: model.RuntimeModeEmbedded, request: validMutationRequest(), state: DiscoveryState{SchemaVersion: 1, LastAttemptAt: now, LastSuccessAt: now, TargetVersion: "7.3.7"}, status: mutationReadyStatus("7.3.3", testArtifactID, model.RuntimeCapabilityActivateUpdate), wantKind: MutationErrorConflict, wantStatus: 1},
+		{name: "activate phase missing activate capability", phase: MutationPhaseActivate, mode: model.RuntimeModeEmbedded, request: validMutationRequest(), state: DiscoveryState{SchemaVersion: 1, LastAttemptAt: now, LastSuccessAt: now, TargetVersion: "7.3.7"}, status: mutationReadyStatus("7.3.3", testArtifactID, model.RuntimeCapabilityPrepareUpdate), wantKind: MutationErrorConflict, wantStatus: 1},
 		{name: "non ready runtime", phase: MutationPhaseActivate, mode: model.RuntimeModeEmbedded, request: validMutationRequest(), state: DiscoveryState{SchemaVersion: 1, LastAttemptAt: now, LastSuccessAt: now, TargetVersion: "7.3.7"}, status: func() model.RuntimeObservedStatus {
 			status := ready()
 			status.State = model.RuntimeStateStarting
@@ -304,7 +306,7 @@ func TestMutationProtocolFenceErrorsAreStableAndNeverRetried(t *testing.T) {
 		runtimeservice.ProtocolErrorRuntimeIdentityMismatch,
 	} {
 		t.Run(string(code), func(t *testing.T) {
-			runtimeClient := &mutationRuntime{status: mutationReadyStatus("7.3.3", testArtifactID, model.RuntimeCapabilityPrepareUpdate)}
+			runtimeClient := &mutationRuntime{status: mutationReadyStatus("7.3.3", testArtifactID, model.RuntimeCapabilityPrepareUpdate, model.RuntimeCapabilityActivateUpdate)}
 			runtimeClient.prepareFn = func(model.RuntimePrepareUpdateRequest) (model.RuntimeOperationResult, error) {
 				return model.RuntimeOperationResult{}, &runtimeservice.ProtocolError{Code: code, HTTPStatus: 409}
 			}
@@ -375,7 +377,7 @@ func TestMutationTerminalFailureAndIncompleteResultsAreNotSuccess(t *testing.T) 
 }
 
 func TestMutationRejectsUnreliableOperationResult(t *testing.T) {
-	runtimeClient := &mutationRuntime{status: mutationReadyStatus("7.3.3", testArtifactID, model.RuntimeCapabilityPrepareUpdate)}
+	runtimeClient := &mutationRuntime{status: mutationReadyStatus("7.3.3", testArtifactID, model.RuntimeCapabilityPrepareUpdate, model.RuntimeCapabilityActivateUpdate)}
 	runtimeClient.prepareFn = func(request model.RuntimePrepareUpdateRequest) (model.RuntimeOperationResult, error) {
 		result := successfulOperation(request.RuntimeMutationRequest, model.RuntimeOperationPrepareUpdate)
 		result.OperationID = "wrong-operation"
@@ -458,5 +460,149 @@ func TestMutationDoesNotHoldDiscoveryMutexAcrossRuntimeCall(t *testing.T) {
 	close(release)
 	if err := <-mutationDone; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMutationAdmissionRequiresBothPrepareAndActivateCapabilities(t *testing.T) {
+	tests := []struct {
+		name         string
+		phase        MutationPhase
+		capabilities []model.RuntimeCapability
+	}{
+		{
+			name:         "prepare rejected when activate missing",
+			phase:        MutationPhasePrepare,
+			capabilities: []model.RuntimeCapability{model.RuntimeCapabilityPrepareUpdate},
+		},
+		{
+			name:         "activate rejected when prepare missing",
+			phase:        MutationPhaseActivate,
+			capabilities: []model.RuntimeCapability{model.RuntimeCapabilityActivateUpdate},
+		},
+		{
+			name:         "prepare rejected when prepare missing",
+			phase:        MutationPhasePrepare,
+			capabilities: []model.RuntimeCapability{model.RuntimeCapabilityActivateUpdate},
+		},
+		{
+			name:         "activate rejected when activate missing",
+			phase:        MutationPhaseActivate,
+			capabilities: []model.RuntimeCapability{model.RuntimeCapabilityPrepareUpdate},
+		},
+		{
+			name:         "prepare rejected when both missing",
+			phase:        MutationPhasePrepare,
+			capabilities: nil,
+		},
+		{
+			name:         "activate rejected when both missing",
+			phase:        MutationPhaseActivate,
+			capabilities: nil,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runtimeClient := &mutationRuntime{status: mutationReadyStatus("7.3.3", testArtifactID, test.capabilities...)}
+			service, source, _ := mutationTestService(t, runtimeClient)
+			var result MutationResult
+			var err error
+			if test.phase == MutationPhasePrepare {
+				result, err = service.Prepare(t.Context(), validMutationRequest())
+			} else {
+				result, err = service.Activate(t.Context(), validMutationRequest())
+			}
+			kind, code, ok := MutationErrorDetails(err)
+			if !ok || kind != MutationErrorConflict || code != "runtime_capability_unavailable" {
+				t.Fatalf("error = %v, kind = %q, code = %q", err, kind, code)
+			}
+			if result != (MutationResult{}) {
+				t.Fatalf("expected zero MutationResult, got %#v", result)
+			}
+			if runtimeClient.prepareCalls.Load() != 0 || runtimeClient.activateCalls.Load() != 0 {
+				t.Fatalf("mutation calls prepare=%d activate=%d", runtimeClient.prepareCalls.Load(), runtimeClient.activateCalls.Load())
+			}
+			if source.requests.Load() != 0 {
+				t.Fatalf("discovery requests = %d", source.requests.Load())
+			}
+		})
+	}
+}
+
+func TestMutationProtocolErrorsNeverFabricateOperationResult(t *testing.T) {
+	tests := []struct {
+		name     string
+		phase    MutationPhase
+		code     runtimeservice.ProtocolErrorCode
+		httpCode int
+		wantKind MutationErrorKind
+	}{
+		{
+			name:     "release_metadata_invalid",
+			phase:    MutationPhasePrepare,
+			code:     runtimeservice.ProtocolErrorReleaseMetadataInvalid,
+			httpCode: 502,
+			wantKind: MutationErrorExecution,
+		},
+		{
+			name:     "unsupported_staging_platform",
+			phase:    MutationPhasePrepare,
+			code:     runtimeservice.ProtocolErrorUnsupportedStagingPlatform,
+			httpCode: 409,
+			wantKind: MutationErrorConflict,
+		},
+		{
+			name:     "target_stage_corrupt",
+			phase:    MutationPhaseActivate,
+			code:     runtimeservice.ProtocolErrorTargetStageCorrupt,
+			httpCode: 409,
+			wantKind: MutationErrorConflict,
+		},
+		{
+			name:     "target_stage_unavailable",
+			phase:    MutationPhaseActivate,
+			code:     runtimeservice.ProtocolErrorTargetStageUnavailable,
+			httpCode: 409,
+			wantKind: MutationErrorConflict,
+		},
+		{
+			name:     "runtime_identity_mismatch",
+			phase:    MutationPhasePrepare,
+			code:     runtimeservice.ProtocolErrorRuntimeIdentityMismatch,
+			httpCode: 409,
+			wantKind: MutationErrorConflict,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runtimeClient := &mutationRuntime{status: mutationReadyStatus("7.3.3", testArtifactID, model.RuntimeCapabilityPrepareUpdate, model.RuntimeCapabilityActivateUpdate)}
+			stubError := &runtimeservice.ProtocolError{Code: test.code, HTTPStatus: test.httpCode}
+			runtimeClient.prepareFn = func(model.RuntimePrepareUpdateRequest) (model.RuntimeOperationResult, error) {
+				return model.RuntimeOperationResult{}, stubError
+			}
+			runtimeClient.activateFn = func(model.RuntimeActivateUpdateRequest) (model.RuntimeOperationResult, error) {
+				return model.RuntimeOperationResult{}, stubError
+			}
+			service, source, _ := mutationTestService(t, runtimeClient)
+			var result MutationResult
+			var err error
+			if test.phase == MutationPhasePrepare {
+				result, err = service.Prepare(t.Context(), validMutationRequest())
+			} else {
+				result, err = service.Activate(t.Context(), validMutationRequest())
+			}
+			kind, code, ok := MutationErrorDetails(err)
+			if !ok || kind != test.wantKind || code != string(test.code) {
+				t.Fatalf("error = %v, kind = %q, code = %q, wantKind = %q, wantCode = %q", err, kind, code, test.wantKind, test.code)
+			}
+			if result != (MutationResult{}) {
+				t.Fatalf("fabricated operation result: %#v", result)
+			}
+			if result.State != "" || result.FailureCode != "" || result.RuntimeOperationID != "" || result.Phase != "" {
+				t.Fatalf("result contains operation state evidence: %#v", result)
+			}
+			if source.requests.Load() != 0 {
+				t.Fatalf("discovery requests = %d", source.requests.Load())
+			}
+		})
 	}
 }
