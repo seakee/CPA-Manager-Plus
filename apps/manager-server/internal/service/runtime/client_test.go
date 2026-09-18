@@ -44,6 +44,10 @@ func (f *fakeRuntimeClient) ActivateUpdate(ctx context.Context, _ model.RuntimeA
 	return f.operationResult, nil
 }
 
+func (*fakeRuntimeClient) ObserveUpdateOperation(context.Context, model.RuntimeObserveUpdateOperationRequest) (model.RuntimeUpdateOperationObservation, error) {
+	panic("unexpected update operation observation")
+}
+
 var _ RuntimeClient = (*fakeRuntimeClient)(nil)
 
 func TestRuntimeClientStatusContract(t *testing.T) {
@@ -69,7 +73,7 @@ func TestRuntimeClientStatusContract(t *testing.T) {
 	}
 
 	contract := reflect.TypeOf((*RuntimeClient)(nil)).Elem()
-	wantMethods := map[string]bool{"ActivateUpdate": true, "PrepareUpdate": true, "Restart": true, "Start": true, "Status": true, "Stop": true}
+	wantMethods := map[string]bool{"ActivateUpdate": true, "ObserveUpdateOperation": true, "PrepareUpdate": true, "Restart": true, "Start": true, "Status": true, "Stop": true}
 	if contract.NumMethod() != len(wantMethods) {
 		t.Fatalf("RuntimeClient methods = %v, want %v", contract.NumMethod(), wantMethods)
 	}

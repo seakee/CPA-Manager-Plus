@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"unicode/utf8"
 
@@ -35,7 +36,9 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 	isCheck := suffix == "/check" && r.Method == http.MethodPost
 	isPrepare := suffix == "/prepare" && r.Method == http.MethodPost
 	isActivate := suffix == "/activate" && r.Method == http.MethodPost
-	if !isStatus && !isCheck && !isPrepare && !isActivate {
+	isObservePrepare := suffix == "/operations/prepare" && r.Method == http.MethodGet
+	isObserveActivate := suffix == "/operations/activate" && r.Method == http.MethodGet
+	if !isStatus && !isCheck && !isPrepare && !isActivate && !isObservePrepare && !isObserveActivate {
 		response.MethodNotAllowed(w)
 		return
 	}
@@ -46,6 +49,25 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 	service := h.App.CPAUpdateService
 	if service == nil {
 		response.Error(w, http.StatusServiceUnavailable, errors.New("CPA update state unavailable"))
+		return
+	}
+	if isObservePrepare || isObserveActivate {
+		request, err := decodeObservationRequest(w, r)
+		if err != nil {
+			writeObservationError(w, err)
+			return
+		}
+		var result cpaupdateservice.ObservationResult
+		if isObservePrepare {
+			result, err = service.ObservePrepare(r.Context(), request)
+		} else {
+			result, err = service.ObserveActivate(r.Context(), request)
+		}
+		if err != nil {
+			writeObservationError(w, err)
+			return
+		}
+		response.JSON(w, http.StatusOK, result)
 		return
 	}
 	if isPrepare || isActivate {
@@ -82,6 +104,48 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.JSON(w, http.StatusOK, payload)
+}
+
+func decodeObservationRequest(w http.ResponseWriter, r *http.Request) (cpaupdateservice.ObservationRequest, error) {
+	var request cpaupdateservice.ObservationRequest
+	if !emptyRequestBody(w, r) {
+		return request, &cpaupdateservice.ObservationError{Kind: cpaupdateservice.ObservationErrorInvalid, Code: "invalid_request"}
+	}
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil || len(query) != 2 {
+		return request, &cpaupdateservice.ObservationError{Kind: cpaupdateservice.ObservationErrorInvalid, Code: "invalid_request"}
+	}
+	requestIDs, requestOK := query["request_id"]
+	targetVersions, targetOK := query["target_version"]
+	if !requestOK || len(requestIDs) != 1 || requestIDs[0] == "" ||
+		!targetOK || len(targetVersions) != 1 || targetVersions[0] == "" {
+		return request, &cpaupdateservice.ObservationError{Kind: cpaupdateservice.ObservationErrorInvalid, Code: "invalid_request"}
+	}
+	request.RequestID = requestIDs[0]
+	request.TargetVersion = targetVersions[0]
+	if err := request.Validate(); err != nil {
+		return request, err
+	}
+	return request, nil
+}
+
+func writeObservationError(w http.ResponseWriter, err error) {
+	kind, code, ok := cpaupdateservice.ObservationErrorDetails(err)
+	if !ok {
+		kind = cpaupdateservice.ObservationErrorUnavailable
+		code = "observation_unavailable"
+	}
+	status := http.StatusServiceUnavailable
+	switch kind {
+	case cpaupdateservice.ObservationErrorInvalid:
+		status = http.StatusBadRequest
+	case cpaupdateservice.ObservationErrorConflict:
+		status = http.StatusConflict
+	}
+	response.JSON(w, status, map[string]string{
+		"error": (&cpaupdateservice.ObservationError{Kind: kind, Code: code}).Error(),
+		"code":  code,
+	})
 }
 
 func emptyRequestBody(w http.ResponseWriter, r *http.Request) bool {

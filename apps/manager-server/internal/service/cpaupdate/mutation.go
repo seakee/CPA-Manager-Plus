@@ -35,15 +35,22 @@ type MutationRequest struct {
 }
 
 func (r MutationRequest) Validate() error {
-	if len(r.RequestID) == 0 || len([]byte(r.RequestID)) > maxMutationRequestIDBytes ||
-		!mutationRequestIDPattern.MatchString(r.RequestID) {
-		return newMutationError(MutationErrorInvalid, "invalid_request")
-	}
-	if _, err := parseStableVersion(r.TargetVersion); err != nil {
+	if err := validateOperationIdentity(r.RequestID, r.TargetVersion); err != nil {
 		return newMutationError(MutationErrorInvalid, "invalid_request")
 	}
 	if !r.ExpectedActiveArtifactID.IsValid() {
 		return newMutationError(MutationErrorInvalid, "invalid_request")
+	}
+	return nil
+}
+
+func validateOperationIdentity(requestID, targetVersion string) error {
+	if len(requestID) == 0 || len([]byte(requestID)) > maxMutationRequestIDBytes ||
+		!mutationRequestIDPattern.MatchString(requestID) {
+		return errors.New("invalid request ID")
+	}
+	if _, err := parseStableVersion(targetVersion); err != nil {
+		return errors.New("invalid target version")
 	}
 	return nil
 }

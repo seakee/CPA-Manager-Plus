@@ -300,6 +300,10 @@ func (c *recordingRuntimeClient) ActivateUpdate(_ context.Context, request model
 	return runtimeOperationResult(request.RuntimeMutationRequest, model.RuntimeOperationActivateUpdate, model.RuntimeOperationSucceeded), nil
 }
 
+func (*recordingRuntimeClient) ObserveUpdateOperation(context.Context, model.RuntimeObserveUpdateOperationRequest) (model.RuntimeUpdateOperationObservation, error) {
+	panic("reconciler must not observe update operations")
+}
+
 func (c *recordingRuntimeClient) setStatus(status model.RuntimeObservedStatus) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

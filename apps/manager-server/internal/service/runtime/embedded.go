@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -25,6 +26,7 @@ const (
 	embeddedRuntimeRestartPath        = "/v1/runtime/operations/restart"
 	embeddedRuntimePrepareUpdatePath  = "/v1/runtime/operations/prepare-update"
 	embeddedRuntimeActivateUpdatePath = "/v1/runtime/operations/activate-update"
+	embeddedRuntimeObserveUpdatePath  = "/v1/runtime/operations/update"
 	embeddedRuntimeRequestTimeout     = 30 * time.Second
 	// Update mutations have dedicated request budgets so status and ordinary
 	// lifecycle calls retain their short timeout semantics. Each remains above
@@ -223,6 +225,18 @@ type embeddedOperationResponse struct {
 	Error             *embeddedProtocolError `json:"error,omitempty"`
 }
 
+type embeddedObservedOperationResponse struct {
+	OperationID       string                 `json:"operationId"`
+	OperationType     string                 `json:"operationType"`
+	RuntimeIdentity   string                 `json:"runtimeIdentity"`
+	RuntimeGeneration uint64                 `json:"runtimeGeneration"`
+	State             string                 `json:"state"`
+	Error             *embeddedProtocolError `json:"error,omitempty"`
+	CreatedAt         time.Time              `json:"createdAt"`
+	UpdatedAt         time.Time              `json:"updatedAt"`
+	CompletedAt       *time.Time             `json:"completedAt,omitempty"`
+}
+
 type embeddedErrorEnvelope struct {
 	Error embeddedProtocolError `json:"error"`
 }
@@ -292,6 +306,88 @@ func (c *EmbeddedClient) ActivateUpdate(ctx context.Context, request model.Runti
 		request.ExpectedRuntimeIdentity,
 		payload,
 	)
+}
+
+func (c *EmbeddedClient) ObserveUpdateOperation(ctx context.Context, request model.RuntimeObserveUpdateOperationRequest) (model.RuntimeUpdateOperationObservation, error) {
+	if err := request.Validate(); err != nil {
+		return model.RuntimeUpdateOperationObservation{}, fmt.Errorf("validate embedded Runtime update operation observation: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return model.RuntimeUpdateOperationObservation{}, fmt.Errorf("observe embedded Runtime update operation: %w", err)
+	}
+	token, err := c.runtimeToken(ctx)
+	if err != nil {
+		return model.RuntimeUpdateOperationObservation{}, errors.New("embedded Runtime transport token is unavailable")
+	}
+	endpoint, err := url.Parse(c.baseURL + embeddedRuntimeObserveUpdatePath)
+	if err != nil {
+		return model.RuntimeUpdateOperationObservation{}, errors.New("embedded Runtime update observation URL is invalid")
+	}
+	query := endpoint.Query()
+	query.Set("operationId", request.OperationID)
+	query.Set("expectedRuntimeIdentity", string(request.ExpectedRuntimeIdentity))
+	query.Set("expectedRuntimeGeneration", fmt.Sprintf("%d", request.ExpectedRuntimeGeneration))
+	query.Set("operationType", string(request.OperationType))
+	query.Set("targetVersion", request.TargetVersion)
+	endpoint.RawQuery = query.Encode()
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return model.RuntimeUpdateOperationObservation{}, errors.New("embedded Runtime update observation request is invalid")
+	}
+	httpRequest.Header.Set("Accept", "application/json")
+	httpRequest.Header.Set("Authorization", "Bearer "+token)
+	httpRequest.Header.Set("Cache-Control", "no-store")
+	response, err := c.httpClient.Do(httpRequest)
+	if err != nil {
+		if ctx.Err() != nil {
+			return model.RuntimeUpdateOperationObservation{}, fmt.Errorf("observe embedded Runtime update operation: %w", ctx.Err())
+		}
+		return model.RuntimeUpdateOperationObservation{}, errors.New("embedded Runtime update observation transport is unavailable")
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		if protocolErr := decodeProtocolError(response); protocolErr != nil {
+			code, _ := ErrorCode(protocolErr)
+			switch code {
+			case ProtocolErrorInvalidRequest, ProtocolErrorUnsupportedOperation, ProtocolErrorOperationNotFound,
+				ProtocolErrorRuntimeIdentityMismatch, ProtocolErrorStaleRuntimeGeneration, ProtocolErrorOperationIDConflict,
+				ProtocolErrorOperationPersistenceUnavailable, ProtocolErrorInternal:
+				return model.RuntimeUpdateOperationObservation{}, protocolErr
+			}
+		}
+		return model.RuntimeUpdateOperationObservation{}, fmt.Errorf(
+			"observe embedded Runtime update operation: unexpected HTTP status %d",
+			response.StatusCode,
+		)
+	}
+	var wire embeddedObservedOperationResponse
+	if err := decodeStrictJSON(response.Body, &wire); err != nil {
+		return model.RuntimeUpdateOperationObservation{}, errors.New("embedded Runtime update operation response is invalid")
+	}
+	result := model.RuntimeUpdateOperationObservation{
+		OperationID:       wire.OperationID,
+		OperationType:     model.RuntimeOperationType(wire.OperationType),
+		RuntimeIdentity:   model.RuntimeIdentity(wire.RuntimeIdentity),
+		RuntimeGeneration: model.RuntimeGeneration(wire.RuntimeGeneration),
+		State:             model.RuntimeOperationState(wire.State),
+		CreatedAt:         wire.CreatedAt,
+		UpdatedAt:         wire.UpdatedAt,
+		CompletedAt:       wire.CompletedAt,
+	}
+	if wire.Error != nil {
+		if result.State != model.RuntimeOperationFailed {
+			return model.RuntimeUpdateOperationObservation{}, errors.New("embedded Runtime update operation has inconsistent failure evidence")
+		}
+		result.FailureCode = wire.Error.Code
+	}
+	if err := result.Validate(); err != nil {
+		return model.RuntimeUpdateOperationObservation{}, errors.New("embedded Runtime update operation evidence is invalid")
+	}
+	if result.OperationID != request.OperationID || result.OperationType != request.OperationType ||
+		result.RuntimeIdentity != request.ExpectedRuntimeIdentity {
+		return model.RuntimeUpdateOperationObservation{}, errors.New("validate embedded Runtime update operation observation: response does not match request")
+	}
+	return result, nil
 }
 
 func (c *EmbeddedClient) mutate(

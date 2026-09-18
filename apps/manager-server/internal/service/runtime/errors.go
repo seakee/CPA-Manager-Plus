@@ -5,7 +5,10 @@ import (
 	"fmt"
 )
 
-var ErrRuntimeMutationUnsupported = errors.New("runtime lifecycle mutation is unsupported")
+var (
+	ErrRuntimeMutationUnsupported    = errors.New("runtime lifecycle mutation is unsupported")
+	ErrRuntimeObservationUnsupported = errors.New("runtime operation observation is unsupported")
+)
 
 type ProtocolErrorCode string
 
@@ -15,6 +18,7 @@ const (
 	ProtocolErrorRuntimeIdentityMismatch         ProtocolErrorCode = "runtime_identity_mismatch"
 	ProtocolErrorStaleRuntimeGeneration          ProtocolErrorCode = "stale_runtime_generation"
 	ProtocolErrorOperationIDConflict             ProtocolErrorCode = "operation_id_conflict"
+	ProtocolErrorOperationNotFound               ProtocolErrorCode = "operation_not_found"
 	ProtocolErrorOperationStateConflict          ProtocolErrorCode = "operation_state_conflict"
 	ProtocolErrorOperationPersistenceUnavailable ProtocolErrorCode = "operation_persistence_unavailable"
 	ProtocolErrorActiveArtifactUnavailable       ProtocolErrorCode = "active_artifact_unavailable"

@@ -31,12 +31,16 @@ type cpaUpdateRuntimeStub struct {
 	err        error
 	prepareFn  func(model.RuntimePrepareUpdateRequest) (model.RuntimeOperationResult, error)
 	activateFn func(model.RuntimeActivateUpdateRequest) (model.RuntimeOperationResult, error)
+	observeFn  func(model.RuntimeObserveUpdateOperationRequest) (model.RuntimeUpdateOperationObservation, error)
 
+	statusCalls   atomic.Int32
 	prepareCalls  atomic.Int32
 	activateCalls atomic.Int32
+	observeCalls  atomic.Int32
 }
 
 func (s *cpaUpdateRuntimeStub) Status(context.Context) (model.RuntimeObservedStatus, error) {
+	s.statusCalls.Add(1)
 	return s.status, s.err
 }
 
@@ -74,6 +78,17 @@ func (s *cpaUpdateRuntimeStub) ActivateUpdate(_ context.Context, request model.R
 	return fn(request)
 }
 
+func (s *cpaUpdateRuntimeStub) ObserveUpdateOperation(_ context.Context, request model.RuntimeObserveUpdateOperationRequest) (model.RuntimeUpdateOperationObservation, error) {
+	s.observeCalls.Add(1)
+	s.mu.Lock()
+	fn := s.observeFn
+	s.mu.Unlock()
+	if fn == nil {
+		panic("unexpected Runtime update operation observation")
+	}
+	return fn(request)
+}
+
 func cpaUpdateOperation(request model.RuntimeMutationRequest, operationType model.RuntimeOperationType) model.RuntimeOperationResult {
 	return model.RuntimeOperationResult{
 		OperationID:       request.OperationID,
@@ -84,7 +99,7 @@ func cpaUpdateOperation(request model.RuntimeMutationRequest, operationType mode
 	}
 }
 
-func newCPAUpdateServer(t *testing.T, runtimeClient *cpaUpdateRuntimeStub) *Server {
+func newCPAUpdateServer(t *testing.T, runtimeClient runtimeservice.RuntimeClient) *Server {
 	t.Helper()
 	cfg := config.Config{
 		DBPath:      filepath.Join(t.TempDir(), "usage.sqlite"),

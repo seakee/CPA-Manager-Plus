@@ -79,6 +79,10 @@ func (*observationOnlyRuntime) ActivateUpdate(context.Context, model.RuntimeActi
 	panic("unexpected Runtime ActivateUpdate mutation")
 }
 
+func (*observationOnlyRuntime) ObserveUpdateOperation(context.Context, model.RuntimeObserveUpdateOperationRequest) (model.RuntimeUpdateOperationObservation, error) {
+	panic("recommendation must not observe update operations")
+}
+
 func embeddedObservation(version string, capabilities ...model.RuntimeCapability) model.RuntimeObservedStatus {
 	return model.RuntimeObservedStatus{
 		Identity:           "runtime-test",

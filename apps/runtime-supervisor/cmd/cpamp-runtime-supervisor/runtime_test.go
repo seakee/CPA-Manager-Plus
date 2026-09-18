@@ -29,7 +29,7 @@ func expectedRuntimeCapabilities() []string {
 	if runtimeupdate.SupportedPlatform(runtime.GOOS, runtime.GOARCH) {
 		capabilities = append(capabilities, "prepare_update", "activate_update")
 	}
-	return capabilities
+	return append(capabilities, "observe_update_operation")
 }
 
 func TestPersistedSelectionDrivesStartupAndContainerGenerationRecreation(t *testing.T) {
