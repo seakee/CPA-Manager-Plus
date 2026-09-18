@@ -2,7 +2,6 @@ package lifecycle
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"time"
@@ -111,12 +110,10 @@ func (e *Executor) PrepareUpdate(ctx context.Context, request PrepareUpdateReque
 
 	intent := journal.Intent{
 		OperationID:               request.OperationID,
-		OperationType:             "prepare_update",
+		OperationType:             UpdateOperationPrepare,
 		ExpectedRuntimeIdentity:   request.ExpectedRuntimeIdentity,
 		ExpectedRuntimeGeneration: request.ExpectedRuntimeGeneration,
-		RequestFingerprint: sha256.Sum256([]byte(
-			"runtime.prepare_update/v1:{targetVersion:" + request.TargetVersion + "}",
-		)),
+		RequestFingerprint:        updateOperationFingerprint(UpdateOperationPrepare, request.TargetVersion),
 	}
 
 	// Resolve retained operation IDs before touching the active executable. A

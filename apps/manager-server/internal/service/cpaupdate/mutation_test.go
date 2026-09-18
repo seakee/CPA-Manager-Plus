@@ -86,6 +86,10 @@ func successfulOperation(request model.RuntimeMutationRequest, operationType mod
 	}
 }
 
+func (*mutationRuntime) ObserveUpdateOperation(context.Context, model.RuntimeObserveUpdateOperationRequest) (model.RuntimeUpdateOperationObservation, error) {
+	panic("mutation must not observe update operations")
+}
+
 func mutationTestService(t *testing.T, runtimeClient *mutationRuntime) (*Service, *fakeSource, time.Time) {
 	t.Helper()
 	now := time.Date(2026, 9, 18, 9, 0, 0, 0, time.UTC)

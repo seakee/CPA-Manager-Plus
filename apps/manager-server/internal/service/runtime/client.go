@@ -20,4 +20,5 @@ type RuntimeClient interface {
 	Restart(ctx context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error)
 	PrepareUpdate(ctx context.Context, request model.RuntimePrepareUpdateRequest) (model.RuntimeOperationResult, error)
 	ActivateUpdate(ctx context.Context, request model.RuntimeActivateUpdateRequest) (model.RuntimeOperationResult, error)
+	ObserveUpdateOperation(ctx context.Context, request model.RuntimeObserveUpdateOperationRequest) (model.RuntimeUpdateOperationObservation, error)
 }

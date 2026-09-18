@@ -2,7 +2,6 @@ package lifecycle
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"time"
@@ -149,12 +148,10 @@ func (e *Executor) ActivateUpdate(ctx context.Context, request ActivateUpdateReq
 	}
 	intent := journal.Intent{
 		OperationID:               request.OperationID,
-		OperationType:             "activate_update",
+		OperationType:             UpdateOperationActivate,
 		ExpectedRuntimeIdentity:   request.ExpectedRuntimeIdentity,
 		ExpectedRuntimeGeneration: request.ExpectedRuntimeGeneration,
-		RequestFingerprint: sha256.Sum256([]byte(
-			"runtime.activate_update/v1:{targetVersion:" + request.TargetVersion + "}",
-		)),
+		RequestFingerprint:        updateOperationFingerprint(UpdateOperationActivate, request.TargetVersion),
 	}
 	operation, found, err := e.journal.Resolve(preconditionCtx, e.authority, intent)
 	if err != nil {

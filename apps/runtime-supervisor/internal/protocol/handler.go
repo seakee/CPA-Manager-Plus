@@ -33,6 +33,7 @@ type Config struct {
 	Restart           RestartExecutor
 	PrepareUpdate     PrepareUpdateExecutor
 	ActivateUpdate    ActivateUpdateExecutor
+	ObserveUpdate     UpdateOperationObserver
 	Status            StatusObserver
 	Recovery          RecoveryStatusObserver
 	Artifact          ArtifactStatusObserver
@@ -55,17 +56,18 @@ type ArtifactStatusObserver interface {
 }
 
 type handler struct {
-	runtimeIdentity   string
-	runtimeGeneration uint64
-	tokenDigest       [sha256.Size]byte
-	start             StartExecutor
-	stop              StopExecutor
-	restart           RestartExecutor
-	prepareUpdate     PrepareUpdateExecutor
-	activateUpdate    ActivateUpdateExecutor
-	status            StatusObserver
-	recovery          RecoveryStatusObserver
-	artifact          ArtifactStatusObserver
+	runtimeIdentity         string
+	runtimeGeneration       uint64
+	tokenDigest             [sha256.Size]byte
+	start                   StartExecutor
+	stop                    StopExecutor
+	restart                 RestartExecutor
+	prepareUpdate           PrepareUpdateExecutor
+	activateUpdate          ActivateUpdateExecutor
+	updateOperationObserver UpdateOperationObserver
+	status                  StatusObserver
+	recovery                RecoveryStatusObserver
+	artifact                ArtifactStatusObserver
 }
 
 type handshakeResponse struct {
@@ -115,24 +117,25 @@ func NewHandler(config Config) (http.Handler, error) {
 		return nil, errors.New("runtime token must not contain whitespace")
 	}
 	return &handler{
-		runtimeIdentity:   identity,
-		runtimeGeneration: config.RuntimeGeneration,
-		tokenDigest:       sha256.Sum256([]byte(config.Token)),
-		start:             config.Start,
-		stop:              config.Stop,
-		restart:           config.Restart,
-		prepareUpdate:     config.PrepareUpdate,
-		activateUpdate:    config.ActivateUpdate,
-		status:            config.Status,
-		recovery:          config.Recovery,
-		artifact:          config.Artifact,
+		runtimeIdentity:         identity,
+		runtimeGeneration:       config.RuntimeGeneration,
+		tokenDigest:             sha256.Sum256([]byte(config.Token)),
+		start:                   config.Start,
+		stop:                    config.Stop,
+		restart:                 config.Restart,
+		prepareUpdate:           config.PrepareUpdate,
+		activateUpdate:          config.ActivateUpdate,
+		updateOperationObserver: config.ObserveUpdate,
+		status:                  config.Status,
+		recovery:                config.Recovery,
+		artifact:                config.Artifact,
 	}, nil
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	method := http.MethodGet
 	switch r.URL.Path {
-	case handshakePath, statusPath:
+	case handshakePath, statusPath, observeUpdateOperationPath:
 	case startPath, stopPath, restartPath, prepareUpdatePath, activateUpdatePath:
 		method = http.MethodPost
 	default:
@@ -190,6 +193,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Capabilities:          h.capabilities(),
 			Recovery:              recovery,
 		})
+	case observeUpdateOperationPath:
+		h.serveObserveUpdateOperation(w, r)
 	case startPath:
 		h.submitStart(w, r)
 	case stopPath:
@@ -215,7 +220,7 @@ func requestsFeature(r *http.Request, feature string) bool {
 }
 
 func (h *handler) capabilities() []string {
-	capabilities := make([]string, 0, 5)
+	capabilities := make([]string, 0, 6)
 	if h.start != nil {
 		capabilities = append(capabilities, CapabilityStart)
 	}
@@ -230,6 +235,9 @@ func (h *handler) capabilities() []string {
 	}
 	if h.activateUpdate != nil {
 		capabilities = append(capabilities, CapabilityActivateUpdate)
+	}
+	if h.updateOperationObserver != nil {
+		capabilities = append(capabilities, CapabilityObserveUpdateOperation)
 	}
 	return capabilities
 }

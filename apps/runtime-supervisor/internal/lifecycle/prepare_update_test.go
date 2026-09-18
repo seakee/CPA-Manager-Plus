@@ -61,6 +61,7 @@ type prepareUpdateFake struct {
 	resolveErr   error
 	stageErr     error
 	resolveHook  func()
+	stageHook    func()
 	stageEntered chan struct{}
 	stageRelease <-chan struct{}
 	stageOnce    sync.Once
@@ -107,6 +108,9 @@ func (u *prepareUpdateFake) Resolve(_ context.Context, version string) (runtimeu
 func (u *prepareUpdateFake) Stage(_ context.Context, release runtimeupdate.Release) (runtimeupdate.Metadata, error) {
 	*u.events = append(*u.events, "stage:"+release.Version)
 	u.stageCalls++
+	if u.stageHook != nil {
+		u.stageHook()
+	}
 	if u.stageEntered != nil {
 		u.stageOnce.Do(func() { close(u.stageEntered) })
 		<-u.stageRelease

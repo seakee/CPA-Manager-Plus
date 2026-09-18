@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -165,11 +166,12 @@ type RuntimeRecoveryObservation struct {
 type RuntimeCapability string
 
 const (
-	RuntimeCapabilityStart          RuntimeCapability = "start"
-	RuntimeCapabilityStop           RuntimeCapability = "stop"
-	RuntimeCapabilityRestart        RuntimeCapability = "restart"
-	RuntimeCapabilityPrepareUpdate  RuntimeCapability = "prepare_update"
-	RuntimeCapabilityActivateUpdate RuntimeCapability = "activate_update"
+	RuntimeCapabilityStart                  RuntimeCapability = "start"
+	RuntimeCapabilityStop                   RuntimeCapability = "stop"
+	RuntimeCapabilityRestart                RuntimeCapability = "restart"
+	RuntimeCapabilityPrepareUpdate          RuntimeCapability = "prepare_update"
+	RuntimeCapabilityActivateUpdate         RuntimeCapability = "activate_update"
+	RuntimeCapabilityObserveUpdateOperation RuntimeCapability = "observe_update_operation"
 )
 
 type RuntimeCapabilities []RuntimeCapability
@@ -247,19 +249,23 @@ type RuntimeMutationRequest struct {
 }
 
 func (r RuntimeMutationRequest) Validate() error {
-	if strings.TrimSpace(r.OperationID) == "" {
+	return validateRuntimeOperationIdentity(r.OperationID, r.ExpectedRuntimeIdentity, r.ExpectedRuntimeGeneration)
+}
+
+func validateRuntimeOperationIdentity(operationID string, identity RuntimeIdentity, generation RuntimeGeneration) error {
+	if strings.TrimSpace(operationID) == "" {
 		return errors.New("runtime operation ID is required")
 	}
-	if !utf8.ValidString(r.OperationID) {
+	if !utf8.ValidString(operationID) {
 		return errors.New("runtime operation ID must be valid UTF-8")
 	}
-	if len([]byte(r.OperationID)) > 128 {
+	if len([]byte(operationID)) > 128 {
 		return errors.New("runtime operation ID exceeds 128 UTF-8 bytes")
 	}
-	if strings.TrimSpace(string(r.ExpectedRuntimeIdentity)) == "" {
+	if strings.TrimSpace(string(identity)) == "" {
 		return errors.New("expected runtime identity is required")
 	}
-	if r.ExpectedRuntimeGeneration == 0 {
+	if generation == 0 {
 		return errors.New("expected runtime generation must be positive")
 	}
 	return nil
@@ -275,6 +281,28 @@ type RuntimeActivateUpdateRequest struct {
 	RuntimeMutationRequest
 	ExpectedActiveArtifactID RuntimeArtifactID
 	TargetVersion            string
+}
+
+// RuntimeObserveUpdateOperationRequest identifies one exact durable update
+// operation. ExpectedRuntimeGeneration fences the fresh query, while the
+// returned operation may retain its older creation generation.
+type RuntimeObserveUpdateOperationRequest struct {
+	RuntimeMutationRequest
+	OperationType RuntimeOperationType
+	TargetVersion string
+}
+
+func (r RuntimeObserveUpdateOperationRequest) Validate() error {
+	if err := r.RuntimeMutationRequest.Validate(); err != nil {
+		return err
+	}
+	if r.OperationType != RuntimeOperationPrepareUpdate && r.OperationType != RuntimeOperationActivateUpdate {
+		return errors.New("observed runtime operation type must be prepare_update or activate_update")
+	}
+	if !validRuntimeTargetVersion(r.TargetVersion) {
+		return errors.New("target version must be an exact canonical release version")
+	}
+	return nil
 }
 
 func (r RuntimeActivateUpdateRequest) Validate() error {
@@ -376,6 +404,68 @@ type RuntimeOperationResult struct {
 	RuntimeGeneration RuntimeGeneration
 	State             RuntimeOperationState
 	Failure           *RuntimeOperationFailure
+}
+
+type RuntimeUpdateOperationObservation struct {
+	OperationID       string
+	OperationType     RuntimeOperationType
+	RuntimeIdentity   RuntimeIdentity
+	RuntimeGeneration RuntimeGeneration
+	State             RuntimeOperationState
+	FailureCode       string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+	CompletedAt       *time.Time
+}
+
+func (r RuntimeUpdateOperationObservation) Validate() error {
+	if err := validateRuntimeOperationIdentity(r.OperationID, r.RuntimeIdentity, r.RuntimeGeneration); err != nil {
+		return fmt.Errorf("invalid runtime update operation identity: %w", err)
+	}
+	if r.OperationType != RuntimeOperationPrepareUpdate && r.OperationType != RuntimeOperationActivateUpdate {
+		return fmt.Errorf("invalid runtime update operation type %q", r.OperationType)
+	}
+	if !r.State.IsValid() {
+		return fmt.Errorf("invalid runtime operation state %q", r.State)
+	}
+	if r.CreatedAt.IsZero() || r.UpdatedAt.IsZero() || r.UpdatedAt.Before(r.CreatedAt) {
+		return errors.New("runtime operation timestamps are invalid")
+	}
+	switch r.State {
+	case RuntimeOperationAccepted, RuntimeOperationRunning:
+		if r.FailureCode != "" || r.CompletedAt != nil {
+			return errors.New("non-terminal runtime operation has terminal evidence")
+		}
+	case RuntimeOperationSucceeded:
+		if r.FailureCode != "" || r.CompletedAt == nil {
+			return errors.New("succeeded runtime operation has invalid terminal evidence")
+		}
+	case RuntimeOperationFailed:
+		if !validRuntimeStableCode(r.FailureCode) || r.CompletedAt == nil {
+			return errors.New("failed runtime operation has invalid terminal evidence")
+		}
+	}
+	// A retained terminal row may have been tombstoned after completion.
+	if r.CompletedAt != nil && (r.UpdatedAt.Before(*r.CompletedAt) || r.CompletedAt.Before(r.CreatedAt)) {
+		return errors.New("runtime operation completion timestamp is invalid")
+	}
+	return nil
+}
+
+func validRuntimeStableCode(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for index, character := range []byte(value) {
+		if character >= 'a' && character <= 'z' {
+			continue
+		}
+		if index > 0 && (character == '_' || character >= '0' && character <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func (r RuntimeOperationResult) Validate() error {

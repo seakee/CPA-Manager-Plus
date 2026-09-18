@@ -79,4 +79,8 @@ func (c *ExternalClient) ActivateUpdate(context.Context, model.RuntimeActivateUp
 	return model.RuntimeOperationResult{}, fmt.Errorf("activate-update external Runtime: %w", ErrRuntimeMutationUnsupported)
 }
 
+func (c *ExternalClient) ObserveUpdateOperation(context.Context, model.RuntimeObserveUpdateOperationRequest) (model.RuntimeUpdateOperationObservation, error) {
+	return model.RuntimeUpdateOperationObservation{}, fmt.Errorf("observe update operation for external Runtime: %w", ErrRuntimeObservationUnsupported)
+}
+
 var _ RuntimeClient = (*ExternalClient)(nil)

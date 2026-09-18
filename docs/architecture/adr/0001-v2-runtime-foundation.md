@@ -121,7 +121,7 @@ Mutation submission order is fixed:
 7. Durably record intent for a new operation.
 8. Perform the side effect.
 
-An identity mismatch fails with `runtime_identity_mismatch`; a generation mismatch fails with `stale_runtime_generation`. Both checks happen before idempotency lookup, durable intent, and side effects. Consequently, replaying a request that still carries a previous generation is rejected as stale. After Manager observes the current generation and retries the same logical request with the same operation ID, the durable lookup finds the earlier-generation record: an identical request returns the existing state, while a different request fails with `operation_id_conflict`. A generation change alone MUST NOT create or execute the operation again. A future, separate operation-observation API is responsible for querying operation status without resubmitting a mutation.
+An identity mismatch fails with `runtime_identity_mismatch`; a generation mismatch fails with `stale_runtime_generation`. Both checks happen before idempotency lookup, durable intent, and side effects. Consequently, replaying a request that still carries a previous generation is rejected as stale. After Manager observes the current generation and retries the same logical request with the same operation ID, the durable lookup finds the earlier-generation record: an identical request returns the existing state, while a different request fails with `operation_id_conflict`. A generation change alone MUST NOT create or execute the operation again. The additive read-only update-operation observation contract below queries retained prepare/activate evidence without resubmitting a mutation; observation of other operation types remains separate scope.
 
 Runtime Protocol v1 keeps the existing JSON error envelope with a stable code and a human-readable message. The code is the protocol contract; clients MUST NOT branch on or otherwise depend on message wording. Mutation application errors and their HTTP status are:
 
@@ -186,6 +186,71 @@ After accepted intent and running evidence are durably committed, Restart uses t
 
 Termination failure does not attempt replacement spawn and records stable failure code `process_restart_stop_failed` when possible. Replacement spawn failure records `process_restart_start_failed` and leaves the old child stopped. A terminal persistence failure does not roll back either completed side effect. Retained `accepted`, `running`, `succeeded`, or `failed` Restart evidence is replayed without resuming or repeating termination or spawn. Restart does not change RuntimeGeneration or imply readiness; only a newly executed Restart whose terminal `succeeded` result is durable grants the fresh bounded recovery lease defined below.
 
+#### Read-only update operation observation
+
+Authenticated `GET /v1/runtime/operations/update` exposes the additive
+`observe_update_operation` capability. It reads one retained
+`prepare_update` or `activate_update` operation through the existing read-only
+journal resolver. The request has an empty body and exactly one value for each
+of `operationId`, `expectedRuntimeIdentity`, `expectedRuntimeGeneration`,
+`operationType`, and `targetVersion`. Missing, duplicate, unknown, or invalid
+fields fail with `400 invalid_request`; existing operation-ID and exact-version
+bounds apply. Responses, including errors, use `Cache-Control: no-store`.
+
+Current identity and generation fence the query before lookup. The durable
+namespace remains `(RuntimeIdentity, operationId)` across Supervisor
+incarnations. The resolver compares the exact operation type and the same
+target-version fingerprint used by prepare/activate:
+`SHA256("runtime.<operationType>/v1:{targetVersion:<targetVersion>}")`.
+Identity mismatch, stale current generation, and conflicting phase or target
+retain the distinct `409 runtime_identity_mismatch`,
+`409 stale_runtime_generation`, and `409 operation_id_conflict` errors.
+No retained row returns `404 operation_not_found`; journal unavailability
+returns `503 operation_persistence_unavailable`.
+
+A successful query returns only `operationId`, `operationType`,
+`runtimeIdentity`, `runtimeGeneration`, `state`, `createdAt`, `updatedAt`,
+optional terminal `completedAt`, and failed-only `error.code` with a fixed
+non-sensitive message. The four durable states remain `accepted`, `running`,
+`succeeded`, and `failed`. Returned `runtimeGeneration` is the operation's
+creation epoch. It may differ from the current query epoch in either numeric
+direction: generations are opaque random values, not ordered counters.
+Retained terminal tombstones remain observable, including an `updatedAt`
+later than `completedAt`. Paths, tokens, release URLs, fingerprints, raw
+messages, and journal storage details are not response fields.
+
+Observation MUST NOT acquire an execution gate, create an intent, transition a
+row, refresh journal timestamps, change row count, discover a release, stage
+an artifact, change selection/recovery, or call any lifecycle/update mutation.
+Runtime readiness, current version, current artifact, and mutation capabilities
+are not observation admission conditions. A missing operation after a lost
+submission response is absence of durable evidence; observation never starts
+it. A retained accepted/running operation remains queryable after disconnect,
+and retained evidence survives Supervisor restart with the same identity and
+journal.
+
+Manager's typed `RuntimeClient.ObserveUpdateOperation` implements this GET in
+Embedded mode and returns stable unsupported semantics in External mode.
+The transitional authenticated, no-store Manager endpoints are
+`GET /usage-service/runtime/updates/operations/prepare` and
+`GET /usage-service/runtime/updates/operations/activate`. Browsers supply only
+`request_id` and `target_version`. Manager reuses Update02 request-ID
+validation and derives `manager-cpa-update/v1:<phase>:<sha256(request_id)>`,
+freshly reads Runtime status for current identity/generation and the observation
+capability, then issues exactly one typed observation. It does not require
+Ready, fresh recommendations, discovery success, a newer target, the original
+active artifact, or prepare/activate capabilities.
+
+Manager returns `phase`, `request_id`, `target_version`,
+`runtime_operation_id`, and `state`, with durable `created_at`/`updated_at`,
+terminal `completed_at`, and failed-only stable `failure_code` when present.
+Only `404 operation_not_found` normalizes to `state=not_found`, without
+timestamps or invented terminal evidence. ID/type/identity mismatches and
+malformed Runtime results fail closed. Runtime version equaling the target
+does not imply `succeeded` or `already_applied`. No Manager journal, session,
+job, polling worker, automatic retry, cancel, rollback, or Web UI is introduced
+by this observation contract.
+
 Unix Domain Sockets and Windows Named Pipes are deferred. They may later be introduced as transport adapters without changing protocol semantics.
 
 ### 5. Supervisor operation journal
@@ -200,7 +265,7 @@ Privileged mutations obey:
 
 If an operation cannot be durably recorded, Supervisor MUST NOT perform binary replacement, process switching, rollback mutation, or other privileged filesystem side effects.
 
-The initial journal needs only operation-oriented fields such as operation ID, type, Runtime identity, creation generation, enough typed-request data to detect conflicting operation ID reuse, expected/current target version, state, timestamps, rollback reference, and structured error code. Records created under an earlier generation MUST NOT be deleted or excluded from idempotency lookup merely because Supervisor starts with a new generation; recovery and observation of those records are later tasks.
+The initial journal needs only operation-oriented fields such as operation ID, type, Runtime identity, creation generation, enough typed-request data to detect conflicting operation ID reuse, expected/current target version, state, timestamps, rollback reference, and structured error code. Records created under an earlier generation MUST NOT be deleted or excluded from idempotency lookup merely because Supervisor starts with a new generation. The read-only update observation contract above includes those retained records; execution recovery and broader journal APIs remain separate scope.
 
 ### 6. Secret ownership
 

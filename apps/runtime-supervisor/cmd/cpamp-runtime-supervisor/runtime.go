@@ -121,6 +121,7 @@ func newRuntimeHandler(ctx context.Context, cfg config) (*runtimeHandler, error)
 		if err != nil {
 			return nil, errors.Join(err, store.Close())
 		}
+		settings.ObserveUpdate = runtime.executor
 		if runtimeupdate.SupportedPlatform(goruntime.GOOS, goruntime.GOARCH) {
 			if err := runtime.executor.EnableActivateUpdate(selected, artifactObserver, selectionStore, observer); err != nil {
 				return nil, errors.Join(fmt.Errorf("enable update activation: %w", err), runtime.executor.Close())
