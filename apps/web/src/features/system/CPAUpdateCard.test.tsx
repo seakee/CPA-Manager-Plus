@@ -61,6 +61,7 @@ const flowState = (patch: Partial<CPAUpdateFlow> = {}): CPAUpdateFlow => ({
   status: updateStatus(),
   statusError: false,
   intent: null,
+  recoveryRecord: { raw: JSON.stringify(updateIntent()) },
   stage: 'idle',
   initialized: true,
   busy: false,
@@ -180,8 +181,34 @@ describe('CPA update product controls', () => {
     expect(dialog).toContain('does not cancel');
     expect(dialog).toContain('lose the link to this uncertain operation');
     await click(en.cpa_updates.forget_confirm);
-    expect(flow.forget).toHaveBeenCalledTimes(1);
+    expect(flow.forget).toHaveBeenCalledExactlyOnceWith(flow.recoveryRecord);
   });
+
+  it.each(['prepared', 'corrupt'] as const)(
+    'binds Forget to the original %s record across same-scope changes',
+    async (kind) => {
+      const original = {
+        raw:
+          kind === 'corrupt'
+            ? 'invalid record'
+            : JSON.stringify(updateIntent({ client_stage: 'prepared' })),
+      };
+      const flow = flowState({
+        intent: kind === 'corrupt' ? null : updateIntent({ client_stage: 'prepared' }),
+        recoveryRecord: original,
+        unresolved: true,
+      });
+      await render(flow);
+      await click(en.cpa_updates.forget);
+      await render({
+        ...flow,
+        intent: updateIntent({ phase: 'activate' }),
+        recoveryRecord: { raw: JSON.stringify(updateIntent({ phase: 'activate' })) },
+      });
+      await click(en.cpa_updates.forget_confirm);
+      expect(flow.forget).toHaveBeenCalledExactlyOnceWith(original);
+    }
+  );
 
   it.each(['prepare', 'activate'] as const)(
     'offers explicit same-request replay for missing %s with activation confirmation when needed',

@@ -13,6 +13,7 @@ import type {
   CPAUpdateStatus,
 } from './cpaUpdateApi';
 import {
+  memoryLockManager,
   memoryStorage,
   mutationResult,
   observationResult,
@@ -113,6 +114,7 @@ beforeEach(() => {
   mocks.demo = false;
   storage = memoryStorage();
   vi.stubGlobal('localStorage', storage);
+  vi.stubGlobal('navigator', { locks: memoryLockManager() });
   vi.stubGlobal('document', Object.assign(new EventTarget(), { visibilityState: 'visible' }));
   vi.stubGlobal(
     'window',
@@ -154,6 +156,65 @@ afterEach(async () => {
 });
 
 describe('CPA page lifecycle and explicit commands', () => {
+  it('adopts the winning claim when two mounted clients start preparing together', async () => {
+    let otherFlow!: CPAUpdateFlow;
+    function OtherHarness() {
+      const value = useCPAUpdateFlow();
+      useLayoutEffect(() => {
+        otherFlow = value;
+      }, [value]);
+      return null;
+    }
+    await mount();
+    let otherRenderer!: ReactTestRenderer;
+    await act(async () => {
+      otherRenderer = create(<OtherHarness />);
+    });
+    try {
+      expect(flow.intent).toBeNull();
+      expect(otherFlow.intent).toBeNull();
+      const statusBarrier = deferred<CPAUpdateStatus>();
+      const responseBarrier = deferred<CPAUpdateMutationResult>();
+      readStatus = () => statusBarrier.promise;
+      mutate = async () => responseBarrier.promise;
+      await act(async () => {
+        void flow.prepare();
+        void otherFlow.prepare();
+      });
+      await act(async () => {
+        statusBarrier.resolve(status);
+      });
+      expect(calls('/prepare')).toHaveLength(1);
+      expect(uuid).toHaveBeenCalledOnce();
+      const winner = readCPAUpdateIntent(storageKey())!;
+      expect(flow.intent?.request_id).toBe(winner.request_id);
+      expect(otherFlow.intent?.request_id).toBe(winner.request_id);
+      expect(queries().length).toBeGreaterThan(0);
+      await act(async () => {
+        responseBarrier.resolve(mutationResult('prepare', winner));
+      });
+    } finally {
+      await act(async () => {
+        otherRenderer.unmount();
+      });
+    }
+  });
+
+  it('blocks check and prepare without cross-tab coordination and generates no request ID', async () => {
+    vi.stubGlobal('navigator', {});
+    await mount();
+    await act(async () => {
+      await flow.prepare();
+    });
+    expect(flow.storageError).toBe('coordination_unavailable');
+    await act(async () => {
+      await flow.check();
+    });
+    expect(posts()).toHaveLength(0);
+    expect(uuid).not.toHaveBeenCalled();
+    expect(storage.length).toBe(0);
+  });
+
   it('loads and refreshes using GET, with no implicit check or mutation', async () => {
     await mount();
     expect(flow.initialized).toBe(true);
@@ -712,10 +773,70 @@ describe('CPA recovery context boundaries', () => {
     expect(storage.getItem(storageKey())).toBe('invalid record');
     expect(posts()).toHaveLength(0);
     await act(async () => {
-      await flow.forget();
+      await flow.forget(flow.recoveryRecord!);
     });
     expect(flow.storageError).toBeNull();
     expect(storage.getItem(storageKey())).toBeNull();
+  });
+
+  it.each(['prepared', 'corrupt'] as const)(
+    'keeps a later activation record when confirming an old %s record',
+    async (kind) => {
+      const original = updateIntent({ client_stage: 'prepared' });
+      storage.setItem(
+        storageKey(),
+        kind === 'corrupt' ? 'invalid record' : JSON.stringify(original)
+      );
+      observe = async (phase, identity) =>
+        observationResult(
+          updateIntent({ ...identity, phase }),
+          phase === 'prepare' ? 'succeeded' : 'running'
+        );
+      await mount();
+      const confirmation = flow.recoveryRecord!;
+      const activated = {
+        ...original,
+        phase: 'activate' as const,
+        client_stage: 'submitted' as const,
+        updated_at_ms: 2000,
+      };
+      storeIntent(activated);
+      await act(async () => {
+        window.dispatchEvent(Object.assign(new Event('storage'), { key: storageKey() }));
+      });
+      expect(flow.intent).toEqual(activated);
+      const remove = vi.spyOn(storage, 'removeItem');
+      await act(async () => {
+        await flow.forget(confirmation);
+      });
+      expect(flow.storageError).toBe('changed');
+      expect(flow.stage).toBe('context_changed');
+      expect(remove).not.toHaveBeenCalled();
+      expect(readCPAUpdateIntent(storageKey())).toEqual(activated);
+      expect(posts()).toHaveLength(0);
+      await act(async () => {
+        await flow.refresh();
+      });
+      await act(async () => {
+        await flow.forget(flow.recoveryRecord!);
+      });
+      expect(readCPAUpdateIntent(storageKey())).toBeNull();
+    }
+  );
+
+  it('does not rewrite prepared revisions during observation or storage events', async () => {
+    const prepared = updateIntent({ client_stage: 'prepared' });
+    storeIntent(prepared);
+    observe = async () => observationResult(prepared, 'succeeded');
+    const set = vi.spyOn(storage, 'setItem');
+    await mount();
+    await act(async () => {
+      await flow.refresh();
+      window.dispatchEvent(Object.assign(new Event('storage'), { key: storageKey() }));
+    });
+    expect(flow.stage).toBe('prepared');
+    expect(set).not.toHaveBeenCalled();
+    expect(readCPAUpdateIntent(storageKey())).toEqual(prepared);
   });
 
   it('forgets only the local scope and never cancels or rolls back a Runtime operation', async () => {
@@ -724,7 +845,7 @@ describe('CPA recovery context boundaries', () => {
     storage.setItem(otherKey, JSON.stringify(updateIntent()));
     await mount();
     await act(async () => {
-      await flow.forget();
+      await flow.forget(flow.recoveryRecord!);
     });
     expect(readCPAUpdateIntent(storageKey())).toBeNull();
     expect(readCPAUpdateIntent(otherKey)).not.toBeNull();

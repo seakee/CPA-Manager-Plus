@@ -1,18 +1,26 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  claimCPAUpdateIntent,
   clearCPAUpdateIntent,
   cpaUpdateStorageKey,
   createCPAUpdateRequestID,
   persistCPAUpdateIntent,
   readCPAUpdateIntent,
+  readCPAUpdateRecord,
 } from './cpaUpdateIntentStorage';
-import { memoryStorage, replacementArtifact, updateIntent } from './cpaUpdateTestFixtures';
+import {
+  memoryLockManager,
+  memoryStorage,
+  replacementArtifact,
+  updateIntent,
+} from './cpaUpdateTestFixtures';
 
 const key = cpaUpdateStorageKey('https://manager.test', 'scope-secret');
 let storage: Storage;
 beforeEach(() => {
   storage = memoryStorage();
   vi.stubGlobal('localStorage', storage);
+  vi.stubGlobal('navigator', { locks: memoryLockManager() });
 });
 afterEach(() => {
   vi.restoreAllMocks();
@@ -20,23 +28,23 @@ afterEach(() => {
 });
 
 describe('CPA browser recovery records', () => {
-  it('scopes records to normalized Manager service and auth without retaining the raw key', () => {
+  it('scopes records to normalized Manager service and auth without retaining the raw key', async () => {
     expect(cpaUpdateStorageKey('https://manager.test/v0/management/', 'scope-secret')).toBe(key);
     expect(cpaUpdateStorageKey('https://manager.test/', 'scope-secret')).toBe(key);
     expect(cpaUpdateStorageKey('https://other.test', 'scope-secret')).not.toBe(key);
     expect(cpaUpdateStorageKey('https://manager.test', 'other-secret')).not.toBe(key);
     expect(key).not.toContain('scope-secret');
     expect(key).toMatch(/^cpamp:cpa-update-intent:v1:[a-f0-9]{64}$/);
-    persistCPAUpdateIntent(key, updateIntent(), null);
+    await persistCPAUpdateIntent(key, updateIntent(), null);
     expect(storage.getItem(key)).not.toContain('scope-secret');
     expect(
       readCPAUpdateIntent(cpaUpdateStorageKey('https://other.test', 'scope-secret'))
     ).toBeNull();
   });
 
-  it('persists exactly the recovery fields and reads the same record back without expiring it', () => {
+  it('persists exactly the recovery fields and reads the same record back without expiring it', async () => {
     const intent = updateIntent();
-    persistCPAUpdateIntent(key, intent, null);
+    await persistCPAUpdateIntent(key, intent, null);
     expect(JSON.parse(storage.getItem(key)!)).toEqual(intent);
     expect(readCPAUpdateIntent(key)).toEqual(intent);
     expect(Object.keys(JSON.parse(storage.getItem(key)!))).toHaveLength(8);
@@ -46,7 +54,7 @@ describe('CPA browser recovery records', () => {
 
   it.each(['write', 'read_back', 'silent_write'] as const)(
     'fails closed on %s failure',
-    (failure) => {
+    async (failure) => {
       const set = vi.spyOn(storage, 'setItem');
       if (failure === 'write')
         set.mockImplementation(() => {
@@ -59,7 +67,7 @@ describe('CPA browser recovery records', () => {
           return null;
         });
       }
-      expect(() => persistCPAUpdateIntent(key, updateIntent(), null)).toThrow();
+      await expect(persistCPAUpdateIntent(key, updateIntent(), null)).rejects.toThrow();
     }
   );
 
@@ -78,10 +86,10 @@ describe('CPA browser recovery records', () => {
     JSON.stringify(updateIntent({ updated_at_ms: 999 })),
     JSON.stringify(updateIntent({ updated_at_ms: 1.5 })),
     ' '.repeat(4097),
-  ])('preserves corrupt/unsupported records for an explicit decision: %s', (raw) => {
+  ])('preserves corrupt/unsupported records for an explicit decision: %s', async (raw) => {
     storage.setItem(key, raw);
     expect(() => readCPAUpdateIntent(key)).toThrow('corrupt');
-    expect(() => persistCPAUpdateIntent(key, updateIntent(), null)).toThrow();
+    await expect(persistCPAUpdateIntent(key, updateIntent(), null)).rejects.toThrow();
     expect(storage.getItem(key)).toBe(raw);
   });
 
@@ -89,45 +97,128 @@ describe('CPA browser recovery records', () => {
     { request_id: 'different-id' },
     { target_version: '7.3.0' },
     { expected_active_artifact_id: replacementArtifact },
-  ])('never changes logical identity or guards on an existing record: %o', (patch) => {
+  ])('never changes logical identity or guards on an existing record: %o', async (patch) => {
     const intent = updateIntent();
-    persistCPAUpdateIntent(key, intent, null);
-    expect(() => persistCPAUpdateIntent(key, { ...intent, ...patch }, intent)).toThrow('changed');
+    await persistCPAUpdateIntent(key, intent, null);
+    await expect(persistCPAUpdateIntent(key, { ...intent, ...patch }, intent)).rejects.toThrow(
+      'changed'
+    );
     expect(readCPAUpdateIntent(key)).toEqual(intent);
   });
 
-  it('updates only the stage/phase and preserves the original snapshot', () => {
+  it('updates only the stage/phase and preserves the original snapshot', async () => {
     const intent = updateIntent();
-    persistCPAUpdateIntent(key, intent, null);
+    await persistCPAUpdateIntent(key, intent, null);
     const prepared = updateIntent({ client_stage: 'prepared', updated_at_ms: 2000 });
-    persistCPAUpdateIntent(key, prepared, intent);
+    await persistCPAUpdateIntent(key, prepared, intent);
     const activating = updateIntent({ phase: 'activate', updated_at_ms: 3000 });
-    persistCPAUpdateIntent(key, activating, prepared);
+    await persistCPAUpdateIntent(key, activating, prepared);
     expect(readCPAUpdateIntent(key)).toEqual(activating);
   });
 
-  it('does not overwrite or terminal-clean another record', () => {
+  it('does not overwrite or terminal-clean another record', async () => {
     const original = updateIntent();
     const other = updateIntent({ request_id: 'other-tab' });
     storage.setItem(key, JSON.stringify(other));
-    expect(() => persistCPAUpdateIntent(key, original, null)).toThrow('changed');
-    expect(() => clearCPAUpdateIntent(key, original)).toThrow('changed');
+    await expect(persistCPAUpdateIntent(key, original, null)).rejects.toThrow('changed');
+    await expect(clearCPAUpdateIntent(key, original)).rejects.toThrow('changed');
     expect(readCPAUpdateIntent(key)).toEqual(other);
   });
 
-  it('verifies removal and permits explicitly forgetting a corrupt record', () => {
+  it('verifies removal and permits explicitly forgetting a corrupt record', async () => {
     storage.setItem(key, 'corrupt');
-    clearCPAUpdateIntent(key);
+    await clearCPAUpdateIntent(key, readCPAUpdateRecord(key));
     expect(storage.getItem(key)).toBeNull();
     storage.setItem(key, JSON.stringify(updateIntent()));
     vi.spyOn(storage, 'removeItem').mockImplementation(() => {});
-    expect(() => clearCPAUpdateIntent(key, updateIntent())).toThrow('unavailable');
+    await expect(clearCPAUpdateIntent(key, updateIntent())).rejects.toThrow('unavailable');
   });
 
-  it('fails closed when localStorage is unavailable', () => {
+  it('fails closed when localStorage is unavailable', async () => {
     vi.stubGlobal('localStorage', undefined);
     expect(() => readCPAUpdateIntent(key)).toThrow('unavailable');
-    expect(() => persistCPAUpdateIntent(key, updateIntent(), null)).toThrow('unavailable');
+    await expect(persistCPAUpdateIntent(key, updateIntent(), null)).rejects.toThrow('unavailable');
+  });
+
+  it('grants one new intent and generates an ID only for the exclusive claim winner', async () => {
+    const createA = vi.fn(() => updateIntent({ request_id: 'tab-a' }));
+    const createB = vi.fn(() => updateIntent({ request_id: 'tab-b' }));
+    const set = vi.spyOn(storage, 'setItem');
+    const [a, b] = await Promise.all([
+      claimCPAUpdateIntent(key, createA),
+      claimCPAUpdateIntent(key, createB),
+    ]);
+    expect([a.claimed, b.claimed]).toEqual([true, false]);
+    expect(a.intent).toEqual(b.intent);
+    expect(createA).toHaveBeenCalledOnce();
+    expect(createB).not.toHaveBeenCalled();
+    expect(set).toHaveBeenCalledOnce();
+  });
+
+  it.each(['corrupt record', JSON.stringify(updateIntent({ client_stage: 'prepared' }))])(
+    'never deletes a replacement record after confirming snapshot %s',
+    async (raw) => {
+      storage.setItem(key, raw);
+      const snapshot = readCPAUpdateRecord(key);
+      const next = updateIntent({ phase: 'activate', updated_at_ms: 2000 });
+      storage.setItem(key, JSON.stringify(next));
+      const remove = vi.spyOn(storage, 'removeItem');
+      await expect(clearCPAUpdateIntent(key, snapshot)).rejects.toThrow('changed');
+      expect(remove).not.toHaveBeenCalled();
+      expect(readCPAUpdateIntent(key)).toEqual(next);
+    }
+  );
+
+  it('blocks claims, writes, and deletion when cross-tab coordination is unavailable', async () => {
+    vi.stubGlobal('navigator', {});
+    const create = vi.fn(() => updateIntent());
+    await expect(claimCPAUpdateIntent(key, create)).rejects.toThrow('coordination_unavailable');
+    await expect(persistCPAUpdateIntent(key, updateIntent(), null)).rejects.toThrow(
+      'coordination_unavailable'
+    );
+    await expect(clearCPAUpdateIntent(key, { raw: null })).rejects.toThrow(
+      'coordination_unavailable'
+    );
+    expect(create).not.toHaveBeenCalled();
+    expect(storage.length).toBe(0);
+  });
+
+  it('treats repeated terminal cleanup as a no-op while keeping stale Forget strict', async () => {
+    const remove = vi.spyOn(storage, 'removeItem');
+    await clearCPAUpdateIntent(key, updateIntent());
+    await expect(
+      clearCPAUpdateIntent(key, { raw: JSON.stringify(updateIntent()) })
+    ).rejects.toThrow('changed');
+    expect(remove).not.toHaveBeenCalled();
+  });
+
+  it('abandons a queued claim on scope disposal without blocking a different scope', async () => {
+    const locks = memoryLockManager();
+    vi.stubGlobal('navigator', { locks });
+    let release!: () => void;
+    const held = locks.request(
+      key,
+      {},
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        })
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    const controller = new AbortController();
+    const create = vi.fn(() => updateIntent());
+    const queued = claimCPAUpdateIntent(key, create, controller.signal);
+    const independent = await claimCPAUpdateIntent(key + '-other', () =>
+      updateIntent({ request_id: 'independent' })
+    );
+    expect(independent.claimed).toBe(true);
+    controller.abort();
+    release();
+    await held;
+    await expect(queued).rejects.toMatchObject({ name: 'AbortError' });
+    expect(create).not.toHaveBeenCalled();
+    expect(readCPAUpdateIntent(key)).toBeNull();
   });
 
   it('uses Web Crypto UUIDs and the secure random byte fallback', () => {

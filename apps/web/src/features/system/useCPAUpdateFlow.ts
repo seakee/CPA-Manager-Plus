@@ -10,14 +10,19 @@ import {
   type CPAUpdateStatus,
 } from './cpaUpdateApi';
 import {
+  claimCPAUpdateIntent,
   clearCPAUpdateIntent,
   cpaUpdateStorageKey,
   CPAUpdateStorageError,
   createCPAUpdateRequestID,
   persistCPAUpdateIntent,
+  parseCPAUpdateRecord,
+  readCPAUpdateRecord,
   readCPAUpdateIntent,
   sameCPAUpdateIntent,
+  withCPAUpdateIntentLock,
   type CPAUpdateIntent,
+  type CPAUpdateRecordSnapshot,
 } from './cpaUpdateIntentStorage';
 
 export type CPAUpdateFlowStage =
@@ -38,6 +43,7 @@ interface Snapshot {
   status: CPAUpdateStatus | null;
   statusError: boolean;
   intent: CPAUpdateIntent | null;
+  recoveryRecord: CPAUpdateRecordSnapshot | null;
   stage: CPAUpdateFlowStage;
   initialized: boolean;
   busy: boolean;
@@ -49,6 +55,7 @@ const initialSnapshot = (): Snapshot => ({
   status: null,
   statusError: false,
   intent: null,
+  recoveryRecord: null,
   stage: 'idle',
   initialized: false,
   busy: false,
@@ -95,7 +102,7 @@ interface Actions {
   prepare: () => Promise<void>;
   activate: (expected: CPAUpdateIntent) => Promise<void>;
   retry: (expected: CPAUpdateIntent) => Promise<void>;
-  forget: () => Promise<void>;
+  forget: (expected: CPAUpdateRecordSnapshot) => Promise<void>;
 }
 
 export function useCPAUpdateFlow() {
@@ -159,44 +166,55 @@ export function useCPAUpdateFlow() {
         return null;
       }
     };
-    const complete = (
+    const complete = async (
       stage: 'confirmed_failed' | 'succeeded' | 'already_applied',
       failureCode?: string
     ) => {
       publish({ stage, failureCode });
       try {
-        clearCPAUpdateIntent(scope, view.intent!);
-        publish({ storageError: null });
+        await clearCPAUpdateIntent(scope, view.intent!, waiting.signal);
+        publish({ storageError: null, recoveryRecord: { raw: null } });
       } catch (error) {
         blockStorage(error);
       }
     };
-    const prepared = () => {
+    const prepared = async (): Promise<void> => {
       const previous = view.intent!;
+      publish({ stage: 'prepared', failureCode: undefined });
+      // Reobserving prepared evidence must not rewrite its revision and cause
+      // storage-event ping-pong between tabs.
+      if (previous.client_stage === 'prepared') return;
       const next: CPAUpdateIntent = {
         ...previous,
         client_stage: 'prepared',
         updated_at_ms: Math.max(Date.now(), previous.updated_at_ms),
       };
-      publish({ stage: 'prepared', failureCode: undefined });
       try {
-        persistCPAUpdateIntent(scope, next, previous);
-        publish({ intent: next, storageError: null });
+        await persistCPAUpdateIntent(scope, next, previous, waiting.signal);
+        publish({
+          intent: next,
+          recoveryRecord: { raw: JSON.stringify(next) },
+          storageError: null,
+        });
       } catch (error) {
+        if (alive && error instanceof CPAUpdateStorageError && error.kind === 'changed') {
+          await refresh();
+          return;
+        }
         blockStorage(error);
       }
     };
-    const observe = async () => {
+    const observe = async (): Promise<void> => {
       const intent = view.intent;
       if (!intent || !alive) return;
       try {
         const result = await cpaUpdateApi.observe(connection, intent.phase, intent, waiting.signal);
         if (!alive) return;
         if (result.state === 'succeeded') {
-          if (intent.phase === 'prepare') prepared();
-          else complete('succeeded');
+          if (intent.phase === 'prepare') await prepared();
+          else await complete('succeeded');
         } else if (result.state === 'failed') {
-          complete('confirmed_failed', result.failure_code);
+          await complete('confirmed_failed', result.failure_code);
         } else {
           publish({ stage: result.state, failureCode: undefined });
         }
@@ -209,9 +227,16 @@ export function useCPAUpdateFlow() {
         });
       }
     };
-    const refresh = async () => {
+    const refresh = async (): Promise<void> => {
       try {
-        const stored = readCPAUpdateIntent(scope);
+        const record = readCPAUpdateRecord(scope);
+        let stored: CPAUpdateIntent | null;
+        try {
+          stored = parseCPAUpdateRecord(record);
+        } catch (error) {
+          publish({ recoveryRecord: record });
+          throw error;
+        }
         if (stored) {
           if (
             view.intent &&
@@ -223,6 +248,7 @@ export function useCPAUpdateFlow() {
           }
           publish({
             intent: stored,
+            recoveryRecord: record,
             storageError: null,
             ...(!view.initialized ? { stage: 'recovering' } : {}),
           });
@@ -231,7 +257,7 @@ export function useCPAUpdateFlow() {
         } else if (unresolved(view)) {
           throw new CPAUpdateStorageError('changed');
         } else {
-          publish({ storageError: null });
+          publish({ storageError: null, recoveryRecord: record });
         }
       } catch (error) {
         blockStorage(error);
@@ -265,13 +291,18 @@ export function useCPAUpdateFlow() {
       }
     };
     const submit = async (intent: CPAUpdateIntent) => {
-      publish({ intent, stage: 'submitting', failureCode: undefined });
+      publish({
+        intent,
+        recoveryRecord: { raw: JSON.stringify(intent) },
+        stage: 'submitting',
+        failureCode: undefined,
+      });
       try {
         const result = await cpaUpdateApi.mutate(connection, intent.phase, intent, waiting.signal);
         if (!alive) return;
-        if (result.state === 'failed') complete('confirmed_failed', result.failure_code);
-        else if (intent.phase === 'prepare') prepared();
-        else complete(result.already_applied ? 'already_applied' : 'succeeded');
+        if (result.state === 'failed') await complete('confirmed_failed', result.failure_code);
+        else if (intent.phase === 'prepare') await prepared();
+        else await complete(result.already_applied ? 'already_applied' : 'succeeded');
       } catch (error) {
         if (!alive) return;
         if (error instanceof CPAUpdateAPIError && error.kind === 'context_changed') {
@@ -286,12 +317,12 @@ export function useCPAUpdateFlow() {
     };
     const persistAndSubmit = async (next: CPAUpdateIntent, previous: CPAUpdateIntent | null) => {
       try {
-        persistCPAUpdateIntent(scope, next, previous);
+        await persistCPAUpdateIntent(scope, next, previous, waiting.signal);
       } catch (error) {
         blockStorage(error);
         return;
       }
-      await submit(next);
+      if (alive) await submit(next);
     };
     const controls: Actions = {
       refresh: () => run(refresh),
@@ -300,12 +331,20 @@ export function useCPAUpdateFlow() {
         await run(async () => {
           try {
             // Another tab may have started a flow since this page last rendered.
-            if (readCPAUpdateIntent(scope)) {
+            const status = await withCPAUpdateIntentLock(
+              scope,
+              () => {
+                if (readCPAUpdateIntent(scope)) return null;
+                return cpaUpdateApi.check(connection, waiting.signal);
+              },
+              waiting.signal
+            );
+            if (!alive) return;
+            if (!status) {
               await refresh();
               return;
             }
-            const status = await cpaUpdateApi.check(connection, waiting.signal);
-            if (alive) applyStatus(status);
+            applyStatus(status);
           } catch (error) {
             if (error instanceof CPAUpdateStorageError) blockStorage(error);
             else publish({ statusError: true });
@@ -326,22 +365,29 @@ export function useCPAUpdateFlow() {
             return;
           }
           try {
-            if (readCPAUpdateIntent(scope)) {
+            const claimed = await claimCPAUpdateIntent(
+              scope,
+              () => {
+                const now = Date.now();
+                return {
+                  schema_version: 1,
+                  request_id: createCPAUpdateRequestID(),
+                  target_version: fresh.target_version!,
+                  expected_active_artifact_id: fresh.active_artifact_id!,
+                  phase: 'prepare',
+                  client_stage: 'submitted',
+                  created_at_ms: now,
+                  updated_at_ms: now,
+                };
+              },
+              waiting.signal
+            );
+            if (!alive) return;
+            if (!claimed.claimed) {
               await refresh();
               return;
             }
-            const now = Date.now();
-            const next: CPAUpdateIntent = {
-              schema_version: 1,
-              request_id: createCPAUpdateRequestID(),
-              target_version: fresh.target_version!,
-              expected_active_artifact_id: fresh.active_artifact_id!,
-              phase: 'prepare',
-              client_stage: 'submitted',
-              created_at_ms: now,
-              updated_at_ms: now,
-            };
-            await persistAndSubmit(next, null);
+            await submit(claimed.intent);
           } catch (error) {
             blockStorage(error);
           }
@@ -396,11 +442,17 @@ export function useCPAUpdateFlow() {
           );
         });
       },
-      forget: () =>
+      forget: (expected) =>
         run(async () => {
           try {
-            clearCPAUpdateIntent(scope);
-            publish({ intent: null, stage: 'idle', storageError: null, failureCode: undefined });
+            await clearCPAUpdateIntent(scope, expected, waiting.signal);
+            publish({
+              intent: null,
+              recoveryRecord: { raw: null },
+              stage: 'idle',
+              storageError: null,
+              failureCode: undefined,
+            });
             await readStatus();
           } catch (error) {
             blockStorage(error);
@@ -442,13 +494,19 @@ export function useCPAUpdateFlow() {
   }, [context]);
 
   const invoke = useCallback(
-    (name: keyof Actions, intent?: CPAUpdateIntent) => {
+    (name: keyof Actions, expected?: CPAUpdateIntent | CPAUpdateRecordSnapshot) => {
       const current = actions.current;
       // Old confirmation callbacks cannot act under a different auth/service scope.
       if (current?.context !== context) return Promise.resolve();
       if (name === 'activate' || name === 'retry') {
-        return intent ? current.controls[name](intent) : Promise.resolve();
+        return expected && 'request_id' in expected
+          ? current.controls[name](expected)
+          : Promise.resolve();
       }
+      if (name === 'forget')
+        return expected && 'raw' in expected
+          ? current.controls.forget(expected)
+          : Promise.resolve();
       return current.controls[name]();
     },
     [context]
@@ -482,7 +540,7 @@ export function useCPAUpdateFlow() {
     prepare: () => invoke('prepare'),
     activate: (intent: CPAUpdateIntent) => invoke('activate', intent),
     retry: (intent: CPAUpdateIntent) => invoke('retry', intent),
-    forget: () => invoke('forget'),
+    forget: (expected: CPAUpdateRecordSnapshot) => invoke('forget', expected),
   };
 }
 

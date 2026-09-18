@@ -37,6 +37,7 @@
     "storage_corrupt": "復原紀錄無效，已阻止提交。紀錄仍被保留，請明確選擇復原或移除。",
     "storage_changed": "復原紀錄已在其他環境中變更，已阻止提交。請重新查詢操作狀態。",
     "storage_secure_random_unavailable": "目前瀏覽器無法安全產生請求識別碼，未提交更新。",
+    "storage_coordination_unavailable": "目前瀏覽器無法協調多個分頁的更新紀錄，已阻止更新。請使用支援 Web Locks 的瀏覽器，並透過 HTTPS 或 localhost 存取。",
     "activate_title": "啟用 CPA 更新",
     "activate_warning": "確認啟用 CPA {{version}}？CPA 會停止並重新啟動，現有請求可能短暫中斷。",
     "activate_confirm": "確認啟用",

@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Modal } from '@/components/ui/Modal';
 import { IconRefreshCw } from '@/components/ui/icons';
-import type { CPAUpdateIntent } from './cpaUpdateIntentStorage';
+import type { CPAUpdateIntent, CPAUpdateRecordSnapshot } from './cpaUpdateIntentStorage';
 import type { CPAUpdateFlow } from './useCPAUpdateFlow';
 import styles from './ManagerUpdatePage.module.scss';
 
@@ -12,6 +12,7 @@ type Confirmation = {
   kind: 'activate' | 'retry_activate' | 'forget';
   scope: string;
   intent: CPAUpdateIntent | null;
+  record: CPAUpdateRecordSnapshot | null;
 };
 
 export function CPAUpdateCard({ flow }: { flow: CPAUpdateFlow }) {
@@ -32,7 +33,7 @@ export function CPAUpdateCard({ flow }: { flow: CPAUpdateFlow }) {
             : status?.state || 'status_unavailable';
   const showFlow = !!intent && !external;
   const confirm = (kind: Confirmation['kind']) => {
-    setConfirmation({ kind, scope: flow.scope, intent });
+    setConfirmation({ kind, scope: flow.scope, intent, record: flow.recoveryRecord });
   };
   const activeConfirmation = confirmation?.scope === flow.scope ? confirmation : null;
   const forgetting = activeConfirmation?.kind === 'forget';
@@ -41,12 +42,13 @@ export function CPAUpdateCard({ flow }: { flow: CPAUpdateFlow }) {
       ? flow.canActivate
       : activeConfirmation?.kind === 'retry_activate'
         ? flow.canRetry
-        : !flow.busy;
+        : !flow.busy && !!activeConfirmation?.record;
   const confirmAction = () => {
     if (!activeConfirmation || !confirmationAllowed) return;
     setConfirmation(null);
-    if (activeConfirmation.kind === 'forget') void flow.forget();
-    else if (activeConfirmation.intent) {
+    if (activeConfirmation.kind === 'forget') {
+      if (activeConfirmation.record) void flow.forget(activeConfirmation.record);
+    } else if (activeConfirmation.intent) {
       if (activeConfirmation.kind === 'activate') void flow.activate(activeConfirmation.intent);
       else void flow.retry(activeConfirmation.intent);
     }
@@ -180,7 +182,7 @@ export function CPAUpdateCard({ flow }: { flow: CPAUpdateFlow }) {
             <Button
               type="button"
               variant="ghost"
-              disabled={flow.busy}
+              disabled={flow.busy || !flow.recoveryRecord}
               onClick={() => confirm('forget')}
             >
               {t('cpa_updates.forget')}

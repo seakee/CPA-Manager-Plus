@@ -78,3 +78,26 @@ export function memoryStorage(): Storage {
     key: (index) => Array.from(values.keys())[index] ?? null,
   };
 }
+
+// Unit-test scheduler only. Cross-tab exclusion is additionally exercised with
+// native Web Locks in tests/cpaUpdateConcurrency.browser.mjs.
+export function memoryLockManager() {
+  const queues = new Map<string, Promise<unknown>>();
+  return {
+    async request<T>(name: string, options: LockOptions, work: () => T | Promise<T>): Promise<T> {
+      const previous = queues.get(name) ?? Promise.resolve();
+      const result = previous
+        .catch(() => {})
+        .then(() => {
+          options.signal?.throwIfAborted();
+          return work();
+        });
+      queues.set(name, result);
+      try {
+        return await result;
+      } finally {
+        if (queues.get(name) === result) queues.delete(name);
+      }
+    },
+  };
+}

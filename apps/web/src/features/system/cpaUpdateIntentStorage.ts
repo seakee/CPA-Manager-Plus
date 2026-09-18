@@ -10,8 +10,21 @@ export interface CPAUpdateIntent extends CPAUpdateRequest {
   updated_at_ms: number;
 }
 
+// Kept only in memory to bind Forget to the exact record the user saw,
+// including records which cannot be decoded as an intent.
+export interface CPAUpdateRecordSnapshot {
+  readonly raw: string | null;
+}
+
 export class CPAUpdateStorageError extends Error {
-  constructor(readonly kind: 'unavailable' | 'corrupt' | 'changed' | 'secure_random_unavailable') {
+  constructor(
+    readonly kind:
+      | 'unavailable'
+      | 'corrupt'
+      | 'changed'
+      | 'secure_random_unavailable'
+      | 'coordination_unavailable'
+  ) {
     super(kind);
   }
 }
@@ -66,22 +79,42 @@ function storage(): Storage {
   }
 }
 
-export function readCPAUpdateIntent(key: string): CPAUpdateIntent | null {
+export function readCPAUpdateRecord(key: string): CPAUpdateRecordSnapshot {
   try {
-    const raw = storage().getItem(key);
-    if (raw === null) return null;
-    if (raw.length > 4096) throw new CPAUpdateStorageError('corrupt');
-    let value: unknown;
-    try {
-      value = JSON.parse(raw);
-    } catch {
-      throw new CPAUpdateStorageError('corrupt');
-    }
-    return parseIntent(value);
+    return { raw: storage().getItem(key) };
   } catch (error) {
     if (error instanceof CPAUpdateStorageError) throw error;
     throw new CPAUpdateStorageError('unavailable');
   }
+}
+
+export function parseCPAUpdateRecord({ raw }: CPAUpdateRecordSnapshot): CPAUpdateIntent | null {
+  if (raw === null) return null;
+  if (raw.length > 4096) throw new CPAUpdateStorageError('corrupt');
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new CPAUpdateStorageError('corrupt');
+  }
+  return parseIntent(value);
+}
+
+export function readCPAUpdateIntent(key: string): CPAUpdateIntent | null {
+  return parseCPAUpdateRecord(readCPAUpdateRecord(key));
+}
+
+export async function withCPAUpdateIntentLock<T>(
+  key: string,
+  work: () => T | Promise<T>,
+  signal?: AbortSignal
+): Promise<T> {
+  if (typeof navigator === 'undefined' || !navigator.locks?.request) {
+    throw new CPAUpdateStorageError('coordination_unavailable');
+  }
+  // All cooperating tabs use this same auth/service-scoped Web Lock. Storage
+  // read-back verifies durability; it is not a cross-tab compare-and-swap.
+  return navigator.locks.request(key, { mode: 'exclusive', signal }, work);
 }
 
 export function sameCPAUpdateIntent(
@@ -93,7 +126,7 @@ export function sameCPAUpdateIntent(
   );
 }
 
-export function persistCPAUpdateIntent(
+function persistLockedIntent(
   key: string,
   intent: CPAUpdateIntent,
   previous: CPAUpdateIntent | null
@@ -120,19 +153,61 @@ export function persistCPAUpdateIntent(
   }
 }
 
-// Omit expected only for the user's explicitly confirmed Forget action.
-// Terminal cleanup must still match the record whose result was observed.
-export function clearCPAUpdateIntent(key: string, expected?: CPAUpdateIntent): void {
-  if (expected && !sameCPAUpdateIntent(readCPAUpdateIntent(key), expected)) {
-    throw new CPAUpdateStorageError('changed');
-  }
-  try {
-    storage().removeItem(key);
-    if (storage().getItem(key) !== null) throw new CPAUpdateStorageError('unavailable');
-  } catch (error) {
-    if (error instanceof CPAUpdateStorageError) throw error;
-    throw new CPAUpdateStorageError('unavailable');
-  }
+export function persistCPAUpdateIntent(
+  key: string,
+  intent: CPAUpdateIntent,
+  previous: CPAUpdateIntent | null,
+  signal?: AbortSignal
+): Promise<void> {
+  return withCPAUpdateIntentLock(key, () => persistLockedIntent(key, intent, previous), signal);
+}
+
+export function claimCPAUpdateIntent(
+  key: string,
+  create: () => CPAUpdateIntent,
+  signal?: AbortSignal
+): Promise<{ intent: CPAUpdateIntent; claimed: boolean }> {
+  return withCPAUpdateIntentLock(
+    key,
+    () => {
+      const existing = readCPAUpdateIntent(key);
+      if (existing) return { intent: existing, claimed: false };
+      // Generate the request ID only after winning the exclusive claim.
+      const intent = create();
+      persistLockedIntent(key, intent, null);
+      return { intent, claimed: true };
+    },
+    signal
+  );
+}
+
+export function clearCPAUpdateIntent(
+  key: string,
+  expected: CPAUpdateIntent | CPAUpdateRecordSnapshot,
+  signal?: AbortSignal
+): Promise<void> {
+  return withCPAUpdateIntentLock(
+    key,
+    () => {
+      const current = readCPAUpdateRecord(key);
+      // Another observer may already have cleaned a confirmed terminal result.
+      // Forget still requires its exact raw snapshot, even when now absent.
+      if (!('raw' in expected) && current.raw === null) return;
+      const matches =
+        'raw' in expected
+          ? current.raw === expected.raw
+          : sameCPAUpdateIntent(parseCPAUpdateRecord(current), expected);
+      if (!matches) throw new CPAUpdateStorageError('changed');
+      try {
+        storage().removeItem(key);
+        if (storage().getItem(key) !== null) throw new CPAUpdateStorageError('unavailable');
+      } catch (error) {
+        if (error instanceof CPAUpdateStorageError) throw error;
+        throw new CPAUpdateStorageError('unavailable');
+      }
+    },
+    signal
+  );
 }
 
 export function createCPAUpdateRequestID(): string {

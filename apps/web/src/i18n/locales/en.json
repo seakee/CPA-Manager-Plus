@@ -37,6 +37,7 @@
     "storage_corrupt": "The recovery record is invalid. Submissions are blocked; the record has been kept for explicit recovery or removal.",
     "storage_changed": "The recovery record changed in another context. Submissions are blocked; query again to inspect the operation.",
     "storage_secure_random_unavailable": "This browser cannot securely generate a request ID. No update was submitted.",
+    "storage_coordination_unavailable": "This browser cannot coordinate update records across tabs. Updates are blocked. Use a browser with Web Locks support over HTTPS or localhost.",
     "activate_title": "Activate CPA update",
     "activate_warning": "Activate CPA {{version}}? CPA will stop and start, and existing requests may be briefly interrupted.",
     "activate_confirm": "Confirm activation",

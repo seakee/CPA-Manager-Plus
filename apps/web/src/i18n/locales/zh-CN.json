@@ -37,6 +37,7 @@
     "storage_corrupt": "恢复记录无效，已阻止提交。记录仍被保留，请明确选择恢复或移除。",
     "storage_changed": "恢复记录已在其他上下文中变化，已阻止提交。请重新查询操作状态。",
     "storage_secure_random_unavailable": "当前浏览器无法安全生成请求标识，未提交更新。",
+    "storage_coordination_unavailable": "当前浏览器无法协调多个标签页的更新记录，已阻止更新。请使用支持 Web Locks 的浏览器，并通过 HTTPS 或 localhost 访问。",
     "activate_title": "激活 CPA 更新",
     "activate_warning": "确认激活 CPA {{version}}？CPA 会停止并重新启动，现有请求可能短暂中断。",
     "activate_confirm": "确认激活",

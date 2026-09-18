@@ -72,6 +72,7 @@ beforeEach(() => {
     status: null,
     statusError: false,
     intent: null,
+    recoveryRecord: null,
     stage: 'idle',
     initialized: true,
     busy: false,
