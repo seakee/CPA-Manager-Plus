@@ -104,17 +104,111 @@ export function readCPAUpdateIntent(key: string): CPAUpdateIntent | null {
   return parseCPAUpdateRecord(readCPAUpdateRecord(key));
 }
 
+function withIntentTransaction<T>(key: string, work: () => T, signal?: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let database: IDBDatabase | undefined;
+    let transaction: IDBTransaction | undefined;
+    let finished = false;
+    let ran = false;
+    let result: T;
+    const unavailable = () => new CPAUpdateStorageError('coordination_unavailable');
+    const cleanup = () => {
+      finished = true;
+      signal?.removeEventListener('abort', abort);
+      database?.close();
+    };
+    const fail = (error: unknown) => {
+      if (finished) return;
+      cleanup();
+      reject(error);
+    };
+    const abort = () => {
+      // Aborting a queued transaction prevents its callback from ever writing.
+      try {
+        transaction?.abort();
+      } catch {
+        // A transaction may have committed before its completion event arrives.
+      }
+      fail(signal?.reason ?? new DOMException('Aborted', 'AbortError'));
+    };
+    if (signal?.aborted) {
+      abort();
+      return;
+    }
+    signal?.addEventListener('abort', abort, { once: true });
+    try {
+      // A database per hashed auth/service scope keeps unrelated scopes from
+      // blocking each other. The empty store is only a transaction gate: the
+      // recovery record remains in localStorage, with no lease or expiring owner.
+      const opening = indexedDB.open(key + ':coordination', 1);
+      opening.onupgradeneeded = () => {
+        if (finished) opening.transaction?.abort();
+        else opening.result.createObjectStore('lock');
+      };
+      opening.onerror = opening.onblocked = () => fail(unavailable());
+      opening.onsuccess = () => {
+        database = opening.result;
+        if (finished) {
+          database.close();
+          return;
+        }
+        database.onversionchange = () => database?.close();
+        try {
+          transaction = database.transaction('lock', 'readwrite');
+          transaction.onabort = () => fail(unavailable());
+          transaction.oncomplete = () => {
+            if (finished) return;
+            if (!ran) return fail(unavailable());
+            cleanup();
+            resolve(result);
+          };
+          // readwrite transactions on this store serialize across connections
+          // and tabs. Run the *synchronous* critical section in a request event,
+          // while the transaction is active; never await a network response here.
+          const acquired = transaction.objectStore('lock').get(0);
+          acquired.onsuccess = () => {
+            if (finished) return;
+            try {
+              signal?.throwIfAborted();
+              result = work();
+              ran = true;
+            } catch (error) {
+              transaction?.abort();
+              fail(error);
+            }
+          };
+        } catch {
+          fail(unavailable());
+        }
+      };
+    } catch {
+      fail(unavailable());
+    }
+  });
+}
+
+// Callbacks must be synchronous. A request may be dispatched while coordinated,
+// but its response must be carried in an object and awaited after releasing the
+// gate. IndexedDB would auto-commit during an asynchronous callback's first wait.
 export async function withCPAUpdateIntentLock<T>(
   key: string,
-  work: () => T | Promise<T>,
+  work: () => T & (T extends PromiseLike<unknown> ? never : unknown),
   signal?: AbortSignal
 ): Promise<T> {
-  if (typeof navigator === 'undefined' || !navigator.locks?.request) {
-    throw new CPAUpdateStorageError('coordination_unavailable');
-  }
-  // All cooperating tabs use this same auth/service-scoped Web Lock. Storage
-  // read-back verifies durability; it is not a cross-tab compare-and-swap.
-  return navigator.locks.request(key, { mode: 'exclusive', signal }, work);
+  const locks = typeof navigator === 'undefined' ? undefined : navigator.locks;
+  const coordinated = () => {
+    if (typeof indexedDB !== 'undefined') return withIntentTransaction(key, work, signal);
+    if (!locks?.request) throw new CPAUpdateStorageError('coordination_unavailable');
+    signal?.throwIfAborted();
+    return work();
+  };
+  // Web Locks are unavailable on ordinary remote HTTP origins. IndexedDB also
+  // gates the native path when exposed, so mixed-capability tabs still exclude
+  // each other. An exposed but failing database must not silently bypass that
+  // shared gate. Browsers without IndexedDB can still use native Web Locks.
+  return locks?.request
+    ? locks.request(key, { mode: 'exclusive', signal }, coordinated)
+    : coordinated();
 }
 
 export function sameCPAUpdateIntent(

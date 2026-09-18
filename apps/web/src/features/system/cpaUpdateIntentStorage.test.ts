@@ -171,6 +171,7 @@ describe('CPA browser recovery records', () => {
 
   it('blocks claims, writes, and deletion when cross-tab coordination is unavailable', async () => {
     vi.stubGlobal('navigator', {});
+    vi.stubGlobal('indexedDB', undefined);
     const create = vi.fn(() => updateIntent());
     await expect(claimCPAUpdateIntent(key, create)).rejects.toThrow('coordination_unavailable');
     await expect(persistCPAUpdateIntent(key, updateIntent(), null)).rejects.toThrow(
@@ -181,6 +182,112 @@ describe('CPA browser recovery records', () => {
     );
     expect(create).not.toHaveBeenCalled();
     expect(storage.length).toBe(0);
+  });
+
+  it.each([false, true])(
+    'never bypasses a failing shared transaction gate (Web Locks: %s)',
+    async (nativeLocks) => {
+      if (!nativeLocks) vi.stubGlobal('navigator', {});
+      vi.stubGlobal('indexedDB', {
+        open: () => {
+          throw new DOMException('Storage disabled', 'SecurityError');
+        },
+      });
+      const create = vi.fn(() => updateIntent());
+      const set = vi.spyOn(storage, 'setItem');
+      const remove = vi.spyOn(storage, 'removeItem');
+      await expect(claimCPAUpdateIntent(key, create)).rejects.toThrow('coordination_unavailable');
+      await expect(persistCPAUpdateIntent(key, updateIntent(), null)).rejects.toThrow(
+        'coordination_unavailable'
+      );
+      await expect(clearCPAUpdateIntent(key, { raw: null })).rejects.toThrow(
+        'coordination_unavailable'
+      );
+      expect(create).not.toHaveBeenCalled();
+      expect(set).not.toHaveBeenCalled();
+      expect(remove).not.toHaveBeenCalled();
+    }
+  );
+
+  // Controlled IDB events cover failure/commit boundaries only; real exclusion
+  // between page realms is tested by cpaUpdateConcurrency.browser.mjs.
+  function transactionEvents() {
+    const acquired = {} as IDBRequest;
+    const transaction = {
+      objectStore: () => ({ get: () => acquired }),
+      abort: vi.fn(),
+    } as unknown as IDBTransaction;
+    const database = {
+      transaction: vi.fn(() => transaction),
+      close: vi.fn(),
+    } as unknown as IDBDatabase;
+    const opening = { result: database } as IDBOpenDBRequest;
+    vi.stubGlobal('navigator', {});
+    vi.stubGlobal('indexedDB', { open: vi.fn(() => opening) });
+    return {
+      database,
+      transaction,
+      open: () => opening.onsuccess!.call(opening, new Event('success')),
+      acquire: () => acquired.onsuccess!.call(acquired, new Event('success')),
+      commit: () => transaction.oncomplete!.call(transaction, new Event('complete')),
+      fail: () => transaction.onabort!.call(transaction, new Event('abort')),
+      block: () => opening.onblocked!.call(opening, {} as IDBVersionChangeEvent),
+    };
+  }
+
+  it('does not grant a fallback claim until the transaction completes', async () => {
+    const events = transactionEvents();
+    const granted = vi.fn();
+    const claim = claimCPAUpdateIntent(key, () => updateIntent()).then(granted);
+    events.open();
+    events.acquire();
+    await Promise.resolve();
+    expect(readCPAUpdateIntent(key)).toEqual(updateIntent());
+    expect(granted).not.toHaveBeenCalled();
+    events.commit();
+    await claim;
+    expect(granted).toHaveBeenCalledWith({ intent: updateIntent(), claimed: true });
+    expect(events.database.close).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the record but denies submission if the transaction aborts after persistence', async () => {
+    const events = transactionEvents();
+    const claim = claimCPAUpdateIntent(key, () => updateIntent());
+    events.open();
+    events.acquire();
+    events.fail();
+    await expect(claim).rejects.toThrow('coordination_unavailable');
+    expect(readCPAUpdateIntent(key)).toEqual(updateIntent());
+    expect(events.database.close).toHaveBeenCalledOnce();
+  });
+
+  it.each(['opening', 'queued transaction'] as const)(
+    'cancels fallback waiting during %s without creating an intent',
+    async (stage) => {
+      const events = transactionEvents();
+      const controller = new AbortController();
+      const create = vi.fn(() => updateIntent());
+      const claim = claimCPAUpdateIntent(key, create, controller.signal);
+      if (stage === 'queued transaction') events.open();
+      controller.abort();
+      if (stage === 'opening') events.open();
+      else events.acquire();
+      await expect(claim).rejects.toMatchObject({ name: 'AbortError' });
+      expect(create).not.toHaveBeenCalled();
+      expect(storage.length).toBe(0);
+      expect(events.database.close).toHaveBeenCalledOnce();
+    }
+  );
+
+  it('fails closed on a blocked database and closes a late open connection', async () => {
+    const events = transactionEvents();
+    const create = vi.fn(() => updateIntent());
+    const claim = claimCPAUpdateIntent(key, create);
+    events.block();
+    events.open();
+    await expect(claim).rejects.toThrow('coordination_unavailable');
+    expect(create).not.toHaveBeenCalled();
+    expect(events.database.close).toHaveBeenCalledOnce();
   });
 
   it('treats repeated terminal cleanup as a no-op while keeping stale Forget strict', async () => {

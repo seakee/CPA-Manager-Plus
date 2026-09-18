@@ -331,20 +331,26 @@ export function useCPAUpdateFlow() {
         await run(async () => {
           try {
             // Another tab may have started a flow since this page last rendered.
-            const status = await withCPAUpdateIntentLock(
+            const dispatched = await withCPAUpdateIntentLock(
               scope,
               () => {
                 if (readCPAUpdateIntent(scope)) return null;
-                return cpaUpdateApi.check(connection, waiting.signal);
+                // Guard dispatch synchronously, then await the response outside
+                // the IndexedDB transaction (which cannot span a network wait).
+                const response = cpaUpdateApi.check(connection, waiting.signal);
+                // Coordination can fail before its promise is returned to us.
+                void response.catch(() => {});
+                return { response };
               },
               waiting.signal
             );
             if (!alive) return;
-            if (!status) {
+            if (!dispatched) {
               await refresh();
               return;
             }
-            applyStatus(status);
+            const status = await dispatched.response;
+            if (alive) applyStatus(status);
           } catch (error) {
             if (error instanceof CPAUpdateStorageError) blockStorage(error);
             else publish({ statusError: true });

@@ -202,6 +202,7 @@ describe('CPA page lifecycle and explicit commands', () => {
 
   it('blocks check and prepare without cross-tab coordination and generates no request ID', async () => {
     vi.stubGlobal('navigator', {});
+    vi.stubGlobal('indexedDB', undefined);
     await mount();
     await act(async () => {
       await flow.prepare();
@@ -210,6 +211,23 @@ describe('CPA page lifecycle and explicit commands', () => {
     await act(async () => {
       await flow.check();
     });
+    expect(posts()).toHaveLength(0);
+    expect(uuid).not.toHaveBeenCalled();
+    expect(storage.length).toBe(0);
+  });
+
+  it('makes zero mutation calls when HTTP fallback storage cannot be opened', async () => {
+    vi.stubGlobal('navigator', {});
+    vi.stubGlobal('indexedDB', {
+      open: () => {
+        throw new DOMException('Storage disabled', 'SecurityError');
+      },
+    });
+    await mount();
+    await act(async () => {
+      await flow.prepare();
+    });
+    expect(flow.storageError).toBe('coordination_unavailable');
     expect(posts()).toHaveLength(0);
     expect(uuid).not.toHaveBeenCalled();
     expect(storage.length).toBe(0);
