@@ -116,7 +116,7 @@ describe('CPA update product controls', () => {
       const content = text(renderer!.root);
       expect(content).toContain(en.cpa_updates[state]);
       expect(content).toContain('CPA Engine');
-      expect(content).toContain('v7.1.0');
+      expect(content).toContain('7.1.0');
       expect(content).not.toContain(originalArtifact);
       expect(renderer!.root.findAllByProps({ 'aria-live': 'polite' }).length).toBeGreaterThan(0);
     }

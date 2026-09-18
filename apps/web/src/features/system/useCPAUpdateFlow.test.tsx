@@ -273,7 +273,7 @@ describe('CPA page lifecycle and explicit commands', () => {
 
   it('does not change the displayed target/guard under a new flow when fresh status differs', async () => {
     await mount();
-    status = updateStatus({ target_version: 'v7.3.0', active_artifact_id: replacementArtifact });
+    status = updateStatus({ target_version: '7.3.0', active_artifact_id: replacementArtifact });
     await act(async () => {
       await flow.prepare();
     });
@@ -629,7 +629,7 @@ describe('CPA recovery context boundaries', () => {
   });
 
   it.each([
-    { target_version: 'v7.3.0' },
+    { target_version: '7.3.0' },
     { active_artifact_id: replacementArtifact },
     { stale: true },
     { mode: 'external' as const, state: 'managed_externally' as const },

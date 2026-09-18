@@ -12,9 +12,9 @@ export const replacementArtifact = 'sha256:' + 'b'.repeat(64);
 export const updateStatus = (patch: Partial<CPAUpdateStatus> = {}): CPAUpdateStatus => ({
   mode: 'embedded',
   state: 'update_available',
-  current_version: 'v7.1.0',
+  current_version: '7.1.0',
   active_artifact_id: originalArtifact,
-  target_version: 'v7.2.0',
+  target_version: '7.2.0',
   last_success_at: '2026-09-18T12:00:00Z',
   stale: false,
   prepare_supported: true,
@@ -25,7 +25,7 @@ export const updateStatus = (patch: Partial<CPAUpdateStatus> = {}): CPAUpdateSta
 export const updateIntent = (patch: Partial<CPAUpdateIntent> = {}): CPAUpdateIntent => ({
   schema_version: 1,
   request_id: 'test-update-123',
-  target_version: 'v7.2.0',
+  target_version: '7.2.0',
   expected_active_artifact_id: originalArtifact,
   phase: 'prepare',
   client_stage: 'submitted',

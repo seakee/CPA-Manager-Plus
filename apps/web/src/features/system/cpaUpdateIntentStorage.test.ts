@@ -71,6 +71,7 @@ describe('CPA browser recovery records', () => {
     JSON.stringify({ ...updateIntent(), management_key: 'secret' }),
     JSON.stringify(updateIntent({ request_id: 'bad id' })),
     JSON.stringify(updateIntent({ target_version: 'latest' })),
+    JSON.stringify(updateIntent({ target_version: 'v7.2.0' })),
     JSON.stringify(updateIntent({ expected_active_artifact_id: 'not-an-artifact' })),
     JSON.stringify(updateIntent({ phase: 'activate', client_stage: 'prepared' })),
     JSON.stringify(updateIntent({ created_at_ms: -1 })),
@@ -86,7 +87,7 @@ describe('CPA browser recovery records', () => {
 
   it.each([
     { request_id: 'different-id' },
-    { target_version: 'v7.3.0' },
+    { target_version: '7.3.0' },
     { expected_active_artifact_id: replacementArtifact },
   ])('never changes logical identity or guards on an existing record: %o', (patch) => {
     const intent = updateIntent();

@@ -36,6 +36,46 @@ afterEach(() => {
 });
 
 describe('accepted CPA update HTTP contract', () => {
+  it('preserves canonical versions from the Manager CPA contract through prepare and observation', async () => {
+    const status = updateStatus({ current_version: '7.2.3', target_version: '7.3.4' });
+    request.mockResolvedValueOnce(response(status));
+    expect(canPrepareCPAUpdate(await cpaUpdateApi.status(connection))).toBe(true);
+    const intent = updateIntent({ target_version: status.target_version });
+    request.mockResolvedValueOnce(response(mutationResult('prepare', intent)));
+    await cpaUpdateApi.mutate(connection, 'prepare', intent);
+    expect(request.mock.calls[1][0].data).toMatchObject({ target_version: '7.3.4' });
+    request.mockResolvedValueOnce(response(observationResult(intent, 'succeeded')));
+    await cpaUpdateApi.observe(connection, 'prepare', intent);
+    expect(request.mock.calls[2][0].params).toEqual({
+      request_id: intent.request_id,
+      target_version: '7.3.4',
+    });
+  });
+
+  it.each([
+    'v7.3.4',
+    '07.3.4',
+    '7.3.4-rc.1',
+    '7.3.4+build',
+    '7.3',
+    ' 7.3.4',
+    '7.3.4 ',
+    '1'.repeat(93) + '.0.0',
+  ])(
+    'rejects noncanonical or oversized CPA target versions without a request: %s',
+    async (target_version) => {
+      expect(canPrepareCPAUpdate(updateStatus({ target_version }))).toBe(false);
+      const intent = updateIntent({ target_version });
+      await expect(cpaUpdateApi.mutate(connection, 'prepare', intent)).rejects.toMatchObject({
+        code: 'invalid_request',
+      });
+      await expect(cpaUpdateApi.observe(connection, 'prepare', intent)).rejects.toMatchObject({
+        code: 'invalid_request',
+      });
+      expect(request).not.toHaveBeenCalled();
+    }
+  );
+
   it('uses status GET and preserves the existing 30 second transport timeout', async () => {
     request.mockResolvedValue(response(updateStatus()));
     await cpaUpdateApi.status(connection);
@@ -141,7 +181,7 @@ describe('accepted CPA update HTTP contract', () => {
   it.each([
     { phase: 'activate' as CPAUpdatePhase },
     { request_id: 'someone-else' },
-    { target_version: 'v7.3.0' },
+    { target_version: '7.3.0' },
     { expected_active_artifact_id: replacementArtifact },
     { runtime_operation_id: '' },
     { already_applied: true },

@@ -70,7 +70,8 @@ export class CPAUpdateAPIError extends Error {
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
-const stableVersion = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+// Manager's CPA contract uses canonical versions, not GitHub release tags.
+const stableVersion = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const artifactID = /^sha256:[a-f0-9]{64}$/;
 const safeCode = (value: unknown): value is string =>
   typeof value === 'string' && /^[a-z0-9_]{1,64}$/.test(value);
@@ -80,6 +81,7 @@ export const isCPAUpdateIdentity = (value: unknown): value is CPAUpdateIdentity 
   typeof value.request_id === 'string' &&
   /^[A-Za-z0-9_.:-]{1,64}$/.test(value.request_id) &&
   typeof value.target_version === 'string' &&
+  value.target_version.length <= 96 &&
   stableVersion.test(value.target_version);
 
 export const isCPAUpdateRequest = (value: unknown): value is CPAUpdateRequest =>
