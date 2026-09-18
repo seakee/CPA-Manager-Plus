@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
@@ -19,6 +19,8 @@ import { buildDashboardVersionReleaseURL } from '@/features/dashboard/versionRel
 import { copyToClipboard } from '@/utils/clipboard';
 import { formatDateTime } from '@/utils/format';
 import { useManagerUpdates } from './ManagerUpdates';
+import { CPAUpdateCard } from './CPAUpdateCard';
+import { useCPAUpdateFlow } from './useCPAUpdateFlow';
 import type { ReleaseInfo, UpdateChannel, UpdateStatus } from './managerUpdateApi';
 import styles from './ManagerUpdatePage.module.scss';
 
@@ -172,9 +174,14 @@ function ReleaseDetails({
 
 export function ManagerUpdatePage() {
   const { t, i18n } = useTranslation();
-  const { status, available, busy, error, check, setChannel } = useManagerUpdates();
+  const { status, available, busy, error, refresh, check, setChannel } = useManagerUpdates();
+  const cpa = useCPAUpdateFlow();
+  const refreshCPA = cpa.refresh;
+  const refreshUpdates = useCallback(async () => {
+    await Promise.all([refresh(), refreshCPA()]);
+  }, [refresh, refreshCPA]);
   const titleRef = useRef<HTMLHeadingElement>(null);
-  useHeaderRefresh(check, available);
+  useHeaderRefresh(refreshUpdates, available || cpa.available);
   useEffect(() => {
     titleRef.current?.focus({ preventScroll: true });
   }, []);
@@ -219,145 +226,155 @@ export function ManagerUpdatePage() {
         <span aria-current="page">{t('manager_updates.title')}</span>
       </nav>
       <div className={styles.heading}>
-        <div>
-          <h1 ref={titleRef} tabIndex={-1}>
-            {t('manager_updates.title')}
-          </h1>
-          <p className={styles.subtitle}>
-            {checkedTime
-              ? t('manager_updates.last_checked', { time: checkedTime })
-              : t('manager_updates.not_checked')}
-            {status && (
-              <span>{t('manager_updates.channel') + ' · ' + t('manager_updates.' + channel)}</span>
-            )}
-          </p>
-        </div>
-        <Button
-          type="button"
-          variant="secondary"
-          onClick={() => void check()}
-          loading={busy}
-          disabled={!available}
-        >
-          {!busy && <IconRefreshCw size={15} aria-hidden="true" />}
-          {t('manager_updates.check_now')}
-        </Button>
+        <h1 ref={titleRef} tabIndex={-1}>
+          {t('manager_updates.title')}
+        </h1>
       </div>
-
-      <Card className={styles.release}>
-        <div className={styles.releaseTop}>
-          <div className={styles.releaseHeading} aria-live="polite" aria-atomic="true">
-            <p className={styles.eyebrow}>
-              {t(
-                info
-                  ? failed || stale
-                    ? 'manager_updates.cached_release'
-                    : 'manager_updates.new_release'
-                  : 'common.status'
+      <section className={styles.productSection} aria-labelledby="cpamp-update-title">
+        <div className={styles.heading}>
+          <div>
+            <h2 id="cpamp-update-title">{t('manager_updates.product')}</h2>
+            <p className={styles.subtitle}>
+              {checkedTime
+                ? t('manager_updates.last_checked', { time: checkedTime })
+                : t('manager_updates.not_checked')}
+              {status && (
+                <span>
+                  {t('manager_updates.channel') + ' · ' + t('manager_updates.' + channel)}
+                </span>
               )}
             </p>
-            <h2 className={info ? styles.version : styles.stateTitle}>
-              {info ? info.release.version : t('manager_updates.' + state)}
-              {info && ['stable', 'rc', 'beta'].includes(info.release.stage) && (
-                <span className={styles.stage}>{t('manager_updates.' + info.release.stage)}</span>
-              )}
-            </h2>
-            {info && (
-              <p className={styles.subtitle}>
-                {t('manager_updates.current_version', { version: currentVersion })}
-              </p>
-            )}
           </div>
-          <span className={styles.releaseIcon} aria-hidden="true">
-            {failed || stale || !available ? (
-              <IconInfo size={23} />
-            ) : info ? (
-              <IconArrowUpFromLine size={23} />
-            ) : state === 'up_to_date' ? (
-              <IconCheck size={23} />
-            ) : (
-              <IconRefreshCw size={23} />
-            )}
-          </span>
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => void check()}
+            loading={busy}
+            disabled={!available}
+          >
+            {!busy && <IconRefreshCw size={15} aria-hidden="true" />}
+            {t('manager_updates.check_now')}
+          </Button>
         </div>
-        {info && (failed || stale) && (
-          <p className={styles.warning} role="status">
-            {t(failed ? 'manager_updates.failed' : 'manager_updates.stale')}
-          </p>
-        )}
-        {info ? (
-          <ReleaseDetails
-            key={channel + ':' + info.release.version}
-            info={info}
-            action={status?.upgrade_action}
-            upgradeAllowed={upgradeAllowed}
-          />
-        ) : available && (state === 'never_checked' || state === 'unknown_version') ? (
-          <p className={styles.summary}>{t('manager_updates.check_hint')}</p>
-        ) : null}
-        <dl className={styles.runningVersions}>
-          {available && (
+
+        <Card className={styles.release}>
+          <div className={styles.releaseTop}>
+            <div className={styles.releaseHeading} aria-live="polite" aria-atomic="true">
+              <p className={styles.eyebrow}>
+                {t(
+                  info
+                    ? failed || stale
+                      ? 'manager_updates.cached_release'
+                      : 'manager_updates.new_release'
+                    : 'common.status'
+                )}
+              </p>
+              <h3 id="manager-release-status" className={info ? styles.version : styles.stateTitle}>
+                {info ? info.release.version : t('manager_updates.' + state)}
+                {info && ['stable', 'rc', 'beta'].includes(info.release.stage) && (
+                  <span className={styles.stage}>{t('manager_updates.' + info.release.stage)}</span>
+                )}
+              </h3>
+              {info && (
+                <p className={styles.subtitle}>
+                  {t('manager_updates.current_version', { version: currentVersion })}
+                </p>
+              )}
+            </div>
+            <span className={styles.releaseIcon} aria-hidden="true">
+              {failed || stale || !available ? (
+                <IconInfo size={23} />
+              ) : info ? (
+                <IconArrowUpFromLine size={23} />
+              ) : state === 'up_to_date' ? (
+                <IconCheck size={23} />
+              ) : (
+                <IconRefreshCw size={23} />
+              )}
+            </span>
+          </div>
+          {info && (failed || stale) && (
+            <p className={styles.warning} role="status">
+              {t(failed ? 'manager_updates.failed' : 'manager_updates.stale')}
+            </p>
+          )}
+          {info ? (
+            <ReleaseDetails
+              key={channel + ':' + info.release.version}
+              info={info}
+              action={status?.upgrade_action}
+              upgradeAllowed={upgradeAllowed}
+            />
+          ) : available && (state === 'never_checked' || state === 'unknown_version') ? (
+            <p className={styles.summary}>{t('manager_updates.check_hint')}</p>
+          ) : null}
+          <dl className={styles.runningVersions}>
+            {available && (
+              <div>
+                <dt>{t('manager_updates.server')}</dt>
+                <dd>
+                  {currentRelease ? (
+                    <a href={currentRelease} target="_blank" rel="noopener noreferrer">
+                      {currentVersion}
+                      <IconExternalLink size={12} aria-hidden="true" />
+                    </a>
+                  ) : (
+                    currentVersion
+                  )}
+                </dd>
+              </div>
+            )}
             <div>
-              <dt>Manager Server</dt>
+              <dt>{t('manager_updates.panel')}</dt>
               <dd>
-                {currentRelease ? (
-                  <a href={currentRelease} target="_blank" rel="noopener noreferrer">
-                    {currentVersion}
+                {panelRelease ? (
+                  <a href={panelRelease} target="_blank" rel="noopener noreferrer">
+                    {panelVersion}
                     <IconExternalLink size={12} aria-hidden="true" />
                   </a>
                 ) : (
-                  currentVersion
+                  panelVersion
                 )}
               </dd>
             </div>
-          )}
-          <div>
-            <dt>{t('manager_updates.panel')}</dt>
-            <dd>
-              {panelRelease ? (
-                <a href={panelRelease} target="_blank" rel="noopener noreferrer">
-                  {panelVersion}
-                  <IconExternalLink size={12} aria-hidden="true" />
-                </a>
-              ) : (
-                panelVersion
-              )}
-            </dd>
-          </div>
-        </dl>
-      </Card>
+          </dl>
+        </Card>
 
-      {available && status && (
-        <details className={styles.settings}>
-          <summary>
-            <IconChevronRight size={14} aria-hidden="true" />
-            {t('manager_updates.settings')}
-          </summary>
-          <div className={styles.settingBody}>
-            <div>
-              <label id="manager-update-channel-label" htmlFor="manager-update-channel">
-                {t('manager_updates.channel')}
-              </label>
-              <p id="manager-update-channel-hint" className={styles.settingDescription}>
-                {t('manager_updates.channel_hint')}
-              </p>
+        {available && status && (
+          <details className={styles.settings}>
+            <summary>
+              <IconChevronRight size={14} aria-hidden="true" />
+              {t('manager_updates.settings')}
+            </summary>
+            <div className={styles.settingBody}>
+              <div>
+                <label id="manager-update-channel-label" htmlFor="manager-update-channel">
+                  {t('manager_updates.channel')}
+                </label>
+                <p id="manager-update-channel-hint" className={styles.settingDescription}>
+                  {t('manager_updates.channel_hint')}
+                </p>
+              </div>
+              <Select
+                id="manager-update-channel"
+                value={status.channel_preference}
+                options={channelOptions}
+                onChange={(value) => void setChannel(value as UpdateChannel)}
+                disabled={busy}
+                ariaLabelledBy="manager-update-channel-label"
+                ariaDescribedBy="manager-update-channel-hint"
+                className={styles.channelSelect}
+              />
             </div>
-            <Select
-              id="manager-update-channel"
-              value={status.channel_preference}
-              options={channelOptions}
-              onChange={(value) => void setChannel(value as UpdateChannel)}
-              disabled={busy}
-              ariaLabelledBy="manager-update-channel-label"
-              ariaDescribedBy="manager-update-channel-hint"
-              className={styles.channelSelect}
-            />
-          </div>
-          <p className={styles.settingDescription}>
-            {t(status.automatic ? 'manager_updates.automatic_on' : 'manager_updates.automatic_off')}
-          </p>
-        </details>
-      )}
+            <p className={styles.settingDescription}>
+              {t(
+                status.automatic ? 'manager_updates.automatic_on' : 'manager_updates.automatic_off'
+              )}
+            </p>
+          </details>
+        )}
+      </section>
+      <CPAUpdateCard key={cpa.scope} flow={cpa} />
     </div>
   );
 }

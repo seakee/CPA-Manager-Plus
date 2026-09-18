@@ -28,6 +28,7 @@ interface Updates {
   available: boolean;
   busy: boolean;
   error: boolean;
+  refresh: () => Promise<void>;
   check: () => Promise<void>;
   setChannel: (channel: UpdateChannel) => Promise<void>;
 }
@@ -36,6 +37,7 @@ const Context = createContext<Updates>({
   available: false,
   busy: false,
   error: false,
+  refresh: async () => {},
   check: async () => {},
   setChannel: async () => {},
 });
@@ -193,6 +195,7 @@ export function ManagerUpdates({ children }: { children: ReactNode }) {
         available,
         busy,
         error,
+        refresh,
         check: () => mutate('/check', 'POST'),
         setChannel: (channel) => mutate('/channel', 'PUT', { channel_preference: channel }),
       }}

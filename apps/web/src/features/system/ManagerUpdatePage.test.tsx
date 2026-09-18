@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Select } from '@/components/ui/Select';
 import { ManagerUpdatePage } from './ManagerUpdatePage';
 import type { ReleaseInfo, UpdateStatus } from './managerUpdateApi';
+import type { CPAUpdateFlow } from './useCPAUpdateFlow';
+import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 
 const mocks = vi.hoisted(() => ({
   updates: {
@@ -11,12 +13,15 @@ const mocks = vi.hoisted(() => ({
     available: true,
     busy: false,
     error: false,
+    refresh: vi.fn(),
     check: vi.fn(),
     setChannel: vi.fn(),
   },
   copy: vi.fn(),
+  cpa: {} as CPAUpdateFlow,
 }));
 vi.mock('./ManagerUpdates', () => ({ useManagerUpdates: () => mocks.updates }));
+vi.mock('./useCPAUpdateFlow', () => ({ useCPAUpdateFlow: () => mocks.cpa }));
 vi.mock('@/hooks/useHeaderRefresh', () => ({ useHeaderRefresh: vi.fn() }));
 vi.mock('@/utils/clipboard', () => ({ copyToClipboard: mocks.copy }));
 vi.mock('react-i18next', () => ({
@@ -63,6 +68,29 @@ beforeEach(() => {
   mocks.updates.error = false;
   mocks.updates.busy = false;
   mocks.copy.mockResolvedValue(true);
+  mocks.cpa = {
+    status: null,
+    statusError: false,
+    intent: null,
+    stage: 'idle',
+    initialized: true,
+    busy: false,
+    storageError: null,
+    available: false,
+    demo: false,
+    scope: 'test-cpa-scope',
+    unresolved: false,
+    canCheck: false,
+    canPrepare: false,
+    canActivate: false,
+    canRetry: false,
+    refresh: vi.fn(),
+    check: vi.fn(),
+    prepare: vi.fn(),
+    activate: vi.fn(),
+    retry: vi.fn(),
+    forget: vi.fn(),
+  };
 });
 afterEach(async () => {
   if (renderer) await act(async () => renderer?.unmount());
@@ -87,11 +115,39 @@ async function renderPage() {
 }
 
 describe('ManagerUpdatePage', () => {
+  it('renders independent CPAMP and CPA areas and refreshes both through read-only status calls', async () => {
+    mocks.cpa.available = true;
+    mocks.cpa.canCheck = true;
+    await renderPage();
+    expect(renderer!.root.findByProps({ 'aria-labelledby': 'cpamp-update-title' })).toBeDefined();
+    expect(renderer!.root.findByProps({ 'aria-labelledby': 'cpa-update-title' })).toBeDefined();
+    await act(async () => {
+      button('cpa_updates.check').props.onClick();
+    });
+    expect(mocks.cpa.check).toHaveBeenCalledTimes(1);
+    expect(mocks.updates.check).not.toHaveBeenCalled();
+    await act(async () => {
+      button('manager_updates.check_now').props.onClick();
+    });
+    expect(mocks.updates.check).toHaveBeenCalledTimes(1);
+    expect(mocks.cpa.check).toHaveBeenCalledTimes(1);
+    const handler = vi.mocked(useHeaderRefresh).mock.lastCall?.[0];
+    await act(async () => {
+      await handler?.();
+    });
+    expect(mocks.updates.refresh).toHaveBeenCalledTimes(1);
+    expect(mocks.cpa.refresh).toHaveBeenCalledTimes(1);
+    expect(mocks.cpa.check).toHaveBeenCalledTimes(1);
+    expect(mocks.updates.check).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps instructions and settings collapsed until requested, then supports both deployment methods', async () => {
     await renderPage();
     expect(steps().props.hidden).toBe(true);
     expect(renderer!.root.findByType('details').props.open).toBeUndefined();
-    expect(text(renderer!.root.findByType('h2'))).toContain('v1.12.11');
+    expect(text(renderer!.root.findByProps({ id: 'manager-release-status' }))).toContain(
+      'v1.12.11'
+    );
     await act(async () => {
       button('manager_updates.show_steps').props.onClick();
     });
