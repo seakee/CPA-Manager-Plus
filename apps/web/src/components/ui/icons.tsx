@@ -633,6 +633,16 @@ export function IconSidebarConfig({ size = 20, ...props }: IconProps) {
   );
 }
 
+export function IconSidebarModels({ size = 20, ...props }: IconProps) {
+  return (
+    <svg {...sidebarSvgProps} width={size} height={size} {...props}>
+      <path d="M12 3.4 20 7.2l-8 3.8-8-3.8 8-3.8Z" fill="currentColor" fillOpacity="0.12" />
+      <path d="m4 12 8 3.8 8-3.8" />
+      <path d="m4 16.4 8 3.8 8-3.8" />
+    </svg>
+  );
+}
+
 export function IconSidebarProviders({ size = 20, ...props }: IconProps) {
   return (
     <svg {...sidebarSvgProps} width={size} height={size} {...props}>
