@@ -419,12 +419,19 @@ Stream 与 Non-Stream 在失败重试能力上存在**根本性分水岭**：
 - **观测比对**:
   - 在 Case A 与 Case B 任意一轮的 `Candidates` 列表中，`auth-disabled.json`（`disabled: true`）均**彻底缺席**；
   - `auth-codex.json`（Provider 不匹配）同样**彻底缺席**。
-- **结论**: 证明无论是否开启 `scheduler_across_priorities`，Conductor 层的资格过滤（Disabled / Provider Mismatch / Cooldown）先于调度插件严格生效，插件调度器绝不可能触碰或唤醒不可用凭据。
+- **结论**:
+  本次 release black-box Case C 直接观测了：
+  - Disabled filtering
+  - Provider mismatch filtering
+
+  Cooldown filtering 由 v7.3.8 upstream source + Go unit test 证明；
+  Model mismatch 与 unauthorized / policy filtering 由 upstream source evidence 证明。
+  证明无论是否开启 `scheduler_across_priorities`，Conductor 层的资格前置过滤均先于调度插件严格生效，插件调度器绝不可能触碰不可用凭据。
 
 ##### Case D: 选择有效性与非法候选优雅降级 (Selection Validity & Fallback)
 - **Part 1 (合法跨优先级选择)**:
   - 在 Case B 中，插件决策选拔低优先级凭据 `auth-low.json`（返回 `Handled: true, AuthID: "auth-low.json"`）。
-  - 宿主日志实测：在执行以及后续由 fake key 引发的重试日志中明确记录：`selected_auth_id: "auth-low.json"`。证明插件在合法候选集范围内的调度决策被宿主完整接纳并严格执行。
+  - 宿主 debug log 明确显示实际执行凭证为 auth-low.json，例如：`Use OAuth provider=claude auth_file=auth-low.json for model ...`，证明合法低优先级 candidate 被 Scheduler 选择后确实进入执行路径。
 - **Part 2 (非法/未知候选优雅降级)**:
   - 插件决策强行返回候选集中不存在的凭据 `invalid-ghost-auth.json`（`Handled: true, AuthID: "invalid-ghost-auth.json"`）。
   - 宿主运行日志实测捕获：
@@ -502,13 +509,13 @@ Stream 与 Non-Stream 在失败重试能力上存在**根本性分水岭**：
 | ------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------- | ----------------------- | ---------------------------------- | ------------------------------- |
 | **候选可见性 (Default)**  | 仅最高可用 Priority tier (`partial`)                                  | 仅最高可用 Priority tier (`partial`)                          | 未知 (`unknown`)        | `conductor_selection.go` / v7.3.8 Release Black-box Case A | 默认均不具备全局跨优先级视野    |
 | **跨优先级调度 (Opt-In)** | 不支持 (`unsupported`)                                                | 支持跨优先级但受前置过滤限制 (`supported`)                    | 未知 (`unknown`)        | `scheduler_test.go` / v7.3.8 Release Black-box Case B    | 仅 v7.3.8 具备该开关            |
-| **前置过滤 (Pre-Filter)** | 支持 Provider/Model/Disabled/Cooldown/Unauthorized 过滤 (`supported`) | 支持完整前置安全过滤 (`supported`)                            | 未知 (`unknown`)        | `conductor_selection.go` / v7.3.8 Release Black-box Case C | 过滤发生在调度器之前            |
-| **合法候选选择**          | 正常接管与执行 (`supported`)                                          | 正常接管与执行 (`supported`)                                  | 未知 (`unknown`)        | `scheduler_test.go` / v7.3.8 Release Black-box Case D1   | 合法 ID 均被正常处理            |
-| **非法候选回退**          | 静默忽略并回退内置 Selector (`supported`)                             | 规范化校验，忽略并回退 (`supported`)                          | 未知 (`unknown`)        | `internal/pluginhost/scheduler.go` / Case D2 Fallback    | 不会崩溃，保证高可用回退        |
-| **Plugin 委托与未处理**   | 支持委托和 unhandled 回退 (`supported`)                               | 支持委托和 unhandled 回退 (`supported`)                       | 未知 (`unknown`)        | `scheduler.go`                     | 健壮性保障                      |
+| **前置过滤 (Pre-Filter)** | 支持 Provider/Model/Disabled/Cooldown/Unauthorized 过滤 (`supported`) | 支持完整前置安全过滤 (`supported`)                            | 未知 (`unknown`)        | `conductor_selection.go` / v7.3.8 Release Black-box Case C (Disabled + Provider Mismatch) | 过滤发生在调度器之前            |
+| **合法候选选择**          | 正常接管与执行 (`supported`)                                          | 正常接管与执行 (`supported`)                                  | 未知 (`unknown`)        | `internal/pluginhost/scheduler.go` / v7.3.8 Release Black-box Case D1   | 合法 ID 均被正常处理            |
+| **非法候选回退**          | 静默忽略并回退内置 Selector (`supported`)                             | 规范化校验，忽略并回退 (`supported`)                          | 未知 (`unknown`)        | `internal/pluginhost/scheduler.go` / `scheduler_test.go` / Case D2 Fallback | 不会崩溃，保证高可用回退        |
+| **Plugin 委托与未处理**   | 支持委托和 unhandled 回退 (`supported`)                               | 支持委托和 unhandled 回退 (`supported`)                       | 未知 (`unknown`)        | `internal/pluginhost/scheduler.go` / `scheduler_test.go`      | 健壮性保障                      |
 | **Plugin Panic 熔断**     | 支持熔断回退 (`supported`)                                            | 支持熔断回退 (`supported`)                                    | 未知 (`unknown`)        | `scheduler_test.go`                | 单插件异常不影响整体可用性      |
-| **pinned_auth_id 语义**   | 严格过滤，不绕过健康检查，重试保持，Fail-Closed (`supported`)         | 严格过滤，不绕过健康检查，重试保持，Fail-Closed (`supported`) | 未知 (`unknown`)        | `conductor_execution.go`           | 是 CPA 原生最严密的安全锁定语义 |
-| **selected_auth_id 观察** | 认证后元数据可见，重试可变 (`supported`)                              | 认证后元数据可见，重试可变 (`supported`)                      | 未知 (`unknown`)        | `selected_auth_metadata_test.go`   | 不对认证前拦截器暴露            |
+| **pinned_auth_id 语义**   | 严格过滤，不绕过健康检查，重试保持，Fail-Closed (`supported`)         | 严格过滤，不绕过健康检查，重试保持，Fail-Closed (`supported`) | 未知 (`unknown`)        | `conductor_execution.go` / `conductor_selection.go`           | 是 CPA 原生最严密的安全锁定语义 |
+| **selected_auth_id 观察** | 认证后元数据可见，重试可变 (`supported`)                              | 认证后元数据可见，重试可变 (`supported`)                      | 未知 (`unknown`)        | `conductor_execution.go#publishSelectedAuthMetadata`          | 不对认证前拦截器暴露            |
 | **重试与故障转移**        | 重试重新执行候选筛选与 Scheduler 调度 (`supported`)                   | 重试重新执行候选筛选与 Scheduler 调度 (`supported`)           | 未知 (`unknown`)        | `conductor_execution.go`           | 支持凭证与 Provider 级重试回退  |
 | **Stream 重试分歧**       | Bootstrap 阶段可重试，In-flight 阶段不可重试 (`partial`)              | Bootstrap 阶段可重试，In-flight 阶段不可重试 (`partial`)      | 未知 (`unknown`)        | `conductor_stream.go`              | 流式首包发出后不可回退          |
 | **Non-Stream 重试**       | 完整支持 (`supported`)                                                | 完整支持 (`supported`)                                        | 未知 (`unknown`)        | `conductor_execution.go`           | 普通请求可安全多级重试          |
@@ -518,7 +525,7 @@ Stream 与 Non-Stream 在失败重试能力上存在**根本性分水岭**：
 ## 5. 后续规划接口
 
 1. **Phase2-04 汇聚**:
-   - 本文沉淀的 11 项确证证据与 25 条 Capability Records 将由 Phase2-04 统一整合进入完整 Capability Matrix。
+   - 本文沉淀的 12 项能力验证与 25 条 Capability Records 将由 Phase2-04 统一整合进入完整 Capability Matrix。
    - 本文证明的“调度器回退陷阱”与“Fail-Open 默认行为”将成为 Hard Routing Go/No-Go 决策的关键输入。
 2. **产品基线保持**:
    - CPAMP 当前运行时镜像与 `Dockerfile.runtime` 继续锁定官方 CPA `v7.3.3`。

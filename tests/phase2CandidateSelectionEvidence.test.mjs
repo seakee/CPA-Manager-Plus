@@ -114,6 +114,191 @@ describe('Phase2-02B: Candidate Visibility / Selection / Retry-Fallback Evidence
       expect(externalRecord.status).toBe('unknown');
       expect(externalRecord.deploymentMode).toBe('external');
     });
+
+    it('restricts black-box Case C claim to directly observed Disabled and Provider mismatch filtering', () => {
+      const extension = readExtension();
+
+      const releaseBlackBoxAnchor = extension.anchors.find(
+        (a) => a.id === 'phase2-02b-v7-3-8-release-black-box'
+      );
+      expect(releaseBlackBoxAnchor).toBeDefined();
+      const bbLimitations = releaseBlackBoxAnchor.limitations.join(' ');
+      expect(bbLimitations).toContain('Disabled');
+      expect(bbLimitations).toContain('Provider');
+      expect(bbLimitations).toContain('directly observing Disabled and Provider mismatch filtering');
+
+      const candidatePreFilter = extension.records.find(
+        (r) => r.id === 'phase2-02b-candidate-pre-filter-exclusion'
+      );
+      expect(candidatePreFilter).toBeDefined();
+      const pfLimitations = candidatePreFilter.limitations.join(' ');
+      expect(pfLimitations).toContain(
+        'The release black-box directly observes Disabled and Provider mismatch filtering only'
+      );
+      expect(pfLimitations).toContain('cooldown is established by upstream Go unit evidence');
+      expect(pfLimitations).toContain(
+        'model and authorization-policy exclusion are established by source evidence'
+      );
+
+      // Verify architecture doc wording for Case C
+      const docPath = path.join(
+        repoRoot,
+        'docs/architecture/phase2-evidence/02b-candidate-selection.md'
+      );
+      const docContent = readFileSync(docPath, 'utf8');
+      expect(docContent).toContain('Disabled filtering');
+      expect(docContent).toContain('Provider mismatch filtering');
+      expect(docContent).toContain(
+        'Cooldown filtering 由 v7.3.8 upstream source + Go unit test 证明'
+      );
+      expect(docContent).toContain(
+        'Model mismatch 与 unauthorized / policy filtering 由 upstream source evidence 证明'
+      );
+    });
+
+    it('binds v7.3.3 scheduler fallback records to dedicated host source and unit anchors rather than candidate-filtering', () => {
+      const extension = readExtension();
+
+      // Host source and unit anchors must exist
+      const hostSourceAnchor = extension.anchors.find(
+        (a) => a.id === 'phase2-02b-v7-3-3-scheduler-host-source'
+      );
+      expect(hostSourceAnchor).toBeDefined();
+      expect(hostSourceAnchor.evidenceKind).toBe('source');
+      expect(hostSourceAnchor.artifactId).toBe('current-bundled-v7-3-3');
+      expect(hostSourceAnchor.evidenceReference).toContain(
+        'internal/pluginhost/scheduler.go#PickAuth,normalizeSchedulerResponse'
+      );
+      expect(hostSourceAnchor.evidenceReference).toContain(
+        'sdk/cliproxy/auth/conductor_selection.go#pickViaPluginScheduler'
+      );
+
+      const hostUnitAnchor = extension.anchors.find(
+        (a) => a.id === 'phase2-02b-v7-3-3-scheduler-host-unit'
+      );
+      expect(hostUnitAnchor).toBeDefined();
+      expect(hostUnitAnchor.evidenceKind).toBe('unit');
+      expect(hostUnitAnchor.artifactId).toBe('current-bundled-v7-3-3');
+      expect(hostUnitAnchor.evidenceReference).toContain(
+        'TestHostPickAuthInvalidResponseFallsBack'
+      );
+
+      const targetRecordIds = [
+        'phase2-02b-current-valid-candidate-selection',
+        'phase2-02b-current-invalid-candidate-fallback',
+        'phase2-02b-current-plugin-delegation-unhandled',
+      ];
+
+      for (const id of targetRecordIds) {
+        const record = extension.records.find((r) => r.id === id);
+        expect(record).toBeDefined();
+        expect(record.evidenceRefs).not.toContain(
+          'phase2-02b-v7-3-3-candidate-filtering-source'
+        );
+        expect(record.evidenceRefs).toContain(
+          'phase2-02b-v7-3-3-scheduler-host-source'
+        );
+      }
+
+      const invalidFallback = extension.records.find(
+        (r) => r.id === 'phase2-02b-current-invalid-candidate-fallback'
+      );
+      expect(invalidFallback.evidenceKind).toContain('unit');
+      expect(invalidFallback.evidenceRefs).toContain(
+        'phase2-02b-v7-3-3-scheduler-host-unit'
+      );
+
+      const unhandledDelegation = extension.records.find(
+        (r) => r.id === 'phase2-02b-current-plugin-delegation-unhandled'
+      );
+      expect(unhandledDelegation.evidenceKind).toContain('unit');
+      expect(unhandledDelegation.evidenceRefs).toContain(
+        'phase2-02b-v7-3-3-scheduler-host-unit'
+      );
+    });
+
+    it('separates pinned_auth and selected_auth evidence anchors and validates their references', () => {
+      const extension = readExtension();
+
+      // Old combined anchors must not exist
+      const combinedPattern = ['pinned', 'and', 'selected', 'auth', 'source'].join('-');
+      const hasCombinedAnchor = extension.anchors.some((a) =>
+        a.id.includes(combinedPattern)
+      );
+      expect(hasCombinedAnchor).toBe(false);
+
+      // Dedicated anchors must exist
+      const v733Pinned = extension.anchors.find(
+        (a) => a.id === 'phase2-02b-v7-3-3-pinned-auth-source'
+      );
+      const v733Selected = extension.anchors.find(
+        (a) => a.id === 'phase2-02b-v7-3-3-selected-auth-source'
+      );
+      const v738Pinned = extension.anchors.find(
+        (a) => a.id === 'phase2-02b-v7-3-8-pinned-auth-source'
+      );
+      const v738Selected = extension.anchors.find(
+        (a) => a.id === 'phase2-02b-v7-3-8-selected-auth-source'
+      );
+
+      expect(v733Pinned).toBeDefined();
+      expect(v733Selected).toBeDefined();
+      expect(v738Pinned).toBeDefined();
+      expect(v738Selected).toBeDefined();
+
+      // Selected auth references publishSelectedAuthMetadata
+      expect(v733Selected.evidenceReference).toBe(
+        'sdk/cliproxy/auth/conductor_execution.go#publishSelectedAuthMetadata'
+      );
+      expect(v738Selected.evidenceReference).toBe(
+        'sdk/cliproxy/auth/conductor_execution.go#publishSelectedAuthMetadata'
+      );
+
+      // Pinned auth references pinnedAuthIDFromMetadata and candidate generation
+      expect(v733Pinned.evidenceReference).toContain('pinnedAuthIDFromMetadata');
+      expect(v733Pinned.evidenceReference).not.toBe(
+        'sdk/cliproxy/auth/conductor_execution.go#publishSelectedAuthMetadata'
+      );
+      expect(v738Pinned.evidenceReference).toContain('pinnedAuthIDFromMetadata');
+      expect(v738Pinned.evidenceReference).not.toBe(
+        'sdk/cliproxy/auth/conductor_execution.go#publishSelectedAuthMetadata'
+      );
+
+      // Records must correctly bind to separated anchors
+      const currentPinnedRec = extension.records.find(
+        (r) => r.id === 'phase2-02b-current-pinned-auth-fencing'
+      );
+      expect(currentPinnedRec.evidenceRefs).toEqual([
+        'phase2-02b-v7-3-3-pinned-auth-source',
+      ]);
+
+      const candidatePinnedRec = extension.records.find(
+        (r) => r.id === 'phase2-02b-candidate-pinned-auth-fencing'
+      );
+      expect(candidatePinnedRec.evidenceRefs).toContain(
+        'phase2-02b-v7-3-8-pinned-auth-source'
+      );
+      expect(candidatePinnedRec.evidenceRefs).not.toContain(
+        'phase2-02b-v7-3-8-selected-auth-source'
+      );
+
+      const currentSelectedRec = extension.records.find(
+        (r) => r.id === 'phase2-02b-current-selected-auth-observation'
+      );
+      expect(currentSelectedRec.evidenceRefs).toEqual([
+        'phase2-02b-v7-3-3-selected-auth-source',
+      ]);
+
+      const candidateSelectedRec = extension.records.find(
+        (r) => r.id === 'phase2-02b-candidate-selected-auth-observation'
+      );
+      expect(candidateSelectedRec.evidenceRefs).toContain(
+        'phase2-02b-v7-3-8-selected-auth-source'
+      );
+      expect(candidateSelectedRec.evidenceRefs).not.toContain(
+        'phase2-02b-v7-3-8-pinned-auth-source'
+      );
+    });
   });
 
   describe('Question 1 & 2: Candidate Pre-Filtering and v7.3.3 Default Highest-Tier Visibility', () => {

@@ -19,12 +19,42 @@
       ]
     },
     {
-      "id": "phase2-02b-v7-3-3-pinned-and-selected-auth-source",
+      "id": "phase2-02b-v7-3-3-scheduler-host-source",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "source",
+      "evidenceReference": "internal/pluginhost/scheduler.go#PickAuth,normalizeSchedulerResponse; sdk/cliproxy/auth/conductor_selection.go#pickViaPluginScheduler",
+      "limitations": [
+        "v7.3.3 host validates scheduler Auth.ID against supplied candidates, accepts valid candidate IDs, treats unknown IDs / invalid delegates / missing decisions as unhandled, and conductor falls back to builtin/default selector when the scheduler does not handle the request."
+      ]
+    },
+    {
+      "id": "phase2-02b-v7-3-3-scheduler-host-unit",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "unit",
+      "evidenceReference": "internal/pluginhost/scheduler_test.go#TestHostPickAuthInvalidResponseFallsBack,TestHostPickAuthAllowsKnownBuiltinDelegates,TestHostPickAuthPanicFusesAndFallsBack,TestHostPickAuthUnhandledDoesNotCallLowerPriorityScheduler",
+      "limitations": [
+        "- invalid scheduler responses become handled=false without crashing;",
+        "- known builtin delegates are accepted;",
+        "- scheduler panic is fused and falls back;",
+        "- explicit unhandled does not cascade into a lower-priority plugin scheduler."
+      ]
+    },
+    {
+      "id": "phase2-02b-v7-3-3-pinned-auth-source",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "source",
+      "evidenceReference": "sdk/cliproxy/auth/conductor_execution.go#pinnedAuthIDFromMetadata; sdk/cliproxy/auth/conductor_selection.go#availableAuthsForSelector",
+      "limitations": [
+        "pinned_auth_id restricts candidate generation to the requested Auth.ID but does not bypass eligibility, provider/model compatibility, disabled state, cooldown, or tried-attempt filtering. If the target is unavailable or invalid, selection fails closed instead of silently choosing another credential."
+      ]
+    },
+    {
+      "id": "phase2-02b-v7-3-3-selected-auth-source",
       "artifactId": "current-bundled-v7-3-3",
       "evidenceKind": "source",
       "evidenceReference": "sdk/cliproxy/auth/conductor_execution.go#publishSelectedAuthMetadata",
       "limitations": [
-        "pinned_auth_id restricts candidate generation to matching auth ID without bypassing health or model checks; selected_auth_id is populated post-selection in request metadata."
+        "selected_auth_id and selected_auth_index are written after selection; registered callbacks receive the selected ID/index and later selections can overwrite the metadata on retry."
       ]
     },
     {
@@ -82,12 +112,21 @@
       ]
     },
     {
-      "id": "phase2-02b-v7-3-8-pinned-and-selected-auth-source",
+      "id": "phase2-02b-v7-3-8-pinned-auth-source",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "source",
+      "evidenceReference": "sdk/cliproxy/auth/conductor_execution.go#pinnedAuthIDFromMetadata; sdk/cliproxy/auth/conductor_selection.go#availableAuthsForSelector",
+      "limitations": [
+        "pinned_auth_id restricts candidate generation to the requested Auth.ID but does not bypass eligibility, provider/model compatibility, disabled state, cooldown, or tried-attempt filtering. If the target is unavailable or invalid, selection fails closed instead of silently choosing another credential."
+      ]
+    },
+    {
+      "id": "phase2-02b-v7-3-8-selected-auth-source",
       "artifactId": "candidate-release-v7-3-8",
       "evidenceKind": "source",
       "evidenceReference": "sdk/cliproxy/auth/conductor_execution.go#publishSelectedAuthMetadata",
       "limitations": [
-        "pinned_auth_id restricts candidate generation to matching auth ID without bypassing health or model checks; selected_auth_id is populated post-selection in request metadata."
+        "selected_auth_id and selected_auth_index are written after selection; registered callbacks receive the selected ID/index and later selections can overwrite the metadata on retry."
       ]
     },
     {
@@ -159,7 +198,7 @@
       "evidenceKind": "black-box",
       "evidenceReference": "docs/architecture/phase2-evidence/02b-candidate-selection.md#v738-release-black-box-observation",
       "limitations": [
-        "Black-box verification executed against official CPA v7.3.8 release binary with dynamic C-ABI scheduler plugin across Cases A, B, C, and D (highest-tier default visibility, across-priorities candidate visibility, pre-scheduler eligibility fencing, and selection validity with fallback)."
+        "Black-box verification executed against official CPA v7.3.8 release binary with dynamic C-ABI scheduler plugin across Cases A, B, C, and D (highest-tier default visibility, across-priorities candidate visibility, pre-scheduler eligibility fencing directly observing Disabled and Provider mismatch filtering, and selection validity with fallback)."
       ]
     },
     {
@@ -277,6 +316,7 @@
         "phase2-02b-v7-3-8-release-black-box"
       ],
       "limitations": [
+        "The release black-box directly observes Disabled and Provider mismatch filtering only; cooldown is established by upstream Go unit evidence, while model and authorization-policy exclusion are established by source evidence.",
         "Even with SchedulerAcrossPriorities=true, disabled, cooldown, provider mismatch, model mismatch, and unauthorized credentials are excluded before scheduler sees candidates."
       ]
     },
@@ -291,7 +331,7 @@
       },
       "deploymentMode": "embedded",
       "evidenceKind": ["source"],
-      "evidenceRefs": ["plugin-abi-schema-v6", "phase2-02b-v7-3-3-candidate-filtering-source"],
+      "evidenceRefs": ["plugin-abi-schema-v6", "phase2-02b-v7-3-3-scheduler-host-source"],
       "limitations": [
         "When scheduler returns a valid Auth.ID from the supplied candidate set, host clones auth, binds executor, and proceeds with upstream execution."
       ]
@@ -327,8 +367,12 @@
         "config": { "scheduler": true }
       },
       "deploymentMode": "embedded",
-      "evidenceKind": ["source"],
-      "evidenceRefs": ["plugin-abi-schema-v6", "phase2-02b-v7-3-3-candidate-filtering-source"],
+      "evidenceKind": ["source", "unit"],
+      "evidenceRefs": [
+        "plugin-abi-schema-v6",
+        "phase2-02b-v7-3-3-scheduler-host-source",
+        "phase2-02b-v7-3-3-scheduler-host-unit"
+      ],
       "limitations": [
         "Returning an Auth.ID not in the supplied candidates slice is ignored by pickSchedulerAuthByID; if delegate_builtin is valid it delegates, otherwise falls back to host default selector."
       ]
@@ -364,8 +408,12 @@
         "config": { "scheduler": true }
       },
       "deploymentMode": "embedded",
-      "evidenceKind": ["source"],
-      "evidenceRefs": ["plugin-abi-schema-v6", "phase2-02b-v7-3-3-candidate-filtering-source"],
+      "evidenceKind": ["source", "unit"],
+      "evidenceRefs": [
+        "plugin-abi-schema-v6",
+        "phase2-02b-v7-3-3-scheduler-host-source",
+        "phase2-02b-v7-3-3-scheduler-host-unit"
+      ],
       "limitations": [
         "Unhandled (handled=false) or delegate_builtin (round_robin, fill_first) cleanly falls back to builtin scheduling."
       ]
@@ -420,7 +468,7 @@
       "pluginContract": null,
       "deploymentMode": "embedded",
       "evidenceKind": ["source"],
-      "evidenceRefs": ["phase2-02b-v7-3-3-pinned-and-selected-auth-source"],
+      "evidenceRefs": ["phase2-02b-v7-3-3-pinned-auth-source"],
       "limitations": [
         "pinned_auth_id filters candidate generation to the target auth ID; if target is missing, disabled, in cooldown, or mismatched, selection fails closed. It does not bypass validation."
       ]
@@ -434,7 +482,7 @@
       "deploymentMode": "release-artifact-fixture",
       "evidenceKind": ["source", "unit"],
       "evidenceRefs": [
-        "phase2-02b-v7-3-8-pinned-and-selected-auth-source",
+        "phase2-02b-v7-3-8-pinned-auth-source",
         "phase2-02b-v7-3-8-cpamp-contract-unit"
       ],
       "limitations": [
@@ -449,7 +497,7 @@
       "pluginContract": null,
       "deploymentMode": "embedded",
       "evidenceKind": ["source"],
-      "evidenceRefs": ["phase2-02b-v7-3-3-pinned-and-selected-auth-source"],
+      "evidenceRefs": ["phase2-02b-v7-3-3-selected-auth-source"],
       "limitations": [
         "selected_auth_id is published into request metadata immediately upon selection; observable in post-auth interceptors and callbacks, but unavailable to pre-auth interceptors."
       ]
@@ -463,7 +511,7 @@
       "deploymentMode": "release-artifact-fixture",
       "evidenceKind": ["source", "unit"],
       "evidenceRefs": [
-        "phase2-02b-v7-3-8-pinned-and-selected-auth-source",
+        "phase2-02b-v7-3-8-selected-auth-source",
         "phase2-02b-v7-3-8-cpamp-contract-unit"
       ],
       "limitations": [
