@@ -13,6 +13,7 @@ const extensionPath = path.join(
   repoRoot,
   'tests/fixtures/phase2-evidence/extensions/phase2-03a-request-correlation.json'
 );
+const docPath = path.join(repoRoot, 'docs/architecture/phase2-evidence/03a-request-correlation.md');
 
 describe('Phase2-03A Request / Attempt / Terminal Correlation Evidence', () => {
   const loadedContext = () => loadAndValidateContract();
@@ -23,7 +24,7 @@ describe('Phase2-03A Request / Attempt / Terminal Correlation Evidence', () => {
     const extension = readExtension();
 
     const result = validateEvidenceExtension(extension, context);
-    expect(result.anchors).toBe(11);
+    expect(result.anchors).toBe(21);
     expect(result.records).toBe(12);
 
     for (const anchor of extension.anchors) {
@@ -49,7 +50,7 @@ describe('Phase2-03A Request / Attempt / Terminal Correlation Evidence', () => {
     }
   });
 
-  it('proves RequestID continuity and TraceID preservation across all interceptor stages', () => {
+  it('asserts RequestID continuity and TraceID preservation contract across interceptor stages', () => {
     const extension = readExtension();
     const currentRecord = extension.records.find(
       (r) => r.id === 'phase2-03a-current-request-correlation-continuity'
@@ -61,8 +62,8 @@ describe('Phase2-03A Request / Attempt / Terminal Correlation Evidence', () => {
     expect(currentRecord.status).toBe('supported');
     expect(candidateRecord.status).toBe('supported');
 
-    // Simulate the handler lifecycle tracker correlation contract
-    const simulateHandlerLifecycle = ({ traceId, model, stream }) => {
+    // Model the handler lifecycle tracker correlation contract (regression harness)
+    const modelHandlerLifecycle = ({ traceId, model, stream }) => {
       const generatedRequestId = 'req-uuid-' + Math.random().toString(36).slice(2, 10);
       const observations = [];
 
@@ -75,7 +76,7 @@ describe('Phase2-03A Request / Attempt / Terminal Correlation Evidence', () => {
         stream,
       });
 
-      // 2. After-auth stage (credential attempt)
+      // 2. After-auth stage (credential attempt) - RequestID bound via handler closure
       observations.push({
         stage: 'after_auth',
         requestId: generatedRequestId,
@@ -106,7 +107,7 @@ describe('Phase2-03A Request / Attempt / Terminal Correlation Evidence', () => {
       return { requestId: generatedRequestId, observations };
     };
 
-    const run = simulateHandlerLifecycle({
+    const run = modelHandlerLifecycle({
       traceId: 'trace-client-http-1234',
       model: 'gpt-4o',
       stream: false,
@@ -119,7 +120,7 @@ describe('Phase2-03A Request / Attempt / Terminal Correlation Evidence', () => {
     }
   });
 
-  it('proves absence of stable attempt ID during retries and marks attempt correlation as requires_upstream', () => {
+  it('asserts absence of stable attempt ID during retries and models requires_upstream correlation boundary', () => {
     const extension = readExtension();
     const currentRecord = extension.records.find(
       (r) => r.id === 'phase2-03a-current-attempt-identity-correlation'
@@ -133,8 +134,8 @@ describe('Phase2-03A Request / Attempt / Terminal Correlation Evidence', () => {
     expect(currentRecord.status).toBe('requires_upstream');
     expect(candidateRecord.status).toBe('requires_upstream');
 
-    // Simulate CPA Conductor execution retry sequence
-    const simulateRetryExecution = ({ attempts }) => {
+    // Model CPA Conductor execution retry sequence (regression harness)
+    const modelRetryExecution = ({ attempts }) => {
       const requestId = 'req-fixed-retry-uuid';
       const sharedMetadata = {};
       const attemptLog = [];
@@ -145,9 +146,9 @@ describe('Phase2-03A Request / Attempt / Terminal Correlation Evidence', () => {
         sharedMetadata.selected_auth_id = attempt.authId;
         sharedMetadata.provider = attempt.provider;
 
-        // In CPA sdk/cliproxy/auth/conductor_execution.go, RequestAfterAuthInterceptRequest
-        // contains only RequestID, Model, RequestedModel, Headers, Body, Metadata.
-        // It does NOT expose any attempt_id, attempt_uuid, or attempt_ordinal field.
+        // In CPA sdk/cliproxy/executor/types.go, RequestAfterAuthInterceptRequest contains only:
+        // SourceFormat, ToFormat, Model, RequestedModel, Stream, Headers, Body, Metadata.
+        // It does NOT contain RequestID or attempt identity (RequestID is bound via handler closure).
         attemptLog.push({
           requestId,
           observedAuthId: sharedMetadata.selected_auth_id,
@@ -169,7 +170,7 @@ describe('Phase2-03A Request / Attempt / Terminal Correlation Evidence', () => {
       return { attemptLog, terminalCompletion };
     };
 
-    const multiAttemptResult = simulateRetryExecution({
+    const multiAttemptResult = modelRetryExecution({
       attempts: [
         { authId: 'cred-1', provider: 'openai', success: false },
         { authId: 'cred-2', provider: 'azure', success: true },
@@ -190,7 +191,7 @@ describe('Phase2-03A Request / Attempt / Terminal Correlation Evidence', () => {
     expect(multiAttemptResult.terminalCompletion.reconstructableAttempts).toBe(false);
   });
 
-  it('proves exactly-once terminal callback cardinality across success, failure, rejection, and cancellation', () => {
+  it('models and validates exactly-once terminal callback cardinality across all termination outcomes', () => {
     const extension = readExtension();
     const currentRecord = extension.records.find(
       (r) => r.id === 'phase2-03a-current-terminal-callback-cardinality'
@@ -202,7 +203,7 @@ describe('Phase2-03A Request / Attempt / Terminal Correlation Evidence', () => {
     expect(currentRecord.status).toBe('supported');
     expect(candidateRecord.status).toBe('supported');
 
-    // Simulate requestLifecycleTracker sync.Once complete semantics
+    // Model requestLifecycleTracker sync.Once complete semantics (regression harness)
     class Tracker {
       constructor(requestId) {
         this.requestId = requestId;
@@ -275,7 +276,7 @@ describe('Phase2-03A Request / Attempt / Terminal Correlation Evidence', () => {
     expect(t5.result.statusCode).toBe(0); // Canceled outcome forces statusCode = 0 in CPA
   });
 
-  it('proves lifecycle coverage boundaries and in-memory dropped notification resilience', () => {
+  it('models lifecycle coverage boundaries and in-memory dropped notification resilience', () => {
     const extension = readExtension();
     const currentResilience = extension.records.find(
       (r) => r.id === 'phase2-03a-current-lifecycle-resilience-boundary'
@@ -287,8 +288,8 @@ describe('Phase2-03A Request / Attempt / Terminal Correlation Evidence', () => {
     expect(currentResilience.status).toBe('partial');
     expect(candidateResilience.status).toBe('partial');
 
-    // 1. Proof of paths that never create a tracker
-    const simulateInboundRequestPipeline = (request) => {
+    // 1. Model of paths that never create a tracker
+    const modelInboundRequestPipeline = (request) => {
       // Access auth middleware check
       if (!request.validClientApiKey) {
         return { handledAt: 'accessAuthMiddleware', status: 401, trackerCreated: false };
@@ -305,28 +306,27 @@ describe('Phase2-03A Request / Attempt / Terminal Correlation Evidence', () => {
       return { handledAt: 'executeWithAuthManagerFormats', status: 200, trackerCreated: true };
     };
 
-    expect(simulateInboundRequestPipeline({ validClientApiKey: false }).trackerCreated).toBe(false);
+    expect(modelInboundRequestPipeline({ validClientApiKey: false }).trackerCreated).toBe(false);
     expect(
-      simulateInboundRequestPipeline({ validClientApiKey: true, path: '/unregistered' })
-        .trackerCreated
+      modelInboundRequestPipeline({ validClientApiKey: true, path: '/unregistered' }).trackerCreated
     ).toBe(false);
     expect(
-      simulateInboundRequestPipeline({
+      modelInboundRequestPipeline({
         validClientApiKey: true,
         path: '/v1/chat/completions',
         malformedJson: true,
       }).trackerCreated
     ).toBe(false);
     expect(
-      simulateInboundRequestPipeline({
+      modelInboundRequestPipeline({
         validClientApiKey: true,
         path: '/v1/chat/completions',
         malformedJson: false,
       }).trackerCreated
     ).toBe(true);
 
-    // 2. Proof of dropped notifications during plugin failure/reload
-    const simulatePluginHostDispatch = (plugins, completion) => {
+    // 2. Model of dropped notifications during plugin failure/reload
+    const modelPluginHostDispatch = (plugins, completion) => {
       const deliveredTo = [];
       const droppedFor = [];
 
@@ -344,7 +344,7 @@ describe('Phase2-03A Request / Attempt / Terminal Correlation Evidence', () => {
       return { deliveredTo, droppedFor };
     };
 
-    const hostDispatch = simulatePluginHostDispatch(
+    const hostDispatch = modelPluginHostDispatch(
       [
         { id: 'plugin-healthy', isFused: false, isCurrentRecord: true },
         { id: 'plugin-fused', isFused: true, isCurrentRecord: true },
@@ -371,6 +371,68 @@ describe('Phase2-03A Request / Attempt / Terminal Correlation Evidence', () => {
       expect(record.status).toBe('unknown');
       expect(record.pluginContract).toBeNull();
       expect(record.deploymentMode).toBe('external');
+    }
+  });
+
+  it('enforces anti-regression guardrails on paths, tests, struct definitions, and statuses', () => {
+    const extensionContent = readFileSync(extensionPath, 'utf8');
+    const docContent = readFileSync(docPath, 'utf8');
+    const testContent = readFileSync(fileURLToPath(import.meta.url), 'utf8');
+
+    // 1. Guard against absolute and machine-specific links
+    expect(extensionContent).not.toMatch(/file:\/\//);
+    expect(extensionContent).not.toMatch(/\/Users\//);
+    expect(docContent).not.toMatch(/file:\/\//);
+    expect(docContent).not.toMatch(/\/Users\//);
+
+    // 2. Terminal records must cite all required upstream terminal test anchors
+    const extension = JSON.parse(extensionContent);
+    const requiredTerminalAnchorSubstrings = [
+      'terminal-success-unit',
+      'terminal-failed-unit',
+      'terminal-stream-unit',
+      'terminal-canceled-unit',
+      'terminal-before-auth-reject-unit',
+      'terminal-after-auth-reject-unit',
+    ];
+
+    const currentTerminal = extension.records.find(
+      (r) => r.id === 'phase2-03a-current-terminal-callback-cardinality'
+    );
+    const candidateTerminal = extension.records.find(
+      (r) => r.id === 'phase2-03a-candidate-terminal-callback-cardinality'
+    );
+
+    for (const key of requiredTerminalAnchorSubstrings) {
+      expect(currentTerminal.evidenceRefs.some((ref) => ref.includes(key))).toBe(true);
+      expect(candidateTerminal.evidenceRefs.some((ref) => ref.includes(key))).toBe(true);
+    }
+
+    // 3. Guard against claiming RequestAfterAuthInterceptRequest has a RequestID field
+    expect(testContent).not.toMatch(
+      /RequestAfterAuthInterceptRequest\s+(?:struct\s+)?contains\s+(?:only\s+)?RequestID/
+    );
+    expect(docContent).not.toMatch(
+      /RequestAfterAuthInterceptRequest[^\n]*(?:自身|结构体)\s*(?:携带|拥有)\s*`?RequestID/
+    );
+    expect(docContent).toMatch(/RequestAfterAuthInterceptRequest[^\n]*不包含\s*`?RequestID/);
+
+    // 4. Guard status invariants
+    const currentAttempt = extension.records.find(
+      (r) => r.id === 'phase2-03a-current-attempt-identity-correlation'
+    );
+    const candidateAttempt = extension.records.find(
+      (r) => r.id === 'phase2-03a-candidate-attempt-identity-correlation'
+    );
+    expect(currentAttempt.status).toBe('requires_upstream');
+    expect(candidateAttempt.status).toBe('requires_upstream');
+
+    const externalRecords = extension.records.filter(
+      (r) => r.artifactId === 'external-unnegotiated'
+    );
+    for (const rec of externalRecords) {
+      expect(rec.status).toBe('unknown');
+      expect(rec.pluginContract).toBeNull();
     }
   });
 });

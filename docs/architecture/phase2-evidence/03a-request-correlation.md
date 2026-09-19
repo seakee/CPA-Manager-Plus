@@ -2,8 +2,8 @@
 
 本文档记录 **CPAMP v2 Phase2-03A — Request / Attempt / Terminal Correlation Evidence** 的证据分析、源码追踪、基数保证与边界证明。本项工作为纯证据（Evidence-only），不引入新的 Request Event 协议、不新增 Manager journal、不设计配额结算（Quota Settlement）、不引入生产 Bridge Plugin 或运行时用户功能。
 
-对应机器可读证据扩展：[`tests/fixtures/phase2-evidence/extensions/phase2-03a-request-correlation.json`](file:///Users/seakee/WorkSpace/Worktree/CPA-Manager-Plus/test/v2-phase2-03a-request-correlation-evidence/tests/fixtures/phase2-evidence/extensions/phase2-03a-request-correlation.json)  
-对应测试验证套件：[`tests/phase2RequestCorrelationEvidence.test.mjs`](file:///Users/seakee/WorkSpace/Worktree/CPA-Manager-Plus/test/v2-phase2-03a-request-correlation-evidence/tests/phase2RequestCorrelationEvidence.test.mjs)
+对应机器可读证据扩展：[`tests/fixtures/phase2-evidence/extensions/phase2-03a-request-correlation.json`](../../../tests/fixtures/phase2-evidence/extensions/phase2-03a-request-correlation.json)
+对应测试验证套件：[`tests/phase2RequestCorrelationEvidence.test.mjs`](../../../tests/phase2RequestCorrelationEvidence.test.mjs)
 
 ---
 
@@ -54,7 +54,7 @@
 1. **Before-Auth RequestID**：
    通过 `applyRequestInterceptorsBeforeAuth` 传入 `lifecycle.requestID()`，插件收到 `RequestInterceptRequest.RequestID`。
 2. **After-Auth RequestID**：
-   通过 `h.requestAfterAuthInterceptor(..., lifecycle.requestID(), ...)` 绑定闭包。在凭据选择后由 `conductor` 调用，传入完全相同的 RequestID。
+   通过 `h.requestAfterAuthInterceptor(..., lifecycle.requestID(), ...)` 绑定闭包。在凭据选择后由 `conductor` 调用，通过闭包胶水层传入完全相同的 RequestID。
 3. **Response Interceptor RequestID**：
    非流式响应成功后调用 `applyResponseInterceptors`，传入 `lifecycle.requestID()`。
 4. **Stream Hook RequestID**：
@@ -86,10 +86,11 @@
 - **是否存在独立的 stable attempt ID 或 attempt ordinal？**
   **否**。
   1. `conductor_execution.go` 内部的 `attempt` 仅为函数局部的循环计数器。
-  2. 传递给 after-auth interceptor 的 `RequestAfterAuthInterceptRequest`（定义于 `sdk/cliproxy/executor/types.go`）仅包含：
+  2. 传递给 after-auth interceptor 的 `cliproxyexecutor.RequestAfterAuthInterceptRequest`（定义于 `sdk/cliproxy/executor/types.go`）包含：
      - `SourceFormat`, `ToFormat`, `Model`, `RequestedModel`, `Stream`, `Headers`, `Body`, `Metadata`。
-       **没有任何 `AttemptID`、`AttemptUUID` 或 `AttemptIndex` 字段**。
-  3. 传递给 plugin 的 `pluginapi.RequestInterceptRequest` 同样不存在 attempt 字段。
+       **注意：`RequestAfterAuthInterceptRequest` 结构体自身不包含 `RequestID` 字段，也不包含 `AttemptID`、`AttemptUUID` 或 `AttemptIndex` 字段**。
+       RequestID 是由 handler 创建的 interceptor 闭包在组装发给插件的 `pluginapi.RequestInterceptRequest` 时绑定的，这属于 handler/interceptor glue 层的关联，而非 executor struct 增加了 RequestID 字段。
+  3. 传递给 plugin 的 `pluginapi.RequestInterceptRequest` 同样不存在 attempt 标识字段。
 
 - **Selected Auth.ID 与 Provider 能否与 attempt 可靠关联？**
   - **在尝试执行中 (In-flight attempt)**：每次选取凭据后，`publishSelectedAuthMetadata(opts.Metadata, auth)` 会将 `auth.ID` 写入 `opts.Metadata["selected_auth_id"]`，并在 after-auth 钩子中可见。
@@ -126,17 +127,19 @@ func (t *requestLifecycleTracker) complete(outcome pluginapi.RequestCompletionOu
 }
 ```
 
-### 4.2 场景覆盖验证
+### 4.2 Upstream 单元测试精确绑定
 
-| 场景                   | 触发代码路径                            | 终态 Outcome                 | HTTP StatusCode             | Callback Cardinality |
-| ---------------------- | --------------------------------------- | ---------------------------- | --------------------------- | -------------------- |
-| **Non-stream Success** | `handlers_execution.go:107`             | `RequestCompletionSucceeded` | `200`                       | **1 (Exactly-once)** |
-| **Stream Success**     | `handlers_stream.go:153` / `608`        | `RequestCompletionSucceeded` | `200`                       | **1 (Exactly-once)** |
-| **Pre-auth Reject**    | `handlers_execution.go:96`              | `RequestCompletionRejected`  | Interceptor 设定值 (如 429) | **1 (Exactly-once)** |
-| **After-auth Reject**  | `conductor_execution.go:348`            | `RequestCompletionRejected`  | Interceptor 设定值 (如 403) | **1 (Exactly-once)** |
-| **Upstream Failure**   | `handlers_execution.go:102` (重试耗尽)  | `RequestCompletionFailed`    | 错误对应值 (如 502/503)     | **1 (Exactly-once)** |
-| **Downstream Cancel**  | `completeError` 识别 `ctx.Err() != nil` | `RequestCompletionCanceled`  | `0` (CPA 约定清零)          | **1 (Exactly-once)** |
-| **Stream Disconnect**  | 流式读取期间客户端断开                  | `RequestCompletionCanceled`  | `0`                         | **1 (Exactly-once)** |
+为避免用单一测试过度宣称所有终态场景，本证据扩展为每个具体终态场景分别绑定了 CPA 官方精确测试：
+
+| 场景                   | 对应 Upstream 单元测试                               | 对应 Evidence Anchor (Current / Candidate)      | 终态 Outcome                 | HTTP StatusCode             | Callback Cardinality |
+| ---------------------- | ---------------------------------------------------- | ----------------------------------------------- | ---------------------------- | --------------------------- | -------------------- |
+| **Non-stream Success** | `TestHandlerLifecycleCompletesSuccessfulRequestOnce` | `phase2-03a-*-terminal-success-unit`            | `RequestCompletionSucceeded` | `200`                       | **1 (Exactly-once)** |
+| **Stream Success**     | `TestHandlerLifecycleCompletesSuccessfulStreamOnce`  | `phase2-03a-*-terminal-stream-unit`             | `RequestCompletionSucceeded` | `200`                       | **1 (Exactly-once)** |
+| **Pre-auth Reject**    | `TestHandlerRequestInterceptorTerminatesBeforeAuth`  | `phase2-03a-*-terminal-before-auth-reject-unit` | `RequestCompletionRejected`  | Interceptor 设定值 (如 429) | **1 (Exactly-once)** |
+| **After-auth Reject**  | `TestHandlerRequestInterceptorTerminatesAfterAuth`   | `phase2-03a-*-terminal-after-auth-reject-unit`  | `RequestCompletionRejected`  | Interceptor 设定值 (如 403) | **1 (Exactly-once)** |
+| **Upstream Failure**   | `TestHandlerLifecycleCompletesFailedRequest`         | `phase2-03a-*-terminal-failed-unit`             | `RequestCompletionFailed`    | 错误对应值 (如 502/503)     | **1 (Exactly-once)** |
+| **Downstream Cancel**  | `TestHandlerLifecycleCompletesCanceledStream`        | `phase2-03a-*-terminal-canceled-unit`           | `RequestCompletionCanceled`  | `0` (CPA 约定清零)          | **1 (Exactly-once)** |
+| **Stream Disconnect**  | `TestHandlerLifecycleCompletesCanceledStream`        | `phase2-03a-*-terminal-canceled-unit`           | `RequestCompletionCanceled`  | `0`                         | **1 (Exactly-once)** |
 
 ---
 

@@ -24,7 +24,7 @@
       "evidenceKind": "source",
       "evidenceReference": "sdk/cliproxy/auth/conductor_execution.go#Execute",
       "limitations": [
-        "Retry loops maintain request-level RequestID and publish selected_auth_id per attempt, but do not expose a separate stable attempt identity or ordinal."
+        "Retry loops maintain request-level RequestID via handler interceptor closure and publish selected_auth_id per attempt into metadata; RequestAfterAuthInterceptRequest struct does not contain RequestID, and no stable attempt identity or ordinal exists."
       ]
     },
     {
@@ -37,21 +37,111 @@
       ]
     },
     {
-      "id": "phase2-03a-current-terminal-unit",
+      "id": "phase2-03a-current-terminal-success-unit",
       "artifactId": "current-bundled-v7-3-3",
       "evidenceKind": "unit",
       "evidenceReference": "sdk/api/handlers/handlers_interceptors_test.go#TestHandlerLifecycleCompletesSuccessfulRequestOnce",
       "limitations": [
-        "Terminal callback cardinality is exactly once per executed request lifecycle, guarded by sync.Once across success, failure, rejection, and cancellation."
+        "Test proves non-stream successful request execution invokes terminal completion exactly once with outcome succeeded and status 200."
       ]
     },
     {
-      "id": "phase2-03a-candidate-terminal-unit",
+      "id": "phase2-03a-candidate-terminal-success-unit",
       "artifactId": "candidate-release-v7-3-8",
       "evidenceKind": "unit",
       "evidenceReference": "sdk/api/handlers/handlers_interceptors_test.go#TestHandlerLifecycleCompletesSuccessfulRequestOnce",
       "limitations": [
-        "Candidate test suite verifies identical exactly-once terminal callback cardinality across non-stream, stream, rejection, and cancellation paths."
+        "Candidate test proves non-stream successful request execution invokes terminal completion exactly once with outcome succeeded and status 200."
+      ]
+    },
+    {
+      "id": "phase2-03a-current-terminal-failed-unit",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "unit",
+      "evidenceReference": "sdk/api/handlers/handlers_interceptors_test.go#TestHandlerLifecycleCompletesFailedRequest",
+      "limitations": [
+        "Test proves upstream model execution failure completes with outcome failed and propagates the execution error status."
+      ]
+    },
+    {
+      "id": "phase2-03a-candidate-terminal-failed-unit",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "unit",
+      "evidenceReference": "sdk/api/handlers/handlers_interceptors_test.go#TestHandlerLifecycleCompletesFailedRequest",
+      "limitations": [
+        "Candidate test proves upstream model execution failure completes with outcome failed and propagates the execution error status."
+      ]
+    },
+    {
+      "id": "phase2-03a-current-terminal-stream-unit",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "unit",
+      "evidenceReference": "sdk/api/handlers/handlers_interceptors_test.go#TestHandlerLifecycleCompletesSuccessfulStreamOnce",
+      "limitations": [
+        "Test proves streaming request execution completes exactly once upon stream finish without duplicate terminal callbacks."
+      ]
+    },
+    {
+      "id": "phase2-03a-candidate-terminal-stream-unit",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "unit",
+      "evidenceReference": "sdk/api/handlers/handlers_interceptors_test.go#TestHandlerLifecycleCompletesSuccessfulStreamOnce",
+      "limitations": [
+        "Candidate test proves streaming request execution completes exactly once upon stream finish without duplicate terminal callbacks."
+      ]
+    },
+    {
+      "id": "phase2-03a-current-terminal-canceled-unit",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "unit",
+      "evidenceReference": "sdk/api/handlers/handlers_interceptors_test.go#TestHandlerLifecycleCompletesCanceledStream",
+      "limitations": [
+        "Test proves downstream context cancellation completes with outcome canceled and forces status code 0."
+      ]
+    },
+    {
+      "id": "phase2-03a-candidate-terminal-canceled-unit",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "unit",
+      "evidenceReference": "sdk/api/handlers/handlers_interceptors_test.go#TestHandlerLifecycleCompletesCanceledStream",
+      "limitations": [
+        "Candidate test proves downstream context cancellation completes with outcome canceled and forces status code 0."
+      ]
+    },
+    {
+      "id": "phase2-03a-current-terminal-before-auth-reject-unit",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "unit",
+      "evidenceReference": "sdk/api/handlers/handlers_interceptors_test.go#TestHandlerRequestInterceptorTerminatesBeforeAuth",
+      "limitations": [
+        "Test proves before-auth request interceptor termination completes with outcome rejected and direct response status."
+      ]
+    },
+    {
+      "id": "phase2-03a-candidate-terminal-before-auth-reject-unit",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "unit",
+      "evidenceReference": "sdk/api/handlers/handlers_interceptors_test.go#TestHandlerRequestInterceptorTerminatesBeforeAuth",
+      "limitations": [
+        "Candidate test proves before-auth request interceptor termination completes with outcome rejected and direct response status."
+      ]
+    },
+    {
+      "id": "phase2-03a-current-terminal-after-auth-reject-unit",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "unit",
+      "evidenceReference": "sdk/api/handlers/handlers_interceptors_test.go#TestHandlerRequestInterceptorTerminatesAfterAuth",
+      "limitations": [
+        "Test proves after-auth request interceptor termination completes with outcome rejected and preserves the interceptor response."
+      ]
+    },
+    {
+      "id": "phase2-03a-candidate-terminal-after-auth-reject-unit",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "unit",
+      "evidenceReference": "sdk/api/handlers/handlers_interceptors_test.go#TestHandlerRequestInterceptorTerminatesAfterAuth",
+      "limitations": [
+        "Candidate test proves after-auth request interceptor termination completes with outcome rejected and preserves the interceptor response."
       ]
     },
     {
@@ -239,11 +329,16 @@
       "evidenceRefs": [
         "plugin-abi-schema-v6",
         "terminal-lifecycle-unit",
-        "phase2-03a-current-terminal-unit",
+        "phase2-03a-current-terminal-success-unit",
+        "phase2-03a-current-terminal-failed-unit",
+        "phase2-03a-current-terminal-stream-unit",
+        "phase2-03a-current-terminal-canceled-unit",
+        "phase2-03a-current-terminal-before-auth-reject-unit",
+        "phase2-03a-current-terminal-after-auth-reject-unit",
         "phase2-03a-current-correlation-test"
       ],
       "limitations": [
-        "Guarded by sync.Once, terminal completion executes exactly once for every request that reaches handler execution across success, failure, rejection, and cancellation."
+        "Guarded by sync.Once, terminal completion executes exactly once across non-stream success, stream success, before/after-auth rejection, upstream failure, and cancellation."
       ]
     },
     {
@@ -262,11 +357,16 @@
       "evidenceRefs": [
         "plugin-abi-schema-v6",
         "terminal-lifecycle-unit",
-        "phase2-03a-candidate-terminal-unit",
+        "phase2-03a-candidate-terminal-success-unit",
+        "phase2-03a-candidate-terminal-failed-unit",
+        "phase2-03a-candidate-terminal-stream-unit",
+        "phase2-03a-candidate-terminal-canceled-unit",
+        "phase2-03a-candidate-terminal-before-auth-reject-unit",
+        "phase2-03a-candidate-terminal-after-auth-reject-unit",
         "phase2-03a-candidate-correlation-test"
       ],
       "limitations": [
-        "Candidate v7.3.8 preserves exactly-once terminal callback cardinality across non-stream, stream, cancellation, and interceptor rejection."
+        "Candidate v7.3.8 preserves exactly-once terminal callback cardinality across non-stream, stream, cancellation, upstream failure, and interceptor rejection."
       ]
     },
     {
