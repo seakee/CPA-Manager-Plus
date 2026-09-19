@@ -1,0 +1,343 @@
+{
+  "anchors": [
+    {
+      "id": "phase2-03a-current-request-id-source",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "source",
+      "evidenceReference": "sdk/api/handlers/handlers_interceptors.go#newRequestLifecycleTracker",
+      "limitations": [
+        "RequestID is a unique per-execution UUID created upon entering handler execution and preserved across interceptors and completion."
+      ]
+    },
+    {
+      "id": "phase2-03a-candidate-request-id-source",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "source",
+      "evidenceReference": "sdk/api/handlers/handlers_interceptors.go#newRequestLifecycleTracker",
+      "limitations": [
+        "Candidate v7.3.8 retains identical per-execution UUID RequestID generation in newRequestLifecycleTracker."
+      ]
+    },
+    {
+      "id": "phase2-03a-current-attempt-source",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "source",
+      "evidenceReference": "sdk/cliproxy/auth/conductor_execution.go#Execute",
+      "limitations": [
+        "Retry loops maintain request-level RequestID and publish selected_auth_id per attempt, but do not expose a separate stable attempt identity or ordinal."
+      ]
+    },
+    {
+      "id": "phase2-03a-candidate-attempt-source",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "source",
+      "evidenceReference": "sdk/cliproxy/auth/conductor_execution.go#Execute",
+      "limitations": [
+        "Candidate conductor execution manages retries locally without generating or passing attempt identifiers to interceptors or callbacks."
+      ]
+    },
+    {
+      "id": "phase2-03a-current-terminal-unit",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "unit",
+      "evidenceReference": "sdk/api/handlers/handlers_interceptors_test.go#TestHandlerLifecycleCompletesSuccessfulRequestOnce",
+      "limitations": [
+        "Terminal callback cardinality is exactly once per executed request lifecycle, guarded by sync.Once across success, failure, rejection, and cancellation."
+      ]
+    },
+    {
+      "id": "phase2-03a-candidate-terminal-unit",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "unit",
+      "evidenceReference": "sdk/api/handlers/handlers_interceptors_test.go#TestHandlerLifecycleCompletesSuccessfulRequestOnce",
+      "limitations": [
+        "Candidate test suite verifies identical exactly-once terminal callback cardinality across non-stream, stream, rejection, and cancellation paths."
+      ]
+    },
+    {
+      "id": "phase2-03a-current-resilience-source",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "source",
+      "evidenceReference": "internal/pluginhost/adapters_interceptors.go#CompleteRequestExcept",
+      "limitations": [
+        "CompleteRequestExcept dispatches via in-memory goroutines; fused plugins, reload transitions, or missing hosts silently drop terminal notifications without durable buffering."
+      ]
+    },
+    {
+      "id": "phase2-03a-candidate-resilience-source",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "source",
+      "evidenceReference": "internal/pluginhost/adapters_interceptors.go#CompleteRequestExcept",
+      "limitations": [
+        "Candidate plugin host preserves in-memory asynchronous completion dispatch without durable delivery guarantees."
+      ]
+    },
+    {
+      "id": "phase2-03a-external-observation-boundary",
+      "artifactId": "external-unnegotiated",
+      "evidenceKind": "source",
+      "evidenceReference": "apps/manager-server/internal/service/runtime/external.go#Status",
+      "limitations": [
+        "External runtime observation queries management status only; RequestID lifetime, attempt identity, and lifecycle callbacks are not negotiated."
+      ]
+    },
+    {
+      "id": "phase2-03a-current-correlation-test",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "unit",
+      "evidenceReference": "tests/phase2RequestCorrelationEvidence.test.mjs#request-correlation",
+      "limitations": [
+        "Evidence test asserts exact RequestID and TraceID preservation, attempt ID absence, and exactly-once terminal outcome mapping."
+      ]
+    },
+    {
+      "id": "phase2-03a-candidate-correlation-test",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "unit",
+      "evidenceReference": "tests/phase2RequestCorrelationEvidence.test.mjs#request-correlation",
+      "limitations": [
+        "Evidence test asserts candidate release preserves RequestID continuity, lacks attempt identity, and enforces terminal cardinality."
+      ]
+    }
+  ],
+  "records": [
+    {
+      "id": "phase2-03a-current-request-correlation-continuity",
+      "capability": "request_correlation_continuity",
+      "status": "supported",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "request_lifecycle_plugin": true,
+          "interceptor": true
+        }
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source", "unit"],
+      "evidenceRefs": [
+        "plugin-abi-schema-v6",
+        "request-interceptor-contract",
+        "phase2-03a-current-request-id-source",
+        "phase2-03a-current-correlation-test"
+      ],
+      "limitations": [
+        "RequestID is a per-execution UUID created in newRequestLifecycleTracker and maintained through before-auth, after-auth, response/stream hooks, and terminal completion; TraceID is inherited from the inbound context."
+      ]
+    },
+    {
+      "id": "phase2-03a-candidate-request-correlation-continuity",
+      "capability": "request_correlation_continuity",
+      "status": "supported",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "request_lifecycle_plugin": true,
+          "interceptor": true
+        }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "unit"],
+      "evidenceRefs": [
+        "plugin-abi-schema-v6",
+        "request-interceptor-contract",
+        "phase2-03a-candidate-request-id-source",
+        "phase2-03a-candidate-correlation-test"
+      ],
+      "limitations": [
+        "Candidate v7.3.8 maintains identical RequestID generation and end-to-end hook correlation without divergence from v7.3.3."
+      ]
+    },
+    {
+      "id": "phase2-03a-external-request-correlation-continuity",
+      "capability": "request_correlation_continuity",
+      "status": "unknown",
+      "artifactId": "external-unnegotiated",
+      "pluginContract": null,
+      "deploymentMode": "external",
+      "evidenceKind": ["source"],
+      "evidenceRefs": ["phase2-03a-external-observation-boundary"],
+      "limitations": [
+        "Unnegotiated External runtime cannot be promoted beyond unknown because RequestID propagation and plugin hooks are unobserved."
+      ]
+    },
+    {
+      "id": "phase2-03a-current-attempt-identity-correlation",
+      "capability": "attempt_identity_correlation",
+      "status": "requires_upstream",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "request_lifecycle_plugin": true,
+          "interceptor": true
+        }
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source", "unit"],
+      "evidenceRefs": [
+        "plugin-abi-schema-v6",
+        "attempt-retry-fallback",
+        "phase2-03a-current-attempt-source",
+        "phase2-03a-current-correlation-test"
+      ],
+      "limitations": [
+        "Retries preserve the overall RequestID and write selected_auth_id into request metadata, but no stable attempt identifier or ordinal is generated or passed to plugins, and terminal callback only records the final outcome; per-attempt correlation requires upstream CPA enhancement."
+      ]
+    },
+    {
+      "id": "phase2-03a-candidate-attempt-identity-correlation",
+      "capability": "attempt_identity_correlation",
+      "status": "requires_upstream",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "request_lifecycle_plugin": true,
+          "interceptor": true
+        }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "unit"],
+      "evidenceRefs": [
+        "plugin-abi-schema-v6",
+        "attempt-retry-fallback",
+        "phase2-03a-candidate-attempt-source",
+        "phase2-03a-candidate-correlation-test"
+      ],
+      "limitations": [
+        "Candidate v7.3.8 retains the same retry loop and metadata overwrite behavior without introducing an upstream attempt ID contract."
+      ]
+    },
+    {
+      "id": "phase2-03a-external-attempt-identity-correlation",
+      "capability": "attempt_identity_correlation",
+      "status": "unknown",
+      "artifactId": "external-unnegotiated",
+      "pluginContract": null,
+      "deploymentMode": "external",
+      "evidenceKind": ["source"],
+      "evidenceRefs": ["phase2-03a-external-observation-boundary"],
+      "limitations": [
+        "External runtime attempt identity and retry semantics are not negotiated or observable over the management interface."
+      ]
+    },
+    {
+      "id": "phase2-03a-current-terminal-callback-cardinality",
+      "capability": "terminal_callback_cardinality",
+      "status": "supported",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "request_lifecycle_plugin": true
+        }
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source", "unit"],
+      "evidenceRefs": [
+        "plugin-abi-schema-v6",
+        "terminal-lifecycle-unit",
+        "phase2-03a-current-terminal-unit",
+        "phase2-03a-current-correlation-test"
+      ],
+      "limitations": [
+        "Guarded by sync.Once, terminal completion executes exactly once for every request that reaches handler execution across success, failure, rejection, and cancellation."
+      ]
+    },
+    {
+      "id": "phase2-03a-candidate-terminal-callback-cardinality",
+      "capability": "terminal_callback_cardinality",
+      "status": "supported",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "request_lifecycle_plugin": true
+        }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "unit"],
+      "evidenceRefs": [
+        "plugin-abi-schema-v6",
+        "terminal-lifecycle-unit",
+        "phase2-03a-candidate-terminal-unit",
+        "phase2-03a-candidate-correlation-test"
+      ],
+      "limitations": [
+        "Candidate v7.3.8 preserves exactly-once terminal callback cardinality across non-stream, stream, cancellation, and interceptor rejection."
+      ]
+    },
+    {
+      "id": "phase2-03a-external-terminal-callback-cardinality",
+      "capability": "terminal_callback_cardinality",
+      "status": "unknown",
+      "artifactId": "external-unnegotiated",
+      "pluginContract": null,
+      "deploymentMode": "external",
+      "evidenceKind": ["source"],
+      "evidenceRefs": ["phase2-03a-external-observation-boundary"],
+      "limitations": [
+        "External terminal callback presence, delivery guarantees, and invocation cardinality remain unnegotiated."
+      ]
+    },
+    {
+      "id": "phase2-03a-current-lifecycle-resilience-boundary",
+      "capability": "lifecycle_coverage_and_resilience",
+      "status": "partial",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "request_lifecycle_plugin": true
+        }
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source", "unit"],
+      "evidenceRefs": [
+        "plugin-abi-schema-v6",
+        "phase2-03a-current-resilience-source",
+        "phase2-03a-current-correlation-test"
+      ],
+      "limitations": [
+        "Inbound requests rejected by accessAuthMiddleware, bad JSON, or missing route never create a tracker; furthermore, plugin panic/fusing, unavailability, or mid-stream reload will silently drop terminal notifications."
+      ]
+    },
+    {
+      "id": "phase2-03a-candidate-lifecycle-resilience-boundary",
+      "capability": "lifecycle_coverage_and_resilience",
+      "status": "partial",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "request_lifecycle_plugin": true
+        }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "unit"],
+      "evidenceRefs": [
+        "plugin-abi-schema-v6",
+        "phase2-03a-candidate-resilience-source",
+        "phase2-03a-candidate-correlation-test"
+      ],
+      "limitations": [
+        "Candidate release retains identical pre-handler rejection blind spots and in-memory dropped notifications during plugin failure or reload."
+      ]
+    },
+    {
+      "id": "phase2-03a-external-lifecycle-resilience-boundary",
+      "capability": "lifecycle_coverage_and_resilience",
+      "status": "unknown",
+      "artifactId": "external-unnegotiated",
+      "pluginContract": null,
+      "deploymentMode": "external",
+      "evidenceKind": ["source"],
+      "evidenceRefs": ["phase2-03a-external-observation-boundary"],
+      "limitations": [
+        "External lifecycle coverage and resilience boundaries cannot be verified without active runtime negotiation."
+      ]
+    }
+  ]
+}
