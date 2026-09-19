@@ -1,0 +1,601 @@
+{
+  "anchors": [
+    {
+      "id": "phase2-02b-v7-3-3-candidate-filtering-source",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "source",
+      "evidenceReference": "sdk/cliproxy/auth/conductor_selection.go#availableAuthsForSelector",
+      "limitations": [
+        "In CPA v7.3.3, candidate generation strictly excludes disabled, cooldown, unavailable, provider mismatch, model mismatch, and unauthorized credentials before calling availableAuthsForSelector."
+      ]
+    },
+    {
+      "id": "phase2-02b-v7-3-3-highest-priority-visibility-source",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "source",
+      "evidenceReference": "sdk/cliproxy/auth/conductor_selection.go#availableAuthsForRouteModel",
+      "limitations": [
+        "In CPA v7.3.3, availableAuthsForSelector passes only the highest available priority tier candidates to the plugin scheduler; lower tiers are invisible."
+      ]
+    },
+    {
+      "id": "phase2-02b-v7-3-3-pinned-and-selected-auth-source",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "source",
+      "evidenceReference": "sdk/cliproxy/auth/conductor_execution.go#publishSelectedAuthMetadata",
+      "limitations": [
+        "pinned_auth_id restricts candidate generation to matching auth ID without bypassing health or model checks; selected_auth_id is populated post-selection in request metadata."
+      ]
+    },
+    {
+      "id": "phase2-02b-v7-3-3-retry-and-fallback-source",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "source",
+      "evidenceReference": "sdk/cliproxy/auth/conductor_execution.go#executeMixedOnce",
+      "limitations": [
+        "Upstream execution failure marks attempted auth as tried and repeats candidate filtering and scheduler selection for subsequent attempts."
+      ]
+    },
+    {
+      "id": "phase2-02b-v7-3-3-stream-bootstrap-source",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "source",
+      "evidenceReference": "sdk/cliproxy/auth/conductor_stream.go#readStreamBootstrap",
+      "limitations": [
+        "Stream retries and credential failovers are supported only during initial bootstrap prior to first payload chunk emission; in-flight stream failures cannot retry."
+      ]
+    },
+    {
+      "id": "phase2-02b-v7-3-8-candidate-filtering-source",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "source",
+      "evidenceReference": "sdk/cliproxy/auth/conductor_selection.go#availableAuthsForSelector",
+      "limitations": [
+        "In CPA v7.3.8, candidate generation continues to filter out disabled, cooldown, unavailable, provider mismatch, and model mismatch credentials before scheduler invocation."
+      ]
+    },
+    {
+      "id": "phase2-02b-v7-3-8-across-priorities-source",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "source",
+      "evidenceReference": "sdk/cliproxy/auth/conductor_selection.go#availableAuthsForSelector",
+      "limitations": [
+        "In CPA v7.3.8, SchedulerAcrossPriorities=true supplies candidates across all priority tiers; default (false) retains highest-tier filtering."
+      ]
+    },
+    {
+      "id": "phase2-02b-v7-3-8-across-priorities-unit",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "unit",
+      "evidenceReference": "sdk/cliproxy/auth/scheduler_test.go#TestManagerPluginSchedulerAcrossPriorities",
+      "limitations": [
+        "Go unit tests prove scheduler receives candidates across multiple priority tiers when opted in."
+      ]
+    },
+    {
+      "id": "phase2-02b-v7-3-8-pre-filter-unit",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "unit",
+      "evidenceReference": "sdk/cliproxy/auth/scheduler_test.go#TestManagerPluginSchedulerAcrossPrioritiesAttributesAndCooldownFilter",
+      "limitations": [
+        "Go unit tests prove disabled and cooldown credentials remain excluded from the candidate set even when SchedulerAcrossPriorities is enabled."
+      ]
+    },
+    {
+      "id": "phase2-02b-v7-3-8-pinned-and-selected-auth-source",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "source",
+      "evidenceReference": "sdk/cliproxy/auth/conductor_execution.go#publishSelectedAuthMetadata",
+      "limitations": [
+        "pinned_auth_id restricts candidate generation to matching auth ID without bypassing health or model checks; selected_auth_id is populated post-selection in request metadata."
+      ]
+    },
+    {
+      "id": "phase2-02b-v7-3-8-retry-and-fallback-source",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "source",
+      "evidenceReference": "sdk/cliproxy/auth/conductor_execution.go#executeMixedOnce",
+      "limitations": [
+        "Upstream execution failure marks attempted auth as tried and repeats candidate filtering and scheduler selection for subsequent attempts."
+      ]
+    },
+    {
+      "id": "phase2-02b-v7-3-8-stream-bootstrap-source",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "source",
+      "evidenceReference": "sdk/cliproxy/auth/conductor_stream.go#readStreamBootstrap",
+      "limitations": [
+        "Stream retries and credential failovers are supported only during initial bootstrap prior to first payload chunk emission; in-flight stream failures cannot retry."
+      ]
+    },
+    {
+      "id": "phase2-02b-v7-3-8-invalid-candidate-fallback-source",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "source",
+      "evidenceReference": "internal/pluginhost/scheduler.go#normalizeSchedulerResponse",
+      "limitations": [
+        "Host normalization verifies selected Auth.ID exists in supplied candidates; unknown auth IDs and unknown builtin delegates fall back to unhandled."
+      ]
+    },
+    {
+      "id": "phase2-02b-v7-3-8-invalid-candidate-fallback-unit",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "unit",
+      "evidenceReference": "internal/pluginhost/scheduler_test.go#TestHostPickAuthInvalidResponseFallsBack",
+      "limitations": [
+        "Unit tests prove unknown Auth.ID, unknown delegate, and missing decisions trigger graceful fallback rather than panic or crash."
+      ]
+    },
+    {
+      "id": "phase2-02b-v7-3-8-plugin-fused-unit",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "unit",
+      "evidenceReference": "internal/pluginhost/scheduler_test.go#TestHostPickAuthPanicFusesAndFallsBack",
+      "limitations": [
+        "Scheduler panic fuses the plugin and falls back to builtin selection; explicit scheduler errors are returned directly."
+      ]
+    },
+    {
+      "id": "phase2-02b-v7-3-8-stream-retry-failover-unit",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "unit",
+      "evidenceReference": "sdk/cliproxy/auth/conductor_stream_overload_failover_test.go#TestExecuteStream_BootstrapOverload_SkipsConsecutiveOverloadedCredentials",
+      "limitations": [
+        "Stream overload during bootstrap skips consecutive overloaded credentials and fails over to healthy candidates before stream start."
+      ]
+    },
+    {
+      "id": "phase2-02b-v7-3-8-black-box-simulation",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "black-box",
+      "evidenceReference": "tests/phase2CandidateSelectionEvidence.test.mjs#candidate-selection-boundary",
+      "limitations": [
+        "Repository test suite reproduces candidate generation, pre-scheduler filtering, pinning fencing, invalid selection fallback, and retry re-selection."
+      ]
+    },
+    {
+      "id": "phase2-02b-external-unnegotiated-boundary",
+      "artifactId": "external-unnegotiated",
+      "evidenceKind": "source",
+      "evidenceReference": "apps/manager-server/internal/service/runtime/runtime.go#InspectRuntime",
+      "limitations": [
+        "External runtime observation does not negotiate scheduler capability or candidate visibility flags; capabilities remain unknown until negotiated."
+      ]
+    }
+  ],
+  "records": [
+    {
+      "id": "phase2-02b-current-highest-tier-visibility",
+      "capability": "candidate_highest_tier_visibility",
+      "status": "partial",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": { "scheduler": true }
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "plugin-abi-schema-v6",
+        "phase2-02b-v7-3-3-highest-priority-visibility-source"
+      ],
+      "limitations": [
+        "In CPA v7.3.3, plugin scheduler only sees candidates in the highest available priority tier; lower tiers are invisible even when healthy."
+      ]
+    },
+    {
+      "id": "phase2-02b-candidate-default-highest-tier-visibility",
+      "capability": "candidate_highest_tier_visibility",
+      "status": "partial",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "scheduler": true,
+          "scheduler_across_priorities": false
+        }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "unit"],
+      "evidenceRefs": [
+        "plugin-abi-schema-v6",
+        "phase2-02b-v7-3-8-across-priorities-source",
+        "phase2-02b-v7-3-8-pre-filter-unit"
+      ],
+      "limitations": [
+        "In CPA v7.3.8 without SchedulerAcrossPriorities opt-in, candidate visibility remains restricted to the highest available priority tier."
+      ]
+    },
+    {
+      "id": "phase2-02b-candidate-across-priorities-opt-in",
+      "capability": "candidate_across_priorities_visibility",
+      "status": "supported",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "scheduler": true,
+          "scheduler_across_priorities": true
+        }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "unit", "black-box"],
+      "evidenceRefs": [
+        "plugin-abi-schema-v6",
+        "phase2-02b-v7-3-8-across-priorities-source",
+        "phase2-02b-v7-3-8-across-priorities-unit",
+        "phase2-02b-v7-3-8-black-box-simulation"
+      ],
+      "limitations": [
+        "In CPA v7.3.8 with SchedulerAcrossPriorities=true, scheduler receives candidates across all priority tiers, but pre-scheduler filtering still applies."
+      ]
+    },
+    {
+      "id": "phase2-02b-current-pre-filter-exclusion",
+      "capability": "pre_scheduler_candidate_filtering",
+      "status": "supported",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": { "scheduler": true }
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source"],
+      "evidenceRefs": ["plugin-abi-schema-v6", "phase2-02b-v7-3-3-candidate-filtering-source"],
+      "limitations": [
+        "Credentials matching provider mismatch, model mismatch, disabled, cooldown/unavailable, or unauthorized are filtered before scheduler invocation."
+      ]
+    },
+    {
+      "id": "phase2-02b-candidate-pre-filter-exclusion",
+      "capability": "pre_scheduler_candidate_filtering",
+      "status": "supported",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "scheduler": true,
+          "scheduler_across_priorities": true
+        }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "unit", "black-box"],
+      "evidenceRefs": [
+        "plugin-abi-schema-v6",
+        "phase2-02b-v7-3-8-candidate-filtering-source",
+        "phase2-02b-v7-3-8-pre-filter-unit",
+        "phase2-02b-v7-3-8-black-box-simulation"
+      ],
+      "limitations": [
+        "Even with SchedulerAcrossPriorities=true, disabled, cooldown, provider mismatch, model mismatch, and unauthorized credentials are excluded before scheduler sees candidates."
+      ]
+    },
+    {
+      "id": "phase2-02b-current-valid-candidate-selection",
+      "capability": "scheduler_valid_candidate_selection",
+      "status": "supported",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": { "scheduler": true }
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source"],
+      "evidenceRefs": ["plugin-abi-schema-v6", "phase2-02b-v7-3-3-candidate-filtering-source"],
+      "limitations": [
+        "When scheduler returns a valid Auth.ID from the supplied candidate set, host clones auth, binds executor, and proceeds with upstream execution."
+      ]
+    },
+    {
+      "id": "phase2-02b-candidate-valid-candidate-selection",
+      "capability": "scheduler_valid_candidate_selection",
+      "status": "supported",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": { "scheduler": true }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "unit", "black-box"],
+      "evidenceRefs": [
+        "plugin-abi-schema-v6",
+        "phase2-02b-v7-3-8-across-priorities-source",
+        "phase2-02b-v7-3-8-across-priorities-unit",
+        "phase2-02b-v7-3-8-black-box-simulation"
+      ],
+      "limitations": [
+        "Valid candidate Auth.ID returned by scheduler is accepted and forwarded to executor."
+      ]
+    },
+    {
+      "id": "phase2-02b-current-invalid-candidate-fallback",
+      "capability": "scheduler_invalid_candidate_fallback",
+      "status": "supported",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": { "scheduler": true }
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source"],
+      "evidenceRefs": ["plugin-abi-schema-v6", "phase2-02b-v7-3-3-candidate-filtering-source"],
+      "limitations": [
+        "Returning an Auth.ID not in the supplied candidates slice is ignored by pickSchedulerAuthByID; if delegate_builtin is valid it delegates, otherwise falls back to host default selector."
+      ]
+    },
+    {
+      "id": "phase2-02b-candidate-invalid-candidate-fallback",
+      "capability": "scheduler_invalid_candidate_fallback",
+      "status": "supported",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": { "scheduler": true }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "unit", "black-box"],
+      "evidenceRefs": [
+        "plugin-abi-schema-v6",
+        "phase2-02b-v7-3-8-invalid-candidate-fallback-source",
+        "phase2-02b-v7-3-8-invalid-candidate-fallback-unit",
+        "phase2-02b-v7-3-8-black-box-simulation"
+      ],
+      "limitations": [
+        "Host normalizeSchedulerResponse detects unknown Auth.ID and resets handled=false; conductor falls back to host selector without error."
+      ]
+    },
+    {
+      "id": "phase2-02b-current-plugin-delegation-unhandled",
+      "capability": "scheduler_plugin_delegation_unhandled",
+      "status": "supported",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": { "scheduler": true }
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source"],
+      "evidenceRefs": ["plugin-abi-schema-v6", "phase2-02b-v7-3-3-candidate-filtering-source"],
+      "limitations": [
+        "Unhandled (handled=false) or delegate_builtin (round_robin, fill_first) cleanly falls back to builtin scheduling."
+      ]
+    },
+    {
+      "id": "phase2-02b-candidate-plugin-delegation-unhandled",
+      "capability": "scheduler_plugin_delegation_unhandled",
+      "status": "supported",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": { "scheduler": true }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "unit", "black-box"],
+      "evidenceRefs": [
+        "plugin-abi-schema-v6",
+        "phase2-02b-v7-3-8-invalid-candidate-fallback-source",
+        "phase2-02b-v7-3-8-invalid-candidate-fallback-unit",
+        "phase2-02b-v7-3-8-black-box-simulation"
+      ],
+      "limitations": [
+        "Delegate builtin round_robin and fill_first are recognized; unknown delegate falls back to unhandled."
+      ]
+    },
+    {
+      "id": "phase2-02b-candidate-plugin-failure-fused",
+      "capability": "scheduler_plugin_failure_fused",
+      "status": "supported",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": { "scheduler": true }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "unit", "black-box"],
+      "evidenceRefs": [
+        "plugin-abi-schema-v6",
+        "phase2-02b-v7-3-8-invalid-candidate-fallback-source",
+        "phase2-02b-v7-3-8-plugin-fused-unit",
+        "phase2-02b-v7-3-8-black-box-simulation"
+      ],
+      "limitations": [
+        "Plugin panic triggers fusePlugin marking the scheduler fused, falling back to host selector; explicit errors are returned directly."
+      ]
+    },
+    {
+      "id": "phase2-02b-current-pinned-auth-fencing",
+      "capability": "pinned_auth_fencing",
+      "status": "supported",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": null,
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source"],
+      "evidenceRefs": ["phase2-02b-v7-3-3-pinned-and-selected-auth-source"],
+      "limitations": [
+        "pinned_auth_id filters candidate generation to the target auth ID; if target is missing, disabled, in cooldown, or mismatched, selection fails closed. It does not bypass validation."
+      ]
+    },
+    {
+      "id": "phase2-02b-candidate-pinned-auth-fencing",
+      "capability": "pinned_auth_fencing",
+      "status": "supported",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": null,
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "black-box"],
+      "evidenceRefs": [
+        "phase2-02b-v7-3-8-pinned-and-selected-auth-source",
+        "phase2-02b-v7-3-8-black-box-simulation"
+      ],
+      "limitations": [
+        "pinned_auth_id strictly isolates selection to the target credential, fails closed on target unavailability, and remains pinned during retries."
+      ]
+    },
+    {
+      "id": "phase2-02b-current-selected-auth-observation",
+      "capability": "selected_auth_observation",
+      "status": "supported",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": null,
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source"],
+      "evidenceRefs": ["phase2-02b-v7-3-3-pinned-and-selected-auth-source"],
+      "limitations": [
+        "selected_auth_id is published into request metadata immediately upon selection; observable in post-auth interceptors and callbacks, but unavailable to pre-auth interceptors."
+      ]
+    },
+    {
+      "id": "phase2-02b-candidate-selected-auth-observation",
+      "capability": "selected_auth_observation",
+      "status": "supported",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": null,
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "black-box"],
+      "evidenceRefs": [
+        "phase2-02b-v7-3-8-pinned-and-selected-auth-source",
+        "phase2-02b-v7-3-8-black-box-simulation"
+      ],
+      "limitations": [
+        "selected_auth_id and selected_auth_index are published synchronously into metadata and notify registered callbacks; updates on retry if different credential is selected."
+      ]
+    },
+    {
+      "id": "phase2-02b-current-retry-re-selection",
+      "capability": "retry_re_selection",
+      "status": "supported",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": { "scheduler": true }
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source"],
+      "evidenceRefs": ["plugin-abi-schema-v6", "phase2-02b-v7-3-3-retry-and-fallback-source"],
+      "limitations": [
+        "Each retry attempt re-evaluates candidate generation, priority filtering, and scheduler invocation; previously failed auths are excluded via tried map."
+      ]
+    },
+    {
+      "id": "phase2-02b-candidate-retry-re-selection",
+      "capability": "retry_re_selection",
+      "status": "supported",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": { "scheduler": true }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "black-box"],
+      "evidenceRefs": [
+        "plugin-abi-schema-v6",
+        "phase2-02b-v7-3-8-retry-and-fallback-source",
+        "phase2-02b-v7-3-8-black-box-simulation"
+      ],
+      "limitations": [
+        "Retry triggers full re-selection allowing credential fallback and provider fallback in mixed mode; each attempt invokes scheduler fresh."
+      ]
+    },
+    {
+      "id": "phase2-02b-current-retry-same-credential",
+      "capability": "retry_same_credential",
+      "status": "supported",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": null,
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source"],
+      "evidenceRefs": ["phase2-02b-v7-3-3-retry-and-fallback-source"],
+      "limitations": [
+        "Within a single execution round, tried map prevents re-trying the same credential; across multiple retry rounds (after cooldown wait), the same credential can be re-tried if within request retry limit."
+      ]
+    },
+    {
+      "id": "phase2-02b-candidate-retry-same-credential",
+      "capability": "retry_same_credential",
+      "status": "supported",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": null,
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "black-box"],
+      "evidenceRefs": [
+        "phase2-02b-v7-3-8-retry-and-fallback-source",
+        "phase2-02b-v7-3-8-black-box-simulation"
+      ],
+      "limitations": [
+        "Multi-round retry allows retrying the same credential after transient error or cooldown wait when effectiveRequestRetryLimit permits."
+      ]
+    },
+    {
+      "id": "phase2-02b-current-stream-retry-divergence",
+      "capability": "stream_retry_divergence",
+      "status": "partial",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": null,
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source"],
+      "evidenceRefs": ["phase2-02b-v7-3-3-stream-bootstrap-source"],
+      "limitations": [
+        "Stream requests support credential retry and failover only during bootstrap before first payload chunk; in-flight stream failure forwards error chunk and cannot fallback."
+      ]
+    },
+    {
+      "id": "phase2-02b-candidate-stream-retry-divergence",
+      "capability": "stream_retry_divergence",
+      "status": "partial",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": null,
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "unit", "black-box"],
+      "evidenceRefs": [
+        "phase2-02b-v7-3-8-stream-bootstrap-source",
+        "phase2-02b-v7-3-8-stream-retry-failover-unit",
+        "phase2-02b-v7-3-8-black-box-simulation"
+      ],
+      "limitations": [
+        "Pre-chunk stream bootstrap buffering allows transparent credential failover on overload/5xx; once streaming starts downstream, no retry is possible."
+      ]
+    },
+    {
+      "id": "phase2-02b-current-non-stream-retry",
+      "capability": "non_stream_retry",
+      "status": "supported",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": null,
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source"],
+      "evidenceRefs": ["phase2-02b-v7-3-3-retry-and-fallback-source"],
+      "limitations": [
+        "Non-stream requests buffer entire upstream response; errors allow full credential retry, provider fallback, and multi-round retries."
+      ]
+    },
+    {
+      "id": "phase2-02b-candidate-non-stream-retry",
+      "capability": "non_stream_retry",
+      "status": "supported",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": null,
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "black-box"],
+      "evidenceRefs": [
+        "phase2-02b-v7-3-8-retry-and-fallback-source",
+        "phase2-02b-v7-3-8-black-box-simulation"
+      ],
+      "limitations": [
+        "Non-stream requests execute with complete retry and provider fallback support up to configured maxRetryCredentials."
+      ]
+    },
+    {
+      "id": "phase2-02b-external-unnegotiated-candidate-selection",
+      "capability": "external_candidate_selection_boundary",
+      "status": "unknown",
+      "artifactId": "external-unnegotiated",
+      "pluginContract": null,
+      "deploymentMode": "external",
+      "evidenceKind": ["source"],
+      "evidenceRefs": ["phase2-02b-external-unnegotiated-boundary"],
+      "limitations": [
+        "External runtime candidate visibility, scheduler support, across-priorities capability, and pinning guarantees cannot be assumed without explicit capability negotiation."
+      ]
+    }
+  ]
+}
