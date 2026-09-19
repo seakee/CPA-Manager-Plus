@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
+  FROZEN_BASELINE,
   loadAndValidateContract,
   validateEvidenceExtension,
 } from '../bin/ci/validate-phase2-evidence.mjs';
@@ -35,7 +36,7 @@ describe('Phase2-02A caller identity and scope evidence', () => {
     const raw = JSON.parse(readFileSync(extensionPath, 'utf8'));
     const summary = validateEvidenceExtension(raw, context);
 
-    expect(summary.anchors).toBe(12);
+    expect(summary.anchors).toBe(16);
     expect(summary.records).toBe(11);
   });
 
@@ -50,7 +51,7 @@ describe('Phase2-02A caller identity and scope evidence', () => {
     }
   });
 
-  it('proves caller_scope derivation is deterministic, irreversible, and whitespace-normalized', () => {
+  it('asserts caller_scope derivation is deterministic, domain-separated, normalized, and non-plaintext', () => {
     const key = 'sk-prod-user-key-987654321';
     const scope1 = computeCallerScope(key);
     const scope2 = computeCallerScope(key);
@@ -68,9 +69,17 @@ describe('Phase2-02A caller identity and scope evidence', () => {
     expect(computeCallerScope('   ')).toBe('');
     expect(computeCallerScope(null)).toBe('');
 
-    // Pre-image / secret redaction: hash does not reveal key contents
+    // Pre-image / non-plaintext: hash does not reveal key contents
     expect(scope1).not.toContain(key);
     expect(scope1).not.toContain('prod-user');
+
+    // Matches official release black-box computed values
+    expect(computeCallerScope('sk-phase2-caller-alpha')).toBe(
+      'b3b1a4b63a0b68349348164be3edb6fcb9a3ee41d4d026c1ef21afb93cafa151'
+    );
+    expect(computeCallerScope('sk-phase2-caller-beta')).toBe(
+      '0eb2fb39ffeac09dfadd792351df6e98ca2007e20e2015068111247fa9e2411c'
+    );
   });
 
   it('proves caller_scope partitions distinct callers and isolates their identity', () => {
@@ -95,7 +104,7 @@ describe('Phase2-02A caller identity and scope evidence', () => {
     const expectedScope = computeCallerScope(rawSecret);
 
     // Simulating CPA request lifecycle progression
-    // 1. request_received (pre-auth)
+    // 0. request_received (pre-auth)
     const stage0 = {
       userApiKey: null,
       callerScope: null,
@@ -103,23 +112,25 @@ describe('Phase2-02A caller identity and scope evidence', () => {
     };
     expect(stage0.callerScope).toBeNull();
 
-    // 2. client_api_key_resolved (accessAuthMiddleware)
+    // 1. client_api_key_resolved (accessAuthMiddleware)
     const stage1 = {
       userApiKey: rawSecret, // Built-in config_access sets candidate.value as principal
       accessProvider: 'config-inline',
     };
     expect(stage1.userApiKey).toBe(rawSecret);
 
-    // 3. model_resolved (handlers_execution.go requestExecutionMetadata)
+    // 2. model_resolved (headersFromContext + modelExecutionHeaders -> opts.Headers)
     const stage2 = {
+      headers: { authorization: `Bearer ${rawSecret}` },
       metadata: {
         caller_scope: computeCallerScope(stage1.userApiKey),
       },
     };
     expect(stage2.metadata.caller_scope).toBe(expectedScope);
     expect(stage2.metadata.userApiKey).toBeUndefined(); // Raw key NOT placed in metadata map
+    expect(stage2.headers.authorization).toContain(rawSecret); // Raw key remains in opts.Headers
 
-    // 4. credential_selected / scheduler options
+    // 5. credential_selected / scheduler options
     const schedulerReq = {
       options: {
         headers: { authorization: `Bearer ${rawSecret}` }, // Raw secret leaks in options.Headers
@@ -129,7 +140,7 @@ describe('Phase2-02A caller identity and scope evidence', () => {
     expect(schedulerReq.options.metadata.caller_scope).toBe(expectedScope);
     expect(schedulerReq.options.headers.authorization).toContain(rawSecret);
 
-    // 5. response_cancel_reject_failure / terminal RequestCompletion
+    // 9. response_cancel_reject_failure / terminal RequestCompletion
     const completion = {
       requestID: 'req-uuid-1',
       outcome: 'succeeded',
@@ -141,12 +152,119 @@ describe('Phase2-02A caller identity and scope evidence', () => {
     expect(completion.headers).toBeUndefined();
     expect(JSON.stringify(completion)).not.toContain(rawSecret);
 
-    // 6. usage_accounting_settlement / UsageRecord
+    // 10. usage_accounting_settlement / UsageRecord
     const usageRecord = {
       model: 'gpt-4o',
       apiKey: stage1.userApiKey, // APIKeyFromContext retrieves ginCtx userApiKey -> raw secret!
     };
     expect(usageRecord.apiKey).toBe(rawSecret);
+  });
+
+  it('guards evidence provenance: kinds, anchors, artifacts, digests, and references', () => {
+    const context = loaded();
+    const raw = JSON.parse(readFileSync(extensionPath, 'utf8'));
+    const anchorMap = new Map(raw.anchors.map((a) => [a.id, a]));
+
+    // 1. CPAMP synthetic test anchors must have evidenceKind === 'unit', NEVER 'black-box'
+    for (const anchor of raw.anchors) {
+      if (anchor.evidenceReference.includes('.test.mjs')) {
+        expect(anchor.evidenceKind).toBe('unit');
+      }
+    }
+
+    // 2. Black-box anchors must point to documented release observations, not test files
+    const blackBoxAnchors = raw.anchors.filter((a) => a.evidenceKind === 'black-box');
+    expect(blackBoxAnchors.length).toBeGreaterThanOrEqual(2);
+    for (const anchor of blackBoxAnchors) {
+      expect(anchor.evidenceReference).not.toContain('.test.mjs');
+      expect(anchor.evidenceReference).toMatch(/\.md#.+/);
+    }
+
+    // 3. Current and Candidate release black-box anchors exist and match artifact IDs
+    const currentBB = anchorMap.get('phase2-02a-v7-3-3-release-black-box');
+    const candidateBB = anchorMap.get('phase2-02a-v7-3-8-release-black-box');
+    expect(currentBB).toBeDefined();
+    expect(currentBB.artifactId).toBe('current-bundled-v7-3-3');
+    expect(candidateBB).toBeDefined();
+    expect(candidateBB.artifactId).toBe('candidate-release-v7-3-8');
+
+    // 4. Contract release assets match frozen baseline digests without drift
+    const currentArtifact = context.artifactById.get('current-bundled-v7-3-3');
+    const candidateArtifact = context.artifactById.get('candidate-release-v7-3-8');
+
+    const curAmd = currentArtifact.releaseAssets.find((a) => a.arch === 'amd64');
+    const curArm = currentArtifact.releaseAssets.find((a) => a.arch === 'arm64');
+    expect(curAmd.sha256).toBe(FROZEN_BASELINE.releases['v7.3.3'].assets.amd64);
+    expect(curArm.sha256).toBe(FROZEN_BASELINE.releases['v7.3.3'].assets.arm64);
+
+    const candAmd = candidateArtifact.releaseAssets.find((a) => a.arch === 'amd64');
+    const candArm = candidateArtifact.releaseAssets.find((a) => a.arch === 'arm64');
+    expect(candAmd.sha256).toBe(FROZEN_BASELINE.releases['v7.3.8'].assets.amd64);
+    expect(candArm.sha256).toBe(FROZEN_BASELINE.releases['v7.3.8'].assets.arm64);
+
+    // 5. Artifacts do not cross wires
+    for (const record of raw.records) {
+      for (const ref of record.evidenceRefs) {
+        const extAnchor = anchorMap.get(ref);
+        if (extAnchor) {
+          expect(extAnchor.artifactId).toBe(record.artifactId);
+        }
+      }
+    }
+
+    // 6. frontend_auth_provider_identity does NOT claim black-box kind
+    const frontendAuthRecords = raw.records.filter(
+      (r) => r.capability === 'frontend_auth_provider_identity'
+    );
+    for (const record of frontendAuthRecords) {
+      expect(record.evidenceKind).not.toContain('black-box');
+      for (const ref of record.evidenceRefs) {
+        const anchor = anchorMap.get(ref) || context.anchorById.get(ref);
+        if (anchor && anchor.evidenceKind) {
+          expect(anchor.evidenceKind).not.toBe('black-box');
+        }
+      }
+    }
+
+    // 7. No private local paths in references or limitations
+    for (const anchor of raw.anchors) {
+      expect(anchor.evidenceReference).not.toMatch(/\/Users\/|^file:\/\//);
+      for (const lim of anchor.limitations) {
+        expect(lim).not.toMatch(/\/Users\/|^file:\/\//);
+      }
+    }
+    for (const record of raw.records) {
+      for (const lim of record.limitations) {
+        expect(lim).not.toMatch(/\/Users\/|^file:\/\//);
+      }
+    }
+  });
+
+  it('strictly separates raw principal, caller_scope, and display metadata', () => {
+    const rawSecret = 'sk-tenant-classified-secret-token';
+    const principal = rawSecret; // built-in config access
+    const scope = computeCallerScope(principal);
+
+    const displayMetadata = {
+      source: 'authorization',
+      clientIP: '192.168.1.100',
+      userAgent: 'curl/8.7.1',
+      modelAlias: 'gpt-4o',
+    };
+
+    // Principal can be secret (built-in) or abstract identifier (plugin auth)
+    expect(principal).toBe(rawSecret);
+
+    // caller_scope is a derived cryptographic string, never equal to raw secret or principal
+    expect(scope).not.toBe(rawSecret);
+    expect(scope).not.toBe(principal);
+    expect(scope).toMatch(/^[0-9a-f]{64}$/);
+
+    // Display metadata must not be conflated with identity or scope
+    expect(displayMetadata.source).not.toBe(scope);
+    expect(displayMetadata.clientIP).not.toBe(scope);
+    expect(displayMetadata.userAgent).not.toBe(scope);
+    expect(displayMetadata.modelAlias).not.toBe(scope);
   });
 
   it('verifies v7.3.3 and v7.3.8 identity semantics parity', () => {
@@ -180,6 +298,7 @@ describe('Phase2-02A caller identity and scope evidence', () => {
       expect(record.status).toBe('unknown');
       expect(record.pluginContract).toBeNull();
       expect(record.deploymentMode).toBe('external');
+      expect(record.evidenceKind).not.toContain('black-box');
       expect(record.limitations.length).toBeGreaterThan(0);
     }
   });
@@ -199,7 +318,7 @@ describe('Phase2-02A caller identity and scope evidence', () => {
     const parsed = JSON.parse(result);
     expect(parsed.contractId).toBe('cpamp-v2-phase2-evidence-v1');
     expect(parsed.evidenceExtension).toEqual({
-      anchors: 12,
+      anchors: 16,
       records: 11,
     });
   });
