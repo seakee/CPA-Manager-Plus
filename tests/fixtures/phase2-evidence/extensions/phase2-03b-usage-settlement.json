@@ -13,9 +13,9 @@
       "id": "phase2-03b-current-usage-attempt-dispatch",
       "artifactId": "current-bundled-v7-3-3",
       "evidenceKind": "source",
-      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:internal/runtime/executor/helps/usage_helpers.go (NewExecutorUsageReporter, UsageReporter.publishWithOutcome, UsageReporter.publishRecord)",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:sdk/cliproxy/auth/conductor_execution.go (Manager.executeMixedOnce) & internal/runtime/executor/helps/usage_helpers.go (NewExecutorUsageReporter, UsageReporter.TrackFailure, UsageReporter.PublishFailure, UsageReporter.publishWithOutcome, UsageReporter.publishRecord, UsageReporter.EnsurePublished)",
       "limitations": [
-        "v7.3.3 instantiates a new UsageReporter per executor execution and dispatches via publishWithOutcome without central logical request aggregation; publishAttemptRecord does not exist in v7.3.3."
+        "v7.3.3 instantiates a new UsageReporter per executor attempt in conductor retry loops and dispatches via publishWithOutcome; multiple callbacks are emitted per logical request without attempt correlation keys, and publishAttemptRecord does not exist in v7.3.3."
       ]
     },
     {
@@ -25,15 +25,6 @@
       "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:internal/runtime/executor/helps/usage_helpers.go (StreamUsageBuffer.Observe, StreamUsageBuffer.Publish, UsageReporter.EnsurePublished)",
       "limitations": [
         "v7.3.3 StreamUsageBuffer observes SSE token payloads and defer-publishes on stream completion or client cancellation."
-      ]
-    },
-    {
-      "id": "phase2-03b-current-retry-multiple-attempts-unit",
-      "artifactId": "current-bundled-v7-3-3",
-      "evidenceKind": "unit",
-      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:sdk/cliproxy/auth/conductor_execution.go (Manager.executeMixedOnce) & sdk/cliproxy/auth/conductor_usage_test.go",
-      "limitations": [
-        "v7.3.3 retry and fallback loops invoke executors repeatedly across attempts; multiple callbacks are emitted per logical request without attempt correlation keys."
       ]
     },
     {
@@ -85,27 +76,18 @@
       "id": "phase2-03b-candidate-usage-attempt-dispatch",
       "artifactId": "candidate-release-v7-3-8",
       "evidenceKind": "source",
-      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:internal/runtime/executor/helps/usage_helpers.go (UsageReporter.publishAttemptRecord, UsageReporter.warnModelSubstitution)",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:sdk/cliproxy/auth/conductor_execution.go (Manager.executeMixedOnce) & internal/runtime/executor/helps/usage_helpers.go (NewExecutorUsageReporter, UsageReporter.TrackFailure, UsageReporter.publishWithOutcome, UsageReporter.publishAttemptRecord, UsageReporter.publishRecord, UsageReporter.EnsurePublished, UsageReporter.warnModelSubstitution)",
       "limitations": [
-        "v7.3.8 introduces publishAttemptRecord to publish usage per upstream attempt and emit attempt-level observability warnings without logical request aggregation."
+        "v7.3.8 invokes executors repeatedly across retry attempts in conductor execution, creating separate UsageReporters and dispatching via publishAttemptRecord; multiple callbacks occur per logical request without attempt correlation keys."
       ]
     },
     {
       "id": "phase2-03b-candidate-stream-usage-observation",
       "artifactId": "candidate-release-v7-3-8",
       "evidenceKind": "source",
-      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:internal/runtime/executor/helps/usage_helpers.go (StreamUsageBuffer.Publish, StreamUsageBuffer.ObserveClaudeStream, StreamUsageBuffer.ObserveOpenAIStream)",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:internal/runtime/executor/helps/usage_helpers.go (StreamUsageBuffer.Observe, StreamUsageBuffer.Publish, StreamUsageBuffer.ObserveClaudeStream, StreamUsageBuffer.ObserveOpenAIStream, UsageReporter.EnsurePublished)",
       "limitations": [
         "Stream usage observation and cancellation behavior in v7.3.8 are identical to v7.3.3."
-      ]
-    },
-    {
-      "id": "phase2-03b-candidate-retry-multiple-attempts-unit",
-      "artifactId": "candidate-release-v7-3-8",
-      "evidenceKind": "unit",
-      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:sdk/cliproxy/auth/conductor_execution.go (Manager.executeMixedOnce) & sdk/cliproxy/auth/conductor_usage_test.go",
-      "limitations": [
-        "Multiple callback emissions per logical request persist under retry/fallback in v7.3.8."
       ]
     },
     {
@@ -167,11 +149,10 @@
         }
       },
       "deploymentMode": "embedded",
-      "evidenceKind": ["source", "unit"],
+      "evidenceKind": ["source"],
       "evidenceRefs": [
         "phase2-03b-current-usage-record-structure",
-        "phase2-03b-current-usage-attempt-dispatch",
-        "phase2-03b-current-retry-multiple-attempts-unit"
+        "phase2-03b-current-usage-attempt-dispatch"
       ],
       "limitations": [
         "Completed non-stream requests observe token usage and latency in v7.3.3, but delivery is asynchronous and lacks request ID correlation."
@@ -237,7 +218,7 @@
         "phase2-03b-current-usage-attempt-dispatch"
       ],
       "limitations": [
-        "Client cancellation in v7.3.3 dispatches via context.WithoutCancel with observed partial tokens or failure details."
+        "Client cancellation in v7.3.3 dispatches via context.WithoutCancel with observed partial tokens or failure details; context.WithoutCancel prevents inheriting the client cancellation signal but does not provide durable delivery."
       ]
     },
     {
@@ -252,13 +233,13 @@
         }
       },
       "deploymentMode": "embedded",
-      "evidenceKind": ["source", "unit"],
+      "evidenceKind": ["source"],
       "evidenceRefs": [
         "phase2-03b-current-usage-attempt-dispatch",
-        "phase2-03b-current-retry-multiple-attempts-unit"
+        "phase2-03b-current-usage-record-structure"
       ],
       "limitations": [
-        "In v7.3.3, each upstream attempt during retry or fallback emits an independent usage record via its own UsageReporter; multiple callbacks occur for a single logical request without attempt correlation."
+        "In v7.3.3, conductor execution invokes executors across retry/fallback attempts, each creating its own UsageReporter; multiple callbacks occur for a single logical request without attempt correlation keys."
       ]
     },
     {
@@ -436,11 +417,10 @@
         }
       },
       "deploymentMode": "release-artifact-fixture",
-      "evidenceKind": ["source", "unit"],
+      "evidenceKind": ["source"],
       "evidenceRefs": [
         "phase2-03b-candidate-usage-record-structure",
-        "phase2-03b-candidate-usage-attempt-dispatch",
-        "phase2-03b-candidate-retry-multiple-attempts-unit"
+        "phase2-03b-candidate-usage-attempt-dispatch"
       ],
       "limitations": [
         "Candidate v7.3.8 maintains identical non-stream usage observation to v7.3.3 without RequestID correlation."
@@ -506,7 +486,7 @@
         "phase2-03b-candidate-usage-attempt-dispatch"
       ],
       "limitations": [
-        "Client cancellation in v7.3.8 dispatches via context.WithoutCancel with observed partial tokens or failure details."
+        "Client cancellation in v7.3.8 dispatches via context.WithoutCancel with observed partial tokens or failure details; context.WithoutCancel prevents inheriting the client cancellation signal but does not provide durable delivery."
       ]
     },
     {
@@ -521,13 +501,13 @@
         }
       },
       "deploymentMode": "release-artifact-fixture",
-      "evidenceKind": ["source", "unit"],
+      "evidenceKind": ["source"],
       "evidenceRefs": [
         "phase2-03b-candidate-usage-attempt-dispatch",
-        "phase2-03b-candidate-retry-multiple-attempts-unit"
+        "phase2-03b-candidate-usage-record-structure"
       ],
       "limitations": [
-        "Multiple callback emissions per logical request persist under retry/fallback in v7.3.8 without attempt correlation."
+        "In v7.3.8, conductor retry/fallback loops invoke executors across attempts with independent UsageReporters emitting via publishAttemptRecord; multiple callbacks occur for a single logical request without attempt correlation keys."
       ]
     },
     {

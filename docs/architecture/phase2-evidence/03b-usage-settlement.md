@@ -6,14 +6,14 @@
 - **Status**: Complete / Proven
 - **Base**: `v2@aca237cf7a99ce5d098dedcaec5cf8e147f05e4b`
 - **Namespace**: `phase2-03b-*`
-- **Machine-readable Fixture**: [`tests/fixtures/phase2-evidence/extensions/phase2-03b-usage-settlement.json`](../../tests/fixtures/phase2-evidence/extensions/phase2-03b-usage-settlement.json)
-- **Automated Test**: [`tests/phase2UsageSettlementEvidence.test.mjs`](../../tests/phase2UsageSettlementEvidence.test.mjs)
+- **Machine-readable Fixture**: [`../../../tests/fixtures/phase2-evidence/extensions/phase2-03b-usage-settlement.json`](../../../tests/fixtures/phase2-evidence/extensions/phase2-03b-usage-settlement.json)
+- **Automated Test**: [`../../../tests/phase2UsageSettlementEvidence.test.mjs`](../../../tests/phase2UsageSettlementEvidence.test.mjs)
 
 ---
 
 ## 1. 核心目标与概念分离
 
-本报告通过对 CPA 官方版本 `v7.3.3`（当前 Bundled 产物）和 `v7.3.8`（候选 Release Fixture）的只读代码比对与单元分析，精确划定 CPA `UsagePlugin` 与 usage pipeline 的能力边界：
+本报告通过对 CPA 官方版本 `v7.3.3`（当前 Bundled 产物）和 `v7.3.8`（候选 Release Fixture）的只读代码比对与源码调用链分析，精确划定 CPA `UsagePlugin` 与 usage pipeline 的能力边界：
 
 - **观察（Observation / Telemetry）**：
   - 非流式（non-stream）成功请求的使用量与延迟观测；
@@ -24,7 +24,7 @@
   - 路由经由 Plugin Executor 时的使用量捕获与派发；
   - 插件 Panic 时的熔断隔离（`fusePlugin` 保护宿主主请求不崩溃）。
 - **关联（Correlation）**：
-  - 仅包含长会话与凭证维度的标识（`SessionID`, `ParentSessionID`, `AuthID`, `AuthIndex`）；
+  - 仅包含长会话与凭证维度的粗粒度标识（`SessionID`, `ParentSessionID`, `AuthID`, `AuthIndex`）；
   - **严重缺乏请求级与尝试级关联键**：`UsageRecord` 中不存在 `RequestID`、`TraceID`、`AttemptID` 或 `IdempotencyKey`。
 - **预留与准入（Reservation / Admission）**：
   - **完全不存在（Unsupported）**：无任何前置预留 hook、资源预扣减接口或配额准入门禁。
@@ -41,7 +41,7 @@
 ## 2. 必须回答的核心问题详尽解答（精确版本溯源）
 
 ### 1. `UsageRecord` 实际字段清单（v7.3.3 vs v7.3.8）
-在 `sdk/pluginapi/types.go` 的 `UsageRecord` 结构体中，两版经逐字段检验具有相同字段定义：
+在 `sdk/pluginapi/types.go` 的 `UsageRecord` 结构体中，两版经逐字段检验具有完全一致的字段定义：
 
 | 字段 | 类型 | 说明 | `router-for-me/CLIProxyAPI@v7.3.3` | `router-for-me/CLIProxyAPI@v7.3.8` |
 |---|---|---|:---:|:---:|
@@ -82,14 +82,25 @@
   - **重要版本定论**：`publishAttemptRecord` 在 **v7.3.3 中并不存在**。v7.3.3 通过 Executor 作用域的独立 Reporter 实例隐式实现了 attempt 级别的单独发布。
 - **v7.3.8 演进机制**：
   - 源码证据：`router-for-me/CLIProxyAPI@v7.3.8:internal/runtime/executor/helps/usage_helpers.go` 中的 `UsageReporter.publishAttemptRecord`。
-  - 机制：v7.3.8 显式重构提取了 `publishAttemptRecord` helper 方法，在其内部调用 `publishRecord` 并触发 `warnModelSubstitution` 警告，从架构上显式定义了“单次上游 attempt 级别发布”的契约。
+  - 机制：v7.3.8 显式重构提取了 `publishAttemptRecord` helper 方法，在其内部调用 `publishRecord` 并触发 `warnModelSubstitution` 警告，从架构上显式确立了“单次上游 attempt 级别发布”的契约。
 - **共性结论**：两版中**均以 upstream-attempt 为单位直接发布**，不存在将多次 attempt 聚合为单一逻辑请求记录的中央聚合器。
 
-### 4. Retry / Fallback 多 Attempt 时的行为
+### 4. Retry / Fallback 多 Attempt 时的行为与事实调用链
+- **事实链推导**：
+  ```text
+  logical request
+    → conductor attempt A
+        → executor A creates UsageReporter A
+        → failed attempt publishes failure usage via reporter A
+    → conductor attempt B
+        → executor B creates UsageReporter B
+        → successful attempt publishes usage via reporter B
+  ```
 - **结论**：
   1. **每个失败的 attempt 均可能发出 usage**：当 attempt 发生错误返回时，Executor 的 `defer reporter.TrackFailure(ctx, &err)` 会触发 `PublishFailure`，向队列发送一条 `Failed: true` 的 `Record`（Token 计数通常为 0）。
   2. **最终成功会再次发出 usage**：Conductor（`sdk/cliproxy/auth/conductor_execution.go:Manager.executeMixedOnce`）重试或 fallback 到后继可用凭证并执行成功后，新 Executor 实例的 Reporter 会发出一条 `Failed: false` 的 `Record`（包含真实的 Token Detail）。
   3. **单个逻辑请求会触发多个 callbacks**：若一次逻辑请求经历 2 次重试（如 Attempt 1 失败，Attempt 2 失败，Attempt 3 成功），UsagePlugin 会相继收到 3 个独立的 `HandleUsage` 回调（2 条失败记录 + 1 条成功记录）。由于缺乏 RequestID/AttemptID，插件无法从原生数据中辨别它们属于同一次客户端调用。
+  4. **`once.Do` 的局部作用域**：单个 `UsageReporter` 内部的 `r.once.Do` 仅限制**该 reporter 实例**的发布次数；重试过程生成了多个 reporter 实例，因此不会阻止跨 attempt 的多次 usage 发布。
 
 ### 5. Stream 场景行为（Success / Cancel / Disconnect）
 - **结论**：两版在 `StreamUsageBuffer` 的流式处理契约上保持一致：
@@ -97,7 +108,8 @@
   - **客户端取消 / 断开连接**：
     - 若在首个 token 帧到达前断开，`streamUsage.PublishFailure` 会发布包含 cancel 错误的失败记录；
     - 若在流式传输中断开但已观测到部分 token 帧，`StreamUsageBuffer` 会将已捕获的部分 tokens 发送出去；
-    - 在两版的 `internal/pluginhost/adapters_usage_translation.go:usageAdapter.HandleUsage` 中，宿主均显式使用 `ctx = context.WithoutCancel(ctx)` 脱敏上下文，确保即便客户端 context 已 cancel，UsagePlugin 的回调执行也不会被提前中断。
+    - 在两版的 `internal/pluginhost/adapters_usage_translation.go:usageAdapter.HandleUsage` 中，宿主均显式使用 `ctx = context.WithoutCancel(ctx)` 脱敏上下文。
+    - **语义收窄说明**：`context.WithoutCancel` 仅避免 UsagePlugin callback 继承客户端取消状态，不构成持久化或可靠送达保证（仍受进程崩溃、队列丢失、熔断、RPC 失败等制约）。
 
 ### 6. Failure / Zero-token / Unknown Usage 路径
 - **结论**：
@@ -126,11 +138,26 @@
   - **Panic & Fuse**：若插件 `HandleUsage` 发生 panic，`adapters_usage_translation.go:usageAdapter.HandleUsage` 会捕获 panic 并调用 `host.fusePlugin`，将该插件状态置为熔断（fused）。熔断后该插件被移出活跃列表，后续 usage 回调直接跳过，宿主进程与主请求绝不会因为插件 panic 而崩溃；
   - **Reload**：热重载时动态刷新插件指针并重新注册，支持无缝热替换。
 
-### 10. Usage Callback 与 RequestCompletion 的顺序关系
-- **结论**：**异步解耦，无通用顺序保证（No Universal Ordering Guarantee）**。
-  - `UsageReporter` 将记录追加到内存队列中，由后台单一 worker goroutine 异步并发取出并 dispatch；
-  - `RequestLifecyclePlugin.RequestCompletion` 是在 HTTP Handler 的工作线程中同步调用的（例如在返回客户端 HTTP 响应前或流式管道关闭时）；
-  - 两者完全并发独立运行，无任何因果屏障（barrier）。Usage callback 可能早于、晚于或与 RequestCompletion 同时发生。
+### 10. Usage Callback 与 RequestCompletion 的顺序关系（两层异步解耦）
+- **结论**：**双通道异步解耦，无通用顺序保证（No Universal Ordering Guarantee）**。
+  - **Usage 派发路径**：
+    ```text
+    UsageReporter
+    → usage.Manager.Publish
+    → in-memory queue ([]queueItem)
+    → background worker goroutine
+    → UsagePlugin.HandleUsage
+    ```
+  - **Request completion 派发路径**：
+    ```text
+    requestLifecycleTracker.complete
+    → Host.CompleteRequest
+    → Host.CompleteRequestExcept
+    → goroutine (go func() { plugin.HandleRequestComplete(ctx, completion) }())
+    → RequestLifecyclePlugin.HandleRequestComplete
+    ```
+  - 源码证据：`internal/pluginhost/adapters_interceptors.go#CompleteRequestExcept` 明确通过单独的 `go func()` 异步调度 `HandleRequestComplete`。
+  - 两条路径之间不存在 ACK、barrier、transaction 或持久化顺序协议。因此 UsagePlugin callback 与 RequestLifecyclePlugin callback 不存在可依赖的全局先后顺序。
 
 ### 11. 是否存在 Pre-request Reserve / Quota Admission / Commit / Rollback 原语？
 - **结论**：**绝对不存在（Unsupported）**。
@@ -155,14 +182,14 @@
 
 ## 3. 证据矩阵（Capability Records 总结）
 
-在 [`phase2-03b-usage-settlement.json`](../../tests/fixtures/phase2-evidence/extensions/phase2-03b-usage-settlement.json) 中，我们冻结了 17 个 Evidence Anchors 和 29 个 Capability Records：
+在 [`../../../tests/fixtures/phase2-evidence/extensions/phase2-03b-usage-settlement.json`](../../../tests/fixtures/phase2-evidence/extensions/phase2-03b-usage-settlement.json) 中，我们冻结了 15 个 Evidence Anchors（清除伪 unit 测试，完全基于真实源码链）和 29 个 Capability Records：
 
 | 领域 | 能力标识 (`capability`) | Bundled v7.3.3 | Candidate v7.3.8 | External (Unnegotiated) | 关键限制与版本边界说明 |
 |---|---|:---:|:---:|:---:|---|
 | **基本观测** | `non_stream_usage_observation` | `supported` | `supported` | `unknown` | 异步观测已完成请求的 Token 与延迟，无 RequestID 关联 |
 | **流式观测** | `stream_usage_observation` | `supported` | `supported` | `unknown` | 依赖上游 SSE 输出 token 帧，流中断上报已观测 tokens |
 | **失败上报** | `upstream_failure_reporting` | `supported` | `supported` | `unknown` | 上报 Failed=true 与 HTTP 错误码，Token 为 0 |
-| **取消上报** | `cancellation_reporting` | `supported` | `supported` | `unknown` | 客户端取消通过 `context.WithoutCancel` 确保送达 |
+| **取消上报** | `cancellation_reporting` | `supported` | `supported` | `unknown` | `context.WithoutCancel` 避免继承客户端取消，但不保证可靠送达 |
 | **重试回调** | `retry_fallback_attempt_callbacks` | `partial` | `partial` | `unknown` | 每次 attempt 独立回调，单个逻辑请求对应多个 callbacks；v7.3.3 无 `publishAttemptRecord` helper |
 | **保底计数** | `zero_unknown_usage_handling` | `supported` | `supported` | `unknown` | `EnsurePublished` 兜底生成零 token 记录保障请求计数 |
 | **插件路由** | `plugin_executor_usage_dispatch` | `supported` | `supported` | `unknown` | 经 Plugin Executor 转发的请求完整接入 usage pipeline |
@@ -184,17 +211,17 @@
    node bin/ci/validate-phase2-evidence.mjs \
      --evidence tests/fixtures/phase2-evidence/extensions/phase2-03b-usage-settlement.json \
      --json
-   # 输出：17 anchors, 29 records 全部合规通过，无 Schema 违背与悬空引用
+   # 输出：15 anchors, 29 records 全部合规通过，无 Schema 违背与悬空引用
    ```
 2. **自动化端到端测试套件**：
    ```bash
    npx vitest run tests/phase2UsageSettlementEvidence.test.mjs
-   # 13 项深度测试断言全部通过（含版本隔离、无本地硬编码路径、各场景边界分类等）
+   # 14 项深度测试断言全部通过（含版本隔离、无伪 unit anchor、无本地硬编码路径、仓库相对路径校验等）
    ```
 3. **全库测试套件回归**：
    ```bash
    npm run test:repo
-   # 13 个测试套件，243 项测试全部 PASS
+   # 13 个测试套件，244 项测试全部 PASS
    ```
 4. **代码格式与 Diff 检查**：
    ```bash

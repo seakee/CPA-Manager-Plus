@@ -13,6 +13,10 @@ const extensionPath = path.join(
   repoRoot,
   'tests/fixtures/phase2-evidence/extensions/phase2-03b-usage-settlement.json'
 );
+const architectureDocPath = path.join(
+  repoRoot,
+  'docs/architecture/phase2-evidence/03b-usage-settlement.md'
+);
 
 const loadExtension = () => JSON.parse(readFileSync(extensionPath, 'utf8'));
 
@@ -22,7 +26,7 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
     const extension = loadExtension();
     const summary = validateEvidenceExtension(extension, loaded);
 
-    expect(summary.anchors).toBe(17);
+    expect(summary.anchors).toBe(15);
     expect(summary.records).toBe(29);
   });
 
@@ -42,8 +46,8 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
     const currentAnchors = extension.anchors.filter((a) => a.artifactId === 'current-bundled-v7-3-3');
     const candidateAnchors = extension.anchors.filter((a) => a.artifactId === 'candidate-release-v7-3-8');
 
-    expect(currentAnchors.length).toBe(8);
-    expect(candidateAnchors.length).toBe(8);
+    expect(currentAnchors.length).toBe(7);
+    expect(candidateAnchors.length).toBe(7);
 
     // Provenance labeling check
     for (const anchor of currentAnchors) {
@@ -65,6 +69,29 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
 
     const candidateAttemptAnchor = candidateAnchors.find((a) => a.id === 'phase2-03b-candidate-usage-attempt-dispatch');
     expect(candidateAttemptAnchor.evidenceReference).toContain('publishAttemptRecord');
+  });
+
+  it('enforces anti-regression guards against fake unit evidence and requires source chains for retry', () => {
+    const extension = loadExtension();
+    const anchorIds = new Set(extension.anchors.map((a) => a.id));
+
+    // Fake unit anchors must be purged
+    expect(anchorIds.has('phase2-03b-current-retry-multiple-attempts-unit')).toBe(false);
+    expect(anchorIds.has('phase2-03b-candidate-retry-multiple-attempts-unit')).toBe(false);
+
+    // conductor_usage_test.go only tests context metadata, never retry/fallback
+    for (const anchor of extension.anchors) {
+      expect(anchor.evidenceReference).not.toContain('conductor_usage_test.go');
+    }
+
+    const records = new Map(extension.records.map((r) => [r.id, r]));
+    const currentRetry = records.get('phase2-03b-current-retry-multiple-attempts');
+    const candidateRetry = records.get('phase2-03b-candidate-retry-multiple-attempts');
+
+    expect(currentRetry.evidenceKind).toEqual(['source']);
+    expect(candidateRetry.evidenceKind).toEqual(['source']);
+    expect(currentRetry.evidenceRefs).toContain('phase2-03b-current-usage-attempt-dispatch');
+    expect(candidateRetry.evidenceRefs).toContain('phase2-03b-candidate-usage-attempt-dispatch');
   });
 
   it('enforces UsageRecord presence and absence claims in v7.3.3 and v7.3.8 anchors', () => {
@@ -126,7 +153,7 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
     expect(currentStream.limitations[0]).toContain('Streaming token observation in v7.3.3 depends on upstream SSE usage chunks');
   });
 
-  it('proves upstream failure and cancellation reporting behavior', () => {
+  it('classifies upstream failure and cancellation reporting behavior with scoped context semantics', () => {
     const extension = loadExtension();
     const records = new Map(extension.records.map((r) => [r.id, r]));
 
@@ -142,9 +169,11 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
     expect(currentCancel.status).toBe('supported');
     expect(candidateCancel.status).toBe('supported');
     expect(currentCancel.limitations[0]).toContain('context.WithoutCancel');
+    expect(currentCancel.limitations[0]).toContain('does not provide durable delivery');
+    expect(candidateCancel.limitations[0]).toContain('does not provide durable delivery');
   });
 
-  it('proves retry and fallback multi-attempt dispatch is partial and emits multiple callbacks', () => {
+  it('classifies retry and fallback multi-attempt dispatch from pinned source evidence', () => {
     const extension = loadExtension();
     const records = new Map(extension.records.map((r) => [r.id, r]));
 
@@ -160,7 +189,7 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
     expect(candidateExactCorrelation.status).toBe('requires_upstream');
   });
 
-  it('proves zero-token and unknown usage handling preserves request counting', () => {
+  it('classifies zero-token and unknown usage handling preserving request counting', () => {
     const extension = loadExtension();
     const records = new Map(extension.records.map((r) => [r.id, r]));
 
@@ -171,7 +200,7 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
     expect(currentZero.limitations[0]).toContain('EnsurePublished in v7.3.3 guarantees request counting');
   });
 
-  it('proves plugin executor usage dispatch path is supported', () => {
+  it('classifies plugin executor usage dispatch path as supported', () => {
     const extension = loadExtension();
     const records = new Map(extension.records.map((r) => [r.id, r]));
 
@@ -181,7 +210,7 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
     expect(candidatePluginExec.status).toBe('supported');
   });
 
-  it('proves UsagePlugin failure, panic fuse, and asynchronous queue resilience', () => {
+  it('classifies UsagePlugin failure, panic fuse, and asynchronous queue resilience', () => {
     const extension = loadExtension();
     const records = new Map(extension.records.map((r) => [r.id, r]));
 
@@ -198,7 +227,7 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
     expect(currentDelivery.limitations[0]).toContain('best-effort in-memory observation without persistent journaling');
   });
 
-  it('proves pre-request reservation and authoritative settlement primitives are unsupported', () => {
+  it('classifies pre-request reservation and authoritative settlement primitives as unsupported', () => {
     const extension = loadExtension();
     const records = new Map(extension.records.map((r) => [r.id, r]));
 
@@ -228,12 +257,30 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
     }
   });
 
+  it('enforces architecture document relative links to repository root tests directory', () => {
+    const docContent = readFileSync(architectureDocPath, 'utf8');
+
+    // Must use ../../../tests/... from docs/architecture/phase2-evidence/
+    expect(docContent).toContain('../../../tests/fixtures/phase2-evidence/extensions/phase2-03b-usage-settlement.json');
+    expect(docContent).toContain('../../../tests/phase2UsageSettlementEvidence.test.mjs');
+
+    // Must forbid erroneous ../../tests/ pattern
+    expect(docContent).not.toMatch(/\]\(\.\.\/\.\.\/tests\//);
+  });
+
   it('strictly ensures no hardcoded machine or developer paths exist in evidence files', () => {
     const extensionFileContent = readFileSync(extensionPath, 'utf8');
+    const docContent = readFileSync(architectureDocPath, 'utf8');
     const localUserPrefix = String.fromCharCode(47) + 'Users' + String.fromCharCode(47);
     const localHomePrefix = String.fromCharCode(47) + 'home' + String.fromCharCode(47);
+    const localFileProtocol = 'file:' + String.fromCharCode(47) + String.fromCharCode(47);
 
     expect(extensionFileContent).not.toContain(localUserPrefix);
     expect(extensionFileContent).not.toContain(localHomePrefix);
+    expect(extensionFileContent).not.toContain(localFileProtocol);
+
+    expect(docContent).not.toContain(localUserPrefix);
+    expect(docContent).not.toContain(localHomePrefix);
+    expect(docContent).not.toContain(localFileProtocol);
   });
 });
