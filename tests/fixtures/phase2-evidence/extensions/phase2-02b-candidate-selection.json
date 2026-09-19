@@ -145,12 +145,21 @@
       ]
     },
     {
-      "id": "phase2-02b-v7-3-8-black-box-simulation",
+      "id": "phase2-02b-v7-3-8-cpamp-contract-unit",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "unit",
+      "evidenceReference": "tests/phase2CandidateSelectionEvidence.test.mjs#candidate-selection-contract-model",
+      "limitations": [
+        "Repository test suite models and asserts documented contract boundaries for candidate generation, pre-scheduler filtering, pinning fencing, invalid selection fallback, and retry re-selection."
+      ]
+    },
+    {
+      "id": "phase2-02b-v7-3-8-release-black-box",
       "artifactId": "candidate-release-v7-3-8",
       "evidenceKind": "black-box",
-      "evidenceReference": "tests/phase2CandidateSelectionEvidence.test.mjs#candidate-selection-boundary",
+      "evidenceReference": "docs/architecture/phase2-evidence/02b-candidate-selection.md#v738-release-black-box-observation",
       "limitations": [
-        "Repository test suite reproduces candidate generation, pre-scheduler filtering, pinning fencing, invalid selection fallback, and retry re-selection."
+        "Black-box verification executed against official CPA v7.3.8 release binary with dynamic C-ABI scheduler plugin across Cases A, B, C, and D (highest-tier default visibility, across-priorities candidate visibility, pre-scheduler eligibility fencing, and selection validity with fallback)."
       ]
     },
     {
@@ -196,11 +205,12 @@
         }
       },
       "deploymentMode": "release-artifact-fixture",
-      "evidenceKind": ["source", "unit"],
+      "evidenceKind": ["source", "unit", "black-box"],
       "evidenceRefs": [
         "plugin-abi-schema-v6",
         "phase2-02b-v7-3-8-across-priorities-source",
-        "phase2-02b-v7-3-8-pre-filter-unit"
+        "phase2-02b-v7-3-8-pre-filter-unit",
+        "phase2-02b-v7-3-8-release-black-box"
       ],
       "limitations": [
         "In CPA v7.3.8 without SchedulerAcrossPriorities opt-in, candidate visibility remains restricted to the highest available priority tier."
@@ -224,7 +234,7 @@
         "plugin-abi-schema-v6",
         "phase2-02b-v7-3-8-across-priorities-source",
         "phase2-02b-v7-3-8-across-priorities-unit",
-        "phase2-02b-v7-3-8-black-box-simulation"
+        "phase2-02b-v7-3-8-release-black-box"
       ],
       "limitations": [
         "In CPA v7.3.8 with SchedulerAcrossPriorities=true, scheduler receives candidates across all priority tiers, but pre-scheduler filtering still applies."
@@ -264,7 +274,7 @@
         "plugin-abi-schema-v6",
         "phase2-02b-v7-3-8-candidate-filtering-source",
         "phase2-02b-v7-3-8-pre-filter-unit",
-        "phase2-02b-v7-3-8-black-box-simulation"
+        "phase2-02b-v7-3-8-release-black-box"
       ],
       "limitations": [
         "Even with SchedulerAcrossPriorities=true, disabled, cooldown, provider mismatch, model mismatch, and unauthorized credentials are excluded before scheduler sees candidates."
@@ -301,7 +311,7 @@
         "plugin-abi-schema-v6",
         "phase2-02b-v7-3-8-across-priorities-source",
         "phase2-02b-v7-3-8-across-priorities-unit",
-        "phase2-02b-v7-3-8-black-box-simulation"
+        "phase2-02b-v7-3-8-release-black-box"
       ],
       "limitations": [
         "Valid candidate Auth.ID returned by scheduler is accepted and forwarded to executor."
@@ -338,7 +348,7 @@
         "plugin-abi-schema-v6",
         "phase2-02b-v7-3-8-invalid-candidate-fallback-source",
         "phase2-02b-v7-3-8-invalid-candidate-fallback-unit",
-        "phase2-02b-v7-3-8-black-box-simulation"
+        "phase2-02b-v7-3-8-release-black-box"
       ],
       "limitations": [
         "Host normalizeSchedulerResponse detects unknown Auth.ID and resets handled=false; conductor falls back to host selector without error."
@@ -370,12 +380,12 @@
         "config": { "scheduler": true }
       },
       "deploymentMode": "release-artifact-fixture",
-      "evidenceKind": ["source", "unit", "black-box"],
+      "evidenceKind": ["source", "unit"],
       "evidenceRefs": [
         "plugin-abi-schema-v6",
         "phase2-02b-v7-3-8-invalid-candidate-fallback-source",
         "phase2-02b-v7-3-8-invalid-candidate-fallback-unit",
-        "phase2-02b-v7-3-8-black-box-simulation"
+        "phase2-02b-v7-3-8-cpamp-contract-unit"
       ],
       "limitations": [
         "Delegate builtin round_robin and fill_first are recognized; unknown delegate falls back to unhandled."
@@ -391,12 +401,12 @@
         "config": { "scheduler": true }
       },
       "deploymentMode": "release-artifact-fixture",
-      "evidenceKind": ["source", "unit", "black-box"],
+      "evidenceKind": ["source", "unit"],
       "evidenceRefs": [
         "plugin-abi-schema-v6",
         "phase2-02b-v7-3-8-invalid-candidate-fallback-source",
         "phase2-02b-v7-3-8-plugin-fused-unit",
-        "phase2-02b-v7-3-8-black-box-simulation"
+        "phase2-02b-v7-3-8-cpamp-contract-unit"
       ],
       "limitations": [
         "Plugin panic triggers fusePlugin marking the scheduler fused, falling back to host selector; explicit errors are returned directly."
@@ -422,10 +432,10 @@
       "artifactId": "candidate-release-v7-3-8",
       "pluginContract": null,
       "deploymentMode": "release-artifact-fixture",
-      "evidenceKind": ["source", "black-box"],
+      "evidenceKind": ["source", "unit"],
       "evidenceRefs": [
         "phase2-02b-v7-3-8-pinned-and-selected-auth-source",
-        "phase2-02b-v7-3-8-black-box-simulation"
+        "phase2-02b-v7-3-8-cpamp-contract-unit"
       ],
       "limitations": [
         "pinned_auth_id strictly isolates selection to the target credential, fails closed on target unavailability, and remains pinned during retries."
@@ -451,10 +461,10 @@
       "artifactId": "candidate-release-v7-3-8",
       "pluginContract": null,
       "deploymentMode": "release-artifact-fixture",
-      "evidenceKind": ["source", "black-box"],
+      "evidenceKind": ["source", "unit"],
       "evidenceRefs": [
         "phase2-02b-v7-3-8-pinned-and-selected-auth-source",
-        "phase2-02b-v7-3-8-black-box-simulation"
+        "phase2-02b-v7-3-8-cpamp-contract-unit"
       ],
       "limitations": [
         "selected_auth_id and selected_auth_index are published synchronously into metadata and notify registered callbacks; updates on retry if different credential is selected."
@@ -486,11 +496,11 @@
         "config": { "scheduler": true }
       },
       "deploymentMode": "release-artifact-fixture",
-      "evidenceKind": ["source", "black-box"],
+      "evidenceKind": ["source", "unit"],
       "evidenceRefs": [
         "plugin-abi-schema-v6",
         "phase2-02b-v7-3-8-retry-and-fallback-source",
-        "phase2-02b-v7-3-8-black-box-simulation"
+        "phase2-02b-v7-3-8-cpamp-contract-unit"
       ],
       "limitations": [
         "Retry triggers full re-selection allowing credential fallback and provider fallback in mixed mode; each attempt invokes scheduler fresh."
@@ -516,10 +526,10 @@
       "artifactId": "candidate-release-v7-3-8",
       "pluginContract": null,
       "deploymentMode": "release-artifact-fixture",
-      "evidenceKind": ["source", "black-box"],
+      "evidenceKind": ["source", "unit"],
       "evidenceRefs": [
         "phase2-02b-v7-3-8-retry-and-fallback-source",
-        "phase2-02b-v7-3-8-black-box-simulation"
+        "phase2-02b-v7-3-8-cpamp-contract-unit"
       ],
       "limitations": [
         "Multi-round retry allows retrying the same credential after transient error or cooldown wait when effectiveRequestRetryLimit permits."
@@ -545,11 +555,11 @@
       "artifactId": "candidate-release-v7-3-8",
       "pluginContract": null,
       "deploymentMode": "release-artifact-fixture",
-      "evidenceKind": ["source", "unit", "black-box"],
+      "evidenceKind": ["source", "unit"],
       "evidenceRefs": [
         "phase2-02b-v7-3-8-stream-bootstrap-source",
         "phase2-02b-v7-3-8-stream-retry-failover-unit",
-        "phase2-02b-v7-3-8-black-box-simulation"
+        "phase2-02b-v7-3-8-cpamp-contract-unit"
       ],
       "limitations": [
         "Pre-chunk stream bootstrap buffering allows transparent credential failover on overload/5xx; once streaming starts downstream, no retry is possible."
@@ -575,10 +585,10 @@
       "artifactId": "candidate-release-v7-3-8",
       "pluginContract": null,
       "deploymentMode": "release-artifact-fixture",
-      "evidenceKind": ["source", "black-box"],
+      "evidenceKind": ["source", "unit"],
       "evidenceRefs": [
         "phase2-02b-v7-3-8-retry-and-fallback-source",
-        "phase2-02b-v7-3-8-black-box-simulation"
+        "phase2-02b-v7-3-8-cpamp-contract-unit"
       ],
       "limitations": [
         "Non-stream requests execute with complete retry and provider fallback support up to configured maxRetryCredentials."

@@ -344,7 +344,95 @@ Stream 与 Non-Stream 在失败重试能力上存在**根本性分水岭**：
 
 - CPAMP 目前仅能通过管理 API 获取状态，尚无能力协商协议层证明其具体的 CPA 版本、是否加载了 Bridge Plugin、以及是否启用了 `SchedulerAcrossPriorities` 开关。
 - 依据 Phase 2 证据基线规范，**不得将 Embedded 源码的推论跨环境推广至 External**。
-- **结论状态**: 外部运行时的所有候选选择与调度能力必须强制严格分类为 **`unknown`**（或在有部分安全只读凭证时归为 `partial`）。在具备正式的握手与 Capability 协商机制之前，严禁在产品中承诺 External 的 Hard Routing 或插件接管。
+### 2.12 v7.3.8 Release Black-box Observation <a id="v738-release-black-box-observation"></a>
+
+基于官方正式发布的 CPA `v7.3.8` 二进制产物及 C-ABI 动态插件，在隔离的临时环境中执行了真实黑盒运行观测，完整覆盖了 Case A、Case B、Case C 与 Case D 四项核心验证。
+
+#### 1. 被测工件与运行环境基线
+
+- **官方发布版本**: `CLIProxyAPI Version: 7.3.8, Commit: c93978c4ea2e908255a2a06c37599fda3651554a`
+- **官方发行包校验和**:
+  - `CLIProxyAPI_7.3.8_linux_amd64.tar.gz`: `3fe5228c458624175d5e4e81d9dd003d82de688ca498fa368a790ea120bda0e3`
+  - `CLIProxyAPI_7.3.8_linux_arm64.tar.gz`: `8d09ce286d857b2d0e6d77c39e08a755246120df58c02a115d58c391fc73e3f1`
+  - `CLIProxyAPI_7.3.8_darwin_amd64.tar.gz`: `38099b7e0ad4792bfc449ccc0f5e9fd9feb9823e245c24691a3bca01d5a2b865`
+- **执行环境**: 本地 Darwin x86_64 宿主直接拉起官方原生发布二进制 `cli-proxy-api`。
+- **插件实现**: 遵循 CPA Plugin C-ABI（`ABI_VERSION = 1`），导出 `cliproxy_plugin_init`、`cliproxyPluginCall`、`cliproxyPluginFree`、`cliproxyPluginShutdown`，编译为共享库 `test-scheduler.dylib` 并通过配置文件 `plugins.configs.test-scheduler` 挂载。
+
+#### 2. 凭据清单 (Synthetic Inventory)
+
+测试环境中预置 4 份合成凭据文件于 `auth-dir`：
+
+| 文件名 | Provider (`type`) | Priority | Disabled | 预期作用 |
+| :--- | :--- | :--- | :--- | :--- |
+| `auth-high.json` | `claude` | `10` | `false` | 最高优先级活跃凭据 |
+| `auth-low.json` | `claude` | `5` | `false` | 低优先级健康凭据 |
+| `auth-disabled.json` | `claude` | `10` | `true` | 高优先级但被显式禁用凭据 |
+| `auth-codex.json` | `codex` | `10` | `false` | 高优先级但 Provider 不匹配凭据 |
+
+#### 3. 观测过程与实测记录
+
+##### Case A: 默认状态最高优先级可见性 (Highest Tier Default Visibility)
+- **配置**: 插件能力声明 `capabilities: {"scheduler": true}`（即 `scheduler_across_priorities: false` 默认值）。
+- **激励**: 向 `POST /v1/messages` 发送模型为 `claude-sonnet-4-5-20250929` 的请求。
+- **实测观测数据**:
+  ```json
+  {
+    "Model": "claude-sonnet-4-5-20250929",
+    "Candidates": [
+      {
+        "ID": "auth-high.json",
+        "Provider": "claude",
+        "Priority": 10,
+        "Status": "active"
+      }
+    ]
+  }
+  ```
+- **结论**: 在未开启跨优先级时，虽然 `auth-low.json` 状态完全健康，但宿主在预处理阶段通过最高优先级分桶将其截断，插件**只能看见最高优先级凭据**。
+
+##### Case B: 跨优先级候选可见性 (Across-Priorities Candidate Visibility)
+- **配置**: 插件能力声明 `capabilities: {"scheduler": true, "scheduler_across_priorities": true}`。
+- **激励**: 相同请求。
+- **实测观测数据**:
+  ```json
+  {
+    "Model": "claude-sonnet-4-5-20250929",
+    "Candidates": [
+      {
+        "ID": "auth-high.json",
+        "Provider": "claude",
+        "Priority": 10,
+        "Status": "active"
+      },
+      {
+        "ID": "auth-low.json",
+        "Provider": "claude",
+        "Priority": 5,
+        "Status": "active"
+      }
+    ]
+  }
+  ```
+- **结论**: 显式声明 `scheduler_across_priorities: true` 后，多优先级候选（Priority 10 与 Priority 5）同时被完整传递给调度插件。
+
+##### Case C: 调度前置资格过滤栅栏 (Pre-Scheduler Eligibility Fencing)
+- **观测比对**:
+  - 在 Case A 与 Case B 任意一轮的 `Candidates` 列表中，`auth-disabled.json`（`disabled: true`）均**彻底缺席**；
+  - `auth-codex.json`（Provider 不匹配）同样**彻底缺席**。
+- **结论**: 证明无论是否开启 `scheduler_across_priorities`，Conductor 层的资格过滤（Disabled / Provider Mismatch / Cooldown）先于调度插件严格生效，插件调度器绝不可能触碰或唤醒不可用凭据。
+
+##### Case D: 选择有效性与非法候选优雅降级 (Selection Validity & Fallback)
+- **Part 1 (合法跨优先级选择)**:
+  - 在 Case B 中，插件决策选拔低优先级凭据 `auth-low.json`（返回 `Handled: true, AuthID: "auth-low.json"`）。
+  - 宿主日志实测：在执行以及后续由 fake key 引发的重试日志中明确记录：`selected_auth_id: "auth-low.json"`。证明插件在合法候选集范围内的调度决策被宿主完整接纳并严格执行。
+- **Part 2 (非法/未知候选优雅降级)**:
+  - 插件决策强行返回候选集中不存在的凭据 `invalid-ghost-auth.json`（`Handled: true, AuthID: "invalid-ghost-auth.json"`）。
+  - 宿主运行日志实测捕获：
+    ```text
+    [warn] [scheduler.go:27] pluginhost: scheduler returned invalid response: unknown auth id plugin_id=test-scheduler
+    [debug] [conductor_execution.go:1827] Use OAuth provider=claude auth_file=auth-high.json for model claude-sonnet-4-5-20250929
+    ```
+  - 结论：宿主 `normalizeSchedulerResponse` 识别未知凭据，重置 `Handled = false`，Conductor 立即降级回退至内置原生 selector，自动选用最高优先级活跃凭据 `auth-high.json` 继续服务。整个过程中宿主**未发生任何 panic、崩溃或请求挂起**。
 
 ---
 
@@ -412,11 +500,11 @@ Stream 与 Non-Stream 在失败重试能力上存在**根本性分水岭**：
 
 | 验证项                    | CPA v7.3.3 (Embedded)                                                 | CPA v7.3.8 (Candidate Release)                                | External (Unnegotiated) | 证据来源                           | 架构定论                        |
 | ------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------- | ----------------------- | ---------------------------------- | ------------------------------- |
-| **候选可见性 (Default)**  | 仅最高可用 Priority tier (`partial`)                                  | 仅最高可用 Priority tier (`partial`)                          | 未知 (`unknown`)        | `conductor_selection.go`           | 默认均不具备全局跨优先级视野    |
-| **跨优先级调度 (Opt-In)** | 不支持 (`unsupported`)                                                | 支持跨优先级但受前置过滤限制 (`supported`)                    | 未知 (`unknown`)        | `scheduler_test.go`                | 仅 v7.3.8 具备该开关            |
-| **前置过滤 (Pre-Filter)** | 支持 Provider/Model/Disabled/Cooldown/Unauthorized 过滤 (`supported`) | 支持完整前置安全过滤 (`supported`)                            | 未知 (`unknown`)        | `conductor_selection.go`           | 过滤发生在调度器之前            |
-| **合法候选选择**          | 正常接管与执行 (`supported`)                                          | 正常接管与执行 (`supported`)                                  | 未知 (`unknown`)        | `scheduler_test.go`                | 合法 ID 均被正常处理            |
-| **非法候选回退**          | 静默忽略并回退内置 Selector (`supported`)                             | 规范化校验，忽略并回退 (`supported`)                          | 未知 (`unknown`)        | `internal/pluginhost/scheduler.go` | 不会崩溃，保证高可用回退        |
+| **候选可见性 (Default)**  | 仅最高可用 Priority tier (`partial`)                                  | 仅最高可用 Priority tier (`partial`)                          | 未知 (`unknown`)        | `conductor_selection.go` / v7.3.8 Release Black-box Case A | 默认均不具备全局跨优先级视野    |
+| **跨优先级调度 (Opt-In)** | 不支持 (`unsupported`)                                                | 支持跨优先级但受前置过滤限制 (`supported`)                    | 未知 (`unknown`)        | `scheduler_test.go` / v7.3.8 Release Black-box Case B    | 仅 v7.3.8 具备该开关            |
+| **前置过滤 (Pre-Filter)** | 支持 Provider/Model/Disabled/Cooldown/Unauthorized 过滤 (`supported`) | 支持完整前置安全过滤 (`supported`)                            | 未知 (`unknown`)        | `conductor_selection.go` / v7.3.8 Release Black-box Case C | 过滤发生在调度器之前            |
+| **合法候选选择**          | 正常接管与执行 (`supported`)                                          | 正常接管与执行 (`supported`)                                  | 未知 (`unknown`)        | `scheduler_test.go` / v7.3.8 Release Black-box Case D1   | 合法 ID 均被正常处理            |
+| **非法候选回退**          | 静默忽略并回退内置 Selector (`supported`)                             | 规范化校验，忽略并回退 (`supported`)                          | 未知 (`unknown`)        | `internal/pluginhost/scheduler.go` / Case D2 Fallback    | 不会崩溃，保证高可用回退        |
 | **Plugin 委托与未处理**   | 支持委托和 unhandled 回退 (`supported`)                               | 支持委托和 unhandled 回退 (`supported`)                       | 未知 (`unknown`)        | `scheduler.go`                     | 健壮性保障                      |
 | **Plugin Panic 熔断**     | 支持熔断回退 (`supported`)                                            | 支持熔断回退 (`supported`)                                    | 未知 (`unknown`)        | `scheduler_test.go`                | 单插件异常不影响整体可用性      |
 | **pinned_auth_id 语义**   | 严格过滤，不绕过健康检查，重试保持，Fail-Closed (`supported`)         | 严格过滤，不绕过健康检查，重试保持，Fail-Closed (`supported`) | 未知 (`unknown`)        | `conductor_execution.go`           | 是 CPA 原生最严密的安全锁定语义 |

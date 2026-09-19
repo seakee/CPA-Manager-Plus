@@ -55,6 +55,67 @@ describe('Phase2-02B: Candidate Visibility / Selection / Retry-Fallback Evidence
     });
   });
 
+  describe('Evidence Provenance and Anchor Governance', () => {
+    it('enforces strict separation between CPAMP unit model and genuine candidate release black-box', () => {
+      const extension = readExtension();
+
+      // 1. phase2-02b-v7-3-8-cpamp-contract-unit MUST be unit evidenceKind, NEVER black-box
+      const unitAnchor = extension.anchors.find(
+        (a) => a.id === 'phase2-02b-v7-3-8-cpamp-contract-unit'
+      );
+      expect(unitAnchor).toBeDefined();
+      expect(unitAnchor.evidenceKind).toBe('unit');
+      expect(unitAnchor.evidenceReference).toBe(
+        'tests/phase2CandidateSelectionEvidence.test.mjs#candidate-selection-contract-model'
+      );
+
+      // 2. NO black-box anchor may point to JS unit test file
+      const blackBoxAnchors = extension.anchors.filter((a) => a.evidenceKind === 'black-box');
+      expect(blackBoxAnchors.length).toBeGreaterThan(0);
+      for (const bb of blackBoxAnchors) {
+        expect(bb.evidenceReference).not.toContain('tests/');
+        expect(bb.evidenceReference).not.toContain('.test.');
+      }
+
+      // 3. Genuine candidate release black-box anchor exists and references documented observation
+      const releaseBlackBoxAnchor = extension.anchors.find(
+        (a) => a.id === 'phase2-02b-v7-3-8-release-black-box'
+      );
+      expect(releaseBlackBoxAnchor).toBeDefined();
+      expect(releaseBlackBoxAnchor.evidenceKind).toBe('black-box');
+      expect(releaseBlackBoxAnchor.artifactId).toBe('candidate-release-v7-3-8');
+      expect(releaseBlackBoxAnchor.evidenceReference).toBe(
+        'docs/architecture/phase2-evidence/02b-candidate-selection.md#v738-release-black-box-observation'
+      );
+
+      // 4. release-black-box is ONLY attached to records verified by genuine black-box Cases A, B, C, D
+      const verifiedRecordIds = [
+        'phase2-02b-candidate-default-highest-tier-visibility', // Case A
+        'phase2-02b-candidate-across-priorities-opt-in',        // Case B
+        'phase2-02b-candidate-pre-filter-exclusion',           // Case C
+        'phase2-02b-candidate-valid-candidate-selection',      // Case D1
+        'phase2-02b-candidate-invalid-candidate-fallback',     // Case D2
+      ];
+
+      for (const record of extension.records) {
+        if (record.evidenceRefs.includes('phase2-02b-v7-3-8-release-black-box')) {
+          expect(verifiedRecordIds).toContain(record.id);
+          expect(record.evidenceKind).toContain('black-box');
+        } else if (record.artifactId === 'candidate-release-v7-3-8') {
+          // Other candidate records must not have black-box
+          expect(record.evidenceKind).not.toContain('black-box');
+        }
+      }
+
+      // 5. External runtime remains unknown
+      const externalRecord = extension.records.find(
+        (r) => r.id === 'phase2-02b-external-unnegotiated-candidate-selection'
+      );
+      expect(externalRecord.status).toBe('unknown');
+      expect(externalRecord.deploymentMode).toBe('external');
+    });
+  });
+
   describe('Question 1 & 2: Candidate Pre-Filtering and v7.3.3 Default Highest-Tier Visibility', () => {
     it('documents pre-scheduler filtering of provider, model, disabled, cooldown, unauthorized, and priority', () => {
       const extension = readExtension();
@@ -91,8 +152,8 @@ describe('Phase2-02B: Candidate Visibility / Selection / Retry-Fallback Evidence
       expect(currentHighestTier.limitations[0]).toContain('highest available priority tier');
     });
 
-    it('simulates pre-scheduler filtering boundaries against inventory', () => {
-      // Simulating CPA conductor_selection.go candidate generation logic
+    it('models and asserts documented contract boundaries for pre-scheduler filtering', () => {
+      // Models documented CPA conductor_selection.go candidate generation and filtering contract in unit scope
       const inventory = [
         {
           id: 'auth-1',
@@ -207,7 +268,7 @@ describe('Phase2-02B: Candidate Visibility / Selection / Retry-Fallback Evidence
       });
     });
 
-    it('simulates candidate visibility difference between default and opt-in', () => {
+    it('models and asserts documented contract for candidate visibility (default vs across-priorities)', () => {
       const candidates = [
         { id: 'auth-high', priority: 10, disabled: false, cooldown: false },
         { id: 'auth-mid', priority: 5, disabled: false, cooldown: false },
@@ -256,7 +317,7 @@ describe('Phase2-02B: Candidate Visibility / Selection / Retry-Fallback Evidence
       expect(candidateInvalid.status).toBe('supported');
     });
 
-    it('verifies exact fallback semantics when scheduler returns Auth.ID not in candidates', () => {
+    it('models and asserts documented fallback contract when scheduler returns Auth.ID not in candidates', () => {
       // Simulating CPA internal/pluginhost/scheduler.go normalizeSchedulerResponse + conductor_selection.go
       const normalizeSchedulerResponse = (resp, suppliedCandidates) => {
         const authID = (resp.authId || '').trim();
@@ -411,7 +472,7 @@ describe('Phase2-02B: Candidate Visibility / Selection / Retry-Fallback Evidence
       expect(nonStreamRetry.status).toBe('supported');
     });
 
-    it('simulates retry loop re-invoking candidate filtering and scheduler selection', () => {
+    it('models and asserts documented contract for retry re-invoking candidate filtering and scheduler selection', () => {
       const authPool = [
         { id: 'auth-1', provider: 'codex' },
         { id: 'auth-2', provider: 'claude' },
@@ -481,7 +542,7 @@ describe('Phase2-02B: Candidate Visibility / Selection / Retry-Fallback Evidence
       expect(fused.status).toBe('supported');
     });
 
-    it('simulates pluginhost panic recovery, fusing, and fallback', () => {
+    it('models and asserts documented contract for pluginhost panic recovery, fusing, and fallback', () => {
       class FakePluginHost {
         constructor() {
           this.fused = false;
