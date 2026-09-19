@@ -159,6 +159,23 @@
       ]
     },
     {
+      "id": "plugin-abi-schema-v6",
+      "repository": "cpa",
+      "evidenceKind": "source",
+      "path": "sdk/pluginabi/types.go",
+      "symbols": ["SchemaVersion uint32 = 6"],
+      "versions": [
+        {
+          "artifactId": "current-bundled-v7-3-3",
+          "sourceCommit": "7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b"
+        },
+        {
+          "artifactId": "candidate-release-v7-3-8",
+          "sourceCommit": "c93978c4ea2e908255a2a06c37599fda3651554a"
+        }
+      ]
+    },
+    {
       "id": "handler-request-model",
       "repository": "cpa",
       "evidenceKind": "source",
@@ -864,7 +881,7 @@
       "status": "partial",
       "artifactId": "current-bundled-v7-3-3",
       "pluginContract": {
-        "schemaVersion": null,
+        "schemaVersion": 6,
         "config": { "scheduler": true, "scheduler_across_priorities": false }
       },
       "deploymentMode": "embedded",
@@ -872,6 +889,7 @@
       "evidenceRefs": [
         "candidate-filtering-selection",
         "blocked-and-priority-semantics",
+        "plugin-abi-schema-v6",
         "scheduler-plugin-v7-3-3",
         "scheduler-default-unit"
       ],
@@ -885,13 +903,14 @@
       "status": "partial",
       "artifactId": "candidate-release-v7-3-8",
       "pluginContract": {
-        "schemaVersion": null,
+        "schemaVersion": 6,
         "config": { "scheduler": true, "scheduler_across_priorities": false }
       },
       "deploymentMode": "release-artifact-fixture",
       "evidenceKind": ["source", "unit"],
       "evidenceRefs": [
         "candidate-filtering-selection",
+        "plugin-abi-schema-v6",
         "scheduler-plugin-boundary",
         "scheduler-capability-rpc",
         "scheduler-default-unit",
@@ -907,7 +926,7 @@
       "status": "partial",
       "artifactId": "candidate-release-v7-3-8",
       "pluginContract": {
-        "schemaVersion": null,
+        "schemaVersion": 6,
         "config": { "scheduler": true, "scheduler_across_priorities": true }
       },
       "deploymentMode": "release-artifact-fixture",
@@ -915,6 +934,7 @@
       "evidenceRefs": [
         "candidate-filtering-selection",
         "blocked-and-priority-semantics",
+        "plugin-abi-schema-v6",
         "scheduler-plugin-boundary",
         "scheduler-capability-rpc",
         "scheduler-priority-unit"
@@ -928,10 +948,14 @@
       "capability": "request_terminal_callback",
       "status": "supported",
       "artifactId": "current-bundled-v7-3-3",
-      "pluginContract": { "schemaVersion": null, "config": { "request_lifecycle_plugin": true } },
+      "pluginContract": { "schemaVersion": 6, "config": { "request_lifecycle_plugin": true } },
       "deploymentMode": "embedded",
       "evidenceKind": ["source", "unit"],
-      "evidenceRefs": ["request-interceptor-contract", "terminal-lifecycle-unit"],
+      "evidenceRefs": [
+        "plugin-abi-schema-v6",
+        "request-interceptor-contract",
+        "terminal-lifecycle-unit"
+      ],
       "limitations": [
         "The callback is asynchronous and terminal-only for requests that reached request interception; it is not a production CPAMP Bridge Plugin."
       ]
@@ -941,10 +965,14 @@
       "capability": "request_terminal_callback",
       "status": "supported",
       "artifactId": "candidate-release-v7-3-8",
-      "pluginContract": { "schemaVersion": null, "config": { "request_lifecycle_plugin": true } },
+      "pluginContract": { "schemaVersion": 6, "config": { "request_lifecycle_plugin": true } },
       "deploymentMode": "release-artifact-fixture",
       "evidenceKind": ["source", "unit"],
-      "evidenceRefs": ["request-interceptor-contract", "terminal-lifecycle-unit"],
+      "evidenceRefs": [
+        "plugin-abi-schema-v6",
+        "request-interceptor-contract",
+        "terminal-lifecycle-unit"
+      ],
       "limitations": [
         "The callback remains asynchronous and terminal-only; release-artifact black-box evidence may be appended without changing this frozen candidate version."
       ]
@@ -954,10 +982,15 @@
       "capability": "completed_usage_callback",
       "status": "partial",
       "artifactId": "current-bundled-v7-3-3",
-      "pluginContract": { "schemaVersion": null, "config": { "usage_plugin": true } },
+      "pluginContract": { "schemaVersion": 6, "config": { "usage_plugin": true } },
       "deploymentMode": "embedded",
       "evidenceKind": ["source", "unit"],
-      "evidenceRefs": ["usage-publish", "usage-plugin-dispatch", "usage-plugin-unit"],
+      "evidenceRefs": [
+        "plugin-abi-schema-v6",
+        "usage-publish",
+        "usage-plugin-dispatch",
+        "usage-plugin-unit"
+      ],
       "limitations": [
         "Completed usage observation exists, but reservation, settlement, deduplication, and correlation guarantees are not proven."
       ]
@@ -967,10 +1000,15 @@
       "capability": "completed_usage_callback",
       "status": "partial",
       "artifactId": "candidate-release-v7-3-8",
-      "pluginContract": { "schemaVersion": null, "config": { "usage_plugin": true } },
+      "pluginContract": { "schemaVersion": 6, "config": { "usage_plugin": true } },
       "deploymentMode": "release-artifact-fixture",
       "evidenceKind": ["source", "unit"],
-      "evidenceRefs": ["usage-publish", "usage-plugin-dispatch", "usage-plugin-unit"],
+      "evidenceRefs": [
+        "plugin-abi-schema-v6",
+        "usage-publish",
+        "usage-plugin-dispatch",
+        "usage-plugin-unit"
+      ],
       "limitations": [
         "Candidate source retains completed usage observation, but Phase2-03 must prove reservation and settlement semantics independently."
       ]

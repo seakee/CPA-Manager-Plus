@@ -38,6 +38,7 @@ export const CANONICAL_LIFECYCLE_ORDER = [
 export const FROZEN_BASELINE = Object.freeze({
   cpampCommit: '2850980d3d08fa30878744e1d67fc04607504c01',
   schedulerAcrossPrioritiesCommit: 'b715526add0c452acc62062bf4fcef53897be604',
+  pluginABISchemaVersion: 6,
   releases: Object.freeze({
     'v7.3.3': Object.freeze({
       sourceCommit: '7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b',
@@ -193,6 +194,10 @@ const frozenAsset = (artifact, arch, expectedDigest) => {
   return asset;
 };
 
+const anchorSupportsArtifact = (anchor, artifactId) =>
+  anchor.artifactId === artifactId ||
+  anchor.versions?.some((version) => version.artifactId === artifactId);
+
 export function validateCapabilityRecord(record, context) {
   const { artifactById, anchorById } = context;
   invariant(
@@ -228,7 +233,7 @@ export function validateCapabilityRecord(record, context) {
     const anchor = anchorById.get(evidenceRef);
     invariant(anchor, `${record.id}: unknown evidence reference ${evidenceRef}`);
     invariant(
-      anchor.versions.some((version) => version.artifactId === record.artifactId),
+      anchorSupportsArtifact(anchor, record.artifactId),
       `${record.id}: ${evidenceRef} has no evidence for ${record.artifactId}`
     );
   }
@@ -236,6 +241,21 @@ export function validateCapabilityRecord(record, context) {
     invariant(
       record.evidenceRefs.some((evidenceRef) => anchorById.get(evidenceRef).evidenceKind === kind),
       `${record.id}: evidence kind ${kind} has no matching evidence reference`
+    );
+  }
+
+  if (
+    artifact.versionKnown &&
+    artifact.pluginAvailability === 'present' &&
+    record.pluginContract !== null
+  ) {
+    invariant(
+      Number.isInteger(record.pluginContract.schemaVersion),
+      `${record.id}: known plugin contract requires an integer schemaVersion`
+    );
+    invariant(
+      record.pluginContract.schemaVersion === FROZEN_BASELINE.pluginABISchemaVersion,
+      `${record.id}: Plugin ABI schema version drifted from the frozen artifact evidence`
     );
   }
 
@@ -488,22 +508,32 @@ export function verifySourceProvenance(contract, cpaSource, cpampSource = repoRo
   return { anchors: contract.sourceAnchors.length, commits: checkedCommits.size };
 }
 
-export function validateAdditionalRecords(records, context) {
-  invariant(Array.isArray(records), 'Additional capability evidence must be a JSON array');
-  const ids = new Set(context.recordById.keys());
-  for (const [index, record] of records.entries()) {
-    invariant(context.schema, 'Capability record JSON Schema is required');
-    validateJSONSchema(
-      record,
-      context.schema.$defs.capabilityRecord,
-      context.schema,
-      `$additionalRecords[${index}]`
+export function validateEvidenceExtension(extension, context) {
+  invariant(context.schema, 'Evidence extension JSON Schema is required');
+  validateJSONSchema(
+    extension,
+    context.schema.$defs.evidenceExtension,
+    context.schema,
+    '$evidenceExtension'
+  );
+
+  const anchorById = new Map(context.anchorById);
+  for (const anchor of extension.anchors) {
+    invariant(!anchorById.has(anchor.id), `Duplicate evidence anchor id: ${anchor.id}`);
+    invariant(
+      context.artifactById.has(anchor.artifactId),
+      `${anchor.id}: unknown artifact ${anchor.artifactId}`
     );
-    invariant(!ids.has(record.id), `Duplicate capability record id: ${record.id}`);
-    validateCapabilityRecord(record, context);
-    ids.add(record.id);
+    anchorById.set(anchor.id, anchor);
   }
-  return records.length;
+
+  const recordIds = new Set(context.recordById.keys());
+  for (const record of extension.records) {
+    invariant(!recordIds.has(record.id), `Duplicate capability record id: ${record.id}`);
+    validateCapabilityRecord(record, { ...context, anchorById });
+    recordIds.add(record.id);
+  }
+  return { anchors: extension.anchors.length, records: extension.records.length };
 }
 
 const parseArgs = (argv) => {
@@ -513,7 +543,7 @@ const parseArgs = (argv) => {
     if (arg === '--json') options.json = true;
     else if (arg === '--contract') options.contract = argv[++index];
     else if (arg === '--cpa-source') options.cpaSource = argv[++index];
-    else if (arg === '--records') options.records = argv[++index];
+    else if (arg === '--evidence') options.evidence = argv[++index];
     else if (arg === '--artifact') options.artifacts.push(argv[++index]);
     else throw new Error(`Unknown argument: ${arg}`);
   }
@@ -545,7 +575,7 @@ async function main() {
     capabilityRecords: loaded.contract.capabilityRecords.length,
     verifiedArtifacts: [],
     verifiedSource: null,
-    additionalRecords: 0,
+    evidenceExtension: null,
   };
 
   for (const spec of options.artifacts) {
@@ -554,9 +584,9 @@ async function main() {
   }
   if (options.cpaSource)
     summary.verifiedSource = verifySourceProvenance(loaded.contract, options.cpaSource);
-  if (options.records) {
-    const additional = readJSON(options.records);
-    summary.additionalRecords = validateAdditionalRecords(additional, loaded);
+  if (options.evidence) {
+    const extension = readJSON(options.evidence);
+    summary.evidenceExtension = validateEvidenceExtension(extension, loaded);
   }
 
   if (options.json) process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);

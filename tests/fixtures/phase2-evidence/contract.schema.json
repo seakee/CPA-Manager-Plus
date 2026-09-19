@@ -274,7 +274,7 @@
       "additionalProperties": false,
       "required": ["schemaVersion", "config"],
       "properties": {
-        "schemaVersion": { "type": ["integer", "null"], "minimum": 0 },
+        "schemaVersion": { "type": "integer", "minimum": 0 },
         "config": { "type": "object" }
       }
     },
@@ -314,6 +314,39 @@
           "type": "array",
           "minItems": 1,
           "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "extensionAnchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "artifactId", "evidenceKind", "evidenceReference", "limitations"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]+$" },
+        "artifactId": { "type": "string" },
+        "evidenceKind": { "$ref": "#/$defs/evidenceKind" },
+        "evidenceReference": { "type": "string", "minLength": 1 },
+        "limitations": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "evidenceExtension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["anchors", "records"],
+      "properties": {
+        "anchors": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/extensionAnchor" }
+        },
+        "records": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/capabilityRecord" }
         }
       }
     }

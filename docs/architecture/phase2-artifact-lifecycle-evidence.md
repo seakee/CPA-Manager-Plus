@@ -22,6 +22,8 @@ The official asset names, sizes, tag commits, and SHA-256 values are in the fixt
 
 The v7.3.8 Go capability is `Capabilities.SchedulerAcrossPriorities`; its RPC field is `scheduler_across_priorities`. Its zero value is `false`. With `false`, the scheduler receives the filtered highest available priority tier. With `true`, it receives filtered candidates across priority tiers. Provider/model eligibility, disabled state, and cooldown filtering still happen first. Candidate visibility does not establish safe hard pinning.
 
+Both v7.3.3 and v7.3.8 declare Plugin ABI `SchemaVersion uint32 = 6` in `sdk/pluginabi/types.go`. This schema version is pinned independently from CPA artifact identity and plugin configuration. The unchanged schema version does not prove that `SchedulerAcrossPriorities` exists: v7.3.3 uses schema 6 without that capability, while v7.3.8 uses schema 6 and contains it. Capability conclusions must therefore retain all three dimensions: exact CPA artifact/version, Plugin ABI schema, and the relevant plugin capability/config.
+
 ## Canonical request lifecycle
 
 The shared stage vocabulary remains:
@@ -101,7 +103,47 @@ npm run evidence:phase2 -- \
   --artifact candidate-linux-amd64=/local/path/CLIProxyAPI_7.3.8_linux_amd64.tar.gz
 ```
 
-C2/C3 may validate additional record arrays with `--records /path/to/records.json`. A failed optional source, artifact, or record check exits only this evidence command; no production package imports the harness.
+C2/C3 add their own evidence without editing the frozen baseline. Each append-only extension contains new anchors and records:
+
+```json
+{
+  "anchors": [
+    {
+      "id": "phase2-02-candidate-selection-black-box",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "black-box",
+      "evidenceReference": "tests/fixtures/phase2-02/candidate-selection.test.mjs#selects-target",
+      "limitations": ["Fixture-only observation; no Hard Routing decision is implied."]
+    }
+  ],
+  "records": [
+    {
+      "id": "phase2-02-candidate-selection-evidence",
+      "capability": "candidate_selection_evidence",
+      "status": "partial",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": { "scheduler": true, "scheduler_across_priorities": true }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "black-box"],
+      "evidenceRefs": ["plugin-abi-schema-v6", "phase2-02-candidate-selection-black-box"],
+      "limitations": ["Hard Routing remains a Phase2-02 decision."]
+    }
+  ]
+}
+```
+
+Validate it with:
+
+```bash
+npm run evidence:phase2 -- --evidence tests/fixtures/phase2-02/c2-evidence.json
+```
+
+Extension anchor and record IDs must be new. An extension record may reference baseline anchors and anchors declared in the same extension. Every extension artifact ID must resolve to the frozen Phase2-01 artifacts. The extension schema has no artifact, vocabulary, lifecycle, or provenance fields, so it cannot replace those baseline sections. This lets Phase2-02 and Phase2-03 own separate evidence files and validate independently without modifying `contract.json`.
+
+A failed optional source, artifact, or extension check exits only this evidence command; no production package imports the harness.
 
 ## Deferred decisions
 

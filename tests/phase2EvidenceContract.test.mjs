@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -9,10 +10,10 @@ import {
   CAPABILITY_STATUSES,
   FROZEN_BASELINE,
   loadAndValidateContract,
-  validateAdditionalRecords,
   validateBundledDockerfile,
   validateCapabilityRecord,
   validateContract,
+  validateEvidenceExtension,
   verifyArtifactDigest,
 } from '../bin/ci/validate-phase2-evidence.mjs';
 
@@ -59,7 +60,7 @@ describe('Phase2 evidence contract', () => {
   });
 
   it('freezes SchedulerAcrossPriorities ancestry and default/opt-in scenarios', () => {
-    const { contract, recordById } = loaded();
+    const { contract, anchorById, recordById } = loaded();
     expect(contract.schedulerAcrossPrioritiesProvenance).toMatchObject({
       commit: FROZEN_BASELINE.schedulerAcrossPrioritiesCommit,
       default: false,
@@ -93,6 +94,33 @@ describe('Phase2 evidence contract', () => {
     expect(recordById.get('candidate-scheduler-candidate-visibility-opt-in').status).toBe(
       'partial'
     );
+
+    const schemaAnchor = anchorById.get('plugin-abi-schema-v6');
+    expect(schemaAnchor).toMatchObject({
+      path: 'sdk/pluginabi/types.go',
+      symbols: ['SchemaVersion uint32 = 6'],
+    });
+    expect(schemaAnchor.versions.map((version) => version.artifactId)).toEqual([
+      'current-bundled-v7-3-3',
+      'candidate-release-v7-3-8',
+    ]);
+    for (const record of contract.capabilityRecords.filter(
+      (candidate) => candidate.pluginContract !== null
+    )) {
+      expect(record.pluginContract.schemaVersion).toBe(FROZEN_BASELINE.pluginABISchemaVersion);
+      expect(record.evidenceRefs).toContain('plugin-abi-schema-v6');
+    }
+    expect(
+      recordById.get('current-scheduler-candidate-visibility-default').pluginContract.schemaVersion
+    ).toBe(
+      recordById.get('candidate-scheduler-candidate-visibility-default').pluginContract
+        .schemaVersion
+    );
+    expect(
+      contract.schedulerAcrossPrioritiesProvenance.releaseAncestry.find(
+        (release) => release.version === 'v7.3.3'
+      ).includesCommit
+    ).toBe(false);
   });
 
   it('validates the canonical lifecycle order and every stage evidence boundary', () => {
@@ -139,6 +167,18 @@ describe('Phase2 evidence contract', () => {
     const invalidSchemaContract = structuredClone(contract);
     invalidSchemaContract.capabilityRecords[0].status = 'mostly works';
     expect(() => validateContract(invalidSchemaContract, schema)).toThrow('invalid enum value');
+
+    const missingPluginSchema = structuredClone(contract.capabilityRecords[0]);
+    missingPluginSchema.pluginContract.schemaVersion = null;
+    expect(() =>
+      validateCapabilityRecord(missingPluginSchema, { artifactById, anchorById })
+    ).toThrow('known plugin contract requires an integer schemaVersion');
+
+    const invalidPluginSchemaContract = structuredClone(contract);
+    invalidPluginSchemaContract.capabilityRecords[0].pluginContract.schemaVersion = null;
+    expect(() => validateContract(invalidPluginSchemaContract, schema)).toThrow(
+      'expected type integer'
+    );
   });
 
   it('rejects automatic promotion of unknown External capability evidence', () => {
@@ -156,26 +196,123 @@ describe('Phase2 evidence contract', () => {
     ).toThrow('unversioned External evidence cannot be promoted');
   });
 
-  it('lets C2/C3 validate additional records against the same vocabulary and evidence refs', () => {
+  it('lets C2/C3 append independent anchors and records without mutating the baseline', () => {
+    const context = loaded();
+    const baselineBefore = JSON.stringify(context.contract);
+    const c2Record = structuredClone(context.recordById.get('candidate-request-terminal-callback'));
+    c2Record.id = 'phase2-02-candidate-selection-evidence';
+    c2Record.capability = 'candidate_selection_evidence';
+    c2Record.status = 'partial';
+    c2Record.evidenceKind.push('black-box');
+    c2Record.evidenceRefs.push('phase2-02-candidate-selection-black-box');
+    const c2Extension = {
+      anchors: [
+        {
+          id: 'phase2-02-candidate-selection-black-box',
+          artifactId: 'candidate-release-v7-3-8',
+          evidenceKind: 'black-box',
+          evidenceReference: 'tests/fixtures/phase2-02/candidate-selection.test.mjs#selects-target',
+          limitations: ['Fixture-only observation; no Hard Routing decision is implied.'],
+        },
+      ],
+      records: [c2Record],
+    };
+
+    const c3Record = structuredClone(context.recordById.get('candidate-completed-usage-callback'));
+    c3Record.id = 'phase2-03-usage-settlement-evidence';
+    c3Record.capability = 'usage_settlement_evidence';
+    c3Record.status = 'requires_upstream';
+    c3Record.evidenceKind.push('integration');
+    c3Record.evidenceRefs.push('phase2-03-usage-integration');
+    const c3Extension = {
+      anchors: [
+        {
+          id: 'phase2-03-usage-integration',
+          artifactId: 'candidate-release-v7-3-8',
+          evidenceKind: 'integration',
+          evidenceReference: 'tests/fixtures/phase2-03/usage.test.mjs#cancel-and-duplicate',
+          limitations: ['Fixture-only observation; no Quota enforcement decision is implied.'],
+        },
+      ],
+      records: [c3Record],
+    };
+
+    expect(validateEvidenceExtension(c2Extension, context)).toEqual({ anchors: 1, records: 1 });
+    expect(validateEvidenceExtension(c3Extension, context)).toEqual({ anchors: 1, records: 1 });
+    expect(JSON.stringify(context.contract)).toBe(baselineBefore);
+    expect(context.anchorById.has(c2Extension.anchors[0].id)).toBe(false);
+    expect(context.recordById.has(c2Extension.records[0].id)).toBe(false);
+
+    const scratch = mkdtempSync(path.join(tmpdir(), 'cpamp-phase2-extension-'));
+    try {
+      const extensionPath = path.join(scratch, 'c2-evidence.json');
+      writeFileSync(extensionPath, JSON.stringify(c2Extension));
+      const result = JSON.parse(
+        execFileSync(process.execPath, [harnessPath, '--evidence', extensionPath, '--json'], {
+          encoding: 'utf8',
+        })
+      );
+      expect(result.evidenceExtension).toEqual({ anchors: 1, records: 1 });
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects extension attempts to replace baseline IDs, artifacts, or contract fields', () => {
     const context = loaded();
     const record = structuredClone(context.recordById.get('candidate-request-terminal-callback'));
-    record.id = 'phase2-follow-up-fixture-record';
-    record.capability = 'follow_up_fixture_contract';
-    record.status = 'requires_upstream';
-    expect(validateAdditionalRecords([record], context)).toBe(1);
+    record.id = 'phase2-extension-record';
+    record.capability = 'extension_contract_guard';
+    record.evidenceKind.push('black-box');
+    record.evidenceRefs.push('phase2-extension-black-box');
+    const extension = {
+      anchors: [
+        {
+          id: 'phase2-extension-black-box',
+          artifactId: 'candidate-release-v7-3-8',
+          evidenceKind: 'black-box',
+          evidenceReference: 'tests/fixtures/phase2-extension.test.mjs#guard',
+          limitations: ['Contract test evidence only.'],
+        },
+      ],
+      records: [record],
+    };
 
-    const invalid = { ...record, id: 'phase2-invalid-extra-record', extraGuess: true };
-    expect(() => validateAdditionalRecords([invalid], context)).toThrow(
-      'unexpected property extraGuess'
+    expect(() =>
+      validateEvidenceExtension({ ...extension, artifacts: context.contract.artifacts }, context)
+    ).toThrow('unexpected property artifacts');
+
+    const baselineAnchorOverride = structuredClone(extension);
+    baselineAnchorOverride.anchors[0].id = 'plugin-abi-schema-v6';
+    baselineAnchorOverride.records[0].evidenceRefs[
+      baselineAnchorOverride.records[0].evidenceRefs.length - 1
+    ] = 'plugin-abi-schema-v6';
+    expect(() => validateEvidenceExtension(baselineAnchorOverride, context)).toThrow(
+      'Duplicate evidence anchor id: plugin-abi-schema-v6'
     );
 
-    const unsupportedClaim = {
-      ...record,
-      id: 'phase2-unreferenced-evidence-kind',
-      evidenceKind: [...record.evidenceKind, 'black-box'],
-    };
-    expect(() => validateAdditionalRecords([unsupportedClaim], context)).toThrow(
-      'evidence kind black-box has no matching evidence reference'
+    const baselineRecordOverride = structuredClone(extension);
+    baselineRecordOverride.records[0].id = 'candidate-request-terminal-callback';
+    expect(() => validateEvidenceExtension(baselineRecordOverride, context)).toThrow(
+      'Duplicate capability record id: candidate-request-terminal-callback'
+    );
+
+    const unknownAnchorArtifact = structuredClone(extension);
+    unknownAnchorArtifact.anchors[0].artifactId = 'moving-latest';
+    expect(() => validateEvidenceExtension(unknownAnchorArtifact, context)).toThrow(
+      'phase2-extension-black-box: unknown artifact moving-latest'
+    );
+
+    const unknownRecordArtifact = structuredClone(extension);
+    unknownRecordArtifact.records[0].artifactId = 'moving-latest';
+    expect(() => validateEvidenceExtension(unknownRecordArtifact, context)).toThrow(
+      'phase2-extension-record: unknown artifact moving-latest'
+    );
+
+    const duplicateExtensionAnchor = structuredClone(extension);
+    duplicateExtensionAnchor.anchors.push(structuredClone(duplicateExtensionAnchor.anchors[0]));
+    expect(() => validateEvidenceExtension(duplicateExtensionAnchor, context)).toThrow(
+      'Duplicate evidence anchor id: phase2-extension-black-box'
     );
   });
 
