@@ -1,0 +1,321 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cpamp.dev/schemas/phase2-evidence-contract-v1.json",
+  "title": "CPAMP Phase2 capability evidence contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schemaVersion",
+    "contractId",
+    "cpampBaselineCommit",
+    "capabilityStatuses",
+    "artifacts",
+    "schedulerAcrossPrioritiesProvenance",
+    "sourceAnchors",
+    "requestLifecycle",
+    "capabilityRecords",
+    "deferredDecisions"
+  ],
+  "properties": {
+    "$schema": { "const": "./contract.schema.json" },
+    "schemaVersion": { "const": 1 },
+    "contractId": { "const": "cpamp-v2-phase2-evidence-v1" },
+    "cpampBaselineCommit": { "$ref": "#/$defs/commit" },
+    "capabilityStatuses": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/capabilityStatus" }
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 3,
+      "items": { "$ref": "#/$defs/artifact" }
+    },
+    "schedulerAcrossPrioritiesProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit", "goField", "rpcField", "default", "releaseAncestry"],
+      "properties": {
+        "commit": { "$ref": "#/$defs/commit" },
+        "goField": { "const": "Capabilities.SchedulerAcrossPriorities" },
+        "rpcField": { "const": "scheduler_across_priorities" },
+        "default": { "const": false },
+        "releaseAncestry": {
+          "type": "array",
+          "minItems": 3,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["version", "sourceCommit", "includesCommit"],
+            "properties": {
+              "version": { "type": "string", "pattern": "^v7\\.3\\.(3|7|8)$" },
+              "sourceCommit": { "$ref": "#/$defs/commit" },
+              "includesCommit": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    },
+    "sourceAnchors": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/sourceAnchor" }
+    },
+    "requestLifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonicalOrder", "observedOrderingConstraints", "stages"],
+      "properties": {
+        "canonicalOrder": {
+          "type": "array",
+          "minItems": 11,
+          "maxItems": 11,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/stageId" }
+        },
+        "observedOrderingConstraints": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "stages": {
+          "type": "array",
+          "minItems": 11,
+          "maxItems": 11,
+          "items": { "$ref": "#/$defs/lifecycleStage" }
+        }
+      }
+    },
+    "capabilityRecords": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/capabilityRecord" }
+    },
+    "deferredDecisions": {
+      "type": "array",
+      "minItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "phase2-02-hard-routing",
+          "phase2-03-quota-enforcement",
+          "phase2-04-capability-matrix-go-no-go"
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "capabilityStatus": {
+      "enum": ["supported", "partial", "unsupported", "unknown", "requires_upstream"]
+    },
+    "evidenceKind": { "enum": ["source", "unit", "black-box", "integration"] },
+    "deploymentMode": {
+      "enum": ["embedded", "external", "source-only-fixture", "release-artifact-fixture"]
+    },
+    "stageId": {
+      "enum": [
+        "request_received",
+        "client_api_key_resolved",
+        "model_resolved",
+        "credential_candidates_generated",
+        "disabled_cooldown_priority_filtering",
+        "credential_selected",
+        "provider_endpoint_resolved",
+        "upstream_request_stream",
+        "retry_fallback",
+        "response_cancel_reject_failure",
+        "usage_accounting_settlement"
+      ]
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "classification",
+        "deploymentMode",
+        "versionKnown",
+        "cpaVersion",
+        "sourceTag",
+        "sourceCommit",
+        "pluginAvailability",
+        "releaseAssets"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]+$" },
+        "classification": { "enum": ["current_bundled", "candidate_release", "external"] },
+        "deploymentMode": { "$ref": "#/$defs/deploymentMode" },
+        "versionKnown": { "type": "boolean" },
+        "cpaVersion": { "type": ["string", "null"], "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$" },
+        "sourceTag": {
+          "type": ["string", "null"],
+          "pattern": "^refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+$"
+        },
+        "sourceCommit": { "anyOf": [{ "$ref": "#/$defs/commit" }, { "type": "null" }] },
+        "pluginAvailability": { "enum": ["present", "absent", "unknown"] },
+        "releaseAssets": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/releaseAsset" }
+        }
+      }
+    },
+    "releaseAsset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "platform", "arch", "assetName", "sha256", "size"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]+$" },
+        "platform": { "const": "linux" },
+        "arch": { "enum": ["amd64", "arm64"] },
+        "assetName": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "size": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "sourceAnchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "repository", "evidenceKind", "path", "symbols", "versions"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]+$" },
+        "repository": { "enum": ["cpamp", "cpa"] },
+        "evidenceKind": { "$ref": "#/$defs/evidenceKind" },
+        "path": { "type": "string", "minLength": 1 },
+        "symbols": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "versions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["artifactId", "sourceCommit"],
+            "properties": {
+              "artifactId": { "type": "string" },
+              "sourceCommit": { "$ref": "#/$defs/commit" }
+            }
+          }
+        }
+      }
+    },
+    "accessFlags": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observable", "mutable", "blockable", "terminalOnly"],
+      "properties": {
+        "observable": { "type": "boolean" },
+        "mutable": { "type": "boolean" },
+        "blockable": { "type": "boolean" },
+        "terminalOnly": { "type": "boolean" }
+      }
+    },
+    "lifecycleStage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "ordinal",
+        "authPlacement",
+        "owner",
+        "hostAccess",
+        "pluginAccess",
+        "identityMetadata",
+        "artifactScope",
+        "evidenceRefs",
+        "limitations"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/stageId" },
+        "ordinal": { "type": "integer", "minimum": 0, "maximum": 10 },
+        "authPlacement": {
+          "enum": [
+            "before-client-auth",
+            "client-auth",
+            "before-credential-auth",
+            "after-credential-auth",
+            "terminal",
+            "attempt-coupled"
+          ]
+        },
+        "owner": { "type": "string", "minLength": 1 },
+        "hostAccess": { "$ref": "#/$defs/accessFlags" },
+        "pluginAccess": { "$ref": "#/$defs/accessFlags" },
+        "identityMetadata": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "artifactScope": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" }
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" }
+        },
+        "limitations": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "pluginContract": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["schemaVersion", "config"],
+      "properties": {
+        "schemaVersion": { "type": ["integer", "null"], "minimum": 0 },
+        "config": { "type": "object" }
+      }
+    },
+    "capabilityRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "capability",
+        "status",
+        "artifactId",
+        "pluginContract",
+        "deploymentMode",
+        "evidenceKind",
+        "evidenceRefs",
+        "limitations"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]+$" },
+        "capability": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_]+$" },
+        "status": { "$ref": "#/$defs/capabilityStatus" },
+        "artifactId": { "type": "string" },
+        "pluginContract": { "$ref": "#/$defs/pluginContract" },
+        "deploymentMode": { "$ref": "#/$defs/deploymentMode" },
+        "evidenceKind": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/evidenceKind" }
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" }
+        },
+        "limitations": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

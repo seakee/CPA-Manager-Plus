@@ -1,0 +1,1023 @@
+{
+  "$schema": "./contract.schema.json",
+  "schemaVersion": 1,
+  "contractId": "cpamp-v2-phase2-evidence-v1",
+  "cpampBaselineCommit": "2850980d3d08fa30878744e1d67fc04607504c01",
+  "capabilityStatuses": ["supported", "partial", "unsupported", "unknown", "requires_upstream"],
+  "artifacts": [
+    {
+      "id": "current-bundled-v7-3-3",
+      "classification": "current_bundled",
+      "deploymentMode": "embedded",
+      "versionKnown": true,
+      "cpaVersion": "v7.3.3",
+      "sourceTag": "refs/tags/v7.3.3",
+      "sourceCommit": "7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b",
+      "pluginAvailability": "present",
+      "releaseAssets": [
+        {
+          "id": "current-linux-amd64",
+          "platform": "linux",
+          "arch": "amd64",
+          "assetName": "CLIProxyAPI_7.3.3_linux_amd64.tar.gz",
+          "sha256": "7af8c99cd08eee3ccc81d1596e8a31785674d3de6bd7ec61416d59493dd8fc01",
+          "size": 22204961
+        },
+        {
+          "id": "current-linux-arm64",
+          "platform": "linux",
+          "arch": "arm64",
+          "assetName": "CLIProxyAPI_7.3.3_linux_aarch64.tar.gz",
+          "sha256": "5f320e3fae52af00f07b78201311e9d096b36e759441d948de48a10f49e71883",
+          "size": 20017646
+        }
+      ]
+    },
+    {
+      "id": "candidate-release-v7-3-8",
+      "classification": "candidate_release",
+      "deploymentMode": "release-artifact-fixture",
+      "versionKnown": true,
+      "cpaVersion": "v7.3.8",
+      "sourceTag": "refs/tags/v7.3.8",
+      "sourceCommit": "c93978c4ea2e908255a2a06c37599fda3651554a",
+      "pluginAvailability": "present",
+      "releaseAssets": [
+        {
+          "id": "candidate-linux-amd64",
+          "platform": "linux",
+          "arch": "amd64",
+          "assetName": "CLIProxyAPI_7.3.8_linux_amd64.tar.gz",
+          "sha256": "3fe5228c458624175d5e4e81d9dd003d82de688ca498fa368a790ea120bda0e3",
+          "size": 22433536
+        },
+        {
+          "id": "candidate-linux-arm64",
+          "platform": "linux",
+          "arch": "arm64",
+          "assetName": "CLIProxyAPI_7.3.8_linux_aarch64.tar.gz",
+          "sha256": "8d09ce286d857b2d0e6d77c39e08a755246120df58c02a115d58c391fc73e3f1",
+          "size": 20224367
+        }
+      ]
+    },
+    {
+      "id": "external-unnegotiated",
+      "classification": "external",
+      "deploymentMode": "external",
+      "versionKnown": false,
+      "cpaVersion": null,
+      "sourceTag": null,
+      "sourceCommit": null,
+      "pluginAvailability": "unknown",
+      "releaseAssets": []
+    }
+  ],
+  "schedulerAcrossPrioritiesProvenance": {
+    "commit": "b715526add0c452acc62062bf4fcef53897be604",
+    "goField": "Capabilities.SchedulerAcrossPriorities",
+    "rpcField": "scheduler_across_priorities",
+    "default": false,
+    "releaseAncestry": [
+      {
+        "version": "v7.3.3",
+        "sourceCommit": "7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b",
+        "includesCommit": false
+      },
+      {
+        "version": "v7.3.7",
+        "sourceCommit": "b773607e3e7756dc6020a291825e4eb08899595a",
+        "includesCommit": true
+      },
+      {
+        "version": "v7.3.8",
+        "sourceCommit": "c93978c4ea2e908255a2a06c37599fda3651554a",
+        "includesCommit": true
+      }
+    ]
+  },
+  "sourceAnchors": [
+    {
+      "id": "client-access-auth",
+      "repository": "cpa",
+      "evidenceKind": "source",
+      "path": "internal/api/server_middleware.go",
+      "symbols": ["func accessAuthMiddleware", "manager.Authenticate", "c.Set(\"userApiKey\""],
+      "versions": [
+        {
+          "artifactId": "current-bundled-v7-3-3",
+          "sourceCommit": "7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b"
+        },
+        {
+          "artifactId": "candidate-release-v7-3-8",
+          "sourceCommit": "c93978c4ea2e908255a2a06c37599fda3651554a"
+        }
+      ]
+    },
+    {
+      "id": "client-config-api-key",
+      "repository": "cpa",
+      "evidenceKind": "source",
+      "path": "internal/access/config_access/provider.go",
+      "symbols": [
+        "func (p *provider) Authenticate",
+        "Principal: candidate.value",
+        "Metadata: map[string]string"
+      ],
+      "versions": [
+        {
+          "artifactId": "current-bundled-v7-3-3",
+          "sourceCommit": "7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b"
+        },
+        {
+          "artifactId": "candidate-release-v7-3-8",
+          "sourceCommit": "c93978c4ea2e908255a2a06c37599fda3651554a"
+        }
+      ]
+    },
+    {
+      "id": "frontend-auth-plugin-contract",
+      "repository": "cpa",
+      "evidenceKind": "source",
+      "path": "sdk/pluginapi/types.go",
+      "symbols": [
+        "type FrontendAuthProvider interface",
+        "Authenticate(context.Context, FrontendAuthRequest)",
+        "type FrontendAuthResponse struct",
+        "Authenticated bool",
+        "Principal string"
+      ],
+      "versions": [
+        {
+          "artifactId": "current-bundled-v7-3-3",
+          "sourceCommit": "7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b"
+        },
+        {
+          "artifactId": "candidate-release-v7-3-8",
+          "sourceCommit": "c93978c4ea2e908255a2a06c37599fda3651554a"
+        }
+      ]
+    },
+    {
+      "id": "handler-request-model",
+      "repository": "cpa",
+      "evidenceKind": "source",
+      "path": "sdk/api/handlers/handlers_execution.go",
+      "symbols": [
+        "func (h *BaseAPIHandler) executeWithAuthManagerFormats",
+        "providersForExecution",
+        "newRequestLifecycleTracker",
+        "applyRequestInterceptorsBeforeAuth"
+      ],
+      "versions": [
+        {
+          "artifactId": "current-bundled-v7-3-3",
+          "sourceCommit": "7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b"
+        },
+        {
+          "artifactId": "candidate-release-v7-3-8",
+          "sourceCommit": "c93978c4ea2e908255a2a06c37599fda3651554a"
+        }
+      ]
+    },
+    {
+      "id": "request-interceptor-contract",
+      "repository": "cpa",
+      "evidenceKind": "source",
+      "path": "sdk/api/handlers/handlers_interceptors.go",
+      "symbols": [
+        "newRequestLifecycleTracker",
+        "applyRequestInterceptorsBeforeAuth",
+        "applyRequestInterceptorsAfterAuth",
+        "requestLifecycleTracker) complete"
+      ],
+      "versions": [
+        {
+          "artifactId": "current-bundled-v7-3-3",
+          "sourceCommit": "7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b"
+        },
+        {
+          "artifactId": "candidate-release-v7-3-8",
+          "sourceCommit": "c93978c4ea2e908255a2a06c37599fda3651554a"
+        }
+      ]
+    },
+    {
+      "id": "request-identity-metadata",
+      "repository": "cpa",
+      "evidenceKind": "source",
+      "path": "sdk/cliproxy/executor/types.go",
+      "symbols": [
+        "PinnedAuthMetadataKey = \"pinned_auth_id\"",
+        "SelectedAuthMetadataKey = \"selected_auth_id\"",
+        "CallerScopeMetadataKey = \"caller_scope\"",
+        "type RequestAfterAuthInterceptRequest struct"
+      ],
+      "versions": [
+        {
+          "artifactId": "current-bundled-v7-3-3",
+          "sourceCommit": "7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b"
+        },
+        {
+          "artifactId": "candidate-release-v7-3-8",
+          "sourceCommit": "c93978c4ea2e908255a2a06c37599fda3651554a"
+        }
+      ]
+    },
+    {
+      "id": "candidate-filtering-selection",
+      "repository": "cpa",
+      "evidenceKind": "source",
+      "path": "sdk/cliproxy/auth/conductor_selection.go",
+      "symbols": [
+        "availableAuthsForRouteModelWithPriorityMode",
+        "availableAuthsForSelector",
+        "pickViaPluginScheduler",
+        "pickNext"
+      ],
+      "versions": [
+        {
+          "artifactId": "current-bundled-v7-3-3",
+          "sourceCommit": "7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b"
+        },
+        {
+          "artifactId": "candidate-release-v7-3-8",
+          "sourceCommit": "c93978c4ea2e908255a2a06c37599fda3651554a"
+        }
+      ]
+    },
+    {
+      "id": "blocked-and-priority-semantics",
+      "repository": "cpa",
+      "evidenceKind": "source",
+      "path": "sdk/cliproxy/auth/selector.go",
+      "symbols": [
+        "func highestPriorityAuths",
+        "func isAuthBlockedForModel",
+        "availableAuthsFromPriorityBuckets"
+      ],
+      "versions": [
+        {
+          "artifactId": "current-bundled-v7-3-3",
+          "sourceCommit": "7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b"
+        },
+        {
+          "artifactId": "candidate-release-v7-3-8",
+          "sourceCommit": "c93978c4ea2e908255a2a06c37599fda3651554a"
+        }
+      ]
+    },
+    {
+      "id": "scheduler-plugin-boundary",
+      "repository": "cpa",
+      "evidenceKind": "source",
+      "path": "internal/pluginhost/scheduler.go",
+      "symbols": [
+        "func (h *Host) PickAuth",
+        "normalizeSchedulerResponse",
+        "SchedulerWantsAcrossPriorities"
+      ],
+      "versions": [
+        {
+          "artifactId": "candidate-release-v7-3-8",
+          "sourceCommit": "c93978c4ea2e908255a2a06c37599fda3651554a"
+        }
+      ]
+    },
+    {
+      "id": "scheduler-plugin-v7-3-3",
+      "repository": "cpa",
+      "evidenceKind": "source",
+      "path": "internal/pluginhost/scheduler.go",
+      "symbols": ["func (h *Host) PickAuth", "normalizeSchedulerResponse"],
+      "versions": [
+        {
+          "artifactId": "current-bundled-v7-3-3",
+          "sourceCommit": "7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b"
+        }
+      ]
+    },
+    {
+      "id": "scheduler-capability-rpc",
+      "repository": "cpa",
+      "evidenceKind": "source",
+      "path": "internal/pluginhost/rpc_schema.go",
+      "symbols": [
+        "SchedulerAcrossPriorities",
+        "json:\"scheduler_across_priorities,omitempty\"",
+        "schedulerWantsAcrossPriorities"
+      ],
+      "versions": [
+        {
+          "artifactId": "candidate-release-v7-3-8",
+          "sourceCommit": "c93978c4ea2e908255a2a06c37599fda3651554a"
+        }
+      ]
+    },
+    {
+      "id": "scheduler-default-unit",
+      "repository": "cpa",
+      "evidenceKind": "unit",
+      "path": "sdk/cliproxy/auth/scheduler_test.go",
+      "symbols": [
+        "TestSchedulerPick_RoundRobinHighestPriority",
+        "TestSchedulerPick_MixedProvidersPrefersHighestPriorityTier",
+        "TestManagerPluginSchedulerSelectsAuthID"
+      ],
+      "versions": [
+        {
+          "artifactId": "current-bundled-v7-3-3",
+          "sourceCommit": "7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b"
+        },
+        {
+          "artifactId": "candidate-release-v7-3-8",
+          "sourceCommit": "c93978c4ea2e908255a2a06c37599fda3651554a"
+        }
+      ]
+    },
+    {
+      "id": "scheduler-priority-unit",
+      "repository": "cpa",
+      "evidenceKind": "unit",
+      "path": "sdk/cliproxy/auth/scheduler_test.go",
+      "symbols": [
+        "TestManagerPluginSchedulerAcrossPriorities",
+        "TestManagerPluginSchedulerAcrossPrioritiesUnhandledFallsBackToHighestPriority",
+        "TestManagerPluginSchedulerAcrossPrioritiesAttributesAndCooldownFilter"
+      ],
+      "versions": [
+        {
+          "artifactId": "candidate-release-v7-3-8",
+          "sourceCommit": "c93978c4ea2e908255a2a06c37599fda3651554a"
+        }
+      ]
+    },
+    {
+      "id": "attempt-retry-fallback",
+      "repository": "cpa",
+      "evidenceKind": "source",
+      "path": "sdk/cliproxy/auth/conductor_execution.go",
+      "symbols": ["func (m *Manager) Execute", "executeMixedOnce", "pickNext"],
+      "versions": [
+        {
+          "artifactId": "current-bundled-v7-3-3",
+          "sourceCommit": "7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b"
+        },
+        {
+          "artifactId": "candidate-release-v7-3-8",
+          "sourceCommit": "c93978c4ea2e908255a2a06c37599fda3651554a"
+        }
+      ]
+    },
+    {
+      "id": "stream-retry-fallback",
+      "repository": "cpa",
+      "evidenceKind": "source",
+      "path": "sdk/cliproxy/auth/conductor_stream.go",
+      "symbols": ["executeStreamWithModelPool", "RequestAfterAuthInterceptor", "ExecuteStream"],
+      "versions": [
+        {
+          "artifactId": "current-bundled-v7-3-3",
+          "sourceCommit": "7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b"
+        },
+        {
+          "artifactId": "candidate-release-v7-3-8",
+          "sourceCommit": "c93978c4ea2e908255a2a06c37599fda3651554a"
+        }
+      ]
+    },
+    {
+      "id": "terminal-lifecycle-unit",
+      "repository": "cpa",
+      "evidenceKind": "unit",
+      "path": "sdk/api/handlers/handlers_interceptors_test.go",
+      "symbols": [
+        "TestHandlerRequestInterceptorTerminatesBeforeAuth",
+        "RequestCompletionRejected",
+        "RequestCompletionCanceled",
+        "RequestCompletionSucceeded"
+      ],
+      "versions": [
+        {
+          "artifactId": "current-bundled-v7-3-3",
+          "sourceCommit": "7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b"
+        },
+        {
+          "artifactId": "candidate-release-v7-3-8",
+          "sourceCommit": "c93978c4ea2e908255a2a06c37599fda3651554a"
+        }
+      ]
+    },
+    {
+      "id": "usage-publish",
+      "repository": "cpa",
+      "evidenceKind": "source",
+      "path": "internal/runtime/executor/helps/usage_helpers.go",
+      "symbols": [
+        "func (r *UsageReporter) Publish",
+        "func (r *UsageReporter) PublishFailure",
+        "usage.PublishRecord"
+      ],
+      "versions": [
+        {
+          "artifactId": "current-bundled-v7-3-3",
+          "sourceCommit": "7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b"
+        },
+        {
+          "artifactId": "candidate-release-v7-3-8",
+          "sourceCommit": "c93978c4ea2e908255a2a06c37599fda3651554a"
+        }
+      ]
+    },
+    {
+      "id": "usage-plugin-dispatch",
+      "repository": "cpa",
+      "evidenceKind": "source",
+      "path": "sdk/cliproxy/usage/manager.go",
+      "symbols": ["func (m *Manager) Publish", "plugin.HandleUsage", "func PublishRecord"],
+      "versions": [
+        {
+          "artifactId": "current-bundled-v7-3-3",
+          "sourceCommit": "7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b"
+        },
+        {
+          "artifactId": "candidate-release-v7-3-8",
+          "sourceCommit": "c93978c4ea2e908255a2a06c37599fda3651554a"
+        }
+      ]
+    },
+    {
+      "id": "usage-plugin-unit",
+      "repository": "cpa",
+      "evidenceKind": "unit",
+      "path": "sdk/api/handlers/handlers_plugin_executor_usage_test.go",
+      "symbols": [
+        "TestHandlerPluginExecutorPublishesUsageNonStreamOpenAI",
+        "TestHandlerPluginExecutorPublishesUsageStreamOpenAI",
+        "TestHandlerPluginExecutorPublishesFailure",
+        "TestHandlerPluginExecutorPublishesStreamCancellation"
+      ],
+      "versions": [
+        {
+          "artifactId": "current-bundled-v7-3-3",
+          "sourceCommit": "7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b"
+        },
+        {
+          "artifactId": "candidate-release-v7-3-8",
+          "sourceCommit": "c93978c4ea2e908255a2a06c37599fda3651554a"
+        }
+      ]
+    },
+    {
+      "id": "external-runtime-observation-boundary",
+      "repository": "cpamp",
+      "evidenceKind": "source",
+      "path": "apps/manager-server/internal/service/runtime/external.go",
+      "symbols": [
+        "func (c *ExternalClient) Status",
+        "cpa.ObserveManagementAPI",
+        "CPAObservedVersion"
+      ],
+      "versions": [
+        {
+          "artifactId": "external-unnegotiated",
+          "sourceCommit": "2850980d3d08fa30878744e1d67fc04607504c01"
+        }
+      ]
+    }
+  ],
+  "requestLifecycle": {
+    "canonicalOrder": [
+      "request_received",
+      "client_api_key_resolved",
+      "model_resolved",
+      "credential_candidates_generated",
+      "disabled_cooldown_priority_filtering",
+      "credential_selected",
+      "provider_endpoint_resolved",
+      "upstream_request_stream",
+      "retry_fallback",
+      "response_cancel_reject_failure",
+      "usage_accounting_settlement"
+    ],
+    "observedOrderingConstraints": [
+      "Client access authentication runs in Gin middleware before the handler creates the request lifecycle tracker or invokes the before-auth request interceptor.",
+      "Model normalization and provider-route resolution happen before credential candidate construction; endpoint resolution remains executor-specific after credential selection.",
+      "Candidate construction and disabled/cooldown/provider/model/priority filtering are one host selection boundary; a scheduler plugin receives only the already-filtered candidate set.",
+      "Retry and fallback re-enter candidate filtering, credential selection, and upstream execution for each attempt.",
+      "Usage publication is attempt-coupled inside executors and is not a reservation or settlement contract; no universal ordering after the request terminal callback is proven."
+    ],
+    "stages": [
+      {
+        "id": "request_received",
+        "ordinal": 0,
+        "authPlacement": "before-client-auth",
+        "owner": "CPA HTTP server and protocol handler",
+        "hostAccess": {
+          "observable": true,
+          "mutable": true,
+          "blockable": true,
+          "terminalOnly": false
+        },
+        "pluginAccess": {
+          "observable": true,
+          "mutable": false,
+          "blockable": true,
+          "terminalOnly": false
+        },
+        "identityMetadata": ["HTTP request", "CPA trace ID when assigned"],
+        "artifactScope": ["current-bundled-v7-3-3", "candidate-release-v7-3-8"],
+        "evidenceRefs": [
+          "client-access-auth",
+          "frontend-auth-plugin-contract",
+          "handler-request-model"
+        ],
+        "limitations": [
+          "FrontendAuthProvider may observe and reject the inbound HTTP request when configured, but RequestInterceptor is not a raw request-received hook and starts after access authentication and model/provider preparation."
+        ]
+      },
+      {
+        "id": "client_api_key_resolved",
+        "ordinal": 1,
+        "authPlacement": "client-auth",
+        "owner": "CPA access manager and configured access provider",
+        "hostAccess": {
+          "observable": true,
+          "mutable": false,
+          "blockable": true,
+          "terminalOnly": false
+        },
+        "pluginAccess": {
+          "observable": true,
+          "mutable": false,
+          "blockable": true,
+          "terminalOnly": false
+        },
+        "identityMetadata": ["userApiKey principal", "accessProvider", "accessMetadata.source"],
+        "artifactScope": ["current-bundled-v7-3-3", "candidate-release-v7-3-8"],
+        "evidenceRefs": [
+          "client-access-auth",
+          "client-config-api-key",
+          "frontend-auth-plugin-contract",
+          "request-identity-metadata"
+        ],
+        "limitations": [
+          "A FrontendAuthProvider can authenticate or reject and return a principal only when it owns this hook; the request interceptor contract does not directly carry the built-in access principal, and stable caller identity correlation is deferred to Phase2-02."
+        ]
+      },
+      {
+        "id": "model_resolved",
+        "ordinal": 2,
+        "authPlacement": "before-credential-auth",
+        "owner": "CPA API handler and model router",
+        "hostAccess": {
+          "observable": true,
+          "mutable": true,
+          "blockable": true,
+          "terminalOnly": false
+        },
+        "pluginAccess": {
+          "observable": true,
+          "mutable": true,
+          "blockable": true,
+          "terminalOnly": false
+        },
+        "identityMetadata": [
+          "requested_model",
+          "normalized model",
+          "source format",
+          "provider route candidates"
+        ],
+        "artifactScope": ["current-bundled-v7-3-3", "candidate-release-v7-3-8"],
+        "evidenceRefs": ["handler-request-model", "request-interceptor-contract"],
+        "limitations": [
+          "The before-auth interceptor may rewrite request body/headers or terminate, but that does not prove an arbitrary model-routing policy contract."
+        ]
+      },
+      {
+        "id": "credential_candidates_generated",
+        "ordinal": 3,
+        "authPlacement": "before-credential-auth",
+        "owner": "CPA auth Manager",
+        "hostAccess": {
+          "observable": true,
+          "mutable": true,
+          "blockable": true,
+          "terminalOnly": false
+        },
+        "pluginAccess": {
+          "observable": false,
+          "mutable": false,
+          "blockable": false,
+          "terminalOnly": false
+        },
+        "identityMetadata": [
+          "Auth.ID",
+          "provider",
+          "route model",
+          "credential policy",
+          "pinned_auth_id"
+        ],
+        "artifactScope": ["current-bundled-v7-3-3", "candidate-release-v7-3-8"],
+        "evidenceRefs": ["candidate-filtering-selection", "request-identity-metadata"],
+        "limitations": [
+          "No plugin hook receives the unfiltered credential inventory; generation cannot be treated as scheduler-visible."
+        ]
+      },
+      {
+        "id": "disabled_cooldown_priority_filtering",
+        "ordinal": 4,
+        "authPlacement": "before-credential-auth",
+        "owner": "CPA auth Manager and selector",
+        "hostAccess": {
+          "observable": true,
+          "mutable": true,
+          "blockable": true,
+          "terminalOnly": false
+        },
+        "pluginAccess": {
+          "observable": true,
+          "mutable": false,
+          "blockable": false,
+          "terminalOnly": false
+        },
+        "identityMetadata": [
+          "Auth.ID",
+          "provider",
+          "priority",
+          "weight",
+          "post-filter candidate attributes"
+        ],
+        "artifactScope": ["current-bundled-v7-3-3", "candidate-release-v7-3-8"],
+        "evidenceRefs": [
+          "candidate-filtering-selection",
+          "blocked-and-priority-semantics",
+          "scheduler-plugin-v7-3-3",
+          "scheduler-plugin-boundary"
+        ],
+        "limitations": [
+          "Scheduler candidates omit filtered credentials and exclusion reasons; SchedulerAcrossPriorities changes priority-tier visibility only after safety filtering."
+        ]
+      },
+      {
+        "id": "credential_selected",
+        "ordinal": 5,
+        "authPlacement": "after-credential-auth",
+        "owner": "CPA plugin scheduler or built-in selector",
+        "hostAccess": {
+          "observable": true,
+          "mutable": true,
+          "blockable": true,
+          "terminalOnly": false
+        },
+        "pluginAccess": {
+          "observable": true,
+          "mutable": true,
+          "blockable": true,
+          "terminalOnly": false
+        },
+        "identityMetadata": ["Auth.ID", "selected_auth_id", "provider", "candidate IDs"],
+        "artifactScope": ["current-bundled-v7-3-3", "candidate-release-v7-3-8"],
+        "evidenceRefs": [
+          "candidate-filtering-selection",
+          "scheduler-plugin-v7-3-3",
+          "scheduler-plugin-boundary",
+          "request-identity-metadata"
+        ],
+        "limitations": [
+          "A scheduler may select only from candidates supplied by CPA; visibility is not proof of safe hard pinning, retry fencing, or target-missing rejection."
+        ]
+      },
+      {
+        "id": "provider_endpoint_resolved",
+        "ordinal": 6,
+        "authPlacement": "after-credential-auth",
+        "owner": "CPA handler, auth Manager, and selected provider executor",
+        "hostAccess": {
+          "observable": true,
+          "mutable": true,
+          "blockable": true,
+          "terminalOnly": false
+        },
+        "pluginAccess": {
+          "observable": true,
+          "mutable": true,
+          "blockable": true,
+          "terminalOnly": false
+        },
+        "identityMetadata": [
+          "provider",
+          "Auth.ID",
+          "model",
+          "executor",
+          "endpoint implementation metadata"
+        ],
+        "artifactScope": ["current-bundled-v7-3-3", "candidate-release-v7-3-8"],
+        "evidenceRefs": [
+          "handler-request-model",
+          "attempt-retry-fallback",
+          "request-interceptor-contract"
+        ],
+        "limitations": [
+          "Provider-route candidates are resolved before credential selection, while the concrete endpoint is executor-specific after selection; the canonical label spans both boundaries."
+        ]
+      },
+      {
+        "id": "upstream_request_stream",
+        "ordinal": 7,
+        "authPlacement": "after-credential-auth",
+        "owner": "CPA provider executor",
+        "hostAccess": {
+          "observable": true,
+          "mutable": true,
+          "blockable": true,
+          "terminalOnly": false
+        },
+        "pluginAccess": {
+          "observable": true,
+          "mutable": true,
+          "blockable": true,
+          "terminalOnly": false
+        },
+        "identityMetadata": [
+          "request ID",
+          "trace ID",
+          "Auth.ID",
+          "provider",
+          "model",
+          "stream flag"
+        ],
+        "artifactScope": ["current-bundled-v7-3-3", "candidate-release-v7-3-8"],
+        "evidenceRefs": [
+          "attempt-retry-fallback",
+          "stream-retry-fallback",
+          "request-interceptor-contract"
+        ],
+        "limitations": [
+          "Plugin interception coverage depends on the declared plugin capabilities and execution route; it is not an unconditional CPAMP production callback."
+        ]
+      },
+      {
+        "id": "retry_fallback",
+        "ordinal": 8,
+        "authPlacement": "after-credential-auth",
+        "owner": "CPA auth Manager execution loops",
+        "hostAccess": {
+          "observable": true,
+          "mutable": true,
+          "blockable": true,
+          "terminalOnly": false
+        },
+        "pluginAccess": {
+          "observable": true,
+          "mutable": true,
+          "blockable": true,
+          "terminalOnly": false
+        },
+        "identityMetadata": [
+          "attempt Auth.ID",
+          "provider",
+          "retry round",
+          "tried candidate set",
+          "error classification"
+        ],
+        "artifactScope": ["current-bundled-v7-3-3", "candidate-release-v7-3-8"],
+        "evidenceRefs": [
+          "attempt-retry-fallback",
+          "stream-retry-fallback",
+          "candidate-filtering-selection"
+        ],
+        "limitations": [
+          "Retries re-run selection and can change credentials/providers; per-attempt correlation and hard-routing fences remain Phase2-02 work."
+        ]
+      },
+      {
+        "id": "response_cancel_reject_failure",
+        "ordinal": 9,
+        "authPlacement": "terminal",
+        "owner": "CPA handler request lifecycle tracker",
+        "hostAccess": {
+          "observable": true,
+          "mutable": true,
+          "blockable": true,
+          "terminalOnly": true
+        },
+        "pluginAccess": {
+          "observable": true,
+          "mutable": false,
+          "blockable": false,
+          "terminalOnly": true
+        },
+        "identityMetadata": [
+          "request ID",
+          "trace ID",
+          "outcome",
+          "status code",
+          "error",
+          "model",
+          "stream flag",
+          "metadata"
+        ],
+        "artifactScope": ["current-bundled-v7-3-3", "candidate-release-v7-3-8"],
+        "evidenceRefs": ["request-interceptor-contract", "terminal-lifecycle-unit"],
+        "limitations": [
+          "RequestLifecyclePlugin is asynchronous and terminal-only; it cannot change an already completed response."
+        ]
+      },
+      {
+        "id": "usage_accounting_settlement",
+        "ordinal": 10,
+        "authPlacement": "attempt-coupled",
+        "owner": "CPA provider executor and usage Manager",
+        "hostAccess": {
+          "observable": true,
+          "mutable": true,
+          "blockable": false,
+          "terminalOnly": false
+        },
+        "pluginAccess": {
+          "observable": true,
+          "mutable": false,
+          "blockable": false,
+          "terminalOnly": false
+        },
+        "identityMetadata": [
+          "provider",
+          "model",
+          "Auth.ID-derived account",
+          "usage detail",
+          "failed flag",
+          "stream flag"
+        ],
+        "artifactScope": ["current-bundled-v7-3-3", "candidate-release-v7-3-8"],
+        "evidenceRefs": ["usage-publish", "usage-plugin-dispatch"],
+        "limitations": [
+          "Usage callbacks report completed observations and failures; reservation, exactly-once settlement, and terminal-event ordering are not established and remain Phase2-03 work."
+        ]
+      }
+    ]
+  },
+  "capabilityRecords": [
+    {
+      "id": "current-scheduler-candidate-visibility-default",
+      "capability": "scheduler_candidate_visibility",
+      "status": "partial",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": null,
+        "config": { "scheduler": true, "scheduler_across_priorities": false }
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source", "unit"],
+      "evidenceRefs": [
+        "candidate-filtering-selection",
+        "blocked-and-priority-semantics",
+        "scheduler-plugin-v7-3-3",
+        "scheduler-default-unit"
+      ],
+      "limitations": [
+        "The plugin sees only filtered credentials from the highest available priority tier; SchedulerAcrossPriorities does not exist in v7.3.3."
+      ]
+    },
+    {
+      "id": "candidate-scheduler-candidate-visibility-default",
+      "capability": "scheduler_candidate_visibility",
+      "status": "partial",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": null,
+        "config": { "scheduler": true, "scheduler_across_priorities": false }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "unit"],
+      "evidenceRefs": [
+        "candidate-filtering-selection",
+        "scheduler-plugin-boundary",
+        "scheduler-capability-rpc",
+        "scheduler-default-unit",
+        "scheduler-priority-unit"
+      ],
+      "limitations": [
+        "False is the default and preserves highest-available-priority-tier visibility; candidate support does not upgrade the current bundle."
+      ]
+    },
+    {
+      "id": "candidate-scheduler-candidate-visibility-opt-in",
+      "capability": "scheduler_candidate_visibility",
+      "status": "partial",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": null,
+        "config": { "scheduler": true, "scheduler_across_priorities": true }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "unit"],
+      "evidenceRefs": [
+        "candidate-filtering-selection",
+        "blocked-and-priority-semantics",
+        "scheduler-plugin-boundary",
+        "scheduler-capability-rpc",
+        "scheduler-priority-unit"
+      ],
+      "limitations": [
+        "The plugin sees all available priority tiers only after provider/model/disabled/cooldown filtering; this is not a Hard Routing decision."
+      ]
+    },
+    {
+      "id": "current-request-terminal-callback",
+      "capability": "request_terminal_callback",
+      "status": "supported",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": { "schemaVersion": null, "config": { "request_lifecycle_plugin": true } },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source", "unit"],
+      "evidenceRefs": ["request-interceptor-contract", "terminal-lifecycle-unit"],
+      "limitations": [
+        "The callback is asynchronous and terminal-only for requests that reached request interception; it is not a production CPAMP Bridge Plugin."
+      ]
+    },
+    {
+      "id": "candidate-request-terminal-callback",
+      "capability": "request_terminal_callback",
+      "status": "supported",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": { "schemaVersion": null, "config": { "request_lifecycle_plugin": true } },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "unit"],
+      "evidenceRefs": ["request-interceptor-contract", "terminal-lifecycle-unit"],
+      "limitations": [
+        "The callback remains asynchronous and terminal-only; release-artifact black-box evidence may be appended without changing this frozen candidate version."
+      ]
+    },
+    {
+      "id": "current-completed-usage-callback",
+      "capability": "completed_usage_callback",
+      "status": "partial",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": { "schemaVersion": null, "config": { "usage_plugin": true } },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source", "unit"],
+      "evidenceRefs": ["usage-publish", "usage-plugin-dispatch", "usage-plugin-unit"],
+      "limitations": [
+        "Completed usage observation exists, but reservation, settlement, deduplication, and correlation guarantees are not proven."
+      ]
+    },
+    {
+      "id": "candidate-completed-usage-callback",
+      "capability": "completed_usage_callback",
+      "status": "partial",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": { "schemaVersion": null, "config": { "usage_plugin": true } },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "unit"],
+      "evidenceRefs": ["usage-publish", "usage-plugin-dispatch", "usage-plugin-unit"],
+      "limitations": [
+        "Candidate source retains completed usage observation, but Phase2-03 must prove reservation and settlement semantics independently."
+      ]
+    },
+    {
+      "id": "external-scheduler-candidate-visibility",
+      "capability": "scheduler_candidate_visibility",
+      "status": "unknown",
+      "artifactId": "external-unnegotiated",
+      "pluginContract": null,
+      "deploymentMode": "external",
+      "evidenceKind": ["source"],
+      "evidenceRefs": ["external-runtime-observation-boundary"],
+      "limitations": [
+        "External Runtime observation yields a version only after connection; plugin availability, configuration, and scheduler capabilities are not negotiated."
+      ]
+    },
+    {
+      "id": "external-request-terminal-callback",
+      "capability": "request_terminal_callback",
+      "status": "unknown",
+      "artifactId": "external-unnegotiated",
+      "pluginContract": null,
+      "deploymentMode": "external",
+      "evidenceKind": ["source"],
+      "evidenceRefs": ["external-runtime-observation-boundary"],
+      "limitations": [
+        "No External plugin availability or request-lifecycle capability negotiation exists in the accepted CPAMP baseline."
+      ]
+    },
+    {
+      "id": "external-completed-usage-callback",
+      "capability": "completed_usage_callback",
+      "status": "unknown",
+      "artifactId": "external-unnegotiated",
+      "pluginContract": null,
+      "deploymentMode": "external",
+      "evidenceKind": ["source"],
+      "evidenceRefs": ["external-runtime-observation-boundary"],
+      "limitations": [
+        "Embedded source evidence cannot promote an unversioned External Runtime to supported."
+      ]
+    }
+  ],
+  "deferredDecisions": [
+    "phase2-02-hard-routing",
+    "phase2-03-quota-enforcement",
+    "phase2-04-capability-matrix-go-no-go"
+  ]
+}

@@ -16,6 +16,7 @@
     "docs:build": "npm --workspace apps/docs run build",
     "docs:preview": "npm --workspace apps/docs run preview",
     "check:demo-isolation": "node bin/release/check-web-demo-isolation.mjs",
+    "evidence:phase2": "node bin/ci/validate-phase2-evidence.mjs",
     "preview": "npm --workspace apps/web run preview",
     "preview:demo": "npm --workspace apps/web run preview:demo",
     "release:validate": "node bin/release/validate-release.mjs",
