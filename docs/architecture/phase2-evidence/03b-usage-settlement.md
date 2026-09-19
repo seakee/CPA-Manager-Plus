@@ -99,7 +99,7 @@
 - **结论**：
   1. **每个失败的 attempt 均可能发出 usage**：当 attempt 发生错误返回时，Executor 的 `defer reporter.TrackFailure(ctx, &err)` 会触发 `PublishFailure`，向队列发送一条 `Failed: true` 的 `Record`（Token 计数通常为 0）。
   2. **最终成功会再次发出 usage**：Conductor（`sdk/cliproxy/auth/conductor_execution.go:Manager.executeMixedOnce`）重试或 fallback 到后继可用凭证并执行成功后，新 Executor 实例的 Reporter 会发出一条 `Failed: false` 的 `Record`（包含真实的 Token Detail）。
-  3. **单个逻辑请求会触发多个 callbacks**：若一次逻辑请求经历 2 次重试（如 Attempt 1 失败，Attempt 2 失败，Attempt 3 成功），UsagePlugin 会相继收到 3 个独立的 `HandleUsage` 回调（2 条失败记录 + 1 条成功记录）。由于缺乏 RequestID/AttemptID，插件无法从原生数据中辨别它们属于同一次客户端调用。
+  3. **单个逻辑请求可映射到多个 usage callbacks**：一个 logical request 可以经历多个 executor attempts；每个实际进入 executor 并创建独立 UsageReporter 的 attempt 都可能产生独立 usage callback。例如当三次 executor attempt 均到达创建 reporter 并执行的阶段（如 Attempt 1 失败，Attempt 2 失败，Attempt 3 成功），UsagePlugin 最多可观测到 3 个独立的 `HandleUsage` 回调（2 条失败记录 + 1 条成功记录）。由于缺乏 RequestID/AttemptID，插件无法从原生数据中辨别它们属于同一次客户端调用。
   4. **`once.Do` 的局部作用域**：单个 `UsageReporter` 内部的 `r.once.Do` 仅限制**该 reporter 实例**的发布次数；重试过程生成了多个 reporter 实例，因此不会阻止跨 attempt 的多次 usage 发布。
 
 ### 5. Stream 场景行为（Success / Cancel / Disconnect）
@@ -175,14 +175,15 @@
 ### 12. External 未协商时如何分类？
 - **结论**：**分类为 `unknown` 或 `partial`，不得推断为 supported**。
   - 在 External Runtime 未连接且未显式协商版本与插件契约时，`pluginContract` 必须为 `null`；
-  - 无法预先保证外部 CPA 启用了 UsagePlugin 或配置了相同的数据流；
+  - 外部运行时状态依据 CPAMP Manager Server 源码定义（`CPAMP:apps/manager-server/internal/service/runtime/external.go`），属于保守的 `source` 证据，不伪造 `black-box` 运行观察，不声称实际连接过外部 CPA；
+  - 外部实例状态及能力无法在真正运行期协商前予以推断；
   - 依据 Phase2-01 合同规则，External 观测边界严禁跨版本推断或自动晋升。
 
 ---
 
 ## 3. 证据矩阵（Capability Records 总结）
 
-在 [`../../../tests/fixtures/phase2-evidence/extensions/phase2-03b-usage-settlement.json`](../../../tests/fixtures/phase2-evidence/extensions/phase2-03b-usage-settlement.json) 中，我们冻结了 15 个 Evidence Anchors（清除伪 unit 测试，完全基于真实源码链）和 29 个 Capability Records：
+在 [`../../../tests/fixtures/phase2-evidence/extensions/phase2-03b-usage-settlement.json`](../../../tests/fixtures/phase2-evidence/extensions/phase2-03b-usage-settlement.json) 中，我们冻结了 15 个 Evidence Anchors（清除伪 unit 测试，External 修正为真实 source 溯源，完全基于真实源码链）和 29 个 Capability Records：
 
 | 领域 | 能力标识 (`capability`) | Bundled v7.3.3 | Candidate v7.3.8 | External (Unnegotiated) | 关键限制与版本边界说明 |
 |---|---|:---:|:---:|:---:|---|
@@ -190,7 +191,7 @@
 | **流式观测** | `stream_usage_observation` | `supported` | `supported` | `unknown` | 依赖上游 SSE 输出 token 帧，流中断上报已观测 tokens |
 | **失败上报** | `upstream_failure_reporting` | `supported` | `supported` | `unknown` | 上报 Failed=true 与 HTTP 错误码，Token 为 0 |
 | **取消上报** | `cancellation_reporting` | `supported` | `supported` | `unknown` | `context.WithoutCancel` 避免继承客户端取消，但不保证可靠送达 |
-| **重试回调** | `retry_fallback_attempt_callbacks` | `partial` | `partial` | `unknown` | 每次 attempt 独立回调，单个逻辑请求对应多个 callbacks；v7.3.3 无 `publishAttemptRecord` helper |
+| **重试回调** | `retry_fallback_attempt_callbacks` | `partial` | `partial` | `unknown` | 每个实际创建 UsageReporter 的 attempt 独立回调，单个逻辑请求可映射到多个 callbacks；v7.3.3 无 `publishAttemptRecord` helper |
 | **保底计数** | `zero_unknown_usage_handling` | `supported` | `supported` | `unknown` | `EnsurePublished` 兜底生成零 token 记录保障请求计数 |
 | **插件路由** | `plugin_executor_usage_dispatch` | `supported` | `supported` | `unknown` | 经 Plugin Executor 转发的请求完整接入 usage pipeline |
 | **容错弹性** | `usage_plugin_fault_resilience` | `supported` | `supported` | `unknown` | Panic 自动熔断（fuse），内存队列崩溃丢数据，主请求不中断 |

@@ -181,7 +181,10 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
     const candidateRetry = records.get('phase2-03b-candidate-retry-multiple-attempts');
     expect(currentRetry.status).toBe('partial');
     expect(candidateRetry.status).toBe('partial');
-    expect(currentRetry.limitations[0]).toContain('multiple callbacks occur for a single logical request');
+    expect(currentRetry.limitations[0]).toContain('a logical request can span multiple executor attempts');
+    expect(currentRetry.limitations[0]).toContain('independent usage callback');
+    expect(candidateRetry.limitations[0]).toContain('a logical request can span multiple executor attempts');
+    expect(candidateRetry.limitations[0]).toContain('independent usage callback');
 
     const currentExactCorrelation = records.get('phase2-03b-current-exact-request-correlation');
     const candidateExactCorrelation = records.get('phase2-03b-candidate-exact-request-correlation');
@@ -249,11 +252,29 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
     const externalRecords = extension.records.filter((r) => r.artifactId === 'external-unnegotiated');
 
     expect(externalRecords.length).toBe(3);
+
+    const externalAnchor = extension.anchors.find(
+      (a) => a.id === 'phase2-03b-external-usage-settlement-boundary'
+    );
+    expect(externalAnchor).toBeDefined();
+    expect(externalAnchor.evidenceKind).toBe('source');
+    expect(externalAnchor.limitations[0]).toContain(
+      'External runtime version/plugin/capability state cannot be inferred until runtime negotiation/observation occurs'
+    );
+
     for (const record of externalRecords) {
       expect(['unknown', 'partial']).toContain(record.status);
       expect(record.pluginContract).toBeNull();
       expect(record.deploymentMode).toBe('external');
+      expect(record.evidenceKind).not.toContain('black-box');
+      expect(record.evidenceKind).toContain('source');
       expect(CAPABILITY_STATUSES).toContain(record.status);
+    }
+
+    for (const anchor of extension.anchors) {
+      if (anchor.evidenceKind === 'black-box') {
+        expect(anchor.evidenceReference).not.toMatch(/\.go\b/);
+      }
     }
   });
 

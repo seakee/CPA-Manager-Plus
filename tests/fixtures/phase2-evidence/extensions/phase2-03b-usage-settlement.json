@@ -15,7 +15,7 @@
       "evidenceKind": "source",
       "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:sdk/cliproxy/auth/conductor_execution.go (Manager.executeMixedOnce) & internal/runtime/executor/helps/usage_helpers.go (NewExecutorUsageReporter, UsageReporter.TrackFailure, UsageReporter.PublishFailure, UsageReporter.publishWithOutcome, UsageReporter.publishRecord, UsageReporter.EnsurePublished)",
       "limitations": [
-        "v7.3.3 instantiates a new UsageReporter per executor attempt in conductor retry loops and dispatches via publishWithOutcome; multiple callbacks are emitted per logical request without attempt correlation keys, and publishAttemptRecord does not exist in v7.3.3."
+        "v7.3.3 instantiates a new UsageReporter per executor attempt in conductor retry loops and dispatches via publishWithOutcome; a logical request can span multiple executor attempts, and each executor attempt that creates its own UsageReporter can emit an independent usage callback without attempt correlation keys. publishAttemptRecord does not exist in v7.3.3."
       ]
     },
     {
@@ -78,7 +78,7 @@
       "evidenceKind": "source",
       "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:sdk/cliproxy/auth/conductor_execution.go (Manager.executeMixedOnce) & internal/runtime/executor/helps/usage_helpers.go (NewExecutorUsageReporter, UsageReporter.TrackFailure, UsageReporter.publishWithOutcome, UsageReporter.publishAttemptRecord, UsageReporter.publishRecord, UsageReporter.EnsurePublished, UsageReporter.warnModelSubstitution)",
       "limitations": [
-        "v7.3.8 invokes executors repeatedly across retry attempts in conductor execution, creating separate UsageReporters and dispatching via publishAttemptRecord; multiple callbacks occur per logical request without attempt correlation keys."
+        "v7.3.8 invokes executors repeatedly across retry attempts in conductor execution, creating separate UsageReporters and dispatching via publishAttemptRecord; a logical request can span multiple executor attempts, and each executor attempt that creates its own UsageReporter can emit an independent usage callback without attempt correlation keys."
       ]
     },
     {
@@ -129,10 +129,10 @@
     {
       "id": "phase2-03b-external-usage-settlement-boundary",
       "artifactId": "external-unnegotiated",
-      "evidenceKind": "black-box",
+      "evidenceKind": "source",
       "evidenceReference": "CPAMP:apps/manager-server/internal/service/runtime/external.go (ExternalClient.Status)",
       "limitations": [
-        "External runtime usage observation and settlement capabilities cannot be assumed without explicit negotiation."
+        "External runtime version/plugin/capability state cannot be inferred until runtime negotiation/observation occurs."
       ]
     }
   ],
@@ -239,7 +239,7 @@
         "phase2-03b-current-usage-record-structure"
       ],
       "limitations": [
-        "In v7.3.3, conductor execution invokes executors across retry/fallback attempts, each creating its own UsageReporter; multiple callbacks occur for a single logical request without attempt correlation keys."
+        "In v7.3.3, conductor execution invokes executors across retry/fallback attempts; a logical request can span multiple executor attempts, and each executor attempt that creates its own UsageReporter can emit an independent usage callback without attempt correlation keys."
       ]
     },
     {
@@ -507,7 +507,7 @@
         "phase2-03b-candidate-usage-record-structure"
       ],
       "limitations": [
-        "In v7.3.8, conductor retry/fallback loops invoke executors across attempts with independent UsageReporters emitting via publishAttemptRecord; multiple callbacks occur for a single logical request without attempt correlation keys."
+        "In v7.3.8, conductor retry/fallback loops invoke executors across attempts with independent UsageReporters emitting via publishAttemptRecord; a logical request can span multiple executor attempts, and each executor attempt that creates its own UsageReporter can emit an independent usage callback without attempt correlation keys."
       ]
     },
     {
@@ -680,7 +680,7 @@
       "artifactId": "external-unnegotiated",
       "pluginContract": null,
       "deploymentMode": "external",
-      "evidenceKind": ["black-box"],
+      "evidenceKind": ["source"],
       "evidenceRefs": [
         "phase2-03b-external-usage-settlement-boundary"
       ],
@@ -695,7 +695,7 @@
       "artifactId": "external-unnegotiated",
       "pluginContract": null,
       "deploymentMode": "external",
-      "evidenceKind": ["black-box"],
+      "evidenceKind": ["source"],
       "evidenceRefs": [
         "phase2-03b-external-usage-settlement-boundary"
       ],
@@ -710,7 +710,7 @@
       "artifactId": "external-unnegotiated",
       "pluginContract": null,
       "deploymentMode": "external",
-      "evidenceKind": ["black-box"],
+      "evidenceKind": ["source"],
       "evidenceRefs": [
         "phase2-03b-external-usage-settlement-boundary"
       ],
