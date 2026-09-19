@@ -1,4 +1,5 @@
 import type { TFunction } from 'i18next';
+import { formatCompactUsd } from '@/utils/usage';
 import {
   computeCacheHitRate,
   computeRowCacheHitRate,
@@ -211,7 +212,8 @@ export const buildUsageOverviewSummaryCards = ({
       label: t('usage_analytics.metric_estimated_cost'),
       meta: deltaMeta(summaryDelta, 'estimatedCost', t, t('usage_analytics.summary_cost_meta')),
       showModelPriceAttention: true,
-      value: formatMetricValue('estimatedCost', summary.estimatedCost),
+      value: formatCompactUsd(summary.estimatedCost),
+      valueTitle: formatMetricValue('estimatedCost', summary.estimatedCost),
     },
     {
       accent: 'teal',

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"time"
@@ -22,10 +23,12 @@ type Repository interface {
 	ListRecent(ctx context.Context, limit int) ([]model.UsageEvent, error)
 	ModelUsageSummary(ctx context.Context, limit int) (model.ModelUsageSummary, error)
 	BackfillResponseMetadata(ctx context.Context, batchLimit int) (int, error)
+	ResponseMetadataBackfillPending(ctx context.Context) (bool, error)
 	Count(ctx context.Context) (int64, error)
 	ExportJSONL(ctx context.Context) ([]byte, error)
 	WriteCompatibleUsage(ctx context.Context, writer io.Writer, limit int) error
 	WriteExportJSONL(ctx context.Context, writer io.Writer, limit int) error
+	WriteFullExportJSONL(ctx context.Context, writer io.Writer) error
 	AggregateBetween(ctx context.Context, fromMs, toMs int64) (Aggregate, error)
 	TopModelsBetween(ctx context.Context, fromMs, toMs int64, limit int) ([]ModelStat, error)
 	ModelStatsBetween(ctx context.Context, fromMs, toMs int64) ([]ModelStat, error)
@@ -214,35 +217,41 @@ func (r *repository) hashExistsInRaw(ctx context.Context, hash string) (bool, er
 	return false, nil
 }
 
-func (r *repository) prepareUsageEvent(rawEvent model.UsageEvent) preparedUsageEvent {
+func (r *repository) prepareUsageEvent(rawEvent model.UsageEvent) (preparedUsageEvent, error) {
 	event := usage.PrepareSensitiveFieldsForPersistence(rawEvent)
 	usage.NormalizeRequestMetadata(&event)
-	accounting := usage.NormalizeCacheAccounting(usage.CacheInputContext{
-		ExplicitMode:     event.CacheInputMode,
-		ExecutorType:     event.ExecutorType,
-		Provider:         event.Provider,
-		ProviderSnapshot: event.AuthProviderSnapshot,
-		ResolvedModel:    event.ResolvedModel,
-		RequestedModel:   event.RequestedModel,
-		DisplayModel:     event.Model,
-	}, event.InputTokens, event.CachedTokens, event.CacheTokens, event.CacheReadTokens, event.CacheCreationTokens)
-	event.CacheInputMode = accounting.Mode
-	event.NormalizedUncachedInputTokens = accounting.UncachedInputTokens
-	event.NormalizedTotalInputTokens = accounting.TotalInputTokens
-	event.NormalizedCacheReadTokens = accounting.CacheReadTokens
-	event.NormalizedCacheCreationTokens = accounting.CacheCreationTokens
-	if event.TotalTokens <= 0 {
-		event.TotalTokens = accounting.TotalInputTokens + max(event.OutputTokens, int64(0)) + max(event.ReasoningTokens, int64(0))
+	if event.PreserveArchiveDerivedFields {
+		if err := usage.ValidateArchiveDerivedFields(event); err != nil {
+			return preparedUsageEvent{}, fmt.Errorf("restore archive event %q: %w", event.EventHash, err)
+		}
+	} else {
+		accounting := usage.NormalizeCacheAccounting(usage.CacheInputContext{
+			ExplicitMode:     event.CacheInputMode,
+			ExecutorType:     event.ExecutorType,
+			Provider:         event.Provider,
+			ProviderSnapshot: event.AuthProviderSnapshot,
+			ResolvedModel:    event.ResolvedModel,
+			RequestedModel:   event.RequestedModel,
+			DisplayModel:     event.Model,
+		}, event.InputTokens, event.CachedTokens, event.CacheTokens, event.CacheReadTokens, event.CacheCreationTokens)
+		event.CacheInputMode = accounting.Mode
+		event.NormalizedUncachedInputTokens = accounting.UncachedInputTokens
+		event.NormalizedTotalInputTokens = accounting.TotalInputTokens
+		event.NormalizedCacheReadTokens = accounting.CacheReadTokens
+		event.NormalizedCacheCreationTokens = accounting.CacheCreationTokens
+		if event.TotalTokens <= 0 {
+			event.TotalTokens = accounting.TotalInputTokens + max(event.OutputTokens, int64(0)) + max(event.ReasoningTokens, int64(0))
+		}
+		if event.RequestServiceTier == "" {
+			event.RequestServiceTier = event.ServiceTier
+		}
+		event.ServiceTier = usage.EffectiveServiceTier(usage.CacheInputContext{
+			ExecutorType:     event.ExecutorType,
+			Provider:         event.Provider,
+			ProviderSnapshot: event.AuthProviderSnapshot,
+			AuthType:         event.AuthType,
+		}, event.RequestServiceTier, event.ServiceTier, event.ResponseServiceTier)
 	}
-	if event.RequestServiceTier == "" {
-		event.RequestServiceTier = event.ServiceTier
-	}
-	event.ServiceTier = usage.EffectiveServiceTier(usage.CacheInputContext{
-		ExecutorType:     event.ExecutorType,
-		Provider:         event.Provider,
-		ProviderSnapshot: event.AuthProviderSnapshot,
-		AuthType:         event.AuthType,
-	}, event.RequestServiceTier, event.ServiceTier, event.ResponseServiceTier)
 	failed := 0
 	if event.Failed {
 		failed = 1
@@ -271,7 +280,7 @@ func (r *repository) prepareUsageEvent(rawEvent model.UsageEvent) preparedUsageE
 		traceID:          traceID,
 		failSummary:      failSummary,
 		rawJSON:          rawJSON,
-	}
+	}, nil
 }
 
 func (r *repository) InsertBatch(ctx context.Context, events []model.UsageEvent) (model.InsertResult, error) {
@@ -351,7 +360,10 @@ func (r *repository) InsertBatch(ctx context.Context, events []model.UsageEvent)
 		if c.isDuplicate {
 			continue
 		}
-		prepared := r.prepareUsageEvent(c.event)
+		prepared, err := r.prepareUsageEvent(c.event)
+		if err != nil {
+			return model.InsertResult{}, err
+		}
 		preparedList = append(preparedList, prepared)
 	}
 
@@ -811,6 +823,9 @@ func responseHeaderDerivedForInsert(event model.UsageEvent) (string, int64, *flo
 	errorKind := event.HeaderErrorKind
 	errorCode := event.HeaderErrorCode
 	traceID := event.HeaderTraceID
+	if event.PreserveArchiveDerivedFields {
+		return metadataJSON, quotaRecoverAtMS, quotaUsedPercent, quotaPlanType, errorKind, errorCode, traceID
+	}
 
 	derived := usage.DeriveResponseHeaderMetadata(event.ResponseMetadata)
 	if metadataJSON == "" {

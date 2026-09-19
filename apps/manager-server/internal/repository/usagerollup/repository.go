@@ -20,6 +20,7 @@ type Repository interface {
 	Checkpoint(ctx context.Context, name string) (Checkpoint, error)
 	LatestEventID(ctx context.Context) (int64, error)
 	AccountHistoryRows(ctx context.Context, accountKeys []string) ([]AccountHistoryRow, error)
+	AccountHistoryRowsTx(ctx context.Context, tx *sql.Tx, accountKeys []string) ([]AccountHistoryRow, error)
 	DashboardHourlyRows(ctx context.Context, fromMS, toMS int64) ([]DashboardHourlyRow, error)
 	DashboardHourlyModelRows(ctx context.Context, fromMS, toMS int64) ([]DashboardHourlyRow, error)
 	DashboardDailyRows(ctx context.Context, fromMS, toMS int64) ([]DashboardHourlyRow, error)
@@ -229,16 +230,26 @@ func (r *repository) LatestEventID(ctx context.Context) (int64, error) {
 }
 
 func (r *repository) AccountHistoryRows(ctx context.Context, accountKeys []string) ([]AccountHistoryRow, error) {
-	keys := normalizeAccountKeys(accountKeys)
-	if len(keys) == 0 {
-		return []AccountHistoryRow{}, nil
-	}
 	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	result, err := r.AccountHistoryRowsTx(ctx, tx, accountKeys)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
 
+func (r *repository) AccountHistoryRowsTx(ctx context.Context, tx *sql.Tx, accountKeys []string) ([]AccountHistoryRow, error) {
+	keys := normalizeAccountKeys(accountKeys)
+	if len(keys) == 0 {
+		return []AccountHistoryRow{}, nil
+	}
 	checkpoint, err := checkpointInTx(ctx, tx, AccountHistoryCheckpointName)
 	if err != nil {
 		return nil, err
@@ -259,11 +270,7 @@ func (r *repository) AccountHistoryRows(ctx context.Context, accountKeys []strin
 	if err := mergeRawAccountHistoryRows(ctx, tx, afterEventID, keys, grouped); err != nil {
 		return nil, err
 	}
-	result := sortedAccountHistoryRows(grouped)
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	return result, nil
+	return sortedAccountHistoryRows(grouped), nil
 }
 
 func cacheAccountingRawFallbackInTx(ctx context.Context, tx *sql.Tx) (bool, error) {

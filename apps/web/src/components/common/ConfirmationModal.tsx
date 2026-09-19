@@ -18,7 +18,7 @@ export function ConfirmationModal() {
 
   const currentStep =
     step === 2 && options.secondConfirmation ? options.secondConfirmation : options;
-  const { title, message, confirmText, cancelText, variant = 'primary' } = currentStep;
+  const { title, message, confirmText, cancelText, variant = 'primary', width } = currentStep;
 
   const handleConfirm = async () => {
     if (step === 1 && options.secondConfirmation) {
@@ -50,20 +50,30 @@ export function ConfirmationModal() {
   };
 
   return (
-    <Modal open={isOpen} onClose={handleCancel} title={title} closeDisabled={isLoading}>
+    <Modal
+      open={isOpen}
+      onClose={handleCancel}
+      title={title}
+      closeDisabled={isLoading}
+      width={width}
+      footer={
+        <div
+          style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'flex-end', gap: '0.75rem' }}
+        >
+          <Button variant="ghost" onClick={handleCancel} disabled={isLoading}>
+            {cancelText || t('common.cancel')}
+          </Button>
+          <Button variant={variant} onClick={handleConfirm} loading={isLoading}>
+            {confirmText || t('common.confirm')}
+          </Button>
+        </div>
+      }
+    >
       {typeof message === 'string' ? (
         <p style={{ margin: '1rem 0' }}>{message}</p>
       ) : (
         <div style={{ margin: '1rem 0' }}>{message}</div>
       )}
-      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '1rem', marginTop: '2rem' }}>
-        <Button variant="ghost" onClick={handleCancel} disabled={isLoading}>
-          {cancelText || t('common.cancel')}
-        </Button>
-        <Button variant={variant} onClick={handleConfirm} loading={isLoading}>
-          {confirmText || t('common.confirm')}
-        </Button>
-      </div>
     </Modal>
   );
 }

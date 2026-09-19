@@ -39,7 +39,7 @@ func BenchmarkPrepareUsageEvent(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = repo.prepareUsageEvent(event)
+		_, _ = repo.prepareUsageEvent(event)
 	}
 }
 
@@ -101,7 +101,7 @@ func BenchmarkPrepareUsageEvent_LargePayload(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = repo.prepareUsageEvent(event)
+		_, _ = repo.prepareUsageEvent(event)
 	}
 }
 

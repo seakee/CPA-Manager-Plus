@@ -1,0 +1,164 @@
+.page {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  min-width: 0;
+  color: var(--text-primary);
+}
+.controlsPanel {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--bg-primary);
+}
+.workspaceTabs {
+  width: 300px;
+  min-width: 0;
+  button {
+    padding: 8px 12px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.workspace {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  outline: none;
+}
+.transferPanel {
+  min-width: 0;
+}
+.preparingNotice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-primary);
+  font-size: 13px;
+}
+.error {
+  padding: 12px 16px;
+  border: 1px solid color-mix(in srgb, var(--danger-color) 35%, var(--border-color));
+  border-radius: 10px;
+  color: var(--danger-color);
+  background: color-mix(in srgb, var(--danger-color) 5%, var(--bg-primary));
+  font-size: 13px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+  button {
+    margin-inline-start: 8px;
+  }
+}
+.postDeleteNotice {
+  border: 1px solid color-mix(in srgb, var(--success-color) 35%, var(--border-color));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--success-color) 5%, var(--bg-primary));
+  padding: 16px;
+  strong {
+    color: var(--success-color);
+    font-size: 14px;
+  }
+  p {
+    font-size: 13px;
+    line-height: 1.7;
+    margin: 8px 0 12px;
+  }
+}
+.confirmSummary {
+  font-size: 13px;
+  line-height: 1.8;
+  dl {
+    display: grid;
+    gap: 14px;
+    margin: 20px 0;
+    padding: 16px 0;
+    border-block: 1px solid var(--border-color);
+  }
+  dl > div {
+    display: grid;
+    grid-template-columns: minmax(100px, 0.6fr) minmax(0, 1fr);
+    gap: 12px;
+  }
+  dt {
+    color: var(--text-secondary);
+  }
+  dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+    font-variant-numeric: tabular-nums;
+  }
+}
+.drawerActions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  button {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    height: auto;
+    min-height: 34px;
+    max-width: 100%;
+  }
+}
+.srOnlyMobile {
+  display: none;
+}
+@media (max-width: 768px) {
+  .controlsPanel {
+    padding: 12px;
+  }
+  .workspaceTabs {
+    width: 100%;
+  }
+  .controlsPanel > .actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+  .toolbarLabel {
+    display: none;
+  }
+  .srOnlyMobile {
+    display: block;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .drawer.drawer {
+    height: 100dvh;
+    max-height: 100dvh;
+    width: 100% !important;
+    border-radius: 0;
+    border: 0;
+  }
+}
+@media (max-width: 400px) {
+  .confirmSummary dl > div {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+}

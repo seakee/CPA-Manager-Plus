@@ -20,6 +20,7 @@ import {
   getDemoRawConfig,
   resetDemoCredentialRefresh,
   resetDemoEvidenceEpoch,
+  resetDemoUsageArchiveState,
 } from '@/features/demo/demoFixtures';
 import {
   CODEX_INSPECTION_LAST_RUN_STORAGE_KEY,
@@ -171,6 +172,7 @@ export function DemoPage() {
 
     resetDemoEvidenceEpoch();
     resetDemoCredentialRefresh();
+    resetDemoUsageArchiveState();
     resetDemoAuthFileConfiguration();
     resetDemoCodexInspectionRunState();
     setDemoMode(true);
@@ -221,6 +223,7 @@ export function DemoPage() {
     return () => {
       resetDemoEvidenceEpoch();
       resetDemoCredentialRefresh();
+      resetDemoUsageArchiveState();
       resetDemoAuthFileConfiguration();
       resetDemoCodexInspectionRunState();
       setDemoMode(false);

@@ -733,6 +733,13 @@
   overflow: hidden;
 }
 
+// ECharts keeps append-to-body tooltips at their last desktop coordinates after
+// hiding them. Remove only the hidden overlay from layout so a viewport change
+// cannot create blank document-level horizontal scrolling.
+.echartsTooltipWrapper[style*='visibility: hidden'] {
+  display: none !important;
+}
+
 .echartsTooltip {
   display: grid;
   gap: 8px;

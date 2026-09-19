@@ -119,6 +119,21 @@ describe('usageAnalyticsPresentation', () => {
     expect(attentionCards[0].label).toBe('usage_analytics.metric_estimated_cost');
   });
 
+  it('keeps large overview costs compact with the full amount available in the tooltip', () => {
+    const cards = buildUsageOverviewSummaryCards({
+      anomalyCount: 3,
+      locale: 'en',
+      reasoningTokens: 1200,
+      summary: { ...summary, estimatedCost: 7647.298318482321 },
+      summaryDelta,
+      t,
+    });
+    expect(cards.find((card) => card.icon === 'cost')).toMatchObject({
+      value: '$7.65K',
+      valueTitle: '$7,647.30',
+    });
+  });
+
   it('shows fine-grained cache buckets in credential detail cache totals', () => {
     const cards = buildCredentialDetailCards({
       locale: 'en',

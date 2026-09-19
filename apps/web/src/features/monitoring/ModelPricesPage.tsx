@@ -6,6 +6,7 @@ import { Input } from '@/components/ui/Input';
 import { IconPencil, IconPlus, IconSearch, IconTrash2, IconX } from '@/components/ui/icons';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import {
+  getUsageServiceErrorCode,
   usageServiceApi,
   type ModelPriceSyncCandidate,
   type ModelPriceSyncResponse,
@@ -201,8 +202,24 @@ export function ModelPricesPage() {
     }
   };
 
+  const savePrices = async (prices: Parameters<typeof setModelPrices>[0]) => {
+    try {
+      await setModelPrices(prices);
+      return true;
+    } catch (error) {
+      const key =
+        getUsageServiceErrorCode(error) === 'model_price_structure_locked_by_usage_archive'
+          ? 'model_prices.structure_locked_by_usage_archive'
+          : error instanceof Error && error.message === 'model_price_api_unavailable'
+            ? 'model_prices.save_unavailable'
+            : 'model_prices.save_failed';
+      showNotification(t(key), 'error');
+      return false;
+    }
+  };
+
   const handleConfirmCandidate = async (model: string, candidate: ModelPriceSyncCandidate) => {
-    await setModelPrices(applyCandidatePrice(modelPrices, model, candidate));
+    if (!(await savePrices(applyCandidatePrice(modelPrices, model, candidate)))) return;
     void attention.check({ force: true }).catch(() => {});
     setSyncResult((previous) =>
       previous
@@ -228,12 +245,13 @@ export function ModelPricesPage() {
       showNotification(t('usage_stats.model_price_model_required'), 'warning');
       return;
     }
-    await setModelPrices({
+    const saved = await savePrices({
       ...modelPrices,
       [model]: {
         ...price,
       },
     });
+    if (!saved) return;
     void attention.check({ force: true }).catch(() => {});
     setDraft(createEmptyPriceDraft());
     setManualEditorOpen(false);
@@ -243,7 +261,7 @@ export function ModelPricesPage() {
   const handleDelete = async (model: string) => {
     const next = { ...modelPrices };
     delete next[model];
-    await setModelPrices(next);
+    if (!(await savePrices(next))) return;
     if (draft.model === model) {
       setDraft(createEmptyPriceDraft());
       setManualEditorOpen(false);

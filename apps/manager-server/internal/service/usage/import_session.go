@@ -3,15 +3,19 @@ package usage
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +41,7 @@ const (
 	ImportSessionErrorTooLarge       ImportSessionErrorCode = "usage_import_session_too_large"
 	ImportSessionErrorQuotaExceeded  ImportSessionErrorCode = "usage_import_session_quota_exceeded"
 	ImportSessionErrorLimitExceeded  ImportSessionErrorCode = "usage_import_session_limit_exceeded"
+	ImportSessionErrorFileMismatch   ImportSessionErrorCode = "usage_import_session_file_mismatch"
 	ImportSessionErrorUnavailable    ImportSessionErrorCode = "usage_import_session_unavailable"
 )
 
@@ -71,20 +76,80 @@ type ImportSessionConfig struct {
 }
 
 type ImportSession struct {
-	ID              string              `json:"id"`
-	Filename        string              `json:"filename"`
-	Status          ImportSessionStatus `json:"status"`
-	SizeBytes       int64               `json:"size_bytes"`
-	ReceivedBytes   int64               `json:"received_bytes"`
-	ChunkSizeBytes  int64               `json:"chunk_size_bytes"`
-	CreatedAtMS     int64               `json:"created_at_ms"`
-	UpdatedAtMS     int64               `json:"updated_at_ms"`
-	ExpiresAtMS     int64               `json:"expires_at_ms"`
-	Retryable       bool                `json:"retryable"`
-	Error           string              `json:"error,omitempty"`
-	Result          *ImportResult       `json:"result,omitempty"`
-	resumeKey       string
-	cancelRequested bool
+	ID                   string              `json:"id"`
+	Filename             string              `json:"filename"`
+	Status               ImportSessionStatus `json:"status"`
+	SizeBytes            int64               `json:"size_bytes"`
+	ReceivedBytes        int64               `json:"received_bytes"`
+	ReceivedPrefixSHA256 string              `json:"received_prefix_sha256"`
+	ChunkSizeBytes       int64               `json:"chunk_size_bytes"`
+	CreatedAtMS          int64               `json:"created_at_ms"`
+	UpdatedAtMS          int64               `json:"updated_at_ms"`
+	ExpiresAtMS          int64               `json:"expires_at_ms"`
+	Retryable            bool                `json:"retryable"`
+	Error                string              `json:"error,omitempty"`
+	Result               *ImportResult       `json:"result,omitempty"`
+	resumeKey            string
+	cancelRequested      bool
+}
+
+type ImportSessionSummary struct {
+	ID                   string              `json:"id"`
+	Filename             string              `json:"filename"`
+	Status               ImportSessionStatus `json:"status"`
+	SizeBytes            int64               `json:"size_bytes"`
+	ReceivedBytes        int64               `json:"received_bytes"`
+	ReceivedPrefixSHA256 string              `json:"received_prefix_sha256"`
+	ChunkSizeBytes       int64               `json:"chunk_size_bytes"`
+	CreatedAtMS          int64               `json:"created_at_ms"`
+	UpdatedAtMS          int64               `json:"updated_at_ms"`
+	ExpiresAtMS          int64               `json:"expires_at_ms"`
+	Retryable            bool                `json:"retryable"`
+	HasError             bool                `json:"has_error"`
+	Error                string              `json:"error,omitempty"`
+	ErrorCode            string              `json:"error_code,omitempty"`
+	Result               *ImportResult       `json:"result,omitempty"`
+}
+
+type ImportSessionListOptions struct {
+	Status string
+	Limit  int
+	Cursor string
+}
+
+type ImportSessionList struct {
+	Sessions       []ImportSessionSummary      `json:"sessions"`
+	Total          int                         `json:"total"`
+	StatusCounts   map[ImportSessionStatus]int `json:"status_counts"`
+	NextCursor     string                      `json:"next_cursor,omitempty"`
+	ActiveSessions int                         `json:"active_sessions"`
+	MaxSessions    int                         `json:"max_sessions"`
+	ChunkSizeBytes int64                       `json:"chunk_size_bytes"`
+	DiskQuotaBytes int64                       `json:"disk_quota_bytes"`
+	TTLSeconds     int64                       `json:"ttl_seconds"`
+}
+
+func NewImportSessionSummary(session ImportSession) ImportSessionSummary {
+	summary := ImportSessionSummary{
+		ID:                   session.ID,
+		Filename:             session.Filename,
+		Status:               session.Status,
+		SizeBytes:            session.SizeBytes,
+		ReceivedBytes:        session.ReceivedBytes,
+		ReceivedPrefixSHA256: session.ReceivedPrefixSHA256,
+		ChunkSizeBytes:       session.ChunkSizeBytes,
+		CreatedAtMS:          session.CreatedAtMS,
+		UpdatedAtMS:          session.UpdatedAtMS,
+		ExpiresAtMS:          session.ExpiresAtMS,
+		Retryable:            session.Retryable,
+		Result:               cloneImportResult(session.Result),
+	}
+	if session.Status == ImportSessionStatusFailed {
+		summary.HasError = true
+		summary.Error = "usage import session needs attention"
+		summary.ErrorCode = "usage_import_session_failed"
+	}
+	return summary
 }
 
 type importSessionMetadata struct {
@@ -95,6 +160,8 @@ type importSessionMetadata struct {
 
 type importSessionState struct {
 	session         ImportSession
+	prefixHash      hash.Hash
+	prefixVerified  bool
 	cancel          context.CancelFunc
 	cancelRequested bool
 	chunkInProgress bool
@@ -117,6 +184,11 @@ type importSessionManager struct {
 }
 
 type importSessionImporter func(context.Context, io.Reader) (ImportResult, error)
+
+func emptyImportPrefixSHA256() string {
+	digest := sha256.Sum256(nil)
+	return hex.EncodeToString(digest[:])
+}
 
 func newImportSessionManager(config ImportSessionConfig) *importSessionManager {
 	if config.Now == nil {
@@ -265,22 +337,23 @@ func (m *importSessionManager) Create(
 	}
 	nowMS := m.nowMS()
 	session := ImportSession{
-		ID:             id,
-		Filename:       filename,
-		Status:         ImportSessionStatusUploading,
-		SizeBytes:      sizeBytes,
-		ChunkSizeBytes: minInt64(m.config.ChunkSizeBytes, sizeBytes),
-		CreatedAtMS:    nowMS,
-		UpdatedAtMS:    nowMS,
-		ExpiresAtMS:    nowMS + m.config.TTL.Milliseconds(),
-		resumeKey:      resumeKey,
+		ID:                   id,
+		Filename:             filename,
+		Status:               ImportSessionStatusUploading,
+		SizeBytes:            sizeBytes,
+		ReceivedPrefixSHA256: emptyImportPrefixSHA256(),
+		ChunkSizeBytes:       minInt64(m.config.ChunkSizeBytes, sizeBytes),
+		CreatedAtMS:          nowMS,
+		UpdatedAtMS:          nowMS,
+		ExpiresAtMS:          nowMS + m.config.TTL.Milliseconds(),
+		resumeKey:            resumeKey,
 	}
 	if err := m.writeMetadataLocked(session); err != nil {
 		_ = os.Remove(dataPath)
 		_ = os.Remove(metadataPath)
 		return ImportSession{}, err
 	}
-	m.sessions[id] = &importSessionState{session: session}
+	m.sessions[id] = &importSessionState{session: session, prefixHash: sha256.New()}
 	return cloneImportSession(session), nil
 }
 
@@ -301,12 +374,217 @@ func (m *importSessionManager) Get(ctx context.Context, id string) (ImportSessio
 	return cloneImportSession(state.session), nil
 }
 
+// ValidatePrefix verifies the caller's selected file against the bytes that
+// are already durable in the resumable session. The verification is kept
+// in-memory and must be repeated after every successful chunk and process
+// restart; the persisted digest is evidence, not a client identity token.
+func (m *importSessionManager) ValidatePrefix(ctx context.Context, id, prefixSHA256 string) (ImportSession, error) {
+	if err := ctx.Err(); err != nil {
+		return ImportSession{}, err
+	}
+	prefixSHA256 = strings.ToLower(strings.TrimSpace(prefixSHA256))
+	if !validSHA256Hex(prefixSHA256) {
+		return ImportSession{}, newImportSessionError(
+			ImportSessionErrorInvalidRequest,
+			"usage import prefix digest is invalid",
+			nil,
+		)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.ensureInitializedLocked(); err != nil {
+		return ImportSession{}, err
+	}
+	m.cleanupExpiredForRequestLocked(m.nowMS())
+	state, err := m.findSessionLocked(id)
+	if err != nil {
+		return ImportSession{}, err
+	}
+	if state.chunkInProgress {
+		return ImportSession{}, newImportSessionError(
+			ImportSessionErrorConflict,
+			"usage import chunk is still in progress",
+			nil,
+		)
+	}
+	if state.session.Status != ImportSessionStatusUploading &&
+		state.session.Status != ImportSessionStatusReady &&
+		!(state.session.Status == ImportSessionStatusFailed && state.session.Retryable) {
+		return ImportSession{}, newImportSessionError(
+			ImportSessionErrorConflict,
+			"usage import session is not accepting prefix validation",
+			nil,
+		)
+	}
+	if state.session.ReceivedBytes == 0 {
+		if prefixSHA256 != emptyImportPrefixSHA256() {
+			return ImportSession{}, newImportSessionError(
+				ImportSessionErrorFileMismatch,
+				"selected file does not match the uploaded usage import prefix",
+				nil,
+			)
+		}
+		state.prefixVerified = true
+		return cloneImportSession(state.session), nil
+	}
+	dataPath, _, err := m.sessionPaths(id)
+	if err != nil {
+		return ImportSession{}, err
+	}
+	prefixHash, digest, err := hashImportPrefix(dataPath, state.session.ReceivedBytes)
+	if err != nil {
+		return ImportSession{}, newImportSessionError(
+			ImportSessionErrorUnavailable,
+			"read usage import prefix",
+			err,
+		)
+	}
+	if digest != state.session.ReceivedPrefixSHA256 || prefixSHA256 != digest {
+		return ImportSession{}, newImportSessionError(
+			ImportSessionErrorFileMismatch,
+			"selected file does not match the uploaded usage import prefix",
+			nil,
+		)
+	}
+	state.prefixHash = prefixHash
+	state.prefixVerified = true
+	return cloneImportSession(state.session), nil
+}
+
+func (m *importSessionManager) List(ctx context.Context, options ImportSessionListOptions) (ImportSessionList, error) {
+	if err := ctx.Err(); err != nil {
+		return ImportSessionList{}, err
+	}
+	if options.Limit <= 0 {
+		options.Limit = 20
+	}
+	if options.Limit > 100 {
+		return ImportSessionList{}, newImportSessionError(
+			ImportSessionErrorInvalidRequest,
+			"usage import session limit must be between 1 and 100",
+			nil,
+		)
+	}
+	status := ImportSessionStatus(strings.TrimSpace(options.Status))
+	if status != "" && !validImportSessionStatus(status) {
+		return ImportSessionList{}, newImportSessionError(
+			ImportSessionErrorInvalidRequest,
+			"usage import session status filter is invalid",
+			nil,
+		)
+	}
+	beforeUpdatedAtMS, beforeID, err := decodeImportSessionCursor(options.Cursor)
+	if err != nil {
+		return ImportSessionList{}, err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.ensureInitializedLocked(); err != nil {
+		return ImportSessionList{}, err
+	}
+	m.cleanupExpiredForRequestLocked(m.nowMS())
+	all := make([]ImportSession, 0, len(m.sessions))
+	statusCounts := make(map[ImportSessionStatus]int)
+	for _, state := range m.sessions {
+		statusCounts[state.session.Status]++
+		if status != "" && state.session.Status != status {
+			continue
+		}
+		all = append(all, cloneImportSession(state.session))
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].UpdatedAtMS != all[j].UpdatedAtMS {
+			return all[i].UpdatedAtMS > all[j].UpdatedAtMS
+		}
+		return all[i].ID > all[j].ID
+	})
+	total := len(all)
+	page := make([]ImportSession, 0, min(options.Limit+1, len(all)))
+	for _, session := range all {
+		if beforeUpdatedAtMS > 0 &&
+			(session.UpdatedAtMS > beforeUpdatedAtMS ||
+				(session.UpdatedAtMS == beforeUpdatedAtMS && session.ID >= beforeID)) {
+			continue
+		}
+		page = append(page, session)
+		if len(page) > options.Limit {
+			break
+		}
+	}
+	hasMore := len(page) > options.Limit
+	if hasMore {
+		page = page[:options.Limit]
+	}
+	nextCursor := ""
+	if hasMore && len(page) > 0 {
+		last := page[len(page)-1]
+		nextCursor = encodeImportSessionCursor(last.UpdatedAtMS, last.ID)
+	}
+	return ImportSessionList{
+		Sessions:       summarizeImportSessions(page),
+		Total:          total,
+		StatusCounts:   statusCounts,
+		NextCursor:     nextCursor,
+		ActiveSessions: m.activeSessionCountLocked(),
+		MaxSessions:    m.config.MaxSessions,
+		ChunkSizeBytes: m.config.ChunkSizeBytes,
+		DiskQuotaBytes: m.config.DiskQuotaBytes,
+		TTLSeconds:     int64(m.config.TTL / time.Second),
+	}, nil
+}
+
+func summarizeImportSessions(sessions []ImportSession) []ImportSessionSummary {
+	summaries := make([]ImportSessionSummary, 0, len(sessions))
+	for _, session := range sessions {
+		summaries = append(summaries, NewImportSessionSummary(session))
+	}
+	return summaries
+}
+
+func encodeImportSessionCursor(updatedAtMS int64, id string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(updatedAtMS, 10) + ":" + id))
+}
+
+func decodeImportSessionCursor(cursor string) (int64, string, error) {
+	cursor = strings.TrimSpace(cursor)
+	if cursor == "" {
+		return 0, "", nil
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return 0, "", newImportSessionError(
+			ImportSessionErrorInvalidRequest,
+			"usage import session cursor is invalid",
+			err,
+		)
+	}
+	parts := strings.SplitN(string(decoded), ":", 2)
+	if len(parts) != 2 || !validImportSessionID(parts[1]) {
+		return 0, "", newImportSessionError(
+			ImportSessionErrorInvalidRequest,
+			"usage import session cursor is invalid",
+			nil,
+		)
+	}
+	updatedAtMS, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || updatedAtMS <= 0 {
+		return 0, "", newImportSessionError(
+			ImportSessionErrorInvalidRequest,
+			"usage import session cursor is invalid",
+			err,
+		)
+	}
+	return updatedAtMS, parts[1], nil
+}
+
 func (m *importSessionManager) WriteChunk(
 	ctx context.Context,
 	id string,
 	offset int64,
 	contentLength int64,
 	reader io.Reader,
+	prefixSHA256 ...string,
 ) (ImportSession, error) {
 	if err := ctx.Err(); err != nil {
 		return ImportSession{}, err
@@ -345,6 +623,28 @@ func (m *importSessionManager) WriteChunk(
 			fmt.Sprintf("usage import offset mismatch: expected %d", state.session.ReceivedBytes),
 			nil,
 		)
+	}
+	if offset > 0 && !state.prefixVerified {
+		m.mu.Unlock()
+		return ImportSession{}, newImportSessionError(
+			ImportSessionErrorFileMismatch,
+			"validate the selected file against the uploaded usage import prefix before continuing",
+			nil,
+		)
+	}
+	if offset > 0 && len(prefixSHA256) > 0 {
+		providedPrefix := ""
+		if len(prefixSHA256) > 0 {
+			providedPrefix = strings.ToLower(strings.TrimSpace(prefixSHA256[0]))
+		}
+		if !validSHA256Hex(providedPrefix) || !strings.EqualFold(providedPrefix, state.session.ReceivedPrefixSHA256) {
+			m.mu.Unlock()
+			return ImportSession{}, newImportSessionError(
+				ImportSessionErrorFileMismatch,
+				"the uploaded usage import prefix is not the validated session prefix",
+				nil,
+			)
+		}
 	}
 	remaining := state.session.SizeBytes - offset
 	if remaining <= 0 {
@@ -416,7 +716,10 @@ func (m *importSessionManager) WriteChunk(
 	m.mu.Unlock()
 
 	limited := &io.LimitedReader{R: &contextReader{ctx: chunkCtx, reader: reader}, N: maxChunkBytes + 1}
-	written, copyErr := io.Copy(file, limited)
+	if state.prefixHash == nil {
+		state.prefixHash = sha256.New()
+	}
+	written, copyErr := io.Copy(io.MultiWriter(file, state.prefixHash), limited)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -464,48 +767,67 @@ func (m *importSessionManager) WriteChunk(
 	}
 	if copyErr != nil {
 		if rollbackErr := rollbackOpenRegularFile(file, offset); rollbackErr != nil {
+			state.prefixVerified = false
 			return ImportSession{}, newImportSessionError(
 				ImportSessionErrorUnavailable,
 				"rollback usage import chunk",
 				errors.Join(copyErr, rollbackErr),
 			)
 		}
+		if rollbackErr := m.restorePrefixHashLocked(state, dataPath, offset); rollbackErr != nil {
+			state.prefixVerified = false
+			return ImportSession{}, newImportSessionError(
+				ImportSessionErrorUnavailable,
+				"restore usage import prefix digest after rollback",
+				errors.Join(copyErr, rollbackErr),
+			)
+		}
+		state.prefixVerified = false
 		return ImportSession{}, copyErr
 	}
 	if err := file.Sync(); err != nil {
 		rollbackErr := rollbackOpenRegularFile(file, offset)
+		hashErr := m.restorePrefixHashLocked(state, dataPath, offset)
+		state.prefixVerified = false
 		return ImportSession{}, newImportSessionError(
 			ImportSessionErrorUnavailable,
 			"sync usage import chunk",
-			errors.Join(err, rollbackErr),
+			errors.Join(err, rollbackErr, hashErr),
 		)
 	}
 	if err := file.Close(); err != nil {
 		rollbackErr := truncateMatchingRegularFile(dataPath, info, offset)
+		hashErr := m.restorePrefixHashLocked(state, dataPath, offset)
+		state.prefixVerified = false
 		return ImportSession{}, newImportSessionError(
 			ImportSessionErrorUnavailable,
 			"close usage import chunk",
-			errors.Join(err, rollbackErr),
+			errors.Join(err, rollbackErr, hashErr),
 		)
 	}
 
 	next := cloneImportSession(state.session)
 	next.ReceivedBytes += written
+	next.ReceivedPrefixSHA256 = hex.EncodeToString(state.prefixHash.Sum(nil))
 	if next.ReceivedBytes == next.SizeBytes {
 		next.Status = ImportSessionStatusReady
 	}
 	m.touchSession(&next)
 	if err := m.writeMetadataLocked(next); err != nil {
-		if rollbackErr := truncateMatchingRegularFile(dataPath, info, offset); rollbackErr != nil {
+		rollbackErr := truncateMatchingRegularFile(dataPath, info, offset)
+		hashErr := m.restorePrefixHashLocked(state, dataPath, offset)
+		state.prefixVerified = false
+		if rollbackErr != nil || hashErr != nil {
 			return ImportSession{}, newImportSessionError(
 				ImportSessionErrorUnavailable,
 				"persist usage import session metadata and rollback chunk",
-				errors.Join(err, rollbackErr),
+				errors.Join(err, rollbackErr, hashErr),
 			)
 		}
 		return ImportSession{}, err
 	}
 	state.session = next
+	state.prefixVerified = false
 	return cloneImportSession(next), nil
 }
 
@@ -572,6 +894,26 @@ func (m *importSessionManager) Complete(
 			err,
 		)
 	}
+	prefixHash, prefixDigest, err := hashImportPrefix(dataPath, state.session.ReceivedBytes)
+	if err != nil {
+		return ImportSession{}, newImportSessionError(
+			ImportSessionErrorUnavailable,
+			"verify usage import prefix",
+			err,
+		)
+	}
+	expectedDigest := strings.TrimSpace(state.session.ReceivedPrefixSHA256)
+	if expectedDigest == "" && state.session.ReceivedBytes == 0 {
+		expectedDigest = emptyImportPrefixSHA256()
+	}
+	if !strings.EqualFold(expectedDigest, prefixDigest) {
+		return ImportSession{}, newImportSessionError(
+			ImportSessionErrorFileMismatch,
+			"uploaded usage import content no longer matches its persisted prefix",
+			nil,
+		)
+	}
+	state.prefixHash = prefixHash
 	next := cloneImportSession(state.session)
 	next.Status = ImportSessionStatusProcessing
 	next.Retryable = false
@@ -889,7 +1231,9 @@ func (m *importSessionManager) ensureInitializedLocked() error {
 				_ = os.Remove(dataPath)
 			}
 			changed = true
-		} else if sessionReservesDisk(session) {
+		}
+		prefixHash := hash.Hash(sha256.New())
+		if sessionReservesDisk(session) {
 			dataPath, _, pathErr := m.sessionPaths(id)
 			if pathErr != nil {
 				m.removeSessionFilesBestEffort(id, true)
@@ -904,8 +1248,78 @@ func (m *importSessionManager) ensureInitializedLocked() error {
 				_ = os.Remove(dataPath)
 				changed = true
 			} else {
-				if session.ReceivedBytes != dataInfo.Size() {
-					session.ReceivedBytes = dataInfo.Size()
+				legacyDigest := strings.TrimSpace(session.ReceivedPrefixSHA256) == ""
+				legacyUploadedPrefix := legacyDigest && session.ReceivedBytes > 0
+				// A legacy session with no uploaded bytes has no content that can
+				// be spliced with a newly selected file. Normalize it to the
+				// canonical empty digest and continue from offset zero; legacy
+				// sessions with an uploaded prefix fail closed below.
+				fileSize := dataInfo.Size()
+				var prefixDigest string
+				prefixReady := false
+				sizeReduced := fileSize < session.ReceivedBytes
+				if fileSize < session.ReceivedBytes {
+					// A published metadata offset with a shorter file can be
+					// recovered as a new, smaller durable prefix. The client must
+					// still prove that prefix before the next chunk is accepted.
+					session.ReceivedBytes = fileSize
+					changed = true
+				}
+				if fileSize > session.ReceivedBytes {
+					// Preserve the historical recovery behavior when the persisted
+					// digest covers the complete file (for example, a crash after
+					// metadata was written but before a status update). Otherwise the
+					// suffix is an uncommitted chunk and must be rolled back to the
+					// metadata offset.
+					fullHash, fullDigest, hashErr := hashImportPrefix(dataPath, fileSize)
+					if hashErr == nil && !legacyDigest && strings.EqualFold(session.ReceivedPrefixSHA256, fullDigest) {
+						session.ReceivedBytes = fileSize
+						prefixHash = fullHash
+						prefixDigest = fullDigest
+						prefixReady = true
+						changed = true
+					} else {
+						if rollbackErr := truncateMatchingRegularFile(dataPath, dataInfo, session.ReceivedBytes); rollbackErr != nil {
+							session.Status = ImportSessionStatusFailed
+							session.Retryable = false
+							session.Error = "usage import temporary file could not be rolled back"
+							m.touchSession(&session)
+							_ = os.Remove(dataPath)
+							changed = true
+							prefixHash = sha256.New()
+							m.sessions[id] = &importSessionState{session: session, prefixHash: prefixHash}
+							if err := m.writeMetadataLocked(session); err != nil {
+								log.Printf("persist usage import rollback state %s: %v", id, err)
+							}
+							continue
+						}
+						changed = true
+					}
+				}
+				if !prefixReady {
+					prefixHash, prefixDigest, err = hashImportPrefix(dataPath, session.ReceivedBytes)
+				}
+				prefixMismatch := err != nil || (!legacyDigest && !strings.EqualFold(session.ReceivedPrefixSHA256, prefixDigest))
+				if sizeReduced && !legacyUploadedPrefix && err == nil {
+					// A shorter regular file is an existing recovery contract: use
+					// the surviving bytes as the new durable prefix and require the
+					// browser to validate that prefix before resuming.
+					prefixMismatch = false
+				}
+				if prefixMismatch || legacyUploadedPrefix {
+					session.Status = ImportSessionStatusFailed
+					session.Retryable = false
+					session.Error = "usage import session file identity is unavailable; start a new import"
+					session.ReceivedBytes = 0
+					session.ReceivedPrefixSHA256 = emptyImportPrefixSHA256()
+					session.Result = nil
+					session.cancelRequested = false
+					m.touchSession(&session)
+					_ = os.Remove(dataPath)
+					prefixHash = sha256.New()
+					changed = true
+				} else if session.ReceivedPrefixSHA256 != prefixDigest {
+					session.ReceivedPrefixSHA256 = prefixDigest
 					changed = true
 				}
 				if session.Status == ImportSessionStatusProcessing {
@@ -939,7 +1353,7 @@ func (m *importSessionManager) ensureInitializedLocked() error {
 				_ = os.Remove(dataPath)
 			}
 		}
-		m.sessions[id] = &importSessionState{session: session}
+		m.sessions[id] = &importSessionState{session: session, prefixHash: prefixHash}
 		if changed {
 			if err := m.writeMetadataLocked(session); err != nil {
 				log.Printf("recover usage import session %s: %v", id, err)
@@ -1013,6 +1427,16 @@ func (m *importSessionManager) finishChunkLocked(state *importSessionState) {
 	state.chunkCancel = nil
 	state.chunkClose = nil
 	state.chunkDone = nil
+}
+
+func (m *importSessionManager) restorePrefixHashLocked(state *importSessionState, dataPath string, receivedBytes int64) error {
+	prefixHash, digest, err := hashImportPrefix(dataPath, receivedBytes)
+	if err != nil {
+		return err
+	}
+	state.prefixHash = prefixHash
+	state.session.ReceivedPrefixSHA256 = digest
+	return nil
 }
 
 func (m *importSessionManager) findSessionLocked(id string) (*importSessionState, error) {
@@ -1179,12 +1603,17 @@ func sessionReservesDisk(session ImportSession) bool {
 
 func cloneImportSession(session ImportSession) ImportSession {
 	clone := session
-	if session.Result != nil {
-		result := *session.Result
-		result.Warnings = append([]string(nil), session.Result.Warnings...)
-		clone.Result = &result
-	}
+	clone.Result = cloneImportResult(session.Result)
 	return clone
+}
+
+func cloneImportResult(result *ImportResult) *ImportResult {
+	if result == nil {
+		return nil
+	}
+	clone := *result
+	clone.Warnings = append([]string(nil), result.Warnings...)
+	return &clone
 }
 
 func newImportSessionID() (string, error) {
@@ -1209,6 +1638,35 @@ func validImportSessionToken(value string) bool {
 		}
 	}
 	return true
+}
+
+func validSHA256Hex(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+func hashImportPrefix(path string, size int64) (hash.Hash, string, error) {
+	if size < 0 {
+		return nil, "", errors.New("prefix size must not be negative")
+	}
+	file, info, err := openValidatedRegularFile(path, os.O_RDONLY)
+	if err != nil {
+		return nil, "", err
+	}
+	defer file.Close()
+	if info.Size() != size {
+		return nil, "", fmt.Errorf("prefix file size = %d, want %d", info.Size(), size)
+	}
+	prefixHash := sha256.New()
+	if size > 0 {
+		if _, err := io.CopyN(prefixHash, file, size); err != nil {
+			return nil, "", err
+		}
+	}
+	return prefixHash, hex.EncodeToString(prefixHash.Sum(nil)), nil
 }
 
 func validImportSessionStatus(status ImportSessionStatus) bool {

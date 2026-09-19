@@ -464,3 +464,179 @@ func makeBaseTestEvent(hash string, timestampMS int64) usage.Event {
 		CreatedAtMS:      timestampMS,
 	}
 }
+
+func TestInsertBatchArchiveRestoreSecurityWithDerivedFieldPreservation(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repo := New(db)
+	ctx := context.Background()
+
+	hash := canonicalTestHash("archive-restore-cross-boundary-test")
+	secretToken := "my-secret-bearer-token-12345678"
+	secretKey := "sk-proj-archiveSecretKeyDirectlyInSource12345"
+	secretAPIKey := "secret-api-key-value-99999"
+
+	quotaUsed := 42.5
+	event := usage.Event{
+		EventHash:                     hash,
+		TimestampMS:                   1778000000000,
+		Timestamp:                     time.UnixMilli(1778000000000).UTC().Format(time.RFC3339Nano),
+		Provider:                      "codex",
+		ExecutorType:                  "CodexExecutor",
+		Model:                         "gpt-5",
+		RequestedModel:                "gpt-5",
+		ResolvedModel:                 "gpt-5",
+		Endpoint:                      "POST /v1/responses",
+		Method:                        "POST",
+		Path:                          "/v1/responses",
+		AuthType:                      "oauth",
+		AuthIndex:                     "auth-1",
+		Source:                        secretKey,
+		InputTokens:                   100,
+		OutputTokens:                  50,
+		ReasoningTokens:               25,
+		CachedTokens:                  20,
+		CacheReadTokens:               20,
+		CacheCreationTokens:           10,
+		CreatedAtMS:                   1778000000000,
+		PreserveArchiveDerivedFields:  true,
+		CacheInputMode:                "separate_from_input",
+		NormalizedUncachedInputTokens: 777,
+		NormalizedTotalInputTokens:    888,
+		NormalizedCacheReadTokens:     333,
+		NormalizedCacheCreationTokens: 444,
+		TotalTokens:                   9999,
+		ServiceTier:                   "default",
+		RequestServiceTier:            "priority",
+		ResponseServiceTier:           "default",
+		FailBody:                      "Authorization: Bearer " + secretToken,
+		FailSummary:                   "Error: Authorization: Bearer " + secretToken,
+		RawJSON:                       `{"api_key":"` + secretAPIKey + `","model":"gpt-5"}`,
+		ResponseMetadataJSON:          `{"Authorization":"Bearer ` + secretToken + `"}`,
+		HeaderQuotaRecoverAtMS:        1778000100000,
+		HeaderQuotaUsedPercent:        &quotaUsed,
+		HeaderQuotaPlanType:           "archive-plan",
+		HeaderErrorKind:               "archive-error",
+		HeaderErrorCode:               "ERR_ARCHIVE",
+		HeaderTraceID:                 "trace-archive-123",
+	}
+
+	res, err := repo.InsertBatch(ctx, []usage.Event{event})
+	if err != nil {
+		t.Fatalf("InsertBatch archive event: %v", err)
+	}
+	if res.Inserted != 1 {
+		t.Fatalf("expected 1 inserted, got: %+v", res)
+	}
+
+	// Query SQLite directly to verify actual persisted columns
+	var (
+		source, failBody, failSummary, rawJSON, respMetaJSON string
+		serviceTier, cacheInputMode                          string
+		uncachedTokens, totalInputTokens                     int64
+		cacheReadTokens, cacheCreationTokens                 int64
+		totalTokens                                          int64
+		quotaRecoverAtMS                                     int64
+		quotaUsedPercent                                     float64
+		quotaPlanType, errorKind, errorCode, traceID         string
+	)
+	err = db.QueryRowContext(ctx, `
+		SELECT source, fail_body, fail_summary, raw_json, response_metadata_json,
+		       service_tier, cache_input_mode,
+		       normalized_uncached_input_tokens, normalized_total_input_tokens,
+		       normalized_cache_read_tokens, normalized_cache_creation_tokens,
+		       total_tokens,
+		       coalesce(header_quota_recover_at_ms, 0), coalesce(header_quota_used_percent, 0),
+		       coalesce(header_quota_plan_type, ''), coalesce(header_error_kind, ''),
+		       coalesce(header_error_code, ''), coalesce(header_trace_id, '')
+		FROM usage_events WHERE event_hash = ?`, hash).
+		Scan(
+			&source, &failBody, &failSummary, &rawJSON, &respMetaJSON,
+			&serviceTier, &cacheInputMode,
+			&uncachedTokens, &totalInputTokens,
+			&cacheReadTokens, &cacheCreationTokens,
+			&totalTokens,
+			&quotaRecoverAtMS, &quotaUsedPercent,
+			&quotaPlanType, &errorKind, &errorCode, &traceID,
+		)
+	if err != nil {
+		t.Fatalf("query row for archive event: %v", err)
+	}
+
+	// Assertion A: Security sanitizer MUST have run on all fields
+	if strings.Contains(source, "archiveSecretKeyDirectlyInSource") {
+		t.Fatalf("Source leaked credential in DB: %q", source)
+	}
+	if strings.Contains(failBody, secretToken) {
+		t.Fatalf("FailBody leaked secret token in DB: %q", failBody)
+	}
+	if strings.Contains(failSummary, secretToken) {
+		t.Fatalf("FailSummary leaked secret token in DB: %q", failSummary)
+	}
+	if strings.Contains(rawJSON, secretAPIKey) {
+		t.Fatalf("RawJSON leaked secret api_key in DB: %q", rawJSON)
+	}
+	if strings.Contains(respMetaJSON, secretToken) {
+		t.Fatalf("ResponseMetadataJSON leaked secret token in DB: %q", respMetaJSON)
+	}
+
+	// Assertion B: Historical derived fields MUST NOT be recalculated
+	if uncachedTokens != 777 {
+		t.Fatalf("normalized_uncached_input_tokens = %d, want 777", uncachedTokens)
+	}
+	if totalInputTokens != 888 {
+		t.Fatalf("normalized_total_input_tokens = %d, want 888", totalInputTokens)
+	}
+	if cacheReadTokens != 333 {
+		t.Fatalf("normalized_cache_read_tokens = %d, want 333", cacheReadTokens)
+	}
+	if cacheCreationTokens != 444 {
+		t.Fatalf("normalized_cache_creation_tokens = %d, want 444", cacheCreationTokens)
+	}
+	if totalTokens != 9999 {
+		t.Fatalf("total_tokens = %d, want 9999 (should not recalculate)", totalTokens)
+	}
+	if serviceTier != "default" {
+		t.Fatalf("service_tier = %q, want %q (should preserve archive value instead of recalculating to %q)", serviceTier, "default", "priority")
+	}
+	if quotaRecoverAtMS != 1778000100000 {
+		t.Fatalf("header_quota_recover_at_ms = %d, want 1778000100000", quotaRecoverAtMS)
+	}
+	if quotaUsedPercent != 42.5 {
+		t.Fatalf("header_quota_used_percent = %f, want 42.5", quotaUsedPercent)
+	}
+	if quotaPlanType != "archive-plan" {
+		t.Fatalf("header_quota_plan_type = %q, want archive-plan", quotaPlanType)
+	}
+	if errorKind != "archive-error" {
+		t.Fatalf("header_error_kind = %q, want archive-error", errorKind)
+	}
+	if errorCode != "ERR_ARCHIVE" {
+		t.Fatalf("header_error_code = %q, want ERR_ARCHIVE", errorCode)
+	}
+	if traceID != "trace-archive-123" {
+		t.Fatalf("header_trace_id = %q, want trace-archive-123", traceID)
+	}
+}
+
+func TestInsertBatchArchiveRestoreDoesNotBypassCanonicalEventHash(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repo := New(db)
+	ctx := context.Background()
+
+	event := makeBaseTestEvent("short-noncanonical-hash", 1000)
+	event.PreserveArchiveDerivedFields = true
+	event.CacheInputMode = "included_in_input"
+
+	_, err = repo.InsertBatch(ctx, []usage.Event{event})
+	if !errors.Is(err, ErrInvalidEventHash) {
+		t.Fatalf("expected ErrInvalidEventHash for archive restore with noncanonical hash, got: %v", err)
+	}
+}

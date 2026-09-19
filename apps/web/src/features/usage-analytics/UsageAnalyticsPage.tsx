@@ -12,6 +12,7 @@ import type {
 import type { BarSeriesOption, HeatmapSeriesOption, LineSeriesOption } from 'echarts/charts';
 import type { ComposeOption, ECElementEvent } from 'echarts/core';
 import { EChartsView } from '@/components/charts/EChartsView';
+import { UsageCoverageWarning } from '@/components/usage/UsageCoverageWarning';
 import { Button } from '@/components/ui/Button';
 import { Select, type SelectOption } from '@/components/ui/Select';
 import { SegmentedTabs, type SegmentedTabItem } from '@/components/ui/SegmentedTabs';
@@ -32,6 +33,7 @@ import {
 } from '@/components/ui/icons';
 import { useNotificationStore, useThemeStore } from '@/stores';
 import { copyToClipboard } from '@/utils/clipboard';
+import { formatCompactUsd } from '@/utils/usage';
 import { getPlanPresentation } from '@/utils/plans';
 import {
   buildUsageHeatmapChartData,
@@ -487,7 +489,7 @@ const getMetricAxisIndex = (axis: (typeof USAGE_METRICS)[number]['axis']) =>
   usageChartAxisKeys[axis];
 
 const getAxisValueFormatter = (axis: (typeof USAGE_METRICS)[number]['axis']) => {
-  if (axis === 'cost') return (value: number) => formatMetricValue('estimatedCost', value);
+  if (axis === 'cost') return (value: number) => formatCompactUsd(value);
   if (axis === 'requests') return (value: number) => compactNumber(value);
   return (value: number) => compactNumber(value);
 };
@@ -557,7 +559,6 @@ const buildUsageTrendChartOption = ({
   const costVisible = visibleAxisSet.has('cost');
   const tokensOnRight = tokensVisible && requestsVisible;
   const costOnRight = costVisible && (requestsVisible || tokensVisible);
-  const rightAxisCount = Number(tokensOnRight) + Number(costOnRight);
   const splitLineAxis = requestsVisible ? 'requests' : tokensVisible ? 'tokens' : 'cost';
   const selectedLine =
     selectedLabel && metrics.length > 0
@@ -594,9 +595,12 @@ const buildUsageTrendChartOption = ({
         : [],
     grid: {
       bottom: compact ? 34 : 44,
-      containLabel: true,
+      // Let ECharts include the offset axes once, instead of reserving their
+      // labels again inside an already padded grid on narrow screens.
+      outerBoundsMode: 'same',
+      outerBoundsContain: 'axisLabel',
       left: 10,
-      right: rightAxisCount > 1 ? 104 : rightAxisCount === 1 ? 72 : 28,
+      right: 10,
       top: compact ? 16 : 28,
     },
     legend: {
@@ -676,7 +680,7 @@ const buildUsageTrendChartOption = ({
           formatter: getAxisValueFormatter('tokens'),
           fontWeight: 700,
         },
-        offset: tokensOnRight && costOnRight ? 46 : 0,
+        offset: tokensOnRight && costOnRight ? 64 : 0,
         position: tokensOnRight ? 'right' : 'left',
         scale: true,
         show: tokensVisible,
@@ -2927,6 +2931,8 @@ function UsageAnalyticsPageInner() {
           </div>
         </section>
       ) : null}
+
+      <UsageCoverageWarning coverage={usage.coverage} t={t} />
 
       {noData ? (
         <EmptyState

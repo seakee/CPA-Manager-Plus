@@ -3,6 +3,7 @@ package dashboard
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"math"
@@ -11,9 +12,34 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagepricing"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
+
+type unavailableDashboardPricing struct {
+	usagepricing.Repository
+}
+
+func (r unavailableDashboardPricing) LoadHourlyRowsTx(context.Context, *sql.Tx, usagepricing.HourlyFilter) ([]usagepricing.HourlyRow, usagepricing.State, bool, error) {
+	return nil, usagepricing.State{}, false, nil
+}
+
+func (r unavailableDashboardPricing) LoadHourlyRowsFromEventsTx(context.Context, *sql.Tx, usagepricing.HourlyFilter) ([]usagepricing.HourlyRow, error) {
+	return nil, errors.New("isolated retained pricing source unavailable")
+}
+
+func TestSummaryFailsClosedWhenPricingCoverageIsIncomplete(t *testing.T) {
+	db := newDashboardTestStore(t)
+	db.UsagePricing = unavailableDashboardPricing{Repository: db.UsagePricing}
+	_, err := New(db).Summary(context.Background(), SummaryParams{
+		TodayStartMS: 1_800_000_000_000,
+		NowMS:        1_800_007_200_000,
+	})
+	if !errors.Is(err, store.ErrUsagePricingCoverageIncomplete) {
+		t.Fatalf("dashboard must not return raw-only zero totals after an incomplete snapshot: %v", err)
+	}
+}
 
 func TestSummaryReturnsContextCancellation(t *testing.T) {
 	db := newDashboardTestStore(t)
@@ -479,7 +505,7 @@ func TestSummaryPricesContextTiersAcrossRawAndPricingRollup(t *testing.T) {
 
 	catchUpDashboardHourlyForTest(t, ctx, db)
 	service := New(db, true)
-	if _, _, _, _, ok := service.loadTodayMetricsFromRollup(ctx, todayStart, nowMS); !ok {
+	if _, _, _, _, ok, err := service.loadTodayMetricsFromRollup(ctx, todayStart, nowMS); !ok || err != nil {
 		t.Fatal("pricing-aware dashboard rollup was not available")
 	}
 	rolled, err := service.Summary(ctx, SummaryParams{
@@ -592,7 +618,10 @@ func TestSummaryDashboardHourlyRollupMergesPendingRawDelta(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("insert pending event: %v", err)
 	}
-	agg, _, timeline, _, ok := New(db).loadTodayMetricsFromRollup(ctx, todayStart, nowMS)
+	agg, _, timeline, _, ok, err := New(db).loadTodayMetricsFromRollup(ctx, todayStart, nowMS)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !ok || agg.TotalCalls != 2 || agg.TotalTokens != 3 || len(timeline) != 2 {
 		t.Fatalf("pending aggregate did not merge raw delta: ok=%v agg=%#v timeline=%#v", ok, agg, timeline)
 	}
@@ -617,7 +646,7 @@ func TestSummaryDashboardHourlyRollupCanBeDisabled(t *testing.T) {
 	}
 	catchUpDashboardHourlyForTest(t, ctx, db)
 	service := New(db, false)
-	if _, _, _, _, ok := service.loadTodayMetricsFromRollup(ctx, todayStart, nowMS); ok {
+	if _, _, _, _, ok, err := service.loadTodayMetricsFromRollup(ctx, todayStart, nowMS); ok || err != nil {
 		t.Fatal("disabled service used hourly rollup")
 	}
 	resp, err := service.Summary(ctx, SummaryParams{TodayStartMS: todayStart, NowMS: nowMS})

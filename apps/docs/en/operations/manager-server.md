@@ -210,7 +210,13 @@ Saving CPAMP configuration does not rewrite the full CPA `config.yaml`.
 | `USAGE_BATCH_SIZE`                      | `100`                                                       | Max records per batch.                                                                                                                                                                                                             |
 | `USAGE_POLL_INTERVAL_MS`                | `500`                                                       | Idle poll interval.                                                                                                                                                                                                                |
 | `USAGE_QUERY_LIMIT`                     | `50000`                                                     | Max recent usage events.                                                                                                                                                                                                           |
+| `USAGE_IMPORT_CHUNK_BYTES`              | `4194304`                                                   | Server chunk size for resumable imports; the panel displays each session's `chunk_size_bytes`, not a fixed label.                                                                                                                  |
+| `USAGE_IMPORT_DISK_QUOTA_BYTES`        | `17179869184`                                               | Total disk quota reserved by active import temporary files; it is not silently expanded.                                                                                                                                           |
+| `USAGE_IMPORT_MAX_SESSIONS`             | `2`                                                         | Maximum number of active import sessions.                                                                                                                                                                                          |
+| `USAGE_IMPORT_SESSION_TTL_MINUTES`     | `1440`                                                      | Import-session and temporary-file TTL in minutes; expired sessions are cleaned by the server.                                                                                                                                     |
 | `USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED` | `true`                                                      | Enable the hourly rollup worker plus the Dashboard and strictly unfiltered Usage Analytics query paths. Temporarily set it to `false` when diagnosing SQLite write contention or rollup failures; queries fall back to raw events. |
+| `USAGE_ARCHIVE_RETENTION_ENABLED`       | `false`                                                     | Enable the startup-and-daily archive, verification, and bounded-delete worker. It is disabled by default, requires hourly rollup to remain enabled, and requires a Manager Server restart after changes.                           |
+| `USAGE_ARCHIVE_RETENTION_DAYS`          | `30`                                                        | Age in days used by automatic retention; effective only when retention and hourly rollup are both enabled.                                                                                                                         |
 | `USAGE_CORS_ORIGINS`                    | `*`                                                         | CORS origins for compatibility endpoints.                                                                                                                                                                                          |
 | `USAGE_RESP_TLS_SKIP_VERIFY`            | `false`                                                     | Skip TLS verification for RESP connection.                                                                                                                                                                                         |
 | `USAGE_QUOTA_COOLDOWN_ENABLED`          | `false`                                                     | Enable the provider quota cooldown worker for strict Codex usage-limit and xAI free-usage-exhausted signals.                                                                                                                       |
@@ -241,7 +247,65 @@ USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED=false
 
 Restart Manager Server after changing it. Dashboard and Usage Analytics will always use raw events while disabled. Except for the one-time startup format upgrade described below, disabling this runtime switch does not delete current-format rollup data. The switch is not exposed in the UI.
 
-When upgrading to the lossless model encoding, Manager Server clears the old `usage_dashboard_hourly_rollups` rows and resets only the `dashboard_hourly` checkpoint. When hourly rollup is enabled, the worker then rebuilds it in bounded background batches; while disabled, it remains empty until the worker is enabled again. This format migration itself does not modify or delete `usage_events` and does not reset the account-history rollup. Long-window queries temporarily fall back to raw events until catch-up completes. The new encoding distinguishes an empty model, the literal `-` model, and models with surrounding whitespace, so a legitimate `-` model no longer disables the entire rollup path.
+Historical usage archives are stored under `usage-archives/` in the resolved data directory. Each segment is a sequence-numbered gzip JSONL file (`segment-*.jsonl.gz`). Usage import reads decompressed JSONL and does not automatically decode a `.gz` file; follow the archive-recovery procedure in [Backup And Restore](./backup.md). If only `USAGE_DB_PATH` or `dbPath` overrides the database location and no data directory is explicitly configured, the archive directory is placed beside that SQLite file. When both a data directory and database path are explicit, the data directory wins, so include that separate archive location in backups. On POSIX systems Manager Server creates directories as `0700` and files as `0600`. Windows inherits the parent directory ACL, so protect the resolved archive parent so only the service account and authorized administrators can access it. SQLite stores archive runs, segments, the maintenance lock, and the event identity ledger. Manual maintenance endpoints accept the CPAMP Admin Key only:
+
+- `POST /v0/management/usage/archives/preview` with `{"cutoff_timestamp_ms": ...}` previews the eligible event count and estimated size.
+- `POST /v0/management/usage/archives` with the same `{"cutoff_timestamp_ms": ...}` body creates a `previewed` run.
+- `GET /v0/management/usage/archives?limit=20` returns recent sanitized run summaries.
+- `GET /v0/management/usage/archives/{id}` returns sanitized progress and segment metadata.
+- `POST /v0/management/usage/archives/{id}/resume` continues archiving or a failed stage.
+- `POST /v0/management/usage/archives/{id}/verify` re-reads the manifest, segment checksums, and event digest.
+- `POST /v0/management/usage/archives/{id}/delete` deletes raw rows in bounded batches only after the archive is verified and every required derived read path covers the run target.
+- `POST /v0/management/usage/archives/{id}/cancel` abandons a run before raw deletion starts. Published archive files, segment metadata, and the identity ledger remain; raw usage is not deleted. `previewed` runs without published segments and `failed` pre-delete runs (`archiving` or `verifying` resume status) before raw deletion starts can be cancelled. Cancelling a failed pre-delete run safely releases its archive event references while preserving existing archive files and ledger rows. `archiving`, `verifying`, `deleting`, stable `archived` or `verified` runs, `failed` runs after raw deletion starts, and `completed` runs cannot be cancelled.
+- `HEAD /v0/management/usage/maintenance` is an Admin-Key-only capability probe; a supported Manager Server returns `204 No Content`.
+- `GET /v0/management/usage/maintenance` returns raw/deleted counts, the active run and lock, migration and aggregate readiness, plus SQLite page/freelist and file-size statistics.
+
+Creating a run never deletes raw rows immediately. A manual `resume` returns a coverage conflict while the cache-accounting migration is incomplete; after that migration completes, it finishes any pending response-metadata backfill before writing the first segment. Stable manual `archived` and `verified` runs do not block a later manual archive, so archive/verify can be used without enabling deletion; automatic-retention runs remain active until their delete stage completes. Abandoning a task never deletes raw rows, published archive segments, or identity-ledger entries. For a failed pre-delete archiving or verifying run, cancellation also releases that run's active archive event references and the maintenance lock so the underlying raw events can participate in future maintenance. Deletion is allowed only after the archive files, manifest, and identity ledger have been verified and the cache-accounting migration, permanent hourly aggregate, pricing and monitoring rollups, monitoring search index, and account-history checkpoint are ready through the run target. Current Dashboard coverage is validated through the permanent hourly aggregate, not the retired `dashboard_hourly` checkpoint. `GET /v0/management/usage/maintenance` summarizes the primary readiness signals, while the delete operation repeats the complete gate inside each bounded transaction. The same run can be resumed after a process restart or interruption. A cancelled run is not auto-resumed and does not block a later manual or retention run. Deletion removes only `usage_events` rows; archive files and the identity ledger remain, so re-importing archived events stays idempotent. This workflow never runs SQLite `VACUUM` online. Automatic retention is disabled by default and does not start while `USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED=false`; enable it only after checking archive-disk capacity and rehearsing recovery.
+
+Monitoring analytics responses include a `coverage` object when either the current query range or its summary-comparison range intersects raw history deleted after a verified archive. Current-range and comparison-range raw/deleted counts are reported independently and are time-range counts that are not narrowed by provider, model, account, search, or other analytics filters. The object also reports `core_aggregate_used` and machine-readable `fidelity_limitations`. Permanent hourly aggregates and event projections can continue to serve supported summary, model, and timeline totals accurately, but raw-only event details, latency percentiles, distributions, failure diagnostics, credential timelines, or unsupported searches can be incomplete. The Monitoring and Usage Analytics pages display this limitation instead of treating missing raw rows or zero-valued raw-only fields as complete history.
+
+Every start or resumption of raw cleanup re-reads the manifest and all segments before deleting the first batch, checking file permissions, checksums, and the event digest instead of trusting the earlier `verified` state alone. If an archive has been lost or corrupted since verification, the run stops in a recoverable deletion-failure state without deleting further raw rows or identity-ledger entries. Restore that run's original archive files from a trusted backup before resuming the same run; do not bypass verification or edit deletion progress manually.
+
+The Usage Maintenance page is available only when the panel is hosted by Manager Server and the Manager Service is available. A regular CPA-hosted panel does not show this entry. The page can run preview/create/resume/verify/delete/cancel and report reclaimable space, but physical compaction remains an offline CLI operation.
+
+The workspace has two tabs, **Archive management** and **Import / export**, with records as the default view.
+
+- **Archive management**: review online details, cleaned details, total SQLite file size, and reclaimable space, then filter archive records by status or source. The already-archived count is a subset of online details; open the online time range when needed.
+- **New archive**: open the drawer from the toolbar, choose archive only or archive followed by cleanup, select a cutoff, review the preview, and confirm archiving. The preview counts only online events that are not already archived. The cutoff applies to this operation; it does not configure automatic retention. Estimated source size is neither the archive file size nor the amount of disk space that will be released.
+- **Continue in place and inspect details**: the same drawer connects range confirmation, execution, results, and follow-up actions. Archive-only work finishes after verification and online details remain available. Cleanup requires a separate confirmation for the entire identified archive record. A cutoff selected for a new archive does not narrow the cleanup range of an existing record. Expand technical fields and segments as needed, or continue a failed stage. Stopping the browser wait does not cancel the current server job. Reopening the record reads its actual server state; cancellation eligibility still follows the existing lifecycle rules.
+- **Import / export**: the default view lists the latest 20 import sessions. File selection, confirmation, progress, and results appear in a drawer, with the same pause, resume, and cancellation interaction as Monitoring. Resume with the original file. Uploading 100% still requires server processing; failed or unsupported records and warnings are reported separately. Exports contain current online details, not already-deleted archive contents, and do not replace a complete disaster-recovery backup. Existing import and export entry points remain available in other deployment modes.
+- **Storage and compaction, and diagnostics**: open these from **More maintenance** in the toolbar for complete backup requirements, offline compaction instructions, coverage, storage, and lock information.
+
+The URL preserves the tab, purpose, cutoff, status and source filters, selected record, and drawer. Refresh and browser history restore views and read state; they never create an archive or start cleanup automatically. On phones, drawers fill the screen and keep their footer actions visible. If cleanup succeeds but a subsequent storage refresh fails, the page retains the successful result and offers a read-only refresh instead of repeating cleanup.
+
+### Reclaim SQLite Space While Stopped
+
+Logical deletion normally does not shrink the SQLite file immediately. Before compacting, back up the complete data set as described in [Backup And Restore](./backup.md), stop every Manager Server connected to the database, and reserve temporary free space conservatively equal to at least the current database-file size. Static `previewed`, `archived`, `verified`, and `failed` runs do not block compaction; recorded maintenance locks and active `archiving`, `verifying`, or `deleting` stages do. Pending derived-data migrations are allowed and their checkpoint state is preserved exactly. Never delete WAL, SHM, or a maintenance lock manually.
+
+Native package:
+
+```bash
+cpa-manager-plus compact-usage --db-path ./data/usage.sqlite
+```
+
+Docker Compose, after stopping the service:
+
+```bash
+docker compose stop cpa-manager-plus
+docker compose run --rm --no-deps cpa-manager-plus \
+  compact-usage --db-path /data/usage.sqlite
+docker compose up -d cpa-manager-plus
+```
+
+Windows PowerShell, after stopping the service:
+
+```powershell
+.\cpa-manager-plus.exe compact-usage --db-path .\data\usage.sqlite
+```
+
+The command acquires the same process-level database lock used by Manager Server, opens one SQLite connection with exclusive access, runs `quick_check`, foreign-key validation, `wal_checkpoint(TRUNCATE)`, `VACUUM`, `integrity_check`, and a second foreign-key validation, then compares logical usage summaries before and after compaction. It prints before/after database, WAL, SHM, page, and freelist statistics. It does not create an archive, delete raw rows, rewrite archive files, advance derived-data migrations, or touch `data.key`. A stale maintenance lock still blocks compaction. If it belongs to a resumable active or failed run, start Manager Server and resume that run; if it remains for an inactive or terminal run, preserve the backup and logs and stop for diagnosis. Never delete the lock manually. Preserve the database and complete backup set after a failure.
+
+When upgrading to the lossless model encoding, Manager Server resets the format of the legacy `usage_dashboard_hourly_rollups` and its `dashboard_hourly` checkpoint. This compatibility migration does not modify or delete `usage_events` and does not reset the account-history rollup. Current Dashboard and Usage Analytics reads use the permanent hourly aggregate. The runtime no longer starts the legacy Dashboard hourly worker and does not wait for its checkpoint. When hourly aggregation is enabled, the background worker maintains the current permanent hourly aggregate in bounded batches; relevant queries fall back to raw events according to their read-path rules while its coverage is not ready.
 
 When upgrading an existing database, Manager Server performs schema and metadata changes plus any required derived-rollup reset during startup, but does not scan historical `usage_events`. Cache-accounting corrections that require a historical event scan begin in the background after the HTTP listener is bound, processing 1,000 rows per batch. Candidate scanning, event correction, and derived-row clearing each use bounded transactions with committed progress, so a restart resumes the active phase without repeating completed batches. Readers use raw events while corrected history is being applied or stale rollups are being cleared.
 
@@ -317,8 +381,18 @@ When `USAGE_QUOTA_COOLDOWN_ENABLED`, `USAGE_ACCOUNT_ACTIONS_ENABLED`, or `USAGE_
 | `GET /usage-service/quota-cooldowns`                             | Read active quota cooldowns so Credential Management can show recovery hints.                                |
 | `POST /setup`                                                    | First setup.                                                                                                 |
 | `GET /v0/management/usage`                                       | Compatible usage data.                                                                                       |
-| `GET /v0/management/usage/export`                                | Export JSONL usage events.                                                                                   |
+| `GET /v0/management/usage/export`                                | Stream a complete JSONL snapshot of current raw usage events, independent of `USAGE_QUERY_LIMIT`; deleted archive segments are not merged back into it. |
 | `POST /v0/management/usage/import`                               | Import JSONL or compatible legacy snapshots.                                                                 |
+| `POST /v0/management/usage/archives/preview`                     | Preview a historical archive range (Admin Key only).                                                         |
+| `POST /v0/management/usage/archives`                             | Create a historical archive run (Admin Key only).                                                            |
+| `GET /v0/management/usage/archives?limit=20`                     | Read recent sanitized archive-run summaries (Admin Key only).                                                |
+| `GET /v0/management/usage/archives/{id}`                         | Read sanitized archive-run status and segment metadata (Admin Key only).                                     |
+| `POST /v0/management/usage/archives/{id}/resume`                 | Resume an archive run (Admin Key only).                                                                      |
+| `POST /v0/management/usage/archives/{id}/verify`                 | Verify the archive manifest and segments (Admin Key only).                                                   |
+| `POST /v0/management/usage/archives/{id}/delete`                 | Delete verified raw data in bounded batches (Admin Key only).                                                |
+| `POST /v0/management/usage/archives/{id}/cancel`                 | Abandon a safe pre-delete run (Admin Key only).                                                             |
+| `HEAD /v0/management/usage/maintenance`                          | Probe Usage Maintenance capability; success is `204 No Content` (Admin Key only).                            |
+| `GET /v0/management/usage/maintenance`                           | Read maintenance readiness and reclaimable SQLite space (Admin Key only).                                    |
 | `GET /v0/management/model-prices/usage-summary`                  | Return the lightweight model-call summary used by the Model Prices page.                                     |
 | `GET /v0/management/model-prices`                                | Model pricing.                                                                                               |
 | `PUT /v0/management/model-prices`                                | Replace saved model pricing.                                                                                 |
@@ -352,6 +426,7 @@ usage.sqlite
 usage.sqlite-wal
 usage.sqlite-shm
 data.key
+usage-archives/
 ```
 
 Security notes:
@@ -364,6 +439,7 @@ Security notes:
 - For manual env/secret deployments, also back up the matching secret files. After a successful one-click import, back up SQLite together with `data.key`; keep the temporary secret for retry if the import failed or execution was skipped.
 - Request metadata may contain model names, endpoints, account labels, project snapshots, token usage, latency, and failure summaries.
 - Raw failure bodies stay local in SQLite. Normal APIs and JSONL exports expose sanitized summaries instead of raw diagnostic bodies.
+- Archive JSONL files may contain event-level `fail_body` and `raw_json`; protect them with the same access controls as the live SQLite database.
 
 ## Import And Export
 
@@ -373,5 +449,7 @@ It can import:
 
 - JSONL / NDJSON exported by Manager Server.
 - Legacy usage snapshots only when request-level details exist.
+
+Large files use resumable chunk sessions, with total size bounded by `USAGE_IMPORT_DISK_QUOTA_BYTES`. When a browser resumes a server session with an uploaded prefix it incrementally computes the prefix SHA-256 and the server verifies the persisted digest; the newly selected file must have the same content, not merely the same name, size, or `lastModified`. A mismatch requires a new import and no further chunk is uploaded. Legacy sessions with an uploaded prefix but no digest are not resumed. Each JSONL record or individual object in a legacy snapshot `details` array must be no larger than 10 MiB; chunked upload does not relax this per-record limit.
 
 Aggregate-only legacy files cannot reconstruct request-level monitoring. Test imports against a backup or staging database when accuracy matters.

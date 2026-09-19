@@ -3,13 +3,17 @@ package modelprice
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 )
+
+var ErrStructureChangeAfterRawDeletion = errors.New("model price structure cannot change after archived raw usage has been deleted")
 
 type Repository interface {
 	LoadAll(ctx context.Context) (map[string]model.ModelPrice, error)
@@ -223,6 +227,11 @@ func (r *repository) ReplaceAll(ctx context.Context, prices map[string]model.Mod
 		_ = tx.Rollback()
 	}()
 
+	beforePrices, err := r.LoadAllTx(ctx, tx)
+	if err != nil {
+		return err
+	}
+
 	normalizedPrices := make(map[string]model.ModelPrice, len(prices))
 	for modelID, price := range prices {
 		if err := model.ValidateModelPrice(modelID, price); err != nil {
@@ -237,6 +246,18 @@ func (r *repository) ReplaceAll(ctx context.Context, prices map[string]model.Mod
 			return err
 		}
 		normalizedPrices[modelID] = price
+	}
+
+	beforeRevision := model.ModelPriceStructureRevision(beforePrices)
+	afterRevision := model.ModelPriceStructureRevision(normalizedPrices)
+	if beforeRevision != afterRevision {
+		hasDeletedRaw, err := sqliterepo.HistoricalRawDeletionExists(tx)
+		if err != nil {
+			return err
+		}
+		if hasDeletedRaw {
+			return ErrStructureChangeAfterRawDeletion
+		}
 	}
 
 	if _, err := tx.ExecContext(ctx, `delete from model_price_service_tiers`); err != nil {
@@ -315,6 +336,11 @@ func (r *repository) UpsertSynced(ctx context.Context, prices map[string]model.M
 	defer func() {
 		_ = tx.Rollback()
 	}()
+
+	beforePrices, err := r.LoadAllTx(ctx, tx)
+	if err != nil {
+		return model.ModelPriceSyncResult{}, err
+	}
 
 	stmt, err := tx.PrepareContext(ctx, `insert into model_prices (
 		model, prompt_per_1m, completion_per_1m, cache_per_1m, cache_read_per_1m, cache_creation_per_1m,
@@ -429,6 +455,21 @@ func (r *repository) UpsertSynced(ctx context.Context, prices map[string]model.M
 			return model.ModelPriceSyncResult{}, err
 		}
 		result.Imported++
+	}
+	afterPrices, err := r.LoadAllTx(ctx, tx)
+	if err != nil {
+		return model.ModelPriceSyncResult{}, err
+	}
+	beforeRevision := model.ModelPriceStructureRevision(beforePrices)
+	afterRevision := model.ModelPriceStructureRevision(afterPrices)
+	if beforeRevision != afterRevision {
+		hasDeletedRaw, err := sqliterepo.HistoricalRawDeletionExists(tx)
+		if err != nil {
+			return model.ModelPriceSyncResult{}, err
+		}
+		if hasDeletedRaw {
+			return model.ModelPriceSyncResult{}, ErrStructureChangeAfterRawDeletion
+		}
 	}
 	sort.Strings(result.Preserved)
 	if err := tx.Commit(); err != nil {

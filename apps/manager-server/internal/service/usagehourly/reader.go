@@ -2,6 +2,7 @@ package usagehourly
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -30,6 +31,7 @@ type Snapshot struct {
 	Aggregate  store.Aggregate
 	ModelStats []store.ModelStat
 	Prices     map[string]store.ModelPrice
+	ReadError  error
 
 	rows                   []store.UsageHourlyAggregateRow
 	pricingRows            []store.UsagePricingHourlyRow
@@ -150,6 +152,9 @@ func (r *Reader) loadRows(ctx context.Context, filter store.AnalyticsFilter, das
 	}
 	dbSnapshot, err := r.store.LoadUsageHourlyPricingSnapshot(ctx, aggregateFilter, pricingFilter)
 	if err != nil {
+		if errors.Is(err, store.ErrUsagePricingCoverageIncomplete) {
+			return Snapshot{ReadError: err}, false
+		}
 		r.logFallback(fmt.Sprintf("hourly pricing snapshot query failed: %v", err))
 		return Snapshot{}, false
 	}

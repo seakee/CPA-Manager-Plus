@@ -1,6 +1,8 @@
 import { act } from 'react';
 import { create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { SVGRenderer } from 'echarts/renderers';
+import { echarts } from '@/components/charts/echartsCore';
 import { EChartsView } from '@/components/charts/EChartsView';
 import { Button } from '@/components/ui/Button';
 import { Select } from '@/components/ui/Select';
@@ -569,6 +571,43 @@ describe('UsageAnalyticsPage', () => {
     expect(text).not.toContain('usage_analytics.model_rank_title');
   });
 
+  it('keeps cost axis labels separate from token labels while preserving exact tooltip costs', () => {
+    const renderer = renderPage();
+    const chart = renderer.root.findAllByType(EChartsView).find((node) =>
+      Array.isArray(node.props.option.yAxis) && node.props.option.yAxis.length === 3
+    );
+    expect(chart).toBeDefined();
+    const option = chart!.props.option;
+    expect(option.yAxis[2].axisLabel.formatter(1000)).toBe('$1.00K');
+    expect(option.yAxis[1].offset).toBeGreaterThanOrEqual(64);
+    expect(option.grid.outerBoundsMode).toBe('same');
+    expect(option.grid.right).toBe(10);
+    const costSeries = option.series.find((series: { yAxisIndex: number }) => series.yAxisIndex === 2);
+    expect(option.tooltip.formatter([{ dataIndex: 0, data: 1234.5, seriesName: costSeries.name }])).toContain('$1,234.50');
+    act(() => renderer.unmount());
+  });
+
+  it.each([324, 702, 1148])('keeps the multi-axis plot readable in a %i px chart', (width) => {
+    const first = createTimelinePoint({ label: '07/01', requestCount: 0, totalTokens: 0, estimatedCost: 0 });
+    const last = createTimelinePoint({ label: '08/05', requestCount: 8000, totalTokens: 1_200_000_000, estimatedCost: 1000 });
+    mocks.usageState = createUsageState({ timeline: [first, last] });
+    const renderer = renderPage();
+    const chart = renderer.root.findAllByType(EChartsView).find((node) =>
+      Array.isArray(node.props.option.yAxis) && node.props.option.yAxis.length === 3
+    );
+    echarts.use([SVGRenderer]);
+    const instance = echarts.init(null, undefined, { renderer: 'svg', ssr: true, width, height: 350 });
+    try {
+      instance.setOption({ ...chart!.props.option, animation: false });
+      const start = instance.convertToPixel({ xAxisIndex: 0 }, first.label) as number;
+      const end = instance.convertToPixel({ xAxisIndex: 0 }, last.label) as number;
+      expect(end - start).toBeGreaterThan(Math.max(130, width * 0.45));
+    } finally {
+      instance.dispose();
+      act(() => renderer.unmount());
+    }
+  });
+
   it('uses the unified full plan label in drilldown diagnostics', () => {
     mocks.usageState = createUsageState({
       drilldownPreview: [createDrilldownEvent()],
@@ -774,6 +813,34 @@ describe('UsageAnalyticsPage', () => {
     renderer = renderPage();
     expect(getText(renderer.root)).toContain('usage_analytics.error_title');
     expect(getText(renderer.root)).toContain('analytics failed');
+  });
+
+  it('shows current and comparison archive coverage separately', () => {
+    mocks.usageState = createUsageState({
+      coverage: {
+        scope: 'time_range',
+        mode: 'mixed',
+        raw_complete: false,
+        core_aggregate_used: true,
+        raw_event_count: 4,
+        raw_deleted_event_count: 2,
+        min_deleted_timestamp_ms: 1,
+        max_deleted_timestamp_ms: 2,
+        comparison_raw_event_count: 0,
+        comparison_raw_deleted_event_count: 3,
+        comparison_min_deleted_timestamp_ms: 3,
+        comparison_max_deleted_timestamp_ms: 4,
+        fidelity_limitations: ['event_details_require_raw_events'],
+      },
+    });
+
+    const renderer = renderPage();
+    const text = getText(renderer.root);
+
+    expect(text).toContain('monitoring.coverage_warning_title');
+    expect(text).toContain('monitoring.coverage_warning_current');
+    expect(text).toContain('monitoring.coverage_warning_comparison');
+    expect(text).toContain('monitoring.coverage_warning_limited');
   });
 
   it('navigates to request monitoring details for a selected anomaly bucket', () => {

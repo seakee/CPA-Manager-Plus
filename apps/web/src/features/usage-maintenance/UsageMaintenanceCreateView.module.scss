@@ -1,0 +1,155 @@
+@use '../../styles/variables' as *;
+
+.view {
+  min-width: 0;
+}
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+.card {
+  min-width: 0;
+  padding: 0;
+  background: transparent;
+  h2 {
+    font-size: 14px;
+    margin: 0 0 12px;
+  }
+}
+.intentOptions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 24px;
+  button {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    text-align: start;
+    padding: 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    cursor: pointer;
+    min-width: 0;
+    font: inherit;
+    span {
+      font-size: 12px;
+      line-height: 1.6;
+      color: var(--text-secondary);
+    }
+  }
+}
+.retentionOptions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+  button {
+    padding: 8px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    cursor: pointer;
+    font: inherit;
+    font-size: 13px;
+  }
+}
+.intentOptions .selected,
+.retentionOptions .selected {
+  border-color: var(--primary-color);
+  background: color-mix(in srgb, var(--primary-color) 8%, var(--bg-primary));
+}
+.intentOptions button:focus-visible,
+.retentionOptions button:focus-visible,
+.details summary:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 3px;
+}
+.cutoff {
+  font-size: 12px;
+  color: var(--text-secondary);
+  strong {
+    display: block;
+    color: var(--text-primary);
+    margin-top: 4px;
+    font-size: 14px;
+    overflow-wrap: anywhere;
+  }
+}
+.hint {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-secondary);
+  margin: 10px 0 0;
+}
+.previewGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin: 0 0 18px;
+  dt {
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  dd {
+    font-size: 24px;
+    font-weight: 650;
+    margin: 4px 0 0;
+    overflow-wrap: anywhere;
+  }
+  .range {
+    grid-column: 1 / -1;
+    dd {
+      font-size: 13px;
+      font-weight: 500;
+      line-height: 1.6;
+    }
+  }
+}
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+.warning,
+.empty {
+  font-size: 13px;
+  line-height: 1.7;
+  margin: 12px 0;
+  overflow-wrap: anywhere;
+}
+.warning {
+  color: var(--warning-color, #b7791f);
+}
+.details {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-color);
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-secondary);
+  summary {
+    cursor: pointer;
+    color: var(--text-primary);
+  }
+  p {
+    margin-bottom: 0;
+  }
+}
+@media (max-width: 768px) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .card {
+    padding: 0;
+  }
+  .intentOptions {
+    margin-bottom: 18px;
+  }
+}

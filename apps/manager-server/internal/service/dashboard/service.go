@@ -346,7 +346,9 @@ func (s *Service) summary(ctx context.Context, p SummaryParams) (SummaryResponse
 }
 
 func (s *Service) loadTodayMetrics(ctx context.Context, fromMS, toMS int64, topLimit int) (store.Aggregate, []store.ModelStat, []store.ModelStat, []store.TimelinePoint, map[string]store.ModelPrice, error) {
-	if agg, modelStats, timeline, prices, ok := s.loadTodayMetricsFromRollup(ctx, fromMS, toMS); ok {
+	if agg, modelStats, timeline, prices, ok, err := s.loadTodayMetricsFromRollup(ctx, fromMS, toMS); err != nil {
+		return store.Aggregate{}, nil, nil, nil, nil, err
+	} else if ok {
 		return agg, modelStats, selectTopModelStats(modelStats, topLimit), timeline, prices, nil
 	}
 
@@ -373,16 +375,19 @@ func (s *Service) loadTodayMetrics(ctx context.Context, fromMS, toMS int64, topL
 	return agg, modelStats, topStats, timeline, prices, nil
 }
 
-func (s *Service) loadTodayMetricsFromRollup(ctx context.Context, fromMS, toMS int64) (store.Aggregate, []store.ModelStat, []store.TimelinePoint, map[string]store.ModelPrice, bool) {
+func (s *Service) loadTodayMetricsFromRollup(ctx context.Context, fromMS, toMS int64) (store.Aggregate, []store.ModelStat, []store.TimelinePoint, map[string]store.ModelPrice, bool, error) {
 	snapshot, ok := s.hourlyReader.Load(ctx, fromMS, toMS)
+	if snapshot.ReadError != nil {
+		return store.Aggregate{}, nil, nil, nil, false, snapshot.ReadError
+	}
 	if !ok {
-		return store.Aggregate{}, nil, nil, nil, false
+		return store.Aggregate{}, nil, nil, nil, false, nil
 	}
 	timeline, ok := s.hourlyReader.DashboardTimeline(ctx, snapshot, fromMS, toMS)
 	if !ok {
-		return store.Aggregate{}, nil, nil, nil, false
+		return store.Aggregate{}, nil, nil, nil, false, nil
 	}
-	return snapshot.Aggregate, snapshot.ModelStats, timeline, snapshot.Prices, true
+	return snapshot.Aggregate, snapshot.ModelStats, timeline, snapshot.Prices, true, nil
 }
 
 func selectTopModelStats(stats []store.ModelStat, limit int) []store.ModelStat {

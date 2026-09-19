@@ -16,8 +16,23 @@ vi.mock('react-i18next', () => ({
 }));
 
 vi.mock('@/components/ui/Modal', () => ({
-  Modal: ({ children, open }: { children: ReactNode; open: boolean }) =>
-    open ? <div>{children}</div> : null,
+  Modal: ({
+    children,
+    footer,
+    open,
+    width,
+  }: {
+    children: ReactNode;
+    footer: ReactNode;
+    open: boolean;
+    width?: number;
+  }) =>
+    open ? (
+      <div data-modal-width={width}>
+        <div data-testid="dialog-body">{children}</div>
+        <footer>{footer}</footer>
+      </div>
+    ) : null,
 }));
 
 const renderModal = () => {
@@ -50,6 +65,22 @@ beforeEach(() => {
 });
 
 describe('ConfirmationModal', () => {
+  it('forwards a feature-specific dialog width', () => {
+    useNotificationStore.getState().showConfirmation({
+      message: 'Structured details',
+      width: 720,
+      onConfirm: vi.fn(),
+    });
+
+    const renderer = renderModal();
+
+    expect(renderer.root.findByProps({ 'data-modal-width': 720 })).toBeTruthy();
+    expect(renderer.root.findByType('footer').findAllByType(Button)).toHaveLength(2);
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'dialog-body' }).findAllByType(Button)
+    ).toHaveLength(0);
+  });
+
   it('executes ordinary confirmations after one click', async () => {
     const onConfirm = vi.fn();
     useNotificationStore.getState().showConfirmation({

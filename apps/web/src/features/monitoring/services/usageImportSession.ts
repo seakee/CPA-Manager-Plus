@@ -4,7 +4,9 @@ import {
   type UsageImportResponse,
   type UsageImportSession,
   type UsageImportSessionStatus,
+  type UsageServiceApiError,
 } from '@/services/api/usageService';
+import { Sha256Incremental } from '@/utils/apiKeyHash';
 
 const STORAGE_KEY = 'cpa-manager-plus:usage-import-sessions:v1';
 const DEFAULT_POLL_INTERVAL_MS = 500;
@@ -38,6 +40,7 @@ export type UsageImportSessionClient = Pick<
   typeof usageServiceApi,
   | 'createUsageImportSession'
   | 'getUsageImportSession'
+  | 'validateUsageImportSessionPrefix'
   | 'uploadUsageImportSessionChunk'
   | 'completeUsageImportSession'
   | 'cancelUsageImportSession'
@@ -58,6 +61,13 @@ export interface UploadUsageImportFileOptions {
   base: string;
   managementKey?: string;
   file: File;
+  /**
+   * Optional server-side session selected from the maintenance session list.
+   * When present, the client validates the file against that session before
+   * uploading, which makes resumability survive a page reload even when the
+   * browser-local resume key is no longer available.
+   */
+  sessionId?: string;
   signal?: AbortSignal;
   onProgress?: (progress: UsageImportProgress) => void;
   pollIntervalMs?: number;
@@ -115,6 +125,7 @@ export async function uploadUsageImportFile(
   const storage = options.storage === undefined ? resolveStorage() : options.storage;
   const pollIntervalMs = Math.max(0, options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS);
   let session: UsageImportSession | null = null;
+  let prefixHasher: Sha256Incremental | null = null;
   let retryableCompletionAttempted = false;
 
   const emit = (
@@ -144,6 +155,31 @@ export async function uploadUsageImportFile(
     });
   };
 
+  const validateSessionPrefix = async (
+    candidate: UsageImportSession
+  ): Promise<UsageImportSession> => {
+    if (candidate.received_bytes <= 0) return candidate;
+    if (!prefixHasher || prefixHasher.length !== candidate.received_bytes) {
+      prefixHasher = await hashFilePrefix(
+        options.file,
+        candidate.received_bytes,
+        candidate.chunk_size_bytes,
+        options.signal
+      );
+    }
+    const validated = await client.validateUsageImportSessionPrefix(
+      options.base,
+      candidate.id,
+      prefixHasher.digestHex(),
+      options.managementKey,
+      options.signal
+    );
+    if (validated.received_bytes !== candidate.received_bytes) {
+      throw new Error('usage import session prefix validation changed the upload offset');
+    }
+    return validated;
+  };
+
   try {
     throwIfPaused(options.signal);
     emit('preparing');
@@ -163,25 +199,35 @@ export async function uploadUsageImportFile(
           ) {
             throw new Error('usage import session upload state is invalid');
           }
+          if (offset > 0) {
+            session = await validateSessionPrefix(session);
+          }
           const end = Math.min(options.file.size, offset + session.chunk_size_bytes);
           const chunk = options.file.slice(offset, end);
+          const chunkBytes = new Uint8Array(await chunk.arrayBuffer());
           const next = await client.uploadUsageImportSessionChunk(
             options.base,
             session.id,
             offset,
             chunk,
             options.managementKey,
-            options.signal
+            options.signal,
+            offset > 0 ? prefixHasher?.digestHex() : undefined
           );
           if (next.received_bytes <= offset || next.received_bytes > end) {
             throw new Error('usage import session did not advance by the uploaded chunk');
           }
+          if (!prefixHasher || prefixHasher.length !== offset) {
+            prefixHasher = new Sha256Incremental();
+          }
+          prefixHasher.update(chunkBytes);
           session = next;
           storeSession(storage, options.base, options.file, session.id);
           emit('uploading');
           break;
         }
         case 'ready':
+          session = await validateSessionPrefix(session);
           session = await client.completeUsageImportSession(
             options.base,
             session.id,
@@ -212,6 +258,7 @@ export async function uploadUsageImportFile(
         case 'failed':
           if (session.retryable && !retryableCompletionAttempted) {
             retryableCompletionAttempted = true;
+            session = await validateSessionPrefix(session);
             session = await client.completeUsageImportSession(
               options.base,
               session.id,
@@ -252,12 +299,16 @@ export async function uploadUsageImportFile(
         clearStoredSession(storage, options.base, options.file, '');
         retryable = code === 'usage_import_session_conflict';
       }
-      emit(
-        'failed',
-        session,
-        error instanceof Error ? error.message : String(error),
-        retryable
-      );
+      if (code === 'usage_import_session_file_mismatch') {
+        clearStoredSession(
+          storage,
+          options.base,
+          options.file,
+          session?.id ?? options.sessionId ?? ''
+        );
+        retryable = false;
+      }
+      emit('failed', session, error instanceof Error ? error.message : String(error), retryable);
     }
     throw error;
   }
@@ -281,10 +332,7 @@ export async function cancelUsageImportFile(
     }
     session = null;
   }
-  const pollIntervalMs = Math.max(
-    0,
-    options.pollIntervalMs ?? DEFAULT_CANCEL_POLL_INTERVAL_MS
-  );
+  const pollIntervalMs = Math.max(0, options.pollIntervalMs ?? DEFAULT_CANCEL_POLL_INTERVAL_MS);
   const settleTimeoutMs = Math.max(
     pollIntervalMs,
     options.settleTimeoutMs ?? DEFAULT_CANCEL_SETTLE_TIMEOUT_MS
@@ -317,15 +365,20 @@ async function resolveOrCreateSession(
 ): Promise<UsageImportSession> {
   const stored = readStoredSession(options.storage, options.base, options.file);
   let resumeKey = stored?.resumeKey ?? '';
-  if (stored?.sessionId) {
+  const requestedSessionId = options.sessionId?.trim() || stored?.sessionId || '';
+  if (requestedSessionId) {
     try {
       const storedSession = await options.client.getUsageImportSession(
         options.base,
-        stored.sessionId,
+        requestedSessionId,
         options.managementKey,
         options.signal
       );
-      if (storedSession.size_bytes === options.file.size) {
+      if (
+        storedSession.size_bytes === options.file.size &&
+        (!options.sessionId ||
+          storedSession.filename === normalizeImportFilename(options.file.name))
+      ) {
         if (
           storedSession.status !== 'cancelled' &&
           !(storedSession.status === 'failed' && !storedSession.retryable)
@@ -333,13 +386,23 @@ async function resolveOrCreateSession(
           return storedSession;
         }
       }
+      if (options.sessionId) {
+        const mismatch = new Error(
+          'usage import session does not match the selected file'
+        ) as UsageServiceApiError;
+        mismatch.code = 'usage_import_session_conflict';
+        throw mismatch;
+      }
       clearStoredSession(options.storage, options.base, options.file, storedSession.id);
       resumeKey = '';
     } catch (error) {
       if (getUsageServiceErrorCode(error) !== 'usage_import_session_not_found') {
         throw error;
       }
-      clearStoredSession(options.storage, options.base, options.file, stored.sessionId);
+      if (options.sessionId) throw error;
+      if (stored?.sessionId) {
+        clearStoredSession(options.storage, options.base, options.file, stored.sessionId);
+      }
     }
   }
 
@@ -358,6 +421,14 @@ async function resolveOrCreateSession(
   );
   storeSession(options.storage, options.base, options.file, created.id, resumeKey);
   return created;
+}
+
+function normalizeImportFilename(value: string): string {
+  let filename = value.trim().split(String.fromCharCode(0)).join('');
+  const basenameStart = filename.lastIndexOf('/');
+  if (basenameStart >= 0) filename = filename.slice(basenameStart + 1);
+  if (!filename || filename === '.') filename = 'usage-import.jsonl';
+  return Array.from(filename).slice(0, 240).join('');
 }
 
 function resolvePhase(session: UsageImportSession): UsageImportPhase {
@@ -509,4 +580,22 @@ function createResumeKey(): string {
     }
   }
   return Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
+}
+
+async function hashFilePrefix(
+  file: File,
+  sizeBytes: number,
+  chunkSizeBytes: number,
+  signal?: AbortSignal
+): Promise<Sha256Incremental> {
+  const hasher = new Sha256Incremental();
+  const step = Math.max(1, Math.min(chunkSizeBytes, 8 * 1024 * 1024));
+  for (let offset = 0; offset < sizeBytes; offset += step) {
+    throwIfPaused(signal);
+    const end = Math.min(sizeBytes, offset + step);
+    const bytes = new Uint8Array(await file.slice(offset, end).arrayBuffer());
+    hasher.update(bytes);
+  }
+  throwIfPaused(signal);
+  return hasher;
 }

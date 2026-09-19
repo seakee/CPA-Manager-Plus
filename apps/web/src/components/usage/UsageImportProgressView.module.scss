@@ -1,0 +1,49 @@
+.usageImportModalBody {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+.usageImportFileName {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+}
+.usageImportStatusRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+}
+.usageImportProgressTrack {
+  height: 8px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-tertiary);
+  span {
+    display: block;
+    height: 100%;
+    background: var(--primary-color);
+    transition: width 150ms ease;
+  }
+}
+.usageImportBytes,
+.usageImportHint {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+.usageImportError {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--danger-color);
+  overflow-wrap: anywhere;
+}
+.usageImportModalFooter {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}

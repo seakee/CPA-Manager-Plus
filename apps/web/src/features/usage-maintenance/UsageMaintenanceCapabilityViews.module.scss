@@ -1,0 +1,205 @@
+.view {
+  display: grid;
+  gap: 22px;
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.7;
+}
+.section {
+  min-width: 0;
+  padding-bottom: 22px;
+  border-bottom: 1px solid var(--border-color);
+  h2 {
+    margin: 0 0 14px;
+    font-size: 14px;
+  }
+  p {
+    margin: 12px 0 0;
+  }
+}
+.storageTotal {
+  display: grid;
+  gap: 4px;
+  span,
+  small {
+    color: var(--text-secondary);
+    font-size: 12px;
+  }
+  strong {
+    font-size: 30px;
+    font-variant-numeric: tabular-nums;
+    font-weight: 650;
+    white-space: nowrap;
+  }
+}
+.storageGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 18px 0;
+  margin: 0;
+  dt {
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  dd {
+    font-size: 15px;
+    font-weight: 600;
+    margin: 4px 0 0;
+    white-space: nowrap;
+  }
+}
+.reclaimable {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  strong {
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+}
+.muted {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.8;
+}
+.instructions {
+  padding-inline-start: 20px;
+  margin: 0;
+  li {
+    margin: 12px 0;
+  }
+}
+.backupFiles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+  code {
+    padding: 2px 6px;
+    background: var(--bg-secondary);
+    border-radius: 4px;
+    font-size: 11px;
+  }
+}
+.codeBox {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 12px 0;
+  padding: 14px;
+  font-size: 12px;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+}
+.technical {
+  min-width: 0;
+  font-size: 12px;
+  summary {
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+  }
+  h3 {
+    font-size: 13px;
+    margin: 16px 0 8px;
+  }
+  ul {
+    padding-inline-start: 20px;
+  }
+}
+.keyValues {
+  display: grid;
+  gap: 12px;
+  margin: 14px 0;
+  font-size: 12px;
+  > div {
+    display: grid;
+    grid-template-columns: minmax(120px, 1fr) minmax(0, 1.3fr);
+    gap: 12px;
+  }
+  dt {
+    color: var(--text-secondary);
+    overflow-wrap: anywhere;
+  }
+  dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+}
+.pill {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  padding: 3px 8px;
+  border-radius: 5px;
+  background: var(--bg-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.success {
+  color: var(--success-color);
+}
+.warning {
+  color: var(--warning-color);
+}
+.banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 14px;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  svg {
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+  p {
+    margin: 0;
+  }
+}
+.warningNote {
+  color: var(--warning-color);
+  margin: 0;
+}
+.coverage {
+  margin: 16px 0;
+  small {
+    display: block;
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-top: 6px;
+  }
+}
+.line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 6px 0;
+  strong {
+    font-weight: 500;
+  }
+}
+.progressTrack {
+  height: 6px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--bg-tertiary);
+  i {
+    display: block;
+    height: 100%;
+    background: var(--primary-color);
+  }
+}
+@media (max-width: 380px) {
+  .storageGrid dd {
+    font-size: 13px;
+  }
+  .keyValues > div {
+    grid-template-columns: minmax(90px, 1fr) minmax(0, 1fr);
+  }
+}
