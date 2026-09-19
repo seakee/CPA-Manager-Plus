@@ -1,0 +1,722 @@
+{
+  "anchors": [
+    {
+      "id": "phase2-03b-current-usage-record-structure",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "source",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:sdk/pluginapi/types.go (UsageRecord, UsageFailure, UsageDetail)",
+      "limitations": [
+        "UsageRecord in v7.3.3 contains APIKey, SessionID, ParentSessionID, AuthID, AuthIndex, Failure, Detail, Latency, TTFT; strictly lacks RequestID, TraceID, AttemptID, or IdempotencyKey."
+      ]
+    },
+    {
+      "id": "phase2-03b-current-usage-attempt-dispatch",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "source",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:sdk/cliproxy/auth/conductor_execution.go (Manager.executeMixedOnce) & internal/runtime/executor/helps/usage_helpers.go (NewExecutorUsageReporter, UsageReporter.TrackFailure, UsageReporter.PublishFailure, UsageReporter.publishWithOutcome, UsageReporter.publishRecord, UsageReporter.EnsurePublished)",
+      "limitations": [
+        "v7.3.3 instantiates a new UsageReporter per executor attempt in conductor retry loops and dispatches via publishWithOutcome; a logical request can span multiple executor attempts, and each executor attempt that creates its own UsageReporter can emit an independent usage callback without attempt correlation keys. publishAttemptRecord does not exist in v7.3.3."
+      ]
+    },
+    {
+      "id": "phase2-03b-current-stream-usage-observation",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "source",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:internal/runtime/executor/helps/usage_helpers.go (StreamUsageBuffer.Observe, StreamUsageBuffer.Publish, UsageReporter.EnsurePublished)",
+      "limitations": [
+        "v7.3.3 StreamUsageBuffer observes SSE token payloads and defer-publishes on stream completion or client cancellation."
+      ]
+    },
+    {
+      "id": "phase2-03b-current-plugin-executor-usage-dispatch",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "source",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:sdk/api/handlers/handlers_execution.go (ExecuteWithAuthManager) & sdk/api/handlers/handlers_stream.go",
+      "limitations": [
+        "v7.3.3 routes requests to plugin executors and captures usage in handler-level UsageReporter when response payloads yield token breakdown."
+      ]
+    },
+    {
+      "id": "phase2-03b-current-usage-manager-queue",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "source",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:sdk/cliproxy/usage/manager.go (Manager.Publish, Manager.run, Manager.dispatch)",
+      "limitations": [
+        "v7.3.3 delivers usage asynchronously via an in-memory queue ([]queueItem); delivery is best-effort, volatile across crashes, without persistence, ACK, or exactly-once guarantee."
+      ]
+    },
+    {
+      "id": "phase2-03b-current-usage-plugin-fuse-resilience",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "source",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:internal/pluginhost/adapters_usage_translation.go (usageAdapter.HandleUsage, Host.fusePlugin) & internal/pluginhost/rpc_client.go (rpcPluginAdapter.HandleUsage)",
+      "limitations": [
+        "v7.3.3 host recovers from UsagePlugin panic and marks the plugin fused; RPC transport errors are debug-logged and suppressed without failing client requests."
+      ]
+    },
+    {
+      "id": "phase2-03b-current-reservation-settlement-absent",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "source",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:sdk/pluginapi/types.go (UsagePlugin) & sdk/cliproxy/usage/",
+      "limitations": [
+        "v7.3.3 provides post-completion usage observation only; pre-request token reservation, quota admission, two-phase commit, rollback, and idempotent settlement primitives do not exist."
+      ]
+    },
+    {
+      "id": "phase2-03b-candidate-usage-record-structure",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "source",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:sdk/pluginapi/types.go (UsageRecord, UsageFailure, UsageDetail)",
+      "limitations": [
+        "Candidate v7.3.8 preserves identical UsageRecord fields (APIKey, SessionID, ParentSessionID, AuthID, AuthIndex, Failure, Detail, Latency, TTFT); RequestID, TraceID, AttemptID, and IdempotencyKey remain absent."
+      ]
+    },
+    {
+      "id": "phase2-03b-candidate-usage-attempt-dispatch",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "source",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:sdk/cliproxy/auth/conductor_execution.go (Manager.executeMixedOnce) & internal/runtime/executor/helps/usage_helpers.go (NewExecutorUsageReporter, UsageReporter.TrackFailure, UsageReporter.publishWithOutcome, UsageReporter.publishAttemptRecord, UsageReporter.publishRecord, UsageReporter.EnsurePublished, UsageReporter.warnModelSubstitution)",
+      "limitations": [
+        "v7.3.8 invokes executors repeatedly across retry attempts in conductor execution, creating separate UsageReporters and dispatching via publishAttemptRecord; a logical request can span multiple executor attempts, and each executor attempt that creates its own UsageReporter can emit an independent usage callback without attempt correlation keys."
+      ]
+    },
+    {
+      "id": "phase2-03b-candidate-stream-usage-observation",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "source",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:internal/runtime/executor/helps/usage_helpers.go (StreamUsageBuffer.Observe, StreamUsageBuffer.Publish, StreamUsageBuffer.ObserveClaudeStream, StreamUsageBuffer.ObserveOpenAIStream, UsageReporter.EnsurePublished)",
+      "limitations": [
+        "Stream usage observation and cancellation behavior in v7.3.8 are identical to v7.3.3."
+      ]
+    },
+    {
+      "id": "phase2-03b-candidate-plugin-executor-usage-dispatch",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "source",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:sdk/api/handlers/handlers_execution.go & sdk/api/handlers/handlers_stream.go",
+      "limitations": [
+        "Plugin executor usage dispatch in v7.3.8 maintains parity with v7.3.3."
+      ]
+    },
+    {
+      "id": "phase2-03b-candidate-usage-manager-queue",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "source",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:sdk/cliproxy/usage/manager.go (Manager.Publish, Manager.run)",
+      "limitations": [
+        "In-memory asynchronous queue remains without persistence, ACK, or exactly-once delivery in v7.3.8."
+      ]
+    },
+    {
+      "id": "phase2-03b-candidate-usage-plugin-fuse-resilience",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "source",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:internal/pluginhost/adapters_usage_translation.go (usageAdapter.HandleUsage) & internal/pluginhost/rpc_client.go (rpcPluginAdapter.HandleUsage)",
+      "limitations": [
+        "Panic fuse and RPC error suppression behavior are preserved in v7.3.8."
+      ]
+    },
+    {
+      "id": "phase2-03b-candidate-reservation-settlement-absent",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "source",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:sdk/pluginapi/types.go (UsagePlugin, QuotaMetric) & sdk/cliproxy/usage/",
+      "limitations": [
+        "v7.3.8 adds management UI QuotaMetric but lacks pre-request quota reservation or authoritative settlement primitives."
+      ]
+    },
+    {
+      "id": "phase2-03b-external-usage-settlement-boundary",
+      "artifactId": "external-unnegotiated",
+      "evidenceKind": "source",
+      "evidenceReference": "CPAMP:apps/manager-server/internal/service/runtime/external.go (ExternalClient.Status)",
+      "limitations": [
+        "External runtime version/plugin/capability state cannot be inferred until runtime negotiation/observation occurs."
+      ]
+    }
+  ],
+  "records": [
+    {
+      "id": "phase2-03b-current-successful-non-stream-usage",
+      "capability": "non_stream_usage_observation",
+      "status": "supported",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        }
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-current-usage-record-structure",
+        "phase2-03b-current-usage-attempt-dispatch"
+      ],
+      "limitations": [
+        "Completed non-stream requests observe token usage and latency in v7.3.3, but delivery is asynchronous and lacks request ID correlation."
+      ]
+    },
+    {
+      "id": "phase2-03b-current-successful-stream-usage",
+      "capability": "stream_usage_observation",
+      "status": "supported",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        }
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-current-stream-usage-observation",
+        "phase2-03b-current-usage-record-structure"
+      ],
+      "limitations": [
+        "Streaming token observation in v7.3.3 depends on upstream SSE usage chunks; client cancellation emits partial or zero-token records."
+      ]
+    },
+    {
+      "id": "phase2-03b-current-upstream-failure-reporting",
+      "capability": "upstream_failure_reporting",
+      "status": "supported",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        }
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-current-usage-attempt-dispatch",
+        "phase2-03b-current-usage-record-structure"
+      ],
+      "limitations": [
+        "Upstream failures in v7.3.3 emit usage records with Failed=true and HTTP status code, but zero token detail."
+      ]
+    },
+    {
+      "id": "phase2-03b-current-cancellation-reporting",
+      "capability": "cancellation_reporting",
+      "status": "supported",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        }
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-current-stream-usage-observation",
+        "phase2-03b-current-usage-attempt-dispatch"
+      ],
+      "limitations": [
+        "Client cancellation in v7.3.3 dispatches via context.WithoutCancel with observed partial tokens or failure details; context.WithoutCancel prevents inheriting the client cancellation signal but does not provide durable delivery."
+      ]
+    },
+    {
+      "id": "phase2-03b-current-retry-multiple-attempts",
+      "capability": "retry_fallback_attempt_callbacks",
+      "status": "partial",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        }
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-current-usage-attempt-dispatch",
+        "phase2-03b-current-usage-record-structure"
+      ],
+      "limitations": [
+        "In v7.3.3, conductor execution invokes executors across retry/fallback attempts; a logical request can span multiple executor attempts, and each executor attempt that creates its own UsageReporter can emit an independent usage callback without attempt correlation keys."
+      ]
+    },
+    {
+      "id": "phase2-03b-current-zero-unknown-usage",
+      "capability": "zero_unknown_usage_handling",
+      "status": "supported",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        }
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-current-usage-attempt-dispatch",
+        "phase2-03b-current-stream-usage-observation"
+      ],
+      "limitations": [
+        "EnsurePublished in v7.3.3 guarantees request counting by emitting zero-token records when upstream omits token usage."
+      ]
+    },
+    {
+      "id": "phase2-03b-current-plugin-executor-usage",
+      "capability": "plugin_executor_usage_dispatch",
+      "status": "supported",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        }
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-current-plugin-executor-usage-dispatch",
+        "phase2-03b-current-usage-record-structure"
+      ],
+      "limitations": [
+        "Usage from requests routed through plugin executors in v7.3.3 is captured and dispatched to UsagePlugin when response usage can be parsed."
+      ]
+    },
+    {
+      "id": "phase2-03b-current-usage-plugin-resilience",
+      "capability": "usage_plugin_fault_resilience",
+      "status": "supported",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        }
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-current-usage-plugin-fuse-resilience",
+        "phase2-03b-current-usage-manager-queue"
+      ],
+      "limitations": [
+        "Host in v7.3.3 catches UsagePlugin panic and fuses the plugin without failing client requests; pending in-memory records are lost on crash."
+      ]
+    },
+    {
+      "id": "phase2-03b-current-request-correlation-keys",
+      "capability": "request_correlation_keys",
+      "status": "partial",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        }
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-current-usage-record-structure"
+      ],
+      "limitations": [
+        "v7.3.3 UsageRecord provides SessionID and AuthID but lacks RequestID, TraceID, AttemptID, or IdempotencyKey."
+      ]
+    },
+    {
+      "id": "phase2-03b-current-exact-request-correlation",
+      "capability": "exact_request_correlation",
+      "status": "requires_upstream",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        }
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-current-usage-record-structure"
+      ],
+      "limitations": [
+        "Exact request-level and attempt-level correlation across retry attempts in v7.3.3 requires upstream additions of RequestID and AttemptID to UsageRecord."
+      ]
+    },
+    {
+      "id": "phase2-03b-current-exactly-once-delivery",
+      "capability": "exactly_once_delivery",
+      "status": "unsupported",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        }
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-current-usage-manager-queue"
+      ],
+      "limitations": [
+        "Usage delivery in v7.3.3 is best-effort in-memory observation without persistent journaling, ACK protocol, or replay deduplication."
+      ]
+    },
+    {
+      "id": "phase2-03b-current-pre-request-reservation",
+      "capability": "pre_request_reservation",
+      "status": "unsupported",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        }
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-current-reservation-settlement-absent"
+      ],
+      "limitations": [
+        "v7.3.3 provides no pre-request token reservation or admission hook; quota admission cannot be enforced before upstream execution."
+      ]
+    },
+    {
+      "id": "phase2-03b-current-authoritative-settlement",
+      "capability": "authoritative_settlement",
+      "status": "unsupported",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        }
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-current-reservation-settlement-absent"
+      ],
+      "limitations": [
+        "v7.3.3 provides no two-phase commit, rollback, or idempotent settlement primitives; UsagePlugin observation cannot act as an authoritative ledger."
+      ]
+    },
+    {
+      "id": "phase2-03b-candidate-successful-non-stream-usage",
+      "capability": "non_stream_usage_observation",
+      "status": "supported",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-candidate-usage-record-structure",
+        "phase2-03b-candidate-usage-attempt-dispatch"
+      ],
+      "limitations": [
+        "Candidate v7.3.8 maintains identical non-stream usage observation to v7.3.3 without RequestID correlation."
+      ]
+    },
+    {
+      "id": "phase2-03b-candidate-successful-stream-usage",
+      "capability": "stream_usage_observation",
+      "status": "supported",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-candidate-stream-usage-observation",
+        "phase2-03b-candidate-usage-record-structure"
+      ],
+      "limitations": [
+        "Streaming token observation in v7.3.8 remains dependent on upstream SSE usage chunks."
+      ]
+    },
+    {
+      "id": "phase2-03b-candidate-upstream-failure-reporting",
+      "capability": "upstream_failure_reporting",
+      "status": "supported",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-candidate-usage-attempt-dispatch",
+        "phase2-03b-candidate-usage-record-structure"
+      ],
+      "limitations": [
+        "Upstream failure reporting in v7.3.8 emits Failed=true records with zero token detail."
+      ]
+    },
+    {
+      "id": "phase2-03b-candidate-cancellation-reporting",
+      "capability": "cancellation_reporting",
+      "status": "supported",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-candidate-stream-usage-observation",
+        "phase2-03b-candidate-usage-attempt-dispatch"
+      ],
+      "limitations": [
+        "Client cancellation in v7.3.8 dispatches via context.WithoutCancel with observed partial tokens or failure details; context.WithoutCancel prevents inheriting the client cancellation signal but does not provide durable delivery."
+      ]
+    },
+    {
+      "id": "phase2-03b-candidate-retry-multiple-attempts",
+      "capability": "retry_fallback_attempt_callbacks",
+      "status": "partial",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-candidate-usage-attempt-dispatch",
+        "phase2-03b-candidate-usage-record-structure"
+      ],
+      "limitations": [
+        "In v7.3.8, conductor retry/fallback loops invoke executors across attempts with independent UsageReporters emitting via publishAttemptRecord; a logical request can span multiple executor attempts, and each executor attempt that creates its own UsageReporter can emit an independent usage callback without attempt correlation keys."
+      ]
+    },
+    {
+      "id": "phase2-03b-candidate-zero-unknown-usage",
+      "capability": "zero_unknown_usage_handling",
+      "status": "supported",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-candidate-usage-attempt-dispatch",
+        "phase2-03b-candidate-stream-usage-observation"
+      ],
+      "limitations": [
+        "EnsurePublished in v7.3.8 emits zero-token records when upstream omits token usage."
+      ]
+    },
+    {
+      "id": "phase2-03b-candidate-plugin-executor-usage",
+      "capability": "plugin_executor_usage_dispatch",
+      "status": "supported",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-candidate-plugin-executor-usage-dispatch",
+        "phase2-03b-candidate-usage-record-structure"
+      ],
+      "limitations": [
+        "Plugin executor usage dispatch in v7.3.8 maintains parity with v7.3.3."
+      ]
+    },
+    {
+      "id": "phase2-03b-candidate-usage-plugin-resilience",
+      "capability": "usage_plugin_fault_resilience",
+      "status": "supported",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-candidate-usage-plugin-fuse-resilience",
+        "phase2-03b-candidate-usage-manager-queue"
+      ],
+      "limitations": [
+        "Panic recovery and fuse behavior are preserved in candidate v7.3.8."
+      ]
+    },
+    {
+      "id": "phase2-03b-candidate-request-correlation-keys",
+      "capability": "request_correlation_keys",
+      "status": "partial",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-candidate-usage-record-structure"
+      ],
+      "limitations": [
+        "v7.3.8 UsageRecord lacks RequestID, TraceID, AttemptID, or IdempotencyKey."
+      ]
+    },
+    {
+      "id": "phase2-03b-candidate-exact-request-correlation",
+      "capability": "exact_request_correlation",
+      "status": "requires_upstream",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-candidate-usage-record-structure"
+      ],
+      "limitations": [
+        "Exact request-level and attempt-level correlation in v7.3.8 requires upstream additions of RequestID and AttemptID."
+      ]
+    },
+    {
+      "id": "phase2-03b-candidate-exactly-once-delivery",
+      "capability": "exactly_once_delivery",
+      "status": "unsupported",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-candidate-usage-manager-queue"
+      ],
+      "limitations": [
+        "In-memory asynchronous queue in v7.3.8 remains without persistence, ACK, or exactly-once delivery."
+      ]
+    },
+    {
+      "id": "phase2-03b-candidate-pre-request-reservation",
+      "capability": "pre_request_reservation",
+      "status": "unsupported",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-candidate-reservation-settlement-absent"
+      ],
+      "limitations": [
+        "v7.3.8 provides no pre-request token reservation or quota admission hook."
+      ]
+    },
+    {
+      "id": "phase2-03b-candidate-authoritative-settlement",
+      "capability": "authoritative_settlement",
+      "status": "unsupported",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-candidate-reservation-settlement-absent"
+      ],
+      "limitations": [
+        "v7.3.8 provides no two-phase commit, rollback, or idempotent settlement primitives."
+      ]
+    },
+    {
+      "id": "phase2-03b-external-usage-observation",
+      "capability": "completed_usage_observation",
+      "status": "unknown",
+      "artifactId": "external-unnegotiated",
+      "pluginContract": null,
+      "deploymentMode": "external",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-external-usage-settlement-boundary"
+      ],
+      "limitations": [
+        "External runtime usage observation capability is unknown until version and plugin availability are explicitly negotiated."
+      ]
+    },
+    {
+      "id": "phase2-03b-external-pre-request-reservation",
+      "capability": "pre_request_reservation",
+      "status": "partial",
+      "artifactId": "external-unnegotiated",
+      "pluginContract": null,
+      "deploymentMode": "external",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-external-usage-settlement-boundary"
+      ],
+      "limitations": [
+        "External CPA instances lack reservation primitives across all known versions; external boundary treats pre-request reservation as unnegotiated."
+      ]
+    },
+    {
+      "id": "phase2-03b-external-authoritative-settlement",
+      "capability": "authoritative_settlement",
+      "status": "partial",
+      "artifactId": "external-unnegotiated",
+      "pluginContract": null,
+      "deploymentMode": "external",
+      "evidenceKind": ["source"],
+      "evidenceRefs": [
+        "phase2-03b-external-usage-settlement-boundary"
+      ],
+      "limitations": [
+        "External CPA instances lack authoritative settlement primitives across all known versions; external boundary treats transactional settlement as unnegotiated."
+      ]
+    }
+  ]
+}
