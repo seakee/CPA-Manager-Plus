@@ -23,6 +23,8 @@ import {
   selectAccountQuotaListWindows,
   selectAccountQuotaMainListWindows,
   getQuotaWindowReadableLabel,
+  getAccountQuotaWindowGroupKey,
+  isAccountQuotaWindowIgnored,
 } from './accountsPagePresentation';
 import type { AccountRow } from './accountRows';
 import type { AccountQuotaDisplayWindow } from './accountQuotaDisplayWindows';
@@ -843,6 +845,43 @@ describe('accountsPagePresentation', () => {
       expect(formatQuotaRemainingPercentDisplay('-', 'zh-CN')).toBe('-');
       expect(formatQuotaRemainingPercentDisplay('', 'zh-CN')).toBe('-');
       expect(formatQuotaRemainingPercentDisplay('80%')).toBe('剩余 80%');
+    });
+  });
+
+  describe('isAccountQuotaWindowIgnored & getAccountQuotaWindowGroupKey', () => {
+    it('resolves antigravity group key to Claude or Gemini', () => {
+      const claudeWindow = makeQuotaWindow({
+        key: 'claude-gpt-models:3p-5h',
+        source: 'antigravity',
+        groupLabel: 'Claude and GPT models',
+      });
+      const geminiWindow = makeQuotaWindow({
+        key: 'gemini-models:gemini-5h',
+        source: 'antigravity',
+        groupLabel: 'Gemini Models',
+      });
+
+      expect(getAccountQuotaWindowGroupKey(claudeWindow)).toBe('Claude');
+      expect(getAccountQuotaWindowGroupKey(geminiWindow)).toBe('Gemini');
+    });
+
+    it('correctly identifies ignored quota windows by group or key', () => {
+      const claude5h = makeQuotaWindow({
+        key: 'claude-gpt-models:3p-5h',
+        source: 'antigravity',
+        groupLabel: 'Claude and GPT models',
+      });
+      const gemini5h = makeQuotaWindow({
+        key: 'gemini-models:gemini-5h',
+        source: 'antigravity',
+        groupLabel: 'Gemini Models',
+      });
+
+      expect(isAccountQuotaWindowIgnored(claude5h, ['Claude'])).toBe(true);
+      expect(isAccountQuotaWindowIgnored(gemini5h, ['Claude'])).toBe(false);
+      expect(isAccountQuotaWindowIgnored(claude5h, ['claude-gpt-models:3p-5h'])).toBe(true);
+      expect(isAccountQuotaWindowIgnored(claude5h, [])).toBe(false);
+      expect(isAccountQuotaWindowIgnored(claude5h, undefined)).toBe(false);
     });
   });
 });

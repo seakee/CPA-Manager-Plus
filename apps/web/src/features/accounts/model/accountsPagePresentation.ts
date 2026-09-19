@@ -577,11 +577,35 @@ export const resolveWindowDurationSeconds = (
   return Number.MAX_SAFE_INTEGER;
 };
 
-const getAntigravityMatrixGroupDisplayLabel = (label: string) => {
+export const getAntigravityMatrixGroupDisplayLabel = (label: string): string => {
   const normalized = label.toLowerCase();
   if (normalized.includes('claude') || normalized.includes('gpt')) return 'Claude';
   if (normalized.includes('gemini')) return 'Gemini';
   return label;
+};
+
+export const getAccountQuotaWindowGroupKey = (window: {
+  source?: string;
+  groupLabel?: string;
+  key: string;
+}): string => {
+  if (window.source === 'antigravity' && window.groupLabel) {
+    return getAntigravityMatrixGroupDisplayLabel(window.groupLabel);
+  }
+  return window.groupLabel?.trim() || window.key;
+};
+
+export const isAccountQuotaWindowIgnored = (
+  window: {
+    source?: string;
+    groupLabel?: string;
+    key: string;
+  },
+  ignoredKeysOrGroups?: string[]
+): boolean => {
+  if (!ignoredKeysOrGroups || ignoredKeysOrGroups.length === 0) return false;
+  const groupKey = getAccountQuotaWindowGroupKey(window);
+  return ignoredKeysOrGroups.includes(groupKey) || ignoredKeysOrGroups.includes(window.key);
 };
 
 const resolveWeeklyQuotaLabel = (window: AccountQuotaDisplayWindow, t?: TFunction): string => {

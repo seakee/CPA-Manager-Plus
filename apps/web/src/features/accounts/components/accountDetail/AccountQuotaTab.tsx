@@ -1,4 +1,4 @@
-import { useId, useState } from 'react';
+import { useId, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { JSX } from 'react';
 import { Button } from '@/components/ui/Button';
@@ -13,7 +13,9 @@ import type { AccountDetailViewModel } from '@/features/accounts/model/accountDe
 import {
   formatPercent,
   formatQuotaResetTimestamp,
+  getAccountQuotaWindowGroupKey,
   getQuotaResetRemainingDays,
+  isAccountQuotaWindowIgnored,
 } from '@/features/accounts/model/accountsPagePresentation';
 import {
   getAccountQuotaSemanticGroup,
@@ -102,6 +104,8 @@ interface AccountQuotaTabProps {
   onRefreshHistory: () => void;
   onResetQuota: () => void;
   resetQuotaDisabled: boolean;
+  ignoredGroups?: string[];
+  onToggleIgnoredGroup?: (group: string) => void;
 }
 
 export function AccountQuotaTab({
@@ -112,18 +116,27 @@ export function AccountQuotaTab({
   onRefreshHistory,
   onResetQuota,
   resetQuotaDisabled,
+  ignoredGroups,
+  onToggleIgnoredGroup,
 }: AccountQuotaTabProps) {
   const { t, i18n } = useTranslation();
   const history = detailView.history;
   const allWindows = detailView.quota.windows;
-  const standardWindows = allWindows.filter(
-    (window) => getAccountQuotaSemanticGroup(window) === 'standard'
+  const visibleWindows = useMemo(
+    () => allWindows.filter((window) => !isAccountQuotaWindowIgnored(window, ignoredGroups)),
+    [allWindows, ignoredGroups]
   );
-  const modelWindows = allWindows.filter(
-    (window) => getAccountQuotaSemanticGroup(window) === 'model'
+  const standardWindows = useMemo(
+    () => visibleWindows.filter((window) => getAccountQuotaSemanticGroup(window) === 'standard'),
+    [visibleWindows]
   );
-  const otherQuotaItems = allWindows.filter(
-    (window) => getAccountQuotaSemanticGroup(window) === 'other'
+  const modelWindows = useMemo(
+    () => visibleWindows.filter((window) => getAccountQuotaSemanticGroup(window) === 'model'),
+    [visibleWindows]
+  );
+  const otherQuotaItems = useMemo(
+    () => visibleWindows.filter((window) => getAccountQuotaSemanticGroup(window) === 'other'),
+    [visibleWindows]
   );
 
   const formatNumber = (value: number) => new Intl.NumberFormat(i18n.language).format(value);
@@ -144,6 +157,19 @@ export function AccountQuotaTab({
   const shouldShowResetRecords = detailView.identity.provider === 'codex' && hasResetRecords;
   const [nowMs, setNowMs] = useState(() => Date.now());
   useInterval(() => setNowMs(Date.now()), shouldShowResetRecords ? 60_000 : null);
+
+  const availableGroups = useMemo(() => {
+    const groups = new Set<string>();
+    allWindows.forEach((w) => {
+      const key = getAccountQuotaWindowGroupKey(w);
+      if (key && key !== w.key) {
+        groups.add(key);
+      } else if (w.groupLabel?.trim()) {
+        groups.add(w.groupLabel.trim());
+      }
+    });
+    return Array.from(groups);
+  }, [allWindows]);
 
   return (
     <div className={styles.quotaTab} data-account-quota-tab="true">
@@ -166,6 +192,38 @@ export function AccountQuotaTab({
           </Button>
         </div>
       </div>
+
+      {availableGroups.length > 1 && onToggleIgnoredGroup ? (
+        <div className={styles.quotaGroupVisibilityBar}>
+          <span className={styles.quotaGroupVisibilityLabel}>
+            {t('accounts.detail_quota_sources_visibility')}:
+          </span>
+          <div className={styles.quotaGroupVisibilityTags}>
+            {availableGroups.map((group) => {
+              const isIgnored = ignoredGroups?.includes(group);
+              return (
+                <button
+                  key={group}
+                  type="button"
+                  data-quota-group-toggle={group}
+                  className={`${styles.quotaGroupTag} ${
+                    !isIgnored ? styles.quotaGroupTagActive : styles.quotaGroupTagInactive
+                  }`}
+                  onClick={() => onToggleIgnoredGroup(group)}
+                  title={
+                    isIgnored
+                      ? t('accounts.detail_quota_source_hidden_hint')
+                      : t('accounts.detail_quota_source_shown_hint')
+                  }
+                >
+                  <span aria-hidden="true">{isIgnored ? '✕' : '✓'}</span>
+                  <span>{group}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
 
       <section className={styles.quotaSummaryPanel} data-account-quota-usage-summary="true">
         <div className={styles.quotaSummaryHeading}>
@@ -213,7 +271,7 @@ export function AccountQuotaTab({
 
 
 
-      {standardWindows.length > 0 || allWindows.length === 0 ? (
+      {standardWindows.length > 0 || visibleWindows.length === 0 ? (
         <section className={styles.quotaSection} data-quota-window-group="standard">
           <div className={styles.quotaSectionHeading}>
             <h3>{t('accounts.detail_quota_standard_title', { defaultValue: '标准额度' })}</h3>
