@@ -228,5 +228,51 @@
       }
     },
     "digest": "sha256:e924d254a48723b5b2032ff05e4e91dec27d5d1c1d940ed602c7604024dbf7d1"
+  },
+  "v1.13.1": {
+    "info": {
+      "schema_version": 1,
+      "release": {
+        "version": "v1.13.1",
+        "stage": "stable",
+        "source_commit": "e188cd8ac4a9ef7a9875d37480a301f29997905d"
+      },
+      "content": {
+        "summary": {
+          "zh": "优化大凭证池中的单凭证操作，增强请求模型路由与响应模型诊断，并修复历史模型价格配置标记和 OAuth 排除模型兼容问题。",
+          "en": "Optimizes single-credential operations in large credential pools, improves routed/response-model diagnostics, and fixes legacy model-price flag and OAuth excluded-model compatibility."
+        },
+        "notes": {
+          "zh": "https://github.com/seakee/CPA-Manager-Plus/blob/v1.13.1/docs/release-notes/v1.13.1-zh.md",
+          "en": "https://github.com/seakee/CPA-Manager-Plus/blob/v1.13.1/docs/release-notes/v1.13.1-en.md"
+        }
+      },
+      "update": {
+        "breaking": false,
+        "migration_required": false,
+        "minimum_direct_upgrade_version": null,
+        "upgrade_guide_url": "https://github.com/seakee/CPA-Manager-Plus/releases/tag/v1.13.1"
+      },
+      "distribution": {
+        "docker": {
+          "image": "seakee/cpa-manager-plus",
+          "version_tag": "v1.13.1"
+        },
+        "native": {
+          "assets": [
+            "cpa-manager-plus_v1.13.1_darwin_amd64.tar.gz",
+            "cpa-manager-plus_v1.13.1_darwin_arm64.tar.gz",
+            "cpa-manager-plus_v1.13.1_linux_amd64.tar.gz",
+            "cpa-manager-plus_v1.13.1_linux_arm64.tar.gz",
+            "cpa-manager-plus_v1.13.1_windows_amd64.zip",
+            "cpa-manager-plus_v1.13.1_windows_arm64.zip"
+          ]
+        }
+      },
+      "compatibility": {
+        "minimum_cpa_version": "v7.3.2"
+      }
+    },
+    "digest": "sha256:9d625a945c063db7052499f0b6ce92980748222a8418569d69aa1e613a4672ce"
   }
 }
