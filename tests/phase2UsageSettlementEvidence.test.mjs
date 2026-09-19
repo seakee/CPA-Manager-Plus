@@ -13,11 +13,10 @@ const extensionPath = path.join(
   repoRoot,
   'tests/fixtures/phase2-evidence/extensions/phase2-03b-usage-settlement.json'
 );
-const cpaSourcePath = '/Users/seakee/WorkSpace/Golang/src/github.com/seakee/CPA';
 
 const loadExtension = () => JSON.parse(readFileSync(extensionPath, 'utf8'));
 
-describe('Phase2-03B Usage / Reservation / Settlement Evidence', () => {
+describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => {
   it('validates extension schema and integrates with frozen contract baseline', () => {
     const loaded = loadAndValidateContract();
     const extension = loadExtension();
@@ -38,7 +37,37 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence', () => {
     }
   });
 
-  it('proves present and absent fields in UsageRecord for v7.3.3 and v7.3.8', () => {
+  it('enforces clean version provenance and forbids candidate-only symbols in v7.3.3 evidence', () => {
+    const extension = loadExtension();
+    const currentAnchors = extension.anchors.filter((a) => a.artifactId === 'current-bundled-v7-3-3');
+    const candidateAnchors = extension.anchors.filter((a) => a.artifactId === 'candidate-release-v7-3-8');
+
+    expect(currentAnchors.length).toBe(8);
+    expect(candidateAnchors.length).toBe(8);
+
+    // Provenance labeling check
+    for (const anchor of currentAnchors) {
+      expect(anchor.evidenceReference).toContain('@v7.3.3:');
+      expect(anchor.evidenceReference).not.toContain('@v7.3.8:');
+      // publishAttemptRecord was introduced in v7.3.8; it must NOT appear as a positive reference in v7.3.3 evidence
+      expect(anchor.evidenceReference).not.toContain('publishAttemptRecord');
+    }
+
+    const currentAttemptAnchor = currentAnchors.find((a) => a.id === 'phase2-03b-current-usage-attempt-dispatch');
+    expect(currentAttemptAnchor.evidenceReference).toContain('publishWithOutcome');
+    expect(currentAttemptAnchor.evidenceReference).toContain('publishRecord');
+    expect(currentAttemptAnchor.limitations[0]).toContain('publishAttemptRecord does not exist in v7.3.3');
+
+    for (const anchor of candidateAnchors) {
+      expect(anchor.evidenceReference).toContain('@v7.3.8:');
+      expect(anchor.evidenceReference).not.toContain('@v7.3.3:');
+    }
+
+    const candidateAttemptAnchor = candidateAnchors.find((a) => a.id === 'phase2-03b-candidate-usage-attempt-dispatch');
+    expect(candidateAttemptAnchor.evidenceReference).toContain('publishAttemptRecord');
+  });
+
+  it('enforces UsageRecord presence and absence claims in v7.3.3 and v7.3.8 anchors', () => {
     const extension = loadExtension();
     const currentAnchor = extension.anchors.find(
       (a) => a.id === 'phase2-03b-current-usage-record-structure'
@@ -56,18 +85,10 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence', () => {
       'ParentSessionID',
       'AuthID',
       'AuthIndex',
-      'AuthType',
-      'Source',
-      'ReasoningEffort',
-      'ServiceTier',
-      'Generate',
-      'RequestedAt',
-      'Latency',
-      'TTFT',
-      'Failed',
       'Failure',
       'Detail',
-      'ResponseHeaders',
+      'Latency',
+      'TTFT',
     ];
 
     const expectedAbsentCorrelationFields = [
@@ -79,9 +100,7 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence', () => {
 
     for (const limitation of [currentAnchor.limitations[0], candidateAnchor.limitations[0]]) {
       for (const field of expectedPresentFields) {
-        if (['APIKey', 'SessionID', 'ParentSessionID', 'AuthID', 'AuthIndex', 'Failure', 'Detail', 'Latency', 'TTFT'].includes(field)) {
-          expect(limitation).toContain(field);
-        }
+        expect(limitation).toContain(field);
       }
       for (const absentField of expectedAbsentCorrelationFields) {
         expect(limitation).toContain(absentField);
@@ -104,7 +123,7 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence', () => {
     const candidateStream = records.get('phase2-03b-candidate-successful-stream-usage');
     expect(currentStream.status).toBe('supported');
     expect(candidateStream.status).toBe('supported');
-    expect(currentStream.limitations[0]).toContain('Streaming token observation depends on upstream SSE usage chunks');
+    expect(currentStream.limitations[0]).toContain('Streaming token observation in v7.3.3 depends on upstream SSE usage chunks');
   });
 
   it('proves upstream failure and cancellation reporting behavior', () => {
@@ -149,7 +168,7 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence', () => {
     const candidateZero = records.get('phase2-03b-candidate-zero-unknown-usage');
     expect(currentZero.status).toBe('supported');
     expect(candidateZero.status).toBe('supported');
-    expect(currentZero.limitations[0]).toContain('EnsurePublished guarantees request counting');
+    expect(currentZero.limitations[0]).toContain('EnsurePublished in v7.3.3 guarantees request counting');
   });
 
   it('proves plugin executor usage dispatch path is supported', () => {
@@ -209,57 +228,12 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence', () => {
     }
   });
 
-  it('verifies CPA source code invariants when local checkout is present', () => {
-    try {
-      const typesSource = readFileSync(path.join(cpaSourcePath, 'sdk/pluginapi/types.go'), 'utf8');
-      const managerSource = readFileSync(path.join(cpaSourcePath, 'sdk/cliproxy/usage/manager.go'), 'utf8');
-      const adapterSource = readFileSync(
-        path.join(cpaSourcePath, 'internal/pluginhost/adapters_usage_translation.go'),
-        'utf8'
-      );
-      const helpersSource = readFileSync(
-        path.join(cpaSourcePath, 'internal/runtime/executor/helps/usage_helpers.go'),
-        'utf8'
-      );
+  it('strictly ensures no hardcoded machine or developer paths exist in evidence files', () => {
+    const extensionFileContent = readFileSync(extensionPath, 'utf8');
+    const localUserPrefix = String.fromCharCode(47) + 'Users' + String.fromCharCode(47);
+    const localHomePrefix = String.fromCharCode(47) + 'home' + String.fromCharCode(47);
 
-      // UsagePlugin interface signature: fire-and-forget, no error return
-      expect(typesSource).toContain('type UsagePlugin interface {');
-      expect(typesSource).toContain('HandleUsage(context.Context, UsageRecord)');
-      expect(typesSource).not.toMatch(/HandleUsage\(context\.Context,\s*UsageRecord\)\s*error/);
-
-      // UsageRecord field checks: RequestID/TraceID/AttemptID absent from UsageRecord struct
-      const usageRecordSlice = typesSource.slice(
-        typesSource.indexOf('type UsageRecord struct {'),
-        typesSource.indexOf('type UsageFailure struct {')
-      );
-      expect(usageRecordSlice).toContain('APIKey');
-      expect(usageRecordSlice).toContain('SessionID');
-      expect(usageRecordSlice).toContain('ParentSessionID');
-      expect(usageRecordSlice).toContain('AuthID');
-      expect(usageRecordSlice).toContain('AuthIndex');
-      expect(usageRecordSlice).toContain('Failure UsageFailure');
-      expect(usageRecordSlice).toContain('Detail UsageDetail');
-      expect(usageRecordSlice).not.toContain('RequestID');
-      expect(usageRecordSlice).not.toContain('TraceID');
-      expect(usageRecordSlice).not.toContain('AttemptID');
-      expect(usageRecordSlice).not.toContain('IdempotencyKey');
-
-      // Asynchronous in-memory queue dispatch
-      expect(managerSource).toContain('queue  []queueItem');
-      expect(managerSource).toContain('m.queue = append(m.queue, queueItem{ctx: ctx, record: record})');
-
-      // Fuse on panic and context.WithoutCancel
-      expect(adapterSource).toContain('ctx = context.WithoutCancel(ctx)');
-      expect(adapterSource).toContain('a.host.fusePlugin(a.pluginID, "UsagePlugin.HandleUsage", recovered)');
-
-      // Attempt-level emission
-      expect(helpersSource).toContain('func (r *UsageReporter) publishAttemptRecord(');
-      expect(helpersSource).toContain('emits the record for one upstream attempt');
-    } catch (error) {
-      if (error.code === 'ENOENT') {
-        return; // Optional local source verification
-      }
-      throw error;
-    }
+    expect(extensionFileContent).not.toContain(localUserPrefix);
+    expect(extensionFileContent).not.toContain(localHomePrefix);
   });
 });

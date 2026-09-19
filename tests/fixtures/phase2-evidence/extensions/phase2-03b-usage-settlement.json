@@ -4,79 +4,79 @@
       "id": "phase2-03b-current-usage-record-structure",
       "artifactId": "current-bundled-v7-3-3",
       "evidenceKind": "source",
-      "evidenceReference": "sdk/pluginapi/types.go:1403-1476",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:sdk/pluginapi/types.go (UsageRecord, UsageFailure, UsageDetail)",
       "limitations": [
-        "UsageRecord contains APIKey, SessionID, ParentSessionID, AuthID, AuthIndex, Failure, Detail, Latency, TTFT, but strictly lacks RequestID, TraceID, AttemptID, or IdempotencyKey."
+        "UsageRecord in v7.3.3 contains APIKey, SessionID, ParentSessionID, AuthID, AuthIndex, Failure, Detail, Latency, TTFT; strictly lacks RequestID, TraceID, AttemptID, or IdempotencyKey."
       ]
     },
     {
       "id": "phase2-03b-current-usage-attempt-dispatch",
       "artifactId": "current-bundled-v7-3-3",
       "evidenceKind": "source",
-      "evidenceReference": "internal/runtime/executor/helps/usage_helpers.go:538-586",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:internal/runtime/executor/helps/usage_helpers.go (NewExecutorUsageReporter, UsageReporter.publishWithOutcome, UsageReporter.publishRecord)",
       "limitations": [
-        "Usage is published per upstream attempt via publishAttemptRecord, not aggregated per logical request."
+        "v7.3.3 instantiates a new UsageReporter per executor execution and dispatches via publishWithOutcome without central logical request aggregation; publishAttemptRecord does not exist in v7.3.3."
       ]
     },
     {
       "id": "phase2-03b-current-stream-usage-observation",
       "artifactId": "current-bundled-v7-3-3",
       "evidenceKind": "source",
-      "evidenceReference": "internal/runtime/executor/helps/usage_helpers.go:850-936",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:internal/runtime/executor/helps/usage_helpers.go (StreamUsageBuffer.Observe, StreamUsageBuffer.Publish, UsageReporter.EnsurePublished)",
       "limitations": [
-        "StreamUsageBuffer observes tokens on SSE events and defer-publishes on stream completion or client cancellation."
+        "v7.3.3 StreamUsageBuffer observes SSE token payloads and defer-publishes on stream completion or client cancellation."
       ]
     },
     {
       "id": "phase2-03b-current-retry-multiple-attempts-unit",
       "artifactId": "current-bundled-v7-3-3",
       "evidenceKind": "unit",
-      "evidenceReference": "sdk/cliproxy/auth/conductor_execution.go:462-600 & conductor_usage_test.go",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:sdk/cliproxy/auth/conductor_execution.go (Manager.executeMixedOnce) & sdk/cliproxy/auth/conductor_usage_test.go",
       "limitations": [
-        "Retry and fallback loops create distinct UsageReporters across attempts; multiple callbacks are emitted per logical request."
+        "v7.3.3 retry and fallback loops invoke executors repeatedly across attempts; multiple callbacks are emitted per logical request without attempt correlation keys."
       ]
     },
     {
       "id": "phase2-03b-current-plugin-executor-usage-dispatch",
       "artifactId": "current-bundled-v7-3-3",
       "evidenceKind": "source",
-      "evidenceReference": "sdk/api/handlers/handlers_execution.go:204-220 & sdk/api/handlers/handlers_stream.go:65-163",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:sdk/api/handlers/handlers_execution.go (ExecuteWithAuthManager) & sdk/api/handlers/handlers_stream.go",
       "limitations": [
-        "Plugin executor requests are observed via handler UsageReporter when response payloads yield token details."
+        "v7.3.3 routes requests to plugin executors and captures usage in handler-level UsageReporter when response payloads yield token breakdown."
       ]
     },
     {
       "id": "phase2-03b-current-usage-manager-queue",
       "artifactId": "current-bundled-v7-3-3",
       "evidenceKind": "source",
-      "evidenceReference": "sdk/cliproxy/usage/manager.go:254-400",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:sdk/cliproxy/usage/manager.go (Manager.Publish, Manager.run, Manager.dispatch)",
       "limitations": [
-        "Usage delivery is asynchronous via an in-memory queue; volatile on crash, no ACK, no exactly-once contract."
+        "v7.3.3 delivers usage asynchronously via an in-memory queue ([]queueItem); delivery is best-effort, volatile across crashes, without persistence, ACK, or exactly-once guarantee."
       ]
     },
     {
       "id": "phase2-03b-current-usage-plugin-fuse-resilience",
       "artifactId": "current-bundled-v7-3-3",
       "evidenceKind": "source",
-      "evidenceReference": "internal/pluginhost/adapters_usage_translation.go:96-148 & internal/pluginhost/rpc_client.go:610-614",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:internal/pluginhost/adapters_usage_translation.go (usageAdapter.HandleUsage, Host.fusePlugin) & internal/pluginhost/rpc_client.go (rpcPluginAdapter.HandleUsage)",
       "limitations": [
-        "Host catches UsagePlugin panic and fuses the plugin; RPC error is ignored; no error return or request rollback."
+        "v7.3.3 host recovers from UsagePlugin panic and marks the plugin fused; RPC transport errors are debug-logged and suppressed without failing client requests."
       ]
     },
     {
       "id": "phase2-03b-current-reservation-settlement-absent",
       "artifactId": "current-bundled-v7-3-3",
       "evidenceKind": "source",
-      "evidenceReference": "sdk/pluginapi/types.go:1246-1249 & sdk/cliproxy/usage/",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:sdk/pluginapi/types.go (UsagePlugin) & sdk/cliproxy/usage/",
       "limitations": [
-        "CPA provides post-request usage observation only; pre-request reservation and authoritative settlement primitives do not exist."
+        "v7.3.3 provides post-completion usage observation only; pre-request token reservation, quota admission, two-phase commit, rollback, and idempotent settlement primitives do not exist."
       ]
     },
     {
       "id": "phase2-03b-candidate-usage-record-structure",
       "artifactId": "candidate-release-v7-3-8",
       "evidenceKind": "source",
-      "evidenceReference": "sdk/pluginapi/types.go:1403-1476 in v7.3.8",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:sdk/pluginapi/types.go (UsageRecord, UsageFailure, UsageDetail)",
       "limitations": [
         "Candidate v7.3.8 preserves identical UsageRecord fields (APIKey, SessionID, ParentSessionID, AuthID, AuthIndex, Failure, Detail, Latency, TTFT); RequestID, TraceID, AttemptID, and IdempotencyKey remain absent."
       ]
@@ -85,16 +85,16 @@
       "id": "phase2-03b-candidate-usage-attempt-dispatch",
       "artifactId": "candidate-release-v7-3-8",
       "evidenceKind": "source",
-      "evidenceReference": "internal/runtime/executor/helps/usage_helpers.go:538-586 in v7.3.8",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:internal/runtime/executor/helps/usage_helpers.go (UsageReporter.publishAttemptRecord, UsageReporter.warnModelSubstitution)",
       "limitations": [
-        "v7.3.8 continues publishing usage per upstream attempt without logical request aggregation."
+        "v7.3.8 introduces publishAttemptRecord to publish usage per upstream attempt and emit attempt-level observability warnings without logical request aggregation."
       ]
     },
     {
       "id": "phase2-03b-candidate-stream-usage-observation",
       "artifactId": "candidate-release-v7-3-8",
       "evidenceKind": "source",
-      "evidenceReference": "internal/runtime/executor/helps/usage_helpers.go:850-936 in v7.3.8",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:internal/runtime/executor/helps/usage_helpers.go (StreamUsageBuffer.Publish, StreamUsageBuffer.ObserveClaudeStream, StreamUsageBuffer.ObserveOpenAIStream)",
       "limitations": [
         "Stream usage observation and cancellation behavior in v7.3.8 are identical to v7.3.3."
       ]
@@ -103,7 +103,7 @@
       "id": "phase2-03b-candidate-retry-multiple-attempts-unit",
       "artifactId": "candidate-release-v7-3-8",
       "evidenceKind": "unit",
-      "evidenceReference": "sdk/cliproxy/auth/conductor_execution.go & conductor_usage_test.go in v7.3.8",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:sdk/cliproxy/auth/conductor_execution.go (Manager.executeMixedOnce) & sdk/cliproxy/auth/conductor_usage_test.go",
       "limitations": [
         "Multiple callback emissions per logical request persist under retry/fallback in v7.3.8."
       ]
@@ -112,7 +112,7 @@
       "id": "phase2-03b-candidate-plugin-executor-usage-dispatch",
       "artifactId": "candidate-release-v7-3-8",
       "evidenceKind": "source",
-      "evidenceReference": "sdk/api/handlers/handlers_execution.go & sdk/api/handlers/handlers_stream.go in v7.3.8",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:sdk/api/handlers/handlers_execution.go & sdk/api/handlers/handlers_stream.go",
       "limitations": [
         "Plugin executor usage dispatch in v7.3.8 maintains parity with v7.3.3."
       ]
@@ -121,7 +121,7 @@
       "id": "phase2-03b-candidate-usage-manager-queue",
       "artifactId": "candidate-release-v7-3-8",
       "evidenceKind": "source",
-      "evidenceReference": "sdk/cliproxy/usage/manager.go in v7.3.8",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:sdk/cliproxy/usage/manager.go (Manager.Publish, Manager.run)",
       "limitations": [
         "In-memory asynchronous queue remains without persistence, ACK, or exactly-once delivery in v7.3.8."
       ]
@@ -130,7 +130,7 @@
       "id": "phase2-03b-candidate-usage-plugin-fuse-resilience",
       "artifactId": "candidate-release-v7-3-8",
       "evidenceKind": "source",
-      "evidenceReference": "internal/pluginhost/adapters_usage_translation.go:96-148 & rpc_client.go in v7.3.8",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:internal/pluginhost/adapters_usage_translation.go (usageAdapter.HandleUsage) & internal/pluginhost/rpc_client.go (rpcPluginAdapter.HandleUsage)",
       "limitations": [
         "Panic fuse and RPC error suppression behavior are preserved in v7.3.8."
       ]
@@ -139,7 +139,7 @@
       "id": "phase2-03b-candidate-reservation-settlement-absent",
       "artifactId": "candidate-release-v7-3-8",
       "evidenceKind": "source",
-      "evidenceReference": "sdk/pluginapi/types.go:1246-1249 & sdk/cliproxy/usage/ in v7.3.8",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:sdk/pluginapi/types.go (UsagePlugin, QuotaMetric) & sdk/cliproxy/usage/",
       "limitations": [
         "v7.3.8 adds management UI QuotaMetric but lacks pre-request quota reservation or authoritative settlement primitives."
       ]
@@ -148,7 +148,7 @@
       "id": "phase2-03b-external-usage-settlement-boundary",
       "artifactId": "external-unnegotiated",
       "evidenceKind": "black-box",
-      "evidenceReference": "apps/manager-server/internal/service/runtime/external.go",
+      "evidenceReference": "CPAMP:apps/manager-server/internal/service/runtime/external.go (ExternalClient.Status)",
       "limitations": [
         "External runtime usage observation and settlement capabilities cannot be assumed without explicit negotiation."
       ]
@@ -174,7 +174,7 @@
         "phase2-03b-current-retry-multiple-attempts-unit"
       ],
       "limitations": [
-        "Completed non-stream requests observe token usage and latency, but delivery is asynchronous and lacks request ID correlation."
+        "Completed non-stream requests observe token usage and latency in v7.3.3, but delivery is asynchronous and lacks request ID correlation."
       ]
     },
     {
@@ -195,7 +195,7 @@
         "phase2-03b-current-usage-record-structure"
       ],
       "limitations": [
-        "Streaming token observation depends on upstream SSE usage chunks; client cancellation emits partial or zero-token records."
+        "Streaming token observation in v7.3.3 depends on upstream SSE usage chunks; client cancellation emits partial or zero-token records."
       ]
     },
     {
@@ -216,7 +216,7 @@
         "phase2-03b-current-usage-record-structure"
       ],
       "limitations": [
-        "Upstream failures emit usage records with Failed=true and HTTP status code, but zero token detail."
+        "Upstream failures in v7.3.3 emit usage records with Failed=true and HTTP status code, but zero token detail."
       ]
     },
     {
@@ -237,7 +237,7 @@
         "phase2-03b-current-usage-attempt-dispatch"
       ],
       "limitations": [
-        "Client cancellation dispatches via context.WithoutCancel with observed partial tokens or failure details."
+        "Client cancellation in v7.3.3 dispatches via context.WithoutCancel with observed partial tokens or failure details."
       ]
     },
     {
@@ -258,7 +258,7 @@
         "phase2-03b-current-retry-multiple-attempts-unit"
       ],
       "limitations": [
-        "Each upstream attempt during retry or fallback emits an independent usage record; multiple callbacks occur for a single logical request without attempt correlation."
+        "In v7.3.3, each upstream attempt during retry or fallback emits an independent usage record via its own UsageReporter; multiple callbacks occur for a single logical request without attempt correlation."
       ]
     },
     {
@@ -279,7 +279,7 @@
         "phase2-03b-current-stream-usage-observation"
       ],
       "limitations": [
-        "EnsurePublished guarantees request counting by emitting zero-token records when upstream omits token usage."
+        "EnsurePublished in v7.3.3 guarantees request counting by emitting zero-token records when upstream omits token usage."
       ]
     },
     {
@@ -300,7 +300,7 @@
         "phase2-03b-current-usage-record-structure"
       ],
       "limitations": [
-        "Usage from requests routed through plugin executors is captured and dispatched to UsagePlugin when response usage can be parsed."
+        "Usage from requests routed through plugin executors in v7.3.3 is captured and dispatched to UsagePlugin when response usage can be parsed."
       ]
     },
     {
@@ -321,7 +321,7 @@
         "phase2-03b-current-usage-manager-queue"
       ],
       "limitations": [
-        "Host catches UsagePlugin panic and fuses the plugin without failing client requests; pending in-memory records are lost on crash."
+        "Host in v7.3.3 catches UsagePlugin panic and fuses the plugin without failing client requests; pending in-memory records are lost on crash."
       ]
     },
     {
@@ -341,7 +341,7 @@
         "phase2-03b-current-usage-record-structure"
       ],
       "limitations": [
-        "UsageRecord provides SessionID and AuthID but lacks RequestID, TraceID, AttemptID, or IdempotencyKey."
+        "v7.3.3 UsageRecord provides SessionID and AuthID but lacks RequestID, TraceID, AttemptID, or IdempotencyKey."
       ]
     },
     {
@@ -361,7 +361,7 @@
         "phase2-03b-current-usage-record-structure"
       ],
       "limitations": [
-        "Exact request-level and attempt-level correlation across retry attempts requires upstream additions of RequestID and AttemptID to UsageRecord."
+        "Exact request-level and attempt-level correlation across retry attempts in v7.3.3 requires upstream additions of RequestID and AttemptID to UsageRecord."
       ]
     },
     {
@@ -381,7 +381,7 @@
         "phase2-03b-current-usage-manager-queue"
       ],
       "limitations": [
-        "Usage delivery is best-effort in-memory observation without persistent journaling, ACK protocol, or replay deduplication."
+        "Usage delivery in v7.3.3 is best-effort in-memory observation without persistent journaling, ACK protocol, or replay deduplication."
       ]
     },
     {
@@ -401,7 +401,7 @@
         "phase2-03b-current-reservation-settlement-absent"
       ],
       "limitations": [
-        "CPA provides no pre-request token reservation or admission hook; quota admission cannot be enforced before upstream execution."
+        "v7.3.3 provides no pre-request token reservation or admission hook; quota admission cannot be enforced before upstream execution."
       ]
     },
     {
@@ -421,7 +421,7 @@
         "phase2-03b-current-reservation-settlement-absent"
       ],
       "limitations": [
-        "CPA provides no two-phase commit, rollback, or idempotent settlement primitives; UsagePlugin observation cannot act as an authoritative ledger."
+        "v7.3.3 provides no two-phase commit, rollback, or idempotent settlement primitives; UsagePlugin observation cannot act as an authoritative ledger."
       ]
     },
     {
