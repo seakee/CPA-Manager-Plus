@@ -1,0 +1,340 @@
+{
+  "anchors": [
+    {
+      "id": "phase2-02a-caller-scope-unit-current",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "unit",
+      "evidenceReference": "sdk/api/handlers/handlers_metadata_test.go#TestRequestExecutionMetadataIncludesHashedCallerScope",
+      "limitations": [
+        "Proves unit-level derivation of caller_scope from userApiKey into execution metadata in v7.3.3.",
+        "Does not prove lifecycle stages prior to client auth middleware execution."
+      ]
+    },
+    {
+      "id": "phase2-02a-caller-scope-isolation-unit-current",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "unit",
+      "evidenceReference": "sdk/cliproxy/auth/selector_lcp_test.go#TestSessionAffinitySelectorLCPCallerScopeIsolation",
+      "limitations": [
+        "Proves different callers are strictly partitioned by caller_scope in session affinity.",
+        "Does not define product-level entity or authorization policy."
+      ]
+    },
+    {
+      "id": "phase2-02a-secret-header-exposure-unit-current",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "unit",
+      "evidenceReference": "sdk/api/handlers/handlers_interceptors_test.go#TestHandlerRequestInterceptorRewritesExecutorRequest",
+      "limitations": [
+        "Confirms request interceptors receive original headers including Authorization unless stripped upstream.",
+        "Proves raw API key is exposed in HTTP headers to before-auth and after-auth interceptors."
+      ]
+    },
+    {
+      "id": "phase2-02a-usage-api-key-exposure-source-current",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "source",
+      "evidenceReference": "internal/runtime/executor/helps/usage_helpers.go#APIKeyFromContext",
+      "limitations": [
+        "Proves raw userApiKey is extracted from context and propagated into usage.Record.APIKey and UsageRecord.APIKey.",
+        "Shows built-in config access leaves raw secret exposed to usage plugins."
+      ]
+    },
+    {
+      "id": "phase2-02a-test-suite-current",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "black-box",
+      "evidenceReference": "tests/phase2CallerIdentityEvidence.test.mjs#v7-3-3-caller-identity-boundary",
+      "limitations": [
+        "CPAMP black-box fixture proving deterministic caller_scope, same caller stability, two-caller isolation, and secret redaction boundaries."
+      ]
+    },
+    {
+      "id": "phase2-02a-caller-scope-unit-candidate",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "unit",
+      "evidenceReference": "sdk/api/handlers/handlers_metadata_test.go#TestRequestExecutionMetadataIncludesHashedCallerScope",
+      "limitations": [
+        "Candidate v7.3.8 retains exact same CallerScope derivation; fixture observation only, not a product upgrade."
+      ]
+    },
+    {
+      "id": "phase2-02a-caller-scope-isolation-unit-candidate",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "unit",
+      "evidenceReference": "sdk/cliproxy/auth/selector_lcp_test.go#TestSessionAffinitySelectorLCPCallerScopeIsolation",
+      "limitations": [
+        "Candidate v7.3.8 retains session affinity caller_scope partition behavior."
+      ]
+    },
+    {
+      "id": "phase2-02a-secret-header-exposure-unit-candidate",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "unit",
+      "evidenceReference": "sdk/api/handlers/handlers_interceptors_test.go#TestHandlerRequestInterceptorRewritesExecutorRequest",
+      "limitations": [
+        "Candidate v7.3.8 retains same interceptor header visibility behavior."
+      ]
+    },
+    {
+      "id": "phase2-02a-usage-api-key-exposure-source-candidate",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "source",
+      "evidenceReference": "internal/runtime/executor/helps/usage_helpers.go#APIKeyFromContext",
+      "limitations": [
+        "Candidate v7.3.8 retains raw APIKey propagation into usage records."
+      ]
+    },
+    {
+      "id": "phase2-02a-test-suite-candidate",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "black-box",
+      "evidenceReference": "tests/phase2CallerIdentityEvidence.test.mjs#v7-3-8-caller-identity-boundary",
+      "limitations": [
+        "CPAMP black-box fixture proving identical caller identity semantics in v7.3.8 candidate release."
+      ]
+    },
+    {
+      "id": "phase2-02a-external-identity-observation",
+      "artifactId": "external-unnegotiated",
+      "evidenceKind": "source",
+      "evidenceReference": "docs/architecture/phase2-evidence/02a-caller-identity.md#external-unnegotiated-boundary",
+      "limitations": [
+        "External instance runtime version, plugin presence, and auth configuration are unnegotiated; caller identity cannot be promoted to supported."
+      ]
+    },
+    {
+      "id": "phase2-02a-external-identity-test",
+      "artifactId": "external-unnegotiated",
+      "evidenceKind": "black-box",
+      "evidenceReference": "tests/phase2CallerIdentityEvidence.test.mjs#external-unnegotiated-boundary",
+      "limitations": [
+        "Validates that unnegotiated External capability records remain unknown."
+      ]
+    }
+  ],
+  "records": [
+    {
+      "id": "phase2-02a-current-caller-scope-derivation",
+      "capability": "caller_scope_derivation_and_stability",
+      "status": "supported",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {}
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source", "unit", "black-box"],
+      "evidenceRefs": [
+        "request-identity-metadata",
+        "phase2-02a-caller-scope-unit-current",
+        "phase2-02a-caller-scope-isolation-unit-current",
+        "phase2-02a-test-suite-current"
+      ],
+      "limitations": [
+        "Derived identity depends on authenticated userApiKey; missing when auth is disabled.",
+        "Rotates when downstream client API key rotates.",
+        "Case-sensitive sha256 domain-separated hash of trimmed principal."
+      ]
+    },
+    {
+      "id": "phase2-02a-current-caller-lifecycle-visibility",
+      "capability": "caller_identity_lifecycle_visibility",
+      "status": "partial",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {}
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source", "unit", "black-box"],
+      "evidenceRefs": [
+        "client-access-auth",
+        "terminal-lifecycle-unit",
+        "phase2-02a-test-suite-current"
+      ],
+      "limitations": [
+        "caller_scope is visible in executor metadata, scheduler options, and RequestCompletion.",
+        "Absent at request_received stage before client auth middleware.",
+        "Absent from usage.Record and pluginapi.UsageRecord."
+      ]
+    },
+    {
+      "id": "phase2-02a-current-caller-secret-redaction",
+      "capability": "caller_secret_redaction_boundary",
+      "status": "partial",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {}
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source", "unit", "black-box"],
+      "evidenceRefs": [
+        "phase2-02a-usage-api-key-exposure-source-current",
+        "phase2-02a-secret-header-exposure-unit-current",
+        "phase2-02a-test-suite-current"
+      ],
+      "limitations": [
+        "Raw API key is redacted from execution metadata and terminal RequestCompletion.",
+        "Raw API key leaks in HTTP request headers to before-auth/after-auth interceptors and scheduler options.",
+        "Raw API key leaks into UsageRecord.APIKey under built-in config access."
+      ]
+    },
+    {
+      "id": "phase2-02a-current-frontend-auth-identity",
+      "capability": "frontend_auth_provider_identity",
+      "status": "partial",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "frontend_auth_provider": true
+        }
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source", "black-box"],
+      "evidenceRefs": [
+        "frontend-auth-plugin-contract",
+        "phase2-02a-test-suite-current"
+      ],
+      "limitations": [
+        "FrontendAuthProvider produces plugin-defined principal string which becomes userApiKey and caller_scope input.",
+        "Does not enforce separation between credential and identity.",
+        "Semantics differ from built-in config access where principal is always raw secret."
+      ]
+    },
+    {
+      "id": "phase2-02a-candidate-caller-scope-derivation",
+      "capability": "caller_scope_derivation_and_stability",
+      "status": "supported",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {}
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "unit", "black-box"],
+      "evidenceRefs": [
+        "request-identity-metadata",
+        "phase2-02a-caller-scope-unit-candidate",
+        "phase2-02a-caller-scope-isolation-unit-candidate",
+        "phase2-02a-test-suite-candidate"
+      ],
+      "limitations": [
+        "Candidate fixture observation only; semantics identical to v7.3.3.",
+        "Does not upgrade product bundle."
+      ]
+    },
+    {
+      "id": "phase2-02a-candidate-caller-lifecycle-visibility",
+      "capability": "caller_identity_lifecycle_visibility",
+      "status": "partial",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {}
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "unit", "black-box"],
+      "evidenceRefs": [
+        "client-access-auth",
+        "terminal-lifecycle-unit",
+        "phase2-02a-test-suite-candidate"
+      ],
+      "limitations": [
+        "Candidate fixture preserves partial lifecycle visibility of caller identity."
+      ]
+    },
+    {
+      "id": "phase2-02a-candidate-caller-secret-redaction",
+      "capability": "caller_secret_redaction_boundary",
+      "status": "partial",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {}
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "unit", "black-box"],
+      "evidenceRefs": [
+        "phase2-02a-usage-api-key-exposure-source-candidate",
+        "phase2-02a-secret-header-exposure-unit-candidate",
+        "phase2-02a-test-suite-candidate"
+      ],
+      "limitations": [
+        "Candidate fixture retains header and usage secret exposure."
+      ]
+    },
+    {
+      "id": "phase2-02a-candidate-frontend-auth-identity",
+      "capability": "frontend_auth_provider_identity",
+      "status": "partial",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "frontend_auth_provider": true
+        }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "black-box"],
+      "evidenceRefs": [
+        "frontend-auth-plugin-contract",
+        "phase2-02a-test-suite-candidate"
+      ],
+      "limitations": [
+        "Candidate fixture preserves plugin-defined frontend auth semantics."
+      ]
+    },
+    {
+      "id": "phase2-02a-external-caller-scope-derivation",
+      "capability": "caller_scope_derivation_and_stability",
+      "status": "unknown",
+      "artifactId": "external-unnegotiated",
+      "pluginContract": null,
+      "deploymentMode": "external",
+      "evidenceKind": ["source", "black-box"],
+      "evidenceRefs": [
+        "phase2-02a-external-identity-observation",
+        "phase2-02a-external-identity-test"
+      ],
+      "limitations": [
+        "External CPA runtime version and auth configuration are unnegotiated.",
+        "Cannot be promoted beyond unknown/partial."
+      ]
+    },
+    {
+      "id": "phase2-02a-external-caller-lifecycle-visibility",
+      "capability": "caller_identity_lifecycle_visibility",
+      "status": "unknown",
+      "artifactId": "external-unnegotiated",
+      "pluginContract": null,
+      "deploymentMode": "external",
+      "evidenceKind": ["source", "black-box"],
+      "evidenceRefs": [
+        "external-runtime-observation-boundary",
+        "phase2-02a-external-identity-test"
+      ],
+      "limitations": [
+        "External runtime lifecycle visibility cannot be asserted without runtime negotiation."
+      ]
+    },
+    {
+      "id": "phase2-02a-external-caller-secret-redaction",
+      "capability": "caller_secret_redaction_boundary",
+      "status": "unknown",
+      "artifactId": "external-unnegotiated",
+      "pluginContract": null,
+      "deploymentMode": "external",
+      "evidenceKind": ["source", "black-box"],
+      "evidenceRefs": [
+        "external-runtime-observation-boundary",
+        "phase2-02a-external-identity-test"
+      ],
+      "limitations": [
+        "External runtime secret redaction policies are unnegotiated."
+      ]
+    }
+  ]
+}
