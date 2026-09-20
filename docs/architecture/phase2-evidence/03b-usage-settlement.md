@@ -18,23 +18,24 @@
 - **观察（Observation / Telemetry）**：
   - 非流式（non-stream）成功请求的使用量与延迟观测；
   - 流式（stream）成功请求通过 SSE chunks 的动态观测与流终态聚合；
-  - 上游 HTTP 失败（4xx/5xx）及超时的失败状态上报（`Failed: true`, `Failure: {StatusCode, Body}`）；
+  - 上游 HTTP 失败（4xx/5xx）及超时的失败状态上报（未观测到 usage 的普通失败发布 `Failed: true` + zero-token detail；流式失败或取消若已观测到部分 tokens，则可携带已观测的 partial token detail）；
   - 客户端取消（cancel / disconnect）路径在 `context.WithoutCancel` 保障下的脱敏上报；
-  - 上游无 token 返回时的保底零 token 计数上报（`EnsurePublished` 保证请求计数不丢失）；
+  - 上游无 token 返回时当前 Reporter 的保底零 token 计数上报（`EnsurePublished` 保证当前 UsageReporter 实例至少发布一条兜底记录，但不保证单次逻辑请求全局仅对应一条）；
   - 路由经由 Plugin Executor 时的使用量捕获与派发；
   - 插件 Panic 时的熔断隔离（`fusePlugin` 保护宿主主请求不崩溃）。
 - **关联（Correlation）**：
   - 仅包含长会话与凭证维度的粗粒度标识（`SessionID`, `ParentSessionID`, `AuthID`, `AuthIndex`）；
   - **严重缺乏请求级与尝试级关联键**：`UsageRecord` 中不存在 `RequestID`、`TraceID`、`AttemptID` 或 `IdempotencyKey`。
 - **预留与准入（Reservation / Admission）**：
-  - **完全不存在（Unsupported）**：无任何前置预留 hook、资源预扣减接口或配额准入门禁。
+  - **缺乏一等配额预留（Unsupported）**：CPA 不提供一等的额度预留、原子预扣减或事务型 quota-admission 原语；但通用的请求前准入/拒绝可通过 `RequestInterceptor.Terminate` 在进入 upstream executor 前实现。
 - **权威结算（Authoritative Settlement）**：
   - **完全不存在（Unsupported）**：内部依赖内存切片队列（`[]queueItem`）异步单向分发，进程崩溃或重启直接丢弃，无 ACK、无持久化、无二阶段提交、无冲正回滚（rollback）、无幂等记账流水。
 
 > [!IMPORTANT]
 > **核心架构定论**：
-> `UsagePlugin 收到 completed usage` $\neq$ `reservation` $\neq$ `authoritative exactly-once settlement`。
+> `UsagePlugin 收到 usage observation` $\neq$ `first-class reservation` $\neq$ `authoritative exactly-once settlement`。
 > CPAMP 严禁将 CPA 的事后使用量观察回调等同于权威结算流水，亦不在此复活 Usage Accounting V2。
+> 同时需明确区分：通用请求前拦截准入可通过 `RequestInterceptor.Terminate` 阻止请求进入 upstream，但 CPA 不存在针对 Token 额度的一等预留与事务结算原语。
 
 ---
 
@@ -97,24 +98,24 @@
         → successful attempt publishes usage via reporter B
   ```
 - **结论**：
-  1. **每个失败的 attempt 均可能发出 usage**：当 attempt 发生错误返回时，Executor 的 `defer reporter.TrackFailure(ctx, &err)` 会触发 `PublishFailure`，向队列发送一条 `Failed: true` 的 `Record`（Token 计数通常为 0）。
+  1. **每个失败的 attempt 均可能发出 usage**：当 attempt 发生错误返回时，Executor 的 `defer reporter.TrackFailure(ctx, &err)` 会触发 `PublishFailure`，向队列发送一条 `Failed: true` 的 `Record`（未观测到 usage 的普通失败其 Token 计数通常为 0；流式请求若在失败前已观测到部分 usage，则可能携带已观测的部分 token detail）。
   2. **最终成功会再次发出 usage**：Conductor（`sdk/cliproxy/auth/conductor_execution.go:Manager.executeMixedOnce`）重试或 fallback 到后继可用凭证并执行成功后，新 Executor 实例的 Reporter 会发出一条 `Failed: false` 的 `Record`（包含真实的 Token Detail）。
   3. **单个逻辑请求可映射到多个 usage callbacks**：一个 logical request 可以经历多个 executor attempts；每个实际进入 executor 并创建独立 UsageReporter 的 attempt 都可能产生独立 usage callback。例如当三次 executor attempt 均到达创建 reporter 并执行的阶段（如 Attempt 1 失败，Attempt 2 失败，Attempt 3 成功），UsagePlugin 最多可观测到 3 个独立的 `HandleUsage` 回调（2 条失败记录 + 1 条成功记录）。由于缺乏 RequestID/AttemptID，插件无法从原生数据中辨别它们属于同一次客户端调用。
   4. **`once.Do` 的局部作用域**：单个 `UsageReporter` 内部的 `r.once.Do` 仅限制**该 reporter 实例**的发布次数；重试过程生成了多个 reporter 实例，因此不会阻止跨 attempt 的多次 usage 发布。
 
 ### 5. Stream 场景行为（Success / Cancel / Disconnect）
-- **结论**：两版在 `StreamUsageBuffer` 的流式处理契约上保持一致：
+- **结论**：面向 UsagePlugin 的 token observation 与 cancellation 语义在两版间保持基本一致；v7.3.8 额外增加了 response-model observation 与 substitution warning：
   - **正常成功结束**：流中的 SSE chunk 被 `StreamUsageBuffer` 收集（如 `ObserveClaudeStream` / `ObserveOpenAIStream`），在 stream 结束的 defer 中通过 `streamUsage.Publish(ctx, reporter)` 统一发布完整的 token usage。
   - **客户端取消 / 断开连接**：
-    - 若在首个 token 帧到达前断开，`streamUsage.PublishFailure` 会发布包含 cancel 错误的失败记录；
-    - 若在流式传输中断开但已观测到部分 token 帧，`StreamUsageBuffer` 会将已捕获的部分 tokens 发送出去；
-    - 在两版的 `internal/pluginhost/adapters_usage_translation.go:usageAdapter.HandleUsage` 中，宿主均显式使用 `ctx = context.WithoutCancel(ctx)` 脱敏上下文。
+    - 若在首个 token 帧到达前断开，`streamUsage.PublishFailure(ctx, reporter, cancelErr)` 会发布包含 cancel 错误的失败记录；
+    - 若在流式传输中断开或发生错误，真实 call site（例如 `internal/runtime/executor/claude_executor_stream.go` 中的 `streamUsage.PublishFailure(ctx, reporter, cancelErr)` 调用链：`StreamUsageBuffer.PublishFailure` $\to$ `reporter.PublishFailureWithDetail(ctx, b.detail, ...)`）会将已捕获的部分 tokens 与失败元数据一并发送出去；
+    - 在两版的 `internal/pluginhost/adapters_usage_translation.go:usageAdapter.HandleUsage` 中，宿主均显式使用 `ctx = context.WithoutCancel(ctx)` 脱敏上下文，防止 usage 派发继承客户端取消信号；
     - **语义收窄说明**：`context.WithoutCancel` 仅避免 UsagePlugin callback 继承客户端取消状态，不构成持久化或可靠送达保证（仍受进程崩溃、队列丢失、熔断、RPC 失败等制约）。
 
 ### 6. Failure / Zero-token / Unknown Usage 路径
 - **结论**：
-  - **Upstream Failure**：发布包含 HTTP 状态码与错误文本的 `Failed: true` 记录，Token Detail 均为 0。
-  - **Zero-token / Unknown Usage**：若上游成功响应但不返回 token 消耗（例如部分非标准模型），两版中的 `reporter.EnsurePublished(ctx)` 均兜底发送一条 `Detail: {TotalTokens: 0}, Failed: false` 的记录，确保请求计数（Invocation Count）不发生漂移。
+  - **Upstream Failure**：未观测到 usage 的普通失败通常发布 `Failed: true` + zero-token detail；流式请求若在失败或取消前已观测到部分 usage，则失败记录（通过 `StreamUsageBuffer.PublishFailure`）可同时携带已观测的 partial token detail。
+  - **Zero-token / Unknown Usage**：若上游成功响应但不返回 token 消耗（例如部分非标准模型），两版中的 `reporter.EnsurePublished(ctx)` 保证当前 `UsageReporter` 实例在此前尚未发布 usage 时至少产生一条 `Detail: {TotalTokens: 0}, Failed: false` 的兜底记录；它不保证一次 logical client request 仅对应一条 usage record，因为 retry/fallback 可以创建多个独立 reporter。
   - **Model Substitution**：在 v7.3.8 中引入了模型替换警告（`warnModelSubstitution`），当上游实际返回的 `ResponseModel` 与请求的 Model 不一致时输出观察警告（v7.3.3 中无此警告逻辑）。
 
 ### 7. Plugin Executor Usage 路径
@@ -160,23 +161,24 @@
   - 两条路径之间不存在 ACK、barrier、transaction 或持久化顺序协议。因此 UsagePlugin callback 与 RequestLifecyclePlugin callback 不存在可依赖的全局先后顺序。
 
 ### 11. 是否存在 Pre-request Reserve / Quota Admission / Commit / Rollback 原语？
-- **结论**：**绝对不存在（Unsupported）**。
+- **结论**：**CPA 不提供一等的额度预留、原子预扣减或事务型 quota-admission 原语；通用请求前准入可通过 RequestInterceptor.Terminate 实现**。
   - 源码证据：
-    - `router-for-me/CLIProxyAPI@v7.3.3:sdk/pluginapi/types.go (UsagePlugin)` 及 `sdk/cliproxy/usage/`
-    - `router-for-me/CLIProxyAPI@v7.3.8:sdk/pluginapi/types.go (UsagePlugin, QuotaMetric)` 及 `sdk/cliproxy/usage/`
+    - `router-for-me/CLIProxyAPI@v7.3.3:sdk/pluginapi/types.go (UsagePlugin, RequestInterceptor)` 及 `sdk/cliproxy/usage/`
+    - `router-for-me/CLIProxyAPI@v7.3.8:sdk/pluginapi/types.go (UsagePlugin, QuotaMetric, RequestInterceptor)` 及 `sdk/cliproxy/usage/`
   - CPA 核心代码与插件接口中没有任何：
-    - `Pre-request Reservation`（请求前预冻结 token/费用）；
-    - `Quota Admission Hook`（基于额度的准入门禁）；
+    - `Pre-request Reservation`（请求前预冻结 token/费用的一等原语）；
+    - `Transactional Quota Admission Hook`（事务型额度准入门禁）；
     - `Authoritative Settlement`（二阶段提交权威结算）；
     - `Rollback`（失败冲正与回滚机制）；
     - `Idempotent Journal`（幂等记账流水）。
+  - 需要严格区分的是：CPA v7.3.3 与 v7.3.8 均提供了 `RequestInterceptor`（`InterceptRequestBeforeAuth` 与 `InterceptRequestAfterAuth`），其返回的 `RequestInterceptResponse.Terminate=true` 可以在进入 upstream executor 之前终止请求，因此通用的请求前准入/拦截是支持的；但 CPA 不存在针对 Token 额度的一等资源预留协议或两阶段结算事务。
   - v7.3.8 虽然在 `QuotaFetchResponse` 中增加了用于管理 UI 展示的 `Summary []QuotaMetric`，但这属于静态只读查询，在运行时模型请求热路径上没有任何额度预留或准入门禁。
 
 ### 12. External 未协商时如何分类？
-- **结论**：**分类为 `unknown` 或 `partial`，不得推断为 supported**。
+- **结论**：**统一分类为保守的 `unknown`，不得推断为 supported 或 partial**。
   - 在 External Runtime 未连接且未显式协商版本与插件契约时，`pluginContract` 必须为 `null`；
   - 外部运行时状态依据 CPAMP Manager Server 源码定义（`CPAMP:apps/manager-server/internal/service/runtime/external.go`），属于保守的 `source` 证据，不伪造 `black-box` 运行观察，不声称实际连接过外部 CPA；
-  - 外部实例状态及能力无法在真正运行期协商前予以推断；
+  - 外部实例状态及能力无法在真正运行期协商前予以推断，因此 `completed_usage_observation`、`pre_request_reservation` 与 `authoritative_settlement` 三项 External 能力均严格分类为 `unknown`；
   - 依据 Phase2-01 合同规则，External 观测边界严禁跨版本推断或自动晋升。
 
 ---
@@ -189,17 +191,17 @@
 |---|---|:---:|:---:|:---:|---|
 | **基本观测** | `non_stream_usage_observation` | `supported` | `supported` | `unknown` | 异步观测已完成请求的 Token 与延迟，无 RequestID 关联 |
 | **流式观测** | `stream_usage_observation` | `supported` | `supported` | `unknown` | 依赖上游 SSE 输出 token 帧，流中断上报已观测 tokens |
-| **失败上报** | `upstream_failure_reporting` | `supported` | `supported` | `unknown` | 上报 Failed=true 与 HTTP 错误码，Token 为 0 |
+| **失败上报** | `upstream_failure_reporting` | `supported` | `supported` | `unknown` | 未观测到 usage 的普通失败发布 zero-token，流式失败可保留已观测 partial token |
 | **取消上报** | `cancellation_reporting` | `supported` | `supported` | `unknown` | `context.WithoutCancel` 避免继承客户端取消，但不保证可靠送达 |
 | **重试回调** | `retry_fallback_attempt_callbacks` | `partial` | `partial` | `unknown` | 每个实际创建 UsageReporter 的 attempt 独立回调，单个逻辑请求可映射到多个 callbacks；v7.3.3 无 `publishAttemptRecord` helper |
-| **保底计数** | `zero_unknown_usage_handling` | `supported` | `supported` | `unknown` | `EnsurePublished` 兜底生成零 token 记录保障请求计数 |
+| **保底计数** | `zero_unknown_usage_handling` | `supported` | `supported` | `unknown` | `EnsurePublished` 保证单个 reporter 实例的兜底发布，不保证单次逻辑请求全局唯一计数 |
 | **插件路由** | `plugin_executor_usage_dispatch` | `supported` | `supported` | `unknown` | 经 Plugin Executor 转发的请求完整接入 usage pipeline |
 | **容错弹性** | `usage_plugin_fault_resilience` | `supported` | `supported` | `unknown` | Panic 自动熔断（fuse），内存队列崩溃丢数据，主请求不中断 |
 | **粗粒度标识**| `request_correlation_keys` | `partial` | `partial` | `unknown` | 仅提供 SessionID 与 AuthID，缺少 RequestID/AttemptID |
 | **精确请求关联**| `exact_request_correlation` | `requires_upstream` | `requires_upstream` | `unknown` | 需要 CPA 上游在 `UsageRecord` 中新增 RequestID 与 AttemptID |
 | **权威交付** | `exactly_once_delivery` | `unsupported` | `unsupported` | `unknown` | 仅内存队列最佳努力投递，无持久化日志与去重确认机制 |
-| **配额预留** | `pre_request_reservation` | `unsupported` | `unsupported` | `partial` | CPA 无任何请求前额度预留或准入门禁原语 |
-| **最终结算** | `authoritative_settlement` | `unsupported` | `unsupported` | `partial` | CPA 无二阶段提交、冲正回滚或幂等记账结算流水 |
+| **配额预留** | `pre_request_reservation` | `unsupported` | `unsupported` | `unknown` | CPA 无一等额度预留或事务准入原语；通用请求前准入/拒绝可通过 RequestInterceptor.Terminate 实现 |
+| **最终结算** | `authoritative_settlement` | `unsupported` | `unsupported` | `unknown` | CPA 无二阶段提交、冲正回滚或幂等记账结算流水 |
 
 ---
 
@@ -214,15 +216,15 @@
      --json
    # 输出：15 anchors, 29 records 全部合规通过，无 Schema 违背与悬空引用
    ```
-2. **自动化端到端测试套件**：
+2. **自动化证据契约测试套件**：
    ```bash
    npx vitest run tests/phase2UsageSettlementEvidence.test.mjs
-   # 14 项深度测试断言全部通过（含版本隔离、无伪 unit anchor、无本地硬编码路径、仓库相对路径校验等）
+   # 15 项深度测试断言全部通过（含版本隔离、无伪 unit anchor、WithoutCancel 溯源、无本地硬编码路径、仓库相对路径校验等）
    ```
 3. **全库测试套件回归**：
    ```bash
    npm run test:repo
-   # 13 个测试套件，244 项测试全部 PASS
+   # 13 个测试套件，246 项测试全部 PASS
    ```
 4. **代码格式与 Diff 检查**：
    ```bash

@@ -156,13 +156,18 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
   it('classifies upstream failure and cancellation reporting behavior with scoped context semantics', () => {
     const extension = loadExtension();
     const records = new Map(extension.records.map((r) => [r.id, r]));
+    const anchors = new Map(extension.anchors.map((a) => [a.id, a]));
 
     const currentFailure = records.get('phase2-03b-current-upstream-failure-reporting');
     const candidateFailure = records.get('phase2-03b-candidate-upstream-failure-reporting');
     expect(currentFailure.status).toBe('supported');
     expect(candidateFailure.status).toBe('supported');
     expect(currentFailure.limitations[0]).toContain('Failed=true');
-    expect(currentFailure.limitations[0]).toContain('zero token detail');
+    expect(currentFailure.limitations[0]).toContain('stream');
+    expect(currentFailure.limitations[0]).toContain('partial');
+    expect(candidateFailure.limitations[0]).toContain('Failed=true');
+    expect(candidateFailure.limitations[0]).toContain('stream');
+    expect(candidateFailure.limitations[0]).toContain('partial');
 
     const currentCancel = records.get('phase2-03b-current-cancellation-reporting');
     const candidateCancel = records.get('phase2-03b-candidate-cancellation-reporting');
@@ -171,6 +176,18 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
     expect(currentCancel.limitations[0]).toContain('context.WithoutCancel');
     expect(currentCancel.limitations[0]).toContain('does not provide durable delivery');
     expect(candidateCancel.limitations[0]).toContain('does not provide durable delivery');
+
+    // Provenance check: cancellation records must link to WithoutCancel source anchor
+    for (const cancelRecord of [currentCancel, candidateCancel]) {
+      const referencedAnchors = cancelRecord.evidenceRefs.map((id) => anchors.get(id)).filter(Boolean);
+      const hasWithoutCancelAnchor = referencedAnchors.some(
+        (a) =>
+          a.evidenceReference.includes('adapters_usage_translation.go') &&
+          a.evidenceReference.includes('usageAdapter.HandleUsage') &&
+          a.limitations.some((l) => l.includes('context.WithoutCancel'))
+      );
+      expect(hasWithoutCancelAnchor).toBe(true);
+    }
   });
 
   it('classifies retry and fallback multi-attempt dispatch from pinned source evidence', () => {
@@ -192,7 +209,7 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
     expect(candidateExactCorrelation.status).toBe('requires_upstream');
   });
 
-  it('classifies zero-token and unknown usage handling preserving request counting', () => {
+  it('classifies zero-token and unknown usage handling with reporter fallback scope', () => {
     const extension = loadExtension();
     const records = new Map(extension.records.map((r) => [r.id, r]));
 
@@ -200,7 +217,12 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
     const candidateZero = records.get('phase2-03b-candidate-zero-unknown-usage');
     expect(currentZero.status).toBe('supported');
     expect(candidateZero.status).toBe('supported');
-    expect(currentZero.limitations[0]).toContain('EnsurePublished in v7.3.3 guarantees request counting');
+    expect(currentZero.limitations[0]).toContain('UsageReporter');
+    expect(currentZero.limitations[0]).toContain('logical');
+    expect(currentZero.limitations[0]).not.toMatch(/one record per logical request|guarantees request counting/i);
+    expect(candidateZero.limitations[0]).toContain('UsageReporter');
+    expect(candidateZero.limitations[0]).toContain('logical');
+    expect(candidateZero.limitations[0]).not.toMatch(/one record per logical request|guarantees request counting/i);
   });
 
   it('classifies plugin executor usage dispatch path as supported', () => {
@@ -238,7 +260,10 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
     const candidateReservation = records.get('phase2-03b-candidate-pre-request-reservation');
     expect(currentReservation.status).toBe('unsupported');
     expect(candidateReservation.status).toBe('unsupported');
-    expect(currentReservation.limitations[0]).toContain('no pre-request token reservation or admission hook');
+    expect(currentReservation.limitations[0]).toContain('first-class quota reservation');
+    expect(currentReservation.limitations[0]).toContain('RequestInterceptor.Terminate');
+    expect(candidateReservation.limitations[0]).toContain('first-class quota reservation');
+    expect(candidateReservation.limitations[0]).toContain('RequestInterceptor.Terminate');
 
     const currentSettlement = records.get('phase2-03b-current-authoritative-settlement');
     const candidateSettlement = records.get('phase2-03b-candidate-authoritative-settlement');
@@ -247,7 +272,7 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
     expect(currentSettlement.limitations[0]).toContain('no two-phase commit, rollback, or idempotent settlement primitives');
   });
 
-  it('bounds unnegotiated External runtime evidence to unknown/partial without pluginContract', () => {
+  it('bounds unnegotiated External runtime evidence to conservative unknown without pluginContract', () => {
     const extension = loadExtension();
     const externalRecords = extension.records.filter((r) => r.artifactId === 'external-unnegotiated');
 
@@ -263,7 +288,7 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
     );
 
     for (const record of externalRecords) {
-      expect(['unknown', 'partial']).toContain(record.status);
+      expect(record.status).toBe('unknown');
       expect(record.pluginContract).toBeNull();
       expect(record.deploymentMode).toBe('external');
       expect(record.evidenceKind).not.toContain('black-box');

@@ -22,9 +22,9 @@
       "id": "phase2-03b-current-stream-usage-observation",
       "artifactId": "current-bundled-v7-3-3",
       "evidenceKind": "source",
-      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:internal/runtime/executor/helps/usage_helpers.go (StreamUsageBuffer.Observe, StreamUsageBuffer.Publish, UsageReporter.EnsurePublished)",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:internal/runtime/executor/helps/usage_helpers.go (StreamUsageBuffer.Observe, StreamUsageBuffer.Publish, StreamUsageBuffer.PublishFailure, UsageReporter.EnsurePublished) & internal/runtime/executor/claude_executor_stream.go (streamUsage.PublishFailure)",
       "limitations": [
-        "v7.3.3 StreamUsageBuffer observes SSE token payloads and defer-publishes on stream completion or client cancellation."
+        "v7.3.3 StreamUsageBuffer observes SSE token payloads, defer-publishes on stream completion, and emits partial observed usage or failure metadata via StreamUsageBuffer.PublishFailure on error/cancellation."
       ]
     },
     {
@@ -51,16 +51,16 @@
       "evidenceKind": "source",
       "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:internal/pluginhost/adapters_usage_translation.go (usageAdapter.HandleUsage, Host.fusePlugin) & internal/pluginhost/rpc_client.go (rpcPluginAdapter.HandleUsage)",
       "limitations": [
-        "v7.3.3 host recovers from UsagePlugin panic and marks the plugin fused; RPC transport errors are debug-logged and suppressed without failing client requests."
+        "usageAdapter.HandleUsage detaches cancellation with context.WithoutCancel before invoking UsagePlugin; panic is recovered and fuses the plugin; RPC transport errors are debug-logged and suppressed without failing client requests."
       ]
     },
     {
       "id": "phase2-03b-current-reservation-settlement-absent",
       "artifactId": "current-bundled-v7-3-3",
       "evidenceKind": "source",
-      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:sdk/pluginapi/types.go (UsagePlugin) & sdk/cliproxy/usage/",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:sdk/pluginapi/types.go (UsagePlugin, RequestInterceptor) & sdk/cliproxy/usage/",
       "limitations": [
-        "v7.3.3 provides post-completion usage observation only; pre-request token reservation, quota admission, two-phase commit, rollback, and idempotent settlement primitives do not exist."
+        "Usage observation in v7.3.3 is emitted after an executor attempt produces an outcome. CPA does not expose a first-class quota reservation or transactional settlement primitive, though generic pre-request admission or rejection can still be implemented through RequestInterceptor.Terminate before upstream execution."
       ]
     },
     {
@@ -85,9 +85,9 @@
       "id": "phase2-03b-candidate-stream-usage-observation",
       "artifactId": "candidate-release-v7-3-8",
       "evidenceKind": "source",
-      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:internal/runtime/executor/helps/usage_helpers.go (StreamUsageBuffer.Observe, StreamUsageBuffer.Publish, StreamUsageBuffer.ObserveClaudeStream, StreamUsageBuffer.ObserveOpenAIStream, UsageReporter.EnsurePublished)",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:internal/runtime/executor/helps/usage_helpers.go (StreamUsageBuffer.Observe, StreamUsageBuffer.Publish, StreamUsageBuffer.PublishFailure, StreamUsageBuffer.ObserveClaudeStream, StreamUsageBuffer.ObserveOpenAIStream, UsageReporter.EnsurePublished) & internal/runtime/executor/claude_executor_stream.go (streamUsage.PublishFailure)",
       "limitations": [
-        "Stream usage observation and cancellation behavior in v7.3.8 are identical to v7.3.3."
+        "Plugin-facing token observation and cancellation semantics remain consistent with v7.3.3; v7.3.8 additionally tracks response-model substitution."
       ]
     },
     {
@@ -112,18 +112,18 @@
       "id": "phase2-03b-candidate-usage-plugin-fuse-resilience",
       "artifactId": "candidate-release-v7-3-8",
       "evidenceKind": "source",
-      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:internal/pluginhost/adapters_usage_translation.go (usageAdapter.HandleUsage) & internal/pluginhost/rpc_client.go (rpcPluginAdapter.HandleUsage)",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:internal/pluginhost/adapters_usage_translation.go (usageAdapter.HandleUsage, Host.fusePlugin) & internal/pluginhost/rpc_client.go (rpcPluginAdapter.HandleUsage)",
       "limitations": [
-        "Panic fuse and RPC error suppression behavior are preserved in v7.3.8."
+        "usageAdapter.HandleUsage detaches cancellation with context.WithoutCancel before invoking UsagePlugin; panic is recovered and fuses the plugin in candidate v7.3.8."
       ]
     },
     {
       "id": "phase2-03b-candidate-reservation-settlement-absent",
       "artifactId": "candidate-release-v7-3-8",
       "evidenceKind": "source",
-      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:sdk/pluginapi/types.go (UsagePlugin, QuotaMetric) & sdk/cliproxy/usage/",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:sdk/pluginapi/types.go (UsagePlugin, QuotaMetric, RequestInterceptor) & sdk/cliproxy/usage/",
       "limitations": [
-        "v7.3.8 adds management UI QuotaMetric but lacks pre-request quota reservation or authoritative settlement primitives."
+        "Usage observation in v7.3.8 is emitted after an executor attempt produces an outcome. Management UI QuotaMetric does not introduce runtime reservation, and CPA does not expose a first-class quota reservation or transactional settlement primitive, though generic pre-request admission or rejection can still be implemented through RequestInterceptor.Terminate before upstream execution."
       ]
     },
     {
@@ -197,7 +197,7 @@
         "phase2-03b-current-usage-record-structure"
       ],
       "limitations": [
-        "Upstream failures in v7.3.3 emit usage records with Failed=true and HTTP status code, but zero token detail."
+        "Failures are emitted with Failed=true and failure metadata. Non-stream/no-observed-usage paths use zero token detail, while streaming failures may retain partial usage already observed by StreamUsageBuffer."
       ]
     },
     {
@@ -215,7 +215,8 @@
       "evidenceKind": ["source"],
       "evidenceRefs": [
         "phase2-03b-current-stream-usage-observation",
-        "phase2-03b-current-usage-attempt-dispatch"
+        "phase2-03b-current-usage-attempt-dispatch",
+        "phase2-03b-current-usage-plugin-fuse-resilience"
       ],
       "limitations": [
         "Client cancellation in v7.3.3 dispatches via context.WithoutCancel with observed partial tokens or failure details; context.WithoutCancel prevents inheriting the client cancellation signal but does not provide durable delivery."
@@ -260,7 +261,7 @@
         "phase2-03b-current-stream-usage-observation"
       ],
       "limitations": [
-        "EnsurePublished in v7.3.3 guarantees request counting by emitting zero-token records when upstream omits token usage."
+        "EnsurePublished guarantees a fallback usage emission for the current UsageReporter instance when that reporter has not already published usage. It does not guarantee one usage record per logical client request because retries/fallbacks can create multiple reporter instances."
       ]
     },
     {
@@ -382,7 +383,7 @@
         "phase2-03b-current-reservation-settlement-absent"
       ],
       "limitations": [
-        "v7.3.3 provides no pre-request token reservation or admission hook; quota admission cannot be enforced before upstream execution."
+        "CPA v7.3.3 does not expose a first-class quota reservation / transactional admission primitive. Generic pre-request admission or rejection can still be implemented through RequestInterceptor.Terminate before upstream execution."
       ]
     },
     {
@@ -444,7 +445,7 @@
         "phase2-03b-candidate-usage-record-structure"
       ],
       "limitations": [
-        "Streaming token observation in v7.3.8 remains dependent on upstream SSE usage chunks."
+        "Plugin-facing token observation and cancellation semantics remain consistent with v7.3.3; v7.3.8 additionally tracks response-model substitution."
       ]
     },
     {
@@ -465,7 +466,7 @@
         "phase2-03b-candidate-usage-record-structure"
       ],
       "limitations": [
-        "Upstream failure reporting in v7.3.8 emits Failed=true records with zero token detail."
+        "Failures are emitted with Failed=true and failure metadata. Non-stream/no-observed-usage paths use zero token detail, while streaming failures may retain partial usage already observed by StreamUsageBuffer."
       ]
     },
     {
@@ -483,7 +484,8 @@
       "evidenceKind": ["source"],
       "evidenceRefs": [
         "phase2-03b-candidate-stream-usage-observation",
-        "phase2-03b-candidate-usage-attempt-dispatch"
+        "phase2-03b-candidate-usage-attempt-dispatch",
+        "phase2-03b-candidate-usage-plugin-fuse-resilience"
       ],
       "limitations": [
         "Client cancellation in v7.3.8 dispatches via context.WithoutCancel with observed partial tokens or failure details; context.WithoutCancel prevents inheriting the client cancellation signal but does not provide durable delivery."
@@ -528,7 +530,7 @@
         "phase2-03b-candidate-stream-usage-observation"
       ],
       "limitations": [
-        "EnsurePublished in v7.3.8 emits zero-token records when upstream omits token usage."
+        "EnsurePublished guarantees a fallback usage emission for the current UsageReporter instance when that reporter has not already published usage. It does not guarantee one usage record per logical client request because retries/fallbacks can create multiple reporter instances."
       ]
     },
     {
@@ -650,7 +652,7 @@
         "phase2-03b-candidate-reservation-settlement-absent"
       ],
       "limitations": [
-        "v7.3.8 provides no pre-request token reservation or quota admission hook."
+        "CPA v7.3.8 does not expose a first-class quota reservation / transactional admission primitive. Generic pre-request admission or rejection can still be implemented through RequestInterceptor.Terminate before upstream execution."
       ]
     },
     {
@@ -670,7 +672,7 @@
         "phase2-03b-candidate-reservation-settlement-absent"
       ],
       "limitations": [
-        "v7.3.8 provides no two-phase commit, rollback, or idempotent settlement primitives."
+        "v7.3.8 provides no two-phase commit, rollback, or idempotent settlement primitives; UsagePlugin observation cannot act as an authoritative ledger."
       ]
     },
     {
@@ -685,13 +687,13 @@
         "phase2-03b-external-usage-settlement-boundary"
       ],
       "limitations": [
-        "External runtime usage observation capability is unknown until version and plugin availability are explicitly negotiated."
+        "The unnegotiated External runtime does not expose sufficient version/plugin capability information to determine whether this capability exists."
       ]
     },
     {
       "id": "phase2-03b-external-pre-request-reservation",
       "capability": "pre_request_reservation",
-      "status": "partial",
+      "status": "unknown",
       "artifactId": "external-unnegotiated",
       "pluginContract": null,
       "deploymentMode": "external",
@@ -700,13 +702,13 @@
         "phase2-03b-external-usage-settlement-boundary"
       ],
       "limitations": [
-        "External CPA instances lack reservation primitives across all known versions; external boundary treats pre-request reservation as unnegotiated."
+        "The unnegotiated External runtime does not expose sufficient version/plugin capability information to determine whether this capability exists."
       ]
     },
     {
       "id": "phase2-03b-external-authoritative-settlement",
       "capability": "authoritative_settlement",
-      "status": "partial",
+      "status": "unknown",
       "artifactId": "external-unnegotiated",
       "pluginContract": null,
       "deploymentMode": "external",
@@ -715,7 +717,7 @@
         "phase2-03b-external-usage-settlement-boundary"
       ],
       "limitations": [
-        "External CPA instances lack authoritative settlement primitives across all known versions; external boundary treats transactional settlement as unnegotiated."
+        "The unnegotiated External runtime does not expose sufficient version/plugin capability information to determine whether this capability exists."
       ]
     }
   ]
