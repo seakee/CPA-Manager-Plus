@@ -302,6 +302,33 @@ describe('Phase2-02A caller identity and scope evidence', () => {
       expect(anchor.evidenceReference).toContain('buildRecordForModel');
       expect(anchor.evidenceReference).toContain('usageAdapter.HandleUsage');
     }
+
+    // 11. Document lifecycle semantics and anti-regression boundaries
+    const docSource = readFileSync(
+      path.join(repoRoot, 'docs/architecture/phase2-evidence/02a-caller-identity.md'),
+      'utf8'
+    );
+    expect(docSource).not.toContain('manager == nil` or `APIKeys` empty');
+    expect(docSource).toContain('FrontendAuthProvider');
+    expect(docSource).toContain('APIKeys');
+
+    expect(docSource).not.toContain('preventing hash collisions');
+    expect(docSource).not.toContain('cryptographically partitioned into disjoint hash values');
+    expect(docSource).not.toContain('cannot cross-access');
+    expect(docSource).toContain('Domain Separation');
+    expect(docSource).toContain('does not alter SHA-256');
+
+    expect(docSource).toContain('RequestAfterAuthInterceptRequest.Metadata');
+    expect(docSource).toContain('execOpts.Metadata');
+
+    const callerScopeRecord = raw.records.find(
+      (r) => r.id === 'phase2-02a-current-caller-scope-derivation'
+    );
+    expect(callerScopeRecord).toBeDefined();
+    expect(callerScopeRecord.limitations.join(' ')).not.toContain('missing when auth is disabled');
+    expect(callerScopeRecord.limitations.join(' ')).toContain(
+      'absent when no access provider establishes such a principal'
+    );
   });
 
   it('strictly separates raw principal, caller_scope, and display metadata', () => {

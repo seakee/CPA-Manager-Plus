@@ -31,12 +31,12 @@ This evidence slice proves the exact semantics, visibility, lifecycle stability,
    CPA derives `caller_scope = hex(sha256("cli-proxy-api:caller-scope:v1\x00" + strings.TrimSpace(userApiKey)))`.
    - **Properties**: Deterministic, domain-separated, whitespace-normalized, non-plaintext one-way hash.
    - **Stability**: Multiple requests from the same caller (identical key) produce identical 64-character hex strings across the entire runtime lifecycle.
-   - **Isolation**: Different callers produce completely disjoint cryptographic hashes, utilized by CPA's session affinity to partition session trees.
-   - **Absence**: Missing if authentication is disabled, if authentication fails/rejects, or prior to `accessAuthMiddleware` execution (`request_received`).
+   - **Isolation**: Distinct callers produce distinct cryptographic hashes, participating in CPA's session affinity partitioning.
+   - **Absence**: Missing if no access provider establishes an authenticated principal, if authentication fails/rejects, or prior to `accessAuthMiddleware` execution (`request_received`).
 3. **Raw Secret Exposure Boundary**:
    - **HTTP Header Cloning Pipeline**: `sdk/api/handlers/handlers_context.go#headersFromContext` clones inbound HTTP headers from the Gin context, and `sdk/api/handlers/model_execution.go#modelExecutionHeaders` forwards them into `opts.Headers`.
    - **RequestInterceptor (before-auth & after-auth)**: **Exposed**. Receives `opts.Headers` / `req.Headers` containing raw inbound `Authorization` / `X-Api-Key` headers.
-   - **Scheduler (`SchedulerPickRequest`)**: **Exposed via Headers**. Receives `req.Options.Headers` containing raw headers; however, `req.Options.Metadata` contains only sanitized `caller_scope`.
+   - **Scheduler (`SchedulerPickRequest`)**: **Exposed via Headers**. Receives `SchedulerPickRequest.Options.Headers` containing raw headers; however, `SchedulerPickRequest.Options.Metadata` contains only sanitized `caller_scope`.
    - **Terminal `RequestCompletion`**: **Redacted**. Struct lacks any `Headers` field; `Metadata` contains only `caller_scope`.
    - **`UsagePlugin` (`pluginapi.UsageRecord`)**: **Exposed**. `APIKeyFromContext` in `internal/runtime/executor/helps/usage_helpers.go` retrieves `ginCtx["userApiKey"]`, placing the raw API key into `UsageRecord.APIKey`.
 4. **Targeted Identity Semantics Parity Between v7.3.3 and v7.3.8**:
@@ -154,14 +154,14 @@ func requestCallerScope(ginCtx *gin.Context) string {
 - **Determinism**: For any given principal string $P$, `CallerScope(P)` is idempotent and invariant over time and across process restarts.
 - **Normalization**: Leading and trailing ASCII whitespace is removed via `strings.TrimSpace(value)`.
 - **Case Sensitivity**: The hash is case-sensitive (e.g. `CallerScope("sk-abc") != CallerScope("SK-ABC")`).
-- **Domain Separation**: Salted with `"cli-proxy-api:caller-scope:v1\x00"`, preventing hash collisions with other SHA-256 usages in CPA.
+- **Domain Separation**: The fixed prefix `"cli-proxy-api:caller-scope:v1\x00"` provides a caller-scope-specific input domain, separating caller_scope hashes from other SHA-256 applications in CPA. It does not alter SHA-256's underlying collision resistance.
 - **One-way / Non-plaintext**: 64-character lowercase hex string. Does not reveal plaintext key contents or length directly.
 
 ### 4.3 Isolation & Limitations
 
-- **Caller Partitioning**: Proven in `sdk/cliproxy/auth/selector_lcp_test.go#TestSessionAffinitySelectorLCPCallerScopeIsolation`: CPA's session affinity engine specifically groups and isolates session trees by `caller_scope`. Different downstream keys cannot cross-access or interfere with each other's session affinity state.
+- **Caller Partitioning**: Proven in `sdk/cliproxy/auth/selector_lcp_test.go#TestSessionAffinitySelectorLCPCallerScopeIsolation`: CPA's session affinity engine specifically groups and isolates session trees by `caller_scope`. The upstream isolation test demonstrates that distinct caller scopes do not reuse the same LCP binding for the tested shared-prompt scenario. This is a session-affinity isolation property, not an authorization boundary.
 - **Absence Conditions**:
-  - Auth disabled (`manager == nil` or `APIKeys` empty): `userApiKey` unset $\rightarrow$ `caller_scope` is `""`.
+  - **No Authenticated Principal**: `caller_scope` is empty when no authenticated Principal/userApiKey is established, for example when the access manager has no active providers or the execution path does not carry an authenticated Gin request context. An empty built-in `APIKeys` configuration disables the `config_access` credential source, but does not imply that plugin `FrontendAuthProvider`s are absent.
   - Auth rejected: request terminated in middleware $\rightarrow$ execution metadata never initialized.
   - Pre-auth stage: at `request_received`, before middleware finishes, `caller_scope` does not exist.
   - Non-HTTP contexts: unit test calls bypassing Gin context where `ctx.Value("gin")` is nil.
@@ -178,12 +178,12 @@ The table below maps the 11 canonical CPA lifecycle stages against caller identi
 | 0 | `request_received` | before-client-auth | Yes (inbound HTTP) | No | No (pre-auth) | `server_middleware.go`; `FrontendAuthRequest` |
 | 1 | `client_api_key_resolved` | client-auth | Yes (inbound HTTP) | No | No (derived next) | `config_access/provider.go`; `server_middleware.go` |
 | 2 | `model_resolved` | before-credential-auth | Yes (`opts.Headers`) | No (redacted) | **Yes** (`meta["caller_scope"]`) | `model_execution.go#modelExecutionHeaders`; `handlers_metadata_test.go` |
-| 3 | `credential_candidates_generated` | before-credential-auth | Yes (`opts.Headers`) | No (redacted) | **Yes** (`opts.Metadata`) | `conductor_selection.go` |
-| 4 | `disabled_cooldown_priority_filtering` | before-credential-auth | Yes (`opts.Headers`) | No (redacted) | **Yes** (`opts.Metadata`) | `conductor_selection.go` |
-| 5 | `credential_selected` | after-credential-auth | Yes (`req.Options.Headers`) | No (redacted) | **Yes** (`req.Options.Metadata`) | `conductor_selection.go`; `PickAuth` |
-| 6 | `provider_endpoint_resolved` | spans route/endpoint | Yes (`opts.Headers`) | No (redacted) | **Yes** (`opts.Metadata`) | `model_execution.go#modelExecutionHeaders` |
-| 7 | `upstream_request_stream` | after-credential-auth | Yes (`req.Headers`) | No (redacted) | **Yes** (`req.Metadata`) | `conductor_execution.go`; `InterceptRequestAfterAuth` |
-| 8 | `retry_fallback` | repeated after auth | Yes (`opts.Headers`) | No (redacted) | **Yes** (`req.Metadata`) | `conductor_execution.go` |
+| 3 | `credential_candidates_generated` | before-credential-auth | Yes (`opts.Headers`) | No (redacted) | **Yes** (`opts.Metadata`) | `sdk/cliproxy/auth/conductor_selection.go` |
+| 4 | `disabled_cooldown_priority_filtering` | before-credential-auth | Yes (`opts.Headers`) | No (redacted) | **Yes** (`opts.Metadata`) | `sdk/cliproxy/auth/conductor_selection.go` |
+| 5 | `credential_selected` | after-credential-auth | Yes (`SchedulerPickRequest.Options.Headers`) | No (redacted) | **Yes** (`SchedulerPickRequest.Options.Metadata`) | `sdk/cliproxy/auth/conductor_selection.go`; `PickAuth` |
+| 6 | `provider_endpoint_resolved` | spans route/endpoint | Yes (`opts.Headers`) | No (redacted) | **Yes** (`opts.Metadata`) | `sdk/api/handlers/model_execution.go#modelExecutionHeaders` |
+| 7 | `upstream_request_stream` | after-credential-auth | Yes (`req.Headers`) | No (redacted) | **Yes** (`RequestAfterAuthInterceptRequest.Metadata ← execOpts.Metadata`) | `conductor_execution.go#applyRequestAfterAuthInterceptor` |
+| 8 | `retry_fallback` | repeated after auth | Yes (`opts.Headers` / per-attempt `execOpts.Headers`) | No (redacted) | **Yes** (`opts.Metadata` / per-attempt `execOpts.Metadata`) | `conductor_execution.go` |
 | 9 | `response_cancel_reject_failure` | terminal | **No** (struct has no headers) | **No** (redacted) | **Yes** (`completion.Metadata`) | `handlers_interceptors.go`; `RequestCompletion` |
 | 10 | `usage_accounting_settlement` | attempt-coupled | N/A | **Yes** (`record.APIKey` has raw secret) | **No** (not copied to usage) | `usage_helpers.go#APIKeyFromContext`; `UsageRecord` |
 
@@ -230,7 +230,7 @@ Official CPA v7.3.3 release binary was executed on port `8081`. The runtime even
 - `request.intercept_before` observed runtime payload:
   - `Headers["Authorization"]`: `["Bearer sk-phase2-caller-beta"]`.
   - `Metadata["caller_scope"]`: `0eb2fb39ffeac09dfadd792351df6e98ca2007e20e2015068111247fa9e2411c`.
-  - Runtime proof: $\text{caller\_scope}_{\alpha} \neq \text{caller\_scope}_{\beta}$. Different callers are cryptographically partitioned into disjoint hash values.
+  - Runtime proof: $\text{caller\_scope}_{\alpha} \neq \text{caller\_scope}_{\beta}$ for the two observed principals, confirming caller-dependent separation in this test.
 
 #### Case D: Raw Header Visibility Across Alternate Header Forms
 - Client sends requests using alternate API key headers:

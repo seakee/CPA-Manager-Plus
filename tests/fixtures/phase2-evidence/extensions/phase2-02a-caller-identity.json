@@ -175,7 +175,7 @@
         "phase2-02a-v7-3-3-release-black-box"
       ],
       "limitations": [
-        "Derived identity depends on authenticated userApiKey; missing when auth is disabled.",
+        "Derived identity depends on an authenticated Principal being stored as userApiKey; it is absent when no access provider establishes such a principal.",
         "Rotates when downstream client API key rotates.",
         "Case-sensitive sha256 domain-separated hash of trimmed principal."
       ]
