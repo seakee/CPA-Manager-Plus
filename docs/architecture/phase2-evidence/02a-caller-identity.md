@@ -296,10 +296,10 @@ CPAMP strictly classifies CPA identity and metadata fields to avoid dangerous id
 - `pluginapi.FrontendAuthResponse.Principal`
 *Boundary*: Under built-in access, Principal is identical to Raw Secret. Under plugin access, Principal is an abstract string. CPAMP must not treat CPA's Principal as an authenticated user entity without inspecting the provider.
 
-### 7.3 Hashed / Scoped Identity (Usable for Request/Session Scoping)
+### 7.3 Hashed / Scoped Identity (Usable for Caller/Session Scoping)
 - `coreexecutor.CallerScopeMetadataKey` (`"caller_scope"`)
 - `coresession.CallerScope(val)`
-*Boundary*: Valid for request correlation, session affinity partitioning, and cache scoping. Unsuitable as a persistent account entity across key rotations.
+*Boundary*: Valid for caller/session scoping, session-affinity partitioning, and caller-scoped affinity/cache namespacing. It is not a per-request correlation key because repeated requests from the same principal intentionally share the same caller_scope. It is also unsuitable as a persistent account entity across key rotations.
 
 ### 7.4 Display Metadata (Unsuitable for Authorization or Routing)
 - `sdkaccess.Result.Metadata["source"]`

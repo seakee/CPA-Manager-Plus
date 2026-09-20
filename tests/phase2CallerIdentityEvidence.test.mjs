@@ -385,6 +385,14 @@ describe('Phase2-02A caller identity and scope evidence', () => {
     expect(docSource).not.toContain('ASCII whitespace');
     expect(docSource).toContain('Unicode whitespace');
 
+    // Anti-regression: caller_scope is not described as request correlation key
+    expect(docSource).not.toContain(
+      'Valid for request correlation, session affinity partitioning'
+    );
+    expect(docSource).not.toContain('Valid for request correlation');
+    expect(docSource).toContain('not a per-request correlation key');
+    expect(docSource).toContain('repeated requests from the same principal');
+
     // Anti-regression: release black-box does not overclaim partitioning or multi-caller isolation
     expect(docSource).not.toContain(
       'confirming multi-caller isolation in candidate v7.3.8'
