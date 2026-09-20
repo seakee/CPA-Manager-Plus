@@ -36,8 +36,8 @@
       "evidenceKind": "unit",
       "evidenceReference": "sdk/api/handlers/handlers_interceptors_test.go#TestHandlerRequestInterceptorRewritesExecutorRequest",
       "limitations": [
-        "Confirms request interceptors receive original headers from opts.Headers without redaction.",
-        "Proves raw API key is exposed in HTTP headers to before-auth and after-auth interceptors."
+        "Confirms ordinary inbound request headers are propagated into RequestInterceptor headers without implicit redaction.",
+        "Upstream test validates X-Original and X-Remove headers; raw authorization header exposure is established by source chain and release binary observation."
       ]
     },
     {
@@ -65,8 +65,8 @@
       "evidenceKind": "black-box",
       "evidenceReference": "docs/architecture/phase2-evidence/02a-caller-identity.md#v7-3-3-release-binary-black-box-observation",
       "limitations": [
-        "Observes official CPA v7.3.3 release binary (commit 7bbfeaf8, linux/arm64: 5f320e3fae52af00f07b78201311e9d096b36e759441d948de48a10f49e71883) in isolated container execution.",
-        "Validates live HTTP client authentication, same-caller stability across repeated requests, multi-caller isolation, and secret exposure boundaries."
+        "Official release binary observed runtime captures caller_scope from runtime RequestInterceptor and RequestCompletion lifecycle hooks, proving same-caller stability, distinct-caller partitioning, and raw header visibility at request interception.",
+        "Does not observe Scheduler headers or UsageRecord.APIKey in black-box runtime; those boundaries are established by source evidence."
       ]
     },
     {
@@ -102,7 +102,8 @@
       "evidenceKind": "unit",
       "evidenceReference": "sdk/api/handlers/handlers_interceptors_test.go#TestHandlerRequestInterceptorRewritesExecutorRequest",
       "limitations": [
-        "Candidate v7.3.8 retains same interceptor header visibility behavior."
+        "Confirms ordinary inbound request headers are propagated into RequestInterceptor headers without implicit redaction in candidate release.",
+        "Upstream test validates X-Original and X-Remove headers; raw authorization header exposure is established by source chain and release binary observation."
       ]
     },
     {
@@ -129,8 +130,8 @@
       "evidenceKind": "black-box",
       "evidenceReference": "docs/architecture/phase2-evidence/02a-caller-identity.md#v7-3-8-release-binary-black-box-observation",
       "limitations": [
-        "Observes official CPA v7.3.8 release binary (commit c93978c4, linux/arm64: 8d09ce286d857b2d0e6d77c39e08a755246120df58c02a115d58c391fc73e3f1) in isolated container execution.",
-        "Validates identical HTTP client authentication, same-caller stability, multi-caller isolation, and secret exposure behavior in candidate release."
+        "Official release binary observed runtime captures caller_scope from runtime RequestInterceptor and RequestCompletion lifecycle hooks, proving same-caller stability, distinct-caller partitioning, and raw header visibility at request interception.",
+        "Does not observe Scheduler headers or UsageRecord.APIKey in black-box runtime; those boundaries are established by source evidence."
       ]
     },
     {
@@ -219,9 +220,9 @@
         "phase2-02a-v7-3-3-release-black-box"
       ],
       "limitations": [
-        "Raw API key is redacted from execution metadata and terminal RequestCompletion.",
-        "Raw API key leaks in HTTP request headers to before-auth/after-auth interceptors and scheduler options via modelExecutionHeaders.",
-        "Raw API key leaks into UsageRecord.APIKey under built-in config access."
+        "Raw API key is redacted from execution metadata and terminal RequestCompletion, confirmed by release binary black-box observation.",
+        "Raw API key is exposed in HTTP request headers to RequestInterceptor, confirmed by release binary black-box observation and modelExecutionHeaders source chain.",
+        "Raw API key exposure to scheduler options and UsageRecord.APIKey is established by source evidence rather than black-box execution."
       ]
     },
     {
@@ -310,7 +311,9 @@
         "phase2-02a-v7-3-8-release-black-box"
       ],
       "limitations": [
-        "Candidate fixture retains header and usage secret exposure via modelExecutionHeaders."
+        "Raw API key is redacted from execution metadata and terminal RequestCompletion, confirmed by release binary black-box observation in candidate release.",
+        "Raw API key is exposed in HTTP request headers to RequestInterceptor, confirmed by release binary black-box observation and modelExecutionHeaders source chain.",
+        "Raw API key exposure to scheduler options and UsageRecord.APIKey is established by source evidence rather than black-box execution."
       ]
     },
     {

@@ -183,7 +183,7 @@ The table below maps the 11 canonical CPA lifecycle stages against caller identi
 | 5 | `credential_selected` | after-credential-auth | Yes (`req.Options.Headers`) | No (redacted) | **Yes** (`req.Options.Metadata`) | `conductor_selection.go`; `PickAuth` |
 | 6 | `provider_endpoint_resolved` | spans route/endpoint | Yes (`opts.Headers`) | No (redacted) | **Yes** (`opts.Metadata`) | `model_execution.go#modelExecutionHeaders` |
 | 7 | `upstream_request_stream` | after-credential-auth | Yes (`req.Headers`) | No (redacted) | **Yes** (`req.Metadata`) | `conductor_execution.go`; `InterceptRequestAfterAuth` |
-| 8 | `retry_fallback` | repeated after auth | Yes (`opts.Headers`) | No (redacted) | **Yes** (`opts.Metadata`) | `conductor_execution.go` |
+| 8 | `retry_fallback` | repeated after auth | Yes (`opts.Headers`) | No (redacted) | **Yes** (`req.Metadata`) | `conductor_execution.go` |
 | 9 | `response_cancel_reject_failure` | terminal | **No** (struct has no headers) | **No** (redacted) | **Yes** (`completion.Metadata`) | `handlers_interceptors.go`; `RequestCompletion` |
 | 10 | `usage_accounting_settlement` | attempt-coupled | N/A | **Yes** (`record.APIKey` has raw secret) | **No** (not copied to usage) | `usage_helpers.go#APIKeyFromContext`; `UsageRecord` |
 
@@ -191,7 +191,7 @@ The table below maps the 11 canonical CPA lifecycle stages against caller identi
 
 ## 6. Official Release Binary Black-Box Observations
 
-### 6.1 Release Binary Verification & Environment
+### 6.1 Release Binary Verification & Ephemeral Observer Harness
 
 Official Linux arm64 binaries from GitHub releases were verified against frozen CPAMP plan digests before execution:
 
@@ -200,48 +200,75 @@ Official Linux arm64 binaries from GitHub releases were verified against frozen 
 | `current-bundled-v7-3-3` | `v7.3.3` | `7bbfeaf8` | `linux/arm64` | `5f320e3fae52af00f07b78201311e9d096b36e759441d948de48a10f49e71883` | Verified |
 | `candidate-release-v7-3-8` | `v7.3.8` | `c93978c4` | `linux/arm64` | `8d09ce286d857b2d0e6d77c39e08a755246120df58c02a115d58c391fc73e3f1` | Verified |
 
-- **Topology**: Isolated Linux container (`seakee/cpamp-runtime:runtime15-arm64`) running on dedicated ephemeral ports (`18333` for v7.3.3, `18338` for v7.3.8).
-- **Execution Mode**: Local model mode (`-local-model`), disabling remote catalog downloads.
-- **Configured Client Keys**: `["sk-phase2-caller-alpha", "sk-phase2-caller-beta"]`.
+- **Ephemeral Observer Harness**: A minimal C-ABI dynamic shared library (`observer.so`, Plugin ABI v1) implementing `RequestInterceptor` (`request.intercept_before`, `request.intercept_after`) and `RequestLifecyclePlugin` (`request.complete`) was compiled in an isolated container and loaded via standard CPA plugin configuration (`plugins.configs.observer`).
+- **Topology**: Isolated Linux containers (`debian:bookworm-slim` arm64) executing on dedicated ephemeral ports (`8081` for v7.3.3, `8088` for v7.3.8).
+- **Execution Mode**: Local model mode (`-local-model`) with synthetic configuration keys: `["sk-phase2-caller-alpha", "sk-phase2-caller-beta"]`.
+- **Termination Mechanism**: The observer intercepts inbound requests at `request.intercept_before`, records full incoming headers and metadata payloads into an external event log, and terminates with `Terminate: true, StatusCode: 200` to avoid external model invocation while cleanly triggering terminal lifecycle tracking (`request.complete`).
 
 ---
 
 <a id="v7-3-3-release-binary-black-box-observation"></a>
 ### 6.2 CPA v7.3.3 Black-Box Observation (`phase2-02a-v7-3-3-release-black-box`)
 
-#### Scenario 1: Same Caller Stability
-- Client sends repeated requests with `Authorization: Bearer sk-phase2-caller-alpha`.
-- Server returns HTTP 200 (`{"data":[],"object":"list"}`).
-- Derived identity:
-  $$\text{caller\_scope} = \text{sha256}(\text{"cli-proxy-api:caller-scope:v1\x00sk-phase2-caller-alpha"}) = \texttt{b3b1a4b63a0b68349348164be3edb6fcb9a3ee41d4d026c1ef21afb93cafa151}$$
-- Repeated requests produce the identical 64-character hex hash, ensuring session affinity stability across requests.
+Official CPA v7.3.3 release binary was executed on port `8081`. The runtime events emitted by the release binary into `observer.so` confirmed the following observations:
 
-#### Scenario 2: Two Caller Isolation
-- Client A sends with `Authorization: Bearer sk-phase2-caller-alpha` $\rightarrow$ `caller_scope = b3b1a4b6...`.
-- Client B sends with `Authorization: Bearer sk-phase2-caller-beta` $\rightarrow$ `caller_scope = 0eb2fb39ffeac09dfadd792351df6e98ca2007e20e2015068111247fa9e2411c`.
-- Both callers authenticate successfully (HTTP 200), and their session states partition into completely separate hash spaces.
-- Unauthorized request `sk-invalid` returns HTTP 401 (`{"error":"Invalid API key"}`).
-- Unauthenticated request returns HTTP 401 (`{"error":"Missing API key"}`).
-- Alternate header forms (`x-api-key`, `x-goog-api-key`) authenticate identically to Bearer tokens.
+#### Case A: Caller Alpha Initial Request
+- Client sends `POST /v1/chat/completions` with header `Authorization: Bearer sk-phase2-caller-alpha`.
+- `request.intercept_before` observed runtime payload:
+  - `Headers["Authorization"]`: `["Bearer sk-phase2-caller-alpha"]` (raw credential present in headers).
+  - `Metadata["caller_scope"]`: `b3b1a4b63a0b68349348164be3edb6fcb9a3ee41d4d026c1ef21afb93cafa151`.
+  - `Metadata`: Contains no raw secret or plain key text.
 
-#### Scenario 3: Secret Exposure Boundary
-- **Gin Access Log**: Outputs `[8b049524] [info ] [gin_logger.go:103] 200 | 3ms | 172.17.0.1 | GET "/v1/models"`. Key string does not leak into access logs.
-- **Header Pipeline**: Inbound request headers (`Authorization: Bearer ...`) are preserved via `handlers_context.go#headersFromContext` into `modelExecutionHeaders`, making raw secrets visible to request interceptors and scheduler options.
-- **Terminal Completion**: Responses omit request headers; `RequestCompletion.Metadata` retains only `caller_scope`.
+#### Case B: Caller Alpha Repeat Request (Runtime Stability)
+- Client sends a second request with identical header `Authorization: Bearer sk-phase2-caller-alpha`.
+- `request.intercept_before` observed runtime payload:
+  - `Metadata["caller_scope"]`: `b3b1a4b63a0b68349348164be3edb6fcb9a3ee41d4d026c1ef21afb93cafa151`.
+  - Runtime proof: $\text{caller\_scope}_{A1} == \text{caller\_scope}_{A2}$. Identity is stable across repeated requests.
+
+#### Case C: Caller Beta Request (Multi-Caller Isolation)
+- Client sends `POST /v1/chat/completions` with header `Authorization: Bearer sk-phase2-caller-beta`.
+- `request.intercept_before` observed runtime payload:
+  - `Headers["Authorization"]`: `["Bearer sk-phase2-caller-beta"]`.
+  - `Metadata["caller_scope"]`: `0eb2fb39ffeac09dfadd792351df6e98ca2007e20e2015068111247fa9e2411c`.
+  - Runtime proof: $\text{caller\_scope}_{\alpha} \neq \text{caller\_scope}_{\beta}$. Different callers are cryptographically partitioned into disjoint hash values.
+
+#### Case D: Raw Header Visibility Across Alternate Header Forms
+- Client sends requests using alternate API key headers:
+  - `x-api-key: sk-phase2-caller-alpha` $\rightarrow$ `Headers["X-Api-Key"]`: `["sk-phase2-caller-alpha"]`, `Metadata["caller_scope"]`: `b3b1a4b6...`.
+  - `x-goog-api-key: sk-phase2-caller-alpha` $\rightarrow$ `Headers["X-Goog-Api-Key"]`: `["sk-phase2-caller-alpha"]`, `Metadata["caller_scope"]`: `b3b1a4b6...`.
+  - Runtime proof: Raw credential strings are propagated into `RequestInterceptor` headers across all supported access header forms without redaction, while `Metadata["caller_scope"]` consistently resolves to the derived hash.
+
+#### Case E: Terminal RequestCompletion Redaction
+- Terminal lifecycle hook `request.complete` observed runtime payload across all requests:
+  - `Metadata["caller_scope"]`: Preserves the exact `caller_scope` derived during execution (`b3b1a4b6...` for Alpha, `0eb2fb39...` for Beta).
+  - Header Redaction: The `RequestCompletion` struct emitted by the runtime lacks any request headers field; neither raw `Authorization` nor any plain secret is present in the completion payload.
 
 ---
 
 <a id="v7-3-8-release-binary-black-box-observation"></a>
 ### 6.3 CPA v7.3.8 Black-Box Observation (`phase2-02a-v7-3-8-release-black-box`)
 
-The identical test battery was executed against official CPA v7.3.8 on port `18338`:
+The identical test battery was executed against candidate release binary CPA v7.3.8 on port `8088`. The observed runtime events confirmed exact semantic parity with v7.3.3:
 
-#### Scenario 4: v7.3.3 vs. v7.3.8 Parity
-- **Unauthenticated**: Returns identical HTTP 401 `{"error":"Missing API key"}`.
-- **Invalid Credential**: Returns identical HTTP 401 `{"error":"Invalid API key"}`.
-- **Valid Caller Alpha**: Returns identical HTTP 200 via `Authorization`, `x-api-key`, and `x-goog-api-key`.
-- **Valid Caller Beta**: Returns identical HTTP 200 and partitions to identical hash `0eb2fb39ffeac09dfadd792351df6e98ca2007e20e2015068111247fa9e2411c`.
-- **Conclusion**: Caller identity resolution, isolation, and header exposure boundaries in v7.3.8 are identical to v7.3.3.
+1. **Case A (Alpha Initial)**: `RequestInterceptor` received `Headers["Authorization"] = ["Bearer sk-phase2-caller-alpha"]` and `Metadata["caller_scope"] = b3b1a4b63a0b68349348164be3edb6fcb9a3ee41d4d026c1ef21afb93cafa151`.
+2. **Case B (Alpha Repeat)**: Emitted identical `caller_scope` `b3b1a4b6...`, confirming runtime stability in candidate v7.3.8.
+3. **Case C (Beta Isolation)**: Emitted `caller_scope` `0eb2fb39ffeac09dfadd792351df6e98ca2007e20e2015068111247fa9e2411c`, confirming multi-caller isolation in candidate v7.3.8.
+4. **Case D (Alternate Headers)**: Raw credentials propagated unredacted into `Headers["X-Api-Key"]` and `Headers["X-Goog-Api-Key"]`.
+5. **Case E (Terminal Redaction)**: `RequestCompletion` preserved `caller_scope` in `Metadata` and omitted all raw request headers and secrets.
+
+---
+
+### 6.4 Source-Supported Boundaries (Non-Black-Box Findings)
+
+Certain downstream lifecycle stages cannot be safely triggered in an isolated black-box harness without mocking upstream provider networks. These boundaries are explicitly backed by upstream source analysis rather than claimed as black-box observations:
+
+1. **Scheduler Header Exposure**:
+   - `sdk/api/handlers/handlers_context.go#headersFromContext` clones inbound HTTP headers into `opts.Headers`.
+   - `internal/runtime/executor/conductor_selection.go#schedulerOptions` copies `opts.Headers` directly into `SchedulerPickRequest.Options.Headers`.
+   - *Source conclusion*: Raw client auth headers are accessible to scheduler plugins in `Options.Headers`.
+2. **UsageRecord.APIKey Exposure**:
+   - `internal/runtime/executor/helps/usage_helpers.go#APIKeyFromContext` retrieves `ginCtx["userApiKey"]` and assigns it to `usage.Record.APIKey` and `pluginapi.UsageRecord.APIKey`.
+   - *Source conclusion*: Under built-in `config_access`, `userApiKey` is the raw client credential, leaving raw secrets visible to usage accounting plugins.
 
 ---
 
@@ -260,7 +287,7 @@ CPAMP strictly classifies CPA identity and metadata fields to avoid dangerous id
 - `sdkaccess.Result.Principal`
 - Gin context `"userApiKey"`
 - `pluginapi.FrontendAuthResponse.Principal`
-*Boundary*: Under built-in access, Principal is identical to Raw Secret. Under plugin access, Principal is an arbitrary string. CPAMP must not treat CPA's Principal as an authenticated user entity without inspecting the provider.
+*Boundary*: Under built-in access, Principal is identical to Raw Secret. Under plugin access, Principal is an abstract string. CPAMP must not treat CPA's Principal as an authenticated user entity without inspecting the provider.
 
 ### 7.3 Hashed / Scoped Identity (Usable for Request/Session Scoping)
 - `coreexecutor.CallerScopeMetadataKey` (`"caller_scope"`)
@@ -283,11 +310,12 @@ A targeted comparison between v7.3.3 (`7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b`
 2. `internal/access/config_access/provider.go`: **Identical**.
 3. `sdk/cliproxy/session/identity.go` (`CallerScope`): **Identical**.
 4. `sdk/api/handlers/handlers.go` (`requestCallerScope`): **Identical**.
-5. `sdk/api/handlers/handlers_context.go` (`headersFromContext`) & `model_execution.go` (`modelExecutionHeaders`): **Identical**.
-6. `internal/runtime/executor/helps/usage_helpers.go`: Identity extraction function `APIKeyFromContext` (extracting `ginCtx["userApiKey"]` into `usage.Record.APIKey`) and caller identity propagation are **Identical**. (Note: non-identity changes in v7.3.8 added upstream model substitution warnings and streaming buffer response model fields, which do not alter caller identity semantics).
-7. `internal/pluginhost/rpc_client.go`: Identity metadata sanitization and caller propagation logic are **Identical** (v7.3.8 only adds `SchedulerAcrossPriorities` capability forwarding).
+5. `sdk/api/handlers/handlers_context.go` (`headersFromContext`): **Identical**.
+6. `sdk/api/handlers/model_execution.go` (`modelExecutionHeaders`): **Identical**.
+7. `internal/runtime/executor/helps/usage_helpers.go`: `APIKeyFromContext` identity extraction semantics are identical, and caller identity propagation remains unchanged across both releases. (Unrelated changes in v7.3.8 add model substitution warnings and streaming buffer response model fields).
+8. `internal/pluginhost/rpc_client.go`: Identity metadata sanitization and caller identity-related behavior remain unchanged between v7.3.3 and v7.3.8. (v7.3.8 introduces `SchedulerAcrossPriorities` capability forwarding without altering identity attributes).
 
-**Conclusion**: Identity semantics and security boundaries in candidate v7.3.8 are identical to the bundled v7.3.3 baseline.
+**Conclusion**: Identity semantics, caller scoping algorithms, and security boundaries in candidate v7.3.8 are identical to the bundled v7.3.3 baseline.
 
 ---
 

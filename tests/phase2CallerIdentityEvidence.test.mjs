@@ -73,7 +73,7 @@ describe('Phase2-02A caller identity and scope evidence', () => {
     expect(scope1).not.toContain(key);
     expect(scope1).not.toContain('prod-user');
 
-    // Matches official release black-box computed values
+    // Asserts caller_scope algorithm against observed release values
     expect(computeCallerScope('sk-phase2-caller-alpha')).toBe(
       'b3b1a4b63a0b68349348164be3edb6fcb9a3ee41d4d026c1ef21afb93cafa151'
     );
@@ -177,8 +177,22 @@ describe('Phase2-02A caller identity and scope evidence', () => {
     expect(blackBoxAnchors.length).toBeGreaterThanOrEqual(2);
     for (const anchor of blackBoxAnchors) {
       expect(anchor.evidenceReference).not.toContain('.test.mjs');
-      expect(anchor.evidenceReference).toMatch(/\.md#.+/);
+      expect(anchor.evidenceReference).toMatch(
+        /02a-caller-identity\.md#v7-3-[38]-release-binary-black-box-observation/
+      );
+      const limText = anchor.limitations.join(' ');
+      expect(limText).toMatch(/observed/i);
+      expect(limText).toMatch(/runtime/i);
+      expect(limText).toMatch(/RequestInterceptor|RequestCompletion|request-interceptor|request-completion/i);
     }
+
+    // 2b. Header unit anchors must NOT claim raw API key / authorization secret proof
+    const currentHeaderUnit = anchorMap.get('phase2-02a-secret-header-exposure-unit-current');
+    const candidateHeaderUnit = anchorMap.get('phase2-02a-secret-header-exposure-unit-candidate');
+    expect(currentHeaderUnit).toBeDefined();
+    expect(candidateHeaderUnit).toBeDefined();
+    expect(currentHeaderUnit.limitations.join(' ')).not.toMatch(/proves raw api key|authorization secret/i);
+    expect(candidateHeaderUnit.limitations.join(' ')).not.toMatch(/proves raw api key|authorization secret/i);
 
     // 3. Current and Candidate release black-box anchors exist and match artifact IDs
     const currentBB = anchorMap.get('phase2-02a-v7-3-3-release-black-box');
