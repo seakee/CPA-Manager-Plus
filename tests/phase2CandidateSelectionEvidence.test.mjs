@@ -325,14 +325,35 @@ describe('Phase2-02B: Candidate Visibility / Selection / Retry-Fallback Evidence
         (a) => a.id === 'phase2-02b-v7-3-8-pinned-auth-source'
       );
 
-      expect(v733Pinned.evidenceReference).toContain('pinnedAuthIDFromMetadata');
-      expect(v733Pinned.evidenceReference).toMatch(/pickNextLegacy|pickSingleWithStrategy/);
+      expect(v733Pinned.evidenceReference).toContain(
+        'sdk/cliproxy/auth/conductor_execution.go#pinnedAuthIDFromMetadata'
+      );
+      expect(v738Pinned.evidenceReference).toContain(
+        'sdk/cliproxy/auth/conductor_execution.go#pinnedAuthIDFromMetadata'
+      );
+
+      expect(v733Pinned.evidenceReference).toContain('pickNextLegacy');
+      expect(v733Pinned.evidenceReference).toContain('pickNextMixedLegacy');
+      expect(v733Pinned.evidenceReference).toContain('pickSingleWithStrategy');
+      expect(v733Pinned.evidenceReference).toContain('pickMixedWithStrategy');
+      expect(v733Pinned.evidenceReference).toContain('scheduledAuthPredicate');
+
+      expect(v738Pinned.evidenceReference).toContain('pickNextLegacy');
+      expect(v738Pinned.evidenceReference).toContain('pickNextMixedLegacy');
+      expect(v738Pinned.evidenceReference).toContain('pickSingleWithStrategy');
+      expect(v738Pinned.evidenceReference).toContain('pickMixedWithStrategy');
+      expect(v738Pinned.evidenceReference).toContain('scheduledAuthPredicate');
+
+      expect(v733Pinned.evidenceReference).not.toContain(
+        'conductor_selection.go#pinnedAuthIDFromMetadata'
+      );
+      expect(v738Pinned.evidenceReference).not.toContain(
+        'conductor_selection.go#pinnedAuthIDFromMetadata'
+      );
+
       expect(v733Pinned.evidenceReference).not.toBe(
         'sdk/cliproxy/auth/conductor_execution.go#publishSelectedAuthMetadata'
       );
-
-      expect(v738Pinned.evidenceReference).toContain('pinnedAuthIDFromMetadata');
-      expect(v738Pinned.evidenceReference).toMatch(/pickNextLegacy|pickSingleWithStrategy/);
       expect(v738Pinned.evidenceReference).not.toBe(
         'sdk/cliproxy/auth/conductor_execution.go#publishSelectedAuthMetadata'
       );
@@ -376,6 +397,7 @@ describe('Phase2-02B: Candidate Visibility / Selection / Retry-Fallback Evidence
     });
 
     it('models and asserts documented contract boundaries for pre-scheduler filtering', () => {
+      // candidate-selection-contract-model
       // Models documented CPA conductor_selection.go candidate generation and filtering contract in unit scope
       const inventory = [
         {

@@ -20,27 +20,29 @@
 
 ### 2.1 Scheduler 前有哪些 Credential 会被过滤？
 
-在 CPA 中，插件调度器（`PluginScheduler`）并不是直接从全局凭证库中挑选凭证，而是由 Conductor 预先执行过滤后将 `available` 切片作为 `Candidates` 传递给 Scheduler。
-
-在 `sdk/cliproxy/auth/conductor_selection.go`（`pickNextLegacy` 与 `pickNextMixedLegacy`，以及 `scheduler.go#pickSingleWithStrategy, pickMixedWithStrategy`）中，在调用 `availableAuthsForSelector` 之前与之中，严格执行以下前置过滤链：
+在 Plugin Scheduler 路径中，Conductor 通过 `pickNextLegacy` / `pickNextMixedLegacy` 完成基础候选生成，再由 `availableAuthsForSelector` 应用 availability/cooldown 与 priority visibility，最终把过滤后的 `Candidates` 传给 `pickViaPluginScheduler`。在此过程中，严格执行以下前置过滤链：
 
 1. **Disabled 过滤**:
-   - `candidate == nil || candidate.Disabled`: 显式禁用的凭证直接在第一轮遍历中跳过。
+   - `candidate == nil || candidate.Disabled`: 显式禁用的凭证直接在基础候选循环中被剔除。
    - `candidate.Status == StatusDisabled`: 在后续状态校验中视为不可用。
 2. **Provider Mismatch 过滤**:
    - `providerKey := executorKeyFromAuth(candidate)`: 凭证所属的 Provider 必须属于当前请求指定的 Provider 集合（如单 Provider 路由或 Mixed 路由允许的 providers）。不匹配的直接剔除。
    - `_, ok := m.executors[providerKey]`: 若该 Provider 没有注册有效的 `ProviderExecutor`，直接剔除。
 3. **Model Mismatch 过滤**:
    - `modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model)`: 通过全局模型注册中心 `registryRef.ClientSupportsModel` 检查该凭证是否声明支持目标模型或其规范化映射别名。不支持目标模型的凭证直接剔除。
-4. **Unauthorized / Policy Mismatch 过滤**:
+4. **Eligibility / Credential Policy 过滤**:
    - `!eligibility.allows(candidate)`:
      - `requiredKind`: 若请求上下文指定了凭证类型（如 oauth / api_key），类型不符被剔除；
      - `credentialPolicy`: 若上下文携带凭证策略（如 `credentialPolicyAllows`），策略拒绝者被剔除；
      - `disallowFreeAuth`: 若请求元数据标记禁止免费凭证，Codex free 凭证被剔除。
-5. **Cooldown / Unavailable 过滤**:
+5. **Availability / Cooldown / Unauthorized 过滤**:
    - 在 `availableAuthsForRouteModel` / `availableAuthsForRouteModelAcrossPriorities` 中遍历剩余候选：
-     - 调用 `isAuthBlockedForModel(candidate, checkModel, now)` 检查 `auth.Unavailable`、`auth.Quota.Exceeded`（含配额耗尽冷却）、以及 `auth.ModelStates` 中的模型级冷却。
-     - 凡处于冷却期（`nextRetryAfter.After(now)`）或处于不可用状态的凭证均被过滤出可用集。
+     - 调用 `isAuthBlockedForModel(candidate, checkModel, now)` 检查凭据健康状态；
+     - `candidate.Disabled` / `StatusDisabled`: 显式禁用或状态禁用被排除；
+     - `hasUnauthorizedAuthFailure(auth)`: 凭证发生未授权 / 401 故障时直接判定阻断（`blockReasonOther`）；
+     - `expired access token`: Access Token 过期者被阻断；
+     - `auth.Quota.Exceeded` / `auth.Unavailable`: 凭证级配额耗尽冷却或不可用状态被排除；
+     - `auth.ModelStates`: 模型级冷却（`nextRetryAfter.After(now)`）；
      - 若全部候选均处于冷却，则返回 `modelCooldownError`；若全部因 401 失败，则返回 `TerminalAuthError`。
 6. **Round-Attempted / Tried 过滤**:
    - `_, used := tried[candidate.ID]`: 在同一请求执行轮次（round）中，前次尝试失败的凭证会被记录进 `tried` 集合并在后续候选生成中剔除，防止在同一轮中重复选择同一个失败凭证。
@@ -48,7 +50,7 @@
    - 剩余可用凭证按 `authPriority(candidate)` 进行分桶（Priority Bucketing）。
    - 在未开启跨优先级调度时，仅最高 Priority 桶的候选被保留并交付 Scheduler。
 
-**结论**: Scheduler 前严格过滤 Provider、Model、Disabled、Cooldown、Unauthorized、Tried 以及（默认模式下的）低 Priority。任何 Scheduler 无法看到已被上述规则排除的凭证。
+**结论**: Scheduler 前会过滤 Provider、Model、Disabled、Eligibility/Policy、Unauthorized、Cooldown、Tried，以及默认模式下的低 Priority。任何 Scheduler 无法看到已被上述规则排除的凭证。
 
 ---
 
@@ -150,7 +152,7 @@ CPA 的行为在两个层次上进行了确定性防护：
    hasDelegate := resp.DelegateBuiltin != ""
 
    if !hasAuthID && !hasDelegate {
-       return pluginapi.SchedulerPickResponse{}, false, "missing decision"
+       return pluginapi.SchedulerPickResponse{}, false, "missing auth id or delegate"
    }
 
    if hasAuthID {
@@ -196,7 +198,8 @@ Host normalization gives Auth.ID precedence over DelegateBuiltin:
 在 CPA 源码中深度检索 `pinned_auth_id`（`cliproxyexecutor.PinnedAuthMetadataKey`），其实际处理逻辑如下：
 
 1. **在哪里消费？**:
-   - `conductor_selection.go:pickNextLegacy` 与 `pickNextMixedLegacy`（以及 `scheduler.go#pickSingleWithStrategy, pickMixedWithStrategy`）:
+   - **Metadata 读取**: `conductor_execution.go:pinnedAuthIDFromMetadata(opts.Metadata)` 从请求元数据中解析目标 ID。
+   - **Plugin Scheduler 存在 / Legacy 路径**: `conductor_selection.go:pickNextLegacy` 与 `pickNextMixedLegacy`：
      ```go
      pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
      ...
@@ -208,12 +211,13 @@ Host normalization gives Auth.ID precedence over DelegateBuiltin:
          ...
      }
      ```
-   - `scheduler.go`:
+   - **无 Plugin Scheduler / Host Fast Path 路径**: `authScheduler.pickSingle` / `pickMixed` 走向 `pickSingleWithStrategy` / `pickMixedWithStrategy`，并在 `scheduler.go:scheduledAuthPredicate` 中独立执行 Fencing：
      ```go
-     predicate := scheduledAuthPredicate(eligibility, tried, pinnedAuthID, ...)
+     if pinnedAuthID != "" && entry.auth.ID != pinnedAuthID {
+         return false
+     }
      ```
-   - `conductor_selection.go:closestCooldownWaitWithAttempted` 与 `retryAllowed`:
-     用于在重试轮次中计算冷却时间与是否允许重试。
+   - **重试与冷却判定**: `conductor_selection.go:closestCooldownWaitWithAttempted` 与 `retryAllowed` 持续接收同一 `pinnedAuthID` 计算重试资格与等待时间。
    - `conductor_home.go`: Home 调度模式下的约束参数。
 2. **是否绕过 Normal Candidate Generation？**:
    - **绝不绕过！** 源码表明，`pinnedAuthID` 只是作为循环中的一条过滤条件（`if candidate.ID != pinnedAuthID { continue }`）。
@@ -232,8 +236,13 @@ Host normalization gives Auth.ID precedence over DelegateBuiltin:
    - **结论**: 表现为严格的 **Fail-Closed（故障闭锁）**，绝不会静默降级或改选其它凭证。
 4. **Retry 时是否保持 Pin？**:
    - **保持 Pin**。`opts.Metadata` 中的 `pinned_auth_id` 在多次尝试与重试轮次间保持不变。
-   - 在第一级重试（同轮次 `executeMixedOnce` 内）：因为该凭证已被置入 `tried[auth.ID]`，下一个循环中由于 `candidate.ID != pinnedAuthID` 且 `tried` 已命中该凭证，导致可用集立即变空，第一轮重试直接终止；
-   - 在第二级重试（跨轮次冷却重试）：若错误属于可重试冷却，且 `retryAllowed` 判定允许重试，等待冷却结束后进入下一个 attempt 轮次，此时 `tried` 重新初始化，系统会**再次且仅尝试该 pinned 凭证**。
+   - **同一 retry round 内**:
+     - 所有其它 credentials 因 `candidate.ID != pinnedAuthID` 被过滤；
+     - 唯一 pinned credential 如果已在 `tried` 中，则因 tried filter 被过滤；
+     - 因此候选集变为空，不会静默改选其它 credential（严格 Fail-Closed）。
+   - **跨 retry round**:
+     - 若错误属于可重试冷却并允许开启新的 retry round，新的 `tried` 集重新开始；
+     - 但 `pinned_auth_id` 仍保留，因此系统仍只允许再次尝试同一个 pinned credential。
 
 ---
 

@@ -43,9 +43,9 @@
       "id": "phase2-02b-v7-3-3-pinned-auth-source",
       "artifactId": "current-bundled-v7-3-3",
       "evidenceKind": "source",
-      "evidenceReference": "sdk/cliproxy/auth/conductor_selection.go#pinnedAuthIDFromMetadata,pickNextLegacy,pickNextMixedLegacy,retryAllowed,closestCooldownWaitWithAttempted",
+      "evidenceReference": "sdk/cliproxy/auth/conductor_execution.go#pinnedAuthIDFromMetadata; sdk/cliproxy/auth/conductor_selection.go#pickNextLegacy,pickNextMixedLegacy,retryAllowed,closestCooldownWaitWithAttempted; sdk/cliproxy/auth/scheduler.go#pickSingleWithStrategy,pickMixedWithStrategy,scheduledAuthPredicate",
       "limitations": [
-        "pinned_auth_id is read from request metadata and applied during candidate generation so every non-matching Auth.ID is excluded before scheduler/selector selection. The pinned credential still must pass disabled, eligibility/policy, provider, model, tried and cooldown/availability checks. Retry-round eligibility and cooldown waiting continue to receive the same pinned Auth.ID, preserving fail-closed fencing."
+        "pinned_auth_id is read from request metadata and enforced on both selection paths: the legacy/plugin-scheduler candidate loop excludes every non-matching Auth.ID, while the host authScheduler fast path applies the same fencing through scheduledAuthPredicate. The pinned credential must still satisfy disabled, eligibility/policy, provider/model compatibility, tried and availability/cooldown checks. Retry-round eligibility and cooldown waiting continue to receive the same pinned Auth.ID."
       ]
     },
     {
@@ -115,9 +115,9 @@
       "id": "phase2-02b-v7-3-8-pinned-auth-source",
       "artifactId": "candidate-release-v7-3-8",
       "evidenceKind": "source",
-      "evidenceReference": "sdk/cliproxy/auth/conductor_selection.go#pinnedAuthIDFromMetadata,pickNextLegacy,pickNextMixedLegacy,retryAllowed,closestCooldownWaitWithAttempted; sdk/cliproxy/auth/scheduler.go#pickSingleWithStrategy,pickMixedWithStrategy,scheduledAuthPredicate",
+      "evidenceReference": "sdk/cliproxy/auth/conductor_execution.go#pinnedAuthIDFromMetadata; sdk/cliproxy/auth/conductor_selection.go#pickNextLegacy,pickNextMixedLegacy,retryAllowed,closestCooldownWaitWithAttempted; sdk/cliproxy/auth/scheduler.go#pickSingleWithStrategy,pickMixedWithStrategy,scheduledAuthPredicate",
       "limitations": [
-        "Plugin Scheduler path is fenced during legacy candidate generation; scheduler fast-path independently applies pinnedAuthID through scheduledAuthPredicate. The pinned credential still must pass disabled, eligibility/policy, provider, model, tried and cooldown/availability checks. Retry-round eligibility and cooldown waiting continue to receive the same pinned Auth.ID, preserving fail-closed fencing."
+        "pinned_auth_id is read from request metadata and enforced on both selection paths: the legacy/plugin-scheduler candidate loop excludes every non-matching Auth.ID, while the host authScheduler fast path applies the same fencing through scheduledAuthPredicate. The pinned credential must still satisfy disabled, eligibility/policy, provider/model compatibility, tried and availability/cooldown checks. Retry-round eligibility and cooldown waiting continue to receive the same pinned Auth.ID."
       ]
     },
     {
