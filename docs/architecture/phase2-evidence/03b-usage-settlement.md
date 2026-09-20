@@ -70,7 +70,7 @@
 | `ResponseHeaders` | `http.Header` | 上游响应头镜像快照 | 存在 | 存在 |
 
 - **`Source` 字段语义与解析算法**：
-  `UsageRecord.Source` 并非简单对应凭证的来源分类枚举（`auth.AuthSourceKind()`）。在普通 Executor 执行路径中，由 `helps.resolveUsageSource(auth, apiKey)` 解析来源标识，优先级为 Vertex `project_id`/`project` $\to$ `auth.AccountInfo()` $\to$ `email` $\to$ `api_key` $\to$ 请求上下文 API-key；特殊 producer（例如 Home usage 路径）才会直接填充 `auth.AuthSourceKind()`。
+  `UsageRecord.Source` 并非简单对应凭证的来源分类枚举（`auth.AuthSourceKind()`）。在普通 Executor 执行路径中，由 `helps.resolveUsageSource(auth, apiKey)` 解析来源标识，优先级为 Vertex `project_id`/`project` $\to$ `auth.AccountInfo()` $\to$ `email` $\to$ `api_key` $\to$ 请求上下文 API-key；特殊 producer（例如 Home unauthorized 路径 `sdk/cliproxy/auth/home_result.go:Manager.reportHomeUnauthorized`）才会直接填充 `auth.AuthSourceKind()`。
 - **`ServiceTier` 暴露边界**：
   在面向插件公开的 `pluginapi.UsageRecord` 结构体中，`ServiceTier` 仅承载客户端请求所声明的 service tier（`usage.ServiceTierFromContext(ctx)`）。上游实际返回的响应层级 `ResponseServiceTier` 虽存在于内部记录中，但并未暴露给 UsagePlugin。
 
@@ -83,13 +83,23 @@
 
 ### 3. Usage 的发布层级（Publish Granularity）与版本差异
 - **v7.3.3 实现机制**：
-  - 源码证据：`router-for-me/CLIProxyAPI@v7.3.3:internal/runtime/executor/helps/usage_helpers.go` 中的 `NewExecutorUsageReporter`、`UsageReporter.publishWithOutcome` 和 `UsageReporter.publishRecord`。
-  - 机制：在每个 Executor 每次调用（`Execute` 或 `ExecuteStream`）入口处创建独立的 `UsageReporter` 实例；请求结束时直接调用 `publishWithOutcome`，通过内部 `r.once.Do` 调用 `r.publishRecord` 投递到全局 `usage.PublishRecord`。
+  - 源码证据：`router-for-me/CLIProxyAPI@v7.3.3:internal/runtime/executor/helps/usage_helpers.go` 中的 `NewExecutorUsageReporter`、`UsageReporter.publishWithOutcome`、`UsageReporter.publishRecord`、`UsageReporter.PublishAdditionalModel`、`UsageReporter.buildAdditionalModelRecord` 以及 `internal/runtime/executor/codex_executor_request.go` 中的 `PublishAdditionalModel` 调用点。
+  - 机制：在每个 Executor 每次调用（`Execute` 或 `ExecuteStream`）入口处创建独立的 `UsageReporter` 实例；主 attempt 结果通过 `publishWithOutcome` 进入内部 `r.once.Do`，经由 `r.publishRecord` 投递；而辅助模型消耗则通过 `PublishAdditionalModel` 绕过 `r.once.Do` 直接调用 `r.publishRecord`。
   - **重要版本定论**：`publishAttemptRecord` 在 **v7.3.3 中并不存在**。v7.3.3 通过 Executor 作用域的独立 Reporter 实例隐式实现了 attempt 级别的单独发布。
 - **v7.3.8 演进机制**：
-  - 源码证据：`router-for-me/CLIProxyAPI@v7.3.8:internal/runtime/executor/helps/usage_helpers.go` 中的 `UsageReporter.publishAttemptRecord`。
-  - 机制：v7.3.8 显式重构提取了 `publishAttemptRecord` helper 方法，在其内部调用 `publishRecord` 并触发 `warnModelSubstitution` 警告，从架构上显式确立了“单次上游 attempt 级别发布”的契约。
-- **共性结论**：两版中**均以 upstream-attempt 为单位直接发布**，不存在将多次 attempt 聚合为单一逻辑请求记录的中央聚合器。
+  - 源码证据：`router-for-me/CLIProxyAPI@v7.3.8:internal/runtime/executor/helps/usage_helpers.go` 中的 `UsageReporter.publishAttemptRecord`、`UsageReporter.PublishAdditionalModel` 以及 `internal/runtime/executor/codex_executor_request.go`。
+  - 机制：v7.3.8 显式重构提取了 `publishAttemptRecord` helper 方法，在其内部调用 `publishRecord` 并触发 `warnModelSubstitution` 警告，主 attempt outcome 严格走此路径；而 `PublishAdditionalModel` 依然绕过 `r.once.Do` 与 `publishAttemptRecord` 直接投递 `publishRecord`。
+- **发布类别与 Cardinality 结论**：
+  `UsageReporter` 存在两类发布渠道，因此发布并非全局单记录语义：
+  1. **主结果发布（Primary attempt outcome）**：`Publish` / `PublishFailure` / `PublishFailureWithDetail` / `EnsurePublished` 互斥受 `r.once.Do` 约束，同一 reporter 实例的主结果至多发布一条（one primary outcome record at most）；
+  2. **副模型/侧模型发布（Additional-model usage）**：`PublishAdditionalModel` 绕过 `r.once.Do` 直接 `publishRecord`。例如 `internal/runtime/executor/codex_executor_request.go` 生产调用点中，在主请求 `reporter.EnsurePublished(ctx)` 发布 primary 记录后，若存在 side-model 工具调用（如图像生成 `codexImageGenerationToolModel`），会通过 `reporter.PublishAdditionalModel(ctx, ..., detail)` 额外发布 side-model usage record。
+- **共性结论**：两版中的主 usage outcome 都以 executor/upstream attempt 为作用域发布；但完整 usage record 数量并不严格等于 attempt 数，因为同一个 UsageReporter 还可以通过 `PublishAdditionalModel` 额外发布 side-model usage record。其表达模型为：
+  ```text
+  one upstream attempt
+  ├─ one primary outcome record at most
+  └─ zero or more additional-model records
+  ```
+  单个 UsageReporter 内部的 `r.once.Do` 仅约束主 attempt outcome 的 `Publish` / `PublishFailure` / `EnsurePublished` 竞争关系；`PublishAdditionalModel` 直接调用 `publishRecord`，不受该 once 控制。
 
 ### 4. Retry / Fallback 多 Attempt 时的行为与事实调用链
 - **事实链推导**：
@@ -97,16 +107,18 @@
   logical request
     → conductor attempt A
         → executor A creates UsageReporter A
-        → failed attempt publishes failure usage via reporter A
+        → failed attempt publishes failure primary usage via reporter A
+        → (optional) reporter A publishes additional-model usage
     → conductor attempt B
         → executor B creates UsageReporter B
-        → successful attempt publishes usage via reporter B
+        → successful attempt publishes primary usage via reporter B
+        → (optional) reporter B publishes additional-model usage
   ```
 - **结论**：
-  1. **每个失败的 attempt 均可能发出 usage**：当 attempt 发生错误返回时，Executor 的 `defer reporter.TrackFailure(ctx, &err)` 会触发 `PublishFailure`，向队列发送一条 `Failed: true` 的 `Record`（未观测到 usage 的普通失败其 Token 计数通常为 0；流式请求若在失败前已观测到部分 usage，则可能携带已观测的部分 token detail）。
-  2. **最终成功会再次发出 usage**：Conductor（`sdk/cliproxy/auth/conductor_execution.go:Manager.executeMixedOnce`）重试或 fallback 到后继可用凭证并执行成功后，新 Executor 实例的 Reporter 会发出一条 `Failed: false` 的 `Record`（包含真实的 Token Detail）。
-  3. **单个逻辑请求可映射到多个 usage callbacks**：一个 logical request 可以经历多个 executor attempts；每个实际进入 executor 并创建独立 UsageReporter 的 attempt 都可能产生独立 usage callback。例如当三次 executor attempt 均到达创建 reporter 并执行的阶段（如 Attempt 1 失败，Attempt 2 失败，Attempt 3 成功），UsagePlugin 最多可观测到 3 个独立的 `HandleUsage` 回调（2 条失败记录 + 1 条成功记录）。由于缺乏 RequestID/AttemptID，插件无法从原生数据中辨别它们属于同一次客户端调用。
-  4. **`once.Do` 的局部作用域**：单个 `UsageReporter` 内部的 `r.once.Do` 仅限制**该 reporter 实例**的发布次数；重试过程生成了多个 reporter 实例，因此不会阻止跨 attempt 的多次 usage 发布。
+  1. **每个失败的 attempt 均可能发出 usage**：当 attempt 发生错误返回时，Executor 的 `defer reporter.TrackFailure(ctx, &err)` 会触发 `PublishFailure`，向队列发送一条 `Failed: true` 的 primary `Record`（未观测到 usage 的普通失败其 Token 计数通常为 0；流式请求若在失败前已观测到部分 usage，则可能携带已观测的部分 token detail）。
+  2. **最终成功会再次发出 usage**：Conductor（`sdk/cliproxy/auth/conductor_execution.go:Manager.executeMixedOnce`）重试或 fallback 到后继可用凭证并执行成功后，新 Executor 实例的 Reporter 会发出一条 `Failed: false` 的 primary `Record`（包含真实的 Token Detail）。
+  3. **单个逻辑请求可映射到多个 usage callbacks 且无固定上限**：一个 logical request 可以经历多个 executor attempts；每个实际进入 executor 并创建独立 UsageReporter 的 attempt 都可以产生一条 primary attempt outcome 记录；此外，每个 attempt 还可能通过 `PublishAdditionalModel` 发出额外的 side-model records。因此 callback cardinality can exceed the number of executor attempts（例如 3 次 attempts 会产生最多 3 条 primary outcome records 加上其发射的所有 additional-model records，总 callbacks 不存在固定上限）。由于缺乏 RequestID/AttemptID，插件无法从原生数据中辨别它们属于同一次客户端调用。
+  4. **`once.Do` 的真实作用域**：单个 `UsageReporter` 内部的 `r.once.Do` 仅约束主 attempt outcome 的 `Publish` / `PublishFailure` / `EnsurePublished` 竞争关系；`PublishAdditionalModel` 直接调用 `publishRecord`，不受该 once 控制；重试过程生成了多个 reporter 实例，因此更不会阻止跨 attempt 的多次 usage 发布。
 
 ### 5. Stream 场景行为（Success / Cancel / Disconnect）
 - **结论**：面向 UsagePlugin 的 token observation 与 cancellation 语义在两版间保持基本一致；v7.3.8 额外增加了 response-model observation 与 substitution warning：
@@ -128,14 +140,19 @@
 - 源码证据：
   - `router-for-me/CLIProxyAPI@v7.3.3:sdk/api/handlers/handlers_execution.go (executeWithPluginExecutor) & sdk/api/handlers/handlers_stream.go (streamWithPluginExecutor) & sdk/api/handlers/handlers_plugin_executor_usage.go (parsePluginExecutorResponseUsage)`
   - `router-for-me/CLIProxyAPI@v7.3.8:sdk/api/handlers/handlers_execution.go (executeWithPluginExecutor) & sdk/api/handlers/handlers_stream.go (streamWithPluginExecutor) & sdk/api/handlers/handlers_plugin_executor_usage.go (parsePluginExecutorResponseUsage)`
-- 当请求被路由到 Plugin Executor 时，Handler 同样参与 Usage 管道分发：
+- 当请求被路由到 Plugin Executor 时，Handler 参与 Usage 管道分发的细化行为如下：
+  - **`InternalSource` 触发条件**：只有顶层非内部来源请求（`if !execOptions.InternalSource { reporter = helps.NewUsageReporter(...) }`）才会创建 handler 级 `UsageReporter`；若 `execOptions.InternalSource == true`，则 `reporter == nil`，外层 handler 不会产生 reporter usage。
   - **非流式调用链（Non-stream）**：
     `executeWithPluginExecutor` $\to$ `NewUsageReporter` $\to$ `host.ExecutePluginExecutor` $\to$ `parsePluginExecutorResponseUsage` $\to$ `reporter.Publish` $\to$ `reporter.EnsurePublished`
     在非流式调用中，直接从 plugin executor 返回的 payload 中通过 `parsePluginExecutorResponseUsage` 解析 token 消耗并发布。
-  - **流式调用链（Stream）**：
-    `streamWithPluginExecutor` $\to$ `NewUsageReporter` $\to$ `host.ExecutePluginExecutorStream` $\to$ `StreamUsageBuffer` $\to$ `Publish / PublishFailure` $\to$ `EnsurePublished`
-    流式传输期间通过 `StreamUsageBuffer` 收集 token，并在结束或失败时由 defer 中的 `Publish` / `PublishFailure` 派发；若流中未解析出 token，由 `EnsurePublished` 兜底保底上报。
-  - **嵌套执行追踪**：两版中均通过 `nestedTracker.hasNestedExecution()` 避免递归内部调用重复产生 usage 记录。
+  - **流式成功分支（Stream Success）**：
+    `streamWithPluginExecutor` $\to$ `NewUsageReporter` $\to$ `host.ExecutePluginExecutorStream` $\to$ `StreamUsageBuffer` $\to$ `Publish` $\to$ `reporter.EnsurePublished`
+    流式传输正常结束时由 `StreamUsageBuffer.Publish` 发布已解析的 token 详情；若流中未解析出 token，则由 `reporter.EnsurePublished` 发出 zero-token 成功保底记录（若 `Publish` 已发射主记录，则 once 已被消耗，`EnsurePublished` 静默跳过）。
+  - **流式失败/取消分支（Stream Failure / Cancel）**：
+    `streamWithPluginExecutor` $\to$ `StreamUsageBuffer.PublishFailure` $\to$ `reporter.PublishFailureWithDetail`（携带已捕获的部分 partial tokens 与失败元数据）；
+    若 buffer 没有 detail，或在 stream 建立阶段发生错误（如 `ExecutePluginExecutorStream` 返回 error 或 stream 为 nil），则直接调用 `reporter.PublishFailure`。
+    **注意：`EnsurePublished` 绝不出现在失败路径中**，因为其仅在 success 分支中被调用。
+  - **嵌套执行抑制（Nested Execution Suppression）**：两版中均通过 `!nestedTracker.hasNestedExecution()` 检查，当检测到嵌套执行时抑制外层 handler 级 usage 发布，以避免内层执行已产生 usage 时造成重复记录；这仅用于避免特定外层重复发布，并不等同于分布式事务级的 exactly-once 记账。
 
 ### 8. 重复与回放（Duplicate / Replay）与 Exactly-Once 契约
 - **结论**：**完全属于 Best-Effort Observation Callback，绝对无 Exactly-Once 契约（Unsupported）**。

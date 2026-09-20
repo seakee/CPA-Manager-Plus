@@ -13,9 +13,9 @@
       "id": "phase2-03b-current-usage-attempt-dispatch",
       "artifactId": "current-bundled-v7-3-3",
       "evidenceKind": "source",
-      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:sdk/cliproxy/auth/conductor_execution.go (Manager.executeMixedOnce) & internal/runtime/executor/helps/usage_helpers.go (NewExecutorUsageReporter, UsageReporter.TrackFailure, UsageReporter.PublishFailure, UsageReporter.publishWithOutcome, UsageReporter.publishRecord, UsageReporter.EnsurePublished, resolveUsageSource, NewUsageReporter)",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:sdk/cliproxy/auth/conductor_execution.go (Manager.executeMixedOnce) & internal/runtime/executor/helps/usage_helpers.go (NewExecutorUsageReporter, UsageReporter.TrackFailure, UsageReporter.PublishFailure, UsageReporter.publishWithOutcome, UsageReporter.publishRecord, UsageReporter.EnsurePublished, resolveUsageSource, NewUsageReporter, UsageReporter.PublishAdditionalModel, UsageReporter.buildAdditionalModelRecord) & internal/runtime/executor/codex_executor_request.go (PublishAdditionalModel) & sdk/cliproxy/auth/home_result.go (Manager.reportHomeUnauthorized)",
       "limitations": [
-        "v7.3.3 instantiates a new UsageReporter per executor attempt in conductor retry loops and dispatches via publishWithOutcome; a logical request can span multiple executor attempts, and each executor attempt that creates its own UsageReporter can emit an independent usage callback without attempt correlation keys. publishAttemptRecord does not exist in v7.3.3."
+        "v7.3.3 creates independent UsageReporters across executor attempts. r.once limits the reporter's primary outcome publication, but PublishAdditionalModel bypasses r.once and can emit additional side-model records. Therefore a logical request may produce multiple callbacks across attempts and more callbacks than the number of attempts. publishAttemptRecord does not exist in v7.3.3."
       ]
     },
     {
@@ -76,9 +76,9 @@
       "id": "phase2-03b-candidate-usage-attempt-dispatch",
       "artifactId": "candidate-release-v7-3-8",
       "evidenceKind": "source",
-      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:sdk/cliproxy/auth/conductor_execution.go (Manager.executeMixedOnce) & internal/runtime/executor/helps/usage_helpers.go (NewExecutorUsageReporter, UsageReporter.TrackFailure, UsageReporter.publishWithOutcome, UsageReporter.publishAttemptRecord, UsageReporter.publishRecord, UsageReporter.EnsurePublished, UsageReporter.warnModelSubstitution, resolveUsageSource, NewUsageReporter)",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:sdk/cliproxy/auth/conductor_execution.go (Manager.executeMixedOnce) & internal/runtime/executor/helps/usage_helpers.go (NewExecutorUsageReporter, UsageReporter.TrackFailure, UsageReporter.publishWithOutcome, UsageReporter.publishAttemptRecord, UsageReporter.publishRecord, UsageReporter.EnsurePublished, UsageReporter.warnModelSubstitution, resolveUsageSource, NewUsageReporter, UsageReporter.PublishAdditionalModel, UsageReporter.buildAdditionalModelRecord) & internal/runtime/executor/codex_executor_request.go (PublishAdditionalModel) & sdk/cliproxy/auth/home_result.go (Manager.reportHomeUnauthorized)",
       "limitations": [
-        "v7.3.8 invokes executors repeatedly across retry attempts in conductor execution, creating separate UsageReporters and dispatching via publishAttemptRecord; a logical request can span multiple executor attempts, and each executor attempt that creates its own UsageReporter can emit an independent usage callback without attempt correlation keys."
+        "v7.3.8 creates independent UsageReporters across retry/fallback attempts and routes the primary attempt outcome through publishAttemptRecord. PublishAdditionalModel still bypasses r.once/publishAttemptRecord and can emit additional side-model usage records, so total callback cardinality is not strictly one per attempt."
       ]
     },
     {
@@ -240,7 +240,7 @@
         "phase2-03b-current-usage-record-structure"
       ],
       "limitations": [
-        "In v7.3.3, conductor execution invokes executors across retry/fallback attempts; a logical request can span multiple executor attempts, and each executor attempt that creates its own UsageReporter can emit an independent usage callback without attempt correlation keys."
+        "In v7.3.3, conductor execution invokes executors across retry/fallback attempts; a logical request can span multiple executor attempts, and each executor attempt that creates its own UsageReporter can emit an independent usage callback without attempt correlation keys. Primary attempt callbacks are attempt-scoped; additional-model records can increase callback count beyond attempt count."
       ]
     },
     {
@@ -282,7 +282,7 @@
         "phase2-03b-current-usage-record-structure"
       ],
       "limitations": [
-        "Plugin Executor requests participate in the usage pipeline through handler-level UsageReporter instances. Non-stream responses parse usage from the plugin executor payload; streaming responses use StreamUsageBuffer and fall back to EnsurePublished when no usage is observed."
+        "Top-level non-InternalSource Plugin Executor requests participate in the handler-level usage pipeline. Successful streams use StreamUsageBuffer plus EnsurePublished fallback when no primary success usage was emitted; failed or canceled streams use PublishFailure / PublishFailureWithDetail instead. Nested executions may suppress the outer handler-level usage publication."
       ]
     },
     {
@@ -509,7 +509,7 @@
         "phase2-03b-candidate-usage-record-structure"
       ],
       "limitations": [
-        "In v7.3.8, conductor retry/fallback loops invoke executors across attempts with independent UsageReporters emitting via publishAttemptRecord; a logical request can span multiple executor attempts, and each executor attempt that creates its own UsageReporter can emit an independent usage callback without attempt correlation keys."
+        "In v7.3.8, conductor retry/fallback loops invoke executors across attempts with independent UsageReporters emitting via publishAttemptRecord; a logical request can span multiple executor attempts, and each executor attempt that creates its own UsageReporter can emit an independent usage callback without attempt correlation keys. Primary attempt callbacks are attempt-scoped; additional-model records can increase callback count beyond attempt count."
       ]
     },
     {
@@ -551,7 +551,7 @@
         "phase2-03b-candidate-usage-record-structure"
       ],
       "limitations": [
-        "Plugin Executor requests participate in the usage pipeline through handler-level UsageReporter instances. Non-stream responses parse usage from the plugin executor payload; streaming responses use StreamUsageBuffer and fall back to EnsurePublished when no usage is observed."
+        "Top-level non-InternalSource Plugin Executor requests participate in the handler-level usage pipeline. Successful streams use StreamUsageBuffer plus EnsurePublished fallback when no primary success usage was emitted; failed or canceled streams use PublishFailure / PublishFailureWithDetail instead. Nested executions may suppress the outer handler-level usage publication."
       ]
     },
     {

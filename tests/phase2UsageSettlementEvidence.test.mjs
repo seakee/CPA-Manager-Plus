@@ -73,6 +73,14 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
     expect(candidateAttemptAnchor.evidenceReference).toContain('publishAttemptRecord');
     expect(candidateAttemptAnchor.evidenceReference).toContain('resolveUsageSource');
     expect(candidateAttemptAnchor.evidenceReference).toContain('NewUsageReporter');
+
+    for (const anchor of [currentAttemptAnchor, candidateAttemptAnchor]) {
+      expect(anchor.evidenceReference).toContain('PublishAdditionalModel');
+      expect(anchor.evidenceReference).toContain('buildAdditionalModelRecord');
+      expect(anchor.evidenceReference).toContain('codex_executor_request.go');
+      expect(anchor.evidenceReference).toContain('home_result.go');
+      expect(anchor.evidenceReference).toContain('reportHomeUnauthorized');
+    }
   });
 
   it('enforces anti-regression guards against fake unit evidence and requires source chains for retry', () => {
@@ -204,8 +212,12 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
     expect(candidateRetry.status).toBe('partial');
     expect(currentRetry.limitations[0]).toContain('a logical request can span multiple executor attempts');
     expect(currentRetry.limitations[0]).toContain('independent usage callback');
+    expect(currentRetry.limitations[0]).toContain('Primary attempt callbacks are attempt-scoped');
+    expect(currentRetry.limitations[0]).toContain('additional-model records can increase callback count beyond attempt count');
     expect(candidateRetry.limitations[0]).toContain('a logical request can span multiple executor attempts');
     expect(candidateRetry.limitations[0]).toContain('independent usage callback');
+    expect(candidateRetry.limitations[0]).toContain('Primary attempt callbacks are attempt-scoped');
+    expect(candidateRetry.limitations[0]).toContain('additional-model records can increase callback count beyond attempt count');
 
     const currentExactCorrelation = records.get('phase2-03b-current-exact-request-correlation');
     const candidateExactCorrelation = records.get('phase2-03b-candidate-exact-request-correlation');
@@ -245,6 +257,15 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
       expect(anchor.evidenceReference).toContain('executeWithPluginExecutor');
       expect(anchor.evidenceReference).toContain('streamWithPluginExecutor');
       expect(anchor.evidenceReference).toContain('parsePluginExecutorResponseUsage');
+    }
+
+    for (const record of [currentPluginExec, candidatePluginExec]) {
+      expect(record.limitations[0]).toContain('Top-level');
+      expect(record.limitations[0]).toContain('InternalSource');
+      expect(record.limitations[0]).toContain('Successful');
+      expect(record.limitations[0]).toContain('EnsurePublished');
+      expect(record.limitations[0]).toContain('PublishFailure');
+      expect(record.limitations[0]).toContain('Nested');
     }
   });
 
@@ -351,6 +372,19 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
     expect(docContent).toContain('ResponseServiceTier');
     expect(docContent).not.toContain('凭证来源类型（`auth.AuthSourceKind()`）');
     expect(docContent).not.toContain('客户端请求或响应的服务层级');
+
+    // Primary and additional-model cardinality anti-regression
+    expect(docContent).toContain('PublishAdditionalModel');
+    expect(docContent).toContain('primary');
+    expect(docContent).toContain('additional-model');
+    expect(docContent).toContain('PublishFailureWithDetail');
+    expect(docContent).toContain('EnsurePublished');
+    expect(docContent).toContain('InternalSource');
+    expect(docContent).toContain('callback cardinality can exceed');
+
+    expect(docContent).not.toContain('仅限制该 reporter 实例的发布次数');
+    expect(docContent).not.toContain('最多可观测到 3 个独立的 `HandleUsage` 回调');
+    expect(docContent).not.toMatch(/Publish \/ PublishFailure.*EnsurePublished/);
   });
 
   it('strictly ensures no hardcoded machine or developer paths exist in evidence files', () => {
