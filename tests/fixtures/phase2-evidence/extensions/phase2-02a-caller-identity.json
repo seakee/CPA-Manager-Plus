@@ -16,8 +16,8 @@
       "evidenceKind": "unit",
       "evidenceReference": "sdk/cliproxy/auth/selector_lcp_test.go#TestSessionAffinitySelectorLCPCallerScopeIsolation",
       "limitations": [
-        "Proves different callers are strictly partitioned by caller_scope in session affinity.",
-        "Does not define product-level entity or authorization policy."
+        "Demonstrates caller_scope participation in LCP/session-affinity partitioning: the tested distinct caller scopes do not reuse the same LCP binding for the shared-prompt scenario.",
+        "Does not define an authorization boundary or hash uniqueness guarantee."
       ]
     },
     {
@@ -84,7 +84,8 @@
       "evidenceKind": "unit",
       "evidenceReference": "sdk/cliproxy/auth/selector_lcp_test.go#TestSessionAffinitySelectorLCPCallerScopeIsolation",
       "limitations": [
-        "Candidate v7.3.8 retains session affinity caller_scope partition behavior."
+        "Candidate v7.3.8 preserves the same tested LCP/session-affinity partition behavior.",
+        "This evidence does not establish an authorization boundary or hash uniqueness guarantee."
       ]
     },
     {
@@ -353,7 +354,7 @@
       ],
       "limitations": [
         "External CPA runtime version and auth configuration are unnegotiated.",
-        "Cannot be promoted beyond unknown/partial."
+        "Must remain unknown until runtime/version/plugin capability negotiation provides direct evidence."
       ]
     },
     {

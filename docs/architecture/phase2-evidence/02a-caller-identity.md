@@ -31,18 +31,18 @@ This evidence slice proves the exact semantics, visibility, lifecycle stability,
    CPA derives `caller_scope = hex(sha256("cli-proxy-api:caller-scope:v1\x00" + strings.TrimSpace(userApiKey)))`.
    - **Properties**: Deterministic, domain-separated, whitespace-normalized, non-plaintext one-way hash.
    - **Stability**: Multiple requests from the same caller (identical key) produce identical 64-character hex strings across the entire runtime lifecycle.
-   - **Isolation**: Distinct callers produce distinct cryptographic hashes, participating in CPA's session affinity partitioning.
+   - **Partitioning / Scope**: `caller_scope` is deterministically derived from the caller principal and is used as an input to session-affinity partitioning. The two tested distinct principals produced distinct caller_scope values. No uniqueness guarantee beyond SHA-256's normal collision-resistance properties is claimed.
    - **Absence**: Missing if no access provider establishes an authenticated principal, if authentication fails/rejects, or prior to `accessAuthMiddleware` execution (`request_received`).
 3. **Raw Secret Exposure Boundary**:
    - **HTTP Header Cloning Pipeline**: `sdk/api/handlers/handlers_context.go#headersFromContext` clones inbound HTTP headers from the Gin context, and `sdk/api/handlers/model_execution.go#modelExecutionHeaders` forwards them into `opts.Headers`.
    - **RequestInterceptor (before-auth & after-auth)**: **Exposed**. Receives `opts.Headers` / `req.Headers` containing raw inbound `Authorization` / `X-Api-Key` headers.
-   - **Scheduler (`SchedulerPickRequest`)**: **Exposed via Headers**. Receives `SchedulerPickRequest.Options.Headers` containing raw headers; however, `SchedulerPickRequest.Options.Metadata` contains only sanitized `caller_scope`.
-   - **Terminal `RequestCompletion`**: **Redacted**. Struct lacks any `Headers` field; `Metadata` contains only `caller_scope`.
+   - **Scheduler (`SchedulerPickRequest`)**: **Exposed via Headers**. Raw inbound credentials remain exposed through `Options.Headers`. `Options.Metadata` carries `caller_scope` plus other execution metadata, but does not receive the built-in raw `userApiKey` through the normal `requestExecutionMetadata` path.
+   - **Terminal `RequestCompletion`**: **Redacted**. RequestCompletion has no request `Headers` field. `Metadata` preserves `caller_scope` plus other execution metadata; the normal metadata construction path does not copy the built-in raw `userApiKey` into this map.
    - **`UsagePlugin` (`pluginapi.UsageRecord`)**: **Exposed**. `APIKeyFromContext` in `internal/runtime/executor/helps/usage_helpers.go` retrieves `ginCtx["userApiKey"]`, placing the raw API key into `UsageRecord.APIKey`.
 4. **Targeted Identity Semantics Parity Between v7.3.3 and v7.3.8**:
    The identity middleware, access providers, `CallerScope` derivation algorithm, `APIKeyFromContext` extraction, and metadata sanitization logic are identical in behavior between CPA v7.3.3 and v7.3.8. (Unrelated changes in v7.3.8 `usage_helpers.go` cover model substitution warnings and stream response model buffer fields, leaving caller identity propagation unchanged).
 5. **External Boundary**:
-   An unnegotiated external runtime must remain `unknown` / `partial` and cannot inherit embedded observations.
+   An unnegotiated External runtime must remain `unknown` until runtime/version/plugin capability negotiation provides direct evidence, and cannot inherit embedded observations.
 
 ---
 
@@ -156,6 +156,7 @@ func requestCallerScope(ginCtx *gin.Context) string {
 - **Case Sensitivity**: The hash is case-sensitive (e.g. `CallerScope("sk-abc") != CallerScope("SK-ABC")`).
 - **Domain Separation**: The fixed prefix `"cli-proxy-api:caller-scope:v1\x00"` provides a caller-scope-specific input domain, separating caller_scope hashes from other SHA-256 applications in CPA. It does not alter SHA-256's underlying collision resistance.
 - **One-way / Non-plaintext**: 64-character lowercase hex string. Does not reveal plaintext key contents or length directly.
+- **Security Limitation (Low-Entropy Principals)**: `caller_scope` is non-plaintext, but it should not be treated as anonymization. If a `FrontendAuthProvider` emits a low-entropy or guessable `Principal` (e.g. usernames or sequential tenant IDs), an observer who knows the domain prefix `"cli-proxy-api:caller-scope:v1\x00"` can test candidate principals offline by hashing them. Built-in `config_access` usually hashes high-entropy client secret credentials, but CPA does not enforce entropy on plugin-defined principals.
 
 ### 4.3 Isolation & Limitations
 
@@ -330,5 +331,5 @@ A targeted comparison between v7.3.3 (`7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b`
 For `external-unnegotiated`:
 - CPA version is `null`, `versionKnown` is `false`, and plugin availability is `unknown`.
 - Plugin contract is `null`.
-- Per the Phase2-01 contract, capability records for External cannot exceed `unknown` or `partial`.
+- Per the Phase2-01 contract, capability records for External must remain `unknown` until runtime/version/plugin capability negotiation provides direct evidence.
 - External runtimes cannot inherit Embedded observations without live version and capability negotiation.

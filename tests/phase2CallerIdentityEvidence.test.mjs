@@ -82,7 +82,7 @@ describe('Phase2-02A caller identity and scope evidence', () => {
     );
   });
 
-  it('proves caller_scope partitions distinct callers and isolates their identity', () => {
+  it('checks caller-dependent scope derivation and tested partition behavior', () => {
     const callerA = 'sk-alpha-tenant-111';
     const callerB = 'sk-beta-tenant-222';
 
@@ -320,6 +320,46 @@ describe('Phase2-02A caller identity and scope evidence', () => {
 
     expect(docSource).toContain('RequestAfterAuthInterceptRequest.Metadata');
     expect(docSource).toContain('execOpts.Metadata');
+
+    // Anti-regression: Metadata is not claimed to be "only caller_scope"
+    expect(docSource).not.toContain(
+      'SchedulerPickRequest.Options.Metadata contains only sanitized `caller_scope`'
+    );
+    expect(docSource).not.toContain(
+      'SchedulerPickRequest.Options.Metadata contains only'
+    );
+    expect(docSource).not.toContain('`Metadata` contains only `caller_scope`');
+    expect(docSource).not.toContain('Metadata contains only caller_scope');
+    expect(docSource).toContain('other execution metadata');
+    expect(docSource).toContain('RequestCompletion has no');
+
+    // Anti-regression: hash uniqueness and isolation anchor boundaries
+    expect(docSource).not.toContain(
+      'Distinct callers produce distinct cryptographic hashes'
+    );
+    expect(docSource).toContain('collision-resistance');
+
+    const curIsolationAnchor = anchorMap.get('phase2-02a-caller-scope-isolation-unit-current');
+    const candIsolationAnchor = anchorMap.get('phase2-02a-caller-scope-isolation-unit-candidate');
+    for (const anchor of [curIsolationAnchor, candIsolationAnchor]) {
+      const lim = anchor.limitations.join(' ');
+      expect(lim).not.toContain('strictly partitioned');
+      expect(lim).not.toContain('globally unique');
+      expect(lim).not.toContain('guaranteed unique');
+    }
+
+    // Anti-regression: low-entropy Principal limitation documentation
+    expect(docSource).toContain('Low-Entropy Principals');
+    expect(docSource).toContain('should not be treated as anonymization');
+
+    // Anti-regression: External records and docs remain strictly unknown
+    expect(docSource).not.toContain('unknown / partial');
+    const externalScope = raw.records.find(
+      (r) => r.id === 'phase2-02a-external-caller-scope-derivation'
+    );
+    expect(externalScope).toBeDefined();
+    expect(externalScope.limitations.join(' ')).not.toContain('unknown/partial');
+    expect(externalScope.limitations.join(' ')).toMatch(/remain unknown|must remain unknown/i);
 
     const callerScopeRecord = raw.records.find(
       (r) => r.id === 'phase2-02a-current-caller-scope-derivation'
