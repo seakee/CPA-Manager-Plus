@@ -24,10 +24,10 @@
       "id": "phase2-02a-secret-header-exposure-source-current",
       "artifactId": "current-bundled-v7-3-3",
       "evidenceKind": "source",
-      "evidenceReference": "sdk/api/handlers/model_execution.go#modelExecutionHeaders",
+      "evidenceReference": "sdk/api/handlers/model_execution.go#modelExecutionHeaders;sdk/cliproxy/auth/conductor_selection.go#schedulerOptions",
       "limitations": [
-        "Clones inbound request headers via handlers_context.go#headersFromContext and passes them into opts.Headers.",
-        "Proves raw inbound Authorization and API key headers are passed unredacted to request interceptors and scheduler options."
+        "modelExecutionHeaders clones inbound HTTP headers into executor Options.Headers. schedulerOptions subsequently clones Options.Headers into SchedulerPickRequest.Options.Headers, so raw inbound Authorization / X-Api-Key / X-Goog-Api-Key values remain visible to scheduler plugins.",
+        "RequestInterceptor exposure is independently confirmed by release black-box observation; Scheduler options exposure is established by source chain only."
       ]
     },
     {
@@ -44,10 +44,10 @@
       "id": "phase2-02a-usage-api-key-exposure-source-current",
       "artifactId": "current-bundled-v7-3-3",
       "evidenceKind": "source",
-      "evidenceReference": "internal/runtime/executor/helps/usage_helpers.go#APIKeyFromContext",
+      "evidenceReference": "internal/runtime/executor/helps/usage_helpers.go#APIKeyFromContext,NewUsageReporter,UsageReporter.buildRecordForModel;internal/pluginhost/adapters_usage_translation.go#usageAdapter.HandleUsage",
       "limitations": [
-        "Proves raw userApiKey is extracted from context and propagated into usage.Record.APIKey and UsageRecord.APIKey.",
-        "Shows built-in config access leaves raw secret exposed to usage plugins."
+        "APIKeyFromContext reads ginCtx[\"userApiKey\"], NewUsageReporter stores that value in reporter.apiKey, and UsageReporter.buildRecordForModel copies it into usage.Record.APIKey.",
+        "usageAdapter.HandleUsage translates usage.Record.APIKey into pluginapi.UsageRecord.APIKey, exposing raw client credentials to usage accounting plugins under built-in config access. Established by source evidence only."
       ]
     },
     {
@@ -91,9 +91,10 @@
       "id": "phase2-02a-secret-header-exposure-source-candidate",
       "artifactId": "candidate-release-v7-3-8",
       "evidenceKind": "source",
-      "evidenceReference": "sdk/api/handlers/model_execution.go#modelExecutionHeaders",
+      "evidenceReference": "sdk/api/handlers/model_execution.go#modelExecutionHeaders;sdk/cliproxy/auth/conductor_selection.go#schedulerOptions",
       "limitations": [
-        "Candidate v7.3.8 retains exact same modelExecutionHeaders logic cloning inbound headers into opts.Headers."
+        "Candidate v7.3.8 retains exact same modelExecutionHeaders and schedulerOptions logic cloning inbound headers into Options.Headers and SchedulerPickRequest.Options.Headers.",
+        "RequestInterceptor exposure is independently confirmed by release black-box observation; Scheduler options exposure is established by source chain only."
       ]
     },
     {
@@ -110,9 +111,10 @@
       "id": "phase2-02a-usage-api-key-exposure-source-candidate",
       "artifactId": "candidate-release-v7-3-8",
       "evidenceKind": "source",
-      "evidenceReference": "internal/runtime/executor/helps/usage_helpers.go#APIKeyFromContext",
+      "evidenceReference": "internal/runtime/executor/helps/usage_helpers.go#APIKeyFromContext,NewUsageReporter,UsageReporter.buildRecordForModel;internal/pluginhost/adapters_usage_translation.go#usageAdapter.HandleUsage",
       "limitations": [
-        "Candidate v7.3.8 retains raw APIKey propagation into usage records."
+        "Candidate v7.3.8 retains exact same APIKeyFromContext, NewUsageReporter, UsageReporter.buildRecordForModel, and usageAdapter.HandleUsage propagation chain.",
+        "Raw client credential propagation into UsageRecord.APIKey is established by source evidence only."
       ]
     },
     {

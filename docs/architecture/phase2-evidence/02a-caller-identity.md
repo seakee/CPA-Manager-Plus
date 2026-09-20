@@ -263,12 +263,18 @@ The identical test battery was executed against candidate release binary CPA v7.
 Certain downstream lifecycle stages cannot be safely triggered in an isolated black-box harness without mocking upstream provider networks. These boundaries are explicitly backed by upstream source analysis rather than claimed as black-box observations:
 
 1. **Scheduler Header Exposure**:
-   - `sdk/api/handlers/handlers_context.go#headersFromContext` clones inbound HTTP headers into `opts.Headers`.
-   - `internal/runtime/executor/conductor_selection.go#schedulerOptions` copies `opts.Headers` directly into `SchedulerPickRequest.Options.Headers`.
-   - *Source conclusion*: Raw client auth headers are accessible to scheduler plugins in `Options.Headers`.
+   - `sdk/api/handlers/handlers_context.go#headersFromContext` clones inbound HTTP request headers.
+   - `sdk/api/handlers/model_execution.go#modelExecutionHeaders` propagates them into `opts.Headers`.
+   - `sdk/cliproxy/auth/conductor_selection.go#schedulerOptions` copies `opts.Headers` directly into `SchedulerPickRequest.Options.Headers`.
+   - *Source conclusion*: Raw client authentication headers are source-proven to be visible to scheduler plugins through `SchedulerPickRequest.Options.Headers`.
+   - *Black-box boundary note*: This scheduler boundary was not directly exercised by the release observer black-box harness.
 2. **UsageRecord.APIKey Exposure**:
-   - `internal/runtime/executor/helps/usage_helpers.go#APIKeyFromContext` retrieves `ginCtx["userApiKey"]` and assigns it to `usage.Record.APIKey` and `pluginapi.UsageRecord.APIKey`.
-   - *Source conclusion*: Under built-in `config_access`, `userApiKey` is the raw client credential, leaving raw secrets visible to usage accounting plugins.
+   - `internal/runtime/executor/helps/usage_helpers.go#APIKeyFromContext` reads `ginCtx["userApiKey"]`.
+   - `NewUsageReporter` stores that value in `reporter.apiKey`.
+   - `UsageReporter.buildRecordForModel` copies it into `usage.Record.APIKey`.
+   - `internal/pluginhost/adapters_usage_translation.go#usageAdapter.HandleUsage` translates `usage.Record.APIKey` into `pluginapi.UsageRecord.APIKey`.
+   - *Source conclusion*: Under built-in `config_access`, Principal equals the raw client credential. Therefore the raw downstream credential is propagated through `UsageReporter` into plugin-facing `UsageRecord.APIKey`.
+   - *Black-box boundary note*: UsageRecord.APIKey exposure is source-supported only; it was not directly exercised by the release black-box observer.
 
 ---
 

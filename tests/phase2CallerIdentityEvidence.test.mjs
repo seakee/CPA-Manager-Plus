@@ -252,6 +252,56 @@ describe('Phase2-02A caller identity and scope evidence', () => {
         expect(lim).not.toMatch(/\/Users\/|^file:\/\//);
       }
     }
+
+    // 8. Synthetic test fragment markers exist in test file and match fixture references
+    const testSource = readFileSync(
+      path.join(repoRoot, 'tests/phase2CallerIdentityEvidence.test.mjs'),
+      'utf8'
+    );
+    expect(testSource).toContain('// v7-3-3-caller-identity-contract');
+    expect(testSource).toContain('// v7-3-8-caller-identity-contract');
+    expect(testSource).toContain('// external-unnegotiated-boundary');
+
+    expect(
+      anchorMap.get('phase2-02a-cpamp-contract-unit-current').evidenceReference
+    ).toContain('#v7-3-3-caller-identity-contract');
+    expect(
+      anchorMap.get('phase2-02a-cpamp-contract-unit-candidate').evidenceReference
+    ).toContain('#v7-3-8-caller-identity-contract');
+    expect(
+      anchorMap.get('phase2-02a-external-identity-unit').evidenceReference
+    ).toContain('#external-unnegotiated-boundary');
+
+    // 9. Scheduler header exposure provenance points to valid chain and avoids illegal path
+    const currentHeaderSource = anchorMap.get(
+      'phase2-02a-secret-header-exposure-source-current'
+    );
+    const candidateHeaderSource = anchorMap.get(
+      'phase2-02a-secret-header-exposure-source-candidate'
+    );
+    for (const anchor of [currentHeaderSource, candidateHeaderSource]) {
+      expect(anchor.evidenceReference).toContain('modelExecutionHeaders');
+      expect(anchor.evidenceReference).toContain(
+        'sdk/cliproxy/auth/conductor_selection.go#schedulerOptions'
+      );
+      expect(anchor.evidenceReference).not.toContain(
+        'internal/runtime/executor/conductor_selection.go'
+      );
+    }
+
+    // 10. UsageRecord.APIKey exposure provenance traces full 4-step propagation chain
+    const currentUsageSource = anchorMap.get(
+      'phase2-02a-usage-api-key-exposure-source-current'
+    );
+    const candidateUsageSource = anchorMap.get(
+      'phase2-02a-usage-api-key-exposure-source-candidate'
+    );
+    for (const anchor of [currentUsageSource, candidateUsageSource]) {
+      expect(anchor.evidenceReference).toContain('APIKeyFromContext');
+      expect(anchor.evidenceReference).toContain('NewUsageReporter');
+      expect(anchor.evidenceReference).toContain('buildRecordForModel');
+      expect(anchor.evidenceReference).toContain('usageAdapter.HandleUsage');
+    }
   });
 
   it('strictly separates raw principal, caller_scope, and display metadata', () => {
@@ -284,7 +334,9 @@ describe('Phase2-02A caller identity and scope evidence', () => {
   it('verifies v7.3.3 and v7.3.8 identity semantics parity', () => {
     const raw = JSON.parse(readFileSync(extensionPath, 'utf8'));
 
+    // v7-3-3-caller-identity-contract
     const currentRecords = raw.records.filter((r) => r.artifactId === 'current-bundled-v7-3-3');
+    // v7-3-8-caller-identity-contract
     const candidateRecords = raw.records.filter((r) => r.artifactId === 'candidate-release-v7-3-8');
 
     expect(currentRecords).toHaveLength(4);
@@ -304,6 +356,7 @@ describe('Phase2-02A caller identity and scope evidence', () => {
   });
 
   it('keeps External unnegotiated capability records unknown and unpromoted', () => {
+    // external-unnegotiated-boundary
     const raw = JSON.parse(readFileSync(extensionPath, 'utf8'));
     const externalRecords = raw.records.filter((r) => r.artifactId === 'external-unnegotiated');
 
