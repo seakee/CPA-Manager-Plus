@@ -255,15 +255,26 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
   it('classifies pre-request reservation and authoritative settlement primitives as unsupported', () => {
     const extension = loadExtension();
     const records = new Map(extension.records.map((r) => [r.id, r]));
+    const anchors = new Map(extension.anchors.map((a) => [a.id, a]));
 
     const currentReservation = records.get('phase2-03b-current-pre-request-reservation');
     const candidateReservation = records.get('phase2-03b-candidate-pre-request-reservation');
     expect(currentReservation.status).toBe('unsupported');
     expect(candidateReservation.status).toBe('unsupported');
     expect(currentReservation.limitations[0]).toContain('first-class quota reservation');
-    expect(currentReservation.limitations[0]).toContain('RequestInterceptor.Terminate');
+    expect(currentReservation.limitations[0]).toContain('RequestInterceptResponse.Terminate');
     expect(candidateReservation.limitations[0]).toContain('first-class quota reservation');
-    expect(candidateReservation.limitations[0]).toContain('RequestInterceptor.Terminate');
+    expect(candidateReservation.limitations[0]).toContain('RequestInterceptResponse.Terminate');
+
+    expect(currentReservation.limitations[0]).not.toContain('RequestInterceptor.Terminate');
+    expect(candidateReservation.limitations[0]).not.toContain('RequestInterceptor.Terminate');
+
+    const currentReservationAnchor = anchors.get('phase2-03b-current-reservation-settlement-absent');
+    const candidateReservationAnchor = anchors.get('phase2-03b-candidate-reservation-settlement-absent');
+    expect(currentReservationAnchor.evidenceReference).toContain('RequestInterceptResponse');
+    expect(candidateReservationAnchor.evidenceReference).toContain('RequestInterceptResponse');
+    expect(candidateReservationAnchor.evidenceReference).toContain('QuotaProvider');
+    expect(candidateReservationAnchor.evidenceReference).toContain('QuotaMetric');
 
     const currentSettlement = records.get('phase2-03b-current-authoritative-settlement');
     const candidateSettlement = records.get('phase2-03b-candidate-authoritative-settlement');
@@ -312,6 +323,14 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
 
     // Must forbid erroneous ../../tests/ pattern
     expect(docContent).not.toMatch(/\]\(\.\.\/\.\.\/tests\//);
+
+    // QuotaProvider management-plane boundary and WithoutCancel anti-regression
+    expect(docContent).toContain('QuotaProvider');
+    expect(docContent).toContain('FetchQuota');
+    expect(docContent).toContain('ResetQuota');
+    expect(docContent).not.toContain('静态只读查询');
+    expect(docContent).not.toContain('脱敏上下文');
+    expect(docContent).not.toContain('脱敏上报');
   });
 
   it('strictly ensures no hardcoded machine or developer paths exist in evidence files', () => {

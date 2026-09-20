@@ -58,9 +58,9 @@
       "id": "phase2-03b-current-reservation-settlement-absent",
       "artifactId": "current-bundled-v7-3-3",
       "evidenceKind": "source",
-      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:sdk/pluginapi/types.go (UsagePlugin, RequestInterceptor) & sdk/cliproxy/usage/",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:sdk/pluginapi/types.go (UsagePlugin, RequestInterceptor, RequestInterceptResponse, QuotaProvider) & sdk/cliproxy/usage/",
       "limitations": [
-        "Usage observation in v7.3.3 is emitted after an executor attempt produces an outcome. CPA does not expose a first-class quota reservation or transactional settlement primitive, though generic pre-request admission or rejection can still be implemented through RequestInterceptor.Terminate before upstream execution."
+        "Usage observation in v7.3.3 is emitted after an executor attempt produces an outcome. CPA does not expose a first-class quota reservation or transactional settlement primitive, though generic pre-request admission or rejection can still be implemented through RequestInterceptResponse.Terminate before upstream execution."
       ]
     },
     {
@@ -121,9 +121,9 @@
       "id": "phase2-03b-candidate-reservation-settlement-absent",
       "artifactId": "candidate-release-v7-3-8",
       "evidenceKind": "source",
-      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:sdk/pluginapi/types.go (UsagePlugin, QuotaMetric, RequestInterceptor) & sdk/cliproxy/usage/",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:sdk/pluginapi/types.go (UsagePlugin, RequestInterceptor, RequestInterceptResponse, QuotaProvider, QuotaMetric, QuotaFetchResponse) & sdk/cliproxy/usage/",
       "limitations": [
-        "Usage observation in v7.3.8 is emitted after an executor attempt produces an outcome. Management UI QuotaMetric does not introduce runtime reservation, and CPA does not expose a first-class quota reservation or transactional settlement primitive, though generic pre-request admission or rejection can still be implemented through RequestInterceptor.Terminate before upstream execution."
+        "Usage observation in v7.3.8 is emitted after an executor attempt produces an outcome. Management UI QuotaMetric does not introduce runtime reservation, and CPA does not expose a first-class quota reservation or transactional settlement primitive, though generic pre-request admission or rejection can still be implemented through RequestInterceptResponse.Terminate before upstream execution."
       ]
     },
     {
@@ -383,7 +383,7 @@
         "phase2-03b-current-reservation-settlement-absent"
       ],
       "limitations": [
-        "CPA v7.3.3 does not expose a first-class quota reservation / transactional admission primitive. Generic pre-request admission or rejection can still be implemented through RequestInterceptor.Terminate before upstream execution."
+        "CPA v7.3.3 does not expose a first-class quota reservation / transactional admission primitive. Generic pre-request admission or rejection can still be implemented through RequestInterceptResponse.Terminate before upstream execution."
       ]
     },
     {
@@ -652,7 +652,7 @@
         "phase2-03b-candidate-reservation-settlement-absent"
       ],
       "limitations": [
-        "CPA v7.3.8 does not expose a first-class quota reservation / transactional admission primitive. Generic pre-request admission or rejection can still be implemented through RequestInterceptor.Terminate before upstream execution."
+        "CPA v7.3.8 does not expose a first-class quota reservation / transactional admission primitive. Generic pre-request admission or rejection can still be implemented through RequestInterceptResponse.Terminate before upstream execution."
       ]
     },
     {
