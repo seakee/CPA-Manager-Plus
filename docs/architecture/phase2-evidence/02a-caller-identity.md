@@ -40,7 +40,7 @@ This evidence slice proves the exact semantics, visibility, lifecycle stability,
    - **Terminal `RequestCompletion`**: **Redacted**. RequestCompletion has no request `Headers` field. `Metadata` preserves `caller_scope` plus other execution metadata; the normal metadata construction path does not copy the built-in raw `userApiKey` into this map.
    - **`UsagePlugin` (`pluginapi.UsageRecord`)**: **Exposed**. `APIKeyFromContext` in `internal/runtime/executor/helps/usage_helpers.go` retrieves `ginCtx["userApiKey"]`, placing the raw API key into `UsageRecord.APIKey`.
 4. **Targeted Identity Semantics Parity Between v7.3.3 and v7.3.8**:
-   The identity middleware, access providers, `CallerScope` derivation algorithm, `APIKeyFromContext` extraction, and metadata sanitization logic are identical in behavior between CPA v7.3.3 and v7.3.8. (Unrelated changes in v7.3.8 `usage_helpers.go` cover model substitution warnings and stream response model buffer fields, leaving caller identity propagation unchanged).
+   The identity middleware, access providers, `CallerScope` derivation algorithm, `APIKeyFromContext` extraction, and metadata construction logic are identical in behavior between CPA v7.3.3 and v7.3.8. (Unrelated changes in v7.3.8 `usage_helpers.go` cover model substitution warnings and stream response model buffer fields, leaving caller identity propagation unchanged).
 5. **External Boundary**:
    An unnegotiated External runtime must remain `unknown` until runtime/version/plugin capability negotiation provides direct evidence, and cannot inherit embedded observations.
 
@@ -151,12 +151,12 @@ func requestCallerScope(ginCtx *gin.Context) string {
 
 ### 4.2 Stability & Cryptographic Properties
 
-- **Determinism**: For any given principal string $P$, `CallerScope(P)` is idempotent and invariant over time and across process restarts.
+- **Determinism**: For a given normalized principal string $P$, `CallerScope(P)` is deterministic and stable across repeated evaluations and process restarts.
 - **Normalization**: Leading and trailing ASCII whitespace is removed via `strings.TrimSpace(value)`.
 - **Case Sensitivity**: The hash is case-sensitive (e.g. `CallerScope("sk-abc") != CallerScope("SK-ABC")`).
 - **Domain Separation**: The fixed prefix `"cli-proxy-api:caller-scope:v1\x00"` provides a caller-scope-specific input domain, separating caller_scope hashes from other SHA-256 applications in CPA. It does not alter SHA-256's underlying collision resistance.
 - **One-way / Non-plaintext**: 64-character lowercase hex string. Does not reveal plaintext key contents or length directly.
-- **Security Limitation (Low-Entropy Principals)**: `caller_scope` is non-plaintext, but it should not be treated as anonymization. If a `FrontendAuthProvider` emits a low-entropy or guessable `Principal` (e.g. usernames or sequential tenant IDs), an observer who knows the domain prefix `"cli-proxy-api:caller-scope:v1\x00"` can test candidate principals offline by hashing them. Built-in `config_access` usually hashes high-entropy client secret credentials, but CPA does not enforce entropy on plugin-defined principals.
+- **Security Limitation (Low-Entropy Principals)**: `caller_scope` is non-plaintext, but it should not be treated as anonymization. CPA does not enforce entropy, length, or randomness requirements for either built-in `config_access` APIKeys or plugin-defined `FrontendAuthProvider` principals. If the underlying principal is low-entropy or guessable, an observer who knows the fixed domain prefix `"cli-proxy-api:caller-scope:v1\x00"` can test candidate values offline by hashing them and comparing the resulting `caller_scope`.
 
 ### 4.3 Isolation & Limitations
 
@@ -242,7 +242,7 @@ Official CPA v7.3.3 release binary was executed on port `8081`. The runtime even
 #### Case E: Terminal RequestCompletion Redaction
 - Terminal lifecycle hook `request.complete` observed runtime payload across all requests:
   - `Metadata["caller_scope"]`: Preserves the exact `caller_scope` derived during execution (`b3b1a4b6...` for Alpha, `0eb2fb39...` for Beta).
-  - Header Redaction: The `RequestCompletion` struct emitted by the runtime lacks any request headers field; neither raw `Authorization` nor any plain secret is present in the completion payload.
+  - Header Redaction: `RequestCompletion` exposes no request Headers field. For the tested request, the configured built-in client credential was not observed in `RequestCompletion.Metadata`; `caller_scope` remained present.
 
 ---
 
@@ -255,7 +255,7 @@ The identical test battery was executed against candidate release binary CPA v7.
 2. **Case B (Alpha Repeat)**: Emitted identical `caller_scope` `b3b1a4b6...`, confirming runtime stability in candidate v7.3.8.
 3. **Case C (Beta Isolation)**: Emitted `caller_scope` `0eb2fb39ffeac09dfadd792351df6e98ca2007e20e2015068111247fa9e2411c`, confirming multi-caller isolation in candidate v7.3.8.
 4. **Case D (Alternate Headers)**: Raw credentials propagated unredacted into `Headers["X-Api-Key"]` and `Headers["X-Goog-Api-Key"]`.
-5. **Case E (Terminal Redaction)**: `RequestCompletion` preserved `caller_scope` in `Metadata` and omitted all raw request headers and secrets.
+5. **Case E (Terminal Redaction)**: `RequestCompletion` preserved `caller_scope` in `Metadata` and exposed no request Headers field. The tested built-in client credential was not observed in `RequestCompletion.Metadata`.
 
 ---
 

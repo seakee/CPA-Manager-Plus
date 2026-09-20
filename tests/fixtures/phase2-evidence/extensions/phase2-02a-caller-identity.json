@@ -223,7 +223,8 @@
         "phase2-02a-v7-3-3-release-black-box"
       ],
       "limitations": [
-        "Raw API key is redacted from execution metadata and terminal RequestCompletion, confirmed by release binary black-box observation.",
+        "The normal requestExecutionMetadata path does not copy the built-in ginCtx[\"userApiKey\"] into execution metadata.",
+        "Release black-box observation confirmed that the tested built-in client credential was absent from RequestCompletion.Metadata and that RequestCompletion exposes no request Headers field.",
         "Raw API key is exposed in HTTP request headers to RequestInterceptor, confirmed by release binary black-box observation and modelExecutionHeaders source chain.",
         "Raw API key exposure to scheduler options and UsageRecord.APIKey is established by source evidence rather than black-box execution."
       ]
@@ -314,7 +315,8 @@
         "phase2-02a-v7-3-8-release-black-box"
       ],
       "limitations": [
-        "Raw API key is redacted from execution metadata and terminal RequestCompletion, confirmed by release binary black-box observation in candidate release.",
+        "Candidate v7.3.8 preserves the same normal metadata construction behavior: the built-in raw userApiKey is not copied into execution metadata.",
+        "Release black-box observation confirmed the tested credential was absent from RequestCompletion.Metadata and RequestCompletion exposes no request Headers field.",
         "Raw API key is exposed in HTTP request headers to RequestInterceptor, confirmed by release binary black-box observation and modelExecutionHeaders source chain.",
         "Raw API key exposure to scheduler options and UsageRecord.APIKey is established by source evidence rather than black-box execution."
       ]

@@ -351,6 +351,42 @@ describe('Phase2-02A caller identity and scope evidence', () => {
     // Anti-regression: low-entropy Principal limitation documentation
     expect(docSource).toContain('Low-Entropy Principals');
     expect(docSource).toContain('should not be treated as anonymization');
+    expect(docSource).not.toContain(
+      'Built-in `config_access` usually hashes high-entropy'
+    );
+    expect(docSource).toContain('does not enforce entropy');
+    expect(docSource).toContain('built-in `config_access`');
+    expect(docSource).toContain('FrontendAuthProvider');
+
+    // Anti-regression: CallerScope is not called idempotent
+    expect(docSource).not.toMatch(/CallerScope.*idempotent/i);
+    expect(docSource).toContain('deterministic');
+    expect(docSource).toContain('stable');
+
+    // Anti-regression: secret redaction overclaims eliminated
+    expect(docSource).not.toContain('any plain secret');
+    expect(docSource).not.toContain('all raw request headers and secrets');
+    expect(docSource).not.toContain('safe redaction');
+    expect(docSource).toContain('does not copy');
+
+    // Anti-regression: fixture secret-redaction boundary records
+    const curRedactionRecord = raw.records.find(
+      (r) => r.id === 'phase2-02a-current-caller-secret-redaction'
+    );
+    expect(curRedactionRecord).toBeDefined();
+    const curRedactionLim = curRedactionRecord.limitations.join(' ');
+    expect(curRedactionLim).not.toContain('Raw API key is redacted from execution metadata');
+    expect(curRedactionLim).toContain('does not copy');
+    expect(curRedactionLim).toContain('exposes no request Headers field');
+
+    const candRedactionRecord = raw.records.find(
+      (r) => r.id === 'phase2-02a-candidate-caller-secret-redaction'
+    );
+    expect(candRedactionRecord).toBeDefined();
+    const candRedactionLim = candRedactionRecord.limitations.join(' ');
+    expect(candRedactionLim).not.toContain('Raw API key is redacted from execution metadata');
+    expect(candRedactionLim).toContain('not copied');
+    expect(candRedactionLim).toContain('exposes no request Headers field');
 
     // Anti-regression: External records and docs remain strictly unknown
     expect(docSource).not.toContain('unknown / partial');
