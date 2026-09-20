@@ -60,6 +60,8 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
     const currentAttemptAnchor = currentAnchors.find((a) => a.id === 'phase2-03b-current-usage-attempt-dispatch');
     expect(currentAttemptAnchor.evidenceReference).toContain('publishWithOutcome');
     expect(currentAttemptAnchor.evidenceReference).toContain('publishRecord');
+    expect(currentAttemptAnchor.evidenceReference).toContain('resolveUsageSource');
+    expect(currentAttemptAnchor.evidenceReference).toContain('NewUsageReporter');
     expect(currentAttemptAnchor.limitations[0]).toContain('publishAttemptRecord does not exist in v7.3.3');
 
     for (const anchor of candidateAnchors) {
@@ -69,6 +71,8 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
 
     const candidateAttemptAnchor = candidateAnchors.find((a) => a.id === 'phase2-03b-candidate-usage-attempt-dispatch');
     expect(candidateAttemptAnchor.evidenceReference).toContain('publishAttemptRecord');
+    expect(candidateAttemptAnchor.evidenceReference).toContain('resolveUsageSource');
+    expect(candidateAttemptAnchor.evidenceReference).toContain('NewUsageReporter');
   });
 
   it('enforces anti-regression guards against fake unit evidence and requires source chains for retry', () => {
@@ -228,11 +232,20 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
   it('classifies plugin executor usage dispatch path as supported', () => {
     const extension = loadExtension();
     const records = new Map(extension.records.map((r) => [r.id, r]));
+    const anchors = new Map(extension.anchors.map((a) => [a.id, a]));
 
     const currentPluginExec = records.get('phase2-03b-current-plugin-executor-usage');
     const candidatePluginExec = records.get('phase2-03b-candidate-plugin-executor-usage');
     expect(currentPluginExec.status).toBe('supported');
     expect(candidatePluginExec.status).toBe('supported');
+
+    const currentPluginAnchor = anchors.get('phase2-03b-current-plugin-executor-usage-dispatch');
+    const candidatePluginAnchor = anchors.get('phase2-03b-candidate-plugin-executor-usage-dispatch');
+    for (const anchor of [currentPluginAnchor, candidatePluginAnchor]) {
+      expect(anchor.evidenceReference).toContain('executeWithPluginExecutor');
+      expect(anchor.evidenceReference).toContain('streamWithPluginExecutor');
+      expect(anchor.evidenceReference).toContain('parsePluginExecutorResponseUsage');
+    }
   });
 
   it('classifies UsagePlugin failure, panic fuse, and asynchronous queue resilience', () => {
@@ -331,6 +344,13 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
     expect(docContent).not.toContain('静态只读查询');
     expect(docContent).not.toContain('脱敏上下文');
     expect(docContent).not.toContain('脱敏上报');
+
+    // UsageRecord Source and ServiceTier semantics anti-regression
+    expect(docContent).toContain('resolveUsageSource');
+    expect(docContent).toContain('auth.AuthSourceKind()');
+    expect(docContent).toContain('ResponseServiceTier');
+    expect(docContent).not.toContain('凭证来源类型（`auth.AuthSourceKind()`）');
+    expect(docContent).not.toContain('客户端请求或响应的服务层级');
   });
 
   it('strictly ensures no hardcoded machine or developer paths exist in evidence files', () => {

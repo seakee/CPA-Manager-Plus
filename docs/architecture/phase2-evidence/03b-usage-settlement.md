@@ -57,9 +57,9 @@
 | `AuthID` | `string` | 选中的凭证标识（`auth.ID`） | 存在 | 存在 |
 | `AuthIndex` | `string` | 凭证索引编号（`auth.Index` / `auth.EnsureIndex()`） | 存在 | 存在 |
 | `AuthType` | `string` | 凭证类型（`auth.AuthKind()`） | 存在 | 存在 |
-| `Source` | `string` | 凭证来源类型（`auth.AuthSourceKind()`） | 存在 | 存在 |
+| `Source` | `string` | Usage 来源标识；普通 Executor 由 resolveUsageSource 从 project/account/email/API-key 等信息解析，特殊 producer 可能具有不同填充语义 | 存在 | 存在 |
 | `ReasoningEffort` | `string` | 思考强度（low, medium, high 等） | 存在 | 存在 |
-| `ServiceTier` | `string` | 客户端请求或响应的服务层级 | 存在 | 存在 |
+| `ServiceTier` | `string` | 客户端请求的 service tier | 存在 | 存在 |
 | `Generate` | `bool` | 是否请求生成（默认 true） | 存在 | 存在 |
 | `RequestedAt` | `time.Time` | 请求接收时间戳 | 存在 | 存在 |
 | `Latency` | `time.Duration` | 整个请求耗时 | 存在 | 存在 |
@@ -68,6 +68,11 @@
 | `Failure` | `UsageFailure` | 包含 `StatusCode int` 和 `Body string` | 存在 | 存在 |
 | `Detail` | `UsageDetail` | 包含 `InputTokens`, `OutputTokens`, `ReasoningTokens`, `CachedTokens`, `CacheReadTokens`, `CacheCreationTokens`, `TotalTokens int64` | 存在 | 存在 |
 | `ResponseHeaders` | `http.Header` | 上游响应头镜像快照 | 存在 | 存在 |
+
+- **`Source` 字段语义与解析算法**：
+  `UsageRecord.Source` 并非简单对应凭证的来源分类枚举（`auth.AuthSourceKind()`）。在普通 Executor 执行路径中，由 `helps.resolveUsageSource(auth, apiKey)` 解析来源标识，优先级为 Vertex `project_id`/`project` $\to$ `auth.AccountInfo()` $\to$ `email` $\to$ `api_key` $\to$ 请求上下文 API-key；特殊 producer（例如 Home usage 路径）才会直接填充 `auth.AuthSourceKind()`。
+- **`ServiceTier` 暴露边界**：
+  在面向插件公开的 `pluginapi.UsageRecord` 结构体中，`ServiceTier` 仅承载客户端请求所声明的 service tier（`usage.ServiceTierFromContext(ctx)`）。上游实际返回的响应层级 `ResponseServiceTier` 虽存在于内部记录中，但并未暴露给 UsagePlugin。
 
 ### 2. 是否包含 RequestID / TraceID / AttemptID / IdempotencyKey？
 - **结论**：**在 v7.3.3 与 v7.3.8 中均不存在（Absent）**。
@@ -121,9 +126,16 @@
 ### 7. Plugin Executor Usage 路径
 - **结论**：**两版中均受完整支持（Supported）**。
 - 源码证据：
-  - `router-for-me/CLIProxyAPI@v7.3.3:sdk/api/handlers/handlers_execution.go (ExecuteWithAuthManager)` 与 `handlers_stream.go`；
-  - `router-for-me/CLIProxyAPI@v7.3.8:sdk/api/handlers/handlers_execution.go` 与 `handlers_stream.go`。
-- 当请求被路由到 Plugin Executor 时，Handler 主动创建 `UsageReporter`，并在执行成功后调用 `parsePluginExecutorResponseUsage` 解析响应 payload 中的 token，随后调用 `reporter.Publish` 或在流式 defer 中调用 `EnsurePublished`。
+  - `router-for-me/CLIProxyAPI@v7.3.3:sdk/api/handlers/handlers_execution.go (executeWithPluginExecutor) & sdk/api/handlers/handlers_stream.go (streamWithPluginExecutor) & sdk/api/handlers/handlers_plugin_executor_usage.go (parsePluginExecutorResponseUsage)`
+  - `router-for-me/CLIProxyAPI@v7.3.8:sdk/api/handlers/handlers_execution.go (executeWithPluginExecutor) & sdk/api/handlers/handlers_stream.go (streamWithPluginExecutor) & sdk/api/handlers/handlers_plugin_executor_usage.go (parsePluginExecutorResponseUsage)`
+- 当请求被路由到 Plugin Executor 时，Handler 同样参与 Usage 管道分发：
+  - **非流式调用链（Non-stream）**：
+    `executeWithPluginExecutor` $\to$ `NewUsageReporter` $\to$ `host.ExecutePluginExecutor` $\to$ `parsePluginExecutorResponseUsage` $\to$ `reporter.Publish` $\to$ `reporter.EnsurePublished`
+    在非流式调用中，直接从 plugin executor 返回的 payload 中通过 `parsePluginExecutorResponseUsage` 解析 token 消耗并发布。
+  - **流式调用链（Stream）**：
+    `streamWithPluginExecutor` $\to$ `NewUsageReporter` $\to$ `host.ExecutePluginExecutorStream` $\to$ `StreamUsageBuffer` $\to$ `Publish / PublishFailure` $\to$ `EnsurePublished`
+    流式传输期间通过 `StreamUsageBuffer` 收集 token，并在结束或失败时由 defer 中的 `Publish` / `PublishFailure` 派发；若流中未解析出 token，由 `EnsurePublished` 兜底保底上报。
+  - **嵌套执行追踪**：两版中均通过 `nestedTracker.hasNestedExecution()` 避免递归内部调用重复产生 usage 记录。
 
 ### 8. 重复与回放（Duplicate / Replay）与 Exactly-Once 契约
 - **结论**：**完全属于 Best-Effort Observation Callback，绝对无 Exactly-Once 契约（Unsupported）**。

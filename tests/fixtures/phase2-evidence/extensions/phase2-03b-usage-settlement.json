@@ -13,7 +13,7 @@
       "id": "phase2-03b-current-usage-attempt-dispatch",
       "artifactId": "current-bundled-v7-3-3",
       "evidenceKind": "source",
-      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:sdk/cliproxy/auth/conductor_execution.go (Manager.executeMixedOnce) & internal/runtime/executor/helps/usage_helpers.go (NewExecutorUsageReporter, UsageReporter.TrackFailure, UsageReporter.PublishFailure, UsageReporter.publishWithOutcome, UsageReporter.publishRecord, UsageReporter.EnsurePublished)",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:sdk/cliproxy/auth/conductor_execution.go (Manager.executeMixedOnce) & internal/runtime/executor/helps/usage_helpers.go (NewExecutorUsageReporter, UsageReporter.TrackFailure, UsageReporter.PublishFailure, UsageReporter.publishWithOutcome, UsageReporter.publishRecord, UsageReporter.EnsurePublished, resolveUsageSource, NewUsageReporter)",
       "limitations": [
         "v7.3.3 instantiates a new UsageReporter per executor attempt in conductor retry loops and dispatches via publishWithOutcome; a logical request can span multiple executor attempts, and each executor attempt that creates its own UsageReporter can emit an independent usage callback without attempt correlation keys. publishAttemptRecord does not exist in v7.3.3."
       ]
@@ -31,7 +31,7 @@
       "id": "phase2-03b-current-plugin-executor-usage-dispatch",
       "artifactId": "current-bundled-v7-3-3",
       "evidenceKind": "source",
-      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:sdk/api/handlers/handlers_execution.go (ExecuteWithAuthManager) & sdk/api/handlers/handlers_stream.go",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.3:sdk/api/handlers/handlers_execution.go (executeWithPluginExecutor) & sdk/api/handlers/handlers_stream.go (streamWithPluginExecutor) & sdk/api/handlers/handlers_plugin_executor_usage.go (parsePluginExecutorResponseUsage)",
       "limitations": [
         "v7.3.3 routes requests to plugin executors and captures usage in handler-level UsageReporter when response payloads yield token breakdown."
       ]
@@ -76,7 +76,7 @@
       "id": "phase2-03b-candidate-usage-attempt-dispatch",
       "artifactId": "candidate-release-v7-3-8",
       "evidenceKind": "source",
-      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:sdk/cliproxy/auth/conductor_execution.go (Manager.executeMixedOnce) & internal/runtime/executor/helps/usage_helpers.go (NewExecutorUsageReporter, UsageReporter.TrackFailure, UsageReporter.publishWithOutcome, UsageReporter.publishAttemptRecord, UsageReporter.publishRecord, UsageReporter.EnsurePublished, UsageReporter.warnModelSubstitution)",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:sdk/cliproxy/auth/conductor_execution.go (Manager.executeMixedOnce) & internal/runtime/executor/helps/usage_helpers.go (NewExecutorUsageReporter, UsageReporter.TrackFailure, UsageReporter.publishWithOutcome, UsageReporter.publishAttemptRecord, UsageReporter.publishRecord, UsageReporter.EnsurePublished, UsageReporter.warnModelSubstitution, resolveUsageSource, NewUsageReporter)",
       "limitations": [
         "v7.3.8 invokes executors repeatedly across retry attempts in conductor execution, creating separate UsageReporters and dispatching via publishAttemptRecord; a logical request can span multiple executor attempts, and each executor attempt that creates its own UsageReporter can emit an independent usage callback without attempt correlation keys."
       ]
@@ -94,7 +94,7 @@
       "id": "phase2-03b-candidate-plugin-executor-usage-dispatch",
       "artifactId": "candidate-release-v7-3-8",
       "evidenceKind": "source",
-      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:sdk/api/handlers/handlers_execution.go & sdk/api/handlers/handlers_stream.go",
+      "evidenceReference": "router-for-me/CLIProxyAPI@v7.3.8:sdk/api/handlers/handlers_execution.go (executeWithPluginExecutor) & sdk/api/handlers/handlers_stream.go (streamWithPluginExecutor) & sdk/api/handlers/handlers_plugin_executor_usage.go (parsePluginExecutorResponseUsage)",
       "limitations": [
         "Plugin executor usage dispatch in v7.3.8 maintains parity with v7.3.3."
       ]
@@ -282,7 +282,7 @@
         "phase2-03b-current-usage-record-structure"
       ],
       "limitations": [
-        "Usage from requests routed through plugin executors in v7.3.3 is captured and dispatched to UsagePlugin when response usage can be parsed."
+        "Plugin Executor requests participate in the usage pipeline through handler-level UsageReporter instances. Non-stream responses parse usage from the plugin executor payload; streaming responses use StreamUsageBuffer and fall back to EnsurePublished when no usage is observed."
       ]
     },
     {
@@ -551,7 +551,7 @@
         "phase2-03b-candidate-usage-record-structure"
       ],
       "limitations": [
-        "Plugin executor usage dispatch in v7.3.8 maintains parity with v7.3.3."
+        "Plugin Executor requests participate in the usage pipeline through handler-level UsageReporter instances. Non-stream responses parse usage from the plugin executor payload; streaming responses use StreamUsageBuffer and fall back to EnsurePublished when no usage is observed."
       ]
     },
     {
