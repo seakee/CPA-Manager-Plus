@@ -1,0 +1,395 @@
+{
+  "anchors": [
+    {
+      "id": "phase2-02a-caller-scope-unit-current",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "unit",
+      "evidenceReference": "sdk/api/handlers/handlers_metadata_test.go#TestRequestExecutionMetadataIncludesHashedCallerScope",
+      "limitations": [
+        "Proves unit-level derivation of caller_scope from userApiKey into execution metadata in v7.3.3.",
+        "Does not prove lifecycle stages prior to client auth middleware execution."
+      ]
+    },
+    {
+      "id": "phase2-02a-caller-scope-isolation-unit-current",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "unit",
+      "evidenceReference": "sdk/cliproxy/auth/selector_lcp_test.go#TestSessionAffinitySelectorLCPCallerScopeIsolation",
+      "limitations": [
+        "Demonstrates caller_scope participation in LCP/session-affinity partitioning: the tested distinct caller scopes do not reuse the same LCP binding for the shared-prompt scenario.",
+        "Does not define an authorization boundary or hash uniqueness guarantee."
+      ]
+    },
+    {
+      "id": "phase2-02a-secret-header-exposure-source-current",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "source",
+      "evidenceReference": "sdk/api/handlers/model_execution.go#modelExecutionHeaders;sdk/cliproxy/auth/conductor_selection.go#schedulerOptions",
+      "limitations": [
+        "modelExecutionHeaders clones inbound HTTP headers into executor Options.Headers. schedulerOptions subsequently clones Options.Headers into SchedulerPickRequest.Options.Headers, so raw inbound Authorization / X-Api-Key / X-Goog-Api-Key values remain visible to scheduler plugins.",
+        "RequestInterceptor exposure is independently confirmed by release black-box observation; Scheduler options exposure is established by source chain only."
+      ]
+    },
+    {
+      "id": "phase2-02a-secret-header-exposure-unit-current",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "unit",
+      "evidenceReference": "sdk/api/handlers/handlers_interceptors_test.go#TestHandlerRequestInterceptorRewritesExecutorRequest",
+      "limitations": [
+        "Confirms ordinary inbound request headers are propagated into RequestInterceptor headers without implicit redaction.",
+        "Upstream test validates X-Original and X-Remove headers; raw authorization header exposure is established by source chain and release binary observation."
+      ]
+    },
+    {
+      "id": "phase2-02a-usage-api-key-exposure-source-current",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "source",
+      "evidenceReference": "internal/runtime/executor/helps/usage_helpers.go#APIKeyFromContext,NewUsageReporter,UsageReporter.buildRecordForModel;internal/pluginhost/adapters_usage_translation.go#usageAdapter.HandleUsage",
+      "limitations": [
+        "APIKeyFromContext reads ginCtx[\"userApiKey\"], NewUsageReporter stores that value in reporter.apiKey, and UsageReporter.buildRecordForModel copies it into usage.Record.APIKey.",
+        "usageAdapter.HandleUsage translates usage.Record.APIKey into pluginapi.UsageRecord.APIKey, exposing raw client credentials to usage accounting plugins under built-in config access. Established by source evidence only."
+      ]
+    },
+    {
+      "id": "phase2-02a-cpamp-contract-unit-current",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "unit",
+      "evidenceReference": "tests/phase2CallerIdentityEvidence.test.mjs#v7-3-3-caller-identity-contract",
+      "limitations": [
+        "CPAMP contract unit suite asserting deterministic caller_scope derivation, same-caller stability, two-caller isolation, and secret redaction properties."
+      ]
+    },
+    {
+      "id": "phase2-02a-v7-3-3-release-black-box",
+      "artifactId": "current-bundled-v7-3-3",
+      "evidenceKind": "black-box",
+      "evidenceReference": "docs/architecture/phase2-evidence/02a-caller-identity.md#v7-3-3-release-binary-black-box-observation",
+      "limitations": [
+        "Official release binary observation captures caller_scope through runtime RequestInterceptor and RequestCompletion hooks, proving same-principal caller_scope stability, observing distinct caller_scope values for the two tested distinct principals, and confirming raw header visibility at request interception.",
+        "Does not observe Scheduler headers or UsageRecord.APIKey in black-box runtime; those boundaries are established by source evidence."
+      ]
+    },
+    {
+      "id": "phase2-02a-caller-scope-unit-candidate",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "unit",
+      "evidenceReference": "sdk/api/handlers/handlers_metadata_test.go#TestRequestExecutionMetadataIncludesHashedCallerScope",
+      "limitations": [
+        "Candidate v7.3.8 retains exact same CallerScope derivation; fixture observation only, not a product upgrade."
+      ]
+    },
+    {
+      "id": "phase2-02a-caller-scope-isolation-unit-candidate",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "unit",
+      "evidenceReference": "sdk/cliproxy/auth/selector_lcp_test.go#TestSessionAffinitySelectorLCPCallerScopeIsolation",
+      "limitations": [
+        "Candidate v7.3.8 preserves the same tested LCP/session-affinity partition behavior.",
+        "This evidence does not establish an authorization boundary or hash uniqueness guarantee."
+      ]
+    },
+    {
+      "id": "phase2-02a-secret-header-exposure-source-candidate",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "source",
+      "evidenceReference": "sdk/api/handlers/model_execution.go#modelExecutionHeaders;sdk/cliproxy/auth/conductor_selection.go#schedulerOptions",
+      "limitations": [
+        "Candidate v7.3.8 retains exact same modelExecutionHeaders and schedulerOptions logic cloning inbound headers into Options.Headers and SchedulerPickRequest.Options.Headers.",
+        "RequestInterceptor exposure is independently confirmed by release black-box observation; Scheduler options exposure is established by source chain only."
+      ]
+    },
+    {
+      "id": "phase2-02a-secret-header-exposure-unit-candidate",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "unit",
+      "evidenceReference": "sdk/api/handlers/handlers_interceptors_test.go#TestHandlerRequestInterceptorRewritesExecutorRequest",
+      "limitations": [
+        "Confirms ordinary inbound request headers are propagated into RequestInterceptor headers without implicit redaction in candidate release.",
+        "Upstream test validates X-Original and X-Remove headers; raw authorization header exposure is established by source chain and release binary observation."
+      ]
+    },
+    {
+      "id": "phase2-02a-usage-api-key-exposure-source-candidate",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "source",
+      "evidenceReference": "internal/runtime/executor/helps/usage_helpers.go#APIKeyFromContext,NewUsageReporter,UsageReporter.buildRecordForModel;internal/pluginhost/adapters_usage_translation.go#usageAdapter.HandleUsage",
+      "limitations": [
+        "Candidate v7.3.8 retains exact same APIKeyFromContext, NewUsageReporter, UsageReporter.buildRecordForModel, and usageAdapter.HandleUsage propagation chain.",
+        "Raw client credential propagation into UsageRecord.APIKey is established by source evidence only."
+      ]
+    },
+    {
+      "id": "phase2-02a-cpamp-contract-unit-candidate",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "unit",
+      "evidenceReference": "tests/phase2CallerIdentityEvidence.test.mjs#v7-3-8-caller-identity-contract",
+      "limitations": [
+        "CPAMP contract unit suite asserting identical caller identity semantics in v7.3.8 candidate release."
+      ]
+    },
+    {
+      "id": "phase2-02a-v7-3-8-release-black-box",
+      "artifactId": "candidate-release-v7-3-8",
+      "evidenceKind": "black-box",
+      "evidenceReference": "docs/architecture/phase2-evidence/02a-caller-identity.md#v7-3-8-release-binary-black-box-observation",
+      "limitations": [
+        "Official release binary observation captures caller_scope through runtime RequestInterceptor and RequestCompletion hooks, proving same-principal caller_scope stability, observing distinct caller_scope values for the two tested distinct principals, and confirming raw header visibility at request interception.",
+        "Does not observe Scheduler headers or UsageRecord.APIKey in black-box runtime; those boundaries are established by source evidence."
+      ]
+    },
+    {
+      "id": "phase2-02a-external-identity-observation",
+      "artifactId": "external-unnegotiated",
+      "evidenceKind": "source",
+      "evidenceReference": "docs/architecture/phase2-evidence/02a-caller-identity.md#external-unnegotiated-boundary",
+      "limitations": [
+        "External instance runtime version, plugin presence, and auth configuration are unnegotiated; caller identity cannot be promoted to supported."
+      ]
+    },
+    {
+      "id": "phase2-02a-external-identity-unit",
+      "artifactId": "external-unnegotiated",
+      "evidenceKind": "unit",
+      "evidenceReference": "tests/phase2CallerIdentityEvidence.test.mjs#external-unnegotiated-boundary",
+      "limitations": [
+        "Validates that unnegotiated External capability records remain unknown."
+      ]
+    }
+  ],
+  "records": [
+    {
+      "id": "phase2-02a-current-caller-scope-derivation",
+      "capability": "caller_scope_derivation_and_stability",
+      "status": "supported",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {}
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source", "unit", "black-box"],
+      "evidenceRefs": [
+        "request-identity-metadata",
+        "phase2-02a-caller-scope-unit-current",
+        "phase2-02a-caller-scope-isolation-unit-current",
+        "phase2-02a-cpamp-contract-unit-current",
+        "phase2-02a-v7-3-3-release-black-box"
+      ],
+      "limitations": [
+        "Derived identity depends on an authenticated Principal being stored as userApiKey; it is absent when no access provider establishes such a principal.",
+        "Rotates when downstream client API key rotates.",
+        "Case-sensitive sha256 domain-separated hash of trimmed principal."
+      ]
+    },
+    {
+      "id": "phase2-02a-current-caller-lifecycle-visibility",
+      "capability": "caller_identity_lifecycle_visibility",
+      "status": "partial",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {}
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source", "unit", "black-box"],
+      "evidenceRefs": [
+        "client-access-auth",
+        "terminal-lifecycle-unit",
+        "phase2-02a-cpamp-contract-unit-current",
+        "phase2-02a-v7-3-3-release-black-box"
+      ],
+      "limitations": [
+        "caller_scope is visible in executor metadata, scheduler options, and RequestCompletion.",
+        "Absent at request_received stage before client auth middleware.",
+        "Absent from usage.Record and pluginapi.UsageRecord."
+      ]
+    },
+    {
+      "id": "phase2-02a-current-caller-secret-redaction",
+      "capability": "caller_secret_redaction_boundary",
+      "status": "partial",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {}
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source", "unit", "black-box"],
+      "evidenceRefs": [
+        "phase2-02a-usage-api-key-exposure-source-current",
+        "phase2-02a-secret-header-exposure-source-current",
+        "phase2-02a-secret-header-exposure-unit-current",
+        "phase2-02a-cpamp-contract-unit-current",
+        "phase2-02a-v7-3-3-release-black-box"
+      ],
+      "limitations": [
+        "The normal requestExecutionMetadata path does not copy the built-in ginCtx[\"userApiKey\"] into execution metadata.",
+        "Release black-box observation confirmed that the tested built-in client credential was absent from RequestCompletion.Metadata and that RequestCompletion exposes no request Headers field.",
+        "Raw API key is exposed in HTTP request headers to RequestInterceptor, confirmed by release binary black-box observation and modelExecutionHeaders source chain.",
+        "Raw API key exposure to scheduler options and UsageRecord.APIKey is established by source evidence rather than black-box execution."
+      ]
+    },
+    {
+      "id": "phase2-02a-current-frontend-auth-identity",
+      "capability": "frontend_auth_provider_identity",
+      "status": "partial",
+      "artifactId": "current-bundled-v7-3-3",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "frontend_auth_provider": true
+        }
+      },
+      "deploymentMode": "embedded",
+      "evidenceKind": ["source", "unit"],
+      "evidenceRefs": [
+        "frontend-auth-plugin-contract",
+        "phase2-02a-cpamp-contract-unit-current"
+      ],
+      "limitations": [
+        "FrontendAuthProvider produces plugin-defined principal string which becomes userApiKey and caller_scope input.",
+        "Does not enforce separation between credential and identity.",
+        "Semantics differ from built-in config access where principal is always raw secret."
+      ]
+    },
+    {
+      "id": "phase2-02a-candidate-caller-scope-derivation",
+      "capability": "caller_scope_derivation_and_stability",
+      "status": "supported",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {}
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "unit", "black-box"],
+      "evidenceRefs": [
+        "request-identity-metadata",
+        "phase2-02a-caller-scope-unit-candidate",
+        "phase2-02a-caller-scope-isolation-unit-candidate",
+        "phase2-02a-cpamp-contract-unit-candidate",
+        "phase2-02a-v7-3-8-release-black-box"
+      ],
+      "limitations": [
+        "Candidate fixture observation only; semantics identical to v7.3.3.",
+        "Does not upgrade product bundle."
+      ]
+    },
+    {
+      "id": "phase2-02a-candidate-caller-lifecycle-visibility",
+      "capability": "caller_identity_lifecycle_visibility",
+      "status": "partial",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {}
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "unit", "black-box"],
+      "evidenceRefs": [
+        "client-access-auth",
+        "terminal-lifecycle-unit",
+        "phase2-02a-cpamp-contract-unit-candidate",
+        "phase2-02a-v7-3-8-release-black-box"
+      ],
+      "limitations": [
+        "Candidate fixture preserves partial lifecycle visibility of caller identity."
+      ]
+    },
+    {
+      "id": "phase2-02a-candidate-caller-secret-redaction",
+      "capability": "caller_secret_redaction_boundary",
+      "status": "partial",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {}
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "unit", "black-box"],
+      "evidenceRefs": [
+        "phase2-02a-usage-api-key-exposure-source-candidate",
+        "phase2-02a-secret-header-exposure-source-candidate",
+        "phase2-02a-secret-header-exposure-unit-candidate",
+        "phase2-02a-cpamp-contract-unit-candidate",
+        "phase2-02a-v7-3-8-release-black-box"
+      ],
+      "limitations": [
+        "Candidate v7.3.8 preserves the same normal metadata construction behavior: the built-in raw userApiKey is not copied into execution metadata.",
+        "Release black-box observation confirmed the tested credential was absent from RequestCompletion.Metadata and RequestCompletion exposes no request Headers field.",
+        "Raw API key is exposed in HTTP request headers to RequestInterceptor, confirmed by release binary black-box observation and modelExecutionHeaders source chain.",
+        "Raw API key exposure to scheduler options and UsageRecord.APIKey is established by source evidence rather than black-box execution."
+      ]
+    },
+    {
+      "id": "phase2-02a-candidate-frontend-auth-identity",
+      "capability": "frontend_auth_provider_identity",
+      "status": "partial",
+      "artifactId": "candidate-release-v7-3-8",
+      "pluginContract": {
+        "schemaVersion": 6,
+        "config": {
+          "frontend_auth_provider": true
+        }
+      },
+      "deploymentMode": "release-artifact-fixture",
+      "evidenceKind": ["source", "unit"],
+      "evidenceRefs": [
+        "frontend-auth-plugin-contract",
+        "phase2-02a-cpamp-contract-unit-candidate"
+      ],
+      "limitations": [
+        "Candidate fixture preserves plugin-defined frontend auth semantics."
+      ]
+    },
+    {
+      "id": "phase2-02a-external-caller-scope-derivation",
+      "capability": "caller_scope_derivation_and_stability",
+      "status": "unknown",
+      "artifactId": "external-unnegotiated",
+      "pluginContract": null,
+      "deploymentMode": "external",
+      "evidenceKind": ["source", "unit"],
+      "evidenceRefs": [
+        "phase2-02a-external-identity-observation",
+        "phase2-02a-external-identity-unit"
+      ],
+      "limitations": [
+        "External CPA runtime version and auth configuration are unnegotiated.",
+        "Must remain unknown until runtime/version/plugin capability negotiation provides direct evidence."
+      ]
+    },
+    {
+      "id": "phase2-02a-external-caller-lifecycle-visibility",
+      "capability": "caller_identity_lifecycle_visibility",
+      "status": "unknown",
+      "artifactId": "external-unnegotiated",
+      "pluginContract": null,
+      "deploymentMode": "external",
+      "evidenceKind": ["source", "unit"],
+      "evidenceRefs": [
+        "external-runtime-observation-boundary",
+        "phase2-02a-external-identity-unit"
+      ],
+      "limitations": [
+        "External runtime lifecycle visibility cannot be asserted without runtime negotiation."
+      ]
+    },
+    {
+      "id": "phase2-02a-external-caller-secret-redaction",
+      "capability": "caller_secret_redaction_boundary",
+      "status": "unknown",
+      "artifactId": "external-unnegotiated",
+      "pluginContract": null,
+      "deploymentMode": "external",
+      "evidenceKind": ["source", "unit"],
+      "evidenceRefs": [
+        "external-runtime-observation-boundary",
+        "phase2-02a-external-identity-unit"
+      ],
+      "limitations": [
+        "External runtime secret redaction policies are unnegotiated."
+      ]
+    }
+  ]
+}
