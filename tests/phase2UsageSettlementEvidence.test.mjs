@@ -180,6 +180,8 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
     expect(candidateFailure.limitations[0]).toContain('Failed=true');
     expect(candidateFailure.limitations[0]).toContain('stream');
     expect(candidateFailure.limitations[0]).toContain('partial');
+    expect(currentFailure.evidenceRefs).toContain('phase2-03b-current-stream-usage-observation');
+    expect(candidateFailure.evidenceRefs).toContain('phase2-03b-candidate-stream-usage-observation');
 
     const currentCancel = records.get('phase2-03b-current-cancellation-reporting');
     const candidateCancel = records.get('phase2-03b-candidate-cancellation-reporting');
@@ -252,6 +254,8 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
     const candidatePluginExec = records.get('phase2-03b-candidate-plugin-executor-usage');
     expect(currentPluginExec.status).toBe('supported');
     expect(candidatePluginExec.status).toBe('supported');
+    expect(currentPluginExec.evidenceRefs).toContain('phase2-03b-current-stream-usage-observation');
+    expect(candidatePluginExec.evidenceRefs).toContain('phase2-03b-candidate-stream-usage-observation');
 
     const currentPluginAnchor = anchors.get('phase2-03b-current-plugin-executor-usage-dispatch');
     const candidatePluginAnchor = anchors.get('phase2-03b-candidate-plugin-executor-usage-dispatch');

@@ -194,6 +194,7 @@
       "evidenceKind": ["source"],
       "evidenceRefs": [
         "phase2-03b-current-usage-attempt-dispatch",
+        "phase2-03b-current-stream-usage-observation",
         "phase2-03b-current-usage-record-structure"
       ],
       "limitations": [
@@ -279,6 +280,7 @@
       "evidenceKind": ["source"],
       "evidenceRefs": [
         "phase2-03b-current-plugin-executor-usage-dispatch",
+        "phase2-03b-current-stream-usage-observation",
         "phase2-03b-current-usage-record-structure"
       ],
       "limitations": [
@@ -463,6 +465,7 @@
       "evidenceKind": ["source"],
       "evidenceRefs": [
         "phase2-03b-candidate-usage-attempt-dispatch",
+        "phase2-03b-candidate-stream-usage-observation",
         "phase2-03b-candidate-usage-record-structure"
       ],
       "limitations": [
@@ -548,6 +551,7 @@
       "evidenceKind": ["source"],
       "evidenceRefs": [
         "phase2-03b-candidate-plugin-executor-usage-dispatch",
+        "phase2-03b-candidate-stream-usage-observation",
         "phase2-03b-candidate-usage-record-structure"
       ],
       "limitations": [
