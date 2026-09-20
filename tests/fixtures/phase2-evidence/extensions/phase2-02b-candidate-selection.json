@@ -4,9 +4,9 @@
       "id": "phase2-02b-v7-3-3-candidate-filtering-source",
       "artifactId": "current-bundled-v7-3-3",
       "evidenceKind": "source",
-      "evidenceReference": "sdk/cliproxy/auth/conductor_selection.go#availableAuthsForSelector",
+      "evidenceReference": "sdk/cliproxy/auth/conductor_selection.go#pickNextLegacy,pickNextMixedLegacy; sdk/cliproxy/auth/conductor_selection.go#availableAuthsForSelector",
       "limitations": [
-        "In CPA v7.3.3, candidate generation strictly excludes disabled, cooldown, unavailable, provider mismatch, model mismatch, and unauthorized credentials before calling availableAuthsForSelector."
+        "pickNextLegacy / pickNextMixedLegacy perform disabled, pin, eligibility/policy, provider, executor, tried and model compatibility filtering before availableAuthsForSelector applies availability/cooldown and priority visibility."
       ]
     },
     {
@@ -43,9 +43,9 @@
       "id": "phase2-02b-v7-3-3-pinned-auth-source",
       "artifactId": "current-bundled-v7-3-3",
       "evidenceKind": "source",
-      "evidenceReference": "sdk/cliproxy/auth/conductor_execution.go#pinnedAuthIDFromMetadata; sdk/cliproxy/auth/conductor_selection.go#availableAuthsForSelector",
+      "evidenceReference": "sdk/cliproxy/auth/conductor_selection.go#pinnedAuthIDFromMetadata,pickNextLegacy,pickNextMixedLegacy,retryAllowed,closestCooldownWaitWithAttempted",
       "limitations": [
-        "pinned_auth_id restricts candidate generation to the requested Auth.ID but does not bypass eligibility, provider/model compatibility, disabled state, cooldown, or tried-attempt filtering. If the target is unavailable or invalid, selection fails closed instead of silently choosing another credential."
+        "pinned_auth_id is read from request metadata and applied during candidate generation so every non-matching Auth.ID is excluded before scheduler/selector selection. The pinned credential still must pass disabled, eligibility/policy, provider, model, tried and cooldown/availability checks. Retry-round eligibility and cooldown waiting continue to receive the same pinned Auth.ID, preserving fail-closed fencing."
       ]
     },
     {
@@ -79,9 +79,9 @@
       "id": "phase2-02b-v7-3-8-candidate-filtering-source",
       "artifactId": "candidate-release-v7-3-8",
       "evidenceKind": "source",
-      "evidenceReference": "sdk/cliproxy/auth/conductor_selection.go#availableAuthsForSelector",
+      "evidenceReference": "sdk/cliproxy/auth/conductor_selection.go#pickNextLegacy,pickNextMixedLegacy; sdk/cliproxy/auth/conductor_selection.go#availableAuthsForSelector",
       "limitations": [
-        "In CPA v7.3.8, candidate generation continues to filter out disabled, cooldown, unavailable, provider mismatch, and model mismatch credentials before scheduler invocation."
+        "pickNextLegacy / pickNextMixedLegacy perform disabled, pin, eligibility/policy, provider, executor, tried and model compatibility filtering before availableAuthsForSelector applies availability/cooldown and priority visibility."
       ]
     },
     {
@@ -115,9 +115,9 @@
       "id": "phase2-02b-v7-3-8-pinned-auth-source",
       "artifactId": "candidate-release-v7-3-8",
       "evidenceKind": "source",
-      "evidenceReference": "sdk/cliproxy/auth/conductor_execution.go#pinnedAuthIDFromMetadata; sdk/cliproxy/auth/conductor_selection.go#availableAuthsForSelector",
+      "evidenceReference": "sdk/cliproxy/auth/conductor_selection.go#pinnedAuthIDFromMetadata,pickNextLegacy,pickNextMixedLegacy,retryAllowed,closestCooldownWaitWithAttempted; sdk/cliproxy/auth/scheduler.go#pickSingleWithStrategy,pickMixedWithStrategy,scheduledAuthPredicate",
       "limitations": [
-        "pinned_auth_id restricts candidate generation to the requested Auth.ID but does not bypass eligibility, provider/model compatibility, disabled state, cooldown, or tried-attempt filtering. If the target is unavailable or invalid, selection fails closed instead of silently choosing another credential."
+        "Plugin Scheduler path is fenced during legacy candidate generation; scheduler fast-path independently applies pinnedAuthID through scheduledAuthPredicate. The pinned credential still must pass disabled, eligibility/policy, provider, model, tried and cooldown/availability checks. Retry-round eligibility and cooldown waiting continue to receive the same pinned Auth.ID, preserving fail-closed fencing."
       ]
     },
     {
@@ -374,7 +374,7 @@
         "phase2-02b-v7-3-3-scheduler-host-unit"
       ],
       "limitations": [
-        "Returning an Auth.ID not in the supplied candidates slice is ignored by pickSchedulerAuthByID; if delegate_builtin is valid it delegates, otherwise falls back to host default selector."
+        "An unknown Auth.ID causes Host.normalizeSchedulerResponse to discard the entire scheduler response and return handled=false. Any DelegateBuiltin carried alongside that invalid Auth.ID is not preserved. Conductor then falls back to its configured/default selector."
       ]
     },
     {
@@ -395,7 +395,7 @@
         "phase2-02b-v7-3-8-release-black-box"
       ],
       "limitations": [
-        "Host normalizeSchedulerResponse detects unknown Auth.ID and resets handled=false; conductor falls back to host selector without error."
+        "An unknown Auth.ID causes Host.normalizeSchedulerResponse to discard the entire scheduler response and return handled=false. Any DelegateBuiltin carried alongside that invalid Auth.ID is not preserved. Conductor then falls back to its configured/default selector without error."
       ]
     },
     {
@@ -415,7 +415,7 @@
         "phase2-02b-v7-3-3-scheduler-host-unit"
       ],
       "limitations": [
-        "Unhandled (handled=false) or delegate_builtin (round_robin, fill_first) cleanly falls back to builtin scheduling."
+        "When Auth.ID is empty and DelegateBuiltin is round_robin or fill_first, the scheduler response is accepted as an explicit builtin delegation. A plugin response with Handled=false instead falls through to the host selector."
       ]
     },
     {
@@ -436,7 +436,7 @@
         "phase2-02b-v7-3-8-cpamp-contract-unit"
       ],
       "limitations": [
-        "Delegate builtin round_robin and fill_first are recognized; unknown delegate falls back to unhandled."
+        "When Auth.ID is empty and DelegateBuiltin is round_robin or fill_first, the scheduler response is accepted as an explicit builtin delegation. An unknown delegate or Handled=false falls back to unhandled and host selection."
       ]
     },
     {

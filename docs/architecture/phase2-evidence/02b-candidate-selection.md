@@ -22,7 +22,7 @@
 
 在 CPA 中，插件调度器（`PluginScheduler`）并不是直接从全局凭证库中挑选凭证，而是由 Conductor 预先执行过滤后将 `available` 切片作为 `Candidates` 传递给 Scheduler。
 
-在 `sdk/cliproxy/auth/conductor_selection.go`（`pickNextWithProvider` 与 `pickNextMixedLegacy`）中，在调用 `availableAuthsForSelector` 之前与之中，严格执行以下前置过滤链：
+在 `sdk/cliproxy/auth/conductor_selection.go`（`pickNextLegacy` 与 `pickNextMixedLegacy`，以及 `scheduler.go#pickSingleWithStrategy, pickMixedWithStrategy`）中，在调用 `availableAuthsForSelector` 之前与之中，严格执行以下前置过滤链：
 
 1. **Disabled 过滤**:
    - `candidate == nil || candidate.Disabled`: 显式禁用的凭证直接在第一轮遍历中跳过。
@@ -146,46 +146,48 @@ CPA 的行为在两个层次上进行了确定性防护：
 1. **PluginHost 校验层** (`internal/pluginhost/scheduler.go`):
 
    ```go
+   hasAuthID := resp.AuthID != ""
+   hasDelegate := resp.DelegateBuiltin != ""
+
+   if !hasAuthID && !hasDelegate {
+       return pluginapi.SchedulerPickResponse{}, false, "missing decision"
+   }
+
    if hasAuthID {
        if !schedulerCandidateExists(req.Candidates, resp.AuthID) {
            return pluginapi.SchedulerPickResponse{}, false, "unknown auth id"
        }
        return resp, true, ""
    }
+
+   if !validSchedulerBuiltin(resp.DelegateBuiltin) {
+       return pluginapi.SchedulerPickResponse{}, false, "unknown delegate"
+   }
+
+   return resp, true, ""
    ```
 
+   - **Auth.ID 优先于 DelegateBuiltin**: 宿主规范化严格执行 `hasAuthID` 优先校验。
    - 当 `resp.AuthID` 不在 `req.Candidates` 中时，`normalizeSchedulerResponse` 判定响应无效，记录警告日志：
      `pluginhost: scheduler returned invalid response: unknown auth id`
-   - 返回 `(pluginapi.SchedulerPickResponse{}, false, nil)`，即 `handled = false`！
+   - 返回 `(pluginapi.SchedulerPickResponse{}, false, nil)`，即 `handled = false`。
+   - **关键语义**: **非法 Auth.ID 会导致整条调度器响应被直接丢弃；即使该响应同时附带了合法的 `DelegateBuiltin`，该委托意图也一并失效丢弃，绝不转入委托执行！**
+   - 只有当 `AuthID == ""` 且 `DelegateBuiltin` 为已知合法策略（`round_robin` 或 `fill_first`）时，宿主才会将响应作为显式委托接纳。
 
-2. **Conductor 校验层** (`sdk/cliproxy/auth/conductor_selection.go`):
-
-   ```go
-   if selected := pickSchedulerAuthByID(candidates, resp.AuthID); selected != nil {
-       return selected, true, nil
-   }
-   strategy, okStrategy := builtinSchedulerStrategy(resp.DelegateBuiltin)
-   if !okStrategy {
-       return nil, false, nil
-   }
-   return m.pickViaBuiltinScheduler(...)
-   ```
-
-   - 即使绕过 host 检查，`pickSchedulerAuthByID` 依然遍历 `candidates` 查找。找不到则返回 `nil`。
-   - 若此时 `resp.DelegateBuiltin` 包含合法内置策略（如 `round_robin` 或 `fill_first`），则委托给内置策略；
-   - 若未声明合法委托策略，则返回 `handled = false`。
-
-3. **Conductor 最终回退**:
-   - 当 `!handled` 时，代码走向回退逻辑：
+2. **Conductor 最终回退**:
+   - 当 Host 返回 `handled = false` 时，Conductor 判定调度插件未接管该请求；
+   - 代码走向宿主回退逻辑：
      `selected, errPick = selector.Pick(selectorCtx, provider, selectionArgForSelector(selector, model), opts, selectorAuths)`
-   - 宿主静默忽略非法 Auth.ID，**安全回退到宿主配置的内置 Selector（如 RoundRobinSelector）继续在合法候选集中选择**！
+   - 宿主丢弃非法调度响应，**安全回退到宿主配置的内置 Selector（如 RoundRobinSelector）继续在合法候选集中选择**！
 
 **明确回答**:
 
-- **Reject？**: 是，非法 Auth.ID 会被直接丢弃并打印警告日志。
-- **Delegate？**: 若响应中同时带有合法 `DelegateBuiltin`，则转由内置调度策略接管。
-- **Fallback？**: 是，若无有效委托，则无缝回退（Fallback）至宿主默认 Selector。
-- **Exact Error？**: **不会直接抛出异常中断请求**，宿主保证请求服务的高可用回退。只有当宿主候选集也彻底为空或全部冷却时，才在后续返回 `auth_not_found` 或 `model_cooldown`。
+Host normalization gives Auth.ID precedence over DelegateBuiltin:
+- **Valid Auth.ID**: response is accepted;
+- **Invalid Auth.ID**: the entire scheduler response is rejected as unhandled, even when DelegateBuiltin is also present;
+- **Explicit DelegateBuiltin**: only when Auth.ID is empty and DelegateBuiltin is a known builtin strategy does the host accept the delegate response.
+- **Fallback**: Conductor 层在 `handled=false` 时回退至 configured/default selector fallback。绝不会把“invalid Auth.ID fallback”与“explicit delegate_builtin”混为一谈。
+- **Exact Error**: 不会直接抛出异常中断请求，宿主保证请求服务的高可用回退。只有当宿主候选集也彻底为空或全部冷却时，才在后续返回 `auth_not_found` 或 `model_cooldown`。
 
 ---
 
@@ -194,7 +196,7 @@ CPA 的行为在两个层次上进行了确定性防护：
 在 CPA 源码中深度检索 `pinned_auth_id`（`cliproxyexecutor.PinnedAuthMetadataKey`），其实际处理逻辑如下：
 
 1. **在哪里消费？**:
-   - `conductor_selection.go:pickNextWithProvider` 与 `pickNextMixedLegacy`:
+   - `conductor_selection.go:pickNextLegacy` 与 `pickNextMixedLegacy`（以及 `scheduler.go#pickSingleWithStrategy, pickMixedWithStrategy`）:
      ```go
      pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
      ...

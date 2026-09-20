@@ -299,6 +299,44 @@ describe('Phase2-02B: Candidate Visibility / Selection / Retry-Fallback Evidence
         'phase2-02b-v7-3-8-pinned-auth-source'
       );
     });
+
+    it('verifies candidate-filtering and pinned-auth anchor references cover real conductor symbols', () => {
+      const extension = readExtension();
+
+      const currentFilteringAnchor = extension.anchors.find(
+        (a) => a.id === 'phase2-02b-v7-3-3-candidate-filtering-source'
+      );
+      const candidateFilteringAnchor = extension.anchors.find(
+        (a) => a.id === 'phase2-02b-v7-3-8-candidate-filtering-source'
+      );
+
+      expect(currentFilteringAnchor.evidenceReference).toContain('pickNextLegacy');
+      expect(currentFilteringAnchor.evidenceReference).toContain('pickNextMixedLegacy');
+      expect(currentFilteringAnchor.evidenceReference).toContain('availableAuthsForSelector');
+
+      expect(candidateFilteringAnchor.evidenceReference).toContain('pickNextLegacy');
+      expect(candidateFilteringAnchor.evidenceReference).toContain('pickNextMixedLegacy');
+      expect(candidateFilteringAnchor.evidenceReference).toContain('availableAuthsForSelector');
+
+      const v733Pinned = extension.anchors.find(
+        (a) => a.id === 'phase2-02b-v7-3-3-pinned-auth-source'
+      );
+      const v738Pinned = extension.anchors.find(
+        (a) => a.id === 'phase2-02b-v7-3-8-pinned-auth-source'
+      );
+
+      expect(v733Pinned.evidenceReference).toContain('pinnedAuthIDFromMetadata');
+      expect(v733Pinned.evidenceReference).toMatch(/pickNextLegacy|pickSingleWithStrategy/);
+      expect(v733Pinned.evidenceReference).not.toBe(
+        'sdk/cliproxy/auth/conductor_execution.go#publishSelectedAuthMetadata'
+      );
+
+      expect(v738Pinned.evidenceReference).toContain('pinnedAuthIDFromMetadata');
+      expect(v738Pinned.evidenceReference).toMatch(/pickNextLegacy|pickSingleWithStrategy/);
+      expect(v738Pinned.evidenceReference).not.toBe(
+        'sdk/cliproxy/auth/conductor_execution.go#publishSelectedAuthMetadata'
+      );
+    });
   });
 
   describe('Question 1 & 2: Candidate Pre-Filtering and v7.3.3 Default Highest-Tier Visibility', () => {
@@ -529,6 +567,20 @@ describe('Phase2-02B: Candidate Visibility / Selection / Retry-Fallback Evidence
 
       // Case 2: Auth.ID not in candidate set -> rejected by host normalization, falls back (handled=false)
       expect(normalizeSchedulerResponse({ authId: 'auth-missing' }, candidates)).toEqual({
+        handled: false,
+        reason: 'unknown auth id',
+      });
+
+      // Case 2b: Auth.ID takes precedence over DelegateBuiltin - invalid Auth.ID discards DelegateBuiltin
+      expect(
+        normalizeSchedulerResponse(
+          {
+            authId: 'auth-missing',
+            delegateBuiltin: 'round_robin',
+          },
+          candidates
+        )
+      ).toEqual({
         handled: false,
         reason: 'unknown auth id',
       });
