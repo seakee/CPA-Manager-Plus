@@ -17,13 +17,21 @@ const extensionPath = path.join(
 );
 const loaded = () => loadAndValidateContract();
 
+const GO_TRIM_SPACE =
+  /^[\u0009-\u000D\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]+|[\u0009-\u000D\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]+$/g;
+
+function goTrimSpace(value) {
+  return String(value).replace(GO_TRIM_SPACE, '');
+}
+
 /**
- * Replicates Go CPA coresession.CallerScope(value):
+ * Replicates CPA coresession.CallerScope normalization and hashing semantics
+ * for the Go strings.TrimSpace whitespace set:
  * sha256("cli-proxy-api:caller-scope:v1\x00" + strings.TrimSpace(value)) -> hex
  */
 function computeCallerScope(value) {
   if (value === null || value === undefined) return '';
-  const trimmed = String(value).trim();
+  const trimmed = goTrimSpace(value);
   if (trimmed === '') return '';
   const hasher = createHash('sha256');
   hasher.update('cli-proxy-api:caller-scope:v1\0' + trimmed);
@@ -60,13 +68,17 @@ describe('Phase2-02A caller identity and scope evidence', () => {
     expect(scope1).toHaveLength(64);
     expect(scope1).toMatch(/^[0-9a-f]{64}$/);
 
-    // Whitespace trimming behavior matches Go strings.TrimSpace
+    // Whitespace trimming behavior matches Go strings.TrimSpace (ASCII and Unicode whitespace)
     expect(computeCallerScope(`  ${key}  \n`)).toBe(scope1);
     expect(computeCallerScope('\t' + key)).toBe(scope1);
+    expect(computeCallerScope('\u0085' + key + '\u0085')).toBe(scope1);
+    expect(computeCallerScope('\u3000' + key + '\u3000')).toBe(scope1);
 
     // Empty or whitespace-only principal produces empty scope
     expect(computeCallerScope('')).toBe('');
     expect(computeCallerScope('   ')).toBe('');
+    expect(computeCallerScope('\u0085')).toBe('');
+    expect(computeCallerScope('\u3000')).toBe('');
     expect(computeCallerScope(null)).toBe('');
 
     // Pre-image / non-plaintext: hash does not reveal key contents
@@ -181,7 +193,7 @@ describe('Phase2-02A caller identity and scope evidence', () => {
         /02a-caller-identity\.md#v7-3-[38]-release-binary-black-box-observation/
       );
       const limText = anchor.limitations.join(' ');
-      expect(limText).toMatch(/observed/i);
+      expect(limText).toMatch(/observ/i);
       expect(limText).toMatch(/runtime/i);
       expect(limText).toMatch(/RequestInterceptor|RequestCompletion|request-interceptor|request-completion/i);
     }
@@ -368,6 +380,25 @@ describe('Phase2-02A caller identity and scope evidence', () => {
     expect(docSource).not.toContain('all raw request headers and secrets');
     expect(docSource).not.toContain('safe redaction');
     expect(docSource).toContain('does not copy');
+
+    // Anti-regression: normalization accurately reflects Go strings.TrimSpace
+    expect(docSource).not.toContain('ASCII whitespace');
+    expect(docSource).toContain('Unicode whitespace');
+
+    // Anti-regression: release black-box does not overclaim partitioning or multi-caller isolation
+    expect(docSource).not.toContain(
+      'confirming multi-caller isolation in candidate v7.3.8'
+    );
+    expect(docSource).not.toContain('distinct-caller partitioning');
+
+    const curBlackBox = anchorMap.get('phase2-02a-v7-3-3-release-black-box');
+    const candBlackBox = anchorMap.get('phase2-02a-v7-3-8-release-black-box');
+    for (const anchor of [curBlackBox, candBlackBox]) {
+      const limitation = anchor.limitations.join(' ');
+      expect(limitation).not.toContain('distinct-caller partitioning');
+      expect(limitation).not.toContain('multi-caller isolation');
+      expect(limitation).toContain('distinct caller_scope');
+    }
 
     // Anti-regression: fixture secret-redaction boundary records
     const curRedactionRecord = raw.records.find(

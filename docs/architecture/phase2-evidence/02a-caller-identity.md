@@ -152,7 +152,7 @@ func requestCallerScope(ginCtx *gin.Context) string {
 ### 4.2 Stability & Cryptographic Properties
 
 - **Determinism**: For a given normalized principal string $P$, `CallerScope(P)` is deterministic and stable across repeated evaluations and process restarts.
-- **Normalization**: Leading and trailing ASCII whitespace is removed via `strings.TrimSpace(value)`.
+- **Normalization**: Leading and trailing Unicode whitespace recognized by Go `strings.TrimSpace` is removed before hashing.
 - **Case Sensitivity**: The hash is case-sensitive (e.g. `CallerScope("sk-abc") != CallerScope("SK-ABC")`).
 - **Domain Separation**: The fixed prefix `"cli-proxy-api:caller-scope:v1\x00"` provides a caller-scope-specific input domain, separating caller_scope hashes from other SHA-256 applications in CPA. It does not alter SHA-256's underlying collision resistance.
 - **One-way / Non-plaintext**: 64-character lowercase hex string. Does not reveal plaintext key contents or length directly.
@@ -226,7 +226,7 @@ Official CPA v7.3.3 release binary was executed on port `8081`. The runtime even
   - `Metadata["caller_scope"]`: `b3b1a4b63a0b68349348164be3edb6fcb9a3ee41d4d026c1ef21afb93cafa151`.
   - Runtime proof: $\text{caller\_scope}_{A1} == \text{caller\_scope}_{A2}$. Identity is stable across repeated requests.
 
-#### Case C: Caller Beta Request (Multi-Caller Isolation)
+#### Case C: Caller Beta Request (Distinct Principal Observation)
 - Client sends `POST /v1/chat/completions` with header `Authorization: Bearer sk-phase2-caller-beta`.
 - `request.intercept_before` observed runtime payload:
   - `Headers["Authorization"]`: `["Bearer sk-phase2-caller-beta"]`.
@@ -253,7 +253,7 @@ The identical test battery was executed against candidate release binary CPA v7.
 
 1. **Case A (Alpha Initial)**: `RequestInterceptor` received `Headers["Authorization"] = ["Bearer sk-phase2-caller-alpha"]` and `Metadata["caller_scope"] = b3b1a4b63a0b68349348164be3edb6fcb9a3ee41d4d026c1ef21afb93cafa151`.
 2. **Case B (Alpha Repeat)**: Emitted identical `caller_scope` `b3b1a4b6...`, confirming runtime stability in candidate v7.3.8.
-3. **Case C (Beta Isolation)**: Emitted `caller_scope` `0eb2fb39ffeac09dfadd792351df6e98ca2007e20e2015068111247fa9e2411c`, confirming multi-caller isolation in candidate v7.3.8.
+3. **Case C (Beta Caller Scope)**: Emitted `caller_scope` `0eb2fb39ffeac09dfadd792351df6e98ca2007e20e2015068111247fa9e2411c`. For the two tested distinct principals, $\text{caller\_scope}_{\alpha} \neq \text{caller\_scope}_{\beta}$, confirming caller-dependent scope separation in this observation.
 4. **Case D (Alternate Headers)**: Raw credentials propagated unredacted into `Headers["X-Api-Key"]` and `Headers["X-Goog-Api-Key"]`.
 5. **Case E (Terminal Redaction)**: `RequestCompletion` preserved `caller_scope` in `Metadata` and exposed no request Headers field. The tested built-in client credential was not observed in `RequestCompletion.Metadata`.
 

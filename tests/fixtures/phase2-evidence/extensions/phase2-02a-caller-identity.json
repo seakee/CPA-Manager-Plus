@@ -65,7 +65,7 @@
       "evidenceKind": "black-box",
       "evidenceReference": "docs/architecture/phase2-evidence/02a-caller-identity.md#v7-3-3-release-binary-black-box-observation",
       "limitations": [
-        "Official release binary observed runtime captures caller_scope from runtime RequestInterceptor and RequestCompletion lifecycle hooks, proving same-caller stability, distinct-caller partitioning, and raw header visibility at request interception.",
+        "Official release binary observation captures caller_scope through runtime RequestInterceptor and RequestCompletion hooks, proving same-principal caller_scope stability, observing distinct caller_scope values for the two tested distinct principals, and confirming raw header visibility at request interception.",
         "Does not observe Scheduler headers or UsageRecord.APIKey in black-box runtime; those boundaries are established by source evidence."
       ]
     },
@@ -133,7 +133,7 @@
       "evidenceKind": "black-box",
       "evidenceReference": "docs/architecture/phase2-evidence/02a-caller-identity.md#v7-3-8-release-binary-black-box-observation",
       "limitations": [
-        "Official release binary observed runtime captures caller_scope from runtime RequestInterceptor and RequestCompletion lifecycle hooks, proving same-caller stability, distinct-caller partitioning, and raw header visibility at request interception.",
+        "Official release binary observation captures caller_scope through runtime RequestInterceptor and RequestCompletion hooks, proving same-principal caller_scope stability, observing distinct caller_scope values for the two tested distinct principals, and confirming raw header visibility at request interception.",
         "Does not observe Scheduler headers or UsageRecord.APIKey in black-box runtime; those boundaries are established by source evidence."
       ]
     },
