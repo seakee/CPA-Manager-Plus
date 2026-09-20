@@ -213,11 +213,13 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
     expect(currentRetry.limitations[0]).toContain('a logical request can span multiple executor attempts');
     expect(currentRetry.limitations[0]).toContain('independent usage callback');
     expect(currentRetry.limitations[0]).toContain('Primary attempt callbacks are attempt-scoped');
-    expect(currentRetry.limitations[0]).toContain('additional-model records can increase callback count beyond attempt count');
+    expect(currentRetry.limitations[0]).toContain('Codex image-tool');
+    expect(currentRetry.limitations[0]).toContain('increase callback count beyond the number of attempts');
     expect(candidateRetry.limitations[0]).toContain('a logical request can span multiple executor attempts');
     expect(candidateRetry.limitations[0]).toContain('independent usage callback');
     expect(candidateRetry.limitations[0]).toContain('Primary attempt callbacks are attempt-scoped');
-    expect(candidateRetry.limitations[0]).toContain('additional-model records can increase callback count beyond attempt count');
+    expect(candidateRetry.limitations[0]).toContain('Codex image-tool');
+    expect(candidateRetry.limitations[0]).toContain('increase callback count beyond the number of attempts');
 
     const currentExactCorrelation = records.get('phase2-03b-current-exact-request-correlation');
     const candidateExactCorrelation = records.get('phase2-03b-candidate-exact-request-correlation');
@@ -260,12 +262,13 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
     }
 
     for (const record of [currentPluginExec, candidatePluginExec]) {
-      expect(record.limitations[0]).toContain('Top-level');
-      expect(record.limitations[0]).toContain('InternalSource');
-      expect(record.limitations[0]).toContain('Successful');
-      expect(record.limitations[0]).toContain('EnsurePublished');
-      expect(record.limitations[0]).toContain('PublishFailure');
-      expect(record.limitations[0]).toContain('Nested');
+      const limitation = record.limitations.join(' ');
+      expect(limitation).toContain('InternalSource');
+      expect(limitation).toContain('nestedTracker');
+      expect(limitation).toContain('PublishFailureWithDetail');
+      expect(limitation).toContain('EnsurePublished');
+      expect(limitation).toContain('Pre-stream');
+      expect(limitation).not.toContain('Top-level non-InternalSource');
     }
   });
 
@@ -373,18 +376,30 @@ describe('Phase2-03B Usage / Reservation / Settlement Evidence Contract', () => 
     expect(docContent).not.toContain('凭证来源类型（`auth.AuthSourceKind()`）');
     expect(docContent).not.toContain('客户端请求或响应的服务层级');
 
+    // Failure path and zero-value detail anti-regression
+    expect(docContent).toContain('PublishFailureWithDetail');
+    expect(docContent).toContain('zero-value');
+    expect(docContent).toContain('Pre-stream failure');
+    expect(docContent).not.toMatch(/buffer.*(?:no|没有).*detail.*PublishFailure/i);
+
     // Primary and additional-model cardinality anti-regression
     expect(docContent).toContain('PublishAdditionalModel');
     expect(docContent).toContain('primary');
     expect(docContent).toContain('additional-model');
-    expect(docContent).toContain('PublishFailureWithDetail');
-    expect(docContent).toContain('EnsurePublished');
-    expect(docContent).toContain('InternalSource');
+    expect(docContent).toContain('Codex');
+    expect(docContent).toContain('image-tool');
     expect(docContent).toContain('callback cardinality can exceed');
 
     expect(docContent).not.toContain('仅限制该 reporter 实例的发布次数');
     expect(docContent).not.toContain('最多可观测到 3 个独立的 `HandleUsage` 回调');
+    expect(docContent).not.toContain('总 callbacks 不存在固定上限');
+    expect(docContent).not.toContain('zero or more additional-model records');
     expect(docContent).not.toMatch(/Publish \/ PublishFailure.*EnsurePublished/);
+
+    // InternalSource and nested tracker boundary anti-regression
+    expect(docContent).toContain('InternalSource');
+    expect(docContent).toContain('nestedTracker.hasNestedExecution');
+    expect(docContent).not.toContain('只有顶层非内部来源请求');
   });
 
   it('strictly ensures no hardcoded machine or developer paths exist in evidence files', () => {
