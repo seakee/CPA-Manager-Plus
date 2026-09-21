@@ -46,6 +46,8 @@ export type AccountQuotaWindowSource =
   | 'devin'
   | 'kimi'
   | 'xai'
+  | 'zhipu'
+  | 'opencode'
   | 'summary';
 
 export interface AccountQuotaDisplayWindow {
@@ -506,6 +508,37 @@ const buildCodexQuotaDisplayWindows = (
   );
 };
 
+const buildCodingPlanQuotaDisplayWindows = (
+  row: AccountRow,
+  options: BuildAccountQuotaDisplayWindowsOptions
+): AccountQuotaDisplayWindow[] => {
+  const quota =
+    row.provider === 'zhipu'
+      ? getCredentialScopedQuotaState(options.stores.zhipuQuota, row.raw)
+      : getCredentialScopedQuotaState(options.stores.opencodeQuota, row.raw);
+  if (!quota) return [];
+  const source = row.provider === 'zhipu' ? 'zhipu' : 'opencode';
+  return (
+    quota.windows?.map((window) =>
+      buildAccountQuotaDisplayWindow({
+        key: window.id,
+        label: options.translateQuotaWindowLabel(window.label, window.labelKey),
+        remainingPercent: remainingPercentFromUsed(window.usedPercent),
+        usedPercent: window.usedPercent,
+        resetLabel: window.resetLabel || '-',
+        resetAtMs: window.resetAtMs,
+        resetAccuracy: window.resetAccuracy,
+        limitWindowSeconds: window.limitWindowSeconds ?? null,
+        modelScope: window.modelScope ?? { kind: 'all', complete: true },
+        windowMode: window.windowMode,
+        source,
+        observedAtMs: quota.fetchedAtMs ?? null,
+        nowMs: options.nowMs,
+      })
+    ) ?? []
+  );
+};
+
 const buildClaudeQuotaDisplayWindows = (
   row: AccountRow,
   options: BuildAccountQuotaDisplayWindowsOptions
@@ -824,6 +857,11 @@ export const buildAccountQuotaDisplayWindows = (
 
   if (row.provider === 'claude') {
     const windows = buildClaudeQuotaDisplayWindows(row, options);
+    if (windows.length) return windows;
+  }
+
+  if (row.provider === 'zhipu' || row.provider === 'opencode') {
+    const windows = buildCodingPlanQuotaDisplayWindows(row, options);
     if (windows.length) return windows;
   }
 

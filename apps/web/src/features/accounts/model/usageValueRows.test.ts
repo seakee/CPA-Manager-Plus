@@ -21,6 +21,8 @@ const emptyStores = (): AccountQuotaStores => ({
   kimiQuota: {},
   devinQuota: {},
   xaiQuota: {},
+  zhipuQuota: {},
+  opencodeQuota: {},
 });
 
 const makeStat = (

@@ -203,6 +203,21 @@ export const KIMI_REQUEST_HEADERS = {
   Authorization: 'Bearer $TOKEN$',
 };
 
+// Zhipu GLM Coding Plan configuration (path appended to the key's base origin)
+export const ZHIPU_QUOTA_LIMIT_PATH = '/api/monitor/usage/quota/limit';
+
+export const ZHIPU_REQUEST_HEADERS = {
+  Authorization: 'Bearer $TOKEN$',
+  'Accept-Language': 'en-US,en',
+};
+
+// OpenCode Go configuration
+export const OPENCODE_USAGE_URL = 'https://opencode.ai/zen/go/v1/usage';
+
+export const OPENCODE_REQUEST_HEADERS = {
+  Authorization: 'Bearer $TOKEN$',
+};
+
 // xAI/Grok API configuration
 export const XAI_BILLING_WEEKLY_URL = 'https://cli-chat-proxy.grok.com/v1/billing?format=credits';
 export const XAI_BILLING_MONTHLY_URL = 'https://cli-chat-proxy.grok.com/v1/billing';

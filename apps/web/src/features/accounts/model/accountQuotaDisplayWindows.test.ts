@@ -29,6 +29,8 @@ const emptyStores = (): AccountQuotaStores => ({
   devinQuota: {},
   kimiQuota: {},
   xaiQuota: {},
+  zhipuQuota: {},
+  opencodeQuota: {},
 });
 
 const t = ((key: string, options?: Record<string, string | number>) => {

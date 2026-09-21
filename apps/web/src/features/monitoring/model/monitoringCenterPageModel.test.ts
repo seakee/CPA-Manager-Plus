@@ -6,7 +6,9 @@ import {
   CODEX_CONFIG,
   DEVIN_CONFIG,
   KIMI_CONFIG,
+  OPENCODE_CONFIG,
   XAI_CONFIG,
+  ZHIPU_CONFIG,
 } from '@/components/quota';
 import {
   fetchAntigravityQuota,
@@ -14,7 +16,9 @@ import {
   fetchCodexQuota,
   fetchDevinQuota,
   fetchKimiQuota,
+  fetchOpencodeQuota,
   fetchXaiQuota,
+  fetchZhipuQuota,
 } from '@/utils/quota';
 import zhCN from '@/i18n/locales/zh-CN.json';
 import zhTW from '@/i18n/locales/zh-TW.json';
@@ -208,6 +212,24 @@ const buildEntryFromMockedProviderFetch = async (
       );
       break;
     }
+    case 'zhipu': {
+      const data = await fetchZhipuQuota(target.file, translate);
+      entry = buildAccountQuotaEntryFromProviderState(
+        target,
+        ZHIPU_CONFIG.buildSuccessState(data, target.file),
+        translate
+      );
+      break;
+    }
+    case 'opencode': {
+      const data = await fetchOpencodeQuota(target.file, translate);
+      entry = buildAccountQuotaEntryFromProviderState(
+        target,
+        OPENCODE_CONFIG.buildSuccessState(data, target.file),
+        translate
+      );
+      break;
+    }
   }
   if (!entry) throw new Error(`No quota entry for ${target.provider}`);
   return entry;
@@ -220,6 +242,8 @@ const emptyQuotaStores = (): MonitoringQuotaStores => ({
   devinQuota: {},
   kimiQuota: {},
   xaiQuota: {},
+      zhipuQuota: {},
+      opencodeQuota: {},
 });
 
 const devinState = (

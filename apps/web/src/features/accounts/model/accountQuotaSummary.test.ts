@@ -16,6 +16,8 @@ const emptyStores = (): AccountQuotaStores => ({
   devinQuota: {},
   kimiQuota: {},
   xaiQuota: {},
+  zhipuQuota: {},
+  opencodeQuota: {},
 });
 
 const makeXaiBilling = (overrides: Partial<XaiBillingSummary> = {}): XaiBillingSummary => ({

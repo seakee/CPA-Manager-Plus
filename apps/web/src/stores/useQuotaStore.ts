@@ -11,7 +11,9 @@ import type {
   CredentialScopedQuotaState,
   DevinQuotaState,
   KimiQuotaState,
+  OpencodeQuotaState,
   XaiQuotaState,
+  ZhipuQuotaState,
 } from '@/types';
 import { obfuscatedStorage } from '@/services/storage/secureStorage';
 import { STORAGE_KEY_QUOTA_CACHE } from '@/utils/constants';
@@ -27,12 +29,16 @@ interface QuotaStoreState {
   devinQuota: Record<string, DevinQuotaState>;
   kimiQuota: Record<string, KimiQuotaState>;
   xaiQuota: Record<string, XaiQuotaState>;
+  zhipuQuota: Record<string, ZhipuQuotaState>;
+  opencodeQuota: Record<string, OpencodeQuotaState>;
   setAntigravityQuota: (updater: QuotaUpdater<Record<string, AntigravityQuotaState>>) => void;
   setClaudeQuota: (updater: QuotaUpdater<Record<string, ClaudeQuotaState>>) => void;
   setCodexQuota: (updater: QuotaUpdater<Record<string, CodexQuotaState>>) => void;
   setDevinQuota: (updater: QuotaUpdater<Record<string, DevinQuotaState>>) => void;
   setKimiQuota: (updater: QuotaUpdater<Record<string, KimiQuotaState>>) => void;
   setXaiQuota: (updater: QuotaUpdater<Record<string, XaiQuotaState>>) => void;
+  setZhipuQuota: (updater: QuotaUpdater<Record<string, ZhipuQuotaState>>) => void;
+  setOpencodeQuota: (updater: QuotaUpdater<Record<string, OpencodeQuotaState>>) => void;
   activateQuotaCacheScope: (scope: string) => void;
   clearQuotaCache: () => void;
 }
@@ -51,6 +57,8 @@ const emptyQuotaState = {
   devinQuota: {},
   kimiQuota: {},
   xaiQuota: {},
+  zhipuQuota: {},
+  opencodeQuota: {},
 };
 
 type PersistableQuotaState = CredentialScopedQuotaState & {
@@ -131,6 +139,14 @@ export const useQuotaStore = create<QuotaStoreState>()(
         set((state) => ({
           xaiQuota: resolveUpdater(updater, state.xaiQuota),
         })),
+      setZhipuQuota: (updater) =>
+        set((state) => ({
+          zhipuQuota: resolveUpdater(updater, state.zhipuQuota),
+        })),
+      setOpencodeQuota: (updater) =>
+        set((state) => ({
+          opencodeQuota: resolveUpdater(updater, state.opencodeQuota),
+        })),
       activateQuotaCacheScope: (scope) =>
         set((state) => {
           const nextScope = scope.trim();
@@ -164,6 +180,8 @@ export const useQuotaStore = create<QuotaStoreState>()(
         devinQuota: filterPersistableQuotaStates(state.devinQuota),
         kimiQuota: filterPersistableQuotaStates(state.kimiQuota),
         xaiQuota: filterPersistableQuotaStates(state.xaiQuota),
+        zhipuQuota: filterPersistableQuotaStates(state.zhipuQuota),
+        opencodeQuota: filterPersistableQuotaStates(state.opencodeQuota),
       }),
       merge: (persistedState, currentState) => {
         const persisted = persistedState as Partial<QuotaStoreState> | undefined;
@@ -176,6 +194,8 @@ export const useQuotaStore = create<QuotaStoreState>()(
           devinQuota: filterPersistableQuotaStates(persisted?.devinQuota),
           kimiQuota: filterPersistableQuotaStates(persisted?.kimiQuota),
           xaiQuota: filterPersistableQuotaStates(persisted?.xaiQuota),
+          zhipuQuota: filterPersistableQuotaStates(persisted?.zhipuQuota),
+          opencodeQuota: filterPersistableQuotaStates(persisted?.opencodeQuota),
         };
       },
     }

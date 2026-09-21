@@ -82,7 +82,9 @@ import {
   CODEX_CONFIG,
   DEVIN_CONFIG,
   KIMI_CONFIG,
+  OPENCODE_CONFIG,
   XAI_CONFIG,
+  ZHIPU_CONFIG,
   refreshQuotaWithConfig,
   type QuotaConfig,
   type QuotaRefreshResult,
@@ -140,6 +142,7 @@ import { useInterval } from '@/hooks/useInterval';
 import { useRequestMonitoringAvailability } from '@/hooks/useRequestMonitoringAvailability';
 import { isFileLogsAvailable } from '@/features/logs/logFeatureAvailability';
 import { useAuthStore, useConfigStore, useNotificationStore, useQuotaStore } from '@/stores';
+import { buildZhipuAuthIndexBaseMap } from '@/utils/quota';
 import { useUsageHeaderSnapshotStore } from '@/stores/useUsageHeaderSnapshotStore';
 import { useAccountCredentialMutationRevisionStore } from '@/stores/useAccountCredentialMutationRevisionStore';
 import { createCodexInspectionConnectionFingerprint } from '@/features/monitoring/codexInspection';
@@ -274,6 +277,8 @@ export function MonitoringCenterPage() {
   const devinQuota = useQuotaStore((state) => state.devinQuota);
   const kimiQuota = useQuotaStore((state) => state.kimiQuota);
   const xaiQuota = useQuotaStore((state) => state.xaiQuota);
+  const zhipuQuota = useQuotaStore((state) => state.zhipuQuota);
+  const opencodeQuota = useQuotaStore((state) => state.opencodeQuota);
   const sharedQuotaStores = useMemo<MonitoringQuotaStores>(
     () => ({
       antigravityQuota,
@@ -282,8 +287,10 @@ export function MonitoringCenterPage() {
       devinQuota,
       kimiQuota,
       xaiQuota,
+      zhipuQuota,
+      opencodeQuota,
     }),
-    [antigravityQuota, claudeQuota, codexQuota, devinQuota, kimiQuota, xaiQuota]
+    [antigravityQuota, claudeQuota, codexQuota, devinQuota, kimiQuota, xaiQuota, zhipuQuota, opencodeQuota]
   );
   const setAntigravityQuota = useQuotaStore((state) => state.setAntigravityQuota);
   const setClaudeQuota = useQuotaStore((state) => state.setClaudeQuota);
@@ -291,6 +298,8 @@ export function MonitoringCenterPage() {
   const setDevinQuota = useQuotaStore((state) => state.setDevinQuota);
   const setKimiQuota = useQuotaStore((state) => state.setKimiQuota);
   const setXaiQuota = useQuotaStore((state) => state.setXaiQuota);
+  const setZhipuQuota = useQuotaStore((state) => state.setZhipuQuota);
+  const setOpencodeQuota = useQuotaStore((state) => state.setOpencodeQuota);
   const [selectedAccount, setSelectedAccount] = useState(
     () => initialMonitoringCenterUiState.current.selectedAccount
   );
@@ -1025,8 +1034,13 @@ export function MonitoringCenterPage() {
   }, [accountPage, accountPagination.currentPage, overallLoading, setCurrentAccountPage]);
 
   const accountQuotaTargetsByRowId = useMemo(
-    () => buildMonitoringAccountQuotaTargetsByRowId(accountRows, accountAuthStateByRowId),
-    [accountAuthStateByRowId, accountRows]
+    () =>
+      buildMonitoringAccountQuotaTargetsByRowId(
+        accountRows,
+        accountAuthStateByRowId,
+        buildZhipuAuthIndexBaseMap(config)
+      ),
+    [accountAuthStateByRowId, accountRows, config]
   );
   const headerSnapshotLookup = useMemo(
     () =>
@@ -1352,6 +1366,18 @@ export function MonitoringCenterPage() {
             setKimiQuota,
             getCredentialScopedQuotaState(sharedQuotaStores.kimiQuota, target.file)
           );
+        case 'zhipu':
+          return run(
+            ZHIPU_CONFIG,
+            setZhipuQuota,
+            getCredentialScopedQuotaState(sharedQuotaStores.zhipuQuota, target.file)
+          );
+        case 'opencode':
+          return run(
+            OPENCODE_CONFIG,
+            setOpencodeQuota,
+            getCredentialScopedQuotaState(sharedQuotaStores.opencodeQuota, target.file)
+          );
         case 'devin':
           return run(
             DEVIN_CONFIG,
@@ -1375,6 +1401,8 @@ export function MonitoringCenterPage() {
       setDevinQuota,
       setKimiQuota,
       setXaiQuota,
+      setZhipuQuota,
+      setOpencodeQuota,
       t,
     ]
   );

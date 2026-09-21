@@ -53,6 +53,8 @@ import {
   fetchCodexResetCredits,
   fetchDevinQuota,
   fetchKimiQuota,
+  fetchOpencodeQuota,
+  fetchZhipuQuota,
   mergeXaiBillingSummaries,
   probeXaiBilling,
   probeXaiInference,
@@ -3943,3 +3945,119 @@ describe('fetchDevinQuota', () => {
   });
 });
 
+
+describe('fetchZhipuQuota', () => {
+  it('maps quota limits to windows with plan level', async () => {
+    mocks.request.mockResolvedValueOnce({
+      statusCode: 200,
+      hasStatusCode: true,
+      header: {},
+      bodyText: '',
+      body: {
+        code: 200,
+        success: true,
+        data: {
+          limits: [
+            { type: 'TOKENS_LIMIT', unit: 3, number: 5, percentage: 0 },
+            { type: 'TOKENS_LIMIT', unit: 6, number: 1, percentage: 46, nextResetTime: 1790162211990 },
+            { type: 'TIME_LIMIT', unit: 5, number: 1, usage: 1000, currentValue: 19, remaining: 981, percentage: 1, nextResetTime: 1790853411998 },
+          ],
+          level: 'pro',
+        },
+      },
+    });
+
+    const result = await fetchZhipuQuota(
+      { name: 'zhipu.json', type: 'zhipu', authIndex: 'zhipu-1', zhipu_base_url: 'https://open.bigmodel.cn' },
+      t
+    );
+
+    expect(result.planType).toBe('pro');
+    expect(result.quotaInventoryObserved).toBe(true);
+    expect(result.windows).toHaveLength(3);
+    // number=1 → weekly; number=5 → 5-hour.
+    expect(result.windows[1]).toMatchObject({
+      id: 'tokens-6-1',
+      labelKey: 'zhipu_quota.window_tokens_weekly',
+      usedPercent: 46,
+      resetAtMs: 1790162211990,
+      resetAccuracy: 'exact',
+    });
+    expect(result.windows[2]).toMatchObject({
+      id: 'time-5',
+      labelKey: 'zhipu_quota.window_mcp',
+      usedPercent: 1,
+    });
+    expect(mocks.request).toHaveBeenCalledWith(
+      expect.objectContaining({
+        authIndex: 'zhipu-1',
+        method: 'GET',
+        url: 'https://open.bigmodel.cn/api/monitor/usage/quota/limit',
+        header: expect.objectContaining({ Authorization: 'Bearer $TOKEN$' }),
+      }),
+      undefined
+    );
+  });
+
+  it('rejects Zhipu business failures reported over HTTP 200', async () => {
+    mocks.request.mockResolvedValueOnce({
+      statusCode: 200,
+      hasStatusCode: true,
+      header: {},
+      bodyText: '',
+      body: { code: 500, msg: '当前用户不存在coding plan', success: false },
+    });
+    await expect(
+      fetchZhipuQuota(
+        { name: 'zhipu.json', type: 'zhipu', authIndex: 'zhipu-1', zhipu_base_url: 'https://open.bigmodel.cn' },
+        t
+      )
+    ).rejects.toThrow('当前用户不存在coding plan');
+  });
+
+  it('throws when the credential carries no zhipu base-url attribute', async () => {
+    await expect(
+      fetchZhipuQuota({ name: 'other.json', type: 'zhipu', authIndex: 'unknown' }, t)
+    ).rejects.toThrow();
+  });
+});
+
+describe('fetchOpencodeQuota', () => {
+  it('maps rolling/weekly/monthly usage windows', async () => {
+    mocks.request.mockResolvedValueOnce({
+      statusCode: 200,
+      hasStatusCode: true,
+      header: {},
+      bodyText: '',
+      body: {
+        usage: {
+          rolling: { status: 'ok', percent: 0, resetsAt: '2026-09-21T01:46:42.061Z' },
+          weekly: { status: 'ok', percent: 84, resetsAt: '2026-09-21T00:00:00.000Z' },
+          monthly: { status: 'ok', percent: 42, resetsAt: '2026-10-18T20:16:23.000Z' },
+        },
+      },
+    });
+
+    const result = await fetchOpencodeQuota(
+      { name: 'opencode.json', type: 'opencode-go', authIndex: 'oc-1' },
+      t
+    );
+
+    expect(result.quotaInventoryObserved).toBe(true);
+    expect(result.windows).toHaveLength(3);
+    expect(result.windows[1]).toMatchObject({
+      id: 'weekly',
+      labelKey: 'opencode_quota.window_weekly',
+      usedPercent: 84,
+      resetAccuracy: 'exact',
+    });
+    expect(mocks.request).toHaveBeenCalledWith(
+      expect.objectContaining({
+        authIndex: 'oc-1',
+        method: 'GET',
+        url: 'https://opencode.ai/zen/go/v1/usage',
+      }),
+      undefined
+    );
+  });
+});

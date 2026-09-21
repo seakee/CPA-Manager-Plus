@@ -10,11 +10,23 @@ import {
   normalizeAuthIndex,
   resolveCodexChatgptAccountId,
   resolveCodexPlanType,
+  resolveCodingPlanProvider,
+  type ZhipuAuthIndexBaseMap,
 } from '@/utils/quota';
 import type { MonitoringAccountAuthState } from './accountOverviewState';
 import type { MonitoringAccountRow } from './hooks/useMonitoringData';
 
-export type MonitoringAccountQuotaProvider = 'antigravity' | 'claude' | 'codex' | 'kimi' | 'xai' | 'devin';
+export type MonitoringAccountQuotaProvider =
+  | 'antigravity'
+  | 'claude'
+  | 'codex'
+  | 'kimi'
+  | 'xai'
+  | 'devin'
+  | 'zhipu'
+  | 'opencode';
+
+const EMPTY_ZHIPU_BASES: ZhipuAuthIndexBaseMap = new Map();
 
 export type MonitoringAccountQuotaTarget = {
   key: string;
@@ -42,8 +54,11 @@ const readAuthFileQuotaLabel = (file: AuthFileItem, authIndex: string) => {
 };
 
 export const resolveMonitoringAccountQuotaProvider = (
-  file: AuthFileItem
+  file: AuthFileItem,
+  zhipuBases: ZhipuAuthIndexBaseMap = EMPTY_ZHIPU_BASES
 ): MonitoringAccountQuotaProvider | null => {
+  const codingPlan = resolveCodingPlanProvider(file, zhipuBases);
+  if (codingPlan) return codingPlan;
   if (isCodexFile(file)) return 'codex';
   if (isClaudeFile(file)) return 'claude';
   if (isAntigravityFile(file)) return 'antigravity';
@@ -53,14 +68,15 @@ export const resolveMonitoringAccountQuotaProvider = (
   return null;
 };
 
-const isQuotaTargetable = (file: AuthFileItem) => {
-  if (isDisabledAuthFile(file)) return false;
+const isQuotaTargetable = (file: AuthFileItem, zhipuBases: ZhipuAuthIndexBaseMap) => {
+  if (isDisabledAuthFile(file)) return resolveCodingPlanProvider(file, zhipuBases) !== null;
   return true;
 };
 
 const resolveActiveQuotaProvidersForRow = (
   row: MonitoringAccountRow,
-  authState: MonitoringAccountAuthState | undefined
+  authState: MonitoringAccountAuthState | undefined,
+  zhipuBases: ZhipuAuthIndexBaseMap
 ): Set<MonitoringAccountQuotaProvider> => {
   const activeProviders = new Set<MonitoringAccountQuotaProvider>();
   if (!authState) return activeProviders;
@@ -76,7 +92,7 @@ const resolveActiveQuotaProvidersForRow = (
     const authIndex = normalizeAuthIndex(file['auth_index'] ?? file.authIndex);
     if (!authIndex || !rowAuthIndices.has(authIndex)) return;
 
-    const provider = resolveMonitoringAccountQuotaProvider(file);
+    const provider = resolveMonitoringAccountQuotaProvider(file, zhipuBases);
     if (provider) activeProviders.add(provider);
   });
 
@@ -85,19 +101,20 @@ const resolveActiveQuotaProvidersForRow = (
 
 export const buildMonitoringAccountQuotaTargetsByRowId = (
   rows: MonitoringAccountRow[],
-  authStateByRowId: Map<string, MonitoringAccountAuthState>
+  authStateByRowId: Map<string, MonitoringAccountAuthState>,
+  zhipuBases: ZhipuAuthIndexBaseMap = EMPTY_ZHIPU_BASES
 ) =>
   new Map(
     rows.map((row) => {
       const bucket = new Map<string, MonitoringAccountQuotaTarget>();
       const authState = authStateByRowId.get(row.id);
-      const activeProviders = resolveActiveQuotaProvidersForRow(row, authState);
+      const activeProviders = resolveActiveQuotaProvidersForRow(row, authState, zhipuBases);
 
       authState?.files.forEach((file) => {
         const authIndex = normalizeAuthIndex(file['auth_index'] ?? file.authIndex);
-        const provider = resolveMonitoringAccountQuotaProvider(file);
+        const provider = resolveMonitoringAccountQuotaProvider(file, zhipuBases);
         if (!authIndex || !provider || !activeProviders.has(provider)) return;
-        if (!isQuotaTargetable(file)) return;
+        if (!isQuotaTargetable(file, zhipuBases)) return;
 
         const dedupeKey = `${provider}::${authIndex}::${file.name}`;
         if (bucket.has(dedupeKey)) return;

@@ -1725,7 +1725,9 @@
     "headers_hint": "按 JSON 格式填写需要额外发送的请求头，例如：{\"X-My-Header\": \"value\"}",
     "headers_invalid_json": "自定义请求头必须是有效的 JSON。",
     "headers_invalid_object": "自定义请求头必须是 JSON 对象。",
-    "headers_invalid_value": "每个自定义请求头的值都必须是字符串。"
+    "headers_invalid_value": "每个自定义请求头的值都必须是字符串。",
+    "filter_zhipu": "智谱 Coding Plan",
+    "filter_opencode": "OpenCode Go"
   },
   "antigravity_quota": {
     "title": "Antigravity 额度",
@@ -4761,5 +4763,29 @@
       "ultra": "Ultra",
       "ultra_lite": "Ultra Lite"
     }
+  },
+  "zhipu_quota": {
+    "title": "智谱 Coding Plan 用量",
+    "idle": "点击此处刷新用量",
+    "loading": "正在加载用量...",
+    "load_failed": "用量获取失败：{{message}}",
+    "missing_auth_index": "认证文件缺少 auth_index",
+    "missing_base_url": "未在配置中找到该凭证的智谱 base-url",
+    "empty_data": "暂无用量数据",
+    "window_tokens_5h": "Token 用量（5 小时）",
+    "window_mcp": "MCP / 工具（月度）",
+    "window_tokens_weekly": "Token 用量（每周）"
+  },
+  "opencode_quota": {
+    "title": "OpenCode Go 用量",
+    "idle": "点击此处刷新用量",
+    "loading": "正在加载用量...",
+    "load_failed": "用量获取失败：{{message}}",
+    "missing_auth_index": "认证文件缺少 auth_index",
+    "empty_data": "暂无用量数据",
+    "window_rolling": "滚动窗口",
+    "window_weekly": "周用量",
+    "window_monthly": "月用量",
+    "provider_disabled": "该 OpenCode 提供商已禁用，凭证未在 CPA 注册，无法查询用量"
   }
 }

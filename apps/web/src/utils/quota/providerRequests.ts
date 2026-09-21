@@ -15,6 +15,7 @@ import type {
   DevinQuotaData,
   KimiQuotaRow,
   KimiUsagePayload,
+  OpencodeUsagePayload,
   XaiBillingConfig,
   XaiBillingPayload,
   XaiBillingDiagnostic,
@@ -23,6 +24,7 @@ import type {
   XaiBillingSummary,
   XaiOfficialApiHealth,
   XaiProductUsageSummary,
+  ZhipuQuotaPayload,
 } from '@/types';
 import { apiCallApi, getApiCallErrorMessage } from '@/services/api/apiCall';
 import { createScopedApiRequestConfig, type ApiClientRequestScope } from '@/services/api/client';
@@ -47,6 +49,10 @@ import {
   DEVIN_REQUEST_HEADERS,
   KIMI_REQUEST_HEADERS,
   KIMI_USAGE_URL,
+  OPENCODE_REQUEST_HEADERS,
+  OPENCODE_USAGE_URL,
+  ZHIPU_QUOTA_LIMIT_PATH,
+  ZHIPU_REQUEST_HEADERS,
   XAI_BILLING_MONTHLY_URL,
   XAI_BILLING_WEEKLY_URL,
   XAI_CLI_CHAT_PROXY_BASE_URL,
@@ -76,7 +82,9 @@ import {
   parseClaudeUsagePayload,
   parseCodexUsagePayload,
   parseKimiUsagePayload,
+  parseOpencodeUsagePayload,
   parseXaiBillingPayload,
+  parseZhipuQuotaPayload,
 } from './parsers';
 import { resolveCodexChatgptAccountId, resolveCodexPlanType } from './resolvers';
 import { buildCodexQuotaWindowInfos, type CodexQuotaScopeResolution } from './codexQuota';
@@ -86,6 +94,7 @@ import {
 } from './codexRequestHeaders';
 import { normalizeCodexResetCreditsPayload } from './resetCredits';
 import { classifyXaiProbe, parseXaiErrorEnvelope, XaiProbeError } from './xaiErrors';
+import { ZHIPU_BASE_URL_ATTRIBUTE } from './codingPlanProviders';
 
 const DEFAULT_ANTIGRAVITY_PROJECT_ID = 'bamboo-precept-lgxtn';
 const CODEX_RESET_CREDITS_REQUEST_TIMEOUT_MS = 8000;
@@ -1164,6 +1173,177 @@ export const fetchKimiQuota = async (
   return {
     rows,
     quotaInventoryObserved: hasKimiQuotaInventory(payload, rows),
+  };
+};
+
+export type ZhipuQuotaData = {
+  windows: ClaudeQuotaWindow[];
+  quotaInventoryObserved: boolean;
+  planType: string | null;
+};
+
+const MS_PER_UNIT_FALLBACK = 5 * 60 * 60 * 1000;
+
+const buildZhipuQuotaWindows = (payload: ZhipuQuotaPayload): ClaudeQuotaWindow[] =>
+  (payload.data?.limits ?? payload.limits ?? []).map((limit, index): ClaudeQuotaWindow => {
+    const type = normalizeStringValue(limit.type)?.toUpperCase() ?? '';
+    const unit = normalizeNumberValue(limit.unit);
+    const number = normalizeNumberValue(limit.number);
+    const usedPercent = normalizeNumberValue(limit.percentage);
+    const resetAtMsRaw = normalizeNumberValue(limit.nextResetTime);
+    const resetAtMs =
+      resetAtMsRaw !== null && Number.isFinite(resetAtMsRaw) && resetAtMsRaw > 0 ? resetAtMsRaw : null;
+    const isTimeLimit = type === 'TIME_LIMIT';
+    // Observed semantics across pro/max plans: number=5 → 5-hour prompt window
+    // (resets roll with usage), number=1 → weekly window (calendar phase),
+    // TIME_LIMIT → monthly MCP/tool quota.
+    const isFiveHour = !isTimeLimit && number === 5;
+    let labelKey: string;
+    let id: string;
+    if (isTimeLimit) {
+      labelKey = 'zhipu_quota.window_mcp';
+      id = `time-${unit ?? index}`;
+    } else {
+      labelKey = isFiveHour
+        ? 'zhipu_quota.window_tokens_5h'
+        : 'zhipu_quota.window_tokens_weekly';
+      id = `tokens-${unit ?? 'x'}-${number ?? index}`;
+    }
+    return {
+      id,
+      label: '',
+      labelKey,
+      usedPercent: usedPercent !== null && Number.isFinite(usedPercent) ? usedPercent : null,
+      resetLabel: resetAtMs !== null ? formatQuotaResetTime(resetAtMs) : '-',
+      resetAtMs,
+      resetAccuracy: resetAtMs !== null ? 'exact' : 'unknown',
+      limitWindowSeconds: isFiveHour ? MS_PER_UNIT_FALLBACK / 1000 : null,
+      windowMode: isTimeLimit || !isFiveHour ? 'calendar' : 'rolling',
+    };
+  });
+
+export const fetchZhipuQuota = async (
+  file: AuthFileItem,
+  t: TFunction,
+  requestScope?: ApiClientRequestScope
+): Promise<ZhipuQuotaData> => {
+  const rawAuthIndex = file['auth_index'] ?? file.authIndex;
+  const authIndex = normalizeAuthIndex(rawAuthIndex);
+  if (!authIndex) {
+    throw new Error(t('zhipu_quota.missing_auth_index'));
+  }
+
+  const requestConfig = requestScope ? createScopedApiRequestConfig(requestScope) : undefined;
+  const baseUrl = normalizeStringValue(
+    (file as Record<string, unknown>)[ZHIPU_BASE_URL_ATTRIBUTE]
+  );
+  if (!baseUrl) {
+    throw new Error(t('zhipu_quota.missing_base_url'));
+  }
+
+  const result = await apiCallApi.request(
+    {
+      authIndex,
+      method: 'GET',
+      url: `${baseUrl}${ZHIPU_QUOTA_LIMIT_PATH}`,
+      header: { ...ZHIPU_REQUEST_HEADERS },
+    },
+    requestConfig
+  );
+
+  if (result.statusCode < 200 || result.statusCode >= 300) {
+    throw createStatusError(getApiCallErrorMessage(result), result.statusCode);
+  }
+
+  const payload = parseZhipuQuotaPayload(result.body ?? result.bodyText);
+  if (!payload) {
+    throw new Error(t('zhipu_quota.empty_data'));
+  }
+  // Zhipu reports business failures as HTTP 200 with { code: 500, success: false },
+  // e.g. "当前用户不存在coding plan" for keys without an active plan.
+  const businessCode = normalizeNumberValue(payload.code);
+  if (payload.success === false || (businessCode !== null && businessCode !== 200)) {
+    throw createStatusError(normalizeStringValue(payload.msg) || t('zhipu_quota.empty_data'), result.statusCode);
+  }
+
+  const windows = buildZhipuQuotaWindows(payload);
+  const limits = payload.data?.limits ?? payload.limits;
+  return {
+    windows,
+    quotaInventoryObserved: Array.isArray(limits),
+    planType: normalizeStringValue(payload.data?.level ?? payload.level) || null,
+  };
+};
+
+export type OpencodeQuotaData = {
+  windows: ClaudeQuotaWindow[];
+  quotaInventoryObserved: boolean;
+};
+
+const OPENCODE_WINDOW_KEYS: Array<{ key: 'rolling' | 'weekly' | 'monthly'; id: string; labelKey: string }> = [
+  { key: 'rolling', id: 'rolling', labelKey: 'opencode_quota.window_rolling' },
+  { key: 'weekly', id: 'weekly', labelKey: 'opencode_quota.window_weekly' },
+  { key: 'monthly', id: 'monthly', labelKey: 'opencode_quota.window_monthly' },
+];
+
+const buildOpencodeQuotaWindows = (payload: OpencodeUsagePayload): ClaudeQuotaWindow[] =>
+  OPENCODE_WINDOW_KEYS.map(({ key, id, labelKey }): ClaudeQuotaWindow => {
+    const window = payload.usage?.[key];
+    const usedPercent = normalizeNumberValue(window?.percent);
+    const resetsAt = normalizeStringValue(window?.resetsAt);
+    const resetAtMs = resetsAt ? new Date(resetsAt).getTime() : null;
+    return {
+      id,
+      label: '',
+      labelKey,
+      usedPercent: usedPercent !== null && Number.isFinite(usedPercent) ? usedPercent : null,
+      resetLabel:
+        resetAtMs !== null && Number.isFinite(resetAtMs) ? formatQuotaResetTime(resetAtMs) : '-',
+      resetAtMs: resetAtMs !== null && Number.isFinite(resetAtMs) ? resetAtMs : null,
+      resetAccuracy:
+        resetAtMs !== null && Number.isFinite(resetAtMs) ? ('exact' as const) : 'unknown',
+      windowMode: key === 'rolling' ? ('rolling' as const) : ('calendar' as const),
+    };
+  }).filter((window) => window.usedPercent !== null || window.resetAtMs !== null);
+
+export const fetchOpencodeQuota = async (
+  file: AuthFileItem,
+  t: TFunction,
+  requestScope?: ApiClientRequestScope
+): Promise<OpencodeQuotaData> => {
+  const rawAuthIndex = file['auth_index'] ?? file.authIndex;
+  const authIndex = normalizeAuthIndex(rawAuthIndex);
+  if (!authIndex) {
+    throw new Error(t('opencode_quota.missing_auth_index'));
+  }
+  // Disabled compat providers are not synthesized into CPA credentials, so
+  // an api-call would only fail with "credential not found".
+  if (file.disabled === true) {
+    throw new Error(t('opencode_quota.provider_disabled'));
+  }
+
+  const result = await apiCallApi.request(
+    {
+      authIndex,
+      method: 'GET',
+      url: OPENCODE_USAGE_URL,
+      header: { ...OPENCODE_REQUEST_HEADERS },
+    },
+    requestScope ? createScopedApiRequestConfig(requestScope) : undefined
+  );
+
+  if (result.statusCode < 200 || result.statusCode >= 300) {
+    throw createStatusError(getApiCallErrorMessage(result), result.statusCode);
+  }
+
+  const payload = parseOpencodeUsagePayload(result.body ?? result.bodyText);
+  if (!payload || !payload.usage) {
+    throw new Error(t('opencode_quota.empty_data'));
+  }
+
+  return {
+    windows: buildOpencodeQuotaWindows(payload),
+    quotaInventoryObserved: true,
   };
 };
 

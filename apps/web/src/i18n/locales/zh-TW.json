@@ -1725,7 +1725,9 @@
     "headers_hint": "按 JSON 格式填寫需要額外傳送的請求標頭，例如：{\"X-My-Header\": \"value\"}",
     "headers_invalid_json": "自訂請求標頭必須是有效的 JSON。",
     "headers_invalid_object": "自訂請求標頭必須是 JSON 物件。",
-    "headers_invalid_value": "每個自訂請求標頭的值都必須是字串。"
+    "headers_invalid_value": "每個自訂請求標頭的值都必須是字串。",
+    "filter_zhipu": "智譜 Coding Plan",
+    "filter_opencode": "OpenCode Go"
   },
   "antigravity_quota": {
     "title": "Antigravity 配額",
@@ -4761,5 +4763,29 @@
       "ultra": "Ultra",
       "ultra_lite": "Ultra Lite"
     }
+  },
+  "zhipu_quota": {
+    "title": "智譜 Coding Plan 用量",
+    "idle": "點擊此處重新整理用量",
+    "loading": "正在載入用量...",
+    "load_failed": "用量取得失敗：{{message}}",
+    "missing_auth_index": "驗證檔案缺少 auth_index",
+    "missing_base_url": "未在設定中找到該憑證的智譜 base-url",
+    "empty_data": "暫無用量資料",
+    "window_tokens_5h": "Token 用量（5 小時）",
+    "window_mcp": "MCP / 工具（月度）",
+    "window_tokens_weekly": "Token 用量（每週）"
+  },
+  "opencode_quota": {
+    "title": "OpenCode Go 用量",
+    "idle": "點擊此處重新整理用量",
+    "loading": "正在載入用量...",
+    "load_failed": "用量取得失敗：{{message}}",
+    "missing_auth_index": "驗證檔案缺少 auth_index",
+    "empty_data": "暫無用量資料",
+    "window_rolling": "滾動視窗",
+    "window_weekly": "週用量",
+    "window_monthly": "月用量",
+    "provider_disabled": "該 OpenCode 提供者已停用，憑證未在 CPA 註冊，無法查詢用量"
   }
 }
