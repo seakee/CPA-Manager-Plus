@@ -84,6 +84,23 @@ const validateDecision = (decision, recordById, artifactById) => {
       acceptedStatuses.has(record.status),
       `${decision.id}: ${reference} (${record.status})`
     ).toBe(true);
+
+    if (record.pluginContract !== null) {
+      expect(
+        decision.requiredPlugin.schemaVersion,
+        `${decision.id}: ${reference} Plugin schema`
+      ).toBe(record.pluginContract.schemaVersion);
+      for (const [configKey, requiredValue] of Object.entries(record.pluginContract.config)) {
+        expect(
+          Object.hasOwn(decision.requiredPlugin.config, configKey),
+          `${decision.id}: ${reference} missing Plugin config ${configKey}`
+        ).toBe(true);
+        expect(
+          decision.requiredPlugin.config[configKey],
+          `${decision.id}: ${reference} Plugin config ${configKey}`
+        ).toEqual(requiredValue);
+      }
+    }
   }
 
   if (decision.artifactId === 'external-unnegotiated') {
@@ -150,8 +167,6 @@ describe('Phase2-04 Capability Matrix Integration / Go-No-Go', () => {
       productRole: 'advanced_compatibility_unnegotiated',
       pluginAbiSchemaVersion: null,
     });
-    expect(manifest.phase2Exit.bundleUpgrade).toBe(false);
-    expect(manifest.phase2Exit.productBehaviorChanged).toBe(false);
   });
 
   it('keeps every product decision traceable, monotonic, and artifact-scoped', () => {
@@ -179,6 +194,14 @@ describe('Phase2-04 Capability Matrix Integration / Go-No-Go', () => {
     );
     crossArtifact.evidenceRecordRefs.push('phase2-03a-candidate-request-correlation-continuity');
     expect(() => validateDecision(crossArtifact, recordById, artifactById)).toThrow();
+
+    const crossConfig = structuredClone(
+      manifest.decisions.find(
+        (decision) => decision.id === 'candidate-hard-routing-across-priorities-opt-in'
+      )
+    );
+    crossConfig.requiredPlugin.config.scheduler_across_priorities = false;
+    expect(() => validateDecision(crossConfig, recordById, artifactById)).toThrow();
   });
 
   it('separates current default, candidate default, and candidate opt-in routing limits', () => {
@@ -208,6 +231,9 @@ describe('Phase2-04 Capability Matrix Integration / Go-No-Go', () => {
       scheduler: true,
       scheduler_across_priorities: false,
     });
+    expect(candidateDefault.evidenceRecordRefs).not.toContain(
+      'phase2-02b-candidate-pre-filter-exclusion'
+    );
     expect(candidateOptIn.requiredPlugin.config).toEqual({
       scheduler: true,
       scheduler_across_priorities: true,
@@ -249,6 +275,11 @@ describe('Phase2-04 Capability Matrix Integration / Go-No-Go', () => {
       expect(decisions.get(id).upstreamDependencies).toContain(
         'upstream-attempt-and-usage-correlation'
       );
+      expect(decisions.get(id).requiredPlugin.config).toEqual({
+        request_lifecycle_plugin: true,
+        interceptor: true,
+        usage_plugin: true,
+      });
     }
 
     for (const id of ['current-terminal-observation', 'candidate-terminal-observation']) {
@@ -361,6 +392,20 @@ describe('Phase2-04 Capability Matrix Integration / Go-No-Go', () => {
     expect(
       manifest.downstreamHandoffs.find((handoff) => handoff.id === 'phase3-g2').requiredAction
     ).toContain('usage_events');
+  });
+
+  it('keeps the Phase2 exit gate closed until required checks and independent acceptance pass', () => {
+    const manifest = loadManifest();
+
+    expect(manifest.phase2Exit).toEqual({
+      status: 'ready_for_independent_acceptance',
+      result: 'go_with_explicit_limits',
+      blockingContradictions: [],
+      requiredAcceptance: ['required_checks_green', 'independent_acceptance'],
+      phase3Gate: 'closed_until_independent_acceptance',
+      bundleUpgrade: false,
+      productBehaviorChanged: false,
+    });
   });
 
   it('publishes every decision in the architecture document with repository-relative links', () => {

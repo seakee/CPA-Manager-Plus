@@ -174,7 +174,6 @@
       "productDecision": "limited",
       "evidenceRecordRefs": [
         "phase2-02b-candidate-default-highest-tier-visibility",
-        "phase2-02b-candidate-pre-filter-exclusion",
         "phase2-02b-candidate-valid-candidate-selection",
         "phase2-02b-candidate-invalid-candidate-fallback",
         "phase2-02b-candidate-pinned-auth-fencing",
@@ -183,7 +182,7 @@
       ],
       "limitations": [
         "v7.3.8 default configuration remains restricted to the highest available priority tier.",
-        "Eligibility filters and invalid scheduler fallback retain the same product boundary as v7.3.3.",
+        "The accepted default-config machine records prove highest-tier visibility, valid/invalid scheduler handling, and pinned target fencing; they do not inherit the opt-in pre-filter record.",
         "Streaming retry/reselection remains stage-limited."
       ],
       "failureBehavior": "Explicit target selection must fail closed through pinned_auth_id; default scheduler fallback cannot satisfy a hard-route promise.",
@@ -289,7 +288,8 @@
         "schemaVersion": 6,
         "config": {
           "request_lifecycle_plugin": true,
-          "interceptor": true
+          "interceptor": true,
+          "usage_plugin": true
         },
         "capabilityGeneration": "artifact-pinned"
       },
@@ -318,7 +318,8 @@
         "schemaVersion": 6,
         "config": {
           "request_lifecycle_plugin": true,
-          "interceptor": true
+          "interceptor": true,
+          "usage_plugin": true
         },
         "capabilityGeneration": "artifact-pinned"
       },

@@ -39,24 +39,24 @@ Capability status 与产品决策是两套不同词汇：
 
 ## 3. 最终 Capability Matrix 与 Go/No-Go
 
-| Decision ID                                       | Artifact / Config                         | Capability          | 产品决策   | 最终边界                                                                                                                            |
-| ------------------------------------------------- | ----------------------------------------- | ------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `current-caller-identity-source`                  | v7.3.3 Embedded                           | `partial`           | `limited`  | `caller_scope` 可作 caller/session provenance，但随 key rotation 改变，不是 Canonical APIKeyID；raw credential 边界必须脱敏。       |
-| `candidate-caller-identity-source`                | v7.3.8 candidate                          | `partial`           | `limited`  | 与 current 相同的身份/生命周期限制；不能由 candidate 推导 bundle 或 Canonical ID。                                                  |
-| `current-hard-routing-default`                    | v7.3.3 scheduler                          | `partial`           | `limited`  | 仅对 CPA 仍认可的 eligible Auth.ID 使用 `pinned_auth_id`；最高 priority tier 可见，目标不可用时 fail-closed。                       |
-| `candidate-hard-routing-default`                  | v7.3.8 scheduler，across-priorities=false | `partial`           | `limited`  | 默认仍只见最高 priority tier；invalid scheduler ID 的 builtin fallback 不算 hard routing。                                          |
-| `candidate-hard-routing-across-priorities-opt-in` | v7.3.8 scheduler，across-priorities=true  | `partial`           | `limited`  | opt-in 后可跨 priority 看见 eligible candidates，但 pre-filter、invalid fallback、stream retry 和 candidate 身份仍限制产品承诺。    |
-| `current-request-correlation-continuity`          | v7.3.3 lifecycle/interceptor              | `supported`         | `go`       | 已创建 tracker 的单次模型请求可贯穿同一 RequestID；不代表 attempt identity。                                                        |
-| `candidate-request-correlation-continuity`        | v7.3.8 lifecycle/interceptor              | `supported`         | `go`       | 保持相同 RequestID continuity；仍不授权 bundle upgrade。                                                                            |
-| `current-attempt-correlation`                     | v7.3.3 lifecycle + usage                  | `requires_upstream` | `deferred` | 重试没有 stable AttemptID/ordinal，UsageRecord 也没有精确 request/attempt/idempotency key。                                         |
-| `candidate-attempt-correlation`                   | v7.3.8 lifecycle + usage                  | `requires_upstream` | `deferred` | `publishAttemptRecord` 不等于稳定 attempt identity，不能重构 attempt ledger。                                                       |
-| `current-terminal-observation`                    | v7.3.3 lifecycle                          | `partial`           | `limited`  | tracker 内 terminal invocation 为 exactly-once，但 pre-tracker 请求、plugin fuse/reload/unavailable 会产生盲区或丢失。              |
-| `candidate-terminal-observation`                  | v7.3.8 lifecycle                          | `partial`           | `limited`  | cardinality 与 delivery/resilience 必须分开；candidate 仍是内存 best-effort delivery。                                              |
-| `current-usage-observation`                       | v7.3.3 usage plugin                       | `partial`           | `limited`  | completed usage 可用于 observed/notify；stream cancel、retry、additional-model、缺失/迟到/重复必须进入 freshness/coverage/unknown。 |
-| `candidate-usage-observation`                     | v7.3.8 usage plugin                       | `partial`           | `limited`  | candidate 增强不产生 authoritative ledger，也不解决 exact request/attempt correlation。                                             |
-| `current-precise-token-cost-quota`                | v7.3.3 usage plugin                       | `unsupported`       | `no_go`    | 无 exactly-once delivery、并发 reservation、rollback 或幂等 settlement；precise token/cost hard cap 必须禁用。                      |
-| `candidate-precise-token-cost-quota`              | v7.3.8 usage plugin                       | `unsupported`       | `no_go`    | candidate 同样缺少 reservation/settlement；generic interceptor terminate 不能提升为 precise hard quota。                            |
-| `external-capability-negotiation`                 | External unknown                          | `unknown`           | `deferred` | artifact/version、Plugin ABI/config、capability generation 未协商；不能继承 Embedded/candidate 结论。                               |
+| Decision ID                                       | Artifact / Config                         | Capability          | 产品决策   | 最终边界                                                                                                                                                               |
+| ------------------------------------------------- | ----------------------------------------- | ------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `current-caller-identity-source`                  | v7.3.3 Embedded                           | `partial`           | `limited`  | `caller_scope` 可作 caller/session provenance，但随 key rotation 改变，不是 Canonical APIKeyID；raw credential 边界必须脱敏。                                          |
+| `candidate-caller-identity-source`                | v7.3.8 candidate                          | `partial`           | `limited`  | 与 current 相同的身份/生命周期限制；不能由 candidate 推导 bundle 或 Canonical ID。                                                                                     |
+| `current-hard-routing-default`                    | v7.3.3 scheduler                          | `partial`           | `limited`  | 仅对 CPA 仍认可的 eligible Auth.ID 使用 `pinned_auth_id`；最高 priority tier 可见，目标不可用时 fail-closed。                                                          |
+| `candidate-hard-routing-default`                  | v7.3.8 scheduler，across-priorities=false | `partial`           | `limited`  | 默认仍只见最高 priority tier；机器决策只引用 default-compatible records，不继承 opt-in pre-filter record；invalid scheduler ID 的 builtin fallback 不算 hard routing。 |
+| `candidate-hard-routing-across-priorities-opt-in` | v7.3.8 scheduler，across-priorities=true  | `partial`           | `limited`  | opt-in 后可跨 priority 看见 eligible candidates，但 pre-filter、invalid fallback、stream retry 和 candidate 身份仍限制产品承诺。                                       |
+| `current-request-correlation-continuity`          | v7.3.3 lifecycle/interceptor              | `supported`         | `go`       | 已创建 tracker 的单次模型请求可贯穿同一 RequestID；不代表 attempt identity。                                                                                           |
+| `candidate-request-correlation-continuity`        | v7.3.8 lifecycle/interceptor              | `supported`         | `go`       | 保持相同 RequestID continuity；仍不授权 bundle upgrade。                                                                                                               |
+| `current-attempt-correlation`                     | v7.3.3 lifecycle + usage                  | `requires_upstream` | `deferred` | 重试没有 stable AttemptID/ordinal，UsageRecord 也没有精确 request/attempt/idempotency key。                                                                            |
+| `candidate-attempt-correlation`                   | v7.3.8 lifecycle + usage                  | `requires_upstream` | `deferred` | `publishAttemptRecord` 不等于稳定 attempt identity，不能重构 attempt ledger。                                                                                          |
+| `current-terminal-observation`                    | v7.3.3 lifecycle                          | `partial`           | `limited`  | tracker 内 terminal invocation 为 exactly-once，但 pre-tracker 请求、plugin fuse/reload/unavailable 会产生盲区或丢失。                                                 |
+| `candidate-terminal-observation`                  | v7.3.8 lifecycle                          | `partial`           | `limited`  | cardinality 与 delivery/resilience 必须分开；candidate 仍是内存 best-effort delivery。                                                                                 |
+| `current-usage-observation`                       | v7.3.3 usage plugin                       | `partial`           | `limited`  | completed usage 可用于 observed/notify；stream cancel、retry、additional-model、缺失/迟到/重复必须进入 freshness/coverage/unknown。                                    |
+| `candidate-usage-observation`                     | v7.3.8 usage plugin                       | `partial`           | `limited`  | candidate 增强不产生 authoritative ledger，也不解决 exact request/attempt correlation。                                                                                |
+| `current-precise-token-cost-quota`                | v7.3.3 usage plugin                       | `unsupported`       | `no_go`    | 无 exactly-once delivery、并发 reservation、rollback 或幂等 settlement；precise token/cost hard cap 必须禁用。                                                         |
+| `candidate-precise-token-cost-quota`              | v7.3.8 usage plugin                       | `unsupported`       | `no_go`    | candidate 同样缺少 reservation/settlement；generic interceptor terminate 不能提升为 precise hard quota。                                                               |
+| `external-capability-negotiation`                 | External unknown                          | `unknown`           | `deferred` | artifact/version、Plugin ABI/config、capability generation 未协商；不能继承 Embedded/candidate 结论。                                                                  |
 
 ## 4. Identity 与 Credential Selection
 
@@ -74,11 +74,13 @@ Secret boundary 仍是 `partial`：正常 RequestCompletion metadata 不复制�
 ### 4.2 Hard Routing
 
 当前可接受的最窄语义是：只对 CPA 已纳入 eligible candidate set 的 `Auth.ID` 进行 pinning，
-目标 missing、disabled、cooldown、provider/model mismatch 或 unauthorized 时 fail-closed。不能绕过
-CPA pre-filter。
+目标 missing、disabled、cooldown 或其他 validation failure 时 fail-closed。Plugin scheduler 的
+pre-filter evidence 必须继续按精确配置隔离，不能从 opt-in 外推到 default。
 
 - v7.3.3 default：scheduler 只看最高可用 priority tier，结论为 `limited`。
-- v7.3.8 default：仍只看最高 tier，结论为 `limited`。
+- v7.3.8 default：仍只看最高 tier，结论为 `limited`；机器决策引用 default-config visibility、
+  valid/invalid scheduler、pinned fencing、selected observation 与 stream retry records，不引用
+  `scheduler_across_priorities=true` 的 pre-filter record。
 - v7.3.8 opt-in：`SchedulerAcrossPriorities=true` 后可跨 priority 看见 eligible candidates，
   但因 pre-filter、invalid-ID fallback、stream retry 和 candidate/bundle 边界，整体仍为 `limited`。
 - scheduler 返回不在候选集的 ID 时，Host 会丢弃响应并回退 builtin selector。这个行为不能被 UI、
