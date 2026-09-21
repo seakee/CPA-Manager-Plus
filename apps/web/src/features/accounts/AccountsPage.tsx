@@ -52,7 +52,9 @@ import {
   CODEX_SUMMARY_CONFIG,
   DEVIN_CONFIG,
   KIMI_CONFIG,
+  OPENCODE_CONFIG,
   XAI_CONFIG,
+  ZHIPU_CONFIG,
   buildObservedCodexQuotaState,
   buildQuotaFailureState,
   refreshQuotaWithConfig,
@@ -228,6 +230,7 @@ import {
   resolveAccountListSubscriptionQuota,
 } from '@/features/accounts/model/accountSubscriptionPresentation';
 import { resolveAccountQuotaWindowUsageAndForecast } from '@/features/accounts/model/accountQuotaWindowUsagePresentation';
+import { isCodingPlanProviderRow } from '@/features/accounts/model/accountQuotaSummary';
 import { formatCompactNumber, formatCompactUsd, formatUsd } from '@/utils/usage';
 import {
   getAuthFileCodexInspectionKeyForFile,
@@ -322,12 +325,19 @@ import type {
   CodexQuotaState,
   DevinQuotaData,
   DevinQuotaState,
+  OpencodeQuotaState,
   XaiQuotaState,
+  ZhipuQuotaState,
 } from '@/types';
 import {
+  buildZhipuAuthIndexBaseMap,
   fetchCodexResetCredits,
+  mergeCodingPlanAuthFiles,
   type CodexResetCreditsData,
+  type OpencodeQuotaData,
+  type ZhipuQuotaData,
 } from '@/utils/quota';
+import { fetchCodingPlanAuthFiles } from '@/utils/quota/codingPlanProviders';
 import type { AuthJsonInputType } from '@/features/authFiles/sessionAuthConverter';
 import {
   maskQuotaAccountText,
@@ -338,6 +348,7 @@ import {
   commitIfQuotaCacheCurrent,
   publishAccountCredentialMutationRevision,
   useAuthStore,
+  useConfigStore,
   useNotificationStore,
   useQuotaStore,
   useThemeStore,
@@ -1272,7 +1283,7 @@ export function AccountsPage() {
   }, []);
 
   const {
-    files,
+    files: rawAuthFiles,
     selectedFiles,
     selectionCount,
     loading,
@@ -1305,6 +1316,28 @@ export function AccountsPage() {
     onCredentialMutation: handleCredentialMutation,
   });
 
+  // Config-sourced coding-plan keys (Zhipu / OpenCode) are hidden from CPA's
+  // auth-files listing; synthesize list rows by hashing the config credentials.
+  const codingPlanConfig = useConfigStore((state) => state.config);
+  const [codingPlanFiles, setCodingPlanFiles] = useState<AuthFileItem[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    fetchCodingPlanAuthFiles(codingPlanConfig)
+      .then((synthesized) => {
+        if (!cancelled) setCodingPlanFiles(synthesized);
+      })
+      .catch(() => {
+        if (!cancelled) setCodingPlanFiles([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [codingPlanConfig]);
+  const files = useMemo(
+    () => mergeCodingPlanAuthFiles(rawAuthFiles, codingPlanFiles),
+    [rawAuthFiles, codingPlanFiles]
+  );
+
   const [oauthViewMode, setOauthViewMode] = useState<'diagram' | 'list'>('list');
   const oauthState = useAuthFilesOauth({
     viewMode: oauthViewMode,
@@ -1336,6 +1369,8 @@ export function AccountsPage() {
   const devinQuota = useQuotaStore((state) => state.devinQuota);
   const kimiQuota = useQuotaStore((state) => state.kimiQuota);
   const xaiQuota = useQuotaStore((state) => state.xaiQuota);
+  const zhipuQuota = useQuotaStore((state) => state.zhipuQuota);
+  const opencodeQuota = useQuotaStore((state) => state.opencodeQuota);
   const baseQuotaStores = useMemo(
     () => ({
       antigravityQuota,
@@ -1344,8 +1379,10 @@ export function AccountsPage() {
       devinQuota,
       kimiQuota,
       xaiQuota,
+      zhipuQuota,
+      opencodeQuota,
     }),
-    [antigravityQuota, claudeQuota, codexQuota, devinQuota, kimiQuota, xaiQuota]
+    [antigravityQuota, claudeQuota, codexQuota, devinQuota, kimiQuota, xaiQuota, zhipuQuota, opencodeQuota]
   );
   const setAntigravityQuota = useQuotaStore((state) => state.setAntigravityQuota);
   const setClaudeQuota = useQuotaStore((state) => state.setClaudeQuota);
@@ -1353,6 +1390,8 @@ export function AccountsPage() {
   const setDevinQuota = useQuotaStore((state) => state.setDevinQuota);
   const setKimiQuota = useQuotaStore((state) => state.setKimiQuota);
   const setXaiQuota = useQuotaStore((state) => state.setXaiQuota);
+  const setZhipuQuota = useQuotaStore((state) => state.setZhipuQuota);
+  const setOpencodeQuota = useQuotaStore((state) => state.setOpencodeQuota);
 
   const [activeView, setActiveView] = useState<AccountsView>(
     () => initialWorkspaceUrlState.current.view
@@ -3011,6 +3050,12 @@ export function AccountsPage() {
         case KIMI_CONFIG.type:
           prune(KIMI_CONFIG, setKimiQuota);
           break;
+        case ZHIPU_CONFIG.type:
+          prune(ZHIPU_CONFIG, setZhipuQuota);
+          break;
+        case OPENCODE_CONFIG.type:
+          prune(OPENCODE_CONFIG, setOpencodeQuota);
+          break;
         case XAI_CONFIG.type:
           prune(XAI_CONFIG, setXaiQuota);
           break;
@@ -3031,7 +3076,9 @@ export function AccountsPage() {
       setCodexQuota,
       setDevinQuota,
       setKimiQuota,
+      setOpencodeQuota,
       setXaiQuota,
+      setZhipuQuota,
     ]
   );
   invalidateProviderCredentialEvidenceRef.current = invalidateProviderCredentialEvidence;
@@ -3880,6 +3927,28 @@ export function AccountsPage() {
           }
           break;
         }
+        case ZHIPU_CONFIG.type: {
+          const state = getCredentialScopedQuotaState(baseQuotaStores.zhipuQuota, row.raw);
+          if (
+            state?.status === 'success' &&
+            (state.quotaInventoryObserved === true || state.windows.length > 0)
+          ) {
+            fetchedAtMs = state.fetchedAtMs;
+            if (state.quotaInventoryObserved !== true) inventoryMode = 'partial';
+          }
+          break;
+        }
+        case OPENCODE_CONFIG.type: {
+          const state = getCredentialScopedQuotaState(baseQuotaStores.opencodeQuota, row.raw);
+          if (
+            state?.status === 'success' &&
+            (state.quotaInventoryObserved === true || state.windows.length > 0)
+          ) {
+            fetchedAtMs = state.fetchedAtMs;
+            if (state.quotaInventoryObserved !== true) inventoryMode = 'partial';
+          }
+          break;
+        }
         case XAI_CONFIG.type: {
           const state = getCredentialScopedQuotaState(baseQuotaStores.xaiQuota, row.raw);
           if (state?.status === 'success' && state.billing && !state.billing.officialApiHealth) {
@@ -4007,6 +4076,9 @@ export function AccountsPage() {
     return { codexQuotaBySelectionKey, codexHeaderSnapshotBySelectionKey };
   }, [files, getDisplayCodexHeaderSnapshot, getDisplayCodexQuota]);
 
+  const config = useConfigStore((state) => state.config);
+  const zhipuAuthIndexBases = useMemo(() => buildZhipuAuthIndexBaseMap(config), [config]);
+
   const rows = useMemo(
     () =>
       buildAccountRows(
@@ -4016,7 +4088,8 @@ export function AccountsPage() {
         accountQuotaOverrides,
         freshAccountInspectionBySelectionKey,
         credentialEvidenceBoundariesBySelectionKey,
-        credentialStatusBoundaries
+        credentialStatusBoundaries,
+        zhipuAuthIndexBases
       ),
     [
       accountQuotaOverrides,
@@ -4024,6 +4097,7 @@ export function AccountsPage() {
       files,
       credentialEvidenceBoundariesBySelectionKey,
       credentialStatusBoundaries,
+      zhipuAuthIndexBases,
       effectiveInspectionResults,
       freshAccountInspectionBySelectionKey,
     ]
@@ -6248,7 +6322,9 @@ export function AccountsPage() {
       row: AccountRow,
       mode: AccountQuotaRefreshMode = 'summary'
     ): Promise<AccountQuotaRefreshOutcome> => {
-      if (row.runtimeOnly) return { status: 'ignored' };
+      if (row.runtimeOnly && !isCodingPlanProviderRow(row.provider)) {
+        return { status: 'ignored' };
+      }
       const refreshWithConfig = <TState, TData>(
         config: QuotaConfig<TState, TData>,
         setQuota: QuotaSetter<TState>,
@@ -6327,6 +6403,22 @@ export function AccountsPage() {
               getScopedQuotaState(DEVIN_CONFIG, baseQuotaStores.devinQuota, row.raw)
             )
           );
+        case ZHIPU_CONFIG.type:
+          return toAccountQuotaRefreshOutcome(
+            await refreshWithConfig<ZhipuQuotaState, ZhipuQuotaData>(
+              ZHIPU_CONFIG,
+              setZhipuQuota,
+              getScopedQuotaState(ZHIPU_CONFIG, baseQuotaStores.zhipuQuota, row.raw)
+            )
+          );
+        case OPENCODE_CONFIG.type:
+          return toAccountQuotaRefreshOutcome(
+            await refreshWithConfig<OpencodeQuotaState, OpencodeQuotaData>(
+              OPENCODE_CONFIG,
+              setOpencodeQuota,
+              getScopedQuotaState(OPENCODE_CONFIG, baseQuotaStores.opencodeQuota, row.raw)
+            )
+          );
         default:
           return { status: 'error', error: t('common.unknown_error') };
       }
@@ -6338,7 +6430,9 @@ export function AccountsPage() {
       setCodexQuota,
       setDevinQuota,
       setKimiQuota,
+      setOpencodeQuota,
       setXaiQuota,
+      setZhipuQuota,
       t,
       authFilesRequestScope,
       baseQuotaStores,
@@ -6351,7 +6445,9 @@ export function AccountsPage() {
       if (currentBatch?.connectionFingerprint === connectionFingerprint) {
         return currentBatch.promise;
       }
-      const refreshable = targets.filter((row) => !row.runtimeOnly);
+      const refreshable = targets.filter(
+        (row) => !row.runtimeOnly || isCodingPlanProviderRow(row.provider)
+      );
       if (refreshable.length === 0) {
         showNotification(t('accounts.no_refreshable_accounts'), 'warning');
         return Promise.resolve();
@@ -6500,7 +6596,7 @@ export function AccountsPage() {
 
   const refreshAccountQuota = useCallback(
     async (row: AccountRow, mode: AccountQuotaRefreshMode = 'summary'): Promise<void> => {
-      if (row.runtimeOnly) return;
+      if (row.runtimeOnly && !isCodingPlanProviderRow(row.provider)) return;
       const refreshKey = getAccountQuotaRefreshKey(row);
       if (manualQuotaRefreshingKeysRef.current.has(refreshKey)) return;
 
@@ -8131,7 +8227,10 @@ export function AccountsPage() {
         className={`${styles.accountIconButton} ${styles.accountIconButtonRefresh}`}
         onClick={() => void refreshAccountQuota(row)}
         disabled={
-          disableControls || quotaRefreshing || isManualQuotaRefreshing(row) || row.runtimeOnly
+          disableControls ||
+          quotaRefreshing ||
+          isManualQuotaRefreshing(row) ||
+          (row.runtimeOnly && !isCodingPlanProviderRow(row.provider))
         }
         loading={isManualQuotaRefreshing(row)}
         title={t('accounts.refresh_quota')}
@@ -9744,7 +9843,11 @@ export function AccountsPage() {
               variant="secondary"
               onClick={() => void refreshAccountQuota(selectedRow, 'detail')}
               loading={quotaRefreshing || selectedQuotaRefreshing}
-              disabled={disableControls || selectedQuotaRefreshing || selectedRow.runtimeOnly}
+              disabled={
+                disableControls ||
+                selectedQuotaRefreshing ||
+                (selectedRow.runtimeOnly && !isCodingPlanProviderRow(selectedRow.provider))
+              }
             >
               {!quotaRefreshing && !selectedQuotaRefreshing ? <IconRefreshCw size={16} /> : null}
               {t('accounts.refresh_quota')}

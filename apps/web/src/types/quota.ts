@@ -301,6 +301,7 @@ export interface ClaudeQuotaWindow {
   resetAccuracy?: QuotaResetAccuracy;
   limitWindowSeconds?: number | null;
   modelScope?: QuotaModelScope;
+  windowMode?: QuotaWindowMode;
 }
 
 export interface CredentialScopedQuotaState {
@@ -475,6 +476,65 @@ export interface KimiQuotaRow {
 export interface KimiQuotaState extends CredentialScopedQuotaState {
   status: 'idle' | 'loading' | 'success' | 'error';
   rows: KimiQuotaRow[];
+  quotaInventoryObserved?: boolean;
+  error?: string;
+  errorStatus?: number;
+}
+
+// Zhipu GLM Coding Plan API payload types (GET /api/monitor/usage/quota/limit)
+export interface ZhipuQuotaLimitItem {
+  type?: string;
+  unit?: number | string;
+  number?: number | string;
+  percentage?: number | string;
+  usage?: number | string;
+  currentValue?: number | string;
+  remaining?: number | string;
+  nextResetTime?: number | string;
+  usageDetails?: Array<{ modelCode?: string; usage?: number | string }>;
+}
+
+export interface ZhipuQuotaPayload {
+  limits?: ZhipuQuotaLimitItem[];
+  level?: string;
+  code?: number | string;
+  msg?: string;
+  success?: boolean;
+  data?: {
+    limits?: ZhipuQuotaLimitItem[];
+    level?: string;
+  };
+}
+
+// OpenCode Go usage API payload types (GET /usage)
+export interface OpencodeUsageWindow {
+  status?: string;
+  percent?: number | string;
+  resetsAt?: string;
+}
+
+export interface OpencodeUsagePayload {
+  usage?: {
+    rolling?: OpencodeUsageWindow;
+    weekly?: OpencodeUsageWindow;
+    monthly?: OpencodeUsageWindow;
+  };
+}
+
+// Coding-plan quota states reuse the Claude window shape (usedPercent windows
+// with absolute resets), so Accounts/Monitoring render them identically.
+export interface ZhipuQuotaState extends CredentialScopedQuotaState {
+  status: 'idle' | 'loading' | 'success' | 'error';
+  windows: ClaudeQuotaWindow[];
+  quotaInventoryObserved?: boolean;
+  planType?: string | null;
+  error?: string;
+  errorStatus?: number;
+}
+
+export interface OpencodeQuotaState extends CredentialScopedQuotaState {
+  status: 'idle' | 'loading' | 'success' | 'error';
+  windows: ClaudeQuotaWindow[];
   quotaInventoryObserved?: boolean;
   error?: string;
   errorStatus?: number;

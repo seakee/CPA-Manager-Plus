@@ -11,8 +11,10 @@ import type {
   DevinQuotaWindow,
   KimiQuotaState,
   KimiQuotaRow,
+  OpencodeQuotaState,
   XaiBillingSummary,
   XaiQuotaState,
+  ZhipuQuotaState,
 } from '@/types';
 import type { UsageHeaderSnapshot } from '@/services/api/usageService';
 import type {
@@ -1339,6 +1341,10 @@ export const getAccountQuotaProviderLabel = (
       return t('xai_quota.title');
     case 'devin':
       return t('devin_quota.title');
+    case 'zhipu':
+      return t('zhipu_quota.title');
+    case 'opencode':
+      return t('opencode_quota.title');
     case 'codex':
     default:
       return t('codex_quota.title');
@@ -1351,6 +1357,10 @@ const getAccountQuotaEmptyMessage = (provider: MonitoringAccountQuotaProvider, t
       return t('antigravity_quota.empty_models');
     case 'claude':
       return t('claude_quota.empty_windows');
+    case 'zhipu':
+      return t('zhipu_quota.empty_data');
+    case 'opencode':
+      return t('opencode_quota.empty_data');
     case 'kimi':
       return t('kimi_quota.empty_data');
     case 'xai':
@@ -1388,6 +1398,8 @@ export type MonitoringQuotaStores = {
   devinQuota: Record<string, DevinQuotaState>;
   kimiQuota: Record<string, KimiQuotaState>;
   xaiQuota: Record<string, XaiQuotaState>;
+  zhipuQuota: Record<string, ZhipuQuotaState>;
+  opencodeQuota: Record<string, OpencodeQuotaState>;
 };
 
 export type MonitoringProviderQuotaState =
@@ -1396,7 +1408,9 @@ export type MonitoringProviderQuotaState =
   | CodexQuotaState
   | DevinQuotaState
   | KimiQuotaState
-  | XaiQuotaState;
+  | XaiQuotaState
+  | ZhipuQuotaState
+  | OpencodeQuotaState;
 
 type ProviderQuotaStateMetadata = {
   fetchedAtMs?: number;
@@ -1477,6 +1491,28 @@ export const buildAccountQuotaEntryFromProviderState = (
         {
           ...buildBaseAccountQuotaEntry(target, t),
           windows: buildKimiAccountQuotaWindows(quota.rows, t),
+        },
+        quota
+      );
+    }
+    case 'zhipu': {
+      const quota = state as ZhipuQuotaState;
+      const planType = quota.planType ?? target.planType;
+      return applyProviderQuotaStateMetadata(
+        {
+          ...buildBaseAccountQuotaEntry({ ...target, planType }, t),
+          planType,
+          windows: buildClaudeAccountQuotaWindows(quota.windows, t),
+        },
+        quota
+      );
+    }
+    case 'opencode': {
+      const quota = state as OpencodeQuotaState;
+      return applyProviderQuotaStateMetadata(
+        {
+          ...buildBaseAccountQuotaEntry(target, t),
+          windows: buildClaudeAccountQuotaWindows(quota.windows, t),
         },
         quota
       );
@@ -1590,6 +1626,18 @@ export const buildCachedAccountQuotaEntry = (
       return buildAccountQuotaEntryFromProviderState(
         target,
         getCredentialScopedQuotaState(stores.xaiQuota, target.file),
+        t
+      );
+    case 'zhipu':
+      return buildAccountQuotaEntryFromProviderState(
+        target,
+        getCredentialScopedQuotaState(stores.zhipuQuota, target.file),
+        t
+      );
+    case 'opencode':
+      return buildAccountQuotaEntryFromProviderState(
+        target,
+        getCredentialScopedQuotaState(stores.opencodeQuota, target.file),
         t
       );
   }

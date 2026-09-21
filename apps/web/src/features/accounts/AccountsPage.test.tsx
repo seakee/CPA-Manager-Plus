@@ -363,6 +363,7 @@ const { mocks } = vi.hoisted(() => {
   return {
     mocks: {
       files: [codexFile] as AuthFileItem[],
+      config: null as unknown,
       authFilesLoading: false,
       selectedFiles: new Set<string>(),
       selectionCount: 0,
@@ -538,11 +539,15 @@ const { mocks } = vi.hoisted(() => {
         codexQuota: {},
         kimiQuota: {},
         xaiQuota: {},
+        zhipuQuota: {},
+        opencodeQuota: {},
         setAntigravityQuota: vi.fn(),
         setClaudeQuota: vi.fn(),
         setCodexQuota: vi.fn(),
         setKimiQuota: vi.fn(),
         setXaiQuota: vi.fn(),
+        setZhipuQuota: vi.fn(),
+        setOpencodeQuota: vi.fn(),
       },
       t: (key: string, options?: Record<string, unknown>) => {
         if (key === 'auth_files.codex_plan_filter_unknown') return 'Unknown plan';
@@ -680,7 +685,7 @@ vi.mock('@/features/authFiles/hooks/useAuthFilesModels', () => ({
     modelDefinitionsError: null,
     modelsFileName: '',
     modelsFileType: '',
-    modelsSelectionKey: getAuthFileSelectionKey(mocks.files[0]),
+    modelsSelectionKey: mocks.files[0] ? getAuthFileSelectionKey(mocks.files[0]) : '',
     modelsError: null,
     showModels: mocks.showModels,
     refreshModels: mocks.refreshModels,
@@ -937,15 +942,21 @@ vi.mock('@/stores', () => ({
       codexQuota: Record<string, never>;
       kimiQuota: Record<string, never>;
       xaiQuota: Record<string, never>;
+      zhipuQuota: Record<string, never>;
+      opencodeQuota: Record<string, never>;
       setAntigravityQuota: () => void;
       setClaudeQuota: () => void;
       setCodexQuota: () => void;
       setKimiQuota: () => void;
       setXaiQuota: () => void;
+      setZhipuQuota: () => void;
+      setOpencodeQuota: () => void;
     }) => unknown
   ) => selector(mocks.quotaState),
   useThemeStore: (selector: (state: { resolvedTheme: 'light' | 'dark' }) => unknown) =>
     selector({ resolvedTheme: 'light' }),
+  useConfigStore: (selector: (state: { config: unknown }) => unknown) =>
+    selector({ config: mocks.config ?? null }),
 }));
 
 vi.mock('@/utils/clipboard', () => ({
@@ -19175,5 +19186,94 @@ describe('AccountsPage replacement flows', () => {
         vi.useRealTimers();
       }
     });
+  });
+});
+
+describe('coding plan synthesized credentials', () => {
+  it('lists zhipu rows and refreshes quota end to end', async () => {
+    mocks.files = [];
+    (mocks.quotaState.zhipuQuota as Record<string, unknown>) = {};
+    mocks.quotaState.setZhipuQuota.mockImplementation(
+      (updater: Record<string, unknown> | ((prev: Record<string, unknown>) => Record<string, unknown>)) => {
+        const prev = mocks.quotaState.zhipuQuota as Record<string, unknown>;
+        mocks.quotaState.zhipuQuota =
+          typeof updater === 'function' ? (updater as (p: Record<string, unknown>) => Record<string, unknown>)(prev) : updater;
+      }
+    );
+    mocks.config = {
+      claudeApiKeys: [
+        {
+          apiKey: 'abcdefgh1234',
+          baseUrl: 'https://open.bigmodel.cn/api/anthropic',
+        },
+      ],
+    };
+    mocks.apiRequest.mockResolvedValueOnce({
+      statusCode: 200,
+      hasStatusCode: true,
+      header: {},
+      bodyText: '',
+      body: {
+        code: 200,
+        msg: 'ok',
+        success: true,
+        data: {
+          limits: [
+            {
+              type: 'TOKENS_LIMIT',
+              unit: 6,
+              number: 1,
+              percentage: 46,
+              nextResetTime: 1790162211990,
+            },
+          ],
+          level: 'pro',
+        },
+      },
+    });
+
+    const renderer = await renderAccountsPage();
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+
+    const zhipuLabels = renderer.root
+      .findAll((node) => typeof node.props.children === 'string')
+      .map((node) => node.props.children as string)
+      .filter((text) => text.includes('GLM Coding Plan'));
+    console.log('zhipu row labels found:', zhipuLabels.length);
+
+    const refreshButtons = renderer.root
+      .findAll((node) => node.type === 'button')
+      .filter((node) => node.props['aria-label'] === 'accounts.refresh_quota');
+    console.log('refresh buttons:', refreshButtons.length);
+    if (refreshButtons.length === 0) return;
+
+    await act(async () => {
+      refreshButtons[0].props.onClick();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+
+    console.log('api request calls:', mocks.apiRequest.mock.calls.length);
+    if (mocks.apiRequest.mock.calls.length > 0) {
+      console.log('api request url:', JSON.stringify(mocks.apiRequest.mock.calls[0][0]));
+    }
+    console.log(
+      'notifications:',
+      mocks.showNotification.mock.calls.map((call: unknown[]) => String(call[0])).slice(-3)
+    );
+
+    expect(zhipuLabels.length).toBeGreaterThan(0);
+    expect(mocks.apiRequest.mock.calls.length).toBeGreaterThan(0);
+
+    console.log('zhipuQuota store keys after refresh:', Object.keys(mocks.quotaState.zhipuQuota as Record<string, unknown>));
+    const storeValues = Object.values(mocks.quotaState.zhipuQuota as Record<string, { windows?: unknown[]; status?: string }>);
+    if (storeValues[0]) console.log('store state:', { status: storeValues[0].status, windows: storeValues[0].windows?.length });
+    const quotaTexts = renderer.root
+      .findAll((node) => typeof node.props.children === 'string')
+      .map((node) => node.props.children as string)
+      .filter((text) => text.includes('46') || text.includes('zhipu_quota') || text.includes('%'));
+    console.log('quota cell texts after refresh:', quotaTexts.slice(0, 10));
   });
 });

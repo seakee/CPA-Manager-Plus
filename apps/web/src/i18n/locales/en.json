@@ -1727,7 +1727,9 @@
     "headers_hint": "Enter extra request headers as JSON, for example {\"X-My-Header\": \"value\"}",
     "headers_invalid_json": "Custom headers must be valid JSON.",
     "headers_invalid_object": "Custom headers must be a JSON object.",
-    "headers_invalid_value": "Each custom header value must be a string."
+    "headers_invalid_value": "Each custom header value must be a string.",
+    "filter_zhipu": "Zhipu Coding Plan",
+    "filter_opencode": "OpenCode Go"
   },
   "antigravity_quota": {
     "title": "Antigravity Quota",
@@ -4763,5 +4765,29 @@
       "ultra": "Ultra",
       "ultra_lite": "Ultra Lite"
     }
+  },
+  "zhipu_quota": {
+    "title": "Zhipu Coding Plan Usage",
+    "idle": "Click here to refresh usage",
+    "loading": "Loading usage...",
+    "load_failed": "Failed to load usage: {{message}}",
+    "missing_auth_index": "Auth file missing auth_index",
+    "missing_base_url": "No Zhipu base-url found for this credential in config",
+    "empty_data": "No usage data available",
+    "window_tokens_5h": "Token usage (5-hour)",
+    "window_mcp": "MCP / tools (monthly)",
+    "window_tokens_weekly": "Token usage (weekly)"
+  },
+  "opencode_quota": {
+    "title": "OpenCode Go Usage",
+    "idle": "Click here to refresh usage",
+    "loading": "Loading usage...",
+    "load_failed": "Failed to load usage: {{message}}",
+    "missing_auth_index": "Auth file missing auth_index",
+    "empty_data": "No usage data available",
+    "window_rolling": "Rolling window",
+    "window_weekly": "Weekly usage",
+    "window_monthly": "Monthly usage",
+    "provider_disabled": "This OpenCode provider is disabled; its credential is not registered in CPA, so usage cannot be queried"
   }
 }

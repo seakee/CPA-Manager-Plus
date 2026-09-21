@@ -4,6 +4,7 @@ import type { AuthFileItem } from '@/types/authFile';
 import type { CredentialInfo } from '@/types/sourceInfo';
 import { buildSourceInfoMap } from '@/utils/sourceResolver';
 import { collectUsageDetailsWithEndpoint, normalizeAuthIndex } from '@/utils/usage';
+import { fetchCodingPlanAuthFiles, mergeCodingPlanAuthFiles } from '@/utils/quota/codingPlanProviders';
 import { readString } from '../model/base';
 import { buildApiKeyDisplayMap } from '../model/apiKeys';
 import { buildMonitoringAuthMetaMap } from '../model/authMeta';
@@ -326,7 +327,28 @@ export function useMonitoringData({
   useLayoutEffect(() => {
     connectionScopeKeyRef.current = connectionScopeKey ?? null;
   }, [connectionScopeKey]);
-  const [authFiles, setAuthFiles] = useState<AuthFileItem[]>([]);
+  const [rawAuthFiles, setAuthFiles] = useState<AuthFileItem[]>([]);
+  // Config-sourced coding-plan keys (Zhipu / OpenCode) never appear in CPA's
+  // auth-files listing; synthesize list rows by hashing the config credentials.
+  const [codingPlanFiles, setCodingPlanFiles] = useState<AuthFileItem[]>([]);
+  useEffect(() => {
+    if (!config) return;
+    let cancelled = false;
+    fetchCodingPlanAuthFiles(config)
+      .then((synthesized) => {
+        if (!cancelled) setCodingPlanFiles(synthesized);
+      })
+      .catch(() => {
+        if (!cancelled) setCodingPlanFiles([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [config]);
+  const authFiles = useMemo(
+    () => mergeCodingPlanAuthFiles(rawAuthFiles, codingPlanFiles),
+    [rawAuthFiles, codingPlanFiles]
+  );
   const [authFilesLoaded, setAuthFilesLoaded] = useState(false);
   const [channels, setChannels] = useState<MonitoringChannelMeta[]>([]);
   const [channelsLoaded, setChannelsLoaded] = useState(false);
