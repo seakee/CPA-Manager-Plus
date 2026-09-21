@@ -76,6 +76,7 @@ const validateDecision = (decision, recordById, artifactById) => {
   expect(decision.deploymentMode, decision.id).toBe(artifact.deploymentMode);
 
   const acceptedStatuses = STATUS_INPUTS[decision.capabilityStatus];
+  const minimumRequiredConfig = {};
   for (const reference of decision.evidenceRecordRefs) {
     const record = recordById.get(reference);
     expect(record, `${decision.id}: ${reference}`).toBeDefined();
@@ -91,14 +92,14 @@ const validateDecision = (decision, recordById, artifactById) => {
         `${decision.id}: ${reference} Plugin schema`
       ).toBe(record.pluginContract.schemaVersion);
       for (const [configKey, requiredValue] of Object.entries(record.pluginContract.config)) {
-        expect(
-          Object.hasOwn(decision.requiredPlugin.config, configKey),
-          `${decision.id}: ${reference} missing Plugin config ${configKey}`
-        ).toBe(true);
-        expect(
-          decision.requiredPlugin.config[configKey],
-          `${decision.id}: ${reference} Plugin config ${configKey}`
-        ).toEqual(requiredValue);
+        if (Object.hasOwn(minimumRequiredConfig, configKey)) {
+          expect(
+            minimumRequiredConfig[configKey],
+            `${decision.id}: ${reference} conflicting Plugin config ${configKey}`
+          ).toEqual(requiredValue);
+        } else {
+          minimumRequiredConfig[configKey] = requiredValue;
+        }
       }
     }
   }
@@ -111,7 +112,9 @@ const validateDecision = (decision, recordById, artifactById) => {
     });
   } else {
     expect(decision.requiredPlugin.schemaVersion, decision.id).toBe(6);
-    expect(decision.requiredPlugin.config, decision.id).not.toBeNull();
+    expect(decision.requiredPlugin.config, `${decision.id}: minimum Plugin config`).toEqual(
+      minimumRequiredConfig
+    );
     expect(decision.requiredPlugin.capabilityGeneration, decision.id).toBe('artifact-pinned');
   }
 };
@@ -202,6 +205,12 @@ describe('Phase2-04 Capability Matrix Integration / Go-No-Go', () => {
     );
     crossConfig.requiredPlugin.config.scheduler_across_priorities = false;
     expect(() => validateDecision(crossConfig, recordById, artifactById)).toThrow();
+
+    const unsupportedConfig = structuredClone(
+      manifest.decisions.find((decision) => decision.id === 'current-hard-routing-default')
+    );
+    unsupportedConfig.requiredPlugin.config.usage_plugin = true;
+    expect(() => validateDecision(unsupportedConfig, recordById, artifactById)).toThrow();
   });
 
   it('separates current default, candidate default, and candidate opt-in routing limits', () => {
@@ -384,14 +393,25 @@ describe('Phase2-04 Capability Matrix Integration / Go-No-Go', () => {
       'runtime-bridge',
       'release-matrix',
     ]);
+    const handoffIds = new Set(manifest.downstreamHandoffs.map((handoff) => handoff.id));
     for (const handoff of manifest.downstreamHandoffs) {
       expect(handoff.mayConsume.length, handoff.id).toBeGreaterThan(0);
       expect(handoff.mustNotAssume.length, handoff.id).toBeGreaterThan(0);
       expect(handoff.requiredAction.length, handoff.id).toBeGreaterThan(0);
     }
+    for (const decision of manifest.decisions) {
+      for (const owner of decision.downstreamOwners) {
+        expect(handoffIds.has(owner), `${decision.id}: ${owner}`).toBe(true);
+      }
+    }
     expect(
       manifest.downstreamHandoffs.find((handoff) => handoff.id === 'phase3-g2').requiredAction
     ).toContain('usage_events');
+    const phase5ResourceGovernance = manifest.downstreamHandoffs.find(
+      (handoff) => handoff.id === 'phase5-r2-r4'
+    );
+    expect(phase5ResourceGovernance.mayConsume).toContain('eligible pinned credential selection');
+    expect(phase5ResourceGovernance.requiredAction).toContain('Phase6 / Advanced Gateway');
   });
 
   it('keeps the Phase2 exit gate closed until required checks and independent acceptance pass', () => {

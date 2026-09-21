@@ -158,14 +158,18 @@ compatibility，但 Identity、Routing、Correlation、Usage/Quota 等能力保�
 
 ## 9. Downstream handoff
 
-| Owner          | 可以消费                                                        | 禁止假设                                                     | 交接动作                                                                     |
-| -------------- | --------------------------------------------------------------- | ------------------------------------------------------------ | ---------------------------------------------------------------------------- |
-| Phase3 G1      | Runtime identity、CPA Auth.ID、caller_scope provenance          | caller_scope 是 Canonical APIKeyID                           | 创建不可复用 Canonical APIKeyID/CredentialID、generation 和 source binding。 |
-| Phase3 G2      | RequestID、selected credential observation、现有 usage evidence | attempt history 可重构；可改写 `usage_events`                | 建立 shadow mapping 与最小 Policy/Event 关联，保持 `usage_events` 不可变。   |
-| Phase5 R1      | completed usage observation                                     | usage 是 authoritative balance                               | 交付带 freshness/coverage/unknown 的 observed/notify。                       |
-| Phase5 R2–R4   | eligible pinning、后续 metric-specific capability               | generic terminate 等于 hard quota；current 可跨所有 priority | 每个 soft/hard/ACL/group 功能独立按 metric/version/config 验收。             |
-| Runtime Bridge | 产品真实需要的窄 adapter                                        | 需要第二套 Runtime Protocol；External 可 fail-open           | 只适配已证明能力，并对 unknown/stale negotiation fail-closed。               |
-| Release matrix | 精确 artifact/config/mode 决策                                  | candidate 自动升级 bundle；External 继承 Embedded            | 单独完成 bundle/compatibility 验收后再声明支持。                             |
+| Owner          | 可以消费                                                        | 禁止假设                                                                                             | 交接动作                                                                                                                                                                                            |
+| -------------- | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Phase3 G1      | Runtime identity、CPA Auth.ID、caller_scope provenance          | caller_scope 是 Canonical APIKeyID                                                                   | 创建不可复用 Canonical APIKeyID/CredentialID、generation 和 source binding。                                                                                                                        |
+| Phase3 G2      | RequestID、selected credential observation、现有 usage evidence | attempt history 可重构；可改写 `usage_events`                                                        | 建立 shadow mapping 与最小 Policy/Event 关联，保持 `usage_events` 不可变。                                                                                                                          |
+| Phase5 R1      | completed usage observation                                     | usage 是 authoritative balance                                                                       | 交付带 freshness/coverage/unknown 的 observed/notify。                                                                                                                                              |
+| Phase5 R2–R4   | eligible pinning、后续 metric-specific capability               | generic terminate 等于 hard quota；current 可跨所有 priority；Phase5 R4 实现 standalone Hard Routing | 每个 soft/hard/ACL/group 功能独立按 metric/version/config 验收；eligible pinning 仅作为 capability-supported ACL/group policy primitive，standalone Hard Routing 保留给 Phase6 / Advanced Gateway。 |
+| Runtime Bridge | 产品真实需要的窄 adapter                                        | 需要第二套 Runtime Protocol；External 可 fail-open                                                   | 只适配已证明能力，并对 unknown/stale negotiation fail-closed。                                                                                                                                      |
+| Release matrix | 精确 artifact/config/mode 决策                                  | candidate 自动升级 bundle；External 继承 Embedded                                                    | 单独完成 bundle/compatibility 验收后再声明支持。                                                                                                                                                    |
+
+这里的 `eligible pinning` 只作为 Phase5 ACL/CredentialGroup policy 可消费的 credential-selection
+primitive；它不把 standalone Hard Routing 提前到 Phase5。Hard / Health-aware / Weighted /
+Cost-aware Routing 及其 Fallback 仍属于 Phase6 / Advanced Gateway。
 
 ## 10. Phase2 退出结论
 

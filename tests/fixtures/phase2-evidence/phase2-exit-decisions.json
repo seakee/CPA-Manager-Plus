@@ -154,7 +154,7 @@
       "failureBehavior": "A product hard-route request must use pinned_auth_id and fail closed when the eligible target is unavailable; invalid scheduler fallback must never be reported as target success.",
       "fallback": "Disable the hard-route action or present highest-tier-only eligibility; do not silently select a different credential for an explicit target.",
       "upstreamDependencies": [],
-      "downstreamOwners": ["phase5-r4", "runtime-bridge"]
+      "downstreamOwners": ["phase5-r2-r4", "runtime-bridge"]
     },
     {
       "id": "candidate-hard-routing-default",
@@ -188,7 +188,7 @@
       "failureBehavior": "Explicit target selection must fail closed through pinned_auth_id; default scheduler fallback cannot satisfy a hard-route promise.",
       "fallback": "Keep the candidate in evidence-only status and expose only the verified highest-tier boundary.",
       "upstreamDependencies": [],
-      "downstreamOwners": ["phase5-r4", "release-matrix"]
+      "downstreamOwners": ["phase5-r2-r4", "release-matrix"]
     },
     {
       "id": "candidate-hard-routing-across-priorities-opt-in",
@@ -224,7 +224,7 @@
       "failureBehavior": "Unknown, filtered, disabled, cooldown, or otherwise ineligible targets must fail closed; a built-in fallback must not be called hard routing.",
       "fallback": "Remain on the current bundle or disable across-priority routing until a separate bundle/release acceptance enables this exact configuration.",
       "upstreamDependencies": [],
-      "downstreamOwners": ["phase5-r4", "release-matrix"]
+      "downstreamOwners": ["phase5-r2-r4", "release-matrix"]
     },
     {
       "id": "current-request-correlation-continuity",
@@ -685,9 +685,10 @@
       "mustNotAssume": [
         "generic interceptor termination proves precise quota",
         "token/cost hard quota is available",
-        "all priority tiers are visible in the current bundle"
+        "all priority tiers are visible in the current bundle",
+        "eligible pinning makes standalone Hard Routing a Phase5 R4 capability"
       ],
-      "requiredAction": "Gate every soft/hard/ACL/group feature by exact metric, version, config, and independently accepted capability."
+      "requiredAction": "Gate every soft/hard/ACL/group feature by exact metric, version, config, and independently accepted capability. Use eligible pinning only for capability-supported Phase5 ACL/group policy; standalone Hard Routing remains Phase6 / Advanced Gateway."
     },
     {
       "id": "runtime-bridge",
