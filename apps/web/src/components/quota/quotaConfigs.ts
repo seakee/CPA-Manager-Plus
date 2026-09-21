@@ -12,8 +12,10 @@ import type {
   KimiQuotaState,
   MetaQuotaData,
   MetaQuotaState,
+  OpencodeQuotaState,
   XaiBillingSummary,
   XaiQuotaState,
+  ZhipuQuotaState,
 } from '@/types';
 import type { UsageHeaderSnapshot } from '@/services/api/usageService';
 import type { AuthFilesApiRequestScope } from '@/services/api/authFiles';
@@ -23,6 +25,8 @@ import type {
   CodexQuotaData,
   KimiQuotaData,
   QuotaFetchContext,
+  OpencodeQuotaData,
+  ZhipuQuotaData,
 } from '@/utils/quota';
 import {
   buildCodexQuotaWindows,
@@ -33,7 +37,9 @@ import {
   fetchDevinQuota,
   fetchKimiQuota,
   fetchMetaQuota,
+  fetchOpencodeQuota,
   fetchXaiQuota,
+  fetchZhipuQuota,
   filterFreshCodexQuotaWindows,
   findCodexProviderWindowMatch,
   isCodexMainQuotaWindow,
@@ -60,7 +66,16 @@ import {
   scopeQuotaStateToCredential,
 } from '@/utils/quota/credentialScope';
 
-type QuotaType = 'antigravity' | 'claude' | 'codex' | 'kimi' | 'xai' | 'devin' | 'meta';
+type QuotaType =
+  | 'antigravity'
+  | 'claude'
+  | 'codex'
+  | 'kimi'
+  | 'xai'
+  | 'devin'
+  | 'meta'
+  | 'zhipu'
+  | 'opencode';
 
 export type { QuotaFetchContext };
 
@@ -795,6 +810,63 @@ export const KIMI_CONFIG: QuotaConfig<KimiQuotaState, KimiQuotaData> = {
   buildErrorState: (message, status, file) => ({
     status: 'error',
     rows: [],
+    error: message,
+    errorStatus: status,
+    ...buildQuotaCredentialIdentity(file),
+    failedAtMs: Date.now(),
+  }),
+  scopeState: scopeCredentialQuotaState,
+};
+
+export const ZHIPU_CONFIG: QuotaConfig<ZhipuQuotaState, ZhipuQuotaData> = {
+  type: 'zhipu',
+  i18nPrefix: 'zhipu_quota',
+  fetchQuota: fetchZhipuQuota,
+  getStoreKey: getQuotaCredentialStoreKey,
+  buildLoadingState: (file) => ({
+    status: 'loading',
+    windows: [],
+    ...buildQuotaCredentialIdentity(file),
+  }),
+  buildSuccessState: (data, file) => ({
+    status: 'success',
+    windows: data.windows,
+    quotaInventoryObserved: data.quotaInventoryObserved,
+    planType: data.planType,
+    ...buildQuotaCredentialIdentity(file),
+    fetchedAtMs: Date.now(),
+  }),
+  buildErrorState: (message, status, file) => ({
+    status: 'error',
+    windows: [],
+    error: message,
+    errorStatus: status,
+    ...buildQuotaCredentialIdentity(file),
+    failedAtMs: Date.now(),
+  }),
+  scopeState: scopeCredentialQuotaState,
+};
+
+export const OPENCODE_CONFIG: QuotaConfig<OpencodeQuotaState, OpencodeQuotaData> = {
+  type: 'opencode',
+  i18nPrefix: 'opencode_quota',
+  fetchQuota: fetchOpencodeQuota,
+  getStoreKey: getQuotaCredentialStoreKey,
+  buildLoadingState: (file) => ({
+    status: 'loading',
+    windows: [],
+    ...buildQuotaCredentialIdentity(file),
+  }),
+  buildSuccessState: (data, file) => ({
+    status: 'success',
+    windows: data.windows,
+    quotaInventoryObserved: data.quotaInventoryObserved,
+    ...buildQuotaCredentialIdentity(file),
+    fetchedAtMs: Date.now(),
+  }),
+  buildErrorState: (message, status, file) => ({
+    status: 'error',
+    windows: [],
     error: message,
     errorStatus: status,
     ...buildQuotaCredentialIdentity(file),

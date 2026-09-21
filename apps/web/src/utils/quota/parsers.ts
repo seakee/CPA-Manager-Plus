@@ -6,7 +6,9 @@ import type {
   ClaudeUsagePayload,
   CodexUsagePayload,
   KimiUsagePayload,
+  OpencodeUsagePayload,
   XaiBillingPayload,
+  ZhipuQuotaPayload,
 } from '@/types';
 import { normalizeAuthIndex } from '@/utils/authIndex';
 
@@ -199,6 +201,40 @@ export function parseXaiBillingPayload(payload: unknown): XaiBillingPayload | nu
   }
   if (typeof payload === 'object') {
     return payload as XaiBillingPayload;
+  }
+  return null;
+}
+
+export function parseZhipuQuotaPayload(payload: unknown): ZhipuQuotaPayload | null {
+  if (payload === undefined || payload === null) return null;
+  if (typeof payload === 'string') {
+    const trimmed = payload.trim();
+    if (!trimmed) return null;
+    try {
+      return JSON.parse(trimmed) as ZhipuQuotaPayload;
+    } catch {
+      return null;
+    }
+  }
+  if (typeof payload === 'object') {
+    return payload as ZhipuQuotaPayload;
+  }
+  return null;
+}
+
+export function parseOpencodeUsagePayload(payload: unknown): OpencodeUsagePayload | null {
+  if (payload === undefined || payload === null) return null;
+  if (typeof payload === 'string') {
+    const trimmed = payload.trim();
+    if (!trimmed) return null;
+    try {
+      return JSON.parse(trimmed) as OpencodeUsagePayload;
+    } catch {
+      return null;
+    }
+  }
+  if (typeof payload === 'object') {
+    return payload as OpencodeUsagePayload;
   }
   return null;
 }

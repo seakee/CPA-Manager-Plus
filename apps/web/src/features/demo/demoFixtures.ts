@@ -42,7 +42,9 @@ import type {
   DevinQuotaState,
   KimiQuotaState,
   MetaQuotaState,
+  OpencodeQuotaState,
   XaiQuotaState,
+  ZhipuQuotaState,
 } from '@/types';
 import type { ModelInfo } from '@/utils/models';
 import { formatXaiProbeIssue } from '@/utils/quota/xaiPresentation';
@@ -70,6 +72,8 @@ export type DemoQuotaStoreState = {
   kimiQuota: Record<string, KimiQuotaState>;
   metaQuota: Record<string, MetaQuotaState>;
   xaiQuota: Record<string, XaiQuotaState>;
+  zhipuQuota: Record<string, ZhipuQuotaState>;
+  opencodeQuota: Record<string, OpencodeQuotaState>;
 };
 
 const clone = <T>(value: T): T => {
@@ -6875,6 +6879,8 @@ const getDemoQuotaStoreStateByFileName = (
     },
   },
   devinQuota: {},
+  zhipuQuota: {},
+  opencodeQuota: {},
 });
 
 const scopeDemoQuotaRecord = <TState extends CredentialScopedQuotaState>(
@@ -6915,6 +6921,8 @@ export const getDemoQuotaStoreState = (baseNow = getDemoEvidenceEpochMs()): Demo
     kimiQuota: scopeDemoQuotaRecord(raw.kimiQuota, filesByName),
     metaQuota: scopeDemoQuotaRecord(raw.metaQuota, filesByName),
     xaiQuota: scopeDemoQuotaRecord(raw.xaiQuota, filesByName),
+    zhipuQuota: scopeDemoQuotaRecord(raw.zhipuQuota, filesByName),
+    opencodeQuota: scopeDemoQuotaRecord(raw.opencodeQuota, filesByName),
   };
 };
 

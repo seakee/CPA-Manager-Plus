@@ -1,4 +1,5 @@
 import type { AuthFileItem } from '@/types';
+import type { ZhipuAuthIndexBaseMap } from '@/utils/quota/codingPlanProviders';
 import type { CodexInspectionResult } from '@/services/api/usageService';
 import type { TFunction } from 'i18next';
 import {
@@ -411,12 +412,13 @@ export const buildAccountRows = (
   overrides?: AccountQuotaOverrides,
   inspectionBySelectionKey?: ReadonlyMap<string, AccountInspectionSummary>,
   evidenceBoundaryBySelectionKey?: ReadonlyMap<string, AccountCredentialEvidenceBoundary>,
-  statusBoundaryBySelectionKey?: ReadonlyMap<string, AccountCredentialEvidenceBoundary>
+  statusBoundaryBySelectionKey?: ReadonlyMap<string, AccountCredentialEvidenceBoundary>,
+  zhipuBases?: ZhipuAuthIndexBaseMap
 ): AccountRow[] => {
   const resolvedInspectionBySelectionKey =
     inspectionBySelectionKey ?? buildAccountInspectionBySelectionKey(files, inspectionResults);
   return files.map((file) => {
-    const provider = normalizeAccountProvider(file);
+    const provider = normalizeAccountProvider(file, zhipuBases);
     const authIndex = readAuthIndex(file);
     const selectionKey = getAuthFileSelectionKey(file);
     const resolvedInspection = resolvedInspectionBySelectionKey.get(selectionKey) ?? null;
@@ -501,7 +503,7 @@ export const buildAccountRows = (
         authenticationAtMs > 0 &&
         updatedAtMs !== null &&
         authenticationAtMs >= updatedAtMs);
-    const quota = resolveAccountQuota(effectiveFile, stores, overrides);
+    const quota = resolveAccountQuota(effectiveFile, stores, overrides, zhipuBases);
     const planType = quota.planType ?? readPlanType(file);
     const subscriptionUntilMs = buildAccountSubscriptionPresentation({
       row: {

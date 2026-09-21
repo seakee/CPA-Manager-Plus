@@ -1153,12 +1153,53 @@ const buildOverviewActivity = (
   };
 };
 
+// Mirrors the status bar grid in utils/recentRequests (not exported there):
+// one bucket per 10-minute block, 20 blocks aligned to now.
+const RECENT_BLOCK_COUNT = 20;
+const RECENT_BLOCK_DURATION_MS = 10 * 60 * 1000;
+
+/**
+ * Aggregates per-request history entries into the fixed time-grid bucket
+ * shape the status bar consumes (one bucket == one block; the bar does not
+ * re-bucket by time). Synthesized rows have no auth-file recent_requests,
+ * so their recent activity comes from the account-history query instead.
+ */
+export const latestRequestsToRecentBuckets = (
+  requests: Array<{ timestamp_ms?: number | string; failed?: boolean }> | null | undefined
+): RecentRequestBucket[] => {
+  const entries = requests ?? [];
+  if (entries.length === 0) return [];
+  const now = Date.now();
+  const blocks: RecentRequestBucket[] = Array.from({ length: RECENT_BLOCK_COUNT }, () => ({
+    success: 0,
+    failed: 0,
+  }));
+  let inWindow = false;
+  entries.forEach((request) => {
+    const timestamp =
+      typeof request.timestamp_ms === 'number'
+        ? request.timestamp_ms
+        : Date.parse(String(request.timestamp_ms ?? ''));
+    if (!Number.isFinite(timestamp)) return;
+    const age = now - timestamp;
+    if (age < 0 || age >= RECENT_BLOCK_COUNT * RECENT_BLOCK_DURATION_MS) return;
+    const blockIndex = RECENT_BLOCK_COUNT - 1 - Math.floor(age / RECENT_BLOCK_DURATION_MS);
+    if (request.failed) blocks[blockIndex].failed += 1;
+    else blocks[blockIndex].success += 1;
+    inWindow = true;
+  });
+  return inWindow ? blocks : [];
+};
+
 export const buildOverviewRecentStatus = (
   row: AccountRow,
   _decision?: AccountDetailOverviewDecision | null,
-  requestEvidence?: ReturnType<typeof resolveAccountRequestHealthEvidence>
+  requestEvidence?: ReturnType<typeof resolveAccountRequestHealthEvidence>,
+  fallbackRequests?: Array<{ timestamp_ms?: number | string; failed?: boolean }> | null
 ): AccountDetailOverviewRecentStatus => {
-  const recentRequests = row.usage.recentRequests;
+  const recentRequests = row.usage.recentRequests.length
+    ? row.usage.recentRequests
+    : latestRequestsToRecentBuckets(fallbackRequests);
   const totals = sumRecentRequests(recentRequests);
   const total = totals.success + totals.failure;
   const credentialStatusKind = classifyAccountCredentialStatusEvidence(row);

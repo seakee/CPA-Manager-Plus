@@ -820,3 +820,47 @@ func BenchmarkRecentAccountRequestsDenseCredential(b *testing.B) {
 		}
 	}
 }
+
+func TestRecentAccountRequestsMatchesAuthIndexOnlyTargets(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repo := New(db)
+	ctx := context.Background()
+	baseMS := int64(1_800_000_000_000)
+
+	// Config-sourced coding-plan events carry no auth file snapshot.
+	keylessOld := latestAccountRequestEvent("keyless-old", baseMS+500, "", "cfg-index", "")
+	keylessNew := latestAccountRequestEvent("keyless-new", baseMS+9_000, "", "cfg-index", "")
+	keylessNew.Failed = true
+	keylessNew.FailStatusCode = 429
+	// Events with a snapshot must not leak into index-only lookups.
+	fileBacked := latestAccountRequestEvent("file-backed", baseMS+12_000, "credential.json", "cfg-index", "")
+
+	if _, err := repo.InsertBatch(ctx, []usage.Event{keylessOld, keylessNew, fileBacked}); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	requests, err := repo.RecentAccountRequests(ctx, []LatestAccountRequestQuery{{
+		RequestIndex:     0,
+		AuthIndex:        "cfg-index",
+		Provider:         "zhipu",
+		AuthFileSnapshot: "",
+	}}, 5)
+	if err != nil {
+		t.Fatalf("recent account requests: %v", err)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("expected 2 index-only requests, got %d: %#v", len(requests), requests)
+	}
+	if requests[0].TimestampMS != baseMS+9_000 {
+		t.Fatalf("expected newest keyless event first, got %#v", requests)
+	}
+	for _, request := range requests {
+		if request.TimestampMS == baseMS+12_000 {
+			t.Fatalf("snapshot-backed event leaked into index-only result: %#v", request)
+		}
+	}
+}
