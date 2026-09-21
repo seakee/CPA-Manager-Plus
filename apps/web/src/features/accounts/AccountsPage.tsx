@@ -65,6 +65,7 @@ import {
 } from '@/components/quota/quotaConfigs';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { useInterval } from '@/hooks/useInterval';
+import { useLocalStorage } from '@/hooks/useLocalStorage';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import { useUnsavedChangesGuard } from '@/hooks/useUnsavedChangesGuard';
 import { useMediaQuery } from '@/hooks/useMediaQuery';
@@ -214,6 +215,7 @@ import {
   getAccountSortFieldOption,
   getProviderLabel,
   getQuotaWindowReadableLabel,
+  isAccountQuotaWindowIgnored,
   parsePriorityValue,
   resolveWindowDurationSeconds,
   selectAccountQuotaMainListWindows,
@@ -1270,6 +1272,23 @@ export function AccountsPage() {
   const handleCredentialMutation = useCallback((mutation: AuthFilesCredentialMutation) => {
     credentialMutationHandlerRef.current(mutation);
   }, []);
+
+  const [ignoredQuotaMap, setIgnoredQuotaMap] = useLocalStorage<Record<string, string[]>>(
+    'accounts.ignored_quota_groups',
+    {}
+  );
+  const handleToggleIgnoredQuotaGroup = useCallback(
+    (selectionKey: string, groupKey: string) => {
+      setIgnoredQuotaMap((prev) => {
+        const current = prev[selectionKey] ?? [];
+        const next = current.includes(groupKey)
+          ? current.filter((k) => k !== groupKey)
+          : [...current, groupKey];
+        return { ...prev, [selectionKey]: next };
+      });
+    },
+    [setIgnoredQuotaMap]
+  );
 
   const {
     files,
@@ -4828,9 +4847,13 @@ export function AccountsPage() {
       const quotaWindows =
         quotaDisplayWindowsByRowKey.get(row.selectionKey) ??
         buildQuotaDisplayWindows(row);
+      const rowIgnoredGroups = ignoredQuotaMap[row.selectionKey];
+      const visibleQuotaWindows = rowIgnoredGroups?.length
+        ? quotaWindows.filter((window) => !isAccountQuotaWindowIgnored(window, rowIgnoredGroups))
+        : quotaWindows;
       const mainListWindows = selectAccountQuotaMainListWindows(
         row,
-        quotaWindows,
+        visibleQuotaWindows,
         getMainListQuotaWindowLimit(effectiveLayoutMode, row)
       );
       const existingDefinitions = quotaWindowDefinitionsByRowKey.get(row.selectionKey);
@@ -4852,6 +4875,7 @@ export function AccountsPage() {
     quotaDisplayWindowsByRowKey,
     quotaWindowDefinitionsByRowKey,
     effectiveLayoutMode,
+    ignoredQuotaMap,
   ]);
   const isListQueryContextMatching = useMemo(() => {
     if (!listWindowUsageQueryContext) return false;
@@ -8473,10 +8497,14 @@ export function AccountsPage() {
     const accountHistory = accountHistoryByRowKey.get(row.selectionKey) ?? null;
     const quotaWindows =
       quotaDisplayWindowsByRowKey.get(row.selectionKey) ?? buildQuotaDisplayWindows(row);
+    const rowIgnoredGroups = ignoredQuotaMap[row.selectionKey];
+    const visibleQuotaWindows = rowIgnoredGroups?.length
+      ? quotaWindows.filter((window) => !isAccountQuotaWindowIgnored(window, rowIgnoredGroups))
+      : quotaWindows;
     const quotaLifecycleBarOverride = getAccountQuotaLifecycleBarOverride(row.quota.status);
     const mainListWindows = selectAccountQuotaMainListWindows(
       row,
-      quotaWindows,
+      visibleQuotaWindows,
       getMainListQuotaWindowLimit(effectiveLayoutMode, row)
     );
     const quotaCooldown = quotaCooldownsByRowKey.get(row.selectionKey)?.[0] ?? null;
@@ -9546,6 +9574,10 @@ export function AccountsPage() {
             onResetQuota={() => resetCodexQuotaForRow(selectedRow)}
             resetQuotaDisabled={
               !canResetCodexQuota(selectedRow) || resettingSelectedQuota || configurationSaving
+            }
+            ignoredGroups={ignoredQuotaMap[selectedRow.selectionKey] ?? []}
+            onToggleIgnoredGroup={(group) =>
+              handleToggleIgnoredQuotaGroup(selectedRow.selectionKey, group)
             }
           />
         );
