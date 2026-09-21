@@ -1,0 +1,716 @@
+{
+  "schemaVersion": 1,
+  "manifestId": "cpamp-v2-phase2-exit-decisions-v1",
+  "integrationBaseline": "d3ddec55346085edae6cc36527106b650f5f438d",
+  "evidenceContract": "tests/fixtures/phase2-evidence/contract.json",
+  "capabilityStatusVocabulary": [
+    "supported",
+    "partial",
+    "unsupported",
+    "unknown",
+    "requires_upstream"
+  ],
+  "productDecisionVocabulary": ["go", "limited", "no_go", "deferred"],
+  "acceptedEvidenceSources": [
+    {
+      "slice": "phase2-01",
+      "path": "tests/fixtures/phase2-evidence/contract.json",
+      "acceptance": "PR #827"
+    },
+    {
+      "slice": "phase2-02a",
+      "path": "tests/fixtures/phase2-evidence/extensions/phase2-02a-caller-identity.json",
+      "acceptance": "PR #834"
+    },
+    {
+      "slice": "phase2-02b",
+      "path": "tests/fixtures/phase2-evidence/extensions/phase2-02b-candidate-selection.json",
+      "acceptance": "PR #831"
+    },
+    {
+      "slice": "phase2-03a",
+      "path": "tests/fixtures/phase2-evidence/extensions/phase2-03a-request-correlation.json",
+      "acceptance": "PR #830"
+    },
+    {
+      "slice": "phase2-03b",
+      "path": "tests/fixtures/phase2-evidence/extensions/phase2-03b-usage-settlement.json",
+      "acceptance": "PR #833"
+    }
+  ],
+  "artifacts": [
+    {
+      "artifactId": "current-bundled-v7-3-3",
+      "cpaVersion": "v7.3.3",
+      "deploymentMode": "embedded",
+      "productRole": "current_bundled",
+      "pluginAbiSchemaVersion": 6,
+      "bundleDecision": "remain_current"
+    },
+    {
+      "artifactId": "candidate-release-v7-3-8",
+      "cpaVersion": "v7.3.8",
+      "deploymentMode": "release-artifact-fixture",
+      "productRole": "candidate_evidence_only",
+      "pluginAbiSchemaVersion": 6,
+      "bundleDecision": "no_upgrade_in_phase2"
+    },
+    {
+      "artifactId": "external-unnegotiated",
+      "cpaVersion": null,
+      "deploymentMode": "external",
+      "productRole": "advanced_compatibility_unnegotiated",
+      "pluginAbiSchemaVersion": null,
+      "bundleDecision": "not_applicable"
+    }
+  ],
+  "decisions": [
+    {
+      "id": "current-caller-identity-source",
+      "area": "caller_identity",
+      "artifactId": "current-bundled-v7-3-3",
+      "cpaVersion": "v7.3.3",
+      "deploymentMode": "embedded",
+      "requiredPlugin": {
+        "schemaVersion": 6,
+        "config": {},
+        "capabilityGeneration": "artifact-pinned"
+      },
+      "capabilityStatus": "partial",
+      "productDecision": "limited",
+      "evidenceRecordRefs": [
+        "phase2-02a-current-caller-scope-derivation",
+        "phase2-02a-current-caller-lifecycle-visibility",
+        "phase2-02a-current-caller-secret-redaction"
+      ],
+      "limitations": [
+        "caller_scope is caller/session provenance, changes when the downstream client key rotates, and is not a Canonical APIKeyID.",
+        "caller_scope is absent before client authentication and from UsageRecord.",
+        "Raw client credentials remain visible at specific interceptor and usage boundaries."
+      ],
+      "failureBehavior": "Missing or ambiguous caller_scope must remain unknown and must not be bound as a Canonical APIKeyID.",
+      "fallback": "Phase3 creates independent Canonical APIKeyID and CredentialID values, retains source provenance, and redacts raw credentials at adapter boundaries.",
+      "upstreamDependencies": [],
+      "downstreamOwners": ["phase3-g1", "runtime-bridge"]
+    },
+    {
+      "id": "candidate-caller-identity-source",
+      "area": "caller_identity",
+      "artifactId": "candidate-release-v7-3-8",
+      "cpaVersion": "v7.3.8",
+      "deploymentMode": "release-artifact-fixture",
+      "requiredPlugin": {
+        "schemaVersion": 6,
+        "config": {},
+        "capabilityGeneration": "artifact-pinned"
+      },
+      "capabilityStatus": "partial",
+      "productDecision": "limited",
+      "evidenceRecordRefs": [
+        "phase2-02a-candidate-caller-scope-derivation",
+        "phase2-02a-candidate-caller-lifecycle-visibility",
+        "phase2-02a-candidate-caller-secret-redaction"
+      ],
+      "limitations": [
+        "Candidate v7.3.8 preserves the same caller_scope rotation and lifecycle limits as v7.3.3.",
+        "Candidate evidence does not make caller_scope a Canonical APIKeyID.",
+        "Candidate evidence does not authorize a product bundle upgrade."
+      ],
+      "failureBehavior": "Missing or ambiguous caller_scope must remain unknown and must not be promoted from candidate evidence.",
+      "fallback": "Use the same Phase3 Canonical identity and redaction boundary as the current bundle after an independent release decision.",
+      "upstreamDependencies": [],
+      "downstreamOwners": ["phase3-g1", "release-matrix"]
+    },
+    {
+      "id": "current-hard-routing-default",
+      "area": "credential_selection",
+      "artifactId": "current-bundled-v7-3-3",
+      "cpaVersion": "v7.3.3",
+      "deploymentMode": "embedded",
+      "requiredPlugin": {
+        "schemaVersion": 6,
+        "config": {
+          "scheduler": true
+        },
+        "capabilityGeneration": "artifact-pinned"
+      },
+      "capabilityStatus": "partial",
+      "productDecision": "limited",
+      "evidenceRecordRefs": [
+        "phase2-02b-current-highest-tier-visibility",
+        "phase2-02b-current-pre-filter-exclusion",
+        "phase2-02b-current-valid-candidate-selection",
+        "phase2-02b-current-invalid-candidate-fallback",
+        "phase2-02b-current-pinned-auth-fencing",
+        "phase2-02b-current-selected-auth-observation",
+        "phase2-02b-current-stream-retry-divergence"
+      ],
+      "limitations": [
+        "The scheduler sees only the highest available priority tier in v7.3.3.",
+        "A target must remain in CPA's eligible candidate set and cannot bypass provider, model, authorization, disabled, or cooldown filters.",
+        "An invalid scheduler Auth.ID falls back to the built-in selector, so that response is not proof of hard routing.",
+        "Streaming does not gain the same retry/reselection behavior as non-stream execution."
+      ],
+      "failureBehavior": "A product hard-route request must use pinned_auth_id and fail closed when the eligible target is unavailable; invalid scheduler fallback must never be reported as target success.",
+      "fallback": "Disable the hard-route action or present highest-tier-only eligibility; do not silently select a different credential for an explicit target.",
+      "upstreamDependencies": [],
+      "downstreamOwners": ["phase5-r4", "runtime-bridge"]
+    },
+    {
+      "id": "candidate-hard-routing-default",
+      "area": "credential_selection",
+      "artifactId": "candidate-release-v7-3-8",
+      "cpaVersion": "v7.3.8",
+      "deploymentMode": "release-artifact-fixture",
+      "requiredPlugin": {
+        "schemaVersion": 6,
+        "config": {
+          "scheduler": true,
+          "scheduler_across_priorities": false
+        },
+        "capabilityGeneration": "artifact-pinned"
+      },
+      "capabilityStatus": "partial",
+      "productDecision": "limited",
+      "evidenceRecordRefs": [
+        "phase2-02b-candidate-default-highest-tier-visibility",
+        "phase2-02b-candidate-pre-filter-exclusion",
+        "phase2-02b-candidate-valid-candidate-selection",
+        "phase2-02b-candidate-invalid-candidate-fallback",
+        "phase2-02b-candidate-pinned-auth-fencing",
+        "phase2-02b-candidate-selected-auth-observation",
+        "phase2-02b-candidate-stream-retry-divergence"
+      ],
+      "limitations": [
+        "v7.3.8 default configuration remains restricted to the highest available priority tier.",
+        "Eligibility filters and invalid scheduler fallback retain the same product boundary as v7.3.3.",
+        "Streaming retry/reselection remains stage-limited."
+      ],
+      "failureBehavior": "Explicit target selection must fail closed through pinned_auth_id; default scheduler fallback cannot satisfy a hard-route promise.",
+      "fallback": "Keep the candidate in evidence-only status and expose only the verified highest-tier boundary.",
+      "upstreamDependencies": [],
+      "downstreamOwners": ["phase5-r4", "release-matrix"]
+    },
+    {
+      "id": "candidate-hard-routing-across-priorities-opt-in",
+      "area": "credential_selection",
+      "artifactId": "candidate-release-v7-3-8",
+      "cpaVersion": "v7.3.8",
+      "deploymentMode": "release-artifact-fixture",
+      "requiredPlugin": {
+        "schemaVersion": 6,
+        "config": {
+          "scheduler": true,
+          "scheduler_across_priorities": true
+        },
+        "capabilityGeneration": "artifact-pinned"
+      },
+      "capabilityStatus": "partial",
+      "productDecision": "limited",
+      "evidenceRecordRefs": [
+        "phase2-02b-candidate-across-priorities-opt-in",
+        "phase2-02b-candidate-pre-filter-exclusion",
+        "phase2-02b-candidate-valid-candidate-selection",
+        "phase2-02b-candidate-invalid-candidate-fallback",
+        "phase2-02b-candidate-pinned-auth-fencing",
+        "phase2-02b-candidate-selected-auth-observation",
+        "phase2-02b-candidate-stream-retry-divergence"
+      ],
+      "limitations": [
+        "Across-priority visibility is available only with the explicit v7.3.8 opt-in.",
+        "Pre-scheduler eligibility filtering still applies to every target.",
+        "Invalid scheduler responses still fall back and stream retry remains limited.",
+        "The candidate is not the bundled runtime."
+      ],
+      "failureBehavior": "Unknown, filtered, disabled, cooldown, or otherwise ineligible targets must fail closed; a built-in fallback must not be called hard routing.",
+      "fallback": "Remain on the current bundle or disable across-priority routing until a separate bundle/release acceptance enables this exact configuration.",
+      "upstreamDependencies": [],
+      "downstreamOwners": ["phase5-r4", "release-matrix"]
+    },
+    {
+      "id": "current-request-correlation-continuity",
+      "area": "request_correlation",
+      "artifactId": "current-bundled-v7-3-3",
+      "cpaVersion": "v7.3.3",
+      "deploymentMode": "embedded",
+      "requiredPlugin": {
+        "schemaVersion": 6,
+        "config": {
+          "request_lifecycle_plugin": true,
+          "interceptor": true
+        },
+        "capabilityGeneration": "artifact-pinned"
+      },
+      "capabilityStatus": "supported",
+      "productDecision": "go",
+      "evidenceRecordRefs": ["phase2-03a-current-request-correlation-continuity"],
+      "limitations": [
+        "RequestID identifies one model request lifecycle and is not an attempt identifier.",
+        "Paths rejected before tracker creation do not produce this correlation."
+      ],
+      "failureBehavior": "Events without a directly observed RequestID remain uncorrelated; no synthetic RequestID may be inferred after the fact.",
+      "fallback": "Store the observation as unknown/unlinked while preserving any independent transport trace metadata.",
+      "upstreamDependencies": [],
+      "downstreamOwners": ["phase3-g2", "phase5-r1"]
+    },
+    {
+      "id": "candidate-request-correlation-continuity",
+      "area": "request_correlation",
+      "artifactId": "candidate-release-v7-3-8",
+      "cpaVersion": "v7.3.8",
+      "deploymentMode": "release-artifact-fixture",
+      "requiredPlugin": {
+        "schemaVersion": 6,
+        "config": {
+          "request_lifecycle_plugin": true,
+          "interceptor": true
+        },
+        "capabilityGeneration": "artifact-pinned"
+      },
+      "capabilityStatus": "supported",
+      "productDecision": "go",
+      "evidenceRecordRefs": ["phase2-03a-candidate-request-correlation-continuity"],
+      "limitations": [
+        "Candidate RequestID continuity does not add attempt identity.",
+        "Candidate evidence does not authorize a product bundle upgrade."
+      ],
+      "failureBehavior": "Unobserved RequestID values remain uncorrelated and cannot be reconstructed from the candidate fixture.",
+      "fallback": "Use the current supported RequestID contract only after exact artifact/config negotiation.",
+      "upstreamDependencies": [],
+      "downstreamOwners": ["phase3-g2", "release-matrix"]
+    },
+    {
+      "id": "current-attempt-correlation",
+      "area": "attempt_correlation",
+      "artifactId": "current-bundled-v7-3-3",
+      "cpaVersion": "v7.3.3",
+      "deploymentMode": "embedded",
+      "requiredPlugin": {
+        "schemaVersion": 6,
+        "config": {
+          "request_lifecycle_plugin": true,
+          "interceptor": true
+        },
+        "capabilityGeneration": "artifact-pinned"
+      },
+      "capabilityStatus": "requires_upstream",
+      "productDecision": "deferred",
+      "evidenceRecordRefs": [
+        "phase2-03a-current-attempt-identity-correlation",
+        "phase2-03b-current-exact-request-correlation"
+      ],
+      "limitations": [
+        "Retries share RequestID and overwrite selected_auth metadata without a stable AttemptID or ordinal.",
+        "UsageRecord lacks RequestID, AttemptID, and an idempotency key."
+      ],
+      "failureBehavior": "Do not reconstruct attempt history from final metadata or callback order.",
+      "fallback": "Expose request-level evidence only and mark per-attempt correlation unavailable.",
+      "upstreamDependencies": ["upstream-attempt-and-usage-correlation"],
+      "downstreamOwners": ["phase3-g2", "phase5-r2-r4"]
+    },
+    {
+      "id": "candidate-attempt-correlation",
+      "area": "attempt_correlation",
+      "artifactId": "candidate-release-v7-3-8",
+      "cpaVersion": "v7.3.8",
+      "deploymentMode": "release-artifact-fixture",
+      "requiredPlugin": {
+        "schemaVersion": 6,
+        "config": {
+          "request_lifecycle_plugin": true,
+          "interceptor": true
+        },
+        "capabilityGeneration": "artifact-pinned"
+      },
+      "capabilityStatus": "requires_upstream",
+      "productDecision": "deferred",
+      "evidenceRecordRefs": [
+        "phase2-03a-candidate-attempt-identity-correlation",
+        "phase2-03b-candidate-exact-request-correlation"
+      ],
+      "limitations": [
+        "v7.3.8 retains the same missing AttemptID and exact usage correlation boundary.",
+        "publishAttemptRecord does not supply a stable cross-callback attempt identity."
+      ],
+      "failureBehavior": "Do not infer an attempt ledger from callback count or selected_auth metadata.",
+      "fallback": "Keep per-attempt policy and settlement disabled until the upstream contract exists.",
+      "upstreamDependencies": ["upstream-attempt-and-usage-correlation"],
+      "downstreamOwners": ["phase3-g2", "phase5-r2-r4", "release-matrix"]
+    },
+    {
+      "id": "current-terminal-observation",
+      "area": "terminal_observation",
+      "artifactId": "current-bundled-v7-3-3",
+      "cpaVersion": "v7.3.3",
+      "deploymentMode": "embedded",
+      "requiredPlugin": {
+        "schemaVersion": 6,
+        "config": {
+          "request_lifecycle_plugin": true
+        },
+        "capabilityGeneration": "artifact-pinned"
+      },
+      "capabilityStatus": "partial",
+      "productDecision": "limited",
+      "evidenceRecordRefs": [
+        "phase2-03a-current-terminal-callback-cardinality",
+        "phase2-03a-current-lifecycle-resilience-boundary"
+      ],
+      "limitations": [
+        "Tracked requests invoke terminal completion once, but pre-tracker rejections emit none.",
+        "Plugin failure, fuse, reload, or unavailability can drop the asynchronous notification."
+      ],
+      "failureBehavior": "Missing terminal notification is unknown coverage, not proof that a request did not happen.",
+      "fallback": "Retain bounded freshness/coverage state and reconcile with independent usage or operation evidence when available.",
+      "upstreamDependencies": ["upstream-durable-observation-delivery"],
+      "downstreamOwners": ["phase3-g2", "phase5-r1"]
+    },
+    {
+      "id": "candidate-terminal-observation",
+      "area": "terminal_observation",
+      "artifactId": "candidate-release-v7-3-8",
+      "cpaVersion": "v7.3.8",
+      "deploymentMode": "release-artifact-fixture",
+      "requiredPlugin": {
+        "schemaVersion": 6,
+        "config": {
+          "request_lifecycle_plugin": true
+        },
+        "capabilityGeneration": "artifact-pinned"
+      },
+      "capabilityStatus": "partial",
+      "productDecision": "limited",
+      "evidenceRecordRefs": [
+        "phase2-03a-candidate-terminal-callback-cardinality",
+        "phase2-03a-candidate-lifecycle-resilience-boundary"
+      ],
+      "limitations": [
+        "Candidate terminal cardinality is exactly once only for requests that created a tracker.",
+        "Candidate delivery remains in-memory and can be lost on plugin lifecycle failures."
+      ],
+      "failureBehavior": "Missing candidate callbacks remain unknown and cannot be promoted to reliable delivery.",
+      "fallback": "Use the same bounded coverage model as v7.3.3; do not treat candidate evidence as durable delivery.",
+      "upstreamDependencies": ["upstream-durable-observation-delivery"],
+      "downstreamOwners": ["phase3-g2", "phase5-r1", "release-matrix"]
+    },
+    {
+      "id": "current-usage-observation",
+      "area": "usage_observation",
+      "artifactId": "current-bundled-v7-3-3",
+      "cpaVersion": "v7.3.3",
+      "deploymentMode": "embedded",
+      "requiredPlugin": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        },
+        "capabilityGeneration": "artifact-pinned"
+      },
+      "capabilityStatus": "partial",
+      "productDecision": "limited",
+      "evidenceRecordRefs": [
+        "phase2-03b-current-successful-non-stream-usage",
+        "phase2-03b-current-successful-stream-usage",
+        "phase2-03b-current-retry-multiple-attempts",
+        "phase2-03b-current-request-correlation-keys"
+      ],
+      "limitations": [
+        "Completed usage can support observed/notify behavior but is asynchronous and best effort.",
+        "Streaming cancellation may produce partial or zero-token records.",
+        "Retries and additional-model records can produce multiple callbacks without exact request/attempt keys."
+      ],
+      "failureBehavior": "Missing, late, duplicate, or uncorrelated usage must lower freshness/coverage and must never authorize a hard cap.",
+      "fallback": "Expose observed/notify state with explicit freshness, coverage, and unknown semantics.",
+      "upstreamDependencies": [
+        "upstream-attempt-and-usage-correlation",
+        "upstream-durable-observation-delivery"
+      ],
+      "downstreamOwners": ["phase5-r1"]
+    },
+    {
+      "id": "candidate-usage-observation",
+      "area": "usage_observation",
+      "artifactId": "candidate-release-v7-3-8",
+      "cpaVersion": "v7.3.8",
+      "deploymentMode": "release-artifact-fixture",
+      "requiredPlugin": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        },
+        "capabilityGeneration": "artifact-pinned"
+      },
+      "capabilityStatus": "partial",
+      "productDecision": "limited",
+      "evidenceRecordRefs": [
+        "phase2-03b-candidate-successful-non-stream-usage",
+        "phase2-03b-candidate-successful-stream-usage",
+        "phase2-03b-candidate-retry-multiple-attempts",
+        "phase2-03b-candidate-request-correlation-keys"
+      ],
+      "limitations": [
+        "v7.3.8 preserves best-effort usage observation without exact request/attempt correlation.",
+        "Candidate attempt publishing and response-model tracking do not create an authoritative ledger.",
+        "Candidate evidence does not authorize a bundle upgrade."
+      ],
+      "failureBehavior": "Missing, late, duplicate, or uncorrelated candidate usage remains unknown coverage and cannot authorize hard enforcement.",
+      "fallback": "Retain observed/notify behavior after exact artifact/config acceptance only.",
+      "upstreamDependencies": [
+        "upstream-attempt-and-usage-correlation",
+        "upstream-durable-observation-delivery"
+      ],
+      "downstreamOwners": ["phase5-r1", "release-matrix"]
+    },
+    {
+      "id": "current-precise-token-cost-quota",
+      "area": "reservation_settlement",
+      "artifactId": "current-bundled-v7-3-3",
+      "cpaVersion": "v7.3.3",
+      "deploymentMode": "embedded",
+      "requiredPlugin": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        },
+        "capabilityGeneration": "artifact-pinned"
+      },
+      "capabilityStatus": "unsupported",
+      "productDecision": "no_go",
+      "evidenceRecordRefs": [
+        "phase2-03b-current-exactly-once-delivery",
+        "phase2-03b-current-pre-request-reservation",
+        "phase2-03b-current-authoritative-settlement"
+      ],
+      "limitations": [
+        "There is no persistent exactly-once usage delivery, first-class reservation, or authoritative settlement primitive.",
+        "Generic RequestInterceptResponse.Terminate is not proof of concurrency-safe token or cost quota enforcement."
+      ],
+      "failureBehavior": "Precise token/cost hard quota must remain disabled; it must not fail open or claim an authoritative remaining balance.",
+      "fallback": "Use Phase5 R1 observed/notify behavior; evaluate any soft or request-count gate as a separate metric-specific task.",
+      "upstreamDependencies": [
+        "upstream-attempt-and-usage-correlation",
+        "upstream-durable-observation-delivery",
+        "upstream-reservation-and-settlement"
+      ],
+      "downstreamOwners": ["phase5-r2-r4"]
+    },
+    {
+      "id": "candidate-precise-token-cost-quota",
+      "area": "reservation_settlement",
+      "artifactId": "candidate-release-v7-3-8",
+      "cpaVersion": "v7.3.8",
+      "deploymentMode": "release-artifact-fixture",
+      "requiredPlugin": {
+        "schemaVersion": 6,
+        "config": {
+          "usage_plugin": true
+        },
+        "capabilityGeneration": "artifact-pinned"
+      },
+      "capabilityStatus": "unsupported",
+      "productDecision": "no_go",
+      "evidenceRecordRefs": [
+        "phase2-03b-candidate-exactly-once-delivery",
+        "phase2-03b-candidate-pre-request-reservation",
+        "phase2-03b-candidate-authoritative-settlement"
+      ],
+      "limitations": [
+        "v7.3.8 still lacks persistent exactly-once delivery, reservation, rollback, and idempotent settlement.",
+        "Candidate usage changes do not make generic interceptor termination a precise quota primitive."
+      ],
+      "failureBehavior": "Candidate precise token/cost hard quota must remain disabled and cannot justify a bundle upgrade.",
+      "fallback": "Retain observed/notify semantics and wait for metric-specific upstream capability plus separate acceptance.",
+      "upstreamDependencies": [
+        "upstream-attempt-and-usage-correlation",
+        "upstream-durable-observation-delivery",
+        "upstream-reservation-and-settlement"
+      ],
+      "downstreamOwners": ["phase5-r2-r4", "release-matrix"]
+    },
+    {
+      "id": "external-capability-negotiation",
+      "area": "external_negotiation",
+      "artifactId": "external-unnegotiated",
+      "cpaVersion": null,
+      "deploymentMode": "external",
+      "requiredPlugin": {
+        "schemaVersion": null,
+        "config": null,
+        "capabilityGeneration": "negotiated-current"
+      },
+      "capabilityStatus": "unknown",
+      "productDecision": "deferred",
+      "evidenceRecordRefs": [
+        "external-scheduler-candidate-visibility",
+        "external-request-terminal-callback",
+        "external-completed-usage-callback",
+        "phase2-02a-external-caller-scope-derivation",
+        "phase2-02b-external-unnegotiated-candidate-selection",
+        "phase2-03a-external-request-correlation-continuity",
+        "phase2-03a-external-attempt-identity-correlation",
+        "phase2-03a-external-terminal-callback-cardinality",
+        "phase2-03a-external-lifecycle-resilience-boundary",
+        "phase2-03b-external-usage-observation",
+        "phase2-03b-external-pre-request-reservation",
+        "phase2-03b-external-authoritative-settlement"
+      ],
+      "limitations": [
+        "External runtime version, artifact identity, Plugin ABI, enabled config, and capability generation are not negotiated.",
+        "Embedded and candidate evidence cannot be inherited by an External runtime."
+      ],
+      "failureBehavior": "Unknown or stale External capability state must fail closed; routing, correlation, usage, and enforcement features remain disabled.",
+      "fallback": "Keep management-plane compatibility without capability claims until an exact negotiation and independent compatibility acceptance succeeds.",
+      "upstreamDependencies": ["external-capability-negotiation-contract"],
+      "downstreamOwners": ["runtime-bridge", "release-matrix"]
+    }
+  ],
+  "externalNegotiation": {
+    "requiredFields": [
+      "artifact_id",
+      "cpa_version",
+      "deployment_mode",
+      "plugin_abi_schema_version",
+      "enabled_plugin_config",
+      "capability_generation"
+    ],
+    "unknownBehavior": "fail_closed",
+    "staleGenerationBehavior": "fail_closed",
+    "inheritEmbeddedEvidence": false
+  },
+  "upstreamDependencies": [
+    {
+      "id": "upstream-attempt-and-usage-correlation",
+      "classification": "blocks_exact_correlation_and_hard_quota",
+      "requiredContract": [
+        "stable RequestID on usage records",
+        "stable AttemptID or attempt ordinal across retries",
+        "idempotency identity for duplicate/replay handling"
+      ],
+      "evidenceRecordRefs": [
+        "phase2-03a-current-attempt-identity-correlation",
+        "phase2-03a-candidate-attempt-identity-correlation",
+        "phase2-03b-current-exact-request-correlation",
+        "phase2-03b-candidate-exact-request-correlation"
+      ],
+      "owners": ["cpa-runtime", "plugin-contract", "phase3-g2", "phase5-r2-r4"]
+    },
+    {
+      "id": "upstream-durable-observation-delivery",
+      "classification": "blocks_authoritative_delivery",
+      "requiredContract": [
+        "persistent journal or equivalent durable queue",
+        "acknowledgement and replay semantics",
+        "deduplication identity",
+        "defined behavior across plugin reload and fuse"
+      ],
+      "evidenceRecordRefs": [
+        "phase2-03a-current-lifecycle-resilience-boundary",
+        "phase2-03a-candidate-lifecycle-resilience-boundary",
+        "phase2-03b-current-exactly-once-delivery",
+        "phase2-03b-candidate-exactly-once-delivery"
+      ],
+      "owners": ["cpa-runtime", "plugin-contract", "phase5-r2-r4"]
+    },
+    {
+      "id": "upstream-reservation-and-settlement",
+      "classification": "blocks_precise_token_cost_hard_quota",
+      "requiredContract": [
+        "concurrency-safe pre-request reservation",
+        "idempotent authoritative settlement",
+        "rollback or expiration for abandoned reservations",
+        "missing and partial usage handling"
+      ],
+      "evidenceRecordRefs": [
+        "phase2-03b-current-pre-request-reservation",
+        "phase2-03b-current-authoritative-settlement",
+        "phase2-03b-candidate-pre-request-reservation",
+        "phase2-03b-candidate-authoritative-settlement"
+      ],
+      "owners": ["cpa-runtime", "plugin-contract", "phase5-r2-r4"]
+    },
+    {
+      "id": "external-capability-negotiation-contract",
+      "classification": "blocks_external_capability_enablement",
+      "requiredContract": [
+        "exact artifact and CPA version",
+        "Plugin ABI schema version",
+        "enabled plugin config",
+        "capability generation with stale detection",
+        "deployment mode"
+      ],
+      "evidenceRecordRefs": [
+        "external-scheduler-candidate-visibility",
+        "external-request-terminal-callback",
+        "external-completed-usage-callback"
+      ],
+      "owners": ["runtime-bridge", "release-matrix"]
+    }
+  ],
+  "downstreamHandoffs": [
+    {
+      "id": "phase3-g1",
+      "mayConsume": ["Runtime identity", "CPA Auth.ID source binding", "caller_scope provenance"],
+      "mustNotAssume": [
+        "caller_scope is a rotation-stable Canonical APIKeyID",
+        "candidate evidence upgrades the current bundle"
+      ],
+      "requiredAction": "Create independent non-reusable Canonical APIKeyID and CredentialID values with generation and source provenance."
+    },
+    {
+      "id": "phase3-g2",
+      "mayConsume": [
+        "request-level correlation",
+        "selected credential observation",
+        "existing usage evidence"
+      ],
+      "mustNotAssume": ["attempt history is reconstructable", "usage_events can be rewritten"],
+      "requiredAction": "Build shadow mapping plus minimum Policy/Event linkage while keeping usage_events authoritative and immutable."
+    },
+    {
+      "id": "phase5-r1",
+      "mayConsume": [
+        "completed usage observation",
+        "request-level correlation where directly observed"
+      ],
+      "mustNotAssume": ["usage delivery is durable", "observed usage is an authoritative balance"],
+      "requiredAction": "Expose observed/notify behavior with freshness, coverage, unknown, missing-price, and late-usage semantics."
+    },
+    {
+      "id": "phase5-r2-r4",
+      "mayConsume": [
+        "eligible pinned credential selection",
+        "metric-specific capabilities after separate acceptance"
+      ],
+      "mustNotAssume": [
+        "generic interceptor termination proves precise quota",
+        "token/cost hard quota is available",
+        "all priority tiers are visible in the current bundle"
+      ],
+      "requiredAction": "Gate every soft/hard/ACL/group feature by exact metric, version, config, and independently accepted capability."
+    },
+    {
+      "id": "runtime-bridge",
+      "mayConsume": ["accepted narrow adapter requirements"],
+      "mustNotAssume": [
+        "a second Runtime Protocol is needed",
+        "unknown External capability can fail open"
+      ],
+      "requiredAction": "Implement only product-required narrow adapters and keep negotiation fail-closed."
+    },
+    {
+      "id": "release-matrix",
+      "mayConsume": ["exact accepted artifact/config/mode decisions"],
+      "mustNotAssume": ["candidate v7.3.8 is bundled", "External inherits Embedded evidence"],
+      "requiredAction": "Publish support only after exact artifact/config/mode acceptance and a separate bundle or compatibility decision."
+    }
+  ],
+  "phase2Exit": {
+    "status": "ready_for_independent_acceptance",
+    "result": "go_with_explicit_limits",
+    "blockingContradictions": [],
+    "requiredAcceptance": ["required_checks_green", "independent_acceptance"],
+    "phase3Gate": "closed_until_independent_acceptance",
+    "bundleUpgrade": false,
+    "productBehaviorChanged": false
+  }
+}
