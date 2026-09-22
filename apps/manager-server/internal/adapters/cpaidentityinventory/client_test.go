@@ -158,7 +158,7 @@ func TestFetchCredentials_ValidAndExcluded(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
-			"auth_files": [
+			"files": [
 				{
 					"id": "runtime-auth-1",
 					"name": "cred1.json",
@@ -248,11 +248,12 @@ func TestFetchCredentials_EmptyAuthID_FailClosed(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		// Credential without id (e.g. disk-only fallback)
 		_, _ = w.Write([]byte(`{
-			"auth_files": [
+			"files": [
 				{
 					"name": "disk-only.json",
 					"auth_index": "1",
-					"provider": "codex"
+					"provider": "codex",
+					"runtime_only": false
 				}
 			]
 		}`))
@@ -268,6 +269,108 @@ func TestFetchCredentials_EmptyAuthID_FailClosed(t *testing.T) {
 	}
 	if !errors.Is(err, ErrIncompleteCredentialInventory) {
 		t.Errorf("expected ErrIncompleteCredentialInventory, got %v", err)
+	}
+}
+
+func TestFetchCredentials_StrictInventoryContract(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        string
+		wantCount   int
+		wantErr     bool
+		errSentinel error
+	}{
+		{
+			name:      "valid non-empty",
+			body:      `{"files": [{"id": "auth-1", "name": "cred.json", "runtime_only": false}]}`,
+			wantCount: 1,
+			wantErr:   false,
+		},
+		{
+			name:      "valid empty",
+			body:      `{"files": []}`,
+			wantCount: 0,
+			wantErr:   false,
+		},
+		{
+			name:        "malformed root empty object",
+			body:        `{}`,
+			wantErr:     true,
+			errSentinel: cpaauthfiles.ErrMalformedAuthFilesResponse,
+		},
+		{
+			name:        "null list",
+			body:        `{"files": null}`,
+			wantErr:     true,
+			errSentinel: cpaauthfiles.ErrMalformedAuthFilesResponse,
+		},
+		{
+			name:        "wrong list type string",
+			body:        `{"files": "bad"}`,
+			wantErr:     true,
+			errSentinel: cpaauthfiles.ErrMalformedAuthFilesResponse,
+		},
+		{
+			name:        "empty object item",
+			body:        `{"files": [{}]}`,
+			wantErr:     true,
+			errSentinel: cpaauthfiles.ErrMalformedAuthFilesResponse,
+		},
+		{
+			name:        "non-object item string",
+			body:        `{"files": ["bad"]}`,
+			wantErr:     true,
+			errSentinel: cpaauthfiles.ErrMalformedAuthFilesResponse,
+		},
+		{
+			name:        "non-object item null",
+			body:        `{"files": [null]}`,
+			wantErr:     true,
+			errSentinel: cpaauthfiles.ErrMalformedAuthFilesResponse,
+		},
+		{
+			name:      "runtime_only only",
+			body:      `{"files": [{"id": "virtual-1", "runtime_only": true}]}`,
+			wantCount: 0,
+			wantErr:   false,
+		},
+		{
+			name:        "missing Auth.ID non-runtime-only",
+			body:        `{"files": [{"name": "disk-only.json", "runtime_only": false}]}`,
+			wantErr:     true,
+			errSentinel: ErrIncompleteCredentialInventory,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+
+			authFilesClient := cpaauthfiles.New(server.Client())
+			c := New(server.Client(), authFilesClient)
+
+			creds, err := c.FetchCredentials(context.Background(), server.URL, "key")
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if tt.errSentinel != nil && !errors.Is(err, tt.errSentinel) {
+					t.Fatalf("expected error %v, got %v", tt.errSentinel, err)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(creds) != tt.wantCount {
+				t.Fatalf("creds count = %d, want %d", len(creds), tt.wantCount)
+			}
+		})
 	}
 }
 

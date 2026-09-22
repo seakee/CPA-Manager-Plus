@@ -3,6 +3,7 @@ package identityreconcile_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -74,17 +75,30 @@ func (r *recordingIdentityRepo) ApplyPassiveSnapshot(ctx context.Context, params
 }
 
 type fakeInventoryClient struct {
-	apiKeys    []identityinventory.APIKeyObservation
-	apiKeysErr error
-	creds      []identityinventory.CredentialObservation
-	credsErr   error
+	mu           sync.Mutex
+	apiKeys      []identityinventory.APIKeyObservation
+	apiKeysErr   error
+	creds        []identityinventory.CredentialObservation
+	credsErr     error
+	fetchAPIKeys func(ctx context.Context) ([]identityinventory.APIKeyObservation, error)
+	fetchCreds   func(ctx context.Context) ([]identityinventory.CredentialObservation, error)
 }
 
 func (f *fakeInventoryClient) FetchAPIKeys(ctx context.Context, baseURL string, managementKey string) ([]identityinventory.APIKeyObservation, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fetchAPIKeys != nil {
+		return f.fetchAPIKeys(ctx)
+	}
 	return f.apiKeys, f.apiKeysErr
 }
 
 func (f *fakeInventoryClient) FetchCredentials(ctx context.Context, baseURL string, managementKey string) ([]identityinventory.CredentialObservation, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fetchCreds != nil {
+		return f.fetchCreds(ctx)
+	}
 	return f.creds, f.credsErr
 }
 
@@ -635,5 +649,226 @@ func TestWorker_ContextCanceledNoWaitingLog(t *testing.T) {
 		if strings.Contains(l, "waiting") || strings.Contains(l, "reconciliation error changed") {
 			t.Errorf("worker logged error on canceled context: %s", l)
 		}
+	}
+}
+
+func TestReconcileOnce_ChildTimeout_TreatedAsInventoryFailure(t *testing.T) {
+	observer := &sequenceRuntimeObserver{
+		statuses: []func() (model.RuntimeObservedStatus, error){
+			func() (model.RuntimeObservedStatus, error) { return validReadyStatus(), nil },
+		},
+	}
+	repo := &recordingIdentityRepo{}
+	inventory := &fakeInventoryClient{
+		apiKeysErr: context.DeadlineExceeded,
+	}
+
+	svc, err := identityreconcile.NewService(identityreconcile.Config{
+		RuntimeObserver:    observer,
+		ConnectionResolver: staticConnectionResolver("http://localhost:8080", "key"),
+		InventoryClient:    inventory,
+		IdentityRepo:       repo,
+	})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+
+	// Parent context is alive and healthy
+	ctx := context.Background()
+	_, err = svc.ReconcileOnce(ctx)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, identityreconcile.ErrAPIKeyInventoryFailed) {
+		t.Errorf("expected ErrAPIKeyInventoryFailed, got %v", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("expected context.DeadlineExceeded cause, got %v", err)
+	}
+	if len(repo.applyCalls) != 0 {
+		t.Errorf("expected 0 apply calls on child timeout, got %d", len(repo.applyCalls))
+	}
+}
+
+func TestWorker_ChildTimeout_LogsWaitingAndRecovers(t *testing.T) {
+	ready := validReadyStatus()
+	observer := &sequenceRuntimeObserver{
+		statuses: []func() (model.RuntimeObservedStatus, error){
+			func() (model.RuntimeObservedStatus, error) { return ready, nil },
+			func() (model.RuntimeObservedStatus, error) { return ready, nil },
+			func() (model.RuntimeObservedStatus, error) { return ready, nil },
+			func() (model.RuntimeObservedStatus, error) { return ready, nil },
+		},
+	}
+	repo := &recordingIdentityRepo{
+		applyResult: ports.ReconcileSnapshotResult{APIKeysRefreshed: 1},
+	}
+
+	var invMu sync.Mutex
+	timeoutMode := true
+	inventory := &fakeInventoryClient{
+		fetchAPIKeys: func(ctx context.Context) ([]identityinventory.APIKeyObservation, error) {
+			invMu.Lock()
+			defer invMu.Unlock()
+			if timeoutMode {
+				return nil, context.DeadlineExceeded
+			}
+			return []identityinventory.APIKeyObservation{{KeyHash: strings.Repeat("a", 64)}}, nil
+		},
+		fetchCreds: func(ctx context.Context) ([]identityinventory.CredentialObservation, error) {
+			return nil, nil
+		},
+	}
+
+	svc, err := identityreconcile.NewService(identityreconcile.Config{
+		RuntimeObserver:    observer,
+		ConnectionResolver: staticConnectionResolver("http://localhost:8080", "key"),
+		InventoryClient:    inventory,
+		IdentityRepo:       repo,
+	})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+
+	var logMu sync.Mutex
+	var logs []string
+	worker := identityreconcile.NewWorker(svc, func(format string, args ...any) {
+		logMu.Lock()
+		defer logMu.Unlock()
+		logs = append(logs, fmt.Sprintf(format, args...))
+	})
+	worker.SetInterval(10 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go worker.Run(ctx)
+
+	// Wait for first step (child timeout) to log waiting
+	deadline := time.Now().Add(1 * time.Second)
+	waitingSeen := false
+	for time.Now().Before(deadline) {
+		logMu.Lock()
+		for _, l := range logs {
+			if strings.Contains(l, "reconciliation waiting") {
+				waitingSeen = true
+				break
+			}
+		}
+		logMu.Unlock()
+		if waitingSeen {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !waitingSeen {
+		t.Fatalf("expected worker to log 'reconciliation waiting' on child timeout, got logs: %v", logs)
+	}
+
+	// Switch off timeout mode to allow recovery
+	invMu.Lock()
+	timeoutMode = false
+	invMu.Unlock()
+
+	// Wait for recovered log
+	recoveredSeen := false
+	deadline = time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		logMu.Lock()
+		for _, l := range logs {
+			if strings.Contains(l, "recovered from reconciliation failure") {
+				recoveredSeen = true
+				break
+			}
+		}
+		logMu.Unlock()
+		if recoveredSeen {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !recoveredSeen {
+		t.Fatalf("expected worker to log recovery, got logs: %v", logs)
+	}
+}
+
+func TestReconcileOnce_MalformedCredentialInventory_ZeroApply_ActiveCredentialPreserved(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "test-malformed-cred-inv.sqlite")
+	db, err := sqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	repo := adaptersqlite.New(db)
+	ready := validReadyStatus()
+
+	inventory := &fakeInventoryClient{
+		creds: []identityinventory.CredentialObservation{
+			{SourceAuthID: "active-cred-1", PhysicalName: "active.json"},
+		},
+	}
+
+	observer := &sequenceRuntimeObserver{
+		statuses: []func() (model.RuntimeObservedStatus, error){
+			func() (model.RuntimeObservedStatus, error) { return ready, nil }, // run 1 pre
+			func() (model.RuntimeObservedStatus, error) { return ready, nil }, // run 1 post
+			func() (model.RuntimeObservedStatus, error) { return ready, nil }, // run 2 pre
+			func() (model.RuntimeObservedStatus, error) { return ready, nil }, // run 2 post
+		},
+	}
+
+	svc, err := identityreconcile.NewService(identityreconcile.Config{
+		RuntimeObserver:    observer,
+		ConnectionResolver: staticConnectionResolver("http://localhost:8080", "key"),
+		InventoryClient:    inventory,
+		IdentityRepo:       repo,
+		TimeSource:         func() int64 { return 1000 },
+	})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+
+	// Run 1: credential is created and active
+	res1, err := svc.ReconcileOnce(ctx)
+	if err != nil {
+		t.Fatalf("run 1 failed: %v", err)
+	}
+	if res1.CredentialsCreated != 1 {
+		t.Fatalf("run 1 expected 1 cred created, got %d", res1.CredentialsCreated)
+	}
+
+	activeCred, _, err := repo.FindActiveCredentialBySource(ctx, "runtime-1", "active-cred-1")
+	if err != nil {
+		t.Fatalf("find active cred: %v", err)
+	}
+	if activeCred.Lifecycle != identity.LifecycleActive {
+		t.Fatalf("lifecycle = %v, want active", activeCred.Lifecycle)
+	}
+	origRevision := activeCred.Revision
+
+	// Run 2: inventory fails with malformed credential response
+	inventory.creds = nil
+	inventory.credsErr = errors.New("malformed CPA auth-files response: missing 'files' field")
+
+	_, err = svc.ReconcileOnce(ctx)
+	if err == nil {
+		t.Fatalf("run 2 expected error, got nil")
+	}
+	if !errors.Is(err, identityreconcile.ErrCredentialInventoryFailed) {
+		t.Fatalf("expected ErrCredentialInventoryFailed, got %v", err)
+	}
+
+	// Verify existing canonical credential remains active and revision is unchanged
+	afterCred, err := repo.LoadCredentialByID(ctx, activeCred.ID)
+	if err != nil {
+		t.Fatalf("load cred: %v", err)
+	}
+	if afterCred.Lifecycle != identity.LifecycleActive {
+		t.Errorf("lifecycle after malformed inventory = %v, want %v (must not become missing!)", afterCred.Lifecycle, identity.LifecycleActive)
+	}
+	if afterCred.Revision != origRevision {
+		t.Errorf("revision after malformed inventory = %d, want %d", afterCred.Revision, origRevision)
 	}
 }

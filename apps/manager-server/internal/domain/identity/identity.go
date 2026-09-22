@@ -121,7 +121,7 @@ func (e CredentialIdentity) Validate() error {
 	return nil
 }
 
-// APIKeySourceBinding binds a canonical APIKeyID to a trusted runtime source (RuntimeIdentity, SHA-256(raw API key)).
+// APIKeySourceBinding binds a canonical APIKeyID to a trusted runtime source (RuntimeIdentity, 64-char lowercase hex SHA-256(TrimSpace(raw))).
 type APIKeySourceBinding struct {
 	BindingID                 int64
 	APIKeyID                  APIKeyID

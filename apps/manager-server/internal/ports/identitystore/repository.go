@@ -38,7 +38,7 @@ type Repository interface {
 	// LoadCredentialByID loads a canonical CredentialIdentity by its CredentialID.
 	LoadCredentialByID(ctx context.Context, id identity.CredentialID) (identity.CredentialIdentity, error)
 
-	// FindActiveAPIKeyBySource finds an active APIKeyIdentity and binding for the given runtime identity and raw API key SHA-256 hash.
+	// FindActiveAPIKeyBySource finds an active APIKeyIdentity and binding for the given runtime identity and normalized API key hash (64-char lowercase hex SHA-256(TrimSpace(raw))).
 	FindActiveAPIKeyBySource(ctx context.Context, runtimeIdentity, apiKeyHash string) (identity.APIKeyIdentity, identity.APIKeySourceBinding, error)
 
 	// FindActiveCredentialBySource finds an active CredentialIdentity and binding for the given runtime identity and CPA Auth.ID.
@@ -60,7 +60,7 @@ type Repository interface {
 
 // APIKeySnapshotItem represents an observed API key in a reconciliation snapshot.
 type APIKeySnapshotItem struct {
-	APIKeyHash string // 64 lowercase hex characters
+	APIKeyHash string // 64-char lowercase hex SHA-256(TrimSpace(raw))
 }
 
 // CredentialSnapshotItem represents an observed credential in a reconciliation snapshot.

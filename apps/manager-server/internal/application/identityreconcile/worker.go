@@ -2,7 +2,6 @@ package identityreconcile
 
 import (
 	"context"
-	"errors"
 	"time"
 )
 
@@ -75,7 +74,7 @@ func (w *Worker) step(ctx context.Context) {
 		return
 	}
 
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if ctx.Err() != nil {
 		return
 	}
 

@@ -1572,3 +1572,93 @@ func TestRuntimeOnlyParsing(t *testing.T) {
 		})
 	}
 }
+
+func TestClient_FetchStrictInventory_Contract(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		wantCount int
+		wantErr   bool
+	}{
+		{
+			name:      "valid non-empty",
+			body:      `{"files": [{"id": "auth-1", "name": "cred.json", "runtime_only": false}]}`,
+			wantCount: 1,
+			wantErr:   false,
+		},
+		{
+			name:      "valid empty",
+			body:      `{"files": []}`,
+			wantCount: 0,
+			wantErr:   false,
+		},
+		{
+			name:    "malformed root empty object",
+			body:    `{}`,
+			wantErr: true,
+		},
+		{
+			name:    "null list",
+			body:    `{"files": null}`,
+			wantErr: true,
+		},
+		{
+			name:    "wrong list type string",
+			body:    `{"files": "bad"}`,
+			wantErr: true,
+		},
+		{
+			name:    "empty object item",
+			body:    `{"files": [{}]}`,
+			wantErr: true,
+		},
+		{
+			name:    "non-object item string",
+			body:    `{"files": ["bad"]}`,
+			wantErr: true,
+		},
+		{
+			name:    "non-object item null",
+			body:    `{"files": [null]}`,
+			wantErr: true,
+		},
+		{
+			name:    "not json object root array",
+			body:    `[]`,
+			wantErr: true,
+		},
+		{
+			name:    "duplicate files field",
+			body:    `{"files": [], "files": []}`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+
+			client := New(server.Client())
+			files, err := client.FetchStrictInventory(context.Background(), server.URL, "mgmt")
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if !errors.Is(err, ErrMalformedAuthFilesResponse) {
+					t.Fatalf("expected ErrMalformedAuthFilesResponse, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(files) != tt.wantCount {
+				t.Fatalf("files count = %d, want %d", len(files), tt.wantCount)
+			}
+		})
+	}
+}

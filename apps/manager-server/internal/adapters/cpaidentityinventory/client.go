@@ -134,7 +134,7 @@ func (c *client) FetchAPIKeys(ctx context.Context, baseURL string, managementKey
 // Filters out runtime_only credentials.
 // If any non-runtime-only item lacks a trusted Auth.ID, fails closed with ErrIncompleteCredentialInventory.
 func (c *client) FetchCredentials(ctx context.Context, baseURL string, managementKey string) ([]identityinventory.CredentialObservation, error) {
-	files, err := c.authFilesClient.Fetch(ctx, baseURL, managementKey)
+	files, err := c.authFilesClient.FetchStrictInventory(ctx, baseURL, managementKey)
 	if err != nil {
 		return nil, fmt.Errorf("fetch auth-files: %w", err)
 	}
