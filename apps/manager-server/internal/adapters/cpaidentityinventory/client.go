@@ -1,6 +1,7 @@
 package cpaidentityinventory
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -23,6 +24,9 @@ var (
 
 	// ErrIncompleteCredentialInventory indicates that the CPA auth-files response contains items missing a trusted Auth.ID.
 	ErrIncompleteCredentialInventory = errors.New("incomplete CPA credential inventory: missing trusted Auth.ID")
+
+	// ErrResponseTooLarge indicates that the CPA response exceeds the maximum allowed size.
+	ErrResponseTooLarge = cpaauthfiles.ErrResponseTooLarge
 )
 
 const (
@@ -32,9 +36,10 @@ const (
 )
 
 type client struct {
-	httpClient      *http.Client
-	authFilesClient *cpaauthfiles.Client
-	timeout         time.Duration
+	httpClient       *http.Client
+	authFilesClient  *cpaauthfiles.Client
+	timeout          time.Duration
+	maxResponseBytes int64
 }
 
 // New creates a new CPA identity inventory client.
@@ -46,9 +51,10 @@ func New(httpClient *http.Client, authFilesClient *cpaauthfiles.Client) identity
 		authFilesClient = cpaauthfiles.New(httpClient)
 	}
 	return &client{
-		httpClient:      httpClient,
-		authFilesClient: authFilesClient,
-		timeout:         defaultTimeout,
+		httpClient:       httpClient,
+		authFilesClient:  authFilesClient,
+		timeout:          defaultTimeout,
+		maxResponseBytes: maxAPIKeysBytes,
 	}
 }
 
@@ -78,38 +84,28 @@ func (c *client) FetchAPIKeys(ctx context.Context, baseURL string, managementKey
 		return nil, fmt.Errorf("GET %s: HTTP %d", apiKeysPath, res.StatusCode)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(res.Body, maxAPIKeysBytes))
+	limit := c.maxResponseBytes
+	if limit <= 0 {
+		limit = maxAPIKeysBytes
+	}
+
+	body, err := io.ReadAll(io.LimitReader(res.Body, limit+1))
 	if err != nil {
 		return nil, fmt.Errorf("GET %s: read response: %w", apiKeysPath, err)
 	}
-
-	// Strictly decode raw map to verify presence of "api-keys" key and type
-	var rawObj map[string]any
-	if err := json.Unmarshal(body, &rawObj); err != nil {
-		return nil, fmt.Errorf("%w: invalid JSON object: %v", ErrMalformedAPIKeysResponse, err)
+	if int64(len(body)) > limit {
+		return nil, fmt.Errorf("GET %s: %w: api-keys response exceeds %d bytes", apiKeysPath, ErrResponseTooLarge, limit)
 	}
 
-	rawKeys, exists := rawObj["api-keys"]
-	if !exists {
-		return nil, fmt.Errorf("%w: missing 'api-keys' field", ErrMalformedAPIKeysResponse)
-	}
-	if rawKeys == nil {
-		return nil, fmt.Errorf("%w: 'api-keys' is null", ErrMalformedAPIKeysResponse)
+	rawKeys, err := decodeStrictAPIKeysResponse(bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: %w", apiKeysPath, err)
 	}
 
-	keysSlice, ok := rawKeys.([]any)
-	if !ok {
-		return nil, fmt.Errorf("%w: 'api-keys' must be a JSON array, got %T", ErrMalformedAPIKeysResponse, rawKeys)
-	}
+	seen := make(map[string]struct{}, len(rawKeys))
+	result := make([]identityinventory.APIKeyObservation, 0, len(rawKeys))
 
-	seen := make(map[string]struct{}, len(keysSlice))
-	result := make([]identityinventory.APIKeyObservation, 0, len(keysSlice))
-
-	for idx, item := range keysSlice {
-		keyStr, ok := item.(string)
-		if !ok {
-			return nil, fmt.Errorf("%w: item at index %d is not a string (type %T)", ErrMalformedAPIKeysResponse, idx, item)
-		}
+	for _, keyStr := range rawKeys {
 		normalized := strings.TrimSpace(keyStr)
 		if normalized == "" {
 			continue
@@ -128,6 +124,103 @@ func (c *client) FetchAPIKeys(ctx context.Context, baseURL string, managementKey
 	}
 
 	return result, nil
+}
+
+// decodeStrictAPIKeysResponse strictly decodes an authoritative CPA /v0/management/api-keys response.
+// Root must be a single JSON object.
+// Authority field "api-keys" must appear exactly once and be a JSON array of strings.
+// Unknown root-level fields are parsed and discarded.
+// Duplicate authority field, wrong types, trailing data or incomplete payloads fail closed with ErrMalformedAPIKeysResponse.
+func decodeStrictAPIKeysResponse(r io.Reader) ([]string, error) {
+	decoder := json.NewDecoder(r)
+
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid JSON object: %v", ErrMalformedAPIKeysResponse, err)
+	}
+	delim, ok := token.(json.Delim)
+	if !ok || delim != '{' {
+		return nil, fmt.Errorf("%w: invalid JSON object: expected JSON object root, got %T", ErrMalformedAPIKeysResponse, token)
+	}
+
+	hasAPIKeys := false
+	var rawKeys []string
+
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrMalformedAPIKeysResponse, err)
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return nil, fmt.Errorf("%w: expected object key", ErrMalformedAPIKeysResponse)
+		}
+
+		if key == "api-keys" {
+			if hasAPIKeys {
+				return nil, fmt.Errorf("%w: duplicate 'api-keys' field", ErrMalformedAPIKeysResponse)
+			}
+			hasAPIKeys = true
+
+			valToken, err := decoder.Token()
+			if err != nil {
+				return nil, fmt.Errorf("%w: %v", ErrMalformedAPIKeysResponse, err)
+			}
+			if valToken == nil {
+				return nil, fmt.Errorf("%w: 'api-keys' is null", ErrMalformedAPIKeysResponse)
+			}
+			arrayDelim, ok := valToken.(json.Delim)
+			if !ok || arrayDelim != '[' {
+				return nil, fmt.Errorf("%w: 'api-keys' must be a JSON array, got %T", ErrMalformedAPIKeysResponse, valToken)
+			}
+
+			rawKeys = make([]string, 0)
+			index := 0
+			for decoder.More() {
+				var rawItem any
+				if err := decoder.Decode(&rawItem); err != nil {
+					return nil, fmt.Errorf("%w: decode item at index %d: %v", ErrMalformedAPIKeysResponse, index, err)
+				}
+				keyStr, ok := rawItem.(string)
+				if !ok {
+					return nil, fmt.Errorf("%w: item at index %d is not a string (type %T)", ErrMalformedAPIKeysResponse, index, rawItem)
+				}
+				rawKeys = append(rawKeys, keyStr)
+				index++
+			}
+
+			endArrayToken, err := decoder.Token()
+			if err != nil {
+				return nil, fmt.Errorf("%w: %v", ErrMalformedAPIKeysResponse, err)
+			}
+			if endDelim, ok := endArrayToken.(json.Delim); !ok || endDelim != ']' {
+				return nil, fmt.Errorf("%w: expected array end ']'", ErrMalformedAPIKeysResponse)
+			}
+		} else {
+			var discard any
+			if err := decoder.Decode(&discard); err != nil {
+				return nil, fmt.Errorf("%w: decode field %q: %v", ErrMalformedAPIKeysResponse, key, err)
+			}
+		}
+	}
+
+	endObjectToken, err := decoder.Token()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrMalformedAPIKeysResponse, err)
+	}
+	if endDelim, ok := endObjectToken.(json.Delim); !ok || endDelim != '}' {
+		return nil, fmt.Errorf("%w: expected object end '}'", ErrMalformedAPIKeysResponse)
+	}
+
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("%w: unexpected trailing data", ErrMalformedAPIKeysResponse)
+	}
+
+	if !hasAPIKeys {
+		return nil, fmt.Errorf("%w: missing 'api-keys' field", ErrMalformedAPIKeysResponse)
+	}
+
+	return rawKeys, nil
 }
 
 // FetchCredentials fetches supported credentials from CPA using cpaauthfiles.Client.

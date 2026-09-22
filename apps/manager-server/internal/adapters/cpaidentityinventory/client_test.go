@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -67,6 +68,23 @@ func TestFetchAPIKeys_Valid(t *testing.T) {
 	}
 }
 
+func TestFetchAPIKeys_ValidEmpty(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"api-keys": []}`))
+	}))
+	defer server.Close()
+
+	c := New(server.Client(), nil)
+	keys, err := c.FetchAPIKeys(context.Background(), server.URL, "key")
+	if err != nil {
+		t.Fatalf("expected nil error for valid empty inventory, got %v", err)
+	}
+	if len(keys) != 0 {
+		t.Errorf("expected 0 keys for empty inventory, got %d", len(keys))
+	}
+}
+
 func TestFetchAPIKeys_MalformedShapes(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -84,6 +102,11 @@ func TestFetchAPIKeys_MalformedShapes(t *testing.T) {
 			errContain: "missing 'api-keys' field",
 		},
 		{
+			name:       "empty root object",
+			body:       `{}`,
+			errContain: "missing 'api-keys' field",
+		},
+		{
 			name:       "api-keys is null",
 			body:       `{"api-keys": null}`,
 			errContain: "'api-keys' is null",
@@ -94,14 +117,49 @@ func TestFetchAPIKeys_MalformedShapes(t *testing.T) {
 			errContain: "'api-keys' must be a JSON array",
 		},
 		{
-			name:       "non-string item in array",
+			name:       "api-keys is an object",
+			body:       `{"api-keys": {}}`,
+			errContain: "'api-keys' must be a JSON array",
+		},
+		{
+			name:       "duplicate authority field",
+			body:       `{"api-keys": ["a"], "api-keys": []}`,
+			errContain: "duplicate 'api-keys' field",
+		},
+		{
+			name:       "duplicate authority field with other field",
+			body:       `{"api-keys": ["a"], "meta": 1, "api-keys": []}`,
+			errContain: "duplicate 'api-keys' field",
+		},
+		{
+			name:       "non-string item int in array",
 			body:       `{"api-keys": ["valid-key", 12345]}`,
+			errContain: "item at index 1 is not a string",
+		},
+		{
+			name:       "non-string item null in array",
+			body:       `{"api-keys": ["valid-key", null]}`,
 			errContain: "item at index 1 is not a string",
 		},
 		{
 			name:       "object item in array",
 			body:       `{"api-keys": [{"nested": "value"}]}`,
 			errContain: "item at index 0 is not a string",
+		},
+		{
+			name:       "array item in array",
+			body:       `{"api-keys": [["nested"]]}`,
+			errContain: "item at index 0 is not a string",
+		},
+		{
+			name:       "trailing JSON object",
+			body:       `{"api-keys": []}{"x": 1}`,
+			errContain: "unexpected trailing data",
+		},
+		{
+			name:       "trailing garbage",
+			body:       `{"api-keys": []}oops`,
+			errContain: "unexpected trailing data",
 		},
 	}
 
@@ -126,6 +184,100 @@ func TestFetchAPIKeys_MalformedShapes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFetchAPIKeys_UnknownFieldsIgnored(t *testing.T) {
+	cases := []struct {
+		name      string
+		body      string
+		wantCount int
+	}{
+		{
+			name:      "unknown meta field before authority field",
+			body:      `{"observed_at": "2026-09-22T00:00:00Z", "api-keys": ["a"]}`,
+			wantCount: 1,
+		},
+		{
+			name:      "unknown complex object before and scalar after",
+			body:      `{"meta": {"version": "v1", "nested": [1, 2]}, "api-keys": ["a", "b"], "count": 2}`,
+			wantCount: 2,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+
+			c := New(server.Client(), nil)
+			keys, err := c.FetchAPIKeys(context.Background(), server.URL, "key")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(keys) != tc.wantCount {
+				t.Fatalf("expected %d keys, got %d", tc.wantCount, len(keys))
+			}
+		})
+	}
+}
+
+func TestFetchAPIKeys_Oversized(t *testing.T) {
+	t.Run("custom small limit", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"api-keys": ["a-secret-key-that-causes-the-response-to-exceed-the-small-limit-1234567890"]}`))
+		}))
+		defer server.Close()
+
+		c := New(server.Client(), nil)
+		c.(*client).maxResponseBytes = 32
+
+		_, err := c.FetchAPIKeys(context.Background(), server.URL, "key")
+		if err == nil {
+			t.Fatal("expected error for oversized response, got nil")
+		}
+		if !errors.Is(err, ErrResponseTooLarge) {
+			t.Errorf("expected ErrResponseTooLarge, got %v", err)
+		}
+		if strings.Contains(err.Error(), "a-secret-key") {
+			t.Errorf("secret leaked in error: %v", err)
+		}
+	})
+
+	t.Run("default limit exceeded", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			// Stream slightly more than maxAPIKeysBytes (4MB)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"api-keys": [`))
+			chunk := `"` + strings.Repeat("a", 1024) + `",`
+			totalWritten := 14
+			for totalWritten < maxAPIKeysBytes+10 {
+				n, _ := w.Write([]byte(chunk))
+				totalWritten += n
+			}
+			_, _ = w.Write([]byte(`"end"]}`))
+		}))
+		defer server.Close()
+
+		c := New(server.Client(), nil)
+		_, err := c.FetchAPIKeys(context.Background(), server.URL, "key")
+		if err == nil {
+			t.Fatal("expected error for oversized response, got nil")
+		}
+		if !errors.Is(err, ErrResponseTooLarge) {
+			t.Errorf("expected ErrResponseTooLarge, got %v", err)
+		}
+		if !strings.Contains(err.Error(), fmt.Sprintf("exceeds %d bytes", maxAPIKeysBytes)) {
+			t.Errorf("expected error to mention limit %d, got: %v", maxAPIKeysBytes, err)
+		}
+		if strings.Contains(err.Error(), strings.Repeat("a", 64)) {
+			t.Errorf("raw data leaked in oversized error message: %v", err)
+		}
+	})
 }
 
 func TestFetchAPIKeys_RawKeyContainmentInError(t *testing.T) {

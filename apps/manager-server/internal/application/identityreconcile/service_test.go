@@ -2,14 +2,19 @@ package identityreconcile_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/adapters/cpaidentityinventory"
 	adaptersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/adapters/sqlite/identitystore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/identityreconcile"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
@@ -871,4 +876,106 @@ func TestReconcileOnce_MalformedCredentialInventory_ZeroApply_ActiveCredentialPr
 	if afterCred.Revision != origRevision {
 		t.Errorf("revision after malformed inventory = %d, want %d", afterCred.Revision, origRevision)
 	}
+}
+
+func TestReconcileOnce_MalformedAPIKeyInventory_NeverBecomesNegativeEvidence(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "test-malformed-api-key-inv.sqlite")
+	db, err := sqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	repo := adaptersqlite.New(db)
+	ready := validReadyStatus()
+
+	apiKeyPayload := `{"api-keys": ["active-secret-1"]}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v0/management/api-keys" {
+			_, _ = w.Write([]byte(apiKeyPayload))
+			return
+		}
+		if r.URL.Path == "/v0/management/auth-files" {
+			_, _ = w.Write([]byte(`{"files": []}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	realInventory := cpaidentityinventory.New(server.Client(), nil)
+
+	observer := &sequenceRuntimeObserver{
+		statuses: []func() (model.RuntimeObservedStatus, error){
+			func() (model.RuntimeObservedStatus, error) { return ready, nil }, // run 1 pre
+			func() (model.RuntimeObservedStatus, error) { return ready, nil }, // run 1 post
+			func() (model.RuntimeObservedStatus, error) { return ready, nil }, // run 2 pre
+			func() (model.RuntimeObservedStatus, error) { return ready, nil }, // run 2 post
+		},
+	}
+
+	svc, err := identityreconcile.NewService(identityreconcile.Config{
+		RuntimeObserver:    observer,
+		ConnectionResolver: staticConnectionResolver(server.URL, "key"),
+		InventoryClient:    realInventory,
+		IdentityRepo:       repo,
+		TimeSource:         func() int64 { return 1000 },
+	})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+
+	// Run 1: initial inventory establishes active canonical APIKey (revision 1)
+	res1, err := svc.ReconcileOnce(ctx)
+	if err != nil {
+		t.Fatalf("run 1 failed: %v", err)
+	}
+	if res1.APIKeysCreated != 1 {
+		t.Fatalf("run 1 expected 1 api key created, got %d", res1.APIKeysCreated)
+	}
+
+	keyHash := sha256Hex("active-secret-1")
+	activeKey, _, err := repo.FindActiveAPIKeyBySource(ctx, "runtime-1", keyHash)
+	if err != nil {
+		t.Fatalf("find active key: %v", err)
+	}
+	if activeKey.Lifecycle != identity.LifecycleActive {
+		t.Fatalf("lifecycle = %v, want active", activeKey.Lifecycle)
+	}
+	origRevision := activeKey.Revision
+
+	// Run 2: next API-key inventory is malformed because duplicate "api-keys" authority field.
+	// Contract: malformed authority response must never become negative evidence.
+	// Ambiguous/duplicate authority fields must fail closed without mutating existing active state.
+	apiKeyPayload = `{"api-keys": ["active-secret-1"], "api-keys": []}`
+
+	_, err = svc.ReconcileOnce(ctx)
+	if err == nil {
+		t.Fatalf("run 2 expected error, got nil")
+	}
+	if !errors.Is(err, identityreconcile.ErrAPIKeyInventoryFailed) {
+		t.Fatalf("expected ErrAPIKeyInventoryFailed, got %v", err)
+	}
+	if !errors.Is(err, cpaidentityinventory.ErrMalformedAPIKeysResponse) {
+		t.Fatalf("expected ErrMalformedAPIKeysResponse, got %v", err)
+	}
+
+	// Verify existing canonical APIKey remains active and revision is unchanged
+	afterKey, err := repo.LoadAPIKeyByID(ctx, activeKey.ID)
+	if err != nil {
+		t.Fatalf("load key: %v", err)
+	}
+	if afterKey.Lifecycle != identity.LifecycleActive {
+		t.Errorf("lifecycle after malformed inventory = %v, want %v (malformed authority response must never become negative evidence!)", afterKey.Lifecycle, identity.LifecycleActive)
+	}
+	if afterKey.Revision != origRevision {
+		t.Errorf("revision after malformed inventory = %d, want %d", afterKey.Revision, origRevision)
+	}
+}
+
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
 }
