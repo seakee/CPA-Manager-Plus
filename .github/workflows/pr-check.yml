@@ -288,7 +288,7 @@ jobs:
 
       - name: Test SQLite repository
         working-directory: apps/manager-server
-        run: go test ./internal/repository/sqlite
+        run: go test ./internal/repository/sqlite ./internal/adapters/sqlite/identitystore
 
       - name: Test Runtime portability
         working-directory: apps/manager-server

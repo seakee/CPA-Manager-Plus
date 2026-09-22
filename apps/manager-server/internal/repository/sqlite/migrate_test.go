@@ -3728,3 +3728,140 @@ func assertTableAbsent(t *testing.T, db *sql.DB, table string) {
 		t.Fatalf("table %s exists, want absent", table)
 	}
 }
+
+func TestGatewayCanonicalIdentityMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "identity-migration.sqlite")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	// 1. Four tables must exist
+	tables := []string{
+		GatewayAPIKeyIdentitiesTable,
+		GatewayCredentialIdentitiesTable,
+		GatewayAPIKeySourceBindingsTable,
+		GatewayCredentialSourceBindingsTable,
+	}
+	for _, table := range tables {
+		assertTableCount(t, db, table, 0)
+	}
+
+	// 2. Columns exist and observed_runtime_generation is text
+	keyCols := migrationTableColumns(t, db, GatewayAPIKeyIdentitiesTable)
+	for _, col := range []string{"id", "revision", "lifecycle", "created_at_ms", "updated_at_ms"} {
+		if !keyCols[col] {
+			t.Fatalf("missing column %s in %s", col, GatewayAPIKeyIdentitiesTable)
+		}
+	}
+
+	credCols := migrationTableColumns(t, db, GatewayCredentialIdentitiesTable)
+	for _, col := range []string{"id", "revision", "lifecycle", "created_at_ms", "updated_at_ms"} {
+		if !credCols[col] {
+			t.Fatalf("missing column %s in %s", col, GatewayCredentialIdentitiesTable)
+		}
+	}
+
+	keyBindingCols := migrationTableColumns(t, db, GatewayAPIKeySourceBindingsTable)
+	for _, col := range []string{
+		"binding_id", "api_key_id", "runtime_identity", "api_key_hash",
+		"observed_runtime_generation", "first_seen_at_ms", "last_seen_at_ms", "retired_at_ms",
+	} {
+		if !keyBindingCols[col] {
+			t.Fatalf("missing column %s in %s", col, GatewayAPIKeySourceBindingsTable)
+		}
+	}
+
+	credBindingCols := migrationTableColumns(t, db, GatewayCredentialSourceBindingsTable)
+	for _, col := range []string{
+		"binding_id", "credential_id", "runtime_identity", "source_auth_id",
+		"auth_index", "provider", "physical_name", "account_snapshot", "account_id_snapshot",
+		"observed_runtime_generation", "first_seen_at_ms", "last_seen_at_ms", "retired_at_ms",
+	} {
+		if !credBindingCols[col] {
+			t.Fatalf("missing column %s in %s", col, GatewayCredentialSourceBindingsTable)
+		}
+	}
+
+	// Verify observed_runtime_generation column type is TEXT
+	for _, bindingTable := range []string{GatewayAPIKeySourceBindingsTable, GatewayCredentialSourceBindingsTable} {
+		rows, err := db.Query(`pragma table_info(` + bindingTable + `)`)
+		if err != nil {
+			t.Fatalf("read table info %s: %v", bindingTable, err)
+		}
+		var foundType string
+		for rows.Next() {
+			var cid, notNull, pk int
+			var name, colType string
+			var dflt any
+			if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+				rows.Close()
+				t.Fatalf("scan table info %s: %v", bindingTable, err)
+			}
+			if name == "observed_runtime_generation" {
+				foundType = strings.ToUpper(colType)
+			}
+		}
+		rows.Close()
+		if foundType != "TEXT" {
+			t.Fatalf("table %s observed_runtime_generation type = %q, want TEXT", bindingTable, foundType)
+		}
+	}
+
+	// 3. Foreign keys exist
+	var keyFKCount int
+	if err := db.QueryRow(`select count(*) from pragma_foreign_key_list(?) where "table" = ?`,
+		GatewayAPIKeySourceBindingsTable, GatewayAPIKeyIdentitiesTable).Scan(&keyFKCount); err != nil {
+		t.Fatalf("inspect api key foreign keys: %v", err)
+	}
+	if keyFKCount != 1 {
+		t.Fatalf("expected 1 foreign key from %s to %s, got %d",
+			GatewayAPIKeySourceBindingsTable, GatewayAPIKeyIdentitiesTable, keyFKCount)
+	}
+
+	var credFKCount int
+	if err := db.QueryRow(`select count(*) from pragma_foreign_key_list(?) where "table" = ?`,
+		GatewayCredentialSourceBindingsTable, GatewayCredentialIdentitiesTable).Scan(&credFKCount); err != nil {
+		t.Fatalf("inspect credential foreign keys: %v", err)
+	}
+	if credFKCount != 1 {
+		t.Fatalf("expected 1 foreign key from %s to %s, got %d",
+			GatewayCredentialSourceBindingsTable, GatewayCredentialIdentitiesTable, credFKCount)
+	}
+
+	// 4. Expected partial unique indexes exist
+	expectedIndexes := []string{
+		"idx_gateway_api_key_source_active",
+		"idx_gateway_api_key_entity_active",
+		"idx_gateway_cred_source_active",
+		"idx_gateway_cred_entity_active",
+	}
+	for _, idxName := range expectedIndexes {
+		var count int
+		if err := db.QueryRow(`select count(*) from sqlite_master where type = 'index' and name = ?`, idxName).Scan(&count); err != nil {
+			t.Fatalf("inspect index %s: %v", idxName, err)
+		}
+		if count != 1 {
+			t.Fatalf("expected index %s to exist, got %d", idxName, count)
+		}
+	}
+
+	// 5. Verify usage_events is not modified by migration
+	if _, err := db.Exec(`insert into usage_events (
+		event_hash, timestamp_ms, timestamp, model, input_tokens, created_at_ms
+	) values ('event-proof-1', 100, '100', 'model-proof', 10, 100)`); err != nil {
+		t.Fatalf("insert proof event: %v", err)
+	}
+	// Re-run Migrate
+	if err := Migrate(db); err != nil {
+		t.Fatalf("re-run Migrate: %v", err)
+	}
+	var eventCount int
+	if err := db.QueryRow(`select count(*) from usage_events where event_hash = 'event-proof-1'`).Scan(&eventCount); err != nil {
+		t.Fatalf("query proof event: %v", err)
+	}
+	if eventCount != 1 {
+		t.Fatalf("usage_events count = %d, want 1 (must remain unmodified)", eventCount)
+	}
+}
