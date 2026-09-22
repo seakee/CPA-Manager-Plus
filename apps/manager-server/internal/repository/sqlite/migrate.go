@@ -69,6 +69,11 @@ const (
 	usageAccountModelSourceLegacy             = "usage_account_model_rollups_legacy_source_recovery"
 	usagePricingAccountSourceLegacy           = "usage_pricing_account_rollups_v1_legacy_source_recovery"
 
+	GatewayAPIKeyIdentitiesTable         = "gateway_api_key_identities"
+	GatewayCredentialIdentitiesTable     = "gateway_credential_identities"
+	GatewayAPIKeySourceBindingsTable     = "gateway_api_key_source_bindings"
+	GatewayCredentialSourceBindingsTable = "gateway_credential_source_bindings"
+
 	createUsageAccountModelRollupsTable = `create table if not exists usage_account_model_rollups (
 		account_key text not null,
 		account_snapshot text,
@@ -927,6 +932,59 @@ func Migrate(db *sql.DB) error {
 			plan_type text,
 			created_at_ms integer not null
 		)`,
+		`create table if not exists gateway_api_key_identities (
+			id text primary key,
+			revision integer not null,
+			lifecycle text not null,
+			created_at_ms integer not null,
+			updated_at_ms integer not null
+		)`,
+		`create table if not exists gateway_credential_identities (
+			id text primary key,
+			revision integer not null,
+			lifecycle text not null,
+			created_at_ms integer not null,
+			updated_at_ms integer not null
+		)`,
+		`create table if not exists gateway_api_key_source_bindings (
+			binding_id integer primary key autoincrement,
+			api_key_id text not null,
+			runtime_identity text not null,
+			api_key_hash text not null,
+			observed_runtime_generation text,
+			first_seen_at_ms integer not null,
+			last_seen_at_ms integer not null,
+			retired_at_ms integer,
+			foreign key(api_key_id) references gateway_api_key_identities(id) on delete restrict
+		)`,
+		`create table if not exists gateway_credential_source_bindings (
+			binding_id integer primary key autoincrement,
+			credential_id text not null,
+			runtime_identity text not null,
+			source_auth_id text not null,
+			auth_index text not null default '',
+			provider text not null default '',
+			physical_name text not null default '',
+			account_snapshot text not null default '',
+			account_id_snapshot text not null default '',
+			observed_runtime_generation text,
+			first_seen_at_ms integer not null,
+			last_seen_at_ms integer not null,
+			retired_at_ms integer,
+			foreign key(credential_id) references gateway_credential_identities(id) on delete restrict
+		)`,
+		`create unique index if not exists idx_gateway_api_key_source_active
+			on gateway_api_key_source_bindings(runtime_identity, api_key_hash)
+			where retired_at_ms is null`,
+		`create unique index if not exists idx_gateway_api_key_entity_active
+			on gateway_api_key_source_bindings(api_key_id, runtime_identity)
+			where retired_at_ms is null`,
+		`create unique index if not exists idx_gateway_cred_source_active
+			on gateway_credential_source_bindings(runtime_identity, source_auth_id)
+			where retired_at_ms is null`,
+		`create unique index if not exists idx_gateway_cred_entity_active
+			on gateway_credential_source_bindings(credential_id, runtime_identity)
+			where retired_at_ms is null`,
 	}
 	for _, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {
