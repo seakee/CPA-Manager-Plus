@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
@@ -436,14 +437,15 @@ func TestApplyPassiveSnapshot_CombinedRollbackOnFailure(t *testing.T) {
 
 	rtID := "runtime-embedded-1"
 	validKeyHash := sha256Hex("valid-key")
+	validAuthID := "cred-1"
 
-	// Initial valid state
+	// Initial valid state: 1 key and 1 credential
 	params1 := ports.ReconcileSnapshotParams{
 		RuntimeIdentity:           rtID,
 		ObservedRuntimeGeneration: 1,
 		APIKeys:                   []ports.APIKeySnapshotItem{{APIKeyHash: validKeyHash}},
 		Credentials: []ports.CredentialSnapshotItem{
-			{SourceAuthID: "cred-1", PhysicalName: "cred1.json"},
+			{SourceAuthID: validAuthID, PhysicalName: "cred1.json"},
 		},
 		NowMS: 1000,
 	}
@@ -451,36 +453,95 @@ func TestApplyPassiveSnapshot_CombinedRollbackOnFailure(t *testing.T) {
 		t.Fatalf("setup initial snapshot: %v", err)
 	}
 
-	// Snapshot 2: introduces a new API key but an invalid credential that fails validation
-	// (e.g. empty SourceAuthID after validation check or constraint violation)
+	// Create test trigger to abort inside transaction when inserting credential source binding:
+	// Execution order inside ApplyPassiveSnapshot:
+	// 1. Query existing API keys & credentials
+	// 2. Insert new API key identity + binding (succeeds inside tx)
+	// 3. Insert new Credential identity + binding (aborts via trigger inside same tx)
+	// 4. Whole transaction rolls back
+	_, err := db.ExecContext(ctx, `create trigger fail_cred_binding_insert
+		before insert on gateway_credential_source_bindings
+		begin
+			select raise(abort, 'forced credential failure');
+		end;`)
+	if err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+	defer func() {
+		_, _ = db.ExecContext(ctx, `drop trigger if exists fail_cred_binding_insert`)
+	}()
+
 	newKeyHash := sha256Hex("new-key-hash")
+	newAuthID := "cred-new"
 	params2 := ports.ReconcileSnapshotParams{
 		RuntimeIdentity:           rtID,
 		ObservedRuntimeGeneration: 1,
-		APIKeys:                   []ports.APIKeySnapshotItem{{APIKeyHash: newKeyHash}},
+		APIKeys: []ports.APIKeySnapshotItem{
+			{APIKeyHash: validKeyHash},
+			{APIKeyHash: newKeyHash},
+		},
 		Credentials: []ports.CredentialSnapshotItem{
-			{SourceAuthID: ""}, // invalid!
+			{SourceAuthID: validAuthID, PhysicalName: "cred1.json"},
+			{SourceAuthID: newAuthID, PhysicalName: "cred2.json"},
 		},
 		NowMS: 2000,
 	}
 
-	_, err := repo.ApplyPassiveSnapshot(ctx, params2)
+	_, err = repo.ApplyPassiveSnapshot(ctx, params2)
 	if err == nil {
-		t.Fatal("expected error on invalid snapshot item, got nil")
+		t.Fatal("expected error from trigger abort, got nil")
+	}
+	if !strings.Contains(err.Error(), "forced credential failure") {
+		t.Errorf("expected error to contain 'forced credential failure', got: %v", err)
 	}
 
-	// Check that newKeyHash was NOT created
+	// Verify rollback: newKeyHash MUST NOT exist in DB
 	if _, _, err := repo.FindActiveAPIKeyBySource(ctx, rtID, newKeyHash); err == nil {
-		t.Errorf("newKeyHash was persisted despite snapshot failure!")
+		t.Errorf("newKeyHash was persisted despite rollback!")
+	}
+	var apiKeyCount int
+	if err := db.QueryRowContext(ctx, `select count(*) from gateway_api_key_identities`).Scan(&apiKeyCount); err != nil {
+		t.Fatalf("query api key count: %v", err)
+	}
+	if apiKeyCount != 1 {
+		t.Errorf("expected 1 api key identity, got %d", apiKeyCount)
 	}
 
-	// Check that validKeyHash is still active and unchanged
+	var apiKeyBindingCount int
+	if err := db.QueryRowContext(ctx, `select count(*) from gateway_api_key_source_bindings`).Scan(&apiKeyBindingCount); err != nil {
+		t.Fatalf("query api key binding count: %v", err)
+	}
+	if apiKeyBindingCount != 1 {
+		t.Errorf("expected 1 api key binding, got %d", apiKeyBindingCount)
+	}
+
+	// Verify newAuthID credential MUST NOT exist in DB
+	if _, _, err := repo.FindActiveCredentialBySource(ctx, rtID, newAuthID); err == nil {
+		t.Errorf("newAuthID credential was persisted despite rollback!")
+	}
+	var credCount int
+	if err := db.QueryRowContext(ctx, `select count(*) from gateway_credential_identities`).Scan(&credCount); err != nil {
+		t.Fatalf("query cred count: %v", err)
+	}
+	if credCount != 1 {
+		t.Errorf("expected 1 credential identity, got %d", credCount)
+	}
+
+	// Verify original rows unchanged
 	oldK, _, err := repo.FindActiveAPIKeyBySource(ctx, rtID, validKeyHash)
 	if err != nil {
-		t.Fatalf("original key missing after rollback: %v", err)
+		t.Fatalf("original key missing: %v", err)
 	}
 	if oldK.Revision != 1 || oldK.Lifecycle != identity.LifecycleActive {
 		t.Errorf("original key altered: %+v", oldK)
+	}
+
+	oldC, _, err := repo.FindActiveCredentialBySource(ctx, rtID, validAuthID)
+	if err != nil {
+		t.Fatalf("original cred missing: %v", err)
+	}
+	if oldC.Revision != 1 || oldC.Lifecycle != identity.LifecycleActive {
+		t.Errorf("original cred altered: %+v", oldC)
 	}
 
 	// Verify usage_events untouched
@@ -504,25 +565,413 @@ func TestApplyPassiveSnapshot_NoRawKeyPersisted(t *testing.T) {
 		RuntimeIdentity:           "runtime-1",
 		ObservedRuntimeGeneration: 1,
 		APIKeys:                   []ports.APIKeySnapshotItem{{APIKeyHash: hashed}},
-		NowMS:                     1000,
+		Credentials: []ports.CredentialSnapshotItem{
+			{
+				SourceAuthID:      "auth-1",
+				AuthIndex:         "0",
+				Provider:          "codex",
+				PhysicalName:      "cred1.json",
+				AccountSnapshot:   "user@example.com",
+				AccountIDSnapshot: "acct-1",
+			},
+		},
+		NowMS: 1000,
 	}
 
 	if _, err := repo.ApplyPassiveSnapshot(ctx, params); err != nil {
 		t.Fatalf("apply snapshot: %v", err)
 	}
 
-	// Scan all text columns across database tables for rawSecret
-	for _, table := range []string{
-		"gateway_api_key_identities",
-		"gateway_api_key_source_bindings",
-		"gateway_credential_identities",
-		"gateway_credential_source_bindings",
-	} {
-		var count int
-		query := fmt.Sprintf("select count(*) from %s where instr(lower(hex(id)), '%s') > 0", table, strings.ToLower(rawSecret))
-		_ = db.QueryRowContext(ctx, query).Scan(&count)
-		if count > 0 {
-			t.Errorf("raw secret leaked into table %s", table)
+	// Columns to check across all 4 tables for rawSecret
+	tableColumns := map[string][]string{
+		"gateway_api_key_identities": {
+			"id", "lifecycle",
+		},
+		"gateway_api_key_source_bindings": {
+			"api_key_hash", "runtime_identity", "observed_runtime_generation",
+		},
+		"gateway_credential_identities": {
+			"id", "lifecycle",
+		},
+		"gateway_credential_source_bindings": {
+			"credential_id", "runtime_identity", "source_auth_id",
+			"auth_index", "provider", "physical_name",
+			"account_snapshot", "account_id_snapshot",
+			"observed_runtime_generation",
+		},
+	}
+
+	for table, cols := range tableColumns {
+		for _, col := range cols {
+			var count int
+			query := fmt.Sprintf("select count(*) from %s where instr(%s, ?) > 0", table, col)
+			err := db.QueryRowContext(ctx, query, rawSecret).Scan(&count)
+			if err != nil {
+				t.Fatalf("querying table %s column %s failed: %v", table, col, err)
+			}
+			if count > 0 {
+				t.Errorf("raw secret leaked into table %s column %s: count = %d", table, col, count)
+			}
 		}
 	}
+}
+
+func TestApplyPassiveSnapshot_TimestampMonotonicity_WallClockRollback(t *testing.T) {
+	ctx := context.Background()
+	_, repo := setupTestDB(t)
+
+	rtID := "runtime-embedded-1"
+	keyHash := sha256Hex("key-rollback-test")
+	authID := "cred-rollback-test"
+
+	// Snapshot 1: observed at 2000
+	params1 := ports.ReconcileSnapshotParams{
+		RuntimeIdentity:           rtID,
+		ObservedRuntimeGeneration: 1,
+		APIKeys:                   []ports.APIKeySnapshotItem{{APIKeyHash: keyHash}},
+		Credentials: []ports.CredentialSnapshotItem{
+			{SourceAuthID: authID, PhysicalName: "cred.json"},
+		},
+		NowMS: 2000,
+	}
+	if _, err := repo.ApplyPassiveSnapshot(ctx, params1); err != nil {
+		t.Fatalf("snapshot 1: %v", err)
+	}
+
+	_, kBind1, err := repo.FindActiveAPIKeyBySource(ctx, rtID, keyHash)
+	if err != nil {
+		t.Fatalf("find active key: %v", err)
+	}
+	if kBind1.FirstSeenAtMS != 2000 || kBind1.LastSeenAtMS != 2000 {
+		t.Errorf("expected 2000, got first=%d, last=%d", kBind1.FirstSeenAtMS, kBind1.LastSeenAtMS)
+	}
+
+	_, cBind1, err := repo.FindActiveCredentialBySource(ctx, rtID, authID)
+	if err != nil {
+		t.Fatalf("find active cred: %v", err)
+	}
+	if cBind1.FirstSeenAtMS != 2000 || cBind1.LastSeenAtMS != 2000 {
+		t.Errorf("expected 2000, got first=%d, last=%d", cBind1.FirstSeenAtMS, cBind1.LastSeenAtMS)
+	}
+
+	// Snapshot 2: Wall clock rolls back to 1000!
+	params2 := params1
+	params2.NowMS = 1000
+	res2, err := repo.ApplyPassiveSnapshot(ctx, params2)
+	if err != nil {
+		t.Fatalf("snapshot 2 with clock rollback: %v", err)
+	}
+	if res2.APIKeysRefreshed != 1 || res2.CredentialsRefreshed != 1 {
+		t.Errorf("expected 1 refresh each, got %+v", res2)
+	}
+
+	_, kBind2, err := repo.FindActiveAPIKeyBySource(ctx, rtID, keyHash)
+	if err != nil {
+		t.Fatalf("find active key after rollback: %v", err)
+	}
+	if kBind2.LastSeenAtMS != 2000 {
+		t.Errorf("APIKey last_seen_at_ms decreased after clock rollback! got %d, want 2000", kBind2.LastSeenAtMS)
+	}
+	if kBind2.LastSeenAtMS < kBind2.FirstSeenAtMS {
+		t.Errorf("last_seen_at_ms (%d) < first_seen_at_ms (%d)", kBind2.LastSeenAtMS, kBind2.FirstSeenAtMS)
+	}
+
+	_, cBind2, err := repo.FindActiveCredentialBySource(ctx, rtID, authID)
+	if err != nil {
+		t.Fatalf("find active cred after rollback: %v", err)
+	}
+	if cBind2.LastSeenAtMS != 2000 {
+		t.Errorf("Credential last_seen_at_ms decreased after clock rollback! got %d, want 2000", cBind2.LastSeenAtMS)
+	}
+	if cBind2.LastSeenAtMS < cBind2.FirstSeenAtMS {
+		t.Errorf("last_seen_at_ms (%d) < first_seen_at_ms (%d)", cBind2.LastSeenAtMS, cBind2.FirstSeenAtMS)
+	}
+
+	// Snapshot 3: Clock advances normally to 3000
+	params3 := params1
+	params3.NowMS = 3000
+	if _, err := repo.ApplyPassiveSnapshot(ctx, params3); err != nil {
+		t.Fatalf("snapshot 3: %v", err)
+	}
+	_, kBind3, _ := repo.FindActiveAPIKeyBySource(ctx, rtID, keyHash)
+	if kBind3.LastSeenAtMS != 3000 {
+		t.Errorf("APIKey last_seen_at_ms = %d, want 3000", kBind3.LastSeenAtMS)
+	}
+}
+
+func TestApplyPassiveSnapshot_UpdatedAtMonotonicAndMaxInt64FailsClosed(t *testing.T) {
+	ctx := context.Background()
+	db, repo := setupTestDB(t)
+
+	rtID := "runtime-embedded-1"
+	keyHash := sha256Hex("key-overflow-test")
+	authID := "cred-overflow-test"
+
+	// 1. Initial snapshot at 2000
+	params1 := ports.ReconcileSnapshotParams{
+		RuntimeIdentity:           rtID,
+		ObservedRuntimeGeneration: 1,
+		APIKeys:                   []ports.APIKeySnapshotItem{{APIKeyHash: keyHash}},
+		Credentials: []ports.CredentialSnapshotItem{
+			{SourceAuthID: authID, PhysicalName: "cred.json"},
+		},
+		NowMS: 2000,
+	}
+	if _, err := repo.ApplyPassiveSnapshot(ctx, params1); err != nil {
+		t.Fatalf("snapshot 1: %v", err)
+	}
+
+	kEnt, _, _ := repo.FindActiveAPIKeyBySource(ctx, rtID, keyHash)
+	cEnt, _, _ := repo.FindActiveCredentialBySource(ctx, rtID, authID)
+
+	// 2. Snapshot 2: key and cred absent, but clock rolled back to 1500
+	// transition active -> missing must advance updated_at_ms monotonically to current + 1 (2001)
+	params2 := ports.ReconcileSnapshotParams{
+		RuntimeIdentity:           rtID,
+		ObservedRuntimeGeneration: 1,
+		NowMS:                     1500,
+	}
+	if _, err := repo.ApplyPassiveSnapshot(ctx, params2); err != nil {
+		t.Fatalf("snapshot 2 (missing transition with clock rollback): %v", err)
+	}
+
+	kMissing, err := repo.LoadAPIKeyByID(ctx, kEnt.ID)
+	if err != nil {
+		t.Fatalf("load missing key: %v", err)
+	}
+	if kMissing.UpdatedAtMS != 2001 {
+		t.Errorf("APIKey updated_at_ms was not monotonically advanced! got %d, want 2001", kMissing.UpdatedAtMS)
+	}
+
+	cMissing, err := repo.LoadCredentialByID(ctx, cEnt.ID)
+	if err != nil {
+		t.Fatalf("load missing cred: %v", err)
+	}
+	if cMissing.UpdatedAtMS != 2001 {
+		t.Errorf("Credential updated_at_ms was not monotonically advanced! got %d, want 2001", cMissing.UpdatedAtMS)
+	}
+
+	// 3. Set updated_at_ms to MaxInt64 in DB for API key
+	_, err = db.ExecContext(ctx, `update gateway_api_key_identities set updated_at_ms = ? where id = ?`,
+		math.MaxInt64, string(kEnt.ID))
+	if err != nil {
+		t.Fatalf("update key updated_at_ms to MaxInt64: %v", err)
+	}
+
+	// Recovery (missing -> active) must fail closed when updated_at_ms is MaxInt64
+	params3 := params1
+	params3.NowMS = 3000
+	_, err = repo.ApplyPassiveSnapshot(ctx, params3)
+	if err == nil {
+		t.Fatal("expected error on MaxInt64 updated_at_ms overflow, got nil")
+	}
+	if !strings.Contains(err.Error(), "cannot advance updatedAtMs: int64 max reached") {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	// Restore API key updated_at_ms, now test Credential MaxInt64
+	_, err = db.ExecContext(ctx, `update gateway_api_key_identities set updated_at_ms = 2001 where id = ?`, string(kEnt.ID))
+	if err != nil {
+		t.Fatalf("reset key updated_at_ms: %v", err)
+	}
+	_, err = db.ExecContext(ctx, `update gateway_credential_identities set updated_at_ms = ? where id = ?`,
+		math.MaxInt64, string(cEnt.ID))
+	if err != nil {
+		t.Fatalf("update cred updated_at_ms to MaxInt64: %v", err)
+	}
+
+	_, err = repo.ApplyPassiveSnapshot(ctx, params3)
+	if err == nil {
+		t.Fatal("expected error on Credential MaxInt64 updated_at_ms overflow, got nil")
+	}
+	if !strings.Contains(err.Error(), "cannot advance updatedAtMs: int64 max reached") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestApplyPassiveSnapshot_CorruptedPersistedState_APIKey_RevisionZero(t *testing.T) {
+	ctx := context.Background()
+	db, repo := setupTestDB(t)
+
+	rtID := "runtime-embedded-1"
+	keyHash := sha256Hex("key-corrupted-rev")
+
+	params := ports.ReconcileSnapshotParams{
+		RuntimeIdentity:           rtID,
+		ObservedRuntimeGeneration: 1,
+		APIKeys:                   []ports.APIKeySnapshotItem{{APIKeyHash: keyHash}},
+		NowMS:                     1000,
+	}
+	if _, err := repo.ApplyPassiveSnapshot(ctx, params); err != nil {
+		t.Fatalf("initial snapshot: %v", err)
+	}
+
+	// Corrupt revision in DB directly: set revision = 0
+	res, err := db.ExecContext(ctx, `update gateway_api_key_identities set revision = 0`)
+	if err != nil {
+		t.Fatalf("corrupt revision: %v", err)
+	}
+	if ra, _ := res.RowsAffected(); ra != 1 {
+		t.Fatalf("expected 1 row affected, got %d", ra)
+	}
+
+	// Next snapshot must FAIL CLOSED
+	params2 := params
+	params2.NowMS = 2000
+	_, err = repo.ApplyPassiveSnapshot(ctx, params2)
+	if err == nil {
+		t.Fatal("expected error on corrupted persisted revision 0, got nil")
+	}
+
+	// Verify ZERO writes: revision remains 0 in DB, not repaired
+	var rev int64
+	if err := db.QueryRowContext(ctx, `select revision from gateway_api_key_identities`).Scan(&rev); err != nil {
+		t.Fatalf("query revision: %v", err)
+	}
+	if rev != 0 {
+		t.Errorf("persisted corruption was silently mutated! revision = %d, want 0", rev)
+	}
+}
+
+func TestApplyPassiveSnapshot_CorruptedPersistedState_APIKey_MalformedGeneration(t *testing.T) {
+	ctx := context.Background()
+	db, repo := setupTestDB(t)
+
+	rtID := "runtime-embedded-1"
+	keyHash := sha256Hex("key-corrupted-gen")
+
+	params := ports.ReconcileSnapshotParams{
+		RuntimeIdentity:           rtID,
+		ObservedRuntimeGeneration: 1,
+		APIKeys:                   []ports.APIKeySnapshotItem{{APIKeyHash: keyHash}},
+		NowMS:                     1000,
+	}
+	if _, err := repo.ApplyPassiveSnapshot(ctx, params); err != nil {
+		t.Fatalf("initial snapshot: %v", err)
+	}
+
+	// Corrupt observed_runtime_generation in DB directly to 'abc'
+	_, err := db.ExecContext(ctx, `update gateway_api_key_source_bindings set observed_runtime_generation = 'abc'`)
+	if err != nil {
+		t.Fatalf("corrupt generation: %v", err)
+	}
+
+	// Next snapshot must fail closed
+	params2 := params
+	params2.NowMS = 2000
+	_, err = repo.ApplyPassiveSnapshot(ctx, params2)
+	if err == nil {
+		t.Fatal("expected error on malformed observed_runtime_generation, got nil")
+	}
+
+	// Verify ZERO writes: generation remains 'abc'
+	var gen string
+	if err := db.QueryRowContext(ctx, `select observed_runtime_generation from gateway_api_key_source_bindings`).Scan(&gen); err != nil {
+		t.Fatalf("query gen: %v", err)
+	}
+	if gen != "abc" {
+		t.Errorf("corrupted generation was overwritten! got %q, want 'abc'", gen)
+	}
+}
+
+func TestApplyPassiveSnapshot_CorruptedPersistedState_APIKey_InvalidTimestamp(t *testing.T) {
+	ctx := context.Background()
+	db, repo := setupTestDB(t)
+
+	rtID := "runtime-embedded-1"
+	keyHash := sha256Hex("key-corrupted-ts")
+
+	params := ports.ReconcileSnapshotParams{
+		RuntimeIdentity:           rtID,
+		ObservedRuntimeGeneration: 1,
+		APIKeys:                   []ports.APIKeySnapshotItem{{APIKeyHash: keyHash}},
+		NowMS:                     1000,
+	}
+	if _, err := repo.ApplyPassiveSnapshot(ctx, params); err != nil {
+		t.Fatalf("initial snapshot: %v", err)
+	}
+
+	// Corrupt timestamps: first_seen_at_ms (2000) > last_seen_at_ms (1000)
+	_, err := db.ExecContext(ctx, `update gateway_api_key_source_bindings set first_seen_at_ms = 2000, last_seen_at_ms = 1000`)
+	if err != nil {
+		t.Fatalf("corrupt timestamps: %v", err)
+	}
+
+	// Next snapshot must fail closed
+	params2 := params
+	params2.NowMS = 3000
+	_, err = repo.ApplyPassiveSnapshot(ctx, params2)
+	if err == nil {
+		t.Fatal("expected error on corrupted binding timestamps, got nil")
+	}
+}
+
+func TestApplyPassiveSnapshot_CorruptedPersistedState_Credential_FailClosed(t *testing.T) {
+	t.Run("revision_zero", func(t *testing.T) {
+		ctx := context.Background()
+		db, repo := setupTestDB(t)
+
+		rtID := "runtime-embedded-1"
+		params := ports.ReconcileSnapshotParams{
+			RuntimeIdentity:           rtID,
+			ObservedRuntimeGeneration: 1,
+			Credentials: []ports.CredentialSnapshotItem{
+				{SourceAuthID: "auth-cred-corrupt", PhysicalName: "cred.json"},
+			},
+			NowMS: 1000,
+		}
+		if _, err := repo.ApplyPassiveSnapshot(ctx, params); err != nil {
+			t.Fatalf("initial snapshot: %v", err)
+		}
+
+		_, err := db.ExecContext(ctx, `update gateway_credential_identities set revision = 0`)
+		if err != nil {
+			t.Fatalf("corrupt credential revision: %v", err)
+		}
+
+		params2 := params
+		params2.NowMS = 2000
+		_, err = repo.ApplyPassiveSnapshot(ctx, params2)
+		if err == nil {
+			t.Fatal("expected error on corrupted credential revision 0, got nil")
+		}
+
+		var rev int64
+		if err := db.QueryRowContext(ctx, `select revision from gateway_credential_identities`).Scan(&rev); err != nil {
+			t.Fatalf("query credential revision: %v", err)
+		}
+		if rev != 0 {
+			t.Errorf("corrupted revision was silently mutated! got %d, want 0", rev)
+		}
+	})
+
+	t.Run("invalid_timestamp", func(t *testing.T) {
+		ctx := context.Background()
+		db, repo := setupTestDB(t)
+
+		rtID := "runtime-embedded-1"
+		params := ports.ReconcileSnapshotParams{
+			RuntimeIdentity:           rtID,
+			ObservedRuntimeGeneration: 1,
+			Credentials: []ports.CredentialSnapshotItem{
+				{SourceAuthID: "auth-cred-corrupt-ts", PhysicalName: "cred.json"},
+			},
+			NowMS: 1000,
+		}
+		if _, err := repo.ApplyPassiveSnapshot(ctx, params); err != nil {
+			t.Fatalf("initial snapshot: %v", err)
+		}
+
+		_, err := db.ExecContext(ctx, `update gateway_credential_source_bindings set first_seen_at_ms = 2000, last_seen_at_ms = 1000`)
+		if err != nil {
+			t.Fatalf("corrupt credential timestamps: %v", err)
+		}
+
+		params2 := params
+		params2.NowMS = 3000
+		_, err = repo.ApplyPassiveSnapshot(ctx, params2)
+		if err == nil {
+			t.Fatal("expected error on corrupted credential timestamps, got nil")
+		}
+	})
 }

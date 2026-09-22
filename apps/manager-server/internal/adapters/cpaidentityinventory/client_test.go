@@ -129,21 +129,24 @@ func TestFetchAPIKeys_MalformedShapes(t *testing.T) {
 }
 
 func TestFetchAPIKeys_RawKeyContainmentInError(t *testing.T) {
-	secretValue := "super-sensitive-raw-api-key-9999"
+	rawSecret := "super-sensitive-raw-api-key-9999"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		// Non-string item, but let's test if raw string in malformed context ever leaks
-		_, _ = w.Write([]byte(`{"api-keys": [12345]}`))
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("internal error dump with sensitive key: " + rawSecret))
 	}))
 	defer server.Close()
 
 	c := New(server.Client(), nil)
 	_, err := c.FetchAPIKeys(context.Background(), server.URL, "key")
 	if err == nil {
-		t.Fatal("expected error")
+		t.Fatal("expected error, got nil")
 	}
-	if strings.Contains(err.Error(), secretValue) {
-		t.Errorf("raw key %q leaked in error message: %v", secretValue, err)
+	if strings.Contains(err.Error(), rawSecret) {
+		t.Errorf("raw key %q leaked in error message: %v", rawSecret, err)
+	}
+	if !strings.Contains(err.Error(), "HTTP 500") {
+		t.Errorf("expected error to contain 'HTTP 500', got: %v", err)
 	}
 }
 

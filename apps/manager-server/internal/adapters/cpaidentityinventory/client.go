@@ -75,8 +75,7 @@ func (c *client) FetchAPIKeys(ctx context.Context, baseURL string, managementKey
 	defer res.Body.Close()
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(res.Body, 1024))
-		return nil, fmt.Errorf("GET %s: HTTP %d %s", apiKeysPath, res.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("GET %s: HTTP %d", apiKeysPath, res.StatusCode)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(res.Body, maxAPIKeysBytes))

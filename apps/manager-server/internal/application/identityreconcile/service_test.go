@@ -553,3 +553,87 @@ type dynamicRuntimeObserver struct {
 func (d *dynamicRuntimeObserver) Status(ctx context.Context) (model.RuntimeObservedStatus, error) {
 	return d.fn()
 }
+
+func TestReconcileOnce_ContextCanceledPreserved(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	observer := &sequenceRuntimeObserver{
+		statuses: []func() (model.RuntimeObservedStatus, error){
+			func() (model.RuntimeObservedStatus, error) {
+				return validReadyStatus(), nil
+			},
+		},
+	}
+	repo := &recordingIdentityRepo{}
+	inventory := &fakeInventoryClient{
+		apiKeysErr: context.Canceled,
+	}
+
+	svc, err := identityreconcile.NewService(identityreconcile.Config{
+		RuntimeObserver:    observer,
+		ConnectionResolver: staticConnectionResolver("http://localhost:8080", "key"),
+		InventoryClient:    inventory,
+		IdentityRepo:       repo,
+	})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+
+	cancel() // cancel context before ReconcileOnce finishes
+	_, err = svc.ReconcileOnce(ctx)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected errors.Is(err, context.Canceled), got %v", err)
+	}
+	if len(repo.applyCalls) != 0 {
+		t.Errorf("expected 0 apply calls on context cancellation, got %d", len(repo.applyCalls))
+	}
+}
+
+func TestWorker_ContextCanceledNoWaitingLog(t *testing.T) {
+	observer := &sequenceRuntimeObserver{
+		statuses: []func() (model.RuntimeObservedStatus, error){
+			func() (model.RuntimeObservedStatus, error) {
+				return validReadyStatus(), nil
+			},
+		},
+	}
+	repo := &recordingIdentityRepo{}
+	inventory := &fakeInventoryClient{
+		apiKeysErr: context.Canceled,
+	}
+
+	svc, err := identityreconcile.NewService(identityreconcile.Config{
+		RuntimeObserver:    observer,
+		ConnectionResolver: staticConnectionResolver("http://localhost:8080", "key"),
+		InventoryClient:    inventory,
+		IdentityRepo:       repo,
+	})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+
+	var logMu sync.Mutex
+	var logs []string
+	worker := identityreconcile.NewWorker(svc, func(format string, args ...any) {
+		logMu.Lock()
+		defer logMu.Unlock()
+		logs = append(logs, format)
+	})
+	worker.SetInterval(10 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // canceled immediately
+
+	worker.Run(ctx)
+
+	logMu.Lock()
+	defer logMu.Unlock()
+	for _, l := range logs {
+		if strings.Contains(l, "waiting") || strings.Contains(l, "reconciliation error changed") {
+			t.Errorf("worker logged error on canceled context: %s", l)
+		}
+	}
+}

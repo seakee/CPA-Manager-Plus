@@ -2,6 +2,7 @@ package identityreconcile
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -82,6 +83,12 @@ func (s *Service) ReconcileOnce(ctx context.Context) (ports.ReconcileSnapshotRes
 	// Step 1: Pre-capture Runtime Status fence
 	preStatus, err := s.runtimeObserver.Status(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ports.ReconcileSnapshotResult{}, ctx.Err()
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return ports.ReconcileSnapshotResult{}, err
+		}
 		return ports.ReconcileSnapshotResult{}, fmt.Errorf("%w: %v", ErrRuntimeUnavailable, err)
 	}
 	if preStatus.State != model.RuntimeStateReady {
@@ -98,6 +105,12 @@ func (s *Service) ReconcileOnce(ctx context.Context) (ports.ReconcileSnapshotRes
 	// Step 2: Resolve ONE immutable CPA Management connection for this run
 	baseURL, mgmtKey, err := s.connectionResolver(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ports.ReconcileSnapshotResult{}, ctx.Err()
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return ports.ReconcileSnapshotResult{}, err
+		}
 		return ports.ReconcileSnapshotResult{}, fmt.Errorf("%w: %v", ErrConnectionResolutionFailed, err)
 	}
 	baseURL = strings.TrimSpace(baseURL)
@@ -109,17 +122,35 @@ func (s *Service) ReconcileOnce(ctx context.Context) (ports.ReconcileSnapshotRes
 	// Step 3: Fetch both inventories using the resolved immutable connection
 	apiKeysObs, err := s.inventoryClient.FetchAPIKeys(ctx, baseURL, mgmtKey)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ports.ReconcileSnapshotResult{}, ctx.Err()
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return ports.ReconcileSnapshotResult{}, err
+		}
 		return ports.ReconcileSnapshotResult{}, fmt.Errorf("%w: %v", ErrAPIKeyInventoryFailed, err)
 	}
 
 	credsObs, err := s.inventoryClient.FetchCredentials(ctx, baseURL, mgmtKey)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ports.ReconcileSnapshotResult{}, ctx.Err()
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return ports.ReconcileSnapshotResult{}, err
+		}
 		return ports.ReconcileSnapshotResult{}, fmt.Errorf("%w: %v", ErrCredentialInventoryFailed, err)
 	}
 
 	// Step 4: Post-capture Runtime Status fence
 	postStatus, err := s.runtimeObserver.Status(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ports.ReconcileSnapshotResult{}, ctx.Err()
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return ports.ReconcileSnapshotResult{}, err
+		}
 		return ports.ReconcileSnapshotResult{}, fmt.Errorf("%w: observe post-status: %v", ErrRuntimeFenceChanged, err)
 	}
 	if postStatus.State != model.RuntimeStateReady {
@@ -168,6 +199,12 @@ func (s *Service) ReconcileOnce(ctx context.Context) (ports.ReconcileSnapshotRes
 
 	result, err := s.identityRepo.ApplyPassiveSnapshot(ctx, snapshotParams)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ports.ReconcileSnapshotResult{}, ctx.Err()
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return ports.ReconcileSnapshotResult{}, err
+		}
 		return ports.ReconcileSnapshotResult{}, fmt.Errorf("%w: %v", ErrReconciliationConflict, err)
 	}
 
