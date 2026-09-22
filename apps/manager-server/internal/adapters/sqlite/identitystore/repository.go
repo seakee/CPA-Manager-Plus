@@ -481,12 +481,9 @@ func (r *repository) SetAPIKeyLifecycle(
 	nextRev := current.Revision + 1
 
 	// Monotonic timestamp advancement
-	persistedUpdatedAt := nowMS
-	if persistedUpdatedAt <= current.UpdatedAtMS {
-		if current.UpdatedAtMS == math.MaxInt64 {
-			return identity.APIKeyIdentity{}, errors.New("cannot advance updatedAtMs: int64 max reached")
-		}
-		persistedUpdatedAt = current.UpdatedAtMS + 1
+	persistedUpdatedAt, err := nextUpdatedAt(current.UpdatedAtMS, nowMS)
+	if err != nil {
+		return identity.APIKeyIdentity{}, err
 	}
 
 	res, err := tx.ExecContext(ctx, `update `+sqliterepo.GatewayAPIKeyIdentitiesTable+`
@@ -599,12 +596,9 @@ func (r *repository) SetCredentialLifecycle(
 	nextRev := current.Revision + 1
 
 	// Monotonic timestamp advancement
-	persistedUpdatedAt := nowMS
-	if persistedUpdatedAt <= current.UpdatedAtMS {
-		if current.UpdatedAtMS == math.MaxInt64 {
-			return identity.CredentialIdentity{}, errors.New("cannot advance updatedAtMs: int64 max reached")
-		}
-		persistedUpdatedAt = current.UpdatedAtMS + 1
+	persistedUpdatedAt, err := nextUpdatedAt(current.UpdatedAtMS, nowMS)
+	if err != nil {
+		return identity.CredentialIdentity{}, err
 	}
 
 	res, err := tx.ExecContext(ctx, `update `+sqliterepo.GatewayCredentialIdentitiesTable+`
@@ -638,6 +632,27 @@ func (r *repository) SetCredentialLifecycle(
 		CreatedAtMS: current.CreatedAtMS,
 		UpdatedAtMS: persistedUpdatedAt,
 	}, nil
+}
+
+func monotonicObservedAt(requested, firstSeen, currentLastSeen int64) int64 {
+	next := requested
+	if next < currentLastSeen {
+		next = currentLastSeen
+	}
+	if next < firstSeen {
+		next = firstSeen
+	}
+	return next
+}
+
+func nextUpdatedAt(current, requested int64) (int64, error) {
+	if requested > current {
+		return requested, nil
+	}
+	if current == math.MaxInt64 {
+		return 0, errors.New("cannot advance updatedAtMs: int64 max reached")
+	}
+	return current + 1, nil
 }
 
 func formatObservedGeneration(generation uint64) *string {
@@ -685,4 +700,471 @@ func isConstraintConflict(err error) bool {
 	lower := strings.ToLower(err.Error())
 	return strings.Contains(lower, "unique constraint failed") ||
 		strings.Contains(lower, "constraint failed")
+}
+
+func (r *repository) ApplyPassiveSnapshot(ctx context.Context, params ports.ReconcileSnapshotParams) (ports.ReconcileSnapshotResult, error) {
+	if params.RuntimeIdentity == "" || strings.TrimSpace(params.RuntimeIdentity) != params.RuntimeIdentity {
+		return ports.ReconcileSnapshotResult{}, fmt.Errorf("%w: %q", identity.ErrInvalidRuntimeIdentity, params.RuntimeIdentity)
+	}
+	if params.ObservedRuntimeGeneration == 0 {
+		return ports.ReconcileSnapshotResult{}, errors.New("observed runtime generation must be non-zero")
+	}
+	if params.NowMS <= 0 {
+		return ports.ReconcileSnapshotResult{}, errors.New("nowMS must be positive")
+	}
+
+	// Validate snapshot API keys
+	uniqueAPIKeys := make(map[string]struct{}, len(params.APIKeys))
+	for idx, k := range params.APIKeys {
+		canonicalHash := strings.ToLower(strings.TrimSpace(k.APIKeyHash))
+		if !identity.IsValidSHA256Hex(canonicalHash) {
+			return ports.ReconcileSnapshotResult{}, fmt.Errorf("item at index %d: %w", idx, identity.ErrInvalidAPIKeyHash)
+		}
+		uniqueAPIKeys[canonicalHash] = struct{}{}
+	}
+
+	// Validate snapshot credentials
+	uniqueCredentials := make(map[string]ports.CredentialSnapshotItem, len(params.Credentials))
+	for idx, c := range params.Credentials {
+		sourceAuthID := strings.TrimSpace(c.SourceAuthID)
+		if sourceAuthID == "" {
+			return ports.ReconcileSnapshotResult{}, fmt.Errorf("item at index %d: %w", idx, identity.ErrInvalidSourceAuthID)
+		}
+		c.SourceAuthID = sourceAuthID
+		uniqueCredentials[sourceAuthID] = c
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ports.ReconcileSnapshotResult{}, fmt.Errorf("begin snapshot tx: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	var result ports.ReconcileSnapshotResult
+
+	// --- 1. Reconcile API Keys ---
+	type existingAPIKey struct {
+		entity  identity.APIKeyIdentity
+		binding identity.APIKeySourceBinding
+	}
+
+	rows, err := tx.QueryContext(ctx, `select
+		i.id, i.revision, i.lifecycle, i.created_at_ms, i.updated_at_ms,
+		b.binding_id, b.api_key_id, b.runtime_identity, b.api_key_hash,
+		b.observed_runtime_generation, b.first_seen_at_ms, b.last_seen_at_ms, b.retired_at_ms
+		from `+sqliterepo.GatewayAPIKeySourceBindingsTable+` b
+		join `+sqliterepo.GatewayAPIKeyIdentitiesTable+` i on b.api_key_id = i.id
+		where b.runtime_identity = ? and b.retired_at_ms is null`, params.RuntimeIdentity)
+	if err != nil {
+		return ports.ReconcileSnapshotResult{}, fmt.Errorf("query current api keys: %w", err)
+	}
+	defer rows.Close()
+
+	existingAPIKeys := make(map[string]existingAPIKey)
+	for rows.Next() {
+		var (
+			rawID         string
+			rev           int64
+			lifecycle     string
+			createdAtMS   int64
+			updatedAtMS   int64
+			bindingID     int64
+			bAPIKeyID     string
+			bRTIdentity   string
+			bHash         string
+			observedGen   *string
+			firstSeenAtMS int64
+			lastSeenAtMS  int64
+			retiredAtMS   sql.NullInt64
+		)
+		if err := rows.Scan(
+			&rawID, &rev, &lifecycle, &createdAtMS, &updatedAtMS,
+			&bindingID, &bAPIKeyID, &bRTIdentity, &bHash,
+			&observedGen, &firstSeenAtMS, &lastSeenAtMS, &retiredAtMS,
+		); err != nil {
+			return ports.ReconcileSnapshotResult{}, fmt.Errorf("scan current api key: %w", err)
+		}
+
+		gen, err := parseObservedGeneration(observedGen)
+		if err != nil {
+			return ports.ReconcileSnapshotResult{}, fmt.Errorf("parse observed runtime generation: %w", err)
+		}
+
+		ent := identity.APIKeyIdentity{
+			ID:          identity.APIKeyID(rawID),
+			Revision:    identity.Revision(rev),
+			Lifecycle:   identity.Lifecycle(lifecycle),
+			CreatedAtMS: createdAtMS,
+			UpdatedAtMS: updatedAtMS,
+		}
+		binding := identity.APIKeySourceBinding{
+			BindingID:                 bindingID,
+			APIKeyID:                  identity.APIKeyID(bAPIKeyID),
+			RuntimeIdentity:           bRTIdentity,
+			APIKeyHash:                bHash,
+			ObservedRuntimeGeneration: gen,
+			FirstSeenAtMS:             firstSeenAtMS,
+			LastSeenAtMS:              lastSeenAtMS,
+			RetiredAtMS:               retiredAtMS.Int64,
+		}
+
+		if err := ent.Validate(); err != nil {
+			return ports.ReconcileSnapshotResult{}, fmt.Errorf("persisted entity invalid: %w", err)
+		}
+		if err := binding.Validate(); err != nil {
+			return ports.ReconcileSnapshotResult{}, fmt.Errorf("persisted binding invalid: %w", err)
+		}
+		if ent.Lifecycle == identity.LifecycleSuperseded {
+			return ports.ReconcileSnapshotResult{}, fmt.Errorf("%w: active binding points to superseded api key %q",
+				identity.ErrInvalidLifecycleTransition, ent.ID)
+		}
+
+		existingAPIKeys[binding.APIKeyHash] = existingAPIKey{
+			entity:  ent,
+			binding: binding,
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return ports.ReconcileSnapshotResult{}, fmt.Errorf("iterate current api keys: %w", err)
+	}
+	rows.Close()
+
+	observedGenStr := formatObservedGeneration(params.ObservedRuntimeGeneration)
+
+	// Process present API keys
+	for hash := range uniqueAPIKeys {
+		if existing, exists := existingAPIKeys[hash]; exists {
+			switch existing.entity.Lifecycle {
+			case identity.LifecycleActive:
+				// Active stays active: same ID, same business revision, refresh binding last seen & generation
+				nextLastSeen := monotonicObservedAt(params.NowMS, existing.binding.FirstSeenAtMS, existing.binding.LastSeenAtMS)
+				_, err := tx.ExecContext(ctx, `update `+sqliterepo.GatewayAPIKeySourceBindingsTable+`
+					set last_seen_at_ms = ?, observed_runtime_generation = ?
+					where binding_id = ?`,
+					nextLastSeen, observedGenStr, existing.binding.BindingID)
+				if err != nil {
+					return ports.ReconcileSnapshotResult{}, fmt.Errorf("refresh api key binding: %w", err)
+				}
+				result.APIKeysRefreshed++
+			case identity.LifecycleMissing:
+				// Missing returns: same ID, missing -> active, revision + 1
+				if existing.entity.Revision >= math.MaxInt64 {
+					return ports.ReconcileSnapshotResult{}, ports.ErrRevisionOverflow
+				}
+				nextRev := existing.entity.Revision + 1
+				persistedUpdatedAt, err := nextUpdatedAt(existing.entity.UpdatedAtMS, params.NowMS)
+				if err != nil {
+					return ports.ReconcileSnapshotResult{}, err
+				}
+				res, err := tx.ExecContext(ctx, `update `+sqliterepo.GatewayAPIKeyIdentitiesTable+`
+					set revision = ?, lifecycle = ?, updated_at_ms = ?
+					where id = ? and revision = ?`,
+					int64(nextRev), string(identity.LifecycleActive), persistedUpdatedAt,
+					string(existing.entity.ID), int64(existing.entity.Revision))
+				if err != nil {
+					return ports.ReconcileSnapshotResult{}, fmt.Errorf("recover api key identity: %w", err)
+				}
+				ra, err := res.RowsAffected()
+				if err != nil || ra != 1 {
+					return ports.ReconcileSnapshotResult{}, fmt.Errorf("%w: api key recovery conflict", ports.ErrRevisionConflict)
+				}
+				nextLastSeen := monotonicObservedAt(params.NowMS, existing.binding.FirstSeenAtMS, existing.binding.LastSeenAtMS)
+				_, err = tx.ExecContext(ctx, `update `+sqliterepo.GatewayAPIKeySourceBindingsTable+`
+					set last_seen_at_ms = ?, observed_runtime_generation = ?
+					where binding_id = ?`,
+					nextLastSeen, observedGenStr, existing.binding.BindingID)
+				if err != nil {
+					return ports.ReconcileSnapshotResult{}, fmt.Errorf("refresh recovered api key binding: %w", err)
+				}
+				result.APIKeysRecovered++
+			}
+		} else {
+			// New source: create new Canonical ID + initial binding
+			newID, err := identity.NewAPIKeyID()
+			if err != nil {
+				return ports.ReconcileSnapshotResult{}, fmt.Errorf("generate api key id: %w", err)
+			}
+			_, err = tx.ExecContext(ctx, `insert into `+sqliterepo.GatewayAPIKeyIdentitiesTable+` (
+				id, revision, lifecycle, created_at_ms, updated_at_ms
+			) values (?, ?, ?, ?, ?)`,
+				string(newID), int64(identity.InitialRevision), string(identity.LifecycleActive),
+				params.NowMS, params.NowMS)
+			if err != nil {
+				return ports.ReconcileSnapshotResult{}, fmt.Errorf("insert api key identity: %w", err)
+			}
+			_, err = tx.ExecContext(ctx, `insert into `+sqliterepo.GatewayAPIKeySourceBindingsTable+` (
+				api_key_id, runtime_identity, api_key_hash, observed_runtime_generation,
+				first_seen_at_ms, last_seen_at_ms, retired_at_ms
+			) values (?, ?, ?, ?, ?, ?, null)`,
+				string(newID), params.RuntimeIdentity, hash, observedGenStr,
+				params.NowMS, params.NowMS)
+			if err != nil {
+				if isConstraintConflict(err) {
+					return ports.ReconcileSnapshotResult{}, fmt.Errorf("%w: %v", ports.ErrSourceBindingConflict, err)
+				}
+				return ports.ReconcileSnapshotResult{}, fmt.Errorf("insert api key source binding: %w", err)
+			}
+			result.APIKeysCreated++
+		}
+	}
+
+	// Negative evidence for API keys: active sources absent from snapshot transition to missing
+	for hash, existing := range existingAPIKeys {
+		if _, present := uniqueAPIKeys[hash]; !present {
+			if existing.entity.Lifecycle == identity.LifecycleActive {
+				if existing.entity.Revision >= math.MaxInt64 {
+					return ports.ReconcileSnapshotResult{}, ports.ErrRevisionOverflow
+				}
+				nextRev := existing.entity.Revision + 1
+				persistedUpdatedAt, err := nextUpdatedAt(existing.entity.UpdatedAtMS, params.NowMS)
+				if err != nil {
+					return ports.ReconcileSnapshotResult{}, err
+				}
+				res, err := tx.ExecContext(ctx, `update `+sqliterepo.GatewayAPIKeyIdentitiesTable+`
+					set revision = ?, lifecycle = ?, updated_at_ms = ?
+					where id = ? and revision = ?`,
+					int64(nextRev), string(identity.LifecycleMissing), persistedUpdatedAt,
+					string(existing.entity.ID), int64(existing.entity.Revision))
+				if err != nil {
+					return ports.ReconcileSnapshotResult{}, fmt.Errorf("set api key missing: %w", err)
+				}
+				ra, err := res.RowsAffected()
+				if err != nil || ra != 1 {
+					return ports.ReconcileSnapshotResult{}, fmt.Errorf("%w: api key missing conflict", ports.ErrRevisionConflict)
+				}
+				// Note: binding remains retired_at_ms IS NULL so source can recover to same ID
+				result.APIKeysMissing++
+			}
+		}
+	}
+
+	// --- 2. Reconcile Credentials ---
+	type existingCred struct {
+		entity  identity.CredentialIdentity
+		binding identity.CredentialSourceBinding
+	}
+
+	cRows, err := tx.QueryContext(ctx, `select
+		i.id, i.revision, i.lifecycle, i.created_at_ms, i.updated_at_ms,
+		b.binding_id, b.credential_id, b.runtime_identity, b.source_auth_id,
+		b.auth_index, b.provider, b.physical_name, b.account_snapshot, b.account_id_snapshot,
+		b.observed_runtime_generation, b.first_seen_at_ms, b.last_seen_at_ms, b.retired_at_ms
+		from `+sqliterepo.GatewayCredentialSourceBindingsTable+` b
+		join `+sqliterepo.GatewayCredentialIdentitiesTable+` i on b.credential_id = i.id
+		where b.runtime_identity = ? and b.retired_at_ms is null`, params.RuntimeIdentity)
+	if err != nil {
+		return ports.ReconcileSnapshotResult{}, fmt.Errorf("query current credentials: %w", err)
+	}
+	defer cRows.Close()
+
+	existingCreds := make(map[string]existingCred)
+	for cRows.Next() {
+		var (
+			rawID            string
+			rev              int64
+			lifecycle        string
+			createdAtMS      int64
+			updatedAtMS      int64
+			bindingID        int64
+			bCredID          string
+			bRTIdentity      string
+			bSourceAuthID    string
+			bAuthIndex       string
+			bProvider        string
+			bPhysicalName    string
+			bAccountSnapshot string
+			bAccountIDSnap   string
+			observedGen      *string
+			firstSeenAtMS    int64
+			lastSeenAtMS     int64
+			retiredAtMS      sql.NullInt64
+		)
+		if err := cRows.Scan(
+			&rawID, &rev, &lifecycle, &createdAtMS, &updatedAtMS,
+			&bindingID, &bCredID, &bRTIdentity, &bSourceAuthID,
+			&bAuthIndex, &bProvider, &bPhysicalName, &bAccountSnapshot, &bAccountIDSnap,
+			&observedGen, &firstSeenAtMS, &lastSeenAtMS, &retiredAtMS,
+		); err != nil {
+			return ports.ReconcileSnapshotResult{}, fmt.Errorf("scan current credential: %w", err)
+		}
+
+		gen, err := parseObservedGeneration(observedGen)
+		if err != nil {
+			return ports.ReconcileSnapshotResult{}, fmt.Errorf("parse observed runtime generation: %w", err)
+		}
+
+		ent := identity.CredentialIdentity{
+			ID:          identity.CredentialID(rawID),
+			Revision:    identity.Revision(rev),
+			Lifecycle:   identity.Lifecycle(lifecycle),
+			CreatedAtMS: createdAtMS,
+			UpdatedAtMS: updatedAtMS,
+		}
+		binding := identity.CredentialSourceBinding{
+			BindingID:                 bindingID,
+			CredentialID:              identity.CredentialID(bCredID),
+			RuntimeIdentity:           bRTIdentity,
+			SourceAuthID:              bSourceAuthID,
+			AuthIndex:                 bAuthIndex,
+			Provider:                  bProvider,
+			PhysicalName:              bPhysicalName,
+			AccountSnapshot:           bAccountSnapshot,
+			AccountIDSnapshot:         bAccountIDSnap,
+			ObservedRuntimeGeneration: gen,
+			FirstSeenAtMS:             firstSeenAtMS,
+			LastSeenAtMS:              lastSeenAtMS,
+			RetiredAtMS:               retiredAtMS.Int64,
+		}
+
+		if err := ent.Validate(); err != nil {
+			return ports.ReconcileSnapshotResult{}, fmt.Errorf("persisted entity invalid: %w", err)
+		}
+		if err := binding.Validate(); err != nil {
+			return ports.ReconcileSnapshotResult{}, fmt.Errorf("persisted binding invalid: %w", err)
+		}
+		if ent.Lifecycle == identity.LifecycleSuperseded {
+			return ports.ReconcileSnapshotResult{}, fmt.Errorf("%w: active binding points to superseded credential %q",
+				identity.ErrInvalidLifecycleTransition, ent.ID)
+		}
+
+		existingCreds[binding.SourceAuthID] = existingCred{
+			entity:  ent,
+			binding: binding,
+		}
+	}
+	if err := cRows.Err(); err != nil {
+		return ports.ReconcileSnapshotResult{}, fmt.Errorf("iterate current credentials: %w", err)
+	}
+	cRows.Close()
+
+	// Process present credentials
+	for authID, credItem := range uniqueCredentials {
+		if existing, exists := existingCreds[authID]; exists {
+			switch existing.entity.Lifecycle {
+			case identity.LifecycleActive:
+				// Active stays active: same ID, same revision, refresh metadata & generation in binding
+				nextLastSeen := monotonicObservedAt(params.NowMS, existing.binding.FirstSeenAtMS, existing.binding.LastSeenAtMS)
+				_, err := tx.ExecContext(ctx, `update `+sqliterepo.GatewayCredentialSourceBindingsTable+`
+					set auth_index = ?, provider = ?, physical_name = ?,
+					    account_snapshot = ?, account_id_snapshot = ?,
+					    observed_runtime_generation = ?, last_seen_at_ms = ?
+					where binding_id = ?`,
+					credItem.AuthIndex, credItem.Provider, credItem.PhysicalName,
+					credItem.AccountSnapshot, credItem.AccountIDSnapshot,
+					observedGenStr, nextLastSeen, existing.binding.BindingID)
+				if err != nil {
+					return ports.ReconcileSnapshotResult{}, fmt.Errorf("refresh credential binding: %w", err)
+				}
+				result.CredentialsRefreshed++
+			case identity.LifecycleMissing:
+				// Missing returns: same ID, missing -> active, revision + 1
+				if existing.entity.Revision >= math.MaxInt64 {
+					return ports.ReconcileSnapshotResult{}, ports.ErrRevisionOverflow
+				}
+				nextRev := existing.entity.Revision + 1
+				persistedUpdatedAt, err := nextUpdatedAt(existing.entity.UpdatedAtMS, params.NowMS)
+				if err != nil {
+					return ports.ReconcileSnapshotResult{}, err
+				}
+				res, err := tx.ExecContext(ctx, `update `+sqliterepo.GatewayCredentialIdentitiesTable+`
+					set revision = ?, lifecycle = ?, updated_at_ms = ?
+					where id = ? and revision = ?`,
+					int64(nextRev), string(identity.LifecycleActive), persistedUpdatedAt,
+					string(existing.entity.ID), int64(existing.entity.Revision))
+				if err != nil {
+					return ports.ReconcileSnapshotResult{}, fmt.Errorf("recover credential identity: %w", err)
+				}
+				ra, err := res.RowsAffected()
+				if err != nil || ra != 1 {
+					return ports.ReconcileSnapshotResult{}, fmt.Errorf("%w: credential recovery conflict", ports.ErrRevisionConflict)
+				}
+				nextLastSeen := monotonicObservedAt(params.NowMS, existing.binding.FirstSeenAtMS, existing.binding.LastSeenAtMS)
+				_, err = tx.ExecContext(ctx, `update `+sqliterepo.GatewayCredentialSourceBindingsTable+`
+					set auth_index = ?, provider = ?, physical_name = ?,
+					    account_snapshot = ?, account_id_snapshot = ?,
+					    observed_runtime_generation = ?, last_seen_at_ms = ?
+					where binding_id = ?`,
+					credItem.AuthIndex, credItem.Provider, credItem.PhysicalName,
+					credItem.AccountSnapshot, credItem.AccountIDSnapshot,
+					observedGenStr, nextLastSeen, existing.binding.BindingID)
+				if err != nil {
+					return ports.ReconcileSnapshotResult{}, fmt.Errorf("refresh recovered credential binding: %w", err)
+				}
+				result.CredentialsRecovered++
+			}
+		} else {
+			// New source: create new Canonical CredentialID + initial binding
+			newID, err := identity.NewCredentialID()
+			if err != nil {
+				return ports.ReconcileSnapshotResult{}, fmt.Errorf("generate credential id: %w", err)
+			}
+			_, err = tx.ExecContext(ctx, `insert into `+sqliterepo.GatewayCredentialIdentitiesTable+` (
+				id, revision, lifecycle, created_at_ms, updated_at_ms
+			) values (?, ?, ?, ?, ?)`,
+				string(newID), int64(identity.InitialRevision), string(identity.LifecycleActive),
+				params.NowMS, params.NowMS)
+			if err != nil {
+				return ports.ReconcileSnapshotResult{}, fmt.Errorf("insert credential identity: %w", err)
+			}
+			_, err = tx.ExecContext(ctx, `insert into `+sqliterepo.GatewayCredentialSourceBindingsTable+` (
+				credential_id, runtime_identity, source_auth_id,
+				auth_index, provider, physical_name,
+				account_snapshot, account_id_snapshot,
+				observed_runtime_generation, first_seen_at_ms, last_seen_at_ms, retired_at_ms
+			) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null)`,
+				string(newID), params.RuntimeIdentity, authID,
+				credItem.AuthIndex, credItem.Provider, credItem.PhysicalName,
+				credItem.AccountSnapshot, credItem.AccountIDSnapshot,
+				observedGenStr, params.NowMS, params.NowMS)
+			if err != nil {
+				if isConstraintConflict(err) {
+					return ports.ReconcileSnapshotResult{}, fmt.Errorf("%w: %v", ports.ErrSourceBindingConflict, err)
+				}
+				return ports.ReconcileSnapshotResult{}, fmt.Errorf("insert credential source binding: %w", err)
+			}
+			result.CredentialsCreated++
+		}
+	}
+
+	// Negative evidence for Credentials: active sources absent from snapshot transition to missing
+	for authID, existing := range existingCreds {
+		if _, present := uniqueCredentials[authID]; !present {
+			if existing.entity.Lifecycle == identity.LifecycleActive {
+				if existing.entity.Revision >= math.MaxInt64 {
+					return ports.ReconcileSnapshotResult{}, ports.ErrRevisionOverflow
+				}
+				nextRev := existing.entity.Revision + 1
+				persistedUpdatedAt, err := nextUpdatedAt(existing.entity.UpdatedAtMS, params.NowMS)
+				if err != nil {
+					return ports.ReconcileSnapshotResult{}, err
+				}
+				res, err := tx.ExecContext(ctx, `update `+sqliterepo.GatewayCredentialIdentitiesTable+`
+					set revision = ?, lifecycle = ?, updated_at_ms = ?
+					where id = ? and revision = ?`,
+					int64(nextRev), string(identity.LifecycleMissing), persistedUpdatedAt,
+					string(existing.entity.ID), int64(existing.entity.Revision))
+				if err != nil {
+					return ports.ReconcileSnapshotResult{}, fmt.Errorf("set credential missing: %w", err)
+				}
+				ra, err := res.RowsAffected()
+				if err != nil || ra != 1 {
+					return ports.ReconcileSnapshotResult{}, fmt.Errorf("%w: credential missing conflict", ports.ErrRevisionConflict)
+				}
+				// Note: binding remains retired_at_ms IS NULL
+				result.CredentialsMissing++
+			}
+		}
+	}
+
+	// Atomic Commit
+	if err := tx.Commit(); err != nil {
+		if isConstraintConflict(err) {
+			return ports.ReconcileSnapshotResult{}, fmt.Errorf("%w: %v", ports.ErrSourceBindingConflict, err)
+		}
+		return ports.ReconcileSnapshotResult{}, fmt.Errorf("commit passive snapshot: %w", err)
+	}
+
+	return result, nil
 }

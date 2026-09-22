@@ -121,7 +121,7 @@ func (e CredentialIdentity) Validate() error {
 	return nil
 }
 
-// APIKeySourceBinding binds a canonical APIKeyID to a trusted runtime source (RuntimeIdentity, SHA-256(raw API key)).
+// APIKeySourceBinding binds a canonical APIKeyID to a trusted runtime source (RuntimeIdentity, 64-char lowercase hex SHA-256(TrimSpace(raw))).
 type APIKeySourceBinding struct {
 	BindingID                 int64
 	APIKeyID                  APIKeyID
@@ -194,7 +194,8 @@ func (b CredentialSourceBinding) Validate() error {
 	return nil
 }
 
-func isValidSHA256Hex(s string) bool {
+// IsValidSHA256Hex checks if a string is exactly 64 lowercase hexadecimal characters.
+func IsValidSHA256Hex(s string) bool {
 	if len(s) != 64 {
 		return false
 	}
@@ -206,4 +207,8 @@ func isValidSHA256Hex(s string) bool {
 		return false
 	}
 	return true
+}
+
+func isValidSHA256Hex(s string) bool {
+	return IsValidSHA256Hex(s)
 }

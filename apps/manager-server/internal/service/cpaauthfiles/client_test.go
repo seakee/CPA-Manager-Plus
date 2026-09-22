@@ -1524,3 +1524,141 @@ func TestClientFetchAndFindAcceptSingleAuthFileObject(t *testing.T) {
 		t.Fatalf("file=%#v ok=%t", file, ok)
 	}
 }
+
+func TestRuntimeOnlyParsing(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  map[string]any
+		want bool
+	}{
+		{
+			name: "absent",
+			raw:  map[string]any{"id": "1"},
+			want: false,
+		},
+		{
+			name: "runtime_only true bool",
+			raw:  map[string]any{"id": "1", "runtime_only": true},
+			want: true,
+		},
+		{
+			name: "runtimeOnly string true",
+			raw:  map[string]any{"id": "1", "runtimeOnly": "true"},
+			want: true,
+		},
+		{
+			name: "runtime_only string 1",
+			raw:  map[string]any{"id": "1", "runtime_only": "1"},
+			want: true,
+		},
+		{
+			name: "runtime_only number 1",
+			raw:  map[string]any{"id": "1", "runtime_only": float64(1)},
+			want: true,
+		},
+		{
+			name: "runtime_only false bool",
+			raw:  map[string]any{"id": "1", "runtime_only": false},
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := FromMap(tc.raw)
+			if got.RuntimeOnly != tc.want {
+				t.Fatalf("RuntimeOnly = %v, want %v", got.RuntimeOnly, tc.want)
+			}
+		})
+	}
+}
+
+func TestClient_FetchStrictInventory_Contract(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		wantCount int
+		wantErr   bool
+	}{
+		{
+			name:      "valid non-empty",
+			body:      `{"files": [{"id": "auth-1", "name": "cred.json", "runtime_only": false}]}`,
+			wantCount: 1,
+			wantErr:   false,
+		},
+		{
+			name:      "valid empty",
+			body:      `{"files": []}`,
+			wantCount: 0,
+			wantErr:   false,
+		},
+		{
+			name:    "malformed root empty object",
+			body:    `{}`,
+			wantErr: true,
+		},
+		{
+			name:    "null list",
+			body:    `{"files": null}`,
+			wantErr: true,
+		},
+		{
+			name:    "wrong list type string",
+			body:    `{"files": "bad"}`,
+			wantErr: true,
+		},
+		{
+			name:    "empty object item",
+			body:    `{"files": [{}]}`,
+			wantErr: true,
+		},
+		{
+			name:    "non-object item string",
+			body:    `{"files": ["bad"]}`,
+			wantErr: true,
+		},
+		{
+			name:    "non-object item null",
+			body:    `{"files": [null]}`,
+			wantErr: true,
+		},
+		{
+			name:    "not json object root array",
+			body:    `[]`,
+			wantErr: true,
+		},
+		{
+			name:    "duplicate files field",
+			body:    `{"files": [], "files": []}`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+
+			client := New(server.Client())
+			files, err := client.FetchStrictInventory(context.Background(), server.URL, "mgmt")
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if !errors.Is(err, ErrMalformedAuthFilesResponse) {
+					t.Fatalf("expected ErrMalformedAuthFilesResponse, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(files) != tt.wantCount {
+				t.Fatalf("files count = %d, want %d", len(files), tt.wantCount)
+			}
+		})
+	}
+}

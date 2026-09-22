@@ -38,7 +38,7 @@ type Repository interface {
 	// LoadCredentialByID loads a canonical CredentialIdentity by its CredentialID.
 	LoadCredentialByID(ctx context.Context, id identity.CredentialID) (identity.CredentialIdentity, error)
 
-	// FindActiveAPIKeyBySource finds an active APIKeyIdentity and binding for the given runtime identity and raw API key SHA-256 hash.
+	// FindActiveAPIKeyBySource finds an active APIKeyIdentity and binding for the given runtime identity and normalized API key hash (64-char lowercase hex SHA-256(TrimSpace(raw))).
 	FindActiveAPIKeyBySource(ctx context.Context, runtimeIdentity, apiKeyHash string) (identity.APIKeyIdentity, identity.APIKeySourceBinding, error)
 
 	// FindActiveCredentialBySource finds an active CredentialIdentity and binding for the given runtime identity and CPA Auth.ID.
@@ -51,4 +51,46 @@ type Repository interface {
 	// SetCredentialLifecycle performs a CAS mutation on a credential's lifecycle fencing on expectedRevision.
 	// Monotonically advances updated_at_ms and increments revision if a real transition occurs.
 	SetCredentialLifecycle(ctx context.Context, id identity.CredentialID, expectedRevision identity.Revision, nextLifecycle identity.Lifecycle, nowMS int64) (identity.CredentialIdentity, error)
+
+	// ApplyPassiveSnapshot atomically reconciles APIKey and Credential identities
+	// within the given runtimeIdentity scope in a single database transaction.
+	// If any error or conflict occurs, the entire transaction is rolled back.
+	ApplyPassiveSnapshot(ctx context.Context, params ReconcileSnapshotParams) (ReconcileSnapshotResult, error)
+}
+
+// APIKeySnapshotItem represents an observed API key in a reconciliation snapshot.
+type APIKeySnapshotItem struct {
+	APIKeyHash string // 64-char lowercase hex SHA-256(TrimSpace(raw))
+}
+
+// CredentialSnapshotItem represents an observed credential in a reconciliation snapshot.
+type CredentialSnapshotItem struct {
+	SourceAuthID      string // CPA Auth.ID (non-empty)
+	AuthIndex         string
+	Provider          string
+	PhysicalName      string
+	AccountSnapshot   string
+	AccountIDSnapshot string
+	Disabled          bool
+}
+
+// ReconcileSnapshotParams contains the coherent fenced inventory snapshot to apply.
+type ReconcileSnapshotParams struct {
+	RuntimeIdentity           string
+	ObservedRuntimeGeneration uint64
+	APIKeys                   []APIKeySnapshotItem
+	Credentials               []CredentialSnapshotItem
+	NowMS                     int64
+}
+
+// ReconcileSnapshotResult summarizes the mutations performed during snapshot reconciliation.
+type ReconcileSnapshotResult struct {
+	APIKeysCreated       int
+	APIKeysRefreshed     int
+	APIKeysRecovered     int
+	APIKeysMissing       int
+	CredentialsCreated   int
+	CredentialsRefreshed int
+	CredentialsRecovered int
+	CredentialsMissing   int
 }

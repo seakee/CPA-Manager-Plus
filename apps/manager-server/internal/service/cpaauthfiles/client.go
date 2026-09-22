@@ -35,6 +35,8 @@ var ErrDeleteMutationScopeAmbiguous = errors.New("CPA auth file delete mutation 
 
 var ErrResponseTooLarge = errors.New("CPA response too large")
 
+var ErrMalformedAuthFilesResponse = errors.New("malformed CPA auth-files response")
+
 const cpaPluginVirtualMutationConflict = "plugin virtual auth cannot be modified directly; edit or delete the source auth file"
 
 type actionHTTPError struct {
@@ -71,6 +73,7 @@ type File struct {
 	AccountIDInvalid       bool
 	AccountSnapshotInvalid bool
 	Disabled               bool
+	RuntimeOnly            bool
 	Raw                    map[string]any
 }
 
@@ -209,6 +212,41 @@ func (c *Client) Fetch(ctx context.Context, baseURL string, managementKey string
 		return false, nil
 	}); err != nil {
 		return nil, err
+	}
+	return files, nil
+}
+
+// FetchStrictInventory fetches supported credentials from CPA using a strict envelope contract.
+// It requires the root to be a JSON object containing a "files" array, where every element is a non-empty JSON object.
+// Returns ErrMalformedAuthFilesResponse if the response does not satisfy this authoritative contract.
+func (c *Client) FetchStrictInventory(ctx context.Context, baseURL string, managementKey string) ([]File, error) {
+	base := cpa.NormalizeBaseURL(baseURL)
+	reqCtx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, base+authFilesPath, nil)
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: %w", authFilesPath, err)
+	}
+	req.Header.Set("Authorization", "Bearer "+managementKey)
+	res, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: %w", authFilesPath, err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
+		return nil, fmt.Errorf("GET %s: HTTP %d %s", authFilesPath, res.StatusCode, strings.TrimSpace(string(body)))
+	}
+	body, limit := c.limitedAuthFilesResponse(res.Body)
+	files, err := scanStrictFiles(body)
+	if err != nil {
+		if body.N == 0 {
+			return nil, fmt.Errorf("GET %s: %w", authFilesPath, responseTooLargeError("auth-files response", limit))
+		}
+		return nil, fmt.Errorf("GET %s: %w", authFilesPath, err)
+	}
+	if body.N == 0 {
+		return nil, fmt.Errorf("GET %s: %w", authFilesPath, responseTooLargeError("auth-files response", limit))
 	}
 	return files, nil
 }
@@ -918,6 +956,96 @@ func scanFiles(body io.Reader, visit func(File) (bool, error)) error {
 	}
 }
 
+func scanStrictFiles(body io.Reader) ([]File, error) {
+	decoder := json.NewDecoder(body)
+	decoder.UseNumber()
+
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrMalformedAuthFilesResponse, err)
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok || delimiter != '{' {
+		return nil, fmt.Errorf("%w: expected JSON object root, got %T", ErrMalformedAuthFilesResponse, token)
+	}
+
+	hasFiles := false
+	files := make([]File, 0)
+
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrMalformedAuthFilesResponse, err)
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return nil, fmt.Errorf("%w: expected object key", ErrMalformedAuthFilesResponse)
+		}
+
+		if key == "files" {
+			if hasFiles {
+				return nil, fmt.Errorf("%w: duplicate 'files' field", ErrMalformedAuthFilesResponse)
+			}
+			hasFiles = true
+
+			valToken, err := decoder.Token()
+			if err != nil {
+				return nil, fmt.Errorf("%w: %v", ErrMalformedAuthFilesResponse, err)
+			}
+			arrayDelim, ok := valToken.(json.Delim)
+			if !ok || arrayDelim != '[' {
+				return nil, fmt.Errorf("%w: 'files' field must be a JSON array", ErrMalformedAuthFilesResponse)
+			}
+
+			for decoder.More() {
+				var raw any
+				if err := decoder.Decode(&raw); err != nil {
+					return nil, fmt.Errorf("%w: decode array element: %v", ErrMalformedAuthFilesResponse, err)
+				}
+				rawMap, ok := raw.(map[string]any)
+				if !ok {
+					return nil, fmt.Errorf("%w: array element must be a JSON object, got %T", ErrMalformedAuthFilesResponse, raw)
+				}
+				if len(rawMap) == 0 {
+					return nil, fmt.Errorf("%w: array element must not be empty object", ErrMalformedAuthFilesResponse)
+				}
+				files = append(files, FromMap(rawMap))
+			}
+
+			endArrayToken, err := decoder.Token()
+			if err != nil {
+				return nil, fmt.Errorf("%w: %v", ErrMalformedAuthFilesResponse, err)
+			}
+			if endDelim, ok := endArrayToken.(json.Delim); !ok || endDelim != ']' {
+				return nil, fmt.Errorf("%w: expected array end ']'", ErrMalformedAuthFilesResponse)
+			}
+		} else {
+			var discard any
+			if err := decoder.Decode(&discard); err != nil {
+				return nil, fmt.Errorf("%w: decode field %q: %v", ErrMalformedAuthFilesResponse, key, err)
+			}
+		}
+	}
+
+	endObjectToken, err := decoder.Token()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrMalformedAuthFilesResponse, err)
+	}
+	if endDelim, ok := endObjectToken.(json.Delim); !ok || endDelim != '}' {
+		return nil, fmt.Errorf("%w: expected object end '}'", ErrMalformedAuthFilesResponse)
+	}
+
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("%w: unexpected trailing data", ErrMalformedAuthFilesResponse)
+	}
+
+	if !hasFiles {
+		return nil, fmt.Errorf("%w: missing 'files' field", ErrMalformedAuthFilesResponse)
+	}
+
+	return files, nil
+}
+
 func decodeValueAfterToken(decoder *json.Decoder, token json.Token) (any, error) {
 	delimiter, ok := token.(json.Delim)
 	if !ok {
@@ -1394,6 +1522,7 @@ func FromMap(file map[string]any) File {
 		AccountIDInvalid:       accountIDInvalid,
 		AccountSnapshotInvalid: accountSnapshotInvalid,
 		Disabled:               disabledField(file),
+		RuntimeOnly:            runtimeOnlyField(file),
 		Raw:                    file,
 	}
 }
@@ -1580,6 +1709,25 @@ func disabledField(file map[string]any) bool {
 	}
 	status := strings.ToLower(stringField(file, "status", "state"))
 	return status == "disabled" || status == "inactive"
+}
+
+func runtimeOnlyField(file map[string]any) bool {
+	for _, key := range []string{"runtime_only", "runtimeOnly"} {
+		if raw, ok := file[key]; ok && raw != nil {
+			switch value := raw.(type) {
+			case bool:
+				return value
+			case json.Number:
+				parsed, _ := strconv.ParseFloat(value.String(), 64)
+				return parsed != 0
+			case float64:
+				return value != 0
+			case string:
+				return strings.EqualFold(strings.TrimSpace(value), "true") || strings.TrimSpace(value) == "1"
+			}
+		}
+	}
+	return false
 }
 
 func stringField(file map[string]any, keys ...string) string {
