@@ -274,5 +274,51 @@
       }
     },
     "digest": "sha256:9d625a945c063db7052499f0b6ce92980748222a8418569d69aa1e613a4672ce"
+  },
+  "v1.13.2": {
+    "info": {
+      "schema_version": 1,
+      "release": {
+        "version": "v1.13.2",
+        "stage": "stable",
+        "source_commit": "1fa5e8a79ce067350d9a5ba6dd5a7b1843cc77f4"
+      },
+      "content": {
+        "summary": {
+          "zh": "新增 Muse / Meta 完整接入，并修复 Codex 重置次数明细、xAI 周额度窗口及 Devin 缓存计费。",
+          "en": "Adds complete Muse / Meta integration and fixes Codex reset-credit details, xAI weekly quota windows, and Devin cache accounting."
+        },
+        "notes": {
+          "zh": "https://github.com/seakee/CPA-Manager-Plus/blob/v1.13.2/docs/release-notes/v1.13.2-zh.md",
+          "en": "https://github.com/seakee/CPA-Manager-Plus/blob/v1.13.2/docs/release-notes/v1.13.2-en.md"
+        }
+      },
+      "update": {
+        "breaking": false,
+        "migration_required": false,
+        "minimum_direct_upgrade_version": null,
+        "upgrade_guide_url": "https://github.com/seakee/CPA-Manager-Plus/releases/tag/v1.13.2"
+      },
+      "distribution": {
+        "docker": {
+          "image": "seakee/cpa-manager-plus",
+          "version_tag": "v1.13.2"
+        },
+        "native": {
+          "assets": [
+            "cpa-manager-plus_v1.13.2_darwin_amd64.tar.gz",
+            "cpa-manager-plus_v1.13.2_darwin_arm64.tar.gz",
+            "cpa-manager-plus_v1.13.2_linux_amd64.tar.gz",
+            "cpa-manager-plus_v1.13.2_linux_arm64.tar.gz",
+            "cpa-manager-plus_v1.13.2_windows_amd64.zip",
+            "cpa-manager-plus_v1.13.2_windows_arm64.zip"
+          ]
+        }
+      },
+      "compatibility": {
+        "minimum_cpa_version": "v7.3.4"
+      }
+    },
+    "digest": "sha256:602323c842258d2b517b5e8bc97da6c6110837d4d28dec74576b077611780e7c"
   }
 }
