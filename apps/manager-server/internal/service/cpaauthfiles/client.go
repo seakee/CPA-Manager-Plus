@@ -71,6 +71,7 @@ type File struct {
 	AccountIDInvalid       bool
 	AccountSnapshotInvalid bool
 	Disabled               bool
+	RuntimeOnly            bool
 	Raw                    map[string]any
 }
 
@@ -1394,6 +1395,7 @@ func FromMap(file map[string]any) File {
 		AccountIDInvalid:       accountIDInvalid,
 		AccountSnapshotInvalid: accountSnapshotInvalid,
 		Disabled:               disabledField(file),
+		RuntimeOnly:            runtimeOnlyField(file),
 		Raw:                    file,
 	}
 }
@@ -1580,6 +1582,25 @@ func disabledField(file map[string]any) bool {
 	}
 	status := strings.ToLower(stringField(file, "status", "state"))
 	return status == "disabled" || status == "inactive"
+}
+
+func runtimeOnlyField(file map[string]any) bool {
+	for _, key := range []string{"runtime_only", "runtimeOnly"} {
+		if raw, ok := file[key]; ok && raw != nil {
+			switch value := raw.(type) {
+			case bool:
+				return value
+			case json.Number:
+				parsed, _ := strconv.ParseFloat(value.String(), 64)
+				return parsed != 0
+			case float64:
+				return value != 0
+			case string:
+				return strings.EqualFold(strings.TrimSpace(value), "true") || strings.TrimSpace(value) == "1"
+			}
+		}
+	}
+	return false
 }
 
 func stringField(file map[string]any, keys ...string) string {

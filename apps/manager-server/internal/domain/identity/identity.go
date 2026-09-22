@@ -194,7 +194,8 @@ func (b CredentialSourceBinding) Validate() error {
 	return nil
 }
 
-func isValidSHA256Hex(s string) bool {
+// IsValidSHA256Hex checks if a string is exactly 64 lowercase hexadecimal characters.
+func IsValidSHA256Hex(s string) bool {
 	if len(s) != 64 {
 		return false
 	}
@@ -206,4 +207,8 @@ func isValidSHA256Hex(s string) bool {
 		return false
 	}
 	return true
+}
+
+func isValidSHA256Hex(s string) bool {
+	return IsValidSHA256Hex(s)
 }

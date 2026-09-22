@@ -16,6 +16,8 @@ import (
 	"time"
 	_ "time/tzdata"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/adapters/cpaidentityinventory"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/identityreconcile"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/adminreset"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/cpaconnection"
@@ -264,6 +266,28 @@ func runServer() {
 			log.Printf,
 		)
 		go runtimeReconciler.Run(ctx)
+
+		managerConfigSvc := serverApp.AppContext().ManagerConfigService
+		identityReconcileSvc, err := identityreconcile.NewService(identityreconcile.Config{
+			RuntimeObserver: runtimeClient,
+			ConnectionResolver: func(connCtx context.Context) (string, string, error) {
+				setup, ok, err := managerConfigSvc.ResolveSetup(connCtx)
+				if err != nil {
+					return "", "", err
+				}
+				if !ok {
+					return "", "", errors.New("CPA connection setup is not available")
+				}
+				return setup.CPAUpstreamURL, setup.ManagementKey, nil
+			},
+			InventoryClient: cpaidentityinventory.New(nil, nil),
+			IdentityRepo:    db.Identities,
+		})
+		if err != nil {
+			log.Fatalf("initialize identity reconcile service: %v", err)
+		}
+		identityWorker := identityreconcile.NewWorker(identityReconcileSvc, log.Printf)
+		go identityWorker.Run(ctx)
 	}
 	go serverApp.AppContext().UpdateCheckService.Run(ctx)
 

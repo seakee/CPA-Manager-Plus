@@ -51,4 +51,46 @@ type Repository interface {
 	// SetCredentialLifecycle performs a CAS mutation on a credential's lifecycle fencing on expectedRevision.
 	// Monotonically advances updated_at_ms and increments revision if a real transition occurs.
 	SetCredentialLifecycle(ctx context.Context, id identity.CredentialID, expectedRevision identity.Revision, nextLifecycle identity.Lifecycle, nowMS int64) (identity.CredentialIdentity, error)
+
+	// ApplyPassiveSnapshot atomically reconciles APIKey and Credential identities
+	// within the given runtimeIdentity scope in a single database transaction.
+	// If any error or conflict occurs, the entire transaction is rolled back.
+	ApplyPassiveSnapshot(ctx context.Context, params ReconcileSnapshotParams) (ReconcileSnapshotResult, error)
+}
+
+// APIKeySnapshotItem represents an observed API key in a reconciliation snapshot.
+type APIKeySnapshotItem struct {
+	APIKeyHash string // 64 lowercase hex characters
+}
+
+// CredentialSnapshotItem represents an observed credential in a reconciliation snapshot.
+type CredentialSnapshotItem struct {
+	SourceAuthID      string // CPA Auth.ID (non-empty)
+	AuthIndex         string
+	Provider          string
+	PhysicalName      string
+	AccountSnapshot   string
+	AccountIDSnapshot string
+	Disabled          bool
+}
+
+// ReconcileSnapshotParams contains the coherent fenced inventory snapshot to apply.
+type ReconcileSnapshotParams struct {
+	RuntimeIdentity           string
+	ObservedRuntimeGeneration uint64
+	APIKeys                   []APIKeySnapshotItem
+	Credentials               []CredentialSnapshotItem
+	NowMS                     int64
+}
+
+// ReconcileSnapshotResult summarizes the mutations performed during snapshot reconciliation.
+type ReconcileSnapshotResult struct {
+	APIKeysCreated       int
+	APIKeysRefreshed     int
+	APIKeysRecovered     int
+	APIKeysMissing       int
+	CredentialsCreated   int
+	CredentialsRefreshed int
+	CredentialsRecovered int
+	CredentialsMissing   int
 }

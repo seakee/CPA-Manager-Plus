@@ -8,7 +8,9 @@ import (
 	"sync"
 	"time"
 
+	adaptersqliteidentity "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/adapters/sqlite/identitystore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	identitystoreports "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/ports/identitystore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/accountaction"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/apikeyalias"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/codexinspection"
@@ -143,6 +145,7 @@ type Store struct {
 	UsagePricing     usagepricing.Repository
 	UsageMonitoring  usagemonitoring.Repository
 	UsageRollups     usagerollup.Repository
+	Identities       identitystoreports.Repository
 }
 
 func Open(path string, protector ...*security.Protector) (*Store, error) {
@@ -170,6 +173,7 @@ func New(db *sql.DB, protector ...*security.Protector) *Store {
 		UsagePricing:     usagepricing.New(db),
 		UsageMonitoring:  usagemonitoring.New(db),
 		UsageRollups:     usagerollup.New(db),
+		Identities:       adaptersqliteidentity.New(db),
 	}
 }
 

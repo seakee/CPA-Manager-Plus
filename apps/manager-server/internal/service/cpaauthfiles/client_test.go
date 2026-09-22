@@ -1524,3 +1524,51 @@ func TestClientFetchAndFindAcceptSingleAuthFileObject(t *testing.T) {
 		t.Fatalf("file=%#v ok=%t", file, ok)
 	}
 }
+
+func TestRuntimeOnlyParsing(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  map[string]any
+		want bool
+	}{
+		{
+			name: "absent",
+			raw:  map[string]any{"id": "1"},
+			want: false,
+		},
+		{
+			name: "runtime_only true bool",
+			raw:  map[string]any{"id": "1", "runtime_only": true},
+			want: true,
+		},
+		{
+			name: "runtimeOnly string true",
+			raw:  map[string]any{"id": "1", "runtimeOnly": "true"},
+			want: true,
+		},
+		{
+			name: "runtime_only string 1",
+			raw:  map[string]any{"id": "1", "runtime_only": "1"},
+			want: true,
+		},
+		{
+			name: "runtime_only number 1",
+			raw:  map[string]any{"id": "1", "runtime_only": float64(1)},
+			want: true,
+		},
+		{
+			name: "runtime_only false bool",
+			raw:  map[string]any{"id": "1", "runtime_only": false},
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := FromMap(tc.raw)
+			if got.RuntimeOnly != tc.want {
+				t.Fatalf("RuntimeOnly = %v, want %v", got.RuntimeOnly, tc.want)
+			}
+		})
+	}
+}
