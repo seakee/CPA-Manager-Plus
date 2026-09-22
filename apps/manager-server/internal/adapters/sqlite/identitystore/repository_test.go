@@ -642,3 +642,519 @@ func TestMalformedStoredGenerationFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+func TestSetLifecycleFailsClosedOnCorruptedPersistedRow(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("APIKeyIdentity", func(t *testing.T) {
+		corruptions := []struct {
+			name      string
+			updateSQL string
+			args      func(id identity.APIKeyID) []any
+		}{
+			{
+				name:      "revision_zero",
+				updateSQL: `update ` + sqlite.GatewayAPIKeyIdentitiesTable + ` set revision = 0 where id = ?`,
+				args:      func(id identity.APIKeyID) []any { return []any{string(id)} },
+			},
+			{
+				name:      "created_at_zero",
+				updateSQL: `update ` + sqlite.GatewayAPIKeyIdentitiesTable + ` set created_at_ms = 0 where id = ?`,
+				args:      func(id identity.APIKeyID) []any { return []any{string(id)} },
+			},
+			{
+				name:      "created_at_negative",
+				updateSQL: `update ` + sqlite.GatewayAPIKeyIdentitiesTable + ` set created_at_ms = -1 where id = ?`,
+				args:      func(id identity.APIKeyID) []any { return []any{string(id)} },
+			},
+			{
+				name:      "updated_at_less_than_created_at",
+				updateSQL: `update ` + sqlite.GatewayAPIKeyIdentitiesTable + ` set created_at_ms = 2000, updated_at_ms = 1000 where id = ?`,
+				args:      func(id identity.APIKeyID) []any { return []any{string(id)} },
+			},
+			{
+				name:      "invalid_lifecycle",
+				updateSQL: `update ` + sqlite.GatewayAPIKeyIdentitiesTable + ` set lifecycle = 'corrupted_state' where id = ?`,
+				args:      func(id identity.APIKeyID) []any { return []any{string(id)} },
+			},
+		}
+
+		for _, tc := range corruptions {
+			t.Run(tc.name, func(t *testing.T) {
+				db, repo := setupTestDB(t)
+
+				keyID, err := identity.NewAPIKeyID()
+				if err != nil {
+					t.Fatalf("generate keyID: %v", err)
+				}
+				ent := identity.APIKeyIdentity{
+					ID:          keyID,
+					Revision:    1,
+					Lifecycle:   identity.LifecycleActive,
+					CreatedAtMS: 1000,
+					UpdatedAtMS: 1000,
+				}
+				binding := identity.APIKeySourceBinding{
+					APIKeyID:        keyID,
+					RuntimeIdentity: "rt-1",
+					APIKeyHash:      strings.Repeat("a", 64),
+					FirstSeenAtMS:   1000,
+					LastSeenAtMS:    1000,
+				}
+				if err := repo.CreateAPIKey(ctx, ent, binding); err != nil {
+					t.Fatalf("create api key: %v", err)
+				}
+
+				// Inject corrupted state via direct SQL
+				if _, err := db.Exec(tc.updateSQL, tc.args(keyID)...); err != nil {
+					t.Fatalf("inject corruption: %v", err)
+				}
+
+				// Attempt lifecycle mutation: must fail closed!
+				_, err = repo.SetAPIKeyLifecycle(ctx, keyID, 1, identity.LifecycleMissing, 2000)
+				if err == nil {
+					t.Fatalf("expected error mutating corrupted identity, got nil")
+				}
+				if !strings.Contains(err.Error(), "persisted api key identity invalid") {
+					t.Fatalf("expected 'persisted api key identity invalid' error, got: %v", err)
+				}
+
+				// Verify database was NOT updated to target lifecycle
+				var currentLC string
+				if err := db.QueryRow(`select lifecycle from `+sqlite.GatewayAPIKeyIdentitiesTable+` where id = ?`, string(keyID)).Scan(&currentLC); err != nil {
+					t.Fatalf("read lifecycle after failed mutation: %v", err)
+				}
+				if currentLC == string(identity.LifecycleMissing) {
+					t.Fatalf("mutation unexpectedly modified lifecycle to %q on corrupted entity", currentLC)
+				}
+			})
+		}
+	})
+
+	t.Run("CredentialIdentity", func(t *testing.T) {
+		corruptions := []struct {
+			name      string
+			updateSQL string
+			args      func(id identity.CredentialID) []any
+		}{
+			{
+				name:      "revision_zero",
+				updateSQL: `update ` + sqlite.GatewayCredentialIdentitiesTable + ` set revision = 0 where id = ?`,
+				args:      func(id identity.CredentialID) []any { return []any{string(id)} },
+			},
+			{
+				name:      "created_at_zero",
+				updateSQL: `update ` + sqlite.GatewayCredentialIdentitiesTable + ` set created_at_ms = 0 where id = ?`,
+				args:      func(id identity.CredentialID) []any { return []any{string(id)} },
+			},
+			{
+				name:      "created_at_negative",
+				updateSQL: `update ` + sqlite.GatewayCredentialIdentitiesTable + ` set created_at_ms = -1 where id = ?`,
+				args:      func(id identity.CredentialID) []any { return []any{string(id)} },
+			},
+			{
+				name:      "updated_at_less_than_created_at",
+				updateSQL: `update ` + sqlite.GatewayCredentialIdentitiesTable + ` set created_at_ms = 2000, updated_at_ms = 1000 where id = ?`,
+				args:      func(id identity.CredentialID) []any { return []any{string(id)} },
+			},
+			{
+				name:      "invalid_lifecycle",
+				updateSQL: `update ` + sqlite.GatewayCredentialIdentitiesTable + ` set lifecycle = 'corrupted_state' where id = ?`,
+				args:      func(id identity.CredentialID) []any { return []any{string(id)} },
+			},
+		}
+
+		for _, tc := range corruptions {
+			t.Run(tc.name, func(t *testing.T) {
+				db, repo := setupTestDB(t)
+
+				credID, err := identity.NewCredentialID()
+				if err != nil {
+					t.Fatalf("generate credID: %v", err)
+				}
+				ent := identity.CredentialIdentity{
+					ID:          credID,
+					Revision:    1,
+					Lifecycle:   identity.LifecycleActive,
+					CreatedAtMS: 1000,
+					UpdatedAtMS: 1000,
+				}
+				binding := identity.CredentialSourceBinding{
+					CredentialID:    credID,
+					RuntimeIdentity: "rt-1",
+					SourceAuthID:    "auth-1",
+					FirstSeenAtMS:   1000,
+					LastSeenAtMS:    1000,
+				}
+				if err := repo.CreateCredential(ctx, ent, binding); err != nil {
+					t.Fatalf("create credential: %v", err)
+				}
+
+				// Inject corrupted state via direct SQL
+				if _, err := db.Exec(tc.updateSQL, tc.args(credID)...); err != nil {
+					t.Fatalf("inject corruption: %v", err)
+				}
+
+				// Attempt lifecycle mutation: must fail closed!
+				_, err = repo.SetCredentialLifecycle(ctx, credID, 1, identity.LifecycleMissing, 2000)
+				if err == nil {
+					t.Fatalf("expected error mutating corrupted identity, got nil")
+				}
+				if !strings.Contains(err.Error(), "persisted credential identity invalid") {
+					t.Fatalf("expected 'persisted credential identity invalid' error, got: %v", err)
+				}
+
+				// Verify database was NOT updated to target lifecycle
+				var currentLC string
+				if err := db.QueryRow(`select lifecycle from `+sqlite.GatewayCredentialIdentitiesTable+` where id = ?`, string(credID)).Scan(&currentLC); err != nil {
+					t.Fatalf("read lifecycle after failed mutation: %v", err)
+				}
+				if currentLC == string(identity.LifecycleMissing) {
+					t.Fatalf("mutation unexpectedly modified lifecycle to %q on corrupted entity", currentLC)
+				}
+			})
+		}
+	})
+}
+
+func TestFindActiveBySourceOnlyReturnsActiveIdentities(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("APIKey", func(t *testing.T) {
+		db, repo := setupTestDB(t)
+
+		// 1. Active entity -> FindActive succeeds
+		keyID1, _ := identity.NewAPIKeyID()
+		hash1 := strings.Repeat("1", 64)
+		ent1 := identity.APIKeyIdentity{
+			ID:          keyID1,
+			Revision:    1,
+			Lifecycle:   identity.LifecycleActive,
+			CreatedAtMS: 1000,
+			UpdatedAtMS: 1000,
+		}
+		binding1 := identity.APIKeySourceBinding{
+			APIKeyID:        keyID1,
+			RuntimeIdentity: "rt-1",
+			APIKeyHash:      hash1,
+			FirstSeenAtMS:   1000,
+			LastSeenAtMS:    1000,
+		}
+		if err := repo.CreateAPIKey(ctx, ent1, binding1); err != nil {
+			t.Fatalf("create api key 1: %v", err)
+		}
+		found1, _, err := repo.FindActiveAPIKeyBySource(ctx, "rt-1", hash1)
+		if err != nil {
+			t.Fatalf("find active api key 1: %v", err)
+		}
+		if found1.ID != keyID1 {
+			t.Fatalf("found ID = %v, want %v", found1.ID, keyID1)
+		}
+
+		// 2. Active -> SetAPIKeyLifecycle(missing) -> FindActive returns ErrNotFound
+		_, err = repo.SetAPIKeyLifecycle(ctx, keyID1, 1, identity.LifecycleMissing, 2000)
+		if err != nil {
+			t.Fatalf("set lifecycle missing: %v", err)
+		}
+		_, _, err = repo.FindActiveAPIKeyBySource(ctx, "rt-1", hash1)
+		if !errors.Is(err, ports.ErrNotFound) {
+			t.Fatalf("expected ErrNotFound for missing identity, got: %v", err)
+		}
+
+		// 3. Create another entity -> SetAPIKeyLifecycle(superseded) -> FindActive returns ErrNotFound
+		keyID2, _ := identity.NewAPIKeyID()
+		hash2 := strings.Repeat("2", 64)
+		ent2 := identity.APIKeyIdentity{
+			ID:          keyID2,
+			Revision:    1,
+			Lifecycle:   identity.LifecycleActive,
+			CreatedAtMS: 1000,
+			UpdatedAtMS: 1000,
+		}
+		binding2 := identity.APIKeySourceBinding{
+			APIKeyID:        keyID2,
+			RuntimeIdentity: "rt-1",
+			APIKeyHash:      hash2,
+			FirstSeenAtMS:   1000,
+			LastSeenAtMS:    1000,
+		}
+		if err := repo.CreateAPIKey(ctx, ent2, binding2); err != nil {
+			t.Fatalf("create api key 2: %v", err)
+		}
+		_, err = repo.SetAPIKeyLifecycle(ctx, keyID2, 1, identity.LifecycleSuperseded, 2000)
+		if err != nil {
+			t.Fatalf("set lifecycle superseded: %v", err)
+		}
+		_, _, err = repo.FindActiveAPIKeyBySource(ctx, "rt-1", hash2)
+		if !errors.Is(err, ports.ErrNotFound) {
+			t.Fatalf("expected ErrNotFound for superseded identity, got: %v", err)
+		}
+
+		// 4. Create another entity -> direct SQL update to superseded -> FindActive returns ErrNotFound
+		keyID3, _ := identity.NewAPIKeyID()
+		hash3 := strings.Repeat("3", 64)
+		ent3 := identity.APIKeyIdentity{
+			ID:          keyID3,
+			Revision:    1,
+			Lifecycle:   identity.LifecycleActive,
+			CreatedAtMS: 1000,
+			UpdatedAtMS: 1000,
+		}
+		binding3 := identity.APIKeySourceBinding{
+			APIKeyID:        keyID3,
+			RuntimeIdentity: "rt-1",
+			APIKeyHash:      hash3,
+			FirstSeenAtMS:   1000,
+			LastSeenAtMS:    1000,
+		}
+		if err := repo.CreateAPIKey(ctx, ent3, binding3); err != nil {
+			t.Fatalf("create api key 3: %v", err)
+		}
+		if _, err := db.Exec(`update `+sqlite.GatewayAPIKeyIdentitiesTable+` set lifecycle = 'superseded' where id = ?`, string(keyID3)); err != nil {
+			t.Fatalf("direct SQL set superseded: %v", err)
+		}
+		_, _, err = repo.FindActiveAPIKeyBySource(ctx, "rt-1", hash3)
+		if !errors.Is(err, ports.ErrNotFound) {
+			t.Fatalf("expected ErrNotFound for direct SQL superseded identity, got: %v", err)
+		}
+	})
+
+	t.Run("Credential", func(t *testing.T) {
+		db, repo := setupTestDB(t)
+
+		// 1. Active entity -> FindActive succeeds
+		credID1, _ := identity.NewCredentialID()
+		authID1 := "auth-active-1"
+		ent1 := identity.CredentialIdentity{
+			ID:          credID1,
+			Revision:    1,
+			Lifecycle:   identity.LifecycleActive,
+			CreatedAtMS: 1000,
+			UpdatedAtMS: 1000,
+		}
+		binding1 := identity.CredentialSourceBinding{
+			CredentialID:    credID1,
+			RuntimeIdentity: "rt-1",
+			SourceAuthID:    authID1,
+			FirstSeenAtMS:   1000,
+			LastSeenAtMS:    1000,
+		}
+		if err := repo.CreateCredential(ctx, ent1, binding1); err != nil {
+			t.Fatalf("create credential 1: %v", err)
+		}
+		found1, _, err := repo.FindActiveCredentialBySource(ctx, "rt-1", authID1)
+		if err != nil {
+			t.Fatalf("find active credential 1: %v", err)
+		}
+		if found1.ID != credID1 {
+			t.Fatalf("found ID = %v, want %v", found1.ID, credID1)
+		}
+
+		// 2. Active -> SetCredentialLifecycle(missing) -> FindActive returns ErrNotFound
+		_, err = repo.SetCredentialLifecycle(ctx, credID1, 1, identity.LifecycleMissing, 2000)
+		if err != nil {
+			t.Fatalf("set lifecycle missing: %v", err)
+		}
+		_, _, err = repo.FindActiveCredentialBySource(ctx, "rt-1", authID1)
+		if !errors.Is(err, ports.ErrNotFound) {
+			t.Fatalf("expected ErrNotFound for missing credential, got: %v", err)
+		}
+
+		// 3. Create another entity -> SetCredentialLifecycle(superseded) -> FindActive returns ErrNotFound
+		credID2, _ := identity.NewCredentialID()
+		authID2 := "auth-active-2"
+		ent2 := identity.CredentialIdentity{
+			ID:          credID2,
+			Revision:    1,
+			Lifecycle:   identity.LifecycleActive,
+			CreatedAtMS: 1000,
+			UpdatedAtMS: 1000,
+		}
+		binding2 := identity.CredentialSourceBinding{
+			CredentialID:    credID2,
+			RuntimeIdentity: "rt-1",
+			SourceAuthID:    authID2,
+			FirstSeenAtMS:   1000,
+			LastSeenAtMS:    1000,
+		}
+		if err := repo.CreateCredential(ctx, ent2, binding2); err != nil {
+			t.Fatalf("create credential 2: %v", err)
+		}
+		_, err = repo.SetCredentialLifecycle(ctx, credID2, 1, identity.LifecycleSuperseded, 2000)
+		if err != nil {
+			t.Fatalf("set lifecycle superseded: %v", err)
+		}
+		_, _, err = repo.FindActiveCredentialBySource(ctx, "rt-1", authID2)
+		if !errors.Is(err, ports.ErrNotFound) {
+			t.Fatalf("expected ErrNotFound for superseded credential, got: %v", err)
+		}
+
+		// 4. Create another entity -> direct SQL update to superseded -> FindActive returns ErrNotFound
+		credID3, _ := identity.NewCredentialID()
+		authID3 := "auth-active-3"
+		ent3 := identity.CredentialIdentity{
+			ID:          credID3,
+			Revision:    1,
+			Lifecycle:   identity.LifecycleActive,
+			CreatedAtMS: 1000,
+			UpdatedAtMS: 1000,
+		}
+		binding3 := identity.CredentialSourceBinding{
+			CredentialID:    credID3,
+			RuntimeIdentity: "rt-1",
+			SourceAuthID:    authID3,
+			FirstSeenAtMS:   1000,
+			LastSeenAtMS:    1000,
+		}
+		if err := repo.CreateCredential(ctx, ent3, binding3); err != nil {
+			t.Fatalf("create credential 3: %v", err)
+		}
+		if _, err := db.Exec(`update `+sqlite.GatewayCredentialIdentitiesTable+` set lifecycle = 'superseded' where id = ?`, string(credID3)); err != nil {
+			t.Fatalf("direct SQL set superseded: %v", err)
+		}
+		_, _, err = repo.FindActiveCredentialBySource(ctx, "rt-1", authID3)
+		if !errors.Is(err, ports.ErrNotFound) {
+			t.Fatalf("expected ErrNotFound for direct SQL superseded credential, got: %v", err)
+		}
+	})
+}
+
+func TestCanonicalIDCollisionDoesNotReturnBindingConflict(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("APIKey", func(t *testing.T) {
+		db, repo := setupTestDB(t)
+
+		canonicalID, err := identity.NewAPIKeyID()
+		if err != nil {
+			t.Fatalf("generate keyID: %v", err)
+		}
+
+		// 1. First create with canonicalID and source runtime-A / hash-A
+		hashA := strings.Repeat("a", 64)
+		entA := identity.APIKeyIdentity{
+			ID:          canonicalID,
+			Revision:    1,
+			Lifecycle:   identity.LifecycleActive,
+			CreatedAtMS: 1000,
+			UpdatedAtMS: 1000,
+		}
+		bindingA := identity.APIKeySourceBinding{
+			APIKeyID:        canonicalID,
+			RuntimeIdentity: "runtime-A",
+			APIKeyHash:      hashA,
+			FirstSeenAtMS:   1000,
+			LastSeenAtMS:    1000,
+		}
+		if err := repo.CreateAPIKey(ctx, entA, bindingA); err != nil {
+			t.Fatalf("create initial api key: %v", err)
+		}
+
+		// 2. Second create with SAME canonicalID but DIFFERENT free source (runtime-B / hash-B)
+		hashB := strings.Repeat("b", 64)
+		entB := identity.APIKeyIdentity{
+			ID:          canonicalID,
+			Revision:    1,
+			Lifecycle:   identity.LifecycleActive,
+			CreatedAtMS: 2000,
+			UpdatedAtMS: 2000,
+		}
+		bindingB := identity.APIKeySourceBinding{
+			APIKeyID:        canonicalID,
+			RuntimeIdentity: "runtime-B",
+			APIKeyHash:      hashB,
+			FirstSeenAtMS:   2000,
+			LastSeenAtMS:    2000,
+		}
+		err = repo.CreateAPIKey(ctx, entB, bindingB)
+		if err == nil {
+			t.Fatalf("expected error on canonical ID PK collision, got nil")
+		}
+		if errors.Is(err, ports.ErrSourceBindingConflict) {
+			t.Fatalf("canonical ID PK collision MUST NOT be classified as ErrSourceBindingConflict, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "insert api key identity") {
+			t.Fatalf("expected generic wrapped identity insert error, got: %v", err)
+		}
+
+		// 3. Verify second binding was NOT written
+		var count int
+		if err := db.QueryRow(`select count(*) from ` + sqlite.GatewayAPIKeySourceBindingsTable + ` where runtime_identity = 'runtime-B'`).Scan(&count); err != nil {
+			t.Fatalf("query second binding: %v", err)
+		}
+		if count != 0 {
+			t.Fatalf("second binding was written despite identity PK collision! count = %d", count)
+		}
+		_, _, err = repo.FindActiveAPIKeyBySource(ctx, "runtime-B", hashB)
+		if !errors.Is(err, ports.ErrNotFound) {
+			t.Fatalf("expected ErrNotFound for unwritten second binding, got: %v", err)
+		}
+	})
+
+	t.Run("Credential", func(t *testing.T) {
+		db, repo := setupTestDB(t)
+
+		canonicalID, err := identity.NewCredentialID()
+		if err != nil {
+			t.Fatalf("generate credID: %v", err)
+		}
+
+		// 1. First create with canonicalID and source runtime-A / auth-A
+		entA := identity.CredentialIdentity{
+			ID:          canonicalID,
+			Revision:    1,
+			Lifecycle:   identity.LifecycleActive,
+			CreatedAtMS: 1000,
+			UpdatedAtMS: 1000,
+		}
+		bindingA := identity.CredentialSourceBinding{
+			CredentialID:    canonicalID,
+			RuntimeIdentity: "runtime-A",
+			SourceAuthID:    "auth-A",
+			FirstSeenAtMS:   1000,
+			LastSeenAtMS:    1000,
+		}
+		if err := repo.CreateCredential(ctx, entA, bindingA); err != nil {
+			t.Fatalf("create initial credential: %v", err)
+		}
+
+		// 2. Second create with SAME canonicalID but DIFFERENT free source (runtime-B / auth-B)
+		entB := identity.CredentialIdentity{
+			ID:          canonicalID,
+			Revision:    1,
+			Lifecycle:   identity.LifecycleActive,
+			CreatedAtMS: 2000,
+			UpdatedAtMS: 2000,
+		}
+		bindingB := identity.CredentialSourceBinding{
+			CredentialID:    canonicalID,
+			RuntimeIdentity: "runtime-B",
+			SourceAuthID:    "auth-B",
+			FirstSeenAtMS:   2000,
+			LastSeenAtMS:    2000,
+		}
+		err = repo.CreateCredential(ctx, entB, bindingB)
+		if err == nil {
+			t.Fatalf("expected error on canonical ID PK collision, got nil")
+		}
+		if errors.Is(err, ports.ErrSourceBindingConflict) {
+			t.Fatalf("canonical ID PK collision MUST NOT be classified as ErrSourceBindingConflict, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "insert credential identity") {
+			t.Fatalf("expected generic wrapped identity insert error, got: %v", err)
+		}
+
+		// 3. Verify second binding was NOT written
+		var count int
+		if err := db.QueryRow(`select count(*) from ` + sqlite.GatewayCredentialSourceBindingsTable + ` where runtime_identity = 'runtime-B'`).Scan(&count); err != nil {
+			t.Fatalf("query second binding: %v", err)
+		}
+		if count != 0 {
+			t.Fatalf("second binding was written despite identity PK collision! count = %d", count)
+		}
+		_, _, err = repo.FindActiveCredentialBySource(ctx, "runtime-B", "auth-B")
+		if !errors.Is(err, ports.ErrNotFound) {
+			t.Fatalf("expected ErrNotFound for unwritten second binding, got: %v", err)
+		}
+	})
+}

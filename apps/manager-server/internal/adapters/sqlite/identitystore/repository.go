@@ -64,9 +64,6 @@ func (r *repository) CreateAPIKey(ctx context.Context, ent identity.APIKeyIdenti
 		ent.UpdatedAtMS,
 	)
 	if err != nil {
-		if isConstraintConflict(err) {
-			return fmt.Errorf("%w: %v", ports.ErrSourceBindingConflict, err)
-		}
 		return fmt.Errorf("insert api key identity: %w", err)
 	}
 
@@ -136,9 +133,6 @@ func (r *repository) CreateCredential(ctx context.Context, ent identity.Credenti
 		ent.UpdatedAtMS,
 	)
 	if err != nil {
-		if isConstraintConflict(err) {
-			return fmt.Errorf("%w: %v", ports.ErrSourceBindingConflict, err)
-		}
 		return fmt.Errorf("insert credential identity: %w", err)
 	}
 
@@ -275,8 +269,8 @@ func (r *repository) FindActiveAPIKeyBySource(ctx context.Context, runtimeIdenti
 		b.first_seen_at_ms, b.last_seen_at_ms, b.retired_at_ms
 		from `+sqliterepo.GatewayAPIKeySourceBindingsTable+` b
 		join `+sqliterepo.GatewayAPIKeyIdentitiesTable+` i on b.api_key_id = i.id
-		where b.runtime_identity = ? and b.api_key_hash = ? and b.retired_at_ms is null`,
-		runtimeIdentity, canonicalHash,
+		where b.runtime_identity = ? and b.api_key_hash = ? and b.retired_at_ms is null and i.lifecycle = ?`,
+		runtimeIdentity, canonicalHash, string(identity.LifecycleActive),
 	).Scan(
 		&entID, &rev, &lifecycle, &createdAtMS, &updatedAtMS,
 		&bindingID, &bAPIKeyID, &bRTIdentity, &bHash, &observedGen,
@@ -358,8 +352,8 @@ func (r *repository) FindActiveCredentialBySource(ctx context.Context, runtimeId
 		b.observed_runtime_generation, b.first_seen_at_ms, b.last_seen_at_ms, b.retired_at_ms
 		from `+sqliterepo.GatewayCredentialSourceBindingsTable+` b
 		join `+sqliterepo.GatewayCredentialIdentitiesTable+` i on b.credential_id = i.id
-		where b.runtime_identity = ? and b.source_auth_id = ? and b.retired_at_ms is null`,
-		runtimeIdentity, sourceAuthID,
+		where b.runtime_identity = ? and b.source_auth_id = ? and b.retired_at_ms is null and i.lifecycle = ?`,
+		runtimeIdentity, sourceAuthID, string(identity.LifecycleActive),
 	).Scan(
 		&entID, &rev, &lifecycle, &createdAtMS, &updatedAtMS,
 		&bindingID, &bCredID, &bRTIdentity, &bSourceAuthID,
@@ -449,45 +443,50 @@ func (r *repository) SetAPIKeyLifecycle(
 		return identity.APIKeyIdentity{}, fmt.Errorf("query current api key identity: %w", err)
 	}
 
+	current := identity.APIKeyIdentity{
+		ID:          identity.APIKeyID(rawID),
+		Revision:    identity.Revision(currentRev),
+		Lifecycle:   identity.Lifecycle(currentLC),
+		CreatedAtMS: createdAtMS,
+		UpdatedAtMS: updatedAtMS,
+	}
+	if err := current.Validate(); err != nil {
+		return identity.APIKeyIdentity{}, fmt.Errorf("persisted api key identity invalid: %w", err)
+	}
+
 	// Stale expectedRevision must fail closed, even if nextLifecycle matches currentLC
-	if identity.Revision(currentRev) != expectedRevision {
+	if current.Revision != expectedRevision {
 		return identity.APIKeyIdentity{}, fmt.Errorf("%w: expected revision %d, current is %d",
-			ports.ErrRevisionConflict, expectedRevision, currentRev)
+			ports.ErrRevisionConflict, expectedRevision, current.Revision)
 	}
 
 	// Validate lifecycle transition
-	if err := identity.ValidateTransition(identity.Lifecycle(currentLC), nextLifecycle); err != nil {
+	if err := identity.ValidateTransition(current.Lifecycle, nextLifecycle); err != nil {
 		return identity.APIKeyIdentity{}, fmt.Errorf("%w: %v", ports.ErrInvalidLifecycleTransition, err)
 	}
 
 	// If same-state, return current entity unchanged (expected revision has already been validated)
-	if identity.Lifecycle(currentLC) == nextLifecycle {
+	if current.Lifecycle == nextLifecycle {
 		if err := tx.Commit(); err != nil {
 			return identity.APIKeyIdentity{}, fmt.Errorf("commit no-op: %w", err)
 		}
-		return identity.APIKeyIdentity{
-			ID:          identity.APIKeyID(rawID),
-			Revision:    identity.Revision(currentRev),
-			Lifecycle:   identity.Lifecycle(currentLC),
-			CreatedAtMS: createdAtMS,
-			UpdatedAtMS: updatedAtMS,
-		}, nil
+		return current, nil
 	}
 
 	// Real transition: increment revision
-	if identity.Revision(currentRev) >= math.MaxInt64 {
+	if current.Revision >= math.MaxInt64 {
 		return identity.APIKeyIdentity{}, fmt.Errorf("%w: current revision %d would exceed math.MaxInt64",
-			ports.ErrRevisionOverflow, currentRev)
+			ports.ErrRevisionOverflow, current.Revision)
 	}
-	nextRev := identity.Revision(currentRev) + 1
+	nextRev := current.Revision + 1
 
 	// Monotonic timestamp advancement
 	persistedUpdatedAt := nowMS
-	if persistedUpdatedAt <= updatedAtMS {
-		if updatedAtMS == math.MaxInt64 {
+	if persistedUpdatedAt <= current.UpdatedAtMS {
+		if current.UpdatedAtMS == math.MaxInt64 {
 			return identity.APIKeyIdentity{}, errors.New("cannot advance updatedAtMs: int64 max reached")
 		}
-		persistedUpdatedAt = updatedAtMS + 1
+		persistedUpdatedAt = current.UpdatedAtMS + 1
 	}
 
 	res, err := tx.ExecContext(ctx, `update `+sqliterepo.GatewayAPIKeyIdentitiesTable+`
@@ -497,7 +496,7 @@ func (r *repository) SetAPIKeyLifecycle(
 		string(nextLifecycle),
 		persistedUpdatedAt,
 		string(id),
-		currentRev,
+		int64(current.Revision),
 	)
 	if err != nil {
 		return identity.APIKeyIdentity{}, fmt.Errorf("update api key lifecycle: %w", err)
@@ -515,10 +514,10 @@ func (r *repository) SetAPIKeyLifecycle(
 	}
 
 	return identity.APIKeyIdentity{
-		ID:          identity.APIKeyID(rawID),
+		ID:          current.ID,
 		Revision:    nextRev,
 		Lifecycle:   nextLifecycle,
-		CreatedAtMS: createdAtMS,
+		CreatedAtMS: current.CreatedAtMS,
 		UpdatedAtMS: persistedUpdatedAt,
 	}, nil
 }
@@ -562,45 +561,50 @@ func (r *repository) SetCredentialLifecycle(
 		return identity.CredentialIdentity{}, fmt.Errorf("query current credential identity: %w", err)
 	}
 
+	current := identity.CredentialIdentity{
+		ID:          identity.CredentialID(rawID),
+		Revision:    identity.Revision(currentRev),
+		Lifecycle:   identity.Lifecycle(currentLC),
+		CreatedAtMS: createdAtMS,
+		UpdatedAtMS: updatedAtMS,
+	}
+	if err := current.Validate(); err != nil {
+		return identity.CredentialIdentity{}, fmt.Errorf("persisted credential identity invalid: %w", err)
+	}
+
 	// Stale expectedRevision must fail closed, even if nextLifecycle matches currentLC
-	if identity.Revision(currentRev) != expectedRevision {
+	if current.Revision != expectedRevision {
 		return identity.CredentialIdentity{}, fmt.Errorf("%w: expected revision %d, current is %d",
-			ports.ErrRevisionConflict, expectedRevision, currentRev)
+			ports.ErrRevisionConflict, expectedRevision, current.Revision)
 	}
 
 	// Validate lifecycle transition
-	if err := identity.ValidateTransition(identity.Lifecycle(currentLC), nextLifecycle); err != nil {
+	if err := identity.ValidateTransition(current.Lifecycle, nextLifecycle); err != nil {
 		return identity.CredentialIdentity{}, fmt.Errorf("%w: %v", ports.ErrInvalidLifecycleTransition, err)
 	}
 
 	// If same-state, return current entity unchanged (expected revision has already been validated)
-	if identity.Lifecycle(currentLC) == nextLifecycle {
+	if current.Lifecycle == nextLifecycle {
 		if err := tx.Commit(); err != nil {
 			return identity.CredentialIdentity{}, fmt.Errorf("commit no-op: %w", err)
 		}
-		return identity.CredentialIdentity{
-			ID:          identity.CredentialID(rawID),
-			Revision:    identity.Revision(currentRev),
-			Lifecycle:   identity.Lifecycle(currentLC),
-			CreatedAtMS: createdAtMS,
-			UpdatedAtMS: updatedAtMS,
-		}, nil
+		return current, nil
 	}
 
 	// Real transition: increment revision
-	if identity.Revision(currentRev) >= math.MaxInt64 {
+	if current.Revision >= math.MaxInt64 {
 		return identity.CredentialIdentity{}, fmt.Errorf("%w: current revision %d would exceed math.MaxInt64",
-			ports.ErrRevisionOverflow, currentRev)
+			ports.ErrRevisionOverflow, current.Revision)
 	}
-	nextRev := identity.Revision(currentRev) + 1
+	nextRev := current.Revision + 1
 
 	// Monotonic timestamp advancement
 	persistedUpdatedAt := nowMS
-	if persistedUpdatedAt <= updatedAtMS {
-		if updatedAtMS == math.MaxInt64 {
+	if persistedUpdatedAt <= current.UpdatedAtMS {
+		if current.UpdatedAtMS == math.MaxInt64 {
 			return identity.CredentialIdentity{}, errors.New("cannot advance updatedAtMs: int64 max reached")
 		}
-		persistedUpdatedAt = updatedAtMS + 1
+		persistedUpdatedAt = current.UpdatedAtMS + 1
 	}
 
 	res, err := tx.ExecContext(ctx, `update `+sqliterepo.GatewayCredentialIdentitiesTable+`
@@ -610,7 +614,7 @@ func (r *repository) SetCredentialLifecycle(
 		string(nextLifecycle),
 		persistedUpdatedAt,
 		string(id),
-		currentRev,
+		int64(current.Revision),
 	)
 	if err != nil {
 		return identity.CredentialIdentity{}, fmt.Errorf("update credential lifecycle: %w", err)
@@ -628,10 +632,10 @@ func (r *repository) SetCredentialLifecycle(
 	}
 
 	return identity.CredentialIdentity{
-		ID:          identity.CredentialID(rawID),
+		ID:          current.ID,
 		Revision:    nextRev,
 		Lifecycle:   nextLifecycle,
-		CreatedAtMS: createdAtMS,
+		CreatedAtMS: current.CreatedAtMS,
 		UpdatedAtMS: persistedUpdatedAt,
 	}, nil
 }

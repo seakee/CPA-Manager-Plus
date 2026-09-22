@@ -3809,41 +3809,155 @@ func TestGatewayCanonicalIdentityMigration(t *testing.T) {
 		}
 	}
 
-	// 3. Foreign keys exist
-	var keyFKCount int
-	if err := db.QueryRow(`select count(*) from pragma_foreign_key_list(?) where "table" = ?`,
-		GatewayAPIKeySourceBindingsTable, GatewayAPIKeyIdentitiesTable).Scan(&keyFKCount); err != nil {
-		t.Fatalf("inspect api key foreign keys: %v", err)
+	// 3. Foreign keys exact structure verification via pragma foreign_key_list
+	type expectedFK struct {
+		fromCol  string
+		toTable  string
+		toCol    string
+		onDelete string
 	}
-	if keyFKCount != 1 {
-		t.Fatalf("expected 1 foreign key from %s to %s, got %d",
-			GatewayAPIKeySourceBindingsTable, GatewayAPIKeyIdentitiesTable, keyFKCount)
-	}
-
-	var credFKCount int
-	if err := db.QueryRow(`select count(*) from pragma_foreign_key_list(?) where "table" = ?`,
-		GatewayCredentialSourceBindingsTable, GatewayCredentialIdentitiesTable).Scan(&credFKCount); err != nil {
-		t.Fatalf("inspect credential foreign keys: %v", err)
-	}
-	if credFKCount != 1 {
-		t.Fatalf("expected 1 foreign key from %s to %s, got %d",
-			GatewayCredentialSourceBindingsTable, GatewayCredentialIdentitiesTable, credFKCount)
-	}
-
-	// 4. Expected partial unique indexes exist
-	expectedIndexes := []string{
-		"idx_gateway_api_key_source_active",
-		"idx_gateway_api_key_entity_active",
-		"idx_gateway_cred_source_active",
-		"idx_gateway_cred_entity_active",
-	}
-	for _, idxName := range expectedIndexes {
-		var count int
-		if err := db.QueryRow(`select count(*) from sqlite_master where type = 'index' and name = ?`, idxName).Scan(&count); err != nil {
-			t.Fatalf("inspect index %s: %v", idxName, err)
+	checkFK := func(table string, expected expectedFK) {
+		t.Helper()
+		rows, err := db.Query(`pragma foreign_key_list(` + table + `)`)
+		if err != nil {
+			t.Fatalf("inspect foreign keys for %s: %v", table, err)
 		}
-		if count != 1 {
-			t.Fatalf("expected index %s to exist, got %d", idxName, count)
+		defer rows.Close()
+
+		var matched bool
+		for rows.Next() {
+			var id, seq int
+			var targetTable, fromCol, toCol, onUpdate, onDelete, match string
+			if err := rows.Scan(&id, &seq, &targetTable, &fromCol, &toCol, &onUpdate, &onDelete, &match); err != nil {
+				t.Fatalf("scan foreign key info for %s: %v", table, err)
+			}
+			if fromCol == expected.fromCol &&
+				targetTable == expected.toTable &&
+				toCol == expected.toCol &&
+				strings.EqualFold(onDelete, expected.onDelete) {
+				matched = true
+				break
+			}
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("iterate foreign keys for %s: %v", table, err)
+		}
+		if !matched {
+			t.Fatalf("table %s missing expected foreign key: %+v", table, expected)
+		}
+	}
+
+	checkFK(GatewayAPIKeySourceBindingsTable, expectedFK{
+		fromCol:  "api_key_id",
+		toTable:  GatewayAPIKeyIdentitiesTable,
+		toCol:    "id",
+		onDelete: "RESTRICT",
+	})
+	checkFK(GatewayCredentialSourceBindingsTable, expectedFK{
+		fromCol:  "credential_id",
+		toTable:  GatewayCredentialIdentitiesTable,
+		toCol:    "id",
+		onDelete: "RESTRICT",
+	})
+
+	// 4. Expected partial unique indexes exact verification
+	type expectedIndex struct {
+		table   string
+		name    string
+		columns []string
+	}
+	expectedIndexes := []expectedIndex{
+		{
+			table:   GatewayAPIKeySourceBindingsTable,
+			name:    "idx_gateway_api_key_source_active",
+			columns: []string{"runtime_identity", "api_key_hash"},
+		},
+		{
+			table:   GatewayAPIKeySourceBindingsTable,
+			name:    "idx_gateway_api_key_entity_active",
+			columns: []string{"api_key_id", "runtime_identity"},
+		},
+		{
+			table:   GatewayCredentialSourceBindingsTable,
+			name:    "idx_gateway_cred_source_active",
+			columns: []string{"runtime_identity", "source_auth_id"},
+		},
+		{
+			table:   GatewayCredentialSourceBindingsTable,
+			name:    "idx_gateway_cred_entity_active",
+			columns: []string{"credential_id", "runtime_identity"},
+		},
+	}
+
+	for _, exp := range expectedIndexes {
+		// Verify index exists, unique = true, partial = true via pragma index_list(table)
+		rows, err := db.Query(`pragma index_list(` + exp.table + `)`)
+		if err != nil {
+			t.Fatalf("query index_list for %s: %v", exp.table, err)
+		}
+		var foundIndex, isUnique, isPartial bool
+		for rows.Next() {
+			var seq int
+			var name string
+			var unique int
+			var origin string
+			var partial int
+			if err := rows.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
+				rows.Close()
+				t.Fatalf("scan index_list for %s: %v", exp.table, err)
+			}
+			if name == exp.name {
+				foundIndex = true
+				isUnique = (unique == 1)
+				isPartial = (partial == 1)
+				break
+			}
+		}
+		rows.Close()
+		if !foundIndex {
+			t.Fatalf("index %s not found on table %s", exp.name, exp.table)
+		}
+		if !isUnique {
+			t.Fatalf("index %s on table %s is not unique", exp.name, exp.table)
+		}
+		if !isPartial {
+			t.Fatalf("index %s on table %s is not partial", exp.name, exp.table)
+		}
+
+		// Verify exact indexed columns via pragma index_info(index_name)
+		infoRows, err := db.Query(`pragma index_info(` + exp.name + `)`)
+		if err != nil {
+			t.Fatalf("query index_info for %s: %v", exp.name, err)
+		}
+		var actualCols []string
+		for infoRows.Next() {
+			var seqno, cid int
+			var colName string
+			if err := infoRows.Scan(&seqno, &cid, &colName); err != nil {
+				infoRows.Close()
+				t.Fatalf("scan index_info for %s: %v", exp.name, err)
+			}
+			actualCols = append(actualCols, colName)
+		}
+		infoRows.Close()
+		if len(actualCols) != len(exp.columns) {
+			t.Fatalf("index %s columns count = %d (%v), want %d (%v)",
+				exp.name, len(actualCols), actualCols, len(exp.columns), exp.columns)
+		}
+		for i, col := range exp.columns {
+			if actualCols[i] != col {
+				t.Fatalf("index %s column %d = %q, want %q", exp.name, i, actualCols[i], col)
+			}
+		}
+
+		// Verify partial condition contains WHERE retired_at_ms IS NULL via sqlite_master.sql
+		var sqlStr string
+		if err := db.QueryRow(`select sql from sqlite_master where type = 'index' and name = ?`, exp.name).Scan(&sqlStr); err != nil {
+			t.Fatalf("query index sql for %s: %v", exp.name, err)
+		}
+		normalizedSQL := strings.Join(strings.Fields(strings.ToLower(sqlStr)), " ")
+		if !strings.Contains(normalizedSQL, "where retired_at_ms is null") {
+			t.Fatalf("index %s sql does not contain 'where retired_at_ms is null': %q", exp.name, sqlStr)
 		}
 	}
 
