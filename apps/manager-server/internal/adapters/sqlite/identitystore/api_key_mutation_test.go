@@ -113,6 +113,48 @@ func TestPendingRotationSuppressesUntilForwardCompletes(t *testing.T) {
 	}
 }
 
+func TestRecoveredRotationKeepsSourceHandoffOrderedAfterClockRollback(t *testing.T) {
+	db, repo, mutations := mutationRepo(t)
+	ctx := context.Background()
+	oldHash, newHash := sha256Hex("old"), sha256Hex("new")
+	old := seedAPIKey(t, repo, oldHash)
+	if _, err := repo.ApplyPassiveSnapshot(ctx, ports.ReconcileSnapshotParams{
+		RuntimeIdentity: "runtime-1", ObservedRuntimeGeneration: 1,
+		APIKeys: []ports.APIKeySnapshotItem{{APIKeyHash: oldHash}}, NowMS: 5000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	prepareMutation(t, mutations, ports.APIKeyMutationRotate, oldHash, newHash, 6000)
+
+	// The old process forwarded the rotation and died before finalization.
+	// A new process observes the new source after the wall clock moved backward.
+	if _, err := repo.ApplyPassiveSnapshot(ctx, ports.ReconcileSnapshotParams{
+		RuntimeIdentity: "runtime-1", ObservedRuntimeGeneration: 2,
+		ProcessInstanceID: "process-B", CaptureStartedAtMS: 800, NowMS: 800,
+		APIKeys: []ports.APIKeySnapshotItem{{APIKeyHash: newHash}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rotated, newBinding, err := repo.FindActiveAPIKeyBySource(ctx, "runtime-1", newHash)
+	if err != nil || rotated.ID != old.ID || rotated.Revision != old.Revision+1 {
+		t.Fatalf("recovered rotation identity: %+v %+v %v", rotated, newBinding, err)
+	}
+	var oldLastSeen, oldRetired int64
+	if err := db.QueryRow(`select last_seen_at_ms, retired_at_ms from gateway_api_key_source_bindings
+		where api_key_hash = ?`, oldHash).Scan(&oldLastSeen, &oldRetired); err != nil {
+		t.Fatal(err)
+	}
+	if oldLastSeen != 5000 || oldRetired != 5000 ||
+		newBinding.FirstSeenAtMS != oldRetired || newBinding.LastSeenAtMS != oldRetired ||
+		newBinding.ObservedRuntimeGeneration != 2 {
+		t.Fatalf("source handoff moved backward: old last=%d retired=%d new=%+v",
+			oldLastSeen, oldRetired, newBinding)
+	}
+	if pending, err := mutations.HasPendingAPIKeyMutation(ctx, "runtime-1"); err != nil || pending {
+		t.Fatalf("recovered rotation left intent: %v %v", pending, err)
+	}
+}
+
 func TestAPIMutationResolverTruthTable(t *testing.T) {
 	oldHash, newHash := sha256Hex("old"), sha256Hex("new")
 	cases := []struct {

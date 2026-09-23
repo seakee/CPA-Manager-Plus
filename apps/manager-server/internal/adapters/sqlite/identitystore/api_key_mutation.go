@@ -422,11 +422,13 @@ func finalizeAPIKeyMutation(ctx context.Context, tx *sql.Tx, m pendingAPIKeyMuta
 		return errors.New("API-key mutation source retirement conflict")
 	}
 	if m.kind == ports.APIKeyMutationRotate {
+		// The source handoff is one explicit mutation. A restart may reset the
+		// wall clock, but the replacement cannot precede the old retirement.
 		_, err = tx.ExecContext(ctx, `insert into `+sqliterepo.GatewayAPIKeySourceBindingsTable+` (
 			api_key_id, runtime_identity, api_key_hash, observed_runtime_generation,
 			first_seen_at_ms, last_seen_at_ms, retired_at_ms
 		) values (?, ?, ?, ?, ?, ?, null)`,
-			string(ent.ID), m.runtimeIdentity, m.newHash, strconv.FormatUint(generation, 10), nowMS, nowMS)
+			string(ent.ID), m.runtimeIdentity, m.newHash, strconv.FormatUint(generation, 10), retiredAt, retiredAt)
 		if err != nil {
 			if isConstraintConflict(err) {
 				return ports.ErrSourceBindingConflict
