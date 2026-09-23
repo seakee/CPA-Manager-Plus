@@ -220,6 +220,32 @@ func TestEvidenceHorizonAndThreeRules(t *testing.T) {
 	}
 }
 
+func TestObservationFiltersCanonicalKeyWindowAndHighWater(t *testing.T) {
+	f := newFixture(t)
+	f.rule("request", 10, 10)
+	f.event(1, "included-before-source", 95, 1, 0, "mapped", keyA)
+	f.event(2, "excluded-other-key", 95, 1, 0, "mapped", keyB)
+	f.event(3, "excluded-before-window", 90, 1, 0, "mapped", keyA)
+	f.event(4, "excluded-upper-bound", 101, 1, 0, "mapped", keyA)
+	f.event(5, "source", 100, 1, 0, "mapped", keyA)
+	f.event(6, "excluded-after-high-water", 95, 1, 0, "mapped", keyA)
+
+	result := f.evaluate(5, 300)
+	if result.Status != StatusEvaluated || len(result.Events) != 1 {
+		t.Fatalf("result = %+v, want one evaluated decision", result)
+	}
+	event := result.Events[0]
+	if event.Metric != resourcepolicy.MetricRequest || event.ObservedValue == nil || *event.ObservedValue != 2 {
+		t.Fatalf("request observation = %+v, want count 2", event)
+	}
+	if event.Outcome != gatewaydecision.OutcomeWithinLimit || event.ReasonCode != "within_limit" {
+		t.Fatalf("outcome/reason = %s/%s, want within_limit/within_limit", event.Outcome, event.ReasonCode)
+	}
+	if event.WindowStartMS == nil || *event.WindowStartMS != 91 || event.WindowEndMS == nil || *event.WindowEndMS != 101 {
+		t.Fatalf("resolved window = [%v,%v), want [91,101)", event.WindowStartMS, event.WindowEndMS)
+	}
+}
+
 func TestTokenEvidenceAndLimits(t *testing.T) {
 	for _, tt := range []struct {
 		name                  string
