@@ -78,9 +78,10 @@ const (
 	GatewayCredentialDeleteIntentItemsTable  = "gateway_credential_delete_intent_items"
 	GatewayUsageIdentityProjectionTable      = "gateway_usage_identity_projection_v1"
 	GatewayUsageIdentityProjectionStateTable = "gateway_usage_identity_projection_state"
-	GatewayQuotaPoliciesTable                 = "gateway_quota_policies"
-	GatewayQuotaPolicyRulesTable              = "gateway_quota_policy_rules"
-	GatewayAPIKeyPolicyBindingsTable          = "gateway_api_key_policy_bindings"
+	GatewayQuotaPoliciesTable                = "gateway_quota_policies"
+	GatewayQuotaPolicyRulesTable             = "gateway_quota_policy_rules"
+	GatewayAPIKeyPolicyBindingsTable         = "gateway_api_key_policy_bindings"
+	GatewayQuotaDecisionEventsTable          = "gateway_quota_decision_events_v1"
 
 	createUsageAccountModelRollupsTable = `create table if not exists usage_account_model_rollups (
 		account_key text not null,
@@ -985,6 +986,37 @@ func Migrate(db *sql.DB) error {
 		)`,
 		`create index if not exists idx_gateway_api_key_policy_bindings_policy
 			on gateway_api_key_policy_bindings(policy_id)`,
+		`create table if not exists gateway_quota_decision_events_v1 (
+			decision_id text not null primary key check(typeof(decision_id) = 'text' and length(decision_id) = 32 and decision_id not glob '*[^0-9a-f]*'),
+			schema_version integer not null check(typeof(schema_version) = 'integer' and schema_version = 1),
+			dedupe_key text not null unique check(typeof(dedupe_key) = 'text' and length(dedupe_key) = 64 and dedupe_key not glob '*[^0-9a-f]*'),
+			api_key_id text not null check(typeof(api_key_id) = 'text' and length(api_key_id) = 32 and api_key_id not glob '*[^0-9a-f]*'),
+			policy_id text not null check(typeof(policy_id) = 'text' and length(policy_id) = 32 and policy_id not glob '*[^0-9a-f]*'),
+			policy_revision integer not null check(typeof(policy_revision) = 'integer' and policy_revision >= 1),
+			binding_revision integer not null check(typeof(binding_revision) = 'integer' and binding_revision >= 1),
+			metric text not null check(typeof(metric) = 'text' and metric in ('request', 'token', 'cost')),
+			enforcement text not null check(typeof(enforcement) = 'text' and enforcement = 'observed'),
+			action text not null check(typeof(action) = 'text' and action = 'notify'),
+			outcome text not null check(typeof(outcome) = 'text' and outcome in ('within_limit', 'notify_required', 'indeterminate')),
+			reason_code text not null check(typeof(reason_code) = 'text' and length(reason_code) between 1 and 64 and reason_code not glob '*[^a-z0-9_]*'),
+			limit_value integer not null check(typeof(limit_value) = 'integer' and limit_value > 0),
+			observed_value integer check(observed_value is null or (typeof(observed_value) = 'integer' and observed_value >= 0)),
+			window_start_ms integer,
+			window_end_ms integer,
+			source_usage_event_id integer not null check(typeof(source_usage_event_id) = 'integer' and source_usage_event_id > 0),
+			source_event_fingerprint text not null check(typeof(source_event_fingerprint) = 'text' and length(source_event_fingerprint) = 64 and source_event_fingerprint not glob '*[^0-9a-f]*'),
+			evidence_timestamp_ms integer not null check(typeof(evidence_timestamp_ms) = 'integer' and evidence_timestamp_ms > 0),
+			evaluated_at_ms integer not null check(typeof(evaluated_at_ms) = 'integer' and evaluated_at_ms > 0),
+			check((window_start_ms is null and window_end_ms is null)
+				or (typeof(window_start_ms) = 'integer' and typeof(window_end_ms) = 'integer'
+					and window_start_ms > 0 and window_end_ms > window_start_ms)),
+			check(outcome not in ('within_limit', 'notify_required')
+				or (observed_value is not null and window_start_ms is not null and window_end_ms is not null)),
+			check(outcome <> 'within_limit' or observed_value < limit_value),
+			check(outcome <> 'notify_required' or observed_value >= limit_value),
+			foreign key(api_key_id) references gateway_api_key_identities(id) on delete restrict,
+			foreign key(policy_id) references gateway_quota_policies(id) on delete restrict
+		)`,
 		`create table if not exists gateway_credential_identities (
 			id text primary key,
 			revision integer not null,
