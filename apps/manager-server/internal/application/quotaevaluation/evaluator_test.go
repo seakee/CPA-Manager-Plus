@@ -139,22 +139,25 @@ func TestProjectionAndConfigurationGate(t *testing.T) {
 
 func TestEvidenceHorizonAndThreeRules(t *testing.T) {
 	f := newFixture(t)
-	f.rule("request", 3, 100)
-	f.rule("token", 6, 100)
-	f.rule("cost", 1, 100)
+	f.rule("request", 3, 20)
+	f.rule("token", 6, 20)
+	f.rule("cost", 1, 20)
 	f.event(1, "first", 90, 2, 0, "mapped", keyA)
 	f.event(2, "failed", 95, 0, 1, "mapped", keyA)
 	f.event(3, "future timestamp", 105, 500, 0, "mapped", keyA)
-	f.event(4, "  legacy hash  ", 100, 3, 0, "mapped", keyA)
-	f.event(5, "other key", 90, 1000, 0, "mapped", keyB)
-	f.event(6, "later id historical time", 80, 1000, 0, "mapped", keyA)
+	// Each excluded row violates exactly one observation predicate:
+	// other subject, lower bound, upper bound, or source ID high-water.
+	f.event(4, "other key", 90, 1000, 0, "mapped", keyB)
+	f.event(5, "before window", 80, 1000, 0, "mapped", keyA)
+	f.event(6, "  legacy hash  ", 100, 3, 0, "mapped", keyA)
+	f.event(7, "later id historical time", 90, 1000, 0, "mapped", keyA)
 	for _, table := range []string{"usage_events", "gateway_usage_identity_projection_v1"} {
 		for _, operation := range []string{"update", "delete"} {
 			f.exec(`create trigger guard_` + table + `_` + operation + ` before ` + operation + ` on ` + table + `
 				begin select raise(abort, 'raw/projection mutation forbidden'); end`)
 		}
 	}
-	result := f.evaluate(4, 300)
+	result := f.evaluate(6, 300)
 	if result.Status != StatusEvaluated || len(result.Events) != 3 {
 		t.Fatalf("result %+v", result)
 	}
@@ -169,7 +172,7 @@ func TestEvidenceHorizonAndThreeRules(t *testing.T) {
 	if *request.ObservedValue != 3 || request.Outcome != gatewaydecision.OutcomeNotifyRequired || request.ReasonCode != "limit_reached" {
 		t.Fatalf("request %+v", request)
 	}
-	if *request.WindowStartMS != 1 || *request.WindowEndMS != 101 {
+	if *request.WindowStartMS != 81 || *request.WindowEndMS != 101 {
 		t.Fatalf("window %+v", request)
 	}
 	token := byMetric[resourcepolicy.MetricToken]
@@ -184,7 +187,7 @@ func TestEvidenceHorizonAndThreeRules(t *testing.T) {
 	if request.SourceEventFingerprint != hex.EncodeToString(hash[:]) {
 		t.Fatalf("fingerprint %s", request.SourceEventFingerprint)
 	}
-	retry := f.evaluate(4, 999)
+	retry := f.evaluate(6, 999)
 	for i, event := range retry.Events {
 		if event.DecisionID != result.Events[i].DecisionID || event.EvaluatedAtMS != 300 {
 			t.Fatalf("retry changed first row: %+v", event)
@@ -195,17 +198,17 @@ func TestEvidenceHorizonAndThreeRules(t *testing.T) {
 		t.Fatalf("decision count %d, %v", count, err)
 	}
 	f.exec(`update gateway_quota_policies set revision=2,updated_at_ms=2 where id=?`, policyID)
-	policyChanged := f.evaluate(4, 1000)
+	policyChanged := f.evaluate(6, 1000)
 	if policyChanged.Events[0].DedupeKey == result.Events[0].DedupeKey {
 		t.Fatal("policy revision retained key")
 	}
 	f.exec(`update gateway_api_key_policy_bindings set revision=2,updated_at_ms=2 where api_key_id=?`, keyA)
-	bindingChanged := f.evaluate(4, 1001)
+	bindingChanged := f.evaluate(6, 1001)
 	if bindingChanged.Events[0].DedupeKey == policyChanged.Events[0].DedupeKey {
 		t.Fatal("binding revision retained key")
 	}
 	f.exec(`update gateway_usage_identity_projection_state set binding_revision=1`)
-	projectionChanged := f.evaluate(4, 1002)
+	projectionChanged := f.evaluate(6, 1002)
 	if projectionChanged.Events[0].DedupeKey == bindingChanged.Events[0].DedupeKey {
 		t.Fatal("projection revision retained key")
 	}
