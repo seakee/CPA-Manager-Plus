@@ -48,6 +48,14 @@ type UsageEventHandler interface {
 	HandleUsageEvents(ctx context.Context, cfg RuntimeConfig, events []usage.Event)
 }
 
+type UsageEventHandlerFunc func(ctx context.Context, cfg RuntimeConfig, events []usage.Event)
+
+func (f UsageEventHandlerFunc) HandleUsageEvents(ctx context.Context, cfg RuntimeConfig, events []usage.Event) {
+	if f != nil {
+		f(ctx, cfg, events)
+	}
+}
+
 type UsageRuntimeConfigHandler interface {
 	UpdateRuntimeConfig(ctx context.Context, cfg RuntimeConfig)
 }

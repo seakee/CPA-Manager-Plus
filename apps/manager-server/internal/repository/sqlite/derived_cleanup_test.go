@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	quotasnapshotrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotasnapshot"
@@ -41,6 +42,22 @@ func TestDerivedIndexesAreDeferredUntilPostListenMaintenance(t *testing.T) {
 			t.Fatalf("post-listen index %s count = %d, want 1", index.name, count)
 		}
 	}
+	for _, query := range []struct {
+		sql       string
+		indexName string
+	}{
+		{`EXPLAIN QUERY PLAN SELECT api_key_id FROM gateway_api_key_source_bindings WHERE api_key_hash = ?`, "idx_gateway_api_key_binding_history_hash"},
+		{`EXPLAIN QUERY PLAN SELECT credential_id FROM gateway_credential_source_bindings WHERE source_auth_id = ?`, "idx_gateway_credential_binding_history_auth_id"},
+	} {
+		var id, parent, unused int
+		var detail string
+		if err := db.QueryRow(query.sql, "source").Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatalf("explain history lookup: %v", err)
+		}
+		if !strings.Contains(detail, query.indexName) {
+			t.Fatalf("history lookup plan = %q, want %s", detail, query.indexName)
+		}
+	}
 }
 
 func TestDerivedIndexesOnNonEmptyTablesRequireOfflineCleanup(t *testing.T) {
@@ -56,6 +73,22 @@ func TestDerivedIndexesOnNonEmptyTablesRequireOfflineCleanup(t *testing.T) {
 	) values (?, 0, 'model', '', '', '', '', '', '', '', '', 1)`, usageidentity.ModelFormatVersion); err != nil {
 		t.Fatalf("seed non-empty upgrade table: %v", err)
 	}
+	for _, statement := range []string{
+		`insert into gateway_api_key_identities (id, revision, lifecycle, created_at_ms, updated_at_ms)
+			values ('key', 1, 'active', 1, 1)`,
+		`insert into gateway_credential_identities (id, revision, lifecycle, created_at_ms, updated_at_ms)
+			values ('credential', 1, 'active', 1, 1)`,
+		`insert into gateway_api_key_source_bindings
+			(api_key_id, runtime_identity, api_key_hash, first_seen_at_ms, last_seen_at_ms)
+			values ('key', 'runtime', 'hash', 1, 1)`,
+		`insert into gateway_credential_source_bindings
+			(credential_id, runtime_identity, source_auth_id, first_seen_at_ms, last_seen_at_ms)
+			values ('credential', 'runtime', 'auth', 1, 1)`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatalf("seed source binding history: %v", err)
+		}
+	}
 
 	ctx := context.Background()
 	if err := RunDerivedStartupMaintenance(ctx, db); err != nil {
@@ -68,6 +101,11 @@ func TestDerivedIndexesOnNonEmptyTablesRequireOfflineCleanup(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("revision index count after startup = %d, want deferred", count)
+	}
+	for _, name := range []string{"idx_gateway_api_key_binding_history_hash", "idx_gateway_credential_binding_history_auth_id"} {
+		if err := db.QueryRow(`select count(*) from sqlite_master where type = 'index' and name = ?`, name).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("binding history index %s after startup = %d, err = %v", name, count, err)
+		}
 	}
 	result, err := CleanupDerivedOffline(ctx, db)
 	if err != nil {
@@ -82,6 +120,11 @@ func TestDerivedIndexesOnNonEmptyTablesRequireOfflineCleanup(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("revision index count after offline cleanup = %d, want 1", count)
+	}
+	for _, name := range []string{"idx_gateway_api_key_binding_history_hash", "idx_gateway_credential_binding_history_auth_id"} {
+		if err := db.QueryRow(`select count(*) from sqlite_master where type = 'index' and name = ?`, name).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("binding history index %s after offline cleanup = %d, err = %v", name, count, err)
+		}
 	}
 }
 

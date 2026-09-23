@@ -68,6 +68,90 @@ func TestUsageDataMigrationInitialStateMatchesExistingUsageData(t *testing.T) {
 	}
 }
 
+func TestLegacyIdentityProjectionStateGetsBindingRevision(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "legacy-projection.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`create table gateway_usage_identity_projection_state (
+		state_name text primary key,
+		schema_version integer not null,
+		status text not null,
+		last_processed_event_id integer not null default 0,
+		target_event_id integer not null default 0,
+		processed_events integer not null default 0,
+		last_run_started_at_ms integer,
+		updated_at_ms integer not null default 0,
+		finished_at_ms integer,
+		last_error text
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into gateway_usage_identity_projection_state
+		(state_name, schema_version, status, last_processed_event_id, target_event_id, processed_events)
+		values ('canonical_identity_v1', 1, 'ready', 7, 7, 7)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(db); err != nil {
+		t.Fatalf("migrate legacy checkpoint: %v", err)
+	}
+	if err := Migrate(db); err != nil {
+		t.Fatalf("repeat migration: %v", err)
+	}
+	var bindingRevision int64
+	if err := db.QueryRow(`select binding_revision from gateway_usage_identity_projection_state
+		where state_name = 'canonical_identity_v1'`).Scan(&bindingRevision); err != nil || bindingRevision != -1 {
+		t.Fatalf("legacy checkpoint binding revision = %d, err = %v", bindingRevision, err)
+	}
+	if _, err := db.Exec(`insert into gateway_api_key_identities
+		(id, revision, lifecycle, created_at_ms, updated_at_ms) values ('key', 1, 'active', 1, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into gateway_api_key_source_bindings
+		(api_key_id, runtime_identity, api_key_hash, first_seen_at_ms, last_seen_at_ms)
+		values ('key', 'runtime', 'hash', 1, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	var sourceRevision int64
+	if err := db.QueryRow(`select revision from gateway_source_binding_revision where id = 1`).Scan(&sourceRevision); err != nil || sourceRevision != 1 {
+		t.Fatalf("source revision after binding insert = %d, err = %v", sourceRevision, err)
+	}
+}
+
+func TestMigrateInvalidatesPreviouslyStaleReadyProjection(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "stale-ready-projection.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	// Simulate the prior build, which tracked revisions but had no invalidation trigger.
+	if _, err := db.Exec(`drop trigger gateway_source_binding_revision_invalidate_projection`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`update gateway_usage_identity_projection_state set
+		status = 'ready', binding_revision = 0, finished_at_ms = 123
+		where state_name = 'canonical_identity_v1'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`update gateway_source_binding_revision set revision = 1 where id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	if err := db.QueryRow(`select status from gateway_usage_identity_projection_state
+		where state_name = 'canonical_identity_v1'`).Scan(&status); err != nil || status != "ready" {
+		t.Fatalf("prior-build state = %q, err = %v", status, err)
+	}
+	if err := Migrate(db); err != nil {
+		t.Fatalf("migrate stale ready projection: %v", err)
+	}
+	var finished sql.NullInt64
+	if err := db.QueryRow(`select status, finished_at_ms from gateway_usage_identity_projection_state
+		where state_name = 'canonical_identity_v1'`).Scan(&status, &finished); err != nil || status != "pending" || finished.Valid {
+		t.Fatalf("upgraded state = %q, finished = %+v, err = %v", status, finished, err)
+	}
+}
+
 func TestMigrateWithoutUsageEventsClearsDeferredIndexLedger(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing-source-deferred-index.sqlite")
 	db, err := Open(path)
@@ -4054,5 +4138,88 @@ func TestGatewayAPIKeyMutationIntentSchema(t *testing.T) {
 	}
 	if err := rows.Err(); err != nil || !foundRestrict {
 		t.Fatalf("intent FK RESTRICT missing: %v", err)
+	}
+}
+
+func TestMigrateGatewayUsageIdentityProjectionSchema(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "test_projection_schema.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Initial state seeded
+	var stateStatus string
+	var lastProcessed, targetID int64
+	if err := db.QueryRow(`SELECT status, last_processed_event_id, target_event_id
+		FROM gateway_usage_identity_projection_state
+		WHERE state_name = 'canonical_identity_v1'`).Scan(&stateStatus, &lastProcessed, &targetID); err != nil {
+		t.Fatalf("projection initial state query failed: %v", err)
+	}
+	if stateStatus != "pending" || lastProcessed != 0 || targetID != 0 {
+		t.Fatalf("unexpected projection initial state: %s, %d, %d", stateStatus, lastProcessed, targetID)
+	}
+
+	insert := func(eventID int64, hash, keyState, keyID, credState, credID string) error {
+		var kID, cID any
+		if keyID != "" {
+			kID = keyID
+		}
+		if credID != "" {
+			cID = credID
+		}
+		_, err := db.Exec(`INSERT INTO gateway_usage_identity_projection_v1 (
+			usage_event_id, event_hash, request_id, evidence_timestamp_ms,
+			api_key_state, api_key_id, api_key_source_hash,
+			credential_state, credential_id, credential_source_auth_id,
+			schema_version, projected_at_ms
+		) VALUES (?, ?, 'req-1', 100, ?, ?, '', ?, ?, '', 1, 100)`,
+			eventID, hash, keyState, kID, credState, cID)
+		return err
+	}
+
+	// Valid insert
+	if err := insert(1, "h-1", "mapped", "key-1", "mapped", "cred-1"); err != nil {
+		t.Fatalf("valid projection row rejected: %v", err)
+	}
+
+	// Valid non-mapped with nil IDs
+	if err := insert(2, "h-2", "unknown", "", "stale", ""); err != nil {
+		t.Fatalf("valid non-mapped projection row rejected: %v", err)
+	}
+
+	// Invalid api_key_state
+	if err := insert(3, "h-3", "bogus", "key-1", "unknown", ""); err == nil {
+		t.Fatal("invalid api_key_state was accepted")
+	}
+
+	// Mapped API key with nil ID
+	if err := insert(4, "h-4", "mapped", "", "unknown", ""); err == nil {
+		t.Fatal("mapped api_key_state with nil ID was accepted")
+	}
+
+	// Unknown API key with non-nil ID
+	if err := insert(5, "h-5", "unknown", "key-1", "unknown", ""); err == nil {
+		t.Fatal("unknown api_key_state with non-nil ID was accepted")
+	}
+
+	// Stale API key with non-nil ID
+	if err := insert(6, "h-6", "stale", "key-1", "unknown", ""); err == nil {
+		t.Fatal("stale api_key_state with non-nil ID was accepted")
+	}
+
+	// Ambiguous API key with non-nil ID
+	if err := insert(7, "h-7", "ambiguous", "key-1", "unknown", ""); err == nil {
+		t.Fatal("ambiguous api_key_state with non-nil ID was accepted")
+	}
+
+	// Mapped credential with nil ID
+	if err := insert(8, "h-8", "unknown", "", "mapped", ""); err == nil {
+		t.Fatal("mapped credential_state with nil ID was accepted")
+	}
+
+	// Unknown credential with non-nil ID
+	if err := insert(9, "h-9", "unknown", "", "unknown", "cred-1"); err == nil {
+		t.Fatal("unknown credential_state with non-nil ID was accepted")
 	}
 }

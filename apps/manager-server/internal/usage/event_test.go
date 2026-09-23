@@ -2,6 +2,7 @@ package usage
 
 import (
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -189,5 +190,31 @@ func TestIsLongContextInputBoundary(t *testing.T) {
 	}
 	if !IsLongContextInput(272_001) {
 		t.Fatal("272001 input tokens should use long-context pricing")
+	}
+}
+
+func TestSafeRawJSONPreservesAuthIDWhileRedactingAPIKey(t *testing.T) {
+	raw := `{
+		"api_key": "sk-proj-super-secret-key-12345",
+		"auth_id": "cpa-auth-target-id-42",
+		"authId": "cpa-auth-target-id-42",
+		"authorization": "Bearer secret-token-abcdef",
+		"model": "gpt-4",
+		"detail": {
+			"api_key": "sk-nested-key",
+			"auth_id": "cpa-auth-target-id-42"
+		}
+	}`
+
+	sanitized := SafeRawJSON(raw)
+
+	if strings.Contains(sanitized, "sk-proj-super-secret-key-12345") || strings.Contains(sanitized, "secret-token-abcdef") || strings.Contains(sanitized, "sk-nested-key") {
+		t.Fatalf("SafeRawJSON leaked secret raw keys: %s", sanitized)
+	}
+	if !strings.Contains(sanitized, "[redacted]") {
+		t.Fatalf("SafeRawJSON did not redact secret fields: %s", sanitized)
+	}
+	if !strings.Contains(sanitized, `"cpa-auth-target-id-42"`) {
+		t.Fatalf("SafeRawJSON failed to preserve CPA Auth.ID for shadow projection: %s", sanitized)
 	}
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/adapters/cpaidentityinventory"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/credentialdeletemutation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/identitymutation"
+	identityprojectionapp "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/identityprojection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/identityreconcile"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/adminreset"
@@ -40,6 +41,7 @@ import (
 	cpaupdateservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaupdate"
 	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/worker"
 )
 
@@ -216,12 +218,14 @@ func runServer() {
 	if cfg.DashboardHourlyRollupEnabled {
 		usageHourlyAggregateWorker = worker.NewUsageHourlyAggregateWorker(db)
 	}
+	identityProjectionWorker := identityprojectionapp.NewWorker(db.IdentityProjections)
 	serverApp.AppContext().UsageService.SetEventsInsertedNotifier(func() {
 		accountHistoryRollupWorker.Wake()
 		usageDerivedRollupWorker.Wake()
 		if usageHourlyAggregateWorker != nil {
 			usageHourlyAggregateWorker.Wake()
 		}
+		identityProjectionWorker.Wake()
 	})
 	automationRuntime := worker.NewAutomationRuntime(
 		automationSettingsService,
@@ -235,6 +239,9 @@ func runServer() {
 		accountHistoryRollupWorker,
 		usageDerivedRollupWorker,
 		usageHourlyAggregateWorker,
+		collector.UsageEventHandlerFunc(func(ctx context.Context, _ collector.RuntimeConfig, events []usage.Event) {
+			identityProjectionWorker.HandleUsageEvents(ctx, events)
+		}),
 	))
 
 	server := &http.Server{
@@ -374,6 +381,7 @@ func runServer() {
 		if usageHourlyAggregateWorker != nil {
 			usageHourlyAggregateWorker.Start(ctx)
 		}
+		identityProjectionWorker.Start(ctx)
 		db.StartDerivedMaintenance(ctx)
 		collectorWorker.Start(ctx)
 		worker.NewLegacyQuotaSnapshotMigrationWorker(db).Start(ctx)
@@ -385,6 +393,7 @@ func runServer() {
 		if usageHourlyAggregateWorker != nil {
 			usageHourlyAggregateWorker.Wake()
 		}
+		identityProjectionWorker.Wake()
 		go runUsageResponseMetadataBackfill(ctx, db)
 	})
 	if ctx.Err() == nil {
