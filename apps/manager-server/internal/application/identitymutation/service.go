@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
@@ -36,6 +37,28 @@ type Service struct {
 	repo              ports.MutationRepository
 	processInstanceID string
 	now               func() int64
+	completionMu      sync.Mutex
+	forwardCompleted  map[string]int64
+}
+
+// NewMonotonicMillis gives the proxy and passive worker one ordered clock.
+// It preserves capture/forward ordering even when the wall clock moves back.
+func NewMonotonicMillis(wall func() int64) func() int64 {
+	if wall == nil {
+		wall = func() int64 { return time.Now().UnixMilli() }
+	}
+	var mu sync.Mutex
+	var last int64
+	return func() int64 {
+		mu.Lock()
+		defer mu.Unlock()
+		current := wall()
+		if current <= last {
+			current = last + 1
+		}
+		last = current
+		return current
+	}
 }
 
 func NewService(cfg Config) (*Service, error) {
@@ -48,7 +71,8 @@ func NewService(cfg Config) (*Service, error) {
 		now = func() int64 { return time.Now().UnixMilli() }
 	}
 	return &Service{observer: cfg.RuntimeObserver, inventory: cfg.InventoryClient,
-		repo: cfg.Repository, processInstanceID: cfg.ProcessInstanceID, now: now}, nil
+		repo: cfg.Repository, processInstanceID: cfg.ProcessInstanceID, now: now,
+		forwardCompleted: make(map[string]int64)}, nil
 }
 
 func (s *Service) status(ctx context.Context) (model.RuntimeObservedStatus, error) {
@@ -95,6 +119,26 @@ func (s *Service) CheckAvailable(ctx context.Context) error {
 	return nil
 }
 
+// Transport-only forms need only the pending-intent overlap guard. An
+// unavailable Runtime status does not change their existing transport behavior
+// when no pending API-key intent exists.
+func (s *Service) CheckTransportAvailable(ctx context.Context) error {
+	status, err := s.status(ctx)
+	var pending bool
+	if err != nil {
+		pending, err = s.repo.HasAnyPendingAPIKeyMutation(ctx)
+	} else {
+		pending, err = s.repo.HasPendingAPIKeyMutation(ctx, string(status.Identity))
+	}
+	if err != nil {
+		return err
+	}
+	if pending {
+		return ports.ErrPendingAPIKeyMutation
+	}
+	return nil
+}
+
 // Prepare invokes the secret-bearing evidence closure between Runtime status
 // observations. Only the resulting safe counts/hashes enter this package.
 func (s *Service) Prepare(ctx context.Context, kind ports.APIKeyMutationKind,
@@ -123,7 +167,30 @@ func (s *Service) Prepare(ctx context.Context, kind ports.APIKeyMutationKind,
 }
 
 func (s *Service) MarkForwardComplete(ctx context.Context, intentID string) error {
-	return s.repo.MarkAPIKeyMutationForwardComplete(ctx, intentID, s.processInstanceID, s.now())
+	s.completionMu.Lock()
+	defer s.completionMu.Unlock()
+	completedAt := s.now()
+	s.forwardCompleted[intentID] = completedAt
+	if err := s.repo.MarkAPIKeyMutationForwardComplete(ctx, intentID, s.processInstanceID, completedAt); err != nil {
+		return err
+	}
+	delete(s.forwardCompleted, intentID)
+	return nil
+}
+
+// RetryForwardCompletions runs before passive inventory capture. A failed
+// marker write remains in memory until SQLite accepts it or this process stops.
+// A fresh capture then starts strictly after the persisted completion marker.
+func (s *Service) RetryForwardCompletions(ctx context.Context) error {
+	s.completionMu.Lock()
+	defer s.completionMu.Unlock()
+	for id, completedAt := range s.forwardCompleted {
+		if err := s.repo.MarkAPIKeyMutationForwardComplete(ctx, id, s.processInstanceID, completedAt); err != nil {
+			return err
+		}
+		delete(s.forwardCompleted, id)
+	}
+	return nil
 }
 
 // Observe resolves only from a fresh, Runtime-fenced authoritative hash set.

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -33,6 +34,12 @@ type readyAPIKeyRuntime struct{}
 
 func (readyAPIKeyRuntime) Status(context.Context) (model.RuntimeObservedStatus, error) {
 	return model.RuntimeObservedStatus{State: model.RuntimeStateReady, Identity: "runtime-1", Generation: 1}, nil
+}
+
+type unavailableAPIKeyRuntime struct{}
+
+func (unavailableAPIKeyRuntime) Status(context.Context) (model.RuntimeObservedStatus, error) {
+	return model.RuntimeObservedStatus{}, errors.New("runtime unavailable")
 }
 
 func keyHash(raw string) string {
@@ -87,21 +94,24 @@ func TestInspectAPIKeyMutationClassification(t *testing.T) {
 	cases := []struct {
 		name, method, url, body string
 		want                    ports.APIKeyMutationKind
+		wantErr                 bool
 	}{
-		{"pure rotation", http.MethodPatch, "/v0/management/api-keys", `{"old":"a","new":"b"}`, ports.APIKeyMutationRotate},
-		{"mixed index", http.MethodPatch, "/v0/management/api-keys", `{"old":"a","new":"b","index":0,"value":"c"}`, ""},
-		{"index patch", http.MethodPatch, "/v0/management/api-keys", `{"index":0,"value":"b"}`, ""},
-		{"duplicate old", http.MethodPatch, "/v0/management/api-keys", `{"old":"a","old":"b","new":"c"}`, ""},
-		{"whole list", http.MethodPut, "/v0/management/api-keys", `["a","b"]`, ""},
-		{"value delete", http.MethodDelete, "/v0/management/api-keys?value=a", "", ports.APIKeyMutationDelete},
-		{"index delete", http.MethodDelete, "/v0/management/api-keys?index=0", "", ""},
-		{"mixed delete", http.MethodDelete, "/v0/management/api-keys?index=0&value=a", "", ""},
+		{"pure rotation", http.MethodPatch, "/v0/management/api-keys", `{"old":"a","new":"b"}`, ports.APIKeyMutationRotate, false},
+		{"mixed index", http.MethodPatch, "/v0/management/api-keys", `{"old":"a","new":"b","index":999,"value":"c"}`, "", true},
+		{"index patch", http.MethodPatch, "/v0/management/api-keys", `{"index":0,"value":"b"}`, "", false},
+		{"duplicate old", http.MethodPatch, "/v0/management/api-keys", `{"old":"a","old":"b","new":"c"}`, "", true},
+		{"unknown field", http.MethodPatch, "/v0/management/api-keys", `{"old":"a","new":"b","extra":"x"}`, "", true},
+		{"case variant", http.MethodPatch, "/v0/management/api-keys", `{"Old":"a","new":"b"}`, "", true},
+		{"whole list", http.MethodPut, "/v0/management/api-keys", `["a","b"]`, "", false},
+		{"value delete", http.MethodDelete, "/v0/management/api-keys?value=a", "", ports.APIKeyMutationDelete, false},
+		{"index delete", http.MethodDelete, "/v0/management/api-keys?index=0", "", "", false},
+		{"mixed delete", http.MethodDelete, "/v0/management/api-keys?index=999&value=a", "", "", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			req := httptest.NewRequest(tc.method, tc.url, strings.NewReader(tc.body))
 			shape, err := inspectAPIKeyMutation(req)
-			if err != nil || shape.kind != tc.want {
+			if (err != nil) != tc.wantErr || shape.kind != tc.want {
 				t.Fatalf("shape=%+v err=%v want=%q", shape, err, tc.want)
 			}
 			body, err := io.ReadAll(req.Body)
@@ -109,6 +119,36 @@ func TestInspectAPIKeyMutationClassification(t *testing.T) {
 				t.Fatalf("request body was changed: %v", err)
 			}
 		})
+	}
+}
+
+func TestAmbiguousAPIKeyMutationsNeverForward(t *testing.T) {
+	var forwarded atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		forwarded.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+	svc, db, _ := newAPIKeyProxyFixture(t, upstream.URL, "old")
+	requests := []*http.Request{
+		httptest.NewRequest(http.MethodPatch, "/v0/management/api-keys", strings.NewReader(`{"index":999,"value":"x","old":"old","new":"new"}`)),
+		httptest.NewRequest(http.MethodDelete, "/v0/management/api-keys?index=999&value=old", nil),
+		httptest.NewRequest(http.MethodPatch, "/v0/management/api-keys", strings.NewReader(`{"old":"a","old":"old","new":"new"}`)),
+		httptest.NewRequest(http.MethodPatch, "/v0/management/api-keys", strings.NewReader(`{"old":"old","new":"new","extra":"x"}`)),
+		httptest.NewRequest(http.MethodPatch, "/v0/management/api-keys", strings.NewReader(strings.Repeat("x", maxAPIKeyMutationInspectionBytes+1))),
+	}
+	for _, request := range requests {
+		response := proxyAPIKeyRequest(svc, request)
+		if response.Code != http.StatusConflict {
+			t.Fatalf("unsafe request status=%d", response.Code)
+		}
+	}
+	if forwarded.Load() != 0 {
+		t.Fatalf("unsafe request reached CPA %d times", forwarded.Load())
+	}
+	var pending int
+	if err := db.QueryRow("select count(*) from " + sqlite.GatewayAPIKeyMutationIntentsTable).Scan(&pending); err != nil || pending != 0 {
+		t.Fatalf("unsafe request left intent: %d %v", pending, err)
 	}
 }
 
@@ -247,6 +287,47 @@ func TestAPIKeyRotationPreflightRejectsUnsafeEvidence(t *testing.T) {
 	}
 }
 
+func TestAPIKeyRotationTransportErrorAfterCPAWriteFinalizes(t *testing.T) {
+	const oldRaw, newRaw = "transport-old-secret", "transport-new-secret"
+	var mu sync.Mutex
+	current := oldRaw
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.Method == http.MethodGet {
+			fmt.Fprintf(w, `{"api-keys":[%q]}`, current)
+			return
+		}
+		current = newRaw
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		_ = conn.Close()
+	}))
+	defer upstream.Close()
+	svc, db, st := newAPIKeyProxyFixture(t, upstream.URL, oldRaw)
+	before, _, err := st.Identities.FindActiveAPIKeyBySource(context.Background(), "runtime-1", keyHash(oldRaw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := proxyAPIKeyRequest(svc, httptest.NewRequest(http.MethodPatch,
+		"/v0/management/api-keys", strings.NewReader(`{"old":"`+oldRaw+`","new":"`+newRaw+`"}`)))
+	if response.Code != http.StatusBadGateway || strings.Contains(response.Body.String(), "api_key_mutation_outcome_unknown") ||
+		strings.Contains(response.Body.String(), oldRaw) || strings.Contains(response.Body.String(), newRaw) {
+		t.Fatalf("unsafe transport response: %d %q", response.Code, response.Body.String())
+	}
+	after, _, err := st.Identities.FindActiveAPIKeyBySource(context.Background(), "runtime-1", keyHash(newRaw))
+	if err != nil || after.ID != before.ID || after.Revision != before.Revision+1 {
+		t.Fatalf("transport error lost identity: %+v %v", after, err)
+	}
+	var pending int
+	if err := db.QueryRow("select count(*) from " + sqlite.GatewayAPIKeyMutationIntentsTable).Scan(&pending); err != nil || pending != 0 {
+		t.Fatalf("transport error left intent: %d %v", pending, err)
+	}
+}
+
 func TestAPIKeyMutationUnknownKeepsIntentAndBlocksUnsupportedOverlap(t *testing.T) {
 	const oldRaw, newRaw = "secret-old-9123", "secret-new-7645"
 	var mu sync.Mutex
@@ -284,6 +365,14 @@ func TestAPIKeyMutationUnknownKeepsIntentAndBlocksUnsupportedOverlap(t *testing.
 		!strings.Contains(response.Body.String(), "api_key_mutation_outcome_unknown") {
 		t.Fatalf("unknown outcome response: %d %q", response.Code, response.Body.String())
 	}
+	mutations, err := identitymutation.NewService(identitymutation.Config{
+		RuntimeObserver: unavailableAPIKeyRuntime{}, InventoryClient: cpaidentityinventory.New(nil, nil),
+		Repository: st.Identities.(ports.MutationRepository), ProcessInstanceID: "process-A",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.SetAPIKeyMutationService(mutations)
 	for _, request := range []*http.Request{
 		httptest.NewRequest(http.MethodPut, "/v0/management/api-keys", strings.NewReader(`["another"]`)),
 		httptest.NewRequest(http.MethodPatch, "/v0/management/api-keys", strings.NewReader(`{"index":0,"value":"another"}`)),
@@ -307,7 +396,7 @@ func TestAPIKeyMutationUnknownKeepsIntentAndBlocksUnsupportedOverlap(t *testing.
 	if strings.Contains(response.Body.String(), oldRaw) || strings.Contains(response.Body.String(), newRaw) {
 		t.Fatal("unknown outcome exposed raw key")
 	}
-	_, err := st.Identities.ApplyPassiveSnapshot(context.Background(), ports.ReconcileSnapshotParams{
+	_, err = st.Identities.ApplyPassiveSnapshot(context.Background(), ports.ReconcileSnapshotParams{
 		RuntimeIdentity: "runtime-1", ObservedRuntimeGeneration: 2, ProcessInstanceID: "process-B",
 		CaptureStartedAtMS: time.Now().UnixMilli() + 1, NowMS: time.Now().UnixMilli() + 2,
 		APIKeys: []ports.APIKeySnapshotItem{{APIKeyHash: keyHash(newRaw)}},
@@ -379,6 +468,14 @@ func TestRepresentationOnlyAndUnsupportedFormsRemainTransportOnly(t *testing.T) 
 	}))
 	defer upstream.Close()
 	svc, db, st := newAPIKeyProxyFixture(t, upstream.URL, oldRaw)
+	mutations, err := identitymutation.NewService(identitymutation.Config{
+		RuntimeObserver: unavailableAPIKeyRuntime{}, InventoryClient: cpaidentityinventory.New(nil, nil),
+		Repository: st.Identities.(ports.MutationRepository), ProcessInstanceID: "process-A",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.SetAPIKeyMutationService(mutations)
 	before, _, err := st.Identities.FindActiveAPIKeyBySource(context.Background(), "runtime-1", keyHash(oldRaw))
 	if err != nil {
 		t.Fatal(err)

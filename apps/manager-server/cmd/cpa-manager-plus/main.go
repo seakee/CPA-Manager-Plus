@@ -260,6 +260,8 @@ func runServer() {
 	log.Printf("cpa-manager-plus listening on %s", listener.Addr())
 	codexInspectionWorker := worker.NewCodexInspectionWorker(serverApp.AppContext().Store, serverApp.AppContext().CodexInspectionService)
 	var identityProcessInstanceID string
+	var mutationSvc *identitymutation.Service
+	identityClock := identitymutation.NewMonotonicMillis(nil)
 	if cfg.EmbeddedRuntimeConfigured() {
 		instanceID, err := identity.NewAPIKeyID()
 		if err != nil {
@@ -270,11 +272,12 @@ func runServer() {
 		if !ok {
 			log.Fatal("identity store does not support API-key mutation intents")
 		}
-		mutationSvc, err := identitymutation.NewService(identitymutation.Config{
+		mutationSvc, err = identitymutation.NewService(identitymutation.Config{
 			RuntimeObserver:   runtimeClient,
 			InventoryClient:   cpaidentityinventory.New(nil, nil),
 			Repository:        mutationRepo,
 			ProcessInstanceID: identityProcessInstanceID,
+			TimeSource:        identityClock,
 		})
 		if err != nil {
 			log.Fatalf("initialize API-key mutation service: %v", err)
@@ -308,6 +311,8 @@ func runServer() {
 			InventoryClient:   cpaidentityinventory.New(nil, nil),
 			IdentityRepo:      db.Identities,
 			ProcessInstanceID: identityProcessInstanceID,
+			TimeSource:        identityClock,
+			BeforeCapture:     mutationSvc.RetryForwardCompletions,
 		})
 		if err != nil {
 			log.Fatalf("initialize identity reconcile service: %v", err)

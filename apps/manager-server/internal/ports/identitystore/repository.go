@@ -73,6 +73,7 @@ type ResolveAPIKeyMutationParams struct {
 // It keeps purpose-built mutation methods out of passive-reconciliation fakes.
 type MutationRepository interface {
 	HasPendingAPIKeyMutation(ctx context.Context, runtimeIdentity string) (bool, error)
+	HasAnyPendingAPIKeyMutation(ctx context.Context) (bool, error)
 	PrepareAPIKeyMutation(ctx context.Context, params PrepareAPIKeyMutationParams) (string, error)
 	MarkAPIKeyMutationForwardComplete(ctx context.Context, intentID, ownerInstance string, nowMS int64) error
 	ResolveAPIKeyMutation(ctx context.Context, params ResolveAPIKeyMutationParams) (APIKeyMutationOutcome, error)

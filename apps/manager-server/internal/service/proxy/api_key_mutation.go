@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -44,26 +45,30 @@ func isAPIKeyMutationRequest(r *http.Request) bool {
 	}
 }
 
+// An empty kind with no error proves transport-only behavior. An inspection
+// error means CPA might still perform an identity-bearing fallback: reject it.
 func inspectAPIKeyMutation(r *http.Request) (apiKeyMutationShape, error) {
 	if !isAPIKeyMutationRequest(r) {
 		return apiKeyMutationShape{}, nil
 	}
 	if r.Method == http.MethodDelete {
-		query := r.URL.Query()
-		if _, indexed := query["index"]; indexed {
+		query, err := url.ParseQuery(r.URL.RawQuery)
+		if err != nil {
+			return apiKeyMutationShape{}, errors.New("ambiguous API-key delete request")
+		}
+		if _, hasValue := query["value"]; !hasValue {
 			return apiKeyMutationShape{}, nil
 		}
-		values, hasValue := query["value"]
-		if !hasValue {
-			return apiKeyMutationShape{}, nil
+		if len(query) == 1 && len(query["value"]) == 1 {
+			return apiKeyMutationShape{kind: ports.APIKeyMutationDelete, oldRaw: query["value"][0]}, nil
 		}
-		if len(values) != 1 {
-			return apiKeyMutationShape{}, errors.New("ambiguous API-key delete value")
-		}
-		return apiKeyMutationShape{kind: ports.APIKeyMutationDelete, oldRaw: values[0]}, nil
+		return apiKeyMutationShape{}, errors.New("ambiguous API-key delete request")
 	}
-	if r.Method != http.MethodPatch || r.Body == nil {
+	if r.Method != http.MethodPatch {
 		return apiKeyMutationShape{}, nil
+	}
+	if r.Body == nil {
+		return apiKeyMutationShape{}, errors.New("ambiguous API-key patch request")
 	}
 	originalBody := r.Body
 	body, err := io.ReadAll(io.LimitReader(originalBody, maxAPIKeyMutationInspectionBytes+1))
@@ -75,42 +80,58 @@ func inspectAPIKeyMutation(r *http.Request) (apiKeyMutationShape, error) {
 		io.Closer
 	}{Reader: io.MultiReader(bytes.NewReader(body), originalBody), Closer: originalBody}
 	if len(body) > maxAPIKeyMutationInspectionBytes {
-		return apiKeyMutationShape{}, nil
+		return apiKeyMutationShape{}, errors.New("API-key patch request too large to inspect")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	token, err := decoder.Token()
 	if err != nil || token != json.Delim('{') {
-		return apiKeyMutationShape{}, nil
+		return apiKeyMutationShape{}, errors.New("ambiguous API-key patch request")
 	}
-	fields := make(map[string]string, 2)
+	fields := make(map[string]json.RawMessage, 2)
 	for decoder.More() {
 		keyToken, err := decoder.Token()
 		if err != nil {
-			return apiKeyMutationShape{}, nil
+			return apiKeyMutationShape{}, errors.New("ambiguous API-key patch request")
 		}
 		key, ok := keyToken.(string)
-		if !ok || (key != "old" && key != "new") {
-			return apiKeyMutationShape{}, nil
+		if !ok || (key != "old" && key != "new" && key != "index" && key != "value") {
+			return apiKeyMutationShape{}, errors.New("ambiguous API-key patch request")
 		}
 		if _, duplicate := fields[key]; duplicate {
-			return apiKeyMutationShape{}, nil
+			return apiKeyMutationShape{}, errors.New("ambiguous API-key patch request")
 		}
-		var value string
+		var value json.RawMessage
 		if err := decoder.Decode(&value); err != nil {
-			return apiKeyMutationShape{}, nil
+			return apiKeyMutationShape{}, errors.New("ambiguous API-key patch request")
 		}
 		fields[key] = value
 	}
 	if _, err := decoder.Token(); err != nil {
-		return apiKeyMutationShape{}, nil
+		return apiKeyMutationShape{}, errors.New("ambiguous API-key patch request")
 	}
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return apiKeyMutationShape{}, errors.New("ambiguous API-key patch request")
+	}
+	if len(fields) != 2 {
+		return apiKeyMutationShape{}, errors.New("ambiguous API-key patch request")
+	}
+	if rawIndex, indexed := fields["index"]; indexed {
+		rawValue, valued := fields["value"]
+		var index int
+		var value string
+		if !valued || json.Unmarshal(rawIndex, &index) != nil || json.Unmarshal(rawValue, &value) != nil ||
+			bytes.Equal(rawIndex, []byte("null")) || bytes.Equal(rawValue, []byte("null")) {
+			return apiKeyMutationShape{}, errors.New("ambiguous API-key patch request")
+		}
 		return apiKeyMutationShape{}, nil
 	}
-	oldRaw, oldPresent := fields["old"]
-	newRaw, newPresent := fields["new"]
-	if len(fields) != 2 || !oldPresent || !newPresent {
-		return apiKeyMutationShape{}, nil
+	oldValue, oldPresent := fields["old"]
+	newValue, newPresent := fields["new"]
+	var oldRaw, newRaw string
+	if !oldPresent || !newPresent || json.Unmarshal(oldValue, &oldRaw) != nil ||
+		json.Unmarshal(newValue, &newRaw) != nil || bytes.Equal(oldValue, []byte("null")) ||
+		bytes.Equal(newValue, []byte("null")) {
+		return apiKeyMutationShape{}, errors.New("ambiguous API-key patch request")
 	}
 	return apiKeyMutationShape{kind: ports.APIKeyMutationRotate, oldRaw: oldRaw,
 		newRaw: newRaw, representationOnly: mutationHash(oldRaw) == mutationHash(newRaw)}, nil
@@ -126,11 +147,11 @@ func (s *Service) prepareAPIKeyMutation(ctx context.Context, setup store.Setup, 
 	if err != nil {
 		return "", err
 	}
+	if shape.kind == "" || shape.representationOnly {
+		return "", s.apiKeyMutations.CheckTransportAvailable(ctx)
+	}
 	if err := s.apiKeyMutations.CheckAvailable(ctx); err != nil {
 		return "", err
-	}
-	if shape.kind == "" || shape.representationOnly {
-		return "", nil
 	}
 	if strings.TrimSpace(shape.oldRaw) == "" ||
 		(shape.kind == ports.APIKeyMutationRotate && strings.TrimSpace(shape.newRaw) == "") {

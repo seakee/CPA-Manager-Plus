@@ -1683,6 +1683,7 @@ func TestIsCPAPluginManagementPath(t *testing.T) {
 		{path: "/v0/management/codex-invite/accounts", want: true},
 		{path: "/v0/management/sample-plugin/custom/action", want: true},
 		{path: "/v0/management/accounts", want: false},
+		{path: "/v0/management/api-keys", want: false},
 		{path: "/v0/management/accounts/", want: false},
 		{path: "/v0/management/config", want: false},
 		{path: "/v0/management/reload", want: false},

@@ -138,6 +138,15 @@ func (r *repository) HasPendingAPIKeyMutation(ctx context.Context, runtimeIdenti
 	return found, err
 }
 
+func (r *repository) HasAnyPendingAPIKeyMutation(ctx context.Context) (bool, error) {
+	var exists int
+	err := r.db.QueryRowContext(ctx, `select 1 from `+sqliterepo.GatewayAPIKeyMutationIntentsTable+` limit 1`).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 func (r *repository) PrepareAPIKeyMutation(ctx context.Context, p ports.PrepareAPIKeyMutationParams) (string, error) {
 	if p.RuntimeIdentity == "" || strings.TrimSpace(p.RuntimeIdentity) != p.RuntimeIdentity ||
 		p.ObservedRuntimeGeneration == 0 || p.OwnerInstance == "" || p.NowMS <= 0 ||
