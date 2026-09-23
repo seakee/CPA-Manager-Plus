@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schemaVersion", "contractId", "executionBaseline", "scenarios"],
+  "properties": {
+    "$schema": { "const": "./contract.schema.json" },
+    "schemaVersion": { "const": 1 },
+    "contractId": { "const": "cpamp-v2-phase3-g1-stable-identity-v1" },
+    "executionBaseline": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "scenarios": {
+      "type": "array",
+      "minItems": 7,
+      "maxItems": 7,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "kind", "assertions"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^g1-[a-z0-9-]+$" },
+          "kind": {
+            "enum": ["canonical_source", "credential_continuity", "generation_revision", "replacement_rotation", "superseded_nonreuse", "fail_closed", "external_boundary"]
+          },
+          "oldHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "newHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "assertions": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "enum": ["canonical_id_not_source", "same_canonical_id", "different_canonical_id", "revision_unchanged", "revision_incremented_once", "lifecycle_missing", "lifecycle_active", "lifecycle_superseded", "binding_current", "binding_retired", "metadata_refreshed", "generation_refreshed", "inventory_rejected", "whole_snapshot_discarded", "zero_canonical_writes", "trusted_runtime_identity_absent"]
+            }
+          }
+        }
+      }
+    }
+  }
+}
