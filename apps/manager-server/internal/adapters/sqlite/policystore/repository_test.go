@@ -180,6 +180,11 @@ func TestSQLiteConstraints(t *testing.T) {
 	if _, err := db.Exec(`insert into gateway_quota_policies values (?,1,'active','observed','notify',1,1)`, "not-a-policy-id"); err == nil {
 		t.Fatal("SQLite accepted malformed PolicyID")
 	}
+	if _, err := db.Exec(`insert into gateway_quota_policies
+		(id, revision, state, enforcement, action, created_at_ms, updated_at_ms)
+		values (NULL, 1, 'active', 'observed', 'notify', 1, 1)`); err == nil {
+		t.Fatal("SQLite accepted NULL PolicyID")
+	}
 	for _, metric := range []string{"request", "other"} {
 		_, err := db.Exec(`insert into gateway_quota_policy_rules
 			(policy_id,metric,limit_value,window_kind,duration_ms,timezone) values (?,?,?,?,?,?)`,

@@ -238,6 +238,11 @@ func TestBindingSQLiteFKAndChecks(t *testing.T) {
 	db, repo, identities := open(t)
 	p := mustPolicy(t, repo)
 	key := seedKey(t, identities, "fk-test")
+	if _, err := db.Exec(`insert into gateway_api_key_policy_bindings
+		(api_key_id, policy_id, revision, enabled, created_at_ms, updated_at_ms)
+		values (NULL, ?, 1, 1, 1, 1)`, p.ID); err == nil {
+		t.Fatal("SQLite accepted NULL Canonical APIKeyID binding")
+	}
 	for _, row := range []struct {
 		keyID, policyID   string
 		revision, enabled int64
@@ -274,6 +279,10 @@ func TestBindingSchemaHasNoSourceOrRuntimeAuthority(t *testing.T) {
 			var defaultValue sql.NullString
 			if err := rows.Scan(&cid, &name, &fieldType, &notNull, &defaultValue, &primaryKey); err != nil {
 				t.Fatal(err)
+			}
+			if (table == "gateway_quota_policies" && name == "id" ||
+				table == "gateway_api_key_policy_bindings" && name == "api_key_id") && (notNull != 1 || primaryKey != 1) {
+				t.Fatalf("%s.%s must be an explicit NOT NULL primary key", table, name)
 			}
 			for _, forbidden := range []string{"hash", "alias", "source", "runtime", "credential", "provider", "endpoint", "model", "tenant", "account", "raw_key"} {
 				if strings.Contains(name, forbidden) {

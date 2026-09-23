@@ -948,7 +948,7 @@ func Migrate(db *sql.DB) error {
 			updated_at_ms integer not null
 		)`,
 		`create table if not exists gateway_quota_policies (
-			id text primary key check(length(id) = 32 and id not glob '*[^0-9a-f]*'),
+			id text not null primary key check(length(id) = 32 and id not glob '*[^0-9a-f]*'),
 			revision integer not null check(typeof(revision) = 'integer' and revision >= 1),
 			state text not null check(state in ('active', 'disabled')),
 			enforcement text not null check(enforcement = 'observed'),
@@ -974,7 +974,7 @@ func Migrate(db *sql.DB) error {
 			)
 		)`,
 		`create table if not exists gateway_api_key_policy_bindings (
-			api_key_id text primary key check(length(api_key_id) = 32 and api_key_id not glob '*[^0-9a-f]*'),
+			api_key_id text not null primary key check(length(api_key_id) = 32 and api_key_id not glob '*[^0-9a-f]*'),
 			policy_id text not null,
 			revision integer not null check(typeof(revision) = 'integer' and revision >= 1),
 			enabled integer not null check(enabled in (0, 1)),
