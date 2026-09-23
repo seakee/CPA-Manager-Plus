@@ -78,6 +78,9 @@ const (
 	GatewayCredentialDeleteIntentItemsTable  = "gateway_credential_delete_intent_items"
 	GatewayUsageIdentityProjectionTable      = "gateway_usage_identity_projection_v1"
 	GatewayUsageIdentityProjectionStateTable = "gateway_usage_identity_projection_state"
+	GatewayQuotaPoliciesTable                 = "gateway_quota_policies"
+	GatewayQuotaPolicyRulesTable              = "gateway_quota_policy_rules"
+	GatewayAPIKeyPolicyBindingsTable          = "gateway_api_key_policy_bindings"
 
 	createUsageAccountModelRollupsTable = `create table if not exists usage_account_model_rollups (
 		account_key text not null,
@@ -944,6 +947,44 @@ func Migrate(db *sql.DB) error {
 			created_at_ms integer not null,
 			updated_at_ms integer not null
 		)`,
+		`create table if not exists gateway_quota_policies (
+			id text primary key check(length(id) = 32 and id not glob '*[^0-9a-f]*'),
+			revision integer not null check(typeof(revision) = 'integer' and revision >= 1),
+			state text not null check(state in ('active', 'disabled')),
+			enforcement text not null check(enforcement = 'observed'),
+			action text not null check(action = 'notify'),
+			created_at_ms integer not null check(typeof(created_at_ms) = 'integer' and created_at_ms > 0),
+			updated_at_ms integer not null check(typeof(updated_at_ms) = 'integer' and updated_at_ms >= created_at_ms)
+		)`,
+		`create table if not exists gateway_quota_policy_rules (
+			policy_id text not null,
+			metric text not null check(metric in ('request', 'token', 'cost')),
+			limit_value integer not null check(typeof(limit_value) = 'integer' and limit_value > 0),
+			window_kind text not null check(window_kind in ('rolling', 'fixed')),
+			duration_ms integer check(duration_ms is null or typeof(duration_ms) = 'integer'),
+			calendar_months integer check(calendar_months is null or typeof(calendar_months) = 'integer'),
+			anchor_at_ms integer check(anchor_at_ms is null or typeof(anchor_at_ms) = 'integer'),
+			timezone text not null default '',
+			primary key(policy_id, metric),
+			foreign key(policy_id) references gateway_quota_policies(id) on delete restrict,
+			check(
+				(window_kind = 'rolling' and coalesce(duration_ms, 0) > 0 and calendar_months is null and anchor_at_ms is null and timezone = '')
+				or (window_kind = 'fixed' and coalesce(duration_ms, 0) > 0 and calendar_months is null and coalesce(anchor_at_ms, 0) > 0 and timezone = '')
+				or (window_kind = 'fixed' and duration_ms is null and coalesce(calendar_months, 0) > 0 and coalesce(anchor_at_ms, 0) > 0 and length(timezone) > 0)
+			)
+		)`,
+		`create table if not exists gateway_api_key_policy_bindings (
+			api_key_id text primary key check(length(api_key_id) = 32 and api_key_id not glob '*[^0-9a-f]*'),
+			policy_id text not null,
+			revision integer not null check(typeof(revision) = 'integer' and revision >= 1),
+			enabled integer not null check(enabled in (0, 1)),
+			created_at_ms integer not null check(typeof(created_at_ms) = 'integer' and created_at_ms > 0),
+			updated_at_ms integer not null check(typeof(updated_at_ms) = 'integer' and updated_at_ms >= created_at_ms),
+			foreign key(api_key_id) references gateway_api_key_identities(id) on delete restrict,
+			foreign key(policy_id) references gateway_quota_policies(id) on delete restrict
+		)`,
+		`create index if not exists idx_gateway_api_key_policy_bindings_policy
+			on gateway_api_key_policy_bindings(policy_id)`,
 		`create table if not exists gateway_credential_identities (
 			id text primary key,
 			revision integer not null,
