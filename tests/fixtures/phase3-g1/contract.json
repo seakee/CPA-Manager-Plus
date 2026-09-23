@@ -1,0 +1,45 @@
+{
+  "$schema": "./contract.schema.json",
+  "schemaVersion": 1,
+  "contractId": "cpamp-v2-phase3-g1-stable-identity-v1",
+  "executionBaseline": "b3bd5c8808ab174c6de295cb1f9113e472054b51",
+  "scenarios": [
+    {
+      "id": "g1-canonical-id-independent-source",
+      "kind": "canonical_source",
+      "assertions": ["canonical_id_not_source", "binding_current"]
+    },
+    {
+      "id": "g1-credential-continuity-reload-restart",
+      "kind": "credential_continuity",
+      "assertions": ["same_canonical_id", "revision_unchanged", "binding_current", "metadata_refreshed", "generation_refreshed"]
+    },
+    {
+      "id": "g1-generation-not-business-revision",
+      "kind": "generation_revision",
+      "assertions": ["same_canonical_id", "revision_unchanged", "revision_incremented_once", "lifecycle_missing", "lifecycle_active", "generation_refreshed"]
+    },
+    {
+      "id": "g1-passive-replacement-vs-explicit-rotation",
+      "kind": "replacement_rotation",
+      "oldHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "newHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "assertions": ["different_canonical_id", "same_canonical_id", "revision_incremented_once", "lifecycle_missing", "lifecycle_active", "binding_retired", "binding_current"]
+    },
+    {
+      "id": "g1-superseded-id-non-reuse",
+      "kind": "superseded_nonreuse",
+      "assertions": ["different_canonical_id", "lifecycle_superseded", "binding_retired", "binding_current"]
+    },
+    {
+      "id": "g1-unsupported-ambiguous-fail-closed",
+      "kind": "fail_closed",
+      "assertions": ["inventory_rejected", "whole_snapshot_discarded", "zero_canonical_writes"]
+    },
+    {
+      "id": "g1-external-no-trusted-identity",
+      "kind": "external_boundary",
+      "assertions": ["trusted_runtime_identity_absent", "zero_canonical_writes"]
+    }
+  ]
+}
