@@ -7474,3 +7474,243 @@ export const getDemoApiCallResult = (payload: DemoApiCallPayload = {}) => {
     body,
   };
 };
+
+/** 演示用的推理级别说明，与 CPA 下发的 supported_reasoning_levels 同形。 */
+const DEMO_CODEX_REASONING_DESCRIPTIONS: Record<string, string> = {
+  minimal: 'Minimal reasoning for the fastest responses',
+  low: 'Fast responses with lighter reasoning',
+  medium: 'Balances speed and reasoning depth for everyday tasks',
+  high: 'Greater reasoning depth for complex problems',
+  xhigh: 'Extra high reasoning depth for complex problems',
+  ultra: 'Maximum reasoning depth for the hardest problems',
+};
+
+const demoCodexReasoningLevels = (efforts: ReadonlyArray<string>) =>
+  efforts.map((effort) => ({
+    effort,
+    description: DEMO_CODEX_REASONING_DESCRIPTIONS[effort] ?? '',
+  }));
+
+/**
+ * 演示用的服务端装配结果：每个可服务模型一条，本地覆写层叠在它们之上。
+ * 目录里没有专属条目的模型由默认模板加模型元数据装配出来，取值与默认模板不一致。
+ */
+const demoCodexClientModelDefaults: Record<string, unknown>[] = [
+  {
+    slug: 'gpt-5.5',
+    display_name: 'GPT-5.5',
+    description: 'Default Codex client model template.',
+    base_instructions: 'You are Codex.',
+    minimal_client_version: '0.0.0',
+    visibility: 'public',
+    default_reasoning_level: 'medium',
+    context_window: 272000,
+    max_context_window: 272000,
+    priority: 100,
+    supported_reasoning_levels: demoCodexReasoningLevels(['low', 'medium', 'high', 'xhigh']),
+    apply_patch_tool_type: 'function',
+  },
+  {
+    slug: 'gpt-5.6-sol',
+    display_name: 'GPT-5.6 Sol',
+    description: 'GPT-5.6 Sol',
+    base_instructions: 'You are Codex.',
+    visibility: 'public',
+    default_reasoning_level: 'high',
+    context_window: 400000,
+    max_context_window: 400000,
+    priority: 90,
+    supported_reasoning_levels: demoCodexReasoningLevels([
+      'low',
+      'medium',
+      'high',
+      'xhigh',
+      'ultra',
+    ]),
+    apply_patch_tool_type: 'function',
+  },
+  {
+    slug: 'deepseek-chat',
+    display_name: 'DeepSeek Chat',
+    description: 'DeepSeek Chat',
+    base_instructions: 'You are Codex.',
+    visibility: 'public',
+    default_reasoning_level: 'medium',
+    context_window: 272000,
+    max_context_window: 272000,
+    priority: 100,
+    supported_reasoning_levels: demoCodexReasoningLevels(['low', 'medium', 'high', 'xhigh']),
+  },
+  {
+    slug: 'deepseek-r1',
+    display_name: 'DeepSeek R1',
+    description: 'DeepSeek R1',
+    base_instructions: 'You are Codex.',
+    visibility: 'public',
+    default_reasoning_level: 'medium',
+    context_window: 272000,
+    max_context_window: 272000,
+    priority: 110,
+    supported_reasoning_levels: demoCodexReasoningLevels(['low', 'medium', 'high', 'xhigh']),
+  },
+  {
+    slug: 'qwen3.8-27b-local',
+    display_name: 'qwen3.8-27b-local',
+    description: 'qwen3.8-27b-local',
+    base_instructions: 'You are Codex.',
+    visibility: 'public',
+    default_reasoning_level: 'medium',
+    context_window: 131072,
+    max_context_window: 131072,
+    priority: 143,
+    supported_reasoning_levels: demoCodexReasoningLevels(['low', 'medium', 'high', 'xhigh']),
+  },
+  {
+    slug: 'gemini-flash-local',
+    display_name: 'Gemini Flash (local)',
+    description: 'gemini-flash-local',
+    base_instructions: 'You are Codex.',
+    visibility: 'hide',
+    default_reasoning_level: 'minimal',
+    context_window: 1048576,
+    max_context_window: 1048576,
+    priority: 243,
+    supported_reasoning_levels: demoCodexReasoningLevels(['minimal', 'low', 'high', 'xhigh']),
+  },
+];
+
+/** 目录里有专属条目的模型；其余模型的条目由服务端按默认模板装配，来源是「自动装配」。 */
+const demoCodexClientModelCatalogSlugs = new Set([
+  'gpt-5.5',
+  'gpt-5.6-sol',
+  'deepseek-chat',
+  'deepseek-r1',
+]);
+
+const demoCodexClientModelProviders: Record<string, string[]> = {
+  'gpt-5.5': ['openai-compatibility'],
+  'gpt-5.6-sol': ['openai-compatibility'],
+  'deepseek-chat': ['openai-compatibility'],
+  'deepseek-r1': ['openai-compatibility'],
+  'qwen3.8-27b-local': ['openai-compatibility'],
+  'gemini-flash-local': ['antigravity'],
+};
+
+/**
+ * 演示用的本地覆写：条目只写本地要改的字段，取值基准是服务端装配出的默认条目。
+ * 字段级继承写在 $inherit 里，界面按它显示每个字段的来源。
+ * null 表示把模型从下发列表里去掉，没有服务端的 slug 则表示这条覆写还不会生效。
+ */
+let demoCodexClientModelOverrides: Record<string, unknown> = {
+  'deepseek-chat': {
+    slug: 'deepseek-chat',
+    display_name: 'DeepSeek Chat (local)',
+    supported_reasoning_levels: demoCodexReasoningLevels(['low', 'medium', 'high', 'xhigh']),
+  },
+  'gemini-flash-local': {
+    slug: 'gemini-flash-local',
+    $inherit: { base_instructions: 'gpt-5.5' },
+  },
+  'deepseek-r1': null,
+  'gpt-5.6-terra': { slug: 'gpt-5.6-terra', display_name: 'GPT-5.6 Terra (prepared)' },
+};
+let demoCodexClientModelRevision = 12;
+
+const mergeDemoCodexClientModelPatch = (
+  base: Record<string, unknown> | null,
+  patch: unknown
+): Record<string, unknown> | null => {
+  if (patch === null) return null;
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return base;
+  const merged: Record<string, unknown> = { ...(base ?? {}) };
+  Object.entries(patch as Record<string, unknown>).forEach(([key, value]) => {
+    if (value === null) {
+      delete merged[key];
+      return;
+    }
+    merged[key] = value;
+  });
+  return merged;
+};
+
+const demoCodexClientModelPriority = (entry: Record<string, unknown>): number => {
+  const parsed = Number(entry.priority);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+export const getDemoCodexClientModelsState = () => {
+  const defaults = new Map(
+    demoCodexClientModelDefaults.map((entry) => [String(entry.slug), entry])
+  );
+  const models = demoCodexClientModelDefaults.map((entry) => clone(entry));
+  const origins: Record<string, string> = {};
+  demoCodexClientModelDefaults.forEach((entry) => {
+    const slug = String(entry.slug);
+    origins[slug] = demoCodexClientModelCatalogSlugs.has(slug) ? 'base' : 'served';
+  });
+
+  // 下发列表是装配结果叠上覆写层的结果；null 覆写让模型从下发列表里消失。
+  const servedEntries: Array<[string, Record<string, unknown>]> = [];
+  defaults.forEach((entry, slug) => {
+    if (!Object.prototype.hasOwnProperty.call(demoCodexClientModelOverrides, slug)) {
+      servedEntries.push([slug, entry]);
+      return;
+    }
+    const patch = demoCodexClientModelOverrides[slug];
+    if (patch === null) {
+      origins[slug] = 'removed';
+      return;
+    }
+    const merged = mergeDemoCodexClientModelPatch(entry, patch);
+    if (!merged) return;
+    origins[slug] = 'override';
+    servedEntries.push([slug, merged]);
+  });
+  Object.keys(demoCodexClientModelOverrides).forEach((slug) => {
+    if (!defaults.has(slug)) origins[slug] = 'unserved';
+  });
+  servedEntries.sort(
+    (left, right) => demoCodexClientModelPriority(left[1]) - demoCodexClientModelPriority(right[1])
+  );
+
+  const served_models = servedEntries.map(([slug, entry]) => ({
+    slug,
+    providers: demoCodexClientModelProviders[slug] ?? [],
+    display_name: String(entry.display_name ?? slug),
+    description: String(entry.description ?? ''),
+    context_window: Number(entry.context_window ?? 0),
+    max_context_window: Number(entry.max_context_window ?? 0),
+    visibility: String(entry.visibility ?? ''),
+    default_reasoning_level: String(entry.default_reasoning_level ?? ''),
+    supported_reasoning_levels: entry.supported_reasoning_levels ?? [],
+    priority: demoCodexClientModelPriority(entry),
+  }));
+
+  return {
+    source: 'demo',
+    revision: demoCodexClientModelRevision,
+    models,
+    origins,
+    override: clone(demoCodexClientModelOverrides),
+    override_path: '/opt/cpa/codex_client_models_override.json',
+    override_error: '',
+    served_models,
+  };
+};
+
+export const setDemoCodexClientModelsOverride = (document: Record<string, unknown>) => {
+  demoCodexClientModelOverrides = clone(document) as Record<string, unknown>;
+  demoCodexClientModelRevision += 1;
+  return getDemoCodexClientModelsState();
+};
+
+export const clearDemoCodexClientModelsOverride = () => setDemoCodexClientModelsOverride({});
+
+export const setDemoCodexClientModelOverrideEntry = (slug: string, patch: unknown) =>
+  setDemoCodexClientModelsOverride({ ...demoCodexClientModelOverrides, [slug]: clone(patch) });
+
+export const deleteDemoCodexClientModelOverrideEntry = (slug: string) => {
+  const next: Record<string, unknown> = { ...demoCodexClientModelOverrides };
+  delete next[slug];
+  return setDemoCodexClientModelsOverride(next);
+};
