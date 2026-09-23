@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	decisions "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/adapters/sqlite/decisionstore"
 	projectionadapter "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/adapters/sqlite/identityprojection"
@@ -339,6 +340,24 @@ func TestProjectionRebuildRevisionCreatesNewDecision(t *testing.T) {
 	second := f.evaluate(1, 600)
 	if second.Status != StatusEvaluated || len(second.Events) != 1 || second.Events[0].DedupeKey == first.Events[0].DedupeKey {
 		t.Fatalf("rebuild result first=%+v second=%+v", first, second)
+	}
+}
+
+func TestHistoricalCalendarSourceBeforeAnchorIsObserved(t *testing.T) {
+	f := newFixture(t)
+	anchor := time.Date(2025, 2, 15, 0, 0, 0, 0, time.UTC).UnixMilli()
+	sourceMS := time.Date(2025, 1, 20, 0, 0, 0, 0, time.UTC).UnixMilli()
+	f.exec(`insert into gateway_quota_policy_rules
+		(policy_id,metric,limit_value,window_kind,calendar_months,anchor_at_ms,timezone)
+		values (?,'request',2,'fixed',1,?,'UTC')`, policyID, anchor)
+	f.event(1, "historical source", sourceMS, 1, 0, "mapped", keyA)
+	event := f.evaluate(1, anchor+1).Events[0]
+	wantStart := time.Date(2025, 1, 15, 0, 0, 0, 0, time.UTC).UnixMilli()
+	if event.Outcome != gatewaydecision.OutcomeWithinLimit || event.ReasonCode != "within_limit" ||
+		event.ObservedValue == nil || *event.ObservedValue != 1 ||
+		event.WindowStartMS == nil || *event.WindowStartMS != wantStart ||
+		event.WindowEndMS == nil || *event.WindowEndMS != anchor {
+		t.Fatalf("historical calendar decision %+v", event)
 	}
 }
 

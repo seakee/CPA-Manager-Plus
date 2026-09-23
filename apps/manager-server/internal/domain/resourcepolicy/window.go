@@ -70,10 +70,16 @@ func resolveCalendarWindow(spec WindowSpec, referenceMS int64) (ResolvedWindow, 
 	months := *spec.CalendarMonths
 	cycle := floorDiv(referenceMonth-anchorMonth, months)
 	boundary := func(index int64) (int64, bool) {
-		if index > 0 && index > (math.MaxInt64-anchorMonth)/months || index < 0 && index < (math.MinInt64-anchorMonth)/months {
+		// Check multiplication before addition; subtracting anchorMonth from
+		// MinInt64 would underflow for historical cycles.
+		if index > 0 && index > math.MaxInt64/months || index < 0 && index < math.MinInt64/months {
 			return 0, false
 		}
-		monthIndex := anchorMonth + index*months
+		offset := index * months
+		if offset > 0 && anchorMonth > math.MaxInt64-offset || offset < 0 && anchorMonth < math.MinInt64-offset {
+			return 0, false
+		}
+		monthIndex := anchorMonth + offset
 		year := floorDiv(monthIndex, 12)
 		if year > math.MaxInt32 || year < math.MinInt32 {
 			return 0, false
