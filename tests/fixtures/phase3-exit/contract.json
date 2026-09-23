@@ -1,0 +1,55 @@
+{
+  "$schema": "./contract.schema.json",
+  "schemaVersion": 1,
+  "contractId": "cpamp-v2-phase3-gateway-core-exit-v1",
+  "executionBaseline": "80583269557cea39fac06b5c26ad985137234efc",
+  "scenarios": [
+    {
+      "id": "phase3-01-canonical-identity",
+      "kind": "canonical_identity",
+      "oldHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "newHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "assertions": ["api_key_id_not_source_hash", "credential_id_not_auth_id", "passive_replacement_new_id", "explicit_rotation_same_id", "superseded_terminal_nonreuse"]
+    },
+    {
+      "id": "phase3-02-raw-truth-projection-derived",
+      "kind": "raw_projection",
+      "apiKeyHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "assertions": ["raw_usage_unchanged", "projection_rebuilt", "checkpoint_rebuilt", "policy_decision_not_raw_authority"]
+    },
+    {
+      "id": "phase3-03-request-shadow-happy-path",
+      "kind": "request_shadow",
+      "apiKeyHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "otherHash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "assertions": ["canonical_mapping_chain", "event_time_high_water", "api_key_isolation", "failed_request_counted", "within_limit", "notify_required", "decision_snapshot"]
+    },
+    {
+      "id": "phase3-04-fail-closed-gates",
+      "kind": "fail_closed",
+      "apiKeyHash": "9999999999999999999999999999999999999999999999999999999999999999",
+      "assertions": ["pending_no_decision", "uncovered_no_decision", "unknown_no_decision", "ambiguous_no_decision", "stale_no_decision", "binding_missing_no_decision", "binding_disabled_no_decision", "policy_disabled_no_decision", "missing_projection_error", "corrupt_projection_error", "no_weak_identity_fallback"]
+    },
+    {
+      "id": "phase3-05-audit-idempotency-history",
+      "kind": "audit_history",
+      "apiKeyHash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "assertions": ["volatile_retry_first_persisted", "partial_append_retry", "policy_revision_new_event", "binding_revision_new_event", "projection_revision_new_event", "old_event_immutable"]
+    },
+    {
+      "id": "phase3-06-token-evidence-conservative",
+      "kind": "token_evidence",
+      "assertions": ["exact_int64_sum", "successful_zero_incomplete", "negative_incomplete", "failed_zero_complete", "overflow_nil"]
+    },
+    {
+      "id": "phase3-07-cost-authority-boundary",
+      "kind": "cost_boundary",
+      "assertions": ["cost_unavailable", "float_estimate_not_authority"]
+    },
+    {
+      "id": "phase3-08-no-overclaim",
+      "kind": "no_overclaim",
+      "assertions": ["no_notification_delivery", "no_soft_hard_request_enforcement", "no_precise_hard_token_cost_quota", "no_reservation_settlement", "no_runtime_policy_publish_ack_reject", "no_hard_routing_fallback_pinning", "no_request_attempt_authority", "no_public_api_web_ui", "no_complete_entity_directory", "observed_notify_only"]
+    }
+  ]
+}
