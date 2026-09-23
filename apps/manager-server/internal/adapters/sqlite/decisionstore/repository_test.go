@@ -170,6 +170,7 @@ func TestAppendDedupeAndRestart(t *testing.T) {
 	repo = adapter.New(db)
 	retry := event()
 	retry.DecisionID = gatewaydecision.DecisionID(strings.Repeat("f", 32))
+	retry.EvaluatedAtMS = first.EvaluatedAtMS + 1000 // recomputed after restart
 	got, inserted, err := repo.Append(ctx, retry)
 	if err != nil || inserted || !reflect.DeepEqual(got, first) || count(t, db) != 1 {
 		t.Fatalf("idempotent retry: %+v inserted=%t err=%v", got, inserted, err)

@@ -136,11 +136,11 @@ func TestEventRejectsInvalidContract(t *testing.T) {
 		"notify no window": func(e *QuotaDecisionEvent) {
 			e.Outcome, e.ObservedValue, e.WindowStartMS, e.WindowEndMS = OutcomeNotifyRequired, number(10), nil, nil
 		},
-		"source id":          func(e *QuotaDecisionEvent) { e.SourceUsageEventID = 0 },
-		"source fingerprint": func(e *QuotaDecisionEvent) { e.SourceEventFingerprint = strings.Repeat("A", 64) },
+		"source id":             func(e *QuotaDecisionEvent) { e.SourceUsageEventID = 0 },
+		"source fingerprint":    func(e *QuotaDecisionEvent) { e.SourceEventFingerprint = strings.Repeat("A", 64) },
 		"raw legacy event hash": func(e *QuotaDecisionEvent) { e.SourceEventFingerprint = "legacy-event-123" },
-		"evidence time":      func(e *QuotaDecisionEvent) { e.EvidenceTimestampMS = 0 },
-		"evaluation time":    func(e *QuotaDecisionEvent) { e.EvaluatedAtMS = 0 },
+		"evidence time":         func(e *QuotaDecisionEvent) { e.EvidenceTimestampMS = 0 },
+		"evaluation time":       func(e *QuotaDecisionEvent) { e.EvaluatedAtMS = 0 },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -157,14 +157,15 @@ func TestSameSemanticContent(t *testing.T) {
 	e := validEvent()
 	retry := validEvent()
 	retry.DecisionID = DecisionID(strings.Repeat("f", 32))
+	retry.EvaluatedAtMS = 300
 	retry.ObservedValue = number(9)
 	if !e.SameSemanticContent(retry) {
-		t.Fatal("different DecisionID and pointer addresses must preserve semantics")
+		t.Fatal("different DecisionID, evaluation time, and pointer addresses must preserve semantics")
 	}
 	fields := reflect.TypeOf(e)
 	for i := 0; i < fields.NumField(); i++ {
 		field := fields.Field(i)
-		if field.Name == "DecisionID" {
+		if field.Name == "DecisionID" || field.Name == "EvaluatedAtMS" {
 			continue
 		}
 		changed := e

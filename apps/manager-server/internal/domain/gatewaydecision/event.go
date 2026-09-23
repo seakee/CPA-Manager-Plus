@@ -121,8 +121,9 @@ func validReasonCode(code string) bool {
 	return true
 }
 
-// SameSemanticContent compares every immutable event field except DecisionID.
-// A producer retry may generate a different DecisionID for the same operation.
+// SameSemanticContent compares the stable producer-operation fields. A retry
+// may regenerate DecisionID and EvaluatedAtMS; the first persisted values of
+// both remain in the audit row returned by Append.
 func (e QuotaDecisionEvent) SameSemanticContent(other QuotaDecisionEvent) bool {
 	return e.SchemaVersion == other.SchemaVersion && e.DedupeKey == other.DedupeKey &&
 		e.APIKeyID == other.APIKeyID && e.PolicyID == other.PolicyID &&
@@ -132,7 +133,7 @@ func (e QuotaDecisionEvent) SameSemanticContent(other QuotaDecisionEvent) bool {
 		e.LimitValue == other.LimitValue && equalOptionalInt(e.ObservedValue, other.ObservedValue) &&
 		equalOptionalInt(e.WindowStartMS, other.WindowStartMS) && equalOptionalInt(e.WindowEndMS, other.WindowEndMS) &&
 		e.SourceUsageEventID == other.SourceUsageEventID && e.SourceEventFingerprint == other.SourceEventFingerprint &&
-		e.EvidenceTimestampMS == other.EvidenceTimestampMS && e.EvaluatedAtMS == other.EvaluatedAtMS
+		e.EvidenceTimestampMS == other.EvidenceTimestampMS
 }
 
 func equalOptionalInt(a, b *int64) bool {
