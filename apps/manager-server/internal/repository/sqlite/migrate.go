@@ -1006,6 +1006,7 @@ func Migrate(db *sql.DB) error {
 			owner_instance text not null check(length(owner_instance) > 0),
 			created_at_ms integer not null check(created_at_ms > 0),
 			forward_completed_at_ms integer check(forward_completed_at_ms is null or forward_completed_at_ms >= created_at_ms),
+			revoked_ownership_json text not null default '[]',
 			unique(runtime_identity, physical_name)
 		)`,
 		`create table if not exists gateway_credential_delete_intent_items (
@@ -1057,6 +1058,9 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 	if err := ensureCodexInspectionOwnershipColumns(db); err != nil {
+		return err
+	}
+	if err := ensureCredentialDeleteOwnershipColumn(db); err != nil {
 		return err
 	}
 	if err := ensureAccountActionCandidateColumns(db); err != nil {
@@ -2470,6 +2474,33 @@ func ensureUsageDataMigrationColumns(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func ensureCredentialDeleteOwnershipColumn(db *sql.DB) error {
+	rows, err := db.Query(`pragma table_info(gateway_credential_delete_intents)`)
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, typ string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "revoked_ownership_json" {
+			found = true
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil || found {
+		return err
+	}
+	_, err = db.Exec(`alter table gateway_credential_delete_intents add column revoked_ownership_json text not null default '[]'`)
+	return err
 }
 
 func ensureCodexInspectionOwnershipColumns(db *sql.DB) error {

@@ -36,6 +36,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	bootstrapservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrap"
 	collectorservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/collector"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
 	cpaupdateservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaupdate"
 	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
@@ -331,6 +332,26 @@ func runServer() {
 			BeforeCapture: func(captureCtx context.Context) error {
 				return retryIdentityForwardCompletions(captureCtx,
 					mutationSvc.RetryForwardCompletions, credentialDeleteSvc.RetryForwardCompletions)
+			},
+			CredentialDeletePhysicalObserver: func(captureCtx context.Context, baseURL, managementKey, runtimeIdentity string) (map[string]identitystoreports.PhysicalSourceEvidence, error) {
+				pending, err := credentialDeleteSvc.PendingPhysicalSources(captureCtx, runtimeIdentity)
+				if err != nil {
+					return nil, err
+				}
+				evidence := make(map[string]identitystoreports.PhysicalSourceEvidence, len(pending))
+				client := cpaauthfiles.New(nil)
+				for _, item := range pending {
+					present, probeErr := client.PhysicalFileExists(captureCtx, baseURL, managementKey, item.PhysicalName)
+					if probeErr != nil {
+						continue
+					}
+					if present {
+						evidence[item.IntentID] = identitystoreports.PhysicalSourcePresent
+					} else {
+						evidence[item.IntentID] = identitystoreports.PhysicalSourceAbsent
+					}
+				}
+				return evidence, nil
 			},
 		})
 		if err != nil {

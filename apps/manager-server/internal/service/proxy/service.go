@@ -265,7 +265,7 @@ func (s *Service) proxyToSavedSetup(w http.ResponseWriter, r *http.Request, writ
 	if ownershipMutation.clearAll {
 		ownershipMutation.fileNames = ownershipFileNames(revokedOwnership)
 	}
-	credentialDeleteIntentID, err := s.prepareCredentialDelete(r.Context(), setup, r, ownershipMutation)
+	credentialDeleteIntentID, err := s.prepareCredentialDelete(r.Context(), setup, r, ownershipMutation, revokedOwnership)
 	if err != nil {
 		if restoreErr := s.restoreInspectionOwnershipDetached(r.Context(), revokedOwnership); restoreErr != nil {
 			err = errors.Join(err, restoreErr)
@@ -299,7 +299,7 @@ func (s *Service) proxyToSavedSetup(w http.ResponseWriter, r *http.Request, writ
 		}
 		proxy.Transport = credentialDeleteTransport{
 			base: baseTransport, deletes: s.credentialDeletes, intentID: credentialDeleteIntentID,
-			baseURL: setup.CPAUpstreamURL, managementKey: setup.ManagementKey, outcome: &deleteOutcome,
+			baseURL: setup.CPAUpstreamURL, managementKey: setup.ManagementKey, physicalName: ownershipMutation.deleteMutation.preparedTarget.File.Name, outcome: &deleteOutcome,
 		}
 	}
 	if apiKeyIntentID != "" {
@@ -335,7 +335,7 @@ func (s *Service) proxyToSavedSetup(w http.ResponseWriter, r *http.Request, writ
 	}
 	responseProcessed := false
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, proxyErr error) {
-		if !responseProcessed && (credentialDeleteIntentID == "" || deleteOutcome == identitystoreports.CredentialDeleteNotApplied) {
+		if !responseProcessed && credentialDeleteIntentID == "" {
 			if restoreErr := s.restoreInspectionOwnershipDetached(r.Context(), revokedOwnership); restoreErr != nil {
 				proxyErr = fmt.Errorf("%w; restore inspection ownership: %v", proxyErr, restoreErr)
 			}
@@ -349,7 +349,7 @@ func (s *Service) proxyToSavedSetup(w http.ResponseWriter, r *http.Request, writ
 			case identitystoreports.CredentialDeleteSuccess:
 				return nil
 			case identitystoreports.CredentialDeleteNotApplied:
-				return s.restoreInspectionOwnershipDetached(r.Context(), revokedOwnership)
+				return nil
 			default:
 				if response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices {
 					return credentialdeletemutation.ErrOutcomeUnknown
@@ -776,7 +776,7 @@ func inspectAuthFileOwnershipMutation(r *http.Request) (authFileOwnershipMutatio
 	case http.MethodPatch:
 		return readJSONAuthFileOwnershipMutation(r, path == "/v0/management/auth-files/status")
 	case http.MethodDelete:
-		if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("all")), "true") {
+		if all := strings.TrimSpace(r.URL.Query().Get("all")); strings.EqualFold(all, "true") || all == "1" || all == "*" {
 			return authFileOwnershipMutation{clearAll: true}, nil
 		}
 		identities, err := readAuthFileDeleteIdentities(r)
@@ -807,6 +807,9 @@ func inspectAuthFileOwnershipMutation(r *http.Request) (authFileOwnershipMutatio
 		fileNames, err := readMultipartAuthFileNames(r)
 		if err != nil {
 			return authFileOwnershipMutation{}, err
+		}
+		if len(fileNames) == 0 && !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "multipart/form-data") {
+			fileNames = normalizeFileNames([]string{r.URL.Query().Get("name")})
 		}
 		mutation := authFileOwnershipMutation{fileNames: fileNames}
 		identities, identityErr := readAuthFileIdentitiesHeader(

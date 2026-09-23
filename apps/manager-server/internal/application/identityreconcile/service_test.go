@@ -164,6 +164,36 @@ func TestReconcileOnce_Success_ApplyExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestReconcileOncePhysicalEvidenceUsesFencedConnection(t *testing.T) {
+	ready := validReadyStatus()
+	observer := &sequenceRuntimeObserver{statuses: []func() (model.RuntimeObservedStatus, error){
+		func() (model.RuntimeObservedStatus, error) { return ready, nil },
+		func() (model.RuntimeObservedStatus, error) { return ready, nil },
+	}}
+	repo := &recordingIdentityRepo{}
+	called := 0
+	svc, err := identityreconcile.NewService(identityreconcile.Config{
+		RuntimeObserver: observer, ConnectionResolver: staticConnectionResolver("http://cpa.test", "key"),
+		InventoryClient: &fakeInventoryClient{}, IdentityRepo: repo, TimeSource: func() int64 { return 2000 },
+		CredentialDeletePhysicalObserver: func(_ context.Context, base, key, runtime string) (map[string]ports.PhysicalSourceEvidence, error) {
+			called++
+			if base != "http://cpa.test" || key != "key" || runtime != "runtime-1" {
+				t.Fatalf("wrong physical probe connection: %s %s %s", base, key, runtime)
+			}
+			return map[string]ports.PhysicalSourceEvidence{"pending-id": ports.PhysicalSourcePresent}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if called != 1 || len(repo.applyCalls) != 1 || repo.applyCalls[0].CredentialDeletePhysicalEvidence["pending-id"] != ports.PhysicalSourcePresent {
+		t.Fatalf("physical evidence not applied: calls=%d snapshots=%d", called, len(repo.applyCalls))
+	}
+}
+
 func TestReconcileOnce_RuntimeFence_PreChecks_ZeroApply(t *testing.T) {
 	cases := []struct {
 		name      string

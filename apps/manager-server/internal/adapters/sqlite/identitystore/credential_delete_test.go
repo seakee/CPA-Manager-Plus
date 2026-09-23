@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	ports "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/ports/identitystore"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 )
@@ -99,7 +100,7 @@ func TestCredentialDeleteMultiMemberTruthTableAndAtomicTerminal(t *testing.T) {
 			}
 			got, err := repo.ResolveCredentialDelete(context.Background(), ports.ResolveCredentialDeleteParams{
 				RuntimeIdentity: "runtime-1", ObservedRuntimeGeneration: 2,
-				ObservedSourceAuthIDs: tc.observed, IntentID: id, NowMS: 3000,
+				ObservedSourceAuthIDs: tc.observed, IntentID: id, NowMS: 3000, PhysicalEvidence: ports.PhysicalSourcePresent,
 			})
 			if err != nil || got != tc.want {
 				t.Fatalf("outcome=%q error=%v, want %q", got, err, tc.want)
@@ -134,7 +135,7 @@ func TestCredentialDeleteCrashRecoveryAndStaleCapture(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db, repo, ids := credentialDeleteFixture(t, "A")
-			prepareCredentialDeleteFixture(t, repo, "A")
+			intentID := prepareCredentialDeleteFixture(t, repo, "A")
 			// A same-process capture made before completion cannot decide absence.
 			if _, err := repo.ApplyPassiveSnapshot(context.Background(), ports.ReconcileSnapshotParams{
 				RuntimeIdentity: "runtime-1", ObservedRuntimeGeneration: 1,
@@ -150,7 +151,8 @@ func TestCredentialDeleteCrashRecoveryAndStaleCapture(t *testing.T) {
 			if _, err := repo.ApplyPassiveSnapshot(context.Background(), ports.ReconcileSnapshotParams{
 				RuntimeIdentity: "runtime-1", ObservedRuntimeGeneration: 2,
 				ProcessInstanceID: "process-B", CaptureStartedAtMS: 100, NowMS: 2300,
-				Credentials: tc.observed,
+				Credentials:                      tc.observed,
+				CredentialDeletePhysicalEvidence: map[string]ports.PhysicalSourceEvidence{intentID: ports.PhysicalSourcePresent},
 			}); err != nil {
 				t.Fatal(err)
 			}
@@ -255,6 +257,85 @@ func TestCredentialDeletePersistentOverlapAndDistinctFiles(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("unrelated physical file blocked: %v", err)
+	}
+}
+
+func TestCredentialDeleteNotAppliedRestoresOwnershipAcrossRecovery(t *testing.T) {
+	for _, initiallyUnknown := range []bool{false, true} {
+		t.Run(map[bool]string{false: "crash before forward", true: "unknown then not applied"}[initiallyUnknown], func(t *testing.T) {
+			db, repo, ids := credentialDeleteFixture(t, "A")
+			owner := model.CodexInspectionDisableOwnership{FileName: "shared.json", Provider: "codex", AuthIndex: "idx-A", AccountID: "account-A", AccountSnapshot: "account@example.com", DisabledAtMS: 1100, UpdatedAtMS: 1200}
+			intentID, err := repo.PrepareCredentialDelete(context.Background(), ports.PrepareCredentialDeleteParams{
+				RuntimeIdentity: "runtime-1", ObservedRuntimeGeneration: 1, PhysicalName: "shared.json",
+				SourceAuthIDs: []string{"A"}, OwnerInstance: "dead-process", NowMS: 2000,
+				RevokedOwnership: []model.CodexInspectionDisableOwnership{owner},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			apply := func(evidence ports.PhysicalSourceEvidence, now int64) error {
+				_, err := repo.ApplyPassiveSnapshot(context.Background(), ports.ReconcileSnapshotParams{
+					RuntimeIdentity: "runtime-1", ObservedRuntimeGeneration: 2,
+					ProcessInstanceID: "new-process", CaptureStartedAtMS: now - 100, NowMS: now,
+					Credentials:                      []ports.CredentialSnapshotItem{{SourceAuthID: "A", PhysicalName: "shared.json", Provider: "codex"}},
+					CredentialDeletePhysicalEvidence: map[string]ports.PhysicalSourceEvidence{intentID: evidence},
+				})
+				return err
+			}
+			if initiallyUnknown {
+				if err := apply(ports.PhysicalSourceAbsent, 2500); err != nil {
+					t.Fatal(err)
+				}
+				assertCredentialDeleteIntentCount(t, db, 1)
+			}
+			if _, err := db.Exec(`create trigger fail_restore before insert on codex_inspection_disable_ownership begin select raise(abort, 'temporary restore failure'); end`); err != nil {
+				t.Fatal(err)
+			}
+			if err := apply(ports.PhysicalSourcePresent, 3000); err == nil {
+				t.Fatal("failed ownership restore resolved intent")
+			}
+			assertCredentialDeleteIntentCount(t, db, 1)
+			if _, err := db.Exec(`drop trigger fail_restore`); err != nil {
+				t.Fatal(err)
+			}
+			if err := apply(ports.PhysicalSourcePresent, 3500); err != nil {
+				t.Fatal(err)
+			}
+			assertCredentialDeleteIntentCount(t, db, 0)
+			var count int
+			if err := db.QueryRow(`select count(*) from codex_inspection_disable_ownership where file_name = ? and provider = ? and auth_index = ? and account_id = ? and account_snapshot = ?`, owner.FileName, owner.Provider, owner.AuthIndex, owner.AccountID, owner.AccountSnapshot).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != 1 {
+				t.Fatalf("restored ownership count=%d", count)
+			}
+			rev, lifecycle, retired := credentialDeleteState(t, db, ids["A"])
+			if rev != 1 || lifecycle != "active" || retired.Valid {
+				t.Fatalf("Canonical changed: %d %s %v", rev, lifecycle, retired)
+			}
+		})
+	}
+}
+
+func TestCredentialDeleteCorruptPendingItemFailsBeforeSuppression(t *testing.T) {
+	db, repo, ids := credentialDeleteFixture(t, "A", "B")
+	intentID := prepareCredentialDeleteFixture(t, repo, "A")
+	if _, err := db.Exec(`update gateway_credential_delete_intent_items set source_auth_id = 'B' where intent_id = ?`, intentID); err != nil {
+		t.Fatal(err)
+	}
+	_, err := repo.ApplyPassiveSnapshot(context.Background(), ports.ReconcileSnapshotParams{
+		RuntimeIdentity: "runtime-1", ObservedRuntimeGeneration: 2,
+		ProcessInstanceID: "process-A", CaptureStartedAtMS: 2100, NowMS: 2200,
+	})
+	if err == nil {
+		t.Fatal("corrupt pending item suppressed another source")
+	}
+	assertCredentialDeleteIntentCount(t, db, 1)
+	for _, source := range []string{"A", "B"} {
+		rev, lifecycle, _ := credentialDeleteState(t, db, ids[source])
+		if rev != 1 || lifecycle != "active" {
+			t.Fatalf("%s changed: %d %s", source, rev, lifecycle)
+		}
 	}
 }
 

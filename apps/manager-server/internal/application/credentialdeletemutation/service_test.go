@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sort"
 	"sync/atomic"
 	"testing"
 
@@ -53,6 +54,75 @@ func (c credentialInventory) FetchCredentials(context.Context, string, string) (
 type failOnceCompletionRepo struct {
 	ports.CredentialDeleteRepository
 	fail atomic.Bool
+}
+
+type selectiveCompletionRepo struct {
+	ports.CredentialDeleteRepository
+	failAll   bool
+	badID     string
+	attempted map[string]int
+}
+
+func (r *selectiveCompletionRepo) MarkCredentialDeleteForwardComplete(ctx context.Context, id, owner string, nowMS int64) error {
+	r.attempted[id]++
+	if r.failAll || id == r.badID {
+		return errors.New("injected marker failure")
+	}
+	return r.CredentialDeleteRepository.MarkCredentialDeleteForwardComplete(ctx, id, owner, nowMS)
+}
+
+func TestRetryForwardCompletionsAttemptsEveryIntent(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlite.Open(filepath.Join(t.TempDir(), "two-markers.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	repo := adapter.New(db)
+	if _, err := repo.ApplyPassiveSnapshot(ctx, ports.ReconcileSnapshotParams{
+		RuntimeIdentity: "runtime-1", ObservedRuntimeGeneration: 1, NowMS: 1000,
+		Credentials: []ports.CredentialSnapshotItem{{SourceAuthID: "A"}, {SourceAuthID: "B"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	markers := &selectiveCompletionRepo{CredentialDeleteRepository: repo.(ports.CredentialDeleteRepository), failAll: true, attempted: make(map[string]int)}
+	svc, err := credentialdeletemutation.NewService(credentialdeletemutation.Config{
+		RuntimeObserver: readyRuntime{}, Repository: markers, ProcessInstanceID: "process-A", TimeSource: func() int64 { return 2000 },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, source := range []string{"A", "B"} {
+		id, err := svc.Prepare(ctx, source+".json", []string{source}, func(context.Context) (string, []string, error) { return source + ".json", []string{source}, nil })
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+		if err := svc.MarkForwardComplete(ctx, id); err == nil {
+			t.Fatal("injected marker failure missing")
+		}
+	}
+	sort.Strings(ids)
+	markers.failAll = false
+	markers.badID = ids[0]
+	if err := svc.RetryForwardCompletions(ctx); err == nil {
+		t.Fatal("bad marker retry unexpectedly succeeded")
+	}
+	if markers.attempted[ids[1]] != 2 {
+		t.Fatalf("second marker attempts=%d", markers.attempted[ids[1]])
+	}
+	var completed int64
+	if err := db.QueryRow(`select forward_completed_at_ms from gateway_credential_delete_intents where id = ?`, ids[1]).Scan(&completed); err != nil || completed != 2000 {
+		t.Fatalf("good marker not persisted: %d %v", completed, err)
+	}
+	markers.badID = ""
+	if err := svc.RetryForwardCompletions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if markers.attempted[ids[1]] != 2 {
+		t.Fatal("successful marker retried again")
+	}
 }
 
 func (r *failOnceCompletionRepo) MarkCredentialDeleteForwardComplete(ctx context.Context, id, owner string, nowMS int64) error {

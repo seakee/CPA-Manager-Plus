@@ -3,6 +3,7 @@ package credentialdeletemutation
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -100,7 +101,7 @@ func sameSources(a, b []string) bool {
 // Prepare receives only verified physical membership IDs. Selector parsing and
 // credential payloads remain in the proxy boundary.
 func (s *Service) Prepare(ctx context.Context, physicalName string, sourceIDs []string,
-	revalidate func(context.Context) (string, []string, error)) (string, error) {
+	revalidate func(context.Context) (string, []string, error), ownership ...[]model.CodexInspectionDisableOwnership) (string, error) {
 	if revalidate == nil {
 		return "", ErrPreflight
 	}
@@ -120,9 +121,13 @@ func (s *Service) Prepare(ctx context.Context, physicalName string, sourceIDs []
 	if err != nil {
 		return "", err
 	}
+	var revoked []model.CodexInspectionDisableOwnership
+	if len(ownership) > 0 {
+		revoked = ownership[0]
+	}
 	id, err := s.repo.PrepareCredentialDelete(ctx, ports.PrepareCredentialDeleteParams{
 		RuntimeIdentity: string(status.Identity), ObservedRuntimeGeneration: uint64(status.Generation),
-		PhysicalName: physicalName, SourceAuthIDs: currentIDs, OwnerInstance: s.processInstanceID, NowMS: s.now(),
+		PhysicalName: physicalName, SourceAuthIDs: currentIDs, OwnerInstance: s.processInstanceID, NowMS: s.now(), RevokedOwnership: revoked,
 	})
 	if err != nil {
 		return "", errors.Join(ErrPreflight, err)
@@ -149,28 +154,46 @@ func (s *Service) MarkForwardComplete(ctx context.Context, intentID string) erro
 func (s *Service) RetryForwardCompletions(ctx context.Context) error {
 	s.completionMu.Lock()
 	defer s.completionMu.Unlock()
-	for id, completedAt := range s.forwardCompleted {
+	var retryErr error
+	ids := make([]string, 0, len(s.forwardCompleted))
+	for id := range s.forwardCompleted {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		completedAt := s.forwardCompleted[id]
 		if err := s.repo.MarkCredentialDeleteForwardComplete(ctx, id, s.processInstanceID, completedAt); err != nil {
-			return err
+			retryErr = errors.Join(retryErr, err)
+			continue
 		}
 		delete(s.forwardCompleted, id)
 	}
-	return nil
+	return retryErr
 }
 
 // Observe accepts only strict inventory SourceAuthIDs; CPA connection secrets
 // stay in the proxy's fetch closure.
 func (s *Service) Observe(ctx context.Context, intentID string,
-	fetch func(context.Context) ([]string, error)) (ports.CredentialDeleteOutcome, error) {
+	fetch func(context.Context) ([]string, error), probe ...func(context.Context) (bool, error)) (ports.CredentialDeleteOutcome, error) {
 	if fetch == nil {
 		return ports.CredentialDeleteUnknown, errors.New("strict credential observation unavailable")
 	}
 	var ids []string
+	physical := ports.PhysicalSourceUnknown
 	status, err := s.fenced(ctx, func(ctx context.Context) error {
 		var fetchErr error
 		ids, fetchErr = fetch(ctx)
 		if fetchErr != nil {
 			return errors.New("strict credential observation unavailable")
+		}
+		if len(probe) > 0 && probe[0] != nil {
+			if present, probeErr := probe[0](ctx); probeErr == nil {
+				if present {
+					physical = ports.PhysicalSourcePresent
+				} else {
+					physical = ports.PhysicalSourceAbsent
+				}
+			}
 		}
 		return nil
 	})
@@ -179,6 +202,10 @@ func (s *Service) Observe(ctx context.Context, intentID string,
 	}
 	return s.repo.ResolveCredentialDelete(ctx, ports.ResolveCredentialDeleteParams{
 		RuntimeIdentity: string(status.Identity), ObservedRuntimeGeneration: uint64(status.Generation),
-		ObservedSourceAuthIDs: ids, IntentID: intentID, NowMS: s.now(),
+		ObservedSourceAuthIDs: ids, IntentID: intentID, NowMS: s.now(), PhysicalEvidence: physical,
 	})
+}
+
+func (s *Service) PendingPhysicalSources(ctx context.Context, runtimeIdentity string) ([]ports.PendingCredentialDeleteSource, error) {
+	return s.repo.PendingCredentialDeleteSources(ctx, runtimeIdentity)
 }

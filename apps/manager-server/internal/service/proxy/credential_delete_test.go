@@ -24,15 +24,29 @@ import (
 )
 
 type credentialDeleteCPA struct {
-	mu                   sync.Mutex
-	members              []map[string]any
-	deleteStatus         int
-	remainingAfterDelete int
-	beforeDelete         func()
-	transportFailure     bool
+	mu                     sync.Mutex
+	members                []map[string]any
+	deleteStatus           int
+	remainingAfterDelete   int
+	beforeDelete           func()
+	transportFailure       bool
+	physicalGone           bool
+	removePhysicalOnDelete bool
 }
 
 func (c *credentialDeleteCPA) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/v0/management/auth-files/download" && r.Method == http.MethodGet {
+		c.mu.Lock()
+		gone := c.physicalGone
+		c.mu.Unlock()
+		if gone {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"token":"secret-must-not-be-read"}`))
+		return
+	}
 	if r.URL.Path != "/v0/management/auth-files" {
 		http.NotFound(w, r)
 		return
@@ -51,6 +65,9 @@ func (c *credentialDeleteCPA) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			c.beforeDelete()
 		}
 		c.mu.Lock()
+		if c.removePhysicalOnDelete {
+			c.physicalGone = true
+		}
 		if c.remainingAfterDelete < len(c.members) {
 			c.members = c.members[:c.remainingAfterDelete]
 		}
@@ -162,7 +179,7 @@ func pendingCredentialDeleteCount(t *testing.T, db *sql.DB) int {
 }
 
 func TestCredentialDeleteCPA500AfterPhysicalRemovalStillFinalizesAndReturnsFailure(t *testing.T) {
-	cpa := &credentialDeleteCPA{members: credentialDeleteMembers("A", "B", "C"), deleteStatus: 500, remainingAfterDelete: 0}
+	cpa := &credentialDeleteCPA{members: credentialDeleteMembers("A", "B", "C"), deleteStatus: 500, remainingAfterDelete: 3, removePhysicalOnDelete: true}
 	upstream := httptest.NewServer(cpa)
 	defer upstream.Close()
 	svc, db, st := newCredentialDeleteProxyFixture(t, upstream.URL, "A", "B", "C")
@@ -180,13 +197,31 @@ func TestCredentialDeleteCPA500AfterPhysicalRemovalStillFinalizesAndReturnsFailu
 	if response.Code != 500 {
 		t.Fatalf("caller status=%d body=%s", response.Code, response.Body.String())
 	}
+	if pendingCredentialDeleteCount(t, db) != 1 {
+		t.Fatal("stale runtime members incorrectly resolved physical deletion")
+	}
+	for _, source := range []string{"A", "B", "C"} {
+		rev, lifecycle, retired := credentialDeleteRecord(t, db, source)
+		if rev != 1 || lifecycle != "active" || retired.Valid {
+			t.Fatalf("%s: revision=%d lifecycle=%s retired=%v", source, rev, lifecycle, retired)
+		}
+	}
+	// CPA's watcher later drops the runtime records. A new process then resolves
+	// the preserved intent, including all members, in one transaction.
+	if _, err := st.Identities.ApplyPassiveSnapshot(context.Background(), ports.ReconcileSnapshotParams{
+		RuntimeIdentity: "runtime-1", ObservedRuntimeGeneration: 2,
+		ProcessInstanceID: "new-process", CaptureStartedAtMS: 100, NowMS: 3000,
+		CredentialDeletePhysicalEvidence: map[string]ports.PhysicalSourceEvidence{},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if pendingCredentialDeleteCount(t, db) != 0 {
-		t.Fatal("successful physical deletion left pending intent")
+		t.Fatal("recovery left pending intent")
 	}
 	for _, source := range []string{"A", "B", "C"} {
 		rev, lifecycle, retired := credentialDeleteRecord(t, db, source)
 		if rev != 2 || lifecycle != "superseded" || !retired.Valid {
-			t.Fatalf("%s: revision=%d lifecycle=%s retired=%v", source, rev, lifecycle, retired)
+			t.Fatalf("%s: %d %s %v", source, rev, lifecycle, retired)
 		}
 	}
 	owners, err := st.ListCodexInspectionDisableOwnership(context.Background())
@@ -302,6 +337,35 @@ func TestCredentialDeletePersistentGuardCoversAuthFileMutationShapes(t *testing.
 			release, err := svc.acquireAuthFileMutation(context.Background(), tc.mutation)
 			if (err != nil) != tc.conflict {
 				t.Fatalf("overlap error=%v want conflict=%t", err, tc.conflict)
+			}
+			if release != nil {
+				release()
+			}
+		})
+	}
+	// Exercise the actual HTTP inspection path; CPA accepts both clear-all
+	// aliases and raw JSON uploads in addition to the web UI's multipart form.
+	for _, tc := range []struct {
+		name, method, target, contentType, body string
+		conflict                                bool
+	}{
+		{"clear all 1", http.MethodDelete, "/v0/management/auth-files?all=1", "", "", true},
+		{"clear all star", http.MethodDelete, "/v0/management/auth-files?all=*", "", "", true},
+		{"same file raw upload", http.MethodPost, "/v0/management/auth-files?name=shared.json", "application/json", `{}`, true},
+		{"other file raw upload", http.MethodPost, "/v0/management/auth-files?name=other.json", "application/json", `{}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.target, strings.NewReader(tc.body))
+			if tc.contentType != "" {
+				req.Header.Set("Content-Type", tc.contentType)
+			}
+			mutation, err := inspectAuthFileOwnershipMutation(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			release, err := svc.acquireAuthFileMutation(context.Background(), mutation)
+			if (err != nil) != tc.conflict {
+				t.Fatalf("HTTP overlap error=%v want conflict=%t", err, tc.conflict)
 			}
 			if release != nil {
 				release()

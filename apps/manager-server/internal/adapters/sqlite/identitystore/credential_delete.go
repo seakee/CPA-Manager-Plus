@@ -3,6 +3,7 @@ package identitystore
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -10,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	ports "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/ports/identitystore"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 )
@@ -20,6 +22,7 @@ type pendingCredentialDelete struct {
 	createdAtMS                                      int64
 	forwardCompletedAtMS                             sql.NullInt64
 	items                                            []credentialDeleteItem
+	revokedOwnership                                 []model.CodexInspectionDisableOwnership
 }
 
 type credentialDeleteItem struct {
@@ -80,7 +83,7 @@ func loadCurrentCredentialSource(ctx context.Context, tx *sql.Tx, runtimeIdentit
 
 func loadPendingCredentialDeletes(ctx context.Context, tx *sql.Tx, runtimeIdentity string) ([]pendingCredentialDelete, error) {
 	rows, err := tx.QueryContext(ctx, `select id, runtime_identity, observed_runtime_generation, physical_name,
-		owner_instance, created_at_ms, forward_completed_at_ms from `+sqliterepo.GatewayCredentialDeleteIntentsTable+`
+		owner_instance, created_at_ms, forward_completed_at_ms, revoked_ownership_json from `+sqliterepo.GatewayCredentialDeleteIntentsTable+`
 		where runtime_identity = ? order by id`, runtimeIdentity)
 	if err != nil {
 		return nil, err
@@ -89,8 +92,9 @@ func loadPendingCredentialDeletes(ctx context.Context, tx *sql.Tx, runtimeIdenti
 	for rows.Next() {
 		var m pendingCredentialDelete
 		var generation string
+		var ownershipJSON string
 		if err := rows.Scan(&m.id, &m.runtimeIdentity, &generation, &m.physicalName,
-			&m.ownerInstance, &m.createdAtMS, &m.forwardCompletedAtMS); err != nil {
+			&m.ownerInstance, &m.createdAtMS, &m.forwardCompletedAtMS, &ownershipJSON); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -101,6 +105,16 @@ func loadPendingCredentialDeletes(ctx context.Context, tx *sql.Tx, runtimeIdenti
 			m.createdAtMS <= 0 || (m.forwardCompletedAtMS.Valid && m.forwardCompletedAtMS.Int64 < m.createdAtMS) {
 			rows.Close()
 			return nil, errors.New("invalid persisted credential delete intent")
+		}
+		if err := json.Unmarshal([]byte(ownershipJSON), &m.revokedOwnership); err != nil || m.revokedOwnership == nil {
+			rows.Close()
+			return nil, errors.New("invalid persisted credential delete ownership")
+		}
+		for _, item := range m.revokedOwnership {
+			if !validDeleteName(item.FileName) || !strings.EqualFold(item.FileName, m.physicalName) || item.DisabledAtMS <= 0 || item.UpdatedAtMS <= 0 {
+				rows.Close()
+				return nil, errors.New("invalid persisted credential delete ownership item")
+			}
 		}
 		pending = append(pending, m)
 	}
@@ -144,8 +158,52 @@ func loadPendingCredentialDeletes(ctx context.Context, tx *sql.Tx, runtimeIdenti
 		if err != nil || len(pending[i].items) == 0 {
 			return nil, errors.New("invalid persisted credential delete items")
 		}
+		// Validate even when a same-process capture is too early to resolve.
+		// Otherwise a format-valid but corrupt source ID could suppress the wrong Credential.
+		if err := validatePendingCredentialDeleteItems(ctx, tx, pending[i]); err != nil {
+			return nil, err
+		}
 	}
 	return pending, nil
+}
+
+func validatePendingCredentialDeleteItems(ctx context.Context, tx *sql.Tx, m pendingCredentialDelete) error {
+	for _, item := range m.items {
+		ent, binding, found, err := loadCurrentCredentialSource(ctx, tx, m.runtimeIdentity, item.sourceAuthID)
+		if err != nil {
+			return err
+		}
+		if !found || ent.ID != item.credentialID || binding.RuntimeIdentity != m.runtimeIdentity || binding.SourceAuthID != item.sourceAuthID {
+			return errors.New("invalid persisted credential delete item relationship")
+		}
+		if ent.Revision != item.expectedRevision {
+			return ports.ErrRevisionConflict
+		}
+	}
+	return nil
+}
+
+func (r *repository) PendingCredentialDeleteSources(ctx context.Context, runtimeIdentity string) ([]ports.PendingCredentialDeleteSource, error) {
+	if !validDeleteName(runtimeIdentity) {
+		return nil, errors.New("invalid runtime identity")
+	}
+	rows, err := r.db.QueryContext(ctx, `select id, physical_name from `+sqliterepo.GatewayCredentialDeleteIntentsTable+` where runtime_identity = ?`, runtimeIdentity)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var sources []ports.PendingCredentialDeleteSource
+	for rows.Next() {
+		var item ports.PendingCredentialDeleteSource
+		if err := rows.Scan(&item.IntentID, &item.PhysicalName); err != nil {
+			return nil, err
+		}
+		if identity.CredentialID(item.IntentID).Validate() != nil || !validDeleteName(item.PhysicalName) {
+			return nil, errors.New("invalid pending credential delete source")
+		}
+		sources = append(sources, item)
+	}
+	return sources, rows.Err()
 }
 
 func (r *repository) CheckPendingCredentialDelete(ctx context.Context, physicalNames []string, all bool) error {
@@ -181,6 +239,18 @@ func (r *repository) PrepareCredentialDelete(ctx context.Context, p ports.Prepar
 		p.ObservedRuntimeGeneration == 0 || p.OwnerInstance == "" || p.NowMS <= 0 || len(p.SourceAuthIDs) == 0 {
 		return "", errors.New("invalid credential delete preparation")
 	}
+	if p.RevokedOwnership == nil {
+		p.RevokedOwnership = []model.CodexInspectionDisableOwnership{}
+	}
+	for _, item := range p.RevokedOwnership {
+		if !validDeleteName(item.FileName) || !strings.EqualFold(item.FileName, p.PhysicalName) || item.DisabledAtMS <= 0 || item.UpdatedAtMS <= 0 {
+			return "", errors.New("invalid revoked ownership")
+		}
+	}
+	ownershipJSON, err := json.Marshal(p.RevokedOwnership)
+	if err != nil {
+		return "", errors.New("invalid revoked ownership")
+	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", err
@@ -215,9 +285,9 @@ func (r *repository) PrepareCredentialDelete(ctx context.Context, p ports.Prepar
 		return "", err
 	}
 	_, err = tx.ExecContext(ctx, `insert into `+sqliterepo.GatewayCredentialDeleteIntentsTable+`
-		(id, runtime_identity, observed_runtime_generation, physical_name, owner_instance, created_at_ms)
-		values (?, ?, ?, ?, ?, ?)`, string(id), p.RuntimeIdentity,
-		strconv.FormatUint(p.ObservedRuntimeGeneration, 10), p.PhysicalName, p.OwnerInstance, p.NowMS)
+		(id, runtime_identity, observed_runtime_generation, physical_name, owner_instance, created_at_ms, revoked_ownership_json)
+		values (?, ?, ?, ?, ?, ?, ?)`, string(id), p.RuntimeIdentity,
+		strconv.FormatUint(p.ObservedRuntimeGeneration, 10), p.PhysicalName, p.OwnerInstance, p.NowMS, string(ownershipJSON))
 	if err != nil {
 		if isConstraintConflict(err) {
 			return "", ports.ErrPendingCredentialDelete
@@ -297,7 +367,7 @@ func (r *repository) ResolveCredentialDelete(ctx context.Context, p ports.Resolv
 		if !m.forwardCompletedAtMS.Valid {
 			return ports.CredentialDeleteUnknown, errors.New("credential delete forward completion unavailable")
 		}
-		outcome, err := resolvePendingCredentialDelete(ctx, tx, m, set, p.NowMS)
+		outcome, err := resolvePendingCredentialDelete(ctx, tx, m, set, p.PhysicalEvidence, p.NowMS)
 		if err != nil {
 			return ports.CredentialDeleteUnknown, err
 		}
@@ -309,7 +379,7 @@ func (r *repository) ResolveCredentialDelete(ctx context.Context, p ports.Resolv
 	return ports.CredentialDeleteUnknown, errors.New("credential delete intent unavailable")
 }
 
-func resolvePendingCredentialDelete(ctx context.Context, tx *sql.Tx, m pendingCredentialDelete, observed map[string]struct{}, nowMS int64) (ports.CredentialDeleteOutcome, error) {
+func resolvePendingCredentialDelete(ctx context.Context, tx *sql.Tx, m pendingCredentialDelete, observed map[string]struct{}, physical ports.PhysicalSourceEvidence, nowMS int64) (ports.CredentialDeleteOutcome, error) {
 	present := 0
 	for _, item := range m.items {
 		ent, binding, found, err := loadCurrentCredentialSource(ctx, tx, m.runtimeIdentity, item.sourceAuthID)
@@ -327,6 +397,9 @@ func resolvePendingCredentialDelete(ctx context.Context, tx *sql.Tx, m pendingCr
 		}
 	}
 	if present > 0 && present < len(m.items) {
+		return ports.CredentialDeleteUnknown, nil
+	}
+	if present == len(m.items) && physical != ports.PhysicalSourcePresent {
 		return ports.CredentialDeleteUnknown, nil
 	}
 	outcome := ports.CredentialDeleteNotApplied
@@ -366,6 +439,18 @@ func resolvePendingCredentialDelete(ctx context.Context, tx *sql.Tx, m pendingCr
 			}
 		}
 	}
+	if outcome == ports.CredentialDeleteNotApplied {
+		for _, item := range m.revokedOwnership {
+			_, err := tx.ExecContext(ctx, `insert into codex_inspection_disable_ownership
+				(file_name, provider, auth_index, account_id, account_snapshot, disabled_at_ms, updated_at_ms)
+				values (?, ?, ?, ?, ?, ?, ?)
+				on conflict(file_name, provider, auth_index, account_id, account_snapshot) do nothing`,
+				item.FileName, item.Provider, item.AuthIndex, item.AccountID, item.AccountSnapshot, item.DisabledAtMS, monotonicObservedAt(nowMS, item.UpdatedAtMS, item.DisabledAtMS))
+			if err != nil {
+				return ports.CredentialDeleteUnknown, err
+			}
+		}
+	}
 	result, err := tx.ExecContext(ctx, `delete from `+sqliterepo.GatewayCredentialDeleteIntentsTable+` where id = ?`, m.id)
 	if err != nil {
 		return ports.CredentialDeleteUnknown, err
@@ -394,7 +479,7 @@ func resolvePassiveCredentialDeletes(ctx context.Context, tx *sql.Tx, p ports.Re
 			canResolve = true
 		}
 		if canResolve {
-			outcome, err := resolvePendingCredentialDelete(ctx, tx, m, set, p.NowMS)
+			outcome, err := resolvePendingCredentialDelete(ctx, tx, m, set, p.CredentialDeletePhysicalEvidence[m.id], p.NowMS)
 			if err != nil {
 				return nil, err
 			}

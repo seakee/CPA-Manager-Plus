@@ -39,7 +39,7 @@ func supportedDeleteSources(target cpaauthfiles.DeleteMutationTarget) ([]string,
 }
 
 func (s *Service) prepareCredentialDelete(ctx context.Context, setup store.Setup, r *http.Request,
-	mutation authFileOwnershipMutation) (string, error) {
+	mutation authFileOwnershipMutation, revoked []store.CodexInspectionDisableOwnership) (string, error) {
 	if s.credentialDeletes == nil || r.Method != http.MethodDelete ||
 		strings.TrimRight(r.URL.Path, "/") != "/v0/management/auth-files" ||
 		mutation.deleteMutation == nil {
@@ -64,7 +64,7 @@ func (s *Service) prepareCredentialDelete(ctx context.Context, setup store.Setup
 			return "", nil, err
 		}
 		return strings.TrimSpace(target.File.Name), revalidated, nil
-	})
+	}, revoked)
 }
 
 type credentialDeleteTransport struct {
@@ -73,6 +73,7 @@ type credentialDeleteTransport struct {
 	intentID      string
 	baseURL       string
 	managementKey string
+	physicalName  string
 	outcome       *ports.CredentialDeleteOutcome
 }
 
@@ -91,6 +92,8 @@ func (t credentialDeleteTransport) RoundTrip(request *http.Request) (*http.Respo
 			ids[i] = item.SourceAuthID
 		}
 		return ids, nil
+	}, func(observeCtx context.Context) (bool, error) {
+		return cpaauthfiles.New(nil).PhysicalFileExists(observeCtx, t.baseURL, t.managementKey, t.physicalName)
 	})
 	if markerErr != nil || observeErr != nil {
 		outcome = ports.CredentialDeleteUnknown
