@@ -750,6 +750,10 @@ func (r *repository) ApplyPassiveSnapshot(ctx context.Context, params ports.Reco
 	if err != nil {
 		return ports.ReconcileSnapshotResult{}, fmt.Errorf("resolve pending API-key mutation: %w", err)
 	}
+	suppressedCredentials, err := resolvePassiveCredentialDeletes(ctx, tx, params, uniqueCredentials)
+	if err != nil {
+		return ports.ReconcileSnapshotResult{}, fmt.Errorf("resolve pending credential delete: %w", err)
+	}
 
 	// --- 1. Reconcile API Keys ---
 	type existingAPIKey struct {
@@ -1054,6 +1058,9 @@ func (r *repository) ApplyPassiveSnapshot(ctx context.Context, params ports.Reco
 
 	// Process present credentials
 	for authID, credItem := range uniqueCredentials {
+		if _, suppressed := suppressedCredentials[authID]; suppressed {
+			continue
+		}
 		if existing, exists := existingCreds[authID]; exists {
 			switch existing.entity.Lifecycle {
 			case identity.LifecycleActive:
@@ -1143,6 +1150,9 @@ func (r *repository) ApplyPassiveSnapshot(ctx context.Context, params ports.Reco
 
 	// Negative evidence for Credentials: active sources absent from snapshot transition to missing
 	for authID, existing := range existingCreds {
+		if _, suppressed := suppressedCredentials[authID]; suppressed {
+			continue
+		}
 		if _, present := uniqueCredentials[authID]; !present {
 			if existing.entity.Lifecycle == identity.LifecycleActive {
 				if existing.entity.Revision >= math.MaxInt64 {

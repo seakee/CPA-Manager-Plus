@@ -23,8 +23,41 @@ var (
 	// ErrRevisionOverflow indicates that the business revision would exceed math.MaxInt64.
 	ErrRevisionOverflow = errors.New("canonical identity revision overflow")
 
-	ErrPendingAPIKeyMutation = errors.New("API-key mutation already pending for runtime")
+	ErrPendingAPIKeyMutation   = errors.New("API-key mutation already pending for runtime")
+	ErrPendingCredentialDelete = errors.New("credential delete already pending for physical file")
 )
+
+type CredentialDeleteOutcome string
+
+const (
+	CredentialDeleteSuccess    CredentialDeleteOutcome = "success"
+	CredentialDeleteNotApplied CredentialDeleteOutcome = "not_applied"
+	CredentialDeleteUnknown    CredentialDeleteOutcome = "unknown"
+)
+
+type PrepareCredentialDeleteParams struct {
+	RuntimeIdentity           string
+	ObservedRuntimeGeneration uint64
+	PhysicalName              string
+	SourceAuthIDs             []string
+	OwnerInstance             string
+	NowMS                     int64
+}
+
+type ResolveCredentialDeleteParams struct {
+	RuntimeIdentity           string
+	ObservedRuntimeGeneration uint64
+	ObservedSourceAuthIDs     []string
+	IntentID                  string
+	NowMS                     int64
+}
+
+type CredentialDeleteRepository interface {
+	CheckPendingCredentialDelete(ctx context.Context, physicalNames []string, all bool) error
+	PrepareCredentialDelete(ctx context.Context, params PrepareCredentialDeleteParams) (string, error)
+	MarkCredentialDeleteForwardComplete(ctx context.Context, intentID, ownerInstance string, nowMS int64) error
+	ResolveCredentialDelete(ctx context.Context, params ResolveCredentialDeleteParams) (CredentialDeleteOutcome, error)
+}
 
 type APIKeyMutationKind string
 

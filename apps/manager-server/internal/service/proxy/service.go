@@ -19,8 +19,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/credentialdeletemutation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/identitymutation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	identitystoreports "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/ports/identitystore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
@@ -32,6 +34,7 @@ type Service struct {
 	authFileMutations    *cpaauthfiles.MutationCoordinator
 	apiKeyMutations      *identitymutation.Service
 	apiKeyMutationMu     sync.Mutex
+	credentialDeletes    *credentialdeletemutation.Service
 }
 
 type authFileOwnershipMutation struct {
@@ -68,9 +71,11 @@ type authFileSourceIdentityPayload struct {
 }
 
 type authFileDeleteMutation struct {
-	selector     string
-	physicalName string
-	identities   []cpaauthfiles.Identity
+	selector        string
+	physicalName    string
+	identities      []cpaauthfiles.Identity
+	preparedTarget  cpaauthfiles.DeleteMutationTarget
+	forwardSelector string
 }
 
 type authFileFieldsMutation struct {
@@ -146,6 +151,10 @@ func NewWithMutationCoordinator(
 // handling before the HTTP server begins accepting requests.
 func (s *Service) SetAPIKeyMutationService(mutations *identitymutation.Service) {
 	s.apiKeyMutations = mutations
+}
+
+func (s *Service) SetCredentialDeleteService(deletes *credentialdeletemutation.Service) {
+	s.credentialDeletes = deletes
 }
 
 func (s *Service) ProxyManagement(w http.ResponseWriter, r *http.Request, writeError func(http.ResponseWriter, int, error)) {
@@ -224,7 +233,11 @@ func (s *Service) proxyToSavedSetup(w http.ResponseWriter, r *http.Request, writ
 	}
 	releaseAuthFileMutation, err := s.acquireAuthFileMutation(r.Context(), ownershipMutation)
 	if err != nil {
-		writeError(w, http.StatusRequestTimeout, err)
+		status := http.StatusRequestTimeout
+		if errors.Is(err, identitystoreports.ErrPendingCredentialDelete) {
+			status = http.StatusConflict
+		}
+		writeError(w, status, err)
 		return
 	}
 	defer releaseAuthFileMutation()
@@ -252,6 +265,18 @@ func (s *Service) proxyToSavedSetup(w http.ResponseWriter, r *http.Request, writ
 	if ownershipMutation.clearAll {
 		ownershipMutation.fileNames = ownershipFileNames(revokedOwnership)
 	}
+	credentialDeleteIntentID, err := s.prepareCredentialDelete(r.Context(), setup, r, ownershipMutation)
+	if err != nil {
+		if restoreErr := s.restoreInspectionOwnershipDetached(r.Context(), revokedOwnership); restoreErr != nil {
+			err = errors.Join(err, restoreErr)
+		}
+		status := http.StatusConflict
+		if errors.Is(err, credentialdeletemutation.ErrRuntimeFence) {
+			status = http.StatusBadGateway
+		}
+		writeError(w, status, err)
+		return
+	}
 	if s.apiKeyMutations != nil && isAPIKeyMutationRequest(r) {
 		s.apiKeyMutationMu.Lock()
 		defer s.apiKeyMutationMu.Unlock()
@@ -266,6 +291,17 @@ func (s *Service) proxyToSavedSetup(w http.ResponseWriter, r *http.Request, writ
 		return
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	deleteOutcome := identitystoreports.CredentialDeleteUnknown
+	if credentialDeleteIntentID != "" {
+		baseTransport := proxy.Transport
+		if baseTransport == nil {
+			baseTransport = http.DefaultTransport
+		}
+		proxy.Transport = credentialDeleteTransport{
+			base: baseTransport, deletes: s.credentialDeletes, intentID: credentialDeleteIntentID,
+			baseURL: setup.CPAUpstreamURL, managementKey: setup.ManagementKey, outcome: &deleteOutcome,
+		}
+	}
 	if apiKeyIntentID != "" {
 		baseTransport := proxy.Transport
 		if baseTransport == nil {
@@ -299,7 +335,7 @@ func (s *Service) proxyToSavedSetup(w http.ResponseWriter, r *http.Request, writ
 	}
 	responseProcessed := false
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, proxyErr error) {
-		if !responseProcessed {
+		if !responseProcessed && (credentialDeleteIntentID == "" || deleteOutcome == identitystoreports.CredentialDeleteNotApplied) {
 			if restoreErr := s.restoreInspectionOwnershipDetached(r.Context(), revokedOwnership); restoreErr != nil {
 				proxyErr = fmt.Errorf("%w; restore inspection ownership: %v", proxyErr, restoreErr)
 			}
@@ -308,6 +344,19 @@ func (s *Service) proxyToSavedSetup(w http.ResponseWriter, r *http.Request, writ
 	}
 	proxy.ModifyResponse = func(response *http.Response) error {
 		responseProcessed = true
+		if credentialDeleteIntentID != "" {
+			switch deleteOutcome {
+			case identitystoreports.CredentialDeleteSuccess:
+				return nil
+			case identitystoreports.CredentialDeleteNotApplied:
+				return s.restoreInspectionOwnershipDetached(r.Context(), revokedOwnership)
+			default:
+				if response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices {
+					return credentialdeletemutation.ErrOutcomeUnknown
+				}
+				return nil
+			}
+		}
 		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 			return s.restoreInspectionOwnershipDetached(r.Context(), revokedOwnership)
 		}
@@ -334,10 +383,23 @@ func (s *Service) acquireAuthFileMutation(
 	if s == nil || s.authFileMutations == nil {
 		return nil, cpaauthfiles.ErrMutationCoordinatorUnavailable
 	}
+	var release func()
+	var err error
 	if all {
-		return s.authFileMutations.AcquireAll(ctx)
+		release, err = s.authFileMutations.AcquireAll(ctx)
+	} else {
+		release, err = s.authFileMutations.Acquire(ctx, keys...)
 	}
-	return s.authFileMutations.Acquire(ctx, keys...)
+	if err != nil {
+		return nil, err
+	}
+	if s.credentialDeletes != nil {
+		if err := s.credentialDeletes.CheckOverlap(ctx, keys, all); err != nil {
+			release()
+			return nil, err
+		}
+	}
+	return release, nil
 }
 
 func authFileMutationLockTargets(mutation authFileOwnershipMutation) ([]string, bool) {
@@ -524,48 +586,9 @@ func (s *Service) prepareAuthFileDeleteMutation(
 		return authFileOwnershipMutation{}, fmt.Errorf("%w: delete identity is required", cpaauthfiles.ErrAuthFileNotFound)
 	}
 
-	requestedSelector := strings.TrimSpace(deleteMutation.selector)
-	physicalName := strings.TrimSpace(deleteMutation.physicalName)
-	physicalDeleteRequested := physicalName != "" && requestedSelector == physicalName
-	client := cpaauthfiles.New(nil)
-	var target cpaauthfiles.DeleteMutationTarget
-	var err error
-	if len(deleteMutation.identities) == 1 && !physicalDeleteRequested {
-		target, err = client.ResolveVerifiedDeleteMutationTarget(
-			ctx,
-			setup.CPAUpstreamURL,
-			setup.ManagementKey,
-			deleteMutation.identities[0],
-		)
-	} else {
-		target, err = client.ResolveVerifiedPhysicalFileDeleteTarget(
-			ctx,
-			setup.CPAUpstreamURL,
-			setup.ManagementKey,
-			deleteMutation.identities,
-		)
-	}
+	target, forwardSelector, err := resolveVerifiedAuthFileDelete(ctx, setup, deleteMutation)
 	if err != nil {
 		return authFileOwnershipMutation{}, err
-	}
-
-	if physicalName == "" {
-		physicalName = strings.TrimSpace(target.File.Name)
-	}
-	forwardSelector := strings.TrimSpace(target.Selector)
-	if requestedSelector == physicalName {
-		forwardSelector = physicalName
-	} else if requestedSelector != "" && requestedSelector != forwardSelector {
-		return authFileOwnershipMutation{}, fmt.Errorf(
-			"%w: delete selector mismatch (expected %q or %q, got %q)",
-			cpaauthfiles.ErrIdentityMismatch,
-			forwardSelector,
-			physicalName,
-			requestedSelector,
-		)
-	}
-	if forwardSelector == "" {
-		return authFileOwnershipMutation{}, fmt.Errorf("%w: delete selector is empty", cpaauthfiles.ErrAuthFileNotFound)
 	}
 
 	query := r.URL.Query()
@@ -573,7 +596,42 @@ func (s *Service) prepareAuthFileDeleteMutation(
 	r.URL.RawQuery = query.Encode()
 	mutation.fileNames = []string{strings.TrimSpace(target.File.Name)}
 	mutation.ownershipTargets = nil
+	mutation.deleteMutation.preparedTarget = target
+	mutation.deleteMutation.forwardSelector = forwardSelector
 	return mutation, nil
+}
+
+func resolveVerifiedAuthFileDelete(ctx context.Context, setup store.Setup, mutation *authFileDeleteMutation) (cpaauthfiles.DeleteMutationTarget, string, error) {
+	requestedSelector := strings.TrimSpace(mutation.selector)
+	physicalName := strings.TrimSpace(mutation.physicalName)
+	physicalDeleteRequested := physicalName != "" && requestedSelector == physicalName
+	client := cpaauthfiles.New(nil)
+	var target cpaauthfiles.DeleteMutationTarget
+	var err error
+	if len(mutation.identities) == 1 && !physicalDeleteRequested {
+		target, err = client.ResolveVerifiedDeleteMutationTarget(ctx, setup.CPAUpstreamURL,
+			setup.ManagementKey, mutation.identities[0])
+	} else {
+		target, err = client.ResolveVerifiedPhysicalFileDeleteTarget(ctx, setup.CPAUpstreamURL,
+			setup.ManagementKey, mutation.identities)
+	}
+	if err != nil {
+		return cpaauthfiles.DeleteMutationTarget{}, "", err
+	}
+	if physicalName == "" {
+		physicalName = strings.TrimSpace(target.File.Name)
+	}
+	forwardSelector := strings.TrimSpace(target.Selector)
+	if requestedSelector == physicalName {
+		forwardSelector = physicalName
+	} else if requestedSelector != "" && requestedSelector != forwardSelector {
+		return cpaauthfiles.DeleteMutationTarget{}, "", fmt.Errorf("%w: delete selector mismatch",
+			cpaauthfiles.ErrIdentityMismatch)
+	}
+	if forwardSelector == "" || strings.TrimSpace(target.File.Name) != physicalName {
+		return cpaauthfiles.DeleteMutationTarget{}, "", cpaauthfiles.ErrDeleteMutationScopeAmbiguous
+	}
+	return target, forwardSelector, nil
 }
 
 func (s *Service) prepareAuthFileFieldsMutation(

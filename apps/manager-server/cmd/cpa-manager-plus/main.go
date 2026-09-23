@@ -17,6 +17,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/adapters/cpaidentityinventory"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/credentialdeletemutation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/identitymutation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/identityreconcile"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
@@ -261,6 +262,7 @@ func runServer() {
 	codexInspectionWorker := worker.NewCodexInspectionWorker(serverApp.AppContext().Store, serverApp.AppContext().CodexInspectionService)
 	var identityProcessInstanceID string
 	var mutationSvc *identitymutation.Service
+	var credentialDeleteSvc *credentialdeletemutation.Service
 	identityClock := identitymutation.NewMonotonicMillis(nil)
 	if cfg.EmbeddedRuntimeConfigured() {
 		instanceID, err := identity.NewAPIKeyID()
@@ -283,6 +285,20 @@ func runServer() {
 			log.Fatalf("initialize API-key mutation service: %v", err)
 		}
 		serverApp.AppContext().ProxyService.SetAPIKeyMutationService(mutationSvc)
+		credentialRepo, ok := db.Identities.(identitystoreports.CredentialDeleteRepository)
+		if !ok {
+			log.Fatal("identity store does not support credential delete intents")
+		}
+		credentialDeleteSvc, err = credentialdeletemutation.NewService(credentialdeletemutation.Config{
+			RuntimeObserver:   runtimeClient,
+			Repository:        credentialRepo,
+			ProcessInstanceID: identityProcessInstanceID,
+			TimeSource:        identityClock,
+		})
+		if err != nil {
+			log.Fatalf("initialize credential delete service: %v", err)
+		}
+		serverApp.AppContext().ProxyService.SetCredentialDeleteService(credentialDeleteSvc)
 	}
 	serverResult := make(chan error, 1)
 	go serveHTTPServer(server, listener, stop, serverResult)
@@ -312,7 +328,10 @@ func runServer() {
 			IdentityRepo:      db.Identities,
 			ProcessInstanceID: identityProcessInstanceID,
 			TimeSource:        identityClock,
-			BeforeCapture:     mutationSvc.RetryForwardCompletions,
+			BeforeCapture: func(captureCtx context.Context) error {
+				return retryIdentityForwardCompletions(captureCtx,
+					mutationSvc.RetryForwardCompletions, credentialDeleteSvc.RetryForwardCompletions)
+			},
 		})
 		if err != nil {
 			log.Fatalf("initialize identity reconcile service: %v", err)
@@ -380,6 +399,12 @@ func runServer() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown: %v", err)
 	}
+}
+
+func retryIdentityForwardCompletions(ctx context.Context, apiKeyRetry, credentialRetry func(context.Context) error) error {
+	apiKeyErr := apiKeyRetry(ctx)
+	credentialErr := credentialRetry(ctx)
+	return errors.Join(apiKeyErr, credentialErr)
 }
 
 func serveHTTPServer(server *http.Server, listener net.Listener, stop context.CancelFunc, result chan<- error) {

@@ -69,11 +69,13 @@ const (
 	usageAccountModelSourceLegacy             = "usage_account_model_rollups_legacy_source_recovery"
 	usagePricingAccountSourceLegacy           = "usage_pricing_account_rollups_v1_legacy_source_recovery"
 
-	GatewayAPIKeyIdentitiesTable         = "gateway_api_key_identities"
-	GatewayAPIKeyMutationIntentsTable    = "gateway_api_key_mutation_intents"
-	GatewayCredentialIdentitiesTable     = "gateway_credential_identities"
-	GatewayAPIKeySourceBindingsTable     = "gateway_api_key_source_bindings"
-	GatewayCredentialSourceBindingsTable = "gateway_credential_source_bindings"
+	GatewayAPIKeyIdentitiesTable            = "gateway_api_key_identities"
+	GatewayAPIKeyMutationIntentsTable       = "gateway_api_key_mutation_intents"
+	GatewayCredentialIdentitiesTable        = "gateway_credential_identities"
+	GatewayAPIKeySourceBindingsTable        = "gateway_api_key_source_bindings"
+	GatewayCredentialSourceBindingsTable    = "gateway_credential_source_bindings"
+	GatewayCredentialDeleteIntentsTable     = "gateway_credential_delete_intents"
+	GatewayCredentialDeleteIntentItemsTable = "gateway_credential_delete_intent_items"
 
 	createUsageAccountModelRollupsTable = `create table if not exists usage_account_model_rollups (
 		account_key text not null,
@@ -994,6 +996,25 @@ func Migrate(db *sql.DB) error {
 			first_seen_at_ms integer not null,
 			last_seen_at_ms integer not null,
 			retired_at_ms integer,
+			foreign key(credential_id) references gateway_credential_identities(id) on delete restrict
+		)`,
+		`create table if not exists gateway_credential_delete_intents (
+			id text primary key,
+			runtime_identity text not null check(length(runtime_identity) > 0 and trim(runtime_identity) = runtime_identity),
+			observed_runtime_generation text not null check(length(observed_runtime_generation) > 0),
+			physical_name text not null check(length(physical_name) > 0 and trim(physical_name) = physical_name),
+			owner_instance text not null check(length(owner_instance) > 0),
+			created_at_ms integer not null check(created_at_ms > 0),
+			forward_completed_at_ms integer check(forward_completed_at_ms is null or forward_completed_at_ms >= created_at_ms),
+			unique(runtime_identity, physical_name)
+		)`,
+		`create table if not exists gateway_credential_delete_intent_items (
+			intent_id text not null,
+			credential_id text not null unique,
+			source_auth_id text not null check(length(source_auth_id) > 0 and trim(source_auth_id) = source_auth_id),
+			expected_revision integer not null check(expected_revision > 0),
+			primary key(intent_id, source_auth_id),
+			foreign key(intent_id) references gateway_credential_delete_intents(id) on delete cascade,
 			foreign key(credential_id) references gateway_credential_identities(id) on delete restrict
 		)`,
 		`create unique index if not exists idx_gateway_api_key_source_active
