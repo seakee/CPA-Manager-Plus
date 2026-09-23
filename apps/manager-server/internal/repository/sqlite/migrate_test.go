@@ -119,6 +119,39 @@ func TestLegacyIdentityProjectionStateGetsBindingRevision(t *testing.T) {
 	}
 }
 
+func TestMigrateInvalidatesPreviouslyStaleReadyProjection(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "stale-ready-projection.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	// Simulate the prior build, which tracked revisions but had no invalidation trigger.
+	if _, err := db.Exec(`drop trigger gateway_source_binding_revision_invalidate_projection`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`update gateway_usage_identity_projection_state set
+		status = 'ready', binding_revision = 0, finished_at_ms = 123
+		where state_name = 'canonical_identity_v1'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`update gateway_source_binding_revision set revision = 1 where id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	if err := db.QueryRow(`select status from gateway_usage_identity_projection_state
+		where state_name = 'canonical_identity_v1'`).Scan(&status); err != nil || status != "ready" {
+		t.Fatalf("prior-build state = %q, err = %v", status, err)
+	}
+	if err := Migrate(db); err != nil {
+		t.Fatalf("migrate stale ready projection: %v", err)
+	}
+	var finished sql.NullInt64
+	if err := db.QueryRow(`select status, finished_at_ms from gateway_usage_identity_projection_state
+		where state_name = 'canonical_identity_v1'`).Scan(&status, &finished); err != nil || status != "pending" || finished.Valid {
+		t.Fatalf("upgraded state = %q, finished = %+v, err = %v", status, finished, err)
+	}
+}
+
 func TestMigrateWithoutUsageEventsClearsDeferredIndexLedger(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing-source-deferred-index.sqlite")
 	db, err := Open(path)

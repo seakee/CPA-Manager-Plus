@@ -1211,6 +1211,31 @@ func ensureGatewaySourceBindingRevision(db *sql.DB) error {
 			return fmt.Errorf("install source binding revision trigger: %w", err)
 		}
 	}
+	// All G1 binding triggers update this row in their own transaction. Invalidate
+	// ready projections there too, so readers cannot observe a stale ready state
+	// while waiting for the projection worker's next run.
+	if _, err := db.Exec(`create trigger if not exists gateway_source_binding_revision_invalidate_projection
+		after update of revision on gateway_source_binding_revision
+		when old.revision is not new.revision
+		begin
+			update gateway_usage_identity_projection_state set
+				status = 'pending',
+				finished_at_ms = null,
+				updated_at_ms = cast(strftime('%s', 'now') as integer) * 1000
+			where state_name = 'canonical_identity_v1' and status = 'ready';
+		end`); err != nil {
+		return fmt.Errorf("install source binding projection invalidation trigger: %w", err)
+	}
+	// A database upgraded from the prior revision may already have a stale ready
+	// checkpoint before the new trigger exists.
+	if _, err := db.Exec(`update gateway_usage_identity_projection_state set
+		status = 'pending',
+		finished_at_ms = null,
+		updated_at_ms = cast(strftime('%s', 'now') as integer) * 1000
+	where state_name = 'canonical_identity_v1' and status = 'ready'
+		and binding_revision <> (select revision from gateway_source_binding_revision where id = 1)`); err != nil {
+		return fmt.Errorf("invalidate stale projection checkpoint: %w", err)
+	}
 	return nil
 }
 

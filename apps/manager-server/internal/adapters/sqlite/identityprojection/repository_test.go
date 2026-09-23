@@ -724,6 +724,10 @@ func TestBindingRetirementReprojectsButLastSeenDoesNot(t *testing.T) {
 	if _, err := db.Exec(`UPDATE gateway_credential_source_bindings SET last_seen_at_ms = 210 WHERE source_auth_id = 'retired-auth'`); err != nil {
 		t.Fatal(err)
 	}
+	ready, err := repo.GetState(ctx)
+	if err != nil || ready.Status != "ready" || ready.FinishedAtMS == nil {
+		t.Fatalf("state after last_seen-only updates = %+v, err = %v", ready, err)
+	}
 	unchanged, err := repo.CatchUp(ctx, 10, 301)
 	if err != nil || unchanged.Processed != 0 || unchanged.Rebuilt {
 		t.Fatalf("last_seen-only catch-up = %+v, err = %v", unchanged, err)
@@ -741,6 +745,67 @@ func TestBindingRetirementReprojectsButLastSeenDoesNot(t *testing.T) {
 	projection, err := repo.GetProjectionByEventID(ctx, 1)
 	if err != nil || projection == nil || projection.APIKeyState != ports.StateStale || projection.CredentialState != ports.StateStale {
 		t.Fatalf("retired projection = %+v, err = %v", projection, err)
+	}
+}
+
+func TestBindingChangeInvalidatesReadyStateBeforeWorkerRuns(t *testing.T) {
+	db, repo := setupTestDB(t)
+	ctx := context.Background()
+	hash := sha256Hex("invalidation-key")
+	insertTestAPIKeyIdentity(t, db, "invalidation-key-id")
+	insertTestCredentialIdentity(t, db, "invalidation-credential-id")
+	insertTestUsageEvent(t, db, 1, "invalidation-event", "req", 100, hash, `{"auth_id":"invalidation-auth"}`)
+	if _, err := repo.CatchUp(ctx, 10, 200); err != nil {
+		t.Fatal(err)
+	}
+
+	// A failed G1 transaction must roll back both its revision and invalidation.
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `insert into gateway_api_key_source_bindings
+		(api_key_id, runtime_identity, api_key_hash, first_seen_at_ms, last_seen_at_ms)
+		values (?, 'rt-1', ?, 50, 50)`, "invalidation-key-id", hash); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	var inTxStatus string
+	if err := tx.QueryRowContext(ctx, `select status from gateway_usage_identity_projection_state
+		where state_name = ?`, StateName).Scan(&inTxStatus); err != nil || inTxStatus != "pending" {
+		_ = tx.Rollback()
+		t.Fatalf("state inside binding transaction = %q, err = %v", inTxStatus, err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	ready, err := repo.GetState(ctx)
+	if err != nil || ready.Status != "ready" || ready.FinishedAtMS == nil {
+		t.Fatalf("state after G1 rollback = %+v, err = %v", ready, err)
+	}
+
+	insertTestAPIKeyBinding(t, db, "invalidation-key-id", "rt-1", hash, 50, nil)
+	state, err := repo.GetState(ctx)
+	if err != nil || state.Status != "pending" || state.FinishedAtMS != nil {
+		t.Fatalf("state after API-key binding insert = %+v, err = %v", state, err)
+	}
+	if _, err := repo.CatchUp(ctx, 10, 201); err != nil {
+		t.Fatal(err)
+	}
+	insertTestCredentialBinding(t, db, "invalidation-credential-id", "rt-1", "invalidation-auth", 50, nil)
+	state, err = repo.GetState(ctx)
+	if err != nil || state.Status != "pending" || state.FinishedAtMS != nil {
+		t.Fatalf("state after credential binding insert = %+v, err = %v", state, err)
+	}
+	if _, err := repo.CatchUp(ctx, 10, 202); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`update gateway_api_key_source_bindings set retired_at_ms = 90 where api_key_hash = ?`, hash); err != nil {
+		t.Fatal(err)
+	}
+	state, err = repo.GetState(ctx)
+	if err != nil || state.Status != "pending" || state.FinishedAtMS != nil {
+		t.Fatalf("state after binding retirement = %+v, err = %v", state, err)
 	}
 }
 
