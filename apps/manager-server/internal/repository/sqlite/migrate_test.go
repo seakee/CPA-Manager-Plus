@@ -4056,3 +4056,86 @@ func TestGatewayAPIKeyMutationIntentSchema(t *testing.T) {
 		t.Fatalf("intent FK RESTRICT missing: %v", err)
 	}
 }
+
+func TestMigrateGatewayUsageIdentityProjectionSchema(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "test_projection_schema.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Initial state seeded
+	var stateStatus string
+	var lastProcessed, targetID int64
+	if err := db.QueryRow(`SELECT status, last_processed_event_id, target_event_id
+		FROM gateway_usage_identity_projection_state
+		WHERE state_name = 'canonical_identity_v1'`).Scan(&stateStatus, &lastProcessed, &targetID); err != nil {
+		t.Fatalf("projection initial state query failed: %v", err)
+	}
+	if stateStatus != "pending" || lastProcessed != 0 || targetID != 0 {
+		t.Fatalf("unexpected projection initial state: %s, %d, %d", stateStatus, lastProcessed, targetID)
+	}
+
+	insert := func(eventID int64, hash, keyState, keyID, credState, credID string) error {
+		var kID, cID any
+		if keyID != "" {
+			kID = keyID
+		}
+		if credID != "" {
+			cID = credID
+		}
+		_, err := db.Exec(`INSERT INTO gateway_usage_identity_projection_v1 (
+			usage_event_id, event_hash, request_id, evidence_timestamp_ms,
+			api_key_state, api_key_id, api_key_source_hash,
+			credential_state, credential_id, credential_source_auth_id,
+			schema_version, projected_at_ms
+		) VALUES (?, ?, 'req-1', 100, ?, ?, '', ?, ?, '', 1, 100)`,
+			eventID, hash, keyState, kID, credState, cID)
+		return err
+	}
+
+	// Valid insert
+	if err := insert(1, "h-1", "mapped", "key-1", "mapped", "cred-1"); err != nil {
+		t.Fatalf("valid projection row rejected: %v", err)
+	}
+
+	// Valid non-mapped with nil IDs
+	if err := insert(2, "h-2", "unknown", "", "stale", ""); err != nil {
+		t.Fatalf("valid non-mapped projection row rejected: %v", err)
+	}
+
+	// Invalid api_key_state
+	if err := insert(3, "h-3", "bogus", "key-1", "unknown", ""); err == nil {
+		t.Fatal("invalid api_key_state was accepted")
+	}
+
+	// Mapped API key with nil ID
+	if err := insert(4, "h-4", "mapped", "", "unknown", ""); err == nil {
+		t.Fatal("mapped api_key_state with nil ID was accepted")
+	}
+
+	// Unknown API key with non-nil ID
+	if err := insert(5, "h-5", "unknown", "key-1", "unknown", ""); err == nil {
+		t.Fatal("unknown api_key_state with non-nil ID was accepted")
+	}
+
+	// Stale API key with non-nil ID
+	if err := insert(6, "h-6", "stale", "key-1", "unknown", ""); err == nil {
+		t.Fatal("stale api_key_state with non-nil ID was accepted")
+	}
+
+	// Ambiguous API key with non-nil ID
+	if err := insert(7, "h-7", "ambiguous", "key-1", "unknown", ""); err == nil {
+		t.Fatal("ambiguous api_key_state with non-nil ID was accepted")
+	}
+
+	// Mapped credential with nil ID
+	if err := insert(8, "h-8", "unknown", "", "mapped", ""); err == nil {
+		t.Fatal("mapped credential_state with nil ID was accepted")
+	}
+
+	// Unknown credential with non-nil ID
+	if err := insert(9, "h-9", "unknown", "", "unknown", "cred-1"); err == nil {
+		t.Fatal("unknown credential_state with non-nil ID was accepted")
+	}
+}

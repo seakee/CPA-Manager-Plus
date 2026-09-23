@@ -69,13 +69,15 @@ const (
 	usageAccountModelSourceLegacy             = "usage_account_model_rollups_legacy_source_recovery"
 	usagePricingAccountSourceLegacy           = "usage_pricing_account_rollups_v1_legacy_source_recovery"
 
-	GatewayAPIKeyIdentitiesTable            = "gateway_api_key_identities"
-	GatewayAPIKeyMutationIntentsTable       = "gateway_api_key_mutation_intents"
-	GatewayCredentialIdentitiesTable        = "gateway_credential_identities"
-	GatewayAPIKeySourceBindingsTable        = "gateway_api_key_source_bindings"
-	GatewayCredentialSourceBindingsTable    = "gateway_credential_source_bindings"
-	GatewayCredentialDeleteIntentsTable     = "gateway_credential_delete_intents"
-	GatewayCredentialDeleteIntentItemsTable = "gateway_credential_delete_intent_items"
+	GatewayAPIKeyIdentitiesTable             = "gateway_api_key_identities"
+	GatewayAPIKeyMutationIntentsTable        = "gateway_api_key_mutation_intents"
+	GatewayCredentialIdentitiesTable         = "gateway_credential_identities"
+	GatewayAPIKeySourceBindingsTable         = "gateway_api_key_source_bindings"
+	GatewayCredentialSourceBindingsTable     = "gateway_credential_source_bindings"
+	GatewayCredentialDeleteIntentsTable      = "gateway_credential_delete_intents"
+	GatewayCredentialDeleteIntentItemsTable  = "gateway_credential_delete_intent_items"
+	GatewayUsageIdentityProjectionTable      = "gateway_usage_identity_projection_v1"
+	GatewayUsageIdentityProjectionStateTable = "gateway_usage_identity_projection_state"
 
 	createUsageAccountModelRollupsTable = `create table if not exists usage_account_model_rollups (
 		account_key text not null,
@@ -1030,6 +1032,41 @@ func Migrate(db *sql.DB) error {
 		`create unique index if not exists idx_gateway_cred_entity_active
 			on gateway_credential_source_bindings(credential_id, runtime_identity)
 			where retired_at_ms is null`,
+		`create table if not exists gateway_usage_identity_projection_v1 (
+			usage_event_id integer primary key,
+			event_hash text not null unique,
+			request_id text not null default '',
+			evidence_timestamp_ms integer not null,
+			api_key_state text not null check(api_key_state in ('mapped', 'unknown', 'ambiguous', 'stale')),
+			api_key_id text check(
+				(api_key_state = 'mapped' and api_key_id is not null and length(trim(api_key_id)) > 0)
+				or (api_key_state <> 'mapped' and api_key_id is null)
+			),
+			api_key_source_hash text not null default '',
+			credential_state text not null check(credential_state in ('mapped', 'unknown', 'ambiguous', 'stale')),
+			credential_id text check(
+				(credential_state = 'mapped' and credential_id is not null and length(trim(credential_id)) > 0)
+				or (credential_state <> 'mapped' and credential_id is null)
+			),
+			credential_source_auth_id text not null default '',
+			schema_version integer not null,
+			projected_at_ms integer not null
+		)`,
+		`create table if not exists gateway_usage_identity_projection_state (
+			state_name text primary key,
+			schema_version integer not null,
+			status text not null,
+			last_processed_event_id integer not null default 0,
+			target_event_id integer not null default 0,
+			processed_events integer not null default 0,
+			last_run_started_at_ms integer,
+			updated_at_ms integer not null default 0,
+			finished_at_ms integer,
+			last_error text
+		)`,
+		`insert or ignore into gateway_usage_identity_projection_state (
+			state_name, schema_version, status, last_processed_event_id, target_event_id, processed_events, updated_at_ms
+		) values ('canonical_identity_v1', 1, 'pending', 0, 0, 0, 0)`,
 	}
 	for _, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {

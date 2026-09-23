@@ -8,8 +8,10 @@ import (
 	"sync"
 	"time"
 
+	adaptersqliteidentityprojection "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/adapters/sqlite/identityprojection"
 	adaptersqliteidentity "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/adapters/sqlite/identitystore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	identityprojectionports "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/ports/identityprojection"
 	identitystoreports "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/ports/identitystore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/accountaction"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/apikeyalias"
@@ -131,21 +133,22 @@ type Store struct {
 	db            *sql.DB
 	modelPricesMu sync.RWMutex
 
-	Settings         setting.Repository
-	UsageEvents      usageevent.Repository
-	DeadLetters      deadletter.Repository
-	ModelPrices      modelprice.Repository
-	APIKeyAliases    apikeyalias.Repository
-	AccountActions   accountaction.Repository
-	CodexInspections codexinspection.Repository
-	DataMigrations   datamigration.Repository
-	QuotaCooldowns   quotacooldown.Repository
-	QuotaSnapshots   quotasnapshot.Repository
-	UsageAggregates  usageaggregate.Repository
-	UsagePricing     usagepricing.Repository
-	UsageMonitoring  usagemonitoring.Repository
-	UsageRollups     usagerollup.Repository
-	Identities       identitystoreports.Repository
+	Settings            setting.Repository
+	UsageEvents         usageevent.Repository
+	DeadLetters         deadletter.Repository
+	ModelPrices         modelprice.Repository
+	APIKeyAliases       apikeyalias.Repository
+	AccountActions      accountaction.Repository
+	CodexInspections    codexinspection.Repository
+	DataMigrations      datamigration.Repository
+	QuotaCooldowns      quotacooldown.Repository
+	QuotaSnapshots      quotasnapshot.Repository
+	UsageAggregates     usageaggregate.Repository
+	UsagePricing        usagepricing.Repository
+	UsageMonitoring     usagemonitoring.Repository
+	UsageRollups        usagerollup.Repository
+	Identities          identitystoreports.Repository
+	IdentityProjections identityprojectionports.Repository
 }
 
 func Open(path string, protector ...*security.Protector) (*Store, error) {
@@ -158,22 +161,23 @@ func Open(path string, protector ...*security.Protector) (*Store, error) {
 
 func New(db *sql.DB, protector ...*security.Protector) *Store {
 	return &Store{
-		db:               db,
-		Settings:         setting.New(db, protector...),
-		UsageEvents:      usageevent.New(db),
-		DeadLetters:      deadletter.New(db),
-		ModelPrices:      modelprice.New(db),
-		APIKeyAliases:    apikeyalias.New(db),
-		AccountActions:   accountaction.New(db),
-		CodexInspections: codexinspection.New(db),
-		DataMigrations:   datamigration.New(db),
-		QuotaCooldowns:   quotacooldown.New(db),
-		QuotaSnapshots:   quotasnapshot.New(db),
-		UsageAggregates:  usageaggregate.New(db),
-		UsagePricing:     usagepricing.New(db),
-		UsageMonitoring:  usagemonitoring.New(db),
-		UsageRollups:     usagerollup.New(db),
-		Identities:       adaptersqliteidentity.New(db),
+		db:                  db,
+		Settings:            setting.New(db, protector...),
+		UsageEvents:         usageevent.New(db),
+		DeadLetters:         deadletter.New(db),
+		ModelPrices:         modelprice.New(db),
+		APIKeyAliases:       apikeyalias.New(db),
+		AccountActions:      accountaction.New(db),
+		CodexInspections:    codexinspection.New(db),
+		DataMigrations:      datamigration.New(db),
+		QuotaCooldowns:      quotacooldown.New(db),
+		QuotaSnapshots:      quotasnapshot.New(db),
+		UsageAggregates:     usageaggregate.New(db),
+		UsagePricing:        usagepricing.New(db),
+		UsageMonitoring:     usagemonitoring.New(db),
+		UsageRollups:        usagerollup.New(db),
+		Identities:          adaptersqliteidentity.New(db),
+		IdentityProjections: adaptersqliteidentityprojection.New(db),
 	}
 }
 
@@ -525,6 +529,13 @@ func (s *Store) CatchUpUsagePricing(ctx context.Context, limit int, nowMS int64)
 
 func (s *Store) RecordUsagePricingFailure(ctx context.Context, rollupErr error, nowMS int64) error {
 	return s.UsagePricing.RecordFailure(ctx, rollupErr, nowMS)
+}
+
+func (s *Store) CatchUpIdentityProjection(ctx context.Context, limit int, nowMS int64) (identityprojectionports.CatchUpResult, error) {
+	if s == nil || s.IdentityProjections == nil {
+		return identityprojectionports.CatchUpResult{}, nil
+	}
+	return s.IdentityProjections.CatchUp(ctx, limit, nowMS)
 }
 
 func (s *Store) CatchUpUsageMonitoringStats(ctx context.Context, limit int, nowMS int64) (UsageMonitoringCatchUpResult, error) {
