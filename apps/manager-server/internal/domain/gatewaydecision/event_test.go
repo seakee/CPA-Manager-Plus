@@ -22,7 +22,7 @@ func validEvent() QuotaDecisionEvent {
 		Metric: resourcepolicy.MetricRequest, Enforcement: resourcepolicy.EnforcementObserved,
 		Action: resourcepolicy.ActionNotify, Outcome: OutcomeWithinLimit, ReasonCode: "within_limit",
 		LimitValue: 10, ObservedValue: number(9), WindowStartMS: number(100), WindowEndMS: number(200),
-		SourceUsageEventID: 1, SourceEventHash: strings.Repeat("e", 64),
+		SourceUsageEventID: 1, SourceEventFingerprint: strings.Repeat("e", 64),
 		EvidenceTimestampMS: 150, EvaluatedAtMS: 250,
 	}
 }
@@ -136,10 +136,11 @@ func TestEventRejectsInvalidContract(t *testing.T) {
 		"notify no window": func(e *QuotaDecisionEvent) {
 			e.Outcome, e.ObservedValue, e.WindowStartMS, e.WindowEndMS = OutcomeNotifyRequired, number(10), nil, nil
 		},
-		"source id":       func(e *QuotaDecisionEvent) { e.SourceUsageEventID = 0 },
-		"source hash":     func(e *QuotaDecisionEvent) { e.SourceEventHash = strings.Repeat("A", 64) },
-		"evidence time":   func(e *QuotaDecisionEvent) { e.EvidenceTimestampMS = 0 },
-		"evaluation time": func(e *QuotaDecisionEvent) { e.EvaluatedAtMS = 0 },
+		"source id":          func(e *QuotaDecisionEvent) { e.SourceUsageEventID = 0 },
+		"source fingerprint": func(e *QuotaDecisionEvent) { e.SourceEventFingerprint = strings.Repeat("A", 64) },
+		"raw legacy event hash": func(e *QuotaDecisionEvent) { e.SourceEventFingerprint = "legacy-event-123" },
+		"evidence time":      func(e *QuotaDecisionEvent) { e.EvidenceTimestampMS = 0 },
+		"evaluation time":    func(e *QuotaDecisionEvent) { e.EvaluatedAtMS = 0 },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -20,7 +20,7 @@ func New(db *sql.DB) ports.Repository { return &repository{db: db} }
 const eventColumns = `decision_id, schema_version, dedupe_key, api_key_id, policy_id,
 	policy_revision, binding_revision, metric, enforcement, action, outcome, reason_code,
 	limit_value, observed_value, window_start_ms, window_end_ms, source_usage_event_id,
-	source_event_hash, evidence_timestamp_ms, evaluated_at_ms`
+	source_event_fingerprint, evidence_timestamp_ms, evaluated_at_ms`
 
 func (r *repository) Append(ctx context.Context, event gatewaydecision.QuotaDecisionEvent) (gatewaydecision.QuotaDecisionEvent, bool, error) {
 	if err := event.Validate(); err != nil {
@@ -31,7 +31,7 @@ func (r *repository) Append(ctx context.Context, event gatewaydecision.QuotaDeci
 		event.DecisionID, event.SchemaVersion, event.DedupeKey, event.APIKeyID, event.PolicyID,
 		event.PolicyRevision, event.BindingRevision, event.Metric, event.Enforcement, event.Action,
 		event.Outcome, event.ReasonCode, event.LimitValue, event.ObservedValue,
-		event.WindowStartMS, event.WindowEndMS, event.SourceUsageEventID, event.SourceEventHash,
+		event.WindowStartMS, event.WindowEndMS, event.SourceUsageEventID, event.SourceEventFingerprint,
 		event.EvidenceTimestampMS, event.EvaluatedAtMS)
 	if err == nil {
 		return event, true, nil
@@ -73,7 +73,7 @@ func loadEvent(row *sql.Row) (gatewaydecision.QuotaDecisionEvent, error) {
 		&event.APIKeyID, &event.PolicyID, &policyRevision, &bindingRevision, &event.Metric,
 		&event.Enforcement, &event.Action, &event.Outcome, &event.ReasonCode,
 		&event.LimitValue, &observed, &start, &end, &event.SourceUsageEventID,
-		&event.SourceEventHash, &event.EvidenceTimestampMS, &event.EvaluatedAtMS)
+		&event.SourceEventFingerprint, &event.EvidenceTimestampMS, &event.EvaluatedAtMS)
 	if errors.Is(err, sql.ErrNoRows) {
 		return gatewaydecision.QuotaDecisionEvent{}, ports.ErrNotFound
 	}

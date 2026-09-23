@@ -2,7 +2,9 @@ package decisionstore_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -35,7 +37,7 @@ func event() gatewaydecision.QuotaDecisionEvent {
 		Action: resourcepolicy.ActionNotify, Outcome: gatewaydecision.OutcomeWithinLimit,
 		ReasonCode: "within_limit", LimitValue: 10, ObservedValue: number(9),
 		WindowStartMS: number(100), WindowEndMS: number(200),
-		SourceUsageEventID: 42, SourceEventHash: strings.Repeat("e", 64),
+		SourceUsageEventID: 42, SourceEventFingerprint: strings.Repeat("e", 64),
 		EvidenceTimestampMS: 150, EvaluatedAtMS: 250,
 	}
 }
@@ -107,6 +109,44 @@ func TestAppendRoundTripMetricsAndOutcomes(t *testing.T) {
 	// Source usage event 42 was never inserted: provenance is a snapshot, not a FK.
 }
 
+func TestStoredUsageEventHashIsFingerprintInput(t *testing.T) {
+	db, repo := open(t)
+	for i, rawHash := range []string{
+		"legacy-event-123",
+		" legacy-event-123 ",
+		strings.Repeat("a", 64),
+		"future:event/历史",
+	} {
+		result, err := db.Exec(`insert into usage_events
+			(event_hash, timestamp_ms, timestamp, model, created_at_ms)
+			values (?, 150, '150', 'test-model', 150)`, rawHash)
+		if err != nil {
+			t.Fatal(err)
+		}
+		usageID, err := result.LastInsertId()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var stored string
+		if err := db.QueryRow(`select event_hash from usage_events where id = ?`, usageID).Scan(&stored); err != nil {
+			t.Fatal(err)
+		}
+		fingerprint := sha256.Sum256([]byte(stored)) // exact stored bytes, with no trim or normalization
+		e := event()
+		e.DecisionID = gatewaydecision.DecisionID(fmt.Sprintf("%032x", i+1))
+		e.DedupeKey = gatewaydecision.DedupeKey(fmt.Sprintf("%064x", i+1))
+		e.SourceUsageEventID = usageID
+		e.SourceEventFingerprint = hex.EncodeToString(fingerprint[:])
+		if _, inserted, err := repo.Append(ctx, e); err != nil || !inserted {
+			t.Fatalf("append for stored usage hash %q: inserted=%t err=%v", rawHash, inserted, err)
+		}
+		loaded, err := repo.LoadByID(ctx, e.DecisionID)
+		if err != nil || !reflect.DeepEqual(loaded, e) {
+			t.Fatalf("fingerprint for stored usage hash %q: %+v err=%v", rawHash, loaded, err)
+		}
+	}
+}
+
 func TestAppendDedupeAndRestart(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "restart.sqlite")
 	db, err := sqlite.Open(file)
@@ -135,7 +175,7 @@ func TestAppendDedupeAndRestart(t *testing.T) {
 		t.Fatalf("idempotent retry: %+v inserted=%t err=%v", got, inserted, err)
 	}
 	conflict := retry
-	conflict.SourceEventHash = strings.Repeat("0", 64)
+	conflict.SourceEventFingerprint = strings.Repeat("0", 64)
 	if _, inserted, err := repo.Append(ctx, conflict); !errors.Is(err, ports.ErrDedupeConflict) || inserted {
 		t.Fatalf("changed semantic content: inserted=%t err=%v", inserted, err)
 	}
@@ -270,7 +310,8 @@ func TestSQLiteRejectsInvalidRows(t *testing.T) {
 		{"within missing observation", "observed_value", nil},
 		{"within at limit", "observed_value", 10},
 		{"source event zero", "source_usage_event_id", 0},
-		{"source hash", "source_event_hash", strings.Repeat("A", 64)},
+		{"source fingerprint", "source_event_fingerprint", strings.Repeat("A", 64)},
+		{"raw legacy event hash", "source_event_fingerprint", "legacy-event-123"},
 		{"evidence time", "evidence_timestamp_ms", 0},
 		{"evaluation time", "evaluated_at_ms", 0},
 	}
@@ -300,12 +341,57 @@ func TestSQLiteRejectsInvalidRows(t *testing.T) {
 		select ?, schema_version, dedupe_key, api_key_id, policy_id, policy_revision,
 		binding_revision, metric, enforcement, action, outcome, reason_code,
 		limit_value, observed_value, window_start_ms, window_end_ms,
-		source_usage_event_id, source_event_hash, evidence_timestamp_ms, evaluated_at_ms
+		source_usage_event_id, source_event_fingerprint, evidence_timestamp_ms, evaluated_at_ms
 		from gateway_quota_decision_events_v1 where decision_id = ?`, strings.Repeat("f", 32), e.DecisionID); err == nil {
 		t.Fatal("SQLite accepted duplicate DedupeKey")
 	}
 	if loaded, err := repo.LoadByID(ctx, e.DecisionID); err != nil || !reflect.DeepEqual(loaded, e) || count(t, db) != 1 {
 		t.Fatalf("failed raw SQL changed event: %+v err=%v", loaded, err)
+	}
+}
+
+func TestSQLiteRejectsSameLogicalIDOrDedupeAsBlob(t *testing.T) {
+	db, repo := open(t)
+	first := event()
+	if _, _, err := repo.Append(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	// A BLOB with the same ASCII bytes compares differently from TEXT in SQLite.
+	// Both INSERTs would bypass logical uniqueness without the storage-class CHECKs.
+	copyRow := `insert into gateway_quota_decision_events_v1
+		select ?, schema_version, ?, api_key_id, policy_id, policy_revision,
+		binding_revision, metric, enforcement, action, outcome, reason_code,
+		limit_value, observed_value, window_start_ms, window_end_ms,
+		source_usage_event_id, source_event_fingerprint, evidence_timestamp_ms, evaluated_at_ms
+		from gateway_quota_decision_events_v1 where decision_id = ?`
+	if _, err := db.Exec(copyRow, []byte(first.DecisionID), strings.Repeat("f", 64), first.DecisionID); err == nil {
+		t.Fatal("SQLite allowed the same DecisionID bytes as a separate BLOB primary key")
+	}
+	if _, err := db.Exec(copyRow, strings.Repeat("f", 32), []byte(first.DedupeKey), first.DecisionID); err == nil {
+		t.Fatal("SQLite allowed the same DedupeKey bytes as a separate BLOB unique key")
+	}
+	for _, tc := range []struct {
+		column string
+		value  string
+	}{
+		{"api_key_id", first.APIKeyID.String()},
+		{"policy_id", first.PolicyID.String()},
+		{"metric", string(first.Metric)},
+		{"enforcement", string(first.Enforcement)},
+		{"action", string(first.Action)},
+		{"outcome", string(first.Outcome)},
+		{"reason_code", first.ReasonCode},
+		{"source_event_fingerprint", first.SourceEventFingerprint},
+	} {
+		if _, err := db.Exec(`update gateway_quota_decision_events_v1 set `+tc.column+` = ? where decision_id = ?`, []byte(tc.value), first.DecisionID); err == nil {
+			t.Fatalf("SQLite allowed BLOB in text column %s", tc.column)
+		}
+	}
+	if got := count(t, db); got != 1 {
+		t.Fatalf("BLOB variants created extra rows: %d", got)
+	}
+	if loaded, err := repo.LoadByID(ctx, first.DecisionID); err != nil || !reflect.DeepEqual(loaded, first) {
+		t.Fatalf("BLOB attempt altered first event: %+v err=%v", loaded, err)
 	}
 }
 
@@ -336,7 +422,7 @@ func TestSchemaOnlyAllowsApprovedColumnsAndRelationships(t *testing.T) {
 	want := strings.Fields(`decision_id schema_version dedupe_key api_key_id policy_id
 		policy_revision binding_revision metric enforcement action outcome reason_code
 		limit_value observed_value window_start_ms window_end_ms source_usage_event_id
-		source_event_hash evidence_timestamp_ms evaluated_at_ms`)
+		source_event_fingerprint evidence_timestamp_ms evaluated_at_ms`)
 	rows, err := db.Query(`pragma table_info(gateway_quota_decision_events_v1)`)
 	if err != nil {
 		t.Fatal(err)

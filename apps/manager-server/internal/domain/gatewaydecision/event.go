@@ -23,27 +23,30 @@ var ErrInvalidEvent = errors.New("invalid quota decision event")
 
 // QuotaDecisionEvent is both the decision result and its immutable audit event.
 // Cost values are integer micro-USD; request and token values are counts.
+// SourceEventFingerprint is SHA-256 of the exact bytes of the stored
+// usage_events.event_hash text. It does not copy the raw historical hash;
+// the future evaluator calculates this fingerprint from its source event.
 type QuotaDecisionEvent struct {
-	DecisionID          DecisionID
-	SchemaVersion       int64
-	DedupeKey           DedupeKey
-	APIKeyID            identity.APIKeyID
-	PolicyID            resourcepolicy.PolicyID
-	PolicyRevision      resourcepolicy.Revision
-	BindingRevision     resourcepolicy.Revision
-	Metric              resourcepolicy.Metric
-	Enforcement         resourcepolicy.Enforcement
-	Action              resourcepolicy.Action
-	Outcome             Outcome
-	ReasonCode          string
-	LimitValue          int64
-	ObservedValue       *int64
-	WindowStartMS       *int64
-	WindowEndMS         *int64
-	SourceUsageEventID  int64
-	SourceEventHash     string
-	EvidenceTimestampMS int64
-	EvaluatedAtMS       int64
+	DecisionID             DecisionID
+	SchemaVersion          int64
+	DedupeKey              DedupeKey
+	APIKeyID               identity.APIKeyID
+	PolicyID               resourcepolicy.PolicyID
+	PolicyRevision         resourcepolicy.Revision
+	BindingRevision        resourcepolicy.Revision
+	Metric                 resourcepolicy.Metric
+	Enforcement            resourcepolicy.Enforcement
+	Action                 resourcepolicy.Action
+	Outcome                Outcome
+	ReasonCode             string
+	LimitValue             int64
+	ObservedValue          *int64
+	WindowStartMS          *int64
+	WindowEndMS            *int64
+	SourceUsageEventID     int64
+	SourceEventFingerprint string
+	EvidenceTimestampMS    int64
+	EvaluatedAtMS          int64
 }
 
 func (e QuotaDecisionEvent) Validate() error {
@@ -99,7 +102,7 @@ func (e QuotaDecisionEvent) Validate() error {
 	default:
 		return fmt.Errorf("%w: unsupported outcome", ErrInvalidEvent)
 	}
-	if e.SourceUsageEventID <= 0 || !isLowerHex(e.SourceEventHash, 64) || e.EvidenceTimestampMS <= 0 || e.EvaluatedAtMS <= 0 {
+	if e.SourceUsageEventID <= 0 || !isLowerHex(e.SourceEventFingerprint, 64) || e.EvidenceTimestampMS <= 0 || e.EvaluatedAtMS <= 0 {
 		return fmt.Errorf("%w: invalid usage provenance", ErrInvalidEvent)
 	}
 	return nil
@@ -128,7 +131,7 @@ func (e QuotaDecisionEvent) SameSemanticContent(other QuotaDecisionEvent) bool {
 		e.Action == other.Action && e.Outcome == other.Outcome && e.ReasonCode == other.ReasonCode &&
 		e.LimitValue == other.LimitValue && equalOptionalInt(e.ObservedValue, other.ObservedValue) &&
 		equalOptionalInt(e.WindowStartMS, other.WindowStartMS) && equalOptionalInt(e.WindowEndMS, other.WindowEndMS) &&
-		e.SourceUsageEventID == other.SourceUsageEventID && e.SourceEventHash == other.SourceEventHash &&
+		e.SourceUsageEventID == other.SourceUsageEventID && e.SourceEventFingerprint == other.SourceEventFingerprint &&
 		e.EvidenceTimestampMS == other.EvidenceTimestampMS && e.EvaluatedAtMS == other.EvaluatedAtMS
 }
 
