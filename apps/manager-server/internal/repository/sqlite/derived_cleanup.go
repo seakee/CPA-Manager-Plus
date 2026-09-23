@@ -127,6 +127,10 @@ var derivedIndexStatements = []struct {
 	tableName string
 	sql       string
 }{
+	{"idx_gateway_api_key_binding_history_hash", GatewayAPIKeySourceBindingsTable,
+		`create index if not exists idx_gateway_api_key_binding_history_hash on gateway_api_key_source_bindings(api_key_hash)`},
+	{"idx_gateway_credential_binding_history_auth_id", GatewayCredentialSourceBindingsTable,
+		`create index if not exists idx_gateway_credential_binding_history_auth_id on gateway_credential_source_bindings(source_auth_id)`},
 	{"idx_usage_events_timestamp", "usage_events", `create index if not exists idx_usage_events_timestamp on usage_events(timestamp_ms)`},
 	{"idx_usage_events_request_id", "usage_events", `create index if not exists idx_usage_events_request_id on usage_events(request_id)`},
 	{"idx_usage_events_model", "usage_events", `create index if not exists idx_usage_events_model on usage_events(model)`},
