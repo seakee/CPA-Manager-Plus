@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CPAMP Phase3 gateway core exit contract",
+  "type": "object",
+  "required": ["$schema", "schemaVersion", "contractId", "executionBaseline", "scenarios"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "const": "./contract.schema.json" },
+    "schemaVersion": { "const": 1 },
+    "contractId": { "const": "cpamp-v2-phase3-gateway-core-exit-v1" },
+    "executionBaseline": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "scenarios": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "items": { "$ref": "#/$defs/scenario" }
+    }
+  },
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "scenario": {
+      "type": "object",
+      "required": ["id", "kind", "assertions"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "enum": ["phase3-01-canonical-identity", "phase3-02-raw-truth-projection-derived", "phase3-03-request-shadow-happy-path", "phase3-04-fail-closed-gates", "phase3-05-audit-idempotency-history", "phase3-06-token-evidence-conservative", "phase3-07-cost-authority-boundary", "phase3-08-no-overclaim"]
+        },
+        "kind": {
+          "enum": ["canonical_identity", "raw_projection", "request_shadow", "fail_closed", "audit_history", "token_evidence", "cost_boundary", "no_overclaim"]
+        },
+        "oldHash": { "$ref": "#/$defs/hash" },
+        "newHash": { "$ref": "#/$defs/hash" },
+        "apiKeyHash": { "$ref": "#/$defs/hash" },
+        "otherHash": { "$ref": "#/$defs/hash" },
+        "assertions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "api_key_id_not_source_hash", "credential_id_not_auth_id", "passive_replacement_new_id", "explicit_rotation_same_id", "superseded_terminal_nonreuse",
+              "raw_usage_unchanged", "projection_rebuilt", "checkpoint_rebuilt", "policy_decision_not_raw_authority",
+              "canonical_mapping_chain", "event_time_high_water", "api_key_isolation", "failed_request_counted", "within_limit", "notify_required", "decision_snapshot",
+              "pending_no_decision", "uncovered_no_decision", "unknown_no_decision", "ambiguous_no_decision", "stale_no_decision", "binding_missing_no_decision", "binding_disabled_no_decision", "policy_disabled_no_decision", "missing_projection_error", "corrupt_projection_error", "no_weak_identity_fallback",
+              "volatile_retry_first_persisted", "partial_append_retry", "policy_revision_new_event", "binding_revision_new_event", "projection_revision_new_event", "old_event_immutable",
+              "exact_int64_sum", "successful_zero_incomplete", "negative_incomplete", "failed_zero_complete", "overflow_nil",
+              "cost_unavailable", "float_estimate_not_authority",
+              "no_notification_delivery", "no_soft_hard_request_enforcement", "no_precise_hard_token_cost_quota", "no_reservation_settlement", "no_runtime_policy_publish_ack_reject", "no_hard_routing_fallback_pinning", "no_request_attempt_authority", "no_public_api_web_ui", "no_complete_entity_directory", "observed_notify_only"
+            ]
+          }
+        }
+      }
+    }
+  }
+}
