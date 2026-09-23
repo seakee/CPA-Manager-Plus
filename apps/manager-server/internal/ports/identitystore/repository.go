@@ -5,7 +5,21 @@ import (
 	"errors"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 )
+
+type PhysicalSourceEvidence string
+
+const (
+	PhysicalSourceUnknown PhysicalSourceEvidence = ""
+	PhysicalSourcePresent PhysicalSourceEvidence = "present"
+	PhysicalSourceAbsent  PhysicalSourceEvidence = "absent"
+)
+
+type PendingCredentialDeleteSource struct {
+	IntentID     string
+	PhysicalName string
+}
 
 var (
 	// ErrNotFound indicates that the requested canonical identity or active source binding does not exist.
@@ -23,8 +37,44 @@ var (
 	// ErrRevisionOverflow indicates that the business revision would exceed math.MaxInt64.
 	ErrRevisionOverflow = errors.New("canonical identity revision overflow")
 
-	ErrPendingAPIKeyMutation = errors.New("API-key mutation already pending for runtime")
+	ErrPendingAPIKeyMutation   = errors.New("API-key mutation already pending for runtime")
+	ErrPendingCredentialDelete = errors.New("credential delete already pending for physical file")
 )
+
+type CredentialDeleteOutcome string
+
+const (
+	CredentialDeleteSuccess    CredentialDeleteOutcome = "success"
+	CredentialDeleteNotApplied CredentialDeleteOutcome = "not_applied"
+	CredentialDeleteUnknown    CredentialDeleteOutcome = "unknown"
+)
+
+type PrepareCredentialDeleteParams struct {
+	RuntimeIdentity           string
+	ObservedRuntimeGeneration uint64
+	PhysicalName              string
+	SourceAuthIDs             []string
+	OwnerInstance             string
+	NowMS                     int64
+	RevokedOwnership          []model.CodexInspectionDisableOwnership
+}
+
+type ResolveCredentialDeleteParams struct {
+	RuntimeIdentity           string
+	ObservedRuntimeGeneration uint64
+	ObservedSourceAuthIDs     []string
+	IntentID                  string
+	NowMS                     int64
+	PhysicalEvidence          PhysicalSourceEvidence
+}
+
+type CredentialDeleteRepository interface {
+	PendingCredentialDeleteSources(ctx context.Context, runtimeIdentity string) ([]PendingCredentialDeleteSource, error)
+	CheckPendingCredentialDelete(ctx context.Context, physicalNames []string, all bool) error
+	PrepareCredentialDelete(ctx context.Context, params PrepareCredentialDeleteParams) (string, error)
+	MarkCredentialDeleteForwardComplete(ctx context.Context, intentID, ownerInstance string, nowMS int64) error
+	ResolveCredentialDelete(ctx context.Context, params ResolveCredentialDeleteParams) (CredentialDeleteOutcome, error)
+}
 
 type APIKeyMutationKind string
 
@@ -131,13 +181,14 @@ type CredentialSnapshotItem struct {
 
 // ReconcileSnapshotParams contains the coherent fenced inventory snapshot to apply.
 type ReconcileSnapshotParams struct {
-	RuntimeIdentity           string
-	ObservedRuntimeGeneration uint64
-	CaptureStartedAtMS        int64
-	ProcessInstanceID         string
-	APIKeys                   []APIKeySnapshotItem
-	Credentials               []CredentialSnapshotItem
-	NowMS                     int64
+	RuntimeIdentity                  string
+	ObservedRuntimeGeneration        uint64
+	CaptureStartedAtMS               int64
+	ProcessInstanceID                string
+	APIKeys                          []APIKeySnapshotItem
+	Credentials                      []CredentialSnapshotItem
+	CredentialDeletePhysicalEvidence map[string]PhysicalSourceEvidence
+	NowMS                            int64
 }
 
 // ReconcileSnapshotResult summarizes the mutations performed during snapshot reconciliation.

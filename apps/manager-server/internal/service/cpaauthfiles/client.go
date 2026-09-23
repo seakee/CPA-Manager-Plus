@@ -146,6 +146,35 @@ func authFileDownloadEndpoint(baseURL string, fileName string) string {
 	return baseURL + authFilesDownloadPath + "?" + query.Encode()
 }
 
+// PhysicalFileExists checks CPA's on-disk auth source. It never reads or
+// returns the download body, which can contain credential material.
+func (c *Client) PhysicalFileExists(ctx context.Context, baseURL, managementKey, fileName string) (bool, error) {
+	if fileName == "" || strings.TrimSpace(fileName) != fileName {
+		return false, errors.New("invalid physical auth file name")
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet,
+		authFileDownloadEndpoint(cpa.NormalizeBaseURL(baseURL), fileName), nil)
+	if err != nil {
+		return false, errors.New("physical auth file probe unavailable")
+	}
+	req.Header.Set("Authorization", "Bearer "+managementKey)
+	res, err := c.httpClient.Do(req)
+	if err != nil {
+		return false, errors.New("physical auth file probe unavailable")
+	}
+	defer res.Body.Close()
+	switch res.StatusCode {
+	case http.StatusOK:
+		return true, nil
+	case http.StatusNotFound:
+		return false, nil
+	default:
+		return false, errors.New("physical auth file probe inconclusive")
+	}
+}
+
 func (c *Client) Download(ctx context.Context, baseURL string, managementKey string, fileName string) ([]byte, error) {
 	fileName = strings.TrimSpace(fileName)
 	if fileName == "" {

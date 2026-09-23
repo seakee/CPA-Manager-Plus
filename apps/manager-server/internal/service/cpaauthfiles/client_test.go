@@ -12,6 +12,43 @@ import (
 	"testing"
 )
 
+type physicalProbeTransport func(*http.Request) (*http.Response, error)
+
+func (f physicalProbeTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+type unreadPhysicalBody struct {
+	t      *testing.T
+	closed bool
+}
+
+func (b *unreadPhysicalBody) Read([]byte) (int, error) {
+	b.t.Fatal("physical probe read credential content")
+	return 0, io.EOF
+}
+func (b *unreadPhysicalBody) Close() error { b.closed = true; return nil }
+
+func TestPhysicalFileExistsUsesDiskEndpointWithoutReadingCredential(t *testing.T) {
+	for _, tc := range []struct {
+		status      int
+		wantPresent bool
+		wantError   bool
+	}{
+		{http.StatusOK, true, false}, {http.StatusNotFound, false, false}, {http.StatusInternalServerError, false, true},
+	} {
+		body := &unreadPhysicalBody{t: t}
+		client := New(&http.Client{Transport: physicalProbeTransport(func(r *http.Request) (*http.Response, error) {
+			if r.URL.Path != "/v0/management/auth-files/download" || r.URL.Query().Get("name") != "shared.json" || r.Header.Get("Authorization") != "Bearer key" {
+				t.Fatalf("wrong physical probe request: %s", r.URL.Path)
+			}
+			return &http.Response{StatusCode: tc.status, Body: body, Header: make(http.Header)}, nil
+		})})
+		present, err := client.PhysicalFileExists(context.Background(), "http://cpa.test", "key", "shared.json")
+		if present != tc.wantPresent || (err != nil) != tc.wantError || !body.closed {
+			t.Fatalf("status=%d present=%t err=%v closed=%t", tc.status, present, err, body.closed)
+		}
+	}
+}
+
 func TestParseAndVerifyIdentity(t *testing.T) {
 	files, err := Parse([]byte(`{"auth_files":[{"id":"runtime-codex","name":"codex-auth.json","auth_index":"7","provider":"codex","account":"user@example.com","account_id":"acct-123","disabled":"true"}]}`))
 	if err != nil {

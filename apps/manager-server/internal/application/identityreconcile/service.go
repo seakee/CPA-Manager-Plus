@@ -22,26 +22,30 @@ type ConnectionResolver func(ctx context.Context) (baseURL string, managementKey
 // TimeSource returns the current time in milliseconds.
 type TimeSource func() int64
 
+type CredentialDeletePhysicalObserver func(context.Context, string, string, string) (map[string]ports.PhysicalSourceEvidence, error)
+
 // Service coordinates runtime-fenced passive identity reconciliation.
 type Service struct {
-	runtimeObserver    RuntimeObserver
-	connectionResolver ConnectionResolver
-	inventoryClient    identityinventory.Client
-	identityRepo       ports.Repository
-	timeSource         TimeSource
-	processInstanceID  string
-	beforeCapture      func(context.Context) error
+	runtimeObserver                  RuntimeObserver
+	connectionResolver               ConnectionResolver
+	inventoryClient                  identityinventory.Client
+	identityRepo                     ports.Repository
+	timeSource                       TimeSource
+	processInstanceID                string
+	beforeCapture                    func(context.Context) error
+	credentialDeletePhysicalObserver CredentialDeletePhysicalObserver
 }
 
 // Config holds dependencies for Service.
 type Config struct {
-	RuntimeObserver    RuntimeObserver
-	ConnectionResolver ConnectionResolver
-	InventoryClient    identityinventory.Client
-	IdentityRepo       ports.Repository
-	TimeSource         TimeSource
-	ProcessInstanceID  string
-	BeforeCapture      func(context.Context) error
+	RuntimeObserver                  RuntimeObserver
+	ConnectionResolver               ConnectionResolver
+	InventoryClient                  identityinventory.Client
+	IdentityRepo                     ports.Repository
+	TimeSource                       TimeSource
+	ProcessInstanceID                string
+	BeforeCapture                    func(context.Context) error
+	CredentialDeletePhysicalObserver CredentialDeletePhysicalObserver
 }
 
 // NewService creates a new identity reconciliation service.
@@ -65,13 +69,14 @@ func NewService(cfg Config) (*Service, error) {
 		}
 	}
 	return &Service{
-		runtimeObserver:    cfg.RuntimeObserver,
-		connectionResolver: cfg.ConnectionResolver,
-		inventoryClient:    cfg.InventoryClient,
-		identityRepo:       cfg.IdentityRepo,
-		timeSource:         ts,
-		processInstanceID:  cfg.ProcessInstanceID,
-		beforeCapture:      cfg.BeforeCapture,
+		runtimeObserver:                  cfg.RuntimeObserver,
+		connectionResolver:               cfg.ConnectionResolver,
+		inventoryClient:                  cfg.InventoryClient,
+		identityRepo:                     cfg.IdentityRepo,
+		timeSource:                       ts,
+		processInstanceID:                cfg.ProcessInstanceID,
+		beforeCapture:                    cfg.BeforeCapture,
+		credentialDeletePhysicalObserver: cfg.CredentialDeletePhysicalObserver,
 	}, nil
 }
 
@@ -146,6 +151,13 @@ func (s *Service) ReconcileOnce(ctx context.Context) (ports.ReconcileSnapshotRes
 		}
 		return ports.ReconcileSnapshotResult{}, fmt.Errorf("%w: %w", ErrCredentialInventoryFailed, err)
 	}
+	var physicalEvidence map[string]ports.PhysicalSourceEvidence
+	if s.credentialDeletePhysicalObserver != nil {
+		physicalEvidence, err = s.credentialDeletePhysicalObserver(ctx, baseURL, mgmtKey, rtIdentity)
+		if err != nil {
+			return ports.ReconcileSnapshotResult{}, fmt.Errorf("observe pending credential delete source: %w", err)
+		}
+	}
 
 	// Step 4: Post-capture Runtime Status fence
 	postStatus, err := s.runtimeObserver.Status(ctx)
@@ -192,13 +204,14 @@ func (s *Service) ReconcileOnce(ctx context.Context) (ports.ReconcileSnapshotRes
 	}
 
 	snapshotParams := ports.ReconcileSnapshotParams{
-		RuntimeIdentity:           rtIdentity,
-		ObservedRuntimeGeneration: uint64(preStatus.Generation),
-		CaptureStartedAtMS:        captureStartedAtMS,
-		ProcessInstanceID:         s.processInstanceID,
-		APIKeys:                   apiKeyItems,
-		Credentials:               credItems,
-		NowMS:                     nowMS,
+		RuntimeIdentity:                  rtIdentity,
+		ObservedRuntimeGeneration:        uint64(preStatus.Generation),
+		CaptureStartedAtMS:               captureStartedAtMS,
+		ProcessInstanceID:                s.processInstanceID,
+		APIKeys:                          apiKeyItems,
+		Credentials:                      credItems,
+		CredentialDeletePhysicalEvidence: physicalEvidence,
+		NowMS:                            nowMS,
 	}
 
 	result, err := s.identityRepo.ApplyPassiveSnapshot(ctx, snapshotParams)

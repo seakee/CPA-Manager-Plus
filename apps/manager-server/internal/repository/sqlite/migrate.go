@@ -69,11 +69,13 @@ const (
 	usageAccountModelSourceLegacy             = "usage_account_model_rollups_legacy_source_recovery"
 	usagePricingAccountSourceLegacy           = "usage_pricing_account_rollups_v1_legacy_source_recovery"
 
-	GatewayAPIKeyIdentitiesTable         = "gateway_api_key_identities"
-	GatewayAPIKeyMutationIntentsTable    = "gateway_api_key_mutation_intents"
-	GatewayCredentialIdentitiesTable     = "gateway_credential_identities"
-	GatewayAPIKeySourceBindingsTable     = "gateway_api_key_source_bindings"
-	GatewayCredentialSourceBindingsTable = "gateway_credential_source_bindings"
+	GatewayAPIKeyIdentitiesTable            = "gateway_api_key_identities"
+	GatewayAPIKeyMutationIntentsTable       = "gateway_api_key_mutation_intents"
+	GatewayCredentialIdentitiesTable        = "gateway_credential_identities"
+	GatewayAPIKeySourceBindingsTable        = "gateway_api_key_source_bindings"
+	GatewayCredentialSourceBindingsTable    = "gateway_credential_source_bindings"
+	GatewayCredentialDeleteIntentsTable     = "gateway_credential_delete_intents"
+	GatewayCredentialDeleteIntentItemsTable = "gateway_credential_delete_intent_items"
 
 	createUsageAccountModelRollupsTable = `create table if not exists usage_account_model_rollups (
 		account_key text not null,
@@ -996,6 +998,26 @@ func Migrate(db *sql.DB) error {
 			retired_at_ms integer,
 			foreign key(credential_id) references gateway_credential_identities(id) on delete restrict
 		)`,
+		`create table if not exists gateway_credential_delete_intents (
+			id text primary key,
+			runtime_identity text not null check(length(runtime_identity) > 0 and trim(runtime_identity) = runtime_identity),
+			observed_runtime_generation text not null check(length(observed_runtime_generation) > 0),
+			physical_name text not null check(length(physical_name) > 0 and trim(physical_name) = physical_name),
+			owner_instance text not null check(length(owner_instance) > 0),
+			created_at_ms integer not null check(created_at_ms > 0),
+			forward_completed_at_ms integer check(forward_completed_at_ms is null or forward_completed_at_ms >= created_at_ms),
+			revoked_ownership_json text not null default '[]',
+			unique(runtime_identity, physical_name)
+		)`,
+		`create table if not exists gateway_credential_delete_intent_items (
+			intent_id text not null,
+			credential_id text not null unique,
+			source_auth_id text not null check(length(source_auth_id) > 0 and trim(source_auth_id) = source_auth_id),
+			expected_revision integer not null check(expected_revision > 0),
+			primary key(intent_id, source_auth_id),
+			foreign key(intent_id) references gateway_credential_delete_intents(id) on delete cascade,
+			foreign key(credential_id) references gateway_credential_identities(id) on delete restrict
+		)`,
 		`create unique index if not exists idx_gateway_api_key_source_active
 			on gateway_api_key_source_bindings(runtime_identity, api_key_hash)
 			where retired_at_ms is null`,
@@ -1036,6 +1058,9 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 	if err := ensureCodexInspectionOwnershipColumns(db); err != nil {
+		return err
+	}
+	if err := ensureCredentialDeleteOwnershipColumn(db); err != nil {
 		return err
 	}
 	if err := ensureAccountActionCandidateColumns(db); err != nil {
@@ -2449,6 +2474,33 @@ func ensureUsageDataMigrationColumns(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func ensureCredentialDeleteOwnershipColumn(db *sql.DB) error {
+	rows, err := db.Query(`pragma table_info(gateway_credential_delete_intents)`)
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, typ string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "revoked_ownership_json" {
+			found = true
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil || found {
+		return err
+	}
+	_, err = db.Exec(`alter table gateway_credential_delete_intents add column revoked_ownership_json text not null default '[]'`)
+	return err
 }
 
 func ensureCodexInspectionOwnershipColumns(db *sql.DB) error {

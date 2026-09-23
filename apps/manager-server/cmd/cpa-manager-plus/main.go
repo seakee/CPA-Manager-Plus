@@ -17,6 +17,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/adapters/cpaidentityinventory"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/credentialdeletemutation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/identitymutation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/identityreconcile"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
@@ -35,6 +36,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	bootstrapservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrap"
 	collectorservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/collector"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
 	cpaupdateservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaupdate"
 	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
@@ -261,6 +263,7 @@ func runServer() {
 	codexInspectionWorker := worker.NewCodexInspectionWorker(serverApp.AppContext().Store, serverApp.AppContext().CodexInspectionService)
 	var identityProcessInstanceID string
 	var mutationSvc *identitymutation.Service
+	var credentialDeleteSvc *credentialdeletemutation.Service
 	identityClock := identitymutation.NewMonotonicMillis(nil)
 	if cfg.EmbeddedRuntimeConfigured() {
 		instanceID, err := identity.NewAPIKeyID()
@@ -283,6 +286,20 @@ func runServer() {
 			log.Fatalf("initialize API-key mutation service: %v", err)
 		}
 		serverApp.AppContext().ProxyService.SetAPIKeyMutationService(mutationSvc)
+		credentialRepo, ok := db.Identities.(identitystoreports.CredentialDeleteRepository)
+		if !ok {
+			log.Fatal("identity store does not support credential delete intents")
+		}
+		credentialDeleteSvc, err = credentialdeletemutation.NewService(credentialdeletemutation.Config{
+			RuntimeObserver:   runtimeClient,
+			Repository:        credentialRepo,
+			ProcessInstanceID: identityProcessInstanceID,
+			TimeSource:        identityClock,
+		})
+		if err != nil {
+			log.Fatalf("initialize credential delete service: %v", err)
+		}
+		serverApp.AppContext().ProxyService.SetCredentialDeleteService(credentialDeleteSvc)
 	}
 	serverResult := make(chan error, 1)
 	go serveHTTPServer(server, listener, stop, serverResult)
@@ -312,7 +329,30 @@ func runServer() {
 			IdentityRepo:      db.Identities,
 			ProcessInstanceID: identityProcessInstanceID,
 			TimeSource:        identityClock,
-			BeforeCapture:     mutationSvc.RetryForwardCompletions,
+			BeforeCapture: func(captureCtx context.Context) error {
+				return retryIdentityForwardCompletions(captureCtx,
+					mutationSvc.RetryForwardCompletions, credentialDeleteSvc.RetryForwardCompletions)
+			},
+			CredentialDeletePhysicalObserver: func(captureCtx context.Context, baseURL, managementKey, runtimeIdentity string) (map[string]identitystoreports.PhysicalSourceEvidence, error) {
+				pending, err := credentialDeleteSvc.PendingPhysicalSources(captureCtx, runtimeIdentity)
+				if err != nil {
+					return nil, err
+				}
+				evidence := make(map[string]identitystoreports.PhysicalSourceEvidence, len(pending))
+				client := cpaauthfiles.New(nil)
+				for _, item := range pending {
+					present, probeErr := client.PhysicalFileExists(captureCtx, baseURL, managementKey, item.PhysicalName)
+					if probeErr != nil {
+						continue
+					}
+					if present {
+						evidence[item.IntentID] = identitystoreports.PhysicalSourcePresent
+					} else {
+						evidence[item.IntentID] = identitystoreports.PhysicalSourceAbsent
+					}
+				}
+				return evidence, nil
+			},
 		})
 		if err != nil {
 			log.Fatalf("initialize identity reconcile service: %v", err)
@@ -380,6 +420,12 @@ func runServer() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown: %v", err)
 	}
+}
+
+func retryIdentityForwardCompletions(ctx context.Context, apiKeyRetry, credentialRetry func(context.Context) error) error {
+	apiKeyErr := apiKeyRetry(ctx)
+	credentialErr := credentialRetry(ctx)
+	return errors.Join(apiKeyErr, credentialErr)
 }
 
 func serveHTTPServer(server *http.Server, listener net.Listener, stop context.CancelFunc, result chan<- error) {
