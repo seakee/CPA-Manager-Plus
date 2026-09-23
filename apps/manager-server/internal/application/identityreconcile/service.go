@@ -29,6 +29,8 @@ type Service struct {
 	inventoryClient    identityinventory.Client
 	identityRepo       ports.Repository
 	timeSource         TimeSource
+	processInstanceID  string
+	beforeCapture      func(context.Context) error
 }
 
 // Config holds dependencies for Service.
@@ -38,6 +40,8 @@ type Config struct {
 	InventoryClient    identityinventory.Client
 	IdentityRepo       ports.Repository
 	TimeSource         TimeSource
+	ProcessInstanceID  string
+	BeforeCapture      func(context.Context) error
 }
 
 // NewService creates a new identity reconciliation service.
@@ -66,6 +70,8 @@ func NewService(cfg Config) (*Service, error) {
 		inventoryClient:    cfg.InventoryClient,
 		identityRepo:       cfg.IdentityRepo,
 		timeSource:         ts,
+		processInstanceID:  cfg.ProcessInstanceID,
+		beforeCapture:      cfg.BeforeCapture,
 	}, nil
 }
 
@@ -110,6 +116,18 @@ func (s *Service) ReconcileOnce(ctx context.Context) (ports.ReconcileSnapshotRes
 	mgmtKey = strings.TrimSpace(mgmtKey)
 	if baseURL == "" || mgmtKey == "" {
 		return ports.ReconcileSnapshotResult{}, fmt.Errorf("%w: missing base URL or management key", ErrConnectionResolutionFailed)
+	}
+
+	// Capture start is recorded before network reads so a snapshot captured
+	// before an intent/forward-completion commit cannot resolve that intent.
+	if s.beforeCapture != nil {
+		// Marker persistence may still be unavailable. The pending intent then
+		// suppresses its sources while unrelated sources continue reconciling.
+		_ = s.beforeCapture(ctx)
+	}
+	captureStartedAtMS := s.timeSource()
+	if captureStartedAtMS <= 0 {
+		captureStartedAtMS = time.Now().UnixMilli()
 	}
 
 	// Step 3: Fetch both inventories using the resolved immutable connection
@@ -176,6 +194,8 @@ func (s *Service) ReconcileOnce(ctx context.Context) (ports.ReconcileSnapshotRes
 	snapshotParams := ports.ReconcileSnapshotParams{
 		RuntimeIdentity:           rtIdentity,
 		ObservedRuntimeGeneration: uint64(preStatus.Generation),
+		CaptureStartedAtMS:        captureStartedAtMS,
+		ProcessInstanceID:         s.processInstanceID,
 		APIKeys:                   apiKeyItems,
 		Credentials:               credItems,
 		NowMS:                     nowMS,

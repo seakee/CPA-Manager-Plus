@@ -17,6 +17,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/adapters/cpaidentityinventory"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/identitymutation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/identityreconcile"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/adminreset"
@@ -25,8 +26,10 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/managerdatasnapshot"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/runtimeconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/httpapi"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	identitystoreports "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/ports/identitystore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
@@ -256,6 +259,31 @@ func runServer() {
 	}
 	log.Printf("cpa-manager-plus listening on %s", listener.Addr())
 	codexInspectionWorker := worker.NewCodexInspectionWorker(serverApp.AppContext().Store, serverApp.AppContext().CodexInspectionService)
+	var identityProcessInstanceID string
+	var mutationSvc *identitymutation.Service
+	identityClock := identitymutation.NewMonotonicMillis(nil)
+	if cfg.EmbeddedRuntimeConfigured() {
+		instanceID, err := identity.NewAPIKeyID()
+		if err != nil {
+			log.Fatalf("create identity process instance: %v", err)
+		}
+		identityProcessInstanceID = string(instanceID)
+		mutationRepo, ok := db.Identities.(identitystoreports.MutationRepository)
+		if !ok {
+			log.Fatal("identity store does not support API-key mutation intents")
+		}
+		mutationSvc, err = identitymutation.NewService(identitymutation.Config{
+			RuntimeObserver:   runtimeClient,
+			InventoryClient:   cpaidentityinventory.New(nil, nil),
+			Repository:        mutationRepo,
+			ProcessInstanceID: identityProcessInstanceID,
+			TimeSource:        identityClock,
+		})
+		if err != nil {
+			log.Fatalf("initialize API-key mutation service: %v", err)
+		}
+		serverApp.AppContext().ProxyService.SetAPIKeyMutationService(mutationSvc)
+	}
 	serverResult := make(chan error, 1)
 	go serveHTTPServer(server, listener, stop, serverResult)
 	if cfg.EmbeddedRuntimeConfigured() {
@@ -280,8 +308,11 @@ func runServer() {
 				}
 				return setup.CPAUpstreamURL, setup.ManagementKey, nil
 			},
-			InventoryClient: cpaidentityinventory.New(nil, nil),
-			IdentityRepo:    db.Identities,
+			InventoryClient:   cpaidentityinventory.New(nil, nil),
+			IdentityRepo:      db.Identities,
+			ProcessInstanceID: identityProcessInstanceID,
+			TimeSource:        identityClock,
+			BeforeCapture:     mutationSvc.RetryForwardCompletions,
 		})
 		if err != nil {
 			log.Fatalf("initialize identity reconcile service: %v", err)

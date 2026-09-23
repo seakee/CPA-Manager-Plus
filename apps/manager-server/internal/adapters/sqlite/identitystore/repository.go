@@ -744,6 +744,13 @@ func (r *repository) ApplyPassiveSnapshot(ctx context.Context, params ports.Reco
 
 	var result ports.ReconcileSnapshotResult
 
+	suppressedAPIKeys, err := resolvePassivePending(ctx, tx, params.RuntimeIdentity,
+		params.ProcessInstanceID, params.CaptureStartedAtMS, uniqueAPIKeys,
+		params.ObservedRuntimeGeneration, params.NowMS)
+	if err != nil {
+		return ports.ReconcileSnapshotResult{}, fmt.Errorf("resolve pending API-key mutation: %w", err)
+	}
+
 	// --- 1. Reconcile API Keys ---
 	type existingAPIKey struct {
 		entity  identity.APIKeyIdentity
@@ -835,6 +842,9 @@ func (r *repository) ApplyPassiveSnapshot(ctx context.Context, params ports.Reco
 
 	// Process present API keys
 	for hash := range uniqueAPIKeys {
+		if _, suppressed := suppressedAPIKeys[hash]; suppressed {
+			continue
+		}
 		if existing, exists := existingAPIKeys[hash]; exists {
 			switch existing.entity.Lifecycle {
 			case identity.LifecycleActive:
@@ -912,6 +922,9 @@ func (r *repository) ApplyPassiveSnapshot(ctx context.Context, params ports.Reco
 
 	// Negative evidence for API keys: active sources absent from snapshot transition to missing
 	for hash, existing := range existingAPIKeys {
+		if _, suppressed := suppressedAPIKeys[hash]; suppressed {
+			continue
+		}
 		if _, present := uniqueAPIKeys[hash]; !present {
 			if existing.entity.Lifecycle == identity.LifecycleActive {
 				if existing.entity.Revision >= math.MaxInt64 {

@@ -16,8 +16,10 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/identitymutation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
@@ -28,6 +30,8 @@ type Service struct {
 	managerConfigService *managerconfig.Service
 	store                *store.Store
 	authFileMutations    *cpaauthfiles.MutationCoordinator
+	apiKeyMutations      *identitymutation.Service
+	apiKeyMutationMu     sync.Mutex
 }
 
 type authFileOwnershipMutation struct {
@@ -100,6 +104,7 @@ var cpaBuiltinManagementPathHeads = map[string]struct{}{
 	"account-action-candidates": {},
 	"accounts":                  {},
 	"api-call":                  {},
+	"api-keys":                  {},
 	"api-key-aliases":           {},
 	"api-key-usage":             {},
 	"auth-files":                {},
@@ -135,6 +140,12 @@ func NewWithMutationCoordinator(
 		service.store = stores[0]
 	}
 	return service
+}
+
+// SetAPIKeyMutationService enables Embedded-only explicit API-key identity
+// handling before the HTTP server begins accepting requests.
+func (s *Service) SetAPIKeyMutationService(mutations *identitymutation.Service) {
+	s.apiKeyMutations = mutations
 }
 
 func (s *Service) ProxyManagement(w http.ResponseWriter, r *http.Request, writeError func(http.ResponseWriter, int, error)) {
@@ -241,7 +252,30 @@ func (s *Service) proxyToSavedSetup(w http.ResponseWriter, r *http.Request, writ
 	if ownershipMutation.clearAll {
 		ownershipMutation.fileNames = ownershipFileNames(revokedOwnership)
 	}
+	if s.apiKeyMutations != nil && isAPIKeyMutationRequest(r) {
+		s.apiKeyMutationMu.Lock()
+		defer s.apiKeyMutationMu.Unlock()
+	}
+	apiKeyIntentID, err := s.prepareAPIKeyMutation(r.Context(), setup, r)
+	if err != nil {
+		status := http.StatusConflict
+		if errors.Is(err, identitymutation.ErrRuntimeFence) {
+			status = http.StatusBadGateway
+		}
+		writeError(w, status, err)
+		return
+	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	if apiKeyIntentID != "" {
+		baseTransport := proxy.Transport
+		if baseTransport == nil {
+			baseTransport = http.DefaultTransport
+		}
+		proxy.Transport = apiKeyMutationTransport{
+			base: baseTransport, mutations: s.apiKeyMutations, intentID: apiKeyIntentID,
+			baseURL: setup.CPAUpstreamURL, managementKey: setup.ManagementKey,
+		}
+	}
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req)

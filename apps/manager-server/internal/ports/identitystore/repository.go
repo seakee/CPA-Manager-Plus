@@ -22,7 +22,62 @@ var (
 
 	// ErrRevisionOverflow indicates that the business revision would exceed math.MaxInt64.
 	ErrRevisionOverflow = errors.New("canonical identity revision overflow")
+
+	ErrPendingAPIKeyMutation = errors.New("API-key mutation already pending for runtime")
 )
+
+type APIKeyMutationKind string
+
+const (
+	APIKeyMutationRotate APIKeyMutationKind = "rotate"
+	APIKeyMutationDelete APIKeyMutationKind = "delete"
+)
+
+type APIKeyMutationOutcome string
+
+const (
+	APIKeyMutationNone       APIKeyMutationOutcome = "none"
+	APIKeyMutationSuccess    APIKeyMutationOutcome = "success"
+	APIKeyMutationNotApplied APIKeyMutationOutcome = "not_applied"
+	APIKeyMutationUnknown    APIKeyMutationOutcome = "unknown"
+)
+
+// APIKeyMutationEvidence contains hashes and counts only. Raw keys stay at the
+// proxy/CPA transport boundary.
+type APIKeyMutationEvidence struct {
+	OldHash            string
+	NewHash            string
+	ExactOldCount      int
+	NormalizedOldCount int
+	NormalizedNewCount int
+}
+
+type PrepareAPIKeyMutationParams struct {
+	Kind                      APIKeyMutationKind
+	RuntimeIdentity           string
+	ObservedRuntimeGeneration uint64
+	Evidence                  APIKeyMutationEvidence
+	OwnerInstance             string
+	NowMS                     int64
+}
+
+type ResolveAPIKeyMutationParams struct {
+	RuntimeIdentity           string
+	ObservedRuntimeGeneration uint64
+	ObservedHashes            []string
+	NowMS                     int64
+	IntentID                  string
+}
+
+// MutationRepository is implemented by the same SQLite adapter as Repository.
+// It keeps purpose-built mutation methods out of passive-reconciliation fakes.
+type MutationRepository interface {
+	HasPendingAPIKeyMutation(ctx context.Context, runtimeIdentity string) (bool, error)
+	HasAnyPendingAPIKeyMutation(ctx context.Context) (bool, error)
+	PrepareAPIKeyMutation(ctx context.Context, params PrepareAPIKeyMutationParams) (string, error)
+	MarkAPIKeyMutationForwardComplete(ctx context.Context, intentID, ownerInstance string, nowMS int64) error
+	ResolveAPIKeyMutation(ctx context.Context, params ResolveAPIKeyMutationParams) (APIKeyMutationOutcome, error)
+}
 
 // Repository is the storage port for canonical identities and source bindings.
 type Repository interface {
@@ -78,6 +133,8 @@ type CredentialSnapshotItem struct {
 type ReconcileSnapshotParams struct {
 	RuntimeIdentity           string
 	ObservedRuntimeGeneration uint64
+	CaptureStartedAtMS        int64
+	ProcessInstanceID         string
 	APIKeys                   []APIKeySnapshotItem
 	Credentials               []CredentialSnapshotItem
 	NowMS                     int64
