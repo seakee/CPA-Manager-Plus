@@ -1059,6 +1059,7 @@ func Migrate(db *sql.DB) error {
 			last_processed_event_id integer not null default 0,
 			target_event_id integer not null default 0,
 			processed_events integer not null default 0,
+			binding_revision integer not null default -1,
 			last_run_started_at_ms integer,
 			updated_at_ms integer not null default 0,
 			finished_at_ms integer,
@@ -1067,11 +1068,19 @@ func Migrate(db *sql.DB) error {
 		`insert or ignore into gateway_usage_identity_projection_state (
 			state_name, schema_version, status, last_processed_event_id, target_event_id, processed_events, updated_at_ms
 		) values ('canonical_identity_v1', 1, 'pending', 0, 0, 0, 0)`,
+		`create table if not exists gateway_source_binding_revision (
+			id integer primary key check(id = 1),
+			revision integer not null default 0
+		)`,
+		`insert or ignore into gateway_source_binding_revision (id, revision) values (1, 0)`,
 	}
 	for _, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {
 			return err
 		}
+	}
+	if err := ensureGatewaySourceBindingRevision(db); err != nil {
+		return err
 	}
 	if err := ensureUsageAccountModelRollupPrimaryKeys(db); err != nil {
 		return err
@@ -1128,6 +1137,81 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 	return ensureModelPriceColumns(db)
+}
+
+// Binding revision changes only when fields used by temporal identity mapping change.
+// A retained projection checkpoint from before this column was added starts at -1,
+// so its first catch-up reprojects history in bounded batches.
+func ensureGatewaySourceBindingRevision(db *sql.DB) error {
+	rows, err := db.Query(`pragma table_info(gateway_usage_identity_projection_state)`)
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, typ string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return err
+		}
+		found = found || name == "binding_revision"
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	if !found {
+		if _, err := db.Exec(`alter table gateway_usage_identity_projection_state add column binding_revision integer not null default -1`); err != nil {
+			return fmt.Errorf("add projection binding revision: %w", err)
+		}
+	}
+
+	for _, statement := range []string{
+		`create trigger if not exists gateway_api_key_binding_revision_insert
+			after insert on gateway_api_key_source_bindings begin
+			update gateway_source_binding_revision set revision = revision + 1 where id = 1;
+		end`,
+		`create trigger if not exists gateway_api_key_binding_revision_update
+			after update on gateway_api_key_source_bindings
+			when old.api_key_id is not new.api_key_id
+				or old.runtime_identity is not new.runtime_identity
+				or old.api_key_hash is not new.api_key_hash
+				or old.first_seen_at_ms is not new.first_seen_at_ms
+				or old.retired_at_ms is not new.retired_at_ms
+			begin
+				update gateway_source_binding_revision set revision = revision + 1 where id = 1;
+			end`,
+		`create trigger if not exists gateway_api_key_binding_revision_delete
+			after delete on gateway_api_key_source_bindings begin
+			update gateway_source_binding_revision set revision = revision + 1 where id = 1;
+		end`,
+		`create trigger if not exists gateway_credential_binding_revision_insert
+			after insert on gateway_credential_source_bindings begin
+			update gateway_source_binding_revision set revision = revision + 1 where id = 1;
+		end`,
+		`create trigger if not exists gateway_credential_binding_revision_update
+			after update on gateway_credential_source_bindings
+			when old.credential_id is not new.credential_id
+				or old.runtime_identity is not new.runtime_identity
+				or old.source_auth_id is not new.source_auth_id
+				or old.first_seen_at_ms is not new.first_seen_at_ms
+				or old.retired_at_ms is not new.retired_at_ms
+			begin
+				update gateway_source_binding_revision set revision = revision + 1 where id = 1;
+			end`,
+		`create trigger if not exists gateway_credential_binding_revision_delete
+			after delete on gateway_credential_source_bindings begin
+			update gateway_source_binding_revision set revision = revision + 1 where id = 1;
+		end`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			return fmt.Errorf("install source binding revision trigger: %w", err)
+		}
+	}
+	return nil
 }
 
 func ensureLegacyQuotaSnapshotMigrationState(db *sql.DB) error {

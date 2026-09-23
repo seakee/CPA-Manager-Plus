@@ -608,6 +608,178 @@ func TestBoundedBatchesAndCheckpointResume(t *testing.T) {
 	}
 }
 
+func TestBindingHistoryChangeConvergesWithCleanRebuild(t *testing.T) {
+	db, repo := setupTestDB(t)
+	ctx := context.Background()
+	hash := sha256Hex("late-key")
+	for id, timestamp := range []int64{100, 250} {
+		insertTestUsageEvent(t, db, int64(id+1), fmt.Sprintf("late-%d", id), "req", timestamp, hash, `{"auth_id":"late-auth"}`)
+	}
+	if _, err := repo.CatchUp(ctx, 10, 300); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := repo.GetProjectionByEventID(ctx, 1)
+	if err != nil || initial == nil || initial.APIKeyState != ports.StateUnknown || initial.CredentialState != ports.StateUnknown {
+		t.Fatalf("initial projection = %+v, err = %v", initial, err)
+	}
+
+	insertTestAPIKeyIdentity(t, db, "late-key-id")
+	insertTestCredentialIdentity(t, db, "late-credential-id")
+	insertTestAPIKeyBinding(t, db, "late-key-id", "rt-1", hash, 200, nil)
+	insertTestCredentialBinding(t, db, "late-credential-id", "rt-1", "late-auth", 200, nil)
+
+	first, err := repo.CatchUp(ctx, 1, 400)
+	if err != nil || !first.Rebuilt || first.Processed != 1 || !first.Pending {
+		t.Fatalf("first bounded reprojection = %+v, err = %v", first, err)
+	}
+	if _, err := repo.CatchUp(ctx, 1, 401); err != nil {
+		t.Fatal(err)
+	}
+	stale, _ := repo.GetProjectionByEventID(ctx, 1)
+	mapped, _ := repo.GetProjectionByEventID(ctx, 2)
+	if stale.APIKeyState != ports.StateStale || stale.CredentialState != ports.StateStale ||
+		mapped.APIKeyState != ports.StateMapped || mapped.CredentialState != ports.StateMapped {
+		t.Fatalf("late binding projections: first=%+v second=%+v", stale, mapped)
+	}
+
+	// A semantic update must also reproject rows already behind the checkpoint.
+	if _, err := db.Exec(`UPDATE gateway_api_key_source_bindings SET first_seen_at_ms = 50 WHERE api_key_hash = ?`, hash); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE gateway_credential_source_bindings SET first_seen_at_ms = 50 WHERE source_auth_id = 'late-auth'`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := repo.CatchUp(ctx, 1, 500); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var incremental [2]*ports.UsageIdentityProjection
+	for id := int64(1); id <= 2; id++ {
+		incremental[id-1], err = repo.GetProjectionByEventID(ctx, id)
+		if err != nil || incremental[id-1].APIKeyState != ports.StateMapped || incremental[id-1].CredentialState != ports.StateMapped {
+			t.Fatalf("incremental projection %d = %+v, err = %v", id, incremental[id-1], err)
+		}
+	}
+
+	if err := repo.Reset(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.CatchUp(ctx, 10, 600); err != nil {
+		t.Fatal(err)
+	}
+	for id := int64(1); id <= 2; id++ {
+		rebuilt, err := repo.GetProjectionByEventID(ctx, id)
+		if err != nil || rebuilt == nil {
+			t.Fatalf("clean rebuild projection %d = %+v, err = %v", id, rebuilt, err)
+		}
+		prior := incremental[id-1]
+		if rebuilt.APIKeyState != prior.APIKeyState || rebuilt.CredentialState != prior.CredentialState ||
+			*rebuilt.APIKeyID != *prior.APIKeyID || *rebuilt.CredentialID != *prior.CredentialID {
+			t.Fatalf("incremental and rebuild differ: incremental=%+v rebuilt=%+v", prior, rebuilt)
+		}
+	}
+}
+
+func TestCatchUpHonorsSnapshotTarget(t *testing.T) {
+	db, repo := setupTestDB(t)
+	ctx := context.Background()
+	if _, err := repo.CatchUp(ctx, 10, 100); err != nil {
+		t.Fatal(err)
+	}
+	for id := int64(1); id <= 3; id++ {
+		insertTestUsageEvent(t, db, id, fmt.Sprintf("target-%d", id), "req", 100+id, "", "{}")
+	}
+	if _, err := db.Exec(`UPDATE gateway_usage_identity_projection_state SET target_event_id = 2`); err != nil {
+		t.Fatal(err)
+	}
+	first, err := repo.CatchUp(ctx, 10, 200)
+	if err != nil || first.Processed != 2 || first.TargetEventID != 2 || first.LastProcessedEventID != 2 || !first.Pending {
+		t.Fatalf("bounded target result = %+v, err = %v", first, err)
+	}
+	if projection, err := repo.GetProjectionByEventID(ctx, 3); err != nil || projection != nil {
+		t.Fatalf("event beyond target projected: %+v, err = %v", projection, err)
+	}
+	second, err := repo.CatchUp(ctx, 10, 201)
+	if err != nil || second.Processed != 1 || second.TargetEventID != 3 || second.LastProcessedEventID != 3 || second.Pending {
+		t.Fatalf("next snapshot result = %+v, err = %v", second, err)
+	}
+}
+
+func TestBindingRetirementReprojectsButLastSeenDoesNot(t *testing.T) {
+	db, repo := setupTestDB(t)
+	ctx := context.Background()
+	hash := sha256Hex("retired-key")
+	insertTestAPIKeyIdentity(t, db, "retired-key-id")
+	insertTestCredentialIdentity(t, db, "retired-credential-id")
+	insertTestAPIKeyBinding(t, db, "retired-key-id", "rt-1", hash, 100, nil)
+	insertTestCredentialBinding(t, db, "retired-credential-id", "rt-1", "retired-auth", 100, nil)
+	insertTestUsageEvent(t, db, 1, "retired-event", "req", 200, hash, `{"auth_id":"retired-auth"}`)
+	if _, err := repo.CatchUp(ctx, 10, 300); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE gateway_api_key_source_bindings SET last_seen_at_ms = 210 WHERE api_key_hash = ?`, hash); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE gateway_credential_source_bindings SET last_seen_at_ms = 210 WHERE source_auth_id = 'retired-auth'`); err != nil {
+		t.Fatal(err)
+	}
+	unchanged, err := repo.CatchUp(ctx, 10, 301)
+	if err != nil || unchanged.Processed != 0 || unchanged.Rebuilt {
+		t.Fatalf("last_seen-only catch-up = %+v, err = %v", unchanged, err)
+	}
+	if _, err := db.Exec(`UPDATE gateway_api_key_source_bindings SET retired_at_ms = 150 WHERE api_key_hash = ?`, hash); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE gateway_credential_source_bindings SET retired_at_ms = 150 WHERE source_auth_id = 'retired-auth'`); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := repo.CatchUp(ctx, 10, 302)
+	if err != nil || !changed.Rebuilt || changed.Processed != 1 {
+		t.Fatalf("retirement catch-up = %+v, err = %v", changed, err)
+	}
+	projection, err := repo.GetProjectionByEventID(ctx, 1)
+	if err != nil || projection == nil || projection.APIKeyState != ports.StateStale || projection.CredentialState != ports.StateStale {
+		t.Fatalf("retired projection = %+v, err = %v", projection, err)
+	}
+}
+
+func TestInterruptedBatchRollsBackAndResumes(t *testing.T) {
+	db, repo := setupTestDB(t)
+	ctx := context.Background()
+	for id := int64(1); id <= 3; id++ {
+		insertTestUsageEvent(t, db, id, fmt.Sprintf("interrupted-%d", id), "req", 100+id, "", "{}")
+	}
+	if _, err := repo.CatchUp(ctx, 1, 200); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER interrupt_projection_batch BEFORE INSERT ON gateway_usage_identity_projection_v1
+		WHEN NEW.usage_event_id = 3 BEGIN SELECT RAISE(ABORT, 'injected batch interruption'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.CatchUp(ctx, 2, 201); err == nil {
+		t.Fatal("batch should fail after writing event 2")
+	}
+	state, err := repo.GetState(ctx)
+	if err != nil || state.LastProcessedEventID != 1 || state.ProcessedEvents != 1 {
+		t.Fatalf("checkpoint after rollback = %+v, err = %v", state, err)
+	}
+	if projection, err := repo.GetProjectionByEventID(ctx, 2); err != nil || projection != nil {
+		t.Fatalf("partial event 2 projection survived rollback: %+v, err = %v", projection, err)
+	}
+	if _, err := db.Exec(`DROP TRIGGER interrupt_projection_batch`); err != nil {
+		t.Fatal(err)
+	}
+	restarted := New(db)
+	if result, err := restarted.CatchUp(ctx, 2, 202); err != nil || result.Processed != 2 || result.LastProcessedEventID != 3 {
+		t.Fatalf("resume result = %+v, err = %v", result, err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM gateway_usage_identity_projection_v1`).Scan(&count); err != nil || count != 3 {
+		t.Fatalf("projection count after resume = %d, err = %v", count, err)
+	}
+}
+
 // 17. Replay 不产生重复 projection
 func TestReplayIdempotence(t *testing.T) {
 	db, repo := setupTestDB(t)

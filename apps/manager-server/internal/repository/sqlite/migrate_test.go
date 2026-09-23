@@ -68,6 +68,57 @@ func TestUsageDataMigrationInitialStateMatchesExistingUsageData(t *testing.T) {
 	}
 }
 
+func TestLegacyIdentityProjectionStateGetsBindingRevision(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "legacy-projection.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`create table gateway_usage_identity_projection_state (
+		state_name text primary key,
+		schema_version integer not null,
+		status text not null,
+		last_processed_event_id integer not null default 0,
+		target_event_id integer not null default 0,
+		processed_events integer not null default 0,
+		last_run_started_at_ms integer,
+		updated_at_ms integer not null default 0,
+		finished_at_ms integer,
+		last_error text
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into gateway_usage_identity_projection_state
+		(state_name, schema_version, status, last_processed_event_id, target_event_id, processed_events)
+		values ('canonical_identity_v1', 1, 'ready', 7, 7, 7)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(db); err != nil {
+		t.Fatalf("migrate legacy checkpoint: %v", err)
+	}
+	if err := Migrate(db); err != nil {
+		t.Fatalf("repeat migration: %v", err)
+	}
+	var bindingRevision int64
+	if err := db.QueryRow(`select binding_revision from gateway_usage_identity_projection_state
+		where state_name = 'canonical_identity_v1'`).Scan(&bindingRevision); err != nil || bindingRevision != -1 {
+		t.Fatalf("legacy checkpoint binding revision = %d, err = %v", bindingRevision, err)
+	}
+	if _, err := db.Exec(`insert into gateway_api_key_identities
+		(id, revision, lifecycle, created_at_ms, updated_at_ms) values ('key', 1, 'active', 1, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into gateway_api_key_source_bindings
+		(api_key_id, runtime_identity, api_key_hash, first_seen_at_ms, last_seen_at_ms)
+		values ('key', 'runtime', 'hash', 1, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	var sourceRevision int64
+	if err := db.QueryRow(`select revision from gateway_source_binding_revision where id = 1`).Scan(&sourceRevision); err != nil || sourceRevision != 1 {
+		t.Fatalf("source revision after binding insert = %d, err = %v", sourceRevision, err)
+	}
+}
+
 func TestMigrateWithoutUsageEventsClearsDeferredIndexLedger(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing-source-deferred-index.sqlite")
 	db, err := Open(path)

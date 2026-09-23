@@ -168,11 +168,12 @@ func (r *repository) CatchUp(ctx context.Context, limit int, nowMS int64) (ports
 
 	// Read current checkpoint state
 	var state ports.State
+	var checkpointBindingRevision int64
 	var lastRun, finished sql.NullInt64
 	row := tx.QueryRowContext(ctx, `SELECT
 		state_name, schema_version, status, last_processed_event_id,
 		target_event_id, processed_events, last_run_started_at_ms,
-		updated_at_ms, finished_at_ms, COALESCE(last_error, '')
+		updated_at_ms, finished_at_ms, COALESCE(last_error, ''), binding_revision
 	FROM gateway_usage_identity_projection_state
 	WHERE state_name = ? AND schema_version = ?`, StateName, CurrentSchemaVersion)
 
@@ -187,8 +188,19 @@ func (r *repository) CatchUp(ctx context.Context, limit int, nowMS int64) (ports
 		&state.UpdatedAtMS,
 		&finished,
 		&state.LastError,
+		&checkpointBindingRevision,
 	); err != nil {
 		return ports.CatchUpResult{}, fmt.Errorf("read projection state: %w", err)
+	}
+	var currentBindingRevision int64
+	if err := tx.QueryRowContext(ctx, `SELECT revision FROM gateway_source_binding_revision WHERE id = 1`).Scan(&currentBindingRevision); err != nil {
+		return ports.CatchUpResult{}, fmt.Errorf("read source binding revision: %w", err)
+	}
+	rebuilding := checkpointBindingRevision != currentBindingRevision && state.LastProcessedEventID > 0
+	if checkpointBindingRevision != currentBindingRevision {
+		state.LastProcessedEventID = 0
+		state.TargetEventID = 0
+		state.ProcessedEvents = 0
 	}
 
 	var latestID int64
@@ -209,9 +221,9 @@ func (r *repository) CatchUp(ctx context.Context, limit int, nowMS int64) (ports
 		id, event_hash, COALESCE(request_id, ''), timestamp_ms,
 		COALESCE(api_key_hash, ''), COALESCE(raw_json, '')
 	FROM usage_events
-	WHERE id > ?
+	WHERE id > ? AND id <= ?
 	ORDER BY id ASC
-	LIMIT ?`, state.LastProcessedEventID, limit)
+	LIMIT ?`, state.LastProcessedEventID, targetEventID, limit)
 	if err != nil {
 		return ports.CatchUpResult{}, fmt.Errorf("query usage events batch: %w", err)
 	}
@@ -248,12 +260,16 @@ func (r *repository) CatchUp(ctx context.Context, limit int, nowMS int64) (ports
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE gateway_usage_identity_projection_state SET
 			status = ?,
+			last_processed_event_id = ?,
 			target_event_id = ?,
+			processed_events = ?,
+			binding_revision = ?,
 			updated_at_ms = ?,
 			finished_at_ms = ?,
 			last_error = NULL
 		WHERE state_name = ? AND schema_version = ?`,
-			status, targetEventID, nowMS, finishedAtVal, StateName, CurrentSchemaVersion); err != nil {
+			status, state.LastProcessedEventID, targetEventID, state.ProcessedEvents,
+			currentBindingRevision, nowMS, finishedAtVal, StateName, CurrentSchemaVersion); err != nil {
 			return ports.CatchUpResult{}, fmt.Errorf("update finished state: %w", err)
 		}
 		if err := tx.Commit(); err != nil {
@@ -264,7 +280,7 @@ func (r *repository) CatchUp(ctx context.Context, limit int, nowMS int64) (ports
 			LastProcessedEventID: state.LastProcessedEventID,
 			TargetEventID:        targetEventID,
 			Pending:              pending,
-			Rebuilt:              false,
+			Rebuilt:              rebuilding,
 		}, nil
 	}
 
@@ -325,6 +341,10 @@ func (r *repository) CatchUp(ctx context.Context, limit int, nowMS int64) (ports
 				}
 				apiKeyBindings = append(apiKeyBindings, b)
 			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				return ports.CatchUpResult{}, fmt.Errorf("iterate api key bindings for event %d: %w", ev.UsageEventID, err)
+			}
 			rows.Close()
 		}
 
@@ -342,6 +362,10 @@ func (r *repository) CatchUp(ctx context.Context, limit int, nowMS int64) (ports
 					return ports.CatchUpResult{}, fmt.Errorf("scan cred binding: %w", err)
 				}
 				credBindings = append(credBindings, b)
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				return ports.CatchUpResult{}, fmt.Errorf("iterate credential bindings for event %d: %w", ev.UsageEventID, err)
 			}
 			rows.Close()
 		}
@@ -393,11 +417,13 @@ func (r *repository) CatchUp(ctx context.Context, limit int, nowMS int64) (ports
 		last_processed_event_id = ?,
 		target_event_id = ?,
 		processed_events = ?,
+		binding_revision = ?,
 		updated_at_ms = ?,
 		finished_at_ms = ?,
 		last_error = NULL
 	WHERE state_name = ? AND schema_version = ?`,
-		status, newLastID, targetEventID, newProcessed, nowMS, finishedAtVal, StateName, CurrentSchemaVersion); err != nil {
+		status, newLastID, targetEventID, newProcessed, currentBindingRevision,
+		nowMS, finishedAtVal, StateName, CurrentSchemaVersion); err != nil {
 		return ports.CatchUpResult{}, fmt.Errorf("update checkpoint state: %w", err)
 	}
 
@@ -410,7 +436,7 @@ func (r *repository) CatchUp(ctx context.Context, limit int, nowMS int64) (ports
 		LastProcessedEventID: newLastID,
 		TargetEventID:        targetEventID,
 		Pending:              pending,
-		Rebuilt:              false,
+		Rebuilt:              rebuilding,
 	}, nil
 }
 
@@ -454,6 +480,7 @@ func (r *repository) Reset(ctx context.Context) error {
 		last_processed_event_id = 0,
 		target_event_id = 0,
 		processed_events = 0,
+		binding_revision = -1,
 		last_run_started_at_ms = NULL,
 		finished_at_ms = NULL,
 		last_error = NULL,
