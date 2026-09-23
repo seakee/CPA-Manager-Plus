@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/ports/identityinventory"
+	identitystore "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/ports/identitystore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
 )
@@ -62,6 +63,60 @@ func New(httpClient *http.Client, authFilesClient *cpaauthfiles.Client) identity
 // Raw keys are trimmed, hashed with SHA-256, deduplicated, and returned as safe hashes only.
 // Raw keys never cross this function's boundary.
 func (c *client) FetchAPIKeys(ctx context.Context, baseURL string, managementKey string) ([]identityinventory.APIKeyObservation, error) {
+	rawKeys, err := c.fetchRawAPIKeys(ctx, baseURL, managementKey)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(rawKeys))
+	result := make([]identityinventory.APIKeyObservation, 0, len(rawKeys))
+	for _, keyStr := range rawKeys {
+		normalized := strings.TrimSpace(keyStr)
+		if normalized == "" {
+			continue
+		}
+		hash := normalizedHash(normalized)
+		if _, already := seen[hash]; already {
+			continue
+		}
+		seen[hash] = struct{}{}
+		result = append(result, identityinventory.APIKeyObservation{KeyHash: hash})
+	}
+	return result, nil
+}
+
+func normalizedHash(raw string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(raw)))
+	return hex.EncodeToString(sum[:])
+}
+
+// FetchMutationEvidence is the only secret-bearing exact-match evidence
+// boundary for explicit API-key mutation. It returns counts and hashes only.
+func FetchMutationEvidence(ctx context.Context, baseURL, managementKey, oldRaw, newRaw string) (identitystore.APIKeyMutationEvidence, error) {
+	c := &client{httpClient: &http.Client{Timeout: defaultTimeout}, timeout: defaultTimeout, maxResponseBytes: maxAPIKeysBytes}
+	rawKeys, err := c.fetchRawAPIKeys(ctx, baseURL, managementKey)
+	if err != nil {
+		return identitystore.APIKeyMutationEvidence{}, err
+	}
+	evidence := identitystore.APIKeyMutationEvidence{OldHash: normalizedHash(oldRaw)}
+	if newRaw != "" {
+		evidence.NewHash = normalizedHash(newRaw)
+	}
+	for _, configured := range rawKeys {
+		if configured == oldRaw {
+			evidence.ExactOldCount++
+		}
+		hash := normalizedHash(configured)
+		if hash == evidence.OldHash {
+			evidence.NormalizedOldCount++
+		}
+		if evidence.NewHash != "" && hash == evidence.NewHash {
+			evidence.NormalizedNewCount++
+		}
+	}
+	return evidence, nil
+}
+
+func (c *client) fetchRawAPIKeys(ctx context.Context, baseURL string, managementKey string) ([]string, error) {
 	base := cpa.NormalizeBaseURL(baseURL)
 	reqURL := base + apiKeysPath
 
@@ -102,28 +157,7 @@ func (c *client) FetchAPIKeys(ctx context.Context, baseURL string, managementKey
 		return nil, fmt.Errorf("GET %s: %w", apiKeysPath, err)
 	}
 
-	seen := make(map[string]struct{}, len(rawKeys))
-	result := make([]identityinventory.APIKeyObservation, 0, len(rawKeys))
-
-	for _, keyStr := range rawKeys {
-		normalized := strings.TrimSpace(keyStr)
-		if normalized == "" {
-			continue
-		}
-
-		sum := sha256.Sum256([]byte(normalized))
-		hash := hex.EncodeToString(sum[:])
-
-		if _, already := seen[hash]; already {
-			continue
-		}
-		seen[hash] = struct{}{}
-		result = append(result, identityinventory.APIKeyObservation{
-			KeyHash: hash,
-		})
-	}
-
-	return result, nil
+	return rawKeys, nil
 }
 
 // decodeStrictAPIKeysResponse strictly decodes an authoritative CPA /v0/management/api-keys response.

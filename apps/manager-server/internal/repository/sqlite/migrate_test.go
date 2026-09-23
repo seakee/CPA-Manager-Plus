@@ -3979,3 +3979,80 @@ func TestGatewayCanonicalIdentityMigration(t *testing.T) {
 		t.Fatalf("usage_events count = %d, want 1 (must remain unmodified)", eventCount)
 	}
 }
+
+func TestGatewayAPIKeyMutationIntentSchema(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "mutation-schema.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	keyID := strings.Repeat("a", 32)
+	oldHash, newHash := strings.Repeat("b", 64), strings.Repeat("c", 64)
+	if _, err := db.Exec(`insert into gateway_api_key_identities
+		(id, revision, lifecycle, created_at_ms, updated_at_ms)
+		values (?, 1, 'active', 1000, 1000)`, keyID); err != nil {
+		t.Fatal(err)
+	}
+	insert := func(id, kind, runtimeID, generation, apiKeyID, old, newHash string, createdAt int64) error {
+		var newValue any
+		if newHash != "" {
+			newValue = newHash
+		}
+		_, err := db.Exec(`insert into gateway_api_key_mutation_intents
+			(id, kind, runtime_identity, observed_runtime_generation, api_key_id,
+			expected_revision, old_api_key_hash, new_api_key_hash, created_at_ms, owner_instance)
+			values (?, ?, ?, ?, ?, 1, ?, ?, ?, 'process-A')`,
+			id, kind, runtimeID, generation, apiKeyID, old, newValue, createdAt)
+		return err
+	}
+	invalid := []struct {
+		name, kind, runtimeID, generation, apiKeyID, old, newHash string
+		createdAt                                                 int64
+	}{
+		{"kind", "replace", "runtime-kind", "1", keyID, oldHash, newHash, 1000},
+		{"zero generation", "rotate", "runtime-zero", "0", keyID, oldHash, newHash, 1000},
+		{"leading zero generation", "rotate", "runtime-leading", "01", keyID, oldHash, newHash, 1000},
+		{"nondecimal generation", "rotate", "runtime-text", "1x", keyID, oldHash, newHash, 1000},
+		{"uppercase hash", "rotate", "runtime-uppercase", "1", keyID, strings.ToUpper(oldHash), newHash, 1000},
+		{"short hash", "rotate", "runtime-short", "1", keyID, "abc", newHash, 1000},
+		{"same hashes", "rotate", "runtime-same", "1", keyID, oldHash, oldHash, 1000},
+		{"delete new hash", "delete", "runtime-delete-new", "1", keyID, oldHash, newHash, 1000},
+		{"missing FK", "rotate", "runtime-fk", "1", strings.Repeat("f", 32), oldHash, newHash, 1000},
+		{"zero timestamp", "rotate", "runtime-time", "1", keyID, oldHash, newHash, 0},
+	}
+	for _, tc := range invalid {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := insert(tc.name, tc.kind, tc.runtimeID, tc.generation, tc.apiKeyID,
+				tc.old, tc.newHash, tc.createdAt); err == nil {
+				t.Fatal("invalid pending intent passed schema constraints")
+			}
+		})
+	}
+	if err := insert("valid", "rotate", "runtime-1", "18446744073709551615",
+		keyID, oldHash, newHash, 1000); err != nil {
+		t.Fatalf("valid uint64 generation rejected: %v", err)
+	}
+	if err := insert("duplicate-runtime", "delete", "runtime-1", "2", keyID,
+		oldHash, "", 1001); err == nil {
+		t.Fatal("second pending intent for runtime was accepted")
+	}
+	rows, err := db.Query("pragma foreign_key_list(gateway_api_key_mutation_intents)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	foundRestrict := false
+	for rows.Next() {
+		var id, seq int
+		var table, from, to, onUpdate, onDelete, match string
+		if err := rows.Scan(&id, &seq, &table, &from, &to, &onUpdate, &onDelete, &match); err != nil {
+			t.Fatal(err)
+		}
+		if table == GatewayAPIKeyIdentitiesTable && from == "api_key_id" && onDelete == "RESTRICT" {
+			foundRestrict = true
+		}
+	}
+	if err := rows.Err(); err != nil || !foundRestrict {
+		t.Fatalf("intent FK RESTRICT missing: %v", err)
+	}
+}

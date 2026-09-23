@@ -68,6 +68,27 @@ func TestFetchAPIKeys_Valid(t *testing.T) {
 	}
 }
 
+func TestFetchMutationEvidencePreservesExactAndNormalizedCounts(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"api-keys":["  old  ","old","existing"]}`))
+	}))
+	defer server.Close()
+	evidence, err := FetchMutationEvidence(context.Background(), server.URL, "management-key", "old", "new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.ExactOldCount != 1 || evidence.NormalizedOldCount != 2 ||
+		evidence.NormalizedNewCount != 0 || evidence.OldHash != sha256Hex("old") ||
+		evidence.NewHash != sha256Hex("new") {
+		t.Fatalf("unexpected safe evidence: %+v", evidence)
+	}
+	for _, secret := range []string{"old", "new", "existing"} {
+		if evidence.OldHash == secret || evidence.NewHash == secret {
+			t.Fatal("raw API key crossed evidence boundary")
+		}
+	}
+}
+
 func TestFetchAPIKeys_ValidEmpty(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

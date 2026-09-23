@@ -657,6 +657,89 @@ func TestWorker_ContextCanceledNoWaitingLog(t *testing.T) {
 	}
 }
 
+func TestWorkerRecoversCommittedRotationIntentAfterProcessRestart(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "worker-recovery.sqlite")
+	db, err := sqlite.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := adaptersqlite.New(db)
+	oldHash, newHash := sha256Hex("worker-old"), sha256Hex("worker-new")
+	_, err = repo.ApplyPassiveSnapshot(ctx, ports.ReconcileSnapshotParams{
+		RuntimeIdentity: "runtime-1", ObservedRuntimeGeneration: 1,
+		APIKeys: []ports.APIKeySnapshotItem{{APIKeyHash: oldHash}}, NowMS: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, _, err := repo.FindActiveAPIKeyBySource(ctx, "runtime-1", oldHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = repo.(ports.MutationRepository).PrepareAPIKeyMutation(ctx, ports.PrepareAPIKeyMutationParams{
+		Kind: ports.APIKeyMutationRotate, RuntimeIdentity: "runtime-1",
+		ObservedRuntimeGeneration: 1,
+		Evidence: ports.APIKeyMutationEvidence{
+			OldHash: oldHash, NewHash: newHash, ExactOldCount: 1, NormalizedOldCount: 1,
+		},
+		OwnerInstance: "former-process", NowMS: 2000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = sqlite.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	repo = adaptersqlite.New(db)
+	observer := &dynamicRuntimeObserver{fn: func() (model.RuntimeObservedStatus, error) {
+		return validReadyStatus(), nil
+	}}
+	svc, err := identityreconcile.NewService(identityreconcile.Config{
+		RuntimeObserver:    observer,
+		ConnectionResolver: staticConnectionResolver("http://localhost:8317", "management-key"),
+		InventoryClient:    &fakeInventoryClient{apiKeys: []identityinventory.APIKeyObservation{{KeyHash: newHash}}},
+		IdentityRepo:       repo, ProcessInstanceID: "restarted-process",
+		TimeSource: func() int64 { return 3000 },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := identityreconcile.NewWorker(svc, nil)
+	worker.SetInterval(10 * time.Millisecond)
+	workerCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		worker.Run(workerCtx)
+	}()
+	deadline := time.After(5 * time.Second)
+	for {
+		rotated, binding, err := repo.FindActiveAPIKeyBySource(ctx, "runtime-1", newHash)
+		if err == nil && rotated.ID == old.ID && rotated.Revision == old.Revision+1 &&
+			binding.ObservedRuntimeGeneration == uint64(validReadyStatus().Generation) {
+			break
+		}
+		select {
+		case <-deadline:
+			cancel()
+			<-done
+			t.Fatalf("worker did not recover same ID: %+v %+v %v", rotated, binding, err)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	cancel()
+	<-done
+	if pending, err := repo.(ports.MutationRepository).HasPendingAPIKeyMutation(ctx, "runtime-1"); err != nil || pending {
+		t.Fatalf("worker recovery left pending intent: %v %v", pending, err)
+	}
+}
+
 func TestReconcileOnce_ChildTimeout_TreatedAsInventoryFailure(t *testing.T) {
 	observer := &sequenceRuntimeObserver{
 		statuses: []func() (model.RuntimeObservedStatus, error){

@@ -70,6 +70,7 @@ const (
 	usagePricingAccountSourceLegacy           = "usage_pricing_account_rollups_v1_legacy_source_recovery"
 
 	GatewayAPIKeyIdentitiesTable         = "gateway_api_key_identities"
+	GatewayAPIKeyMutationIntentsTable    = "gateway_api_key_mutation_intents"
 	GatewayCredentialIdentitiesTable     = "gateway_credential_identities"
 	GatewayAPIKeySourceBindingsTable     = "gateway_api_key_source_bindings"
 	GatewayCredentialSourceBindingsTable = "gateway_credential_source_bindings"
@@ -955,6 +956,28 @@ func Migrate(db *sql.DB) error {
 			first_seen_at_ms integer not null,
 			last_seen_at_ms integer not null,
 			retired_at_ms integer,
+			foreign key(api_key_id) references gateway_api_key_identities(id) on delete restrict
+		)`,
+		`create table if not exists gateway_api_key_mutation_intents (
+			id text primary key,
+			kind text not null check(kind in ('rotate', 'delete')),
+			runtime_identity text not null unique check(length(runtime_identity) > 0 and trim(runtime_identity) = runtime_identity),
+			observed_runtime_generation text not null
+				check(length(observed_runtime_generation) > 0 and observed_runtime_generation not glob '*[^0-9]*'
+				and observed_runtime_generation not glob '0*'),
+			api_key_id text not null,
+			expected_revision integer not null check(expected_revision > 0),
+			old_api_key_hash text not null
+				check(length(old_api_key_hash) = 64 and old_api_key_hash not glob '*[^0-9a-f]*'),
+			new_api_key_hash text
+				check(new_api_key_hash is null or
+					(length(new_api_key_hash) = 64 and new_api_key_hash not glob '*[^0-9a-f]*')),
+			created_at_ms integer not null check(created_at_ms > 0),
+			owner_instance text not null check(length(owner_instance) > 0),
+			forward_completed_at_ms integer
+				check(forward_completed_at_ms is null or forward_completed_at_ms >= created_at_ms),
+			check((kind = 'rotate' and new_api_key_hash is not null and old_api_key_hash <> new_api_key_hash)
+				or (kind = 'delete' and new_api_key_hash is null)),
 			foreign key(api_key_id) references gateway_api_key_identities(id) on delete restrict
 		)`,
 		`create table if not exists gateway_credential_source_bindings (
