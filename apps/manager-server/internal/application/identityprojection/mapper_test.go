@@ -83,20 +83,45 @@ func TestExtractCredentialSourceAuthID(t *testing.T) {
 		{
 			name:       "auth_id inside detail object",
 			rawJSON:    `{"model":"claude-3","detail":{"auth_id":"cpa-cred-detail"}}`,
-			wantAuthID: "cpa-cred-detail",
-			wantState:  "",
+			wantAuthID: "",
+			wantState:  ports.StateUnknown,
 		},
 		{
 			name:       "top level and detail conflicting",
 			rawJSON:    `{"auth_id":"top-cred","detail":{"auth_id":"detail-cred"}}`,
-			wantAuthID: "",
-			wantState:  ports.StateAmbiguous,
+			wantAuthID: "top-cred",
+			wantState:  "",
 		},
 		{
 			name:       "top level and detail identical",
 			rawJSON:    `{"auth_id":"same-cred","detail":{"auth_id":"same-cred"}}`,
 			wantAuthID: "same-cred",
 			wantState:  "",
+		},
+		{
+			name:      "numeric top-level auth id",
+			rawJSON:   `{"auth_id":123}`,
+			wantState: ports.StateUnknown,
+		},
+		{
+			name:      "boolean top-level auth id",
+			rawJSON:   `{"auth_id":true}`,
+			wantState: ports.StateUnknown,
+		},
+		{
+			name:      "object top-level auth id",
+			rawJSON:   `{"auth_id":{"value":"cpa-cred-01"}}`,
+			wantState: ports.StateUnknown,
+		},
+		{
+			name:      "null top-level auth id",
+			rawJSON:   `{"auth_id":null}`,
+			wantState: ports.StateUnknown,
+		},
+		{
+			name:      "mixed string and non-string aliases",
+			rawJSON:   `{"auth_id":"cpa-cred-01","authId":123}`,
+			wantState: ports.StateUnknown,
 		},
 	}
 

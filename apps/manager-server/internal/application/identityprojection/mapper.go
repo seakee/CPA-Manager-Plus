@@ -3,7 +3,6 @@ package identityprojection
 import (
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
@@ -40,8 +39,9 @@ type EventInput struct {
 // - 1 unique non-empty value => trusted source_auth_id
 // - Multiple aliases with identical value => trusted source_auth_id
 // - Multiple different non-empty values => ambiguous
-// - malformed JSON => unknown
-// Only trim normalization is applied. No fallback to auth_index/file/provider/account is allowed.
+// - malformed JSON or a non-string top-level alias => unknown
+// Only top-level aliases are trusted. Only trim normalization is applied.
+// No fallback to detail/auth_index/file/provider/account is allowed.
 func ExtractCredentialSourceAuthID(rawJSON string) (sourceAuthID string, state ports.MappingState) {
 	trimmed := strings.TrimSpace(rawJSON)
 	if trimmed == "" {
@@ -59,20 +59,18 @@ func ExtractCredentialSourceAuthID(rawJSON string) (sourceAuthID string, state p
 	}
 
 	var foundValues []string
-	checkKeys := func(m map[string]any) {
-		for _, k := range []string{"auth_id", "authId", "AuthID", "AuthId"} {
-			if val, exists := m[k]; exists {
-				s := strings.TrimSpace(stringValue(val))
-				if s != "" {
-					foundValues = append(foundValues, s)
-				}
-			}
+	for _, key := range []string{"auth_id", "authId", "AuthID", "AuthId"} {
+		value, exists := record[key]
+		if !exists {
+			continue
 		}
-	}
-
-	checkKeys(record)
-	if detail, ok := record["detail"].(map[string]any); ok {
-		checkKeys(detail)
+		valueString, ok := value.(string)
+		if !ok {
+			return "", ports.StateUnknown
+		}
+		if trimmedValue := strings.TrimSpace(valueString); trimmedValue != "" {
+			foundValues = append(foundValues, trimmedValue)
+		}
 	}
 
 	if len(foundValues) == 0 {
@@ -180,22 +178,4 @@ func MapEvent(
 	}
 
 	return proj, nil
-}
-
-func stringValue(raw any) string {
-	switch value := raw.(type) {
-	case string:
-		return value
-	case json.Number:
-		return value.String()
-	case float64:
-		if value == float64(int64(value)) {
-			return strconv.FormatInt(int64(value), 10)
-		}
-		return strconv.FormatFloat(value, 'f', -1, 64)
-	case nil:
-		return ""
-	default:
-		return fmt.Sprint(value)
-	}
 }
