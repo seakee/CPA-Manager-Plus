@@ -142,20 +142,21 @@ const (
 // ControlBasePath denotes the desired canonical value; normalization, collision
 // checks and apply/rollback are deferred to later work.
 type Plan struct {
-	Mode              Mode
-	CPAMPAction       CPAMPAction
-	CPAStrategy       CPAStrategy
-	SourceCPAMP       *DirectUpgradeSource
-	SourceCPA         SourceCPA
-	UsageAction       UsageAction
-	BackupRequired    bool
-	RuntimeMode       RuntimeMode
-	Mutations         []string
-	Preserved         []string
-	Unsupported       []string
-	AdoptionResources []AdoptionResource
-	ControlBasePath   string
-	EstimatedSteps    []string
+	Mode                   Mode
+	CPAMPAction            CPAMPAction
+	CPAStrategy            CPAStrategy
+	SourceCPAMP            *DirectUpgradeSource
+	SourceCPA              SourceCPA
+	UsageAction            UsageAction
+	BackupRequired         bool
+	RuntimeMode            RuntimeMode
+	Mutations              []string
+	Preserved              []string
+	Unsupported            []string
+	DiscoveredResourceRefs []ResourceRef
+	AdoptionDecisions      []AdoptionResourceDecision
+	ControlBasePath        string
+	EstimatedSteps         []string
 }
 
 func RuntimeForStrategy(strategy CPAStrategy) (RuntimeMode, error) {
@@ -240,11 +241,20 @@ func (p Plan) Validate(allowlist []DirectUpgradeSource) error {
 		if !has(p.Preserved, "source_cpa_available_until_commit") {
 			return errors.New("adoption must keep source CPA available until commit")
 		}
-		if err := validateAdoptionResources(p.AdoptionResources, p.Mutations, p.Unsupported); err != nil {
+		if err := validateAdoptionDecisions(p.DiscoveredResourceRefs, p.AdoptionDecisions, p.Mutations, p.Unsupported); err != nil {
 			return err
 		}
-	} else if len(p.AdoptionResources) != 0 {
-		return errors.New("adoption resources require adopt_existing strategy")
+	} else {
+		if len(p.DiscoveredResourceRefs) != 0 || len(p.AdoptionDecisions) != 0 {
+			return errors.New("adoption resources require adopt_existing strategy")
+		}
+		for _, group := range [][]string{p.Mutations, p.Unsupported} {
+			for _, effect := range group {
+				if strings.HasPrefix(effect, "adoption:") {
+					return errors.New("adoption effect requires adopt_existing strategy")
+				}
+			}
+		}
 	}
 	if p.CPAStrategy == ConnectExternal {
 		for _, v := range []string{"source_cpa_stop", "source_cpa_delete", "source_cpa_takeover"} {

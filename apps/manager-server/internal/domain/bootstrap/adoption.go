@@ -3,12 +3,12 @@ package bootstrap
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
-// AdoptionResourceKind is the first supported CPA migration taxonomy. Each
-// discovered item within these categories still needs its own capability
-// evidence; a category does not authorize copying all of its fields.
+// AdoptionResourceKind names the supported migration taxonomy, not a unit of
+// migration. Distinct resources of the same kind may need distinct decisions.
 type AdoptionResourceKind string
 
 const (
@@ -21,10 +21,10 @@ const (
 type AdoptionScope string
 
 const (
-	ClientAPIKeys        AdoptionScope = "client_api_keys"
-	PortableAuthFiles    AdoptionScope = "portable_auth_files"
-	ManagementAPIFields  AdoptionScope = "management_api_allowlisted_fields"
-	DurableProviderState AdoptionScope = "capability_proven_durable_state"
+	ClientAPIKeys       AdoptionScope = "client_api_keys"
+	CPAAuthFiles        AdoptionScope = "cpa_auth_files"
+	ManagementAPIFields AdoptionScope = "management_api_fields"
+	ProviderState       AdoptionScope = "provider_runtime_state"
 )
 
 type AdoptionDisposition string
@@ -42,17 +42,41 @@ const (
 	ReconfigureAfterAdoption    AdoptionManualAction = "reconfigure_after_adoption"
 )
 
-// AdoptionResource is a resource-level plan item, never an implicit whole-CPA
-// migration. Phase4-01 must supply evidence from the actual source and staged
-// destination; endpoint names alone are not proof of instance capability.
-type AdoptionResource struct {
-	Kind           AdoptionResourceKind
-	Scope          AdoptionScope
-	ReadEvidence   string
-	ReplayEvidence string
-	VerifyEvidence string
-	ManualAction   AdoptionManualAction
-	Disposition    AdoptionDisposition
+// ResourceRef is an opaque identifier assigned to one discovered source CPA
+// resource by server-owned preflight. It must not contain a secret or URL.
+type ResourceRef string
+
+// CapabilityEvidenceRef points to a server-owned detection/preflight record.
+// The domain checks reference shape only. Phase4-01 must resolve each reference
+// against authoritative server evidence before a migration can be executed;
+// endpoint names, user input, or arbitrary text are not capability proof.
+type CapabilityEvidenceRef string
+
+var resourceRefPattern = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
+
+func validResourceRef(ref ResourceRef) bool {
+	return resourceRefPattern.MatchString(string(ref))
+}
+
+func validEvidenceRef(ref CapabilityEvidenceRef) bool {
+	if ref == "" {
+		return true
+	}
+	id, ok := strings.CutPrefix(string(ref), "preflight:")
+	return ok && validResourceRef(ResourceRef(id))
+}
+
+// AdoptionResourceDecision applies to one discovered resource. An empty
+// evidence reference means the corresponding capability is not proven yet.
+type AdoptionResourceDecision struct {
+	ResourceRef       ResourceRef
+	Kind              AdoptionResourceKind
+	Scope             AdoptionScope
+	ReadEvidenceRef   CapabilityEvidenceRef
+	ReplayEvidenceRef CapabilityEvidenceRef
+	VerifyEvidenceRef CapabilityEvidenceRef
+	ManualAction      AdoptionManualAction
+	Disposition       AdoptionDisposition
 }
 
 func adoptionScope(kind AdoptionResourceKind) (AdoptionScope, bool) {
@@ -60,29 +84,34 @@ func adoptionScope(kind AdoptionResourceKind) (AdoptionScope, bool) {
 	case APIKeys:
 		return ClientAPIKeys, true
 	case Credentials:
-		return PortableAuthFiles, true
+		return CPAAuthFiles, true
 	case CPAConfiguration:
 		return ManagementAPIFields, true
 	case ProviderRuntimeState:
-		return DurableProviderState, true
+		return ProviderState, true
 	default:
 		return "", false
 	}
 }
 
-func validEvidence(value string) bool {
-	return value != "" && value == strings.TrimSpace(value)
-}
-
-// DecideAdoptionResource requires read, replay/import, and verification
-// evidence before an item may enter mutations. Missing proof is explicit
-// unsupported or a named manual action; it is never silently migrated.
-func DecideAdoptionResource(item AdoptionResource) (AdoptionDisposition, error) {
+// DecideAdoptionResource requires references for read, replay/import, and
+// verification before a resource can be proposed for migration. The server
+// must resolve those references before execution; this function does not
+// turn their mere presence into proof of capability.
+func DecideAdoptionResource(item AdoptionResourceDecision) (AdoptionDisposition, error) {
+	if !validResourceRef(item.ResourceRef) {
+		return "", fmt.Errorf("invalid adoption resource reference %q", item.ResourceRef)
+	}
 	scope, ok := adoptionScope(item.Kind)
 	if !ok || item.Scope != scope {
 		return "", fmt.Errorf("unknown or mismatched adoption resource %q/%q", item.Kind, item.Scope)
 	}
-	complete := validEvidence(item.ReadEvidence) && validEvidence(item.ReplayEvidence) && validEvidence(item.VerifyEvidence)
+	for _, ref := range []CapabilityEvidenceRef{item.ReadEvidenceRef, item.ReplayEvidenceRef, item.VerifyEvidenceRef} {
+		if !validEvidenceRef(ref) {
+			return "", fmt.Errorf("invalid server preflight evidence reference %q", ref)
+		}
+	}
+	complete := item.ReadEvidenceRef != "" && item.ReplayEvidenceRef != "" && item.VerifyEvidenceRef != ""
 	if complete {
 		if item.ManualAction != "" {
 			return "", errors.New("migratable resource cannot also require manual action")
@@ -99,43 +128,49 @@ func DecideAdoptionResource(item AdoptionResource) (AdoptionDisposition, error) 
 	}
 }
 
-func adoptionEffect(disposition AdoptionDisposition, kind AdoptionResourceKind) string {
-	return string(disposition) + "_" + string(kind)
+func adoptionEffect(disposition AdoptionDisposition, ref ResourceRef) string {
+	return "adoption:" + string(disposition) + ":" + string(ref)
 }
 
-func validateAdoptionResources(items []AdoptionResource, mutations, unsupported []string) error {
-	// A missing category must be recorded as unsupported or manual action,
-	// rather than silently omitted from the adoption plan.
-	if len(items) != 4 {
-		return errors.New("adoption requires a decision for each of the four resource categories")
+func validateAdoptionDecisions(discovered []ResourceRef, decisions []AdoptionResourceDecision, mutations, unsupported []string) error {
+	if discovered == nil || decisions == nil {
+		return errors.New("adoption inventory and decisions must be explicit")
 	}
-	seen := map[AdoptionResourceKind]bool{}
-	expected := map[string]bool{}
-	for _, item := range items {
-		if seen[item.Kind] {
-			return fmt.Errorf("duplicate adoption resource %q", item.Kind)
+	if len(discovered) != len(decisions) {
+		return errors.New("each discovered adoption resource needs exactly one decision")
+	}
+	seenDiscovered := make(map[ResourceRef]bool, len(discovered))
+	for _, ref := range discovered {
+		if !validResourceRef(ref) || seenDiscovered[ref] {
+			return fmt.Errorf("invalid or duplicate discovered resource %q", ref)
 		}
-		seen[item.Kind] = true
+		seenDiscovered[ref] = true
+	}
+	seenDecisions := make(map[ResourceRef]bool, len(decisions))
+	expected := make(map[string]bool, len(decisions))
+	for _, item := range decisions {
+		if !seenDiscovered[item.ResourceRef] || seenDecisions[item.ResourceRef] {
+			return fmt.Errorf("missing or duplicate discovered resource decision %q", item.ResourceRef)
+		}
+		seenDecisions[item.ResourceRef] = true
 		decision, err := DecideAdoptionResource(item)
 		if err != nil || item.Disposition != decision {
-			return fmt.Errorf("adoption resource %q disposition disagrees with capability evidence: %v", item.Kind, err)
+			return fmt.Errorf("adoption resource %q disposition conflicts with evidence references: %v", item.ResourceRef, err)
 		}
-		effect := adoptionEffect(decision, item.Kind)
+		effect := adoptionEffect(decision, item.ResourceRef)
 		expected[effect] = true
 		if decision == Migrate {
 			if !has(mutations, effect) || has(unsupported, effect) {
-				return fmt.Errorf("migratable resource %q missing from mutations", item.Kind)
+				return fmt.Errorf("migratable resource %q missing from mutations", item.ResourceRef)
 			}
 		} else if !has(unsupported, effect) || has(mutations, effect) {
-			return fmt.Errorf("non-migratable resource %q missing from unsupported/manual", item.Kind)
+			return fmt.Errorf("resource %q missing from unsupported or manual actions", item.ResourceRef)
 		}
 	}
 	for _, group := range [][]string{mutations, unsupported} {
 		for _, effect := range group {
-			if strings.HasPrefix(effect, "migrate_") || strings.HasPrefix(effect, "manual_action_") || strings.HasPrefix(effect, "unsupported_") {
-				if !expected[effect] {
-					return fmt.Errorf("adoption effect %q lacks a resource decision", effect)
-				}
+			if strings.HasPrefix(effect, "adoption:") && !expected[effect] {
+				return fmt.Errorf("adoption effect %q lacks a resource decision", effect)
 			}
 		}
 	}

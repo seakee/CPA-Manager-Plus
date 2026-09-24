@@ -44,39 +44,42 @@ type strategyEntry struct {
 }
 
 type adoptionEntry struct {
-	Kind           bootstrap.AdoptionResourceKind `json:"kind"`
-	Scope          bootstrap.AdoptionScope        `json:"scope"`
-	ReadEvidence   string                         `json:"readEvidence"`
-	ReplayEvidence string                         `json:"replayEvidence"`
-	VerifyEvidence string                         `json:"verifyEvidence"`
-	ManualAction   bootstrap.AdoptionManualAction `json:"manualAction"`
-	Disposition    bootstrap.AdoptionDisposition  `json:"disposition"`
+	ResourceRef       bootstrap.ResourceRef           `json:"resourceRef"`
+	Kind              bootstrap.AdoptionResourceKind  `json:"kind"`
+	Scope             bootstrap.AdoptionScope         `json:"scope"`
+	ReadEvidenceRef   bootstrap.CapabilityEvidenceRef `json:"readEvidenceRef"`
+	ReplayEvidenceRef bootstrap.CapabilityEvidenceRef `json:"replayEvidenceRef"`
+	VerifyEvidenceRef bootstrap.CapabilityEvidenceRef `json:"verifyEvidenceRef"`
+	ManualAction      bootstrap.AdoptionManualAction  `json:"manualAction"`
+	Disposition       bootstrap.AdoptionDisposition   `json:"disposition"`
 }
 
-func (a adoptionEntry) domain() bootstrap.AdoptionResource {
-	return bootstrap.AdoptionResource{
-		Kind: a.Kind, Scope: a.Scope, ReadEvidence: a.ReadEvidence,
-		ReplayEvidence: a.ReplayEvidence, VerifyEvidence: a.VerifyEvidence,
-		ManualAction: a.ManualAction, Disposition: a.Disposition,
+func (a adoptionEntry) domain() bootstrap.AdoptionResourceDecision {
+	return bootstrap.AdoptionResourceDecision{
+		ResourceRef: a.ResourceRef, Kind: a.Kind, Scope: a.Scope,
+		ReadEvidenceRef: a.ReadEvidenceRef, ReplayEvidenceRef: a.ReplayEvidenceRef,
+		VerifyEvidenceRef: a.VerifyEvidenceRef, ManualAction: a.ManualAction,
+		Disposition: a.Disposition,
 	}
 }
 
 type pathEntry struct {
-	ID                string                `json:"id"`
-	Mode              bootstrap.Mode        `json:"mode"`
-	CPAMPAction       bootstrap.CPAMPAction `json:"cpamp_action"`
-	CPAStrategy       bootstrap.CPAStrategy `json:"cpa_strategy"`
-	SourceCPAMP       *source               `json:"source_cpamp"`
-	SourceCPA         *bootstrap.SourceCPA  `json:"source_cpa"`
-	UsageAction       bootstrap.UsageAction `json:"usage_action"`
-	BackupRequired    bool                  `json:"backup_required"`
-	RuntimeMode       bootstrap.RuntimeMode `json:"runtime_mode"`
-	Mutations         []string              `json:"mutations"`
-	Preserved         []string              `json:"preserved"`
-	Unsupported       []string              `json:"unsupported"`
-	AdoptionResources []adoptionEntry       `json:"adoptionResources"`
-	ControlBasePath   string                `json:"control_base_path"`
-	EstimatedSteps    []string              `json:"estimated_steps"`
+	ID                     string                  `json:"id"`
+	Mode                   bootstrap.Mode          `json:"mode"`
+	CPAMPAction            bootstrap.CPAMPAction   `json:"cpamp_action"`
+	CPAStrategy            bootstrap.CPAStrategy   `json:"cpa_strategy"`
+	SourceCPAMP            *source                 `json:"source_cpamp"`
+	SourceCPA              *bootstrap.SourceCPA    `json:"source_cpa"`
+	UsageAction            bootstrap.UsageAction   `json:"usage_action"`
+	BackupRequired         bool                    `json:"backup_required"`
+	RuntimeMode            bootstrap.RuntimeMode   `json:"runtime_mode"`
+	Mutations              []string                `json:"mutations"`
+	Preserved              []string                `json:"preserved"`
+	Unsupported            []string                `json:"unsupported"`
+	DiscoveredResourceRefs []bootstrap.ResourceRef `json:"discoveredResourceRefs"`
+	AdoptionDecisions      []adoptionEntry         `json:"adoptionDecisions"`
+	ControlBasePath        string                  `json:"control_base_path"`
+	EstimatedSteps         []string                `json:"estimated_steps"`
 }
 
 func (p pathEntry) domain() bootstrap.Plan {
@@ -89,17 +92,17 @@ func (p pathEntry) domain() bootstrap.Plan {
 	if p.SourceCPA != nil {
 		cpa = *p.SourceCPA
 	}
-	resources := make([]bootstrap.AdoptionResource, len(p.AdoptionResources))
-	for i, resource := range p.AdoptionResources {
-		resources[i] = resource.domain()
+	decisions := make([]bootstrap.AdoptionResourceDecision, len(p.AdoptionDecisions))
+	for i, decision := range p.AdoptionDecisions {
+		decisions[i] = decision.domain()
 	}
 	return bootstrap.Plan{
 		Mode: p.Mode, CPAMPAction: p.CPAMPAction, CPAStrategy: p.CPAStrategy,
 		SourceCPAMP: cpamp, SourceCPA: cpa, UsageAction: p.UsageAction,
 		BackupRequired: p.BackupRequired, RuntimeMode: p.RuntimeMode,
 		Mutations: p.Mutations, Preserved: p.Preserved, Unsupported: p.Unsupported,
-		AdoptionResources: resources,
-		ControlBasePath:   p.ControlBasePath, EstimatedSteps: p.EstimatedSteps,
+		DiscoveredResourceRefs: p.DiscoveredResourceRefs, AdoptionDecisions: decisions,
+		ControlBasePath: p.ControlBasePath, EstimatedSteps: p.EstimatedSteps,
 	}
 }
 
@@ -113,16 +116,17 @@ type classificationAssertion struct {
 }
 
 type fixture struct {
-	Schema                   string                    `json:"$schema"`
-	SchemaVersion            int                       `json:"schemaVersion"`
-	ContractID               string                    `json:"contractId"`
-	ExecutionBaseline        string                    `json:"executionBaseline"`
-	BootstrapModes           []modeEntry               `json:"bootstrapModes"`
-	CPAStrategies            []strategyEntry           `json:"cpaStrategies"`
-	DirectUpgradeSources     []source                  `json:"directUpgradeSources"`
-	Paths                    []pathEntry               `json:"paths"`
-	ClassificationAssertions []classificationAssertion `json:"classificationAssertions"`
-	GlobalAssertions         []string                  `json:"globalAssertions"`
+	Schema                   string                           `json:"$schema"`
+	SchemaVersion            int                              `json:"schemaVersion"`
+	ContractID               string                           `json:"contractId"`
+	ExecutionBaseline        string                           `json:"executionBaseline"`
+	BootstrapModes           []modeEntry                      `json:"bootstrapModes"`
+	CPAStrategies            []strategyEntry                  `json:"cpaStrategies"`
+	AdoptionResourceKinds    []bootstrap.AdoptionResourceKind `json:"adoptionResourceKinds"`
+	DirectUpgradeSources     []source                         `json:"directUpgradeSources"`
+	Paths                    []pathEntry                      `json:"paths"`
+	ClassificationAssertions []classificationAssertion        `json:"classificationAssertions"`
+	GlobalAssertions         []string                         `json:"globalAssertions"`
 }
 
 // Require every declared fixture field. DisallowUnknownFields alone does not
@@ -211,7 +215,7 @@ func decodeFixture(data []byte) (fixture, error) {
 	if err := rejectDuplicateKeys(data); err != nil {
 		return fixture{}, err
 	}
-	if err := requireFields(data, "$schema", "schemaVersion", "contractId", "executionBaseline", "bootstrapModes", "cpaStrategies", "directUpgradeSources", "paths", "classificationAssertions", "globalAssertions"); err != nil {
+	if err := requireFields(data, "$schema", "schemaVersion", "contractId", "executionBaseline", "bootstrapModes", "cpaStrategies", "adoptionResourceKinds", "directUpgradeSources", "paths", "classificationAssertions", "globalAssertions"); err != nil {
 		return fixture{}, err
 	}
 	for _, check := range []struct {
@@ -221,7 +225,7 @@ func decodeFixture(data []byte) (fixture, error) {
 		{"bootstrapModes", []string{"mode", "category", "ordinaryPathAllowed", "meaning"}},
 		{"cpaStrategies", []string{"strategy", "allowedModes", "runtimeMode"}},
 		{"directUpgradeSources", []string{"versionTag", "schemaIdentity", "schemaVersion"}},
-		{"paths", []string{"id", "mode", "cpamp_action", "cpa_strategy", "source_cpamp", "source_cpa", "usage_action", "backup_required", "runtime_mode", "mutations", "preserved", "unsupported", "adoptionResources", "control_base_path", "estimated_steps"}},
+		{"paths", []string{"id", "mode", "cpamp_action", "cpa_strategy", "source_cpamp", "source_cpa", "usage_action", "backup_required", "runtime_mode", "mutations", "preserved", "unsupported", "discoveredResourceRefs", "adoptionDecisions", "control_base_path", "estimated_steps"}},
 		{"classificationAssertions", []string{"id", "hasV1ProductState", "source", "recoveryReason", "bootstrapComplete", "expectedMode"}},
 	} {
 		if err := requireArrayObjects(data, check.field, check.keys...); err != nil {
@@ -236,12 +240,16 @@ func decodeFixture(data []byte) (fixture, error) {
 		return fixture{}, err
 	}
 	for _, item := range raw.Paths {
-		var resources []json.RawMessage
-		if err := json.Unmarshal(item["adoptionResources"], &resources); err != nil || resources == nil {
-			return fixture{}, fmt.Errorf("adoptionResources must be an array: %v", err)
+		var discovered []json.RawMessage
+		if err := json.Unmarshal(item["discoveredResourceRefs"], &discovered); err != nil || discovered == nil {
+			return fixture{}, fmt.Errorf("discoveredResourceRefs must be an array: %v", err)
 		}
-		for _, resource := range resources {
-			if err := requireFields(resource, "kind", "scope", "readEvidence", "replayEvidence", "verifyEvidence", "manualAction", "disposition"); err != nil {
+		var decisions []json.RawMessage
+		if err := json.Unmarshal(item["adoptionDecisions"], &decisions); err != nil || decisions == nil {
+			return fixture{}, fmt.Errorf("adoptionDecisions must be an array: %v", err)
+		}
+		for _, decision := range decisions {
+			if err := requireFields(decision, "resourceRef", "kind", "scope", "readEvidenceRef", "replayEvidenceRef", "verifyEvidenceRef", "manualAction", "disposition"); err != nil {
 				return fixture{}, err
 			}
 		}
@@ -325,6 +333,13 @@ func validateFixture(f fixture) error {
 		}
 		seenStrategies[item.Strategy] = true
 	}
+	kinds := make([]string, len(f.AdoptionResourceKinds))
+	for i, kind := range f.AdoptionResourceKinds {
+		kinds[i] = string(kind)
+	}
+	if !sameSet(kinds, []string{"api_keys", "credentials", "cpa_configuration", "provider_runtime_state"}) {
+		return errors.New("adoption resource taxonomy must contain exactly four kinds")
+	}
 	allowlist := make([]bootstrap.DirectUpgradeSource, len(f.DirectUpgradeSources))
 	for i, item := range f.DirectUpgradeSources {
 		allowlist[i] = item.domain()
@@ -342,7 +357,7 @@ func validateFixture(f fixture) error {
 	}
 	paths := map[string]pathWant{
 		"P4-BOOT-01": {bootstrap.Fresh, bootstrap.NewManaged, []string{"cpamp_state", "managed_cpa", "control_base_path"}, []string{}, []string{}},
-		"P4-BOOT-02": {bootstrap.Fresh, bootstrap.AdoptExisting, []string{"cpamp_state", "managed_cpa", "control_base_path", "migrate_api_keys", "migrate_credentials", "migrate_cpa_configuration"}, []string{"source_cpa_recoverable_until_success", "source_cpa_available_until_commit"}, []string{"historical_usage_import", "request_history_import", "cpa_log_import", "historical_analytics_import", "plugin_runtime_implicit_import", "source_cpa_stop", "source_cpa_delete", "source_cpa_overwrite", "manual_action_provider_runtime_state"}},
+		"P4-BOOT-02": {bootstrap.Fresh, bootstrap.AdoptExisting, []string{"cpamp_state", "managed_cpa", "control_base_path", "adoption:migrate:api-key-primary", "adoption:migrate:credential-a", "adoption:migrate:config-routing"}, []string{"source_cpa_recoverable_until_success", "source_cpa_available_until_commit"}, []string{"historical_usage_import", "request_history_import", "cpa_log_import", "historical_analytics_import", "plugin_runtime_implicit_import", "source_cpa_stop", "source_cpa_delete", "source_cpa_overwrite", "adoption:manual_action:credential-b", "adoption:unsupported:credential-c", "adoption:unsupported:config-secret", "adoption:manual_action:provider-state-a"}},
 		"P4-BOOT-03": {bootstrap.Fresh, bootstrap.ConnectExternal, []string{"cpamp_state", "control_base_path", "external_connection"}, []string{"source_cpa_user_owned"}, []string{"historical_usage_import", "source_cpa_stop", "source_cpa_delete", "source_cpa_takeover"}},
 		"P4-BOOT-04": {bootstrap.Upgrade, bootstrap.MigrateLegacy, []string{"cpamp_state", "managed_cpa", "control_base_path"}, []string{"usage_events_authoritative"}, []string{"usage_events_export_transform_reimport"}},
 		"P4-BOOT-05": {bootstrap.Upgrade, bootstrap.ConnectExternal, []string{"cpamp_state", "control_base_path", "external_connection"}, []string{"usage_events_authoritative", "source_cpa_user_owned"}, []string{"usage_events_export_transform_reimport", "source_cpa_stop", "source_cpa_delete", "source_cpa_takeover"}},
@@ -364,28 +379,30 @@ func validateFixture(f fixture) error {
 			return fmt.Errorf("path %s effects changed", item.ID)
 		}
 		if item.ID == "P4-BOOT-02" {
-			resourceWant := map[bootstrap.AdoptionResourceKind]struct {
+			decisionWant := map[bootstrap.ResourceRef]struct {
+				kind        bootstrap.AdoptionResourceKind
 				scope       bootstrap.AdoptionScope
 				disposition bootstrap.AdoptionDisposition
 			}{
-				bootstrap.APIKeys:              {bootstrap.ClientAPIKeys, bootstrap.Migrate},
-				bootstrap.Credentials:          {bootstrap.PortableAuthFiles, bootstrap.Migrate},
-				bootstrap.CPAConfiguration:     {bootstrap.ManagementAPIFields, bootstrap.Migrate},
-				bootstrap.ProviderRuntimeState: {bootstrap.DurableProviderState, bootstrap.ManualAction},
+				"api-key-primary":  {bootstrap.APIKeys, bootstrap.ClientAPIKeys, bootstrap.Migrate},
+				"credential-a":     {bootstrap.Credentials, bootstrap.CPAAuthFiles, bootstrap.Migrate},
+				"credential-b":     {bootstrap.Credentials, bootstrap.CPAAuthFiles, bootstrap.ManualAction},
+				"credential-c":     {bootstrap.Credentials, bootstrap.CPAAuthFiles, bootstrap.Unsupported},
+				"config-routing":   {bootstrap.CPAConfiguration, bootstrap.ManagementAPIFields, bootstrap.Migrate},
+				"config-secret":    {bootstrap.CPAConfiguration, bootstrap.ManagementAPIFields, bootstrap.Unsupported},
+				"provider-state-a": {bootstrap.ProviderRuntimeState, bootstrap.ProviderState, bootstrap.ManualAction},
 			}
-			if len(item.AdoptionResources) != len(resourceWant) {
-				return errors.New("adoption resource taxonomy must contain four categories")
+			if len(item.AdoptionDecisions) != len(decisionWant) || len(item.DiscoveredResourceRefs) != len(decisionWant) {
+				return errors.New("adoption fixture must cover each discovered resource")
 			}
-			seenResources := map[bootstrap.AdoptionResourceKind]bool{}
-			for _, resource := range item.AdoptionResources {
-				wantResource, ok := resourceWant[resource.Kind]
-				if !ok || seenResources[resource.Kind] || resource.Scope != wantResource.scope || resource.Disposition != wantResource.disposition {
-					return fmt.Errorf("invalid or duplicate adoption resource %q", resource.Kind)
+			for _, decision := range item.AdoptionDecisions {
+				wantDecision, ok := decisionWant[decision.ResourceRef]
+				if !ok || decision.Kind != wantDecision.kind || decision.Scope != wantDecision.scope || decision.Disposition != wantDecision.disposition {
+					return fmt.Errorf("invalid adoption decision %q", decision.ResourceRef)
 				}
-				seenResources[resource.Kind] = true
 			}
-		} else if len(item.AdoptionResources) != 0 {
-			return fmt.Errorf("path %s cannot declare adoption resources", item.ID)
+		} else if len(item.DiscoveredResourceRefs) != 0 || len(item.AdoptionDecisions) != 0 {
+			return fmt.Errorf("path %s cannot declare adoption decisions", item.ID)
 		}
 		if item.ControlBasePath != "/phase4-fixture-control" {
 			return fmt.Errorf("path %s must carry the synthetic canonical path", item.ID)
@@ -425,7 +442,7 @@ func validateFixture(f fixture) error {
 			return fmt.Errorf("classification %s: got %s, err %v, want %s", item.ID, got, err, want)
 		}
 	}
-	global := []string{"legacy_bootstrap_state_separate", "recovery_server_checkpoint_authority", "recovery_no_direct_completed", "fresh_no_historical_usage", "upgrade_usage_events_authoritative", "upgrade_additive_derived_rebuild_allowed", "direct_upgrade_release_owned_exact_allowlist", "unknown_v1_fail_closed", "runtime_derived_from_strategy", "manager_desired_control_base_path_authority", "bootstrap_discovery_temporary", "completed_fixed_alias_no_path_disclosure", "control_base_path_not_authentication", "control_base_path_apply_deferred", "no_http_persistence_runtime_ui_behavior", "adoption_capability_gated_resource_set", "adoption_source_available_until_commit"}
+	global := []string{"legacy_bootstrap_state_separate", "recovery_server_checkpoint_authority", "recovery_no_direct_completed", "fresh_no_historical_usage", "upgrade_usage_events_authoritative", "upgrade_additive_derived_rebuild_allowed", "direct_upgrade_release_owned_exact_allowlist", "unknown_v1_fail_closed", "runtime_derived_from_strategy", "manager_desired_control_base_path_authority", "bootstrap_discovery_temporary", "completed_fixed_alias_no_path_disclosure", "control_base_path_not_authentication", "control_base_path_apply_deferred", "no_http_persistence_runtime_ui_behavior", "adoption_capability_gated_resource_set", "adoption_source_available_until_commit", "adoption_per_resource_decision", "adoption_server_owned_evidence_refs"}
 	if !sameSet(f.GlobalAssertions, global) {
 		return errors.New("global assertions missing, duplicated or unknown")
 	}
@@ -491,7 +508,7 @@ func validateSchemaStructure(data []byte) error {
 		}
 		return nil
 	}
-	if err := checkSet(schema, "required", []string{"$schema", "schemaVersion", "contractId", "executionBaseline", "bootstrapModes", "cpaStrategies", "directUpgradeSources", "paths", "classificationAssertions", "globalAssertions"}); err != nil {
+	if err := checkSet(schema, "required", []string{"$schema", "schemaVersion", "contractId", "executionBaseline", "bootstrapModes", "cpaStrategies", "adoptionResourceKinds", "directUpgradeSources", "paths", "classificationAssertions", "globalAssertions"}); err != nil {
 		return err
 	}
 	checks := []struct {
@@ -513,7 +530,7 @@ func validateSchemaStructure(data []byte) error {
 			return err
 		}
 	}
-	for _, name := range []string{"path", "classificationAssertion", "adoptionResource"} {
+	for _, name := range []string{"path", "classificationAssertion", "adoptionDecision"} {
 		object, err := schemaObject(schema, "$defs", name)
 		if err != nil || object["additionalProperties"] != false {
 			return fmt.Errorf("schema %s must reject additional properties: %v", name, err)
@@ -523,8 +540,31 @@ func validateSchemaStructure(data []byte) error {
 	if err != nil {
 		return err
 	}
-	if err := checkSet(path, "required", []string{"id", "mode", "cpamp_action", "cpa_strategy", "source_cpamp", "source_cpa", "usage_action", "backup_required", "runtime_mode", "mutations", "preserved", "unsupported", "adoptionResources", "control_base_path", "estimated_steps"}); err != nil {
+	if err := checkSet(path, "required", []string{"id", "mode", "cpamp_action", "cpa_strategy", "source_cpamp", "source_cpa", "usage_action", "backup_required", "runtime_mode", "mutations", "preserved", "unsupported", "discoveredResourceRefs", "adoptionDecisions", "control_base_path", "estimated_steps"}); err != nil {
 		return err
+	}
+	decision, err := schemaObject(schema, "$defs", "adoptionDecision")
+	if err != nil {
+		return err
+	}
+	if err := checkSet(decision, "required", []string{"resourceRef", "kind", "scope", "readEvidenceRef", "replayEvidenceRef", "verifyEvidenceRef", "manualAction", "disposition"}); err != nil {
+		return err
+	}
+	decisions, err := schemaObject(schema, "$defs", "path", "properties", "adoptionDecisions")
+	if err != nil || decisions["maxItems"] != nil {
+		return errors.New("adoption decisions cannot be capped at taxonomy size")
+	}
+	evidence, err := schemaObject(schema, "$defs", "evidenceRef")
+	if err != nil || evidence["pattern"] != "^(|preflight:[a-z][a-z0-9-]*)$" {
+		return errors.New("schema must restrict capability evidence references to server preflight refs")
+	}
+	resource, err := schemaObject(schema, "$defs", "resourceRef")
+	if err != nil || resource["pattern"] != "^[a-z][a-z0-9-]*$" {
+		return errors.New("schema resource reference shape changed")
+	}
+	taxonomy, err := schemaObject(schema, "properties", "adoptionResourceKinds")
+	if err != nil || taxonomy["minItems"] != float64(4) || taxonomy["maxItems"] != float64(4) || taxonomy["uniqueItems"] != true {
+		return errors.New("schema must freeze four distinct adoption kinds")
 	}
 	return nil
 }
@@ -558,6 +598,12 @@ func TestSchemaRejectsStructuralDrift(t *testing.T) {
 		{"mode enum", `"recovery", "completed"]`, `"recovery", "mystery"]`},
 		{"strategy enum", `"migrate_legacy", "connect_external"]`, `"migrate_legacy", "mystery"]`},
 		{"path ID enum", `"P4-BOOT-04", "P4-BOOT-05"]`, `"P4-BOOT-04", "P4-BOOT-99"]`},
+		{"adoption decision cap", `"adoptionDecisions": { "type": "array", "items"`, `"adoptionDecisions": { "type": "array", "maxItems": 4, "items"`},
+		{"evidence reference pattern", `"pattern": "^(|preflight:[a-z][a-z0-9-]*)$"`, `"pattern": "^.*$"`},
+		{"adoption decision required", `"verifyEvidenceRef", "manualAction", "disposition"]`, `"verifyEvidenceRef", "manualAction"]`},
+		{"adoption decision additionalProperties", `"adoptionDecision": {
+      "type": "object", "additionalProperties": false,`, `"adoptionDecision": {
+      "type": "object", "additionalProperties": true,`},
 		{"path additionalProperties", `"path": {
       "type": "object", "additionalProperties": false,`, `"path": {
       "type": "object", "additionalProperties": true,`},
@@ -594,10 +640,15 @@ func TestFixtureRejectsContractDrift(t *testing.T) {
 		{"upgrade usage lost", `"source_cpa": "legacy", "usage_action": "preserve"`, `"source_cpa": "legacy", "usage_action": "none"`},
 		{"adoption history import", `"historical_usage_import", "request_history_import"`, `"usage_events_authoritative", "request_history_import"`},
 		{"adoption source stop", `"source_cpa_stop", "source_cpa_delete"`, `"source_cpa_delete"`},
-		{"adoption duplicate resource", `"kind": "credentials"`, `"kind": "api_keys"`},
-		{"adoption unreadable resource", `"readEvidence": "synthetic:GET /v0/management/api-keys"`, `"readEvidence": ""`},
-		{"adoption resource not replayable", `"replayEvidence": "synthetic:PUT /v0/management/api-keys"`, `"replayEvidence": ""`},
-		{"adoption resource not verifiable", `"verifyEvidence": "synthetic:GET staged /v0/management/api-keys"`, `"verifyEvidence": ""`},
+		{"duplicate taxonomy kind", `"adoptionResourceKinds": ["api_keys", "credentials", "cpa_configuration", "provider_runtime_state"]`, `"adoptionResourceKinds": ["api_keys", "credentials", "credentials", "provider_runtime_state"]`},
+		{"adoption duplicate resource ref", `"resourceRef": "credential-b"`, `"resourceRef": "credential-a"`},
+		{"adoption missing discovered decision", `"resourceRef": "credential-c"`, `"resourceRef": "credential-d"`},
+		{"adoption arbitrary evidence text", `"readEvidenceRef": "preflight:read-api-key-primary"`, `"readEvidenceRef": "yes"`},
+		{"adoption endpoint is not evidence", `"replayEvidenceRef": "preflight:replay-api-key-primary"`, `"replayEvidenceRef": "PUT /v0/management/api-keys"`},
+		{"adoption unreadable resource", `"readEvidenceRef": "preflight:read-api-key-primary"`, `"readEvidenceRef": ""`},
+		{"adoption resource not replayable", `"replayEvidenceRef": "preflight:replay-api-key-primary"`, `"replayEvidenceRef": ""`},
+		{"adoption resource not verifiable", `"verifyEvidenceRef": "preflight:verify-api-key-primary"`, `"verifyEvidenceRef": ""`},
+		{"adoption mixed credentials collapsed", `"resourceRef": "credential-b", "kind": "credentials"`, `"resourceRef": "credential-b", "kind": "api_keys"`},
 		{"adoption manual state called migratable", `"manualAction": "reconfigure_after_adoption", "disposition": "manual_action"`, `"manualAction": "reconfigure_after_adoption", "disposition": "migrate"`},
 		{"upgrade preserve missing", `"preserved": ["usage_events_authoritative"],`, `"preserved": [],`},
 		{"unsupported source called fresh", `"id": "unknown_version_is_unsupported", "hasV1ProductState": true`, `"id": "unknown_version_is_unsupported", "hasV1ProductState": false`},
@@ -703,34 +754,61 @@ func TestAdoptionResourceCapabilityGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	missing := plan
-	missing.AdoptionResources = append([]bootstrap.AdoptionResource(nil), plan.AdoptionResources[:3]...)
+	missing.AdoptionDecisions = append([]bootstrap.AdoptionResourceDecision(nil), plan.AdoptionDecisions[:6]...)
 	if err := missing.Validate(allowlist); err == nil {
-		t.Fatal("adoption accepted without a decision for provider runtime state")
+		t.Fatal("adoption accepted with an undecided discovered resource")
+	}
+	duplicate := plan
+	duplicate.AdoptionDecisions = append([]bootstrap.AdoptionResourceDecision(nil), plan.AdoptionDecisions...)
+	duplicate.AdoptionDecisions[2].ResourceRef = duplicate.AdoptionDecisions[1].ResourceRef
+	if err := duplicate.Validate(allowlist); err == nil {
+		t.Fatal("adoption accepted duplicate resource references")
+	}
+	undiscovered := plan
+	undiscovered.DiscoveredResourceRefs = append([]bootstrap.ResourceRef(nil), plan.DiscoveredResourceRefs...)
+	undiscovered.DiscoveredResourceRefs[2] = "credential-extra"
+	if err := undiscovered.Validate(allowlist); err == nil {
+		t.Fatal("adoption accepted a decision for an undiscovered resource")
+	}
+	empty := plan
+	empty.DiscoveredResourceRefs = []bootstrap.ResourceRef{}
+	empty.AdoptionDecisions = []bootstrap.AdoptionResourceDecision{}
+	empty.Mutations = slices.DeleteFunc(append([]string(nil), plan.Mutations...), func(v string) bool { return strings.HasPrefix(v, "adoption:") })
+	empty.Unsupported = slices.DeleteFunc(append([]string(nil), plan.Unsupported...), func(v string) bool { return strings.HasPrefix(v, "adoption:") })
+	if err := empty.Validate(allowlist); err != nil {
+		t.Fatalf("an empty discovered inventory must be representable: %v", err)
 	}
 	for _, tc := range []struct {
 		name  string
-		clear func(*bootstrap.AdoptionResource)
+		clear func(*bootstrap.AdoptionResourceDecision)
 	}{
-		{"unreadable", func(r *bootstrap.AdoptionResource) { r.ReadEvidence = "" }},
-		{"not replayable", func(r *bootstrap.AdoptionResource) { r.ReplayEvidence = "" }},
-		{"not verifiable", func(r *bootstrap.AdoptionResource) { r.VerifyEvidence = "" }},
+		{"unreadable", func(r *bootstrap.AdoptionResourceDecision) { r.ReadEvidenceRef = "" }},
+		{"not replayable", func(r *bootstrap.AdoptionResourceDecision) { r.ReplayEvidenceRef = "" }},
+		{"not verifiable", func(r *bootstrap.AdoptionResourceDecision) { r.VerifyEvidenceRef = "" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			item := plan.AdoptionResources[0]
+			item := plan.AdoptionDecisions[0]
 			tc.clear(&item)
 			got, err := bootstrap.DecideAdoptionResource(item)
 			if err != nil || got != bootstrap.Unsupported {
-				t.Fatalf("incomplete capability proof got %q, err %v", got, err)
+				t.Fatalf("incomplete capability references got %q, err %v", got, err)
 			}
 			changed := plan
-			changed.AdoptionResources = append([]bootstrap.AdoptionResource(nil), plan.AdoptionResources...)
-			changed.AdoptionResources[0] = item
+			changed.AdoptionDecisions = append([]bootstrap.AdoptionResourceDecision(nil), plan.AdoptionDecisions...)
+			changed.AdoptionDecisions[0] = item
 			if err := changed.Validate(allowlist); err == nil {
-				t.Fatal("unproven resource remained in mutations")
+				t.Fatal("resource lacking evidence reference remained in mutations")
 			}
 		})
 	}
-	manual := plan.AdoptionResources[3]
+	for _, value := range []bootstrap.CapabilityEvidenceRef{"yes", "GET /v0/management/config", "preflight:", "preflight:bad/path"} {
+		item := plan.AdoptionDecisions[0]
+		item.ReadEvidenceRef = value
+		if _, err := bootstrap.DecideAdoptionResource(item); err == nil {
+			t.Fatalf("arbitrary evidence text %q accepted", value)
+		}
+	}
+	manual := plan.AdoptionDecisions[6]
 	if got, err := bootstrap.DecideAdoptionResource(manual); err != nil || got != bootstrap.ManualAction {
 		t.Fatalf("unproven provider state must require manual action: %q, %v", got, err)
 	}
