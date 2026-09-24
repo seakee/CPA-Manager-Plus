@@ -25,16 +25,22 @@
       "source_cpamp": null, "source_cpa": null, "usage_action": "none", "backup_required": false,
       "runtime_mode": "embedded", "control_base_path": "/phase4-fixture-control",
       "mutations": ["cpamp_state", "managed_cpa", "control_base_path"],
-      "preserved": [], "unsupported": [],
+      "preserved": [], "unsupported": [], "adoptionResources": [],
       "estimated_steps": ["choose_strategy", "choose_control_base_path", "initialize_cpamp", "verify_runtime"]
     },
     {
       "id": "P4-BOOT-02", "mode": "fresh", "cpamp_action": "initialize", "cpa_strategy": "adopt_existing",
       "source_cpamp": null, "source_cpa": "existing", "usage_action": "none", "backup_required": false,
       "runtime_mode": "embedded", "control_base_path": "/phase4-fixture-control",
-      "mutations": ["cpamp_state", "managed_cpa", "control_base_path"],
-      "preserved": ["source_cpa_recoverable_until_success"],
-      "unsupported": ["historical_usage_import", "request_history_import", "cpa_log_import", "historical_analytics_import", "plugin_runtime_implicit_import", "source_cpa_delete", "source_cpa_overwrite"],
+      "mutations": ["cpamp_state", "managed_cpa", "control_base_path", "migrate_api_keys", "migrate_credentials", "migrate_cpa_configuration"],
+      "preserved": ["source_cpa_recoverable_until_success", "source_cpa_available_until_commit"],
+      "unsupported": ["historical_usage_import", "request_history_import", "cpa_log_import", "historical_analytics_import", "plugin_runtime_implicit_import", "source_cpa_stop", "source_cpa_delete", "source_cpa_overwrite", "manual_action_provider_runtime_state"],
+      "adoptionResources": [
+        { "kind": "api_keys", "scope": "client_api_keys", "readEvidence": "synthetic:GET /v0/management/api-keys", "replayEvidence": "synthetic:PUT /v0/management/api-keys", "verifyEvidence": "synthetic:GET staged /v0/management/api-keys", "manualAction": "", "disposition": "migrate" },
+        { "kind": "credentials", "scope": "portable_auth_files", "readEvidence": "synthetic:GET /v0/management/auth-files + download", "replayEvidence": "synthetic:POST /v0/management/auth-files", "verifyEvidence": "synthetic:GET staged auth-files + download", "manualAction": "", "disposition": "migrate" },
+        { "kind": "cpa_configuration", "scope": "management_api_allowlisted_fields", "readEvidence": "synthetic:GET /v0/management/config allowlisted fields", "replayEvidence": "synthetic:matching Management PUT/PATCH", "verifyEvidence": "synthetic:GET staged /v0/management/config", "manualAction": "", "disposition": "migrate" },
+        { "kind": "provider_runtime_state", "scope": "capability_proven_durable_state", "readEvidence": "", "replayEvidence": "", "verifyEvidence": "", "manualAction": "reconfigure_after_adoption", "disposition": "manual_action" }
+      ],
       "estimated_steps": ["choose_strategy", "inspect_source_cpa", "choose_control_base_path", "initialize_cpamp", "verify_adoption"]
     },
     {
@@ -44,6 +50,7 @@
       "mutations": ["cpamp_state", "control_base_path", "external_connection"],
       "preserved": ["source_cpa_user_owned"],
       "unsupported": ["historical_usage_import", "source_cpa_stop", "source_cpa_delete", "source_cpa_takeover"],
+      "adoptionResources": [],
       "estimated_steps": ["choose_strategy", "inspect_source_cpa", "choose_control_base_path", "initialize_cpamp", "verify_connection"]
     },
     {
@@ -54,6 +61,7 @@
       "mutations": ["cpamp_state", "managed_cpa", "control_base_path"],
       "preserved": ["usage_events_authoritative"],
       "unsupported": ["usage_events_export_transform_reimport"],
+      "adoptionResources": [],
       "estimated_steps": ["verify_source", "backup", "choose_strategy", "choose_control_base_path", "migrate_cpamp", "verify_runtime"]
     },
     {
@@ -64,6 +72,7 @@
       "mutations": ["cpamp_state", "control_base_path", "external_connection"],
       "preserved": ["usage_events_authoritative", "source_cpa_user_owned"],
       "unsupported": ["usage_events_export_transform_reimport", "source_cpa_stop", "source_cpa_delete", "source_cpa_takeover"],
+      "adoptionResources": [],
       "estimated_steps": ["verify_source", "backup", "choose_strategy", "choose_control_base_path", "migrate_cpamp", "verify_connection"]
     }
   ],
@@ -85,6 +94,7 @@
     "fresh_no_historical_usage", "upgrade_usage_events_authoritative", "upgrade_additive_derived_rebuild_allowed",
     "direct_upgrade_release_owned_exact_allowlist", "unknown_v1_fail_closed", "runtime_derived_from_strategy",
     "manager_desired_control_base_path_authority", "bootstrap_discovery_temporary", "completed_fixed_alias_no_path_disclosure",
-    "control_base_path_not_authentication", "control_base_path_apply_deferred", "no_http_persistence_runtime_ui_behavior"
+    "control_base_path_not_authentication", "control_base_path_apply_deferred", "no_http_persistence_runtime_ui_behavior",
+    "adoption_capability_gated_resource_set", "adoption_source_available_until_commit"
   ]
 }

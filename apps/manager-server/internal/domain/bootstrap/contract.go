@@ -82,13 +82,6 @@ type ClassificationEvidence struct {
 }
 
 func Classify(e ClassificationEvidence, allowlist []DirectUpgradeSource) (Mode, error) {
-	seen := make(map[DirectUpgradeSource]bool, len(allowlist))
-	for _, source := range allowlist {
-		if !source.valid() || seen[source] {
-			return "", errors.New("direct-upgrade allowlist has invalid or duplicate source")
-		}
-		seen[source] = true
-	}
 	if e.RecoveryReason != "" {
 		if !validRecoveryReason(e.RecoveryReason) {
 			return "", fmt.Errorf("unknown recovery reason %q", e.RecoveryReason)
@@ -103,6 +96,15 @@ func Classify(e ClassificationEvidence, allowlist []DirectUpgradeSource) (Mode, 
 			return "", errors.New("source supplied without v1 product state")
 		}
 		return Fresh, nil
+	}
+	// Release metadata only gates direct upgrade. Recovery, completed, and
+	// fresh classification must remain available when that metadata is broken.
+	seen := make(map[DirectUpgradeSource]bool, len(allowlist))
+	for _, source := range allowlist {
+		if !source.valid() || seen[source] {
+			return "", errors.New("direct-upgrade allowlist has invalid or duplicate source")
+		}
+		seen[source] = true
 	}
 	if e.Source != nil && seen[*e.Source] {
 		return Upgrade, nil
@@ -140,19 +142,20 @@ const (
 // ControlBasePath denotes the desired canonical value; normalization, collision
 // checks and apply/rollback are deferred to later work.
 type Plan struct {
-	Mode            Mode
-	CPAMPAction     CPAMPAction
-	CPAStrategy     CPAStrategy
-	SourceCPAMP     *DirectUpgradeSource
-	SourceCPA       SourceCPA
-	UsageAction     UsageAction
-	BackupRequired  bool
-	RuntimeMode     RuntimeMode
-	Mutations       []string
-	Preserved       []string
-	Unsupported     []string
-	ControlBasePath string
-	EstimatedSteps  []string
+	Mode              Mode
+	CPAMPAction       CPAMPAction
+	CPAStrategy       CPAStrategy
+	SourceCPAMP       *DirectUpgradeSource
+	SourceCPA         SourceCPA
+	UsageAction       UsageAction
+	BackupRequired    bool
+	RuntimeMode       RuntimeMode
+	Mutations         []string
+	Preserved         []string
+	Unsupported       []string
+	AdoptionResources []AdoptionResource
+	ControlBasePath   string
+	EstimatedSteps    []string
 }
 
 func RuntimeForStrategy(strategy CPAStrategy) (RuntimeMode, error) {
@@ -226,7 +229,7 @@ func (p Plan) Validate(allowlist []DirectUpgradeSource) error {
 		}
 	}
 	if p.CPAStrategy == AdoptExisting {
-		for _, v := range []string{"historical_usage_import", "request_history_import", "cpa_log_import", "historical_analytics_import", "plugin_runtime_implicit_import", "source_cpa_delete", "source_cpa_overwrite"} {
+		for _, v := range []string{"historical_usage_import", "request_history_import", "cpa_log_import", "historical_analytics_import", "plugin_runtime_implicit_import", "source_cpa_stop", "source_cpa_delete", "source_cpa_overwrite"} {
 			if !has(p.Unsupported, v) {
 				return fmt.Errorf("adoption must disallow %s", v)
 			}
@@ -234,6 +237,14 @@ func (p Plan) Validate(allowlist []DirectUpgradeSource) error {
 		if !has(p.Preserved, "source_cpa_recoverable_until_success") {
 			return errors.New("adoption must keep source CPA recoverable until success")
 		}
+		if !has(p.Preserved, "source_cpa_available_until_commit") {
+			return errors.New("adoption must keep source CPA available until commit")
+		}
+		if err := validateAdoptionResources(p.AdoptionResources, p.Mutations, p.Unsupported); err != nil {
+			return err
+		}
+	} else if len(p.AdoptionResources) != 0 {
+		return errors.New("adoption resources require adopt_existing strategy")
 	}
 	if p.CPAStrategy == ConnectExternal {
 		for _, v := range []string{"source_cpa_stop", "source_cpa_delete", "source_cpa_takeover"} {
