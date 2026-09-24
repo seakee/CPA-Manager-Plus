@@ -320,5 +320,51 @@
       }
     },
     "digest": "sha256:602323c842258d2b517b5e8bc97da6c6110837d4d28dec74576b077611780e7c"
+  },
+  "v1.14.0": {
+    "info": {
+      "schema_version": 1,
+      "release": {
+        "version": "v1.14.0",
+        "stage": "stable",
+        "source_commit": "eea422fd6a19ddb90f117b79b80d1f785a3b6a83"
+      },
+      "content": {
+        "summary": {
+          "zh": "新增完整的用量维护工作区，支持历史用量归档、校验、清理、可恢复导入导出与离线压缩，并修复模型发现将 display_name 误写为路由别名的问题。",
+          "en": "Adds the complete Usage Maintenance workspace with historical archiving, verification, cleanup, resumable import/export, and offline compaction, and fixes model discovery treating display_name as a routing alias."
+        },
+        "notes": {
+          "zh": "https://github.com/seakee/CPA-Manager-Plus/blob/v1.14.0/docs/release-notes/v1.14.0-zh.md",
+          "en": "https://github.com/seakee/CPA-Manager-Plus/blob/v1.14.0/docs/release-notes/v1.14.0-en.md"
+        }
+      },
+      "update": {
+        "breaking": false,
+        "migration_required": false,
+        "minimum_direct_upgrade_version": null,
+        "upgrade_guide_url": "https://github.com/seakee/CPA-Manager-Plus/releases/tag/v1.14.0"
+      },
+      "distribution": {
+        "docker": {
+          "image": "seakee/cpa-manager-plus",
+          "version_tag": "v1.14.0"
+        },
+        "native": {
+          "assets": [
+            "cpa-manager-plus_v1.14.0_darwin_amd64.tar.gz",
+            "cpa-manager-plus_v1.14.0_darwin_arm64.tar.gz",
+            "cpa-manager-plus_v1.14.0_linux_amd64.tar.gz",
+            "cpa-manager-plus_v1.14.0_linux_arm64.tar.gz",
+            "cpa-manager-plus_v1.14.0_windows_amd64.zip",
+            "cpa-manager-plus_v1.14.0_windows_arm64.zip"
+          ]
+        }
+      },
+      "compatibility": {
+        "minimum_cpa_version": "v7.3.4"
+      }
+    },
+    "digest": "sha256:0f1c9361103c3ee22972e8e7a3f0b6f8207fc8f747f74fd847d33588c6aed181"
   }
 }
