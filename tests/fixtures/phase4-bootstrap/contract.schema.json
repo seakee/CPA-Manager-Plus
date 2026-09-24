@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CPAMP Phase4-00 bootstrap domain contract fixture",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schemaVersion", "contractId", "executionBaseline", "bootstrapModes", "cpaStrategies", "adoptionResourceKinds", "directUpgradeSources", "paths", "classificationAssertions", "globalAssertions"],
+  "properties": {
+    "$schema": { "const": "./contract.schema.json" },
+    "schemaVersion": { "const": 1 },
+    "contractId": { "const": "cpamp-v2-phase4-00-bootstrap-contract-v1" },
+    "executionBaseline": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "bootstrapModes": { "type": "array", "minItems": 5, "maxItems": 5, "items": { "$ref": "#/$defs/modeEntry" } },
+    "cpaStrategies": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "$ref": "#/$defs/strategyEntry" } },
+    "adoptionResourceKinds": { "type": "array", "minItems": 4, "maxItems": 4, "uniqueItems": true, "items": { "$ref": "#/$defs/adoptionKind" } },
+    "directUpgradeSources": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/source" } },
+    "paths": { "type": "array", "minItems": 5, "maxItems": 5, "items": { "$ref": "#/$defs/path" } },
+    "classificationAssertions": { "type": "array", "minItems": 11, "items": { "$ref": "#/$defs/classificationAssertion" } },
+    "globalAssertions": {
+      "type": "array", "minItems": 19, "maxItems": 19, "uniqueItems": true,
+      "items": { "enum": ["legacy_bootstrap_state_separate", "recovery_server_checkpoint_authority", "recovery_no_direct_completed", "fresh_no_historical_usage", "upgrade_usage_events_authoritative", "upgrade_additive_derived_rebuild_allowed", "direct_upgrade_release_owned_exact_allowlist", "unknown_v1_fail_closed", "runtime_derived_from_strategy", "manager_desired_control_base_path_authority", "bootstrap_discovery_temporary", "completed_fixed_alias_no_path_disclosure", "control_base_path_not_authentication", "control_base_path_apply_deferred", "no_http_persistence_runtime_ui_behavior", "adoption_capability_gated_resource_set", "adoption_source_available_until_commit", "adoption_per_resource_decision", "adoption_server_owned_evidence_refs"] }
+    }
+  },
+  "$defs": {
+    "mode": { "enum": ["fresh", "upgrade", "unsupported_upgrade", "recovery", "completed"] },
+    "strategy": { "enum": ["new_managed", "adopt_existing", "migrate_legacy", "connect_external"] },
+    "adoptionKind": { "enum": ["api_keys", "credentials", "cpa_configuration", "provider_runtime_state"] },
+    "resourceRef": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+    "evidenceRef": { "type": "string", "pattern": "^(|preflight:[a-z][a-z0-9-]*)$" },
+    "adoptionDecision": {
+      "type": "object", "additionalProperties": false,
+      "required": ["resourceRef", "kind", "scope", "readEvidenceRef", "replayEvidenceRef", "verifyEvidenceRef", "manualAction", "disposition"],
+      "properties": {
+        "resourceRef": { "$ref": "#/$defs/resourceRef" },
+        "kind": { "$ref": "#/$defs/adoptionKind" },
+        "scope": { "enum": ["client_api_keys", "cpa_auth_files", "management_api_fields", "provider_runtime_state"] },
+        "readEvidenceRef": { "$ref": "#/$defs/evidenceRef" },
+        "replayEvidenceRef": { "$ref": "#/$defs/evidenceRef" },
+        "verifyEvidenceRef": { "$ref": "#/$defs/evidenceRef" },
+        "manualAction": { "enum": ["", "reauthenticate_after_adoption", "reconfigure_after_adoption"] },
+        "disposition": { "enum": ["migrate", "manual_action", "unsupported"] }
+      }
+    },
+    "runtimeMode": { "enum": ["embedded", "external"] },
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["versionTag", "schemaIdentity", "schemaVersion"],
+      "properties": {
+        "versionTag": { "type": "string", "minLength": 1 },
+        "schemaIdentity": { "type": "string", "minLength": 1 },
+        "schemaVersion": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "modeEntry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mode", "category", "ordinaryPathAllowed", "meaning"],
+      "properties": {
+        "mode": { "$ref": "#/$defs/mode" },
+        "category": { "enum": ["initial", "blocked", "repair", "terminal"] },
+        "ordinaryPathAllowed": { "type": "boolean" },
+        "meaning": { "type": "string", "minLength": 1 }
+      }
+    },
+    "strategyEntry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["strategy", "allowedModes", "runtimeMode"],
+      "properties": {
+        "strategy": { "$ref": "#/$defs/strategy" },
+        "allowedModes": { "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": { "enum": ["fresh", "upgrade"] } },
+        "runtimeMode": { "$ref": "#/$defs/runtimeMode" }
+      }
+    },
+    "path": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "mode", "cpamp_action", "cpa_strategy", "source_cpamp", "source_cpa", "usage_action", "backup_required", "runtime_mode", "mutations", "preserved", "unsupported", "discoveredResourceRefs", "adoptionDecisions", "control_base_path", "estimated_steps"],
+      "properties": {
+        "id": { "enum": ["P4-BOOT-01", "P4-BOOT-02", "P4-BOOT-03", "P4-BOOT-04", "P4-BOOT-05"] },
+        "mode": { "enum": ["fresh", "upgrade"] },
+        "cpamp_action": { "enum": ["initialize", "migrate_v1"] },
+        "cpa_strategy": { "$ref": "#/$defs/strategy" },
+        "source_cpamp": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/source" }] },
+        "source_cpa": { "enum": [null, "existing", "legacy", "external"] },
+        "usage_action": { "enum": ["none", "preserve"] },
+        "backup_required": { "type": "boolean" },
+        "runtime_mode": { "$ref": "#/$defs/runtimeMode" },
+        "mutations": { "$ref": "#/$defs/effects" },
+        "preserved": { "$ref": "#/$defs/effects" },
+        "unsupported": { "$ref": "#/$defs/effects" },
+        "discoveredResourceRefs": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/resourceRef" } },
+        "adoptionDecisions": { "type": "array", "items": { "$ref": "#/$defs/adoptionDecision" } },
+        "control_base_path": { "type": "string", "minLength": 1 },
+        "estimated_steps": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["verify_source", "backup", "choose_strategy", "inspect_source_cpa", "choose_control_base_path", "initialize_cpamp", "migrate_cpamp", "verify_runtime", "verify_adoption", "verify_connection"] } }
+      },
+      "allOf": [
+        { "if": { "properties": { "id": { "const": "P4-BOOT-01" } } }, "then": { "properties": { "mode": { "const": "fresh" }, "cpa_strategy": { "const": "new_managed" } } } },
+        { "if": { "properties": { "id": { "const": "P4-BOOT-02" } } }, "then": { "properties": { "mode": { "const": "fresh" }, "cpa_strategy": { "const": "adopt_existing" } } } },
+        { "if": { "properties": { "id": { "const": "P4-BOOT-03" } } }, "then": { "properties": { "mode": { "const": "fresh" }, "cpa_strategy": { "const": "connect_external" } } } },
+        { "if": { "properties": { "id": { "const": "P4-BOOT-04" } } }, "then": { "properties": { "mode": { "const": "upgrade" }, "cpa_strategy": { "const": "migrate_legacy" } } } },
+        { "if": { "properties": { "id": { "const": "P4-BOOT-05" } } }, "then": { "properties": { "mode": { "const": "upgrade" }, "cpa_strategy": { "const": "connect_external" } } } },
+        { "if": { "properties": { "mode": { "const": "fresh" } } }, "then": { "properties": { "cpamp_action": { "const": "initialize" }, "source_cpamp": { "type": "null" }, "usage_action": { "const": "none" }, "backup_required": { "const": false } } } },
+        { "if": { "properties": { "mode": { "const": "upgrade" } } }, "then": { "properties": { "cpamp_action": { "const": "migrate_v1" }, "source_cpamp": { "$ref": "#/$defs/source" }, "usage_action": { "const": "preserve" }, "backup_required": { "const": true } } } },
+        { "if": { "properties": { "cpa_strategy": { "const": "connect_external" } } }, "then": { "properties": { "runtime_mode": { "const": "external" } } }, "else": { "properties": { "runtime_mode": { "const": "embedded" } } } },
+        { "if": { "properties": { "cpa_strategy": { "const": "adopt_existing" } } }, "else": { "properties": { "discoveredResourceRefs": { "maxItems": 0 }, "adoptionDecisions": { "maxItems": 0 } } } }
+      ]
+    },
+    "effects": {
+      "type": "array", "uniqueItems": true,
+      "items": { "oneOf": [{ "enum": ["cpamp_state", "managed_cpa", "control_base_path", "external_connection", "additive_schema", "derived_projection_rebuild", "source_cpa_recoverable_until_success", "source_cpa_available_until_commit", "source_cpa_user_owned", "usage_events_authoritative", "historical_usage_import", "request_history_import", "cpa_log_import", "historical_analytics_import", "plugin_runtime_implicit_import", "source_cpa_delete", "source_cpa_overwrite", "source_cpa_stop", "source_cpa_takeover", "usage_events_export_transform_reimport"] }, { "type": "string", "pattern": "^adoption:(migrate|manual_action|unsupported):[a-z][a-z0-9-]*$" }] }
+    },
+    "classificationAssertion": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "hasV1ProductState", "source", "recoveryReason", "bootstrapComplete", "expectedMode"],
+      "properties": {
+        "id": { "enum": ["no_v1_is_fresh", "exact_source_is_upgrade", "unknown_version_is_unsupported", "unknown_schema_is_unsupported", "missing_source_is_unsupported", "incomplete_operation_is_recovery", "rollback_is_recovery", "damaged_is_recovery", "manual_is_recovery", "completed_state", "recovery_overrides_completed"] },
+        "hasV1ProductState": { "type": "boolean" },
+        "source": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/source" }] },
+        "recoveryReason": { "enum": ["", "operation_incomplete", "rollback_required", "damaged_state", "manual_recovery_required"] },
+        "bootstrapComplete": { "type": "boolean" },
+        "expectedMode": { "$ref": "#/$defs/mode" }
+      }
+    }
+  }
+}
