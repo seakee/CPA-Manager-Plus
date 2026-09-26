@@ -1,4 +1,6 @@
 import type { GeminiKeyConfig, OpenAIProviderConfig, ProviderKeyConfig } from '@/types';
+import type { ProviderKeyAlias } from '@/services/api/usageService';
+import { sha256Hex } from '@/utils/apiKeyHash';
 import { maskApiKey } from '@/utils/format';
 import type { StatusBarData } from '@/utils/recentRequests';
 import {
@@ -63,7 +65,10 @@ interface ProviderRowBase {
 export type ProviderRow =
   | (ProviderRowBase & { kind: 'gemini'; raw: GeminiKeyConfig })
   | (ProviderRowBase & { kind: 'interactions'; raw: GeminiKeyConfig })
-  | (ProviderRowBase & { kind: 'codex' | 'xai' | 'meta' | 'claude' | 'vertex'; raw: ProviderKeyConfig })
+  | (ProviderRowBase & {
+      kind: 'codex' | 'xai' | 'meta' | 'claude' | 'vertex';
+      raw: ProviderKeyConfig;
+    })
   | (ProviderRowBase & { kind: 'openai'; raw: OpenAIProviderConfig });
 
 export interface BuildProviderRowsInput {
@@ -76,6 +81,7 @@ export interface BuildProviderRowsInput {
   vertex: ProviderKeyConfig[];
   openai: OpenAIProviderConfig[];
   usageByProvider: ProviderRecentUsageMap;
+  providerKeyAliases?: ProviderKeyAlias[];
 }
 
 const collectModelNames = (models?: { name: string }[]): string[] =>
@@ -96,18 +102,34 @@ const getKeyConfigSortName = (config: GeminiKeyConfig | ProviderKeyConfig): stri
     .map((value) => String(value ?? '').trim())
     .find(Boolean) ?? '';
 
+const getCodexAlias = (apiKey: string, providerKeyAliases: ProviderKeyAlias[]): string => {
+  if (!apiKey) return '';
+  const apiKeyHash = sha256Hex(apiKey).toLowerCase();
+  return (
+    providerKeyAliases
+      .find(
+        (item) =>
+          item.provider.trim().toLowerCase() === 'codex' &&
+          item.apiKeyHash.trim().toLowerCase() === apiKeyHash
+      )
+      ?.alias.trim() ?? ''
+  );
+};
+
 function buildKeyConfigRow(
   kind: 'gemini' | 'interactions' | 'codex' | 'xai' | 'meta' | 'claude' | 'vertex',
   config: GeminiKeyConfig | ProviderKeyConfig,
   originalIndex: number,
-  usageByProvider: ProviderRecentUsageMap
+  usageByProvider: ProviderRecentUsageMap,
+  providerKeyAliases: ProviderKeyAlias[]
 ): ProviderRow {
   const modelNames = collectModelNames(config.models);
+  const label = kind === 'codex' ? getCodexAlias(config.apiKey, providerKeyAliases) : '';
   return {
     key: `${kind}:${getProviderConfigKey(config, originalIndex)}`,
     kind,
     originalIndex,
-    label: maskApiKey(config.apiKey),
+    label: label || maskApiKey(config.apiKey),
     sortName: getKeyConfigSortName(config),
     baseUrl: config.baseUrl ?? '',
     priority: config.priority,
@@ -124,6 +146,7 @@ function buildKeyConfigRow(
     ).success,
     statusData: getProviderRecentStatusData(usageByProvider, kind, config.apiKey, config.baseUrl),
     haystack: buildHaystack([
+      label,
       config.apiKey,
       config.prefix,
       config.baseUrl,
@@ -177,17 +200,30 @@ export function buildProviderRows({
   vertex,
   openai,
   usageByProvider,
+  providerKeyAliases = [],
 }: BuildProviderRowsInput): ProviderRow[] {
   return [
-    ...gemini.map((config, index) => buildKeyConfigRow('gemini', config, index, usageByProvider)),
-    ...interactions.map((config, index) =>
-      buildKeyConfigRow('interactions', config, index, usageByProvider)
+    ...gemini.map((config, index) =>
+      buildKeyConfigRow('gemini', config, index, usageByProvider, providerKeyAliases)
     ),
-    ...codex.map((config, index) => buildKeyConfigRow('codex', config, index, usageByProvider)),
-    ...xai.map((config, index) => buildKeyConfigRow('xai', config, index, usageByProvider)),
-    ...meta.map((config, index) => buildKeyConfigRow('meta', config, index, usageByProvider)),
-    ...claude.map((config, index) => buildKeyConfigRow('claude', config, index, usageByProvider)),
-    ...vertex.map((config, index) => buildKeyConfigRow('vertex', config, index, usageByProvider)),
+    ...interactions.map((config, index) =>
+      buildKeyConfigRow('interactions', config, index, usageByProvider, providerKeyAliases)
+    ),
+    ...codex.map((config, index) =>
+      buildKeyConfigRow('codex', config, index, usageByProvider, providerKeyAliases)
+    ),
+    ...xai.map((config, index) =>
+      buildKeyConfigRow('xai', config, index, usageByProvider, providerKeyAliases)
+    ),
+    ...meta.map((config, index) =>
+      buildKeyConfigRow('meta', config, index, usageByProvider, providerKeyAliases)
+    ),
+    ...claude.map((config, index) =>
+      buildKeyConfigRow('claude', config, index, usageByProvider, providerKeyAliases)
+    ),
+    ...vertex.map((config, index) =>
+      buildKeyConfigRow('vertex', config, index, usageByProvider, providerKeyAliases)
+    ),
     ...openai.map((provider, index) => buildOpenAIRow(provider, index, usageByProvider)),
   ];
 }
