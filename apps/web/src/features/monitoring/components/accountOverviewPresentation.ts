@@ -154,18 +154,29 @@ const isRedundantAccountSecondaryLabel = (candidate: string, primaryText: string
 
 export const buildAccountSecondaryText = (row: MonitoringAccountRow) => {
   const primaryText = row.displayAccount || row.account;
-  if (row.account && !isRedundantAccountSecondaryLabel(row.account, primaryText)) {
+  const isGenericProvider = (value: string) =>
+    Boolean(row.providerAlias) && value.trim().toLowerCase() === row.provider?.trim().toLowerCase();
+  if (
+    row.account &&
+    !isGenericProvider(row.account) &&
+    !isRedundantAccountSecondaryLabel(row.account, primaryText)
+  ) {
     return row.account;
   }
 
   const extraAuthLabels = row.authLabels.filter(
-    (label) => label && !isRedundantAccountSecondaryLabel(label, primaryText)
+    (label) =>
+      label && !isGenericProvider(label) && !isRedundantAccountSecondaryLabel(label, primaryText)
   );
   if (extraAuthLabels.length > 0) {
     return joinShort(extraAuthLabels, 2);
   }
   const extraChannels = row.channels.filter(
-    (label) => label && label !== '-' && !isRedundantAccountSecondaryLabel(label, primaryText)
+    (label) =>
+      label &&
+      label !== '-' &&
+      !isGenericProvider(label) &&
+      !isRedundantAccountSecondaryLabel(label, primaryText)
   );
   if (extraChannels.length > 0) {
     return joinShort(extraChannels, 2);

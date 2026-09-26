@@ -116,6 +116,7 @@ export type MonitoringSourceDisplay = {
   channel: string;
   channelHost: string;
   provider: string;
+  providerAlias?: string;
   fallbackId: string;
 };
 
@@ -151,11 +152,13 @@ export const buildMonitoringSourceDisplay = (
         (authMeta?.authIndex ? context.channelByAuthIndex.get(authMeta.authIndex) : undefined);
   const sourceInfoMap = context.sourceInfoMap ?? buildSourceInfoMap({});
   const authFileMap = context.authFileMap ?? buildAuthFileMapFromMeta(context.authMetaMap);
+  const snapshotProvider = readString(input.authProviderSnapshot);
   const sourceMeta = resolveSourceDisplay(
     readString(input.source),
     authIndex,
     sourceInfoMap,
-    authFileMap
+    authFileMap,
+    authMeta?.provider || snapshotProvider
   );
   const apiKeyHash = readString(input.apiKeyHash).toLowerCase();
   const apiKeyAlias = firstReadable(
@@ -164,7 +167,6 @@ export const buildMonitoringSourceDisplay = (
   );
   const snapshotAccount = readString(input.accountSnapshot);
   const snapshotLabel = readString(input.authLabelSnapshot);
-  const snapshotProvider = readString(input.authProviderSnapshot);
   const explicitChannel = readString(input.channel);
   const explicitLabel = readString(input.authLabel);
   const explicitAccount = readString(input.account);
@@ -205,6 +207,7 @@ export const buildMonitoringSourceDisplay = (
     account,
     resolvedSourceName
   );
+  const providerAlias = sourceMeta.isProviderKeyAlias ? resolvedSourceName : '';
   const sourceMasked = maskEmailLike(sourceLabel || sourceMeta.displayName);
   const accountMasked = maskEmailLike(account || sourceLabel);
   const fallbackId = shortHash(input.sourceHash || input.apiKeyHash || authIndex);
@@ -245,7 +248,7 @@ export const buildMonitoringSourceDisplay = (
       fallbackId
     ) || '-';
   const meta = firstReadable(
-    provider && !isRedundantMonitoringLabel(provider, primary) ? provider : '',
+    !providerAlias && provider && !isRedundantMonitoringLabel(provider, primary) ? provider : '',
     channelHost && !isRedundantMonitoringLabel(channelHost, primary) ? channelHost : '',
     readableAccountMasked && !isRedundantMonitoringLabel(readableAccountMasked, primary)
       ? readableAccountMasked
@@ -254,7 +257,7 @@ export const buildMonitoringSourceDisplay = (
       ? readableNonGenericSource
       : '',
     apiKeyAlias && !isRedundantMonitoringLabel(apiKeyAlias, primary) ? apiKeyAlias : '',
-    channel && !isRedundantMonitoringLabel(channel, primary) ? channel : '',
+    !providerAlias && channel && !isRedundantMonitoringLabel(channel, primary) ? channel : '',
     opaqueSource && !isRedundantMonitoringLabel(opaqueSource, primary) ? opaqueSource : ''
   );
   const title = Array.from(
@@ -265,7 +268,7 @@ export const buildMonitoringSourceDisplay = (
         sourceMasked,
         accountMasked,
         channelHost,
-        provider,
+        providerAlias ? '' : provider,
         authIndex !== '-' ? `#${shortHash(authIndex)}` : '',
         readString(input.sourceHash),
         readString(input.apiKeyHash),
@@ -285,6 +288,7 @@ export const buildMonitoringSourceDisplay = (
     channel: channel || '-',
     channelHost: channelHost || '-',
     provider: provider || '-',
+    providerAlias: providerAlias || undefined,
     fallbackId,
   };
 };

@@ -158,7 +158,8 @@ describe('buildMonitoringSourceDisplay', () => {
     );
 
     expect(display.primary).toBe('WWP1');
-    expect(display.meta).not.toContain(apiKey);
+    expect(display.meta).toBe('');
+    expect(display.providerAlias).toBe('WWP1');
   });
 
   it('keeps generic devin provider labels secondary to the account identity', () => {

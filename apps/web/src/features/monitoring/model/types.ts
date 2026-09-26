@@ -185,6 +185,7 @@ export type MonitoringEventRow = {
   apiKeyLabel: string;
   apiKeyMasked: string;
   provider: string;
+  providerAlias?: string;
   providerIdentity?: string;
   planType: string;
   channel: string;
@@ -267,6 +268,7 @@ export type MonitoringAccountRow = {
   id: string;
   account: string;
   provider?: string;
+  providerAlias?: string;
   filterValue?: string;
   displayAccount: string;
   accountMasked: string;

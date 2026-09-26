@@ -8,6 +8,30 @@ import {
 import { sha256Hex } from './apiKeyHash';
 
 describe('source resolver', () => {
+  it('uses a single configured provider alias for a generic provider source', () => {
+    const sourceInfoMap = buildSourceInfoMap({
+      codexApiKeys: [{ apiKey: 'sk-single-codex-source-fallback', authIndex: 'configured-auth' }],
+      providerKeyAliases: [
+        {
+          provider: 'codex',
+          apiKeyHash: sha256Hex('sk-single-codex-source-fallback'),
+          alias: 'WWP1',
+        },
+      ],
+    });
+
+    const resolved = resolveSourceDisplay(
+      'codex',
+      'runtime-auth',
+      sourceInfoMap,
+      new Map(),
+      'codex'
+    );
+
+    expect(resolved.displayName).toBe('WWP1');
+    expect(resolved.isProviderKeyAlias).toBe(true);
+  });
+
   it('resolves CPA masked Codex API key sources to readable base URL hosts', () => {
     const sourceInfoMap = buildSourceInfoMap({
       codexApiKeys: [

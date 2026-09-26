@@ -34,6 +34,7 @@ export const buildRealtimeSourceDisplay = (
     Partial<
       Pick<
         MonitoringEventRow,
+        | 'providerAlias'
         | 'clientIp'
         | 'userAgent'
         | 'xForwardedFor'
@@ -48,6 +49,9 @@ export const buildRealtimeSourceDisplay = (
 ) => {
   const channel = hasReadableRealtimeValue(row.channel) ? row.channel.trim() : '';
   const provider = hasReadableRealtimeValue(row.provider) ? row.provider.trim() : '';
+  const providerAlias = hasReadableRealtimeValue(row.providerAlias)
+    ? String(row.providerAlias).trim()
+    : '';
   const host = hasReadableRealtimeValue(row.channelHost) ? row.channelHost.trim() : '';
   const fullAccount = firstReadable(row.account, row.authLabel, row.accountMasked);
   const maskedAccount = firstReadable(row.accountMasked, row.authLabel, row.account);
@@ -82,6 +86,7 @@ export const buildRealtimeSourceDisplay = (
         : '';
   const primary =
     firstReadable(
+      providerAlias,
       keyDisambiguatedSource,
       nonGenericChannel,
       host,
@@ -92,10 +97,11 @@ export const buildRealtimeSourceDisplay = (
       provider,
       opaqueSource
     ) || '-';
-  const metaCandidate =
-    provider &&
-    (!isRedundantMonitoringLabel(provider, primary) ||
-      !isOpenAICompatibleRuntimeLabel(row.providerIdentity, primary))
+  const metaCandidate = providerAlias
+    ? undefined
+    : provider &&
+        (!isRedundantMonitoringLabel(provider, primary) ||
+          !isOpenAICompatibleRuntimeLabel(row.providerIdentity, primary))
       ? { value: provider, label: t('monitoring.filter_provider') }
       : [
           { value: host, label: t('monitoring.column_host') },
@@ -147,7 +153,7 @@ export const buildRealtimeSourceDisplay = (
         fullAccount,
         maskedAccount,
         host,
-        provider,
+        providerAlias ? '' : provider,
         ...requestMetadata,
       ].filter(hasReadableRealtimeValue)
     )

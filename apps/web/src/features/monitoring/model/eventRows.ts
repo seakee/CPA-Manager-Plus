@@ -53,11 +53,17 @@ export const buildEventRows = (
       const sourceIdentity = readString(detail.source);
       const sourceHashIdentity = readString(detail.source_hash ?? detail.sourceHash);
       const authMeta = authMetaMap.get(authIndex);
+      const snapshotProvider = readString(
+        detail.auth_provider_snapshot ?? detail.authProviderSnapshot
+      );
+      const eventProvider = readString(detail.provider);
+      const effectiveProvider = snapshotProvider || eventProvider;
       const sourceMeta = resolveSourceDisplay(
         detail.source,
         detail.auth_index,
         sourceInfoMap,
-        authFileMap
+        authFileMap,
+        authMeta?.provider || effectiveProvider
       );
       const snapshotAccount = readString(detail.account_snapshot ?? detail.accountSnapshot);
       const snapshotLabel = readString(
@@ -66,11 +72,6 @@ export const buildEventRows = (
           detail.auth_file_snapshot ??
           detail.authFileSnapshot
       );
-      const snapshotProvider = readString(
-        detail.auth_provider_snapshot ?? detail.authProviderSnapshot
-      );
-      const eventProvider = readString(detail.provider);
-      const effectiveProvider = snapshotProvider || eventProvider;
       const snapshotDisplay = snapshotAccount || snapshotLabel;
       const channelMeta =
         channelByAuthIndex.get(authIndex) ||
@@ -255,6 +256,7 @@ export const buildEventRows = (
         apiKeyLabel,
         apiKeyMasked,
         provider: normalizedProvider || '-',
+        providerAlias: sourceMeta.isProviderKeyAlias ? resolvedSourceName : undefined,
         providerIdentity: effectiveProvider,
         planType: authMeta?.planType || '-',
         channel: channelLabel,
