@@ -41,6 +41,152 @@ const buildRows = (
   );
 
 describe('buildEventRows', () => {
+  it('shows the configured OpenAI-compatible name without repeating the runtime label', () => {
+    const sourceInfoMap = buildSourceInfoMap({
+      openaiCompatibility: [
+        {
+          name: 'CC wwp1',
+          baseUrl: 'https://wawapii.example/v1',
+          apiKeyEntries: [{ apiKey: 'sk-compatible-event-cc-wwp1' }],
+        },
+      ],
+    });
+    const [resolvedRow] = buildEventRows(
+      [
+        {
+          timestamp: '2026-05-19T10:00:00Z',
+          source: 'openai-compatible-cc wwp1',
+          auth_index: '',
+          auth_provider_snapshot: 'openai-compatible-cc wwp1',
+          latency_ms: 1500,
+          tokens: { input_tokens: 10, output_tokens: 20, total_tokens: 30 },
+          failed: false,
+          __modelName: 'gpt-5.4',
+          __endpoint: 'POST /v1/chat/completions',
+          __timestampMs: Date.parse('2026-05-19T10:00:00Z'),
+        },
+      ],
+      new Map(),
+      new Map(),
+      sourceInfoMap,
+      new Map(),
+      {},
+      new Map()
+    );
+    const t = ((key: string) => key) as Parameters<typeof buildRealtimeSourceDisplay>[1];
+    const display = buildRealtimeSourceDisplay(resolvedRow, t);
+
+    expect(resolvedRow.source).toBe('CC wwp1');
+    expect(resolvedRow.provider).toBe('CC wwp1');
+    expect(display.primary).toBe('CC wwp1');
+    expect(display.meta).toBe('');
+  });
+
+  it('uses a provider key alias before a generic Codex snapshot label', () => {
+    const apiKey = 'sk-codex-event-row-alias-test-1234567890';
+    const authMetaMap = new Map<string, MonitoringAuthMeta>([
+      [
+        'auth-1',
+        {
+          authIndex: 'auth-1',
+          label: 'codex',
+          account: 'codex@example.com',
+          provider: 'codex',
+          status: 'active',
+          disabled: false,
+          unavailable: false,
+          runtimeOnly: false,
+          planType: '',
+          updatedAt: '',
+        },
+      ],
+    ]);
+    const [row] = buildEventRows(
+      [
+        {
+          timestamp: '2026-05-19T10:00:00Z',
+          source: `h:${sha256Hex(apiKey)}`,
+          auth_index: 'auth-1',
+          auth_provider_snapshot: 'codex',
+          latency_ms: 1500,
+          tokens: { input_tokens: 10, output_tokens: 20, total_tokens: 30 },
+          failed: false,
+          __modelName: 'gpt-5.4',
+          __endpoint: 'POST /v1/chat/completions',
+          __timestampMs: Date.parse('2026-05-19T10:00:00Z'),
+        },
+      ],
+      authMetaMap,
+      new Map(),
+      buildSourceInfoMap({
+        codexApiKeys: [{ apiKey, authIndex: 'auth-1' }],
+        providerKeyAliases: [{ provider: 'codex', apiKeyHash: sha256Hex(apiKey), alias: 'WWP1' }],
+      }),
+      new Map(),
+      {},
+      new Map()
+    );
+
+    expect(row.source).toBe('WWP1');
+  });
+
+  it('uses a provider key alias when the event source is the generic provider label', () => {
+    const apiKey = 'sk-codex-generic-source-alias-test-1234567890';
+    const authMetaMap = new Map<string, MonitoringAuthMeta>([
+      [
+        'auth-1',
+        {
+          authIndex: 'auth-1',
+          label: 'codex',
+          account: 'codex',
+          provider: 'codex',
+          status: 'active',
+          disabled: false,
+          unavailable: false,
+          runtimeOnly: false,
+          planType: '',
+          updatedAt: '',
+        },
+      ],
+    ]);
+    const [row] = buildEventRows(
+      [
+        {
+          timestamp: '2026-05-19T10:00:00Z',
+          source: 'codex',
+          auth_index: 'auth-1',
+          provider: 'codex',
+          api_key_hash: sha256Hex('client-key-is-not-the-codex-upstream-key'),
+          latency_ms: 1500,
+          tokens: { input_tokens: 10, output_tokens: 20, total_tokens: 30 },
+          failed: false,
+          __modelName: 'gpt-5.4',
+          __endpoint: 'POST /v1/chat/completions',
+          __timestampMs: Date.parse('2026-05-19T10:00:00Z'),
+        },
+      ],
+      authMetaMap,
+      new Map(),
+      buildSourceInfoMap({
+        codexApiKeys: [{ apiKey, authIndex: 'auth-1' }],
+        providerKeyAliases: [{ provider: 'codex', apiKeyHash: sha256Hex(apiKey), alias: 'WWP1' }],
+      }),
+      new Map(),
+      {},
+      new Map()
+    );
+
+    const display = buildRealtimeSourceDisplay(row, ((key: string) =>
+      key === 'monitoring.filter_provider' ? 'Provider' : key) as Parameters<
+      typeof buildRealtimeSourceDisplay
+    >[1]);
+
+    expect(row.source).toBe('WWP1');
+    expect(row.providerAlias).toBe('WWP1');
+    expect(display.primary).toBe('WWP1');
+    expect(display.meta).toBe('');
+  });
+
   it('preserves persisted account identity fields before display enrichment', () => {
     const [row] = buildRows({
       account_snapshot: '',

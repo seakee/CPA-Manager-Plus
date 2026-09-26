@@ -37,6 +37,10 @@ import {
   parseExcludedModels,
 } from '@/components/providers/utils';
 import { CredentialWeightInput } from '../CredentialWeightInput';
+import {
+  ProviderKeyAliasEditor,
+  type ProviderKeyAliasEditorHandle,
+} from '../ProviderKeyAliasEditor';
 import type { ProviderFormState } from '../types';
 import {
   getCredentialWeightComparisonValue,
@@ -146,6 +150,8 @@ export function CodexEditDrawer({
     buildCodexBaseline(buildEmptyForm(defaultBaseUrl))
   );
   const [loaded, setLoaded] = useState(false);
+  const providerKeyAliasRef = useRef<ProviderKeyAliasEditorHandle>(null);
+  const [providerKeyAliasDirty, setProviderKeyAliasDirty] = useState(false);
 
   const [modelDiscoveryOpen, setModelDiscoveryOpen] = useState(false);
   const [modelDiscoveryFetching, setModelDiscoveryFetching] = useState(false);
@@ -267,9 +273,10 @@ export function CodexEditDrawer({
       baseline.proxyUrl !== String(form.proxyUrl ?? '').trim() ||
       !areKeyValueEntriesEqual(baseline.headers, normalizeHeaderEntries(form.headers)) ||
       !areModelEntriesEqual(baseline.models, normalizeModelEntries(form.modelEntries)) ||
-      !areStringArraysEqual(baseline.excludedModels, parseExcludedModels(form.excludedText ?? ''))
+      !areStringArraysEqual(baseline.excludedModels, parseExcludedModels(form.excludedText ?? '')) ||
+      providerKeyAliasDirty
     );
-  }, [baseline, form]);
+  }, [baseline, form, providerKeyAliasDirty]);
 
   const discoveredModelsFiltered = useMemo(() => {
     const filter = modelDiscoverySearch.trim().toLowerCase();
@@ -646,6 +653,7 @@ export function CodexEditDrawer({
     setSaving(true);
     setError('');
     try {
+      await providerKeyAliasRef.current?.save();
       const payload: ProviderKeyConfig = {
         apiKey: form.apiKey.trim(),
         priority: form.priority !== undefined ? Math.trunc(form.priority) : undefined,
@@ -739,6 +747,7 @@ export function CodexEditDrawer({
     isXAI,
     onClose,
     onSaved,
+    providerKeyAliasRef,
     providerSection,
     showNotification,
     t,
@@ -851,6 +860,15 @@ export function CodexEditDrawer({
               disabled={disabled || saving}
               required
             />
+            {!isMeta && !isXAI && (
+              <ProviderKeyAliasEditor
+                ref={providerKeyAliasRef}
+                apiKey={form.apiKey}
+                provider="codex"
+                disabled={disabled || saving}
+                onDirtyChange={setProviderKeyAliasDirty}
+              />
+            )}
             <Input
               label={t('ai_providers.priority_label')}
               hint={t('ai_providers.priority_hint')}

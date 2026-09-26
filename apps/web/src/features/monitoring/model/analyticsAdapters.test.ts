@@ -4,8 +4,10 @@ import type {
   MonitoringAnalyticsEventRow,
 } from '@/services/api/usageService';
 import { buildSourceInfoMap } from '@/utils/sourceResolver';
+import { sha256Hex } from '@/utils/apiKeyHash';
 import {
   buildAnalyticsFilters,
+  buildAccountRowsFromAnalytics,
   buildMonitoringAccountFilterValue,
   buildChannelRowsFromAnalytics,
   buildFailureRowsFromAnalytics,
@@ -14,6 +16,58 @@ import {
   buildUsageDetailsFromAnalyticsEvents,
   parseMonitoringAccountFilterValue,
 } from './analyticsAdapters';
+
+describe('analytics account alias display', () => {
+  it('uses the configured alias when analytics only reports a generic Codex source', () => {
+    const rows = buildAccountRowsFromAnalytics(
+      [
+        {
+          id: 'codex-account',
+          account_snapshot: 'codex',
+          auth_label_snapshot: 'codex',
+          auth_provider_snapshot: 'codex',
+          auth_indices: [],
+          sources: ['codex'],
+          source_hashes: [],
+          calls: 1,
+          success_calls: 1,
+          failure_calls: 0,
+          success_rate: 1,
+          input_tokens: 1,
+          output_tokens: 1,
+          cached_tokens: 0,
+          cache_read_tokens: 0,
+          cache_creation_tokens: 0,
+          total_tokens: 2,
+          cost: 0,
+          average_latency_ms: null,
+          last_seen_ms: 1,
+          models: [],
+        },
+      ],
+      new Map(),
+      new Map(),
+      buildSourceInfoMap({
+        codexApiKeys: [{ apiKey: 'sk-single-analytics-alias' }],
+        providerKeyAliases: [
+          {
+            provider: 'codex',
+            apiKeyHash: sha256Hex('sk-single-analytics-alias'),
+            alias: 'WWP1',
+          },
+        ],
+      }),
+      new Map()
+    );
+
+    expect(rows[0]).toMatchObject({
+      account: 'codex',
+      provider: 'codex',
+      providerAlias: 'WWP1',
+      displayAccount: 'WWP1',
+    });
+  });
+});
 
 describe('buildUsageDetailsFromAnalyticsEvents', () => {
   it('maps resolved model and auth project snapshots into usage details', () => {
@@ -426,7 +480,11 @@ describe('buildAnalyticsFilters', () => {
       ],
     ]);
 
-    const filters = buildAnalyticsFilters({ account: 'account:legacy@example.com' }, authMetaMap, []);
+    const filters = buildAnalyticsFilters(
+      { account: 'account:legacy@example.com' },
+      authMetaMap,
+      []
+    );
 
     expect(filters.auth_indices).toEqual(['auth-1']);
   });

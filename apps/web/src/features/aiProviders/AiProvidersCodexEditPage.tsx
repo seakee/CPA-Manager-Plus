@@ -41,6 +41,10 @@ import {
 } from '@/components/providers/utils';
 import { CredentialWeightInput, type ProviderFormState } from '@/components/providers';
 import {
+  ProviderKeyAliasEditor,
+  type ProviderKeyAliasEditorHandle,
+} from '@/components/providers/ProviderKeyAliasEditor';
+import {
   getCredentialWeightComparisonValue,
   getCredentialWeightError,
   normalizeCredentialWeight,
@@ -156,6 +160,8 @@ export function AiProvidersCodexEditPage() {
   const [isTesting, setIsTesting] = useState(false);
   const autoFetchSignatureRef = useRef<string>('');
   const modelDiscoveryRequestIdRef = useRef(0);
+  const providerKeyAliasRef = useRef<ProviderKeyAliasEditorHandle>(null);
+  const [providerKeyAliasDirty, setProviderKeyAliasDirty] = useState(false);
 
   const hasIndexParam = typeof params.index === 'string';
   const editIndex = useMemo(() => parseProviderIndexParam(params.index), [params.index]);
@@ -297,7 +303,8 @@ export function AiProvidersCodexEditPage() {
     baseline.proxyUrl !== String(form.proxyUrl ?? '').trim() ||
     isHeadersDirty ||
     isModelsDirty ||
-    isExcludedModelsDirty;
+    isExcludedModelsDirty ||
+    providerKeyAliasDirty;
   const canGuard = !loading && !saving && !invalidIndexParam && !invalidIndex;
 
   const { allowNextNavigation } = useUnsavedChangesGuard({
@@ -646,6 +653,7 @@ export function AiProvidersCodexEditPage() {
     setSaving(true);
     setError('');
     try {
+      await providerKeyAliasRef.current?.save();
       const payload: ProviderKeyConfig = {
         apiKey: form.apiKey.trim(),
         priority: form.priority !== undefined ? Math.trunc(form.priority) : undefined,
@@ -666,11 +674,13 @@ export function AiProvidersCodexEditPage() {
       } else {
         await providersApi.createCodexConfig(payload);
       }
-      const syncedList = await providersApi.getCodexConfigs().catch(() =>
-        editIndex !== null
-          ? configs.map((item, index) => (index === editIndex ? payload : item))
-          : [...configs, payload]
-      );
+      const syncedList = await providersApi
+        .getCodexConfigs()
+        .catch(() =>
+          editIndex !== null
+            ? configs.map((item, index) => (index === editIndex ? payload : item))
+            : [...configs, payload]
+        );
       updateConfigValue('codex-api-key', syncedList);
       clearCache('codex-api-key');
       showNotification(
@@ -697,6 +707,7 @@ export function AiProvidersCodexEditPage() {
     editIndex,
     form,
     handleBack,
+    providerKeyAliasRef,
     showNotification,
     t,
     updateConfigValue,
@@ -757,6 +768,13 @@ export function AiProvidersCodexEditPage() {
               value={form.apiKey}
               onChange={(e) => setForm((prev) => ({ ...prev, apiKey: e.target.value }))}
               disabled={disableControls || saving}
+            />
+            <ProviderKeyAliasEditor
+              ref={providerKeyAliasRef}
+              apiKey={form.apiKey}
+              provider="codex"
+              disabled={disableControls || saving}
+              onDirtyChange={setProviderKeyAliasDirty}
             />
             <Input
               label={t('ai_providers.priority_label')}

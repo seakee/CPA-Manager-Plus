@@ -26,6 +26,7 @@ const createAccountRow = (overrides: Partial<MonitoringAccountRow> = {}): Monito
   id: overrides.id ?? 'account',
   account: overrides.account ?? 'account@example.com',
   provider: overrides.provider ?? 'codex',
+  providerAlias: overrides.providerAlias,
   filterValue: overrides.filterValue,
   displayAccount: overrides.displayAccount ?? overrides.account ?? 'account@example.com',
   accountMasked: overrides.accountMasked ?? 'acc***@example.com',
@@ -221,6 +222,23 @@ describe('accountOverviewState', () => {
     });
     expect(resolveAccountDisplayText(row, 'full')).toMatchObject({
       primary: 'kuaileshifu #1',
+      secondary: '',
+    });
+  });
+
+  it('uses a provider alias as the account identity and hides the generic provider label', () => {
+    const row = createAccountRow({
+      account: 'codex',
+      displayAccount: 'WWP1',
+      accountMasked: 'codex',
+      provider: 'codex',
+      providerAlias: 'WWP1',
+      authLabels: ['codex'],
+      channels: ['codex'],
+    });
+
+    expect(resolveAccountDisplayText(row, 'masked')).toMatchObject({
+      primary: 'WWP1',
       secondary: '',
     });
   });

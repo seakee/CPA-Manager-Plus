@@ -15,6 +15,7 @@ import { logsApi, type ErrorLogFile } from '@/services/api/logs';
 import {
   usageServiceApi,
   type ApiKeyAlias,
+  type ProviderKeyAlias,
   type UsageServiceStatus,
 } from '@/services/api/usageService';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
@@ -56,6 +57,7 @@ interface DashboardDisplayMeta {
   authFiles: AuthFileItem[];
   channels: MonitoringChannelMeta[];
   apiKeyAliases: ApiKeyAlias[];
+  providerKeyAliases: ProviderKeyAlias[];
 }
 
 const HEALTH_REFRESH_INTERVAL_MS = 60_000;
@@ -106,6 +108,7 @@ export function DashboardPage() {
     authFiles: [],
     channels: [],
     apiKeyAliases: [],
+    providerKeyAliases: [],
   });
 
   const apiKeysCache = useRef<string[]>([]);
@@ -236,8 +239,9 @@ export function DashboardPage() {
         metaApiKeys: config?.metaApiKeys || [],
         vertexApiKeys: config?.vertexApiKeys || [],
         openaiCompatibility: config?.openaiCompatibility || [],
+        providerKeyAliases: displayMeta.providerKeyAliases,
       }),
-    [config]
+    [config, displayMeta.providerKeyAliases]
   );
   const channelByAuthIndex = useMemo(() => {
     const map = new Map<string, MonitoringChannelMeta>();
@@ -268,21 +272,28 @@ export function DashboardPage() {
       setErrorLogs([]);
       setErrorLogsLoading(false);
       setManagerCpaBase('');
-      setDisplayMeta({ authFiles: [], channels: [], apiKeyAliases: [] });
+      setDisplayMeta({ authFiles: [], channels: [], apiKeyAliases: [], providerKeyAliases: [] });
       return;
     }
 
     setCollectorLoading(true);
     setErrorLogsLoading(true);
 
-    const [collectorResult, logsResult, managerConfigResult, metaResult, aliasesResult] =
-      await Promise.allSettled([
-        usageServiceApi.getStatus(usageServiceBase, managementKey),
-        logsApi.fetchErrorLogs(),
-        usageServiceApi.getManagerConfig(usageServiceBase, managementKey),
-        loadMonitoringMetaPayload(config),
-        usageServiceApi.getApiKeyAliases(usageServiceBase, managementKey),
-      ]);
+    const [
+      collectorResult,
+      logsResult,
+      managerConfigResult,
+      metaResult,
+      aliasesResult,
+      providerAliasesResult,
+    ] = await Promise.allSettled([
+      usageServiceApi.getStatus(usageServiceBase, managementKey),
+      logsApi.fetchErrorLogs(),
+      usageServiceApi.getManagerConfig(usageServiceBase, managementKey),
+      loadMonitoringMetaPayload(config),
+      usageServiceApi.getApiKeyAliases(usageServiceBase, managementKey),
+      usageServiceApi.getProviderKeyAliases(usageServiceBase, managementKey),
+    ]);
 
     if (collectorResult.status === 'fulfilled') {
       setCollectorStatus(collectorResult.value);
@@ -314,6 +325,11 @@ export function DashboardPage() {
         aliasesResult.status === 'fulfilled' && Array.isArray(aliasesResult.value.items)
           ? aliasesResult.value.items
           : current.apiKeyAliases,
+      providerKeyAliases:
+        providerAliasesResult.status === 'fulfilled' &&
+        Array.isArray(providerAliasesResult.value.items)
+          ? providerAliasesResult.value.items
+          : current.providerKeyAliases,
     }));
   }, [apiBase, config, managementKey, usageEnabled, usageServiceBase]);
 

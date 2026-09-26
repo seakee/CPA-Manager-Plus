@@ -5,6 +5,7 @@ export type SourceInfo = {
   type: string;
   identityKey?: string;
   providerEnabledState?: SourceProviderEnabledState;
+  isProviderKeyAlias?: boolean;
 };
 
 export type CredentialInfo = {

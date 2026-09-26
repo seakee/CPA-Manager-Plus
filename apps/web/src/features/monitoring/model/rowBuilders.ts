@@ -334,6 +334,7 @@ export const buildAccountRows = (rows: MonitoringEventRow[]): MonitoringAccountR
       account: string;
       filterAccount: string;
       provider: string;
+      providerAliases: Set<string>;
       accountMasked: string;
       authLabels: Set<string>;
       authIndices: Set<string>;
@@ -395,6 +396,7 @@ export const buildAccountRows = (rows: MonitoringEventRow[]): MonitoringAccountR
       account: row.account,
       filterAccount,
       provider,
+      providerAliases: new Set<string>(),
       accountMasked: row.accountMasked,
       authLabels: new Set<string>(),
       authIndices: new Set<string>(),
@@ -421,6 +423,7 @@ export const buildAccountRows = (rows: MonitoringEventRow[]): MonitoringAccountR
     };
 
     existing.rows.push(row);
+    if (row.providerAlias) existing.providerAliases.add(row.providerAlias);
     existing.authLabels.add(row.authLabel);
     existing.authIndices.add(row.authIndexIdentity ?? row.authIndex);
     if (row.sourceKey) {
@@ -487,10 +490,13 @@ export const buildAccountRows = (rows: MonitoringEventRow[]): MonitoringAccountR
       const sourceKeys = Array.from(item.sourceKeys).sort();
       const sourceHashes = Array.from(item.sourceHashes).sort();
       const apiKeyHashes = Array.from(item.apiKeyHashes).sort();
+      const providerAliases = Array.from(item.providerAliases);
+      const providerAlias = providerAliases.length === 1 ? providerAliases[0] : '';
       return {
         id: item.id,
         account: item.account,
         provider: item.provider,
+        providerAlias: providerAlias || undefined,
         filterValue:
           buildMonitoringAccountFilterValue({
             account: item.filterAccount,
@@ -499,7 +505,7 @@ export const buildAccountRows = (rows: MonitoringEventRow[]): MonitoringAccountR
             sourceHashes,
             apiKeyHashes,
           }) || item.account,
-        displayAccount: resolveAccountDisplayName(item.account, channels),
+        displayAccount: providerAlias || resolveAccountDisplayName(item.account, channels),
         accountMasked: item.accountMasked,
         authLabels: Array.from(item.authLabels).sort(),
         authIndices,
