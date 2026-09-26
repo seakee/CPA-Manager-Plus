@@ -569,6 +569,9 @@ export const QuotaWindowCard = ({
       </div>
     ) : null;
 
+  // A labelled plugin reading has no window percentage, so the card shows the
+  // plugin's own amount instead of an empty progress bar.
+  const amountOnly = Boolean(q.amountLabel) && q.remainingPercent === null;
   const header = (
     <div className={styles.header}>
       <div className={styles.headerMain}>
@@ -606,7 +609,7 @@ export const QuotaWindowCard = ({
       <div className={styles.headerAside}>
         <div className={styles.remaining}>
           <span>{t('accounts.detail_quota_remaining_label', { defaultValue: '剩余' })}</span>
-          <strong>{formatPercent(q.remainingPercent)}</strong>
+          <strong>{amountOnly ? q.amountLabel : formatPercent(q.remainingPercent)}</strong>
         </div>
       </div>
     </div>
@@ -623,12 +626,16 @@ export const QuotaWindowCard = ({
         data-quota-card-mode="other"
       >
         {header}
-        {progress}
+        {amountOnly ? null : progress}
         <div className={styles.meta}>
-          {q.amountLabel ? <span className={styles.amountLabel}>{q.amountLabel}</span> : null}
-          <span>
-            {t('accounts.detail_used')}: {formatPercent(q.usedPercent)}
-          </span>
+          {q.amountLabel && !amountOnly ? (
+            <span className={styles.amountLabel}>{q.amountLabel}</span>
+          ) : null}
+          {amountOnly ? null : (
+            <span>
+              {t('accounts.detail_used')}: {formatPercent(q.usedPercent)}
+            </span>
+          )}
           {q.windowMode === 'unknown' ? (
             <span className={styles.metaEmpty}>
               {t('accounts.detail_window_boundary_incomplete')}

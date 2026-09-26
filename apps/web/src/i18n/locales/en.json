@@ -2492,6 +2492,15 @@
     "plan_start": "Plan start",
     "plan_end": "Plan end"
   },
+  "plugin_quota": {
+    "title": "Plugin Quota",
+    "missing_identity": "Plugin credential is missing its auth_index",
+    "manager_unavailable": "Manager Server is unavailable, so plugin quota cannot be read",
+    "stale_response": "Plugin quota request cancelled due to credential or connection change",
+    "empty_data": "The plugin reported no quota data",
+    "loading": "Loading plugin quota...",
+    "refresh_button": "Refresh Quota"
+  },
   "meta_quota": {
     "title": "Meta Quota",
     "window": "Current window",

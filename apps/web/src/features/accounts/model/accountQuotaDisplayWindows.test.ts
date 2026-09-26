@@ -29,6 +29,7 @@ const emptyStores = (): AccountQuotaStores => ({
   devinQuota: {},
   kimiQuota: {},
   metaQuota: {},
+  pluginQuota: {},
   xaiQuota: {},
 });
 
@@ -61,6 +62,7 @@ const buildRow = (file: AuthFileItem, stores: AccountQuotaStores = emptyStores()
     stores.devinQuota,
     stores.kimiQuota,
     stores.metaQuota,
+    stores.pluginQuota,
     stores.xaiQuota,
   ] as Array<Record<string, CredentialScopedQuotaState>>;
   records.forEach((record) => {
@@ -1890,5 +1892,90 @@ describe('accountQuotaDisplayWindows', () => {
         quotaProgressObservedAtMs: null,
       });
     });
+  });
+});
+
+describe('plugin quota display windows', () => {
+  const pluginFile = (): AuthFileItem => ({
+    name: 'example-plugin-account.json',
+    provider: 'example-plugin',
+    auth_index: 'plugin-auth-index',
+    quota_provider: 'example-plugin',
+    account: 'account-1',
+  });
+
+  const pluginStores = (): AccountQuotaStores => {
+    const stores = emptyStores();
+    stores.pluginQuota['example-plugin-account.json'] = {
+      status: 'success',
+      provider: 'example-plugin',
+      pluginId: 'example-plugin',
+      displayName: 'Example quota',
+      supportsReset: false,
+      observedAtMs: 1_700_000_000_000,
+      items: [
+        { key: 'credit_remaining', label: '剩余额度', value: 1739.5, unit: 'credit', format: 'number' },
+        { key: 'balance', label: 'Balance', value: 5, unit: 'USD', format: 'currency', currency: 'USD' },
+        { key: 'daily_checkin', label: '今日可签到', value: 0, format: 'boolean' },
+      ],
+    };
+    return stores;
+  };
+
+  it('renders one non-window item per plugin reading', () => {
+    const stores = pluginStores();
+    const row = buildRow(pluginFile(), stores);
+
+    const windows = buildAccountQuotaDisplayWindows(row, {
+      stores,
+      translateQuotaWindowLabel,
+      t,
+      nowMs: 1_700_000_000_000,
+    });
+
+    expect(windows.map((window) => window.key)).toEqual([
+      'plugin:example-plugin:credit_remaining',
+      'plugin:example-plugin:balance',
+      'plugin:example-plugin:daily_checkin',
+    ]);
+    expect(windows[0].source).toBe('plugin');
+    expect(windows[0].kind).toBe('item');
+    expect(windows[0].windowMode).toBe('non_window');
+    expect(windows[0].label).toBe('剩余额度');
+    expect(windows[0].amountLabel).toBe('1,739.5 credit');
+    expect(windows[0].remainingPercent).toBeNull();
+    expect(windows[1].amountLabel).toBe('$5.00');
+    expect(windows[2].amountLabel).toBe('—');
+    windows.forEach((window) => {
+      expect(getAccountQuotaSemanticGroup(window)).toBe('other');
+      expect(isStandardAccountQuotaListWindow(window)).toBe(false);
+    });
+  });
+
+  it('keeps the plugin reading when the panel has no provider catalogue', () => {
+    const stores = pluginStores();
+    const row = buildRow(pluginFile(), stores);
+
+    const windows = buildAccountQuotaDisplayWindows(row, {
+      stores,
+      translateQuotaWindowLabel,
+      t,
+    });
+
+    expect(windows).toHaveLength(3);
+  });
+
+  it('falls back to window quotas for credentials without a plugin provider', () => {
+    const stores = pluginStores();
+    const file: AuthFileItem = { name: 'claude.json', provider: 'claude', auth_index: 'claude-1' };
+    const row = buildRow(file, stores);
+
+    const windows = buildAccountQuotaDisplayWindows(row, {
+      stores,
+      translateQuotaWindowLabel,
+      t,
+    });
+
+    expect(windows.every((window) => window.source !== 'plugin')).toBe(true);
   });
 });

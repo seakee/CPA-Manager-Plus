@@ -149,6 +149,91 @@ func codexInspectionInventoryComplete(result model.CodexInspectionResult) bool {
 		(result.QuotaInventoryObserved || strings.TrimSpace(result.QuotaWindowsJSON) == "[]")
 }
 
+// pluginQuotaWindowKind marks one labelled reading reported by a plugin quota
+// provider. The kind is deliberately not a duration bucket: a plugin item is a
+// non-window reading such as a balance, a point total or a check-in flag.
+const pluginQuotaWindowKind = "item"
+
+// WritePluginQuotaResult persists the labelled quota items a CPA plugin quota
+// provider reported for one credential. The plugin's own item key is the
+// provider window identity, its unit is the stored quota unit and a finite
+// numeric reading is stored as the window's observed amount. CPAMP never
+// persists provider display strings, so the plugin's label, format and
+// currency hints stay out of the snapshot: the panel renders them from the
+// live observation it fetched for the same credential.
+//
+// A provider that CPA has not reported in its catalogue is ignored, as is a
+// summary without usable items. Ignoring an empty summary keeps a transient
+// empty plugin answer from deactivating the windows of a credential that still
+// owns quota.
+func (s *Service) WritePluginQuotaResult(ctx context.Context, result model.PluginQuotaResult) error {
+	provider := normalizeProvider(result.Provider)
+	if provider == "" || !s.isSupportedProvider(provider) {
+		return nil
+	}
+	observedAtMS := result.ObservedAtMS
+	if observedAtMS <= 0 {
+		observedAtMS = s.now().UnixMilli()
+	}
+	account := AccountTarget{
+		AuthFileSnapshot:     result.AuthFileName,
+		AuthLabelSnapshot:    result.AuthLabel,
+		AuthProviderSnapshot: provider,
+		AuthIndex:            result.AuthIndex,
+		AccountSnapshot:      result.AccountSnapshot,
+		Source:               result.AuthFileName,
+	}
+	if _, ok := usageidentity.AccountKey(account.identityFields(provider)); !ok {
+		return nil
+	}
+	observationID := pluginQuotaObservationID(result, observedAtMS)
+	windows := make([]WindowInput, 0, len(result.Items))
+	for _, item := range result.Items {
+		key := strings.TrimSpace(item.Key)
+		if key == "" {
+			continue
+		}
+		windows = append(windows, WindowInput{
+			ProviderWindowID:    key,
+			WindowKind:          pluginQuotaWindowKind,
+			WindowMode:          "non_window",
+			ModelScopeKind:      "all",
+			Source:              "api_query",
+			SourceObservationID: observationID,
+			ObservedAtMS:        observedAtMS,
+			BoundaryAccuracy:    "unknown",
+			QuotaUnit:           item.Unit,
+			LimitValue:          item.Value,
+		})
+	}
+	if len(windows) == 0 {
+		return nil
+	}
+	return s.writeEvidenceEntries(ctx, []WriteEntry{{
+		Provider: provider,
+		Account:  account,
+		Observation: &ObservationInput{
+			Source:              "api_query",
+			SourceObservationID: observationID,
+			ObservedAtMS:        observedAtMS,
+			InventoryScopeKey:   provider + ":plugin-quota",
+			InventoryMode:       "complete",
+		},
+		Windows: windows,
+	}})
+}
+
+func pluginQuotaObservationID(result model.PluginQuotaResult, observedAtMS int64) string {
+	pluginID := firstNonEmpty(result.PluginID, result.Provider)
+	credential := firstNonEmpty(result.AuthIndex, result.AuthFileName)
+	return truncateObservationID(fmt.Sprintf(
+		"plugin-quota:%s:%s:%d",
+		pluginID,
+		credential,
+		observedAtMS,
+	))
+}
+
 func (s *Service) writeEvidenceEntries(ctx context.Context, entries []WriteEntry) error {
 	if len(entries) == 0 {
 		return nil

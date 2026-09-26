@@ -2487,6 +2487,15 @@
     "plan_start": "套餐生效时间",
     "plan_end": "套餐到期时间"
   },
+  "plugin_quota": {
+    "title": "插件额度",
+    "missing_identity": "插件凭据缺少 auth_index",
+    "manager_unavailable": "管理服务不可用，无法读取插件额度",
+    "stale_response": "由于凭据或连接变更，插件额度请求已取消",
+    "empty_data": "插件未返回额度数据",
+    "loading": "正在加载插件额度...",
+    "refresh_button": "刷新额度"
+  },
   "meta_quota": {
     "title": "Meta 额度",
     "window": "当前窗口",

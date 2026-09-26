@@ -16,6 +16,7 @@ const emptyStores = (): AccountQuotaStores => ({
   devinQuota: {},
   kimiQuota: {},
   metaQuota: {},
+  pluginQuota: {},
   xaiQuota: {},
 });
 
