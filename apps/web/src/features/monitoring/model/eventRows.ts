@@ -82,6 +82,7 @@ export const buildEventRows = (
       // Prefer multi-key OpenAI-compatible disambiguation (e.g. "kuaileshifu #1") over the
       // bare provider/auth label so realtime cells match account overview identity.
       const sourceLabel =
+        (sourceMeta.isProviderKeyAlias ? resolvedSourceName : '') ||
         (resolvedSourceName &&
         (isKeyDisambiguatedLabel(resolvedSourceName, channelMeta?.name) ||
           isKeyDisambiguatedLabel(resolvedSourceName, channelMeta?.host) ||

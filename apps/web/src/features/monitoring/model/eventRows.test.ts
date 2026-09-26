@@ -41,6 +41,54 @@ const buildRows = (
   );
 
 describe('buildEventRows', () => {
+  it('uses a provider key alias before a generic Codex snapshot label', () => {
+    const apiKey = 'sk-codex-event-row-alias-test-1234567890';
+    const authMetaMap = new Map<string, MonitoringAuthMeta>([
+      [
+        'auth-1',
+        {
+          authIndex: 'auth-1',
+          label: 'codex',
+          account: 'codex@example.com',
+          provider: 'codex',
+          status: 'active',
+          disabled: false,
+          unavailable: false,
+          runtimeOnly: false,
+          planType: '',
+          updatedAt: '',
+        },
+      ],
+    ]);
+    const [row] = buildEventRows(
+      [
+        {
+          timestamp: '2026-05-19T10:00:00Z',
+          source: `h:${sha256Hex(apiKey)}`,
+          auth_index: 'auth-1',
+          auth_provider_snapshot: 'codex',
+          latency_ms: 1500,
+          tokens: { input_tokens: 10, output_tokens: 20, total_tokens: 30 },
+          failed: false,
+          __modelName: 'gpt-5.4',
+          __endpoint: 'POST /v1/chat/completions',
+          __timestampMs: Date.parse('2026-05-19T10:00:00Z'),
+        },
+      ],
+      authMetaMap,
+      new Map(),
+      buildSourceInfoMap({
+        codexApiKeys: [{ apiKey, authIndex: 'auth-1' }],
+        providerKeyAliases: [{ provider: 'codex', apiKeyHash: sha256Hex(apiKey), alias: 'WWP1' }],
+      }),
+      new Map(),
+      {},
+      new Map()
+    );
+
+    expect(row.source).toBe('WWP1');
+  });
+
   it('preserves persisted account identity fields before display enrichment', () => {
     const [row] = buildRows({
       account_snapshot: '',
