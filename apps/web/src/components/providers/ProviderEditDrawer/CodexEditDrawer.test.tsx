@@ -159,7 +159,7 @@ describe('CodexEditDrawer load baseline guard', () => {
     mocks.deleteProviderKeyAlias.mockResolvedValue(undefined);
   });
 
-  it('saves a Codex provider alias by hash without adding it to provider config', async () => {
+  it('saves a Codex provider alias with the main form save', async () => {
     mocks.fetchConfig.mockResolvedValueOnce([
       { apiKey: 'codex-provider-secret', baseUrl: 'https://api.openai.com/v1' },
     ]);
@@ -188,15 +188,15 @@ describe('CodexEditDrawer load baseline guard', () => {
       );
     expect(aliasInput).toBeDefined();
     act(() => aliasInput?.props.onChange({ target: { value: 'WWP1' } }));
-    const aliasSaveButton = renderer!.root
-      .findAllByType('button')
-      .find((button) =>
+    expect(
+      renderer!.root.findAllByType('button').some((button) =>
         button
           .findAllByType('span')
           .some((span) => span.children.join('') === i18n.t('ai_providers.provider_key_alias_save'))
-      );
+      )
+    ).toBe(false);
     await act(async () => {
-      await aliasSaveButton?.props.onClick();
+      await findSaveButton(renderer!.root)?.props.onClick();
     });
 
     expect(mocks.saveProviderKeyAlias).toHaveBeenCalledWith(
@@ -204,7 +204,7 @@ describe('CodexEditDrawer load baseline guard', () => {
       { provider: 'codex', apiKeyHash: sha256Hex('codex-provider-secret'), alias: 'WWP1' },
       'manager-key'
     );
-    expect(mocks.updateCodexConfig).not.toHaveBeenCalled();
+    expect(mocks.updateCodexConfig).toHaveBeenCalledTimes(1);
     act(() => renderer!.unmount());
   });
 

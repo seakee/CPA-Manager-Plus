@@ -1076,7 +1076,7 @@
     "codex_key_required": "请输入 Codex API 密钥",
     "provider_key_alias_label": "Provider 别名（可选）",
     "provider_key_alias_placeholder": "例如：WWP1",
-    "provider_key_alias_hint": "别名按 API Key 哈希保存，用于调用记录显示；不会写入 CPA Provider 配置。",
+    "provider_key_alias_hint": "别名按 API Key 哈希保存，用于调用记录显示；填写后点击页面底部“保存”即可生效，不会写入 CPA Provider 配置。",
     "provider_key_alias_save": "保存别名",
     "provider_key_alias_saved": "Provider 别名已保存",
     "provider_key_alias_load_failed": "Provider 别名加载失败",

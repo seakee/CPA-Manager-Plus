@@ -1,26 +1,31 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { usageServiceApi, type ProviderKeyAlias } from '@/services/api/usageService';
-import { useAuthStore, useNotificationStore } from '@/stores';
+import { useAuthStore } from '@/stores';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import { sha256Hex } from '@/utils/apiKeyHash';
+
+export type ProviderKeyAliasEditorHandle = {
+  save: () => Promise<void>;
+};
 
 type ProviderKeyAliasEditorProps = {
   apiKey: string;
   provider: string;
   disabled?: boolean;
+  onDirtyChange?: (dirty: boolean) => void;
 };
 
-export function ProviderKeyAliasEditor({
-  apiKey,
-  provider,
-  disabled = false,
-}: ProviderKeyAliasEditorProps) {
+export const ProviderKeyAliasEditor = forwardRef<
+  ProviderKeyAliasEditorHandle,
+  ProviderKeyAliasEditorProps
+>(function ProviderKeyAliasEditor(
+  { apiKey, provider, disabled = false, onDirtyChange },
+  ref
+) {
   const { t } = useTranslation();
   const managementKey = useAuthStore((state) => state.managementKey);
-  const showNotification = useNotificationStore((state) => state.showNotification);
   const availability = usePanelFeatureAvailability();
   const [alias, setAlias] = useState('');
   const [savedAlias, setSavedAlias] = useState('');
@@ -33,10 +38,15 @@ export function ProviderKeyAliasEditor({
   const serviceBase = availability.managerServiceBase;
   const serviceAvailable = Boolean(
     availability.panelHostConfirmed &&
-    availability.panelHostMode === 'manager_embedded' &&
-    availability.managerServiceAvailable &&
-    serviceBase
+      availability.panelHostMode === 'manager_embedded' &&
+      availability.managerServiceAvailable &&
+      serviceBase
   );
+  const isDirty = alias.trim() !== savedAlias;
+
+  useEffect(() => {
+    onDirtyChange?.(isDirty);
+  }, [isDirty, onDirtyChange]);
 
   useEffect(() => {
     let cancelled = false;
@@ -79,13 +89,16 @@ export function ProviderKeyAliasEditor({
 
   const save = useCallback(async () => {
     const nextAlias = alias.trim();
+    if (!isDirty) return;
     if (!apiKeyHash || !serviceAvailable) {
-      setError(t('ai_providers.provider_key_alias_unavailable'));
-      return;
+      const saveError = new Error(t('ai_providers.provider_key_alias_unavailable'));
+      setError(saveError.message);
+      throw saveError;
     }
     if (nextAlias.length > 120) {
-      setError(t('ai_providers.provider_key_alias_too_long'));
-      return;
+      const saveError = new Error(t('ai_providers.provider_key_alias_too_long'));
+      setError(saveError.message);
+      throw saveError;
     }
     setSaving(true);
     setError('');
@@ -121,54 +134,42 @@ export function ProviderKeyAliasEditor({
         setAlias(persisted?.alias?.trim() || nextAlias);
       }
       setSavedAlias(nextAlias);
-      showNotification(t('ai_providers.provider_key_alias_saved'), 'success');
     } catch (err: unknown) {
       const code = err && typeof err === 'object' && 'code' in err ? String(err.code) : '';
-      setError(
+      const message =
         code === 'provider_key_alias_duplicate'
           ? t('ai_providers.provider_key_alias_duplicate')
           : err instanceof Error
             ? err.message
-            : t('ai_providers.provider_key_alias_save_failed')
-      );
+            : t('ai_providers.provider_key_alias_save_failed');
+      setError(message);
+      throw new Error(message);
     } finally {
       setSaving(false);
     }
   }, [
     alias,
     apiKeyHash,
+    isDirty,
     managementKey,
     provider,
     savedAlias,
     serviceAvailable,
     serviceBase,
-    showNotification,
     t,
   ]);
 
+  useImperativeHandle(ref, () => ({ save }), [save]);
+
   return (
-    <div>
-      <Input
-        label={t('ai_providers.provider_key_alias_label')}
-        placeholder={t('ai_providers.provider_key_alias_placeholder')}
-        hint={t('ai_providers.provider_key_alias_hint')}
-        value={alias}
-        onChange={(event) => setAlias(event.target.value)}
-        disabled={disabled || loading || saving || !apiKeyHash || !serviceAvailable}
-        error={error || undefined}
-      />
-      <Button
-        type="button"
-        variant="secondary"
-        size="sm"
-        onClick={() => void save()}
-        disabled={
-          disabled || loading || saving || !apiKeyHash || !serviceAvailable || alias === savedAlias
-        }
-        loading={saving}
-      >
-        {t('ai_providers.provider_key_alias_save')}
-      </Button>
-    </div>
+    <Input
+      label={t('ai_providers.provider_key_alias_label')}
+      placeholder={t('ai_providers.provider_key_alias_placeholder')}
+      hint={t('ai_providers.provider_key_alias_hint')}
+      value={alias}
+      onChange={(event) => setAlias(event.target.value)}
+      disabled={disabled || loading || saving || !apiKeyHash || !serviceAvailable}
+      error={error || undefined}
+    />
   );
-}
+});

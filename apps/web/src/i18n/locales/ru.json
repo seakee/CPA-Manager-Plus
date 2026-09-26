@@ -1082,7 +1082,7 @@
     "codex_key_required": "Введите API-ключ Codex",
     "provider_key_alias_label": "Псевдоним провайдера (необязательно)",
     "provider_key_alias_placeholder": "Например: WWP1",
-    "provider_key_alias_hint": "Сохраняется по хэшу API-ключа для отображения запросов и не записывается в конфигурацию CPA Provider.",
+    "provider_key_alias_hint": "Сохраняется по хэшу API-ключа для отображения запросов; после ввода нажмите кнопку «Сохранить» на странице. В конфигурацию CPA Provider не записывается.",
     "provider_key_alias_save": "Сохранить псевдоним",
     "provider_key_alias_saved": "Псевдоним провайдера сохранён",
     "provider_key_alias_load_failed": "Не удалось загрузить псевдоним провайдера",

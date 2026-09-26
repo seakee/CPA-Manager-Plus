@@ -1078,7 +1078,7 @@
     "codex_key_required": "Please enter a Codex API Key",
     "provider_key_alias_label": "Provider alias (optional)",
     "provider_key_alias_placeholder": "e.g. WWP1",
-    "provider_key_alias_hint": "Saved by API key hash for usage display; it is not written to the CPA provider configuration.",
+    "provider_key_alias_hint": "Saved by API key hash for usage display; click the page Save button after entering it. It is not written to the CPA provider configuration.",
     "provider_key_alias_save": "Save alias",
     "provider_key_alias_saved": "Provider alias saved",
     "provider_key_alias_load_failed": "Failed to load provider alias",
