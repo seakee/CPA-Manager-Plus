@@ -527,6 +527,7 @@ export interface XaiBillingUsage {
 }
 
 export interface XaiBillingConfig {
+  isUnifiedBillingUser?: boolean;
   currentPeriod?: XaiBillingPeriod | null;
   current_period?: XaiBillingPeriod | null;
   creditUsagePercent?: number | string | null;
@@ -592,6 +593,7 @@ export interface XaiOfficialApiHealth {
 }
 
 export interface XaiBillingSummary {
+  usagePercentSource?: 'grpc-implicit-zero';
   periodType: XaiBillingPeriodType;
   usagePercent: number | null;
   periodStart?: string;
