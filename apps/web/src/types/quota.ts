@@ -668,3 +668,35 @@ export interface MetaQuotaState
   errorStatus?: number;
 }
 
+
+/**
+ * One labelled reading a CPA plugin quota provider reported. A plugin quota is
+ * a set of items rather than the fixed windows the built-in providers expose,
+ * so `value` keeps the plugin's own shape (number, boolean or string) and the
+ * remaining fields are presentation hints owned by the plugin.
+ */
+export interface PluginQuotaItem {
+  key: string;
+  label: string;
+  value: number | string | boolean | null;
+  unit?: string;
+  format?: string;
+  currency?: string;
+}
+
+export interface PluginQuotaData {
+  provider: string;
+  pluginId: string;
+  displayName: string;
+  supportsReset: boolean;
+  observedAtMs: number;
+  items: PluginQuotaItem[];
+}
+
+export interface PluginQuotaState
+  extends CredentialScopedQuotaState,
+    PluginQuotaData {
+  status: 'idle' | 'loading' | 'success' | 'error';
+  error?: string;
+  errorStatus?: number;
+}

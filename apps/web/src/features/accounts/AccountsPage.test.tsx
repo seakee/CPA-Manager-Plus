@@ -567,6 +567,7 @@ const { mocks } = vi.hoisted(() => {
         devinQuota: {},
         kimiQuota: {},
         metaQuota: {},
+        pluginQuota: {},
         xaiQuota: {},
         setAntigravityQuota: vi.fn(),
         setClaudeQuota: vi.fn(),

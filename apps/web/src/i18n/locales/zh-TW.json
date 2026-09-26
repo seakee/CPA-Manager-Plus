@@ -2487,6 +2487,15 @@
     "plan_start": "方案生效時間",
     "plan_end": "方案到期時間"
   },
+  "plugin_quota": {
+    "title": "外掛額度",
+    "missing_identity": "外掛憑證缺少 auth_index",
+    "manager_unavailable": "管理服務無法使用，無法讀取外掛額度",
+    "stale_response": "由於憑證或連線變更，外掛額度請求已取消",
+    "empty_data": "外掛未回傳額度資料",
+    "loading": "正在載入外掛額度...",
+    "refresh_button": "重新整理額度"
+  },
   "meta_quota": {
     "title": "Meta 配額",
     "window": "目前週期",

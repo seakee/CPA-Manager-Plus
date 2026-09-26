@@ -45,6 +45,10 @@ export class MetaQuotaError extends Error {
 
 export interface QuotaFetchContext {
   isCurrent?: () => boolean;
+  // Manager Server connection for quota sources that CPAMP, rather than CPA,
+  // has to resolve (a plugin quota provider is named by CPA at runtime).
+  managerServiceBase?: string;
+  managementKey?: string;
 }
 
 export interface ParseMetaQuotaOptions {

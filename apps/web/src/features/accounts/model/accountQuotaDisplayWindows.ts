@@ -21,6 +21,12 @@ import {
   inferCodexQuotaScopeFromProviderWindowId,
   isCodexMainQuotaModelScope,
 } from '@/utils/quota/codexQuota';
+import {
+  formatPluginQuotaItemAmount,
+  getPluginQuotaProviderDescriptor,
+  isPluginQuotaCredential,
+  resolvePluginQuotaProvider,
+} from '@/utils/quota/pluginQuota';
 import type { AccountRow } from './accountRows';
 import {
   hasConfirmedXaiBillingEntitlement,
@@ -37,6 +43,7 @@ export type AccountQuotaWindowKind =
   | 'payg'
   | 'product'
   | 'summary'
+  | 'item'
   | 'unknown';
 
 export type AccountQuotaWindowSource =
@@ -47,6 +54,7 @@ export type AccountQuotaWindowSource =
   | 'kimi'
   | 'meta'
   | 'xai'
+  | 'plugin'
   | 'summary';
 
 export interface AccountQuotaDisplayWindow {
@@ -830,6 +838,13 @@ export const buildAccountQuotaDisplayWindows = (
   row: AccountRow,
   options: BuildAccountQuotaDisplayWindowsOptions
 ): AccountQuotaDisplayWindow[] => {
+  // A plugin quota provider is named by CPA at runtime, so this branch is
+  // resolved from the credential binding rather than from row.provider.
+  if (isPluginQuotaCredential(row.raw)) {
+    const windows = buildPluginQuotaDisplayWindows(row, options);
+    if (windows.length) return windows;
+  }
+
   if (row.provider === 'codex') {
     const windows = buildCodexQuotaDisplayWindows(row, options);
     if (windows.length) return windows;
@@ -866,6 +881,40 @@ export const buildAccountQuotaDisplayWindows = (
   }
 
   return buildSummaryQuotaDisplayWindow(row, options);
+};
+
+/**
+ * A plugin reports labelled readings instead of windows. Each reading becomes
+ * one non-window display item whose amount the panel renders verbatim, so an
+ * unknown plugin still surfaces its numbers without a panel-side mapping.
+ */
+const buildPluginQuotaDisplayWindows = (
+  row: AccountRow,
+  options: BuildAccountQuotaDisplayWindowsOptions
+): AccountQuotaDisplayWindow[] => {
+  const quota = getCredentialScopedQuotaState(options.stores.pluginQuota, row.raw);
+  if (!quota || !quota.items?.length) return [];
+  const provider = quota.provider || resolvePluginQuotaProvider(row.raw) || 'plugin';
+  const displayName =
+    quota.displayName || getPluginQuotaProviderDescriptor(provider)?.display_name || '';
+  return quota.items.map((item) =>
+    buildAccountQuotaDisplayWindow({
+      key: `plugin:${provider}:${item.key}`,
+      label: item.label,
+      kind: 'item',
+      remainingPercent: null,
+      usedPercent: null,
+      resetLabel: '-',
+      amountLabel: formatPluginQuotaItemAmount(item),
+      description: displayName || undefined,
+      source: 'plugin',
+      observationSource: 'api_query',
+      observedAtMs: quota.observedAtMs ?? quota.fetchedAtMs ?? null,
+      windowMode: 'non_window',
+      modelScope: { kind: 'all', complete: true },
+      nowMs: options.nowMs,
+    })
+  );
 };
 
 const buildDevinQuotaDisplayWindows = (

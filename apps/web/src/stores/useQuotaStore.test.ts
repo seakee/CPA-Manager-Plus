@@ -431,6 +431,7 @@ describe('useQuotaStore persistence', () => {
       devinQuota: {},
       kimiQuota: {},
       metaQuota: {},
+      pluginQuota: {},
       xaiQuota: {},
     });
   });
