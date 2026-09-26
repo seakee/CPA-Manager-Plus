@@ -367,6 +367,42 @@ describe('source resolver', () => {
     expect(masked.displayName).not.toContain(apiKey);
   });
 
+  it('keeps identical key hashes distinct across Codex and OpenAI-compatible providers', () => {
+    const apiKey = 'sk-shared-codex-and-openai-provider-key';
+    const sourceInfoMap = buildSourceInfoMap({
+      codexApiKeys: [{ apiKey }],
+      openaiCompatibility: [
+        {
+          name: 'CC wwp1',
+          baseUrl: 'https://wawapii.example/v1',
+          apiKeyEntries: [{ apiKey }],
+        },
+      ],
+      providerKeyAliases: [
+        {
+          provider: 'codex',
+          apiKeyHash: sha256Hex(apiKey),
+          alias: 'WWP1',
+        },
+      ],
+    });
+
+    const source = `h:${sha256Hex(apiKey)}`;
+    const codex = resolveSourceDisplay(source, '', sourceInfoMap, new Map(), 'codex');
+    const openai = resolveSourceDisplay(
+      source,
+      '',
+      sourceInfoMap,
+      new Map(),
+      'openai-compatible-cc wwp1'
+    );
+
+    expect(codex.displayName).toBe('WWP1');
+    expect(codex.type).toBe('codex');
+    expect(openai.displayName).toBe('CC wwp1');
+    expect(openai.type).toBe('openai');
+  });
+
   it('preserves identity continuity between legacy and new h:<sha256> source representations', () => {
     const apiKey = 'sk-proj-identity-continuity-test-key-56789';
     const sourceInfoMap = buildSourceInfoMap({

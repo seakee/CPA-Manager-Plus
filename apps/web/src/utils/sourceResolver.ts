@@ -25,11 +25,14 @@ type SourceInfoEntry = Required<Pick<SourceInfo, 'displayName' | 'type' | 'ident
 export interface SourceInfoMap {
   byAuthIndex: Map<string, SourceInfoEntry | null>;
   bySource: Map<string, SourceInfoEntry | null>;
+  byProviderAndSource?: Map<string, SourceInfoEntry | null>;
   byIdentityKey: Map<string, SourceInfoEntry>;
   byProviderAliasFallback?: Map<string, SourceInfoEntry>;
 }
 
 const buildProviderIdentityKey = (type: string, index: number | string) => `${type}:${index}`;
+const buildProviderSourceKey = (provider: string, source: string) =>
+  `${provider.trim().toLowerCase()}:${source}`;
 
 const hasDisableAllModelsRule = (models?: string[]) =>
   Array.isArray(models) && models.some((model) => String(model ?? '').trim() === '*');
@@ -177,20 +180,30 @@ const buildOpenAIKeyDisplayNameMap = (providers: OpenAIProviderConfig[]) => {
 export function buildSourceInfoMap(input: SourceInfoMapInput): SourceInfoMap {
   const byAuthIndex = new Map<string, SourceInfoEntry | null>();
   const bySource = new Map<string, SourceInfoEntry | null>();
+  const byProviderAndSource = new Map<string, SourceInfoEntry | null>();
   const byIdentityKey = new Map<string, SourceInfoEntry>();
   const byProviderAliasFallback = new Map<string, SourceInfoEntry>();
 
   const registerProvider = (
     entry: SourceInfoEntry,
     authIndices: Array<unknown>,
-    candidates: Iterable<string>
+    candidates: Iterable<string>,
+    providerScopes: Iterable<string> = [entry.type]
   ) => {
+    const sourceCandidates = Array.from(candidates);
     authIndices.forEach((authIndex) => {
       registerIdentity(byAuthIndex, normalizeAuthIndex(authIndex), entry);
     });
 
-    Array.from(candidates).forEach((candidate) => {
+    sourceCandidates.forEach((candidate) => {
       registerIdentity(bySource, candidate, entry);
+      for (const providerScope of providerScopes) {
+        registerIdentity(
+          byProviderAndSource,
+          buildProviderSourceKey(providerScope, candidate),
+          entry
+        );
+      }
     });
   };
 
@@ -276,7 +289,8 @@ export function buildSourceInfoMap(input: SourceInfoMapInput): SourceInfoMap {
       [
         ...buildCandidateUsageSourceIds({ prefix: provider.prefix }),
         ...buildOpenAIProviderSourceIds(providerEntry.displayName),
-      ]
+      ],
+      ['openai', providerEntry.displayName, `openai-compatible-${providerEntry.displayName}`]
     );
 
     (provider.apiKeyEntries || []).forEach((entry, entryIndex) => {
@@ -305,7 +319,8 @@ export function buildSourceInfoMap(input: SourceInfoMapInput): SourceInfoMap {
           isProviderKeyAlias: Boolean(alias),
         },
         [entry.authIndex],
-        buildCandidateUsageSourceIds({ apiKey: entry.apiKey })
+        buildCandidateUsageSourceIds({ apiKey: entry.apiKey }),
+        ['openai', providerEntry.displayName, `openai-compatible-${providerEntry.displayName}`]
       );
     });
   });
@@ -318,7 +333,13 @@ export function buildSourceInfoMap(input: SourceInfoMapInput): SourceInfoMap {
     });
   });
 
-  return { byAuthIndex, bySource, byIdentityKey, byProviderAliasFallback };
+  return {
+    byAuthIndex,
+    bySource,
+    byProviderAndSource,
+    byIdentityKey,
+    byProviderAliasFallback,
+  };
 }
 
 export const buildSourceProviderStateMap = (sourceInfoMap: SourceInfoMap) => {
@@ -340,13 +361,25 @@ export function resolveSourceDisplay(
 ): SourceInfo {
   const source = normalizeUsageSourceId(sourceRaw);
   const authIndexKey = normalizeAuthIndex(authIndex);
+  const provider = String(providerRaw || '')
+    .trim()
+    .toLowerCase();
+
+  const matchedByProviderAndSource =
+    provider && source
+      ? sourceInfoMap.byProviderAndSource?.get(buildProviderSourceKey(provider, source))
+      : null;
+  if (matchedByProviderAndSource?.isProviderKeyAlias) return matchedByProviderAndSource;
+  if (
+    matchedByProviderAndSource &&
+    (provider === 'openai' || provider.startsWith('openai-compatible-'))
+  ) {
+    return matchedByProviderAndSource;
+  }
 
   const matchedBySource = source ? sourceInfoMap.bySource.get(source) : null;
   if (matchedBySource?.isProviderKeyAlias) return matchedBySource;
 
-  const provider = String(providerRaw || '')
-    .trim()
-    .toLowerCase();
   const providerFallback = sourceInfoMap.byProviderAliasFallback?.get(provider);
   if (providerFallback && source === `t:${provider}`) {
     return providerFallback;
