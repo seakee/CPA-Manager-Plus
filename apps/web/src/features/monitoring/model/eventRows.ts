@@ -9,7 +9,7 @@ import {
 import { formatApiKeyHashLabel } from './base';
 import { buildSearchText, maskAuthIndex, maskEmailLike, readString } from './base';
 import { sanitizeApiKeyDisplayText, type ApiKeyDisplayInfo } from './apiKeys';
-import { isKeyDisambiguatedLabel } from './sourceDisplay';
+import { isKeyDisambiguatedLabel, isOpenAICompatibleRuntimeLabel } from './sourceDisplay';
 import { buildHourLabel, buildLocalDayKey } from './range';
 import type { MonitoringAuthMeta, MonitoringChannelMeta, MonitoringEventRow } from './types';
 
@@ -75,14 +75,24 @@ export const buildEventRows = (
       const channelMeta =
         channelByAuthIndex.get(authIndex) ||
         (authMeta?.authIndex ? channelByAuthIndex.get(authMeta.authIndex) : undefined);
-      const channelLabel =
-        channelMeta?.name || authMeta?.provider || snapshotProvider || sourceMeta.type || '-';
       const resolvedSourceName = readString(sourceMeta.displayName);
+      const rawProvider =
+        authMeta?.provider || snapshotProvider || eventProvider || sourceMeta.type;
+      const normalizeRuntimeLabel = isOpenAICompatibleRuntimeLabel(rawProvider, resolvedSourceName);
+      const normalizedProvider = normalizeRuntimeLabel ? resolvedSourceName : rawProvider;
+      const channelLabel =
+        channelMeta?.name ||
+        (normalizeRuntimeLabel ? resolvedSourceName : '') ||
+        authMeta?.provider ||
+        snapshotProvider ||
+        sourceMeta.type ||
+        '-';
       const labelCandidates = authMeta?.label || snapshotLabel || snapshotDisplay;
       // Prefer multi-key OpenAI-compatible disambiguation (e.g. "kuaileshifu #1") over the
       // bare provider/auth label so realtime cells match account overview identity.
       const sourceLabel =
         (sourceMeta.isProviderKeyAlias ? resolvedSourceName : '') ||
+        (normalizeRuntimeLabel ? resolvedSourceName : '') ||
         (resolvedSourceName &&
         (isKeyDisambiguatedLabel(resolvedSourceName, channelMeta?.name) ||
           isKeyDisambiguatedLabel(resolvedSourceName, channelMeta?.host) ||
@@ -120,17 +130,11 @@ export const buildEventRows = (
         detail.__responseModel ?? detail.response_model ?? detail.responseModel
       );
       const sessionId = readString(detail.session_id ?? detail.sessionId);
-      const parentSessionId = readString(
-        detail.parent_session_id ?? detail.parentSessionId
-      );
-      const accessTokenSha256 = readString(
-        detail.access_token_sha256 ?? detail.accessTokenSha256
-      );
+      const parentSessionId = readString(detail.parent_session_id ?? detail.parentSessionId);
+      const accessTokenSha256 = readString(detail.access_token_sha256 ?? detail.accessTokenSha256);
       const generate = typeof detail.generate === 'boolean' ? detail.generate : undefined;
       const stream = typeof detail.stream === 'boolean' ? detail.stream : undefined;
-      const accountId = readString(
-        detail.auth_account_id_snapshot ?? detail.authAccountIdSnapshot
-      );
+      const accountId = readString(detail.auth_account_id_snapshot ?? detail.authAccountIdSnapshot);
       const rawProjectId = readString(
         detail.auth_project_id_snapshot ?? detail.authProjectIdSnapshot
       );
@@ -250,7 +254,7 @@ export const buildEventRows = (
         apiKeyHash,
         apiKeyLabel,
         apiKeyMasked,
-        provider: authMeta?.provider || snapshotProvider || eventProvider || sourceMeta.type || '-',
+        provider: normalizedProvider || '-',
         providerIdentity: effectiveProvider,
         planType: authMeta?.planType || '-',
         channel: channelLabel,

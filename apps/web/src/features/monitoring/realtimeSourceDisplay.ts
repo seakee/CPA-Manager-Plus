@@ -4,6 +4,7 @@ import type { AccountDisplayMode } from '@/features/monitoring/accountOverviewSt
 import {
   isGenericMonitoringProviderLabel,
   isKeyDisambiguatedLabel,
+  isOpenAICompatibleRuntimeLabel,
   isProviderLikeMonitoringLabel,
   isRedundantMonitoringLabel,
 } from '@/features/monitoring/model/sourceDisplay';
@@ -26,6 +27,7 @@ export const buildRealtimeSourceDisplay = (
     | 'channel'
     | 'channelHost'
     | 'provider'
+    | 'providerIdentity'
     | 'source'
     | 'sourceMasked'
   > &
@@ -86,14 +88,17 @@ export const buildRealtimeSourceDisplay = (
       provider,
       opaqueSource
     ) || '-';
-  const metaCandidate = provider
-    ? { value: provider, label: t('monitoring.filter_provider') }
-    : [
-        { value: host, label: t('monitoring.column_host') },
-        { value: readableAccount, label: '' },
-        { value: readableNonGenericSource, label: t('monitoring.source') },
-        { value: opaqueSource, label: t('monitoring.source') },
-      ].find(
+  const metaCandidate =
+    provider &&
+    (!isRedundantMonitoringLabel(provider, primary) ||
+      !isOpenAICompatibleRuntimeLabel(row.providerIdentity, primary))
+      ? { value: provider, label: t('monitoring.filter_provider') }
+      : [
+          { value: host, label: t('monitoring.column_host') },
+          { value: readableAccount, label: '' },
+          { value: readableNonGenericSource, label: t('monitoring.source') },
+          { value: opaqueSource, label: t('monitoring.source') },
+        ].find(
         (candidate) =>
           candidate.value && !isRedundantMonitoringLabel(candidate.value, primary)
       );

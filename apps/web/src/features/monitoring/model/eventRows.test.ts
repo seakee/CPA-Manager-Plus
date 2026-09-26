@@ -41,6 +41,47 @@ const buildRows = (
   );
 
 describe('buildEventRows', () => {
+  it('shows the configured OpenAI-compatible name without repeating the runtime label', () => {
+    const sourceInfoMap = buildSourceInfoMap({
+      openaiCompatibility: [
+        {
+          name: 'CC wwp1',
+          baseUrl: 'https://wawapii.example/v1',
+          apiKeyEntries: [{ apiKey: 'sk-compatible-event-cc-wwp1' }],
+        },
+      ],
+    });
+    const [resolvedRow] = buildEventRows(
+      [
+        {
+          timestamp: '2026-05-19T10:00:00Z',
+          source: 'openai-compatible-cc wwp1',
+          auth_index: '',
+          auth_provider_snapshot: 'openai-compatible-cc wwp1',
+          latency_ms: 1500,
+          tokens: { input_tokens: 10, output_tokens: 20, total_tokens: 30 },
+          failed: false,
+          __modelName: 'gpt-5.4',
+          __endpoint: 'POST /v1/chat/completions',
+          __timestampMs: Date.parse('2026-05-19T10:00:00Z'),
+        },
+      ],
+      new Map(),
+      new Map(),
+      sourceInfoMap,
+      new Map(),
+      {},
+      new Map()
+    );
+    const t = ((key: string) => key) as Parameters<typeof buildRealtimeSourceDisplay>[1];
+    const display = buildRealtimeSourceDisplay(resolvedRow, t);
+
+    expect(resolvedRow.source).toBe('CC wwp1');
+    expect(resolvedRow.provider).toBe('CC wwp1');
+    expect(display.primary).toBe('CC wwp1');
+    expect(display.meta).toBe('');
+  });
+
   it('uses a provider key alias before a generic Codex snapshot label', () => {
     const apiKey = 'sk-codex-event-row-alias-test-1234567890';
     const authMetaMap = new Map<string, MonitoringAuthMeta>([

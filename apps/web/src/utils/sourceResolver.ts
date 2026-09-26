@@ -137,6 +137,22 @@ const disambiguateDuplicateNames = (names: string[]) => {
   });
 };
 
+const buildOpenAIProviderSourceIds = (name: string) => {
+  const trimmed = name.trim();
+  if (!trimmed) return [];
+
+  return Array.from(
+    new Set(
+      [
+        trimmed,
+        trimmed.toLowerCase(),
+        `openai-compatible-${trimmed}`,
+        `openai-compatible-${trimmed.toLowerCase()}`,
+      ].map((value) => normalizeUsageSourceId(value))
+    )
+  );
+};
+
 const buildOpenAIKeyDisplayNameMap = (providers: OpenAIProviderConfig[]) => {
   const entries: Array<{ key: string; name: string }> = [];
 
@@ -247,7 +263,10 @@ export function buildSourceInfoMap(input: SourceInfoMapInput): SourceInfoMap {
     registerProvider(
       providerEntry,
       providerAuthIndex && !entryAuthIndexKeys.has(providerAuthIndex) ? [providerAuthIndex] : [],
-      buildCandidateUsageSourceIds({ prefix: provider.prefix })
+      [
+        ...buildCandidateUsageSourceIds({ prefix: provider.prefix }),
+        ...buildOpenAIProviderSourceIds(providerEntry.displayName),
+      ]
     );
 
     (provider.apiKeyEntries || []).forEach((entry, entryIndex) => {

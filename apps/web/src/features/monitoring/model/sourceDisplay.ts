@@ -42,6 +42,15 @@ export const isProviderLikeMonitoringLabel = (
   return Boolean(providerValue) && candidate.toLowerCase() === providerValue.toLowerCase();
 };
 
+export const isOpenAICompatibleRuntimeLabel = (
+  value: string | null | undefined,
+  providerName: string | null | undefined
+) => {
+  const runtimeLabel = readString(value).toLowerCase();
+  const configuredName = readString(providerName).toLowerCase();
+  return Boolean(configuredName) && runtimeLabel === `openai-compatible-${configuredName}`;
+};
+
 /**
  * True when `refined` is a key/provider ordinal disambiguation of `base`
  * (for example base=`kuaileshifu`, refined=`kuaileshifu #1`).
@@ -167,15 +176,24 @@ export const buildMonitoringSourceDisplay = (
     explicitLabel,
     snapshotLabel
   );
-  const provider = firstReadable(authMeta?.provider, snapshotProvider, sourceMeta.type);
-  const channel = firstReadable(channelMeta?.name, explicitChannel, provider);
-  const channelHost = firstReadable(channelMeta?.host);
   const resolvedSourceName = firstReadable(sourceMeta.displayName);
+  const rawProvider = firstReadable(authMeta?.provider, snapshotProvider, sourceMeta.type);
+  const provider = isOpenAICompatibleRuntimeLabel(rawProvider, resolvedSourceName)
+    ? resolvedSourceName
+    : rawProvider;
+  const channel = firstReadable(
+    channelMeta?.name,
+    isOpenAICompatibleRuntimeLabel(rawProvider, resolvedSourceName) ? resolvedSourceName : '',
+    explicitChannel,
+    provider
+  );
+  const channelHost = firstReadable(channelMeta?.host);
   const labelCandidates = firstReadable(authMeta?.label, explicitLabel, snapshotLabel);
   // Prefer key-disambiguated source names (e.g. "kuaileshifu #1") over the bare
   // OpenAI-compatible provider/channel name when multi-key providers share a label.
   const sourceLabel = firstReadable(
     sourceMeta.isProviderKeyAlias ? resolvedSourceName : '',
+    isOpenAICompatibleRuntimeLabel(rawProvider, resolvedSourceName) ? resolvedSourceName : '',
     resolvedSourceName &&
       (isKeyDisambiguatedLabel(resolvedSourceName, channel) ||
         isKeyDisambiguatedLabel(resolvedSourceName, channelHost) ||

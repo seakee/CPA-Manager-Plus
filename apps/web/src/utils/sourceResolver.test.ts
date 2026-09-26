@@ -111,6 +111,28 @@ describe('source resolver', () => {
     expect(resolved.type).toBe('openai');
   });
 
+  it('resolves CPA OpenAI-compatible runtime labels to the configured provider name', () => {
+    const sourceInfoMap = buildSourceInfoMap({
+      openaiCompatibility: [
+        {
+          name: 'CC wwp1',
+          baseUrl: 'https://wawapii.example/v1',
+          apiKeyEntries: [{ apiKey: 'sk-compatible-cc-wwp1' }],
+        },
+      ],
+    });
+
+    const resolved = resolveSourceDisplay(
+      'openai-compatible-cc wwp1',
+      '',
+      sourceInfoMap,
+      new Map()
+    );
+
+    expect(resolved.displayName).toBe('CC wwp1');
+    expect(resolved.type).toBe('openai');
+  });
+
   it('distinguishes OpenAI compatible providers that share the same base URL', () => {
     const sourceInfoMap = buildSourceInfoMap({
       openaiCompatibility: [

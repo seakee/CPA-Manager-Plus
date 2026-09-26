@@ -309,6 +309,34 @@ describe('buildMonitoringSourceDisplay', () => {
     expect(display.meta).toBe('openai');
   });
 
+  it('normalizes CPA OpenAI-compatible runtime labels to the configured provider name', () => {
+    const sourceInfoMap = buildSourceInfoMap({
+      openaiCompatibility: [
+        {
+          name: 'CC wwp1',
+          baseUrl: 'https://wawapii.example/v1',
+          apiKeyEntries: [{ apiKey: 'sk-compatible-display-cc-wwp1' }],
+        },
+      ],
+    });
+
+    const display = buildMonitoringSourceDisplay(
+      {
+        source: 'openai-compatible-cc wwp1',
+        authProviderSnapshot: 'openai-compatible-cc wwp1',
+      },
+      {
+        authMetaMap: new Map(),
+        channelByAuthIndex: new Map(),
+        sourceInfoMap,
+      }
+    );
+
+    expect(display.primary).toBe('CC wwp1');
+    expect(display.provider).toBe('CC wwp1');
+    expect(display.channel).toBe('CC wwp1');
+  });
+
   it('prefers credential account over dynamic/unknown provider when channel and source are provider-equivalent (#686)', () => {
     const authMetaMap = new Map<string, MonitoringAuthMeta>([
       [
