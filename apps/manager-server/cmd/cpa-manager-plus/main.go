@@ -11,6 +11,7 @@ import (
 	httppprof "net/http/pprof"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -262,6 +263,10 @@ func runServer() {
 	}
 	log.Printf("cpa-manager-plus listening on %s", listener.Addr())
 	codexInspectionWorker := worker.NewCodexInspectionWorker(serverApp.AppContext().Store, serverApp.AppContext().CodexInspectionService)
+	pluginQuotaWorker := worker.NewPluginQuotaWorker(
+		serverApp.AppContext().PluginQuotaService,
+		pluginQuotaRefreshInterval(),
+	)
 	serverResult := make(chan error, 1)
 	go serveHTTPServer(server, listener, stop, serverResult)
 	go serverApp.AppContext().UpdateCheckService.Run(ctx)
@@ -279,6 +284,9 @@ func runServer() {
 		log.Printf("[startup] starting background workers")
 		automationRuntime.Start(ctx)
 		codexInspectionWorker.Start(ctx)
+		if os.Getenv("CPAMP_PLUGIN_QUOTA_ENABLED") != "false" {
+			pluginQuotaWorker.Start(ctx)
+		}
 		accountHistoryRollupWorker.Start(ctx)
 		usageDerivedRollupWorker.Start(ctx)
 		if usageHourlyAggregateWorker != nil {
@@ -329,6 +337,7 @@ func runServer() {
 		stop()
 	}
 	stopCodexInspectionWorker(codexInspectionWorker, 20*time.Second)
+	stopCodexInspectionWorker(pluginQuotaWorker, 10*time.Second)
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelShutdown()
 	collectorWorker.Stop(context.Background())
@@ -462,4 +471,26 @@ func runUsageResponseMetadataBackfill(ctx context.Context, db *store.Store) erro
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
+}
+
+// pluginQuotaRefreshInterval resolves how often plugin-provided quota is
+// re-read. The default keeps a periodic pass cheap; an operator can shorten or
+// lengthen it, or disable the worker entirely with CPAMP_PLUGIN_QUOTA_ENABLED.
+func pluginQuotaRefreshInterval() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("CPAMP_PLUGIN_QUOTA_REFRESH_INTERVAL"))
+	if raw == "" {
+		return worker.DefaultPluginQuotaRefreshInterval
+	}
+	if parsed, err := time.ParseDuration(raw); err == nil && parsed > 0 {
+		return parsed
+	}
+	if seconds, err := strconv.Atoi(raw); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	log.Printf(
+		"invalid CPAMP_PLUGIN_QUOTA_REFRESH_INTERVAL %q; using %s",
+		raw,
+		worker.DefaultPluginQuotaRefreshInterval,
+	)
+	return worker.DefaultPluginQuotaRefreshInterval
 }

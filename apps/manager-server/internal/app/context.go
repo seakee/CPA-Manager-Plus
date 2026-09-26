@@ -24,6 +24,7 @@ import (
 	modelpricesvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/modelprice"
 	monitoringsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/monitoring"
 	panelsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/panel"
+	pluginquotasvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/pluginquota"
 	proxysvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/proxy"
 	quotasnapshotsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/quotasnapshot"
 	setupsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/setup"
@@ -59,6 +60,7 @@ type Context struct {
 	CodexInspectionService         *codexinspectionsvc.Service
 	MonitoringService              *monitoringsvc.Service
 	QuotaSnapshotService           *quotasnapshotsvc.Service
+	PluginQuotaService             *pluginquotasvc.Service
 	ModelPriceService              *modelpricesvc.Service
 	APIKeyAliasService             *apikeyaliassvc.Service
 	AccountActionService           *accountactionsvc.Service
@@ -159,6 +161,7 @@ func fromExisting(
 		AggregateReadsEnabled: cfg.DashboardHourlyRollupEnabled,
 	}))
 	authFileMutationCoordinator := cpaauthfiles.NewMutationCoordinator()
+	quotaSnapshotService := quotasnapshotsvc.New(st)
 	return &Context{
 		UpdateCheckService:   updatechecksvc.New(st, buildinfo.Version, buildinfo.SourceCommit, os.Getenv("CPAMP_UPDATE_CHECK_ENABLED") != "false"),
 		Config:               cfg,
@@ -178,9 +181,14 @@ func fromExisting(
 			codexinspectionsvc.ServiceOptions{AuthFileMutationCoordinator: authFileMutationCoordinator},
 		),
 		MonitoringService:    monitoringsvc.New(st, cfg.DashboardHourlyRollupEnabled),
-		QuotaSnapshotService: quotasnapshotsvc.New(st),
-		ModelPriceService:    modelpricesvc.NewMultiSourceWithModelsDev(st, modelsDevModelPriceSyncURL, modelPriceSyncURL, openRouterModelPriceSyncURL, managerConfigService),
-		APIKeyAliasService:   apikeyaliassvc.New(st),
+		QuotaSnapshotService: quotaSnapshotService,
+		PluginQuotaService: pluginquotasvc.New(
+			managerConfigService,
+			quotaSnapshotService,
+			pluginquotasvc.ServiceOptions{},
+		),
+		ModelPriceService:  modelpricesvc.NewMultiSourceWithModelsDev(st, modelsDevModelPriceSyncURL, modelPriceSyncURL, openRouterModelPriceSyncURL, managerConfigService),
+		APIKeyAliasService: apikeyaliassvc.New(st),
 		AccountActionService: accountactionsvc.NewWithMutationCoordinator(
 			st,
 			managerConfigService,
