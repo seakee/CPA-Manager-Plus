@@ -1,3 +1,4 @@
+import zeroFixtures from '../../../../../tests/fixtures/xai-billing-zero.json';
 import type { TFunction } from 'i18next';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -4267,3 +4268,145 @@ describe('fetchDevinQuota', () => {
   });
 });
 
+
+describe('xAI paid zero-usage enrichment', () => {
+  const start = '2030-01-01T00:00:00Z';
+  const end = '2030-01-08T00:00:00Z';
+  const success = (body: unknown) => ({
+    statusCode: 200,
+    hasStatusCode: true,
+    header: {},
+    body,
+    bodyText: typeof body === 'string' ? body : JSON.stringify(body),
+  });
+  const file = { name: 'xai-test.json', auth_index: 'test-account', type: 'xai' };
+  const text = 'AAAAACgKJkIYCAISCgiA2M2GBxoKCIDNmIcHWAFiAGgB';
+  // Shared protocol fixtures are synthetic and contain no account identifiers.
+  it('enriches a paid active period to 0% used / 100% remaining through the same auth index', async () => {
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2030-01-02T00:00:00Z'));
+    try {
+      mocks.request.mockImplementation(async (request: { url: string }) => {
+        if (request.url.endsWith('/settings'))
+          return success({ subscription_tier_display: 'SuperGrok Heavy' });
+        if (request.url.includes('GetGrokCreditsConfig')) return success(zeroFixtures[0].text);
+        return success({
+          config: { isUnifiedBillingUser: true, currentPeriod: { type: 'weekly', start, end } },
+        });
+      });
+      const result = await probeXaiQuota(file, t);
+      expect(result.summary).toMatchObject({
+        usagePercent: 0,
+        usagePercentSource: 'grpc-implicit-zero',
+        periodStart: start,
+        periodEnd: end,
+      });
+      expect(100 - result.summary.usagePercent!).toBe(100);
+      expect(result.partial).toBe(false);
+      expect(mocks.request).toHaveBeenCalledWith(
+        expect.objectContaining({
+          authIndex: 'test-account',
+          method: 'POST',
+          data: 'AAAAAAIIAA==',
+          header: expect.objectContaining({ Authorization: 'Bearer $TOKEN$' }),
+        }),
+        expect.objectContaining({ timeout: 3000 }),
+      );
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it.each(['Free', 'unknown', 'timeout', 'malformed'])(
+    'keeps %s responses unknown without downgrading REST health',
+    async (mode) => {
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2030-01-02T00:00:00Z'));
+      try {
+        mocks.request.mockImplementation(async (request: { url: string }) => {
+          if (request.url.endsWith('/settings')) {
+            if (mode === 'timeout') throw new Error('timeout');
+            return success({
+              subscription_tier_display: mode === 'malformed' ? 'SuperGrok Heavy' : mode,
+            });
+          }
+          if (request.url.includes('GetGrokCreditsConfig')) return success(text);
+          return success({
+            config: { isUnifiedBillingUser: true, currentPeriod: { type: 'weekly', start, end } },
+          });
+        });
+        const result = await probeXaiQuota(file, t);
+        expect(result.summary.usagePercent).toBeNull();
+        expect(result.summary.usagePercentSource).toBeUndefined();
+        expect(result.partial).toBe(false);
+        expect(result.failures).toEqual([]);
+      } finally {
+        clock.mockRestore();
+      }
+    },
+  );
+});
+
+describe('xAI enrichment boundaries', () => {
+  it.each([0, 7, 'invalid'])(
+    'does not reinterpret a present REST percentage (%s)',
+    async (percent) => {
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2030-01-02T00:00:00Z'));
+      try {
+        mocks.request.mockResolvedValue({
+          statusCode: 200,
+          hasStatusCode: true,
+          header: {},
+          body: {
+            config: {
+              isUnifiedBillingUser: true,
+              creditUsagePercent: percent,
+              currentPeriod: {
+                type: 'weekly',
+                start: '2030-01-01T00:00:00Z',
+                end: '2030-01-08T00:00:00Z',
+              },
+            },
+          },
+          bodyText: '',
+        });
+        await probeXaiQuota({ name: 'test', auth_index: 'test' }, t);
+        expect(mocks.request).toHaveBeenCalledTimes(2);
+      } finally {
+        clock.mockRestore();
+      }
+    },
+  );
+
+  it('propagates caller cancellation during optional enrichment', async () => {
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2030-01-02T00:00:00Z'));
+    const controller = new AbortController();
+    try {
+      mocks.request.mockImplementation(async (request: { url: string }) => {
+        if (request.url.endsWith('/settings')) {
+          controller.abort();
+          throw new Error('cancelled');
+        }
+        return {
+          statusCode: 200,
+          hasStatusCode: true,
+          header: {},
+          body: {
+            config: {
+              isUnifiedBillingUser: true,
+              currentPeriod: {
+                type: 'weekly',
+                start: '2030-01-01T00:00:00Z',
+                end: '2030-01-08T00:00:00Z',
+              },
+            },
+          },
+          bodyText: '',
+        };
+      });
+      await expect(
+        probeXaiQuota({ name: 'test', auth_index: 'test' }, t, { signal: controller.signal }),
+      ).rejects.toThrow('cancelled');
+    } finally {
+      clock.mockRestore();
+    }
+  });
+});

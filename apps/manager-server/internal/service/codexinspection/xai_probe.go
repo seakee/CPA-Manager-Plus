@@ -39,6 +39,8 @@ type xaiProbeDecision struct {
 }
 
 type xaiBillingSummary struct {
+	PeriodStart         string
+	UsagePercentSource  string
 	UsagePercent        *float64
 	UsedPercent         *float64
 	OnDemandUsedPercent *float64
@@ -527,6 +529,9 @@ func (s *Service) requestXAIBilling(
 
 	probe := xaiBillingProbe{}
 	if weekly.Summary != nil {
+		if weekly.ZeroFallbackEligible {
+			s.enrichXAIBillingZero(ctx, setup, settings, item, weekly.Summary)
+		}
 		probe.Summary = mergeXAIBillingSummary(weekly.Summary, monthly.Summary)
 		probe.StatusCode = weekly.StatusCode
 		probe.Healthy = true
@@ -780,10 +785,11 @@ func positiveXAIFloat(value *float64) bool {
 }
 
 type xaiBillingResult struct {
-	Summary    *xaiBillingSummary
-	Failure    *xaiProbeDecision
-	Partial    bool
-	StatusCode int
+	ZeroFallbackEligible bool
+	Summary              *xaiBillingSummary
+	Failure              *xaiProbeDecision
+	Partial              bool
+	StatusCode           int
 }
 
 func (s *Service) requestProviderBilling(
@@ -811,7 +817,7 @@ func (s *Service) requestProviderBilling(
 		if summary == nil {
 			return xaiBillingResult{Failure: xaiDecision(response.StatusCode, "protocol_changed", "xAI billing response schema changed")}, nil
 		}
-		return xaiBillingResult{Summary: summary, StatusCode: response.StatusCode}, nil
+		return xaiBillingResult{Summary: summary, StatusCode: response.StatusCode, ZeroFallbackEligible: config["isUnifiedBillingUser"] == true && config["creditUsagePercent"] == nil && config["credit_usage_percent"] == nil}, nil
 	}
 	return xaiBillingResult{Failure: xaiDecision(
 		response.StatusCode,
@@ -1022,6 +1028,7 @@ func parseXAIBillingSummary(config map[string]any) *xaiBillingSummary {
 		return nil
 	}
 	return &xaiBillingSummary{
+		PeriodStart:         readString(period, "start"),
 		UsagePercent:        usage,
 		UsedPercent:         monthlyUsed,
 		OnDemandUsedPercent: onDemandUsedPercent,

@@ -1,3 +1,9 @@
+import {
+  isXaiValidatedZero,
+  XAI_WEB_BILLING_URL,
+  XAI_WEB_BILLING_DATA,
+  XAI_WEB_BILLING_HEADERS,
+} from './xaiBillingZero';
 import type { TFunction } from 'i18next';
 import type { AxiosRequestConfig } from 'axios';
 import type {
@@ -1485,6 +1491,7 @@ export const mergeXaiBillingSummaries = (
   const merged: XaiBillingSummary = {
     periodType: weeklySource.periodType,
     usagePercent: weeklySource.usagePercent,
+    usagePercentSource: weeklySource.usagePercentSource,
     periodStart: weeklySource.periodStart,
     periodEnd: weeklySource.periodEnd,
     productUsage: weeklySource.productUsage,
@@ -1644,7 +1651,11 @@ const requestXaiBilling = async (
   url: string,
   header: Record<string, string>,
   requestConfig?: AxiosRequestConfig
-): Promise<{ summary: XaiBillingSummary; statusCode: number | null } | null> => {
+): Promise<{
+  summary: XaiBillingSummary;
+  statusCode: number | null;
+  zeroFallbackEligible: boolean;
+} | null> => {
   const result = await apiCallApi.request(
     {
       authIndex,
@@ -1667,7 +1678,8 @@ const requestXaiBilling = async (
   }
 
   const payload = parseXaiBillingPayload(result.body ?? result.bodyText);
-  const summary = buildXaiBillingSummary(resolveXaiBillingConfig(payload));
+  const config = resolveXaiBillingConfig(payload);
+  const summary = buildXaiBillingSummary(config);
   if (!summary) {
     const envelope = parseXaiErrorEnvelope({
       statusCode: result.hasStatusCode ? result.statusCode : null,
@@ -1680,6 +1692,10 @@ const requestXaiBilling = async (
   }
   return {
     summary,
+    zeroFallbackEligible:
+      config?.isUnifiedBillingUser === true &&
+      config.creditUsagePercent == null &&
+      config.credit_usage_percent == null,
     statusCode: result.hasStatusCode ? result.statusCode : null,
   };
 };
@@ -1950,6 +1966,52 @@ const requestXaiBillingProbe = async (
   const monthlyProbe = monthlyResult.status === 'fulfilled' ? monthlyResult.value : null;
   const weeklySummary = weeklyProbe?.summary ?? null;
   const monthlySummary = monthlyProbe?.summary ?? null;
+  // Optional same-account enrichment; errors never invalidate successful REST billing.
+  if (
+    weeklyProbe?.zeroFallbackEligible &&
+    weeklySummary?.periodType === 'weekly' &&
+    weeklySummary.usagePercent === null &&
+    weeklySummary.productUsage.length === 0 &&
+    Date.parse(weeklySummary.periodStart ?? '') <= Date.now() &&
+    Date.now() < Date.parse(weeklySummary.periodEnd ?? '')
+  ) {
+    try {
+      const fallbackConfig = { ...requestConfig, timeout: Math.min(configuredTimeout || 3000, 3000) };
+      const settings = await apiCallApi.request(
+        {
+          authIndex,
+          method: 'GET',
+          url: `${XAI_CLI_CHAT_PROXY_BASE_URL}/settings`,
+          header: requestHeader,
+        },
+        fallbackConfig,
+      );
+      const tier = toXaiRecord(settings.body)?.subscription_tier_display;
+      // Free/unknown billing can also omit usage after exhaustion (#710).
+      if (settings.statusCode !== 200 || !['SuperGrok', 'SuperGrok Heavy'].includes(String(tier))) {
+        throw new Error('unconfirmed paid subscription');
+      }
+      const result = await apiCallApi.request(
+        {
+          authIndex,
+          method: 'POST',
+          url: XAI_WEB_BILLING_URL,
+          header: XAI_WEB_BILLING_HEADERS,
+          data: XAI_WEB_BILLING_DATA,
+        },
+        fallbackConfig,
+      );
+      if (
+        result.statusCode === 200 &&
+        isXaiValidatedZero(result.bodyText, weeklySummary.periodStart, weeklySummary.periodEnd)
+      ) {
+        weeklySummary.usagePercent = 0;
+        weeklySummary.usagePercentSource = 'grpc-implicit-zero';
+      }
+    } catch (error) {
+      if (requestConfig?.signal?.aborted) throw error;
+    }
+  }
   const weeklyFailures = weeklyResult.status === 'rejected' ? [weeklyResult.reason] : [];
   const monthlyFailures = monthlyResult.status === 'rejected' ? [monthlyResult.reason] : [];
   const weeklyFailure = weeklyFailures[0];

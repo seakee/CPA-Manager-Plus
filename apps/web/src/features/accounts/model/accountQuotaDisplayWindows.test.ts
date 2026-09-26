@@ -1640,7 +1640,7 @@ describe('accountQuotaDisplayWindows', () => {
     ).toEqual([]);
   });
 
-  it('creates weekly quota window for confirmed paid plan SuperGrok without legacy monthly limit', () => {
+  it.each([{ used: 42, planType: 'SuperGrok' }, { used: 0, planType: 'SuperGrok' }, { used: 0, planType: undefined }])('shows remaining quota for xAI with $used percent used and plan $planType', ({ used, planType }) => {
     const stores = {
       ...emptyStores(),
       xaiQuota: {
@@ -1648,7 +1648,8 @@ describe('accountQuotaDisplayWindows', () => {
           status: 'success',
           billing: {
             periodType: 'weekly',
-            usagePercent: 42,
+            usagePercent: used,
+            ...(used === 0 ? { usagePercentSource: 'grpc-implicit-zero' as const } : {}),
             periodStart: '2026-09-05T00:00:00Z',
             periodEnd: '2026-09-12T00:00:00Z',
             productUsage: [],
@@ -1664,7 +1665,7 @@ describe('accountQuotaDisplayWindows', () => {
       },
     } satisfies AccountQuotaStores;
     const row = buildRow(
-      { name: 'xai-supergrok.json', type: 'xai', planType: 'SuperGrok' },
+      { name: 'xai-supergrok.json', type: 'xai', planType },
       stores
     );
 
@@ -1679,8 +1680,8 @@ describe('accountQuotaDisplayWindows', () => {
       key: 'credits-period',
       label: 'Weekly credits',
       kind: 'weekly',
-      remainingPercent: 58,
-      usedPercent: 42,
+      remainingPercent: 100 - used,
+      usedPercent: used,
       cycleStartMs: Date.parse('2026-09-05T00:00:00Z'),
       cycleEndMs: Date.parse('2026-09-12T00:00:00Z'),
       source: 'xai',
