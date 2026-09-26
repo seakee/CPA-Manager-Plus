@@ -53,12 +53,16 @@ export const buildRealtimeSourceDisplay = (
   const maskedAccount = firstReadable(row.accountMasked, row.authLabel, row.account);
   const account = accountDisplayMode === 'full' ? fullAccount : maskedAccount;
   const fullSource = firstReadable(row.source, row.account, row.authLabel, row.sourceMasked);
-  const maskedSource = firstReadable(row.sourceMasked, row.accountMasked, row.authLabel, row.source);
+  const maskedSource = firstReadable(
+    row.sourceMasked,
+    row.accountMasked,
+    row.authLabel,
+    row.source
+  );
   const source = accountDisplayMode === 'full' ? fullSource : maskedSource;
   const nonGenericChannel =
     channel && !isProviderLikeMonitoringLabel(channel, provider) ? channel : '';
-  const nonGenericSource =
-    source && !isProviderLikeMonitoringLabel(source, provider) ? source : '';
+  const nonGenericSource = source && !isProviderLikeMonitoringLabel(source, provider) ? source : '';
   const readableNonGenericSource =
     nonGenericSource && !isOpaqueUsageSourceId(nonGenericSource) ? nonGenericSource : '';
   const readableAccount = account && !isOpaqueUsageSourceId(account) ? account : '';
@@ -72,10 +76,10 @@ export const buildRealtimeSourceDisplay = (
   const opaqueSource = isOpaqueUsageSourceId(source)
     ? source
     : isOpaqueUsageSourceId(row.source)
-    ? row.source
-    : isOpaqueUsageSourceId(account)
-    ? account
-    : '';
+      ? row.source
+      : isOpaqueUsageSourceId(account)
+        ? account
+        : '';
   const primary =
     firstReadable(
       keyDisambiguatedSource,
@@ -99,9 +103,8 @@ export const buildRealtimeSourceDisplay = (
           { value: readableNonGenericSource, label: t('monitoring.source') },
           { value: opaqueSource, label: t('monitoring.source') },
         ].find(
-        (candidate) =>
-          candidate.value && !isRedundantMonitoringLabel(candidate.value, primary)
-      );
+          (candidate) => candidate.value && !isRedundantMonitoringLabel(candidate.value, primary)
+        );
   const meta =
     metaCandidate && metaCandidate.label
       ? `${metaCandidate.label}: ${metaCandidate.value}`
@@ -118,27 +121,19 @@ export const buildRealtimeSourceDisplay = (
   const requestMetadata =
     accountDisplayMode === 'full'
       ? [
-          hasReadableRealtimeValue(clientIp)
-            ? `${t('monitoring.client_ip')}: ${clientIp}`
-            : '',
+          hasReadableRealtimeValue(clientIp) ? `${t('monitoring.client_ip')}: ${clientIp}` : '',
           hasReadableRealtimeValue(xForwardedFor)
             ? `${t('monitoring.x_forwarded_for_unverified')}: ${xForwardedFor}`
             : '',
-          hasReadableRealtimeValue(userAgent)
-            ? `${t('monitoring.user_agent')}: ${userAgent}`
-            : '',
-          hasReadableRealtimeValue(sessionId)
-            ? `${t('monitoring.session_id')}: ${sessionId}`
-            : '',
+          hasReadableRealtimeValue(userAgent) ? `${t('monitoring.user_agent')}: ${userAgent}` : '',
+          hasReadableRealtimeValue(sessionId) ? `${t('monitoring.session_id')}: ${sessionId}` : '',
           hasReadableRealtimeValue(parentSessionId)
             ? `${t('monitoring.parent_session_id')}: ${parentSessionId}`
             : '',
           hasReadableRealtimeValue(generateText)
             ? `${t('monitoring.generate')}: ${generateText}`
             : '',
-          hasReadableRealtimeValue(streamText)
-            ? `${t('monitoring.stream')}: ${streamText}`
-            : '',
+          hasReadableRealtimeValue(streamText) ? `${t('monitoring.stream')}: ${streamText}` : '',
         ]
       : [];
   const requestMetadataTitle = requestMetadata.filter(hasReadableRealtimeValue).join('\n');
