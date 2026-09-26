@@ -366,5 +366,51 @@
       }
     },
     "digest": "sha256:0f1c9361103c3ee22972e8e7a3f0b6f8207fc8f747f74fd847d33588c6aed181"
+  },
+  "v1.14.1": {
+    "info": {
+      "schema_version": 1,
+      "release": {
+        "version": "v1.14.1",
+        "stage": "stable",
+        "source_commit": "aa8c5e9886b42ec82d78a419a1e1f59700ca90c5"
+      },
+      "content": {
+        "summary": {
+          "zh": "修复反向代理将 Usage Maintenance 的 HEAD 能力探测归一化为 HTTP 200 时，页面被错误判定为不支持用量维护的问题。",
+          "en": "Fixes Usage Maintenance being incorrectly reported as unsupported when a reverse proxy normalizes the HEAD capability probe to HTTP 200."
+        },
+        "notes": {
+          "zh": "https://github.com/seakee/CPA-Manager-Plus/blob/v1.14.1/docs/release-notes/v1.14.1-zh.md",
+          "en": "https://github.com/seakee/CPA-Manager-Plus/blob/v1.14.1/docs/release-notes/v1.14.1-en.md"
+        }
+      },
+      "update": {
+        "breaking": false,
+        "migration_required": false,
+        "minimum_direct_upgrade_version": null,
+        "upgrade_guide_url": "https://github.com/seakee/CPA-Manager-Plus/releases/tag/v1.14.1"
+      },
+      "distribution": {
+        "docker": {
+          "image": "seakee/cpa-manager-plus",
+          "version_tag": "v1.14.1"
+        },
+        "native": {
+          "assets": [
+            "cpa-manager-plus_v1.14.1_darwin_amd64.tar.gz",
+            "cpa-manager-plus_v1.14.1_darwin_arm64.tar.gz",
+            "cpa-manager-plus_v1.14.1_linux_amd64.tar.gz",
+            "cpa-manager-plus_v1.14.1_linux_arm64.tar.gz",
+            "cpa-manager-plus_v1.14.1_windows_amd64.zip",
+            "cpa-manager-plus_v1.14.1_windows_arm64.zip"
+          ]
+        }
+      },
+      "compatibility": {
+        "minimum_cpa_version": "v7.3.4"
+      }
+    },
+    "digest": "sha256:d943c16a2637070642867a3e0bd666147291c4194a0ae22b3df92745770fc0d3"
   }
 }
