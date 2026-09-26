@@ -482,6 +482,17 @@ export interface ApiKeyAliasesResponse {
   items: ApiKeyAlias[];
 }
 
+export interface ProviderKeyAlias {
+  provider: string;
+  apiKeyHash: string;
+  alias: string;
+  updatedAtMs?: number;
+}
+
+export interface ProviderKeyAliasesResponse {
+  items: ProviderKeyAlias[];
+}
+
 export type AccountActionType = 'delete' | 'reauth' | 'review' | string;
 export type AccountActionStatus = 'pending' | 'ignored' | 'resolved' | 'deleted' | string;
 
@@ -3336,6 +3347,60 @@ export const usageServiceApi = {
     await withUsageServiceError(async () => {
       await axios.delete(
         buildUrl(base, `/v0/management/api-key-aliases/${encodeURIComponent(apiKeyHash)}`),
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+        }
+      );
+    });
+  },
+
+  getProviderKeyAliases: async (
+    base: string,
+    managementKey?: string
+  ): Promise<ProviderKeyAliasesResponse> => {
+    return withUsageServiceError(async () => {
+      const response = await axios.get<ProviderKeyAliasesResponse>(
+        buildUrl(base, '/v0/management/provider-key-aliases'),
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+        }
+      );
+      return response.data;
+    });
+  },
+
+  saveProviderKeyAlias: async (
+    base: string,
+    item: ProviderKeyAlias,
+    managementKey?: string
+  ): Promise<ProviderKeyAliasesResponse> => {
+    return withUsageServiceError(async () => {
+      const response = await axios.put<ProviderKeyAliasesResponse>(
+        buildUrl(base, '/v0/management/provider-key-aliases'),
+        item,
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+        }
+      );
+      return response.data;
+    });
+  },
+
+  deleteProviderKeyAlias: async (
+    base: string,
+    provider: string,
+    apiKeyHash: string,
+    managementKey?: string
+  ): Promise<void> => {
+    await withUsageServiceError(async () => {
+      await axios.delete(
+        buildUrl(
+          base,
+          `/v0/management/provider-key-aliases/${encodeURIComponent(provider)}/${encodeURIComponent(apiKeyHash)}`
+        ),
         {
           timeout: USAGE_SERVICE_TIMEOUT_MS,
           headers: authHeaders(managementKey),

@@ -16,6 +16,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/datamigration"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/deadletter"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/modelprice"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/providerkeyalias"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotacooldown"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotasnapshot"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
@@ -54,6 +55,7 @@ type ModelPriceSyncResult = model.ModelPriceSyncResult
 type ModelUsageStat = model.ModelUsageStat
 type ModelUsageSummary = model.ModelUsageSummary
 type APIKeyAlias = model.APIKeyAlias
+type ProviderKeyAlias = model.ProviderKeyAlias
 type QuotaCooldown = model.QuotaCooldown
 type QuotaCooldownUpsert = model.QuotaCooldownUpsert
 type AccountQuotaSnapshot = model.AccountQuotaSnapshot
@@ -142,21 +144,22 @@ type Store struct {
 	db            *sql.DB
 	modelPricesMu sync.RWMutex
 
-	Settings         setting.Repository
-	UsageEvents      usageevent.Repository
-	DeadLetters      deadletter.Repository
-	ModelPrices      modelprice.Repository
-	APIKeyAliases    apikeyalias.Repository
-	AccountActions   accountaction.Repository
-	CodexInspections codexinspection.Repository
-	DataMigrations   datamigration.Repository
-	QuotaCooldowns   quotacooldown.Repository
-	QuotaSnapshots   quotasnapshot.Repository
-	UsageAggregates  usageaggregate.Repository
-	UsageArchives    *usagearchive.Repository
-	UsagePricing     usagepricing.Repository
-	UsageMonitoring  usagemonitoring.Repository
-	UsageRollups     usagerollup.Repository
+	Settings           setting.Repository
+	UsageEvents        usageevent.Repository
+	DeadLetters        deadletter.Repository
+	ModelPrices        modelprice.Repository
+	APIKeyAliases      apikeyalias.Repository
+	ProviderKeyAliases providerkeyalias.Repository
+	AccountActions     accountaction.Repository
+	CodexInspections   codexinspection.Repository
+	DataMigrations     datamigration.Repository
+	QuotaCooldowns     quotacooldown.Repository
+	QuotaSnapshots     quotasnapshot.Repository
+	UsageAggregates    usageaggregate.Repository
+	UsageArchives      *usagearchive.Repository
+	UsagePricing       usagepricing.Repository
+	UsageMonitoring    usagemonitoring.Repository
+	UsageRollups       usagerollup.Repository
 }
 
 func Open(path string, protector ...*security.Protector) (*Store, error) {
@@ -169,22 +172,23 @@ func Open(path string, protector ...*security.Protector) (*Store, error) {
 
 func New(db *sql.DB, protector ...*security.Protector) *Store {
 	return &Store{
-		db:               db,
-		Settings:         setting.New(db, protector...),
-		UsageEvents:      usageevent.New(db),
-		DeadLetters:      deadletter.New(db),
-		ModelPrices:      modelprice.New(db),
-		APIKeyAliases:    apikeyalias.New(db),
-		AccountActions:   accountaction.New(db),
-		CodexInspections: codexinspection.New(db),
-		DataMigrations:   datamigration.New(db),
-		QuotaCooldowns:   quotacooldown.New(db),
-		QuotaSnapshots:   quotasnapshot.New(db),
-		UsageAggregates:  usageaggregate.New(db),
-		UsageArchives:    usagearchive.New(db),
-		UsagePricing:     usagepricing.New(db),
-		UsageMonitoring:  usagemonitoring.New(db),
-		UsageRollups:     usagerollup.New(db),
+		db:                 db,
+		Settings:           setting.New(db, protector...),
+		UsageEvents:        usageevent.New(db),
+		DeadLetters:        deadletter.New(db),
+		ModelPrices:        modelprice.New(db),
+		APIKeyAliases:      apikeyalias.New(db),
+		ProviderKeyAliases: providerkeyalias.New(db),
+		AccountActions:     accountaction.New(db),
+		CodexInspections:   codexinspection.New(db),
+		DataMigrations:     datamigration.New(db),
+		QuotaCooldowns:     quotacooldown.New(db),
+		QuotaSnapshots:     quotasnapshot.New(db),
+		UsageAggregates:    usageaggregate.New(db),
+		UsageArchives:      usagearchive.New(db),
+		UsagePricing:       usagepricing.New(db),
+		UsageMonitoring:    usagemonitoring.New(db),
+		UsageRollups:       usagerollup.New(db),
 	}
 }
 
@@ -324,6 +328,18 @@ func (s *Store) UpsertAPIKeyAliasesWithActiveHashes(ctx context.Context, aliases
 
 func (s *Store) DeleteAPIKeyAlias(ctx context.Context, apiKeyHash string) error {
 	return s.APIKeyAliases.Delete(ctx, apiKeyHash)
+}
+
+func (s *Store) LoadProviderKeyAliases(ctx context.Context) ([]ProviderKeyAlias, error) {
+	return s.ProviderKeyAliases.LoadAll(ctx)
+}
+
+func (s *Store) UpsertProviderKeyAlias(ctx context.Context, alias ProviderKeyAlias) error {
+	return s.ProviderKeyAliases.Upsert(ctx, alias)
+}
+
+func (s *Store) DeleteProviderKeyAlias(ctx context.Context, provider, apiKeyHash string) error {
+	return s.ProviderKeyAliases.Delete(ctx, provider, apiKeyHash)
 }
 
 func (s *Store) UpsertAccountActionCandidate(ctx context.Context, input AccountActionCandidateUpsert) (AccountActionCandidate, error) {

@@ -1,6 +1,7 @@
 import type {
   ApiKeyAlias,
   MonitoringAnalyticsCoverage,
+  ProviderKeyAlias,
   ResponseHeaderMetadata,
 } from '@/services/api/usageService';
 import type { AuthFileItem } from '@/types/authFile';
@@ -31,14 +32,7 @@ export type MonitoringAuthMeta = {
   updatedAt: string;
 };
 
-export type MonitoringTimeRange =
-  | 'today'
-  | 'yesterday'
-  | '7d'
-  | '14d'
-  | '30d'
-  | 'all'
-  | 'custom';
+export type MonitoringTimeRange = 'today' | 'yesterday' | '7d' | '14d' | '30d' | 'all' | 'custom';
 
 export type MonitoringCustomTimeRange = {
   startMs: number;
@@ -399,6 +393,7 @@ export interface UseMonitoringDataParams {
   connectionScopeKey?: string | null;
   modelPrices: Record<string, ModelPrice>;
   apiKeyAliases?: ApiKeyAlias[];
+  providerKeyAliases?: ProviderKeyAlias[];
   timeRange: MonitoringTimeRange;
   customTimeRange?: MonitoringCustomTimeRange | null;
   searchQuery: string;

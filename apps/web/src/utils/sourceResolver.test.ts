@@ -298,6 +298,29 @@ describe('source resolver', () => {
     expect(resolved.identityKey).toBe('codex:0');
   });
 
+  it('uses a provider key alias for both hashed and masked Codex sources', () => {
+    const apiKey = 'sk-codex-provider-alias-test-1234567890';
+    const sourceInfoInput = {
+      codexApiKeys: [
+        {
+          apiKey,
+          authIndex: 'codex-alias-auth',
+          baseUrl: 'https://api.alias.example/v1',
+        },
+      ],
+      providerKeyAliases: [{ provider: 'codex', apiKeyHash: sha256Hex(apiKey), alias: 'WWP1' }],
+    };
+    const sourceInfoMap = buildSourceInfoMap(sourceInfoInput);
+
+    const hashed = resolveSourceDisplay(`h:${sha256Hex(apiKey)}`, '', sourceInfoMap, new Map());
+    const masked = resolveSourceDisplay('m:sk-c...7890', '', sourceInfoMap, new Map());
+
+    expect(hashed.displayName).toBe('WWP1');
+    expect(masked.displayName).toBe('WWP1');
+    expect(hashed.displayName).not.toContain(apiKey);
+    expect(masked.displayName).not.toContain(apiKey);
+  });
+
   it('preserves identity continuity between legacy and new h:<sha256> source representations', () => {
     const apiKey = 'sk-proj-identity-continuity-test-key-56789';
     const sourceInfoMap = buildSourceInfoMap({
@@ -335,16 +358,24 @@ describe('source resolver', () => {
       ],
     });
 
-    const authFileMap = new Map([
-      ['meta-oauth-1', { name: 'Muse OAuth Account', type: 'meta' }],
-    ]);
+    const authFileMap = new Map([['meta-oauth-1', { name: 'Muse OAuth Account', type: 'meta' }]]);
 
-    const resolvedByAuthIndex = resolveSourceDisplay('', 'meta-api-key-1', sourceInfoMap, authFileMap);
+    const resolvedByAuthIndex = resolveSourceDisplay(
+      '',
+      'meta-api-key-1',
+      sourceInfoMap,
+      authFileMap
+    );
     expect(resolvedByAuthIndex.displayName).toBe('Muse Team API');
     expect(resolvedByAuthIndex.type).toBe('meta');
     expect(resolvedByAuthIndex.identityKey).toBe('meta:0');
 
-    const resolvedByHash = resolveSourceDisplay(`h:${sha256Hex(apiKey)}`, '', sourceInfoMap, authFileMap);
+    const resolvedByHash = resolveSourceDisplay(
+      `h:${sha256Hex(apiKey)}`,
+      '',
+      sourceInfoMap,
+      authFileMap
+    );
     expect(resolvedByHash.displayName).toBe('Muse Team API');
     expect(resolvedByHash.type).toBe('meta');
     expect(resolvedByHash.identityKey).toBe('meta:0');

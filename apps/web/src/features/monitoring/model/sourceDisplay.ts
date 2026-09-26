@@ -39,10 +39,7 @@ export const isProviderLikeMonitoringLabel = (
   }
 
   const providerValue = readString(provider);
-  return (
-    Boolean(providerValue) &&
-    candidate.toLowerCase() === providerValue.toLowerCase()
-  );
+  return Boolean(providerValue) && candidate.toLowerCase() === providerValue.toLowerCase();
 };
 
 /**
@@ -178,6 +175,7 @@ export const buildMonitoringSourceDisplay = (
   // Prefer key-disambiguated source names (e.g. "kuaileshifu #1") over the bare
   // OpenAI-compatible provider/channel name when multi-key providers share a label.
   const sourceLabel = firstReadable(
+    sourceMeta.isProviderKeyAlias ? resolvedSourceName : '',
     resolvedSourceName &&
       (isKeyDisambiguatedLabel(resolvedSourceName, channel) ||
         isKeyDisambiguatedLabel(resolvedSourceName, channelHost) ||
@@ -203,8 +201,8 @@ export const buildMonitoringSourceDisplay = (
   const opaqueSource = isOpaqueUsageSourceId(sourceMasked)
     ? sourceMasked
     : isOpaqueUsageSourceId(accountMasked)
-    ? accountMasked
-    : '';
+      ? accountMasked
+      : '';
   const keyDisambiguatedSource =
     readableNonGenericSource &&
     (isKeyDisambiguatedLabel(readableNonGenericSource, channel) ||
@@ -215,6 +213,7 @@ export const buildMonitoringSourceDisplay = (
       : '';
   const primary =
     firstReadable(
+      sourceMeta.isProviderKeyAlias ? resolvedSourceName : '',
       keyDisambiguatedSource,
       nonGenericChannel,
       channelHost,

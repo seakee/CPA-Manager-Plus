@@ -4,6 +4,8 @@ import {
   usageServiceApi,
   type ApiKeyAlias,
   type ApiKeyAliasesResponse,
+  type ProviderKeyAlias,
+  type ProviderKeyAliasesResponse,
   type ModelPricesResponse,
   type ModelPriceSyncResponse,
   type UsageExportResponse,
@@ -34,9 +36,11 @@ export interface UseUsageDataReturn {
   lastRefreshedAt: Date | null;
   modelPrices: Record<string, ModelPrice>;
   apiKeyAliases: ApiKeyAlias[];
+  providerKeyAliases: ProviderKeyAlias[];
   usageServiceAvailable: boolean;
   setModelPrices: (prices: Record<string, ModelPrice>) => Promise<void>;
   loadApiKeyAliases: () => Promise<void>;
+  loadProviderKeyAliases: () => Promise<void>;
   syncModelPrices: (
     models?: string[],
     options?: {
@@ -70,6 +74,7 @@ export function useUsageData({
   const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
   const [modelPrices, setModelPricesState] = useState<Record<string, ModelPrice>>({});
   const [apiKeyAliases, setApiKeyAliases] = useState<ApiKeyAlias[]>([]);
+  const [providerKeyAliases, setProviderKeyAliases] = useState<ProviderKeyAlias[]>([]);
   const [usageServiceAvailable, setUsageServiceAvailable] = useState(false);
   const requestIdRef = useRef(0);
   const aliasRequestIdRef = useRef(0);
@@ -100,6 +105,12 @@ export function useUsageData({
     return usageServiceApi.getApiKeyAliases(modelPriceServiceBase, managementKey);
   }, [managementKey, modelPriceServiceBase]);
 
+  const getProviderKeyAliasesFromApi =
+    useCallback(async (): Promise<ProviderKeyAliasesResponse> => {
+      if (!modelPriceServiceBase) return { items: [] };
+      return usageServiceApi.getProviderKeyAliases(modelPriceServiceBase, managementKey);
+    }, [managementKey, modelPriceServiceBase]);
+
   const saveModelPricesToApi = useCallback(
     async (prices: Record<string, ModelPrice>): Promise<ModelPricesResponse> => {
       if (!modelPriceServiceBase) {
@@ -120,12 +131,7 @@ export function useUsageData({
       if (!modelPriceServiceBase) {
         throw new Error('model_price_sync_requires_usage_service');
       }
-      return usageServiceApi.syncModelPrices(
-        modelPriceServiceBase,
-        managementKey,
-        models,
-        options
-      );
+      return usageServiceApi.syncModelPrices(modelPriceServiceBase, managementKey, models, options);
     },
     [managementKey, modelPriceServiceBase]
   );
@@ -204,6 +210,15 @@ export function useUsageData({
     }
   }, [getApiKeyAliasesFromApi]);
 
+  const loadProviderKeyAliases = useCallback(async () => {
+    try {
+      const response = await getProviderKeyAliasesFromApi();
+      setProviderKeyAliases(Array.isArray(response.items) ? response.items : []);
+    } catch {
+      setProviderKeyAliases([]);
+    }
+  }, [getProviderKeyAliasesFromApi]);
+
   const loadUsage = useCallback(async () => {
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
@@ -244,8 +259,9 @@ export function useUsageData({
   useEffect(() => {
     void loadModelPricesFromStorage();
     void loadApiKeyAliases();
+    void loadProviderKeyAliases();
     void loadUsage();
-  }, [loadApiKeyAliases, loadModelPricesFromStorage, loadUsage]);
+  }, [loadApiKeyAliases, loadModelPricesFromStorage, loadProviderKeyAliases, loadUsage]);
 
   const setModelPrices = useCallback(
     async (prices: Record<string, ModelPrice>) => {
@@ -285,9 +301,11 @@ export function useUsageData({
     lastRefreshedAt,
     modelPrices,
     apiKeyAliases,
+    providerKeyAliases,
     usageServiceAvailable: managerServiceAvailable || usageServiceAvailable,
     setModelPrices,
     loadApiKeyAliases,
+    loadProviderKeyAliases,
     syncModelPrices,
     exportUsage: exportUsageFromApi,
     importUsage: importUsageToApi,

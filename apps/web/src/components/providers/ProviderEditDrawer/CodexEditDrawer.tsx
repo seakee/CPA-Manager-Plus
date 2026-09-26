@@ -37,6 +37,7 @@ import {
   parseExcludedModels,
 } from '@/components/providers/utils';
 import { CredentialWeightInput } from '../CredentialWeightInput';
+import { ProviderKeyAliasEditor } from '../ProviderKeyAliasEditor';
 import type { ProviderFormState } from '../types';
 import {
   getCredentialWeightComparisonValue,
@@ -851,6 +852,9 @@ export function CodexEditDrawer({
               disabled={disabled || saving}
               required
             />
+            {!isMeta && !isXAI && (
+              <ProviderKeyAliasEditor apiKey={form.apiKey} provider="codex" disabled={disabled} />
+            )}
             <Input
               label={t('ai_providers.priority_label')}
               hint={t('ai_providers.priority_hint')}

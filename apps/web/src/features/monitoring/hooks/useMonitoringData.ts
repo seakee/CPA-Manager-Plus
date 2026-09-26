@@ -330,6 +330,7 @@ export function useMonitoringData({
   connectionScopeKey,
   modelPrices,
   apiKeyAliases,
+  providerKeyAliases,
   timeRange,
   customTimeRange,
   searchQuery,
@@ -467,8 +468,9 @@ export function useMonitoringData({
         metaApiKeys: config?.metaApiKeys || [],
         vertexApiKeys: config?.vertexApiKeys || [],
         openaiCompatibility: config?.openaiCompatibility || [],
+        providerKeyAliases,
       }),
-    [config]
+    [config, providerKeyAliases]
   );
 
   const channelByAuthIndex = useMemo(() => {

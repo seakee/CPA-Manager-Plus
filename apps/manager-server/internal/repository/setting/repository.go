@@ -352,7 +352,7 @@ func (r *repository) LoadBootstrapState(ctx context.Context) (model.BootstrapSta
 }
 
 func (r *repository) HasHistoricalData(ctx context.Context) (bool, error) {
-	tables := []string{"usage_events", "dead_letter_events", "model_prices", "api_key_aliases"}
+	tables := []string{"usage_events", "dead_letter_events", "model_prices", "api_key_aliases", "provider_key_aliases"}
 	for _, table := range tables {
 		var count int64
 		if err := r.db.QueryRowContext(ctx, `select count(*) from `+table).Scan(&count); err != nil {

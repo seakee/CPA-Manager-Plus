@@ -5,6 +5,8 @@ import {
   normalizeAuthIndex,
   normalizeUsageSourceId,
 } from '@/utils/usage';
+import type { ProviderKeyAlias } from '@/services/api/usageService';
+import { sha256Hex } from '@/utils/apiKeyHash';
 
 export interface SourceInfoMapInput {
   geminiApiKeys?: GeminiKeyConfig[];
@@ -14,10 +16,11 @@ export interface SourceInfoMapInput {
   metaApiKeys?: ProviderKeyConfig[];
   vertexApiKeys?: ProviderKeyConfig[];
   openaiCompatibility?: OpenAIProviderConfig[];
+  providerKeyAliases?: ProviderKeyAlias[];
 }
 
 type SourceInfoEntry = Required<Pick<SourceInfo, 'displayName' | 'type' | 'identityKey'>> &
-  Pick<SourceInfo, 'providerEnabledState'>;
+  Pick<SourceInfo, 'providerEnabledState' | 'isProviderKeyAlias'>;
 
 export interface SourceInfoMap {
   byAuthIndex: Map<string, SourceInfoEntry | null>;
@@ -191,17 +194,31 @@ export function buildSourceInfoMap(input: SourceInfoMapInput): SourceInfoMap {
     { items: input.vertexApiKeys || [], type: 'vertex', label: 'Vertex' },
   ];
 
+  const providerAliasMap = new Map<string, string>();
+  (input.providerKeyAliases || []).forEach((item) => {
+    const provider = String(item.provider || '')
+      .trim()
+      .toLowerCase();
+    const hash = String(item.apiKeyHash || '')
+      .trim()
+      .toLowerCase();
+    const alias = String(item.alias || '').trim();
+    if (provider && hash && alias) providerAliasMap.set(`${provider}:${hash}`, alias);
+  });
+
   providers.forEach(({ items, type, label }) => {
-    const displayNames = buildProviderDisplayNames(items, label);
+    const fallbackNames = buildProviderDisplayNames(items, label);
     items.forEach((item, index) => {
+      const alias = item.apiKey ? providerAliasMap.get(`${type}:${sha256Hex(item.apiKey)}`) : '';
       registerProvider(
         {
-          displayName: displayNames[index] || `${label} #${index + 1}`,
+          displayName: alias || fallbackNames[index] || `${label} #${index + 1}`,
           type,
           identityKey: buildProviderIdentityKey(type, index),
           providerEnabledState: buildProviderEnabledState(
             !hasDisableAllModelsRule(item.excludedModels)
           ),
+          isProviderKeyAlias: Boolean(alias),
         },
         [item.authIndex],
         buildCandidateUsageSourceIds({ apiKey: item.apiKey, prefix: item.prefix })
@@ -234,14 +251,17 @@ export function buildSourceInfoMap(input: SourceInfoMapInput): SourceInfoMap {
     );
 
     (provider.apiKeyEntries || []).forEach((entry, entryIndex) => {
+      const alias = entry.apiKey ? providerAliasMap.get(`openai:${sha256Hex(entry.apiKey)}`) : '';
       registerProvider(
         {
           displayName:
+            alias ||
             openaiKeyDisplayNames.get(`${providerIndex}:${entryIndex}`) ||
             providerEntry.displayName,
           type: 'openai',
           identityKey: buildProviderIdentityKey('openai', `${providerIndex}:${entryIndex}`),
           providerEnabledState: providerEntry.providerEnabledState,
+          isProviderKeyAlias: Boolean(alias),
         },
         [entry.authIndex],
         buildCandidateUsageSourceIds({ apiKey: entry.apiKey })
@@ -279,6 +299,9 @@ export function resolveSourceDisplay(
   const source = normalizeUsageSourceId(sourceRaw);
   const authIndexKey = normalizeAuthIndex(authIndex);
 
+  const matchedBySource = source ? sourceInfoMap.bySource.get(source) : null;
+  if (matchedBySource?.isProviderKeyAlias) return matchedBySource;
+
   if (authIndexKey) {
     const matchedByAuthIndex = sourceInfoMap.byAuthIndex.get(authIndexKey);
     if (matchedByAuthIndex) return matchedByAuthIndex;
@@ -293,7 +316,6 @@ export function resolveSourceDisplay(
     }
   }
 
-  const matchedBySource = source ? sourceInfoMap.bySource.get(source) : null;
   if (matchedBySource) return matchedBySource;
 
   if (source) {

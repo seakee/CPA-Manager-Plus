@@ -4,10 +4,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import i18n from '@/i18n';
 import { CoolingPolicySelect } from '@/components/providers/CoolingPolicySelect';
 import { HeaderInputList } from '@/components/ui/HeaderInputList';
+import { sha256Hex } from '@/utils/apiKeyHash';
 
 const authState = vi.hoisted(() => ({
   serverVersion: 'v7.2.93' as string | null,
   serverCommit: null as string | null,
+  managementKey: 'manager-key',
 }));
 
 vi.mock('@/stores/useAuthStore', () => ({
@@ -25,16 +27,50 @@ const mocks = vi.hoisted(() => ({
   updateMetaConfig: vi.fn(),
   getMetaConfigs: vi.fn(),
   fetchV1ModelsViaApiCall: vi.fn(),
+  getProviderKeyAliases: vi.fn(),
+  saveProviderKeyAlias: vi.fn(),
+  deleteProviderKeyAlias: vi.fn(),
 }));
 
 vi.mock('@/stores', () => ({
+  useAuthStore: (selector: (state: typeof authState) => unknown) => selector(authState),
   useConfigStore: (selector: (state: unknown) => unknown) =>
     selector({
       fetchConfig: mocks.fetchConfig,
       updateConfigValue: mocks.updateConfigValue,
       clearCache: mocks.clearCache,
     }),
-  useNotificationStore: () => ({ showNotification: mocks.showNotification }),
+  useNotificationStore: (
+    selector?: (state: { showNotification: typeof mocks.showNotification }) => unknown
+  ) =>
+    selector
+      ? selector({ showNotification: mocks.showNotification })
+      : { showNotification: mocks.showNotification },
+}));
+
+vi.mock('@/hooks/usePanelFeatureAvailability', () => ({
+  usePanelFeatureAvailability: () => ({
+    checking: false,
+    panelHostConfirmed: true,
+    panelHostMode: 'manager_embedded',
+    panelBase: 'http://manager.local',
+    managerServiceBase: 'http://manager.local',
+    managerServiceAvailable: true,
+    requestMonitoringAvailable: true,
+    modelPricesAvailable: true,
+    serverCodexInspectionAvailable: true,
+    dockerSetupAvailable: true,
+    externalManagerConfigAvailable: false,
+    reason: '',
+  }),
+}));
+
+vi.mock('@/services/api/usageService', () => ({
+  usageServiceApi: {
+    getProviderKeyAliases: mocks.getProviderKeyAliases,
+    saveProviderKeyAlias: mocks.saveProviderKeyAlias,
+    deleteProviderKeyAlias: mocks.deleteProviderKeyAlias,
+  },
 }));
 
 vi.mock('@/components/ui/Drawer', () => ({
@@ -98,21 +134,17 @@ const findDrawerCloseButton = (root: ReactTestInstance) =>
   root.findAllByType('button').find((button) => button.props['data-drawer-close'] === true);
 
 const findFetchModelsButton = (root: ReactTestInstance) =>
-  root
-    .findAllByType('button')
-    .find((button) =>
-      button.findAllByType('span').some((span) => {
-        const text = span.children.join('');
-        return text.includes('/v1/models');
-      })
-    );
+  root.findAllByType('button').find((button) =>
+    button.findAllByType('span').some((span) => {
+      const text = span.children.join('');
+      return text.includes('/v1/models');
+    })
+  );
 
 const findConnectivityTestButton = (root: ReactTestInstance) =>
   root
     .findAllByType('button')
-    .find((button) =>
-      String(button.props.className ?? '').includes('modelTestAllButton')
-    );
+    .find((button) => String(button.props.className ?? '').includes('modelTestAllButton'));
 
 describe('CodexEditDrawer load baseline guard', () => {
   beforeEach(() => {
@@ -122,6 +154,58 @@ describe('CodexEditDrawer load baseline guard', () => {
     mocks.updateCodexConfig.mockResolvedValue(undefined);
     mocks.getCodexConfigs.mockResolvedValue([]);
     mocks.fetchV1ModelsViaApiCall.mockResolvedValue([]);
+    mocks.getProviderKeyAliases.mockResolvedValue({ items: [] });
+    mocks.saveProviderKeyAlias.mockResolvedValue({ items: [] });
+    mocks.deleteProviderKeyAlias.mockResolvedValue(undefined);
+  });
+
+  it('saves a Codex provider alias by hash without adding it to provider config', async () => {
+    mocks.fetchConfig.mockResolvedValueOnce([
+      { apiKey: 'codex-provider-secret', baseUrl: 'https://api.openai.com/v1' },
+    ]);
+    mocks.getProviderKeyAliases.mockResolvedValueOnce({ items: [] });
+    mocks.saveProviderKeyAlias.mockResolvedValueOnce({
+      items: [
+        {
+          provider: 'codex',
+          apiKeyHash: sha256Hex('codex-provider-secret'),
+          alias: 'WWP1',
+        },
+      ],
+    });
+
+    let renderer: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <CodexEditDrawer open editIndex={0} disabled={false} onClose={vi.fn()} onSaved={vi.fn()} />
+      );
+    });
+
+    const aliasInput = renderer!.root
+      .findAllByType('input')
+      .find(
+        (input) => input.props.placeholder === i18n.t('ai_providers.provider_key_alias_placeholder')
+      );
+    expect(aliasInput).toBeDefined();
+    act(() => aliasInput?.props.onChange({ target: { value: 'WWP1' } }));
+    const aliasSaveButton = renderer!.root
+      .findAllByType('button')
+      .find((button) =>
+        button
+          .findAllByType('span')
+          .some((span) => span.children.join('') === i18n.t('ai_providers.provider_key_alias_save'))
+      );
+    await act(async () => {
+      await aliasSaveButton?.props.onClick();
+    });
+
+    expect(mocks.saveProviderKeyAlias).toHaveBeenCalledWith(
+      'http://manager.local',
+      { provider: 'codex', apiKeyHash: sha256Hex('codex-provider-secret'), alias: 'WWP1' },
+      'manager-key'
+    );
+    expect(mocks.updateCodexConfig).not.toHaveBeenCalled();
+    act(() => renderer!.unmount());
   });
 
   it('does not reuse a stale xAI edit baseline after a later load failure', async () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildSourceInfoMap } from '@/utils/sourceResolver';
+import { sha256Hex } from '@/utils/apiKeyHash';
 import {
   buildMonitoringSourceDisplay,
   isGenericMonitoringProviderLabel,
@@ -129,6 +130,35 @@ describe('buildMonitoringSourceDisplay', () => {
 
     expect(display.primary).toBe('fbc***@vip.qq.com');
     expect(display.meta).toBe('codex');
+  });
+
+  it('puts a provider key alias before generic Codex metadata', () => {
+    const apiKey = 'sk-codex-display-alias-test-1234567890';
+    const display = buildMonitoringSourceDisplay(
+      {
+        source: `h:${sha256Hex(apiKey)}`,
+        authIndex: 'codex-alias-auth',
+        authProviderSnapshot: 'codex',
+        channel: 'codex',
+      },
+      {
+        authMetaMap: new Map(),
+        channelByAuthIndex: new Map(),
+        sourceInfoMap: buildSourceInfoMap({
+          codexApiKeys: [
+            {
+              apiKey,
+              authIndex: 'codex-alias-auth',
+              baseUrl: 'https://api.alias.example/v1',
+            },
+          ],
+          providerKeyAliases: [{ provider: 'codex', apiKeyHash: sha256Hex(apiKey), alias: 'WWP1' }],
+        }),
+      }
+    );
+
+    expect(display.primary).toBe('WWP1');
+    expect(display.meta).not.toContain(apiKey);
   });
 
   it('keeps generic devin provider labels secondary to the account identity', () => {

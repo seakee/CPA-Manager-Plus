@@ -40,6 +40,7 @@ import {
   parseExcludedModels,
 } from '@/components/providers/utils';
 import { CredentialWeightInput, type ProviderFormState } from '@/components/providers';
+import { ProviderKeyAliasEditor } from '@/components/providers/ProviderKeyAliasEditor';
 import {
   getCredentialWeightComparisonValue,
   getCredentialWeightError,
@@ -666,11 +667,13 @@ export function AiProvidersCodexEditPage() {
       } else {
         await providersApi.createCodexConfig(payload);
       }
-      const syncedList = await providersApi.getCodexConfigs().catch(() =>
-        editIndex !== null
-          ? configs.map((item, index) => (index === editIndex ? payload : item))
-          : [...configs, payload]
-      );
+      const syncedList = await providersApi
+        .getCodexConfigs()
+        .catch(() =>
+          editIndex !== null
+            ? configs.map((item, index) => (index === editIndex ? payload : item))
+            : [...configs, payload]
+        );
       updateConfigValue('codex-api-key', syncedList);
       clearCache('codex-api-key');
       showNotification(
@@ -757,6 +760,11 @@ export function AiProvidersCodexEditPage() {
               value={form.apiKey}
               onChange={(e) => setForm((prev) => ({ ...prev, apiKey: e.target.value }))}
               disabled={disableControls || saving}
+            />
+            <ProviderKeyAliasEditor
+              apiKey={form.apiKey}
+              provider="codex"
+              disabled={disableControls}
             />
             <Input
               label={t('ai_providers.priority_label')}
