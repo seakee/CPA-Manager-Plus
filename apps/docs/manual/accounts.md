@@ -63,6 +63,7 @@ CPAMP 按凭证身份和观察时间合并这些证据。较新的健康结果�
 | Claude         | 基础额度、周额度、模型级 scoped limits                 | scoped limits 可能重复、缺失或停用，CPAMP 按身份和新鲜度归并。 |
 | xAI/Grok OAuth | CLI billing 周/月数据、官方 API 身份、请求事件耗尽信号 | 官方 API 身份不等于可查询费用或剩余百分比。                    |
 | Muse / Meta    | `meta:window`、`meta:weekly`、reset/周期元数据           | 缺少用量比例时保持 unknown，不把缺失字段解释成 `0%`；DCA 仅用于账号/配额流程。 |
+| 插件 Provider  | 插件通过 CPA `quota.*` 发布的带标签额度项                | provider 与凭证绑定都由 CPA 给出；CPAMP 原样渲染每一项，不解释插件自定义单位。 |
 | 其他 Provider  | CPA 凭证元数据或最近响应 Header                        | 不假设存在统一主动额度接口。                                   |
 
 ## 配额冷却与账号处理
