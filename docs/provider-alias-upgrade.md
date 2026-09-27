@@ -20,3 +20,11 @@
 - `/data/cpa/CLIProxyAPI/config.yaml`
 
 如果 `git rebase` 或测试失败，脚本会停止。代码冲突需要人工解决一次，然后继续执行脚本即可。
+
+脚本默认使用 `origin/dev`。也可以传入 tag 或其他提交：
+
+```bash
+./bin/release/reapply-provider-alias.sh v1.15.0
+```
+
+部署前会检查健康接口和 provider alias 接口；校验失败时会尝试恢复部署前的 `app/current` 与 `panel/current`。

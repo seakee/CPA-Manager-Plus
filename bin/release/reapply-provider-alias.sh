@@ -46,11 +46,15 @@ echo "[4/7] 构建前端"
 npm --prefix apps/web run build
 
 echo "[5/7] 运行服务端测试"
-go test ./apps/manager-server/...
+pushd apps/manager-server >/dev/null
+go test ./...
+popd >/dev/null
 
 echo "[6/7] 构建 Linux 服务端"
 mkdir -p dist/provider-alias
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o dist/provider-alias/cpa-manager-plus ./apps/manager-server/cmd/cpa-manager-plus
+pushd apps/manager-server >/dev/null
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$ROOT_DIR/dist/provider-alias/cpa-manager-plus" ./cmd/cpa-manager-plus
+popd >/dev/null
 cp apps/web/dist/index.html dist/provider-alias/management.html
 
 if [[ "$DEPLOY" != 1 ]]; then
@@ -64,9 +68,17 @@ REMOTE_RELEASE="$REMOTE_ROOT/app/$RELEASE"
 REMOTE_PANEL="$REMOTE_ROOT/panel/releases/$RELEASE"
 
 echo "[7/7] 部署到 ${REMOTE_HOST}"
+PREVIOUS_APP="$(ssh "$REMOTE_HOST" "readlink -f '$REMOTE_ROOT/app/current' || true")"
+PREVIOUS_PANEL="$(ssh "$REMOTE_HOST" "readlink -f '$REMOTE_ROOT/panel/current' || true")"
 ssh "$REMOTE_HOST" "set -eu; mkdir -p '$REMOTE_RELEASE' '$REMOTE_PANEL'"
 scp dist/provider-alias/cpa-manager-plus "$REMOTE_HOST:$REMOTE_RELEASE/cpa-manager-plus"
 scp dist/provider-alias/management.html "$REMOTE_HOST:$REMOTE_PANEL/management.html"
-ssh "$REMOTE_HOST" "set -eu; chmod 0755 '$REMOTE_RELEASE/cpa-manager-plus'; ln -sfn '$REMOTE_RELEASE' '$REMOTE_ROOT/app/current'; ln -sfn '$REMOTE_PANEL' '$REMOTE_ROOT/panel/current'; systemctl --user restart cpa-manager.service; sleep 2; curl -fsS http://127.0.0.1:18317/health; echo; '$REMOTE_RELEASE/cpa-manager-plus' --version"
+if ! ssh "$REMOTE_HOST" "set -eu; chmod 0755 '$REMOTE_RELEASE/cpa-manager-plus'; ln -sfn '$REMOTE_RELEASE' '$REMOTE_ROOT/app/current'; ln -sfn '$REMOTE_PANEL' '$REMOTE_ROOT/panel/current'; systemctl --user restart cpa-manager.service; for i in \$(seq 1 30); do curl -fsS http://127.0.0.1:18317/health >/dev/null && break; sleep 1; done; curl -fsS http://127.0.0.1:18317/health; echo; key=\$(sed -n 's/^CPA_MANAGER_ADMIN_KEY=//p' '$REMOTE_ROOT/data/manager.env'); test \"\$(curl -sS -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer \$key\" http://127.0.0.1:18317/v0/management/provider-key-aliases)\" = 200; '$REMOTE_RELEASE/cpa-manager-plus' --version"; then
+  echo "部署校验失败，恢复上一版。" >&2
+  if [[ -n "$PREVIOUS_APP" && -n "$PREVIOUS_PANEL" ]]; then
+    ssh "$REMOTE_HOST" "set -eu; ln -sfn '$PREVIOUS_APP' '$REMOTE_ROOT/app/current'; ln -sfn '$PREVIOUS_PANEL' '$REMOTE_ROOT/panel/current'; systemctl --user restart cpa-manager.service"
+  fi
+  exit 1
+fi
 
 echo "部署完成：$RELEASE"
