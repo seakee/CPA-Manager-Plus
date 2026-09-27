@@ -19,7 +19,7 @@
 - `/data/cpa/CPA-Manager/data`
 - `/data/cpa/CLIProxyAPI/config.yaml`
 
-如果 `git rebase` 或测试失败，脚本会停止。代码冲突需要人工解决一次，然后继续执行脚本即可。
+如果 `git rebase` 或测试失败，脚本会停止。发生代码冲突时，解决冲突后执行 `git add` 和 `git rebase --continue`，完成后再运行构建或部署命令；不要在未结束的 rebase 中重新启动脚本。
 
 脚本默认使用 `origin/dev`。也可以传入 tag 或其他提交：
 
