@@ -257,6 +257,42 @@ describe('authFilesApi model endpoints', () => {
 });
 
 describe('authFilesApi list normalization', () => {
+  it('preserves upstream pagination metadata while deduplicating a page', async () => {
+    mocks.get.mockResolvedValue({
+      files: [
+        { name: 'shared.json', id: 'runtime-1', source: 'runtime' },
+        { name: 'shared.json', id: 'runtime-1', source: 'file' },
+      ],
+      total: 101,
+      page: 2,
+      page_size: 50,
+      has_more: true,
+    });
+
+    const result = await authFilesApi.listPage(2, 50);
+
+    expect(mocks.get).toHaveBeenCalledWith('/auth-files', {
+      params: { page: 2, page_size: 50 },
+    });
+    expect(result.files).toHaveLength(1);
+    expect(result).toMatchObject({ total: 101, page: 2, page_size: 50, has_more: true });
+  });
+
+  it('keeps the unpaginated list total based on deduplicated files', async () => {
+    mocks.get.mockResolvedValue({
+      files: [
+        { name: 'shared.json', id: 'runtime-1', source: 'runtime' },
+        { name: 'shared.json', id: 'runtime-1', source: 'file' },
+      ],
+      total: 2,
+    });
+
+    const result = await authFilesApi.list();
+
+    expect(result.files).toHaveLength(1);
+    expect(result.total).toBe(1);
+  });
+
   it('pins list requests to the captured CPA connection', async () => {
     mocks.get.mockResolvedValue({ files: [] });
     const requestScope = {

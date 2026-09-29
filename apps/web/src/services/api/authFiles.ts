@@ -531,7 +531,10 @@ const mergeAuthFileEntries = (entries: AuthFileEntry[]): AuthFileEntry => {
   return merged;
 };
 
-const dedupeAuthFilesResponse = (payload: AuthFilesResponse): AuthFilesResponse => {
+const dedupeAuthFilesResponse = (
+  payload: AuthFilesResponse,
+  preserveUpstreamTotal = false
+): AuthFilesResponse => {
   const files = Array.isArray(payload?.files) ? payload.files : [];
   const grouped = new Map<string, AuthFileEntry[]>();
 
@@ -565,7 +568,7 @@ const dedupeAuthFilesResponse = (payload: AuthFilesResponse): AuthFilesResponse 
   return {
     ...payload,
     files: normalizedFiles,
-    total: normalizedFiles.length,
+    total: preserveUpstreamTotal ? (payload.total ?? normalizedFiles.length) : normalizedFiles.length,
   };
 };
 
@@ -1169,6 +1172,14 @@ export const authFilesApi = {
         )
       : await apiClient.get<AuthFilesResponse>('/auth-files');
     return dedupeAuthFilesResponse(response);
+  },
+
+  listPage: async (page: number, pageSize: number, requestScope?: AuthFilesApiRequestScope) => {
+    const response = await apiClient.get<AuthFilesResponse>('/auth-files', {
+      ...(requestScope ? createScopedApiRequestConfig(requestScope) : {}),
+      params: { page, page_size: pageSize },
+    });
+    return dedupeAuthFilesResponse(response, true);
   },
 
   lookup: async (
