@@ -1836,6 +1836,17 @@ func (s *Service) accountHistory(ctx context.Context, req AccountHistoryRequest)
 	loadTotals := func(readKeys []string) (map[string]*accountHistoryTotal, error) {
 		pricingSnapshot, err := s.store.LoadUsagePricingAccountSnapshot(ctx, readKeys)
 		if err != nil {
+			if errors.Is(err, store.ErrUsagePricingCoverageIncomplete) {
+				prices, priceErr := s.store.LoadModelPrices(ctx)
+				if priceErr != nil {
+					return nil, priceErr
+				}
+				rows, rollupErr := s.store.AccountHistoryRollupRows(ctx, readKeys)
+				if rollupErr != nil {
+					return nil, rollupErr
+				}
+				return buildAccountHistoryTotals(rows, prices), nil
+			}
 			return nil, err
 		}
 		prices := pricingSnapshot.Prices

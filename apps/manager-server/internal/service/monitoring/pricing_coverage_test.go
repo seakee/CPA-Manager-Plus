@@ -208,7 +208,7 @@ func TestAccountHistoryRecoversIncompleteArchivedPricing(t *testing.T) {
 	}
 }
 
-func TestAccountHistoryIncompleteArchivedPricingFailsClosed(t *testing.T) {
+func TestAccountHistoryIncompleteArchivedPricingFallsBackToCoreRollups(t *testing.T) {
 	db, sqlDB, _, _ := pricingCoverageFixture(t)
 	ctx := context.Background()
 	if _, err := sqlDB.ExecContext(ctx, `delete from usage_pricing_account_rollups_v1;
@@ -216,8 +216,17 @@ func TestAccountHistoryIncompleteArchivedPricingFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := New(db).AccountHistory(ctx, pricingCoverageAccountRequest())
-	if !errors.Is(err, store.ErrUsagePricingCoverageIncomplete) || len(got.Items) != 0 {
-		t.Fatalf("incomplete account history returned success: %#v error=%v", got.Items, err)
+	if err != nil || len(got.Items) != 2 {
+		t.Fatalf("incomplete account history failed to fallback: %#v error=%v", got.Items, err)
+	}
+	if !got.Items[0].Matched || !got.Items[1].Matched {
+		t.Fatalf("expected matched items on fallback: %#v", got.Items)
+	}
+	if got.Items[0].TotalRequests <= 0 || got.Items[1].TotalRequests <= 0 {
+		t.Fatalf("expected positive requests on fallback: %#v", got.Items)
+	}
+	if got.Items[0].LatestRequest == nil || got.Items[1].LatestRequest == nil {
+		t.Fatalf("expected latest request to be populated on fallback: %#v", got.Items)
 	}
 }
 
