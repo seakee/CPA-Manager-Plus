@@ -26,6 +26,7 @@ import {
   withoutDisableAllModelsRule,
 } from '@/components/providers/utils';
 import { usePageTransitionLayer } from '@/components/common/PageTransitionLayer';
+import { useUsageData } from '@/features/monitoring/hooks/useUsageData';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { EmptyState } from '@/components/ui/EmptyState';
@@ -127,6 +128,9 @@ export function AiProvidersPage() {
 
   const { usageByProvider, loadRecentRequests, refreshRecentRequests } = useProviderRecentRequests({
     enabled: isCurrentLayer,
+  });
+  const { providerKeyAliases, loadProviderKeyAliases } = useUsageData({
+    loadUsageEvents: false,
   });
 
   const getErrorMessage = (err: unknown) => {
@@ -246,7 +250,8 @@ export function AiProvidersPage() {
 
   const handleDrawerSaved = useCallback(() => {
     void loadConfigs();
-  }, [loadConfigs]);
+    void loadProviderKeyAliases();
+  }, [loadConfigs, loadProviderKeyAliases]);
 
   // 统一行集合与派生数据
   const rows = useMemo(
@@ -261,6 +266,7 @@ export function AiProvidersPage() {
         vertex: vertexConfigs,
         openai: openaiProviders,
         usageByProvider,
+        providerKeyAliases,
       }),
     [
       claudeConfigs,
@@ -269,6 +275,7 @@ export function AiProvidersPage() {
       interactionsKeys,
       metaConfigs,
       openaiProviders,
+      providerKeyAliases,
       usageByProvider,
       vertexConfigs,
       xaiConfigs,

@@ -777,6 +777,15 @@ func Migrate(db *sql.DB) error {
 			alias text not null,
 			updated_at_ms integer not null
 		)`,
+		`create table if not exists provider_key_aliases (
+			provider text not null,
+			api_key_hash text not null,
+			alias text not null,
+			updated_at_ms integer not null,
+			primary key (provider, api_key_hash)
+		)`,
+		`create unique index if not exists idx_provider_key_aliases_alias
+			on provider_key_aliases(provider, lower(alias))`,
 		`create table if not exists account_action_candidates (
 			id integer primary key autoincrement,
 			action_type text not null,

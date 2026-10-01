@@ -24,6 +24,8 @@ const mocks = vi.hoisted(() => ({
   getOpenAIProviders: vi.fn(),
   showNotification: vi.fn(),
   showConfirmation: vi.fn(),
+  loadProviderKeyAliases: vi.fn(async () => undefined),
+  providerKeyAliases: [] as Array<{ provider: string; apiKeyHash: string; alias: string }>,
   cacheValid: true,
   transitionLayer: null as { status: string } | null,
 }));
@@ -33,6 +35,12 @@ vi.mock('react-i18next', () => ({
 }));
 
 vi.mock('@/hooks/useHeaderRefresh', () => ({ useHeaderRefresh: () => undefined }));
+vi.mock('@/features/monitoring/hooks/useUsageData', () => ({
+  useUsageData: () => ({
+    providerKeyAliases: mocks.providerKeyAliases,
+    loadProviderKeyAliases: mocks.loadProviderKeyAliases,
+  }),
+}));
 vi.mock('@/components/common/PageTransitionLayer', () => ({
   usePageTransitionLayer: () => mocks.transitionLayer,
 }));

@@ -93,7 +93,9 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
 
 export function useUsageAnalytics() {
   const config = useConfigStore((state) => state.config);
-  const { apiKeyAliases, loadApiKeyAliases } = useUsageData({ loadUsageEvents: false });
+  const { apiKeyAliases, providerKeyAliases, loadApiKeyAliases } = useUsageData({
+    loadUsageEvents: false,
+  });
   const [monitoringMeta, setMonitoringMeta] = useState<UsageAnalyticsMonitoringMeta>(
     EMPTY_USAGE_ANALYTICS_MONITORING_META
   );
@@ -184,8 +186,9 @@ export function useUsageAnalytics() {
         metaApiKeys: config?.metaApiKeys || [],
         vertexApiKeys: config?.vertexApiKeys || [],
         openaiCompatibility: config?.openaiCompatibility || [],
+        providerKeyAliases,
       }),
-    [config]
+    [config, providerKeyAliases]
   );
   const channelByAuthIndex = useMemo(() => {
     const map = new Map<string, MonitoringChannelMeta>();

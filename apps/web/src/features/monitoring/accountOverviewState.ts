@@ -239,7 +239,13 @@ const isRedundantAccountLabel = (
 export const resolveAccountDisplayText = (
   row: Pick<
     MonitoringAccountRow,
-    'account' | 'accountMasked' | 'displayAccount' | 'authLabels' | 'channels' | 'provider'
+    | 'account'
+    | 'accountMasked'
+    | 'displayAccount'
+    | 'authLabels'
+    | 'channels'
+    | 'provider'
+    | 'providerAlias'
   >,
   displayMode: AccountDisplayMode
 ) => {
@@ -248,7 +254,12 @@ export const resolveAccountDisplayText = (
     displayMode === 'masked'
       ? firstReadableAccountValue(row.accountMasked, row.account, row.displayAccount)
       : fullAccount;
-  const configuredPrimary = firstReadableAccountValue(row.displayAccount, row.account);
+  const providerAlias = firstReadableAccountValue(row.providerAlias);
+  const configuredPrimary = firstReadableAccountValue(
+    providerAlias,
+    row.displayAccount,
+    row.account
+  );
   const primaryIsAccount =
     !configuredPrimary ||
     configuredPrimary === row.account ||
@@ -269,8 +280,13 @@ export const resolveAccountDisplayText = (
         ...row.authLabels.filter((label) => label && label !== primary && label !== fullAccount),
       ]
     : [maskedAccount, fullAccount];
+  const visibleSecondaryCandidates = providerAlias
+    ? secondaryCandidates.filter(
+        (value) => normalizeMonitoringProvider(value) !== normalizeMonitoringProvider(row.provider)
+      )
+    : secondaryCandidates;
   const secondary =
-    secondaryCandidates.find(
+    visibleSecondaryCandidates.find(
       (value) =>
         hasReadableAccountValue(value) &&
         value !== primary &&

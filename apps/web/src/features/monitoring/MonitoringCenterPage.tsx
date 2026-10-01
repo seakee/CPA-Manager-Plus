@@ -458,7 +458,9 @@ export function MonitoringCenterPage() {
     error: usageError,
     modelPrices,
     apiKeyAliases,
+    providerKeyAliases,
     loadApiKeyAliases,
+    loadProviderKeyAliases,
     exportUsage,
     importUsage,
     cancelUsageImport,
@@ -522,6 +524,7 @@ export function MonitoringCenterPage() {
     connectionScopeKey: connectionFingerprint,
     modelPrices,
     apiKeyAliases,
+    providerKeyAliases,
     timeRange,
     customTimeRange,
     searchQuery: deferredSearch,
@@ -563,8 +566,9 @@ export function MonitoringCenterPage() {
   );
 
   const refreshAll = useCallback(async () => {
-    const [, metaPayload] = await Promise.all([
+    const [, , metaPayload] = await Promise.all([
       loadApiKeyAliases(),
+      loadProviderKeyAliases(),
       refreshMeta(false),
       loadHeaderSnapshots(),
     ]);
@@ -577,7 +581,7 @@ export function MonitoringCenterPage() {
     if (hasUncoveredRevision && !credentialMutationRefreshPromiseRef.current) {
       setCredentialMutationRefreshKick((current) => current + 1);
     }
-  }, [loadApiKeyAliases, loadHeaderSnapshots, refreshMeta]);
+  }, [loadApiKeyAliases, loadHeaderSnapshots, loadProviderKeyAliases, refreshMeta]);
 
   useEffect(() => {
     if (!connectionFingerprint) return;
@@ -890,14 +894,11 @@ export function MonitoringCenterPage() {
     [scopedRows]
   );
   const accountStatusNowMs = monitoringLastRefreshedAt?.getTime() ?? Date.now();
-  const accountStatusBounds = useMemo(
-    () => {
-      const bounds = getRangeBounds(timeRange, accountStatusNowMs, customTimeRange);
-      if (!bounds || timeRange !== 'yesterday') return bounds;
-      return { ...bounds, endMs: bounds.endMs - 1 };
-    },
-    [accountStatusNowMs, customTimeRange, timeRange]
-  );
+  const accountStatusBounds = useMemo(() => {
+    const bounds = getRangeBounds(timeRange, accountStatusNowMs, customTimeRange);
+    if (!bounds || timeRange !== 'yesterday') return bounds;
+    return { ...bounds, endMs: bounds.endMs - 1 };
+  }, [accountStatusNowMs, customTimeRange, timeRange]);
   const accountOverviewScopeText = useMemo(
     () => formatAccountOverviewScopeText(accountStatusBounds, i18n.language, t),
     [accountStatusBounds, i18n.language, t]

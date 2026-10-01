@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { OpenAIProviderConfig, ProviderKeyConfig } from '@/types';
 import { buildRecentRequestCompositeKey } from '@/utils/recentRequests';
+import { sha256Hex } from '@/utils/apiKeyHash';
 import type { ProviderRecentUsageMap } from '../utils';
 import { buildProviderRows } from './rowData';
 
@@ -43,6 +44,34 @@ describe('buildProviderRows', () => {
 
     expect(rows[1].enabled).toBe(false);
     expect(rows[1].originalIndex).toBe(1);
+  });
+
+  it('uses a Codex alias as the identity label when one matches the API key hash', () => {
+    const apiKey = 'sk-codex-provider-secret';
+    const rows = buildProviderRows({
+      ...emptyInput,
+      codex: [{ apiKey, baseUrl: 'https://codex.example.com/v1' }],
+      providerKeyAliases: [
+        { provider: 'CODEX', apiKeyHash: sha256Hex(apiKey).toUpperCase(), alias: 'WWP1' },
+      ],
+    });
+
+    expect(rows[0].label).toBe('WWP1');
+    expect(rows[0].haystack).toContain('wwp1');
+    expect(rows[0].label).not.toContain('codex-provider-secret');
+  });
+
+  it('keeps the masked API key when a Codex alias is not available', () => {
+    const rows = buildProviderRows({
+      ...emptyInput,
+      codex: [{ apiKey: 'sk-codex-without-alias' }],
+      providerKeyAliases: [
+        { provider: 'claude', apiKeyHash: sha256Hex('other-key'), alias: 'Other' },
+      ],
+    });
+
+    expect(rows[0].label).toMatch(/^sk/);
+    expect(rows[0].label).not.toContain('codex-without-alias');
   });
 
   it('maps xAI API key configs as a distinct provider kind', () => {

@@ -677,6 +677,7 @@ export const buildAccountRowsFromAnalytics = (
           }),
         account,
         provider,
+        providerAlias: display.providerAlias,
         displayAccount,
         accountMasked: display.accountMasked || maskEmailLike(account),
         authLabels,

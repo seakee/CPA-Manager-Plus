@@ -5,6 +5,8 @@ import {
   normalizeAuthIndex,
   normalizeUsageSourceId,
 } from '@/utils/usage';
+import type { ProviderKeyAlias } from '@/services/api/usageService';
+import { sha256Hex } from '@/utils/apiKeyHash';
 
 export interface SourceInfoMapInput {
   geminiApiKeys?: GeminiKeyConfig[];
@@ -14,18 +16,23 @@ export interface SourceInfoMapInput {
   metaApiKeys?: ProviderKeyConfig[];
   vertexApiKeys?: ProviderKeyConfig[];
   openaiCompatibility?: OpenAIProviderConfig[];
+  providerKeyAliases?: ProviderKeyAlias[];
 }
 
 type SourceInfoEntry = Required<Pick<SourceInfo, 'displayName' | 'type' | 'identityKey'>> &
-  Pick<SourceInfo, 'providerEnabledState'>;
+  Pick<SourceInfo, 'providerEnabledState' | 'isProviderKeyAlias'>;
 
 export interface SourceInfoMap {
   byAuthIndex: Map<string, SourceInfoEntry | null>;
   bySource: Map<string, SourceInfoEntry | null>;
+  byProviderAndSource?: Map<string, SourceInfoEntry | null>;
   byIdentityKey: Map<string, SourceInfoEntry>;
+  byProviderAliasFallback?: Map<string, SourceInfoEntry>;
 }
 
 const buildProviderIdentityKey = (type: string, index: number | string) => `${type}:${index}`;
+const buildProviderSourceKey = (provider: string, source: string) =>
+  `${provider.trim().toLowerCase()}:${source}`;
 
 const hasDisableAllModelsRule = (models?: string[]) =>
   Array.isArray(models) && models.some((model) => String(model ?? '').trim() === '*');
@@ -134,6 +141,22 @@ const disambiguateDuplicateNames = (names: string[]) => {
   });
 };
 
+const buildOpenAIProviderSourceIds = (name: string) => {
+  const trimmed = name.trim();
+  if (!trimmed) return [];
+
+  return Array.from(
+    new Set(
+      [
+        trimmed,
+        trimmed.toLowerCase(),
+        `openai-compatible-${trimmed}`,
+        `openai-compatible-${trimmed.toLowerCase()}`,
+      ].map((value) => normalizeUsageSourceId(value))
+    )
+  );
+};
+
 const buildOpenAIKeyDisplayNameMap = (providers: OpenAIProviderConfig[]) => {
   const entries: Array<{ key: string; name: string }> = [];
 
@@ -157,19 +180,30 @@ const buildOpenAIKeyDisplayNameMap = (providers: OpenAIProviderConfig[]) => {
 export function buildSourceInfoMap(input: SourceInfoMapInput): SourceInfoMap {
   const byAuthIndex = new Map<string, SourceInfoEntry | null>();
   const bySource = new Map<string, SourceInfoEntry | null>();
+  const byProviderAndSource = new Map<string, SourceInfoEntry | null>();
   const byIdentityKey = new Map<string, SourceInfoEntry>();
+  const byProviderAliasFallback = new Map<string, SourceInfoEntry>();
 
   const registerProvider = (
     entry: SourceInfoEntry,
     authIndices: Array<unknown>,
-    candidates: Iterable<string>
+    candidates: Iterable<string>,
+    providerScopes: Iterable<string> = [entry.type]
   ) => {
+    const sourceCandidates = Array.from(candidates);
     authIndices.forEach((authIndex) => {
       registerIdentity(byAuthIndex, normalizeAuthIndex(authIndex), entry);
     });
 
-    Array.from(candidates).forEach((candidate) => {
+    sourceCandidates.forEach((candidate) => {
       registerIdentity(bySource, candidate, entry);
+      for (const providerScope of providerScopes) {
+        registerIdentity(
+          byProviderAndSource,
+          buildProviderSourceKey(providerScope, candidate),
+          entry
+        );
+      }
     });
   };
 
@@ -191,17 +225,39 @@ export function buildSourceInfoMap(input: SourceInfoMapInput): SourceInfoMap {
     { items: input.vertexApiKeys || [], type: 'vertex', label: 'Vertex' },
   ];
 
+  const providerAliasMap = new Map<string, string>();
+  (input.providerKeyAliases || []).forEach((item) => {
+    const provider = String(item.provider || '')
+      .trim()
+      .toLowerCase();
+    const hash = String(item.apiKeyHash || '')
+      .trim()
+      .toLowerCase();
+    const alias = String(item.alias || '').trim();
+    if (provider && hash && alias) providerAliasMap.set(`${provider}:${hash}`, alias);
+  });
+
   providers.forEach(({ items, type, label }) => {
-    const displayNames = buildProviderDisplayNames(items, label);
+    const fallbackNames = buildProviderDisplayNames(items, label);
     items.forEach((item, index) => {
+      const alias = item.apiKey ? providerAliasMap.get(`${type}:${sha256Hex(item.apiKey)}`) : '';
+      if (items.length === 1 && alias) {
+        byProviderAliasFallback.set(type, {
+          displayName: alias,
+          type,
+          identityKey: buildProviderIdentityKey(type, index),
+          isProviderKeyAlias: true,
+        });
+      }
       registerProvider(
         {
-          displayName: displayNames[index] || `${label} #${index + 1}`,
+          displayName: alias || fallbackNames[index] || `${label} #${index + 1}`,
           type,
           identityKey: buildProviderIdentityKey(type, index),
           providerEnabledState: buildProviderEnabledState(
             !hasDisableAllModelsRule(item.excludedModels)
           ),
+          isProviderKeyAlias: Boolean(alias),
         },
         [item.authIndex],
         buildCandidateUsageSourceIds({ apiKey: item.apiKey, prefix: item.prefix })
@@ -230,21 +286,41 @@ export function buildSourceInfoMap(input: SourceInfoMapInput): SourceInfoMap {
     registerProvider(
       providerEntry,
       providerAuthIndex && !entryAuthIndexKeys.has(providerAuthIndex) ? [providerAuthIndex] : [],
-      buildCandidateUsageSourceIds({ prefix: provider.prefix })
+      [
+        ...buildCandidateUsageSourceIds({ prefix: provider.prefix }),
+        ...buildOpenAIProviderSourceIds(providerEntry.displayName),
+      ],
+      ['openai', providerEntry.displayName, `openai-compatible-${providerEntry.displayName}`]
     );
 
     (provider.apiKeyEntries || []).forEach((entry, entryIndex) => {
+      const alias = entry.apiKey ? providerAliasMap.get(`openai:${sha256Hex(entry.apiKey)}`) : '';
+      const totalOpenAIKeys = openaiProviders.reduce(
+        (count, item) => count + (item.apiKeyEntries?.length || 0),
+        0
+      );
+      if (totalOpenAIKeys === 1 && alias) {
+        byProviderAliasFallback.set('openai', {
+          displayName: alias,
+          type: 'openai',
+          identityKey: buildProviderIdentityKey('openai', `${providerIndex}:${entryIndex}`),
+          isProviderKeyAlias: true,
+        });
+      }
       registerProvider(
         {
           displayName:
+            alias ||
             openaiKeyDisplayNames.get(`${providerIndex}:${entryIndex}`) ||
             providerEntry.displayName,
           type: 'openai',
           identityKey: buildProviderIdentityKey('openai', `${providerIndex}:${entryIndex}`),
           providerEnabledState: providerEntry.providerEnabledState,
+          isProviderKeyAlias: Boolean(alias),
         },
         [entry.authIndex],
-        buildCandidateUsageSourceIds({ apiKey: entry.apiKey })
+        buildCandidateUsageSourceIds({ apiKey: entry.apiKey }),
+        ['openai', providerEntry.displayName, `openai-compatible-${providerEntry.displayName}`]
       );
     });
   });
@@ -257,7 +333,13 @@ export function buildSourceInfoMap(input: SourceInfoMapInput): SourceInfoMap {
     });
   });
 
-  return { byAuthIndex, bySource, byIdentityKey };
+  return {
+    byAuthIndex,
+    bySource,
+    byProviderAndSource,
+    byIdentityKey,
+    byProviderAliasFallback,
+  };
 }
 
 export const buildSourceProviderStateMap = (sourceInfoMap: SourceInfoMap) => {
@@ -274,10 +356,34 @@ export function resolveSourceDisplay(
   sourceRaw: string,
   authIndex: unknown,
   sourceInfoMap: SourceInfoMap,
-  authFileMap: Map<string, CredentialInfo>
+  authFileMap: Map<string, CredentialInfo>,
+  providerRaw?: string
 ): SourceInfo {
   const source = normalizeUsageSourceId(sourceRaw);
   const authIndexKey = normalizeAuthIndex(authIndex);
+  const provider = String(providerRaw || '')
+    .trim()
+    .toLowerCase();
+
+  const matchedByProviderAndSource =
+    provider && source
+      ? sourceInfoMap.byProviderAndSource?.get(buildProviderSourceKey(provider, source))
+      : null;
+  if (matchedByProviderAndSource?.isProviderKeyAlias) return matchedByProviderAndSource;
+  if (
+    matchedByProviderAndSource &&
+    (provider === 'openai' || provider.startsWith('openai-compatible-'))
+  ) {
+    return matchedByProviderAndSource;
+  }
+
+  const matchedBySource = source ? sourceInfoMap.bySource.get(source) : null;
+  if (matchedBySource?.isProviderKeyAlias) return matchedBySource;
+
+  const providerFallback = sourceInfoMap.byProviderAliasFallback?.get(provider);
+  if (providerFallback && source === `t:${provider}`) {
+    return providerFallback;
+  }
 
   if (authIndexKey) {
     const matchedByAuthIndex = sourceInfoMap.byAuthIndex.get(authIndexKey);
@@ -293,7 +399,6 @@ export function resolveSourceDisplay(
     }
   }
 
-  const matchedBySource = source ? sourceInfoMap.bySource.get(source) : null;
   if (matchedBySource) return matchedBySource;
 
   if (source) {

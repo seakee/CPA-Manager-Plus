@@ -101,6 +101,7 @@ var cpaBuiltinManagementPathHeads = map[string]struct{}{
 	"accounts":                  {},
 	"api-call":                  {},
 	"api-key-aliases":           {},
+	"provider-key-aliases":      {},
 	"api-key-usage":             {},
 	"auth-files":                {},
 	"codex-inspection":          {},

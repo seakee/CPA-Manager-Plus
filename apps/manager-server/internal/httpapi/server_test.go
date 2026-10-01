@@ -660,6 +660,72 @@ func TestAPIKeyAliasesSaveLoadAndDelete(t *testing.T) {
 	}
 }
 
+func TestProviderKeyAliasesSaveLoadAndDelete(t *testing.T) {
+	handler := newTestHandler(t, "http://example.test", true)
+	const hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	unauthorized := httptest.NewRecorder()
+	handler.ServeHTTP(
+		unauthorized,
+		httptest.NewRequest(http.MethodGet, "/v0/management/provider-key-aliases", nil),
+	)
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status = %d, body = %s", unauthorized.Code, unauthorized.Body.String())
+	}
+
+	req := httptest.NewRequest(
+		http.MethodPut,
+		"/v0/management/provider-key-aliases",
+		bytes.NewBufferString(`{"provider":"codex","apiKeyHash":"`+hash+`","alias":"WWP1"}`),
+	)
+	req.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("save status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/provider-key-aliases", nil)
+	req.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"alias":"WWP1"`) {
+		t.Fatalf("load status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	otherHash := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	req = httptest.NewRequest(
+		http.MethodPut,
+		"/v0/management/provider-key-aliases",
+		bytes.NewBufferString(`{"provider":"codex","apiKeyHash":"`+otherHash+`","alias":"wwp1"}`),
+	)
+	req.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), `"code":"provider_key_alias_duplicate"`) {
+		t.Fatalf("duplicate status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	req = httptest.NewRequest(
+		http.MethodDelete,
+		"/v0/management/provider-key-aliases/codex/"+hash,
+		nil,
+	)
+	req.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("delete status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/provider-key-aliases", nil)
+	req.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || strings.Contains(rr.Body.String(), `"alias":"WWP1"`) {
+		t.Fatalf("after delete status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestModelPricesSyncFromLiteLLMFormat(t *testing.T) {
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

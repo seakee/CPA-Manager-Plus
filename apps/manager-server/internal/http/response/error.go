@@ -107,6 +107,8 @@ func UsageServiceErrorCode(err error) string {
 		return "api_key_aliases_required"
 	case strings.Contains(message, "api key alias already exists"):
 		return "api_key_alias_duplicate"
+	case strings.Contains(message, "provider key alias already exists"):
+		return "provider_key_alias_duplicate"
 	case strings.Contains(message, "model price structure cannot change after archived raw usage has been deleted"):
 		return "model_price_structure_locked_by_usage_archive"
 	case strings.Contains(message, "model price sync failed"):

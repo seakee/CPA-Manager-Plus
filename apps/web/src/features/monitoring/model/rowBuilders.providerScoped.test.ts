@@ -57,6 +57,24 @@ const eventRow = (overrides: Partial<MonitoringEventRow> = {}): MonitoringEventR
   }) as MonitoringEventRow;
 
 describe('provider-scoped monitoring account fallback filters', () => {
+  it('carries a resolved provider alias into account rows', () => {
+    const [row] = buildAccountRows([
+      eventRow({
+        account: 'codex',
+        accountMasked: 'codex',
+        authLabel: 'codex',
+        channel: 'codex',
+        providerAlias: 'WWP1',
+      }),
+    ]);
+
+    expect(row).toMatchObject({
+      provider: 'codex',
+      providerAlias: 'WWP1',
+      displayAccount: 'WWP1',
+    });
+  });
+
   it('keeps account-provider local filtering isolated by persisted provider identity', () => {
     const codex = eventRow({
       id: 'codex-event',

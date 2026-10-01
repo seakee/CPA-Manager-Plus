@@ -39,10 +39,16 @@ export const isProviderLikeMonitoringLabel = (
   }
 
   const providerValue = readString(provider);
-  return (
-    Boolean(providerValue) &&
-    candidate.toLowerCase() === providerValue.toLowerCase()
-  );
+  return Boolean(providerValue) && candidate.toLowerCase() === providerValue.toLowerCase();
+};
+
+export const isOpenAICompatibleRuntimeLabel = (
+  value: string | null | undefined,
+  providerName: string | null | undefined
+) => {
+  const runtimeLabel = readString(value).toLowerCase();
+  const configuredName = readString(providerName).toLowerCase();
+  return Boolean(configuredName) && runtimeLabel === `openai-compatible-${configuredName}`;
 };
 
 /**
@@ -110,6 +116,7 @@ export type MonitoringSourceDisplay = {
   channel: string;
   channelHost: string;
   provider: string;
+  providerAlias?: string;
   fallbackId: string;
 };
 
@@ -145,11 +152,13 @@ export const buildMonitoringSourceDisplay = (
         (authMeta?.authIndex ? context.channelByAuthIndex.get(authMeta.authIndex) : undefined);
   const sourceInfoMap = context.sourceInfoMap ?? buildSourceInfoMap({});
   const authFileMap = context.authFileMap ?? buildAuthFileMapFromMeta(context.authMetaMap);
+  const snapshotProvider = readString(input.authProviderSnapshot);
   const sourceMeta = resolveSourceDisplay(
     readString(input.source),
     authIndex,
     sourceInfoMap,
-    authFileMap
+    authFileMap,
+    authMeta?.provider || snapshotProvider
   );
   const apiKeyHash = readString(input.apiKeyHash).toLowerCase();
   const apiKeyAlias = firstReadable(
@@ -158,7 +167,6 @@ export const buildMonitoringSourceDisplay = (
   );
   const snapshotAccount = readString(input.accountSnapshot);
   const snapshotLabel = readString(input.authLabelSnapshot);
-  const snapshotProvider = readString(input.authProviderSnapshot);
   const explicitChannel = readString(input.channel);
   const explicitLabel = readString(input.authLabel);
   const explicitAccount = readString(input.account);
@@ -170,14 +178,24 @@ export const buildMonitoringSourceDisplay = (
     explicitLabel,
     snapshotLabel
   );
-  const provider = firstReadable(authMeta?.provider, snapshotProvider, sourceMeta.type);
-  const channel = firstReadable(channelMeta?.name, explicitChannel, provider);
-  const channelHost = firstReadable(channelMeta?.host);
   const resolvedSourceName = firstReadable(sourceMeta.displayName);
+  const rawProvider = firstReadable(authMeta?.provider, snapshotProvider, sourceMeta.type);
+  const provider = isOpenAICompatibleRuntimeLabel(rawProvider, resolvedSourceName)
+    ? resolvedSourceName
+    : rawProvider;
+  const channel = firstReadable(
+    channelMeta?.name,
+    isOpenAICompatibleRuntimeLabel(rawProvider, resolvedSourceName) ? resolvedSourceName : '',
+    explicitChannel,
+    provider
+  );
+  const channelHost = firstReadable(channelMeta?.host);
   const labelCandidates = firstReadable(authMeta?.label, explicitLabel, snapshotLabel);
   // Prefer key-disambiguated source names (e.g. "kuaileshifu #1") over the bare
   // OpenAI-compatible provider/channel name when multi-key providers share a label.
   const sourceLabel = firstReadable(
+    sourceMeta.isProviderKeyAlias ? resolvedSourceName : '',
+    isOpenAICompatibleRuntimeLabel(rawProvider, resolvedSourceName) ? resolvedSourceName : '',
     resolvedSourceName &&
       (isKeyDisambiguatedLabel(resolvedSourceName, channel) ||
         isKeyDisambiguatedLabel(resolvedSourceName, channelHost) ||
@@ -189,6 +207,7 @@ export const buildMonitoringSourceDisplay = (
     account,
     resolvedSourceName
   );
+  const providerAlias = sourceMeta.isProviderKeyAlias ? resolvedSourceName : '';
   const sourceMasked = maskEmailLike(sourceLabel || sourceMeta.displayName);
   const accountMasked = maskEmailLike(account || sourceLabel);
   const fallbackId = shortHash(input.sourceHash || input.apiKeyHash || authIndex);
@@ -203,8 +222,8 @@ export const buildMonitoringSourceDisplay = (
   const opaqueSource = isOpaqueUsageSourceId(sourceMasked)
     ? sourceMasked
     : isOpaqueUsageSourceId(accountMasked)
-    ? accountMasked
-    : '';
+      ? accountMasked
+      : '';
   const keyDisambiguatedSource =
     readableNonGenericSource &&
     (isKeyDisambiguatedLabel(readableNonGenericSource, channel) ||
@@ -215,6 +234,7 @@ export const buildMonitoringSourceDisplay = (
       : '';
   const primary =
     firstReadable(
+      sourceMeta.isProviderKeyAlias ? resolvedSourceName : '',
       keyDisambiguatedSource,
       nonGenericChannel,
       channelHost,
@@ -228,7 +248,7 @@ export const buildMonitoringSourceDisplay = (
       fallbackId
     ) || '-';
   const meta = firstReadable(
-    provider && !isRedundantMonitoringLabel(provider, primary) ? provider : '',
+    !providerAlias && provider && !isRedundantMonitoringLabel(provider, primary) ? provider : '',
     channelHost && !isRedundantMonitoringLabel(channelHost, primary) ? channelHost : '',
     readableAccountMasked && !isRedundantMonitoringLabel(readableAccountMasked, primary)
       ? readableAccountMasked
@@ -237,7 +257,7 @@ export const buildMonitoringSourceDisplay = (
       ? readableNonGenericSource
       : '',
     apiKeyAlias && !isRedundantMonitoringLabel(apiKeyAlias, primary) ? apiKeyAlias : '',
-    channel && !isRedundantMonitoringLabel(channel, primary) ? channel : '',
+    !providerAlias && channel && !isRedundantMonitoringLabel(channel, primary) ? channel : '',
     opaqueSource && !isRedundantMonitoringLabel(opaqueSource, primary) ? opaqueSource : ''
   );
   const title = Array.from(
@@ -248,7 +268,7 @@ export const buildMonitoringSourceDisplay = (
         sourceMasked,
         accountMasked,
         channelHost,
-        provider,
+        providerAlias ? '' : provider,
         authIndex !== '-' ? `#${shortHash(authIndex)}` : '',
         readString(input.sourceHash),
         readString(input.apiKeyHash),
@@ -268,6 +288,7 @@ export const buildMonitoringSourceDisplay = (
     channel: channel || '-',
     channelHost: channelHost || '-',
     provider: provider || '-',
+    providerAlias: providerAlias || undefined,
     fallbackId,
   };
 };
