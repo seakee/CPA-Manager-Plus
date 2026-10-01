@@ -11,6 +11,7 @@ import {
   DEVIN_CONFIG,
   getCodexQuotaStoreKey,
   KIMI_CONFIG,
+  PLUGIN_CONFIG,
   getSortedCodexResetCreditExpiries,
   resolveQuotaDisplayState,
   XAI_CONFIG,
@@ -1693,3 +1694,82 @@ describe('DEVIN_CONFIG', () => {
   });
 });
 
+
+describe('PLUGIN_CONFIG', () => {
+  const file = {
+    name: 'example-plugin-account.json',
+    provider: 'example-plugin',
+    auth_index: 'plugin-auth-index',
+    quota_provider: 'example-plugin',
+  };
+
+  it('builds loading, success, and error states from a labelled summary', () => {
+    const loading = PLUGIN_CONFIG.buildLoadingState(file);
+    expect(loading).toMatchObject({
+      status: 'loading',
+      provider: 'example-plugin',
+      items: [],
+      authFileKey: 'example-plugin-account.json::plugin-auth-index',
+    });
+
+    const success = PLUGIN_CONFIG.buildSuccessState(
+      {
+        provider: 'example-plugin',
+        pluginId: 'example-plugin',
+        displayName: 'Example quota',
+        supportsReset: false,
+        observedAtMs: 1_700_000_000_000,
+        items: [
+          { key: 'credit_remaining', label: '剩余额度', value: 1739.5, unit: 'credit', format: 'number' },
+          { key: 'daily_checkin', label: '今日可签到', value: 0, format: 'boolean' },
+        ],
+      },
+      file
+    );
+    expect(success).toMatchObject({
+      status: 'success',
+      provider: 'example-plugin',
+      displayName: 'Example quota',
+      observedAtMs: 1_700_000_000_000,
+      fetchedAtMs: 1_700_000_000_000,
+      authFileKey: 'example-plugin-account.json::plugin-auth-index',
+    });
+    expect(success.items).toHaveLength(2);
+
+    const error = PLUGIN_CONFIG.buildErrorState('quota failed', 404, file);
+    expect(error).toMatchObject({
+      status: 'error',
+      provider: 'example-plugin',
+      items: [],
+      error: 'quota failed',
+      errorStatus: 404,
+      authFileKey: 'example-plugin-account.json::plugin-auth-index',
+    });
+  });
+
+  it('keeps the previous items visible when a refresh fails', () => {
+    const active = PLUGIN_CONFIG.buildSuccessState(
+      {
+        provider: 'example-plugin',
+        pluginId: 'example-plugin',
+        displayName: 'Example quota',
+        supportsReset: false,
+        observedAtMs: 1_700_000_000_000,
+        items: [{ key: 'balance', label: 'Balance', value: 5, format: 'currency', currency: 'USD' }],
+      },
+      file
+    );
+
+    const failed = buildQuotaFailureState(
+      PLUGIN_CONFIG,
+      'quota failed',
+      502,
+      file,
+      active,
+      1_700_000_100_000
+    );
+    expect(failed.status).toBe('error');
+    expect(failed.errorStatus).toBe(502);
+    expect(failed.items).toHaveLength(1);
+  });
+});

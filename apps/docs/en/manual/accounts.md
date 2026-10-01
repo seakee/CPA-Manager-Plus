@@ -63,6 +63,7 @@ CPAMP reconciles evidence by credential identity and observation time. Newer hea
 | Claude          | Base quota, weekly quota, and model-scoped limits                              | Scoped limits can be duplicated, missing, or inactive; CPAMP groups them by identity and freshness. |
 | xAI/Grok OAuth  | CLI billing weekly/monthly data, official API identity, and request exhaustion | Official API identity does not provide queryable cost or remaining percentages.                     |
 | Muse / Meta     | `meta:window`, `meta:weekly`, and reset/period metadata                         | Missing usage percentages remain unknown rather than becoming `0%`; DCA is limited to account/quota flows. |
+| Plugin provider | The labelled quota items the plugin publishes through CPA `quota.*`            | CPA names the provider and its credential binding; CPAMP renders each item verbatim and never interprets a plugin unit. |
 | Other providers | CPA credential metadata or recent response Headers                             | No common active quota API is assumed.                                                              |
 
 ## Quota Cooldown And Account Actions

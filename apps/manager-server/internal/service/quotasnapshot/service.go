@@ -9,6 +9,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/codexquota"
@@ -42,10 +43,66 @@ var (
 type Service struct {
 	store *store.Store
 	now   func() time.Time
+
+	// pluginProviders holds the plugin quota providers CPA reported. A plugin
+	// provider is named by CPA, so it cannot live in the compiled-in built-in
+	// allowlist; the catalogue is the validation authority for these providers.
+	pluginMu        sync.RWMutex
+	pluginProviders map[string]struct{}
 }
 
 func New(st *store.Store) *Service {
 	return &Service{store: st, now: time.Now}
+}
+
+// SetPluginQuotaProviders replaces the plugin quota provider catalogue that
+// Write and Query accept in addition to the built-in providers. The caller is
+// expected to pass the provider identifiers CPA reported on
+// /v0/management/quota/providers; an empty catalogue removes every plugin
+// provider.
+func (s *Service) SetPluginQuotaProviders(providers []string) {
+	if s == nil {
+		return
+	}
+	next := make(map[string]struct{}, len(providers))
+	for _, provider := range providers {
+		name := normalizeProvider(provider)
+		if name == "" {
+			continue
+		}
+		next[name] = struct{}{}
+	}
+	s.pluginMu.Lock()
+	s.pluginProviders = next
+	s.pluginMu.Unlock()
+}
+
+// PluginQuotaProviders returns the current plugin provider catalogue.
+func (s *Service) PluginQuotaProviders() []string {
+	if s == nil {
+		return nil
+	}
+	s.pluginMu.RLock()
+	defer s.pluginMu.RUnlock()
+	result := make([]string, 0, len(s.pluginProviders))
+	for provider := range s.pluginProviders {
+		result = append(result, provider)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func (s *Service) isSupportedProvider(provider string) bool {
+	if validProviders[provider] {
+		return true
+	}
+	if s == nil {
+		return false
+	}
+	s.pluginMu.RLock()
+	defer s.pluginMu.RUnlock()
+	_, ok := s.pluginProviders[provider]
+	return ok
 }
 
 type AccountTarget struct {
@@ -232,7 +289,7 @@ func (s *Service) Write(ctx context.Context, req WriteRequest) (WriteResponse, e
 			return WriteResponse{}, fmt.Errorf("window mutations must be less than or equal to %d", maxWriteEntries)
 		}
 		provider := normalizeProvider(entry.Provider)
-		if !validProviders[provider] {
+		if !s.isSupportedProvider(provider) {
 			return WriteResponse{}, fmt.Errorf("unsupported provider %q", entry.Provider)
 		}
 		accountKey, ok := usageidentity.AccountKey(entry.Account.identityFields(provider))
@@ -510,7 +567,7 @@ func (s *Service) Query(ctx context.Context, req QueryRequest) (QueryResponse, e
 			return QueryResponse{}, errors.New("row_key is required")
 		}
 		provider := normalizeProvider(account.Provider)
-		if !validProviders[provider] {
+		if !s.isSupportedProvider(provider) {
 			return QueryResponse{}, fmt.Errorf("unsupported provider %q", account.Provider)
 		}
 		accountKey, ok := usageidentity.AccountKey(account.Account.identityFields(provider))

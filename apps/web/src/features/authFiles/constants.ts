@@ -1,4 +1,5 @@
 import type { TFunction } from 'i18next';
+import { isPluginQuotaProvider } from '@/utils/quota/pluginQuota';
 import iconAntigravity from '@/assets/icons/antigravity.svg';
 import iconClaude from '@/assets/icons/claude.svg';
 import iconCodex from '@/assets/icons/codex.svg';
@@ -163,7 +164,10 @@ export const normalizeProviderKey = (value: string) => {
 };
 
 export const isQuotaRefreshSupportedProvider = (provider: string): boolean =>
-  QUOTA_PROVIDER_TYPES.has(normalizeProviderKey(provider) as QuotaProviderType);
+  QUOTA_PROVIDER_TYPES.has(normalizeProviderKey(provider) as QuotaProviderType) ||
+  // Plugin quota providers are named by CPA at runtime, so the runtime
+  // catalogue is the authority for them.
+  isPluginQuotaProvider(provider);
 
 
 export const getEquivalentProviderKeys = (value: string): string[] => {

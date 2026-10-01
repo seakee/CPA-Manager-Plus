@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react';
 import type {
   KeyboardEvent,
   MouseEvent as ReactMouseEvent,
@@ -54,6 +62,7 @@ import {
   DEVIN_CONFIG,
   KIMI_CONFIG,
   META_CONFIG,
+  PLUGIN_CONFIG,
   XAI_CONFIG,
   buildObservedCodexQuotaState,
   buildQuotaFailureState,
@@ -338,8 +347,14 @@ import {
   resolveCodexResetCreditsCountEvidenceAtMs,
   resolveCodexResetCreditsDetailEvidenceAtMs,
   mergeCodexResetCreditsEvidence,
+  isPluginQuotaCredential,
+  loadPluginQuotaProviders,
+  resolvePluginQuotaProvider,
+  getPluginQuotaCatalogueVersion,
+  subscribePluginQuotaProviders,
 } from '@/utils/quota';
 import type { AuthJsonInputType } from '@/features/authFiles/sessionAuthConverter';
+import type { PluginQuotaData, PluginQuotaState } from '@/types';
 import {
   maskQuotaAccountText,
   type QuotaAccountDisplayMode,
@@ -1374,6 +1389,7 @@ export function AccountsPage() {
   const devinQuota = useQuotaStore((state) => state.devinQuota);
   const kimiQuota = useQuotaStore((state) => state.kimiQuota);
   const metaQuota = useQuotaStore((state) => state.metaQuota);
+  const pluginQuota = useQuotaStore((state) => state.pluginQuota);
   const xaiQuota = useQuotaStore((state) => state.xaiQuota);
   const baseQuotaStores = useMemo(
     () => ({
@@ -1383,9 +1399,19 @@ export function AccountsPage() {
       devinQuota,
       kimiQuota,
       metaQuota,
+      pluginQuota,
       xaiQuota,
     }),
-    [antigravityQuota, claudeQuota, codexQuota, devinQuota, kimiQuota, metaQuota, xaiQuota]
+    [
+      antigravityQuota,
+      claudeQuota,
+      codexQuota,
+      devinQuota,
+      kimiQuota,
+      metaQuota,
+      pluginQuota,
+      xaiQuota,
+    ]
   );
   const setAntigravityQuota = useQuotaStore((state) => state.setAntigravityQuota);
   const setClaudeQuota = useQuotaStore((state) => state.setClaudeQuota);
@@ -1393,7 +1419,30 @@ export function AccountsPage() {
   const setDevinQuota = useQuotaStore((state) => state.setDevinQuota);
   const setKimiQuota = useQuotaStore((state) => state.setKimiQuota);
   const setMetaQuota = useQuotaStore((state) => state.setMetaQuota);
+  const setPluginQuota = useQuotaStore((state) => state.setPluginQuota);
   const setXaiQuota = useQuotaStore((state) => state.setXaiQuota);
+  const pluginQuotaCatalogueVersion = useSyncExternalStore(
+    subscribePluginQuotaProviders,
+    getPluginQuotaCatalogueVersion,
+    getPluginQuotaCatalogueVersion
+  );
+
+  // The plugin quota catalogue is runtime data published by CPA, so the panel
+  // loads it from the Manager Server instead of importing a provider list.
+  useEffect(() => {
+    const managerBase = featureAvailability.managerServiceBase;
+    if (!managerBase) return;
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        await loadPluginQuotaProviders(managerBase, managementKey, controller.signal);
+      } catch {
+        // An unavailable Manager Server or an older CPA without plugin quota
+        // providers is not an error: those credentials simply have no items.
+      }
+    })();
+    return () => controller.abort();
+  }, [featureAvailability.managerServiceBase, managementKey]);
 
   const [activeView, setActiveView] = useState<AccountsView>(
     () => initialWorkspaceUrlState.current.view
@@ -3044,6 +3093,10 @@ export function AccountsPage() {
           )
         );
       };
+      if (isPluginQuotaCredential(targetFiles[0])) {
+        prune(PLUGIN_CONFIG, setPluginQuota);
+        return targetFiles;
+      }
       switch (normalizedProvider) {
         case CLAUDE_CONFIG.type:
           prune(CLAUDE_CONFIG, setClaudeQuota);
@@ -3078,6 +3131,7 @@ export function AccountsPage() {
       setDevinQuota,
       setKimiQuota,
       setMetaQuota,
+      setPluginQuota,
       setXaiQuota,
     ]
   );
@@ -3952,6 +4006,13 @@ export function AccountsPage() {
           }
           break;
         }
+        case PLUGIN_CONFIG.type: {
+          const state = getCredentialScopedQuotaState(baseQuotaStores.pluginQuota, row.raw);
+          if (state?.status === 'success' && state.items.length > 0) {
+            fetchedAtMs = state.fetchedAtMs ?? state.observedAtMs ?? undefined;
+          }
+          break;
+        }
         default:
           return undefined;
       }
@@ -4757,6 +4818,9 @@ export function AccountsPage() {
   );
   const buildQuotaDisplayWindows = useCallback(
     (row: AccountRow): AccountQuotaDisplayWindow[] => {
+      // pluginQuotaCatalogueVersion is a dependency, not an input: a catalogue
+      // refresh changes plugin display names, so the windows must be rebuilt.
+      void pluginQuotaCatalogueVersion;
       return buildAccountQuotaDisplayWindows(row, {
         stores: baseQuotaStores,
         getDisplayCodexQuota,
@@ -4764,7 +4828,13 @@ export function AccountsPage() {
         t,
       });
     },
-    [baseQuotaStores, getDisplayCodexQuota, t, translateQuotaWindowLabel]
+    [
+      baseQuotaStores,
+      getDisplayCodexQuota,
+      t,
+      translateQuotaWindowLabel,
+      pluginQuotaCatalogueVersion,
+    ]
   );
   const buildCodexSnapshotDefinitions = useCallback(
     (row: AccountRow, quota: CodexQuotaState | undefined): AccountQuotaWindowDefinition[] =>
@@ -6384,7 +6454,11 @@ export function AccountsPage() {
       row: AccountRow,
       mode: AccountQuotaRefreshMode = 'summary'
     ): Promise<AccountQuotaRefreshOutcome> => {
-      if (row.runtimeOnly || !isQuotaRefreshSupportedProvider(row.provider)) {
+      const pluginProvider = resolvePluginQuotaProvider(row.raw);
+      if (
+        row.runtimeOnly ||
+        (!isQuotaRefreshSupportedProvider(row.provider) && !pluginProvider)
+      ) {
         return { status: 'ignored' };
       }
       const refreshWithConfig = <TState, TData>(
@@ -6404,8 +6478,20 @@ export function AccountsPage() {
           ),
           requestScope: authFilesRequestScope,
           currentState,
+          managerServiceBase: featureAvailability.managerServiceBase,
+          managementKey,
         });
       };
+      // A plugin provider is named by CPA, so it cannot be a switch case.
+      if (pluginProvider) {
+        return toAccountQuotaRefreshOutcome(
+          await refreshWithConfig<PluginQuotaState, PluginQuotaData>(
+            PLUGIN_CONFIG,
+            setPluginQuota,
+            getScopedQuotaState(PLUGIN_CONFIG, baseQuotaStores.pluginQuota, row.raw)
+          )
+        );
+      }
       switch (row.provider) {
         case CODEX_CONFIG.type: {
           const config = mode === 'detail' ? CODEX_CONFIG : CODEX_SUMMARY_CONFIG;
@@ -6485,10 +6571,13 @@ export function AccountsPage() {
       setDevinQuota,
       setKimiQuota,
       setMetaQuota,
+      setPluginQuota,
       setXaiQuota,
       t,
       authFilesRequestScope,
       baseQuotaStores,
+      featureAvailability.managerServiceBase,
+      managementKey,
     ]
   );
 
@@ -6499,7 +6588,10 @@ export function AccountsPage() {
         return currentBatch.promise;
       }
       const refreshable = targets.filter(
-        (row) => !row.runtimeOnly && isQuotaRefreshSupportedProvider(row.provider)
+        (row) =>
+          !row.runtimeOnly &&
+          (isQuotaRefreshSupportedProvider(row.provider) ||
+            resolvePluginQuotaProvider(row.raw) !== null)
       );
       if (refreshable.length === 0) {
         showNotification(t('accounts.no_refreshable_accounts'), 'warning');
@@ -6649,7 +6741,12 @@ export function AccountsPage() {
 
   const refreshAccountQuota = useCallback(
     async (row: AccountRow, mode: AccountQuotaRefreshMode = 'summary'): Promise<void> => {
-      if (row.runtimeOnly || !isQuotaRefreshSupportedProvider(row.provider)) return;
+      if (
+        row.runtimeOnly ||
+        (!isQuotaRefreshSupportedProvider(row.provider) && !resolvePluginQuotaProvider(row.raw))
+      ) {
+        return;
+      }
       const refreshKey = getAccountQuotaRefreshKey(row);
       if (manualQuotaRefreshingKeysRef.current.has(refreshKey)) return;
 
@@ -8527,9 +8624,16 @@ export function AccountsPage() {
     const hasForecast =
       windowUsageData.forecastCost !== null &&
       windowUsageData.forecastTokens !== null;
-    const percentText = windowRemaining !== null ? formatPercent(windowRemaining) : '-';
-    const remainingParts = formatQuotaRemainingPercentParts(percentText, i18n.language);
-    const remainingText = formatQuotaRemainingPercentDisplay(percentText, i18n.language);
+    // A plugin quota item is a labelled reading, not a window percentage, so
+    // the panel shows the plugin's own amount instead of inventing progress.
+    const amountText = windowRemaining === null ? (window.amountLabel ?? '').trim() : '';
+    const percentText =
+      windowRemaining !== null ? formatPercent(windowRemaining) : amountText || '-';
+    const remainingParts = amountText
+      ? null
+      : formatQuotaRemainingPercentParts(percentText, i18n.language);
+    const remainingText =
+      amountText || formatQuotaRemainingPercentDisplay(percentText, i18n.language);
     const cardTitle = [
       `${readableLabel}: ${remainingText}${relativeReset ? ` | ${relativeReset}` : ''}`,
       hasActual
@@ -8597,12 +8701,14 @@ export function AccountsPage() {
             {extraMeta}
           </span>
         </span>
-        <span className={styles.quotaTrack} aria-hidden="true">
-          <span
-            className={`${styles.quotaBar} ${barClass}`}
-            style={{ width: `${windowWidth}%` }}
-          />
-        </span>
+        {amountText ? null : (
+          <span className={styles.quotaTrack} aria-hidden="true">
+            <span
+              className={`${styles.quotaBar} ${barClass}`}
+              style={{ width: `${windowWidth}%` }}
+            />
+          </span>
+        )}
         <span className={styles.quotaWindowUsageLine}>
           {hasActual ? (
             <span
@@ -8724,7 +8830,11 @@ export function AccountsPage() {
       mainListWindows
         .map((window) => {
           const label = getQuotaWindowReadableLabel(window, t);
-          return `${label}: ${formatPercent(window.remainingPercent)}`;
+          const value =
+            window.remainingPercent === null && window.amountLabel
+              ? window.amountLabel
+              : formatPercent(window.remainingPercent);
+          return `${label}: ${value}`;
         })
         .join('\n') || quotaEmptyLabel;
     const healthTitle = t(

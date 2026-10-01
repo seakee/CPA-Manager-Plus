@@ -12,6 +12,8 @@ import type {
   KimiQuotaState,
   MetaQuotaData,
   MetaQuotaState,
+  PluginQuotaData,
+  PluginQuotaState,
   XaiBillingSummary,
   XaiQuotaState,
 } from '@/types';
@@ -24,6 +26,7 @@ import type {
   KimiQuotaData,
   QuotaFetchContext,
 } from '@/utils/quota';
+import { fetchPluginQuota, resolvePluginQuotaProvider } from '@/utils/quota';
 import {
   buildCodexQuotaWindows,
   fetchAntigravityQuota,
@@ -60,7 +63,7 @@ import {
   scopeQuotaStateToCredential,
 } from '@/utils/quota/credentialScope';
 
-type QuotaType = 'antigravity' | 'claude' | 'codex' | 'kimi' | 'xai' | 'devin' | 'meta';
+type QuotaType = 'antigravity' | 'claude' | 'codex' | 'kimi' | 'xai' | 'devin' | 'meta' | 'plugin';
 
 export type { QuotaFetchContext };
 
@@ -899,3 +902,51 @@ export const META_CONFIG: QuotaConfig<MetaQuotaState, MetaQuotaData> = {
   scopeState: scopeCredentialQuotaState,
 };
 
+
+/**
+ * Plugin quota is a set of labelled readings rather than the fixed windows the
+ * built-in providers expose. The config is provider agnostic: the provider, the
+ * display name and the item keys all arrive from CPA through the Manager Server
+ * for the credential being refreshed.
+ */
+export const PLUGIN_CONFIG: QuotaConfig<PluginQuotaState, PluginQuotaData> = {
+  type: 'plugin',
+  i18nPrefix: 'plugin_quota',
+  fetchQuota: fetchPluginQuota,
+  getStoreKey: getQuotaCredentialStoreKey,
+  buildLoadingState: (file) => ({
+    status: 'loading',
+    provider: resolvePluginQuotaProvider(file) ?? '',
+    pluginId: '',
+    displayName: '',
+    supportsReset: false,
+    observedAtMs: 0,
+    items: [],
+    ...buildQuotaCredentialIdentity(file),
+  }),
+  buildSuccessState: (data, file) => ({
+    status: 'success',
+    provider: data.provider,
+    pluginId: data.pluginId,
+    displayName: data.displayName,
+    supportsReset: data.supportsReset,
+    observedAtMs: data.observedAtMs,
+    items: data.items,
+    ...buildQuotaCredentialIdentity(file),
+    fetchedAtMs: data.observedAtMs ?? Date.now(),
+  }),
+  buildErrorState: (message, status, file) => ({
+    status: 'error',
+    provider: resolvePluginQuotaProvider(file) ?? '',
+    pluginId: '',
+    displayName: '',
+    supportsReset: false,
+    observedAtMs: 0,
+    items: [],
+    error: message,
+    errorStatus: status,
+    ...buildQuotaCredentialIdentity(file),
+    failedAtMs: Date.now(),
+  }),
+  scopeState: scopeCredentialQuotaState,
+};

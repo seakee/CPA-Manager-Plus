@@ -780,6 +780,12 @@ export const selectAccountQuotaMainListWindows = (
   quotaWindows: AccountQuotaDisplayWindow[],
   maxWindows = 2
 ): AccountQuotaDisplayWindow[] => {
+  // Plugin readings are the only quota a plugin credential has, and they are
+  // never interval windows, so they are selected before any window ranking.
+  const pluginQuotaWindows = quotaWindows.filter((window) => window.source === 'plugin');
+  if (pluginQuotaWindows.length > 0) {
+    return pluginQuotaWindows.slice(0, Math.max(1, maxWindows));
+  }
   const standardQuotaWindows = quotaWindows.filter(isStandardAccountQuotaListWindow);
   let candidates: AccountQuotaDisplayWindow[];
 
@@ -854,6 +860,8 @@ export const selectAccountQuotaListWindows = (
   quotaWindows: AccountQuotaDisplayWindow[],
   standardQuotaWindows: AccountQuotaDisplayWindow[]
 ): AccountQuotaDisplayWindow[] => {
+  const pluginQuotaWindows = quotaWindows.filter((window) => window.source === 'plugin');
+  if (pluginQuotaWindows.length > 0) return pluginQuotaWindows;
   switch (row.provider) {
     case 'codex':
       return selectCodexQuotaListWindows(quotaWindows);

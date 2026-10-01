@@ -40,6 +40,8 @@ export const refreshQuotaWithConfig = async <TState, TData>({
   isCurrent,
   requestScope,
   currentState,
+  managerServiceBase,
+  managementKey,
 }: {
   config: QuotaConfig<TState, TData>;
   file: AuthFileItem;
@@ -48,6 +50,8 @@ export const refreshQuotaWithConfig = async <TState, TData>({
   isCurrent: () => boolean;
   requestScope?: AuthFilesApiRequestScope;
   currentState?: TState;
+  managerServiceBase?: string;
+  managementKey?: string;
 }): Promise<QuotaRefreshResult<TState, TData> | null> => {
   const storeKey = config.getStoreKey?.(file) ?? file.name;
   const requestKey = `${config.type}:${storeKey}`;
@@ -80,9 +84,13 @@ export const refreshQuotaWithConfig = async <TState, TData>({
   try {
     const context: QuotaFetchContext = {
       isCurrent: isRefreshCurrent,
+      managerServiceBase,
+      managementKey,
     };
+    // Only the quota sources that CPAMP has to resolve need the Manager Server
+    // connection; every other provider keeps its existing call shape.
     const data =
-      config.type === 'meta'
+      config.type === 'meta' || config.type === 'plugin'
         ? await config.fetchQuota(file, t, requestScope, context)
         : await config.fetchQuota(file, t, requestScope);
     if (!isRefreshCurrent()) return null;

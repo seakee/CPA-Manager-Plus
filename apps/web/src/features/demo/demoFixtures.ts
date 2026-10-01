@@ -42,6 +42,7 @@ import type {
   DevinQuotaState,
   KimiQuotaState,
   MetaQuotaState,
+  PluginQuotaState,
   XaiQuotaState,
 } from '@/types';
 import type { ModelInfo } from '@/utils/models';
@@ -69,6 +70,7 @@ export type DemoQuotaStoreState = {
   devinQuota: Record<string, DevinQuotaState>;
   kimiQuota: Record<string, KimiQuotaState>;
   metaQuota: Record<string, MetaQuotaState>;
+  pluginQuota: Record<string, PluginQuotaState>;
   xaiQuota: Record<string, XaiQuotaState>;
 };
 
@@ -6200,6 +6202,7 @@ const getDemoQuotaStoreStateByFileName = (
   baseNow = getDemoEvidenceEpochMs()
 ): DemoQuotaStoreState => ({
   metaQuota: {},
+  pluginQuota: {},
   codexQuota: {
     'codex-team-01.json': {
       status: 'success',
@@ -6899,6 +6902,7 @@ export const getDemoQuotaStoreState = (baseNow = getDemoEvidenceEpochMs()): Demo
     devinQuota: scopeDemoQuotaRecord(raw.devinQuota, filesByName),
     kimiQuota: scopeDemoQuotaRecord(raw.kimiQuota, filesByName),
     metaQuota: scopeDemoQuotaRecord(raw.metaQuota, filesByName),
+    pluginQuota: scopeDemoQuotaRecord(raw.pluginQuota, filesByName),
     xaiQuota: scopeDemoQuotaRecord(raw.xaiQuota, filesByName),
   };
 };
