@@ -173,3 +173,83 @@ func TestPanelPathFallsBackToEmbeddedWhenMissing(t *testing.T) {
 		t.Fatalf("fallback response is missing its ETag validator")
 	}
 }
+
+func TestEmbeddedPanelAssetsOnlyAllowGetAndHead(t *testing.T) {
+	s := New("", fstest.MapFS{
+		embeddedPanelFile: &fstest.MapFile{Data: []byte(embeddedPanelBody)},
+		"web/favicon.ico": &fstest.MapFile{Data: []byte("favicon")},
+		"web/apple-touch-icon.png": &fstest.MapFile{Data: []byte("apple-touch-icon")},
+	})
+
+	assets := []struct {
+		name        string
+		path        string
+		contentType string
+		serve       func(http.ResponseWriter, *http.Request, func(http.ResponseWriter, int, error))
+	}{
+		{
+			name:        "favicon",
+			path:        "/favicon.ico",
+			contentType: "image/x-icon",
+			serve:       s.ServeFavicon,
+		},
+		{
+			name:        "apple touch icon",
+			path:        "/apple-touch-icon.png",
+			contentType: "image/png",
+			serve:       s.ServeAppleTouchIcon,
+		},
+	}
+
+	for _, asset := range assets {
+		asset := asset
+		t.Run(asset.name, func(t *testing.T) {
+			for _, method := range []string{http.MethodGet, http.MethodHead} {
+				method := method
+				t.Run(method, func(t *testing.T) {
+					r := httptest.NewRequest(method, asset.path, nil)
+					rr := httptest.NewRecorder()
+					asset.serve(rr, r, func(w http.ResponseWriter, status int, err error) {
+						http.Error(w, err.Error(), status)
+					})
+					if rr.Code != http.StatusOK {
+						t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+					}
+					if got := rr.Header().Get("Content-Type"); got != asset.contentType {
+						t.Fatalf("content type = %q, want %q", got, asset.contentType)
+					}
+					if got := rr.Header().Get("Allow"); got != "" {
+						t.Fatalf("allow = %q, want empty", got)
+					}
+					if method == http.MethodHead && rr.Body.Len() != 0 {
+						t.Fatalf("HEAD body length = %d, want 0", rr.Body.Len())
+					}
+				})
+			}
+
+			for _, method := range []string{
+				http.MethodPost,
+				http.MethodPut,
+				http.MethodPatch,
+				http.MethodDelete,
+				http.MethodOptions,
+				http.MethodTrace,
+			} {
+				method := method
+				t.Run(method, func(t *testing.T) {
+					r := httptest.NewRequest(method, asset.path, nil)
+					rr := httptest.NewRecorder()
+					asset.serve(rr, r, func(w http.ResponseWriter, status int, err error) {
+						http.Error(w, err.Error(), status)
+					})
+					if rr.Code != http.StatusMethodNotAllowed {
+						t.Fatalf("status = %d, want %d", rr.Code, http.StatusMethodNotAllowed)
+					}
+					if got := rr.Header().Get("Allow"); got != "GET, HEAD" {
+						t.Fatalf("allow = %q, want %q", got, "GET, HEAD")
+					}
+				})
+			}
+		})
+	}
+}

@@ -131,6 +131,26 @@ func TestServerCompatHealthInfoAndPanel(t *testing.T) {
 	if got, want := panelRR.Header().Get("Content-Length"), strconv.Itoa(panelRR.Body.Len()); got != want {
 		t.Fatalf("panel content length = %q, want %q", got, want)
 	}
+
+	for _, tc := range []struct {
+		path        string
+		contentType string
+	}{
+		{path: "/favicon.ico", contentType: "image/x-icon"},
+		{path: "/apple-touch-icon.png", contentType: "image/png"},
+	} {
+		rr := testutil.Request(t, handler, http.MethodGet, tc.path, "", "")
+		testutil.RequireStatus(t, rr, http.StatusOK)
+		if got := rr.Header().Get("Content-Type"); got != tc.contentType {
+			t.Fatalf("%s content type = %q, want %q", tc.path, got, tc.contentType)
+		}
+		if rr.Body.Len() == 0 {
+			t.Fatalf("%s returned an empty body", tc.path)
+		}
+		if rr.Header().Get("ETag") == "" {
+			t.Fatalf("%s is missing an ETag validator", tc.path)
+		}
+	}
 }
 
 func TestServerCompatPanelPathOverridesEmbeddedPanel(t *testing.T) {

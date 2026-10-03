@@ -25,6 +25,13 @@ const FORBIDDEN_INVISIBLE_CODE_POINTS = new Set([
 
 const DEFAULT_CHANGED_FILES_BASE = 'origin/main...HEAD';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const WEB_ICON_ASSET_PAIRS = [
+  ['apps/web/public/favicon.ico', 'apps/manager-server/internal/httpapi/web/favicon.ico'],
+  [
+    'apps/web/public/apple-touch-icon.png',
+    'apps/manager-server/internal/httpapi/web/apple-touch-icon.png',
+  ],
+];
 
 const toLineColumn = (text, index) => {
   const prior = text.slice(0, index);
@@ -113,6 +120,14 @@ const listChangedTextFiles = (changedFilesOutput, diffBase = getChangedFilesBase
 describe('repo source integrity', () => {
   it('uses the merge-base PR diff range for changed-file scanning', () => {
     expect(DEFAULT_CHANGED_FILES_BASE).toBe('origin/main...HEAD');
+  });
+
+  it('keeps Vite and Manager Server icon assets byte-identical', () => {
+    for (const [webPath, embeddedPath] of WEB_ICON_ASSET_PAIRS) {
+      const webAsset = readFileSync(path.resolve(repoRoot, webPath));
+      const embeddedAsset = readFileSync(path.resolve(repoRoot, embeddedPath));
+      expect(Buffer.compare(webAsset, embeddedAsset), `${webPath} differs from ${embeddedPath}`).toBe(0);
+    }
   });
 
   it('detects bidi override and zero-width characters', () => {

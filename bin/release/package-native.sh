@@ -5,14 +5,18 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 version="${VERSION:-dev}"
 out_dir="${OUT_DIR:-"${repo_root}/dist/native"}"
 web_html="${WEB_HTML:-"${repo_root}/apps/web/dist/index.html"}"
+web_favicon="${WEB_FAVICON:-"${repo_root}/apps/web/dist/favicon.ico"}"
+web_apple_touch_icon="${WEB_APPLE_TOUCH_ICON:-"${repo_root}/apps/web/dist/apple-touch-icon.png"}"
 binary_name="cpa-manager-plus"
 server_src="${repo_root}/apps/manager-server"
 native_script_src="${repo_root}/bin/native"
 
-if [ ! -f "${web_html}" ]; then
-  echo "missing ${web_html}; run npm run build first" >&2
-  exit 1
-fi
+for web_asset in "${web_html}" "${web_favicon}" "${web_apple_touch_icon}"; do
+  if [ ! -f "${web_asset}" ]; then
+    echo "missing ${web_asset}; run npm run build first" >&2
+    exit 1
+  fi
+done
 
 mkdir -p "${repo_root}/bin/tmp/release"
 work_dir="$(mktemp -d "${repo_root}/bin/tmp/release/native.XXXXXX")"
@@ -23,6 +27,8 @@ mkdir -p "${out_dir}"
 
 cp -R "${server_src}" "${work_dir}/manager-server"
 cp "${web_html}" "${work_dir}/manager-server/internal/httpapi/web/management.html"
+cp "${web_favicon}" "${work_dir}/manager-server/internal/httpapi/web/favicon.ico"
+cp "${web_apple_touch_icon}" "${work_dir}/manager-server/internal/httpapi/web/apple-touch-icon.png"
 
 targets=(
   "linux amd64"
