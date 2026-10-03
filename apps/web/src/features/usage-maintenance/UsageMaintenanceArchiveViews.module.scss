@@ -1519,3 +1519,7 @@
     }
   }
 }
+
+.recordTable {
+  @include table-column-dividers;
+}

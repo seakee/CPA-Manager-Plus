@@ -49,7 +49,7 @@
   --sidebar-hover-bg-color: rgba(59, 130, 246, 0.08);
   --sidebar-logo-bg-color: rgba(255, 255, 255, 0.34);
   --sidebar-shadow: 2px 0 12px rgba(31, 38, 135, 0.12);
-  --sidebar-width: 210px;
+  --sidebar-width: 256px;
   --sidebar-collapsed-width-token: 54px;
 
   --primary-gradient: var(--data-blue-base);
@@ -83,6 +83,7 @@
   --text-muted: var(--app-text-muted);
 
   --border-color: var(--app-border);
+  --table-column-divider: var(--app-border-strong);
   --border-secondary: rgba(15, 23, 42, 0.06);
   --border-primary: var(--app-border-strong);
   --border-hover: rgba(59, 130, 246, 0.28);

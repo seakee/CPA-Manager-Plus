@@ -370,21 +370,24 @@
 .accountCardList {
   display: grid;
   gap: 8px;
-  min-width: 1240px;
+  // Fit the panel instead of forcing horizontal scroll that hides the action column.
+  min-width: 0;
   padding: 10px 12px;
 }
 
 .accountCardHeader,
 .accountCard {
   display: grid;
+  // credential | plan | availability | recent requests | historical usage | quota | actions
+  // Minimums include the 10px gutters on each side of the column separators.
   grid-template-columns:
-    minmax(140px, 1.1fr)
-    76px
-    96px
-    minmax(124px, 0.3fr)
-    minmax(160px, 0.35fr)
-    minmax(280px, 3fr)
-    146px;
+    minmax(124px, 1.4fr)
+    70px
+    120px
+    minmax(120px, 0.35fr)
+    minmax(160px, 0.5fr)
+    minmax(170px, 2fr)
+    150px;
   column-gap: 8px;
   min-width: 0;
   box-sizing: border-box;
@@ -1091,19 +1094,15 @@
 }
 
 @media (min-width: 1360px) {
-  .accountCardList {
-    min-width: 1320px;
-  }
-
   .accountCardHeader,
   .accountCard {
     grid-template-columns:
-      minmax(150px, 1.1fr)
+      minmax(165px, 1.6fr)
       70px
-      96px
-      minmax(112px, 0.3fr)
-      minmax(178px, 0.35fr)
-      minmax(300px, 3fr)
+      126px
+      minmax(110px, 0.35fr)
+      minmax(170px, 0.5fr)
+      minmax(160px, 2fr)
       175px;
     column-gap: 10px;
   }
@@ -1116,19 +1115,15 @@
 }
 
 @media (min-width: 1680px) {
-  .accountCardList {
-    min-width: 1500px;
-  }
-
   .accountCardHeader,
   .accountCard {
     grid-template-columns:
-      minmax(180px, 1.3fr)
+      minmax(180px, 1.6fr)
       80px
-      96px
-      minmax(124px, 0.3fr)
-      minmax(186px, 0.35fr)
-      minmax(380px, 3fr)
+      126px
+      minmax(120px, 0.35fr)
+      minmax(180px, 0.5fr)
+      minmax(220px, 2fr)
       182px;
     column-gap: 12px;
   }
@@ -1407,7 +1402,9 @@
     line-height: 1.25;
     max-width: 100%;
     white-space: normal;
-    overflow-wrap: anywhere;
+    // Wrap between words ("Weekly / exhausted"), never mid-word ("Undetermin / ed").
+    overflow-wrap: normal;
+    word-break: keep-all;
     overflow: hidden;
     text-overflow: ellipsis;
   }
@@ -1925,7 +1922,9 @@
 
 .quotaWindowGrid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  // Windows (e.g. 5h + weekly) sit side by side only when there is room; otherwise
+  // they stack instead of overlapping and clipping the remaining-percent labels.
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   align-content: center;
   gap: 10px;
   position: relative;
@@ -2616,7 +2615,12 @@
   font-size: 12px;
   font-weight: 500;
   line-height: 1.4;
-  @include text-ellipsis;
+  // Wrap rather than ellipsize so the copyable file name stays visible next to
+  // the header controls.
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 4px;
 }
 
 .drawerFileNameCopy {
@@ -3629,8 +3633,8 @@
 
 .accountModelsControls {
   display: grid;
-  grid-template-columns: minmax(180px, 0.85fr) minmax(260px, 1.15fr);
-  align-items: end;
+  grid-template-columns: minmax(180px, 0.85fr) minmax(240px, 1.15fr) auto;
+  align-items: center;
   gap: 10px;
   min-width: 0;
 
@@ -3720,6 +3724,49 @@
 .accountModelRowExcluded {
   border-color: color-mix(in srgb, var(--accounts-warning) 26%, var(--accounts-border));
   background: color-mix(in srgb, var(--accounts-warning) 4%, var(--accounts-surface));
+}
+
+.accountModelRowChanged {
+  border-color: color-mix(in srgb, var(--primary-color) 45%, var(--accounts-border));
+  background: color-mix(in srgb, var(--primary-color) 5%, var(--accounts-surface));
+}
+
+.accountModelUnsavedDot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--warning-color);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--warning-color) 25%, transparent);
+}
+
+.accountModelLockedReason {
+  @include button-reset;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accounts-muted);
+  white-space: nowrap;
+
+  &:is(button) {
+    color: var(--primary-color);
+    cursor: pointer;
+
+    &:hover {
+      text-decoration: underline;
+    }
+  }
+}
+
+.accountModelsMenu {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.accountModelsMenuTrigger {
+  min-height: 34px;
+  border-radius: 8px;
+  background: var(--accounts-surface);
 }
 
 .accountModelMain {
@@ -3829,6 +3876,7 @@
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  gap: 10px;
   min-width: 0;
 }
 
@@ -5258,11 +5306,35 @@
 }
 
 .drawerActions {
-  justify-content: flex-end;
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  // Centred in the drawer. The save pill keeps a constant width (its status slot is
+  // sized to the longest status), so nothing moves when the status changes.
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: wrap;
 
   :global(.btn) {
     min-height: 36px;
   }
+}
+
+// Header controls: account routing switch + account actions menu, the same
+// ToggleSwitch the table row uses so on/off reads identically everywhere.
+.drawerTitleControls {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 10px;
+  margin-left: auto;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.drawerSavePill {
+  box-shadow: var(--shadow-md, 0 6px 18px rgba(15, 23, 42, 0.12));
 }
 
 .drawerMoreActions {
@@ -7719,4 +7791,71 @@
     flex-direction: column;
     gap: 6px;
   }
+}
+
+// Column separators between the table-mode cells (header and rows). Below the tablet
+// breakpoint rows become single-column cards, so the separators are not drawn there.
+@media (min-width: #{$breakpoint-tablet + 1}) {
+  .accountCardHeader,
+  .accountCard {
+    @include grid-column-dividers(10px);
+  }
+
+  // Every column after the credential is centred, header included, so values line
+  // up under their headings instead of hugging the left divider.
+  .accountCardHeader > span:not(:first-child) {
+    justify-content: center;
+    text-align: center;
+  }
+
+  .accountCardLatestRequest,
+  .accountCardEvidence {
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+  }
+
+  .accountCardBusiness .quotaEmptyState {
+    justify-content: center;
+  }
+}
+
+// Quota auto-refresh selector (same construction as the Monitoring page's).
+.quotaAutoRefreshField {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 6px 0 9px;
+  border-radius: 10px;
+  border: 1px solid var(--accounts-border);
+  background: var(--accounts-surface);
+}
+
+.quotaAutoRefreshLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--accounts-muted);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.quotaAutoRefreshSelect {
+  width: 92px;
+  flex: 0 0 auto;
+}
+
+.quotaAutoRefreshSelectTrigger {
+  min-width: 72px;
+  height: 30px !important;
+  padding: 0 2px 0 6px !important;
+  border: 0 !important;
+  border-radius: 8px !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
 }

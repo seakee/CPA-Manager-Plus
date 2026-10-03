@@ -1,0 +1,144 @@
+@use '@/styles/variables.scss' as *;
+@use '@/styles/mixins.scss' as *;
+
+// Mirrors the Config page floating save actions (ConfigPage.module.scss
+// .floatingActionList / .floatingStatus / .floatingActionButton).
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  --glass-blur: 12px;
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-backdrop-filter);
+  -webkit-backdrop-filter: var(--glass-backdrop-filter);
+  border: 1px solid var(--glass-border);
+  border-radius: 999px;
+  box-shadow: var(--shadow-lg);
+  max-width: 100%;
+}
+
+.statusSlot {
+  // All candidate texts share one grid cell, so the slot is as wide as the widest
+  // and never changes; the visible chip is centred within it.
+  display: inline-grid;
+  justify-items: center;
+  align-items: center;
+
+  > * {
+    grid-area: 1 / 1;
+  }
+}
+
+.statusSizer {
+  visibility: hidden;
+}
+
+.status {
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  min-width: 0;
+  min-height: 28px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.saved {
+  color: var(--success-color);
+  background: color-mix(in srgb, var(--success-color) 12%, var(--bg-primary));
+  border-color: color-mix(in srgb, var(--success-color) 28%, var(--border-color));
+}
+
+.modified {
+  color: var(--warning-text);
+  background: var(--warning-bg);
+  border-color: var(--warning-border);
+}
+
+.neutral {
+  color: var(--text-secondary);
+}
+
+.separator {
+  flex: 0 0 auto;
+  width: 1px;
+  height: 22px;
+  background: var(--border-color);
+}
+
+.action {
+  @include button-reset;
+  flex: 0 0 auto;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 38px;
+  padding: 0 16px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 650;
+  white-space: nowrap;
+  cursor: pointer;
+  color: var(--text-primary);
+  transition:
+    background-color 0.2s ease,
+    transform 0.15s ease;
+
+  &:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--text-primary) 10%, transparent);
+  }
+
+  &:active:not(:disabled) {
+    transform: scale(0.95);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+  }
+}
+
+.actionPrimary {
+  background: var(--primary-color);
+  color: #fff;
+
+  &:hover:not(:disabled) {
+    background: var(--primary-hover, var(--primary-color));
+  }
+}
+
+.dirtyDot {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--warning-color);
+  box-shadow: 0 0 0 2px rgba($warning-color, 0.25);
+}
+
+// Phones: icon-only buttons (text stays available to screen readers via aria-label).
+@include mobile {
+  .action {
+    width: 40px;
+    height: 40px;
+    padding: 0;
+  }
+
+  .actionText {
+    display: none;
+  }
+}
