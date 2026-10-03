@@ -34,14 +34,7 @@ export function AccountConfigurationTab({
 }: AccountConfigurationTabProps) {
   const { t } = useTranslation();
   const reloadButtonId = useId();
-  const {
-    state,
-    draft,
-    errors,
-    rawDataText,
-    sharedSourceReadOnly,
-    sourceMemberCount,
-  } = editor;
+  const { state, draft, errors, rawDataText, sharedSourceReadOnly, sourceMemberCount } = editor;
   const capabilities = getAuthFileConfigurationCapabilities(state?.providerKey || row.provider);
   const providerLabel = getProviderLabel(state?.providerKey || row.provider, t);
   const disabled = disableControls || sharedSourceReadOnly || state?.saving === true;

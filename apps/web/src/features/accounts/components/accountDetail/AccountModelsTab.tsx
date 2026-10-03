@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/Button';
 import { DropdownMenu, type DropdownMenuItem } from '@/components/ui/DropdownMenu';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Input } from '@/components/ui/Input';
+import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { SegmentedTabs } from '@/components/ui/SegmentedTabs';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import { IconCopy, IconMoreVertical, IconRefreshCw } from '@/components/ui/icons';
@@ -188,9 +189,7 @@ export function AccountModelsTab({
           ? model.ruleModelId.trim().toLowerCase()
           : model.id.trim().toLowerCase();
       return (
-        aliasesByModelId.get(lookupKey) ??
-        aliasesByModelId.get(model.id.trim().toLowerCase()) ??
-        []
+        aliasesByModelId.get(lookupKey) ?? aliasesByModelId.get(model.id.trim().toLowerCase()) ?? []
       );
     },
     [aliasesByModelId]
@@ -242,44 +241,53 @@ export function AccountModelsTab({
     editor.updateField('excludedModelsText', next.join('\n'));
   };
 
-  type RowControl =
-    | { kind: 'switch'; checked: boolean; disabled: boolean; title?: string }
-    | { kind: 'locked'; reason: string; onOpen?: () => void };
+  interface RowControl {
+    /** null: no switch (the model is decided by a rule this credential does not own). */
+    switchState: { checked: boolean; disabled: boolean; title?: string } | null;
+    /** Names the other rule that keeps the model off, linking to its editor when editable. */
+    reason?: { label: string; onOpen?: () => void };
+  }
 
-  // One control per row: a switch when this credential's own exact rule decides the
-  // model, otherwise a locked "off" state that names (and links to) the rule that does.
+  // The switch always means "this credential's own exact rule". A global, wildcard or
+  // shared rule that also applies is named next to it and links to its editor.
   const getRowControl = (model: AccountModelRuleRow): RowControl => {
-    if (sharedSourceReadOnly && (model.credentialPatterns.length > 0 || model.scope === 'available')) {
-      return { kind: 'locked', reason: t('accounts.model_locked_shared') };
+    if (
+      sharedSourceReadOnly &&
+      (model.credentialPatterns.length > 0 || model.scope === 'available')
+    ) {
+      return { switchState: null, reason: { label: t('accounts.model_locked_shared') } };
     }
     const unresolvedTitle = !model.ruleModelIdResolved
       ? t('accounts.model_rule_mapping_unavailable')
       : undefined;
+    const globalReason = { label: t('accounts.model_locked_global'), onOpen: onManageGlobalRules };
+    const wildcardReason = {
+      label: t('accounts.model_locked_advanced'),
+      onOpen: onOpenAdvancedRules,
+    };
     if (model.hasCredentialExactRule) {
-      if (model.globalPatterns.length > 0) {
-        return { kind: 'locked', reason: t('accounts.model_locked_global'), onOpen: onManageGlobalRules };
-      }
-      if (model.hasCredentialWildcardRule) {
-        return { kind: 'locked', reason: t('accounts.model_locked_advanced'), onOpen: onOpenAdvancedRules };
-      }
       return {
-        kind: 'switch',
-        checked: false,
-        disabled: editingDisabled || !model.ruleModelIdResolved || !globalRulesKnown,
-        title: unresolvedTitle,
+        switchState: {
+          checked: false,
+          disabled: editingDisabled || !model.ruleModelIdResolved,
+          title: unresolvedTitle,
+        },
+        reason:
+          model.globalPatterns.length > 0
+            ? globalReason
+            : model.hasCredentialWildcardRule
+              ? wildcardReason
+              : undefined,
       };
     }
-    if (model.hasCredentialWildcardRule) {
-      return { kind: 'locked', reason: t('accounts.model_locked_advanced'), onOpen: onOpenAdvancedRules };
-    }
-    if (model.globalPatterns.length > 0) {
-      return { kind: 'locked', reason: t('accounts.model_locked_global'), onOpen: onManageGlobalRules };
-    }
+    if (model.hasCredentialWildcardRule) return { switchState: null, reason: wildcardReason };
+    if (model.globalPatterns.length > 0) return { switchState: null, reason: globalReason };
     return {
-      kind: 'switch',
-      checked: true,
-      disabled: editingDisabled || !model.ruleModelIdResolved,
-      title: unresolvedTitle,
+      switchState: {
+        checked: true,
+        disabled: editingDisabled || !model.ruleModelIdResolved,
+        title: unresolvedTitle,
+      },
     };
   };
 
@@ -290,8 +298,8 @@ export function AccountModelsTab({
     if (editingDisabled) return;
     let next = credentialRules;
     filteredRows.forEach((model) => {
-      const control = getRowControl(model);
-      if (control.kind !== 'switch' || control.disabled || control.checked === enabled) return;
+      const state = getRowControl(model).switchState;
+      if (!state || state.disabled || state.checked === enabled) return;
       next = setAccountModelExactRule(
         next,
         model.ruleModelId,
@@ -427,13 +435,16 @@ export function AccountModelsTab({
           equalWidth
           fullWidth
         />
-        <DropdownMenu
-          items={listMenuItems}
-          ariaLabel={t('accounts.model_list_actions')}
-          triggerTitle={t('accounts.model_list_actions')}
-          triggerIcon={<IconMoreVertical size={16} />}
-          triggerClassName={styles.accountModelsMenuTrigger}
-        />
+        <div className={styles.accountModelsMenu}>
+          {refreshing ? <LoadingSpinner size={16} /> : null}
+          <DropdownMenu
+            items={listMenuItems}
+            ariaLabel={t('accounts.model_list_actions')}
+            triggerTitle={t('accounts.model_list_actions')}
+            triggerIcon={<IconMoreVertical size={16} />}
+            triggerClassName={styles.accountModelsMenuTrigger}
+          />
+        </div>
       </div>
 
       {projection.advancedCredentialRules.length > 0 ||
@@ -547,23 +558,25 @@ export function AccountModelsTab({
                   </div>
                 </div>
                 <div className={styles.accountModelActions}>
-                  {control.kind === 'locked' ? (
-                    control.onOpen ? (
+                  {control.reason ? (
+                    control.reason.onOpen ? (
                       <button
                         type="button"
                         className={styles.accountModelLockedReason}
-                        onClick={control.onOpen}
+                        onClick={control.reason.onOpen}
                       >
-                        {control.reason}
+                        {control.reason.label}
                       </button>
                     ) : (
-                      <span className={styles.accountModelLockedReason}>{control.reason}</span>
+                      <span className={styles.accountModelLockedReason}>
+                        {control.reason.label}
+                      </span>
                     )
                   ) : null}
-                  <span title={control.kind === 'switch' ? control.title : control.reason}>
+                  <span title={control.switchState?.title ?? control.reason?.label}>
                     <ToggleSwitch
-                      checked={control.kind === 'switch' ? control.checked : false}
-                      disabled={control.kind === 'locked' || control.disabled}
+                      checked={control.switchState?.checked ?? false}
+                      disabled={!control.switchState || control.switchState.disabled}
                       onChange={(enabled) => updateExactRule(model, !enabled)}
                       ariaLabel={t('accounts.model_toggle_label', { model: model.id })}
                     />

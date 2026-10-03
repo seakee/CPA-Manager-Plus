@@ -6668,28 +6668,29 @@ export function AccountsPage() {
     [accountDisplayMode, connectionFingerprint, refreshQuotaForRow, showNotification, t]
   );
 
-  const quotaAutoRefreshStateRef = useRef({ refreshQuotaRows, pageRows, quotaRefreshing, disableControls });
-  quotaAutoRefreshStateRef.current = { refreshQuotaRows, pageRows, quotaRefreshing, disableControls };
   useEffect(() => {
     try {
       globalThis.localStorage?.setItem(QUOTA_AUTO_REFRESH_STORAGE_KEY, String(quotaAutoRefreshMs));
     } catch {
       // Ignore persistence failures; the in-memory choice still applies.
     }
-    if (quotaAutoRefreshMs <= 0) return undefined;
-    const timer = window.setInterval(() => {
-      const current = quotaAutoRefreshStateRef.current;
-      // Only while someone is looking, and never on top of a running refresh.
-      if (document.visibilityState !== 'visible') return;
-      if (current.quotaRefreshing || current.disableControls) return;
-      const targets = current.pageRows.filter(
+  }, [quotaAutoRefreshMs]);
+
+  // Scheduled quota refresh: same visibility gating as the passive evidence poll,
+  // silent, and never stacked on top of a refresh that is already running.
+  useInterval(
+    () => {
+      if (quotaRefreshing || disableControls) return;
+      const targets = pageRows.filter(
         (row) => !row.runtimeOnly && isQuotaRefreshSupportedProvider(row.provider)
       );
       if (targets.length === 0) return;
-      void current.refreshQuotaRows(targets, { silent: true });
-    }, quotaAutoRefreshMs);
-    return () => window.clearInterval(timer);
-  }, [quotaAutoRefreshMs]);
+      void refreshQuotaRows(targets, { silent: true });
+    },
+    activeView === 'accounts' && documentVisible && quotaAutoRefreshMs > 0
+      ? quotaAutoRefreshMs
+      : null
+  );
 
   const refreshAccountQuota = useCallback(
     async (row: AccountRow, mode: AccountQuotaRefreshMode = 'summary'): Promise<void> => {

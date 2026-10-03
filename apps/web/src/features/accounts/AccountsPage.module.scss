@@ -3757,6 +3757,12 @@
   }
 }
 
+.accountModelsMenu {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .accountModelsMenuTrigger {
   min-height: 34px;
   border-radius: 8px;
