@@ -370,21 +370,24 @@
 .accountCardList {
   display: grid;
   gap: 8px;
-  min-width: 1240px;
+  // Fit the panel instead of forcing horizontal scroll that hides the action column.
+  min-width: 0;
   padding: 10px 12px;
 }
 
 .accountCardHeader,
 .accountCard {
   display: grid;
+  // credential | plan | availability | recent requests | historical usage | quota | actions
+  // Minimums include the 10px gutters on each side of the column separators.
   grid-template-columns:
-    minmax(140px, 1.1fr)
-    76px
-    96px
-    minmax(124px, 0.3fr)
-    minmax(160px, 0.35fr)
-    minmax(280px, 3fr)
-    146px;
+    minmax(124px, 1.4fr)
+    70px
+    120px
+    minmax(120px, 0.35fr)
+    minmax(160px, 0.5fr)
+    minmax(170px, 2fr)
+    150px;
   column-gap: 8px;
   min-width: 0;
   box-sizing: border-box;
@@ -1091,19 +1094,15 @@
 }
 
 @media (min-width: 1360px) {
-  .accountCardList {
-    min-width: 1320px;
-  }
-
   .accountCardHeader,
   .accountCard {
     grid-template-columns:
-      minmax(150px, 1.1fr)
+      minmax(165px, 1.6fr)
       70px
-      96px
-      minmax(112px, 0.3fr)
-      minmax(178px, 0.35fr)
-      minmax(300px, 3fr)
+      126px
+      minmax(110px, 0.35fr)
+      minmax(170px, 0.5fr)
+      minmax(160px, 2fr)
       175px;
     column-gap: 10px;
   }
@@ -1116,19 +1115,15 @@
 }
 
 @media (min-width: 1680px) {
-  .accountCardList {
-    min-width: 1500px;
-  }
-
   .accountCardHeader,
   .accountCard {
     grid-template-columns:
-      minmax(180px, 1.3fr)
+      minmax(180px, 1.6fr)
       80px
-      96px
-      minmax(124px, 0.3fr)
-      minmax(186px, 0.35fr)
-      minmax(380px, 3fr)
+      126px
+      minmax(120px, 0.35fr)
+      minmax(180px, 0.5fr)
+      minmax(220px, 2fr)
       182px;
     column-gap: 12px;
   }
@@ -1407,7 +1402,9 @@
     line-height: 1.25;
     max-width: 100%;
     white-space: normal;
-    overflow-wrap: anywhere;
+    // Wrap between words ("Weekly / exhausted"), never mid-word ("Undetermin / ed").
+    overflow-wrap: normal;
+    word-break: keep-all;
     overflow: hidden;
     text-overflow: ellipsis;
   }
@@ -1925,7 +1922,9 @@
 
 .quotaWindowGrid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  // Windows (e.g. 5h + weekly) sit side by side only when there is room; otherwise
+  // they stack instead of overlapping and clipping the remaining-percent labels.
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   align-content: center;
   gap: 10px;
   position: relative;
@@ -7718,5 +7717,32 @@
     align-items: flex-start;
     flex-direction: column;
     gap: 6px;
+  }
+}
+
+// Column separators between the table-mode cells (header and rows). Below the tablet
+// breakpoint rows become single-column cards, so the separators are not drawn there.
+@media (min-width: #{$breakpoint-tablet + 1}) {
+  .accountCardHeader,
+  .accountCard {
+    @include grid-column-dividers(10px);
+  }
+
+  // Every column after the credential is centred, header included, so values line
+  // up under their headings instead of hugging the left divider.
+  .accountCardHeader > span:not(:first-child) {
+    justify-content: center;
+    text-align: center;
+  }
+
+  .accountCardLatestRequest,
+  .accountCardEvidence {
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+  }
+
+  .accountCardBusiness .quotaEmptyState {
+    justify-content: center;
   }
 }

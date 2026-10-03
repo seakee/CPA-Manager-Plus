@@ -1,3 +1,5 @@
+@use '@/styles/mixins.scss' as *;
+
 .page {
   --usage-surface: var(--bg-primary);
   --usage-muted-surface: var(--surface-subtle);
@@ -2736,4 +2738,8 @@
   .chartCanvas {
     min-width: 560px;
   }
+}
+
+.tableWrap table {
+  @include table-column-dividers;
 }

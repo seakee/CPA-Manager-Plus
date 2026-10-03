@@ -44,6 +44,55 @@
   }
 }
 
+// 数据表列分隔线：在相邻列之间绘制统一的浅色竖线，两侧留出相同间距。
+// Light vertical separator between adjacent columns of a data table, with equal
+// breathing room on both sides of every line.
+
+// Native <table>: cells already carry symmetric horizontal padding.
+@mixin table-column-dividers($cells: 'th + th, td + td') {
+  #{$cells} {
+    border-inline-start: 1px solid var(--table-column-divider);
+  }
+}
+
+// CSS-grid rows (header + rows sharing one grid-template-columns): the column gap is
+// replaced by equal padding on both sides of each line, so the separator sits
+// exactly between two columns and content never touches it.
+// $center: stretch every cell to the full row height (so separators span the row)
+// and centre the content of each column after the first, vertically and horizontally.
+// Leave it off for rows whose cells manage their own alignment.
+@mixin grid-column-dividers($gutter: 10px, $center: false) {
+  column-gap: 0;
+
+  > * + * {
+    border-inline-start: 1px solid var(--table-column-divider);
+    padding-inline-start: $gutter;
+  }
+
+  > *:not(:last-child) {
+    padding-inline-end: $gutter;
+  }
+
+  @if $center {
+    align-items: stretch;
+
+    > * {
+      align-self: stretch;
+      align-content: center;
+    }
+
+    > :first-child {
+      align-items: center;
+    }
+
+    > * + * {
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+    }
+  }
+}
+
 // Flexbox 居中
 @mixin flex-center {
   display: flex;

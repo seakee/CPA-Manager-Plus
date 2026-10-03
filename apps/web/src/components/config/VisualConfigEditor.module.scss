@@ -137,7 +137,9 @@
 
 .workspace {
   display: grid;
-  grid-template-columns: minmax(0, 232px) minmax(0, 1fr);
+  // Wide enough for one-line section titles ("Authentication Configuration");
+  // at <=1280px the section nav becomes a horizontal strip anyway.
+  grid-template-columns: minmax(0, 310px) minmax(0, 1fr);
   gap: 18px;
   align-items: start;
   width: 100%;

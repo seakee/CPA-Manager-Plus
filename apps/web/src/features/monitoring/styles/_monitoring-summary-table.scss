@@ -551,15 +551,17 @@
   }
 
   .accountOverviewTable {
-    --account-col-account: 21%;
+    --account-col-account: 19%;
     --account-col-status: 8%;
     --account-col-total-calls: 5%;
     --account-col-success-calls: 7%;
     --account-col-failure-calls: 7%;
     --account-col-success-rate: 8%;
-    --account-col-total-tokens: 10%;
+    --account-col-total-tokens: 8%;
     --account-col-estimated-cost: 9%;
-    --account-col-latest-request: 13%;
+    // Wide enough for a full "10/3/2026, 1:25:06 AM" timestamp so it no longer runs
+    // into the action column.
+    --account-col-latest-request: 17%;
     --account-col-action: 12%;
     --account-overview-columns: var(--account-col-account) var(--account-col-status)
       var(--account-col-total-calls) var(--account-col-success-calls)
@@ -879,6 +881,8 @@
     border-right: 1px solid color-mix(in srgb, var(--monitor-line) 86%, transparent);
     border-radius: 0 14px 14px 0;
   }
+
+  @include table-column-dividers('.table thead th + th, .table tbody td + td');
 
   .table tbody tr:nth-child(even) td {
     background: color-mix(in srgb, var(--monitor-surface-elevated) 86%, var(--monitor-surface));
