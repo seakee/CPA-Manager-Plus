@@ -728,9 +728,7 @@
     --realtime-col-usage: 8%;
     --realtime-col-cost: 5%;
 
-    // Dense multi-line cells (reasoning/service, TTFT/elapsed) need real width;
-    // headers wrap and values use the compact type scale.
-    min-width: 1200px;
+    min-width: 1080px;
     border-collapse: separate;
     border-spacing: 0 8px;
     background: transparent;

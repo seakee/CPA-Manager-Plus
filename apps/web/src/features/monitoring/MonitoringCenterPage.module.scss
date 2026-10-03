@@ -1332,11 +1332,43 @@
 @include summaryTable.styles;
 @include accountOverview.styles;
 .realtimeTable {
-  --realtime-col-source: 16%;
-  --realtime-col-model: 16%;
-  --realtime-col-tps: 8%;
-  --realtime-col-latency: 8%;
+  // Final realtime column split (sums to 100%; this block overrides the shared
+  // defaults). Sized so the full row fits the panel at a 1440px window.
+  --realtime-col-source: 15%;
+  --realtime-col-model: 14%;
+  --realtime-col-effort: 11%;
+  --realtime-col-recent: 6%;
+  --realtime-col-status: 7%;
+  --realtime-col-success-rate: 7%;
+  --realtime-col-total-calls: 5%;
+  --realtime-col-tps: 5%;
+  --realtime-col-latency: 9%;
   --realtime-col-time: 8%;
+  --realtime-col-usage: 7%;
+  --realtime-col-cost: 6%;
+
+  min-width: 1080px;
+}
+
+// Same alignment rule as the other tables: Source (first) left, everything else
+// centred. Label/value cells (Reasoning, Elapsed) centre as a block and keep their
+// internal label column aligned.
+.realtimeTable thead th + th,
+.realtimeTable tbody td + td {
+  text-align: center;
+}
+
+.realtimeTable .realtimeModelCell,
+.realtimeTable .realtimeUsageCell {
+  justify-items: center;
+  text-align: center;
+}
+
+// Recent-status bars and numeric cells: tighter side padding so they fit the
+// narrow columns without clipping.
+.realtimeTable tbody td.realtimeCenteredColumn,
+.realtimeTable tbody td.realtimeTpsColumn {
+  padding-inline: 6px;
 }
 
 .realtimeTable .logTypeCell .primaryCell > span {
@@ -1563,7 +1595,7 @@
 }
 
 .realtimeSettingsColumn {
-  text-align: left !important;
+  text-align: center !important;
 }
 
 .realtimeCenteredColumn .primaryCell {
