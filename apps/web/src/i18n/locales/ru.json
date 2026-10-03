@@ -3208,6 +3208,8 @@
     "reasoning_effort_short": "Уровень",
     "reasoning_service_short": "Мышление / сервис",
     "realtime_reasoning_label": "Мышление",
+    "realtime_group_request": "Этот запрос",
+    "realtime_group_trend": "Тренд аккаунта · модели",
     "realtime_service_label": "Сервис",
     "service_tier": "Уровень сервиса",
     "service_tier_short": "Сервис",

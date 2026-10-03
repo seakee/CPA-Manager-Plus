@@ -744,43 +744,39 @@
   }
 
   .realtimeTable col:nth-child(3) {
-    width: var(--realtime-col-effort);
-  }
-
-  .realtimeTable col:nth-child(4) {
-    width: var(--realtime-col-recent);
-  }
-
-  .realtimeTable col:nth-child(5) {
     width: var(--realtime-col-status);
   }
 
-  .realtimeTable col:nth-child(6) {
-    width: var(--realtime-col-success-rate);
-  }
-
-  .realtimeTable col:nth-child(7) {
-    width: var(--realtime-col-total-calls);
-  }
-
-  .realtimeTable col:nth-child(8) {
+  .realtimeTable col:nth-child(4) {
     width: var(--realtime-col-tps);
   }
 
-  .realtimeTable col:nth-child(9) {
+  .realtimeTable col:nth-child(5) {
     width: var(--realtime-col-latency);
   }
 
-  .realtimeTable col:nth-child(10) {
+  .realtimeTable col:nth-child(6) {
     width: var(--realtime-col-time);
   }
 
-  .realtimeTable col:nth-child(11) {
+  .realtimeTable col:nth-child(7) {
     width: var(--realtime-col-usage);
   }
 
-  .realtimeTable col:nth-child(12) {
+  .realtimeTable col:nth-child(8) {
     width: var(--realtime-col-cost);
+  }
+
+  .realtimeTable col:nth-child(9) {
+    width: var(--realtime-col-recent);
+  }
+
+  .realtimeTable col:nth-child(10) {
+    width: var(--realtime-col-success-rate);
+  }
+
+  .realtimeTable col:nth-child(11) {
+    width: var(--realtime-col-total-calls);
   }
 
   .table thead th {

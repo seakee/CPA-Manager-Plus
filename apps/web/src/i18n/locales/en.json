@@ -3209,6 +3209,8 @@
     "reasoning_effort_short": "Effort",
     "reasoning_service_short": "Reasoning / Tier",
     "realtime_reasoning_label": "Reasoning",
+    "realtime_group_request": "This request",
+    "realtime_group_trend": "Account · model trend",
     "realtime_service_label": "Service",
     "service_tier": "Service Tier",
     "service_tier_short": "Tier",

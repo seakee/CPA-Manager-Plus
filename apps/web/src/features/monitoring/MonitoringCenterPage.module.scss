@@ -1334,18 +1334,18 @@
 .realtimeTable {
   // Final realtime column split (sums to 100%; this block overrides the shared
   // defaults). Sized so the full row fits the panel at a 1440px window.
-  --realtime-col-source: 15%;
-  --realtime-col-model: 14%;
-  --realtime-col-effort: 11%;
-  --realtime-col-recent: 6%;
-  --realtime-col-status: 7%;
+  // Column order: request columns, then the account · model trend group.
+  --realtime-col-source: 17%;
+  --realtime-col-model: 17%;
+  --realtime-col-status: 8%;
+  --realtime-col-tps: 6%;
+  --realtime-col-latency: 10%;
+  --realtime-col-time: 9%;
+  --realtime-col-usage: 8%;
+  --realtime-col-cost: 6%;
+  --realtime-col-recent: 7%;
   --realtime-col-success-rate: 7%;
   --realtime-col-total-calls: 5%;
-  --realtime-col-tps: 5%;
-  --realtime-col-latency: 9%;
-  --realtime-col-time: 8%;
-  --realtime-col-usage: 7%;
-  --realtime-col-cost: 6%;
 
   min-width: 1080px;
 }
@@ -1356,6 +1356,44 @@
 .realtimeTable thead th + th,
 .realtimeTable tbody td + td {
   text-align: center;
+}
+
+// Group header row: "This request" | "Account · model trend". Not sticky (only the
+// column header row is), and the trend group gets a stronger left boundary.
+.realtimeTable thead .realtimeGroupRow th {
+  position: static;
+  padding-block: 6px 2px;
+  border-bottom: 0;
+  background: transparent;
+  color: var(--monitor-muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.realtimeTable thead .realtimeGroupRow th.realtimeTrendStart {
+  text-align: center;
+}
+
+.realtimeTable .realtimeTrendStart {
+  border-inline-start: 2px solid var(--table-column-divider) !important;
+}
+
+.realtimeRequestTags {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px;
+  margin-top: 3px;
+}
+
+.realtimeRequestTag {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--monitor-surface-muted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
 }
 
 .realtimeTable .realtimeModelCell,

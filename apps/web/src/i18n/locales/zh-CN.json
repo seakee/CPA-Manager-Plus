@@ -3204,6 +3204,8 @@
     "reasoning_effort_short": "强度",
     "reasoning_service_short": "推理/服务",
     "realtime_reasoning_label": "思考",
+    "realtime_group_request": "本次请求",
+    "realtime_group_trend": "账号 · 模型趋势",
     "realtime_service_label": "服务",
     "service_tier": "服务等级",
     "service_tier_short": "等级",

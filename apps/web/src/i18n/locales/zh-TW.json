@@ -3204,6 +3204,8 @@
     "reasoning_effort_short": "強度",
     "reasoning_service_short": "推理/服務",
     "realtime_reasoning_label": "思考",
+    "realtime_group_request": "本次請求",
+    "realtime_group_trend": "帳號 · 模型趨勢",
     "realtime_service_label": "服務",
     "service_tier": "服務等級",
     "service_tier_short": "等級",
