@@ -4,6 +4,12 @@ import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import { IconEye, IconEyeOff, IconX } from '@/components/ui/icons';
+import type { Ref } from 'react';
+import {
+  ReconnectSettingsSection,
+  type ReconnectSettingsHandle,
+  type ReconnectSettingsPending,
+} from '@/features/reconnect/components/ReconnectSettingsSection';
 import { AccountProcessingPolicySection } from './AccountProcessingPolicySection';
 import styles from '../ConfigPage.module.scss';
 
@@ -39,6 +45,8 @@ type ManagerConfigPanelProps = {
   onPollIntervalMsChange: (value: string) => void;
   onBatchSizeChange: (value: string) => void;
   onQueryLimitChange: (value: string) => void;
+  reconnectSettingsRef?: Ref<ReconnectSettingsHandle>;
+  onReconnectPendingChange?: (pending: ReconnectSettingsPending) => void;
 };
 
 export function ManagerConfigPanel({
@@ -73,6 +81,8 @@ export function ManagerConfigPanel({
   onPollIntervalMsChange,
   onBatchSizeChange,
   onQueryLimitChange,
+  reconnectSettingsRef,
+  onReconnectPendingChange,
 }: ManagerConfigPanelProps) {
   const { t } = useTranslation();
   const connectionInputDisabled =
@@ -304,6 +314,13 @@ export function ManagerConfigPanel({
 
       <section className={styles.managerSection}>
         <AccountProcessingPolicySection />
+      </section>
+
+      <section className={styles.managerSection}>
+        <ReconnectSettingsSection
+          handleRef={reconnectSettingsRef}
+          onPendingChange={onReconnectPendingChange}
+        />
       </section>
 
       <div className={styles.managerMetaGrid}>

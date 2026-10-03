@@ -48,6 +48,10 @@ import {
 } from '@/services/api/usageService';
 import { detectApiBaseFromLocation } from '@/utils/connection';
 import { ManagerConfigPanel } from './components/ManagerConfigPanel';
+import type {
+  ReconnectSettingsHandle,
+  ReconnectSettingsPending,
+} from '@/features/reconnect/components/ReconnectSettingsSection';
 import styles from './ConfigPage.module.scss';
 
 type ConfigEditorTab = 'visual' | 'source' | 'manager';
@@ -419,6 +423,10 @@ export function ConfigPage() {
   const [lastSearchedQuery, setLastSearchedQuery] = useState('');
   const editorRef = useRef<ReactCodeMirrorRef | null>(null);
   const floatingActionsRef = useRef<HTMLDivElement>(null);
+  const reconnectSettingsRef = useRef<ReconnectSettingsHandle>(null);
+  const [reconnectPending, setReconnectPending] = useState<ReconnectSettingsPending>({
+    dirty: false,
+  });
   const savingRef = useRef(false);
   const managerSavingRef = useRef(false);
   const apiKeyMutationInFlightRef = useRef(false);
@@ -546,7 +554,7 @@ export function ConfigPage() {
   }, [detectedPanelBase, panelHostedByUsageService]);
 
   const managerServiceTarget = resolveManagerServiceBase();
-  const managerDirty = useMemo(
+  const managerFormDirty = useMemo(
     () =>
       resolveManagerFormDirty({
         managerConfig,
@@ -569,6 +577,8 @@ export function ConfigPage() {
       managerRequestMonitoringEnabled,
     ]
   );
+  // The self-service reconnect section saves through its own API but shares this page's save bar.
+  const managerDirty = managerFormDirty || reconnectPending.dirty;
   const managerSaveState = resolveManagerSaveState({
     panelHostedByUsageService,
     managerDirty,
@@ -994,6 +1004,10 @@ export function ConfigPage() {
     if (managerSavingRef.current || apiKeyMutationInFlightRef.current) return;
     if (disableControls) return;
     if (panelHostedByUsageService !== true) return;
+    if (reconnectPending.dirty) {
+      const reconnectSaved = await reconnectSettingsRef.current?.save();
+      if (!reconnectSaved || !managerFormDirty) return;
+    }
     const serviceBase = resolveManagerServiceBase();
     if (!serviceBase) {
       showNotification(t('config_management.manager.service_base_required'), 'warning');
@@ -1516,6 +1530,7 @@ export function ConfigPage() {
     if (isManagerTab) {
       if (!managerDirty) {
         void loadManagerConfig();
+        void reconnectSettingsRef.current?.reload();
         return;
       }
       showConfirmation({
@@ -1525,7 +1540,7 @@ export function ConfigPage() {
         cancelText: t('common.cancel'),
         variant: 'danger',
         onConfirm: async () => {
-          await loadManagerConfig();
+          await Promise.all([loadManagerConfig(), reconnectSettingsRef.current?.reload()]);
         },
       });
       return;
@@ -1708,6 +1723,8 @@ export function ConfigPage() {
               onBatchSizeChange={(value) => {
                 setManagerBatchSize(value);
               }}
+              reconnectSettingsRef={reconnectSettingsRef}
+              onReconnectPendingChange={setReconnectPending}
               onQueryLimitChange={(value) => {
                 setManagerQueryLimit(value);
               }}

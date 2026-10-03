@@ -20,6 +20,7 @@ Use this page to confirm which features each usage option provides and what evid
 | Model prices and API key aliases                 | ❌                          | ✅              |
 | Scheduled account inspection and history         | ❌                          | ✅              |
 | Quota cooldowns and account action queue         | ❌                          | ✅              |
+| Self-service reconnect for broken logins         | ❌                          | ✅              |
 | Login credential                                 | CPA Management Key          | CPAMP Admin Key |
 | Backups, migration state, and pprof              | ❌                          | ✅              |
 

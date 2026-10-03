@@ -1,6 +1,7 @@
 package router
 
 import (
+	reconnectcontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/reconnect"
 	"net/http"
 	"strings"
 
@@ -43,6 +44,7 @@ func New(appCtx *app.Context) http.Handler {
 	quotaSnapshotHandler := &quotasnapshotcontroller.Handler{App: appCtx}
 	proxyHandler := &proxycontroller.Handler{App: appCtx}
 	panelHandler := &panelcontroller.Handler{App: appCtx}
+	reconnectHandler := reconnectcontroller.New(appCtx)
 
 	mux := http.NewServeMux()
 	updates := &updatecheckcontroller.Handler{App: appCtx}
@@ -54,6 +56,7 @@ func New(appCtx *app.Context) http.Handler {
 	mux.HandleFunc("/usage-service/config", middleware.WithCORS(appCtx.Config, managerConfigHandler.Handle))
 	mux.HandleFunc("/usage-service/account-processing-policy", middleware.WithCORS(appCtx.Config, automationHandler.Handle))
 	mux.HandleFunc("/usage-service/quota-cooldowns", middleware.WithCORS(appCtx.Config, quotaCooldownHandler.Handle))
+	mux.HandleFunc("/usage-service/reconnect/", middleware.WithCORS(appCtx.Config, reconnectHandler.Handle))
 	mux.HandleFunc("/setup", middleware.WithCORS(appCtx.Config, setupHandler.Setup))
 	mux.HandleFunc("/management.html", panelHandler.ManagementHTML)
 	mux.HandleFunc("/", rootHandler(appCtx, usageHandler, modelPriceHandler, apiKeyAliasHandler, accountActionHandler, codexInspectionHandler, dashboardHandler, monitoringHandler, quotaSnapshotHandler, managerConfigHandler, proxyHandler))

@@ -262,6 +262,7 @@ func runServer() {
 	}
 	log.Printf("cpa-manager-plus listening on %s", listener.Addr())
 	codexInspectionWorker := worker.NewCodexInspectionWorker(serverApp.AppContext().Store, serverApp.AppContext().CodexInspectionService)
+	reconnectWorker := worker.NewReconnectWorker(serverApp.AppContext().ReconnectService)
 	serverResult := make(chan error, 1)
 	go serveHTTPServer(server, listener, stop, serverResult)
 	go serverApp.AppContext().UpdateCheckService.Run(ctx)
@@ -279,6 +280,7 @@ func runServer() {
 		log.Printf("[startup] starting background workers")
 		automationRuntime.Start(ctx)
 		codexInspectionWorker.Start(ctx)
+		reconnectWorker.Start(ctx)
 		accountHistoryRollupWorker.Start(ctx)
 		usageDerivedRollupWorker.Start(ctx)
 		if usageHourlyAggregateWorker != nil {

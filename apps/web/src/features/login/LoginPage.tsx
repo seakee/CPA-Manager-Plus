@@ -1,28 +1,20 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { SelectionCheckbox } from '@/components/ui/SelectionCheckbox';
+import { AppearanceToolbar } from '@/components/common/AppearanceToolbar';
 import {
   IconCheck,
   IconEye,
   IconEyeOff,
   IconInfo,
   IconKey,
-  IconLanguages,
-  IconMoon,
   IconShield,
-  IconSun,
   IconTimer,
 } from '@/components/ui/icons';
-import {
-  useAuthStore,
-  useLanguageStore,
-  useNotificationStore,
-  useThemeStore,
-  useUsageServiceStore,
-} from '@/stores';
+import { useAuthStore, useNotificationStore, useUsageServiceStore } from '@/stores';
 import {
   LEGACY_USAGE_SERVICE_LAST_CPA_BASE_KEY,
   USAGE_SERVICE_LAST_CPA_BASE_KEY,
@@ -34,8 +26,6 @@ import {
   normalizeApiBase,
   resolveDefaultCPAConnectionBase,
 } from '@/utils/connection';
-import { LANGUAGE_LABEL_KEYS, LANGUAGE_ORDER } from '@/utils/constants';
-import { isSupportedLanguage } from '@/utils/language';
 import {
   CPAMP_HORIZONTAL_LOGO_ON_DARK_PNG_SRC_SET,
   CPAMP_HORIZONTAL_LOGO_ON_DARK_PNG_URL,
@@ -125,10 +115,6 @@ export function LoginPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const { showNotification } = useNotificationStore();
-  const language = useLanguageStore((state) => state.language);
-  const setLanguage = useLanguageStore((state) => state.setLanguage);
-  const theme = useThemeStore((state) => state.theme);
-  const cycleTheme = useThemeStore((state) => state.cycleTheme);
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
   const login = useAuthStore((state) => state.login);
   const restoreSession = useAuthStore((state) => state.restoreSession);
@@ -136,7 +122,6 @@ export function LoginPage() {
   const storedKey = useAuthStore((state) => state.managementKey);
   const storedRememberPassword = useAuthStore((state) => state.rememberPassword);
   const setUsageServiceConfig = useUsageServiceStore((state) => state.setUsageServiceConfig);
-  const languageMenuRef = useRef<HTMLDivElement | null>(null);
 
   const [apiBase, setApiBase] = useState('');
   const [adminKey, setAdminKey] = useState('');
@@ -153,7 +138,6 @@ export function LoginPage() {
   const [error, setError] = useState('');
   const [hostedByUsageService, setHostedByUsageService] = useState(false);
   const [usageServiceNeedsSetup, setUsageServiceNeedsSetup] = useState(false);
-  const [languageMenuOpen, setLanguageMenuOpen] = useState(false);
   const [hasHistoricalData, setHasHistoricalData] = useState(false);
   const [migrationStatus, setMigrationStatus] = useState('');
   const [usageSetupStep, setUsageSetupStep] = useState<UsageSetupStep>('admin');
@@ -197,48 +181,6 @@ export function LoginPage() {
     }),
     [t]
   );
-  const toggleLanguageMenu = useCallback(() => {
-    setLanguageMenuOpen((prev) => !prev);
-  }, []);
-
-  const handleLanguageSelect = useCallback(
-    (selectedLanguage: string) => {
-      if (!isSupportedLanguage(selectedLanguage)) {
-        return;
-      }
-
-      setLanguage(selectedLanguage);
-      setLanguageMenuOpen(false);
-    },
-    [setLanguage]
-  );
-
-  useEffect(() => {
-    if (!languageMenuOpen) {
-      return;
-    }
-
-    const handlePointerDown = (event: MouseEvent) => {
-      if (!languageMenuRef.current?.contains(event.target as Node)) {
-        setLanguageMenuOpen(false);
-      }
-    };
-
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setLanguageMenuOpen(false);
-      }
-    };
-
-    document.addEventListener('mousedown', handlePointerDown);
-    document.addEventListener('keydown', handleEscape);
-
-    return () => {
-      document.removeEventListener('mousedown', handlePointerDown);
-      document.removeEventListener('keydown', handleEscape);
-    };
-  }, [languageMenuOpen]);
-
   useEffect(() => {
     const init = async () => {
       try {
@@ -518,52 +460,7 @@ export function LoginPage() {
 
   return (
     <div className={styles.container}>
-      <div className={styles.toolBar}>
-        <button
-          type="button"
-          className={styles.toolButton}
-          onClick={cycleTheme}
-          aria-label={t('theme.switch')}
-          title={t('theme.switch')}
-        >
-          {theme === 'dark' ? <IconMoon size={17} /> : <IconSun size={17} />}
-        </button>
-        <div className={styles.languageMenu} ref={languageMenuRef}>
-          <button
-            type="button"
-            className={styles.toolButton}
-            onClick={toggleLanguageMenu}
-            aria-label={t('language.switch')}
-            title={t('language.switch')}
-            aria-haspopup="menu"
-            aria-expanded={languageMenuOpen}
-          >
-            <IconLanguages size={17} />
-          </button>
-          {languageMenuOpen && (
-            <div
-              className={styles.languagePopover}
-              role="menu"
-              aria-label={t('language.switch')}
-            >
-              {LANGUAGE_ORDER.map((lang) => (
-                <button
-                  key={lang}
-                  type="button"
-                  className={`${styles.languageOption} ${
-                    language === lang ? styles.languageOptionActive : ''
-                  }`}
-                  onClick={() => handleLanguageSelect(lang)}
-                  role="menuitemradio"
-                  aria-checked={language === lang}
-                >
-                  {t(LANGUAGE_LABEL_KEYS[lang])}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
+      <AppearanceToolbar />
 
       <div className={styles.formPanel}>
         {showSplash ? (
