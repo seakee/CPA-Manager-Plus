@@ -38,8 +38,6 @@ export function AccountConfigurationTab({
     state,
     draft,
     errors,
-    dirty,
-    canSave,
     rawDataText,
     sharedSourceReadOnly,
     sourceMemberCount,
@@ -128,34 +126,7 @@ export function AccountConfigurationTab({
       role="region"
       aria-label={t('accounts.detail_tab_config')}
     >
-      <div className={styles.configurationToolbar}>
-        {dirty ? (
-          <span className={styles.configurationDirtyBadge} role="status">
-            {t('accounts.config_unsaved')}
-          </span>
-        ) : null}
-        <div className={styles.configurationToolbarActions}>
-          <Button
-            variant="secondary"
-            size="sm"
-            className={styles.configurationToolbarButton}
-            onClick={editor.reset}
-            disabled={!dirty || state.saving}
-          >
-            {t('common.reset')}
-          </Button>
-          <Button
-            size="sm"
-            className={styles.configurationToolbarButton}
-            onClick={() => void editor.save()}
-            loading={state.saving}
-            disabled={!canSave}
-          >
-            {t('common.save')}
-          </Button>
-        </div>
-      </div>
-
+      {/* Save / discard live in the drawer footer save pill (shared with the Models tab). */}
       {sharedSourceReadOnly ? (
         <div className={styles.configurationReadOnlyNotice} role="note">
           {t('accounts.config_shared_source_read_only', { count: sourceMemberCount })}

@@ -2615,7 +2615,12 @@
   font-size: 12px;
   font-weight: 500;
   line-height: 1.4;
-  @include text-ellipsis;
+  // Wrap rather than ellipsize so the copyable file name stays visible next to
+  // the header controls.
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 4px;
 }
 
 .drawerFileNameCopy {
@@ -3628,8 +3633,8 @@
 
 .accountModelsControls {
   display: grid;
-  grid-template-columns: minmax(180px, 0.85fr) minmax(260px, 1.15fr);
-  align-items: end;
+  grid-template-columns: minmax(180px, 0.85fr) minmax(240px, 1.15fr) auto;
+  align-items: center;
   gap: 10px;
   min-width: 0;
 
@@ -3719,6 +3724,43 @@
 .accountModelRowExcluded {
   border-color: color-mix(in srgb, var(--accounts-warning) 26%, var(--accounts-border));
   background: color-mix(in srgb, var(--accounts-warning) 4%, var(--accounts-surface));
+}
+
+.accountModelRowChanged {
+  border-color: color-mix(in srgb, var(--primary-color) 45%, var(--accounts-border));
+  background: color-mix(in srgb, var(--primary-color) 5%, var(--accounts-surface));
+}
+
+.accountModelUnsavedDot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--warning-color);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--warning-color) 25%, transparent);
+}
+
+.accountModelLockedReason {
+  @include button-reset;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accounts-muted);
+  white-space: nowrap;
+
+  &:is(button) {
+    color: var(--primary-color);
+    cursor: pointer;
+
+    &:hover {
+      text-decoration: underline;
+    }
+  }
+}
+
+.accountModelsMenuTrigger {
+  min-height: 34px;
+  border-radius: 8px;
+  background: var(--accounts-surface);
 }
 
 .accountModelMain {
@@ -3828,6 +3870,7 @@
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  gap: 10px;
   min-width: 0;
 }
 
@@ -5257,11 +5300,35 @@
 }
 
 .drawerActions {
-  justify-content: flex-end;
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  // Centred in the drawer. The save pill keeps a constant width (its status slot is
+  // sized to the longest status), so nothing moves when the status changes.
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: wrap;
 
   :global(.btn) {
     min-height: 36px;
   }
+}
+
+// Header controls: account routing switch + account actions menu, the same
+// ToggleSwitch the table row uses so on/off reads identically everywhere.
+.drawerTitleControls {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 10px;
+  margin-left: auto;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.drawerSavePill {
+  box-shadow: var(--shadow-md, 0 6px 18px rgba(15, 23, 42, 0.12));
 }
 
 .drawerMoreActions {
@@ -7745,4 +7812,44 @@
   .accountCardBusiness .quotaEmptyState {
     justify-content: center;
   }
+}
+
+// Quota auto-refresh selector (same construction as the Monitoring page's).
+.quotaAutoRefreshField {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 6px 0 9px;
+  border-radius: 10px;
+  border: 1px solid var(--accounts-border);
+  background: var(--accounts-surface);
+}
+
+.quotaAutoRefreshLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--accounts-muted);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.quotaAutoRefreshSelect {
+  width: 92px;
+  flex: 0 0 auto;
+}
+
+.quotaAutoRefreshSelectTrigger {
+  min-width: 72px;
+  height: 30px !important;
+  padding: 0 2px 0 6px !important;
+  border: 0 !important;
+  border-radius: 8px !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
 }
