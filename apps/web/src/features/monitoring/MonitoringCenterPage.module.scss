@@ -965,15 +965,27 @@
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  flex-wrap: wrap;
+  // One row on desktop: the search box gives up width before anything wraps.
+  flex-wrap: nowrap;
   gap: 8px;
   min-width: 0;
 }
 
 .accountOverviewSearchWrap {
-  flex: 0 0 auto;
-  width: 220px;
-  min-width: 0;
+  flex: 1 1 200px;
+  width: auto;
+  max-width: 220px;
+  min-width: 120px;
+}
+
+// The tab group (Accounts / Keys / Realtime with counts) never shrinks either.
+.dataPanelHeader > :first-child {
+  flex-shrink: 0;
+}
+
+// The view switch never shrinks; the search box and sort menu give way first.
+.accountOverviewToolbarRow > :last-child {
+  flex-shrink: 0;
 }
 
 .accountOverviewSearchWrap :global(.form-group) {
@@ -1979,6 +1991,7 @@
 
   .accountOverviewToolbarRow {
     justify-content: flex-start;
+    flex-wrap: wrap;
   }
 
   .accountOverviewSearchWrap {
