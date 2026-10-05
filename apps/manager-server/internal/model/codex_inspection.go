@@ -35,8 +35,9 @@ const (
 	CodexInspectionActionStatusSkipped     = "skipped"
 	CodexInspectionActionStatusNeedsReview = "needs_review"
 
-	CodexInspectionTargetCodex = "codex"
-	CodexInspectionTargetXAI   = "xai"
+	CodexInspectionTargetCodex  = "codex"
+	CodexInspectionTargetXAI    = "xai"
+	CodexInspectionTargetClaude = "claude"
 
 	DefaultXAIInspectionModel    = "grok-4.5"
 	DefaultXAIInspectionPrompt   = "Reply with exactly OK."
@@ -361,7 +362,7 @@ func ValidateCodexInspectionConfig(input ManagerCodexInspectionConfig) error {
 
 func IsCodexInspectionTargetType(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case CodexInspectionTargetCodex, CodexInspectionTargetXAI:
+	case CodexInspectionTargetCodex, CodexInspectionTargetXAI, CodexInspectionTargetClaude:
 		return true
 	default:
 		return false
@@ -384,7 +385,7 @@ func NormalizeCodexInspectionTargetTypes(values []string, legacyTargetType strin
 		}
 	}
 	result := make([]string, 0, len(selected))
-	for _, target := range []string{CodexInspectionTargetCodex, CodexInspectionTargetXAI} {
+	for _, target := range []string{CodexInspectionTargetCodex, CodexInspectionTargetXAI, CodexInspectionTargetClaude} {
 		if _, ok := selected[target]; ok {
 			result = append(result, target)
 		}
