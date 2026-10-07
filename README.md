@@ -110,6 +110,7 @@ See [Choosing A CPA Panel](https://seakee.github.io/CPA-Manager-Plus/docs/en/gui
 - Inspect Codex and xAI accounts locally or on a Manager Server schedule.
 - Read quota windows, reset evidence, credential state, workspace state, and provider-specific health signals when available.
 - Apply controlled quota cooldowns and route credential failures into an account action queue for review and recovery.
+- Message login owners a one-time self-service reconnect link through your webhook when a Claude, Codex, Antigravity, xAI, or Muse login needs a new sign-in.
 - Open the unified [Accounts Demo](https://seakee.github.io/CPA-Manager-Plus/#/demo/accounts).
 
 ### Production Operations

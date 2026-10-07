@@ -882,6 +882,30 @@ func Migrate(db *sql.DB) error {
 			updated_at_ms integer not null,
 			primary key (file_name, provider, auth_index, account_id, account_snapshot)
 		)`,
+		`create table if not exists reconnect_requests (
+			id integer primary key autoincrement,
+			provider text not null,
+			email text not null,
+			auth_file_name text not null default '',
+			token_hash text not null unique,
+			status text not null,
+			purpose text not null default 'reconnect',
+			manual integer not null default 0,
+			reason text not null default '',
+			oauth_state text not null default '',
+			oauth_started_at_ms integer not null default 0,
+			oauth_deadline_ms integer not null default 0,
+			known_auth_files text not null default '',
+			followup_count integer not null default 0,
+			created_at_ms integer not null,
+			expires_at_ms integer not null,
+			notified_at_ms integer not null default 0,
+			completed_at_ms integer not null default 0
+		)`,
+		`create index if not exists idx_reconnect_requests_owner_status
+			on reconnect_requests(provider, email, status)`,
+		`create index if not exists idx_reconnect_requests_status_created
+			on reconnect_requests(status, created_at_ms)`,
 		`create table if not exists quota_cooldowns (
 			id integer primary key autoincrement,
 			auth_file_name text not null,

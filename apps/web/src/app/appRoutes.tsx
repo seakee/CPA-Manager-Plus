@@ -2,6 +2,7 @@ import { Navigate, type RouteObject } from 'react-router-dom';
 import { MainLayout } from '@/components/layout/MainLayout';
 import { DemoPage } from '@/pages/DemoPage';
 import { LoginPage } from '@/pages/LoginPage';
+import { ReconnectPage } from '@/pages/ReconnectPage';
 import { ProtectedRoute } from '@/router/ProtectedRoute';
 import { RootShell } from './RootShell';
 
@@ -16,6 +17,8 @@ const appRoutes: RouteObject[] = [
         ]
       : [
           { path: '/login', element: <LoginPage /> },
+          // Public: opened from a one-time reconnect link (Manager Server only).
+          { path: '/reconnect/:token', element: <ReconnectPage /> },
           {
             path: '/*',
             element: (

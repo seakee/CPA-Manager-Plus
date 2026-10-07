@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	reconnectsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/reconnect"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -67,6 +68,7 @@ type Context struct {
 	ProxyService                   *proxysvc.Service
 	PanelService                   *panelsvc.Service
 	AutomationRuntimeService       AutomationRuntimeService
+	ReconnectService               *reconnectsvc.Service
 	DatabaseMaintenance            DatabaseMaintenanceStatusProvider
 }
 
@@ -195,5 +197,6 @@ func fromExisting(
 		),
 		PanelService:             panelsvc.New(cfg.PanelPath, embeddedPanel),
 		AutomationRuntimeService: runtimeService,
+		ReconnectService:         reconnectsvc.New(st.Reconnect, managerConfigService, authFileMutationCoordinator),
 	}
 }

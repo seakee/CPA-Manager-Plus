@@ -19,6 +19,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/modelprice"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotacooldown"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotasnapshot"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/reconnect"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageaggregate"
@@ -154,6 +155,7 @@ type Store struct {
 	CodexInspections codexinspection.Repository
 	DataMigrations   datamigration.Repository
 	QuotaCooldowns   quotacooldown.Repository
+	Reconnect        reconnect.Repository
 	QuotaSnapshots   quotasnapshot.Repository
 	UsageAggregates  usageaggregate.Repository
 	UsageArchives    *usagearchive.Repository
@@ -182,6 +184,7 @@ func New(db *sql.DB, protector ...*security.Protector) *Store {
 		CodexInspections: codexinspection.New(db),
 		DataMigrations:   datamigration.New(db),
 		QuotaCooldowns:   quotacooldown.New(db),
+		Reconnect:        reconnect.New(db, protector...),
 		QuotaSnapshots:   quotasnapshot.New(db),
 		UsageAggregates:  usageaggregate.New(db),
 		UsageArchives:    usagearchive.New(db),

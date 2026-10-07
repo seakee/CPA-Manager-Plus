@@ -1,0 +1,178 @@
+@use '../styles/variables.scss' as *;
+
+// Shell and card follow the login page (features/login/LoginPage.module.scss).
+
+.page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 72px 20px 32px;
+  background: transparent;
+
+  @media (max-width: $breakpoint-mobile) {
+    padding: 76px 14px 24px;
+  }
+}
+
+.card {
+  width: min(100%, 520px);
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 40px 35px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--app-radius-lg);
+  background: var(--glass-bg);
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: var(--glass-backdrop-filter);
+  -webkit-backdrop-filter: var(--glass-backdrop-filter);
+  animation: cardEnter 0.48s cubic-bezier(0.16, 1, 0.3, 1);
+
+  @media (max-width: $breakpoint-mobile) {
+    padding: 26px 18px;
+    border-radius: 16px;
+  }
+}
+
+.branding {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.brandLogo {
+  width: 200px;
+  max-width: 70%;
+  height: auto;
+  display: block;
+}
+
+.brandLogoDark {
+  display: none;
+}
+
+[data-theme='dark'] {
+  .brandLogoLight {
+    display: none;
+  }
+
+  .brandLogoDark {
+    display: block;
+  }
+}
+
+.loading {
+  display: flex;
+  justify-content: center;
+  padding: 12px 0;
+}
+
+.title {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.text {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.steps {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.step {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 15px 16px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius-md);
+  background: var(--app-surface-muted);
+
+  :global(.form-group) {
+    margin-bottom: 0;
+  }
+}
+
+.stepTitle {
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.countdown {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius-sm);
+  background: var(--glass-bg);
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.countdownTime {
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  font-size: 16px;
+}
+
+.urgent {
+  color: var(--warning-color);
+}
+
+.expired {
+  color: var(--error-color);
+}
+
+.code {
+  font-family: $font-mono;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.error {
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--error-color) 40%, transparent);
+  border-radius: $radius-md;
+  background: color-mix(in srgb, var(--error-color) 10%, transparent);
+  color: var(--error-color);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.done {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  text-align: center;
+}
+
+@keyframes cardEnter {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

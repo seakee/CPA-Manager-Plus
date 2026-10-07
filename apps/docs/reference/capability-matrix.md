@@ -20,6 +20,7 @@ description: 对比 CPAMP 轻量面板和完整模式支持的管理、监控、
 | 模型价格和 API Key 别名                   | ❌                    | ✅              |
 | 服务端账号巡检和历史                      | ❌                    | ✅              |
 | 配额冷却与账号处理队列                    | ❌                    | ✅              |
+| 失效登录自助重连                          | ❌                    | ✅              |
 | 登录凭证                                  | CPA Management Key    | CPAMP Admin Key |
 | 备份、迁移状态、pprof                     | ❌                    | ✅              |
 
