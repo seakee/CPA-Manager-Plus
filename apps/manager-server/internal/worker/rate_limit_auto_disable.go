@@ -791,6 +791,23 @@ func (w *RateLimitAutoDisableWorker) recoverCooldown(ctx context.Context, baseUR
 		log.Printf("[quota-auto-disable] failed to enable auth file %q: %v", item.AuthFileName, err)
 		return false, err
 	}
+	verifiedTarget, verified, verifyErr := w.currentAuthFileTarget(ctx, baseURL, managementKey, cpaauthfiles.Identity{
+		AuthFileName:      target.File.Name,
+		AuthIndex:         target.File.AuthIndex,
+		Provider:          target.File.Provider,
+		AccountSnapshot:   target.File.AccountSnapshot,
+		AccountIDSnapshot: target.File.AccountID,
+	})
+	if verifyErr != nil {
+		reason := fmt.Sprintf("verify enabled auth file after recovery: %v", verifyErr)
+		_ = w.store.RecordQuotaCooldownFailure(ctx, item.ID, reason)
+		return false, errors.New(reason)
+	}
+	if !verified || verifiedTarget.File.Disabled {
+		reason := "credential remains disabled after recovery"
+		_ = w.store.RecordQuotaCooldownFailure(ctx, item.ID, reason)
+		return false, errors.New(reason)
+	}
 	if err := w.store.MarkQuotaCooldownRecovered(ctx, item.ID, now.UnixMilli()); err != nil {
 		rollbackCtx, cancelRollback := detachedAuthFileMutationContext(ctx, w.compensationTimeout)
 		defer cancelRollback()
