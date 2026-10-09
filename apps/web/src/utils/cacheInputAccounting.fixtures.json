@@ -94,5 +94,51 @@
     "context": { "executorType": "GeminiVertexExecutor", "displayModel": "claude-alias" },
     "tokens": { "input": 100, "cached": 0, "cache": 0, "read": 20, "creation": 10 },
     "expected": { "mode": "included_in_input", "uncached": 70, "totalInput": 100, "cacheRead": 20, "cacheCreation": 10 }
+  },
+  {
+    "name": "devin issue 838 cache-read with claude requested model",
+    "context": {
+      "executorType": "DevinExecutor",
+      "provider": "devin",
+      "requestedModel": "claude-fable-5-1"
+    },
+    "tokens": { "input": 229788, "cached": 228021, "cache": 0, "read": 228021, "creation": 0 },
+    "expected": {
+      "mode": "read_included_creation_separate",
+      "uncached": 1767,
+      "totalInput": 229788,
+      "cacheRead": 228021,
+      "cacheCreation": 0
+    }
+  },
+  {
+    "name": "devin cache-write read and creation",
+    "context": {
+      "executorType": "DevinExecutor",
+      "provider": "devin"
+    },
+    "tokens": { "input": 53, "cached": 0, "cache": 0, "read": 50, "creation": 14361 },
+    "expected": {
+      "mode": "read_included_creation_separate",
+      "uncached": 3,
+      "totalInput": 14414,
+      "cacheRead": 50,
+      "cacheCreation": 14361
+    }
+  },
+  {
+    "name": "executor contains devin does not match DevinExecutor",
+    "context": {
+      "executorType": "SomeDevinLikeExecutor",
+      "resolvedModel": "claude-sonnet-4"
+    },
+    "tokens": { "input": 100, "cached": 0, "cache": 0, "read": 20, "creation": 10 },
+    "expected": {
+      "mode": "separate_from_input",
+      "uncached": 100,
+      "totalInput": 130,
+      "cacheRead": 20,
+      "cacheCreation": 10
+    }
   }
 ]

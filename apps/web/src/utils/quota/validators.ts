@@ -8,6 +8,7 @@ export function resolveAuthProvider(file: AuthFileItem): string {
   const raw = file.provider ?? file.type ?? file.typo ?? '';
   const key = String(raw).trim().toLowerCase().replace(/_/g, '-');
   if (key === 'x-ai' || key === 'grok') return 'xai';
+  if (key === 'muse') return 'meta';
   return key;
 }
 
@@ -42,6 +43,14 @@ export function isKimiFile(file: AuthFileItem): boolean {
 
 export function isXaiFile(file: AuthFileItem): boolean {
   return resolveAuthProvider(file) === 'xai';
+}
+
+export function isDevinFile(file: AuthFileItem): boolean {
+  return resolveAuthProvider(file) === 'devin';
+}
+
+export function isMetaFile(file: AuthFileItem): boolean {
+  return resolveAuthProvider(file) === 'meta';
 }
 
 export function isRuntimeOnlyAuthFile(file: AuthFileItem): boolean {

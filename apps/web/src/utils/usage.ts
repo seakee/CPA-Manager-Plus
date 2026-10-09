@@ -3,6 +3,7 @@ import { maskApiKey } from './format';
 import { normalizeAuthIndex } from './authIndex';
 import { parseTimestampMs } from './timestamp';
 import { normalizeAnalyticsModel } from './analyticsModel';
+import { sha256Hex } from './apiKeyHash';
 
 export { normalizeAuthIndex };
 export { normalizeAnalyticsModel } from './analyticsModel';
@@ -76,7 +77,10 @@ export interface UsageTokens {
   cacheInputMode?: CacheInputMode | string;
 }
 
-export type CacheInputMode = 'included_in_input' | 'separate_from_input';
+export type CacheInputMode =
+  | 'included_in_input'
+  | 'separate_from_input'
+  | 'read_included_creation_separate';
 
 export interface UsageResponseHeaderQuotaWindow {
   used_percent?: number;
@@ -223,6 +227,16 @@ export interface UsageDetail {
   requestedModel?: string;
   resolved_model?: string;
   resolvedModel?: string;
+  response_model?: string;
+  responseModel?: string;
+  session_id?: string;
+  sessionId?: string;
+  parent_session_id?: string;
+  parentSessionId?: string;
+  access_token_sha256?: string;
+  accessTokenSha256?: string;
+  generate?: boolean;
+  stream?: boolean;
   latency_ms?: number;
   ttft_ms?: number;
   tokens: UsageTokens;
@@ -250,6 +264,7 @@ export interface UsageDetail {
   __modelName?: string;
   __requestedModel?: string;
   __resolvedModel?: string;
+  __responseModel?: string;
   __timestampMs?: number;
 }
 
@@ -270,9 +285,12 @@ export interface DurationFormatOptions {
 const TOKENS_PER_PRICE_UNIT = 1_000_000;
 const MODEL_PRICE_STORAGE_KEY = 'cli-proxy-model-prices-v2';
 const USAGE_ENDPOINT_METHOD_REGEX = /^(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s+(\S+)/i;
-const USAGE_SOURCE_PREFIX_KEY = 'k:';
-const USAGE_SOURCE_PREFIX_MASKED = 'm:';
-const USAGE_SOURCE_PREFIX_TEXT = 't:';
+export const USAGE_SOURCE_PREFIX_KEY = 'k:';
+export const USAGE_SOURCE_PREFIX_HASH = 'h:';
+export const USAGE_SOURCE_PREFIX_MASKED = 'm:';
+export const USAGE_SOURCE_PREFIX_TEXT = 't:';
+const CANONICAL_HASHED_SOURCE_REGEX = /^h:[0-9a-fA-F]{64}$/;
+const FNV_KEY_SOURCE_REGEX = /^k:[0-9a-fA-F]{16}$/;
 const KEY_LIKE_TOKEN_REGEX =
   /(sk-proj-[A-Za-z0-9-_]{6,}|sk-ant-[A-Za-z0-9-_]{6,}|sk-[A-Za-z0-9-_]{6,}|sess-[A-Za-z0-9-_]{6,}|ghp_[A-Za-z0-9]{6,}|github_pat_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z-_]{8,}|hf_[A-Za-z0-9]{6,}|pk_[A-Za-z0-9]{6,}|rk_[A-Za-z0-9]{6,})/;
 const MASKED_TOKEN_HINT_REGEX = /^[^\s]{1,24}(\*{2,}|\.{3})[^\s]{1,24}$/;
@@ -466,6 +484,7 @@ const normalizeCacheIdentity = (value: unknown): string =>
 const classifyExecutorCacheInputMode = (value: unknown): CacheInputMode | undefined => {
   const executor = normalizeCacheIdentity(value);
   if (!executor) return undefined;
+  if (executor === 'devinexecutor') return 'read_included_creation_separate';
   if (executor.includes('claude')) return 'separate_from_input';
   if (
     [
@@ -491,6 +510,9 @@ const classifyExecutorCacheInputMode = (value: unknown): CacheInputMode | undefi
 const classifyProviderCacheInputMode = (value: unknown): CacheInputMode | undefined => {
   const provider = normalizeCacheIdentity(value);
   if (!provider) return undefined;
+  if (provider === 'devin' || provider.startsWith('devin/')) {
+    return 'read_included_creation_separate';
+  }
   if (provider.includes('anthropic') || provider.includes('claude')) {
     return 'separate_from_input';
   }
@@ -518,6 +540,9 @@ const classifyProviderCacheInputMode = (value: unknown): CacheInputMode | undefi
 const classifyModelCacheInputMode = (value: unknown): CacheInputMode | undefined => {
   const model = normalizeCacheIdentity(value);
   if (!model) return undefined;
+  if (model === 'devin' || model.startsWith('devin/')) {
+    return 'read_included_creation_separate';
+  }
   if (model.includes('anthropic') || model.includes('claude')) {
     return 'separate_from_input';
   }
@@ -549,6 +574,7 @@ export const inferCacheInputMode = (
   const normalizedMode = normalizeCacheIdentity(context.explicitMode);
   if (normalizedMode === 'separate_from_input') return 'separate_from_input';
   if (normalizedMode === 'included_in_input') return 'included_in_input';
+  if (normalizedMode === 'read_included_creation_separate') return 'read_included_creation_separate';
   const executorMode = classifyExecutorCacheInputMode(context.executorType);
   if (executorMode) return executorMode;
   for (const provider of [context.provider, context.providerSnapshot]) {
@@ -583,14 +609,22 @@ export const normalizeCacheAccounting = (input: {
   );
   const read = legacyRead + rawRead;
   const mode = inferCacheInputMode(input.context, rawRead, creation);
+  let totalInputTokens = rawInput;
+  let uncachedInputTokens = Math.max(rawInput - read - creation, 0);
+  if (mode === 'separate_from_input') {
+    totalInputTokens = rawInput + read + creation;
+    uncachedInputTokens = rawInput;
+  } else if (mode === 'read_included_creation_separate') {
+    totalInputTokens = rawInput + creation;
+    uncachedInputTokens = Math.max(rawInput - read, 0);
+  }
   return {
     mode,
     legacyRead,
     cacheReadTokens: rawRead,
     cacheCreationTokens: creation,
-    totalInputTokens: mode === 'separate_from_input' ? rawInput + read + creation : rawInput,
-    uncachedInputTokens:
-      mode === 'separate_from_input' ? rawInput : Math.max(rawInput - read - creation, 0),
+    totalInputTokens,
+    uncachedInputTokens,
   };
 };
 
@@ -701,6 +735,21 @@ export function maskUsageSecretSource(secret: string): string {
   return `${trimmed.slice(0, 4)}...${trimmed.slice(-4)}`;
 }
 
+export function isOpaqueUsageSourceId(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  if (CANONICAL_HASHED_SOURCE_REGEX.test(trimmed)) return true;
+  if (FNV_KEY_SOURCE_REGEX.test(trimmed)) return true;
+  if (
+    trimmed.startsWith(USAGE_SOURCE_PREFIX_MASKED) &&
+    trimmed.length > USAGE_SOURCE_PREFIX_MASKED.length
+  ) {
+    return true;
+  }
+  return false;
+}
+
 export function normalizeUsageSourceId(
   value: unknown,
   masker: (val: string) => string = maskApiKey
@@ -709,6 +758,9 @@ export function normalizeUsageSourceId(
     typeof value === 'string' ? value : value === null || value === undefined ? '' : String(value);
   const trimmed = raw.trim();
   if (!trimmed) return '';
+  if (CANONICAL_HASHED_SOURCE_REGEX.test(trimmed)) {
+    return `${USAGE_SOURCE_PREFIX_HASH}${trimmed.slice(USAGE_SOURCE_PREFIX_HASH.length).toLowerCase()}`;
+  }
   if (trimmed.startsWith(USAGE_SOURCE_PREFIX_KEY)) return trimmed;
   if (trimmed.startsWith(USAGE_SOURCE_PREFIX_MASKED)) {
     if (BACKEND_MASKED_SOURCE_REGEX.test(trimmed)) return trimmed;
@@ -741,6 +793,10 @@ export function buildCandidateUsageSourceIds(input: {
   const apiKey = input.apiKey?.trim();
   if (apiKey) {
     result.push(normalizeUsageSourceId(apiKey));
+    const hashed = sha256Hex(apiKey);
+    if (hashed) {
+      result.push(`${USAGE_SOURCE_PREFIX_HASH}${hashed.toLowerCase()}`);
+    }
     result.push(`${USAGE_SOURCE_PREFIX_MASKED}${maskUsageSecretSource(apiKey)}`);
     result.push(`${USAGE_SOURCE_PREFIX_MASKED}${maskApiKey(apiKey)}`);
     result.push(`${USAGE_SOURCE_PREFIX_TEXT}${maskApiKey(apiKey)}`);
@@ -1092,9 +1148,16 @@ export function collectUsageDetailsWithEndpoint(usageData: unknown): UsageDetail
           ),
           header_trace_id: readDetailString(detailRaw.header_trace_id ?? detailRaw.headerTraceId),
           fail_body: readDetailString(detailRaw.fail_body ?? detailRaw.failBody ?? failRaw.body),
+          response_model: readDetailString(detailRaw.response_model ?? detailRaw.responseModel),
+          session_id: readDetailString(detailRaw.session_id ?? detailRaw.sessionId),
+          parent_session_id: readDetailString(detailRaw.parent_session_id ?? detailRaw.parentSessionId),
+          access_token_sha256: readDetailString(detailRaw.access_token_sha256 ?? detailRaw.accessTokenSHA256 ?? detailRaw.accessTokenSha256),
+          generate: typeof detailRaw.generate === 'boolean' ? detailRaw.generate : undefined,
+          stream: typeof detailRaw.stream === 'boolean' ? detailRaw.stream : undefined,
           __modelName: analyticsModel,
           __requestedModel: requestedModel,
           __resolvedModel: readDetailString(detailRaw.resolved_model ?? detailRaw.resolvedModel),
+          __responseModel: readDetailString(detailRaw.response_model ?? detailRaw.responseModel),
           __endpoint: endpoint,
           __endpointMethod: endpointMethod,
           __endpointPath: endpointPath,
