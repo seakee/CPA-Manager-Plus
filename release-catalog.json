@@ -550,5 +550,51 @@
       }
     },
     "digest": "sha256:b8f7b97cd242c11d95b905e2b402275fc5d664025bc829773a260d1da17d18b5"
+  },
+  "v1.14.5": {
+    "info": {
+      "schema_version": 1,
+      "release": {
+        "version": "v1.14.5",
+        "stage": "stable",
+        "source_commit": "dbf61ddf438f399558722df3467355c42af9005d"
+      },
+      "content": {
+        "summary": {
+          "zh": "修复 Codex 重置次数在额度刷新后消失或陈旧的问题，并支持无需 API 密钥的 OpenAI-compatible 提供商。",
+          "en": "Fixes Codex reset-credit counts disappearing or becoming stale after quota refresh, and adds support for keyless OpenAI-compatible providers."
+        },
+        "notes": {
+          "zh": "https://github.com/seakee/CPA-Manager-Plus/blob/v1.14.5/docs/release-notes/v1.14.5-zh.md",
+          "en": "https://github.com/seakee/CPA-Manager-Plus/blob/v1.14.5/docs/release-notes/v1.14.5-en.md"
+        }
+      },
+      "update": {
+        "breaking": false,
+        "migration_required": false,
+        "minimum_direct_upgrade_version": null,
+        "upgrade_guide_url": "https://github.com/seakee/CPA-Manager-Plus/releases/tag/v1.14.5"
+      },
+      "distribution": {
+        "docker": {
+          "image": "seakee/cpa-manager-plus",
+          "version_tag": "v1.14.5"
+        },
+        "native": {
+          "assets": [
+            "cpa-manager-plus_v1.14.5_darwin_amd64.tar.gz",
+            "cpa-manager-plus_v1.14.5_darwin_arm64.tar.gz",
+            "cpa-manager-plus_v1.14.5_linux_amd64.tar.gz",
+            "cpa-manager-plus_v1.14.5_linux_arm64.tar.gz",
+            "cpa-manager-plus_v1.14.5_windows_amd64.zip",
+            "cpa-manager-plus_v1.14.5_windows_arm64.zip"
+          ]
+        }
+      },
+      "compatibility": {
+        "minimum_cpa_version": "v7.3.4"
+      }
+    },
+    "digest": "sha256:84055e09f0c8b2152b7d4ba4ce4c4bc315ce690c2594ec55e9713d38acb34fef"
   }
 }
