@@ -1,10 +1,13 @@
 import { useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
+import { DropdownMenu, type DropdownMenuItem } from '@/components/ui/DropdownMenu';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Input } from '@/components/ui/Input';
+import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { SegmentedTabs } from '@/components/ui/SegmentedTabs';
-import { IconCopy, IconRefreshCw } from '@/components/ui/icons';
+import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
+import { IconCopy, IconMoreVertical, IconRefreshCw } from '@/components/ui/icons';
 import type { AccountRow } from '@/features/accounts/model/accountRows';
 import {
   buildAccountModelRuleDiff,
@@ -90,7 +93,6 @@ const isKnownDisabledScope = (scope: AccountModelRuleScope): boolean =>
 export function AccountModelsTab({
   row,
   disableControls,
-  fileName,
   fileType,
   loading,
   refreshing,
@@ -111,7 +113,7 @@ export function AccountModelsTab({
   const { t } = useTranslation();
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<AccountModelFilter>('all');
-  const { state, draft, dirty, canSave, sharedSourceReadOnly, sourceMemberCount } = editor;
+  const { state, draft, sharedSourceReadOnly, sourceMemberCount } = editor;
   const providerKey = normalizeProviderKey(fileType || row.provider);
   const globalRulesKnown = globalExcludedState === 'ready';
   const aliasEntries = useMemo(() => {
@@ -171,7 +173,10 @@ export function AccountModelsTab({
       ),
     [draft?.excludedModelsText, state?.originalDraft?.excludedModelsText]
   );
-  const modelRulesDirty = diff.added.length > 0 || diff.removed.length > 0;
+  const changedRules = useMemo(
+    () => new Set([...diff.added, ...diff.removed].map((rule) => rule.trim().toLowerCase())),
+    [diff.added, diff.removed]
+  );
   const hasUnresolvedRows = useMemo(
     () => projection.rows.some((row) => !row.ruleModelIdResolved),
     [projection.rows]
@@ -184,9 +189,7 @@ export function AccountModelsTab({
           ? model.ruleModelId.trim().toLowerCase()
           : model.id.trim().toLowerCase();
       return (
-        aliasesByModelId.get(lookupKey) ??
-        aliasesByModelId.get(model.id.trim().toLowerCase()) ??
-        []
+        aliasesByModelId.get(lookupKey) ?? aliasesByModelId.get(model.id.trim().toLowerCase()) ?? []
       );
     },
     [aliasesByModelId]
@@ -238,77 +241,102 @@ export function AccountModelsTab({
     editor.updateField('excludedModelsText', next.join('\n'));
   };
 
-  const renderRowAction = (model: AccountModelRuleRow) => {
-    if (sharedSourceReadOnly && model.credentialPatterns.length > 0) {
-      return (
-        <Button variant="secondary" size="xs" disabled>
-          {t('accounts.model_shared_source_read_only_action')}
-        </Button>
-      );
+  interface RowControl {
+    /** null: no switch (the model is decided by a rule this credential does not own). */
+    switchState: { checked: boolean; disabled: boolean; title?: string } | null;
+    /** Names the other rule that keeps the model off, linking to its editor when editable. */
+    reason?: { label: string; onOpen?: () => void };
+  }
+
+  // The switch always means "this credential's own exact rule". A global, wildcard or
+  // shared rule that also applies is named next to it and links to its editor.
+  const getRowControl = (model: AccountModelRuleRow): RowControl => {
+    if (
+      sharedSourceReadOnly &&
+      (model.credentialPatterns.length > 0 || model.scope === 'available')
+    ) {
+      return { switchState: null, reason: { label: t('accounts.model_locked_shared') } };
     }
+    const unresolvedTitle = !model.ruleModelIdResolved
+      ? t('accounts.model_rule_mapping_unavailable')
+      : undefined;
+    const globalReason = { label: t('accounts.model_locked_global'), onOpen: onManageGlobalRules };
+    const wildcardReason = {
+      label: t('accounts.model_locked_advanced'),
+      onOpen: onOpenAdvancedRules,
+    };
     if (model.hasCredentialExactRule) {
-      const remainsExcluded =
-        model.hasCredentialWildcardRule || model.globalPatterns.length > 0 || !globalRulesKnown;
-      return (
-        <Button
-          variant="secondary"
-          size="xs"
-          disabled={editingDisabled || !model.ruleModelIdResolved}
-          onClick={() => updateExactRule(model, false)}
-          title={
-            remainsExcluded
-              ? t('accounts.model_remove_exact_rule_hint')
-              : t('accounts.model_restore_for_credential')
-          }
-        >
-          {remainsExcluded
-            ? t('accounts.model_remove_exact_rule')
-            : t('accounts.model_restore_for_credential')}
-        </Button>
-      );
+      return {
+        switchState: {
+          checked: false,
+          disabled: editingDisabled || !model.ruleModelIdResolved,
+          title: unresolvedTitle,
+        },
+        reason:
+          model.globalPatterns.length > 0
+            ? globalReason
+            : model.hasCredentialWildcardRule
+              ? wildcardReason
+              : undefined,
+      };
     }
-    if (model.hasCredentialWildcardRule) {
-      return (
-        <Button
-          variant="secondary"
-          size="xs"
-          disabled={editingDisabled}
-          onClick={onOpenAdvancedRules}
-        >
-          {t('accounts.model_edit_advanced_rules')}
-        </Button>
-      );
-    }
-    if (model.globalPatterns.length > 0) {
-      return (
-        <Button variant="secondary" size="xs" onClick={onManageGlobalRules}>
-          {t('accounts.model_manage_global_rules')}
-        </Button>
-      );
-    }
-    if (sharedSourceReadOnly) {
-      return (
-        <Button variant="secondary" size="xs" disabled>
-          {t('accounts.model_shared_source_read_only_action')}
-        </Button>
-      );
-    }
-    return (
-      <Button
-        variant="secondary"
-        size="xs"
-        disabled={editingDisabled || !model.ruleModelIdResolved}
-        onClick={() => updateExactRule(model, true)}
-        title={
-          !model.ruleModelIdResolved
-            ? t('accounts.model_rule_mapping_unavailable')
-            : undefined
-        }
-      >
-        {t('accounts.model_disable_for_credential')}
-      </Button>
-    );
+    if (model.hasCredentialWildcardRule) return { switchState: null, reason: wildcardReason };
+    if (model.globalPatterns.length > 0) return { switchState: null, reason: globalReason };
+    return {
+      switchState: {
+        checked: true,
+        disabled: editingDisabled || !model.ruleModelIdResolved,
+        title: unresolvedTitle,
+      },
+    };
   };
+
+  const isRowChanged = (model: AccountModelRuleRow) =>
+    Boolean(model.ruleModelId) && changedRules.has(model.ruleModelId.trim().toLowerCase());
+
+  const setShownRows = (enabled: boolean) => {
+    if (editingDisabled) return;
+    let next = credentialRules;
+    filteredRows.forEach((model) => {
+      const state = getRowControl(model).switchState;
+      if (!state || state.disabled || state.checked === enabled) return;
+      next = setAccountModelExactRule(
+        next,
+        model.ruleModelId,
+        !enabled,
+        model.equivalentRuntimeModelIds
+      );
+    });
+    if (next !== credentialRules) editor.updateField('excludedModelsText', next.join('\n'));
+  };
+
+  const listMenuItems: DropdownMenuItem[] = [
+    {
+      key: 'turn-on-shown',
+      label: t('accounts.model_turn_on_shown', { count: filteredRows.length }),
+      onClick: () => setShownRows(true),
+      disabled: editingDisabled || filteredRows.length === 0,
+    },
+    {
+      key: 'turn-off-shown',
+      label: t('accounts.model_turn_off_shown', { count: filteredRows.length }),
+      onClick: () => setShownRows(false),
+      disabled: editingDisabled || filteredRows.length === 0,
+    },
+    { key: 'list-divider', type: 'divider' },
+    {
+      key: 'refresh-models',
+      label: t('accounts.model_refresh_list'),
+      icon: <IconRefreshCw size={15} />,
+      onClick: onRefresh,
+      disabled: loading || refreshing,
+    },
+    {
+      key: 'manage-global-rules',
+      label: t('accounts.model_manage_global_rules'),
+      onClick: onManageGlobalRules,
+    },
+  ];
 
   const showUnsupported = error === 'unsupported' && projection.rows.length === 0;
   const showLoadFailed = error === 'failed' && projection.rows.length === 0;
@@ -329,29 +357,6 @@ export function AccountModelsTab({
       aria-label={t('accounts.detail_tab_models')}
       aria-busy={loading || modelDefinitionsLoading || globalExcludedState === 'loading'}
     >
-      <div className={styles.accountModelsHeader}>
-        <div className={styles.accountModelsSummary}>
-          <strong>
-            {t('accounts.detail_models_summary', { count: projection.rows.length, file: fileName })}
-          </strong>
-        </div>
-        <div className={styles.headerActions}>
-          <Button variant="secondary" size="sm" onClick={onManageGlobalRules}>
-            {t('accounts.model_manage_global_rules')}
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={onRefresh}
-            disabled={loading || refreshing}
-            loading={refreshing}
-          >
-            {!refreshing ? <IconRefreshCw size={14} /> : null}
-            {t('common.refresh')}
-          </Button>
-        </div>
-      </div>
-
       {row.runtimeOnly ? (
         <div className={styles.configurationReadOnlyNotice} role="note">
           {t('accounts.config_runtime_only_desc')}
@@ -414,51 +419,6 @@ export function AccountModelsTab({
         </div>
       ) : null}
 
-      {editorReady && !sharedSourceReadOnly ? (
-        <div className={styles.configurationToolbar}>
-          <div className={styles.accountModelsChangeSummary} aria-live="polite">
-            {dirty ? (
-              <>
-                <span className={styles.configurationDirtyBadge}>
-                  {t('accounts.config_unsaved')}
-                </span>
-                {modelRulesDirty ? (
-                  <span>
-                    {t('accounts.model_change_summary', {
-                      added: diff.added.length,
-                      removed: diff.removed.length,
-                      unchanged: diff.unchanged.length,
-                    })}
-                  </span>
-                ) : (
-                  <span>{t('accounts.model_other_config_changes')}</span>
-                )}
-              </>
-            ) : (
-              <span>{t('accounts.model_changes_empty')}</span>
-            )}
-          </div>
-          <div className={styles.configurationToolbarActions}>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={editor.reset}
-              disabled={!dirty || state?.saving}
-            >
-              {t('common.reset')}
-            </Button>
-            <Button
-              size="sm"
-              onClick={() => void editor.save()}
-              loading={state?.saving}
-              disabled={!canSave || row.disabled}
-            >
-              {t('common.save')}
-            </Button>
-          </div>
-        </div>
-      ) : null}
-
       <div className={styles.accountModelsControls}>
         <Input
           value={query}
@@ -475,6 +435,16 @@ export function AccountModelsTab({
           equalWidth
           fullWidth
         />
+        <div className={styles.accountModelsMenu}>
+          {refreshing ? <LoadingSpinner size={16} /> : null}
+          <DropdownMenu
+            items={listMenuItems}
+            ariaLabel={t('accounts.model_list_actions')}
+            triggerTitle={t('accounts.model_list_actions')}
+            triggerIcon={<IconMoreVertical size={16} />}
+            triggerClassName={styles.accountModelsMenuTrigger}
+          />
+        </div>
       </div>
 
       {projection.advancedCredentialRules.length > 0 ||
@@ -525,12 +495,14 @@ export function AccountModelsTab({
         <div className={styles.accountModelsList}>
           {filteredRows.map((model) => {
             const modelAliases = getModelAliases(model);
+            const control = getRowControl(model);
+            const changed = isRowChanged(model);
             return (
               <article
                 key={model.id}
                 className={`${styles.accountModelRow} ${
                   isKnownDisabledScope(model.scope) ? styles.accountModelRowExcluded : ''
-                }`}
+                } ${changed ? styles.accountModelRowChanged : ''}`}
                 data-model-scope={model.scope}
               >
                 <div className={styles.accountModelMain}>
@@ -549,6 +521,14 @@ export function AccountModelsTab({
                     >
                       {t(getScopeTranslationKey(model.scope))}
                     </span>
+                    {changed ? (
+                      <span
+                        className={styles.accountModelUnsavedDot}
+                        role="img"
+                        aria-label={t('accounts.config_unsaved')}
+                        title={t('accounts.config_unsaved')}
+                      />
+                    ) : null}
                   </div>
                   {model.display_name && model.display_name !== model.id ? (
                     <span className={styles.accountModelDisplayName}>{model.display_name}</span>
@@ -577,7 +557,31 @@ export function AccountModelsTab({
                     ) : null}
                   </div>
                 </div>
-                <div className={styles.accountModelActions}>{renderRowAction(model)}</div>
+                <div className={styles.accountModelActions}>
+                  {control.reason ? (
+                    control.reason.onOpen ? (
+                      <button
+                        type="button"
+                        className={styles.accountModelLockedReason}
+                        onClick={control.reason.onOpen}
+                      >
+                        {control.reason.label}
+                      </button>
+                    ) : (
+                      <span className={styles.accountModelLockedReason}>
+                        {control.reason.label}
+                      </span>
+                    )
+                  ) : null}
+                  <span title={control.switchState?.title ?? control.reason?.label}>
+                    <ToggleSwitch
+                      checked={control.switchState?.checked ?? false}
+                      disabled={!control.switchState || control.switchState.disabled}
+                      onChange={(enabled) => updateExactRule(model, !enabled)}
+                      ariaLabel={t('accounts.model_toggle_label', { model: model.id })}
+                    />
+                  </span>
+                </div>
               </article>
             );
           })}

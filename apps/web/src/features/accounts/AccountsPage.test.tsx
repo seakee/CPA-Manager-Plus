@@ -1073,6 +1073,15 @@ const findBatchMoreItem = (renderer: ReactTestRenderer, key: string) => {
   return item;
 };
 
+const findDrawerStatusToggle = (renderer: ReactTestRenderer) =>
+  renderer.root
+    .findByType(Drawer)
+    .findAllByType(ToggleSwitch)
+    .find((node) => node.props.label === 'auth_files.status_toggle_label') ??
+  (() => {
+    throw new Error('Drawer status toggle not found');
+  })();
+
 const findDrawerMoreItem = (renderer: ReactTestRenderer, key: string) => {
   const drawerMoreMenu = renderer.root
     .findAllByType(DropdownMenu)
@@ -3217,11 +3226,77 @@ describe('AccountsPage replacement flows', () => {
     };
     const renderer = await renderAccountsPage();
 
-    expect(findButtonByText(renderer, 'accounts.disable').props.disabled).toBe(true);
+    expect(findDrawerStatusToggle(renderer).props.disabled).toBe(true);
     expect(findDrawerMoreItem(renderer, 'refresh-credential').disabled).toBe(true);
     expect(findDrawerMoreItem(renderer, 'delete').disabled).toBe(true);
     expect(findDrawerMoreItem(renderer, 'download').disabled).toBe(false);
-    expect(findButtonByText(renderer, 'accounts.refresh_quota').props.disabled).not.toBe(true);
+    expect(findDrawerMoreItem(renderer, 'refresh-quota').disabled).not.toBe(true);
+  });
+
+  it('uses the table status toggle in the drawer header instead of a footer button', async () => {
+    mocks.location = {
+      pathname: '/accounts',
+      search: '?account=codex.json%00auth-1&tab=config',
+    };
+    const renderer = await renderAccountsPage();
+    const drawer = renderer.root.findByType(Drawer);
+    const toggle = findDrawerStatusToggle(renderer);
+
+    expect(toggle.props.checked).toBe(true);
+    expect(
+      drawer.findAllByType(Button).some((node) => {
+        const label = readText(node.props.children);
+        return label.includes('accounts.disable') || label.includes('accounts.refresh_quota');
+      })
+    ).toBe(false);
+
+    await act(async () => {
+      await toggle.props.onChange(false);
+    });
+    expect(mocks.batchSetStatus).toHaveBeenCalledExactlyOnceWith(expect.anything(), false);
+  });
+
+  it('refreshes visible-page quota silently on the auto-refresh interval', async () => {
+    vi.useFakeTimers();
+    let visibilityState: DocumentVisibilityState = 'visible';
+    const documentEvents = new EventTarget();
+    vi.stubGlobal('document', {
+      get visibilityState() {
+        return visibilityState;
+      },
+      addEventListener: documentEvents.addEventListener.bind(documentEvents),
+      removeEventListener: documentEvents.removeEventListener.bind(documentEvents),
+    });
+    mocks.files = [makeCodexFile('codex-auto.json', 'auth-auto', 'auto@example.com')];
+    const summarySpy = vi
+      .spyOn(CODEX_SUMMARY_CONFIG, 'fetchQuota')
+      .mockResolvedValue(makeCodexQuotaData());
+
+    await renderAccountsPage();
+    await flushPromises();
+    summarySpy.mockClear();
+    mocks.showNotification.mockClear();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+    });
+    expect(summarySpy).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    await flushPromises();
+    expect(summarySpy).toHaveBeenCalledTimes(1);
+    expect(mocks.showNotification).not.toHaveBeenCalled();
+
+    visibilityState = 'hidden';
+    await act(async () => {
+      documentEvents.dispatchEvent(new Event('visibilitychange'));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+    });
+    expect(summarySpy).toHaveBeenCalledTimes(1);
   });
 
   it('clears the selected account and detail tab from the URL after the drawer closes', async () => {
@@ -12990,12 +13065,7 @@ describe('AccountsPage replacement flows', () => {
     mocks.getAccountHistory.mockClear();
 
     await act(async () => {
-      const detailRefreshButton = renderer.root
-        .findByType(Drawer)
-        .findAllByType(Button)
-        .find((node) => readText(node.props.children).includes('accounts.refresh_quota'));
-      if (!detailRefreshButton) throw new Error('Detail quota refresh button not found');
-      detailRefreshButton.props.onClick();
+      findDrawerMoreItem(renderer, 'refresh-quota').onClick();
       await Promise.resolve();
     });
     await flushPromises();
@@ -18568,12 +18638,7 @@ describe('AccountsPage replacement flows', () => {
       await flushPromises();
 
       await act(async () => {
-        const detailRefreshButton = renderer.root
-          .findByType(Drawer)
-          .findAllByType(Button)
-          .find((node) => readText(node.props.children).includes('accounts.refresh_quota'));
-        if (!detailRefreshButton) throw new Error('Detail quota refresh button not found');
-        detailRefreshButton.props.onClick();
+        findDrawerMoreItem(renderer, 'refresh-quota').onClick();
         await Promise.resolve();
       });
       await flushPromises();

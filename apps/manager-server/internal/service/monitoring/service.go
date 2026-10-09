@@ -2605,8 +2605,21 @@ func filterOptionsBaseFilter(filter store.AnalyticsFilter) store.AnalyticsFilter
 	return optionFilter
 }
 
+// Longest ranges the sub-hour granularities accept (25h covers a DST day); a
+// longer range falls back to the default so a chart stays under ~1500 points.
+const (
+	maxMinuteGranularityRangeMS      = 25 * 60 * 60 * 1000
+	maxQuarterHourGranularityRangeMS = 7*24*60*60*1000 + 60*60*1000
+)
+
 func normalizeGranularity(input string, fromMS int64, toMS int64) string {
 	if input == "day" || input == "hour" {
+		return input
+	}
+	if input == usage.AnalyticsGranularityMinute && toMS-fromMS <= maxMinuteGranularityRangeMS {
+		return input
+	}
+	if input == usage.AnalyticsGranularityQuarterHour && toMS-fromMS <= maxQuarterHourGranularityRangeMS {
 		return input
 	}
 	if toMS-fromMS <= 24*60*60*1000 {
@@ -4814,10 +4827,7 @@ func floatValueOrZero(value *float64) float64 {
 }
 
 func bucketSizeMS(granularity string) int64 {
-	if granularity == "day" {
-		return 24 * 60 * 60 * 1000
-	}
-	return 60 * 60 * 1000
+	return usage.AnalyticsBucketSizeMS(granularity)
 }
 
 func anomalySeverity(metricCount int) string {

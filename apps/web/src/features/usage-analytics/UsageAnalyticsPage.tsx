@@ -61,6 +61,7 @@ import {
   USAGE_METRICS,
   USAGE_SUCCESS_RATE_WATCH_THRESHOLD,
   USAGE_TIME_RANGES,
+  isUsageGranularityAvailable,
   type UsageAnalyticsTab,
   type UsageEntityTrendSeries,
   type UsageAnalyticsGranularity,
@@ -2761,18 +2762,31 @@ function UsageAnalyticsPageInner() {
               className={styles.segmentedControl}
               aria-label={t('usage_analytics.filter_granularity')}
             >
-              {(['auto', 'hour', 'day'] as UsageAnalyticsGranularity[]).map((granularity) => (
-                <button
-                  key={granularity}
-                  type="button"
-                  className={`${styles.segmentButton} ${
-                    usage.filters.granularity === granularity ? styles.segmentButtonActive : ''
-                  }`}
-                  onClick={() => updateFilters({ granularity })}
-                >
-                  {t(`usage_analytics.granularity_${granularity}`)}
-                </button>
-              ))}
+              {(['auto', '1m', '15m', 'hour', 'day'] as UsageAnalyticsGranularity[]).map(
+                (granularity) => {
+                  const available = isUsageGranularityAvailable(granularity, usage.bounds);
+                  return (
+                    <button
+                      key={granularity}
+                      type="button"
+                      className={`${styles.segmentButton} ${
+                        usage.filters.granularity === granularity ? styles.segmentButtonActive : ''
+                      }`}
+                      disabled={!available}
+                      title={
+                        available
+                          ? undefined
+                          : t('usage_analytics.granularity_unavailable', {
+                              limit: t(`usage_analytics.granularity_limit_${granularity}`),
+                            })
+                      }
+                      onClick={() => updateFilters({ granularity })}
+                    >
+                      {t(`usage_analytics.granularity_${granularity}`)}
+                    </button>
+                  );
+                }
+              )}
             </div>
 
             <div className={styles.refreshControls}>

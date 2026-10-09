@@ -235,6 +235,9 @@ export interface CodexUsagePayload {
 export interface ClaudeUsageWindow {
   utilization: number;
   resets_at: string;
+  /** Present on dollar-capped windows (e.g. the Fable weekly allowance). */
+  limit_dollars?: number | null;
+  used_dollars?: number | null;
 }
 
 export interface ClaudeExtraUsage {
@@ -302,6 +305,9 @@ export interface ClaudeQuotaWindow {
   resetAccuracy?: QuotaResetAccuracy;
   limitWindowSeconds?: number | null;
   modelScope?: QuotaModelScope;
+  /** Dollar cap and spend for dollar-limited windows. */
+  limitUsd?: number | null;
+  usedUsd?: number | null;
 }
 
 export interface CredentialScopedQuotaState {

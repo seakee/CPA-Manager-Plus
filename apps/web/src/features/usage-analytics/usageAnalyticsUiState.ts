@@ -31,7 +31,7 @@ const TIME_RANGE_SET = new Set<UsageAnalyticsTimeRange>([
   '30d',
   'custom',
 ]);
-const GRANULARITY_SET = new Set<UsageAnalyticsGranularity>(['auto', 'hour', 'day']);
+const GRANULARITY_SET = new Set<UsageAnalyticsGranularity>(['auto', '1m', '15m', 'hour', 'day']);
 const STATUS_SET = new Set<UsageAnalyticsStatus>(['all', 'success', 'failed']);
 const LATENCY_SET = new Set<UsageAnalyticsLatencyFilter>(['all', '3000', '10000', '30000']);
 const CACHE_STATUS_SET = new Set<UsageAnalyticsCacheStatus>(['all', 'hit', 'miss']);

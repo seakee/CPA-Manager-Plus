@@ -37,6 +37,7 @@ import {
   buildUsageTimeline,
   getSelectableApiKeyHash,
   getUsageRangeBounds,
+  getUsageBucketSizeMs,
   resolveUsageGranularity,
   USAGE_ANALYTICS_DEFAULT_FILTERS,
   type UsageMatrixDimension,
@@ -258,8 +259,7 @@ export function useUsageAnalytics() {
     if (selectedBucketMs === null) return null;
     return {
       fromMs: selectedBucketMs,
-      toMs:
-        selectedBucketMs + (resolvedGranularity === 'day' ? 24 * 60 * 60 * 1000 : 60 * 60 * 1000),
+      toMs: selectedBucketMs + getUsageBucketSizeMs(resolvedGranularity),
       limit: 12,
     };
   }, [resolvedGranularity, selectedBucketMs]);

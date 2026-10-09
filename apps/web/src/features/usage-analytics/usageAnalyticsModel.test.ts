@@ -33,6 +33,8 @@ import {
   buildUsageApiKeyTimeline,
   buildUsageTimeline,
   fillUsageTimelineBuckets,
+  getUsageBucketSizeMs,
+  isUsageGranularityAvailable,
   computeCacheHitRate,
   computeRowAverageCostPerCall,
   computeRowCacheHitRate,
@@ -329,6 +331,61 @@ describe('usage analytics adapters', () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  it('accepts minute and quarter-hour buckets only for short ranges', () => {
+    const today = { ...USAGE_ANALYTICS_DEFAULT_FILTERS, timeRange: '24h' as const };
+    expect(resolveUsageGranularity({ ...today, granularity: '1m' }, NOW_MS)).toBe('1m');
+    expect(resolveUsageGranularity({ ...today, granularity: '15m' }, NOW_MS)).toBe('15m');
+    expect(
+      resolveUsageGranularity(
+        { ...USAGE_ANALYTICS_DEFAULT_FILTERS, timeRange: '7d', granularity: '1m' },
+        NOW_MS
+      )
+    ).toBe('hour');
+    expect(
+      resolveUsageGranularity(
+        { ...USAGE_ANALYTICS_DEFAULT_FILTERS, timeRange: '7d', granularity: '15m' },
+        NOW_MS
+      )
+    ).toBe('15m');
+    expect(
+      resolveUsageGranularity(
+        { ...USAGE_ANALYTICS_DEFAULT_FILTERS, timeRange: '30d', granularity: '15m' },
+        NOW_MS
+      )
+    ).toBe('day');
+
+    const day = { fromMs: NOW_MS - DAY_MS, toMs: NOW_MS };
+    const week = { fromMs: NOW_MS - 7 * DAY_MS, toMs: NOW_MS };
+    expect(isUsageGranularityAvailable('1m', day)).toBe(true);
+    expect(isUsageGranularityAvailable('1m', week)).toBe(false);
+    expect(isUsageGranularityAvailable('15m', week)).toBe(true);
+    expect(isUsageGranularityAvailable('hour', null)).toBe(true);
+    expect(isUsageGranularityAvailable('15m', null)).toBe(false);
+    expect(getUsageBucketSizeMs('1m')).toBe(60_000);
+    expect(getUsageBucketSizeMs('15m')).toBe(900_000);
+  });
+
+  it('fills quarter-hour buckets with minute labels', () => {
+    const fromMs = new Date(2026, 5, 4, 10, 0, 0, 0).getTime();
+    const toMs = new Date(2026, 5, 4, 11, 0, 0, 0).getTime();
+    const bucketMs = new Date(2026, 5, 4, 10, 30, 0, 0).getTime();
+    const timeline = fillUsageTimelineBuckets(
+      buildUsageTimeline(
+        [{ bucket_ms: bucketMs, label: '', calls: 3, tokens: 30, success: 3, failure: 0 }],
+        '15m'
+      ),
+      { fromMs, toMs },
+      '15m'
+    );
+
+    expect(timeline).toHaveLength(4);
+    expect(timeline[2].bucketMs).toBe(bucketMs);
+    expect(timeline[2].bucketEndMs).toBe(bucketMs + 15 * 60_000);
+    expect(timeline[2].label).toBe('06/04 10:30');
+    expect(timeline[2].requestCount).toBe(3);
+    expectZeroTimelinePoint(timeline[1]);
   });
 
   it('fills missing daily buckets and respects the exclusive range end', () => {

@@ -592,6 +592,9 @@ export const QuotaWindowCard = ({
                 })}
               </span>
             ) : null}
+            {resolvedMode !== 'other' && q.amountLabel ? (
+              <span className={styles.amountLabel}>{q.amountLabel}</span>
+            ) : null}
           </div>
           {q.description ? (
             <span className={styles.subtitle} title={q.description}>

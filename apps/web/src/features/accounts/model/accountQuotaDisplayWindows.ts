@@ -528,6 +528,10 @@ const buildClaudeQuotaDisplayWindows = (
         source: 'claude',
         observedAtMs: quota.fetchedAtMs ?? null,
         nowMs: options.nowMs,
+        amountLabel:
+          window.limitUsd != null && window.usedUsd != null
+            ? `$${window.usedUsd.toFixed(2)} / $${window.limitUsd.toFixed(0)}`
+            : undefined,
       })
     ) ?? [];
 

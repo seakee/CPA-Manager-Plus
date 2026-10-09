@@ -393,8 +393,9 @@ describe('fetchCodexQuota', () => {
             unlimited: false,
             balance: '120',
             overage_limit_reached: false,
-            approx_local_messages: 24,
-            approx_cloud_messages: 12,
+            // Upstream reports [low, high] ranges; the low bound is kept.
+            approx_local_messages: [24, 120],
+            approx_cloud_messages: [12, 24],
           },
           spend_control: {
             reached: false,
@@ -830,6 +831,8 @@ describe('fetchClaudeQuota', () => {
           iguana_necktie: {
             utilization: 56,
             resets_at: '2026-07-09T10:00:00Z',
+            limit_dollars: 250,
+            used_dollars: 140.25,
           },
           limits: [
             {
@@ -887,7 +890,10 @@ describe('fetchClaudeQuota', () => {
     expect(result.windows[3]).toMatchObject({
       id: 'iguana-necktie',
       labelKey: 'claude_quota.iguana_necktie',
+      limitUsd: 250,
+      usedUsd: 140.25,
     });
+    expect(result.windows[0].limitUsd).toBeNull();
   });
 
   it('preserves usage windows and marks rateLimited when profile returns 429', async () => {

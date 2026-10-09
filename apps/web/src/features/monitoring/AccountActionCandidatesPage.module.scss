@@ -1,3 +1,5 @@
+@use '@/styles/mixins.scss' as *;
+
 .page {
   --action-surface: var(--bg-primary);
   --action-surface-raised: color-mix(in srgb, var(--bg-primary) 82%, var(--surface-subtle));
@@ -348,4 +350,8 @@
   .toolbar {
     display: grid;
   }
+}
+
+.table {
+  @include table-column-dividers;
 }

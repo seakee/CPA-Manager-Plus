@@ -89,3 +89,37 @@ func TestCanMapUTCWholeHours(t *testing.T) {
 		t.Fatal("unaligned range unexpectedly representable")
 	}
 }
+
+func TestAnalyticsBucketMSSubHour(t *testing.T) {
+	// Asia/Kolkata is UTC+05:30, so local quarter hours are not UTC quarter hours of the same label.
+	location, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		t.Fatalf("load location: %v", err)
+	}
+	timestampMS := time.Date(2026, time.March, 8, 6, 52, 41, 0, time.UTC).UnixMilli() // 12:22:41 local
+	if got, want := AnalyticsBucketMS(timestampMS, AnalyticsGranularityQuarterHour, location), time.Date(2026, time.March, 8, 6, 45, 0, 0, time.UTC).UnixMilli(); got != want {
+		t.Fatalf("15m bucket = %d, want %d", got, want)
+	}
+	if got, want := AnalyticsBucketMS(timestampMS, AnalyticsGranularityMinute, location), time.Date(2026, time.March, 8, 6, 52, 0, 0, time.UTC).UnixMilli(); got != want {
+		t.Fatalf("1m bucket = %d, want %d", got, want)
+	}
+	if got := AnalyticsBucketSizeMS(AnalyticsGranularityQuarterHour); got != 15*60*1000 {
+		t.Fatalf("15m size = %d", got)
+	}
+	if got := AnalyticsBucketSizeMS(AnalyticsGranularityMinute); got != 60*1000 {
+		t.Fatalf("1m size = %d", got)
+	}
+}
+
+func TestCanMapUTCWholeHoursRejectsSubHour(t *testing.T) {
+	fromMS := time.Date(2026, time.March, 8, 0, 0, 0, 0, time.UTC).UnixMilli()
+	toMS := fromMS + 3*analyticsHourMS
+	if !CanMapUTCWholeHours(fromMS, toMS, "hour", time.UTC) {
+		t.Fatal("hour should map onto hourly rollups")
+	}
+	for _, granularity := range []string{AnalyticsGranularityQuarterHour, AnalyticsGranularityMinute} {
+		if CanMapUTCWholeHours(fromMS, toMS, granularity, time.UTC) {
+			t.Fatalf("%s must be served from raw events", granularity)
+		}
+	}
+}

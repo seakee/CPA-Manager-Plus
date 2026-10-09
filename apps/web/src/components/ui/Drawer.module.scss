@@ -69,6 +69,7 @@
 
 .title {
   display: flex;
+  flex: 1 1 auto;
   align-items: center;
   gap: $spacing-sm;
   font-size: 16px;

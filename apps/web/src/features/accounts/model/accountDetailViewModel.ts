@@ -323,6 +323,8 @@ export interface AccountDetailViewModel {
     cooldown: QuotaCooldownInfo | null;
     resetCreditsAvailableCount: number | null;
     resetCreditExpiries: AccountDetailResetCreditExpiry[];
+    /** ChatGPT credits (spent after the plan quota is exhausted); null when not reported. */
+    credits: AccountDetailCredits | null;
   };
   auth: {
     fields: AccountDetailField[];
@@ -340,6 +342,25 @@ export interface AccountDetailViewModel {
   value: AccountDetailValueSummary;
   history: AccountDetailHistorySummary | null;
 }
+
+export interface AccountDetailCredits {
+  balance: number | null;
+  approxMessages: number | null;
+  unlimited: boolean;
+  overageReached: boolean;
+}
+
+const buildCreditsSummary = (row: AccountRow): AccountDetailCredits | null => {
+  const balance = Number.parseFloat(String(row.quota.creditsBalance ?? ''));
+  const hasBalance = Number.isFinite(balance);
+  if (!hasBalance && row.quota.creditsUnlimited !== true) return null;
+  return {
+    balance: hasBalance ? balance : null,
+    approxMessages: row.quota.creditsApproxLocalMessages ?? null,
+    unlimited: row.quota.creditsUnlimited === true,
+    overageReached: row.quota.creditsOverageLimitReached === true,
+  };
+};
 
 export interface BuildAccountDetailViewModelOptions {
   t?: TFunction;
@@ -1490,6 +1511,7 @@ export const buildAccountDetailViewModel = (
       resetCreditExpiries: getSortedCodexResetCreditExpiries(
         options.codexQuota?.rateLimitResetCredits
       ).map((item) => ({ id: item.id, expiresAtMs: item.expiresAtMs })),
+      credits: buildCreditsSummary(row),
     },
     auth: {
       fields: buildAuthFields(row),
