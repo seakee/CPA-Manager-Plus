@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/datamigration"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	usagearchive "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagearchive"
 	usageservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/usage"
@@ -398,7 +399,7 @@ func TestUsageArchiveRetentionWorkerResumesPersistedStagesAfterStoreRestart(t *t
 				if _, err := fixture.store.UsageArchives.BeginDelete(ctx, fixture.runID, nowMS); err != nil {
 					t.Fatalf("begin delete: %v", err)
 				}
-				first, err := fixture.store.UsageArchives.DeleteBatch(ctx, fixture.runID, 1, nowMS+1)
+				first, err := fixture.store.UsageArchives.DeleteBatch(ctx, fixture.runID, 1, nowMS+1, func(context.Context, usagearchive.Run, []usagearchive.Segment) error { return nil })
 				if err != nil {
 					t.Fatalf("delete first batch: %v", err)
 				}
@@ -426,6 +427,50 @@ func TestUsageArchiveRetentionWorkerResumesPersistedStagesAfterStoreRestart(t *t
 				completed.DeletedEventCount != fixture.eventCount ||
 				completed.ResumeStatus != "" || completed.LastError != "" {
 				t.Fatalf("completed retention run = %#v", completed)
+			}
+		})
+	}
+}
+
+func TestUsageArchiveRetentionWorkerWaitsForAccountingMigrationBeforeRawCleanup(t *testing.T) {
+	for _, state := range []string{datamigration.StatusDiscovering, datamigration.StatusRunning, datamigration.StatusFailed} {
+		t.Run(state, func(t *testing.T) {
+			fixture := newRetentionWorkerFixture(t, 3)
+			ctx := context.Background()
+			if _, err := fixture.service.ResumeArchive(ctx, fixture.runID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fixture.service.VerifyArchive(ctx, fixture.runID); err != nil {
+				t.Fatal(err)
+			}
+			rawDB, err := sqliterepo.Open(fixture.dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rawDB.Close()
+			if _, err := rawDB.ExecContext(ctx, `update usage_data_migrations set status = ? where name = ?`, state, datamigration.UsageCacheAccountingMigrationName); err != nil {
+				t.Fatal(err)
+			}
+			retention := NewUsageArchiveRetentionWorker(fixture.service, 30)
+			if !retention.runOnce(ctx) {
+				t.Fatal("incomplete migration did not retain automatic retry")
+			}
+			var raw, deleted int64
+			if err := rawDB.QueryRowContext(ctx, `select (select count(*) from usage_events), deleted_event_count from usage_archive_runs where id = ?`, fixture.runID).Scan(&raw, &deleted); err != nil {
+				t.Fatal(err)
+			}
+			if raw != fixture.eventCount || deleted != 0 {
+				t.Fatalf("incomplete migration allowed destructive cleanup: raw=%d deleted=%d", raw, deleted)
+			}
+			if _, err := rawDB.ExecContext(ctx, `update usage_data_migrations set status = ? where name = ?`, datamigration.StatusCompleted, datamigration.UsageCacheAccountingMigrationName); err != nil {
+				t.Fatal(err)
+			}
+			if retention.runOnce(ctx) {
+				t.Fatal("restored migration did not complete retention")
+			}
+			completed, err := fixture.store.UsageArchives.Run(ctx, fixture.runID)
+			if err != nil || completed.Status != usagearchive.StatusCompleted || completed.DeletedEventCount != fixture.eventCount {
+				t.Fatalf("retention after migration recovery: run=%#v err=%v", completed, err)
 			}
 		})
 	}

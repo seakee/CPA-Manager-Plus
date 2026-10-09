@@ -1471,6 +1471,67 @@ func TestUsageArchiveServiceRejectsChecksumMismatch(t *testing.T) {
 	}
 }
 
+func TestUsageArchiveDeletionRevalidatesFilesBetweenCommittedBatches(t *testing.T) {
+	for _, damage := range []string{"missing manifest", "corrupt manifest", "missing next segment", "corrupt next segment"} {
+		t.Run(damage, func(t *testing.T) {
+			service, st, rawDB, directory := newRawArchiveTestService(t, 2, 1)
+			ctx := context.Background()
+			insertArchiveTestEvents(t, st, archiveTestServiceEvents(4))
+			catchUpUsageAggregate(t, st)
+			created, err := service.CreateArchive(ctx, 5_000)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := service.ResumeArchive(ctx, created.Run.ID); err != nil {
+				t.Fatal(err)
+			}
+			verified, err := service.VerifyArchive(ctx, created.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			name := verified.Run.ManifestFile
+			if strings.Contains(damage, "segment") {
+				name = verified.Segments[len(verified.Segments)-1].FileName
+			}
+			file := filepath.Join(directory, filepath.FromSlash(name))
+			original, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fired := false
+			service.archive.testHook = func(point string) error {
+				if point != "delete_batch_committed" || fired {
+					return nil
+				}
+				fired = true
+				if strings.HasPrefix(damage, "missing") {
+					return os.Remove(file)
+				}
+				return os.WriteFile(file, append(append([]byte(nil), original...), []byte("corrupt")...), 0o600)
+			}
+			if _, err := service.DeleteArchive(ctx, created.Run.ID); err == nil {
+				t.Fatal("later raw batch deleted after archive evidence changed between committed batches")
+			}
+			var remaining, retained int64
+			if err := rawDB.QueryRow(`select (select count(*) from usage_events), (select count(*) from usage_event_identity_ledger)`).Scan(&remaining, &retained); err != nil {
+				t.Fatal(err)
+			}
+			failed, err := service.ArchiveStatus(ctx, created.Run.ID)
+			if !fired || err != nil || remaining != 3 || retained != 4 || failed.Run.Status != usagearchive.StatusFailed || failed.Run.ResumeStatus != usagearchive.StatusDeleting || failed.Run.DeletedEventCount != 1 {
+				t.Fatalf("failed later batch must preserve committed checkpoint and remaining history: raw=%d ledger=%d run=%#v err=%v", remaining, retained, failed.Run, err)
+			}
+			service.archive.testHook = nil
+			if err := os.WriteFile(file, original, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			completed, err := service.ResumeArchive(ctx, created.Run.ID)
+			if err != nil || completed.Run.Status != usagearchive.StatusCompleted || completed.Run.DeletedEventCount != 4 {
+				t.Fatalf("exact archive restoration must resume remaining batches: %#v %v", completed.Run, err)
+			}
+		})
+	}
+}
+
 func TestUsageArchiveDeletionRevalidatesPublishedFiles(t *testing.T) {
 	for _, stage := range []string{"verified", "deleting", "failed-deleting"} {
 		for _, damage := range []string{"missing manifest", "corrupt manifest", "missing segment", "corrupt segment"} {
@@ -1495,7 +1556,7 @@ func TestUsageArchiveDeletionRevalidatesPublishedFiles(t *testing.T) {
 					if _, err := st.UsageArchives.BeginDelete(ctx, created.Run.ID, time.Now().UnixMilli()); err != nil {
 						t.Fatal(err)
 					}
-					batch, err := st.UsageArchives.DeleteBatch(ctx, created.Run.ID, 1, time.Now().UnixMilli())
+					batch, err := st.UsageArchives.DeleteBatch(ctx, created.Run.ID, 1, time.Now().UnixMilli(), func(context.Context, usagearchive.Run, []usagearchive.Segment) error { return nil })
 					if err != nil || batch.Deleted != 1 {
 						t.Fatalf("initial delete batch = %#v, %v", batch, err)
 					}

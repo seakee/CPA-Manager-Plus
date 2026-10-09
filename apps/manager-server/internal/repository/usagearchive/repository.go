@@ -551,7 +551,13 @@ func requestedStageSatisfied(run Run, stage string) bool {
 }
 
 func (r *Repository) Segments(ctx context.Context, runID string) ([]Segment, error) {
-	rows, err := r.db.QueryContext(ctx, `select
+	return segmentsQuery(ctx, r.db, runID)
+}
+
+func segmentsQuery(ctx context.Context, query interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, runID string) ([]Segment, error) {
+	rows, err := query.QueryContext(ctx, `select
 		run_id, sequence, status, file_name, first_event_id, last_event_id,
 		min_timestamp_ms, max_timestamp_ms, event_count, uncompressed_bytes,
 		compressed_bytes, content_sha256, event_hash_digest, created_at_ms, verified_at_ms
@@ -1213,7 +1219,13 @@ func (r *Repository) MarkVerified(ctx context.Context, runID string, nowMS int64
 	return r.Run(ctx, runID)
 }
 
-func (r *Repository) DeleteBatch(ctx context.Context, runID string, limit int, nowMS int64) (DeleteBatchResult, error) {
+// DeleteBatch rechecks database and archive-file evidence under the same SQLite
+// write transaction before each bounded delete. verifyFiles must only read files;
+// it must not reenter the database or publish progress while the transaction owns it.
+func (r *Repository) DeleteBatch(ctx context.Context, runID string, limit int, nowMS int64, verifyFiles func(context.Context, Run, []Segment) error) (DeleteBatchResult, error) {
+	if verifyFiles == nil {
+		return DeleteBatchResult{}, fmt.Errorf("%w: archive file verifier is required", ErrCoverageIncomplete)
+	}
 	if limit <= 0 {
 		limit = 1_000
 	}
@@ -1238,9 +1250,29 @@ func (r *Repository) DeleteBatch(ctx context.Context, runID string, limit int, n
 	if err := validateRunContract(run); err != nil {
 		return DeleteBatchResult{}, err
 	}
+	if (run.Mode != RunModeManual && run.Mode != RunModeRetention) ||
+		(run.RequestedStage != "" && run.RequestedStage != StatusDeleting) || run.DeleteStartedAtMS <= 0 {
+		return DeleteBatchResult{}, fmt.Errorf("%w: raw cleanup is not authorized for this run", ErrInvalidState)
+	}
+	if err := validateDeleteLock(ctx, tx, run.ID); err != nil {
+		return DeleteBatchResult{}, err
+	}
+	if err := validateCoverage(ctx, tx, run); err != nil {
+		return DeleteBatchResult{}, err
+	}
 	aggregateState, err := validateCurrentDeleteReadiness(ctx, tx, run)
 	if err != nil {
 		return DeleteBatchResult{}, err
+	}
+	segments, err := segmentsQuery(ctx, tx, run.ID)
+	if err != nil {
+		return DeleteBatchResult{}, err
+	}
+	if err := validateDeleteArchiveEvidence(run, segments); err != nil {
+		return DeleteBatchResult{}, err
+	}
+	if err := verifyFiles(ctx, run, segments); err != nil {
+		return DeleteBatchResult{}, fmt.Errorf("revalidate usage archive before raw cleanup batch: %w", err)
 	}
 	rows, err := tx.QueryContext(ctx, `select e.id, archived.event_hash, e.timestamp_ms
 	from usage_events e
@@ -1636,6 +1668,39 @@ func releaseLock(ctx context.Context, tx *sql.Tx, runID string) error {
 	return err
 }
 
+func validateDeleteLock(ctx context.Context, tx *sql.Tx, runID string) error {
+	var owner, operation string
+	err := tx.QueryRowContext(ctx, `select run_id, operation from usage_maintenance_locks where name = ?`, MaintenanceLockName).Scan(&owner, &operation)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && (owner != runID || operation != StatusDeleting)) {
+		return fmt.Errorf("%w: raw cleanup no longer owns the maintenance lock", ErrMaintenanceLocked)
+	}
+	return err
+}
+
+func validateDeleteArchiveEvidence(run Run, segments []Segment) error {
+	if run.VerifiedAtMS <= 0 || run.ArchivedAtMS <= 0 || run.ArchiveDigest == "" ||
+		run.ManifestFile == "" || run.ManifestSHA256 == "" || len(segments) == 0 {
+		return fmt.Errorf("%w: verified archive evidence is missing", ErrCoverageIncomplete)
+	}
+	var count, uncompressed, compressed, lastID int64
+	for index, segment := range segments {
+		if segment.RunID != run.ID || segment.Sequence != index+1 || segment.Status != SegmentStatusVerified ||
+			segment.VerifiedAtMS <= 0 || segment.FirstEventID <= lastID || segment.LastEventID < segment.FirstEventID ||
+			segment.EventCount <= 0 || segment.ContentSHA256 == "" || segment.EventHashDigest == "" {
+			return fmt.Errorf("%w: segment %d verification is incomplete", ErrCoverageIncomplete, segment.Sequence)
+		}
+		count += segment.EventCount
+		uncompressed += segment.UncompressedBytes
+		compressed += segment.CompressedBytes
+		lastID = segment.LastEventID
+	}
+	if count != run.EventCount || uncompressed != run.ArchivedUncompressedBytes ||
+		compressed != run.ArchivedCompressedBytes || lastID != run.LastArchivedEventID || lastID != run.TargetEventID {
+		return fmt.Errorf("%w: verified segments do not cover the archive run", ErrCoverageIncomplete)
+	}
+	return nil
+}
+
 func validateCoverage(ctx context.Context, tx *sql.Tx, run Run) error {
 	if run.ArchivedEventCount != run.EventCount {
 		return fmt.Errorf("%w: archived %d of %d events", ErrCoverageIncomplete, run.ArchivedEventCount, run.EventCount)
@@ -1654,6 +1719,8 @@ func validateCoverage(ctx context.Context, tx *sql.Tx, run Run) error {
 		coalesce(sum(case
 			when ledger.aggregate_schema_version = ?
 				and ledger.aggregate_structure_revision = ?
+				and ledger.timestamp_ms = archived.timestamp_ms
+				and ledger.bucket_ms = archived.timestamp_ms - (archived.timestamp_ms % 3600000)
 				and (
 					(archived.raw_deleted_at_ms is null and ledger.raw_event_id = archived.raw_event_id)
 					or (archived.raw_deleted_at_ms is not null and ledger.raw_event_id is null)
@@ -1937,12 +2004,15 @@ func validateGatewayIdentityCoverage(ctx context.Context, tx *sql.Tx, run Run) e
 	var incomplete bool
 	if err := tx.QueryRowContext(ctx, `select exists (
 		select 1 from usage_archive_event_refs archived
-		join usage_events e on e.id = archived.raw_event_id and e.event_hash = archived.event_hash
-		left join gateway_usage_identity_projection_v1 p on p.usage_event_id = e.id
-		where archived.run_id = ? and archived.raw_deleted_at_ms is null
-			and (p.usage_event_id is null or p.schema_version <> 1 or p.event_hash <> e.event_hash
-				or p.evidence_timestamp_ms <> e.timestamp_ms
-				or p.request_id <> coalesce(e.request_id, ''))
+		left join usage_events e on e.id = archived.raw_event_id
+		left join gateway_usage_identity_projection_v1 p on p.usage_event_id = archived.raw_event_id
+		where archived.run_id = ?
+			and (p.usage_event_id is null or p.schema_version <> 1 or p.event_hash <> archived.event_hash
+				or p.evidence_timestamp_ms <> archived.timestamp_ms
+				or (archived.raw_deleted_at_ms is null and
+					(e.id is null or e.event_hash <> archived.event_hash or e.timestamp_ms <> archived.timestamp_ms
+						or p.request_id <> coalesce(e.request_id, '')))
+				or (archived.raw_deleted_at_ms is not null and e.id is not null))
 	)`, run.ID).Scan(&incomplete); err != nil {
 		return err
 	}

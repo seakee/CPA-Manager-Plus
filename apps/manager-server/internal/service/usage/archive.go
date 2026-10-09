@@ -1061,7 +1061,10 @@ func (m *archiveManager) deleteLocked(ctx context.Context, runID string) (Archiv
 		if err := ctx.Err(); err != nil {
 			return ArchiveStatus{}, m.recordFailure(ctx, run.ID, usagearchive.StatusDeleting, err)
 		}
-		result, err := m.store.UsageArchives.DeleteBatch(ctx, run.ID, m.config.DeleteBatchSize, time.Now().UnixMilli())
+		result, err := m.store.UsageArchives.DeleteBatch(ctx, run.ID, m.config.DeleteBatchSize, time.Now().UnixMilli(),
+			func(ctx context.Context, current store.UsageArchiveRun, segments []store.UsageArchiveSegment) error {
+				return m.verifyManifestFiles(ctx, current, segments, false)
+			})
 		if err != nil {
 			return ArchiveStatus{}, m.recordFailure(ctx, run.ID, usagearchive.StatusDeleting, err)
 		}
@@ -1281,6 +1284,10 @@ func (m *archiveManager) writeManifest(runID string, manifest ArchiveManifest) (
 }
 
 func (m *archiveManager) verifyManifest(ctx context.Context, run store.UsageArchiveRun, segments []store.UsageArchiveSegment, progress ...archiveSegmentProgressFunc) error {
+	return m.verifyManifestFiles(ctx, run, segments, true, progress...)
+}
+
+func (m *archiveManager) verifyManifestFiles(ctx context.Context, run store.UsageArchiveRun, segments []store.UsageArchiveSegment, notify bool, progress ...archiveSegmentProgressFunc) error {
 	if len(segments) == 0 {
 		return fmt.Errorf("%w: archive has no segments", ErrArchiveCoverageIncomplete)
 	}
@@ -1361,8 +1368,10 @@ func (m *archiveManager) verifyManifest(ctx context.Context, run store.UsageArch
 		if len(progress) > 0 && progress[0] != nil {
 			progress[0](int64(index+1), int64(len(segments)))
 		}
-		if err := m.callTestHook("verification_segment_inspected"); err != nil {
-			return err
+		if notify {
+			if err := m.callTestHook("verification_segment_inspected"); err != nil {
+				return err
+			}
 		}
 	}
 	if manifest.MinTimestampMS != minTimestampMS || manifest.MaxTimestampMS != maxTimestampMS {
