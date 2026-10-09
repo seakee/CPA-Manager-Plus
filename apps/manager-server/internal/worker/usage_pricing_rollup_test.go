@@ -2,6 +2,8 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -253,8 +255,9 @@ func newUsagePricingRollupWorkerStore(t *testing.T) *store.Store {
 }
 
 func usagePricingRollupWorkerEvent(hash string, timestampMS, inputTokens int64) usage.Event {
+	sum := sha256.Sum256([]byte(hash))
 	return usage.Event{
-		EventHash:     hash,
+		EventHash:     hex.EncodeToString(sum[:]),
 		TimestampMS:   timestampMS,
 		Timestamp:     time.UnixMilli(timestampMS).UTC().Format(time.RFC3339Nano),
 		Model:         "gpt-a",

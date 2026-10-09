@@ -2,7 +2,9 @@ package usagemonitoring_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -247,6 +249,27 @@ func TestUsageMonitoringProjectionCatchUpResumesAfterRestart(t *testing.T) {
 	}
 	if second.CoverageEventID != 2 || !second.Pending || second.Rebuilt {
 		t.Fatalf("resumed projection batch = %#v", second)
+	}
+}
+
+func TestUsageMonitoringSQLiteBusyDoesNotPoisonState(t *testing.T) {
+	_, db := newMonitoringRepositoryStore(t)
+	ctx := context.Background()
+
+	before, err := db.UsageMonitoringState(ctx, monitoringrepo.StatsRollupName)
+	if err != nil {
+		t.Fatalf("read monitoring state before sqlite busy: %v", err)
+	}
+	if err := db.RecordUsageMonitoringFailure(ctx, monitoringrepo.StatsRollupName, errors.New("database table is locked (SQLITE_LOCKED)"), 10_000); err != nil {
+		t.Fatalf("record monitoring sqlite busy: %v", err)
+	}
+	after, err := db.UsageMonitoringState(ctx, monitoringrepo.StatsRollupName)
+	if err != nil {
+		t.Fatalf("read monitoring state after sqlite busy: %v", err)
+	}
+	if after.Status != before.Status || after.CoverageEventID != before.CoverageEventID ||
+		after.TargetEventID != before.TargetEventID || after.LastError != before.LastError {
+		t.Fatalf("monitoring state changed after sqlite busy: before=%#v after=%#v", before, after)
 	}
 }
 
@@ -783,7 +806,7 @@ func TestCodexAccountWindowDoesNotMergeConflictingWorkspaceEvidenceFromDailyRoll
 	valid.AuthAccountIDSnapshot = "workspace-1"
 
 	conflicting := valid
-	conflicting.EventHash = "window-daily-conflicting-workspace-evidence"
+	conflicting.EventHash = canonicalMonitoringEventHash("window-daily-conflicting-workspace-evidence")
 	conflicting.TimestampMS = fromMS + 2_000
 	conflicting.AuthProjectIDSnapshot = usageidentity.CodexAccountIDSnapshot("workspace-2")
 	conflicting.InputTokens = 200
@@ -1007,7 +1030,7 @@ func TestUsageMonitoringSearchDoesNotIndexHistoricalCodexProjectMarker(t *testin
 	// Leave the next event outside the projection coverage so the raw tail
 	// search path is exercised as well.
 	tail := event
-	tail.EventHash = "search-legacy-codex-marker-tail"
+	tail.EventHash = canonicalMonitoringEventHash("search-legacy-codex-marker-tail")
 	tail.TimestampMS = baseMS + 2_000
 	tail.Timestamp = time.UnixMilli(tail.TimestampMS).UTC().Format(time.RFC3339Nano)
 	if _, err := db.InsertEvents(ctx, []usage.Event{tail}); err != nil {
@@ -1898,6 +1921,48 @@ func TestUsageMonitoringProjectionTailKeysetMatchesRawWithOutOfOrderTimestamps(t
 	assertProjectionPagesMatchRaw(t, ctx, db, filter, 2, len(initial)+len(tail))
 }
 
+func TestUsageMonitoringEventPaginationSkipsDeletedProjectionRows(t *testing.T) {
+	sqlDB, db := newMonitoringRepositoryStore(t)
+	ctx := context.Background()
+	baseMS := int64(1_800_057_700_000)
+	events := make([]usage.Event, 0, 5)
+	for index := 1; index <= 5; index++ {
+		events = append(events, monitoringRepositoryEvent(
+			fmt.Sprintf("archived-page-%d", index),
+			baseMS+1_000,
+			"gpt-page",
+			"key-a",
+			"alice@example.com",
+			"auth-a",
+			"source-a",
+			false,
+			10,
+			5,
+			10,
+		))
+	}
+	if _, err := db.InsertEvents(ctx, events); err != nil {
+		t.Fatalf("insert archived page events: %v", err)
+	}
+	catchUpMonitoringRepository(t, ctx, db)
+	if _, err := sqlDB.ExecContext(ctx, `delete from usage_events where event_hash in (?, ?)`,
+		events[4].EventHash, events[2].EventHash); err != nil {
+		t.Fatalf("delete archived page raw rows: %v", err)
+	}
+
+	filter := store.AnalyticsFilter{
+		FromMS:        baseMS,
+		ToMS:          baseMS + testDayMS,
+		Models:        []string{"gpt-page"},
+		IncludeFailed: true,
+	}
+	total, _, available, err := db.UsageMonitoringEventsCount(ctx, filter)
+	if err != nil || !available || total != 3 {
+		t.Fatalf("archived page count available=%v total=%d err=%v", available, total, err)
+	}
+	assertProjectionPagesMatchRaw(t, ctx, db, filter, 2, 3)
+}
+
 func TestUsageMonitoringMetadataBackfillRefreshesHistoricalHeadersWithoutReset(t *testing.T) {
 	sqlDB, db := newMonitoringRepositoryStore(t)
 	ctx := context.Background()
@@ -2110,7 +2175,7 @@ func TestUsageMonitoringMetadataBackfillOlderEventDoesNotReplaceLatestHeader(t *
 	if err != nil || !available {
 		t.Fatalf("load headers after older backfill: available=%v err=%v", available, err)
 	}
-	if len(items) != 1 || items[0].EventHash != "metadata-newer" ||
+	if len(items) != 1 || items[0].EventHash != newer.EventHash ||
 		items[0].HeaderQuotaPlanType != "team" || items[0].HeaderTraceID != "newer-trace" {
 		t.Fatalf("older backfill replaced latest header: %#v", items)
 	}
@@ -2323,6 +2388,14 @@ func catchUpMonitoringRepository(t *testing.T, ctx context.Context, db *store.St
 	}
 }
 
+func canonicalMonitoringEventHash(raw string) string {
+	if len(raw) == 64 {
+		return raw
+	}
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
+}
+
 func monitoringRepositoryEvent(
 	hash string,
 	timestampMS int64,
@@ -2339,7 +2412,7 @@ func monitoringRepositoryEvent(
 	usedPercent := 42.5
 	latency := latencyMS
 	event := usage.Event{
-		EventHash:              hash,
+		EventHash:              canonicalMonitoringEventHash(hash),
 		TimestampMS:            timestampMS,
 		Timestamp:              time.UnixMilli(timestampMS).UTC().Format(time.RFC3339Nano),
 		Provider:               "codex",

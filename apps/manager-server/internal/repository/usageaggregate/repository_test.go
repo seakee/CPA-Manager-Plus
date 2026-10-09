@@ -2,7 +2,9 @@ package usageaggregate
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -15,6 +17,30 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageevent"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
+
+func TestIsCurrentStructureRevision(t *testing.T) {
+	for _, revision := range []string{
+		StructureRevision,
+		StructureRevision + ":rebuild-0123456789abcdef0123456789abcdef",
+	} {
+		if !IsCurrentStructureRevision(revision) {
+			t.Fatalf("current structure revision rejected: %q", revision)
+		}
+	}
+	for _, revision := range []string{
+		"",
+		"stale",
+		StructureRevision + ":rebuild-short",
+		StructureRevision + ":rebuild-0123456789abcdef0123456789abcdeg",
+		StructureRevision + ":cache-accounting-v2-0-42",
+		StructureRevision + ":cache-accounting-v2-1700000000000-42",
+		StructureRevision + ":rebuild-0123456789abcdef0123456789abcdef:cache-accounting-v2-1700000000000-42",
+	} {
+		if IsCurrentStructureRevision(revision) {
+			t.Fatalf("invalid structure revision accepted: %q", revision)
+		}
+	}
+}
 
 func TestCatchUpAndLoadRowsMergeCoverageDeltaAndLateEvents(t *testing.T) {
 	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
@@ -287,6 +313,32 @@ func TestCatchUpReaggregatesAcrossRevisionWithoutDoubleCount(t *testing.T) {
 	}
 }
 
+func TestRecordFailureSQLiteBusyDoesNotPoisonAggregateState(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	repo := New(db)
+
+	before, err := repo.State(ctx)
+	if err != nil {
+		t.Fatalf("read aggregate state before sqlite busy: %v", err)
+	}
+	if err := repo.RecordFailure(ctx, errors.New("database is locked (SQLITE_BUSY_SNAPSHOT)"), 10_000); err != nil {
+		t.Fatalf("record aggregate sqlite busy: %v", err)
+	}
+	after, err := repo.State(ctx)
+	if err != nil {
+		t.Fatalf("read aggregate state after sqlite busy: %v", err)
+	}
+	if after.Status != before.Status || after.CoverageEventID != before.CoverageEventID ||
+		after.TargetEventID != before.TargetEventID || after.LastError != before.LastError {
+		t.Fatalf("aggregate state changed after sqlite busy: before=%#v after=%#v", before, after)
+	}
+}
+
 func TestCatchUpPreservesRebuildStateAcrossRecordedFailure(t *testing.T) {
 	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
 	if err != nil {
@@ -434,11 +486,12 @@ func assertAggregateCallsAndLedgerRevision(db *sql.DB, wantCalls int64, wantRevi
 	if calls != wantCalls {
 		return fmt.Errorf("aggregate calls = %d, want %d", calls, wantCalls)
 	}
-	for _, eventHash := range []string{"revision-event-1", "revision-event-2"} {
+	for _, rawHash := range []string{"revision-event-1", "revision-event-2"} {
+		eventHash := canonicalAggregateHash(rawHash)
 		var revision string
 		if err := db.QueryRow(`select aggregate_structure_revision
 			from usage_event_identity_ledger where event_hash = ?`, eventHash).Scan(&revision); err != nil {
-			return fmt.Errorf("read ledger revision for %s: %w", eventHash, err)
+			return fmt.Errorf("read ledger revision for %s: %w", rawHash, err)
 		}
 		if revision != wantRevision {
 			return fmt.Errorf("ledger aggregate_structure_revision for %s = %q, want %q", eventHash, revision, wantRevision)
@@ -558,7 +611,7 @@ func TestCatchUpFailureDoesNotAdvanceCoverage(t *testing.T) {
 		t.Fatalf("state advanced after failure: %#v", state)
 	}
 	var version int
-	if err := db.QueryRow(`select aggregate_schema_version from usage_event_identity_ledger where event_hash = 'aggregate-failure'`).Scan(&version); err != nil {
+	if err := db.QueryRow(`select aggregate_schema_version from usage_event_identity_ledger where event_hash = ?`, canonicalAggregateHash("aggregate-failure")).Scan(&version); err != nil {
 		t.Fatalf("read ledger version: %v", err)
 	}
 	if version != 0 {
@@ -759,9 +812,17 @@ func TestLoadRowsCanonicalizesReasoningSuffixesAcrossStoredAndRawRows(t *testing
 	}
 }
 
+func canonicalAggregateHash(raw string) string {
+	if len(raw) == 64 {
+		return raw
+	}
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
+}
+
 func aggregateTestEvent(hash string, timestampMS int64, model string, failed bool, inputTokens, outputTokens int64, latencyMS *int64) usage.Event {
 	return usage.Event{
-		EventHash:     hash,
+		EventHash:     canonicalAggregateHash(hash),
 		TimestampMS:   timestampMS,
 		Timestamp:     time.UnixMilli(timestampMS).UTC().Format(time.RFC3339Nano),
 		Provider:      "openai",

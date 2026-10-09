@@ -29,7 +29,7 @@ const (
 )
 
 var (
-	validProviders      = stringSet("codex", "claude", "antigravity", "kimi", "xai")
+	validProviders      = stringSet("codex", "claude", "antigravity", "kimi", "xai", "devin", "meta")
 	validModes          = stringSet("fixed", "calendar", "rolling", "non_window", "unknown")
 	validScopes         = stringSet("all", "family", "models", "product", "feature")
 	validSources        = stringSet("api_query", "response_header", "response_body", "inspection")
@@ -931,6 +931,7 @@ func normalizeWindowInput(accountKey, provider string, input WindowInput, nowMS 
 		}
 	}
 	scopeFingerprint := quotasnapshotrepo.ScopeFingerprint(scopeKind, scopeKey, modelIDs)
+	resetCreditsObserved := input.ResetCredits != nil
 	resetCredits, err := normalizeResetCredits(input.ResetCredits)
 	if err != nil {
 		return model.AccountQuotaSnapshot{}, err
@@ -970,7 +971,7 @@ func normalizeWindowInput(accountKey, provider string, input WindowInput, nowMS 
 		RemainingPercent: input.RemainingPercent, UsedValue: input.UsedValue,
 		LimitValue: input.LimitValue, QuotaUnit: strings.TrimSpace(input.QuotaUnit),
 		ResetCreditsAvailable: input.ResetCreditsAvailable,
-		ResetCreditsJSON:      marshalAllowlist(resetCredits), PlanType: strings.TrimSpace(input.PlanType),
+		ResetCreditsJSON:      marshalResetCreditsEvidence(resetCredits, resetCreditsObserved), PlanType: strings.TrimSpace(input.PlanType),
 		RelationshipKind:  relationshipKind,
 		ContainerWindowID: containerWindowID,
 		CreatedAtMS:       nowMS,
@@ -1136,9 +1137,12 @@ func selectWindows(
 					window.ResetCreditsAvailable = candidate.ResetCreditsAvailable
 					window.FieldSources["reset_credits_available"] = FieldSource{Source: candidate.Source, ObservedAtMS: candidate.ObservedAtMS}
 				}
-				if len(window.ResetCredits) == 0 && candidate.ResetCreditsJSON != "" {
-					window.ResetCredits = unmarshalResetCredits(candidate.ResetCreditsJSON)
-					window.FieldSources["reset_credits"] = FieldSource{Source: candidate.Source, ObservedAtMS: candidate.ObservedAtMS}
+				if _, hasCreditsSource := window.FieldSources["reset_credits"]; !hasCreditsSource && candidate.ResetCreditsJSON != "" {
+					countSource, hasCountSource := window.FieldSources["reset_credits_available"]
+					if !(window.ResetCreditsAvailable != nil && *window.ResetCreditsAvailable == 0 && hasCountSource && countSource.ObservedAtMS >= candidate.ObservedAtMS) {
+						window.ResetCredits = unmarshalResetCredits(candidate.ResetCreditsJSON)
+						window.FieldSources["reset_credits"] = FieldSource{Source: candidate.Source, ObservedAtMS: candidate.ObservedAtMS}
+					}
 				}
 				if window.PlanType == "" && candidate.PlanType != "" {
 					window.PlanType = candidate.PlanType
@@ -1147,10 +1151,25 @@ func selectWindows(
 			}
 			countSource, hasCountSource := window.FieldSources["reset_credits_available"]
 			creditsSource, hasCreditsSource := window.FieldSources["reset_credits"]
-			if window.ResetCreditsAvailable != nil && *window.ResetCreditsAvailable == 0 &&
-				hasCountSource && (!hasCreditsSource || countSource.ObservedAtMS >= creditsSource.ObservedAtMS) {
-				window.ResetCredits = nil
-				delete(window.FieldSources, "reset_credits")
+			if window.ResetCreditsAvailable != nil &&
+				*window.ResetCreditsAvailable == 0 &&
+				hasCountSource &&
+				hasCreditsSource {
+				switch {
+				case countSource.ObservedAtMS > creditsSource.ObservedAtMS:
+					// newer zero count invalidates older detail
+					window.ResetCredits = nil
+					delete(window.FieldSources, "reset_credits")
+				case countSource.ObservedAtMS == creditsSource.ObservedAtMS:
+					// same observation: zero count dominates conflicting records,
+					// but preserve explicit-empty field evidence
+					if len(window.ResetCredits) > 0 {
+						window.ResetCredits = []ResetCredit{}
+					}
+				case countSource.ObservedAtMS < creditsSource.ObservedAtMS:
+					// newer detail must not be erased by older zero count
+					// keep current ResetCredits + field source unchanged
+				}
 			}
 		}
 		result = append(result, window)
@@ -1677,6 +1696,35 @@ func unmarshalResetCredits(raw string) []ResetCredit {
 		return nil
 	}
 	return result
+}
+
+func marshalResetCreditsEvidence(credits []ResetCredit, observed bool) string {
+	if !observed {
+		return ""
+	}
+	if len(credits) == 0 {
+		return "[]"
+	}
+	payload, err := json.Marshal(credits)
+	if err != nil {
+		return "[]"
+	}
+	return string(payload)
+}
+
+func (w Window) MarshalJSON() ([]byte, error) {
+	type Alias Window
+	if w.ResetCredits != nil && len(w.ResetCredits) == 0 {
+		type ExplicitEmptyResetCredits struct {
+			Alias
+			ResetCredits []ResetCredit `json:"reset_credits"`
+		}
+		return json.Marshal(ExplicitEmptyResetCredits{
+			Alias:        Alias(w),
+			ResetCredits: w.ResetCredits,
+		})
+	}
+	return json.Marshal(Alias(w))
 }
 
 func stringSet(values ...string) map[string]bool {

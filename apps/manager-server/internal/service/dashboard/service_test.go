@@ -2,6 +2,9 @@ package dashboard
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"errors"
 	"math"
 	"path/filepath"
@@ -9,9 +12,34 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagepricing"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
+
+type unavailableDashboardPricing struct {
+	usagepricing.Repository
+}
+
+func (r unavailableDashboardPricing) LoadHourlyRowsTx(context.Context, *sql.Tx, usagepricing.HourlyFilter) ([]usagepricing.HourlyRow, usagepricing.State, bool, error) {
+	return nil, usagepricing.State{}, false, nil
+}
+
+func (r unavailableDashboardPricing) LoadHourlyRowsFromEventsTx(context.Context, *sql.Tx, usagepricing.HourlyFilter) ([]usagepricing.HourlyRow, error) {
+	return nil, store.ErrUsagePricingCoverageIncomplete
+}
+
+func TestSummaryFailsClosedWhenPricingCoverageIsIncomplete(t *testing.T) {
+	db := newDashboardTestStore(t)
+	db.UsagePricing = unavailableDashboardPricing{Repository: db.UsagePricing}
+	_, err := New(db).Summary(context.Background(), SummaryParams{
+		TodayStartMS: 1_800_000_000_000,
+		NowMS:        1_800_007_200_000,
+	})
+	if !errors.Is(err, store.ErrUsagePricingCoverageIncomplete) {
+		t.Fatalf("dashboard must not return raw-only zero totals after an incomplete snapshot: %v", err)
+	}
+}
 
 func TestSummaryReturnsContextCancellation(t *testing.T) {
 	db := newDashboardTestStore(t)
@@ -164,7 +192,7 @@ func TestSummaryAggregatesCostsAndWindows(t *testing.T) {
 		resp.ChannelHealth[0].AccountSnapshot != "user@example.com" {
 		t.Fatalf("channel health display snapshots = %#v", resp.ChannelHealth[0])
 	}
-	if len(resp.FailureSources) != 1 || resp.FailureSources[0].SourceHash != "source-hash" ||
+	if len(resp.FailureSources) != 1 || resp.FailureSources[0].SourceHash != testCanonicalHash("source-hash") ||
 		resp.FailureSources[0].Failures != 1 {
 		t.Fatalf("failure sources = %#v", resp.FailureSources)
 	}
@@ -477,7 +505,7 @@ func TestSummaryPricesContextTiersAcrossRawAndPricingRollup(t *testing.T) {
 
 	catchUpDashboardHourlyForTest(t, ctx, db)
 	service := New(db, true)
-	if _, _, _, _, ok := service.loadTodayMetricsFromRollup(ctx, todayStart, nowMS); !ok {
+	if _, _, _, _, ok, err := service.loadTodayMetricsFromRollup(ctx, todayStart, nowMS); !ok || err != nil {
 		t.Fatal("pricing-aware dashboard rollup was not available")
 	}
 	rolled, err := service.Summary(ctx, SummaryParams{
@@ -590,7 +618,10 @@ func TestSummaryDashboardHourlyRollupMergesPendingRawDelta(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("insert pending event: %v", err)
 	}
-	agg, _, timeline, _, ok := New(db).loadTodayMetricsFromRollup(ctx, todayStart, nowMS)
+	agg, _, timeline, _, ok, err := New(db).loadTodayMetricsFromRollup(ctx, todayStart, nowMS)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !ok || agg.TotalCalls != 2 || agg.TotalTokens != 3 || len(timeline) != 2 {
 		t.Fatalf("pending aggregate did not merge raw delta: ok=%v agg=%#v timeline=%#v", ok, agg, timeline)
 	}
@@ -615,7 +646,7 @@ func TestSummaryDashboardHourlyRollupCanBeDisabled(t *testing.T) {
 	}
 	catchUpDashboardHourlyForTest(t, ctx, db)
 	service := New(db, false)
-	if _, _, _, _, ok := service.loadTodayMetricsFromRollup(ctx, todayStart, nowMS); ok {
+	if _, _, _, _, ok, err := service.loadTodayMetricsFromRollup(ctx, todayStart, nowMS); ok || err != nil {
 		t.Fatal("disabled service used hourly rollup")
 	}
 	resp, err := service.Summary(ctx, SummaryParams{TodayStartMS: todayStart, NowMS: nowMS})
@@ -661,6 +692,14 @@ func newDashboardTestStore(t *testing.T) *store.Store {
 	return db
 }
 
+func testCanonicalHash(value string) string {
+	if len(value) == 64 {
+		return value
+	}
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
 func dashboardEvent(
 	hash string,
 	timestampMS int64,
@@ -675,7 +714,7 @@ func dashboardEvent(
 	latencyMS *int64,
 ) usage.Event {
 	return usage.Event{
-		EventHash:       hash,
+		EventHash:       testCanonicalHash(hash),
 		TimestampMS:     timestampMS,
 		Timestamp:       time.UnixMilli(timestampMS).UTC().Format(time.RFC3339Nano),
 		Model:           model,
@@ -684,8 +723,8 @@ func dashboardEvent(
 		Path:            "/v1/chat/completions",
 		AuthIndex:       "auth-1",
 		Source:          "user@example.com",
-		SourceHash:      "source-hash",
-		APIKeyHash:      "api-key-hash",
+		SourceHash:      testCanonicalHash("source-hash"),
+		APIKeyHash:      testCanonicalHash("api-key-hash"),
 		AccountSnapshot: "user@example.com",
 		InputTokens:     inputTokens,
 		OutputTokens:    outputTokens,

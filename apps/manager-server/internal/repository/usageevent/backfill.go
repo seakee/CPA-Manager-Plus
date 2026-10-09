@@ -87,17 +87,20 @@ where
 order by id
 limit ?`
 
-func (r *repository) BackfillResponseMetadata(ctx context.Context, batchLimit int) (int, error) {
-	if batchLimit <= 0 {
-		batchLimit = defaultResponseMetadataBackfillBatch
+func (r *repository) collectResponseMetadataBackfillUpdates(ctx context.Context, maxUpdates int, pageLimit int) ([]responseMetadataBackfillUpdate, error) {
+	if maxUpdates <= 0 {
+		return nil, nil
+	}
+	if pageLimit <= 0 {
+		pageLimit = defaultResponseMetadataBackfillBatch
 	}
 
-	updates := make([]responseMetadataBackfillUpdate, 0, batchLimit)
+	updates := make([]responseMetadataBackfillUpdate, 0, maxUpdates)
 	lastID := int64(0)
-	for len(updates) < batchLimit {
-		items, err := r.responseMetadataBackfillPage(ctx, lastID, batchLimit)
+	for len(updates) < maxUpdates {
+		items, err := r.responseMetadataBackfillPage(ctx, lastID, pageLimit)
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
 		if len(items) == 0 {
 			break
@@ -120,7 +123,7 @@ func (r *repository) BackfillResponseMetadata(ctx context.Context, batchLimit in
 						PreviousMetadataJSON: item.ResponseMetadataJSON,
 						Derived:              usage.ResponseHeaderDerived{MetadataJSON: "{}"},
 					})
-					if len(updates) == batchLimit {
+					if len(updates) == maxUpdates {
 						break
 					}
 				}
@@ -134,13 +137,33 @@ func (r *repository) BackfillResponseMetadata(ctx context.Context, batchLimit in
 				PreviousMetadataJSON: item.ResponseMetadataJSON,
 				Derived:              derived,
 			})
-			if len(updates) == batchLimit {
+			if len(updates) == maxUpdates {
 				break
 			}
 		}
-		if len(items) < batchLimit {
+		if len(items) < pageLimit {
 			break
 		}
+	}
+	return updates, nil
+}
+
+func (r *repository) ResponseMetadataBackfillPending(ctx context.Context) (bool, error) {
+	updates, err := r.collectResponseMetadataBackfillUpdates(ctx, 1, defaultResponseMetadataBackfillBatch)
+	if err != nil {
+		return false, err
+	}
+	return len(updates) > 0, nil
+}
+
+func (r *repository) BackfillResponseMetadata(ctx context.Context, batchLimit int) (int, error) {
+	if batchLimit <= 0 {
+		batchLimit = defaultResponseMetadataBackfillBatch
+	}
+
+	updates, err := r.collectResponseMetadataBackfillUpdates(ctx, batchLimit, batchLimit)
+	if err != nil {
+		return 0, err
 	}
 	if len(updates) == 0 {
 		return 0, nil

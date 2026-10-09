@@ -1525,6 +1525,72 @@ func TestXAISummaryWindowsDoesNotCreateMonthlyWindowFromOnDemandOnlyData(t *test
 	}
 }
 
+func TestXAISummaryWindowsMetadataOnlyWeekly(t *testing.T) {
+	summary := &xaiBillingSummary{
+		HasWeeklyData: true,
+		UsagePercent:  nil,
+		PeriodEnd:     "2026-08-20T00:00:00Z",
+	}
+	windows := xaiSummaryWindows(summary)
+	if len(windows) != 1 {
+		t.Fatalf("metadata-only weekly windows = %#v, want exactly 1 window", windows)
+	}
+	if windows[0].ID != "xai-weekly" || windows[0].UsedPercent != nil || windows[0].ResetLabel != "2026-08-20T00:00:00Z" {
+		t.Fatalf("metadata-only weekly window = %#v, want xai-weekly with nil used percent", windows[0])
+	}
+}
+
+func TestXAISummaryWindowsZeroMonthlyLimit(t *testing.T) {
+	zero := float64(0)
+	summary := &xaiBillingSummary{
+		MonthlyLimitCents: &zero,
+		UsedPercent:       nil,
+		BillingPeriodEnd:  "2026-09-01T00:00:00Z",
+	}
+	windows := xaiSummaryWindows(summary)
+	for _, window := range windows {
+		if window.ID == "xai-monthly" {
+			t.Fatalf("zero monthly limit produced xai-monthly window: %#v", windows)
+		}
+	}
+}
+
+func TestXAISummaryWindowsPositiveMonthlyLimit(t *testing.T) {
+	positiveLimit := float64(10000)
+	usedPercent := float64(25)
+	summary := &xaiBillingSummary{
+		MonthlyLimitCents: &positiveLimit,
+		UsedPercent:       &usedPercent,
+		BillingPeriodEnd:  "2026-09-01T00:00:00Z",
+	}
+	windows := xaiSummaryWindows(summary)
+	if len(windows) != 1 || windows[0].ID != "xai-monthly" {
+		t.Fatalf("positive monthly limit windows = %#v, want xai-monthly", windows)
+	}
+	if windows[0].UsedPercent == nil || *windows[0].UsedPercent != 25 {
+		t.Fatalf("positive monthly limit used percent = %#v, want 25", windows[0].UsedPercent)
+	}
+}
+
+func TestXAISummaryWindowsWeeklyPlusZeroMonthly(t *testing.T) {
+	zero := float64(0)
+	summary := &xaiBillingSummary{
+		HasWeeklyData:     true,
+		UsagePercent:      nil,
+		PeriodEnd:         "2026-09-12T00:00:00Z",
+		MonthlyLimitCents: &zero,
+		UsedPercent:       nil,
+		BillingPeriodEnd:  "2026-10-01T00:00:00Z",
+	}
+	windows := xaiSummaryWindows(summary)
+	if len(windows) != 1 || windows[0].ID != "xai-weekly" {
+		t.Fatalf("weekly + zero monthly windows = %#v, want weekly only", windows)
+	}
+	if windows[0].UsedPercent != nil || windows[0].ResetLabel != "2026-09-12T00:00:00Z" {
+		t.Fatalf("weekly window = %#v, want nil used percent", windows[0])
+	}
+}
+
 func TestParseXAIBillingSummaryDoesNotCreateMonthlyWindowFromWeeklyZeroOnDemandData(t *testing.T) {
 	summary := parseXAIBillingSummary(map[string]any{
 		"currentPeriod": map[string]any{
@@ -1746,13 +1812,50 @@ func TestMergeXAIBillingSummaryKeepsWeeklyAndMonthlyResetBoundariesSeparate(t *t
 	}
 
 	windows := xaiSummaryWindows(merged)
+	if len(windows) != 1 {
+		t.Fatalf("merged windows = %#v, want weekly only because monthly limit is zero", windows)
+	}
+	if windows[0].ID != "xai-weekly" || windows[0].UsedPercent != nil || windows[0].ResetLabel != "2026-09-12T00:00:00Z" {
+		t.Fatalf("weekly window = %#v", windows[0])
+	}
+}
+
+func TestMergeXAIBillingSummaryKeepsWeeklyAndPositiveMonthlyResetBoundariesSeparate(t *testing.T) {
+	weekly := parseXAIBillingSummary(map[string]any{
+		"currentPeriod": map[string]any{
+			"type":  "USAGE_PERIOD_TYPE_WEEKLY",
+			"start": "2026-09-05T00:00:00Z",
+			"end":   "2026-09-12T00:00:00Z",
+		},
+		"onDemandCap":      map[string]any{"val": 0},
+		"onDemandUsed":     map[string]any{"val": 0},
+		"billingPeriodEnd": "2026-09-12T00:00:00Z",
+	})
+	monthly := parseXAIBillingSummary(map[string]any{
+		"monthlyLimit":     map[string]any{"val": 10000},
+		"used":             map[string]any{"val": 2500},
+		"billingPeriodEnd": "2026-10-01T00:00:00Z",
+	})
+
+	merged := mergeXAIBillingSummary(weekly, monthly)
+	if merged == nil || merged.UsagePercent != nil || merged.PeriodEnd != "2026-09-12T00:00:00Z" {
+		t.Fatalf("merged weekly summary = %#v", merged)
+	}
+	if merged.MonthlyLimitCents == nil || *merged.MonthlyLimitCents != 10000 {
+		t.Fatalf("merged monthly limit = %#v, want positive limit", merged.MonthlyLimitCents)
+	}
+	if merged.BillingPeriodEnd != "2026-10-01T00:00:00Z" {
+		t.Fatalf("merged billing period end = %q", merged.BillingPeriodEnd)
+	}
+
+	windows := xaiSummaryWindows(merged)
 	if len(windows) != 2 {
 		t.Fatalf("merged windows = %#v, want weekly and monthly", windows)
 	}
 	if windows[0].ID != "xai-weekly" || windows[0].UsedPercent != nil || windows[0].ResetLabel != "2026-09-12T00:00:00Z" {
 		t.Fatalf("weekly window = %#v", windows[0])
 	}
-	if windows[1].ID != "xai-monthly" || windows[1].UsedPercent != nil || windows[1].ResetLabel != "2026-10-01T00:00:00Z" {
+	if windows[1].ID != "xai-monthly" || windows[1].UsedPercent == nil || *windows[1].UsedPercent != 25 || windows[1].ResetLabel != "2026-10-01T00:00:00Z" {
 		t.Fatalf("monthly window = %#v", windows[1])
 	}
 }

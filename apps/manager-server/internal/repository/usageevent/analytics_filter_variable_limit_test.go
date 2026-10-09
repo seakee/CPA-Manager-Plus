@@ -14,7 +14,7 @@ func TestAnalyticsLargeFilterListsStayBelowSQLiteVariableLimit(t *testing.T) {
 	ctx := context.Background()
 	timestamp := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 	if _, err := repo.InsertBatch(ctx, []usage.Event{{
-		EventHash:       "large-filter-variable-limit",
+		EventHash:       canonicalTestHash("large-filter-variable-limit"),
 		TimestampMS:     timestamp.UnixMilli(),
 		Timestamp:       timestamp.Format(time.RFC3339Nano),
 		Provider:        "provider-target",

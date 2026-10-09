@@ -188,6 +188,7 @@ type DrilldownPreview struct {
 type Response struct {
 	GeneratedAtMS      int64                     `json:"generated_at_ms"`
 	Granularity        string                    `json:"granularity"`
+	Coverage           *AnalyticsCoverage        `json:"coverage,omitempty"`
 	Summary            *Summary                  `json:"summary,omitempty"`
 	SummaryComparison  *SummaryComparison        `json:"summary_comparison,omitempty"`
 	Timeline           []TimelinePoint           `json:"timeline,omitempty"`
@@ -208,6 +209,33 @@ type Response struct {
 	RecentFailures     []RecentFailure           `json:"recent_failures,omitempty"`
 	Events             *EventsResponse           `json:"events,omitempty"`
 	DrilldownPreview   *EventsResponse           `json:"drilldown_preview,omitempty"`
+}
+
+type AnalyticsCoverage struct {
+	Scope                           string                   `json:"scope"`
+	Mode                            string                   `json:"mode"`
+	RawComplete                     bool                     `json:"raw_complete"`
+	CoreAggregateUsed               bool                     `json:"core_aggregate_used"`
+	RawEventCount                   int64                    `json:"raw_event_count,omitempty"`
+	RawDeletedEventCount            int64                    `json:"raw_deleted_event_count"`
+	MinDeletedTimestampMS           int64                    `json:"min_deleted_timestamp_ms"`
+	MaxDeletedTimestampMS           int64                    `json:"max_deleted_timestamp_ms"`
+	ComparisonRawEventCount         int64                    `json:"comparison_raw_event_count,omitempty"`
+	ComparisonRawDeletedEventCount  int64                    `json:"comparison_raw_deleted_event_count,omitempty"`
+	ComparisonMinDeletedTimestampMS int64                    `json:"comparison_min_deleted_timestamp_ms,omitempty"`
+	ComparisonMaxDeletedTimestampMS int64                    `json:"comparison_max_deleted_timestamp_ms,omitempty"`
+	AuxiliaryRanges                 []AnalyticsCoverageRange `json:"auxiliary_ranges,omitempty"`
+	FidelityLimitations             []string                 `json:"fidelity_limitations"`
+}
+
+type AnalyticsCoverageRange struct {
+	Scope                 string `json:"scope"`
+	FromMS                int64  `json:"from_ms"`
+	ToMS                  int64  `json:"to_ms"`
+	RawEventCount         int64  `json:"raw_event_count,omitempty"`
+	RawDeletedEventCount  int64  `json:"raw_deleted_event_count"`
+	MinDeletedTimestampMS int64  `json:"min_deleted_timestamp_ms,omitempty"`
+	MaxDeletedTimestampMS int64  `json:"max_deleted_timestamp_ms,omitempty"`
 }
 
 type HeaderSnapshotsRequest struct {
@@ -261,7 +289,7 @@ type AccountHistoryItem struct {
 	SuccessCalls   int64                  `json:"success_calls"`
 	FailureCalls   int64                  `json:"failure_calls"`
 	TotalTokens    int64                  `json:"total_tokens"`
-	TotalCost      float64                `json:"total_cost"`
+	TotalCost      *float64               `json:"total_cost"`
 	SuccessRate    *float64               `json:"success_rate"`
 	FirstSeenMS    *int64                 `json:"first_seen_ms"`
 	LastSeenMS     *int64                 `json:"last_seen_ms"`
@@ -836,6 +864,12 @@ type EventRow struct {
 	AnalyticsModel         string                        `json:"analytics_model,omitempty"`
 	RequestedModel         string                        `json:"requested_model,omitempty"`
 	ResolvedModel          string                        `json:"resolved_model,omitempty"`
+	ResponseModel          string                        `json:"response_model,omitempty"`
+	SessionID              string                        `json:"session_id,omitempty"`
+	ParentSessionID        string                        `json:"parent_session_id,omitempty"`
+	AccessTokenSHA256      string                        `json:"access_token_sha256,omitempty"`
+	Generate               *bool                         `json:"generate,omitempty"`
+	Stream                 *bool                         `json:"stream,omitempty"`
 	Endpoint               string                        `json:"endpoint"`
 	Method                 string                        `json:"method"`
 	Path                   string                        `json:"path"`
@@ -900,6 +934,78 @@ func (s *Service) analytics(ctx context.Context, req Request) (Response, error) 
 		return Response{}, err
 	}
 	filter := buildFilter(req)
+	compactSummary := req.Include.Summary && req.Include.SummaryProfile == "compact"
+	rawCoverage, err := s.store.UsageArchives.RawCoverage(ctx, req.FromMS, req.ToMS)
+	if err != nil {
+		return Response{}, err
+	}
+	comparisonFromMS, comparisonToMS, comparisonRequested := summaryComparisonRange(req)
+	var comparisonRawCoverage *store.UsageArchiveRawCoverage
+	if comparisonRequested {
+		coverage, coverageErr := s.store.UsageArchives.RawCoverage(ctx, comparisonFromMS, comparisonToMS)
+		if coverageErr != nil {
+			return Response{}, coverageErr
+		}
+		comparisonRawCoverage = &coverage
+	}
+	auxiliaryRawCoverage := make([]analyticsAuxiliaryCoverage, 0, 2)
+	var drilldownRawCoverage *store.UsageArchiveRawCoverage
+	if req.Include.Summary && !compactSummary {
+		rollingFromMS := nowMS - recentWindowMS
+		if rollingFromMS > 0 {
+			coverage, coverageErr := s.store.UsageArchives.RawCoverage(ctx, rollingFromMS, nowMS)
+			if coverageErr != nil {
+				return Response{}, coverageErr
+			}
+			auxiliaryRawCoverage = append(auxiliaryRawCoverage, analyticsAuxiliaryCoverage{
+				Scope:    "rolling_30m",
+				Coverage: coverage,
+			})
+		}
+	}
+	if preview := req.Include.DrilldownPreview; preview != nil && preview.FromMS > 0 && preview.ToMS > preview.FromMS {
+		coverage, coverageErr := s.store.UsageArchives.RawCoverage(ctx, preview.FromMS, preview.ToMS)
+		if coverageErr != nil {
+			return Response{}, coverageErr
+		}
+		drilldownRawCoverage = &coverage
+		auxiliaryRawCoverage = append(auxiliaryRawCoverage, analyticsAuxiliaryCoverage{
+			Scope:    "drilldown_preview",
+			Coverage: coverage,
+		})
+	}
+	coverageWarningRequired := rawCoverage.RawDeletedEventCount > 0 ||
+		(comparisonRawCoverage != nil && comparisonRawCoverage.RawDeletedEventCount > 0)
+	for _, auxiliary := range auxiliaryRawCoverage {
+		if auxiliary.Coverage.RawDeletedEventCount > 0 {
+			coverageWarningRequired = true
+			break
+		}
+	}
+	if coverageWarningRequired {
+		populateRawEventCount := func(coverage *store.UsageArchiveRawCoverage) error {
+			if coverage == nil || coverage.RawDeletedEventCount > 0 {
+				return nil
+			}
+			count, countErr := s.store.UsageArchives.RawEventCount(ctx, coverage.FromTimestampMS, coverage.ToTimestampMS)
+			if countErr != nil {
+				return countErr
+			}
+			coverage.RawEventCount = count
+			return nil
+		}
+		if err = populateRawEventCount(&rawCoverage); err != nil {
+			return Response{}, err
+		}
+		if err = populateRawEventCount(comparisonRawCoverage); err != nil {
+			return Response{}, err
+		}
+		for index := range auxiliaryRawCoverage {
+			if err = populateRawEventCount(&auxiliaryRawCoverage[index].Coverage); err != nil {
+				return Response{}, err
+			}
+		}
+	}
 	var prices map[string]store.ModelPrice
 
 	response := Response{
@@ -912,7 +1018,6 @@ func (s *Service) analytics(ctx context.Context, req Request) (Response, error) 
 	// (summary and events use the exact same filter).
 	var summaryTotalCalls int64
 	summaryComputed := false
-	compactSummary := req.Include.Summary && req.Include.SummaryProfile == "compact"
 	rollupEligible := analyticsHourlyRollupEligible(filter)
 	needsHourlyAggregates := req.Include.Summary || req.Include.ModelShare || req.Include.ModelStats
 	needsHourlyTimeline := req.Include.Timeline || req.Include.AnomalyPoints
@@ -921,13 +1026,21 @@ func (s *Service) analytics(ctx context.Context, req Request) (Response, error) 
 	var hourlySnapshot usagehourly.Snapshot
 	hourlySnapshotAvailable := false
 	if rollupEligible && needsHourlyCore {
+		edges, edgeErr := s.deletedHourlyEdges(ctx, req.FromMS, req.ToMS, rawCoverage.RawDeletedEventCount > 0)
+		if edgeErr != nil {
+			return Response{}, edgeErr
+		}
 		hourlySnapshot, hourlySnapshotAvailable = s.hourlyReader.LoadAnalytics(
 			ctx,
 			filter,
 			granularity,
 			location,
 			hourlyTimelineRepresentable,
+			edges,
 		)
+		if hourlySnapshot.ReadError != nil {
+			return Response{}, hourlySnapshot.ReadError
+		}
 	}
 	if hourlySnapshotAvailable {
 		prices = hourlySnapshot.Prices
@@ -939,16 +1052,21 @@ func (s *Service) analytics(ctx context.Context, req Request) (Response, error) 
 	}
 
 	var modelStats []store.ModelStat
+	modelStatsDerived := false
 	var channelStats []store.ChannelModelStat
+	channelStatsDerived := false
 	var accountStats []store.AccountModelStat
+	accountStatsDerived := false
 	var apiKeyStats []store.APIKeyModelStat
+	apiKeyStatsDerived := false
 	deriveChannelStatsFromAccounts := req.Include.ChannelShare && req.Include.AccountStats
 	needsModelStats := req.Include.Summary || req.Include.ModelShare || req.Include.ModelStats
 	if needsModelStats {
 		if hourlySnapshotAvailable {
 			modelStats = hourlySnapshot.ModelStats
+			modelStatsDerived = true
 		} else {
-			modelStats, err = s.modelStats(ctx, filter)
+			modelStats, modelStatsDerived, err = s.modelStatsWithSource(ctx, filter)
 			if err != nil {
 				return Response{}, err
 			}
@@ -988,7 +1106,7 @@ func (s *Service) analytics(ctx context.Context, req Request) (Response, error) 
 	if req.Include.ChannelShare && !deriveChannelStatsFromAccounts {
 		queries.Go(func(queryCtx context.Context) error {
 			var queryErr error
-			channelStats, queryErr = s.channelModelStats(queryCtx, filter)
+			channelStats, channelStatsDerived, queryErr = s.channelModelStatsWithSource(queryCtx, filter)
 			return queryErr
 		})
 	}
@@ -1005,7 +1123,7 @@ func (s *Service) analytics(ctx context.Context, req Request) (Response, error) 
 	if req.Include.AccountStats {
 		queries.Go(func(queryCtx context.Context) error {
 			var queryErr error
-			accountStats, queryErr = s.accountModelStats(queryCtx, filter)
+			accountStats, accountStatsDerived, queryErr = s.accountModelStatsWithSource(queryCtx, filter)
 			return queryErr
 		})
 	}
@@ -1040,33 +1158,36 @@ func (s *Service) analytics(ctx context.Context, req Request) (Response, error) 
 	if req.Include.APIKeyStats {
 		queries.Go(func(queryCtx context.Context) error {
 			var queryErr error
-			apiKeyStats, queryErr = s.apiKeyModelStats(queryCtx, filter)
+			apiKeyStats, apiKeyStatsDerived, queryErr = s.apiKeyModelStatsWithSource(queryCtx, filter)
 			return queryErr
 		})
 	}
 
 	var selectorOptions *FilterOptions
+	selectorOptionsDerived := false
 	var prebuiltFilterOptions *FilterOptions
+	prebuiltFilterOptionsDerived := false
 	var filterOptionValues store.FilterOptionValues
 	var filterOptionValuesAvailable bool
+	filterOptionValuesDerived := false
 	if req.Include.FilterSelectors {
 		queries.Go(func(queryCtx context.Context) error {
 			var queryErr error
-			selectorOptions, queryErr = s.filterSelectors(queryCtx, filter)
+			selectorOptions, selectorOptionsDerived, queryErr = s.filterSelectorsWithSource(queryCtx, filter)
 			return queryErr
 		})
 	} else if req.Include.FilterOptions {
 		if filterOptionsMatchMainScope(filter) {
 			queries.Go(func(queryCtx context.Context) error {
 				var queryErr error
-				filterOptionValues, queryErr = s.filterOptionValues(queryCtx, filterOptionsBaseFilter(filter))
+				filterOptionValues, filterOptionValuesDerived, queryErr = s.filterOptionValuesWithSource(queryCtx, filterOptionsBaseFilter(filter))
 				filterOptionValuesAvailable = queryErr == nil
 				return queryErr
 			})
 		} else {
 			queries.Go(func(queryCtx context.Context) error {
 				var queryErr error
-				prebuiltFilterOptions, queryErr = s.filterOptions(queryCtx, filter, prices, filterOptionStats{})
+				prebuiltFilterOptions, prebuiltFilterOptionsDerived, queryErr = s.filterOptionsWithSource(queryCtx, filter, prices, filterOptionStats{})
 				return queryErr
 			})
 		}
@@ -1100,7 +1221,23 @@ func (s *Service) analytics(ctx context.Context, req Request) (Response, error) 
 		}
 		queries.Go(func(queryCtx context.Context) error {
 			var queryErr error
-			eventsPage, queryErr = s.eventsPage(queryCtx, filter, beforeMS, beforeID, limit)
+			if rawCoverage.RawDeletedEventCount > 0 {
+				eventsPage, queryErr = s.store.EventsPageWithFilter(
+					queryCtx,
+					filter,
+					beforeMS,
+					beforeID,
+					limit,
+				)
+			} else {
+				eventsPage, queryErr = s.eventsPage(
+					queryCtx,
+					filter,
+					beforeMS,
+					beforeID,
+					limit,
+				)
+			}
 			return queryErr
 		})
 	}
@@ -1113,12 +1250,16 @@ func (s *Service) analytics(ctx context.Context, req Request) (Response, error) 
 		}
 	}
 
+	summaryDerived := false
+	comparisonDerived := false
+	rollingDerived := false
 	if req.Include.Summary {
 		var agg store.Aggregate
 		if hourlySnapshotAvailable {
 			agg = hourlySnapshot.Aggregate
+			summaryDerived = true
 		} else {
-			agg, err = s.aggregate(ctx, filter)
+			agg, summaryDerived, err = s.aggregateWithSource(ctx, filter)
 			if err != nil {
 				return Response{}, err
 			}
@@ -1137,7 +1278,7 @@ func (s *Service) analytics(ctx context.Context, req Request) (Response, error) 
 			rollingFilter := filter
 			rollingFilter.FromMS = nowMS - recentWindowMS
 			rollingFilter.ToMS = nowMS
-			rollingAgg, err = s.store.AggregateWithFilter(ctx, rollingFilter)
+			rollingAgg, rollingDerived, err = s.aggregateWithSource(ctx, rollingFilter)
 			if err != nil {
 				return Response{}, err
 			}
@@ -1164,47 +1305,69 @@ func (s *Service) analytics(ctx context.Context, req Request) (Response, error) 
 		// Period-over-period comparison reuses the same filter over the
 		// immediately preceding window [FromMS-window, FromMS). Gated behind an
 		// explicit flag so other analytics consumers avoid the extra queries.
-		if req.Include.SummaryComparison {
-			windowMS := req.ToMS - req.FromMS
-			if prevFrom := req.FromMS - windowMS; prevFrom > 0 {
+		if comparisonRequested {
+			prevFrom := comparisonFromMS
+			if prevFrom > 0 {
 				prevFilter := filter
 				prevFilter.FromMS = prevFrom
-				prevFilter.ToMS = req.FromMS
+				prevFilter.ToMS = comparisonToMS
 				var prevAgg store.Aggregate
 				var prevModelStats []store.ModelStat
 				var prevSnapshot usagehourly.Snapshot
 				prevSnapshotAvailable := false
+				comparisonUnavailable := false
 				if rollupEligible {
+					edges, edgeErr := s.deletedHourlyEdges(ctx, comparisonFromMS, comparisonToMS,
+						comparisonRawCoverage != nil && comparisonRawCoverage.RawDeletedEventCount > 0)
+					if edgeErr != nil {
+						return Response{}, edgeErr
+					}
 					prevSnapshot, prevSnapshotAvailable = s.hourlyReader.LoadAnalytics(
 						ctx,
 						prevFilter,
 						granularity,
 						location,
 						false,
+						edges,
 					)
-				}
-				if prevSnapshotAvailable {
-					prevAgg = prevSnapshot.Aggregate
-					prevModelStats = prevSnapshot.ModelStats
-				} else {
-					prevAgg, err = s.aggregate(ctx, prevFilter)
-					if err != nil {
-						return Response{}, err
-					}
-					prevModelStats, err = s.modelStats(ctx, prevFilter)
-					if err != nil {
-						return Response{}, err
+					if prevSnapshot.ReadError != nil {
+						if errors.Is(prevSnapshot.ReadError, store.ErrUsagePricingCoverageIncomplete) &&
+							comparisonRawCoverage != nil &&
+							comparisonRawCoverage.RawDeletedEventCount > 0 {
+							comparisonUnavailable = true
+						} else {
+							return Response{}, prevSnapshot.ReadError
+						}
 					}
 				}
-				response.SummaryComparison = &SummaryComparison{
-					FromMS:       prevFrom,
-					ToMS:         req.FromMS,
-					TotalCalls:   prevAgg.TotalCalls,
-					SuccessCalls: prevAgg.SuccessCalls,
-					FailureCalls: prevAgg.FailureCalls,
-					SuccessRate:  ratio(prevAgg.SuccessCalls, prevAgg.TotalCalls),
-					TotalTokens:  prevAgg.TotalTokens,
-					TotalCost:    sumCost(prevModelStats, prices),
+				if !comparisonUnavailable {
+					if prevSnapshotAvailable {
+						prevAgg = prevSnapshot.Aggregate
+						prevModelStats = prevSnapshot.ModelStats
+						comparisonDerived = true
+					} else {
+						var aggregateDerived bool
+						prevAgg, aggregateDerived, err = s.aggregateWithSource(ctx, prevFilter)
+						if err != nil {
+							return Response{}, err
+						}
+						var modelsDerived bool
+						prevModelStats, modelsDerived, err = s.modelStatsWithSource(ctx, prevFilter)
+						if err != nil {
+							return Response{}, err
+						}
+						comparisonDerived = aggregateDerived && modelsDerived
+					}
+					response.SummaryComparison = &SummaryComparison{
+						FromMS:       prevFrom,
+						ToMS:         comparisonToMS,
+						TotalCalls:   prevAgg.TotalCalls,
+						SuccessCalls: prevAgg.SuccessCalls,
+						FailureCalls: prevAgg.FailureCalls,
+						SuccessRate:  ratio(prevAgg.SuccessCalls, prevAgg.TotalCalls),
+						TotalTokens:  prevAgg.TotalTokens,
+						TotalCost:    sumCost(prevModelStats, prices),
+					}
 				}
 			}
 		}
@@ -1214,13 +1377,16 @@ func (s *Service) analytics(ctx context.Context, req Request) (Response, error) 
 	}
 	if deriveChannelStatsFromAccounts {
 		channelStats = channelModelStatsFromAccountStats(accountStats)
+		channelStatsDerived = accountStatsDerived
 	}
 	var timeline []TimelinePoint
+	timelineDerived := false
 	if req.Include.Timeline || req.Include.AnomalyPoints {
 		var points []store.TimelinePoint
 		pointsAvailable := false
 		if hourlySnapshotAvailable && hourlyTimelineRepresentable {
 			points, pointsAvailable = s.hourlyReader.AnalyticsTimeline(ctx, hourlySnapshot, granularity, location)
+			timelineDerived = pointsAvailable
 		}
 		if !pointsAvailable {
 			points, err = s.store.TimelineWithFilter(ctx, filter, granularity, location)
@@ -1269,28 +1435,37 @@ func (s *Service) analytics(ctx context.Context, req Request) (Response, error) 
 	if req.Include.APIKeyStats {
 		response.APIKeyStats = buildAPIKeyStats(apiKeyStats, prices)
 	}
+	filterOptionsDerived := false
 	if req.Include.FilterSelectors {
 		response.FilterOptions = selectorOptions
+		filterOptionsDerived = selectorOptionsDerived
 	} else if req.Include.FilterOptions {
 		if prebuiltFilterOptions != nil {
 			response.FilterOptions = prebuiltFilterOptions
+			filterOptionsDerived = prebuiltFilterOptionsDerived
 		} else {
 			reuse := filterOptionStats{
 				accountStats:          accountStats,
 				accountStatsAvailable: req.Include.AccountStats,
+				accountStatsDerived:   accountStatsDerived,
 				apiKeyStats:           apiKeyStats,
 				apiKeyStatsAvailable:  req.Include.APIKeyStats,
+				apiKeyStatsDerived:    apiKeyStatsDerived,
 				channelStats:          channelStats,
 				channelStatsAvailable: req.Include.ChannelShare,
+				channelStatsDerived:   channelStatsDerived,
 				modelStats:            modelStats,
 				modelStatsAvailable:   needsModelStats,
+				modelStatsDerived:     modelStatsDerived,
 				optionValues:          filterOptionValues,
 				optionValuesAvailable: filterOptionValuesAvailable,
+				optionValuesDerived:   filterOptionValuesDerived,
 			}
-			options, err := s.filterOptions(ctx, filter, prices, reuse)
+			options, derived, err := s.filterOptionsWithSource(ctx, filter, prices, reuse)
 			if err != nil {
 				return Response{}, err
 			}
+			filterOptionsDerived = derived
 			if filterOptionsMatchMainScope(filter) {
 				if req.Include.AccountStats {
 					options.AccountStats = response.AccountStats
@@ -1321,11 +1496,17 @@ func (s *Service) analytics(ctx context.Context, req Request) (Response, error) 
 		// for this same filter to avoid a second scan; otherwise run a
 		// lightweight count(*).
 		total := summaryTotalCalls
-		if !summaryComputed {
-			total, err = s.eventsCount(ctx, filter)
-			if err != nil {
-				return Response{}, err
+		if rawCoverage.RawDeletedEventCount > 0 {
+			if !monitoringrollup.PrefersEventProjection(filter) {
+				total = rawCoverage.RawEventCount
+			} else {
+				total, err = s.store.EventsCountWithFilter(ctx, filter)
 			}
+		} else if !summaryComputed {
+			total, err = s.eventsCount(ctx, filter)
+		}
+		if err != nil {
+			return Response{}, err
 		}
 		response.Events = buildEvents(eventsPage, total)
 	}
@@ -1342,15 +1523,233 @@ func (s *Service) analytics(ctx context.Context, req Request) (Response, error) 
 			if limit > maxDrilldownLimit {
 				limit = maxDrilldownLimit
 			}
-			page, err := s.eventsPage(ctx, previewFilter, 0, 0, limit)
+			var (
+				page store.EventsPage
+				err  error
+			)
+			if drilldownRawCoverage != nil && drilldownRawCoverage.RawDeletedEventCount > 0 {
+				page, err = s.store.EventsPageWithFilter(
+					ctx,
+					previewFilter,
+					0,
+					0,
+					limit,
+				)
+			} else {
+				page, err = s.eventsPage(
+					ctx,
+					previewFilter,
+					0,
+					0,
+					limit,
+				)
+			}
 			if err != nil {
 				return Response{}, err
 			}
 			response.DrilldownPreview = buildEvents(page, int64(len(page.Items)))
 		}
 	}
+	if coverageWarningRequired {
+		response.Coverage = buildAnalyticsCoverage(
+			req,
+			rawCoverage,
+			comparisonRawCoverage,
+			auxiliaryRawCoverage,
+			analyticsCoverageSources{
+				Summary:       summaryDerived,
+				ModelStats:    modelStatsDerived,
+				Comparison:    comparisonDerived,
+				Rolling:       rollingDerived,
+				Timeline:      timelineDerived,
+				AccountStats:  accountStatsDerived,
+				APIKeyStats:   apiKeyStatsDerived,
+				ChannelStats:  channelStatsDerived,
+				FilterOptions: filterOptionsDerived,
+			},
+		)
+	}
 
 	return response, nil
+}
+
+type analyticsAuxiliaryCoverage struct {
+	Scope    string
+	Coverage store.UsageArchiveRawCoverage
+}
+
+type analyticsCoverageSources struct {
+	Summary       bool
+	ModelStats    bool
+	Comparison    bool
+	Rolling       bool
+	Timeline      bool
+	AccountStats  bool
+	APIKeyStats   bool
+	ChannelStats  bool
+	FilterOptions bool
+}
+
+func buildAnalyticsCoverage(
+	req Request,
+	coverage store.UsageArchiveRawCoverage,
+	comparisonCoverage *store.UsageArchiveRawCoverage,
+	auxiliaryCoverage []analyticsAuxiliaryCoverage,
+	sources analyticsCoverageSources,
+) *AnalyticsCoverage {
+	mode := "aggregate_only"
+	if coverage.RawEventCount > 0 || (comparisonCoverage != nil && comparisonCoverage.RawEventCount > 0) {
+		mode = "mixed"
+	}
+	for _, auxiliary := range auxiliaryCoverage {
+		if auxiliary.Coverage.RawEventCount > 0 {
+			mode = "mixed"
+			break
+		}
+	}
+	limitations := make([]string, 0, 8)
+	appendLimitation := func(value string) {
+		for _, existing := range limitations {
+			if existing == value {
+				return
+			}
+		}
+		limitations = append(limitations, value)
+	}
+
+	if coverage.RawDeletedEventCount > 0 {
+		coreRequested := req.Include.Summary || req.Include.ModelShare || req.Include.ModelStats
+		coreDerived := true
+		if req.Include.Summary && !sources.Summary {
+			coreDerived = false
+		}
+		if (req.Include.Summary || req.Include.ModelShare || req.Include.ModelStats) && !sources.ModelStats {
+			coreDerived = false
+		}
+		if coreRequested && !coreDerived {
+			appendLimitation("core_metrics_require_raw_events")
+		}
+		if req.Include.Summary && (req.Include.SummaryProfile != "compact" || req.Include.SummaryPercentiles) {
+			appendLimitation("extended_summary_metrics_require_raw_events")
+		}
+		if req.Include.Timeline || req.Include.AnomalyPoints {
+			if !sources.Timeline {
+				appendLimitation("timeline_metrics_require_raw_events")
+			}
+			appendLimitation("timeline_latency_percentiles_require_raw_events")
+		}
+		if req.Include.HourlyDistribution || req.Include.Heatmap || req.Include.TaskBuckets {
+			appendLimitation("distribution_metrics_require_raw_events")
+		}
+		if req.Include.FailureSources || req.Include.RecentFailures > 0 {
+			appendLimitation("failure_metrics_require_raw_events")
+		}
+		if req.Include.CredentialStats || req.Include.CredentialTimeline || req.Include.APIKeyTimeline {
+			appendLimitation("credential_metrics_require_raw_events")
+		}
+		identityMetricsRequireRaw := (req.Include.ChannelShare && !sources.ChannelStats) ||
+			(req.Include.AccountStats && !sources.AccountStats) ||
+			(req.Include.APIKeyStats && !sources.APIKeyStats)
+		if identityMetricsRequireRaw {
+			appendLimitation("identity_metrics_require_raw_events")
+		}
+		if (req.Include.FilterOptions || req.Include.FilterSelectors) && !sources.FilterOptions {
+			appendLimitation("filter_options_require_raw_events")
+		}
+		if req.Include.EventsPage != nil {
+			appendLimitation("event_details_require_raw_events")
+		}
+	}
+	if comparisonCoverage != nil && comparisonCoverage.RawDeletedEventCount > 0 && !sources.Comparison {
+		appendLimitation("summary_comparison_requires_raw_events")
+	}
+	for _, auxiliary := range auxiliaryCoverage {
+		if auxiliary.Coverage.RawDeletedEventCount == 0 {
+			continue
+		}
+		switch auxiliary.Scope {
+		case "rolling_30m":
+			if !sources.Rolling {
+				appendLimitation("rolling_window_metrics_require_raw_events")
+			}
+		case "drilldown_preview":
+			appendLimitation("event_details_require_raw_events")
+		}
+	}
+
+	scope := "time_range"
+	if len(auxiliaryCoverage) > 0 {
+		scope = "requested_ranges"
+	}
+
+	result := &AnalyticsCoverage{
+		Scope:                 scope,
+		Mode:                  mode,
+		RawComplete:           false,
+		CoreAggregateUsed:     sources.Summary || sources.ModelStats || sources.Comparison || sources.Rolling || sources.Timeline,
+		RawEventCount:         coverage.RawEventCount,
+		RawDeletedEventCount:  coverage.RawDeletedEventCount,
+		MinDeletedTimestampMS: coverage.MinDeletedTimestampMS,
+		MaxDeletedTimestampMS: coverage.MaxDeletedTimestampMS,
+		FidelityLimitations:   limitations,
+	}
+	if comparisonCoverage != nil {
+		result.ComparisonRawEventCount = comparisonCoverage.RawEventCount
+		result.ComparisonRawDeletedEventCount = comparisonCoverage.RawDeletedEventCount
+		result.ComparisonMinDeletedTimestampMS = comparisonCoverage.MinDeletedTimestampMS
+		result.ComparisonMaxDeletedTimestampMS = comparisonCoverage.MaxDeletedTimestampMS
+	}
+	if len(auxiliaryCoverage) > 0 {
+		result.AuxiliaryRanges = make([]AnalyticsCoverageRange, 0, len(auxiliaryCoverage))
+		for _, auxiliary := range auxiliaryCoverage {
+			result.AuxiliaryRanges = append(result.AuxiliaryRanges, AnalyticsCoverageRange{
+				Scope:                 auxiliary.Scope,
+				FromMS:                auxiliary.Coverage.FromTimestampMS,
+				ToMS:                  auxiliary.Coverage.ToTimestampMS,
+				RawEventCount:         auxiliary.Coverage.RawEventCount,
+				RawDeletedEventCount:  auxiliary.Coverage.RawDeletedEventCount,
+				MinDeletedTimestampMS: auxiliary.Coverage.MinDeletedTimestampMS,
+				MaxDeletedTimestampMS: auxiliary.Coverage.MaxDeletedTimestampMS,
+			})
+		}
+	}
+	return result
+}
+
+func summaryComparisonRange(req Request) (int64, int64, bool) {
+	if !req.Include.Summary || !req.Include.SummaryComparison {
+		return 0, 0, false
+	}
+	windowMS := req.ToMS - req.FromMS
+	previousFromMS := req.FromMS - windowMS
+	if windowMS <= 0 || previousFromMS <= 0 {
+		return 0, 0, false
+	}
+	return previousFromMS, req.FromMS, true
+}
+
+func (s *Service) deletedHourlyEdges(ctx context.Context, fromMS, toMS int64, hasDeletedRaw bool) (usagehourly.DeletedEdges, error) {
+	edges := usagehourly.DeletedEdges{}
+	if !hasDeletedRaw {
+		return edges, nil
+	}
+	const hourMS = int64(time.Hour / time.Millisecond)
+	fullStartMS := (fromMS + hourMS - 1) / hourMS * hourMS
+	fullEndMS := toMS / hourMS * hourMS
+	if fullStartMS >= fullEndMS {
+		return edges, nil
+	}
+	var err error
+	if fromMS < fullStartMS {
+		edges.Left, err = s.store.UsageArchives.HasDeletedRaw(ctx, fromMS, fullStartMS)
+		if err != nil {
+			return edges, err
+		}
+	}
+	if fullEndMS < toMS {
+		edges.Right, err = s.store.UsageArchives.HasDeletedRaw(ctx, fullEndMS, toMS)
+	}
+	return edges, err
 }
 
 func (s *Service) AccountHistory(ctx context.Context, req AccountHistoryRequest) (AccountHistoryResponse, error) {
@@ -1383,7 +1782,8 @@ func (s *Service) accountHistory(ctx context.Context, req AccountHistoryRequest)
 			return AccountHistoryResponse{}, err
 		}
 		processed = result.Processed
-		if _, err := s.store.CatchUpUsagePricing(ctx, accountHistoryCatchUpLimit, generatedAtMS); err != nil {
+		if _, err := s.store.CatchUpUsagePricing(ctx, accountHistoryCatchUpLimit, generatedAtMS); err != nil &&
+			!errors.Is(err, store.ErrUsagePricingCoverageIncomplete) {
 			return AccountHistoryResponse{}, err
 		}
 	}
@@ -1448,15 +1848,20 @@ func (s *Service) accountHistory(ctx context.Context, req AccountHistoryRequest)
 		if err != nil {
 			return nil, err
 		}
-		prices := pricingSnapshot.Prices
-		if pricingSnapshot.Available {
-			return buildPricingAccountHistoryTotals(pricingSnapshot.Rows, prices), nil
+		totals := buildPricingAccountHistoryTotals(pricingSnapshot.Rows, pricingSnapshot.Prices)
+		if len(pricingSnapshot.PricingIncompleteAccountKeys) == 0 {
+			return totals, nil
 		}
-		rows, err := s.store.AccountHistoryRollupRows(ctx, readKeys)
-		if err != nil {
-			return nil, err
+		unpricedRows := make([]store.AccountHistoryRollupRow, 0, len(pricingSnapshot.CoreRows))
+		for _, row := range pricingSnapshot.CoreRows {
+			if _, incomplete := pricingSnapshot.PricingIncompleteAccountKeys[row.AccountKey]; incomplete {
+				unpricedRows = append(unpricedRows, row)
+			}
 		}
-		return buildAccountHistoryTotals(rows, prices), nil
+		for key, total := range buildUnpricedAccountHistoryTotals(unpricedRows) {
+			totals[key] = total
+		}
+		return totals, nil
 	}
 	totals, err := loadTotals(keys)
 	if err != nil {
@@ -1545,7 +1950,7 @@ func (s *Service) accountHistory(ctx context.Context, req AccountHistoryRequest)
 			SuccessCalls:   total.successCalls,
 			FailureCalls:   total.failureCalls,
 			TotalTokens:    total.totalTokens,
-			TotalCost:      total.cost,
+			TotalCost:      accountHistoryCostPointer(total),
 			SuccessRate:    successRate,
 			FirstSeenMS:    nullableMSPointer(total.firstSeenMS),
 			LastSeenMS:     nullableMSPointer(total.lastSeenMS),
@@ -1776,62 +2181,73 @@ func analyticsHourlyRollupEligible(filter store.AnalyticsFilter) bool {
 type filterOptionStats struct {
 	accountStats          []store.AccountModelStat
 	accountStatsAvailable bool
+	accountStatsDerived   bool
 	apiKeyStats           []store.APIKeyModelStat
 	apiKeyStatsAvailable  bool
+	apiKeyStatsDerived    bool
 	channelStats          []store.ChannelModelStat
 	channelStatsAvailable bool
+	channelStatsDerived   bool
 	modelStats            []store.ModelStat
 	modelStatsAvailable   bool
+	modelStatsDerived     bool
 	optionValues          store.FilterOptionValues
 	optionValuesAvailable bool
+	optionValuesDerived   bool
 }
 
-func (s *Service) filterOptions(
+func (s *Service) filterOptionsWithSource(
 	ctx context.Context,
 	filter store.AnalyticsFilter,
 	prices map[string]store.ModelPrice,
 	reuse filterOptionStats,
-) (*FilterOptions, error) {
+) (*FilterOptions, bool, error) {
 	optionFilter := filterOptionsBaseFilter(filter)
 
 	accountStats := reuse.accountStats
+	accountStatsDerived := reuse.accountStatsDerived
 	if !reuse.accountStatsAvailable {
 		var err error
-		accountStats, err = s.accountModelStats(ctx, optionFilter)
+		accountStats, accountStatsDerived, err = s.accountModelStatsWithSource(ctx, optionFilter)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 	apiKeyStats := reuse.apiKeyStats
+	apiKeyStatsDerived := reuse.apiKeyStatsDerived
 	if !reuse.apiKeyStatsAvailable {
 		var err error
-		apiKeyStats, err = s.apiKeyModelStats(ctx, optionFilter)
+		apiKeyStats, apiKeyStatsDerived, err = s.apiKeyModelStatsWithSource(ctx, optionFilter)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 	channelStats := reuse.channelStats
+	channelStatsDerived := reuse.channelStatsDerived
 	if !reuse.channelStatsAvailable {
 		channelStats = channelModelStatsFromAccountStats(accountStats)
+		channelStatsDerived = accountStatsDerived
 	}
 	modelStats := reuse.modelStats
+	modelStatsDerived := reuse.modelStatsDerived
 	if !reuse.modelStatsAvailable {
 		var err error
-		modelStats, err = s.modelStats(ctx, optionFilter)
+		modelStats, modelStatsDerived, err = s.modelStatsWithSource(ctx, optionFilter)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 	optionValues := reuse.optionValues
+	optionValuesDerived := reuse.optionValuesDerived
 	if !reuse.optionValuesAvailable {
 		var err error
-		optionValues, err = s.filterOptionValues(ctx, optionFilter)
+		optionValues, optionValuesDerived, err = s.filterOptionValuesWithSource(ctx, optionFilter)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 
-	return &FilterOptions{
+	options := &FilterOptions{
 		AccountStats:     buildAccountStats(accountStats, prices),
 		APIKeyStats:      buildAPIKeyStats(apiKeyStats, prices),
 		ChannelShare:     buildChannelShare(channelStats, prices),
@@ -1844,7 +2260,10 @@ func (s *Service) filterOptions(
 		HeaderErrorCodes: optionValues.HeaderErrorCodes,
 		HeaderQuotaPlans: optionValues.HeaderQuotaPlans,
 		HeaderTraceIDs:   optionValues.HeaderTraceIDs,
-	}, nil
+	}
+	derived := accountStatsDerived && apiKeyStatsDerived && channelStatsDerived &&
+		modelStatsDerived && optionValuesDerived
+	return options, derived, nil
 }
 
 func filterOptionsMatchMainScope(filter store.AnalyticsFilter) bool {
@@ -1868,14 +2287,14 @@ func filterOptionsMatchMainScope(filter store.AnalyticsFilter) bool {
 		strings.TrimSpace(filter.CacheStatus) == ""
 }
 
-func (s *Service) filterSelectors(ctx context.Context, filter store.AnalyticsFilter) (*FilterOptions, error) {
+func (s *Service) filterSelectorsWithSource(ctx context.Context, filter store.AnalyticsFilter) (*FilterOptions, bool, error) {
 	optionFilter := filterOptionsBaseFilter(filter)
-	values, available := s.monitoringReader.FilterSelectors(ctx, optionFilter)
-	if !available {
+	values, derived := s.monitoringReader.FilterSelectors(ctx, optionFilter)
+	if !derived {
 		var err error
 		values, err = s.store.FilterSelectorValuesWithFilter(ctx, optionFilter)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 	accountStats := buildAccountSelectorStats(values)
@@ -1888,35 +2307,54 @@ func (s *Service) filterSelectors(ctx context.Context, filter store.AnalyticsFil
 		AccountStats: accountStats,
 		AccountCount: len(accountStats),
 		APIKeyCount:  countAPIKeySelectors(values),
-	}, nil
+	}, derived, nil
 }
 
-func (s *Service) filterOptionValues(ctx context.Context, filter store.AnalyticsFilter) (store.FilterOptionValues, error) {
+func (s *Service) filterOptionValuesWithSource(ctx context.Context, filter store.AnalyticsFilter) (store.FilterOptionValues, bool, error) {
 	if values, available := s.monitoringReader.FilterOptions(ctx, filter); available {
-		return values, nil
+		return values, true, nil
 	}
-	return s.store.FilterOptionValuesWithFilter(ctx, filter)
+	values, err := s.store.FilterOptionValuesWithFilter(ctx, filter)
+	return values, false, err
 }
 
 func (s *Service) accountModelStats(ctx context.Context, filter store.AnalyticsFilter) ([]store.AccountModelStat, error) {
+	rows, _, err := s.accountModelStatsWithSource(ctx, filter)
+	return rows, err
+}
+
+func (s *Service) accountModelStatsWithSource(ctx context.Context, filter store.AnalyticsFilter) ([]store.AccountModelStat, bool, error) {
 	if rows, available := s.monitoringReader.AccountStats(ctx, filter); available {
-		return rows, nil
+		return rows, true, nil
 	}
-	return s.store.AccountModelStatsWithFilter(ctx, filter)
+	rows, err := s.store.AccountModelStatsWithFilter(ctx, filter)
+	return rows, false, err
 }
 
 func (s *Service) apiKeyModelStats(ctx context.Context, filter store.AnalyticsFilter) ([]store.APIKeyModelStat, error) {
+	rows, _, err := s.apiKeyModelStatsWithSource(ctx, filter)
+	return rows, err
+}
+
+func (s *Service) apiKeyModelStatsWithSource(ctx context.Context, filter store.AnalyticsFilter) ([]store.APIKeyModelStat, bool, error) {
 	if rows, available := s.monitoringReader.APIKeyStats(ctx, filter); available {
-		return rows, nil
+		return rows, true, nil
 	}
-	return s.store.APIKeyModelStatsWithFilter(ctx, filter)
+	rows, err := s.store.APIKeyModelStatsWithFilter(ctx, filter)
+	return rows, false, err
 }
 
 func (s *Service) channelModelStats(ctx context.Context, filter store.AnalyticsFilter) ([]store.ChannelModelStat, error) {
+	rows, _, err := s.channelModelStatsWithSource(ctx, filter)
+	return rows, err
+}
+
+func (s *Service) channelModelStatsWithSource(ctx context.Context, filter store.AnalyticsFilter) ([]store.ChannelModelStat, bool, error) {
 	if rows, available := s.monitoringReader.AccountStats(ctx, filter); available {
-		return channelModelStatsFromAccountStats(rows), nil
+		return channelModelStatsFromAccountStats(rows), true, nil
 	}
-	return s.store.ChannelModelStatsWithFilter(ctx, filter)
+	rows, err := s.store.ChannelModelStatsWithFilter(ctx, filter)
+	return rows, false, err
 }
 
 type channelModelStatKey struct {
@@ -2029,17 +2467,29 @@ func pricingBandFromAccountStat(stat store.AccountModelStat) usage.PricingBand {
 }
 
 func (s *Service) aggregate(ctx context.Context, filter store.AnalyticsFilter) (store.Aggregate, error) {
+	aggregate, _, err := s.aggregateWithSource(ctx, filter)
+	return aggregate, err
+}
+
+func (s *Service) aggregateWithSource(ctx context.Context, filter store.AnalyticsFilter) (store.Aggregate, bool, error) {
 	if aggregate, available := s.monitoringReader.Aggregate(ctx, filter); available {
-		return aggregate, nil
+		return aggregate, true, nil
 	}
-	return s.store.AggregateWithFilter(ctx, filter)
+	aggregate, err := s.store.AggregateWithFilter(ctx, filter)
+	return aggregate, false, err
 }
 
 func (s *Service) modelStats(ctx context.Context, filter store.AnalyticsFilter) ([]store.ModelStat, error) {
+	rows, _, err := s.modelStatsWithSource(ctx, filter)
+	return rows, err
+}
+
+func (s *Service) modelStatsWithSource(ctx context.Context, filter store.AnalyticsFilter) ([]store.ModelStat, bool, error) {
 	if rows, available := s.monitoringReader.ModelStats(ctx, filter); available {
-		return rows, nil
+		return rows, true, nil
 	}
-	return s.store.ModelStatsWithFilter(ctx, filter, 0)
+	rows, err := s.store.ModelStatsWithFilter(ctx, filter, 0)
+	return rows, false, err
 }
 
 func (s *Service) eventsCount(ctx context.Context, filter store.AnalyticsFilter) (int64, error) {
@@ -3556,6 +4006,12 @@ func buildEvents(page store.EventsPage, totalCount int64) *EventsResponse {
 			AnalyticsModel:         item.AnalyticsModel,
 			RequestedModel:         item.RequestedModel,
 			ResolvedModel:          item.ResolvedModel,
+			ResponseModel:          item.ResponseModel,
+			SessionID:              item.SessionID,
+			ParentSessionID:        item.ParentSessionID,
+			AccessTokenSHA256:      item.AccessTokenSHA256,
+			Generate:               item.Generate,
+			Stream:                 item.Stream,
 			Endpoint:               item.Endpoint,
 			Method:                 item.Method,
 			Path:                   item.Path,
@@ -3631,13 +4087,14 @@ func buildHeaderSnapshots(items []store.HeaderSnapshot) []HeaderSnapshot {
 }
 
 type accountHistoryTotal struct {
-	requests     int64
-	successCalls int64
-	failureCalls int64
-	totalTokens  int64
-	cost         float64
-	firstSeenMS  int64
-	lastSeenMS   int64
+	requests      int64
+	successCalls  int64
+	failureCalls  int64
+	totalTokens   int64
+	cost          float64
+	costAvailable bool
+	firstSeenMS   int64
+	lastSeenMS    int64
 }
 
 func accountHistoryTargetKey(target AccountHistoryTarget) (string, bool) {
@@ -3740,7 +4197,7 @@ func accountLatestRequestFromStore(request store.LatestAccountRequest) *AccountL
 	}
 }
 
-func buildAccountHistoryTotals(rows []store.AccountHistoryRollupRow, prices map[string]store.ModelPrice) map[string]*accountHistoryTotal {
+func buildUnpricedAccountHistoryTotals(rows []store.AccountHistoryRollupRow) map[string]*accountHistoryTotal {
 	totals := map[string]*accountHistoryTotal{}
 	for _, row := range rows {
 		total := totals[row.AccountKey]
@@ -3752,23 +4209,6 @@ func buildAccountHistoryTotals(rows []store.AccountHistoryRollupRow, prices map[
 		total.successCalls += row.SuccessCalls
 		total.failureCalls += row.FailureCalls
 		total.totalTokens += row.TotalTokens
-		total.cost += pricing.CostForModelCandidatesWithServiceTier(
-			[]string{row.BillingModel, row.Model},
-			row.ServiceTier,
-			pricing.ModelTokens{
-				InputTokens:             row.InputTokens,
-				OutputTokens:            row.OutputTokens,
-				CachedTokens:            row.CachedTokens,
-				CacheReadTokens:         row.CacheReadTokens,
-				CacheCreationTokens:     row.CacheCreationTokens,
-				LongInputTokens:         row.LongInputTokens,
-				LongOutputTokens:        row.LongOutputTokens,
-				LongCachedTokens:        row.LongCachedTokens,
-				LongCacheReadTokens:     row.LongCacheReadTokens,
-				LongCacheCreationTokens: row.LongCacheCreationTokens,
-			},
-			prices,
-		)
 		if total.firstSeenMS == 0 || (row.FirstSeenMS > 0 && row.FirstSeenMS < total.firstSeenMS) {
 			total.firstSeenMS = row.FirstSeenMS
 		}
@@ -3784,7 +4224,7 @@ func buildPricingAccountHistoryTotals(rows []store.UsagePricingAccountRow, price
 	for _, row := range rows {
 		total := totals[row.AccountKey]
 		if total == nil {
-			total = &accountHistoryTotal{}
+			total = &accountHistoryTotal{costAvailable: true}
 			totals[row.AccountKey] = total
 		}
 		total.requests += row.Calls
@@ -3837,6 +4277,7 @@ func mergeAliasedAccountHistoryTotals(totals map[string]*accountHistoryTotal, al
 		primary.failureCalls += legacy.failureCalls
 		primary.totalTokens += legacy.totalTokens
 		primary.cost += legacy.cost
+		primary.costAvailable = primary.costAvailable && legacy.costAvailable
 		if primary.firstSeenMS == 0 || (legacy.firstSeenMS > 0 && legacy.firstSeenMS < primary.firstSeenMS) {
 			primary.firstSeenMS = legacy.firstSeenMS
 		}
@@ -3845,6 +4286,14 @@ func mergeAliasedAccountHistoryTotals(totals map[string]*accountHistoryTotal, al
 		}
 		delete(totals, legacyKey)
 	}
+}
+
+func accountHistoryCostPointer(total *accountHistoryTotal) *float64 {
+	if total == nil || !total.costAvailable {
+		return nil
+	}
+	value := total.cost
+	return &value
 }
 
 func accountWindowUsageTargetKey(target AccountWindowUsageTarget) (string, bool) {

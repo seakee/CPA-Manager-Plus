@@ -20,7 +20,7 @@ func TestRecentFailuresHideHistoricalCodexProjectMarker(t *testing.T) {
 	ctx := context.Background()
 	timestamp := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 	if _, err := repo.InsertBatch(ctx, []usage.Event{{
-		EventHash:             "recent-failure-legacy-codex-marker",
+		EventHash:             canonicalTestHash("recent-failure-legacy-codex-marker"),
 		TimestampMS:           timestamp.UnixMilli(),
 		Timestamp:             timestamp.Format(time.RFC3339Nano),
 		Provider:              "codex",

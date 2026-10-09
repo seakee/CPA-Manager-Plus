@@ -15,6 +15,83 @@ import (
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 )
 
+func TestArchiveDeletionPreservesCanonicalEvidenceAndBlocksIncompleteReplay(t *testing.T) {
+	db, repo := setupTestDB(t)
+	ctx := context.Background()
+	insertTestAPIKeyIdentity(t, db, "canonical-key")
+	hash := sha256Hex("fixture-source")
+	insertTestAPIKeyBinding(t, db, "canonical-key", "runtime", hash, 100, nil)
+	insertTestUsageEvent(t, db, 1, "archived-event", "request", 200, hash, "{}")
+	if _, err := repo.CatchUp(ctx, 10, 300); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`insert into usage_archive_runs(id, mode, schema_version, format, status, cutoff_timestamp_ms, target_event_id, event_count, created_at_ms, updated_at_ms)
+    values('run', 'manual', 1, 'gzip-jsonl-v1', 'completed', 300, 1, 1, 1, 1)`,
+		`insert into usage_archive_segments(run_id, sequence, status, file_name, first_event_id, last_event_id, min_timestamp_ms, max_timestamp_ms, event_count, uncompressed_bytes, compressed_bytes, content_sha256, event_hash_digest, created_at_ms)
+    values('run', 1, 'verified', 'fixture', 1, 1, 200, 200, 1, 1, 1, 'sha', 'digest', 1)`,
+		`insert into usage_event_identity_ledger(event_hash, timestamp_ms, bucket_ms, first_seen_at_ms, updated_at_ms)
+    values('archived-event', 200, 0, 1, 1)`,
+		`insert into usage_archive_event_refs(event_hash, run_id, segment_sequence, raw_event_id, timestamp_ms, archived_at_ms, raw_deleted_at_ms)
+    values('archived-event', 'run', 1, 1, 200, 1, 2)`,
+		`delete from usage_events where id = 1`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Stable bindings can still append live events without replaying lost history.
+	insertTestUsageEvent(t, db, 2, "live-event", "request-2", 400, hash, "{}")
+	if result, err := repo.CatchUp(ctx, 10, 500); err != nil || result.Processed != 1 || result.Pending {
+		t.Fatalf("incremental catch-up after archive: result=%+v err=%v", result, err)
+	}
+	before, err := repo.GetState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Reset(ctx); err == nil || !strings.Contains(err.Error(), "complete identity evidence") {
+		t.Fatalf("reset with missing historical raw error=%v", err)
+	}
+	after, err := repo.GetState(ctx)
+	if err != nil || after.Status != before.Status || after.LastProcessedEventID != before.LastProcessedEventID {
+		t.Fatalf("rejected reset changed checkpoint: before=%+v after=%+v err=%v", before, after, err)
+	}
+	insertTestAPIKeyIdentity(t, db, "another-key")
+	insertTestAPIKeyBinding(t, db, "another-key", "another-runtime", "another-hash", 600, nil)
+	if _, err := repo.CatchUp(ctx, 10, 700); err == nil || !strings.Contains(err.Error(), "complete identity evidence") {
+		t.Fatalf("binding replay with missing historical raw error=%v", err)
+	}
+	after, err = repo.GetState(ctx)
+	if err != nil || after.Status != "pending" || after.LastProcessedEventID != 2 {
+		t.Fatalf("rejected replay promoted or advanced checkpoint: state=%+v err=%v", after, err)
+	}
+	for _, id := range []int64{1, 2} {
+		projection, err := repo.GetProjectionByEventID(ctx, id)
+		if err != nil || projection == nil || projection.APIKeyID == nil || *projection.APIKeyID != "canonical-key" {
+			t.Fatalf("canonical evidence lost for event %d: projection=%+v err=%v", id, projection, err)
+		}
+	}
+}
+
+func TestResetPreservesIdentityProjectionOnArchiveInspectionFailure(t *testing.T) {
+	db, repo := setupTestDB(t)
+	insertTestUsageEvent(t, db, 1, "fixture", "request", 200, "", "{}")
+	if _, err := repo.CatchUp(context.Background(), 10, 300); err != nil {
+		t.Fatal(err)
+	}
+	// Missing raw-source metadata inspection must not be treated as complete.
+	if _, err := db.Exec(`alter table usage_archive_event_refs rename column raw_deleted_at_ms to unavailable_deleted_at_ms`); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Reset(context.Background()); err == nil {
+		t.Fatal("reset swallowed source metadata error")
+	}
+	projection, err := repo.GetProjectionByEventID(context.Background(), 1)
+	if err != nil || projection == nil {
+		t.Fatalf("reset lost projection after inspection error: %v", err)
+	}
+}
+
 func setupTestDB(t *testing.T) (*sql.DB, ports.Repository) {
 	t.Helper()
 	dir := t.TempDir()

@@ -369,7 +369,7 @@ func TestResolveCodexLegacyAccountKeySharesEvidenceAcrossPhysicalPredicates(t *t
 func identityTestEvent(hash string, offset int64, file, authIndex, provider, accountID string) usage.Event {
 	timestampMS := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC).UnixMilli() + offset*1000
 	return usage.Event{
-		EventHash:             hash,
+		EventHash:             canonicalTestHash(hash),
 		TimestampMS:           timestampMS,
 		Timestamp:             time.UnixMilli(timestampMS).UTC().Format(time.RFC3339Nano),
 		Provider:              provider,

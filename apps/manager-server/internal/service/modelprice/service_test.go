@@ -259,6 +259,62 @@ func TestPriceMutationsNotifyPricingRollup(t *testing.T) {
 	}
 }
 
+func TestSyncPreservesManualPriceOnExactMatch(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewStore(t, testutil.NewConfig(t))
+	if err := st.SaveModelPrices(ctx, map[string]store.ModelPrice{
+		"gpt-test": {
+			Prompt: 9, Completion: 18, PromptConfigured: true, CompletionConfigured: true,
+			Source: "manual",
+			ContextTiers: []store.ModelPriceContextTier{
+				{ThresholdTokens: 200_000, Prompt: 27, Completion: 36, PromptConfigured: true, CompletionConfigured: true},
+			},
+			ServiceTiers: []store.ModelPriceServiceTier{
+				{Mode: "fast", ServiceTier: "priority", Prompt: 45, Completion: 54, PromptConfigured: true, CompletionConfigured: true},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("save manual price: %v", err)
+	}
+
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"gpt-test":{"input_cost_per_token":0.000001,"output_cost_per_token":0.000002},
+			"fresh-model":{"input_cost_per_token":0.000003,"output_cost_per_token":0.000004}
+		}`))
+	}))
+	t.Cleanup(source.Close)
+	syncURL := source.URL
+
+	result, err := New(st, &syncURL).Sync(ctx, SyncRequest{Models: []string{"gpt-test", "fresh-model"}})
+	if err != nil {
+		t.Fatalf("sync prices: %v", err)
+	}
+	if result.Imported != 1 || len(result.Preserved) != 0 {
+		t.Fatalf("sync result = %#v", result)
+	}
+	if _, matched := result.Matched["gpt-test"]; matched {
+		t.Fatalf("manual price reported as matched: %#v", result.Matched)
+	}
+	manual := result.Prices["gpt-test"]
+	if manual.Source != "manual" || manual.Prompt != 9 || manual.Completion != 18 || manual.SyncedAtMS != nil {
+		t.Fatalf("manual price was overwritten: %#v", manual)
+	}
+	if len(manual.ContextTiers) != 1 || manual.ContextTiers[0].ThresholdTokens != 200_000 ||
+		manual.ContextTiers[0].Prompt != 27 || manual.ContextTiers[0].Completion != 36 {
+		t.Fatalf("manual context tier was overwritten: %#v", manual.ContextTiers)
+	}
+	if len(manual.ServiceTiers) != 1 || manual.ServiceTiers[0].Mode != "fast" ||
+		manual.ServiceTiers[0].ServiceTier != "priority" || manual.ServiceTiers[0].Prompt != 45 ||
+		manual.ServiceTiers[0].Completion != 54 {
+		t.Fatalf("manual service tier was overwritten: %#v", manual.ServiceTiers)
+	}
+	if fresh := result.Prices["fresh-model"]; fresh.Source != SyncSourceLiteLLM || fresh.Prompt != 3 || fresh.Completion != 4 {
+		t.Fatalf("fresh model was not imported: %#v", fresh)
+	}
+}
+
 func TestModelsDevPriceCacheReusesETagConcurrently(t *testing.T) {
 	const etag = `"catalog-v1"`
 	var requestCount atomic.Int32
@@ -1042,8 +1098,8 @@ func TestUsageSummaryUsesConfiguredRecentLimit(t *testing.T) {
 	cfg := testutil.NewConfig(t)
 	st := testutil.NewStore(t, cfg)
 	if _, err := st.UsageEvents.InsertBatch(context.Background(), []usage.Event{
-		{EventHash: "older", TimestampMS: 100, Timestamp: "2026-01-01T00:00:00Z", Model: "gpt-old", CreatedAtMS: 100},
-		{EventHash: "newer", TimestampMS: 200, Timestamp: "2026-01-01T00:00:01Z", Model: "gpt-new", ResolvedModel: "gpt-resolved", CreatedAtMS: 200},
+		{EventHash: "0000000000000000000000000000000000000000000000000000000000000001", TimestampMS: 100, Timestamp: "2026-01-01T00:00:00Z", Model: "gpt-old", CreatedAtMS: 100},
+		{EventHash: "0000000000000000000000000000000000000000000000000000000000000002", TimestampMS: 200, Timestamp: "2026-01-01T00:00:01Z", Model: "gpt-new", ResolvedModel: "gpt-resolved", CreatedAtMS: 200},
 	}); err != nil {
 		t.Fatalf("insert events: %v", err)
 	}

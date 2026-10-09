@@ -2,7 +2,10 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"errors"
 	"testing"
 	"time"
 
@@ -219,8 +222,9 @@ func catchUpUsagePricingSnapshot(t *testing.T, ctx context.Context, db *Store) {
 }
 
 func snapshotTestEvent(hash string, timestampMS, inputTokens int64) usage.Event {
+	sum := sha256.Sum256([]byte(hash))
 	return usage.Event{
-		EventHash:     hash,
+		EventHash:     hex.EncodeToString(sum[:]),
 		TimestampMS:   timestampMS,
 		Timestamp:     time.UnixMilli(timestampMS).UTC().Format(time.RFC3339Nano),
 		Model:         "model-a",
@@ -239,6 +243,39 @@ func aggregateSnapshotCalls(rows []UsageHourlyAggregateRow) int64 {
 		calls += row.Calls
 	}
 	return calls
+}
+
+func TestLoadUsageHourlyPricingSnapshotEdgeErrorClassification(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir() + "/usage.sqlite")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	fromMS := int64(1_800_000_000_000)
+	toMS := fromMS + 2*int64(time.Hour/time.Millisecond)
+
+	aggregateFilter := UsageHourlyAggregateFilter{FromMS: fromMS, ToMS: toMS, LeftEdgeDeleted: true}
+	pricingFilter := UsagePricingHourlyFilter{FromMS: fromMS, ToMS: toMS}
+
+	// 1. Missing projection state: delete rollup_state row, should return ErrUsagePricingCoverageIncomplete
+	if _, err := db.db.Exec(`delete from usage_monitoring_rollup_state where rollup_name = 'projection_v1'`); err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.LoadUsageHourlyPricingSnapshot(ctx, aggregateFilter, pricingFilter)
+	if !errors.Is(err, ErrUsagePricingCoverageIncomplete) {
+		t.Fatalf("expected ErrUsagePricingCoverageIncomplete on missing projection state, got: %v", err)
+	}
+
+	// 2. Query failure on usage_monitoring_rollup_state: should return real SQL error, NOT ErrUsagePricingCoverageIncomplete
+	if _, err := db.db.Exec(`drop table usage_monitoring_rollup_state`); err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.LoadUsageHourlyPricingSnapshot(ctx, aggregateFilter, pricingFilter)
+	if err == nil || errors.Is(err, ErrUsagePricingCoverageIncomplete) {
+		t.Fatalf("expected real query error, not ErrUsagePricingCoverageIncomplete: %v", err)
+	}
 }
 
 func pricingSnapshotCalls(rows []UsagePricingHourlyRow) int64 {

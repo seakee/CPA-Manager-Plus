@@ -82,16 +82,16 @@ func TestCredentialIDFilterMatchesAllIdentityFallbacks(t *testing.T) {
 		sourceHash string
 		source     string
 	}{
-		{name: "auth file", id: "credential.json", authFile: "credential.json", authIndex: "auth-file", sourceHash: "hash-file", source: "source-file"},
-		{name: "auth index", id: "auth-index", authIndex: "auth-index", sourceHash: "hash-index", source: "source-index"},
-		{name: "source hash", id: "hash-only", sourceHash: "hash-only", source: "source-hash"},
+		{name: "auth file", id: "credential.json", authFile: "credential.json", authIndex: "auth-file", sourceHash: canonicalTestHash("hash-file"), source: "source-file"},
+		{name: "auth index", id: "auth-index", authIndex: "auth-index", sourceHash: canonicalTestHash("hash-index"), source: "source-index"},
+		{name: "source hash", id: canonicalTestHash("hash-only"), sourceHash: canonicalTestHash("hash-only"), source: "source-hash"},
 		{name: "source", id: "source-only", source: "source-only"},
 	}
 	events := make([]usage.Event, 0, len(identities))
 	for index, identity := range identities {
 		timestamp := base.Add(time.Duration(index) * time.Hour)
 		events = append(events, usage.Event{
-			EventHash:        "credential-filter-" + identity.name,
+			EventHash:        canonicalTestHash("credential-filter-" + identity.name),
 			TimestampMS:      timestamp.UnixMilli(),
 			Timestamp:        timestamp.Format(time.RFC3339Nano),
 			Model:            "gpt-test",
@@ -140,7 +140,7 @@ func TestCredentialAnalyticsHidesHistoricalCodexProjectMarker(t *testing.T) {
 	ctx := context.Background()
 	timestamp := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 	if _, err := repo.InsertBatch(ctx, []usage.Event{{
-		EventHash:             "credential-legacy-codex-marker",
+		EventHash:             canonicalTestHash("credential-legacy-codex-marker"),
 		TimestampMS:           timestamp.UnixMilli(),
 		Timestamp:             timestamp.Format(time.RFC3339Nano),
 		Provider:              "codex",
@@ -194,7 +194,7 @@ func insertAnalyticsPreaggregationEvents(t *testing.T, ctx context.Context, repo
 	for index, latency := range latencies {
 		timestamp := base.Add(time.Duration(index)*time.Hour + 20*time.Minute)
 		event := usage.Event{
-			EventHash:             "analytics-preaggregate-" + timestamp.Format("20060102T150405Z"),
+			EventHash:             canonicalTestHash("analytics-preaggregate-" + timestamp.Format("20060102T150405Z")),
 			TimestampMS:           timestamp.UnixMilli(),
 			Timestamp:             timestamp.Format(time.RFC3339Nano),
 			Provider:              "fallback-provider",

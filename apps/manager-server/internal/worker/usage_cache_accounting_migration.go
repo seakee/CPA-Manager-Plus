@@ -83,8 +83,7 @@ func (w *UsageCacheAccountingMigrationWorker) run(ctx context.Context) {
 		}
 		w.logProgress(result)
 		if result.Completed {
-			w.complete(result.State)
-			return
+			continue
 		}
 		if !waitFor(ctx, w.delay) {
 			return

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"unicode"
@@ -12,11 +13,66 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
 
+var ErrRetainedCoverageIncomplete = errors.New("retained usage projection coverage is incomplete")
+
 const (
 	EventTable       = "usage_monitoring_event_projection_v1"
 	HeaderTable      = "usage_monitoring_header_latest_v1"
 	SearchIndexTable = "usage_monitoring_event_search_v1"
 )
+
+// RetainedEdgeSource joins deleted archive refs to projection rows by event ID.
+// The time predicate stays inside each arm so a partial-hour read never scans
+// the full projection table. Live raw rows supply the rest of the edge.
+func RetainedEdgeSource(fromMS, toMS int64) string {
+	columns := []string{
+		"timestamp_ms", "model", "requested_model", "resolved_model", "service_tier", "failed",
+		"input_tokens", "output_tokens", "reasoning_tokens", "cached_tokens", "cache_tokens",
+		"cache_read_tokens", "cache_creation_tokens", "normalized_total_input_tokens", "total_tokens", "latency_ms",
+		"provider", "auth_index", "source", "source_hash", "account_snapshot", "auth_label_snapshot",
+		"auth_file_snapshot", "auth_provider_snapshot", "auth_project_id_snapshot", "auth_account_id_snapshot",
+	}
+	return fmt.Sprintf(`(select e.id, e.%s from usage_events e
+		where e.timestamp_ms >= %d and e.timestamp_ms < %d
+		union all
+		select p.event_id as id, p.%s from usage_archive_event_refs archived
+		join %s p on p.event_id = archived.raw_event_id
+		where archived.raw_deleted_at_ms is not null
+			and archived.timestamp_ms >= %d and archived.timestamp_ms < %d)`,
+		strings.Join(columns, ", e."), fromMS, toMS,
+		strings.Join(columns, ", p."), EventTable, fromMS, toMS)
+}
+
+func VerifyRetainedEdgeTx(ctx context.Context, tx *sql.Tx, fromMS, toMS int64) error {
+	var version int
+	var revision, status string
+	var coverageID int64
+	if err := tx.QueryRowContext(ctx, `select schema_version, structure_revision, status, coverage_event_id
+		from usage_monitoring_rollup_state where rollup_name = 'projection_v1'`).Scan(
+		&version, &revision, &status, &coverageID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: missing projection state", ErrRetainedCoverageIncomplete)
+		}
+		return err
+	}
+	if version != 1 || revision != usageidentity.MonitoringProjectionStructureRevision() || status == "clearing" {
+		return fmt.Errorf("%w: retained usage projection is incompatible or rebuilding", ErrRetainedCoverageIncomplete)
+	}
+	var incomplete bool
+	if err := tx.QueryRowContext(ctx, `select exists (
+		select 1 from usage_archive_event_refs archived
+		left join usage_monitoring_event_projection_v1 p on p.event_id = archived.raw_event_id
+		where archived.raw_deleted_at_ms is not null
+			and archived.timestamp_ms >= ? and archived.timestamp_ms < ?
+			and (archived.raw_event_id > ? or p.event_id is null)
+	)`, fromMS, toMS, coverageID).Scan(&incomplete); err != nil {
+		return err
+	}
+	if incomplete {
+		return fmt.Errorf("%w: retained usage projection is missing a deleted edge event", ErrRetainedCoverageIncomplete)
+	}
+	return nil
+}
 
 var SearchColumns = []string{
 	"request_id",

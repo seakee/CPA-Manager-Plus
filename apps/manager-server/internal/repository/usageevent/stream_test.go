@@ -525,10 +525,10 @@ func TestInsertBatchSelectsServiceTierByProviderSemantics(t *testing.T) {
 	for _, event := range recent {
 		byHash[event.EventHash] = event
 	}
-	if event := byHash["codex-tier"]; event.ServiceTier != "priority" || event.RequestServiceTier != "priority" || event.ResponseServiceTier != "default" {
+	if event := byHash[codex.EventHash]; event.ServiceTier != "priority" || event.RequestServiceTier != "priority" || event.ResponseServiceTier != "default" {
 		t.Fatalf("codex tiers = %q/%q/%q", event.ServiceTier, event.RequestServiceTier, event.ResponseServiceTier)
 	}
-	if event := byHash["openai-tier"]; event.ServiceTier != "default" || event.RequestServiceTier != "priority" || event.ResponseServiceTier != "default" {
+	if event := byHash[nonCodex.EventHash]; event.ServiceTier != "default" || event.RequestServiceTier != "priority" || event.ResponseServiceTier != "default" {
 		t.Fatalf("non-Codex tiers = %q/%q/%q", event.ServiceTier, event.RequestServiceTier, event.ResponseServiceTier)
 	}
 }
@@ -595,6 +595,167 @@ func TestWriteExportJSONLUsesRecentLimitAndAscendingKeysetOrder(t *testing.T) {
 	if last.ResponseMetadata == nil || last.ResponseMetadata.Trace == nil || last.ResponseMetadata.Trace.PrimaryTraceID != "trace-export" {
 		t.Fatalf("last metadata = %#v", last.ResponseMetadata)
 	}
+}
+
+func TestWriteFullExportJSONLIgnoresQueryLimitAndUsesSnapshotBoundary(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repo := New(db)
+	initial := make([]usage.Event, 0, 7)
+	for index, timestamp := range []int64{30, 10, 20, 10, 40, 50, 60} {
+		initial = append(initial, streamTestEvent(fmt.Sprintf("full-export-%d", index), timestamp, "POST /v1/responses", "gpt-test"))
+	}
+	if _, err := repo.InsertBatch(context.Background(), initial); err != nil {
+		t.Fatalf("insert initial events: %v", err)
+	}
+
+	inserted := false
+	var lateHash string
+	writer := exportInsertWriter{onFirstWrite: func() {
+		if inserted {
+			return
+		}
+		inserted = true
+		newEvent := streamTestEvent("full-export-after-snapshot", 5, "POST /v1/responses", "gpt-test")
+		lateHash = newEvent.EventHash
+		if _, err := repo.InsertBatch(context.Background(), []usage.Event{newEvent}); err != nil {
+			t.Fatalf("insert concurrent event: %v", err)
+		}
+	}}
+	if err := repo.WriteFullExportJSONL(context.Background(), &writer); err != nil {
+		t.Fatalf("write full export: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(writer.String()), "\n")
+	if len(lines) != len(initial) {
+		t.Fatalf("full export line count = %d, want %d", len(lines), len(initial))
+	}
+	previousTimestamp := int64(-1)
+	for index, line := range lines {
+		var event usage.Event
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("decode line %d: %v", index, err)
+		}
+		if event.TimestampMS < previousTimestamp {
+			t.Fatalf("line %d timestamp %d is not ordered after %d", index, event.TimestampMS, previousTimestamp)
+		}
+		previousTimestamp = event.TimestampMS
+		if event.EventHash == lateHash {
+			t.Fatal("export included event inserted after snapshot boundary")
+		}
+	}
+}
+
+func TestWriteFullExportJSONLRetainsRowsDeletedAfterSnapshot(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repo := New(db)
+	events := make([]usage.Event, 0, usageExportBatchSize+32)
+	for index := 0; index < cap(events); index++ {
+		events = append(events, streamTestEvent(
+			fmt.Sprintf("full-export-delete-%04d", index),
+			int64(index+1),
+			"POST /v1/responses",
+			"gpt-test",
+		))
+	}
+	if _, err := repo.InsertBatch(context.Background(), events); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	deleted := false
+	writer := exportInsertWriter{onFirstWrite: func() {
+		if deleted {
+			return
+		}
+		deleted = true
+		if _, err := db.Exec(`delete from usage_events where event_hash = ?`, events[0].EventHash); err != nil {
+			t.Fatalf("delete concurrent event: %v", err)
+		}
+	}}
+	if err := repo.WriteFullExportJSONL(context.Background(), &writer); err != nil {
+		t.Fatalf("write full export: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(writer.String()), "\n")
+	if len(lines) != len(events) {
+		t.Fatalf("full export line count = %d, want %d", len(lines), len(events))
+	}
+	seen := make(map[string]bool, len(lines))
+	for index, line := range lines {
+		var event usage.Event
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("decode line %d: %v", index, err)
+		}
+		seen[event.EventHash] = true
+	}
+	if !seen[events[0].EventHash] {
+		t.Fatalf("snapshot row deleted during export was missing")
+	}
+}
+
+func TestWriteFullExportJSONLStopsWhenContextIsCancelledDuringStreaming(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repo := New(db)
+	events := make([]usage.Event, 0, 4)
+	for index := 0; index < 4; index++ {
+		events = append(events, streamTestEvent(fmt.Sprintf("full-export-cancel-%d", index), int64(index+1), "POST /v1/responses", "gpt-test"))
+	}
+	if _, err := repo.InsertBatch(context.Background(), events); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	writer := &cancelExportWriter{cancel: cancel}
+	err = repo.WriteFullExportJSONL(ctx, writer)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("full export error = %v, want context canceled", err)
+	}
+}
+
+func TestWriteFullExportJSONLEmptyDatabaseReturnsEmptyJSONL(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	var output bytes.Buffer
+	if err := New(db).WriteFullExportJSONL(context.Background(), &output); err != nil {
+		t.Fatalf("empty full export: %v", err)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("empty full export bytes = %d, want zero", output.Len())
+	}
+}
+
+type exportInsertWriter struct {
+	bytes.Buffer
+	onFirstWrite func()
+}
+
+type cancelExportWriter struct {
+	cancel context.CancelFunc
+}
+
+func (w *cancelExportWriter) Write(p []byte) (int, error) {
+	w.cancel()
+	return len(p), nil
+}
+
+func (w *exportInsertWriter) Write(p []byte) (int, error) {
+	if w.onFirstWrite != nil {
+		callback := w.onFirstWrite
+		w.onFirstWrite = nil
+		callback()
+	}
+	return w.Buffer.Write(p)
 }
 
 func TestValidatedMetadataJSONRequiresJSONObject(t *testing.T) {
@@ -844,7 +1005,7 @@ func explainCompatibleUsageQueryPlan(t *testing.T, db *sql.DB, query string, arg
 
 func streamTestEvent(hash string, timestampMS int64, endpoint, model string) usage.Event {
 	return usage.Event{
-		EventHash:    hash,
+		EventHash:    canonicalTestHash(hash),
 		TimestampMS:  timestampMS,
 		Timestamp:    fmt.Sprintf("2026-01-01T00:00:%02dZ", timestampMS%60),
 		Model:        model,
@@ -854,5 +1015,90 @@ func streamTestEvent(hash string, timestampMS int64, endpoint, model string) usa
 		OutputTokens: 2,
 		TotalTokens:  3,
 		CreatedAtMS:  timestampMS,
+	}
+}
+
+func TestWriteExportJSONLAndCompatibleUsagePreserveRequestMetadata(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repo := New(db)
+
+	genFalse := false
+	streamFalse := false
+	event := streamTestEvent("stream-meta-test", 100, "POST /v1/chat/completions", "gpt-4o")
+	event.ResponseModel = "gpt-4o-mini"
+	event.SessionID = "sess-export-1"
+	event.ParentSessionID = "parent-export-1"
+	event.AccessTokenSHA256 = "sha256-export-hash"
+	event.Generate = &genFalse
+	event.Stream = &streamFalse
+
+	if _, err := repo.InsertBatch(context.Background(), []usage.Event{event}); err != nil {
+		t.Fatalf("insert event: %v", err)
+	}
+
+	// 1. Verify JSONL export stream through real JSONL import parsing
+	var jsonlBuf bytes.Buffer
+	if err := repo.WriteExportJSONL(context.Background(), &jsonlBuf, 10); err != nil {
+		t.Fatalf("write export JSONL: %v", err)
+	}
+
+	importResult, err := usage.ParseImportPayload(jsonlBuf.Bytes())
+	if err != nil {
+		t.Fatalf("parse imported JSONL: %v", err)
+	}
+	if importResult.Format != usage.ImportFormatJSONL || len(importResult.Events) != 1 {
+		t.Fatalf("unexpected import result: format=%q, count=%d", importResult.Format, len(importResult.Events))
+	}
+	exported := importResult.Events[0]
+	if exported.ResponseModel != event.ResponseModel {
+		t.Fatalf("ResponseModel mismatch: got %q, want %q", exported.ResponseModel, event.ResponseModel)
+	}
+	if exported.SessionID != event.SessionID {
+		t.Fatalf("SessionID mismatch: got %q, want %q", exported.SessionID, event.SessionID)
+	}
+	if exported.ParentSessionID != event.ParentSessionID {
+		t.Fatalf("ParentSessionID mismatch: got %q, want %q", exported.ParentSessionID, event.ParentSessionID)
+	}
+	if exported.AccessTokenSHA256 != event.AccessTokenSHA256 {
+		t.Fatalf("AccessTokenSHA256 mismatch: got %q, want %q", exported.AccessTokenSHA256, event.AccessTokenSHA256)
+	}
+	if exported.Generate == nil {
+		t.Fatal("Generate is nil; false presence must not be dropped by omitempty or parser")
+	}
+	if *exported.Generate != false {
+		t.Fatalf("Generate = %v, want false", *exported.Generate)
+	}
+	if exported.Stream == nil {
+		t.Fatal("Stream is nil; false presence must not be dropped by omitempty or parser")
+	}
+	if *exported.Stream != false {
+		t.Fatalf("Stream = %v, want false", *exported.Stream)
+	}
+
+	// 2. Verify compatible usage stream
+	var compBuf bytes.Buffer
+	if err := repo.WriteCompatibleUsage(context.Background(), &compBuf, 10); err != nil {
+		t.Fatalf("write compatible usage: %v", err)
+	}
+	var compPayload usage.Payload
+	if err := json.Unmarshal(compBuf.Bytes(), &compPayload); err != nil {
+		t.Fatalf("unmarshal compatible payload: %v", err)
+	}
+	details := compPayload.APIs[event.Endpoint].Models[event.Model].Details
+	if len(details) != 1 {
+		t.Fatalf("compatible details count = %d", len(details))
+	}
+	compDetail := details[0]
+	if compDetail.ResponseModel != event.ResponseModel ||
+		compDetail.SessionID != event.SessionID ||
+		compDetail.ParentSessionID != event.ParentSessionID ||
+		compDetail.AccessTokenSHA256 != event.AccessTokenSHA256 ||
+		compDetail.Generate == nil || *compDetail.Generate != false ||
+		compDetail.Stream == nil || *compDetail.Stream != false {
+		t.Fatalf("compatible detail metadata mismatch: %+v", compDetail)
 	}
 }

@@ -58,6 +58,72 @@ func TestRequestMetadataPersistsAndIsSearchable(t *testing.T) {
 	}
 }
 
+func TestNewRequestMetadataFieldsPersistAndLoad(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repo := New(db)
+
+	genTrue := true
+	streamFalse := false
+	ev1 := streamTestEvent("metadata-ev-1", 100, "POST /v1/chat/completions", "gpt-4o")
+	ev1.ResponseModel = "gpt-4o-mini"
+	ev1.SessionID = "sess-001"
+	ev1.ParentSessionID = "parent-001"
+	ev1.AccessTokenSHA256 = "sha256-hash-001"
+	ev1.Generate = &genTrue
+	ev1.Stream = &streamFalse
+
+	genFalse := false
+	ev2 := streamTestEvent("metadata-ev-2", 200, "POST /v1/chat/completions", "claude-3-5-sonnet")
+	ev2.ResponseModel = "claude-3-haiku"
+	ev2.SessionID = "sess-002"
+	ev2.Generate = &genFalse
+	ev2.Stream = nil // nil unknown
+
+	if _, err := repo.InsertBatch(context.Background(), []usage.Event{ev1, ev2}); err != nil {
+		t.Fatalf("insert batch: %v", err)
+	}
+
+	recent, err := repo.ListRecent(context.Background(), 2)
+	if err != nil {
+		t.Fatalf("list recent: %v", err)
+	}
+	if len(recent) != 2 {
+		t.Fatalf("recent len = %d, want 2", len(recent))
+	}
+
+	// ListRecent orders by timestamp_ms desc -> ev2 first, then ev1
+	rEv2 := recent[0]
+	if rEv2.ResponseModel != "claude-3-haiku" || rEv2.SessionID != "sess-002" || rEv2.Generate == nil || *rEv2.Generate != false || rEv2.Stream != nil {
+		t.Fatalf("rEv2 metadata mismatch: %+v", rEv2)
+	}
+
+	rEv1 := recent[1]
+	if rEv1.ResponseModel != "gpt-4o-mini" || rEv1.SessionID != "sess-001" || rEv1.ParentSessionID != "parent-001" || rEv1.AccessTokenSHA256 != "sha256-hash-001" || rEv1.Generate == nil || *rEv1.Generate != true || rEv1.Stream == nil || *rEv1.Stream != false {
+		t.Fatalf("rEv1 metadata mismatch: %+v", rEv1)
+	}
+
+	// Verify EventsPageWithFilter read
+	page, err := repo.EventsPageWithFilter(context.Background(), AnalyticsFilter{
+		FromMS: 50,
+		ToMS:   300,
+	}, 0, 0, 10)
+	if err != nil {
+		t.Fatalf("events page: %v", err)
+	}
+	if len(page.Items) != 2 {
+		t.Fatalf("page items = %d, want 2", len(page.Items))
+	}
+
+	pEv1 := page.Items[1]
+	if pEv1.ResponseModel != "gpt-4o-mini" || pEv1.SessionID != "sess-001" || pEv1.ParentSessionID != "parent-001" || pEv1.AccessTokenSHA256 != "sha256-hash-001" || pEv1.Generate == nil || *pEv1.Generate != true || pEv1.Stream == nil || *pEv1.Stream != false {
+		t.Fatalf("page item 1 mismatch: %+v", pEv1)
+	}
+}
+
 func TestInsertBatchNormalizesRequestMetadataAtPersistenceBoundary(t *testing.T) {
 	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
 	if err != nil {

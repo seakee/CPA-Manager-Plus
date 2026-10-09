@@ -2,6 +2,8 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -195,8 +197,9 @@ func newUsageHourlyAggregateWorkerStore(t *testing.T) *store.Store {
 }
 
 func usageHourlyAggregateWorkerEvent(hash string, timestampMS, totalTokens int64) usage.Event {
+	sum := sha256.Sum256([]byte(hash))
 	return usage.Event{
-		EventHash:   hash,
+		EventHash:   hex.EncodeToString(sum[:]),
 		TimestampMS: timestampMS,
 		Timestamp:   time.UnixMilli(timestampMS).UTC().Format(time.RFC3339Nano),
 		Model:       "gpt-a",
