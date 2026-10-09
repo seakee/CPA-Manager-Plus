@@ -8576,8 +8576,8 @@ export function AccountsPage() {
         key: 'cost',
         icon: <IconDollarSign size={13} />,
         className: styles.accountHistoryMetricCost,
-        value: matched ? formatCompactUsd(accountHistory.total_cost) : '-',
-        exact: matched ? formatUsd(accountHistory.total_cost) : '-',
+        value: matched && accountHistory.total_cost !== null ? formatCompactUsd(accountHistory.total_cost) : '-',
+        exact: matched && accountHistory.total_cost !== null ? formatUsd(accountHistory.total_cost) : '-',
       },
       {
         key: 'success',

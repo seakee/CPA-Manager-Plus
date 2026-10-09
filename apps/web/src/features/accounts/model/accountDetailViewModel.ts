@@ -205,7 +205,7 @@ export interface AccountDetailHistorySummary {
   successCalls: number;
   failureCalls: number;
   totalTokens: number;
-  totalCost: number;
+  totalCost: number | null;
   successRate: number | null;
   firstSeenMs: number | null;
   lastSeenMs: number | null;

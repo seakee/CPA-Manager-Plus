@@ -5662,7 +5662,7 @@ export const getDemoAccountWindowUsage = (
         success_calls: successCalls,
         failure_calls: failureCalls,
         total_tokens: Math.max(1, Math.round(history.total_tokens * ratio)),
-        total_cost: round2(history.total_cost * ratio),
+        total_cost: round2((history.total_cost ?? 0) * ratio),
         success_rate: totalRequests > 0 ? successCalls / totalRequests : null,
         last_seen_ms: resolvedLastSeenMs,
         sync_status: 'ready',

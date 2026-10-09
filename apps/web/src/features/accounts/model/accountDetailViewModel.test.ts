@@ -1933,6 +1933,19 @@ describe('accountDetailViewModel', () => {
     expect(serialized).not.toContain('failure-body-secret');
   });
 
+  it('preserves unavailable historical cost without losing matched request or token counts', () => {
+    const viewModel = buildAccountDetailViewModel(makeRow(), {
+      history: makeHistory({ total_cost: null }),
+    });
+
+    expect(viewModel.history).toMatchObject({
+      matched: true,
+      totalRequests: 12,
+      totalTokens: 2400,
+      totalCost: null,
+    });
+  });
+
   it('keeps overview activity scoped to matched seven-day monitoring data', () => {
     const row = makeRow();
     const viewModel = buildAccountDetailViewModel(row, {

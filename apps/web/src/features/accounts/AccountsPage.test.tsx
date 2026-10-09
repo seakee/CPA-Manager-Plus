@@ -150,7 +150,7 @@ type AccountHistoryResponseForTest = {
     success_calls: number;
     failure_calls: number;
     total_tokens: number;
-    total_cost: number;
+    total_cost: number | null;
     success_rate: number | null;
     first_seen_ms: number | null;
     last_seen_ms: number | null;
@@ -9300,6 +9300,24 @@ describe('AccountsPage replacement flows', () => {
         serverCodexInspectionAvailable: false,
       };
       mocks.getAccountHistory.mockResolvedValue(makeAccountHistoryResponse([item]));
+    });
+
+    it('preserves historical counts and shows unavailable cost as a dash', async () => {
+      mocks.getAccountHistory.mockResolvedValue(
+        makeAccountHistoryResponse([{ ...item, total_cost: null }])
+      );
+      const renderer = await renderAccountsPage();
+      await flushPromises();
+      const region = findAccountDetailRegion(renderer, selectionKey, 'history');
+      expect(region.findAllByType('strong').map(readText)).toEqual(['1.2M', '1.0B', '-', '98.3%']);
+      expect(region.props['aria-label']).toContain(
+        'accounts.history_title:1,234,567:1,000,190,000:-:98.32%'
+      );
+      expect(
+        region
+          .findAll((node) => node.type === 'span' && node.props['aria-label'])
+          .map((node) => node.props['aria-label'])
+      ).toContain('accounts.history_cost: -');
     });
 
     it('renders compact historical metrics with exact accessible values and opens quota without bubbling', async () => {

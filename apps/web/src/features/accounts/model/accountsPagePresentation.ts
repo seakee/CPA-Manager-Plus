@@ -109,7 +109,8 @@ export const getProviderLabel = (provider: string, t: TFunction) => {
 export const formatPercent = (value: number | null | undefined, digits = 0) =>
   typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(digits)}%` : '-';
 
-export const formatMoney = (value: number) => formatUsd(value);
+export const formatMoney = (value: number | null | undefined) =>
+  typeof value === 'number' && Number.isFinite(value) ? formatUsd(value) : '-';
 
 export const formatHistoryNumber = (value: number, locale: string) => {
   const numberValue = Number(value);
