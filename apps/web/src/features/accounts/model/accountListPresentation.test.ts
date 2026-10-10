@@ -640,6 +640,45 @@ describe('accountListPresentation', () => {
     });
   });
 
+  it('distinguishes an exhausted non-zero spend-control budget from a zero budget', () => {
+    const item = buildAccountListItem(
+      makeRow({
+        quota: {
+          spendControlReached: true,
+          fetchedAtMs: 2_000,
+          spendControlIndividualLimit: {
+            source: 'workspace_spend_controls',
+            unit: 'credit',
+            limit: '100',
+            used: '100',
+            remaining: '0',
+            usedPercent: 100,
+            remainingPercent: 0,
+            resetAfterSeconds: 3600,
+            resetAtMs: 1_793_491_200_000,
+          },
+        },
+      })
+    );
+
+    expect(item.health).toMatchObject({
+      status: 'limited',
+      reasonKey: 'accounts.health_reason_limited_spend_control',
+      tooltipKey: 'accounts.health_tip_limited_spend_control_detail',
+      tooltipParams: {
+        limit: '100',
+        used: '100',
+        remaining: '0',
+      },
+    });
+    expect(item.recommendation).toMatchObject({
+      hasRecommendation: true,
+      actionLabelKey: 'accounts.recommend_action_review',
+      reasonKey: 'accounts.recommend_reason_spend_control_limited',
+      priority: 'high',
+    });
+  });
+
   it('uses xAI provider usage limit status in account health', () => {
     const item = buildAccountListItem(makeRow({ provider: 'xai' }), {
       codexStatus: makeCodexStatus({

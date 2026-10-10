@@ -2901,16 +2901,16 @@ describe('accountDetailViewModel', () => {
         spendControlReached: true,
         fetchedAtMs: 2_000,
         spendControlIndividualLimit: {
-            source: 'workspace_spend_controls',
-            unit: 'credit',
-            limit: '0',
-            used: '0.0',
-            remaining: '0.0',
-            usedPercent: 100,
-            remainingPercent: 0,
-            resetAfterSeconds: 3600,
-            resetAtMs: 1_793_491_200_000,
-          },
+          source: 'workspace_spend_controls',
+          unit: 'credit',
+          limit: '0',
+          used: '0.0',
+          remaining: '0.0',
+          usedPercent: 100,
+          remainingPercent: 0,
+          resetAfterSeconds: 3600,
+          resetAtMs: 1_793_491_200_000,
+        },
       },
     });
 
@@ -2964,5 +2964,39 @@ describe('accountDetailViewModel', () => {
     ).toBeUndefined();
   });
 
+  it('shows usage percentages for an exhausted non-zero spend-control budget', () => {
+    const row = makeRow({
+      quota: {
+        spendControlReached: true,
+        fetchedAtMs: 2_000,
+        spendControlIndividualLimit: {
+          source: 'workspace_spend_controls',
+          unit: 'credit',
+          limit: '100',
+          used: '100',
+          remaining: '0',
+          usedPercent: 100,
+          remainingPercent: 0,
+          resetAfterSeconds: 3600,
+          resetAtMs: 1_793_491_200_000,
+        },
+      },
+    });
+
+    const viewModel = buildAccountDetailViewModel(row);
+
+    expect(
+      viewModel.quota.diagnostics.find((field) => field.key === 'spendControlUsedPercent')
+    ).toMatchObject({
+      value: 100,
+      valueKind: 'percent',
+    });
+    expect(
+      viewModel.quota.diagnostics.find((field) => field.key === 'spendControlRemainingPercent')
+    ).toMatchObject({
+      value: 0,
+      valueKind: 'percent',
+    });
+  });
 });
 

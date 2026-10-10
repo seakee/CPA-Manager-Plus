@@ -89,6 +89,37 @@ const quotaStateForScope = (cacheScope: string, cacheGeneration: number) => ({
   ...emptyQuotaState,
 });
 
+const normalizePersistedCodexQuotaState = (
+  item: CodexQuotaState & { authFileKey: string }
+): CodexQuotaState & { authFileKey: string } => {
+  const rawLimit = (
+    item as unknown as {
+      spendControlIndividualLimit?: unknown;
+    }
+  ).spendControlIndividualLimit;
+  if (typeof rawLimit !== 'number' && typeof rawLimit !== 'string') return item;
+
+  const limit = String(rawLimit).trim();
+  if (!limit || !Number.isFinite(Number(limit))) {
+    return { ...item, spendControlIndividualLimit: null };
+  }
+
+  return {
+    ...item,
+    spendControlIndividualLimit: {
+      source: null,
+      unit: null,
+      limit,
+      used: null,
+      remaining: null,
+      usedPercent: null,
+      remainingPercent: null,
+      resetAfterSeconds: null,
+      resetAtMs: null,
+    },
+  };
+};
+
 const filterPersistableCodexQuota = (
   quota: Record<string, CodexQuotaState> | undefined
 ): Record<string, CodexQuotaState> => {
@@ -101,7 +132,10 @@ const filterPersistableCodexQuota = (
           isPersistableQuotaState(item) &&
           (item.status !== 'success' || item.observedFromUsageHeaders !== true)
       )
-      .map((item) => [item.authFileKey, item])
+      .map((item) => {
+        const normalized = normalizePersistedCodexQuotaState(item);
+        return [normalized.authFileKey, normalized];
+      })
   );
 };
 
