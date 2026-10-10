@@ -59,6 +59,12 @@ const makeRow = (overrides: AccountRowOverrides = {}): AccountRow => {
   };
 };
 
+const TEST_NOW_MS = Date.now();
+const FRESH_SPEND_CONTROL_FETCHED_AT_MS = TEST_NOW_MS - 60_000;
+const STALE_SPEND_CONTROL_FETCHED_AT_MS = TEST_NOW_MS - 16 * 60_000;
+const FUTURE_SPEND_CONTROL_RESET_AT_MS = TEST_NOW_MS + 24 * 60 * 60_000;
+const EXPIRED_SPEND_CONTROL_RESET_AT_MS = TEST_NOW_MS - 60_000;
+
 const spendControlLimit = (
   overrides: Partial<NonNullable<AccountRow['quota']['spendControlIndividualLimit']>> = {}
 ): NonNullable<AccountRow['quota']['spendControlIndividualLimit']> => ({
@@ -70,7 +76,7 @@ const spendControlLimit = (
   usedPercent: 100,
   remainingPercent: 0,
   resetAfterSeconds: 3600,
-  resetAtMs: Date.now() + 60_000,
+  resetAtMs: FUTURE_SPEND_CONTROL_RESET_AT_MS,
   ...overrides,
 });
 
@@ -497,7 +503,7 @@ describe('quotaRecommendations', () => {
       makeRow({
         quota: {
           spendControlReached: true,
-          fetchedAtMs: 2_000,
+          fetchedAtMs: FRESH_SPEND_CONTROL_FETCHED_AT_MS,
           spendControlIndividualLimit: {
             source: 'workspace_spend_controls',
             unit: 'credit',
@@ -507,7 +513,7 @@ describe('quotaRecommendations', () => {
             usedPercent: 100,
             remainingPercent: 0,
             resetAfterSeconds: 3600,
-            resetAtMs: Date.now() + 60_000,
+            resetAtMs: FUTURE_SPEND_CONTROL_RESET_AT_MS,
           },
         },
       })
@@ -520,19 +526,43 @@ describe('quotaRecommendations', () => {
     });
   });
 
-  it('refreshes an expired structured spend-control cycle instead of treating it as resolved', () => {
+  it('refreshes a stale structured spend-control snapshot within the same reset cycle', () => {
     const recommendation = buildAccountRecommendation(
       makeRow({
         quota: {
           spendControlReached: true,
-          fetchedAtMs: 2_000,
+          fetchedAtMs: STALE_SPEND_CONTROL_FETCHED_AT_MS,
           spendControlIndividualLimit: spendControlLimit({
             limit: '0',
             used: '0.0',
             remaining: '0.0',
             usedPercent: 100,
             remainingPercent: 0,
-            resetAtMs: Date.now() - 60_000,
+          }),
+        },
+      })
+    );
+
+    expect(recommendation).toMatchObject({
+      action: 'refresh',
+      priority: 'high',
+      reasonKey: 'accounts.recommend_reason_quota_limited',
+    });
+  });
+
+  it('refreshes an expired structured spend-control cycle instead of treating it as resolved', () => {
+    const recommendation = buildAccountRecommendation(
+      makeRow({
+        quota: {
+          spendControlReached: true,
+          fetchedAtMs: FRESH_SPEND_CONTROL_FETCHED_AT_MS,
+          spendControlIndividualLimit: spendControlLimit({
+            limit: '0',
+            used: '0.0',
+            remaining: '0.0',
+            usedPercent: 100,
+            remainingPercent: 0,
+            resetAtMs: EXPIRED_SPEND_CONTROL_RESET_AT_MS,
           }),
         },
       })
@@ -550,7 +580,7 @@ describe('quotaRecommendations', () => {
       makeRow({
         quota: {
           spendControlReached: true,
-          fetchedAtMs: 2_000,
+          fetchedAtMs: FRESH_SPEND_CONTROL_FETCHED_AT_MS,
           spendControlIndividualLimit: null,
         },
       })
@@ -569,7 +599,7 @@ describe('quotaRecommendations', () => {
         quota: {
           spendControlReached: true,
           creditsOverageLimitReached: true,
-          fetchedAtMs: 2_000,
+          fetchedAtMs: FRESH_SPEND_CONTROL_FETCHED_AT_MS,
           spendControlIndividualLimit: spendControlLimit(),
         },
       }),
@@ -577,16 +607,16 @@ describe('quotaRecommendations', () => {
         quota: {
           spendControlReached: true,
           rateLimitReachedType: 'primary',
-          fetchedAtMs: 2_000,
+          fetchedAtMs: FRESH_SPEND_CONTROL_FETCHED_AT_MS,
           spendControlIndividualLimit: spendControlLimit(),
         },
       }),
       makeRow({
         statusMessage: 'quota exceeded',
-        updatedAtMs: 3_000,
+        updatedAtMs: TEST_NOW_MS,
         quota: {
           spendControlReached: true,
-          fetchedAtMs: 2_000,
+          fetchedAtMs: FRESH_SPEND_CONTROL_FETCHED_AT_MS,
           spendControlIndividualLimit: spendControlLimit(),
         },
       }),
@@ -606,13 +636,13 @@ describe('quotaRecommendations', () => {
       makeRow({
         quota: {
           spendControlReached: true,
-          fetchedAtMs: 2_000,
+          fetchedAtMs: FRESH_SPEND_CONTROL_FETCHED_AT_MS,
           spendControlIndividualLimit: spendControlLimit(),
         },
       }),
       {
         latestRequest: {
-          timestamp_ms: 3_000,
+          timestamp_ms: TEST_NOW_MS,
           failed: true,
           fail_status_code: 429,
           fail_summary: 'request quota limited',
@@ -632,7 +662,7 @@ describe('quotaRecommendations', () => {
       makeRow({
         quota: {
           spendControlReached: true,
-          fetchedAtMs: 2_000,
+          fetchedAtMs: FRESH_SPEND_CONTROL_FETCHED_AT_MS,
           spendControlIndividualLimit: spendControlLimit({
             limit: 'not-a-number',
             used: 'bad',
