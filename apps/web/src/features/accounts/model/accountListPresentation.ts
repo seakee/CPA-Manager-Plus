@@ -459,9 +459,9 @@ const getQuotaLimitTooltip = (
       return {
         tooltipKey: 'accounts.health_tip_limited_spend_control_detail',
         tooltipParams: {
-          limit: limit.limit,
-          used: limit.used,
-          remaining: limit.remaining,
+          limit: limit.limit ?? '-',
+          used: limit.used ?? '-',
+          remaining: limit.remaining ?? '-',
           resetAt: getSpendControlResetLabel(row),
         },
       };
