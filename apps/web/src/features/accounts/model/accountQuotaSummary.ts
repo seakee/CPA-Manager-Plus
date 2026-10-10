@@ -3,6 +3,7 @@ import type {
   AuthFileItem,
   ClaudeQuotaState,
   CodexQuotaState,
+  CodexSpendControlLimit,
   DevinQuotaState,
   KimiQuotaState,
   MetaQuotaState,
@@ -67,7 +68,7 @@ export interface AccountQuotaSummary {
   creditsApproxLocalMessages?: number | null;
   creditsApproxCloudMessages?: number | null;
   spendControlReached?: boolean | null;
-  spendControlIndividualLimit?: number | null;
+  spendControlIndividualLimit?: CodexSpendControlLimit | null;
   rateLimitReachedType?: string | null;
   primaryOverSecondaryLimitPercent?: number | null;
 }

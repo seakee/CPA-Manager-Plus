@@ -4,6 +4,7 @@ import {
   hasAccountQuotaLimitEvidence,
   isAccountInspectionHealthyEvidence,
   isAccountRequestCredentialEvidenceCurrent,
+  isAccountRequestHealthEvidenceCurrent,
   resolveAccountAuthenticationProblemEvidence,
   resolveAccountExceptionProblemEvidence,
   resolveAccountRequestHealthEvidence,
@@ -44,6 +45,7 @@ const evidenceSensitiveRecommendationReasonKeys = new Set([
   'accounts.recommend_reason_credential_auth',
   'accounts.recommend_reason_request_failure',
   'accounts.recommend_reason_quota_limited',
+  'accounts.recommend_reason_spend_control_limited',
   'accounts.recommend_reason_quota_auth',
   'accounts.recommend_reason_error',
 ]);
@@ -54,6 +56,20 @@ export const isAccountRecommendationEvidenceSensitive = (
   recommendation !== null &&
   recommendation !== undefined &&
   evidenceSensitiveRecommendationReasonKeys.has(recommendation.reasonKey);
+
+const hasResolvedSpendControlEvidence = (row: AccountRow): boolean => {
+  const limit = row.quota.spendControlIndividualLimit;
+  return (
+    row.quota.spendControlReached === true &&
+    limit !== null &&
+    limit !== undefined &&
+    limit.limit !== null &&
+    limit.used !== null &&
+    limit.remaining !== null &&
+    typeof row.quota.fetchedAtMs === 'number' &&
+    Number.isFinite(row.quota.fetchedAtMs)
+  );
+};
 
 export const buildAccountRecommendation = (
   row: AccountRow,
@@ -146,6 +162,21 @@ export const buildAccountRecommendation = (
       reasonKey: row.disabled
         ? 'accounts.recommend_reason_disabled_exhausted'
         : 'accounts.recommend_reason_exhausted',
+    };
+  }
+
+  if (
+    hasResolvedSpendControlEvidence(row) &&
+    !(
+      requestEvidence?.kind === 'quota' &&
+      isAccountRequestHealthEvidenceCurrent(row, requestEvidence)
+    )
+  ) {
+    return {
+      row,
+      action: 'review',
+      priority: 'high',
+      reasonKey: 'accounts.recommend_reason_spend_control_limited',
     };
   }
 

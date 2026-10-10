@@ -477,6 +477,52 @@ describe('quotaRecommendations', () => {
     });
   });
 
+  it('reviews a confirmed structured spend-control limit instead of refreshing it again', () => {
+    const recommendation = buildAccountRecommendation(
+      makeRow({
+        quota: {
+          spendControlReached: true,
+          fetchedAtMs: 2_000,
+          spendControlIndividualLimit: {
+            source: 'workspace_spend_controls',
+            unit: 'credit',
+            limit: '0',
+            used: '0.0',
+            remaining: '0.0',
+            usedPercent: 100,
+            remainingPercent: 0,
+            resetAfterSeconds: 3600,
+            resetAtMs: 1_793_491_200_000,
+          },
+        },
+      })
+    );
+
+    expect(recommendation).toMatchObject({
+      action: 'review',
+      priority: 'high',
+      reasonKey: 'accounts.recommend_reason_spend_control_limited',
+    });
+  });
+
+  it('still refreshes a boolean-only spend-control signal when the budget details are unknown', () => {
+    const recommendation = buildAccountRecommendation(
+      makeRow({
+        quota: {
+          spendControlReached: true,
+          fetchedAtMs: 2_000,
+          spendControlIndividualLimit: null,
+        },
+      })
+    );
+
+    expect(recommendation).toMatchObject({
+      action: 'refresh',
+      priority: 'high',
+      reasonKey: 'accounts.recommend_reason_quota_limited',
+    });
+  });
+
   it('sorts recommendations by priority rank and then account name', () => {
     const rows = [
       makeRow({

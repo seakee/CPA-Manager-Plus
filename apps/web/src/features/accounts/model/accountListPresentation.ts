@@ -234,6 +234,28 @@ const getFirstDetail = (...values: Array<string | number | null | undefined>): s
   return '-';
 };
 
+const readSpendControlAmount = (value: string | null | undefined): number | null => {
+  const trimmed = value?.trim() ?? '';
+  if (!trimmed) return null;
+  const numeric = Number(trimmed);
+  return Number.isFinite(numeric) ? numeric : null;
+};
+
+const isZeroSpendControlBudget = (row: AccountRow): boolean => {
+  const limit = row.quota.spendControlIndividualLimit;
+  if (!limit) return false;
+  return [limit.limit, limit.used, limit.remaining]
+    .map(readSpendControlAmount)
+    .every((value) => value === 0);
+};
+
+const getSpendControlResetLabel = (row: AccountRow): string => {
+  const resetAtMs = row.quota.spendControlIndividualLimit?.resetAtMs;
+  if (typeof resetAtMs !== 'number' || !Number.isFinite(resetAtMs) || resetAtMs <= 0) return '-';
+  const date = new Date(resetAtMs);
+  return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString();
+};
+
 const getHttpStatusDetail = (statusCode: number | null | undefined): string =>
   statusCode ? `HTTP ${statusCode}` : '';
 
@@ -364,6 +386,11 @@ const getLimitedReasonKey = (
   requestQuotaEvidence: AccountRequestQuotaEvidence | null = null
 ): string => {
   if (requestQuotaEvidence) return 'accounts.health_reason_limited_request';
+  if (row.quota.spendControlReached === true) {
+    return isZeroSpendControlBudget(row)
+      ? 'accounts.health_reason_limited_spend_control_zero_budget'
+      : 'accounts.health_reason_limited_spend_control';
+  }
   return isHeaderQuotaLimitEvidence(row)
     ? 'accounts.health_reason_limited_header'
     : 'accounts.health_reason_limited_quota';
@@ -407,6 +434,24 @@ const getQuotaLimitTooltip = (
     return { tooltipKey: 'accounts.health_tip_limited_credits_overage', tooltipParams: {} };
   }
   if (row.quota.spendControlReached === true) {
+    const limit = row.quota.spendControlIndividualLimit;
+    if (isZeroSpendControlBudget(row)) {
+      return {
+        tooltipKey: 'accounts.health_tip_limited_spend_control_zero_budget',
+        tooltipParams: {},
+      };
+    }
+    if (limit && limit.limit !== null && limit.used !== null && limit.remaining !== null) {
+      return {
+        tooltipKey: 'accounts.health_tip_limited_spend_control_detail',
+        tooltipParams: {
+          limit: limit.limit,
+          used: limit.used,
+          remaining: limit.remaining,
+          resetAt: getSpendControlResetLabel(row),
+        },
+      };
+    }
     return { tooltipKey: 'accounts.health_tip_limited_spend_control', tooltipParams: {} };
   }
   const detail = getQuotaLimitDetail(row, null, hasCurrentCredentialQuotaLimit);

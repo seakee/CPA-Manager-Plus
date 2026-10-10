@@ -2893,5 +2893,76 @@ describe('accountDetailViewModel', () => {
       cost: 25.0,
     });
   });
+
+  it('shows structured spend-control details without presenting a zero budget as 100% used', () => {
+    const resetAtMs = 1_793_491_200_000;
+    const row = makeRow({
+      quota: {
+        spendControlReached: true,
+        fetchedAtMs: 2_000,
+        spendControlIndividualLimit: {
+            source: 'workspace_spend_controls',
+            unit: 'credit',
+            limit: '0',
+            used: '0.0',
+            remaining: '0.0',
+            usedPercent: 100,
+            remainingPercent: 0,
+            resetAfterSeconds: 3600,
+            resetAtMs: 1_793_491_200_000,
+          },
+      },
+    });
+
+    const viewModel = buildAccountDetailViewModel(row);
+
+    expect(viewModel.quota.diagnostics).toEqual(
+      expect.arrayContaining([
+        {
+          key: 'spendControlSource',
+          labelKey: 'accounts.detail_spend_control_source',
+          value: 'workspace_spend_controls',
+          valueKind: 'text',
+        },
+        {
+          key: 'spendControlUnit',
+          labelKey: 'accounts.detail_spend_control_unit',
+          value: 'credit',
+          valueKind: 'text',
+        },
+        {
+          key: 'spendControlLimit',
+          labelKey: 'accounts.detail_spend_control_limit',
+          value: '0',
+          valueKind: 'text',
+        },
+        {
+          key: 'spendControlUsed',
+          labelKey: 'accounts.detail_spend_control_used',
+          value: '0.0',
+          valueKind: 'text',
+        },
+        {
+          key: 'spendControlRemaining',
+          labelKey: 'accounts.detail_spend_control_remaining',
+          value: '0.0',
+          valueKind: 'text',
+        },
+        {
+          key: 'spendControlResetAt',
+          labelKey: 'accounts.detail_spend_control_reset_at',
+          value: resetAtMs,
+          valueKind: 'timestamp',
+        },
+      ])
+    );
+    expect(
+      viewModel.quota.diagnostics.find((field) => field.key === 'spendControlUsedPercent')
+    ).toBeUndefined();
+    expect(
+      viewModel.quota.diagnostics.find((field) => field.key === 'spendControlRemainingPercent')
+    ).toBeUndefined();
+  });
+
 });
 
