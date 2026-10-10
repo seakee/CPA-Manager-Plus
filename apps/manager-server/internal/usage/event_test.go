@@ -1,9 +1,162 @@
 package usage
 
 import (
+	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 )
+
+func unknownPluginUsageRecord(t *testing.T) map[string]any {
+	t.Helper()
+	var record map[string]any
+	if err := json.Unmarshal([]byte(`{
+		"timestamp":"2026-10-09T12:00:00Z","request_id":"unknown-plugin-cache",
+		"provider":"commandcode","executor_type":"executorAdapter","model":"opaque-model",
+		"tokens":{"input_tokens":100,"output_tokens":10,"reasoning_tokens":3,"cached_tokens":80,"cache_tokens":0,"cache_read_tokens":80,"cache_creation_tokens":0,"total_tokens":110},
+		"accounting_version":2,"token_breakdown":{"schema_version":2,"quality":"complete","total_tokens":110,"unclassified_tokens":0,
+			"input":{"total_tokens":100,"uncached_tokens":20,"cache_read_tokens":80,"cache_write_tokens":0},
+			"output":{"total_tokens":10,"non_reasoning_tokens":7,"reasoning_tokens":3}}
+	}`), &record); err != nil {
+		t.Fatal(err)
+	}
+	return record
+}
+
+func setPluginUsageField(record map[string]any, path string, value any) {
+	parts := strings.Split(path, ".")
+	for _, key := range parts[:len(parts)-1] {
+		record = record[key].(map[string]any)
+	}
+	key := parts[len(parts)-1]
+	if value == nil {
+		delete(record, key)
+	} else {
+		record[key] = value
+	}
+}
+
+func TestNormalizeRawUnknownPluginCacheAccounting(t *testing.T) {
+	tests := []struct {
+		name, path string
+		value      any
+		wantMode   string
+		wantInput  int64
+	}{
+		{"deepseek", "model", "commandcode/deepseek/deepseek-v4.1-flash", CacheInputModeIncluded, 100},
+		{"glm", "model", "commandcode/glm-5", CacheInputModeIncluded, 100},
+		{"minimax", "model", "commandcode/minimax-m3", CacheInputModeIncluded, 100},
+		{"qwen", "model", "commandcode/qwen-model", CacheInputModeIncluded, 100},
+		{"executor normalization", "executor_type", " ExecutorAdapter ", CacheInputModeIncluded, 100},
+		{"other executor", "executor_type", "CustomExecutor", CacheInputModeSeparate, 180},
+		{"executor lookalike", "executor_type", "OtherexecutorAdapter", CacheInputModeSeparate, 180},
+		{"claude executor", "executor_type", "ClaudeExecutor", CacheInputModeSeparate, 180},
+		{"claude provider", "provider", "anthropic", CacheInputModeSeparate, 180},
+		{"claude snapshot", "auth_provider_snapshot", "claude", CacheInputModeSeparate, 180},
+		{"claude resolved model", "resolved_model", "claude-sonnet", CacheInputModeSeparate, 180},
+		{"claude requested model", "requested_model", "claude-sonnet", CacheInputModeSeparate, 180},
+		{"claude display model", "model", "claude-sonnet", CacheInputModeSeparate, 180},
+		{"explicit separate", "cache_input_mode", CacheInputModeSeparate, CacheInputModeSeparate, 180},
+		{"explicit mixed", "cache_input_mode", CacheInputModeReadIncludedCreationSeparate, CacheInputModeReadIncludedCreationSeparate, 100},
+		{"missing version", "accounting_version", nil, CacheInputModeSeparate, 180},
+		{"missing breakdown", "token_breakdown", nil, CacheInputModeSeparate, 180},
+		{"future version", "accounting_version", 3, CacheInputModeSeparate, 180},
+		{"future schema", "token_breakdown.schema_version", 3, CacheInputModeSeparate, 180},
+		{"inconsistent", "token_breakdown.quality", "inconsistent", CacheInputModeSeparate, 180},
+		{"unclassified", "token_breakdown.quality", "unclassified", CacheInputModeSeparate, 180},
+		{"missing zero field", "token_breakdown.unclassified_tokens", nil, CacheInputModeSeparate, 180},
+		{"unclassified remainder", "token_breakdown.unclassified_tokens", 1, CacheInputModeSeparate, 180},
+		{"total mismatch", "tokens.total_tokens", 190, CacheInputModeSeparate, 180},
+		{"missing observed total", "tokens.total_tokens", nil, CacheInputModeSeparate, 180},
+		{"zero observed total", "tokens.total_tokens", 0, CacheInputModeSeparate, 180},
+		{"unsafe observed total", "tokens.total_tokens", float64(1 << 53), CacheInputModeSeparate, 180},
+		{"coercible observed total", "tokens.total_tokens", "110", CacheInputModeSeparate, 180},
+		{"contradictory breakdown total", "token_breakdown.total_tokens", 111, CacheInputModeSeparate, 180},
+		{"cache exceeds input", "tokens.cache_read_tokens", 101, CacheInputModeSeparate, 201},
+		{"combined cache exceeds input", "tokens.cache_creation_tokens", 30, CacheInputModeSeparate, 210},
+		{"negative raw bucket", "tokens.cache_creation_tokens", -1, CacheInputModeSeparate, 180},
+		{"coercible raw bucket", "tokens.input_tokens", "100", CacheInputModeSeparate, 180},
+		{"invalid reasoning subset", "tokens.reasoning_tokens", 11, CacheInputModeSeparate, 180},
+		{"legacy cached only", "tokens.cache_read_tokens", 0, CacheInputModeIncluded, 100},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			record := unknownPluginUsageRecord(t)
+			setPluginUsageField(record, tt.path, tt.value)
+			data, err := json.Marshal(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			event, err := NormalizeRaw(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if event.CacheInputMode != tt.wantMode || event.NormalizedTotalInputTokens != tt.wantInput {
+				t.Fatalf("mode=%s input=%d, want mode=%s input=%d", event.CacheInputMode, event.NormalizedTotalInputTokens, tt.wantMode, tt.wantInput)
+			}
+			if tt.wantMode == CacheInputModeIncluded && event.NormalizedUncachedInputTokens != 20 {
+				t.Fatalf("uncached=%d, want 20", event.NormalizedUncachedInputTokens)
+			}
+			if tt.name == "missing observed total" && event.TotalTokens != 193 {
+				t.Fatalf("fallback total=%d, want 193", event.TotalTokens)
+			}
+		})
+	}
+	t.Run("matching total without v2 markers", func(t *testing.T) {
+		record := unknownPluginUsageRecord(t)
+		delete(record, "accounting_version")
+		delete(record, "token_breakdown")
+		data, _ := json.Marshal(record)
+		event, err := NormalizeRaw(data)
+		if err != nil || event.CacheInputMode != CacheInputModeSeparate || event.NormalizedTotalInputTokens != 180 {
+			t.Fatalf("event=%+v err=%v", event, err)
+		}
+	})
+}
+
+func TestNormalizeRawUnknownPluginBreakdownBuckets(t *testing.T) {
+	for _, group := range []string{"input", "output"} {
+		base := unknownPluginUsageRecord(t)["token_breakdown"].(map[string]any)[group].(map[string]any)
+		for key := range base {
+			t.Run(group+"/"+key, func(t *testing.T) {
+				for _, malformed := range []any{nil, true, "0", -1, 0.5, float64(1 << 53), 999} {
+					record := unknownPluginUsageRecord(t)
+					setPluginUsageField(record, "token_breakdown."+group+"."+key, malformed)
+					data, _ := json.Marshal(record)
+					event, err := NormalizeRaw(data)
+					if err != nil || event.CacheInputMode != CacheInputModeSeparate {
+						t.Fatalf("value=%v event=%+v err=%v", malformed, event, err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestNormalizeRawUnknownPluginEffectiveCache(t *testing.T) {
+	for _, tt := range []struct {
+		name                                                            string
+		input, output, reasoning, cached, read, creation, effectiveRead int64
+	}{
+		{"long deepseek example", 371500, 3300, 2722, 370000, 370000, 0, 370000},
+		{"legacy remainder and creation", 100, 10, 3, 80, 50, 10, 70},
+		{"creation only", 100, 10, 3, 0, 0, 80, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r := unknownPluginUsageRecord(t)
+			r["tokens"] = map[string]any{"input_tokens": tt.input, "output_tokens": tt.output, "reasoning_tokens": tt.reasoning, "cached_tokens": tt.cached, "cache_read_tokens": tt.read, "cache_creation_tokens": tt.creation, "total_tokens": tt.input + tt.output}
+			b := r["token_breakdown"].(map[string]any)
+			b["total_tokens"] = tt.input + tt.output
+			b["input"] = map[string]any{"total_tokens": tt.input, "uncached_tokens": tt.input - tt.effectiveRead - tt.creation, "cache_read_tokens": tt.effectiveRead, "cache_write_tokens": tt.creation}
+			b["output"] = map[string]any{"total_tokens": tt.output, "non_reasoning_tokens": tt.output - tt.reasoning, "reasoning_tokens": tt.reasoning}
+			data, _ := json.Marshal(r)
+			event, err := NormalizeRaw(data)
+			if err != nil || event.CacheInputMode != CacheInputModeIncluded || event.NormalizedTotalInputTokens != tt.input || event.NormalizedUncachedInputTokens != tt.input-tt.effectiveRead-tt.creation || event.TotalTokens != tt.input+tt.output {
+				t.Fatalf("event=%+v err=%v", event, err)
+			}
+		})
+	}
+}
 
 func TestCacheHitRateUsesNormalizedInputTotals(t *testing.T) {
 	tests := []struct {

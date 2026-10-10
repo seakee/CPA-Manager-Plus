@@ -28,6 +28,214 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+const unknownPluginUsageRecord = (): Record<string, unknown> => ({
+  timestamp: '2026-10-09T12:00:00Z',
+  provider: 'commandcode',
+  executor_type: 'executorAdapter',
+  model: 'opaque-model',
+  tokens: {
+    input_tokens: 100,
+    output_tokens: 10,
+    reasoning_tokens: 3,
+    cached_tokens: 80,
+    cache_tokens: 0,
+    cache_read_tokens: 80,
+    cache_creation_tokens: 0,
+    total_tokens: 110,
+  },
+  accounting_version: 2,
+  token_breakdown: {
+    schema_version: 2,
+    quality: 'complete',
+    total_tokens: 110,
+    unclassified_tokens: 0,
+    input: { total_tokens: 100, uncached_tokens: 20, cache_read_tokens: 80, cache_write_tokens: 0 },
+    output: { total_tokens: 10, non_reasoning_tokens: 7, reasoning_tokens: 3 },
+  },
+});
+
+const setPluginUsageField = (record: Record<string, unknown>, path: string, value: unknown) => {
+  const parts = path.split('.');
+  let fields = record;
+  for (const key of parts.slice(0, -1)) fields = fields[key] as Record<string, unknown>;
+  const key = parts[parts.length - 1];
+  if (value === undefined) delete fields[key];
+  else fields[key] = value;
+};
+
+const collectPluginDetail = (record: Record<string, unknown>) =>
+  collectUsageDetails({
+    apis: { 'POST /v1/chat/completions': { models: { 'opaque-model': { details: [record] } } } },
+  })[0];
+
+describe('unknown plugin cache accounting', () => {
+  const cases: [string, string, unknown, number][] = [
+    ['deepseek', 'model', 'commandcode/deepseek/deepseek-v4.1-flash', 100],
+    ['glm', 'model', 'commandcode/glm-5', 100],
+    ['minimax', 'model', 'commandcode/minimax-m3', 100],
+    ['qwen', 'model', 'commandcode/qwen-model', 100],
+    ['executor normalization', 'executor_type', ' ExecutorAdapter ', 100],
+    ['other executor', 'executor_type', 'CustomExecutor', 180],
+    ['executor lookalike', 'executor_type', 'OtherexecutorAdapter', 180],
+    ['claude executor', 'executor_type', 'ClaudeExecutor', 180],
+    ['claude provider', 'provider', 'anthropic', 180],
+    ['claude snapshot', 'auth_provider_snapshot', 'claude', 180],
+    ['claude resolved model', 'resolved_model', 'claude-sonnet', 180],
+    ['claude requested model', 'requested_model', 'claude-sonnet', 180],
+    ['claude display model', 'model', 'claude-sonnet', 180],
+    ['explicit separate', 'cache_input_mode', 'separate_from_input', 180],
+    ['explicit mixed', 'cache_input_mode', 'read_included_creation_separate', 100],
+    ['missing version', 'accounting_version', undefined, 180],
+    ['missing breakdown', 'token_breakdown', undefined, 180],
+    ['future version', 'accounting_version', 3, 180],
+    ['future schema', 'token_breakdown.schema_version', 3, 180],
+    ['inconsistent', 'token_breakdown.quality', 'inconsistent', 180],
+    ['unclassified', 'token_breakdown.quality', 'unclassified', 180],
+    ['missing zero field', 'token_breakdown.unclassified_tokens', undefined, 180],
+    ['unclassified remainder', 'token_breakdown.unclassified_tokens', 1, 180],
+    ['total mismatch', 'tokens.total_tokens', 190, 180],
+    ['missing observed total', 'tokens.total_tokens', undefined, 180],
+    ['zero observed total', 'tokens.total_tokens', 0, 180],
+    ['unsafe observed total', 'tokens.total_tokens', 2 ** 53, 180],
+    ['coercible observed total', 'tokens.total_tokens', '110', 180],
+    ['contradictory breakdown total', 'token_breakdown.total_tokens', 111, 180],
+    ['cache exceeds input', 'tokens.cache_read_tokens', 101, 201],
+    ['combined cache exceeds input', 'tokens.cache_creation_tokens', 30, 210],
+    ['negative raw bucket', 'tokens.cache_creation_tokens', -1, 180],
+    ['coercible raw bucket', 'tokens.input_tokens', '100', 180],
+    ['invalid reasoning subset', 'tokens.reasoning_tokens', 11, 180],
+    ['legacy cached only', 'tokens.cache_read_tokens', 0, 100],
+  ];
+  it.each(cases)('%s', (name, path, value, expectedInput) => {
+    const record = unknownPluginUsageRecord();
+    setPluginUsageField(record, path, value);
+    const detail = collectPluginDetail(record);
+    expect(detail.tokens.input_tokens).toBe(expectedInput);
+    if (name === 'missing observed total') expect(detail.tokens.total_tokens).toBe(193);
+  });
+
+  it('keeps the fallback when the matching total has no v2 markers', () => {
+    const record = unknownPluginUsageRecord();
+    delete record.accounting_version;
+    delete record.token_breakdown;
+    expect(collectPluginDetail(record).tokens.input_tokens).toBe(180);
+  });
+
+  for (const [group, keys] of Object.entries({
+    input: ['total_tokens', 'uncached_tokens', 'cache_read_tokens', 'cache_write_tokens'],
+    output: ['total_tokens', 'non_reasoning_tokens', 'reasoning_tokens'],
+  })) {
+    for (const key of keys) {
+      it(`rejects malformed ${group}.${key}`, () => {
+        for (const malformed of [undefined, null, true, '0', -1, 0.5, 2 ** 53, 999]) {
+          const record = unknownPluginUsageRecord();
+          setPluginUsageField(record, `token_breakdown.${group}.${key}`, malformed);
+          expect(collectPluginDetail(record).tokens.input_tokens).toBe(180);
+        }
+      });
+    }
+  }
+});
+
+describe('unknown plugin accounting sources and pricing', () => {
+  it.each([
+    'nested',
+    'nested detail',
+    'too deeply nested',
+    'conflicting markers',
+    'different source tokens',
+    'known source provider',
+    'known source display model',
+    'other source executor',
+    'explicit source mode',
+  ])('uses one complete source: %s', (kind) => {
+    const source = unknownPluginUsageRecord();
+    if (kind === 'different source tokens') setPluginUsageField(source, 'tokens.input_tokens', 101);
+    if (kind === 'known source provider') source.provider = 'anthropic';
+    if (kind === 'known source display model') {
+      source.resolved_model = 'opaque-model';
+      source.requested_model = 'opaque-model';
+      source.model = 'claude-sonnet';
+    }
+    if (kind === 'other source executor') source.executor_type = 'CustomExecutor';
+    if (kind === 'explicit source mode') source.usage = { cache_input_mode: 'separate_from_input' };
+    const record = unknownPluginUsageRecord();
+    delete record.accounting_version;
+    delete record.token_breakdown;
+    record.raw_json = JSON.stringify(
+      kind === 'nested detail'
+        ? { detail: source }
+        : kind === 'too deeply nested'
+          ? { detail: { raw_json: JSON.stringify(source) } }
+          : source
+    );
+    if (kind === 'conflicting markers') record.accounting_version = 3;
+    expect(collectPluginDetail(record).tokens.input_tokens).toBe(
+      kind === 'nested' || kind === 'nested detail' ? 100 : 180
+    );
+  });
+
+  it.each([
+    ['long deepseek example', 371500, 3300, 2722, 370000, 370000, 0, 370000],
+    ['legacy remainder and creation', 100, 10, 3, 80, 50, 10, 70],
+    ['creation only', 100, 10, 3, 0, 0, 80, 0],
+  ] as const)(
+    'normalizes %s',
+    (_name, input, output, reasoning, cached, read, creation, effectiveRead) => {
+      const record = unknownPluginUsageRecord();
+      record.tokens = {
+        input_tokens: input,
+        output_tokens: output,
+        reasoning_tokens: reasoning,
+        cached_tokens: cached,
+        cache_read_tokens: read,
+        cache_creation_tokens: creation,
+        total_tokens: input + output,
+      };
+      record.token_breakdown = {
+        schema_version: 2,
+        quality: 'complete',
+        total_tokens: input + output,
+        unclassified_tokens: 0,
+        input: {
+          total_tokens: input,
+          uncached_tokens: input - effectiveRead - creation,
+          cache_read_tokens: effectiveRead,
+          cache_write_tokens: creation,
+        },
+        output: {
+          total_tokens: output,
+          non_reasoning_tokens: output - reasoning,
+          reasoning_tokens: reasoning,
+        },
+      };
+      const detail = collectPluginDetail(record);
+      expect(detail.tokens.input_tokens).toBe(input);
+      expect(detail.tokens.total_tokens).toBe(input + output);
+      expect((detail.tokens.cached_tokens ?? 0) + (detail.tokens.cache_read_tokens ?? 0)).toBe(
+        effectiveRead
+      );
+    }
+  );
+
+  it('updates cost and cache hit rate using corrected total input', () => {
+    const detail = collectPluginDetail(unknownPluginUsageRecord());
+    expect(
+      calculateCacheHitRate({
+        inputTokens: detail.tokens.input_tokens,
+        cachedTokens: detail.tokens.cached_tokens,
+        cacheReadTokens: detail.tokens.cache_read_tokens,
+        cacheCreationTokens: detail.tokens.cache_creation_tokens,
+      })
+    ).toBe(0.8);
+    expect(
+      calculateCost(detail, {
+        'opaque-model': { prompt: 2, completion: 4, cache: 0.5, cacheRead: 0.5 },
+      })
+    ).toBeCloseTo(0.00012, 10);
+  });
+});
+
 describe('formatCompactNumber', () => {
   it('keeps large values compact across units and rounding boundaries', () => {
     expect(formatCompactNumber(0)).toBe('0');

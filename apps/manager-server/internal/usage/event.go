@@ -305,27 +305,163 @@ func ValidateArchiveDerivedFields(event Event) error {
 }
 
 func InferCacheInputMode(context CacheInputContext, cacheReadTokens, cacheCreationTokens int64) string {
-	mode := normalizeCacheInputMode(context.ExplicitMode)
-	if mode == CacheInputModeIncluded || mode == CacheInputModeSeparate || mode == CacheInputModeReadIncludedCreationSeparate {
+	if mode, known := classifyCacheInputMode(context); known {
 		return mode
-	}
-	if classified, ok := classifyExecutorCacheInputMode(context.ExecutorType); ok {
-		return classified
-	}
-	for _, provider := range []string{context.Provider, context.ProviderSnapshot} {
-		if classified, ok := classifyProviderCacheInputMode(provider); ok {
-			return classified
-		}
-	}
-	for _, model := range []string{context.ResolvedModel, context.RequestedModel, context.DisplayModel} {
-		if classified, ok := classifyModelCacheInputMode(model); ok {
-			return classified
-		}
 	}
 	if cacheReadTokens > 0 || cacheCreationTokens > 0 {
 		return CacheInputModeSeparate
 	}
 	return CacheInputModeIncluded
+}
+
+func classifyCacheInputMode(context CacheInputContext) (string, bool) {
+	mode := normalizeCacheInputMode(context.ExplicitMode)
+	if mode == CacheInputModeIncluded || mode == CacheInputModeSeparate || mode == CacheInputModeReadIncludedCreationSeparate {
+		return mode, true
+	}
+	if classified, ok := classifyExecutorCacheInputMode(context.ExecutorType); ok {
+		return classified, true
+	}
+	for _, provider := range []string{context.Provider, context.ProviderSnapshot} {
+		if classified, ok := classifyProviderCacheInputMode(provider); ok {
+			return classified, true
+		}
+	}
+	for _, model := range []string{context.ResolvedModel, context.RequestedModel, context.DisplayModel} {
+		if classified, ok := classifyModelCacheInputMode(model); ok {
+			return classified, true
+		}
+	}
+	return "", false
+}
+
+// reconcileUnknownPluginCacheAccounting only corrects the unknown-plugin
+// fallback when CPA's complete v2 breakdown explicitly describes subset input.
+// A matching total alone is insufficient evidence.
+func reconcileUnknownPluginCacheAccounting(context CacheInputContext, accounting CacheAccounting, record map[string]any, observedTotal int64) CacheAccounting {
+	if _, known := classifyCacheInputMode(context); known || accounting.Mode != CacheInputModeSeparate ||
+		strings.ToLower(strings.TrimSpace(context.ExecutorType)) != "executoradapter" {
+		return accounting
+	}
+	input, output, reasoning, _, _, _, _, _ := readTokenFields(record)
+	read, creation := accounting.CacheReadTokens, accounting.CacheCreationTokens
+	if !validPluginTokenFields(record) || read < 0 || creation < 0 || read > input || creation > input-read ||
+		(read == 0 && creation == 0) || reasoning > output || observedTotal <= 0 ||
+		observedTotal < input || observedTotal-input != output || observedTotal > 1<<53-1 {
+		return accounting
+	}
+	source := pluginCacheAccountingSource(record, 0)
+	if source == nil || !validPluginTokenFields(source) {
+		return accounting
+	}
+	sourceContext := CacheInputContext{
+		ExplicitMode:     cacheInputModeFromRecord(source),
+		ExecutorType:     readString(source, "executor_type", "executorType"),
+		Provider:         readString(source, "provider", "type", "auth_type", "authType"),
+		ProviderSnapshot: readString(source, "auth_provider_snapshot", "authProviderSnapshot"),
+		ResolvedModel:    readString(source, "resolved_model", "resolvedModel", "model"),
+		RequestedModel:   readString(source, "requested_model", "requestedModel", "alias"),
+		DisplayModel:     readString(source, "model", "model_name", "modelName"),
+	}
+	if _, known := classifyCacheInputMode(sourceContext); known ||
+		(sourceContext.ExecutorType != "" && normalizeCacheInputMode(sourceContext.ExecutorType) != "executoradapter") {
+		return accounting
+	}
+	si, so, sr, sc, sct, scr, scc, st := readTokenFields(source)
+	if si != input || so != output || sr != reasoning || st != observedTotal || scc != creation ||
+		CompatibleCachedTokens(sc, sct, scr, scc)+scr != read {
+		return accounting
+	}
+	version, ok := pluginTokenInteger(source["accounting_version"])
+	breakdown, hasBreakdown := source["token_breakdown"].(map[string]any)
+	if !ok || version != 2 || !hasBreakdown || breakdown["quality"] != "complete" {
+		return accounting
+	}
+	inputBreakdown, hasInput := breakdown["input"].(map[string]any)
+	outputBreakdown, hasOutput := breakdown["output"].(map[string]any)
+	if !hasInput || !hasOutput {
+		return accounting
+	}
+	for _, group := range []struct {
+		record map[string]any
+		want   map[string]int64
+	}{
+		{breakdown, map[string]int64{"schema_version": 2, "total_tokens": observedTotal, "unclassified_tokens": 0}},
+		{inputBreakdown, map[string]int64{"total_tokens": input, "uncached_tokens": input - read - creation, "cache_read_tokens": read, "cache_write_tokens": creation}},
+		{outputBreakdown, map[string]int64{"total_tokens": output, "non_reasoning_tokens": output - reasoning, "reasoning_tokens": reasoning}},
+	} {
+		for key, want := range group.want {
+			if value, valid := pluginTokenInteger(group.record[key]); !valid || value != want {
+				return accounting
+			}
+		}
+	}
+	accounting.Mode = CacheInputModeIncluded
+	accounting.TotalInputTokens = input
+	accounting.UncachedInputTokens = input - read - creation
+	return accounting
+}
+
+// Select one complete source; never combine partial markers across wrappers.
+func pluginCacheAccountingSource(record map[string]any, depth int) map[string]any {
+	if depth > 2 {
+		return nil
+	}
+	_, hasVersion := record["accounting_version"]
+	_, hasBreakdown := record["token_breakdown"]
+	if hasVersion || hasBreakdown {
+		return record
+	}
+	if detail, ok := record["detail"].(map[string]any); ok {
+		return pluginCacheAccountingSource(detail, depth+1)
+	}
+	if raw, ok := first(record, "raw_json", "rawJson").(string); ok {
+		var nested map[string]any
+		if decodeJSON([]byte(raw), &nested) == nil {
+			return pluginCacheAccountingSource(nested, depth+1)
+		}
+	}
+	return nil
+}
+
+func validPluginTokenFields(record map[string]any) bool {
+	records := []map[string]any{record}
+	for _, parent := range []string{"tokens", "usage"} {
+		if nested, ok := record[parent].(map[string]any); ok {
+			records = append(records, nested)
+		}
+	}
+	for _, fields := range records {
+		for key, value := range fields {
+			if strings.HasSuffix(key, "_tokens") || strings.HasSuffix(key, "Tokens") || key == "total" {
+				if _, ok := pluginTokenInteger(value); !ok {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+// Match the frontend's safe integer range and reject coercible malformed values.
+func pluginTokenInteger(value any) (int64, bool) {
+	var number float64
+	switch typed := value.(type) {
+	case float64:
+		number = typed
+	case json.Number:
+		var err error
+		number, err = typed.Float64()
+		if err != nil {
+			return 0, false
+		}
+	default:
+		return 0, false
+	}
+	if math.IsNaN(number) || math.IsInf(number, 0) || number < 0 || number > 1<<53-1 || math.Trunc(number) != number {
+		return 0, false
+	}
+	return int64(number), true
 }
 
 func normalizeCacheInputMode(mode string) string {
@@ -627,6 +763,7 @@ func NormalizeRaw(raw []byte) (Event, error) {
 	}
 	serviceTier := EffectiveServiceTier(usageContext, requestServiceTier, "", responseServiceTier)
 	cacheAccounting := NormalizeCacheAccounting(usageContext, inputTokens, cachedTokens, cacheTokens, cacheReadTokens, cacheCreationTokens)
+	cacheAccounting = reconcileUnknownPluginCacheAccounting(usageContext, cacheAccounting, record, totalTokens)
 	if totalTokens <= 0 {
 		totalTokens = cacheAccounting.TotalInputTokens + maxInt64(outputTokens, 0) + maxInt64(reasoningTokens, 0)
 	}

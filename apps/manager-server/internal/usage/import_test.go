@@ -105,6 +105,98 @@ func TestParseImportPayloadLegacyUsageExport(t *testing.T) {
 	}
 }
 
+func TestImportUnknownPluginCacheAccounting(t *testing.T) {
+	for _, format := range []string{"raw JSONL", "exported JSONL", "legacy details"} {
+		for _, proof := range []string{"complete", "missing", "nested", "nested total", "nested detail", "too deeply nested", "conflicting markers", "different source tokens", "known source provider", "known source display model", "other source executor", "explicit source mode"} {
+			t.Run(format+"/"+proof, func(t *testing.T) {
+				record := unknownPluginUsageRecord(t)
+				if proof != "complete" {
+					source := unknownPluginUsageRecord(t)
+					if proof == "different source tokens" {
+						source["tokens"].(map[string]any)["input_tokens"] = 101
+					}
+					if proof == "known source provider" {
+						source["provider"] = "anthropic"
+					}
+					if proof == "known source display model" {
+						source["resolved_model"], source["requested_model"], source["model"] = "opaque-model", "opaque-model", "claude-sonnet"
+					}
+					if proof == "other source executor" {
+						source["executor_type"] = "CustomExecutor"
+					}
+					if proof == "explicit source mode" {
+						source["usage"] = map[string]any{"cache_input_mode": CacheInputModeSeparate}
+					}
+					if proof == "nested detail" {
+						source = map[string]any{"detail": source}
+					}
+					if proof == "too deeply nested" {
+						inner, _ := json.Marshal(source)
+						source = map[string]any{"detail": map[string]any{"raw_json": string(inner)}}
+					}
+					raw, _ := json.Marshal(source)
+					delete(record, "accounting_version")
+					delete(record, "token_breakdown")
+					if proof != "missing" {
+						record["raw_json"] = string(raw)
+					}
+					if proof == "nested total" {
+						delete(record["tokens"].(map[string]any), "total_tokens")
+					}
+					if proof == "conflicting markers" {
+						record["accounting_version"] = 3
+					}
+				}
+				var payload any = record
+				if format == "exported JSONL" {
+					record["event_hash"] = "plugin-import-event"
+				}
+				if format == "legacy details" {
+					payload = map[string]any{"usage": map[string]any{"apis": map[string]any{"POST /v1/chat/completions": map[string]any{"models": map[string]any{"opaque-model": map[string]any{"details": []any{record}}}}}}}
+				}
+				data, _ := json.Marshal(payload)
+				result, err := ParseImportPayload(data)
+				if err != nil || len(result.Events) != 1 {
+					t.Fatalf("result=%+v err=%v", result, err)
+				}
+				want := CacheInputModeSeparate
+				if proof == "complete" || proof == "nested" || proof == "nested detail" || (proof == "nested total" && format == "exported JSONL") {
+					want = CacheInputModeIncluded
+				}
+				event := result.Events[0]
+				if event.CacheInputMode != want {
+					t.Fatalf("mode=%s, want %s", event.CacheInputMode, want)
+				}
+				if want == CacheInputModeIncluded && (event.NormalizedTotalInputTokens != 100 || event.NormalizedUncachedInputTokens != 20 || event.TotalTokens != 110) {
+					t.Fatalf("event=%+v", event)
+				}
+			})
+		}
+	}
+}
+
+func TestImportUnknownPluginArchivePreservesAccounting(t *testing.T) {
+	raw, _ := json.Marshal(unknownPluginUsageRecord(t))
+	record := minimalArchiveImportRecord("plugin-archive-preserve")
+	record["provider"], record["executor_type"], record["model"] = "commandcode", "executorAdapter", "opaque-model"
+	for key, value := range unknownPluginUsageRecord(t)["tokens"].(map[string]any) {
+		record[key] = value
+	}
+	record["raw_json"] = string(raw)
+	record["cache_input_mode"] = CacheInputModeSeparate
+	record["normalized_uncached_input_tokens"], record["normalized_total_input_tokens"] = 100, 180
+	record["normalized_cache_read_tokens"], record["normalized_cache_creation_tokens"] = 80, 0
+	data, _ := json.Marshal(record)
+	result, err := ParseImportPayload(data)
+	if err != nil || len(result.Events) != 1 {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	event := result.Events[0]
+	if !event.PreserveArchiveDerivedFields || event.CacheInputMode != CacheInputModeSeparate || event.NormalizedTotalInputTokens != 180 || event.NormalizedUncachedInputTokens != 100 || event.TotalTokens != 110 {
+		t.Fatalf("event=%+v", event)
+	}
+}
+
 func TestImportCacheAccountingUsesStructuredSemantics(t *testing.T) {
 	tests := []struct {
 		name        string

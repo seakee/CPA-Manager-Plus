@@ -1852,7 +1852,7 @@ func eventFromExportedRecord(record map[string]any) (Event, bool, error) {
 	if explicitMode == "" {
 		explicitMode = rawHints.ExplicitMode
 	}
-	accounting := NormalizeCacheAccounting(CacheInputContext{
+	usageContext := CacheInputContext{
 		ExplicitMode:     explicitMode,
 		ExecutorType:     executorType,
 		Provider:         provider,
@@ -1860,7 +1860,8 @@ func eventFromExportedRecord(record map[string]any) (Event, bool, error) {
 		ResolvedModel:    resolvedModel,
 		RequestedModel:   requestedModel,
 		DisplayModel:     model,
-	}, inputTokens, cachedTokens, cacheTokens, cacheReadTokens, cacheCreationTokens)
+	}
+	accounting := NormalizeCacheAccounting(usageContext, inputTokens, cachedTokens, cacheTokens, cacheReadTokens, cacheCreationTokens)
 	headerQuotaRecoverAtMS := readInt(record, "header_quota_recover_at_ms", "headerQuotaRecoverAtMs")
 	headerQuotaUsedPercent := readOptionalFloat(record, "header_quota_used_percent", "headerQuotaUsedPercent")
 	headerQuotaPlanType := readString(record, "header_quota_plan_type", "headerQuotaPlanType")
@@ -1884,6 +1885,7 @@ func eventFromExportedRecord(record map[string]any) (Event, bool, error) {
 		if totalTokens <= 0 && rawHints.HasExplicitTotal {
 			totalTokens = rawHints.ExplicitTotal
 		}
+		accounting = reconcileUnknownPluginCacheAccounting(usageContext, accounting, record, totalTokens)
 		if totalTokens <= 0 {
 			totalTokens = accounting.TotalInputTokens + maxInt64(outputTokens, 0) + maxInt64(reasoningTokens, 0)
 		}
@@ -2303,7 +2305,7 @@ func eventFromLegacyDetail(
 	if requestedModel != "" {
 		displayModel = requestedModel
 	}
-	accounting := NormalizeCacheAccounting(CacheInputContext{
+	usageContext := CacheInputContext{
 		ExplicitMode:     cacheInputModeFromRecord(detail),
 		ExecutorType:     executorType,
 		Provider:         provider,
@@ -2311,7 +2313,9 @@ func eventFromLegacyDetail(
 		ResolvedModel:    resolvedModel,
 		RequestedModel:   requestedModel,
 		DisplayModel:     displayModel,
-	}, inputTokens, cachedTokens, cacheTokens, cacheReadTokens, cacheCreationTokens)
+	}
+	accounting := NormalizeCacheAccounting(usageContext, inputTokens, cachedTokens, cacheTokens, cacheReadTokens, cacheCreationTokens)
+	accounting = reconcileUnknownPluginCacheAccounting(usageContext, accounting, detail, totalTokens)
 	if totalTokens <= 0 {
 		totalTokens = accounting.TotalInputTokens + maxInt64(outputTokens, 0) + maxInt64(reasoningTokens, 0)
 	}

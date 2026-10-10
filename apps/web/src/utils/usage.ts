@@ -566,15 +566,12 @@ const classifyModelCacheInputMode = (value: unknown): CacheInputMode | undefined
   return undefined;
 };
 
-export const inferCacheInputMode = (
-  context: CacheInputContext,
-  cacheReadTokens: number,
-  cacheCreationTokens: number
-): CacheInputMode => {
+const classifyCacheInputMode = (context: CacheInputContext): CacheInputMode | undefined => {
   const normalizedMode = normalizeCacheIdentity(context.explicitMode);
   if (normalizedMode === 'separate_from_input') return 'separate_from_input';
   if (normalizedMode === 'included_in_input') return 'included_in_input';
-  if (normalizedMode === 'read_included_creation_separate') return 'read_included_creation_separate';
+  if (normalizedMode === 'read_included_creation_separate')
+    return 'read_included_creation_separate';
   const executorMode = classifyExecutorCacheInputMode(context.executorType);
   if (executorMode) return executorMode;
   for (const provider of [context.provider, context.providerSnapshot]) {
@@ -585,6 +582,16 @@ export const inferCacheInputMode = (
     const modelMode = classifyModelCacheInputMode(model);
     if (modelMode) return modelMode;
   }
+  return undefined;
+};
+
+export const inferCacheInputMode = (
+  context: CacheInputContext,
+  cacheReadTokens: number,
+  cacheCreationTokens: number
+): CacheInputMode => {
+  const classified = classifyCacheInputMode(context);
+  if (classified) return classified;
   return cacheReadTokens > 0 || cacheCreationTokens > 0
     ? 'separate_from_input'
     : 'included_in_input';
@@ -625,6 +632,182 @@ export const normalizeCacheAccounting = (input: {
     cacheCreationTokens: creation,
     totalInputTokens,
     uncachedInputTokens,
+  };
+};
+
+const isPluginTokenInteger = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+
+const validPluginTokenFields = (record: Record<string, unknown>): boolean =>
+  [record, record.tokens, record.usage]
+    .filter(isRecord)
+    .every((fields) =>
+      Object.entries(fields).every(([key, value]) =>
+        key.endsWith('_tokens') || key.endsWith('Tokens') || key === 'total'
+          ? isPluginTokenInteger(value)
+          : true
+      )
+    );
+
+// Select one complete source; never combine partial markers across wrappers.
+const pluginCacheAccountingSource = (
+  record: Record<string, unknown>,
+  depth = 0
+): Record<string, unknown> | undefined => {
+  if (depth > 2) return undefined;
+  if ('accounting_version' in record || 'token_breakdown' in record) return record;
+  if (isRecord(record.detail)) return pluginCacheAccountingSource(record.detail, depth + 1);
+  const raw = record.raw_json ?? record.rawJson;
+  if (typeof raw === 'string') {
+    try {
+      const nested: unknown = JSON.parse(raw);
+      if (isRecord(nested)) return pluginCacheAccountingSource(nested, depth + 1);
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+};
+
+const readPluginSourceToken = (
+  record: Record<string, unknown>,
+  keys: readonly string[]
+): number => {
+  for (const fields of [record.tokens, record.usage, record]) {
+    if (!isRecord(fields)) continue;
+    const value = readFirstTokenNumber(fields, keys);
+    if (value !== 0) return value;
+  }
+  return 0;
+};
+
+// CPA's complete v2 breakdown must explicitly describe subset input. A matching
+// total alone never changes the unknown-provider fallback.
+const reconcileUnknownPluginCacheAccounting = (
+  context: CacheInputContext,
+  accounting: ReturnType<typeof normalizeCacheAccounting>,
+  record: Record<string, unknown>,
+  input: number,
+  output: number,
+  reasoning: number,
+  observedTotal: number
+): ReturnType<typeof normalizeCacheAccounting> => {
+  if (
+    classifyCacheInputMode(context) ||
+    accounting.mode !== 'separate_from_input' ||
+    normalizeCacheIdentity(context.executorType) !== 'executoradapter'
+  )
+    return accounting;
+  const read = accounting.legacyRead + accounting.cacheReadTokens;
+  const creation = accounting.cacheCreationTokens;
+  if (
+    !validPluginTokenFields(record) ||
+    ![input, output, reasoning, read, creation, observedTotal].every(isPluginTokenInteger) ||
+    read > input ||
+    creation > input - read ||
+    (read === 0 && creation === 0) ||
+    reasoning > output ||
+    observedTotal <= 0 ||
+    observedTotal < input ||
+    observedTotal - input !== output
+  )
+    return accounting;
+  const source = pluginCacheAccountingSource(record);
+  if (!source || !validPluginTokenFields(source)) return accounting;
+  const sourceExecutor = source.executor_type ?? source.executorType;
+  const sourceMode = [source.tokens, source.usage, source]
+    .filter(isRecord)
+    .map((fields) => normalizeCacheIdentity(fields.cache_input_mode ?? fields.cacheInputMode))
+    .find((mode) =>
+      ['included_in_input', 'separate_from_input', 'read_included_creation_separate'].includes(mode)
+    );
+  if (
+    classifyCacheInputMode({
+      explicitMode: sourceMode,
+      executorType: sourceExecutor,
+      provider: source.provider ?? source.type ?? source.auth_type ?? source.authType,
+      providerSnapshot: source.auth_provider_snapshot ?? source.authProviderSnapshot,
+      resolvedModel: source.resolved_model ?? source.resolvedModel ?? source.model,
+      requestedModel: source.requested_model ?? source.requestedModel ?? source.alias,
+      displayModel: source.model ?? source.model_name ?? source.modelName,
+    }) ||
+    (normalizeCacheIdentity(sourceExecutor) !== '' &&
+      normalizeCacheIdentity(sourceExecutor) !== 'executoradapter')
+  )
+    return accounting;
+  const sourceRead = readPluginSourceToken(source, CACHE_READ_TOKEN_KEYS);
+  const sourceCreation = readPluginSourceToken(source, CACHE_CREATION_TOKEN_KEYS);
+  const sourceCache =
+    compatibleCachedTokens(
+      readPluginSourceToken(source, ['cached_tokens', 'cachedTokens']),
+      readPluginSourceToken(source, ['cache_tokens', 'cacheTokens']),
+      sourceRead,
+      sourceCreation
+    ) + sourceRead;
+  if (
+    readPluginSourceToken(source, [
+      'input_tokens',
+      'inputTokens',
+      'prompt_tokens',
+      'promptTokens',
+    ]) !== input ||
+    readPluginSourceToken(source, [
+      'output_tokens',
+      'outputTokens',
+      'completion_tokens',
+      'completionTokens',
+    ]) !== output ||
+    readPluginSourceToken(source, ['reasoning_tokens', 'reasoningTokens']) !== reasoning ||
+    readPluginSourceToken(source, ['total_tokens', 'totalTokens', 'total']) !== observedTotal ||
+    sourceCache !== read ||
+    sourceCreation !== creation ||
+    source.accounting_version !== 2
+  )
+    return accounting;
+  const breakdown = source.token_breakdown;
+  if (
+    !isRecord(breakdown) ||
+    breakdown.quality !== 'complete' ||
+    !isRecord(breakdown.input) ||
+    !isRecord(breakdown.output)
+  )
+    return accounting;
+  const groups = [
+    {
+      fields: breakdown,
+      expected: { schema_version: 2, total_tokens: observedTotal, unclassified_tokens: 0 },
+    },
+    {
+      fields: breakdown.input,
+      expected: {
+        total_tokens: input,
+        uncached_tokens: input - read - creation,
+        cache_read_tokens: read,
+        cache_write_tokens: creation,
+      },
+    },
+    {
+      fields: breakdown.output,
+      expected: {
+        total_tokens: output,
+        non_reasoning_tokens: output - reasoning,
+        reasoning_tokens: reasoning,
+      },
+    },
+  ];
+  if (
+    !groups.every(({ fields, expected }) =>
+      Object.entries(expected).every(
+        ([key, value]) => isPluginTokenInteger(fields[key]) && fields[key] === value
+      )
+    )
+  )
+    return accounting;
+  return {
+    ...accounting,
+    mode: 'included_in_input',
+    totalInputTokens: input,
+    uncachedInputTokens: input - read - creation,
   };
 };
 
@@ -843,30 +1026,41 @@ const readTokens = (detail: Record<string, unknown>, modelName: string): UsageTo
   const tokensRaw = isRecord(detail.tokens) ? detail.tokens : {};
   const cacheReadTokens = readFirstTokenNumber(tokensRaw, CACHE_READ_TOKEN_KEYS);
   const cacheCreationTokens = readFirstTokenNumber(tokensRaw, CACHE_CREATION_TOKEN_KEYS);
-  const accounting = normalizeCacheAccounting({
-    context: {
-      explicitMode:
-        tokensRaw.cache_input_mode ??
-        tokensRaw.cacheInputMode ??
-        detail.cache_input_mode ??
-        detail.cacheInputMode,
-      executorType: detail.executor_type ?? detail.executorType,
-      provider: detail.provider,
-      providerSnapshot: detail.auth_provider_snapshot ?? detail.authProviderSnapshot,
-      resolvedModel: detail.resolved_model ?? detail.resolvedModel,
-      requestedModel: detail.requested_model ?? detail.requestedModel ?? detail.alias,
-      displayModel: modelName,
-    },
+  const context: CacheInputContext = {
+    explicitMode:
+      tokensRaw.cache_input_mode ??
+      tokensRaw.cacheInputMode ??
+      detail.cache_input_mode ??
+      detail.cacheInputMode,
+    executorType: detail.executor_type ?? detail.executorType,
+    provider: detail.provider,
+    providerSnapshot: detail.auth_provider_snapshot ?? detail.authProviderSnapshot,
+    resolvedModel: detail.resolved_model ?? detail.resolvedModel,
+    requestedModel: detail.requested_model ?? detail.requestedModel ?? detail.alias,
+    displayModel: modelName,
+  };
+  const rawInputTokens = toFiniteNumber(tokensRaw.input_tokens ?? tokensRaw.inputTokens);
+  const outputTokens = toFiniteNumber(tokensRaw.output_tokens ?? tokensRaw.outputTokens);
+  const reasoningTokens = toFiniteNumber(tokensRaw.reasoning_tokens ?? tokensRaw.reasoningTokens);
+  const explicitTotalTokens = toFiniteNumber(tokensRaw.total_tokens ?? tokensRaw.totalTokens);
+  let accounting = normalizeCacheAccounting({
+    context,
     inputTokens: tokensRaw.input_tokens ?? tokensRaw.inputTokens,
     cachedTokens: tokensRaw.cached_tokens ?? tokensRaw.cachedTokens,
     cacheTokens: tokensRaw.cache_tokens ?? tokensRaw.cacheTokens,
     cacheReadTokens,
     cacheCreationTokens,
   });
+  accounting = reconcileUnknownPluginCacheAccounting(
+    context,
+    accounting,
+    detail,
+    rawInputTokens,
+    outputTokens,
+    reasoningTokens,
+    explicitTotalTokens
+  );
   const inputTokens = accounting.totalInputTokens;
-  const outputTokens = toFiniteNumber(tokensRaw.output_tokens ?? tokensRaw.outputTokens);
-  const reasoningTokens = toFiniteNumber(tokensRaw.reasoning_tokens ?? tokensRaw.reasoningTokens);
-  const explicitTotalTokens = toFiniteNumber(tokensRaw.total_tokens ?? tokensRaw.totalTokens);
   const totalTokens =
     explicitTotalTokens > 0 ? explicitTotalTokens : inputTokens + outputTokens + reasoningTokens;
   return {

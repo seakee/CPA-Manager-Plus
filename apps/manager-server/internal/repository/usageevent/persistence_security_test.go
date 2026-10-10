@@ -93,6 +93,83 @@ func TestEventHashPersistenceBoundary(t *testing.T) {
 	}
 }
 
+func TestUnknownPluginCacheAccountingPersistenceAndExport(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repo := New(db)
+	ctx := context.Background()
+	event, err := usage.NormalizeRaw([]byte(`{
+		"timestamp":"2026-10-09T12:00:00Z","request_id":"plugin-persistence","endpoint":"POST /v1/chat/completions",
+		"provider":"commandcode","executor_type":"executorAdapter","model":"opaque-model",
+		"tokens":{"input_tokens":100,"output_tokens":10,"reasoning_tokens":3,"cached_tokens":80,"cache_read_tokens":80,"cache_creation_tokens":0,"total_tokens":110},
+		"accounting_version":2,"token_breakdown":{"schema_version":2,"quality":"complete","total_tokens":110,"unclassified_tokens":0,
+			"input":{"total_tokens":100,"uncached_tokens":20,"cache_read_tokens":80,"cache_write_tokens":0},
+			"output":{"total_tokens":10,"non_reasoning_tokens":7,"reasoning_tokens":3}}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inserted, err := repo.InsertBatch(ctx, []usage.Event{event})
+	if err != nil || inserted.Inserted != 1 {
+		t.Fatalf("insert=%+v err=%v", inserted, err)
+	}
+	var mode string
+	var input, uncached, total int64
+	err = db.QueryRowContext(ctx, `select cache_input_mode, normalized_total_input_tokens, normalized_uncached_input_tokens, total_tokens from usage_events where event_hash = ?`, event.EventHash).Scan(&mode, &input, &uncached, &total)
+	if err != nil || mode != usage.CacheInputModeIncluded || input != 100 || uncached != 20 || total != 110 {
+		t.Fatalf("mode=%s input=%d uncached=%d total=%d err=%v", mode, input, uncached, total, err)
+	}
+	filter := AnalyticsFilter{FromMS: event.TimestampMS - 1, ToMS: event.TimestampMS + 1, IncludeFailed: true}
+	page, err := repo.EventsPageWithFilter(ctx, filter, 0, 0, 10)
+	if err != nil || len(page.Items) != 1 {
+		t.Fatalf("page=%+v err=%v", page, err)
+	}
+	item := page.Items[0]
+	if item.InputTokens != 100 || item.TotalTokens != 110 || item.CacheReadTokens != 80 || item.ReasoningTokens != 3 {
+		t.Fatalf("item=%+v", item)
+	}
+	var compatible strings.Builder
+	if err := repo.WriteCompatibleUsage(ctx, &compatible, 10); err != nil {
+		t.Fatal(err)
+	}
+	compatibleImport, err := usage.ParseImportPayload([]byte(compatible.String()))
+	if err != nil || len(compatibleImport.Events) != 1 {
+		t.Fatalf("compatible import=%+v err=%v", compatibleImport, err)
+	}
+	compatibleEvent := compatibleImport.Events[0]
+	if compatibleEvent.CacheInputMode != usage.CacheInputModeIncluded || compatibleEvent.NormalizedTotalInputTokens != 100 || compatibleEvent.NormalizedUncachedInputTokens != 20 || compatibleEvent.TotalTokens != 110 {
+		t.Fatalf("compatible event=%+v", compatibleEvent)
+	}
+	exported, err := repo.ExportJSONL(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(exported), "raw_json") || strings.Contains(string(exported), "token_breakdown") {
+		t.Fatalf("export exposed raw accounting provenance: %s", exported)
+	}
+	restored, err := usage.ParseImportPayload(exported)
+	if err != nil || len(restored.Events) != 1 {
+		t.Fatalf("import=%+v err=%v", restored, err)
+	}
+	again := restored.Events[0]
+	// Existing JSONL exports omit both the mode and raw proof. Equality of the
+	// total alone must not cause reconciliation when that payload is imported.
+	if again.CacheInputMode != usage.CacheInputModeSeparate || again.NormalizedTotalInputTokens != 180 || again.NormalizedUncachedInputTokens != 100 || again.TotalTokens != 110 || again.EventHash != event.EventHash {
+		t.Fatalf("restored=%+v", again)
+	}
+	duplicate, err := repo.InsertBatch(ctx, restored.Events)
+	if err != nil || duplicate.Inserted != 0 || duplicate.Skipped != 1 {
+		t.Fatalf("duplicate=%+v err=%v", duplicate, err)
+	}
+	err = db.QueryRowContext(ctx, `select cache_input_mode, normalized_total_input_tokens, normalized_uncached_input_tokens, total_tokens from usage_events where event_hash = ?`, event.EventHash).Scan(&mode, &input, &uncached, &total)
+	if err != nil || mode != usage.CacheInputModeIncluded || input != 100 || uncached != 20 || total != 110 {
+		t.Fatalf("duplicate changed stored accounting: mode=%s input=%d uncached=%d total=%d err=%v", mode, input, uncached, total, err)
+	}
+}
+
 func TestSensitiveSourcePseudonymizationRoundTrip(t *testing.T) {
 	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
 	if err != nil {
