@@ -736,7 +736,7 @@ const isAccountQuotaRefreshLimitCurrent = (
   classifyAccountQuotaRefreshEvidence(row) === 'quota' &&
   !isAccountQuotaRefreshEvidenceSuperseded(row, requestEvidence);
 
-export const hasAccountQuotaLimitEvidence = (
+export const hasAccountNonSpendControlQuotaLimitEvidence = (
   row: AccountRow,
   requestEvidenceInput: AccountRequestEvidenceInput = {}
 ): boolean => {
@@ -746,7 +746,6 @@ export const hasAccountQuotaLimitEvidence = (
     classifyAccountObservedDiagnosticEvidence(row) === 'quota' ||
     isAccountQuotaRefreshLimitCurrent(row, requestHealthEvidence) ||
     Boolean(row.quota.rateLimitReachedType?.trim()) ||
-    row.quota.spendControlReached === true ||
     row.quota.creditsOverageLimitReached === true ||
     isAccountRequestQuotaEvidenceCurrent(
       row,
@@ -754,6 +753,13 @@ export const hasAccountQuotaLimitEvidence = (
     )
   );
 };
+
+export const hasAccountQuotaLimitEvidence = (
+  row: AccountRow,
+  requestEvidenceInput: AccountRequestEvidenceInput = {}
+): boolean =>
+  row.quota.spendControlReached === true ||
+  hasAccountNonSpendControlQuotaLimitEvidence(row, requestEvidenceInput);
 
 export const isAccountRequestHealthEvidenceCurrent = (
   row: AccountRow,

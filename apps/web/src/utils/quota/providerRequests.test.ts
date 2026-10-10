@@ -532,6 +532,70 @@ describe('fetchCodexQuota', () => {
     });
   });
 
+  it('rejects malformed legacy scalar spend-control limits', async () => {
+    mocks.request.mockResolvedValueOnce({
+      statusCode: 200,
+      hasStatusCode: true,
+      header: {},
+      bodyText: '',
+      body: {
+        spend_control: {
+          reached: true,
+          individual_limit: 'not-a-number',
+        },
+      },
+    });
+
+    const result = await fetchCodexQuotaSummary(
+      { name: 'codex-team.json', type: 'codex', authIndex: 'auth-team' },
+      t
+    );
+
+    expect(result.spendControlReached).toBe(true);
+    expect(result.spendControlIndividualLimit).toBeNull();
+  });
+
+  it('keeps structured spend-control metadata but rejects malformed amount fields', async () => {
+    mocks.request.mockResolvedValueOnce({
+      statusCode: 200,
+      hasStatusCode: true,
+      header: {},
+      bodyText: '',
+      body: {
+        spend_control: {
+          reached: true,
+          individual_limit: {
+            source: 'workspace_spend_controls',
+            unit: 'credit',
+            limit: 'not-a-number',
+            used: 'bad',
+            remaining: 'unknown',
+            used_percent: 100,
+            remaining_percent: 0,
+          },
+        },
+      },
+    });
+
+    const result = await fetchCodexQuotaSummary(
+      { name: 'codex-team.json', type: 'codex', authIndex: 'auth-team' },
+      t
+    );
+
+    expect(result.spendControlReached).toBe(true);
+    expect(result.spendControlIndividualLimit).toEqual({
+      source: 'workspace_spend_controls',
+      unit: 'credit',
+      limit: null,
+      used: null,
+      remaining: null,
+      usedPercent: 100,
+      remainingPercent: 0,
+      resetAfterSeconds: null,
+      resetAtMs: null,
+    });
+  });
+
   it('fails soft when Codex spend-control individual_limit has an unknown object shape', async () => {
     mocks.request.mockResolvedValueOnce({
       statusCode: 200,

@@ -453,8 +453,14 @@ const resolveCodexCreditsInfo = (payload: CodexUsagePayload) => {
   };
 };
 
+const normalizeCodexSpendControlAmount = (value: unknown): string | null => {
+  const normalized = normalizeStringValue(value);
+  if (normalized === null || !Number.isFinite(Number(normalized))) return null;
+  return normalized;
+};
+
 const normalizeCodexSpendControlLimit = (value: unknown): CodexSpendControlLimit | null => {
-  const legacyLimit = normalizeStringValue(value);
+  const legacyLimit = normalizeCodexSpendControlAmount(value);
   if (legacyLimit !== null) {
     return {
       source: null,
@@ -473,9 +479,9 @@ const normalizeCodexSpendControlLimit = (value: unknown): CodexSpendControlLimit
   const normalized: CodexSpendControlLimit = {
     source: normalizeStringValue(value.source),
     unit: normalizeStringValue(value.unit),
-    limit: normalizeStringValue(value.limit),
-    used: normalizeStringValue(value.used),
-    remaining: normalizeStringValue(value.remaining),
+    limit: normalizeCodexSpendControlAmount(value.limit),
+    used: normalizeCodexSpendControlAmount(value.used),
+    remaining: normalizeCodexSpendControlAmount(value.remaining),
     usedPercent: normalizeNumberValue(value.used_percent ?? value.usedPercent),
     remainingPercent: normalizeNumberValue(
       value.remaining_percent ?? value.remainingPercent

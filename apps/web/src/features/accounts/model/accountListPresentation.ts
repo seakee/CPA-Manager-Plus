@@ -25,6 +25,7 @@ import {
   getAccountRequestCredentialEvidence,
   getAccountRequestEvidenceDetail,
   getAccountRequestQuotaEvidenceDetail,
+  hasAccountNonSpendControlQuotaLimitEvidence,
   hasAccountQuotaLimitEvidence,
   isAccountCredentialQuotaLimitCurrent,
   isAccountCredentialStatusProblemCurrent,
@@ -241,9 +242,17 @@ const readSpendControlAmount = (value: string | null | undefined): number | null
   return Number.isFinite(numeric) ? numeric : null;
 };
 
-const isZeroSpendControlBudget = (row: AccountRow): boolean => {
+const hasCompleteSpendControlAmounts = (row: AccountRow): boolean => {
   const limit = row.quota.spendControlIndividualLimit;
   if (!limit) return false;
+  return [limit.limit, limit.used, limit.remaining]
+    .map(readSpendControlAmount)
+    .every((value) => value !== null);
+};
+
+const isZeroSpendControlBudget = (row: AccountRow): boolean => {
+  const limit = row.quota.spendControlIndividualLimit;
+  if (!limit || !hasCompleteSpendControlAmounts(row)) return false;
   return [limit.limit, limit.used, limit.remaining]
     .map(readSpendControlAmount)
     .every((value) => value === 0);
@@ -383,10 +392,11 @@ const isHeaderQuotaLimitEvidence = (row: AccountRow): boolean => {
 
 const getLimitedReasonKey = (
   row: AccountRow,
-  requestQuotaEvidence: AccountRequestQuotaEvidence | null = null
+  requestQuotaEvidence: AccountRequestQuotaEvidence | null = null,
+  hasNonSpendControlQuotaLimitEvidence = false
 ): string => {
   if (requestQuotaEvidence) return 'accounts.health_reason_limited_request';
-  if (row.quota.spendControlReached === true) {
+  if (row.quota.spendControlReached === true && !hasNonSpendControlQuotaLimitEvidence) {
     return isZeroSpendControlBudget(row)
       ? 'accounts.health_reason_limited_spend_control_zero_budget'
       : 'accounts.health_reason_limited_spend_control';
@@ -422,7 +432,8 @@ const getQuotaLimitDetail = (
 const getQuotaLimitTooltip = (
   row: AccountRow,
   requestQuotaEvidence: AccountRequestQuotaEvidence | null,
-  hasCurrentCredentialQuotaLimit: boolean
+  hasCurrentCredentialQuotaLimit: boolean,
+  hasNonSpendControlQuotaLimitEvidence: boolean
 ): Pick<HealthStatusResolution, 'tooltipKey' | 'tooltipParams'> => {
   if (requestQuotaEvidence) {
     return {
@@ -433,7 +444,10 @@ const getQuotaLimitTooltip = (
   if (row.quota.creditsOverageLimitReached === true) {
     return { tooltipKey: 'accounts.health_tip_limited_credits_overage', tooltipParams: {} };
   }
-  if (row.quota.spendControlReached === true) {
+  if (
+    row.quota.spendControlReached === true &&
+    !hasNonSpendControlQuotaLimitEvidence
+  ) {
     const limit = row.quota.spendControlIndividualLimit;
     if (isZeroSpendControlBudget(row)) {
       return {
@@ -441,7 +455,7 @@ const getQuotaLimitTooltip = (
         tooltipParams: {},
       };
     }
-    if (limit && limit.limit !== null && limit.used !== null && limit.remaining !== null) {
+    if (limit && hasCompleteSpendControlAmounts(row)) {
       return {
         tooltipKey: 'accounts.health_tip_limited_spend_control_detail',
         tooltipParams: {
@@ -802,6 +816,10 @@ const resolveHealthStatus = (
     ? resolvedRequestQuotaEvidence
     : null;
   const hasQuotaLimitEvidence = hasAccountQuotaLimitEvidence(row, requestEvidenceInput);
+  const hasNonSpendControlQuotaLimitEvidence = hasAccountNonSpendControlQuotaLimitEvidence(
+    row,
+    requestEvidenceInput
+  );
   const hasCredentialQuotaLimitEvidence = isAccountCredentialQuotaLimitCurrent(
     row,
     resolvedRequestEvidence
@@ -931,7 +949,7 @@ const resolveHealthStatus = (
       status: 'limited',
       tooltipKey: 'accounts.health_tip_limited',
       tooltipParams: { detail: getFirstDetail(row.quota.rateLimitReachedType, row.quota.error) },
-      reasonKey: getLimitedReasonKey(row),
+      reasonKey: getLimitedReasonKey(row, null, true),
       reasonTone: 'warning',
     };
   }
@@ -964,7 +982,7 @@ const resolveHealthStatus = (
       status: 'limited',
       tooltipKey: 'accounts.health_tip_limited',
       tooltipParams: { detail: getFirstDetail(row.quota.rateLimitReachedType, row.quota.error) },
-      reasonKey: getLimitedReasonKey(row),
+      reasonKey: getLimitedReasonKey(row, null, true),
       reasonTone: 'warning',
     };
   }
@@ -973,12 +991,17 @@ const resolveHealthStatus = (
     const tooltip = getQuotaLimitTooltip(
       row,
       requestQuotaEvidence,
-      hasCredentialQuotaLimitEvidence
+      hasCredentialQuotaLimitEvidence,
+      hasNonSpendControlQuotaLimitEvidence
     );
     return {
       status: 'limited',
       ...tooltip,
-      reasonKey: getLimitedReasonKey(row, requestQuotaEvidence),
+      reasonKey: getLimitedReasonKey(
+        row,
+        requestQuotaEvidence,
+        hasNonSpendControlQuotaLimitEvidence
+      ),
       reasonTone: 'warning',
       ...(requestQuotaEvidence
         ? {
@@ -1001,7 +1024,7 @@ const resolveHealthStatus = (
       tooltipParams: {
         detail: getFirstDetail(row.quota.rateLimitReachedType, row.quota.resetLabel),
       },
-      reasonKey: getLimitedReasonKey(row),
+      reasonKey: getLimitedReasonKey(row, null, true),
       reasonTone: 'warning',
     };
   }

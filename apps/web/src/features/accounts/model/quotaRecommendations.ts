@@ -1,10 +1,10 @@
 import type { AccountRow } from './accountRows';
 import {
   getAccountRequestCredentialEvidence,
+  hasAccountNonSpendControlQuotaLimitEvidence,
   hasAccountQuotaLimitEvidence,
   isAccountInspectionHealthyEvidence,
   isAccountRequestCredentialEvidenceCurrent,
-  isAccountRequestHealthEvidenceCurrent,
   resolveAccountAuthenticationProblemEvidence,
   resolveAccountExceptionProblemEvidence,
   resolveAccountRequestHealthEvidence,
@@ -57,15 +57,20 @@ export const isAccountRecommendationEvidenceSensitive = (
   recommendation !== undefined &&
   evidenceSensitiveRecommendationReasonKeys.has(recommendation.reasonKey);
 
+const isFiniteSpendControlAmount = (value: string | null | undefined): boolean => {
+  const normalized = value?.trim() ?? '';
+  return normalized !== '' && Number.isFinite(Number(normalized));
+};
+
 const hasResolvedSpendControlEvidence = (row: AccountRow): boolean => {
   const limit = row.quota.spendControlIndividualLimit;
   return (
     row.quota.spendControlReached === true &&
     limit !== null &&
     limit !== undefined &&
-    limit.limit !== null &&
-    limit.used !== null &&
-    limit.remaining !== null &&
+    isFiniteSpendControlAmount(limit.limit) &&
+    isFiniteSpendControlAmount(limit.used) &&
+    isFiniteSpendControlAmount(limit.remaining) &&
     typeof row.quota.fetchedAtMs === 'number' &&
     Number.isFinite(row.quota.fetchedAtMs)
   );
@@ -167,10 +172,7 @@ export const buildAccountRecommendation = (
 
   if (
     hasResolvedSpendControlEvidence(row) &&
-    !(
-      requestEvidence?.kind === 'quota' &&
-      isAccountRequestHealthEvidenceCurrent(row, requestEvidence)
-    )
+    !hasAccountNonSpendControlQuotaLimitEvidence(row, requestEvidenceInput)
   ) {
     return {
       row,

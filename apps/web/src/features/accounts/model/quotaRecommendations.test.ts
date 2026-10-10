@@ -59,6 +59,21 @@ const makeRow = (overrides: AccountRowOverrides = {}): AccountRow => {
   };
 };
 
+const spendControlLimit = (
+  overrides: Partial<NonNullable<AccountRow['quota']['spendControlIndividualLimit']>> = {}
+): NonNullable<AccountRow['quota']['spendControlIndividualLimit']> => ({
+  source: 'workspace_spend_controls',
+  unit: 'credit',
+  limit: '100',
+  used: '100',
+  remaining: '0',
+  usedPercent: 100,
+  remainingPercent: 0,
+  resetAfterSeconds: 3600,
+  resetAtMs: 1_793_491_200_000,
+  ...overrides,
+});
+
 describe('quotaRecommendations', () => {
   it('disables active exhausted accounts with critical priority', () => {
     const recommendation = buildAccountRecommendation(
@@ -512,6 +527,92 @@ describe('quotaRecommendations', () => {
           spendControlReached: true,
           fetchedAtMs: 2_000,
           spendControlIndividualLimit: null,
+        },
+      })
+    );
+
+    expect(recommendation).toMatchObject({
+      action: 'refresh',
+      priority: 'high',
+      reasonKey: 'accounts.recommend_reason_quota_limited',
+    });
+  });
+
+  it('keeps generic quota refresh when structured spend-control overlaps another quota limit', () => {
+    const rows = [
+      makeRow({
+        quota: {
+          spendControlReached: true,
+          creditsOverageLimitReached: true,
+          fetchedAtMs: 2_000,
+          spendControlIndividualLimit: spendControlLimit(),
+        },
+      }),
+      makeRow({
+        quota: {
+          spendControlReached: true,
+          rateLimitReachedType: 'primary',
+          fetchedAtMs: 2_000,
+          spendControlIndividualLimit: spendControlLimit(),
+        },
+      }),
+      makeRow({
+        statusMessage: 'quota exceeded',
+        updatedAtMs: 3_000,
+        quota: {
+          spendControlReached: true,
+          fetchedAtMs: 2_000,
+          spendControlIndividualLimit: spendControlLimit(),
+        },
+      }),
+    ];
+
+    rows.forEach((row) => {
+      expect(buildAccountRecommendation(row)).toMatchObject({
+        action: 'refresh',
+        priority: 'high',
+        reasonKey: 'accounts.recommend_reason_quota_limited',
+      });
+    });
+  });
+
+  it('keeps a newer request quota limit ahead of structured spend-control review', () => {
+    const recommendation = buildAccountRecommendation(
+      makeRow({
+        quota: {
+          spendControlReached: true,
+          fetchedAtMs: 2_000,
+          spendControlIndividualLimit: spendControlLimit(),
+        },
+      }),
+      {
+        latestRequest: {
+          timestamp_ms: 3_000,
+          failed: true,
+          fail_status_code: 429,
+          fail_summary: 'request quota limited',
+        },
+      }
+    );
+
+    expect(recommendation).toMatchObject({
+      action: 'refresh',
+      priority: 'high',
+      reasonKey: 'accounts.recommend_reason_quota_limited',
+    });
+  });
+
+  it('does not treat malformed spend-control amounts as resolved budget evidence', () => {
+    const recommendation = buildAccountRecommendation(
+      makeRow({
+        quota: {
+          spendControlReached: true,
+          fetchedAtMs: 2_000,
+          spendControlIndividualLimit: spendControlLimit({
+            limit: 'not-a-number',
+            used: 'bad',
+            remaining: 'unknown',
+          }),
         },
       })
     );
