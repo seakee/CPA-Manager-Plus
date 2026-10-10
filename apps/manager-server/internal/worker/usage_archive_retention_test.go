@@ -399,7 +399,9 @@ func TestUsageArchiveRetentionWorkerResumesPersistedStagesAfterStoreRestart(t *t
 				if _, err := fixture.store.UsageArchives.BeginDelete(ctx, fixture.runID, nowMS); err != nil {
 					t.Fatalf("begin delete: %v", err)
 				}
-				first, err := fixture.store.UsageArchives.DeleteBatch(ctx, fixture.runID, 1, nowMS+1, func(context.Context, usagearchive.Run, []usagearchive.Segment) error { return nil })
+				first, err := fixture.store.UsageArchives.DeleteBatch(ctx, fixture.runID, 1, nowMS+1, func(context.Context, usagearchive.Run, []usagearchive.Segment) (usagearchive.DeleteFileCheck, error) {
+					return func(context.Context) error { return nil }, nil
+				})
 				if err != nil {
 					t.Fatalf("delete first batch: %v", err)
 				}

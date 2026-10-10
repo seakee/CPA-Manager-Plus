@@ -1471,6 +1471,177 @@ func TestUsageArchiveServiceRejectsChecksumMismatch(t *testing.T) {
 	}
 }
 
+func TestUsageArchiveDeleteFileVerificationAllowsConcurrentWrites(t *testing.T) {
+	service, _, db, _, verified := newVerifiedArchiveDeleteTestService(t)
+	ctx := context.Background()
+	writer, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	if _, err := writer.ExecContext(ctx, `pragma busy_timeout = 0`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.ExecContext(ctx, `create table archive_verification_writer_test (id integer primary key)`); err != nil {
+		t.Fatal(err)
+	}
+	writes := 0
+	service.archive.testHook = func(point string) error {
+		if point != "delete_batch_files_verification_started" && point != "delete_batch_files_verified" {
+			return nil
+		}
+		writes++
+		_, err := writer.ExecContext(ctx, `insert into archive_verification_writer_test values (?)`, writes)
+		return err
+	}
+	completed, err := service.DeleteArchive(ctx, verified.Run.ID)
+	if err != nil || completed.Run.Status != usagearchive.StatusCompleted || completed.Run.DeletedEventCount != 4 || writes != 8 {
+		t.Fatalf("each batch's full verification must allow independent writes: run=%#v writes=%d err=%v", completed.Run, writes, err)
+	}
+}
+
+func TestUsageArchiveDeleteRejectsFilesChangedAfterContentVerification(t *testing.T) {
+	for _, damage := range []string{"missing manifest", "missing segment", "replace manifest", "replace segment", "in-place manifest", "in-place segment", "rewrite manifest", "rewrite segment"} {
+		t.Run(damage, func(t *testing.T) {
+			service, _, db, directory, verified := newVerifiedArchiveDeleteTestService(t)
+			name := verified.Run.ManifestFile
+			if strings.HasSuffix(damage, "segment") {
+				name = verified.Segments[len(verified.Segments)-1].FileName
+			}
+			file := filepath.Join(directory, filepath.FromSlash(name))
+			original, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			batches := 0
+			service.archive.testHook = func(point string) error {
+				if point != "delete_batch_files_verified" {
+					return nil
+				}
+				batches++
+				if batches != 2 {
+					return nil
+				}
+				switch {
+				case strings.HasPrefix(damage, "missing"):
+					return os.Remove(file)
+				case strings.HasPrefix(damage, "replace"):
+					replacement := file + ".replacement"
+					if err := os.WriteFile(replacement, original, 0o600); err != nil {
+						return err
+					}
+					if err := replaceArchiveFile(replacement, file); err != nil {
+						return err
+					}
+				default:
+					changed := append([]byte(nil), original...)
+					if strings.HasPrefix(damage, "in-place") {
+						changed[len(changed)/2] ^= 1
+					}
+					if err := os.WriteFile(file, changed, 0o600); err != nil {
+						return err
+					}
+				}
+				// Size and mtime alone must not let a changed file reuse the proof.
+				return os.Chtimes(file, info.ModTime(), info.ModTime())
+			}
+			if _, err := service.DeleteArchive(context.Background(), verified.Run.ID); err == nil {
+				t.Fatal("later batch accepted file evidence changed after content verification")
+			}
+			var raw, deleted, last int64
+			if err := db.QueryRow(`select (select count(*) from usage_events), deleted_event_count, last_deleted_event_id from usage_archive_runs where id = ?`, verified.Run.ID).Scan(&raw, &deleted, &last); err != nil {
+				t.Fatal(err)
+			}
+			if batches != 2 || raw != 3 || deleted != 1 || last != verified.Segments[0].FirstEventID {
+				t.Fatalf("changed proof advanced deletion: batches=%d raw=%d deleted=%d last=%d", batches, raw, deleted, last)
+			}
+			service.archive.testHook = nil
+			if err := os.WriteFile(file, original, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			completed, err := service.ResumeArchive(context.Background(), verified.Run.ID)
+			if err != nil || completed.Run.Status != usagearchive.StatusCompleted || completed.Run.DeletedEventCount != 4 {
+				t.Fatalf("fresh verification must allow recovery after restoring the file: run=%#v err=%v", completed.Run, err)
+			}
+		})
+	}
+}
+
+func TestUsageArchiveDeleteRollsBackFileChangeBeforeCommit(t *testing.T) {
+	service, st, db, directory, verified := newVerifiedArchiveDeleteTestService(t)
+	ctx := context.Background()
+	if _, err := st.UsageArchives.BeginDelete(ctx, verified.Run.ID, time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(directory, filepath.FromSlash(verified.Segments[0].FileName))
+	original, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checks := 0
+	_, err = st.UsageArchives.DeleteBatch(ctx, verified.Run.ID, 1, time.Now().UnixMilli(), func(ctx context.Context, run usagearchive.Run, segments []usagearchive.Segment) (usagearchive.DeleteFileCheck, error) {
+		check, err := service.archive.prepareDeleteFiles(ctx, run, segments)
+		if err != nil {
+			return nil, err
+		}
+		return func(ctx context.Context) error {
+			checks++
+			if checks == 2 {
+				if err := os.WriteFile(file, append(original, 'x'), 0o600); err != nil {
+					return err
+				}
+			}
+			return check(ctx)
+		}, nil
+	})
+	if err == nil || checks != 2 {
+		t.Fatalf("pre-commit file change must reject the batch: checks=%d err=%v", checks, err)
+	}
+	var raw, deleted, last, deletedRefs, deletedLedger, dailyCoverage int64
+	if err := db.QueryRow(`select
+		(select count(*) from usage_events), deleted_event_count, last_deleted_event_id,
+		(select count(*) from usage_archive_event_refs where raw_deleted_at_ms is not null),
+		(select count(*) from usage_event_identity_ledger where raw_event_id is null),
+		(select coalesce(sum(deleted_event_count), 0) from usage_archive_deleted_coverage_daily)
+		from usage_archive_runs where id = ?`, verified.Run.ID).Scan(&raw, &deleted, &last, &deletedRefs, &deletedLedger, &dailyCoverage); err != nil {
+		t.Fatal(err)
+	}
+	if raw != 4 || deleted != 0 || last != 0 || deletedRefs != 0 || deletedLedger != 0 || dailyCoverage != 0 {
+		t.Fatalf("file change must roll back the whole destructive batch: raw=%d deleted=%d last=%d refs=%d ledger=%d coverage=%d", raw, deleted, last, deletedRefs, deletedLedger, dailyCoverage)
+	}
+	if err := os.WriteFile(file, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := service.DeleteArchive(ctx, verified.Run.ID)
+	if err != nil || completed.Run.Status != usagearchive.StatusCompleted {
+		t.Fatalf("rollback must leave the delete run resumable: run=%#v err=%v", completed.Run, err)
+	}
+}
+
+func newVerifiedArchiveDeleteTestService(t *testing.T) (*Service, *store.Store, *sql.DB, string, ArchiveStatus) {
+	t.Helper()
+	service, st, db, directory := newRawArchiveTestService(t, 2, 1)
+	ctx := context.Background()
+	insertArchiveTestEvents(t, st, archiveTestServiceEvents(4))
+	catchUpUsageAggregate(t, st)
+	created, err := service.CreateArchive(ctx, 5_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ResumeArchive(ctx, created.Run.ID); err != nil {
+		t.Fatal(err)
+	}
+	verified, err := service.VerifyArchive(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return service, st, db, directory, verified
+}
+
 func TestUsageArchiveDeletionRevalidatesFilesBetweenCommittedBatches(t *testing.T) {
 	for _, damage := range []string{"missing manifest", "corrupt manifest", "missing next segment", "corrupt next segment"} {
 		t.Run(damage, func(t *testing.T) {
@@ -1556,7 +1727,7 @@ func TestUsageArchiveDeletionRevalidatesPublishedFiles(t *testing.T) {
 					if _, err := st.UsageArchives.BeginDelete(ctx, created.Run.ID, time.Now().UnixMilli()); err != nil {
 						t.Fatal(err)
 					}
-					batch, err := st.UsageArchives.DeleteBatch(ctx, created.Run.ID, 1, time.Now().UnixMilli(), func(context.Context, usagearchive.Run, []usagearchive.Segment) error { return nil })
+					batch, err := st.UsageArchives.DeleteBatch(ctx, created.Run.ID, 1, time.Now().UnixMilli(), service.archive.prepareDeleteFiles)
 					if err != nil || batch.Deleted != 1 {
 						t.Fatalf("initial delete batch = %#v, %v", batch, err)
 					}

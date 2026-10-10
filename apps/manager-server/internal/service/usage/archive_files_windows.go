@@ -4,9 +4,25 @@ package usage
 
 import (
 	"os"
+	"strconv"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
+
+// FILE_BASIC_INFO.ChangeTime is independent of LastWriteTime, so restoring
+// mtime cannot make an in-place edit reuse a previously verified witness.
+func archiveFileChangeStamp(file *os.File, _ os.FileInfo) (string, error) {
+	var basic struct {
+		CreationTime, LastAccessTime, LastWriteTime, ChangeTime int64
+		FileAttributes                                          uint32
+	}
+	if err := windows.GetFileInformationByHandleEx(windows.Handle(file.Fd()), windows.FileBasicInfo,
+		(*byte)(unsafe.Pointer(&basic)), uint32(unsafe.Sizeof(basic))); err != nil {
+		return "", err
+	}
+	return strconv.FormatInt(basic.ChangeTime, 10), nil
+}
 
 func replaceArchiveFile(from, to string) error {
 	fromPtr, err := windows.UTF16PtrFromString(from)

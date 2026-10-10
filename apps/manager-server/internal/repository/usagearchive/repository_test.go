@@ -256,7 +256,7 @@ func TestRepositoryArchiveVerifyResumeAndBoundedDelete(t *testing.T) {
 		t.Fatalf("begin delete: %v", err)
 	}
 
-	firstDelete, err := repository.DeleteBatch(ctx, run.ID, 1, 10_010, func(context.Context, Run, []Segment) error { return nil })
+	firstDelete, err := repository.DeleteBatch(ctx, run.ID, 1, 10_010, archiveTestFileVerifier)
 	if err != nil {
 		t.Fatalf("first delete batch: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestRepositoryArchiveVerifyResumeAndBoundedDelete(t *testing.T) {
 	if _, err := repository.BeginDelete(ctx, run.ID, 10_012); err != nil {
 		t.Fatalf("resume delete: %v", err)
 	}
-	secondDelete, err := repository.DeleteBatch(ctx, run.ID, 1, 10_013, func(context.Context, Run, []Segment) error { return nil })
+	secondDelete, err := repository.DeleteBatch(ctx, run.ID, 1, 10_013, archiveTestFileVerifier)
 	if err != nil {
 		t.Fatalf("second delete batch: %v", err)
 	}
@@ -562,7 +562,7 @@ func TestRepositoryCancelVerifiedRunIsRejectedAndCanDelete(t *testing.T) {
 	if err != nil || deleting.Status != StatusDeleting {
 		t.Fatalf("begin delete after rejected cancel: %v", err)
 	}
-	result, err := repository.DeleteBatch(ctx, run.ID, 10, 30_408, func(context.Context, Run, []Segment) error { return nil })
+	result, err := repository.DeleteBatch(ctx, run.ID, 10, 30_408, archiveTestFileVerifier)
 	if err != nil || result.Deleted != 1 || result.Run.Status != StatusCompleted {
 		t.Fatalf("delete batch after rejected cancel: result=%#v err=%v", result, err)
 	}
@@ -1320,7 +1320,7 @@ func TestRepositoryDeleteRejectsRawRowsRemovedOutsideMaintenance(t *testing.T) {
 	if _, err := db.Exec(`delete from usage_events where id = 1`); err != nil {
 		t.Fatalf("remove archived raw event outside maintenance: %v", err)
 	}
-	if _, err := repository.DeleteBatch(ctx, run.ID, 10, 30_001, func(context.Context, Run, []Segment) error { return nil }); !errors.Is(err, ErrCoverageIncomplete) {
+	if _, err := repository.DeleteBatch(ctx, run.ID, 10, 30_001, archiveTestFileVerifier); !errors.Is(err, ErrCoverageIncomplete) {
 		t.Fatalf("delete missing raw error = %v, want coverage incomplete", err)
 	}
 	var rawCount, deletedCount, deletedRefCount int64
@@ -1353,6 +1353,10 @@ func TestRepositoryDeleteRevalidatesOwnershipAndEvidenceBetweenBatches(t *testin
 		"lock owner":                 {`update usage_maintenance_locks set run_id = 'another-run'`, ErrMaintenanceLocked},
 		"lock operation":             {`update usage_maintenance_locks set operation = 'verifying'`, ErrMaintenanceLocked},
 		"manifest evidence":          {`update usage_archive_runs set manifest_sha256 = ''`, ErrCoverageIncomplete},
+		"manifest digest changed":    {`update usage_archive_runs set manifest_sha256 = 'another-valid-digest'`, ErrCoverageIncomplete},
+		"segment digest changed":     {`update usage_archive_segments set content_sha256 = 'another-valid-digest'`, ErrCoverageIncomplete},
+		"verified timestamp changed": {`update usage_archive_runs set verified_at_ms = verified_at_ms + 1`, ErrCoverageIncomplete},
+		"cutoff changed":             {`update usage_archive_runs set cutoff_timestamp_ms = cutoff_timestamp_ms + 1`, ErrCoverageIncomplete},
 		"segment verification":       {`update usage_archive_segments set status = 'published'`, ErrCoverageIncomplete},
 		"segment verification time":  {`update usage_archive_segments set verified_at_ms = null`, ErrCoverageIncomplete},
 		"segment count":              {`update usage_archive_segments set event_count = event_count + 1`, ErrCoverageIncomplete},
@@ -1378,12 +1382,16 @@ func TestRepositoryDeleteRevalidatesOwnershipAndEvidenceBetweenBatches(t *testin
 			if _, err := repository.BeginDelete(ctx, run.ID, 60_000); err != nil {
 				t.Fatal(err)
 			}
-			first, err := repository.DeleteBatch(ctx, run.ID, 1, 60_001, func(context.Context, Run, []Segment) error { return nil })
+			first, err := repository.DeleteBatch(ctx, run.ID, 1, 60_001, archiveTestFileVerifier)
 			if err != nil || first.Completed || first.Deleted != 1 {
 				t.Fatalf("first batch=%#v err=%v", first, err)
 			}
-			archiveTestExec(t, db, mutation.statement)
-			if _, err := repository.DeleteBatch(ctx, run.ID, 1, 60_002, func(context.Context, Run, []Segment) error { return nil }); !errors.Is(err, mutation.want) {
+			if _, err := repository.DeleteBatch(ctx, run.ID, 1, 60_002, func(ctx context.Context, run Run, segments []Segment) (DeleteFileCheck, error) {
+				// This write occurs after the next batch's snapshot was read and
+				// before it can take the delete transaction's write lock.
+				archiveTestExec(t, db, mutation.statement)
+				return archiveTestFileVerifier(ctx, run, segments)
+			}); !errors.Is(err, mutation.want) {
 				t.Fatalf("next destructive batch after %s: err=%v, want %v", name, err, mutation.want)
 			}
 			var rawCount, deletedCount, lastDeletedID int64
@@ -1397,6 +1405,51 @@ func TestRepositoryDeleteRevalidatesOwnershipAndEvidenceBetweenBatches(t *testin
 	}
 }
 
+func TestRepositoryDeleteFileVerificationDoesNotHoldWriteTransaction(t *testing.T) {
+	db, repository, run := prepareVerifiedArchiveRun(t, "short-delete-transaction")
+	ctx := context.Background()
+	writer, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	if _, err := writer.ExecContext(ctx, `pragma busy_timeout = 0`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.ExecContext(ctx, `create table delete_concurrent_write_test (id integer primary key)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.BeginDelete(ctx, run.ID, 60_000); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	result, err := repository.DeleteBatch(ctx, run.ID, 1, 60_001, func(context.Context, Run, []Segment) (DeleteFileCheck, error) {
+		called = true
+		_, err := writer.ExecContext(ctx, `insert into delete_concurrent_write_test values (1)`)
+		return func(context.Context) error { return nil }, err
+	})
+	if !called || err != nil || result.Deleted != 1 {
+		t.Fatalf("archive verification must allow another SQLite writer: called=%v result=%#v err=%v", called, result, err)
+	}
+}
+
+func TestRepositoryDeleteRejectsMissingFileVersionCheck(t *testing.T) {
+	db, repository, run := prepareVerifiedArchiveRun(t, "missing-file-version-check")
+	ctx := context.Background()
+	if _, err := repository.BeginDelete(ctx, run.ID, 60_000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.DeleteBatch(ctx, run.ID, 1, 60_001, func(context.Context, Run, []Segment) (DeleteFileCheck, error) {
+		return nil, nil
+	}); !errors.Is(err, ErrCoverageIncomplete) {
+		t.Fatalf("unbound file evidence = %v, want coverage incomplete", err)
+	}
+	var count int64
+	if err := db.QueryRow(`select count(*) from usage_events`).Scan(&count); err != nil || count != run.EventCount {
+		t.Fatalf("missing file check deleted raw history: count=%d err=%v", count, err)
+	}
+}
+
 func TestRepositoryDeleteRequiresFileVerifierAndRollsBackItsFailure(t *testing.T) {
 	for _, fail := range []bool{false, true} {
 		t.Run(fmt.Sprint(fail), func(t *testing.T) {
@@ -1405,15 +1458,15 @@ func TestRepositoryDeleteRequiresFileVerifierAndRollsBackItsFailure(t *testing.T
 			if _, err := repository.BeginDelete(ctx, run.ID, 60_000); err != nil {
 				t.Fatal(err)
 			}
-			var verifier func(context.Context, Run, []Segment) error
+			var verifier DeleteFileVerifier
 			want := error(ErrCoverageIncomplete)
 			if fail {
 				want = errors.New("archive file changed")
-				verifier = func(_ context.Context, current Run, segments []Segment) error {
+				verifier = func(_ context.Context, current Run, segments []Segment) (DeleteFileCheck, error) {
 					if current.ID != run.ID || current.Status != StatusDeleting || len(segments) != 1 {
-						t.Fatalf("verifier did not receive current transaction evidence: run=%#v segments=%#v", current, segments)
+						t.Fatalf("verifier did not receive current archive snapshot: run=%#v segments=%#v", current, segments)
 					}
-					return want
+					return nil, want
 				}
 			}
 			if _, err := repository.DeleteBatch(ctx, run.ID, 1, 60_001, verifier); !errors.Is(err, want) {
@@ -1450,7 +1503,7 @@ func TestRepositoryDeleteDoesNotRequireLegacyDashboardCheckpoint(t *testing.T) {
 			if _, err := repository.BeginDelete(ctx, run.ID, 50_009); err != nil {
 				t.Fatalf("begin delete with %s legacy dashboard checkpoint: %v", checkpointState, err)
 			}
-			first, err := repository.DeleteBatch(ctx, run.ID, 1, 50_010, func(context.Context, Run, []Segment) error { return nil })
+			first, err := repository.DeleteBatch(ctx, run.ID, 1, 50_010, archiveTestFileVerifier)
 			if err != nil {
 				t.Fatalf("first bounded delete: %v", err)
 			}
@@ -1460,7 +1513,7 @@ func TestRepositoryDeleteDoesNotRequireLegacyDashboardCheckpoint(t *testing.T) {
 			// Legacy state also remains irrelevant when a later batch rechecks readiness.
 			archiveTestExec(t, db, `delete from usage_rollup_checkpoints where name = ?`,
 				usagerollup.DashboardHourlyCheckpointName)
-			last, err := repository.DeleteBatch(ctx, run.ID, 1, 50_011, func(context.Context, Run, []Segment) error { return nil })
+			last, err := repository.DeleteBatch(ctx, run.ID, 1, 50_011, archiveTestFileVerifier)
 			if err != nil {
 				t.Fatalf("last bounded delete: %v", err)
 			}
@@ -1510,7 +1563,7 @@ func TestRepositoryDeleteRequiresCanonicalIdentityCoverage(t *testing.T) {
 				if stage == "begin" {
 					_, err = repository.BeginDelete(ctx, run.ID, 60_001)
 				} else {
-					_, err = repository.DeleteBatch(ctx, run.ID, 100, 60_001, func(context.Context, Run, []Segment) error { return nil })
+					_, err = repository.DeleteBatch(ctx, run.ID, 100, 60_001, archiveTestFileVerifier)
 				}
 				if !errors.Is(err, ErrCoverageIncomplete) {
 					t.Fatalf("incomplete canonical coverage error=%v", err)
@@ -1808,12 +1861,14 @@ func TestRepositoryDeleteRequiresEveryCurrentDerivedCoverageGate(t *testing.T) {
 			if _, err := repository.BeginDelete(context.Background(), run.ID, 40_001); err != nil {
 				t.Fatalf("begin delete after restoring %s: %v", test.name, err)
 			}
-			first, err := repository.DeleteBatch(context.Background(), run.ID, 1, 40_002, func(context.Context, Run, []Segment) error { return nil })
+			first, err := repository.DeleteBatch(context.Background(), run.ID, 1, 40_002, archiveTestFileVerifier)
 			if err != nil || first.Deleted != 1 || first.Completed {
 				t.Fatalf("first committed batch: result=%#v err=%v", first, err)
 			}
-			restore = test.mutate(t, db, run)
-			if _, err := repository.DeleteBatch(context.Background(), run.ID, 100, 40_002, func(context.Context, Run, []Segment) error { return nil }); !errors.Is(err, ErrCoverageIncomplete) {
+			if _, err := repository.DeleteBatch(context.Background(), run.ID, 100, 40_002, func(ctx context.Context, current Run, segments []Segment) (DeleteFileCheck, error) {
+				restore = test.mutate(t, db, run)
+				return archiveTestFileVerifier(ctx, current, segments)
+			}); !errors.Is(err, ErrCoverageIncomplete) {
 				t.Fatalf("delete batch with broken %s error = %v, want coverage incomplete", test.name, err)
 			}
 			var rawCount int64
@@ -1828,7 +1883,7 @@ func TestRepositoryDeleteRequiresEveryCurrentDerivedCoverageGate(t *testing.T) {
 				t.Fatalf("rejected later batch changed delete checkpoint: run=%#v err=%v", persisted, err)
 			}
 			restore()
-			result, err := repository.DeleteBatch(context.Background(), run.ID, 100, 40_003, func(context.Context, Run, []Segment) error { return nil })
+			result, err := repository.DeleteBatch(context.Background(), run.ID, 100, 40_003, archiveTestFileVerifier)
 			if err != nil || !result.Completed || result.Run.DeletedEventCount != run.EventCount {
 				t.Fatalf("delete batch after restoring %s: result=%#v err=%v", test.name, result, err)
 			}
@@ -1908,7 +1963,7 @@ func TestRepositoryDeleteAllowsPricingSQLiteBusyAfterCommittedCoverage(t *testin
 	if _, err := repository.BeginDelete(ctx, run.ID, 60_001); err != nil {
 		t.Fatalf("begin delete after covered sqlite busy: %v", err)
 	}
-	result, err := repository.DeleteBatch(ctx, run.ID, 100, 60_002, func(context.Context, Run, []Segment) error { return nil })
+	result, err := repository.DeleteBatch(ctx, run.ID, 100, 60_002, archiveTestFileVerifier)
 	if err != nil {
 		t.Fatalf("delete after covered sqlite busy: %v", err)
 	}
@@ -1955,6 +2010,12 @@ func TestRepositoryDeleteRejectsFailedPricingAfterNonTransientCatchUpError(t *te
 	if rawCount != 3 {
 		t.Fatalf("raw events after rejected delete = %d, want 3", rawCount)
 	}
+}
+
+// Repository fixtures exercise database gates without real filesystem contents.
+// Service tests use the production verifier and its per-batch file-version checks.
+func archiveTestFileVerifier(context.Context, Run, []Segment) (DeleteFileCheck, error) {
+	return func(context.Context) error { return nil }, nil
 }
 
 func prepareVerifiedArchiveRun(t *testing.T, runID string) (*sql.DB, *Repository, Run) {

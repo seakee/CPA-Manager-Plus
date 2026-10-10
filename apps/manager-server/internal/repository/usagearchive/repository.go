@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"slices"
 	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/datamigration"
@@ -1219,11 +1220,19 @@ func (r *Repository) MarkVerified(ctx context.Context, runID string, nowMS int64
 	return r.Run(ctx, runID)
 }
 
-// DeleteBatch rechecks database and archive-file evidence under the same SQLite
-// write transaction before each bounded delete. verifyFiles must only read files;
-// it must not reenter the database or publish progress while the transaction owns it.
-func (r *Repository) DeleteBatch(ctx context.Context, runID string, limit int, nowMS int64, verifyFiles func(context.Context, Run, []Segment) error) (DeleteBatchResult, error) {
-	if verifyFiles == nil {
+// DeleteFileCheck only rechecks file identity/version metadata. It must not hash,
+// decompress, parse archive contents, reenter SQLite, or publish progress.
+type DeleteFileCheck func(context.Context) error
+
+// DeleteFileVerifier fully verifies the supplied archive outside a transaction
+// and returns a cheap check bound to those exact files for this batch only.
+type DeleteFileVerifier func(context.Context, Run, []Segment) (DeleteFileCheck, error)
+
+// DeleteBatch verifies files before taking the SQLite write lock. Inside the
+// transaction it rechecks every database safety gate, binds the verified snapshot
+// to current evidence, and checks file versions before deleting and committing.
+func (r *Repository) DeleteBatch(ctx context.Context, runID string, limit int, nowMS int64, prepareFiles DeleteFileVerifier) (DeleteBatchResult, error) {
+	if prepareFiles == nil {
 		return DeleteBatchResult{}, fmt.Errorf("%w: archive file verifier is required", ErrCoverageIncomplete)
 	}
 	if limit <= 0 {
@@ -1231,6 +1240,24 @@ func (r *Repository) DeleteBatch(ctx context.Context, runID string, limit int, n
 	}
 	if nowMS <= 0 {
 		return DeleteBatchResult{}, fmt.Errorf("nowMS must be greater than zero")
+	}
+	verifiedRun, err := r.Run(ctx, runID)
+	if err != nil {
+		return DeleteBatchResult{}, err
+	}
+	verifiedSegments, err := r.Segments(ctx, runID)
+	if err != nil {
+		return DeleteBatchResult{}, err
+	}
+	if err := validateDeleteArchiveEvidence(verifiedRun, verifiedSegments); err != nil {
+		return DeleteBatchResult{}, err
+	}
+	checkFiles, err := prepareFiles(ctx, verifiedRun, slices.Clone(verifiedSegments))
+	if err != nil {
+		return DeleteBatchResult{}, fmt.Errorf("revalidate usage archive before raw cleanup batch: %w", err)
+	}
+	if checkFiles == nil {
+		return DeleteBatchResult{}, fmt.Errorf("%w: archive file version check is required", ErrCoverageIncomplete)
 	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1271,8 +1298,11 @@ func (r *Repository) DeleteBatch(ctx context.Context, runID string, limit int, n
 	if err := validateDeleteArchiveEvidence(run, segments); err != nil {
 		return DeleteBatchResult{}, err
 	}
-	if err := verifyFiles(ctx, run, segments); err != nil {
-		return DeleteBatchResult{}, fmt.Errorf("revalidate usage archive before raw cleanup batch: %w", err)
+	if deleteEvidenceRun(run) != deleteEvidenceRun(verifiedRun) || !slices.Equal(segments, verifiedSegments) {
+		return DeleteBatchResult{}, fmt.Errorf("%w: archive evidence changed during file verification", ErrCoverageIncomplete)
+	}
+	if err := checkFiles(ctx); err != nil {
+		return DeleteBatchResult{}, fmt.Errorf("recheck usage archive files before raw cleanup batch: %w", err)
 	}
 	rows, err := tx.QueryContext(ctx, `select e.id, archived.event_hash, e.timestamp_ms
 	from usage_events e
@@ -1447,6 +1477,9 @@ func (r *Repository) DeleteBatch(ctx context.Context, runID string, limit int, n
 			return DeleteBatchResult{}, err
 		}
 	}
+	if err := checkFiles(ctx); err != nil {
+		return DeleteBatchResult{}, fmt.Errorf("recheck usage archive files before raw cleanup commit: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return DeleteBatchResult{}, err
 	}
@@ -1455,6 +1488,15 @@ func (r *Repository) DeleteBatch(ctx context.Context, runID string, limit int, n
 		return DeleteBatchResult{}, err
 	}
 	return DeleteBatchResult{Deleted: len(candidates), LastID: lastID, Completed: completed, Run: updated}, nil
+}
+
+// Progress writes may occur during file verification. Only telemetry is excluded;
+// archive identity, authorization, verification and deletion checkpoints must match.
+func deleteEvidenceRun(run Run) Run {
+	run.UpdatedAtMS = 0
+	run.ProgressPhase, run.ProgressUnit, run.LastError = "", "", ""
+	run.ProgressCurrent, run.ProgressTotal, run.ProgressUpdatedAtMS = 0, 0, 0
+	return run
 }
 
 func (r *Repository) RecordFailure(ctx context.Context, runID, resumeStatus string, failure error, nowMS int64) (Run, error) {

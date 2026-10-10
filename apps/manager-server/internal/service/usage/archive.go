@@ -1061,10 +1061,7 @@ func (m *archiveManager) deleteLocked(ctx context.Context, runID string) (Archiv
 		if err := ctx.Err(); err != nil {
 			return ArchiveStatus{}, m.recordFailure(ctx, run.ID, usagearchive.StatusDeleting, err)
 		}
-		result, err := m.store.UsageArchives.DeleteBatch(ctx, run.ID, m.config.DeleteBatchSize, time.Now().UnixMilli(),
-			func(ctx context.Context, current store.UsageArchiveRun, segments []store.UsageArchiveSegment) error {
-				return m.verifyManifestFiles(ctx, current, segments, false)
-			})
+		result, err := m.store.UsageArchives.DeleteBatch(ctx, run.ID, m.config.DeleteBatchSize, time.Now().UnixMilli(), m.prepareDeleteFiles)
 		if err != nil {
 			return ArchiveStatus{}, m.recordFailure(ctx, run.ID, usagearchive.StatusDeleting, err)
 		}
@@ -1281,6 +1278,80 @@ func (m *archiveManager) writeManifest(runID string, manifest ArchiveManifest) (
 	}
 	digest := sha256.Sum256(payload)
 	return relativeName, hex.EncodeToString(digest[:]), nil
+}
+
+type archiveFileVersion struct {
+	name        string
+	info        os.FileInfo
+	changeStamp string
+}
+
+func (m *archiveManager) archiveFileVersion(name string) (archiveFileVersion, error) {
+	path, err := m.resolveArchivePath(name)
+	if err != nil {
+		return archiveFileVersion{}, err
+	}
+	file, info, err := openPrivateRegularFile(m.config.Directory, path)
+	if err != nil {
+		return archiveFileVersion{}, err
+	}
+	defer file.Close()
+	stamp, err := archiveFileChangeStamp(file, info)
+	if err != nil {
+		return archiveFileVersion{}, err
+	}
+	return archiveFileVersion{name: name, info: info, changeStamp: stamp}, nil
+}
+
+// Every batch gets fresh content verification outside SQLite. The resulting
+// file-version witness lives only until that batch commits; it is not a cache.
+func (m *archiveManager) prepareDeleteFiles(ctx context.Context, run store.UsageArchiveRun, segments []store.UsageArchiveSegment) (usagearchive.DeleteFileCheck, error) {
+	versions := make([]archiveFileVersion, 0, len(segments)+1)
+	names := make([]string, 0, len(segments)+1)
+	names = append(names, run.ManifestFile)
+	for _, segment := range segments {
+		names = append(names, segment.FileName)
+	}
+	for _, name := range names {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		version, err := m.archiveFileVersion(name)
+		if err != nil {
+			return nil, err
+		}
+		versions = append(versions, version)
+	}
+	check := func(ctx context.Context) error {
+		for _, verified := range versions {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			current, err := m.archiveFileVersion(verified.name)
+			if err != nil {
+				return err
+			}
+			if !os.SameFile(verified.info, current.info) || verified.info.Size() != current.info.Size() ||
+				verified.info.Mode() != current.info.Mode() || !verified.info.ModTime().Equal(current.info.ModTime()) ||
+				verified.changeStamp != current.changeStamp {
+				return fmt.Errorf("%w: archive file changed after content verification", ErrArchiveCoverageIncomplete)
+			}
+		}
+		return nil
+	}
+	if err := m.callTestHook("delete_batch_files_verification_started"); err != nil {
+		return nil, err
+	}
+	if err := m.verifyManifestFiles(ctx, run, segments, false); err != nil {
+		return nil, err
+	}
+	if err := check(ctx); err != nil {
+		return nil, err
+	}
+	if err := m.callTestHook("delete_batch_files_verified"); err != nil {
+		return nil, err
+	}
+	return check, nil
 }
 
 func (m *archiveManager) verifyManifest(ctx context.Context, run store.UsageArchiveRun, segments []store.UsageArchiveSegment, progress ...archiveSegmentProgressFunc) error {
