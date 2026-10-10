@@ -11,6 +11,7 @@ import type {
   ClaudeUsagePayload,
   CodexRateLimitResetCredit,
   CodexQuotaWindow,
+  CodexSpendControlLimit,
   CodexUsagePayload,
   DevinQuotaData,
   KimiQuotaRow,
@@ -107,7 +108,7 @@ export type CodexQuotaData = {
   creditsApproxLocalMessages?: number | null;
   creditsApproxCloudMessages?: number | null;
   spendControlReached?: boolean | null;
-  spendControlIndividualLimit?: number | null;
+  spendControlIndividualLimit?: CodexSpendControlLimit | null;
   rateLimitResetCreditsAvailableCount: number | null;
   resetCreditsCountSource?: 'summary' | 'dedicated';
   rateLimitResetCredits: CodexRateLimitResetCredit[];
@@ -452,11 +453,53 @@ const resolveCodexCreditsInfo = (payload: CodexUsagePayload) => {
   };
 };
 
+const normalizeCodexSpendControlAmount = (value: unknown): string | null => {
+  const normalized = normalizeStringValue(value);
+  if (normalized === null || !Number.isFinite(Number(normalized))) return null;
+  return normalized;
+};
+
+const normalizeCodexSpendControlLimit = (value: unknown): CodexSpendControlLimit | null => {
+  const legacyLimit = normalizeCodexSpendControlAmount(value);
+  if (legacyLimit !== null) {
+    return {
+      source: null,
+      unit: null,
+      limit: legacyLimit,
+      used: null,
+      remaining: null,
+      usedPercent: null,
+      remainingPercent: null,
+      resetAfterSeconds: null,
+      resetAtMs: null,
+    };
+  }
+  if (!isRecord(value)) return null;
+
+  const normalized: CodexSpendControlLimit = {
+    source: normalizeStringValue(value.source),
+    unit: normalizeStringValue(value.unit),
+    limit: normalizeCodexSpendControlAmount(value.limit),
+    used: normalizeCodexSpendControlAmount(value.used),
+    remaining: normalizeCodexSpendControlAmount(value.remaining),
+    usedPercent: normalizeNumberValue(value.used_percent ?? value.usedPercent),
+    remainingPercent: normalizeNumberValue(
+      value.remaining_percent ?? value.remainingPercent
+    ),
+    resetAfterSeconds: normalizeNumberValue(
+      value.reset_after_seconds ?? value.resetAfterSeconds
+    ),
+    resetAtMs: resolveAbsoluteQuotaReset(value.reset_at ?? value.resetAt).resetAtMs,
+  };
+
+  return Object.values(normalized).some((item) => item !== null) ? normalized : null;
+};
+
 const resolveCodexSpendControlInfo = (payload: CodexUsagePayload) => {
   const spendControl = payload.spend_control ?? payload.spendControl;
   return {
     spendControlReached: normalizeBooleanValue(spendControl?.reached),
-    spendControlIndividualLimit: normalizeNumberValue(
+    spendControlIndividualLimit: normalizeCodexSpendControlLimit(
       spendControl?.individual_limit ?? spendControl?.individualLimit
     ),
   };

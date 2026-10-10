@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { AuthFileItem, CodexQuotaState } from '@/types';
+import type { AuthFileItem, CodexQuotaState, CodexSpendControlLimit } from '@/types';
 import {
   buildInspectionCodexQuotaState,
   getAccountCredentialEvidenceCutoffs,
@@ -17,6 +17,21 @@ const file: AuthFileItem = {
   provider: 'codex',
   authIndex: 'codex-1',
 };
+
+const spendControlLimit = (
+  overrides: Partial<CodexSpendControlLimit> = {}
+): CodexSpendControlLimit => ({
+  source: 'workspace_spend_controls',
+  unit: 'credit',
+  limit: '200',
+  used: '20',
+  remaining: '180',
+  usedPercent: 10,
+  remainingPercent: 90,
+  resetAfterSeconds: 3600,
+  resetAtMs: 3_600_000,
+  ...overrides,
+});
 
 const inspection = (
   overrides: Partial<AccountInspectionSummary> = {}
@@ -129,7 +144,7 @@ describe('confirmed reauth Codex quota state merge', () => {
         creditsApproxLocalMessages: 24,
         creditsApproxCloudMessages: 12,
         spendControlReached: true,
-        spendControlIndividualLimit: 200,
+        spendControlIndividualLimit: spendControlLimit(),
         primaryOverSecondaryLimitPercent: 100,
         rateLimitResetCreditsAvailableCount: 2,
         rateLimitResetCredits: [
@@ -218,7 +233,7 @@ describe('confirmed reauth Codex quota state merge', () => {
       providerQuota({
         planType: 'team',
         creditsBalance: '100',
-        spendControlIndividualLimit: 200,
+        spendControlIndividualLimit: spendControlLimit(),
         rateLimitResetCreditsAvailableCount: 2,
         rateLimitResetCredits: [
           {
@@ -620,7 +635,13 @@ describe('confirmed reauth Codex quota state merge', () => {
         activeLimit: 'secondary',
         creditsOverageLimitReached: true,
         spendControlReached: true,
-        spendControlIndividualLimit: 100,
+        spendControlIndividualLimit: spendControlLimit({
+          limit: '100',
+          used: '100',
+          remaining: '0',
+          usedPercent: 100,
+          remainingPercent: 0,
+        }),
         rateLimitReachedType: 'secondary',
         primaryOverSecondaryLimitPercent: 100,
         observedFromUsageHeaders: true,

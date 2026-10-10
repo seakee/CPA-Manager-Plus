@@ -4961,21 +4961,21 @@ const buildDemoInspectionResults = (baseNow: number): CodexInspectionResult[] =>
     actionReason: 'monitoring.codex_inspection_reason_healthy',
     actionStatus: 'none',
     statusCode: 200,
-    usedPercent: 42,
+    usedPercent: 9,
     isQuota: false,
     planType: 'team',
     quotaWindows: [
       {
         id: 'five-hour',
         labelKey: 'codex_quota.primary_window',
-        usedPercent: 63,
+        usedPercent: 55,
         resetLabel: '2h 18m',
         limitWindowSeconds: 18000,
       },
       {
         id: 'weekly',
         labelKey: 'codex_quota.secondary_window',
-        usedPercent: 42,
+        usedPercent: 9,
         resetLabel: '2d 20h',
         limitWindowSeconds: 604800,
       },
@@ -6210,6 +6210,21 @@ const getDemoQuotaStoreStateByFileName = (
       fetchedAtMs: baseNow - 5 * minute,
       resetCreditsEvidenceAtMs: baseNow - 5 * minute,
       subscriptionActiveUntil: demoResetIso(23 * day, baseNow),
+      creditsHasCredits: false,
+      creditsUnlimited: false,
+      creditsOverageLimitReached: false,
+      spendControlReached: true,
+      spendControlIndividualLimit: {
+        source: 'workspace_spend_controls',
+        unit: 'credit',
+        limit: '0',
+        used: '0.0',
+        remaining: '0.0',
+        usedPercent: 100,
+        remainingPercent: 0,
+        resetAfterSeconds: (22 * day) / 1000,
+        resetAtMs: baseNow + 22 * day,
+      },
       rateLimitResetCreditsAvailableCount: 2,
       rateLimitResetCredits: [
         {
@@ -6229,14 +6244,14 @@ const getDemoQuotaStoreStateByFileName = (
         {
           id: 'five-hour',
           label: '5 小时限额',
-          usedPercent: 36,
+          usedPercent: 55,
           ...demoQuotaReset(2 * hour + 18 * minute, baseNow),
           limitWindowSeconds: 18_000,
         },
         {
           id: 'weekly',
           label: '周限额',
-          usedPercent: 41,
+          usedPercent: 9,
           ...demoQuotaReset(3 * day + 8 * hour, baseNow),
           limitWindowSeconds: 604_800,
         },
@@ -7409,6 +7424,7 @@ export const getDemoApiCallResult = (payload: DemoApiCallPayload = {}) => {
   const requestUrl = String(payload.url || '');
   const authIndex = String(payload.authIndex || '');
   const isCodexUpgrade = authIndex === 'codex-upgrade-demo-01';
+  const isCodexTeamZeroBudget = authIndex === 'codex-team-01';
   const isCodexPro20x = authIndex === 'codex-pro-20x-01';
   const isCodexRecovered = authIndex === 'codex-fallback-02';
   const isCodexExpired = authIndex === 'codex-email-user-01';
@@ -7467,8 +7483,20 @@ export const getDemoApiCallResult = (payload: DemoApiCallPayload = {}) => {
           Number.isFinite(rawSubscriptionActiveUntil))
           ? rawSubscriptionActiveUntil
           : null;
-      const primaryUsedPercent = isCodexPro20x ? 84 : isCodexRecovered ? 24 : 63;
-      const secondaryUsedPercent = isCodexPro20x ? 96 : isCodexRecovered ? 18 : 42;
+      const primaryUsedPercent = isCodexPro20x
+        ? 84
+        : isCodexRecovered
+          ? 24
+          : isCodexTeamZeroBudget
+            ? 55
+            : 63;
+      const secondaryUsedPercent = isCodexPro20x
+        ? 96
+        : isCodexRecovered
+          ? 18
+          : isCodexTeamZeroBudget
+            ? 9
+            : 42;
       const accountId = isCodexPro20x
         ? 'acct_codex_pro_20x'
         : isCodexRecovered
@@ -7490,6 +7518,7 @@ export const getDemoApiCallResult = (payload: DemoApiCallPayload = {}) => {
         plan_type: matchedPlanType ?? (isCodexPro20x ? 'pro' : isCodexUpgrade ? 'free' : 'team'),
         rate_limit: {
           allowed: true,
+          limit_reached: false,
           primary_window: {
             used_percent: primaryUsedPercent,
             limit_window_seconds: 18000,
@@ -7510,10 +7539,31 @@ export const getDemoApiCallResult = (payload: DemoApiCallPayload = {}) => {
           },
         },
         credits: {
-          has_credits: true,
+          has_credits: isCodexTeamZeroBudget ? false : true,
           unlimited: false,
-          balance: isCodexPro20x ? 42.6 : 18.4,
+          balance: isCodexTeamZeroBudget ? null : isCodexPro20x ? 42.6 : 18.4,
+          overage_limit_reached: false,
         },
+        spend_control: isCodexTeamZeroBudget
+          ? {
+              reached: true,
+              individual_limit: {
+                source: 'workspace_spend_controls',
+                unit: 'credit',
+                limit: '0',
+                used: '0.0',
+                remaining: '0.0',
+                used_percent: 100,
+                remaining_percent: 0,
+                reset_after_seconds: (22 * day) / 1000,
+                reset_at: Math.floor((now() + 22 * day) / 1000),
+              },
+            }
+          : {
+              reached: false,
+              individual_limit: null,
+            },
+        rate_limit_reached_type: null,
         rate_limit_reset_credits: {
           available_count: isCodexPro20x ? 3 : isCodexRecovered ? 1 : 2,
         },

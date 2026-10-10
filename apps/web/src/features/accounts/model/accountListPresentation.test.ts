@@ -61,6 +61,27 @@ const makeRow = (overrides: AccountRowOverrides = {}): AccountRow => {
   };
 };
 
+const TEST_NOW_MS = Date.now();
+const FRESH_SPEND_CONTROL_FETCHED_AT_MS = TEST_NOW_MS - 60_000;
+const STALE_SPEND_CONTROL_FETCHED_AT_MS = TEST_NOW_MS - 16 * 60_000;
+const FUTURE_SPEND_CONTROL_RESET_AT_MS = TEST_NOW_MS + 24 * 60 * 60_000;
+const EXPIRED_SPEND_CONTROL_RESET_AT_MS = TEST_NOW_MS - 60_000;
+
+const spendControlLimit = (
+  overrides: Partial<NonNullable<AccountRow['quota']['spendControlIndividualLimit']>> = {}
+): NonNullable<AccountRow['quota']['spendControlIndividualLimit']> => ({
+  source: 'workspace_spend_controls',
+  unit: 'credit',
+  limit: '100',
+  used: '100',
+  remaining: '0',
+  usedPercent: 100,
+  remainingPercent: 0,
+  resetAfterSeconds: 3600,
+  resetAtMs: FUTURE_SPEND_CONTROL_RESET_AT_MS,
+  ...overrides,
+});
+
 const makeRecommendation = (
   row: AccountRow,
   overrides: Partial<AccountRecommendation> = {}
@@ -540,7 +561,7 @@ describe('accountListPresentation', () => {
       makeRow({
         quota: {
           rateLimitReachedType: 'primary',
-          fetchedAtMs: 2_000,
+          fetchedAtMs: FRESH_SPEND_CONTROL_FETCHED_AT_MS,
           observedAtMs: 1_000,
         },
       })
@@ -603,6 +624,264 @@ describe('accountListPresentation', () => {
     ).toMatchObject({
       tooltipKey: 'accounts.health_tip_limited',
       tooltipParams: { detail: 'latest request quota evidence' },
+    });
+  });
+
+  it('keeps a confirmed zero spend-control budget limited and explains the exact cause', () => {
+    const item = buildAccountListItem(
+      makeRow({
+        quota: {
+          spendControlReached: true,
+          fetchedAtMs: FRESH_SPEND_CONTROL_FETCHED_AT_MS,
+          spendControlIndividualLimit: {
+            source: 'workspace_spend_controls',
+            unit: 'credit',
+            limit: '0',
+            used: '0.0',
+            remaining: '0.0',
+            usedPercent: 100,
+            remainingPercent: 0,
+            resetAfterSeconds: 3600,
+            resetAtMs: FUTURE_SPEND_CONTROL_RESET_AT_MS,
+          },
+        },
+      })
+    );
+
+    expect(item.health).toMatchObject({
+      status: 'limited',
+      reasonKey: 'accounts.health_reason_limited_spend_control_zero_budget',
+      tooltipKey: 'accounts.health_tip_limited_spend_control_zero_budget',
+    });
+    expect(item.recommendation).toMatchObject({
+      hasRecommendation: true,
+      actionLabelKey: 'accounts.recommend_action_review',
+      reasonKey: 'accounts.recommend_reason_spend_control_limited',
+      priority: 'high',
+    });
+  });
+
+  it('keeps an expired zero-budget snapshot limited but drops stale budget-specific details', () => {
+    const item = buildAccountListItem(
+      makeRow({
+        quota: {
+          spendControlReached: true,
+          fetchedAtMs: FRESH_SPEND_CONTROL_FETCHED_AT_MS,
+          spendControlIndividualLimit: spendControlLimit({
+            limit: '0',
+            used: '0.0',
+            remaining: '0.0',
+            usedPercent: 100,
+            remainingPercent: 0,
+            resetAtMs: EXPIRED_SPEND_CONTROL_RESET_AT_MS,
+          }),
+        },
+      })
+    );
+
+    expect(item.health).toMatchObject({
+      status: 'limited',
+      reasonKey: 'accounts.health_reason_limited_spend_control',
+      tooltipKey: 'accounts.health_tip_limited_spend_control',
+      tooltipParams: {},
+    });
+    expect(item.recommendation).toMatchObject({
+      hasRecommendation: true,
+      actionLabelKey: 'accounts.recommend_action_refresh',
+      reasonKey: 'accounts.recommend_reason_quota_limited',
+      priority: 'high',
+    });
+  });
+
+  it('keeps a stale same-cycle spend-control snapshot limited but drops precise budget details', () => {
+    const item = buildAccountListItem(
+      makeRow({
+        quota: {
+          spendControlReached: true,
+          fetchedAtMs: STALE_SPEND_CONTROL_FETCHED_AT_MS,
+          spendControlIndividualLimit: spendControlLimit({
+            limit: '0',
+            used: '0.0',
+            remaining: '0.0',
+            usedPercent: 100,
+            remainingPercent: 0,
+          }),
+        },
+      })
+    );
+
+    expect(item.health).toMatchObject({
+      status: 'limited',
+      reasonKey: 'accounts.health_reason_limited_spend_control',
+      tooltipKey: 'accounts.health_tip_limited_spend_control',
+      tooltipParams: {},
+    });
+    expect(item.recommendation).toMatchObject({
+      hasRecommendation: true,
+      actionLabelKey: 'accounts.recommend_action_refresh',
+      reasonKey: 'accounts.recommend_reason_quota_limited',
+      priority: 'high',
+    });
+  });
+
+  it('distinguishes an exhausted non-zero spend-control budget from a zero budget', () => {
+    const item = buildAccountListItem(
+      makeRow({
+        quota: {
+          spendControlReached: true,
+          fetchedAtMs: FRESH_SPEND_CONTROL_FETCHED_AT_MS,
+          spendControlIndividualLimit: {
+            source: 'workspace_spend_controls',
+            unit: 'credit',
+            limit: '100',
+            used: '100',
+            remaining: '0',
+            usedPercent: 100,
+            remainingPercent: 0,
+            resetAfterSeconds: 3600,
+            resetAtMs: FUTURE_SPEND_CONTROL_RESET_AT_MS,
+          },
+        },
+      })
+    );
+
+    expect(item.health).toMatchObject({
+      status: 'limited',
+      reasonKey: 'accounts.health_reason_limited_spend_control',
+      tooltipKey: 'accounts.health_tip_limited_spend_control_detail',
+      tooltipParams: {
+        limit: '100',
+        used: '100',
+        remaining: '0',
+      },
+    });
+    expect(item.recommendation).toMatchObject({
+      hasRecommendation: true,
+      actionLabelKey: 'accounts.recommend_action_review',
+      reasonKey: 'accounts.recommend_reason_spend_control_limited',
+      priority: 'high',
+    });
+  });
+
+  it('keeps health reason and action generic when spend-control overlaps credits overage', () => {
+    const item = buildAccountListItem(
+      makeRow({
+        quota: {
+          spendControlReached: true,
+          creditsOverageLimitReached: true,
+          fetchedAtMs: FRESH_SPEND_CONTROL_FETCHED_AT_MS,
+          spendControlIndividualLimit: spendControlLimit(),
+        },
+      })
+    );
+
+    expect(item.health).toMatchObject({
+      status: 'limited',
+      reasonKey: 'accounts.health_reason_limited_quota',
+      tooltipKey: 'accounts.health_tip_limited_credits_overage',
+    });
+    expect(item.recommendation).toMatchObject({
+      actionLabelKey: 'accounts.recommend_action_refresh',
+      reasonKey: 'accounts.recommend_reason_quota_limited',
+    });
+  });
+
+  it('keeps health reason and action generic when spend-control overlaps a rate-limit signal', () => {
+    const item = buildAccountListItem(
+      makeRow({
+        quota: {
+          spendControlReached: true,
+          rateLimitReachedType: 'primary',
+          fetchedAtMs: FRESH_SPEND_CONTROL_FETCHED_AT_MS,
+          spendControlIndividualLimit: spendControlLimit(),
+        },
+      })
+    );
+
+    expect(item.health).toMatchObject({
+      status: 'limited',
+      reasonKey: 'accounts.health_reason_limited_quota',
+      tooltipKey: 'accounts.health_tip_limited',
+      tooltipParams: { detail: 'primary' },
+    });
+    expect(item.recommendation).toMatchObject({
+      actionLabelKey: 'accounts.recommend_action_refresh',
+      reasonKey: 'accounts.recommend_reason_quota_limited',
+    });
+  });
+
+  it('keeps current credential and request quota evidence ahead of spend-control presentation', () => {
+    const credentialItem = buildAccountListItem(
+      makeRow({
+        statusMessage: 'quota exceeded',
+        updatedAtMs: TEST_NOW_MS,
+        quota: {
+          spendControlReached: true,
+          fetchedAtMs: FRESH_SPEND_CONTROL_FETCHED_AT_MS,
+          spendControlIndividualLimit: spendControlLimit(),
+        },
+      })
+    );
+    expect(credentialItem.health).toMatchObject({
+      reasonKey: 'accounts.health_reason_limited_quota',
+      tooltipKey: 'accounts.health_tip_limited',
+      tooltipParams: { detail: 'quota exceeded' },
+    });
+
+    const requestItem = buildAccountListItem(
+      makeRow({
+        quota: {
+          spendControlReached: true,
+          fetchedAtMs: FRESH_SPEND_CONTROL_FETCHED_AT_MS,
+          spendControlIndividualLimit: spendControlLimit(),
+        },
+      }),
+      {
+        requestEvidence: {
+          latestRequest: {
+            timestamp_ms: TEST_NOW_MS,
+            failed: true,
+            fail_status_code: 429,
+            fail_summary: 'request quota limited',
+          },
+        },
+      }
+    );
+    expect(requestItem.health).toMatchObject({
+      reasonKey: 'accounts.health_reason_limited_request',
+      tooltipKey: 'accounts.health_tip_limited',
+      tooltipParams: { detail: 'request quota limited' },
+    });
+    expect(requestItem.recommendation).toMatchObject({
+      actionLabelKey: 'accounts.recommend_action_refresh',
+      reasonKey: 'accounts.recommend_reason_quota_limited',
+    });
+  });
+
+  it('does not expose malformed spend-control amounts as detailed budget values', () => {
+    const item = buildAccountListItem(
+      makeRow({
+        quota: {
+          spendControlReached: true,
+          fetchedAtMs: FRESH_SPEND_CONTROL_FETCHED_AT_MS,
+          spendControlIndividualLimit: spendControlLimit({
+            limit: 'not-a-number',
+            used: 'bad',
+            remaining: 'unknown',
+          }),
+        },
+      })
+    );
+
+    expect(item.health).toMatchObject({
+      status: 'limited',
+      reasonKey: 'accounts.health_reason_limited_spend_control',
+      tooltipKey: 'accounts.health_tip_limited_spend_control',
+      tooltipParams: {},
+    });
+    expect(item.recommendation).toMatchObject({
+      actionLabelKey: 'accounts.recommend_action_refresh',
+      reasonKey: 'accounts.recommend_reason_quota_limited',
     });
   });
 
