@@ -4,6 +4,7 @@ import type { AuthFileCodexStatusSummary } from '@/features/authFiles/model/cred
 import type { AccountRow } from './accountRows';
 import {
   isConfirmedPaidXaiPlan,
+  isSpendControlLimitExpired,
   summarizeGroupedQuotaAvailability,
   type AccountGroupedQuotaAvailabilitySummary,
 } from './accountQuotaSummary';
@@ -252,7 +253,13 @@ const hasCompleteSpendControlAmounts = (row: AccountRow): boolean => {
 
 const isZeroSpendControlBudget = (row: AccountRow): boolean => {
   const limit = row.quota.spendControlIndividualLimit;
-  if (!limit || !hasCompleteSpendControlAmounts(row)) return false;
+  if (
+    !limit ||
+    isSpendControlLimitExpired(limit) ||
+    !hasCompleteSpendControlAmounts(row)
+  ) {
+    return false;
+  }
   return [limit.limit, limit.used, limit.remaining]
     .map(readSpendControlAmount)
     .every((value) => value === 0);
@@ -449,13 +456,14 @@ const getQuotaLimitTooltip = (
     !hasNonSpendControlQuotaLimitEvidence
   ) {
     const limit = row.quota.spendControlIndividualLimit;
-    if (isZeroSpendControlBudget(row)) {
+    const limitExpired = isSpendControlLimitExpired(limit);
+    if (!limitExpired && isZeroSpendControlBudget(row)) {
       return {
         tooltipKey: 'accounts.health_tip_limited_spend_control_zero_budget',
         tooltipParams: {},
       };
     }
-    if (limit && hasCompleteSpendControlAmounts(row)) {
+    if (!limitExpired && limit && hasCompleteSpendControlAmounts(row)) {
       return {
         tooltipKey: 'accounts.health_tip_limited_spend_control_detail',
         tooltipParams: {

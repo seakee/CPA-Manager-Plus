@@ -72,7 +72,7 @@ const spendControlLimit = (
   usedPercent: 100,
   remainingPercent: 0,
   resetAfterSeconds: 3600,
-  resetAtMs: 1_793_491_200_000,
+  resetAtMs: Date.now() + 60_000,
   ...overrides,
 });
 
@@ -636,7 +636,7 @@ describe('accountListPresentation', () => {
             usedPercent: 100,
             remainingPercent: 0,
             resetAfterSeconds: 3600,
-            resetAtMs: 1_793_491_200_000,
+            resetAtMs: Date.now() + 60_000,
           },
         },
       })
@@ -651,6 +651,38 @@ describe('accountListPresentation', () => {
       hasRecommendation: true,
       actionLabelKey: 'accounts.recommend_action_review',
       reasonKey: 'accounts.recommend_reason_spend_control_limited',
+      priority: 'high',
+    });
+  });
+
+  it('keeps an expired zero-budget snapshot limited but drops stale budget-specific details', () => {
+    const item = buildAccountListItem(
+      makeRow({
+        quota: {
+          spendControlReached: true,
+          fetchedAtMs: 2_000,
+          spendControlIndividualLimit: spendControlLimit({
+            limit: '0',
+            used: '0.0',
+            remaining: '0.0',
+            usedPercent: 100,
+            remainingPercent: 0,
+            resetAtMs: Date.now() - 60_000,
+          }),
+        },
+      })
+    );
+
+    expect(item.health).toMatchObject({
+      status: 'limited',
+      reasonKey: 'accounts.health_reason_limited_spend_control',
+      tooltipKey: 'accounts.health_tip_limited_spend_control',
+      tooltipParams: {},
+    });
+    expect(item.recommendation).toMatchObject({
+      hasRecommendation: true,
+      actionLabelKey: 'accounts.recommend_action_refresh',
+      reasonKey: 'accounts.recommend_reason_quota_limited',
       priority: 'high',
     });
   });
@@ -670,7 +702,7 @@ describe('accountListPresentation', () => {
             usedPercent: 100,
             remainingPercent: 0,
             resetAfterSeconds: 3600,
-            resetAtMs: 1_793_491_200_000,
+            resetAtMs: Date.now() + 60_000,
           },
         },
       })

@@ -124,6 +124,18 @@ export interface AccountGroupedQuotaAvailabilitySummary {
 const QUOTA_LOW_THRESHOLD = 20;
 const CREDENTIAL_REFRESH_FILE_WRITE_SKEW_MS = 5_000;
 
+export const isSpendControlLimitExpired = (
+  limit: CodexSpendControlLimit | null | undefined,
+  nowMs = Date.now()
+): boolean => {
+  const resetAtMs = limit?.resetAtMs;
+  return (
+    isValidQuotaResetAtMs(resetAtMs) &&
+    Number.isFinite(nowMs) &&
+    resetAtMs <= nowMs
+  );
+};
+
 type AccountQuotaObservationFields = Partial<
   Pick<
     AccountQuotaSummary,

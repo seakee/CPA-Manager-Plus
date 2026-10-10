@@ -70,7 +70,7 @@ const spendControlLimit = (
   usedPercent: 100,
   remainingPercent: 0,
   resetAfterSeconds: 3600,
-  resetAtMs: 1_793_491_200_000,
+  resetAtMs: Date.now() + 60_000,
   ...overrides,
 });
 
@@ -507,7 +507,7 @@ describe('quotaRecommendations', () => {
             usedPercent: 100,
             remainingPercent: 0,
             resetAfterSeconds: 3600,
-            resetAtMs: 1_793_491_200_000,
+            resetAtMs: Date.now() + 60_000,
           },
         },
       })
@@ -517,6 +517,31 @@ describe('quotaRecommendations', () => {
       action: 'review',
       priority: 'high',
       reasonKey: 'accounts.recommend_reason_spend_control_limited',
+    });
+  });
+
+  it('refreshes an expired structured spend-control cycle instead of treating it as resolved', () => {
+    const recommendation = buildAccountRecommendation(
+      makeRow({
+        quota: {
+          spendControlReached: true,
+          fetchedAtMs: 2_000,
+          spendControlIndividualLimit: spendControlLimit({
+            limit: '0',
+            used: '0.0',
+            remaining: '0.0',
+            usedPercent: 100,
+            remainingPercent: 0,
+            resetAtMs: Date.now() - 60_000,
+          }),
+        },
+      })
+    );
+
+    expect(recommendation).toMatchObject({
+      action: 'refresh',
+      priority: 'high',
+      reasonKey: 'accounts.recommend_reason_quota_limited',
     });
   });
 

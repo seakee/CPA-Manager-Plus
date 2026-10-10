@@ -1,4 +1,5 @@
 import type { AccountRow } from './accountRows';
+import { isSpendControlLimitExpired } from './accountQuotaSummary';
 import {
   getAccountRequestCredentialEvidence,
   hasAccountNonSpendControlQuotaLimitEvidence,
@@ -71,6 +72,7 @@ const hasResolvedSpendControlEvidence = (row: AccountRow): boolean => {
     isFiniteSpendControlAmount(limit.limit) &&
     isFiniteSpendControlAmount(limit.used) &&
     isFiniteSpendControlAmount(limit.remaining) &&
+    !isSpendControlLimitExpired(limit) &&
     typeof row.quota.fetchedAtMs === 'number' &&
     Number.isFinite(row.quota.fetchedAtMs)
   );
