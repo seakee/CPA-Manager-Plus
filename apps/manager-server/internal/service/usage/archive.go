@@ -16,6 +16,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1047,9 +1048,10 @@ func (m *archiveManager) deleteLocked(ctx context.Context, runID string) (Archiv
 	if err := m.callTestHook("cleanup_revalidation_started"); err != nil {
 		return ArchiveStatus{}, m.recordFailure(ctx, run.ID, usagearchive.StatusDeleting, err)
 	}
-	if err := m.verifyManifest(ctx, run, status.Segments, func(completed, total int64) {
+	prepareFiles, err := m.prepareDeleteFiles(ctx, run, status.Segments, func(completed, total int64) {
 		m.reportProgress(ctx, run.ID, usagearchive.StatusDeleting, usagearchive.ProgressCleanupRevalidating, completed, total, "segments")
-	}); err != nil {
+	})
+	if err != nil {
 		return ArchiveStatus{}, m.recordFailure(ctx, run.ID, usagearchive.StatusDeleting,
 			fmt.Errorf("revalidate usage archive before raw cleanup: %w", err))
 	}
@@ -1061,7 +1063,7 @@ func (m *archiveManager) deleteLocked(ctx context.Context, runID string) (Archiv
 		if err := ctx.Err(); err != nil {
 			return ArchiveStatus{}, m.recordFailure(ctx, run.ID, usagearchive.StatusDeleting, err)
 		}
-		result, err := m.store.UsageArchives.DeleteBatch(ctx, run.ID, m.config.DeleteBatchSize, time.Now().UnixMilli(), m.prepareDeleteFiles)
+		result, err := m.store.UsageArchives.DeleteBatch(ctx, run.ID, m.config.DeleteBatchSize, time.Now().UnixMilli(), prepareFiles)
 		if err != nil {
 			return ArchiveStatus{}, m.recordFailure(ctx, run.ID, usagearchive.StatusDeleting, err)
 		}
@@ -1303,9 +1305,11 @@ func (m *archiveManager) archiveFileVersion(name string) (archiveFileVersion, er
 	return archiveFileVersion{name: name, info: info, changeStamp: stamp}, nil
 }
 
-// Every batch gets fresh content verification outside SQLite. The resulting
-// file-version witness lives only until that batch commits; it is not a cache.
-func (m *archiveManager) prepareDeleteFiles(ctx context.Context, run store.UsageArchiveRun, segments []store.UsageArchiveSegment) (usagearchive.DeleteFileCheck, error) {
+// Fully verify once per delete/resume invocation, outside SQLite. Reuse this
+// in-memory witness only while archive evidence and every file version match.
+// A failure, restart or new invocation always requires fresh content verification.
+func (m *archiveManager) prepareDeleteFiles(ctx context.Context, run store.UsageArchiveRun, segments []store.UsageArchiveSegment, progress ...archiveSegmentProgressFunc) (usagearchive.DeleteFileVerifier, error) {
+	segments = slices.Clone(segments)
 	versions := make([]archiveFileVersion, 0, len(segments)+1)
 	names := make([]string, 0, len(segments)+1)
 	names = append(names, run.ManifestFile)
@@ -1339,19 +1343,39 @@ func (m *archiveManager) prepareDeleteFiles(ctx context.Context, run store.Usage
 		}
 		return nil
 	}
-	if err := m.callTestHook("delete_batch_files_verification_started"); err != nil {
-		return nil, err
-	}
-	if err := m.verifyManifestFiles(ctx, run, segments, false); err != nil {
+	if err := m.verifyManifest(ctx, run, segments, progress...); err != nil {
 		return nil, err
 	}
 	if err := check(ctx); err != nil {
 		return nil, err
 	}
-	if err := m.callTestHook("delete_batch_files_verified"); err != nil {
-		return nil, err
-	}
-	return check, nil
+	verifiedRun := deleteFileWitnessRun(run)
+	return func(ctx context.Context, current store.UsageArchiveRun, currentSegments []store.UsageArchiveSegment) (usagearchive.DeleteFileCheck, error) {
+		if verifiedRun != deleteFileWitnessRun(current) || !slices.Equal(segments, currentSegments) {
+			return nil, fmt.Errorf("%w: archive evidence changed after content verification", ErrArchiveCoverageIncomplete)
+		}
+		if err := m.callTestHook("delete_batch_files_check_started"); err != nil {
+			return nil, err
+		}
+		if err := check(ctx); err != nil {
+			return nil, err
+		}
+		if err := m.callTestHook("delete_batch_files_checked"); err != nil {
+			return nil, err
+		}
+		return check, nil
+	}, nil
+}
+
+// Only per-batch deletion progress and telemetry may advance under this witness.
+// All archive, verification, authorization and schema evidence remains bound.
+// The repository independently checks the exact deletion checkpoint inside each tx.
+func deleteFileWitnessRun(run store.UsageArchiveRun) store.UsageArchiveRun {
+	run.LastDeletedEventID, run.DeletedEventCount = 0, 0
+	run.UpdatedAtMS = 0
+	run.ProgressPhase, run.ProgressUnit, run.LastError = "", "", ""
+	run.ProgressCurrent, run.ProgressTotal, run.ProgressUpdatedAtMS = 0, 0, 0
+	return run
 }
 
 func (m *archiveManager) verifyManifest(ctx context.Context, run store.UsageArchiveRun, segments []store.UsageArchiveSegment, progress ...archiveSegmentProgressFunc) error {
@@ -1465,6 +1489,9 @@ func (m *archiveManager) inspectSegment(segment store.UsageArchiveSegment, overa
 	}
 	defer file.Close()
 	contentDigest := sha256.New()
+	if err := m.callTestHook("archive_segment_content_inspection_started"); err != nil {
+		return archiveFileInspection{}, err
+	}
 	copied, copyErr := io.Copy(contentDigest, file)
 	if copyErr != nil {
 		return archiveFileInspection{}, copyErr

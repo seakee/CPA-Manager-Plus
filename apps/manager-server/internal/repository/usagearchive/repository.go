@@ -1224,8 +1224,9 @@ func (r *Repository) MarkVerified(ctx context.Context, runID string, nowMS int64
 // decompress, parse archive contents, reenter SQLite, or publish progress.
 type DeleteFileCheck func(context.Context) error
 
-// DeleteFileVerifier fully verifies the supplied archive outside a transaction
-// and returns a cheap check bound to those exact files for this batch only.
+// DeleteFileVerifier binds this batch's archive evidence to fully verified files
+// outside a transaction and returns a cheap file-version check. An invocation may
+// reuse content verification only while evidence and file versions still match.
 type DeleteFileVerifier func(context.Context, Run, []Segment) (DeleteFileCheck, error)
 
 // DeleteBatch verifies files before taking the SQLite write lock. Inside the

@@ -1471,6 +1471,139 @@ func TestUsageArchiveServiceRejectsChecksumMismatch(t *testing.T) {
 	}
 }
 
+func TestUsageArchiveDeleteInspectsContentOnceRegardlessOfBatchCount(t *testing.T) {
+	for _, events := range []int{4, 8, 16} {
+		for _, batchSize := range []int{1, 4} {
+			t.Run(fmt.Sprintf("events=%d/batch=%d", events, batchSize), func(t *testing.T) {
+				service, st, _, _ := newRawArchiveTestService(t, 2, batchSize)
+				ctx := context.Background()
+				insertArchiveTestEvents(t, st, archiveTestServiceEvents(events))
+				catchUpUsageAggregate(t, st)
+				created, err := service.CreateArchive(ctx, 20_000)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := service.ResumeArchive(ctx, created.Run.ID); err != nil {
+					t.Fatal(err)
+				}
+				verified, err := service.VerifyArchive(ctx, created.Run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				inspections := 0
+				service.archive.testHook = func(point string) error {
+					if point == "archive_segment_content_inspection_started" {
+						inspections++
+					}
+					return nil
+				}
+				completed, err := service.DeleteArchive(ctx, created.Run.ID)
+				if err != nil || completed.Run.DeletedEventCount != int64(events) || completed.Run.Status != usagearchive.StatusCompleted {
+					t.Fatalf("cleanup failed: run=%#v err=%v", completed.Run, err)
+				}
+				if inspections != len(verified.Segments) {
+					t.Fatalf("full-content inspections=%d, want %d (one pass, independent of %d delete batches)", inspections, len(verified.Segments), (events+batchSize-1)/batchSize)
+				}
+				t.Logf("events=%d batches=%d segments=%d full-content inspections=%d", events, (events+batchSize-1)/batchSize, len(verified.Segments), inspections)
+			})
+		}
+	}
+}
+
+func TestUsageArchiveDeleteRejectsEvidenceChangedBetweenBatches(t *testing.T) {
+	for _, mutation := range []struct {
+		name, change, restore string
+	}{
+		{"manifest digest", `update usage_archive_runs set manifest_sha256 = 'different-digest' where id = ?`, `update usage_archive_runs set manifest_sha256 = ? where id = ?`},
+		{"segment digest", `update usage_archive_segments set content_sha256 = 'different-digest' where run_id = ? and sequence = 1`, `update usage_archive_segments set content_sha256 = ? where run_id = ? and sequence = 1`},
+		{"segment path", `update usage_archive_segments set file_name = 'different-segment.jsonl.gz' where run_id = ? and sequence = 1`, `update usage_archive_segments set file_name = ? where run_id = ? and sequence = 1`},
+		{"verification timestamp", `update usage_archive_runs set verified_at_ms = verified_at_ms + 1 where id = ?`, `update usage_archive_runs set verified_at_ms = ? where id = ?`},
+	} {
+		t.Run(mutation.name, func(t *testing.T) {
+			service, _, db, _, verified := newVerifiedArchiveDeleteTestService(t)
+			ctx := context.Background()
+			changed := false
+			service.archive.testHook = func(point string) error {
+				if point != "delete_batch_committed" || changed {
+					return nil
+				}
+				changed = true
+				_, err := db.ExecContext(ctx, mutation.change, verified.Run.ID)
+				return err
+			}
+			if _, err := service.DeleteArchive(ctx, verified.Run.ID); !errors.Is(err, ErrArchiveCoverageIncomplete) {
+				t.Fatalf("changed %s reused stale content evidence: %v", mutation.name, err)
+			}
+			var raw, deleted int64
+			if err := db.QueryRow(`select (select count(*) from usage_events), deleted_event_count from usage_archive_runs where id = ?`, verified.Run.ID).Scan(&raw, &deleted); err != nil {
+				t.Fatal(err)
+			}
+			if !changed || raw != 3 || deleted != 1 {
+				t.Fatalf("changed evidence advanced deletion: changed=%v raw=%d deleted=%d", changed, raw, deleted)
+			}
+			var original any
+			switch mutation.name {
+			case "manifest digest":
+				original = verified.Run.ManifestSHA256
+			case "segment digest":
+				original = verified.Segments[0].ContentSHA256
+			case "segment path":
+				original = verified.Segments[0].FileName
+			case "verification timestamp":
+				original = verified.Run.VerifiedAtMS
+			}
+			if _, err := db.ExecContext(ctx, mutation.restore, original, verified.Run.ID); err != nil {
+				t.Fatal(err)
+			}
+			inspections := 0
+			service.archive.testHook = func(point string) error {
+				if point == "archive_segment_content_inspection_started" {
+					inspections++
+				}
+				return nil
+			}
+			completed, err := service.ResumeArchive(ctx, verified.Run.ID)
+			if err != nil || completed.Run.Status != usagearchive.StatusCompleted || inspections != len(verified.Segments) {
+				t.Fatalf("recovery must verify fresh content once: run=%#v inspections=%d err=%v", completed.Run, inspections, err)
+			}
+		})
+	}
+}
+
+func TestUsageArchiveDeleteRejectsFileChangedDuringContentVerification(t *testing.T) {
+	service, _, db, directory, verified := newVerifiedArchiveDeleteTestService(t)
+	file := filepath.Join(directory, filepath.FromSlash(verified.Segments[0].FileName))
+	original, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := false
+	service.archive.testHook = func(point string) error {
+		if point != "archive_segment_content_inspection_started" || changed {
+			return nil
+		}
+		changed = true
+		if err := os.WriteFile(file, original, 0o600); err != nil {
+			return err
+		}
+		return os.Chtimes(file, info.ModTime(), info.ModTime())
+	}
+	if _, err := service.DeleteArchive(context.Background(), verified.Run.ID); !errors.Is(err, ErrArchiveCoverageIncomplete) {
+		t.Fatalf("file rewritten during inspection must invalidate the witness: %v", err)
+	}
+	var raw, deleted int64
+	if err := db.QueryRow(`select (select count(*) from usage_events), deleted_event_count from usage_archive_runs where id = ?`, verified.Run.ID).Scan(&raw, &deleted); err != nil {
+		t.Fatal(err)
+	}
+	if !changed || raw != 4 || deleted != 0 {
+		t.Fatalf("changed file published a reusable witness: changed=%v raw=%d deleted=%d", changed, raw, deleted)
+	}
+}
+
 func TestUsageArchiveDeleteFileVerificationAllowsConcurrentWrites(t *testing.T) {
 	service, _, db, _, verified := newVerifiedArchiveDeleteTestService(t)
 	ctx := context.Background()
@@ -1485,9 +1618,14 @@ func TestUsageArchiveDeleteFileVerificationAllowsConcurrentWrites(t *testing.T) 
 	if _, err := writer.ExecContext(ctx, `create table archive_verification_writer_test (id integer primary key)`); err != nil {
 		t.Fatal(err)
 	}
-	writes := 0
+	writes, contentWrites, batchWrites := 0, 0, 0
 	service.archive.testHook = func(point string) error {
-		if point != "delete_batch_files_verification_started" && point != "delete_batch_files_verified" {
+		switch point {
+		case "archive_segment_content_inspection_started":
+			contentWrites++
+		case "delete_batch_files_check_started", "delete_batch_files_checked":
+			batchWrites++
+		default:
 			return nil
 		}
 		writes++
@@ -1495,8 +1633,8 @@ func TestUsageArchiveDeleteFileVerificationAllowsConcurrentWrites(t *testing.T) 
 		return err
 	}
 	completed, err := service.DeleteArchive(ctx, verified.Run.ID)
-	if err != nil || completed.Run.Status != usagearchive.StatusCompleted || completed.Run.DeletedEventCount != 4 || writes != 8 {
-		t.Fatalf("each batch's full verification must allow independent writes: run=%#v writes=%d err=%v", completed.Run, writes, err)
+	if err != nil || completed.Run.Status != usagearchive.StatusCompleted || completed.Run.DeletedEventCount != 4 || contentWrites != len(verified.Segments) || batchWrites != 8 {
+		t.Fatalf("content verification and per-batch preparation must allow independent writes: run=%#v content=%d batch=%d err=%v", completed.Run, contentWrites, batchWrites, err)
 	}
 }
 
@@ -1519,7 +1657,7 @@ func TestUsageArchiveDeleteRejectsFilesChangedAfterContentVerification(t *testin
 			}
 			batches := 0
 			service.archive.testHook = func(point string) error {
-				if point != "delete_batch_files_verified" {
+				if point != "delete_batch_files_checked" {
 					return nil
 				}
 				batches++
@@ -1584,7 +1722,11 @@ func TestUsageArchiveDeleteRollsBackFileChangeBeforeCommit(t *testing.T) {
 	}
 	checks := 0
 	_, err = st.UsageArchives.DeleteBatch(ctx, verified.Run.ID, 1, time.Now().UnixMilli(), func(ctx context.Context, run usagearchive.Run, segments []usagearchive.Segment) (usagearchive.DeleteFileCheck, error) {
-		check, err := service.archive.prepareDeleteFiles(ctx, run, segments)
+		prepare, err := service.archive.prepareDeleteFiles(ctx, run, segments)
+		if err != nil {
+			return nil, err
+		}
+		check, err := prepare(ctx, run, segments)
 		if err != nil {
 			return nil, err
 		}
@@ -1724,10 +1866,15 @@ func TestUsageArchiveDeletionRevalidatesPublishedFiles(t *testing.T) {
 				}
 				var deletedBefore int64
 				if stage != "verified" {
-					if _, err := st.UsageArchives.BeginDelete(ctx, created.Run.ID, time.Now().UnixMilli()); err != nil {
+					deleting, err := st.UsageArchives.BeginDelete(ctx, created.Run.ID, time.Now().UnixMilli())
+					if err != nil {
 						t.Fatal(err)
 					}
-					batch, err := st.UsageArchives.DeleteBatch(ctx, created.Run.ID, 1, time.Now().UnixMilli(), service.archive.prepareDeleteFiles)
+					prepare, err := service.archive.prepareDeleteFiles(ctx, deleting, verified.Segments)
+					if err != nil {
+						t.Fatal(err)
+					}
+					batch, err := st.UsageArchives.DeleteBatch(ctx, created.Run.ID, 1, time.Now().UnixMilli(), prepare)
 					if err != nil || batch.Deleted != 1 {
 						t.Fatalf("initial delete batch = %#v, %v", batch, err)
 					}
@@ -2140,7 +2287,11 @@ func TestUsageArchiveServiceResumesBoundedDelete(t *testing.T) {
 	}
 	interrupted := errors.New("simulated interruption after delete batch")
 	fired := false
+	inspections := 0
 	service.archive.testHook = func(point string) error {
+		if point == "archive_segment_content_inspection_started" {
+			inspections++
+		}
 		if point == "delete_batch_committed" && !fired {
 			fired = true
 			return interrupted
@@ -2157,18 +2308,31 @@ func TestUsageArchiveServiceResumesBoundedDelete(t *testing.T) {
 	if failed.Run.Status != usagearchive.StatusFailed || failed.Run.ResumeStatus != usagearchive.StatusDeleting || failed.Run.DeletedEventCount != 1 {
 		t.Fatalf("failed delete = %#v", failed)
 	}
+	if inspections != 1 {
+		t.Fatalf("interrupted invocation content inspections=%d, want 1", inspections)
+	}
 	restarted := New(st, WithArchive(ArchiveConfig{
 		Directory:             archiveDirectory,
 		SegmentEventLimit:     3,
 		DeleteBatchSize:       1,
 		AggregateReadsEnabled: true,
 	}))
+	inspections = 0
+	restarted.archive.testHook = func(point string) error {
+		if point == "archive_segment_content_inspection_started" {
+			inspections++
+		}
+		return nil
+	}
 	completed, err := restarted.ResumeArchive(ctx, created.Run.ID)
 	if err != nil {
 		t.Fatalf("resume delete: %v", err)
 	}
 	if completed.Run.Status != usagearchive.StatusCompleted || completed.Run.DeletedEventCount != 3 {
 		t.Fatalf("completed delete = %#v", completed)
+	}
+	if inspections != 1 {
+		t.Fatalf("restarted invocation content inspections=%d, want 1 fresh pass", inspections)
 	}
 }
 
