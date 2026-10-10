@@ -6,6 +6,8 @@ import {
   resetDemoEvidenceEpoch,
 } from './demoFixtures';
 import { buildAccountRows, sortAccountRows } from '@/features/accounts/model/accountRows';
+import { buildAccountListItem } from '@/features/accounts/model/accountListPresentation';
+import { buildAccountDetailViewModel } from '@/features/accounts/model/accountDetailViewModel';
 import {
   buildAccountQuotaDisplayWindows,
   type BuildAccountQuotaDisplayWindowsOptions,
@@ -19,6 +21,58 @@ import type { AccountRow } from '@/features/accounts/model/accountRows';
 import type { MonitoringAccountWindowUsageItem } from '@/services/api/usageService';
 
 describe('Demo accounts quota & usage presentation regression', () => {
+  it('exposes the Codex Team zero-budget spend-control scenario in list and detail UI data', () => {
+    resetDemoEvidenceEpoch();
+    const authFiles = getDemoAuthFiles().files;
+    const quotaState = getDemoQuotaStoreState();
+    const rows = buildAccountRows(authFiles, quotaState);
+    const teamRow = rows.find((row) => row.fileName === 'codex-team-01.json');
+
+    expect(teamRow).toBeDefined();
+    expect(teamRow?.quota).toMatchObject({
+      spendControlReached: true,
+      spendControlIndividualLimit: {
+        source: 'workspace_spend_controls',
+        unit: 'credit',
+        limit: '0',
+        used: '0.0',
+        remaining: '0.0',
+        usedPercent: 100,
+        remainingPercent: 0,
+      },
+    });
+
+    const listItem = buildAccountListItem(teamRow!);
+    expect(listItem.health).toMatchObject({
+      status: 'limited',
+      reasonKey: 'accounts.health_reason_limited_spend_control_zero_budget',
+      tooltipKey: 'accounts.health_tip_limited_spend_control_zero_budget',
+    });
+    expect(listItem.recommendation).toMatchObject({
+      hasRecommendation: true,
+      actionLabelKey: 'accounts.recommend_action_review',
+      reasonKey: 'accounts.recommend_reason_spend_control_limited',
+      priority: 'high',
+    });
+
+    const detail = buildAccountDetailViewModel(teamRow!);
+    expect(detail.quota.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: 'spendControlSource', value: 'workspace_spend_controls' }),
+        expect.objectContaining({ key: 'spendControlUnit', value: 'credit' }),
+        expect.objectContaining({ key: 'spendControlLimit', value: '0' }),
+        expect.objectContaining({ key: 'spendControlUsed', value: '0.0' }),
+        expect.objectContaining({ key: 'spendControlRemaining', value: '0.0' }),
+        expect.objectContaining({ key: 'spendControlResetAt', valueKind: 'timestamp' }),
+      ])
+    );
+    expect(
+      detail.quota.diagnostics.find((field) => field.key === 'spendControlUsedPercent')
+    ).toBeUndefined();
+    expect(
+      detail.quota.diagnostics.find((field) => field.key === 'spendControlRemainingPercent')
+    ).toBeUndefined();
+  });
   it('correctly presents subscription plans and remaining days for demo accounts', () => {
     const authFiles = getDemoAuthFiles().files;
     const quotaState = getDemoQuotaStoreState();
