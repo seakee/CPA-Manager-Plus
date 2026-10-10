@@ -3,11 +3,13 @@ package usagemonitoring_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageevent"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagemonitoring"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
@@ -199,5 +201,168 @@ func assertCodexEvidenceRawEvents(t testing.TB, db *sql.DB, count int64) {
 		sum(case when auth_account_id_snapshot = 'account-a' then 1 else 0 end) from usage_events`).Scan(&rows, &sumIDs, &sumCreated, &strong)
 	if err != nil || rows != count || sumIDs != count*(count+1)/2 || sumCreated != sumIDs || strong != count-count/2 {
 		t.Fatalf("raw identity events changed: rows=%d ids=%d created=%d strong=%d err=%v", rows, sumIDs, sumCreated, strong, err)
+	}
+}
+
+func TestCodexLegacyIdentityEvidenceSurvivesRawDeletionAndCatchUp(t *testing.T) {
+	ctx := context.Background()
+	db, st := newMonitoringRepositoryStore(t)
+
+	// 1. insert Codex events
+	seedCodexLegacyIdentityEvents(t, db, 10)
+
+	// 2. CatchUpCodexLegacyIdentityEvidence until ready
+	finishCodexEvidenceRollup(t, st, 1000)
+
+	// 3. assert state ready, coverage > 0, target >= coverage
+	stateBefore, err := st.UsageMonitoringState(ctx, usageevent.CodexLegacyIdentityRollupName)
+	if err != nil {
+		t.Fatalf("get state before raw deletion: %v", err)
+	}
+	if stateBefore.Status != "ready" {
+		t.Fatalf("state status = %q, want ready", stateBefore.Status)
+	}
+	if stateBefore.CoverageEventID <= 0 {
+		t.Fatalf("state coverage_event_id = %d, want > 0", stateBefore.CoverageEventID)
+	}
+	if stateBefore.TargetEventID < stateBefore.CoverageEventID {
+		t.Fatalf("state target (%d) < coverage (%d)", stateBefore.TargetEventID, stateBefore.CoverageEventID)
+	}
+
+	var evidenceCountBefore int
+	if err := db.QueryRow("select count(*) from " + usageevent.CodexLegacyIdentityEvidenceTable).Scan(&evidenceCountBefore); err != nil {
+		t.Fatalf("count evidence before: %v", err)
+	}
+	if evidenceCountBefore == 0 {
+		t.Fatal("expected evidence rows before deletion, got 0")
+	}
+
+	keyBefore, allowedBefore, err := st.UsageEvents.ResolveCodexLegacyAccountKey(ctx, usageidentity.Fields{
+		AuthFileSnapshot: "codex-a.json", AuthIndex: "auth-a", Source: "codex-a.json",
+		AuthProviderSnapshot: "codex", AuthAccountIDSnapshot: "account-a", AccountSnapshot: "same@example.com",
+	})
+	if err != nil || !allowedBefore || keyBefore == "" {
+		t.Fatalf("resolve key before: key=%q allowed=%v err=%v", keyBefore, allowedBefore, err)
+	}
+
+	// 4. delete all usage_events
+	if _, err := db.Exec("delete from usage_events"); err != nil {
+		t.Fatalf("delete all usage_events: %v", err)
+	}
+
+	// 5. raw max = 0
+	var rawMax int64
+	if err := db.QueryRow("select coalesce(max(id), 0) from usage_events").Scan(&rawMax); err != nil {
+		t.Fatalf("query raw max: %v", err)
+	}
+	if rawMax != 0 {
+		t.Fatalf("raw max = %d, want 0", rawMax)
+	}
+
+	// 6. 再次 CatchUpCodexLegacyIdentityEvidence
+	result, err := st.CatchUpCodexLegacyIdentityEvidence(ctx, 1000, 123456789)
+	if err != nil {
+		t.Fatalf("catch up after raw deletion: %v", err)
+	}
+	if result.Pending {
+		t.Fatalf("catch up result pending = true, want false")
+	}
+
+	// 7. 断言：
+	// evidence row count 不减少
+	// status 不进入 clearing
+	// coverage 不回退
+	// target 不错误回退到 0
+	// structure_revision 不变化
+	// stored evidence available == true
+	// ResolveCodexLegacyAccountKey 仍得到原结果
+	var evidenceCountAfter int
+	if err := db.QueryRow("select count(*) from " + usageevent.CodexLegacyIdentityEvidenceTable).Scan(&evidenceCountAfter); err != nil {
+		t.Fatalf("count evidence after: %v", err)
+	}
+	if evidenceCountAfter < evidenceCountBefore {
+		t.Fatalf("evidence count decreased: before=%d after=%d", evidenceCountBefore, evidenceCountAfter)
+	}
+
+	stateAfter, err := st.UsageMonitoringState(ctx, usageevent.CodexLegacyIdentityRollupName)
+	if err != nil {
+		t.Fatalf("get state after: %v", err)
+	}
+	if stateAfter.Status == "clearing" {
+		t.Fatalf("state status entered clearing: %s", stateAfter.Status)
+	}
+	if stateAfter.CoverageEventID < stateBefore.CoverageEventID {
+		t.Fatalf("coverage rewound: before=%d after=%d", stateBefore.CoverageEventID, stateAfter.CoverageEventID)
+	}
+	if stateAfter.TargetEventID == 0 {
+		t.Fatalf("target reset to 0: target_event_id=%d", stateAfter.TargetEventID)
+	}
+	if stateAfter.StructureRevision != stateBefore.StructureRevision {
+		t.Fatalf("structure_revision changed: before=%q after=%q", stateBefore.StructureRevision, stateAfter.StructureRevision)
+	}
+
+	keyAfter, allowedAfter, err := st.UsageEvents.ResolveCodexLegacyAccountKey(ctx, usageidentity.Fields{
+		AuthFileSnapshot: "codex-a.json", AuthIndex: "auth-a", Source: "codex-a.json",
+		AuthProviderSnapshot: "codex", AuthAccountIDSnapshot: "account-a", AccountSnapshot: "same@example.com",
+	})
+	if err != nil || !allowedAfter || keyAfter != keyBefore {
+		t.Fatalf("resolve key after: key=%q allowed=%v (want key=%q, allowed=true) err=%v", keyAfter, allowedAfter, keyBefore, err)
+	}
+
+	// 8. 验证 new raw tail 仍正常工作
+	if _, err := db.Exec(`insert into usage_events (
+		id, event_hash, timestamp_ms, timestamp, model, created_at_ms,
+		provider, auth_provider_snapshot, auth_file_snapshot, source,
+		auth_index, auth_account_id_snapshot, account_snapshot
+	) values (
+		11, 'identity-11', 11, '11', 'gpt-test', 11,
+		'codex', 'codex', 'codex-a.json', 'codex-a.json',
+		'auth-a', 'account-a', 'same@example.com'
+	)`); err != nil {
+		t.Fatalf("insert tail event: %v", err)
+	}
+
+	tailResult, err := st.CatchUpCodexLegacyIdentityEvidence(ctx, 1000, 123456790)
+	if err != nil {
+		t.Fatalf("tail catch up: %v", err)
+	}
+	if tailResult.CoverageEventID < 11 {
+		t.Fatalf("tail coverage did not advance: got %d, want >= 11", tailResult.CoverageEventID)
+	}
+	stateTail, err := st.UsageMonitoringState(ctx, usageevent.CodexLegacyIdentityRollupName)
+	if err != nil {
+		t.Fatalf("state after tail: %v", err)
+	}
+	if stateTail.CoverageEventID < 11 {
+		t.Fatalf("coverage after tail = %d, want >= 11", stateTail.CoverageEventID)
+	}
+}
+
+func TestCodexLegacyIdentityRollupDecoupledSchemaVersion(t *testing.T) {
+	ctx := context.Background()
+	db, st := newMonitoringRepositoryStore(t)
+	seedCodexLegacyIdentityEvents(t, db, 5)
+
+	if _, err := db.Exec("update usage_monitoring_rollup_state set schema_version = ? where rollup_name = ?",
+		usageidentity.CodexLegacyIdentityEvidenceSchemaVersion+1, usageevent.CodexLegacyIdentityRollupName); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := st.CatchUpCodexLegacyIdentityEvidence(ctx, 1000, 1)
+	if !errors.Is(err, usagemonitoring.ErrUnsupportedSchema) {
+		t.Fatalf("expected ErrUnsupportedSchema when schema_version is drifted, got %v", err)
+	}
+
+	if _, err := db.Exec("update usage_monitoring_rollup_state set schema_version = ? where rollup_name = ?",
+		usageidentity.CodexLegacyIdentityEvidenceSchemaVersion, usageevent.CodexLegacyIdentityRollupName); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := st.CatchUpCodexLegacyIdentityEvidence(ctx, 1000, 2)
+	if err != nil {
+		t.Fatalf("catch-up with decoupled schema version failed: %v", err)
+	}
+	if result.Processed != 5 {
+		t.Fatalf("expected processed=5, got %d", result.Processed)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -16,19 +17,25 @@ import (
 )
 
 type Event struct {
-	RequestID      string `json:"request_id,omitempty"`
-	EventHash      string `json:"event_hash"`
-	TimestampMS    int64  `json:"timestamp_ms"`
-	Timestamp      string `json:"timestamp"`
-	Provider       string `json:"provider,omitempty"`
-	ExecutorType   string `json:"executor_type,omitempty"`
-	Model          string `json:"model"`
-	AnalyticsModel string `json:"analytics_model,omitempty"`
-	RequestedModel string `json:"requested_model,omitempty"`
-	ResolvedModel  string `json:"resolved_model,omitempty"`
-	Endpoint       string `json:"endpoint,omitempty"`
-	Method         string `json:"method,omitempty"`
-	Path           string `json:"path,omitempty"`
+	RequestID         string `json:"request_id,omitempty"`
+	EventHash         string `json:"event_hash"`
+	TimestampMS       int64  `json:"timestamp_ms"`
+	Timestamp         string `json:"timestamp"`
+	Provider          string `json:"provider,omitempty"`
+	ExecutorType      string `json:"executor_type,omitempty"`
+	Model             string `json:"model"`
+	AnalyticsModel    string `json:"analytics_model,omitempty"`
+	RequestedModel    string `json:"requested_model,omitempty"`
+	ResolvedModel     string `json:"resolved_model,omitempty"`
+	ResponseModel     string `json:"response_model,omitempty"`
+	SessionID         string `json:"session_id,omitempty"`
+	ParentSessionID   string `json:"parent_session_id,omitempty"`
+	AccessTokenSHA256 string `json:"access_token_sha256,omitempty"`
+	Generate          *bool  `json:"generate,omitempty"`
+	Stream            *bool  `json:"stream,omitempty"`
+	Endpoint          string `json:"endpoint,omitempty"`
+	Method            string `json:"method,omitempty"`
+	Path              string `json:"path,omitempty"`
 	// Downstream request metadata is available only to authenticated monitoring
 	// APIs. Compatible usage payloads and JSONL exports intentionally omit it.
 	ClientIP              string `json:"-"`
@@ -62,16 +69,20 @@ type Event struct {
 	CacheCreationTokens int64  `json:"cache_creation_tokens"`
 	// Normalized token buckets are persisted for aggregation and billing but are
 	// not exposed in compatible usage payloads.
-	NormalizedUncachedInputTokens int64  `json:"-"`
-	NormalizedTotalInputTokens    int64  `json:"-"`
-	NormalizedCacheReadTokens     int64  `json:"-"`
-	NormalizedCacheCreationTokens int64  `json:"-"`
-	TotalTokens                   int64  `json:"total_tokens"`
-	LatencyMS                     *int64 `json:"latency_ms,omitempty"`
-	TTFTMS                        *int64 `json:"ttft_ms,omitempty"`
-	Failed                        bool   `json:"failed"`
-	FailStatusCode                int    `json:"fail_status_code,omitempty"`
-	FailSummary                   string `json:"fail_summary,omitempty"`
+	NormalizedUncachedInputTokens int64 `json:"-"`
+	NormalizedTotalInputTokens    int64 `json:"-"`
+	NormalizedCacheReadTokens     int64 `json:"-"`
+	NormalizedCacheCreationTokens int64 `json:"-"`
+	TotalTokens                   int64 `json:"total_tokens"`
+	// PreserveArchiveDerivedFields is set only after an internal archive record
+	// passes schema validation. It keeps persisted accounting and service-tier
+	// semantics stable when an archive is restored by a newer CPAMP version.
+	PreserveArchiveDerivedFields bool   `json:"-"`
+	LatencyMS                    *int64 `json:"latency_ms,omitempty"`
+	TTFTMS                       *int64 `json:"ttft_ms,omitempty"`
+	Failed                       bool   `json:"failed"`
+	FailStatusCode               int    `json:"fail_status_code,omitempty"`
+	FailSummary                  string `json:"fail_summary,omitempty"`
 	// FailBody is retained only in the local DB as a sensitive internal field.
 	// Public APIs, compatible payloads, and exports must use FailSummary instead.
 	FailBody               string                  `json:"-"`
@@ -144,6 +155,12 @@ type Detail struct {
 	TTFTMS                *int64                  `json:"ttft_ms,omitempty"`
 	RequestedModel        string                  `json:"requested_model,omitempty"`
 	ResolvedModel         string                  `json:"resolved_model,omitempty"`
+	ResponseModel         string                  `json:"response_model,omitempty"`
+	SessionID             string                  `json:"session_id,omitempty"`
+	ParentSessionID       string                  `json:"parent_session_id,omitempty"`
+	AccessTokenSHA256     string                  `json:"access_token_sha256,omitempty"`
+	Generate              *bool                   `json:"generate,omitempty"`
+	Stream                *bool                   `json:"stream,omitempty"`
 	ReasoningEffort       string                  `json:"reasoning_effort,omitempty"`
 	ServiceTier           string                  `json:"service_tier,omitempty"`
 	RequestServiceTier    string                  `json:"request_service_tier,omitempty"`
@@ -174,13 +191,14 @@ type Payload struct {
 }
 
 const (
-	maxFailSummaryBytes            = 4096
-	maxClientIPBytes               = 64
-	maxXForwardedForBytes          = 2048
-	maxUserAgentBytes              = 1024
-	LongContextInputTokenThreshold = int64(272_000)
-	CacheInputModeIncluded         = "included_in_input"
-	CacheInputModeSeparate         = "separate_from_input"
+	maxFailSummaryBytes                        = 4096
+	maxClientIPBytes                           = 64
+	maxXForwardedForBytes                      = 2048
+	maxUserAgentBytes                          = 1024
+	LongContextInputTokenThreshold             = int64(272_000)
+	CacheInputModeIncluded                     = "included_in_input"
+	CacheInputModeSeparate                     = "separate_from_input"
+	CacheInputModeReadIncludedCreationSeparate = "read_included_creation_separate"
 )
 
 type CacheAccounting struct {
@@ -247,19 +265,48 @@ func NormalizeCacheAccounting(context CacheInputContext, inputTokens, cachedToke
 		CacheReadTokens:     cacheRead,
 		CacheCreationTokens: cacheCreation,
 	}
-	if mode == CacheInputModeSeparate {
+	switch mode {
+	case CacheInputModeSeparate:
 		accounting.UncachedInputTokens = input
 		accounting.TotalInputTokens = input + cacheRead + cacheCreation
-		return accounting
+	case CacheInputModeReadIncludedCreationSeparate:
+		accounting.UncachedInputTokens = maxInt64(input-cacheRead, 0)
+		accounting.TotalInputTokens = input + cacheCreation
+	default:
+		accounting.UncachedInputTokens = maxInt64(input-cacheRead-cacheCreation, 0)
+		accounting.TotalInputTokens = input
 	}
-	accounting.UncachedInputTokens = maxInt64(input-cacheRead-cacheCreation, 0)
-	accounting.TotalInputTokens = input
 	return accounting
+}
+
+func ValidateArchiveDerivedFields(event Event) error {
+	if !event.PreserveArchiveDerivedFields {
+		return nil
+	}
+	mode := normalizeCacheInputMode(event.CacheInputMode)
+	if mode != CacheInputModeIncluded && mode != CacheInputModeSeparate {
+		return fmt.Errorf("archive cache input mode %q is invalid", event.CacheInputMode)
+	}
+	for _, field := range []struct {
+		name  string
+		value int64
+	}{
+		{name: "normalized_uncached_input_tokens", value: event.NormalizedUncachedInputTokens},
+		{name: "normalized_total_input_tokens", value: event.NormalizedTotalInputTokens},
+		{name: "normalized_cache_read_tokens", value: event.NormalizedCacheReadTokens},
+		{name: "normalized_cache_creation_tokens", value: event.NormalizedCacheCreationTokens},
+		{name: "total_tokens", value: event.TotalTokens},
+	} {
+		if field.value < 0 {
+			return fmt.Errorf("archive %s must not be negative", field.name)
+		}
+	}
+	return nil
 }
 
 func InferCacheInputMode(context CacheInputContext, cacheReadTokens, cacheCreationTokens int64) string {
 	mode := normalizeCacheInputMode(context.ExplicitMode)
-	if mode == CacheInputModeIncluded || mode == CacheInputModeSeparate {
+	if mode == CacheInputModeIncluded || mode == CacheInputModeSeparate || mode == CacheInputModeReadIncludedCreationSeparate {
 		return mode
 	}
 	if classified, ok := classifyExecutorCacheInputMode(context.ExecutorType); ok {
@@ -290,6 +337,9 @@ func classifyExecutorCacheInputMode(executorType string) (string, bool) {
 	if executor == "" {
 		return "", false
 	}
+	if executor == "devinexecutor" {
+		return CacheInputModeReadIncludedCreationSeparate, true
+	}
 	if strings.Contains(executor, "claude") {
 		return CacheInputModeSeparate, true
 	}
@@ -310,6 +360,9 @@ func classifyProviderCacheInputMode(provider string) (string, bool) {
 	if provider == "" {
 		return "", false
 	}
+	if provider == "devin" || strings.HasPrefix(provider, "devin/") {
+		return CacheInputModeReadIncludedCreationSeparate, true
+	}
 	if strings.Contains(provider, "anthropic") || strings.Contains(provider, "claude") {
 		return CacheInputModeSeparate, true
 	}
@@ -328,6 +381,9 @@ func classifyModelCacheInputMode(model string) (string, bool) {
 	model = strings.ToLower(strings.TrimSpace(model))
 	if model == "" {
 		return "", false
+	}
+	if model == "devin" || strings.HasPrefix(model, "devin/") {
+		return CacheInputModeReadIncludedCreationSeparate, true
 	}
 	if strings.Contains(model, "anthropic") || strings.Contains(model, "claude") {
 		return CacheInputModeSeparate, true
@@ -383,12 +439,12 @@ func rawCacheAccountingHintsFromJSON(raw string, depth int) RawCacheAccountingHi
 func cacheInputModeFromRecord(record map[string]any) string {
 	for _, parent := range []string{"tokens", "usage"} {
 		mode := normalizeCacheInputMode(readStringFromNested(record, parent, "cache_input_mode", "cacheInputMode"))
-		if mode == CacheInputModeIncluded || mode == CacheInputModeSeparate {
+		if mode == CacheInputModeIncluded || mode == CacheInputModeSeparate || mode == CacheInputModeReadIncludedCreationSeparate {
 			return mode
 		}
 	}
 	mode := normalizeCacheInputMode(readString(record, "cache_input_mode", "cacheInputMode"))
-	if mode == CacheInputModeIncluded || mode == CacheInputModeSeparate {
+	if mode == CacheInputModeIncluded || mode == CacheInputModeSeparate || mode == CacheInputModeReadIncludedCreationSeparate {
 		return mode
 	}
 	return ""
@@ -436,15 +492,8 @@ func IsLongContextInput(inputTokens int64) bool {
 }
 
 var (
-	endpointPattern          = regexp.MustCompile(`^(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s+(\S+)`)
-	authorizationHeaderRegex = regexp.MustCompile(`(?i)\b(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,"'{}]+`)
-	bearerTokenRegex         = regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}`)
-	apiKeyTokenRegex         = regexp.MustCompile(`(sk-proj-[A-Za-z0-9-_]{6,}|sk-ant-[A-Za-z0-9-_]{6,}|sk-[A-Za-z0-9-_]{6,}|sess-[A-Za-z0-9-_]{6,}|ghp_[A-Za-z0-9]{6,}|github_pat_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z-_]{8,}|hf_[A-Za-z0-9]{6,}|pk_[A-Za-z0-9]{6,}|rk_[A-Za-z0-9]{6,})`)
-	tokenFieldRegex          = regexp.MustCompile(`(?i)\b(access_token|refresh_token|id_token)\b(\s*["']?\s*[:=]\s*["']?)[^"',\s&}]+`)
-	apiKeyFieldRegex         = regexp.MustCompile(`(?i)\b(api[-_ ]?key|x-api-key)\b(\s*["']?\s*[:=]\s*["']?)[^"',\s&}]+`)
-	cookieJSONFieldRegex     = regexp.MustCompile(`(?i)("?(?:cookie|set-cookie)"?\s*:\s*")[^"]*(")`)
-	cookieHeaderRegex        = regexp.MustCompile(`(?i)\b(cookie|set-cookie)\s*:\s*[^,\r\n"}]+`)
-	emailRegex               = regexp.MustCompile(`([A-Za-z0-9._%+\-])([A-Za-z0-9._%+\-]*)(@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})`)
+	endpointPattern = regexp.MustCompile(`^(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s+(\S+)`)
+	emailRegex      = regexp.MustCompile(`([A-Za-z0-9._%+\-])([A-Za-z0-9._%+\-]*)(@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})`)
 )
 
 // CompatibleCachedTokens returns the legacy cached_tokens value after removing
@@ -547,6 +596,12 @@ func NormalizeRaw(raw []byte) (Event, error) {
 	authIndex := readString(record, "auth_index", "authIndex", "AuthIndex")
 	requestedModel := readString(record, "alias", "requested_model", "requestedModel")
 	resolvedModel := readString(record, "resolved_model", "resolvedModel", "model", "model_name", "modelName")
+	responseModel := readString(record, "response_model", "responseModel")
+	sessionID := readString(record, "session_id", "sessionId")
+	parentSessionID := readString(record, "parent_session_id", "parentSessionId")
+	accessTokenSHA256 := readString(record, "access_token_sha256", "accessTokenSHA256", "accessTokenSha256")
+	generate := readOptionalBool(record, "generate", "Generate")
+	stream := readOptionalBool(record, "stream", "Stream")
 	model := requestedModel
 	if model == "" {
 		model = resolvedModel
@@ -586,6 +641,12 @@ func NormalizeRaw(raw []byte) (Event, error) {
 		AnalyticsModel:                usageidentity.AnalyticsModelForRequest(model, requestedModel),
 		RequestedModel:                requestedModel,
 		ResolvedModel:                 resolvedModel,
+		ResponseModel:                 responseModel,
+		SessionID:                     sessionID,
+		ParentSessionID:               parentSessionID,
+		AccessTokenSHA256:             accessTokenSHA256,
+		Generate:                      generate,
+		Stream:                        stream,
 		Endpoint:                      endpoint,
 		Method:                        method,
 		Path:                          path,
@@ -695,6 +756,12 @@ func BuildPayload(events []Event) Payload {
 			TTFTMS:                event.TTFTMS,
 			RequestedModel:        requestedModel,
 			ResolvedModel:         event.ResolvedModel,
+			ResponseModel:         event.ResponseModel,
+			SessionID:             event.SessionID,
+			ParentSessionID:       event.ParentSessionID,
+			AccessTokenSHA256:     event.AccessTokenSHA256,
+			Generate:              event.Generate,
+			Stream:                event.Stream,
 			ReasoningEffort:       event.ReasoningEffort,
 			ServiceTier:           event.ServiceTier,
 			RequestServiceTier:    event.RequestServiceTier,
@@ -817,9 +884,93 @@ func readFailFields(record map[string]any) (int64, string) {
 	return statusCode, body
 }
 
+func readOptionalBool(record map[string]any, keys ...string) *bool {
+	raw := first(record, keys...)
+	if raw == nil {
+		return nil
+	}
+	switch value := raw.(type) {
+	case bool:
+		v := value
+		return &v
+	case string:
+		trimmed := strings.ToLower(strings.TrimSpace(value))
+		if trimmed == "true" || trimmed == "1" {
+			v := true
+			return &v
+		}
+		if trimmed == "false" || trimmed == "0" {
+			v := false
+			return &v
+		}
+	case float64:
+		if value == 1 {
+			v := true
+			return &v
+		}
+		if value == 0 {
+			v := false
+			return &v
+		}
+	case int:
+		if value == 1 {
+			v := true
+			return &v
+		}
+		if value == 0 {
+			v := false
+			return &v
+		}
+	case int64:
+		if value == 1 {
+			v := true
+			return &v
+		}
+		if value == 0 {
+			v := false
+			return &v
+		}
+	case json.Number:
+		if n, err := value.Int64(); err == nil {
+			if n == 1 {
+				v := true
+				return &v
+			}
+			if n == 0 {
+				v := false
+				return &v
+			}
+		}
+	}
+	return nil
+}
+
 func readOptionalInt(record map[string]any, keys ...string) *int64 {
 	value := readInt(record, keys...)
 	if value == 0 && first(record, keys...) == nil {
+		return nil
+	}
+	return &value
+}
+
+func readOptionalFloat(record map[string]any, keys ...string) *float64 {
+	raw := first(record, keys...)
+	if raw == nil {
+		return nil
+	}
+	var value float64
+	var err error
+	switch number := raw.(type) {
+	case json.Number:
+		value, err = strconv.ParseFloat(number.String(), 64)
+	case float64:
+		value = number
+	case string:
+		value, err = strconv.ParseFloat(strings.TrimSpace(number), 64)
+	default:
+		return nil
+	}
+	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
 		return nil
 	}
 	return &value
@@ -868,10 +1019,7 @@ func sanitizeRequestMetadata(value string, maxBytes int) string {
 	if maxBytes <= 0 || len(cleaned) <= maxBytes {
 		return cleaned
 	}
-	if maxBytes <= 3 {
-		return truncateUTF8Bytes(cleaned, maxBytes)
-	}
-	return truncateUTF8Bytes(cleaned, maxBytes-3)
+	return truncateUTF8Bytes(cleaned, maxBytes)
 }
 
 func readStringFromNested(record map[string]any, parent string, keys ...string) string {
@@ -974,6 +1122,10 @@ func maskSource(value string) string {
 		}
 		return prefix + "***@" + parts[1]
 	}
+	if ContainsCredential(trimmed) {
+		sum := sha256.Sum256([]byte(trimmed))
+		return "h:" + hex.EncodeToString(sum[:])
+	}
 	if looksSecret(trimmed) {
 		if len(trimmed) <= 8 {
 			return "m:****"
@@ -995,35 +1147,24 @@ func FailSummaryFromBody(body string) string {
 	if summary == "" {
 		return ""
 	}
-	summary = authorizationHeaderRegex.ReplaceAllString(summary, `${1}[redacted]`)
-	summary = bearerTokenRegex.ReplaceAllString(summary, `Bearer [redacted]`)
-	summary = tokenFieldRegex.ReplaceAllString(summary, `${1}${2}[redacted]`)
-	summary = apiKeyFieldRegex.ReplaceAllString(summary, `${1}${2}[redacted]`)
-	summary = apiKeyTokenRegex.ReplaceAllString(summary, `[redacted]`)
-	summary = cookieJSONFieldRegex.ReplaceAllString(summary, `${1}[redacted]${2}`)
-	summary = cookieHeaderRegex.ReplaceAllString(summary, `${1}: [redacted]`)
+	summary = SanitizeCredentialText(summary)
 	summary = emailRegex.ReplaceAllString(summary, `${1}***${3}`)
 	return truncateUTF8Bytes(strings.TrimSpace(summary), maxFailSummaryBytes)
 }
 
 func SafeRawJSON(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return ""
-	}
-	var payload any
-	if err := json.Unmarshal([]byte(trimmed), &payload); err == nil {
-		redacted, err := json.Marshal(redactValue(payload))
-		if err == nil {
-			return string(redacted)
-		}
-	}
-	return FailSummaryFromBody(trimmed)
+	return SanitizeJSONForPersistence(raw)
 }
 
 func truncateUTF8Bytes(value string, maxBytes int) string {
 	if maxBytes <= 0 || len(value) <= maxBytes {
 		return value
+	}
+	limit := maxBytes
+	suffix := ""
+	if maxBytes > 3 {
+		limit = maxBytes - 3
+		suffix = "..."
 	}
 	var builder strings.Builder
 	for _, r := range value {
@@ -1031,48 +1172,20 @@ func truncateUTF8Bytes(value string, maxBytes int) string {
 		if size < 0 {
 			size = len(string(r))
 		}
-		if builder.Len()+size > maxBytes {
+		if builder.Len()+size > limit {
 			break
 		}
 		builder.WriteRune(r)
 	}
-	return strings.TrimSpace(builder.String()) + "..."
+	return strings.TrimSpace(builder.String()) + suffix
 }
 
 func redactValue(value any) any {
-	return redactValueWithParent("", value)
+	return sanitizeJSONValue(value)
 }
 
-func redactValueWithParent(parentKey string, value any) any {
-	switch item := value.(type) {
-	case map[string]any:
-		result := make(map[string]any, len(item))
-		for key, child := range item {
-			normalizedKey := normalizeSecretKey(key)
-			if isSecretKey(key) {
-				result[key] = "[redacted]"
-				continue
-			}
-			if maxBytes, ok := requestMetadataMaxBytes(normalizedKey); ok {
-				result[key] = sanitizeRequestMetadata(stringValue(child), maxBytes)
-				continue
-			}
-			if normalizedKey == "fail_body" || (parentKey == "fail" && normalizedKey == "body") {
-				result[key] = FailSummaryFromBody(stringValue(child))
-				continue
-			}
-			result[key] = redactValueWithParent(normalizedKey, child)
-		}
-		return result
-	case []any:
-		result := make([]any, 0, len(item))
-		for _, child := range item {
-			result = append(result, redactValueWithParent(parentKey, child))
-		}
-		return result
-	default:
-		return value
-	}
+func isSecretKey(key string) bool {
+	return isSecretFieldKey(key)
 }
 
 func requestMetadataMaxBytes(normalizedKey string) (int, bool) {
@@ -1086,26 +1199,6 @@ func requestMetadataMaxBytes(normalizedKey string) (int, bool) {
 	default:
 		return 0, false
 	}
-}
-
-func isSecretKey(key string) bool {
-	normalized := normalizeSecretKey(key)
-	return normalized == "api_key" ||
-		normalized == "apikey" ||
-		normalized == "authorization" ||
-		normalized == "cookie" ||
-		normalized == "set_cookie" ||
-		normalized == "access_token" ||
-		normalized == "refresh_token" ||
-		normalized == "id_token" ||
-		normalized == "token" ||
-		strings.Contains(normalized, "secret")
-}
-
-func normalizeSecretKey(key string) string {
-	normalized := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(key), "-", "_"))
-	normalized = strings.ReplaceAll(normalized, " ", "_")
-	return normalized
 }
 
 func stringValue(raw any) string {

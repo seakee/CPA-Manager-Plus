@@ -10,6 +10,7 @@ import (
 
 	appidentity "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/identityprojection"
 	ports "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/ports/identityprojection"
+	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
 
@@ -198,6 +199,9 @@ func (r *repository) CatchUp(ctx context.Context, limit int, nowMS int64) (ports
 	}
 	rebuilding := checkpointBindingRevision != currentBindingRevision && state.LastProcessedEventID > 0
 	if checkpointBindingRevision != currentBindingRevision {
+		if err := requireCompleteRawSource(tx); err != nil {
+			return ports.CatchUpResult{}, err
+		}
 		state.LastProcessedEventID = 0
 		state.TargetEventID = 0
 		state.ProcessedEvents = 0
@@ -470,6 +474,9 @@ func (r *repository) Reset(ctx context.Context) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if err := requireCompleteRawSource(tx); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM gateway_usage_identity_projection_v1`); err != nil {
 		return fmt.Errorf("truncate projection table: %w", err)
 	}
@@ -491,6 +498,20 @@ func (r *repository) Reset(ctx context.Context) error {
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit reset tx: %w", err)
+	}
+	return nil
+}
+
+// The retained monitoring projection and public archive format omit raw Auth.ID
+// evidence. Preserve canonical rows and fail closed until a complete source can
+// be proven for a reset or source-binding replay.
+func requireCompleteRawSource(tx *sql.Tx) error {
+	deleted, err := sqliterepo.HistoricalRawDeletionExists(tx)
+	if err != nil {
+		return fmt.Errorf("inspect canonical identity replay source: %w", err)
+	}
+	if deleted {
+		return errors.New("cannot rebuild canonical identity projection: historical raw usage events have been archived and deleted; complete identity evidence is required")
 	}
 	return nil
 }

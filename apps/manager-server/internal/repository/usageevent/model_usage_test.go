@@ -74,7 +74,7 @@ func TestModelUsageSummaryReturnsEmptyModels(t *testing.T) {
 
 func modelUsageTestEvent(hash string, timestampMS int64, requestedModel, resolvedModel string) usage.Event {
 	return usage.Event{
-		EventHash:     hash,
+		EventHash:     canonicalTestHash(hash),
 		TimestampMS:   timestampMS,
 		Timestamp:     "2026-01-01T00:00:00Z",
 		Model:         requestedModel,

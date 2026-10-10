@@ -2,6 +2,7 @@ package usagehourly
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -26,10 +27,16 @@ type Reader struct {
 	fallbackLogContext string
 }
 
+type DeletedEdges struct {
+	Left  bool
+	Right bool
+}
+
 type Snapshot struct {
 	Aggregate  store.Aggregate
 	ModelStats []store.ModelStat
 	Prices     map[string]store.ModelPrice
+	ReadError  error
 
 	rows                   []store.UsageHourlyAggregateRow
 	pricingRows            []store.UsagePricingHourlyRow
@@ -78,7 +85,7 @@ func (r *Reader) Load(ctx context.Context, fromMS, toMS int64) (Snapshot, bool) 
 		FromMS:        fromMS,
 		ToMS:          toMS,
 		IncludeFailed: true,
-	}, true, true)
+	}, true, true, DeletedEdges{})
 }
 
 func (r *Reader) LoadAnalytics(
@@ -87,12 +94,17 @@ func (r *Reader) LoadAnalytics(
 	granularity string,
 	location *time.Location,
 	needsTimeline bool,
+	deletedEdges ...DeletedEdges,
 ) (Snapshot, bool) {
 	if !SupportsAnalyticsFilter(filter) {
 		return Snapshot{}, false
 	}
 	analyticsTimelineReady := needsTimeline && r.CanRepresentAnalyticsTimeline(filter.FromMS, filter.ToMS, granularity, location)
-	return r.loadRows(ctx, filter, false, analyticsTimelineReady)
+	edges := DeletedEdges{}
+	if len(deletedEdges) > 0 {
+		edges = deletedEdges[0]
+	}
+	return r.loadRows(ctx, filter, false, analyticsTimelineReady, edges)
 }
 
 // SupportsAnalyticsFilter reports whether the permanent hourly aggregate
@@ -117,7 +129,7 @@ func SupportsAnalyticsFilter(filter store.AnalyticsFilter) bool {
 		strings.TrimSpace(filter.CacheStatus) == ""
 }
 
-func (r *Reader) loadRows(ctx context.Context, filter store.AnalyticsFilter, dashboardTimelineReady bool, analyticsTimelineReady bool) (Snapshot, bool) {
+func (r *Reader) loadRows(ctx context.Context, filter store.AnalyticsFilter, dashboardTimelineReady bool, analyticsTimelineReady bool, edges DeletedEdges) (Snapshot, bool) {
 	if !r.enabled {
 		return Snapshot{}, false
 	}
@@ -133,23 +145,31 @@ func (r *Reader) loadRows(ctx context.Context, filter store.AnalyticsFilter, das
 	}
 
 	aggregateFilter := store.UsageHourlyAggregateFilter{
-		FromMS:          filter.FromMS,
-		ToMS:            filter.ToMS,
-		Models:          filter.Models,
-		IncludeFailed:   filter.IncludeFailed,
-		FailedOnly:      filter.FailedOnly,
-		CollapseBuckets: !dashboardTimelineReady && !analyticsTimelineReady,
+		FromMS:           filter.FromMS,
+		ToMS:             filter.ToMS,
+		Models:           filter.Models,
+		IncludeFailed:    filter.IncludeFailed,
+		FailedOnly:       filter.FailedOnly,
+		CollapseBuckets:  !dashboardTimelineReady && !analyticsTimelineReady,
+		LeftEdgeDeleted:  edges.Left,
+		RightEdgeDeleted: edges.Right,
 	}
 	pricingFilter := store.UsagePricingHourlyFilter{
-		FromMS:          filter.FromMS,
-		ToMS:            filter.ToMS,
-		Models:          filter.Models,
-		IncludeFailed:   filter.IncludeFailed,
-		FailedOnly:      filter.FailedOnly,
-		CollapseBuckets: !dashboardTimelineReady && !analyticsTimelineReady,
+		FromMS:           filter.FromMS,
+		ToMS:             filter.ToMS,
+		Models:           filter.Models,
+		IncludeFailed:    filter.IncludeFailed,
+		FailedOnly:       filter.FailedOnly,
+		CollapseBuckets:  !dashboardTimelineReady && !analyticsTimelineReady,
+		LeftEdgeDeleted:  edges.Left,
+		RightEdgeDeleted: edges.Right,
 	}
 	dbSnapshot, err := r.store.LoadUsageHourlyPricingSnapshot(ctx, aggregateFilter, pricingFilter)
 	if err != nil {
+		if errors.Is(err, store.ErrUsagePricingCoverageIncomplete) ||
+			errors.Is(err, store.ErrUsagePricingRecoveryFailed) {
+			return Snapshot{ReadError: err}, false
+		}
 		r.logFallback(fmt.Sprintf("hourly pricing snapshot query failed: %v", err))
 		return Snapshot{}, false
 	}

@@ -322,7 +322,7 @@ func latestAccountRequestEvent(
 	source string,
 ) usage.Event {
 	return usage.Event{
-		EventHash:        hash,
+		EventHash:        canonicalTestHash(hash),
 		TimestampMS:      timestampMS,
 		Timestamp:        time.UnixMilli(timestampMS).UTC().Format(time.RFC3339Nano),
 		Model:            "gpt-test",

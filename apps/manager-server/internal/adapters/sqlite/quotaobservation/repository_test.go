@@ -3,6 +3,7 @@ package quotaobservation
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -117,4 +118,70 @@ func changeConfigAndProjection(ctx context.Context, db *sql.DB) error {
 		}
 	}
 	return tx.Commit()
+}
+
+func TestObserveRejectsMissingRawWithinCanonicalWindow(t *testing.T) {
+	for _, tt := range []struct {
+		name                  string
+		missingID, missingAt  int64
+		missingKey            any
+		missingState          string
+		highWater, start, end int64
+		wantError             bool
+		wantCount             int64
+	}{
+		{"deleted within window", 1, 100, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "mapped", 2, 1, 201, true, 0},
+		{"different key", 1, 100, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "mapped", 2, 1, 201, false, 1},
+		{"unmapped", 1, 100, nil, "unknown", 2, 1, 201, false, 1},
+		{"before window", 1, 100, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "mapped", 2, 150, 201, false, 1},
+		{"exclusive end", 1, 100, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "mapped", 2, 1, 100, false, 0},
+		{"beyond high water", 3, 150, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "mapped", 2, 1, 201, false, 1},
+		{"after source time", 1, 250, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "mapped", 2, 1, 201, false, 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			db, err := sqlite.Open(filepath.Join(t.TempDir(), "archive-window.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			for _, statement := range []string{
+				`insert into usage_events(id,event_hash,timestamp_ms,timestamp,model,total_tokens,failed,created_at_ms)
+				 values (2,'live',200,'2026-01-01T00:00:00Z','model',5,0,1)`,
+				`insert into gateway_usage_identity_projection_v1
+				 (usage_event_id,event_hash,evidence_timestamp_ms,api_key_state,api_key_id,credential_state,schema_version,projected_at_ms)
+				 values (2,'live',200,'mapped','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','unknown',1,1)`,
+			} {
+				if _, err := db.Exec(statement); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := db.Exec(`insert into gateway_usage_identity_projection_v1
+				(usage_event_id,event_hash,evidence_timestamp_ms,api_key_state,api_key_id,credential_state,schema_version,projected_at_ms)
+				values (?,'archived',?,?,?,'unknown',1,1)`, tt.missingID, tt.missingAt, tt.missingState, tt.missingKey); err != nil {
+				t.Fatal(err)
+			}
+			for _, metric := range []resourcepolicy.Metric{resourcepolicy.MetricRequest, resourcepolicy.MetricToken} {
+				err := New(db).WithSnapshot(context.Background(), func(v ports.View) error {
+					observation, err := v.Observe(context.Background(), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", metric, tt.highWater, tt.start, tt.end)
+					if tt.wantError {
+						if !errors.Is(err, ErrSourceIncomplete) {
+							t.Fatalf("%s incomplete historical source: %+v err=%v", metric, observation, err)
+						}
+						return nil
+					}
+					if err != nil {
+						return err
+					}
+					if observation.Count != tt.wantCount || metric == resourcepolicy.MetricToken &&
+						(observation.TokenSum == nil || *observation.TokenSum != tt.wantCount*5) {
+						t.Fatalf("%s unaffected observation: %+v", metric, observation)
+					}
+					return nil
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
 }

@@ -21,12 +21,15 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/identitymutation"
 	identityprojectionapp "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/identityprojection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/identityreconcile"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo"
+
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/adminreset"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/cpaconnection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/derivedmaintenance"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/managerdatasnapshot"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/runtimeconfig"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/usagecompact"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/httpapi"
@@ -46,6 +49,13 @@ import (
 )
 
 func main() {
+	if handled, err := writeVersion(os.Args[1:], os.Stdout); handled {
+		if err != nil {
+			log.Printf("write version: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "reset-admin-key", "reset-admin-password":
@@ -59,6 +69,17 @@ func main() {
 			defer stop()
 			if err := derivedmaintenance.Run(ctx, os.Args[2:], os.Stdout, os.Stderr); err != nil {
 				log.Printf("cleanup derived data: %v", err)
+				os.Exit(1)
+			}
+			return
+		case "compact-usage":
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			if err := usagecompact.Run(ctx, os.Args[2:], os.Stdout, os.Stderr); err != nil {
+				if usagecompact.IsHelp(err) {
+					return
+				}
+				log.Printf("compact usage database: %v", err)
 				os.Exit(1)
 			}
 			return
@@ -83,6 +104,14 @@ func main() {
 		}
 	}
 	runServer()
+}
+
+func writeVersion(args []string, stdout io.Writer) (bool, error) {
+	if len(args) != 1 || (args[0] != "-v" && args[0] != "--version") {
+		return false, nil
+	}
+	_, err := fmt.Fprintln(stdout, buildinfo.Version)
+	return true, err
 }
 
 func runManagerDataSnapshotCommand(args []string, stdout io.Writer, stderr io.Writer) error {
@@ -193,9 +222,6 @@ func runServer() {
 		log.Printf("recover codex inspection runs: %v", err)
 	}
 	cancelRecovery()
-	if err := serverApp.AppContext().UsageService.StartImportSessionCleanup(ctx); err != nil {
-		log.Fatalf("start usage import session cleanup: %v", err)
-	}
 	automationSettingsService := serverApp.AppContext().AccountProcessingPolicyService
 	runtimeSettings := automationSettingsService.RuntimeSettings(ctx)
 	rateLimitAutoDisableWorker := worker.NewRateLimitAutoDisableWorkerWithMutationCoordinator(
@@ -219,6 +245,14 @@ func runServer() {
 		usageHourlyAggregateWorker = worker.NewUsageHourlyAggregateWorker(db)
 	}
 	identityProjectionWorker := identityprojectionapp.NewWorker(db.IdentityProjections)
+	var usageArchiveRetentionWorker *worker.UsageArchiveRetentionWorker
+	if cfg.UsageArchiveRetentionEnabled && cfg.UsageArchiveRetentionDays > 0 && cfg.DashboardHourlyRollupEnabled {
+		usageArchiveRetentionWorker = worker.NewUsageArchiveRetentionWorker(
+			serverApp.AppContext().UsageService,
+			cfg.UsageArchiveRetentionDays,
+		)
+	}
+
 	serverApp.AppContext().UsageService.SetEventsInsertedNotifier(func() {
 		accountHistoryRollupWorker.Wake()
 		usageDerivedRollupWorker.Wake()
@@ -368,6 +402,12 @@ func runServer() {
 		go identityWorker.Run(ctx)
 	}
 	go serverApp.AppContext().UpdateCheckService.Run(ctx)
+	if err := serverApp.AppContext().UsageService.StartImportSessionCleanup(ctx); err != nil {
+		log.Printf("[startup] start usage import session cleanup: %v", err)
+	}
+	if err := serverApp.AppContext().UsageService.StartArchiveJobs(ctx); err != nil {
+		log.Printf("[startup] start usage archive jobs: %v", err)
+	}
 
 	if err := db.RunDerivedStartupMaintenance(ctx); err != nil && ctx.Err() == nil {
 		log.Printf("[startup] post-listen index preparation failed; continuing without blocking background workers: %v", err)
@@ -394,7 +434,18 @@ func runServer() {
 			usageHourlyAggregateWorker.Wake()
 		}
 		identityProjectionWorker.Wake()
-		go runUsageResponseMetadataBackfill(ctx, db)
+		go func() {
+			if err := waitForUsageResponseMetadataBackfill(ctx, db); err != nil {
+				if ctx.Err() == nil {
+					log.Printf("usage response metadata backfill: %v", err)
+				}
+				return
+			}
+			if usageArchiveRetentionWorker != nil {
+				usageArchiveRetentionWorker.Start(ctx)
+			}
+		}()
+
 	})
 	if ctx.Err() == nil {
 		usageCacheAccountingMigrationWorker.Start(ctx)
@@ -428,6 +479,12 @@ func runServer() {
 	}
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown: %v", err)
+	}
+	if err := usageArchiveRetentionWorker.StopAndWait(shutdownCtx); err != nil {
+		log.Printf("shutdown usage archive retention: %v", err)
+	}
+	if err := serverApp.AppContext().UsageService.WaitArchiveJobs(shutdownCtx); err != nil {
+		log.Printf("shutdown usage archive jobs: %v", err)
 	}
 }
 
@@ -496,27 +553,58 @@ func newPprofServer(addr string) (*http.Server, error) {
 	}, nil
 }
 
-func runUsageResponseMetadataBackfill(ctx context.Context, db *store.Store) {
+const usageResponseMetadataBackfillRetryDelay = 5 * time.Second
+
+func waitForUsageResponseMetadataBackfill(ctx context.Context, db *store.Store) error {
+	return waitForBackfillReadiness(ctx, usageResponseMetadataBackfillRetryDelay, func(runCtx context.Context) error {
+		return runUsageResponseMetadataBackfill(runCtx, db)
+	})
+}
+
+func waitForBackfillReadiness(ctx context.Context, retryDelay time.Duration, run func(context.Context) error) error {
+	if run == nil {
+		return errors.New("usage response metadata backfill is not configured")
+	}
+	if retryDelay <= 0 {
+		retryDelay = time.Second
+	}
+	for {
+		err := run(ctx)
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		log.Printf("usage response metadata backfill failed; will retry: %v", err)
+		timer := time.NewTimer(retryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func runUsageResponseMetadataBackfill(ctx context.Context, db *store.Store) error {
 	const batchLimit = 1000
 	total := 0
 	for {
 		updated, err := db.BackfillUsageResponseMetadata(ctx, batchLimit)
 		if err != nil {
-			if ctx.Err() == nil {
-				log.Printf("usage response metadata backfill: %v", err)
-			}
-			return
+			return err
 		}
 		if updated == 0 {
 			if total > 0 {
 				log.Printf("usage response metadata backfill completed: updated=%d", total)
 			}
-			return
+			return nil
 		}
 		total += updated
 		select {
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		case <-time.After(100 * time.Millisecond):
 		}
 	}

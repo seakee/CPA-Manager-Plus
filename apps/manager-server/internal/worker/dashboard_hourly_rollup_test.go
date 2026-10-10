@@ -2,6 +2,8 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -20,7 +22,7 @@ func TestDashboardHourlyRollupWorkerCatchUp(t *testing.T) {
 	ctx := context.Background()
 	timestampMS := int64(1_800_000_001_000)
 	if _, err := db.InsertEvents(ctx, []usage.Event{{
-		EventHash:    "dashboard-worker-event",
+		EventHash:    testCanonicalHash("dashboard-worker-event"),
 		TimestampMS:  timestampMS,
 		Timestamp:    time.UnixMilli(timestampMS).UTC().Format(time.RFC3339Nano),
 		Model:        "gpt-a",
@@ -62,7 +64,7 @@ func TestDashboardHourlyRollupWorkerContinuesPendingBacklog(t *testing.T) {
 	for index := 0; index < 5; index++ {
 		timestampMS := baseMS + int64(index)*1000
 		events = append(events, usage.Event{
-			EventHash:   fmt.Sprintf("dashboard-worker-backlog-%d", index),
+			EventHash:   testCanonicalHash(fmt.Sprintf("dashboard-worker-backlog-%d", index)),
 			TimestampMS: timestampMS,
 			Timestamp:   time.UnixMilli(timestampMS).UTC().Format(time.RFC3339Nano),
 			Model:       "gpt-a",
@@ -98,6 +100,11 @@ func TestDashboardHourlyRollupWorkerContinuesPendingBacklog(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+func testCanonicalHash(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
 }
 
 const hourWindowMS int64 = 60 * 60 * 1000

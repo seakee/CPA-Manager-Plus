@@ -409,6 +409,12 @@ type EventPageItem struct {
 	AnalyticsModel         string
 	RequestedModel         string
 	ResolvedModel          string
+	ResponseModel          string
+	SessionID              string
+	ParentSessionID        string
+	AccessTokenSHA256      string
+	Generate               *bool
+	Stream                 *bool
 	Endpoint               string
 	Method                 string
 	Path                   string
@@ -2665,7 +2671,13 @@ func (r *repository) EventsPageWithFilter(ctx context.Context, filter AnalyticsF
 	coalesce(header_quota_plan_type, ''),
 	coalesce(header_error_kind, ''),
 	coalesce(header_error_code, ''),
-	coalesce(header_trace_id, '')
+	coalesce(header_trace_id, ''),
+	coalesce(response_model, ''),
+	coalesce(session_id, ''),
+	coalesce(parent_session_id, ''),
+	coalesce(access_token_sha256, ''),
+	generate,
+	stream
 from usage_events `+where+`
 order by timestamp_ms desc, id desc
 limit ?`, args...)
@@ -2679,6 +2691,8 @@ limit ?`, args...)
 		var item EventPageItem
 		var failed int
 		var responseMetadataJSON string
+		var responseModel, sessionID, parentSessionID, accessTokenSHA256 sql.NullString
+		var generateVal, streamVal sql.NullInt64
 		if err := rows.Scan(
 			&item.ID,
 			&item.RequestID,
@@ -2727,10 +2741,28 @@ limit ?`, args...)
 			&item.HeaderErrorKind,
 			&item.HeaderErrorCode,
 			&item.HeaderTraceID,
+			&responseModel,
+			&sessionID,
+			&parentSessionID,
+			&accessTokenSHA256,
+			&generateVal,
+			&streamVal,
 		); err != nil {
 			return EventsPage{}, err
 		}
 		item.Failed = failed != 0
+		item.ResponseModel = responseModel.String
+		item.SessionID = sessionID.String
+		item.ParentSessionID = parentSessionID.String
+		item.AccessTokenSHA256 = accessTokenSHA256.String
+		if generateVal.Valid {
+			v := generateVal.Int64 != 0
+			item.Generate = &v
+		}
+		if streamVal.Valid {
+			v := streamVal.Int64 != 0
+			item.Stream = &v
+		}
 		item.AuthProjectIDSnapshot = usageidentity.ProjectIDSnapshot(item.AuthProviderSnapshot, item.AuthProjectIDSnapshot)
 		item.ResponseMetadata = usage.ResponseHeaderMetadataFromJSON(responseMetadataJSON)
 		items = append(items, item)

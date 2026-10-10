@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageprojection"
+	sqliteutil "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/sqliteutil"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
@@ -28,8 +30,10 @@ type Repository interface {
 	State(ctx context.Context) (State, error)
 	LoadHourlyRows(ctx context.Context, filter HourlyFilter) ([]HourlyRow, State, bool, error)
 	LoadHourlyRowsTx(ctx context.Context, tx *sql.Tx, filter HourlyFilter) ([]HourlyRow, State, bool, error)
+	LoadHourlyRowsFromEventsTx(ctx context.Context, tx *sql.Tx, filter HourlyFilter) ([]HourlyRow, error)
 	LoadAccountRows(ctx context.Context, accountKeys []string) ([]AccountRow, State, bool, error)
 	LoadAccountRowsTx(ctx context.Context, tx *sql.Tx, accountKeys []string) ([]AccountRow, State, bool, error)
+	LoadAccountRowsFromEventsTx(ctx context.Context, tx *sql.Tx, accountKeys []string) ([]AccountRow, error)
 }
 
 type State struct {
@@ -60,12 +64,14 @@ type CatchUpResult struct {
 }
 
 type HourlyFilter struct {
-	FromMS          int64
-	ToMS            int64
-	Models          []string
-	IncludeFailed   bool
-	FailedOnly      bool
-	CollapseBuckets bool
+	FromMS           int64
+	ToMS             int64
+	Models           []string
+	IncludeFailed    bool
+	FailedOnly       bool
+	CollapseBuckets  bool
+	LeftEdgeDeleted  bool
+	RightEdgeDeleted bool
 }
 
 type HourlyRow struct {
@@ -179,9 +185,18 @@ func (r *repository) CatchUp(ctx context.Context, limit int, nowMS int64) (Catch
 	if err != nil {
 		return CatchUpResult{}, err
 	}
+	rebuildMode := state.StructureRevision != revision ||
+		state.Status == "clearing" || state.Status == "rebuilding" || state.Status == "pending"
 	latestID, err := latestEventID(ctx, tx)
 	if err != nil {
 		return CatchUpResult{}, err
+	}
+	eventSource := "usage_events"
+	if rebuildMode {
+		eventSource, latestID, err = retainedPricingRebuildSourceTx(ctx, tx)
+		if err != nil {
+			return CatchUpResult{}, fmt.Errorf("cannot rebuild pricing rollups from retained usage history: %w", err)
+		}
 	}
 	rebuilt := (state.Status == "pending" || state.Status == "rebuilding" || state.Status == "clearing") &&
 		state.CoverageEventID < state.TargetEventID
@@ -236,7 +251,7 @@ func (r *repository) CatchUp(ctx context.Context, limit int, nowMS int64) (Catch
 			return CatchUpResult{}, err
 		}
 	}
-	ids, err := eventIDsThrough(ctx, tx, state.BackfillLastEventID, targetEventID, limit)
+	ids, err := eventIDsThrough(ctx, tx, eventSource, state.BackfillLastEventID, targetEventID, limit)
 	if err != nil {
 		return CatchUpResult{}, err
 	}
@@ -280,13 +295,13 @@ func (r *repository) CatchUp(ctx context.Context, limit int, nowMS int64) (Catch
 	}
 
 	lastEventID := ids[len(ids)-1]
-	if err := upsertHourlyBatch(ctx, tx, revision, state.BackfillLastEventID, lastEventID, nowMS); err != nil {
+	if err := upsertHourlyBatch(ctx, tx, eventSource, revision, state.BackfillLastEventID, lastEventID, nowMS); err != nil {
 		return CatchUpResult{}, err
 	}
-	if err := upsertAccountBatch(ctx, tx, revision, state.BackfillLastEventID, lastEventID, nowMS); err != nil {
+	if err := upsertAccountBatch(ctx, tx, eventSource, revision, state.BackfillLastEventID, lastEventID, nowMS); err != nil {
 		return CatchUpResult{}, err
 	}
-	minBucket, maxBucket, err := batchBucketRange(ctx, tx, state.BackfillLastEventID, lastEventID)
+	minBucket, maxBucket, err := batchBucketRange(ctx, tx, eventSource, state.BackfillLastEventID, lastEventID)
 	if err != nil {
 		return CatchUpResult{}, err
 	}
@@ -349,6 +364,9 @@ func (r *repository) CatchUp(ctx context.Context, limit int, nowMS int64) (Catch
 
 func (r *repository) RecordFailure(ctx context.Context, rollupErr error, nowMS int64) error {
 	if rollupErr == nil || nowMS <= 0 {
+		return nil
+	}
+	if sqliteutil.IsBusyError(rollupErr) {
 		return nil
 	}
 	_, err := r.db.ExecContext(ctx, `update usage_pricing_rollup_state set
@@ -493,11 +511,14 @@ func latestEventID(ctx context.Context, tx *sql.Tx) (int64, error) {
 	return id, nil
 }
 
-func eventIDsThrough(ctx context.Context, tx *sql.Tx, lastEventID, targetEventID int64, limit int) ([]int64, error) {
+func eventIDsThrough(ctx context.Context, tx *sql.Tx, source string, lastEventID, targetEventID int64, limit int) ([]int64, error) {
 	if targetEventID <= lastEventID {
 		return []int64{}, nil
 	}
-	rows, err := tx.QueryContext(ctx, `select id from usage_events where id > ? and id <= ? order by id limit ?`, lastEventID, targetEventID, limit)
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+		`select id from %s where id > ? and id <= ? order by id limit ?`,
+		source,
+	), lastEventID, targetEventID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -513,16 +534,20 @@ func eventIDsThrough(ctx context.Context, tx *sql.Tx, lastEventID, targetEventID
 	return ids, rows.Err()
 }
 
-func batchBucketRange(ctx context.Context, tx *sql.Tx, afterID, throughID int64) (sql.NullInt64, sql.NullInt64, error) {
+func batchBucketRange(ctx context.Context, tx *sql.Tx, source string, afterID, throughID int64) (sql.NullInt64, sql.NullInt64, error) {
 	var minBucket, maxBucket sql.NullInt64
 	err := tx.QueryRowContext(ctx, fmt.Sprintf(`select
 		min(timestamp_ms - (timestamp_ms %% %d)),
 		max(timestamp_ms - (timestamp_ms %% %d))
-		from usage_events where id > ? and id <= ?`, hourMS, hourMS), afterID, throughID).Scan(&minBucket, &maxBucket)
+		from %s where id > ? and id <= ?`, hourMS, hourMS, source), afterID, throughID).Scan(&minBucket, &maxBucket)
 	return minBucket, maxBucket, err
 }
 
 func bandedEventsCTE(whereClause string) string {
+	return bandedEventsFromSourceCTE(whereClause, "usage_events")
+}
+
+func bandedEventsFromSourceCTE(whereClause, source string) string {
 	accountKeyExpression := usageidentity.SQLAccountKeyExpression("e")
 	requestedModelExpression := usageidentity.SQLEffectiveRequestedModelExpression("e.model", "e.requested_model")
 	analyticsModelExpression := usageidentity.SQLRequestAnalyticsModelExpression("e.model", "e.requested_model")
@@ -540,7 +565,7 @@ func bandedEventsCTE(whereClause string) string {
 				0
 			) as compatible_cached_tokens_value,
 			%s as account_key_value
-		from usage_events e
+		from %s e
 		where %s
 	), priced_events as (
 		select
@@ -565,11 +590,11 @@ func bandedEventsCTE(whereClause string) string {
 					and priced_events.normalized_input_tokens_value > tier.threshold_tokens
 			), %d) as context_threshold_tokens_value
 		from priced_events
-		)`, requestedModelExpression, analyticsModelExpression, analyticsModelExpression, accountKeyExpression, whereClause, model.ModelPriceBaseContextThreshold)
+		)`, requestedModelExpression, analyticsModelExpression, analyticsModelExpression, accountKeyExpression, source, whereClause, model.ModelPriceBaseContextThreshold)
 }
 
-func upsertHourlyBatch(ctx context.Context, tx *sql.Tx, revision string, afterID, throughID, nowMS int64) error {
-	query := bandedEventsCTE("e.id > ? and e.id <= ?") + fmt.Sprintf(`
+func upsertHourlyBatch(ctx context.Context, tx *sql.Tx, source, revision string, afterID, throughID, nowMS int64) error {
+	query := bandedEventsFromSourceCTE("e.id > ? and e.id <= ?", source) + fmt.Sprintf(`
 	insert into usage_pricing_hourly_rollups_v1 (
 		structure_revision, bucket_ms, model, billing_model, pricing_model,
 		service_tier, context_threshold_tokens, failed, calls,
@@ -639,8 +664,8 @@ func upsertHourlyBatch(ctx context.Context, tx *sql.Tx, revision string, afterID
 	return err
 }
 
-func upsertAccountBatch(ctx context.Context, tx *sql.Tx, revision string, afterID, throughID, nowMS int64) error {
-	query := bandedEventsCTE("e.id > ? and e.id <= ?") + fmt.Sprintf(`
+func upsertAccountBatch(ctx context.Context, tx *sql.Tx, source, revision string, afterID, throughID, nowMS int64) error {
+	query := bandedEventsFromSourceCTE("e.id > ? and e.id <= ?", source) + fmt.Sprintf(`
 	insert into usage_pricing_account_rollups_v1 (
 		structure_revision, account_key, account_snapshot, auth_label_snapshot,
 		auth_provider_snapshot, auth_index, source, source_hash, model,
@@ -778,12 +803,26 @@ func (r *repository) LoadHourlyRowsTx(ctx context.Context, tx *sql.Tx, filter Ho
 		}
 	}
 	if filter.FromMS < fullStartMS {
-		if err := mergeRawHourlyRows(ctx, tx, filter, filter.FromMS, min(fullStartMS, filter.ToMS), 0, false, grouped); err != nil {
+		fromMS, toMS := filter.FromMS, min(fullStartMS, filter.ToMS)
+		var err error
+		if filter.LeftEdgeDeleted {
+			err = mergeRetainedEdgeHourlyRows(ctx, tx, filter, fromMS, toMS, grouped)
+		} else {
+			err = mergeRawHourlyRows(ctx, tx, filter, fromMS, toMS, 0, false, grouped)
+		}
+		if err != nil {
 			return nil, State{}, false, err
 		}
 	}
 	if fullEndMS < filter.ToMS {
-		if err := mergeRawHourlyRows(ctx, tx, filter, max(fullEndMS, filter.FromMS), filter.ToMS, 0, false, grouped); err != nil {
+		fromMS, toMS := max(fullEndMS, filter.FromMS), filter.ToMS
+		var err error
+		if filter.RightEdgeDeleted {
+			err = mergeRetainedEdgeHourlyRows(ctx, tx, filter, fromMS, toMS, grouped)
+		} else {
+			err = mergeRawHourlyRows(ctx, tx, filter, fromMS, toMS, 0, false, grouped)
+		}
+		if err != nil {
 			return nil, State{}, false, err
 		}
 	}
@@ -834,6 +873,15 @@ func mergeRawHourlyRows(
 	grouped map[hourlyKey]*HourlyRow,
 ) error {
 	query, args := rawHourlyStatement(filter, fromMS, toMS, afterID, useAfterID)
+	return mergeHourlyEventRows(ctx, tx, query, args, grouped)
+}
+
+func mergeRetainedEdgeHourlyRows(ctx context.Context, tx *sql.Tx, filter HourlyFilter, fromMS, toMS int64, grouped map[hourlyKey]*HourlyRow) error {
+	query, args := hourlyStatementFromEvents(filter, fromMS, toMS, 0, false, usageprojection.RetainedEdgeSource(fromMS, toMS))
+	return mergeHourlyEventRows(ctx, tx, query, args, grouped)
+}
+
+func mergeHourlyEventRows(ctx context.Context, tx *sql.Tx, query string, args []any, grouped map[hourlyKey]*HourlyRow) error {
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err
@@ -843,6 +891,10 @@ func mergeRawHourlyRows(
 }
 
 func rawHourlyStatement(filter HourlyFilter, fromMS, toMS, afterID int64, useAfterID bool) (string, []any) {
+	return hourlyStatementFromEvents(filter, fromMS, toMS, afterID, useAfterID, "usage_events")
+}
+
+func hourlyStatementFromEvents(filter HourlyFilter, fromMS, toMS, afterID int64, useAfterID bool, source string) (string, []any) {
 	conditions := []string{"e.timestamp_ms >= ?", "e.timestamp_ms < ?"}
 	args := []any{fromMS, toMS}
 	if useAfterID {
@@ -867,7 +919,7 @@ func rawHourlyStatement(filter HourlyFilter, fromMS, toMS, afterID int64, useAft
 	if filter.CollapseBuckets {
 		bucketExpr = "0"
 	}
-	query := bandedEventsCTE(strings.Join(conditions, " and ")) + fmt.Sprintf(`
+	query := bandedEventsFromSourceCTE(strings.Join(conditions, " and "), source) + fmt.Sprintf(`
 	select
 		%s,
 			analytics_model_value, billing_model_value, pricing_model_value, coalesce(service_tier, ''),
@@ -1097,8 +1149,31 @@ func mergeRawAccountRows(
 	accountKeys []string,
 	grouped map[accountKey]*AccountRow,
 ) error {
+	return mergeAccountRowsFromSource(ctx, tx, afterID, accountKeys, grouped, "usage_events")
+}
+
+func mergeAccountRowsFromSource(
+	ctx context.Context,
+	tx *sql.Tx,
+	afterID int64,
+	accountKeys []string,
+	grouped map[accountKey]*AccountRow,
+	source string,
+) error {
+	return mergeAccountRowsFromSourceArgs(ctx, tx, afterID, accountKeys, grouped, source, nil)
+}
+
+func mergeAccountRowsFromSourceArgs(
+	ctx context.Context,
+	tx *sql.Tx,
+	afterID int64,
+	accountKeys []string,
+	grouped map[accountKey]*AccountRow,
+	source string,
+	sourceArgs []any,
+) error {
 	placeholders := strings.TrimRight(strings.Repeat("?,", len(accountKeys)), ",")
-	query := bandedEventsCTE("e.id > ?") + fmt.Sprintf(`
+	query := bandedEventsFromSourceCTE("e.id > ?", source) + fmt.Sprintf(`
 	select
 		account_key_value,
 		coalesce(max(nullif(account_snapshot, '')), ''),
@@ -1136,7 +1211,8 @@ func mergeRawAccountRows(
 		usage.LongContextInputTokenThreshold,
 		placeholders,
 	)
-	args := make([]any, 0, len(accountKeys)+1)
+	args := make([]any, 0, len(sourceArgs)+len(accountKeys)+1)
+	args = append(args, sourceArgs...)
 	args = append(args, afterID)
 	for _, key := range accountKeys {
 		args = append(args, key)

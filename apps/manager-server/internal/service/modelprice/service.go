@@ -16,9 +16,12 @@ import (
 	"unicode"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	modelpricerepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/modelprice"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
+
+var ErrStructureChangeAfterRawDeletion = modelpricerepo.ErrStructureChangeAfterRawDeletion
 
 const (
 	SyncSourceModelsDev  = "models.dev"
@@ -321,6 +324,9 @@ func (s *Service) Sync(ctx context.Context, req SyncRequest) (SyncResult, error)
 	result, err := s.store.UpsertSyncedModelPrices(ctx, selection.Prices)
 	if err != nil {
 		return SyncResult{}, err
+	}
+	for _, modelID := range result.Preserved {
+		delete(selection.Matched, modelID)
 	}
 	if result.Imported > 0 {
 		s.notifyPricesChanged()

@@ -8,6 +8,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageevent"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageprojection"
+	sqliteutil "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/sqliteutil"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
 
@@ -141,8 +142,9 @@ func (r *repository) catchUp(
 	if err != nil {
 		return CatchUpResult{}, err
 	}
-	if state.SchemaVersion != SchemaVersion {
-		return CatchUpResult{}, fmt.Errorf("%w: %s got %d, want %d", ErrUnsupportedSchema, rollupName, state.SchemaVersion, SchemaVersion)
+	expectedSchema := expectedSchemaVersion(rollupName)
+	if state.SchemaVersion != expectedSchema {
+		return CatchUpResult{}, fmt.Errorf("%w: %s got %d, want %d", ErrUnsupportedSchema, rollupName, state.SchemaVersion, expectedSchema)
 	}
 	latestID, err := latestEventID(ctx, tx)
 	if err != nil {
@@ -164,14 +166,13 @@ func (r *repository) catchUp(
 	if err != nil {
 		return CatchUpResult{}, err
 	}
-	if state.StructureRevision != revision ||
-		(rollupName == usageevent.CodexLegacyIdentityRollupName && latestID < state.CoverageEventID) {
+	if state.StructureRevision != revision {
 		if err := resetForRevision(ctx, tx, rollupName, revision, latestID, nowMS); err != nil {
 			return CatchUpResult{}, err
 		}
 		state = State{
 			RollupName:        rollupName,
-			SchemaVersion:     SchemaVersion,
+			SchemaVersion:     expectedSchema,
 			StructureRevision: revision,
 			Status:            revisionResetStatus(rollupName),
 			TargetEventID:     latestID,
@@ -308,6 +309,9 @@ func (r *repository) RecordFailure(ctx context.Context, rollupName string, rollu
 	}
 	if rollupName != StatsRollupName && rollupName != MetadataRollupName && rollupName != ProjectionRollupName && rollupName != usageevent.CodexLegacyIdentityRollupName {
 		return fmt.Errorf("unknown usage monitoring rollup %q", rollupName)
+	}
+	if sqliteutil.IsBusyError(rollupErr) {
+		return nil
 	}
 	_, err := r.db.ExecContext(ctx, `update usage_monitoring_rollup_state set
 		status = case
@@ -469,4 +473,11 @@ func setSearchIndexReady(ctx context.Context, tx *sql.Tx, rollupName string, rea
 	_, err := tx.ExecContext(ctx, `update usage_monitoring_search_index_state set
 		ready = ?, updated_at_ms = ? where id = 1`, readyValue, nowMS)
 	return err
+}
+
+func expectedSchemaVersion(rollupName string) int {
+	if rollupName == usageevent.CodexLegacyIdentityRollupName {
+		return usageevent.CodexLegacyIdentityEvidenceSchemaVersion
+	}
+	return SchemaVersion
 }

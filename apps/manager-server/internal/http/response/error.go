@@ -57,6 +57,9 @@ func ManagerConfigErrorStatus(err error) int {
 }
 
 func ModelPriceErrorStatus(err error) int {
+	if strings.Contains(err.Error(), "model price structure cannot change after archived raw usage has been deleted") {
+		return http.StatusConflict
+	}
 	if strings.Contains(err.Error(), "model price sync failed") {
 		return http.StatusBadGateway
 	}
@@ -104,6 +107,8 @@ func UsageServiceErrorCode(err error) string {
 		return "api_key_aliases_required"
 	case strings.Contains(message, "api key alias already exists"):
 		return "api_key_alias_duplicate"
+	case strings.Contains(message, "model price structure cannot change after archived raw usage has been deleted"):
+		return "model_price_structure_locked_by_usage_archive"
 	case strings.Contains(message, "model price sync failed"):
 		return "model_price_sync_failed"
 	case strings.Contains(message, "method not allowed"):

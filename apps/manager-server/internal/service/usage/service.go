@@ -2,6 +2,9 @@ package usage
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -37,6 +40,8 @@ type Service struct {
 	notifierMu             sync.RWMutex
 	eventsInsertedNotifier func()
 	importSessions         *importSessionManager
+	archive                *archiveManager
+	archiveJobs            *archiveJobRunner
 }
 
 const importBatchSize = 256
@@ -80,6 +85,10 @@ func (s *Service) WriteExport(ctx context.Context, writer io.Writer, limit int) 
 	return s.store.WriteExportJSONL(ctx, writer, limit)
 }
 
+func (s *Service) WriteFullExport(ctx context.Context, writer io.Writer) error {
+	return s.store.WriteFullExportJSONL(ctx, writer)
+}
+
 func (s *Service) Import(ctx context.Context, reader io.Reader) (ImportResult, *usageparser.ImportStreamResult, error) {
 	var added int
 	var skipped int
@@ -88,8 +97,14 @@ func (s *Service) Import(ctx context.Context, reader io.Reader) (ImportResult, *
 		contextualReader = &contextReadSeeker{ctx: ctx, reader: seeker}
 	}
 	parsed, err := usageparser.StreamImportPayload(contextualReader, importBatchSize, func(events []usageparser.Event) error {
+		if err := s.normalizeImportedEventHashes(ctx, events); err != nil {
+			return &ImportPersistenceError{err: err}
+		}
 		result, err := s.store.InsertEvents(ctx, events)
 		if err != nil {
+			if errors.Is(err, usageparser.ErrInvalidEventHash) {
+				return err
+			}
 			return &ImportPersistenceError{err: err}
 		}
 		added += result.Inserted
@@ -112,6 +127,38 @@ func (s *Service) Import(ctx context.Context, reader io.Reader) (ImportResult, *
 		return result, &parsed, err
 	}
 	return result, &parsed, nil
+}
+
+func (s *Service) normalizeImportedEventHashes(ctx context.Context, events []usageparser.Event) error {
+	legacyHashes := make([]string, 0)
+	for i := range events {
+		hash := events[i].EventHash
+		if hash != "" && !usageparser.IsCanonicalSHA256Hex(hash) {
+			legacyHashes = append(legacyHashes, hash)
+		}
+	}
+	if len(legacyHashes) == 0 {
+		return nil
+	}
+
+	existing, err := s.store.ExistingUsageEventHashes(ctx, legacyHashes)
+	if err != nil {
+		return err
+	}
+	for i := range events {
+		rawHash := events[i].EventHash
+		if rawHash == "" || usageparser.IsCanonicalSHA256Hex(rawHash) {
+			continue
+		}
+		if _, ok := existing[rawHash]; ok {
+			// Preserve the exact historical identity so InsertBatch can deduplicate
+			// or repair its ledger entry without creating a canonicalized duplicate.
+			continue
+		}
+		sum := sha256.Sum256([]byte(rawHash))
+		events[i].EventHash = hex.EncodeToString(sum[:])
+	}
+	return nil
 }
 
 func (s *Service) Counts(ctx context.Context) (events int64, deadLetters int64, err error) {
@@ -147,18 +194,35 @@ func (s *Service) GetImportSession(ctx context.Context, id string) (ImportSessio
 	return manager.Get(ctx, id)
 }
 
+func (s *Service) ListImportSessions(ctx context.Context, options ImportSessionListOptions) (ImportSessionList, error) {
+	manager, err := s.requireImportSessionManager()
+	if err != nil {
+		return ImportSessionList{}, err
+	}
+	return manager.List(ctx, options)
+}
+
 func (s *Service) WriteImportSessionChunk(
 	ctx context.Context,
 	id string,
 	offset int64,
 	contentLength int64,
 	reader io.Reader,
+	prefixSHA256 ...string,
 ) (ImportSession, error) {
 	manager, err := s.requireImportSessionManager()
 	if err != nil {
 		return ImportSession{}, err
 	}
-	return manager.WriteChunk(ctx, id, offset, contentLength, reader)
+	return manager.WriteChunk(ctx, id, offset, contentLength, reader, prefixSHA256...)
+}
+
+func (s *Service) ValidateImportSessionPrefix(ctx context.Context, id, prefixSHA256 string) (ImportSession, error) {
+	manager, err := s.requireImportSessionManager()
+	if err != nil {
+		return ImportSession{}, err
+	}
+	return manager.ValidatePrefix(ctx, id, prefixSHA256)
 }
 
 func (s *Service) CompleteImportSession(ctx context.Context, id string) (ImportSession, error) {

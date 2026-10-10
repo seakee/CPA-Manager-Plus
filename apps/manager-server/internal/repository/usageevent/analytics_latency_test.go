@@ -30,7 +30,7 @@ func TestLatencyPercentilesUseNearestRankAcrossSummaryAndBuckets(t *testing.T) {
 			ttft := latency * 2
 			timestamp := base.Add(time.Duration(hour) * time.Hour).Add(time.Duration(sample) * time.Second)
 			events = append(events, usage.Event{
-				EventHash:   fmt.Sprintf("%d-%d", hour, sample),
+				EventHash:   canonicalTestHash(fmt.Sprintf("%d-%d", hour, sample)),
 				TimestampMS: timestamp.UnixMilli(),
 				Timestamp:   timestamp.Format(time.RFC3339Nano),
 				Model:       "gpt-test",
@@ -106,7 +106,7 @@ func TestLatencyPercentilesMatchRawAcrossTimeZonesAndDST(t *testing.T) {
 
 	newSample := func(hash string, timestamp time.Time, latencyMS, ttftMS *int64) usage.Event {
 		return usage.Event{
-			EventHash:   hash,
+			EventHash:   canonicalTestHash(hash),
 			TimestampMS: timestamp.UnixMilli(),
 			Timestamp:   timestamp.Format(time.RFC3339Nano),
 			Model:       "gpt-test",
@@ -161,10 +161,10 @@ func TestLatencyPercentilesApplyFiltersAndIgnoreMissingValues(t *testing.T) {
 	latency10, latency20, latency30 := int64(10), int64(20), int64(30)
 	ttft5, ttft15 := int64(5), int64(15)
 	events := []usage.Event{
-		{EventHash: "match", TimestampMS: base.UnixMilli(), Timestamp: base.Format(time.RFC3339Nano), Model: "gpt-a", Provider: "codex", AuthFileSnapshot: "a.json", LatencyMS: &latency20, TTFTMS: &ttft15, CreatedAtMS: base.UnixMilli()},
-		{EventHash: "low-latency", TimestampMS: base.Add(time.Minute).UnixMilli(), Timestamp: base.Add(time.Minute).Format(time.RFC3339Nano), Model: "gpt-a", Provider: "codex", AuthFileSnapshot: "a.json", LatencyMS: &latency10, TTFTMS: &ttft5, CreatedAtMS: base.Add(time.Minute).UnixMilli()},
-		{EventHash: "failed", TimestampMS: base.Add(2 * time.Minute).UnixMilli(), Timestamp: base.Add(2 * time.Minute).Format(time.RFC3339Nano), Model: "gpt-a", Provider: "codex", AuthFileSnapshot: "a.json", LatencyMS: &latency30, Failed: true, CreatedAtMS: base.Add(2 * time.Minute).UnixMilli()},
-		{EventHash: "other", TimestampMS: base.Add(3 * time.Minute).UnixMilli(), Timestamp: base.Add(3 * time.Minute).Format(time.RFC3339Nano), Model: "gpt-b", Provider: "claude", AuthFileSnapshot: "b.json", TTFTMS: &ttft15, CreatedAtMS: base.Add(3 * time.Minute).UnixMilli()},
+		{EventHash: canonicalTestHash("match"), TimestampMS: base.UnixMilli(), Timestamp: base.Format(time.RFC3339Nano), Model: "gpt-a", Provider: "codex", AuthFileSnapshot: "a.json", LatencyMS: &latency20, TTFTMS: &ttft15, CreatedAtMS: base.UnixMilli()},
+		{EventHash: canonicalTestHash("low-latency"), TimestampMS: base.Add(time.Minute).UnixMilli(), Timestamp: base.Add(time.Minute).Format(time.RFC3339Nano), Model: "gpt-a", Provider: "codex", AuthFileSnapshot: "a.json", LatencyMS: &latency10, TTFTMS: &ttft5, CreatedAtMS: base.Add(time.Minute).UnixMilli()},
+		{EventHash: canonicalTestHash("failed"), TimestampMS: base.Add(2 * time.Minute).UnixMilli(), Timestamp: base.Add(2 * time.Minute).Format(time.RFC3339Nano), Model: "gpt-a", Provider: "codex", AuthFileSnapshot: "a.json", LatencyMS: &latency30, Failed: true, CreatedAtMS: base.Add(2 * time.Minute).UnixMilli()},
+		{EventHash: canonicalTestHash("other"), TimestampMS: base.Add(3 * time.Minute).UnixMilli(), Timestamp: base.Add(3 * time.Minute).Format(time.RFC3339Nano), Model: "gpt-b", Provider: "claude", AuthFileSnapshot: "b.json", TTFTMS: &ttft15, CreatedAtMS: base.Add(3 * time.Minute).UnixMilli()},
 	}
 	if _, err := New(db).InsertBatch(context.Background(), events); err != nil {
 		t.Fatalf("insert events: %v", err)
@@ -209,7 +209,7 @@ func BenchmarkLatencyPercentilesWithFilter(b *testing.B) {
 					latencyMS := int64(50 + index%2_000)
 					ttftMS := int64(10 + index%500)
 					events = append(events, usage.Event{
-						EventHash:   fmt.Sprintf("latency-benchmark-%06d", index),
+						EventHash:   canonicalTestHash(fmt.Sprintf("latency-benchmark-%06d", index)),
 						TimestampMS: timestamp.UnixMilli(),
 						Timestamp:   timestamp.Format(time.RFC3339Nano),
 						Model:       fmt.Sprintf("gpt-%02d", index%12),

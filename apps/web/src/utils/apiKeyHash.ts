@@ -93,3 +93,115 @@ export const sha256Hex = (value: string): string => {
   const trimmed = String(value || '').trim();
   return trimmed ? sha256RawTextHex(trimmed) : '';
 };
+
+/**
+ * Small streaming SHA-256 implementation for resumable file prefixes. It
+ * retains only the current 64-byte block and the eight-word hash state, so a
+ * large File is never materialized as one ArrayBuffer.
+ */
+export class Sha256Incremental {
+  private readonly hash = new Uint32Array([
+    0x6a09e667,
+    0xbb67ae85,
+    0x3c6ef372,
+    0xa54ff53a,
+    0x510e527f,
+    0x9b05688c,
+    0x1f83d9ab,
+    0x5be0cd19,
+  ]);
+
+  private readonly buffer = new Uint8Array(64);
+  private readonly words = new Uint32Array(64);
+  private buffered = 0;
+  private byteLength = 0;
+
+  get length(): number {
+    return this.byteLength;
+  }
+
+  update(bytes: Uint8Array): this {
+    let offset = 0;
+    this.byteLength += bytes.length;
+    while (offset < bytes.length) {
+      const copied = Math.min(64 - this.buffered, bytes.length - offset);
+      this.buffer.set(bytes.subarray(offset, offset + copied), this.buffered);
+      this.buffered += copied;
+      offset += copied;
+      if (this.buffered === 64) {
+        this.compress(this.hash, this.buffer);
+        this.buffered = 0;
+      }
+    }
+    return this;
+  }
+
+  digestHex(): string {
+    const state = new Uint32Array(this.hash);
+    const tail = new Uint8Array(128);
+    tail.set(this.buffer.subarray(0, this.buffered));
+    tail[this.buffered] = 0x80;
+    const paddedLength = this.buffered < 56 ? 64 : 128;
+    const bitLength = this.byteLength * 8;
+    const view = new DataView(tail.buffer);
+    view.setUint32(paddedLength - 8, Math.floor(bitLength / 0x100000000), false);
+    view.setUint32(paddedLength - 4, bitLength >>> 0, false);
+    for (let offset = 0; offset < paddedLength; offset += 64) {
+      this.compress(state, tail.subarray(offset, offset + 64));
+    }
+    return Array.from(state)
+      .map((part) => part.toString(16).padStart(8, '0'))
+      .join('');
+  }
+
+  private compress(state: Uint32Array, block: Uint8Array): void {
+    const view = new DataView(block.buffer, block.byteOffset, block.byteLength);
+    const words = this.words;
+    for (let index = 0; index < 16; index += 1) {
+      words[index] = view.getUint32(index * 4, false);
+    }
+    for (let index = 16; index < 64; index += 1) {
+      const s0 =
+        rightRotate(words[index - 15], 7) ^
+        rightRotate(words[index - 15], 18) ^
+        (words[index - 15] >>> 3);
+      const s1 =
+        rightRotate(words[index - 2], 17) ^
+        rightRotate(words[index - 2], 19) ^
+        (words[index - 2] >>> 10);
+      words[index] = (words[index - 16] + s0 + words[index - 7] + s1) >>> 0;
+    }
+    let a = state[0];
+    let b = state[1];
+    let c = state[2];
+    let d = state[3];
+    let e = state[4];
+    let f = state[5];
+    let g = state[6];
+    let h = state[7];
+    for (let index = 0; index < 64; index += 1) {
+      const s1 = rightRotate(e, 6) ^ rightRotate(e, 11) ^ rightRotate(e, 25);
+      const ch = (e & f) ^ (~e & g);
+      const temp1 = (h + s1 + ch + SHA256_K[index] + words[index]) >>> 0;
+      const s0 = rightRotate(a, 2) ^ rightRotate(a, 13) ^ rightRotate(a, 22);
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = (s0 + maj) >>> 0;
+      h = g;
+      g = f;
+      f = e;
+      e = (d + temp1) >>> 0;
+      d = c;
+      c = b;
+      b = a;
+      a = (temp1 + temp2) >>> 0;
+    }
+    state[0] = (state[0] + a) >>> 0;
+    state[1] = (state[1] + b) >>> 0;
+    state[2] = (state[2] + c) >>> 0;
+    state[3] = (state[3] + d) >>> 0;
+    state[4] = (state[4] + e) >>> 0;
+    state[5] = (state[5] + f) >>> 0;
+    state[6] = (state[6] + g) >>> 0;
+    state[7] = (state[7] + h) >>> 0;
+  }
+}

@@ -20,8 +20,9 @@ type ModelPrice struct {
 }
 
 type ModelPriceSyncResult struct {
-	Imported int `json:"imported"`
-	Skipped  int `json:"skipped"`
+	Imported  int      `json:"imported"`
+	Skipped   int      `json:"skipped"`
+	Preserved []string `json:"preserved,omitempty"`
 }
 
 type ModelUsageStat struct {

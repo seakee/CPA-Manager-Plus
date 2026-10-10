@@ -2,12 +2,18 @@ package usagehourly
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"errors"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"testing"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
@@ -318,6 +324,15 @@ func catchUpReaderRollup(t *testing.T, ctx context.Context, db *store.Store) {
 		}
 	}
 	for {
+		result, err := db.CatchUpUsageMonitoringProjection(ctx, 100, time.Now().UnixMilli())
+		if err != nil {
+			t.Fatalf("catch up projection: %v", err)
+		}
+		if !result.Pending {
+			break
+		}
+	}
+	for {
 		result, err := db.CatchUpUsagePricing(ctx, 100, time.Now().UnixMilli())
 		if err != nil {
 			t.Fatalf("catch up pricing rollup: %v", err)
@@ -339,8 +354,9 @@ func newReaderTestStore(t *testing.T) *store.Store {
 }
 
 func readerEvent(hash string, timestampMS int64, model string, failed bool, inputTokens, outputTokens int64, latencyMS *int64) usage.Event {
+	sum := sha256.Sum256([]byte(hash))
 	return usage.Event{
-		EventHash:    hash,
+		EventHash:    hex.EncodeToString(sum[:]),
 		TimestampMS:  timestampMS,
 		Timestamp:    time.UnixMilli(timestampMS).UTC().Format(time.RFC3339Nano),
 		Model:        model,
@@ -353,4 +369,83 @@ func readerEvent(hash string, timestampMS int64, model string, failed bool, inpu
 		LatencyMS:    latencyMS,
 		Failed:       failed,
 	}
+}
+
+func newReaderTestStoreWithDB(t *testing.T) (*store.Store, *sql.DB) {
+	t.Helper()
+	sqlDB, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	db := store.New(sqlDB)
+	t.Cleanup(func() { _ = db.Close() })
+	return db, sqlDB
+}
+
+func TestReaderClassifiesSnapshotErrors(t *testing.T) {
+	ctx := context.Background()
+	fromMS := int64(1_800_000_000_000)
+	toMS := fromMS + 2*hourMS
+	filter := store.AnalyticsFilter{FromMS: fromMS, ToMS: toMS, IncludeFailed: true}
+
+	t.Run("ordinary snapshot error falls back without ReadError", func(t *testing.T) {
+		db, sqlDB := newReaderTestStoreWithDB(t)
+		reader := New(db, true)
+		if _, err := db.InsertEvents(ctx, []usage.Event{readerEvent("event-1", fromMS+1000, "m1", false, 10, 10, nil)}); err != nil {
+			t.Fatal(err)
+		}
+		catchUpReaderRollup(t, ctx, db)
+		if _, err := sqlDB.ExecContext(ctx, `drop table usage_hourly_aggregate_v1`); err != nil {
+			t.Fatal(err)
+		}
+		snapshot, ok := reader.LoadAnalytics(ctx, filter, "hour", time.UTC, false)
+		if ok {
+			t.Fatal("expected snapshot to be abandoned on dropped aggregate table")
+		}
+		if snapshot.ReadError != nil {
+			t.Fatalf("ordinary snapshot error must fallback without ReadError, got: %v", snapshot.ReadError)
+		}
+	})
+
+	t.Run("pricing coverage incomplete sets fatal ReadError", func(t *testing.T) {
+		db, sqlDB := newReaderTestStoreWithDB(t)
+		reader := New(db, true)
+		if _, err := db.InsertEvents(ctx, []usage.Event{readerEvent("event-2", fromMS+1000, "m1", false, 10, 10, nil)}); err != nil {
+			t.Fatal(err)
+		}
+		catchUpReaderRollup(t, ctx, db)
+		if _, err := sqlDB.ExecContext(ctx, `delete from usage_monitoring_rollup_state where rollup_name = 'projection_v1'`); err != nil {
+			t.Fatal(err)
+		}
+		snapshot, ok := reader.LoadAnalytics(ctx, filter, "hour", time.UTC, false, DeletedEdges{Left: true})
+		if ok {
+			t.Fatal("expected snapshot to fail on incomplete coverage")
+		}
+		if !errors.Is(snapshot.ReadError, store.ErrUsagePricingCoverageIncomplete) {
+			t.Fatalf("expected ErrUsagePricingCoverageIncomplete, got: %v", snapshot.ReadError)
+		}
+	})
+
+	t.Run("pricing recovery failure sets fatal ReadError", func(t *testing.T) {
+		db, sqlDB := newReaderTestStoreWithDB(t)
+		reader := New(db, true)
+		if _, err := db.InsertEvents(ctx, []usage.Event{readerEvent("event-3", fromMS+1000, "m1", false, 10, 10, nil)}); err != nil {
+			t.Fatal(err)
+		}
+		catchUpReaderRollup(t, ctx, db)
+		if _, err := sqlDB.ExecContext(ctx, `delete from usage_pricing_hourly_rollups_v1;
+			alter table usage_monitoring_event_projection_v1 rename column normalized_total_input_tokens to unavailable_tokens`); err != nil {
+			t.Fatal(err)
+		}
+		snapshot, ok := reader.LoadAnalytics(ctx, filter, "hour", time.UTC, false)
+		if ok {
+			t.Fatal("expected snapshot to fail on recovery query error")
+		}
+		if !errors.Is(snapshot.ReadError, store.ErrUsagePricingRecoveryFailed) {
+			t.Fatalf("expected ErrUsagePricingRecoveryFailed, got: %v", snapshot.ReadError)
+		}
+		if errors.Is(snapshot.ReadError, store.ErrUsagePricingCoverageIncomplete) {
+			t.Fatalf("recovery failure must not be classified as ErrUsagePricingCoverageIncomplete: %v", snapshot.ReadError)
+		}
+	})
 }

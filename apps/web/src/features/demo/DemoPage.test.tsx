@@ -367,7 +367,7 @@ describe('DemoPage', () => {
         (item) =>
           item.total_requests > 0 &&
           item.total_tokens > 0 &&
-          item.total_cost > 0 &&
+          (item.total_cost ?? 0) > 0 &&
           item.success_rate !== null &&
           item.sync_status === 'ready'
       )

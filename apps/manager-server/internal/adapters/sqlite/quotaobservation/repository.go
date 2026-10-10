@@ -14,6 +14,7 @@ import (
 )
 
 var ErrSourceNotFound = errors.New("source usage event not found")
+var ErrSourceIncomplete = errors.New("quota observation source incomplete")
 
 type repository struct{ db *sql.DB }
 type view struct{ tx *sql.Tx }
@@ -153,6 +154,21 @@ const observationQuery = `select u.total_tokens, u.failed
 	and u.id <= ? and u.timestamp_ms >= ? and u.timestamp_ms < ?`
 
 func (v view) Observe(ctx context.Context, id identity.APIKeyID, metric resourcepolicy.Metric, highWater, start, cappedEnd int64) (ports.Observation, error) {
+	// Canonical identity survives archive deletion; the raw-only observation
+	// must not present a partial historical window as a complete value.
+	var missingSource bool
+	if err := v.tx.QueryRowContext(ctx, `select exists (
+		select 1 from gateway_usage_identity_projection_v1 p
+		left join usage_events u on u.id = p.usage_event_id
+		where p.api_key_state = 'mapped' and p.api_key_id = ?
+		and p.usage_event_id <= ? and p.evidence_timestamp_ms >= ?
+		and p.evidence_timestamp_ms < ? and u.id is null
+	)`, id, highWater, start, cappedEnd).Scan(&missingSource); err != nil {
+		return ports.Observation{}, err
+	}
+	if missingSource {
+		return ports.Observation{}, ErrSourceIncomplete
+	}
 	rows, err := v.tx.QueryContext(ctx, observationQuery, id, highWater, start, cappedEnd)
 	if err != nil {
 		return ports.Observation{}, err

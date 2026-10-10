@@ -20,7 +20,7 @@ func TestInsertBatchUsesIdentityLedgerAfterRawDeletion(t *testing.T) {
 	ctx := context.Background()
 	timestampMS := int64(1_800_000_001_000)
 	event := usage.Event{
-		EventHash:    "identity-ledger-event",
+		EventHash:    canonicalTestHash("identity-ledger-event"),
 		TimestampMS:  timestampMS,
 		Timestamp:    time.UnixMilli(timestampMS).UTC().Format(time.RFC3339Nano),
 		Model:        "gpt-test",
@@ -126,7 +126,7 @@ func TestInsertBatchRollsBackIdentityClaimWhenRawInsertFails(t *testing.T) {
 	ctx := context.Background()
 	timestampMS := int64(1_800_000_003_000)
 	event := usage.Event{
-		EventHash:   "identity-ledger-rollback",
+		EventHash:   canonicalTestHash("identity-ledger-rollback"),
 		TimestampMS: timestampMS,
 		Timestamp:   time.UnixMilli(timestampMS).UTC().Format(time.RFC3339Nano),
 		Model:       "gpt-test",

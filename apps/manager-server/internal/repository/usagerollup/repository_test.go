@@ -2,7 +2,9 @@ package usagerollup
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -717,8 +719,9 @@ func rollupTestEvent(
 	cacheCreationTokens int64,
 	totalTokens int64,
 ) usage.Event {
+	sum := sha256.Sum256([]byte(hash))
 	return usage.Event{
-		EventHash:            hash,
+		EventHash:            hex.EncodeToString(sum[:]),
 		TimestampMS:          timestampMS,
 		Timestamp:            time.UnixMilli(timestampMS).UTC().Format(time.RFC3339Nano),
 		Provider:             "openai",

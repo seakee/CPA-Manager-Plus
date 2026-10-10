@@ -2,11 +2,14 @@ package usagepricing_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/testutil"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
@@ -76,6 +79,110 @@ func TestPricingRollupBandsStrictThresholdsAndMergesRawDelta(t *testing.T) {
 	}
 }
 
+func TestPricingRollupRebuildsFromRetainedProjectionAfterRawDeletion(t *testing.T) {
+	ctx := context.Background()
+	cfg := testutil.NewConfig(t)
+	st := testutil.NewStore(t, cfg)
+	price := store.ModelPrice{
+		Prompt: 1,
+		ContextTiers: []store.ModelPriceContextTier{{
+			ThresholdTokens:  100,
+			Prompt:           2,
+			PromptConfigured: true,
+		}},
+	}
+	if err := st.SaveModelPrices(ctx, map[string]store.ModelPrice{"resolved-model": price}); err != nil {
+		t.Fatalf("save initial prices: %v", err)
+	}
+	events := []usage.Event{
+		pricingEvent("retained-live", 3_600_001, 150),
+		pricingEvent("retained-deleted-highest", 3_600_002, 250),
+	}
+	if _, err := st.UsageEvents.InsertBatch(ctx, events); err != nil {
+		t.Fatalf("insert retained rebuild events: %v", err)
+	}
+	projection, err := st.CatchUpUsageMonitoringProjection(ctx, 10, 9_000)
+	if err != nil {
+		t.Fatalf("build monitoring projection: %v", err)
+	}
+	if projection.CoverageEventID != 2 || projection.Pending {
+		t.Fatalf("projection result = %#v", projection)
+	}
+	if _, err := st.CatchUpUsagePricing(ctx, 10, 10_000); err != nil {
+		t.Fatalf("build initial pricing rollup: %v", err)
+	}
+
+	db, err := sqliterepo.Open(cfg.DBPath)
+	if err != nil {
+		t.Fatalf("open raw sqlite handle: %v", err)
+	}
+	defer db.Close()
+	var deletedID, deletedTimestamp int64
+	if err := db.QueryRowContext(ctx, `select id, timestamp_ms from usage_events where event_hash = ?`,
+		events[1].EventHash).Scan(&deletedID, &deletedTimestamp); err != nil {
+		t.Fatalf("resolve deleted event: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `pragma foreign_keys = off`); err != nil {
+		t.Fatalf("disable foreign keys: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `insert into usage_archive_event_refs(
+		event_hash, run_id, segment_sequence, raw_event_id, timestamp_ms, archived_at_ms, raw_deleted_at_ms
+	) values(?, 'retained-pricing-run', 1, ?, ?, 11000, 12000)`,
+		events[1].EventHash, deletedID, deletedTimestamp); err != nil {
+		t.Fatalf("insert retained archive ref: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `delete from usage_events where id = ?`, deletedID); err != nil {
+		t.Fatalf("delete highest raw event: %v", err)
+	}
+
+	price.ContextTiers[0].ThresholdTokens = 200
+	if err := st.SaveModelPrices(ctx, map[string]store.ModelPrice{"resolved-model": price}); err != nil {
+		t.Fatalf("save structural price change with retained history: %v", err)
+	}
+	result, err := st.CatchUpUsagePricing(ctx, 10, 13_000)
+	if err != nil {
+		t.Fatalf("rebuild pricing from retained history: %v", err)
+	}
+	if !result.Rebuilt || result.Pending || result.TargetEventID != deletedID || result.CoverageEventID != deletedID {
+		t.Fatalf("retained rebuild result = %#v, deletedID=%d", result, deletedID)
+	}
+
+	rows, _, available, err := st.UsagePricingHourlyRows(ctx, store.UsagePricingHourlyFilter{
+		FromMS:        3_600_000,
+		ToMS:          7_200_000,
+		IncludeFailed: true,
+	})
+	if err != nil || !available {
+		t.Fatalf("load retained pricing rows: available=%v err=%v", available, err)
+	}
+	var calls int64
+	byThreshold := map[int64]int64{}
+	for _, row := range rows {
+		calls += row.Calls
+		byThreshold[row.ContextThresholdTokens] += row.Calls
+	}
+	if calls != 2 {
+		t.Fatalf("retained rebuild calls=%d rows=%#v", calls, rows)
+	}
+	if byThreshold[model.ModelPriceBaseContextThreshold] != 1 || byThreshold[200] != 1 {
+		t.Fatalf("retained rebuild threshold rows=%#v", byThreshold)
+	}
+
+	accountRows, _, accountAvailable, err := st.UsagePricingAccountRows(ctx, []string{
+		pricingAccountKey("team-a.json", "auth-team-a"),
+	})
+	if err != nil || !accountAvailable {
+		t.Fatalf("load retained account rows: available=%v err=%v", accountAvailable, err)
+	}
+	var accountCalls int64
+	for _, row := range accountRows {
+		accountCalls += row.Calls
+	}
+	if accountCalls != 2 {
+		t.Fatalf("retained account calls=%d rows=%#v", accountCalls, accountRows)
+	}
+}
+
 func TestPricingRollupDoesNotClassifyIncrementalBacklogAsRebuild(t *testing.T) {
 	ctx := context.Background()
 	cfg := testutil.NewConfig(t)
@@ -108,6 +215,28 @@ func TestPricingRollupDoesNotClassifyIncrementalBacklogAsRebuild(t *testing.T) {
 	}
 	if second.Rebuilt || second.Pending || second.CoverageEventID != 3 {
 		t.Fatalf("second incremental batch = %#v", second)
+	}
+}
+
+func TestPricingRollupSQLiteBusyDoesNotPoisonState(t *testing.T) {
+	ctx := context.Background()
+	cfg := testutil.NewConfig(t)
+	st := testutil.NewStore(t, cfg)
+
+	before, err := st.UsagePricingState(ctx)
+	if err != nil {
+		t.Fatalf("read pricing state before sqlite busy: %v", err)
+	}
+	if err := st.RecordUsagePricingFailure(ctx, errors.New("database is locked (SQLITE_BUSY)"), 10_000); err != nil {
+		t.Fatalf("record pricing sqlite busy: %v", err)
+	}
+	after, err := st.UsagePricingState(ctx)
+	if err != nil {
+		t.Fatalf("read pricing state after sqlite busy: %v", err)
+	}
+	if after.Status != before.Status || after.CoverageEventID != before.CoverageEventID ||
+		after.TargetEventID != before.TargetEventID || after.LastError != before.LastError {
+		t.Fatalf("pricing state changed after sqlite busy: before=%#v after=%#v", before, after)
 	}
 }
 
@@ -531,8 +660,9 @@ func TestPricingAccountRollupSeparatesAnalyticsModelsSharingBillingModel(t *test
 }
 
 func pricingEvent(hash string, timestampMS int64, inputTokens int64) usage.Event {
+	sum := sha256.Sum256([]byte(hash))
 	return usage.Event{
-		EventHash:            hash,
+		EventHash:            hex.EncodeToString(sum[:]),
 		TimestampMS:          timestampMS,
 		Timestamp:            "1970-01-01T01:00:00Z",
 		Provider:             "openai",

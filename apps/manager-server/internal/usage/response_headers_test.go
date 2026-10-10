@@ -386,7 +386,7 @@ func TestResponseHeaderMetadataFromRecordSanitizesImportedMetadata(t *testing.T)
 	metadata := ResponseHeaderMetadataFromRecord(map[string]any{
 		"response_metadata": map[string]any{
 			"errors": map[string]any{
-				"authorization_error": "sk-sensitive-token",
+				"authorization_error": "sk-sensitivetoken123456789012345678901234",
 				"code":                "token_revoked",
 				"kind":                "auth",
 			},
@@ -406,7 +406,7 @@ func TestResponseHeaderMetadataFromRecordSanitizesImportedMetadata(t *testing.T)
 		t.Fatalf("marshal metadata: %v", err)
 	}
 	text := string(data)
-	for _, secret := range []string{"sk-sensitive-token", "Bearer secretvalue", "alice@example.com"} {
+	for _, secret := range []string{"sk-sensitivetoken123456789012345678901234", "Bearer secretvalue", "alice@example.com"} {
 		if strings.Contains(text, secret) {
 			t.Fatalf("metadata leaked %q: %s", secret, text)
 		}

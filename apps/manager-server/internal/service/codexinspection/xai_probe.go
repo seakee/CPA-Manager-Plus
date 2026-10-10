@@ -1078,7 +1078,7 @@ func xaiSummaryWindows(summary *xaiBillingSummary) []model.CodexInspectionQuotaW
 	if summary.HasWeeklyData {
 		windows = append(windows, model.CodexInspectionQuotaWindow{ID: "xai-weekly", LabelKey: "xai_quota.weekly_limit", UsedPercent: summary.UsagePercent, ResetLabel: summary.PeriodEnd})
 	}
-	if summary.UsedPercent != nil || summary.MonthlyLimitCents != nil {
+	if summary.UsedPercent != nil || positiveXAIFloat(summary.MonthlyLimitCents) {
 		windows = append(windows, model.CodexInspectionQuotaWindow{ID: "xai-monthly", LabelKey: "xai_quota.monthly_limit", UsedPercent: summary.UsedPercent, ResetLabel: summary.BillingPeriodEnd})
 	}
 	if summary.OnDemandUsedPercent != nil || (summary.OnDemandCapCents != nil && *summary.OnDemandCapCents > 0) {
