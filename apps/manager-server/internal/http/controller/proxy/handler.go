@@ -34,6 +34,26 @@ func (h *Handler) Management(w http.ResponseWriter, r *http.Request) {
 	h.App.ProxyService.ProxyPluginManagementWithCallerAuth(w, r, response.Error)
 }
 
+func (h *Handler) ManagementConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodDelete:
+	default:
+		response.MethodNotAllowed(w)
+		return
+	}
+
+	ok, err := h.App.AdminAuthService.VerifyHeader(r.Context(), r.Header.Get("Authorization"))
+	if err != nil {
+		response.Error(w, http.StatusInternalServerError, err)
+		return
+	}
+	if ok {
+		h.App.ProxyService.ProxyManagementConfig(w, r, response.Error)
+		return
+	}
+	h.App.ProxyService.ProxyManagementConfigWithCallerAuth(w, r, response.Error)
+}
+
 func (h *Handler) ModelList(w http.ResponseWriter, r *http.Request) {
 	h.App.ProxyService.ProxyModelList(w, r, response.Error, response.MethodNotAllowed)
 }

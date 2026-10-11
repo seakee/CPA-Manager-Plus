@@ -119,6 +119,10 @@ func rootHandler(
 			middleware.WithCORS(appCtx.Config, managerConfigHandler.ValidateCPAConnection)(w, r)
 			return
 		}
+		if strings.HasPrefix(r.URL.Path, "/v8/management/config/") {
+			middleware.WithCORS(appCtx.Config, proxyHandler.ManagementConfig)(w, r)
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/v0/management/") {
 			middleware.WithCORS(appCtx.Config, proxyHandler.Management)(w, r)
 			return
