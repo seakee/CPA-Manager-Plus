@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -242,7 +243,7 @@ func TestManagerDatabaseProcessLockPrecedesStoreOpen(t *testing.T) {
 		t.Fatalf("read main.go: %v", err)
 	}
 	source := string(content)
-	lockAt := strings.Index(source, "processlock.Acquire(cfg.DBPath)")
+	lockAt := strings.Index(source, "legacypreflight.AdmitStartup(")
 	storeOpenAt := strings.Index(source, "store.Open(cfg.DBPath, protector)")
 	lockCloseAt := strings.Index(source, "databaseLock.Close()")
 	if lockAt < 0 || storeOpenAt < lockAt || lockCloseAt < lockAt {
@@ -526,13 +527,22 @@ func managerServerTestEnvironment(dataDir, dbPath string) []string {
 
 func (p *managerServerProcess) stop(t testing.TB) {
 	t.Helper()
-	if err := p.cmd.Process.Signal(os.Interrupt); err != nil {
+	signal := os.Interrupt
+	if runtime.GOOS == "windows" {
+		// Windows cannot send Interrupt through os.Process. Terminate this
+		// owned helper; reopen tests then exercise native crash recovery.
+		signal = os.Kill
+	}
+	if err := p.cmd.Process.Signal(signal); err != nil {
 		t.Fatalf("signal manager server helper: %v", err)
 	}
 	select {
 	case err := <-p.done:
 		if err != nil {
-			t.Fatalf("manager server helper shutdown: %v\n%s", err, p.logs.String())
+			var exitErr *exec.ExitError
+			if signal != os.Kill || !errors.As(err, &exitErr) {
+				t.Fatalf("manager server helper shutdown: %v\n%s", err, p.logs.String())
+			}
 		}
 	case <-time.After(20 * time.Second):
 		_ = p.cmd.Process.Kill()

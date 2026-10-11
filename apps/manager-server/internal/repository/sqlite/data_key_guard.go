@@ -27,6 +27,12 @@ func RequireExistingDataKeyForEncryptedCPAConnection(ctx context.Context, databa
 	if err != nil {
 		return err
 	}
+	return RequireDataKeyForInspectedConnection(inspection, rawDataKey, dataKeyPath)
+}
+
+// RequireDataKeyForInspectedConnection consumes the fenced preflight result;
+// it does not reopen the source or create SQLite sidecars.
+func RequireDataKeyForInspectedConnection(inspection PersistedCPAConnectionStorageInspection, rawDataKey, dataKeyPath string) error {
 	if strings.TrimSpace(rawDataKey) != "" {
 		return nil
 	}
@@ -44,8 +50,8 @@ func RequireExistingDataKeyForEncryptedCPAConnection(ctx context.Context, databa
 // PersistedCPAConnectionStorageInspection is the result of a raw, pre-Store
 // inspection of the bootstrap and connection settings.
 type PersistedCPAConnectionStorageInspection struct {
-	MigrationVersion       int
-	HasEncryptedConnection bool
+	MigrationVersion       int  `json:"migrationVersion"`
+	HasEncryptedConnection bool `json:"hasEncryptedConnection"`
 }
 
 // InspectPersistedCPAConnectionStorage reads the bootstrap marker and both
@@ -78,6 +84,11 @@ func InspectPersistedCPAConnectionStorage(ctx context.Context, databasePath stri
 		return inspection, fmt.Errorf("open sqlite %s for data-key inspection: %w", databasePath, err)
 	}
 	defer db.Close()
+	return inspectConnectionStorage(ctx, db, databasePath)
+}
+
+func inspectConnectionStorage(ctx context.Context, db *sql.DB, databasePath string) (PersistedCPAConnectionStorageInspection, error) {
+	inspection := PersistedCPAConnectionStorageInspection{}
 
 	var tableExists int
 	if err := db.QueryRowContext(ctx, `select exists(select 1 from sqlite_schema where type = 'table' and name = 'settings')`).Scan(&tableExists); err != nil {

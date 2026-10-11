@@ -9,6 +9,80 @@ import (
 	"time"
 )
 
+func TestInspectionConfigStrictMissingMalformedAndProvisioningPaths(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	t.Setenv(configEnvKey, path)
+	if _, err := LoadForInspection(); err == nil {
+		t.Fatal("missing explicit config accepted")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("inspection created config")
+	}
+	for _, test := range []struct {
+		raw                     string
+		wantError, provisioning bool
+	}{
+		{`{broken`, true, false}, {`{"dataDir":"owned"}`, false, true}, {`{"cpaUpstreamUrl":"https://owned.invalid"}`, false, false},
+		{`{"retiredSource":{"managementKey":"owned"}}`, false, false},
+	} {
+		if err := os.WriteFile(path, []byte(test.raw), 0600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := LoadForInspection()
+		if (err != nil) != test.wantError {
+			t.Fatalf("error=%v", err)
+		}
+		if err == nil && cfg.ProvisioningConfigOnly != test.provisioning {
+			t.Fatal("provisioning/source config classification failed")
+		}
+		after, err := os.ReadFile(path)
+		if err != nil || string(after) != test.raw {
+			t.Fatal("inspection changed config")
+		}
+	}
+}
+
+func TestInspectionLocationsIgnoreRuntimeEnvironmentAndNeverReadSecrets(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"dataDir":"source-data","dataKeyPath":"source.key","managementKeyFile":"unused-secret"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("USAGE_DATA_DIR", filepath.Join(dir, "unrelated-runtime"))
+	t.Setenv("CPA_MANAGER_DATA_KEY", "UNRELATED_SECRET")
+	cfg, err := ResolveInspectionLocations(path, filepath.Join(dir, "usage.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DataKey != "" || cfg.ManagementKey != "" || cfg.DataKeyPath != filepath.Join(dir, "source.key") || cfg.UsageArchiveDir != filepath.Join(dir, "source-data", "usage-archives") {
+		t.Fatal("source paths consumed runtime credentials or overrides")
+	}
+}
+
+func TestInspectionDefaultKeyLocationMatchesSourceConfig(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"dbPath":"custom/usage.sqlite"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(configEnvKey, path)
+	source, err := LoadForInspection()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := ResolveInspectionLocations(path, source.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inspection.DataKeyPath != source.DataKeyPath || inspection.UsageArchiveDir != source.UsageArchiveDir {
+		t.Fatalf("source key/archive=%s/%s inspection=%s/%s", source.DataKeyPath, source.UsageArchiveDir, inspection.DataKeyPath, inspection.UsageArchiveDir)
+	}
+}
+
 func TestLoadCreatesDefaultConfig(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()

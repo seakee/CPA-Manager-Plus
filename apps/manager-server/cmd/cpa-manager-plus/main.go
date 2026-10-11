@@ -27,6 +27,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/adminreset"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/cpaconnection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/derivedmaintenance"
+	legacypreflightcommand "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/legacypreflight"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/managerdatasnapshot"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/runtimeconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/usagecompact"
@@ -35,13 +36,13 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/httpapi"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	identitystoreports "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/ports/identitystore"
-	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	bootstrapservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrap"
 	collectorservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
 	cpaupdateservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaupdate"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
@@ -58,6 +59,17 @@ func main() {
 	}
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "legacy-preflight":
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			if err := legacypreflightcommand.Run(ctx, os.Args[2:], os.Stdout, os.Stderr); err != nil {
+				if legacypreflightcommand.IsHelp(err) {
+					return
+				}
+				log.Printf("legacy preflight: %v", err)
+				os.Exit(1)
+			}
+			return
 		case "reset-admin-key", "reset-admin-password":
 			if err := adminreset.Run(context.Background(), os.Args[2:], os.Stdout, os.Stderr); err != nil {
 				log.Printf("reset admin key: %v", err)
@@ -121,11 +133,19 @@ func runManagerDataSnapshotCommand(args []string, stdout io.Writer, stderr io.Wr
 }
 
 func runServer() {
-	cfg, err := config.Load()
+	cfg, err := config.LoadForInspection()
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
-	databaseLock, err := processlock.Acquire(cfg.DBPath)
+	configPath, err := config.InspectionConfigPath()
+	if err != nil {
+		log.Fatalf("resolve inspection config: %v", err)
+	}
+	inspectionCtx, cancelInspection := context.WithTimeout(context.Background(), 30*time.Second)
+	databaseLock, err := legacypreflight.AdmitStartup(inspectionCtx, sqliterepo.InspectionPaths{
+		Database: cfg.DBPath, Config: configPath, DataKey: cfg.DataKeyPath, Archives: cfg.UsageArchiveDir,
+	}, legacypreflight.Options{ProvisioningConfig: cfg.ProvisioningConfigOnly})
+	cancelInspection()
 	if err != nil {
 		log.Fatalf("acquire manager database process lock: %v", err)
 	}
@@ -134,10 +154,18 @@ func runServer() {
 			log.Printf("close manager database process lock: %v", err)
 		}
 	}()
+	// Defaults are created only after the source has passed fenced admission.
+	loadedConfig, err := config.Load()
+	if err != nil {
+		log.Fatalf("load admitted config: %v", err)
+	}
+	if loadedConfig.DBPath != cfg.DBPath || loadedConfig.DataKeyPath != cfg.DataKeyPath || loadedConfig.UsageArchiveDir != cfg.UsageArchiveDir || loadedConfig.DataKey != cfg.DataKey {
+		log.Fatal("source configuration changed before startup")
+	}
+	cfg = loadedConfig
 	cfg.DBPath = databaseLock.DatabasePath()
-	if err := sqliterepo.RequireExistingDataKeyForEncryptedCPAConnection(
-		context.Background(),
-		cfg.DBPath,
+	if err := sqliterepo.RequireDataKeyForInspectedConnection(
+		databaseLock.ConnectionStorage,
 		cfg.DataKey,
 		cfg.DataKeyPath,
 	); err != nil {

@@ -8,6 +8,68 @@ import (
 	"testing"
 )
 
+func TestAcquireExistingNeverCreatesSourceAndRetainsNormalOwnership(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "missing", "usage.sqlite")
+	lock, err := AcquireExisting(path)
+	if lock != nil || !errors.Is(err, ErrNoExistingLock) {
+		t.Fatalf("missing lock=%v err=%v", lock, err)
+	}
+	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
+		t.Fatal("inspection created directory")
+	}
+	first, err := Acquire(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(first.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock, err = AcquireExisting(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := lock.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if second, err := Acquire(path); second != nil || !errors.Is(err, ErrLocked) {
+		t.Fatalf("second=%v err=%v", second, err)
+	}
+	after, err := os.Stat(first.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().Equal(after.ModTime()) || info.Size() != after.Size() {
+		t.Fatal("inspection changed persistent lock")
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := lock.Validate(); err == nil {
+		t.Fatal("closed lock retained authority")
+	}
+}
+
+func TestAcquireExistingRejectsLockSymlinksWithoutFollowingThem(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "usage.sqlite")
+	target := filepath.Join(dir, "owned-lock")
+	if err := os.WriteFile(target, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path+".manager.lock"); err != nil {
+		t.Skip(err)
+	}
+	if lock, err := AcquireExisting(path); lock != nil || err == nil {
+		t.Fatal("symbolic ownership accepted")
+	}
+}
+
 func TestAcquireSerializesDatabaseOwnersAndReleasesOnClose(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "data", "usage.sqlite")
 	first, err := Acquire(databasePath)

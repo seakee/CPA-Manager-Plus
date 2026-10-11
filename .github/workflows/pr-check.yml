@@ -275,6 +275,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.windows_sqlite == 'true'
     runs-on: windows-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout code
@@ -286,9 +287,45 @@ jobs:
           go-version: '1.24.x'
           cache-dependency-path: apps/manager-server/go.sum
 
-      - name: Test SQLite repository
+      - name: Record Windows test environment
         working-directory: apps/manager-server
-        run: go test ./internal/repository/sqlite ./internal/adapters/sqlite/identitystore
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP/manager-preflight-windows" | Out-Null
+          @{
+            sourceHead = '${{ github.event.pull_request.head.sha || github.sha }}'
+            testedCommit = (git rev-parse HEAD)
+            runnerOS = $env:RUNNER_OS
+            runnerArch = $env:RUNNER_ARCH
+            imageOS = $env:ImageOS
+            imageVersion = $env:ImageVersion
+            goVersion = (go version)
+            sqliteDriver = (go list -m modernc.org/sqlite)
+          } | ConvertTo-Json | Set-Content -Encoding utf8 "$env:RUNNER_TEMP/manager-preflight-windows/environment.json"
+
+      - name: Test SQLite repository and source inspection
+        working-directory: apps/manager-server
+        shell: pwsh
+        run: |
+          go test -count=1 -json ./internal/repository/sqlite ./internal/adapters/sqlite/identitystore |
+            Tee-Object -FilePath "$env:RUNNER_TEMP/manager-preflight-windows/sqlite.jsonl"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test preflight ownership and commands
+        working-directory: apps/manager-server
+        shell: pwsh
+        run: |
+          go test -count=1 -json ./internal/processlock ./internal/config ./internal/service/legacypreflight ./internal/command/legacypreflight |
+            Tee-Object -FilePath "$env:RUNNER_TEMP/manager-preflight-windows/preflight.jsonl"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test preflight startup and recovery
+        working-directory: apps/manager-server
+        shell: pwsh
+        run: |
+          go test -count=1 -json -run '^(TestBlockedLegacyNormalStartupHasNoSourceSideEffects|TestNativePreflightRetainsEncryptedKeyGuardsForBothSettings|TestLegacyPreflightMainDispatchReturnsBeforeServer|TestNativeV2FreshAndReopenStartup|TestNativeV2CrashWALStartupReadsCommittedUsage)$' ./cmd/cpa-manager-plus |
+            Tee-Object -FilePath "$env:RUNNER_TEMP/manager-preflight-windows/startup.jsonl"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Test Runtime portability
         working-directory: apps/manager-server
@@ -297,6 +334,15 @@ jobs:
       - name: Build Manager Server
         working-directory: apps/manager-server
         run: go build ./cmd/cpa-manager-plus
+
+      - name: Upload Windows preflight evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: manager-preflight-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/manager-preflight-windows/
+          if-no-files-found: error
+          retention-days: 14
 
   native-control:
     name: Native Control (${{ matrix.os }})
