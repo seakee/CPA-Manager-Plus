@@ -337,6 +337,8 @@ Windows PowerShell 在停止服务后运行：
 
 数据库升级后，旧的请求监控 FTS generation 可能在配对投影行完成分批在线清理后继续保留；非空表索引也可能被延后，旧 quota cooldown identity 索引则可能需要离线替换。极端情况下，单个旧 quota observation group 超过在线安全批次限制时，迁移会标记为 `offline_required` 并记录 `offline cleanup required`，原始 snapshot fallback 仍继续可用。日志出现 deferred index preparation、`cleanup requires offline finalization`、`offline cleanup required`，或 UI / `/status` 显示数据库维护未完成时，先停止所有使用该数据库的 Manager Server 进程，再使用同版本二进制执行一次离线维护。
 
+额度快照候选读取通过受管理索引，按窗口和来源定位最近的证据，避免每次用量入库时都对账号全部历史做排序。已有非空数据库会将该索引延后到下方的离线维护命令中创建；准备完成前继续使用原有读取方式。空数据库会在 HTTP 开始监听后准备索引。已有安装必须完成这次维护，才能启用有界候选读取。
+
 Docker Compose：
 
 ```bash

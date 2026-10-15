@@ -191,6 +191,7 @@ var derivedIndexStatements = []struct {
 	{"idx_quota_cycles_active", "account_quota_cycles", `create unique index if not exists idx_quota_cycles_active on account_quota_cycles(activation_id) where actual_end_ms is null`},
 	{"idx_quota_cycles_history", "account_quota_cycles", `create index if not exists idx_quota_cycles_history on account_quota_cycles(activation_id, actual_start_ms desc)`},
 	{"idx_quota_snapshots_latest", "account_quota_snapshots", `create index if not exists idx_quota_snapshots_latest on account_quota_snapshots(account_key, provider, provider_window_id, model_scope_kind, model_scope_key, observed_at_ms desc)`},
+	{quotasnapshotrepo.CandidateIndexName, "account_quota_snapshots", quotasnapshotrepo.CandidateIndexSQL},
 	{"idx_quota_snapshots_observation", "account_quota_snapshots", `create index if not exists idx_quota_snapshots_observation on account_quota_snapshots(observation_id)`},
 	{"idx_quota_snapshots_window_cycle", "account_quota_snapshots", `create index if not exists idx_quota_snapshots_window_cycle on account_quota_snapshots(logical_window_id, cycle_id, observed_at_ms desc)`},
 	{"idx_quota_snapshots_cycle_evidence", "account_quota_snapshots", `create index if not exists idx_quota_snapshots_cycle_evidence on account_quota_snapshots(cycle_id, observed_at_ms, id)`},

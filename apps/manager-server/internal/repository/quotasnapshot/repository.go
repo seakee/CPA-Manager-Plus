@@ -515,63 +515,11 @@ func (r *repository) ListCandidates(ctx context.Context, accountKey, provider st
 	if limit <= 0 {
 		limit = defaultCandidateLimit
 	}
-	rows, err := r.db.QueryContext(ctx, `with ranked as (
-	select
-		id, coalesce(observation_id, 0) as observation_id,
-		coalesce(logical_window_id, 0) as logical_window_id,
-		coalesce(activation_id, 0) as activation_id,
-		coalesce(cycle_id, 0) as cycle_id,
-		account_key, provider, provider_window_id, window_kind, window_mode,
-		model_scope_kind, coalesce(model_scope_key, '') as model_scope_key,
-		coalesce(model_ids_json, '') as model_ids_json,
-		coalesce(scope_fingerprint, '') as scope_fingerprint,
-		coalesce(content_hash, '') as content_hash,
-		source, coalesce(source_observation_id, '') as source_observation_id, observed_at_ms,
-		boundary_accuracy, cycle_start_ms, cycle_end_ms, duration_seconds,
-		used_percent, remaining_percent, used_value, limit_value,
-		coalesce(quota_unit, '') as quota_unit, reset_credits_available,
-		coalesce(reset_credits_json, '') as reset_credits_json,
-		coalesce(plan_type, '') as plan_type, created_at_ms,
-		case when observation_id is null then 'active' else coalesce((
-			select availability from account_quota_windows window
-			where window.id = account_quota_snapshots.logical_window_id
-		), 'inactive') end as window_availability,
-		row_number() over (
-			partition by coalesce(
-				cast(logical_window_id as text),
-				'legacy:' || provider_window_id || char(0) || model_scope_kind ||
-				char(0) || coalesce(model_scope_key, '') || char(0) ||
-				coalesce(model_ids_json, '')
-			), source
-			order by observed_at_ms desc, id desc
-		) as source_rank
-		from account_quota_snapshots
-		where account_key = ? and provider = ?
-			and `+excludeLegacyCodexWorkspaceSnapshotSQL("")+`
-			and (observation_id is null or (
-				logical_window_id is not null and exists (
-					select 1 from account_quota_observations observation
-					where observation.id = account_quota_snapshots.observation_id
-						and observation.lifecycle_applied = 1
-				)
-			))
-	)
-	select
-		id, coalesce(observation_id, 0), coalesce(logical_window_id, 0),
-		coalesce(activation_id, 0), coalesce(cycle_id, 0),
-		account_key, provider, provider_window_id, window_kind, window_mode,
-		model_scope_kind, coalesce(model_scope_key, ''), coalesce(model_ids_json, ''),
-		coalesce(scope_fingerprint, ''), coalesce(content_hash, ''),
-		source, coalesce(source_observation_id, ''), observed_at_ms,
-		boundary_accuracy, cycle_start_ms, cycle_end_ms, duration_seconds,
-		used_percent, remaining_percent, used_value, limit_value,
-		coalesce(quota_unit, ''), reset_credits_available,
-		coalesce(reset_credits_json, ''), coalesce(plan_type, ''), created_at_ms
-	from ranked
-	where source_rank <= ?
-	order by case window_availability when 'active' then 0 when 'pending_absent' then 1 else 2 end,
-		source_rank, observed_at_ms desc, id desc
-	limit ?`, strings.TrimSpace(accountKey), strings.TrimSpace(provider), candidateRowsPerSource, limit)
+	query, err := r.candidateQuery(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.db.QueryContext(ctx, query, strings.TrimSpace(accountKey), strings.TrimSpace(provider), candidateRowsPerSource, limit)
 	if err != nil {
 		return nil, err
 	}

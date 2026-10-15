@@ -85,6 +85,42 @@ func TestDerivedIndexesOnNonEmptyTablesRequireOfflineCleanup(t *testing.T) {
 	}
 }
 
+func TestQuotaCandidateIndexOnPopulatedHistoryRequiresOfflineCleanup(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`insert into account_quota_snapshots (
+		account_key, provider, provider_window_id, window_kind, window_mode,
+		model_scope_kind, source, observed_at_ms, boundary_accuracy, created_at_ms
+	) values ('account-1', 'codex', 'five-hour', 'five_hour', 'unknown', 'all', 'response_header', 1, 'unknown', 1)`); err != nil {
+		t.Fatalf("seed populated quota history: %v", err)
+	}
+	ctx := context.Background()
+	if err := RunDerivedStartupMaintenance(ctx, db); err != nil {
+		t.Fatalf("run startup maintenance: %v", err)
+	}
+	var exists bool
+	if err := db.QueryRow(`select exists(select 1 from sqlite_master where type = 'index' and name = ?)`, quotasnapshotrepo.CandidateIndexName).Scan(&exists); err != nil || exists {
+		t.Fatalf("candidate index must be deferred: exists=%t err=%v", exists, err)
+	}
+	var pending int
+	if err := db.QueryRow(`select count(*) from usage_derived_deferred_indexes where index_name = ?`, quotasnapshotrepo.CandidateIndexName).Scan(&pending); err != nil || pending != 1 {
+		t.Fatalf("candidate maintenance ledger: pending=%d err=%v", pending, err)
+	}
+	if _, err := CleanupDerivedOffline(ctx, db); err != nil {
+		t.Fatalf("prepare candidate index offline: %v", err)
+	}
+	if err := db.QueryRow(`select exists(select 1 from sqlite_master where type = 'index' and name = ?)`, quotasnapshotrepo.CandidateIndexName).Scan(&exists); err != nil || !exists {
+		t.Fatalf("candidate index missing after maintenance: exists=%t err=%v", exists, err)
+	}
+	var retained int
+	if err := db.QueryRow(`select count(*) from account_quota_snapshots`).Scan(&retained); err != nil || retained != 1 {
+		t.Fatalf("quota history changed during index preparation: retained=%d err=%v", retained, err)
+	}
+}
+
 func TestAccountActionIdentityIndexReplacementRequiresOfflineCleanup(t *testing.T) {
 	const rowCount = 100_000
 	path := filepath.Join(t.TempDir(), "usage.sqlite")

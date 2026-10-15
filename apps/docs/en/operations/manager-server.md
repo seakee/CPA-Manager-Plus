@@ -339,6 +339,8 @@ The maintenance check reads SQLite schema metadata and cleanup-job metadata, plu
 
 An upgraded database can retain an old request-monitoring FTS generation after its paired projection rows have been removed in bounded online batches. It can also have deferred indexes for populated tables or an obsolete quota-cooldown identity index that must be replaced offline. In the exceptional case where one legacy quota observation group exceeds the safe online batch limit, the migration is marked `offline_required` and logs `offline cleanup required`; the original snapshot fallback remains available. When logs report deferred index preparation, `cleanup requires offline finalization`, or `offline cleanup required`, or when the UI or `/status` reports unfinished database maintenance, stop every Manager Server process using the database and run the same-version binary once.
 
+Quota snapshot candidate reads use a managed index to seek the newest evidence per window and source instead of sorting each account's entire history on every usage insert. Existing populated databases defer this index to the offline maintenance command below; until it is prepared, the reader keeps its previous behavior. Empty databases prepare the index after the HTTP listener starts. Completing the maintenance is required to activate the bounded reader on an existing installation.
+
 Docker Compose:
 
 ```bash

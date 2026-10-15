@@ -17,6 +17,9 @@ func TestListCandidatesKeepsLatestEvidenceForEveryActiveWindow(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
+	if err := st.RunDerivedStartupMaintenance(context.Background()); err != nil {
+		t.Fatalf("prepare indexed candidate reader: %v", err)
+	}
 
 	const (
 		windowCount = 251
