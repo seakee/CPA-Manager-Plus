@@ -54,8 +54,8 @@ export type UsageAnalyticsTab =
   | 'credentials'
   | 'heatmap';
 export type UsageAnalyticsTimeRange = '24h' | 'today' | 'yesterday' | '7d' | '30d' | 'custom';
-export type UsageAnalyticsGranularity = 'auto' | 'hour' | 'day';
-export type UsageAnalyticsResolvedGranularity = 'hour' | 'day';
+export type UsageAnalyticsGranularity = 'auto' | '1m' | '15m' | 'hour' | 'day';
+export type UsageAnalyticsResolvedGranularity = '1m' | '15m' | 'hour' | 'day';
 export type UsageAnalyticsStatus = 'all' | 'success' | 'failed';
 export type UsageAnalyticsLatencyFilter = 'all' | '3000' | '10000' | '30000';
 export type UsageAnalyticsCacheStatus = 'all' | 'hit' | 'miss';
@@ -581,8 +581,21 @@ export const USAGE_HEATMAP_SCALE_MODES: UsageHeatmapScaleMode[] = [
   'byHour',
 ];
 
-const HOUR_MS = 60 * 60 * 1000;
+const MINUTE_MS = 60 * 1000;
+const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
+
+const SUB_HOUR_BUCKET_MINUTES: Partial<Record<UsageAnalyticsResolvedGranularity, number>> = {
+  '1m': 1,
+  '15m': 15,
+};
+
+// Longest range each sub-hour bucket accepts (the server enforces the same limits;
+// 25h covers a DST day), so a chart stays under ~1500 points.
+const SUB_HOUR_MAX_RANGE_MS: Partial<Record<UsageAnalyticsGranularity, number>> = {
+  '1m': 25 * HOUR_MS,
+  '15m': 7 * DAY_MS + HOUR_MS,
+};
 const USAGE_HEATMAP_FAILURE_MIN_REQUESTS = 5;
 
 const toNumber = (value: unknown): number => {
@@ -634,7 +647,8 @@ export const formatLocalBucketLabel = (
   if (granularity === 'day') {
     return `${padDateUnit(date.getMonth() + 1)}/${padDateUnit(date.getDate())}`;
   }
-  return `${padDateUnit(date.getMonth() + 1)}/${padDateUnit(date.getDate())} ${padDateUnit(date.getHours())}:00`;
+  const minutes = SUB_HOUR_BUCKET_MINUTES[granularity] ? padDateUnit(date.getMinutes()) : '00';
+  return `${padDateUnit(date.getMonth() + 1)}/${padDateUnit(date.getDate())} ${padDateUnit(date.getHours())}:${minutes}`;
 };
 
 export const formatLocalDateTime = (timestampMs: number, locale: string) =>
@@ -658,7 +672,8 @@ const getLocalBucketStartMs = (
 ) => {
   if (granularity === 'day') return localDayStartMs(timestampMs);
   const date = new Date(timestampMs);
-  date.setMinutes(0, 0, 0);
+  const stepMinutes = SUB_HOUR_BUCKET_MINUTES[granularity];
+  date.setMinutes(stepMinutes ? date.getMinutes() - (date.getMinutes() % stepMinutes) : 0, 0, 0);
   return date.getTime();
 };
 
@@ -667,6 +682,11 @@ const getNextUsageBucketStartMs = (
   granularity: UsageAnalyticsResolvedGranularity
 ) => {
   const date = new Date(bucketMs);
+  const stepMinutes = SUB_HOUR_BUCKET_MINUTES[granularity];
+  if (stepMinutes) {
+    date.setMinutes(date.getMinutes() + stepMinutes, 0, 0);
+    return date.getTime();
+  }
   if (granularity === 'hour') {
     date.setHours(date.getHours() + 1, 0, 0, 0);
     return date.getTime();
@@ -709,11 +729,27 @@ export const getUsageRangeBounds = (
   }
 };
 
+/** Whether a granularity can be used for the selected range (sub-hour buckets cap the range). */
+export const isUsageGranularityAvailable = (
+  granularity: UsageAnalyticsGranularity,
+  bounds: UsageAnalyticsRangeBounds | null
+) => {
+  const maxRangeMs = SUB_HOUR_MAX_RANGE_MS[granularity];
+  if (maxRangeMs === undefined) return true;
+  return bounds !== null && bounds.toMs - bounds.fromMs <= maxRangeMs;
+};
+
 export const resolveUsageGranularity = (
   filters: Pick<UsageAnalyticsFiltersState, 'timeRange' | 'customRange' | 'granularity'>,
   nowMs: number
 ): UsageAnalyticsResolvedGranularity => {
   if (filters.granularity === 'hour' || filters.granularity === 'day') {
+    return filters.granularity;
+  }
+  if (
+    (filters.granularity === '1m' || filters.granularity === '15m') &&
+    isUsageGranularityAvailable(filters.granularity, getUsageRangeBounds(filters, nowMs))
+  ) {
     return filters.granularity;
   }
 
@@ -863,8 +899,11 @@ export const buildUsageSummary = (
   tpm30m: toNumber(summary?.tpm_30m),
 });
 
-const getBucketSizeMs = (granularity: UsageAnalyticsResolvedGranularity) =>
-  granularity === 'day' ? DAY_MS : HOUR_MS;
+export const getUsageBucketSizeMs = (granularity: UsageAnalyticsResolvedGranularity) => {
+  const stepMinutes = SUB_HOUR_BUCKET_MINUTES[granularity];
+  if (stepMinutes) return stepMinutes * MINUTE_MS;
+  return granularity === 'day' ? DAY_MS : HOUR_MS;
+};
 
 export const computeCacheHitRate = (tokens: {
   modelName?: string;
@@ -933,7 +972,7 @@ export const buildUsageTimeline = (
     const bucketMs = toNumber(point.bucket_ms);
     return {
       bucketMs,
-      bucketEndMs: toNumber(point.bucket_end_ms) || bucketMs + getBucketSizeMs(granularity),
+      bucketEndMs: toNumber(point.bucket_end_ms) || bucketMs + getUsageBucketSizeMs(granularity),
       label: formatLocalBucketLabel(bucketMs, granularity),
       requestCount,
       totalTokens,
@@ -972,7 +1011,7 @@ const buildEmptyUsageTimelinePoint = (
   granularity: UsageAnalyticsResolvedGranularity
 ): UsageTimelinePoint => ({
   bucketMs,
-  bucketEndMs: bucketMs + getBucketSizeMs(granularity),
+  bucketEndMs: bucketMs + getUsageBucketSizeMs(granularity),
   label: formatLocalBucketLabel(bucketMs, granularity),
   requestCount: 0,
   totalTokens: 0,

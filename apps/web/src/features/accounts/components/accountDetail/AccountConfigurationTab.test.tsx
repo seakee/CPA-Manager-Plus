@@ -178,43 +178,28 @@ describe('AccountConfigurationTab', () => {
     expect(text).not.toContain('auth_files.websockets_label');
   });
 
-  it('keeps primary save and reset actions at the top of the hierarchy', () => {
+  it('leaves save and discard to the drawer footer save pill', () => {
     const editor = makeEditor('codex');
     editor.dirty = true;
     editor.canSave = true;
     const renderer = renderTab(makeRow('codex'), editor);
-    const buttons = renderer.root.findAllByType('button');
-    const resetButton = buttons.find((button) => readText(button).includes('common.reset'));
-    const saveButton = buttons.find((button) => readText(button).includes('common.save'));
-    if (!resetButton || !saveButton) throw new Error('configuration toolbar actions missing');
+    const buttonText = renderer.root.findAllByType('button').map(readText).join(' ');
 
-    expect(resetButton.props.className).toContain('configurationToolbarButton');
-    expect(saveButton.props.className).toContain('configurationToolbarButton');
-    act(() => resetButton.props.onClick());
-    act(() => saveButton.props.onClick());
-
-    expect(editor.reset).toHaveBeenCalledTimes(1);
-    expect(editor.save).toHaveBeenCalledTimes(1);
+    expect(buttonText).not.toContain('common.save');
+    expect(buttonText).not.toContain('common.reset');
+    expect(editor.save).not.toHaveBeenCalled();
   });
 
-  it('allows an administratively disabled credential to edit and save configuration', () => {
+  it('allows an administratively disabled credential to edit its configuration', () => {
     const editor = makeEditor('codex');
     editor.dirty = true;
     editor.canSave = true;
     const renderer = renderTab(makeRow('codex', { disabled: true }), editor);
-    const saveButton = renderer.root
-      .findAllByType('button')
-      .find((button) => readText(button).includes('common.save'));
-    if (!saveButton) throw new Error('configuration save action missing');
 
     expect(renderer.root.findAllByType(Input).every((input) => input.props.disabled !== true)).toBe(
       true
     );
-    expect(saveButton.props.disabled).toBe(false);
     expect(readText(renderer.toJSON())).not.toContain('accounts.config_disabled_read_only');
-
-    act(() => saveButton.props.onClick());
-    expect(editor.save).toHaveBeenCalledTimes(1);
   });
 
   it.each(['enabled', 'inherit'] as const)(
@@ -296,11 +281,6 @@ describe('AccountConfigurationTab', () => {
       renderer.root.findAllByType('textarea').every((textarea) => textarea.props.disabled === true)
     ).toBe(true);
     expect(renderer.root.findByType('details')).toBeDefined();
-    expect(
-      renderer.root
-        .findAllByType('button')
-        .find((button) => readText(button).includes('common.save'))?.props.disabled
-    ).toBe(true);
   });
 
   it('explains why runtime-only credentials cannot be configured', () => {

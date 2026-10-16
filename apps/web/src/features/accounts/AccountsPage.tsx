@@ -19,6 +19,7 @@ import { Modal } from '@/components/ui/Modal';
 import { Select } from '@/components/ui/Select';
 import { SegmentedTabs, type SegmentedTabItem } from '@/components/ui/SegmentedTabs';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
+import { SaveStatusPill } from '@/components/ui/SaveStatusPill';
 import {
   IconCheck,
   IconBinary,
@@ -37,6 +38,7 @@ import {
   IconModelCluster,
   IconPlus,
   IconRefreshCw,
+  IconTimer,
   IconRotateCcw,
   IconSearch,
   IconSettings,
@@ -421,6 +423,22 @@ const renderAccountDetailTrigger = ({
   );
 
 const MAX_CONCURRENT_QUOTA_REFRESHES_PER_PROVIDER = 1;
+// Scheduled quota refresh. Quota endpoints are free but rate limited (Anthropic in
+// particular), so the floor is one minute; the default matches a typical review cadence.
+const QUOTA_AUTO_REFRESH_STORAGE_KEY = 'cpamp.accounts.quotaAutoRefreshMs';
+const QUOTA_AUTO_REFRESH_DEFAULT_MS = 5 * 60_000;
+const QUOTA_AUTO_REFRESH_OPTIONS_MS = [0, 60_000, 2 * 60_000, 5 * 60_000, 10 * 60_000, 15 * 60_000];
+const readQuotaAutoRefreshMs = (): number => {
+  try {
+    const raw = globalThis.localStorage?.getItem(QUOTA_AUTO_REFRESH_STORAGE_KEY);
+    // Number(null) is 0 ("Off"), so only trust a value that was actually stored.
+    const stored = raw === null || raw === undefined || raw === '' ? NaN : Number(raw);
+    if (QUOTA_AUTO_REFRESH_OPTIONS_MS.includes(stored)) return stored;
+  } catch {
+    // Storage may be unavailable (private mode, embedded contexts).
+  }
+  return QUOTA_AUTO_REFRESH_DEFAULT_MS;
+};
 const MAX_CONCURRENT_QUOTA_REFRESH_PROVIDERS = 3;
 const MAX_CONCURRENT_ACCOUNT_HISTORY_REQUESTS = 2;
 const PASSIVE_ACCOUNTS_EVIDENCE_REFRESH_MS = 60_000;
@@ -1424,6 +1442,7 @@ export function AccountsPage() {
   const inspectionSnapshotRef = useRef(inspectionSnapshot);
   inspectionSnapshotRef.current = inspectionSnapshot;
   const [quotaRefreshing, setQuotaRefreshing] = useState(false);
+  const [quotaAutoRefreshMs, setQuotaAutoRefreshMs] = useState<number>(readQuotaAutoRefreshMs);
   const [manualQuotaRefreshingKeys, setManualQuotaRefreshingKeys] = useState<ReadonlySet<string>>(
     () => new Set()
   );
@@ -6521,7 +6540,9 @@ export function AccountsPage() {
   );
 
   const refreshQuotaRows = useCallback(
-    (targets: AccountRow[]): Promise<void> => {
+    (targets: AccountRow[], options?: { silent?: boolean }): Promise<void> => {
+      // Scheduled (auto) refreshes run quietly; manual refreshes keep their toasts.
+      const notify: typeof showNotification = options?.silent ? () => undefined : showNotification;
       const currentBatch = quotaRefreshBatchRef.current;
       if (currentBatch?.connectionFingerprint === connectionFingerprint) {
         return currentBatch.promise;
@@ -6530,7 +6551,7 @@ export function AccountsPage() {
         (row) => !row.runtimeOnly && isQuotaRefreshSupportedProvider(row.provider)
       );
       if (refreshable.length === 0) {
-        showNotification(t('accounts.no_refreshable_accounts'), 'warning');
+        notify(t('accounts.no_refreshable_accounts'), 'warning');
         return Promise.resolve();
       }
       const taskPlan = buildProviderCredentialTaskPlan(refreshable, {
@@ -6608,18 +6629,18 @@ export function AccountsPage() {
             const rawName = account.accountLabel || account.fileName;
             const name = accountDisplayMode === 'full' ? rawName : maskQuotaAccountText(rawName);
             if (firstError?.status === 'error') {
-              showNotification(
+              notify(
                 t('accounts.quota_refresh_failed', { name, message: firstError.error }),
                 'error'
               );
             } else {
-              showNotification(t('accounts.quota_refresh_success', { name }), 'success');
+              notify(t('accounts.quota_refresh_success', { name }), 'success');
             }
             return;
           }
 
           if (firstError?.status === 'error') {
-            showNotification(
+            notify(
               t('accounts.quota_refresh_result_with_error', {
                 success: successCount,
                 total: totalCount,
@@ -6628,7 +6649,7 @@ export function AccountsPage() {
               successCount === 0 ? 'error' : 'warning'
             );
           } else if (rateLimitedSuccessCount > 0 || rateLimitSkippedCount > 0) {
-            showNotification(
+            notify(
               t('accounts.quota_refresh_result', {
                 success: successCount,
                 total: totalCount,
@@ -6636,7 +6657,7 @@ export function AccountsPage() {
               'warning'
             );
           } else {
-            showNotification(
+            notify(
               t('accounts.quota_refresh_result', {
                 success: successCount,
                 total: totalCount,
@@ -6646,7 +6667,7 @@ export function AccountsPage() {
           }
 
           if (rateLimitSkippedCount > 0) {
-            showNotification(
+            notify(
               t('accounts.quota_refresh_rate_limited_skipped', {
                 count: rateLimitSkippedCount,
                 defaultValue: `因 Provider 请求频率限制，已跳过 ${rateLimitSkippedCount} 个凭证`,
@@ -6654,7 +6675,7 @@ export function AccountsPage() {
               'warning'
             );
           } else if (rateLimitedSuccessCount > 0) {
-            showNotification(
+            notify(
               t('accounts.quota_refresh_partial_rate_limited'),
               'warning'
             );
@@ -6673,6 +6694,30 @@ export function AccountsPage() {
       return batchPromise;
     },
     [accountDisplayMode, connectionFingerprint, refreshQuotaForRow, showNotification, t]
+  );
+
+  useEffect(() => {
+    try {
+      globalThis.localStorage?.setItem(QUOTA_AUTO_REFRESH_STORAGE_KEY, String(quotaAutoRefreshMs));
+    } catch {
+      // Ignore persistence failures; the in-memory choice still applies.
+    }
+  }, [quotaAutoRefreshMs]);
+
+  // Scheduled quota refresh: same visibility gating as the passive evidence poll,
+  // silent, and never stacked on top of a refresh that is already running.
+  useInterval(
+    () => {
+      if (quotaRefreshing || disableControls) return;
+      const targets = pageRows.filter(
+        (row) => !row.runtimeOnly && isQuotaRefreshSupportedProvider(row.provider)
+      );
+      if (targets.length === 0) return;
+      void refreshQuotaRows(targets, { silent: true });
+    },
+    activeView === 'accounts' && documentVisible && quotaAutoRefreshMs > 0
+      ? quotaAutoRefreshMs
+      : null
   );
 
   const refreshAccountQuota = useCallback(
@@ -8244,6 +8289,32 @@ export function AccountsPage() {
           {showSelectionControls ? renderSelectionControls() : null}
           <div className={styles.batchDisplayToggle}>{renderAccountDisplayToggle()}</div>
           {!hasSelection && !isSelectionMode ? (
+            <div className={styles.quotaAutoRefreshField}>
+              <span
+                className={styles.quotaAutoRefreshLabel}
+                title={t('accounts.quota_auto_refresh')}
+              >
+                <IconTimer size={15} />
+                {t('accounts.quota_auto_refresh_short')}
+              </span>
+              <Select
+                className={styles.quotaAutoRefreshSelect}
+                triggerClassName={styles.quotaAutoRefreshSelectTrigger}
+                value={String(quotaAutoRefreshMs)}
+                options={QUOTA_AUTO_REFRESH_OPTIONS_MS.map((ms) => ({
+                  value: String(ms),
+                  label:
+                    ms === 0
+                      ? t('monitoring.auto_refresh_off')
+                      : t('accounts.quota_auto_refresh_minutes', { count: ms / 60_000 }),
+                }))}
+                onChange={(value) => setQuotaAutoRefreshMs(Number(value))}
+                ariaLabel={t('accounts.quota_auto_refresh')}
+                fullWidth={false}
+              />
+            </div>
+          ) : null}
+          {!hasSelection && !isSelectionMode ? (
             <Button
               variant="secondary"
               size="sm"
@@ -8586,6 +8657,29 @@ export function AccountsPage() {
           </>
         ) : null}
       </div>
+    );
+  };
+
+  // ChatGPT credits pay for usage once the plan quota is exhausted; shown under the
+  // quota meters so a draining balance is visible without opening the drawer.
+  const renderCreditsLine = (row: AccountRow) => {
+    const balance = Number.parseFloat(String(row.quota.creditsBalance ?? ''));
+    if (!Number.isFinite(balance) && row.quota.creditsUnlimited !== true) return null;
+    const messages = row.quota.creditsApproxLocalMessages;
+    return (
+      <span className={styles.quotaCreditsLine} data-account-credits="true">
+        <span className={styles.quotaCreditsLabel}>{t('accounts.credits_short')}</span>
+        <strong>
+          {row.quota.creditsUnlimited === true
+            ? t('accounts.detail_credits_unlimited')
+            : formatCompactNumber(balance)}
+        </strong>
+        {messages != null ? (
+          <span className={styles.quotaCreditsMeta}>
+            {t('accounts.credits_approx_messages', { count: formatCompactNumber(messages) })}
+          </span>
+        ) : null}
+      </span>
     );
   };
 
@@ -9726,6 +9820,7 @@ export function AccountsPage() {
                       kind: 'quota',
                       onOpen: () => void openAccountDetail(row, 'quota'),
                       children: (
+                        <>
                         <span className={styles.quotaWindowGrid} title={ctx.quotaWindowTitle}>
                         {ctx.mainListWindows.length > 0 ? (
                           ctx.mainListWindows.map((window, windowIndex) =>
@@ -9744,6 +9839,10 @@ export function AccountsPage() {
                           </span>
                         )}
                       </span>
+                        {/* Outside the grid: a lone quota window must stay its only child
+                            so it spans the full cell width. */}
+                        {renderCreditsLine(row)}
+                        </>
                       ),
                     });
                   })()}
@@ -9963,7 +10062,20 @@ export function AccountsPage() {
     const selectedCredentialRefreshing =
       credentialRefreshing[getAuthFileSelectionKey(selectedRow.raw)] === true;
     const selectedQuotaRefreshing = isManualQuotaRefreshing(selectedRow);
+    const canRefreshSelectedQuota =
+      !selectedRow.runtimeOnly && isQuotaRefreshSupportedProvider(selectedRow.provider);
     const drawerMoreItems: DropdownMenuItem[] = [
+      ...(canRefreshSelectedQuota
+        ? [
+            {
+              key: 'refresh-quota',
+              label: t('accounts.refresh_quota'),
+              icon: <IconRefreshCw size={15} />,
+              onClick: () => void refreshAccountQuota(selectedRow, 'detail'),
+              disabled: disableControls || quotaRefreshing || selectedQuotaRefreshing,
+            } satisfies DropdownMenuItem,
+          ]
+        : []),
       {
         key: 'models',
         label: t('auth_files.models_button'),
@@ -10019,6 +10131,19 @@ export function AccountsPage() {
       },
     ];
 
+    const configurationEditorReady = Boolean(
+      configurationEditor.state &&
+        !configurationEditor.state.loading &&
+        !configurationEditor.state.error &&
+        configurationEditor.draft
+    );
+    const showDrawerReauth = detailView.health.status === 'reauth';
+    const showDrawerSavePill =
+      (detailTab === 'config' || detailTab === 'models') &&
+      configurationEditorReady &&
+      !configurationEditor.sharedSourceReadOnly &&
+      !selectedRow.runtimeOnly;
+
     return (
       <Drawer
         key={selectedRow.selectionKey}
@@ -10059,49 +10184,66 @@ export function AccountsPage() {
                 </button>
               </span>
             </div>
+            <div className={styles.drawerTitleControls}>
+              <ToggleSwitch
+                checked={!selectedRow.disabled}
+                onChange={(enabled) => void handleBatchStatus(enabled, [selectedRow])}
+                disabled={
+                  disableControls || configurationSaving || statusUpdating || selectedRow.runtimeOnly
+                }
+                label={t('auth_files.status_toggle_label')}
+                labelPosition="left"
+              />
+              <DropdownMenu
+                items={drawerMoreItems}
+                ariaLabel={t('accounts.drawer_more_actions')}
+                triggerTitle={t('accounts.drawer_more_actions')}
+                triggerIcon={<IconMoreVertical size={16} />}
+                triggerClassName={styles.drawerMoreActions}
+              />
+            </div>
           </div>
         }
         footer={
-          <div className={styles.drawerActions}>
-            {detailView.health.status === 'reauth' ? (
-              <Button
-                variant="primary"
-                onClick={() => handleReauthAccount(selectedRow.raw)}
-                disabled={disableControls || configurationSaving || selectedRow.runtimeOnly}
-              >
-                <IconShield size={16} />
-                {t('accounts.recommend_action_reauth')}
-              </Button>
-            ) : null}
-            {!selectedRow.runtimeOnly && isQuotaRefreshSupportedProvider(selectedRow.provider) ? (
-              <Button
-                variant="secondary"
-                onClick={() => void refreshAccountQuota(selectedRow, 'detail')}
-                loading={quotaRefreshing || selectedQuotaRefreshing}
-                disabled={disableControls || selectedQuotaRefreshing || selectedRow.runtimeOnly}
-              >
-                {!quotaRefreshing && !selectedQuotaRefreshing ? <IconRefreshCw size={16} /> : null}
-                {t('accounts.refresh_quota')}
-              </Button>
-            ) : null}
-            <Button
-              variant={selectedRow.disabled ? 'secondary' : 'danger'}
-              onClick={() => handleBatchStatus(selectedRow.disabled, [selectedRow])}
-              disabled={
-                disableControls || configurationSaving || statusUpdating || selectedRow.runtimeOnly
-              }
-            >
-              {selectedRow.disabled ? t('accounts.enable') : t('accounts.disable')}
-            </Button>
-            <DropdownMenu
-              items={drawerMoreItems}
-              ariaLabel={t('accounts.drawer_more_actions')}
-              triggerTitle={t('accounts.drawer_more_actions')}
-              triggerLabel={t('accounts.batch_more')}
-              triggerIcon={<IconMoreVertical size={16} />}
-              triggerClassName={styles.drawerMoreActions}
-            />
-          </div>
+          showDrawerReauth || showDrawerSavePill ? (
+            <div className={styles.drawerActions}>
+              {showDrawerReauth ? (
+                <Button
+                  variant="primary"
+                  onClick={() => handleReauthAccount(selectedRow.raw)}
+                  disabled={disableControls || configurationSaving || selectedRow.runtimeOnly}
+                >
+                  <IconShield size={16} />
+                  {t('accounts.recommend_action_reauth')}
+                </Button>
+              ) : null}
+              {showDrawerSavePill ? (
+                <SaveStatusPill
+                  className={styles.drawerSavePill}
+                  statusOptions={[
+                    t('accounts.save_pill_saved'),
+                    t('accounts.save_pill_unsaved'),
+                    t('accounts.save_pill_saving'),
+                  ]}
+                  status={
+                    configurationSaving
+                      ? t('accounts.save_pill_saving')
+                      : configurationEditor.dirty
+                        ? t('accounts.save_pill_unsaved')
+                        : t('accounts.save_pill_saved')
+                  }
+                  tone={configurationEditor.dirty ? 'modified' : 'saved'}
+                  dirty={configurationEditor.dirty}
+                  onReset={configurationEditor.reset}
+                  onSave={() => void configurationEditor.save()}
+                  resetDisabled={!configurationEditor.dirty || configurationSaving}
+                  saveDisabled={!configurationEditor.canSave || selectedRow.disabled}
+                  resetLabel={t('accounts.save_pill_discard')}
+                  saveLabel={t('accounts.save_pill_save')}
+                />
+              ) : null}
+            </div>
+          ) : undefined
         }
       >
         <div className={styles.drawerBodyShell} data-detail-tab={detailTab}>

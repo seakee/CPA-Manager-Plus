@@ -2,7 +2,7 @@
 @use '@/styles/mixins.scss' as *;
 
 // 类型 / 标识 / 地址 / 模型 / 优先级 / 近期请求 / 启用 / 操作
-$table-columns: 92px minmax(132px, 0.72fr) minmax(180px, 1fr) 96px 72px minmax(220px, 0.82fr) 68px 112px;
+$table-columns: 108px minmax(132px, 0.72fr) minmax(180px, 1fr) 96px 72px minmax(220px, 0.82fr) 68px 112px;
 
 @mixin provider-card-layout {
   @include narrow-laptop {
@@ -441,4 +441,12 @@ $table-columns: 92px minmax(132px, 0.72fr) minmax(180px, 1fr) 96px 72px minmax(2
 
 .cellActionsHeader {
   text-align: center;
+}
+
+// Column separators only while rows are a table; the card layout stacks cells.
+@media (min-width: 1441px) {
+  .headerRow,
+  .row {
+    @include grid-column-dividers(8px, $center: true);
+  }
 }

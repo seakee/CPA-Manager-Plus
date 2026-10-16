@@ -50,7 +50,7 @@ export function MonitoringActionBar({
       <div className={styles.actionGroup}>
         <button
           type="button"
-          className={`${styles.actionButton} ${styles.actionButtonPrimary}`}
+          className={styles.actionButton}
           onClick={() => void onUsageExport()}
           disabled={!usageTransferAvailable || usageExporting || usageImporting}
           title={
@@ -64,7 +64,7 @@ export function MonitoringActionBar({
         </button>
         <button
           type="button"
-          className={`${styles.actionButton} ${styles.actionButtonPrimary}`}
+          className={styles.actionButton}
           onClick={onUsageImportClick}
           disabled={!usageTransferAvailable || usageExporting || usageImporting}
           title={

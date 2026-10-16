@@ -1,3 +1,5 @@
+@use '@/styles/mixins.scss' as *;
+
 .page {
   --pricing-surface: var(--bg-primary);
   --pricing-surface-elevated: color-mix(in srgb, var(--bg-primary) 84%, var(--surface-subtle));
@@ -560,4 +562,8 @@
     align-items: flex-start;
     flex-direction: column;
   }
+}
+
+.priceTable {
+  @include table-column-dividers;
 }

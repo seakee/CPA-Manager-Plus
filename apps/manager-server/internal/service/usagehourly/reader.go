@@ -219,7 +219,7 @@ func (r *Reader) AnalyticsTimeline(
 	granularity string,
 	location *time.Location,
 ) ([]store.TimelinePoint, bool) {
-	if !snapshot.analyticsTimelineReady {
+	if !snapshot.analyticsTimelineReady || usage.IsSubHourAnalyticsGranularity(granularity) {
 		return nil, false
 	}
 	if location == nil {
@@ -238,7 +238,7 @@ func (r *Reader) AnalyticsTimeline(
 // CanRepresentAnalyticsTimeline reports whether complete UTC hourly rows can
 // be mapped to the requested local buckets without splitting an hourly row.
 func (r *Reader) CanRepresentAnalyticsTimeline(fromMS, toMS int64, granularity string, location *time.Location) bool {
-	if !r.enabled {
+	if !r.enabled || usage.IsSubHourAnalyticsGranularity(granularity) {
 		return false
 	}
 	if location == nil {

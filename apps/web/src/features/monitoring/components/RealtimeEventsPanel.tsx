@@ -1035,7 +1035,6 @@ export function RealtimeEventsPanel({
     'monitoring.column_source_api_key_short',
     'monitoring.column_source_api_key'
   );
-  const reasoningServiceLabel = t('monitoring.reasoning_service_short');
   const recentStatusLabel = shortLabel(
     t,
     'monitoring.recent_status_short',
@@ -1097,22 +1096,28 @@ export function RealtimeEventsPanel({
             <col />
             <col />
             <col />
-            <col />
           </colgroup>
           <thead>
+            <tr className={styles.realtimeGroupRow}>
+              <th colSpan={8}>{t('monitoring.realtime_group_request')}</th>
+              <th colSpan={3} className={styles.realtimeTrendStart}>
+                {t('monitoring.realtime_group_trend')}
+              </th>
+            </tr>
             <tr>
               <th>{sourceApiKeyLabel}</th>
               <th>{t('monitoring.column_model')}</th>
-              <th className={styles.realtimeSettingsColumn}>{reasoningServiceLabel}</th>
-              <th className={styles.realtimeCenteredColumn}>{recentStatusLabel}</th>
               <th className={styles.realtimeCenteredColumn}>{requestStatusLabel}</th>
-              <th className={styles.realtimeCenteredColumn}>{successRateLabel}</th>
-              <th className={styles.realtimeCenteredColumn}>{totalCallsLabel}</th>
               <th className={styles.realtimeTpsColumn}>{t('monitoring.column_output_tps')}</th>
               <th className={styles.realtimeLatencyColumn}>{t('monitoring.elapsed_short')}</th>
               <th className={styles.realtimeTimeColumn}>{t('monitoring.column_time')}</th>
               <th>{usageLabel}</th>
               <th>{costLabel}</th>
+              <th className={`${styles.realtimeCenteredColumn} ${styles.realtimeTrendStart}`}>
+                {recentStatusLabel}
+              </th>
+              <th className={styles.realtimeCenteredColumn}>{successRateLabel}</th>
+              <th className={styles.realtimeCenteredColumn}>{totalCallsLabel}</th>
             </tr>
           </thead>
           <tbody>
@@ -1152,6 +1157,32 @@ export function RealtimeEventsPanel({
                   : serviceTier !== '-'
                     ? serviceTier
                     : responseServiceTier;
+              // Request settings are properties of this model call, so they sit with the
+              // model rather than in a column that reads like an account attribute.
+              const requestTags = [
+                ...(reasoningEffort !== '-'
+                  ? [
+                      {
+                        key: 'reasoning',
+                        label: reasoningEffort,
+                        title: `${t('monitoring.realtime_reasoning_label')}: ${reasoningEffort}`,
+                        className: styles.realtimeReasoningValue,
+                      },
+                    ]
+                  : []),
+                ...(!['-', 'auto', 'default', 'standard'].includes(
+                  effectiveServiceTier.toLowerCase()
+                )
+                  ? [
+                      {
+                        key: 'tier',
+                        label: effectiveServiceTier,
+                        title: `${t('monitoring.realtime_service_label')}: ${effectiveServiceTier}`,
+                        className: styles.realtimeServiceValue,
+                      },
+                    ]
+                  : []),
+              ];
               const requestDiagnosticDetails = buildRequestDiagnosticDetails(row, t, locale);
               const requestDiagnosticTooltipId = requestDiagnosticDetails
                 ? `${tooltipIdPrefix}-request-diagnostic-tooltip-${row.id}`
@@ -1209,35 +1240,19 @@ export function RealtimeEventsPanel({
                           </span>
                         </div>
                       ) : null}
-                    </div>
-                  </td>
-                  <td className={styles.realtimeSettingsColumn}>
-                    <div className={styles.realtimeSettingsCell}>
-                      <span className={styles.realtimeSettingLine}>
-                        <span className={styles.realtimeSettingLabel}>
-                          {t('monitoring.realtime_reasoning_label')}
-                        </span>
-                        <span
-                          className={`${styles.realtimeSettingValue} ${styles.realtimeReasoningValue}`}
-                        >
-                          {reasoningEffort}
-                        </span>
-                      </span>
-                      <span className={styles.realtimeSettingLine}>
-                        <span className={styles.realtimeSettingLabel}>
-                          {t('monitoring.realtime_service_label')}
-                        </span>
-                        <span
-                          className={`${styles.realtimeSettingValue} ${styles.realtimeServiceValue}`}
-                        >
-                          {effectiveServiceTier}
-                        </span>
-                      </span>
-                    </div>
-                  </td>
-                  <td className={styles.realtimeCenteredColumn}>
-                    <div className={styles.recentStatusCell}>
-                      <RecentPattern pattern={row.recentPattern} variant="plain" />
+                      {requestTags.length > 0 ? (
+                        <div className={styles.realtimeRequestTags}>
+                          {requestTags.map((tag) => (
+                            <span
+                              key={tag.key}
+                              className={`${styles.realtimeRequestTag} ${tag.className}`}
+                              title={tag.title}
+                            >
+                              {tag.label}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
                     </div>
                   </td>
                   <td className={styles.realtimeCenteredColumn}>
@@ -1269,21 +1284,6 @@ export function RealtimeEventsPanel({
                         </span>
                       )}
                     </div>
-                  </td>
-                  <td
-                    className={[
-                      styles.realtimeCenteredColumn,
-                      row.successRate >= 0.95
-                        ? styles.goodText
-                        : row.successRate >= 0.85
-                          ? styles.warnText
-                          : styles.badText,
-                    ].join(' ')}
-                  >
-                    {formatPercent(row.successRate)}
-                  </td>
-                  <td className={styles.realtimeCenteredColumn}>
-                    {formatCompactNumber(row.requestCount)}
                   </td>
                   <td className={styles.realtimeTpsColumn}>
                     <span className={styles.realtimeTpsCell}>
@@ -1331,12 +1331,32 @@ export function RealtimeEventsPanel({
                     />
                   </td>
                   <td>{hasPrices ? formatUsd(row.totalCost, 3) : '--'}</td>
+                  <td className={`${styles.realtimeCenteredColumn} ${styles.realtimeTrendStart}`}>
+                    <div className={styles.recentStatusCell}>
+                      <RecentPattern pattern={row.recentPattern} variant="plain" />
+                    </div>
+                  </td>
+                  <td
+                    className={[
+                      styles.realtimeCenteredColumn,
+                      row.successRate >= 0.95
+                        ? styles.goodText
+                        : row.successRate >= 0.85
+                          ? styles.warnText
+                          : styles.badText,
+                    ].join(' ')}
+                  >
+                    {formatPercent(row.successRate)}
+                  </td>
+                  <td className={styles.realtimeCenteredColumn}>
+                    {formatCompactNumber(row.requestCount)}
+                  </td>
                 </tr>
               );
             })}
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={12}>{emptyState}</td>
+                <td colSpan={11}>{emptyState}</td>
               </tr>
             ) : null}
           </tbody>

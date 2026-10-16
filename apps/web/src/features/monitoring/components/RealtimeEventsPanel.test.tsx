@@ -232,24 +232,23 @@ describe('RealtimeEventsPanel', () => {
       })
     );
 
-    expect(markup).toContain(
-      `class="${styles.realtimeSettingsColumn}">Reasoning / Tier</th>`
-    );
+    // Request settings live with the model; the stream tallies sit under their own group.
+    expect(markup).not.toContain('Reasoning / Tier');
+    expect(markup).toContain('>monitoring.realtime_group_request</th>');
+    expect(markup).toContain('monitoring.realtime_group_trend');
     expect(markup).toContain('>TPS</th>');
     expect(markup).toContain(styles.realtimeTpsColumn);
     expect(markup).toContain(styles.realtimeLatencyColumn);
     expect(markup).toContain(styles.realtimeTimeColumn);
     expect(markup.match(new RegExp(styles.realtimeCenteredColumn, 'g'))).toHaveLength(8);
-    expect(markup.match(new RegExp(styles.realtimeSettingsColumn, 'g'))).toHaveLength(2);
+    expect(markup.match(new RegExp(styles.realtimeTrendStart, 'g'))).toHaveLength(3);
     expect(markup).toContain('>Recent Status</th>');
     expect(markup).toContain('>Success Rate</th>');
     expect(markup).toContain('Source / API Key');
     expect(markup).not.toContain('>Executor: codex<');
     expect(markup).not.toContain('Executor: codex');
-    expect(markup).toContain('>Reasoning</span><span class=');
-    expect(markup).toContain('>medium</span>');
-    expect(markup).toContain('>Service</span><span class=');
-    expect(markup).toContain('>priority</span>');
+    expect(markup).toContain('title="Reasoning: medium">medium</span>');
+    expect(markup).toContain('title="Service: priority">priority</span>');
     expect(markup).not.toContain('default</span>');
     expect(markup).toContain(styles.realtimeReasoningValue);
     expect(markup).toContain(styles.realtimeServiceValue);
@@ -358,13 +357,9 @@ describe('RealtimeEventsPanel', () => {
     const markup = renderPanel(baseRow({ reasoningTokens: 0 }));
 
     expect(markup).toContain('<colgroup>');
-    expect(markup.match(/<col\b/g)).toHaveLength(12);
-    expect(
-      markup.match(new RegExp(`class="[^"]*${styles.realtimeSettingValue}[^"]*">-</span>`, 'g'))
-    ).toHaveLength(2);
-    expect(markup).toContain(
-      `class="${styles.realtimeSettingsColumn}">Reasoning / Tier</th>`
-    );
+    expect(markup.match(/<col\b/g)).toHaveLength(11);
+    // No reasoning/tier recorded: no tags rather than "-" placeholders.
+    expect(markup).not.toContain(styles.realtimeRequestTags);
     expect(markup).toContain('>TPS</th>');
     expect(markup).toContain('Success');
     expect(markup).toContain('>Elapsed</th>');

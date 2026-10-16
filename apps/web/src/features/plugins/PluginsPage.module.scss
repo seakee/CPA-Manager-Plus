@@ -1,3 +1,5 @@
+@use '@/styles/mixins.scss' as *;
+
 .page {
   display: flex;
   flex-direction: column;
@@ -157,8 +159,9 @@
   min-width: 0;
 }
 
+// Actions fits "Edit config" plus the overflow menu (~150px) inside the column gutters.
 $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 1fr)
-  minmax(160px, 0.82fr) 72px 126px;
+  minmax(160px, 0.82fr) 80px 170px;
 
 .list {
   display: flex;
@@ -729,5 +732,13 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
 
   .arrayActions {
     justify-content: flex-start;
+  }
+}
+
+// Column separators only while rows are a table; at <=1180px rows become cards.
+@media (min-width: 1181px) {
+  .tableHeader,
+  .row {
+    @include grid-column-dividers(8px, $center: true);
   }
 }

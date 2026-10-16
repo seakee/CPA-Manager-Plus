@@ -1,7 +1,9 @@
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
 import type { ComponentProps } from 'react';
 import { describe, expect, it, vi } from 'vitest';
+import { DropdownMenu, type DropdownMenuItem } from '@/components/ui/DropdownMenu';
 import { Input } from '@/components/ui/Input';
+import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import type { AccountRow } from '@/features/accounts/model/accountRows';
 import type { UseAuthFileConfigurationEditorResult } from '@/features/authFiles/hooks/useAuthFileConfigurationEditor';
 import type { AuthFileConfigurationDraft } from '@/features/authFiles/model/authFileConfiguration';
@@ -173,6 +175,24 @@ const findButtonByText = (root: ReactTestInstance, label: string): ReactTestInst
   return button;
 };
 
+const findModelSwitch = (row: ReactTestInstance): ReactTestInstance => row.findByType(ToggleSwitch);
+
+const flipModelSwitch = (row: ReactTestInstance, enabled: boolean) => {
+  act(() => {
+    findModelSwitch(row).props.onChange(enabled);
+  });
+};
+
+const findListMenuItem = (renderer: ReactTestRenderer, key: string) => {
+  const items = renderer.root.findByType(DropdownMenu).props.items as DropdownMenuItem[];
+  const item = items.find((candidate) => candidate.key === key);
+  if (!item || item.type === 'divider') throw new Error(`Menu item missing: ${key}`);
+  return item;
+};
+
+const hasUnsavedMarker = (row: ReactTestInstance) =>
+  row.findAll((node) => node.props['aria-label'] === 'accounts.config_unsaved').length > 0;
+
 const findLoadingSpinners = (renderer: ReactTestRenderer) =>
   renderer.root.findAll(
     (node) =>
@@ -199,6 +219,21 @@ describe('AccountModelsTab', () => {
     const { renderer } = renderTab({ loading: true, refreshing: true });
 
     expect(findLoadingSpinners(renderer)).toHaveLength(1);
+    expect(findListMenuItem(renderer, 'refresh-models').disabled).toBe(true);
+  });
+
+  it('moves list-level actions into the model list menu', () => {
+    const onRefresh = vi.fn();
+    const onManageGlobalRules = vi.fn();
+    const { renderer } = renderTab({ onRefresh, onManageGlobalRules });
+
+    act(() => {
+      findListMenuItem(renderer, 'refresh-models').onClick();
+      findListMenuItem(renderer, 'manage-global-rules').onClick();
+    });
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+    expect(onManageGlobalRules).toHaveBeenCalledTimes(1);
+    expect(readText(renderer.toJSON())).not.toContain('accounts.detail_models_summary');
   });
 
   it('uses the credential detail models label for its region', () => {
@@ -229,21 +264,23 @@ describe('AccountModelsTab', () => {
     expect(renderer.root.findAllByProps({ 'data-model-scope': 'global' })).toHaveLength(1);
     expect(renderer.root.findAllByProps({ 'data-model-scope': 'both' })).toHaveLength(1);
 
+    expect(findModelSwitch(findModelRow(renderer, 'available-model')).props.checked).toBe(true);
+    expect(findModelSwitch(findModelRow(renderer, 'credential-model')).props.checked).toBe(false);
+    // A model off only by a global rule has no credential switch to flip.
+    expect(findModelSwitch(findModelRow(renderer, 'global-model')).props.disabled).toBe(true);
     act(() => {
       findButtonByText(
         findModelRow(renderer, 'global-model'),
-        'accounts.model_manage_global_rules'
+        'accounts.model_locked_global'
       ).props.onClick();
     });
     expect(onManageGlobalRules).toHaveBeenCalledTimes(1);
     expect(editor.updateField).not.toHaveBeenCalled();
 
-    act(() => {
-      findButtonByText(
-        findModelRow(renderer, 'both-model'),
-        'accounts.model_remove_exact_rule'
-      ).props.onClick();
-    });
+    // Its own exact rule can still be removed; the global rule stays named beside it.
+    const bothRow = findModelRow(renderer, 'both-model');
+    expect(readText(bothRow)).toContain('accounts.model_locked_global');
+    flipModelSwitch(bothRow, true);
     expect(editor.updateField).toHaveBeenCalledWith('excludedModelsText', 'credential-model');
   });
 
@@ -254,12 +291,7 @@ describe('AccountModelsTab', () => {
       models: [{ id: 'existing-model' }, { id: 'new-model' }],
     });
 
-    act(() => {
-      findButtonByText(
-        findModelRow(disabled.renderer, 'new-model'),
-        'accounts.model_disable_for_credential'
-      ).props.onClick();
-    });
+    flipModelSwitch(findModelRow(disabled.renderer, 'new-model'), false);
     expect(disableEditor.updateField).toHaveBeenCalledWith(
       'excludedModelsText',
       'existing-model\nnew-model'
@@ -270,12 +302,7 @@ describe('AccountModelsTab', () => {
       editor: restoreEditor,
       models: [{ id: 'existing-model' }],
     });
-    act(() => {
-      findButtonByText(
-        findModelRow(restored.renderer, 'existing-model'),
-        'accounts.model_restore_for_credential'
-      ).props.onClick();
-    });
+    flipModelSwitch(findModelRow(restored.renderer, 'existing-model'), true);
     expect(restoreEditor.updateField).toHaveBeenCalledWith('excludedModelsText', '');
   });
 
@@ -290,11 +317,10 @@ describe('AccountModelsTab', () => {
     });
 
     expect(readText(renderer.toJSON())).toContain('gpt-5-*');
+    const wildcardRow = findModelRow(renderer, 'gpt-5-mini');
+    expect(findModelSwitch(wildcardRow).props.disabled).toBe(true);
     act(() => {
-      findButtonByText(
-        findModelRow(renderer, 'gpt-5-mini'),
-        'accounts.model_edit_advanced_rules'
-      ).props.onClick();
+      findButtonByText(wildcardRow, 'accounts.model_locked_advanced').props.onClick();
     });
     expect(onOpenAdvancedRules).toHaveBeenCalledTimes(1);
     expect(editor.updateField).not.toHaveBeenCalled();
@@ -354,7 +380,7 @@ describe('AccountModelsTab', () => {
     expect(onCopyText).toHaveBeenCalledWith('Gemini-2.5-Pro');
   });
 
-  it('exposes staged change summary with reset and save actions', () => {
+  it('marks rows with staged rule changes and leaves save to the drawer', () => {
     const editor = makeEditor({
       originalRules: 'model-a\nmodel-b',
       rules: 'model-b\nmodel-c',
@@ -365,32 +391,45 @@ describe('AccountModelsTab', () => {
       editor,
       models: [{ id: 'model-a' }, { id: 'model-b' }, { id: 'model-c' }],
     });
-    const text = readText(renderer.toJSON());
 
-    expect(text).toContain('accounts.config_unsaved');
-    expect(text).toContain('accounts.model_change_summary:added=1,removed=1,unchanged=1');
-    act(() => {
-      findButtonByText(renderer.root, 'common.reset').props.onClick();
-      findButtonByText(renderer.root, 'common.save').props.onClick();
-    });
-    expect(editor.reset).toHaveBeenCalledTimes(1);
-    expect(editor.save).toHaveBeenCalledTimes(1);
+    expect(hasUnsavedMarker(findModelRow(renderer, 'model-a'))).toBe(true);
+    expect(hasUnsavedMarker(findModelRow(renderer, 'model-b'))).toBe(false);
+    expect(hasUnsavedMarker(findModelRow(renderer, 'model-c'))).toBe(true);
+    // Save / discard live in the drawer footer pill, not inside the tab.
+    const buttonText = renderer.root.findAllByType('button').map(readText).join(' ');
+    expect(buttonText).not.toContain('common.save');
+    expect(buttonText).not.toContain('common.reset');
   });
 
-  it('distinguishes unsaved non-model configuration changes', () => {
+  it('does not mark rows for unsaved non-model configuration changes', () => {
     const { renderer } = renderTab({
-      editor: makeEditor({
-        rules: 'model-a',
-        dirty: true,
-        canSave: true,
-      }),
+      editor: makeEditor({ rules: 'model-a', dirty: true, canSave: true }),
       models: [{ id: 'model-a' }],
     });
-    const text = readText(renderer.toJSON());
 
-    expect(text).toContain('accounts.config_unsaved');
-    expect(text).toContain('accounts.model_other_config_changes');
-    expect(text).not.toContain('accounts.model_change_summary');
+    expect(hasUnsavedMarker(findModelRow(renderer, 'model-a'))).toBe(false);
+  });
+
+  it('turns every editable shown model on or off from the list menu', () => {
+    const editor = makeEditor({ rules: 'model-b' });
+    const { renderer } = renderTab({
+      editor,
+      models: [{ id: 'model-a' }, { id: 'model-b' }, { id: 'model-c' }, { id: 'global-model' }],
+      globalExcluded: { codex: ['global-model'] },
+    });
+
+    act(() => {
+      findListMenuItem(renderer, 'turn-off-shown').onClick();
+    });
+    expect(editor.updateField).toHaveBeenLastCalledWith(
+      'excludedModelsText',
+      'model-a\nmodel-b\nmodel-c'
+    );
+
+    act(() => {
+      findListMenuItem(renderer, 'turn-on-shown').onClick();
+    });
+    expect(editor.updateField).toHaveBeenLastCalledWith('excludedModelsText', '');
   });
 
   it('keeps runtime-only and administratively disabled credentials read-only', () => {
@@ -402,12 +441,9 @@ describe('AccountModelsTab', () => {
       editor: runtimeEditor,
       models: [{ id: 'runtime-model' }],
     });
-    const runtimeAction = findButtonByText(
-      findModelRow(runtimeOnly.renderer, 'runtime-model'),
-      'accounts.model_disable_for_credential'
-    );
+    const runtimeSwitch = findModelSwitch(findModelRow(runtimeOnly.renderer, 'runtime-model'));
     expect(readText(runtimeOnly.renderer.toJSON())).toContain('accounts.config_runtime_only_desc');
-    expect(runtimeAction.props.disabled).toBe(true);
+    expect(runtimeSwitch.props.disabled).toBe(true);
 
     const disabledEditor = makeEditor({ canSave: true });
     const disabled = renderTab({
@@ -417,12 +453,8 @@ describe('AccountModelsTab', () => {
     });
     expect(readText(disabled.renderer.toJSON())).toContain('accounts.config_disabled_read_only');
     expect(
-      findButtonByText(
-        findModelRow(disabled.renderer, 'disabled-credential-model'),
-        'accounts.model_disable_for_credential'
-      ).props.disabled
+      findModelSwitch(findModelRow(disabled.renderer, 'disabled-credential-model')).props.disabled
     ).toBe(true);
-    expect(findButtonByText(disabled.renderer.root, 'common.save').props.disabled).toBe(true);
   });
 
   it('shows partial-state warnings and retries a failed credential configuration load', () => {
@@ -450,12 +482,7 @@ describe('AccountModelsTab', () => {
       findButtonByText(renderer.root, 'common.retry').props.onClick();
     });
     expect(editor.reload).toHaveBeenCalledTimes(1);
-    expect(
-      findButtonByText(
-        findModelRow(renderer, 'visible-model'),
-        'accounts.model_disable_for_credential'
-      ).props.disabled
-    ).toBe(true);
+    expect(findModelSwitch(findModelRow(renderer, 'visible-model')).props.disabled).toBe(true);
   });
 
   it('waits for global exclusion rules before enabling credential model actions', () => {
@@ -467,12 +494,7 @@ describe('AccountModelsTab', () => {
     });
 
     expect(readText(renderer.toJSON())).toContain('accounts.model_global_rules_loading');
-    expect(
-      findButtonByText(
-        findModelRow(renderer, 'pending-model'),
-        'accounts.model_disable_for_credential'
-      ).props.disabled
-    ).toBe(true);
+    expect(findModelSwitch(findModelRow(renderer, 'pending-model')).props.disabled).toBe(true);
     expect(editor.updateField).not.toHaveBeenCalled();
   });
 
@@ -487,18 +509,8 @@ describe('AccountModelsTab', () => {
     expect(renderer.root.findAllByProps({ 'data-model-scope': 'unknown' })).toHaveLength(1);
     expect(renderer.root.findAllByProps({ 'data-model-scope': 'credential' })).toHaveLength(1);
     expect(renderer.root.findAllByProps({ 'data-model-scope': 'available' })).toHaveLength(0);
-    expect(
-      findButtonByText(
-        findModelRow(renderer, 'unknown-model'),
-        'accounts.model_disable_for_credential'
-      ).props.disabled
-    ).toBe(true);
-    expect(
-      findButtonByText(
-        findModelRow(renderer, 'credential-model'),
-        'accounts.model_remove_exact_rule'
-      ).props.disabled
-    ).toBe(true);
+    expect(findModelSwitch(findModelRow(renderer, 'unknown-model')).props.disabled).toBe(true);
+    expect(findModelSwitch(findModelRow(renderer, 'credential-model')).props.disabled).toBe(true);
 
     act(() => {
       renderer.root.findByProps({ id: 'account-model-filter-available' }).props.onClick({
@@ -533,18 +545,11 @@ describe('AccountModelsTab', () => {
     expect(readText(findModelRow(renderer, 'shared-model'))).toContain(
       'accounts.model_rule_count_shared'
     );
-    expect(
-      findButtonByText(
-        findModelRow(renderer, 'shared-model'),
-        'accounts.model_shared_source_read_only_action'
-      ).props.disabled
-    ).toBe(true);
-    expect(
-      findButtonByText(
-        findModelRow(renderer, 'available-model'),
-        'accounts.model_shared_source_read_only_action'
-      ).props.disabled
-    ).toBe(true);
+    for (const modelId of ['shared-model', 'available-model']) {
+      const row = findModelRow(renderer, modelId);
+      expect(readText(row)).toContain('accounts.model_locked_shared');
+      expect(findModelSwitch(row).props.disabled).toBe(true);
+    }
     expect(editor.updateField).not.toHaveBeenCalled();
   });
 
@@ -566,12 +571,7 @@ describe('AccountModelsTab', () => {
       modelDefinitions: [{ id: 'gpt-5.5' }],
     });
 
-    act(() => {
-      findButtonByText(
-        findModelRow(renderer, 'haochi/gpt-5.5'),
-        'accounts.model_disable_for_credential'
-      ).props.onClick();
-    });
+    flipModelSwitch(findModelRow(renderer, 'haochi/gpt-5.5'), false);
 
     expect(editor.updateField).toHaveBeenCalledWith('excludedModelsText', 'gpt-5.5');
     expect(editor.updateField).not.toHaveBeenCalledWith('excludedModelsText', 'haochi/gpt-5.5');
@@ -585,12 +585,7 @@ describe('AccountModelsTab', () => {
       modelDefinitions: [{ id: 'gpt-5.5' }],
     });
 
-    act(() => {
-      findButtonByText(
-        findModelRow(renderer, 'haochi/gpt-5.5'),
-        'accounts.model_disable_for_credential'
-      ).props.onClick();
-    });
+    flipModelSwitch(findModelRow(renderer, 'haochi/gpt-5.5'), false);
 
     expect(editor.updateField).toHaveBeenCalledWith('excludedModelsText', 'gpt-5.5');
   });
@@ -612,9 +607,7 @@ describe('AccountModelsTab', () => {
     expect(modelRow.props['data-model-scope']).not.toBe('credential');
     expect(modelRow.props['data-model-scope']).toBe('available');
 
-    act(() => {
-      findButtonByText(modelRow, 'accounts.model_disable_for_credential').props.onClick();
-    });
+    flipModelSwitch(modelRow, false);
 
     expect(editor.updateField).toHaveBeenCalledWith('excludedModelsText', 'gpt-5.5');
   });
@@ -635,9 +628,7 @@ describe('AccountModelsTab', () => {
     const modelRow = findModelRow(renderer, 'haochi/gpt-5.5');
     expect(modelRow.props['data-model-scope']).toBe('credential');
 
-    act(() => {
-      findButtonByText(modelRow, 'accounts.model_restore_for_credential').props.onClick();
-    });
+    flipModelSwitch(modelRow, true);
 
     expect(editor.updateField).toHaveBeenCalledWith('excludedModelsText', '');
   });
@@ -654,12 +645,7 @@ describe('AccountModelsTab', () => {
       modelDefinitions: [{ id: 'gpt-5.5' }],
     });
 
-    act(() => {
-      findButtonByText(
-        findModelRow(renderer, 'haochi/gpt-5.5'),
-        'accounts.model_disable_for_credential'
-      ).props.onClick();
-    });
+    flipModelSwitch(findModelRow(renderer, 'haochi/gpt-5.5'), false);
 
     expect(editor.updateField).toHaveBeenCalledWith('excludedModelsText', 'gpt-5.5');
   });
@@ -676,13 +662,11 @@ describe('AccountModelsTab', () => {
     const modelRow = findModelRow(renderer, 'haochi/private-model');
     expect(modelRow.props['data-model-scope']).toBe('unknown');
 
-    const button = findButtonByText(modelRow, 'accounts.model_disable_for_credential');
-    expect(button.props.disabled).toBe(true);
+    const unmappedSwitch = findModelSwitch(modelRow);
+    expect(unmappedSwitch.props.disabled).toBe(true);
 
     act(() => {
-      if (button.props.onClick) {
-        button.props.onClick();
-      }
+      unmappedSwitch.props.onChange(false);
     });
     expect(editor.updateField).not.toHaveBeenCalled();
 

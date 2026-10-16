@@ -1,3 +1,5 @@
+@use '@/styles/mixins.scss' as *;
+
 .page {
   --usage-surface: var(--bg-primary);
   --usage-muted-surface: var(--surface-subtle);
@@ -68,10 +70,21 @@
 }
 
 .controlBar {
-  display: grid;
-  grid-template-columns: auto auto minmax(220px, 1fr);
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
+  min-width: 0;
+}
+
+/* Groups keep their natural width and wrap to the next line instead of shrinking
+   into a scroll strip; the refresh controls take the remaining space. */
+.controlBar > .segmentedControl {
+  flex: 0 1 auto;
+}
+
+.controlBar > .refreshControls {
+  flex: 1 1 220px;
 }
 
 .segmentedControl {
@@ -110,6 +123,13 @@
 
 .segmentButton:first-child {
   border-left: 0;
+}
+
+.segmentButton:disabled,
+.segmentButton:disabled:hover {
+  background: transparent;
+  color: color-mix(in srgb, var(--usage-muted) 45%, transparent);
+  cursor: not-allowed;
 }
 
 .segmentButton:hover {
@@ -405,9 +425,12 @@
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0;
-  text-overflow: ellipsis;
   text-transform: none;
-  white-space: nowrap;
+  // Wrap to a second line rather than truncating ("Estimated Cost", "Input Tokens").
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-height: 1.25;
 }
 
 .usageSummaryCardBody {
@@ -2578,10 +2601,15 @@
   }
 }
 
-@media (max-width: 1400px) {
+// Same breakpoint as the Request Monitor summary cards: eight across only on wide
+// screens, 4 x 2 below that, so labels like "Success Rate" are never cut off.
+@media (max-width: 1680px) {
   .usageSummaryGrid {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
+}
+
+@media (max-width: 1400px) {
 
   .entityIdentityGrid,
   .credentialIdentityGrid {
@@ -2602,24 +2630,6 @@
 }
 
 @media (max-width: 1100px) {
-  .controlBar {
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: start;
-  }
-
-  .controlBar .segmentedControl:first-child {
-    grid-column: 1 / -1;
-  }
-
-  .controlBar .segmentedControl:nth-child(2) {
-    grid-column: 1;
-  }
-
-  .refreshControls {
-    grid-column: 2;
-    justify-content: flex-end;
-  }
-
   .usageSummaryGrid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -2660,13 +2670,8 @@
 }
 
 @media (max-width: 760px) {
-  .controlBar {
-    grid-template-columns: 1fr;
-  }
-
   .controlBar .segmentedControl,
   .refreshControls {
-    grid-column: 1;
     width: 100%;
   }
 
@@ -2736,4 +2741,8 @@
   .chartCanvas {
     min-width: 560px;
   }
+}
+
+.tableWrap table {
+  @include table-column-dividers;
 }

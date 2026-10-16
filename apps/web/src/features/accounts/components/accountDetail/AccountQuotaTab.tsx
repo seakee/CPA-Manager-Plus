@@ -143,6 +143,7 @@ export function AccountQuotaTab({
 }: AccountQuotaTabProps) {
   const { t, i18n } = useTranslation();
   const history = detailView.history;
+  const credits = detailView.quota.credits;
   const allWindows = detailView.quota.windows;
   const standardWindows = allWindows.filter(
     (window) => getAccountQuotaSemanticGroup(window) === 'standard'
@@ -239,6 +240,56 @@ export function AccountQuotaTab({
           />
         </div>
       </section>
+
+      {credits ? (
+        <section className={styles.quotaSummaryPanel} data-account-credits="true">
+          <div className={styles.quotaSummaryHeading}>
+            <h3>{t('accounts.detail_credits_title')}</h3>
+            <div className={styles.quotaSummaryMeta}>
+              <span>{t('accounts.detail_credits_hint')}</span>
+            </div>
+          </div>
+          <div className={styles.quotaSummaryMetrics}>
+            <MetricCell
+              icon={<IconDollarSign size={20} />}
+              tone="amber"
+              label={t('accounts.detail_credits_balance')}
+              value={
+                credits.unlimited
+                  ? t('accounts.detail_credits_unlimited')
+                  : credits.balance != null
+                    ? formatCompactNumber(credits.balance)
+                    : '-'
+              }
+              valueTitle={credits.balance != null ? formatNumber(credits.balance) : undefined}
+            />
+            <MetricCell
+              icon={<IconChartLine size={20} />}
+              tone="blue"
+              label={t('accounts.detail_credits_approx_local_messages')}
+              value={
+                credits.approxMessages != null ? `≈${formatCompactNumber(credits.approxMessages)}` : '-'
+              }
+            />
+            <MetricCell
+              icon={<IconRefreshCw size={20} />}
+              tone="teal"
+              label={t('accounts.detail_reset_credits')}
+              value={
+                detailView.quota.resetCreditsAvailableCount != null
+                  ? String(detailView.quota.resetCreditsAvailableCount)
+                  : '-'
+              }
+            />
+            <MetricCell
+              icon={<IconCheck size={20} />}
+              tone={credits.overageReached ? 'amber' : 'green'}
+              label={t('accounts.detail_credits_overage_reached')}
+              value={credits.overageReached ? t('common.yes') : t('common.no')}
+            />
+          </div>
+        </section>
+      ) : null}
 
       {windowUsageError ? <div className={styles.errorBox}>{windowUsageError}</div> : null}
 
