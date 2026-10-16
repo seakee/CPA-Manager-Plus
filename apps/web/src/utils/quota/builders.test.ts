@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { KimiUsagePayload } from '@/types';
-import { buildAntigravityQuotaGroups, buildKimiQuotaRows } from './builders';
+import {
+  buildAntigravityQuotaGroups,
+  buildKimiQuotaRows,
+  hasAntigravityGeminiGroup,
+  mergeAntigravityQuotaGroups,
+} from './builders';
 
 describe('buildAntigravityQuotaGroups', () => {
   it('builds Antigravity groups from the real models payload shape', () => {
@@ -150,7 +155,92 @@ describe('buildAntigravityQuotaGroups', () => {
       remainingFraction: 0,
       resetTime: '2026-07-29T16:00:00Z',
     });
+    });
   });
+
+  it('merges groups from summary and models without duplicate entries', () => {
+    const payload = {
+      groups: [
+        {
+          displayName: 'Claude and GPT models',
+          buckets: [
+            {
+              bucketId: 'claude-5h',
+              displayName: '5 hour window',
+              remainingFraction: 0.85,
+              resetTime: '2026-07-30T10:00:00Z',
+            },
+          ],
+        },
+      ],
+      models: {
+        'gemini-2.5-pro': {
+          displayName: 'Gemini 2.5 Pro',
+          quotaInfo: {
+            remainingFraction: 0.9,
+            resetTime: '2026-07-30T12:00:00Z',
+          },
+          apiProvider: 'API_PROVIDER_GOOGLE_GEMINI',
+          modelProvider: 'MODEL_PROVIDER_GOOGLE',
+        },
+        'claude-sonnet-4-6': {
+          displayName: 'Claude Sonnet 4.6',
+          quotaInfo: {
+            remainingFraction: 0.5,
+            resetTime: '2026-07-30T10:00:00Z',
+          },
+          apiProvider: 'API_PROVIDER_ANTHROPIC_VERTEX',
+          modelProvider: 'MODEL_PROVIDER_ANTHROPIC',
+        },
+      },
+      tieredModelIds: {
+        pro: ['gemini-2.5-pro'],
+      },
+    };
+
+    const groups = buildAntigravityQuotaGroups(payload as any);
+    expect(groups).toHaveLength(2);
+    expect(groups.map((g) => g.label)).toEqual(['Claude and GPT models', 'Gemini']);
+    expect(hasAntigravityGeminiGroup(groups)).toBe(true);
+    expect(groups.find((g) => g.id === 'gemini')?.buckets[0]).toMatchObject({
+      label: 'Gemini',
+      remainingFraction: 0.9,
+    });
+  });
+
+  it('mergeAntigravityQuotaGroups correctly merges missing Gemini group while keeping primary Claude', () => {
+    const primary = [
+      {
+        id: 'claude-gpt',
+        label: 'Claude and GPT models',
+        buckets: [
+          {
+            id: 'claude-gpt-shared',
+            label: '5-hour limit',
+            remainingFraction: 0.4,
+          },
+        ],
+      },
+    ];
+    const fallback = [
+      {
+        id: 'claude-gpt',
+        label: 'Claude',
+        buckets: [{ id: 'claude-shared', label: 'Claude', remainingFraction: 0.2 }],
+      },
+      {
+        id: 'gemini',
+        label: 'Gemini',
+        buckets: [{ id: 'gemini-shared', label: 'Gemini', remainingFraction: 0.8 }],
+      },
+    ];
+
+    const merged = mergeAntigravityQuotaGroups(primary, fallback);
+    expect(merged).toHaveLength(2);
+    expect(merged[0].id).toBe('claude-gpt');
+    expect(merged[0].buckets[0].remainingFraction).toBe(0.4);
+    expect(merged[1].id).toBe('gemini');
+    expect(merged[1].buckets[0].remainingFraction).toBe(0.8);
 });
 
 describe('buildKimiQuotaRows', () => {

@@ -295,6 +295,47 @@ export function buildAntigravityQuotaGroupsFromModels(
     buildAntigravitySharedGroup('gemini', 'Gemini', geminiModelIds, models, payload),
   ].filter((group): group is AntigravityQuotaGroup => group !== null);
 }
+export function hasAntigravityGeminiGroup(groups: AntigravityQuotaGroup[]): boolean {
+  return groups.some((group) => {
+    const id = group.id.toLowerCase();
+    const label = group.label.toLowerCase();
+    return id.includes('gemini') || label.includes('gemini');
+  });
+}
+
+export function mergeAntigravityQuotaGroups(
+  primaryGroups: AntigravityQuotaGroup[],
+  fallbackGroups: AntigravityQuotaGroup[]
+): AntigravityQuotaGroup[] {
+  if (primaryGroups.length === 0) return fallbackGroups;
+  if (fallbackGroups.length === 0) return primaryGroups;
+
+  const result = [...primaryGroups];
+  const hasGemini = hasAntigravityGeminiGroup(result);
+  const hasClaude = result.some((g) => {
+    const id = g.id.toLowerCase();
+    const label = g.label.toLowerCase();
+    return id.includes('claude') || label.includes('claude');
+  });
+
+  const existingIds = new Set(result.map((g) => g.id.toLowerCase()));
+  const existingLabels = new Set(result.map((g) => g.label.toLowerCase()));
+
+  for (const group of fallbackGroups) {
+    const id = group.id.toLowerCase();
+    const label = group.label.toLowerCase();
+    const isGemini = id.includes('gemini') || label.includes('gemini');
+    const isClaude = id.includes('claude') || label.includes('claude');
+
+    if (isGemini && hasGemini) continue;
+    if (isClaude && hasClaude) continue;
+    if (existingIds.has(id) || existingLabels.has(label)) continue;
+
+    result.push(group);
+  }
+
+  return result;
+}
 
 export function buildAntigravityQuotaGroups(
   payload: AntigravityQuotaSummaryPayload
@@ -347,11 +388,16 @@ export function buildAntigravityQuotaGroups(
     })
     .filter((group): group is AntigravityQuotaGroup => group !== null);
 
-  if (parsedGroups.length > 0) return parsedGroups;
+  const modelGroups =
+    payload.models && typeof payload.models === 'object' && !Array.isArray(payload.models)
+      ? buildAntigravityQuotaGroupsFromModels(payload.models, payload)
+      : [];
 
-  if (payload.models && typeof payload.models === 'object' && !Array.isArray(payload.models)) {
-    return buildAntigravityQuotaGroupsFromModels(payload.models, payload);
+  if (parsedGroups.length > 0 && modelGroups.length > 0) {
+    return mergeAntigravityQuotaGroups(parsedGroups, modelGroups);
   }
+  if (parsedGroups.length > 0) return parsedGroups;
+  if (modelGroups.length > 0) return modelGroups;
 
   return [];
 }

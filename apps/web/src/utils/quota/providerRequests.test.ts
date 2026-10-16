@@ -4188,6 +4188,79 @@ describe('fetchAntigravityQuota', () => {
     expect(result.groups.map((group) => group.id)).toEqual(['claude-gpt', 'gemini']);
   });
 
+  it('queries available models to merge Gemini quota when summary only returns Claude/GPT models', async () => {
+    // 1. Summary returns only Claude and GPT models (new Google behavior)
+    mocks.request.mockResolvedValueOnce({
+      statusCode: 200,
+      hasStatusCode: true,
+      header: {},
+      bodyText: '',
+      body: {
+        groups: [
+          {
+            displayName: 'Claude and GPT models',
+            buckets: [
+              {
+                bucketId: 'claude-5h',
+                displayName: '5-hour limit',
+                window: '5h',
+                remainingFraction: 0.65,
+                resetTime: '2026-07-30T10:00:00Z',
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    // 2. Available models returns Gemini model entries
+    mocks.request.mockResolvedValueOnce({
+      statusCode: 200,
+      hasStatusCode: true,
+      header: {},
+      bodyText: '',
+      body: {
+        models: {
+          'gemini-2.5-pro': {
+            displayName: 'Gemini 2.5 Pro',
+            quotaInfo: {
+              remainingFraction: 0.95,
+              resetTime: '2026-07-30T14:00:00Z',
+            },
+            apiProvider: 'API_PROVIDER_GOOGLE_GEMINI',
+          },
+        },
+        tieredModelIds: {
+          pro: ['gemini-2.5-pro'],
+        },
+      },
+    });
+
+    const result = await fetchAntigravityQuota(
+      {
+        name: 'antigravity.json',
+        type: 'antigravity',
+        authIndex: 'ag-1',
+        project_id: 'project-1',
+      },
+      t
+    );
+
+    expect(mocks.request).toHaveBeenCalledTimes(2);
+    expect(mocks.request.mock.calls[0][0]).toMatchObject({
+      url: ANTIGRAVITY_QUOTA_SUMMARY_URLS[0],
+    });
+    expect(mocks.request.mock.calls[1][0]).toMatchObject({
+      url: ANTIGRAVITY_AVAILABLE_MODELS_URLS[0],
+    });
+    expect(result.groups).toHaveLength(2);
+    expect(result.groups.map((g) => g.label)).toEqual(['Claude and GPT models', 'Gemini']);
+    expect(result.groups.find((g) => g.id === 'gemini')?.buckets[0]).toMatchObject({
+      label: 'Gemini',
+      remainingFraction: 0.95,
+    });
+  });
+
   it('sends the generated Antigravity user agent', async () => {
     mocks.request.mockResolvedValue({
       statusCode: 403,

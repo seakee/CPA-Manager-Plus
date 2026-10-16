@@ -60,7 +60,12 @@ import {
   XAI_REQUEST_HEADERS,
 } from './constants';
 import { parseDevinQuotaPayload } from './devinQuota';
-import { buildAntigravityQuotaGroups, buildKimiQuotaRows } from './builders';
+import {
+  buildAntigravityQuotaGroups,
+  buildKimiQuotaRows,
+  hasAntigravityGeminiGroup,
+  mergeAntigravityQuotaGroups,
+} from './builders';
 import {
   createStatusError,
   formatQuotaResetTime,
@@ -300,68 +305,97 @@ export const fetchAntigravityQuota = async (
   let hadSuccess = false;
   let quotaInventoryObserved = false;
 
-  for (const url of [...ANTIGRAVITY_QUOTA_SUMMARY_URLS, ...ANTIGRAVITY_AVAILABLE_MODELS_URLS]) {
-    try {
-      const result = await apiCallApi.request(
-        {
-          authIndex,
-          method: 'POST',
-          url,
-          header: { ...ANTIGRAVITY_REQUEST_HEADERS },
-          data: requestBody,
-        },
-        requestConfig
-      );
+  const probeUrls = async (urls: readonly string[]) => {
+    for (const url of urls) {
+      try {
+        const result = await apiCallApi.request(
+          {
+            authIndex,
+            method: 'POST',
+            url,
+            header: { ...ANTIGRAVITY_REQUEST_HEADERS },
+            data: requestBody,
+          },
+          requestConfig
+        );
 
-      if (result.statusCode < 200 || result.statusCode >= 300) {
-        lastError = getApiCallErrorMessage(result);
-        lastStatus = result.statusCode;
-        if (result.statusCode === 429) {
-          throw createStatusError(lastError, 429);
+        if (result.statusCode < 200 || result.statusCode >= 300) {
+          lastError = getApiCallErrorMessage(result);
+          lastStatus = result.statusCode;
+          if (result.statusCode === 429) {
+            throw createStatusError(lastError, 429);
+          }
+          if (result.statusCode === 403 || result.statusCode === 404) {
+            priorityStatus ??= result.statusCode;
+          }
+          continue;
         }
-        if (result.statusCode === 403 || result.statusCode === 404) {
-          priorityStatus ??= result.statusCode;
+
+        hadSuccess = true;
+        const payload = parseAntigravityPayload(
+          result.body ?? result.bodyText
+        ) as AntigravityQuotaSummaryPayload | null;
+        if (!payload) {
+          lastError = t('antigravity_quota.empty_models');
+          continue;
         }
-        continue;
-      }
 
-      hadSuccess = true;
-      const payload = parseAntigravityPayload(
-        result.body ?? result.bodyText
-      ) as AntigravityQuotaSummaryPayload | null;
-      if (!payload) {
-        lastError = t('antigravity_quota.empty_models');
-        continue;
-      }
+        const groups = buildAntigravityQuotaGroups(payload);
+        if (groups.length === 0) {
+          quotaInventoryObserved ||= hasExplicitEmptyAntigravityInventory(payload);
+          lastError = t('antigravity_quota.empty_models');
+          continue;
+        }
 
-      const groups = buildAntigravityQuotaGroups(payload);
-      if (groups.length === 0) {
-        quotaInventoryObserved ||= hasExplicitEmptyAntigravityInventory(payload);
-        lastError = t('antigravity_quota.empty_models');
-        continue;
-      }
-
-      const subscriptionResult = await subscriptionPromise;
-      return {
-        groups,
-        quotaInventoryObserved: true,
-        subscription: subscriptionResult.subscription,
-        serverTimeOffsetMs: resolveResponseServerTimeOffsetMs(result.header),
-        ...(subscriptionResult.rateLimited ? { rateLimited: true } : {}),
-      };
-    } catch (err: unknown) {
-      const status = getStatusFromError(err);
-      if (status === 429) {
-        throw err;
-      }
-      lastError = err instanceof Error ? err.message : t('common.unknown_error');
-      if (status) {
-        lastStatus = status;
-        if (status === 403 || status === 404) {
-          priorityStatus ??= status;
+        return {
+          groups,
+          serverTimeOffsetMs: resolveResponseServerTimeOffsetMs(result.header),
+        };
+      } catch (err: unknown) {
+        const status = getStatusFromError(err);
+        if (status === 429) {
+          throw err;
+        }
+        lastError = err instanceof Error ? err.message : t('common.unknown_error');
+        if (status) {
+          lastStatus = status;
+          if (status === 403 || status === 404) {
+            priorityStatus ??= status;
+          }
         }
       }
     }
+    return null;
+  };
+
+  let resolvedGroups: AntigravityQuotaGroup[] = [];
+  let serverTimeOffsetMs: number | null = null;
+
+  const summaryResult = await probeUrls(ANTIGRAVITY_QUOTA_SUMMARY_URLS);
+  if (summaryResult) {
+    resolvedGroups = summaryResult.groups;
+    serverTimeOffsetMs = summaryResult.serverTimeOffsetMs;
+  }
+
+  // Google moved Gemini quotas exclusively to fetchAvailableModels, leaving retrieveUserQuotaSummary
+  // with only Claude/GPT models. Query available models to merge Gemini quota if missing or if summary failed.
+  if (!hasAntigravityGeminiGroup(resolvedGroups)) {
+    const modelsResult = await probeUrls(ANTIGRAVITY_AVAILABLE_MODELS_URLS);
+    if (modelsResult) {
+      resolvedGroups = mergeAntigravityQuotaGroups(resolvedGroups, modelsResult.groups);
+      serverTimeOffsetMs ??= modelsResult.serverTimeOffsetMs;
+    }
+  }
+
+  if (resolvedGroups.length > 0) {
+    const subscriptionResult = await subscriptionPromise;
+    return {
+      groups: resolvedGroups,
+      quotaInventoryObserved: true,
+      subscription: subscriptionResult.subscription,
+      serverTimeOffsetMs,
+      ...(subscriptionResult.rateLimited ? { rateLimited: true } : {}),
+    };
   }
 
   if (hadSuccess) {
