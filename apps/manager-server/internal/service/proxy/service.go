@@ -82,6 +82,7 @@ type authFileWriteMutation struct {
 
 const cpaPluginResourcePrefix = "/v0/resource/plugins"
 const cpaManagementPrefix = "/v0/management"
+const cpaManagementConfigPrefix = "/v8/management/config"
 const codexInviteOriginHeader = "X-Codex-Invite-Origin"
 const managementOriginJSONField = "management_origin"
 const authFilePhysicalNameHeader = "X-CPAMP-Auth-File-Physical-Name"
@@ -1433,6 +1434,34 @@ func IsCPAPluginManagementPath(path string) bool {
 func IsCPAPluginResourcePath(path string) bool {
 	cleaned := strings.TrimRight(path, "/")
 	return cleaned == cpaPluginResourcePrefix || strings.HasPrefix(cleaned, cpaPluginResourcePrefix+"/")
+}
+
+// IsCPAManagementConfigPath reports whether path targets the CPA configuration
+// document API (config-version 8). A plugin page loaded inside the panel writes
+// its configuration through that API, so the panel forwards those paths as-is.
+func IsCPAManagementConfigPath(path string) bool {
+	cleaned := strings.TrimRight(path, "/")
+	return cleaned == cpaManagementConfigPrefix || strings.HasPrefix(cleaned, cpaManagementConfigPrefix+"/")
+}
+
+// ProxyManagementConfig forwards a configuration request using the saved CPA
+// management key (panel-admin caller).
+func (s *Service) ProxyManagementConfig(w http.ResponseWriter, r *http.Request, writeError func(http.ResponseWriter, int, error)) {
+	if !IsCPAManagementConfigPath(r.URL.Path) {
+		writeError(w, http.StatusNotFound, errors.New("proxy path must be under /v8/management/config/"))
+		return
+	}
+	s.proxyToSavedSetup(w, r, writeError, true, false)
+}
+
+// ProxyManagementConfigWithCallerAuth forwards a configuration request with the
+// caller's own Authorization header; the CPA validates that key.
+func (s *Service) ProxyManagementConfigWithCallerAuth(w http.ResponseWriter, r *http.Request, writeError func(http.ResponseWriter, int, error)) {
+	if !IsCPAManagementConfigPath(r.URL.Path) {
+		writeError(w, http.StatusNotFound, errors.New("proxy path must be under /v8/management/config/"))
+		return
+	}
+	s.proxyToSavedSetup(w, r, writeError, false, false)
 }
 
 func (s *Service) resolveSetup(ctx context.Context) (store.Setup, bool, error) {
