@@ -1053,6 +1053,13 @@ func reconcileCycle(
 			var id int64
 			if nearScheduledRollover {
 				id, err = restoreOrInsertCycleAt(ctx, tx, activationID, observationID, &actualEndMS, snapshot)
+			} else if snapshot.Provider == "codex" && snapshot.Source == "response_header" &&
+				*snapshot.DurationSeconds == 5*60*60 &&
+				snapshot.ObservedAtMS >= actualEndMS && snapshot.ObservedAtMS < *snapshot.CycleStartMS {
+				// CPA timestamps usage at request start, which can precede the
+				// new boundary reported in its response. Keep this confirmed
+				// call in the new cycle without changing provider timing.
+				id, err = restoreOrInsertCycleAt(ctx, tx, activationID, observationID, &snapshot.ObservedAtMS, snapshot)
 			} else {
 				id, err = restoreOrInsertCycle(ctx, tx, activationID, observationID, snapshot)
 			}
