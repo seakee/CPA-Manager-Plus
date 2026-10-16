@@ -734,14 +734,16 @@ func TestManagerKeepsFirstRequestAcrossFiveHourScheduledRollover(t *testing.T) {
 		latencyMS         int64
 		previousRequests  int64
 		actualStartOffset time.Duration
+		outOfOrder        bool
 	}{
-		{"main_five_seconds_before_header_start", 10 * time.Second, 8_000, 1, 10 * time.Second},
-		{"A_equal_to_header_start", 15 * time.Second, 1_000, 1, 15 * time.Second},
-		{"B_after_header_start", 16 * time.Second, 1_000, 1, 15 * time.Second},
-		{"C_one_second_before_header_start", 14 * time.Second, 2_000, 1, 14 * time.Second},
+		{"main_five_seconds_before_header_start", 10 * time.Second, 8_000, 1, 10 * time.Second, false},
+		{"A_equal_to_header_start", 15 * time.Second, 1_000, 1, 15 * time.Second, false},
+		{"B_after_header_start", 16 * time.Second, 1_000, 1, 15 * time.Second, false},
+		{"C_one_second_before_header_start", 14 * time.Second, 2_000, 1, 14 * time.Second, false},
 		// Start-time attribution puts this call in the old cycle. Its response
 		// headers alone cannot prove which upstream cycle charged the tokens.
-		{"D_started_before_old_end_completed_after_new_start", -2 * time.Second, 20_000, 2, 15 * time.Second},
+		{"D_started_before_old_end_completed_after_new_start", -2 * time.Second, 20_000, 2, 15 * time.Second, false},
+		{"out_of_order_completion", 10 * time.Second, 20_000, 1, 10 * time.Second, true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			// Keep this fixture on one UTC date. Header boundaries come from reset_at
@@ -752,6 +754,13 @@ func TestManagerKeepsFirstRequestAcrossFiveHourScheduledRollover(t *testing.T) {
 			providerEnd := providerStart.Add(5 * time.Hour)
 			firstAt := oldEnd.Add(scenario.firstOffset)
 			secondAt := oldEnd.Add(20 * time.Second)
+			secondLatencyMS := int64(1_000)
+			firstUsed, secondUsed := int64(1), int64(2)
+			if scenario.outOfOrder {
+				secondAt = oldEnd.Add(12 * time.Second)
+				secondLatencyMS = 6_000
+				firstUsed, secondUsed = 2, 1
+			}
 			now := oldEnd.Add(30 * time.Second)
 			ctx := context.Background()
 			db := newTestStore(t)
@@ -777,12 +786,18 @@ func TestManagerKeepsFirstRequestAcrossFiveHourScheduledRollover(t *testing.T) {
 			}
 		}`, id, at.UTC().Format(time.RFC3339Nano), latencyMS, input, input+1000, used, reset.Unix())
 			}
-			// Import one completed call at a time through the normal collector path.
-			for _, item := range []string{
+			payloads := []string{
 				payload("scheduled-old", oldEnd.Add(-10*time.Second), oldEnd, 10_000, 80, 1_000),
-				payload("scheduled-first", firstAt, providerEnd, 132_000, 1, scenario.latencyMS),
-				payload("scheduled-second", secondAt, providerEnd, 20_000, 2, 1_000),
-			} {
+				payload("scheduled-first", firstAt, providerEnd, 132_000, firstUsed, scenario.latencyMS),
+				payload("scheduled-second", secondAt, providerEnd, 20_000, secondUsed, secondLatencyMS),
+			}
+			if scenario.outOfOrder {
+				// B completes at 05:00:18; A completes at 05:00:30.
+				// Separate collector calls preserve completion-order delivery.
+				payloads[1], payloads[2] = payloads[2], payloads[1]
+			}
+			// Import one completed call at a time through the normal collector path.
+			for _, item := range payloads {
 				if err := manager.processItems(ctx, RuntimeConfig{}, []string{item}); err != nil {
 					t.Fatalf("process scheduled rollover event: %v", err)
 				}
@@ -859,8 +874,14 @@ func TestManagerKeepsFirstRequestAcrossFiveHourScheduledRollover(t *testing.T) {
 				t.Fatalf("account history=%#v err=%v", history, err)
 			}
 			snapshots, err := db.QuotaSnapshots.ListCandidates(ctx, history.Items[0].AccountKey, "codex", 10)
-			if err != nil || len(snapshots) != 3 {
-				t.Fatalf("stored quota evidence: count=%d err=%v, want three accepted Header snapshots", len(snapshots), err)
+			wantCandidates := 3
+			if scenario.outOfOrder {
+				// ListCandidates excludes historical observations; the three
+				// persisted usage events were checked independently above.
+				wantCandidates = 2
+			}
+			if err != nil || len(snapshots) != wantCandidates {
+				t.Fatalf("quota evidence candidates: count=%d err=%v, want %d", len(snapshots), err, wantCandidates)
 			}
 			for _, snapshot := range snapshots {
 				wantCycleID := current.ID
