@@ -61,6 +61,10 @@ func TestLatencyCoveringIndexAPIExperiment(t *testing.T) {
 	if markerErr != nil || count <= 0 {
 		t.Fatal("refusing database without synthetic fixture marker")
 	}
+	targetOnly := os.Getenv("CPAMP_LATENCY_PERF_API_TARGET_ONLY") == "1"
+	if targetOnly && count != 3200000 {
+		t.Fatalf("target-only API experiment requires exactly 3200000 events, got %d", count)
+	}
 	lock, err := processlock.Acquire(path)
 	if err != nil {
 		t.Fatal(err)
@@ -71,6 +75,15 @@ func TestLatencyCoveringIndexAPIExperiment(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	if targetOnly {
+		var actualCount int
+		if err := db.QueryRow(`select count(*) from usage_events`).Scan(&actualCount); err != nil {
+			t.Fatal(err)
+		}
+		if actualCount != count {
+			t.Fatalf("target-only API experiment requires a complete fixture: marker=%d usage_events=%d", count, actualCount)
+		}
+	}
 	// Keep the experiment's DDL timeout/WAL policy aligned with CPAMP.
 	if _, err := db.Exec(`pragma busy_timeout=5000`); err != nil {
 		t.Fatal(err)
@@ -96,8 +109,18 @@ func TestLatencyCoveringIndexAPIExperiment(t *testing.T) {
 		}
 	}
 	const index = "idx_usage_events_ts_latency_ttft_cover"
+	tabs := []string{"overview", "trends", "models", "apiKeys", "credentials"}
+	daysToTest := []int64{30, 90, 120}
+	rollups := []bool{false, true}
+	if targetOnly {
+		tabs = []string{"overview"}
+		daysToTest = []int64{30}
+		// Production defaults USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED to true.
+		rollups = []bool{true}
+		t.Log("TARGET events=3200000 days=30 tab=overview rollup=true")
+	}
 	profiles := map[string]monitoringsvc.Include{}
-	for _, tab := range []string{"overview", "trends", "models", "apiKeys", "credentials"} {
+	for _, tab := range tabs {
 		include := monitoringsvc.Include{Summary: true, SummaryProfile: "compact", Granularity: "day"}
 		switch tab {
 		case "overview":
@@ -127,7 +150,7 @@ func TestLatencyCoveringIndexAPIExperiment(t *testing.T) {
 	}
 	const base int64 = 1767225600000
 	const day int64 = 86400000
-	for _, rollup := range []bool{false, true} {
+	for _, rollup := range rollups {
 		if rollup {
 			started := time.Now()
 			for {
@@ -164,8 +187,8 @@ func TestLatencyCoveringIndexAPIExperiment(t *testing.T) {
 				if cover {
 					exec(`create index ` + index + ` on usage_events(timestamp_ms,latency_ms,ttft_ms)`)
 				}
-				for _, days := range []int64{30, 90, 120} {
-					for _, tab := range []string{"overview", "trends", "models", "apiKeys", "credentials"} {
+				for _, days := range daysToTest {
+					for _, tab := range tabs {
 						name := fmt.Sprintf("api/%s/%dd/rollup=%t", tab, days, rollup)
 						request := monitoringsvc.Request{FromMS: base + (120-days)*day, ToMS: base + 120*day, NowMS: base + 120*day, TimeZone: "UTC", Include: profiles[tab]}
 						body, err := json.Marshal(request)

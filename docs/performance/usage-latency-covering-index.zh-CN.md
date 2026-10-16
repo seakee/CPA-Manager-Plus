@@ -208,7 +208,7 @@ INSERT/UPDATE/DELETE abort triggers 在维护全程保护 raw usage，前后 che
 - SQLite lifecycle 测试：空／已有数据、重启、离线构建、锁失败、真实 DDL 中断、原始历史和状态恢复。
 - usageevent 回归／opt-in 实验：自然 planner、NULL/0/失败／筛选精确结果、真实 SQL A/B、Go 排序和写入；CPU helper 按平台拆分。
 - monitoring opt-in 实验：真实认证 handler 与五 Tab 响应精确比较。
-- 原 TopModels query-plan 回归保留 timestamp-only 的原断言，并新增两索引共存场景，要求特定自然索引和 timestamp 范围条件，继续禁止全表扫描。
+- 原 TopModels query-plan 回归在 timestamp-only 场景继续严格要求 `idx_usage_events_timestamp`；两索引共存场景只要求 timestamp 范围索引搜索并继续禁止全表扫描，不锁定 SQLite 必须选择哪一个 timestamp-leading 索引。
 - 无 API/UI、生产 SQL、分位数定义、归档语义、新配置或后台系统变化。没有生产 INDEXED BY；试验索引选择只存在于测试。
 
 升级后的非空 usage_events 继续可服务，性能提升需停 Manager Server 后运行现有 `cpa-manager-plus cleanup-derived --db-path <数据库>`，完成后重启。新空库由既有 post-listen maintenance 创建。在线 periodic maintenance 不建大库索引。
@@ -242,6 +242,9 @@ CPAMP_LATENCY_PERF=1 CPAMP_LATENCY_PERF_EVENTS=100000 go test ./internal/reposit
 # 已存在的 marked fixture 可设置 CPAMP_LATENCY_PERF_RESUME，EVENTS 须相同。
 
 CPAMP_LATENCY_PERF_DB=<marked-fixture> go test ./internal/http/controller/monitoring -run '^TestLatencyCoveringIndexAPIExperiment$' -count=1 -timeout=120m -v
+# 合并前目标场景：仅接受实际包含 320 万 usage_events 的完整 fixture，测试 30 天 Overview 与生产默认 rollup=true。
+CPAMP_LATENCY_PERF_DB=<marked-3200000-fixture> CPAMP_LATENCY_PERF_API_TARGET_ONLY=1 go test ./internal/http/controller/monitoring -run '^TestLatencyCoveringIndexAPIExperiment$' -count=1 -timeout=120m -v
+
 # SQLITE_TMPDIR 必须是预先创建的任务独占临时目录。大库实验要求 lsof。
 SQLITE_TMPDIR=<task-owned-temp-dir> CPAMP_LATENCY_PERF_MAINT_DB=<marked-3200000-fixture> go test ./internal/repository/sqlite -run '^TestLatencyCoverIndexLargeOfflineExperiment$' -count=1 -timeout=20m -v
 
