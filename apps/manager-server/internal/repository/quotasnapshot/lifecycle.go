@@ -102,6 +102,9 @@ func persistObservationSnapshots(ctx context.Context, tx *sql.Tx, write *model.A
 		for snapshotIndex := range write.Snapshots {
 			snapshot := &write.Snapshots[snapshotIndex]
 			snapshot.ObservationID = observationID
+			if err := reconcileHistoricalCodexFiveHourActualStart(ctx, tx, write.Observation, *snapshot); err != nil {
+				return err
+			}
 			snapshot.LogicalWindowID = 0
 			snapshot.ActivationID = 0
 			snapshot.CycleID = 0
@@ -995,6 +998,92 @@ func resolveWindowRelationship(
 		return "", "", nil
 	}
 	return "concurrent_subwindow", containerID, nil
+}
+
+func reconcileHistoricalCodexFiveHourActualStart(
+	ctx context.Context,
+	tx *sql.Tx,
+	observation model.AccountQuotaObservation,
+	snapshot model.AccountQuotaSnapshot,
+) error {
+	if observation.Provider != "codex" || observation.Source != "response_header" ||
+		snapshot.Provider != "codex" || snapshot.Source != "response_header" ||
+		snapshot.WindowMode != "fixed" || snapshot.DurationSeconds == nil ||
+		*snapshot.DurationSeconds != 5*60*60 || snapshot.CycleStartMS == nil ||
+		snapshot.CycleEndMS == nil ||
+		(snapshot.BoundaryAccuracy != "exact" && snapshot.BoundaryAccuracy != "derived") {
+		return nil
+	}
+
+	window, err := findLogicalWindow(
+		ctx,
+		tx,
+		observation.AccountKey,
+		observation.Provider,
+		snapshot.ProviderWindowID,
+		snapshot.ScopeFingerprint,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if window.inventoryScopeKey != observation.InventoryScopeKey || window.availability == "inactive" {
+		return nil
+	}
+
+	activationID, err := activeActivationID(ctx, tx, window.id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	active, err := activeCycle(ctx, tx, activationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if active.ScheduledStartMS == nil || active.ScheduledEndMS == nil ||
+		active.DurationSeconds == nil || *active.DurationSeconds != 5*60*60 ||
+		!cycleMatchesSnapshot(active, snapshot) ||
+		snapshot.ObservedAtMS >= active.ActualStartMS ||
+		snapshot.ObservedAtMS >= *active.ScheduledStartMS {
+		return nil
+	}
+
+	var previousEndMS int64
+	var previousEndReason string
+	err = tx.QueryRowContext(ctx, `select actual_end_ms, coalesce(end_reason, '')
+		from account_quota_cycles
+		where activation_id = ? and actual_end_ms is not null
+			and actual_start_ms < ?
+		order by actual_end_ms desc, id desc limit 1`,
+		activationID,
+		active.ActualStartMS,
+	).Scan(&previousEndMS, &previousEndReason)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if previousEndReason != "scheduled" || snapshot.ObservedAtMS < previousEndMS {
+		return nil
+	}
+
+	_, err = tx.ExecContext(ctx, `update account_quota_cycles
+		set actual_start_ms = ?, updated_at_ms = ?
+		where id = ? and actual_start_ms > ?`,
+		snapshot.ObservedAtMS,
+		snapshot.CreatedAtMS,
+		active.ID,
+		snapshot.ObservedAtMS,
+	)
+	return err
 }
 
 func reconcileCycle(

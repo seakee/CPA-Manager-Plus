@@ -744,6 +744,7 @@ func TestManagerKeepsFirstRequestAcrossFiveHourScheduledRollover(t *testing.T) {
 		// headers alone cannot prove which upstream cycle charged the tokens.
 		{"D_started_before_old_end_completed_after_new_start", -2 * time.Second, 20_000, 2, 15 * time.Second, false},
 		{"out_of_order_completion", 10 * time.Second, 20_000, 1, 10 * time.Second, true},
+		{"out_of_order_started_before_old_end_stays_previous", -2 * time.Second, 25_000, 2, 12 * time.Second, true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			// Keep this fixture on one UTC date. Header boundaries come from reset_at
