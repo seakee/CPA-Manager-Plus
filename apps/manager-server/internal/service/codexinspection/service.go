@@ -1744,6 +1744,9 @@ func (s *Service) inspectSingleAccount(
 	if item.Provider == "xai" {
 		return s.inspectSingleXAIAccount(ctx, setup, settings, item, logger)
 	}
+	if item.Provider == "muse" {
+		return s.inspectSingleMuseAccount(ctx, setup, settings, item, logger)
+	}
 	base := resultFromAccount(item)
 	if item.AuthIndex == "" {
 		base.Action = "keep"
@@ -4326,6 +4329,8 @@ func normalizeInspectionProvider(value string) string {
 	switch normalized {
 	case "x-ai", "grok":
 		return "xai"
+	case "meta", "meta-ai", "muse-code", "museai":
+		return "muse"
 	default:
 		return normalized
 	}
