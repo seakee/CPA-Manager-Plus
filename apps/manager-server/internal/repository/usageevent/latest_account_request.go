@@ -131,10 +131,26 @@ func (r *repository) recentAccountRequestsIndexed(
 			return nil, err
 		}
 		authFileSnapshot := strings.TrimSpace(target.AuthFileSnapshot)
+		authIndex := strings.TrimSpace(target.AuthIndex)
 		if authFileSnapshot == "" {
+			if authIndex == "" {
+				continue
+			}
+			indexOnly, err := r.recentAccountRequestsByPredicates(
+				ctx,
+				target.RequestIndex,
+				limit,
+				withLatestRequestIdentity(
+					authIndexLatestRequestPredicates(authIndex),
+					target,
+				),
+			)
+			if err != nil {
+				return nil, err
+			}
+			requests = append(requests, mergeRecentAccountRequests(limit, indexOnly)...)
 			continue
 		}
-		authIndex := strings.TrimSpace(target.AuthIndex)
 		snapshot, err := r.recentAccountRequestsByPredicates(
 			ctx,
 			target.RequestIndex,
@@ -292,6 +308,16 @@ func snapshotLatestRequestPredicates(authFileSnapshot, authIndex string) []lates
 	)
 }
 
+// authIndexLatestRequestPredicates matches config-sourced credentials whose
+// events carry no auth file snapshot (e.g. api-key coding-plan keys): the
+// auth index alone identifies the credential.
+func authIndexLatestRequestPredicates(authIndex string) []latestRequestPredicate {
+	return []latestRequestPredicate{{
+		sql:  `(e.auth_file_snapshot is null or e.auth_file_snapshot = '') and e.auth_index collate nocase = ?`,
+		args: []any{authIndex},
+	}}
+}
+
 func legacyLatestRequestPredicates(authFileSnapshot, authIndex string) []latestRequestPredicate {
 	filePredicates := []latestRequestPredicate{
 		{sql: `e.auth_file_snapshot is null and e.source collate nocase = ?`, args: []any{authFileSnapshot}},
@@ -395,7 +421,8 @@ func (r *repository) recentAccountRequestsBatched(
 	args := make([]any, 0, len(targets)*8+1)
 	for _, target := range targets {
 		authFileSnapshot := strings.TrimSpace(target.AuthFileSnapshot)
-		if authFileSnapshot == "" {
+		authIndex := strings.TrimSpace(target.AuthIndex)
+		if authFileSnapshot == "" && authIndex == "" {
 			continue
 		}
 		provider := normalizeLatestRequestProvider(target.Provider)
@@ -449,6 +476,22 @@ func (r *repository) recentAccountRequestsBatched(
 		on e.auth_file_snapshot collate nocase = t.auth_file_snapshot
 		and coalesce(e.auth_index, '') collate nocase = t.auth_index
 		and `+latestRequestBatchedIdentityPredicate("t", "e")+`
+), index_candidates as (
+	select
+		t.request_index,
+		e.id,
+		e.timestamp_ms,
+		e.failed,
+		e.fail_status_code,
+		coalesce(e.fail_summary, '') as fail_summary,
+		coalesce(e.header_error_kind, '') as header_error_kind,
+		coalesce(e.header_error_code, '') as header_error_code,
+		coalesce(e.header_trace_id, '') as header_trace_id
+	from credential_targets t
+	join usage_events e
+		on t.auth_file_snapshot = ''
+		and (e.auth_file_snapshot is null or e.auth_file_snapshot = '')
+		and e.auth_index collate nocase = t.auth_index
 ), legacy_source_candidates as (
 	select
 		t.request_index,
@@ -468,6 +511,8 @@ func (r *repository) recentAccountRequestsBatched(
 		and `+latestRequestBatchedIdentityPredicate("t", "e")+`
 ), candidates as (
 	select * from snapshot_candidates
+	union all
+	select * from index_candidates
 	union all
 	select * from legacy_source_candidates
 ), ranked as (

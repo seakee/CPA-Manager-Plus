@@ -47,6 +47,8 @@ const emptyStores = (): AccountQuotaStores => ({
   devinQuota: {},
   metaQuota: {},
   xaiQuota: {},
+  zhipuQuota: {},
+  opencodeQuota: {},
 });
 
 const evidenceBoundary = (

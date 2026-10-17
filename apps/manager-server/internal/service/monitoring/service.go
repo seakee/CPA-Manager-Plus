@@ -33,6 +33,9 @@ const (
 	maxAccountWindowUsageItems = 400
 	accountHistoryCatchUpLimit = 5000
 	accountRecentRequestLimit  = 10
+	// Deeper sample for config-sourced credentials so their status bar can
+	// aggregate a full 20x10m window instead of just the newest requests.
+	accountRecentRequestIndexOnlyLimit = 500
 	recentWindowMS             = 30 * 60 * 1000
 	// analyticsPrefetchConcurrency limits background analytics reads. The
 	// foreground summary/task path may hold one additional SQLite connection.
@@ -1885,13 +1888,35 @@ func (s *Service) accountHistory(ctx context.Context, req AccountHistoryRequest)
 			}
 		}
 	}
-	recentRequests, err := s.store.RecentAccountRequests(
-		ctx,
-		latestRequestTargets,
-		accountRecentRequestLimit,
-	)
-	if err != nil {
-		return AccountHistoryResponse{}, err
+	// Snapshot-backed targets keep the default sample; index-only targets
+	// (config-sourced credentials) fetch a deeper sample so the panel can
+	// aggregate a full recent-request window for them.
+	fileBackedTargets := make([]store.LatestAccountRequestQuery, 0, len(latestRequestTargets))
+	indexOnlyTargets := make([]store.LatestAccountRequestQuery, 0, len(latestRequestTargets))
+	for _, target := range latestRequestTargets {
+		if strings.TrimSpace(target.AuthFileSnapshot) == "" {
+			indexOnlyTargets = append(indexOnlyTargets, target)
+		} else {
+			fileBackedTargets = append(fileBackedTargets, target)
+		}
+	}
+	var recentRequests []store.LatestAccountRequest
+	groups := []struct {
+		targets []store.LatestAccountRequestQuery
+		limit   int
+	}{
+		{fileBackedTargets, accountRecentRequestLimit},
+		{indexOnlyTargets, accountRecentRequestIndexOnlyLimit},
+	}
+	for _, group := range groups {
+		if len(group.targets) == 0 {
+			continue
+		}
+		groupRequests, err := s.store.RecentAccountRequests(ctx, group.targets, group.limit)
+		if err != nil {
+			return AccountHistoryResponse{}, err
+		}
+		recentRequests = append(recentRequests, groupRequests...)
 	}
 	recentRequestsByTargetIndex := make(map[int][]AccountLatestRequest, len(recentRequests))
 	for _, request := range recentRequests {
@@ -4167,7 +4192,12 @@ func uniqueAccountHistoryKeys(keys []string) []string {
 }
 
 func latestAccountRequestTargetValid(target AccountHistoryTarget) bool {
-	return accountHistoryAuthFileSnapshot(target) != ""
+	if accountHistoryAuthFileSnapshot(target) != "" {
+		return true
+	}
+	// Config-sourced credentials (api-key coding plans) have no file snapshot;
+	// their stable auth index alone identifies recent requests.
+	return strings.TrimSpace(target.AuthIndex) != ""
 }
 
 func accountHistoryAuthFileSnapshot(target AccountHistoryTarget) string {

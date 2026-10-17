@@ -506,6 +506,8 @@ describe('useQuotaStore persistence', () => {
       kimiQuota: {},
       metaQuota: {},
       xaiQuota: {},
+      zhipuQuota: {},
+      opencodeQuota: {},
     });
   });
 

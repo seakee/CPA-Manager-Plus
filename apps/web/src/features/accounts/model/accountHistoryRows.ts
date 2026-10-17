@@ -54,8 +54,13 @@ export const buildAccountHistoryTargetEntries = (rows: AccountRow[]): AccountHis
       const identity = resolveCredentialIdentity(row.raw);
       const accountSnapshot = identity.accountSnapshot;
       const authLabelSnapshot = identity.authLabelSnapshot;
-      const authFileSnapshot = identity.physicalName || readString(row.fileName);
       const rowProvider = readString(row.provider);
+      // Synthesized coding-plan credentials have no real auth file; their
+      // stable auth index is the only match key for recent requests.
+      const isCodingPlan = rowProvider === 'zhipu' || rowProvider === 'opencode';
+      const authFileSnapshot = isCodingPlan
+        ? ''
+        : identity.physicalName || readString(row.fileName);
       const authProviderSnapshot = identity.provider || (rowProvider === 'unknown' ? '' : rowProvider);
       const isCodex = normalizeProvider(authProviderSnapshot) === 'codex';
       const authAccountIdSnapshot = isCodex ? identity.accountId : '';
@@ -69,11 +74,12 @@ export const buildAccountHistoryTargetEntries = (rows: AccountRow[]): AccountHis
           account_snapshot: accountSnapshot || undefined,
           auth_label_snapshot: authLabelSnapshot || undefined,
           auth_file_snapshot: authFileSnapshot || undefined,
+          // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- guard for coding-plan rows
+          source: (!isCodingPlan && authFileSnapshot) || undefined,
           auth_provider_snapshot: authProviderSnapshot || undefined,
           auth_account_id_snapshot: authAccountIdSnapshot || undefined,
           auth_project_id_snapshot: authProjectIdSnapshot || undefined,
           auth_index: authIndex || undefined,
-          source: authFileSnapshot || undefined,
         },
       };
     })

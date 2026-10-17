@@ -11,6 +11,8 @@ const emptyStores = () => ({
   devinQuota: {},
   metaQuota: {},
   xaiQuota: {},
+  zhipuQuota: {},
+  opencodeQuota: {},
 });
 
 describe('buildAccountOperationalItemsByRowKey', () => {

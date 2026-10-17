@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { latestRequestsToRecentBuckets } from './accountDetailViewModel';
 import type { AuthFileItem, CodexQuotaState, XaiQuotaState } from '@/types';
 import type {
   AccountActionCandidate,
@@ -3000,3 +3001,34 @@ describe('accountDetailViewModel', () => {
   });
 });
 
+
+describe('latestRequestsToRecentBuckets', () => {
+  it('aggregates per-request entries into the fixed time grid', () => {
+    const now = Date.now();
+    const requests = [
+      { timestamp_ms: now - 1 * 60_000, failed: false },
+      { timestamp_ms: now - 2 * 60_000, failed: false },
+      { timestamp_ms: now - 3 * 60_000, failed: true },
+      { timestamp_ms: now - 15 * 60_000, failed: true },
+      { timestamp_ms: now - 5 * 60 * 60_000, failed: false },
+    ];
+    const buckets = latestRequestsToRecentBuckets(requests);
+    expect(buckets).toHaveLength(20);
+    const last = buckets[19];
+    expect(last).toEqual({ success: 2, failed: 1 });
+    // 15 minutes ago lands in block 18 (second-newest 10-minute block).
+    expect(buckets[18]).toEqual({ success: 0, failed: 1 });
+    expect(buckets[17]).toEqual({ success: 0, failed: 0 });
+    // Outside the 20-block window is dropped.
+    const total = buckets.reduce((sum, b) => sum + b.success + b.failed, 0);
+    expect(total).toBe(4);
+  });
+
+  it('returns empty for no or all-stale entries', () => {
+    expect(latestRequestsToRecentBuckets([])).toEqual([]);
+    expect(latestRequestsToRecentBuckets(null)).toEqual([]);
+    expect(
+      latestRequestsToRecentBuckets([{ timestamp_ms: Date.now() - 48 * 60 * 60_000, failed: false }])
+    ).toEqual([]);
+  });
+});

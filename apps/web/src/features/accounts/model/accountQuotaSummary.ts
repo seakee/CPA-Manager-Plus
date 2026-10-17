@@ -7,9 +7,11 @@ import type {
   DevinQuotaState,
   KimiQuotaState,
   MetaQuotaState,
+  OpencodeQuotaState,
   QuotaResetAccuracy,
   XaiBillingSummary,
   XaiQuotaState,
+  ZhipuQuotaState,
 } from '@/types';
 import {
   isValidQuotaResetAtMs,
@@ -27,6 +29,7 @@ import {
   hasUsageHeaderDiagnosticSignal,
 } from '@/utils/usageHeaderSnapshots';
 import { getCredentialScopedQuotaState } from '@/utils/quota/credentialScope';
+import { resolveCodingPlanProvider, type ZhipuAuthIndexBaseMap } from '@/utils/quota/codingPlanProviders';
 import { isCodexMainQuotaModelScope, isCodexMainQuotaWindow } from '@/utils/quota/codexQuota';
 import { resolveAuthFilePlanType, resolveAntigravityPlanType } from '@/utils/plans';
 
@@ -81,6 +84,8 @@ export interface AccountQuotaStores {
   kimiQuota: Record<string, KimiQuotaState>;
   metaQuota: Record<string, MetaQuotaState>;
   xaiQuota: Record<string, XaiQuotaState>;
+  zhipuQuota: Record<string, ZhipuQuotaState>;
+  opencodeQuota: Record<string, OpencodeQuotaState>;
 }
 
 export interface AccountQuotaOverrides {
@@ -280,11 +285,22 @@ export const readAuthFileCredentialRefreshAtMs = (file: AuthFileItem): number | 
     : refreshAtMs;
 };
 
-export const normalizeAccountProvider = (file: AuthFileItem): string => {
+const EMPTY_ZHIPU_BASES: ZhipuAuthIndexBaseMap = new Map();
+
+/** Coding-plan rows are config-synthesized (runtime-only) yet quota-queryable. */
+export const isCodingPlanProviderRow = (provider: string): boolean =>
+  provider === 'zhipu' || provider === 'opencode';
+
+export const normalizeAccountProvider = (
+  file: AuthFileItem,
+  zhipuBases: ZhipuAuthIndexBaseMap = EMPTY_ZHIPU_BASES
+): string => {
   const raw = readString(file.provider) || readString(file.type) || 'unknown';
   const key = raw.toLowerCase().replace(/_/g, '-');
   if (key === 'x-ai' || key === 'grok') return 'xai';
   if (key === 'muse') return 'meta';
+  const codingPlan = resolveCodingPlanProvider(file, zhipuBases);
+  if (codingPlan) return codingPlan;
   return key || 'unknown';
 };
 
@@ -919,11 +935,14 @@ const loadingQuota = (planType: string | null): AccountQuotaSummary => ({
 export const resolveAccountQuota = (
   file: AuthFileItem,
   stores: AccountQuotaStores,
-  overrides?: AccountQuotaOverrides
+  overrides?: AccountQuotaOverrides,
+  zhipuBases?: ZhipuAuthIndexBaseMap
 ): AccountQuotaSummary => {
-  const provider = normalizeAccountProvider(file);
+  const provider = normalizeAccountProvider(file, zhipuBases);
   const filePlanType = readPlanType(file);
-  if (file.disabled === true) {
+  // Coding-plan usage is account-level and remains queryable even when the
+  // credential is excluded from routing (excluded-models: ['*']).
+  if (file.disabled === true && !isCodingPlanProviderRow(provider)) {
     return {
       status: 'disabled',
       remainingPercent: null,
@@ -1021,6 +1040,28 @@ export const resolveAccountQuota = (
         quota.failedAtMs
       );
     return quotaFromUsedWindows(quota.windows, quota.planType ?? filePlanType, {
+      fetchedAtMs: quota.fetchedAtMs,
+    });
+  }
+
+  if (provider === 'zhipu') {
+    const quota = getCredentialScopedQuotaState(stores.zhipuQuota, file);
+    if (!quota) return emptyQuota(filePlanType);
+    if (quota.status === 'loading') return loadingQuota(quota.planType ?? filePlanType);
+    if (quota.status === 'error')
+      return quotaFromError(quota.error, quota.planType ?? filePlanType, quota.errorStatus, quota.failedAtMs);
+    return quotaFromUsedWindows(quota.windows, quota.planType ?? filePlanType, {
+      fetchedAtMs: quota.fetchedAtMs,
+    });
+  }
+
+  if (provider === 'opencode') {
+    const quota = getCredentialScopedQuotaState(stores.opencodeQuota, file);
+    if (!quota) return emptyQuota(filePlanType);
+    if (quota.status === 'loading') return loadingQuota(filePlanType);
+    if (quota.status === 'error')
+      return quotaFromError(quota.error, filePlanType, quota.errorStatus, quota.failedAtMs);
+    return quotaFromUsedWindows(quota.windows, filePlanType, {
       fetchedAtMs: quota.fetchedAtMs,
     });
   }
