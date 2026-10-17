@@ -162,6 +162,25 @@ If an upgrade path needs a legacy redirect, it must be explicit, disable-able, a
 
 A temporary bootstrap discovery surface may exist before initialization; its lifecycle ends when normal Control Plane routing is configured.
 
+Phase4-03 bounds that lifecycle to the Manager-owned namespace
+`/.well-known/cpamp-bootstrap`: exact root remains GET/OPTIONS non-secret
+discovery, `/ui` and `/assets/` load the same Full Web build's technical
+Bootstrap graph, and `/api/v2/` carries only Fresh claim/session operations.
+Ingress captures the whole namespace including unknown and ambiguous aliases;
+there is no Gateway fallback, canonical-prefix redirect or public prefix
+disclosure. The fixed API accepts only a short-lived Fresh Bootstrap session,
+never Admin Key or normal Console authentication. A verified initial canonical
+route commit retires the entire namespace to generic 404 immediately, before
+Gateway readiness or Fresh strategy completion if necessary.
+
+Administrator initialization is independent of Bootstrap classification. A
+matching durable Fresh installation, generation and OperationID checkpoint can
+retain `Fresh` in progress after administrator initialization. Administrator
+presence or native-v2 schema alone never supplies that evidence; unknown or
+pre-existing native-v2 remains fail closed. Unauthenticated discovery during
+this continuation returns the existing unavailable envelope; only the current
+Fresh session or a host-issued same-operation resume can continue.
+
 ### 7. Full Web delivery is multi-resource
 
 The production Full Web artifact is structurally:

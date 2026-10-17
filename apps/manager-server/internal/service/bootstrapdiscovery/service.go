@@ -27,6 +27,9 @@ const (
 type Input struct {
 	Report          legacypreflight.Report
 	InspectionError error
+	// Supplied only by the already-held Manager store owner. Unauthenticated
+	// requests and schema inspection never manufacture this evidence.
+	FreshOperation *bootstrap.FreshOperation
 }
 
 func Unavailable() bootstrap.PublicDiscovery {
@@ -41,6 +44,15 @@ func Unavailable() bootstrap.PublicDiscovery {
 func Project(input Input) bootstrap.PublicDiscovery {
 	if input.InspectionError != nil {
 		return Unavailable()
+	}
+	if input.FreshOperation != nil {
+		op := *input.FreshOperation
+		if op.Validate() != nil || op.ProductComplete || op.Routing.Committed || op.AdminInitialized {
+			return Unavailable()
+		}
+		// Only the canonical store consumer can supply this positively owned
+		// checkpoint. The ordinary native-v2 branch below is unchanged.
+		return publicDiscovery(bootstrap.PublicFreshClaimRequired, bootstrap.Fresh, true, bootstrap.AuthEntryFreshClaim, bootstrap.ReasonFreshClaimRequired)
 	}
 	if !safeObservation(input.Report) {
 		return Unavailable()

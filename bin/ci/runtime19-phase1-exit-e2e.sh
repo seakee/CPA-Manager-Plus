@@ -559,13 +559,11 @@ if [ "${skip_build}" != true ]; then
   "${compose[@]}" build
 fi
 
-scenario 'A — fresh install via explicit initializer / default bootstrap'
-# Runtime19's fresh-install boundary now uses the existing explicit writable
-# initializer before exercising persisted Runtime/Manager lifecycle semantics.
-"${compose[@]}" run -d --no-deps --name "${initializer_name}" cpamp-manager initialize >/dev/null
-retry 90 docker exec "${initializer_name}" wget -qO- http://127.0.0.1:18317/health >/dev/null
-docker stop -t 20 "${initializer_name}" >/dev/null
-docker rm "${initializer_name}" >/dev/null
+scenario 'A — historical Manager lifecycle baseline'
+# Runtime19 exercises persisted Runtime/Manager lifecycle semantics. Build its
+# CI-only historical baseline explicitly instead of treating Phase4-03 Fresh
+# initialize as the old default bootstrap.
+"${repo_root}/bin/ci/runtime-lifecycle-manager-baseline.sh" "${project}" "${initializer_name}"
 "${compose[@]}" up -d
 wait_public_health 120
 status_a="$(wait_runtime_observation ready armed - manager 120)"
@@ -573,12 +571,12 @@ runtime_identity="$(printf '%s' "${status_a}" | json_field runtimeIdentity)"
 generation_a="$(printf '%s' "${status_a}" | json_uint_field runtimeGeneration)"
 artifact_a="$(printf '%s' "${status_a}" | json_field activeGatewayArtifact.artifactId)"
 attempts_a="$(printf '%s' "${status_a}" | json_field recovery.attemptsRemaining)"
-assert_equal "${runtime_identity}" embedded-default "fresh Runtime identity"
-assert_not_equal "${generation_a}" 0 "fresh RuntimeGeneration"
-assert_equal "${attempts_a}" 3 "fresh recovery budget"
+assert_equal "${runtime_identity}" embedded-default "baseline Runtime identity"
+assert_not_equal "${generation_a}" 0 "baseline RuntimeGeneration"
+assert_equal "${attempts_a}" 3 "baseline recovery budget"
 [[ "${artifact_a}" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "bundled A artifact is not canonical: ${artifact_a}"
 bundled_artifact="sha256:$("${compose[@]}" exec -T cpamp-runtime sha256sum /usr/local/bin/cli-proxy-api | awk '{print $1}')"
-assert_equal "${artifact_a}" "${bundled_artifact}" "fresh bundled A exact artifact"
+assert_equal "${artifact_a}" "${bundled_artifact}" "baseline bundled A exact artifact"
 pid_a="$(runtime_cpa_pid)"
 assert_cpa_pid_alive "${pid_a}"
 assert_cpa_identity "${pid_a}"
@@ -596,7 +594,7 @@ assert_mount_isolation
 
 private_gateway_a="$(private_gateway_signature)"
 public_gateway_a="$(wait_public_gateway_signature "${private_gateway_a}" 120)"
-assert_equal "${public_gateway_a}" "${private_gateway_a}" "fresh public/private Gateway semantics"
+assert_equal "${public_gateway_a}" "${private_gateway_a}" "baseline public/private Gateway semantics"
 config_digest_a="$(gateway_config_digest)"
 secret_digest_a="$(runtime_secret_digest)"
 manager_a="$(snapshot_manager_database scenario-a-manager)"

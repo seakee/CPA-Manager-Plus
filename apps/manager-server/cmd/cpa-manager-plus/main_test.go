@@ -710,7 +710,7 @@ func managerServerTestEnvironment(dataDir, dbPath string) []string {
 	overrides := map[string]string{
 		"CPA_MANAGER_PREFLIGHT_TIMEOUT":         "",
 		"CPA_MANAGER_TEST_HELPER":               "1",
-		"CPA_MANAGER_ADMIN_KEY":                 "cpamp_startup_migration_test_admin_key",
+		"CPA_MANAGER_ADMIN_KEY":                 "cpamp_Startup_Migration_Test_7391_Strong_Key",
 		"CPA_MANAGER_DATA_KEY_PATH":             filepath.Join(dataDir, "data.key"),
 		"HTTP_ADDR":                             "127.0.0.1:0",
 		"USAGE_DATA_DIR":                        dataDir,

@@ -20,6 +20,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/codexinspection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/datamigration"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/deadletter"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/modelprice"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotacooldown"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotasnapshot"
@@ -169,6 +170,8 @@ type Store struct {
 	IdentityProjections identityprojectionports.Repository
 	UsageArchives       *usagearchive.Repository
 }
+
+func (s *Store) FreshStore() freshstore.Store { return freshstore.New(s.db) }
 
 func Open(path string, protector ...*security.Protector) (*Store, error) {
 	db, err := sqliterepo.Open(path)

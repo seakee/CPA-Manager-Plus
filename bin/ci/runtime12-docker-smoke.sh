@@ -189,23 +189,15 @@ fi
 '
 "${compose[@]}" stop cpamp-manager >/dev/null
 
-# The existing initialize command is the deliberate Fresh write boundary. Run
-# it once against the same Manager data volume, wait until the initialized
-# Manager is ready, then stop the one-off container and resume the normal
-# Compose service for the Runtime lifecycle smoke.
-"${compose[@]}" run -d --no-deps --name "${initializer_name}" cpamp-manager initialize >/dev/null
-retry 90 docker exec "${initializer_name}" wget -qO- http://127.0.0.1:18317/health >/dev/null
-docker exec "${initializer_name}" sh -ec '
-  test -s /data/usage.sqlite
-  test -s /data/data.key
-  test -e /data/usage.sqlite.manager.lock
-'
-docker stop -t 20 "${initializer_name}" >/dev/null
-docker rm "${initializer_name}" >/dev/null
+# Verify the one-shot Fresh admission/handoff contract, then convert only this
+# disposable CI volume to the explicit historical Manager baseline required by
+# the existing Runtime lifecycle smoke. Fresh itself must not select Embedded
+# Runtime or create runtime_desired_v1.
+"${repo_root}/bin/ci/runtime-lifecycle-manager-baseline.sh" "${project}" "${initializer_name}"
 
-# After explicit initialization, retain the existing Runtime lifecycle checks:
-# Manager desired-state reconciliation must start CPA without a direct
-# Supervisor mutation from the smoke test.
+# The historical baseline retains the existing Runtime lifecycle checks:
+# normal Manager compatibility startup must create the desired state and start
+# CPA without a direct Supervisor mutation from the smoke test.
 "${compose[@]}" up -d
 public_origin="http://127.0.0.1:${public_port}"
 retry 90 curl --fail --silent "${public_origin}/health" >/dev/null

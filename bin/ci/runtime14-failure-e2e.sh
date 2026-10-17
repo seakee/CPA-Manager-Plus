@@ -391,12 +391,10 @@ if [ "${skip_build}" != "true" ]; then
 fi
 
 scenario 'A — healthy Manager-owned baseline'
-# Runtime14 tests failure behavior after installation, not Fresh discovery.
-# Seed the Manager volume through the existing explicit writable initializer.
-"${compose[@]}" run -d --no-deps --name "${initializer_name}" cpamp-manager initialize >/dev/null
-retry 90 docker exec "${initializer_name}" wget -qO- http://127.0.0.1:18317/health >/dev/null
-docker stop -t 20 "${initializer_name}" >/dev/null
-docker rm "${initializer_name}" >/dev/null
+# Runtime14 tests historical Runtime failure behavior, not Fresh product setup.
+# Seed a CI-only historical Manager lifecycle baseline without restoring the
+# removed implicit Embedded behavior to Phase4-03 initialize.
+"${repo_root}/bin/ci/runtime-lifecycle-manager-baseline.sh" "${project}" "${initializer_name}"
 "${compose[@]}" up -d
 wait_public_success /health 90
 wait_public_success /v1/models 120

@@ -30,8 +30,10 @@ type Report struct {
 }
 
 type Options struct {
-	SourceStopped    bool
-	Initialize       bool
+	SourceStopped bool
+	Initialize    bool
+	// FreshAdmission enables Phase4-03 durable real-store admission receipts.
+	FreshAdmission   bool
 	ValidatedHop     *legacyartifact.ValidatedHopEvidence
 	readOnlySnapshot bool
 }
@@ -46,6 +48,7 @@ type Admission struct {
 	closeOnce         sync.Once
 	closeErr          error
 	markerPermanent   atomic.Bool
+	PendingFresh      *processlock.FreshReceipt
 }
 
 // RetainMarker makes the ownership marker permanent after writable DB open.
@@ -152,8 +155,8 @@ func Inspect(ctx context.Context, paths sqlite.InspectionPaths, options Options)
 // source had no ownership marker. Diagnostic callers never ignore an old lock.
 func inspect(ctx context.Context, paths sqlite.InspectionPaths, options Options, lock *processlock.Lock, createdLock bool) (report Report, err error) {
 	observed, err := sqlite.InspectLegacySource(ctx, paths, sqlite.InspectionOptions{
-		SourceStopped: options.SourceStopped,
-		ManagerLock: lock,
+		SourceStopped:    options.SourceStopped,
+		ManagerLock:      lock,
 		ReadOnlySnapshot: options.readOnlySnapshot,
 	})
 	report = Report{SourceKind: "unknown", Observed: observed, Unknown: []string{
@@ -287,9 +290,25 @@ func AdmitStartup(ctx context.Context, paths sqlite.InspectionPaths, options Opt
 		}
 	}()
 	options.SourceStopped = true // provisional cold read; WAL still requires a fence
+	if options.FreshAdmission && lock != nil {
+		receipt, receiptErr := lock.PendingFreshAdmission()
+		if receiptErr != nil {
+			return nil, receiptErr
+		}
+		if receipt != nil {
+			if err := validatePendingSource(ctx, paths, options, lock); err != nil {
+				return nil, err
+			}
+			owned = true
+			return &Admission{Lock: lock, PendingFresh: receipt}, nil
+		}
+	}
 	before, err := inspect(ctx, paths, options, lock, false)
 	if err != nil {
 		return nil, err
+	}
+	if !options.FreshAdmission && before.Observed.FreshOwnershipCheckpointPresent {
+		return nil, errors.New("Fresh store requires its product-owned admission path")
 	}
 	if !startupAllowed(before) {
 		return nil, errors.New("Manager source is not proven fresh or native v2; run legacy-preflight and restore missing source assets; use initialize only for a deliberate config-only new installation")
@@ -303,6 +322,14 @@ func AdmitStartup(ctx context.Context, paths sqlite.InspectionPaths, options Opt
 		paths.Database = lock.DatabasePath()
 		if fresh {
 			freshAdmission = &Admission{Lock: lock, fresh: true, paths: paths, options: options, initial: before.Observed}
+			if options.FreshAdmission {
+				receipt, receiptErr := lock.BeginFreshAdmission()
+				if receiptErr != nil {
+					return nil, receiptErr
+				}
+				freshAdmission.PendingFresh = &receipt
+				freshAdmission.RetainMarker()
+			}
 		}
 		after, err := inspect(ctx, paths, options, lock, fresh)
 		if err != nil {
@@ -315,6 +342,9 @@ func AdmitStartup(ctx context.Context, paths sqlite.InspectionPaths, options Opt
 	}
 	if err := lock.Validate(); err != nil {
 		return nil, err
+	}
+	if !options.FreshAdmission && before.Observed.FreshOwnershipCheckpointPresent {
+		return nil, errors.New("Fresh store requires its product-owned admission path")
 	}
 	owned = true
 	if freshAdmission != nil {

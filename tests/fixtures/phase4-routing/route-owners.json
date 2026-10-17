@@ -1,7 +1,20 @@
 {
   "$schema": "./route-owners.schema.json",
-  "schemaVersion": 2,
-  "contractId": "cpamp-v2-phase4-02-routing-ownership-v2",
+  "schemaVersion": 3,
+  "contractId": "cpamp-v2-phase4-03-routing-ownership-v3",
+  "fixedBootstrapNamespace": {
+    "root": "/.well-known/cpamp-bootstrap",
+    "shell": "/.well-known/cpamp-bootstrap/ui",
+    "assets": "/.well-known/cpamp-bootstrap/assets/",
+    "api": "/.well-known/cpamp-bootstrap/api/v2/",
+    "owner": "manager",
+    "authentication": "fresh_session_only",
+    "loadingGraph": "same_full_web_static_bootstrap_graph",
+    "unknownOrAmbiguous": "captured_generic_404",
+    "gatewayFallback": "deny",
+    "prefixDisclosure": "deny",
+    "retirement": "verified_initial_route_commit_generic_404"
+  },
   "fixedBrandResources": [
     {
       "path": "/favicon.ico",

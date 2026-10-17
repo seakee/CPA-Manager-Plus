@@ -66,14 +66,20 @@ func (h DiscoveryHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // encoded separators, dot segments, duplicate slashes, backslashes, and
 // trailing-slash aliases from reaching a different owner.
 func ProtectFixedDiscovery(next http.Handler, discovery http.Handler) http.Handler {
+	return ProtectFixedBootstrap(next, discovery)
+}
+
+// ProtectFixedBootstrap captures the complete bounded namespace before a mux
+// can normalize aliases. Only canonical descendants reach the lifecycle owner.
+func ProtectFixedBootstrap(next http.Handler, bootstrap http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r == nil || r.URL == nil {
 			writeGenericNotFound(w)
 			return
 		}
 		if discoveryCandidate(r) {
-			if canonicalDiscoveryRequest(r) {
-				discovery.ServeHTTP(w, r)
+			if CanonicalBootstrapRequest(r) && bootstrap != nil {
+				bootstrap.ServeHTTP(w, r)
 			} else {
 				writeGenericNotFound(w)
 			}
@@ -81,6 +87,15 @@ func ProtectFixedDiscovery(next http.Handler, discovery http.Handler) http.Handl
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func CanonicalBootstrapRequest(r *http.Request) bool {
+	if r == nil || r.URL == nil || !CanonicalRequestPath(r.URL.Path) ||
+		(r.URL.Path != BootstrapDiscoveryPath && !strings.HasPrefix(r.URL.Path, BootstrapDiscoveryPath+"/")) ||
+		r.URL.EscapedPath() != r.URL.Path {
+		return false
+	}
+	return r.RequestURI == "" || strings.SplitN(r.RequestURI, "?", 2)[0] == r.URL.Path
 }
 
 func writeGenericNotFound(w http.ResponseWriter) {
@@ -120,7 +135,7 @@ func discoveryCandidate(r *http.Request) bool {
 }
 
 func discoveryPathCandidate(candidate string) bool {
-	if candidate == BootstrapDiscoveryPath || strings.HasPrefix(candidate, BootstrapDiscoveryPath+"/") {
+	if candidate == BootstrapDiscoveryPath || strings.HasPrefix(candidate, BootstrapDiscoveryPath+"/") || strings.HasPrefix(candidate, BootstrapDiscoveryPath+"%") {
 		return true
 	}
 	normalized := path.Clean(strings.ReplaceAll(candidate, "\\", "/"))

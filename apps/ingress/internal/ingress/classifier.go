@@ -59,7 +59,11 @@ func NewOwnershipClassifier(control ControlMatcher, retired ControlMatcher) Clas
 }
 
 func (c Classifier) Classify(path string) Route {
-	fixed, active, retired := c.candidateOwnership(routeCandidates(path))
+	candidates := routeCandidates(path)
+	if privateRoutingCandidate(candidates) {
+		return RouteDeny
+	}
+	fixed, active, retired := c.candidateOwnership(candidates)
 	return resolveOwnership(fixed, active, retired)
 }
 
@@ -88,7 +92,11 @@ func (c Classifier) ClassifyRequest(r *http.Request) Route {
 		if index := strings.IndexByte(value, '?'); index >= 0 {
 			value = value[:index]
 		}
-		candidateFixed, candidateActive, candidateRetired := c.candidateOwnership(routeCandidates(value))
+		candidates := routeCandidates(value)
+		if privateRoutingCandidate(candidates) {
+			return RouteDeny
+		}
+		candidateFixed, candidateActive, candidateRetired := c.candidateOwnership(candidates)
 		fixed = fixed || candidateFixed
 		active = active || candidateActive
 		retired = retired || candidateRetired
@@ -169,8 +177,19 @@ func routeCandidates(value string) []string {
 	return result
 }
 
+func privateRoutingCandidate(candidates []string) bool {
+	for _, value := range candidates {
+		for _, private := range []string{FreshRoutingControlPath, FreshRoutingAuthorityPath} {
+			if value == private || strings.HasPrefix(value, private+"/") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func fixedDiscoveryCandidate(value string) bool {
-	if value == FixedBootstrapDiscoveryPath || strings.HasPrefix(value, FixedBootstrapDiscoveryPath+"/") {
+	if value == FixedBootstrapDiscoveryPath || strings.HasPrefix(value, FixedBootstrapDiscoveryPath+"/") || strings.HasPrefix(value, FixedBootstrapDiscoveryPath+"%") {
 		return true
 	}
 	normalized := path.Clean(strings.ReplaceAll(value, "\\", "/"))

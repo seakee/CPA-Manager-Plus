@@ -54,6 +54,22 @@ func New(appCtx *app.Context) http.Handler {
 	mux.HandleFunc("/usage-service/runtime/updates", middleware.WithCORS(appCtx.Config, cpaUpdates.Handle))
 	mux.HandleFunc("/usage-service/runtime/updates/", middleware.WithCORS(appCtx.Config, cpaUpdates.Handle))
 	mux.HandleFunc("/health", middleware.WithCORS(appCtx.Config, healthHandler.Health))
+	// The legacy application is selected only after startup admission and
+	// initialization. Fresh and pending startup use separate handlers and must
+	// never emit this explicit legacy-mode acknowledgement. Public Ingress
+	// denies this namespace; it is not a Gateway-safety qualification endpoint.
+	mux.HandleFunc("/internal/routing/fresh-authority", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		if r.URL.EscapedPath() != r.URL.Path || r.URL.RawQuery != "" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
 	mux.HandleFunc("/status", middleware.WithCORS(appCtx.Config, systemHandler.Status))
 	mux.HandleFunc("/usage-service/info", middleware.WithCORS(appCtx.Config, systemHandler.Info))
 	mux.HandleFunc("/usage-service/config", middleware.WithCORS(appCtx.Config, managerConfigHandler.Handle))

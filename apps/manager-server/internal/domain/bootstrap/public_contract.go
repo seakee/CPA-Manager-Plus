@@ -141,6 +141,7 @@ func (d PublicDiscovery) Validate() error {
 // StatusSnapshot keeps the three state axes explicit for authenticated
 // consumers. SessionState never grants or changes BootstrapMode authority.
 type StatusSnapshot struct {
+	FreshOwnership  *FreshOwnership
 	Mode            Mode
 	AdminCredential AdminCredentialState
 	Session         SessionState
@@ -150,8 +151,13 @@ func (s StatusSnapshot) Validate() error {
 	if !validMode(s.Mode) || !validAdminCredentialState(s.AdminCredential) || !validSessionState(s.Session) {
 		return errors.New("status snapshot contains an unknown mode, credential state or session state")
 	}
-	if s.Mode == Fresh && s.AdminCredential != AdminCredentialUninitialized {
-		return errors.New("fresh status requires an uninitialized administrator credential")
+	if s.Mode == Fresh {
+		if s.FreshOwnership != nil && !s.FreshOwnership.Valid() {
+			return errors.New("fresh status requires matching current ownership")
+		}
+		if s.AdminCredential == AdminCredentialUnverifiable || (s.AdminCredential == AdminCredentialInitialized && s.FreshOwnership == nil) {
+			return errors.New("initialized fresh status requires matching current ownership")
+		}
 	}
 	if s.Mode == Completed && s.AdminCredential != AdminCredentialInitialized {
 		return errors.New("completed status requires an initialized administrator credential")

@@ -23,8 +23,8 @@ const managerDiscoveryContractPath = path.join(
 
 const readJSON = (filePath) => JSON.parse(readFileSync(filePath, 'utf8'));
 
-describe('Phase4-02 routing ownership successor contract', () => {
-  it('advances the identity and preserves every Phase4-01 assertion verbatim', () => {
+describe('Phase4-03 routing ownership successor contract', () => {
+  it('advances the identity and preserves every Phase4-02 assertion verbatim', () => {
     const fixture = readJSON(fixturePath);
     const schema = readJSON(schemaPath);
     const previous = JSON.parse(
@@ -32,23 +32,22 @@ describe('Phase4-02 routing ownership successor contract', () => {
         'git',
         [
           'show',
-          '8bc1911224b7d069f190ebc9055590300cdbf8ab:tests/fixtures/phase4-routing/route-owners.json',
+          '63cf85c9b84de87bc469d9aab8d492c18cd7a0bf:tests/fixtures/phase4-routing/route-owners.json',
         ],
         { cwd: repoRoot, encoding: 'utf8' }
       )
     );
-    expect(fixture.schemaVersion).toBe(2);
-    expect(fixture.contractId).toBe('cpamp-v2-phase4-02-routing-ownership-v2');
-    expect(schema.properties.schemaVersion.const).toBe(2);
+    expect(fixture.schemaVersion).toBe(3);
+    expect(fixture.contractId).toBe('cpamp-v2-phase4-03-routing-ownership-v3');
+    expect(schema.properties.schemaVersion.const).toBe(3);
     expect(schema.properties.contractId.const).toBe(fixture.contractId);
     for (const [key, value] of Object.entries(previous)) {
       if (['schemaVersion', 'contractId'].includes(key)) continue;
-      if (key === 'routes')
-        expect(fixture.routes.filter((route) => route.id !== 'fixed_brand_resources')).toEqual(
-          value
-        );
-      else expect(fixture[key]).toEqual(value);
+      expect(fixture[key]).toEqual(value);
     }
+    expect(fixture.fixedBootstrapNamespace).toEqual(schema.properties.fixedBootstrapNamespace.const);
+    expect(fixture.fixedBootstrapNamespace.authentication).toBe('fresh_session_only');
+    expect(fixture.fixedBootstrapNamespace.retirement).toBe('verified_initial_route_commit_generic_404');
     expect(fixture.fixedBrandResources.map((resource) => resource.path)).toEqual([
       '/favicon.ico',
       '/apple-touch-icon.png',

@@ -137,6 +137,14 @@ func newRuntimeHandler(ctx context.Context, cfg config) (*runtimeHandler, error)
 			settings.PrepareUpdate = runtime.executor
 		}
 		settings.Start = runtime.executor
+		// The currently qualified destination artifact is Linux-only. Other
+		// platforms retain existing lifecycle support without advertising Adopt.
+		if goruntime.GOOS == "linux" {
+			if err := runtime.executor.EnableDestination(filepath.Join(supervisorRoot, "destination"), cfg.cpaAddr, cfg.cpaIdentity); err != nil {
+				return nil, errors.Join(err, runtime.executor.Close())
+			}
+			settings.Destination = runtime.executor
+		}
 		settings.Stop = runtime.executor
 		settings.Restart = runtime.executor
 		settings.Status = observer

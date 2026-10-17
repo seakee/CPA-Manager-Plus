@@ -1,0 +1,124 @@
+{
+  "schemaVersion": 1,
+  "managementGeneration": "v8",
+  "implementationSha256": "",
+  "archiveSha256": "50ecffb47fdd81c8c5a9825a73a7a905ab66342337e274f39c4276b92d3533f3",
+  "binarySha256": "b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41",
+  "artifactId": "sha256:b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41",
+  "consumers": [
+    {
+      "strategy": "new_managed",
+      "sourceClass": "",
+      "status": "pending",
+      "evidence": [
+        {
+          "profile": "CPA8-MGMT-MIN-r1",
+          "manifestSha256": "758fafa41bbbf6ce58961c0a3ac3beedab2af29b18631bef3ffb4064dd3955f2",
+          "reportSha256": "5481b5ca7ce53175bc5199f32cd6a68f5a1f29c302c9cbf3465a1a62ccfe0d92",
+          "implementationHead": "27f4bf80dc7cbbca90c07cc2d3853be7c5ee9902",
+          "caseRefs": []
+        }
+      ],
+      "acceptanceSha256": "",
+      "limitations": [],
+      "invalidatedBy": [
+        "artifact",
+        "manifest",
+        "report",
+        "implementation",
+        "profile",
+        "config",
+        "mode"
+      ]
+    },
+    {
+      "strategy": "connect_external",
+      "sourceClass": "",
+      "status": "pending",
+      "evidence": [
+        {
+          "profile": "CPA8-EXTERNAL-SAFETY-r1",
+          "manifestSha256": "75f79bc124a5a712ac74f162b0ab8d434438863b295a79de60e92a8d7c5523ea",
+          "reportSha256": "ce1e806cf8f5a676c97c7337bef3618b2cdf1213b9b33827a90d2e3a0141e779",
+          "implementationHead": "7d8c98cb93a4ca9d405f2f91504348d439655f59",
+          "caseRefs": []
+        }
+      ],
+      "acceptanceSha256": "",
+      "limitations": [],
+      "invalidatedBy": [
+        "artifact",
+        "manifest",
+        "report",
+        "implementation",
+        "profile",
+        "config",
+        "mode"
+      ]
+    },
+    {
+      "strategy": "adopt_existing",
+      "sourceClass": "network_existing",
+      "status": "pending",
+      "evidence": [
+        {
+          "profile": "CPA8-EXTERNAL-SAFETY-r1",
+          "manifestSha256": "75f79bc124a5a712ac74f162b0ab8d434438863b295a79de60e92a8d7c5523ea",
+          "reportSha256": "ce1e806cf8f5a676c97c7337bef3618b2cdf1213b9b33827a90d2e3a0141e779",
+          "implementationHead": "7d8c98cb93a4ca9d405f2f91504348d439655f59",
+          "caseRefs": []
+        },
+        {
+          "profile": "CPA8-STAGE-r1",
+          "manifestSha256": "3c21eb7db0d45638b9be81891277329b0c04ea941588dc90213d6d864f34896f",
+          "reportSha256": "6add816401dad04a7e29285eece43e30abcef6625313a8e492ae24b4ef079a7c",
+          "implementationHead": "7d8c98cb93a4ca9d405f2f91504348d439655f59",
+          "caseRefs": []
+        }
+      ],
+      "acceptanceSha256": "",
+      "limitations": [],
+      "invalidatedBy": [
+        "artifact",
+        "manifest",
+        "report",
+        "implementation",
+        "profile",
+        "config",
+        "mode"
+      ]
+    },
+    {
+      "strategy": "adopt_existing",
+      "sourceClass": "legacy_managed",
+      "status": "pending",
+      "evidence": [
+        {
+          "profile": "CPA8-EXTERNAL-SAFETY-r1",
+          "manifestSha256": "75f79bc124a5a712ac74f162b0ab8d434438863b295a79de60e92a8d7c5523ea",
+          "reportSha256": "ce1e806cf8f5a676c97c7337bef3618b2cdf1213b9b33827a90d2e3a0141e779",
+          "implementationHead": "7d8c98cb93a4ca9d405f2f91504348d439655f59",
+          "caseRefs": []
+        },
+        {
+          "profile": "CPA8-STAGE-r1",
+          "manifestSha256": "3c21eb7db0d45638b9be81891277329b0c04ea941588dc90213d6d864f34896f",
+          "reportSha256": "6add816401dad04a7e29285eece43e30abcef6625313a8e492ae24b4ef079a7c",
+          "implementationHead": "7d8c98cb93a4ca9d405f2f91504348d439655f59",
+          "caseRefs": []
+        }
+      ],
+      "acceptanceSha256": "",
+      "limitations": [],
+      "invalidatedBy": [
+        "artifact",
+        "manifest",
+        "report",
+        "implementation",
+        "profile",
+        "config",
+        "mode"
+      ]
+    }
+  ]
+}

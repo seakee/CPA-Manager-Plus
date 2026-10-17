@@ -12,9 +12,58 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/artifact"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/cpaprocess"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/journal"
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/selection"
 )
+
+func TestFreshStartRejectsSameGenerationArtifactChangeInsideLifecycleLock(t *testing.T) {
+	f := newPrepareFixture(t, activeArtifactA)
+	request := startRequest("fresh-start")
+	request.ExpectedActiveArtifactID = activeArtifactA
+	// Manager has already observed/staged A. An activation holds the same
+	// lifecycle gate and selects B before Fresh's submitted Start acquires it.
+	f.starter.mu.Lock()
+	done := make(chan error, 1)
+	go func() { _, err := f.starter.Start(t.Context(), request); done <- err }()
+	f.starter.active = selection.Bundled("supervisor-local-b", "")
+	f.observer.observation.ArtifactID = activeArtifactB
+	f.starter.mu.Unlock()
+	if err := <-done; !errors.Is(err, ErrActiveArtifactMismatch) {
+		t.Fatalf("same-generation A -> B escaped fencing: %v", err)
+	}
+	if f.child.starts != 0 || f.starter.authority.RuntimeGeneration != request.ExpectedRuntimeGeneration {
+		t.Fatal("artifact mismatch changed process/generation")
+	}
+	if _, err := f.journal.Store.Get(t.Context(), "runtime-01", request.OperationID); !errors.Is(err, journal.ErrOperationNotFound) {
+		t.Fatalf("artifact mismatch persisted an intent: %v", err)
+	}
+}
+
+func TestFreshStartArtifactFingerprintFencesReplayAndPreservesOriginalResult(t *testing.T) {
+	f := newPrepareFixture(t, activeArtifactA)
+	request := startRequest("fresh-start")
+	request.ExpectedActiveArtifactID = activeArtifactA
+	first, err := f.starter.Start(t.Context(), request)
+	if err != nil || first.State != journal.StateSucceeded || first.RequestFingerprint != sha256.Sum256([]byte(`runtime.start/v1:{"expectedActiveArtifactId":"`+string(activeArtifactA)+`"}`)) {
+		t.Fatalf("first artifact-bound Start: %+v %v", first, err)
+	}
+	// A lost response must return A's retained result without starting the
+	// newly selected B, and the same operation cannot be rebound or downgraded.
+	f.observer.observation.ArtifactID = activeArtifactB
+	f.events = nil
+	replay, err := f.starter.Start(t.Context(), request)
+	if err != nil || !reflect.DeepEqual(replay, first) || f.child.starts != 1 || !reflect.DeepEqual(f.events, []string{"resolve"}) {
+		t.Fatalf("artifact-bound replay: %+v %v events=%v", replay, err, f.events)
+	}
+	for _, newArtifact := range []artifact.ID{activeArtifactB, ""} {
+		request.ExpectedActiveArtifactID = newArtifact
+		if _, err := f.starter.Start(t.Context(), request); !errors.Is(err, journal.ErrOperationIDConflict) || f.child.starts != 1 {
+			t.Fatalf("rebound original operation: %v", err)
+		}
+	}
+}
 
 var injectedFailure = errors.New("injected storage failure")
 

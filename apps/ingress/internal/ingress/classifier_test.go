@@ -25,6 +25,8 @@ func TestTransitionalClassifier(t *testing.T) {
 		{path: "/usage-service/info", want: RouteManager},
 		{path: "/v0/management", want: RouteManager},
 		{path: "/v0/management/config", want: RouteManager},
+		{path: FreshRoutingControlPath, want: RouteDeny},
+		{path: FreshRoutingAuthorityPath, want: RouteDeny},
 		{path: "/v1/models", want: RouteGateway},
 		{path: "/v1/chat/completions", want: RouteGateway},
 		{path: "/v1/responses", want: RouteGateway},
@@ -81,7 +83,7 @@ func TestClassifierRequestDeniesRetiredCandidates(t *testing.T) {
 		ControlMatcherFunc(func(value string) bool { return value == "/control" || strings.HasPrefix(value, "/control/") }),
 		ControlMatcherFunc(func(value string) bool { return value == "/retired" || strings.HasPrefix(value, "/retired/") }),
 	)
-	for _, target := range []string{"/retired/settings", "/retired%2fsettings", "/retired%252fsettings"} {
+	for _, target := range []string{"/retired/settings", "/retired%2fsettings", "/retired%252fsettings", "/internal%2frouting%2ffresh", "/internal%252frouting%252ffresh-authority"} {
 		t.Run(target, func(t *testing.T) {
 			req, err := http.NewRequest(http.MethodPost, "http://example.test"+target, nil)
 			if err != nil {

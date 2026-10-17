@@ -226,7 +226,7 @@ func (e *Executor) ActivateUpdate(ctx context.Context, request ActivateUpdateReq
 		return e.rollbackActivation(operation, intent.OperationID, prior, oldInstance, 0,
 			"activation_target_changed", err, operationDeadline)
 	}
-	started, err := e.process.Start(executionCtx, cpaprocess.StartSpec{Executable: candidate.ExecutablePath})
+	started, err := e.startProcess(executionCtx, candidate.ExecutablePath)
 	if err != nil {
 		return e.rollbackActivation(operation, intent.OperationID, prior, oldInstance, 0,
 			"activation_start_failed", err, operationDeadline)
@@ -383,7 +383,7 @@ func (e *Executor) rollbackActivation(
 			return e.failRollback(operation, operationID, errors.New("cannot safely spawn rollback child"))
 		}
 		var err error
-		restored, err = e.process.Start(rollbackCtx, cpaprocess.StartSpec{Executable: prior.ExecutablePath})
+		restored, err = e.startProcess(rollbackCtx, prior.ExecutablePath)
 		if err != nil {
 			return e.failRollback(operation, operationID, err)
 		}

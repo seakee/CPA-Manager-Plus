@@ -229,6 +229,7 @@ func validSessionState(s SessionState) bool {
 }
 
 type ClassificationEvidence struct {
+	FreshOwnership      *FreshOwnership
 	HasV1ProductState   bool
 	Admission           *UpgradeAdmission
 	RecoveryReason      RecoveryReason
@@ -264,7 +265,10 @@ func Classify(e ClassificationEvidence) (Mode, error) {
 		if e.Admission != nil {
 			return "", errors.New("upgrade admission supplied without v1 product state")
 		}
-		if e.AdminCredential != AdminCredentialUninitialized {
+		if e.FreshOwnership != nil && !e.FreshOwnership.Valid() {
+			return Recovery, nil
+		}
+		if e.AdminCredential != AdminCredentialUninitialized && e.FreshOwnership == nil {
 			return Recovery, nil
 		}
 		return Fresh, nil
@@ -389,6 +393,7 @@ func (c CPACoreContract) Validate() error {
 }
 
 type Plan struct {
+	FreshOwnership                  *FreshOwnership
 	Mode                            Mode
 	CPAMPAction                     CPAMPAction
 	CPAStrategy                     CPAStrategy
@@ -437,8 +442,13 @@ func (p Plan) Validate() error {
 		if p.SourceAdmission != nil {
 			return errors.New("fresh cannot have upgrade admission")
 		}
-		if !p.InitializeAdminCredential || p.PreserveExistingAdminCredential || p.AuthenticationRequired {
-			return errors.New("fresh must initialize, not preserve, the administrator credential")
+		if p.FreshOwnership != nil && !p.FreshOwnership.Valid() {
+			return errors.New("fresh continuation requires matching current ownership")
+		}
+		initializes := p.InitializeAdminCredential && !p.PreserveExistingAdminCredential && !p.AuthenticationRequired
+		continues := !p.InitializeAdminCredential && p.PreserveExistingAdminCredential && p.AuthenticationRequired && p.FreshOwnership != nil
+		if !initializes && !continues {
+			return errors.New("fresh must initialize administrator authority or preserve it under matching Fresh ownership")
 		}
 		if len(p.MigrationOrdering) != 0 {
 			return errors.New("fresh cannot carry legacy migration ordering")

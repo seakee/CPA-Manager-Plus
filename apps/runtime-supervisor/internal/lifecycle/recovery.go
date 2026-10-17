@@ -185,7 +185,7 @@ func (e *Executor) executeAutomaticRecovery(epoch uint64, crashedInstanceID uint
 	e.cancelRecoveryTimer = nil
 	e.recoveryMu.Unlock()
 
-	started, spawnErr := e.process.Start(executionContext, cpaprocess.StartSpec{Executable: e.currentExecutableLocked()})
+	started, spawnErr := e.startProcess(executionContext, e.currentExecutableLocked())
 	if spawnErr != nil {
 		if _, err := e.journal.Complete(
 			executionContext,

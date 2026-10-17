@@ -133,11 +133,106 @@ func DecideAdoptionResource(item AdoptionResourceDecision) (AdoptionDisposition,
 	}
 }
 
+// Bounded Fresh adoption resources. Only client API keys may migrate; every
+// other discovered resource is an explicit manual action. These stable,
+// non-secret references are the only identities Fresh may persist, so an
+// arbitrary upstream key can never become durable state.
+const (
+	AdoptionRefClientAPIKeys          ResourceRef = "client-api-keys"
+	AdoptionRefCPAAuthFiles           ResourceRef = "cpa-auth-files"
+	AdoptionRefConfigServer           ResourceRef = "cpa-config-server"
+	AdoptionRefConfigManagement       ResourceRef = "cpa-config-management"
+	AdoptionRefConfigRouting          ResourceRef = "cpa-config-routing"
+	AdoptionRefConfigLogging          ResourceRef = "cpa-config-logging"
+	AdoptionRefConfigUsage            ResourceRef = "cpa-config-usage"
+	AdoptionRefConfigPlugins          ResourceRef = "cpa-config-plugins"
+	AdoptionRefConfigObservability    ResourceRef = "cpa-config-observability"
+	AdoptionRefConfigUnknown          ResourceRef = "cpa-config-unknown"
+	AdoptionRefProviderStateProviders ResourceRef = "provider-state-providers"
+	AdoptionRefProviderStateAPIKeys   ResourceRef = "provider-state-api-keys"
+	AdoptionRefProviderStateClient    ResourceRef = "provider-state-client"
+)
+
+type freshAdoptionRefRule struct {
+	kind      AdoptionResourceKind
+	scope     AdoptionScope
+	manual    AdoptionManualAction
+	qualified bool
+}
+
+var freshAdoptionRefRules = map[ResourceRef]freshAdoptionRefRule{
+	AdoptionRefClientAPIKeys:          {kind: APIKeys, scope: ClientAPIKeys, qualified: true},
+	AdoptionRefCPAAuthFiles:           {kind: Credentials, scope: CPAAuthFiles, manual: ReauthenticateAfterAdoption},
+	AdoptionRefConfigServer:           {kind: CPAConfiguration, scope: ManagementAPIFields, manual: ReconfigureAfterAdoption},
+	AdoptionRefConfigManagement:       {kind: CPAConfiguration, scope: ManagementAPIFields, manual: ReconfigureAfterAdoption},
+	AdoptionRefConfigRouting:          {kind: CPAConfiguration, scope: ManagementAPIFields, manual: ReconfigureAfterAdoption},
+	AdoptionRefConfigLogging:          {kind: CPAConfiguration, scope: ManagementAPIFields, manual: ReconfigureAfterAdoption},
+	AdoptionRefConfigUsage:            {kind: CPAConfiguration, scope: ManagementAPIFields, manual: ReconfigureAfterAdoption},
+	AdoptionRefConfigPlugins:          {kind: CPAConfiguration, scope: ManagementAPIFields, manual: ReconfigureAfterAdoption},
+	AdoptionRefConfigObservability:    {kind: CPAConfiguration, scope: ManagementAPIFields, manual: ReconfigureAfterAdoption},
+	AdoptionRefConfigUnknown:          {kind: CPAConfiguration, scope: ManagementAPIFields, manual: ReconfigureAfterAdoption},
+	AdoptionRefProviderStateProviders: {kind: ProviderRuntimeState, scope: ProviderState, manual: ReauthenticateAfterAdoption},
+	AdoptionRefProviderStateAPIKeys:   {kind: ProviderRuntimeState, scope: ProviderState, manual: ReauthenticateAfterAdoption},
+	AdoptionRefProviderStateClient:    {kind: ProviderRuntimeState, scope: ProviderState, manual: ReauthenticateAfterAdoption},
+}
+
+// FreshAdoptionDecision returns the only decision shape permitted for a bounded
+// Fresh adoption resource. Client API keys must come from accepted
+// qualification; every other resource is an explicit manual action. An unknown
+// reference yields no decision.
+func FreshAdoptionDecision(ref ResourceRef, clientAPIKeys AdoptionResourceDecision) (AdoptionResourceDecision, bool) {
+	rule, ok := freshAdoptionRefRules[ref]
+	if !ok {
+		return AdoptionResourceDecision{}, false
+	}
+	if rule.qualified {
+		disposition, err := DecideAdoptionResource(clientAPIKeys)
+		if err != nil || clientAPIKeys.ResourceRef != ref || clientAPIKeys.Kind != rule.kind || clientAPIKeys.Scope != rule.scope ||
+			clientAPIKeys.Qualification != CapabilityQualified || clientAPIKeys.ManualAction != "" || clientAPIKeys.Disposition != disposition || disposition != Migrate {
+			return AdoptionResourceDecision{}, false
+		}
+		return clientAPIKeys, true
+	}
+	decision := AdoptionResourceDecision{
+		ResourceRef: ref, Kind: rule.kind, Scope: rule.scope,
+		Qualification: CapabilityPending, ManualAction: rule.manual, Disposition: ManualAction,
+	}
+	if disposition, err := DecideAdoptionResource(decision); err != nil || disposition != ManualAction {
+		return AdoptionResourceDecision{}, false
+	}
+	return decision, true
+}
+
+// validFreshAdoptionInventory requires exactly one permitted decision per
+// discovered resource, the qualified client-key migration, and the auth-file
+// manual action that cannot be replayed safely.
+func validFreshAdoptionInventory(discovered []ResourceRef, decisions []AdoptionResourceDecision) bool {
+	if validateAdoptionInventory(discovered, decisions) != nil {
+		return false
+	}
+	hasKeys, hasAuth := false, false
+	for _, decision := range decisions {
+		expected, ok := FreshAdoptionDecision(decision.ResourceRef, decision)
+		if !ok || expected != decision {
+			return false
+		}
+		switch decision.ResourceRef {
+		case AdoptionRefClientAPIKeys:
+			hasKeys = true
+		case AdoptionRefCPAAuthFiles:
+			hasAuth = true
+		}
+	}
+	return hasKeys && hasAuth
+}
+
 func adoptionEffect(d AdoptionDisposition, ref ResourceRef) string {
 	return "adoption:" + string(d) + ":" + string(ref)
 }
 
-func validateAdoptionDecisions(discovered []ResourceRef, decisions []AdoptionResourceDecision, mutations, unsupported []string) error {
+// validateAdoptionInventory is the minimal one-to-one discovered-resource
+// contract shared by the Bootstrap plan and the Fresh durable checkpoint.
+func validateAdoptionInventory(discovered []ResourceRef, decisions []AdoptionResourceDecision) error {
 	if discovered == nil || decisions == nil {
 		return errors.New("adoption inventory and decisions must be explicit")
 	}
@@ -152,7 +247,6 @@ func validateAdoptionDecisions(discovered []ResourceRef, decisions []AdoptionRes
 		seenDiscovered[ref] = true
 	}
 	seenDecisions := map[ResourceRef]bool{}
-	expected := map[string]bool{}
 	for _, item := range decisions {
 		if !seenDiscovered[item.ResourceRef] || seenDecisions[item.ResourceRef] {
 			return fmt.Errorf("missing or duplicate discovered resource decision %q", item.ResourceRef)
@@ -162,6 +256,17 @@ func validateAdoptionDecisions(discovered []ResourceRef, decisions []AdoptionRes
 		if err != nil || item.Disposition != decision {
 			return fmt.Errorf("adoption resource %q disposition conflicts with qualification: %v", item.ResourceRef, err)
 		}
+	}
+	return nil
+}
+
+func validateAdoptionDecisions(discovered []ResourceRef, decisions []AdoptionResourceDecision, mutations, unsupported []string) error {
+	if err := validateAdoptionInventory(discovered, decisions); err != nil {
+		return err
+	}
+	expected := map[string]bool{}
+	for _, item := range decisions {
+		decision, _ := DecideAdoptionResource(item)
 		effect := adoptionEffect(decision, item.ResourceRef)
 		expected[effect] = true
 		if decision == Migrate {

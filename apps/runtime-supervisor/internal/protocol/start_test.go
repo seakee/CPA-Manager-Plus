@@ -16,6 +16,46 @@ import (
 
 const validStartBody = `{"operationId":"op","expectedRuntimeIdentity":"runtime-01","expectedRuntimeGeneration":7}`
 
+func TestFreshStartExactArtifactEnvelopeIsStrictAndStartOnly(t *testing.T) {
+	id := "sha256:" + strings.Repeat("a", 64)
+	h := startHandler(t, startFunc(func(_ context.Context, request lifecycle.StartRequest) (journal.Operation, error) {
+		if string(request.ExpectedActiveArtifactID) != id {
+			t.Fatalf("artifact fence lost at protocol: %+v", request)
+		}
+		return journal.Operation{OperationID: request.OperationID}, nil
+	}))
+	body := strings.TrimSuffix(validStartBody, "}") + `,"expectedActiveArtifactId":"` + id + `"}`
+	if response := submitStart(t, h, body); response.Code != http.StatusOK {
+		t.Fatalf("artifact-bound Start rejected: %s", response.Body.String())
+	}
+	for name, invalid := range map[string]string{
+		"invalid artifact":   strings.Replace(body, id, "version-8", 1),
+		"null artifact":      strings.Replace(body, `"`+id+`"`, "null", 1),
+		"case alias":         strings.Replace(body, "expectedActiveArtifactId", "ExpectedActiveArtifactId", 1),
+		"duplicate artifact": strings.TrimSuffix(body, "}") + `,"expectedActiveArtifactId":"` + id + `"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := submitStart(t, h, invalid)
+			if response.Code != 400 {
+				t.Fatalf("accepted invalid artifact: %s", response.Body.String())
+			}
+			assertErrorCode(t, response, "invalid_request")
+		})
+	}
+	for _, path := range []string{stopPath, restartPath} {
+		for _, value := range []string{`"` + id + `"`, `""`} {
+			request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(strings.TrimSuffix(validStartBody, "}")+`,"expectedActiveArtifactId":`+value+`}`))
+			request.Header.Set("Authorization", "Bearer "+testRuntimeToken)
+			response := httptest.NewRecorder()
+			h.ServeHTTP(response, request)
+			if response.Code != 400 {
+				t.Fatalf("%s accepted Start payload", path)
+			}
+			assertErrorCode(t, response, "invalid_request")
+		}
+	}
+}
+
 func TestStartAuthenticatesBeforeReadingBodyOrCallingExecutor(t *testing.T) {
 	h := startHandler(t, startFunc(func(context.Context, lifecycle.StartRequest) (journal.Operation, error) {
 		t.Fatal("unauthorized request reached execution boundary")

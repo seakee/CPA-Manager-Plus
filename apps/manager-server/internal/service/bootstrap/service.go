@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -33,16 +34,32 @@ const currentConnectionStorageMigrationVersion = 2
 
 func Run(ctx context.Context, cfg config.Config, st *store.Store, dataKeyCreated bool) (Result, error) {
 	result := Result{DataKeyCreated: dataKeyCreated}
+	if _, err := st.FreshStore().Load(ctx); err == nil {
+		return Result{}, errors.New("Fresh ownership requires the bounded Fresh service")
+	}
 
 	historical, err := st.HasHistoricalData(ctx)
 	if err != nil {
 		return Result{}, err
 	}
 	result.HasHistoricalData = historical
+	// An empty/native schema is not permission to initialize product authority.
+	// Keep this historical compatibility path isolated from the Fresh host path.
+	_, managerFound, err := st.LoadManagerConfig(ctx)
+	if err != nil {
+		return Result{}, err
+	}
+	_, setupFound, err := st.LoadSetup(ctx)
+	if err != nil {
+		return Result{}, err
+	}
 
 	previousState, stateFound, err := st.LoadBootstrapState(ctx)
 	if err != nil {
 		return Result{}, err
+	}
+	if !historical && !managerFound && !setupFound && !stateFound {
+		return Result{}, errors.New("Fresh initialization requires the host-controlled initialize command")
 	}
 	connectionStorageMigrationVersion := 0
 	if stateFound {

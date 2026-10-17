@@ -415,6 +415,8 @@ func reservedNamespaceCollision(candidate string) bool {
 		"/v0",
 		"/v1",
 		"/usage-service",
+		"/internal/routing/fresh",
+		"/internal/routing/fresh-authority",
 	} {
 		if sameOrNestedPrefix(candidate, reserved) {
 			return true

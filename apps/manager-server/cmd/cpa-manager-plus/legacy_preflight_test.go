@@ -385,10 +385,14 @@ func TestBlockedLegacyNormalStartupHasNoSourceSideEffects(t *testing.T) {
 			if kind == "invalid-timeout" {
 				env = append(env, "CPA_MANAGER_PREFLIGHT_TIMEOUT=0")
 			}
-			if kind == "invalid-timeout" || kind == "symlink-config" {
+			if kind == "invalid-timeout" || kind == "symlink-config" || kind == "old-lock-initialize" {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
-				cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestManagerServerHelperProcess$")
+				args := []string{"-test.run=^TestManagerServerHelperProcess$"}
+				if kind == "old-lock-initialize" {
+					args = append(args, "--", "initialize")
+				}
+				cmd := exec.CommandContext(ctx, os.Args[0], args...)
 				cmd.Env = env
 				output, err := cmd.CombinedOutput()
 				if err == nil || ctx.Err() != nil || strings.Contains(string(output), "listening on") {
@@ -608,8 +612,8 @@ func TestNativeSourceDiscoveryDoesNotInferCompleted(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "usage.sqlite")
 	writeOwnedProvisioningConfig(t, dir)
-	first := startManagerServerProcess(t, dir, path, "initialize")
-	assertManagerEndpoint(t, first.addr, "/health")
+	runFreshInitializeProcess(t, ownedPreflightEnvironment(dir, path))
+	first := startManagerServerProcess(t, dir, path)
 	status, body := waitForManagerResponse(t, first.addr, http.MethodGet, bootstrapdiscovery.Path)
 	if status != http.StatusServiceUnavailable || strings.Contains(body, `"mode"`) {
 		t.Fatalf("fresh graph readiness completed Bootstrap or reused Fresh evidence: status=%d body=%s", status, body)
@@ -617,7 +621,6 @@ func TestNativeSourceDiscoveryDoesNotInferCompleted(t *testing.T) {
 	first.stop(t)
 	second := startManagerServerProcess(t, dir, path)
 	defer second.stop(t)
-	assertManagerEndpoint(t, second.addr, "/health")
 	status, body = waitForManagerResponse(t, second.addr, http.MethodGet, bootstrapdiscovery.Path)
 	if status != http.StatusServiceUnavailable || strings.Contains(body, `"mode"`) {
 		t.Fatalf("native graph readiness inferred completion or reused pre-write evidence: status=%d body=%s", status, body)
@@ -767,8 +770,9 @@ func TestNativeV2FreshAndReopenStartup(t *testing.T) {
 			t.Setenv(key, value)
 		}
 	}
-	first := startManagerServerProcess(t, dir, path, "initialize")
-	assertManagerEndpoint(t, first.addr, "/usage-service/info")
+	runFreshInitializeProcess(t, ownedPreflightEnvironment(dir, path))
+	first := startManagerServerProcess(t, dir, path)
+	assertFreshPendingDiscovery(t, first.addr)
 	first.stop(t)
 	paths := legacypreflight.DefaultPaths(path)
 	paths.Config = filepath.Join(dir, "config.json")
@@ -784,7 +788,7 @@ func TestNativeV2FreshAndReopenStartup(t *testing.T) {
 		t.Fatal("fresh native key was not created")
 	}
 	second := startManagerServerProcess(t, dir, path)
-	assertManagerEndpoint(t, second.addr, "/usage-service/info")
+	assertFreshPendingDiscovery(t, second.addr)
 	second.stop(t)
 }
 
@@ -817,18 +821,24 @@ func TestFreshInitializationFailureAllowsRetry(t *testing.T) {
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestManagerServerHelperProcess$", "--", "initialize")
 	cmd.Env = env
 	output, err := cmd.CombinedOutput()
-	if err == nil || ctx.Err() != nil || !strings.Contains(string(output), "load data key:") {
+	if err == nil || ctx.Err() != nil || !strings.Contains(string(output), "Fresh initialization/handoff unavailable") {
 		t.Fatalf("initialization did not reach owned write failure: %v\n%s", err, output)
 	}
-	// Creating/removing our marker changes only the directory's timestamp.
+	// The pending receipt is intentionally durable even before data.key exists.
+	// Retry must resume the same admission instead of rolling this marker back.
 	after := managerSourceSnapshot(t, dir)
 	delete(before, dir)
 	delete(after, dir)
+	delete(after, path+".manager.lock")
 	if !reflect.DeepEqual(before, after) {
 		t.Fatalf("failed fresh initialization left source evidence:\n%s", output)
 	}
 	if _, err := os.Lstat(keyPath); !os.IsNotExist(err) {
 		t.Fatalf("key created: %v", err)
+	}
+	markerBefore, err := os.Stat(path + ".manager.lock")
+	if err != nil {
+		t.Fatal(err)
 	}
 	if err := os.Chmod(keyDir, 0700); err != nil {
 		t.Fatal(err)
@@ -839,9 +849,14 @@ func TestFreshInitializationFailureAllowsRetry(t *testing.T) {
 			t.Setenv(key, value)
 		}
 	}
-	retry := startManagerServerProcess(t, dir, path, "initialize")
+	runFreshInitializeProcess(t, env)
+	markerAfter, err := os.Stat(path + ".manager.lock")
+	if err != nil || !os.SameFile(markerBefore, markerAfter) {
+		t.Fatal("retry replaced original marker")
+	}
+	retry := startManagerServerProcessWithEnvironment(t, env)
 	defer retry.stop(t)
-	assertManagerEndpoint(t, retry.addr, "/usage-service/info")
+	assertFreshPendingDiscovery(t, retry.addr)
 }
 
 func TestExplicitInitializeWithoutConfigRetainsWritableStartup(t *testing.T) {
@@ -855,9 +870,50 @@ func TestExplicitInitializeWithoutConfigRetainsWritableStartup(t *testing.T) {
 	t.Setenv("CPA_MANAGER_DATA_KEY_FILE", filepath.Join(dir, "no-key-secret"))
 	t.Setenv("CPAMP_RUNTIME_URL", "")
 	t.Setenv("CPAMP_RUNTIME_TOKEN_FILE", "")
-	server := startManagerServerProcess(t, dir, path, "initialize")
+	env := ownedPreflightEnvironment(dir, path)
+	for i, value := range env {
+		if strings.HasPrefix(value, "CPA_MANAGER_CONFIG=") {
+			env[i] = "CPA_MANAGER_CONFIG="
+		}
+	}
+	runFreshInitializeProcess(t, env)
+	server := startManagerServerProcessWithEnvironment(t, env)
 	defer server.stop(t)
-	assertManagerEndpoint(t, server.addr, "/usage-service/info")
+	assertFreshPendingDiscovery(t, server.addr)
+}
+
+func runFreshInitializeProcess(t *testing.T, environment []string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestManagerServerHelperProcess$", "--", "initialize")
+	command.Env = environment
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		t.Fatalf("host initialize: %v %s", err, stderr.String())
+	}
+	if !strings.HasPrefix(stdout.String(), bootstrap.FixedBootstrapUIPath+"#handoff=") || strings.Contains(stderr.String(), "handoff=") || strings.Contains(stderr.String(), "admin key generated") {
+		t.Fatal("handoff was not restricted to host stdout")
+	}
+	// The test helper returns from main into testing, which appends PASS on
+	// stdout. The real initialize command emits exactly the first handoff line.
+	handoff, _, _ := strings.Cut(stdout.String(), "\n")
+	return strings.TrimSpace(handoff)
+}
+
+func assertFreshPendingDiscovery(t *testing.T, addr string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		status, body := waitForManagerResponse(t, addr, http.MethodGet, bootstrapdiscovery.Path)
+		if status == http.StatusServiceUnavailable && strings.Contains(body, `"status":"unavailable"`) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("host-admin Fresh did not remain pre-canonical unavailable")
 }
 
 func TestNativeV2CrashWALStartupReadsCommittedUsage(t *testing.T) {

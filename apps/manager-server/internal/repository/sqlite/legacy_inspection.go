@@ -68,7 +68,9 @@ type LegacyInspection struct {
 	// discovery surface. It is deliberately not a public BootstrapState
 	// projection and must never be treated as writable startup authority.
 	BootstrapState BootstrapStateInspection `json:"bootstrapState"`
-	Issues         []string                 `json:"issues"`
+	// Presence only: this blocks historical startup, never grants Fresh authority.
+	FreshOwnershipCheckpointPresent bool     `json:"freshOwnershipCheckpointPresent"`
+	Issues                          []string `json:"issues"`
 }
 
 // BootstrapStateInspection contains only the administrator/product facts
@@ -419,6 +421,9 @@ func inspectHistory(ctx context.Context, db inspectionQueryer, result *LegacyIns
 // historical product evidence; the new domain classifier still decides the
 // public mode and never maps Status directly.
 func inspectBootstrapState(ctx context.Context, db inspectionQueryer, result *LegacyInspection) error {
+	if err := db.QueryRowContext(ctx, `select exists(select 1 from settings where key='fresh_operation_v1')`).Scan(&result.FreshOwnershipCheckpointPresent); err != nil {
+		return err
+	}
 	rows, err := db.QueryContext(ctx, `select key, value from settings where key in ('bootstrap_state_v1', 'admin_credential_v1')`)
 	if err != nil {
 		return err

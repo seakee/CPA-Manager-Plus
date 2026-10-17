@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "contractId": "cpamp-cpa-v8-qualification",
+  "revision": "fresh-legacy-managed-stage-v8-r1",
+  "candidate": {
+    "id": "CPA8-8.0.13-linux-amd64-plugin",
+    "declaredSha256": "50ecffb47fdd81c8c5a9825a73a7a905ab66342337e274f39c4276b92d3533f3",
+    "artifactId": "sha256:b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41"
+  },
+  "profiles": [
+    {
+      "id": "CPA8-STAGE-r1"
+    }
+  ],
+  "cases": [
+    {
+      "id": "fresh-legacy-managed-stage-v8-r1",
+      "profileRefs": [
+        "CPA8-STAGE-r1"
+      ],
+      "proofScope": "fresh-legacy-staging-transition"
+    }
+  ],
+  "legacySource": {
+    "version": "v7.0.12",
+    "archiveSha256": "8afc9ed4c89a50a5ffce5d122a9bb93442c5b8ff3d8c6f07b7a274c719109b74",
+    "binarySha256": "1eb108b85ad554b92bab9f5a85af433d7c2e1b951bb192b639d73605d4593d1a"
+  }
+}

@@ -37,6 +37,7 @@ type Config struct {
 	Status            StatusObserver
 	Recovery          RecoveryStatusObserver
 	Artifact          ArtifactStatusObserver
+	Destination       DestinationExecutor
 }
 
 // StatusObserver supplies read-only availability facts after authentication.
@@ -68,6 +69,7 @@ type handler struct {
 	status                  StatusObserver
 	recovery                RecoveryStatusObserver
 	artifact                ArtifactStatusObserver
+	destination             DestinationExecutor
 }
 
 type handshakeResponse struct {
@@ -129,6 +131,7 @@ func NewHandler(config Config) (http.Handler, error) {
 		status:                  config.Status,
 		recovery:                config.Recovery,
 		artifact:                config.Artifact,
+		destination:             config.Destination,
 	}, nil
 }
 
@@ -136,7 +139,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	method := http.MethodGet
 	switch r.URL.Path {
 	case handshakePath, statusPath, observeUpdateOperationPath:
-	case startPath, stopPath, restartPath, prepareUpdatePath, activateUpdatePath:
+	case startPath, stopPath, restartPath, prepareUpdatePath, activateUpdatePath, destinationPath:
 		method = http.MethodPost
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "runtime endpoint not found")
@@ -205,6 +208,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.submitPrepareUpdate(w, r)
 	case activateUpdatePath:
 		h.submitActivateUpdate(w, r)
+	case destinationPath:
+		h.submitDestination(w, r)
 	}
 }
 
@@ -238,6 +243,9 @@ func (h *handler) capabilities() []string {
 	}
 	if h.updateOperationObserver != nil {
 		capabilities = append(capabilities, CapabilityObserveUpdateOperation)
+	}
+	if h.destination != nil {
+		capabilities = append(capabilities, "stage_destination")
 	}
 	return capabilities
 }

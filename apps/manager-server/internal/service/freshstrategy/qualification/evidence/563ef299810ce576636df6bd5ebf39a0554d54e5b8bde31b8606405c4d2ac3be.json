@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "contractId": "cpamp-cpa-v8-adoption-resource",
+  "revision": "fresh-network-client-api-keys-r1",
+  "candidate": {
+    "id": "CPA8-8.0.13-linux-amd64-plugin",
+    "declaredSha256": "50ecffb47fdd81c8c5a9825a73a7a905ab66342337e274f39c4276b92d3533f3",
+    "artifactId": "sha256:b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41"
+  },
+  "profiles": [
+    {
+      "id": "CPA8-ADOPT-RESOURCE-r1"
+    }
+  ],
+  "cases": [
+    {
+      "id": "fresh-network-client-api-keys-read",
+      "profileRefs": [
+        "CPA8-ADOPT-RESOURCE-r1"
+      ],
+      "proofScope": "source-read"
+    },
+    {
+      "id": "fresh-network-client-api-keys-replay",
+      "profileRefs": [
+        "CPA8-ADOPT-RESOURCE-r1"
+      ],
+      "proofScope": "destination-replay"
+    },
+    {
+      "id": "fresh-network-client-api-keys-verify",
+      "profileRefs": [
+        "CPA8-ADOPT-RESOURCE-r1"
+      ],
+      "proofScope": "destination-verify"
+    }
+  ],
+  "sourceClass": "network_existing",
+  "sourceProfile": "cpa_v8"
+}

@@ -3,6 +3,30 @@
 apps/web/** -linguist-detectable
 
 # Qualification profiles/code and byte-pinned evidence must survive Windows checkout.
+apps/manager-server/internal/service/freshstrategy/qualification/** -text
+apps/manager-server/internal/domain/bootstrap/qualification.go text eol=lf
+apps/manager-server/internal/domain/bootstrap/adoption.go text eol=lf
+apps/manager-server/internal/domain/bootstrap/fresh.go text eol=lf
+apps/manager-server/internal/domain/bootstrap/implementation.go text eol=lf
+apps/manager-server/internal/service/freshstrategy/production.go text eol=lf
+apps/manager-server/internal/service/freshstrategy/service.go text eol=lf
+apps/manager-server/internal/service/freshstrategy/adoption.go text eol=lf
+apps/manager-server/internal/service/freshstrategy/legacy_transition.go text eol=lf
+apps/manager-server/internal/service/freshstrategy/adoption_resource.go text eol=lf
+apps/manager-server/internal/service/cpa/v8.go text eol=lf
+apps/manager-server/internal/service/cpa/v8_adoption.go text eol=lf
+apps/manager-server/internal/service/cpa/legacy_adoption.go text eol=lf
+apps/manager-server/internal/model/runtime.go text eol=lf
+apps/manager-server/internal/model/runtime_destination.go text eol=lf
+apps/manager-server/internal/service/runtime/destination.go text eol=lf
+apps/manager-server/internal/service/runtime/embedded.go text eol=lf
+apps/runtime-supervisor/cmd/cpamp-runtime-supervisor/runtime.go text eol=lf
+apps/runtime-supervisor/internal/lifecycle/destination.go text eol=lf
+apps/runtime-supervisor/internal/lifecycle/start.go text eol=lf
+apps/runtime-supervisor/internal/lifecycle/restart.go text eol=lf
+apps/runtime-supervisor/internal/lifecycle/recovery.go text eol=lf
+apps/runtime-supervisor/internal/protocol/destination.go text eol=lf
+apps/runtime-supervisor/internal/protocol/handler.go text eol=lf
 apps/manager-server/tests/qualification/src11/*.go text eol=lf
 bin/qualification/*.py text eol=lf
 tests/fixtures/phase4a-src11/** text eol=lf

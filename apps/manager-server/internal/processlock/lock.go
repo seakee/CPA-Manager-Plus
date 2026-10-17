@@ -59,7 +59,7 @@ func AcquireExisting(databasePath string) (*Lock, error) {
 	if !info.Mode().IsRegular() {
 		return nil, errors.New("existing process lock is not a regular file")
 	}
-	file, err := openLockFile(lockPath, os.O_RDONLY)
+	file, err := openLockFile(lockPath, os.O_RDWR)
 	if err != nil {
 		return nil, err
 	}
@@ -216,6 +216,11 @@ func (l *Lock) Validate() error {
 	}
 	if !current.Mode().IsRegular() || !os.SameFile(held, current) {
 		return errors.New("manager ownership lock was replaced")
+	}
+	if multiple, err := hasMultipleLinks(l.file); err != nil {
+		return err
+	} else if multiple {
+		return ErrHardLinked
 	}
 	return rejectHardLinkedDatabase(l.databasePath)
 }

@@ -98,7 +98,7 @@ func (e *Executor) Restart(ctx context.Context, request RestartRequest) (journal
 	// confirmed reap. Release is idempotent and makes that requirement explicit
 	// for alternative process implementations before replacement Start.
 	target.Release()
-	started, err := e.process.Start(executionCtx, cpaprocess.StartSpec{Executable: e.currentExecutableLocked()})
+	started, err := e.startProcess(executionCtx, e.currentExecutableLocked())
 	if err != nil {
 		return e.completeRestartFailure(executionCtx, operation, intent.OperationID, "process_restart_start_failed", err)
 	}

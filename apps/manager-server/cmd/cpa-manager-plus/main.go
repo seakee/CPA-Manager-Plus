@@ -64,13 +64,16 @@ func main() {
 		switch os.Args[1] {
 		case "initialize":
 			if len(os.Args) == 3 && (os.Args[2] == "--help" || os.Args[2] == "-h") {
-				fmt.Fprintln(os.Stdout, "Usage: cpa-manager-plus initialize\nStart a deliberate new installation with a pre-created config. This starts the Manager Server and keeps it running; it does not exit after initialization. Existing database, sidecar, data-key, archive or pre-existing process-lock assets are not bypassed. Use normal startup on subsequent runs.\nStartup inspection timeout: CPA_MANAGER_PREFLIGHT_TIMEOUT (positive duration; default 2m). WAL inspection copies the complete database and WAL.")
+				fmt.Fprintln(os.Stdout, "Usage: cpa-manager-plus initialize\nAdmit the real Fresh Manager store and print one short-lived Bootstrap fragment handoff to this host caller, then exit. Existing Fresh operations resume without resetting Admin. Stop the writable service before reissue/resume; the initial read-only listener may remain running. No service-log credential delivery. Unknown/legacy sources remain blocked.")
 				return
 			}
 			if len(os.Args) != 2 {
 				log.Fatal("Usage: cpa-manager-plus initialize")
 			}
-			runServerWithOptions(legacypreflight.Options{Initialize: true})
+			if err := runFreshInitialize(context.Background(), os.Stdout); err != nil {
+				log.Print("Fresh initialization/handoff unavailable; inspect the host source and ownership before retrying")
+				os.Exit(1)
+			}
 			return
 		case "legacy-preflight":
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -215,10 +218,28 @@ func runServerWithOptions(options legacypreflight.Options) {
 	serverResult := make(chan error, 1)
 	log.Printf("cpa-manager-plus listening on %s", listener.Addr())
 	go serveHTTPServer(server, listener, stop, serverResult)
+	// A Fresh store can only have been admitted by the bounded host command.
+	// Retain that ownership through this service incarnation and bypass every
+	// historical bootstrap/setup/collector/lifecycle side effect.
+	if freshMarkerPresent(paths.Database) {
+		opened, openErr := serveExistingFresh(ctx, cfg, paths, startupHandler)
+		if openErr == nil {
+			defer opened.Close()
+			waitForReadOnlyStartup(ctx, server, serverResult)
+			return
+		}
+		// A competing host initializer may still hold this exact admission.
+		// Keep discovery unavailable and retry ownership validation after it
+		// releases the fence; never project this Fresh store as a legacy source.
+		go awaitFreshStore(ctx, cfg, paths, startupHandler)
+		waitForReadOnlyStartup(ctx, server, serverResult)
+		return
+	}
 
 	if !options.Initialize {
 		if _, statErr := os.Lstat(paths.Database); os.IsNotExist(statErr) {
 			startupHandler.EnableReadOnlyDiscovery(paths, options, inspectionTimeout)
+			go awaitFreshStore(ctx, cfg, paths, startupHandler)
 			log.Printf("Manager source has no database; serving read-only Bootstrap discovery pending a later authorized initializer")
 			waitForReadOnlyStartup(ctx, server, serverResult)
 			return
@@ -291,11 +312,7 @@ func runServerWithOptions(options legacypreflight.Options) {
 	if err != nil {
 		log.Fatalf("bootstrap manager server: %v", err)
 	}
-	if bootstrapResult.GeneratedAdminKey != "" {
-		log.Printf("CPA Manager Plus admin key generated: %s", bootstrapResult.GeneratedAdminKey)
-	} else {
-		log.Printf("CPA Manager Plus admin credential initialized")
-	}
+	log.Printf("CPA Manager Plus administrator authority loaded")
 	if bootstrapResult.DataKeyCreated {
 		log.Printf("CPA Manager Plus data key created at %s", cfg.DataKeyPath)
 	}

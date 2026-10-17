@@ -345,6 +345,37 @@ func TestEmbeddedClientSubmitsTypedLifecycleMutations(t *testing.T) {
 	}
 }
 
+func TestEmbeddedClientStartCarriesExactArtifactFenceOnlyToStart(t *testing.T) {
+	request := model.RuntimeMutationRequest{OperationID: "fresh-start", ExpectedRuntimeIdentity: "runtime-01", ExpectedRuntimeGeneration: 7, ExpectedActiveArtifactID: model.RuntimeArtifactID("sha256:" + strings.Repeat("a", 64))}
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var body embeddedMutationRequest
+		if json.NewDecoder(r.Body).Decode(&body) != nil || body.ExpectedActiveArtifactID != string(request.ExpectedActiveArtifactID) || r.URL.Path != embeddedRuntimeStartPath {
+			t.Errorf("Start artifact fence lost: %+v", body)
+		}
+		_ = json.NewEncoder(w).Encode(embeddedOperationResponse{OperationID: request.OperationID, OperationType: "start", RuntimeIdentity: "runtime-01", RuntimeGeneration: 7, State: "succeeded"})
+	}))
+	defer server.Close()
+	client := NewEmbeddedClient(server.URL, testRuntimeToken)
+	if _, err := client.Start(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Stop(t.Context(), request); err == nil {
+		t.Fatal("Stop silently accepted Start artifact fence")
+	}
+	if _, err := client.Restart(t.Context(), request); err == nil {
+		t.Fatal("Restart silently accepted Start artifact fence")
+	}
+	request.ExpectedActiveArtifactID = "invalid"
+	if _, err := client.Start(t.Context(), request); err == nil {
+		t.Fatal("invalid artifact reached transport")
+	}
+	if calls != 1 {
+		t.Fatalf("unexpected network mutations: %d", calls)
+	}
+}
+
 func TestEmbeddedClientSubmitsTypedPrepareUpdate(t *testing.T) {
 	request := model.RuntimePrepareUpdateRequest{
 		RuntimeMutationRequest: model.RuntimeMutationRequest{

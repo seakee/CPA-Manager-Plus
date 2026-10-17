@@ -152,12 +152,10 @@ export CPAMP_PUBLIC_PORT="${public_port}"
 if [ "${skip_build}" != "true" ]; then
   "${compose[@]}" build
 fi
-# This Runtime E2E starts from an initialized Manager volume. Fresh read-only
-# discovery is covered by Runtime12; use the existing explicit initializer here.
-"${compose[@]}" run -d --no-deps --name "${initializer_name}" cpamp-manager initialize >/dev/null
-retry 90 docker exec "${initializer_name}" wget -qO- http://127.0.0.1:18317/health >/dev/null
-docker stop -t 20 "${initializer_name}" >/dev/null
-docker rm "${initializer_name}" >/dev/null
+# This Runtime E2E starts from an explicit historical Manager lifecycle
+# baseline. Fresh read-only discovery and one-shot initialize are covered by
+# Runtime12/the shared helper and must not implicitly select Embedded Runtime.
+"${repo_root}/bin/ci/runtime-lifecycle-manager-baseline.sh" "${project}" "${initializer_name}"
 "${compose[@]}" up -d
 public_origin="http://127.0.0.1:${public_port}"
 retry 120 curl --fail --silent "${public_origin}/health" >/dev/null

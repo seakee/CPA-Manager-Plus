@@ -198,6 +198,7 @@ type embeddedMutationRequest struct {
 	OperationID               string `json:"operationId"`
 	ExpectedRuntimeIdentity   string `json:"expectedRuntimeIdentity"`
 	ExpectedRuntimeGeneration uint64 `json:"expectedRuntimeGeneration"`
+	ExpectedActiveArtifactID  string `json:"expectedActiveArtifactId,omitempty"`
 }
 
 type embeddedPrepareUpdateRequest struct {
@@ -396,6 +397,9 @@ func (c *EmbeddedClient) mutate(
 	operationType model.RuntimeOperationType,
 	request model.RuntimeMutationRequest,
 ) (model.RuntimeOperationResult, error) {
+	if operationType != model.RuntimeOperationStart && request.ExpectedActiveArtifactID != "" {
+		return model.RuntimeOperationResult{}, errors.New("active artifact fencing is only supported for Start")
+	}
 	if err := request.Validate(); err != nil {
 		return model.RuntimeOperationResult{}, fmt.Errorf("validate embedded Runtime %s request: %w", operationType, err)
 	}
@@ -403,6 +407,7 @@ func (c *EmbeddedClient) mutate(
 		OperationID:               request.OperationID,
 		ExpectedRuntimeIdentity:   string(request.ExpectedRuntimeIdentity),
 		ExpectedRuntimeGeneration: uint64(request.ExpectedRuntimeGeneration),
+		ExpectedActiveArtifactID:  string(request.ExpectedActiveArtifactID),
 	})
 	if err != nil {
 		return model.RuntimeOperationResult{}, fmt.Errorf("encode embedded Runtime %s request: %w", operationType, err)

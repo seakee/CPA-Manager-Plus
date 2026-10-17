@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "contractId": "cpamp-cpa-v8-adoption-resource",
+  "revision": "fresh-legacy-client-api-keys-r1",
+  "candidate": {
+    "id": "CPA8-8.0.13-linux-amd64-plugin",
+    "declaredSha256": "50ecffb47fdd81c8c5a9825a73a7a905ab66342337e274f39c4276b92d3533f3",
+    "artifactId": "sha256:b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41"
+  },
+  "profiles": [
+    {
+      "id": "CPA8-ADOPT-RESOURCE-r1"
+    }
+  ],
+  "cases": [
+    {
+      "id": "fresh-legacy-client-api-keys-read",
+      "profileRefs": [
+        "CPA8-ADOPT-RESOURCE-r1"
+      ],
+      "proofScope": "source-read"
+    },
+    {
+      "id": "fresh-legacy-client-api-keys-replay",
+      "profileRefs": [
+        "CPA8-ADOPT-RESOURCE-r1"
+      ],
+      "proofScope": "destination-replay"
+    },
+    {
+      "id": "fresh-legacy-client-api-keys-verify",
+      "profileRefs": [
+        "CPA8-ADOPT-RESOURCE-r1"
+      ],
+      "proofScope": "destination-verify"
+    }
+  ],
+  "sourceClass": "legacy_managed",
+  "legacySource": {
+    "version": "v7.0.12",
+    "archiveSha256": "8afc9ed4c89a50a5ffce5d122a9bb93442c5b8ff3d8c6f07b7a274c719109b74",
+    "binarySha256": "1eb108b85ad554b92bab9f5a85af433d7c2e1b951bb192b639d73605d4593d1a"
+  }
+}

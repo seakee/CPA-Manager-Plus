@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"unicode/utf8"
 
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/artifact"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/journal"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/lifecycle"
 )
@@ -35,7 +36,8 @@ type operationResponse struct {
 }
 
 func (h *handler) submitStart(w http.ResponseWriter, r *http.Request) {
-	envelope, err := decodeMutationRequest(w, r)
+	var expectedArtifact artifact.ID
+	envelope, err := decodeMutationRequest(w, r, &expectedArtifact)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", "invalid Start request")
 		return
@@ -44,7 +46,10 @@ func (h *handler) submitStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "unsupported_operation", "Start is not configured")
 		return
 	}
-	operation, err := h.start.Start(r.Context(), lifecycle.StartRequest(envelope))
+	operation, err := h.start.Start(r.Context(), lifecycle.StartRequest{
+		OperationID: envelope.OperationID, ExpectedRuntimeIdentity: envelope.ExpectedRuntimeIdentity,
+		ExpectedRuntimeGeneration: envelope.ExpectedRuntimeGeneration, ExpectedActiveArtifactID: expectedArtifact,
+	})
 	if err != nil {
 		writeMutationError(w, err, "Start")
 		return
@@ -59,7 +64,7 @@ type mutationRequest struct {
 }
 
 func (r mutationRequest) Validate() error {
-	return lifecycle.StartRequest(r).Validate()
+	return lifecycle.StopRequest(r).Validate()
 }
 
 func writeOperationResponse(w http.ResponseWriter, operation journal.Operation, operationName string) {
@@ -76,7 +81,9 @@ func writeOperationResponse(w http.ResponseWriter, operation journal.Operation, 
 	writeJSON(w, http.StatusOK, response)
 }
 
-func decodeMutationRequest(w http.ResponseWriter, r *http.Request) (mutationRequest, error) {
+// Only Start supplies the optional exact-artifact sink. Stop/Restart retain
+// their original empty payload and reject the field even when its value is empty.
+func decodeMutationRequest(w http.ResponseWriter, r *http.Request, startArtifact ...*artifact.ID) (mutationRequest, error) {
 	var request mutationRequest
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxMutationBody))
 	if err != nil || !utf8.Valid(body) {
@@ -104,6 +111,16 @@ func decodeMutationRequest(w http.ResponseWriter, r *http.Request) (mutationRequ
 			err = decoder.Decode(&request.ExpectedRuntimeIdentity)
 		case "expectedRuntimeGeneration":
 			err = decoder.Decode(&request.ExpectedRuntimeGeneration)
+		case "expectedActiveArtifactId":
+			if len(startArtifact) != 1 {
+				return request, lifecycle.ErrInvalidRequest
+			}
+			value, tokenErr := decoder.Token()
+			text, ok := value.(string)
+			if tokenErr != nil || !ok || text != "" && !artifact.ID(text).IsValid() {
+				return request, lifecycle.ErrInvalidRequest
+			}
+			*startArtifact[0] = artifact.ID(text)
 		default:
 			return request, lifecycle.ErrInvalidRequest
 		}

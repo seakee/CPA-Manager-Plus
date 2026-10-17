@@ -327,6 +327,10 @@ func TestRoutingSnapshotRejectsReservedNamespaceCollision(t *testing.T) {
 		"/health/private",
 		BootstrapDiscoveryPath,
 		"/usage-service",
+		"/internal",
+		"/internal/routing",
+		"/internal/routing/fresh",
+		"/internal/routing/fresh-authority",
 	} {
 		snapshot := RoutingSnapshot{
 			DesiredControlBasePath:           value,

@@ -11,6 +11,7 @@ services:
       CPAMP_INGRESS_ADDR: '0.0.0.0:18317'
       CPAMP_MANAGER_URL: 'http://cpamp-manager:18317'
       CPAMP_GATEWAY_URL: 'http://cpamp-runtime:8317'
+      CPAMP_INGRESS_CONTROL_ADDR: '0.0.0.0:9082'
     depends_on:
       - cpamp-manager
       - cpamp-runtime
@@ -32,6 +33,9 @@ services:
       CPA_UPSTREAM_URL: 'http://cpamp-runtime:8317'
       CPAMP_RUNTIME_URL: 'http://cpamp-runtime:9081'
       CPAMP_RUNTIME_TOKEN_FILE: '/run/cpamp/runtime-secret/token'
+      CPAMP_INGRESS_CONTROL_URL: 'http://cpamp-ingress:9082'
+      # Explicit externally reachable origin used for real public-entry verification.
+      CPAMP_PUBLIC_ORIGIN: '${CPAMP_PUBLIC_ORIGIN:-}'
       USAGE_COLLECTOR_MODE: 'auto'
       USAGE_RESP_QUEUE: 'usage'
       USAGE_RESP_POP_SIDE: 'right'

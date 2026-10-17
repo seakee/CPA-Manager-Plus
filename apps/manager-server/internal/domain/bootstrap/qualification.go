@@ -50,6 +50,9 @@ func (q CPAQualification) ValidateForStrategy(strategy CPAStrategy, adoptClass A
 				return errors.New("network_existing adopt source requires the required v8 management profile")
 			}
 		case AdoptLegacyManaged:
+			if !q.RequiredProfileQualified {
+				return errors.New("legacy_managed adopt source requires the required v8 management profile")
+			}
 			if !q.StagingV8TransitionQualified {
 				return errors.New("legacy_managed adopt source requires a qualified staging v8 transition")
 			}

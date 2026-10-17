@@ -33,6 +33,9 @@ if (
   fail('Ingress upstreams must address Manager and Gateway directly');
 }
 if ((ingress.volumes ?? []).length !== 0) fail('Ingress must not mount product data or secrets');
+if ('CPAMP_RUNTIME_TOKEN_FILE' in ingressEnvironment) {
+  fail('Ingress must not consume the Runtime transport secret');
+}
 
 const managerEnvironment = manager.environment ?? {};
 if (

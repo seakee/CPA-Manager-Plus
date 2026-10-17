@@ -29,3 +29,21 @@ func TestRouterCapturesFixedDiscoveryBeforeMuxNormalization(t *testing.T) {
 	}
 }
 
+func TestLegacyRouterExplicitModeAcknowledgement(t *testing.T) {
+	h := New(&app.Context{})
+	for _, tc := range []struct {
+		method, target string
+		code           int
+	}{
+		{"GET", "/internal/routing/fresh-authority", 204},
+		{"PUT", "/internal/routing/fresh-authority", 405},
+		{"GET", "/internal/routing/fresh-authority?legacy=true", 404},
+		{"GET", "/internal/routing/fresh%2dauthority", 404},
+	} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(tc.method, tc.target, nil))
+		if w.Code != tc.code || w.Header().Get("Cache-Control") != "no-store" {
+			t.Fatal(tc, w.Code, w.Header())
+		}
+	}
+}

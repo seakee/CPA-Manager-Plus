@@ -139,6 +139,10 @@ jobs:
         working-directory: apps/manager-server
         run: go test -race ./internal/domain/bootstrap
 
+      - name: Race test Fresh admission and authentication cutover
+        working-directory: apps/manager-server
+        run: go test -race ./cmd/cpa-manager-plus ./internal/processlock ./internal/repository/freshstore ./internal/service/fresh ./internal/service/freshrouting ./internal/service/freshstrategy ./internal/http/controller/freshbootstrap
+
       - name: Race test Runtime ownership paths
         if: needs.changes.outputs.manager_runtime == 'true'
         working-directory: apps/manager-server
@@ -147,6 +151,138 @@ jobs:
       - name: Vet
         working-directory: apps/manager-server
         run: go vet ./...
+
+      - name: Verify Fresh adoption with exact CPA v8 and Supervisor
+        if: needs.changes.outputs.manager_runtime == 'true'
+        shell: bash
+        env:
+          SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          evidence="${RUNNER_TEMP}/fresh-adoption-v8"
+          tools="${RUNNER_TEMP}/fresh-adoption-tools"
+          mkdir -p "${evidence}" "${tools}/v8" "${tools}/v7"
+          curl --fail --location --max-time 120 --output "${tools}/v8/cpa.tar.gz" \
+            https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.13/CLIProxyAPI_8.0.13_linux_amd64.tar.gz
+          printf '%s  %s\n' 50ecffb47fdd81c8c5a9825a73a7a905ab66342337e274f39c4276b92d3533f3 "${tools}/v8/cpa.tar.gz" | sha256sum --check --status
+          tar -xzf "${tools}/v8/cpa.tar.gz" -C "${tools}/v8" cli-proxy-api
+          printf '%s  %s\n' b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41 "${tools}/v8/cli-proxy-api" | sha256sum --check --status
+
+          curl --fail --location --max-time 120 --output "${tools}/v7/cpa.tar.gz" \
+            https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.0.12/CLIProxyAPI_7.0.12_linux_amd64.tar.gz
+          printf '%s  %s\n' 8afc9ed4c89a50a5ffce5d122a9bb93442c5b8ff3d8c6f07b7a274c719109b74 "${tools}/v7/cpa.tar.gz" | sha256sum --check --status
+          tar -xzf "${tools}/v7/cpa.tar.gz" -C "${tools}/v7" cli-proxy-api
+
+          go -C apps/runtime-supervisor build -trimpath -o "${tools}/cpamp-runtime-supervisor" ./cmd/cpamp-runtime-supervisor
+          export CPAMP_TEST_CPA_V8="${tools}/v8/cli-proxy-api"
+          export CPAMP_TEST_CPA_LEGACY="${tools}/v7/cli-proxy-api"
+          export CPAMP_TEST_RUNTIME="${tools}/cpamp-runtime-supervisor"
+          export CPAMP_TEST_CPA_LEGACY_ARCHIVE_SHA256="8afc9ed4c89a50a5ffce5d122a9bb93442c5b8ff3d8c6f07b7a274c719109b74"
+          export CPAMP_TEST_FRESH_TRANSITION_OUT="${evidence}/fresh-legacy-transition.json"
+          export CPAMP_TEST_FRESH_TRANSITION_HEAD="$(git rev-parse HEAD)"
+          export CPAMP_TEST_FRESH_TRANSITION_TREE="$(git rev-parse HEAD^{tree})"
+          export CPAMP_TEST_FRESH_TRANSITION_SOURCE_HEAD="${SOURCE_HEAD}"
+          export CPAMP_TEST_FRESH_RESOURCE_OUT_DIR="${evidence}"
+          go -C apps/runtime-supervisor test -race -count=1 -json -run '^TestDestinationRealCPAV8$' ./internal/lifecycle | tee "${evidence}/supervisor.jsonl"
+          go -C apps/manager-server test -race -count=1 -json -run '^TestAdoptionExactCPAV8WithSupervisor$' ./internal/service/freshstrategy | tee "${evidence}/adoption.jsonl"
+          python3 - <<'PY'
+          import hashlib, json, os, platform, subprocess
+          def output(*args):
+              return subprocess.check_output(args, text=True).strip()
+          evidence = os.path.join(os.environ['RUNNER_TEMP'],'fresh-adoption-v8')
+          def sha(name):
+              with open(os.path.join(evidence, name), 'rb') as f:
+                  return hashlib.sha256(f.read()).hexdigest()
+          manifest_sha = sha('fresh-legacy-transition-manifest.json')
+          report_sha = sha('fresh-legacy-transition-report.json')
+          observation_sha = sha('fresh-legacy-transition.json')
+          with open(os.path.join(evidence, 'fresh-legacy-transition-report.json')) as f:
+              report = json.load(f)
+          with open(os.path.join(evidence, 'fresh-legacy-transition-authority.json')) as f:
+              authority = json.load(f)
+          tested_commit = output('git','rev-parse','HEAD')
+          tested_tree = output('git','rev-parse','HEAD^{tree}')
+          target_archive = '50ecffb47fdd81c8c5a9825a73a7a905ab66342337e274f39c4276b92d3533f3'
+          target_binary = 'b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41'
+          legacy_archive = os.environ['CPAMP_TEST_CPA_LEGACY_ARCHIVE_SHA256']
+          legacy_binary = output('sha256sum', os.environ['CPAMP_TEST_CPA_LEGACY']).split()[0]
+          if report['manifestSha256'] != manifest_sha or report['evidence'][0]['sha256'] != observation_sha or report['run']['runnerCommit'] != tested_commit or report['run'].get('testedTree') != tested_tree:
+              raise SystemExit('transition report does not bind the emitted manifest/observation/head/tree')
+          if authority['manifest']['sha256'] != manifest_sha or authority['report']['sha256'] != report_sha or authority['observation']['sha256'] != observation_sha:
+              raise SystemExit('transition authority digest mismatch')
+          with open(os.path.join(evidence, 'fresh-legacy-transition.json')) as f:
+              transition = json.load(f)
+          transition_digest = transition['consumerImplementationSha256']
+          def verify_resource(short, expected_class):
+              base = 'fresh-adoption-resource-' + short
+              names = {role: base + '-' + role + '.json' for role in ('manifest','report','read','replay','verify')}
+              shas = {role: sha(name) for role, name in names.items()}
+              with open(os.path.join(evidence, names['manifest'])) as f:
+                  manifest = json.load(f)
+              with open(os.path.join(evidence, names['report'])) as f:
+                  resource_report = json.load(f)
+              with open(os.path.join(evidence, base + '-authority.json')) as f:
+                  resource_authority = json.load(f)
+              if manifest['sourceClass'] != expected_class or manifest['candidate']['artifactId'] != 'sha256:' + target_binary or manifest['candidate']['declaredSha256'] != target_archive:
+                  raise SystemExit(base + ' manifest source/target mismatch')
+              if expected_class == 'network_existing':
+                  if manifest.get('sourceProfile') != 'cpa_v8' or manifest.get('legacySource') is not None:
+                      raise SystemExit(base + ' source profile mismatch')
+              else:
+                  if manifest.get('sourceProfile') not in (None, '') or manifest.get('legacySource') != {'version':'v7.0.12','archiveSha256':legacy_archive,'binarySha256':legacy_binary}:
+                      raise SystemExit(base + ' source profile mismatch')
+              if resource_report['manifestSha256'] != shas['manifest'] or resource_report['run']['runnerCommit'] != tested_commit or resource_report['run'].get('testedTree') != tested_tree:
+                  raise SystemExit(base + ' report does not bind manifest/head/tree')
+              if len(resource_report['results']) != 3 or any(r['executionState'] != 'completed' or r['assertionOutcome'] != 'pass' or r['capability'] != 'supported' for r in resource_report['results']):
+                  raise SystemExit(base + ' results are not three completed supported cases')
+              cases = [c['id'] for c in manifest['cases']]
+              by_case = {e['id']: e['sha256'] for e in resource_report['evidence']}
+              if [by_case.get(case) for case in cases] != [shas['read'], shas['replay'], shas['verify']]:
+                  raise SystemExit(base + ' report evidence does not bind the three traces')
+              if resource_authority['manifest']['sha256'] != shas['manifest'] or resource_authority['report']['sha256'] != shas['report'] or resource_authority['traces']['read']['sha256'] != shas['read'] or resource_authority['traces']['replay']['sha256'] != shas['replay'] or resource_authority['traces']['verify']['sha256'] != shas['verify']:
+                  raise SystemExit(base + ' authority digest mismatch')
+              digests = set()
+              for role, case in zip(('read','replay','verify'), cases):
+                  with open(os.path.join(evidence, names[role])) as f:
+                      trace = json.load(f)
+                  if trace['runId'] != resource_report['run']['id'] or trace['caseRef'] != case or trace['sourceClass'] != expected_class:
+                      raise SystemExit(base + ' trace binding mismatch')
+                  digests.add(trace['consumerImplementationSha256'])
+              if len(digests) != 1 or digests.pop() != transition_digest:
+                  raise SystemExit(base + ' implementation digest mismatch')
+              return shas
+          network_shas = verify_resource('network', 'network_existing')
+          legacy_shas = verify_resource('legacy', 'legacy_managed')
+          value = dict(sourceHead=os.environ['SOURCE_HEAD'], testedCommit=tested_commit,
+                       testedTree=tested_tree,
+                       platform=platform.platform(), goVersion=output('go','version'),
+                       archiveSha256=target_archive, binarySha256=target_binary,
+                       legacyVersion='v7.0.12', legacyArchiveSha256=legacy_archive, legacyBinarySha256=legacy_binary,
+                       legacyTransition='live-v7-source-to-manager-owned-staging-v8',
+                       legacyTransitionCaseRef='fresh-legacy-managed-stage-v8-r1',
+                       transitionManifestSha256=manifest_sha, transitionReportSha256=report_sha,
+                       transitionObservationSha256=observation_sha, consumerImplementationSha256=transition_digest,
+                       resourceProfile='CPA8-ADOPT-RESOURCE-r1',
+                       resourceNetworkManifestSha256=network_shas['manifest'], resourceNetworkReportSha256=network_shas['report'],
+                       resourceNetworkReadTraceSha256=network_shas['read'], resourceNetworkReplayTraceSha256=network_shas['replay'],
+                       resourceNetworkVerifyTraceSha256=network_shas['verify'],
+                       resourceLegacyManifestSha256=legacy_shas['manifest'], resourceLegacyReportSha256=legacy_shas['report'],
+                       resourceLegacyReadTraceSha256=legacy_shas['read'], resourceLegacyReplayTraceSha256=legacy_shas['replay'],
+                       resourceLegacyVerifyTraceSha256=legacy_shas['verify'],
+                       sourceClasses=['network_existing','legacy_managed'], resourceInventory='explicit-bounded-decisions',
+                       migratedResource='client-api-keys', productionAcceptance='pending', gateway='pending')
+          with open(os.path.join(evidence,'environment.json'),'w') as f:
+              json.dump(value, f, indent=2)
+          PY
+
+      - name: Upload controlled Fresh adoption observations
+        if: always() && needs.changes.outputs.manager_runtime == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fresh-adoption-v8-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fresh-adoption-v8/
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Record Linux bundle boundary environment
         if: needs.changes.outputs.bundle_boundary == 'true'
@@ -368,7 +504,7 @@ jobs:
         working-directory: apps/manager-server
         shell: pwsh
         run: |
-          go test -count=1 -json ./internal/processlock ./internal/config ./internal/service/legacypreflight ./internal/command/legacypreflight |
+          go test -count=1 -json ./internal/processlock ./internal/config ./internal/service/legacypreflight ./internal/command/legacypreflight ./internal/domain/bootstrap ./internal/repository/freshstore ./internal/service/fresh ./internal/service/freshstrategy |
             Tee-Object -FilePath "$env:RUNNER_TEMP/manager-preflight-windows/preflight.jsonl"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -377,7 +513,7 @@ jobs:
         working-directory: apps/manager-server
         shell: pwsh
         run: |
-          go test -count=1 -json -run '^(TestBlockedLegacyNormalStartupHasNoSourceSideEffects|TestNativePreflightRetainsEncryptedKeyGuardsForBothSettings|TestLegacyPreflightMainDispatchReturnsBeforeServer|TestNativeV2FreshAndReopenStartup|TestFreshNoConfigNormalStartup|TestStartupPreflightTimeout|TestNativeV2CrashWALStartupReadsCommittedUsage|TestFreshInitializationFailureAllowsRetry)$' ./cmd/cpa-manager-plus |
+          go test -count=1 -json -run '^(TestBlockedLegacyNormalStartupHasNoSourceSideEffects|TestNativePreflightRetainsEncryptedKeyGuardsForBothSettings|TestLegacyPreflightMainDispatchReturnsBeforeServer|TestNativeV2FreshAndReopenStartup|TestFreshNoConfigNormalStartup|TestStartupPreflightTimeout|TestNativeV2CrashWALStartupReadsCommittedUsage|TestFreshInitializationFailureAllowsRetry|TestFreshProductionQualificationCannotBeGrantedByHTTPOrRestart|TestFreshCommittedStrategyReplayChecksTargetsWithoutUpdating|TestFreshCompleteRejectsMalformedStrategyCheckpoint)$' ./cmd/cpa-manager-plus |
             Tee-Object -FilePath "$env:RUNNER_TEMP/manager-preflight-windows/startup.jsonl"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

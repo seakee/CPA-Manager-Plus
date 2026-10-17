@@ -172,6 +172,7 @@ const (
 	RuntimeCapabilityPrepareUpdate          RuntimeCapability = "prepare_update"
 	RuntimeCapabilityActivateUpdate         RuntimeCapability = "activate_update"
 	RuntimeCapabilityObserveUpdateOperation RuntimeCapability = "observe_update_operation"
+	RuntimeCapabilityStageDestination       RuntimeCapability = "stage_destination"
 )
 
 type RuntimeCapabilities []RuntimeCapability
@@ -205,16 +206,17 @@ type RuntimeObservedStatus struct {
 type RuntimeOperationType string
 
 const (
-	RuntimeOperationStart          RuntimeOperationType = "start"
-	RuntimeOperationStop           RuntimeOperationType = "stop"
-	RuntimeOperationRestart        RuntimeOperationType = "restart"
-	RuntimeOperationPrepareUpdate  RuntimeOperationType = "prepare_update"
-	RuntimeOperationActivateUpdate RuntimeOperationType = "activate_update"
+	RuntimeOperationStart            RuntimeOperationType = "start"
+	RuntimeOperationStageDestination RuntimeOperationType = "stage_destination"
+	RuntimeOperationStop             RuntimeOperationType = "stop"
+	RuntimeOperationRestart          RuntimeOperationType = "restart"
+	RuntimeOperationPrepareUpdate    RuntimeOperationType = "prepare_update"
+	RuntimeOperationActivateUpdate   RuntimeOperationType = "activate_update"
 )
 
 func (t RuntimeOperationType) IsValid() bool {
 	switch t {
-	case RuntimeOperationStart, RuntimeOperationStop, RuntimeOperationRestart, RuntimeOperationPrepareUpdate, RuntimeOperationActivateUpdate:
+	case RuntimeOperationStart, RuntimeOperationStop, RuntimeOperationRestart, RuntimeOperationPrepareUpdate, RuntimeOperationActivateUpdate, RuntimeOperationStageDestination:
 		return true
 	default:
 		return false
@@ -246,9 +248,15 @@ type RuntimeMutationRequest struct {
 	OperationID               string
 	ExpectedRuntimeIdentity   RuntimeIdentity
 	ExpectedRuntimeGeneration RuntimeGeneration
+	// Optional for legacy Start callers; Fresh Start always fences the exact
+	// previously staged executable. Stop/Restart do not accept this payload.
+	ExpectedActiveArtifactID RuntimeArtifactID
 }
 
 func (r RuntimeMutationRequest) Validate() error {
+	if r.ExpectedActiveArtifactID != "" && !r.ExpectedActiveArtifactID.IsValid() {
+		return errors.New("expected active artifact ID must be canonical SHA-256")
+	}
 	return validateRuntimeOperationIdentity(r.OperationID, r.ExpectedRuntimeIdentity, r.ExpectedRuntimeGeneration)
 }
 

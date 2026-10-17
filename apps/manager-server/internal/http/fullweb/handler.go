@@ -32,6 +32,20 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	context, _ := json.Marshal(struct {
+		State    routing.SnapshotState `json:"state"`
+		Base     string                `json:"verifiedEffectiveControlBasePath"`
+		Revision uint64                `json:"revision"`
+	}{h.Snapshot.State, prefix, h.Snapshot.Revision})
+	serveFullWeb(w, r, prefix, h.Dist, routing.PublicAPIHandler{Snapshot: h.Snapshot, Active: h.API}, context)
+}
+
+func serveFullWeb(w http.ResponseWriter, r *http.Request, prefix string, dist fs.FS, api http.Handler, context []byte) {
+	w.Header().Set("Cache-Control", "no-cache")
+	if r == nil || r.URL == nil {
+		http.NotFound(w, r)
+		return
+	}
 	requestPath := r.URL.Path
 	if !routing.CanonicalRequestPath(requestPath) || r.URL.EscapedPath() != requestPath ||
 		(r.RequestURI != "" && strings.SplitN(r.RequestURI, "?", 2)[0] != requestPath) ||
@@ -39,9 +53,13 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	apiBase, _ := h.Snapshot.CanonicalPublicAPIBase()
+	apiBase := prefix + routing.PublicAPIV2Suffix
 	if requestPath == apiBase || strings.HasPrefix(requestPath, apiBase+"/") {
-		routing.PublicAPIHandler{Snapshot: h.Snapshot, Active: h.API}.ServeHTTP(w, r)
+		if api == nil {
+			http.NotFound(w, r)
+			return
+		}
+		api.ServeHTTP(w, r)
 		return
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -58,7 +76,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if suffix == "assets" || strings.HasPrefix(suffix, "assets/") {
-		h.serveAsset(w, r, suffix)
+		Handler{Dist: dist}.serveAsset(w, r, suffix)
 		return
 	}
 	// Only HTML navigation can receive SPA fallback. File-like and missing
@@ -67,20 +85,15 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if h.Dist == nil {
+	if dist == nil {
 		http.NotFound(w, r)
 		return
 	}
-	data, err := fs.ReadFile(h.Dist, "index.html")
+	data, err := fs.ReadFile(dist, "index.html")
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	context, _ := json.Marshal(struct {
-		State    routing.SnapshotState `json:"state"`
-		Base     string                `json:"verifiedEffectiveControlBasePath"`
-		Revision uint64                `json:"revision"`
-	}{h.Snapshot.State, prefix, h.Snapshot.Revision})
 	data = bytes.ReplaceAll(data, []byte("__CPAMP_ROUTING_CONTEXT__"), context)
 	// Vite base './' keeps lazy imports relative to their module, while entry
 	// references are rebound once here for pathname deep-link refresh.
@@ -101,6 +114,8 @@ func (h Handler) serveAsset(w http.ResponseWriter, r *http.Request, name string)
 	}
 	w.Header().Set("Content-Type", mime.TypeByExtension(path.Ext(name)))
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	if w.Header().Get("Cache-Control") != "no-store" {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	}
 	http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(data))
 }

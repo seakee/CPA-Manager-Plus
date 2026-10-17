@@ -14,6 +14,8 @@ const RESERVED_CONTROL_PATHS = [
   '/v0',
   '/v1',
   '/usage-service',
+  '/internal/routing/fresh',
+  '/internal/routing/fresh-authority',
   '/favicon.ico',
   '/apple-touch-icon.png',
 ];

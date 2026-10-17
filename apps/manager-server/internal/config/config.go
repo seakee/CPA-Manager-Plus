@@ -30,12 +30,15 @@ const (
 )
 
 type Config struct {
-	HTTPAddr                     string
-	DataDir                      string
-	DBPath                       string
-	CPAUpstreamURL               string
-	ManagementKey                string
-	AdminKey                     string
+	HTTPAddr       string
+	DataDir        string
+	DBPath         string
+	CPAUpstreamURL string
+	ManagementKey  string
+	AdminKey       string
+	// AdminAuthorityConfigured distinguishes absent host authority from an
+	// explicitly configured but unreadable/empty secret for Fresh admission.
+	AdminAuthorityConfigured     bool
 	DataKey                      string
 	DataKeyPath                  string
 	RuntimeURL                   string
@@ -160,6 +163,12 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 	if cfgFile.AdminKeyFile != "" {
 		adminKeyFile = resolveConfigPath(cfgFile.AdminKeyFile, cfgDir)
 	}
+	adminAuthorityConfigured := os.Getenv("CPA_MANAGER_ADMIN_KEY") != "" ||
+		strings.TrimSpace(os.Getenv("CPA_MANAGER_ADMIN_KEY_FILE")) != "" || cfgFile.AdminKeyFile != ""
+	if !adminAuthorityConfigured {
+		_, statErr := os.Stat(adminKeyFile)
+		adminAuthorityConfigured = !os.IsNotExist(statErr)
+	}
 
 	dataKeyFile := defaultDataKeySecretFile
 	if cfgFile.DataKeyFile != "" {
@@ -177,6 +186,7 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 		CPAUpstreamURL:               env("CPA_UPSTREAM_URL", cfgFile.CPAUpstreamURL),
 		ManagementKey:                readSecret("CPA_MANAGEMENT_KEY", "CPA_MANAGEMENT_KEY_FILE", managementKeyFile),
 		AdminKey:                     readSecret("CPA_MANAGER_ADMIN_KEY", "CPA_MANAGER_ADMIN_KEY_FILE", adminKeyFile),
+		AdminAuthorityConfigured:     adminAuthorityConfigured,
 		DataKey:                      readSecret("CPA_MANAGER_DATA_KEY", "CPA_MANAGER_DATA_KEY_FILE", dataKeyFile),
 		DataKeyPath:                  env("CPA_MANAGER_DATA_KEY_PATH", dataKeyPath),
 		RuntimeURL:                   strings.TrimSpace(os.Getenv("CPAMP_RUNTIME_URL")),

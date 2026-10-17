@@ -18,6 +18,16 @@ func FullWebHandler(snapshot routing.RoutingSnapshot, api http.Handler) http.Han
 	return fullweb.Handler{Snapshot: snapshot, Dist: dist, API: api}
 }
 
+func BootstrapWebHandler() http.Handler {
+	dist, _ := fs.Sub(embeddedPanel, "web/fullweb")
+	return fullweb.BootstrapHandler{Dist: dist}
+}
+
+func InitialFullWebHandler(target string, api http.Handler) http.Handler {
+	dist, _ := fs.Sub(embeddedPanel, "web/fullweb")
+	return fullweb.InitialHandler{Target: target, Dist: dist, API: api}
+}
+
 // ProtectBrandResources also wraps the pre-ready listener: fixed immutable
 // brand delivery needs no product/data initialization or authentication.
 func ProtectBrandResources(next http.Handler) http.Handler {

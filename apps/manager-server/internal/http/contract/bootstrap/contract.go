@@ -81,6 +81,7 @@ func (d *DiscoveryDTO) UnmarshalJSON(data []byte) error {
 }
 
 type BootstrapStatusDTO struct {
+	FreshOwnership  *domain.FreshOwnership      `json:"fresh_ownership,omitempty"`
 	ContractVersion string                      `json:"contract_version"`
 	Mode            domain.Mode                 `json:"mode"`
 	AdminCredential domain.AdminCredentialState `json:"admin_credential_state"`
@@ -92,6 +93,7 @@ func StatusFromDomain(value domain.StatusSnapshot) (BootstrapStatusDTO, error) {
 		return BootstrapStatusDTO{}, err
 	}
 	return BootstrapStatusDTO{
+		FreshOwnership:  value.FreshOwnership,
 		ContractVersion: StatusContractVersion,
 		Mode:            value.Mode,
 		AdminCredential: value.AdminCredential,
@@ -104,6 +106,7 @@ func (d BootstrapStatusDTO) Validate() error {
 		return fmt.Errorf("unsupported status contract version %q", d.ContractVersion)
 	}
 	return (domain.StatusSnapshot{
+		FreshOwnership:  d.FreshOwnership,
 		Mode:            d.Mode,
 		AdminCredential: d.AdminCredential,
 		Session:         d.Session,
