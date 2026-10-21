@@ -210,6 +210,16 @@ export interface QuotaCooldownsResponse {
   items: QuotaCooldownInfo[];
 }
 
+export interface QuotaCooldownRecoveryRequest {
+  authFileName: string;
+  authIndex: string;
+  provider: 'codex';
+}
+
+export interface QuotaCooldownRecoveryResponse {
+  recovered: boolean;
+}
+
 export interface UsageServiceSetupRequest {
   cpaBaseUrl: string;
   cpaManagementKey: string;
@@ -1104,7 +1114,7 @@ export interface MonitoringAccountHistoryItem {
   success_calls: number;
   failure_calls: number;
   total_tokens: number;
-  total_cost: number;
+  total_cost: number | null;
   success_rate: number | null;
   first_seen_ms: number | null;
   last_seen_ms: number | null;
@@ -1336,8 +1346,8 @@ const buildDemoAccountQuotaSnapshotWindows = (
         cycle_start_ms: fiveHourStartMs,
         cycle_end_ms: fiveHourEndMs,
         duration_seconds: fiveHourDuration,
-        used_percent: 36,
-        remaining_percent: 64,
+        used_percent: 55,
+        remaining_percent: 45,
         relationship_kind: 'concurrent_subwindow',
         container_provider_window_id: 'weekly',
         stale: false,
@@ -1384,8 +1394,8 @@ const buildDemoAccountQuotaSnapshotWindows = (
         cycle_start_ms: weeklyStartMs,
         cycle_end_ms: weeklyEndMs,
         duration_seconds: weeklyDuration,
-        used_percent: 41,
-        remaining_percent: 59,
+        used_percent: 9,
+        remaining_percent: 91,
         stale: false,
         logical_window_id: 102,
         activation_generation: 1,
@@ -3147,6 +3157,28 @@ export const usageServiceApi = {
         }
       );
       return response.data.items ?? [];
+    });
+  },
+
+  recoverQuotaCooldown: async (
+    base: string,
+    managementKey: string,
+    request: QuotaCooldownRecoveryRequest
+  ): Promise<QuotaCooldownRecoveryResponse> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return { recovered: false };
+    }
+
+    return withUsageServiceError(async () => {
+      const response = await axios.post<QuotaCooldownRecoveryResponse>(
+        buildUrl(base, '/usage-service/quota-cooldowns/recover'),
+        request,
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+        }
+      );
+      return response.data;
     });
   },
 

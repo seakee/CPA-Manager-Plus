@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"unicode"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
+
+var ErrRetainedCoverageIncomplete = errors.New("retained usage projection coverage is incomplete")
 
 const (
 	EventTable       = "usage_monitoring_event_projection_v1"
@@ -47,10 +50,13 @@ func VerifyRetainedEdgeTx(ctx context.Context, tx *sql.Tx, fromMS, toMS int64) e
 	if err := tx.QueryRowContext(ctx, `select schema_version, structure_revision, status, coverage_event_id
 		from usage_monitoring_rollup_state where rollup_name = 'projection_v1'`).Scan(
 		&version, &revision, &status, &coverageID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: missing projection state", ErrRetainedCoverageIncomplete)
+		}
 		return err
 	}
 	if version != 1 || revision != usageidentity.MonitoringProjectionStructureRevision() || status == "clearing" {
-		return fmt.Errorf("retained usage projection is incompatible or rebuilding")
+		return fmt.Errorf("%w: retained usage projection is incompatible or rebuilding", ErrRetainedCoverageIncomplete)
 	}
 	var incomplete bool
 	if err := tx.QueryRowContext(ctx, `select exists (
@@ -63,7 +69,7 @@ func VerifyRetainedEdgeTx(ctx context.Context, tx *sql.Tx, fromMS, toMS int64) e
 		return err
 	}
 	if incomplete {
-		return fmt.Errorf("retained usage projection is missing a deleted edge event")
+		return fmt.Errorf("%w: retained usage projection is missing a deleted edge event", ErrRetainedCoverageIncomplete)
 	}
 	return nil
 }

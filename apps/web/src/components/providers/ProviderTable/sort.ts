@@ -29,6 +29,18 @@ const matchesSelectedModels = (row: ProviderRow, selectedModels: ReadonlySet<str
   return row.modelNames.some((name) => selectedModels.has(name));
 };
 
+const getUsageStatsCoverageRank = (row: ProviderRow): number => {
+  switch (row.usageStatsCoverage) {
+    case 'full':
+      return 0;
+    case 'partial':
+      return 1;
+    case 'unavailable':
+    default:
+      return 2;
+  }
+};
+
 const compareRows = (
   left: ProviderRow,
   right: ProviderRow,
@@ -42,6 +54,11 @@ const compareRows = (
       break;
     }
     case 'recent-success': {
+      // Keep complete statistics ahead of partial/unknown statistics regardless
+      // of sort direction. A keyless provider with unavailable accounting must
+      // never be treated as a real numeric zero.
+      const coverageDiff = getUsageStatsCoverageRank(left) - getUsageStatsCoverageRank(right);
+      if (coverageDiff !== 0) return coverageDiff;
       const diff = left.recentSuccess - right.recentSuccess;
       if (diff !== 0) return applyDirection(diff, sortDirection);
       const nameDiff = left.sortName.localeCompare(right.sortName);

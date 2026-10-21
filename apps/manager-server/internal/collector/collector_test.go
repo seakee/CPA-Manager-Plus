@@ -3,6 +3,7 @@ package collector
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -718,6 +719,241 @@ func TestManagerKeepsFirstUsageInCurrentWindowWhenHeaderBoundaryDrifts(t *testin
 	}
 	if firstCycleEndMS-firstCycleStartMS != durationMS || firstObservedAtMS < firstCycleStartMS {
 		t.Fatal("invalid first-use test fixture")
+	}
+}
+
+func TestManagerKeepsFirstRequestAcrossFiveHourScheduledRollover(t *testing.T) {
+	for _, scenario := range []struct {
+		name              string
+		firstOffset       time.Duration
+		latencyMS         int64
+		previousRequests  int64
+		actualStartOffset time.Duration
+		outOfOrder        bool
+	}{
+		{"main_five_seconds_before_header_start", 10 * time.Second, 8_000, 1, 10 * time.Second, false},
+		{"A_equal_to_header_start", 15 * time.Second, 1_000, 1, 15 * time.Second, false},
+		{"B_after_header_start", 16 * time.Second, 1_000, 1, 15 * time.Second, false},
+		{"C_one_second_before_header_start", 14 * time.Second, 2_000, 1, 14 * time.Second, false},
+		// Start-time attribution puts this call in the old cycle. Its response
+		// headers alone cannot prove which upstream cycle charged the tokens.
+		{"D_started_before_old_end_completed_after_new_start", -2 * time.Second, 20_000, 2, 15 * time.Second, false},
+		{"out_of_order_completion", 10 * time.Second, 20_000, 1, 10 * time.Second, true},
+		{"out_of_order_started_before_old_end_stays_previous", -2 * time.Second, 25_000, 2, 12 * time.Second, true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			// Keep this fixture on one UTC date. Header boundaries come from reset_at
+			// minus window_minutes; usage timestamps retain CPA's request-start time.
+			base := time.Date(2026, time.October, 1, 0, 0, 0, 0, time.UTC)
+			oldEnd := base.Add(5 * time.Hour)
+			providerStart := oldEnd.Add(15 * time.Second)
+			providerEnd := providerStart.Add(5 * time.Hour)
+			firstAt := oldEnd.Add(scenario.firstOffset)
+			secondAt := oldEnd.Add(20 * time.Second)
+			secondLatencyMS := int64(1_000)
+			firstUsed, secondUsed := int64(1), int64(2)
+			if scenario.outOfOrder {
+				secondAt = oldEnd.Add(12 * time.Second)
+				secondLatencyMS = 6_000
+				firstUsed, secondUsed = 2, 1
+			}
+			now := oldEnd.Add(30 * time.Second)
+			ctx := context.Background()
+			db := newTestStore(t)
+			manager := NewManager(testConfig(t, "http"), db)
+			if err := db.SaveModelPrices(ctx, map[string]store.ModelPrice{
+				"gpt-5.6-terra": {Prompt: 1, Completion: 2},
+			}); err != nil {
+				t.Fatalf("save fixed model price: %v", err)
+			}
+			payload := func(id string, at, reset time.Time, input, used, latencyMS int64) string {
+				return fmt.Sprintf(`{
+			"request_id":%q,"timestamp":%q,"latency_ms":%d,
+			"provider":"codex","model":"gpt-5.6-terra",
+			"endpoint":"POST /v1/responses","source":"codex-five-hour.json",
+			"auth_file_snapshot":"codex-five-hour.json",
+			"auth_provider_snapshot":"codex","auth_index":"auth-five-hour",
+			"account_snapshot":"five-hour@example.com",
+			"tokens":{"input_tokens":%d,"output_tokens":1000,"total_tokens":%d},
+			"response_headers":{
+				"X-Codex-Primary-Used-Percent":["%d"],
+				"X-Codex-Primary-Reset-At":["%d"],
+				"X-Codex-Primary-Window-Minutes":["300"]
+			}
+		}`, id, at.UTC().Format(time.RFC3339Nano), latencyMS, input, input+1000, used, reset.Unix())
+			}
+			payloads := []string{
+				payload("scheduled-old", oldEnd.Add(-10*time.Second), oldEnd, 10_000, 80, 1_000),
+				payload("scheduled-first", firstAt, providerEnd, 132_000, firstUsed, scenario.latencyMS),
+				payload("scheduled-second", secondAt, providerEnd, 20_000, secondUsed, secondLatencyMS),
+			}
+			if scenario.outOfOrder {
+				// B completes at 05:00:18; A completes at 05:00:30.
+				// Separate collector calls preserve completion-order delivery.
+				payloads[1], payloads[2] = payloads[2], payloads[1]
+			}
+			// Import one completed call at a time through the normal collector path.
+			for _, item := range payloads {
+				if err := manager.processItems(ctx, RuntimeConfig{}, []string{item}); err != nil {
+					t.Fatalf("process scheduled rollover event: %v", err)
+				}
+			}
+			count, deadLetters, err := db.Counts(ctx)
+			if err != nil || count != 3 || deadLetters != 0 {
+				t.Fatalf("persisted=%d dead_letters=%d err=%v, want 3/0/nil", count, deadLetters, err)
+			}
+			events, err := db.RecentEvents(ctx, 10)
+			if err != nil || len(events) != 3 {
+				t.Fatalf("read persisted events: len=%d err=%v", len(events), err)
+			}
+			wantTimes := map[string]int64{
+				"scheduled-old":   oldEnd.Add(-10 * time.Second).UnixMilli(),
+				"scheduled-first": firstAt.UnixMilli(), "scheduled-second": secondAt.UnixMilli(),
+			}
+			for _, event := range events {
+				want, ok := wantTimes[event.RequestID]
+				if !ok || event.TimestampMS != want || event.AuthFileSnapshot != "codex-five-hour.json" ||
+					event.AuthProviderSnapshot != "codex" || event.AuthIndex != "auth-five-hour" ||
+					event.AccountSnapshot != "five-hour@example.com" || event.Model != "gpt-5.6-terra" ||
+					event.Provider != "codex" || event.ResponseMetadata == nil || event.ResponseMetadata.Quota == nil {
+					t.Fatalf("persisted event lost timestamp, identity, model or quota evidence: %#v", event)
+				}
+				delete(wantTimes, event.RequestID)
+				if event.RequestID == "scheduled-first" {
+					if event.LatencyMS == nil || *event.LatencyMS != scenario.latencyMS {
+						t.Fatalf("first request latency = %v", event.LatencyMS)
+					}
+					t.Logf("first_request.completed_at_ms=%d", event.TimestampMS+*event.LatencyMS)
+				}
+			}
+			account := quotasnapshotsvc.AccountTarget{
+				AccountSnapshot: "five-hour@example.com", AuthFileSnapshot: "codex-five-hour.json",
+				AuthProviderSnapshot: "codex", AuthIndex: "auth-five-hour",
+			}
+			query, err := quotasnapshotsvc.New(db).Query(ctx, quotasnapshotsvc.QueryRequest{
+				NowMS: now.UnixMilli(), Accounts: []quotasnapshotsvc.QueryAccount{{
+					RowKey: "row-five-hour", Provider: "codex", Account: account,
+				}},
+			})
+			if err != nil || len(query.Items) != 1 || len(query.Items[0].Windows) != 1 {
+				t.Fatalf("quota query=%#v err=%v", query, err)
+			}
+			window := query.Items[0].Windows[0]
+			current, previous := window.CurrentCycle, window.PreviousCycle
+			if window.ProviderWindowID != "five-hour" || window.ModelScopeKind != "family" || window.ModelScopeKey != "codex_main" || window.Stale ||
+				current == nil || previous == nil || previous.ActualEndMS == nil ||
+				current.ScheduledStartMS == nil || current.ScheduledEndMS == nil {
+				t.Fatalf("missing queryable five-hour lifecycle: %#v", window)
+			}
+			t.Logf("old_cycle.actual_start_ms=%d old_cycle.actual_end_ms=%d end_reason=%s",
+				previous.ActualStartMS, *previous.ActualEndMS, previous.EndReason)
+			t.Logf("current_cycle.actual_start_ms=%d current_cycle.scheduled_start_ms=%d current_cycle.scheduled_end_ms=%d",
+				current.ActualStartMS, *current.ScheduledStartMS, *current.ScheduledEndMS)
+			t.Logf("first_request.timestamp_ms=%d second_request.timestamp_ms=%d", firstAt.UnixMilli(), secondAt.UnixMilli())
+			if previous.ActualStartMS != base.UnixMilli() || *previous.ActualEndMS != oldEnd.UnixMilli() ||
+				previous.EndReason != "scheduled" || *current.ScheduledStartMS != providerStart.UnixMilli() ||
+				*current.ScheduledEndMS != providerEnd.UnixMilli() {
+				t.Fatalf("unexpected provider timing or scheduled rollover: previous=%#v current=%#v", previous, current)
+			}
+			if current.ActualStartMS != oldEnd.Add(scenario.actualStartOffset).UnixMilli() {
+				t.Errorf("actual_start_ms=%d, want %d after both requests", current.ActualStartMS, oldEnd.Add(scenario.actualStartOffset).UnixMilli())
+			}
+			monitoring := monitoringsvc.New(db)
+			history, err := monitoring.AccountHistory(ctx, monitoringsvc.AccountHistoryRequest{
+				CatchUp: true, Accounts: []monitoringsvc.AccountHistoryTarget{{
+					RowKey: "row-five-hour", AccountSnapshot: account.AccountSnapshot,
+					AuthFileSnapshot: account.AuthFileSnapshot, AuthProviderSnapshot: account.AuthProviderSnapshot,
+					AuthIndex: account.AuthIndex,
+				}},
+			})
+			if err != nil || len(history.Items) != 1 || !history.Items[0].Matched || history.Items[0].TotalRequests != 3 {
+				t.Fatalf("account history=%#v err=%v", history, err)
+			}
+			snapshots, err := db.QuotaSnapshots.ListCandidates(ctx, history.Items[0].AccountKey, "codex", 10)
+			wantCandidates := 3
+			if scenario.outOfOrder {
+				// ListCandidates excludes historical observations; the three
+				// persisted usage events were checked independently above.
+				wantCandidates = 2
+			}
+			if err != nil || len(snapshots) != wantCandidates {
+				t.Fatalf("quota evidence candidates: count=%d err=%v, want %d", len(snapshots), err, wantCandidates)
+			}
+			for _, snapshot := range snapshots {
+				wantCycleID := current.ID
+				if snapshot.SourceObservationID == "scheduled-old" {
+					wantCycleID = previous.ID
+				}
+				if snapshot.CycleID != wantCycleID {
+					t.Fatalf("Header evidence assigned to wrong cycle: %#v, want cycle %d", snapshot, wantCycleID)
+				}
+				t.Logf("accepted_header.request=%s cycle_id=%d", snapshot.SourceObservationID, snapshot.CycleID)
+			}
+			target := func(key, period string, fromMS, toMS int64) monitoringsvc.AccountWindowUsageTarget {
+				return monitoringsvc.AccountWindowUsageTarget{
+					RequestKey: key, RowKey: "row-five-hour", ProviderWindowID: window.ProviderWindowID,
+					Period: period, FromMS: fromMS, ToMS: toMS,
+					ModelScope: monitoringsvc.AccountWindowModelScope{
+						Kind: window.ModelScopeKind, Key: window.ModelScopeKey, Models: window.ModelIDs, Complete: true,
+					},
+					AccountSnapshot: account.AccountSnapshot, AuthFileSnapshot: account.AuthFileSnapshot,
+					AuthProviderSnapshot: account.AuthProviderSnapshot, AuthIndex: account.AuthIndex,
+				}
+			}
+			result, err := monitoring.AccountWindowUsage(ctx, monitoringsvc.AccountWindowUsageRequest{
+				Windows: []monitoringsvc.AccountWindowUsageTarget{
+					target("previous", "previous", previous.ActualStartMS, *previous.ActualEndMS),
+					target("current", "current", current.ActualStartMS, now.UnixMilli()),
+					target("all", "current", base.UnixMilli(), now.UnixMilli()),
+				},
+			})
+			if err != nil || len(result.Items) != 3 {
+				t.Fatalf("window usage=%#v err=%v", result, err)
+			}
+			oldUsage, currentUsage, allUsage := result.Items[0], result.Items[1], result.Items[2]
+			for _, item := range result.Items {
+				if item.ScopeMatchStatus != "complete" || item.UnmatchedRequests != 0 {
+					t.Fatalf("incomplete model scope match: %#v", item)
+				}
+			}
+			for _, event := range events {
+				inPrevious := event.TimestampMS >= previous.ActualStartMS && event.TimestampMS < *previous.ActualEndMS
+				inCurrent := event.TimestampMS >= current.ActualStartMS && event.TimestampMS < now.UnixMilli()
+				t.Logf("request=%s timestamp_ms=%d in_previous=%t in_current=%t", event.RequestID, event.TimestampMS, inPrevious, inCurrent)
+				if inPrevious && inCurrent {
+					t.Errorf("request %s belongs to both query intervals", event.RequestID)
+				}
+			}
+			t.Logf("previous_window.total_requests=%d current_window.total_requests=%d account_total_requests=%d",
+				oldUsage.TotalRequests, currentUsage.TotalRequests, history.Items[0].TotalRequests)
+			t.Logf("costs: previous=%.6f current=%.6f all=%.6f gap=%.6f; tokens: previous=%d current=%d all=%d",
+				oldUsage.TotalCost, currentUsage.TotalCost, allUsage.TotalCost,
+				allUsage.TotalCost-oldUsage.TotalCost-currentUsage.TotalCost,
+				oldUsage.TotalTokens, currentUsage.TotalTokens, allUsage.TotalTokens)
+			if !allUsage.Matched || allUsage.TotalRequests != 3 || allUsage.TotalTokens != 165_000 ||
+				math.Abs(allUsage.TotalCost-0.168) > 1e-9 || history.Items[0].TotalCost == nil ||
+				math.Abs(*history.Items[0].TotalCost-allUsage.TotalCost) > 1e-9 {
+				t.Fatalf("account identity or price calculation mismatch: all=%#v history=%#v", allUsage, history.Items[0])
+			}
+			wantPreviousTokens, wantCurrentTokens := int64(11_000), int64(154_000)
+			wantPreviousCost, wantCurrentCost := 0.012, 0.156
+			if scenario.previousRequests == 2 {
+				wantPreviousTokens, wantCurrentTokens = 144_000, 21_000
+				wantPreviousCost, wantCurrentCost = 0.146, 0.022
+			}
+			if !oldUsage.Matched || oldUsage.TotalRequests != scenario.previousRequests || oldUsage.TotalTokens != wantPreviousTokens ||
+				math.Abs(oldUsage.TotalCost-wantPreviousCost) > 1e-9 {
+				t.Errorf("previous window = %#v, want %d requests", oldUsage, scenario.previousRequests)
+			}
+			if !currentUsage.Matched || currentUsage.TotalRequests != 3-scenario.previousRequests || currentUsage.TotalTokens != wantCurrentTokens ||
+				math.Abs(currentUsage.TotalCost-wantCurrentCost) > 1e-9 {
+				t.Errorf("current window = %#v, want %d requests, %d tokens and $%.3f", currentUsage, 3-scenario.previousRequests, wantCurrentTokens, wantCurrentCost)
+			}
+			if oldUsage.TotalRequests+currentUsage.TotalRequests != allUsage.TotalRequests {
+				t.Errorf("cycle partition lost or duplicated requests: previous=%d current=%d all=%d",
+					oldUsage.TotalRequests, currentUsage.TotalRequests, allUsage.TotalRequests)
+			}
+		})
 	}
 }
 

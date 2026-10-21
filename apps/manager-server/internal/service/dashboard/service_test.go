@@ -26,7 +26,7 @@ func (r unavailableDashboardPricing) LoadHourlyRowsTx(context.Context, *sql.Tx, 
 }
 
 func (r unavailableDashboardPricing) LoadHourlyRowsFromEventsTx(context.Context, *sql.Tx, usagepricing.HourlyFilter) ([]usagepricing.HourlyRow, error) {
-	return nil, errors.New("isolated retained pricing source unavailable")
+	return nil, store.ErrUsagePricingCoverageIncomplete
 }
 
 func TestSummaryFailsClosedWhenPricingCoverageIsIncomplete(t *testing.T) {

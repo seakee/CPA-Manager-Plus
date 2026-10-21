@@ -55,6 +55,37 @@ describe('key disambiguation helpers', () => {
 });
 
 describe('buildMonitoringSourceDisplay', () => {
+  it('uses provider snapshots to disambiguate failure sources for shared keys (#1013)', () => {
+    const firstKey = 'sk-1000000000000001';
+    const secondKey = 'sk-2000000000000002';
+    const sourceInfoMap = buildSourceInfoMap({
+      codexApiKeys: [firstKey, secondKey].map((apiKey) => ({
+        apiKey,
+        baseUrl: 'https://relay-a.example/v1',
+      })),
+      claudeApiKeys: [secondKey, firstKey].map((apiKey) => ({
+        apiKey,
+        baseUrl: 'https://relay-a.example',
+        excludedModels: ['*'],
+      })),
+    });
+    const context = { ...emptyContext, sourceInfoMap };
+
+    const codex = buildMonitoringSourceDisplay(
+      { source: 'm:sk-1...0001', authLabelSnapshot: 'codex', authProviderSnapshot: 'codex' },
+      context
+    );
+    const claude = buildMonitoringSourceDisplay(
+      { source: 'm:sk-1...0001', authLabelSnapshot: 'claude', authProviderSnapshot: 'claude' },
+      context
+    );
+
+    expect(codex.primary).toBe('relay-a.example #1');
+    expect(codex.provider).toBe('codex');
+    expect(claude.primary).toBe('relay-a.example #2');
+    expect(claude.provider).toBe('claude');
+  });
+
   it('keeps generic xAI provider labels secondary to the account identity', () => {
     const authMetaMap = new Map<string, MonitoringAuthMeta>([
       [

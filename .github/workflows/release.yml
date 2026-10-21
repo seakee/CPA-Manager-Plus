@@ -222,6 +222,9 @@ jobs:
       - name: Check demo isolation
         run: npm run check:demo-isolation
 
+      - name: Check web icon artifact
+        run: npm run check:web-icons
+
       - name: Build native release packages
         run: bin/release/package-native.sh
         env:

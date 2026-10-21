@@ -57,6 +57,7 @@ describe('accountsPagePresentation', () => {
     expect(parsePriorityValue('1.2')).toBeNull();
     expect(formatHistorySuccessRate(0.975)).toBe('97.5%');
     expect(formatMoney(12.34)).toBe('$12.34');
+    expect(formatMoney(null)).toBe('-');
     expect(quotaStatusLabelKey('exhausted')).toBe('accounts.quota_status_exhausted');
   });
 

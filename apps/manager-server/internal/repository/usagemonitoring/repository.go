@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	sqliteutil "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/sqliteutil"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageevent"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageprojection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
@@ -308,6 +309,9 @@ func (r *repository) RecordFailure(ctx context.Context, rollupName string, rollu
 	}
 	if rollupName != StatsRollupName && rollupName != MetadataRollupName && rollupName != ProjectionRollupName && rollupName != usageevent.CodexLegacyIdentityRollupName {
 		return fmt.Errorf("unknown usage monitoring rollup %q", rollupName)
+	}
+	if sqliteutil.IsBusyError(rollupErr) {
+		return nil
 	}
 	_, err := r.db.ExecContext(ctx, `update usage_monitoring_rollup_state set
 		status = case

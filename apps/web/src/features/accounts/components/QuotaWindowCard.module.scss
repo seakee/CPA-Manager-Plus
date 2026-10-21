@@ -328,6 +328,14 @@
   text-align: center;
 }
 
+.modelEmptyUsage {
+  margin-top: $spacing-xs;
+  padding: 7px 2px;
+  color: var(--color-text-tertiary, var(--gray-500));
+  font-size: 10px;
+  line-height: 15px;
+}
+
 .modelWarning {
   display: flex;
   align-items: flex-start;

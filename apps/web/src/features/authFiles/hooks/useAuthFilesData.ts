@@ -85,6 +85,8 @@ export type UseAuthFilesDataResult = {
   selectedFiles: Set<string>;
   selectionCount: number;
   loading: boolean;
+  initialLoading: boolean;
+  hasLoaded: boolean;
   error: string;
   uploading: boolean;
   authJsonPasteSaving: boolean;
@@ -762,6 +764,7 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
 
   const [files, setFiles] = useState<AuthFileItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [hasLoaded, setHasLoaded] = useState(false);
   const [error, setError] = useState('');
   const [uploading, setUploading] = useState(false);
   const [authJsonPasteSaving, setAuthJsonPasteSaving] = useState(false);
@@ -803,6 +806,7 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
     authJsonPasteSavingRef.current = false;
     deleteOperationRef.current = null;
     commitFiles([]);
+    setHasLoaded(false);
     setSelectedFiles(new Set());
     setLoading(true);
     setError('');
@@ -962,15 +966,21 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
       setLoading(true);
       setError('');
       try {
-        const data = requestScope
-          ? await authFilesApi.list(requestScope)
-          : await authFilesApi.list();
+        // A list begun before a successful local mutation must not undo its
+        // patch. Re-read until the response belongs to the current revision.
+        let data: Awaited<ReturnType<typeof authFilesApi.list>>;
+        let revision: number;
+        do {
+          revision = filesRevisionRef.current;
+          data = requestScope ? await authFilesApi.list(requestScope) : await authFilesApi.list();
+        } while (isCurrentRequest() && revision !== filesRevisionRef.current);
         if (!isCurrentRequest()) {
           if (options?.throwOnError) throw new Error(t('notification.refresh_failed'));
           return;
         }
         const nextFiles = Array.isArray(data?.files) ? data.files : [];
         commitFiles(nextFiles);
+        setHasLoaded(true);
         return nextFiles;
       } catch (err: unknown) {
         if (!isCurrentRequest()) {
@@ -2189,6 +2199,8 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
     selectedFiles,
     selectionCount,
     loading,
+    initialLoading: loading && !hasLoaded,
+    hasLoaded,
     error,
     uploading,
     authJsonPasteSaving,

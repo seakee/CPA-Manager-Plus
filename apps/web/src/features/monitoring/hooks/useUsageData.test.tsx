@@ -15,12 +15,15 @@ const mocks = vi.hoisted(() => {
     loadLocalPrices: vi.fn(),
     saveLocalPrices: vi.fn(),
     clearLocalPrices: vi.fn(),
+    notify: vi.fn(),
   };
 });
 
 vi.mock('@/hooks/usePanelFeatureAvailability', () => ({
   usePanelFeatureAvailability: () => mocks.availability,
 }));
+vi.mock('@/i18n', () => ({ default: { t: (key: string) => key } }));
+vi.mock('@/stores/useNotificationStore', () => ({ useNotificationStore: { getState: () => ({ showNotification: mocks.notify }) } }));
 
 vi.mock('@/stores', () => ({
   useAuthStore: (selector: (state: { managementKey: string }) => unknown) =>
@@ -129,6 +132,31 @@ describe('useUsageData model price persistence', () => {
       changedPrices,
       'test-key'
     );
+  });
+
+  it('retains aliases during pending/failure, replaces success, and rejects old manager replies', async () => {
+    mocks.getApiKeyAliases.mockResolvedValueOnce({ items: [{ apiKeyHash: 'hash-a', alias: 'last-good' }] });
+    await renderHook();
+    let reject!: (error: Error) => void;
+    mocks.getApiKeyAliases.mockReturnValueOnce(new Promise((_resolve, no) => { reject = no; }));
+    let pending!: Promise<void>;
+    act(() => { pending = latest.loadApiKeyAliases(); });
+    expect(latest.apiKeyAliases[0].alias).toBe('last-good');
+    await act(async () => { reject(new Error('offline')); await pending; });
+    expect(latest.apiKeyAliases[0].alias).toBe('last-good');
+    expect(mocks.notify).toHaveBeenCalledWith('notification.refresh_failed', 'error');
+    let resolve!: (response: { items: Array<{ apiKeyHash: string; alias: string }> }) => void;
+    mocks.getApiKeyAliases.mockReturnValueOnce(new Promise((yes) => { resolve = yes; }));
+    act(() => { pending = latest.loadApiKeyAliases(); });
+    mocks.getApiKeyAliases.mockReturnValueOnce(new Promise(() => {}));
+    mocks.availability = { ...mocks.availability, managerServiceBase: 'http://new-manager.local' };
+    await act(async () => { renderer!.update(<Harness />); });
+    expect(latest.apiKeyAliases).toEqual([]);
+    await act(async () => { resolve({ items: [{ apiKeyHash: 'old-hash', alias: 'stale' }] }); await pending; });
+    expect(latest.apiKeyAliases).toEqual([]);
+    mocks.getApiKeyAliases.mockResolvedValueOnce({ items: [{ apiKeyHash: 'new-hash', alias: 'new-scope' }] });
+    await act(async () => { await latest.loadApiKeyAliases(); });
+    expect(latest.apiKeyAliases[0].alias).toBe('new-scope');
   });
 
   it.each([

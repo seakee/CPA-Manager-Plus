@@ -252,6 +252,27 @@ func TestUsageMonitoringProjectionCatchUpResumesAfterRestart(t *testing.T) {
 	}
 }
 
+func TestUsageMonitoringSQLiteBusyDoesNotPoisonState(t *testing.T) {
+	_, db := newMonitoringRepositoryStore(t)
+	ctx := context.Background()
+
+	before, err := db.UsageMonitoringState(ctx, monitoringrepo.StatsRollupName)
+	if err != nil {
+		t.Fatalf("read monitoring state before sqlite busy: %v", err)
+	}
+	if err := db.RecordUsageMonitoringFailure(ctx, monitoringrepo.StatsRollupName, errors.New("database table is locked (SQLITE_LOCKED)"), 10_000); err != nil {
+		t.Fatalf("record monitoring sqlite busy: %v", err)
+	}
+	after, err := db.UsageMonitoringState(ctx, monitoringrepo.StatsRollupName)
+	if err != nil {
+		t.Fatalf("read monitoring state after sqlite busy: %v", err)
+	}
+	if after.Status != before.Status || after.CoverageEventID != before.CoverageEventID ||
+		after.TargetEventID != before.TargetEventID || after.LastError != before.LastError {
+		t.Fatalf("monitoring state changed after sqlite busy: before=%#v after=%#v", before, after)
+	}
+}
+
 func TestUsageMonitoringProjectionPreservesRebuildStateAcrossFailure(t *testing.T) {
 	sqlDB, db := newMonitoringRepositoryStore(t)
 	ctx := context.Background()

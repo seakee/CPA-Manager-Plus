@@ -156,7 +156,46 @@ describe('buildProviderRows', () => {
     const openaiRow = rows.find((row) => row.kind === 'openai');
 
     expect(codexRow?.stats).toEqual({ success: 5, failure: 2 });
+    expect(codexRow?.usageStatsCoverage).toBe('full');
     expect(openaiRow?.stats).toEqual({ success: 3, failure: 3 });
+    expect(openaiRow?.keyCount).toBe(2);
+    expect(openaiRow?.usageStatsCoverage).toBe('full');
+  });
+
+  it('does not interpret unsupported empty-key usage records as keyless OpenAI stats', () => {
+    const baseUrl = 'https://keyless.example.com/v1';
+    const usageByProvider: ProviderRecentUsageMap = new Map([
+      ['keyless', new Map([
+        [buildRecentRequestCompositeKey(baseUrl, ''), {
+          success: 8,
+          failed: 1,
+          recentRequests: [],
+        }],
+      ])],
+    ]);
+    const rows = buildProviderRows({
+      ...emptyInput,
+      openai: [{ name: 'keyless', baseUrl, apiKeyEntries: [] }],
+      usageByProvider,
+    });
+
+    expect(rows[0].stats).toEqual({ success: 0, failure: 0 });
+    expect(rows[0].keyCount).toBe(0);
+    expect(rows[0].usageStatsCoverage).toBe('unavailable');
+  });
+
+  it('marks mixed keyed/keyless OpenAI rows as partial statistics', () => {
+    const rows = buildProviderRows({
+      ...emptyInput,
+      openai: [{
+        name: 'mixed-keyless',
+        baseUrl: 'https://mixed-keyless.example/v1',
+        apiKeyEntries: [{ apiKey: 'tracked-key' }, { apiKey: '', proxyUrl: 'socks5://proxy:1080' }],
+      }],
+    });
+
+    expect(rows[0].keyCount).toBe(1);
+    expect(rows[0].usageStatsCoverage).toBe('partial');
   });
 
   it('keeps row keys unique across kinds with identical configs', () => {

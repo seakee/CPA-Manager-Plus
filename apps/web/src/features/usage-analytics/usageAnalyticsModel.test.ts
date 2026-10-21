@@ -37,6 +37,7 @@ import {
   computeRowAverageCostPerCall,
   computeRowCacheHitRate,
   getUsageCacheTokens,
+  getUsagePresentationRangeScopeKey,
   getUsageRangeBounds,
   getSelectableApiKeyHash,
   maskApiKeyHash,
@@ -88,6 +89,28 @@ describe('usage analytics request model', () => {
         { apiKeyHash: 'unknown-client-api-key:monitoring-link' }
       )
     ).not.toContain('api_key_hash');
+  });
+
+  it('keeps rolling-range presentation stable on refresh but separates new calendar days', () => {
+    const rollingFilters = { timeRange: '24h' as const, customRange: null };
+    const firstRolling = getUsageRangeBounds(rollingFilters, NOW_MS);
+    const nextRolling = getUsageRangeBounds(rollingFilters, NOW_MS + 60_000);
+    expect(nextRolling).not.toEqual(firstRolling);
+    expect(getUsagePresentationRangeScopeKey(rollingFilters, nextRolling)).toBe(
+      getUsagePresentationRangeScopeKey(rollingFilters, firstRolling)
+    );
+
+    const todayFilters = { timeRange: 'today' as const, customRange: null };
+    const today = getUsageRangeBounds(todayFilters, localDateMs(20, 12));
+    const tomorrow = getUsageRangeBounds(todayFilters, localDateMs(21, 1));
+    expect(getUsagePresentationRangeScopeKey(todayFilters, tomorrow)).not.toBe(
+      getUsagePresentationRangeScopeKey(todayFilters, today)
+    );
+
+    const customFilters = { timeRange: 'custom' as const, customRange: null };
+    expect(
+      getUsagePresentationRangeScopeKey(customFilters, { fromMs: 1000, toMs: 2000 })
+    ).not.toBe(getUsagePresentationRangeScopeKey(customFilters, { fromMs: 2000, toMs: 3000 }));
   });
 
   it('resolves time ranges and default granularity rules', () => {

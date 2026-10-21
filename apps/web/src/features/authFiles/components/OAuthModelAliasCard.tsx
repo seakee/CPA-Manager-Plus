@@ -23,6 +23,7 @@ export type OAuthModelAliasCardProps = {
   onEditProvider: (provider?: string) => void;
   onDeleteProvider: (provider: string) => void;
   loadState: OAuthConfigLoadState;
+  hasLoaded?: boolean;
   modelAlias: Record<string, OAuthModelAliasEntry[]>;
   allProviderModels: Record<string, AuthFileModelItem[]>;
   onUpdate: (provider: string, sourceModel: string, newAlias: string) => Promise<void>;
@@ -60,6 +61,7 @@ export function OAuthModelAliasCard(props: OAuthModelAliasCardProps) {
     onDeleteAlias,
   } = props;
   const writesDisabled = disableControls || loadState !== 'ready';
+  const hasLoaded = props.hasLoaded ?? Object.keys(modelAlias).length > 0;
   const viewModeDisabled = loadState !== 'ready';
   const normalizedSearch = search.trim().toLowerCase();
   const entries = useMemo(
@@ -127,7 +129,7 @@ export function OAuthModelAliasCard(props: OAuthModelAliasCardProps) {
       {loadState === 'ready' ? (
         <div className={styles.cardScopeHint}>{t('oauth_model_alias.scope_hint')}</div>
       ) : null}
-      {loadState === 'ready' && entries.length > 0 ? (
+      {hasLoaded && entries.length > 0 ? (
         <div className={styles.ruleToolbar}>
           <div className={styles.ruleSummary} role="status">
             {viewMode === 'list' && normalizedSearch
@@ -154,12 +156,20 @@ export function OAuthModelAliasCard(props: OAuthModelAliasCardProps) {
           ) : null}
         </div>
       ) : null}
+      {loadState === 'error' && hasLoaded ? (
+        <div role="alert">
+          {t('notification.refresh_failed')}{' '}
+          <Button variant="secondary" size="sm" onClick={() => void onRetry()}>
+            {t('common.retry')}
+          </Button>
+        </div>
+      ) : null}
       {loadState === 'unsupported' ? (
         <EmptyState
           title={t('oauth_model_alias.upgrade_required_title')}
           description={t('oauth_model_alias.upgrade_required_desc')}
         />
-      ) : loadState === 'error' ? (
+      ) : loadState === 'error' && !hasLoaded ? (
         <EmptyState
           title={t('notification.refresh_failed')}
           action={
@@ -168,7 +178,7 @@ export function OAuthModelAliasCard(props: OAuthModelAliasCardProps) {
             </Button>
           }
         />
-      ) : loadState === 'loading' ? (
+      ) : loadState === 'loading' && !hasLoaded ? (
         <EmptyState title={t('common.loading')} />
       ) : viewMode === 'diagram' ? (
         Object.keys(modelAlias).length === 0 ? (

@@ -459,16 +459,12 @@ func (s *Service) stabilizeNewDerivedFixedBoundaries(
 			})
 		}
 	}
-	for key, locations := range grouped {
-		candidates, err := s.store.QuotaSnapshots.ListCandidates(
-			ctx,
-			key.accountKey,
-			key.provider,
-			maxSnapshotsPerQuery,
-		)
-		if err != nil {
-			return err
-		}
+	for _, locations := range grouped {
+		// Historical database candidates cannot participate in this pre-write
+		// stabilization because account_quota_snapshots does not persist
+		// InventoryScopeKey. Keep only candidates from the current Write batch,
+		// which retain the scope needed by sameHeaderWindowCycle.
+		candidates := make([]model.AccountQuotaSnapshot, 0, len(locations))
 		sort.SliceStable(locations, func(i, j int) bool {
 			leftLocation := locations[i]
 			rightLocation := locations[j]

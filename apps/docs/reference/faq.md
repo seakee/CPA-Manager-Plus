@@ -219,6 +219,8 @@ http://cli-proxy-api:8317
 
 ```text
 /management.html        -> CPAMP
+/favicon.ico             -> CPAMP
+/apple-touch-icon.png    -> CPAMP
 /usage-service/*        -> CPAMP
 /v0/management/*        -> CPAMP
 /v1/*                   -> CPA

@@ -22,8 +22,12 @@ vi.mock('@/features/monitoring/hooks/useUsageData', () => ({
   useUsageData: () => ({ apiKeyAliases: [], loadApiKeyAliases: vi.fn() }),
 }));
 
+const monitoringMetaMocks = vi.hoisted(() => ({
+  load: vi.fn(),
+}));
+
 vi.mock('@/features/monitoring/services/monitoringMetaService', () => ({
-  loadMonitoringMetaPayload: () => Promise.resolve({ authFiles: [], channels: [] }),
+  loadMonitoringMetaPayload: monitoringMetaMocks.load,
 }));
 
 vi.mock('@/stores', () => ({
@@ -86,6 +90,8 @@ describe('useUsageAnalytics request orchestration', () => {
   let selectorError = '';
   let credentialTimelineError = '';
   let credentialTimelineLoading = false;
+  let emptyAuxiliarySnapshot = false;
+  let auxiliaryScopeStale = false;
   let apiKeyTimelineAvailable = true;
   let mainTimelineBucketCalls = 5;
   let apiKeyStats: MonitoringAnalyticsApiKeyStatRow[] = [createApiKeyStatRow()];
@@ -107,6 +113,7 @@ describe('useUsageAnalytics request orchestration', () => {
             {
               id: 'credential-a.json',
               auth_file_snapshot: 'credential-a.json',
+              auth_index: 'auth-a',
               calls: 10,
               success_calls: 9,
               failure_calls: 1,
@@ -151,7 +158,9 @@ describe('useUsageAnalytics request orchestration', () => {
       enabled: Boolean(params.fromMs && params.toMs),
       loading: credentialTimeline ? credentialTimelineLoading : false,
       error: selectors ? selectorError : credentialTimeline ? credentialTimelineError : '',
-      data: selectors
+      data: emptyAuxiliarySnapshot && !main && !selectors
+        ? emptyAnalyticsResponse
+        : selectors
         ? selectorError
           ? null
           : {
@@ -203,7 +212,7 @@ describe('useUsageAnalytics request orchestration', () => {
                   ],
                 }
               : null,
-      dataStale: false,
+      dataStale: !main && !selectors && auxiliaryScopeStale,
       lastRefreshedAt: null,
       serviceBase: 'http://manager.local',
       unavailableReason: '',
@@ -228,6 +237,8 @@ describe('useUsageAnalytics request orchestration', () => {
     selectorError = '';
     credentialTimelineError = '';
     credentialTimelineLoading = false;
+    emptyAuxiliarySnapshot = false;
+    auxiliaryScopeStale = false;
     apiKeyTimelineAvailable = true;
     mainTimelineBucketCalls = 5;
     apiKeyStats = [createApiKeyStatRow()];
@@ -235,6 +246,13 @@ describe('useUsageAnalytics request orchestration', () => {
     mainRefresh.mockReset();
     selectorRefresh.mockReset();
     auxiliaryRefresh.mockReset();
+    monitoringMetaMocks.load.mockReset().mockResolvedValue({
+      authFiles: [],
+      authFilesLoaded: true,
+      channels: [],
+      channelsLoaded: true,
+      error: '',
+    });
     useMonitoringAnalyticsMock.mockReset();
     useMonitoringAnalyticsMock.mockImplementation(resultFor);
   });
@@ -555,5 +573,81 @@ describe('useUsageAnalytics request orchestration', () => {
     expect(latestResult?.credentialTrendLoading).toBe(false);
     expect(latestResult?.credentialTrendError).toBe('timeline failed');
     expect(latestResult?.credentialRows).toHaveLength(1);
+  });
+
+  it('retains last-good metadata when a manual metadata refresh partially fails', async () => {
+    monitoringMetaMocks.load.mockResolvedValueOnce({
+      authFiles: [
+        {
+          name: 'credential-a.json',
+          auth_index: 'auth-a',
+          account: 'retained@example.com',
+          provider: 'codex',
+        },
+      ],
+      authFilesLoaded: true,
+      channels: [
+        {
+          key: 'retained:0',
+          name: 'retained-channel',
+          baseUrl: 'https://retained.test',
+          host: 'retained.test',
+          disabled: false,
+          authIndices: ['auth-a'],
+          modelNames: [],
+        },
+      ],
+      channelsLoaded: true,
+      error: '',
+    });
+
+    await renderHook();
+    await act(async () => {
+      latestResult?.setActiveTab('credentials');
+      await Promise.resolve();
+    });
+    expect(latestResult?.credentialRows[0]).toMatchObject({
+      label: 'credential-a.json',
+      account: 'retained@example.com',
+      provider: 'codex',
+      authIndex: 'auth-a',
+    });
+
+    monitoringMetaMocks.load.mockResolvedValueOnce({
+      authFiles: [],
+      authFilesLoaded: false,
+      channels: [],
+      channelsLoaded: false,
+      error: 'meta offline',
+    });
+    await act(async () => {
+      latestResult?.refresh();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(latestResult?.credentialRows[0]).toMatchObject({
+      label: 'credential-a.json',
+      account: 'retained@example.com',
+      provider: 'codex',
+      authIndex: 'auth-a',
+    });
+    expect(latestResult?.error).toBe('meta offline');
+  });
+
+  it('recognizes successful empty auxiliary snapshots but rejects them after scope invalidation', async () => {
+    emptyAuxiliarySnapshot = true;
+    await renderHook();
+    await act(async () => { latestResult!.setActiveTab('credentials'); });
+    expect(latestResult!.credentialTrendSeries).toEqual([]);
+    expect(latestResult!.credentialTrendLoaded).toBe(true);
+    expect(latestResult!.heatmapDateLoaded).toBe(true);
+    credentialTimelineLoading = true;
+    await act(async () => { latestResult!.setSelectedCredentialId('credential-a.json'); });
+    expect(latestResult!.credentialTrendLoaded).toBe(true);
+    auxiliaryScopeStale = true;
+    await act(async () => { latestResult!.setSelectedCredentialId('credential-b.json'); });
+    expect(latestResult!.credentialTrendLoaded).toBe(false);
+    expect(latestResult!.heatmapDateLoaded).toBe(false);
   });
 });

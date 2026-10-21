@@ -7,6 +7,7 @@ import {
   classifyAccountQuotaRefreshEvidence,
   classifyAccountRequestEvidence,
   getAccountRequestCredentialEvidence,
+  hasAccountNonSpendControlQuotaLimitEvidence,
   hasAccountQuotaLimitEvidence,
   isAccountCredentialStatusProblemCurrent,
   isAccountInspectionAuthenticationFailure,
@@ -1483,6 +1484,59 @@ describe('accountHealthEvidence', () => {
       hasAccountQuotaLimitEvidence(
         makeRow({ quota: { ...makeRow().quota, creditsOverageLimitReached: true } })
       )
+    ).toBe(true);
+  });
+
+  it('separates spend-control-only limits from competing quota evidence', () => {
+    const spendControlOnly = makeRow({
+      quota: { ...makeRow().quota, spendControlReached: true },
+    });
+    expect(hasAccountNonSpendControlQuotaLimitEvidence(spendControlOnly)).toBe(false);
+    expect(hasAccountQuotaLimitEvidence(spendControlOnly)).toBe(true);
+
+    expect(
+      hasAccountNonSpendControlQuotaLimitEvidence(
+        makeRow({
+          quota: {
+            ...makeRow().quota,
+            spendControlReached: true,
+            creditsOverageLimitReached: true,
+          },
+        })
+      )
+    ).toBe(true);
+    expect(
+      hasAccountNonSpendControlQuotaLimitEvidence(
+        makeRow({
+          quota: {
+            ...makeRow().quota,
+            spendControlReached: true,
+            rateLimitReachedType: 'primary',
+          },
+        })
+      )
+    ).toBe(true);
+    expect(
+      hasAccountNonSpendControlQuotaLimitEvidence(
+        makeRow({
+          statusMessage: 'quota exceeded',
+          updatedAtMs: 3_000,
+          quota: {
+            ...makeRow().quota,
+            spendControlReached: true,
+            fetchedAtMs: 2_000,
+          },
+        })
+      )
+    ).toBe(true);
+    expect(
+      hasAccountNonSpendControlQuotaLimitEvidence(spendControlOnly, {
+        latestRequest: makeRequest({
+          timestamp_ms: 3_000,
+          failed: true,
+          fail_status_code: 429,
+        }),
+      })
     ).toBe(true);
   });
 

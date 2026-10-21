@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
-	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagepricing"
 )
 
 var ErrStructureChangeAfterRawDeletion = errors.New("model price structure cannot change after archived raw usage has been deleted")
@@ -251,12 +251,11 @@ func (r *repository) ReplaceAll(ctx context.Context, prices map[string]model.Mod
 	beforeRevision := model.ModelPriceStructureRevision(beforePrices)
 	afterRevision := model.ModelPriceStructureRevision(normalizedPrices)
 	if beforeRevision != afterRevision {
-		hasDeletedRaw, err := sqliterepo.HistoricalRawDeletionExists(tx)
-		if err != nil {
+		if err := usagepricing.VerifyRetainedPricingRebuildSourceTx(ctx, tx); err != nil {
+			if errors.Is(err, usagepricing.ErrRetainedPricingHistoryIncomplete) {
+				return fmt.Errorf("%w: %v", ErrStructureChangeAfterRawDeletion, err)
+			}
 			return err
-		}
-		if hasDeletedRaw {
-			return ErrStructureChangeAfterRawDeletion
 		}
 	}
 
@@ -463,12 +462,11 @@ func (r *repository) UpsertSynced(ctx context.Context, prices map[string]model.M
 	beforeRevision := model.ModelPriceStructureRevision(beforePrices)
 	afterRevision := model.ModelPriceStructureRevision(afterPrices)
 	if beforeRevision != afterRevision {
-		hasDeletedRaw, err := sqliterepo.HistoricalRawDeletionExists(tx)
-		if err != nil {
+		if err := usagepricing.VerifyRetainedPricingRebuildSourceTx(ctx, tx); err != nil {
+			if errors.Is(err, usagepricing.ErrRetainedPricingHistoryIncomplete) {
+				return model.ModelPriceSyncResult{}, fmt.Errorf("%w: %v", ErrStructureChangeAfterRawDeletion, err)
+			}
 			return model.ModelPriceSyncResult{}, err
-		}
-		if hasDeletedRaw {
-			return model.ModelPriceSyncResult{}, ErrStructureChangeAfterRawDeletion
 		}
 	}
 	sort.Strings(result.Preserved)

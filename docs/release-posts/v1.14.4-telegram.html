@@ -1,0 +1,14 @@
+🚀 <b>10 月 6 日 · v1.14.4</b>
+
+🛠 <b>xAI、Claude 鉴权与历史用量分析修复</b>
+
+• 更新 xAI/Grok 健康巡检使用的 Grok CLI 客户端标识，避免旧版 <code>0.2.101</code> 因低于上游最低版本要求而触发 HTTP 426。
+• 修复 Claude 自定义 Base URL 的模型获取与连通性测试鉴权；Anthropic 官方 API Key 继续使用 <code>x-api-key</code>，自定义兼容端点可正确使用 Bearer 鉴权。
+• Claude 探测诊断仅报告有效鉴权头是否存在，不输出 API Key、Token 或自定义鉴权值。
+• 修复历史原始用量已清理后，请求 <code>SummaryComparison</code> 可能因无法证明历史定价覆盖而返回 HTTP 500 的问题；无法证明的对比现在会被省略，不会伪造成本数据。
+
+⚠️ <b>升级说明</b>
+
+• 无需数据库迁移或 CPAMP 配置变更。
+• xAI/Grok 无需重新登录，Claude 现有配置无需重建。
+• 完整 Muse / Meta 功能的 CPA 基线继续为 <code>v7.3.4+</code>。

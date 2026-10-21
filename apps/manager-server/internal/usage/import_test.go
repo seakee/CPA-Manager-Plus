@@ -2058,3 +2058,42 @@ func TestParseImportPayloadJSONLRoundTripsFalseBooleans(t *testing.T) {
 		t.Fatalf("imported fields mismatch: %+v", imported)
 	}
 }
+
+func TestArchiveDerivedFieldsAcceptsReadIncludedCreationSeparate(t *testing.T) {
+	record := map[string]any{
+		"cache_input_mode":                 CacheInputModeReadIncludedCreationSeparate,
+		"normalized_uncached_input_tokens": json.Number("100"),
+		"normalized_total_input_tokens":    json.Number("125"),
+		"normalized_cache_read_tokens":     json.Number("20"),
+		"normalized_cache_creation_tokens": json.Number("5"),
+		"total_tokens":                     json.Number("135"),
+		"header_quota_recover_at_ms":       json.Number("0"),
+		"header_quota_used_percent":        nil,
+	}
+	accounting, totalTokens, _, _, err := archiveDerivedFieldsFromRecord(record)
+	if err != nil {
+		t.Fatalf("archive derived fields: %v", err)
+	}
+	if accounting.Mode != CacheInputModeReadIncludedCreationSeparate ||
+		accounting.UncachedInputTokens != 100 ||
+		accounting.TotalInputTokens != 125 ||
+		accounting.CacheReadTokens != 20 ||
+		accounting.CacheCreationTokens != 5 ||
+		totalTokens != 135 {
+		t.Fatalf("archive accounting = %+v total=%d", accounting, totalTokens)
+	}
+
+	event := Event{
+		PreserveArchiveDerivedFields:      true,
+		CacheInputMode:                   accounting.Mode,
+		NormalizedUncachedInputTokens:    accounting.UncachedInputTokens,
+		NormalizedTotalInputTokens:       accounting.TotalInputTokens,
+		NormalizedCacheReadTokens:        accounting.CacheReadTokens,
+		NormalizedCacheCreationTokens:    accounting.CacheCreationTokens,
+		TotalTokens:                      totalTokens,
+	}
+	if err := ValidateArchiveDerivedFields(event); err != nil {
+		t.Fatalf("validate mixed archive accounting: %v", err)
+	}
+}
+

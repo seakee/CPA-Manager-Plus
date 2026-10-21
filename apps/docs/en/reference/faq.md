@@ -219,6 +219,8 @@ For same-domain deployment, read [Reverse Proxy](../deployment/reverse-proxy.md)
 
 ```text
 /management.html        -> CPAMP
+/favicon.ico             -> CPAMP
+/apple-touch-icon.png    -> CPAMP
 /usage-service/*        -> CPAMP
 /v0/management/*        -> CPAMP
 /v1/*                   -> CPA

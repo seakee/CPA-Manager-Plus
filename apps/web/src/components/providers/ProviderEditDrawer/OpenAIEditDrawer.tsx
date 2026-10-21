@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useAuthStore as useDiscoveryAuthStore } from '@/stores/useAuthStore';
+import { useRef, useLayoutEffect, useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
 import { Drawer } from '@/components/ui/Drawer';
@@ -22,6 +23,13 @@ import {
 } from '@/types';
 import { buildHeaderObject, headersToEntries, normalizeHeaderEntries } from '@/utils/headers';
 import { normalizeAuthIndex } from '@/utils/authIndex';
+import {
+  getOpenAIKeyCount,
+  getOpenAIModelDiscoveryEntry,
+  updateOpenAIApiKey,
+  getOpenAITestableKeyIndexes,
+  hasOpenAIKeyEntryConfiguration,
+} from '@/utils/openAIKeyEntries';
 import { areKeyValueEntriesEqual, areModelEntriesEqual } from '@/utils/compare';
 import {
   cloneModelEntry,
@@ -139,11 +147,14 @@ const areNormalizedApiKeyEntriesEqual = (
     const left = a[i];
     const right = b[i];
     if (!left || !right) return false;
+    // auth-index is server-generated runtime identity, not user configuration.
+    // Editing a key intentionally clears it; restoring the original visible
+    // configuration must therefore not remain dirty solely because the old
+    // runtime identity is gone.
     if (
       left.apiKey !== right.apiKey ||
       left.weight !== right.weight ||
-      left.proxyUrl !== right.proxyUrl ||
-      left.authIndex !== right.authIndex
+      left.proxyUrl !== right.proxyUrl
     )
       return false;
     if (!areKeyValueEntriesEqual(left.headers, right.headers)) return false;
@@ -197,6 +208,7 @@ export function OpenAIEditDrawer({
   const [modelDiscoveryFetching, setModelDiscoveryFetching] = useState(false);
   const [modelDiscoveryError, setModelDiscoveryError] = useState('');
   const [discoveredModels, setDiscoveredModels] = useState<ModelInfo[]>([]);
+  const [modelsLoaded, setModelsLoaded] = useState(false);
   const [modelDiscoverySearch, setModelDiscoverySearch] = useState('');
   const [modelDiscoverySelected, setModelDiscoverySelected] = useState<Set<string>>(new Set());
 
@@ -216,9 +228,7 @@ export function OpenAIEditDrawer({
     [form.modelEntries]
   );
   const hasConfiguredModels = form.modelEntries.some((entry) => entry.name.trim());
-  const hasTestableKeys = form.apiKeyEntries.some(
-    (entry) => entry.apiKey?.trim() || normalizeAuthIndex(entry.authIndex)
-  );
+  const hasTestableKeys = form.apiKeyEntries.length > 0;
 
   useEffect(() => {
     if (!open) return;
@@ -332,36 +342,67 @@ export function OpenAIEditDrawer({
   }, [isDirty, onClose, saving, t]);
 
   // Model discovery
+  const discoveryConnection = useDiscoveryAuthStore((state) =>
+    JSON.stringify([state.apiBase, state.managementKey])
+  );
+  const discoveryScope = JSON.stringify([
+    discoveryConnection,
+    open,
+    editIndex,
+    form.baseUrl,
+    form.apiKeyEntries,
+    buildHeaderObject(form.headers),
+  ]);
+  const activeDiscoveryScopeRef = useRef(discoveryScope);
+  activeDiscoveryScopeRef.current = discoveryScope;
+  const modelDiscoveryRequestIdRef = useRef(0);
+  useLayoutEffect(() => {
+    modelDiscoveryRequestIdRef.current += 1;
+    setDiscoveredModels([]);
+    setModelsLoaded(false);
+    setModelDiscoveryError('');
+    setModelDiscoveryFetching(false);
+    return () => {
+      modelDiscoveryRequestIdRef.current += 1;
+    };
+  }, [discoveryScope]);
+
   const fetchModelDiscovery = useCallback(async () => {
+    const requestId = ++modelDiscoveryRequestIdRef.current;
+    const requestScope = discoveryScope;
+    const isCurrentDiscovery = () =>
+      modelDiscoveryRequestIdRef.current === requestId &&
+      activeDiscoveryScopeRef.current === requestScope;
     setModelDiscoveryFetching(true);
     setModelDiscoveryError('');
     const headerObject = buildHeaderObject(form.headers);
     try {
-      const firstKey = form.apiKeyEntries.find(
-        (entry) => entry.apiKey?.trim() || normalizeAuthIndex(entry.authIndex)
-      );
+      const firstKey = getOpenAIModelDiscoveryEntry(form.apiKeyEntries);
       const keyAuthIndex = normalizeAuthIndex(firstKey?.authIndex) ?? undefined;
       const list = await modelsApi.fetchModelsViaApiCall(
         form.baseUrl.trim(),
         firstKey?.apiKey?.trim() || undefined,
         headerObject,
         keyAuthIndex,
-        firstKey?.proxyUrl
+        firstKey?.proxyUrl,
+        !firstKey?.apiKey?.trim()
       );
+      if (!isCurrentDiscovery()) return;
       setDiscoveredModels(list);
+      setModelsLoaded(true);
     } catch (err: unknown) {
-      setDiscoveredModels([]);
+      if (!isCurrentDiscovery()) return;
+
       setModelDiscoveryError(
         `${t('ai_providers.openai_models_fetch_error')}: ${getErrorMessage(err)}`
       );
     } finally {
-      setModelDiscoveryFetching(false);
+      if (isCurrentDiscovery()) setModelDiscoveryFetching(false);
     }
-  }, [form.apiKeyEntries, form.baseUrl, form.headers, t]);
+  }, [discoveryScope, form.apiKeyEntries, form.baseUrl, form.headers, t]);
 
   useEffect(() => {
     if (!modelDiscoveryOpen) return;
-    setDiscoveredModels([]);
     setModelDiscoverySearch('');
     setModelDiscoverySelected(new Set());
     setModelDiscoveryError('');
@@ -496,15 +537,8 @@ export function OpenAIEditDrawer({
         return false;
       }
       const keyEntry = form.apiKeyEntries[keyIndex];
-      const keyAuthIndex = normalizeAuthIndex(keyEntry?.authIndex) ?? undefined;
-      if (!keyEntry?.apiKey?.trim() && !keyAuthIndex) {
-        setKeyTestStatuses((prev) => {
-          const next = [...prev];
-          next[keyIndex] = { status: 'error', message: t('notification.openai_test_key_required') };
-          return next;
-        });
-        return false;
-      }
+      if (!keyEntry) return false;
+      const keyAuthIndex = normalizeAuthIndex(keyEntry.authIndex) ?? undefined;
       const modelName = testModel.trim() || availableModels[0] || '';
       if (!modelName) {
         showNotification(t('notification.openai_test_model_required'), 'error');
@@ -516,9 +550,11 @@ export function OpenAIEditDrawer({
         ...customHeaders,
       };
       if (!hasHeader(headers, 'authorization')) {
-        headers.Authorization = keyAuthIndex
-          ? 'Bearer $TOKEN$'
-          : `Bearer ${keyEntry.apiKey.trim()}`;
+        if (keyEntry.apiKey.trim()) {
+          headers.Authorization = keyAuthIndex
+            ? 'Bearer $TOKEN$'
+            : `Bearer ${keyEntry.apiKey.trim()}`;
+        }
       }
       setKeyTestStatuses((prev) => {
         const next = [...prev];
@@ -529,6 +565,7 @@ export function OpenAIEditDrawer({
         const result = await apiCallApi.request(
           {
             authIndex: keyAuthIndex,
+            proxyUrl: keyEntry.proxyUrl?.trim() || undefined,
             method: 'POST',
             url: endpoint,
             header: Object.keys(headers).length ? headers : undefined,
@@ -605,15 +642,7 @@ export function OpenAIEditDrawer({
       showNotification(t('ai_providers.openai_test_model_required'), 'error');
       return;
     }
-    const validKeyIndexes = form.apiKeyEntries
-      .map((entry, index) =>
-        entry.apiKey?.trim() || normalizeAuthIndex(entry.authIndex) ? index : -1
-      )
-      .filter((index) => index >= 0);
-    if (validKeyIndexes.length === 0) {
-      showNotification(t('notification.openai_test_key_required'), 'error');
-      return;
-    }
+    const validKeyIndexes = getOpenAITestableKeyIndexes(form.apiKeyEntries);
     setIsTestingKeys(true);
     setTestStatus('loading');
     setTestMessage(t('ai_providers.openai_test_running'));
@@ -655,16 +684,6 @@ export function OpenAIEditDrawer({
       showNotification(t('notification.openai_provider_required'), 'error');
       return;
     }
-    const hasValidKey = form.apiKeyEntries.some(
-      (entry) => entry.apiKey?.trim() || normalizeAuthIndex(entry.authIndex)
-    );
-    if (!hasValidKey) {
-      showNotification(
-        t('ai_providers.openai_key_required', { defaultValue: 'Please add at least one API key' }),
-        'error'
-      );
-      return;
-    }
     if (!canSave) return;
     setSaving(true);
     try {
@@ -673,7 +692,7 @@ export function OpenAIEditDrawer({
         prefix: form.prefix?.trim() || undefined,
         baseUrl,
         headers: buildHeaderObject(form.headers),
-        apiKeyEntries: form.apiKeyEntries.map((entry) => ({
+        apiKeyEntries: form.apiKeyEntries.filter(hasOpenAIKeyEntryConfiguration).map((entry) => ({
           apiKey: entry.apiKey.trim(),
           weight: normalizeCredentialWeight(entry.weight),
           proxyUrl: entry.proxyUrl?.trim() || undefined,
@@ -755,7 +774,13 @@ export function OpenAIEditDrawer({
   const renderKeyEntries = () => {
     const list = form.apiKeyEntries.length ? form.apiKeyEntries : [buildApiKeyEntry()];
     const updateEntry = (idx: number, field: keyof OpenAIFormApiKeyEntry, value: string) => {
-      const next = list.map((entry, i) => (i === idx ? { ...entry, [field]: value } : entry));
+      const next = list.map((entry, i) =>
+        i === idx
+          ? field === 'apiKey'
+            ? updateOpenAIApiKey(entry, value)
+            : { ...entry, [field]: value }
+          : entry
+      );
       setForm((prev) => ({ ...prev, apiKeyEntries: next }));
       setKeyTestStatuses((prev) => {
         const nextStatuses = [...prev];
@@ -782,7 +807,7 @@ export function OpenAIEditDrawer({
       <div className={styles.keyEntriesList}>
         <div className={styles.keyEntriesToolbar}>
           <span className={styles.keyEntriesCount}>
-            {t('ai_providers.openai_keys_count')}: {list.length}
+            {t('ai_providers.openai_keys_count')}: {getOpenAIKeyCount(list)}
           </span>
           <Button
             variant="secondary"
@@ -807,8 +832,7 @@ export function OpenAIEditDrawer({
             const keyStatus = keyTestStatuses[index]?.status ?? 'idle';
             const weightError = getCredentialWeightError(entry.weight);
             const canTestKey =
-              Boolean(entry.apiKey?.trim() || normalizeAuthIndex(entry.authIndex)) &&
-              hasConfiguredModels;
+              hasConfiguredModels && getOpenAITestableKeyIndexes(form.apiKeyEntries).includes(index);
             return (
               <div key={index} className={styles.keyTableRow}>
                 <div className={styles.keyTableColIndex}>{index + 1}</div>
@@ -1195,11 +1219,11 @@ export function OpenAIEditDrawer({
                   </div>
                 )}
                 {modelDiscoveryError && <div className="error-box">{modelDiscoveryError}</div>}
-                {modelDiscoveryFetching ? (
+                {modelDiscoveryFetching && !modelsLoaded ? (
                   <div className={styles.sectionHint}>
                     {t('ai_providers.openai_models_fetch_loading')}
                   </div>
-                ) : discoveredModels.length === 0 ? (
+                ) : !modelsLoaded ? null : discoveredModels.length === 0 ? (
                   <div className={styles.sectionHint}>
                     {t('ai_providers.openai_models_fetch_empty')}
                   </div>

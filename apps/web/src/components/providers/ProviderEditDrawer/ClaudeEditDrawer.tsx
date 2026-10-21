@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useAuthStore as useDiscoveryAuthStore } from '@/stores/useAuthStore';
+import { useLayoutEffect, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
 import { Drawer } from '@/components/ui/Drawer';
@@ -27,6 +28,7 @@ import {
 } from '@/types';
 import { buildHeaderObject, headersToEntries, normalizeHeaderEntries } from '@/utils/headers';
 import { normalizeAuthIndex } from '@/utils/authIndex';
+import { buildClaudeRequestHeaders, formatClaudeAuthDiagnostic } from '@/utils/claudeAuth';
 import {
   areKeyValueEntriesEqual,
   areModelEntriesEqual,
@@ -61,7 +63,6 @@ interface ClaudeEditDrawerProps {
 type ClaudeFormBaseline = ReturnType<typeof buildClaudeBaseline>;
 
 const CLAUDE_TEST_TIMEOUT_MS = 30_000;
-const DEFAULT_ANTHROPIC_VERSION = '2023-06-01';
 
 const buildEmptyForm = (): ProviderFormState => ({
   apiKey: '',
@@ -141,20 +142,6 @@ const getErrorMessage = (err: unknown) => {
   return '';
 };
 
-const hasHeader = (headers: Record<string, string>, name: string) => {
-  const target = name.toLowerCase();
-  return Object.keys(headers).some((key) => key.toLowerCase() === target);
-};
-
-const resolveBearerTokenFromAuthorization = (headers: Record<string, string>): string => {
-  const entry = Object.entries(headers).find(([key]) => key.toLowerCase() === 'authorization');
-  if (!entry) return '';
-  const value = String(entry[1] ?? '').trim();
-  if (!value) return '';
-  const match = value.match(/^Bearer\s+(.+)$/i);
-  return match?.[1]?.trim() || '';
-};
-
 export function ClaudeEditDrawer({
   open,
   editIndex,
@@ -184,6 +171,7 @@ export function ClaudeEditDrawer({
   const [modelDiscoveryFetching, setModelDiscoveryFetching] = useState(false);
   const [modelDiscoveryError, setModelDiscoveryError] = useState('');
   const [discoveredModels, setDiscoveredModels] = useState<ModelInfo[]>([]);
+  const [modelsLoaded, setModelsLoaded] = useState(false);
   const [modelDiscoverySearch, setModelDiscoverySearch] = useState('');
   const [modelDiscoverySelected, setModelDiscoverySelected] = useState<Set<string>>(new Set());
   const lastCloakConfigRef = useRef<typeof form.cloak>(null);
@@ -411,47 +399,80 @@ export function ClaudeEditDrawer({
     [showNotification, t]
   );
 
+  const discoveryConnection = useDiscoveryAuthStore((state) =>
+    JSON.stringify([state.apiBase, state.managementKey])
+  );
+  const discoveryScope = JSON.stringify([
+    discoveryConnection,
+    open,
+    editIndex,
+    form.baseUrl,
+    form.apiKey,
+    form.authIndex,
+    form.proxyUrl,
+    buildHeaderObject(form.headers),
+  ]);
+  const activeDiscoveryScopeRef = useRef(discoveryScope);
+  activeDiscoveryScopeRef.current = discoveryScope;
+  const modelDiscoveryRequestIdRef = useRef(0);
+  useLayoutEffect(() => {
+    modelDiscoveryRequestIdRef.current += 1;
+    setDiscoveredModels([]);
+    setModelsLoaded(false);
+    setModelDiscoveryError('');
+    setModelDiscoveryFetching(false);
+    return () => {
+      modelDiscoveryRequestIdRef.current += 1;
+    };
+  }, [discoveryScope]);
+
   const fetchClaudeModelDiscovery = useCallback(async () => {
+    const requestId = ++modelDiscoveryRequestIdRef.current;
+    const requestScope = discoveryScope;
+    const isCurrentDiscovery = () =>
+      modelDiscoveryRequestIdRef.current === requestId &&
+      activeDiscoveryScopeRef.current === requestScope;
     setModelDiscoveryFetching(true);
     setModelDiscoveryError('');
     const headerObject = buildHeaderObject(form.headers);
+    const authIndex = normalizeAuthIndex(form.authIndex) ?? undefined;
 
     try {
       const list = await modelsApi.fetchClaudeModelsViaApiCall(
         form.baseUrl ?? '',
         form.apiKey.trim() || undefined,
         headerObject,
-        normalizeAuthIndex(form.authIndex) ?? undefined,
+        authIndex,
         form.proxyUrl
       );
+      if (!isCurrentDiscovery()) return;
       setDiscoveredModels(list);
+      setModelsLoaded(true);
     } catch (err: unknown) {
-      setDiscoveredModels([]);
+      if (!isCurrentDiscovery()) return;
+
       const message = getErrorMessage(err);
-      const hasCustomXApiKey = Object.keys(headerObject).some(
-        (key) => key.toLowerCase() === 'x-api-key'
-      );
-      const hasAuthorization = Object.keys(headerObject).some(
-        (key) => key.toLowerCase() === 'authorization'
-      );
+      const authResolution = buildClaudeRequestHeaders({
+        url: modelsApi.buildClaudeModelsEndpoint(form.baseUrl ?? ''),
+        apiKey: form.apiKey.trim() || undefined,
+        authIndex,
+        customHeaders: headerObject,
+      });
       const shouldAttachDiag =
         message.toLowerCase().includes('x-api-key') || message.includes('401');
       const diag = shouldAttachDiag
-        ? ` [diag: apiKeyField=${form.apiKey.trim() ? 'yes' : 'no'}, customXApiKey=${
-            hasCustomXApiKey ? 'yes' : 'no'
-          }, customAuthorization=${hasAuthorization ? 'yes' : 'no'}]`
+        ? ` ${formatClaudeAuthDiagnostic(authResolution, form.apiKey, authIndex)}`
         : '';
       setModelDiscoveryError(
         `${t('ai_providers.claude_models_fetch_error')}: ${message}${diag}`
       );
     } finally {
-      setModelDiscoveryFetching(false);
+      if (isCurrentDiscovery()) setModelDiscoveryFetching(false);
     }
-  }, [form.apiKey, form.authIndex, form.baseUrl, form.headers, form.proxyUrl, t]);
+  }, [discoveryScope, form.apiKey, form.authIndex, form.baseUrl, form.headers, form.proxyUrl, t]);
 
   useEffect(() => {
     if (!modelDiscoveryOpen) return;
-    setDiscoveredModels([]);
     setModelDiscoverySearch('');
     setModelDiscoverySelected(new Set());
     setModelDiscoveryError('');
@@ -510,30 +531,23 @@ export function ClaudeEditDrawer({
     const customHeaders = buildHeaderObject(form.headers);
     const apiKey = form.apiKey.trim();
     const keyAuthIndex = normalizeAuthIndex(form.authIndex) ?? undefined;
-    const hasApiKeyHeader = hasHeader(customHeaders, 'x-api-key');
-    const apiKeyFromAuthorization = resolveBearerTokenFromAuthorization(customHeaders);
-    const resolvedApiKey = apiKey || apiKeyFromAuthorization;
-    if (!resolvedApiKey && !hasApiKeyHeader && !keyAuthIndex) {
-      showNotification(t('ai_providers.claude_test_key_required'), 'error');
-      return;
-    }
     const endpoint = buildClaudeMessagesEndpoint(form.baseUrl ?? '');
     if (!endpoint) {
       showNotification(t('ai_providers.claude_test_endpoint_invalid'), 'error');
       return;
     }
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      ...customHeaders,
-    };
-    if (!hasHeader(headers, 'anthropic-version'))
-      headers['anthropic-version'] = DEFAULT_ANTHROPIC_VERSION;
-    if (!Object.prototype.hasOwnProperty.call(headers, 'Anthropic-Version'))
-      headers['Anthropic-Version'] = headers['anthropic-version'] ?? DEFAULT_ANTHROPIC_VERSION;
-    const tokenValue = resolvedApiKey || (keyAuthIndex ? '$TOKEN$' : '');
-    if (!hasApiKeyHeader && tokenValue) headers['x-api-key'] = tokenValue;
-    if (!Object.prototype.hasOwnProperty.call(headers, 'X-Api-Key') && tokenValue)
-      headers['X-Api-Key'] = tokenValue;
+    const authResolution = buildClaudeRequestHeaders({
+      url: endpoint,
+      apiKey: apiKey || undefined,
+      authIndex: keyAuthIndex,
+      customHeaders,
+      contentType: 'application/json',
+    });
+    if (!authResolution.effectiveXApiKey && !authResolution.effectiveAuthorization) {
+      showNotification(t('ai_providers.claude_test_key_required'), 'error');
+      return;
+    }
+    const headers = authResolution.headers;
 
     setIsTesting(true);
     setTestStatus('loading');
@@ -543,6 +557,7 @@ export function ClaudeEditDrawer({
         {
           method: 'POST',
           authIndex: keyAuthIndex,
+          proxyUrl: form.proxyUrl,
           url: endpoint,
           header: headers,
           data: JSON.stringify({
@@ -581,6 +596,7 @@ export function ClaudeEditDrawer({
     form.authIndex,
     form.baseUrl,
     form.headers,
+    form.proxyUrl,
     isTesting,
     showNotification,
     t,
@@ -1052,11 +1068,11 @@ export function ClaudeEditDrawer({
                   </div>
                 )}
                 {modelDiscoveryError && <div className="error-box">{modelDiscoveryError}</div>}
-                {modelDiscoveryFetching ? (
+                {modelDiscoveryFetching && !modelsLoaded ? (
                   <div className={styles.sectionHint}>
                     {t('ai_providers.claude_models_fetch_loading')}
                   </div>
-                ) : discoveredModels.length === 0 ? (
+                ) : !modelsLoaded ? null : discoveredModels.length === 0 ? (
                   <div className={styles.sectionHint}>
                     {t('ai_providers.claude_models_fetch_empty')}
                   </div>

@@ -16,7 +16,7 @@ import (
 const (
 	UsageCacheAccountingMigrationName            = "usage_cache_accounting_v2"
 	UsageCacheAccountingSemanticsRevisionKey     = "usage_cache_accounting_semantics_revision"
-	CurrentUsageCacheAccountingSemanticsRevision = 2
+	CurrentUsageCacheAccountingSemanticsRevision = 3
 )
 
 const usageCacheAccountingCandidatePredicate = `(coalesce(cached_tokens, 0) != 0
@@ -424,9 +424,13 @@ func stageCacheAccountingRow(ctx context.Context, tx *sql.Tx, row cacheAccountin
 		RequestedModel:   row.RequestedModel,
 		DisplayModel:     row.DisplayModel,
 	}
-	accounting := usage.NormalizeCacheAccounting(
+	accounting := usage.NormalizeCacheAccountingWithRawJSON(
 		context,
+		row.RawJSON,
 		row.InputTokens,
+		row.OutputTokens,
+		row.ReasoningTokens,
+		row.TotalTokens,
 		row.CachedTokens,
 		row.CacheTokens,
 		row.CacheReadTokens,
@@ -910,38 +914,14 @@ func reconcileSemanticsRevisionInTx(ctx context.Context, tx *sql.Tx, state *Stat
 		return false, nil
 	}
 
-	var hasAffectedDevinRow bool
-	query := `select exists(
-		select 1 from usage_events
-		where (
-			coalesce(cached_tokens, 0) != 0
-			or coalesce(cache_tokens, 0) != 0
-			or coalesce(cache_read_tokens, 0) != 0
-			or coalesce(cache_creation_tokens, 0) != 0
-		) and (
-			lower(trim(coalesce(executor_type, ''))) = 'devinexecutor'
-			or lower(trim(coalesce(provider, ''))) = 'devin'
-			or lower(trim(coalesce(provider, ''))) like 'devin/%'
-			or lower(trim(coalesce(auth_provider_snapshot, ''))) = 'devin'
-			or lower(trim(coalesce(auth_provider_snapshot, ''))) like 'devin/%'
-			or lower(trim(coalesce(resolved_model, ''))) = 'devin'
-			or lower(trim(coalesce(resolved_model, ''))) like 'devin/%'
-			or lower(trim(coalesce(requested_model, ''))) = 'devin'
-			or lower(trim(coalesce(requested_model, ''))) like 'devin/%'
-			or lower(trim(coalesce(model, ''))) = 'devin'
-			or lower(trim(coalesce(model, ''))) like 'devin/%'
-		)
-		limit 1
-	)`
-	if err := tx.QueryRowContext(ctx, query).Scan(&hasAffectedDevinRow); err != nil {
+	needsRediscovery, err := usageCacheAccountingSemanticsNeedRediscoveryInTx(ctx, tx, currentRevision)
+	if err != nil {
 		return false, err
 	}
 
 	nowMS := time.Now().UnixMilli()
-	if !hasAffectedDevinRow {
-		if _, err := tx.ExecContext(ctx, `insert into settings(key, value, updated_at_ms) values (?, ?, ?)
-			on conflict(key) do update set value = excluded.value, updated_at_ms = excluded.updated_at_ms`,
-			UsageCacheAccountingSemanticsRevisionKey, strconv.Itoa(CurrentUsageCacheAccountingSemanticsRevision), nowMS); err != nil {
+	if !needsRediscovery {
+		if err := writeUsageCacheAccountingSemanticsRevisionInTx(ctx, tx, nowMS); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -957,9 +937,7 @@ func reconcileSemanticsRevisionInTx(ctx context.Context, tx *sql.Tx, state *Stat
 		where name = ?`, StatusDiscovering, nowMS, UsageCacheAccountingMigrationName); err != nil {
 			return false, err
 		}
-		if _, err := tx.ExecContext(ctx, `insert into settings(key, value, updated_at_ms) values (?, ?, ?)
-			on conflict(key) do update set value = excluded.value, updated_at_ms = excluded.updated_at_ms`,
-			UsageCacheAccountingSemanticsRevisionKey, strconv.Itoa(CurrentUsageCacheAccountingSemanticsRevision), nowMS); err != nil {
+		if err := writeUsageCacheAccountingSemanticsRevisionInTx(ctx, tx, nowMS); err != nil {
 			return false, err
 		}
 		state.Status = StatusDiscovering
@@ -976,4 +954,87 @@ func reconcileSemanticsRevisionInTx(ctx context.Context, tx *sql.Tx, state *Stat
 	}
 
 	return false, nil
+}
+
+func usageCacheAccountingSemanticsNeedRediscoveryInTx(ctx context.Context, tx *sql.Tx, currentRevision int) (bool, error) {
+	if currentRevision < 2 {
+		var hasAffectedDevinRow bool
+		query := `select exists(
+			select 1 from usage_events
+			where (
+				coalesce(cached_tokens, 0) != 0
+				or coalesce(cache_tokens, 0) != 0
+				or coalesce(cache_read_tokens, 0) != 0
+				or coalesce(cache_creation_tokens, 0) != 0
+			) and (
+				lower(trim(coalesce(executor_type, ''))) = 'devinexecutor'
+				or lower(trim(coalesce(provider, ''))) = 'devin'
+				or lower(trim(coalesce(provider, ''))) like 'devin/%'
+				or lower(trim(coalesce(auth_provider_snapshot, ''))) = 'devin'
+				or lower(trim(coalesce(auth_provider_snapshot, ''))) like 'devin/%'
+				or lower(trim(coalesce(resolved_model, ''))) = 'devin'
+				or lower(trim(coalesce(resolved_model, ''))) like 'devin/%'
+				or lower(trim(coalesce(requested_model, ''))) = 'devin'
+				or lower(trim(coalesce(requested_model, ''))) like 'devin/%'
+				or lower(trim(coalesce(model, ''))) = 'devin'
+				or lower(trim(coalesce(model, ''))) like 'devin/%'
+			)
+			limit 1
+		)`
+		if err := tx.QueryRowContext(ctx, query).Scan(&hasAffectedDevinRow); err != nil {
+			return false, err
+		}
+		if hasAffectedDevinRow {
+			return true, nil
+		}
+	}
+
+	if currentRevision < 3 {
+		var hasCanonicalV2Candidate bool
+		query := `select exists(
+			select 1 from usage_events
+			where (
+				coalesce(cached_tokens, 0) != 0
+				or coalesce(cache_tokens, 0) != 0
+				or coalesce(cache_read_tokens, 0) != 0
+				or coalesce(cache_creation_tokens, 0) != 0
+			)
+			and lower(trim(coalesce(cache_input_mode, ''))) not in (
+				'included_in_input',
+				'read_included_creation_separate'
+			)
+			and json_valid(raw_json)
+			and json_extract(case when json_valid(raw_json) then raw_json else '{}' end, '$.accounting_version') = 2
+			and json_extract(case when json_valid(raw_json) then raw_json else '{}' end, '$.token_breakdown.schema_version') = 2
+			and json_extract(case when json_valid(raw_json) then raw_json else '{}' end, '$.token_breakdown.quality') = 'complete'
+			and (
+				json_extract(case when json_valid(raw_json) then raw_json else '{}' end, '$.token_breakdown.input.total_tokens') = input_tokens
+				or (
+					json_extract(case when json_valid(raw_json) then raw_json else '{}' end, '$.token_breakdown.input.cache_read_tokens') > 0
+					and json_extract(case when json_valid(raw_json) then raw_json else '{}' end, '$.token_breakdown.input.cache_write_tokens') > 0
+					and json_extract(case when json_valid(raw_json) then raw_json else '{}' end, '$.token_breakdown.input.uncached_tokens')
+						+ json_extract(case when json_valid(raw_json) then raw_json else '{}' end, '$.token_breakdown.input.cache_read_tokens') = input_tokens
+				)
+			)
+			limit 1
+		)`
+		if err := tx.QueryRowContext(ctx, query).Scan(&hasCanonicalV2Candidate); err != nil {
+			return false, err
+		}
+		if hasCanonicalV2Candidate {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+func writeUsageCacheAccountingSemanticsRevisionInTx(ctx context.Context, tx *sql.Tx, nowMS int64) error {
+	_, err := tx.ExecContext(ctx, `insert into settings(key, value, updated_at_ms) values (?, ?, ?)
+		on conflict(key) do update set value = excluded.value, updated_at_ms = excluded.updated_at_ms`,
+		UsageCacheAccountingSemanticsRevisionKey,
+		strconv.Itoa(CurrentUsageCacheAccountingSemanticsRevision),
+		nowMS,
+	)
+	return err
 }

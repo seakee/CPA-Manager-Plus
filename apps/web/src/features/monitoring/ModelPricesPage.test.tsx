@@ -92,6 +92,26 @@ describe('ModelPricesPage Attention UI', () => {
     vi.spyOn(attentionHook, 'useModelPriceAttention').mockImplementation(() => mockAttentionState);
   });
 
+  it('keeps the existing model price table mounted while usage summary loads', async () => {
+    vi.spyOn(usageServiceApi, 'getModelPriceUsageSummary').mockImplementation(
+      () => new Promise<Awaited<ReturnType<typeof usageServiceApi.getModelPriceUsageSummary>>>(() => {})
+    );
+
+    let renderer: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <MemoryRouter initialEntries={['/model-prices']}>
+          <ModelPricesPage />
+        </MemoryRouter>
+      );
+    });
+
+    expect(renderer!.root.findAllByType('table')).toHaveLength(1);
+    expect(
+      renderer!.root.findAllByProps({ 'data-testid': 'pending-badge-runtime-new-model' })
+    ).toHaveLength(1);
+  });
+
   it('renders pending count badge on Sync Prices button when pendingCount > 0', async () => {
     let renderer: ReactTestRenderer;
     await act(async () => {

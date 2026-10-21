@@ -2,4 +2,4 @@ export const getDashboardModelCountDisplay = (
   count: number,
   loading: boolean,
   error: string | null
-) => (loading || error ? '-' : count);
+) => (count > 0 ? count : loading || error ? '-' : count);

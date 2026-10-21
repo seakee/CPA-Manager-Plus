@@ -1,6 +1,8 @@
 import {
+  useRef,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useId,
   useMemo,
   useState,
@@ -509,6 +511,16 @@ export function PluginStorePage({
   const [installVersion, setInstallVersion] = useState('');
 
   const connected = connectionStatus === 'connected';
+  const canOperate = connected && supportsPlugin && Boolean(data);
+  const canOperateRef = useRef(canOperate);
+  canOperateRef.current = canOperate;
+  const operationEpochRef = useRef(0);
+  // Captured actions stay invalid after access is revoked, even if access later recovers.
+  const operationEpoch = operationEpochRef.current;
+  const canContinueOperation = useCallback(
+    () => canOperateRef.current && operationEpochRef.current === operationEpoch,
+    [operationEpoch]
+  );
 
   const handleManageInstalled = useCallback(() => {
     if (onManageInstalled) {
@@ -518,13 +530,37 @@ export function PluginStorePage({
     navigate('/plugins');
   }, [navigate, onManageInstalled]);
 
+  const listRequestIdRef = useRef(0);
+  const clearPluginData = useCallback(() => {
+    canOperateRef.current = false;
+    operationEpochRef.current += 1;
+    listRequestIdRef.current += 1;
+    setData(null);
+    setGateEntry(null);
+    setInstallOptionsEntry(null);
+    setLoading(false);
+  }, []);
+  useLayoutEffect(() => {
+    if (!connected || !supportsPlugin) clearPluginData();
+  }, [connected, supportsPlugin, clearPluginData]);
+  useEffect(
+    () => () => {
+      canOperateRef.current = false;
+      operationEpochRef.current += 1;
+      listRequestIdRef.current += 1;
+    },
+    []
+  );
   const loadStore = useCallback(async () => {
+    const requestId = ++listRequestIdRef.current;
     if (!connected) {
+      clearPluginData();
       setLoading(false);
       setError({ kind: 'generic', message: t('notification.connection_required') });
       return;
     }
     if (!supportsPlugin) {
+      clearPluginData();
       setLoading(false);
       setError({ kind: 'unsupported', message: t('plugin_store.unsupported_backend') });
       return;
@@ -534,9 +570,12 @@ export function PluginStorePage({
     setError(null);
     try {
       const store = await pluginStoreApi.list();
+      if (requestId !== listRequestIdRef.current) return;
       setData(store);
     } catch (err: unknown) {
+      if (requestId !== listRequestIdRef.current) return;
       const status = getErrorStatus(err);
+      if (status === 401 || status === 403 || status === 404) clearPluginData();
       if (status === 404) {
         setError({ kind: 'unsupported', message: t('plugin_store.unsupported_backend') });
       } else if (status === 502) {
@@ -554,9 +593,9 @@ export function PluginStorePage({
         });
       }
     } finally {
-      setLoading(false);
+      if (requestId === listRequestIdRef.current) setLoading(false);
     }
-  }, [connected, supportsPlugin, t]);
+  }, [connected, supportsPlugin, clearPluginData, t]);
 
   useHeaderRefresh(loadStore, active && connected && supportsPlugin);
 
@@ -662,6 +701,7 @@ export function PluginStorePage({
 
   const runInstall = useCallback(
     async (entry: PluginStoreEntry, isUpdate: boolean, requestedVersion = '') => {
+      if (!canContinueOperation()) return;
       const failedKey = isUpdate ? 'plugin_store.update_failed' : 'plugin_store.install_failed';
       const entryKey = getStoreEntryKey(entry);
       const sourceId = entry.sourceId || undefined;
@@ -673,6 +713,7 @@ export function PluginStorePage({
           sourceId,
           version: version || undefined,
         });
+        if (!canContinueOperation()) return;
         showNotification(
           isUpdate ? t('plugin_store.update_success') : t('plugin_store.install_success'),
           'success'
@@ -687,12 +728,32 @@ export function PluginStorePage({
         if (result.restartRequired) {
           await loadStore();
         } else {
-          const waitResult = await waitForPluginStoreState(
-            entry.id,
-            entry.sourceId,
-            (plugin) => isPluginStoreInstallSettled(plugin, version)
-          );
-          setData(waitResult.response);
+          const requestId = ++listRequestIdRef.current;
+          try {
+            const waitResult = await waitForPluginStoreState(
+              entry.id,
+              entry.sourceId,
+              (plugin) => isPluginStoreInstallSettled(plugin, version)
+            );
+            if (requestId === listRequestIdRef.current) {
+              setData(waitResult.response);
+              setError(null);
+            }
+          } catch (err: unknown) {
+            if (
+              requestId === listRequestIdRef.current &&
+              [401, 403, 404].includes(getErrorStatus(err) ?? 0)
+            ) {
+              clearPluginData();
+              setError({
+                kind: 'generic',
+                message: getErrorMessage(err, t('plugin_store.load_failed')),
+              });
+            }
+            throw err;
+          } finally {
+            if (requestId === listRequestIdRef.current) setLoading(false);
+          }
         }
         notifyPluginResourcesChanged();
         if (!result.restartRequired) {
@@ -713,10 +774,11 @@ export function PluginStorePage({
         setInstallingID('');
       }
     },
-    [clearConfigCache, loadStore, showNotification, t]
+    [clearConfigCache, clearPluginData, canContinueOperation, loadStore, showNotification, t]
   );
 
   const handleInstall = (entry: PluginStoreEntry) => {
+    if (!canContinueOperation()) return;
     const isUpdate = entry.installed && entry.updateAvailable;
     setInstallOptionsEntry(entry);
     setInstallOptionsIsUpdate(isUpdate);
@@ -730,7 +792,7 @@ export function PluginStorePage({
   }, [installingID]);
 
   const handleInstallOptionsConfirm = useCallback(async () => {
-    if (!installOptionsEntry) return;
+    if (!canContinueOperation() || !installOptionsEntry) return;
     const requestedVersion = installVersion.trim();
     if (!isOfficialPlugin(installOptionsEntry)) {
       setGateEntry(installOptionsEntry);
@@ -748,10 +810,10 @@ export function PluginStorePage({
     } catch {
       // runInstall has already shown a notification; keep the modal open for correction.
     }
-  }, [installOptionsEntry, installOptionsIsUpdate, installVersion, runInstall]);
+  }, [canContinueOperation, installOptionsEntry, installOptionsIsUpdate, installVersion, runInstall]);
 
   const handleDeleteInstalled = (entry: PluginStoreEntry) => {
-    if (installingID) return;
+    if (!canContinueOperation() || installingID) return;
 
     const entryKey = getStoreEntryKey(entry);
     const title = getStoreEntryTitle(entry);
@@ -763,9 +825,11 @@ export function PluginStorePage({
       cancelText: t('common.cancel'),
       variant: 'danger',
       onConfirm: async () => {
+        if (!canContinueOperation()) return;
         setInstallingID(`${entryKey}:delete`);
         try {
           const result = await pluginsApi.deletePlugin(entry.id);
+          if (!canContinueOperation()) return;
           clearConfigCache();
           if (result.restartRequired) {
             setRestartRequiredIDs((current) =>
@@ -800,12 +864,14 @@ export function PluginStorePage({
 
   const runReinstall = useCallback(
     async (entry: PluginStoreEntry) => {
+      if (!canContinueOperation()) return;
       const entryKey = getStoreEntryKey(entry);
       const sourceId = entry.sourceId || undefined;
 
       setInstallingID(`${entryKey}:reinstall`);
       try {
         const deleteResult = await pluginsApi.deletePlugin(entry.id);
+        if (!canContinueOperation()) return;
         clearConfigCache();
         if (deleteResult.restartRequired) {
           setRestartRequiredIDs((current) =>
@@ -817,7 +883,9 @@ export function PluginStorePage({
           return;
         }
 
+        if (!canContinueOperation()) return;
         const installResult = await pluginStoreApi.install(entry.id, { sourceId });
+        if (!canContinueOperation()) return;
         if (installResult.restartRequired) {
           setRestartRequiredIDs((current) =>
             current.includes(entryKey) ? current : [...current, entryKey]
@@ -850,11 +918,11 @@ export function PluginStorePage({
         setInstallingID('');
       }
     },
-    [clearConfigCache, loadStore, showNotification, t]
+    [clearConfigCache, canContinueOperation, loadStore, showNotification, t]
   );
 
   const handleReinstall = (entry: PluginStoreEntry) => {
-    if (installingID) return;
+    if (!canContinueOperation() || installingID) return;
 
     if (!isOfficialPlugin(entry)) {
       setGateEntry(entry);
@@ -882,7 +950,7 @@ export function PluginStorePage({
   }, []);
 
   const handleGateConfirm = useCallback(async () => {
-    if (!gateEntry) return;
+    if (!canContinueOperation() || !gateEntry) return;
     if (gateMode === 'reinstall') {
       await runReinstall(gateEntry);
     } else {
@@ -890,7 +958,15 @@ export function PluginStorePage({
     }
     setGateEntry(null);
     setGateRequestedVersion('');
-  }, [gateEntry, gateIsUpdate, gateMode, gateRequestedVersion, runInstall, runReinstall]);
+  }, [
+    canContinueOperation,
+    gateEntry,
+    gateIsUpdate,
+    gateMode,
+    gateRequestedVersion,
+    runInstall,
+    runReinstall,
+  ]);
 
   const renderCard = (entry: PluginStoreEntry) => {
     const entryKey = getStoreEntryKey(entry);
@@ -976,7 +1052,7 @@ export function PluginStorePage({
     const reinstallingCurrent = installingID === `${entryKey}:reinstall`;
     const deletingCurrent = installingID === `${entryKey}:delete`;
     const missingAuth = entry.authRequired && !entry.authConfigured;
-    const actionDisabled = !connected || missingAuth || Boolean(installingID);
+    const actionDisabled = !canOperate || missingAuth || Boolean(installingID);
     const actionTitle = missingAuth ? t('plugin_store.auth_required_hint') : undefined;
 
     return (
@@ -1076,7 +1152,7 @@ export function PluginStorePage({
                   variant="secondary"
                   size="sm"
                   onClick={() => handleReinstall(entry)}
-                  disabled={!connected || Boolean(installingID)}
+                  disabled={!canOperate || Boolean(installingID)}
                   loading={reinstallingCurrent}
                 >
                   <IconRefreshCw size={14} />
@@ -1109,7 +1185,7 @@ export function PluginStorePage({
                 iconOnly
                 className={styles.dangerIconButton}
                 onClick={() => handleDeleteInstalled(entry)}
-                disabled={!connected || Boolean(installingID)}
+                disabled={!canOperate || Boolean(installingID)}
                 loading={deletingCurrent}
                 title={t('plugin_store.delete_plugin')}
                 aria-label={t('plugin_store.delete_plugin')}

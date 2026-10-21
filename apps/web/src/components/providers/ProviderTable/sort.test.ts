@@ -131,6 +131,35 @@ describe('filterAndSortProviderRows', () => {
     expect(result.map((row) => row.originalIndex)).toEqual([2, 1]);
   });
 
+  it('keeps partial and unavailable statistics behind complete rows for recent-success sorting', () => {
+    const rows = buildProviderRows({
+      ...emptyInput,
+      openai: [
+        { name: 'full-high', baseUrl: 'https://full-high.example/v1', apiKeyEntries: [{ apiKey: 'a' }] },
+        { name: 'full-low', baseUrl: 'https://full-low.example/v1', apiKeyEntries: [{ apiKey: 'b' }] },
+        {
+          name: 'partial',
+          baseUrl: 'https://partial.example/v1',
+          apiKeyEntries: [{ apiKey: 'c' }, { apiKey: '', proxyUrl: 'socks5://proxy:1080' }],
+        },
+        { name: 'unknown', baseUrl: 'https://unknown.example/v1', apiKeyEntries: [] },
+      ],
+    });
+    rows.find((row) => row.label === 'full-high')!.recentSuccess = 10;
+    rows.find((row) => row.label === 'full-low')!.recentSuccess = 1;
+    rows.find((row) => row.label === 'partial')!.recentSuccess = 99;
+    rows.find((row) => row.label === 'unknown')!.recentSuccess = 0;
+
+    expect(
+      filterAndSortProviderRows(rows, { sortOption: 'recent-success', sortDirection: 'desc' })
+        .map((row) => row.label)
+    ).toEqual(['full-high', 'full-low', 'partial', 'unknown']);
+    expect(
+      filterAndSortProviderRows(rows, { sortOption: 'recent-success', sortDirection: 'asc' })
+        .map((row) => row.label)
+    ).toEqual(['full-low', 'full-high', 'partial', 'unknown']);
+  });
+
   it('sorts by name using provider name for openai and identity fallback for key configs', () => {
     const rows = buildProviderRows({
       ...emptyInput,

@@ -625,7 +625,7 @@ export function ModelPricesPage() {
           </div>
         ) : null}
 
-        {loading || usageSummaryLoading ? (
+        {(loading || usageSummaryLoading) && visibleRows.length === 0 ? (
           <div className={styles.emptyState}>{t('common.loading')}</div>
         ) : visibleRows.length === 0 ? (
           <div className={styles.emptyState}>{t('model_prices.empty')}</div>

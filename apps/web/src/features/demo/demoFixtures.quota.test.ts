@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { getDemoApiCallResult } from './demoFixtures';
 
 const CLAUDE_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
+const CODEX_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage';
 
 describe('Claude quota demo fixtures', () => {
   it('provides limits-only base quotas plus multiple fictional scoped models', () => {
@@ -63,3 +64,44 @@ describe('Claude quota demo fixtures', () => {
     expect(result.body).not.toHaveProperty('limits');
   });
 });
+
+describe('Codex spend-control demo fixture', () => {
+  it('keeps the Team account on the #935 zero-budget scenario after quota refresh', () => {
+    const result = getDemoApiCallResult({
+      authIndex: 'codex-team-01',
+      url: CODEX_USAGE_URL,
+    });
+
+    expect(result.body).toMatchObject({
+      plan_type: 'team',
+      rate_limit: {
+        allowed: true,
+        limit_reached: false,
+        primary_window: { used_percent: 55, limit_window_seconds: 18_000 },
+        secondary_window: { used_percent: 9, limit_window_seconds: 604_800 },
+      },
+      credits: {
+        has_credits: false,
+        unlimited: false,
+        balance: null,
+        overage_limit_reached: false,
+      },
+      spend_control: {
+        reached: true,
+        individual_limit: {
+          source: 'workspace_spend_controls',
+          unit: 'credit',
+          limit: '0',
+          used: '0.0',
+          remaining: '0.0',
+          used_percent: 100,
+          remaining_percent: 0,
+          reset_after_seconds: expect.any(Number),
+          reset_at: expect.any(Number),
+        },
+      },
+      rate_limit_reached_type: null,
+    });
+  });
+});
+

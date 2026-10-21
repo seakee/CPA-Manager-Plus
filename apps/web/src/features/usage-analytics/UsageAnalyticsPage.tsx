@@ -1446,6 +1446,7 @@ function HeatmapContributorGroup({
 function HeatmapDetailPanel({
   dateError,
   dateLoading,
+  dateLoaded,
   dateOptions,
   detail,
   metric,
@@ -1457,6 +1458,7 @@ function HeatmapDetailPanel({
 }: {
   dateError: string;
   dateLoading: boolean;
+  dateLoaded: boolean;
   dateOptions: UsageHeatmapDateOption[];
   detail: UsageHeatmapCellDetail | null;
   metric: UsageHeatmapMetricKey;
@@ -1559,14 +1561,14 @@ function HeatmapDetailPanel({
   const dateCount = dateOptions.length;
   let content: ReactNode;
 
-  if (dateLoading && !detail) {
+  if (dateLoading && !dateLoaded && !detail) {
     content = (
       <div className={styles.chartEmptyInline}>
         <IconRefreshCw size={24} />
         <span>{t('common.loading')}</span>
       </div>
     );
-  } else if (dateError) {
+  } else if (dateError && !dateLoaded && !detail) {
     content = (
       <div className={styles.chartEmptyInline}>
         <IconX size={24} />
@@ -1579,6 +1581,7 @@ function HeatmapDetailPanel({
       <div className={styles.chartEmptyInline}>
         <IconInbox size={24} />
         <span>{t('usage_analytics.heatmap_date_empty')}</span>
+        {dateError ? <span role="alert">{dateError}</span> : null}
       </div>
     );
   } else {
@@ -1589,6 +1592,7 @@ function HeatmapDetailPanel({
         }`}
         aria-busy={dateLoading}
       >
+        {dateError ? <div role="alert">{dateError}</div> : null}
         {dateLoading ? (
           <div className={styles.heatmapDetailRefreshBadge} role="status">
             <IconRefreshCw size={14} />
@@ -1959,12 +1963,14 @@ function EntityTrendChart({
   series,
   highlightId,
   loading = false,
+  loaded = false,
   error = '',
 }: {
   metric: UsageTrendMetricKey;
   series: UsageEntityTrendSeries[];
   highlightId?: string;
   loading?: boolean;
+  loaded?: boolean;
   error?: string;
 }) {
   const { t } = useTranslation();
@@ -2049,7 +2055,7 @@ function EntityTrendChart({
     [chartTheme, hasHighlight, highlightId, metric, series]
   );
 
-  if (loading) {
+  if (loading && !loaded && series.length === 0) {
     return (
       <div className={styles.chartEmptyInline}>
         <IconRefreshCw size={24} />
@@ -2058,7 +2064,7 @@ function EntityTrendChart({
     );
   }
 
-  if (error) {
+  if (error && !loaded && series.length === 0) {
     return (
       <div className={styles.chartEmptyInline}>
         <IconX size={24} />
@@ -2073,17 +2079,21 @@ function EntityTrendChart({
       <div className={styles.chartEmptyInline}>
         <IconInbox size={24} />
         <span>{t('usage_analytics.empty_title')}</span>
+        {error ? <span role="alert">{error}</span> : null}
       </div>
     );
   }
 
   return (
-    <EChartsView
-      option={option}
-      className={styles.echartsCanvas}
-      style={{ height: 260 }}
-      ariaLabel={t('usage_analytics.entity_trend_title')}
-    />
+    <div aria-busy={loading}>
+      {error ? <div role="alert">{error}</div> : null}
+      <EChartsView
+        option={option}
+        className={styles.echartsCanvas}
+        style={{ height: 260 }}
+        ariaLabel={t('usage_analytics.entity_trend_title')}
+      />
+    </div>
   );
 }
 
@@ -3388,6 +3398,7 @@ function UsageAnalyticsPageInner() {
                 series={usage.credentialTrendSeries}
                 metric={usage.trendMetric}
                 loading={usage.credentialTrendLoading}
+                loaded={usage.credentialTrendLoaded}
                 error={usage.credentialTrendError}
               />
             </div>
@@ -3520,6 +3531,7 @@ function UsageAnalyticsPageInner() {
               <HeatmapDetailPanel
                 dateError={usage.heatmapDateError}
                 dateLoading={usage.heatmapDateLoading}
+                dateLoaded={usage.heatmapDateLoaded}
                 dateOptions={usage.heatmapDateOptions}
                 detail={usage.heatmapDetail}
                 metric={usage.heatmapMetric}

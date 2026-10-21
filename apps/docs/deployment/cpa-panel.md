@@ -77,6 +77,8 @@ http://<cpa-host>:8317/management.html
 
 CPA 首次访问时会从指定 GitHub 仓库的最新 Release 查找名为 `management.html` 的资源，并缓存到 CPA 工作目录。
 
+`management.html` 继续保持单文件分发。页面先使用传统根路径图标，但只有响应被识别为 CPAMP Manager Server 的图标资源时才会继续使用；否则当前浏览器会切换到同一份 ICO 和 Apple Touch Icon 的内嵌 Data URL。这样 Safari 26+ 和当前 iOS 不需要 CPA 下载额外静态文件也能保持自包含。Safari 18 及更早版本对 Data URL 图标的兼容性不可靠，因此轻量面板不保证这些旧版本的主屏幕自定义图标；Full Mode 仍直接提供传统根路径图标资源。
+
 ## 更新与缓存
 
 当 `disable-auto-update-panel: false` 时，CPA 会定期检查最新面板。升级后仍显示旧界面时：

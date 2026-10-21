@@ -3,6 +3,7 @@ package store
 import "errors"
 
 var ErrUsagePricingCoverageIncomplete = errors.New("usage pricing coverage is incomplete")
+var ErrUsagePricingRecoveryFailed = errors.New("usage pricing recovery failed")
 
 type hourlyPricingCoverageKey struct {
 	bucketMS     int64
@@ -85,7 +86,7 @@ func addAccountPricingCoverage(grouped map[accountPricingCoverageKey]accountPric
 	grouped[key] = entry
 }
 
-func accountPricingCoverageMatches(core []AccountHistoryRollupRow, prices []UsagePricingAccountRow) bool {
+func accountPricingCoverageIncompleteKeys(core []AccountHistoryRollupRow, prices []UsagePricingAccountRow) map[string]struct{} {
 	coreTotals := make(map[accountPricingCoverageKey]accountPricingCoverage, len(core))
 	priceTotals := make(map[accountPricingCoverageKey]accountPricingCoverage, len(prices))
 	for _, row := range core {
@@ -110,13 +111,20 @@ func accountPricingCoverageMatches(core []AccountHistoryRollupRow, prices []Usag
 				row.LongCacheReadTokens, row.LongCacheCreationTokens, row.TotalTokens,
 			}, row.FirstSeenMS, row.LastSeenMS)
 	}
-	if len(coreTotals) != len(priceTotals) {
-		return false
-	}
+	incomplete := make(map[string]struct{})
 	for key, expected := range coreTotals {
 		if actual, exists := priceTotals[key]; !exists || actual != expected {
-			return false
+			incomplete[key.accountKey] = struct{}{}
 		}
 	}
-	return true
+	for key := range priceTotals {
+		if _, exists := coreTotals[key]; !exists {
+			incomplete[key.accountKey] = struct{}{}
+		}
+	}
+	return incomplete
+}
+
+func accountPricingCoverageMatches(core []AccountHistoryRollupRow, prices []UsagePricingAccountRow) bool {
+	return len(accountPricingCoverageIncompleteKeys(core, prices)) == 0
 }

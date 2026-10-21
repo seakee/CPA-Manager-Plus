@@ -351,6 +351,46 @@ describe('ProviderTable', () => {
     expect(getText(renderer.root as unknown as ReactTestInstance)).toContain('empty');
   });
 
+  it('distinguishes unavailable and partial OpenAI statistics from no traffic', () => {
+    const usageByProvider: ProviderRecentUsageMap = new Map([
+      ['mixed-keyless', new Map([
+        [
+          buildRecentRequestCompositeKey('https://mixed-keyless.example/v1', 'tracked-key'),
+          { success: 5, failed: 1, recentRequests: [] },
+        ],
+      ])],
+    ]);
+    const rows = buildProviderRows({
+      ...emptyInput,
+      openai: [
+        {
+          name: 'pure-keyless',
+          baseUrl: 'https://pure-keyless.example/v1',
+          apiKeyEntries: [],
+        },
+        {
+          name: 'mixed-keyless',
+          baseUrl: 'https://mixed-keyless.example/v1',
+          apiKeyEntries: [
+            { apiKey: 'tracked-key' },
+            { apiKey: '', proxyUrl: 'socks5://proxy:1080' },
+          ],
+        },
+      ],
+      usageByProvider,
+    });
+    const renderer = renderTable(rows);
+    const renderedRows = getRows(renderer);
+
+    expect(getText(renderedRows[0])).toContain('ai_providers.openai_keys_count: 0');
+    expect(getText(renderedRows[0])).toContain('ai_providers.usage_stats_unavailable');
+    expect(getText(renderedRows[0])).not.toContain('status_bar.no_requests');
+
+    expect(getText(renderedRows[1])).toContain('ai_providers.openai_keys_count: 1');
+    expect(getText(renderedRows[1])).toContain('5');
+    expect(getText(renderedRows[1])).toContain('ai_providers.usage_stats_partial');
+  });
+
   it('shows a placeholder instead of the status bar for zero-traffic rows', () => {
     const usageByProvider: ProviderRecentUsageMap = new Map([
       [

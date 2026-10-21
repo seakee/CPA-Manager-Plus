@@ -1286,6 +1286,7 @@ describe('UsageAnalyticsPage', () => {
     mocks.usageState = createUsageState({
       activeTab: 'credentials',
       credentialTrendLoading: true,
+      credentialTrendSeries: [],
     });
     let renderer = renderPage();
     expect(getText(renderer.root)).toContain('common.loading');
@@ -1293,12 +1294,62 @@ describe('UsageAnalyticsPage', () => {
     mocks.usageState = createUsageState({
       activeTab: 'credentials',
       credentialTrendError: 'timeline failed',
+      credentialTrendSeries: [],
     });
     renderer = renderPage();
     const text = getText(renderer.root);
     expect(text).toContain('usage_analytics.error_title');
     expect(text).toContain('timeline failed');
   });
+
+  it.each(['credentials', 'heatmap'] as const)(
+    'retains a successful empty %s snapshot during refresh, failure, and recovery',
+    (tab) => {
+      const state = createUsageState({
+        activeTab: tab,
+        credentialTrendLoaded: true,
+        credentialTrendSeries: [],
+        heatmapDateLoaded: true,
+        heatmapDetail: null,
+        selectedHeatmapCell: { weekday: 1, hour: 9 },
+        selectedHeatmapDateKey: '2026-06-08',
+      });
+      mocks.usageState = state;
+      const renderer = renderPage();
+      const panel = () => renderer.root.find(n => typeof n.type === 'function' && n.type.name === (tab === 'credentials' ? 'EntityTrendChart' : 'HeatmapDetailPanel'));
+      const emptyLabel = tab === 'credentials' ? 'usage_analytics.empty_title' : 'usage_analytics.heatmap_date_empty';
+      for (const phase of ['pending', 'failure', 'recovery']) {
+        Object.assign(state, {
+          credentialTrendLoading: phase === 'pending',
+          heatmapDateLoading: phase === 'pending',
+          credentialTrendError: phase === 'failure' ? 'empty refresh offline' : '',
+          heatmapDateError: phase === 'failure' ? 'empty refresh offline' : '',
+        });
+        act(() => renderer.update(<UsageAnalyticsPage />));
+        expect(getText(panel())).toContain(emptyLabel);
+        expect(getText(panel())).not.toContain('common.loading');
+        expect(panel().findAllByProps({ role: 'alert' }).length).toBe(phase === 'failure' ? 1 : 0);
+      }
+    }
+  );
+
+  it.each([true, false])(
+    'keeps the credential trend visible during pending/failure revalidation (loading=%s)',
+    (loading) => {
+      mocks.usageState = createUsageState({
+        activeTab: 'credentials',
+        credentialTrendLoading: loading,
+        credentialTrendError: loading ? '' : 'refresh offline',
+      });
+      const renderer = renderPage();
+      expect(
+        renderer.root
+          .findAllByType(EChartsView)
+          .some((node) => node.props.ariaLabel === 'usage_analytics.entity_trend_title')
+      ).toBe(true);
+      if (!loading) expect(getText(renderer.root)).toContain('refresh offline');
+    }
+  );
 
   it('renders the heatmap tab as a focused time-window workspace', () => {
     const usageState = createUsageState({ activeTab: 'heatmap' });
@@ -1447,43 +1498,47 @@ describe('UsageAnalyticsPage', () => {
     expect(text).not.toContain('usage_analytics.heatmap_focus_title');
   });
 
-  it('keeps heatmap detail content mounted while a date tab refreshes', () => {
-    const point = {
-      weekday: 1,
-      hour: 9,
-      requestCount: 12,
-      successCount: 11,
-      failureCount: 1,
-      totalTokens: 1200,
-      estimatedCost: 1.25,
-      failureRate: 1 / 12,
-    };
-    mocks.usageState = createUsageState({
-      activeTab: 'heatmap',
-      heatmapDateLoading: true,
-      heatmapDetail: {
-        point,
-        metricValue: 12,
-        overallBaseline: 12,
-        weekdayBaseline: 12,
-        hourBaseline: 12,
-        overallDelta: 0,
-        weekdayDelta: 0,
-        hourDelta: 0,
-        rank: 1,
-        totalCells: 1,
-      },
-      selectedHeatmapCell: { weekday: 1, hour: 9 },
-      selectedHeatmapDateKey: '2026-06-08',
-    });
-    const renderer = renderPage();
-    const text = getText(renderer.root);
+  it.each([true, false])(
+    'keeps heatmap detail content mounted during pending/failure (loading=%s)',
+    (loading) => {
+      const point = {
+        weekday: 1,
+        hour: 9,
+        requestCount: 12,
+        successCount: 11,
+        failureCount: 1,
+        totalTokens: 1200,
+        estimatedCost: 1.25,
+        failureRate: 1 / 12,
+      };
+      mocks.usageState = createUsageState({
+        activeTab: 'heatmap',
+        heatmapDateLoading: loading,
+        heatmapDateError: loading ? '' : 'date refresh offline',
+        heatmapDetail: {
+          point,
+          metricValue: 12,
+          overallBaseline: 12,
+          weekdayBaseline: 12,
+          hourBaseline: 12,
+          overallDelta: 0,
+          weekdayDelta: 0,
+          hourDelta: 0,
+          rank: 1,
+          totalCells: 1,
+        },
+        selectedHeatmapCell: { weekday: 1, hour: 9 },
+        selectedHeatmapDateKey: '2026-06-08',
+      });
+      const renderer = renderPage();
+      const text = getText(renderer.root);
 
-    expect(text).toContain('common.loading');
-    expect(text).toContain('usage_analytics.metric_request_count');
-    expect(text).toContain('usage_analytics.metric_total_tokens');
-    expect(text).not.toContain('usage_analytics.heatmap_date_empty');
-  });
+      expect(text).toContain(loading ? 'common.loading' : 'date refresh offline');
+      expect(text).toContain('usage_analytics.metric_request_count');
+      expect(text).toContain('usage_analytics.metric_total_tokens');
+      expect(text).not.toContain('usage_analytics.heatmap_date_empty');
+    }
+  );
 
   it('offers time range and status controls that update usage filters', () => {
     const usageState = createUsageState();

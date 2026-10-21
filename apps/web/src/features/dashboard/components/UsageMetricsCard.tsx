@@ -157,7 +157,7 @@ export function UsageMetricsCard({
       <>
         <div className={styles.metricsGrid}>
           {metrics.map((m) => (
-            <MetricCard key={m.label} {...m} loading={loading} />
+            <MetricCard key={m.label} {...m} loading={loading && !summary} />
           ))}
         </div>
         {error ? <div className={styles.error}>{error}</div> : null}

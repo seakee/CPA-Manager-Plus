@@ -18,6 +18,7 @@ import {
   type UsageServiceStatus,
 } from '@/services/api/usageService';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
+import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import { loadMonitoringMetaPayload } from '@/features/monitoring/services/monitoringMetaService';
 import { buildMonitoringAuthMetaMap } from '@/features/monitoring/model/authMeta';
 import { buildAuthFileMapFromMeta } from '@/features/monitoring/model/sourceDisplay';
@@ -61,6 +62,23 @@ interface DashboardDisplayMeta {
 const HEALTH_REFRESH_INTERVAL_MS = 60_000;
 
 export function DashboardPage() {
+  const connectionScope = useAuthStore((state) =>
+    JSON.stringify([state.apiBase, state.managementKey])
+  );
+  const featureAvailability = usePanelFeatureAvailability();
+  const useApiBaseAsCpaBase =
+    featureAvailability.panelHostConfirmed &&
+    featureAvailability.panelHostMode === 'external_panel';
+
+  return (
+    <DashboardPageContent
+      key={`${connectionScope}:${featureAvailability.managerServiceBase}`}
+      useApiBaseAsCpaBase={useApiBaseAsCpaBase}
+    />
+  );
+}
+
+function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: boolean }) {
   const { t, i18n } = useTranslation();
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
   const serverVersion = useAuthStore((state) => state.serverVersion);
@@ -74,6 +92,7 @@ export function DashboardPage() {
   const models = useModelsStore((state) => state.models);
   const modelsLoading = useModelsStore((state) => state.loading);
   const modelsError = useModelsStore((state) => state.error);
+  const modelsCache = useModelsStore((state) => state.cache);
   const fetchModelsFromStore = useModelsStore((state) => state.fetchModels);
 
   const [stats, setStats] = useState<{
@@ -101,7 +120,10 @@ export function DashboardPage() {
   const [collectorError, setCollectorError] = useState('');
   const [errorLogs, setErrorLogs] = useState<ErrorLogFile[]>([]);
   const [errorLogsLoading, setErrorLogsLoading] = useState(false);
+  const [errorLogsLoaded, setErrorLogsLoaded] = useState(false);
+  const [errorLogsError, setErrorLogsError] = useState('');
   const [managerCpaBase, setManagerCpaBase] = useState('');
+  const [healthMetaError, setHealthMetaError] = useState('');
   const [displayMeta, setDisplayMeta] = useState<DashboardDisplayMeta>({
     authFiles: [],
     channels: [],
@@ -109,6 +131,19 @@ export function DashboardPage() {
   });
 
   const apiKeysCache = useRef<string[]>([]);
+  const statsRequestId = useRef(0);
+  const healthRequestId = useRef(0);
+  const channelsSnapshotLoadedRef = useRef(false);
+  const modelRequestId = useRef(0);
+  useEffect(
+    () => () => {
+      statsRequestId.current += 1;
+      healthRequestId.current += 1;
+      modelRequestId.current += 1;
+    },
+    []
+  );
+  const [statsError, setStatsError] = useState('');
 
   useEffect(() => {
     apiKeysCache.current = [];
@@ -171,20 +206,23 @@ export function DashboardPage() {
   }, [config?.apiKeys]);
 
   const fetchModels = useCallback(async () => {
+    const requestId = ++modelRequestId.current;
     if (connectionStatus !== 'connected' || !apiBase) {
       return;
     }
 
     try {
       const apiKeys = await resolveApiKeysForModels();
+      if (requestId !== modelRequestId.current) return;
       const primaryKey = apiKeys[0];
       await fetchModelsFromStore(apiBase, primaryKey);
     } catch {
-      // Ignore model fetch errors on dashboard
+      // The models store retains its last snapshot and exposes the refresh error below.
     }
   }, [connectionStatus, apiBase, resolveApiKeysForModels, fetchModelsFromStore]);
 
   const refreshStats = useCallback(async () => {
+    const requestId = ++statsRequestId.current;
     if (connectionStatus === 'connected') {
       setLoading(true);
       try {
@@ -199,28 +237,38 @@ export function DashboardPage() {
             providersApi.getOpenAIProviders(),
           ]);
 
-        setStats({
-          apiKeys: keysRes.status === 'fulfilled' ? keysRes.value.length : null,
-          authFiles: filesRes.status === 'fulfilled' ? filesRes.value.files.length : null,
-        });
+        if (requestId !== statsRequestId.current) return;
+        setStats((current) => ({
+          apiKeys: keysRes.status === 'fulfilled' ? keysRes.value.length : current.apiKeys,
+          authFiles:
+            filesRes.status === 'fulfilled' ? filesRes.value.files.length : current.authFiles,
+        }));
 
-        setProviderStats({
-          gemini: resolveProviderCount(geminiRes),
-          codex: resolveProviderCount(codexRes),
-          xai: resolveProviderCount(xaiRes, { unsupportedAsZero: true }),
-          claude: resolveProviderCount(claudeRes),
-          openai: resolveProviderCount(openaiRes),
-        });
+        setProviderStats((current) => ({
+          gemini: resolveProviderCount(geminiRes) ?? current.gemini,
+          codex: resolveProviderCount(codexRes) ?? current.codex,
+          xai: resolveProviderCount(xaiRes, { unsupportedAsZero: true }) ?? current.xai,
+          claude: resolveProviderCount(claudeRes) ?? current.claude,
+          openai: resolveProviderCount(openaiRes) ?? current.openai,
+        }));
+        setStatsError(
+          [keysRes, filesRes, geminiRes, codexRes, xaiRes, claudeRes, openaiRes].some(
+            (result) => result.status === 'rejected'
+          )
+            ? t('notification.refresh_failed')
+            : ''
+        );
       } finally {
-        setLoading(false);
+        if (requestId === statsRequestId.current) setLoading(false);
       }
     } else {
       setLoading(false);
     }
-  }, [connectionStatus]);
+  }, [connectionStatus, t]);
 
   const usageEnabled = usageSummary.enabled;
   const usageServiceBase = usageSummary.serviceBase;
+  const usageSummaryBootstrapError = Boolean(usageSummary.error && !usageSummary.summary);
   const authMetaMap = useMemo(
     () => buildMonitoringAuthMetaMap(displayMeta.authFiles),
     [displayMeta.authFiles]
@@ -261,13 +309,18 @@ export function DashboardPage() {
   }, [displayMeta.apiKeyAliases]);
 
   const refreshHealth = useCallback(async () => {
+    const requestId = ++healthRequestId.current;
     if (!usageEnabled || !usageServiceBase) {
       setCollectorStatus(null);
       setCollectorError('');
       setCollectorLoading(false);
       setErrorLogs([]);
+      setErrorLogsLoaded(false);
+      setErrorLogsError('');
       setErrorLogsLoading(false);
       setManagerCpaBase('');
+      setHealthMetaError('');
+      channelsSnapshotLoadedRef.current = false;
       setDisplayMeta({ authFiles: [], channels: [], apiKeyAliases: [] });
       return;
     }
@@ -284,11 +337,11 @@ export function DashboardPage() {
         usageServiceApi.getApiKeyAliases(usageServiceBase, managementKey),
       ]);
 
+    if (requestId !== healthRequestId.current) return;
     if (collectorResult.status === 'fulfilled') {
       setCollectorStatus(collectorResult.value);
       setCollectorError('');
     } else {
-      setCollectorStatus(null);
       const reason = collectorResult.reason;
       setCollectorError(reason instanceof Error ? reason.message : String(reason));
     }
@@ -296,26 +349,49 @@ export function DashboardPage() {
 
     if (logsResult.status === 'fulfilled') {
       setErrorLogs(Array.isArray(logsResult.value.files) ? logsResult.value.files : []);
+      setErrorLogsLoaded(true);
+      setErrorLogsError('');
     } else {
-      setErrorLogs([]);
+      const reason = logsResult.reason;
+      setErrorLogsError(reason instanceof Error ? reason.message : String(reason));
     }
     setErrorLogsLoading(false);
 
-    setManagerCpaBase(
-      managerConfigResult.status === 'fulfilled'
-        ? managerConfigResult.value.config.cpaConnection?.cpaBaseUrl || apiBase || ''
-        : apiBase || ''
+    const metaRefreshFailed =
+      metaResult.status === 'rejected' ||
+      (metaResult.status === 'fulfilled' && Boolean(metaResult.value.error));
+
+    if (managerConfigResult.status === 'fulfilled') {
+      setManagerCpaBase(managerConfigResult.value.config.cpaConnection?.cpaBaseUrl || '');
+    }
+    setHealthMetaError(
+      [managerConfigResult, aliasesResult].some((result) => result.status === 'rejected') ||
+        metaRefreshFailed
+        ? t('notification.refresh_failed')
+        : ''
     );
 
+    const nextChannels =
+      metaResult.status === 'fulfilled' &&
+      (metaResult.value.channelsLoaded || !channelsSnapshotLoadedRef.current)
+        ? metaResult.value.channels
+        : null;
+    if (metaResult.status === 'fulfilled' && metaResult.value.channelsLoaded) {
+      channelsSnapshotLoadedRef.current = true;
+    }
+
     setDisplayMeta((current) => ({
-      authFiles: metaResult.status === 'fulfilled' ? metaResult.value.authFiles : current.authFiles,
-      channels: metaResult.status === 'fulfilled' ? metaResult.value.channels : current.channels,
+      authFiles:
+        metaResult.status === 'fulfilled' && metaResult.value.authFilesLoaded
+          ? metaResult.value.authFiles
+          : current.authFiles,
+      channels: nextChannels ?? current.channels,
       apiKeyAliases:
         aliasesResult.status === 'fulfilled' && Array.isArray(aliasesResult.value.items)
           ? aliasesResult.value.items
           : current.apiKeyAliases,
     }));
-  }, [apiBase, config, managementKey, usageEnabled, usageServiceBase]);
+  }, [apiBase, config, managementKey, t, usageEnabled, usageServiceBase]);
 
   const refreshDashboard = useCallback(async () => {
     setCurrentTime(new Date());
@@ -373,10 +449,10 @@ export function DashboardPage() {
     },
     {
       label: t('nav.ai_providers'),
-      value: loading ? '-' : providerStatsReady ? totalProviderKeys : '-',
+      value: providerStatsReady ? totalProviderKeys : '-',
       icon: <IconBot size={24} />,
       path: '/ai-providers',
-      loading: loading,
+      loading: loading && !hasProviderStats,
       sublabel: hasProviderStats
         ? t('dashboard.provider_keys_detail', {
             gemini: providerStats.gemini ?? '-',
@@ -397,10 +473,14 @@ export function DashboardPage() {
     },
     {
       label: t('dashboard.available_models'),
-      value: getDashboardModelCountDisplay(models.length, modelsLoading, modelsError),
+      value: getDashboardModelCountDisplay(
+        models.length,
+        modelsLoading && !modelsCache,
+        modelsCache ? null : modelsError
+      ),
       icon: <IconSatellite size={24} />,
       path: '/system',
-      loading: modelsLoading,
+      loading: modelsLoading && !modelsCache,
       sublabel: t('dashboard.available_models_desc'),
     },
   ];
@@ -500,20 +580,23 @@ export function DashboardPage() {
         <VersionCard
           appVersion={__APP_VERSION__ || t('dashboard.version_unknown')}
           apiVersion={serverVersion || t('dashboard.version_unknown')}
-          cpaBase={managerCpaBase || apiBase || ''}
+          cpaBase={managerCpaBase || (useApiBaseAsCpaBase ? apiBase : '')}
           serverBuildDate={serverBuildDate || undefined}
           connectionStatus={connectionStatus}
           refreshSignal={cardRefreshSignal}
           usageEnabled={usageSummary.enabled}
-          usageLoading={usageSummary.loading}
+          usageLoading={usageSummary.loading && !usageSummary.summary}
           usageError={usageSummary.error}
           collectorStatus={collectorStatus}
           collectorLoading={collectorLoading}
           collectorError={collectorError}
           errorLogCount={errorLogs.length}
-          errorLogsLoading={errorLogsLoading}
+          errorLogsLoading={errorLogsLoading && !errorLogsLoaded}
+          errorLogsError={errorLogsError}
+          errorLogsLoaded={errorLogsLoaded}
         />
       </section>
+      {healthMetaError ? <div className="error-box" role="alert">{healthMetaError}</div> : null}
 
       {/* 3. Today's Overview (Metrics Cards) */}
       {usageSummary.enabled && (
@@ -523,7 +606,7 @@ export function DashboardPage() {
             summary={usageSummary.summary}
             topModels={usageSummary.topModels}
             modelCostRank={usageSummary.modelCostRank}
-            loading={usageSummary.loading}
+            loading={usageSummary.loading && !usageSummary.summary}
             error={usageSummary.error}
             lastRefreshedAt={usageSummary.lastRefreshedAt}
             mode="metrics-only"
@@ -532,32 +615,32 @@ export function DashboardPage() {
       )}
 
       {/* 4. Charts Row (Traffic, Activity, Tokens) */}
-      {usageSummary.enabled && (
+      {usageSummary.enabled && !usageSummaryBootstrapError && (
         <section className={styles.chartsRow}>
           <TrafficOverviewCard
             timeline={usageSummary.trafficTimeline}
             trafficNowMs={usageSummary.summary?.window.now_ms}
             todayRequestHealthTimeline={usageSummary.todayRequestHealthTimeline}
             tokenMix={usageSummary.tokenMix}
-            loading={usageSummary.loading}
+            loading={usageSummary.loading && !usageSummary.summary}
           />
         </section>
       )}
 
       {/* 5. Data & Status Row (Rankings, Health, Failures) */}
-      {usageSummary.enabled && (
+      {usageSummary.enabled && !usageSummaryBootstrapError && (
         <section className={styles.dataRow}>
           <UsageMetricsCard
             summary={usageSummary.summary}
             topModels={usageSummary.topModels}
             modelCostRank={usageSummary.modelCostRank}
-            loading={usageSummary.loading}
+            loading={usageSummary.loading && !usageSummary.summary}
             error={usageSummary.error}
             lastRefreshedAt={usageSummary.lastRefreshedAt}
             mode="rank-only"
           />
           <HealthAlertsCard
-            loading={usageSummary.loading}
+            loading={usageSummary.loading && !usageSummary.summary}
             recentFailures={usageSummary.recentFailures}
             channelHealth={usageSummary.channelHealth}
             authMetaMap={authMetaMap}
@@ -579,6 +662,8 @@ export function DashboardPage() {
       )}
 
       {/* 6. Quick Stats + Config Summary */}
+      {statsError ? <div role="alert">{statsError}</div> : null}
+      {modelsError ? <div role="alert">{modelsError}</div> : null}
       <section className={styles.bottomSummaryRow}>
         <div className={styles.quickStatsPanel}>
           <div className={styles.bentoGrid}>

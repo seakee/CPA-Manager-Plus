@@ -14,6 +14,7 @@ const COLLAPSED_MODEL_COUNT = 3;
 export type OAuthExcludedCardProps = {
   disableControls: boolean;
   loadState: OAuthConfigLoadState;
+  hasLoaded?: boolean;
   excluded: Record<string, string[]>;
   onRetry: () => void | Promise<void>;
   onAdd: () => void;
@@ -24,6 +25,7 @@ export type OAuthExcludedCardProps = {
 export function OAuthExcludedCard(props: OAuthExcludedCardProps) {
   const { t } = useTranslation();
   const { disableControls, loadState, excluded, onRetry, onAdd, onEdit, onDelete } = props;
+  const hasLoaded = props.hasLoaded ?? Object.keys(excluded).length > 0;
   const writesDisabled = disableControls || loadState !== 'ready';
   const [search, setSearch] = useState('');
   const [expandedProviders, setExpandedProviders] = useState<Set<string>>(() => new Set());
@@ -69,7 +71,7 @@ export function OAuthExcludedCard(props: OAuthExcludedCardProps) {
       {loadState === 'ready' ? (
         <div className={styles.cardScopeHint}>{t('oauth_excluded.scope_hint')}</div>
       ) : null}
-      {loadState === 'ready' && entries.length > 0 ? (
+      {hasLoaded && entries.length > 0 ? (
         <div className={styles.ruleToolbar}>
           <div className={styles.ruleSummary} role="status">
             {normalizedSearch
@@ -94,12 +96,20 @@ export function OAuthExcludedCard(props: OAuthExcludedCardProps) {
           </div>
         </div>
       ) : null}
+      {loadState === 'error' && hasLoaded ? (
+        <div role="alert">
+          {t('notification.refresh_failed')}{' '}
+          <Button variant="secondary" size="sm" onClick={() => void onRetry()}>
+            {t('common.retry')}
+          </Button>
+        </div>
+      ) : null}
       {loadState === 'unsupported' ? (
         <EmptyState
           title={t('oauth_excluded.upgrade_required_title')}
           description={t('oauth_excluded.upgrade_required_desc')}
         />
-      ) : loadState === 'error' ? (
+      ) : loadState === 'error' && !hasLoaded ? (
         <EmptyState
           title={t('notification.refresh_failed')}
           action={
@@ -108,7 +118,7 @@ export function OAuthExcludedCard(props: OAuthExcludedCardProps) {
             </Button>
           }
         />
-      ) : loadState === 'loading' ? (
+      ) : loadState === 'loading' && !hasLoaded ? (
         <EmptyState title={t('common.loading')} />
       ) : Object.keys(excluded).length === 0 ? (
         <EmptyState title={t('oauth_excluded.list_empty_all')} />

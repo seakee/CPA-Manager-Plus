@@ -42,6 +42,9 @@ git rebase upstream/dev
 
 ## Local Verification
 
+Frontend work follows the [Data Loading & Refresh Interaction](docs/development/data-loading-and-refresh.md)
+contract. It is the default for v2 and later development, and for v1 refresh fixes.
+
 Use the narrowest checks that cover your change, then run broader checks when
 the change crosses frontend, Manager Server, packaging, or runtime boundaries.
 

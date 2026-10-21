@@ -1304,15 +1304,17 @@ export function VisualConfigEditor({
                         onChange={(e) => onChange({ codexHeaderBetaFeatures: e.target.value })}
                         disabled={disabled}
                       />
-                      <ToggleRow
-                        title={t('config_management.visual.sections.headers.identity_confuse')}
-                        description={t(
-                          'config_management.visual.sections.headers.identity_confuse_desc'
-                        )}
-                        checked={values.codexIdentityConfuse}
-                        disabled={disabled}
-                        onChange={(codexIdentityConfuse) => onChange({ codexIdentityConfuse })}
-                      />
+                      {values.codexIdentityConfuseSupported && (
+                        <ToggleRow
+                          title={t('config_management.visual.sections.headers.identity_confuse')}
+                          description={t(
+                            'config_management.visual.sections.headers.identity_confuse_desc'
+                          )}
+                          checked={values.codexIdentityConfuse}
+                          disabled={disabled}
+                          onChange={(codexIdentityConfuse) => onChange({ codexIdentityConfuse })}
+                        />
+                      )}
                     </SectionGrid>
                   </SectionSubsection>
                 </SectionStack>

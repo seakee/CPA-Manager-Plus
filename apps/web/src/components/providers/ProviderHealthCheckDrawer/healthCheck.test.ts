@@ -188,6 +188,70 @@ describe('provider health check model', () => {
     );
   });
 
+  it('health-checks a keyless OpenAI provider without requiring a credential or injecting a token', async () => {
+    mocks.fetchModelsViaApiCall.mockResolvedValueOnce([{ name: 'local-model' }]);
+    const rows = buildProviderRows({
+      gemini: [],
+      codex: [],
+      claude: [],
+      vertex: [],
+      openai: [{
+        name: 'local-anonymous',
+        baseUrl: 'http://localhost:11434/v1',
+        apiKeyEntries: [],
+        authIndex: 'auto-assigned-cpa-index',
+      }],
+      usageByProvider: emptyUsageByProvider,
+    });
+    const [item] = buildProviderHealthCheckItems(rows);
+
+    await expect(runProviderHealthCheckItem(rows, item)).resolves.toMatchObject({
+      status: 'success',
+      modelCount: 1,
+    });
+    expect(item).toMatchObject({
+      targetLabelKey: 'ai_providers.health_check_no_key_entries',
+      detailLabelKey: 'ai_providers.health_check_no_key_entries',
+    });
+    expect(mocks.fetchModelsViaApiCall).toHaveBeenCalledWith(
+      'http://localhost:11434/v1', undefined, {}, undefined, undefined, true
+    );
+  });
+
+  it('retains the auth-index and proxy for an empty-key OpenAI entry without token substitution', async () => {
+    mocks.fetchModelsViaApiCall.mockResolvedValueOnce([{ name: 'local-model' }]);
+    const rows = buildProviderRows({
+      gemini: [], codex: [], claude: [], vertex: [],
+      openai: [{
+        name: 'keyless-proxy',
+        baseUrl: 'https://model.example/v1',
+        apiKeyEntries: [{
+          apiKey: '',
+          authIndex: 'cpa-keyless-index',
+          proxyUrl: 'socks5://proxy.example:1080',
+        }],
+      }],
+      usageByProvider: emptyUsageByProvider,
+    });
+    const [item] = buildProviderHealthCheckItems(rows);
+    expect(item).toMatchObject({
+      targetLabelKey: 'ai_providers.health_check_keyless_index',
+      targetLabelValues: { index: 1 },
+    });
+    await expect(runProviderHealthCheckItem(rows, item)).resolves.toMatchObject({
+      status: 'success',
+      modelCount: 1,
+    });
+    expect(mocks.fetchModelsViaApiCall).toHaveBeenCalledWith(
+      'https://model.example/v1',
+      undefined,
+      {},
+      'cpa-keyless-index',
+      'socks5://proxy.example:1080',
+      true
+    );
+  });
+
   it('uses the selected OpenAI key entry proxy for health checks', async () => {
     mocks.fetchModelsViaApiCall.mockResolvedValueOnce([{ name: 'gpt-4.1' }]);
     const rows = buildProviderRows({
@@ -219,7 +283,8 @@ describe('provider health check model', () => {
       'key-b',
       {},
       undefined,
-      'http://second-proxy.example:8080'
+      'http://second-proxy.example:8080',
+      false
     );
   });
 

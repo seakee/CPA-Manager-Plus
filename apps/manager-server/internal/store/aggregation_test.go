@@ -159,3 +159,61 @@ func aggregationEvent(
 		CreatedAtMS:     timestampMS,
 	}
 }
+
+func TestIssue941CanonicalAccountingFlowsIntoAnalytics(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	event, err := usage.NormalizeRaw([]byte(`{
+		"timestamp":"2026-10-12T00:00:00Z",
+		"provider":"workbuddy",
+		"executor_type":"executorAdapter",
+		"model":"Deepseek-V4.1-Flash",
+		"endpoint":"POST /v1/chat/completions",
+		"tokens":{
+			"input_tokens":233705,
+			"output_tokens":1148,
+			"reasoning_tokens":458,
+			"cached_tokens":232576,
+			"cache_read_tokens":232576,
+			"cache_creation_tokens":0,
+			"total_tokens":234853
+		},
+		"accounting_version":2,
+		"token_breakdown":{
+			"schema_version":2,
+			"quality":"complete",
+			"total_tokens":234853,
+			"input":{"total_tokens":233705,"uncached_tokens":1129,"cache_read_tokens":232576,"cache_write_tokens":0},
+			"output":{"total_tokens":1148,"non_reasoning_tokens":690,"reasoning_tokens":458},
+			"unclassified_tokens":0
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("normalize #941 event: %v", err)
+	}
+	if _, err := db.InsertEvents(context.Background(), []usage.Event{event}); err != nil {
+		t.Fatalf("insert #941 event: %v", err)
+	}
+
+	agg, err := db.AggregateBetween(context.Background(), event.TimestampMS, event.TimestampMS+1)
+	if err != nil {
+		t.Fatalf("aggregate #941 event: %v", err)
+	}
+	if agg.InputTokens != 233705 ||
+		agg.OutputTokens != 1148 ||
+		agg.ReasoningTokens != 458 ||
+		agg.CacheReadTokens != 232576 ||
+		agg.TotalTokens != 234853 {
+		t.Fatalf("aggregate #941 tokens = %#v", agg)
+	}
+	if agg.LongInputTokens != 0 ||
+		agg.LongOutputTokens != 0 ||
+		agg.LongCacheReadTokens != 0 {
+		t.Fatalf("aggregate #941 long-context tokens = %#v", agg.LongContextTokens)
+	}
+}
+

@@ -194,42 +194,6 @@ export const mergeCodexResetCreditsFromQuotaSnapshots = (
   quota: CodexQuotaState | undefined,
   snapshots: AccountQuotaSnapshotWindow[]
 ): CodexQuotaState | undefined => {
-  const hasLocalCountEvidence =
-    typeof quota?.resetCreditsCountEvidenceAtMs === 'number' &&
-    Number.isFinite(quota.resetCreditsCountEvidenceAtMs) &&
-    quota.resetCreditsCountEvidenceAtMs > 0;
-  const localCountEvidenceAtMs =
-    resolveCodexResetCreditsCountEvidenceAtMs(quota) ?? 0;
-
-  const hasLocalDetailEvidence =
-    typeof quota?.resetCreditsDetailEvidenceAtMs === 'number' &&
-    Number.isFinite(quota.resetCreditsDetailEvidenceAtMs) &&
-    quota.resetCreditsDetailEvidenceAtMs > 0;
-  const localDetailEvidenceAtMs =
-    resolveCodexResetCreditsDetailEvidenceAtMs(quota) ?? 0;
-
-  const localResetInvalidationAtMs =
-    quota?.resetCreditsDetailStale === true &&
-    typeof quota?.resetCreditsEvidenceAtMs === 'number' &&
-    Number.isFinite(quota.resetCreditsEvidenceAtMs) &&
-    quota.resetCreditsEvidenceAtMs > 0
-      ? quota.resetCreditsEvidenceAtMs
-      : 0;
-
-  const localCountInvalidationBoundaryAtMs = Math.max(
-    localCountEvidenceAtMs,
-    localResetInvalidationAtMs
-  );
-
-  const localDetailInvalidationBoundaryAtMs =
-    quota?.resetCreditsDetailStale === true
-      ? Math.max(
-          localDetailEvidenceAtMs,
-          localCountEvidenceAtMs,
-          localResetInvalidationAtMs
-        )
-      : localDetailEvidenceAtMs;
-
   const usableSnapshots = snapshots.filter(
     (snapshot) =>
       snapshot.stale !== true &&
@@ -247,103 +211,169 @@ export const mergeCodexResetCreditsFromQuotaSnapshots = (
   const creditsSnapshot = usableSnapshots
     .filter((snapshot) => snapshot.reset_credits !== undefined)
     .sort(compareSnapshotFieldFreshness('reset_credits'))[0];
-  const countObservedAt = countSnapshot
+
+  if (!countSnapshot && !creditsSnapshot) return quota;
+
+  const localCount = quota?.rateLimitResetCreditsAvailableCount ?? null;
+  const localCredits = quota?.rateLimitResetCredits ?? [];
+  const localCountAt = resolveCodexResetCreditsCountEvidenceAtMs(quota) ?? 0;
+  const localDetailAt = resolveCodexResetCreditsDetailEvidenceAtMs(quota) ?? 0;
+  const localResetInvalidationAt =
+    quota?.resetCreditsDetailStale === true &&
+    typeof quota.resetCreditsEvidenceAtMs === 'number' &&
+    Number.isFinite(quota.resetCreditsEvidenceAtMs) &&
+    quota.resetCreditsEvidenceAtMs > 0
+      ? quota.resetCreditsEvidenceAtMs
+      : 0;
+  const countBoundary = Math.max(localCountAt, localResetInvalidationAt);
+  const detailBoundary =
+    quota?.resetCreditsDetailStale === true
+      ? Math.max(localDetailAt, localCountAt, localResetInvalidationAt)
+      : localDetailAt;
+
+  const countAt = countSnapshot
     ? snapshotFieldObservedAt(countSnapshot, 'reset_credits_available')
     : 0;
-  const creditsObservedAt = creditsSnapshot
+  const detailAt = creditsSnapshot
     ? snapshotFieldObservedAt(creditsSnapshot, 'reset_credits')
     : 0;
 
-  const localIsZeroCountAtOrAfterSnapshot =
-    quota?.rateLimitResetCreditsAvailableCount === 0 &&
-    localCountEvidenceAtMs >= creditsObservedAt;
-
-  const useSnapshotCount =
+  let useCount =
     countSnapshot !== undefined &&
-    ((quota?.rateLimitResetCreditsAvailableCount === undefined ||
-      quota?.rateLimitResetCreditsAvailableCount === null) &&
-    !hasLocalCountEvidence &&
-    localCountInvalidationBoundaryAtMs === 0
-      ? true
-      : countObservedAt >= localCountInvalidationBoundaryAtMs);
+    countAt > 0 &&
+    countAt >= countBoundary;
 
-  const useSnapshotCredits =
+  let useDetail =
     creditsSnapshot !== undefined &&
-    !localIsZeroCountAtOrAfterSnapshot &&
-    (quota?.resetCreditsDetailStale === true
-      ? creditsObservedAt >= localDetailInvalidationBoundaryAtMs
-      : quota?.rateLimitResetCredits === undefined &&
-        !hasLocalDetailEvidence &&
-        localDetailInvalidationBoundaryAtMs === 0
-        ? true
-        : creditsObservedAt >= localDetailInvalidationBoundaryAtMs);
+    detailAt > 0 &&
+    detailAt >= detailBoundary;
 
-  if (!useSnapshotCount && !useSnapshotCredits) return quota;
+  // A locally observed zero at the same or newer instant is an explicit
+  // invalidation boundary for older detail snapshots.
+  if (
+    useDetail &&
+    localCount === 0 &&
+    localCountAt > 0 &&
+    localCountAt >= detailAt
+  ) {
+    useDetail = false;
+  }
 
-  const activeCount = useSnapshotCount
-    ? (countSnapshot.reset_credits_available ?? null)
-    : (quota?.rateLimitResetCreditsAvailableCount ?? null);
-  const activeCountObservedAt = useSnapshotCount ? countObservedAt : localCountEvidenceAtMs;
-  const activeCreditsObservedAt = useSnapshotCredits ? creditsObservedAt : localDetailEvidenceAtMs;
+  // Snapshot count fields are summary-like. A count-only zero must not erase
+  // known positive evidence. An explicit detail observation at the same/newer
+  // instant (including an empty array) is authoritative and may settle zero.
+  let provisionalZeroAt = 0;
+  if (
+    useCount &&
+    countSnapshot?.reset_credits_available === 0 &&
+    (localCount !== null && localCount > 0 || localCredits.length > 0) &&
+    !(useDetail && detailAt >= countAt)
+  ) {
+    useCount = false;
+    provisionalZeroAt = countAt;
+  }
 
-  const clearCreditsFromZeroCount =
-    activeCount === 0 && activeCountObservedAt >= activeCreditsObservedAt;
+  if (!useCount && !useDetail && provisionalZeroAt === 0) return quota;
 
-  const finalCredits = clearCreditsFromZeroCount
-    ? []
-    : useSnapshotCredits
-      ? (creditsSnapshot.reset_credits ?? []).map((credit) => ({
-          id: credit.id,
-          status: 'available',
-          grantedAt: '',
-          expiresAt: new Date(credit.expires_at_ms).toISOString(),
-        }))
-      : (quota?.rateLimitResetCredits ?? []);
+  let finalCount = useCount
+    ? (countSnapshot?.reset_credits_available ?? null)
+    : localCount;
+  let finalCountAt = useCount ? countAt : localCountAt;
+  let finalCredits = useDetail
+    ? (creditsSnapshot?.reset_credits ?? []).map((credit) => ({
+        id: credit.id,
+        status: 'available' as const,
+        grantedAt: '',
+        expiresAt: new Date(credit.expires_at_ms).toISOString(),
+      }))
+    : localCredits;
+  const finalDetailAt = useDetail ? detailAt : localDetailAt;
 
-  const detailSupersedesCount =
-    useSnapshotCredits &&
-    !clearCreditsFromZeroCount &&
-    creditsObservedAt > 0 &&
-    creditsObservedAt > activeCountObservedAt;
+  // Count/detail are independent evidence streams. Only a strictly newer
+  // detail observation may derive a replacement count. Equal timestamps keep
+  // the explicit count authoritative.
+  const detailDerivesCount =
+    useDetail &&
+    (finalCount === null || finalCountAt <= 0 || detailAt > finalCountAt);
+  if (detailDerivesCount) {
+    finalCount = finalCredits.length;
+    finalCountAt = detailAt;
+  }
 
-  const finalCount = detailSupersedesCount ? finalCredits.length : activeCount;
-  const finalCountEvidenceAtMs = detailSupersedesCount
-    ? creditsObservedAt
-    : Math.max(
-        localCountEvidenceAtMs,
-        useSnapshotCount ? countObservedAt : 0
-      );
+  const localHadPositiveEvidence =
+    (localCount !== null && localCount > 0) || localCredits.length > 0;
+  const acceptedCountChanged =
+    useCount && finalCount !== localCount && !detailDerivesCount;
 
-  const finalDetailEvidenceAtMs = clearCreditsFromZeroCount
-    ? null
-    : useSnapshotCredits
-      ? creditsObservedAt
-      : localDetailEvidenceAtMs > 0
-        ? localDetailEvidenceAtMs
-        : null;
+  // A newer accepted count can invalidate older displayed detail without
+  // deleting its historical evidence timestamp. Fresher local detail remains
+  // independently valid.
+  if (
+    acceptedCountChanged &&
+    !useDetail &&
+    localDetailAt <= finalCountAt
+  ) {
+    finalCredits = [];
+  }
+
+  // Explicit zero count wins at equal/newer time, but if detail was explicitly
+  // observed keep its provenance timestamp even though displayed credits clear.
+  if (
+    finalCount === 0 &&
+    finalCountAt > 0 &&
+    finalCountAt >= finalDetailAt
+  ) {
+    finalCredits = [];
+  }
+
+  let finalStale = quota?.resetCreditsDetailStale ?? false;
+  if (useDetail) {
+    finalStale = false;
+  } else if (provisionalZeroAt > 0) {
+    finalStale = true;
+  } else if (acceptedCountChanged) {
+    finalStale = finalCount === 0 && !localHadPositiveEvidence ? false : true;
+  } else if (useCount && finalCount === 0 && !localHadPositiveEvidence) {
+    finalStale = false;
+  }
+
+  const localSource: 'summary' | 'dedicated' =
+    quota?.resetCreditsCountSource ??
+    (localDetailAt > 0 ? 'dedicated' : 'summary');
+  const finalSource: 'summary' | 'dedicated' =
+    detailDerivesCount || (useDetail && detailAt >= finalCountAt)
+      ? 'dedicated'
+      : useCount
+        ? 'summary'
+        : localSource;
+
+  const finalCountEvidenceAtMs = finalCountAt > 0 ? finalCountAt : null;
+  const finalDetailEvidenceAtMs = finalDetailAt > 0 ? finalDetailAt : null;
+  const latestEvidenceAt = Math.max(
+    typeof quota?.resetCreditsEvidenceAtMs === 'number' &&
+      Number.isFinite(quota.resetCreditsEvidenceAtMs)
+      ? quota.resetCreditsEvidenceAtMs
+      : 0,
+    localCountAt,
+    localDetailAt,
+    useCount ? countAt : 0,
+    useDetail ? detailAt : 0,
+    provisionalZeroAt,
+    finalCountAt,
+    finalDetailAt
+  );
 
   const base: CodexQuotaState = quota ?? { status: 'success', windows: [] };
-  const next: CodexQuotaState = {
+  return {
     ...base,
     rateLimitResetCreditsAvailableCount: finalCount,
+    resetCreditsCountSource: finalSource,
     rateLimitResetCredits: finalCredits,
-    resetCreditsCountEvidenceAtMs: finalCountEvidenceAtMs > 0 ? finalCountEvidenceAtMs : null,
+    resetCreditsCountEvidenceAtMs: finalCountEvidenceAtMs,
     resetCreditsDetailEvidenceAtMs: finalDetailEvidenceAtMs,
-    resetCreditsDetailStale: clearCreditsFromZeroCount
-      ? false
-      : useSnapshotCredits
-        ? false
-        : (quota?.resetCreditsDetailStale ?? false),
-    resetCreditsEvidenceAtMs: Math.max(
-      localCountEvidenceAtMs,
-      localDetailEvidenceAtMs,
-      localResetInvalidationAtMs,
-      useSnapshotCount ? countObservedAt : 0,
-      useSnapshotCredits ? creditsObservedAt : 0,
-      finalCountEvidenceAtMs
-    ),
+    resetCreditsDetailStale: finalStale,
+    resetCreditsEvidenceAtMs: latestEvidenceAt > 0 ? latestEvidenceAt : null,
   };
-  return next;
 };
 
 const toSnapshotWindow = (

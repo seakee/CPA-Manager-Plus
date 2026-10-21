@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useAuthStore as useDiscoveryAuthStore } from '@/stores/useAuthStore';
+import { useLayoutEffect, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useOutletContext } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
@@ -11,6 +12,7 @@ import { modelsApi } from '@/services/api';
 import { modelDisplayLabel, type ModelInfo } from '@/utils/models';
 import { normalizeAuthIndex } from '@/utils/authIndex';
 import { buildHeaderObject } from '@/utils/headers';
+import { buildClaudeRequestHeaders, formatClaudeAuthDiagnostic } from '@/utils/claudeAuth';
 import type { ClaudeEditOutletContext } from './AiProvidersClaudeEditLayout';
 import styles from './AiProvidersPage.module.scss';
 import layoutStyles from './AiProvidersEditLayout.module.scss';
@@ -34,6 +36,7 @@ export function AiProvidersClaudeModelsPage() {
 
   const [endpoint, setEndpoint] = useState('');
   const [models, setModels] = useState<ModelInfo[]>([]);
+  const [modelsLoaded, setModelsLoaded] = useState(false);
   const [fetching, setFetching] = useState(false);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
@@ -71,61 +74,92 @@ export function AiProvidersClaudeModelsPage() {
     [selected, visibleModelNames]
   );
 
+  const discoveryConnection = useDiscoveryAuthStore((state) =>
+    JSON.stringify([state.apiBase, state.managementKey])
+  );
+  const discoveryScope = JSON.stringify([
+    discoveryConnection,
+    form.baseUrl,
+    form.apiKey,
+    form.authIndex,
+    form.proxyUrl,
+    buildHeaderObject(form.headers),
+  ]);
+  const activeDiscoveryScopeRef = useRef(discoveryScope);
+  activeDiscoveryScopeRef.current = discoveryScope;
+  const modelDiscoveryRequestIdRef = useRef(0);
+  useLayoutEffect(() => {
+    modelDiscoveryRequestIdRef.current += 1;
+    setModels([]);
+    setModelsLoaded(false);
+    setError('');
+    setFetching(false);
+    return () => {
+      modelDiscoveryRequestIdRef.current += 1;
+    };
+  }, [discoveryScope]);
+
   const fetchClaudeModelDiscovery = useCallback(async () => {
+    const requestId = ++modelDiscoveryRequestIdRef.current;
+    const requestScope = discoveryScope;
+    const isCurrentDiscovery = () =>
+      modelDiscoveryRequestIdRef.current === requestId &&
+      activeDiscoveryScopeRef.current === requestScope;
     setFetching(true);
     setError('');
     const headerObject = buildHeaderObject(form.headers);
+    const authIndex = normalizeAuthIndex(form.authIndex) ?? undefined;
     try {
       const list = await modelsApi.fetchClaudeModelsViaApiCall(
         form.baseUrl ?? '',
         form.apiKey.trim() || undefined,
         headerObject,
-        normalizeAuthIndex(form.authIndex) ?? undefined,
+        authIndex,
         form.proxyUrl
       );
+      if (!isCurrentDiscovery()) return;
       setModels(list);
+      setModelsLoaded(true);
     } catch (err: unknown) {
-      setModels([]);
+      if (!isCurrentDiscovery()) return;
+
       const message = getErrorMessage(err);
-      const hasCustomXApiKey = Object.keys(headerObject).some(
-        (key) => key.toLowerCase() === 'x-api-key'
-      );
-      const hasAuthorization = Object.keys(headerObject).some(
-        (key) => key.toLowerCase() === 'authorization'
-      );
+      const authResolution = buildClaudeRequestHeaders({
+        url: modelsApi.buildClaudeModelsEndpoint(form.baseUrl ?? ''),
+        apiKey: form.apiKey.trim() || undefined,
+        authIndex,
+        customHeaders: headerObject,
+      });
       const shouldAttachDiag =
         message.toLowerCase().includes('x-api-key') || message.includes('401');
       const diag = shouldAttachDiag
-        ? ` [diag: apiKeyField=${form.apiKey.trim() ? 'yes' : 'no'}, customXApiKey=${
-            hasCustomXApiKey ? 'yes' : 'no'
-          }, customAuthorization=${hasAuthorization ? 'yes' : 'no'}]`
+        ? ` ${formatClaudeAuthDiagnostic(authResolution, form.apiKey, authIndex)}`
         : '';
       setError(`${t('ai_providers.claude_models_fetch_error')}: ${message}${diag}`);
     } finally {
-      setFetching(false);
+      if (isCurrentDiscovery()) setFetching(false);
     }
-  }, [form.apiKey, form.authIndex, form.baseUrl, form.headers, form.proxyUrl, t]);
+  }, [discoveryScope, form.apiKey, form.authIndex, form.baseUrl, form.headers, form.proxyUrl, t]);
 
   useEffect(() => {
     if (initialLoading) return;
 
     const nextEndpoint = modelsApi.buildClaudeModelsEndpoint(form.baseUrl ?? '');
     setEndpoint(nextEndpoint);
-    setModels([]);
     setSearch('');
     setSelected(new Set());
     setError('');
 
     const headerObject = buildHeaderObject(form.headers);
-    const hasCustomXApiKey = Object.keys(headerObject).some(
-      (key) => key.toLowerCase() === 'x-api-key'
-    );
-    const hasAuthorization = Object.keys(headerObject).some(
-      (key) => key.toLowerCase() === 'authorization'
-    );
-    const hasApiKeyField = Boolean(form.apiKey.trim());
-    const hasAuthIndex = Boolean(normalizeAuthIndex(form.authIndex));
-    const canAutoFetch = hasApiKeyField || hasCustomXApiKey || hasAuthorization || hasAuthIndex;
+    const authIndex = normalizeAuthIndex(form.authIndex) ?? undefined;
+    const authResolution = buildClaudeRequestHeaders({
+      url: nextEndpoint,
+      apiKey: form.apiKey.trim() || undefined,
+      authIndex,
+      customHeaders: headerObject,
+    });
+    const canAutoFetch =
+      authResolution.effectiveXApiKey || authResolution.effectiveAuthorization;
 
     // Avoid firing a guaranteed 401 on initial render (common while the parent form is still
     // initializing), and avoid duplicate auto-fetches (e.g. React StrictMode in dev).
@@ -135,7 +169,7 @@ export function AiProvidersClaudeModelsPage() {
       .sort(([a], [b]) => a.toLowerCase().localeCompare(b.toLowerCase()))
       .map(([key, value]) => `${key}:${value}`)
       .join('|');
-    const signature = `${nextEndpoint}||${form.apiKey.trim()}||${normalizeAuthIndex(form.authIndex) ?? ''}||${form.proxyUrl?.trim() ?? ''}||${headerSignature}`;
+    const signature = `${nextEndpoint}||${form.apiKey.trim()}||${authIndex ?? ''}||${form.proxyUrl?.trim() ?? ''}||${headerSignature}`;
     if (autoFetchSignatureRef.current === signature) return;
     autoFetchSignatureRef.current = signature;
 
@@ -313,11 +347,11 @@ export function AiProvidersClaudeModelsPage() {
             </div>
           )}
           {error && <div className="error-box">{error}</div>}
-          {fetching ? (
+          {fetching && !modelsLoaded ? (
             <div className={styles.sectionHint}>
               {t('ai_providers.claude_models_fetch_loading')}
             </div>
-          ) : models.length === 0 ? (
+          ) : !modelsLoaded ? null : models.length === 0 ? (
             <div className={styles.sectionHint}>{t('ai_providers.claude_models_fetch_empty')}</div>
           ) : filteredModels.length === 0 ? (
             <div className={styles.sectionHint}>{t('ai_providers.claude_models_search_empty')}</div>

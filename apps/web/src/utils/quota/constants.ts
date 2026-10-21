@@ -82,27 +82,20 @@ export const ANTIGRAVITY_CODE_ASSIST_URLS = [
 
 export const ANTIGRAVITY_CODE_ASSIST_URL = ANTIGRAVITY_CODE_ASSIST_URLS[0];
 
-export const ANTIGRAVITY_CLI_VERSION = '1.0.13';
-export const ANTIGRAVITY_CLIENT_NAME = 'aidev_client';
-export const ANTIGRAVITY_CLIENT_PLATFORM = {
-  osType: 'darwin',
-  arch: 'arm64',
-} as const;
+// Keep aligned with the CPA Antigravity Hub UA (internal/misc/antigravity_version.go).
+// Cloud Code rejects newer models for clients below 2.23.0.
+export const ANTIGRAVITY_HUB_VERSION = '2.23.0';
+export const ANTIGRAVITY_HUB_PLATFORM = 'darwin/arm64';
 
 type AntigravityUserAgentOptions = {
   version?: string;
-  clientName?: string;
-  osType?: string;
-  arch?: string;
+  platform?: string;
 };
 
 export const buildAntigravityUserAgent = ({
-  version = ANTIGRAVITY_CLI_VERSION,
-  clientName = ANTIGRAVITY_CLIENT_NAME,
-  osType = ANTIGRAVITY_CLIENT_PLATFORM.osType,
-  arch = ANTIGRAVITY_CLIENT_PLATFORM.arch,
-}: AntigravityUserAgentOptions = {}) =>
-  `antigravity/cli/${version} (${clientName}; os_type=${osType}; arch=${arch})`;
+  version = ANTIGRAVITY_HUB_VERSION,
+  platform = ANTIGRAVITY_HUB_PLATFORM,
+}: AntigravityUserAgentOptions = {}) => `antigravity/hub/${version} ${platform}`;
 
 export const ANTIGRAVITY_USER_AGENT = buildAntigravityUserAgent();
 
@@ -211,9 +204,12 @@ export const XAI_OFFICIAL_API_BASE_URL = 'https://api.x.ai/v1';
 export const XAI_CLI_CHAT_PROXY_BASE_URL = 'https://cli-chat-proxy.grok.com/v1';
 export const DEFAULT_XAI_INSPECTION_MODEL = 'grok-4.5';
 export const DEFAULT_XAI_INSPECTION_PROMPT = 'Reply with exactly OK.';
-export const XAI_GROK_CLIENT_VERSION = '0.2.101';
-export const XAI_GROK_USER_AGENT = 'grok-pager/0.2.101 grok-shell/0.2.101 (macos; aarch64)';
-export const XAI_INFERENCE_USER_AGENT = 'xai-grok-workspace/0.2.101';
+// xAI chat-proxy rejects Grok CLI versions older than 1.0.13 with HTTP 426.
+// Keep these identity headers on one version source so future bumps stay synchronized.
+export const XAI_GROK_CLIENT_VERSION = '1.0.44';
+export const XAI_GROK_USER_AGENT =
+  `grok-pager/${XAI_GROK_CLIENT_VERSION} grok-shell/${XAI_GROK_CLIENT_VERSION} (macos; aarch64)`;
+export const XAI_INFERENCE_USER_AGENT = `xai-grok-workspace/${XAI_GROK_CLIENT_VERSION}`;
 
 export const XAI_REQUEST_HEADERS = {
   Authorization: 'Bearer $TOKEN$',

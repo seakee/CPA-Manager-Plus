@@ -3,6 +3,7 @@
  */
 
 import { apiClient } from './client';
+import { hasOpenAIKeyEntryConfiguration } from '@/utils/openAIKeyEntries';
 import { configApi } from './config';
 import {
   normalizeClaudeFingerprintProfile,
@@ -949,7 +950,7 @@ const serializeOpenAIProvider = (provider: OpenAIProviderConfig) => {
     name: provider.name,
     'base-url': provider.baseUrl,
     'api-key-entries': Array.isArray(provider.apiKeyEntries)
-      ? provider.apiKeyEntries.map((entry) => serializeApiKeyEntry(entry))
+      ? provider.apiKeyEntries.filter(hasOpenAIKeyEntryConfiguration).map((entry) => serializeApiKeyEntry(entry))
       : [],
   };
   const authIndex = serializeAuthIndex(provider.authIndex);

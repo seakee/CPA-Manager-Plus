@@ -400,6 +400,7 @@ const CODEX_QUOTA_FACT_KEYS = [
   'primaryOverSecondaryLimitPercent',
   'subscriptionActiveUntil',
   'rateLimitResetCreditsAvailableCount',
+  'resetCreditsCountSource',
   'rateLimitResetCredits',
   'rateLimitResetCreditsError',
   'resetCreditsEvidenceAtMs',

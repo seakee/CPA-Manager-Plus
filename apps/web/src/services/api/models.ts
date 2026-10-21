@@ -5,13 +5,13 @@
 import axios from 'axios';
 import { normalizeModelList } from '@/utils/models';
 import { normalizeApiBase } from '@/utils/connection';
+import { buildClaudeRequestHeaders } from '@/utils/claudeAuth';
 import { getDemoProviderModels } from '@/features/demo/demoFixtures';
 import { isDemoMode } from '@/features/demo/demoMode';
 import { apiCallApi, getApiCallErrorMessage } from './apiCall';
 
 const DEFAULT_CLAUDE_BASE_URL = 'https://api.anthropic.com';
 const DEFAULT_GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com';
-const DEFAULT_ANTHROPIC_VERSION = '2023-06-01';
 const CLAUDE_MODELS_IN_FLIGHT = new Map<string, Promise<ReturnType<typeof normalizeModelList>>>();
 const GEMINI_MODELS_IN_FLIGHT = new Map<string, Promise<ReturnType<typeof normalizeModelList>>>();
 
@@ -75,15 +75,6 @@ const stripGeminiModelResourceName = (value: string): string => {
 const hasHeader = (headers: Record<string, string>, name: string) => {
   const target = name.toLowerCase();
   return Object.keys(headers).some((key) => key.toLowerCase() === target);
-};
-
-const resolveBearerTokenFromAuthorization = (headers: Record<string, string>): string => {
-  const entry = Object.entries(headers).find(([key]) => key.toLowerCase() === 'authorization');
-  if (!entry) return '';
-  const value = String(entry[1] ?? '').trim();
-  if (!value) return '';
-  const match = value.match(/^Bearer\s+(.+)$/i);
-  return match?.[1]?.trim() || '';
 };
 
 export const modelsApi = {
@@ -161,7 +152,8 @@ export const modelsApi = {
     apiKey?: string,
     headers: Record<string, string> = {},
     authIndex?: string,
-    proxyUrl?: string
+    proxyUrl?: string,
+    keyless = false
   ) {
     const endpoint = buildModelsEndpoint(baseUrl);
     if (!endpoint) {
@@ -173,7 +165,7 @@ export const modelsApi = {
     const resolvedHeaders = { ...headers };
     if (apiKey && !hasHeader(resolvedHeaders, 'authorization')) {
       resolvedHeaders.Authorization = `Bearer ${apiKey}`;
-    } else if (trimmedAuthIndex && !hasHeader(resolvedHeaders, 'authorization')) {
+    } else if (trimmedAuthIndex && !keyless && !hasHeader(resolvedHeaders, 'authorization')) {
       resolvedHeaders.Authorization = 'Bearer $TOKEN$';
     }
 
@@ -207,7 +199,7 @@ export const modelsApi = {
 
   /**
    * Fetch Claude models from /v1/models via api-call.
-   * Anthropic requires `x-api-key` and `anthropic-version` headers.
+   * Match CPA Claude runtime authentication for Anthropic and custom upstreams.
    */
   async fetchClaudeModelsViaApiCall(
     baseUrl: string,
@@ -223,20 +215,12 @@ export const modelsApi = {
 
     const trimmedAuthIndex = authIndex?.trim() || undefined;
     const trimmedProxyUrl = proxyUrl?.trim() || undefined;
-    const resolvedHeaders = { ...headers };
-    let resolvedApiKey = String(apiKey ?? '').trim();
-    if (!resolvedApiKey && !hasHeader(resolvedHeaders, 'x-api-key')) {
-      resolvedApiKey = resolveBearerTokenFromAuthorization(resolvedHeaders);
-    }
-
-    if (resolvedApiKey && !hasHeader(resolvedHeaders, 'x-api-key')) {
-      resolvedHeaders['x-api-key'] = resolvedApiKey;
-    } else if (trimmedAuthIndex && !hasHeader(resolvedHeaders, 'x-api-key')) {
-      resolvedHeaders['x-api-key'] = '$TOKEN$';
-    }
-    if (!hasHeader(resolvedHeaders, 'anthropic-version')) {
-      resolvedHeaders['anthropic-version'] = DEFAULT_ANTHROPIC_VERSION;
-    }
+    const resolvedHeaders = buildClaudeRequestHeaders({
+      url: endpoint,
+      apiKey,
+      authIndex: trimmedAuthIndex,
+      customHeaders: headers,
+    }).headers;
 
     const signature = buildRequestSignature(
       endpoint,

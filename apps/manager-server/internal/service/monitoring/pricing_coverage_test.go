@@ -59,7 +59,6 @@ func TestAnalyticsIncompletePricingFailsClosedWithoutCompatibleEvents(t *testing
 		{"obsolete projection", `update usage_monitoring_rollup_state set structure_revision = 'obsolete' where rollup_name = 'projection_v1'`},
 		{"unsupported projection", `update usage_monitoring_rollup_state set schema_version = 0 where rollup_name = 'projection_v1'`},
 		{"clearing projection", `update usage_monitoring_rollup_state set status = 'clearing' where rollup_name = 'projection_v1'`},
-		{"projection query error", `alter table usage_monitoring_event_projection_v1 rename column normalized_total_input_tokens to unavailable_tokens`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			db, sqlDB, request, _ := pricingCoverageFixture(t)
@@ -75,6 +74,24 @@ func TestAnalyticsIncompletePricingFailsClosedWithoutCompatibleEvents(t *testing
 				t.Fatalf("incomplete history returned success: summary=%#v error=%v", got.Summary, err)
 			}
 		})
+	}
+}
+
+func TestAnalyticsPrimaryPeriodRecoveryQueryErrorFailsFatal(t *testing.T) {
+	db, sqlDB, request, _ := pricingCoverageFixture(t)
+	ctx := context.Background()
+	if _, err := sqlDB.ExecContext(ctx, `delete from usage_pricing_hourly_rollups_v1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sqlDB.ExecContext(ctx, `alter table usage_monitoring_event_projection_v1 rename column normalized_total_input_tokens to unavailable_tokens`); err != nil {
+		t.Fatal(err)
+	}
+	got, err := New(db, true).Analytics(ctx, request)
+	if err == nil || !errors.Is(err, store.ErrUsagePricingRecoveryFailed) || errors.Is(err, store.ErrUsagePricingCoverageIncomplete) {
+		t.Fatalf("expected ErrUsagePricingRecoveryFailed, got err=%v", err)
+	}
+	if got.Summary != nil {
+		t.Fatalf("query error returned summary: %#v", got.Summary)
 	}
 }
 
@@ -94,9 +111,47 @@ func TestAnalyticsPricingCoverageChecksComparisonPeriod(t *testing.T) {
 		t.Fatalf("current period must be complete: %#v error=%v", current.Summary, err)
 	}
 	request.Include.SummaryComparison = true
-	_, err := New(db, true).Analytics(ctx, request)
-	if !errors.Is(err, store.ErrUsagePricingCoverageIncomplete) {
-		t.Fatalf("incomplete comparison error = %v", err)
+	got, err := New(db, true).Analytics(ctx, request)
+	if err != nil {
+		t.Fatalf("analytics failed with incomplete comparison pricing: %v", err)
+	}
+	if got.Summary == nil || got.Summary.TotalCalls != 1 {
+		t.Fatalf("current summary expected 1 call, got: %#v", got.Summary)
+	}
+	if got.SummaryComparison != nil {
+		t.Fatalf("summary comparison must be omitted when incomplete: %#v", got.SummaryComparison)
+	}
+	if got.Coverage == nil {
+		t.Fatalf("coverage must be populated")
+	}
+	hasLimitation := false
+	for _, lim := range got.Coverage.FidelityLimitations {
+		if lim == "summary_comparison_requires_raw_events" {
+			hasLimitation = true
+			break
+		}
+	}
+	if !hasLimitation {
+		t.Fatalf("coverage limitations must contain summary_comparison_requires_raw_events: %#v", got.Coverage.FidelityLimitations)
+	}
+}
+
+func TestAnalyticsComparisonPeriodRecoveryQueryErrorFailsFatal(t *testing.T) {
+	db, sqlDB, request, _ := pricingCoverageFixture(t)
+	ctx := context.Background()
+	request.FromMS += 2 * time.Hour.Milliseconds()
+	request.ToMS = request.FromMS + time.Hour.Milliseconds()
+	if _, err := sqlDB.ExecContext(ctx, `delete from usage_pricing_hourly_rollups_v1 where bucket_ms < ?;
+		alter table usage_monitoring_event_projection_v1 rename column normalized_total_input_tokens to unavailable_tokens`, request.FromMS); err != nil {
+		t.Fatal(err)
+	}
+	request.Include.SummaryComparison = true
+	got, err := New(db, true).Analytics(ctx, request)
+	if err == nil || !errors.Is(err, store.ErrUsagePricingRecoveryFailed) || errors.Is(err, store.ErrUsagePricingCoverageIncomplete) {
+		t.Fatalf("expected ErrUsagePricingRecoveryFailed on comparison recovery, got err=%v", err)
+	}
+	if got.Summary != nil {
+		t.Fatalf("query error returned summary: %#v", got.Summary)
 	}
 }
 
@@ -133,35 +188,40 @@ func TestAnalyticsPricingRecoveryPreservesFiltersAndCollapsedBuckets(t *testing.
 	}
 }
 
-func TestPricingCatchUpPreservesArchivedHistoryDuringRebuild(t *testing.T) {
+func TestPricingCatchUpRebuildsArchivedHistoryFromRetainedProjection(t *testing.T) {
 	for _, test := range []struct {
 		name string
 		sql  string
 	}{
 		{"revision change", `update usage_pricing_rollup_state set structure_revision = 'obsolete'`},
 		{"resumed clearing", `update usage_pricing_rollup_state set status = 'clearing', coverage_event_id = 0, backfill_last_event_id = 0`},
-		{"resumed rebuilding", `update usage_pricing_rollup_state set status = 'rebuilding', coverage_event_id = 0, backfill_last_event_id = 0`},
+		{"resumed rebuilding", `delete from usage_pricing_hourly_rollups_v1;
+			delete from usage_pricing_account_rollups_v1;
+			update usage_pricing_rollup_state set status = 'rebuilding', coverage_event_id = 0, backfill_last_event_id = 0`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			db, sqlDB, _, _ := pricingCoverageFixture(t)
 			ctx := context.Background()
+			before := pricingCoverageCounts(t, sqlDB)
 			if _, err := sqlDB.ExecContext(ctx, test.sql); err != nil {
 				t.Fatal(err)
 			}
-			before := pricingCoverageCounts(t, sqlDB)
-			stateBefore, err := db.UsagePricingState(ctx)
+			result, err := db.CatchUpUsagePricing(ctx, 100, time.Now().UnixMilli())
 			if err != nil {
-				t.Fatal(err)
+				t.Fatalf("rebuild from retained projection: %v", err)
 			}
-			if _, err := db.CatchUpUsagePricing(ctx, 100, time.Now().UnixMilli()); err == nil {
-				t.Fatal("rebuild from deleted raw history unexpectedly succeeded")
+			if !result.Rebuilt || result.Pending || result.CoverageEventID < result.TargetEventID {
+				t.Fatalf("unexpected retained rebuild result: %#v", result)
 			}
 			stateAfter, err := db.UsagePricingState(ctx)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if after := pricingCoverageCounts(t, sqlDB); after != before || !reflect.DeepEqual(stateAfter, stateBefore) {
-				t.Fatalf("rebuild changed retained history: before=%v after=%v states=%#v / %#v", before, after, stateBefore, stateAfter)
+			if stateAfter.Status != "ready" || stateAfter.CoverageEventID < stateAfter.TargetEventID {
+				t.Fatalf("retained rebuild state = %#v", stateAfter)
+			}
+			if after := pricingCoverageCounts(t, sqlDB); after != before {
+				t.Fatalf("retained rebuild changed historical coverage: before=%v after=%v", before, after)
 			}
 		})
 	}
@@ -190,7 +250,10 @@ func TestAccountHistoryRecoversIncompleteArchivedPricing(t *testing.T) {
 				t.Fatalf("baseline history calls = %d, want 8", calls)
 			}
 			wantCost := analytics.Summary.TotalCost + analytics.SummaryComparison.TotalCost
-			if delta := want.Items[0].TotalCost + want.Items[1].TotalCost - wantCost; delta < -0.000001 || delta > 0.000001 {
+			if want.Items[0].TotalCost == nil || want.Items[1].TotalCost == nil {
+				t.Fatalf("baseline account costs unavailable: %#v", want.Items)
+			}
+			if delta := *want.Items[0].TotalCost + *want.Items[1].TotalCost - wantCost; delta < -0.000001 || delta > 0.000001 {
 				t.Fatalf("baseline account costs differ from hourly costs: %v", delta)
 			}
 			if _, err := sqlDB.ExecContext(ctx, test.sql); err != nil {
@@ -208,16 +271,107 @@ func TestAccountHistoryRecoversIncompleteArchivedPricing(t *testing.T) {
 	}
 }
 
-func TestAccountHistoryIncompleteArchivedPricingFailsClosed(t *testing.T) {
+func TestAccountHistoryDegradesWhenArchivedPricingCannotBeRecovered(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		catchUp bool
+		sql     string
+	}{
+		{name: "read", sql: `delete from usage_pricing_account_rollups_v1;
+			delete from usage_monitoring_event_projection_v1 where event_id not in (select id from usage_events)`},
+		{name: "catch up", catchUp: true, sql: `delete from usage_pricing_account_rollups_v1;
+			delete from usage_monitoring_event_projection_v1 where event_id not in (select id from usage_events);
+			update usage_pricing_rollup_state set structure_revision = 'obsolete'`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db, sqlDB, _, _ := pricingCoverageFixture(t)
+			ctx := context.Background()
+			request := pricingCoverageAccountRequest()
+			want, err := New(db).AccountHistory(ctx, request)
+			if err != nil || len(want.Items) != 2 {
+				t.Fatalf("baseline account history = %#v, %v", want, err)
+			}
+			if _, err := sqlDB.ExecContext(ctx, test.sql); err != nil {
+				t.Fatal(err)
+			}
+			request.CatchUp = test.catchUp
+			got, err := New(db).AccountHistory(ctx, request)
+			if err != nil || len(got.Items) != len(want.Items) {
+				t.Fatalf("degraded account history = %#v, %v", got, err)
+			}
+			for index := range got.Items {
+				item, baseline := got.Items[index], want.Items[index]
+				if !item.Matched || item.TotalCost != nil {
+					t.Fatalf("degraded item availability = %#v", item)
+				}
+				if item.TotalRequests != baseline.TotalRequests || item.SuccessCalls != baseline.SuccessCalls ||
+					item.FailureCalls != baseline.FailureCalls || item.TotalTokens != baseline.TotalTokens ||
+					!reflect.DeepEqual(item.SuccessRate, baseline.SuccessRate) ||
+					!reflect.DeepEqual(item.FirstSeenMS, baseline.FirstSeenMS) ||
+					!reflect.DeepEqual(item.LastSeenMS, baseline.LastSeenMS) {
+					t.Fatalf("degraded core history differs: got=%#v want=%#v", item, baseline)
+				}
+				if !reflect.DeepEqual(item.LatestRequest, baseline.LatestRequest) ||
+					!reflect.DeepEqual(item.RecentRequests, baseline.RecentRequests) {
+					t.Fatalf("degraded recent requests differ: got=%#v want=%#v", item, baseline)
+				}
+			}
+		})
+	}
+}
+
+func TestAccountHistoryIsolatesUnrecoverablePricingByAccount(t *testing.T) {
 	db, sqlDB, _, _ := pricingCoverageFixture(t)
 	ctx := context.Background()
-	if _, err := sqlDB.ExecContext(ctx, `delete from usage_pricing_account_rollups_v1;
-		delete from usage_monitoring_event_projection_v1 where event_id not in (select id from usage_events)`); err != nil {
+	request := pricingCoverageAccountRequest()
+	want, err := New(db).AccountHistory(ctx, request)
+	if err != nil || len(want.Items) != 2 || want.Items[0].TotalCost == nil || want.Items[1].TotalCost == nil {
+		t.Fatalf("baseline account history = %#v, %v", want.Items, err)
+	}
+
+	if _, err := sqlDB.ExecContext(ctx, `delete from usage_pricing_account_rollups_v1 where auth_index = 'a';
+		delete from usage_monitoring_event_projection_v1
+		where auth_index = 'a' and event_id not in (select id from usage_events)`); err != nil {
 		t.Fatal(err)
 	}
-	got, err := New(db).AccountHistory(ctx, pricingCoverageAccountRequest())
-	if !errors.Is(err, store.ErrUsagePricingCoverageIncomplete) || len(got.Items) != 0 {
-		t.Fatalf("incomplete account history returned success: %#v error=%v", got.Items, err)
+	got, err := New(db).AccountHistory(ctx, request)
+	if err != nil || len(got.Items) != len(want.Items) {
+		t.Fatalf("isolated account history = %#v, %v", got.Items, err)
+	}
+
+	wantA := want.Items[0]
+	wantA.TotalCost = nil
+	if !reflect.DeepEqual(got.Items[0], wantA) {
+		t.Fatalf("incomplete account was not isolated: got=%#v want=%#v", got.Items[0], wantA)
+	}
+	if !reflect.DeepEqual(got.Items[1], want.Items[1]) {
+		t.Fatalf("complete account pricing was degraded: got=%#v want=%#v", got.Items[1], want.Items[1])
+	}
+}
+
+func TestAccountHistoryDoesNotHidePricingRecoveryQueryErrors(t *testing.T) {
+	db, sqlDB, _, _ := pricingCoverageFixture(t)
+	ctx := context.Background()
+	if _, err := sqlDB.ExecContext(ctx, `delete from usage_pricing_account_rollups_v1 where auth_index = 'a';
+		alter table usage_monitoring_event_projection_v1
+		rename column normalized_total_input_tokens to unavailable_tokens`); err != nil {
+		t.Fatal(err)
+	}
+	_, err := New(db).AccountHistory(ctx, pricingCoverageAccountRequest())
+	if err == nil || errors.Is(err, store.ErrUsagePricingCoverageIncomplete) {
+		t.Fatalf("pricing recovery query error was hidden: %v", err)
+	}
+}
+
+func TestAccountHistoryDoesNotHideCoreHistoryReadErrors(t *testing.T) {
+	db, sqlDB, _, _ := pricingCoverageFixture(t)
+	ctx := context.Background()
+	if _, err := sqlDB.ExecContext(ctx, `alter table usage_account_model_rollups rename column total_tokens to unavailable_tokens`); err != nil {
+		t.Fatal(err)
+	}
+	_, err := New(db).AccountHistory(ctx, pricingCoverageAccountRequest())
+	if err == nil || errors.Is(err, store.ErrUsagePricingCoverageIncomplete) {
+		t.Fatalf("core history read error was hidden: %v", err)
 	}
 }
 

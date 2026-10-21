@@ -35,6 +35,13 @@ const parseMenuIndex = (value = '') => {
 };
 
 export function PluginResourcePage() {
+  const connectionScope = useAuthStore((state) =>
+    JSON.stringify([state.apiBase, state.managementKey])
+  );
+  return <PluginResourcePageContent key={connectionScope} />;
+}
+
+function PluginResourcePageContent() {
   const { t } = useTranslation();
   const params = useParams<{ pluginId: string; menuIndex: string }>();
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
@@ -52,7 +59,15 @@ export function PluginResourcePage() {
   const pluginID = useMemo(() => safeDecodeURIComponent(params.pluginId), [params.pluginId]);
   const menuIndex = useMemo(() => parseMenuIndex(params.menuIndex), [params.menuIndex]);
 
+  const listRequestIdRef = useRef(0);
+  useEffect(
+    () => () => {
+      listRequestIdRef.current += 1;
+    },
+    []
+  );
   const loadResource = useCallback(async () => {
+    const requestId = ++listRequestIdRef.current;
     if (!connected) {
       setLoading(false);
       setError(t('notification.connection_required'));
@@ -68,15 +83,18 @@ export function PluginResourcePage() {
     setError('');
     try {
       const plugins = await pluginsApi.list();
+      if (requestId !== listRequestIdRef.current) return;
       setData(plugins);
     } catch (err: unknown) {
+      if (requestId !== listRequestIdRef.current) return;
+      if ([401, 403, 404].some((status) => hasStatus(err, status))) setData(null);
       setError(
         hasStatus(err, 404)
           ? t('plugin_resource.unsupported_backend')
           : getErrorMessage(err, t('plugin_resource.load_failed'))
       );
     } finally {
-      setLoading(false);
+      if (requestId === listRequestIdRef.current) setLoading(false);
     }
   }, [connected, supportsPlugin, t]);
 
@@ -141,11 +159,12 @@ export function PluginResourcePage() {
 
   return (
     <div className={styles.page}>
-      {loading ? (
+      {error && resource && connected && supportsPlugin ? <div role="alert">{error}</div> : null}
+      {loading && !data ? (
         <div className={styles.stateShell}>
           <div className={styles.statusPanel}>{t('common.loading')}</div>
         </div>
-      ) : error ? (
+      ) : error && (!resource || !connected || !supportsPlugin) ? (
         <div className={styles.stateShell}>
           <EmptyState title={t('plugin_resource.unavailable')} description={error} />
         </div>

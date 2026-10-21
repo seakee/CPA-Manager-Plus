@@ -2070,7 +2070,7 @@ describe('account quota snapshots', () => {
     expect(merged).toBe(quota);
   });
 
-  it('clears older reset-credit details when a newer zero count is observed', () => {
+  it('preserves verified reset-credit detail when a newer count-only snapshot reports zero', () => {
     const merged = mergeCodexResetCreditsFromQuotaSnapshots(
       {
         status: 'success',
@@ -2096,9 +2096,72 @@ describe('account quota snapshots', () => {
         }),
       ]
     );
+    expect(merged?.rateLimitResetCreditsAvailableCount).toBe(1);
+    expect(merged?.rateLimitResetCredits).toHaveLength(1);
+    expect(merged?.rateLimitResetCredits?.[0].id).toBe('old-credit');
+    expect(merged?.resetCreditsDetailStale).toBe(true);
+  });
 
+  it('preserves a known positive count when a newer snapshot only reports zero', () => {
+    const merged = mergeCodexResetCreditsFromQuotaSnapshots(
+      {
+        status: 'success',
+        windows: [],
+        rateLimitResetCreditsAvailableCount: 2,
+        rateLimitResetCredits: [],
+        resetCreditsCountEvidenceAtMs: 10_000,
+        resetCreditsDetailEvidenceAtMs: null,
+        resetCreditsDetailStale: true,
+      },
+      [
+        makeSnapshot({
+          observed_at_ms: 20_000,
+          reset_credits_available: 0,
+          field_sources: {
+            reset_credits_available: { source: 'api_query', observed_at_ms: 20_000 },
+          },
+        }),
+      ]
+    );
+
+    expect(merged?.rateLimitResetCreditsAvailableCount).toBe(2);
+    expect(merged?.resetCreditsCountEvidenceAtMs).toBe(10_000);
+    expect(merged?.rateLimitResetCredits).toEqual([]);
+    expect(merged?.resetCreditsDetailStale).toBe(true);
+  });
+
+  it('accepts an explicit empty reset-credit detail as authoritative zero', () => {
+    const merged = mergeCodexResetCreditsFromQuotaSnapshots(
+      {
+        status: 'success',
+        windows: [],
+        fetchedAtMs: 10_000,
+        rateLimitResetCreditsAvailableCount: 1,
+        rateLimitResetCredits: [
+          {
+            id: 'old-credit',
+            status: 'available',
+            grantedAt: '',
+            expiresAt: new Date(100_000).toISOString(),
+          },
+        ],
+      },
+      [
+        makeSnapshot({
+          observed_at_ms: 20_000,
+          reset_credits_available: 0,
+          reset_credits: [],
+          field_sources: {
+            reset_credits_available: { source: 'api_query', observed_at_ms: 20_000 },
+            reset_credits: { source: 'api_query', observed_at_ms: 20_000 },
+          },
+        }),
+      ]
+    );
     expect(merged?.rateLimitResetCreditsAvailableCount).toBe(0);
     expect(merged?.rateLimitResetCredits).toEqual([]);
+    expect(merged?.resetCreditsDetailEvidenceAtMs).toBe(20_000);
+    expect(merged?.resetCreditsDetailStale).toBe(false);
   });
 
   it('uses a deterministic tie-break for snapshots observed at the same time', () => {

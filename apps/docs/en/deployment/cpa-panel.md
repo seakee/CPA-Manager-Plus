@@ -77,6 +77,8 @@ http://<cpa-host>:8317/management.html
 
 On first access, CPA checks the latest Release in the configured GitHub repository for an asset named `management.html` and caches it in the CPA working directory.
 
+`management.html` remains a single-file distribution. It starts with conventional root icon URLs and keeps them only when the response is identified as a CPAMP Manager Server icon resource. Otherwise current browsers switch to the same ICO and Apple Touch Icon embedded as Data URLs. This keeps Safari 26+ and current iOS self-contained without requiring CPA to download companion files. Safari 18 and earlier do not reliably support Data URL icons, so the lightweight panel does not guarantee a custom Home Screen icon on those legacy versions. Full Mode continues to provide the conventional root icon resources directly.
+
 ## Updates And Cache
 
 With `disable-auto-update-panel: false`, CPA periodically checks for a newer panel. If an upgrade still shows the old interface:

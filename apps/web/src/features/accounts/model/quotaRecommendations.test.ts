@@ -59,6 +59,27 @@ const makeRow = (overrides: AccountRowOverrides = {}): AccountRow => {
   };
 };
 
+const TEST_NOW_MS = Date.now();
+const FRESH_SPEND_CONTROL_FETCHED_AT_MS = TEST_NOW_MS - 60_000;
+const STALE_SPEND_CONTROL_FETCHED_AT_MS = TEST_NOW_MS - 16 * 60_000;
+const FUTURE_SPEND_CONTROL_RESET_AT_MS = TEST_NOW_MS + 24 * 60 * 60_000;
+const EXPIRED_SPEND_CONTROL_RESET_AT_MS = TEST_NOW_MS - 60_000;
+
+const spendControlLimit = (
+  overrides: Partial<NonNullable<AccountRow['quota']['spendControlIndividualLimit']>> = {}
+): NonNullable<AccountRow['quota']['spendControlIndividualLimit']> => ({
+  source: 'workspace_spend_controls',
+  unit: 'credit',
+  limit: '100',
+  used: '100',
+  remaining: '0',
+  usedPercent: 100,
+  remainingPercent: 0,
+  resetAfterSeconds: 3600,
+  resetAtMs: FUTURE_SPEND_CONTROL_RESET_AT_MS,
+  ...overrides,
+});
+
 describe('quotaRecommendations', () => {
   it('disables active exhausted accounts with critical priority', () => {
     const recommendation = buildAccountRecommendation(
@@ -469,6 +490,187 @@ describe('quotaRecommendations', () => {
         { timestamp_ms: 2_000, failed: true, fail_status_code: 502 },
       ],
     });
+
+    expect(recommendation).toMatchObject({
+      action: 'refresh',
+      priority: 'high',
+      reasonKey: 'accounts.recommend_reason_quota_limited',
+    });
+  });
+
+  it('reviews a confirmed structured spend-control limit instead of refreshing it again', () => {
+    const recommendation = buildAccountRecommendation(
+      makeRow({
+        quota: {
+          spendControlReached: true,
+          fetchedAtMs: FRESH_SPEND_CONTROL_FETCHED_AT_MS,
+          spendControlIndividualLimit: {
+            source: 'workspace_spend_controls',
+            unit: 'credit',
+            limit: '0',
+            used: '0.0',
+            remaining: '0.0',
+            usedPercent: 100,
+            remainingPercent: 0,
+            resetAfterSeconds: 3600,
+            resetAtMs: FUTURE_SPEND_CONTROL_RESET_AT_MS,
+          },
+        },
+      })
+    );
+
+    expect(recommendation).toMatchObject({
+      action: 'review',
+      priority: 'high',
+      reasonKey: 'accounts.recommend_reason_spend_control_limited',
+    });
+  });
+
+  it('refreshes a stale structured spend-control snapshot within the same reset cycle', () => {
+    const recommendation = buildAccountRecommendation(
+      makeRow({
+        quota: {
+          spendControlReached: true,
+          fetchedAtMs: STALE_SPEND_CONTROL_FETCHED_AT_MS,
+          spendControlIndividualLimit: spendControlLimit({
+            limit: '0',
+            used: '0.0',
+            remaining: '0.0',
+            usedPercent: 100,
+            remainingPercent: 0,
+          }),
+        },
+      })
+    );
+
+    expect(recommendation).toMatchObject({
+      action: 'refresh',
+      priority: 'high',
+      reasonKey: 'accounts.recommend_reason_quota_limited',
+    });
+  });
+
+  it('refreshes an expired structured spend-control cycle instead of treating it as resolved', () => {
+    const recommendation = buildAccountRecommendation(
+      makeRow({
+        quota: {
+          spendControlReached: true,
+          fetchedAtMs: FRESH_SPEND_CONTROL_FETCHED_AT_MS,
+          spendControlIndividualLimit: spendControlLimit({
+            limit: '0',
+            used: '0.0',
+            remaining: '0.0',
+            usedPercent: 100,
+            remainingPercent: 0,
+            resetAtMs: EXPIRED_SPEND_CONTROL_RESET_AT_MS,
+          }),
+        },
+      })
+    );
+
+    expect(recommendation).toMatchObject({
+      action: 'refresh',
+      priority: 'high',
+      reasonKey: 'accounts.recommend_reason_quota_limited',
+    });
+  });
+
+  it('still refreshes a boolean-only spend-control signal when the budget details are unknown', () => {
+    const recommendation = buildAccountRecommendation(
+      makeRow({
+        quota: {
+          spendControlReached: true,
+          fetchedAtMs: FRESH_SPEND_CONTROL_FETCHED_AT_MS,
+          spendControlIndividualLimit: null,
+        },
+      })
+    );
+
+    expect(recommendation).toMatchObject({
+      action: 'refresh',
+      priority: 'high',
+      reasonKey: 'accounts.recommend_reason_quota_limited',
+    });
+  });
+
+  it('keeps generic quota refresh when structured spend-control overlaps another quota limit', () => {
+    const rows = [
+      makeRow({
+        quota: {
+          spendControlReached: true,
+          creditsOverageLimitReached: true,
+          fetchedAtMs: FRESH_SPEND_CONTROL_FETCHED_AT_MS,
+          spendControlIndividualLimit: spendControlLimit(),
+        },
+      }),
+      makeRow({
+        quota: {
+          spendControlReached: true,
+          rateLimitReachedType: 'primary',
+          fetchedAtMs: FRESH_SPEND_CONTROL_FETCHED_AT_MS,
+          spendControlIndividualLimit: spendControlLimit(),
+        },
+      }),
+      makeRow({
+        statusMessage: 'quota exceeded',
+        updatedAtMs: TEST_NOW_MS,
+        quota: {
+          spendControlReached: true,
+          fetchedAtMs: FRESH_SPEND_CONTROL_FETCHED_AT_MS,
+          spendControlIndividualLimit: spendControlLimit(),
+        },
+      }),
+    ];
+
+    rows.forEach((row) => {
+      expect(buildAccountRecommendation(row)).toMatchObject({
+        action: 'refresh',
+        priority: 'high',
+        reasonKey: 'accounts.recommend_reason_quota_limited',
+      });
+    });
+  });
+
+  it('keeps a newer request quota limit ahead of structured spend-control review', () => {
+    const recommendation = buildAccountRecommendation(
+      makeRow({
+        quota: {
+          spendControlReached: true,
+          fetchedAtMs: FRESH_SPEND_CONTROL_FETCHED_AT_MS,
+          spendControlIndividualLimit: spendControlLimit(),
+        },
+      }),
+      {
+        latestRequest: {
+          timestamp_ms: TEST_NOW_MS,
+          failed: true,
+          fail_status_code: 429,
+          fail_summary: 'request quota limited',
+        },
+      }
+    );
+
+    expect(recommendation).toMatchObject({
+      action: 'refresh',
+      priority: 'high',
+      reasonKey: 'accounts.recommend_reason_quota_limited',
+    });
+  });
+
+  it('does not treat malformed spend-control amounts as resolved budget evidence', () => {
+    const recommendation = buildAccountRecommendation(
+      makeRow({
+        quota: {
+          spendControlReached: true,
+          fetchedAtMs: FRESH_SPEND_CONTROL_FETCHED_AT_MS,
+          spendControlIndividualLimit: spendControlLimit({
+            limit: 'not-a-number',
+            used: 'bad',
+            remaining: 'unknown',
+          }),
+        },
+      })
+    );
 
     expect(recommendation).toMatchObject({
       action: 'refresh',

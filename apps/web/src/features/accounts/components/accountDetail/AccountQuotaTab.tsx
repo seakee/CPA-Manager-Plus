@@ -229,7 +229,7 @@ export function AccountQuotaTab({
             icon={<IconDollarSign size={20} />}
             tone="amber"
             label={t('accounts.detail_total_cost')}
-            value={history ? formatUsd(history.totalCost) : '-'}
+            value={history?.totalCost != null ? formatUsd(history.totalCost) : '-'}
           />
           <MetricCell
             icon={<IconCheck size={20} />}

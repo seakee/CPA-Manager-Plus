@@ -1338,6 +1338,129 @@ func TestRepositoryDeleteRejectsRawRowsRemovedOutsideMaintenance(t *testing.T) {
 	}
 }
 
+func TestRepositoryDeleteDoesNotRewriteHealthyRetainedProjection(t *testing.T) {
+	db, repository, run := prepareVerifiedArchiveRun(t, "healthy-retained-projection-no-rewrite")
+	ctx := context.Background()
+	const sentinelUpdatedAtMS int64 = 12_345
+	if _, err := db.Exec(`update usage_monitoring_event_projection_v1
+		set updated_at_ms = ? where event_id = 1`, sentinelUpdatedAtMS); err != nil {
+		t.Fatalf("mark retained projection fixture: %v", err)
+	}
+	if _, err := repository.BeginDelete(ctx, run.ID, 69_000); err != nil {
+		t.Fatalf("begin delete: %v", err)
+	}
+	result, err := repository.DeleteBatch(ctx, run.ID, 1, 69_001)
+	if err != nil {
+		t.Fatalf("delete healthy retained batch: %v", err)
+	}
+	if result.Deleted != 1 || result.Run.DeletedEventCount != 1 {
+		t.Fatalf("delete result = %#v", result)
+	}
+	var updatedAtMS int64
+	if err := db.QueryRow(`select updated_at_ms
+		from usage_monitoring_event_projection_v1 where event_id = 1`).Scan(&updatedAtMS); err != nil {
+		t.Fatalf("read retained projection after delete: %v", err)
+	}
+	if updatedAtMS != sentinelUpdatedAtMS {
+		t.Fatalf("healthy retained projection was rewritten: updated_at_ms=%d want=%d", updatedAtMS, sentinelUpdatedAtMS)
+	}
+}
+
+func TestRepositoryDeleteRepairsMissingRetainedProjectionBeforeRawDelete(t *testing.T) {
+	db, repository, run := prepareVerifiedArchiveRun(t, "repair-missing-retained-projection")
+	ctx := context.Background()
+	if _, err := db.Exec(`delete from usage_monitoring_event_projection_v1 where event_id = 1`); err != nil {
+		t.Fatalf("remove retained projection fixture: %v", err)
+	}
+	var status string
+	var coverage int64
+	if err := db.QueryRow(`select status, coverage_event_id
+		from usage_monitoring_rollup_state where rollup_name = 'projection_v1'`).Scan(&status, &coverage); err != nil {
+		t.Fatalf("read projection state: %v", err)
+	}
+	if status != "ready" || coverage < run.TargetEventID {
+		t.Fatalf("projection state no longer reproduces healthy watermark: status=%s coverage=%d target=%d", status, coverage, run.TargetEventID)
+	}
+	if _, err := repository.BeginDelete(ctx, run.ID, 70_000); err != nil {
+		t.Fatalf("begin delete with missing material projection: %v", err)
+	}
+	result, err := repository.DeleteBatch(ctx, run.ID, 1, 70_001)
+	if err != nil {
+		t.Fatalf("delete batch after retained projection repair: %v", err)
+	}
+	if result.Deleted != 1 || result.Run.DeletedEventCount != 1 {
+		t.Fatalf("delete result = %#v", result)
+	}
+	var rawCount, projectionCount int64
+	if err := db.QueryRow(`select
+		(select count(*) from usage_events where id = 1),
+		(select count(*) from usage_monitoring_event_projection_v1 where event_id = 1 and timestamp_ms = 1000)`).Scan(&rawCount, &projectionCount); err != nil {
+		t.Fatalf("inspect repaired retained projection: %v", err)
+	}
+	if rawCount != 0 || projectionCount != 1 {
+		t.Fatalf("retained handoff raw=%d projection=%d, want raw=0 projection=1", rawCount, projectionCount)
+	}
+}
+
+func TestRepositoryDeleteRollsBackWhenRetainedProjectionHandoffFails(t *testing.T) {
+	db, repository, run := prepareVerifiedArchiveRun(t, "retained-projection-handoff-failure")
+	ctx := context.Background()
+	if _, err := db.Exec(`delete from usage_monitoring_event_projection_v1 where event_id = 1`); err != nil {
+		t.Fatalf("remove retained projection fixture: %v", err)
+	}
+	if _, err := db.Exec(`create trigger reject_retained_projection_handoff
+		before insert on usage_monitoring_event_projection_v1
+		when new.event_id = 1
+		begin select raise(abort, 'blocked retained projection handoff'); end`); err != nil {
+		t.Fatalf("create retained projection failure trigger: %v", err)
+	}
+	if _, err := repository.BeginDelete(ctx, run.ID, 71_000); err != nil {
+		t.Fatalf("begin delete: %v", err)
+	}
+	if _, err := repository.DeleteBatch(ctx, run.ID, 1, 71_001); err == nil {
+		t.Fatal("delete batch succeeded despite retained projection handoff failure")
+	}
+	var rawCount, deletedCount, deletedRefCount int64
+	if err := db.QueryRow(`select
+		(select count(*) from usage_events),
+		(select deleted_event_count from usage_archive_runs where id = ?),
+		(select count(*) from usage_archive_event_refs where run_id = ? and raw_deleted_at_ms is not null)`,
+		run.ID, run.ID,
+	).Scan(&rawCount, &deletedCount, &deletedRefCount); err != nil {
+		t.Fatalf("inspect failed retained handoff: %v", err)
+	}
+	if rawCount != run.EventCount || deletedCount != 0 || deletedRefCount != 0 {
+		t.Fatalf("failed retained handoff changed delete state raw=%d deleted=%d refs=%d", rawCount, deletedCount, deletedRefCount)
+	}
+}
+
+func TestRepositoryDeleteResumeRejectsMissingProjectionForDeletedEvent(t *testing.T) {
+	db, repository, run := prepareVerifiedArchiveRun(t, "resume-missing-retained-projection")
+	ctx := context.Background()
+	if _, err := repository.BeginDelete(ctx, run.ID, 72_000); err != nil {
+		t.Fatalf("begin delete: %v", err)
+	}
+	first, err := repository.DeleteBatch(ctx, run.ID, 1, 72_001)
+	if err != nil || first.Deleted != 1 || first.Run.DeletedEventCount != 1 {
+		t.Fatalf("first delete batch = %#v err=%v", first, err)
+	}
+	if _, err := db.Exec(`delete from usage_monitoring_event_projection_v1 where event_id = 1`); err != nil {
+		t.Fatalf("remove retained row after raw deletion: %v", err)
+	}
+	if _, err := repository.BeginDelete(ctx, run.ID, 72_002); !errors.Is(err, ErrCoverageIncomplete) {
+		t.Fatalf("resume delete error = %v, want coverage incomplete", err)
+	}
+	var remainingRaw, deletedCount int64
+	if err := db.QueryRow(`select
+		(select count(*) from usage_events where id = 2),
+		(select deleted_event_count from usage_archive_runs where id = ?)`, run.ID).Scan(&remainingRaw, &deletedCount); err != nil {
+		t.Fatalf("inspect rejected resume: %v", err)
+	}
+	if remainingRaw != 1 || deletedCount != 1 {
+		t.Fatalf("rejected resume changed delete state raw=%d deleted=%d", remainingRaw, deletedCount)
+	}
+}
+
 func TestRepositoryDeleteDoesNotRequireLegacyDashboardCheckpoint(t *testing.T) {
 	for _, checkpointState := range []string{"missing", "behind"} {
 		t.Run(checkpointState, func(t *testing.T) {
@@ -1434,7 +1557,7 @@ func TestRepositoryDeleteRequiresEveryCurrentDerivedCoverageGate(t *testing.T) {
 		{
 			name: "hourly aggregate status",
 			mutate: func(t *testing.T, db *sql.DB, _ Run) func() {
-				archiveTestExec(t, db, `update usage_hourly_aggregate_state set status = 'failed'
+				archiveTestExec(t, db, `update usage_hourly_aggregate_state set status = 'backfilling'
 					where aggregate_name = ?`, usageaggregate.AggregateName)
 				return func() {
 					archiveTestExec(t, db, `update usage_hourly_aggregate_state set status = 'ready'
@@ -1480,7 +1603,7 @@ func TestRepositoryDeleteRequiresEveryCurrentDerivedCoverageGate(t *testing.T) {
 		{
 			name: "pricing status",
 			mutate: func(t *testing.T, db *sql.DB, _ Run) func() {
-				archiveTestExec(t, db, `update usage_pricing_rollup_state set status = 'failed'
+				archiveTestExec(t, db, `update usage_pricing_rollup_state set status = 'rebuilding'
 					where rollup_name = ?`, usagepricing.RollupName)
 				return func() {
 					archiveTestExec(t, db, `update usage_pricing_rollup_state set status = 'ready'
@@ -1515,7 +1638,7 @@ func TestRepositoryDeleteRequiresEveryCurrentDerivedCoverageGate(t *testing.T) {
 		{
 			name: "monitoring stats status",
 			mutate: func(t *testing.T, db *sql.DB, _ Run) func() {
-				archiveTestExec(t, db, `update usage_monitoring_rollup_state set status = 'failed'
+				archiveTestExec(t, db, `update usage_monitoring_rollup_state set status = 'rebuilding'
 					where rollup_name = ?`, usagemonitoring.StatsRollupName)
 				return func() {
 					archiveTestExec(t, db, `update usage_monitoring_rollup_state set status = 'ready'
@@ -1537,7 +1660,7 @@ func TestRepositoryDeleteRequiresEveryCurrentDerivedCoverageGate(t *testing.T) {
 		{
 			name: "monitoring metadata status",
 			mutate: func(t *testing.T, db *sql.DB, _ Run) func() {
-				archiveTestExec(t, db, `update usage_monitoring_rollup_state set status = 'failed'
+				archiveTestExec(t, db, `update usage_monitoring_rollup_state set status = 'rebuilding'
 					where rollup_name = ?`, usagemonitoring.MetadataRollupName)
 				return func() {
 					archiveTestExec(t, db, `update usage_monitoring_rollup_state set status = 'ready'
@@ -1572,7 +1695,7 @@ func TestRepositoryDeleteRequiresEveryCurrentDerivedCoverageGate(t *testing.T) {
 		{
 			name: "monitoring projection status",
 			mutate: func(t *testing.T, db *sql.DB, _ Run) func() {
-				archiveTestExec(t, db, `update usage_monitoring_rollup_state set status = 'failed'
+				archiveTestExec(t, db, `update usage_monitoring_rollup_state set status = 'rebuilding'
 					where rollup_name = ?`, usagemonitoring.ProjectionRollupName)
 				return func() {
 					archiveTestExec(t, db, `update usage_monitoring_rollup_state set status = 'ready'
@@ -1607,7 +1730,7 @@ func TestRepositoryDeleteRequiresEveryCurrentDerivedCoverageGate(t *testing.T) {
 		{
 			name: "codex legacy identity evidence status",
 			mutate: func(t *testing.T, db *sql.DB, _ Run) func() {
-				archiveTestExec(t, db, `update usage_monitoring_rollup_state set status = 'failed'
+				archiveTestExec(t, db, `update usage_monitoring_rollup_state set status = 'clearing'
 					where rollup_name = ?`, usageevent.CodexLegacyIdentityRollupName)
 				return func() {
 					archiveTestExec(t, db, `update usage_monitoring_rollup_state set status = 'ready'
@@ -1686,6 +1809,127 @@ func TestRepositoryDeleteRequiresEveryCurrentDerivedCoverageGate(t *testing.T) {
 				t.Fatalf("delete batch after restoring %s: result=%#v err=%v", test.name, result, err)
 			}
 		})
+	}
+}
+
+func TestRepositoryDeleteAllowsCommittedCoverageInStableRuntimeStates(t *testing.T) {
+	for _, status := range []string{derivedStatusReady, "catching_up"} {
+		t.Run("derived "+status, func(t *testing.T) {
+			if err := validateDerivedCoverage(
+				"test",
+				1,
+				1,
+				"revision",
+				"revision",
+				status,
+				10,
+				10,
+			); err != nil {
+				t.Fatalf("covered derived state %q rejected: %v", status, err)
+			}
+		})
+		t.Run("hourly "+status, func(t *testing.T) {
+			err := validateHourlyAggregateCoverage(
+				Run{TargetEventID: 10},
+				hourlyAggregateCoverageState{
+					SchemaVersion:     usageaggregate.SchemaVersion,
+					StructureRevision: usageaggregate.StructureRevision,
+					Status:            status,
+					CoverageEventID:   10,
+				},
+			)
+			if err != nil {
+				t.Fatalf("covered hourly state %q rejected: %v", status, err)
+			}
+		})
+	}
+
+	for _, status := range []string{"failed", "pending", "clearing", "rebuilding", "backfilling", "unknown"} {
+		t.Run("unsafe "+status, func(t *testing.T) {
+			if err := validateDerivedCoverage(
+				"test",
+				1,
+				1,
+				"revision",
+				"revision",
+				status,
+				10,
+				10,
+			); !errors.Is(err, ErrCoverageIncomplete) {
+				t.Fatalf("unsafe derived state %q error = %v, want coverage incomplete", status, err)
+			}
+		})
+	}
+}
+
+func TestRepositoryDeleteAllowsPricingSQLiteBusyAfterCommittedCoverage(t *testing.T) {
+	ctx := context.Background()
+	db, repository, run := prepareVerifiedArchiveRun(t, "pricing-busy-covered-"+fmt.Sprint(time.Now().UnixNano()))
+
+	pricing := usagepricing.New(db)
+	if err := pricing.RecordFailure(ctx, errors.New("database is locked (SQLITE_BUSY)"), 60_000); err != nil {
+		t.Fatalf("record pricing sqlite busy: %v", err)
+	}
+
+	var status string
+	var coverage int64
+	if err := db.QueryRow(`select status, coverage_event_id
+		from usage_pricing_rollup_state where rollup_name = ?`, usagepricing.RollupName).Scan(&status, &coverage); err != nil {
+		t.Fatalf("read pricing state after sqlite busy: %v", err)
+	}
+	if status != derivedStatusReady || coverage < run.TargetEventID {
+		t.Fatalf("pricing state = status:%q coverage:%d target:%d, want ready with committed coverage", status, coverage, run.TargetEventID)
+	}
+
+	if _, err := repository.BeginDelete(ctx, run.ID, 60_001); err != nil {
+		t.Fatalf("begin delete after covered sqlite busy: %v", err)
+	}
+	result, err := repository.DeleteBatch(ctx, run.ID, 100, 60_002)
+	if err != nil {
+		t.Fatalf("delete after covered sqlite busy: %v", err)
+	}
+	if !result.Completed || result.Run.DeletedEventCount != run.EventCount {
+		t.Fatalf("delete result = %#v, want completed count %d", result, run.EventCount)
+	}
+}
+
+func TestRepositoryDeleteRejectsFailedPricingAfterNonTransientCatchUpError(t *testing.T) {
+	ctx := context.Background()
+	db, repository, run := prepareVerifiedArchiveRun(t, "pricing-hard-failure-"+fmt.Sprint(time.Now().UnixNano()))
+
+	if _, err := usageevent.New(db).InsertBatch(ctx, archiveTestEvents()[2:]); err != nil {
+		t.Fatalf("insert pricing tail event: %v", err)
+	}
+	archiveTestExec(t, db, `drop table usage_pricing_hourly_rollups_v1`)
+
+	pricing := usagepricing.New(db)
+	_, catchUpErr := pricing.CatchUp(ctx, 100, 61_000)
+	if catchUpErr == nil {
+		t.Fatal("pricing catch-up after dropping rollup table succeeded, want failure")
+	}
+	if err := pricing.RecordFailure(ctx, catchUpErr, 61_001); err != nil {
+		t.Fatalf("record non-transient pricing failure: %v", err)
+	}
+
+	var status string
+	var coverage int64
+	if err := db.QueryRow(`select status, coverage_event_id
+		from usage_pricing_rollup_state where rollup_name = ?`, usagepricing.RollupName).Scan(&status, &coverage); err != nil {
+		t.Fatalf("read failed pricing state: %v", err)
+	}
+	if status != "failed" || coverage < run.TargetEventID {
+		t.Fatalf("pricing state = status:%q coverage:%d target:%d, want failed with retained committed coverage", status, coverage, run.TargetEventID)
+	}
+
+	if _, err := repository.BeginDelete(ctx, run.ID, 61_002); !errors.Is(err, ErrCoverageIncomplete) {
+		t.Fatalf("begin delete with failed pricing state error = %v, want coverage incomplete", err)
+	}
+	var rawCount int64
+	if err := db.QueryRow(`select count(*) from usage_events`).Scan(&rawCount); err != nil {
+		t.Fatalf("count raw events after rejected delete: %v", err)
+	}
+	if rawCount != 3 {
+		t.Fatalf("raw events after rejected delete = %d, want 3", rawCount)
 	}
 }
 

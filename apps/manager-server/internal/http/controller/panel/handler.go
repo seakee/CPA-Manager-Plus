@@ -14,3 +14,11 @@ type Handler struct {
 func (h *Handler) ManagementHTML(w http.ResponseWriter, r *http.Request) {
 	h.App.PanelService.ServeManagementHTML(w, r, response.Error)
 }
+
+func (h *Handler) Favicon(w http.ResponseWriter, r *http.Request) {
+	h.App.PanelService.ServeFavicon(w, r, response.Error)
+}
+
+func (h *Handler) AppleTouchIcon(w http.ResponseWriter, r *http.Request) {
+	h.App.PanelService.ServeAppleTouchIcon(w, r, response.Error)
+}

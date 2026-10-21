@@ -708,32 +708,57 @@ func (r *repository) ListRecent(ctx context.Context, limit int) ([]model.UsageEv
 		event.ServiceTier = serviceTier.String
 		event.RequestServiceTier = requestServiceTier.String
 		event.ResponseServiceTier = responseServiceTier.String
-		hints := usage.RawCacheAccountingHintsFromJSON(rawJSON)
-		accounting := usage.NormalizeCacheAccounting(usage.CacheInputContext{
-			ExplicitMode:     hints.ExplicitMode,
-			ExecutorType:     event.ExecutorType,
-			Provider:         event.Provider,
-			ProviderSnapshot: event.AuthProviderSnapshot,
-			ResolvedModel:    event.ResolvedModel,
-			RequestedModel:   event.RequestedModel,
-			DisplayModel:     event.Model,
-		}, event.InputTokens, event.CachedTokens, event.CacheTokens, event.CacheReadTokens, event.CacheCreationTokens)
-		event.CacheInputMode = accounting.Mode
-		event.NormalizedUncachedInputTokens = accounting.UncachedInputTokens
-		event.NormalizedTotalInputTokens = accounting.TotalInputTokens
-		event.NormalizedCacheReadTokens = accounting.CacheReadTokens
-		event.NormalizedCacheCreationTokens = accounting.CacheCreationTokens
-		if normalizedUncachedInput.Valid {
+		storedMode := strings.TrimSpace(cacheInputMode.String)
+		storedDerivedComplete := cacheInputMode.Valid &&
+			normalizedUncachedInput.Valid &&
+			normalizedTotalInput.Valid &&
+			normalizedCacheRead.Valid &&
+			normalizedCacheCreation.Valid &&
+			normalizedUncachedInput.Int64 >= 0 &&
+			normalizedTotalInput.Int64 >= 0 &&
+			normalizedCacheRead.Int64 >= 0 &&
+			normalizedCacheCreation.Int64 >= 0 &&
+			(storedMode == usage.CacheInputModeIncluded ||
+				storedMode == usage.CacheInputModeSeparate ||
+				storedMode == usage.CacheInputModeReadIncludedCreationSeparate)
+		if storedDerivedComplete {
+			// These columns are one persisted derived-accounting result. Restore
+			// them atomically so a sanitized import cannot pair a newly inferred
+			// fallback mode with normalized values calculated under another mode.
+			// This does not make the stored mode raw/upstream provenance; migration
+			// and ingestion still classify exclusively from explicit/raw evidence.
+			event.CacheInputMode = storedMode
 			event.NormalizedUncachedInputTokens = normalizedUncachedInput.Int64
-		}
-		if normalizedTotalInput.Valid {
 			event.NormalizedTotalInputTokens = normalizedTotalInput.Int64
-		}
-		if normalizedCacheRead.Valid {
 			event.NormalizedCacheReadTokens = normalizedCacheRead.Int64
-		}
-		if normalizedCacheCreation.Valid {
 			event.NormalizedCacheCreationTokens = normalizedCacheCreation.Int64
+		} else {
+			hints := usage.RawCacheAccountingHintsFromJSON(rawJSON)
+			accounting := usage.NormalizeCacheAccountingWithRawJSON(
+				usage.CacheInputContext{
+					ExplicitMode:     hints.ExplicitMode,
+					ExecutorType:     event.ExecutorType,
+					Provider:         event.Provider,
+					ProviderSnapshot: event.AuthProviderSnapshot,
+					ResolvedModel:    event.ResolvedModel,
+					RequestedModel:   event.RequestedModel,
+					DisplayModel:     event.Model,
+				},
+				rawJSON,
+				event.InputTokens,
+				event.OutputTokens,
+				event.ReasoningTokens,
+				event.TotalTokens,
+				event.CachedTokens,
+				event.CacheTokens,
+				event.CacheReadTokens,
+				event.CacheCreationTokens,
+			)
+			event.CacheInputMode = accounting.Mode
+			event.NormalizedUncachedInputTokens = accounting.UncachedInputTokens
+			event.NormalizedTotalInputTokens = accounting.TotalInputTokens
+			event.NormalizedCacheReadTokens = accounting.CacheReadTokens
+			event.NormalizedCacheCreationTokens = accounting.CacheCreationTokens
 		}
 		if authSnapshotAt.Valid {
 			event.AuthSnapshotAtMS = authSnapshotAt.Int64

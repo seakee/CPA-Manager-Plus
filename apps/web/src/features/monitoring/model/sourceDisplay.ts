@@ -145,11 +145,13 @@ export const buildMonitoringSourceDisplay = (
         (authMeta?.authIndex ? context.channelByAuthIndex.get(authMeta.authIndex) : undefined);
   const sourceInfoMap = context.sourceInfoMap ?? buildSourceInfoMap({});
   const authFileMap = context.authFileMap ?? buildAuthFileMapFromMeta(context.authMetaMap);
+  const snapshotProvider = readString(input.authProviderSnapshot);
   const sourceMeta = resolveSourceDisplay(
     readString(input.source),
     authIndex,
     sourceInfoMap,
-    authFileMap
+    authFileMap,
+    snapshotProvider
   );
   const apiKeyHash = readString(input.apiKeyHash).toLowerCase();
   const apiKeyAlias = firstReadable(
@@ -158,7 +160,6 @@ export const buildMonitoringSourceDisplay = (
   );
   const snapshotAccount = readString(input.accountSnapshot);
   const snapshotLabel = readString(input.authLabelSnapshot);
-  const snapshotProvider = readString(input.authProviderSnapshot);
   const explicitChannel = readString(input.channel);
   const explicitLabel = readString(input.authLabel);
   const explicitAccount = readString(input.account);
@@ -175,6 +176,12 @@ export const buildMonitoringSourceDisplay = (
   const channelHost = firstReadable(channelMeta?.host);
   const resolvedSourceName = firstReadable(sourceMeta.displayName);
   const labelCandidates = firstReadable(authMeta?.label, explicitLabel, snapshotLabel);
+  const configuredSourceName = Boolean(
+    resolvedSourceName &&
+      sourceMeta.identityKey &&
+      !sourceMeta.identityKey.startsWith('source:') &&
+      !sourceMeta.identityKey.startsWith('auth:')
+  );
   // Prefer key-disambiguated source names (e.g. "kuaileshifu #1") over the bare
   // OpenAI-compatible provider/channel name when multi-key providers share a label.
   const sourceLabel = firstReadable(
@@ -182,7 +189,9 @@ export const buildMonitoringSourceDisplay = (
       (isKeyDisambiguatedLabel(resolvedSourceName, channel) ||
         isKeyDisambiguatedLabel(resolvedSourceName, channelHost) ||
         isKeyDisambiguatedLabel(resolvedSourceName, labelCandidates) ||
-        isKeyDisambiguatedLabel(resolvedSourceName, account))
+        isKeyDisambiguatedLabel(resolvedSourceName, account) ||
+        (configuredSourceName &&
+          isProviderLikeMonitoringLabel(firstReadable(labelCandidates, account), provider)))
       ? resolvedSourceName
       : '',
     labelCandidates,

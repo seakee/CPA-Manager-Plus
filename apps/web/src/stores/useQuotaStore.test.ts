@@ -395,6 +395,80 @@ describe('useQuotaStore persistence', () => {
     });
   });
 
+  it('normalizes legacy scalar Codex spend-control limits while hydrating quota cache', async () => {
+    const { STORAGE_KEY_QUOTA_CACHE } = await import('@/utils/constants');
+    const { obfuscatedStorage } = await import('@/services/storage/secureStorage');
+
+    obfuscatedStorage.setItem(STORAGE_KEY_QUOTA_CACHE, {
+      state: {
+        cacheScope: 'legacy-scope',
+        codexQuota: {
+          legacyCodex: {
+            status: 'success',
+            windows: [],
+            authFileKey: 'legacy-codex',
+            authFileIdentityVerified: true,
+            fetchedAtMs: 2_000,
+            spendControlReached: true,
+            spendControlIndividualLimit: 200,
+          },
+          canonicalCodex: {
+            status: 'success',
+            windows: [],
+            authFileKey: 'canonical-codex',
+            authFileIdentityVerified: true,
+            fetchedAtMs: 3_000,
+            spendControlReached: true,
+            spendControlIndividualLimit: {
+              source: 'workspace_spend_controls',
+              unit: 'credit',
+              limit: '100',
+              used: '100',
+              remaining: '0',
+              usedPercent: 100,
+              remainingPercent: 0,
+              resetAfterSeconds: 3600,
+              resetAtMs: 1_793_491_200_000,
+            },
+          },
+        },
+      },
+      version: 0,
+    });
+
+    vi.resetModules();
+    const { useQuotaStore: hydratedQuotaStore } = await import('./useQuotaStore');
+
+    expect(hydratedQuotaStore.getState().codexQuota['legacy-codex']).toMatchObject({
+      status: 'success',
+      spendControlReached: true,
+      spendControlIndividualLimit: {
+        source: null,
+        unit: null,
+        limit: '200',
+        used: null,
+        remaining: null,
+        usedPercent: null,
+        remainingPercent: null,
+        resetAfterSeconds: null,
+        resetAtMs: null,
+      },
+    });
+    expect(
+      hydratedQuotaStore.getState().codexQuota['canonical-codex'].spendControlIndividualLimit
+    ).toEqual({
+      source: 'workspace_spend_controls',
+      unit: 'credit',
+      limit: '100',
+      used: '100',
+      remaining: '0',
+      usedPercent: 100,
+      remainingPercent: 0,
+      resetAfterSeconds: 3600,
+      resetAtMs: 1_793_491_200_000,
+    });
+  });
+
   it('clears quota state and persisted quota cache together', async () => {
     const { useQuotaStore } = await import('./useQuotaStore');
 

@@ -299,7 +299,7 @@ describe('buildEventRows', () => {
     expect(row.searchText).toContain('premium');
   });
 
-  it('keeps shared provider display names available to realtime source cells', () => {
+  it('keeps shared display names while distinguishing known providers in realtime cells', () => {
     const sharedKey = 'sk-shared1234567890abcdef';
     const sourceInfoMap = buildSourceInfoMap({
       codexApiKeys: [
@@ -350,9 +350,97 @@ describe('buildEventRows', () => {
     const display = buildRealtimeSourceDisplay(row, t);
 
     expect(row.source).toBe('Shared Relay');
-    expect(row.sourceKey).toBe('shared:m:sk-s...cdef');
+    expect(row.sourceKey).toBe('codex:0');
     expect(row.provider).toBe('codex');
     expect(display.primary).toBe('Shared Relay');
+  });
+
+  it('shows the correct upstream for reordered Codex/Claude shared keys (#1013)', () => {
+    const keys = [
+      'sk-1000000000000001',
+      'sk-2000000000000002',
+      'sk-3000000000000003',
+      'sk-4000000000000004',
+    ];
+    const sourceInfoMap = buildSourceInfoMap({
+      codexApiKeys: keys.map((apiKey) => ({
+        apiKey,
+        baseUrl: 'https://relay-a.example/v1',
+      })),
+      claudeApiKeys: [keys[1], keys[0], keys[3]].map((apiKey) => ({
+        apiKey,
+        baseUrl: 'https://relay-a.example',
+        excludedModels: ['*'],
+      })),
+    });
+    const timestamp = '2026-05-19T10:00:00Z';
+    const events = keys.map((_, index) => ({
+      timestamp,
+      source: `m:sk-${index + 1}...000${index + 1}`,
+      auth_index: null,
+      auth_label_snapshot: 'codex',
+      auth_provider_snapshot: index === 0 ? 'codex' : '',
+      provider: 'codex',
+      latency_ms: 1000,
+      tokens: { input_tokens: 10, output_tokens: 20, total_tokens: 30 },
+      failed: false,
+      __modelName: 'gpt-5.4',
+      __endpoint: 'POST /v1/chat/completions',
+      __timestampMs: Date.parse(timestamp) + index,
+    }));
+    const rows = buildEventRows(
+      events,
+      new Map(),
+      new Map(),
+      sourceInfoMap,
+      new Map(),
+      {},
+      new Map()
+    );
+    const t = ((key: string) => key) as Parameters<typeof buildRealtimeSourceDisplay>[1];
+
+    expect(rows).toHaveLength(4);
+    rows.forEach((row, index) => {
+      expect(row.source).toBe(`relay-a.example #${index + 1}`);
+      expect(row.sourceKey).toBe(`codex:${index}`);
+      expect(buildRealtimeSourceDisplay(row, t).primary).toBe(`relay-a.example #${index + 1}`);
+    });
+
+    const [claudeRow] = buildEventRows(
+      [{ ...events[0], auth_label_snapshot: 'claude', auth_provider_snapshot: 'claude', provider: 'claude' }],
+      new Map(),
+      new Map(),
+      sourceInfoMap,
+      new Map(),
+      {},
+      new Map()
+    );
+    expect(claudeRow.source).toBe('relay-a.example #2');
+    expect(claudeRow.sourceKey).toBe('claude:1');
+    expect(buildRealtimeSourceDisplay(claudeRow, t).primary).toBe('relay-a.example #2');
+
+    const [unknownRow] = buildEventRows(
+      [{ ...events[0], auth_label_snapshot: '', auth_provider_snapshot: '', provider: '' }],
+      new Map(),
+      new Map(),
+      sourceInfoMap,
+      new Map(),
+      {},
+      new Map()
+    );
+    expect(unknownRow.source).toBe('m:sk-1...0001');
+    expect(unknownRow.sourceKey).toBe('source:m:sk-1...0001');
+
+    const [customLabelRow] = buildEventRows(
+      [{ ...events[0], auth_label_snapshot: 'Human-readable Relay' }],
+      new Map(),
+      new Map(),
+      sourceInfoMap,
+      new Map(),
+      {},
+      new Map()
+    );
+    expect(customLabelRow.source).toBe('Human-readable Relay');
   });
 
   it('prefers multi-key OpenAI-compatible disambiguation in realtime source cells', () => {

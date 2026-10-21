@@ -25,6 +25,7 @@
 | 流量                                         | 推荐后端         | 说明                                                                                                    |
 | -------------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------- |
 | `/management.html`                           | CPAMP `:18317`   | Manager Server 托管的管理面板。                                                                         |
+| `/favicon.ico`、`/apple-touch-icon.png`      | CPAMP `:18317`   | 旧版 Safari / iOS 的站点图标根路径 fallback；现代 Safari 可直接使用面板内嵌图标。                       |
 | `/usage-service/*`                           | CPAMP `:18317`   | Manager Server 模式探测和配置接口。                                                                     |
 | `/v0/management/*`                           | CPAMP `:18317`   | CPAMP 先处理用量、模型价格、别名、仪表盘、请求监控、Codex 账号巡检；其他管理接口再由 CPAMP 代理到 CPA。 |
 | `/v0/resource/plugins/*`                     | CPAMP `:18317`   | CPAMP 面板中的插件页面资源；CPAMP 会按需代理到 CPA。                                                    |
@@ -40,6 +41,8 @@
 Browser
   -> https://your-domain.com
       -> /management.html       -> CPA Manager Plus :18317
+      -> /favicon.ico            -> CPA Manager Plus :18317
+      -> /apple-touch-icon.png   -> CPA Manager Plus :18317
       -> /usage-service/*       -> CPA Manager Plus :18317
       -> /v0/management/*       -> CPA Manager Plus :18317
       -> /v0/resource/plugins/* -> CPA Manager Plus :18317
@@ -179,8 +182,10 @@ server {
 
     # ===== CPA Manager Plus =====
 
-    location = /management.html { proxy_pass http://cpamp; }
-    location = /health          { proxy_pass http://cpamp; }
+    location = /management.html       { proxy_pass http://cpamp; }
+    location = /favicon.ico            { proxy_pass http://cpamp; }
+    location = /apple-touch-icon.png   { proxy_pass http://cpamp; }
+    location = /health                 { proxy_pass http://cpamp; }
     location = /status          { proxy_pass http://cpamp; }
     location = /setup           { proxy_pass http://cpamp; }
 
@@ -322,24 +327,28 @@ Linux Docker 环境则建议把 CPA 和 CPAMP 放到同一个 Docker network，�
 # 1. CPAMP 面板能打开
 curl -I https://your-domain.com/management.html
 
-# 2. CPAMP 健康检查
+# 2. 旧版 Safari / iOS 图标 fallback 应进入 CPAMP
+curl -I https://your-domain.com/favicon.ico
+curl -I https://your-domain.com/apple-touch-icon.png
+
+# 3. CPAMP 健康检查
 curl -i https://your-domain.com/health
 
-# 3. CPA 健康检查
+# 4. CPA 健康检查
 curl -i https://your-domain.com/healthz
 
-# 4. CPAMP 运行时信息
+# 5. CPAMP 运行时信息
 curl -i https://your-domain.com/usage-service/info
 
-# 5. CPA API 请求，应该命中 CPA
+# 6. CPA API 请求，应该命中 CPA
 curl -i https://your-domain.com/v1/models \
   -H "Authorization: Bearer 你的 API 密钥"
 
-# 6. CPAMP 代理的管理接口，应该先命中 CPAMP，再由 CPAMP 访问 CPA
+# 7. CPAMP 代理的管理接口，应该先命中 CPAMP，再由 CPAMP 访问 CPA
 curl -i https://your-domain.com/v0/management/config \
   -H "Authorization: Bearer 你的 CPAMP 管理员密钥"
 
-# 7. 插件资源路径应该命中 CPAMP；不存在的资源可以返回 404，但不应被 Nginx 转到错误后端
+# 8. 插件资源路径应该命中 CPAMP；不存在的资源可以返回 404，但不应被 Nginx 转到错误后端
 curl -i https://your-domain.com/v0/resource/plugins/
 ```
 

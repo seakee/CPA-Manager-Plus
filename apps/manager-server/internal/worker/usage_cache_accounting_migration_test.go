@@ -160,7 +160,7 @@ func TestUsageCacheAccountingMigrationWorkerRediscoverSemanticsRevision(t *testi
 	if err := rawDB.QueryRow(`select value from settings where key = 'usage_cache_accounting_semantics_revision'`).Scan(&revision); err != nil {
 		t.Fatalf("read revision: %v", err)
 	}
-	if revision != "2" {
-		t.Fatalf("revision = %q, want 2", revision)
+	if revision != "3" {
+		t.Fatalf("revision = %q, want 3", revision)
 	}
 }

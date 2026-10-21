@@ -166,7 +166,8 @@ func (r *Reader) loadRows(ctx context.Context, filter store.AnalyticsFilter, das
 	}
 	dbSnapshot, err := r.store.LoadUsageHourlyPricingSnapshot(ctx, aggregateFilter, pricingFilter)
 	if err != nil {
-		if errors.Is(err, store.ErrUsagePricingCoverageIncomplete) {
+		if errors.Is(err, store.ErrUsagePricingCoverageIncomplete) ||
+			errors.Is(err, store.ErrUsagePricingRecoveryFailed) {
 			return Snapshot{ReadError: err}, false
 		}
 		r.logFallback(fmt.Sprintf("hourly pricing snapshot query failed: %v", err))

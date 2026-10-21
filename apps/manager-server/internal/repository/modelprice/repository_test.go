@@ -10,6 +10,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/modelprice"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagemonitoring"
 )
 
 func openTestDB(t *testing.T) (*sql.DB, modelprice.Repository) {
@@ -41,6 +42,36 @@ func insertArchiveRef(t *testing.T, db *sql.DB, rawDeletedAt any) {
 func markRawDeleted(t *testing.T, db *sql.DB) {
 	t.Helper()
 	insertArchiveRef(t, db, 2000)
+}
+
+func markRawDeletedWithRetainedProjection(t *testing.T, db *sql.DB) {
+	t.Helper()
+	ctx := context.Background()
+	const eventHash = "hash-retained"
+	if _, err := db.Exec(`insert into usage_events(
+		id, event_hash, timestamp_ms, timestamp, model, created_at_ms
+	) values(1, ?, 1000, '1970-01-01T00:00:01Z', 'model-a', 1000)`, eventHash); err != nil {
+		t.Fatalf("insert retained raw event: %v", err)
+	}
+	projection := usagemonitoring.New(db)
+	result, err := projection.CatchUpProjection(ctx, 10, 1500)
+	if err != nil {
+		t.Fatalf("build retained projection: %v", err)
+	}
+	if result.CoverageEventID != 1 || result.Pending {
+		t.Fatalf("unexpected retained projection result: %#v", result)
+	}
+	if _, err := db.Exec(`pragma foreign_keys = off`); err != nil {
+		t.Fatalf("disable foreign keys: %v", err)
+	}
+	if _, err := db.Exec(`insert into usage_archive_event_refs(
+		event_hash, run_id, segment_sequence, raw_event_id, timestamp_ms, archived_at_ms, raw_deleted_at_ms
+	) values(?, 'run-retained', 1, 1, 1000, 1600, 1700)`, eventHash); err != nil {
+		t.Fatalf("insert retained archive ref: %v", err)
+	}
+	if _, err := db.Exec(`delete from usage_events where id = 1`); err != nil {
+		t.Fatalf("delete retained raw event: %v", err)
+	}
 }
 
 // Test P1-1：没有 raw deletion，structure change 允许
@@ -512,5 +543,136 @@ func TestModelPriceUpsertSyncedManualPriceAndNewModelRejectedWithRawDeletion(t *
 	}
 	if _, ok := persisted["model-b"]; ok {
 		t.Fatalf("model-b should not exist after rollback")
+	}
+}
+
+
+func TestModelPriceStructureChangeAllowedAfterRawDeletionWithRetainedProjection(t *testing.T) {
+	ctx := context.Background()
+	db, repo := openTestDB(t)
+
+	if err := repo.ReplaceAll(ctx, map[string]model.ModelPrice{
+		"model-a": {Prompt: 1.0, Completion: 2.0},
+	}); err != nil {
+		t.Fatalf("initial ReplaceAll: %v", err)
+	}
+	markRawDeletedWithRetainedProjection(t, db)
+
+	if err := repo.ReplaceAll(ctx, map[string]model.ModelPrice{
+		"model-a": {Prompt: 1.0, Completion: 2.0},
+		"model-b": {Prompt: 3.0, Completion: 4.0},
+	}); err != nil {
+		t.Fatalf("structure change with retained projection: %v", err)
+	}
+
+	persisted, err := repo.LoadAll(ctx)
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	if _, ok := persisted["model-b"]; !ok {
+		t.Fatalf("expected model-b to be persisted")
+	}
+}
+
+func TestModelPriceUpsertSyncedStructureChangeAllowedAfterRawDeletionWithRetainedProjection(t *testing.T) {
+	ctx := context.Background()
+	db, repo := openTestDB(t)
+
+	if err := repo.ReplaceAll(ctx, map[string]model.ModelPrice{
+		"model-a": {Prompt: 1.0, Completion: 2.0},
+	}); err != nil {
+		t.Fatalf("initial ReplaceAll: %v", err)
+	}
+	markRawDeletedWithRetainedProjection(t, db)
+
+	result, err := repo.UpsertSynced(ctx, map[string]model.ModelPrice{
+		"model-b": {Prompt: 3.0, Completion: 4.0, Source: "sync"},
+	})
+	if err != nil {
+		t.Fatalf("UpsertSynced with retained projection: %v", err)
+	}
+	if result.Imported != 1 {
+		t.Fatalf("unexpected sync result: %+v", result)
+	}
+	persisted, err := repo.LoadAll(ctx)
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	if _, ok := persisted["model-b"]; !ok {
+		t.Fatalf("expected model-b to be persisted")
+	}
+}
+
+
+func TestModelPriceStructureChangePreservesRetainedVerifierSystemError(t *testing.T) {
+	ctx := context.Background()
+	db, repo := openTestDB(t)
+
+	if err := repo.ReplaceAll(ctx, map[string]model.ModelPrice{
+		"model-a": {Prompt: 1.0, Completion: 2.0},
+	}); err != nil {
+		t.Fatalf("initial ReplaceAll: %v", err)
+	}
+	markRawDeleted(t, db)
+	if _, err := db.Exec(`drop table usage_monitoring_rollup_state`); err != nil {
+		t.Fatalf("drop monitoring rollup state: %v", err)
+	}
+
+	err := repo.ReplaceAll(ctx, map[string]model.ModelPrice{
+		"model-a": {Prompt: 1.0, Completion: 2.0},
+		"model-b": {Prompt: 3.0, Completion: 4.0},
+	})
+	if err == nil {
+		t.Fatal("expected retained verifier system error")
+	}
+	if errors.Is(err, modelprice.ErrStructureChangeAfterRawDeletion) {
+		t.Fatalf("system error was misclassified as structure conflict: %v", err)
+	}
+
+	persisted, loadErr := repo.LoadAll(ctx)
+	if loadErr != nil {
+		t.Fatalf("LoadAll: %v", loadErr)
+	}
+	if len(persisted) != 1 {
+		t.Fatalf("expected mutation rollback, got %d models", len(persisted))
+	}
+	if _, ok := persisted["model-b"]; ok {
+		t.Fatal("model-b should not exist after verifier system error")
+	}
+}
+
+func TestModelPriceUpsertSyncedPreservesRetainedVerifierSystemError(t *testing.T) {
+	ctx := context.Background()
+	db, repo := openTestDB(t)
+
+	if err := repo.ReplaceAll(ctx, map[string]model.ModelPrice{
+		"model-a": {Prompt: 1.0, Completion: 2.0},
+	}); err != nil {
+		t.Fatalf("initial ReplaceAll: %v", err)
+	}
+	markRawDeleted(t, db)
+	if _, err := db.Exec(`drop table usage_monitoring_rollup_state`); err != nil {
+		t.Fatalf("drop monitoring rollup state: %v", err)
+	}
+
+	result, err := repo.UpsertSynced(ctx, map[string]model.ModelPrice{
+		"model-b": {Prompt: 3.0, Completion: 4.0, Source: "sync"},
+	})
+	if err == nil {
+		t.Fatalf("expected retained verifier system error, got result=%+v", result)
+	}
+	if errors.Is(err, modelprice.ErrStructureChangeAfterRawDeletion) {
+		t.Fatalf("system error was misclassified as structure conflict: %v", err)
+	}
+
+	persisted, loadErr := repo.LoadAll(ctx)
+	if loadErr != nil {
+		t.Fatalf("LoadAll: %v", loadErr)
+	}
+	if len(persisted) != 1 {
+		t.Fatalf("expected sync rollback, got %d models", len(persisted))
+	}
+	if _, ok := persisted["model-b"]; ok {
+		t.Fatal("model-b should not exist after verifier system error")
 	}
 }

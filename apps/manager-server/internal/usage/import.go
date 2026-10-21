@@ -1852,6 +1852,14 @@ func eventFromExportedRecord(record map[string]any) (Event, bool, error) {
 	if explicitMode == "" {
 		explicitMode = rawHints.ExplicitMode
 	}
+	if explicitMode == "" {
+		derivedMode := normalizeCacheInputMode(readString(record, "derived_cache_input_mode", "derivedCacheInputMode"))
+		if derivedMode == CacheInputModeIncluded ||
+			derivedMode == CacheInputModeSeparate ||
+			derivedMode == CacheInputModeReadIncludedCreationSeparate {
+			explicitMode = derivedMode
+		}
+	}
 	accounting := NormalizeCacheAccounting(CacheInputContext{
 		ExplicitMode:     explicitMode,
 		ExecutorType:     executorType,
@@ -2084,7 +2092,10 @@ func archiveDerivedFieldsFromRecord(record map[string]any) (CacheAccounting, int
 	rawMode, present := record["cache_input_mode"]
 	mode, ok := rawMode.(string)
 	mode = normalizeCacheInputMode(mode)
-	if !present || !ok || (mode != CacheInputModeIncluded && mode != CacheInputModeSeparate) {
+	if !present || !ok ||
+		(mode != CacheInputModeIncluded &&
+			mode != CacheInputModeSeparate &&
+			mode != CacheInputModeReadIncludedCreationSeparate) {
 		return CacheAccounting{}, 0, 0, nil, fmt.Errorf("%w: cache_input_mode is required and must be supported", ErrInvalidArchiveRecord)
 	}
 	read := func(key string) (int64, error) {

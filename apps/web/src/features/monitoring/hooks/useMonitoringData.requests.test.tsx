@@ -543,4 +543,44 @@ describe('useMonitoringData analytics requests', () => {
     expect(latestResult?.authFiles[0]?.auth_index).toBe('auth-2');
     expect(latestResult?.error).toBe('auth-2');
   });
+
+  it('retains last-good metadata when a same-scope revalidation partially fails', async () => {
+    loadMonitoringMetaPayloadMock.mockResolvedValueOnce({
+      authFiles: [{ name: 'retained.json', auth_index: 'auth-retained' }],
+      authFilesLoaded: true,
+      channels: [
+        {
+          key: 'retained:0',
+          name: 'retained-channel',
+          baseUrl: 'https://retained.test',
+          host: 'retained.test',
+          disabled: false,
+          authIndices: ['auth-retained'],
+          modelNames: [],
+        },
+      ],
+      channelsLoaded: true,
+      error: '',
+    });
+
+    await renderTab('accounts', 'scope-a');
+    expect(latestResult?.authFiles[0]?.name).toBe('retained.json');
+    expect(latestResult?.channels[0]?.name).toBe('retained-channel');
+
+    loadMonitoringMetaPayloadMock.mockResolvedValueOnce({
+      authFiles: [],
+      authFilesLoaded: false,
+      channels: [],
+      channelsLoaded: false,
+      error: 'meta offline',
+    });
+
+    await act(async () => {
+      await latestResult?.refreshMeta(false);
+    });
+
+    expect(latestResult?.authFiles[0]?.name).toBe('retained.json');
+    expect(latestResult?.channels[0]?.name).toBe('retained-channel');
+    expect(latestResult?.error).toBe('meta offline');
+  });
 });

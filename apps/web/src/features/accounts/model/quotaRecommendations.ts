@@ -1,6 +1,8 @@
 import type { AccountRow } from './accountRows';
+import { isSpendControlSnapshotCurrent } from './accountQuotaSummary';
 import {
   getAccountRequestCredentialEvidence,
+  hasAccountNonSpendControlQuotaLimitEvidence,
   hasAccountQuotaLimitEvidence,
   isAccountInspectionHealthyEvidence,
   isAccountRequestCredentialEvidenceCurrent,
@@ -44,6 +46,7 @@ const evidenceSensitiveRecommendationReasonKeys = new Set([
   'accounts.recommend_reason_credential_auth',
   'accounts.recommend_reason_request_failure',
   'accounts.recommend_reason_quota_limited',
+  'accounts.recommend_reason_spend_control_limited',
   'accounts.recommend_reason_quota_auth',
   'accounts.recommend_reason_error',
 ]);
@@ -54,6 +57,24 @@ export const isAccountRecommendationEvidenceSensitive = (
   recommendation !== null &&
   recommendation !== undefined &&
   evidenceSensitiveRecommendationReasonKeys.has(recommendation.reasonKey);
+
+const isFiniteSpendControlAmount = (value: string | null | undefined): boolean => {
+  const normalized = value?.trim() ?? '';
+  return normalized !== '' && Number.isFinite(Number(normalized));
+};
+
+const hasResolvedSpendControlEvidence = (row: AccountRow): boolean => {
+  const limit = row.quota.spendControlIndividualLimit;
+  return (
+    row.quota.spendControlReached === true &&
+    limit !== null &&
+    limit !== undefined &&
+    isFiniteSpendControlAmount(limit.limit) &&
+    isFiniteSpendControlAmount(limit.used) &&
+    isFiniteSpendControlAmount(limit.remaining) &&
+    isSpendControlSnapshotCurrent(limit, row.quota.fetchedAtMs)
+  );
+};
 
 export const buildAccountRecommendation = (
   row: AccountRow,
@@ -146,6 +167,18 @@ export const buildAccountRecommendation = (
       reasonKey: row.disabled
         ? 'accounts.recommend_reason_disabled_exhausted'
         : 'accounts.recommend_reason_exhausted',
+    };
+  }
+
+  if (
+    hasResolvedSpendControlEvidence(row) &&
+    !hasAccountNonSpendControlQuotaLimitEvidence(row, requestEvidenceInput)
+  ) {
+    return {
+      row,
+      action: 'review',
+      priority: 'high',
+      reasonKey: 'accounts.recommend_reason_spend_control_limited',
     };
   }
 

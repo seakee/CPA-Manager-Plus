@@ -102,7 +102,10 @@ import {
   getCodexInspectionOwnershipIdentityKey,
   recordCodexInspectionDisableOwnership,
 } from '@/features/monitoring/model/codexInspectionOwnership';
-import { getAuthFilePatchTarget } from '@/features/authFiles/model/credentialStatus';
+import {
+  getAuthFilePatchTarget,
+  getAuthFileSelectionKey,
+} from '@/features/authFiles/model/credentialStatus';
 
 type UseAuthFilesDataHarness = {
   getCurrent: () => ReturnType<typeof useAuthFilesData>;
@@ -246,6 +249,92 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+describe('useAuthFilesData revalidation', () => {
+  it('keeps successful data and selection through pending, successful and failed refreshes', async () => {
+    const hook = mountUseAuthFilesData('a');
+    expect(hook.getCurrent().initialLoading).toBe(true);
+    const first = createDeferred<{ files: AuthFileItem[] }>();
+    mocks.list.mockReturnValueOnce(first.promise);
+    let pending!: Promise<unknown>;
+    act(() => {
+      pending = hook.getCurrent().loadFiles();
+    });
+    expect(hook.getCurrent().initialLoading).toBe(true);
+    await act(async () => {
+      first.resolve({ files: [{ name: 'old.json' }] });
+      await pending;
+    });
+    const selectionKey = getAuthFileSelectionKey({ name: 'old.json' });
+    act(() => hook.getCurrent().toggleSelect(selectionKey));
+    const next = createDeferred<{ files: AuthFileItem[] }>();
+    mocks.list.mockReturnValueOnce(next.promise);
+    act(() => {
+      pending = hook.getCurrent().loadFiles();
+    });
+    expect(hook.getCurrent().loading).toBe(true);
+    expect(hook.getCurrent().initialLoading).toBe(false);
+    expect(hook.getCurrent().files[0].name).toBe('old.json');
+    await act(async () => {
+      next.resolve({ files: [{ name: 'old.json' }, { name: 'new.json' }] });
+      await pending;
+    });
+    expect(hook.getCurrent().files).toHaveLength(2);
+    mocks.list.mockRejectedValueOnce(new Error('offline'));
+    await act(async () => {
+      await hook.getCurrent().loadFiles();
+    });
+    expect(hook.getCurrent().files).toHaveLength(2);
+    expect(hook.getCurrent().error).toBe('offline');
+    expect(hook.getCurrent().selectedFiles.has(selectionKey)).toBe(true);
+    hook.unmount();
+  });
+
+  it('keeps a successful empty result and rejects old connection responses', async () => {
+    const hook = mountUseAuthFilesData('a');
+    await act(async () => {
+      await hook.getCurrent().loadFiles();
+    });
+    const old = createDeferred<{ files: AuthFileItem[] }>();
+    mocks.list.mockReturnValueOnce(old.promise);
+    let pending!: Promise<unknown>;
+    act(() => {
+      pending = hook.getCurrent().loadFiles();
+    });
+    expect(hook.getCurrent().initialLoading).toBe(false);
+    hook.rerender('b');
+    expect(hook.getCurrent().initialLoading).toBe(true);
+    await act(async () => {
+      old.resolve({ files: [{ name: 'wrong-scope.json' }] });
+      await pending;
+    });
+    expect(hook.getCurrent().files).toEqual([]);
+    expect(hook.getCurrent().initialLoading).toBe(true);
+    hook.unmount();
+  });
+
+  it('discards earlier refreshes that complete after the latest response', async () => {
+    const hook = mountUseAuthFilesData('a');
+    const old = createDeferred<{ files: AuthFileItem[] }>();
+    const fresh = createDeferred<{ files: AuthFileItem[] }>();
+    mocks.list.mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise);
+    let first!: Promise<unknown>, second!: Promise<unknown>;
+    act(() => {
+      first = hook.getCurrent().loadFiles();
+      second = hook.getCurrent().loadFiles();
+    });
+    await act(async () => {
+      fresh.resolve({ files: [{ name: 'latest.json' }] });
+      await second;
+    });
+    await act(async () => {
+      old.resolve({ files: [{ name: 'stale.json' }] });
+      await first;
+    });
+    expect(hook.getCurrent().files[0].name).toBe('latest.json');
+    hook.unmount();
+  });
 });
 
 describe('buildPastedAuthJsonPayloads', () => {

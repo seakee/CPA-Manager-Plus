@@ -177,17 +177,18 @@ const normalizeApiKeyEntry = (entry: unknown): ApiKeyEntry | null => {
   const authIndex = normalizeAuthIndex(
     record?.['auth-index'] ?? record?.authIndex ?? record?.['auth_index']
   );
-  if (!trimmed && !authIndex) return null;
-
   const proxyUrl = record ? (record['proxy-url'] ?? record.proxyUrl) : undefined;
   const headers = record ? normalizeHeaders(record.headers) : undefined;
+  const weight = normalizeCredentialWeight(record?.weight);
+  if (!trimmed && !authIndex && !String(proxyUrl ?? '').trim() && weight === undefined) {
+    return null;
+  }
 
   const result: ApiKeyEntry = {
     apiKey: trimmed,
     proxyUrl: proxyUrl ? String(proxyUrl) : undefined,
     headers,
   };
-  const weight = normalizeCredentialWeight(record?.weight);
   if (weight !== undefined) result.weight = weight;
   if (authIndex) result.authIndex = authIndex;
   return result;

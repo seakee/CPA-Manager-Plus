@@ -69,6 +69,109 @@ describe('source resolver', () => {
     expect(resolved.type).toBe('');
     expect(resolved.identityKey).toBe('shared:m:sk-s...cdef');
     expect(resolved.displayName).not.toContain('sk-shared');
+
+    const codex = resolveSourceDisplay('m:sk-s...cdef', '', sourceInfoMap, new Map(), 'codex');
+    const claude = resolveSourceDisplay('m:sk-s...cdef', '', sourceInfoMap, new Map(), 'claude');
+    expect(codex.identityKey).toBe('codex:0');
+    expect(codex.type).toBe('codex');
+    expect(claude.identityKey).toBe('claude:0');
+    expect(claude.type).toBe('claude');
+  });
+
+  it('keeps Codex and Claude source ordinals separate for reordered shared keys (#1013)', () => {
+    const keys = [
+      'sk-1000000000000001',
+      'sk-2000000000000002',
+      'sk-3000000000000003',
+      'sk-4000000000000004',
+    ];
+    const sourceInfoMap = buildSourceInfoMap({
+      codexApiKeys: keys.map((apiKey, index) => ({
+        apiKey,
+        authIndex: index === 0 ? 'codex-auth-1' : undefined,
+        baseUrl: 'https://relay-a.example/v1',
+      })),
+      claudeApiKeys: [keys[1], keys[0], keys[3]].map((apiKey) => ({
+        apiKey,
+        baseUrl: 'https://relay-a.example',
+        excludedModels: ['*'],
+      })),
+    });
+    const authFileMap = new Map();
+    const sources = keys.map((_, index) => `m:sk-${index + 1}...000${index + 1}`);
+
+    sources.forEach((source, index) => {
+      const codex = resolveSourceDisplay(source, '', sourceInfoMap, authFileMap, 'codex');
+      expect(codex.displayName).toBe(`relay-a.example #${index + 1}`);
+      expect(codex.identityKey).toBe(`codex:${index}`);
+      expect(codex.type).toBe('codex');
+    });
+
+    const claudeOrdinals = [
+      { source: sources[1], ordinal: 1, identityKey: 'claude:0' },
+      { source: sources[0], ordinal: 2, identityKey: 'claude:1' },
+      { source: sources[3], ordinal: 3, identityKey: 'claude:2' },
+    ];
+    claudeOrdinals.forEach(({ source, ordinal, identityKey }) => {
+      const claude = resolveSourceDisplay(source, '', sourceInfoMap, authFileMap, 'claude');
+      expect(claude.displayName).toBe(`relay-a.example #${ordinal}`);
+      expect(claude.identityKey).toBe(identityKey);
+      expect(claude.type).toBe('claude');
+    });
+
+    expect(sourceInfoMap.bySource.get(sources[0])).toBeNull();
+    expect(resolveSourceDisplay(sources[0], '', sourceInfoMap, authFileMap).displayName).toBe(
+      sources[0]
+    );
+    expect(resolveSourceDisplay(sources[0], '', sourceInfoMap, authFileMap, 'unknown').displayName).toBe(
+      sources[0]
+    );
+    expect(resolveSourceDisplay(sources[0], 'codex-auth-1', sourceInfoMap, authFileMap, 'claude').displayName).toBe(
+      'relay-a.example #1'
+    );
+    expect(
+      resolveSourceDisplay(`h:${sha256Hex(keys[0])}`, '', sourceInfoMap, authFileMap, 'codex')
+        .displayName
+    ).toBe('relay-a.example #1');
+
+    const states = buildSourceProviderStateMap(sourceInfoMap);
+    expect(states.get('codex:0')).toBe('enabled');
+    expect(states.get('claude:1')).toBe('disabled');
+  });
+
+  it('does not guess among colliding entries in the same provider (#1013)', () => {
+    const sharedKey = 'sk-9000000000009999';
+    const sourceInfoMap = buildSourceInfoMap({
+      codexApiKeys: [
+        { apiKey: sharedKey, baseUrl: 'https://same.example/v1' },
+        { apiKey: sharedKey, baseUrl: 'https://same.example/v1' },
+      ],
+    });
+    const source = 'm:sk-9...9999';
+    const resolved = resolveSourceDisplay(source, '', sourceInfoMap, new Map(), 'codex');
+
+    expect(sourceInfoMap.bySource.get(source)).toBeNull();
+    expect(resolved.displayName).toBe(source);
+    expect(resolved.identityKey).toBe(`source:${source}`);
+  });
+
+  it('keeps same-provider shared labels ambiguous', () => {
+    const sourceInfoMap = buildSourceInfoMap({
+      codexApiKeys: [
+        { apiKey: 'sk-reused-key-abcdef1234', prefix: 'One Relay' },
+        { apiKey: 'sk-reused-key-abcdef1234', prefix: 'One Relay' },
+      ],
+    });
+    const resolved = resolveSourceDisplay(
+      'm:sk-r...1234',
+      '',
+      sourceInfoMap,
+      new Map(),
+      'codex'
+    );
+    expect(resolved.displayName).toBe('One Relay');
+    expect(resolved.identityKey).toBe('shared:m:sk-r...1234');
+    expect(resolved.type).toBe('codex');
   });
 
   it('distinguishes multiple keys from the same base URL without exposing raw keys', () => {

@@ -128,6 +128,7 @@ var derivedIndexStatements = []struct {
 	sql       string
 }{
 	{"idx_usage_events_timestamp", "usage_events", `create index if not exists idx_usage_events_timestamp on usage_events(timestamp_ms)`},
+	{"idx_usage_events_ts_latency_ttft_cover", "usage_events", `create index if not exists idx_usage_events_ts_latency_ttft_cover on usage_events(timestamp_ms, latency_ms, ttft_ms)`},
 	{"idx_usage_events_request_id", "usage_events", `create index if not exists idx_usage_events_request_id on usage_events(request_id)`},
 	{"idx_usage_events_model", "usage_events", `create index if not exists idx_usage_events_model on usage_events(model)`},
 	{"idx_usage_events_auth_index", "usage_events", `create index if not exists idx_usage_events_auth_index on usage_events(auth_index)`},

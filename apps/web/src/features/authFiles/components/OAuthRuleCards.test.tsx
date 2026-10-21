@@ -27,6 +27,58 @@ const noopAsync = async () => {};
 const renderText = (renderer: ReactTestRenderer) => JSON.stringify(renderer.toJSON());
 
 describe('OAuth rule cards', () => {
+  it.each(['loading', 'error'] as const)(
+    'retains rules, including loaded empty snapshots, in %s state',
+    (loadState) => {
+      let renderer!: ReactTestRenderer;
+      const renderCards = (empty: boolean) => (
+        <>
+          <OAuthExcludedCard
+            hasLoaded
+            disableControls={false}
+            loadState={loadState}
+            excluded={empty ? {} : { codex: ['retained-model'] }}
+            onRetry={noop}
+            onAdd={noop}
+            onEdit={noop}
+            onDelete={noop}
+          />
+          <OAuthModelAliasCard
+            hasLoaded
+            disableControls={false}
+            viewMode="list"
+            onViewModeChange={noop}
+            onRetry={noop}
+            onAdd={noop}
+            onEditProvider={noop}
+            onDeleteProvider={noop}
+            loadState={loadState}
+            modelAlias={empty ? {} : { codex: [{ name: 'source', alias: 'retained-alias' }] }}
+            allProviderModels={{}}
+            onUpdate={noopAsync}
+            onDeleteLink={noop}
+            onToggleFork={noopAsync}
+            onRenameAlias={noopAsync}
+            onDeleteAlias={noop}
+          />
+        </>
+      );
+      act(() => {
+        renderer = create(renderCards(false));
+      });
+      expect(renderText(renderer)).toContain('retained-model');
+      expect(renderText(renderer)).toContain('retained-alias');
+      if (loadState === 'error')
+        expect(renderer.root.findAllByProps({ role: 'alert' })).toHaveLength(2);
+      act(() => {
+        renderer.update(renderCards(true));
+      });
+      expect(renderText(renderer)).toContain('oauth_excluded.list_empty_all');
+      expect(renderText(renderer)).not.toContain('common.loading');
+      act(() => renderer.unmount());
+    }
+  );
+
   it('summarizes, filters and expands disabled-model rules without exposing a danger button', () => {
     let renderer: ReactTestRenderer;
     act(() => {

@@ -3,6 +3,7 @@ package usagearchive
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path"
@@ -13,6 +14,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageevent"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagemonitoring"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagepricing"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageprojection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagerollup"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
@@ -1285,6 +1287,67 @@ func (r *Repository) DeleteBatch(ctx context.Context, runID string, limit int, n
 	if err := rows.Close(); err != nil {
 		return DeleteBatchResult{}, err
 	}
+	if len(candidates) > 0 {
+		// A projection watermark is not proof that every retained row is actually
+		// present. Repair only missing or timestamp-mismatched rows, then prove the
+		// whole bounded batch is retained before any irreversible raw deletion.
+		candidateIDs := make([]int64, len(candidates))
+		for index, candidate := range candidates {
+			candidateIDs[index] = candidate.ID
+		}
+		encodedIDs, err := json.Marshal(candidateIDs)
+		if err != nil {
+			return DeleteBatchResult{}, err
+		}
+		repairRows, err := tx.QueryContext(ctx, `select e.id
+			from usage_events e
+			left join usage_monitoring_event_projection_v1 p on p.event_id = e.id
+			where e.id in (select value from json_each(?))
+				and (p.event_id is null or p.timestamp_ms <> e.timestamp_ms)
+			order by e.id`, string(encodedIDs))
+		if err != nil {
+			return DeleteBatchResult{}, err
+		}
+		repairIDs := make([]int64, 0)
+		for repairRows.Next() {
+			var eventID int64
+			if err := repairRows.Scan(&eventID); err != nil {
+				_ = repairRows.Close()
+				return DeleteBatchResult{}, err
+			}
+			repairIDs = append(repairIDs, eventID)
+		}
+		if err := repairRows.Err(); err != nil {
+			_ = repairRows.Close()
+			return DeleteBatchResult{}, err
+		}
+		if err := repairRows.Close(); err != nil {
+			return DeleteBatchResult{}, err
+		}
+		if len(repairIDs) > 0 {
+			if err := usageprojection.UpsertEventIDs(ctx, tx, repairIDs, nowMS); err != nil {
+				return DeleteBatchResult{}, err
+			}
+		}
+		var rawCount, retainedCount int64
+		if err := tx.QueryRowContext(ctx, `select
+			count(*),
+			coalesce(sum(case when p.event_id is not null and p.timestamp_ms = e.timestamp_ms then 1 else 0 end), 0)
+			from usage_events e
+			left join usage_monitoring_event_projection_v1 p on p.event_id = e.id
+			where e.id in (select value from json_each(?))`, string(encodedIDs)).Scan(&rawCount, &retainedCount); err != nil {
+			return DeleteBatchResult{}, err
+		}
+		if rawCount != int64(len(candidates)) || retainedCount != rawCount {
+			return DeleteBatchResult{}, fmt.Errorf(
+				"%w: retained usage projection handoff raw=%d retained=%d candidates=%d",
+				ErrCoverageIncomplete,
+				rawCount,
+				retainedCount,
+				len(candidates),
+			)
+		}
+	}
 	type dailyDeleted struct{ count, minMS, maxMS int64 }
 	daily := make(map[int64]dailyDeleted)
 	for _, candidate := range candidates {
@@ -1692,8 +1755,26 @@ func validateDeleteCoverage(ctx context.Context, tx *sql.Tx, run Run) error {
 	if err := validateCoverage(ctx, tx, run); err != nil {
 		return err
 	}
-	_, err := validateCurrentDeleteReadiness(ctx, tx, run)
-	return err
+	if _, err := validateCurrentDeleteReadiness(ctx, tx, run); err != nil {
+		return err
+	}
+	// A rollup watermark proves worker progress, not that retained rows from an
+	// interrupted delete are still materialized. Never resume destructive cleanup
+	// if this run has already lost an exact retained projection row.
+	var retainedProjectionIncomplete bool
+	if err := tx.QueryRowContext(ctx, `select exists (
+		select 1
+		from usage_archive_event_refs archived
+		left join usage_monitoring_event_projection_v1 p on p.event_id = archived.raw_event_id
+		where archived.run_id = ? and archived.raw_deleted_at_ms is not null
+			and (p.event_id is null or p.timestamp_ms <> archived.timestamp_ms)
+	)`, run.ID).Scan(&retainedProjectionIncomplete); err != nil {
+		return err
+	}
+	if retainedProjectionIncomplete {
+		return fmt.Errorf("%w: retained usage projection is missing a deleted archive event", ErrCoverageIncomplete)
+	}
+	return nil
 }
 
 type hourlyAggregateCoverageState struct {
@@ -1723,10 +1804,19 @@ func loadHourlyAggregateCoverageState(ctx context.Context, tx *sql.Tx) (hourlyAg
 	return state, nil
 }
 
+func archiveSafeCoverageStatus(status string) bool {
+	switch status {
+	case derivedStatusReady, "catching_up":
+		return true
+	default:
+		return false
+	}
+}
+
 func validateHourlyAggregateCoverage(run Run, state hourlyAggregateCoverageState) error {
 	if state.SchemaVersion != usageaggregate.SchemaVersion ||
 		!usageaggregate.IsCurrentStructureRevision(state.StructureRevision) ||
-		state.Status != derivedStatusReady ||
+		!archiveSafeCoverageStatus(state.Status) ||
 		state.CoverageEventID < run.TargetEventID {
 		return fmt.Errorf(
 			"%w: hourly aggregate coverage=%d target=%d schema=%d revision=%q status=%s",
@@ -1916,7 +2006,7 @@ func validateDerivedCoverage(
 	if actualVersion != expectedVersion ||
 		strings.TrimSpace(actualRevision) == "" ||
 		actualRevision != expectedRevision ||
-		status != derivedStatusReady ||
+		!archiveSafeCoverageStatus(status) ||
 		coverageEventID < targetEventID {
 		return fmt.Errorf(
 			"%w: %s coverage=%d target=%d schema=%d expected_schema=%d revision=%q expected_revision=%q status=%s",

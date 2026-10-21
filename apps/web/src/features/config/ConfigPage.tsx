@@ -65,6 +65,7 @@ const MANAGER_COLLECTOR_DEFAULT = {
 };
 
 const CONFIG_TAB_STORAGE_KEY = 'config-management:tab';
+const YAML_EFFECTIVE_PARSE_OPTIONS = { merge: true } as const;
 
 // eslint-disable-next-line react-refresh/only-export-components
 export function resolveManagerRequestAuthKey({
@@ -315,9 +316,17 @@ const LazyConfigSourceEditor = lazy(() => import('@/components/config/ConfigSour
 
 function readCommercialModeFromYaml(yamlContent: string): boolean {
   try {
-    const parsed = parseYaml(yamlContent);
+    const parsed = parseYaml(yamlContent, YAML_EFFECTIVE_PARSE_OPTIONS);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
-    return Boolean((parsed as Record<string, unknown>)['commercial-mode']);
+    const root = parsed as Record<string, unknown>;
+    const server =
+      root.server && typeof root.server === 'object' && !Array.isArray(root.server)
+        ? (root.server as Record<string, unknown>)
+        : null;
+    if (server && Object.prototype.hasOwnProperty.call(server, 'commercial-mode')) {
+      return Boolean(server['commercial-mode']);
+    }
+    return Boolean(root['commercial-mode']);
   } catch {
     return false;
   }
@@ -340,6 +349,8 @@ export function ConfigPage() {
   const showConfirmation = useNotificationStore((state) => state.showConfirmation);
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
   const managementKey = useAuthStore((state) => state.managementKey);
+  const serverVersion = useAuthStore((state) => state.serverVersion);
+  const serverCommit = useAuthStore((state) => state.serverCommit);
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
   const setUsageServiceConfig = useUsageServiceStore((state) => state.setUsageServiceConfig);
   const isMobile = useMediaQuery('(max-width: 768px)');
@@ -354,7 +365,7 @@ export function ConfigPage() {
     applyVisualChangesToYaml,
     setVisualValues,
     commitApiKeysText,
-  } = useVisualConfig();
+  } = useVisualConfig({ serverVersion, serverCommit });
 
   const [activeTab, setActiveTab] = useState<ConfigEditorTab>(() => {
     const saved = localStorage.getItem(CONFIG_TAB_STORAGE_KEY);

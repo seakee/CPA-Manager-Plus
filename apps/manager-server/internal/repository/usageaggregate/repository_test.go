@@ -313,6 +313,32 @@ func TestCatchUpReaggregatesAcrossRevisionWithoutDoubleCount(t *testing.T) {
 	}
 }
 
+func TestRecordFailureSQLiteBusyDoesNotPoisonAggregateState(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	repo := New(db)
+
+	before, err := repo.State(ctx)
+	if err != nil {
+		t.Fatalf("read aggregate state before sqlite busy: %v", err)
+	}
+	if err := repo.RecordFailure(ctx, errors.New("database is locked (SQLITE_BUSY_SNAPSHOT)"), 10_000); err != nil {
+		t.Fatalf("record aggregate sqlite busy: %v", err)
+	}
+	after, err := repo.State(ctx)
+	if err != nil {
+		t.Fatalf("read aggregate state after sqlite busy: %v", err)
+	}
+	if after.Status != before.Status || after.CoverageEventID != before.CoverageEventID ||
+		after.TargetEventID != before.TargetEventID || after.LastError != before.LastError {
+		t.Fatalf("aggregate state changed after sqlite busy: before=%#v after=%#v", before, after)
+	}
+}
+
 func TestCatchUpPreservesRebuildStateAcrossRecordedFailure(t *testing.T) {
 	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
 	if err != nil {

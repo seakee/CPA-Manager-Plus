@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useAuthStore as useDiscoveryAuthStore } from '@/stores/useAuthStore';
+import { useLayoutEffect, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Card } from '@/components/ui/Card';
@@ -129,6 +130,7 @@ export function AiProvidersGeminiEditPage() {
   const [modelDiscoveryOpen, setModelDiscoveryOpen] = useState(false);
   const [modelDiscoveryEndpoint, setModelDiscoveryEndpoint] = useState('');
   const [discoveredModels, setDiscoveredModels] = useState<ModelInfo[]>([]);
+  const [modelsLoaded, setModelsLoaded] = useState(false);
   const [modelDiscoveryFetching, setModelDiscoveryFetching] = useState(false);
   const [modelDiscoveryError, setModelDiscoveryError] = useState('');
   const [modelDiscoverySearch, setModelDiscoverySearch] = useState('');
@@ -314,8 +316,38 @@ export function AiProvidersGeminiEditPage() {
     [setForm, showNotification, t]
   );
 
+  const discoveryConnection = useDiscoveryAuthStore((state) =>
+    JSON.stringify([state.apiBase, state.managementKey])
+  );
+  const discoveryScope = JSON.stringify([
+    discoveryConnection,
+    modelDiscoveryOpen,
+    editIndex,
+    form.baseUrl,
+    form.apiKey,
+    form.authIndex,
+    form.proxyUrl,
+    buildHeaderObject(form.headers),
+  ]);
+  const activeDiscoveryScopeRef = useRef(discoveryScope);
+  activeDiscoveryScopeRef.current = discoveryScope;
+  useLayoutEffect(() => {
+    modelDiscoveryRequestIdRef.current += 1;
+    setDiscoveredModels([]);
+    setModelsLoaded(false);
+    setModelDiscoveryError('');
+    setModelDiscoveryFetching(false);
+    return () => {
+      modelDiscoveryRequestIdRef.current += 1;
+    };
+  }, [discoveryScope]);
+
   const fetchGeminiModelDiscovery = useCallback(async () => {
     const requestId = (modelDiscoveryRequestIdRef.current += 1);
+    const requestScope = discoveryScope;
+    const isCurrentDiscovery = () =>
+      modelDiscoveryRequestIdRef.current === requestId &&
+      activeDiscoveryScopeRef.current === requestScope;
     setModelDiscoveryFetching(true);
     setModelDiscoveryError('');
     const headerObject = buildHeaderObject(form.headers);
@@ -327,11 +359,12 @@ export function AiProvidersGeminiEditPage() {
         normalizeAuthIndex(form.authIndex) ?? undefined,
         form.proxyUrl
       );
-      if (modelDiscoveryRequestIdRef.current !== requestId) return;
+      if (!isCurrentDiscovery()) return;
       setDiscoveredModels(list);
+      setModelsLoaded(true);
     } catch (err: unknown) {
-      if (modelDiscoveryRequestIdRef.current !== requestId) return;
-      setDiscoveredModels([]);
+      if (!isCurrentDiscovery()) return;
+
       const message = err instanceof Error ? err.message : typeof err === 'string' ? err : '';
       const hasCustomXGoogApiKey = Object.keys(headerObject).some(
         (key) => key.toLowerCase() === 'x-goog-api-key'
@@ -347,11 +380,9 @@ export function AiProvidersGeminiEditPage() {
         : '';
       setModelDiscoveryError(`${t('ai_providers.gemini_models_fetch_error')}: ${message}${diag}`);
     } finally {
-      if (modelDiscoveryRequestIdRef.current === requestId) {
-        setModelDiscoveryFetching(false);
-      }
+      if (isCurrentDiscovery()) setModelDiscoveryFetching(false);
     }
-  }, [form.apiKey, form.authIndex, form.baseUrl, form.headers, form.proxyUrl, t]);
+  }, [discoveryScope, form.apiKey, form.authIndex, form.baseUrl, form.headers, form.proxyUrl, t]);
 
   useEffect(() => {
     if (!modelDiscoveryOpen) {
@@ -363,7 +394,6 @@ export function AiProvidersGeminiEditPage() {
 
     const nextEndpoint = modelsApi.buildGeminiModelsEndpoint(form.baseUrl ?? '');
     setModelDiscoveryEndpoint(nextEndpoint);
-    setDiscoveredModels([]);
     setModelDiscoverySearch('');
     setModelDiscoverySelected(new Set());
     setModelDiscoveryError('');
@@ -827,11 +857,11 @@ export function AiProvidersGeminiEditPage() {
                   </div>
                 )}
                 {modelDiscoveryError && <div className="error-box">{modelDiscoveryError}</div>}
-                {modelDiscoveryFetching ? (
+                {modelDiscoveryFetching && !modelsLoaded ? (
                   <div className={styles.sectionHint}>
                     {t('ai_providers.gemini_models_fetch_loading')}
                   </div>
-                ) : discoveredModels.length === 0 ? (
+                ) : !modelsLoaded ? null : discoveredModels.length === 0 ? (
                   <div className={styles.sectionHint}>
                     {t('ai_providers.gemini_models_fetch_empty')}
                   </div>

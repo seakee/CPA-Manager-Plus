@@ -1,0 +1,16 @@
+🚀 <b>10 月 16 日 · v1.14.7</b>
+
+🛠 <b>后台刷新、配额统计与长窗口延迟优化</b>
+
+• 已加载的凭证、Dashboard、日志、插件、System 与 Usage Analytics 等页面在后台刷新时继续保留当前内容；临时失败不再把页面清空，切换连接或数据作用域时旧数据仍会正确失效。
+• 修复 Antigravity 旧客户端身份导致的额度信息裁剪，恢复 Gemini weekly / 5-hour 等完整 quota bucket。
+• 修复 Codex 5 小时周期切换后首条请求可能漏计的问题，新周期会纳入该请求且不会重复计费。
+• Quota Snapshot 写入不再在热路径读取并排序历史候选，大历史库下减少同步写入开销。
+• 长窗口 latency / TTFT 查询新增覆盖索引；在 320 万条合成数据的预热测试中，30 天原始 SQL 扫描从约 3.77 秒降至约 0.43 秒。
+
+⚠️ <b>升级说明</b>
+
+• 正常升级并重启即可使用所有正确性修复，无数据库 Schema 或配置格式迁移。
+• 已有非空数据库若要获得新的延迟索引收益，需要停 Manager Server 后运行 <code>cleanup-derived</code> 再启动；不执行不会影响正常服务。
+• <code>compact-usage</code> 不能替代 <code>cleanup-derived</code>，执行离线数据库维护前建议先备份。
+• 完整 Muse / Meta 功能的 CPA 兼容基线仍为 <code>v7.3.4+</code>。

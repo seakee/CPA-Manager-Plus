@@ -1,0 +1,14 @@
+🚀 <b>10 月 4 日 · v1.14.3</b>
+
+🛠 <b>归档稳定性、CPA v8 配置与 Safari / iOS 兼容修复</b>
+
+• 修复 Usage Maintenance 已安全覆盖目标范围后，仍可能因瞬时 SQLite <code>BUSY</code> / <code>LOCKED</code> 把派生状态标记失败并反复中断清理的问题；真实失败和覆盖不足继续 fail-closed。
+• 完善 CPA v8 可视化配置兼容，按 canonical path、历史 alias 与 legacy path 的实际优先级读取和写回，并补齐 YAML merge / alias、Management Key 与 Codex 运行时能力边界。
+• 新增多尺寸 <code>favicon.ico</code> 与 180×180 Apple Touch Icon；Full Mode 提供标准根路径资源。
+• 轻量 <code>management.html</code> 继续保持单文件，当前 Safari / iOS 可在根路径不是 CPAMP 图标时切换到内嵌 fallback，无需额外下载静态文件。
+
+⚠️ <b>升级说明</b>
+
+• 无需数据库迁移或 CPAMP 配置变更。
+• 使用自定义同域反代、且需要兼容旧版 Safari / iOS 根路径图标时，可将 <code>/favicon.ico</code> 与 <code>/apple-touch-icon.png</code> 路由到 CPAMP Manager Server。
+• 完整 Muse / Meta 功能的 CPA 基线继续为 <code>v7.3.4+</code>。

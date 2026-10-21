@@ -1,0 +1,15 @@
+🚀 <b>10 月 9 日 · v1.14.5</b>
+
+🛠 <b>Codex 重置状态与无密钥 OpenAI 兼容修复</b>
+
+• 修复 Codex 重置次数在额度刷新后消失或陈旧的问题：低置信度零值不再覆盖已有正向证据，专用详情失败时会保留可信状态并标记为陈旧。
+• 消费 banked reset 后可在一次性额度验证通过时恢复精确匹配的 CPAMP 自有 cooldown；手动禁用和预先禁用凭证仍受保护。
+• 整个 Codex 修复保持事件驱动，不新增 provider polling、后台 reset-credit 队列或周期定时器。
+• OpenAI-compatible 提供商现在可以无需 API Key 保存、测试、发现模型和执行健康检查，不再发送空 Bearer 鉴权。
+• CPA 无法统计无密钥流量时，CPAMP 会显示统计不可用 / 部分可用，而不是把缺失统计当成零请求；Keys Count 也只统计真实非空 Key。
+
+⚠️ <b>升级说明</b>
+
+• 无需数据库迁移或 CPAMP 配置变更。
+• 现有带 Key 的 OpenAI-compatible 配置保持不变；无密钥支持仅作用于 OpenAI-compatible 提供商。
+• 完整 Muse / Meta 功能的 CPA 基线继续为 <code>v7.3.4+</code>。

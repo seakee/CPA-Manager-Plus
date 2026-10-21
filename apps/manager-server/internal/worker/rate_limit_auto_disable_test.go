@@ -1738,7 +1738,89 @@ func TestRateLimitAutoDisableWorkerRejectsDuplicateCodexRecoveryLocator(t *testi
 	}
 }
 
-func TestRateLimitAutoDisableWorkerRecoversLegacyCodexCooldownWithoutIdentityEvidence(t *testing.T) {
+func TestRateLimitAutoDisableWorkerEarlyRecoveryIsEventDriven(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	disabled := true
+	patchCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v0/management/auth-files":
+			_ = json.NewEncoder(w).Encode([]map[string]any{{
+				"id":         "runtime-alice",
+				"name":       "codex-auth.json",
+				"auth_index": "auth-1",
+				"provider":   "codex",
+				"account":    "alice@example.com",
+				"account_id": "workspace-1",
+				"disabled":   disabled,
+			}})
+		case "PATCH /v0/management/auth-files/status":
+			var payload struct {
+				Disabled bool `json:"disabled"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			patchCalls++
+			disabled = payload.Disabled
+			if payload.Disabled {
+				http.Error(w, "expected enable", http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+	if _, err := st.UpsertQuotaCooldown(ctx, store.QuotaCooldownUpsert{
+		AuthFileName:     "codex-auth.json",
+		AuthIndex:        "auth-1",
+		AccountSnapshot:  "alice@example.com",
+		Provider:         "codex",
+		EvidenceJSON:     codexCooldownIdentityEvidenceJSON("workspace-1", "alice@example.com"),
+		RecoverAtMS:      now.Add(time.Hour).UnixMilli(),
+		Owner:            model.QuotaCooldownOwnerUsage429,
+		EventHash:        "evt-early-recovery",
+		PreDisabledState: false,
+		DisabledAtMS:     now.Add(-time.Minute).UnixMilli(),
+	}); err != nil {
+		t.Fatalf("seed cooldown: %v", err)
+	}
+
+	worker := NewRateLimitAutoDisableWorker(st, collectorpkg.RuntimeConfig{
+		CPAUpstreamURL: server.URL,
+		ManagementKey:  "mgmt",
+	})
+	recovered, err := worker.RecoverOwnedCooldown(ctx, "codex-auth.json", "auth-1", "codex")
+	if err != nil {
+		t.Fatalf("early recover: %v", err)
+	}
+	if !recovered {
+		t.Fatal("early recover = false, want true")
+	}
+	if patchCalls != 1 {
+		t.Fatalf("patch calls = %d, want 1", patchCalls)
+	}
+	active, err := st.QuotaCooldowns.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("list active cooldowns: %v", err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("active cooldowns = %#v, want recovered", active)
+	}
+}
+
+func TestRateLimitAutoDisableWorkerEarlyRecoveryRequiresEnabledPostCondition(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -1759,6 +1841,133 @@ func TestRateLimitAutoDisableWorkerRecoversLegacyCodexCooldownWithoutIdentityEvi
 				"disabled":   true,
 			}})
 		case "PATCH /v0/management/auth-files/status":
+			patchCalls++
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+	if _, err := st.UpsertQuotaCooldown(ctx, store.QuotaCooldownUpsert{
+		AuthFileName:     "codex-auth.json",
+		AuthIndex:        "auth-1",
+		AccountSnapshot:  "alice@example.com",
+		Provider:         "codex",
+		EvidenceJSON:     codexCooldownIdentityEvidenceJSON("workspace-1", "alice@example.com"),
+		RecoverAtMS:      now.Add(time.Hour).UnixMilli(),
+		Owner:            model.QuotaCooldownOwnerUsage429,
+		EventHash:        "evt-post-condition",
+		PreDisabledState: false,
+		DisabledAtMS:     now.Add(-time.Minute).UnixMilli(),
+	}); err != nil {
+		t.Fatalf("seed cooldown: %v", err)
+	}
+
+	worker := NewRateLimitAutoDisableWorker(st, collectorpkg.RuntimeConfig{
+		CPAUpstreamURL: server.URL,
+		ManagementKey:  "mgmt",
+	})
+	recovered, err := worker.RecoverOwnedCooldown(ctx, "codex-auth.json", "auth-1", "codex")
+	if err == nil || !strings.Contains(err.Error(), "remains disabled") {
+		t.Fatalf("early recover error = %v, want remains-disabled verification failure", err)
+	}
+	if recovered {
+		t.Fatal("early recover = true, want false when post-condition is not observed")
+	}
+	if patchCalls != 1 {
+		t.Fatalf("patch calls = %d, want 1", patchCalls)
+	}
+	active, err := st.QuotaCooldowns.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("list active cooldowns: %v", err)
+	}
+	if len(active) != 1 || !strings.Contains(active[0].LastError, "remains disabled") {
+		t.Fatalf("active cooldowns = %#v, want retained cooldown with post-condition failure", active)
+	}
+}
+
+func TestRateLimitAutoDisableWorkerEarlyRecoveryDoesNotEnablePreDisabledCredential(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	requestCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCalls++
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+	if _, err := st.UpsertQuotaCooldown(ctx, store.QuotaCooldownUpsert{
+		AuthFileName:     "manual-disabled.json",
+		AuthIndex:        "auth-manual",
+		Provider:         "codex",
+		RecoverAtMS:      now.Add(time.Hour).UnixMilli(),
+		Owner:            model.QuotaCooldownOwnerUsage429,
+		EventHash:        "evt-pre-disabled",
+		PreDisabledState: true,
+		DisabledAtMS:     now.Add(-time.Minute).UnixMilli(),
+	}); err != nil {
+		t.Fatalf("seed cooldown: %v", err)
+	}
+
+	worker := NewRateLimitAutoDisableWorker(st, collectorpkg.RuntimeConfig{
+		CPAUpstreamURL: server.URL,
+		ManagementKey:  "mgmt",
+	})
+	recovered, err := worker.RecoverOwnedCooldown(
+		ctx,
+		"manual-disabled.json",
+		"auth-manual",
+		"codex",
+	)
+	if err != nil {
+		t.Fatalf("early recover: %v", err)
+	}
+	if recovered {
+		t.Fatal("early recover = true, want false for pre-disabled credential")
+	}
+	if requestCalls != 0 {
+		t.Fatalf("provider/CPA requests = %d, want 0", requestCalls)
+	}
+	active, err := st.QuotaCooldowns.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("list active cooldowns: %v", err)
+	}
+	if len(active) != 1 {
+		t.Fatalf("active cooldowns = %#v, want manual/pre-disabled cooldown untouched", active)
+	}
+}
+
+func TestRateLimitAutoDisableWorkerRecoversLegacyCodexCooldownWithoutIdentityEvidence(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	disabled := true
+	patchCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v0/management/auth-files":
+			_ = json.NewEncoder(w).Encode([]map[string]any{{
+				"id":         "runtime-alice",
+				"name":       "codex-auth.json",
+				"auth_index": "auth-1",
+				"provider":   "codex",
+				"account":    "alice@example.com",
+				"account_id": "workspace-1",
+				"disabled":   disabled,
+			}})
+		case "PATCH /v0/management/auth-files/status":
 			var payload struct {
 				Disabled bool `json:"disabled"`
 			}
@@ -1767,6 +1976,7 @@ func TestRateLimitAutoDisableWorkerRecoversLegacyCodexCooldownWithoutIdentityEvi
 				return
 			}
 			patchCalls++
+			disabled = payload.Disabled
 			if payload.Disabled {
 				http.Error(w, "expected enable", http.StatusBadRequest)
 				return

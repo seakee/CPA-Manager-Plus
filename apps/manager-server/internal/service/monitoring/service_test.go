@@ -2249,7 +2249,7 @@ func TestAccountHistoryReturnsRollupTotalsAndCost(t *testing.T) {
 	if history.SuccessRate == nil || math.Abs(*history.SuccessRate-0.5) > 0.000001 {
 		t.Fatalf("success rate = %#v", history.SuccessRate)
 	}
-	if math.Abs(history.TotalCost-2.055) > 0.000001 {
+	if history.TotalCost == nil || math.Abs(*history.TotalCost-2.055) > 0.000001 {
 		t.Fatalf("total cost = %v", history.TotalCost)
 	}
 	if history.FirstSeenMS == nil || *history.FirstSeenMS != baseMS+1_000 || history.LastSeenMS == nil || *history.LastSeenMS != baseMS+2_000 {
@@ -2477,7 +2477,7 @@ func TestAccountHistoryPricesContextTierBands(t *testing.T) {
 		t.Fatalf("history item = %#v", resp.Items)
 	}
 	const wantCost = 4.60002
-	if math.Abs(resp.Items[0].TotalCost-wantCost) > 0.000001 {
+	if resp.Items[0].TotalCost == nil || math.Abs(*resp.Items[0].TotalCost-wantCost) > 0.000001 {
 		t.Fatalf("history cost = %v, want %v", resp.Items[0].TotalCost, wantCost)
 	}
 }
@@ -4111,6 +4111,80 @@ func TestAnalyticsReportsActualDerivedReaderFallbacksAfterArchivedDeletion(t *te
 		!slices.Contains(response.Coverage.FidelityLimitations, "identity_metrics_require_raw_events") ||
 		!slices.Contains(response.Coverage.FidelityLimitations, "filter_options_require_raw_events") {
 		t.Fatalf("fallback coverage = %#v", response.Coverage)
+	}
+}
+
+func TestAnalyticsPartialArchivedEdgeRepairsMissingProjectionBeforeDelete(t *testing.T) {
+	sqlDB, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open partial-edge store: %v", err)
+	}
+	db := store.New(sqlDB)
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+	ctx := context.Background()
+	fromMS := time.Date(2026, time.August, 2, 0, 0, 0, 0, time.UTC).UnixMilli()
+	hour := time.Hour.Milliseconds()
+	events := []usage.Event{
+		monitoringEvent("partial-edge-before-range", fromMS+1_000, "gpt-a", "auth-1", "src-1", false, 10, 2, 0, 0, 12, nil),
+		monitoringEvent("partial-edge-in-range", fromMS+2_000, "gpt-a", "auth-1", "src-1", false, 20, 3, 0, 0, 23, nil),
+		monitoringEvent("partial-edge-online", fromMS+hour+1_000, "gpt-a", "auth-1", "src-1", false, 30, 4, 0, 0, 34, nil),
+	}
+	if _, err := db.InsertEvents(ctx, events); err != nil {
+		t.Fatalf("insert partial-edge events: %v", err)
+	}
+	catchUpMonitoringArchiveDeleteReadiness(t, ctx, db)
+
+	missingHash := testCanonicalHash("partial-edge-in-range")
+	if _, err := sqlDB.ExecContext(ctx, `delete from usage_monitoring_event_projection_v1
+		where event_id = (select id from usage_events where event_hash = ?)`, missingHash); err != nil {
+		t.Fatalf("remove partial-edge projection fixture: %v", err)
+	}
+	var projectionStatus string
+	var projectionCoverage, projectionTarget int64
+	if err := sqlDB.QueryRowContext(ctx, `select status, coverage_event_id, target_event_id
+		from usage_monitoring_rollup_state where rollup_name = 'projection_v1'`).Scan(
+		&projectionStatus,
+		&projectionCoverage,
+		&projectionTarget,
+	); err != nil {
+		t.Fatalf("read projection state: %v", err)
+	}
+	if projectionStatus != "ready" || projectionCoverage < projectionTarget {
+		t.Fatalf("projection state no longer reproduces healthy watermark: status=%s coverage=%d target=%d",
+			projectionStatus, projectionCoverage, projectionTarget)
+	}
+
+	archiveMonitoringEventsThrough(t, ctx, db, fromMS+hour)
+
+	response, err := New(db, true).Analytics(ctx, Request{
+		FromMS: fromMS + 1_500,
+		ToMS:   fromMS + 2*hour,
+		Include: Include{
+			Summary:        true,
+			SummaryProfile: "compact",
+			Granularity:    "hour",
+		},
+	})
+	if err != nil {
+		t.Fatalf("partial archived edge analytics: %v", err)
+	}
+	if response.Summary == nil || response.Summary.TotalCalls != 2 {
+		t.Fatalf("partial archived edge summary = %#v, want 2 calls", response.Summary)
+	}
+	if response.Coverage == nil || response.Coverage.RawDeletedEventCount != 1 || response.Coverage.RawEventCount != 1 {
+		t.Fatalf("partial archived edge coverage = %#v", response.Coverage)
+	}
+	var retainedCount int64
+	if err := sqlDB.QueryRowContext(ctx, `select count(*)
+		from usage_monitoring_event_projection_v1
+		where event_id = (select raw_event_id from usage_archive_event_refs where event_hash = ?)
+			and timestamp_ms = ?`, missingHash, fromMS+2_000).Scan(&retainedCount); err != nil {
+		t.Fatalf("read repaired partial-edge projection: %v", err)
+	}
+	if retainedCount != 1 {
+		t.Fatalf("repaired partial-edge projection count = %d, want 1", retainedCount)
 	}
 }
 

@@ -107,6 +107,9 @@ jobs:
       - name: Check demo isolation
         run: npm run check:demo-isolation
 
+      - name: Check web icon artifact
+        run: npm run check:web-icons
+
   manager-server:
     name: Manager Server
     needs: changes

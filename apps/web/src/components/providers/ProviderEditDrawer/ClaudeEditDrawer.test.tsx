@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   updateClaudeConfig: vi.fn(),
   createClaudeConfig: vi.fn(),
   readBack: vi.fn(),
+  apiCallRequest: vi.fn(),
 }));
 
 vi.mock('react-i18next', () => ({
@@ -72,7 +73,7 @@ vi.mock('@/services/api', async () => {
       buildClaudeModelsEndpoint: vi.fn(() => ''),
     },
     apiCallApi: {
-      request: vi.fn(),
+      request: mocks.apiCallRequest,
     },
     getApiCallErrorMessage: () => '',
   };
@@ -136,6 +137,48 @@ describe('ClaudeEditDrawer fingerprint save verification', () => {
     };
     mocks.fetchConfig.mockResolvedValue(mocks.config.claudeApiKeys);
     mocks.updateClaudeConfig.mockResolvedValue(undefined);
+  });
+
+  it('passes the current provider proxy to the Claude connectivity probe', async () => {
+    mocks.config = {
+      claudeApiKeys: [
+        {
+          apiKey: 'key',
+          baseUrl: 'https://gateway.example.com',
+          proxyUrl: 'socks5://provider-proxy.example:1080',
+          models: [{ name: 'claude-test', alias: 'claude-test' }],
+        },
+      ],
+    };
+    mocks.fetchConfig.mockResolvedValue(mocks.config.claudeApiKeys);
+    mocks.apiCallRequest.mockResolvedValue({
+      statusCode: 200,
+      hasStatusCode: true,
+      header: {},
+      bodyText: '{}',
+      body: {},
+    });
+
+    const renderer = await renderDrawer();
+    const testButton = renderer.root.find(
+      (node) =>
+        node.props?.onClick && node.props?.children === 'ai_providers.claude_test_action'
+    );
+
+    await act(async () => {
+      await testButton.props.onClick();
+    });
+    await flush();
+
+    expect(mocks.apiCallRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        authIndex: undefined,
+        proxyUrl: 'socks5://provider-proxy.example:1080',
+        url: 'https://gateway.example.com/v1/messages',
+        header: expect.objectContaining({ Authorization: 'Bearer key' }),
+      }),
+      { timeout: 30_000 }
+    );
   });
 
   it('saves the fingerprint, verifies against the persisted raw /config, and closes as committed', async () => {
