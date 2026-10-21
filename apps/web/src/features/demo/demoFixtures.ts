@@ -7764,6 +7764,22 @@ export const getDemoApiCallResult = (payload: DemoApiCallPayload = {}) => {
         ],
       };
     }
+  } else if (requestUrl.includes('cli-chat-proxy.grok.com/v1/user?include=subscription')) {
+    if (isXaiExpired) {
+      statusCode = 401;
+      body = { error: 'Expired demo credential' };
+    } else {
+      body = { subscriptionTier: authIndex === 'xai-ops-01' ? 'Free' : 'SuperGrokPro' };
+    }
+  } else if (requestUrl.includes('cli-chat-proxy.grok.com/v1/settings')) {
+    if (isXaiExpired) {
+      statusCode = 401;
+      body = { error: 'Expired demo credential' };
+    } else {
+      body = {
+        subscription_tier_display: authIndex === 'xai-ops-01' ? 'Free' : 'SuperGrok Heavy',
+      };
+    }
   } else if (requestUrl.includes('/billing?format=credits')) {
     body = {
       config: {

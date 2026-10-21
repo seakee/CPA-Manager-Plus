@@ -1579,6 +1579,8 @@
     "health_reason_available": "額度 · 關鍵視窗正常",
     "health_reason_available_request": "請求 · 最近呼叫成功",
     "health_reason_raw": "無訊號 · 等待刷新",
+    "health_reason_xai_plan_unknown": "方案未識別 · 已有額度資料",
+    "health_reason_xai_quota_unconfirmed": "已取得額度 · 目前可用性待確認",
     "health_tip_reauth": "巡檢或最近請求提示認證失效。詳情：{{detail}}",
     "health_tip_five_hour_cooldown": "5H 額度進入冷卻，恢復時間：{{recoverAt}}。視窗重置：{{resetAt}}",
     "health_tip_weekly_cooldown": "週額度進入冷卻，恢復時間：{{recoverAt}}。視窗重置：{{resetAt}}",

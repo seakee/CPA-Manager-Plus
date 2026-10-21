@@ -1257,18 +1257,42 @@ export const buildAccountListItem = (
       : row.provider === 'xai' && !isConfirmedPaidXaiPlan(row.planType)
         ? []
         : quotaWindows;
-  const health = resolveHealthStatus(
+  const resolvedHealth = resolveHealthStatus(
     row,
     quotaCooldown,
     options.codexStatus ?? null,
     accountQuotaWindows,
     options.requestEvidence
   );
+  const health =
+    resolvedHealth.status === 'raw' &&
+    row.provider === 'xai' &&
+    quotaWindows.length > 0
+      ? {
+          ...resolvedHealth,
+          reasonKey: row.planType
+            ? 'accounts.health_reason_xai_quota_unconfirmed'
+            : 'accounts.health_reason_xai_plan_unknown',
+          tooltipKey: row.planType
+            ? 'accounts.health_reason_xai_quota_unconfirmed'
+            : 'accounts.health_reason_xai_plan_unknown',
+        }
+      : resolvedHealth;
   const planPresentation = getPlanPresentation({
     provider: row.provider,
     planType: row.planType,
     t: options.t,
   });
+  // Informational windows may be displayed without becoming health evidence.
+  const observedXaiWindow =
+    row.provider === 'xai' && row.quota.status === 'unknown' &&
+    !isConfirmedPaidXaiPlan(row.planType) && row.quota.remainingPercent === null
+      ? quotaWindows
+          .filter((window) =>
+            typeof window.remainingPercent === 'number' && Number.isFinite(window.remainingPercent)
+          )
+          .sort((a, b) => a.remainingPercent! - b.remainingPercent!)[0]
+      : undefined;
 
   return {
     identity: {
@@ -1295,11 +1319,11 @@ export const buildAccountListItem = (
       observedAtMs: health.observedAtMs ?? null,
     },
     quota: {
-      remainingPercent: row.quota.remainingPercent,
-      usedPercent: row.quota.usedPercent,
-      resetLabel: row.quota.resetLabel,
-      resetAtMs: row.quota.resetAtMs,
-      resetAccuracy: row.quota.resetAccuracy,
+      remainingPercent: row.quota.remainingPercent ?? observedXaiWindow?.remainingPercent ?? null,
+      usedPercent: row.quota.usedPercent ?? observedXaiWindow?.usedPercent ?? null,
+      resetLabel: observedXaiWindow?.resetLabel ?? row.quota.resetLabel,
+      resetAtMs: observedXaiWindow?.resetAtMs ?? row.quota.resetAtMs,
+      resetAccuracy: observedXaiWindow?.resetAccuracy ?? row.quota.resetAccuracy,
       statusLabelKey: quotaStatusLabelKey(row.quota.status),
       sourceShortLabelKey: quotaSourceShortLabelKey(row.quota.source),
     },

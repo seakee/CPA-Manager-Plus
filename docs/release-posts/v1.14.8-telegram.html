@@ -1,0 +1,22 @@
+<b>10 月 21 日 · v1.14.8</b>
+
+<b>凭证刷新、来源识别与配额展示修复</b>
+
+• 凭证历史、配额使用量、Usage Analytics 及模型价格表在同一作用域内后台刷新时保留已有内容；临时请求失败不再清空已加载数据。
+• 替换凭证后不会继续使用原凭证的历史与配额信息，其他未变化的凭证保持正常。
+• 修复不同提供商共用 API Key 时实时监控来源可能误归属的问题，无法可靠识别时保持未知，不猜测来源。
+• Antigravity 主要配额窗口最多显示五项，包括 Gemini 4 Argon；区分真实空用量与未知、过期、获取失败状态。
+• xAI OAuth 凭证缺少订阅信息时，通过 CPA 既有接口后台查询；确认后显示 SuperGrok Heavy，无法确认计划时仍展示已观察到的配额。
+
+<b>升级说明</b>
+
+• 从 v1.14.7 正常升级并重启即可，无数据库或配置迁移。
+• xAI 订阅补充取决于 CPA 与上游订阅接口是否可用，不影响已获取配额的展示。
+• 完整 Muse / Meta 功能的最低 CPA 兼容版本仍为 <code>v7.3.4+</code>。
+
+🤝 <b>致谢</b>
+
+• <a href="https://github.com/M1nt-Ch0c0">@M1nt-Ch0c0</a> - 修复 xAI OAuth 订阅计划识别，补充后台查询并保留计划未知时的配额展示。
+• <a href="https://github.com/imrooki">@imrooki</a> - 修复 Antigravity 配额窗口显示不完整及模型用量空状态识别。
+
+<a href="https://github.com/seakee/CPA-Manager-Plus/releases/tag/v1.14.8">GitHub Release</a>

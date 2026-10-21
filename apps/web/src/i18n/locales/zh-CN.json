@@ -1579,6 +1579,8 @@
     "health_reason_available": "配额 · 关键窗口正常",
     "health_reason_available_request": "请求 · 最近调用成功",
     "health_reason_raw": "无信号 · 等待刷新",
+    "health_reason_xai_plan_unknown": "套餐未识别 · 已有额度数据",
+    "health_reason_xai_quota_unconfirmed": "已获取额度 · 当前可用性待确认",
     "health_tip_reauth": "巡检或最近请求提示认证失效。详情：{{detail}}",
     "health_tip_five_hour_cooldown": "5H 配额进入冷却，恢复时间：{{recoverAt}}。窗口重置：{{resetAt}}",
     "health_tip_weekly_cooldown": "周配额进入冷却，恢复时间：{{recoverAt}}。窗口重置：{{resetAt}}",

@@ -97,7 +97,26 @@ export const refreshQuotaWithConfig = async <TState, TData>({
         };
       });
     });
-    return committed ? { status: 'success', data, state } : null;
+    if (!committed) return null;
+    if (config.enrichState && isRefreshCurrent()) {
+      const publishedState = state;
+      // Publish quota immediately; optional subscription metadata must not delay it.
+      void config
+        .enrichState(file, publishedState, requestScope, context)
+        .then((enrichedState) => {
+          if (enrichedState === publishedState) return;
+          commitIfRefreshCurrent(() => {
+            setQuota((previous) => {
+              if (previous[storeKey] !== publishedState) return previous;
+              return { ...previous, [storeKey]: enrichedState };
+            });
+          });
+        })
+        .catch(() => {
+          // Keep the successful snapshot on optional metadata failures.
+        });
+    }
+    return { status: 'success', data, state };
   } catch (error: unknown) {
     if (!isRefreshCurrent()) return null;
     const message = error instanceof Error ? error.message : t('common.unknown_error');

@@ -1040,7 +1040,8 @@ const buildOverviewCapacity = (
   return {
     kind: 'percent',
     statusLabelKey: listItem.quota.statusLabelKey,
-    remainingPercent: row.quota.remainingPercent,
+    remainingPercent: row.quota.remainingPercent ??
+      (row.provider === 'xai' ? quotaWindow?.remainingPercent ?? null : null),
     availableGroupCount: null,
     totalGroupCount: null,
     hasData: hasQuotaData,
@@ -1434,7 +1435,9 @@ export const buildAccountDetailViewModel = (
     recommendation,
     quotaCooldown,
     codexStatus: options.codexStatus ?? null,
-    quotaWindows: accountQuotaWindows,
+    // The list model filters entitlement evidence itself, but also needs the
+    // observed windows to explain why availability remains unconfirmed.
+    quotaWindows: row.provider === 'xai' ? quotaWindows : accountQuotaWindows,
     requestEvidence,
   });
   const value = buildValueSummary(row, options.valueRow);
@@ -1466,7 +1469,11 @@ export const buildAccountDetailViewModel = (
   const overviewDecision = buildOverviewDecision(row, listItem, quotaCooldown);
   const overview = {
     decision: overviewDecision,
-    capacity: buildOverviewCapacity(row, accountQuotaWindows, listItem),
+    capacity: buildOverviewCapacity(
+      row,
+      row.provider === 'xai' ? quotaWindows : accountQuotaWindows,
+      listItem
+    ),
     credential: buildOverviewCredential(row, options.codexQuota, options.t),
     recentStatus: buildOverviewRecentStatus(
       row,

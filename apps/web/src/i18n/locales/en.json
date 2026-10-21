@@ -1581,6 +1581,8 @@
     "health_reason_available": "Quota · Key windows normal",
     "health_reason_available_request": "Request · Latest call succeeded",
     "health_reason_raw": "No signal · Waiting for refresh",
+    "health_reason_xai_plan_unknown": "Plan unrecognized · Quota data available",
+    "health_reason_xai_quota_unconfirmed": "Quota data available · Availability unconfirmed",
     "health_tip_reauth": "Inspection or recent requests indicate authentication is invalid. Detail: {{detail}}",
     "health_tip_five_hour_cooldown": "The 5H quota is in cooldown. Recovers at {{recoverAt}}. Window reset: {{resetAt}}",
     "health_tip_weekly_cooldown": "The weekly quota is in cooldown. Recovers at {{recoverAt}}. Window reset: {{resetAt}}",

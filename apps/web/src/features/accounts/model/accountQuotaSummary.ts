@@ -608,6 +608,20 @@ export const hasConfirmedXaiBillingEntitlement = (
   return isConfirmedPaidXaiPlan(planType);
 };
 
+// A failed refresh keeps the previous billing snapshot, so its subscription
+// evidence must still take precedence over older auth-file metadata.
+const resolveXaiQuotaPlanType = (
+  quota: XaiQuotaState,
+  file: AuthFileItem,
+  filePlanType: string | null
+): string | null => {
+  const subscription = quota.billing?.subscription;
+  if (subscription && subscription.observedAtMs >= (readAuthFileCredentialRefreshAtMs(file) ?? 0)) {
+    return subscription.observedAtMs >= (quota.fetchedAtMs ?? 0) ? subscription.planType : null;
+  }
+  return quota.billing?.subscriptionSuperseded ? null : filePlanType;
+};
+
 const quotaFromXaiBilling = (
   billing: XaiBillingSummary | null | undefined,
   planType: string | null,
@@ -1095,9 +1109,10 @@ export const resolveAccountQuota = (
     const quota = getCredentialScopedQuotaState(stores.xaiQuota, file);
     if (!quota) return emptyQuota(filePlanType);
     if (quota.status === 'loading') return loadingQuota(filePlanType);
+    const planType = resolveXaiQuotaPlanType(quota, file, filePlanType);
     if (quota.status === 'error')
-      return quotaFromError(quota.error, filePlanType, quota.errorStatus, quota.failedAtMs);
-    return quotaFromXaiBilling(quota.billing, filePlanType, {
+      return quotaFromError(quota.error, planType, quota.errorStatus, quota.failedAtMs);
+    return quotaFromXaiBilling(quota.billing, planType, {
       fetchedAtMs: quota.fetchedAtMs,
     });
   }

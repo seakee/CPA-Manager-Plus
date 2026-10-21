@@ -1585,6 +1585,8 @@
     "health_reason_available": "Квота · ключевые окна в норме",
     "health_reason_available_request": "Запрос · последний вызов успешен",
     "health_reason_raw": "Нет сигнала · ожидание обновления",
+    "health_reason_xai_plan_unknown": "Тариф не определён · данные квоты получены",
+    "health_reason_xai_quota_unconfirmed": "Данные квоты получены · доступность не подтверждена",
     "health_tip_reauth": "Проверка или последние запросы показывают недействительную авторизацию. Детали: {{detail}}",
     "health_tip_five_hour_cooldown": "5H-квота в cooldown. Восстановится в {{recoverAt}}. Сброс окна: {{resetAt}}",
     "health_tip_weekly_cooldown": "Недельная квота в cooldown. Восстановится в {{recoverAt}}. Сброс окна: {{resetAt}}",
