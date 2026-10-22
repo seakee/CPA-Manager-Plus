@@ -3,7 +3,7 @@ module github.com/seakee/cpa-manager-plus/apps/manager-server
 go 1.26.10
 
 require (
-	golang.org/x/sys v0.44.0
+	golang.org/x/sys v0.49.0
 	modernc.org/sqlite v1.46.1
 )
 
