@@ -39,3 +39,15 @@ Model requests must go to CPA, not CPAMP. For same-domain routing, see [Reverse 
 Model prices affect CPAMP local cost estimates only. They do not change CPA routing or provider billing.
 
 :::
+
+### xAI weekly periods with zero usage
+
+Some unified-billing accounts omit `creditUsagePercent` when usage is zero or rounds to zero.
+The panel and server inspection accept an implicit 0% used only when settings confirm SuperGrok / SuperGrok Heavy
+and a complete, successful gRPC billing response from the same credential matches the active REST weekly period.
+The existing remaining-quota display then shows 100%. This does not prove that no tokens were consumed
+and cannot be converted into a remaining token count.
+
+REST period metadata alone, Free / unconfirmed plans, and expired or incomplete responses remain unknown (`-`).
+The optional reads use the existing CPA management proxy, add at most six seconds, and never turn an enrichment failure
+into an account health failure or an automatic account action.
