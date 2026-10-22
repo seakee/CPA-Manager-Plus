@@ -8,7 +8,7 @@ COPY apps/web ./apps/web
 WORKDIR /app/apps/web
 RUN VERSION=$VERSION npm run build
 
-FROM --platform=$BUILDPLATFORM golang:1.26.10-alpine AS service-build
+FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine AS service-build
 ARG VERSION=dev
 ARG SOURCE_COMMIT=unknown
 ARG TARGETOS
