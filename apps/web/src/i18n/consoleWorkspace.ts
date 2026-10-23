@@ -190,8 +190,7 @@ const ru: typeof en = {
   preferences: 'Настройки',
   stored: 'Сохранено Manager',
 };
-export function workspaceText(key: keyof typeof en): string {
-  const language = fullWebLanguage();
+export function workspaceText(key: keyof typeof en, language = fullWebLanguage()): string {
   return (language === 'zh-TW' ? tw : language === 'ru' ? ru : language.startsWith('zh') ? zh : en)[
     key
   ];

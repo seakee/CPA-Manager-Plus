@@ -178,4 +178,31 @@ describe('Fresh resources within the original Console', () => {
     expect(node('retry-operation-id').props.children).toBe(originalId);
     expect(transport.mock.calls.filter(([, init]) => init?.method === 'PUT')).toHaveLength(1);
   });
+
+  it('mounts gateway workspace on /console/gateway with preserved retained state', async () => {
+    const transport = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        field: 'routing.retry.request-retry',
+        presence: 'present',
+        value: 3,
+        source: 'private-embedded-cpa-v8.0.13',
+        authority: 'host-runtime',
+        editable: true,
+        reason: '',
+        persisted: 'persisted',
+        effective: 'unknown',
+        concurrentProtection: 'host-exclusive-runtime-reservation',
+        expected: {
+          sourceId: 'private-source',
+          generation: 'gen-1',
+          revision: 1,
+          sha256: 'a'.repeat(64),
+        },
+      })
+    );
+    await mount(transport);
+    await navigate('/console/gateway');
+    expect(panel('retry').props.hidden).toBe(false);
+    expect(renderer.root.findByProps({ 'data-testid': 'fresh-gateway-workspace' })).toBeDefined();
+  });
 });

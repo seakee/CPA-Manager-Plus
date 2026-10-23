@@ -1,10 +1,11 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fullWebText as t } from '../i18n/fullweb';
+import i18n from '../i18n';
 import { FreshRetryConfiguration } from './FreshRetryConfiguration';
 import { createPublicApiClient } from './publicApi';
 
 const context = { basePath: '/console', apiBase: '/console/api/v2', revision: 1 };
+const t = (key: string) => i18n.t('fullweb.' + key);
 const expected = {
   sourceId: 'isolated-source-1234',
   generation: '7',

@@ -232,6 +232,7 @@ const mainRoutes: RouteObject[] = [
   { path: '/plugin-store/*', element: <Navigate to="/plugins?tab=store" replace /> },
   { path: '/plugin-pages/*', element: <Navigate to="/" replace /> },
   { path: '/config', element: <ConfigPage /> },
+  { path: '/gateway', element: <ConfigPage /> },
   {
     path: '/logs',
     element: (

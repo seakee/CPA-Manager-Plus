@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { configurationText } from '@/i18n/configurationWorkspace';
 import { Link } from 'react-router-dom';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -58,11 +59,23 @@ const MODEL_CATEGORY_ICONS: Record<string, string | { light: string; dark: strin
 
 const DATABASE_STATUS_REFRESH_INTERVAL_MS = 60_000;
 
-export function SystemPage({ logoutDisabled = false }: { logoutDisabled?: boolean } = {}) {
+export function SystemPage({
+  logoutDisabled = false,
+  hasUnsavedChanges = false,
+  workspace,
+}: {
+  logoutDisabled?: boolean;
+  hasUnsavedChanges?: boolean;
+  workspace?: React.ReactNode;
+} = {}) {
   const { t, i18n } = useTranslation();
   const { showNotification, showConfirmation } = useNotificationStore();
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
   const auth = useAuthStore();
+  const logoutBlockedRef = useRef(logoutDisabled);
+  useEffect(() => {
+    logoutBlockedRef.current = logoutDisabled;
+  }, [logoutDisabled]);
   const featureAvailability = usePanelFeatureAvailability();
   const updates = useManagerUpdates();
   const config = useConfigStore((state) => state.config);
@@ -246,10 +259,13 @@ export function SystemPage({ logoutDisabled = false }: { logoutDisabled?: boolea
     if (logoutDisabled) return;
     showConfirmation({
       title: t('system_info.clear_login_title', { defaultValue: 'Clear Login Storage' }),
-      message: t('system_info.clear_login_confirm'),
+      message:
+        t('system_info.clear_login_confirm') +
+        (hasUnsavedChanges ? '\n' + configurationText('leaveHelp') : ''),
       variant: 'danger',
       confirmText: t('common.confirm'),
       onConfirm: () => {
+        if (logoutBlockedRef.current) return;
         auth.logout();
         if (typeof localStorage === 'undefined') return;
         const keysToRemove = [
@@ -291,151 +307,158 @@ export function SystemPage({ logoutDisabled = false }: { logoutDisabled?: boolea
   }, [featureAvailability.managerServiceAvailable, refreshDatabaseStatus]);
 
   useHeaderRefresh(refreshDatabaseStatus, featureAvailability.managerServiceAvailable);
+  const InformationContainer = workspace ? 'details' : 'div';
 
   return (
     <div className={styles.container}>
-      <div className={styles.content}>
-        <Card
-          title={t('system_info.quick_links_title')}
-          extra={
-            updates.available && (
-              <Link to="/system/updates" className="btn btn-secondary btn-sm">
-                <IconArrowUpFromLine size={16} aria-hidden="true" />
-                {t('manager_updates.title')}
-              </Link>
-            )
-          }
-        >
-          <p className={styles.sectionDescription}>{t('system_info.quick_links_desc')}</p>
-          <div className={styles.quickLinks}>
-            <a
-              href="https://github.com/router-for-me/CLIProxyAPI"
-              target="_blank"
-              rel="noopener noreferrer"
-              className={styles.linkCard}
-            >
-              <div className={`${styles.linkIcon} ${styles.github}`}>
-                <IconGithub size={22} />
-              </div>
-              <div className={styles.linkContent}>
-                <div className={styles.linkTitle}>
-                  {t('system_info.link_main_repo')}
-                  <IconExternalLink size={14} />
+      {workspace && <div style={{ marginBottom: '24px' }}>{workspace}</div>}
+      <InformationContainer className={workspace ? 'system-additional-info' : undefined}>
+        {workspace && <summary>{configurationText('additionalInfo')}</summary>}
+        <div className={styles.content}>
+          <Card
+            title={t('system_info.quick_links_title')}
+            extra={
+              updates.available && (
+                <Link to="/system/updates" className="btn btn-secondary btn-sm">
+                  <IconArrowUpFromLine size={16} aria-hidden="true" />
+                  {t('manager_updates.title')}
+                </Link>
+              )
+            }
+          >
+            <p className={styles.sectionDescription}>{t('system_info.quick_links_desc')}</p>
+            <div className={styles.quickLinks}>
+              <a
+                href="https://github.com/router-for-me/CLIProxyAPI"
+                target="_blank"
+                rel="noopener noreferrer"
+                className={styles.linkCard}
+              >
+                <div className={`${styles.linkIcon} ${styles.github}`}>
+                  <IconGithub size={22} />
                 </div>
-                <div className={styles.linkDesc}>{t('system_info.link_main_repo_desc')}</div>
-              </div>
-            </a>
-
-            <a
-              href="https://github.com/seakee/CPA-Manager-Plus"
-              target="_blank"
-              rel="noopener noreferrer"
-              className={styles.linkCard}
-            >
-              <div className={`${styles.linkIcon} ${styles.github}`}>
-                <IconCode size={22} />
-              </div>
-              <div className={styles.linkContent}>
-                <div className={styles.linkTitle}>
-                  {t('system_info.link_webui_repo')}
-                  <IconExternalLink size={14} />
-                </div>
-                <div className={styles.linkDesc}>{t('system_info.link_webui_repo_desc')}</div>
-              </div>
-            </a>
-
-            <a
-              href="https://seakee.github.io/CPA-Manager-Plus/docs/"
-              target="_blank"
-              rel="noopener noreferrer"
-              className={styles.linkCard}
-            >
-              <div className={`${styles.linkIcon} ${styles.docs}`}>
-                <IconBookOpen size={22} />
-              </div>
-              <div className={styles.linkContent}>
-                <div className={styles.linkTitle}>
-                  {t('system_info.link_docs')}
-                  <IconExternalLink size={14} />
-                </div>
-                <div className={styles.linkDesc}>{t('system_info.link_docs_desc')}</div>
-              </div>
-            </a>
-          </div>
-        </Card>
-
-        {featureAvailability.managerServiceAvailable && (
-          <DatabaseStatusCard
-            status={databaseStatus}
-            loading={databaseLoading}
-            error={databaseError}
-          />
-        )}
-
-        <Card
-          title={t('system_info.models_title')}
-          extra={
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => fetchModels({ forceRefresh: true })}
-              loading={modelsLoading}
-            >
-              {t('common.refresh')}
-            </Button>
-          }
-        >
-          <p className={styles.sectionDescription}>{t('system_info.models_desc')}</p>
-          {modelStatus && (
-            <div className={`status-badge ${modelStatus.type}`}>{modelStatus.message}</div>
-          )}
-          {modelsLoading ? (
-            <div className="hint">{t('common.loading')}</div>
-          ) : models.length === 0 ? (
-            <div className="hint">{t('system_info.models_empty')}</div>
-          ) : (
-            <div className="item-list">
-              {groupedModels.map((group) => {
-                const iconSrc = getIconForCategory(group.id);
-                return (
-                  <div key={group.id} className="item-row">
-                    <div className="item-meta">
-                      <div className={styles.groupTitle}>
-                        {iconSrc && <img src={iconSrc} alt="" className={styles.groupIcon} />}
-                        <span className="item-title">{group.label}</span>
-                      </div>
-                      <div className="item-subtitle">
-                        {t('system_info.models_count', { count: group.items.length })}
-                      </div>
-                    </div>
-                    <div className={styles.modelTags}>
-                      {group.items.map((model) => (
-                        <span
-                          key={`${model.name}-${model.alias ?? 'default'}`}
-                          className={styles.modelTag}
-                          title={model.description || ''}
-                        >
-                          <span className={styles.modelName}>{model.name}</span>
-                          {model.alias && <span className={styles.modelAlias}>{model.alias}</span>}
-                        </span>
-                      ))}
-                    </div>
+                <div className={styles.linkContent}>
+                  <div className={styles.linkTitle}>
+                    {t('system_info.link_main_repo')}
+                    <IconExternalLink size={14} />
                   </div>
-                );
-              })}
-            </div>
-          )}
-        </Card>
+                  <div className={styles.linkDesc}>{t('system_info.link_main_repo_desc')}</div>
+                </div>
+              </a>
 
-        <Card title={t('system_info.clear_login_title')}>
-          <p className={styles.sectionDescription}>{t('system_info.clear_login_desc')}</p>
-          <div className={styles.clearLoginActions}>
-            <Button variant="danger" onClick={handleClearLoginStorage} disabled={logoutDisabled}>
-              {t('system_info.clear_login_button')}
-            </Button>
-          </div>
-        </Card>
-      </div>
+              <a
+                href="https://github.com/seakee/CPA-Manager-Plus"
+                target="_blank"
+                rel="noopener noreferrer"
+                className={styles.linkCard}
+              >
+                <div className={`${styles.linkIcon} ${styles.github}`}>
+                  <IconCode size={22} />
+                </div>
+                <div className={styles.linkContent}>
+                  <div className={styles.linkTitle}>
+                    {t('system_info.link_webui_repo')}
+                    <IconExternalLink size={14} />
+                  </div>
+                  <div className={styles.linkDesc}>{t('system_info.link_webui_repo_desc')}</div>
+                </div>
+              </a>
+
+              <a
+                href="https://seakee.github.io/CPA-Manager-Plus/docs/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className={styles.linkCard}
+              >
+                <div className={`${styles.linkIcon} ${styles.docs}`}>
+                  <IconBookOpen size={22} />
+                </div>
+                <div className={styles.linkContent}>
+                  <div className={styles.linkTitle}>
+                    {t('system_info.link_docs')}
+                    <IconExternalLink size={14} />
+                  </div>
+                  <div className={styles.linkDesc}>{t('system_info.link_docs_desc')}</div>
+                </div>
+              </a>
+            </div>
+          </Card>
+
+          {featureAvailability.managerServiceAvailable && (
+            <DatabaseStatusCard
+              status={databaseStatus}
+              loading={databaseLoading}
+              error={databaseError}
+            />
+          )}
+
+          <Card
+            title={t('system_info.models_title')}
+            extra={
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => fetchModels({ forceRefresh: true })}
+                loading={modelsLoading}
+              >
+                {t('common.refresh')}
+              </Button>
+            }
+          >
+            <p className={styles.sectionDescription}>{t('system_info.models_desc')}</p>
+            {modelStatus && (
+              <div className={`status-badge ${modelStatus.type}`}>{modelStatus.message}</div>
+            )}
+            {modelsLoading ? (
+              <div className="hint">{t('common.loading')}</div>
+            ) : models.length === 0 ? (
+              <div className="hint">{t('system_info.models_empty')}</div>
+            ) : (
+              <div className="item-list">
+                {groupedModels.map((group) => {
+                  const iconSrc = getIconForCategory(group.id);
+                  return (
+                    <div key={group.id} className="item-row">
+                      <div className="item-meta">
+                        <div className={styles.groupTitle}>
+                          {iconSrc && <img src={iconSrc} alt="" className={styles.groupIcon} />}
+                          <span className="item-title">{group.label}</span>
+                        </div>
+                        <div className="item-subtitle">
+                          {t('system_info.models_count', { count: group.items.length })}
+                        </div>
+                      </div>
+                      <div className={styles.modelTags}>
+                        {group.items.map((model) => (
+                          <span
+                            key={`${model.name}-${model.alias ?? 'default'}`}
+                            className={styles.modelTag}
+                            title={model.description || ''}
+                          >
+                            <span className={styles.modelName}>{model.name}</span>
+                            {model.alias && (
+                              <span className={styles.modelAlias}>{model.alias}</span>
+                            )}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </Card>
+
+          <Card title={t('system_info.clear_login_title')}>
+            <p className={styles.sectionDescription}>{t('system_info.clear_login_desc')}</p>
+            <div className={styles.clearLoginActions}>
+              <Button variant="danger" onClick={handleClearLoginStorage} disabled={logoutDisabled}>
+                {t('system_info.clear_login_button')}
+              </Button>
+            </div>
+          </Card>
+        </div>
+      </InformationContainer>
     </div>
   );
 }

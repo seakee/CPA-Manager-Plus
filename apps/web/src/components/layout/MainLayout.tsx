@@ -10,6 +10,7 @@ import {
 import { createPortal } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { configurationText } from '@/i18n/configurationWorkspace';
 import { Button } from '@/components/ui/Button';
 import { PageTransition } from '@/components/common/PageTransition';
 import { DatabaseMaintenanceBanner } from '@/components/common/DatabaseMaintenanceBanner';
@@ -239,6 +240,7 @@ interface MainLayoutProps {
   demoMode?: boolean;
   onLogout?: () => void;
   logoutDisabled?: boolean;
+  hasUnsavedChanges?: boolean;
   navigationDisabled?: boolean;
   contentFooter?: ReactNode;
   /**
@@ -258,11 +260,14 @@ function MainLayoutContent({
   renderRoute,
   onLogout,
   logoutDisabled = false,
+  hasUnsavedChanges = false,
   navigationDisabled = false,
   contentFooter,
 }: MainLayoutProps = {}) {
   const { t } = useTranslation();
-  const { showNotification } = useNotificationStore();
+  const { showNotification, showConfirmation } = useNotificationStore();
+  const logoutBlockedRef = useRef(logoutDisabled);
+  useEffect(() => { logoutBlockedRef.current = logoutDisabled; }, [logoutDisabled]);
   const location = useLocation();
   const navigate = useNavigate();
   const routePathname = stripRouteBase(location.pathname, routeBase);
@@ -665,14 +670,23 @@ function MainLayoutContent({
       items: [
         {
           path: '/system',
-          label: t('nav.system_info'),
-          shortLabel: navShortLabel('nav.system_info', t('nav.system_info')),
+          label: renderRoute
+            ? t('nav.system_config')
+            : t('nav.system_info'),
+          shortLabel: renderRoute
+            ? navShortLabel('nav.system_config', t('nav.system_config'))
+            : navShortLabel('nav.system_info', t('nav.system_info')),
           icon: sidebarIcons.system,
           exact: true,
         },
         {
           path: '/config',
-          label: t('nav.config_management'),
+          label: renderRoute
+            ? t('nav.gateway_management')
+            : t('nav.config_management'),
+          shortLabel: renderRoute
+            ? navShortLabel('nav.gateway_management', t('nav.gateway_management'))
+            : navShortLabel('nav.config_management', t('nav.config_management')),
           icon: sidebarIcons.config,
         },
         {
@@ -765,11 +779,23 @@ function MainLayoutContent({
       navigate(getDemoLogoutPath(routeBase), { replace: true });
       return;
     }
-    if (onLogout) {
-      onLogout();
-    } else {
-      logout();
+    const finishLogout = () => {
+      if (logoutBlockedRef.current) return;
+      if (onLogout) onLogout();
+      else logout();
+    };
+    if (hasUnsavedChanges) {
+      showConfirmation({
+        title: configurationText('leaveTitle'),
+        message: configurationText('leaveHelp'),
+        confirmText: configurationText('leaveConfirm'),
+        cancelText: configurationText('keep'),
+        variant: 'danger',
+        onConfirm: finishLogout,
+      });
+      return;
     }
+    finishLogout();
   };
   const mobileSidebarToggleLabel = sidebarOpen
     ? t('sidebar.toggle_collapse', { defaultValue: 'Close navigation' })
@@ -779,10 +805,14 @@ function MainLayoutContent({
       ? routePathname.slice(0, -1)
       : routePathname;
   const currentPath = normalizedLocationPath === '/dashboard' ? '/' : normalizedLocationPath;
-  const matchesNavPath = (item: NavItem, pathname: string) =>
-    item.path === '/' || item.exact
+  const matchesNavPath = (item: NavItem, pathname: string) => {
+    if (renderRoute && item.path === '/config' && pathname === '/gateway') {
+      return true;
+    }
+    return item.path === '/' || item.exact
       ? pathname === item.path
       : pathname === item.path || pathname.startsWith(`${item.path}/`);
+  };
   const activeNavItem =
     [...navItems]
       .sort((a, b) => b.path.length - a.path.length)

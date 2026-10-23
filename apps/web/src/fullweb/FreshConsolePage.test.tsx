@@ -1,4 +1,8 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
+import type { ReactNode } from 'react';
+import { Button } from '../components/ui/Button';
+import i18n from '../i18n';
+import { apiKeysApi } from '../services/api/apiKeys';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FreshConsolePage } from './FreshConsolePage';
 import { FreshManagedRuntime } from './FreshManagedRuntime';
@@ -18,6 +22,21 @@ import { NotificationContainer } from '../components/common/NotificationContaine
 import { MainLayout } from '../components/layout/MainLayout';
 import { FreshManagedResources } from './FreshManagedResources';
 import { SystemPage } from '../features/system/SystemPage';
+import { FreshSystemWorkspace } from './FreshSystemWorkspace';
+import { useNotificationStore } from '../stores/useNotificationStore';
+import { configurationText as c } from '../i18n/configurationWorkspace';
+vi.mock('../components/ui/Modal', () => ({
+  Modal: ({ open, children, footer }: { open: boolean; children: ReactNode; footer: ReactNode }) =>
+    open ? (
+      <div role="dialog">
+        {children}
+        {footer}
+      </div>
+    ) : null,
+}));
+vi.mock('../components/common/NotificationContainer', () => ({
+  NotificationContainer: () => null,
+}));
 const context = { basePath: '/console', apiBase: '/console/api/v2', revision: 1 };
 const operation: FreshOperation = {
   identity: {
@@ -98,6 +117,9 @@ describe('Fresh installation and Console authority boundary', () => {
     useAuthStore.getState().logout();
     useAuthStore.setState({ rememberPassword: false });
     persist.mockClear();
+    useNotificationStore.getState().hideConfirmation();
+    useNotificationStore.getState().clearAll();
+    vi.spyOn(apiKeysApi, 'list').mockResolvedValue([]);
     read = vi
       .fn<typeof fetch>()
       .mockImplementation(() => Promise.resolve(Response.json(operation)));
@@ -105,20 +127,22 @@ describe('Fresh installation and Console authority boundary', () => {
   afterEach(async () => {
     if (renderer) await act(async () => renderer.unmount());
     useAuthStore.getState().logout();
+    useNotificationStore.getState().hideConfirmation();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
   const find = (id: string) => renderer.root.findByProps({ 'data-testid': id });
   const has = (id: string) => renderer.root.findAllByProps({ 'data-testid': id }).length > 0;
   const hasLogin = () => renderer.root.findAllByType(LoginPage).length > 0;
-  const input = () => renderer.root.findAllByType('input').find((node) => node.props.id === 'console-admin-key')!;
+  const input = () =>
+    renderer.root.findAllByType('input').find((node) => node.props.id === 'console-admin-key')!;
   const logout = () =>
     renderer.root
       .findAllByType('button')
       .find((button) =>
         [t('logout'), 'Logout', '登出', 'Выйти'].includes(button.props['aria-label'])
       )!;
-  async function mount() {
+  async function mount(retryTransport?: typeof fetch) {
     await act(async () => {
       renderer = create(
         <FreshConsolePage
@@ -142,7 +166,10 @@ describe('Fresh installation and Console authority boundary', () => {
                   activeGatewayArtifact: { artifactId: 'sha256:' + 'a'.repeat(64) },
                   state: 'ready',
                 });
-              if (target.includes('/gateway/retry/')) return new Response('', { status: 503 });
+              if (target.includes('/gateway/retry/'))
+                return retryTransport
+                  ? retryTransport(url, init)
+                  : new Response('', { status: 503 });
               return read(url, init);
             }
           )}
@@ -156,13 +183,22 @@ describe('Fresh installation and Console authority boundary', () => {
   async function login(remember = false) {
     await act(async () => input().props.onChange({ target: { value: key } }));
     await act(async () =>
-      renderer.root.findByProps({ type: 'checkbox' }).props.onChange({ target: { checked: remember } })
+      renderer.root
+        .findByProps({ type: 'checkbox' })
+        .props.onChange({ target: { checked: remember } })
     );
     await act(async () => find('console-login').props.onSubmit({ preventDefault: vi.fn() }));
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
   }
   async function navigate(route: string) {
-    const section = ['/accounts', '/oauth'].includes(route) || route.startsWith('/ai-providers')
-      ? 'resources' : route === '/api-keys' ? 'clients' : 'system';
+    const section =
+      ['/accounts', '/oauth'].includes(route) || route.startsWith('/ai-providers')
+        ? 'resources'
+        : route === '/api-keys'
+          ? 'clients'
+          : 'system';
     if (!renderer.root.findAllByType('a').some((link) => link.props.href === '/console' + route))
       await act(async () =>
         renderer.root
@@ -206,7 +242,10 @@ describe('Fresh installation and Console authority boundary', () => {
     // Fresh administrator credential itself never appears in a persistence
     // payload while allowing those normal cache writes.
     expect(persist.mock.calls.flat().some((value) => String(value).includes(key))).toBe(false);
-    expect(obfuscatedStorage.getItem<{ state: { managementKey?: string } }>(STORAGE_KEY_AUTH)?.state.managementKey).toBeUndefined();
+    expect(
+      obfuscatedStorage.getItem<{ state: { managementKey?: string } }>(STORAGE_KEY_AUTH)?.state
+        .managementKey
+    ).toBeUndefined();
   });
   it('keeps clear-login locked on both System route spellings while an editor needs recovery', async () => {
     await mount();
@@ -217,14 +256,123 @@ describe('Fresh installation and Console authority boundary', () => {
       const page = renderRoute(path);
       expect(page.type).toBe(SystemPage);
       expect(page.props.logoutDisabled).toBe(true);
+      expect(page.props.workspace.type).toBe(FreshSystemWorkspace);
     }
     expect(renderRoute('/api-keys/')).toBeNull();
   });
+  const retryTransport: typeof fetch = async (url) =>
+    Response.json({
+      field: String(url).includes('max-retry-interval')
+        ? 'routing.retry.max-retry-interval'
+        : 'routing.retry.request-retry',
+      presence: 'present',
+      value: 2,
+      source: 'isolated-test',
+      authority: 'host-runtime',
+      editable: true,
+      reason: '',
+      persisted: 'persisted',
+      effective: 'unknown',
+      concurrentProtection: 'host-exclusive-runtime-reservation',
+      expected: { sourceId: 'test-only', generation: '1', revision: 1, sha256: 'a'.repeat(64) },
+    });
+  async function editGateway() {
+    await mount(retryTransport);
+    await login();
+    await navigate('/config');
+    await act(async () => find('retry-value').props.onChange({ target: { value: '4' } }));
+  }
+  it('keeps existing system information and session tools in a collapsed section below product settings', async () => {
+    await mount();
+    await login();
+    await navigate('/system');
+    const system = renderer.root.findByType(SystemPage);
+    const details = system.findByProps({ className: 'system-additional-info' });
+    expect(details.type).toBe('details');
+    expect(details.props.open).not.toBe(true);
+    expect(details.findByType('summary').props.children).toBe(c('additionalInfo'));
+    expect(details.findAllByType(FreshSystemWorkspace)).toHaveLength(0);
+    expect(system.findAllByType(FreshSystemWorkspace)).toHaveLength(1);
+    expect(
+      details
+        .findAllByType(Button)
+        .some((button) => button.props.children === i18n.t('system_info.clear_login_button'))
+    ).toBe(true);
+  });
+  it('keeps a real gateway draft on logout cancellation and clears the session only after confirmation', async () => {
+    await editGateway();
+    expect(renderer.root.findByType(MainLayout).props.logoutDisabled).toBe(false);
+    await navigate('/system');
+    expect(renderer.root.findByType(SystemPage).props.hasUnsavedChanges).toBe(true);
+    await act(async () => logout().props.onClick());
+    expect(has('legacy-console')).toBe(true);
+    expect(useNotificationStore.getState().confirmation.options?.message).toBe(c('leaveHelp'));
+    const keep = renderer.root
+      .findAllByType(Button)
+      .find((button) => button.props.children === c('keep'))!;
+    await act(async () => keep.props.onClick());
+    await navigate('/config');
+    expect(find('retry-value').props.value).toBe('4');
+    await act(async () => logout().props.onClick());
+    await act(async () => {
+      await useNotificationStore.getState().confirmation.options!.onConfirm();
+    });
+    expect(has('legacy-console')).toBe(false);
+  });
+  it('rechecks the operation lock when confirming a previously opened logout dialog', async () => {
+    await editGateway();
+    await act(async () => logout().props.onClick());
+    const confirm = useNotificationStore.getState().confirmation.options!.onConfirm;
+    await act(async () => renderer.root.findByType(FreshManagedResources).props.onPending(true));
+    await act(async () => {
+      await confirm();
+    });
+    expect(has('legacy-console')).toBe(true);
+    expect(find('retry-value').props.value).toBe('4');
+  });
+  it('warns before clearing login storage and rechecks a newly started operation', async () => {
+    await editGateway();
+    await navigate('/system');
+    const clearButton = renderer.root
+      .findByType(SystemPage)
+      .findAllByType(Button)
+      .find((button) => button.props.children === i18n.t('system_info.clear_login_button'))!;
+    await act(async () => clearButton.props.onClick());
+    expect(String(useNotificationStore.getState().confirmation.options?.message)).toContain(
+      c('leaveHelp')
+    );
+    const confirm = useNotificationStore.getState().confirmation.options!.onConfirm;
+    await act(async () => renderer.root.findByType(FreshManagedResources).props.onPending(true));
+    await act(async () => {
+      await confirm();
+    });
+    expect(has('legacy-console')).toBe(true);
+    await act(async () => renderer.root.findByType(FreshManagedResources).props.onPending(false));
+    await act(async () => clearButton.props.onClick());
+    await act(async () => {
+      await useNotificationStore.getState().confirmation.options!.onConfirm();
+    });
+    expect(has('legacy-console')).toBe(false);
+  });
+  it('does not block credential revocation on a local dirty draft', async () => {
+    await editGateway();
+    await act(async () => renderer.root.findByType(LegacyConsolePage).props.onUnauthorized());
+    expect(has('legacy-console')).toBe(false);
+    expect(input().props.value).toBe('');
+  });
   it('never calls legacy discovery or legacy login/restore before the business Console is admitted', async () => {
-    const discovery = vi.spyOn(usageServiceApi, 'getInfo').mockRejectedValue(new Error('Legacy discovery is forbidden'));
-    const legacyLogin = vi.spyOn(useAuthStore.getState(), 'login').mockRejectedValue(new Error('Legacy login is forbidden'));
-    const legacyRestore = vi.spyOn(useAuthStore.getState(), 'restoreSession').mockResolvedValue(false);
-    read.mockImplementation(() => Promise.resolve(Response.json({ ...operation, productComplete: false })));
+    const discovery = vi
+      .spyOn(usageServiceApi, 'getInfo')
+      .mockRejectedValue(new Error('Legacy discovery is forbidden'));
+    const legacyLogin = vi
+      .spyOn(useAuthStore.getState(), 'login')
+      .mockRejectedValue(new Error('Legacy login is forbidden'));
+    const legacyRestore = vi
+      .spyOn(useAuthStore.getState(), 'restoreSession')
+      .mockResolvedValue(false);
+    read.mockImplementation(() =>
+      Promise.resolve(Response.json({ ...operation, productComplete: false }))
+    );
     await mount();
     await login(true);
     expect(has('legacy-console')).toBe(false);
@@ -238,7 +386,10 @@ describe('Fresh installation and Console authority boundary', () => {
     await mount();
     await login(true);
     expect(useAuthStore.getState().rememberPassword).toBe(true);
-    expect(obfuscatedStorage.getItem<{ state: { managementKey?: string } }>(STORAGE_KEY_AUTH)?.state.managementKey).toBe(key);
+    expect(
+      obfuscatedStorage.getItem<{ state: { managementKey?: string } }>(STORAGE_KEY_AUTH)?.state
+        .managementKey
+    ).toBe(key);
     await act(async () => renderer.unmount());
     // Rehydrate persisted state as a new document would; no authenticated flag
     // is persisted and no management page may bypass the operation check.
@@ -295,7 +446,9 @@ describe('Fresh installation and Console authority boundary', () => {
   it('can sign in and revoke in-memory authority when browser storage is full', async () => {
     await mount();
     const original = localStorage.setItem;
-    localStorage.setItem = () => { throw new DOMException('Storage full', 'QuotaExceededError'); };
+    localStorage.setItem = () => {
+      throw new DOMException('Storage full', 'QuotaExceededError');
+    };
     try {
       await login(true);
       expect(has('legacy-console')).toBe(true);
@@ -329,12 +482,17 @@ describe('Fresh installation and Console authority boundary', () => {
     // A view callback is not authority to admit the business Console.
     // Keep the non-DOM router harness while observing its browser navigation.
     const history = window.history;
-    Object.defineProperty(window, 'history', { value: { ...history, replaceState: vi.fn() }, configurable: true });
+    Object.defineProperty(window, 'history', {
+      value: { ...history, replaceState: vi.fn() },
+      configurable: true,
+    });
     await act(async () => renderer.root.findByType(FreshManagedRuntime).props.onContinue());
     Object.defineProperty(window, 'history', { value: history, configurable: true });
     expect(has('legacy-console')).toBe(false);
     expect(renderer.root.findByType(FreshManagedRuntime)).toBeTruthy();
-    await act(async () => renderer.root.findByType(FreshManagedRuntime).props.onOperation(operation));
+    await act(async () =>
+      renderer.root.findByType(FreshManagedRuntime).props.onOperation(operation)
+    );
     expect(has('legacy-console')).toBe(true);
   });
   it('opens External from the existing journey and can return without selecting a strategy', async () => {
@@ -423,8 +581,7 @@ describe('Fresh installation and Console authority boundary', () => {
         .findAllByType('a')
         .some(
           (link) =>
-            link.props.href === '/console/system' &&
-            String(link.props.className).includes('active')
+            link.props.href === '/console/system' && String(link.props.className).includes('active')
         )
     ).toBe(true);
   });

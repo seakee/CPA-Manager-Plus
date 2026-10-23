@@ -528,6 +528,7 @@
     "monitoring_center_short": "Мониторинг",
     "account_actions": "Проблемы аутентификации",
     "account_actions_short": "Проблемы",
+    "gateway_management": "Управление шлюзом",
     "config_management": "Панель конфигурации",
     "config_management_short": "Конфиг",
     "system_config": "Системная конфигурация",

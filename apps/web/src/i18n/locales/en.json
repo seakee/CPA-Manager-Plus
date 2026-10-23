@@ -530,6 +530,7 @@
     "monitoring_center_short": "Monitoring",
     "account_actions": "Auth Issues",
     "account_actions_short": "Issues",
+    "gateway_management": "Gateway Management",
     "config_management": "Config Panel",
     "config_management_short": "Config",
     "system_config": "System Config",

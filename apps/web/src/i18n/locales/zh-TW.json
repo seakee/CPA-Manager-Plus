@@ -522,6 +522,7 @@
     "monitoring_center_short": "監控",
     "account_actions": "認證異常",
     "account_actions_short": "異常",
+    "gateway_management": "閘道管理",
     "config_management": "設定面板",
     "config_management_short": "設定",
     "system_config": "系統設定",

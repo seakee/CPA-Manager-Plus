@@ -528,6 +528,7 @@
     "monitoring_center_short": "监控",
     "account_actions": "认证异常",
     "account_actions_short": "异常",
+    "gateway_management": "网关管理",
     "config_management": "配置面板",
     "config_management_short": "配置",
     "system_config": "系统配置",

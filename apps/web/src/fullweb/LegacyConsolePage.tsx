@@ -22,6 +22,7 @@ import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { NotificationContainer } from '../components/common/NotificationContainer';
 import { ManagerUpdates } from '../features/system/ManagerUpdates';
 import { SystemPage } from '../features/system/SystemPage';
+import { FreshSystemWorkspace } from './FreshSystemWorkspace';
 import { useAuthStore } from '../stores';
 import { FreshManagedResources } from './FreshManagedResources';
 import type { createPublicApiClient } from './publicApi';
@@ -59,6 +60,7 @@ export function LegacyConsolePage({
   const inRouter = useInRouterContext();
   const [activated, setActivated] = useState(false);
   const [freshPending, setFreshPending] = useState(false);
+  const [freshDirty, setFreshDirty] = useState(false);
   const onUnauthorizedRef = useRef(onUnauthorized);
 
   useEffect(() => {
@@ -132,6 +134,7 @@ export function LegacyConsolePage({
           routeBase={context.basePath}
           navigationBase={context.basePath}
           logoutDisabled={freshPending}
+          hasUnsavedChanges={freshDirty}
           contentFooter={
             client ? (
               <FreshManagedResources
@@ -140,18 +143,28 @@ export function LegacyConsolePage({
                 credential={credential}
                 onUnauthorized={onUnauthorized}
                 onPending={setFreshPending}
+                onDirtyChange={setFreshDirty}
               />
             ) : undefined
           }
           renderRoute={(pathname) => {
             if (!client) return undefined;
             const route = pathname.replace(/\/+$/, '') || '/';
-            // Keep the original ConfigPage at /config: it owns the visual/source
-            // editor, Manager→CPA binding form, and the existing CPA API-key
-            // controls. Manager-owned keys render in the persistent footer to
-            // retain their original reconciliation operation across navigation.
+            // In Full Web, API keys, Gateway workspace and System configuration
+            // render in the persistent footer panels (RetainedRoutePanel) so that
+            // active drafts, one-time secrets and in-flight operations are
+            // retained across page transitions.
             if (route === '/api-keys') return null;
-            if (route === '/system') return <SystemPage logoutDisabled={freshPending} />;
+            if (route === '/gateway' || route === '/config') return null;
+            if (route === '/system') {
+              return (
+                <SystemPage
+                  logoutDisabled={freshPending}
+                  hasUnsavedChanges={freshDirty}
+                  workspace={<FreshSystemWorkspace basePath={context.basePath} />}
+                />
+              );
+            }
             return undefined;
           }}
         />
