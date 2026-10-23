@@ -5,6 +5,25 @@ import {
   parseExcludedModelsText,
 } from '@/features/authFiles/constants';
 
+export type AccountModelExclusionPriority = 'merge' | 'override' | 'unknown';
+
+// Verified official CPA releases: v7.3.4–v8.0.32 merge OAuth exclusions;
+// v8.0.33+ gives nonempty credential exclusions priority over global exclusions.
+// Unrecognized/dev builds must not be assumed to use either behavior.
+export const getAccountModelExclusionPriority = (
+  serverVersion?: string | null
+): AccountModelExclusionPriority => {
+  const match = serverVersion?.trim().match(/^v?(\d+)\.(\d+)\.(\d+)$/i);
+  if (!match) return 'unknown';
+  const [, majorText, minorText, patchText] = match;
+  const major = Number(majorText);
+  const minor = Number(minorText);
+  const patch = Number(patchText);
+  if (major === 7 && minor === 3 && patch >= 4) return 'merge';
+  if (major === 8 && minor === 0) return patch >= 33 ? 'override' : 'merge';
+  return 'unknown';
+};
+
 export type AccountModelRuleScope =
   | 'available'
   | 'unknown'
@@ -49,6 +68,7 @@ type BuildAccountModelRuleProjectionOptions = {
   globalRulesKnown?: boolean;
   credentialRulesShared?: boolean;
   credentialPrefix?: string;
+  exclusionPriority?: AccountModelExclusionPriority;
 };
 
 const normalizeModelId = (value: string): string => value.trim().toLowerCase();
@@ -163,11 +183,15 @@ export const buildAccountModelRuleProjection = ({
   globalRulesKnown = true,
   credentialRulesShared = false,
   credentialPrefix,
+  exclusionPriority = 'merge',
 }: BuildAccountModelRuleProjectionOptions): AccountModelRuleProjection => {
   const normalizedCredentialRules = normalizeExcludedModels(credentialRules);
   const normalizedGlobalRules = globalRulesKnown
     ? getGlobalRulesForProvider(provider, globalRules)
     : [];
+  const credentialOverridesGlobal =
+    exclusionPriority === 'override' && normalizedCredentialRules.length > 0;
+  const effectiveGlobalRules = credentialOverridesGlobal ? [] : normalizedGlobalRules;
   const runtimeIds = new Set(
     runtimeModels.map((model) => normalizeModelId(model.id)).filter(Boolean)
   );
@@ -221,7 +245,7 @@ export const buildAccountModelRuleProjection = ({
 
     if (
       findMatchingRules(defId, normalizedCredentialRules).length === 0 &&
-      findMatchingRules(defId, normalizedGlobalRules).length === 0
+      findMatchingRules(defId, effectiveGlobalRules).length === 0
     ) {
       continue;
     }
@@ -284,17 +308,20 @@ export const buildAccountModelRuleProjection = ({
     const globalPatterns = findMatchingRules(identity.ruleModelId, normalizedGlobalRules);
     const credentialExcluded = credentialPatterns.length > 0;
     const globalExcluded = globalPatterns.length > 0;
+    const globalApplies = globalExcluded && !credentialOverridesGlobal;
+    const globalEffectUnknown =
+      exclusionPriority === 'unknown' && normalizedCredentialRules.length > 0 && globalExcluded;
     const scope: AccountModelRuleScope = credentialExcluded
       ? credentialRulesShared
-        ? globalExcluded
+        ? globalApplies && !globalEffectUnknown
           ? 'shared-global'
           : 'shared'
-        : globalExcluded
+        : globalApplies && !globalEffectUnknown
           ? 'both'
           : 'credential'
-      : !globalRulesKnown
+      : !globalRulesKnown || globalEffectUnknown
         ? 'unknown'
-        : globalExcluded
+        : globalApplies
           ? 'global'
           : 'available';
 
@@ -329,7 +356,7 @@ export const buildAccountModelRuleProjection = ({
     credentialRules: normalizedCredentialRules,
     globalRules: normalizedGlobalRules,
     advancedCredentialRules: normalizedCredentialRules.filter(isAdvancedRule),
-    advancedGlobalRules: normalizedGlobalRules.filter(isAdvancedRule),
+    advancedGlobalRules: effectiveGlobalRules.filter(isAdvancedRule),
   };
 };
 
@@ -360,6 +387,43 @@ export const setAccountModelExactRule = (
   }
 
   return Array.from(next).sort((left, right) => left.localeCompare(right));
+};
+
+
+// Apply one exact-model change without silently dropping inherited global exclusions.
+// An empty credential list cannot override a nonempty global list in official CPA.
+export const setEffectiveAccountModelExactRule = ({
+  credentialRules,
+  globalRules,
+  exclusionPriority,
+  modelId,
+  excluded,
+  equivalentExactModelIds = [],
+}: {
+  credentialRules: string[];
+  globalRules: string[];
+  exclusionPriority: AccountModelExclusionPriority;
+  modelId: string;
+  excluded: boolean;
+  equivalentExactModelIds?: string[];
+}): string[] | null => {
+  const existing = normalizeExcludedModels(credentialRules);
+  const base =
+    exclusionPriority === 'override' && existing.length === 0
+      ? normalizeExcludedModels(globalRules)
+      : existing;
+  const next = setAccountModelExactRule(base, modelId, excluded, equivalentExactModelIds);
+
+  // An empty override would immediately inherit the global rule again.
+  if (
+    exclusionPriority === 'override' &&
+    !excluded &&
+    next.length === 0 &&
+    normalizeExcludedModels(globalRules).some((rule) => matchesAccountModelRule(modelId, rule))
+  ) {
+    return null;
+  }
+  return next;
 };
 
 export const buildAccountModelRuleDiff = (

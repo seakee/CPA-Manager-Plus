@@ -9,7 +9,9 @@ import type { AccountRow } from '@/features/accounts/model/accountRows';
 import {
   buildAccountModelRuleDiff,
   buildAccountModelRuleProjection,
-  setAccountModelExactRule,
+  getAccountModelExclusionPriority,
+  matchesAccountModelRule,
+  setEffectiveAccountModelExactRule,
   type AccountModelRuleRow,
   type AccountModelRuleScope,
 } from '@/features/accounts/model/accountModelRules';
@@ -22,6 +24,7 @@ import {
 } from '@/features/authFiles/constants';
 import type { UseAuthFileConfigurationEditorResult } from '@/features/authFiles/hooks/useAuthFileConfigurationEditor';
 import type { OAuthModelAliasEntry } from '@/types';
+import { useAuthStore } from '@/stores/useAuthStore';
 import styles from '@/features/accounts/AccountsPage.module.scss';
 
 type AccountModelFilter = 'all' | 'available' | 'disabled';
@@ -109,6 +112,8 @@ export function AccountModelsTab({
   onCopyText,
 }: AccountModelsTabProps) {
   const { t } = useTranslation();
+  const serverVersion = useAuthStore((state) => state.serverVersion);
+  const exclusionPriority = getAccountModelExclusionPriority(serverVersion);
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<AccountModelFilter>('all');
   const { state, draft, dirty, canSave, sharedSourceReadOnly, sourceMemberCount } = editor;
@@ -151,10 +156,12 @@ export function AccountModelsTab({
         globalRulesKnown,
         credentialRulesShared: sharedSourceReadOnly,
         credentialPrefix,
+        exclusionPriority,
       }),
     [
       credentialPrefix,
       credentialRules,
+      exclusionPriority,
       globalExcluded,
       globalRulesKnown,
       modelDefinitions,
@@ -212,6 +219,7 @@ export function AccountModelsTab({
     row.runtimeOnly ||
     sharedSourceReadOnly ||
     !globalRulesKnown ||
+    (exclusionPriority === 'unknown' && projection.globalRules.length > 0) ||
     state?.saving === true ||
     !editorReady;
   const disabledCount = projection.rows.filter((model) => isKnownDisabledScope(model.scope)).length;
@@ -229,12 +237,15 @@ export function AccountModelsTab({
 
   const updateExactRule = (model: AccountModelRuleRow, excluded: boolean) => {
     if (editingDisabled || !model.ruleModelIdResolved) return;
-    const next = setAccountModelExactRule(
+    const next = setEffectiveAccountModelExactRule({
       credentialRules,
-      model.ruleModelId,
+      globalRules: projection.globalRules,
+      exclusionPriority,
+      modelId: model.ruleModelId,
       excluded,
-      model.equivalentRuntimeModelIds
-    );
+      equivalentExactModelIds: model.equivalentRuntimeModelIds,
+    });
+    if (next === null) return;
     editor.updateField('excludedModelsText', next.join('\n'));
   };
 
@@ -247,8 +258,23 @@ export function AccountModelsTab({
       );
     }
     if (model.hasCredentialExactRule) {
+      // Removing the last credential rule cannot unblock a model still excluded globally.
+      if (
+        exclusionPriority === 'override' &&
+        credentialRules.length === 1 &&
+        projection.globalRules.some((rule) => matchesAccountModelRule(model.ruleModelId, rule))
+      ) {
+        return (
+          <Button variant="secondary" size="xs" onClick={onManageGlobalRules}>
+            {t('accounts.model_manage_global_rules')}
+          </Button>
+        );
+      }
       const remainsExcluded =
-        model.hasCredentialWildcardRule || model.globalPatterns.length > 0 || !globalRulesKnown;
+        model.hasCredentialWildcardRule ||
+        (model.globalPatterns.length > 0 &&
+          (exclusionPriority !== 'override' || credentialRules.length === 1)) ||
+        !globalRulesKnown;
       return (
         <Button
           variant="secondary"
@@ -279,7 +305,10 @@ export function AccountModelsTab({
         </Button>
       );
     }
-    if (model.globalPatterns.length > 0) {
+    if (
+      model.globalPatterns.length > 0 &&
+      (exclusionPriority !== 'override' || credentialRules.length === 0)
+    ) {
       return (
         <Button variant="secondary" size="xs" onClick={onManageGlobalRules}>
           {t('accounts.model_manage_global_rules')}

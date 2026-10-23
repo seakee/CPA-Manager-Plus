@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   buildAccountModelRuleDiff,
   buildAccountModelRuleProjection,
+  getAccountModelExclusionPriority,
   matchesAccountModelRule,
+  setEffectiveAccountModelExactRule,
   resolveAccountModelRuleIdentity,
   setAccountModelExactRule,
 } from './accountModelRules';
@@ -13,6 +15,101 @@ describe('accountModelRules', () => {
     expect(matchesAccountModelRule('gpt-5-mini', 'gpt-5-*')).toBe(true);
     expect(matchesAccountModelRule('gpt-5-mini', 'gpt-5.*')).toBe(false);
     expect(matchesAccountModelRule('claude-sonnet', '*-mini')).toBe(false);
+  });
+
+
+  it('recognizes the verified CPA precedence boundary without guessing custom builds', () => {
+    expect(getAccountModelExclusionPriority('v7.3.4')).toBe('merge');
+    expect(getAccountModelExclusionPriority('v8.0.13')).toBe('merge');
+    expect(getAccountModelExclusionPriority('v8.0.32')).toBe('merge');
+    expect(getAccountModelExclusionPriority('v8.0.33')).toBe('override');
+    expect(getAccountModelExclusionPriority('v8.0.40')).toBe('override');
+    expect(getAccountModelExclusionPriority('v8.0.40-dev')).toBe('unknown');
+    expect(getAccountModelExclusionPriority(null)).toBe('unknown');
+  });
+
+  it('shows effective exclusions instead of inactive global matches for newer CPA', () => {
+    const args = {
+      provider: 'codex',
+      runtimeModels: [{ id: 'gpt-5.6-terra' }, { id: 'gpt-6-luna' }],
+      modelDefinitions: [],
+      credentialRules: ['gpt-6-luna'],
+      globalRules: { codex: ['gpt-5.6-terra'] },
+    };
+    const overridden = buildAccountModelRuleProjection({
+      ...args,
+      exclusionPriority: 'override',
+    });
+    expect(overridden.rows.map((row) => [row.id, row.scope])).toEqual([
+      ['gpt-5.6-terra', 'available'],
+      ['gpt-6-luna', 'credential'],
+    ]);
+    const merged = buildAccountModelRuleProjection({ ...args, exclusionPriority: 'merge' });
+    expect(merged.rows.map((row) => [row.id, row.scope])).toEqual([
+      ['gpt-5.6-terra', 'global'],
+      ['gpt-6-luna', 'credential'],
+    ]);
+  });
+
+  it('restores global exclusions when the credential list becomes empty', () => {
+    const p = buildAccountModelRuleProjection({
+      provider: 'codex',
+      runtimeModels: [{ id: 'gpt-5.6-terra' }],
+      modelDefinitions: [],
+      credentialRules: [],
+      globalRules: { codex: ['gpt-5.6-terra'] },
+      exclusionPriority: 'override',
+    });
+    expect(p.rows[0].scope).toBe('global');
+  });
+
+  it('does not classify conflicting global-only exclusions when CPA precedence is unknown', () => {
+    const p = buildAccountModelRuleProjection({
+      provider: 'codex',
+      runtimeModels: [{ id: 'gpt-5.6-terra' }, { id: 'gpt-6-luna' }],
+      modelDefinitions: [],
+      credentialRules: ['gpt-6-luna'],
+      globalRules: { codex: ['gpt-5.6-terra'] },
+      exclusionPriority: 'unknown',
+    });
+    expect(p.rows.map((row) => row.scope)).toEqual(['unknown', 'credential']);
+  });
+
+  it('copies global exclusions before the first credential-only edit', () => {
+    expect(setEffectiveAccountModelExactRule({
+      credentialRules: [],
+      globalRules: ['gpt-5.6-terra'],
+      exclusionPriority: 'override',
+      modelId: 'gpt-6-luna',
+      excluded: true,
+    })).toEqual(['gpt-5.6-terra', 'gpt-6-luna']);
+  });
+
+  it('rejects an empty override that would re-enable a globally denied exact model', () => {
+    expect(setEffectiveAccountModelExactRule({
+      credentialRules: [],
+      globalRules: ['gpt-5.6-terra'],
+      exclusionPriority: 'override',
+      modelId: 'gpt-5.6-terra',
+      excluded: false,
+    })).toBeNull();
+    expect(setEffectiveAccountModelExactRule({
+      credentialRules: ['gpt-5.6-terra'],
+      globalRules: ['gpt-5.6-terra'],
+      exclusionPriority: 'override',
+      modelId: 'gpt-5.6-terra',
+      excluded: false,
+    })).toBeNull();
+  });
+
+  it('keeps wildcard exclusions intact when editing a different exact model', () => {
+    expect(setEffectiveAccountModelExactRule({
+      credentialRules: [],
+      globalRules: ['gpt-5.*'],
+      exclusionPriority: 'override',
+      modelId: 'gpt-6-luna',
+      excluded: true,
+    })).toEqual(['gpt-5.*', 'gpt-6-luna']);
   });
 
   it('combines runtime models, excluded definitions, and custom exact rules', () => {
