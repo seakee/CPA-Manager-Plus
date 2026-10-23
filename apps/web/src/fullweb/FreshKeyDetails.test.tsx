@@ -1,8 +1,47 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
+import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FreshKeyDetails } from './FreshKeyDetails';
 import { createPublicApiClient } from './publicApi';
 import { fullWebText as t } from '../i18n/fullweb';
+import { keyWorkspaceText as k } from '../i18n/freshKeyWorkspace';
+
+// Renderer tests exercise domain state; browser acceptance covers the shared
+// portal, focus, animation and close controls.
+vi.mock('../components/ui/Modal', () => ({
+  Modal: ({
+    open,
+    children,
+    footer,
+  }: {
+    open: boolean;
+    children?: ReactNode;
+    footer?: ReactNode;
+  }) =>
+    open ? (
+      <div>
+        {children}
+        {footer}
+      </div>
+    ) : null,
+}));
+vi.mock('../components/ui/Drawer', () => ({
+  Drawer: ({
+    open,
+    children,
+    footer,
+  }: {
+    open: boolean;
+    children?: ReactNode;
+    footer?: ReactNode;
+  }) =>
+    open ? (
+      <div>
+        {children}
+        {footer}
+      </div>
+    ) : null,
+}));
 
 const context = { basePath: '/console', apiBase: '/console/api/v2', revision: 1 };
 const key = {
@@ -59,9 +98,14 @@ describe('Canonical key detail and rename', () => {
     });
   }
   async function draft(name: string) {
+    await edit();
     await act(async () =>
       renderer.root.findByType('input').props.onChange({ target: { value: name } })
     );
+  }
+  async function edit() {
+    if (!renderer.root.findAllByType('input').length)
+      await act(async () => button(k('rename')).props.onClick());
   }
   async function submit() {
     await act(async () =>
@@ -94,6 +138,7 @@ describe('Canonical key detail and rename', () => {
     expect(view()).toContain(t('keysNameSaved'));
     expect(pending.mock.calls[pending.mock.calls.length - 1]).toEqual([false]);
     await read();
+    await edit();
     expect(renderer.root.findByType('input').props.value).toBe(renamed.name);
     expect(view()).not.toContain('admin-memory');
   });
@@ -126,6 +171,7 @@ describe('Canonical key detail and rename', () => {
         Response.json({ ...installReady, attempted: true, installAvailable: false })
       );
     await mount(fetchMock);
+    await edit();
     await act(async () => button(t('keysCheckInstallation')).props.onClick());
     await act(async () => {
       button(t('keysInstallOne')).props.onClick();
@@ -316,6 +362,28 @@ describe('Canonical key detail and rename', () => {
       expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'PUT')).toHaveLength(1);
     }
   );
+  it('lets the rejected rename modal discard its draft explicitly before rereading', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json({ ...key, name: 'original' }))
+      .mockResolvedValueOnce(new Response('', { status: 409 }))
+      .mockResolvedValueOnce(Response.json({ ...key, name: 'concurrent', nameRevision: 2 }));
+    await mount(fetchMock);
+    await draft('rejected');
+    await submit();
+    await act(async () => button(k('cancel')).props.onClick());
+    expect(window.confirm).toHaveBeenCalledWith(t('keysDiscardName'));
+    expect(button(k('cancel'))).toBeDefined();
+    vi.mocked(window.confirm).mockReturnValueOnce(true);
+    await act(async () => button(k('cancel')).props.onClick());
+    expect(
+      renderer.root.findAllByType('button').some((item) => item.props.children === k('cancel'))
+    ).toBe(false);
+    await read();
+    expect(view()).toContain('concurrent');
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'PUT')).toHaveLength(1);
+  });
+
   it('rejects a mismatched canonical response and clears rejected authentication', async () => {
     const fetchMock = vi
       .fn<typeof fetch>()
@@ -392,5 +460,34 @@ describe('Canonical key detail and rename', () => {
     await submit();
     expect(view()).toContain(t('keysNameSaved'));
     expect(saved.mock.calls[saved.mock.calls.length - 1]?.[0].name).toBe('');
+  });
+
+  it('displays honest usage/policy boundaries and forwards quick replacement requests', async () => {
+    const onRequestOperation = vi.fn();
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json(key));
+    await act(async () => {
+      renderer = create(
+        <FreshKeyDetails
+          id={key.id}
+          client={createPublicApiClient(() => context, fetchMock)}
+          credential="test-admin"
+          onUnauthorized={unauthorized}
+          onPending={pending}
+          onSaved={saved}
+          onClose={close}
+          onRequestOperation={onRequestOperation}
+        />
+      );
+    });
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'key-detail-usage-policy' }).length
+    ).toBeGreaterThan(0);
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'key-detail-metadata' }).length
+    ).toBeGreaterThan(0);
+    await act(async () =>
+      renderer.root.findByProps({ 'data-testid': 'detail-replace-key' }).props.onClick()
+    );
+    expect(onRequestOperation).toHaveBeenCalledWith('replace');
   });
 });

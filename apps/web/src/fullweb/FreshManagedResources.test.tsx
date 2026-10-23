@@ -1,16 +1,57 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
+import type { ReactNode } from 'react';
 import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FreshManagedResources } from './FreshManagedResources';
 import { createPublicApiClient } from './publicApi';
 import { fullWebText as t } from '../i18n/fullweb';
+import i18n from '../i18n';
+import { keyWorkspaceText as k } from '../i18n/freshKeyWorkspace';
+
+// Renderer tests exercise domain state; browser acceptance covers the shared
+// portal, focus, animation and close controls.
+vi.mock('../components/ui/Modal', () => ({
+  Modal: ({
+    open,
+    children,
+    footer,
+  }: {
+    open: boolean;
+    children?: ReactNode;
+    footer?: ReactNode;
+  }) =>
+    open ? (
+      <div>
+        {children}
+        {footer}
+      </div>
+    ) : null,
+}));
+vi.mock('../components/ui/Drawer', () => ({
+  Drawer: ({
+    open,
+    children,
+    footer,
+  }: {
+    open: boolean;
+    children?: ReactNode;
+    footer?: ReactNode;
+  }) =>
+    open ? (
+      <div>
+        {children}
+        {footer}
+      </div>
+    ) : null,
+}));
 
 const context = { basePath: '/console', apiBase: '/console/api/v2', revision: 1 };
 
 describe('Fresh resources within the original Console', () => {
   let renderer: ReactTestRenderer;
   const pending = vi.fn();
-  beforeEach(() => {
+  beforeEach(async () => {
+    await i18n.changeLanguage('zh-CN');
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.stubGlobal('window', {
       location: new URL('https://manager.example/console'),
@@ -54,33 +95,36 @@ describe('Fresh resources within the original Console', () => {
   const panel = (name: string) =>
     renderer.root.findByProps({ 'data-testid': `fresh-route-${name}` });
 
-  it.each(['', '/'])('mounts resources only on their own page (suffix %j) and never adds an update-channel editor', async (suffix) => {
-    const transport = vi
-      .fn<typeof fetch>()
-      .mockImplementation((url) =>
-        Promise.resolve(
-          String(url).endsWith('/api-keys')
-            ? Response.json({ keys: [], gatewayPending: true, revocationAvailable: false })
-            : new Response('', { status: 503 })
-        )
+  it.each(['', '/'])(
+    'mounts resources only on their own page (suffix %j) and never adds an update-channel editor',
+    async (suffix) => {
+      const transport = vi
+        .fn<typeof fetch>()
+        .mockImplementation((url) =>
+          Promise.resolve(
+            String(url).endsWith('/api-keys')
+              ? Response.json({ keys: [], gatewayPending: true, revocationAvailable: false })
+              : new Response('', { status: 503 })
+          )
+        );
+      await mount(transport);
+      expect(transport).not.toHaveBeenCalled();
+      await navigate('/console/api-keys' + suffix);
+      expect(panel('keys').props.hidden).toBe(false);
+      expect(renderer.root.findAllByProps({ 'data-testid': 'retry-editor' })).toHaveLength(0);
+      expect(transport.mock.calls.map(([url]) => String(url))).toEqual([
+        'https://manager.example/console/api/v2/api-keys',
+      ]);
+      await navigate('/console/config' + suffix);
+      expect(panel('keys').props.hidden).toBe(true);
+      expect(panel('retry').props.hidden).toBe(false);
+      await navigate('/console/system/updates');
+      expect(panel('retry').props.hidden).toBe(true);
+      expect(transport.mock.calls.every(([url]) => !String(url).includes('update-channel'))).toBe(
+        true
       );
-    await mount(transport);
-    expect(transport).not.toHaveBeenCalled();
-    await navigate('/console/api-keys' + suffix);
-    expect(panel('keys').props.hidden).toBe(false);
-    expect(renderer.root.findAllByProps({ 'data-testid': 'retry-editor' })).toHaveLength(0);
-    expect(transport.mock.calls.map(([url]) => String(url))).toEqual([
-      'https://manager.example/console/api/v2/api-keys',
-    ]);
-    await navigate('/console/config' + suffix);
-    expect(panel('keys').props.hidden).toBe(true);
-    expect(panel('retry').props.hidden).toBe(false);
-    await navigate('/console/system/updates');
-    expect(panel('retry').props.hidden).toBe(true);
-    expect(transport.mock.calls.every(([url]) => !String(url).includes('update-channel'))).toBe(
-      true
-    );
-  });
+    }
+  );
 
   it('retains the same unknown key creation across navigation and reconciles it without another write', async () => {
     const record = {
@@ -114,18 +158,65 @@ describe('Fresh resources within the original Console', () => {
         .findAllByType('button')
         .find((node) => node.props.children === label || node.props['aria-label'] === label)!;
     await act(async () => button(t('keysCreate')).props.onClick());
+    await act(async () =>
+      renderer.root.findByType('form').props.onSubmit({ preventDefault: vi.fn() })
+    );
     expect(pending).toHaveBeenLastCalledWith(true);
     expect(window.addEventListener).toHaveBeenCalledWith('beforeunload', expect.any(Function));
     await navigate('/console/system/updates');
     expect(panel('keys').props.hidden).toBe(true);
+    expect(renderer.root.findAllByType('form')).toHaveLength(0);
     expect(pending).toHaveBeenLastCalledWith(true);
     await navigate('/console/api-keys');
+    expect(renderer.root.findAllByType('form')).toHaveLength(1);
     await act(async () => button(t('keysCheck')).props.onClick());
     expect(transport.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
     expect(
       transport.mock.calls.some(([url]) => String(url).endsWith('/requests/' + record.requestId))
     ).toBe(true);
     expect(pending).toHaveBeenLastCalledWith(false);
+  });
+
+  it('updates the retained key workspace language without recreating a key or losing its secret', async () => {
+    const record = {
+      id: 'a'.repeat(32),
+      requestId: 'b'.repeat(32),
+      maskedPreview: 'cpamp_sk_…cccc',
+      createdAtMs: 1234,
+      managerState: 'persisted',
+      runtimeState: 'not_applied',
+      name: '',
+      nameRevision: 1,
+    };
+    const secret = 'cpamp_sk_' + 'c'.repeat(64);
+    const transport = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        Response.json({ keys: [], gatewayPending: true, revocationAvailable: false })
+      )
+      .mockResolvedValueOnce(Response.json({ key: record, createdSecret: secret }));
+    await mount(transport);
+    await navigate('/console/api-keys');
+    await act(async () =>
+      renderer.root
+        .findAllByType('button')
+        .find((node) => node.props['aria-label'] === t('keysCreate'))!
+        .props.onClick()
+    );
+    await act(async () =>
+      renderer.root.findByType('form').props.onSubmit({ preventDefault: vi.fn() })
+    );
+    for (const language of ['en', 'ru', 'zh-TW']) {
+      await act(async () => {
+        await i18n.changeLanguage(language);
+      });
+      expect(panel('keys').props.lang).toBe(language);
+      const view = JSON.stringify(renderer.toJSON());
+      expect(view).toContain(k('secretTitle'));
+      expect(view).toContain(secret);
+      expect(pending).toHaveBeenLastCalledWith(true);
+    }
+    expect(transport).toHaveBeenCalledTimes(2);
   });
 
   it('keeps an unresolved retry and its logout lock when another resource first loads', async () => {

@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { fullWebText as t } from '../i18n/fullweb';
+import { keyWorkspaceText as k } from '../i18n/freshKeyWorkspace';
+import { FullWebIcon } from './FullWebIcon';
 import { PublicApiError, type createPublicApiClient } from './publicApi';
 import type { Key } from './freshKeyMetadata';
+import { Modal } from '../components/ui/Modal';
 
 interface Operation {
   id: string;
@@ -57,6 +60,10 @@ export function FreshKeyRevocation({
   onPending,
   onChanged,
   disabled,
+  preset,
+  open = true,
+  onClose,
+  onCreateReplacement,
 }: {
   keys: Key[];
   client: ReturnType<typeof createPublicApiClient>;
@@ -65,6 +72,10 @@ export function FreshKeyRevocation({
   onPending: (value: boolean) => void;
   onChanged: () => void;
   disabled: boolean;
+  preset?: { targetId: string; mode: 'revoke' | 'replace'; seq: number } | null;
+  open?: boolean;
+  onClose?: () => void;
+  onCreateReplacement?: () => void;
 }) {
   const [target, setTarget] = useState('');
   const [keeper, setKeeper] = useState('');
@@ -79,6 +90,7 @@ export function FreshKeyRevocation({
   const [busy, setBusy] = useState(false);
   const [checked, setChecked] = useState(false);
   const [message, setMessage] = useState('');
+  const [showGuide, setShowGuide] = useState(false);
   const active = useRef(true);
   const flight = useRef(false);
   const auth = { kind: 'admin' as const, value: credential };
@@ -93,11 +105,24 @@ export function FreshKeyRevocation({
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  useEffect(() => {
+    if (!preset || request || (result?.operation && result.operation.outcome !== 'committed'))
+      return;
+    if (available.some((item) => item.id === preset.targetId)) {
+      setTarget(preset.targetId);
+      setMode(preset.mode);
+      setShowGuide(preset.mode === 'replace');
+      const fallbackKeeper = available.find((item) => item.id !== preset.targetId)?.id || '';
+      setKeeper((previous) =>
+        previous && previous !== preset.targetId && available.some((item) => item.id === previous)
+          ? previous
+          : fallbackKeeper
+      );
+    }
+  }, [preset, keys]); // eslint-disable-line react-hooks/exhaustive-deps
+
   function accept(value: Result, expected?: string, selection = request, observed = true) {
-    if (
-      !validResult(value) ||
-      (expected && (!value.operation || value.operation.id !== expected))
-    )
+    if (!validResult(value) || (expected && (!value.operation || value.operation.id !== expected)))
       throw new Error();
     if (
       selection &&
@@ -193,10 +218,10 @@ export function FreshKeyRevocation({
       (result?.operation && result.operation.outcome !== 'committed') ||
       !target ||
       !keeper ||
+      available.length <= 1 ||
       target === keeper
     )
       return;
-    if (!window.confirm(t('keysOperationConfirm'))) return;
     const id = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) =>
       b.toString(16).padStart(2, '0')
     ).join('');
@@ -220,7 +245,15 @@ export function FreshKeyRevocation({
   }
   async function proceed() {
     const o = result?.operation;
-    if (flight.current || disabled || !checked || !o || !result.nextStep || o.outcome === 'committed' || request)
+    if (
+      flight.current ||
+      disabled ||
+      !checked ||
+      !o ||
+      !result.nextStep ||
+      o.outcome === 'committed' ||
+      request
+    )
       return;
     setChecked(false);
     onPending(true);
@@ -230,112 +263,193 @@ export function FreshKeyRevocation({
     );
   }
   const unresolved = !!request || (!!result?.operation && result.operation.outcome !== 'committed');
-  return (
-    <section className="console-key-result" aria-busy={busy}>
+  const guiding = showGuide && !!onCreateReplacement && checked && !unresolved;
+  const content = (
+    <section className="console-key-result key-revocation-workspace" aria-busy={busy}>
+      {/* CI browser proofs locate controls via this heading's direct parent. */}
       <h3>{t('keysRevokeTitle')}</h3>
-      <p>{t('keysOperationHelp')}</p>
-      {message && <p role="alert">{message}</p>}
-      {request && (
-        <p>
-          {t('keysOperationId')}: <code>{request.id}</code>
-        </p>
-      )}
-      {result?.operation && (
-        <div role="status">
-          <p>
-            {t('keysOperationId')}: <code>{result.operation.id}</code>
-          </p>
-          <p>
-            {t('keysOperationTarget')}: <code>{result.operation.targetId}</code>
-          </p>
-          <p>
-            {t('keysOperationKeeper')}: <code>{result.operation.keeperId}</code>
-          </p>
-          <p>
-            {t(
-              result.operation.outcome === 'committed'
-                ? 'keysOperationCommitted'
-                : 'keysOperationPending'
-            )}
-          </p>
-          {result.nextStep && (
-            <p>
-              {t(result.nextStep === 'add' ? 'keysOperationAddNext' : 'keysOperationRevokeNext')}
-            </p>
+      {(!preset || guiding || (showGuide && !onCreateReplacement)) && (
+        <div className="key-replace-guide" data-testid="key-replacement-guide">
+          <strong>{k('replaceGuideTitle')}</strong>
+          <ol className="key-replace-steps">
+            <li>{k('replaceStep1')}</li>
+            <li>{k('replaceStep2')}</li>
+            <li>{k('replaceStep3')}</li>
+          </ol>
+          {showGuide && onCreateReplacement && (
+            <div className="key-modal-actions">
+              <button
+                className="btn btn-secondary"
+                disabled={busy || unresolved || !checked}
+                onClick={() => setShowGuide(false)}
+              >
+                {k('replacementReady')}
+              </button>
+              <button
+                className="btn btn-primary"
+                disabled={busy || unresolved || !checked}
+                onClick={onCreateReplacement}
+              >
+                {k('createReplacement')}
+              </button>
+            </div>
           )}
-          <button
-            className="btn btn-primary"
-            disabled={disabled || busy || !checked || !result.nextStep || !!request}
-            onClick={() => void proceed()}
-          >
-            {t('keysOperationContinue')}
-          </button>
         </div>
       )}
-      <fieldset
-        className="form-group console-key-operation-fields"
-        disabled={disabled || busy || unresolved || !checked}
-      >
-        <label className="form-group">
-          {t('keysOperationTarget')}
-          <span className="input-wrap">
-            <select
-              className="form-input"
-              value={target}
-              onChange={(e) => setTarget(e.target.value)}
+      {preset && (
+        <div className="key-operation-resource">
+          <strong>
+            {available.find((key) => key.id === preset.targetId)?.name || t('keysUnnamed')}
+          </strong>
+          <code>{available.find((key) => key.id === preset.targetId)?.maskedPreview}</code>
+        </div>
+      )}
+      {available.length <= 1 && guiding && (
+        <div className="key-notice key-notice-warning" data-testid="last-key-protection-notice">
+          {k('lastKeyProtectionHelp')}
+        </div>
+      )}
+      {!guiding && (
+        <>
+          <p className="key-field-help">{t('keysOperationHelp')}</p>
+          {available.length <= 1 && (
+            <div className="key-notice key-notice-warning" data-testid="last-key-protection-notice">
+              <FullWebIcon name="shield" />
+              <div>
+                <strong>{k('lastKeyProtectionTitle')}</strong>
+                <p>{k('lastKeyProtectionHelp')}</p>
+              </div>
+            </div>
+          )}
+          {message && (
+            <p role="alert" className="key-notice key-notice-warning">
+              <FullWebIcon name="alert" />
+              <span>{message}</span>
+            </p>
+          )}
+          {request && (
+            <p>
+              {t('keysOperationId')}: <code>{request.id}</code>
+            </p>
+          )}
+          {result?.operation && (
+            <div role="status">
+              <details className="key-record-identifiers">
+                <summary>{k('diagnostics')}</summary>
+                <p>
+                  {t('keysOperationId')}: <code>{result.operation.id}</code>
+                </p>
+                <p>
+                  {t('keysOperationTarget')}: <code>{result.operation.targetId}</code>
+                </p>
+                <p>
+                  {t('keysOperationKeeper')}: <code>{result.operation.keeperId}</code>
+                </p>
+              </details>
+              <p>
+                {t(
+                  result.operation.outcome === 'committed'
+                    ? 'keysOperationCommitted'
+                    : 'keysOperationPending'
+                )}
+              </p>
+              {result.nextStep && (
+                <p>
+                  {t(
+                    result.nextStep === 'add' ? 'keysOperationAddNext' : 'keysOperationRevokeNext'
+                  )}
+                </p>
+              )}
+              <button
+                className="btn btn-primary"
+                disabled={disabled || busy || !checked || !result.nextStep || !!request}
+                onClick={() => void proceed()}
+              >
+                {t('keysOperationContinue')}
+              </button>
+            </div>
+          )}
+          <fieldset
+            className="form-group console-key-operation-fields"
+            disabled={disabled || busy || unresolved || !checked}
+          >
+            <label className="form-group" hidden={!!preset}>
+              {t('keysOperationTarget')}
+              <span className="input-wrap">
+                <select
+                  className="form-input"
+                  value={target}
+                  onChange={(e) => setTarget(e.target.value)}
+                >
+                  <option value="">{t('keysOperationSelect')}</option>
+                  {available.map((k) => (
+                    <option key={k.id} value={k.id}>
+                      {k.name || t('keysUnnamed')} — {k.maskedPreview} ({k.id})
+                    </option>
+                  ))}
+                </select>
+              </span>
+            </label>
+            <label className="form-group">
+              {t('keysOperationKeeper')}
+              <span className="input-wrap">
+                <select
+                  className="form-input"
+                  value={keeper}
+                  onChange={(e) => setKeeper(e.target.value)}
+                >
+                  <option value="">{t('keysOperationSelect')}</option>
+                  {available
+                    .filter((k) => k.id !== target)
+                    .map((k) => (
+                      <option key={k.id} value={k.id}>
+                        {k.name || t('keysUnnamed')} — {k.maskedPreview} ({k.id})
+                      </option>
+                    ))}
+                </select>
+              </span>
+            </label>
+            <label className="form-group" hidden={!!preset}>
+              {t('keysOperationMode')}
+              <span className="input-wrap">
+                <select
+                  className="form-input"
+                  value={mode}
+                  onChange={(e) => setMode(e.target.value as 'revoke' | 'replace')}
+                >
+                  <option value="revoke">{t('keysOperationRevoke')}</option>
+                  <option value="replace">{t('keysOperationReplace')}</option>
+                </select>
+              </span>
+            </label>
+            <p className="key-field-help">{t('keysOperationConfirm')}</p>
+            <button
+              className="btn btn-primary"
+              disabled={!target || !keeper || target === keeper || available.length <= 1}
+              onClick={() => void prepare()}
             >
-              <option value="">{t('keysOperationSelect')}</option>
-              {available.map((k) => (
-                <option key={k.id} value={k.id}>
-                  {k.name || t('keysUnnamed')} — {k.maskedPreview} ({k.id})
-                </option>
-              ))}
-            </select>
-          </span>
-        </label>
-        <label className="form-group">
-          {t('keysOperationKeeper')}
-          <span className="input-wrap">
-            <select
-              className="form-input"
-              value={keeper}
-              onChange={(e) => setKeeper(e.target.value)}
-            >
-              <option value="">{t('keysOperationSelect')}</option>
-              {available
-                .filter((k) => k.id !== target)
-                .map((k) => (
-                  <option key={k.id} value={k.id}>
-                    {k.name || t('keysUnnamed')} — {k.maskedPreview} ({k.id})
-                  </option>
-                ))}
-            </select>
-          </span>
-        </label>
-        <label className="form-group">
-          {t('keysOperationMode')}
-          <span className="input-wrap">
-            <select
-              className="form-input"
-              value={mode}
-              onChange={(e) => setMode(e.target.value as 'revoke' | 'replace')}
-            >
-              <option value="revoke">{t('keysOperationRevoke')}</option>
-              <option value="replace">{t('keysOperationReplace')}</option>
-            </select>
-          </span>
-        </label>
-        <button
-          className="btn btn-primary"
-          disabled={!target || !keeper || target === keeper}
-          onClick={() => void prepare()}
-        >
-          {t('keysOperationPrepare')}
-        </button>
-      </fieldset>
-      <button className="btn btn-secondary" disabled={busy} onClick={() => void read()}>
-        {t('keysOperationCheck')}
-      </button>
+              {preset ? k('confirmOperation') : t('keysOperationPrepare')}
+            </button>
+          </fieldset>
+          <button className="btn btn-secondary" disabled={busy} onClick={() => void read()}>
+            {t('keysOperationCheck')}
+          </button>
+        </>
+      )}
     </section>
+  );
+  return onClose ? (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={preset?.mode === 'replace' ? k('quickReplace') : k('quickRevoke')}
+      closeDisabled={busy || unresolved || !checked}
+      className="key-operation-modal"
+      width={560}
+    >
+      {content}
+    </Modal>
+  ) : (
+    content
   );
 }

@@ -236,4 +236,33 @@ describe('Canonical revocation recovery UI', () => {
     expect(view.root.findByType('fieldset').props.disabled).toBe(true);
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
   });
+
+  it('shows last-key protection notice when only one active key exists and honours preset only when idle', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(result(null, ''));
+    await act(async () => {
+      view = create(
+        <FreshKeyRevocation
+          keys={[keys[0]]}
+          client={createPublicApiClient(
+            () => ({ basePath: '/control', apiBase: '/control/api/v2', revision: 1 }),
+            fetchMock
+          )}
+          credential="test-admin"
+          onUnauthorized={vi.fn()}
+          onPending={pending}
+          onChanged={changed}
+          disabled={false}
+          preset={{ targetId: target, mode: 'replace', seq: 1 }}
+        />
+      );
+    });
+    expect(
+      view.root.findAllByProps({ 'data-testid': 'last-key-protection-notice' }).length
+    ).toBeGreaterThan(0);
+    expect(
+      view.root.findAllByProps({ 'data-testid': 'key-replacement-guide' }).length
+    ).toBeGreaterThan(0);
+    expect(view.root.findAllByType('select')[0].props.value).toBe(target);
+    expect(view.root.findAllByType('select')[2].props.value).toBe('replace');
+  });
 });
