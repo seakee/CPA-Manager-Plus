@@ -11,6 +11,13 @@ import (
 
 func TestBootstrapSameBuildBoundedStaticGraph(t *testing.T) {
 	dist := fstest.MapFS{
+		".vite/manifest.json": {Data: []byte(`{
+"../src/fullweb/UpgradeAuthenticationEntry.tsx":{"file":"assets/upgrade-AbCd1234.js","imports":["login"],"dynamicImports":["console"]},
+"login":{"file":"assets/login-AbCd1234.js","css":["assets/login-AbCd1234.css"]},
+"console":{"file":"assets/console-AbCd1234.js"}}`)},
+		"assets/upgrade-AbCd1234.js":      {Data: []byte(`import("./console-AbCd1234.js")`)},
+		"assets/login-AbCd1234.js":        {Data: []byte(`export const login=true`)},
+		"assets/login-AbCd1234.css":       {Data: []byte(`input{color:black}`)},
 		"index.html":                      {Data: []byte(`<div id="root"></div><script src="./assets/index-AbCd1234.js"></script><link href="./assets/index-AbCd1234.css"><script>__CPAMP_ROUTING_CONTEXT__</script>`)},
 		"assets/index-AbCd1234.js":        {Data: []byte(`import{a}from"./shared-AbCd1234.js";import("./console-AbCd1234.js")`)},
 		"assets/shared-AbCd1234.js":       {Data: []byte(`export const a=1;`)},
@@ -25,6 +32,7 @@ func TestBootstrapSameBuildBoundedStaticGraph(t *testing.T) {
 		status       int
 	}{
 		{"GET", "/ui", 200}, {"HEAD", "/ui", 200}, {"POST", "/ui", 404},
+		{"GET", "/assets/upgrade-AbCd1234.js", 200}, {"GET", "/assets/login-AbCd1234.js", 200}, {"GET", "/assets/login-AbCd1234.css", 200},
 		{"GET", "/assets/index-AbCd1234.js", 200}, {"GET", "/assets/shared-AbCd1234.js", 200}, {"GET", "/assets/index-AbCd1234.css", 200}, {"GET", "/assets/image-AbCd1234.png", 200},
 		{"GET", "/assets/console-AbCd1234.js", 404}, {"GET", "/assets/unreferenced-AbCd1234.js", 404}, {"GET", "/assets/missing-AbCd1234.js", 404}, {"GET", "/ui/anything", 404}, {"GET", "/assets/index-AbCd1234.js/", 404},
 		{"GET", "/assets%2findex-AbCd1234.js", 404}, {"GET", "/assets/../index.html", 404},

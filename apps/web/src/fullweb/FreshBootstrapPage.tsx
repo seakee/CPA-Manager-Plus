@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { bootstrapJourneyText as journey } from '../i18n/bootstrapJourney';
 import { shellText } from '../i18n/consoleShell';
 import logo from '../assets/brand/cpamp-logo-horizontal-color.svg?inline';
@@ -12,6 +12,9 @@ import {
 } from './bootstrapTransport';
 
 import { FreshSetupWizard } from './FreshSetupWizard';
+const UpgradeAuthenticationEntry = lazy(() => import('./UpgradeAuthenticationEntry').then(
+  (module) => ({ default: module.UpgradeAuthenticationEntry })
+));
 export interface FreshBootstrapPageProps {
   handoff: Handoff | null;
   transport: BootstrapTransportClient;
@@ -26,8 +29,8 @@ interface ActionFeedback {
 }
 
 // Public discovery never confers write authority. Non-Fresh statuses only
-// provide a Host-side preflight next step; they cannot enter the Fresh claim.
-type DiscoveryGuidance = ActionFeedback & { flow: 'fresh' | 'host'; retryable?: true };
+// enter either the existing-Admin gate or host intervention, never Fresh claim.
+type DiscoveryGuidance = ActionFeedback & { flow: 'fresh' | 'host' | 'upgrade'; retryable?: true };
 function publicDiscoveryGuidance(payload: unknown): DiscoveryGuidance | null {
   if (!payload || typeof payload !== 'object') return null;
   const value = payload as Record<string, unknown>;
@@ -56,7 +59,7 @@ function publicDiscoveryGuidance(payload: unknown): DiscoveryGuidance | null {
   ) {
     return {
       tone: 'warn',
-      flow: 'host',
+      flow: 'upgrade',
       title: '检测到尚未获得升级资格的现有来源',
       detail:
         '只能在受信宿主机检查原始来源。当前无法进入 Fresh 初始化或 Upgrade 切换；预检成功也不代表获得导入或覆盖授权。',
@@ -240,6 +243,8 @@ export function FreshBootstrapPage({ handoff, transport }: FreshBootstrapPagePro
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void executeStart(handoff);
   }, [handoff, executeStart]);
+
+  if (!handoff && discoveryNote?.flow === 'upgrade') return <Suspense fallback={<></>}><UpgradeAuthenticationEntry /></Suspense>;
 
   return (
     <div className="bootstrap-shell" data-testid="fresh-bootstrap-shell">

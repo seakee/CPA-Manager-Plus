@@ -2,7 +2,10 @@ package legacypreflight
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -20,17 +23,19 @@ import (
 )
 
 type Report struct {
-	SourceKind             string                  `json:"sourceKind"`
-	Observed               sqlite.LegacyInspection `json:"observed"`
-	Unknown                []string                `json:"unknown"`
-	Blocked                []string                `json:"blocked"`
-	UpgradeAuthorized      bool                    `json:"upgradeAuthorized"`
-	CompatibilityProfile   *CompatibilityProfile   `json:"compatibilityProfile,omitempty"`
-	ExactSourceRelease     *ProfileObservation     `json:"exactSourceRelease,omitempty"`
-	BridgeReadiness        *BridgeReadiness        `json:"bridgeReadiness,omitempty"`
-	PlannedBridgeCandidate *PlannedBridgeCandidate `json:"plannedBridgeCandidate,omitempty"`
-	ForwardHopEvidence     *ForwardHopEvidence     `json:"forwardHopEvidence,omitempty"`
-	UpgradePreconditions   *UpgradePreconditions   `json:"upgradePreconditions,omitempty"`
+	// Internal binding witness, never inventory or authentication authority.
+	AdminCredentialRevision string                  `json:"-"`
+	SourceKind              string                  `json:"sourceKind"`
+	Observed                sqlite.LegacyInspection `json:"observed"`
+	Unknown                 []string                `json:"unknown"`
+	Blocked                 []string                `json:"blocked"`
+	UpgradeAuthorized       bool                    `json:"upgradeAuthorized"`
+	CompatibilityProfile    *CompatibilityProfile   `json:"compatibilityProfile,omitempty"`
+	ExactSourceRelease      *ProfileObservation     `json:"exactSourceRelease,omitempty"`
+	BridgeReadiness         *BridgeReadiness        `json:"bridgeReadiness,omitempty"`
+	PlannedBridgeCandidate  *PlannedBridgeCandidate `json:"plannedBridgeCandidate,omitempty"`
+	ForwardHopEvidence      *ForwardHopEvidence     `json:"forwardHopEvidence,omitempty"`
+	UpgradePreconditions    *UpgradePreconditions   `json:"upgradePreconditions,omitempty"`
 }
 
 type Options struct {
@@ -165,12 +170,19 @@ func inspect(ctx context.Context, paths sqlite.InspectionPaths, options Options,
 		ReadOnlySnapshot: options.readOnlySnapshot,
 	}
 	var observed sqlite.LegacyInspection
+	var credentialRevision string
 	if options.adminKey != "" {
 		observed, err = sqlite.InspectLegacySourceForAdmin(ctx, paths, inspectionOptions, func(db *sql.DB) error {
 			credential, found, err := setting.New(db).LoadAdminCredential(ctx)
 			if err != nil || !found || !security.VerifyAdminKey(credential, options.adminKey) {
 				return sqlite.ErrLegacyAdminUnauthorized
 			}
+			raw, err := json.Marshal(credential)
+			if err != nil {
+				return sqlite.ErrLegacyAdminUnauthorized
+			}
+			digest := sha256.Sum256(raw)
+			credentialRevision = hex.EncodeToString(digest[:])
 			return nil
 		})
 	} else {
@@ -179,6 +191,7 @@ func inspect(ctx context.Context, paths sqlite.InspectionPaths, options Options,
 	report = Report{SourceKind: "unknown", Observed: observed, Unknown: []string{
 		"exact-source-release", "compatibility-profile", "verified-backup", "full-database-integrity", "archive-content",
 	}, Blocked: append([]string{}, observed.Issues...)}
+	report.AdminCredentialRevision = credentialRevision
 	defer func() { addCompatibilityObservations(&report) }()
 	if err != nil {
 		report.Blocked = append(report.Blocked, "inspection-failed")

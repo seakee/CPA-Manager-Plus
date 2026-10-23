@@ -2,6 +2,7 @@ package fullweb
 
 import (
 	"bytes"
+	"encoding/json"
 	"io/fs"
 	"net/http"
 	"path"
@@ -48,8 +49,9 @@ func (h BootstrapHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // Dynamic Console imports are intentionally excluded. The Bootstrap entry is
-// an eager part of Full Web; only static imports, entry CSS and its resources
-// can be requested through the fixed carrier.
+// an eager part of Full Web. The one bounded Upgrade entry may load the existing
+// login UI; its static manifest closure is allowed without admitting Console's
+// dynamic imports or granting API authority.
 func (h BootstrapHandler) loadingGraph(index []byte) map[string]bool {
 	allowed := map[string]bool{}
 	var visit func(string)
@@ -75,6 +77,31 @@ func (h BootstrapHandler) loadingGraph(index []byte) map[string]bool {
 	}
 	for _, reference := range htmlAssetReference.FindAllSubmatch(index, -1) {
 		visit(string(reference[1]))
+	}
+	var manifest map[string]struct {
+		File    string   `json:"file"`
+		Imports []string `json:"imports"`
+		CSS     []string `json:"css"`
+		Assets  []string `json:"assets"`
+	}
+	if raw, err := fs.ReadFile(h.Dist, ".vite/manifest.json"); err == nil && json.Unmarshal(raw, &manifest) == nil {
+		seen := map[string]bool{}
+		var entry func(string)
+		entry = func(key string) {
+			item, ok := manifest[key]
+			if !ok || seen[key] {
+				return
+			}
+			seen[key] = true
+			visit(item.File)
+			for _, name := range append(item.CSS, item.Assets...) {
+				visit(name)
+			}
+			for _, dependency := range item.Imports {
+				entry(dependency)
+			}
+		}
+		entry("../src/fullweb/UpgradeAuthenticationEntry.tsx")
 	}
 	return allowed
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -10,6 +11,7 @@ import (
 
 	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	routingdomain "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/routing"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradeauth"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/httpapi"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrapdiscovery"
@@ -28,6 +30,7 @@ type startupHTTPHandler struct {
 	projectionMu      sync.RWMutex
 	projection        bootstrap.PublicDiscovery
 	readOnlyDiscovery http.Handler
+	upgradeAuth       http.Handler
 	next              atomic.Value // *startupHandlerTarget
 	lifecycle         atomic.Value // routingdomain.DiscoveryLifecycle
 	ready             atomic.Bool
@@ -52,10 +55,21 @@ func newStartupHTTPHandler(result bootstrap.PublicDiscovery) *startupHTTPHandler
 }
 
 // The blocked/pre-ready operator may inspect the same bounded public discovery
-// in a read-only shell. No Bootstrap API, Admin or Upgrade writer is mounted.
+// in a read-only shell. The separate Upgrade leaf authenticates only; no
+// Bootstrap API or Upgrade writer is mounted.
 func (h *startupHTTPHandler) serveFixedBootstrap(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == bootstrap.FixedBootstrapDiscoveryPath {
 		h.discovery.ServeHTTP(w, r)
+		return
+	}
+	if r.URL.Path == upgradeauth.Path {
+		h.projectionMu.RLock()
+		defer h.projectionMu.RUnlock()
+		if !h.ready.Load() && h.discoveryLifecycle() == routingdomain.DiscoveryActive && h.readOnlyDiscovery != nil && h.upgradeAuth != nil {
+			h.upgradeAuth.ServeHTTP(w, r)
+		} else {
+			http.NotFound(w, r)
+		}
 		return
 	}
 	if h.ready.Load() || h.discoveryLifecycle() != routingdomain.DiscoveryActive ||
@@ -95,6 +109,11 @@ func (h *startupHTTPHandler) serveDiscovery(w http.ResponseWriter, r *http.Reque
 func (h *startupHTTPHandler) EnableReadOnlyDiscovery(paths sqliterepo.InspectionPaths, options legacypreflight.Options, timeout time.Duration) {
 	h.projectionMu.Lock()
 	defer h.projectionMu.Unlock()
+	// Entropy failure leaves this leaf closed without weakening discovery.
+	h.upgradeAuth = nil
+	if handler, err := upgradeauth.New(paths, os.Getenv("CPAMP_PUBLIC_ORIGIN")); err == nil {
+		h.upgradeAuth = handler
+	}
 	h.readOnlyDiscovery = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
@@ -112,6 +131,7 @@ func (h *startupHTTPHandler) BeginWritableStartup() {
 	defer h.projectionMu.Unlock()
 	h.projection = bootstrapdiscovery.Unavailable()
 	h.readOnlyDiscovery = nil
+	h.upgradeAuth = nil
 }
 
 func (h *startupHTTPHandler) discoveryLifecycle() routingdomain.DiscoveryLifecycle {

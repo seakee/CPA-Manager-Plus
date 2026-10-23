@@ -1,0 +1,265 @@
+/* Upgrade owns this Bootstrap surface; shared Console styles stay unchanged. */
+.upgrade-entry {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+.upgrade-header {
+  min-height: 90px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 14px 4%;
+  background: var(--glass-bg);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.upgrade-header > img {
+  width: 188px;
+  height: 57px;
+  object-fit: contain;
+}
+
+.upgrade-appearance,
+.upgrade-language {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-secondary);
+}
+
+.upgrade-appearance {
+  gap: 19px;
+}
+
+.upgrade-language {
+  position: relative;
+  border-radius: 8px;
+}
+
+.upgrade-language select {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  width: 125px;
+  min-height: 40px;
+  cursor: pointer;
+}
+
+.upgrade-language option {
+  color: var(--text-primary);
+  background: var(--bg-surface);
+}
+
+.upgrade-theme {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.upgrade-language:focus-within,
+.upgrade-entry :focus-visible {
+  outline: 3px solid var(--border-focus);
+  outline-offset: 3px;
+}
+
+.upgrade-main {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 66px 24px 0;
+}
+
+.upgrade-card {
+  width: min(100%, 1016px);
+  background: var(--glass-bg);
+  border: 1px solid var(--border-subtle);
+  border-radius: 22px;
+  overflow: hidden;
+}
+
+.upgrade-body {
+  padding: 44px 46px 26px;
+}
+
+.upgrade-heading {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.upgrade-heading h1 {
+  margin: 0;
+  font-size: 34px;
+  line-height: 1.35;
+  letter-spacing: -0.6px;
+  color: var(--text-primary);
+}
+
+.upgrade-heading .badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: 18px;
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.upgrade-heading .badge-emerald {
+  background: var(--emerald-soft);
+  color: var(--emerald);
+}
+
+.upgrade-subtitle {
+  margin: 12px 0 28px;
+  color: var(--text-secondary);
+  font-size: 20px;
+  line-height: 1.6;
+}
+
+.upgrade-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 19px;
+  border: 1px solid var(--amber-border);
+  border-radius: 11px;
+  background: var(--amber-soft);
+  color: var(--text-primary);
+  line-height: 1.65;
+}
+
+.upgrade-notice > svg {
+  margin-top: 2px;
+  color: var(--amber);
+}
+.upgrade-notice h2 {
+  margin: 0;
+  font-size: 18px;
+}
+.upgrade-notice p {
+  margin: 8px 0 0;
+}
+.upgrade-next {
+  margin: 20px 0 0;
+  color: var(--text-secondary);
+  line-height: 1.7;
+}
+
+.upgrade-footer {
+  min-height: 90px;
+  border-top: 1px solid var(--border-subtle);
+  padding: 20px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.upgrade-footer .btn {
+  min-height: 48px;
+  gap: 10px;
+}
+
+.upgrade-footer .btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.upgrade-login-recovery {
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.upgrade-login-recovery summary {
+  color: var(--accent);
+  cursor: pointer;
+}
+.upgrade-login-recovery p {
+  margin: 12px 0 0;
+}
+
+@media (max-width: 760px) {
+  .upgrade-header {
+    min-height: 70px;
+    padding: 8px 19px;
+    gap: 12px;
+  }
+  .upgrade-header > img {
+    width: 140px;
+    height: 44px;
+    min-width: 0;
+  }
+  .upgrade-appearance {
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .upgrade-theme {
+    width: 32px;
+  }
+  .upgrade-entry .journey-version {
+    font-size: 12px;
+    padding: 5px 8px;
+  }
+  .upgrade-language {
+    width: 32px;
+    height: 40px;
+    justify-content: center;
+  }
+  .upgrade-language select {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+  }
+  .upgrade-main {
+    padding: 25px 14px 0;
+  }
+  .upgrade-card {
+    border-radius: 16px;
+  }
+  .upgrade-body {
+    padding: 29px 20px 22px;
+  }
+  .upgrade-heading {
+    gap: 10px;
+  }
+  .upgrade-heading h1 {
+    font-size: 26px;
+    letter-spacing: -0.3px;
+  }
+  .upgrade-heading .badge {
+    font-size: 12px;
+    padding: 4px 9px;
+  }
+  .upgrade-subtitle {
+    font-size: 16px;
+    margin: 10px 0 23px;
+  }
+  .upgrade-notice {
+    padding: 15px;
+  }
+  .upgrade-notice h2 {
+    font-size: 17px;
+  }
+  .upgrade-footer {
+    padding: 18px 20px;
+  }
+}

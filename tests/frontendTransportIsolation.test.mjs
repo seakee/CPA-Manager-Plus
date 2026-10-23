@@ -66,12 +66,28 @@ function graph(entry, panel = false, { skipLegacyCompatibility = false } = {}) {
       // Bootstrap and the canonical transport stay isolated. The verified
       // Console route explicitly reuses the original login/session modules,
       // and only mounts business pages after ProductComplete. These are the
-      // three bounded compatibility edges; Fresh login runtime tests assert
+      // bounded compatibility edges; Fresh login runtime tests assert
       // that they never call legacy discovery/login instead of canonical auth.
       if (
         skipLegacyCompatibility &&
         file.endsWith('/fullweb/FreshConsolePage.tsx') &&
         ['./LegacyConsolePage', './FullWebLoginPage', './freshSession'].includes(specifier)
+      ) {
+        continue;
+      }
+      // Upgrade reuses the same login UI and original credential persistence.
+      // Keep the Upgrade entry/session themselves in the checked core graph:
+      // only these exact UI/storage/credential-key edges may reach legacy dependencies.
+      if (
+        skipLegacyCompatibility &&
+        ((file.endsWith('/fullweb/UpgradeAuthenticationEntry.tsx') &&
+          specifier === './FullWebLoginPage') ||
+          (file.endsWith('/fullweb/upgradeSession.ts') &&
+            [
+              '../stores/useAuthStore',
+              '../services/storage/secureStorage',
+              '../utils/constants',
+            ].includes(specifier)))
       ) {
         continue;
       }
@@ -136,7 +152,7 @@ describe('Full Web / Panel Lite runtime dependency isolation', () => {
     }
   });
 
-  it('Full Web core excludes legacy transport outside the explicit login/session/Console compatibility edges', () => {
+  it('Full Web core excludes legacy transport outside the explicit login/session/Console/Upgrade compatibility edges', () => {
     const files = [
       ...new Set([
         ...graph('fullweb/main.tsx', false, { skipLegacyCompatibility: true }),
@@ -144,6 +160,8 @@ describe('Full Web / Panel Lite runtime dependency isolation', () => {
       ]),
     ];
     expect(files.length).toBeGreaterThan(2);
+    expect(files).toContain('fullweb/UpgradeAuthenticationEntry.tsx');
+    expect(files).toContain('fullweb/upgradeSession.ts');
     expect(
       files.filter(
         (file) =>
@@ -155,6 +173,27 @@ describe('Full Web / Panel Lite runtime dependency isolation', () => {
       const source = readFileSync(path.join(src, file), 'utf8');
       expect(source, file).not.toMatch(/localStorage|sessionStorage|\/v0\/management/);
     }
+  });
+
+  it('limits Upgrade compatibility imports to the original credential persistence modules', () => {
+    const session = path.join(src, 'fullweb/upgradeSession.ts');
+    expect(runtimeImports(session).sort()).toEqual([
+      '../services/storage/secureStorage',
+      '../stores/useAuthStore',
+      '../utils/constants',
+    ]);
+    // The shared constants module also defines legacy CPA endpoints. Only the
+    // original auth-storage key belongs to this compatibility boundary.
+    const parsed = ts.createSourceFile(session, readFileSync(session, 'utf8'), ts.ScriptTarget.Latest);
+    const constants = parsed.statements.find(
+      (node) => ts.isImportDeclaration(node) && node.moduleSpecifier.text === '../utils/constants'
+    );
+    expect(constants?.importClause?.name).toBeUndefined();
+    const bindings = constants?.importClause?.namedBindings;
+    expect(bindings && ts.isNamedImports(bindings)).toBe(true);
+    expect(bindings.elements.map((element) => (element.propertyName ?? element.name).text)).toEqual([
+      'STORAGE_KEY_AUTH',
+    ]);
   });
 
   it('mounts the existing Console only through the authenticated canonical bridge seam', () => {

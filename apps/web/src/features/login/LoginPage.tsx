@@ -124,6 +124,9 @@ export interface ConsoleLoginAdapter {
   address: string;
   error: string;
   credentialPlaceholder?: string;
+  connectionHint?: string;
+  status?: string;
+  recoveryHelp?: { label: string; description: string };
   restore: () => Promise<void>;
   authenticate: (credential: string, remember: boolean) => Promise<boolean>;
 }
@@ -145,6 +148,7 @@ export function LoginPage({ consoleAuth }: { consoleAuth?: ConsoleLoginAdapter }
   const storedRememberPassword = useAuthStore((state) => state.rememberPassword);
   const setUsageServiceConfig = useUsageServiceStore((state) => state.setUsageServiceConfig);
   const languageMenuRef = useRef<HTMLDivElement | null>(null);
+  const consoleFormRef = useRef<HTMLFormElement | null>(null);
 
   const [apiBase, setApiBase] = useState('');
   const [adminKey, setAdminKey] = useState('');
@@ -393,6 +397,7 @@ export function LoginPage({ consoleAuth }: { consoleAuth?: ConsoleLoginAdapter }
 
   const handleSubmit = useCallback(async () => {
     if (consoleAuth) {
+      if (consoleAuth.status) return;
       if (!adminKey.trim()) {
         setError(t('login.admin_key_required'));
         return;
@@ -530,6 +535,13 @@ export function LoginPage({ consoleAuth }: { consoleAuth?: ConsoleLoginAdapter }
     },
     [handleSubmit, loading]
   );
+
+  const consoleError = consoleAuth && (error || consoleAuth.error);
+  useEffect(() => {
+    if (consoleError && !autoLoading && !autoLoginSuccess && !loading) {
+      consoleFormRef.current?.querySelector<HTMLInputElement>('#console-admin-key')?.focus();
+    }
+  }, [consoleError, autoLoading, autoLoginSuccess, loading]);
 
   if (!consoleAuth && isAuthenticated && !autoLoading && !autoLoginSuccess) {
     return <Navigate to={redirectAfterLogin} replace />;
@@ -873,6 +885,7 @@ export function LoginPage({ consoleAuth }: { consoleAuth?: ConsoleLoginAdapter }
 
               {!usageServiceNeedsSetup && (
                 <form
+                  ref={consoleFormRef}
                   className={styles.loginForm}
                   data-testid={consoleAuth ? 'console-login' : undefined}
                   onSubmit={(event) => {
@@ -884,9 +897,9 @@ export function LoginPage({ consoleAuth }: { consoleAuth?: ConsoleLoginAdapter }
                     <div className={styles.label}>{t('login.connection_current')}</div>
                     <div className={styles.value}>{apiBase || detectedBase}</div>
                     <div className={styles.hint}>
-                      {isManagerServerMode
+                      {consoleAuth?.connectionHint || (isManagerServerMode
                         ? t('login.usage_service_configured_hint')
-                        : t('login.connection_auto_hint')}
+                        : t('login.connection_auto_hint'))}
                     </div>
                   </div>
 
@@ -917,6 +930,8 @@ export function LoginPage({ consoleAuth }: { consoleAuth?: ConsoleLoginAdapter }
                   <Input
                     autoFocus
                     id={consoleAuth ? 'console-admin-key' : undefined}
+                    aria-invalid={Boolean(consoleError)}
+                    aria-describedby={consoleError ? 'console-login-error' : undefined}
                     label={loginCredentialLabel}
                     placeholder={loginCredentialPlaceholder}
                     type={
@@ -939,6 +954,13 @@ export function LoginPage({ consoleAuth }: { consoleAuth?: ConsoleLoginAdapter }
                     )}
                   />
 
+                  {consoleAuth?.recoveryHelp && (
+                    <details className="upgrade-login-recovery">
+                      <summary>{consoleAuth.recoveryHelp.label}</summary>
+                      <p>{consoleAuth.recoveryHelp.description}</p>
+                    </details>
+                  )}
+
                   <div className={styles.toggleAdvanced}>
                     <SelectionCheckbox
                       checked={rememberCredential}
@@ -949,12 +971,14 @@ export function LoginPage({ consoleAuth }: { consoleAuth?: ConsoleLoginAdapter }
                     />
                   </div>
 
-                  <Button fullWidth type="submit" loading={loading} disabled={Boolean(consoleAuth) && !adminKey.trim()}>
+                  {consoleAuth?.status && <p role="status">{consoleAuth.status}</p>}
+
+                  <Button fullWidth type="submit" loading={loading} disabled={Boolean(consoleAuth) && (!adminKey.trim() || Boolean(consoleAuth?.status))}>
                     {loading ? t('login.submitting') : t('login.submit_button')}
                   </Button>
 
                   {(error || consoleAuth?.error) && (
-                    <div className={styles.errorBox} role="alert">{error || consoleAuth?.error}</div>
+                    <div id={consoleAuth ? 'console-login-error' : undefined} className={styles.errorBox} role="alert">{error || consoleAuth?.error}</div>
                   )}
                 </form>
               )}

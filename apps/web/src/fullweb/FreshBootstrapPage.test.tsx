@@ -5,6 +5,10 @@ import { FreshBootstrapPage } from './FreshBootstrapPage';
 import { setFullWebLanguage } from '../i18n/fullweb';
 import { bootstrapJourneyText } from '../i18n/bootstrapJourney';
 
+vi.mock('./UpgradeAuthenticationEntry', () => ({
+  UpgradeAuthenticationEntry: () => <div data-testid="upgrade-auth-entry" />,
+}));
+
 const identity = {
   admissionId: 'admission-01',
   installationId: 'install-01',
@@ -445,7 +449,7 @@ describe('FreshBootstrapPage product preview workflow', () => {
       '检测到需要宿主机介入的恢复状态',
     ],
   ])(
-    'shows only Host preflight for non-Fresh %s',
+    'routes non-Fresh %s to its own authentication or host gate',
     async (status, mode, authEntry, reason, authRequired, title) => {
       vi.stubGlobal(
         'fetch',
@@ -468,6 +472,12 @@ describe('FreshBootstrapPage product preview workflow', () => {
           <FreshBootstrapPage handoff={null} transport={createBootstrapTransport(vi.fn())} />
         );
       });
+      if (status === 'unsupported_upgrade') {
+        expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-auth-entry' })).toHaveLength(1);
+        expect(renderer.root.findAllByProps({ 'data-testid': 'cli-handoff-command' })).toHaveLength(0);
+        expect(renderer.root.findAllByProps({ 'data-testid': 'host-preflight-command' })).toHaveLength(0);
+        return;
+      }
       expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-guidance'))).toContain(title);
       expect(renderer.root.findAllByProps({ 'aria-label': 'Fresh Bootstrap 进度' })).toHaveLength(
         0

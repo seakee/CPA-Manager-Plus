@@ -193,6 +193,51 @@ installation wizard. A major v1-to-v2 migration instead requires existing-Admin
 authentication and an explicit migration decision; it never consumes a Fresh
 claim or creates a replacement administrator key.
 
+#### Existing-Manager authentication leaf (2026-10-23)
+
+Before writable startup, the exact `POST
+/.well-known/cpamp-bootstrap/upgrade/authenticate` leaf accepts the **existing
+Manager administrator key** in `Authorization: Bearer <key>`. It is outside
+`/api/v2/`; Fresh handlers still reject Admin credentials. This leaf creates no
+session, claim, backup, migration, route or completion receipt. CPA keys, cookies
+and browser logged-in flags are not credentials for it.
+
+The leaf uses the current bounded, fenced, no-migrate source inspection and the
+persisted credential verifier. Only a safely observed, initialized legacy or
+unowned native-v2 source projecting `unsupported_upgrade` can authenticate;
+Fresh-owned sources remain unavailable. Its success DTO is
+`{contract_version:"cpamp.upgrade-auth.v1", authenticated:true,
+source_revision:<opaque observation id>, status:"unsupported_upgrade",
+migration_available:false, expires_in_seconds:60}`. It discloses no inventory,
+paths, CPA endpoint or canonical entry. The identifier detects source/credential and
+process changes; it grants no authority. Credential revision is compared internally;
+source identity uses the existing file identity/size/mtime and schema witness,
+not a complete content hash or backup-consistency proof. Revalidation supplies the original key
+and `X-CPAMP-Upgrade-Source`; a changed observation returns 409. Refresh/restart
+must reverify the credential, not reuse a local authenticated flag. The browser
+keeps its observation in memory for at most 60 seconds and revalidates after
+30 seconds, on foreground return and on explicit refresh. Late responses are
+discarded; failure revokes the local observation and returns to the existing
+login page. Remembered credentials use the existing auth storage format, never
+an additional account/session authority. Old entries without an explicit
+same-origin Manager base/runtime provenance require manual login.
+
+Errors use `{contract_version:"cpamp.upgrade-auth.v1", error:{code:<code>}}`:
+401 `admin_unauthorized`, 403 `origin_rejected`, 409 `source_changed`,
+503 `source_unavailable`, 405 `method_not_allowed` (`Allow: POST`). Browser
+requests must be same-origin; there is no CORS/cookie authentication. The
+origin is checked against the existing trusted `CPAMP_PUBLIC_ORIGIN` deployment
+setting when supplied (including TLS termination), otherwise direct TLS/Host.
+Forwarded headers cannot establish this trust. Query
+strings, unknown paths and aliases are generic 404. Responses are `no-store`.
+Writable startup, readiness, Fresh takeover or canonical commit/completion
+retires this leaf to the captured generic 404 behavior. It never delegates to
+Gateway, normal login/config loading, `store.Open`, bootstrap initialization or
+collector startup. This narrow auth contract does not resolve the future
+migration executor or widen the Fresh-only fixed API.
+The fixed asset carrier admits only the Upgrade entry's static manifest closure
+in addition to its initial graph; dynamic Console imports remain unavailable.
+
 Administrator initialization is independent of Bootstrap classification. A
 matching durable Fresh installation, generation and OperationID checkpoint can
 retain `Fresh` in progress after administrator initialization. Administrator
