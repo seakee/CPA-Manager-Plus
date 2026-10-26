@@ -196,16 +196,22 @@ func retainedAccountEventSourceTx(ctx context.Context, tx *sql.Tx, accountKeys [
 	for _, key := range accountKeys {
 		args = append(args, key)
 	}
+	// Drive archived candidates from the account index. The archive timestamp
+	// index verifies actual deletion without scanning every archived credential.
 	return fmt.Sprintf(`(select e.id, e.%s from usage_events e
 		union all
 		select p.event_id as id, p.%s
-		from usage_archive_event_refs archived
-		join %s p on p.event_id = archived.raw_event_id
-		where archived.raw_deleted_at_ms is not null
-			and p.account_key in (%s)
+		from %s p
+		where p.account_key in (%s)
 			and p.event_id <= %d
-			and not exists (
-				select 1 from usage_events live where live.event_hash = archived.event_hash
+			and exists (
+				select 1 from usage_archive_event_refs archived
+				where archived.timestamp_ms = p.timestamp_ms
+					and archived.raw_event_id = p.event_id
+					and archived.raw_deleted_at_ms is not null
+					and not exists (
+						select 1 from usage_events live where live.event_hash = archived.event_hash
+					)
 			))`,
 		strings.Join(retainedPricingColumns, ", e."),
 		strings.Join(retainedPricingColumns, ", p."), usageprojection.EventTable, placeholders, coverageID,

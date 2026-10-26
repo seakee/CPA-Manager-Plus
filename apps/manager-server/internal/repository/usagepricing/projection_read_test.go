@@ -43,8 +43,8 @@ func TestRetainedAccountEventSourceUsesProjectionAccountIndex(t *testing.T) {
 	)`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`create index idx_usage_archive_event_refs_raw_id
-		on usage_archive_event_refs(raw_event_id)`); err != nil {
+	if _, err := db.Exec(`create index idx_usage_archive_event_refs_timestamp_deleted
+		on usage_archive_event_refs(timestamp_ms, raw_deleted_at_ms)`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`create index idx_usage_monitoring_event_projection_account_window
