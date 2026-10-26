@@ -25,12 +25,26 @@ func TestRetainedAccountEventSourceUsesProjectionAccountIndex(t *testing.T) {
 	if _, err := db.Exec("create table usage_monitoring_event_projection_v1 (" + strings.Join(columns, ",") + ")"); err != nil {
 		t.Fatal(err)
 	}
-	rawColumns := make([]string, 0, len(retainedPricingColumns)+1)
-	rawColumns = append(rawColumns, "id integer primary key")
+	rawColumns := make([]string, 0, len(retainedPricingColumns)+2)
+	rawColumns = append(rawColumns, "id integer primary key", "event_hash text")
 	for _, column := range retainedPricingColumns {
 		rawColumns = append(rawColumns, column+" text")
 	}
 	if _, err := db.Exec("create table usage_events (" + strings.Join(rawColumns, ",") + ")"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`create index idx_usage_events_event_hash on usage_events(event_hash)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`create table usage_archive_event_refs (
+		raw_event_id integer not null,
+		raw_deleted_at_ms integer,
+		event_hash text not null
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`create index idx_usage_archive_event_refs_raw_id
+		on usage_archive_event_refs(raw_event_id)`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`create index idx_usage_monitoring_event_projection_account_window
