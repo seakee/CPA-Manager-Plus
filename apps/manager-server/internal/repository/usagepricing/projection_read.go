@@ -157,6 +157,9 @@ func retainedPricingRebuildSourceTx(ctx context.Context, tx *sql.Tx) (string, in
 	return source, latestID, nil
 }
 
+// retainedEventSourceTx prefers the original raw event whenever it still exists.
+// Only genuinely deleted archive records may use a compatible retained projection.
+// This avoids losing an intact raw event when its projection is missing or stale.
 func retainedEventSourceTx(ctx context.Context, tx *sql.Tx) (string, error) {
 	coverageID, compatible, err := retainedProjectionCoverageTx(ctx, tx)
 	if err != nil {
@@ -165,10 +168,18 @@ func retainedEventSourceTx(ctx context.Context, tx *sql.Tx) (string, error) {
 	if !compatible || coverageID <= 0 {
 		return "usage_events", nil
 	}
-	return fmt.Sprintf(`(select p.event_id as id, p.%s from %s p where p.event_id <= %d
-		union all select e.id, e.%s from usage_events e where e.id > %d)`,
+	return fmt.Sprintf(`(select e.id, e.%s from usage_events e
+		union all
+		select p.event_id as id, p.%s
+		from usage_archive_event_refs archived
+		join %s p on p.event_id = archived.raw_event_id
+		where archived.raw_deleted_at_ms is not null
+			and p.event_id <= %d
+			and not exists (
+				select 1 from usage_events live where live.event_hash = archived.event_hash
+			))`,
+		strings.Join(retainedPricingColumns, ", e."),
 		strings.Join(retainedPricingColumns, ", p."), usageprojection.EventTable, coverageID,
-		strings.Join(retainedPricingColumns, ", e."), coverageID,
 	), nil
 }
 
@@ -185,14 +196,21 @@ func retainedAccountEventSourceTx(ctx context.Context, tx *sql.Tx, accountKeys [
 	for _, key := range accountKeys {
 		args = append(args, key)
 	}
-	return fmt.Sprintf(`(select p.event_id as id, p.%s from %s p
-		where p.account_key in (%s) and p.event_id <= %d
-		union all select e.id, e.%s from usage_events e where e.id > %d)`,
+	return fmt.Sprintf(`(select e.id, e.%s from usage_events e
+		union all
+		select p.event_id as id, p.%s
+		from usage_archive_event_refs archived
+		join %s p on p.event_id = archived.raw_event_id
+		where archived.raw_deleted_at_ms is not null
+			and p.account_key in (%s)
+			and p.event_id <= %d
+			and not exists (
+				select 1 from usage_events live where live.event_hash = archived.event_hash
+			))`,
+		strings.Join(retainedPricingColumns, ", e."),
 		strings.Join(retainedPricingColumns, ", p."), usageprojection.EventTable, placeholders, coverageID,
-		strings.Join(retainedPricingColumns, ", e."), coverageID,
 	), args, nil
 }
-
 func retainedProjectionCoverageTx(ctx context.Context, tx *sql.Tx) (int64, bool, error) {
 	var schemaVersion int
 	var revision, status string
