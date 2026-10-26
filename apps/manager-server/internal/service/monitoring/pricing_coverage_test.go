@@ -118,6 +118,7 @@ func TestAccountHistoryRecoversOnlineProjectionGap(t *testing.T) {
 		t.Fatalf("account pricing recovery differs: got=%#v want=%#v", got.Items, want.Items)
 	}
 }
+
 func TestAnalyticsIncompletePricingFailsClosedWithoutCompatibleEvents(t *testing.T) {
 	for _, test := range []struct {
 		name string

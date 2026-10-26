@@ -211,6 +211,7 @@ func retainedAccountEventSourceTx(ctx context.Context, tx *sql.Tx, accountKeys [
 		strings.Join(retainedPricingColumns, ", p."), usageprojection.EventTable, placeholders, coverageID,
 	), args, nil
 }
+
 func retainedProjectionCoverageTx(ctx context.Context, tx *sql.Tx) (int64, bool, error) {
 	var schemaVersion int
 	var revision, status string
