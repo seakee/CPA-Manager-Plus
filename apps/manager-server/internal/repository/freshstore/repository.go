@@ -91,6 +91,10 @@ func load(ctx context.Context, q queryer) (Record, error) {
 			return Record{}, ErrNotFresh
 		}
 	}
+	r.AdoptionSummary, err = loadAdoptionSummary(ctx, q, r.Operation)
+	if err != nil {
+		return Record{}, err
+	}
 	var connectionData string
 	if err := q.QueryRowContext(ctx, "select value from settings where key='manager_config_v1'").Scan(&connectionData); err == nil {
 		var cfg model.ManagerConfig
@@ -188,6 +192,11 @@ func valid(r Record) error {
 			return ErrNotFresh
 		}
 	} else if r.AdoptionCiphertext != "" {
+		return ErrNotFresh
+	}
+	if r.AdoptionSummary != nil && (r.Operation.Strategy.Strategy != bootstrap.AdoptExisting || validAdoptionSummary(*r.AdoptionSummary) != nil) {
+		// Only an adopted installation carries a migration summary, and it may
+		// only carry the bounded shape the executor emits.
 		return ErrNotFresh
 	}
 	return nil
@@ -325,6 +334,7 @@ func (r *repository) Update(ctx context.Context, id bootstrap.FreshIdentity, rev
 	before.ConfigGroupsDamaged = cloneRawMessages(v.ConfigGroupsDamaged)
 	before.Operation.Strategy.AdoptionDecisions = slices.Clone(v.Operation.Strategy.AdoptionDecisions)
 	before.Operation.Strategy.AdoptionResources = slices.Clone(v.Operation.Strategy.AdoptionResources)
+	before.AdoptionSummary = cloneAdoptionSummary(v.AdoptionSummary)
 	if v.Admin != nil {
 		copy := *v.Admin
 		before.Admin = &copy
@@ -375,6 +385,9 @@ func (r *repository) Update(ctx context.Context, id bootstrap.FreshIdentity, rev
 	if before.AdoptionCiphertext != "" && before.AdoptionCiphertext != v.AdoptionCiphertext {
 		return Record{}, ErrConflict
 	}
+	if err = validAdoptionSummaryUpdate(before.AdoptionSummary, v.AdoptionSummary); err != nil {
+		return Record{}, ErrConflict
+	}
 	if before.Operation.Strategy.Strategy == bootstrap.AdoptExisting {
 		// An adoption checkpoint is frozen once written, with exactly two
 		// permitted transitions: its stage may advance, and — only while it is
@@ -420,6 +433,9 @@ func (r *repository) Update(ctx context.Context, id bootstrap.FreshIdentity, rev
 	}
 	if err == nil {
 		err = writeConfigJournals(ctx, tx, before.Config, v.Config, v.ConfigDamaged, before.ConfigGroups, v.ConfigGroups, v.ConfigGroupsDamaged)
+	}
+	if err == nil && v.AdoptionSummary != nil && !reflect.DeepEqual(before.AdoptionSummary, v.AdoptionSummary) {
+		err = writeAdoptionSummary(ctx, tx, v.AdoptionSummary)
 	}
 	if err != nil {
 		return Record{}, err
