@@ -77,15 +77,27 @@ func TestAnalyticsComparisonRecoversOnlineProjectionGap(t *testing.T) {
 	hour := time.Hour.Milliseconds()
 	request.FromMS += 3 * hour
 	request.ToMS = request.FromMS + hour
+	comparisonFromMS := request.FromMS - hour
+	onlineMS := comparisonFromMS + 1_000
 	want, err := New(db, true).Analytics(ctx, request)
 	if err != nil || want.Summary == nil || want.SummaryComparison == nil {
 		t.Fatalf("baseline comparison: summary=%#v comparison=%#v error=%v", want.Summary, want.SummaryComparison, err)
 	}
-	if _, err := sqlDB.ExecContext(ctx, `delete from usage_monitoring_event_projection_v1
-		where event_id in (select id from usage_events where event_hash = 'coverage-online');
-		delete from usage_pricing_hourly_rollups_v1 where bucket_ms >= ? and bucket_ms < ?`,
-		request.FromMS-hour, request.FromMS); err != nil {
+	deleted, err := sqlDB.ExecContext(ctx, `delete from usage_monitoring_event_projection_v1
+		where event_id in (select id from usage_events where timestamp_ms = ?)`, onlineMS)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if affected, err := deleted.RowsAffected(); err != nil || affected != 1 {
+		t.Fatalf("fixture did not remove exactly one projection row: affected=%d error=%v", affected, err)
+	}
+	rollups, err := sqlDB.ExecContext(ctx, `delete from usage_pricing_hourly_rollups_v1
+		where bucket_ms >= ? and bucket_ms < ?`, comparisonFromMS, request.FromMS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if affected, err := rollups.RowsAffected(); err != nil || affected < 1 {
+		t.Fatalf("fixture did not remove prior-period rollups: affected=%d error=%v", affected, err)
 	}
 	got, err := New(db, true).Analytics(ctx, request)
 	if err != nil {
