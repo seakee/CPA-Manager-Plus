@@ -22,8 +22,8 @@ var retainedPricingColumns = []string{
 var ErrRetainedPricingHistoryIncomplete = errors.New("retained pricing history is incomplete")
 
 // LoadHourlyRowsFromEventsTx bypasses a deficient pricing cache without writing
-// to it. A compatible retained projection supplies archived events; raw events
-// after its watermark supply the tail, with no overlapping IDs.
+// to it. Intact raw events are authoritative; the compatible retained projection
+// contributes only archive-deleted events up to its watermark.
 // The caller must compare the result with the permanent core snapshot before
 // treating it as complete. A projection watermark alone is not proof of data.
 func (r *repository) LoadHourlyRowsFromEventsTx(ctx context.Context, tx *sql.Tx, filter HourlyFilter) ([]HourlyRow, error) {
@@ -173,6 +173,7 @@ func retainedEventSourceTx(ctx context.Context, tx *sql.Tx) (string, error) {
 		select p.event_id as id, p.%s
 		from usage_archive_event_refs archived
 		join %s p on p.event_id = archived.raw_event_id
+			and archived.timestamp_ms = p.timestamp_ms
 		where archived.raw_deleted_at_ms is not null
 			and p.event_id <= %d
 			and not exists (
