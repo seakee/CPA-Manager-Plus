@@ -554,10 +554,88 @@ the Key records cannot silently become reachable from the Runtime child.
 
 Adoption stops at a `committed` checkpoint plus the protected destination
 snapshot in this lane; `POST complete` still answers 409 for
-`strategy = adopt_existing` (`fresh.go:418`), so adoption does not yet reach
+`strategy = adopt_existing` (`fresh.go:426`), so adoption does not yet reach
 product completion the way New Managed does. Completion arrives in a later
 slice. What it already writes is its own `external:sha256:` target identity, and
 it keeps `strategy = adopt_existing`; the prefixes are never merged.
+
+#### Migration after the destination is committed
+
+Once the destination is committed and its client keys are verified, the Manager
+copies a bounded inventory from the source CPA into it and records one result per
+item. The executor is `internal/service/freshadopt`, reached only from
+`freshApplication.runAdoptionMigration` (`fresh_adopt_migration.go`), guarded on
+`adopt_existing` + `network_existing` + `stage == committed`.
+
+| kind | source | destination | read-back |
+| --- | --- | --- | --- |
+| credential file | `GET /v8/management/credentials`, `GET /credentials/download?name=` | `POST /v8/management/credentials?name=`, then `PATCH /credentials/status` to restore the enabled state | the destination's listing entry (name, type, disabled) and the downloaded byte digest |
+| gateway leaf | one `GET /v8/management/config` | `PATCH /config/<group prefix>`, nested down to the leaf, using the same `cpa.ConfigLeafPaths()` table (39 leaves) the gateway page owns | `GET` that one path |
+| rule family | the same single document | `PUT /config/<family path>`, for the 5 `cpa.ConfigRuleFamilyIDs()` families | `GET` that path |
+| provider section | the same single document | `PUT /config/<section>`, for the 12 `api-keys.*`/`oauth.*` groups | `GET` that path |
+
+The approved scope names 13 provider ownership groups, but CPA v8.0.13 has no
+root `models` section: `internal/config/config.go:9-192` declares `models` only
+inside a `*-api-key` group, a provider config or a `payload` rule list, and
+`v8AllowedRoots` (`config_v8.go:572`) does not list it. It is absent from the
+table rather than guessed; its effective content arrives with the `api-keys.*`
+groups, which carry each group's own `models` list.
+
+Three properties are structural rather than conventional:
+
+- **The source is never written.** The source client interface has no write
+  method, so no code path in the package can issue a non-GET request to it. A
+  test asserts the fake source observed zero writes and kept its own bytes and
+  configuration.
+- **An unknown result is reconciled by read-back, never by resending.** An upload
+  or a configuration write whose reply was lost is decided by what the
+  destination holds afterwards: matching bytes or a matching value is a
+  successful copy, anything else is a reported failure. Every item already
+  recorded — `migrated`, `manual` or `failed` — is skipped on a rerun, because
+  resending a failed write is exactly what the checkpoint exists to prevent.
+- **Secrets stay in Manager memory.** Credential bytes and provider keys travel
+  inside the process only: they are never logged, never written to the record,
+  never returned in a result and never listed by an enumerable GET. The durable
+  summary carries item identities, outcomes, a bounded reason, a concrete
+  instruction and byte digests.
+
+`ManagerOwned` is the single exclusion predicate: `management.*`,
+`remote-management.*`, `server.host`, `server.port`, `plugins.*`,
+`disable-control-panel`, `oauth.auth-dir` and `access.api-keys` are never copied.
+They are the destination's own identity, listener, plugin root, auth directory
+and client key list, and the last of those was already written by the verified
+`StageDestination`/`VerifyV8Adoption` path. A test asserts that no table path
+matches the predicate and that the executor never sends one.
+
+A credential whose type v8 cannot upload (a runtime-only/plugin virtual auth, or
+a file CPA refuses to parse) becomes a `manual` item with a concrete instruction
+instead of a failure, and so does a copy whose enabled state or provider
+classification the destination did not accept.
+
+The per-item record is `freshstore.Record.AdoptionSummary`, written through the
+same revision CAS as every other Fresh write and held to a monotone append-only
+shape by the store itself. The executor checkpoints after each item, so the
+record is never behind a write that already happened; a refused checkpoint stops
+the run at that item, and the item in flight is the only one a resume may repeat.
+Manual and failed items are operator work carrying a concrete instruction: they
+never fail the adoption, and a source that cannot be read leaves the adoption
+committed with an empty summary. A committed replay of `POST strategy` is the
+resume path and continues from the durable prefix. Step 4's completion
+conditions read this summary; the authority generalization, usage enablement,
+model management and the Full Web Adopt flow are not part of this lane.
+
+The per-item summary is the operational record of the copy. It is deliberately
+*not* a qualification: `freshAdoptionRefRules`
+(`internal/domain/bootstrap/adoption.go`) still marks `cpa-auth-files`, the
+config refs and the provider-state refs as manual actions, and the accepted
+adoption consumer still carries the `client_api_keys_only` limitation. That
+record is the reviewed authority for what the Manager's install-derived
+authority may claim, and it is bound to an independent acceptance of exactly
+those bytes and that scope; the executor copying credentials and configuration
+is product behaviour reported to the operator, not a wider authority claim.
+Promoting those refs to `migrate` would need its own reviewed evidence chain per
+ref (read/replay/verify) and a new independent acceptance, so this lane leaves
+the vocabulary as accepted and reports outcomes instead.
 
 #### Retry after a terminal destination failure
 
