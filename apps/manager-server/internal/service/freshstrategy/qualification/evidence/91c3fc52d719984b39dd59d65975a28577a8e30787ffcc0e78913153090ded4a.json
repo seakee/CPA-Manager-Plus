@@ -1,0 +1,37 @@
+{
+  "caseRefs": [
+    "fresh-legacy-client-api-keys-read",
+    "fresh-legacy-client-api-keys-replay",
+    "fresh-legacy-client-api-keys-verify"
+  ],
+  "legacyArchiveSha256": "8afc9ed4c89a50a5ffce5d122a9bb93442c5b8ff3d8c6f07b7a274c719109b74",
+  "legacyBinarySha256": "1eb108b85ad554b92bab9f5a85af433d7c2e1b951bb192b639d73605d4593d1a",
+  "legacyVersion": "v7.0.12",
+  "manifest": {
+    "file": "fresh-adoption-resource-legacy-manifest.json",
+    "sha256": "7388022d21d2d6502449c311bc5379e4e954db0030912e73a2607d809fefb5f2"
+  },
+  "productionAcceptance": "pending",
+  "profile": "CPA8-ADOPT-RESOURCE-r1",
+  "report": {
+    "file": "fresh-adoption-resource-legacy-report.json",
+    "sha256": "c5e403dce9c930e242383d3af06ee563f3027da3eacbf42263df13a94265bfbf"
+  },
+  "schemaVersion": 1,
+  "sourceClass": "legacy_managed",
+  "targetArtifactId": "sha256:b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41",
+  "traces": {
+    "read": {
+      "file": "fresh-adoption-resource-legacy-read.json",
+      "sha256": "57e38f387171b7b41a332e7ed06dab60c5f1cfb0d64fc794a154ba2ab7b257d8"
+    },
+    "replay": {
+      "file": "fresh-adoption-resource-legacy-replay.json",
+      "sha256": "7299726a48e61a981e66bd44c147caae22588616f75ea8b45a20cd1d925c4e7e"
+    },
+    "verify": {
+      "file": "fresh-adoption-resource-legacy-verify.json",
+      "sha256": "f9ce2680709cea2139baae26b582df30969b3f79b01de6221561be9e5e600d45"
+    }
+  }
+}

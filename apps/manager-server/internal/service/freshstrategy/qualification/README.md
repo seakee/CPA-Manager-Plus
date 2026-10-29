@@ -43,7 +43,9 @@ The enforced limitation vocabulary is `management_generation_v8`,
 `direct_transport_no_proxy_no_redirect`, `client_api_keys_only`,
 `legacy_source_profile_cpa_v7_0_12`, `source_preserved` and `gateway_pending`,
 with a fixed set per consumer. These keys map to facts the code actually checks;
-they are not review prose.
+they are not review prose. `client_api_keys_only` is a `legacy_managed` limitation
+only: a network adoption migrates credentials, gateway configuration and the
+provider sections its evidence chain authorizes.
 
 The following evidence restrictions cannot be checked by the running Manager and
 therefore cannot be represented as accepted applicability. A review that relies
@@ -82,8 +84,10 @@ consumers reference original `CPA8-STAGE-r1` limited background evidence
 separately from the real-process resource proof. `adoptionEvidence` binds the
 independent class-specific `CPA8-ADOPT-RESOURCE-r1` manifest and its distinct
 `readCaseRef`, `replayCaseRef` and `verifyCaseRef`. Only those separately
-accepted completed/supported cases authorize the bounded `client-api-keys`
-`Migrate` decision and exact destination ArtifactID. External safe-read or the
+accepted completed/supported cases authorize the bounded `Migrate` decisions and
+exact destination ArtifactID. The three traces each carry a per-kind count, and
+a kind is authorized only when all three name it, so one kind's evidence can
+never authorize another. External safe-read or the
 original r4 `limited` observations cannot substitute for any resource proof.
 Legacy transition acceptance remains separate from network adoption acceptance.
 
@@ -153,9 +157,13 @@ trace, source profile or target fails the whole record closed.
 
 Accepted consumers also persist the bounded, non-secret
 `adoptionResources` inventory discovered from the source. Every entry has
-exactly one decision: only `client-api-keys` may be `Migrate`; auth files,
-provider state and configuration sections remain explicit manual or unsupported
-actions. Unknown upstream sections collapse to the fixed `cpa-config-unknown`
+exactly one decision. A kind may be `Migrate` only when the resource chain's
+three traces all name it, so `client-api-keys` and — for a `network_existing`
+source — `cpa-auth-files`, `cpa-config-routing` and `provider-state-api-keys`
+migrate, while the remaining sections stay explicit manual or unsupported
+actions. A `legacy_managed` source is a pre-v8 process with no v8 management
+surface, so its evidence authorizes `client-api-keys` only and its other kinds
+keep the manual action they had before. Unknown upstream sections collapse to the fixed `cpa-config-unknown`
 reference and never become durable upstream-controlled identities. The
 inventory and its decisions are written through the existing Fresh CAS before
 any destination mutation and are immutable afterwards.

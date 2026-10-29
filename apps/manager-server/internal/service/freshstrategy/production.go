@@ -151,7 +151,11 @@ func requiredConsumerLimitations(key consumerKey) []string {
 	case consumerKey{bootstrap.ConnectExternal, bootstrap.AdoptSourceNone}:
 		return []string{limitationManagementGenerationV8, limitationReadOnlyBoundedRead, limitationDirectTransport, limitationGatewayPending}
 	case consumerKey{bootstrap.AdoptExisting, bootstrap.AdoptNetworkExisting}:
-		return []string{limitationManagementGenerationV8, limitationReadOnlyBoundedRead, limitationDirectTransport, limitationClientAPIKeysOnly, limitationSourcePreserved, limitationGatewayPending}
+		// A network adoption migrates more than the client keys: the executor
+		// copies credentials, gateway configuration and the provider sections
+		// that carry provider keys. The bound on what migrates is the evidence
+		// chain, kind by kind, not a client-keys-only list.
+		return []string{limitationManagementGenerationV8, limitationReadOnlyBoundedRead, limitationDirectTransport, limitationSourcePreserved, limitationGatewayPending}
 	case consumerKey{bootstrap.AdoptExisting, bootstrap.AdoptLegacyManaged}:
 		return []string{limitationManagementGenerationV8, limitationReadOnlyBoundedRead, limitationDirectTransport, limitationClientAPIKeysOnly, limitationLegacyProfile, limitationSourcePreserved, limitationGatewayPending}
 	}
