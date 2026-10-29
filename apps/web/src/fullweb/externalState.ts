@@ -9,7 +9,6 @@ export type ExternalBlocker =
   | { kind: 'key_rejected'; detail?: string }
   | { kind: 'target_moved' }
   | { kind: 'version_unsupported'; version?: string; support?: string }
-  | { kind: 'legacy_write_replaced' }
   | { kind: 'rebind_refused' }
   | { kind: 'rebind_stale' }
   | { kind: 'authority_unavailable' };
@@ -25,8 +24,6 @@ export function blockerOf(code: string | undefined): ExternalBlocker | null {
       return { kind: 'target_moved' };
     case 'external_cpa_version_unsupported':
       return { kind: 'version_unsupported' };
-    case 'external_legacy_write_replaced':
-      return { kind: 'legacy_write_replaced' };
     case 'external_rebind_refused':
       return { kind: 'rebind_refused' };
     case 'external_rebind_stale_generation':

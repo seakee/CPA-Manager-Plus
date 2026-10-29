@@ -26,23 +26,23 @@ export function FreshExternalBlocker({
         ? x('blockerTargetMovedTitle')
         : state.kind === 'version_unsupported'
           ? x('blockerVersionUnsupportedTitle')
-          : state.kind === 'legacy_write_replaced'
-            ? x('blockerLegacyReplacedTitle')
-            : state.kind === 'rebind_refused'
-              ? x('rebindRefusedHelp')
-              : state.kind === 'rebind_stale'
-                ? x('rebindStaleHelp')
-                : x('rebindUnavailableHelp');
+          : state.kind === 'rebind_refused'
+            ? x('rebindRefusedHelp')
+            : state.kind === 'rebind_stale'
+              ? x('rebindStaleHelp')
+              : x('rebindUnavailableHelp');
+  // The instruction is always localized. The server's `detail` is English, so it
+  // is never the sentence a page speaks: it is offered below as the diagnostic it
+  // is, for whoever needs the Manager's own wording.
   const help =
     state.kind === 'key_rejected'
-      ? state.detail || x('blockerKeyRejectedHelp')
+      ? x('blockerKeyRejectedHelp')
       : state.kind === 'target_moved'
         ? x('blockerTargetMovedHelp')
         : state.kind === 'version_unsupported'
           ? x('blockerVersionUnsupportedHelp')
-          : state.kind === 'legacy_write_replaced'
-            ? x('blockerLegacyReplacedHelp')
-            : '';
+          : '';
+  const detail = state.kind === 'key_rejected' ? state.detail : undefined;
   return (
     <section
       className="key-notice key-notice-warning fresh-external-blocker"
@@ -54,6 +54,12 @@ export function FreshExternalBlocker({
       <div className="fresh-external-blocker-body">
         <strong>{title}</strong>
         {help && <p>{help}</p>}
+        {detail && (
+          <details className="fresh-external-blocker-detail" data-testid="external-blocker-detail">
+            <summary>{x('details')}</summary>
+            <p>{detail}</p>
+          </details>
+        )}
         {state.kind === 'version_unsupported' && (
           <p className="fresh-external-blocker-version" data-testid="external-blocker-version">
             {x('blockerVersionLabel')}: {state.version || x('blockerVersionUnknown')} ·{' '}

@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FreshExternalBlocker } from './FreshExternalBlocker';
 import { blockerOf } from './externalState';
+import { externalWorkspaceText as x } from '../i18n/freshExternal';
 
 // The Modal is a portal in the browser and an inline block in these tests, so a
 // dialog's own content is assertable without a DOM.
@@ -48,9 +49,9 @@ describe('External blocker states', () => {
     expect(blockerOf('external_cpa_version_unsupported')).toEqual({
       kind: 'version_unsupported',
     });
-    expect(blockerOf('external_legacy_write_replaced')).toEqual({
-      kind: 'legacy_write_replaced',
-    });
+    // The legacy bridge's replaced-write code has no banner: no reachable page
+    // performs a write the bridge owns, so it stays a raw wire answer.
+    expect(blockerOf('external_legacy_write_replaced')).toBeNull();
     expect(blockerOf('external_rebind_refused')).toEqual({ kind: 'rebind_refused' });
     expect(blockerOf('external_rebind_stale_generation')).toEqual({ kind: 'rebind_stale' });
     expect(blockerOf('external_cpa_authority_unavailable')).toEqual({
@@ -98,6 +99,35 @@ describe('External blocker states', () => {
     expect(text).toContain('v7.0.12');
     // The support class is a real translation, never the raw wire token.
     expect(text).not.toContain('unsupported');
+  });
+
+  // The server's `detail` is English. It must never be the sentence the page
+  // speaks in another locale: the instruction is localized and the diagnostic is
+  // offered behind its own disclosure.
+  // The server's `detail` is English. It must never be the sentence the page
+  // speaks in another locale: the instruction is localized and the diagnostic is
+  // offered behind its own disclosure.
+  // The server's `detail` is English. It must never be the sentence the page
+  // speaks: the instruction is the localized table's, and the diagnostic is
+  // offered behind its own disclosure.
+  it('keeps an English detail out of a localized instruction', async () => {
+    const detail = 'the CPA replaced this key or is refusing this client';
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(<FreshExternalBlocker state={{ kind: 'key_rejected', detail }} />);
+    });
+    const instructions = () =>
+      renderer.root
+        .findAll((node) => node.type === 'p')
+        .map((node) =>
+          node.children.filter((child): child is string => typeof child === 'string').join('')
+        )
+        .filter((text) => text !== '');
+    // The first paragraph is the instruction; it is the locale's own sentence and
+    // never the English detail.
+    expect(instructions()[0]).toBe(x('blockerKeyRejectedHelp'));
+    expect(instructions()[0]).not.toContain(detail);
+    expect(textOf(renderer, 'external-blocker-detail')).toContain(detail);
   });
 
   it('offers a reload only for a stale generation', async () => {

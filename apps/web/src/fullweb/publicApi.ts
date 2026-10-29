@@ -51,8 +51,6 @@ const EXTERNAL_ERROR_CODES: Record<string, true> = {
   external_rebind_stale_generation: true,
   // The committed External authority could not be resolved.
   external_cpa_authority_unavailable: true,
-  // A legacy write this External install already owns through its own route.
-  external_legacy_write_replaced: true,
 };
 
 const isExternalResource = (resource: string) =>
@@ -60,6 +58,15 @@ const isExternalResource = (resource: string) =>
   resource.startsWith('external/usage/') ||
   resource === 'external/rebind' ||
   resource.startsWith('external/rebind/');
+
+// A gateway resource is the Manager's own document, but on an External install the
+// save is written through the committed CPA credential: the same conflict can
+// carry any External code. The page merges both sets, so the blocker renders
+// instead of the code being dropped as an unrecognised payload.
+const GATEWAY_ERROR_CODES: Record<string, true> = {
+  ...GATEWAY_CONFIG_ERROR_CODES,
+  ...EXTERNAL_ERROR_CODES,
+};
 
 // Every resource whose failure carries a typed code the page must act on. The
 // payload is parsed for exactly these; every other failure stays a bare HTTP
@@ -184,7 +191,13 @@ export function createPublicApiClient(
         // The External pages act on the same wire shape: a bounded `code` and,
         // for a refused credential, the rebind `detail`. The key list answers
         // from the same authority, so it is read the same way.
-        const externalResource = isExternalResource(resource) || resource === 'api-keys';
+        const externalResource =
+          isExternalResource(resource) ||
+          resource === 'api-keys' ||
+          // A single key answers the same typed codes on its own writes: renaming,
+          // revoking and replacing one are written through the same credential, and
+          // the operation journal keeps its own answer below.
+          (resource.startsWith('api-keys/') && !resource.startsWith('api-keys/operations/'));
         const operationResource = method === 'GET' && resource.startsWith('api-keys/operations/');
         if (
           (retryResource ||
@@ -201,7 +214,7 @@ export function createPublicApiClient(
             if (retryResource || externalResource) {
               // Only a recognised code unlocks the diagnostic: an unrecognised
               // upstream payload must not smuggle its message into the UI.
-              const known = retryResource ? GATEWAY_CONFIG_ERROR_CODES : EXTERNAL_ERROR_CODES;
+              const known = retryResource ? GATEWAY_ERROR_CODES : EXTERNAL_ERROR_CODES;
               if (typeof payload.code === 'string' && known[payload.code] === true)
                 code = payload.code;
               if (code) {

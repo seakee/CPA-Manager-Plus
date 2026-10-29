@@ -144,6 +144,7 @@ export function FreshManagedResources({
           client={client}
           credential={credential}
           onClose={() => setRebindOpen(false)}
+          onUnauthorized={onUnauthorized}
           onRebound={({ reverified }) => {
             setRebindOpen(false);
             setRebound(x(reverified ? 'rebindSucceededReverified' : 'rebindSucceededRebound'));

@@ -17,12 +17,6 @@ const messages = {
     '已儲存的金鑰無法再通過 CPA 的身分驗證。請提交目前金鑰重新連線，其他操作不會自動重試。',
     'Сохранённый ключ больше не проходит проверку на вашем CPA. Укажите текущий ключ, чтобы восстановить соединение; остальное не повторяется автоматически.',
   ],
-  blockerKeyRejectedForbidden: [
-    'Your CPA refused this Manager client, or its address is banned after repeated failed authentications. Wait out the ban window, then rebind with the current key.',
-    'CPA 拒绝了本 Manager 客户端，或本机地址因多次认证失败被封禁。请等待封禁窗口结束后，用当前密钥重新绑定。',
-    'CPA 拒絕了本 Manager 用戶端，或本機位址因多次驗證失敗被封鎖。請等待封鎖時間結束後，用目前金鑰重新綁定。',
-    'CPA отклонил клиент Manager или заблокировал адрес после нескольких неудачных проверок. Дождитесь окончания блокировки и привяжите текущий ключ.',
-  ],
   blockerTargetMovedTitle: [
     'The CPA address changed; reconnect is required',
     'CPA 地址已变更，需要重新连接',
@@ -62,19 +56,8 @@ const messages = {
   supportSupported: ['Supported', '受支持', '受支援', 'Поддерживается'],
   supportUnsupported: ['Unsupported', '不受支持', '不受支援', 'Не поддерживается'],
   supportUnknown: ['Unverified', '未验证', '未驗證', 'Не подтверждено'],
-  blockerLegacyReplacedTitle: [
-    'This write is unavailable on an External CPA',
-    '外部 CPA 上不提供该写入',
-    '外部 CPA 上不提供該寫入',
-    'Эта запись недоступна для внешнего CPA',
-  ],
-  blockerLegacyReplacedHelp: [
-    'The Manager owns this change through its own screen. Edit it there so the connection and the saved configuration stay in step.',
-    '该变更由 Manager 自己的页面负责。请在该页面修改，以确保连接与已保存的配置保持一致。',
-    '該變更由 Manager 自己的頁面負責。請在該頁面修改，以確保連線與已儲存的設定保持一致。',
-    'Это изменение выполняется на собственной странице Manager. Изменяйте его там, чтобы подключение и сохранённая конфигурация не расходились.',
-  ],
   blockerDismiss: ['Dismiss', '关闭', '關閉', 'Закрыть'],
+  details: ['Details', '详情', '詳情', 'Подробности'],
   rebindAction: ['Rebind management key', '重新绑定管理密钥', '重新綁定管理金鑰', 'Привязать ключ заново'],
   rebindTitle: ['Rebind management key', '重新绑定管理密钥', '重新綁定管理金鑰', 'Привязать ключ заново'],
   rebindHelp: [
@@ -117,6 +100,12 @@ const messages = {
     'Manager 無法解析該安裝的 CPA 位址，未向 CPA 傳送任何請求。',
     'Manager не смог определить адрес CPA этой установки. Запросы к CPA не отправлялись.',
   ],
+  rebindAuthenticationHelp: [
+    'Your Manager session expired before the key was proven. Sign in again, then repeat the rebind; nothing was changed.',
+    '验证密钥前 Manager 会话已过期。请重新登录后再次绑定，当前未做任何更改。',
+    '驗證金鑰前 Manager 工作階段已過期。請重新登入後再次綁定，目前未做任何變更。',
+    'Сеанс Manager завершился до проверки ключа. Войдите снова и повторите привязку; ничего не изменено.',
+  ],
   rebindFailedHelp: [
     'The rebind did not complete. Keep the same request and try again without changing the installation.',
     '重新绑定未完成。请保留同一请求并重试，不要改动安装状态。',
@@ -134,11 +123,16 @@ const messages = {
   usageEnabled: ['Enabled', '已启用', '已啟用', 'Включена'],
   usageDisabled: ['Disabled', '已关闭', '已關閉', 'Отключена'],
   usageCollector: ['Collector', '采集器', '擷取器', 'Сборщик'],
+  usageCollectorRunning: ['Running', '运行中', '執行中', 'Работает'],
+  usageCollectorStarting: ['Starting', '启动中', '啟動中', 'Запускается'],
+  usageCollectorStopped: ['Stopped', '已停止', '已停止', 'Остановлен'],
+  usageCollectorError: ['Failed', '失败', '失敗', 'Сбой'],
+  usageCollectorUnknown: ['Unknown', '未知', '未知', 'Неизвестно'],
   usageCollectionStarted: ['Collection started', '已开始采集', '已開始擷取', 'Сбор начат'],
   usageNotStarted: ['not started', '尚未开始', '尚未開始', 'не начат'],
   usageVersion: ['CPA version', 'CPA 版本', 'CPA 版本', 'Версия CPA'],
   usageWritesBlocked: ['Writes blocked by this version', '该版本阻止写入', '該版本阻止寫入', 'Запись заблокирована этой версией'],
-  usageWritesAllowed: ['Writes verified', '写入已验证', '寫入已驗證', 'Запись подтверждена'],
+  usageWritesAllowed: ['Writes allowed', '允许写入', '允許寫入', 'Запись разрешена'],
   usageBlockedReason: ['Collection blocked by', '采集中断原因', '擷取中斷原因', 'Причина остановки сбора'],
   usageEnableAction: ['Enable usage statistics on your CPA', '在你的 CPA 上启用用量统计', '在你的 CPA 上啟用用量統計', 'Включить статистику на вашем CPA'],
   usageConfirmTitle: ['Enable usage statistics on your CPA?', '要在你的 CPA 上启用用量统计吗？', '要在你的 CPA 上啟用用量統計嗎？', 'Включить статистику использования на вашем CPA?'],
@@ -150,6 +144,7 @@ const messages = {
   ],
   usageConfirmAction: ['Write and start collection', '写入并开始采集', '寫入並開始擷取', 'Записать и начать сбор'],
   usageConfirmCancel: ['Cancel', '取消', '取消', 'Отмена'],
+  usageConfirmRetry: ['Try again', '重试', '重試', 'Повторить'],
   usageConfirmed: [
     'Usage statistics were enabled and collection started.',
     '用量统计已启用，采集已开始。',
@@ -171,6 +166,24 @@ export function externalWorkspaceText(key: keyof typeof messages): string {
   const index =
     language === 'zh-TW' ? 2 : language === 'ru' ? 3 : language.startsWith('zh') ? 1 : 0;
   return messages[key][index];
+}
+
+// collectorStateText names the Collector phase the Manager reports. The raw value
+// is a Manager phase name, never something to show a person: an unknown one reads
+// as unknown rather than as the wire word.
+export function collectorStateText(collector: string | undefined): string {
+  switch (collector) {
+    case 'running':
+      return externalWorkspaceText('usageCollectorRunning');
+    case 'starting':
+      return externalWorkspaceText('usageCollectorStarting');
+    case 'stopped':
+      return externalWorkspaceText('usageCollectorStopped');
+    case 'error':
+      return externalWorkspaceText('usageCollectorError');
+    default:
+      return externalWorkspaceText('usageCollectorUnknown');
+  }
 }
 
 // versionSupportText names the class the Manager proved for the observed CPA

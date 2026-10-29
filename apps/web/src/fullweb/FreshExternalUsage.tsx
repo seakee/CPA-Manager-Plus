@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { Modal } from '../components/ui/Modal';
 import { FullWebIcon } from './FullWebIcon';
-import { externalWorkspaceText as x, versionSupportText } from '../i18n/freshExternal';
+import {
+  collectorStateText,
+  externalWorkspaceText as x,
+  versionSupportText,
+} from '../i18n/freshExternal';
 import { PublicApiError, type PublicApiClient } from './publicApi';
 import {
   newExternalRequestId,
@@ -37,7 +41,11 @@ export function FreshExternalUsage({
   reloadToken?: number;
 }) {
   const [state, setState] = useState<ExternalUsageState | null>(null);
-  const [error, setError] = useState('');
+  const [readError, setReadError] = useState('');
+  // A failed confirmation keeps the panel and its facts: replacing them with a
+  // bare error would hide the state the operator is trying to change and leave no
+  // way to ask again.
+  const [confirmFailed, setConfirmFailed] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
@@ -59,7 +67,7 @@ export function FreshExternalUsage({
       if (!alive.current) return;
       if (!parsed) throw new Error('invalid usage state');
       setState(parsed);
-      setError('');
+      setReadError('');
     } catch (err) {
       if (!alive.current) return;
       if (err instanceof PublicApiError && err.kind === 'authentication') {
@@ -68,7 +76,7 @@ export function FreshExternalUsage({
       }
       setState(null);
       if (err instanceof PublicApiError && err.code) onBlocker?.(err.code);
-      setError(x('usageReadFailed'));
+      setReadError(x('usageReadFailed'));
     }
   }
 
@@ -82,6 +90,7 @@ export function FreshExternalUsage({
     if (busy) return;
     setBusy(true);
     setNotice('');
+    setConfirmFailed(false);
     if (!requestId.current) requestId.current = newExternalRequestId();
     try {
       const parsed = parseExternalUsageState(
@@ -96,6 +105,7 @@ export function FreshExternalUsage({
       requestId.current = '';
       setState(parsed);
       setConfirming(false);
+      setConfirmFailed(false);
       setNotice(x('usageConfirmed'));
     } catch (err) {
       if (!alive.current) return;
@@ -104,17 +114,27 @@ export function FreshExternalUsage({
         return;
       }
       setConfirming(false);
-      setError(x('usageEnableFailed'));
+      // The request ID is kept: the retry is a replay of the same request, not a
+      // second write.
+      setConfirmFailed(true);
     } finally {
       if (alive.current) setBusy(false);
     }
   }
 
-  if (error) {
+  if (readError) {
     return (
       <section className="key-notice key-notice-warning" role="alert" data-testid="external-usage">
         <FullWebIcon name="alert" />
-        <span>{error}</span>
+        <span>{readError}</span>
+        <button
+          className="btn btn-secondary btn-sm"
+          type="button"
+          data-testid="external-usage-reload"
+          onClick={() => void read()}
+        >
+          {x('usageConfirmRetry')}
+        </button>
       </section>
     );
   }
@@ -138,7 +158,7 @@ export function FreshExternalUsage({
         </div>
         <div data-testid="external-usage-collector">
           <dt>{x('usageCollector')}</dt>
-          <dd>{state.collector || x('usageNotStarted')}</dd>
+          <dd>{collectorStateText(state.collector)}</dd>
         </div>
         <div data-testid="external-usage-started">
           <dt>{x('usageCollectionStarted')}</dt>
@@ -164,6 +184,21 @@ export function FreshExternalUsage({
       {notice && (
         <p role="status" data-testid="external-usage-notice">
           {notice}
+        </p>
+      )}
+      {confirmFailed && (
+        <p className="key-notice key-notice-warning" role="alert" data-testid="external-usage-confirm-failed">
+          <FullWebIcon name="alert" />
+          <span>{x('usageEnableFailed')}</span>
+          <button
+            className="btn btn-secondary btn-sm"
+            type="button"
+            disabled={busy}
+            data-testid="external-usage-confirm-retry"
+            onClick={() => void confirmEnable()}
+          >
+            {x('usageConfirmRetry')}
+          </button>
         </p>
       )}
       {!state.statisticsEnabled && (

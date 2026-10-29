@@ -7,6 +7,7 @@ import { newExternalRequestId } from './externalState';
 type RebindOutcome =
   | { kind: 'none' }
   | { kind: 'error'; message: string; stale: boolean }
+  | { kind: 'unauthorized' }
   | { kind: 'succeeded'; reverified: boolean };
 
 /**
@@ -21,12 +22,15 @@ export function FreshRebindDialog({
   credential,
   onClose,
   onRebound,
+  onUnauthorized,
 }: {
   open: boolean;
   client: PublicApiClient;
   credential: string;
   onClose: () => void;
   onRebound: (outcome: { reverified: boolean }) => void;
+  /** The Manager session ended, not the key: the shell takes the operator back. */
+  onUnauthorized: () => void;
 }) {
   const [managementKey, setManagementKey] = useState('');
   const [busy, setBusy] = useState(false);
@@ -94,6 +98,16 @@ export function FreshRebindDialog({
       onRebound({ reverified: result.status === 'reverified' });
     } catch (error) {
       if (!alive.current) return;
+      // A 401/403 from the Manager is its own answer, never a verdict on the key:
+      // the key is cleared, the request ID is dropped, and the shell takes the
+      // operator back to the form without claiming the rebind failed.
+      if (error instanceof PublicApiError && error.kind === 'authentication') {
+        requestId.current = '';
+        setManagementKey('');
+        setOutcome({ kind: 'unauthorized' });
+        onUnauthorized();
+        return;
+      }
       setOutcome({ kind: 'error', ...failureMessage(error) });
     } finally {
       if (alive.current) setBusy(false);
@@ -169,6 +183,15 @@ export function FreshRebindDialog({
           {outcome.kind === 'error' && (
             <p className="key-notice key-notice-warning" role="alert" data-testid="rebind-error">
               {outcome.message}
+            </p>
+          )}
+          {outcome.kind === 'unauthorized' && (
+            <p
+              className="key-notice key-notice-warning"
+              role="alert"
+              data-testid="rebind-authentication-error"
+            >
+              {x('rebindAuthenticationHelp')}
             </p>
           )}
         </form>

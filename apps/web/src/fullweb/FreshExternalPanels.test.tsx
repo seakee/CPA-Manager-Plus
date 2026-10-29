@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FreshRebindDialog } from './FreshRebindDialog';
 import { FreshExternalUsage } from './FreshExternalUsage';
 import { parseExternalUsageState } from './externalState';
+import { setFullWebLanguage } from '../i18n/fullweb';
 import { PublicApiError, type PublicApiClient } from './publicApi';
 import { externalWorkspaceText as x } from '../i18n/freshExternal';
 
@@ -64,7 +65,10 @@ describe('External rebind dialog', () => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.stubGlobal('crypto', { getRandomValues: (bytes: Uint8Array) => bytes.fill(0x11) });
   });
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    setFullWebLanguage('zh-CN');
+  });
 
   async function typeKey(renderer: ReactTestRenderer, value: string) {
     const input = renderer.root.find(
@@ -95,6 +99,7 @@ describe('External rebind dialog', () => {
           open
           client={client}
           credential="admin"
+          onUnauthorized={() => undefined}
           onClose={() => undefined}
           onRebound={rebound}
         />
@@ -124,6 +129,7 @@ describe('External rebind dialog', () => {
           open
           client={client}
           credential="admin"
+          onUnauthorized={() => undefined}
           onClose={() => undefined}
           onRebound={rebound}
         />
@@ -156,6 +162,7 @@ describe('External rebind dialog', () => {
           open
           client={client}
           credential="admin"
+          onUnauthorized={() => undefined}
           onClose={() => undefined}
           onRebound={() => undefined}
         />
@@ -172,6 +179,40 @@ describe('External rebind dialog', () => {
     );
   });
 
+  it('handles an expired Manager session without blaming the key', async () => {
+    const { client, calls } = stubClient(async () => {
+      throw new PublicApiError('authentication', 401);
+    });
+    const unauthorized = vi.fn();
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <FreshRebindDialog
+          open
+          client={client}
+          credential="admin"
+          onUnauthorized={unauthorized}
+          onClose={() => undefined}
+          onRebound={() => undefined}
+        />
+      );
+    });
+    await typeKey(renderer, 'key');
+    await submit(renderer);
+    expect(calls).toHaveLength(1);
+    // The session ended, not the key: the shell takes the operator back and the
+    // dialog says so instead of claiming the rebind failed.
+    expect(unauthorized).toHaveBeenCalledTimes(1);
+    expect(textOf(renderer, 'rebind-authentication-error')).toBe(x('rebindAuthenticationHelp'));
+    expect(
+      renderer.root.findAll((node) => node.props['data-testid'] === 'rebind-error')
+    ).toHaveLength(0);
+    const input = renderer.root.find(
+      (node) => node.props['data-testid'] === 'rebind-management-key'
+    );
+    expect(input.props.value).toBe('');
+  });
+
   it('names a stale generation as reload-and-retry rather than a refused key', async () => {
     const { client } = stubClient(async () => {
       throw new PublicApiError('http', 409, undefined, 'external_rebind_stale_generation');
@@ -183,6 +224,7 @@ describe('External rebind dialog', () => {
           open
           client={client}
           credential="admin"
+          onUnauthorized={() => undefined}
           onClose={() => undefined}
           onRebound={() => undefined}
         />
@@ -281,6 +323,80 @@ describe('External usage confirmation', () => {
       );
     });
     expect(reads).toBe(2);
+  });
+
+  it('names the collector state in the page language instead of the wire value', async () => {
+    const { client } = stubClient(
+      async () => usageState,
+      async () => ({ ...usageState, collector: 'running' })
+    );
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <FreshExternalUsage client={client} credential="admin" onUnauthorized={() => undefined} />
+      );
+    });
+    const text = textOf(renderer, 'external-usage-collector');
+    expect(text).toContain(x('usageCollectorRunning'));
+    expect(text).not.toContain('running');
+  });
+
+  it('says writes are allowed rather than verified', async () => {
+    setFullWebLanguage('en');
+    const { client } = stubClient(async () => usageState, async () => usageState);
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <FreshExternalUsage client={client} credential="admin" onUnauthorized={() => undefined} />
+      );
+    });
+    const text = textOf(renderer, 'external-usage-version');
+    // `writeBlocked=false` is permission, not proof: the Manager has not written
+    // anything yet, so the row may only claim that writes are allowed.
+    expect(text).toContain('Writes allowed');
+    expect(text).not.toContain('Writes verified');
+  });
+
+  it('offers a retry when the confirmation fails, keeping the panel and the request', async () => {
+    let attempts = 0;
+    const { client, calls } = stubClient(
+      async () => {
+        attempts += 1;
+        if (attempts === 1) throw new PublicApiError('http', 409, undefined, 'external_cpa_authority_unavailable');
+        return { ...usageState, statisticsEnabled: true };
+      },
+      async () => usageState
+    );
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <FreshExternalUsage client={client} credential="admin" onUnauthorized={() => undefined} />
+      );
+    });
+    const open = renderer.root.find(
+      (node) => node.props['data-testid'] === 'external-usage-enable'
+    );
+    await act(async () => open.props.onClick());
+    const confirm = renderer.root.find(
+      (node) => node.props['data-testid'] === 'external-usage-confirm'
+    );
+    await act(async () => confirm.props.onClick());
+    // The state the operator is trying to change stays readable, and the failure
+    // carries its own way to ask again.
+    expect(textOf(renderer, 'external-usage-confirm-failed')).toContain(x('usageEnableFailed'));
+    expect(
+      renderer.root.findAll((node) => node.props['data-testid'] === 'external-usage-statistics')
+    ).toHaveLength(1);
+    const retry = renderer.root.find(
+      (node) => node.props['data-testid'] === 'external-usage-confirm-retry'
+    );
+    await act(async () => retry.props.onClick());
+    expect(calls).toHaveLength(2);
+    // The retry is a replay of the same request, not a second write identity.
+    expect((calls[0].body as { requestId: string }).requestId).toBe(
+      (calls[1].body as { requestId: string }).requestId
+    );
+    expect(textOf(renderer, 'external-usage-notice')).toBe(x('usageConfirmed'));
   });
 
   it('reports the CPA version class alongside the collector state', async () => {
