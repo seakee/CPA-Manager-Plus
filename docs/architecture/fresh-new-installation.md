@@ -722,10 +722,11 @@ It is the acceptance for everything above:
 4. the usage confirm, including the confirm-less `400`; then one model request
    with an installed Client Key, the CPA's own usage queue read out of band to
    prove it publishes no record for a request that reached no Provider, and an
-   `api-keys/<id>/usage` read that attributes nothing the CPA did not publish. CPA
-   v8.0.13 credits usage only to an inference call that reached a Provider, so a
-   Client-Key figure for a real call is `NOT RUN` in a disposable CPA with no
-   Provider fixture;
+   `api-keys/<id>/usage` read that attributes nothing the CPA did not publish —
+   totals appear only for a window the projection can bound, and a zero is never
+   made to stand in for "not measured". CPA v8.0.13 credits usage only to an
+   inference call that reached a Provider, so a Client-Key figure for a real call
+   is `NOT RUN` in a disposable CPA with no Provider fixture;
 5. one Client Key proven directly against the CPA;
 6. **rotation**: the operator changes the CPA's management key out of band and
    restarts it, after which a Keys write, a gateway save and a usage confirm each

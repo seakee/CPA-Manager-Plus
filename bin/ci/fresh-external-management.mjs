@@ -896,13 +896,20 @@ try {
   await check('Key usage attributes nothing the CPA did not publish', async () => {
     const read = await apiCall('GET', 'api-keys/' + usageKey.id + '/usage');
     assert.equal(read.status, 200, JSON.stringify(read.payload));
-    const calls = read.payload?.totals?.calls;
-    assert.equal(
-      typeof calls === 'number' ? calls : -1,
-      0,
-      'the projection invented a call: ' + JSON.stringify(read.payload?.totals)
-    );
-    return { calls, coverage: read.payload?.coverage?.state };
+    const totals = read.payload?.totals ?? null;
+    const coverage = read.payload?.coverage?.state;
+    // The projection publishes totals only for a window it can bound, and a zero
+    // is never made to stand in for "not measured". Whatever this window says, it
+    // never carries a call the CPA did not publish.
+    if (totals !== null) {
+      assert.equal(totals.calls, 0, 'the projection invented a call: ' + JSON.stringify(totals));
+    } else {
+      assert(
+        !['complete', 'partial'].includes(coverage),
+        'a bounded window published no totals: ' + JSON.stringify(read.payload?.coverage)
+      );
+    }
+    return { calls: totals?.calls ?? null, coverage, reason: read.payload?.coverage?.reason };
   });
 
   // ---- Rotation. The operator changes the CPA's management key out of band and
