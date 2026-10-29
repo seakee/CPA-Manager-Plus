@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "runId": "cpamp-fresh-adoption-resource-legacy-d34355aff4d2",
+  "caseRef": "fresh-legacy-client-api-keys-read",
+  "sourceClass": "legacy_managed",
+  "consumerImplementationSha256": "4ead43972543c565ca147b248c166229ec83ee90a8db86267fc6d1f896e8247d",
+  "readVerified": true,
+  "clientKeyCount": 2,
+  "legacyVersion": "v7.0.12",
+  "legacyArchiveSha256": "8afc9ed4c89a50a5ffce5d122a9bb93442c5b8ff3d8c6f07b7a274c719109b74",
+  "legacyBinarySha256": "1eb108b85ad554b92bab9f5a85af433d7c2e1b951bb192b639d73605d4593d1a"
+}

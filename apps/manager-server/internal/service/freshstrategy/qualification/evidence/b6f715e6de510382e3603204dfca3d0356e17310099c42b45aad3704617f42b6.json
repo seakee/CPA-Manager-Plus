@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "runId": "cpamp-fresh-adoption-resource-network-d34355aff4d2",
+  "caseRef": "fresh-network-client-api-keys-read",
+  "sourceClass": "network_existing",
+  "consumerImplementationSha256": "4ead43972543c565ca147b248c166229ec83ee90a8db86267fc6d1f896e8247d",
+  "readVerified": true,
+  "clientKeyCount": 2,
+  "managementGeneration": "v8"
+}

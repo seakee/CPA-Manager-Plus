@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "contractId": "cpamp-cpa-v8-adoption-resource",
+  "manifestRevision": "fresh-legacy-client-api-keys-r1",
+  "manifestSha256": "7388022d21d2d6502449c311bc5379e4e954db0030912e73a2607d809fefb5f2",
+  "run": {
+    "id": "cpamp-fresh-adoption-resource-legacy-d34355aff4d2",
+    "runnerCommit": "d34355aff4d297f4b2f907a9a7f6f3973c6009f7",
+    "testedTree": "a4cada00884c7c735c34e68ff479515bd5b3c900"
+  },
+  "artifactObservation": {
+    "candidateRef": "CPA8-8.0.13-linux-amd64-plugin",
+    "provenance": "locally-verified",
+    "observedArchiveSha256": "50ecffb47fdd81c8c5a9825a73a7a905ab66342337e274f39c4276b92d3533f3",
+    "observedBinarySha256": "b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41"
+  },
+  "results": [
+    {
+      "caseRef": "fresh-legacy-client-api-keys-read",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "supported",
+      "evidenceRefs": [
+        "fresh-legacy-client-api-keys-read"
+      ]
+    },
+    {
+      "caseRef": "fresh-legacy-client-api-keys-replay",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "supported",
+      "evidenceRefs": [
+        "fresh-legacy-client-api-keys-replay"
+      ]
+    },
+    {
+      "caseRef": "fresh-legacy-client-api-keys-verify",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "supported",
+      "evidenceRefs": [
+        "fresh-legacy-client-api-keys-verify"
+      ]
+    }
+  ],
+  "evidence": [
+    {
+      "id": "fresh-legacy-client-api-keys-read",
+      "kind": "sanitized-trace",
+      "sha256": "29943ef74be1fb87d61b9db95ff7f1f0e967e66ea73429215e1c6f276f4ec21c"
+    },
+    {
+      "id": "fresh-legacy-client-api-keys-replay",
+      "kind": "sanitized-trace",
+      "sha256": "23f601adcc869cc42d60b57fe9512ae27ac97473b144a959539dcee83d48c972"
+    },
+    {
+      "id": "fresh-legacy-client-api-keys-verify",
+      "kind": "sanitized-trace",
+      "sha256": "e717d6641468bda5f2b1b6fb0d19491ba07f7540be589f6e1500876d0101c622"
+    }
+  ]
+}

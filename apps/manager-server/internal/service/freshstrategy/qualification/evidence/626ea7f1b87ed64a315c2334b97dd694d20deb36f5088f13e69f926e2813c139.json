@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "contractId": "cpamp-cpa-v8-adoption-resource",
+  "manifestRevision": "fresh-network-client-api-keys-r1",
+  "manifestSha256": "563ef299810ce576636df6bd5ebf39a0554d54e5b8bde31b8606405c4d2ac3be",
+  "run": {
+    "id": "cpamp-fresh-adoption-resource-network-d34355aff4d2",
+    "runnerCommit": "d34355aff4d297f4b2f907a9a7f6f3973c6009f7",
+    "testedTree": "a4cada00884c7c735c34e68ff479515bd5b3c900"
+  },
+  "artifactObservation": {
+    "candidateRef": "CPA8-8.0.13-linux-amd64-plugin",
+    "provenance": "locally-verified",
+    "observedArchiveSha256": "50ecffb47fdd81c8c5a9825a73a7a905ab66342337e274f39c4276b92d3533f3",
+    "observedBinarySha256": "b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41"
+  },
+  "results": [
+    {
+      "caseRef": "fresh-network-client-api-keys-read",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "supported",
+      "evidenceRefs": [
+        "fresh-network-client-api-keys-read"
+      ]
+    },
+    {
+      "caseRef": "fresh-network-client-api-keys-replay",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "supported",
+      "evidenceRefs": [
+        "fresh-network-client-api-keys-replay"
+      ]
+    },
+    {
+      "caseRef": "fresh-network-client-api-keys-verify",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "supported",
+      "evidenceRefs": [
+        "fresh-network-client-api-keys-verify"
+      ]
+    }
+  ],
+  "evidence": [
+    {
+      "id": "fresh-network-client-api-keys-read",
+      "kind": "sanitized-trace",
+      "sha256": "b6f715e6de510382e3603204dfca3d0356e17310099c42b45aad3704617f42b6"
+    },
+    {
+      "id": "fresh-network-client-api-keys-replay",
+      "kind": "sanitized-trace",
+      "sha256": "a5f78e2e7f20a5673caae93a72e8c7e4effae53fe0e1a71f33ab40aedee7387f"
+    },
+    {
+      "id": "fresh-network-client-api-keys-verify",
+      "kind": "sanitized-trace",
+      "sha256": "b029fd7185722d53e38197e77f15f8dd46020fa99c42be742c61a6610415f067"
+    }
+  ]
+}

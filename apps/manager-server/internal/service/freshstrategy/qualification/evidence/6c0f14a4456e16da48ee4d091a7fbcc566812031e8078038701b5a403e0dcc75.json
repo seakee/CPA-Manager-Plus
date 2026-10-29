@@ -1,0 +1,21 @@
+{
+  "caseRef": "fresh-legacy-managed-stage-v8-r1",
+  "consumerImplementationSha256": "4ead43972543c565ca147b248c166229ec83ee90a8db86267fc6d1f896e8247d",
+  "destinationVerified": true,
+  "gatewayPending": true,
+  "legacyArchiveSha256": "8afc9ed4c89a50a5ffce5d122a9bb93442c5b8ff3d8c6f07b7a274c719109b74",
+  "legacyBinarySha256": "1eb108b85ad554b92bab9f5a85af433d7c2e1b951bb192b639d73605d4593d1a",
+  "legacyReadVerified": true,
+  "legacyVersion": "v7.0.12",
+  "schemaVersion": 1,
+  "sourceClass": "legacy_managed",
+  "sourceHead": "416e1c108dcebe3de528e1e47ad053bede00687c",
+  "sourcePreserved": true,
+  "stagingV8Verified": true,
+  "targetArchiveSha256": "50ecffb47fdd81c8c5a9825a73a7a905ab66342337e274f39c4276b92d3533f3",
+  "targetArtifactId": "sha256:b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41",
+  "targetBinarySha256": "b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41",
+  "targetVersion": "v8.0.13",
+  "testedCommit": "d34355aff4d297f4b2f907a9a7f6f3973c6009f7",
+  "testedTree": "a4cada00884c7c735c34e68ff479515bd5b3c900"
+}
