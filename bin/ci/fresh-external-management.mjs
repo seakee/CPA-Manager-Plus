@@ -662,6 +662,23 @@ try {
 
   // The CPA's own key list, read out of band: this Manager never reports a
   // fact about a CPA it does not own that the CPA did not just answer.
+  // The CPA's own usage queue: the record of external requests before this Manager
+  // projects them. It is read with the operator's key, out of band, because only
+  // the CPA knows what it published.
+  async function cpaUsageQueue(management) {
+    const response = await fetch(
+      `http://127.0.0.1:${cpaPort}/v0/management/usage-queue?count=10`,
+      { headers: { Authorization: 'Bearer ' + management } }
+    );
+    assert.equal(
+      response.status,
+      200,
+      'the CPA refused the out-of-band usage-queue read: ' + response.status
+    );
+    const body = await response.json();
+    return Array.isArray(body) ? body : [];
+  }
+
   async function cpaKeys(management) {
     const response = await fetch(
       `http://127.0.0.1:${cpaPort}/v8/management/config/access/api-keys`,
@@ -850,13 +867,15 @@ try {
     return { enabledAfterConfirm: true };
   });
 
-  // One model request, made with a Client Key this Manager installed, must be
-  // attributed to that Key: the CPA records the call, the Collector reads its queue
-  // and the projection binds the call to the Canonical Key. Collection is
-  // asynchronous on both sides, so the read is polled with a bounded timeout and
-  // never asserted on the first attempt.
-  await check('Key usage shows the model request a Client Key made', async () => {
-    const usageKey = await stageKey();
+  // ---- Usage attribution. A CPA publishes a usage record only for an inference
+  // call that reached a Provider: a Client-Key model list publishes nothing, and
+  // so does an inference that fails before any Provider (both observed on v8.0.13,
+  // and this run has no Provider fixture). What is provable here is the honest
+  // half of attribution — the CPA records nothing, and the projection attributes
+  // nothing it was never given. A Key-usage figure for a real Provider call stays
+  // NOT RUN, because no Provider fixture exists in this disposable CPA.
+  const usageKey = await stageKey();
+  await check('the CPA records no usage for a Client-Key model request', async () => {
     const probe = run(
       ['docker', 'run', '--rm', '--network', network, '--entrypoint', 'wget',
         images['cpamp-manager'], '-qO-', '--header=Authorization: Bearer ' + usageKey.secret,
@@ -865,14 +884,25 @@ try {
       false
     );
     assert.equal(probe.status, 0, 'the CPA refused the staged Client Key');
-    let usage = null;
-    await wait(async () => {
-      const read = await apiCall('GET', 'api-keys/' + usageKey.id + '/usage');
-      if (read.status !== 200) return false;
-      usage = read.payload;
-      return (usage.totals?.calls ?? 0) >= 1;
-    }, 'Key usage attribution of the model request', 120000);
-    return { calls: usage.totals.calls, coverage: usage.coverage?.state };
+    // The CPA's own queue is the only place a record of a request that did not
+    // pass through this Manager exists, so it is read out of band. It must stay
+    // empty: a record here would mean the CPA credited a call to a Provider that
+    // does not exist.
+    const records = await cpaUsageQueue(managementKey);
+    assert.deepEqual(records, [], 'the CPA published usage for a request that reached no Provider');
+    return { modelRequests: 1, queueRecords: records.length };
+  });
+
+  await check('Key usage attributes nothing the CPA did not publish', async () => {
+    const read = await apiCall('GET', 'api-keys/' + usageKey.id + '/usage');
+    assert.equal(read.status, 200, JSON.stringify(read.payload));
+    const calls = read.payload?.totals?.calls;
+    assert.equal(
+      typeof calls === 'number' ? calls : -1,
+      0,
+      'the projection invented a call: ' + JSON.stringify(read.payload?.totals)
+    );
+    return { calls, coverage: read.payload?.coverage?.state };
   });
 
   // ---- Rotation. The operator changes the CPA's management key out of band and
