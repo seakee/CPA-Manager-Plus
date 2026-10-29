@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 )
 
 func guardFreshLegacyWrites(next http.Handler, wiringErr error) http.Handler {
@@ -22,6 +25,117 @@ func guardFreshLegacyWrites(next http.Handler, wiringErr error) http.Handler {
 	})
 }
 
+// externalLegacyWriteReplaced is the stable code of a legacy write that an
+// External install already owns through its own route. The legacy bridge is a
+// compatibility tunnel; on External the same write exists behind an explicit
+// API-key, gateway-config, rebind or usage confirmation contract, so forwarding
+// it would be a second, unproven way to change the user's CPA.
+const externalLegacyWriteReplaced = "external_legacy_write_replaced"
+
+// writeLegacyRefusal answers one legacy-bridge refusal locally. Nothing is
+// forwarded, so a refused code costs the user's CPA no request.
+func writeLegacyRefusal(w http.ResponseWriter, code string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	writeFreshJSON(w, struct {
+		Code string `json:"code"`
+	}{code})
+}
+
+// externalLegacyReplacedWrite reports whether this legacy request is one of the
+// writes Fresh already owns on External. The argument is the path the legacy
+// router sees, not the browser-facing `cpamp/` alias.
+func externalLegacyReplacedWrite(path, method string) bool {
+	if method == http.MethodGet || method == http.MethodHead {
+		return false
+	}
+	switch strings.TrimRight(path, "/") {
+	case "/v0/management/api-keys", "/v0/management/config.yaml", "/usage-service/config":
+		// API keys are owned by `api-keys`, the gateway document by
+		// `gateway/config`, and the usage-service settings document by the
+		// connection, the rebind and `external/usage`. On External the setup row
+		// is a mirror of the committed connection, so editing it here would
+		// desync the two.
+		return true
+	}
+	return false
+}
+
+// legacyBridgeReachesCPA reports whether a legacy request ends up presenting the
+// saved management credential to the user's CPA. Only those requests are gated:
+// the Manager-local families answer from its own store, and a page, a static asset
+// or a redirect must stay reachable so the user can still read the blocker.
+func legacyBridgeReachesCPA(path string) bool {
+	cleaned := strings.TrimRight(path, "/")
+	if cleaned == "/v0/resource/plugins" || strings.HasPrefix(cleaned, "/v0/resource/plugins/") {
+		return true
+	}
+	if !strings.HasPrefix(cleaned, "/v0/management/") {
+		return false
+	}
+	// Manager-local controllers are dispatched before the CPA proxy in the legacy
+	// router, so they never carry the saved key upstream.
+	for _, family := range []string{
+		"/v0/management/usage",
+		"/v0/management/dashboard",
+		"/v0/management/model-prices",
+		"/v0/management/monitoring",
+		"/v0/management/api-key-aliases",
+		"/v0/management/account-action-candidates",
+		"/v0/management/codex-inspection",
+		"/v0/management/quota-snapshots",
+		"/v0/management/cpa-connection",
+	} {
+		if cleaned == family || strings.HasPrefix(cleaned, family+"/") {
+			return false
+		}
+	}
+	return true
+}
+
+// guardFreshExternalLegacy is the External cutover of the legacy bridge. The
+// bridge is a compatibility tunnel onto the same routes Fresh now owns behind an
+// explicit contract, so on External it must not become a second, unproven write
+// path onto the user's CPA; and it must never present a management credential
+// that CPA already refused. Both answers are local, so neither costs the user's
+// CPA a request. New Managed and Adopt hand the request straight through.
+func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Handler {
+	if next == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if app.externalLegacyRefusal(r.Context(), w, r) {
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// externalLegacyRefusal answers the refusal one legacy request must get on an
+// External install, and reports whether it answered.
+func (a *freshApplication) externalLegacyRefusal(ctx context.Context, w http.ResponseWriter, r *http.Request) bool {
+	if a == nil || a.store == nil || r == nil || r.URL == nil {
+		return false
+	}
+	record, err := a.store.Load(ctx)
+	if err != nil || record.Operation.Strategy.Strategy != bootstrap.ConnectExternal {
+		// New Managed and Adopt keep the bridge they have always had: on those
+		// profiles it is the Console's own contract, not a duplicate route.
+		return false
+	}
+	if externalLegacyReplacedWrite(r.URL.Path, r.Method) {
+		writeLegacyRefusal(w, externalLegacyWriteReplaced)
+		return true
+	}
+	if !legacyBridgeReachesCPA(r.URL.Path) || !a.externalReadGrant(ctx).Refused {
+		return false
+	}
+	// The refused credential is the rebind blocker for every method: a read the
+	// CPA would refuse again, and a write whose effect cannot be read back.
+	writeExternalManagementRejected(w)
+	return true
+}
+
 // legacyResource exposes the existing CPAMP service/controller contracts below
 // the canonical Full Web API namespace. The browser never learns or constructs
 // the legacy paths; this adapter keeps the Public API authority and admin
@@ -34,10 +148,12 @@ func (a *freshApplication) legacyResource(w http.ResponseWriter, r *http.Request
 	}
 	// Full Web uses this bridge only after canonicalAPI has verified the
 	// Manager Admin key. Keep the browser-facing namespace explicit while
-	// reusing the complete legacy router and its own controller checks.
-	if strings.HasPrefix(resource, "cpamp/") && legacyBridgePathAllowed(strings.TrimPrefix(resource, "cpamp/"), r.Method) {
-		targetResource := strings.TrimPrefix(resource, "cpamp/")
-		parsed, err := url.Parse("/" + targetResource)
+	// reusing the complete legacy router and its own controller checks. The
+	// External cutover runs inside a.legacy itself, on the rewritten path, so
+	// every entry point into that router is covered by one gate.
+	bridged := strings.TrimPrefix(resource, "cpamp/")
+	if strings.HasPrefix(resource, "cpamp/") && legacyBridgePathAllowed(bridged, r.Method) {
+		parsed, err := url.Parse("/" + bridged)
 		if err != nil || parsed.Path == "" || parsed.Path == "/" {
 			http.NotFound(w, r)
 			return

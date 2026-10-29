@@ -242,8 +242,10 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	}
 	// An unavailable Embedded writer must not remove unrelated Console reads,
 	// and External has no identity worker to install. Always construct the
-	// router, but fail writes closed if either mutation wiring step failed.
-	a.legacy = guardFreshLegacyWrites(router.New(legacyContext), err)
+	// router, but fail writes closed if either mutation wiring step failed, and
+	// on External refuse the writes Fresh already owns plus any request that
+	// would present a credential its CPA already rejected.
+	a.legacy = guardFreshExternalLegacy(guardFreshLegacyWrites(router.New(legacyContext), err), a)
 	// The private host launcher alone mounts the short-lived permit. The default
 	// v7 profile and existing environments never opt into this consumer.
 	h1Mode := os.Getenv("CPAMP_PRIVATE_H1")
