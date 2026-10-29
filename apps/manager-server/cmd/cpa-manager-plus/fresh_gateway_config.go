@@ -304,7 +304,23 @@ func (a *freshApplication) gatewayConfigOperation(w http.ResponseWriter, r *http
 	if service == nil {
 		return
 	}
-	operation, err := service.Operation(r.Context(), parts[1], reconcile)
+	if reconcile {
+		// A reconcile asks the user's CPA for the source record, so it presents
+		// the stored credential exactly like the config read does. A credential
+		// CPA has already refused is never presented again: five refusals ban the
+		// address for thirty minutes, and this endpoint is polled. The plain
+		// inspection answers from the journal alone, so it stays ungated.
+		grant := a.externalReadGrant(r.Context())
+		if grant.Refused {
+			gatewayConfigReply(w, nil, cpa.ErrManagementRejected)
+			return
+		}
+		operation, err := service.Operation(r.Context(), parts[1], true)
+		a.noteExternalRejection(r.Context(), grant, err)
+		gatewayConfigReply(w, operation, err)
+		return
+	}
+	operation, err := service.Operation(r.Context(), parts[1], false)
 	gatewayConfigReply(w, operation, err)
 }
 

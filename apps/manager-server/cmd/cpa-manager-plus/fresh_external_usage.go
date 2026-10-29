@@ -326,17 +326,19 @@ type externalUsageState struct {
 }
 
 func (a *freshApplication) externalUsageState(ctx context.Context) (externalUsageState, error) {
-	install, err := a.externalSource(ctx)
-	if err != nil {
-		return externalUsageState{}, err
-	}
 	// The CPA has already refused this credential, so this read would be another
 	// failed authentication against an address CPA is about to ban. The typed
 	// blocker is answered locally until a rebind or a re-verify proves the key
-	// again.
+	// again. The grant resolves the committed source itself, so it runs first:
+	// resolving the install above it only to discard it would be work this read
+	// must not do once the credential is refused.
 	grant := a.externalReadGrant(ctx)
 	if grant.Refused {
 		return externalUsageState{}, externalReadRefusedError()
+	}
+	install, err := a.externalSource(ctx)
+	if err != nil {
+		return externalUsageState{}, err
 	}
 	report, err := cpa.ObserveExternalVersion(ctx, install.BaseURL, install.ManagementKey)
 	if err != nil {
