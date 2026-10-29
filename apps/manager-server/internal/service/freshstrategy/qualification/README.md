@@ -161,7 +161,10 @@ exactly one decision. A kind may be `Migrate` only when the resource chain's
 three traces all name it, so `client-api-keys` and — for a `network_existing`
 source — `cpa-auth-files`, `cpa-config-routing` and `provider-state-api-keys`
 migrate, while the remaining sections stay explicit manual or unsupported
-actions. A `legacy_managed` source is a pre-v8 process with no v8 management
+actions. The section item is a whole `api-keys.*` group or one of the copyable
+`oauth.*` children, which are provider configuration rather than the source's
+auth directory; both are gated under `provider-state-api-keys`. A `legacy_managed`
+source is a pre-v8 process with no v8 management
 surface, so its evidence authorizes `client-api-keys` only and its other kinds
 keep the manual action they had before. Unknown upstream sections collapse to the fixed `cpa-config-unknown`
 reference and never become durable upstream-controlled identities. The
@@ -176,7 +179,14 @@ no new review record exists, `status` is still `accepted` under `65eb659a`, and
 the widened kinds are pending the single pre-Beta independent re-acceptance.
 Until that re-acceptance the four-kind breadth of `network_existing` is a
 waived claim, and the executor's per-reference gate is what keeps it honest: an
-item is copied only when the record's decision for its reference is `migrate`.
+item is copied only when the record's decision for its own reference is `migrate`.
+All three item classes share one resolver table in
+`internal/service/cpa/adoption_ref.go`, so discovery and the copy gate cannot
+classify the same upstream section two ways: a provider section resolves through
+its own root (`api-keys.*` and the copyable `oauth.*` children are
+`provider-state-api-keys`; `client` and `providers` keep their own references),
+and a section under a root the table does not name falls back to
+`provider-state-providers` rather than inheriting another root's verdict.
 
 The four accepted entries carry exact `applicability`, independently
 accepted evidence and their enforced limitations. On a missing/mismatched

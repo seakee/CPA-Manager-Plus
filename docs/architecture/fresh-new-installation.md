@@ -791,13 +791,26 @@ re-acceptance**. No new review record was created and the consumer stays
 independently accepted.
 
 The record is also the gate on the copy itself, not only on its label. The
-executor classifies every item through `freshadopt.ItemRef` — a gateway leaf or
-payload rule family the accepted gateway table names is `cpa-config-routing`,
-anything outside that table keeps its describing reference and stays manual —
-and it copies an item only when the record's decision for that reference is
-`migrate` (`freshadopt.Executor.gated`). Every other item is recorded with that
-decision's manual action and is never written, so an inventory that later
-widens cannot copy a kind the record still calls manual.
+executor classifies every item through `freshadopt.ItemRef`, and each class of
+item has its own single resolver in `internal/service/cpa/adoption_ref.go`:
+
+- a credential file is `cpa-auth-files`;
+- a gateway leaf or payload rule family the accepted gateway table names is
+  `cpa-config-routing`; anything outside that table keeps `cpa-config-unknown`
+  and stays manual;
+- a whole provider section is its own root's reference — `api-keys.*` and the
+  copyable `oauth.*` children (provider configuration, not the auth directory)
+  are `provider-state-api-keys`, while a `client` or `providers` section is
+  `provider-state-client` / `provider-state-providers`. A section whose root the
+  table does not name falls back to `provider-state-providers`, never to the
+  api-keys verdict.
+
+The same table is what discovery reads, so an item is gated under exactly the
+reference the record decided for it. The executor copies an item only when that
+reference's decision is `migrate` (`freshadopt.Executor.gated`); every other item
+is recorded with that decision's manual action and is never written, so an
+inventory that later widens cannot copy a kind the record still calls manual, and
+one root's verdict is never borrowed by another root's sections.
 
 #### Retry after a terminal destination failure
 
