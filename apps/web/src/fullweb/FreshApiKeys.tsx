@@ -24,6 +24,7 @@ export function FreshApiKeys({
   visible = true,
   onRebind,
   externalUsage = false,
+  reloadToken = 0,
 }: {
   client: ReturnType<typeof createPublicApiClient>;
   credential: string;
@@ -36,6 +37,8 @@ export function FreshApiKeys({
   onRebind?: () => void;
   /** Shows the External usage panel, which reads `external/usage`. */
   externalUsage?: boolean;
+  /** Bumped by the shell after a successful rebind to re-read this page. */
+  reloadToken?: number;
 }) {
   const [keys, setKeys] = useState<Key[] | null>(null);
   // A typed External blocker is the page's own contract. It is kept apart from
@@ -154,9 +157,11 @@ export function FreshApiKeys({
   }
 
   // No credential, secret or request journal enters persistent browser storage.
+  // A successful rebind changes `reloadToken`, so the blocker this page is
+  // showing is re-read instead of outliving the fix that resolved it.
   useEffect(() => {
     void refresh();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [reloadToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function copyCreatedSecret() {
     if (!secret) return;
@@ -507,6 +512,7 @@ export function FreshApiKeys({
       )}
       {externalUsage && (
         <FreshExternalUsage
+          reloadToken={reloadToken}
           client={client}
           credential={credential}
           onUnauthorized={onUnauthorized}

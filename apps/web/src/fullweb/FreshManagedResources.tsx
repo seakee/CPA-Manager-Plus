@@ -80,6 +80,7 @@ export function FreshManagedResources({
   // dialog is mounted here so switching pages mid-fix cannot drop it.
   const [rebindOpen, setRebindOpen] = useState(false);
   const [rebound, setRebound] = useState('');
+  const [reloadToken, setReloadToken] = useState(0);
 
   function reportPending(resource: 'keys' | 'retry', value: boolean) {
     if (pending.current[resource] === value) return;
@@ -111,6 +112,7 @@ export function FreshManagedResources({
           onPending={(value) => reportPending('keys', value)}
           onRebind={externalProfile ? () => setRebindOpen(true) : undefined}
           externalUsage={externalProfile}
+          reloadToken={reloadToken}
         />
       </RetainedRoutePanel>
 
@@ -127,6 +129,7 @@ export function FreshManagedResources({
           onUnauthorized={onUnauthorized}
           onPending={(value) => reportPending('retry', value)}
           onRebind={externalProfile ? () => setRebindOpen(true) : undefined}
+          reloadToken={reloadToken}
         />
       </RetainedRoutePanel>
 
@@ -144,6 +147,10 @@ export function FreshManagedResources({
           onRebound={({ reverified }) => {
             setRebindOpen(false);
             setRebound(x(reverified ? 'rebindSucceededReverified' : 'rebindSucceededRebound'));
+            // The blocker every panel is showing is now stale: nothing else
+            // re-reads these pages, so without this the operator sees the fix
+            // and the refusal it resolved at the same time.
+            setReloadToken((token) => token + 1);
           }}
         />
       )}

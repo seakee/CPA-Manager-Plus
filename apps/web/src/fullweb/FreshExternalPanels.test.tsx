@@ -252,6 +252,37 @@ describe('External usage confirmation', () => {
     expect(text).not.toMatch(/\d/);
   });
 
+  it('re-reads the panel when the shell reports a successful rebind', async () => {
+    let reads = 0;
+    const { client } = stubClient(
+      async () => undefined,
+      async () => {
+        reads += 1;
+        return usageState;
+      }
+    );
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <FreshExternalUsage client={client} credential="admin" onUnauthorized={() => undefined} />
+      );
+    });
+    expect(reads).toBe(1);
+    // The panel is mounted once, so without this it would keep the refusal it
+    // saw before the fix that resolved it.
+    await act(async () => {
+      renderer.update(
+        <FreshExternalUsage
+          client={client}
+          credential="admin"
+          onUnauthorized={() => undefined}
+          reloadToken={1}
+        />
+      );
+    });
+    expect(reads).toBe(2);
+  });
+
   it('reports the CPA version class alongside the collector state', async () => {
     const { client } = stubClient(
       async () => usageState,

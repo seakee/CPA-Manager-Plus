@@ -27,11 +27,14 @@ export function FreshExternalUsage({
   credential,
   onUnauthorized,
   onBlocker,
+  reloadToken = 0,
 }: {
   client: PublicApiClient;
   credential: string;
   onUnauthorized: () => void;
   onBlocker?: (code: string) => void;
+  /** Bumped by the shell after a successful rebind to re-read this panel. */
+  reloadToken?: number;
 }) {
   const [state, setState] = useState<ExternalUsageState | null>(null);
   const [error, setError] = useState('');
@@ -69,9 +72,11 @@ export function FreshExternalUsage({
     }
   }
 
+  // Mounted once, so a rebind that resolves the blocker has to re-read here too:
+  // otherwise the panel keeps the refusal it saw before the fix.
   useEffect(() => {
     void read();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [reloadToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function confirmEnable() {
     if (busy) return;

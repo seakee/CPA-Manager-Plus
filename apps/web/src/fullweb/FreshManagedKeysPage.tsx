@@ -17,6 +17,7 @@ export function FreshManagedKeysPage({
   visible = true,
   onRebind,
   externalUsage = false,
+  reloadToken = 0,
 }: {
   client: ReturnType<typeof createPublicApiClient>;
   credential: string;
@@ -25,6 +26,7 @@ export function FreshManagedKeysPage({
   visible?: boolean;
   onRebind?: () => void;
   externalUsage?: boolean;
+  reloadToken?: number;
 }) {
   return (
     <div className="fresh-managed-config key-managed-page" data-testid="fresh-managed-keys">
@@ -38,6 +40,7 @@ export function FreshManagedKeysPage({
         pageDescription={w('keysHelp')}
         onRebind={onRebind}
         externalUsage={externalUsage}
+        reloadToken={reloadToken}
       />
     </div>
   );

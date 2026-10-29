@@ -85,6 +85,7 @@ export function FreshGatewayWorkspace({
   onPending,
   onDirtyChange,
   onRebind,
+  reloadToken = 0,
 }: {
   client: PublicApiClient;
   credential: string;
@@ -92,6 +93,8 @@ export function FreshGatewayWorkspace({
   onPending: (pending: boolean) => void;
   onDirtyChange?: (dirty: boolean) => void;
   onRebind?: () => void;
+  /** Bumped by the shell after a successful rebind to re-read this page. */
+  reloadToken?: number;
 }) {
   // Subscribe to language changes just like the original Console pages.
   const { i18n } = useTranslation();
@@ -176,7 +179,7 @@ export function FreshGatewayWorkspace({
 
   useEffect(() => {
     void load();
-  }, [load]);
+  }, [load, reloadToken]);
 
   const fieldViews = useMemo(() => {
     const index = new Map<string, GatewayFieldView>();
