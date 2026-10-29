@@ -25,6 +25,26 @@ assert(
 const { chromium } = createRequire(import.meta.url)(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const out = resolve(output);
 mkdirSync(out, { recursive: false, mode: 0o700 });
+// The CPA configs carry every secret of this run, so they are written to a
+// sibling of the artifact directory and deleted with it. An artifact directory is
+// the one place a secret must never be: a redacted copy of a live CPA config is
+// still a replayable one.
+const secretsDir = resolve(root, 'bin/tmp', 'd-external-secrets-' + randomBytes(6).toString('hex'));
+mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
+const cpaConfigPath = resolve(secretsDir, 'cpa-config.yaml');
+const cpaV7ConfigPath = resolve(secretsDir, 'cpa-v7-config.yaml');
+const cpaV7AuthDir = resolve(secretsDir, 'cpa-v7-auth');
+
+// Everything this run prints is kept, unredacted, so the secret assertion below can
+// look at it before redaction rewrites it.
+const printed = [];
+for (const level of ['log', 'error']) {
+  const write = console[level].bind(console);
+  console[level] = (...args) => {
+    printed.push(args.map((value) => String(value)).join(' '));
+    write(...args);
+  };
+}
 const project = 'cpamp-d-external-' + randomBytes(6).toString('hex');
 const bootstrap = '/.well-known/cpamp-bootstrap';
 const report = {
@@ -117,8 +137,19 @@ report.imageSourceRevisions = Object.fromEntries(
     ] || 'unknown',
   ])
 );
-report.testedSourceCommit = report.imageSourceRevisions['cpamp-manager'];
+// The report names the source it tested, so a rerun on another commit is visible
+// rather than assumed. A dirty worktree is refused outright: an image built from
+// it carries bytes no commit names, and every check below would be attributed to
+// work that does not exist.
 report.gitHead = run(['git', 'rev-parse', 'HEAD']).stdout.trim();
+const dirtyWorktree = run(['git', 'status', '--porcelain']).stdout.trim();
+assert.equal(dirtyWorktree, '', 'the worktree must be clean: the report names this HEAD');
+report.testedSourceCommit = report.gitHead;
+report.imageSourceCommit = report.imageSourceRevisions['cpamp-manager'];
+assert(
+  report.imageSourceCommit === 'unknown' || report.imageSourceCommit === report.gitHead,
+  'the Manager image was built from ' + report.imageSourceCommit + ', not ' + report.gitHead
+);
 
 const network = project + '-net';
 const managerVolume = project + '-manager-data';
@@ -126,10 +157,15 @@ const cpaContainer = project + '-cpa';
 const managerContainer = project + '-manager';
 const ingressContainer = project + '-ingress';
 const v7Container = project + '-cpa-v7';
+// The Manager's own address on the private network: the failed-authentication
+// counter only attributes a CPA log line to this Manager when it names this.
+let managerAddress = '';
 
 function pass(name, observed) {
   report.checks.push({ name, result: 'PASS', ...(observed ? { observed } : {}) });
-  console.log('PASS ' + name + (observed ? ' ' + JSON.stringify(observed) : ''));
+  // The report keeps the observation itself; the run log never prints it raw, so a
+  // value that should not be here cannot become part of a pasted log.
+  console.log('PASS ' + name + (observed ? ' ' + redact(JSON.stringify(observed)) : ''));
 }
 function fail(name, observed) {
   report.checks.push({ name, result: 'FAIL', ...(observed ? { observed } : {}) });
@@ -187,15 +223,44 @@ async function screenshot(name) {
 // which is the only place that knows how many times this Manager presented a
 // credential the CPA refused: five in a row bans the Manager's address, so the
 // number is the whole point of the rejection gate.
+// The parsing rule, in one place because the number is the whole point:
+//   * only a line that names the MANAGEMENT surface counts — a `/v0/management/`
+//     or `/v8/management/` path, a management key, or the management secret;
+//   * within those, only an authentication refusal counts: 401, unauthorized, or
+//     an invalid key/token;
+//   * and when the line carries a peer address, it must be the Manager's own
+//     container address. This run's other management clients are its own wget
+//     probes, which always present the key the CPA currently holds, so they can
+//     only answer 200; a Client-Key request on `/v1/models`, a 404 and a health
+//     probe are not management authentications and are never counted.
 function cpaFailedAuthCount() {
-  const logs = run(
-    ['docker', 'logs', cpaContainer],
-    undefined,
-    false
-  );
+  const logs = run(['docker', 'logs', cpaContainer], undefined, false);
   const text = (logs.stdout || '') + (logs.stderr || '');
-  return text.split('\n').filter((line) => /401|unauthorized|invalid.*(?:key|token)/i.test(line))
+  return text
+    .split('\n')
+    .filter((line) => /(?:^|\/)(?:v0|v8)\/management\/|management[ -]?key|secret-key/i.test(line))
+    .filter((line) => /\b401\b|unauthori[sz]ed|invalid (?:api )?(?:key|token)/i.test(line))
+    .filter((line) => !/\d+\.\d+\.\d+\.\d+/.test(line) || line.includes(managerAddress))
     .length;
+}
+// A secret must not survive anywhere this run wrote: the report object itself
+// (asserted UNREDACTED), everything the run printed, and the log of every
+// container of this run. Redaction is what makes the artifact readable, never what
+// makes it safe — an assertion that runs after it can never fail.
+function assertNoSecret(where, text) {
+  for (const value of secretValues) {
+    if (value && text.includes(value)) throw new Error('a secret value reached ' + where);
+  }
+}
+function runContainerLogs() {
+  const names = run(['docker', 'ps', '-a', '--filter', 'name=' + project, '--format', '{{.Names}}'], undefined, false)
+    .stdout.trim()
+    .split('\n')
+    .filter(Boolean);
+  return names.map((name) => {
+    const logs = run(['docker', 'logs', name], undefined, false);
+    return { name, text: (logs.stdout || '') + (logs.stderr || '') };
+  });
 }
 function cpaLogTail(lines = 40) {
   const logs = run(['docker', 'logs', '--tail', String(lines), cpaContainer], undefined, false);
@@ -231,9 +296,10 @@ let cpaConfig = [
   '    usage-statistics-enabled: false',
   '',
 ].join('\n');
-// The config lives outside the artifact directory: it carries every secret of
-// this run, and an artifact directory is the one place a secret must never be.
-writeFileSync(resolve(out, '.cpa-config.yaml'), cpaConfig, { mode: 0o600 });
+// The config lives outside the artifact directory, in the sibling secrets
+// directory: it carries every secret of this run, and an artifact directory is the
+// one place a secret must never be.
+writeFileSync(cpaConfigPath, cpaConfig, { mode: 0o600 });
 
 const cpaName = 'cpamp-d-external-cpa';
 const origin = `http://127.0.0.1:${publicPort}`;
@@ -261,7 +327,7 @@ try {
     '-p',
     `127.0.0.1:${cpaPort}:8317`,
     '-v',
-    `${resolve(out, '.cpa-config.yaml')}:/cpa/config.yaml`,
+    `${cpaConfigPath}:/cpa/config.yaml`,
     images['cpamp-runtime'],
     '/usr/local/bin/cli-proxy-api',
     // The pinned v8.0.13 binary takes a single-dash flag; `--config` is not a
@@ -374,6 +440,12 @@ try {
     return health.status === 503 || health.status === 200;
   }, 'Manager listener');
   pass('Manager starts manager-only with no Runtime companion');
+  managerAddress = (
+    docker('inspect', '-f', '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}', managerContainer)
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)[0] ?? ''
+  );
 
   // Claim. The install issues a Handoff, which carries the one-time token; it is a
   // secret and never appears in the report.
@@ -653,12 +725,72 @@ try {
     return { mode: 'revoke', outcome: result.payload.operation.outcome };
   });
 
-  // Gateway config: one scalar, written and read back, then changed out of band.
+  // Gateway config: the page's own projection, then one scalar saved, read back,
+  // changed out of band by the operator, and saved again with the stale digest.
   const gatewayRead = await apiCall('GET', 'gateway/config');
-  await check('gateway config reads the CPA through the External authority', async () => ({
-    status: gatewayRead.status,
-    revision: gatewayRead.payload?.result?.revision,
-  }));
+  await check('gateway config reads the CPA through the External authority', async () => {
+    assert.equal(gatewayRead.status, 200, JSON.stringify(gatewayRead.payload));
+    const groups = gatewayRead.payload?.groups ?? [];
+    assert(groups.length > 0, 'the projection lists no groups');
+    return { groups: groups.length, generation: gatewayRead.payload?.generation };
+  });
+
+  // The scalar this run saves is chosen from the projection, so it is a leaf this
+  // profile says is editable rather than a path the script assumes.
+  const scalar = (() => {
+    for (const group of gatewayRead.payload?.groups ?? []) {
+      if (!group.writable) continue;
+      for (const path of group.paths ?? []) {
+        const field = (gatewayRead.payload?.fields ?? []).find((entry) => entry.path === path);
+        if (!field?.editable) continue;
+        if (!['number', 'boolean', 'string'].includes(typeof field.value)) continue;
+        return { group: group.id, baseline: group.baseline, path };
+      }
+    }
+    return null;
+  })();
+
+  await check('gateway config saves one scalar and reads it back from the CPA', async () => {
+    assert(scalar, 'the projection offered no editable scalar');
+    const saved = await apiCall('POST', 'gateway/config/groups/' + scalar.group, {
+      requestId: randomBytes(16).toString('hex'),
+      expected: { generation: gatewayRead.payload.generation, baseline: scalar.baseline },
+      edits: [{ path: scalar.path, action: 'set', value: 3 }],
+    });
+    assert.equal(saved.status, 200, JSON.stringify(saved.payload));
+    let observed = null;
+    await wait(async () => {
+      const read = await apiCall('GET', 'gateway/config');
+      if (read.status !== 200) return false;
+      observed = (read.payload?.fields ?? []).find((field) => field.path === scalar.path);
+      gatewayRead.payload = read.payload;
+      return observed?.value === 3;
+    }, 'the saved scalar on the CPA');
+    return { path: scalar.path, value: observed.value };
+  });
+
+  await check('a save built on the out-of-band digest is refused as a conflict', async () => {
+    // The operator edits the same leaf on their own CPA. The Manager's confirmed
+    // baseline still names the document it last saw, so a save against it is a
+    // conflict rather than a blind overwrite.
+    const edited = await fetch(
+      `http://127.0.0.1:${cpaPort}/v8/management/config/` + scalar.path.split('.').join('/'),
+      {
+        method: 'PATCH',
+        headers: { Authorization: 'Bearer ' + managementKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify(4),
+      }
+    );
+    assert([200, 204].includes(edited.status), 'the operator edit was refused: ' + edited.status);
+    const stale = await apiCall('POST', 'gateway/config/groups/' + scalar.group, {
+      requestId: randomBytes(16).toString('hex'),
+      expected: { generation: gatewayRead.payload.generation, baseline: scalar.baseline },
+      edits: [{ path: scalar.path, action: 'set', value: 3 }],
+    });
+    assert.equal(stale.status, 409, JSON.stringify(stale.payload));
+    assert.equal(stale.payload.code, 'source_or_operation_conflict', JSON.stringify(stale.payload));
+    return { code: stale.payload.code };
+  });
 
   const usageRead = await apiCall('GET', 'external/usage');
   await check('usage state reports the CPA version it observed', async () => {
@@ -686,6 +818,31 @@ try {
     return { enabledAfterConfirm: true };
   });
 
+  // One model request, made with a Client Key this Manager installed, must be
+  // attributed to that Key: the CPA records the call, the Collector reads its queue
+  // and the projection binds the call to the Canonical Key. Collection is
+  // asynchronous on both sides, so the read is polled with a bounded timeout and
+  // never asserted on the first attempt.
+  await check('Key usage shows the model request a Client Key made', async () => {
+    const usageKey = await stageKey();
+    const probe = run(
+      ['docker', 'run', '--rm', '--network', network, '--entrypoint', 'wget',
+        images['cpamp-manager'], '-qO-', '--header=Authorization: Bearer ' + usageKey.secret,
+        `http://${cpaName}:8317/v1/models`],
+      undefined,
+      false
+    );
+    assert.equal(probe.status, 0, 'the CPA refused the staged Client Key');
+    let usage = null;
+    await wait(async () => {
+      const read = await apiCall('GET', 'api-keys/' + usageKey.id + '/usage');
+      if (read.status !== 200) return false;
+      usage = read.payload;
+      return (usage.totals?.calls ?? 0) >= 1;
+    }, 'Key usage attribution of the model request', 120000);
+    return { calls: usage.totals.calls, coverage: usage.coverage?.state };
+  });
+
   // ---- Rotation. The operator changes the CPA's management key out of band and
   // restarts it; the Manager is never told. This is the scenario the rejection
   // gate exists for.
@@ -693,7 +850,7 @@ try {
   // Stop before writing: a running CPA flushes its own config on shutdown, which
   // would put the previous secret back and make the rotation a no-op.
   docker('stop', cpaContainer);
-  writeFileSync(resolve(out, '.cpa-config.yaml'), cpaConfig, { mode: 0o600 });
+  writeFileSync(cpaConfigPath, cpaConfig, { mode: 0o600 });
   docker('start', cpaContainer);
   await wait(async () => {
     const probe = run(
@@ -752,6 +909,56 @@ try {
     const payload = await legacyWrite.json();
     assert.equal(payload.code, 'external_legacy_write_replaced');
     return payload;
+  });
+
+  // The Fresh writes answer the same typed refusal as the bridge. None of them may
+  // present the credential the CPA already refused: that is what five failures
+  // turn into a ban.
+  await check('after rotation a Keys write answers the typed refusal', async () => {
+    const staged = await stageKey(false);
+    const install = await apiCall('POST', 'api-keys/' + staged.id + '/initial-install', {});
+    assert.equal(install.status, 409, JSON.stringify(install.payload));
+    assert.equal(install.payload.code, 'external_management_key_rejected', JSON.stringify(install.payload));
+    return { code: install.payload.code };
+  });
+
+  await check('after rotation a gateway save answers the typed refusal', async () => {
+    assert(scalar, 'no editable scalar was projected');
+    const save = await apiCall('POST', 'gateway/config/groups/' + scalar.group, {
+      requestId: randomBytes(16).toString('hex'),
+      expected: { generation: gatewayRead.payload?.generation, baseline: scalar.baseline },
+      edits: [{ path: scalar.path, action: 'set', value: 3 }],
+    });
+    assert.equal(save.status, 409, JSON.stringify(save.payload));
+    assert.equal(save.payload.code, 'external_management_key_rejected', JSON.stringify(save.payload));
+    return { code: save.payload.code };
+  });
+
+  await check('after rotation a usage confirm answers the typed refusal', async () => {
+    const confirm = await apiCall('POST', 'external/usage', {
+      requestId: randomBytes(16).toString('hex'),
+      confirmEnableStatistics: true,
+    });
+    assert.equal(confirm.status, 409, JSON.stringify(confirm.payload));
+    assert.equal(confirm.payload.code, 'external_management_key_rejected', JSON.stringify(confirm.payload));
+    return { code: confirm.payload.code };
+  });
+
+  // The refusal is on record, so every read above and below answers from this
+  // Manager. Not one of them may reach the CPA with the refused key.
+  const failedAtGate = cpaFailedAuthCount();
+  await check('once the local gate engages no management refusal reaches the CPA', async () => {
+    for (let round = 0; round < 3; round++) {
+      await apiCall('GET', 'external/usage');
+      await apiCall('GET', 'gateway/config');
+      await apiCall('GET', 'api-keys');
+    }
+    assert.equal(
+      cpaFailedAuthCount(),
+      failedAtGate,
+      'the gate kept presenting the refused credential'
+    );
+    return { failedAuthsAtGate: failedAtGate };
   });
 
   const failedDuringRotation = cpaFailedAuthCount() - failedBefore;
@@ -853,7 +1060,7 @@ try {
       '  api-keys:\n' + carried.map((key) => `    - "${key}"\n`).join('')
     );
   docker('stop', cpaContainer);
-  writeFileSync(resolve(out, '.cpa-config.yaml'), cpaConfig, { mode: 0o600 });
+  writeFileSync(cpaConfigPath, cpaConfig, { mode: 0o600 });
   docker('start', cpaContainer);
   await wait(async () => {
     const probe = run(
@@ -995,13 +1202,13 @@ try {
   // This one replaces the CPA the whole run was built on with a v7 binary, so it
   // runs after every other check has already read the v8 one.
   if (process.env.CPAMP_D_CPA_LEGACY) {
-    await check('a v7 CPA is refused for writes and still answers a read', async () => {
+    await check('a CONNECT naming a v7 CPA is refused, and a read is never answered with the version code', async () => {
       const binary = process.env.CPAMP_D_CPA_LEGACY;
       assert(existsSync(binary), 'CPAMP_D_CPA_LEGACY does not name a binary');
       // v7 keeps the management key, the port and the auth directory at the
       // document root, so it needs its own file rather than the v8 one.
       writeFileSync(
-        resolve(out, '.cpa-v7-config.yaml'),
+        cpaV7ConfigPath,
         [
           'port: 8317',
           'host: "0.0.0.0"',
@@ -1016,7 +1223,7 @@ try {
         ].join('\n'),
         { mode: 0o600 }
       );
-      mkdirSync(resolve(out, '.cpa-v7-auth'), { recursive: true });
+      mkdirSync(cpaV7AuthDir, { recursive: true, mode: 0o700 });
       // The address the installation is committed to now answers as v7: the
       // operator downgraded the CPA underneath a working connection.
       docker('stop', cpaContainer);
@@ -1032,9 +1239,9 @@ try {
         '-v',
         `${binary}:/usr/local/bin/cli-proxy-api:ro`,
         '-v',
-        `${resolve(out, '.cpa-v7-config.yaml')}:/cpa/config.yaml`,
+        `${cpaV7ConfigPath}:/cpa/config.yaml`,
         '-v',
-        `${resolve(out, '.cpa-v7-auth')}:/cpa/auth`,
+        `${cpaV7AuthDir}:/cpa/auth`,
         '--entrypoint',
         '/usr/local/bin/cli-proxy-api',
         images['cpamp-runtime'],
@@ -1063,6 +1270,32 @@ try {
       );
       assert.equal(accepted.status, 0, 'the v7 CPA refused the stored credential');
 
+      // A CONNECT is the first thing an operator does with a CPA. It probes the v8
+      // safe read before anything is persisted, so a v7 CPA is refused there: the
+      // code is the 2a connect refusal (or the version code the other External
+      // surfaces name), and no journal entry exists afterwards.
+      const current = await apiCall('GET', 'operation');
+      const connectV7 = await apiCall('POST', 'strategy', {
+        identity: current.payload.identity,
+        expectedRevision: current.payload.revision,
+        attemptId: randomBytes(16).toString('hex'),
+        strategy: 'connect_external',
+        baseUrl: `http://${cpaName}:8317`,
+        managementKey: staleKey,
+      });
+      const connectRefusals = [
+        'external_cpa_version_unsupported',
+        'management_safe_read_unavailable',
+        'management_v8_config_invalid',
+        'owner_upgrade_required',
+        'management_authentication_rejected',
+      ];
+      assert.equal(connectV7.status, 409, JSON.stringify(connectV7.payload));
+      assert(
+        connectRefusals.includes(connectV7.payload.code),
+        'connect refusal: ' + JSON.stringify(connectV7.payload)
+      );
+
       // A write is refused with the version code before anything is sent. The
       // rebind is the write that names the credential: its one verification read
       // is what sees the v7 version, so nothing is persisted.
@@ -1084,7 +1317,11 @@ try {
       if (read.payload?.code === 'external_cpa_version_unsupported') {
         throw new Error(JSON.stringify(read.payload));
       }
-      return { write: write.payload.code, read: read.payload?.code ?? read.status };
+      return {
+        connect: connectV7.payload.code,
+        write: write.payload.code,
+        read: read.payload?.code ?? read.status,
+      };
     });
   } else {
     notRun(
@@ -1124,17 +1361,29 @@ try {
   run(['docker', 'rm', '-f', cpaContainer, managerContainer, ingressContainer, v7Container], undefined, false);
   run(['docker', 'network', 'rm', network], undefined, false);
   run(['docker', 'volume', 'rm', managerVolume], undefined, false);
-  // A secret must not survive in the artifact directory either.
-  // The CPA's own config is an input, not evidence: it holds both management keys
-  // and the seed client keys, so it is removed rather than redacted in place. A
-  // redacted copy could still be replayed into a live CPA.
+  // The CPA's own config is an input, not evidence: it holds every management key
+  // and every seed Client Key, so the whole secrets directory is removed rather
+  // than redacted in place. A redacted copy could still be replayed into a live CPA.
+  // It is deleted before the assertions below so a leftover file cannot hide one.
+  rmSync(secretsDir, { recursive: true, force: true });
+  // Before redaction: a secret in the report object, in what this run printed, or
+  // in any container log is a failure, not something to redact away.
+  report.secretAssertion = 'PASS';
   try {
-    rmSync(resolve(out, '.cpa-config.yaml'), { force: true });
-  } catch {}
+    assertNoSecret('the report', JSON.stringify(report));
+    assertNoSecret('the run log', printed.join('\n'));
+    for (const { name, text } of runContainerLogs()) assertNoSecret('the logs of ' + name, text);
+  } catch (error) {
+    report.secretAssertion = 'FAIL';
+    report.secretFailure = String(error.message);
+    report.result = 'FAIL';
+  }
   const serialized = redact(JSON.stringify(report, null, 2));
   for (const value of secretValues)
-    assert(!serialized.includes(value), 'a secret reached the report');
+    assert(!serialized.includes(value), 'a secret reached the serialized report');
   writeFileSync(resolve(out, 'report.json'), serialized, { mode: 0o600 });
   console.log(report.result + ': ' + resolve(out, 'report.json'));
   if (report.failure) console.error(report.failure);
+  if (report.secretFailure) console.error(report.secretFailure);
+  if (report.result !== 'PASS') process.exitCode = 1;
 }

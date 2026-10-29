@@ -570,8 +570,20 @@ The Foundation-era Console still speaks the original CPAMP routes through the
 `cpamp/` bridge (`fresh_resources.go`), and on External that bridge would be a
 second, unproven write path onto a CPA this Manager does not own. It is therefore
 cut over on the committed `connect_external` profile, at one point: the whole
-legacy router is wrapped, so the `cpamp/` alias, the plugin management proxy and
-the plugin resource proxy are all covered by the same gate.
+legacy router is wrapped, so the `cpamp/` alias and the plugin management proxy
+are covered by the same gate.
+
+The gate is scoped to the request that actually presents the saved key. The path
+does not say that: the same `/v0/management/...` prefix is proxied with the saved
+key for an Admin caller and with the caller's own header for a caller-auth plugin
+request, and `/v1/models` forwards the caller's own header. The proxy therefore
+marks the request at the moment it attaches the saved key
+(`SavedKeyMark`/`NoteSavedManagementKey`), and only a marked request is recorded
+when the CPA answers 401 or 403. Admin authorization runs before the gate, so a
+caller-auth or unauthenticated request never takes the credential lock and a 401
+on one is never filed as a refusal of the saved key. The plugin resource proxy is
+excluded from the gate entirely, because it accepts unauthenticated sandbox
+fetches and cannot authenticate before it runs.
 
 - Writes Fresh already owns are refused locally with `409` and
   `{"code":"external_legacy_write_replaced"}`, and nothing reaches the CPA:
@@ -604,8 +616,26 @@ the plugin resource proxy are all covered by the same gate.
   that lock. A console page opens six of them at once, and CPA bans an address
   after five failed authentications: without the serialization a single page load
   trips the ban, and the blocker could never be cleared, because the rebind that
-  would clear it is refused by the ban it caused. The console's own model read
-  (`/v1/models`) carries the same credential and is covered by the same rule.
+  would clear it is refused by the ban it caused. The lock is bounded: it is
+  released the moment the answer's status is known (`WriteHeader`, and on every
+  error or panic path), so one slow body cannot stall the rest of the console, and
+  a waiter whose own request was cancelled gives up instead of queueing — nothing
+  is ever forwarded for a caller that stopped waiting. The read grant is taken
+  under the lock *before* the request leaves, so a slow 401 sent with the replaced
+  key is filed against the envelope that was sent and never against a rebound key.
+- The local refusal deletes the entity headers the proxy copied from CPA
+  (`Content-Length`, `Content-Type`, `Content-Encoding`, `Transfer-Encoding`, and
+  the rest of the framing/representation set) before writing its own JSON; behind a
+  real server those headers truncated or emptied it.
+- A CPA 403 is the same `external_management_key_rejected` blocker with the `detail`
+  the rebind route uses for a ban, and a `store.Load` failure fails closed with
+  `503 external_cpa_authority_unavailable` and no CPA request. The External gateway
+  save, the key install and the usage confirm also answer the recorded refusal
+  locally, so a rotation costs at most one failed authentication before the gate
+  answers everything.
+- The console's own model read (`/v1/models`) is **not** gated and is **not** a
+  presentation of the saved key: it forwards the caller's own header, so its 401 is
+  the caller's, not the installation's.
 - New Managed and Adopt keep their existing bridge exactly as it was; the gate
   reads the committed strategy and hands the request straight through.
 
@@ -626,7 +656,9 @@ state with its own instruction and its own action
 | `external_management_key_rejected` | banner on Keys and Gateway | **Rebind management key** |
 | `external_target_moved` | banner, no write action | start a new External connection |
 | `external_cpa_version_unsupported` | banner with the version and its support class; reads stay | run a v8 or later CPA |
-| `external_legacy_write_replaced` | banner | edit on the screen that owns the change |
+
+`external_legacy_write_replaced` is a raw wire answer of the bridge, not a page
+state: no reachable page performs a write the bridge owns, so it has no banner.
 | `external_rebind_refused` / `_stale_generation` / `_authority_unavailable` | inside the Rebind dialog | none, fix the input, or reload and retry |
 
 An unrecognised code is not a state: the page keeps its own contract rather than
@@ -639,8 +671,12 @@ field because a different address is refused by design. Success reports
 `rebound` or `reverified` distinctly and refetches, and the request ID survives a
 failed attempt so a retry is a replay rather than a second write.
 
-**Usage** shows statistics, the collector, whether collection ever started, and
-the CPA version. A collector that never started reads "not started", never a
+**Usage** shows statistics, the collector as a localized phase (never the raw wire
+value), whether collection ever started, and the CPA version. `writeBlocked=false`
+reads "writes allowed", not "writes verified": the Manager has permission, not
+proof. A failed confirmation keeps the panel and offers a retry that replays the
+same request. A server `detail` is never the sentence a page speaks: it is offered
+behind a localized "Details" disclosure. A collector that never started reads "not started", never a
 zero: a window that never opened is not coverage. Enabling statistics is a
 two-step gate — opening the confirmation writes nothing, and only an explicit
 confirm sends `{requestId, confirmEnableStatistics: true}`.
@@ -666,31 +702,53 @@ It is the acceptance for everything above:
 1. claim, connect External, complete;
 2. the Key lifecycle — list read back from the CPA, add, rename, replace,
    revoke, and the refusal to revoke the last credential the CPA carries;
-3. the gateway read and a save;
-4. the usage confirm, including the confirm-less `400`;
+3. the gateway: the projection, one scalar saved and read back from the CPA, then
+   an out-of-band edit on the CPA and a save with the stale digest, which must
+   answer `source_or_operation_conflict`;
+4. the usage confirm, including the confirm-less `400`, and then one model request
+   with an installed Client Key, whose call must appear in `api-keys/<id>/usage`
+   within a bounded poll;
 5. one Client Key proven directly against the CPA;
 6. **rotation**: the operator changes the CPA's management key out of band and
-   restarts it, after which writes answer `external_management_key_rejected`,
-   repeated reads answer locally, the legacy `api-keys` `PUT` answers
-   `external_legacy_write_replaced`, and the CPA-side failed-authentication count
-   must stay below the ban threshold of five;
+   restarts it, after which a Keys write, a gateway save and a usage confirm each
+   answer `external_management_key_rejected`, repeated reads answer locally, and
+   the legacy `api-keys` `PUT` answers `external_legacy_write_replaced`. Failed
+   authentications are counted by parsing the CPA log under one documented rule: a
+   line counts only when it names the management surface (`/v0/management/` or
+   `/v8/management/`, a management key or the secret), is an authentication
+   refusal (401/unauthorized/invalid key), and — when it carries a peer address —
+   names the Manager's container. The count must stay below five for the whole
+   rotation-to-rebind window, and must not move at all once the local gate has
+   engaged;
 7. rebind with the new key recovers everything, and the same key reports
    `reverified`;
 8. screenshots of the Keys blocker, the rebind dialog, the usage confirmation and
    the runtime version row;
 9. the v7 negative: with `CPAMP_D_CPA_LEGACY` naming a pinned v7.0.12 binary, the
-   committed address is answered by that CPA instead, and a write is refused with
-   `external_cpa_version_unsupported` while a read is never answered with it.
-   v7 keeps its management key, port and auth directory at the document root, so
-   it needs its own config file rather than the v8 one.
+   committed address is answered by that CPA instead; a **CONNECT** naming it is
+   refused with the 2a connect code (`management_safe_read_unavailable`) or
+   `external_cpa_version_unsupported`, the rebind write is refused with
+   `external_cpa_version_unsupported`, and a read is never answered with the
+   version code. v7 keeps its management key, port and auth directory at the
+   document root, so it needs its own config file rather than the v8 one.
 
-`report.json` (mode `0600`) carries per-check `PASS` / `FAIL` / `NOT RUN`. The v7
-negative is `NOT RUN` unless `CPAMP_D_CPA_LEGACY` names a pinned v7.0.12 binary.
-Both management keys, the seed Client Keys, the claim and session tokens and the
-Admin Key are generated in the run and asserted absent from the report; the CPA's
-own config is written outside the artifact directory and removed at the end,
-because a redacted copy is still a replayable one. Cleanup removes this run's
-containers, network and volume only.
+`report.json` (mode `0600`) carries per-check `PASS` / `FAIL` / `NOT RUN`, and it
+names its provenance: `gitHead` and `testedSourceCommit` are both `HEAD`, the run
+refuses a dirty worktree, and the Manager image's revision label must match it.
+The v7 negative is `NOT RUN` unless `CPAMP_D_CPA_LEGACY` names a pinned v7.0.12
+binary.
+
+Both CPA configs and the v7 auth directory live in a sibling
+`bin/tmp/d-external-secrets-<random>` directory, never inside the artifact
+directory, and that whole directory is deleted in `finally`, because a redacted
+copy of a live CPA config is still a replayable one. Both management keys, the
+seed and staged Client Keys, the claim and session tokens and the Admin Key are
+generated in the run and asserted absent — before any redaction — from the
+unredacted report object, from everything the run printed, and from `docker logs`
+of every container of this run. A passing check never prints an observed value
+raw. A hit fails the run (`result: FAIL`, non-zero exit) instead of being redacted
+away. Cleanup removes this run's containers, network, volume and secrets
+directory only.
 
 ### Failed stage or start
 
