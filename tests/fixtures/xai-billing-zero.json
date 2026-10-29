@@ -1,0 +1,178 @@
+[
+  {
+    "name": "complete active weekly zero",
+    "text": "AAAAABwKGkISCAISBgiAse+GBxoGCICmlIcHWAFiAGgBgAAAAA9ncnBjLXN0YXR1czowDQo=",
+    "start": "2030-01-01T00:00:00Z",
+    "end": "2030-01-08T00:00:00Z",
+    "now": "2030-01-01T01:00:00Z",
+    "want": true
+  },
+  {
+    "name": "single base64 stream",
+    "text": "AAAAABwKGkISCAISBgiAse+GBxoGCICmlIcHWAFiAGgBgAAAAA9ncnBjLXN0YXR1czowDQo=",
+    "start": "2030-01-01T00:00:00Z",
+    "end": "2030-01-08T00:00:00Z",
+    "now": "2030-01-01T01:00:00Z",
+    "want": true
+  },
+  {
+    "name": "opaque unknown bytes",
+    "text": "AAAAACEKH0ISCAISBgiAse+GBxoGCICmlIcHWAFiAGgBogECAP8=gAAAAA9ncnBjLXN0YXR1czowDQo=",
+    "start": "2030-01-01T00:00:00Z",
+    "end": "2030-01-08T00:00:00Z",
+    "now": "2030-01-01T01:00:00Z",
+    "want": true
+  },
+  {
+    "name": "historical period",
+    "text": "AAAAABwKGkISCAISBgiAse+GBxoGCICmlIcHWAFiAGgBgAAAAA9ncnBjLXN0YXR1czowDQo=",
+    "start": "2030-01-01T00:00:00Z",
+    "end": "2030-01-08T00:00:00Z",
+    "now": "2030-01-08T00:00:01Z",
+    "want": false
+  },
+  {
+    "name": "future period",
+    "text": "AAAAABwKGkISCAISBgiAse+GBxoGCICmlIcHWAFiAGgBgAAAAA9ncnBjLXN0YXR1czowDQo=",
+    "start": "2030-01-01T00:00:00Z",
+    "end": "2030-01-08T00:00:00Z",
+    "now": "2029-12-31T23:59:59Z",
+    "want": false
+  },
+  {
+    "name": "different rest reset",
+    "text": "AAAAABwKGkISCAISBgiAse+GBxoGCICmlIcHWAFiAGgBgAAAAA9ncnBjLXN0YXR1czowDQo=",
+    "start": "2030-01-01T00:00:00Z",
+    "end": "2030-01-09T00:00:00Z",
+    "now": "2030-01-01T01:00:00Z",
+    "want": false
+  },
+  {
+    "name": "missing rest start",
+    "text": "AAAAABwKGkISCAISBgiAse+GBxoGCICmlIcHWAFiAGgBgAAAAA9ncnBjLXN0YXR1czowDQo=",
+    "start": "",
+    "end": "2030-01-08T00:00:00Z",
+    "now": "2030-01-01T01:00:00Z",
+    "want": false
+  },
+  {
+    "name": "missing grpc status",
+    "text": "AAAAABwKGkISCAISBgiAse+GBxoGCICmlIcHWAFiAGgB",
+    "start": "2030-01-01T00:00:00Z",
+    "end": "2030-01-08T00:00:00Z",
+    "now": "2030-01-01T01:00:00Z",
+    "want": false
+  },
+  {
+    "name": "grpc denied",
+    "text": "AAAAABwKGkISCAISBgiAse+GBxoGCICmlIcHWAFiAGgBgAAAABBncnBjLXN0YXR1czoxNg0K",
+    "start": "2030-01-01T00:00:00Z",
+    "end": "2030-01-08T00:00:00Z",
+    "now": "2030-01-01T01:00:00Z",
+    "want": false
+  },
+  {
+    "name": "empty successful response",
+    "text": "AAAAAAA=gAAAAA9ncnBjLXN0YXR1czowDQo=",
+    "start": "2030-01-01T00:00:00Z",
+    "end": "2030-01-08T00:00:00Z",
+    "now": "2030-01-01T01:00:00Z",
+    "want": false
+  },
+  {
+    "name": "truncated protobuf",
+    "text": "AAAAABsKGkISCAISBgiAse+GBxoGCICmlIcHWAFiAGg=gAAAAA9ncnBjLXN0YXR1czowDQo=",
+    "start": "2030-01-01T00:00:00Z",
+    "end": "2030-01-08T00:00:00Z",
+    "now": "2030-01-01T01:00:00Z",
+    "want": false
+  },
+  {
+    "name": "truncated frame",
+    "text": "AAAAABwKGkISCAISBgiAse+GBxoGCICmlIcHWAFiAGg=",
+    "start": "2030-01-01T00:00:00Z",
+    "end": "2030-01-08T00:00:00Z",
+    "now": "2030-01-01T01:00:00Z",
+    "want": false
+  },
+  {
+    "name": "duplicate data",
+    "text": "AAAAABwKGkISCAISBgiAse+GBxoGCICmlIcHWAFiAGgBAAAAABwKGkISCAISBgiAse+GBxoGCICmlIcHWAFiAGgBgAAAAA9ncnBjLXN0YXR1czowDQo=",
+    "start": "2030-01-01T00:00:00Z",
+    "end": "2030-01-08T00:00:00Z",
+    "now": "2030-01-01T01:00:00Z",
+    "want": false
+  },
+  {
+    "name": "explicit nonzero float",
+    "text": "AAAAACEKHw0AAEBAQhIIAhIGCICx74YHGgYIgKaUhwdYAWIAaAE=gAAAAA9ncnBjLXN0YXR1czowDQo=",
+    "start": "2030-01-01T00:00:00Z",
+    "end": "2030-01-08T00:00:00Z",
+    "now": "2030-01-01T01:00:00Z",
+    "want": false
+  },
+  {
+    "name": "invalid float",
+    "text": "AAAAACEKHw0AAMB/QhIIAhIGCICx74YHGgYIgKaUhwdYAWIAaAE=gAAAAA9ncnBjLXN0YXR1czowDQo=",
+    "start": "2030-01-01T00:00:00Z",
+    "end": "2030-01-08T00:00:00Z",
+    "now": "2030-01-01T01:00:00Z",
+    "want": false
+  },
+  {
+    "name": "duplicate period",
+    "text": "AAAAADAKLkISCAISBgiAse+GBxoGCICmlIcHWAFiAGgBQhIIAhIGCICx74YHGgYIgKaUhwc=gAAAAA9ncnBjLXN0YXR1czowDQo=",
+    "start": "2030-01-01T00:00:00Z",
+    "end": "2030-01-08T00:00:00Z",
+    "now": "2030-01-01T01:00:00Z",
+    "want": false
+  },
+  {
+    "name": "invalid field zero",
+    "text": "AAAAAB4KGkISCAISBgiAse+GBxoGCICmlIcHWAFiAGgBAAA=gAAAAA9ncnBjLXN0YXR1czowDQo=",
+    "start": "2030-01-01T00:00:00Z",
+    "end": "2030-01-08T00:00:00Z",
+    "now": "2030-01-01T01:00:00Z",
+    "want": false
+  },
+  {
+    "name": "overflow varint",
+    "text": "AAAAACcKGkISCAISBgiAse+GBxoGCICmlIcHWAFiAGgB/////////////wI=gAAAAA9ncnBjLXN0YXR1czowDQo=",
+    "start": "2030-01-01T00:00:00Z",
+    "end": "2030-01-08T00:00:00Z",
+    "now": "2030-01-01T01:00:00Z",
+    "want": false
+  },
+  {
+    "name": "monthly period",
+    "text": "AAAAABYKFEISCAESBgiAse+GBxoGCICmlIcHgAAAAA9ncnBjLXN0YXR1czowDQo=",
+    "start": "2030-01-01T00:00:00Z",
+    "end": "2030-01-08T00:00:00Z",
+    "now": "2030-01-01T01:00:00Z",
+    "want": false
+  },
+  {
+    "name": "invalid nested data",
+    "text": "AAAAAB8KHUISCAISBgiAse+GBxoGCICmlIcHWAFiAGgBEgH/gAAAAA9ncnBjLXN0YXR1czowDQo=",
+    "start": "2030-01-01T00:00:00Z",
+    "end": "2030-01-08T00:00:00Z",
+    "now": "2030-01-01T01:00:00Z",
+    "want": false
+  },
+  {
+    "name": "wrong percentage wire type",
+    "text": "AAAAAB4KHEISCAISBgiAse+GBxoGCICmlIcHWAFiAGgBCgA=gAAAAA9ncnBjLXN0YXR1czowDQo=",
+    "start": "2030-01-01T00:00:00Z",
+    "end": "2030-01-08T00:00:00Z",
+    "now": "2030-01-01T01:00:00Z",
+    "want": false
+  },
+  {
+    "name": "bad base64",
+    "text": "====",
+    "start": "2030-01-01T00:00:00Z",
+    "end": "2030-01-08T00:00:00Z",
+    "now": "2030-01-01T01:00:00Z",
+    "want": false
+  }
+]
