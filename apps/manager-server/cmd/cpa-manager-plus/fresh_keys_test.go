@@ -186,14 +186,26 @@ func TestFreshClientKeysAdminPersistenceAndStops(t *testing.T) {
 			t.Fatal("restart lost renamed metadata", got.Code)
 		}
 	}
-	for _, strategy := range []bootstrap.CPAStrategy{bootstrap.ConnectExternal, bootstrap.AdoptExisting} {
-		blocked := after.Operation
-		blocked.Strategy.Strategy = strategy
-		response := httptest.NewRecorder()
-		app.clientKeys(response, httptest.NewRequest("POST", "/control/api/v2/api-keys", strings.NewReader(body)), blocked, "api-keys")
-		if response.Code != 409 {
-			t.Fatal("non-New scope enabled")
-		}
+	// Adopt is a Manager-owned installation, so its Key routes answer exactly as
+	// New Managed's do: this Manager staged that destination and owns the
+	// credential the Key workspace writes through. Connect External is not, and
+	// this application has no External authority, so the route must refuse it
+	// rather than serve an installation it does not own.
+	adopted := after.Operation
+	adopted.Strategy.Strategy = bootstrap.AdoptExisting
+	adoptedRequest := httptest.NewRequest("POST", "/control/api/v2/api-keys", strings.NewReader(body))
+	adoptedRequest.Header.Set("Content-Type", "application/json")
+	served := httptest.NewRecorder()
+	app.clientKeys(served, adoptedRequest, adopted, "api-keys")
+	if served.Code != 200 || !strings.Contains(served.Body.String(), string(result.Key.ID)) {
+		t.Fatalf("adopted scope did not serve its Key workspace: %d %s", served.Code, served.Body.String())
+	}
+	external := after.Operation
+	external.Strategy.Strategy = bootstrap.ConnectExternal
+	refused := httptest.NewRecorder()
+	app.clientKeys(refused, httptest.NewRequest("POST", "/control/api/v2/api-keys", strings.NewReader(body)), external, "api-keys")
+	if refused.Code != 409 {
+		t.Fatalf("Connect External scope answered without its installation authority: %d", refused.Code)
 	}
 }
 

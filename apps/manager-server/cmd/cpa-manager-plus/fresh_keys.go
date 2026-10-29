@@ -27,11 +27,12 @@ func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op
 		return
 	}
 	// The staging routes (list, create, rename) are Manager-local and existed
-	// before any CPA authority did, so they keep serving a New Managed
-	// checkpoint exactly as before. Every other strategy must be admitted by the
-	// installation authority: External answers through its own committed
-	// connection, and an adopted or incomplete checkpoint answers nothing.
-	if op.Strategy.Strategy != "" && op.Strategy.Strategy != bootstrap.NewManaged &&
+	// before any CPA authority did, so they keep serving a Manager-owned
+	// checkpoint exactly as before: New Managed, and now Adopt, whose committed
+	// destination this Manager staged itself. Every other strategy must be
+	// admitted by the installation authority: External answers through its own
+	// committed connection, and an incomplete checkpoint answers nothing.
+	if op.Strategy.Strategy != "" && !freshkeyapply.ManagerOwnedStrategy(op.Strategy.Strategy) &&
 		(a.keyApply == nil || !a.keyApply.Targets(op, freshkeyapply.SurfaceKeyOperation)) {
 		w.WriteHeader(http.StatusConflict)
 		return

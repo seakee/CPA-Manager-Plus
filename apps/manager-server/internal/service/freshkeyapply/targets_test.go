@@ -92,6 +92,37 @@ func TestTargetsSelectsTheProfileOfTheService(t *testing.T) {
 	t.Run("managed refuses an unbound checkpoint", func(t *testing.T) {
 		sameAnswer(t, managed, operation(unboundManaged), false, canonicalSurfaces...)
 	})
+	t.Run("managed owns an adopted destination on every surface", func(t *testing.T) {
+		// Adopt is Manager-owned: this Manager staged the destination, started it
+		// and holds the install-derived credential. Its connection identity is the
+		// `external:` digest the adoption recorded, so the prefix comes from the
+		// strategy and is never inferred from the value.
+		adopted := bootstrap.FreshStrategyCheckpoint{
+			Strategy: bootstrap.AdoptExisting, Stage: "committed",
+			TargetIdentity: managedRuntimeIdentity, TargetGeneration: 9, TargetArtifactID: managedArtifact(),
+			DestinationConnectionIdentity: "external:sha256:" + strings.Repeat("f", 64),
+		}
+		sameAnswer(t, managed, operation(adopted), true, canonicalSurfaces...)
+	})
+	t.Run("managed refuses an adopted checkpoint bound by the managed prefix", func(t *testing.T) {
+		// The two identities are distinct values. An adopted checkpoint carrying
+		// the New Managed prefix is a record this Manager never wrote.
+		adopted := bootstrap.FreshStrategyCheckpoint{
+			Strategy: bootstrap.AdoptExisting, Stage: "committed",
+			TargetIdentity: managedRuntimeIdentity, TargetGeneration: 9, TargetArtifactID: managedArtifact(),
+			DestinationConnectionIdentity: managedDestination,
+		}
+		sameAnswer(t, managed, operation(adopted), false, canonicalSurfaces...)
+	})
+	t.Run("managed refuses an unbound adopted checkpoint", func(t *testing.T) {
+		sameAnswer(t, managed, operation(adoptedPrivate), false, canonicalSurfaces...)
+	})
+	t.Run("managed never answers Connect External", func(t *testing.T) {
+		// The plugin-opt-in and authority generalizations stop at the two
+		// Manager-owned strategies: the user's own CPA stays outside this
+		// authority on every surface, including the gateway page.
+		sameAnswer(t, managed, operation(externalCheckpoint), false, canonicalSurfaces...)
+	})
 	t.Run("managed refuses a staged checkpoint", func(t *testing.T) {
 		sameAnswer(t, managed, operation(stagedManaged), false, canonicalSurfaces...)
 	})

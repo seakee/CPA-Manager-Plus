@@ -126,10 +126,14 @@ func (s *Service) Targets(op bootstrap.FreshOperation, surface Surface) bool {
 	}
 	switch s.profile {
 	case ProfileManaged:
-		// One install-derived authority: the committed managed destination is the
-		// credential's destination on every surface, so keys, admission and
-		// configuration share exactly one answer.
-		return op.Strategy.Strategy == bootstrap.NewManaged && strings.HasPrefix(op.Strategy.DestinationConnectionIdentity, "managed:sha256:")
+		// One install-derived authority: the committed Manager-owned destination
+		// is the credential's destination on every surface, so keys, admission and
+		// configuration share exactly one answer. New Managed and Adopt both
+		// qualify; an adopted destination is bound by the `external:` digest the
+		// adoption recorded, so the prefix is read from the strategy and never
+		// guessed from the value.
+		prefix, owned := managerOwnedDestinationPrefix(op.Strategy.Strategy)
+		return owned && strings.HasPrefix(op.Strategy.DestinationConnectionIdentity, prefix)
 	case ProfilePrivate:
 		// The private H1/direct profile names one attested runtime and artifact;
 		// the Host permit remains the write authority for whatever it names.
