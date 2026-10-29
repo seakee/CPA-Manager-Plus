@@ -728,12 +728,10 @@ export function FreshAdoptFlow({
               type="button"
               className="btn btn-primary"
               data-testid="adopt-complete"
-              disabled={
-                busy ||
-                !summary?.finished ||
-                summary.running ||
-                (summary.retryable > 0 && !acceptRetryable)
-              }
+              // A settled run may always be completed from here: the server's
+              // own refusal is what tells the operator about retryable items,
+              // and its count is what the acknowledgement is about.
+              disabled={busy || !summary?.finished || summary.running}
               onClick={() => void complete()}
             >
               {adoptText(busy ? 'completing' : 'complete')}

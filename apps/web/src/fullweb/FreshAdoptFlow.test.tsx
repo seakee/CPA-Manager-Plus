@@ -409,6 +409,9 @@ it('keeps polling on a running refusal and only finishes over failed items when 
   expect(text()).toContain(adoptText('retryableRefusal', { count: 1 }));
   expect(maybe('adopt-accept-retryable')).toHaveLength(1);
   expect(maybe('enter-console')).toHaveLength(0);
+  // The refusal is the server's answer, not a disabled control: a settled run can
+  // always ask to complete, and its refusal is what names the failed items.
+  expect(byID('adopt-complete').props.disabled).toBe(false);
 
   await input('adopt-accept-retryable', true);
   await click('adopt-complete');
