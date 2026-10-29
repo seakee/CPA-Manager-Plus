@@ -891,3 +891,98 @@ func TestNoCheckpointStillResolvesEveryItem(t *testing.T) {
 		t.Fatal("a dry run resolved no items")
 	}
 }
+
+// oversizedInventory seeds a source with more credential files than the summary
+// can hold. Names are short and distinct so the count, not the name bound, is
+// what the preflight has to catch.
+func oversizedInventory(t *testing.T, count int) *fakeCPA {
+	t.Helper()
+	source := sourceFixture(t)
+	for index := 0; index < count; index++ {
+		name := fmt.Sprintf("bulk-%04d.json", index)
+		source.seedAuthFile(name, "claude", []byte(`{"type":"claude","access_token":"bulk"}`), false)
+	}
+	return source
+}
+
+// A source whose inventory cannot fit the record is reported as manual work
+// instead of being attempted: the record stays valid, the run completes, and a
+// replay neither stops nor retries the items it already reported.
+func TestOversizedInventoryIsRecordedAsManualAndTheRunCompletes(t *testing.T) {
+	source := oversizedInventory(t, freshstore.MaxAdoptionItems())
+	destination := destinationFixture(t)
+
+	// The checkpoint is the store's own validator, so a record the store would
+	// refuse fails here rather than in production.
+	var durable freshstore.AdoptionSummary
+	checkpoint := func(current freshstore.AdoptionSummary) error {
+		if err := freshstore.ValidateAdoptionSummary(current); err != nil {
+			return err
+		}
+		durable = current
+		return nil
+	}
+	summary := runMigrationWithCheckpoint(t, source, destination, freshstore.AdoptionSummary{}, checkpoint)
+	if err := freshstore.ValidateAdoptionSummary(summary); err != nil {
+		t.Fatalf("the preflight produced a record the store refuses: %v", err)
+	}
+	if len(summary.Items) > freshstore.MaxAdoptionItems() {
+		t.Fatalf("recorded %d items over the store's bound", len(summary.Items))
+	}
+	excess := itemByName(t, summary, "credential-inventory-excess")
+	if excess.Outcome != freshstore.AdoptionManual || excess.Reason != "adoption_inventory_too_large" || excess.Instruction == "" {
+		t.Fatalf("the excess must be one manual item with an instruction: %+v", excess)
+	}
+	// The credentials that did fit were still copied, so the excess is a bound on
+	// the record and not on the migration.
+	migrated, manual, failed := summary.Counts()
+	if migrated == 0 || manual == 0 || failed != 0 {
+		t.Fatalf("unexpected outcomes: %d migrated, %d manual, %d failed", migrated, manual, failed)
+	}
+	// A replay settles the excess marker instead of reporting it again, so the
+	// bound cannot turn into a stop-and-resend loop.
+	replay := runMigrationWithCheckpoint(t, source, destination, durable, checkpoint)
+	if len(replay.Items) != len(summary.Items) {
+		t.Fatalf("a replay of the bounded inventory appended %d items", len(replay.Items)-len(summary.Items))
+	}
+	if item := itemByName(t, replay, "credential-inventory-excess"); item.Outcome != freshstore.AdoptionManual {
+		t.Fatalf("a replay rewrote the excess marker: %+v", item)
+	}
+	// The credential the preflight left out was never uploaded: a bounded record
+	// never claims a copy it did not make.
+	if _, stored := destination.credential(fmt.Sprintf("bulk-%04d.json", freshstore.MaxAdoptionItems()-1)); stored {
+		t.Fatal("a credential past the bound was uploaded anyway")
+	}
+	source.usesOnlyReads(t)
+}
+
+// A credential name longer than an item identity is reported with a stable,
+// bounded identity instead of stopping the run at a name the store refuses.
+func TestCredentialNameLongerThanTheItemBoundIsManual(t *testing.T) {
+	source, destination := sourceFixture(t), destinationFixture(t)
+	long := strings.Repeat("a", freshstore.MaxAdoptionItemName()) + ".json"
+	source.seedAuthFile(long, "claude", []byte(`{"type":"claude","access_token":"long-name-token"}`), false)
+
+	summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+	if err := freshstore.ValidateAdoptionSummary(summary); err != nil {
+		t.Fatalf("an over-long credential name broke the record: %v", err)
+	}
+	item := itemByName(t, summary, overlongCredentialItem(long))
+	if item.Outcome != freshstore.AdoptionManual || item.Reason != "adoption_item_name_too_long" || item.Instruction == "" {
+		t.Fatalf("an over-long name must be a manual item: %+v", item)
+	}
+	if _, stored := destination.credential(long); stored {
+		t.Fatal("a credential whose name the record cannot hold was uploaded anyway")
+	}
+	// The rest of the inventory still migrated: one unusable name is not a run
+	// failure.
+	if item := itemByName(t, summary, credentialItemName("claude-a.json")); item.Outcome != freshstore.AdoptionMigrated {
+		t.Fatalf("the run stopped at the over-long name: %+v", item)
+	}
+	// The stable identity is a digest of the name, so a replay recognizes it.
+	recorded, _ := summary.Item(overlongCredentialItem(long))
+	replay := runMigration(t, source, destination, summary)
+	if item, ok := replay.Item(overlongCredentialItem(long)); !ok || item != recorded {
+		t.Fatalf("a replay did not recognize the over-long item: %+v", item)
+	}
+}

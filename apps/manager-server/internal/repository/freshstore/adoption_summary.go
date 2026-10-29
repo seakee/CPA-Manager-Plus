@@ -102,10 +102,24 @@ const (
 	maxAdoptionItemName = 256
 	// maxAdoptionItems bounds the whole summary. The migration inventory is a
 	// few dozen entries; a larger summary was not produced by this executor.
-	maxAdoptionItems = 1024
-	maxAdoptionReason = 120
+	maxAdoptionItems       = 1024
+	maxAdoptionReason      = 120
 	maxAdoptionInstruction = 512
 )
+
+// MaxAdoptionItems is the bound this store enforces on one whole summary. A
+// producer that plans an inventory has to stay below it: a summary the store
+// refuses is a run that stops, and stopping on a bound is exactly the loop the
+// preflight exists to prevent.
+func MaxAdoptionItems() int { return maxAdoptionItems }
+
+// MaxAdoptionItemName is the bound on one stable item identity.
+func MaxAdoptionItemName() int { return maxAdoptionItemName }
+
+// ValidateAdoptionSummary reports whether the store would accept this summary.
+// It is the same check the write path applies, so a producer can prove its plan
+// fits before it writes anything.
+func ValidateAdoptionSummary(summary AdoptionSummary) error { return validAdoptionSummary(summary) }
 
 func validAdoptionItemKind(kind AdoptionItemKind) bool {
 	switch kind {
@@ -233,4 +247,3 @@ func writeAdoptionSummary(ctx context.Context, tx *sql.Tx, summary *AdoptionSumm
 	}
 	return write(ctx, tx, adoptionSummaryKey, summary)
 }
-

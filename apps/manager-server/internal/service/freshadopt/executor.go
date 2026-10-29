@@ -155,6 +155,14 @@ func (e *Executor) Run(ctx context.Context, previous freshstore.AdoptionSummary,
 	if err != nil {
 		return Result{Summary: summary}, fmt.Errorf("%w: %v", ErrInventoryUnavailable, err)
 	}
+	// The plan is bounded before anything is written. A summary the store would
+	// refuse is a run that stops at the offending item, and every replay then
+	// repeats that item and stops again: the loop this preflight exists to make
+	// impossible.
+	files, err = e.preflightInventory(&summary, files, checkpoint)
+	if err != nil {
+		return Result{Summary: summary}, err
+	}
 	if err := e.migrateCredentials(ctx, &summary, files, checkpoint); err != nil {
 		return Result{Summary: summary}, err
 	}
@@ -185,6 +193,23 @@ func configFamilyItemName(family string) string { return "rules:" + family }
 
 func providerSectionItemName(section string) string { return "section:" + section }
 
+// overlongCredentialItem is the stable identity of a credential whose own name
+// cannot be an item identity because it is longer than the store accepts. It is
+// the digest of the name, so it is stable across replays and carries no name
+// byte beyond its own bounded prefix.
+func overlongCredentialItem(name string) string {
+	return "credential-name-sha256:" + digestSHA256([]byte(name))
+}
+
+// boundedName quotes a credential name inside an instruction without letting an
+// upstream name exceed the instruction bound.
+func boundedName(name string) string {
+	if len(name) > 120 {
+		return name[:120] + "..."
+	}
+	return name
+}
+
 // sanitizeReason bounds a reason to the vocabulary the record accepts without
 // ever carrying a value: an upstream message can quote YAML.
 func sanitizeReason(reason string) string {
@@ -209,6 +234,97 @@ func manualInstruction(kind freshstore.AdoptionItemKind, name string) string {
 	default:
 		return "Review this item in the destination CPA."
 	}
+}
+
+// excessCredentialItem is the single aggregate identity that reports every
+// credential the record had no room for. It is one item, not one per credential,
+// because a per-credential report would need exactly the room that is missing.
+const excessCredentialItem = "credential-inventory-excess"
+
+// preflightInventory bounds the plan before the first write. It returns the
+// credentials this run may attempt and records the rest as manual work.
+//
+// Two bounds are decided here, both from the store's own limits rather than a
+// second copy of them:
+//
+//   - a credential whose stable item identity is longer than the store accepts
+//     can never be recorded, so it is reported as manual with an instruction
+//     instead of stopping the run at it;
+//   - the whole inventory must fit the summary. The fixed part of the plan (the
+//     gateway leaves, the rule families and the provider sections) is known
+//     exactly, so the credential allowance is the remainder. Anything past it is
+//     reported as manual: a bounded, valid record the operator can act on is
+//     strictly better than a record the store refuses.
+//
+// The summary is validated against the store's own checker before it is
+// checkpointed, so a plan that still does not fit ends the run here, before any
+// write, instead of failing during it.
+func (e *Executor) preflightInventory(summary *freshstore.AdoptionSummary, files []CredentialFile, checkpoint Checkpoint) ([]CredentialFile, error) {
+	limit := freshstore.MaxAdoptionItems()
+	nameLimit := freshstore.MaxAdoptionItemName()
+	// The fixed part of every run. A leaf the source never set is not recorded,
+	// so this is an upper bound on what the three configuration passes append.
+	fixed := len(cpa.ConfigLeafPaths()) + len(cpa.ConfigRuleFamilyIDs()) + len(ProviderSections())
+	// One slot is reserved for the single aggregate marker below, so the plan and
+	// its own report always fit.
+	allowed := limit - len(summary.Items) - fixed - 1
+	if allowed < 0 {
+		allowed = 0
+	}
+	if summary.Settled(excessCredentialItem) {
+		// An earlier run already reported the overflow. The credentials it left
+		// out stay out: a later run may not quietly copy past the bound that run
+		// reported, because the operator was told those files were left behind.
+		return nil, nil
+	}
+	migratable := make([]CredentialFile, 0, len(files))
+	excess := 0
+	for _, file := range files {
+		if len(credentialItemName(file.Name)) > nameLimit {
+			// The name cannot be the item identity: the store would refuse the
+			// whole summary. The record carries a bounded identity derived from the
+			// name instead, so the item is still reported, still stable across
+			// replays and still actionable.
+			item := overlongCredentialItem(file.Name)
+			if summary.Settled(item) {
+				continue
+			}
+			if err := e.record(summary, freshstore.AdoptionItem{
+				Item: item, Kind: freshstore.AdoptionKindCredential, Outcome: freshstore.AdoptionManual,
+				Reason:      "adoption_item_name_too_long",
+				Instruction: "Copy the credential file " + boundedName(file.Name) + " into the destination CPA's auth directory by hand; its name is too long for the migration record.",
+			}, checkpoint); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if summary.Settled(credentialItemName(file.Name)) {
+			// Already recorded: it neither consumes the allowance nor needs work.
+			continue
+		}
+		if allowed == 0 {
+			excess++
+			continue
+		}
+		allowed--
+		migratable = append(migratable, file)
+	}
+	if excess > 0 {
+		if err := e.record(summary, freshstore.AdoptionItem{
+			Item: excessCredentialItem, Kind: freshstore.AdoptionKindCredential, Outcome: freshstore.AdoptionManual,
+			Reason:      "adoption_inventory_too_large",
+			Instruction: fmt.Sprintf("%d credential files were left behind because the migration record is full. Copy them into the destination CPA's auth directory by hand.", excess),
+		}, checkpoint); err != nil {
+			return nil, err
+		}
+	}
+	// The plan is checked against the store's own validator here, before the
+	// first write, so a plan that still does not fit ends the run at its start
+	// instead of in the middle of it.
+	if err := freshstore.ValidateAdoptionSummary(*summary); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInventoryUnavailable, err)
+	}
+	return migratable, nil
 }
 
 func (e *Executor) migrateCredentials(ctx context.Context, summary *freshstore.AdoptionSummary, files []CredentialFile, checkpoint Checkpoint) error {
