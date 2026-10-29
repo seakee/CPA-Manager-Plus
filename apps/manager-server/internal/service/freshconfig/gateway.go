@@ -123,6 +123,10 @@ const (
 	// authority's alone, so it fails closed instead of borrowing a value another
 	// CPA owns.
 	ReasonPluginManagedOnly = "plugin_switch_requires_managed_install"
+	// ReasonVersionUnsupported answers a write to an External CPA that did not
+	// prove the v8 contract this Manager writes. Reads stay open: the page can
+	// still show the user what their CPA serves.
+	ReasonVersionUnsupported = cpa.ReasonExternalVersionUnsupported
 )
 
 // ErrGenerationMismatch refuses a save the browser built against another CPA
@@ -274,6 +278,10 @@ type Service struct {
 	// externalWire builds the transport of that connection; nil selects the
 	// CPA v8 transport.
 	externalWire func(string) configWire
+	// externalProbe reads the CPA version of that connection. A save is refused
+	// unless it proves the v8 contract this Manager writes; nil selects the real
+	// probe, exactly as the wire does.
+	externalProbe func(context.Context, string, string) (cpa.ExternalVersionReport, error)
 }
 
 // New builds the service over the Fresh CAS store and the installation
@@ -282,7 +290,12 @@ type Service struct {
 // owns. Both are nil for profiles without a key authority.
 func New(st freshstore.Store, target func(context.Context, uint64) (string, error), targets func(bootstrap.FreshOperation) bool) *Service {
 	transport := cpa.NewTransport()
-	return &Service{store: st, wire: transport, transport: transport, target: target, targets: targets}
+	return &Service{
+		store: st, wire: transport, transport: transport, target: target, targets: targets,
+		// The probe is the live one until a test replaces it, exactly as the wire
+		// is: a save must never be gated on a version nobody asked the CPA for.
+		externalProbe: cpa.ObserveExternalVersion,
+	}
 }
 
 // EnableH1 switches the service onto the Host H1 handoff journal. The private H1
@@ -317,6 +330,30 @@ type ExternalAuthority func(context.Context, uint64) (string, string, error)
 // write window a whole rule family is read-only.
 func (s *Service) EnableExternal(authority ExternalAuthority) {
 	s.external = authority
+}
+
+// externalWriteGate asks the version probe about the authority a save resolved.
+// It runs before the journal entry and before every write, so a CPA that does not
+// prove the v8 contract is refused with a journal that never existed. Reads never
+// call it: the page still shows what the user's CPA serves.
+func (s *Service) externalWriteGate(ctx context.Context, auth authority) error {
+	if auth.mode != ModeExternal || s.externalProbe == nil {
+		return nil
+	}
+	report, err := s.externalProbe(ctx, auth.endpoint, auth.secret)
+	if err != nil {
+		// A refused credential and a moved target are the blockers of their own
+		// reads; an unreachable CPA is not evidence about its version. The probe's
+		// own refusal is what the page reports.
+		if errors.Is(err, cpa.ErrManagementRejected) || errors.Is(err, cpa.ErrExternalTargetMoved) {
+			return err
+		}
+		return cpa.ErrProofUnavailable
+	}
+	if report.WriteBlocked {
+		return cpa.ErrExternalVersionUnsupported
+	}
+	return nil
 }
 
 // scope is one closed write surface over the shared journal, CAS and read-back
@@ -379,6 +416,9 @@ type authority struct {
 	// limits is the write shape this profile accepts; nil means the page's own
 	// group rules apply unchanged.
 	limits *ProfileLimits
+	// endpoint is the resolved CPA address of an External authority. The version
+	// gate reads it before a write; every other profile leaves it empty.
+	endpoint string
 }
 
 // resolve proves the profile this service was constructed with and returns the
@@ -481,9 +521,10 @@ func (s *Service) resolveProfile(ctx context.Context, r freshstore.Record) (auth
 			transport = cpa.NewTransportForEndpoint(endpoint)
 		}
 		return authority{
-			mode:   ModeExternal,
-			wire:   transport,
-			secret: secret,
+			mode:     ModeExternal,
+			wire:     transport,
+			secret:   secret,
+			endpoint: endpoint,
 			// An External CPA may have other writers. Scalars are best-effort;
 			// a whole rule family needs an exclusive window this profile cannot
 			// prove.

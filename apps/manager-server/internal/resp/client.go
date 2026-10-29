@@ -22,6 +22,16 @@ type Client struct {
 
 var ErrUnsupportedSubscribe = errors.New("RESP server does not support SUBSCRIBE")
 
+// ErrorReply is a Redis error frame: the server answered and refused. It is
+// typed rather than formatted so a caller can tell "this credential was not
+// accepted" from "the connection broke", which is the difference between a
+// terminal refusal and a retry.
+type ErrorReply struct {
+	Message string
+}
+
+func (e *ErrorReply) Error() string { return e.Message }
+
 func Dial(rawURL string, skipTLSVerify bool) (*Client, error) {
 	upstream, err := parseURL(rawURL)
 	if err != nil {
@@ -240,7 +250,7 @@ func (c *Client) readValue() (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return nil, errors.New(line)
+		return nil, &ErrorReply{Message: line}
 	case ':':
 		line, err := c.readLine()
 		if err != nil {

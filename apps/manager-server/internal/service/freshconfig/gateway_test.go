@@ -570,6 +570,7 @@ func TestExternalProfileWritesScalarsAndRefusesRuleFamilies(t *testing.T) {
 	// installation's connection is what its own authority answers for.
 	service.targets = externalTargets()
 	service.externalWire = func(string) configWire { return wire }
+	service.externalProbe = supportedExternalVersion
 	view, err := service.Read(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -878,6 +879,12 @@ func externalTargets() func(bootstrap.FreshOperation) bool {
 	return freshkeyapply.NewExternal(nil, nil, nil).TargetsFunc(freshkeyapply.SurfaceGatewayConfig)
 }
 
+// supportedExternalVersion stands in for a CPA that advertises the v8 contract the
+// fake wire serves. The probe itself is tested against its own fake server.
+func supportedExternalVersion(context.Context, string, string) (cpa.ExternalVersionReport, error) {
+	return cpa.ClassifyExternalVersion("v8.0.13"), nil
+}
+
 // TestExternalProfileReportsAMovedTarget proves a connection the checkpoint no
 // longer names is its own blocker on the page. The installation exists, so it is
 // neither an unavailable authority nor a missing proof: only rebinding the
@@ -907,4 +914,77 @@ func TestExternalProfileReportsAMovedTarget(t *testing.T) {
 	if wire.reads != 0 {
 		t.Fatal("a moved target was contacted")
 	}
+}
+
+// TestExternalWritesAreRefusedForAnUnsupportedVersion proves the CPA version
+// bounds the save and nothing else. An External CPA that does not prove the v8
+// contract is refused before the journal and before the first write, while the
+// page keeps reading it: the user can still see what their own CPA serves.
+func TestExternalWritesAreRefusedForAnUnsupportedVersion(t *testing.T) {
+	for _, version := range []string{"v7.2.130", "", "latest"} {
+		t.Run("version "+version, func(t *testing.T) {
+			wire := &fakeWire{document: map[string]any{"routing": map[string]any{"strategy": "round-robin"}}}
+			store := &memoryStore{record: managedRecord()}
+			store.record.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+				Strategy: bootstrap.ConnectExternal, Stage: "committed", TargetIdentity: "external:sha256:" + strings.Repeat("b", 64), TargetGeneration: 1,
+			}
+			store.record.Connection = &model.ManagerCPAConnectionConfig{CPABaseURL: "https://external.test", ManagementKey: "cpamp_protected_envelope"}
+			service := New(store, nil, nil)
+			service.wire = wire
+			service.transport = nil
+			service.EnableExternal(func(context.Context, uint64) (string, string, error) {
+				return "https://external.test", "management-test-only", nil
+			})
+			service.targets = externalTargets()
+			service.externalWire = func(string) configWire { return wire }
+
+			// The page still reads the CPA.
+			view, err := service.Read(context.Background())
+			if err != nil {
+				t.Fatalf("read = %v", err)
+			}
+			if !view.Capability.Readable || !view.Capability.Writable || view.Capability.Mode != ModeExternal {
+				t.Fatalf("unsupported CPA is not readable: %+v", view.Capability)
+			}
+			before := baselineOf(t, view, "routing")
+
+			service.externalProbe = func(context.Context, string, string) (cpa.ExternalVersionReport, error) {
+				return cpa.ClassifyExternalVersion(version), nil
+			}
+			request := GroupRequest{
+				RequestID: strings.Repeat("ab", 16),
+				Expected:  Expected{Generation: "1", Baseline: before},
+				Edits:     []Edit{{Path: "routing.strategy", Action: "set", Value: json.RawMessage(`"fill-first"`)}},
+			}
+			if _, err = service.SaveGroup(context.Background(), "routing", request); !errors.Is(err, cpa.ErrExternalVersionUnsupported) {
+				t.Fatalf("group save on version %q = %v", version, err)
+			}
+			if _, err = service.SaveFamily(context.Background(), "filter", FamilyRequest{
+				RequestID: strings.Repeat("cd", 16),
+				Expected:  Expected{Generation: "1", Baseline: familyBaselineFor(t, service, "filter")},
+				Rules:     json.RawMessage(`[{"models":[{"name":"*"}],"params":["a"]}]`),
+			}); !errors.Is(err, cpa.ErrExternalVersionUnsupported) {
+				t.Fatalf("family save on version %q = %v", version, err)
+			}
+			if len(wire.puts) != 0 || len(wire.patches) != 0 || len(wire.deletes) != 0 {
+				t.Fatalf("a refused save reached the CPA: %d puts, %d patches, %d deletes", len(wire.puts), len(wire.patches), len(wire.deletes))
+			}
+			// No intent was journaled, so nothing is left pending on the connection.
+			if len(store.record.ConfigGroups) != 0 {
+				t.Fatalf("a refused save journaled %d groups", len(store.record.ConfigGroups))
+			}
+		})
+	}
+}
+
+// baselineOf is the rendered baseline of one group in an already-read view.
+func baselineOf(t *testing.T, view View, groupID string) string {
+	t.Helper()
+	for _, group := range view.Groups {
+		if group.ID == groupID {
+			return group.Baseline
+		}
+	}
+	t.Fatalf("group %q is not projected", groupID)
+	return ""
 }

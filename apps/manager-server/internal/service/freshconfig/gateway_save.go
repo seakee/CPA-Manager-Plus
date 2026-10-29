@@ -216,6 +216,12 @@ func (s *Service) saveGroup(ctx context.Context, sc scope, groupID string, q Gro
 	if auth.wire == nil {
 		return freshstore.ConfigGroupOperation{}, cpa.ErrProofUnavailable
 	}
+	// The version is asked before the journal and before the first write: an
+	// External CPA that does not prove the v8 contract this Manager writes is
+	// refused with no intent recorded, so nothing is left pending.
+	if err = s.externalWriteGate(ctx, auth); err != nil {
+		return freshstore.ConfigGroupOperation{}, err
+	}
 	if !auth.capable.Writable {
 		return freshstore.ConfigGroupOperation{}, ErrReadOnly
 	}
@@ -317,6 +323,9 @@ func (s *Service) SaveFamily(ctx context.Context, familyID string, q FamilyReque
 	}
 	if auth.wire == nil {
 		return freshstore.ConfigGroupOperation{}, cpa.ErrProofUnavailable
+	}
+	if err = s.externalWriteGate(ctx, auth); err != nil {
+		return freshstore.ConfigGroupOperation{}, err
 	}
 	if !auth.capable.RulesWritable {
 		return freshstore.ConfigGroupOperation{}, ErrRulesReadOnly

@@ -134,7 +134,16 @@ func newExternalHarness(t *testing.T, keys ...string) *externalHarness {
 	}
 	h := &externalHarness{cpa: newFakeExternalCPA(t, keys...), keys: freshkeys.New(r, protector)}
 	h.service = NewExternal(r, h.keys, h.cpa.source())
+	// The fake CPA serves the v8 key surface, so the version probe the write gate
+	// reads is stubbed to the contract that surface speaks. The probe itself is
+	// tested against its own fake server in the cpa package.
+	h.service.externalProbe = supportedExternalVersion
 	return h
+}
+
+// supportedExternalVersion stands in for a CPA that advertises the v8 contract.
+func supportedExternalVersion(context.Context, string, string) (cpa.ExternalVersionReport, error) {
+	return cpa.ClassifyExternalVersion("v8.0.13"), nil
 }
 
 // staged stages one Manager key and returns its canonical ID and secret.
@@ -695,5 +704,281 @@ func TestExternalApplyRefusesWhileAnOperationIsJournaled(t *testing.T) {
 	}
 	if harness.cpa.writes != 0 || slices.Contains(harness.cpa.keys, stagedSecret) {
 		t.Fatal("an apply during a journaled operation reached the user's CPA")
+	}
+}
+
+// A CPA that does not prove the v8 contract is refused for every write — install,
+// revoke and replace — with the typed version refusal and not one PUT, while the
+// key list still reads it. The version bounds what may be written, never what may
+// be shown: an old CPA's keys are still its own answer.
+func TestExternalWritesAreRefusedForAnUnsupportedVersion(t *testing.T) {
+	harness := newExternalHarness(t)
+	ctx := context.Background()
+	target, targetSecret := harness.staged(t, strings.Repeat("2", 32))
+	keeper, keeperSecret := harness.staged(t, strings.Repeat("3", 32))
+	if _, err := harness.service.Apply(ctx, target, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := harness.service.Apply(ctx, keeper, 1); err != nil {
+		t.Fatal(err)
+	}
+	// The user's CPA now advertises a major this Manager never wrote against.
+	harness.service.externalProbe = func(context.Context, string, string) (cpa.ExternalVersionReport, error) {
+		return cpa.ClassifyExternalVersion("v7.2.130"), nil
+	}
+	harness.cpa.writes = 0
+
+	staged, stagedSecret := harness.staged(t, strings.Repeat("4", 32))
+	if _, err := harness.service.Apply(ctx, staged, 1); !errors.Is(err, cpa.ErrExternalVersionUnsupported) {
+		t.Fatalf("install on an unsupported CPA = %v", err)
+	}
+	if _, err := harness.service.Prepare(ctx, strings.Repeat("5", 32), target, keeper, "revoke", 1); !errors.Is(err, cpa.ErrExternalVersionUnsupported) {
+		t.Fatalf("revoke on an unsupported CPA = %v", err)
+	}
+	replacement, replacementSecret := harness.staged(t, strings.Repeat("6", 32))
+	if _, err := harness.service.Prepare(ctx, strings.Repeat("7", 32), keeper, replacement, "replace", 1); !errors.Is(err, cpa.ErrExternalVersionUnsupported) {
+		t.Fatalf("replace on an unsupported CPA = %v", err)
+	}
+	if harness.cpa.writes != 0 {
+		t.Fatalf("a refused write reached the user's CPA: %d writes", harness.cpa.writes)
+	}
+	if slices.Contains(harness.cpa.keys, stagedSecret) || slices.Contains(harness.cpa.keys, replacementSecret) {
+		t.Fatal("a refused write mutated the user's key list")
+	}
+	if !slices.Contains(harness.cpa.keys, targetSecret) || !slices.Contains(harness.cpa.keys, keeperSecret) {
+		t.Fatal("a refused write disturbed the credentials the CPA carries")
+	}
+
+	// Reads are untouched: the list still reports the presence the CPA answers.
+	keys, err := harness.keys.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed, unverified, err := harness.service.ExternalKeyList(ctx, keys)
+	if err != nil || unverified {
+		t.Fatalf("list on an unsupported CPA = %d keys, unverified=%v, %v", len(listed), unverified, err)
+	}
+	observed := 0
+	for _, key := range listed {
+		if key.RuntimeState == "effective_observed" {
+			observed++
+		}
+	}
+	if observed != 2 {
+		t.Fatalf("observed %d of the credentials the CPA carries, want 2", observed)
+	}
+}
+
+// A CPA whose version cannot be read at all is refused for writes as well: an
+// unproven version is not a licence to write, and the refusal names the class it
+// actually met.
+func TestExternalWritesAreRefusedWithoutAProvenVersion(t *testing.T) {
+	harness := newExternalHarness(t)
+	ctx := context.Background()
+	id, secret := harness.staged(t, strings.Repeat("8", 32))
+	for _, version := range []string{"", "latest"} {
+		harness.service.externalProbe = func(context.Context, string, string) (cpa.ExternalVersionReport, error) {
+			return cpa.ClassifyExternalVersion(version), nil
+		}
+		harness.cpa.writes = 0
+		if _, err := harness.service.Apply(ctx, id, 1); !errors.Is(err, cpa.ErrExternalVersionUnsupported) {
+			t.Fatalf("install with version %q = %v", version, err)
+		}
+		if harness.cpa.writes != 0 || slices.Contains(harness.cpa.keys, secret) {
+			t.Fatalf("a write with version %q reached the user's CPA", version)
+		}
+	}
+}
+
+// A refused credential stays the blocker of the probe itself: a CPA that answered
+// 401 is a rebind, which is a different refusal from a version this Manager does
+// not write.
+//
+// A user's CPA whose version stops proving the v8 contract between Prepare and
+// Continue sends no write at all. The gate runs before the step is journaled as
+// attempted, so the step stays unattempted and the journal does not answer
+// ErrApplyUnknown forever: the later operation on the same connection is accepted
+// instead of being refused by a step that could never be settled.
+func TestExternalVersionGateRunsBeforeTheStepIsAttempted(t *testing.T) {
+	for _, scenario := range []struct {
+		name   string
+		probe  func() (cpa.ExternalVersionReport, error)
+		causes []error
+	}{
+		{
+			name:   "version became unsupported",
+			probe:  func() (cpa.ExternalVersionReport, error) { return cpa.ClassifyExternalVersion("v7.2.130"), nil },
+			causes: []error{cpa.ErrExternalVersionUnsupported},
+		},
+		{
+			name:   "probe timed out",
+			probe:  func() (cpa.ExternalVersionReport, error) { return cpa.ExternalVersionReport{}, cpa.ErrProofUnavailable },
+			causes: []error{cpa.ErrProofUnavailable},
+		},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			harness := newExternalHarness(t)
+			ctx := context.Background()
+			target, targetSecret := harness.staged(t, strings.Repeat("2", 32))
+			keeper, keeperSecret := harness.staged(t, strings.Repeat("3", 32))
+			if _, err := harness.service.Apply(ctx, target, 1); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := harness.service.Apply(ctx, keeper, 1); err != nil {
+				t.Fatal(err)
+			}
+			result, err := harness.service.Prepare(ctx, strings.Repeat("4", 32), target, keeper, "revoke", 1)
+			if err != nil {
+				t.Fatalf("prepare: %v", err)
+			}
+			// The CPA was upgraded — or stopped answering — after the intent was
+			// journaled, so the probe answers differently from here on.
+			harness.service.externalProbe = func(context.Context, string, string) (cpa.ExternalVersionReport, error) {
+				return scenario.probe()
+			}
+			writes := harness.cpa.writes
+			_, err = harness.service.ContinueOperation(ctx, result.Operation.ID, 1)
+			for _, cause := range scenario.causes {
+				if errors.Is(err, cause) {
+					err = nil
+					break
+				}
+			}
+			if err != nil {
+				t.Fatalf("continue behind the version gate = %v", err)
+			}
+			if harness.cpa.writes != writes {
+				t.Fatal("a write was sent for a step the version gate refused")
+			}
+			if !slices.Contains(harness.cpa.keys, targetSecret) || !slices.Contains(harness.cpa.keys, keeperSecret) {
+				t.Fatalf("a refused step changed the CPA's credentials: %v", harness.cpa.keys)
+			}
+			journal, err := harness.service.repo.Operation(ctx, result.Operation.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if journal.Outcome != "pending" || journal.Steps[0].State != "unattempted" {
+				t.Fatalf("a refused step was journaled as %q with %q", journal.Outcome, journal.Steps[0].State)
+			}
+			// Nothing was sent, so no read-back can ever settle this step: the
+			// journal must not keep reporting an unknown effect. The CPA serves
+			// the contract again, and the same journaled step is taken once.
+			harness.service.externalProbe = supportedExternalVersion
+			result, err = harness.service.ContinueOperation(ctx, result.Operation.ID, 1)
+			if err != nil {
+				t.Fatalf("continue once the CPA serves the contract again: %v", err)
+			}
+			if result.Operation == nil || result.Operation.Outcome != "committed" {
+				t.Fatalf("the step refused by the gate never settled: %+v", result.Operation)
+			}
+			if slices.Contains(harness.cpa.keys, targetSecret) {
+				t.Fatal("the credential the settled step removes is still carried")
+			}
+			// The journal is terminal, so an unrelated key operation on the same
+			// connection is accepted instead of being refused by a stuck journal.
+			next, nextSecret := harness.staged(t, strings.Repeat("5", 32))
+			if _, err := harness.service.Apply(ctx, next, 1); err != nil {
+				t.Fatalf("a later operation on the same connection = %v", err)
+			}
+			if !slices.Contains(harness.cpa.keys, nextSecret) {
+				t.Fatal("the later operation did not reach the user's CPA")
+			}
+		})
+	}
+}
+
+// A probe that answers 401 in front of the write is the credential blocker on
+// Prepare and on every later step: it is reported as such, never as a version
+// class, and never followed by a write.
+func TestExternalWriteGateKeepsTheProbeBlocker(t *testing.T) {
+	harness := newExternalHarness(t)
+	ctx := context.Background()
+	id, secret := harness.staged(t, strings.Repeat("9", 32))
+	harness.service.externalProbe = func(context.Context, string, string) (cpa.ExternalVersionReport, error) {
+		return cpa.ExternalVersionReport{}, cpa.ErrManagementRejected
+	}
+	harness.cpa.writes = 0
+	_, err := harness.service.Apply(ctx, id, 1)
+	if !errors.Is(err, cpa.ErrManagementRejected) {
+		t.Fatalf("install on a rejected probe = %v", err)
+	}
+	if errors.Is(err, cpa.ErrExternalVersionUnsupported) {
+		t.Fatal("a rejected credential was reported as an unsupported version")
+	}
+	if harness.cpa.writes != 0 || slices.Contains(harness.cpa.keys, secret) {
+		t.Fatal("a write behind a rejected probe reached the user's CPA")
+	}
+}
+
+// A journaled External step asks the version probe exactly once: the gate in front
+// of the journaled intent and the gate in front of the single PUT are the same
+// ask, and the wire itself carries none. The earlier double ask charged two round
+// trips per step and, worse, could refuse inside the write after the journal had
+// already recorded it as attempted.
+func TestExternalStepAsksTheVersionProbeOnce(t *testing.T) {
+	harness := newExternalHarness(t)
+	ctx := context.Background()
+	probes := 0
+	harness.service.externalProbe = func(context.Context, string, string) (cpa.ExternalVersionReport, error) {
+		probes++
+		return cpa.ClassifyExternalVersion("v8.0.13"), nil
+	}
+	target, targetSecret := harness.staged(t, strings.Repeat("2", 32))
+	keeper, _ := harness.staged(t, strings.Repeat("3", 32))
+	if _, err := harness.service.Apply(ctx, target, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := harness.service.Apply(ctx, keeper, 1); err != nil {
+		t.Fatal(err)
+	}
+	if probes != 2 {
+		t.Fatalf("two installs asked the probe %d times, want one each", probes)
+	}
+
+	prepared, err := harness.service.Prepare(ctx, strings.Repeat("4", 32), target, keeper, "revoke", 1)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if probes != 3 {
+		t.Fatalf("prepare asked the probe %d times in total, want one more", probes)
+	}
+	writes := harness.cpa.writes
+	probes = 0
+	result, err := harness.service.ContinueOperation(ctx, prepared.Operation.ID, 1)
+	if err != nil {
+		t.Fatalf("continue: %v", err)
+	}
+	if probes != 1 {
+		t.Fatalf("one step asked the probe %d times, want exactly one", probes)
+	}
+	if harness.cpa.writes != writes+1 {
+		t.Fatalf("writes = %d, want exactly one PUT for the step", harness.cpa.writes-writes)
+	}
+	if result.Operation == nil || result.Operation.Outcome != "committed" {
+		t.Fatalf("the step did not settle: %+v", result.Operation)
+	}
+	if slices.Contains(harness.cpa.keys, targetSecret) {
+		t.Fatal("the credential the step removes is still carried")
+	}
+}
+
+// TestExternalApplyRefusesAnUnsupportedVersionBeforeItsPut proves the install
+// write carries its own gate. The wire has none, so a missing gate here would be
+// a write straight to a CPA that does not serve the v8 contract.
+func TestExternalApplyRefusesAnUnsupportedVersionBeforeItsPut(t *testing.T) {
+	harness := newExternalHarness(t)
+	ctx := context.Background()
+	target, _ := harness.staged(t, strings.Repeat("2", 32))
+	harness.service.externalProbe = func(context.Context, string, string) (cpa.ExternalVersionReport, error) {
+		return cpa.ClassifyExternalVersion("v7.2.130"), nil
+	}
+	if _, err := harness.service.Apply(ctx, target, 1); !errors.Is(err, cpa.ErrExternalVersionUnsupported) {
+		t.Fatalf("apply on an unsupported version = %v, want the typed refusal", err)
+	}
+	if harness.cpa.writes != 0 {
+		t.Fatalf("apply wrote to a CPA that does not serve the contract: %d writes", harness.cpa.writes)
+	}
+	if len(harness.cpa.keys) != 0 {
+		t.Fatalf("the CPA's credentials changed: %v", harness.cpa.keys)
 	}
 }

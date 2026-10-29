@@ -51,11 +51,20 @@ type Service struct {
 	// externalWire builds the CPA transport of one resolved External target. It
 	// is a field so tests can stand in a fake CPA; production dials the committed
 	// address and never the private loopback.
-	externalWire  func(string) externalWire
-	endpoint      string
-	profile       string
-	keyOperations bool
-	startedAtMS   int64
+	externalWire func(string) externalWire
+	// externalProbe reads the CPA version of one resolved External target. A
+	// write is refused unless that probe proves the v8 contract this Manager
+	// writes, so it is injected exactly like the wire: tests stand in a
+	// supported CPA and production reads the real one.
+	externalProbe func(context.Context, string, string) (cpa.ExternalVersionReport, error)
+	// externalRebindVerifier proves one candidate management credential against
+	// the committed address. It is injected like the probe, so a test can decide
+	// what the user's CPA answers without a second fake server.
+	externalRebindVerifier ExternalRebindVerifier
+	endpoint               string
+	profile                string
+	keyOperations          bool
+	startedAtMS            int64
 }
 
 func New(r *repo.Repository, keys *freshkeys.Service, runtime runtimeservice.RuntimeClient) *Service {

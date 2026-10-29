@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 )
@@ -17,6 +18,15 @@ import (
 // rebinding automatically would write to a CPA this Manager no longer proves it
 // owns.
 var ErrManagementRejected = errors.New("external cpa management credential rejected")
+
+// ErrManagementClientForbidden reports CPA's own 403 to an External management
+// request. CPA answers 403, not 401, when it refuses the client rather than the
+// credential: the address is banned after too many failed authentications, or
+// remote management is disabled for it. It is the same blocker — the Manager's
+// credential is not accepted — so it wraps ErrManagementRejected, and it is
+// separate only because a ban expires: the page can tell the administrator to
+// retry the same credential after the ban window instead of asking for a new one.
+var ErrManagementClientForbidden = fmt.Errorf("%w: %w", ErrManagementRejected, errors.New("cpa refused this management client"))
 
 // ErrExternalTargetMoved reports a committed External target that no longer names
 // the connection this Manager holds: the address the user configured changed after
@@ -50,6 +60,8 @@ func (t *Transport) ExternalKeySnapshot(ctx context.Context, management string) 
 	switch code {
 	case http.StatusUnauthorized:
 		return snapshot, ErrManagementRejected
+	case http.StatusForbidden:
+		return snapshot, ErrManagementClientForbidden
 	case http.StatusOK:
 	default:
 		return snapshot, ErrSourceConflict
@@ -69,6 +81,8 @@ func (t *Transport) ExternalKeySnapshot(ctx context.Context, management string) 
 	switch code {
 	case http.StatusUnauthorized:
 		return snapshot, ErrManagementRejected
+	case http.StatusForbidden:
+		return snapshot, ErrManagementClientForbidden
 	case http.StatusOK:
 	default:
 		return snapshot, ErrSourceConflict
@@ -104,6 +118,10 @@ func (t *Transport) ExternalWriteKeySet(ctx context.Context, management string, 
 		return nil
 	case http.StatusUnauthorized:
 		return ErrManagementRejected
+	case http.StatusForbidden:
+		// A banned or remote-management-disabled client is refused before the
+		// list is read, so nothing was written: the effect is not unknown.
+		return ErrManagementClientForbidden
 	}
 	return ErrApplyUnknown
 }

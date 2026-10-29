@@ -22,6 +22,18 @@ type ManagementConfig struct {
 	ProxyURL string `json:"proxyUrl,omitempty"`
 }
 
+// managementStatusError is a non-2xx answer to a management read. Its message is
+// the text every existing caller already matches, so the wire contract of the
+// setup paths is unchanged; the status code is exposed for the callers that must
+// tell CPA's own 401 apart from an unreachable CPA.
+type managementStatusError struct {
+	what   string
+	code   int
+	status string
+}
+
+func (e *managementStatusError) Error() string { return e.what + ": " + e.status }
+
 func ValidateManagementAPI(ctx context.Context, baseURL string, key string) error {
 	_, err := ObserveManagementAPI(ctx, baseURL, key)
 	return err
@@ -42,7 +54,7 @@ func ObserveManagementAPI(ctx context.Context, baseURL string, key string) (stri
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return "", errors.New("management API validation failed: " + res.Status)
+		return "", &managementStatusError{what: "management API validation failed", code: res.StatusCode, status: res.Status}
 	}
 	version := strings.TrimSpace(res.Header.Get("X-CPA-Version"))
 	if version == "" {

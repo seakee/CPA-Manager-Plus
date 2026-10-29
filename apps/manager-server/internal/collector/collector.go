@@ -70,6 +70,14 @@ type Manager struct {
 	cancel            context.CancelFunc
 	status            Status
 	runtimeCfg        RuntimeConfig
+	// authRejected reports that the CPA refused the management credential this
+	// Collector is running with. The Collector stops itself first: resending a
+	// refused credential is what turns a rotation into an IP ban.
+	authRejected func()
+	// starts counts how many runs this Manager has opened. It is the identity of
+	// the running Collector: every Start supersedes the previous run, so a caller
+	// that must not restart one can prove it did not by seeing this unchanged.
+	starts uint64
 }
 
 func NewManager(base config.Config, store *store.Store) *Manager {
@@ -94,6 +102,7 @@ func (m *Manager) Start(ctx context.Context, cfg RuntimeConfig) {
 		m.cancel = nil
 	}
 	m.runtimeCfg = cfg
+	m.starts++
 	handler := m.usageEventHandler
 	m.status.Collector = "starting"
 	m.status.Upstream = cfg.CPAUpstreamURL
@@ -107,7 +116,7 @@ func (m *Manager) Start(ctx context.Context, cfg RuntimeConfig) {
 	if runtimeHandler, ok := handler.(UsageRuntimeConfigHandler); ok {
 		go runtimeHandler.UpdateRuntimeConfig(runCtx, cfg)
 	}
-	go m.run(runCtx, cfg)
+	go m.run(runCtx, cancel, cfg)
 }
 
 func (m *Manager) Stop() {
@@ -118,6 +127,16 @@ func (m *Manager) Stop() {
 		m.cancel = nil
 	}
 	m.status.Collector = "stopped"
+}
+
+// StartCount is the identity of the running Collector: one increment per Start.
+// A caller that must not restart a live Collector proves it did not by comparing
+// this before and after, which a phase string alone cannot show — a restart is
+// observable as "starting" only for a moment.
+func (m *Manager) StartCount() uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.starts
 }
 
 func (m *Manager) Status() Status {
@@ -145,27 +164,124 @@ func (m *Manager) setStatus(update func(*Status)) {
 	update(&m.status)
 }
 
-func (m *Manager) run(ctx context.Context, cfg RuntimeConfig) {
+// SetAuthRejectionHandler installs the report of a CPA refusal of this
+// Collector's management credential. The Collector stops before it reports: a
+// refused credential is terminal until the connection is rebound, and every
+// further request is one more failed attempt against a CPA that bans an address
+// after a handful of them.
+func (m *Manager) SetAuthRejectionHandler(handler func()) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.authRejected = handler
+}
+
+// refuseAuth stops one run and reports the refusal. It acts only on the run that
+// met it: the cancel func is that run's own, and a run whose context is already
+// cancelled has been superseded by a restart, so its late reply must neither stop
+// the new Collector nor record a blocker for a credential the new run does not
+// use.
+//
+// The refusal itself is recorded as LastError, because a stop with no reason is
+// the worst answer: the legacy Collector installs no handler, so without this it
+// would stop silently and its status page would report a stopped Collector with an
+// empty cause. An earlier error is kept if there is one — the refusal is added to
+// the record, not used to erase why the Collector was already failing.
+func (m *Manager) refuseAuth(ctx context.Context, cancel context.CancelFunc, err error) {
+	if ctx != nil && ctx.Err() != nil {
+		return
+	}
+	m.setStatus(func(status *Status) {
+		status.Collector = "stopped"
+		if message := authRefusalMessage(err); message != "" {
+			if status.LastError == "" {
+				status.LastError = message
+			} else {
+				status.LastError += "; " + message
+			}
+		}
+	})
+	if cancel != nil {
+		cancel()
+	}
+	m.mu.Lock()
+	report := m.authRejected
+	m.mu.Unlock()
+	if report != nil {
+		report()
+	}
+}
+
+// authRefusals are CPA's own replies to a management authentication it refused:
+// the messages its RESP protocol writes for an invalid or missing key, a banned
+// address, disabled remote management, and the NOAUTH it answers a command with.
+// The list is deliberately closed. CPA answers other frames too — its home mode
+// greets every RESP connection with `ERR redis usage output disabled in home
+// mode` before any command — and treating those as a refused credential would
+// stop a Collector that used to fall back to the HTTP queue instead.
+var authRefusals = []string{
+	"NOAUTH Authentication required.",
+	"ERR invalid management key",
+	"ERR missing management key",
+	"ERR remote management key not set",
+	"ERR remote management disabled",
+	"ERR IP banned due to too many failed attempts",
+}
+
+// authRefusalMessage is the refusal as it is recorded for an operator. It is CPA's
+// own text when there is one, so the status page says what the CPA said rather than
+// paraphrasing it, and it never carries a credential: CPA's auth frames quote none.
+func authRefusalMessage(err error) string {
+	var reply *resp.ErrorReply
+	if errors.As(err, &reply) {
+		if message := strings.TrimSpace(reply.Message); message != "" {
+			return "management credential refused: " + message
+		}
+	}
+	if errors.Is(err, httpqueue.ErrRejected) {
+		return "management credential refused: the CPA rejected the request"
+	}
+	return ""
+}
+
+// isAuthRefusal reports a management credential the CPA itself refused. Only the
+// replies above and an HTTP 401/403 from the usage queue qualify: the server
+// answered and refused this credential. Any other error frame, and any plain
+// transport error, is not an answer about the credential and stays retryable.
+func isAuthRefusal(err error) bool {
+	var reply *resp.ErrorReply
+	if errors.As(err, &reply) {
+		message := strings.TrimSpace(reply.Message)
+		for _, refusal := range authRefusals {
+			if strings.HasPrefix(message, refusal) {
+				return true
+			}
+		}
+		return false
+	}
+	return errors.Is(err, httpqueue.ErrRejected)
+}
+
+func (m *Manager) run(ctx context.Context, cancel context.CancelFunc, cfg RuntimeConfig) {
 	mode := collectorMode(valueOr(cfg.CollectorMode, m.base.CollectorMode))
 
 	if mode == "subscribe" {
-		m.runSubscribe(ctx, cfg, mode)
+		m.runSubscribe(ctx, cancel, cfg, mode)
 		return
 	}
-	if mode == "auto" && m.runSubscribe(ctx, cfg, mode) {
+	if mode == "auto" && m.runSubscribe(ctx, cancel, cfg, mode) {
 		return
 	}
 	if mode == "http" {
-		m.runHTTP(ctx, cfg, mode)
+		m.runHTTP(ctx, cancel, cfg, mode)
 		return
 	}
-	if mode == "auto" && m.runHTTP(ctx, cfg, mode) {
+	if mode == "auto" && m.runHTTP(ctx, cancel, cfg, mode) {
 		return
 	}
-	m.runRESP(ctx, cfg)
+	m.runRESP(ctx, cancel, cfg)
 }
 
-func (m *Manager) runSubscribe(ctx context.Context, cfg RuntimeConfig, mode string) bool {
+func (m *Manager) runSubscribe(ctx context.Context, cancel context.CancelFunc, cfg RuntimeConfig, mode string) bool {
 	channel := valueOr(cfg.Queue, m.base.Queue)
 	backoff := time.Second
 	subscribed := false
@@ -195,6 +311,19 @@ func (m *Manager) runSubscribe(ctx context.Context, cfg RuntimeConfig, mode stri
 		}
 		if err := client.Auth(cfg.ManagementKey); err != nil {
 			_ = client.Close()
+			// A reply can land after a restart superseded this run. It says
+			// nothing about the Collector now running — and that one uses another
+			// credential — so the run ends here without stopping or reporting.
+			if ctx.Err() != nil {
+				return true
+			}
+			if isAuthRefusal(err) {
+				// The CPA answered and refused this management credential. That
+				// is terminal: another attempt is one more failed authentication
+				// against a CPA that bans the address after a handful of them.
+				m.refuseAuth(ctx, cancel, err)
+				return true
+			}
 			if mode == "auto" && !subscribed {
 				return fallback()
 			}
@@ -282,7 +411,7 @@ func (m *Manager) consumeSubscribe(ctx context.Context, cfg RuntimeConfig, clien
 	}
 }
 
-func (m *Manager) runHTTP(ctx context.Context, cfg RuntimeConfig, mode string) bool {
+func (m *Manager) runHTTP(ctx context.Context, cancel context.CancelFunc, cfg RuntimeConfig, mode string) bool {
 	client := httpqueue.New(cfg.CPAUpstreamURL, cfg.ManagementKey)
 	backoff := time.Second
 
@@ -302,6 +431,13 @@ func (m *Manager) runHTTP(ctx context.Context, cfg RuntimeConfig, mode string) b
 			})
 			return false
 		}
+		if ctx.Err() == nil && isAuthRefusal(err) {
+			// The CPA answered and refused the management credential. That is
+			// terminal until the connection is rebound, and every retry would be
+			// another failed authentication against a CPA that bans the address.
+			m.refuseAuth(ctx, cancel, err)
+			return true
+		}
 		if err != nil {
 			m.markError("http", err)
 			sleep(ctx, backoff)
@@ -310,7 +446,7 @@ func (m *Manager) runHTTP(ctx context.Context, cfg RuntimeConfig, mode string) b
 	}
 }
 
-func (m *Manager) runRESP(ctx context.Context, cfg RuntimeConfig) {
+func (m *Manager) runRESP(ctx context.Context, cancel context.CancelFunc, cfg RuntimeConfig) {
 	queue := valueOr(cfg.Queue, m.base.Queue)
 	popSide := valueOr(cfg.PopSide, m.base.PopSide)
 	backoff := time.Second
@@ -328,6 +464,15 @@ func (m *Manager) runRESP(ctx context.Context, cfg RuntimeConfig) {
 		}
 		if err := client.Auth(cfg.ManagementKey); err != nil {
 			_ = client.Close()
+			// A superseded run's late reply is not about the Collector running
+			// now: the run ends without stopping it or recording its blocker.
+			if ctx.Err() != nil {
+				return
+			}
+			if isAuthRefusal(err) {
+				m.refuseAuth(ctx, cancel, err)
+				return
+			}
 			m.markError("auth", err)
 			sleep(ctx, backoff)
 			backoff = nextBackoff(backoff)

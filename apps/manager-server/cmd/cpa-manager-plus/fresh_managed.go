@@ -84,9 +84,10 @@ func externalInstallSource(store freshstore.Store, protector *security.Protector
 		// The committed target must still be the connection this Manager holds.
 		// Comparing the address digests is the only comparison available: the
 		// credential is a protected envelope, and a connection the user edited to
-		// another CPA is a rebind, which this path never performs silently. It is
-		// reported as the typed blocker it is, so the page can offer the rebind the
-		// next slice ships instead of claiming the installation is unavailable.
+		// another CPA is a different installation. It is reported as the typed
+		// blocker it is instead of claiming the installation is unavailable, and
+		// `POST external/rebind` refuses it too — a rebind replaces a credential
+		// and never an address — so the way back is a reconnect.
 		if checkpoint.TargetIdentity != freshkeyapply.ExternalIdentity(baseURL) {
 			return freshkeyapply.ExternalInstall{}, cpa.ErrExternalTargetMoved
 		}

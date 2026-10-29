@@ -16,6 +16,11 @@ import (
 
 var ErrUnsupported = errors.New("http usage queue is unsupported")
 
+// ErrRejected reports a usage queue request the CPA refused as unauthenticated.
+// It is the transport-level form of a refused management credential: the server
+// answered, so retrying the same request is another failed authentication.
+var ErrRejected = errors.New("usage queue rejected the management credential")
+
 type StatusError struct {
 	StatusCode int
 	Status     string
@@ -27,6 +32,15 @@ func (e *StatusError) Error() string {
 		return "usage queue request failed: " + e.Status
 	}
 	return "usage queue request failed: " + e.Status + ": " + e.Body
+}
+
+// Unwrap makes a refused credential recognizable without matching on the status
+// text, so a caller stops collecting instead of retrying.
+func (e *StatusError) Unwrap() error {
+	if e.StatusCode == http.StatusUnauthorized || e.StatusCode == http.StatusForbidden {
+		return ErrRejected
+	}
+	return nil
 }
 
 type Client struct {

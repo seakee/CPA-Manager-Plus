@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeys"
+	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
 )
 
 const externalAuthorityManagement = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -26,10 +28,23 @@ const externalAuthorityManagement = "0123456789abcdef0123456789abcdef0123456789a
 // External authority needs to derive its generation.
 type externalAuthorityCPA struct {
 	management string
+	// version is the CPA version header this fake advertises. It defaults to the
+	// v8 contract the routes below actually serve.
+	version string
 	// reject makes the CPA refuse every management read, as a rotated credential
 	// does.
 	reject atomic.Bool
+	// forbid makes the CPA answer 403 instead of 401, which is what it does to a
+	// banned address or one with remote management disabled.
+	forbid atomic.Bool
 	reads  atomic.Int32
+	// writes counts PUT/PATCH/DELETE attempts, so a refused save can prove it
+	// never reached the CPA while its reads still did.
+	writes atomic.Int32
+	// probes counts the requests that reached this CPA at all, refusals included.
+	// A rebind only reads, so counting writes alone would assert something that
+	// is always true; this is the counter that discriminates.
+	probes atomic.Int32
 	server *httptest.Server
 }
 
@@ -42,13 +57,32 @@ func newExternalAuthorityCPA(t *testing.T) *externalAuthorityCPA {
 // credential, so a test can prove which key shapes the authority accepts.
 func newExternalAuthorityCPAWith(t *testing.T, management string) *externalAuthorityCPA {
 	t.Helper()
-	f := &externalAuthorityCPA{management: management}
+	f := &externalAuthorityCPA{management: management, version: "v8.0.13"}
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.probes.Add(1)
+		if f.forbid.Load() {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
 		if f.reject.Load() || r.Header.Get("Authorization") != "Bearer "+f.management {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
+		if r.Method != http.MethodGet {
+			f.writes.Add(1)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		switch r.URL.Path {
+		case "/v0/management/config":
+			// The version probe is the same authenticated read the setup path uses.
+			if f.version != "" {
+				w.Header().Set("X-CPA-Version", f.version)
+			}
+			_, _ = w.Write([]byte(`{}`))
+		case "/v8/management/config":
+			f.reads.Add(1)
+			_, _ = w.Write([]byte(`{"routing":{"strategy":"round-robin"}}`))
 		case "/v8/management/config/access/api-keys":
 			f.reads.Add(1)
 			_, _ = w.Write([]byte("[]"))
@@ -107,6 +141,11 @@ func externalAuthorityAppWith(t *testing.T, management, targetIdentity string, e
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// The committed checkpoint and the protected connection are what the External
+	// authority resolves, so the application is wired to them exactly as the
+	// External profile wires itself.
+	app.externalSource = externalInstallSource(app.store, app.protector)
+	app.keyApply = freshkeyapply.NewExternal(app.keyRepo, app.keys, app.externalSource)
 	return app, cpaServer
 }
 
@@ -362,5 +401,139 @@ func TestExternalInstallSourceFailsClosed(t *testing.T) {
 				t.Fatalf("%s = %v, want %v", scenario.name, err, scenario.cause)
 			}
 		})
+	}
+}
+
+// TestExternalSurfacesReportAnUnsupportedVersion proves the version refusal is the
+// typed code on every External write surface — the key install, the key operation
+// and the gateway save — while the key list still reads the CPA. Reads stay open:
+// the version bounds what may be written, never what may be shown.
+func TestExternalSurfacesReportAnUnsupportedVersion(t *testing.T) {
+	for _, version := range []string{"v7.2.130", ""} {
+		t.Run("version "+version, func(t *testing.T) {
+			app, cpaServer := externalAuthorityApp(t, "")
+			cpaServer.version = version
+			// The page's own service, bound to the same External authority the key
+			// surfaces use.
+			app.gatewayConfig = freshconfig.New(app.store, nil, app.keyApply.TargetsFunc(freshkeyapply.SurfaceGatewayConfig))
+			app.gatewayConfig.EnableExternal(app.keyApply.ExternalTarget)
+			created := app.keyApplyKeys(t, strings.Repeat("a", 32))
+			keeper := app.keyApplyKeys(t, strings.Repeat("b", 32))
+			call := func(method, resource, body string) *httptest.ResponseRecorder {
+				t.Helper()
+				request := httptest.NewRequest(method, "/control/api/v2/"+resource, bytes.NewBufferString(body))
+				request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+				if body != "" {
+					request.Header.Set("Content-Type", "application/json")
+				}
+				response := httptest.NewRecorder()
+				app.canonicalAPI(response, request)
+				return response
+			}
+			// The list is a read: it answers the keys the Manager staged.
+			list := call(http.MethodGet, "api-keys", "")
+			if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), string(created.Key.ID)) {
+				t.Fatalf("list on version %q = %d %s", version, list.Code, list.Body.String())
+			}
+			for _, scenario := range []struct{ method, resource, body string }{
+				{http.MethodPost, "api-keys/" + string(created.Key.ID) + "/initial-install", `{}`},
+				{http.MethodPost, "api-keys/" + string(created.Key.ID) + "/revocation",
+					`{"requestId":"` + strings.Repeat("d", 32) + `","keeperId":"` + string(keeper.Key.ID) + `","mode":"revoke"}`},
+				{http.MethodPost, "gateway/config/groups/routing",
+					`{"requestId":"` + strings.Repeat("e", 32) + `",` +
+						`"expected":{"generation":"1","baseline":"` + strings.Repeat("f", 64) + `"},` +
+						`"edits":[{"path":"routing.strategy","action":"set","value":"\"fill-first\""}]}`},
+			} {
+				response := call(scenario.method, scenario.resource, scenario.body)
+				if response.Code != http.StatusConflict ||
+					!strings.Contains(response.Body.String(), freshconfig.ReasonVersionUnsupported) {
+					t.Fatalf("%s %s on version %q = %d %s", scenario.method, scenario.resource, version, response.Code, response.Body.String())
+				}
+			}
+			if cpaServer.writes.Load() != 0 {
+				t.Fatalf("a refused write reached the CPA %d times", cpaServer.writes.Load())
+			}
+		})
+	}
+}
+
+// TestExternalUsageExposesTheObservedVersion proves the usage workspace reports the
+// version it observed and what that lets this Manager do, and that collection is
+// refused on a CPA whose version does not prove the v8 contract.
+func TestExternalUsageExposesTheObservedVersion(t *testing.T) {
+	h := newExternalUsageHarness(t)
+	h.cpa.enabled.Store(true)
+	response := h.call(t, http.MethodGet, "external/usage", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("usage state = %d %s", response.Code, response.Body.String())
+	}
+	state := decodeExternalUsageState(t, response.Body.Bytes())
+	if state.CPA.Version != "v8.0.13" || state.CPA.Support != cpa.VersionSupportSupported || state.CPA.WriteBlocked {
+		t.Fatalf("version report = %+v", state.CPA)
+	}
+
+	h.cpa.version.Store("v7.2.130")
+	// A later attempt re-runs the start, as a completion replay or a trigger does.
+	h.app.resetUsageStart()
+	h.app.startUsageCollection(h.operation(t))
+	if reason := h.app.usageStartBlock(); reason != freshconfig.ReasonVersionUnsupported {
+		t.Fatalf("blocked reason = %q, want the version refusal", reason)
+	}
+	if h.cpa.statWrites.Load() != 0 {
+		t.Fatal("usage statistics were enabled on a CPA this Manager cannot write")
+	}
+	state = decodeExternalUsageState(t, h.call(t, http.MethodGet, "external/usage", "").Body.Bytes())
+	if state.CPA.Support != cpa.VersionSupportUnsupported || !state.CPA.WriteBlocked {
+		t.Fatalf("version report = %+v, want an unsupported class", state.CPA)
+	}
+	if state.BlockedReason != freshconfig.ReasonVersionUnsupported {
+		t.Fatalf("blocked reason = %q", state.BlockedReason)
+	}
+}
+
+func gatewayFor(app *freshApplication) *freshconfig.Service {
+	svc := freshconfig.New(app.store, nil, app.keyApply.TargetsFunc(freshkeyapply.SurfaceGatewayConfig))
+	svc.EnableExternal(app.keyApply.ExternalTarget)
+	return svc
+}
+
+// TestExternalRuntimeStatusReportsTheVersionClass proves the Runtime status page
+// publishes what this Manager proved about the CPA's version. The page can then
+// say why the write surfaces are closed instead of offering a save that will be
+// refused.
+func TestExternalRuntimeStatusReportsTheVersionClass(t *testing.T) {
+	app, cpaServer := externalAuthorityApp(t, "")
+	app.runtime = nil
+	app.runtimeExternal = runtimeservice.NewExternalClientWithConnectionSource(
+		func(ctx context.Context) (string, string, error) {
+			install, err := app.externalSource(ctx)
+			if err != nil {
+				return "", "", err
+			}
+			return install.BaseURL, install.ManagementKey, nil
+		})
+	op := freshRuntimeProductCompleteOperation(t, app)
+
+	for _, scenario := range []struct {
+		version     string
+		wantSupport string
+		wantBlocked bool
+	}{
+		{"v8.0.13", cpa.VersionSupportSupported, false},
+		{"v7.2.130", cpa.VersionSupportUnsupported, true},
+	} {
+		cpaServer.version = scenario.version
+		recorder := httptest.NewRecorder()
+		app.runtimeStatus(recorder, httptest.NewRequest(http.MethodGet, "/runtime/status", nil), op)
+		var body freshRuntimeStatusResponse
+		if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode status for %q: %v (%s)", scenario.version, err, recorder.Body.String())
+		}
+		if body.Gateway == nil || body.Gateway.Version != scenario.version {
+			t.Fatalf("status for %q = %+v", scenario.version, body.Gateway)
+		}
+		if body.Gateway.VersionSupport != scenario.wantSupport || body.Gateway.WriteBlocked != scenario.wantBlocked {
+			t.Fatalf("class for %q = %q blocked=%v", scenario.version, body.Gateway.VersionSupport, body.Gateway.WriteBlocked)
+		}
 	}
 }

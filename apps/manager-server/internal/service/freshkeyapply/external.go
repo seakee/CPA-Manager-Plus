@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"time"
@@ -97,6 +98,8 @@ func NewExternal(r *repo.Repository, keys *freshkeys.Service, source ExternalSou
 	s.profile = ProfileExternal
 	s.externalSource = source
 	s.externalWire = func(endpoint string) externalWire { return cpa.NewTransportForEndpoint(endpoint) }
+	s.externalProbe = cpa.ObserveExternalVersion
+	s.externalRebindVerifier = ObserveExternalRebindCredential
 	// The adapter is the wire every step of this profile speaks: it resolves the
 	// committed target first, so no step is taken against a stale credential.
 	s.wire = externalKeyAuthority{s: s}
@@ -182,11 +185,41 @@ func (s *Service) externalTarget(ctx context.Context, generation uint64) (Extern
 	return install, nil
 }
 
+// externalKeyWire is the plain wire of one resolved target. It carries no gate:
+// the version refusal is asked explicitly by each write entry point, once, before
+// the request it guards (see externalWriteGate). A gate here would ask it again
+// inside the write, after the journal had already recorded the intent, and a
+// timeout or a version flip there would leave a step `attempted` with no byte sent.
 func (s *Service) externalKeyWire(install ExternalInstall) externalWire {
 	if s.externalWire == nil {
 		return nil
 	}
 	return s.externalWire(install.BaseURL)
+}
+
+// externalWriteRefusal is the one verdict of a version probe in front of a write.
+// A refused credential and an unreachable CPA are the typed blockers of their own
+// reads and pass through unchanged: neither is evidence that the version is wrong.
+func externalVersionWriteRefusal(report cpa.ExternalVersionReport, err error) error {
+	if err != nil {
+		return err
+	}
+	if report.WriteBlocked {
+		return fmt.Errorf("%w: %s", cpa.ErrExternalVersionUnsupported, report.Support)
+	}
+	return nil
+}
+
+// externalWriteGate asks the probe once for a resolved target and returns its
+// verdict. The journal asks it before recording an intent, so an unsupported CPA
+// is refused before a durable operation exists that no later step could send: a
+// pending journal on a target this Manager cannot write would block every other
+// operation of that connection forever.
+func (s *Service) externalWriteGate(ctx context.Context, install ExternalInstall) error {
+	if s.externalProbe == nil {
+		return nil
+	}
+	return externalVersionWriteRefusal(s.externalProbe(ctx, install.BaseURL, install.ManagementKey))
 }
 
 // ExternalKeyPresence reports, per staged key, whether the user's CPA carries it.
@@ -331,6 +364,12 @@ func (s *Service) externalApply(ctx context.Context, id string, generation uint6
 		if again.SourceSHA256 != snapshot.SourceSHA256 || !sameKeys(again.Keys, snapshot.Keys) {
 			return cpa.ErrSourceConflict
 		}
+		// The version is asked here, once, immediately before the single PUT: the
+		// wire itself carries no gate, so this is the only probe this write costs
+		// and a refusal leaves nothing attempted.
+		if err = s.externalWriteGate(ctx, install); err != nil {
+			return err
+		}
 		result.Attempted = true
 		if err = w.ExternalWriteKeySet(ctx, install.ManagementKey, after); err != nil {
 			return err
@@ -448,6 +487,11 @@ func (a externalKeyAuthority) KeySnapshot(ctx context.Context, management string
 func (a externalKeyAuthority) WriteKeySet(ctx context.Context, management string, keys []string) error {
 	install, w, err := a.resolved(ctx, management)
 	if err != nil {
+		return err
+	}
+	// The same explicit gate the journaled step and the Apply install take, so no
+	// path reaches the user's CPA with a write the version does not allow.
+	if err = a.s.externalWriteGate(ctx, install); err != nil {
 		return err
 	}
 	return w.ExternalWriteKeySet(ctx, install.ManagementKey, keys)

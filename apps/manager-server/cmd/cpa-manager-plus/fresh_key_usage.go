@@ -122,7 +122,17 @@ func (a *freshApplication) attemptUsageStart(ctx context.Context, op bootstrap.F
 			// Only the explicit private profile owns a host-supplied Collector
 			// authority.
 			started = a.privateCollector(ctx)
-		case a.managedSource != nil && a.legacyCollector != nil:
+		case checkpoint.Strategy == bootstrap.ConnectExternal && a.externalSource != nil:
+			// An External installation collects from the user's own CPA through
+			// the committed connection. A refused start proves nothing, so no
+			// collection window is recorded for it.
+			outcome := a.startExternalUsageCollector(ctx)
+			a.setUsageStartReason(outcome.Reason)
+			if !outcome.Started {
+				return false
+			}
+			started = true
+		case checkpoint.Strategy == bootstrap.NewManaged && a.managedSource != nil && a.legacyCollector != nil:
 			install, err := a.managedSource(ctx)
 			if err != nil {
 				// Managed and External installs have no other authority. Usage
@@ -143,16 +153,26 @@ func (a *freshApplication) attemptUsageStart(ctx context.Context, op bootstrap.F
 				log.Printf("Fresh usage collection unavailable: %v", err)
 				return false
 			}
+			// A live phase is not proof: the Collector reports "starting" before
+			// it has authenticated anything. The first authenticated management
+			// read is, so it gates the durable collection instant.
+			if err := a.sampleUsageAuthority(ctx, install.BaseURL, install.ManagementKey); err != nil {
+				log.Printf("Fresh usage collection sample unavailable: %v", err)
+				return false
+			}
 			started = a.collectionPhase() != usageapp.PhaseStopped
 		default:
-			// No Collector authority is configured for this strategy: starting
-			// one would be a guess, so nothing is retried here.
-			return true
+			// No Collector authority is configured for this strategy: nothing
+			// starts, so nothing may be claimed either. Returning success here
+			// would publish a coverage window that can never carry data.
+			a.setUsageStartReason(usageStartReasonNoAuthority)
+			return false
 		}
 		if !started {
 			return false
 		}
 		a.usageCollectorStarted = true
+		a.setUsageStartReason("")
 	}
 	if err := a.usage.MarkCollectionStart(ctx); err != nil {
 		log.Printf("Fresh usage collection start unavailable: %v", err)

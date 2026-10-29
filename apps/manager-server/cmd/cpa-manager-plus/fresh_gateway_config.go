@@ -161,6 +161,11 @@ func gatewayConfigReply(w http.ResponseWriter, v any, e error) {
 		// this is the same typed blocker the read publishes as capability.reason,
 		// not an unavailable authority and not a retry reason.
 		code, status = freshconfig.ReasonTargetMoved, http.StatusConflict
+	case errors.Is(e, cpa.ErrExternalVersionUnsupported):
+		// The user's CPA did not prove the v8 contract this Manager writes, so no
+		// journal entry and no write exist. The page keeps reading that CPA; only
+		// the save is refused.
+		code, status = freshconfig.ReasonVersionUnsupported, http.StatusConflict
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -199,7 +204,17 @@ func (a *freshApplication) gatewayConfiguration(w http.ResponseWriter, r *http.R
 		if service == nil {
 			return
 		}
+		// A key the user's CPA already refused is not presented again: this is
+		// the config page's own read, it polls, and five refusals ban the address.
+		grant := a.externalReadGrant(r.Context())
+		if grant.Refused {
+			gatewayConfigReply(w, freshconfig.View{}, cpa.ErrManagementRejected)
+			return
+		}
 		view, err := service.Read(r.Context())
+		if errors.Is(err, cpa.ErrManagementRejected) {
+			a.noteExternalRejection(r.Context(), grant, err)
+		}
 		gatewayConfigReply(w, view, err)
 	case parts[0] == "groups" && len(parts) == 2:
 		if r.Method != http.MethodPost {

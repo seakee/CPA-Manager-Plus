@@ -415,9 +415,10 @@ func TestFreshCompleteStartsUsageOnceAndBackfillsStagedKeys(t *testing.T) {
 	installManagedCheckpoint(t, app, "committed")
 	app.runtime = &installationTestRuntime{status: validInstallationRuntime()}
 	sourceCalls, workerStarts := 0, 0
+	stub := usageManagementStub(t)
 	app.managedSource = func(context.Context) (freshkeyapply.ManagedInstall, error) {
 		sourceCalls++
-		return freshkeyapply.ManagedInstall{BaseURL: "http://127.0.0.1:1", ManagementKey: "test-management-key"}, nil
+		return freshkeyapply.ManagedInstall{BaseURL: stub.URL, ManagementKey: strings.Repeat("a", 64)}, nil
 	}
 	app.startIdentityWorker = func(context.Context) { workerStarts++ }
 
@@ -520,6 +521,26 @@ func quietProjection(app *freshApplication) {
 	app.usageProjection = identityprojection.NewWorker(nil)
 }
 
+// usageManagementStub is a CPA that answers the one authenticated management
+// read a Collector startup requires before it may claim a collection window, and
+// an empty usage queue so the real Collector stays live without traffic.
+func usageManagementStub(t *testing.T) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v0/management/config":
+			w.Header().Set("X-CPA-Version", "v8.0.13")
+			_, _ = w.Write([]byte(`{}`))
+		case "/v0/management/usage-queue":
+			_, _ = w.Write([]byte("[]"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
 // newUsageCompletionApplication builds a routed Fresh app whose usage workers
 // run on the caller's host lifetime.
 func newUsageCompletionApplication(t *testing.T, ctx context.Context, cfg config.Config) (*fresh.Opened, *freshApplication) {
@@ -575,13 +596,14 @@ func TestFreshUsageStartUsesHostLifetimeAndRetriesAfterFailure(t *testing.T) {
 
 	sourceCalls, workerStarts := 0, 0
 	var sourceCtx context.Context
+	stub := usageManagementStub(t)
 	app.managedSource = func(ctx context.Context) (freshkeyapply.ManagedInstall, error) {
 		sourceCalls++
 		sourceCtx = ctx
 		if sourceCalls == 1 {
 			return freshkeyapply.ManagedInstall{}, freshkeyapply.ErrUnavailable
 		}
-		return freshkeyapply.ManagedInstall{BaseURL: "http://127.0.0.1:1", ManagementKey: "test-management-key"}, nil
+		return freshkeyapply.ManagedInstall{BaseURL: stub.URL, ManagementKey: strings.Repeat("a", 64)}, nil
 	}
 	app.startIdentityWorker = func(context.Context) { workerStarts++ }
 
@@ -634,6 +656,7 @@ func TestFreshUsageStartIsSerializedAcrossConcurrentTriggers(t *testing.T) {
 	entered := make(chan struct{}, 1)
 	var sourceCalls, workerStarts int32
 	var inFlight, maxInFlight int32
+	stub := usageManagementStub(t)
 	app.managedSource = func(context.Context) (freshkeyapply.ManagedInstall, error) {
 		if n := atomic.AddInt32(&inFlight, 1); n > atomic.LoadInt32(&maxInFlight) {
 			atomic.StoreInt32(&maxInFlight, n)
@@ -645,7 +668,7 @@ func TestFreshUsageStartIsSerializedAcrossConcurrentTriggers(t *testing.T) {
 		default:
 		}
 		<-release
-		return freshkeyapply.ManagedInstall{BaseURL: "http://127.0.0.1:1", ManagementKey: "test-management-key"}, nil
+		return freshkeyapply.ManagedInstall{BaseURL: stub.URL, ManagementKey: strings.Repeat("a", 64)}, nil
 	}
 	app.startIdentityWorker = func(context.Context) { atomic.AddInt32(&workerStarts, 1) }
 
@@ -692,9 +715,10 @@ func TestFreshUsageStartRetriesOnlyTheMarkerAfterAMarkerFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	sourceCalls := 0
+	stub := usageManagementStub(t)
 	app.managedSource = func(context.Context) (freshkeyapply.ManagedInstall, error) {
 		sourceCalls++
-		return freshkeyapply.ManagedInstall{BaseURL: "http://127.0.0.1:1", ManagementKey: "test-management-key"}, nil
+		return freshkeyapply.ManagedInstall{BaseURL: stub.URL, ManagementKey: strings.Repeat("a", 64)}, nil
 	}
 	collectionStarted := func() int {
 		t.Helper()

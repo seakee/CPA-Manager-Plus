@@ -46,6 +46,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -121,6 +122,16 @@ type freshApplication struct {
 	usageStarted          bool
 	usageWorkersStarted   bool
 	usageCollectorStarted bool
+	// usageStartReason is the stable code of the last refused Collector start.
+	// It is empty once a start succeeded, so the workspace can tell an unstarted
+	// window from one that was never attempted.
+	usageStartReason atomic.Value
+	// externalUsageConfirmed records the administrator's explicit confirmation
+	// to enable usage statistics on the user's own CPA. Without it nothing is
+	// written to that CPA and the collection window never opens. It is
+	// authorisation for one write and is consumed by the attempt that uses it,
+	// so a later replay or a restart asks again.
+	externalUsageConfirmed atomic.Bool
 	// runCtx is the host lifetime of this application. Workers started after an
 	// in-process ProductComplete must outlive the request that triggered them.
 	runCtx context.Context
@@ -139,6 +150,12 @@ type freshApplication struct {
 	// and guards the flag that says a run is in flight.
 	adoptMigrationMu      sync.Mutex
 	adoptMigrationRunning bool
+	// rejection remembers that the user's CPA refused the stored External
+	// credential. Browser-driven reads consult it before they send anything: CPA
+	// bans an address after five failed authentications, so a page that keeps
+	// presenting a key its own CPA already rejected is what turns a rotation into
+	// a thirty-minute outage.
+	rejection *externalRejection
 }
 
 func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshrouting.Driver) *freshApplication {
@@ -148,6 +165,7 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 		cfg: cfg, store: st, authority: fresh.New(st), routing: freshrouting.New(st, driver),
 		protector: opened.Protector,
 		runtimeSettings: settings, runtimeJournal: newFreshRuntimeJournal(opened.DB),
+		rejection: newExternalRejection(opened.DB),
 	}
 	// Fresh owns the SQLite admission and keeps the old app bootstrap bypassed,
 	// but the already-built CPAMP services remain the source of truth for Full
@@ -161,6 +179,11 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	legacyContext := app.FromExistingWithModelsDev(cfg, legacyStore, legacyCollector, time.Now().UnixMilli(), nil, nil, nil, nil, "cpa-manager-plus")
 	a.legacyCollector = legacyCollectorService
 	a.collectorWorker = worker.NewCollectorWorker(cfg, legacyStore, legacyCollectorService)
+	// A CPA that refuses the management credential this Collector runs with is
+	// terminal, not a retry: the Collector stops itself and reports, and this
+	// application records the blocker and drops the started latch so the
+	// workspace stops claiming coverage.
+	legacyCollector.SetAuthRejectionHandler(a.reportCollectorAuthRejection)
 	// The Collector is the only writer of Fresh usage events, so its inserts are
 	// exactly what the canonical identity projection must attribute.
 	a.usageProjection = identityprojection.NewWorker(legacyStore.IdentityProjections)
@@ -415,6 +438,10 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 		a.updateChannel(w, r, op)
 	case resource == "api-keys" || strings.HasPrefix(resource, "api-keys/"):
 		a.clientKeys(w, r, op, resource)
+	case resource == "external/usage" || strings.HasPrefix(resource, "external/usage/"):
+		a.externalUsageRoute(w, r, op, strings.TrimPrefix(strings.TrimPrefix(resource, "external/usage"), "/"))
+	case resource == "external/rebind" || strings.HasPrefix(resource, "external/rebind/"):
+		a.externalRebindRoute(w, r, op, strings.TrimPrefix(strings.TrimPrefix(resource, "external/rebind"), "/"))
 	case resource == "runtime/status":
 		a.runtimeStatus(w, r, op)
 	case resource == "runtime/operations" || strings.HasPrefix(resource, "runtime/operations/"):
