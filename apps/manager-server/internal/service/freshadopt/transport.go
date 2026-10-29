@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -217,9 +218,15 @@ func (d *DestinationWire) CredentialState(ctx context.Context, name string) (Cre
 }
 
 // UploadCredential posts the raw file body. CPA accepts a non-multipart body with
-// `?name=` (internal/api/handlers/management/auth_files_crud.go:110-135) and
-// refuses anything that is not a `.json` file it can parse, which is exactly the
-// manual-action case this package reports.
+// `?name=` (`UploadAuthFile` in internal/api/handlers/management/auth_files_crud.go:110-135).
+//
+// CPA's answer for a body it cannot parse is a 500, not a 400: `writeAuthFile`
+// calls `buildAuthFromFileData`, whose JSON/synthesis failure is returned to the
+// handler as `500 {"error": "invalid auth file: ..."}`
+// (`auth_files_crud.go:125-128,482-508`). A 400 is only a bad `name` query
+// parameter or an unreadable body, which this client never sends. So both are
+// reported as CPA's own verdict on the file, and the caller decides from what
+// the destination holds afterwards.
 func (d *DestinationWire) UploadCredential(ctx context.Context, name string, data []byte) error {
 	code, body, err := d.w.do(ctx, http.MethodPost, "/v8/management/credentials?name="+url.QueryEscape(name), data, maxConfigBytes)
 	if err != nil {
@@ -229,13 +236,23 @@ func (d *DestinationWire) UploadCredential(ctx context.Context, name string, dat
 	case http.StatusOK:
 		return nil
 	case http.StatusBadRequest:
-		// CPA's own shape verdict: the file is not one it can accept, so no
-		// resend can succeed and the operator has to act.
+		// A bad name or an unreadable body: no resend can succeed either.
 		return fmt.Errorf("%w: %s", ErrCredentialNotUploadable, credentialRefusal(body))
+	case http.StatusInternalServerError:
+		// CPA's answer when it cannot take the file: `writeAuthFile` returns the
+		// parse or upsert failure and the handler reports it as 500. It is a
+		// verdict on the file only if the file did not land, which the caller
+		// decides from the read-back.
+		return fmt.Errorf("%w: %s", errCredentialServerRefusal, credentialRefusal(body))
 	default:
 		return cpa.ErrApplyUnknown
 	}
 }
+
+// errCredentialServerRefusal reports CPA's 500 on an upload. Unlike the 400, it
+// does not by itself prove the file was not stored: the caller reads the
+// destination back and treats a missing file as CPA's verdict on the bytes.
+var errCredentialServerRefusal = errors.New("freshadopt: credential upload refused by CPA")
 
 // credentialRefusal keeps only the bounded code of CPA's refusal message.
 func credentialRefusal(body []byte) string {

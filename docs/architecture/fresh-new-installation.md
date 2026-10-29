@@ -607,10 +607,18 @@ and client key list, and the last of those was already written by the verified
 `StageDestination`/`VerifyV8Adoption` path. A test asserts that no table path
 matches the predicate and that the executor never sends one.
 
-A credential whose type v8 cannot upload (a runtime-only/plugin virtual auth, or
-a file CPA refuses to parse) becomes a `manual` item with a concrete instruction
+A credential v8 cannot take becomes a `manual` item with a concrete instruction
 instead of a failure, and so does a copy whose enabled state or provider
-classification the destination did not accept.
+classification the destination did not accept. There are three such cases, and
+each one is decided from evidence this side holds:
+
+- a runtime-only/plugin virtual auth has no file to copy;
+- a file that is not a JSON object can never satisfy CPA's `buildAuthFromFileData`,
+  so it is refused locally and never uploaded — CPA's answer for such a body is
+  a `500 {"error":"invalid auth file: ..."}` (`auth_files_crud.go:125-128,482-508`),
+  not a 400, which only covers a bad `name` or an unreadable request body;
+- an upload CPA answered `500` for, with the file absent on read-back, is CPA's
+  verdict on the bytes and is recorded as `manual` without a resend.
 
 The per-item record is `freshstore.Record.AdoptionSummary`, written through the
 same revision CAS as every other Fresh write and held to a monotone append-only

@@ -36,7 +36,7 @@ type fakeCPA struct {
 	disabled        map[string]bool
 	// runtimeOnly names the credentials the list reports as runtime-only.
 	runtimeOnly map[string]bool
-	// refuseUpload rejects these file names with CPA's own 400.
+	// refuseUpload rejects these file names with CPA's own 500.
 	refuseUpload map[string]string
 	// config is the configuration document this CPA serves.
 	config map[string]any
@@ -161,7 +161,11 @@ func (c *fakeCPA) uploadCredential(w http.ResponseWriter, r *http.Request) {
 	lost := c.lostUploadBody
 	c.mu.Unlock()
 	if refused {
-		w.WriteHeader(http.StatusBadRequest)
+		// CPA answers 500 for a file it cannot parse: `writeAuthFile` returns the
+		// `buildAuthFromFileData` failure and the handler reports it as 500
+		// (auth_files_crud.go:125-128,482-508). 400 is only a bad name or an
+		// unreadable body, which this client never sends.
+		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": refusal})
 		return
 	}
@@ -597,9 +601,10 @@ func TestUnknownWriteResultIsReconciledByReadBackWithoutResending(t *testing.T) 
 			uploads++
 		}
 	}
-	// Three plain credentials are uploaded once each, and the refused and
-	// runtime-only ones are not uploaded at all: no item is ever sent twice.
-	if uploads != 4 {
+	// Three plain credentials are uploaded once each; the unparseable one is
+	// refused locally and the runtime-only one has no file, so neither is ever
+	// sent, and no item is ever sent twice.
+	if uploads != 3 {
 		t.Fatalf("expected exactly one upload per uploadable credential, got %d", uploads)
 	}
 	item := itemByName(t, summary, credentialItemName(lost))
@@ -862,13 +867,13 @@ func TestAFailedCheckpointStopsTheRunWithoutWritingLaterItems(t *testing.T) {
 		}
 	}
 	// Only the item that was in flight when the checkpoint failed may be written
-	// twice. Every durable item is uploaded exactly once; broken.json is the
-	// refused one and was attempted once.
+	// twice. Every durable item is uploaded exactly once; broken.json is refused
+	// locally and never uploaded at all.
 	counts := map[string]int{}
 	for _, name := range destination.uploadNames() {
 		counts[name]++
 	}
-	if counts["claude-a.json"] != 1 || counts["gemini-c.json"] != 1 || counts["broken.json"] != 1 {
+	if counts["claude-a.json"] != 1 || counts["gemini-c.json"] != 1 || counts["broken.json"] != 0 {
 		t.Fatalf("a durable item was uploaded again: %v", counts)
 	}
 	// codex-b.json is the third item, so it is the one the failed checkpoint left
@@ -984,5 +989,61 @@ func TestCredentialNameLongerThanTheItemBoundIsManual(t *testing.T) {
 	replay := runMigration(t, source, destination, summary)
 	if item, ok := replay.Item(overlongCredentialItem(long)); !ok || item != recorded {
 		t.Fatalf("a replay did not recognize the over-long item: %+v", item)
+	}
+}
+
+// A source credential whose bytes CPA could not parse is never uploaded at all.
+// CPA's answer for such a file is a 500 from `buildAuthFromFileData`, so sending
+// it would only produce a refusal the executor can already predict.
+func TestUnparseableCredentialIsNeverUploaded(t *testing.T) {
+	source, destination := sourceFixture(t), destinationFixture(t)
+	// The destination would accept it (no refusal is configured); only the local
+	// parse expectation can stop the upload.
+	destination.mu.Lock()
+	delete(destination.refuseUpload, "broken.json")
+	destination.mu.Unlock()
+
+	summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+	item := itemByName(t, summary, credentialItemName("broken.json"))
+	if item.Outcome != freshstore.AdoptionManual || item.Reason != "not_uploadable" || item.Instruction == "" {
+		t.Fatalf("an unparseable credential must be manual work: %+v", item)
+	}
+	for _, name := range destination.uploadNames() {
+		if name == "broken.json" {
+			t.Fatal("an unparseable credential was uploaded anyway")
+		}
+	}
+	if _, stored := destination.credential("broken.json"); stored {
+		t.Fatal("an unparseable credential reached the destination")
+	}
+}
+
+// CPA's real refusal for an unparseable body is a 500, and the file is absent
+// afterwards. That is a verdict on the bytes, not an unknown write: it becomes a
+// manual item and is never resent.
+func TestServerRefusedUploadThatDidNotLandIsManual(t *testing.T) {
+	source, destination := sourceFixture(t), destinationFixture(t)
+	// A file that parses locally but CPA still refuses: the fake answers 500 and
+	// stores nothing, exactly like `writeAuthFile` failing on synthesis.
+	destination.mu.Lock()
+	destination.refuseUpload["gemini-c.json"] = "invalid auth file: unsupported provider"
+	destination.mu.Unlock()
+
+	summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+	item := itemByName(t, summary, credentialItemName("gemini-c.json"))
+	if item.Outcome != freshstore.AdoptionManual || item.Reason != "not_uploadable" {
+		t.Fatalf("a 500 with an absent file must be manual work: %+v", item)
+	}
+	if uploads := destination.uploadNames(); len(uploads) != 0 && uploads[len(uploads)-1] != "gemini-c.json" {
+		t.Fatalf("unexpected upload order: %v", uploads)
+	}
+	// A replay does not resend it: the item is settled.
+	before := len(destination.uploadNames())
+	replay := runMigration(t, source, destination, summary)
+	if after := len(destination.uploadNames()); after != before {
+		t.Fatalf("a replay resent the refused credential %d times", after-before)
+	}
+	if item, _ := replay.Item(credentialItemName("gemini-c.json")); item.Outcome != freshstore.AdoptionManual {
+		t.Fatalf("a replay rewrote the refusal: %+v", item)
 	}
 }

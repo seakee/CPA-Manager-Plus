@@ -193,6 +193,22 @@ func digestSHA256(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// credentialParseable applies CPA's own parse expectations to the bytes this run
+// is about to upload. CPA's `writeAuthFile` calls `buildAuthFromFileData`, which
+// unmarshals the body as a JSON object and then synthesizes the auth from it
+// (`internal/api/handlers/management/auth_files_crud.go:482-508`); a body that is
+// not a JSON object can never be accepted, so it is never sent.
+func credentialParseable(data []byte) error {
+	var object map[string]any
+	if err := json.Unmarshal(data, &object); err != nil {
+		return ErrCredentialNotUploadable
+	}
+	if object == nil {
+		return ErrCredentialNotUploadable
+	}
+	return nil
+}
+
 func credentialItemName(name string) string { return "credential:" + name }
 
 func configLeafItemName(path string) string { return "config:" + path }
@@ -368,6 +384,16 @@ func (e *Executor) migrateCredential(ctx context.Context, item string, file Cred
 			Reason: "download_failed", Instruction: manualInstruction(freshstore.AdoptionKindCredential, file.Name),
 		}
 	}
+	if err := credentialParseable(data); err != nil {
+		// CPA could not take these bytes, so uploading them would only produce
+		// its refusal. The verdict is recorded where it can be acted on and the
+		// file is never sent.
+		return freshstore.AdoptionItem{
+			Item: item, Kind: freshstore.AdoptionKindCredential, Outcome: freshstore.AdoptionManual,
+			Reason: "not_uploadable", Instruction: manualInstruction(freshstore.AdoptionKindCredential, file.Name),
+			SourceSHA256: digestSHA256(data),
+		}
+	}
 	sourceDigest := digestSHA256(data)
 
 	uploadErr := e.destination.UploadCredential(ctx, file.Name, data)
@@ -387,6 +413,16 @@ func (e *Executor) migrateCredential(ctx context.Context, item string, file Cred
 	readBack, readErr := e.destination.DownloadCredential(ctx, file.Name)
 	bytesMatch := stateErr == nil && state.Present && readErr == nil && digestSHA256(readBack) == sourceDigest
 	if !bytesMatch {
+		if errors.Is(uploadErr, errCredentialServerRefusal) && stateErr == nil && !state.Present {
+			// CPA answered 500 and the file is absent: it refused the bytes, and
+			// no resend of the same bytes can succeed. This is the answer CPA
+			// really gives for a file it cannot parse.
+			return freshstore.AdoptionItem{
+				Item: item, Kind: freshstore.AdoptionKindCredential, Outcome: freshstore.AdoptionManual,
+				Reason: "not_uploadable", Instruction: manualInstruction(freshstore.AdoptionKindCredential, file.Name),
+				SourceSHA256: sourceDigest,
+			}
+		}
 		reason := "verify_mismatch"
 		if uploadErr != nil {
 			reason = sanitizeReason(errorCode(uploadErr))
