@@ -725,14 +725,21 @@ It is the acceptance for everything above:
 3. the gateway: the projection, one scalar saved and read back from the CPA, then
    an out-of-band edit on the CPA and a save with the stale digest, which must
    answer `source_or_operation_conflict`;
-4. the usage confirm, including the confirm-less `400`; then one model request
-   with an installed Client Key, the CPA's own usage queue read out of band to
-   prove it publishes no record for a request that reached no Provider, and an
-   `api-keys/<id>/usage` read that attributes nothing the CPA did not publish —
-   totals appear only for a window the projection can bound, and a zero is never
-   made to stand in for "not measured". CPA v8.0.13 credits usage only to an
-   inference call that reached a Provider, so a Client-Key figure for a real call
-   is `NOT RUN` in a disposable CPA with no Provider fixture;
+4. the usage confirm, including the confirm-less `400`; then one `api-keys/<id>/usage`
+   read ("no usage attribution while the key has no binding") taken while the
+   Manager is warm, because the probe that follows restarts it and a restart
+   rebinds the keys it finds. That read observes the unbound state of the staged
+   key: the coverage reason is `binding_missing`, no totals are published, and no
+   window is claimed complete or partial, because a zero is never made to stand in
+   for "not measured". A transient catching-up or starting projection is polled
+   past rather than reported. Then, with the Manager stopped so that nothing
+   drains the CPA's queue, one model request with an installed Client Key and an
+   out-of-band `usage-queue` read that is empty both before and after it — the
+   check is named "usage queue empty at probe time", because that observation is
+   all it makes. The Manager is restarted after the probe. CPA v8.0.13 credits
+   usage only to an inference call that reached a Provider, so a Client-Key figure
+   for a real call is an explicit `NOT RUN` ("Key usage attribution of a real call
+   (no Provider fixture)") in a disposable CPA with no Provider fixture;
 5. one Client Key proven directly against the CPA;
 6. **rotation**: the operator changes the CPA's management key out of band and
    restarts it, after which a Keys write, a gateway save and a usage confirm each

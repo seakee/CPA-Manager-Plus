@@ -908,46 +908,88 @@ try {
   // call that reached a Provider: a Client-Key model list publishes nothing, and
   // so does an inference that fails before any Provider (both observed on v8.0.13,
   // and this run has no Provider fixture). What is provable here is the honest
-  // half of attribution — the CPA records nothing, and the projection attributes
-  // nothing it was never given. A Key-usage figure for a real Provider call stays
-  // NOT RUN, because no Provider fixture exists in this disposable CPA.
+  // half of attribution — the CPA queues nothing for this run's traffic while
+  // nothing drains the queue, and the projection attributes nothing it was never
+  // given. A Key-usage figure for a real Provider call stays NOT RUN, because no
+  // Provider fixture exists in this disposable CPA.
   const usageKey = await stageKey();
-  await check('the CPA records no usage for a Client-Key model request', async () => {
-    const probe = run(
-      ['docker', 'run', '--rm', '--network', network, '--entrypoint', 'wget',
-        images['cpamp-manager'], '-qO-', '--header=Authorization: Bearer ' + usageKey.secret,
-        `http://${cpaName}:8317/v1/models`],
-      undefined,
-      false
+  await check('no usage attribution while the key has no binding', async () => {
+    // Read while the Manager is warm and has been running since the confirmation:
+    // the queue probe below restarts the Manager, and a restart rebinds the keys it
+    // finds, which is not the state this check observes.
+    let read = await apiCall('GET', 'api-keys/' + usageKey.id + '/usage');
+    assert.equal(read.status, 200, JSON.stringify(read.payload));
+    // A projection that is still catching up, or a Collector that is still
+    // starting, has measured nothing yet. Those states are polled past, with a
+    // bound, instead of being mistaken for a settled answer.
+    await wait(
+      async () => {
+        read = await apiCall('GET', 'api-keys/' + usageKey.id + '/usage');
+        return (
+          read.status === 200 &&
+          !['projection_catching_up', 'collection_starting', 'collection_unproven'].includes(
+            read.payload?.coverage?.reason
+          )
+        );
+      },
+      'the usage projection to settle',
+      60000
     );
-    assert.equal(probe.status, 0, 'the CPA refused the staged Client Key');
-    // The CPA's own queue is the only place a record of a request that did not
-    // pass through this Manager exists, so it is read out of band. It must stay
-    // empty: a record here would mean the CPA credited a call to a Provider that
-    // does not exist.
-    const records = await cpaUsageQueue(managementKey);
-    assert.deepEqual(records, [], 'the CPA published usage for a request that reached no Provider');
-    return { modelRequests: 1, queueRecords: records.length };
+    const coverage = read.payload?.coverage?.state;
+    const reason = read.payload?.coverage?.reason;
+    const totals = read.payload?.totals ?? null;
+    // No usage window has claimed this key, so there is nothing to attribute: the
+    // projection publishes no totals at all, and it never puts a zero where a
+    // measurement is missing. Both halves are asserted here, because the earlier
+    // shape of this check passed on a payload that proved neither.
+    assert.equal(
+      reason,
+      'binding_missing',
+      'coverage reason = ' + JSON.stringify(read.payload?.coverage)
+    );
+    assert.equal(totals, null, 'a key with no binding published totals: ' + JSON.stringify(totals));
+    assert.notEqual(coverage, 'complete', 'an unbound key claimed a complete window');
+    assert.notEqual(coverage, 'partial', 'an unbound key claimed a partial window');
+    return { calls: null, coverage, bindingReason: reason };
   });
 
-  await check('Key usage attributes nothing the CPA did not publish', async () => {
-    const read = await apiCall('GET', 'api-keys/' + usageKey.id + '/usage');
-    assert.equal(read.status, 200, JSON.stringify(read.payload));
-    const totals = read.payload?.totals ?? null;
-    const coverage = read.payload?.coverage?.state;
-    // The projection publishes totals only for a window it can bound, and a zero
-    // is never made to stand in for "not measured". Whatever this window says, it
-    // never carries a call the CPA did not publish.
-    if (totals !== null) {
-      assert.equal(totals.calls, 0, 'the projection invented a call: ' + JSON.stringify(totals));
-    } else {
-      assert(
-        !['complete', 'partial'].includes(coverage),
-        'a bounded window published no totals: ' + JSON.stringify(read.payload?.coverage)
+  await check('usage queue empty at probe time', async () => {
+    // The Manager's own Collector reads and drains this queue, so an empty queue
+    // while it runs proves nothing: the record could have been consumed a moment
+    // earlier. The probe stops the Manager for its whole length, which is the only
+    // way the queue is the CPA's own answer and nobody else's. The model request
+    // reaches the CPA directly, so it does not need the Manager to be up.
+    docker('stop', managerContainer);
+    try {
+      const before = await cpaUsageQueue(managementKey);
+      assert.deepEqual(before, [], 'the CPA queue was not empty at probe time');
+      const probe = run(
+        ['docker', 'run', '--rm', '--network', network, '--entrypoint', 'wget',
+          images['cpamp-manager'], '-qO-', '--header=Authorization: Bearer ' + usageKey.secret,
+          `http://${cpaName}:8317/v1/models`],
+        undefined,
+        false
+      );
+      assert.equal(probe.status, 0, 'the CPA refused the staged Client Key');
+      const after = await cpaUsageQueue(managementKey);
+      assert.deepEqual(after, [], 'the CPA queued a record for a request that reached no Provider');
+      return { modelRequests: 1, queueRecords: after.length, collectorStopped: true };
+    } finally {
+      docker('start', managerContainer);
+      await wait(
+        async () => (await apiCall('GET', 'operation')).status === 200,
+        'the Manager after the usage probe',
+        120000
       );
     }
-    return { calls: totals?.calls ?? null, coverage, reason: read.payload?.coverage?.reason };
   });
+
+  // The one attribution claim this run cannot make: it needs a Provider credential
+  // in the disposable CPA, and there is none.
+  notRun(
+    'Key usage attribution of a real call (no Provider fixture)',
+    'this disposable CPA has no Provider credential, so no inference call can reach a Provider and nothing can be attributed to one'
+  );
 
   // ---- Rotation. The operator changes the CPA's management key out of band and
   // restarts it; the Manager is never told. This is the scenario the rejection
