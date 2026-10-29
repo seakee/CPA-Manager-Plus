@@ -258,6 +258,23 @@ func (e *Executor) Run(ctx context.Context, previous freshstore.AdoptionSummary,
 	if err != nil {
 		return Result{Summary: summary}, err
 	}
+	// The plan is fixed here, after the preflight and before the first write: the
+	// exact list of items this run will settle, in the order it visits them. It is
+	// the same list the four passes iterate, and `Planned` is its size plus what
+	// the preflight has already recorded, so it is what the item list has to reach
+	// for this run to have finished. A run that stops early leaves
+	// `len(Items) < Planned` with `Finished` still false.
+	plan := e.plan(&summary, files)
+	// `Planned` is the size the item list must reach: what the record already
+	// holds, plus every planned item it does not hold yet. A provisional failure is
+	// already recorded and is replaced in place, so counting it again would demand
+	// an item the run never appends.
+	summary.Planned = len(summary.Items)
+	for _, item := range plan {
+		if summary.Index(item) < 0 {
+			summary.Planned++
+		}
+	}
 	if err := e.migrateCredentials(ctx, &summary, files, checkpoint); err != nil {
 		return Result{Summary: summary}, err
 	}
@@ -273,16 +290,52 @@ func (e *Executor) Run(ctx context.Context, previous freshstore.AdoptionSummary,
 	// Every planned item is now settled or recorded as retryable, so this run
 	// finished. The marker is written, never inferred: a run that stopped at an
 	// item leaves a list that looks no different from a complete one, and
-	// completion reads exactly this record. `Planned` is the plan this run
-	// actually reached, which a later replay rewrites with its own.
+	// completion reads exactly this record. `Planned` was fixed before the first
+	// write, so a run that reached the end of its plan has `len(Items) >= Planned`;
+	// a later replay rewrites both with its own plan.
 	summary.Finished = true
-	summary.Planned = len(summary.Items)
+	if len(summary.Items) < summary.Planned {
+		// The plan is the list this run iterates, so this can only mean a pass
+		// skipped an item after the preflight. Refuse to claim a finished run
+		// rather than record a record completion would trust.
+		return Result{Summary: summary}, fmt.Errorf("%w: the run recorded fewer items than it planned", ErrInventoryUnavailable)
+	}
 	if checkpoint != nil {
 		if err := checkpoint(summary); err != nil {
 			return Result{Summary: summary}, err
 		}
 	}
 	return Result{Summary: summary}, nil
+}
+
+// plan is the exact list of item identities this run will settle, in the order
+// the passes visit them. It is read from the same tables those passes iterate and
+// from the credential list the preflight approved, after excluding what an earlier
+// run already settled, so the plan and the run can never disagree about what
+// "every planned item" means.
+func (e *Executor) plan(summary *freshstore.AdoptionSummary, files []CredentialFile) []string {
+	plan := make([]string, 0, len(files)+len(cpa.ConfigLeafPaths())+len(cpa.ConfigRuleFamilyIDs())+len(ProviderSections()))
+	for _, file := range files {
+		if item := credentialItemName(file.Name); !summary.Settled(item) {
+			plan = append(plan, item)
+		}
+	}
+	for _, path := range cpa.ConfigLeafPaths() {
+		if item := configLeafItemName(path); !summary.Settled(item) {
+			plan = append(plan, item)
+		}
+	}
+	for _, family := range cpa.ConfigRuleFamilyIDs() {
+		if item := configFamilyItemName(family); !summary.Settled(item) {
+			plan = append(plan, item)
+		}
+	}
+	for _, section := range ProviderSections() {
+		if item := providerSectionItemName(section); !summary.Settled(item) {
+			plan = append(plan, item)
+		}
+	}
+	return plan
 }
 
 // digestSHA256 is the canonical digest of item bytes. It is the only thing a

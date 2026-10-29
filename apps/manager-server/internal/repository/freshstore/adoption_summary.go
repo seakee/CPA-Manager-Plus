@@ -64,9 +64,12 @@ type AdoptionSummary struct {
 	// reads, and it is never inferred from the item list, because a run that
 	// stopped early leaves that list looking no different.
 	Finished bool `json:"finished,omitempty"`
-	// Planned is the size of the plan that run made. A later replay run that
-	// settles more items rewrites it with its own plan, so `Finished` together
-	// with `len(Items) >= Planned` means that run really reached every item.
+	// Planned is the size of the plan the run fixed after its preflight and
+	// before its first write: what the record already held plus every item the run
+	// was going to settle. `Finished` is written only when the run reached the end
+	// of that list, so the two together mean the run really settled every planned
+	// item, and a run that stopped early carries a plan its item list never
+	// reached. A later replay rewrites both with its own plan.
 	Planned int `json:"planned,omitempty"`
 }
 
