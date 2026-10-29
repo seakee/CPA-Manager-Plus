@@ -57,6 +57,12 @@ func (a *freshApplication) initialClientKey(w http.ResponseWriter, r *http.Reque
 	var result freshkeyapply.State
 	var err error
 	if r.Method == http.MethodPost {
+		if grant.Refused {
+			// The install would present a credential the user's CPA already refused:
+			// the answer is the same blocker, and nothing is sent.
+			writeExternalManagementRejected(w)
+			return
+		}
 		result, err = a.keyApply.Apply(r.Context(), id, op.Strategy.TargetGeneration)
 	} else {
 		// The observation reads the CPA, so a credential it already refused is

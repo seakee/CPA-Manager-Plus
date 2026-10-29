@@ -245,6 +245,13 @@ func (a *freshApplication) gatewayConfiguration(w http.ResponseWriter, r *http.R
 		if service == nil {
 			return
 		}
+		if grant := a.externalReadGrant(r.Context()); grant.Refused {
+			// The user's CPA already refused the stored credential. This save would
+			// present it once more, and five refusals ban the address for thirty
+			// minutes: the answer is the same blocker, written locally.
+			gatewayConfigReply(w, nil, cpa.ErrManagementRejected)
+			return
+		}
 		operation, err := service.SaveGroup(r.Context(), parts[1], q)
 		gatewayConfigReply(w, operation, err)
 	case parts[0] == "rules" && len(parts) == 2:
@@ -267,6 +274,10 @@ func (a *freshApplication) gatewayConfiguration(w http.ResponseWriter, r *http.R
 		}
 		service := a.gatewayService(w)
 		if service == nil {
+			return
+		}
+		if grant := a.externalReadGrant(r.Context()); grant.Refused {
+			gatewayConfigReply(w, nil, cpa.ErrManagementRejected)
 			return
 		}
 		operation, err := service.SaveFamily(r.Context(), parts[1], q)

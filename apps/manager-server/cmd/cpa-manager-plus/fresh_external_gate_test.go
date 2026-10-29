@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
 )
 
@@ -384,6 +386,43 @@ func TestExternalGateFailsClosedWhenTheInstructionCannotBeRead(t *testing.T) {
 	}
 	if sent := upstream.requests.Load(); sent != 0 {
 		t.Fatalf("a failed-closed request made %d CPA requests", sent)
+	}
+}
+
+// TestExternalWritesAnswerTheRecordedRefusalLocally covers the Fresh writes, not
+// just the bridge: a gateway save and a key install would each present a credential
+// the CPA already refused, and five refusals ban the address for thirty minutes.
+// Both answer the typed blocker without a CPA request.
+func TestExternalWritesAnswerTheRecordedRefusalLocally(t *testing.T) {
+	upstream := newGateUpstream(t, externalAuthorityManagement)
+	app := newExternalApp(t, upstream.server.URL, externalAuthorityManagement)
+	app.noteExternalRejection(t.Context(), app.externalReadGrant(t.Context()), cpa.ErrManagementRejected)
+	before := upstream.requests.Load()
+	save := gatewayRequest(t, app, http.MethodPost, "gateway/config/groups/retry",
+		`{"requestId":"`+strings.Repeat("a", 32)+`","expected":{"generation":"1","baseline":"`+strings.Repeat("b", 64)+`"},"edits":[{"path":"routing.retry.request-retry","action":"set","value":3}]}`,
+		"application/json")
+	if save.Code != http.StatusConflict || errorCode(t, save) != freshconfig.ReasonManagementRejected {
+		t.Fatalf("gateway save = %d %s", save.Code, save.Body.String())
+	}
+	created := gatewayRequest(t, app, http.MethodPost, "api-keys",
+		`{"requestId":"`+strings.Repeat("c", 32)+`"}`, "application/json")
+	if created.Code != http.StatusCreated && created.Code != http.StatusOK {
+		t.Fatalf("key create = %d %s", created.Code, created.Body.String())
+	}
+	var body struct {
+		Key struct {
+			ID string `json:"id"`
+		} `json:"key"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &body); err != nil || body.Key.ID == "" {
+		t.Fatalf("key create body = %s", created.Body.String())
+	}
+	install := gatewayRequest(t, app, http.MethodPost, "api-keys/"+body.Key.ID+"/initial-install", `{}`, "application/json")
+	if install.Code != http.StatusConflict || errorCode(t, install) != freshconfig.ReasonManagementRejected {
+		t.Fatalf("key install = %d %s", install.Code, install.Body.String())
+	}
+	if sent := upstream.requests.Load() - before; sent != 0 {
+		t.Fatalf("writes presented the refused key %d times", sent)
 	}
 }
 
