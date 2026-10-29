@@ -790,27 +790,36 @@ re-acceptance**. No new review record was created and the consumer stays
 `accepted` under `65eb659a`; read every widened kind here as waived, not as
 independently accepted.
 
-The record is also the gate on the copy itself, not only on its label. The
-executor classifies every item through `freshadopt.ItemRef`, and each class of
-item has its own single resolver in `internal/service/cpa/adoption_ref.go`:
+The record is also the gate on the copy itself, not only on its label, and the
+record and the gate are computed from one resolver:
+`internal/service/cpa/adoption_ref.go`. That file answers both questions and is
+pinned by the consumer implementation digest, because it decides what an adoption
+copies.
 
-- a credential file is `cpa-auth-files`;
-- a gateway leaf or payload rule family the accepted gateway table names is
-  `cpa-config-routing`; anything outside that table keeps `cpa-config-unknown`
-  and stays manual;
-- a whole provider section is its own root's reference — `api-keys.*` and the
-  copyable `oauth.*` children (provider configuration, not the auth directory)
-  are `provider-state-api-keys`, while a `client` or `providers` section is
-  `provider-state-client` / `provider-state-providers`. A section whose root the
-  table does not name falls back to `provider-state-providers`, never to the
-  api-keys verdict.
+- `AdoptionItemRef(path)` is the reference of one item. A gateway leaf or payload
+  rule family the accepted gateway table names is `cpa-config-routing`;
+  `api-keys.*` groups and the copyable `oauth.*` children (`model-alias`,
+  `excluded-models`, `settings`, `request-scoped-errors` — provider
+  configuration, not the auth directory) are `provider-state-api-keys`; a
+  `client` or `providers` section keeps its own reference; anything else is
+  `cpa-config-unknown` and stays manual. Credential files are `cpa-auth-files`.
+- `AdoptionRootRefs(root)` is the *set* of references any item under one
+  discovered root can carry, derived from `AdoptionItemRef` over the enumerable
+  item universe — it is never restated. `oauth` therefore contributes both
+  `cpa-auth-files` (the root is the source's auth directory) and
+  `provider-state-api-keys` (its copyable children). `requests`, `multimedia` and
+  `upstream` are not named sections: the v8 reader reports them under
+  `unknown_cpa_native_resource`, so that root contributes `cpa-config-routing`
+  for the gateway configuration and `cpa-config-unknown` for anything the table
+  does not name. `client` contributes its client leaves and its provider section.
 
-The same table is what discovery reads, so an item is gated under exactly the
-reference the record decided for it. The executor copies an item only when that
-reference's decision is `migrate` (`freshadopt.Executor.gated`); every other item
-is recorded with that decision's manual action and is never written, so an
-inventory that later widens cannot copy a kind the record still calls manual, and
-one root's verdict is never borrowed by another root's sections.
+Discovery records one decision per reference in each reported root's set, so the
+record holds a decision for every item the executor can classify under that root.
+The executor then copies an item only when that item's reference is `migrate`
+(`freshadopt.Executor.gated`); every other item is recorded with its reference's
+manual action and is never written. Because the two sides read the same resolver,
+the record cannot tell the operator to redo an item the executor copies, or
+authorize one it never copies.
 
 #### Retry after a terminal destination failure
 

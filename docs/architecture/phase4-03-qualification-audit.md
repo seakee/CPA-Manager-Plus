@@ -589,6 +589,18 @@ and the destination read-back agreed with every recorded outcome. A
 `legacy_managed` source is a pre-v8 process with no v8 management surface, so the
 executor is not run against it and its non-client kinds stay manual.
 
+The decision set and the copy gate come from one resolver,
+`internal/service/cpa/adoption_ref.go`, which is part of the consumer digest:
+`AdoptionItemRef` classifies one item and `AdoptionRootRefs` derives the set of
+references any item under a discovered root can carry. Discovery records a
+decision for every reference in each reported root's set, so a root that carries
+gateway configuration, a provider section and its own signal contributes all
+three — `oauth` contributes `cpa-auth-files` and `provider-state-api-keys`,
+`client` its gateway leaves and its provider section, and the reader's unknown
+catch-all (where `requests`/`multimedia`/`upstream` arrive) both
+`cpa-config-routing` and `cpa-config-unknown`. The witness above is unchanged by
+the wider record: the executor still copies exactly those items.
+
 Consequences recorded here because they change review-visible facts:
 
 - the `client_api_keys_only` limitation is no longer claimed for the network

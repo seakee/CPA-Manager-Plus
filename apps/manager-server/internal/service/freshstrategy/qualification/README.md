@@ -178,15 +178,19 @@ runs under a **maintainer waiver dated 2026-10-29**, not under a new acceptance:
 no new review record exists, `status` is still `accepted` under `65eb659a`, and
 the widened kinds are pending the single pre-Beta independent re-acceptance.
 Until that re-acceptance the four-kind breadth of `network_existing` is a
-waived claim, and the executor's per-reference gate is what keeps it honest: an
-item is copied only when the record's decision for its own reference is `migrate`.
-All three item classes share one resolver table in
-`internal/service/cpa/adoption_ref.go`, so discovery and the copy gate cannot
-classify the same upstream section two ways: a provider section resolves through
-its own root (`api-keys.*` and the copyable `oauth.*` children are
-`provider-state-api-keys`; `client` and `providers` keep their own references),
-and a section under a root the table does not name falls back to
-`provider-state-providers` rather than inheriting another root's verdict.
+waived claim, and the executor's per-item gate is what keeps it honest: an item is
+copied only when the record's decision for its own reference is `migrate`. The
+record and the gate are computed from one pinned resolver,
+`internal/service/cpa/adoption_ref.go` (part of the consumer digest):
+`AdoptionItemRef(path)` classifies one item, and `AdoptionRootRefs(root)` is the
+derived set of references any item under a discovered root can carry. Discovery
+records a decision for every reference in each reported root's set, so a root is
+no longer one resource — `oauth` contributes `cpa-auth-files` and
+`provider-state-api-keys`, `client` its gateway leaves and its provider section,
+and the reader's unknown catch-all (where `requests`/`multimedia`/`upstream`
+arrive) both `cpa-config-routing` and `cpa-config-unknown`. An item is therefore
+never recorded as manual work under one reference while being copied under
+another.
 
 The four accepted entries carry exact `applicability`, independently
 accepted evidence and their enforced limitations. On a missing/mismatched
