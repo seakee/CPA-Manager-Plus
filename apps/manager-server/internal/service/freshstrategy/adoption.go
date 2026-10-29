@@ -216,6 +216,10 @@ func (s *Service) adopt(ctx context.Context, op bootstrap.FreshOperation, r Requ
 		Strategy: bootstrap.AdoptExisting, TargetIdentity: string(status.Identity), TargetGeneration: uint64(status.Generation),
 		TargetArtifactID: string(r.ExpectedArtifactID), Stage: "staged", SourceIdentity: connectionIdentity(source),
 		SourceClass: r.AdoptSourceClass, DestinationConnectionIdentity: connectionIdentity(target),
+		// The destination is the Supervisor's own CPA, so the operator's plugin
+		// opt-in belongs to it exactly as it does to a New Managed one. The source
+		// this adoption copies from keeps its own plugin posture.
+		PluginsEnabled: r.PluginsEnabled,
 	}
 	var snapshot adoptionSnapshot
 	if op.Strategy.Strategy == "" {
@@ -244,7 +248,7 @@ func (s *Service) adopt(ctx context.Context, op bootstrap.FreshOperation, r Requ
 		}
 		snapshot = adoptionSnapshot{SourceManagementKey: r.ManagementKey, DestinationURL: target, Destination: model.RuntimeDestinationRequest{
 			OperationID: string(op.Identity.OperationID) + ":adopt-destination", ExpectedRuntimeIdentity: status.Identity, ExpectedRuntimeGeneration: status.Generation, ExpectedActiveArtifactID: r.ExpectedArtifactID,
-			SourceIdentity: checkpoint.SourceIdentity, SourceClass: string(r.AdoptSourceClass), APIKeys: sourceSnapshot.APIKeys, ManagementKey: hex.EncodeToString(secret)}}
+			SourceIdentity: checkpoint.SourceIdentity, SourceClass: string(r.AdoptSourceClass), APIKeys: sourceSnapshot.APIKeys, ManagementKey: hex.EncodeToString(secret), PluginsEnabled: r.PluginsEnabled}}
 		data, err := json.Marshal(snapshot)
 		if err != nil {
 			return block("management_secret_storage_unavailable")
@@ -260,6 +264,14 @@ func (s *Service) adopt(ctx context.Context, op bootstrap.FreshOperation, r Requ
 	checkpoint.AdoptionResources = append([]bootstrap.ResourceRef(nil), op.Strategy.AdoptionResources...)
 	checkpoint.AdoptionDecisions = append([]bootstrap.AdoptionResourceDecision(nil), op.Strategy.AdoptionDecisions...)
 	checkpoint.DestinationAttempt = op.Strategy.DestinationAttempt
+	checkpoint.PluginsEnabled = op.Strategy.PluginsEnabled
+	// The opt-in was persisted with the checkpoint and reached the Supervisor
+	// template. A later attempt presenting another value would claim a decision
+	// this operation never recorded, so it is refused, not adopted. The recorded
+	// value is the checkpoint's, never the request's.
+	if checkpoint.PluginsEnabled != r.PluginsEnabled {
+		return block("adopt_plugin_optin_conflict")
+	}
 	if !adoptionCheckpointDecisionsValid(checkpoint.AdoptionResources, checkpoint.AdoptionDecisions, decision) || !reflect.DeepEqual(checkpoint, op.Strategy) {
 		return block("fresh_strategy_owner_conflict")
 	}
@@ -271,7 +283,7 @@ func (s *Service) adopt(ctx context.Context, op bootstrap.FreshOperation, r Requ
 		return block("adoption_snapshot_unavailable")
 	}
 	destination := snapshot.Destination
-	if !security.EqualHMAC(snapshot.SourceManagementKey, r.ManagementKey) || snapshot.DestinationURL != target || destination.OperationID != string(op.Identity.OperationID)+":adopt-destination" || destination.ExpectedRuntimeIdentity != status.Identity || destination.ExpectedRuntimeGeneration != status.Generation || destination.ExpectedActiveArtifactID != r.ExpectedArtifactID || destination.SourceIdentity != checkpoint.SourceIdentity || destination.SourceClass != string(r.AdoptSourceClass) {
+	if !security.EqualHMAC(snapshot.SourceManagementKey, r.ManagementKey) || snapshot.DestinationURL != target || destination.OperationID != string(op.Identity.OperationID)+":adopt-destination" || destination.ExpectedRuntimeIdentity != status.Identity || destination.ExpectedRuntimeGeneration != status.Generation || destination.ExpectedActiveArtifactID != r.ExpectedArtifactID || destination.SourceIdentity != checkpoint.SourceIdentity || destination.SourceClass != string(r.AdoptSourceClass) || destination.PluginsEnabled != checkpoint.PluginsEnabled {
 		return block("fresh_strategy_owner_conflict")
 	}
 	result.Checkpoint = op.Strategy
