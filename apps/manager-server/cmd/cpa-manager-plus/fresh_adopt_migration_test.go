@@ -321,6 +321,29 @@ func (f *migrationFakeCPA) value(path ...string) any {
 	return value
 }
 
+// migratingDecisions is the fully qualified record decision set of a real-CPA
+// adoption: exactly the references the rules permit to migrate, each with its
+// own read/replay/verify refs. The executor copies only what a record marks
+// migrate, so a fixture that expects a copy has to hand the executor this.
+func migratingDecisions() []bootstrap.AdoptionResourceDecision {
+	refs := bootstrap.MigratedAdoptionResourceRefs()
+	decisions := make([]bootstrap.AdoptionResourceDecision, 0, len(refs))
+	for _, ref := range refs {
+		rule, ok := bootstrap.FreshAdoptionRule(ref)
+		if !ok {
+			panic("migrated ref without a rule: " + string(ref))
+		}
+		decisions = append(decisions, bootstrap.AdoptionResourceDecision{
+			ResourceRef: ref, Kind: rule.Kind, Scope: rule.Scope,
+			ReadEvidenceRef:   bootstrap.CapabilityEvidenceRef("preflight:" + string(ref) + "-read"),
+			ReplayEvidenceRef: bootstrap.CapabilityEvidenceRef("preflight:" + string(ref) + "-replay"),
+			VerifyEvidenceRef: bootstrap.CapabilityEvidenceRef("preflight:" + string(ref) + "-verify"),
+			Qualification:     bootstrap.CapabilityQualified, Disposition: bootstrap.Migrate,
+		})
+	}
+	return decisions
+}
+
 // adoptMigrationFixture is a staged adoption whose source CPA carries every
 // migration kind and whose destination is the Manager-owned CPA the Supervisor
 // just staged. It is exactly the state the strategy handler is in when the
@@ -395,7 +418,7 @@ func newAdoptMigrationFixture(t *testing.T) *adoptMigrationFixture {
 	app.strategy = freshstrategy.New(freshstrategy.Options{
 		Runtime: runtime, Protector: opened.Protector, DestinationBaseURL: destination.URL(),
 		Qualification:       bootstrap.CPAQualification{ManagementGeneration: "v8", ArtifactQualified: true, RequiredProfileQualified: true},
-		QualifiedArtifactID: artifact, AdoptionResources: acceptedClientAPIKeysDecision(),
+		QualifiedArtifactID: artifact, AdoptionResources: migratingDecisions(),
 	})
 	fixture.request = freshstrategy.Request{Strategy: bootstrap.AdoptExisting, AdoptSourceClass: bootstrap.AdoptNetworkExisting,
 		BaseURL: source.URL(), ManagementKey: migrationSourceKey,
@@ -818,7 +841,7 @@ func TestMigrationDeadlineStopsTheRunWithTheRemainderUnrecorded(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	recorded := 0
-	result, runErr := freshadopt.New(source, destination).Run(ctx, freshstore.AdoptionSummary{}, func(summary freshstore.AdoptionSummary) error {
+	result, runErr := freshadopt.New(source, destination, migratingDecisions()).Run(ctx, freshstore.AdoptionSummary{}, func(summary freshstore.AdoptionSummary) error {
 		recorded = len(summary.Items)
 		if recorded == 2 {
 			cancel()

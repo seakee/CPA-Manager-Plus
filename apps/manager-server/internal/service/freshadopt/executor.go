@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 )
@@ -91,14 +92,89 @@ type Result struct {
 
 // Executor runs the bounded migration inventory against one source/destination
 // pair. It is constructed per run and holds no durable state of its own.
+//
+// The one durable input it must not invent is the record's decision: which
+// references the operator's own installation record marks migrate. Every item
+// below one of them is copied; every item below any other reference is recorded
+// with that decision's manual action and never written. The executor therefore
+// copies exactly what the record authorized, and a widened inventory cannot
+// copy a kind the record still calls manual.
 type Executor struct {
 	source      Source
 	destination Destination
+	// decisions is the record's verdict per stable adoption reference. A
+	// reference missing from it has no migrate verdict, which the rules resolve
+	// to that reference's manual action.
+	decisions map[bootstrap.ResourceRef]bootstrap.AdoptionResourceDecision
 }
 
-// New builds an executor over an already-authenticated source and destination.
-func New(source Source, destination Destination) *Executor {
-	return &Executor{source: source, destination: destination}
+// New builds an executor over an already-authenticated source and destination
+// and the per-reference decisions of the operation record this run serves.
+func New(source Source, destination Destination, decisions []bootstrap.AdoptionResourceDecision) *Executor {
+	indexed := make(map[bootstrap.ResourceRef]bootstrap.AdoptionResourceDecision, len(decisions))
+	for _, decision := range decisions {
+		indexed[decision.ResourceRef] = decision
+	}
+	return &Executor{source: source, destination: destination, decisions: indexed}
+}
+
+// ItemRef is the stable adoption reference one bounded item belongs to. It is
+// the single classification of this package, and the reference the record's
+// decision is looked up under.
+//
+// A gateway leaf or a payload rule family that the accepted gateway table names
+// (`cpa.LookupConfigLeaf`, `cpa.LookupConfigRuleFamily`) is routing
+// configuration: that table is the exact scope the gateway configuration page
+// reads and writes against CPA v8.0.13, so an item inside it is the same
+// configuration the `cpa-config-routing` decision covers. Anything outside the
+// table keeps the reference that already describes it and stays manual: the
+// executor never widens a scope by classifying an item into a migrate verdict it
+// was not given.
+func ItemRef(item freshstore.AdoptionItem) bootstrap.ResourceRef {
+	switch item.Kind {
+	case freshstore.AdoptionKindCredential:
+		// Every credential item — a copied file, an overlong name, the excess
+		// marker — is the source's auth-file inventory.
+		return bootstrap.AdoptionRefCPAAuthFiles
+	case freshstore.AdoptionKindConfigLeaf:
+		if path, ok := strings.CutPrefix(item.Item, "config:"); ok {
+			if _, known := cpa.LookupConfigLeaf(path); known {
+				return bootstrap.AdoptionRefConfigRouting
+			}
+		}
+		return bootstrap.AdoptionRefConfigUnknown
+	case freshstore.AdoptionKindConfigFamily:
+		if family, ok := strings.CutPrefix(item.Item, "rules:"); ok {
+			if _, known := cpa.LookupConfigRuleFamily(family); known {
+				return bootstrap.AdoptionRefConfigRouting
+			}
+		}
+		return bootstrap.AdoptionRefConfigUnknown
+	case freshstore.AdoptionKindProviderSection:
+		return bootstrap.AdoptionRefProviderStateAPIKeys
+	default:
+		return bootstrap.AdoptionRefConfigUnknown
+	}
+}
+
+// gated reports the item to record instead of copying, when this item's
+// reference is not marked migrate by the record. An item the record does not
+// mark migrate is never written: the decision is what authorizes the copy, and
+// the decision's own manual action is what the operator is told to do.
+func (e *Executor) gated(item freshstore.AdoptionItem, name string) (freshstore.AdoptionItem, bool) {
+	ref := ItemRef(item)
+	decision, ok := bootstrap.FreshAdoptionDecision(ref, e.decisions[ref])
+	if ok && decision.Disposition == bootstrap.Migrate {
+		return freshstore.AdoptionItem{}, false
+	}
+	reason := "not_authorized"
+	if ok && decision.ManualAction != "" {
+		reason = string(decision.ManualAction)
+	}
+	return freshstore.AdoptionItem{
+		Item: item.Item, Kind: item.Kind, Outcome: freshstore.AdoptionManual,
+		Reason: reason, Instruction: manualInstruction(item.Kind, name),
+	}, true
 }
 
 // Checkpoint persists the items recorded so far. It is called once per item,
@@ -367,6 +443,12 @@ func (e *Executor) migrateCredentials(ctx context.Context, summary *freshstore.A
 		if summary.Settled(item) {
 			continue
 		}
+		if gated, ok := e.gated(freshstore.AdoptionItem{Item: item, Kind: freshstore.AdoptionKindCredential}, file.Name); ok {
+			if err := e.record(ctx, summary, gated, checkpoint); err != nil {
+				return err
+			}
+			continue
+		}
 		if err := e.record(ctx, summary, e.migrateCredential(ctx, item, file), checkpoint); err != nil {
 			return err
 		}
@@ -528,6 +610,12 @@ func (e *Executor) migrateConfigLeaves(ctx context.Context, summary *freshstore.
 			}
 			continue
 		}
+		if gated, ok := e.gated(freshstore.AdoptionItem{Item: item, Kind: freshstore.AdoptionKindConfigLeaf}, path); ok {
+			if err := e.record(ctx, summary, gated, checkpoint); err != nil {
+				return err
+			}
+			continue
+		}
 		rawValue, presence := cpa.LookupConfigValue(document, path)
 		if presence != cpa.ConfigPresent {
 			// The source does not set this leaf, so there is nothing to copy. It is
@@ -622,6 +710,12 @@ func (e *Executor) migrateConfigFamilies(ctx context.Context, summary *freshstor
 			}
 			continue
 		}
+		if gated, ok := e.gated(freshstore.AdoptionItem{Item: item, Kind: freshstore.AdoptionKindConfigFamily}, family); ok {
+			if err := e.record(ctx, summary, gated, checkpoint); err != nil {
+				return err
+			}
+			continue
+		}
 		value, presence := cpa.LookupConfigValue(document, entry.Path)
 		if presence == cpa.ConfigMissing {
 			// Absent is CPA's own empty rule list; there is nothing to write, but
@@ -662,6 +756,12 @@ func (e *Executor) migrateProviderSections(ctx context.Context, summary *freshst
 				Item: item, Kind: freshstore.AdoptionKindProviderSection, Outcome: freshstore.AdoptionManual,
 				Reason: "manager_owned", Instruction: manualInstruction(freshstore.AdoptionKindProviderSection, section),
 			}, checkpoint); err != nil {
+				return err
+			}
+			continue
+		}
+		if gated, ok := e.gated(freshstore.AdoptionItem{Item: item, Kind: freshstore.AdoptionKindProviderSection}, section); ok {
+			if err := e.record(ctx, summary, gated, checkpoint); err != nil {
 				return err
 			}
 			continue

@@ -95,7 +95,7 @@ func (a *freshApplication) runAdoptionMigration(ctx context.Context, record fres
 		// the reply has already returned, and every write this run makes has to
 		// outlive it.
 		checkpoint := persistAdoptionSummary(ctx, a, identity, revision, a.adoptionMigrationSession(ctx, sessionToken))
-		result, runErr := freshadopt.New(source, destination).Run(ctx, previous, checkpoint)
+		result, runErr := freshadopt.New(source, destination, record.Operation.Strategy.AdoptionDecisions).Run(ctx, previous, checkpoint)
 		if runErr != nil {
 			// The reason is a bounded code from this package, never an upstream
 			// message: a source refusal can quote a value.

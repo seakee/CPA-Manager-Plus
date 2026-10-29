@@ -609,7 +609,7 @@ func witnessMigrationKinds(t *testing.T, class bootstrap.AdoptSourceClass, sourc
 	// The checkpoint is the durable record the run is building; a run whose
 	// record the store would refuse is not evidence of anything.
 	var durable freshstore.AdoptionSummary
-	result, err := freshadopt.New(source, destination).Run(t.Context(), freshstore.AdoptionSummary{}, func(current freshstore.AdoptionSummary) error {
+	result, err := freshadopt.New(source, destination, decisionsForMigratedRefs()).Run(t.Context(), freshstore.AdoptionSummary{}, func(current freshstore.AdoptionSummary) error {
 		durable = current
 		return nil
 	})
@@ -622,18 +622,20 @@ func witnessMigrationKinds(t *testing.T, class bootstrap.AdoptSourceClass, sourc
 	if err = freshstore.ValidateAdoptionSummary(durable); err != nil {
 		t.Fatalf("the executor checkpointed an invalid record: %v", err)
 	}
+	// Every migrated item is counted under the reference the executor itself
+	// classified it into, so a kind is authorized by the items of that kind and
+	// never by another kind's items: a leaf the gateway table does not name stays
+	// out of the routing count, and a section is only a provider count.
+	names := adoptionResourceKindNames()
 	for _, item := range result.Summary.Items {
 		if item.Outcome != freshstore.AdoptionMigrated {
 			continue
 		}
-		switch kind := item.Kind; kind {
-		case freshstore.AdoptionKindCredential:
-			counts["cpa-auth-files"]++
-		case freshstore.AdoptionKindConfigLeaf, freshstore.AdoptionKindConfigFamily:
-			counts["cpa-config-routing"]++
-		case freshstore.AdoptionKindProviderSection:
-			counts["provider-state-api-keys"]++
+		name, ok := names[freshadopt.ItemRef(item)]
+		if !ok {
+			t.Fatalf("the executor migrated %s under no authorized reference", item.Item)
 		}
+		counts[name]++
 	}
 	if counts["cpa-auth-files"] == 0 || counts["cpa-config-routing"] == 0 || counts["provider-state-api-keys"] == 0 {
 		t.Fatalf("the executor migrated no item of every claimed kind: %v", counts)

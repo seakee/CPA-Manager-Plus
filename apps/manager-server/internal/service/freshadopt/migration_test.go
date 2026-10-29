@@ -16,6 +16,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 )
@@ -503,11 +504,35 @@ func runMigrationWithCheckpoint(t *testing.T, source, destination *fakeCPA, prev
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := New(sourceWire, destinationWire).Run(context.Background(), previous, checkpoint)
+	result, err := New(sourceWire, destinationWire, migratingDecisions()).Run(context.Background(), previous, checkpoint)
 	if err != nil {
 		t.Fatalf("migration failed: %v", err)
 	}
 	return result.Summary
+}
+
+// migratingDecisions is the record's decision set a fully qualified real-CPA
+// adoption carries: exactly the references the rules permit to migrate, each
+// backed by the read/replay/verify refs of its own kind. A test that drives the
+// executor directly has to hand it this record, because the executor copies only
+// what the record marks migrate.
+func migratingDecisions() []bootstrap.AdoptionResourceDecision {
+	refs := bootstrap.MigratedAdoptionResourceRefs()
+	decisions := make([]bootstrap.AdoptionResourceDecision, 0, len(refs))
+	for _, ref := range refs {
+		rule, ok := bootstrap.FreshAdoptionRule(ref)
+		if !ok {
+			panic("migrated ref without a rule: " + string(ref))
+		}
+		decisions = append(decisions, bootstrap.AdoptionResourceDecision{
+			ResourceRef: ref, Kind: rule.Kind, Scope: rule.Scope,
+			ReadEvidenceRef:   bootstrap.CapabilityEvidenceRef("preflight:" + string(ref) + "-read"),
+			ReplayEvidenceRef: bootstrap.CapabilityEvidenceRef("preflight:" + string(ref) + "-replay"),
+			VerifyEvidenceRef: bootstrap.CapabilityEvidenceRef("preflight:" + string(ref) + "-verify"),
+			Qualification:     bootstrap.CapabilityQualified, Disposition: bootstrap.Migrate,
+		})
+	}
+	return decisions
 }
 
 func itemByName(t *testing.T, summary freshstore.AdoptionSummary, name string) freshstore.AdoptionItem {
@@ -867,7 +892,7 @@ func TestAFailedCheckpointStopsTheRunWithoutWritingLaterItems(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The credentials are listed in name order, so item three is codex-b.json.
-	_, runErr := New(sourceWire, destinationWire).Run(context.Background(), freshstore.AdoptionSummary{}, func(current freshstore.AdoptionSummary) error {
+	_, runErr := New(sourceWire, destinationWire, migratingDecisions()).Run(context.Background(), freshstore.AdoptionSummary{}, func(current freshstore.AdoptionSummary) error {
 		calls++
 		if calls == 3 {
 			// The store refused this write, so this item is NOT durable: only the
@@ -1112,7 +1137,7 @@ func TestReplayDoesNotRewriteWhatTheDestinationAlreadyHolds(t *testing.T) {
 	// claude-a.json: refusing the second checkpoint is a crash after claude-a.json
 	// was written and before anything about it became durable.
 	calls := 0
-	_, runErr := New(sourceWire, destinationWire).Run(context.Background(), freshstore.AdoptionSummary{}, func(freshstore.AdoptionSummary) error {
+	_, runErr := New(sourceWire, destinationWire, migratingDecisions()).Run(context.Background(), freshstore.AdoptionSummary{}, func(freshstore.AdoptionSummary) error {
 		calls++
 		if calls == 2 {
 			return errCheckpoint
@@ -1446,5 +1471,115 @@ func TestDestinationDigestIsObservedFromTheReadBack(t *testing.T) {
 	observed := lookup(destination.config, []string{"api-keys", "claude"})
 	if section.DestinationSHA256 != digestOfValue(observed) {
 		t.Fatalf("the recorded section digest is not the observed value: %s vs %s", section.DestinationSHA256, digestOfValue(observed))
+	}
+}
+
+// The executor copies what the record authorized and nothing else. The record
+// here marks credentials and gateway configuration migrate and leaves the
+// provider sections at their manual action, so the provider sections that are
+// present at the source must not be written and must be recorded as the manual
+// work the decision names.
+func TestExecutorCopiesOnlyWhatTheRecordMarksMigrate(t *testing.T) {
+	source, destination := sourceFixture(t), destinationFixture(t)
+	decisions := make([]bootstrap.AdoptionResourceDecision, 0, len(migratingDecisions()))
+	for _, decision := range migratingDecisions() {
+		if decision.ResourceRef == bootstrap.AdoptionRefProviderStateAPIKeys {
+			continue
+		}
+		decisions = append(decisions, decision)
+	}
+
+	sourceWire, err := NewSource(t.Context(), source.endpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinationWire, err := NewDestination(t.Context(), destination.endpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := New(sourceWire, destinationWire, decisions).Run(context.Background(), freshstore.AdoptionSummary{}, nil)
+	if err != nil {
+		t.Fatalf("migration failed: %v", err)
+	}
+	summary := result.Summary
+
+	// Every item of a migrate reference is written under its reference, and
+	// every item of a manual reference is recorded as that manual action.
+	for _, item := range summary.Items {
+		ref := ItemRef(item)
+		migrate := false
+		for _, decision := range decisions {
+			migrate = migrate || decision.ResourceRef == ref && decision.Disposition == bootstrap.Migrate
+		}
+		if migrate {
+			continue
+		}
+		if item.Outcome != freshstore.AdoptionManual || item.Reason != string(bootstrap.ReauthenticateAfterAdoption) || item.Instruction == "" {
+			t.Fatalf("%s (%s) is not authorized by the record but was not recorded as manual work: %+v", item.Item, ref, item)
+		}
+	}
+
+	// The provider sections really are present at the source, so the read above
+	// is a decision not to write them rather than an absence.
+	for _, section := range []string{"api-keys.claude", "oauth.model-alias"} {
+		if _, presence := cpa.LookupConfigValue(source.config, section); presence != cpa.ConfigPresent {
+			t.Fatalf("the fixture source does not carry %s", section)
+		}
+		item := itemByName(t, summary, providerSectionItemName(section))
+		if item.Outcome != freshstore.AdoptionManual {
+			t.Fatalf("section %s: %+v", section, item)
+		}
+	}
+	for _, entry := range destination.requestMethods() {
+		if strings.HasPrefix(entry, http.MethodGet+" ") {
+			continue
+		}
+		if strings.Contains(entry, "/config/api-keys") || strings.Contains(entry, "/config/oauth/") {
+			t.Fatalf("the executor wrote a manual provider section: %s", entry)
+		}
+	}
+	if lookup(destination.config, []string{"oauth", "model-alias"}) != nil {
+		t.Fatal("a manual provider section reached the destination")
+	}
+	// The authorized kinds were still copied: the gate is per reference, not a
+	// whole-run switch.
+	if item := itemByName(t, summary, credentialItemName("claude-a.json")); item.Outcome != freshstore.AdoptionMigrated {
+		t.Fatalf("an authorized credential did not migrate: %+v", item)
+	}
+	if item := itemByName(t, summary, configLeafItemName("routing.strategy")); item.Outcome != freshstore.AdoptionMigrated {
+		t.Fatalf("an authorized leaf did not migrate: %+v", item)
+	}
+	source.usesOnlyReads(t)
+}
+
+// Every writable gateway leaf, payload rule family and credential is routing or
+// credentials; anything outside the accepted gateway table keeps the reference
+// that describes it and therefore stays manual.
+func TestItemRefClassifiesAgainstTheGatewayTable(t *testing.T) {
+	for _, path := range []string{"routing.strategy", "requests.proxy-url", "requests.streaming.keepalive-seconds",
+		"multimedia.disable-image-generation", "upstream.codex.response-steering", "upstream.claude.header-defaults.timezone",
+		"upstream.xai.inject-x-search", "client.codex.enable-apply-patch", "client.codex.optimize-multi-agent-v2"} {
+		if ref := ItemRef(freshstore.AdoptionItem{Item: configLeafItemName(path), Kind: freshstore.AdoptionKindConfigLeaf}); ref != bootstrap.AdoptionRefConfigRouting {
+			t.Fatalf("gateway leaf %s classified as %s", path, ref)
+		}
+	}
+	for _, family := range cpa.ConfigRuleFamilyIDs() {
+		if ref := ItemRef(freshstore.AdoptionItem{Item: configFamilyItemName(family), Kind: freshstore.AdoptionKindConfigFamily}); ref != bootstrap.AdoptionRefConfigRouting {
+			t.Fatalf("rule family %s classified as %s", family, ref)
+		}
+	}
+	for _, path := range []string{"oauth.auth-dir", "server.host", "observability.logs.debug", "plugins.dir", "not.a.path"} {
+		if ref := ItemRef(freshstore.AdoptionItem{Item: configLeafItemName(path), Kind: freshstore.AdoptionKindConfigLeaf}); ref != bootstrap.AdoptionRefConfigUnknown {
+			t.Fatalf("non-gateway leaf %s classified as %s", path, ref)
+		}
+	}
+	if ref := ItemRef(freshstore.AdoptionItem{Item: configFamilyItemName("not-a-family"), Kind: freshstore.AdoptionKindConfigFamily}); ref != bootstrap.AdoptionRefConfigUnknown {
+		t.Fatalf("non-gateway family classified as %s", ref)
+	}
+	if ref := ItemRef(freshstore.AdoptionItem{Item: credentialItemName("claude-a.json"), Kind: freshstore.AdoptionKindCredential}); ref != bootstrap.AdoptionRefCPAAuthFiles {
+		t.Fatalf("credential classified as %s", ref)
+	}
+	if ref := ItemRef(freshstore.AdoptionItem{Item: providerSectionItemName("api-keys.claude"), Kind: freshstore.AdoptionKindProviderSection}); ref != bootstrap.AdoptionRefProviderStateAPIKeys {
+		t.Fatalf("provider section classified as %s", ref)
 	}
 }
