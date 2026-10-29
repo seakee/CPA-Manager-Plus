@@ -47,6 +47,22 @@ type DestinationRequest struct {
 // peer that can reach the child listener.
 const SourceClassNewManaged = "new_managed"
 
+// The two adopted source classes. An adopted destination is staged from this
+// Supervisor's own template exactly like a New Managed one: the Manager owns it,
+// so the template facts that belong to the installation rather than to the source
+// — the usage switch included — are the installation's, not the operator's
+// original CPA posture.
+const (
+	SourceClassAdoptNetwork = "network_existing"
+	SourceClassAdoptLegacy  = "legacy_managed"
+)
+
+// managedSourceClass reports whether this Supervisor staged the destination, so
+// its template facts apply. It is the one copy of that decision in this package.
+func managedSourceClass(class string) bool {
+	return class == SourceClassNewManaged || class == SourceClassAdoptNetwork || class == SourceClassAdoptLegacy
+}
+
 // initialClientKeyLength is the length of the Manager's install-generated
 // Client Key ("sk-" followed by 64 [A-Za-z0-9] characters), the same shape
 // v1.x installations were seeded with.
@@ -75,7 +91,7 @@ var ErrGatewayAuthPresent = errors.New("bootstrap Gateway auth directory is not 
 func (r DestinationRequest) Validate() error {
 	prefix := "external:sha256:"
 	switch r.SourceClass {
-	case "network_existing", "legacy_managed":
+	case SourceClassAdoptNetwork, SourceClassAdoptLegacy:
 	case SourceClassNewManaged:
 		prefix = "managed:sha256:"
 		if len(r.APIKeys) != 1 || !validInitialClientKey(r.APIKeys[0]) {
@@ -402,9 +418,10 @@ func (d *destination) publish(r DestinationRequest, supersedes string) error {
 	}
 	// JSON is a YAML subset accepted by the exact CPA v8 config parser. Only
 	// this new target receives resources; the source is never contacted here.
-	// Usage statistics are productized for the default Fresh New Managed
-	// installation only; Adopt and existing sources keep the base template so an
-	// operator's CPA posture is not silently changed.
+	// Usage statistics are productized for the installations this Supervisor
+	// stages — New Managed and both adopted classes — because Key usage and the
+	// Key workspace read the destination's own aggregation. A source CPA that is
+	// not staged here is never rebuilt, so its posture is never touched.
 	// The plugin root belongs to this Supervisor, never to the source or the
 	// caller: CPA discovers native code there, so a template that let a request
 	// name the directory would be a code-loading path. It sits in the Supervisor
@@ -415,7 +432,7 @@ func (d *destination) publish(r DestinationRequest, supersedes string) error {
 	if err = ensurePluginDir(pluginDir, d.child); err != nil {
 		return err
 	}
-	usage := r.SourceClass == SourceClassNewManaged
+	usage := managedSourceClass(r.SourceClass)
 	config := map[string]any{"config-version": 8, "server": map[string]any{"host": "0.0.0.0", "port": json.Number(d.port)},
 		"management": map[string]any{"allow-remote": true, "secret-key": r.ManagementKey, "disable-control-panel": true, "disable-auto-update-panel": true},
 		"access":     map[string]any{"api-keys": r.APIKeys}, "oauth": map[string]any{"auth-dir": filepath.Join(d.root, "auth")},
