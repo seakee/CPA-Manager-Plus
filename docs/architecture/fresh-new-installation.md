@@ -818,6 +818,13 @@ copies.
   A root with no enumerable item at all (`access`, `server`, `management`,
   `logging`, `usage`, `plugins`, `observability`, `providers`) contributes its
   one declared fallback, because the operator may still have to redo it by hand.
+- `AdoptionItemUniverse()` also carries the source keys under a named root that
+  no copyable item covers, so they cannot vanish from the record: today
+  `oauth.auth-auto-refresh-workers` and the whole `oauth.providers` runtime
+  block, which is why `oauth` contributes `cpa-config-unknown` in addition to
+  its auth-file and provider-state references. `oauth.auth-dir` is not one of
+  them — it is the directory credential files are discovered in, so
+  `credential:<name>` carries it.
 
 Discovery records one decision per reference in each reported root's set, so the
 record holds a decision for every item the executor can classify under that root.

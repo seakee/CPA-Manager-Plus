@@ -186,13 +186,17 @@ of every item-to-reference pair are part of the consumer digest):
 `AdoptionItemRef(item)` classifies one item, and `AdoptionRootRefs(root)` is the
 derived set every item under a discovered root carries. Discovery records a
 decision for every reference in each reported root's set, so a root is no longer
-one resource — `oauth` contributes `cpa-auth-files` and
-`provider-state-api-keys`, and the reader's unknown catch-all (where
+one resource — `oauth` contributes `cpa-auth-files`, `provider-state-api-keys` and
+`cpa-config-unknown` (the source keys nothing copies: its refresh worker count and
+its `providers` runtime block), and the reader's unknown catch-all (where
 `requests`/`multimedia`/`upstream` arrive) both `cpa-config-routing` and
 `cpa-config-unknown`. No set contains a reference that no item under that root
 produces, so an item is never recorded as manual work under one reference while
 being copied under another, and the record never asks the operator to redo work
-the executor never does.
+the executor never does. A source key that no copyable item carries is named in
+the universe on purpose, and `TestEverySourceKeyIsCoveredByItsRoot` checks every
+direct child key of every named section against that, so a key of the accepted CPA
+v8 document cannot silently leave the adoption.
 
 ## Current acceptance-repair inputs
 
