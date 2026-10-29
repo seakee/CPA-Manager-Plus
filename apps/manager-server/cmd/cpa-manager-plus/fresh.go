@@ -106,10 +106,10 @@ type freshApplication struct {
 	// pluginCapability is the short-lived proof behind X-CPA-SUPPORT-PLUGIN.
 	// It is nil until the application knows which connection it serves.
 	pluginCapability *pluginCapabilityProbe
-	legacy          http.Handler
-	legacyCollector *collectorservice.Service
-	collectorWorker *worker.CollectorWorker
-	identityWorker  *identityreconcile.Worker
+	legacy           http.Handler
+	legacyCollector  *collectorservice.Service
+	collectorWorker  *worker.CollectorWorker
+	identityWorker   *identityreconcile.Worker
 	// Usage chain: staged keys own source bindings, Collector events feed the
 	// canonical identity projection, and the workspace reads attributed usage.
 	managedSource   freshkeyapply.ManagedSource
@@ -163,7 +163,7 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	settings := setting.New(opened.DB, opened.Protector)
 	a := &freshApplication{
 		cfg: cfg, store: st, authority: fresh.New(st), routing: freshrouting.New(st, driver),
-		protector: opened.Protector,
+		protector:       opened.Protector,
 		runtimeSettings: settings, runtimeJournal: newFreshRuntimeJournal(opened.DB),
 		rejection: newExternalRejection(opened.DB),
 	}
@@ -421,6 +421,11 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 		// cutover, but is never an Admin credential for the Console/CPA proxy.
 		allowed := resource == "operation" && r.Method == http.MethodGet || !op.ProductComplete &&
 			(resource == "installation/runtime" && r.Method == http.MethodGet ||
+				// The per-item migration summary is the progress read of an
+				// adoption's own run, so the session that committed the
+				// adoption reads it exactly as it reads the runtime
+				// observation.
+				resource == "installation/adoption" && r.Method == http.MethodGet ||
 				(resource == "strategy" || resource == "complete") && r.Method == http.MethodPost)
 		if !allowed || a.authority.ValidateContinuation(record, continuation) != nil {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -461,6 +466,8 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 		a.legacyResource(w, r, resource)
 	case resource == "installation/runtime" && r.Method == http.MethodGet:
 		a.installationRuntime(w, r, op)
+	case resource == "installation/adoption" && r.Method == http.MethodGet:
+		a.adoptionSummary(w, r, op)
 	case resource == "strategy" && r.Method == http.MethodPost:
 		a.executeStrategy(w, r, op)
 	case resource == "complete" && r.Method == http.MethodPost:
