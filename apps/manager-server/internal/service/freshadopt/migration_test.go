@@ -49,6 +49,8 @@ type fakeCPA struct {
 	lostUploadBody bool
 	// failDownload makes these files fail their download, which writes nothing.
 	failDownload map[string]bool
+	// downloads_ records the file name of every credential download requested.
+	downloaded []string
 	// uploads records the file name of every POST /credentials received, so a
 	// test can prove which items were written twice.
 	uploads []string
@@ -139,6 +141,7 @@ func (c *fakeCPA) listCredentials(w http.ResponseWriter) {
 func (c *fakeCPA) downloadCredential(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
 	c.mu.Lock()
+	c.downloaded = append(c.downloaded, name)
 	data, ok := c.credentials[name]
 	broken := c.failDownload[name]
 	c.mu.Unlock()
@@ -360,6 +363,20 @@ func (c *fakeCPA) uploadNames() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]string(nil), c.uploads...)
+}
+
+// downloads reports how many times one credential was downloaded. The query
+// string is kept for this, because the file name travels in it.
+func (c *fakeCPA) downloads(name string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	count := 0
+	for _, entry := range c.downloaded {
+		if entry == name {
+			count++
+		}
+	}
+	return count
 }
 
 // writeCount reports how many non-GET requests this CPA received.
@@ -1254,5 +1271,65 @@ func TestRetryableFailureIsRetriedOnceAndUnknownWriteIsNot(t *testing.T) {
 	}
 	if item, _ := replay.Item(credentialItemName("codex-b.json")); item != unknown.Items[0] {
 		t.Fatalf("a settled unknown write was rewritten: %+v", item)
+	}
+}
+
+// A retryable failure is attempted once per run, never in a loop inside one run,
+// and it keeps failing observably until the source answers.
+func TestRetryableFailureIsAttemptedOncePerRun(t *testing.T) {
+	source, destination := sourceFixture(t), destinationFixture(t)
+	source.mu.Lock()
+	source.failDownload = map[string]bool{"claude-a.json": true}
+	source.mu.Unlock()
+
+	summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+	// The failing item was attempted exactly once in this run, not retried in
+	// place, and the other credentials still migrated.
+	if item := itemByName(t, summary, credentialItemName("claude-a.json")); item.Outcome != freshstore.AdoptionFailed || item.Reason != "download_failed" {
+		t.Fatalf("the failing item: %+v", item)
+	}
+	if item := itemByName(t, summary, credentialItemName("codex-b.json")); item.Outcome != freshstore.AdoptionMigrated {
+		t.Fatalf("a retryable failure stopped the run: %+v", item)
+	}
+	if got := source.downloads("claude-a.json"); got != 1 {
+		t.Fatalf("the failing item was downloaded %d times in one run", got)
+	}
+	// A second run attempts it once more, so a permanently failing item is
+	// retried exactly once per run rather than never.
+	second := runMigration(t, source, destination, summary)
+	if got := source.downloads("claude-a.json"); got != 2 {
+		t.Fatalf("a replay attempted the retryable item %d times in total", got)
+	}
+	if item, _ := second.Item(credentialItemName("claude-a.json")); item.Outcome != freshstore.AdoptionFailed {
+		t.Fatalf("the retry did not record its own failure: %+v", item)
+	}
+}
+
+// A failure after a write attempt is never retried by a later run: its only
+// resolution is reading the destination back.
+func TestUnknownWriteIsReconciledOnlyByReadBack(t *testing.T) {
+	source, destination := sourceFixture(t), destinationFixture(t)
+	// An upload that stores the bytes and answers 500 leaves the effect unknown.
+	destination.lostUploadBody = true
+	first := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+	// The read-back decides it as a successful copy, and it is recorded as such
+	// rather than as an unknown write.
+	if item := itemByName(t, first, credentialItemName("claude-a.json")); item.Outcome != freshstore.AdoptionMigrated {
+		t.Fatalf("a landed upload must be reconciled by read-back: %+v", item)
+	}
+
+	// A settled unknown write is never re-attempted, whatever the destination
+	// holds later.
+	unknown := freshstore.AdoptionSummary{Items: []freshstore.AdoptionItem{{
+		Item: credentialItemName("claude-a.json"), Kind: freshstore.AdoptionKindCredential,
+		Outcome: freshstore.AdoptionFailed, Reason: "apply_unknown",
+	}}}
+	before := len(destination.uploadNames())
+	replay := runMigration(t, source, destination, unknown)
+	if after := len(destination.uploadNames()); after != before {
+		t.Fatalf("an unknown write was resent %d times", after-before)
+	}
+	if item, _ := replay.Item(credentialItemName("claude-a.json")); item != unknown.Items[0] {
+		t.Fatalf("an unknown write was rewritten: %+v", item)
 	}
 }
