@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 )
 
 func TestAdoptionSourceClassUsesOnlyItsExplicitReadSurface(t *testing.T) {
@@ -73,8 +75,18 @@ func TestAdoptionSourceClassUsesOnlyItsExplicitReadSurface(t *testing.T) {
 }
 
 func TestAdoptionInventoryMappingIsBounded(t *testing.T) {
+	// A root is not one resource: the record holds a decision for every reference
+	// an item under the reported roots can carry. `access` adds the client keys
+	// and the unknown configuration a path under it would be, `oauth` adds the
+	// auth directory and its copyable provider maps, `providers` its own section
+	// reference, and the unknown root the gateway configuration the reader does
+	// not name.
 	refs, err := adoptionResourceRefs([]string{"access", "oauth", "unknown_cpa_native_resource", "providers"})
-	want := []bootstrap.ResourceRef{bootstrap.AdoptionRefClientAPIKeys, bootstrap.AdoptionRefCPAAuthFiles, bootstrap.AdoptionRefConfigUnknown, bootstrap.AdoptionRefProviderStateProviders}
+	want := []bootstrap.ResourceRef{
+		bootstrap.AdoptionRefClientAPIKeys, bootstrap.AdoptionRefConfigUnknown,
+		bootstrap.AdoptionRefCPAAuthFiles, bootstrap.AdoptionRefProviderStateAPIKeys,
+		bootstrap.AdoptionRefConfigRouting, bootstrap.AdoptionRefProviderStateProviders,
+	}
 	if err != nil || !reflect.DeepEqual(refs, want) {
 		t.Fatalf("bounded mapping: %v %v", refs, err)
 	}
@@ -120,6 +132,60 @@ func TestAdoptionInventoryMappingIsBounded(t *testing.T) {
 	// An upstream-controlled reference can never be turned into a decision.
 	if _, ok := adoptionDecisionsForInventory([]bootstrap.ResourceRef{bootstrap.AdoptionRefClientAPIKeys, "attacker-controlled-key"}, acceptedKeyDecisionMap()); ok {
 		t.Fatal("unbounded resource reference accepted")
+	}
+}
+
+// The record must cover the executor. Discovery records a decision per reference
+// a reported root contributes; the executor gates each item on its own reference.
+// Over the roots the controlled real-CPA source reports, every item the executor
+// can enumerate under one of them must therefore have a recorded decision — the
+// drift this asserts against is a root recorded as manual while its items are
+// copied.
+func TestAdoptionRecordCoversEveryEnumeratedItemUnderTheReportedRoots(t *testing.T) {
+	// The v8 fixture of `adoption_cpa_test.go` reports these roots: its config
+	// document carries `server`, `management`, `oauth`, `access`, `plugins`,
+	// `routing`, `client` and `api-keys`, and `requests`/`multimedia`/`upstream`
+	// arrive under the reader's unknown catch-all.
+	roots := []string{"server", "management", "access", "oauth", "api-keys", "routing", "client", "plugins", "unknown_cpa_native_resource"}
+	refs, err := adoptionResourceRefs(roots)
+	if err != nil {
+		t.Fatalf("the reported roots are not a bounded inventory: %v", err)
+	}
+	recorded := map[bootstrap.ResourceRef]bool{}
+	for _, ref := range refs {
+		recorded[ref] = true
+	}
+	// Per root, not merely over the union: an item must be covered by the
+	// reference the decision list holds *for its own root*. A union check would
+	// pass while one root's set was wrong, because another root happened to
+	// contribute the same reference — exactly how the drift stayed hidden.
+	for _, item := range cpa.AdoptionItemUniverse() {
+		root := cpa.AdoptionRootOf(item)
+		if !slices.Contains(roots, root) {
+			continue
+		}
+		ref := cpa.AdoptionItemRef(item)
+		if !slices.Contains(cpa.AdoptionRootRefs(root), ref) {
+			t.Fatalf("item %s is gated under %s but root %q contributes %v", item, ref, root, cpa.AdoptionRootRefs(root))
+		}
+		if !recorded[ref] {
+			t.Fatalf("item %s is gated under %s, which the record never decided: %v", item, ref, refs)
+		}
+	}
+	// The gateway configuration under `requests`, `multimedia` and `upstream` is
+	// the case that used to drift: it classifies as routing configuration while
+	// the root itself contributes the unknown reference.
+	if !recorded[bootstrap.AdoptionRefConfigRouting] || !recorded[bootstrap.AdoptionRefConfigUnknown] {
+		t.Fatalf("the unknown root did not contribute both of its references: %v", refs)
+	}
+	for _, item := range []string{"requests.proxy-url", "multimedia.disable-image-generation", "upstream.codex.response-steering"} {
+		ref := cpa.AdoptionItemRef(item)
+		if ref != bootstrap.AdoptionRefConfigRouting {
+			t.Fatalf("%s classifies as %s", item, ref)
+		}
+		if !recorded[ref] {
+			t.Fatalf("%s is gated under an undecided reference", item)
+		}
 	}
 }
 

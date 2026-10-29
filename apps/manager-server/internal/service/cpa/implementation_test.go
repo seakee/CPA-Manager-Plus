@@ -13,7 +13,7 @@ import (
 func TestSafeReadImplementationDigestCoversBothSourceGenerations(t *testing.T) {
 	root := filepath.Clean(filepath.Join("..", "..", "..", "..", ".."))
 	hash := sha256.New()
-	for _, name := range []string{"v8.go", "v8_adoption.go", "legacy_adoption.go"} {
+	for _, name := range []string{"v8.go", "v8_adoption.go", "legacy_adoption.go", "adoption_ref.go"} {
 		data, err := os.ReadFile(filepath.Join(root, "apps", "manager-server", "internal", "service", "cpa", name))
 		if err != nil {
 			t.Fatal(err)

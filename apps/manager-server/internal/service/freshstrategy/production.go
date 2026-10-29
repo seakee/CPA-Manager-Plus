@@ -26,6 +26,12 @@ var productionEvidence embed.FS
 // evidence runner HEADs. A semantic source change invalidates an old acceptance
 // without requiring a self-referential commit SHA inside that same commit.
 //
+// The adoption classification is pinned through
+// `cpa.SafeReadImplementationSHA256`, which embeds `cpa/adoption_ref.go`: that
+// file decides the reference every item is gated under and the references each
+// discovered root contributes, so a change to it must invalidate an acceptance
+// exactly as a change to one of the files below does.
+//
 //go:embed production.go service.go adoption.go legacy_transition.go adoption_resource.go
 var consumerImplementation embed.FS
 

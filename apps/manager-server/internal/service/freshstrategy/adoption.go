@@ -100,20 +100,40 @@ func readAdoptionSource(ctx context.Context, class bootstrap.AdoptSourceClass, s
 	return adoptionSourceSnapshot{APIKeys: keys, DiscoveredResources: refs}, nil
 }
 
+// adoptionResourceRefs is the record's inventory: one entry for every reference
+// an item under the reported roots can carry.
+//
+// A root is not one resource. `oauth` carries its auth directory and its
+// copyable provider maps; `client` carries the gateway's client leaves and the
+// provider section of the same name; `requests`, `multimedia` and `upstream` are
+// gateway configuration the reader reports under its unknown-root catch-all. The
+// executor gates each item on its own reference through the same resolver
+// (`cpa.AdoptionItemRef`), so the record must hold a decision for the whole set —
+// otherwise it tells the operator to redo an item the executor copies, or
+// authorizes one it never copies.
 func adoptionResourceRefs(sections []string) ([]bootstrap.ResourceRef, error) {
 	seenSection := map[string]bool{}
 	seenRef := map[bootstrap.ResourceRef]bool{}
 	refs := make([]bootstrap.ResourceRef, 0, len(sections))
 	for _, section := range sections {
-		// One resolver for the whole inventory: the reference a section is
-		// discovered under is the same one the executor gates its items under.
-		ref, ok := cpa.AdoptionSectionRef(section)
-		if !ok || seenSection[section] || seenRef[ref] {
+		if seenSection[section] {
 			return nil, errUnsupportedAdoptionSourceClass
 		}
 		seenSection[section] = true
-		seenRef[ref] = true
-		refs = append(refs, ref)
+		rootRefs := cpa.AdoptionRootRefs(section)
+		if len(rootRefs) == 0 {
+			return nil, errUnsupportedAdoptionSourceClass
+		}
+		for _, ref := range rootRefs {
+			// Two roots may contribute the same reference — `api-keys` and
+			// `oauth` both carry provider configuration — and the record holds it
+			// once.
+			if seenRef[ref] {
+				continue
+			}
+			seenRef[ref] = true
+			refs = append(refs, ref)
+		}
 	}
 	if !seenRef[bootstrap.AdoptionRefClientAPIKeys] || !seenRef[bootstrap.AdoptionRefCPAAuthFiles] {
 		return nil, errUnsupportedAdoptionSourceClass

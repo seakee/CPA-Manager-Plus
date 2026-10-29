@@ -1664,6 +1664,138 @@ func TestProviderSectionsAreGatedByTheirOwnRoot(t *testing.T) {
 	}
 }
 
+// The record a real v8 adoption carries must cover every item the executor can
+// copy out of the roots that source reports, and each item's outcome must follow
+// its own reference's decision. This is the production shape: discovery records a
+// decision per root contribution, the executor classifies each item on its own
+// reference, and the two must agree item by item.
+//
+// The roots are the ones the controlled real-CPA source of
+// `adoption_cpa_test.go` reports: `server`, `oauth`, `management`, `access`,
+// `plugins`, `routing`, `client`, `api-keys`, and the reader's unknown catch-all
+// for `requests`, `multimedia` and `upstream`.
+func TestDiscoveredDecisionsCoverEveryItemTheExecutorClassifies(t *testing.T) {
+	roots := []string{"server", "management", "access", "oauth", "api-keys", "routing", "client", "plugins", "unknown_cpa_native_resource"}
+	refs := make([]bootstrap.ResourceRef, 0, len(roots))
+	for _, root := range roots {
+		for _, ref := range cpa.AdoptionRootRefs(root) {
+			if !slices.Contains(refs, ref) {
+				refs = append(refs, ref)
+			}
+		}
+	}
+	// The decisions are exactly what discovery writes: one per reference the
+	// reported roots contribute, migrate only for a reference the rules permit.
+	migrating := migratingDecisions()
+	decisions := make([]bootstrap.AdoptionResourceDecision, 0, len(refs))
+	for _, ref := range refs {
+		candidate := bootstrap.AdoptionResourceDecision{}
+		for _, decision := range migrating {
+			if decision.ResourceRef == ref {
+				candidate = decision
+			}
+		}
+		decision, ok := bootstrap.FreshAdoptionDecision(ref, candidate)
+		if !ok {
+			t.Fatalf("no decision for discovered reference %s", ref)
+		}
+		decisions = append(decisions, decision)
+	}
+
+	source, destination := sourceFixture(t), destinationFixture(t)
+	sourceWire, err := NewSource(t.Context(), source.endpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinationWire, err := NewDestination(t.Context(), destination.endpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := New(sourceWire, destinationWire, decisions).Run(context.Background(), freshstore.AdoptionSummary{}, nil)
+	if err != nil {
+		t.Fatalf("migration failed: %v", err)
+	}
+
+	authorized := map[bootstrap.ResourceRef]bootstrap.AdoptionResourceDecision{}
+	for _, decision := range decisions {
+		authorized[decision.ResourceRef] = decision
+	}
+	// Every item the executor recorded is gated under a reference discovery
+	// recorded, and its outcome follows that reference's disposition.
+	for _, item := range result.Summary.Items {
+		ref := ItemRef(item)
+		decision, recorded := authorized[ref]
+		if !recorded {
+			t.Fatalf("%s (%s) is gated under a reference discovery never recorded: %v", item.Item, ref, refs)
+		}
+		// For an item of the enumerable universe, the reference must be one the
+		// item's OWN root contributes, not merely one some root happened to
+		// contribute: a union check passes while a root's set is wrong.
+		if path, enumerable := enumerableItemPath(item); enumerable {
+			root := cpa.AdoptionRootOf(path)
+			if slices.Contains(roots, root) && !slices.Contains(cpa.AdoptionRootRefs(root), ref) {
+				t.Fatalf("%s is gated under %s but root %q contributes %v", item.Item, ref, root, cpa.AdoptionRootRefs(root))
+			}
+		}
+		if decision.Disposition == bootstrap.Migrate {
+			// Authorized does not promise copied: an item CPA itself would reject
+			// (an unparseable credential file) or one the Manager owns is still
+			// manual work. What it must never be is refused for lack of
+			// authorization.
+			if item.Outcome == freshstore.AdoptionManual && item.Reason == string(decision.ManualAction) {
+				t.Fatalf("%s (%s) is authorized but was recorded as unauthorized manual work: %+v", item.Item, ref, item)
+			}
+			continue
+		}
+		if item.Outcome != freshstore.AdoptionManual || item.Reason != string(decision.ManualAction) || item.Instruction == "" {
+			t.Fatalf("%s (%s) is not authorized but was not recorded as the decision's manual work: %+v", item.Item, ref, item)
+		}
+	}
+	// Nothing the record calls manual was written: the destination holds none of
+	// the source's values for those paths.
+	for _, item := range result.Summary.Items {
+		if item.Outcome != freshstore.AdoptionManual {
+			continue
+		}
+		path := strings.TrimPrefix(item.Item, "config:")
+		if path == item.Item {
+			continue
+		}
+		if value, presence := cpa.LookupConfigValue(destination.config, path); presence == cpa.ConfigPresent &&
+			equalConfigValue(lookup(source.config, strings.Split(path, ".")), value) {
+			t.Fatalf("manual path %s reached the destination", path)
+		}
+	}
+	source.usesOnlyReads(t)
+}
+
+// enumerableItemPath returns the adoption path one recorded item corresponds to,
+// when that path is part of the enumerable universe (a gateway leaf, a rule
+// family or a copyable section). Credential items and the excess marker are not
+// configuration paths and have no root.
+func enumerableItemPath(item freshstore.AdoptionItem) (string, bool) {
+	var path string
+	switch item.Kind {
+	case freshstore.AdoptionKindConfigLeaf:
+		path, _ = strings.CutPrefix(item.Item, "config:")
+	case freshstore.AdoptionKindConfigFamily:
+		family, ok := strings.CutPrefix(item.Item, "rules:")
+		if !ok {
+			return "", false
+		}
+		entry, ok := cpa.LookupConfigRuleFamily(family)
+		if !ok {
+			return "", false
+		}
+		path = entry.Path
+	case freshstore.AdoptionKindProviderSection:
+		path, _ = strings.CutPrefix(item.Item, "section:")
+	default:
+		return "", false
+	}
+	return path, slices.Contains(cpa.AdoptionItemUniverse(), path)
+}
+
 // providerSection is the executor's own item shape for one whole section.
 func providerSection(section string) freshstore.AdoptionItem {
 	return freshstore.AdoptionItem{Item: providerSectionItemName(section), Kind: freshstore.AdoptionKindProviderSection}
@@ -1732,9 +1864,12 @@ func TestItemRefClassifiesAgainstTheGatewayTable(t *testing.T) {
 		"providers":         bootstrap.AdoptionRefProviderStateProviders,
 		"client":            bootstrap.AdoptionRefProviderStateClient,
 		"oauth":             bootstrap.AdoptionRefCPAAuthFiles,
-		"plugins.enabled":   bootstrap.AdoptionRefProviderStateProviders,
-		"made-up":           bootstrap.AdoptionRefProviderStateProviders,
-		"made-up.child":     bootstrap.AdoptionRefProviderStateProviders,
+		// A path the gateway table does not name is unknown configuration, under
+		// a named root or the unknown one alike: it stays manual, and it never
+		// borrows a provider verdict.
+		"plugins.enabled": bootstrap.AdoptionRefConfigUnknown,
+		"made-up":         bootstrap.AdoptionRefConfigUnknown,
+		"made-up.child":   bootstrap.AdoptionRefConfigUnknown,
 	} {
 		ref := ItemRef(freshstore.AdoptionItem{Item: providerSectionItemName(section), Kind: freshstore.AdoptionKindProviderSection})
 		if ref != want {
@@ -1746,9 +1881,6 @@ func TestItemRefClassifiesAgainstTheGatewayTable(t *testing.T) {
 	// reference, and none of them lands on the fallback.
 	for _, section := range ProviderSections() {
 		ref := ItemRef(freshstore.AdoptionItem{Item: providerSectionItemName(section), Kind: freshstore.AdoptionKindProviderSection})
-		if _, known := cpa.AdoptionProviderSectionRef(section); !known {
-			t.Fatalf("copyable section %s has no root reference", section)
-		}
 		if ref != bootstrap.AdoptionRefProviderStateAPIKeys {
 			t.Fatalf("copyable section %s classified as %s", section, ref)
 		}

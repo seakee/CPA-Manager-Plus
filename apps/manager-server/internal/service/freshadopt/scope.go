@@ -107,23 +107,12 @@ func ManagerOwned(path string) bool {
 // it is absent from the table below rather than guessed. Its effective content
 // arrives with the `api-keys.*` groups, which carry each group's own `models`
 // list.
-var providerSections = []string{
-	"api-keys.gemini",
-	"api-keys.interactions",
-	"api-keys.vertex",
-	"api-keys.codex",
-	"api-keys.claude",
-	"api-keys.xai",
-	"api-keys.meta",
-	"api-keys.openai-compatibility",
-	"oauth.model-alias",
-	"oauth.excluded-models",
-	"oauth.settings",
-	"oauth.request-scoped-errors",
-}
-
+// The list itself lives in the pinned resolver (`cpa.ProviderAdoptionSections`),
+// next to the reference each section is gated under, so a section cannot be
+// copyable without a classification.
+//
 // ProviderSections returns the whole-section copy list in page order.
-func ProviderSections() []string { return append([]string(nil), providerSections...) }
+func ProviderSections() []string { return cpa.ProviderAdoptionSections() }
 
 // configLeafPrefix resolves the single PATCH prefix of one gateway leaf: the
 // leaf's own page group. A leaf outside the page table has no prefix.

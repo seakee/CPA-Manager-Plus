@@ -138,23 +138,20 @@ func ItemRef(item freshstore.AdoptionItem) bootstrap.ResourceRef {
 		return bootstrap.AdoptionRefCPAAuthFiles
 	case freshstore.AdoptionKindConfigLeaf:
 		if path, ok := strings.CutPrefix(item.Item, "config:"); ok {
-			return cpa.AdoptionConfigRef(path)
+			return cpa.AdoptionItemRef(path)
 		}
 		return bootstrap.AdoptionRefConfigUnknown
 	case freshstore.AdoptionKindConfigFamily:
 		if family, ok := strings.CutPrefix(item.Item, "rules:"); ok {
-			return cpa.AdoptionConfigRef(family)
+			return cpa.AdoptionItemRef(family)
 		}
 		return bootstrap.AdoptionRefConfigUnknown
 	case freshstore.AdoptionKindProviderSection:
 		if section, ok := strings.CutPrefix(item.Item, "section:"); ok {
-			if ref, known := cpa.AdoptionProviderSectionRef(section); known {
-				return ref
-			}
+			return cpa.AdoptionItemRef(section)
 		}
-		// A section outside the provider roots has no migrate reference of its
-		// own, and it must not borrow one: the catalogue reference is never
-		// qualified, so an unexpected section stays manual.
+		// A section item without a section name has no reference of its own, and
+		// it must not borrow one.
 		return bootstrap.AdoptionRefProviderStateProviders
 	default:
 		return bootstrap.AdoptionRefConfigUnknown

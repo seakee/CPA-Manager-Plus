@@ -183,9 +183,26 @@ func TestAdoptionStagesEncryptedSnapshotBeforeDestinationAndVerifiesActualAuth(t
 			if err != nil || staged.Checkpoint.Stage != "staged" || !security.IsValidProtectedEnvelope(staged.AdoptionCiphertext) || len(runtime.stages) != 0 || len(runtime.starts) != 0 || sourceReads != 1 {
 				t.Fatalf("stage did effects: %v", err)
 			}
-			wantResources := []bootstrap.ResourceRef{bootstrap.AdoptionRefConfigServer, bootstrap.AdoptionRefClientAPIKeys, bootstrap.AdoptionRefCPAAuthFiles, bootstrap.AdoptionRefProviderStateProviders, bootstrap.AdoptionRefConfigUsage}
+			// The record covers every reference an item under the reported roots can
+			// carry, not one reference per root. This source reports `server`,
+			// `access`, `oauth`, `providers` and `usage`; each contributes the
+			// reference of its own root plus everything its paths classify as, and
+			// a root may contribute more than one (`client` carries both its
+			// gateway leaves and its provider section). The v7 source reports
+			// `access`, `oauth`, `server`, `routing` and `usage`.
+			wantResources := []bootstrap.ResourceRef{
+				bootstrap.AdoptionRefConfigServer, bootstrap.AdoptionRefConfigUnknown,
+				bootstrap.AdoptionRefClientAPIKeys, bootstrap.AdoptionRefCPAAuthFiles,
+				bootstrap.AdoptionRefProviderStateAPIKeys, bootstrap.AdoptionRefProviderStateProviders,
+				bootstrap.AdoptionRefConfigUsage,
+			}
 			if class == bootstrap.AdoptLegacyManaged {
-				wantResources = []bootstrap.ResourceRef{bootstrap.AdoptionRefClientAPIKeys, bootstrap.AdoptionRefCPAAuthFiles, bootstrap.AdoptionRefConfigServer, bootstrap.AdoptionRefConfigRouting, bootstrap.AdoptionRefConfigUsage, bootstrap.AdoptionRefProviderStateProviders}
+				wantResources = []bootstrap.ResourceRef{
+					bootstrap.AdoptionRefClientAPIKeys, bootstrap.AdoptionRefConfigUnknown,
+					bootstrap.AdoptionRefCPAAuthFiles, bootstrap.AdoptionRefProviderStateAPIKeys,
+					bootstrap.AdoptionRefConfigServer, bootstrap.AdoptionRefConfigRouting,
+					bootstrap.AdoptionRefConfigUsage, bootstrap.AdoptionRefProviderStateProviders,
+				}
 			}
 			if !reflect.DeepEqual(staged.Checkpoint.AdoptionResources, wantResources) {
 				t.Fatalf("discovered source inventory was not bounded: %+v", staged.Checkpoint.AdoptionResources)
