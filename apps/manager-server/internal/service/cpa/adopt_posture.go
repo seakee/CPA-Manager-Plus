@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"net/http"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 )
@@ -125,47 +124,6 @@ func (t *Transport) postureOf() proofPosture {
 		return adoptProofPosture()
 	}
 	return managedProofPosture
-}
-
-// matchesAdoptedCore checks the adopted rules that do not depend on the record
-// that staged the destination: the closed root vocabulary, the required roots,
-// the version stamp, the bcrypt management digest and the usage switch.
-func (p proofPosture) matchesAdoptedCore(data []byte) bool {
-	var root map[string]json.RawMessage
-	if json.Unmarshal(data, &root) != nil {
-		return false
-	}
-	for name := range root {
-		if !adoptRoots[name] {
-			return false
-		}
-	}
-	for _, name := range adoptRequiredRoots {
-		if _, ok := root[name]; !ok {
-			return false
-		}
-	}
-	var version int
-	if json.Unmarshal(root["config-version"], &version) != nil || version != 8 {
-		return false
-	}
-	var management struct {
-		AllowRemote bool   `json:"allow-remote"`
-		SecretKey   string `json:"secret-key"`
-	}
-	if json.Unmarshal(root["management"], &management) != nil || !management.AllowRemote || !looksLikeBcrypt(management.SecretKey) {
-		return false
-	}
-	var observability struct {
-		Usage struct {
-			UsageStatisticsEnabled *bool `json:"usage-statistics-enabled"`
-		} `json:"usage"`
-	}
-	if json.Unmarshal(root["observability"], &observability) != nil ||
-		observability.Usage.UsageStatisticsEnabled == nil || !*observability.Usage.UsageStatisticsEnabled {
-		return false
-	}
-	return true
 }
 
 // matchesAdopt accepts the adopted destination posture: the same proof as the
@@ -303,43 +261,26 @@ func (p proofPosture) validKeys(keys []string) bool {
 // ProveAdoptedDestination proves one adopted destination with the
 // install-derived management credential and returns its client keys.
 //
-// The document is read once: the plugin opt-in is the switch that document
-// carries, so this proves the destination is the adopted template without
-// needing the record that wrote it. The caller that holds the record pins the
-// same switch separately, through the posture selector.
+// It runs the production proof rather than a subset of it: the adopted posture on
+// a transport of its own, then `KeySnapshot`, which is the same function gateway
+// admission and the Adopt completion path call. Every rule of the adopted
+// destination is therefore exercised here — host and port, the disabled panels,
+// the Supervisor auth directory and plugin root, the plugin key set, the usage
+// and log switches, the client-key policy and the advertised key list — and a
+// document that fails one of them is refused exactly as the product refuses it.
 //
-// It is the direct proof the real-CPA harness runs after a migration, and it is
-// exported so it can be: the posture itself stays unexported, and nothing here
-// grants a write.
+// The posture is a package constant of this proof, not a caller input: this
+// function has no record to read, and the whole point is that the document alone
+// must prove the Supervisor template. It is exported because the real-CPA harness
+// runs it after a migration; nothing here grants a write.
 func ProveAdoptedDestination(ctx context.Context, endpoint, managementKey string) ([]string, error) {
 	transport := NewTransportForEndpoint(endpoint)
-	code, body, err := transport.request(ctx, http.MethodGet, "/v8/management/config", managementKey, nil)
+	// The transport's default is the New Managed template, whose exact root count
+	// an adopted document never carries.
+	transport.posture = adoptProofPosture()
+	snapshot, err := transport.KeySnapshot(ctx, managementKey)
 	if err != nil {
-		return nil, ErrProofUnavailable
+		return nil, err
 	}
-	if code != http.StatusOK {
-		return nil, ErrSourceConflict
-	}
-	var root map[string]json.RawMessage
-	if json.Unmarshal(body, &root) != nil {
-		return nil, ErrSourceConflict
-	}
-	posture := adoptProofPosture()
-	// The record-independent rules only: the root set, the required roots, the
-	// version, the bcrypt management digest and the usage switch. The Supervisor
-	// directory and bind facts are proven against the record by the posture
-	// selector, which this harness does not hold; asserting them from a document
-	// alone would only restate that document.
-	if !posture.matchesAdoptedCore(body) {
-		return nil, ErrSourceConflict
-	}
-	var access map[string]json.RawMessage
-	if json.Unmarshal(root["access"], &access) != nil {
-		return nil, ErrSourceConflict
-	}
-	var keys []string
-	if json.Unmarshal(access["api-keys"], &keys) != nil || !posture.validKeys(keys) {
-		return nil, ErrSourceConflict
-	}
-	return keys, nil
+	return snapshot.Keys, nil
 }

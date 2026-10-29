@@ -133,6 +133,74 @@ func TestAdoptPostureCarriesTheSourceKeyList(t *testing.T) {
 	}
 }
 
+// TestProveAdoptedDestinationRunsTheProductionRules is the step-3 regression: the
+// exported proof the real-CPA harness runs is `KeySnapshot`, so it refuses every
+// document the product refuses — not just the record-independent subset a
+// harness-local matcher once applied.
+func TestProveAdoptedDestinationRunsTheProductionRules(t *testing.T) {
+	keys := []string{"source-key-one", "source-key-two"}
+	list, _ := json.Marshal(keys)
+	root := strings.Replace(adoptDestinationConfig, `"api-keys":[]`, `"api-keys":`+string(list), 1)
+	var served atomic.Value
+	served.Store(root)
+	yaml := "adopted exact YAML bytes"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+testManagement() {
+			t.Error("wrong authority")
+		}
+		switch r.URL.Path {
+		case "/v8/management/config":
+			w.Write([]byte(served.Load().(string)))
+		case "/v8/management/config/access/api-keys":
+			json.NewEncoder(w).Encode(keys)
+		case "/v8/management/config.yaml":
+			w.Write([]byte(yaml))
+		default:
+			t.Error("unexpected request")
+		}
+	}))
+	defer server.Close()
+	if got, err := ProveAdoptedDestination(t.Context(), server.URL, testManagement()); err != nil || len(got) != 2 {
+		t.Fatalf("the adopted destination did not prove: %v %v", got, err)
+	}
+	for name, document := range map[string]string{
+		// Every one of these passes the record-independent subset the harness used
+		// to apply; each is a destination the product refuses.
+		"loopback host":   strings.Replace(root, `"host":"0.0.0.0"`, `"host":"127.0.0.1"`, 1),
+		"panel enabled":   strings.Replace(root, `"disable-control-panel":true`, `"disable-control-panel":false`, 1),
+		"foreign auth":    strings.Replace(root, `"/runtime/gateway/destination/auth"`, `"/runtime/gateway/auth"`, 1),
+		"foreign plugins": strings.Replace(root, `"/runtime/supervisor/plugins"`, `"/runtime/gateway/plugins"`, 1),
+		"logging to file": strings.Replace(root, `"logging-to-file":false`, `"logging-to-file":true`, 1),
+		"port moved":      strings.Replace(root, `"port":8317`, `"port":8318`, 1),
+		"plugin store":    strings.Replace(root, `"enabled":false`, `"enabled":false,"store":{}`, 1),
+	} {
+		served.Store(document)
+		if _, err := ProveAdoptedDestination(t.Context(), server.URL, testManagement()); err == nil {
+			t.Fatalf("%s proved the adopted destination", name)
+		}
+	}
+	// The advertised key list is the same one the document carries, because the
+	// production proof compares them.
+	served.Store(root)
+	if _, err := ProveAdoptedDestination(t.Context(), server.URL, testManagement()); err != nil {
+		t.Fatal(err)
+	}
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v8/management/config":
+			w.Write([]byte(root))
+		case "/v8/management/config/access/api-keys":
+			json.NewEncoder(w).Encode([]string{"source-key-one", "source-key-three"})
+		case "/v8/management/config.yaml":
+			w.Write([]byte(yaml))
+		}
+	}))
+	defer other.Close()
+	if _, err := ProveAdoptedDestination(t.Context(), other.URL, testManagement()); err == nil {
+		t.Fatal("a destination whose advertised keys differ from its document proved")
+	}
+}
+
 // TestPostureFollowsTheCommittedStrategy proves the selector is the only source
 // of the posture: the transport never assumes the New Managed template, and a
 // strategy it does not own is refused rather than proven.
