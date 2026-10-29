@@ -93,31 +93,32 @@ func TestAdoptionInventoryMappingIsBounded(t *testing.T) {
 			}
 		})
 	}
-	// Only the accepted client-key decision may migrate; every mapped manual
-	// resource keeps its explicit disposition.
-	decisions, ok := adoptionDecisionsForInventory(want, acceptedKeys()[0])
+	// Exactly the accepted evidence's kinds that this source carries migrate;
+	// every mapped manual resource keeps its explicit disposition.
+	decisions, ok := adoptionDecisionsForInventory(want, acceptedKeyDecisionMap())
 	if !ok {
 		t.Fatal("bounded inventory produced no decisions")
 	}
+	migrated := acceptedKeyDecisionMap()
 	for i, decision := range decisions {
 		if decision.ResourceRef != want[i] {
 			t.Fatal("decision order does not follow the durable inventory")
 		}
-		if decision.ResourceRef == bootstrap.AdoptionRefClientAPIKeys {
-			if decision.Disposition != bootstrap.Migrate {
-				t.Fatal("client keys did not migrate")
+		if _, ok := migrated[decision.ResourceRef]; ok {
+			if decision.Disposition != bootstrap.Migrate || decision.Qualification != bootstrap.CapabilityQualified {
+				t.Fatalf("authorized resource did not migrate: %+v", decision)
 			}
 			continue
 		}
 		if decision.Disposition != bootstrap.ManualAction || decision.ManualAction == "" || decision.Qualification != bootstrap.CapabilityPending {
-			t.Fatalf("non-client resource migrated or dropped: %+v", decision)
+			t.Fatalf("unauthorized resource migrated or dropped: %+v", decision)
 		}
 	}
-	if _, ok := adoptionDecisionsForInventory([]bootstrap.ResourceRef{bootstrap.AdoptionRefCPAAuthFiles}, acceptedKeys()[0]); ok {
+	if _, ok := adoptionDecisionsForInventory([]bootstrap.ResourceRef{bootstrap.AdoptionRefCPAAuthFiles}, acceptedKeyDecisionMap()); ok {
 		t.Fatal("inventory without client keys produced decisions")
 	}
 	// An upstream-controlled reference can never be turned into a decision.
-	if _, ok := adoptionDecisionsForInventory([]bootstrap.ResourceRef{bootstrap.AdoptionRefClientAPIKeys, "attacker-controlled-key"}, acceptedKeys()[0]); ok {
+	if _, ok := adoptionDecisionsForInventory([]bootstrap.ResourceRef{bootstrap.AdoptionRefClientAPIKeys, "attacker-controlled-key"}, acceptedKeyDecisionMap()); ok {
 		t.Fatal("unbounded resource reference accepted")
 	}
 }

@@ -98,7 +98,7 @@ func TestFreshStrategyCheckpointRequiresCompleteShape(t *testing.T) {
 		AdoptionResources:             []ResourceRef{"client-api-keys", "cpa-auth-files", "cpa-config-server"},
 		AdoptionDecisions: []AdoptionResourceDecision{
 			{ResourceRef: "client-api-keys", Kind: APIKeys, Scope: ClientAPIKeys, ReadEvidenceRef: "preflight:keys-read", ReplayEvidenceRef: "preflight:keys-replay", VerifyEvidenceRef: "preflight:keys-verify", Qualification: CapabilityQualified, Disposition: Migrate},
-			{ResourceRef: "cpa-auth-files", Kind: Credentials, Scope: CPAAuthFiles, Qualification: CapabilityPending, ManualAction: ReauthenticateAfterAdoption, Disposition: ManualAction},
+			{ResourceRef: "cpa-auth-files", Kind: Credentials, Scope: CPAAuthFiles, ReadEvidenceRef: "preflight:keys-read", ReplayEvidenceRef: "preflight:keys-replay", VerifyEvidenceRef: "preflight:keys-verify", Qualification: CapabilityQualified, Disposition: Migrate},
 			{ResourceRef: "cpa-config-server", Kind: CPAConfiguration, Scope: ManagementAPIFields, Qualification: CapabilityPending, ManualAction: ReconfigureAfterAdoption, Disposition: ManualAction},
 		},
 	}
@@ -165,6 +165,22 @@ func freshManualDecision(ref ResourceRef) AdoptionResourceDecision {
 	return decision
 }
 
+// freshQualifiedDecision is the decision a migrated reference carries once its
+// evidence chain authorizes it: the rule's own kind and scope, fully qualified.
+func freshQualifiedDecision(ref ResourceRef) AdoptionResourceDecision {
+	rule, ok := FreshAdoptionRule(ref)
+	if !ok {
+		panic("no rule for " + string(ref))
+	}
+	return AdoptionResourceDecision{
+		ResourceRef: ref, Kind: rule.Kind, Scope: rule.Scope,
+		ReadEvidenceRef:   CapabilityEvidenceRef("preflight:" + string(ref) + "-read"),
+		ReplayEvidenceRef: CapabilityEvidenceRef("preflight:" + string(ref) + "-replay"),
+		VerifyEvidenceRef: CapabilityEvidenceRef("preflight:" + string(ref) + "-verify"),
+		Qualification:     CapabilityQualified, Disposition: Migrate,
+	}
+}
+
 func TestFreshAdoptionInventoryRequiresExactlyOneDecisionPerResource(t *testing.T) {
 	keys := freshKeysDecision()
 	base := func() FreshStrategyCheckpoint {
@@ -174,7 +190,7 @@ func TestFreshAdoptionInventoryRequiresExactlyOneDecisionPerResource(t *testing.
 			SourceIdentity:   "external:sha256:" + strings.Repeat("d", 64), SourceClass: AdoptLegacyManaged,
 			DestinationConnectionIdentity: "external:sha256:" + strings.Repeat("e", 64),
 			AdoptionResources:             []ResourceRef{AdoptionRefClientAPIKeys, AdoptionRefCPAAuthFiles},
-			AdoptionDecisions:             []AdoptionResourceDecision{keys, freshManualDecision(AdoptionRefCPAAuthFiles)},
+			AdoptionDecisions:             []AdoptionResourceDecision{keys, freshQualifiedDecision(AdoptionRefCPAAuthFiles)},
 		}
 	}
 	if err := base().validate(); err != nil {
@@ -204,9 +220,12 @@ func TestFreshAdoptionInventoryRequiresExactlyOneDecisionPerResource(t *testing.
 			c.AdoptionResources = []ResourceRef{AdoptionRefCPAAuthFiles}
 			c.AdoptionDecisions = c.AdoptionDecisions[1:]
 		},
-		"missing auth files": func(c *FreshStrategyCheckpoint) {
-			c.AdoptionResources = []ResourceRef{AdoptionRefClientAPIKeys}
-			c.AdoptionDecisions = c.AdoptionDecisions[:1]
+		"auth files downgraded to manual": func(c *FreshStrategyCheckpoint) {
+			c.AdoptionDecisions = []AdoptionResourceDecision{c.AdoptionDecisions[0], freshManualDecision(AdoptionRefCPAAuthFiles)}
+		},
+		"routing decision with the wrong kind": func(c *FreshStrategyCheckpoint) {
+			c.AdoptionResources = append(c.AdoptionResources, AdoptionRefConfigRouting)
+			c.AdoptionDecisions = append(c.AdoptionDecisions, AdoptionResourceDecision{ResourceRef: AdoptionRefConfigRouting, Kind: Credentials, Scope: CPAAuthFiles, ReadEvidenceRef: "preflight:r-read", ReplayEvidenceRef: "preflight:r-replay", VerifyEvidenceRef: "preflight:r-verify", Qualification: CapabilityQualified, Disposition: Migrate})
 		},
 		"inventory without decisions": func(c *FreshStrategyCheckpoint) { c.AdoptionDecisions = nil },
 		"decisions without inventory": func(c *FreshStrategyCheckpoint) { c.AdoptionResources = nil },
@@ -230,7 +249,7 @@ func TestFreshAdoptionInventoryKeepsManualResourcesExplicit(t *testing.T) {
 	if _, ok := FreshAdoptionDecision(AdoptionRefClientAPIKeys, AdoptionResourceDecision{}); ok {
 		t.Fatal("unqualified client-key migration accepted")
 	}
-	for _, ref := range []ResourceRef{AdoptionRefConfigServer, AdoptionRefConfigManagement, AdoptionRefConfigRouting, AdoptionRefConfigLogging, AdoptionRefConfigUsage, AdoptionRefConfigPlugins, AdoptionRefConfigObservability, AdoptionRefConfigUnknown, AdoptionRefProviderStateProviders, AdoptionRefProviderStateAPIKeys, AdoptionRefProviderStateClient} {
+	for _, ref := range []ResourceRef{AdoptionRefConfigServer, AdoptionRefConfigManagement, AdoptionRefConfigLogging, AdoptionRefConfigUsage, AdoptionRefConfigPlugins, AdoptionRefConfigObservability, AdoptionRefConfigUnknown, AdoptionRefProviderStateProviders, AdoptionRefProviderStateClient} {
 		decision, ok := FreshAdoptionDecision(ref, AdoptionResourceDecision{})
 		if !ok || decision.Disposition != ManualAction || decision.Qualification != CapabilityPending || decision.ManualAction == "" || decision.ResourceRef != ref {
 			t.Fatalf("resource %q was not a bounded manual action: %+v", ref, decision)

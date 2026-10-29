@@ -21,7 +21,7 @@ func TestProductionAdoptionResourceAcceptanceCannotComeFromSafeRead(t *testing.T
 			t.Fatal(err)
 		}
 		key := consumerKey{record.Consumers[index].Strategy, record.Consumers[index].SourceClass}
-		if len(consumers[key].AdoptionResources) != 1 || consumers[key].ArtifactID != record.ArtifactID {
+		if len(consumers[key].AdoptionResources) != expectedAdoptionResourceCount(record.Consumers[index].SourceClass) || consumers[key].ArtifactID != record.ArtifactID {
 			t.Fatal("accepted scoped resources unavailable")
 		}
 		for _, change := range []func(*consumerRecord){func(c *consumerRecord) { c.AdoptionEvidence.Profile = "CPA8-EXTERNAL-SAFETY-r1" }, func(c *consumerRecord) { c.AdoptionEvidence.ReadCaseRef = "unaccepted-read" }, func(c *consumerRecord) { c.AdoptionEvidence.ReplayCaseRef = c.AdoptionEvidence.ReadCaseRef }, func(c *consumerRecord) { c.AdoptionEvidence.VerifyCaseRef = "" }} {

@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"regexp"
 	"strings"
 )
@@ -161,37 +162,93 @@ type freshAdoptionRefRule struct {
 }
 
 var freshAdoptionRefRules = map[ResourceRef]freshAdoptionRefRule{
-	AdoptionRefClientAPIKeys:          {kind: APIKeys, scope: ClientAPIKeys, qualified: true},
-	AdoptionRefCPAAuthFiles:           {kind: Credentials, scope: CPAAuthFiles, manual: ReauthenticateAfterAdoption},
+	AdoptionRefClientAPIKeys: {kind: APIKeys, scope: ClientAPIKeys, qualified: true},
+	// Credential files, the gateway configuration and the provider sections are
+	// copied by the adoption executor, so their decision says migrate. The
+	// evidence for them is the same class-specific read/replay/verify chain the
+	// client keys use, extended to name the resource kinds it actually exercised
+	// against real CPA v8.
+	//
+	// Each of them also keeps its manual action as the fallback: a source class
+	// whose evidence does not authorize the kind keeps exactly the manual action
+	// it had before. A legacy_managed source is a pre-v8 process with no v8
+	// configuration or credential surface, so nothing can be copied from it and
+	// its consumers stay manual, without a second rule table.
+	AdoptionRefCPAAuthFiles:         {kind: Credentials, scope: CPAAuthFiles, manual: ReauthenticateAfterAdoption, qualified: true},
+	AdoptionRefConfigRouting:        {kind: CPAConfiguration, scope: ManagementAPIFields, manual: ReconfigureAfterAdoption, qualified: true},
+	AdoptionRefProviderStateAPIKeys: {kind: ProviderRuntimeState, scope: ProviderState, manual: ReauthenticateAfterAdoption, qualified: true},
+	// Not migrated: the Manager owns the destination's own identity and client
+	// keys, the destination's plugin set is a deployment decision, and usage,
+	// logs and observability history are the source's own history, which the
+	// adoption explicitly excludes.
 	AdoptionRefConfigServer:           {kind: CPAConfiguration, scope: ManagementAPIFields, manual: ReconfigureAfterAdoption},
 	AdoptionRefConfigManagement:       {kind: CPAConfiguration, scope: ManagementAPIFields, manual: ReconfigureAfterAdoption},
-	AdoptionRefConfigRouting:          {kind: CPAConfiguration, scope: ManagementAPIFields, manual: ReconfigureAfterAdoption},
 	AdoptionRefConfigLogging:          {kind: CPAConfiguration, scope: ManagementAPIFields, manual: ReconfigureAfterAdoption},
 	AdoptionRefConfigUsage:            {kind: CPAConfiguration, scope: ManagementAPIFields, manual: ReconfigureAfterAdoption},
 	AdoptionRefConfigPlugins:          {kind: CPAConfiguration, scope: ManagementAPIFields, manual: ReconfigureAfterAdoption},
 	AdoptionRefConfigObservability:    {kind: CPAConfiguration, scope: ManagementAPIFields, manual: ReconfigureAfterAdoption},
 	AdoptionRefConfigUnknown:          {kind: CPAConfiguration, scope: ManagementAPIFields, manual: ReconfigureAfterAdoption},
 	AdoptionRefProviderStateProviders: {kind: ProviderRuntimeState, scope: ProviderState, manual: ReauthenticateAfterAdoption},
-	AdoptionRefProviderStateAPIKeys:   {kind: ProviderRuntimeState, scope: ProviderState, manual: ReauthenticateAfterAdoption},
 	AdoptionRefProviderStateClient:    {kind: ProviderRuntimeState, scope: ProviderState, manual: ReauthenticateAfterAdoption},
+}
+
+// AdoptionResourceRule is the exported shape of one rule, so a consumer can name
+// the kind and scope a reference decides without restating them.
+type AdoptionResourceRule struct {
+	Kind  AdoptionResourceKind
+	Scope AdoptionScope
+}
+
+// FreshAdoptionRule returns the rule for one reference.
+func FreshAdoptionRule(ref ResourceRef) (AdoptionResourceRule, bool) {
+	rule, ok := freshAdoptionRefRules[ref]
+	if !ok {
+		return AdoptionResourceRule{}, false
+	}
+	return AdoptionResourceRule{Kind: rule.kind, Scope: rule.scope}, true
+}
+
+// MigratedAdoptionResourceRefs is the closed set of resources an adoption
+// decision may mark migrate. It is the single list the evidence chain must
+// cover and the executor must copy: a kind cannot be marked migrate without
+// evidence for it, and the executor copies nothing outside it.
+func MigratedAdoptionResourceRefs() []ResourceRef {
+	refs := make([]ResourceRef, 0, len(freshAdoptionRefRules))
+	for ref, rule := range freshAdoptionRefRules {
+		if rule.qualified {
+			refs = append(refs, ref)
+		}
+	}
+	slices.Sort(refs)
+	return refs
 }
 
 // FreshAdoptionDecision returns the only decision shape permitted for a bounded
 // Fresh adoption resource. Client API keys must come from accepted
 // qualification; every other resource is an explicit manual action. An unknown
 // reference yields no decision.
-func FreshAdoptionDecision(ref ResourceRef, clientAPIKeys AdoptionResourceDecision) (AdoptionResourceDecision, bool) {
+func FreshAdoptionDecision(ref ResourceRef, candidate AdoptionResourceDecision) (AdoptionResourceDecision, bool) {
 	rule, ok := freshAdoptionRefRules[ref]
 	if !ok {
 		return AdoptionResourceDecision{}, false
 	}
-	if rule.qualified {
-		disposition, err := DecideAdoptionResource(clientAPIKeys)
-		if err != nil || clientAPIKeys.ResourceRef != ref || clientAPIKeys.Kind != rule.kind || clientAPIKeys.Scope != rule.scope ||
-			clientAPIKeys.Qualification != CapabilityQualified || clientAPIKeys.ManualAction != "" || clientAPIKeys.Disposition != disposition || disposition != Migrate {
+	// The caller passes the decision it derived for this ref from the evidence
+	// chain, or the zero decision when the chain did not exercise this kind.
+	if rule.qualified && candidate.Qualification != CapabilityPending {
+		// A migrate verdict is only ever this ref's own shape, fully qualified,
+		// and derived from evidence: never inferred from another kind.
+		disposition, err := DecideAdoptionResource(candidate)
+		if err != nil || candidate.ResourceRef != ref || candidate.Kind != rule.kind || candidate.Scope != rule.scope ||
+			candidate.Qualification != CapabilityQualified || candidate.ManualAction != "" || candidate.Disposition != disposition || disposition != Migrate {
 			return AdoptionResourceDecision{}, false
 		}
-		return clientAPIKeys, true
+		return candidate, true
+	}
+	// The kind was not authorized by the evidence chain. A resource with a
+	// declared manual action falls back to exactly that action; a kind with none
+	// is refused, so nothing unqualified can be claimed migratable.
+	if rule.manual == "" {
+		return AdoptionResourceDecision{}, false
 	}
 	decision := AdoptionResourceDecision{
 		ResourceRef: ref, Kind: rule.kind, Scope: rule.scope,
@@ -204,26 +261,25 @@ func FreshAdoptionDecision(ref ResourceRef, clientAPIKeys AdoptionResourceDecisi
 }
 
 // validFreshAdoptionInventory requires exactly one permitted decision per
-// discovered resource, the qualified client-key migration, and the auth-file
-// manual action that cannot be replayed safely.
+// discovered resource and the qualified client-key migration. The other
+// migrated kinds are optional: a source that carries no credential file has
+// nothing to authorize, and requiring them would refuse such a source instead of
+// adopting it with an empty set.
 func validFreshAdoptionInventory(discovered []ResourceRef, decisions []AdoptionResourceDecision) bool {
 	if validateAdoptionInventory(discovered, decisions) != nil {
 		return false
 	}
-	hasKeys, hasAuth := false, false
+	hasKeys := false
 	for _, decision := range decisions {
 		expected, ok := FreshAdoptionDecision(decision.ResourceRef, decision)
 		if !ok || expected != decision {
 			return false
 		}
-		switch decision.ResourceRef {
-		case AdoptionRefClientAPIKeys:
+		if decision.ResourceRef == AdoptionRefClientAPIKeys {
 			hasKeys = true
-		case AdoptionRefCPAAuthFiles:
-			hasAuth = true
 		}
 	}
-	return hasKeys && hasAuth
+	return hasKeys
 }
 
 func adoptionEffect(d AdoptionDisposition, ref ResourceRef) string {

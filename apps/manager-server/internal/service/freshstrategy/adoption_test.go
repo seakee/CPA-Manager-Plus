@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,8 +19,38 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 )
 
+// acceptedKeys is the resource decision set the accepted evidence authorizes: one
+// decision per migrated reference, exactly as the production loader derives them.
 func acceptedKeys() []bootstrap.AdoptionResourceDecision {
-	return []bootstrap.AdoptionResourceDecision{{ResourceRef: "client-api-keys", Kind: bootstrap.APIKeys, Scope: bootstrap.ClientAPIKeys, ReadEvidenceRef: "preflight:client-api-keys-read", ReplayEvidenceRef: "preflight:client-api-keys-replay", VerifyEvidenceRef: "preflight:client-api-keys-verify", Qualification: bootstrap.CapabilityQualified, Disposition: bootstrap.Migrate}}
+	return decisionsForMigratedRefs()
+}
+
+func decisionsForMigratedRefs() []bootstrap.AdoptionResourceDecision {
+	refs := bootstrap.MigratedAdoptionResourceRefs()
+	decisions := make([]bootstrap.AdoptionResourceDecision, 0, len(refs))
+	for _, ref := range refs {
+		rule, ok := bootstrap.FreshAdoptionRule(ref)
+		if !ok {
+			panic("migrated ref without a rule: " + string(ref))
+		}
+		decisions = append(decisions, bootstrap.AdoptionResourceDecision{
+			ResourceRef: ref, Kind: rule.Kind, Scope: rule.Scope,
+			ReadEvidenceRef:   bootstrap.CapabilityEvidenceRef("preflight:" + string(ref) + "-read"),
+			ReplayEvidenceRef: bootstrap.CapabilityEvidenceRef("preflight:" + string(ref) + "-replay"),
+			VerifyEvidenceRef: bootstrap.CapabilityEvidenceRef("preflight:" + string(ref) + "-verify"),
+			Qualification:     bootstrap.CapabilityQualified, Disposition: bootstrap.Migrate,
+		})
+	}
+	return decisions
+}
+
+// acceptedKeyDecisionMap is the map form the inventory builder takes.
+func acceptedKeyDecisionMap() map[bootstrap.ResourceRef]bootstrap.AdoptionResourceDecision {
+	decisions, ok := qualifiedAdoptionDecisions(acceptedKeys())
+	if !ok {
+		panic("the accepted decision set is not qualified")
+	}
+	return decisions
 }
 
 type adoptionRuntime struct {
@@ -159,25 +190,42 @@ func TestAdoptionStagesEncryptedSnapshotBeforeDestinationAndVerifiesActualAuth(t
 			if !reflect.DeepEqual(staged.Checkpoint.AdoptionResources, wantResources) {
 				t.Fatalf("discovered source inventory was not bounded: %+v", staged.Checkpoint.AdoptionResources)
 			}
-			wantDecisions, ok := adoptionDecisionsForInventory(wantResources, acceptedKeys()[0])
+			wantDecisions, ok := adoptionDecisionsForInventory(wantResources, acceptedKeyDecisionMap())
 			if !ok || !reflect.DeepEqual(staged.Checkpoint.AdoptionDecisions, wantDecisions) {
 				t.Fatalf("discovered source resources were not explicitly decided: %+v", staged.Checkpoint.AdoptionDecisions)
 			}
 			migrated := 0
+			migratedRefs := make([]bootstrap.ResourceRef, 0, len(staged.Checkpoint.AdoptionDecisions))
 			for _, decision := range staged.Checkpoint.AdoptionDecisions {
 				if decision.Disposition == bootstrap.Migrate {
 					migrated++
-					if decision.ResourceRef != bootstrap.AdoptionRefClientAPIKeys {
-						t.Fatalf("non-client resource migrated: %+v", decision)
-					}
+					migratedRefs = append(migratedRefs, decision.ResourceRef)
 					continue
 				}
 				if decision.ResourceRef == bootstrap.AdoptionRefClientAPIKeys || decision.ManualAction == "" || decision.Qualification != bootstrap.CapabilityPending {
 					t.Fatalf("discovered resource silently dropped or migrated: %+v", decision)
 				}
 			}
-			if migrated != 1 {
-				t.Fatal("client API keys were not the sole migrated resource")
+			// The migrated set is exactly the accepted evidence's kinds that this
+			// source actually carries, and it can never exceed the rules' migrated
+			// set.
+			authorized := map[bootstrap.ResourceRef]bool{}
+			for _, decision := range acceptedKeys() {
+				authorized[decision.ResourceRef] = true
+			}
+			wantMigrated := make([]bootstrap.ResourceRef, 0, len(acceptedKeys()))
+			for _, ref := range wantResources {
+				if authorized[ref] {
+					wantMigrated = append(wantMigrated, ref)
+				}
+			}
+			slices.Sort(wantMigrated)
+			slices.Sort(migratedRefs)
+			if !slices.Equal(migratedRefs, wantMigrated) {
+				t.Fatalf("migrated resources %v, evidence authorizes %v", migratedRefs, wantMigrated)
+			}
+			if migrated != len(wantMigrated) {
+				t.Fatal("client API keys were not part of the migrated set")
 			}
 			public, _ := json.Marshal(staged)
 			for _, secret := range []string{"source-client", "source-management", "never-migrate", "enc:v1"} {
