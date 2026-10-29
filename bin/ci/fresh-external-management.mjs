@@ -10,7 +10,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomBytes, createHash } from 'node:crypto';
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import { resolve, dirname } from 'node:path';
@@ -125,6 +125,7 @@ const managerVolume = project + '-manager-data';
 const cpaContainer = project + '-cpa';
 const managerContainer = project + '-manager';
 const ingressContainer = project + '-ingress';
+const v7Container = project + '-cpa-v7';
 
 function pass(name, observed) {
   report.checks.push({ name, result: 'PASS', ...(observed ? { observed } : {}) });
@@ -790,17 +791,6 @@ try {
   // ---- The v7 negative. A CPA older than v8 must be refused for writes while
   // its safe reads keep working. Without a pinned v7 binary the check is recorded
   // as not run rather than skipped silently.
-  if (process.env.CPAMP_D_CPA_LEGACY) {
-    notRun(
-      'a v7 CPA is refused for writes and allowed for reads',
-      'CPAMP_D_CPA_LEGACY was set but the v7 scenario needs its own container and the run budget did not reach it'
-    );
-  } else
-    notRun(
-      'a v7 CPA is refused for writes and allowed for reads',
-      'CPAMP_D_CPA_LEGACY is unset: no pinned v7.0.12 binary was available'
-    );
-
   // ---- Screenshots. Each surface is its own check: a rendering gap on one page
   // must not throw away the protocol evidence above, and a surface that cannot be
   // reached is recorded as NOT RUN with the page it landed on.
@@ -1002,6 +992,107 @@ try {
     return { code: result.payload.code };
   });
 
+  // This one replaces the CPA the whole run was built on with a v7 binary, so it
+  // runs after every other check has already read the v8 one.
+  if (process.env.CPAMP_D_CPA_LEGACY) {
+    await check('a v7 CPA is refused for writes and still answers a read', async () => {
+      const binary = process.env.CPAMP_D_CPA_LEGACY;
+      assert(existsSync(binary), 'CPAMP_D_CPA_LEGACY does not name a binary');
+      // v7 keeps the management key, the port and the auth directory at the
+      // document root, so it needs its own file rather than the v8 one.
+      writeFileSync(
+        resolve(out, '.cpa-v7-config.yaml'),
+        [
+          'port: 8317',
+          'host: "0.0.0.0"',
+          'remote-management:',
+          '  allow-remote: true',
+          `  secret-key: "${staleKey}"`,
+          '  disable-control-panel: true',
+          'auth-dir: "/cpa/auth"',
+          'api-keys:',
+          `  - "${spender.secret}"`,
+          '',
+        ].join('\n'),
+        { mode: 0o600 }
+      );
+      mkdirSync(resolve(out, '.cpa-v7-auth'), { recursive: true });
+      // The address the installation is committed to now answers as v7: the
+      // operator downgraded the CPA underneath a working connection.
+      docker('stop', cpaContainer);
+      docker(
+        'run',
+        '-d',
+        '--name',
+        v7Container,
+        '--network',
+        network,
+        '--network-alias',
+        cpaName,
+        '-v',
+        `${binary}:/usr/local/bin/cli-proxy-api:ro`,
+        '-v',
+        `${resolve(out, '.cpa-v7-config.yaml')}:/cpa/config.yaml`,
+        '-v',
+        `${resolve(out, '.cpa-v7-auth')}:/cpa/auth`,
+        '--entrypoint',
+        '/usr/local/bin/cli-proxy-api',
+        images['cpamp-runtime'],
+        '-config',
+        '/cpa/config.yaml'
+      );
+      await wait(async () => {
+        const probe = run(
+          ['docker', 'run', '--rm', '--network', network, '--entrypoint', 'wget',
+            images['cpamp-manager'], '-qO-', '--header=Authorization: Bearer ' + staleKey,
+            `http://${cpaName}:8317/v0/management/config`],
+          undefined,
+          false
+        );
+        return probe.status === 0;
+      }, 'the v7 CPA');
+
+      // The credential this Manager holds must be one the v7 CPA accepts, or the
+      // refusal below would be about the key rather than the version.
+      const accepted = run(
+        ['docker', 'run', '--rm', '--network', network, '--entrypoint', 'wget',
+          images['cpamp-manager'], '-qO-', '--header=Authorization: Bearer ' + staleKey,
+          `http://${cpaName}:8317/v0/management/config`],
+        undefined,
+        false
+      );
+      assert.equal(accepted.status, 0, 'the v7 CPA refused the stored credential');
+
+      // A write is refused with the version code before anything is sent. The
+      // rebind is the write that names the credential: its one verification read
+      // is what sees the v7 version, so nothing is persisted.
+      const write = await apiCall('POST', 'external/rebind', {
+        requestId: randomBytes(16).toString('hex'),
+        managementKey: staleKey,
+      });
+      assert.equal(write.status, 409, write.status + ' ' + JSON.stringify(write.payload));
+      if (write.payload.code !== 'external_cpa_version_unsupported') {
+        const logs = run(['docker', 'logs', '--tail', '30', v7Container], undefined, false);
+        throw new Error(
+          JSON.stringify(write.payload) + ' ||| ' + redact((logs.stdout || '') + (logs.stderr || ''))
+        );
+      }
+      // The version refusal is a write refusal. A read is never answered with it:
+      // whatever the read answers (this run already has a rotation refusal on
+      // record, so that is what it says), it is not the version code.
+      const read = await apiCall('GET', 'external/usage');
+      if (read.payload?.code === 'external_cpa_version_unsupported') {
+        throw new Error(JSON.stringify(read.payload));
+      }
+      return { write: write.payload.code, read: read.payload?.code ?? read.status };
+    });
+  } else {
+    notRun(
+      'a v7 CPA is refused for writes and still answers a read',
+      'CPAMP_D_CPA_LEGACY is unset: no pinned v7 binary was provided'
+    );
+  }
+
   report.result = 'PASS';
 } catch (error) {
   report.failure = redact(String(error.stack || error));
@@ -1030,7 +1121,7 @@ try {
   if (browser) await browser.close();
   // Only this run's containers, network and volume. Nothing named cpamp-* beyond
   // the project prefix is touched.
-  run(['docker', 'rm', '-f', cpaContainer, managerContainer, ingressContainer], undefined, false);
+  run(['docker', 'rm', '-f', cpaContainer, managerContainer, ingressContainer, v7Container], undefined, false);
   run(['docker', 'network', 'rm', network], undefined, false);
   run(['docker', 'volume', 'rm', managerVolume], undefined, false);
   // A secret must not survive in the artifact directory either.

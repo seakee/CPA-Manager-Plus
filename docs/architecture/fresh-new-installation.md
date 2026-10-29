@@ -600,6 +600,12 @@ the plugin resource proxy are all covered by the same gate.
   operator to the login form before any page could name the cause. This is the
   first refusal after an out-of-band rotation, which is exactly when the blocker
   has to appear.
+- Those requests are serialized, one at a time, and the refusal is re-read under
+  that lock. A console page opens six of them at once, and CPA bans an address
+  after five failed authentications: without the serialization a single page load
+  trips the ban, and the blocker could never be cleared, because the rebind that
+  would clear it is refused by the ban it caused. The console's own model read
+  (`/v1/models`) carries the same credential and is covered by the same rule.
 - New Managed and Adopt keep their existing bridge exactly as it was; the gate
   reads the committed strategy and hands the request straight through.
 
@@ -670,7 +676,13 @@ It is the acceptance for everything above:
    must stay below the ban threshold of five;
 7. rebind with the new key recovers everything, and the same key reports
    `reverified`;
-8. screenshots of the Keys blocker, the rebind dialog and the runtime version row.
+8. screenshots of the Keys blocker, the rebind dialog, the usage confirmation and
+   the runtime version row;
+9. the v7 negative: with `CPAMP_D_CPA_LEGACY` naming a pinned v7.0.12 binary, the
+   committed address is answered by that CPA instead, and a write is refused with
+   `external_cpa_version_unsupported` while a read is never answered with it.
+   v7 keeps its management key, port and auth directory at the document root, so
+   it needs its own config file rather than the v8 one.
 
 `report.json` (mode `0600`) carries per-check `PASS` / `FAIL` / `NOT RUN`. The v7
 negative is `NOT RUN` unless `CPAMP_D_CPA_LEGACY` names a pinned v7.0.12 binary.
