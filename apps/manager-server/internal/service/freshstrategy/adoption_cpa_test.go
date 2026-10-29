@@ -72,7 +72,12 @@ func TestAdoptionExactCPAV8WithSupervisor(t *testing.T) {
 		t.Run(string(class), func(t *testing.T) {
 			root := t.TempDir()
 			sourceRoot := filepath.Join(root, "source")
-			targetRoot := filepath.Join(root, "target")
+			// The Supervisor root is named exactly as it is in the installation
+			// (`<runtime root>/supervisor`, journal beside the destination). The
+			// Adopt posture pins the Supervisor-owned directories, so a harness that
+			// laid them out differently would prove a destination the product never
+			// stages.
+			targetRoot := filepath.Join(root, "supervisor")
 			for _, dir := range []string{sourceRoot, targetRoot, filepath.Join(sourceRoot, "auth")} {
 				if err := os.Mkdir(dir, 0o700); err != nil {
 					t.Fatal(err)
