@@ -688,12 +688,90 @@ container mounts its own volume and never the Manager store. A repo test asserts
 that topology against `docker-compose.yml` so the claim anchor, the Fresh CAS and
 the Key records cannot silently become reachable from the Runtime child.
 
-Adoption stops at a `committed` checkpoint plus the protected destination
-snapshot in this lane; `POST complete` still answers 409 for
-`strategy = adopt_existing` (`fresh.go:426`), so adoption does not yet reach
-product completion the way New Managed does. Completion arrives in a later
-slice. What it already writes is its own `external:sha256:` target identity, and
-it keeps `strategy = adopt_existing`; the prefixes are never merged.
+A committed adoption carries its own `external:sha256:` target identity and keeps
+`strategy = adopt_existing`; the prefixes are never merged. From that point it
+behaves like a New Managed installation: the Keys page, gateway configuration
+writes, gateway admission, Key usage, runtime status and operations all answer
+through the same install-derived authority (see *The Adopt installation
+authority* below).
+
+#### The Adopt installation authority
+
+One predicate decides which strategies this Manager owns a destination for
+(`freshkeyapply.ManagerOwnedStrategy`): New Managed and Adopt. Connect External
+is the user's own CPA and is never answered by it — it keeps its own connection,
+its own key routes and its own completion path.
+
+The authority is derived, never cached (`cmd/…/fresh_managed.go`): the committed
+checkpoint and the protected Manager connection must still name the normalized
+`CPAUpstreamURL`, the checkpoint's `DestinationConnectionIdentity` must be the
+identity its strategy derives — `managed:sha256:` for New Managed,
+`external:sha256:` for Adopt — and the decrypted credential must be the
+64-character install-derived management key. A mismatch fails closed instead of
+rebinding.
+
+**Destination posture.** The authenticated read of `/v8/management/config` with
+that credential is the real proof. New Managed proves the Supervisor's exact
+template; Adopt proves its own rules, because an adopted destination legitimately
+carries the source's content:
+
+| rule | New Managed | Adopt |
+| --- | --- | --- |
+| client keys | 1–2 canonical Manager key shapes | 1–128 unique printable source keys |
+| root sections | exactly the seven template roots | a subset of CPA v8's own vocabulary (`config-version`, `api-keys`, `plugins`, `quota-exceeded`, `client`, `server`, `management`, `access`, `credentials`, `routing`, `requests`, `oauth`, `upstream`, `multimedia`, `observability`), no exact count |
+| required roots | the template's | the template's: `config-version`, `server`, `management`, `access`, `oauth`, `plugins`, `observability` |
+| `observability.usage.usage-statistics-enabled` | `true` | `true` |
+| `plugins.enabled` | either (the operator's New Managed choice) | exactly the recorded opt-in |
+| management digest | bcrypt | bcrypt |
+
+Both postures keep the same Supervisor-owned facts: `server.host` 0.0.0.0 with
+port 8317, `management.allow-remote` on with the control and update panels off,
+the destination `auth-dir`, and the Supervisor plugin root. The posture is
+selected from the committed strategy (`cpa.PostureFor`) through a selector
+installed on the transport, so a strategy the selector does not own — Connect
+External, or an unset one — resolves to a refusing posture rather than the
+loosest one. `KeySnapshot`, `WriteKeySet`, `InstallOne`, the derived key grant,
+the target proof and `DefaultInstallCPAAuthorityProven` all read that posture, so
+gateway admission follows the same answer.
+
+**Usage statistics** are on for both adopted classes
+(`lifecycle/destination.go`, `managedSourceClass`): the switch is a template fact
+of the installation this Supervisor staged, not the operator's original CPA
+posture, and Key usage and the Key workspace read the destination's own
+aggregation. A source CPA that is not staged here is never rebuilt, so its
+posture is untouched.
+
+**Plugin opt-in** is accepted for Adopt and persisted on the checkpoint and in
+the protected destination snapshot, exactly as for New Managed; a replay
+presenting the other value is refused with `adopt_plugin_optin_conflict`. Connect
+External still refuses it (`fresh_strategy_plugin_scope_conflict`): that plugin
+root is the user's own process, not this installation's.
+
+**Completion** (`POST complete`, `cmd/…/fresh_adopt_migration.go`) is decided
+while `adoptMigrationMu` is held — the same mutex `startAdoptionMigration` takes
+— so a migration run can never start between the conditions and the CAS:
+
+1. a copy is not running → 409 `adopt_migration_running`;
+2. the installation is still `committed`;
+3. the connection decrypts and an authenticated read proves the Adopt posture →
+   503 `adopt_destination_unproven`;
+4. the destination carries at least one client key (part of the same read);
+5. the run recorded `Finished` with every planned item present → 409
+   `adopt_migration_incomplete`;
+6. no item is retryable, unless the body carries `{"acceptRetryable": true}` →
+   409 `adopt_migration_retryable` with `{"retryable": n}`.
+
+Only then does the CAS set `ProductComplete`, still under the lock, followed by
+the idempotent usage-collection startup. Manual items never block completion: a
+manual outcome is the operator's own work on the destination, and the run settled
+it. `Finished` is written by the migration itself in one final checkpoint after
+its last pass — it is never inferred from the item list, because a run stopped at
+an item leaves a list that looks exactly like a complete one.
+
+**The update channel stays New Managed only** (`cmd/…/fresh_updates.go`). An
+adopted destination is the operator's own CPA; the Fresh version-update wiring
+that replaces a Supervisor-staged artifact is a New Managed concern.
+
 
 #### Migration after the destination is committed
 

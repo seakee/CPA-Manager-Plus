@@ -18,6 +18,13 @@ The current [independent bounded acceptance](evidence/65eb659a172c9075afeddc959a
 records each consumer's evidence and limits. External acceptance does not
 guarantee connectivity for every topology; Gateway remains pending.
 
+The pins below were recomputed by the Adopt Step 4 lane
+(`runtime_destination_implementation.sha256`, `implementationSha256`, the adoption
+resource chain and the legacy transition chain) after that lane changed pinned
+sources. The change is pending the maintainer's pre-Beta re-acceptance: `accepted`
+stays under review `65eb659a`, no new review record was written, and the
+re-emitted evidence is the same harness run against the same pinned candidates.
+
 To accept a consumer, independent review must first identify the exact original
 case subset and explicitly accept its applicability to that consumer's actual
 implementation. Acceptance is valid only for exactly the scope this build can
