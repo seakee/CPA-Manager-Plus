@@ -27,7 +27,7 @@ func (a *freshApplication) observeInstallationRuntime(ctx context.Context) (mode
 }
 
 func (a *freshApplication) installationRuntime(w http.ResponseWriter, r *http.Request, op bootstrap.FreshOperation) {
-	if op.Strategy.Strategy != "" && !freshkeyapply.ManagerOwnedStrategy(op.Strategy.Strategy) {
+	if op.Strategy.Strategy != "" && !freshkeyapply.ManagerOwnedStrategy(op.Strategy) {
 		w.WriteHeader(http.StatusConflict)
 		return
 	}
@@ -55,7 +55,7 @@ type installationRuntimeObservation struct {
 }
 
 func (a *freshApplication) managedInstallationReady(ctx context.Context, op bootstrap.FreshOperation) bool {
-	if !freshkeyapply.ManagerOwnedStrategy(op.Strategy.Strategy) || op.Strategy.Stage != "committed" {
+	if !freshkeyapply.ManagerOwnedStrategy(op.Strategy) || op.Strategy.Stage != "committed" {
 		return false
 	}
 	s, err := a.observeInstallationRuntime(ctx)

@@ -153,7 +153,7 @@ func (s *Service) Targets(op bootstrap.FreshOperation, surface Surface) bool {
 		// qualify; an adopted destination is bound by the `external:` digest the
 		// adoption recorded, so the prefix is read from the strategy and never
 		// guessed from the value.
-		prefix, owned := managerOwnedDestinationPrefix(op.Strategy.Strategy)
+		prefix, owned := managerOwnedDestinationPrefix(op.Strategy)
 		return owned && strings.HasPrefix(op.Strategy.DestinationConnectionIdentity, prefix)
 	case ProfilePrivate:
 		// The private H1/direct profile names one attested runtime and artifact;

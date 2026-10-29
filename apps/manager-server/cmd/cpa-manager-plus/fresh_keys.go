@@ -32,7 +32,7 @@ func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op
 	// destination this Manager staged itself. Every other strategy must be
 	// admitted by the installation authority: External answers through its own
 	// committed connection, and an incomplete checkpoint answers nothing.
-	if op.Strategy.Strategy != "" && !freshkeyapply.ManagerOwnedStrategy(op.Strategy.Strategy) &&
+	if op.Strategy.Strategy != "" && !freshkeyapply.ManagerOwnedStrategy(op.Strategy) &&
 		(a.keyApply == nil || !a.keyApply.Targets(op, freshkeyapply.SurfaceKeyOperation)) {
 		w.WriteHeader(http.StatusConflict)
 		return

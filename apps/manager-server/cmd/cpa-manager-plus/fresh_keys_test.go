@@ -193,12 +193,23 @@ func TestFreshClientKeysAdminPersistenceAndStops(t *testing.T) {
 	// rather than serve an installation it does not own.
 	adopted := after.Operation
 	adopted.Strategy.Strategy = bootstrap.AdoptExisting
+	adopted.Strategy.SourceClass = bootstrap.AdoptNetworkExisting
 	adoptedRequest := httptest.NewRequest("POST", "/control/api/v2/api-keys", strings.NewReader(body))
 	adoptedRequest.Header.Set("Content-Type", "application/json")
 	served := httptest.NewRecorder()
 	app.clientKeys(served, adoptedRequest, adopted, "api-keys")
 	if served.Code != 200 || !strings.Contains(served.Body.String(), string(result.Key.ID)) {
 		t.Fatalf("adopted scope did not serve its Key workspace: %d %s", served.Code, served.Body.String())
+	}
+	// A legacy_managed adoption is Upgrade's source class, not a destination this
+	// lane staged, so the same route refuses it even though the strategy matches.
+	legacy := after.Operation
+	legacy.Strategy.Strategy = bootstrap.AdoptExisting
+	legacy.Strategy.SourceClass = bootstrap.AdoptLegacyManaged
+	legacyRecorder := httptest.NewRecorder()
+	app.clientKeys(legacyRecorder, httptest.NewRequest("POST", "/control/api/v2/api-keys", strings.NewReader(body)), legacy, "api-keys")
+	if legacyRecorder.Code != 409 {
+		t.Fatalf("legacy_managed scope answered without its installation authority: %d", legacyRecorder.Code)
 	}
 	external := after.Operation
 	external.Strategy.Strategy = bootstrap.ConnectExternal

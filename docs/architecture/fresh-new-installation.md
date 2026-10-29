@@ -695,6 +695,13 @@ writes, gateway admission, Key usage, runtime status and operations all answer
 through the same install-derived authority (see *The Adopt installation
 authority* below).
 
+That authority covers exactly two source classes: `new_managed`, and
+`adopt_existing` with source class `network_existing`. `legacy_managed` is
+Upgrade's source class — a destination this Fresh lane never staged, read or
+verified — so it is granted no install-derived authority at all; the same
+predicate refuses it on the Keys page, admission, usage and the update channel.
+An `adopt_existing` checkpoint with no source class is refused the same way.
+
 #### The Adopt installation authority
 
 One predicate decides which strategies this Manager owns a destination for
@@ -721,12 +728,16 @@ carries the source's content:
 | root sections | exactly the seven template roots | a subset of CPA v8's own vocabulary (`config-version`, `api-keys`, `plugins`, `quota-exceeded`, `client`, `server`, `management`, `access`, `credentials`, `routing`, `requests`, `oauth`, `upstream`, `multimedia`, `observability`), no exact count |
 | required roots | the template's | the template's: `config-version`, `server`, `management`, `access`, `oauth`, `plugins`, `observability` |
 | `observability.usage.usage-statistics-enabled` | `true` | `true` |
-| `plugins.enabled` | either (the operator's New Managed choice) | exactly the recorded opt-in |
+| `plugins.enabled` | either (the operator's own switch) | either (the operator's own switch) |
 | management digest | bcrypt | bcrypt |
 
 Both postures keep the same Supervisor-owned facts: `server.host` 0.0.0.0 with
 port 8317, `management.allow-remote` on with the control and update panels off,
-the destination `auth-dir`, and the Supervisor plugin root. The posture is
+the destination `auth-dir`, exactly one `access.api-keys` leaf, the closed
+`plugins` key set, and the Supervisor plugin root. The plugin switch itself is
+the operator's on both strategies — the plugin page opens for an adopted
+installation too, so a saved value can never invalidate a proof — and the
+recorded opt-in only drives the first start. The posture is
 selected from the committed strategy (`cpa.PostureFor`) through a selector
 installed on the transport, so a strategy the selector does not own — Connect
 External, or an unset one — resolves to a refusing posture rather than the
@@ -742,9 +753,12 @@ aggregation. A source CPA that is not staged here is never rebuilt, so its
 posture is untouched.
 
 **Plugin opt-in** is accepted for Adopt and persisted on the checkpoint and in
-the protected destination snapshot, exactly as for New Managed; a replay
-presenting the other value is refused with `adopt_plugin_optin_conflict`. Connect
-External still refuses it (`fresh_strategy_plugin_scope_conflict`): that plugin
+the protected destination snapshot, exactly as for New Managed, where it drives
+the template the Supervisor writes at first start. A *strategy replay* that
+presents the other value is refused with `adopt_plugin_optin_conflict`, because
+that is a different staged destination; the switch the destination carries
+afterwards is the operator's and is not part of the posture. Connect External
+still refuses the opt-in (`fresh_strategy_plugin_scope_conflict`): that plugin
 root is the user's own process, not this installation's.
 
 **Completion** (`POST complete`, `cmd/…/fresh_adopt_migration.go`) is decided
@@ -761,16 +775,25 @@ while `adoptMigrationMu` is held — the same mutex `startAdoptionMigration` tak
 6. no item is retryable, unless the body carries `{"acceptRetryable": true}` →
    409 `adopt_migration_retryable` with `{"retryable": n}`.
 
-Only then does the CAS set `ProductComplete`, still under the lock, followed by
-the idempotent usage-collection startup. Manual items never block completion: a
-manual outcome is the operator's own work on the destination, and the run settled
-it. `Finished` is written by the migration itself in one final checkpoint after
-its last pass — it is never inferred from the item list, because a run stopped at
-an item leaves a list that looks exactly like a complete one.
+Only then does the CAS set `ProductComplete`, still under the lock. The lock is
+released before the reply is written and before the idempotent usage-collection
+startup, which samples the destination over the network: a migration run must not
+wait on that sample to take the same mutex. Manual items never block completion:
+a manual outcome is the operator's own work on the destination, and the run
+settled it.
 
-**The update channel stays New Managed only** (`cmd/…/fresh_updates.go`). An
-adopted destination is the operator's own CPA; the Fresh version-update wiring
-that replaces a Supervisor-staged artifact is a New Managed concern.
+`Planned` is the plan the run fixed after its preflight and before its first
+write: what the record already held plus every item the run was going to settle.
+`Finished` is written by the migration in its final checkpoint only when the item
+list reached that plan — it is never inferred from the list, because a run
+stopped at an item leaves a list that looks exactly like a complete one. A stop
+therefore leaves `Finished` false with `len(Items) < Planned`, which is what the
+completion refuses.
+
+**The update channel stays New Managed only** (`cmd/…/fresh_updates.go`). The
+Fresh version-update wiring that replaces a Supervisor-staged artifact is Later,
+and until it exists there is no update path this lane may offer an adopted
+installation; nothing about the operator's own CPA is the reason.
 
 
 #### Migration after the destination is committed

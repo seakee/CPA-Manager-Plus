@@ -200,9 +200,12 @@ type adoptCompleteRequest struct {
 //  5. the run recorded `Finished` with every planned item present;
 //  6. no item is retryable, unless the request accepts them.
 //
-// Everything is decided while `adoptMigrationMu` is held, and the CAS that sets
-// `ProductComplete` runs under the same lock, so a run can never start between
-// the last check and the write.
+// Every one of them is decided while `adoptMigrationMu` is held, and the CAS that
+// sets `ProductComplete` runs under the same lock, so a run can never start
+// between the last check and the write. The lock is released before the reply is
+// written and before the usage startup runs: that startup samples the destination
+// over the network, and a migration run must not wait on a sample to take the
+// same lock.
 func (a *freshApplication) adoptComplete(w http.ResponseWriter, r *http.Request, op bootstrap.FreshOperation, record freshstore.Record, continuation string, freshAuth bool) {
 	var request adoptCompleteRequest
 	// An empty body is the ordinary call; any body is bounded and closed.
@@ -231,31 +234,55 @@ func (a *freshApplication) adoptComplete(w http.ResponseWriter, r *http.Request,
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}
-	// Everything below is decided while the migration lock is held. A run that is
-	// starting holds the same lock, so it can neither slip between these checks and
-	// the CAS nor be decided away from them: the completion either waits for the
-	// run to settle, or the run waits until the installation is already complete.
 	a.adoptMigrationMu.Lock()
-	defer a.adoptMigrationMu.Unlock()
+	decision := a.decideAdoptionCompletion(r.Context(), op, record, managementKey, continuation, freshAuth, request)
+	a.adoptMigrationMu.Unlock()
+	if decision.code != "" {
+		writeFreshAdoptCompleteError(w, decision.status, decision.code, decision.retryable)
+		return
+	}
+	if decision.status != 0 {
+		w.WriteHeader(decision.status)
+		return
+	}
+	// Completion is the moment the install-derived CPA authority exists, so the
+	// same idempotent startup path as a resumed install runs now.
+	a.startUsageCollection(decision.next.Operation)
+	writeFreshJSON(w, decision.next.Operation)
+}
+
+// adoptCompletion is what the completion decided under the migration lock: the
+// completed record, or the refusal the operator acts on. Exactly one of the two
+// is populated — a zero status with a code is a coded refusal, a non-zero status
+// without a code is a bare HTTP refusal.
+type adoptCompletion struct {
+	next      freshstore.Record
+	status    int
+	code      string
+	retryable int
+}
+
+// decideAdoptionCompletion runs the completion's checks and its CAS. The caller
+// holds `adoptMigrationMu` and releases it before using the result: nothing here
+// may hold the lock across a network sample other than the proof itself, which
+// has to be decided with the run's single-flight flag.
+func (a *freshApplication) decideAdoptionCompletion(ctx context.Context, op bootstrap.FreshOperation, record freshstore.Record, managementKey, continuation string, freshAuth bool, request adoptCompleteRequest) adoptCompletion {
 	if a.adoptMigrationRunning {
 		// The operator retries once the copy has settled. Nothing is written.
-		writeFreshAdoptCompleteError(w, http.StatusConflict, "adopt_migration_running", 0)
-		return
+		return adoptCompletion{status: http.StatusConflict, code: "adopt_migration_running"}
 	}
 	// One authenticated read of the destination is conditions 3 and 4: the Adopt
 	// posture proves the key this Manager installed, and the snapshot carries the
 	// client keys the destination actually has.
-	if _, err := a.keyApply.AdoptedDestinationKeys(r.Context(), managementKey); err != nil {
-		writeFreshAdoptCompleteError(w, http.StatusServiceUnavailable, "adopt_destination_unproven", 0)
-		return
+	if _, err := a.keyApply.AdoptedDestinationKeys(ctx, managementKey); err != nil {
+		return adoptCompletion{status: http.StatusServiceUnavailable, code: "adopt_destination_unproven"}
 	}
 	summary := freshstore.AdoptionSummary{}
 	if record.AdoptionSummary != nil {
 		summary = *record.AdoptionSummary
 	}
 	if !summary.Finished || len(summary.Items) < summary.Planned {
-		writeFreshAdoptCompleteError(w, http.StatusConflict, "adopt_migration_incomplete", 0)
-		return
+		return adoptCompletion{status: http.StatusConflict, code: "adopt_migration_incomplete"}
 	}
 	retryable := 0
 	for _, item := range summary.Items {
@@ -264,10 +291,9 @@ func (a *freshApplication) adoptComplete(w http.ResponseWriter, r *http.Request,
 		}
 	}
 	if retryable > 0 && !request.AcceptRetryable {
-		writeFreshAdoptCompleteError(w, http.StatusConflict, "adopt_migration_retryable", retryable)
-		return
+		return adoptCompletion{status: http.StatusConflict, code: "adopt_migration_retryable", retryable: retryable}
 	}
-	next, err := a.store.Update(r.Context(), op.Identity, op.Revision, func(record *freshstore.Record) error {
+	next, err := a.store.Update(ctx, op.Identity, op.Revision, func(record *freshstore.Record) error {
 		if freshAuth {
 			if err := a.authority.ValidateContinuation(*record, continuation); err != nil {
 				return err
@@ -280,13 +306,9 @@ func (a *freshApplication) adoptComplete(w http.ResponseWriter, r *http.Request,
 		return nil
 	})
 	if err != nil {
-		w.WriteHeader(http.StatusConflict)
-		return
+		return adoptCompletion{status: http.StatusConflict}
 	}
-	// Completion is the moment the install-derived CPA authority exists, so the
-	// same idempotent startup path as a resumed install runs now.
-	a.startUsageCollection(next.Operation)
-	writeFreshJSON(w, next.Operation)
+	return adoptCompletion{next: next}
 }
 
 // writeFreshAdoptCompleteError refuses one adoption completion with the code the

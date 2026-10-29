@@ -70,7 +70,7 @@ func newMigrationFakeCPA(t *testing.T) *migrationFakeCPA {
 		disabled: map[string]bool{}, runtimeOnly: map[string]bool{}, refuse: map[string]bool{},
 		writeFailures:    map[string]int{},
 		downloadFailures: map[string]bool{},
-		config:        map[string]any{"config-version": json.Number("8")},
+		config:           map[string]any{"config-version": json.Number("8")},
 	}
 	fake.server = httptest.NewServer(http.HandlerFunc(fake.serve))
 	t.Cleanup(fake.server.Close)
@@ -1086,6 +1086,44 @@ func TestCompletionIsRefusedWhileTheMigrationIsRunning(t *testing.T) {
 	completed := fixture.reload(t)
 	if replay := fixture.complete(t); replay.Code != http.StatusOK || adoptionItemCount(fixture.reload(t)) != adoptionItemCount(completed) {
 		t.Fatalf("completion replay answered %d", replay.Code)
+	}
+}
+
+// The completion's usage startup samples the destination over the network, so it
+// runs after the migration lock is released: a run that starts meanwhile must not
+// wait on that sample to take the same lock.
+func TestCompletionReleasesTheMigrationLockBeforeUsageStarts(t *testing.T) {
+	fixture := settledAdoption(t)
+	fixture.app.runCtx = context.Background()
+	entered, release := make(chan struct{}), make(chan struct{})
+	fixture.app.startIdentityWorker = func(context.Context) {
+		close(entered)
+		<-release
+	}
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	completed := make(chan *httptest.ResponseRecorder, 1)
+	go func() { completed <- fixture.complete(t) }()
+	<-entered
+	// The startup is in flight and holds no migration lock.
+	free := make(chan bool, 1)
+	go func() { free <- fixture.app.adoptMigrationInFlight() }()
+	select {
+	case <-free:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the completion held the migration lock across the usage startup")
+	}
+	close(release)
+	if response := <-completed; response.Code != http.StatusOK {
+		t.Fatalf("the settled adopt completion answered %d: %s", response.Code, response.Body.String())
+	}
+	if !fixture.reload(t).Operation.ProductComplete {
+		t.Fatal("the completion did not finish the installation")
 	}
 }
 

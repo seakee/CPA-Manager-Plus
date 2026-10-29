@@ -195,7 +195,7 @@ func TestFreshInstallationRuntimeRejectsOtherStrategiesWithoutCallingRuntime(t *
 	// Adopt is a Manager-owned installation: the destination the Manager staged
 	// is its own Runtime, so the same observation answers for it.
 	adopted := httptest.NewRecorder()
-	app.installationRuntime(adopted, httptest.NewRequest(http.MethodGet, "/control/api/v2/installation/runtime", nil), bootstrap.FreshOperation{Strategy: bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.AdoptExisting}})
+	app.installationRuntime(adopted, httptest.NewRequest(http.MethodGet, "/control/api/v2/installation/runtime", nil), bootstrap.FreshOperation{Strategy: bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.AdoptExisting, SourceClass: bootstrap.AdoptNetworkExisting}})
 	if adopted.Code != http.StatusOK || runtime.calls != 1 {
 		t.Fatalf("adopted installation lost its Runtime observation: %d", adopted.Code)
 	}

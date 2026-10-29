@@ -98,7 +98,7 @@ func TestTargetsSelectsTheProfileOfTheService(t *testing.T) {
 		// `external:` digest the adoption recorded, so the prefix comes from the
 		// strategy and is never inferred from the value.
 		adopted := bootstrap.FreshStrategyCheckpoint{
-			Strategy: bootstrap.AdoptExisting, Stage: "committed",
+			Strategy: bootstrap.AdoptExisting, SourceClass: bootstrap.AdoptNetworkExisting, Stage: "committed",
 			TargetIdentity: managedRuntimeIdentity, TargetGeneration: 9, TargetArtifactID: managedArtifact(),
 			DestinationConnectionIdentity: "external:sha256:" + strings.Repeat("f", 64),
 		}
@@ -108,11 +108,22 @@ func TestTargetsSelectsTheProfileOfTheService(t *testing.T) {
 		// The two identities are distinct values. An adopted checkpoint carrying
 		// the New Managed prefix is a record this Manager never wrote.
 		adopted := bootstrap.FreshStrategyCheckpoint{
-			Strategy: bootstrap.AdoptExisting, Stage: "committed",
+			Strategy: bootstrap.AdoptExisting, SourceClass: bootstrap.AdoptNetworkExisting, Stage: "committed",
 			TargetIdentity: managedRuntimeIdentity, TargetGeneration: 9, TargetArtifactID: managedArtifact(),
 			DestinationConnectionIdentity: managedDestination,
 		}
 		sameAnswer(t, managed, operation(adopted), false, canonicalSurfaces...)
+	})
+	t.Run("managed refuses a legacy_managed adoption on every surface", func(t *testing.T) {
+		// `legacy_managed` is Upgrade's source class, not this lane's authority: no
+		// Fresh adopt path staged that destination, so no key, admission or gateway
+		// write may be granted on it.
+		legacy := bootstrap.FreshStrategyCheckpoint{
+			Strategy: bootstrap.AdoptExisting, SourceClass: bootstrap.AdoptLegacyManaged, Stage: "committed",
+			TargetIdentity: managedRuntimeIdentity, TargetGeneration: 9, TargetArtifactID: managedArtifact(),
+			DestinationConnectionIdentity: "external:sha256:" + strings.Repeat("f", 64),
+		}
+		sameAnswer(t, managed, operation(legacy), false, canonicalSurfaces...)
 	})
 	t.Run("managed refuses an unbound adopted checkpoint", func(t *testing.T) {
 		sameAnswer(t, managed, operation(adoptedPrivate), false, canonicalSurfaces...)

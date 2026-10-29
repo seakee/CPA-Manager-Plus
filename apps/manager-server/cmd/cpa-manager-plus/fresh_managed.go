@@ -38,7 +38,7 @@ func managedInstallSource(store freshstore.Store, protector *security.Protector,
 			return freshkeyapply.ManagedInstall{}, freshkeyapply.ErrUnavailable
 		}
 		checkpoint := record.Operation.Strategy
-		if !freshkeyapply.ManagerOwnedStrategy(checkpoint.Strategy) || checkpoint.Stage != "committed" || record.Connection == nil {
+		if !freshkeyapply.ManagerOwnedStrategy(checkpoint) || checkpoint.Stage != "committed" || record.Connection == nil {
 			return freshkeyapply.ManagedInstall{}, freshkeyapply.ErrUnavailable
 		}
 		// The Manager connection is the CPA the destination was staged for. A
