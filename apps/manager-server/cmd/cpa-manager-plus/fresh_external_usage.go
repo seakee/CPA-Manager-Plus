@@ -279,6 +279,14 @@ func (a *freshApplication) confirmExternalUsageCollection(w http.ResponseWriter,
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
+	// A credential the user's CPA already refused is not presented again. This
+	// endpoint re-runs the collection start, and that start samples the CPA before
+	// it may write anything: answering the recorded blocker here is the same answer
+	// the read gives, and it costs the CPA no request.
+	if a.externalReadGrant(r.Context()).Refused {
+		a.writeExternalUsageError(w, cpa.ErrManagementRejected)
+		return
+	}
 	// A confirm while collection is already live is a no-op: the switch it would
 	// authorise is already on, and restarting the Collector here would cancel the
 	// running one and open the window this Manager works to avoid. The started
