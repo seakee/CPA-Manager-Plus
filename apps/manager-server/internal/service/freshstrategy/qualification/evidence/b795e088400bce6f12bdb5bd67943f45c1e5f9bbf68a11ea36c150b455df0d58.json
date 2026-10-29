@@ -1,0 +1,35 @@
+{
+  "artifactObservation": {
+    "candidateRef": "CPA8-8.0.13-linux-amd64-plugin",
+    "observedArchiveSha256": "50ecffb47fdd81c8c5a9825a73a7a905ab66342337e274f39c4276b92d3533f3",
+    "observedBinarySha256": "b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41",
+    "provenance": "locally-verified"
+  },
+  "contractId": "cpamp-cpa-v8-qualification",
+  "evidence": [
+    {
+      "id": "fresh-legacy-managed-stage-v8-r1",
+      "kind": "sanitized-trace",
+      "sha256": "775278c34f531c786466576c86745cc1b4d7e10ac2e8f735b4776148421d41d9"
+    }
+  ],
+  "manifestRevision": "fresh-legacy-managed-stage-v8-r1",
+  "manifestSha256": "316f7452e29145039eb856dee65cfc15c2f0bdc86e839be4cc4b43d8a1794694",
+  "results": [
+    {
+      "assertionOutcome": "pass",
+      "capability": "supported",
+      "caseRef": "fresh-legacy-managed-stage-v8-r1",
+      "evidenceRefs": [
+        "fresh-legacy-managed-stage-v8-r1"
+      ],
+      "executionState": "completed"
+    }
+  ],
+  "run": {
+    "id": "cpamp-fresh-legacy-transition-6e1f5157c9a3",
+    "runnerCommit": "6e1f5157c9a3af9ba4d0143bb376b5da048fc9de",
+    "testedTree": "cae415fcb97a0cd32097b184c90d5191e359ddf1"
+  },
+  "schemaVersion": 1
+}

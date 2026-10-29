@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "runId": "cpamp-fresh-adoption-resource-network-6e1f5157c9a3",
+  "caseRef": "fresh-network-client-api-keys-replay",
+  "sourceClass": "network_existing",
+  "consumerImplementationSha256": "07f2bcd447772522f56f38ff0ebd1f97fb63d07b804f1071b4e6099740e5fc40",
+  "replayVerified": true,
+  "copiedResources": {
+    "client-api-keys": 2,
+    "cpa-auth-files": 2,
+    "cpa-config-routing": 12,
+    "provider-state-api-keys": 5
+  },
+  "targetArtifactId": "sha256:b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41",
+  "targetArchiveSha256": "50ecffb47fdd81c8c5a9825a73a7a905ab66342337e274f39c4276b92d3533f3",
+  "targetBinarySha256": "b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41",
+  "sourcePreserved": true,
+  "gatewayPending": true
+}
