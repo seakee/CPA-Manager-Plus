@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -10,12 +11,14 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/fresh"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshadopt"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 )
@@ -45,6 +48,10 @@ type migrationFakeCPA struct {
 	refuse      map[string]bool
 	config      map[string]any
 	writes      []string
+	uploadsLog  []string
+	// beforeDownload blocks every credential download until it returns. It is
+	// how a test holds the copy inside a source read.
+	beforeDownload func()
 }
 
 func newMigrationFakeCPA(t *testing.T) *migrationFakeCPA {
@@ -157,8 +164,12 @@ func (f *migrationFakeCPA) listCredentials(w http.ResponseWriter) {
 func (f *migrationFakeCPA) downloadCredential(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
 	f.mu.Lock()
+	gate := f.beforeDownload
 	data, ok := f.credentials[name]
 	f.mu.Unlock()
+	if gate != nil {
+		gate()
+	}
 	if !ok {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -171,6 +182,7 @@ func (f *migrationFakeCPA) uploadCredential(w http.ResponseWriter, r *http.Reque
 	body, _ := io.ReadAll(r.Body)
 	f.mu.Lock()
 	f.writes = append(f.writes, "POST "+r.URL.Path+" "+name)
+	f.uploadsLog = append(f.uploadsLog, name)
 	refused := f.refuse[name]
 	if !refused {
 		f.credentials[name] = body
@@ -255,6 +267,13 @@ func migrationMerge(document map[string]any, parts []string, value any) {
 		}
 	}
 	cursor[key] = value
+}
+
+// uploads reports the file name of every credential upload this CPA received.
+func (f *migrationFakeCPA) uploads() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.uploadsLog...)
 }
 
 func (f *migrationFakeCPA) writeCount() int {
@@ -393,6 +412,34 @@ func (f *adoptMigrationFixture) reload(t *testing.T) freshstore.Record {
 	return record
 }
 
+// blockCredentialDownloads holds every source credential download until the
+// returned function is called, and reports the first time one was entered. The
+// release is idempotent and always runs at cleanup, so a failed assertion can
+// never leave the background run holding an HTTP connection.
+func blockCredentialDownloads(t *testing.T, fixture *adoptMigrationFixture) (func(), <-chan struct{}) {
+	t.Helper()
+	var once sync.Once
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	fixture.source.mu.Lock()
+	fixture.source.beforeDownload = func() {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-gate
+	}
+	fixture.source.mu.Unlock()
+	release := func() { once.Do(func() { close(gate) }) }
+	t.Cleanup(release)
+	return release, entered
+}
+
+// wait blocks until the background Adopt migration of this fixture has
+// finished. The commit reply no longer waits for it, so every assertion on the
+// per-item summary reads the record only after the run has settled.
+func (f *adoptMigrationFixture) wait() { f.app.waitAdoptionMigration() }
+
 func (f *adoptMigrationFixture) strategy(t *testing.T, record freshstore.Record) *httptest.ResponseRecorder {
 	t.Helper()
 	body, err := json.Marshal(struct {
@@ -420,6 +467,14 @@ func TestCommittedAdoptionMigratesTheBoundedInventory(t *testing.T) {
 	if committed.Code != http.StatusOK {
 		t.Fatalf("commit: %d %s", committed.Code, committed.Body.String())
 	}
+	var reply struct {
+		bootstrap.FreshOperation
+		MigrationState string `json:"migrationState"`
+	}
+	if json.Unmarshal(committed.Body.Bytes(), &reply) != nil || reply.MigrationState != adoptMigrationStateRunning {
+		t.Fatalf("the commit reply did not report the running migration: %s", committed.Body.String())
+	}
+	fixture.wait()
 	record := fixture.reload(t)
 	if record.Operation.Strategy.Stage != "committed" || record.Connection == nil {
 		t.Fatalf("adoption did not commit: %+v", record.Operation.Strategy)
@@ -490,6 +545,7 @@ func TestManualAndFailedItemsNeverFailTheAdoption(t *testing.T) {
 	if committed.Code != http.StatusOK {
 		t.Fatalf("a manual item failed the adoption: %d %s", committed.Code, committed.Body.String())
 	}
+	fixture.wait()
 	record := fixture.reload(t)
 	if record.Operation.Strategy.Stage != "committed" || record.AdoptionSummary == nil {
 		t.Fatalf("adoption state after a manual item: %+v summary=%v", record.Operation.Strategy, record.AdoptionSummary)
@@ -498,11 +554,15 @@ func TestManualAndFailedItemsNeverFailTheAdoption(t *testing.T) {
 	if manual == 0 {
 		t.Fatal("no manual item was recorded for the runtime-only credential")
 	}
-	// The reply carries the revision the caller must resume from, which is the
-	// one the migration's last checkpoint wrote.
+	// The reply carries the committed revision it committed, not the one the
+	// background migration advanced to afterwards: the reply never waits for the
+	// copy, so it cannot claim the copy's progress.
 	var replied bootstrap.FreshOperation
-	if json.Unmarshal(committed.Body.Bytes(), &replied) != nil || replied.Revision != record.Operation.Revision {
-		t.Fatalf("reply revision %d != durable revision %d", replied.Revision, record.Operation.Revision)
+	if json.Unmarshal(committed.Body.Bytes(), &replied) != nil || replied.Revision >= record.Operation.Revision {
+		t.Fatalf("reply revision %d must precede the migration's revision %d", replied.Revision, record.Operation.Revision)
+	}
+	if replied.Strategy.Stage != "committed" {
+		t.Fatalf("the reply must carry the committed checkpoint: %+v", replied.Strategy)
 	}
 }
 
@@ -514,6 +574,7 @@ func TestCommittedReplayResumesWithoutRewritingItems(t *testing.T) {
 	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
 		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
 	}
+	fixture.wait()
 	committed := fixture.reload(t)
 	before, beforeItems := fixture.destination.writeCount(), len(committed.AdoptionSummary.Items)
 
@@ -521,6 +582,7 @@ func TestCommittedReplayResumesWithoutRewritingItems(t *testing.T) {
 	if replay.Code != http.StatusOK {
 		t.Fatalf("replay: %d %s", replay.Code, replay.Body.String())
 	}
+	fixture.wait()
 	again := fixture.reload(t)
 	if fixture.destination.writeCount() != before {
 		t.Fatalf("a replay wrote %d times over settled items", fixture.destination.writeCount()-before)
@@ -542,6 +604,7 @@ func TestAdoptionMigrationNeverWritesTheSource(t *testing.T) {
 	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
 		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
 	}
+	fixture.wait()
 	if writes := fixture.source.writeCount(); writes != 0 {
 		t.Fatalf("the source received %d write requests", writes)
 	}
@@ -559,6 +622,7 @@ func TestAdoptionMigrationLeaksNoSecret(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
 	}
+	fixture.wait()
 	record := fixture.reload(t)
 	summary, err := json.Marshal(record.AdoptionSummary)
 	if err != nil {
@@ -592,6 +656,7 @@ func TestUnreachableSourceLeavesTheAdoptionCommitted(t *testing.T) {
 	if committed.Code != http.StatusOK {
 		t.Fatalf("an unreachable source failed the adoption: %d %s", committed.Code, committed.Body.String())
 	}
+	fixture.wait()
 	record := fixture.reload(t)
 	if record.Operation.Strategy.Stage != "committed" || record.Connection == nil {
 		t.Fatalf("the adoption did not commit: %+v", record.Operation.Strategy)
@@ -601,4 +666,143 @@ func TestUnreachableSourceLeavesTheAdoptionCommitted(t *testing.T) {
 	}
 }
 
-var _ = filepath.Join
+// The commit reply must not wait for the copy: it reports the committed
+// checkpoint and the state `running`, and the reply is written while the
+// migration is still working.
+func TestCommitReplyReturnsBeforeTheMigrationEnds(t *testing.T) {
+	fixture := newAdoptMigrationFixture(t)
+	// The source holds a referenced credential the fake answers slowly: every
+	// download blocks until the test releases it, which is exactly the case a
+	// synchronous commit reply would hang on.
+	release, entered := blockCredentialDownloads(t, fixture)
+	committed := fixture.strategy(t, fixture.record)
+	if committed.Code != http.StatusOK {
+		t.Fatalf("commit: %d %s", committed.Code, committed.Body.String())
+	}
+	var reply struct {
+		bootstrap.FreshOperation
+		MigrationState string `json:"migrationState"`
+	}
+	if json.Unmarshal(committed.Body.Bytes(), &reply) != nil || reply.MigrationState != adoptMigrationStateRunning {
+		t.Fatalf("the commit reply must report the running migration: %s", committed.Body.String())
+	}
+	if reply.Strategy.Stage != "committed" {
+		t.Fatalf("the reply must carry the committed checkpoint: %+v", reply.Strategy)
+	}
+	// The reply arrived while the copy is still inside a source read, and the
+	// record it committed has not copied a single credential yet.
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reply returned before the migration ever started")
+	}
+	if record := fixture.reload(t); record.AdoptionSummary != nil {
+		for _, item := range record.AdoptionSummary.Items {
+			if item.Kind == freshstore.AdoptionKindCredential && item.Outcome == freshstore.AdoptionMigrated {
+				t.Fatalf("the reply waited for the copy: %q was already migrated", item.Item)
+			}
+		}
+	}
+	release()
+	fixture.wait()
+	if record := fixture.reload(t); record.AdoptionSummary == nil || len(record.AdoptionSummary.Items) == 0 {
+		t.Fatal("the background migration recorded nothing after the reply")
+	}
+}
+
+// Two committed replays must not start two copies of the same migration: the
+// second start finds the run in flight and only reports that it is running.
+func TestConcurrentReplaysStartOneMigrationRun(t *testing.T) {
+	fixture := newAdoptMigrationFixture(t)
+	release, entered := blockCredentialDownloads(t, fixture)
+	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
+		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
+	}
+	<-entered
+	committed := fixture.reload(t)
+
+	// A second committed replay while the first run is still inside the copy.
+	replay := fixture.strategy(t, committed)
+	if replay.Code != http.StatusOK {
+		t.Fatalf("replay: %d %s", replay.Code, replay.Body.String())
+	}
+	var reply struct {
+		MigrationState string `json:"migrationState"`
+	}
+	if json.Unmarshal(replay.Body.Bytes(), &reply) != nil || reply.MigrationState != adoptMigrationStateRunning {
+		t.Fatalf("a replay while a run is in flight must report running, got %s", replay.Body.String())
+	}
+	release()
+	fixture.wait()
+
+	// Exactly one copy happened: each uploadable credential was uploaded once,
+	// and the record holds one item per identity.
+	uploads := map[string]int{}
+	for _, entry := range fixture.destination.uploads() {
+		uploads[entry]++
+	}
+	for name, count := range uploads {
+		if count != 1 {
+			t.Fatalf("credential %s was uploaded %d times by concurrent runs", name, count)
+		}
+	}
+	record := fixture.reload(t)
+	seen := map[string]bool{}
+	for _, item := range record.AdoptionSummary.Items {
+		if seen[item.Item] {
+			t.Fatalf("the concurrent runs recorded %q twice", item.Item)
+		}
+		seen[item.Item] = true
+	}
+}
+
+// The overall deadline stops the run. What it recorded stays recorded, and the
+// items it never reached stay unrecorded so a later replay can retry them.
+func TestMigrationDeadlineStopsTheRunWithTheRemainderUnrecorded(t *testing.T) {
+	fixture := newAdoptMigrationFixture(t)
+
+	// A cancelled run context is what the deadline produces, and it is the only
+	// difference between "stopped by the clock" and "ran to the end" that the
+	// executor can see. Reproduce it directly so the test does not have to wait
+	// ten minutes.
+	source, err := freshadopt.NewSource(freshadopt.Endpoint{BaseURL: fixture.source.URL(), ManagementKey: migrationSourceKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// This test drives the executor directly rather than through the commit, so
+	// the destination fake is pinned to a known secret first.
+	const deadlineDestinationKey = "deadline-destination-key"
+	fixture.destination.mu.Lock()
+	fixture.destination.auth, fixture.destination.authFn = deadlineDestinationKey, nil
+	fixture.destination.mu.Unlock()
+	destination, err := freshadopt.NewDestination(freshadopt.Endpoint{BaseURL: fixture.destination.URL(), ManagementKey: deadlineDestinationKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	recorded := 0
+	result, runErr := freshadopt.New(source, destination).Run(ctx, freshstore.AdoptionSummary{}, func(summary freshstore.AdoptionSummary) error {
+		recorded = len(summary.Items)
+		if recorded == 2 {
+			cancel()
+		}
+		return nil
+	})
+	if runErr == nil {
+		t.Fatal("a cancelled run reported success")
+	}
+	if recorded != 2 || len(result.Summary.Items) > 2 {
+		t.Fatalf("a stopped run recorded %d durable and %d returned items", recorded, len(result.Summary.Items))
+	}
+	// The remainder is not in the summary, which is what makes it retryable.
+	if _, ok := result.Summary.Item("credential:gemini-c.json"); ok {
+		t.Fatal("a stopped run recorded an item it never reached")
+	}
+}
+
+// The deadline is a real bound on one run, not just a comment.
+func TestAdoptionMigrationDeadlineIsTenMinutes(t *testing.T) {
+	if adoptMigrationDeadline != 10*time.Minute {
+		t.Fatalf("migration deadline = %s", adoptMigrationDeadline)
+	}
+}
