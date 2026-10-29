@@ -185,12 +185,19 @@ func TestFreshInstallationRuntimeRejectsOtherStrategiesWithoutCallingRuntime(t *
 	app := newInstallationTestApplication(t)
 	runtime := &installationTestRuntime{status: validInstallationRuntime()}
 	app.runtime = runtime
-	for _, strategy := range []bootstrap.CPAStrategy{bootstrap.ConnectExternal, bootstrap.AdoptExisting} {
-		response := httptest.NewRecorder()
-		app.installationRuntime(response, httptest.NewRequest(http.MethodGet, "/control/api/v2/installation/runtime", nil), bootstrap.FreshOperation{Strategy: bootstrap.FreshStrategyCheckpoint{Strategy: strategy}})
-		if response.Code != http.StatusConflict || runtime.calls != 0 {
-			t.Fatal("non-New strategy acquired managed Runtime observation")
-		}
+	// Connect External owns no Manager Runtime: its CPA is the user's, so the
+	// observation route refuses it before any status read.
+	response := httptest.NewRecorder()
+	app.installationRuntime(response, httptest.NewRequest(http.MethodGet, "/control/api/v2/installation/runtime", nil), bootstrap.FreshOperation{Strategy: bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.ConnectExternal}})
+	if response.Code != http.StatusConflict || runtime.calls != 0 {
+		t.Fatal("External acquired managed Runtime observation")
+	}
+	// Adopt is a Manager-owned installation: the destination the Manager staged
+	// is its own Runtime, so the same observation answers for it.
+	adopted := httptest.NewRecorder()
+	app.installationRuntime(adopted, httptest.NewRequest(http.MethodGet, "/control/api/v2/installation/runtime", nil), bootstrap.FreshOperation{Strategy: bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.AdoptExisting, SourceClass: bootstrap.AdoptNetworkExisting}})
+	if adopted.Code != http.StatusOK || runtime.calls != 1 {
+		t.Fatalf("adopted installation lost its Runtime observation: %d", adopted.Code)
 	}
 }
 

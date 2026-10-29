@@ -12,6 +12,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeys"
 )
 
@@ -32,7 +33,7 @@ func (a *freshApplication) installedRuntimeIdentity(ctx context.Context) (string
 		return "", err
 	}
 	checkpoint := record.Operation.Strategy
-	if checkpoint.Strategy != bootstrap.NewManaged || checkpoint.Stage != "committed" {
+	if !freshkeyapply.ManagerOwnedStrategy(checkpoint) || checkpoint.Stage != "committed" {
 		return "", nil
 	}
 	return checkpoint.TargetIdentity, nil
@@ -96,7 +97,7 @@ func (a *freshApplication) attemptUsageStart(ctx context.Context, op bootstrap.F
 	// event may be collected before its key is attributable, so a failed backfill
 	// fails the whole attempt instead of starting a Collector that loses history.
 	checkpoint := op.Strategy
-	if checkpoint.Strategy == bootstrap.NewManaged && checkpoint.Stage == "committed" && checkpoint.TargetIdentity != "" {
+	if freshkeyapply.ManagerOwnedStrategy(checkpoint) && checkpoint.Stage == "committed" && checkpoint.TargetIdentity != "" {
 		if _, err := a.keyRepo.BindFreshKeySources(ctx, checkpoint.TargetIdentity, time.Now().UnixMilli()); err != nil {
 			log.Printf("Fresh key usage bindings unavailable: %v", err)
 			return false
@@ -132,7 +133,7 @@ func (a *freshApplication) attemptUsageStart(ctx context.Context, op bootstrap.F
 				return false
 			}
 			started = true
-		case checkpoint.Strategy == bootstrap.NewManaged && a.managedSource != nil && a.legacyCollector != nil:
+		case freshkeyapply.ManagerOwnedStrategy(checkpoint) && a.managedSource != nil && a.legacyCollector != nil:
 			install, err := a.managedSource(ctx)
 			if err != nil {
 				// Managed and External installs have no other authority. Usage

@@ -286,8 +286,9 @@ func TestDestinationStageReplayReopenAndEverySpawnRetainOwnedConfiguration(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Adoption keeps the base template: only the default Fresh New Managed
-	// installation productizes usage statistics.
+	// An adopted destination is staged by this Supervisor, so it carries the
+	// installation's template facts: usage statistics are on, which is what the
+	// Key workspace reads back.
 	var adopted struct {
 		Observability struct {
 			Usage struct {
@@ -295,8 +296,8 @@ func TestDestinationStageReplayReopenAndEverySpawnRetainOwnedConfiguration(t *te
 			} `json:"usage"`
 		} `json:"observability"`
 	}
-	if json.Unmarshal(configBefore, &adopted) != nil || adopted.Observability.Usage.Enabled {
-		t.Fatal("adoption destination changed the CPA usage statistics posture")
+	if json.Unmarshal(configBefore, &adopted) != nil || !adopted.Observability.Usage.Enabled {
+		t.Fatal("adoption destination does not record usage statistics")
 	}
 	// A lost successful reply replays without replacing files or spawning.
 	if op, err := f.starter.StageDestination(t.Context(), r); err != nil || !reflect.DeepEqual(op, staged) {

@@ -11,6 +11,13 @@ import (
 )
 
 // Called only behind canonical routing and the Fresh Admin verifier.
+//
+// The Fresh version-update channel stays New Managed only, and deliberately does
+// not follow `freshkeyapply.ManagerOwnedStrategy`. It is not an installation
+// authority: the update check compares the Manager's own build against upstream,
+// and its Fresh wiring is scheduled for Later. Admitting an adopted or an
+// External checkpoint here would publish a channel decision to an installation
+// whose update story this lane does not define.
 func (a *freshApplication) updateChannel(w http.ResponseWriter, r *http.Request, op bootstrap.FreshOperation) {
 	if !op.GatewayPending || op.Strategy.Strategy != "" && op.Strategy.Strategy != bootstrap.NewManaged {
 		w.WriteHeader(http.StatusConflict)

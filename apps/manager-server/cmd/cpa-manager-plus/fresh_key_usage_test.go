@@ -418,7 +418,7 @@ func TestFreshCompleteStartsUsageOnceAndBackfillsStagedKeys(t *testing.T) {
 	stub := usageManagementStub(t)
 	app.managedSource = func(context.Context) (freshkeyapply.ManagedInstall, error) {
 		sourceCalls++
-		return freshkeyapply.ManagedInstall{BaseURL: stub.URL, ManagementKey: strings.Repeat("a", 64)}, nil
+		return freshkeyapply.ManagedInstall{BaseURL: stub.URL, ManagementKey: strings.Repeat("a", 64), Strategy: string(bootstrap.NewManaged)}, nil
 	}
 	app.startIdentityWorker = func(context.Context) { workerStarts++ }
 
@@ -603,7 +603,7 @@ func TestFreshUsageStartUsesHostLifetimeAndRetriesAfterFailure(t *testing.T) {
 		if sourceCalls == 1 {
 			return freshkeyapply.ManagedInstall{}, freshkeyapply.ErrUnavailable
 		}
-		return freshkeyapply.ManagedInstall{BaseURL: stub.URL, ManagementKey: strings.Repeat("a", 64)}, nil
+		return freshkeyapply.ManagedInstall{BaseURL: stub.URL, ManagementKey: strings.Repeat("a", 64), Strategy: string(bootstrap.NewManaged)}, nil
 	}
 	app.startIdentityWorker = func(context.Context) { workerStarts++ }
 
@@ -668,7 +668,7 @@ func TestFreshUsageStartIsSerializedAcrossConcurrentTriggers(t *testing.T) {
 		default:
 		}
 		<-release
-		return freshkeyapply.ManagedInstall{BaseURL: stub.URL, ManagementKey: strings.Repeat("a", 64)}, nil
+		return freshkeyapply.ManagedInstall{BaseURL: stub.URL, ManagementKey: strings.Repeat("a", 64), Strategy: string(bootstrap.NewManaged)}, nil
 	}
 	app.startIdentityWorker = func(context.Context) { atomic.AddInt32(&workerStarts, 1) }
 
@@ -718,7 +718,7 @@ func TestFreshUsageStartRetriesOnlyTheMarkerAfterAMarkerFailure(t *testing.T) {
 	stub := usageManagementStub(t)
 	app.managedSource = func(context.Context) (freshkeyapply.ManagedInstall, error) {
 		sourceCalls++
-		return freshkeyapply.ManagedInstall{BaseURL: stub.URL, ManagementKey: strings.Repeat("a", 64)}, nil
+		return freshkeyapply.ManagedInstall{BaseURL: stub.URL, ManagementKey: strings.Repeat("a", 64), Strategy: string(bootstrap.NewManaged)}, nil
 	}
 	collectionStarted := func() int {
 		t.Helper()

@@ -265,3 +265,35 @@ func TestFreshAdoptionInventoryKeepsManualResourcesExplicit(t *testing.T) {
 		t.Fatal("retired aggregate configuration ref accepted")
 	}
 }
+
+// TestPluginOptInBelongsToTheStrategiesThatStageADestination pins the store's own
+// rule: an adopted checkpoint is staged by the Supervisor, so the plugin opt-in is
+// its operator's decision exactly as for New Managed, while an external CPA keeps
+// its own plugin posture.
+func TestPluginOptInBelongsToTheStrategiesThatStageADestination(t *testing.T) {
+	adopted := func() FreshStrategyCheckpoint {
+		return FreshStrategyCheckpoint{
+			Strategy: AdoptExisting, Stage: "staged", TargetIdentity: "runtime-adopt", TargetGeneration: 4,
+			TargetArtifactID: "sha256:" + strings.Repeat("c", 64),
+			SourceIdentity:   "external:sha256:" + strings.Repeat("d", 64), SourceClass: AdoptNetworkExisting,
+			DestinationConnectionIdentity: "external:sha256:" + strings.Repeat("e", 64),
+			AdoptionResources:             []ResourceRef{AdoptionRefClientAPIKeys},
+			AdoptionDecisions:             []AdoptionResourceDecision{freshKeysDecision()},
+		}
+	}
+	if err := adopted().validate(); err != nil {
+		t.Fatalf("adopt checkpoint without the opt-in rejected: %v", err)
+	}
+	opted := adopted()
+	opted.PluginsEnabled = true
+	if err := opted.validate(); err != nil {
+		t.Fatalf("adopt checkpoint refused the opt-in: %v", err)
+	}
+	external := FreshStrategyCheckpoint{
+		Strategy: ConnectExternal, Stage: "committed", TargetIdentity: "external:sha256:" + strings.Repeat("d", 64),
+		TargetGeneration: 1, PluginsEnabled: true,
+	}
+	if err := external.validate(); err == nil {
+		t.Fatal("external checkpoint accepted the opt-in")
+	}
+}

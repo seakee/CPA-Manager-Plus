@@ -149,6 +149,7 @@ func managedFixture(t *testing.T) (*Service, *managedCPA, *ModelSource, string) 
 	source := &ModelSource{install: ManagedInstall{
 		RunID: "managed:operation-default-install", Generation: "9", Identity: managedRuntimeIdentity,
 		ArtifactID: managedArtifact(), BaseURL: server.URL, ManagementKey: cpa.management,
+		Strategy: "new_managed",
 	}}
 	s := NewManaged(r, keys, rt, server.URL, source.get)
 	return s, cpa, source, string(installed.Key.ID)

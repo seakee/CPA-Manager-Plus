@@ -881,7 +881,9 @@ func TestManualItemNeverFailsTheAdoption(t *testing.T) {
 
 // The checkpoint is the only durable record of the run, so it has to be
 // written once per item, in migration order, before the next item is attempted.
-// A run that batched at the end would lose every proven item to a crash.
+// A run that batched at the end would lose every proven item to a crash. One
+// final checkpoint carries the run-finished marker: completion reads it, and a
+// run stopped at an item leaves a list that looks exactly like a complete one.
 func TestEveryItemIsCheckpointedInOrder(t *testing.T) {
 	source, destination := sourceFixture(t), destinationFixture(t)
 	var snapshots []freshstore.AdoptionSummary
@@ -889,13 +891,24 @@ func TestEveryItemIsCheckpointedInOrder(t *testing.T) {
 		snapshots = append(snapshots, current)
 		return nil
 	})
-	if len(snapshots) != len(summary.Items) {
-		t.Fatalf("checkpointed %d times for %d items", len(snapshots), len(summary.Items))
-	}
 	if len(summary.Items) == 0 {
 		t.Fatal("no items recorded")
 	}
-	for index, snapshot := range snapshots {
+	if !summary.Finished || summary.Planned != len(summary.Items) {
+		t.Fatalf("finished run did not record its marker: %+v", summary)
+	}
+	if len(snapshots) != len(summary.Items)+1 {
+		t.Fatalf("checkpointed %d times for %d items and one marker", len(snapshots), len(summary.Items))
+	}
+	for _, snapshot := range snapshots[:len(summary.Items)] {
+		if snapshot.Finished {
+			t.Fatal("an item checkpoint claimed the run finished")
+		}
+	}
+	if last := snapshots[len(snapshots)-1]; !last.Finished || last.Planned != len(summary.Items) || len(last.Items) != len(summary.Items) {
+		t.Fatalf("final checkpoint is not the run-finished marker: %+v", last)
+	}
+	for index, snapshot := range snapshots[:len(summary.Items)] {
 		// Each checkpoint holds exactly the items resolved so far, in order, and
 		// is a strict prefix of the final summary.
 		if len(snapshot.Items) != index+1 || !reflect.DeepEqual(snapshot.Items[index], summary.Items[index]) {
@@ -988,6 +1001,52 @@ func TestAFailedCheckpointStopsTheRunWithoutWritingLaterItems(t *testing.T) {
 		t.Fatal("the retried item left the wrong bytes on the destination")
 	}
 	source.usesOnlyReads(t)
+}
+
+// `Planned` is the plan, not the prefix a run reached. A run that stops at a
+// refused checkpoint has settled fewer items than it planned and has not reached
+// the end of its list, so it leaves the run-finished marker unset — otherwise
+// completion would accept a migration that copied half the inventory.
+func TestStoppedRunLeavesThePlanUnfinished(t *testing.T) {
+	source, destination := sourceFixture(t), destinationFixture(t)
+	sourceWire, err := NewSource(t.Context(), source.endpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinationWire, err := NewDestination(t.Context(), destination.endpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	errCheckpoint := errors.New("checkpoint refused")
+	calls, planned := 0, 0
+	result, runErr := New(sourceWire, destinationWire, migratingDecisions()).Run(context.Background(), freshstore.AdoptionSummary{}, func(current freshstore.AdoptionSummary) error {
+		calls++
+		if calls > 1 && current.Planned != planned {
+			t.Fatalf("the plan changed during the run: %d → %d", planned, current.Planned)
+		}
+		planned = current.Planned
+		if calls == 3 {
+			return errCheckpoint
+		}
+		return nil
+	})
+	if !errors.Is(runErr, errCheckpoint) {
+		t.Fatalf("a failed checkpoint must stop the run: %v", runErr)
+	}
+	stopped := result.Summary
+	if stopped.Finished {
+		t.Fatal("a run that stopped mid-plan recorded the run-finished marker")
+	}
+	if stopped.Planned <= len(stopped.Items) {
+		t.Fatalf("planned %d items but the stop left the list at %d", stopped.Planned, len(stopped.Items))
+	}
+	// The plan is the whole list: the run that finishes it records exactly the
+	// items the stopped run planned, and marks itself finished.
+	completed := runMigration(t, source, destination, stopped)
+	if !completed.Finished || completed.Planned != len(completed.Items) || completed.Planned != stopped.Planned {
+		t.Fatalf("the finished run does not match its plan: finished=%v planned=%d items=%d stoppedPlan=%d",
+			completed.Finished, completed.Planned, len(completed.Items), stopped.Planned)
+	}
 }
 
 // A nil checkpoint is a dry run: nothing is persisted and the summary is still

@@ -8,6 +8,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 )
 
 // Observe through the existing Host-configured transport. Browser input cannot
@@ -26,7 +27,7 @@ func (a *freshApplication) observeInstallationRuntime(ctx context.Context) (mode
 }
 
 func (a *freshApplication) installationRuntime(w http.ResponseWriter, r *http.Request, op bootstrap.FreshOperation) {
-	if op.Strategy.Strategy != "" && op.Strategy.Strategy != bootstrap.NewManaged {
+	if op.Strategy.Strategy != "" && !freshkeyapply.ManagerOwnedStrategy(op.Strategy) {
 		w.WriteHeader(http.StatusConflict)
 		return
 	}
@@ -54,7 +55,7 @@ type installationRuntimeObservation struct {
 }
 
 func (a *freshApplication) managedInstallationReady(ctx context.Context, op bootstrap.FreshOperation) bool {
-	if op.Strategy.Strategy != bootstrap.NewManaged || op.Strategy.Stage != "committed" {
+	if !freshkeyapply.ManagerOwnedStrategy(op.Strategy) || op.Strategy.Stage != "committed" {
 		return false
 	}
 	s, err := a.observeInstallationRuntime(ctx)

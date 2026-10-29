@@ -118,9 +118,10 @@ type Request struct {
 	ExpectedRuntimeGeneration model.RuntimeGeneration    `json:"expectedRuntimeGeneration,omitempty"`
 	ExpectedArtifactID        model.RuntimeArtifactID    `json:"expectedArtifactId,omitempty"`
 	AdoptSourceClass          bootstrap.AdoptSourceClass `json:"adoptSourceClass,omitempty"`
-	// PluginsEnabled is the wizard's explicit plugin opt-in. It is accepted only
-	// for a New Managed install and is persisted with the checkpoint, so a retry
-	// or a Supervisor restart reads the decision instead of the browser.
+	// PluginsEnabled is the wizard's explicit plugin opt-in. It is accepted for the
+	// strategies whose destination this Manager stages — New Managed and Adopt —
+	// and is persisted with the checkpoint, so a retry or a Supervisor restart
+	// reads the decision instead of the browser.
 	PluginsEnabled bool `json:"pluginsEnabled,omitempty"`
 	// Loaded only by the application from the existing protected Fresh store.
 	AdoptionCiphertext string `json:"-"`
@@ -175,10 +176,16 @@ func (s *Service) Execute(ctx context.Context, op bootstrap.FreshOperation, requ
 	switch request.Strategy {
 	case bootstrap.NewManaged:
 		return scoped.newManaged(ctx, op, request)
-	case bootstrap.ConnectExternal, bootstrap.AdoptExisting:
-		// Plugins are loaded by the Supervisor's own CPA only. An external or
-		// adopted CPA keeps its plugin posture; accepting the flag there would
-		// silently claim a resource this installation does not own.
+	case bootstrap.AdoptExisting:
+		// An adopted destination is staged from the Supervisor's own template, so
+		// its plugin root is a resource this installation owns exactly as a New
+		// Managed one does: the opt-in is the operator's decision for the new CPA,
+		// not a claim on the source. The source's own plugin posture is untouched.
+		return scoped.existing(ctx, op, request)
+	case bootstrap.ConnectExternal:
+		// An external CPA is the user's own process with its own plugin root.
+		// Accepting the flag would silently claim a resource this installation does
+		// not own.
 		if request.PluginsEnabled {
 			return Result{}, &Blocker{Code: "fresh_strategy_plugin_scope_conflict"}
 		}

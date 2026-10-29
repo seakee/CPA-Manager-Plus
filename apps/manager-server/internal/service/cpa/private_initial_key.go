@@ -63,6 +63,10 @@ type Transport struct {
 	attempted              bool
 	providerSeed           func() (PrivateProviderSeed, error)
 	posture                proofPosture
+	// postureFor resolves the per-install posture of a Manager-owned profile whose
+	// strategy is only known after construction (New Managed or Adopt). It is nil
+	// for the private profile and for External, whose posture is fixed.
+	postureFor PostureSelector
 }
 
 func NewTransport() *Transport {
@@ -132,7 +136,10 @@ func (t *Transport) InstallOne(ctx context.Context, proof TargetProof, managemen
 	if t.attempted {
 		return unknown, ErrApplyUnknown
 	}
-	if t.posture.managed {
+	// The destination posture follows the strategy that staged it: an adopted
+	// destination is proven against the adopted rules.
+	posture := t.postureOf()
+	if posture.managed {
 		// A default install cannot attest a disposable, exclusive writer. The
 		// caller replaces that attestation with the committed Fresh checkpoint
 		// and the authenticated destination read-back below.
@@ -146,7 +153,7 @@ func (t *Transport) InstallOne(ctx context.Context, proof TargetProof, managemen
 		return unknown, ErrProofUnavailable
 	}
 	status, full, err := t.request(ctx, http.MethodGet, "/v8/management/config", managementKey, nil)
-	validSeed := t.posture.matches(full) && proof.ProviderSeed == (PrivateProviderSeed{})
+	validSeed := posture.matches(full) && proof.ProviderSeed == (PrivateProviderSeed{})
 	if t.providerSeed != nil {
 		seed, sourceErr := t.providerSeed()
 		validSeed = sourceErr == nil && seed == proof.ProviderSeed && privateProviderConfig(full, seed, "")
@@ -201,7 +208,14 @@ func (t *Transport) InstallOne(ctx context.Context, proof TargetProof, managemen
 // plugins published at the Supervisor-owned plugin root. Fields are
 // server-owned facts of the destination template, never caller input.
 type proofPosture struct {
-	managed         bool
+	managed bool
+	// adopt selects the adopted destination rules: a subset root set and the
+	// source's client list, instead of the new_managed template. It is set only by
+	// `adoptProofPosture`.
+	adopt bool
+	// deny refuses every read. It is the posture of a Manager-owned profile whose
+	// selector could not answer, which is a destination this Manager may not prove.
+	deny            bool
 	host            string
 	allowRemote     bool
 	usageStatistics bool
@@ -244,6 +258,12 @@ func looksLikeBcrypt(value string) bool {
 // list. Authentication of the read itself already proves that the persisted
 // management digest belongs to the presented credential.
 func (p proofPosture) matches(data []byte) bool {
+	if p.deny {
+		return false
+	}
+	if p.adopt {
+		return p.matchesAdopt(data)
+	}
 	host := p.host
 	if host == "" {
 		host = "127.0.0.1"

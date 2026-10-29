@@ -575,7 +575,7 @@ func TestManagedUsageStartRecordsCollectionOnlyAfterAuthenticating(t *testing.T)
 		op := h.operation(t)
 		return freshkeyapply.ManagedInstall{
 			RunID: "managed-run", Generation: "1", Identity: op.Strategy.TargetIdentity,
-			BaseURL: managed.URL, ManagementKey: strings.Repeat("a", 64),
+			BaseURL: managed.URL, ManagementKey: strings.Repeat("a", 64), Strategy: "new_managed",
 		}, nil
 	}
 	h.app.startUsageCollection(h.operation(t))

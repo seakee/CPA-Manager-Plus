@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"slices"
-
-	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 )
 
 type KeySnapshot struct {
@@ -40,16 +38,17 @@ func (t *Transport) KeySnapshot(ctx context.Context, management string) (KeySnap
 	if json.Unmarshal(body, &root) != nil {
 		return result, ErrSourceConflict
 	}
+	posture := t.postureOf()
 	var access map[string]json.RawMessage
-	if json.Unmarshal(root["access"], &access) != nil || len(access) != 1 || json.Unmarshal(access["api-keys"], &result.Keys) != nil || len(result.Keys) < 1 || len(result.Keys) > 2 {
+	if json.Unmarshal(root["access"], &access) != nil || len(access) != 1 || json.Unmarshal(access["api-keys"], &result.Keys) != nil {
 		return result, ErrSourceConflict
 	}
-	// A default installation starts with the install-generated key, so both
-	// canonical shapes are legitimate projections of this destination.
-	for i, key := range result.Keys {
-		if !model.ValidCanonicalClientKey(key) || slices.Contains(result.Keys[:i], key) {
-			return result, ErrSourceConflict
-		}
+	// The list belongs to the destination's own strategy: a Manager-owned New
+	// Managed destination starts with the install-generated key, so both canonical
+	// shapes are legitimate projections; an adopted destination carries the
+	// source's opaque list up to the adoption bound.
+	if !posture.validKeys(result.Keys) {
+		return result, ErrSourceConflict
 	}
 	root["access"] = json.RawMessage(`{"api-keys":[]}`)
 	empty, _ := json.Marshal(root)
@@ -60,7 +59,7 @@ func (t *Transport) KeySnapshot(ctx context.Context, management string) (KeySnap
 			return result, e
 		}
 	}
-	valid := t.posture.matches(empty)
+	valid := posture.matches(empty)
 	if t.providerSeed != nil {
 		seed, e := t.providerSeed()
 		valid = e == nil && privateProviderConfig(empty, seed, "")
@@ -96,13 +95,10 @@ func (t *Transport) KeySnapshot(ctx context.Context, management string) (KeySnap
 // WriteKeySet is called only after a durable per-step claim and a current Host
 // source/writer grant. It sends one request, never retries, and never clears Keys.
 func (t *Transport) WriteKeySet(ctx context.Context, management string, keys []string) error {
-	if len(keys) < 1 || len(keys) > 2 {
+	// The writer accepts exactly what the snapshot policy of this destination
+	// accepts, so a list the read would refuse can never be written.
+	if !t.postureOf().validKeys(keys) {
 		return ErrSourceConflict
-	}
-	for i, key := range keys {
-		if !model.ValidCanonicalClientKey(key) || slices.Contains(keys[:i], key) {
-			return ErrSourceConflict
-		}
 	}
 	body, _ := json.Marshal(keys)
 	code, _, err := t.request(ctx, http.MethodPut, "/v8/management/config/access/api-keys", management, body)

@@ -117,9 +117,10 @@ func (c FreshStrategyCheckpoint) validate() error {
 	} else if c.Strategy != AdoptExisting && (c.SourceIdentity != "" || c.SourceClass != "" || c.DestinationConnectionIdentity != "" || c.DestinationAttempt != 0 || c.PluginsEnabled || len(c.AdoptionDecisions) != 0 || len(c.AdoptionResources) != 0) {
 		return errors.New("foreign adoption checkpoint")
 	}
-	// Plugins are a Supervisor-owned resource of the Manager's own destination.
-	// An adopted or external CPA keeps its own plugin posture untouched.
-	if c.PluginsEnabled && c.Strategy != NewManaged {
+	// Plugins are a Supervisor-owned resource of the Manager's own destination, so
+	// the opt-in belongs to the strategies that stage one: New Managed and Adopt.
+	// An external CPA is the user's own process and keeps its own plugin posture.
+	if c.PluginsEnabled && c.Strategy != NewManaged && c.Strategy != AdoptExisting {
 		return errors.New("foreign plugin opt-in")
 	}
 	if strings.TrimSpace(c.TargetIdentity) == "" || c.TargetGeneration == 0 || len(c.Unsupported) != 0 {

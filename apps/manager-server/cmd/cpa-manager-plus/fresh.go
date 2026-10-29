@@ -289,6 +289,15 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 		// The destination address is the managed installation's own CPA, not the
 		// private loopback profile the default Transport dials.
 		a.gatewayConfig.EnableManaged(cfg.CPAUpstreamURL)
+		// New Managed and Adopt prove different destination postures, so the page
+		// asks the same committed checkpoint the key authority asks.
+		a.gatewayConfig.SetPostureSelector(func() (cpa.DestinationPosture, bool) {
+			install, err := a.managedSource(context.Background())
+			if err != nil {
+				return cpa.DestinationPosture{}, false
+			}
+			return cpa.PostureFor(install.Strategy)
+		})
 	}
 	// The plugin capability the navigation reads is proven, not assumed: this
 	// installation must be able to show that its saved connection serves the
@@ -468,20 +477,14 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 	case resource == "strategy" && r.Method == http.MethodPost:
 		a.executeStrategy(w, r, op)
 	case resource == "complete" && r.Method == http.MethodPost:
-		if a.adoptMigrationInFlight() {
-			// A completion decided while the copy is still running would finish
-			// the installation under a migration that then keeps writing into it:
-			// the last item of the run would land after the operator was told the
-			// installation was complete, and Step 4's completion conditions read
-			// exactly the summary this run is still filling in. Nothing is
-			// changed; the operator retries once the run has settled.
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusConflict)
-			writeFreshJSON(w, map[string]string{"code": "adopt_migration_running"})
-			return
-		}
+		// An adoption's completion reads the migration summary the run is still
+		// filling in, so the whole decision — the in-flight check, the conditions
+		// and the CAS that sets `ProductComplete` — is taken under the same mutex a
+		// run takes to start. A run therefore can never begin between the check
+		// and the CAS, and a completion decided while one is running changes
+		// nothing.
 		if op.Strategy.Strategy == bootstrap.AdoptExisting {
-			w.WriteHeader(http.StatusConflict)
+			a.adoptComplete(w, r, op, record, continuation, freshAuth)
 			return
 		}
 		if op.ProductComplete {
