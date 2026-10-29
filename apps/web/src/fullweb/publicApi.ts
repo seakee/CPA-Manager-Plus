@@ -1,4 +1,5 @@
 import { readRoutingContext, resolveRoutingContext, type RoutingContext } from './routingContext';
+import { isAdoptBlocker } from './freshAdoption';
 import { parseGatewayJSON, stringifyGatewayJSON } from './gatewayRuleJSON';
 import { parseRuntimeJSON, runtimeRequestJSON } from './runtimeGeneration';
 
@@ -32,6 +33,16 @@ const GATEWAY_CONFIG_ERROR_CODES: Record<string, true> = {
   invalid_config: true,
 };
 
+// The completion refusals an adoption's operator can act on. A code outside this
+// set never reaches the UI: the completion screen shows a message for a cause it
+// knows, and a plain failure otherwise.
+const COMPLETE_ERROR_CODES: Record<string, true> = {
+  adopt_migration_running: true,
+  adopt_migration_incomplete: true,
+  adopt_migration_retryable: true,
+  adopt_destination_unproven: true,
+};
+
 // The gateway configuration surface is `gateway/config` plus its sub-resources.
 const isGatewayConfigResource = (resource: string) =>
   resource === 'gateway/config' || resource.startsWith('gateway/config/');
@@ -44,7 +55,11 @@ export class PublicApiError extends Error {
     readonly code?: string,
     // A CPA rejection names the field and the redacted diagnostic it refused.
     readonly field?: string,
-    readonly detail?: string
+    readonly detail?: string,
+    // The item count of an `adopt_migration_retryable` completion refusal.
+    readonly retryable?: number,
+    // The bounded capability list an Adopt strategy blocker names.
+    readonly unsupported?: readonly string[]
   ) {
     super(`Public API ${kind}`);
     this.name = 'PublicApiError';
@@ -107,6 +122,9 @@ export function createPublicApiClient(
       body !== undefined ||
       resource === 'operation' ||
       resource === 'installation/runtime' ||
+      // One progress poll, bounded by the same 15 s as every other read: the
+      // flow's own timer decides when the next poll starts.
+      resource === 'installation/adoption' ||
       resource === 'runtime/status' ||
       resource === 'runtime/operations' ||
       resource.startsWith('runtime/operations/') ||
@@ -149,23 +167,32 @@ export function createPublicApiClient(
         let code: string | undefined;
         let field: string | undefined;
         let detail: string | undefined;
+        let unsupported: readonly string[] | undefined;
+        let retryable: number | undefined;
         const retryResource = isGatewayConfigResource(resource);
         const operationResource = method === 'GET' && resource.startsWith('api-keys/operations/');
+        // The completion refusals are the only coded answers a POST can carry
+        // about an adoption's own run, so they are read for both statuses the
+        // server uses: a 409 for "not yet" and a 503 for "cannot be proven".
+        const completeResource = resource === 'complete';
         if (
           (retryResource ||
             operationResource ||
+            completeResource ||
             (resource === 'strategy' && response.status === 409)) &&
           (response.status === 409 ||
             response.status === 503 ||
-            (retryResource &&
-              (response.status === 400 || response.status === 422)))
+            (retryResource && (response.status === 400 || response.status === 422)))
         ) {
           try {
             const payload = (await response.json()) as Record<string, unknown>;
             if (retryResource) {
               // Only a recognised code unlocks the diagnostic: an unrecognised
               // upstream payload must not smuggle its message into the UI.
-              if (typeof payload.code === 'string' && GATEWAY_CONFIG_ERROR_CODES[payload.code] === true)
+              if (
+                typeof payload.code === 'string' &&
+                GATEWAY_CONFIG_ERROR_CODES[payload.code] === true
+              )
                 code = payload.code;
               if (code) {
                 if (typeof payload.field === 'string') field = payload.field;
@@ -181,10 +208,28 @@ export function createPublicApiClient(
               )
                 operationResult = payload.result;
             } else if (resource === 'strategy') {
-              // Only one bounded CPA-source error is actionable to this UI.
-              // Admin authentication errors remain separate 401/403 responses.
+              // Only bounded CPA-source errors are actionable to this UI. Admin
+              // authentication errors remain separate 401/403 responses. An
+              // Adopt blocker travels with the capabilities it says are missing,
+              // so the flow can explain the refusal the server named.
               if (payload.Code === 'management_authentication_rejected')
                 code = 'management_authentication_rejected';
+              else if (isAdoptBlocker(payload.Code)) {
+                code = payload.Code;
+                if (Array.isArray(payload.Unsupported))
+                  unsupported = payload.Unsupported.filter(
+                    (entry): entry is string =>
+                      typeof entry === 'string' && !!entry && entry.length <= 64
+                  );
+              }
+            } else if (completeResource) {
+              // An adoption completion answers with a lowercase code and, for a
+              // retryable run, the item count the operator decides over.
+              if (typeof payload.code === 'string' && COMPLETE_ERROR_CODES[payload.code] === true) {
+                code = payload.code;
+                if (Number.isSafeInteger(payload.retryable) && (payload.retryable as number) > 0)
+                  retryable = payload.retryable as number;
+              }
             } else if (
               typeof payload.code === 'string' &&
               payload.code.startsWith('key_operation_') &&
@@ -196,13 +241,28 @@ export function createPublicApiClient(
             // A malformed failed response does not provide a journal snapshot.
           }
         }
-        throw new PublicApiError('http', response.status, operationResult, code, field, detail);
+        throw new PublicApiError(
+          'http',
+          response.status,
+          operationResult,
+          code,
+          field,
+          detail,
+          retryable,
+          unsupported
+        );
       }
       // The gateway projection carries family rules, whose wide integers must not
       // be rounded on the way in either.
       if (isGatewayConfigResource(resource)) return parseGatewayJSON(await response.text()) as T;
       return (
-        ['operation', 'strategy', 'complete', 'installation/runtime'].includes(resource)
+        [
+          'operation',
+          'strategy',
+          'complete',
+          'installation/runtime',
+          'installation/adoption',
+        ].includes(resource)
           ? parseRuntimeJSON(await response.text())
           : await response.json()
       ) as T;
