@@ -549,3 +549,58 @@ consumers; this repair only makes the real evidence expressible and checkable.
 
 Scope check: no generic AQ framework, second ledger, new Runtime authority,
 remote attestation, full AQ rerun, Phase4-04 or UI is introduced.
+
+## Migrated resource kinds (evidence-backed `migrate`)
+
+Updated 2026-10-29.
+
+The adoption executor has copied credential files, gateway configuration and the
+provider API-key sections since the inventory was bounded, but
+`freshAdoptionRefRules` still decided every kind except client API keys as a
+blanket manual action, so the operator was told to redo work the adoption had
+already done. Three refs are now qualified: `cpa-auth-files`,
+`cpa-config-routing`, `provider-state-api-keys`. Each keeps its manual action as
+the fallback, so a source class whose evidence does not authorize a kind gets
+exactly the manual action it had before.
+
+The verdict is evidence-backed per kind, not per class. All three resource
+traces carry a per-kind count (`resourceCounts`, `copiedResources`,
+`verifiedResources`); a ref is authorized only when all three name its key, and
+every authorized ref must be in `MigratedAdoptionResourceRefs()`. A trace that
+silently dropped a kind therefore fails the whole chain instead of authorizing a
+resource the run never exercised.
+
+The counts come from the real executor, not from a fixture.
+`TestAdoptionExactCPAV8WithSupervisor` runs `freshadopt.New(source,
+destination).Run(...)` from the live source into the verified exact v8
+destination and then reads both ends back independently: every credential file
+the source served must be present byte-identically, and every gateway path and
+provider section the request reaches must hold the source's value. Against CPA
+v8.0.13 (`b682e9e4…`) on linux/amd64 with `--network none` it witnessed
+
+| kind | cpa_v8 source | v7.0.12 source |
+| --- | --- | --- |
+| `client-api-keys` | 2 | 2 |
+| `cpa-auth-files` | 2 | — |
+| `cpa-config-routing` | 12 | — |
+| `provider-state-api-keys` | 5 | — |
+
+and the destination read-back agreed with every recorded outcome. A
+`legacy_managed` source is a pre-v8 process with no v8 management surface, so the
+executor is not run against it and its non-client kinds stay manual.
+
+Consequences recorded here because they change review-visible facts:
+
+- the `client_api_keys_only` limitation is no longer claimed for the network
+  adoption consumer, because it no longer describes what that build does; it
+  remains a `legacy_managed` limitation;
+- the compiled consumer digest moved, so the resource reports/traces and the
+  legacy transition observation were re-emitted at the new head and both runs
+  were repeated independently and are byte-identical;
+- the two resource manifests are unchanged (`563ef299…` network, `7388022d…`
+  legacy) and the transition manifest is unchanged (`316f7452…`); only the
+  report/observation bytes, the per-kind trace fields and the implementation
+  head moved.
+
+`Gateway` stays pending and no independent re-acceptance of this head has
+happened; that remains required before merge.

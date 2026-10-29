@@ -633,17 +633,17 @@ conditions read this summary; the authority generalization, usage enablement,
 model management and the Full Web Adopt flow are not part of this lane.
 
 The per-item summary is the operational record of the copy. It is deliberately
-*not* a qualification: `freshAdoptionRefRules`
-(`internal/domain/bootstrap/adoption.go`) still marks `cpa-auth-files`, the
-config refs and the provider-state refs as manual actions, and the accepted
-adoption consumer still carries the `client_api_keys_only` limitation. That
-record is the reviewed authority for what the Manager's install-derived
-authority may claim, and it is bound to an independent acceptance of exactly
-those bytes and that scope; the executor copying credentials and configuration
-is product behaviour reported to the operator, not a wider authority claim.
-Promoting those refs to `migrate` would need its own reviewed evidence chain per
-ref (read/replay/verify) and a new independent acceptance, so this lane leaves
-the vocabulary as accepted and reports outcomes instead.
+*not* itself a qualification. `freshAdoptionRefRules`
+(`internal/domain/bootstrap/adoption.go`) now marks `cpa-auth-files`,
+`cpa-config-routing` and `provider-state-api-keys` as qualified, but the decision
+still requires per-kind evidence: the class-specific read/replay/verify chain
+must name the kind in all three traces, and every authorized kind must be in the
+rules' migrated set. A `legacy_managed` source authorizes client keys only, so its
+other kinds fall back to exactly the manual action they had before. That record
+is the reviewed authority for what the Manager's install-derived authority may
+claim, and it is bound to an independent acceptance of exactly those bytes and
+that scope; the `client_api_keys_only` limitation therefore remains on the
+legacy consumer and is no longer claimed for the network consumer.
 
 #### Retry after a terminal destination failure
 
