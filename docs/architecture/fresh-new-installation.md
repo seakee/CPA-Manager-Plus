@@ -68,12 +68,13 @@ one-time credential: do not paste it into issues, service logs or evidence.
 
 After signing in, the installation wizard continues the same durable operation:
 
-1. Choose **New embedded installation**. External remains a Host-authorized
-   connection checkpoint and cannot finish installation. The Fresh flow does not
-   upgrade existing product data. The `adopt_existing`/`network_existing` service
-   path is admitted (see [Adopt `network_existing`](#adopt-network_existing)),
-   but the wizard still offers no Adopt action, so it stays unreachable from the
-   browser in this lane.
+1. Choose **New embedded installation**, **Adopt existing CPA** or **Connect to
+   external CPA**. New Managed is the recommended path. Adopt reads the
+   `adopt_existing`/`network_existing` source the operator names and copies its
+   credentials, gateway configuration, provider sections and client keys into the
+   CPA this Manager runs (see [Adopt `network_existing`](#adopt-network_existing)).
+   External remains a Host-authorized connection checkpoint and cannot finish
+   installation. The Fresh flow does not upgrade existing product data.
 2. Review the Console address and packaged official CPA version, then select
    **Check deployment**. Manager reads the Runtime through its existing
    Host-configured authenticated transport. There is no Runtime JSON input,
@@ -687,6 +688,64 @@ zero: a window that never opened is not coverage. Enabling statistics is a
 two-step gate — opening the confirmation writes nothing, and only an explicit
 confirm sends `{requestId, confirmEnableStatistics: true}`.
 
+### D acceptance: `bin/ci/fresh-adopt-network.mjs`
+
+```sh
+revision=$(git rev-parse HEAD)
+docker buildx build --builder "$BUILDER" --platform linux/amd64 --load \
+  --label "org.opencontainers.image.revision=$revision" \
+  --target v8-amd64-candidate -f Dockerfile.runtime -t cpamp-d-runtime:local .
+docker buildx build --builder "$BUILDER" --platform linux/amd64 --load \
+  --label "org.opencontainers.image.revision=$revision" \
+  -f Dockerfile.manager-server -t cpamp-d-manager:local .
+docker buildx build --builder "$BUILDER" --platform linux/amd64 --load \
+  --label "org.opencontainers.image.revision=$revision" \
+  -f Dockerfile.ingress -t cpamp-d-ingress:local .
+
+node bin/ci/fresh-adopt-network.mjs \
+  cpamp-d-runtime:local cpamp-d-manager:local cpamp-d-ingress:local bin/tmp/d-adopt
+```
+
+It is the browser journey, not an API reconstruction. A real CPA v8.0.13 runs as
+its own container with two credential files, two provider sections, three gateway
+leaves and one file the destination cannot parse; the destination is the CPA the
+project's own Compose Runtime stages, because an adoption needs a Manager-owned
+destination. The script claims the installation, chooses Adopt, enters the source
+and confirms the inventory in Chromium.
+
+It proves, in order:
+
+1. the four pre-commit negatives each answer their own code and commit nothing —
+   a wrong management key (`adoption_source_read_unavailable`), a source with no
+   client key (`adoption_source_empty`), a source that is the destination
+   (`adoption_destination_identity_conflict`), and, when `CPAMP_D_CPA_LEGACY`
+   names the pinned v7 binary, a v7 source;
+2. the inventory screen separates what copies from what needs manual work, and the
+   commit is impossible before it is confirmed;
+3. the migration runs behind a TCP forwarder this script controls. It refuses every
+   new connection once the run has recorded its first item, so the remaining items
+   fail before writing anything and are recorded retryable — a deterministic fault
+   rather than a race;
+4. completion answers `adopt_migration_retryable`, and the screen shows the count
+   with the acknowledgement;
+5. removing the control file and pressing **Resume** continues from the durable
+   prefix, the run finishes with no retryable item, and completion succeeds;
+6. the destination — read from the CPA the Supervisor staged, not from the Manager's
+   own report — carries exactly the source client keys, the seeded gateway values
+   and the migrated credential bytes (and not the unparseable file), admits a
+   client key through Ingress `/v1/models` while refusing an unknown one, starts the
+   usage collector, reports a readable runtime status, and leaves the source's
+   config bytes and credential list unchanged.
+
+Screenshots cover the source form, the inventory, the retryable result, the
+retryable completion and the finished installation. The report goes to
+`bin/tmp/d-adopt/report.json`, is written 0600, and records PASS/FAIL/NOT RUN for
+every check plus `gitHead`, the image revisions and the failure logs. The harness
+is the External one — secrets in a sibling directory outside the artifact
+directory, `assertNoSecret` over the unredacted report, the run log and every
+container log before teardown, a dirty tree refused, and a `finally` that removes
+only this project.
+
 ### D acceptance: `bin/ci/fresh-external-management.mjs`
 
 ```sh
@@ -1099,9 +1158,9 @@ committed with an empty summary. A committed replay of `POST strategy` is the
 resume path and continues from the durable prefix; a replay that was already
 waiting for the migration lock when a completion took it starts nothing, because
 the start re-reads the record under that lock and refuses a completed or
-re-staged installation. Step 4's completion conditions read this summary; the
-authority generalization and usage enablement are described above, while model
-management and the Full Web Adopt flow are not part of this lane.
+re-staged installation. Step 4's completion conditions read this summary, and
+the Full Web Adopt flow of Step 5 reads it through `GET installation/adoption`
+(below). Model management is not part of this lane.
 
 The per-item summary is the operational record of the copy. It is deliberately
 *not* itself a qualification. `freshAdoptionRefRules`
@@ -1213,9 +1272,62 @@ this lane re-emitted the `network_existing` and `legacy_managed` resource
 reports/traces and the legacy-transition report/observation rather than editing a
 digest by hand.
 
-Adopt stays unreachable from the web UI in this lane: the wizard's only
-actionable strategy is still **New embedded installation**, and the Full Web
-Adopt flow is a later step.
+#### The Adopt read route and the Full Web flow
+
+The per-item summary was durable but readable only by the completion decision, so
+the browser could learn whether an adoption had finished and nothing else. Step 5
+adds one read: `GET installation/adoption`, in the same `canonicalAPI` switch as
+`GET operation`, allowed for the Fresh session exactly as `GET
+installation/runtime` is — it is the progress read of the session that committed
+the adoption.
+
+It answers `{items[], planned, finished, running, retryable, counts}`, where each
+item carries `item`, `kind`, `outcome`, `reason`, `instruction` and the store's own
+`retryable` rule, `running` is the live single-flight flag rather than a recorded
+value, and `counts` tallies the four outcomes. The reply omits the record's source
+and destination digests: they are the Manager's evidence, and dropping them keeps
+the route a statement about progress. A staged adoption, a non-adoption and an
+unreadable record answer `404 {"code":"adopt_summary_unavailable"}` rather than an
+empty list that reads like a finished run.
+
+Both wizards render one shared `FreshAdoptFlow`:
+
+- the Adopt tile in the setup wizard and in the Console's guided Runtime page is a
+  real choice, and an `adopt_existing` checkpoint renders the flow instead of an
+  empty card;
+- the source stage asks for the address, the management key (a password input held
+  in component memory, never persisted or logged) and the plugin opt-in, and
+  states the scope: credentials, gateway configuration, provider sections and
+  client keys migrate; usage history, logs and plugins do not; the source is never
+  written;
+- the first `POST strategy` answers `staged` with `adoptionResources` and
+  `adoptionDecisions` — PascalCase fields the pinned domain type has no JSON tags
+  for, read as they are — and the flow groups them into what copies and what needs
+  manual work. Nothing is copied until the operator confirms, and the second POST
+  sends the identical body;
+- the committed run is polled every two seconds with a bounded backoff until the
+  record says `finished` and not `running`, then the per-item results are grouped
+  as migrated / manual / failed (retryable or not). Each reason code has a
+  localized sentence and the server's English `instruction` stays behind a
+  "details" disclosure;
+- a run that stopped, or a page reloaded mid-run, resumes from the durable prefix
+  with the same `baseUrl`, key and `pluginsEnabled`. The key is not kept anywhere,
+  so the resume form asks for it again and pins the recorded plugin choice;
+- the completion's coded refusals each have their own next action:
+  `adopt_migration_running` keeps polling, `adopt_migration_incomplete` offers
+  Resume, `adopt_migration_retryable` shows the count plus an explicit
+  "finish anyway" checkbox that sends `acceptRetryable`, and
+  `adopt_destination_unproven` names the specific failure.
+
+The strategy body and both refusal envelopes are read by both carriers: the
+bootstrap transport parses `Code` and `Unsupported` for a blocker and lowercase
+`code` plus `retryable` for a completion, and the canonical transport forwards
+only the bounded Adopt blocker vocabulary. Every parser has a test built on real
+server bodies.
+
+`FreshManagedRuntime` also sends `pluginsEnabled` for New Managed: the console
+path never did, so an operator who installed from the Console could not opt into
+the plugin runtime at all.
 
 ### Existing-install migration
 
