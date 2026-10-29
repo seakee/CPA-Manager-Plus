@@ -684,3 +684,74 @@ func TestExternalGateBudgetFreesAHungCPA(t *testing.T) {
 		t.Fatal("the hung read never ended")
 	}
 }
+
+// externalProviderCallDelay is how long the fake provider takes to send its
+// headers: several times the console-read budget the same test installs.
+const externalProviderCallDelay = 400 * time.Millisecond
+
+// TestExternalProviderCallOutlivesTheHeaderBudget covers the regression the read
+// budget introduced: `v0/management/api-call` forwards a request to an upstream
+// provider, and a non-streaming completion can take far longer than any console
+// read to send its headers. Cutting it at the read budget turned a healthy slow
+// answer into a 502. The console read keeps its budget.
+func TestExternalProviderCallOutlivesTheHeaderBudget(t *testing.T) {
+	// The blocked read below outlives the assertion, so the handler is released
+	// before the upstream server's own cleanup closes it.
+	block := make(chan struct{})
+	defer close(block)
+	upstream := newGateUpstream(t, externalAuthorityManagement)
+	upstream.handle.Store(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v0/management/api-call":
+			time.Sleep(externalProviderCallDelay)
+		case "/v0/management/api-keys":
+			// This read never answers, so only the budget can end it.
+			<-block
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status_code":200}`))
+	})
+	app := newExternalApp(t, upstream.server.URL, externalAuthorityManagement)
+	app.credentialHeaderBudget = 100 * time.Millisecond
+
+	call := gateRequest(t, app, http.MethodPost, "/v0/management/api-call", gateAdmin)
+	if call.Code != http.StatusOK {
+		t.Fatalf("a provider call answered after %s = %d %s", externalProviderCallDelay, call.Code, call.Body.String())
+	}
+	if body := call.Body.String(); !strings.Contains(body, `"status_code":200`) {
+		t.Fatalf("provider call body = %q", body)
+	}
+	if !gateIsFree(app) {
+		t.Fatal("the provider call kept the credential gate after its status")
+	}
+
+	read := make(chan int, 1)
+	go func() {
+		response := httptest.NewRecorder()
+		app.legacy.ServeHTTP(response, gateHTTPRequest(http.MethodGet, "/v0/management/api-keys", gateAdmin))
+		read <- response.Code
+	}()
+	select {
+	case code := <-read:
+		if code != http.StatusBadGateway {
+			t.Fatalf("a management read past the %s budget = %d", app.credentialHeaderBudget, code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("a management read survived its %s budget", app.credentialHeaderBudget)
+	}
+}
+
+// TestExternalProviderWaitSet names the paths whose status belongs to an upstream
+// provider: they take no header budget, and a trailing slash does not hide them.
+func TestExternalProviderWaitSet(t *testing.T) {
+	for _, path := range []string{"/v0/management/api-call", "/v0/management/api-call/", "/v0/management/oauth-callback"} {
+		if !externalLegacyWaitsOnProvider(path) {
+			t.Fatalf("%s waits on a provider but takes the console-read budget", path)
+		}
+	}
+	for _, path := range []string{"/v0/management/api-keys", "/v0/management/config.yaml", "/v1/models"} {
+		if externalLegacyWaitsOnProvider(path) {
+			t.Fatalf("%s is a CPA read but is exempt from the budget", path)
+		}
+	}
+}

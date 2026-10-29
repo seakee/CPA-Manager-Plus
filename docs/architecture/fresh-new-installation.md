@@ -620,9 +620,15 @@ fetches and cannot authenticate before it runs.
   released the moment the answer's status is known (`WriteHeader`, and on every
   error or panic path), so one slow body cannot stall the rest of the console, and
   a waiter whose own request was cancelled gives up instead of queueing — nothing
-  is ever forwarded for a caller that stopped waiting. The read grant is taken
-  under the lock *before* the request leaves, so a slow 401 sent with the replaced
-  key is filed against the envelope that was sent and never against a rebound key.
+  is ever forwarded for a caller that stopped waiting. A request whose status is an
+  upstream provider's rather than the CPA's is exempt from the console-read budget
+  (`v0/management/api-call`, and the provider token exchange of
+  `v0/management/oauth-callback`): a non-streaming completion can take far longer
+  than 30 s to send its headers, so the lock is held until that status arrives or
+  the caller cancels, which is the only bound the proxy itself puts on those paths.
+  The read grant is taken under the lock *before* the request leaves, so a slow 401
+  sent with the replaced key is filed against the envelope that was sent and never
+  against a rebound key.
 - The local refusal deletes the entity headers the proxy copied from CPA
   (`Content-Length`, `Content-Type`, `Content-Encoding`, `Transfer-Encoding`, and
   the rest of the framing/representation set) before writing its own JSON; behind a

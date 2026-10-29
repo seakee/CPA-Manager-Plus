@@ -228,11 +228,14 @@ func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Han
 		// name the cause. The refusal is the same fact the typed reads block on, so
 		// it is recorded and answered as that blocker instead.
 		markContext, mark := proxysvc.WithSavedKeyMark(ctx)
-		// The tenure is bounded in both directions: the recorder frees the gate the
-		// moment the status exists, and the budget frees it and ends the request
-		// when the CPA never sends one. Without the budget a CPA that accepts the
-		// connection and never answers would hold every other console read.
-		hold, requestCtx := beginExternalCredentialHold(markContext, gate, app.externalCredentialHeaderBudget())
+		// A console read's tenure is bounded in both directions: the recorder frees
+		// the gate the moment the status exists, and the budget frees it and ends
+		// the request when the CPA never sends one. Without the budget a CPA that
+		// accepts the connection and never answers would hold every other console
+		// read. A request that waits on an upstream provider takes no budget at all
+		// and keeps the tenure until its status arrives, exactly as the proxy
+		// itself bounds it.
+		hold, requestCtx := beginExternalCredentialHold(markContext, gate, app.externalCredentialHoldBudget(r.URL.Path))
 		recorder := &externalLegacyRecorder{
 			ResponseWriter: w,
 			// The refusal is recorded against a context the caller cannot cancel: a
@@ -281,10 +284,12 @@ func (g *externalCredentialGate) release() {
 	}
 }
 
-// externalCredentialHeaderBudgetDefault is how long one gated request may hold the
-// credential gate waiting for the CPA's status. It is deliberately longer than any
-// management read the console makes and shorter than a browser's own patience: its
-// only job is to keep a CPA that never answers from stalling every other read.
+// externalCredentialHeaderBudgetDefault is how long one gated console read may hold
+// the credential gate waiting for the CPA's status. It is deliberately longer than
+// any management read the console makes and shorter than a browser's own patience:
+// its only job is to keep a CPA that never answers from stalling every other read.
+// It is never applied to a request that waits on an upstream provider — see
+// externalLegacyWaitsOnProvider.
 const externalCredentialHeaderBudgetDefault = 30 * time.Second
 
 // externalCredentialHeaderBudget reports the bounded tenure of the credential gate
@@ -294,6 +299,35 @@ func (a *freshApplication) externalCredentialHeaderBudget() time.Duration {
 		return a.credentialHeaderBudget
 	}
 	return externalCredentialHeaderBudgetDefault
+}
+
+// externalCredentialHoldBudget is the tenure bound of one gated legacy request. A
+// request that waits on an upstream provider gets none: its status is decided by
+// that provider's own latency, not by how long a console read should take.
+func (a *freshApplication) externalCredentialHoldBudget(path string) time.Duration {
+	if externalLegacyWaitsOnProvider(path) {
+		return 0
+	}
+	return a.externalCredentialHeaderBudget()
+}
+
+// externalLegacyWaitsOnProvider reports whether a gated legacy request's status is
+// the upstream provider's, not the CPA's management handlers'. The proxy puts no
+// response-header timeout on these paths — it uses the default transport, so the
+// caller's own deadline is the only bound — and the gate must not add one: a
+// non-streaming completion that takes a minute to send its headers is a healthy
+// answer, not a hung CPA, and cutting it turns it into a 502.
+//
+// `api-call` forwards an arbitrary provider request. `oauth-callback` exchanges an
+// authorization code for tokens at the provider, and that exchange is the
+// provider's latency too.
+func externalLegacyWaitsOnProvider(path string) bool {
+	switch strings.TrimRight(path, "/") {
+	case "/v0/management/api-call", "/v0/management/oauth-callback":
+		return true
+	default:
+		return false
+	}
 }
 
 // statusClientClosedRequest names a request whose caller stopped waiting before
@@ -318,9 +352,10 @@ func writeExternalCredentialWaitCancelled(w http.ResponseWriter) {
 }
 
 // externalCredentialHold is one request's tenure of the credential gate. The gate
-// is released the moment the response status is known, and the budget releases it
-// and ends the request when the CPA never produces one, so a hung CPA cannot hold
-// every other console read behind it.
+// is released the moment the response status is known, and, on a console read, the
+// budget releases it and ends the request when the CPA never produces one, so a
+// hung CPA cannot hold every other console read behind it. A provider-bound request
+// takes no budget: its own status or its caller's cancellation ends the tenure.
 type externalCredentialHold struct {
 	gate *externalCredentialGate
 	// timer is stored atomically because the budget callback can fire while the
@@ -331,9 +366,10 @@ type externalCredentialHold struct {
 	once   sync.Once
 }
 
-// beginExternalCredentialHold takes the bounded tenure of an already-acquired gate
-// and returns the context the proxied request must use: cancelling it is what ends
-// a request whose CPA never answered.
+// beginExternalCredentialHold takes the tenure of an already-acquired gate and
+// returns the context the proxied request must use: cancelling it is what ends a
+// request whose CPA never answered. A non-positive budget means the request carries
+// no header budget of its own, and only its status or its caller ends the tenure.
 func beginExternalCredentialHold(
 	ctx context.Context,
 	gate *externalCredentialGate,
@@ -341,10 +377,12 @@ func beginExternalCredentialHold(
 ) (*externalCredentialHold, context.Context) {
 	requestCtx, cancel := context.WithCancel(ctx)
 	hold := &externalCredentialHold{gate: gate, cancel: cancel}
-	hold.timer.Store(time.AfterFunc(budget, func() {
-		hold.release()
-		cancel()
-	}))
+	if budget > 0 {
+		hold.timer.Store(time.AfterFunc(budget, func() {
+			hold.release()
+			cancel()
+		}))
+	}
 	return hold, requestCtx
 }
 
