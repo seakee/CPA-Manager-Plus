@@ -1,6 +1,7 @@
 package cpa
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -14,8 +15,9 @@ import (
 // client keys, provider catalogue and gateway configuration belong to the source
 // the operator adopted. The new_managed posture describes a template this Manager
 // wrote whole, so it refuses exactly the parts an adoption is allowed to carry:
-// more than two client keys, extra root sections, and a plugin switch the operator
-// chose rather than one this Manager fixed.
+// more than two client keys and extra root sections. The plugin switch is not one
+// of them: the plugin page opens for an adoption too, so the operator's own
+// decision there must not invalidate the proof.
 //
 // The two postures therefore differ only in the rules the two strategies differ
 // in. The proof itself is shared and unchanged: the authenticated read succeeded
@@ -59,35 +61,32 @@ var adoptRoots = map[string]bool{
 var adoptRequiredRoots = []string{"config-version", "server", "management", "access", "oauth", "plugins", "observability"}
 
 // adoptProofPosture is the adopted destination: the Supervisor template keyed by
-// the install-derived management credential, carrying the adopted client list,
-// the recorded plugin opt-in, and whatever root sections the source carried.
-func adoptProofPosture(pluginsEnabled bool) proofPosture {
-	return proofPosture{managed: true, adopt: true, host: "0.0.0.0", allowRemote: true, usageStatistics: true, pluginsEnabled: pluginsEnabled}
+// the install-derived management credential, carrying the adopted client list and
+// whatever root sections the source carried.
+func adoptProofPosture() proofPosture {
+	return proofPosture{managed: true, adopt: true, host: "0.0.0.0", allowRemote: true, usageStatistics: true}
 }
 
 // DestinationPosture is the per-install posture of the destination CPA. It names
-// the facts that are not package constants: which strategy staged the destination
-// and the plugin opt-in the operator recorded for it.
+// the fact that is not a package constant: which strategy staged the destination.
+// The recorded plugin opt-in is not part of it — that switch is the operator's to
+// change on the plugin page, so it is not a proof of this Manager.
 type DestinationPosture struct {
 	// Adopt marks a destination staged by an adoption, selecting the adopted rules
 	// instead of the new_managed template.
 	Adopt bool
-	// PluginsEnabled is the recorded plugin opt-in. The Supervisor wrote exactly
-	// this value into the destination, so a switch that disagrees is a posture
-	// this Manager did not stage for this installation.
-	PluginsEnabled bool
 }
 
 // PostureFor resolves the destination posture of one strategy. Only the
 // strategies this Manager stages a destination for are answered, so a caller can
 // never widen a posture it does not own: Connect External and every unknown
 // strategy are refused.
-func PostureFor(strategy string, pluginsEnabled bool) (DestinationPosture, bool) {
+func PostureFor(strategy string) (DestinationPosture, bool) {
 	switch strategy {
 	case "new_managed":
 		return DestinationPosture{}, true
 	case "adopt_existing":
-		return DestinationPosture{Adopt: true, PluginsEnabled: pluginsEnabled}, true
+		return DestinationPosture{Adopt: true}, true
 	default:
 		return DestinationPosture{}, false
 	}
@@ -123,7 +122,7 @@ func (t *Transport) postureOf() proofPosture {
 		return proofPosture{deny: true}
 	}
 	if v.Adopt {
-		return adoptProofPosture(v.PluginsEnabled)
+		return adoptProofPosture()
 	}
 	return managedProofPosture
 }
@@ -213,12 +212,14 @@ func (p proofPosture) matchesAdopt(data []byte) bool {
 		!looksLikeBcrypt(management.SecretKey) {
 		return false
 	}
-	// The adopted client list is the source's, so only its shape is checked here;
-	// the key policy is `validKeys`, which the snapshot caller applies.
-
 	var access map[string]json.RawMessage
 	var keys []string
-	if json.Unmarshal(root["access"], &access) != nil || json.Unmarshal(access["api-keys"], &keys) != nil || keys == nil {
+	// The adopted client list is the source's, so only its shape is checked here;
+	// the key policy is `validKeys`, which the snapshot caller applies. The
+	// section itself is exactly one leaf: `KeySnapshot` proves by blanking this
+	// list, so an extra access key must not be able to hide behind that rewrite.
+	if json.Unmarshal(root["access"], &access) != nil || len(access) != 1 ||
+		json.Unmarshal(access["api-keys"], &keys) != nil || keys == nil {
 		return false
 	}
 	var oauth map[string]json.RawMessage
@@ -228,12 +229,14 @@ func (p proofPosture) matchesAdopt(data []byte) bool {
 	}
 	var plugins map[string]json.RawMessage
 	var pluginDir string
-	var enabled bool
-	if json.Unmarshal(root["plugins"], &plugins) != nil ||
-		json.Unmarshal(plugins["enabled"], &enabled) != nil ||
-		// The recorded opt-in is the operator's decision for this installation,
-		// and the Supervisor wrote exactly that value into the destination.
-		enabled != p.pluginsEnabled ||
+	// The enabled switch is the operator's own decision on the plugin page, which
+	// opens for an adopted installation, so either boolean is this template's. The
+	// recorded opt-in drives the first start only; it is not a proof. What is
+	// pinned is the Supervisor-owned directory, and the closed key set — a store
+	// source, a per-plugin config or an auth revision is a plugin configuration
+	// this Manager never wrote.
+	if json.Unmarshal(root["plugins"], &plugins) != nil || len(plugins) != 2 ||
+		(!bytes.Equal(plugins["enabled"], []byte("true")) && !bytes.Equal(plugins["enabled"], []byte("false"))) ||
 		json.Unmarshal(plugins["dir"], &pluginDir) != nil || !p.validPluginDir(pluginDir) {
 		return false
 	}
@@ -317,14 +320,11 @@ func ProveAdoptedDestination(ctx context.Context, endpoint, managementKey string
 	if code != http.StatusOK {
 		return nil, ErrSourceConflict
 	}
-	var plugins struct {
-		Enabled *bool `json:"enabled"`
-	}
 	var root map[string]json.RawMessage
-	if json.Unmarshal(body, &root) != nil || json.Unmarshal(root["plugins"], &plugins) != nil || plugins.Enabled == nil {
+	if json.Unmarshal(body, &root) != nil {
 		return nil, ErrSourceConflict
 	}
-	posture := adoptProofPosture(*plugins.Enabled)
+	posture := adoptProofPosture()
 	// The record-independent rules only: the root set, the required roots, the
 	// version, the bcrypt management digest and the usage switch. The Supervisor
 	// directory and bind facts are proven against the record by the posture

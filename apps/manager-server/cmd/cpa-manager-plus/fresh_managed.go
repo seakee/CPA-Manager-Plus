@@ -67,10 +67,9 @@ func managedInstallSource(store freshstore.Store, protector *security.Protector,
 			ArtifactID:    checkpoint.TargetArtifactID,
 			BaseURL:       baseURL,
 			ManagementKey: key,
-			// The strategy selects the destination posture, and the recorded opt-in
-			// is the plugin switch the Supervisor wrote into this destination.
-			Strategy:       string(checkpoint.Strategy),
-			PluginsEnabled: checkpoint.PluginsEnabled,
+			// The strategy is what selects the destination posture; the plugin
+			// switch is the operator's own and is not part of the proof.
+			Strategy: string(checkpoint.Strategy),
 		}, nil
 	}
 }

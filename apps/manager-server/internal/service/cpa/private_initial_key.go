@@ -208,15 +208,11 @@ func (t *Transport) InstallOne(ctx context.Context, proof TargetProof, managemen
 // plugins published at the Supervisor-owned plugin root. Fields are
 // server-owned facts of the destination template, never caller input.
 type proofPosture struct {
-	managed         bool
-	// adopt selects the adopted destination rules: a subset root set, the
-	// source's client list and the recorded plugin opt-in, instead of the
-	// new_managed template. It is set only by `adoptProofPosture`.
+	managed bool
+	// adopt selects the adopted destination rules: a subset root set and the
+	// source's client list, instead of the new_managed template. It is set only by
+	// `adoptProofPosture`.
 	adopt bool
-	// pluginsEnabled is the plugin opt-in the operator recorded for this
-	// installation. It is a per-install fact, so both Manager-owned strategies
-	// pin it: the Supervisor wrote exactly this value into the destination.
-	pluginsEnabled bool
 	// deny refuses every read. It is the posture of a Manager-owned profile whose
 	// selector could not answer, which is a destination this Manager may not prove.
 	deny            bool

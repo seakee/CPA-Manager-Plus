@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -14,7 +15,7 @@ import (
 const adoptDestinationConfig = `{"config-version":8,"server":{"host":"0.0.0.0","port":8317},"management":{"allow-remote":true,"secret-key":"$2a$10$abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXY12","disable-control-panel":true,"disable-auto-update-panel":true},"access":{"api-keys":[]},"routing":{"strategy":"round-robin"},"client":{"codex":{"enable-apply-patch":true}},"oauth":{"auth-dir":"/runtime/gateway/destination/auth"},"plugins":{"enabled":false,"dir":"/runtime/supervisor/plugins"},"observability":{"logs":{"logging-to-file":false},"usage":{"usage-statistics-enabled":true}}}`
 
 func TestAdoptPostureAcceptsTheAdoptedDestination(t *testing.T) {
-	adopt := adoptProofPosture(false)
+	adopt := adoptProofPosture()
 	if !adopt.matches([]byte(adoptDestinationConfig)) {
 		t.Fatal("adopted destination rejected")
 	}
@@ -23,14 +24,54 @@ func TestAdoptPostureAcceptsTheAdoptedDestination(t *testing.T) {
 	if managedProofPosture.matches([]byte(adoptDestinationConfig)) {
 		t.Fatal("managed template accepted an adopted destination")
 	}
-	// The recorded opt-in is pinned with the directory: a destination whose
-	// switch disagrees with the record is not the one this install staged.
-	if adoptProofPosture(true).matches([]byte(adoptDestinationConfig)) {
-		t.Fatal("adopted destination accepted the wrong plugin opt-in")
+	// The plugin switch is the operator's: the plugin page opens for an adopted
+	// installation, so saving either value must leave the posture proven. What
+	// stays pinned is the Supervisor directory and the closed key set.
+	for _, enabled := range []string{"true", "false"} {
+		document := strings.Replace(adoptDestinationConfig, `"enabled":false`, `"enabled":`+enabled, 1)
+		if !adoptProofPosture().matches([]byte(document)) {
+			t.Fatalf("adopted destination rejected the plugin switch %s", enabled)
+		}
 	}
-	enabled := strings.Replace(adoptDestinationConfig, `"enabled":false`, `"enabled":true`, 1)
-	if !adoptProofPosture(true).matches([]byte(enabled)) || adoptProofPosture(false).matches([]byte(enabled)) {
-		t.Fatal("plugin opt-in not pinned to the record")
+}
+
+// TestAdoptPostureAcceptsThePluginGroupTheOperatorSaves is the P1 regression: the
+// plugin page writes `plugins.enabled` on an adopted installation, so a proof that
+// pinned the recorded opt-in failed for every request after one save. Admission
+// and the Key snapshot read the same posture, so both are proven here after the
+// switch moves in either direction.
+func TestAdoptPostureAcceptsThePluginGroupTheOperatorSaves(t *testing.T) {
+	keys := []string{"source-key-one", "source-key-two"}
+	list, _ := json.Marshal(keys)
+	root := strings.Replace(adoptDestinationConfig, `"api-keys":[]`, `"api-keys":`+string(list), 1)
+	var served atomic.Value
+	served.Store(root)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v8/management/config":
+			w.Write([]byte(served.Load().(string)))
+		case "/v8/management/config/access/api-keys":
+			json.NewEncoder(w).Encode(keys)
+		case "/v8/management/config.yaml":
+			w.Write([]byte("adopted exact YAML bytes"))
+		default:
+			t.Error("unexpected request")
+		}
+	}))
+	defer server.Close()
+	// The posture is resolved from the committed record, exactly as the default
+	// profile installs it.
+	transport := NewTransportForEndpoint(server.URL)
+	transport.SetPostureSelector(func() (DestinationPosture, bool) { return PostureFor("adopt_existing") })
+	// The recorded opt-in was `false`; the operator saves the plugin group on.
+	served.Store(strings.Replace(root, `"enabled":false`, `"enabled":true`, 1))
+	if snap, err := transport.KeySnapshot(t.Context(), testManagement()); err != nil || len(snap.Keys) != 2 {
+		t.Fatalf("a saved plugin switch broke the adopted proof: %v %+v", err, snap)
+	}
+	// And back off again.
+	served.Store(root)
+	if snap, err := transport.KeySnapshot(t.Context(), testManagement()); err != nil || len(snap.Keys) != 2 {
+		t.Fatalf("the recorded switch broke the adopted proof: %v %+v", err, snap)
 	}
 }
 
@@ -50,8 +91,16 @@ func TestAdoptPostureRefusesWhatTheManagerNeverStaged(t *testing.T) {
 		"logging to file":     strings.Replace(adoptDestinationConfig, `"logging-to-file":false`, `"logging-to-file":true`, 1),
 		"foreign version":     strings.Replace(adoptDestinationConfig, `"config-version":8`, `"config-version":7`, 1),
 		"non-object document": `[]`,
+		// The plugin root is the Supervisor's: a store source, a per-plugin
+		// config or an auth revision is a plugin configuration this Manager never
+		// wrote, so it is refused even though the switch itself is free.
+		"foreign plugin key": strings.Replace(adoptDestinationConfig, `"enabled":false`, `"enabled":false,"store":{"repository":"https://plugins.example"`, 1),
+		"plugin auth":        strings.Replace(adoptDestinationConfig, `"enabled":false`, `"enabled":false,"auth":true`, 1),
+		// `KeySnapshot` proves by blanking the client list, so an extra access
+		// leaf must be refused rather than hidden by that rewrite.
+		"extra access key": strings.Replace(adoptDestinationConfig, `"api-keys":[]`, `"api-keys":[],"extra":true`, 1),
 	} {
-		if adoptProofPosture(false).matches([]byte(body)) {
+		if adoptProofPosture().matches([]byte(body)) {
 			t.Fatalf("%s permitted", name)
 		}
 	}
@@ -61,24 +110,24 @@ func TestAdoptPostureCarriesTheSourceKeyList(t *testing.T) {
 	keys := []string{"source-key-one", "source-key-two", "source-key-three"}
 	list, _ := json.Marshal(keys)
 	root := strings.Replace(adoptDestinationConfig, `"api-keys":[]`, `"api-keys":`+string(list), 1)
-	if !adoptProofPosture(false).matches([]byte(root)) {
+	if !adoptProofPosture().matches([]byte(root)) {
 		t.Fatal("adopted key list rejected")
 	}
 	// The same list is refused by the New Managed posture, which mints its own
 	// canonical shapes and never carries three of them.
-	if !adoptProofPosture(false).validKeys(keys) {
+	if !adoptProofPosture().validKeys(keys) {
 		t.Fatal("adopted key policy refused a source list")
 	}
 	if managedProofPosture.validKeys(keys) {
 		t.Fatal("managed key policy accepted a source list")
 	}
 	for name, list := range map[string][]string{
-		"empty":     nil,
-		"duplicate": {"a", "a"},
-		"too many":  make([]string, adoptMaxClientKeys+1),
+		"empty":         nil,
+		"duplicate":     {"a", "a"},
+		"too many":      make([]string, adoptMaxClientKeys+1),
 		"not printable": {"a b"},
 	} {
-		if adoptProofPosture(false).validKeys(list) {
+		if adoptProofPosture().validKeys(list) {
 			t.Fatalf("%s list permitted", name)
 		}
 	}
@@ -88,16 +137,16 @@ func TestAdoptPostureCarriesTheSourceKeyList(t *testing.T) {
 // of the posture: the transport never assumes the New Managed template, and a
 // strategy it does not own is refused rather than proven.
 func TestPostureFollowsTheCommittedStrategy(t *testing.T) {
-	if _, ok := PostureFor("connect_external", false); ok {
+	if _, ok := PostureFor("connect_external"); ok {
 		t.Fatal("external answered by the Manager-owned posture")
 	}
-	if _, ok := PostureFor("", false); ok {
+	if _, ok := PostureFor(""); ok {
 		t.Fatal("unselected strategy answered")
 	}
-	if v, ok := PostureFor("new_managed", true); !ok || v.Adopt {
+	if v, ok := PostureFor("new_managed"); !ok || v.Adopt {
 		t.Fatal("new managed posture not resolved")
 	}
-	if v, ok := PostureFor("adopt_existing", true); !ok || !v.Adopt || !v.PluginsEnabled {
+	if v, ok := PostureFor("adopt_existing"); !ok || !v.Adopt {
 		t.Fatal("adopt posture not resolved")
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusUnauthorized) }))
@@ -135,14 +184,14 @@ func TestKeySnapshotProvesTheAdoptedDestination(t *testing.T) {
 	}))
 	defer server.Close()
 	transport := NewTransportForEndpoint(server.URL)
-	transport.SetPostureSelector(func() (DestinationPosture, bool) { return PostureFor("adopt_existing", false) })
+	transport.SetPostureSelector(func() (DestinationPosture, bool) { return PostureFor("adopt_existing") })
 	got, err := transport.KeySnapshot(t.Context(), testManagement())
 	if err != nil || len(got.SourceSHA256) != 64 || len(got.Keys) != 3 {
 		t.Fatalf("adopted destination not proven: %v %+v", err, got)
 	}
 	// New Managed with three keys still fails: the posture is selected by the
 	// strategy, not by the document's shape.
-	transport.SetPostureSelector(func() (DestinationPosture, bool) { return PostureFor("new_managed", false) })
+	transport.SetPostureSelector(func() (DestinationPosture, bool) { return PostureFor("new_managed") })
 	if _, err = transport.KeySnapshot(t.Context(), testManagement()); err == nil {
 		t.Fatal("new managed posture accepted an adopted destination")
 	}

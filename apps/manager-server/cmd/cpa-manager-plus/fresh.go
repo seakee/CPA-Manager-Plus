@@ -283,7 +283,7 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 			if err != nil {
 				return cpa.DestinationPosture{}, false
 			}
-			return cpa.PostureFor(install.Strategy, install.PluginsEnabled)
+			return cpa.PostureFor(install.Strategy)
 		})
 	}
 	// The plugin capability the navigation reads is proven, not assumed: this

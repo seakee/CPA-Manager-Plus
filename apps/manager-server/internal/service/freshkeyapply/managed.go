@@ -43,9 +43,6 @@ type ManagedInstall struct {
 	// Managed or Adopt. It selects the destination posture, so it is a fact of the
 	// installation and never a caller input.
 	Strategy string
-	// PluginsEnabled is the plugin opt-in the operator recorded for this
-	// installation, which is the switch the Supervisor wrote into the destination.
-	PluginsEnabled bool
 }
 
 // ManagedSource reloads and validates that authority on every call. It must
@@ -74,7 +71,7 @@ func NewManaged(r *repo.Repository, keys *freshkeys.Service, runtime runtimeserv
 		if install.RunID == "" || install.Generation == "" || install.Identity == "" || install.ArtifactID == "" || len(install.ManagementKey) != 64 {
 			return Permit{}, ErrUnavailable
 		}
-		if _, owned := cpa.PostureFor(install.Strategy, install.PluginsEnabled); !owned {
+		if _, owned := cpa.PostureFor(install.Strategy); !owned {
 			return Permit{}, ErrUnavailable
 		}
 		// The credential and the transport must address the same CPA; a moved
@@ -101,7 +98,7 @@ func NewManaged(r *repo.Repository, keys *freshkeys.Service, runtime runtimeserv
 		if err != nil {
 			return cpa.DestinationPosture{}, false
 		}
-		return cpa.PostureFor(install.Strategy, install.PluginsEnabled)
+		return cpa.PostureFor(install.Strategy)
 	})
 	s.wire = transport
 	s.keyPermit = s.managedKeyGrant
