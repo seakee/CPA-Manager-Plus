@@ -739,7 +739,7 @@ It is the acceptance for everything above:
    names the Manager's container. A rotation produces two discovery refusals at
    most — the gated console read, and the Collector's own in-flight poll, which
    stops itself on the answer instead of retrying — so the baseline is taken once
-   they have landed. The four post-rotation writes are measured against it: not one
+   the Manager's own log shows the Collector stopped and the count has been quiet. The four post-rotation writes are measured against it: not one
    of them may add a management 401, and the repeated reads that follow must not
    move the count at all. The whole rotation-to-rebind window must stay below five,
    and the browser pass, which rotates the CPA a second time, is counted the same

@@ -264,14 +264,35 @@ function cpaFailedAuthCount() {
 // refusals of a rotation (the console read and the Collector's in-flight poll) can
 // land a poll interval apart, so a baseline taken too early would blame a later
 // request for them.
-async function settledFailedAuthCount(timeout = 20000) {
+// The Manager stops its usage Collector as soon as it meets the refusal (its own
+// poll, or the gated read). That stop is the moment the Manager has stopped
+// presenting the key in the background, so it is read from the Manager's own log
+// rather than guessed at from a timer.
+function managerCollectorStopped() {
+  const logs = run(['docker', 'logs', managerContainer], undefined, false);
+  return /usage collection stopped/i.test((logs.stdout || '') + (logs.stderr || ''));
+}
+
+async function settledFailedAuthCount(timeout = 30000) {
+  // Three consecutive equal samples: the CPA answers a poll on its own schedule,
+  // so one quiet interval does not prove nothing else is about to present the key.
+  const quietSamples = 3;
   const end = Date.now() + timeout;
   let previous = cpaFailedAuthCount();
+  let quiet = 0;
+  const stopDeadline = Date.now() + 15000;
+  while (!managerCollectorStopped() && Date.now() < stopDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
   do {
     await new Promise((resolve) => setTimeout(resolve, 2000));
     const current = cpaFailedAuthCount();
-    if (current === previous) return current;
+    if (current === previous) {
+      if (++quiet >= quietSamples - 1) return current;
+      continue;
+    }
     previous = current;
+    quiet = 0;
   } while (Date.now() < end);
   return previous;
 }
