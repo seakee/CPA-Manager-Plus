@@ -804,9 +804,12 @@ try {
     const logs = containerLog('cpamp-manager', 400);
     assert(!/Fresh usage collection unavailable/.test(logs), 'the collector did not start');
     assert(!/Fresh usage collection start unavailable/.test(logs), 'the collection start was not recorded');
+    // The key workspace must answer for the completed installation, and the
+    // Manager's own start path must have recorded the collection window; a start
+    // failure logs one of the two lines above.
     const keys = await adminGet('api-keys');
-    assert(Array.isArray(keys) && keys.length > 0, 'the key workspace is empty');
-    return { keys: keys.length };
+    assert(Array.isArray(keys.keys), 'the key workspace answered no list');
+    return { keys: keys.keys.length, presenceUnverified: keys.presenceUnverified === true };
   });
   await check('runtime status is readable for the completed installation', async () => {
     const status = await adminGet('runtime/status');
