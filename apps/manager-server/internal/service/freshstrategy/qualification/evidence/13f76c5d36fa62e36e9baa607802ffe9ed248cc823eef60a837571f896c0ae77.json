@@ -16,6 +16,6 @@
   "targetArtifactId": "sha256:b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41",
   "targetBinarySha256": "b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41",
   "targetVersion": "v8.0.13",
-  "testedCommit": "6e1f5157c9a3af9ba4d0143bb376b5da048fc9de",
-  "testedTree": "cae415fcb97a0cd32097b184c90d5191e359ddf1"
+  "testedCommit": "2a0e2bb6a19fc0d75e8ff4da0377cc121054c579",
+  "testedTree": "479183437e3628fd35cb319f76b04992b4f9d90c"
 }
