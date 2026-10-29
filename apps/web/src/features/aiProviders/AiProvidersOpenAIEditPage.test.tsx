@@ -221,6 +221,22 @@ describe('AiProvidersOpenAIEditPage keyless connectivity', () => {
     vi.unstubAllGlobals();
   });
 
+  it.each(['gpt-6.1-terra', 'gpt-6.1-sol'])('tests %s without a legacy model', async (model) => {
+    const context = buildContext([{ apiKey: 'test-key' }]);
+    context.form.modelEntries = [{ name: model, alias: '' }];
+    context.availableModels = [model];
+    context.testModel = model;
+    mocks.context = context;
+    const renderer = renderPage();
+    await act(async () => { await findSingleTestButton(renderer)?.props.onClick(); });
+    expect(mocks.apiCallRequest).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(mocks.apiCallRequest.mock.calls[0][0].data);
+    expect(body).toMatchObject({ model, max_completion_tokens: 128 });
+    expect(body).not.toHaveProperty('max_tokens');
+    expect(mocks.setDraftKeyTestStatus).toHaveBeenLastCalledWith(0, { status: 'success', message: '' });
+    act(() => renderer.unmount());
+  });
+
   it('tests a pure keyless provider without Authorization or auth-index', async () => {
     const renderer = renderPage();
     const button = findSingleTestButton(renderer);

@@ -16,6 +16,7 @@ import { useEdgeSwipeBack } from '@/hooks/useEdgeSwipeBack';
 import { useNotificationStore } from '@/stores';
 import { apiCallApi, getApiCallErrorDetails } from '@/services/api';
 import { normalizeAuthIndex } from '@/utils/authIndex';
+import { requestOpenAIConnectivityTest } from '@/utils/openAIConnectivityTest';
 import {
   getOpenAIKeyCount,
   getOpenAITestableKeyIndexes,
@@ -187,20 +188,16 @@ export function AiProvidersOpenAIEditPage() {
       setDraftKeyTestStatus(keyIndex, { status: 'loading', message: '' });
 
       try {
-        const result = await apiCallApi.request(
+        const result = await requestOpenAIConnectivityTest(
+          apiCallApi.request,
           {
             authIndex: keyAuthIndex,
             proxyUrl: keyEntry.proxyUrl?.trim() || undefined,
             method: 'POST',
             url: endpoint,
             header: Object.keys(headers).length ? headers : undefined,
-            data: JSON.stringify({
-              model: modelName,
-              messages: [{ role: 'user', content: 'Hi' }],
-              stream: false,
-              max_tokens: 5,
-            }),
           },
+          modelName,
           { timeout: OPENAI_TEST_TIMEOUT_MS }
         );
 
@@ -410,7 +407,8 @@ export function AiProvidersOpenAIEditPage() {
             const keyStatus = keyTestStatuses[index]?.status ?? 'idle';
             const weightError = getCredentialWeightError(entry.weight);
             const canTestKey =
-              hasConfiguredModels && getOpenAITestableKeyIndexes(form.apiKeyEntries).includes(index);
+              hasConfiguredModels &&
+              getOpenAITestableKeyIndexes(form.apiKeyEntries).includes(index);
 
             return (
               <div key={index} className={styles.keyTableRow}>
