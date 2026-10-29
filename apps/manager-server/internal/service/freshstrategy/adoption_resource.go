@@ -31,17 +31,38 @@ func adoptionResourceKindNames() map[bootstrap.ResourceRef]string {
 // authorizes, or nil when the three traces do not agree.
 func adoptionResourceAuthorizedRefs(read adoptionResourceReadTrace, replay adoptionResourceReplayTrace, verify adoptionResourceVerifyTrace) []bootstrap.ResourceRef {
 	names := adoptionResourceKindNames()
-	authorized := make([]bootstrap.ResourceRef, 0, len(names))
+	// The three traces must describe the same run, so they must name the same
+	// kinds. A key in one and not another is a disagreement, not a kind that
+	// quietly drops out: the whole chain is void rather than partially believed.
+	keys := func(counts map[string]int) []string {
+		named := make([]string, 0, len(counts))
+		for name := range counts {
+			named = append(named, name)
+		}
+		slices.Sort(named)
+		return named
+	}
+	readKeys := keys(read.ResourceCounts)
+	if !slices.Equal(readKeys, keys(replay.CopiedResources)) || !slices.Equal(readKeys, keys(verify.VerifiedResources)) {
+		return nil
+	}
+	// A named kind with no item is a trace claiming a kind it did not observe.
+	// The writer only names kinds it copied items of, so this is the shape of a
+	// doctored or mis-generated trace, not of an empty source: an empty source
+	// names no kind at all.
+	for _, name := range readKeys {
+		if read.ResourceCounts[name] < 1 || replay.CopiedResources[name] < 1 || verify.VerifiedResources[name] < 1 {
+			return nil
+		}
+	}
+	authorized := make([]bootstrap.ResourceRef, 0, len(readKeys))
 	for ref, name := range names {
-		count, ok := read.ResourceCounts[name]
-		if !ok || count < 0 {
+		// A kind the source read found nothing of is not evidence that anything
+		// was copied, so it is not authorized: the count is a fact about a real
+		// item, exactly like the client key count. A kind outside the table is
+		// never authorized, whatever a trace names.
+		if count, ok := read.ResourceCounts[name]; !ok || count < 1 {
 			continue
-		}
-		if _, ok := replay.CopiedResources[name]; !ok {
-			return nil
-		}
-		if _, ok := verify.VerifiedResources[name]; !ok {
-			return nil
 		}
 		authorized = append(authorized, ref)
 	}
