@@ -1,6 +1,6 @@
 {
   "caseRef": "fresh-legacy-managed-stage-v8-r1",
-  "consumerImplementationSha256": "000afda7edc0b80a5cef0d3f2aa53c02f1e5b08de89ca81c70ac754799378337",
+  "consumerImplementationSha256": "98ffdf4b5b744f693628922d8542a84df2756b4309b2ce9338185467603067fa",
   "destinationVerified": true,
   "gatewayPending": true,
   "legacyArchiveSha256": "8afc9ed4c89a50a5ffce5d122a9bb93442c5b8ff3d8c6f07b7a274c719109b74",
@@ -16,6 +16,6 @@
   "targetArtifactId": "sha256:b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41",
   "targetBinarySha256": "b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41",
   "targetVersion": "v8.0.13",
-  "testedCommit": "e4ece4ab747f86230fdb10c1d786cb8ad8341faf",
-  "testedTree": "5e8793ffdb9219ed952386d11a7a9a973d44e406"
+  "testedCommit": "6c6e745c4e7a15f4c0fd3885d28003a9aba74785",
+  "testedTree": "6aada046b0491282994488da423b80605a9e78ae"
 }

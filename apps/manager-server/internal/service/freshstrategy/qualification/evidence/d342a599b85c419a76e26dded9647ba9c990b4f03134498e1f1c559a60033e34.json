@@ -4,9 +4,9 @@
   "manifestRevision": "fresh-network-client-api-keys-r1",
   "manifestSha256": "563ef299810ce576636df6bd5ebf39a0554d54e5b8bde31b8606405c4d2ac3be",
   "run": {
-    "id": "cpamp-fresh-adoption-resource-network-e4ece4ab747f",
-    "runnerCommit": "e4ece4ab747f86230fdb10c1d786cb8ad8341faf",
-    "testedTree": "5e8793ffdb9219ed952386d11a7a9a973d44e406"
+    "id": "cpamp-fresh-adoption-resource-network-6c6e745c4e7a",
+    "runnerCommit": "6c6e745c4e7a15f4c0fd3885d28003a9aba74785",
+    "testedTree": "6aada046b0491282994488da423b80605a9e78ae"
   },
   "artifactObservation": {
     "candidateRef": "CPA8-8.0.13-linux-amd64-plugin",
@@ -47,17 +47,17 @@
     {
       "id": "fresh-network-client-api-keys-read",
       "kind": "sanitized-trace",
-      "sha256": "b492fc5b1138bca9b2148c214c304ac54bd964f034a895d50c2d29a611292984"
+      "sha256": "9022173190754f69aad00e57a25ea26da0d16cbd3230573b04a8d32845e51e0c"
     },
     {
       "id": "fresh-network-client-api-keys-replay",
       "kind": "sanitized-trace",
-      "sha256": "d1229459ef536586a2ddc0585e95cdd32dc24120852dd29262782501e1a43f58"
+      "sha256": "8e7f819e5eb0cd1b3dec6e2769cc6a9a7e03b28d8a455a9c8867313521757ab6"
     },
     {
       "id": "fresh-network-client-api-keys-verify",
       "kind": "sanitized-trace",
-      "sha256": "b5012c7c9cda9d4f48cb10503cd8de7386f987df35b5da2bec93fb373bae04b3"
+      "sha256": "9d31f905be82669aa75f9eeeda4884f2760c960572071cfce6ccb7322d31aeb5"
     }
   ]
 }
