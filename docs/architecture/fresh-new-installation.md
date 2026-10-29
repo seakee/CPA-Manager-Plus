@@ -842,9 +842,12 @@ the run at that item, and the item in flight is the only one a resume may repeat
 Manual and failed items are operator work carrying a concrete instruction: they
 never fail the adoption, and a source that cannot be read leaves the adoption
 committed with an empty summary. A committed replay of `POST strategy` is the
-resume path and continues from the durable prefix. Step 4's completion
-conditions read this summary; the authority generalization, usage enablement,
-model management and the Full Web Adopt flow are not part of this lane.
+resume path and continues from the durable prefix; a replay that was already
+waiting for the migration lock when a completion took it starts nothing, because
+the start re-reads the record under that lock and refuses a completed or
+re-staged installation. Step 4's completion conditions read this summary; the
+authority generalization, usage enablement, model management and the Full Web
+Adopt flow are not part of this lane.
 
 The per-item summary is the operational record of the copy. It is deliberately
 *not* itself a qualification. `freshAdoptionRefRules`

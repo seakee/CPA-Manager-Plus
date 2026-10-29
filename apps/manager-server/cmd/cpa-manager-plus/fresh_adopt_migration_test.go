@@ -955,6 +955,73 @@ func TestCompletedInstallationIsNeverMigratedAgain(t *testing.T) {
 	}
 }
 
+// A replay that was already waiting for the migration lock must not start a run
+// after a completion took that lock. The record such a replay read is stale by
+// then, so a run started from it would copy into a finished installation and
+// overwrite what the operator changed after completion.
+func TestReplayBlockedOnTheLockNeverStartsAfterCompletion(t *testing.T) {
+	fixture := newAdoptMigrationFixture(t)
+	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
+		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
+	}
+	fixture.wait()
+	stale := fixture.reload(t)
+	if stale.Operation.ProductComplete {
+		t.Fatal("the fixture completed before the replay read the record")
+	}
+	// The destination moves on and the source gains a credential the first run
+	// never saw, so a run started now leaves evidence rather than a plausible
+	// no-op.
+	fixture.destination.mu.Lock()
+	fixture.destination.config["routing"] = map[string]any{"strategy": "operator-choice"}
+	fixture.destination.mu.Unlock()
+	fixture.source.mu.Lock()
+	fixture.source.credentials["late-source.json"] = []byte(`{"type":"claude","access_token":"late"}`)
+	fixture.source.types["late-source.json"] = "claude"
+	fixture.source.mu.Unlock()
+	writes, uploads := fixture.destination.writeCount(), len(fixture.destination.uploads())
+
+	// The replay is derived from the pre-completion record and waits for the lock
+	// the completion is about to take.
+	started, state := make(chan struct{}), make(chan string, 1)
+	fixture.app.adoptMigrationMu.Lock()
+	go func() {
+		close(started)
+		state <- fixture.app.runAdoptionMigration(context.Background(), stale, fixture.source.URL(), migrationSourceKey, "")
+	}()
+	<-started
+	time.Sleep(20 * time.Millisecond)
+	if _, err := fixture.app.store.Update(t.Context(), stale.Operation.Identity, stale.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.ProductComplete = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fixture.app.adoptMigrationMu.Unlock()
+
+	select {
+	case got := <-state:
+		if got != "" {
+			t.Fatalf("a replay reported the migration %q after completion", got)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the replay never left the lock")
+	}
+	fixture.wait()
+	if got := fixture.destination.writeCount(); got != writes {
+		t.Fatalf("a replay wrote into the completed installation: %d writes", got-writes)
+	}
+	if got := len(fixture.destination.uploads()); got != uploads {
+		t.Fatalf("a completed installation received %d more uploads", got-uploads)
+	}
+	if got := fixture.destination.value("routing", "strategy"); got != "operator-choice" {
+		t.Fatalf("the replay overwrote a post-completion change: %v", got)
+	}
+	if summary := fixture.reload(t).AdoptionSummary; summary == nil || summary.Finished != true {
+		t.Fatalf("the replay changed the settled summary: %+v", summary)
+	}
+}
+
 // complete posts the completion request of this fixture's installation.
 func (f *adoptMigrationFixture) complete(t *testing.T) *httptest.ResponseRecorder {
 	t.Helper()
