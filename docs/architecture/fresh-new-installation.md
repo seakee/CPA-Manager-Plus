@@ -711,8 +711,8 @@ item. The executor is `internal/service/freshadopt`, reached only from
 | provider section | the same single document | `PUT /config/<section>`, for the 12 `api-keys.*`/`oauth.*` groups | `GET` that path |
 
 The approved scope names 13 provider ownership groups, but CPA v8.0.13 has no
-root `models` section: `internal/config/config.go:9-192` declares `models` only
-inside a `*-api-key` group, a provider config or a `payload` rule list, and
+root `models` section: `internal/config/config_types.go:454-455,537-538,658-659`
+declares `models` only inside a `payload` rule list or a provider config, and
 `v8AllowedRoots` (`config_v8.go:572`) does not list it. It is absent from the
 table rather than guessed; its effective content arrives with the `api-keys.*`
 groups, which carry each group's own `models` list.
@@ -780,6 +780,24 @@ is the reviewed authority for what the Manager's install-derived authority may
 claim, and it is bound to an independent acceptance of exactly those bytes and
 that scope; the `client_api_keys_only` limitation therefore remains on the
 legacy consumer and is no longer claimed for the network consumer.
+
+**Waiver (2026-10-29).** Acceptance `65eb659a` covered client API keys only.
+What this document describes for credentials, gateway configuration and provider
+sections was built and evidenced afterwards: those kinds are migrated under a
+**maintainer waiver dated 2026-10-29**, backed by real-CPA evidence from the
+`linux/amd64` container run and **pending the single pre-Beta independent
+re-acceptance**. No new review record was created and the consumer stays
+`accepted` under `65eb659a`; read every widened kind here as waived, not as
+independently accepted.
+
+The record is also the gate on the copy itself, not only on its label. The
+executor classifies every item through `freshadopt.ItemRef` — a gateway leaf or
+payload rule family the accepted gateway table names is `cpa-config-routing`,
+anything outside that table keeps its describing reference and stays manual —
+and it copies an item only when the record's decision for that reference is
+`migrate` (`freshadopt.Executor.gated`). Every other item is recorded with that
+decision's manual action and is never written, so an inventory that later
+widens cannot copy a kind the record still calls manual.
 
 #### Retry after a terminal destination failure
 

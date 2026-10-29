@@ -483,7 +483,15 @@ func blockCredentialDownloads(t *testing.T, fixture *adoptMigrationFixture) (fun
 // wait blocks until the background Adopt migration of this fixture has
 // finished. The commit reply no longer waits for it, so every assertion on the
 // per-item summary reads the record only after the run has settled.
-func (f *adoptMigrationFixture) wait() { f.app.waitAdoptionMigration() }
+func (f *adoptMigrationFixture) wait() {
+	deadline := time.Now().Add(30 * time.Second)
+	for f.app.adoptMigrationInFlight() {
+		if time.Now().After(deadline) {
+			panic("the Adopt migration did not settle")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
 
 func (f *adoptMigrationFixture) strategy(t *testing.T, record freshstore.Record) *httptest.ResponseRecorder {
 	t.Helper()

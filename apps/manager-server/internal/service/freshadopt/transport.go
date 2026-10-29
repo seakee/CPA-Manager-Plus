@@ -224,8 +224,24 @@ func (d *DestinationWire) DownloadCredential(ctx context.Context, name string) (
 // CredentialState reports the destination's own listing entry for one file. A
 // file the destination does not list is reported absent rather than as an error:
 // absence is the answer that decides an unknown upload.
+//
+// The read is the list route narrowed by `?name=`, not a full listing per
+// credential. `ListAuthFiles` filters on that parameter itself, on both of its
+// paths — `matchesAuthFileLookup` against the auth manager
+// (`auth_files.go:292-303`, called at `:132,157`) and an exact name comparison
+// against the auth directory when the manager is unavailable
+// (`auth_files.go:396-398`) — and `/v8/management/credentials` is that handler
+// (`server_management_v8.go:43`). A run therefore reads one entry per credential
+// instead of the whole inventory once per credential.
 func (d *DestinationWire) CredentialState(ctx context.Context, name string) (CredentialState, error) {
-	files, err := d.ListCredentialFiles(ctx)
+	code, body, err := d.w.do(ctx, http.MethodGet, "/v8/management/credentials?name="+url.QueryEscape(name), nil, maxConfigBytes)
+	if err != nil {
+		return CredentialState{}, err
+	}
+	if code != http.StatusOK {
+		return CredentialState{}, fmt.Errorf("freshadopt: destination credential %q lookup refused with %d", name, code)
+	}
+	files, err := decodeCredentialList(body)
 	if err != nil {
 		return CredentialState{}, err
 	}
@@ -274,7 +290,9 @@ func (d *DestinationWire) UploadCredential(ctx context.Context, name string, dat
 // destination back and treats a missing file as CPA's verdict on the bytes.
 var errCredentialServerRefusal = errors.New("freshadopt: credential upload refused by CPA")
 
-// credentialRefusal keeps only the bounded code of CPA's refusal message.
+// credentialRefusal keeps the first 80 bytes of CPA's refusal message, which is
+// bounded but is still CPA's text: it is used only inside an in-process error for
+// the run to classify, and no part of it is ever stored in the record.
 func credentialRefusal(body []byte) string {
 	var refused struct {
 		Error string `json:"error"`

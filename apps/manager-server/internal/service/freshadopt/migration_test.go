@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -61,7 +62,12 @@ type fakeCPA struct {
 	// uploads records the file name of every POST /credentials received, so a
 	// test can prove which items were written twice.
 	uploads []string
-	server  *httptest.Server
+	// listCalls counts credential list requests, and listFilters records the
+	// `?name=` filter of each, so a test can prove the run reads one entry per
+	// credential rather than the whole inventory per credential.
+	listCalls   int
+	listFilters []string
+	server      *httptest.Server
 }
 
 func newFakeCPA(t *testing.T, auth string) *fakeCPA {
@@ -102,7 +108,7 @@ func (c *fakeCPA) serve(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	switch {
 	case path == "/v8/management/credentials" && r.Method == http.MethodGet:
-		c.listCredentials(w)
+		c.listCredentials(w, r)
 	case path == "/v8/management/credentials" && r.Method == http.MethodPost:
 		c.uploadCredential(w, r)
 	case path == "/v8/management/credentials/download" && r.Method == http.MethodGet:
@@ -128,7 +134,9 @@ func (c *fakeCPA) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (c *fakeCPA) listCredentials(w http.ResponseWriter) {
+// listCredentials reproduces CPA's own list route: `?name=` narrows the answer to
+// the one credential with that name, on both of ListAuthFiles' paths.
+func (c *fakeCPA) listCredentials(w http.ResponseWriter, r *http.Request) {
 	c.mu.Lock()
 	if c.failListAfterPatch && c.statusPatched {
 		c.mu.Unlock()
@@ -136,8 +144,14 @@ func (c *fakeCPA) listCredentials(w http.ResponseWriter) {
 		_, _ = w.Write([]byte(`{"error":"failed to read auth dir"}`))
 		return
 	}
+	nameFilter := r.URL.Query().Get("name")
+	c.listCalls++
+	c.listFilters = append(c.listFilters, nameFilter)
 	files := make([]map[string]any, 0, len(c.credentials))
 	for name := range c.credentials {
+		if nameFilter != "" && name != nameFilter {
+			continue
+		}
 		files = append(files, map[string]any{
 			"name": name, "type": c.credentialTypes[name],
 			"disabled": c.disabled[name], "runtime_only": c.runtimeOnly[name],
@@ -372,6 +386,26 @@ func (c *fakeCPA) usesOnlyReads(t *testing.T) {
 			t.Fatalf("source received a non-GET request: %s", entry)
 		}
 	}
+}
+
+// listNames reports the `?name=` filter of every credential list this CPA
+// received, empty when the request listed the whole inventory.
+func (c *fakeCPA) listNames() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.listFilters...)
+}
+
+// heldNames reports the credentials this CPA holds, sorted.
+func (c *fakeCPA) heldNames() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	names := make([]string, 0, len(c.credentials))
+	for name := range c.credentials {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // uploadNames reports the file name of every credential upload this CPA received.
@@ -1581,5 +1615,31 @@ func TestItemRefClassifiesAgainstTheGatewayTable(t *testing.T) {
 	}
 	if ref := ItemRef(freshstore.AdoptionItem{Item: providerSectionItemName("api-keys.claude"), Kind: freshstore.AdoptionKindProviderSection}); ref != bootstrap.AdoptionRefProviderStateAPIKeys {
 		t.Fatalf("provider section classified as %s", ref)
+	}
+}
+
+// Reading the destination's state of one credential costs one entry, not the
+// whole inventory: the route is narrowed by `?name=`.
+func TestCredentialStateReadsOnlyTheOneCredential(t *testing.T) {
+	source, destination := sourceFixture(t), destinationFixture(t)
+	runMigration(t, source, destination, freshstore.AdoptionSummary{})
+
+	names := destination.listNames()
+	held := destination.heldNames()
+	if len(held) == 0 {
+		t.Fatal("the fixture destination holds no credential")
+	}
+	if len(names) == 0 {
+		t.Fatal("the run read no credential state at all")
+	}
+	for _, name := range names {
+		if name == "" {
+			t.Fatalf("a credential state read listed the whole inventory: %v", names)
+		}
+	}
+	for _, name := range held {
+		if !slices.Contains(names, name) {
+			t.Fatalf("no per-name read of %s: %v", name, names)
+		}
 	}
 }

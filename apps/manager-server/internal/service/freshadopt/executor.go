@@ -555,7 +555,7 @@ func (e *Executor) credentialOutcome(ctx context.Context, item, name string, fil
 	reason, instruction := "", ""
 	if file.Type != "" && state.Type != "" && !strings.EqualFold(state.Type, file.Type) {
 		reason, instruction = "type_diverged",
-			"The credential was copied but the destination classifies it as "+state.Type+". Check the provider in the destination Console."
+			"The credential was copied but the destination classifies it as "+boundedName(state.Type)+". Check the provider in the destination Console."
 	}
 	if file.Disabled && !state.Disabled {
 		// The PATCH is read back on the same terms as every other write: an

@@ -99,10 +99,11 @@ func ManagerOwned(path string) bool {
 //	                                     oauth.settings, oauth.request-scoped-errors
 //
 // The scope also names a `models` section. CPA v8.0.13 has no root `models`
-// key: `internal/config/config.go:9-192` declares `models` only as a member of a
-// `*-api-key` group, of `claude`/`codex`/`gemini` provider configs and of the
-// `payload` rule lists, and `v8AllowedRoots` (internal/config/config_v8.go:572)
-// does not list it. So `models` is NOT a whole section that can be copied, and
+// key: `internal/config/config_types.go:454-455` (payload rule lists),
+// `:537-538` (claude provider) and `:658-659` (codex provider) declare `models`
+// only as a member of those structures, and no other root declares it, while
+// `v8AllowedRoots` (internal/config/config_v8.go:572) does not list it. So
+// `models` is NOT a whole section that can be copied, and
 // it is absent from the table below rather than guessed. Its effective content
 // arrives with the `api-keys.*` groups, which carry each group's own `models`
 // list.

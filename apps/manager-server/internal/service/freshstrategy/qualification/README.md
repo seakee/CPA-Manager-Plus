@@ -168,6 +168,16 @@ reference and never become durable upstream-controlled identities. The
 inventory and its decisions are written through the existing Fresh CAS before
 any destination mutation and are immutable afterwards.
 
+**Honest status of the widened kinds (2026-10-29).** Acceptance `65eb659a`
+covered client API keys only. The network consumer's migration of credentials,
+gateway configuration and provider sections is backed by real-CPA evidence but
+runs under a **maintainer waiver dated 2026-10-29**, not under a new acceptance:
+no new review record exists, `status` is still `accepted` under `65eb659a`, and
+the widened kinds are pending the single pre-Beta independent re-acceptance.
+Until that re-acceptance the four-kind breadth of `network_existing` is a
+waived claim, and the executor's per-reference gate is what keeps it honest: an
+item is copied only when the record's decision for its reference is `migrate`.
+
 The four accepted entries carry exact `applicability`, independently
 accepted evidence and their enforced limitations. On a missing/mismatched
 source or withdrawn qualification they remain fail-closed. Missing destination

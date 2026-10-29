@@ -97,9 +97,9 @@ func (a *freshApplication) runAdoptionMigration(ctx context.Context, record fres
 		checkpoint := persistAdoptionSummary(ctx, a, identity, revision, a.adoptionMigrationSession(ctx, sessionToken))
 		result, runErr := freshadopt.New(source, destination, record.Operation.Strategy.AdoptionDecisions).Run(ctx, previous, checkpoint)
 		if runErr != nil {
-			// The reason is a bounded code from this package, never an upstream
-			// message: a source refusal can quote a value.
-			log.Printf("Fresh adoption migration stopped after %d items: %v (%v)", len(result.Summary.Items), adoptionMigrationCode(runErr), runErr)
+			// Only the bounded code is logged. A runner error can quote an upstream
+			// value, and the code is the whole diagnosis the log needs.
+			log.Printf("Fresh adoption migration stopped after %d items: %v", len(result.Summary.Items), adoptionMigrationCode(runErr))
 			return
 		}
 		migrated, manual, failed := result.Summary.Counts()
@@ -117,9 +117,11 @@ func (a *freshApplication) runAdoptionMigration(ctx context.Context, record fres
 // begin a copy, and the flag is cleared only when the run has finished so a
 // later replay can resume a run that stopped.
 //
-// The run gets its own deadline and its own context. They are deliberately not
-// the request's: the reply returns at once, and a request that ends must not
-// cancel work the operator was told had started.
+// The run is derived from the host lifetime, not from the request: the reply
+// returns at once, and the request that started the copy ends long before it
+// does. The host lifetime is the right parent because the copy writes into this
+// process's installation, so a host shutdown must cancel it rather than leave a
+// goroutine writing into a closing database; the deadline bounds it besides.
 func (a *freshApplication) startAdoptionMigration(run func(context.Context)) bool {
 	a.adoptMigrationMu.Lock()
 	defer a.adoptMigrationMu.Unlock()
@@ -131,7 +133,7 @@ func (a *freshApplication) startAdoptionMigration(run func(context.Context)) boo
 		basis = context.Background()
 	}
 	a.adoptMigrationRunning = true
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(basis), adoptMigrationDeadline)
+	ctx, cancel := context.WithTimeout(basis, adoptMigrationDeadline)
 	go func() {
 		defer cancel()
 		defer func() {
@@ -151,21 +153,6 @@ func (a *freshApplication) adoptMigrationInFlight() bool {
 	a.adoptMigrationMu.Lock()
 	defer a.adoptMigrationMu.Unlock()
 	return a.adoptMigrationRunning
-}
-
-// waitAdoptionMigration blocks until the in-flight run has finished. It exists
-// for tests and for a graceful shutdown; the request path never calls it, which
-// is the point of the background worker.
-func (a *freshApplication) waitAdoptionMigration() {
-	a.adoptMigrationMu.Lock()
-	running := a.adoptMigrationRunning
-	a.adoptMigrationMu.Unlock()
-	for running {
-		time.Sleep(time.Millisecond)
-		a.adoptMigrationMu.Lock()
-		running = a.adoptMigrationRunning
-		a.adoptMigrationMu.Unlock()
-	}
 }
 
 // adoptionMigrationSession re-reads the installation record and re-validates the
