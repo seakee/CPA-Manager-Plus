@@ -3,8 +3,8 @@ package bootstrap
 import (
 	"errors"
 	"fmt"
-	"slices"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -233,8 +233,10 @@ func FreshAdoptionDecision(ref ResourceRef, candidate AdoptionResourceDecision) 
 		return AdoptionResourceDecision{}, false
 	}
 	// The caller passes the decision it derived for this ref from the evidence
-	// chain, or the zero decision when the chain did not exercise this kind.
-	if rule.qualified && candidate.Qualification != CapabilityPending {
+	// chain, or no decision at all when the chain did not exercise this kind.
+	// "Not authorized" is therefore the zero decision and the explicit pending
+	// one; anything else is a claim this function then has to accept or refuse.
+	if rule.qualified && candidate != (AdoptionResourceDecision{}) && candidate.Qualification != CapabilityPending {
 		// A migrate verdict is only ever this ref's own shape, fully qualified,
 		// and derived from evidence: never inferred from another kind.
 		disposition, err := DecideAdoptionResource(candidate)

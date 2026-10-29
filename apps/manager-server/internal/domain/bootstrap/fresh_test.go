@@ -220,8 +220,14 @@ func TestFreshAdoptionInventoryRequiresExactlyOneDecisionPerResource(t *testing.
 			c.AdoptionResources = []ResourceRef{AdoptionRefCPAAuthFiles}
 			c.AdoptionDecisions = c.AdoptionDecisions[1:]
 		},
-		"auth files downgraded to manual": func(c *FreshStrategyCheckpoint) {
-			c.AdoptionDecisions = []AdoptionResourceDecision{c.AdoptionDecisions[0], freshManualDecision(AdoptionRefCPAAuthFiles)}
+		// A kind the evidence does not authorize falls back to its own manual
+		// action, but only that one: a manual decision that names another
+		// resource's action is a claim the rule cannot make.
+		"auth files downgraded to the wrong manual action": func(c *FreshStrategyCheckpoint) {
+			c.AdoptionDecisions = []AdoptionResourceDecision{c.AdoptionDecisions[0], {
+				ResourceRef: AdoptionRefCPAAuthFiles, Kind: Credentials, Scope: CPAAuthFiles,
+				Qualification: CapabilityPending, ManualAction: ReconfigureAfterAdoption, Disposition: ManualAction,
+			}}
 		},
 		"routing decision with the wrong kind": func(c *FreshStrategyCheckpoint) {
 			c.AdoptionResources = append(c.AdoptionResources, AdoptionRefConfigRouting)
