@@ -260,6 +260,22 @@ function cpaFailedAuthCount() {
     .filter((line) => !/\d+\.\d+\.\d+\.\d+/.test(line) || line.includes(managerAddress))
     .length;
 }
+// The failed-authentication count once it has stopped moving. The two discovery
+// refusals of a rotation (the console read and the Collector's in-flight poll) can
+// land a poll interval apart, so a baseline taken too early would blame a later
+// request for them.
+async function settledFailedAuthCount(timeout = 20000) {
+  const end = Date.now() + timeout;
+  let previous = cpaFailedAuthCount();
+  do {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const current = cpaFailedAuthCount();
+    if (current === previous) return current;
+    previous = current;
+  } while (Date.now() < end);
+  return previous;
+}
+
 // A secret must not survive anywhere this run wrote: the report object itself
 // (asserted UNREDACTED), everything the run printed, and the log of every
 // container of this run. Redaction is what makes the artifact readable, never what
@@ -944,13 +960,17 @@ try {
   const failedBefore = cpaFailedAuthCount();
 
   const blockedRead = await apiCall('GET', 'external/usage');
-  // The baseline is the count at the moment the gate engages: every refusal after
-  // it belongs to the Manager presenting a key the CPA already rejected, which is
-  // the number five bans an address for.
-  const failedAtRefusal = cpaFailedAuthCount();
+  // The settled baseline is published here so every later write is measured
+  // against it.
+  let failedAtRefusal = 0;
   await check('after an out-of-band rotation writes are blocked and reads answer locally', async () => {
     assert.equal(blockedRead.status, 409, JSON.stringify(blockedRead.payload));
     assert.equal(blockedRead.payload.code, 'external_management_key_rejected');
+    // A rotation produces two discovery refusals at most: this gated read, and the
+    // Collector's own in-flight poll, which stops itself on the answer instead of
+    // retrying. Both are the Manager learning the key changed; the baseline is
+    // taken once they have landed, so no later request can be blamed for them.
+    failedAtRefusal = await settledFailedAuthCount();
     // The refused credential is now the standing state, so repeated reads must
     // answer from the Manager without touching the CPA at all.
     for (let round = 0; round < 4; round++) {

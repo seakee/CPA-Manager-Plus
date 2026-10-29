@@ -736,11 +736,14 @@ It is the acceptance for everything above:
    line counts only when it names the management surface (`/v0/management/` or
    `/v8/management/`, a management key or the secret), is an authentication
    refusal (401/unauthorized/invalid key), and — when it carries a peer address —
-   names the Manager's container. The baseline is taken at the moment the gate
-   engages, so the four post-rotation writes are measured against it: not one of
-   them may add a management 401. The count must stay below five for the whole
-   rotation-to-rebind window and again for the browser pass, which rotates the CPA
-   a second time; once the local gate has engaged the count must not move at all;
+   names the Manager's container. A rotation produces two discovery refusals at
+   most — the gated console read, and the Collector's own in-flight poll, which
+   stops itself on the answer instead of retrying — so the baseline is taken once
+   they have landed. The four post-rotation writes are measured against it: not one
+   of them may add a management 401, and the repeated reads that follow must not
+   move the count at all. The whole rotation-to-rebind window must stay below five,
+   and the browser pass, which rotates the CPA a second time, is counted the same
+   way;
 7. rebind with the new key recovers everything, and the same key reports
    `reverified`;
 8. screenshots of the Keys blocker, the rebind dialog, the usage confirmation and
