@@ -1,12 +1,23 @@
 package main
 
 import (
+	"bufio"
+	"context"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	proxysvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/proxy"
 )
 
 func guardFreshLegacyWrites(next http.Handler, wiringErr error) http.Handler {
@@ -22,6 +33,485 @@ func guardFreshLegacyWrites(next http.Handler, wiringErr error) http.Handler {
 	})
 }
 
+// externalLegacyWriteReplaced is the stable code of a legacy write that an
+// External install already owns through its own route. The legacy bridge is a
+// compatibility tunnel; on External the same write exists behind an explicit
+// API-key, gateway-config, rebind or usage confirmation contract, so forwarding
+// it would be a second, unproven way to change the user's CPA.
+const externalLegacyWriteReplaced = "external_legacy_write_replaced"
+
+// writeLegacyRefusal answers one legacy-bridge refusal locally. Nothing is
+// forwarded, so a refused code costs the user's CPA no request.
+func writeLegacyRefusal(w http.ResponseWriter, code string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	writeFreshJSON(w, struct {
+		Code string `json:"code"`
+	}{code})
+}
+
+// externalLegacyReplacedWrite reports whether this legacy request is one of the
+// writes Fresh already owns on External. The argument is the path the legacy
+// router sees, not the browser-facing `cpamp/` alias.
+func externalLegacyReplacedWrite(path, method string) bool {
+	if method == http.MethodGet || method == http.MethodHead {
+		return false
+	}
+	switch strings.TrimRight(path, "/") {
+	case "/v0/management/api-keys", "/v0/management/config.yaml", "/usage-service/config":
+		// API keys are owned by `api-keys`, the gateway document by
+		// `gateway/config`, and the usage-service settings document by the
+		// connection, the rebind and `external/usage`. On External the setup row
+		// is a mirror of the committed connection, so editing it here would
+		// desync the two.
+		return true
+	}
+	return false
+}
+
+// legacyBridgePresentsSavedKey reports whether a legacy request ends up presenting
+// the saved management credential to the user's CPA once its caller is authorized.
+// Only those requests are gated: the Manager-local families answer from its own
+// store, and a page, a static asset or a redirect must stay reachable so the user
+// can still read the blocker. The model list is deliberately absent: it forwards
+// the caller's own header, so it is not a presentation of the saved key.
+func legacyBridgePresentsSavedKey(path string) bool {
+	cleaned := strings.TrimRight(path, "/")
+	if cleaned == "/v0/resource/plugins" || strings.HasPrefix(cleaned, "/v0/resource/plugins/") {
+		return true
+	}
+	if !strings.HasPrefix(cleaned, "/v0/management/") {
+		return false
+	}
+	// Manager-local controllers are dispatched before the CPA proxy in the legacy
+	// router, so they never carry the saved key upstream.
+	for _, family := range []string{
+		"/v0/management/usage",
+		"/v0/management/dashboard",
+		"/v0/management/model-prices",
+		"/v0/management/monitoring",
+		"/v0/management/api-key-aliases",
+		"/v0/management/account-action-candidates",
+		"/v0/management/codex-inspection",
+		"/v0/management/quota-snapshots",
+		"/v0/management/cpa-connection",
+	} {
+		if cleaned == family || strings.HasPrefix(cleaned, family+"/") {
+			return false
+		}
+	}
+	return true
+}
+
+// externalLegacyDecision is the one answer the External cutover gives a legacy
+// request before anything is forwarded.
+type externalLegacyDecision int
+
+const (
+	// legacyDecisionPassthrough is a request the cutover does not own: another
+	// profile's bridge, a Manager-local family, a page, or a request that carries
+	// the caller's own credential instead of the saved key.
+	legacyDecisionPassthrough externalLegacyDecision = iota
+	// legacyDecisionReplacedWrite is a write Fresh already owns on External.
+	legacyDecisionReplacedWrite
+	// legacyDecisionUnavailable is a saved-key request this Manager cannot decide
+	// because its own committed instruction is unreadable.
+	legacyDecisionUnavailable
+	// legacyDecisionGated is an admin-authorized request that will present the saved
+	// management key, so it is serialized and its refusal recorded.
+	legacyDecisionGated
+)
+
+// externalLegacyDecision decides one legacy request before anything is forwarded,
+// and returns the record it decided from, so the gated path does not read the same
+// row twice.
+func (a *freshApplication) externalLegacyDecision(r *http.Request) (externalLegacyDecision, freshstore.Record) {
+	if a == nil || a.store == nil || r == nil || r.URL == nil {
+		return legacyDecisionPassthrough, freshstore.Record{}
+	}
+	presents := legacyBridgePresentsSavedKey(r.URL.Path)
+	record, err := a.store.Load(r.Context())
+	if err != nil {
+		// Fail closed: without the committed instruction this Manager cannot prove
+		// which credential a saved-key request would present, and presenting a
+		// credential it cannot name is how an address gets banned.
+		if presents {
+			return legacyDecisionUnavailable, freshstore.Record{}
+		}
+		return legacyDecisionPassthrough, freshstore.Record{}
+	}
+	if record.Operation.Strategy.Strategy != bootstrap.ConnectExternal {
+		// New Managed and Adopt keep the bridge they have always had: on those
+		// profiles it is the Console's own contract, not a duplicate route.
+		return legacyDecisionPassthrough, record
+	}
+	if externalLegacyReplacedWrite(r.URL.Path, r.Method) {
+		return legacyDecisionReplacedWrite, record
+	}
+	if !presents {
+		return legacyDecisionPassthrough, record
+	}
+	// Admin authorization runs before the gate. A caller-auth plugin-management
+	// request keeps the caller's own header, and every other unauthorized
+	// management request is answered by this Manager itself, so neither presents
+	// the saved key: neither may serialize a CPA read or file a refusal.
+	if !freshAdminAuthenticated(record, r) {
+		return legacyDecisionPassthrough, record
+	}
+	return legacyDecisionGated, record
+}
+
+// freshAdminAuthenticated reports whether the request carries this installation's
+// Admin key. The gate sits above the legacy router, where the same key is verified
+// again per controller, so the gate has to decide before it takes the credential
+// lock.
+func freshAdminAuthenticated(record freshstore.Record, r *http.Request) bool {
+	if record.Admin == nil || r == nil {
+		return false
+	}
+	return security.VerifyAdminKey(*record.Admin, security.ExtractBearerToken(r.Header.Get("Authorization")))
+}
+
+// guardFreshExternalLegacy is the External cutover of the legacy bridge. The
+// bridge is a compatibility tunnel onto the same routes Fresh now owns behind an
+// explicit contract, so on External it must not become a second, unproven write
+// path onto the user's CPA; and it must never present a management credential
+// that CPA already refused. Both answers are local, so neither costs the user's
+// CPA a request. New Managed and Adopt hand the request straight through.
+func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Handler {
+	if next == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decision, record := app.externalLegacyDecision(r)
+		switch decision {
+		case legacyDecisionReplacedWrite:
+			writeLegacyRefusal(w, externalLegacyWriteReplaced)
+			return
+		case legacyDecisionUnavailable:
+			writeExternalAuthorityUnavailable(w)
+			return
+		case legacyDecisionGated:
+		default:
+			next.ServeHTTP(w, r)
+			return
+		}
+		ctx := r.Context()
+		gate := &app.legacyCredentialGate
+		// A waiter whose request was cancelled gives up instead of queueing: no CPA
+		// request is ever made on behalf of a caller that stopped waiting. It is told
+		// so locally rather than left with a connection that never answers.
+		if !gate.acquire(ctx) {
+			writeExternalCredentialWaitCancelled(w)
+			return
+		}
+		// One at a time, and the refusal is re-read under the lock: a page fires
+		// several of these in parallel, and the CPA bans an address after five
+		// failed authentications. Without this, one page load is enough to trip
+		// the ban and the blocker could never be cleared.
+		//
+		// The grant is taken here, before the request leaves. It is the credential
+		// this request is about to send, so a refusal is filed against that and not
+		// against whatever a concurrent rebind stored while it was in flight.
+		grant := app.externalReadGrantFor(ctx, record)
+		if grant.Refused {
+			gate.release()
+			// The refused credential is the rebind blocker for every method: a read
+			// the CPA would refuse again, and a write whose effect cannot be read
+			// back.
+			writeExternalManagementRejected(w)
+			return
+		}
+		// A stale credential is refused by the CPA with 401, and the browser reads
+		// a 401 from this namespace as its own Admin session having expired: it
+		// clears the session and returns to the login form before any page can
+		// name the cause. The refusal is the same fact the typed reads block on, so
+		// it is recorded and answered as that blocker instead.
+		markContext, mark := proxysvc.WithSavedKeyMark(ctx)
+		// A console read's tenure is bounded in both directions: the recorder frees
+		// the gate the moment the status exists, and the budget frees it and ends
+		// the request when the CPA never sends one. Without the budget a CPA that
+		// accepts the connection and never answers would hold every other console
+		// read. A request that waits on an upstream provider takes no budget at all
+		// and keeps the tenure until its status arrives, exactly as the proxy
+		// itself bounds it.
+		hold, requestCtx := beginExternalCredentialHold(markContext, gate, app.externalCredentialHoldBudget(r.URL.Path))
+		recorder := &externalLegacyRecorder{
+			ResponseWriter: w,
+			// The refusal is recorded against a context the caller cannot cancel: a
+			// browser that disconnects while the CPA answers 401 must still leave the
+			// gate in place, or the next page load presents the refused key again.
+			ctx: context.WithoutCancel(requestCtx), app: app, hold: hold, grant: grant, mark: mark,
+		}
+		// The lock is held only until the status is known, which the recorder does;
+		// this defer covers the paths where no status ever reaches it.
+		defer hold.finish()
+		next.ServeHTTP(recorder, r.WithContext(requestCtx))
+	})
+}
+
+// externalCredentialGate serializes the legacy requests that present the saved
+// management credential. It is a channel rather than a mutex so a waiter can give
+// up when its own request is cancelled: holding a console page behind a caller that
+// is already gone would stall every other CPA read for no answer.
+type externalCredentialGate struct {
+	once sync.Once
+	slot chan struct{}
+}
+
+func (g *externalCredentialGate) acquire(ctx context.Context) bool {
+	g.once.Do(func() { g.slot = make(chan struct{}, 1) })
+	select {
+	case g.slot <- struct{}{}:
+		return true
+	default:
+	}
+	select {
+	case g.slot <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// release returns the gate. It is safe to call more than once: the recorder
+// releases on the status and its caller releases on every other exit.
+func (g *externalCredentialGate) release() {
+	g.once.Do(func() { g.slot = make(chan struct{}, 1) })
+	select {
+	case <-g.slot:
+	default:
+	}
+}
+
+// externalCredentialHeaderBudgetDefault is how long one gated console read may hold
+// the credential gate waiting for the CPA's status. It is deliberately longer than
+// any management read the console makes and shorter than a browser's own patience:
+// its only job is to keep a CPA that never answers from stalling every other read.
+// It is never applied to a request that waits on an upstream provider — see
+// externalLegacyWaitsOnProvider.
+const externalCredentialHeaderBudgetDefault = 30 * time.Second
+
+// externalCredentialHeaderBudget reports the bounded tenure of the credential gate
+// for one request.
+func (a *freshApplication) externalCredentialHeaderBudget() time.Duration {
+	if a != nil && a.credentialHeaderBudget > 0 {
+		return a.credentialHeaderBudget
+	}
+	return externalCredentialHeaderBudgetDefault
+}
+
+// externalCredentialHoldBudget is the tenure bound of one gated legacy request. A
+// request that waits on an upstream provider gets none: its status is decided by
+// that provider's own latency, not by how long a console read should take.
+func (a *freshApplication) externalCredentialHoldBudget(path string) time.Duration {
+	if externalLegacyWaitsOnProvider(path) {
+		return 0
+	}
+	return a.externalCredentialHeaderBudget()
+}
+
+// externalLegacyWaitsOnProvider reports whether a gated legacy request's status is
+// the upstream provider's, not the CPA's management handlers'. The proxy puts no
+// response-header timeout on these paths — it uses the default transport, so the
+// caller's own deadline is the only bound — and the gate must not add one: a
+// non-streaming completion that takes a minute to send its headers is a healthy
+// answer, not a hung CPA, and cutting it turns it into a 502.
+//
+// `api-call` forwards an arbitrary provider request. `oauth-callback` exchanges an
+// authorization code for tokens at the provider, and that exchange is the
+// provider's latency too.
+func externalLegacyWaitsOnProvider(path string) bool {
+	switch strings.TrimRight(path, "/") {
+	case "/v0/management/api-call", "/v0/management/oauth-callback":
+		return true
+	default:
+		return false
+	}
+}
+
+// statusClientClosedRequest names a request whose caller stopped waiting before
+// any answer existed. It is the Client Closed Request status (499) proxies already
+// use for exactly this fact.
+const statusClientClosedRequest = 499
+
+// externalCredentialWaitCancelled is the local code for a gated request that gave
+// up on the credential lock because its own caller was gone. No CPA request was
+// made, so it is not a refusal of the stored credential.
+const externalCredentialWaitCancelled = "external_credential_wait_cancelled"
+
+// writeExternalCredentialWaitCancelled answers a cancelled waiter locally instead
+// of returning silently: an abandoned connection that never receives a status is
+// indistinguishable from a Manager that hung.
+func writeExternalCredentialWaitCancelled(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusClientClosedRequest)
+	writeFreshJSON(w, struct {
+		Code string `json:"code"`
+	}{externalCredentialWaitCancelled})
+}
+
+// externalCredentialHold is one request's tenure of the credential gate. The gate
+// is released the moment the response status is known, and, on a console read, the
+// budget releases it and ends the request when the CPA never produces one, so a
+// hung CPA cannot hold every other console read behind it. A provider-bound request
+// takes no budget: its own status or its caller's cancellation ends the tenure.
+type externalCredentialHold struct {
+	gate *externalCredentialGate
+	// timer is stored atomically because the budget callback can fire while the
+	// handle is still being built: the callback must never read a field the
+	// constructor has not published yet.
+	timer  atomic.Pointer[time.Timer]
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+// beginExternalCredentialHold takes the tenure of an already-acquired gate and
+// returns the context the proxied request must use: cancelling it is what ends a
+// request whose CPA never answered. A non-positive budget means the request carries
+// no header budget of its own, and only its status or its caller ends the tenure.
+func beginExternalCredentialHold(
+	ctx context.Context,
+	gate *externalCredentialGate,
+	budget time.Duration,
+) (*externalCredentialHold, context.Context) {
+	requestCtx, cancel := context.WithCancel(ctx)
+	hold := &externalCredentialHold{gate: gate, cancel: cancel}
+	if budget > 0 {
+		hold.timer.Store(time.AfterFunc(budget, func() {
+			hold.release()
+			cancel()
+		}))
+	}
+	return hold, requestCtx
+}
+
+// release frees the gate and stops the budget. It is safe to call more than once:
+// the recorder releases on the status, on a hijack and on every other exit.
+func (h *externalCredentialHold) release() {
+	h.once.Do(func() {
+		if timer := h.timer.Load(); timer != nil {
+			timer.Stop()
+		}
+		h.gate.release()
+	})
+}
+
+// finish ends the tenure once ServeHTTP returned. The request context is cancelled
+// only here: a streamed body whose status was already known keeps its own context.
+func (h *externalCredentialHold) finish() {
+	h.release()
+	if h.cancel != nil {
+		h.cancel()
+	}
+}
+
+// externalLegacyRecorder turns a CPA credential rejection into the typed blocker
+// while passing every other response through untouched. The status is decided
+// before any byte is written, so a streamed or large body is never buffered, and
+// the credential gate is released right there: serializing the body past the moment
+// the CPA authenticated would let one slow reader stall every other console read.
+type externalLegacyRecorder struct {
+	http.ResponseWriter
+	ctx   context.Context
+	app   *freshApplication
+	hold  *externalCredentialHold
+	grant externalReadGrant
+	mark  *proxysvc.SavedKeyMark
+
+	decided bool
+	refused bool
+}
+
+func (w *externalLegacyRecorder) release() { w.hold.release() }
+
+func (w *externalLegacyRecorder) WriteHeader(status int) {
+	if w.decided {
+		return
+	}
+	if status < http.StatusOK {
+		// An informational status is not the answer. A 100 or a 103 says nothing
+		// about the credential, and deciding on it would release the gate before the
+		// CPA had a chance to refuse: the final status is what decides both.
+		w.ResponseWriter.WriteHeader(status)
+		return
+	}
+	w.decided = true
+	// Only a refusal of the saved key is this gate's business. The caller-auth
+	// entry points forward the caller's own header, and a 401 from one of those
+	// says nothing about the stored key: recording it would block a healthy
+	// installation until someone rebound.
+	if w.mark.Attached() {
+		switch status {
+		case http.StatusUnauthorized:
+			w.refused = true
+			w.app.noteExternalRejection(w.ctx, w.grant, cpa.ErrManagementRejected)
+			writeExternalManagementRejected(w.ResponseWriter)
+			w.release()
+			return
+		case http.StatusForbidden:
+			// CPA refused this client rather than the credential: a ban, or remote
+			// management disabled for it. It is the same blocker the 2a routes name,
+			// with the detail that says the ban expires.
+			w.refused = true
+			w.app.noteExternalRejection(w.ctx, w.grant, cpa.ErrManagementClientForbidden)
+			writeExternalManagementForbidden(w.ResponseWriter)
+			w.release()
+			return
+		}
+	}
+	w.ResponseWriter.WriteHeader(status)
+	w.release()
+}
+
+// Hijack releases the gate before handing the connection over. An upgraded
+// connection never carries a status this gate can decide, so the lock must not
+// outlive the handshake; the caller still owns the lifetime of the connection.
+func (w *externalLegacyRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, http.ErrNotSupported
+	}
+	w.release()
+	w.decided = true
+	return hijacker.Hijack()
+}
+
+// Unwrap lets http.ResponseController reach the real writer, so streaming a
+// legacy response through this gate still flushes.
+func (w *externalLegacyRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *externalLegacyRecorder) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		if !w.decided {
+			w.WriteHeader(http.StatusOK)
+		}
+		flusher.Flush()
+	}
+}
+
+func (w *externalLegacyRecorder) Write(body []byte) (int, error) {
+	if w.refused {
+		// The CPA's body described a refusal this Manager has already replaced.
+		return len(body), nil
+	}
+	if !w.decided {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(body)
+}
+
+// writeExternalAuthorityUnavailable fails a saved-key request closed: this Manager
+// could not read its own committed instruction, so it cannot prove which credential
+// the request would present, and it forwards nothing.
+func writeExternalAuthorityUnavailable(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	writeFreshJSON(w, struct {
+		Code string `json:"code"`
+	}{"external_cpa_authority_unavailable"})
+}
+
 // legacyResource exposes the existing CPAMP service/controller contracts below
 // the canonical Full Web API namespace. The browser never learns or constructs
 // the legacy paths; this adapter keeps the Public API authority and admin
@@ -34,10 +524,12 @@ func (a *freshApplication) legacyResource(w http.ResponseWriter, r *http.Request
 	}
 	// Full Web uses this bridge only after canonicalAPI has verified the
 	// Manager Admin key. Keep the browser-facing namespace explicit while
-	// reusing the complete legacy router and its own controller checks.
-	if strings.HasPrefix(resource, "cpamp/") && legacyBridgePathAllowed(strings.TrimPrefix(resource, "cpamp/"), r.Method) {
-		targetResource := strings.TrimPrefix(resource, "cpamp/")
-		parsed, err := url.Parse("/" + targetResource)
+	// reusing the complete legacy router and its own controller checks. The
+	// External cutover runs inside a.legacy itself, on the rewritten path, so
+	// every entry point into that router is covered by one gate.
+	bridged := strings.TrimPrefix(resource, "cpamp/")
+	if strings.HasPrefix(resource, "cpamp/") && legacyBridgePathAllowed(bridged, r.Method) {
+		parsed, err := url.Parse("/" + bridged)
 		if err != nil || parsed.Path == "" || parsed.Path == "/" {
 			http.NotFound(w, r)
 			return

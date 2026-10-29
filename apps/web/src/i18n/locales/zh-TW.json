@@ -245,7 +245,15 @@
     "restart_title": "重新啟動 CPA 閘道？",
     "interruption": "閘道請求可能中斷，但 CPAMP Manager 仍可用。",
     "operation_conflict": "已有執行環境操作正在進行。",
-    "operation_failed": "執行環境操作未能完成。"
+    "operation_failed": "執行環境操作未能完成。",
+    "cpa_version": "CPA 版本",
+    "version_support": "版本支援狀態",
+    "version_supported": "受支援",
+    "version_unsupported": "不受支援",
+    "version_unverified": "未驗證",
+    "writes": "寫入",
+    "writes_blocked": "該版本阻止寫入",
+    "writes_allowed": "該版本未阻止寫入"
   },
   "cpa_updates": {
     "title": "CPA Engine",

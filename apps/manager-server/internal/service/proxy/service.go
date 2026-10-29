@@ -381,6 +381,10 @@ func (s *Service) proxyWithResponseHook(w http.ResponseWriter, r *http.Request, 
 		req.Host = target.Host
 		if useSavedManagementKey {
 			req.Header.Set("Authorization", "Bearer "+setup.ManagementKey)
+			// A gate above this proxy records the refusal the CPA answers, and it
+			// may only do that for a request that actually presented the saved
+			// key: the caller-auth entry points forward the caller's own header.
+			NoteSavedManagementKey(req.Context())
 		}
 		if rewritePluginOrigin {
 			rewriteCodexInviteOrigin(req.Header, target)

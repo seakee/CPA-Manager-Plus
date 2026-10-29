@@ -245,7 +245,15 @@
     "restart_title": "Перезапустить шлюз CPA?",
     "interruption": "Запросы шлюза могут прерваться. CPAMP Manager останется доступен.",
     "operation_conflict": "Другая операция Runtime уже выполняется.",
-    "operation_failed": "Операцию Runtime не удалось завершить."
+    "operation_failed": "Операцию Runtime не удалось завершить.",
+    "cpa_version": "Версия CPA",
+    "version_support": "Поддержка версии",
+    "version_supported": "Поддерживается",
+    "version_unsupported": "Не поддерживается",
+    "version_unverified": "Не подтверждено",
+    "writes": "Запись",
+    "writes_blocked": "Заблокирована этой версией",
+    "writes_allowed": "Не заблокирована этой версией"
   },
   "cpa_updates": {
     "title": "CPA Engine",

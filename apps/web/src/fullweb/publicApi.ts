@@ -36,6 +36,44 @@ const GATEWAY_CONFIG_ERROR_CODES: Record<string, true> = {
 const isGatewayConfigResource = (resource: string) =>
   resource === 'gateway/config' || resource.startsWith('gateway/config/');
 
+// Typed External codes the pages act on. The Manager maps its own refusals onto
+// these; no branch carries a credential, an address or any text from the CPA.
+const EXTERNAL_ERROR_CODES: Record<string, true> = {
+  // The user's CPA refused the saved management key. Only a rebind resolves it.
+  external_management_key_rejected: true,
+  // The committed target and the live connection name different CPAs.
+  external_target_moved: true,
+  // The user's CPA did not prove the v8 contract this Manager writes.
+  external_cpa_version_unsupported: true,
+  // A rebind that named another address, or refused for another reason.
+  external_rebind_refused: true,
+  // Something else moved the installation while the candidate was proven.
+  external_rebind_stale_generation: true,
+  // The committed External authority could not be resolved.
+  external_cpa_authority_unavailable: true,
+};
+
+const isExternalResource = (resource: string) =>
+  resource === 'external/usage' ||
+  resource.startsWith('external/usage/') ||
+  resource === 'external/rebind' ||
+  resource.startsWith('external/rebind/');
+
+// A gateway resource is the Manager's own document, but on an External install the
+// save is written through the committed CPA credential: the same conflict can
+// carry any External code. The page merges both sets, so the blocker renders
+// instead of the code being dropped as an unrecognised payload.
+const GATEWAY_ERROR_CODES: Record<string, true> = {
+  ...GATEWAY_CONFIG_ERROR_CODES,
+  ...EXTERNAL_ERROR_CODES,
+};
+
+// Every resource whose failure carries a typed code the page must act on. The
+// payload is parsed for exactly these; every other failure stays a bare HTTP
+// error, because a page must never guess a cause from a status alone.
+const isTypedErrorResource = (resource: string) =>
+  isGatewayConfigResource(resource) || isExternalResource(resource);
+
 export class PublicApiError extends Error {
   constructor(
     readonly kind: PublicApiErrorKind,
@@ -112,7 +150,7 @@ export function createPublicApiClient(
       resource.startsWith('runtime/operations/') ||
       resource.startsWith('api-keys/') ||
       resource === 'settings/update-channel' ||
-      isGatewayConfigResource(resource)
+      isTypedErrorResource(resource)
         ? new AbortController()
         : undefined;
     const timer = controller ? setTimeout(() => controller.abort(), 15000) : undefined;
@@ -150,9 +188,20 @@ export function createPublicApiClient(
         let field: string | undefined;
         let detail: string | undefined;
         const retryResource = isGatewayConfigResource(resource);
+        // The External pages act on the same wire shape: a bounded `code` and,
+        // for a refused credential, the rebind `detail`. The key list answers
+        // from the same authority, so it is read the same way.
+        const externalResource =
+          isExternalResource(resource) ||
+          resource === 'api-keys' ||
+          // A single key answers the same typed codes on its own writes: renaming,
+          // revoking and replacing one are written through the same credential, and
+          // the operation journal keeps its own answer below.
+          (resource.startsWith('api-keys/') && !resource.startsWith('api-keys/operations/'));
         const operationResource = method === 'GET' && resource.startsWith('api-keys/operations/');
         if (
           (retryResource ||
+            externalResource ||
             operationResource ||
             (resource === 'strategy' && response.status === 409)) &&
           (response.status === 409 ||
@@ -162,14 +211,16 @@ export function createPublicApiClient(
         ) {
           try {
             const payload = (await response.json()) as Record<string, unknown>;
-            if (retryResource) {
+            if (retryResource || externalResource) {
               // Only a recognised code unlocks the diagnostic: an unrecognised
               // upstream payload must not smuggle its message into the UI.
-              if (typeof payload.code === 'string' && GATEWAY_CONFIG_ERROR_CODES[payload.code] === true)
+              const known = retryResource ? GATEWAY_ERROR_CODES : EXTERNAL_ERROR_CODES;
+              if (typeof payload.code === 'string' && known[payload.code] === true)
                 code = payload.code;
               if (code) {
                 if (typeof payload.field === 'string') field = payload.field;
                 if (typeof payload.message === 'string') detail = payload.message;
+                if (typeof payload.detail === 'string') detail = payload.detail;
               }
               // A 400 shape error and a 422 CPA rejection carry no journal; only a
               // conflict or an unavailable authority can hold an operation.
