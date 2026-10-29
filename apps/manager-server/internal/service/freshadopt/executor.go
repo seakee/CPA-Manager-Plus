@@ -479,15 +479,24 @@ func (e *Executor) credentialOutcome(ctx context.Context, item, name string, fil
 		// The PATCH is read back on the same terms as every other write: an
 		// unknown reply is resolved by what the destination reports now, never by
 		// reporting a state this run did not observe.
-		patchErr := e.destination.SetCredentialDisabled(ctx, file.Name, true)
+		// The PATCH reply itself is not the answer: only the read-back is. It is
+		// issued and its outcome deliberately ignored, because an acknowledged
+		// PATCH that did not take and a lost reply that did both resolve the same
+		// way, from what the destination reports next.
+		_ = e.destination.SetCredentialDisabled(ctx, file.Name, true)
 		after, afterErr := e.destination.CredentialState(ctx, name)
 		switch {
 		case afterErr == nil && after.Present && after.Disabled:
 			// The read-back is the answer, whatever the PATCH replied.
-		case patchErr != nil:
+		case afterErr == nil && after.Present:
+			// The destination answers and reports the credential enabled: the
+			// disable did not take, whether or not the PATCH said it did.
 			reason, instruction = "status_write_failed",
 				"The credential was copied but the destination does not report it disabled. Disable it in the destination Console."
 		default:
+			// The destination did not answer the read-back, so this run cannot say
+			// what the state is. Reporting "stays enabled" would be a claim it did
+			// not observe.
 			reason, instruction = "status_unverified",
 				"The credential was copied but the destination's disabled state could not be read back. Check it in the destination Console."
 		}

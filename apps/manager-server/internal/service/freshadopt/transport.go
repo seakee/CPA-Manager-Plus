@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 )
@@ -22,30 +21,23 @@ const maxCredentialBytes = 1 << 20
 // maxConfigBytes bounds one configuration read or write body.
 const maxConfigBytes = 8 << 20
 
-// client is the shared direct transport of both endpoints: no proxy, no
-// redirect following, no keep-alive reuse across calls and one bounded body. It
-// is deliberately the same posture as the management safe-read client, because
-// both talk to a CPA the operator pointed at.
-func newClient() *http.Client {
-	direct := http.DefaultTransport.(*http.Transport).Clone()
-	direct.Proxy = nil
-	direct.DisableKeepAlives = true
-	direct.MaxResponseHeaderBytes = 32 << 10
-	return &http.Client{
-		Transport:     direct,
-		Timeout:       30 * time.Second,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
-}
-
 // wire is one authenticated CPA v8 Management API endpoint.
+//
+// Its transport is the management safe-read client itself, not a copy of it:
+// no proxy, one fixed DNS resolution, no redirect following, no retry, a bounded
+// header/body budget and a five-second timeout per call. The copy that used to
+// live here called itself "the same posture" while allowing 30 seconds and
+// re-resolving DNS on every call; reusing the real one is what makes the claim
+// true, and it binds this package to the transport the External and adoption
+// reads are already qualified on.
 type wire struct {
 	baseURL string
 	key     string
 	client  *http.Client
+	close   func()
 }
 
-func newWire(endpoint Endpoint) (*wire, error) {
+func newWire(ctx context.Context, endpoint Endpoint) (*wire, error) {
 	base := cpa.NormalizeBaseURL(endpoint.BaseURL)
 	parsed, err := url.Parse(base)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
@@ -54,7 +46,19 @@ func newWire(endpoint Endpoint) (*wire, error) {
 	if strings.TrimSpace(endpoint.ManagementKey) == "" {
 		return nil, ErrEndpointInvalid
 	}
-	return &wire{baseURL: strings.TrimRight(base, "/"), key: endpoint.ManagementKey, client: newClient()}, nil
+	client, closeClient, err := cpa.NewDirectClient(ctx, base)
+	if err != nil {
+		return nil, ErrEndpointInvalid
+	}
+	return &wire{baseURL: strings.TrimRight(base, "/"), key: endpoint.ManagementKey, client: client, close: closeClient}, nil
+}
+
+// Close releases the connections of this endpoint's fixed resolution. It is
+// safe to call more than once.
+func (w *wire) Close() {
+	if w != nil && w.close != nil {
+		w.close()
+	}
 }
 
 // ErrEndpointInvalid rejects an unusable source or destination endpoint.
@@ -97,13 +101,21 @@ func (w *wire) do(ctx context.Context, method, path string, payload []byte, limi
 // the executor cannot mutate the source even by mistake.
 type SourceWire struct{ w *wire }
 
-// NewSource builds the read-only source of one migration run.
-func NewSource(endpoint Endpoint) (*SourceWire, error) {
-	w, err := newWire(endpoint)
+// NewSource builds the read-only source of one migration run. The caller must
+// Close it when the run is over.
+func NewSource(ctx context.Context, endpoint Endpoint) (*SourceWire, error) {
+	w, err := newWire(ctx, endpoint)
 	if err != nil {
 		return nil, err
 	}
 	return &SourceWire{w: w}, nil
+}
+
+// Close releases the source client's connections.
+func (s *SourceWire) Close() {
+	if s != nil {
+		s.w.Close()
+	}
 }
 
 func (s *SourceWire) ListCredentialFiles(ctx context.Context) ([]CredentialFile, error) {
@@ -170,13 +182,21 @@ func (s *SourceWire) ReadConfigDocument(ctx context.Context) (map[string]any, er
 // DestinationWire is the write and read-back client of the destination.
 type DestinationWire struct{ w *wire }
 
-// NewDestination builds the write client of one migration run.
-func NewDestination(endpoint Endpoint) (*DestinationWire, error) {
-	w, err := newWire(endpoint)
+// NewDestination builds the write client of one migration run. The caller must
+// Close it when the run is over.
+func NewDestination(ctx context.Context, endpoint Endpoint) (*DestinationWire, error) {
+	w, err := newWire(ctx, endpoint)
 	if err != nil {
 		return nil, err
 	}
 	return &DestinationWire{w: w}, nil
+}
+
+// Close releases the destination client's connections.
+func (d *DestinationWire) Close() {
+	if d != nil {
+		d.w.Close()
+	}
 }
 
 func (d *DestinationWire) ListCredentialFiles(ctx context.Context) ([]CredentialFile, error) {

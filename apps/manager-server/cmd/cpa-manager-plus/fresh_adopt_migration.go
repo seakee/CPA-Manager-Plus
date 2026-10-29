@@ -29,10 +29,6 @@ const adoptMigrationDeadline = 10 * time.Minute
 // summary the record already carries.
 const adoptMigrationStateRunning = "running"
 
-// adoptMigrationStateComplete is the migration state once every item is
-// recorded or the run has stopped for good.
-const adoptMigrationStateComplete = "complete"
-
 // adoptMigrationSession re-checks the installation session before every
 // checkpoint. A migration outlives the request that started it, so the authority
 // that authorized the commit is re-read rather than carried: a revoked or
@@ -74,28 +70,32 @@ func (a *freshApplication) runAdoptionMigration(ctx context.Context, record fres
 		log.Printf("Fresh adoption migration skipped: destination credential unavailable")
 		return ""
 	}
-	source, err := freshadopt.NewSource(freshadopt.Endpoint{BaseURL: sourceBaseURL, ManagementKey: sourceManagementKey})
-	if err != nil {
-		log.Printf("Fresh adoption migration skipped: source endpoint invalid")
-		return ""
-	}
-	destination, err := freshadopt.NewDestination(freshadopt.Endpoint{BaseURL: record.Connection.CPABaseURL, ManagementKey: destinationManagementKey})
-	if err != nil {
-		log.Printf("Fresh adoption migration skipped: destination endpoint invalid")
-		return ""
-	}
 	previous := freshstore.AdoptionSummary{}
 	if record.AdoptionSummary != nil {
 		previous = *record.AdoptionSummary
 	}
-	executor := freshadopt.New(source, destination)
 	identity, revision := record.Operation.Identity, record.Operation.Revision
 	a.startAdoptionMigration(func(ctx context.Context) {
+		// Both clients fix their DNS resolution once and are closed with the run.
+		// A source or destination that cannot be reached ends the run here; the
+		// adoption itself is already committed.
+		source, err := freshadopt.NewSource(ctx, freshadopt.Endpoint{BaseURL: sourceBaseURL, ManagementKey: sourceManagementKey})
+		if err != nil {
+			log.Printf("Fresh adoption migration skipped: source endpoint invalid")
+			return
+		}
+		defer source.Close()
+		destination, err := freshadopt.NewDestination(ctx, freshadopt.Endpoint{BaseURL: record.Connection.CPABaseURL, ManagementKey: destinationManagementKey})
+		if err != nil {
+			log.Printf("Fresh adoption migration skipped: destination endpoint invalid")
+			return
+		}
+		defer destination.Close()
 		// The checkpoint is built from the run's own context, not the request's:
 		// the reply has already returned, and every write this run makes has to
 		// outlive it.
 		checkpoint := persistAdoptionSummary(ctx, a, identity, revision, a.adoptionMigrationSession(ctx, sessionToken))
-		result, runErr := executor.Run(ctx, previous, checkpoint)
+		result, runErr := freshadopt.New(source, destination).Run(ctx, previous, checkpoint)
 		if runErr != nil {
 			// The reason is a bounded code from this package, never an upstream
 			// message: a source refusal can quote a value.

@@ -47,6 +47,12 @@ type fakeCPA struct {
 	uploadStatus int
 	// lostUploadBody true stores the bytes then answers 500.
 	lostUploadBody bool
+	// ignoreStatusPatch accepts the disable PATCH and changes nothing.
+	ignoreStatusPatch bool
+	// failListAfterPatch makes every credential listing fail once a disable PATCH
+	// has been received, so exactly the read-back of that disable is unavailable.
+	failListAfterPatch bool
+	statusPatched      bool
 	// failDownload makes these files fail their download, which writes nothing.
 	failDownload map[string]bool
 	// downloads_ records the file name of every credential download requested.
@@ -123,6 +129,12 @@ func (c *fakeCPA) serve(w http.ResponseWriter, r *http.Request) {
 
 func (c *fakeCPA) listCredentials(w http.ResponseWriter) {
 	c.mu.Lock()
+	if c.failListAfterPatch && c.statusPatched {
+		c.mu.Unlock()
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"failed to read auth dir"}`))
+		return
+	}
 	files := make([]map[string]any, 0, len(c.credentials))
 	for name := range c.credentials {
 		files = append(files, map[string]any{
@@ -208,7 +220,10 @@ func (c *fakeCPA) patchStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.mu.Lock()
-	c.disabled[request.Name] = request.Disabled
+	c.statusPatched = true
+	if !c.ignoreStatusPatch {
+		c.disabled[request.Name] = request.Disabled
+	}
 	c.mu.Unlock()
 	_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
 }
@@ -480,11 +495,11 @@ func runMigration(t *testing.T, source, destination *fakeCPA, previous freshstor
 
 func runMigrationWithCheckpoint(t *testing.T, source, destination *fakeCPA, previous freshstore.AdoptionSummary, checkpoint Checkpoint) freshstore.AdoptionSummary {
 	t.Helper()
-	sourceWire, err := NewSource(source.endpoint())
+	sourceWire, err := NewSource(t.Context(), source.endpoint())
 	if err != nil {
 		t.Fatal(err)
 	}
-	destinationWire, err := NewDestination(destination.endpoint())
+	destinationWire, err := NewDestination(t.Context(), destination.endpoint())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -843,11 +858,11 @@ func TestAFailedCheckpointStopsTheRunWithoutWritingLaterItems(t *testing.T) {
 	errCheckpoint := errors.New("checkpoint refused")
 	var durable freshstore.AdoptionSummary
 	calls := 0
-	sourceWire, err := NewSource(source.endpoint())
+	sourceWire, err := NewSource(t.Context(), source.endpoint())
 	if err != nil {
 		t.Fatal(err)
 	}
-	destinationWire, err := NewDestination(destination.endpoint())
+	destinationWire, err := NewDestination(t.Context(), destination.endpoint())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1084,11 +1099,11 @@ func TestReplayDoesNotRewriteWhatTheDestinationAlreadyHolds(t *testing.T) {
 	source, destination := sourceFixture(t), destinationFixture(t)
 	// A checkpoint that refuses the very first item is a crash before the first
 	// durable record, with that item's write already landed on the destination.
-	sourceWire, err := NewSource(source.endpoint())
+	sourceWire, err := NewSource(t.Context(), source.endpoint())
 	if err != nil {
 		t.Fatal(err)
 	}
-	destinationWire, err := NewDestination(destination.endpoint())
+	destinationWire, err := NewDestination(t.Context(), destination.endpoint())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1331,5 +1346,105 @@ func TestUnknownWriteIsReconciledOnlyByReadBack(t *testing.T) {
 	}
 	if item, _ := replay.Item(credentialItemName("claude-a.json")); item != unknown.Items[0] {
 		t.Fatalf("an unknown write was rewritten: %+v", item)
+	}
+}
+
+// ManagerOwned also matches a parent section named as a whole: copying one whole
+// section would carry the destination's own identity, listener, plugin root,
+// auth directory or client key list with it.
+func TestManagerOwnedMatchesParentSectionsNamedWhole(t *testing.T) {
+	for _, parent := range []string{"management", "plugins", "oauth", "access", "server"} {
+		if !ManagerOwned(parent) {
+			t.Fatalf("parent section %q must be Manager-owned", parent)
+		}
+	}
+	// A subtree that is wholly owned stays excluded under any child name, because
+	// every leaf of it belongs to the destination.
+	for _, path := range []string{"management.secret-key", "management.anything", "plugins.anything"} {
+		if !ManagerOwned(path) {
+			t.Fatalf("%q must be Manager-owned", path)
+		}
+	}
+	// The destination's client key list stays owned under any spelling.
+	if !ManagerOwned("access.api-keys.vendor") {
+		t.Fatal("a path below access.api-keys must stay owned")
+	}
+	// The provider sections this run copies live in the same parents, and naming
+	// the parent must not swallow them: `oauth` as a whole is owned, but its
+	// copyable children are named explicitly and are not.
+	for _, path := range []string{"oauth.model-alias", "oauth.settings", "access.other"} {
+		if ManagerOwned(path) {
+			t.Fatalf("%q is copyable and must not be owned", path)
+		}
+	}
+	// A section that only looks similar is not Manager-owned.
+	for _, path := range []string{"routing", "requests", "multimedia", "upstream", "client", "api-keys.claude", "oauth.model-alias"} {
+		if ManagerOwned(path) {
+			t.Fatalf("%q is copyable and must not be Manager-owned", path)
+		}
+	}
+}
+
+// The disable PATCH is read back like every other write: a destination that does
+// not report the credential disabled is manual work, and one whose read-back
+// fails is reported as unverified rather than as "stays enabled".
+func TestDisableStateIsReadBack(t *testing.T) {
+	source, destination := sourceFixture(t), destinationFixture(t)
+	// This destination accepts the PATCH and ignores it.
+	destination.mu.Lock()
+	destination.ignoreStatusPatch = true
+	destination.mu.Unlock()
+
+	summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+	item := itemByName(t, summary, credentialItemName("codex-b.json"))
+	if item.Outcome != freshstore.AdoptionManual || item.Reason != "status_write_failed" || item.Instruction == "" {
+		t.Fatalf("a disable the destination did not apply must be manual work: %+v", item)
+	}
+	// The copy itself is still recorded as the successful copy it was, with both
+	// observed digests.
+	if item.SourceSHA256 == "" || item.DestinationSHA256 != item.SourceSHA256 {
+		t.Fatalf("the copied bytes must still be recorded: %+v", item)
+	}
+}
+
+// A destination whose status read-back fails reports the unknown outcome
+// honestly instead of claiming the credential stays enabled.
+func TestUnreadableDisableStateIsReportedAsUnverified(t *testing.T) {
+	source, destination := sourceFixture(t), destinationFixture(t)
+	// The listings that decide the copy succeed; the one that would confirm the
+	// disable does not.
+	destination.mu.Lock()
+	destination.failListAfterPatch = true
+	destination.mu.Unlock()
+
+	summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+	item := itemByName(t, summary, credentialItemName("codex-b.json"))
+	if item.Outcome != freshstore.AdoptionManual || item.Reason != "status_unverified" {
+		t.Fatalf("an unreadable disable state must be recorded as unverified: %+v", item)
+	}
+}
+
+// The recorded destination digest is what the destination actually holds, not a
+// copy of the source digest: a destination that stores different bytes is a
+// mismatch, never a claimed success.
+func TestDestinationDigestIsObservedFromTheReadBack(t *testing.T) {
+	source, destination := sourceFixture(t), destinationFixture(t)
+	summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+	for _, name := range []string{"claude-a.json", "codex-b.json", "gemini-c.json"} {
+		item := itemByName(t, summary, credentialItemName(name))
+		readBack, ok := destination.credential(name)
+		if !ok {
+			t.Fatalf("the destination does not hold %s", name)
+		}
+		if item.DestinationSHA256 != digestSHA256(readBack) {
+			t.Fatalf("%s: recorded destination digest is not the observed one", name)
+		}
+	}
+	// A whole section records the digest of the value read back, not of the body
+	// it sent.
+	section := itemByName(t, summary, providerSectionItemName("api-keys.claude"))
+	observed := lookup(destination.config, []string{"api-keys", "claude"})
+	if section.DestinationSHA256 != digestOfValue(observed) {
+		t.Fatalf("the recorded section digest is not the observed value: %s vs %s", section.DestinationSHA256, digestOfValue(observed))
 	}
 }

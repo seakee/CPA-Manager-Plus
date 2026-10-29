@@ -33,18 +33,30 @@ var managerOwnedPrefixes = []string{
 	"plugins.",
 	"disable-control-panel",
 	"oauth.auth-dir",
-	"access.api-keys",
+	// A list has no children, but a path spelled below it still names the same
+	// owned client key list, so the subtree form is the conservative one.
+	"access.api-keys.",
 }
 
 // managerOwnedExact are the Manager-owned paths that are not a prefix of
-// anything else. They exist so an exact match cannot be missed by the
-// trailing-dot prefix form.
+// anything else, plus the whole parent sections those paths live in. The parent
+// sections are named whole on purpose: `management`, `plugins`, `oauth`, `access`
+// and `server` are each owned somewhere inside them, so a section named as a
+// whole is not a copyable unit — a whole-section write would carry the
+// destination's own identity, listener, plugin root, auth directory or client key
+// list with it. Today's tables never name them, which makes this the safety net
+// that surfaces a widened table rather than a normal path.
 var managerOwnedExact = map[string]bool{
 	"server.host":           true,
 	"server.port":           true,
 	"disable-control-panel": true,
 	"oauth.auth-dir":        true,
 	"access.api-keys":       true,
+	"management":            true,
+	"server":                true,
+	"plugins":               true,
+	"oauth":                 true,
+	"access":                true,
 }
 
 // ManagerOwned reports whether one dotted CPA path belongs to the Manager on the

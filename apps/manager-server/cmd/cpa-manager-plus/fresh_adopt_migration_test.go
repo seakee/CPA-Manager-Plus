@@ -46,9 +46,12 @@ type migrationFakeCPA struct {
 	disabled    map[string]bool
 	runtimeOnly map[string]bool
 	refuse      map[string]bool
-	config      map[string]any
-	writes      []string
-	uploadsLog  []string
+	// writeFailures refuses these dotted configuration paths with the given
+	// status, which is how a definite CPA refusal is reproduced.
+	writeFailures map[string]int
+	config        map[string]any
+	writes        []string
+	uploadsLog    []string
 	// beforeDownload blocks every credential download until it returns. It is
 	// how a test holds the copy inside a source read.
 	beforeDownload func()
@@ -59,7 +62,8 @@ func newMigrationFakeCPA(t *testing.T) *migrationFakeCPA {
 	fake := &migrationFakeCPA{
 		credentials: map[string][]byte{}, types: map[string]string{},
 		disabled: map[string]bool{}, runtimeOnly: map[string]bool{}, refuse: map[string]bool{},
-		config: map[string]any{"config-version": json.Number("8")},
+		writeFailures: map[string]int{},
+		config:        map[string]any{"config-version": json.Number("8")},
 	}
 	fake.server = httptest.NewServer(http.HandlerFunc(fake.serve))
 	t.Cleanup(fake.server.Close)
@@ -217,8 +221,25 @@ func (f *migrationFakeCPA) patchStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *migrationFakeCPA) writeConfig(w http.ResponseWriter, r *http.Request, slashPath string) {
-	parts := strings.Split(strings.ReplaceAll(strings.Trim(slashPath, "/"), "/", "."), ".")
+	dotted := strings.ReplaceAll(strings.Trim(slashPath, "/"), "/", ".")
+	parts := strings.Split(dotted, ".")
 	body, _ := io.ReadAll(r.Body)
+	// A refused write changes nothing, exactly like CPA's own 4xx: the refusal is
+	// matched against the path the write names.
+	f.mu.Lock()
+	failing := 0
+	for path, status := range f.writeFailures {
+		if path == dotted || strings.HasPrefix(path, dotted+".") || strings.HasPrefix(dotted, path+".") {
+			failing = status
+			break
+		}
+	}
+	f.mu.Unlock()
+	if failing != 0 {
+		w.WriteHeader(failing)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "invalid_config", "message": `cannot set "` + dotted + `": secret value quoted`})
+		return
+	}
 	var value any
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
@@ -536,9 +557,16 @@ func TestCommittedAdoptionMigratesTheBoundedInventory(t *testing.T) {
 // commit reply stays 200 and the checkpoint stays committed.
 func TestManualAndFailedItemsNeverFailTheAdoption(t *testing.T) {
 	fixture := newAdoptMigrationFixture(t)
-	// Make one destination leaf refuse, which the executor reports as manual.
+	// A source credential the destination refuses: the executor reports it as
+	// manual. This is a manual item the fixture can really produce.
+	fixture.source.mu.Lock()
+	fixture.source.credentials["unsupported-source.json"] = []byte("not-json")
+	fixture.source.types["unsupported-source.json"] = "unknown"
+	fixture.source.mu.Unlock()
+	// A destination leaf the fake refuses with CPA's own 4xx: a definite refusal,
+	// recorded as manual work instead of failing the adoption.
 	fixture.destination.mu.Lock()
-	fixture.destination.config["routing"] = map[string]any{"strategy": "round-robin"}
+	fixture.destination.writeFailures["routing.strategy"] = http.StatusUnprocessableEntity
 	fixture.destination.mu.Unlock()
 
 	committed := fixture.strategy(t, fixture.record)
@@ -550,9 +578,18 @@ func TestManualAndFailedItemsNeverFailTheAdoption(t *testing.T) {
 	if record.Operation.Strategy.Stage != "committed" || record.AdoptionSummary == nil {
 		t.Fatalf("adoption state after a manual item: %+v summary=%v", record.Operation.Strategy, record.AdoptionSummary)
 	}
-	_, manual, _ := record.AdoptionSummary.Counts()
+	_, manual, failed := record.AdoptionSummary.Counts()
 	if manual == 0 {
-		t.Fatal("no manual item was recorded for the runtime-only credential")
+		t.Fatal("no manual item was recorded")
+	}
+	if item, ok := record.AdoptionSummary.Item("credential:unsupported-source.json"); !ok || item.Outcome != freshstore.AdoptionManual {
+		t.Fatalf("the refused credential must be manual work: %+v", item)
+	}
+	if item, ok := record.AdoptionSummary.Item("config:routing.strategy"); !ok || item.Outcome != freshstore.AdoptionManual {
+		t.Fatalf("the refused leaf must be manual work: %+v", item)
+	}
+	if failed != 0 {
+		t.Fatalf("%d items failed instead of being reported as manual work", failed)
 	}
 	// The reply carries the committed revision it committed, not the one the
 	// background migration advanced to afterwards: the reply never waits for the
@@ -765,7 +802,7 @@ func TestMigrationDeadlineStopsTheRunWithTheRemainderUnrecorded(t *testing.T) {
 	// difference between "stopped by the clock" and "ran to the end" that the
 	// executor can see. Reproduce it directly so the test does not have to wait
 	// ten minutes.
-	source, err := freshadopt.NewSource(freshadopt.Endpoint{BaseURL: fixture.source.URL(), ManagementKey: migrationSourceKey})
+	source, err := freshadopt.NewSource(t.Context(), freshadopt.Endpoint{BaseURL: fixture.source.URL(), ManagementKey: migrationSourceKey})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -775,7 +812,7 @@ func TestMigrationDeadlineStopsTheRunWithTheRemainderUnrecorded(t *testing.T) {
 	fixture.destination.mu.Lock()
 	fixture.destination.auth, fixture.destination.authFn = deadlineDestinationKey, nil
 	fixture.destination.mu.Unlock()
-	destination, err := freshadopt.NewDestination(freshadopt.Endpoint{BaseURL: fixture.destination.URL(), ManagementKey: deadlineDestinationKey})
+	destination, err := freshadopt.NewDestination(t.Context(), freshadopt.Endpoint{BaseURL: fixture.destination.URL(), ManagementKey: deadlineDestinationKey})
 	if err != nil {
 		t.Fatal(err)
 	}
