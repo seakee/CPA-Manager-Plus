@@ -4,6 +4,8 @@ import { shellText as s } from '../i18n/consoleShell';
 import { bootstrapJourneyText as journey } from '../i18n/bootstrapJourney';
 import { FullWebIcon, type FullWebIconName } from './FullWebIcon';
 import { sameIdentity, type FreshOperation } from './bootstrapTransport';
+import { parseAdoptionSummary } from './freshAdoption';
+import { FreshAdoptFlow, type AdoptCarrier } from './FreshAdoptFlow';
 import { PublicApiError, type createPublicApiClient } from './publicApi';
 import { parseRuntimeJSON, validRuntimeGeneration } from './runtimeGeneration';
 
@@ -89,6 +91,10 @@ export function FreshManagedRuntime({
   const [acknowledged, setAcknowledged] = useState(false);
   const [running, setRunning] = useState(false);
   const [readiness, setReadiness] = useState(false);
+  // The plugin opt-in belongs to the destination this installation stages. It
+  // starts from the persisted decision and is submitted with the same operation
+  // that writes the destination, so a retry cannot silently change it.
+  const [plugins, setPlugins] = useState(operation.strategy?.pluginsEnabled === true);
   const [checking, setChecking] = useState(false);
   const runningRef = useRef(false);
   const inFlight = useRef(false);
@@ -172,8 +178,13 @@ export function FreshManagedRuntime({
                 expectedRuntimeIdentity: checkpoint.targetIdentity,
                 expectedRuntimeGeneration: checkpoint.targetGeneration,
                 expectedArtifactId: checkpoint.targetArtifactId,
+                // A replay states the decision the checkpoint recorded.
+                ...(checkpoint.pluginsEnabled ? { pluginsEnabled: true } : {}),
               }
-            : expectedTarget.current),
+            : {
+                ...expectedTarget.current,
+                ...(plugins ? { pluginsEnabled: true } : {}),
+              }),
         };
       } catch {
         setError(t('installObservationInvalid'));
@@ -307,6 +318,57 @@ export function FreshManagedRuntime({
       runningRef.current = false;
       if (alive.current) setRunning(false);
     }
+  }
+
+  // An adopted installation is a journey of its own. It is never `null`: an
+  // adopt checkpoint used to fall into the foreign branch and render nothing, so
+  // a browser that had committed an adoption showed an empty card.
+  if (checkpoint?.strategy === 'adopt_existing') {
+    const guarded = async <T,>(call: () => Promise<T>): Promise<T> => {
+      try {
+        return await call();
+      } catch (err) {
+        if (err instanceof PublicApiError && err.kind === 'authentication') onUnauthorized();
+        throw err;
+      }
+    };
+    const adoptCarrier: AdoptCarrier = {
+      readOperation: () => guarded(() => client.get<FreshOperation>('operation', auth)),
+      observeTarget: async () => {
+        const observed = hostTarget(
+          JSON.stringify(await guarded(() => client.get<unknown>('installation/runtime', auth)))
+        );
+        return {
+          runtimeIdentity: observed.expectedRuntimeIdentity,
+          runtimeGeneration: observed.expectedRuntimeGeneration,
+          artifactId: observed.expectedArtifactId,
+        };
+      },
+      // The canonical carrier sends no identity of its own, so the flow's body
+      // gets the operation's fence exactly where the bootstrap carrier adds it.
+      writeStrategy: (body) =>
+        guarded(() =>
+          client.post<FreshOperation>(
+            'strategy',
+            { identity: operation.identity, expectedRevision: operation.revision, ...body },
+            auth
+          )
+        ),
+      complete: (body) => guarded(() => client.post<FreshOperation>('complete', body, auth)),
+      readAdoption: async () =>
+        parseAdoptionSummary(
+          await guarded(() => client.get<unknown>('installation/adoption', auth))
+        ),
+    };
+    return (
+      <FreshAdoptFlow
+        operation={operation}
+        carrier={adoptCarrier}
+        onOperation={onOperation}
+        onComplete={onContinue}
+        onPending={onPending}
+      />
+    );
   }
 
   if (foreign) return null;
@@ -486,6 +548,20 @@ export function FreshManagedRuntime({
                     </strong>
                     <p>{journey('createsHelp')}</p>
                   </div>
+                </div>
+                <div className="journey-field">
+                  <label className="journey-checkline" htmlFor="runtime-plugin-optin">
+                    <input
+                      id="runtime-plugin-optin"
+                      data-testid="plugin-optin-checkbox"
+                      type="checkbox"
+                      checked={checkpoint?.pluginsEnabled === true || plugins}
+                      disabled={!!checkpoint?.strategy}
+                      onChange={(event) => setPlugins(event.target.checked)}
+                    />
+                    <span>{journey('pluginsOptIn')}</span>
+                  </label>
+                  <p className="journey-help">{journey('pluginsOptInHelp')}</p>
                 </div>
               </>
             )}

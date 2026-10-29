@@ -62,6 +62,25 @@ export interface AdoptionItem {
   retryable: boolean;
 }
 
+/**
+ * One recorded inventory decision of a staged adoption.
+ *
+ * The fields are PascalCase because the pinned domain type has no JSON tags, so
+ * the wire name is the Go field name. Reading it as it is keeps the browser and
+ * the record on one name; adding tags would change a pinned file.
+ */
+export interface AdoptionDecision {
+  ResourceRef: string;
+  Kind: string;
+  Scope: string;
+  ReadEvidenceRef: string;
+  ReplayEvidenceRef: string;
+  VerifyEvidenceRef: string;
+  Qualification: string;
+  ManualAction: string;
+  Disposition: 'migrate' | 'manual_action' | 'unsupported';
+}
+
 /** The recorded progress of one run plus the live in-flight flag. */
 export interface AdoptionSummary {
   items: AdoptionItem[];

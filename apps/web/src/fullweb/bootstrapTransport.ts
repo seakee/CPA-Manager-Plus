@@ -1,7 +1,12 @@
 // Bounded pre-canonical carrier. It has no CPA/Admin transport and persists no
 // secrets. This module belongs to the existing Full Web entry graph.
 import { validControlBasePath } from './routingContext';
-import { ADOPT_SOURCE_CLASS, parseAdoptionSummary, type AdoptionSummary } from './freshAdoption';
+import {
+  ADOPT_SOURCE_CLASS,
+  parseAdoptionSummary,
+  type AdoptionDecision,
+  type AdoptionSummary,
+} from './freshAdoption';
 import {
   parseRuntimeJSON,
   runtimeRequestJSON,
@@ -46,6 +51,13 @@ export interface FreshStrategyCheckpoint {
   stage?: string;
   /** The persisted plugin opt-in of a New Managed install; absent means off. */
   pluginsEnabled?: boolean;
+  /** An adoption's recorded source class and connection identities. */
+  sourceClass?: string;
+  sourceIdentity?: string;
+  destinationConnectionIdentity?: string;
+  /** An adoption's discovered resources and their recorded dispositions. */
+  adoptionResources?: string[];
+  adoptionDecisions?: AdoptionDecision[];
 }
 
 export interface FreshOperation {

@@ -1,9 +1,5 @@
 import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
-import {
-  BOOTSTRAP_UI,
-  createBootstrapTransport,
-  type FreshOperation,
-} from './bootstrapTransport';
+import { BOOTSTRAP_UI, createBootstrapTransport, type FreshOperation } from './bootstrapTransport';
 import {
   ADOPT_SOURCE_CLASS,
   adoptStrategyBody,
@@ -45,7 +41,12 @@ const target = { runtimeIdentity: 'owned-runtime', runtimeGeneration: 3, artifac
 // emits for its manual and retryable ones.
 const summary = {
   items: [
-    { item: 'credential:claude-source.json', kind: 'credential', outcome: 'migrated', retryable: false },
+    {
+      item: 'credential:claude-source.json',
+      kind: 'credential',
+      outcome: 'migrated',
+      retryable: false,
+    },
     {
       item: 'credential:codex-source.json',
       kind: 'credential',
@@ -240,9 +241,7 @@ describe('the Adopt wire contract', () => {
     expect(validManagementKey('ok-key')).toBe(true);
     expect(() => adoptStrategyBody({ ...source, baseUrl: 'ftp://x' }, target)).toThrow();
     expect(() => adoptStrategyBody({ ...source, managementKey: '' }, target)).toThrow();
-    expect(() =>
-      adoptStrategyBody(source, { ...target, artifactId: 'sha256:short' })
-    ).toThrow();
+    expect(() => adoptStrategyBody(source, { ...target, artifactId: 'sha256:short' })).toThrow();
   });
 });
 
@@ -297,17 +296,23 @@ describe('the bootstrap carrier reads and writes the adoption', () => {
       const client = await bootstrapClient(fetchMock);
       const reply = { ...staged, revision: 9, strategy: { ...staged.strategy, stage } };
       fetchMock.mockResolvedValueOnce(Response.json(reply));
-      await expect(client.executeStrategy(adoptStrategyBody(source, target))).resolves.toMatchObject(
-        { operation: { revision: 9 } }
-      );
+      await expect(
+        client.executeStrategy(adoptStrategyBody(source, target))
+      ).resolves.toMatchObject({ operation: { revision: 9 } });
       const invalid = vi.fn<typeof fetch>();
       const second = await bootstrapClient(invalid);
       invalid.mockResolvedValueOnce(
-        Response.json({ ...staged, revision: 9, strategy: { ...staged.strategy, stage: 'starting' } })
+        Response.json({
+          ...staged,
+          revision: 9,
+          strategy: { ...staged.strategy, stage: 'starting' },
+        })
       );
-      await expect(second.executeStrategy(adoptStrategyBody(source, target))).rejects.toMatchObject({
-        kind: 'mismatch',
-      });
+      await expect(second.executeStrategy(adoptStrategyBody(source, target))).rejects.toMatchObject(
+        {
+          kind: 'mismatch',
+        }
+      );
     }
   );
 
@@ -316,13 +321,20 @@ describe('the bootstrap carrier reads and writes the adoption', () => {
     const fetchMock = vi.fn<typeof fetch>();
     const client = await bootstrapClient(fetchMock);
     await expect(
-      client.executeStrategy({ ...adoptStrategyBody(source, target), strategy: 'adopt_existing', requestId: 'x' })
+      client.executeStrategy({
+        ...adoptStrategyBody(source, target),
+        strategy: 'adopt_existing',
+        requestId: 'x',
+      })
     ).rejects.toMatchObject({ kind: 'bad_request' });
     await expect(
       client.executeStrategy({ ...adoptStrategyBody(source, target), pluginsEnabled: 'true' })
     ).rejects.toMatchObject({ kind: 'bad_request' });
     await expect(
-      client.executeStrategy({ ...adoptStrategyBody(source, target), adoptSourceClass: 'legacy_managed' })
+      client.executeStrategy({
+        ...adoptStrategyBody(source, target),
+        adoptSourceClass: 'legacy_managed',
+      })
     ).rejects.toMatchObject({ kind: 'bad_request' });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -359,9 +371,7 @@ describe('the bootstrap carrier reads and writes the adoption', () => {
     const client = await cutoverClient(fetchMock);
     fetchMock.mockResolvedValueOnce(Response.json(body, { status: Number(status) }));
     await expect(client.complete()).rejects.toMatchObject({ status, code, retryable });
-    expect(fetchMock.mock.calls[4][0]).toBe(
-      'https://manager.example/console/api/v2/complete'
-    );
+    expect(fetchMock.mock.calls[4][0]).toBe('https://manager.example/console/api/v2/complete');
   });
 
   it('never surfaces an unknown completion code', async () => {
@@ -436,16 +446,23 @@ describe('the canonical carrier reads and writes the adoption', () => {
     const client = canonicalClient(fetchMock);
     await expect(
       client.post('complete', { acceptRetryable: false }, credential)
-    ).rejects.toMatchObject({ kind: 'http', status: 409, code: 'adopt_migration_retryable', retryable: 2 });
+    ).rejects.toMatchObject({
+      kind: 'http',
+      status: 409,
+      code: 'adopt_migration_retryable',
+      retryable: 2,
+    });
   });
 
   it('reads an adoption blocker and its unsupported capabilities', async () => {
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
-      Response.json(
-        { Code: 'adoption_source_read_unavailable', Unsupported: null },
-        { status: 409 }
-      )
-    );
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        Response.json(
+          { Code: 'adoption_source_read_unavailable', Unsupported: null },
+          { status: 409 }
+        )
+      );
     const client = canonicalClient(fetchMock);
     await expect(
       client.post('strategy', adoptStrategyBody(source, target), credential)

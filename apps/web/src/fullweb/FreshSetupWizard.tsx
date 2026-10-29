@@ -11,9 +11,11 @@ import {
 } from './bootstrapTransport';
 import { validControlBasePath } from './routingContext';
 import { validRuntimeGeneration, type RuntimeGeneration } from './runtimeGeneration';
+import { normalizeCPAAddress, type AdoptRuntimeTarget } from './freshAdoption';
+import { FreshAdoptFlow, type AdoptCarrier } from './FreshAdoptFlow';
 import { FullWebIcon } from './FullWebIcon';
 
-type Strategy = 'new_managed' | 'connect_external';
+type Strategy = 'new_managed' | 'connect_external' | 'adopt_existing';
 type Target = {
   runtimeIdentity: string;
   runtimeGeneration: RuntimeGeneration;
@@ -32,19 +34,9 @@ function managedTarget(value: unknown): Target {
     throw new Error('Invalid installation target');
   return target;
 }
-function externalURL(value: string): string {
-  const normalized = value.trim().replace(/\/+$/, '');
-  if (/[\\%@?#\s]/.test(normalized)) throw new Error('Invalid CPA address');
-  const url = new URL(normalized);
-  if (
-    !['http:', 'https:'].includes(url.protocol) ||
-    url.username ||
-    url.password ||
-    url.origin + url.pathname.replace(/\/+$/, '') !== normalized
-  )
-    throw new Error('Invalid CPA address');
-  return normalized;
-}
+// One address rule for every CPA this wizard talks to: the External form and the
+// Adopt flow normalize the same way, and the server normalizes again.
+const externalURL = normalizeCPAAddress;
 type Pending = {
   revision: number;
   stage: 'admin' | 'strategy' | 'route' | 'complete';
@@ -82,8 +74,14 @@ export function FreshSetupWizard({
   onOperation?: (operation: FreshOperation) => void;
 }) {
   const [operation, setOperation] = useState(initialOperation);
+  // A resumed installation keeps the strategy it recorded, including an
+  // adoption whose flow owns the rest of the journey.
   const [strategy, setStrategy] = useState<Strategy>(
-    initialOperation.strategy?.strategy === 'connect_external' ? 'connect_external' : 'new_managed'
+    initialOperation.strategy?.strategy === 'connect_external'
+      ? 'connect_external'
+      : initialOperation.strategy?.strategy === 'adopt_existing'
+        ? 'adopt_existing'
+        : 'new_managed'
   );
   const [step, setStep] = useState(initialOperation.strategy?.strategy ? 3 : 0);
   const [key, setKey] = useState('');
@@ -106,6 +104,9 @@ export function FreshSetupWizard({
   const [error, setError] = useState('');
   const [note, setNote] = useState('');
   const [unknown, setUnknown] = useState(false);
+  // The adoption's own step inside this wizard's four-step chrome: the confirm
+  // step is the inventory and the execute step is the migration.
+  const [adoptStep, setAdoptStep] = useState(2);
   const inflight = useRef(false);
   const alive = useRef(true);
   const pending = useRef<Pending | null>(null);
@@ -228,6 +229,20 @@ export function FreshSetupWizard({
       return;
     }
     await task(async () => {
+      if (strategy === 'adopt_existing') {
+        // An adoption's own source form comes next, so this step only settles the
+        // installation's own facts. The Admin key is committed here because the
+        // strategy write that follows is authorized by it, and the console route
+        // is prepared just before completion.
+        if (!operation.adminInitialized) {
+          const current = await read();
+          await write(current, 'admin', () => transport.commitAdminKey(commitID.current, key));
+          setKey('');
+          setVisible(false);
+        }
+        setStep(2);
+        return;
+      }
       if (strategy === 'new_managed')
         setTarget(managedTarget(await transport.request('installation/runtime')));
       else {
@@ -240,6 +255,10 @@ export function FreshSetupWizard({
     });
   }
   async function execute() {
+    // An adoption is executed by the shared flow, which owns its two-POST commit
+    // and its resumable migration. This path stays the New Managed and External
+    // one.
+    if (strategy === 'adopt_existing') return;
     if (pending.current || (!operation.adminInitialized && !savedKey)) return;
     await task(async () => {
       setStep(3);
@@ -268,7 +287,8 @@ export function FreshSetupWizard({
               checkpoint?.targetArtifactId || observed!.activeGatewayArtifact.artifactId,
             // Every New Managed attempt carries the same persisted decision, so a
             // retried destination publishes what the operator chose and nothing
-            // else. Adoption and External never send it.
+            // else. An adoption sends its own opt-in through the shared flow's
+            // two-POST body, and an external CPA owns its own plugin posture.
             ...(strategy === 'new_managed' && plugins ? { pluginsEnabled: true } : {}),
           };
         }
@@ -314,8 +334,73 @@ export function FreshSetupWizard({
     });
   }
   const complete = operation.productComplete === true;
+  // The shared Adopt flow's carrier. The bootstrap transport owns identity,
+  // revision and the canonical route, so each capability is one call.
+  const adoptCarrier: AdoptCarrier = {
+    readOperation: () => transport.fetchOperation(),
+    observeTarget: async () => {
+      const observed = managedTarget(await transport.request('installation/runtime'));
+      return {
+        runtimeIdentity: observed.runtimeIdentity,
+        runtimeGeneration: observed.runtimeGeneration,
+        artifactId: observed.activeGatewayArtifact.artifactId,
+      } satisfies AdoptRuntimeTarget;
+    },
+    writeStrategy: async (body) => (await transport.executeStrategy(body)).operation,
+    prepareRoute: async () => {
+      // The canonical route is committed before completion, exactly as the New
+      // Managed path does, so the console the operator enters is the one this
+      // installation owns.
+      let current = await transport.fetchOperation();
+      if (!current.routing.target) current = await transport.prepareRouting(path);
+      await transport.activateRouting();
+      return transport.fetchOperation();
+    },
+    complete: (body) => transport.complete(body),
+    readAdoption: () => transport.readAdoption(),
+  };
+  // An adoption is a journey of its own inside this wizard's shell: the shared
+  // flow owns the source form, the inventory confirmation, the resumable
+  // migration and the completion, so the review and execute steps below never
+  // render for it.
+  if (strategy === 'adopt_existing' && step >= 2 && !complete) {
+    return (
+      <section className="cpamp-installation" data-testid="fresh-setup-wizard" aria-busy={busy}>
+        <div className="wizard-card">
+          <ol className="journey-steps" aria-label={s('installation')}>
+            {(['choose', 'configure', 'confirm', 'execute'] as const).map((label, index) => (
+              <li
+                key={label}
+                className={index < adoptStep ? 'done' : index === adoptStep ? 'active' : ''}
+                aria-current={index === adoptStep ? 'step' : undefined}
+              >
+                <span className="journey-step-dot">
+                  {index < adoptStep ? <FullWebIcon name="check" size={22} /> : index + 1}
+                </span>
+                <span>{s(label)}</span>
+              </li>
+            ))}
+          </ol>
+          <FreshAdoptFlow
+            embedded
+            operation={operation}
+            carrier={adoptCarrier}
+            onOperation={accept}
+            onStage={(stage) => setAdoptStep(stage === 'migration' ? 3 : 2)}
+          />
+        </div>
+      </section>
+    );
+  }
   const summary = [
-    [s('choiceTitle'), strategy === 'new_managed' ? s('newManaged') : s('external')],
+    [
+      s('choiceTitle'),
+      strategy === 'new_managed'
+        ? s('newManaged')
+        : strategy === 'adopt_existing'
+          ? s('adopt')
+          : s('external'),
+    ],
     [j('key'), operation.adminInitialized ? j('keepKey') : j('keyHidden')],
     [s('consoleAddress'), path],
     ...(strategy === 'connect_external' && baseURL ? [[t('externalBaseURL'), baseURL]] : []),
@@ -391,7 +476,7 @@ export function FreshSetupWizard({
           )}
           {step === 0 && (
             <div>
-              {(['new_managed', 'connect_external'] as const).map((value) => (
+              {(['new_managed', 'adopt_existing', 'connect_external'] as const).map((value) => (
                 <button
                   type="button"
                   key={value}
@@ -406,24 +491,39 @@ export function FreshSetupWizard({
                 >
                   <span className="journey-radio" aria-hidden="true" />
                   <span className="journey-tile-icon">
-                    <FullWebIcon name={value === 'new_managed' ? 'server' : 'link'} size={30} />
+                    <FullWebIcon
+                      name={
+                        value === 'new_managed'
+                          ? 'server'
+                          : value === 'adopt_existing'
+                            ? 'copy'
+                            : 'link'
+                      }
+                      size={30}
+                    />
                   </span>
                   <span>
-                    <h2>{s(value === 'new_managed' ? 'newManaged' : 'external')}</h2>
-                    <p>{s(value === 'new_managed' ? 'newDetail' : 'externalHelp')}</p>
+                    <h2>
+                      {s(
+                        value === 'new_managed'
+                          ? 'newManaged'
+                          : value === 'adopt_existing'
+                            ? 'adopt'
+                            : 'external'
+                      )}
+                    </h2>
+                    <p>
+                      {s(
+                        value === 'new_managed'
+                          ? 'newDetail'
+                          : value === 'adopt_existing'
+                            ? 'adoptHelp'
+                            : 'externalHelp'
+                      )}
+                    </p>
                   </span>
                 </button>
               ))}
-              <div className="journey-choice is-unavailable" aria-disabled="true">
-                <span className="journey-radio" aria-hidden="true" />
-                <span className="journey-tile-icon">
-                  <FullWebIcon name="copy" size={30} />
-                </span>
-                <span>
-                  <h2>{s('adopt')}</h2>
-                  <p>{s('adoptHelp')}</p>
-                </span>
-              </div>
             </div>
           )}
           {step === 1 && (
@@ -630,7 +730,11 @@ export function FreshSetupWizard({
                   </div>
                   {installKeyFeedback && (
                     <p role="status" data-testid="install-client-key-feedback">
-                      {k(installKeyFeedback === 'copied' ? 'installKeyCopied' : 'installKeyCopyFailed')}
+                      {k(
+                        installKeyFeedback === 'copied'
+                          ? 'installKeyCopied'
+                          : 'installKeyCopyFailed'
+                      )}
                     </p>
                   )}
                   <p className="journey-quiet">{k('installKeyLater')}</p>
