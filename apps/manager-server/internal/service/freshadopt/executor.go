@@ -122,14 +122,14 @@ func New(source Source, destination Destination, decisions []bootstrap.AdoptionR
 // the single classification of this package, and the reference the record's
 // decision is looked up under.
 //
-// A gateway leaf or a payload rule family that the accepted gateway table names
-// (`cpa.LookupConfigLeaf`, `cpa.LookupConfigRuleFamily`) is routing
-// configuration: that table is the exact scope the gateway configuration page
-// reads and writes against CPA v8.0.13, so an item inside it is the same
-// configuration the `cpa-config-routing` decision covers. Anything outside the
-// table keeps the reference that already describes it and stays manual: the
-// executor never widens a scope by classifying an item into a migrate verdict it
-// was not given.
+// It delegates to the same tables the discovery read uses
+// (`cpa.AdoptionConfigRef`, `cpa.AdoptionProviderSectionRef`), so an item is
+// gated under exactly the reference the record decided for it. A writable
+// gateway leaf or a whole payload rule family is routing configuration: that
+// table is the exact scope the gateway configuration page reads and writes
+// against CPA v8.0.13. Anything outside the table keeps the reference that
+// already describes it and stays manual: the executor never widens a scope by
+// classifying an item into a migrate verdict it was not given.
 func ItemRef(item freshstore.AdoptionItem) bootstrap.ResourceRef {
 	switch item.Kind {
 	case freshstore.AdoptionKindCredential:
@@ -138,20 +138,24 @@ func ItemRef(item freshstore.AdoptionItem) bootstrap.ResourceRef {
 		return bootstrap.AdoptionRefCPAAuthFiles
 	case freshstore.AdoptionKindConfigLeaf:
 		if path, ok := strings.CutPrefix(item.Item, "config:"); ok {
-			if _, known := cpa.LookupConfigLeaf(path); known {
-				return bootstrap.AdoptionRefConfigRouting
-			}
+			return cpa.AdoptionConfigRef(path)
 		}
 		return bootstrap.AdoptionRefConfigUnknown
 	case freshstore.AdoptionKindConfigFamily:
 		if family, ok := strings.CutPrefix(item.Item, "rules:"); ok {
-			if _, known := cpa.LookupConfigRuleFamily(family); known {
-				return bootstrap.AdoptionRefConfigRouting
-			}
+			return cpa.AdoptionConfigRef(family)
 		}
 		return bootstrap.AdoptionRefConfigUnknown
 	case freshstore.AdoptionKindProviderSection:
-		return bootstrap.AdoptionRefProviderStateAPIKeys
+		if section, ok := strings.CutPrefix(item.Item, "section:"); ok {
+			if ref, known := cpa.AdoptionProviderSectionRef(section); known {
+				return ref
+			}
+		}
+		// A section outside the provider roots has no migrate reference of its
+		// own, and it must not borrow one: the catalogue reference is never
+		// qualified, so an unexpected section stays manual.
+		return bootstrap.AdoptionRefProviderStateProviders
 	default:
 		return bootstrap.AdoptionRefConfigUnknown
 	}

@@ -30,25 +30,6 @@ type adoptionSourceSnapshot struct {
 	DiscoveredResources []bootstrap.ResourceRef
 }
 
-// adoptionSectionRefs maps the bounded safe-read section inventory to the
-// existing stable adoption resource references. Arbitrary upstream keys never
-// become refs.
-var adoptionSectionRefs = map[string]bootstrap.ResourceRef{
-	"access":                      bootstrap.AdoptionRefClientAPIKeys,
-	"oauth":                       bootstrap.AdoptionRefCPAAuthFiles,
-	"server":                      bootstrap.AdoptionRefConfigServer,
-	"management":                  bootstrap.AdoptionRefConfigManagement,
-	"routing":                     bootstrap.AdoptionRefConfigRouting,
-	"logging":                     bootstrap.AdoptionRefConfigLogging,
-	"usage":                       bootstrap.AdoptionRefConfigUsage,
-	"plugins":                     bootstrap.AdoptionRefConfigPlugins,
-	"observability":               bootstrap.AdoptionRefConfigObservability,
-	"unknown_cpa_native_resource": bootstrap.AdoptionRefConfigUnknown,
-	"providers":                   bootstrap.AdoptionRefProviderStateProviders,
-	"api-keys":                    bootstrap.AdoptionRefProviderStateAPIKeys,
-	"client":                      bootstrap.AdoptionRefProviderStateClient,
-}
-
 var errUnsupportedAdoptionSourceClass = errors.New("unsupported adoption source class")
 
 func connectionIdentity(base string) string {
@@ -124,7 +105,9 @@ func adoptionResourceRefs(sections []string) ([]bootstrap.ResourceRef, error) {
 	seenRef := map[bootstrap.ResourceRef]bool{}
 	refs := make([]bootstrap.ResourceRef, 0, len(sections))
 	for _, section := range sections {
-		ref, ok := adoptionSectionRefs[section]
+		// One resolver for the whole inventory: the reference a section is
+		// discovered under is the same one the executor gates its items under.
+		ref, ok := cpa.AdoptionSectionRef(section)
 		if !ok || seenSection[section] || seenRef[ref] {
 			return nil, errUnsupportedAdoptionSourceClass
 		}

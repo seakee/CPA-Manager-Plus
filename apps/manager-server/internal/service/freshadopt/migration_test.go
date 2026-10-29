@@ -1586,6 +1586,114 @@ func TestExecutorCopiesOnlyWhatTheRecordMarksMigrate(t *testing.T) {
 	source.usesOnlyReads(t)
 }
 
+// A provider section is gated by its own root's decision, never by another
+// root's. The record here marks `provider-state-api-keys` migrate and leaves
+// `provider-state-client` and `provider-state-providers` at their manual action,
+// so the `api-keys.*` and `oauth.*` sections are copied while a `client` or
+// `providers` section is refused as the manual work its own decision names.
+func TestProviderSectionsAreGatedByTheirOwnRoot(t *testing.T) {
+	apiKeysMigrate := replaceDecision(migratingDecisions(), bootstrap.AdoptionRefProviderStateClient, manualReauthentication)
+	apiKeysMigrate = replaceDecision(apiKeysMigrate, bootstrap.AdoptionRefProviderStateProviders, manualReauthentication)
+
+	source, destination := sourceFixture(t), destinationFixture(t)
+	sourceWire, err := NewSource(t.Context(), source.endpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinationWire, err := NewDestination(t.Context(), destination.endpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := New(sourceWire, destinationWire, apiKeysMigrate).Run(context.Background(), freshstore.AdoptionSummary{}, nil)
+	if err != nil {
+		t.Fatalf("migration failed: %v", err)
+	}
+	summary := result.Summary
+	// Every copyable section belongs to the api-keys decision: the ones the
+	// source carries are copied, and the ones it does not carry are recorded as
+	// absent rather than refused.
+	for _, section := range ProviderSections() {
+		want, presence := cpa.LookupConfigValue(source.config, section)
+		item := itemByName(t, summary, providerSectionItemName(section))
+		if presence != cpa.ConfigPresent {
+			if item.Outcome != freshstore.AdoptionAbsentAtSource {
+				t.Fatalf("absent section %s recorded as %+v", section, item)
+			}
+			continue
+		}
+		if item.Outcome != freshstore.AdoptionMigrated {
+			t.Fatalf("an authorized provider section did not migrate: %+v", item)
+		}
+		if got, seen := cpa.LookupConfigValue(destination.config, section); seen != cpa.ConfigPresent || !equalConfigValue(want, got) {
+			t.Fatalf("%s did not reach the destination intact: %+v %v", section, got, seen)
+		}
+	}
+	source.usesOnlyReads(t)
+
+	// The gate itself, per root: the same record refuses the two roots whose
+	// sections it did not authorize, and does not refuse the one it did.
+	executor := New(nil, nil, apiKeysMigrate)
+	for _, section := range []string{"client", "providers", "made-up"} {
+		if _, gated := executor.gated(providerSection(section), section); !gated {
+			t.Fatalf("section %s under an unauthorized root was not gated", section)
+		}
+	}
+	for _, section := range []string{"api-keys.claude", "oauth.model-alias"} {
+		if _, gated := executor.gated(providerSection(section), section); gated {
+			t.Fatalf("authorized section %s was gated", section)
+		}
+	}
+	// The two roots are distinct references, so the api-keys verdict cannot
+	// reach a client section: it is the split that the earlier classification
+	// collapsed.
+	if ItemRef(providerSection("client")) == ItemRef(providerSection("api-keys.claude")) {
+		t.Fatal("a client section and an api-keys section share one reference")
+	}
+	// Even a forged migrate claim for the client reference cannot authorize it:
+	// the rules keep that reference manual, so the gate still refuses.
+	forged := replaceDecision(apiKeysMigrate, bootstrap.AdoptionRefProviderStateClient, bootstrap.AdoptionResourceDecision{
+		ResourceRef: bootstrap.AdoptionRefProviderStateClient, Qualification: bootstrap.CapabilityQualified,
+		Disposition: bootstrap.Migrate,
+	})
+	if _, gated := New(nil, nil, forged).gated(providerSection("client"), "client"); !gated {
+		t.Fatal("a forged migrate claim authorized a client section")
+	}
+	item, gated := New(nil, nil, apiKeysMigrate).gated(providerSection("client"), "client")
+	if !gated || item.Outcome != freshstore.AdoptionManual || item.Reason != string(bootstrap.ReauthenticateAfterAdoption) || item.Instruction == "" {
+		t.Fatalf("a provider section under a manual root was not recorded as manual work: %+v", item)
+	}
+}
+
+// providerSection is the executor's own item shape for one whole section.
+func providerSection(section string) freshstore.AdoptionItem {
+	return freshstore.AdoptionItem{Item: providerSectionItemName(section), Kind: freshstore.AdoptionKindProviderSection}
+}
+
+// manualReauthentication is the manual decision the adoption rules permit for a
+// provider-state reference: built by the rules themselves, so it is exactly the
+// shape `gated` accepts.
+var manualReauthentication = func() bootstrap.AdoptionResourceDecision {
+	ref := bootstrap.AdoptionRefProviderStateClient
+	decision, ok := bootstrap.FreshAdoptionDecision(ref, bootstrap.AdoptionResourceDecision{
+		ResourceRef: ref, Qualification: bootstrap.CapabilityPending, ManualAction: bootstrap.ReauthenticateAfterAdoption,
+	})
+	if !ok {
+		panic("no manual decision for " + string(ref))
+	}
+	return decision
+}()
+
+// replaceDecision returns a copy of decisions with ref's decision replaced.
+func replaceDecision(decisions []bootstrap.AdoptionResourceDecision, ref bootstrap.ResourceRef, replacement bootstrap.AdoptionResourceDecision) []bootstrap.AdoptionResourceDecision {
+	replaced := slices.Clone(decisions)
+	for i := range replaced {
+		if replaced[i].ResourceRef == ref {
+			replaced[i] = replacement
+		}
+	}
+	return replaced
+}
+
 // Every writable gateway leaf, payload rule family and credential is routing or
 // credentials; anything outside the accepted gateway table keeps the reference
 // that describes it and therefore stays manual.
@@ -1613,8 +1721,37 @@ func TestItemRefClassifiesAgainstTheGatewayTable(t *testing.T) {
 	if ref := ItemRef(freshstore.AdoptionItem{Item: credentialItemName("claude-a.json"), Kind: freshstore.AdoptionKindCredential}); ref != bootstrap.AdoptionRefCPAAuthFiles {
 		t.Fatalf("credential classified as %s", ref)
 	}
-	if ref := ItemRef(freshstore.AdoptionItem{Item: providerSectionItemName("api-keys.claude"), Kind: freshstore.AdoptionKindProviderSection}); ref != bootstrap.AdoptionRefProviderStateAPIKeys {
-		t.Fatalf("provider section classified as %s", ref)
+	// A provider section is gated under its own root, never under another
+	// root's reference: `client` is its own bounded resource, and a decision
+	// for `provider-state-api-keys` must not cover it.
+	for section, want := range map[string]bootstrap.ResourceRef{
+		"api-keys.claude":   bootstrap.AdoptionRefProviderStateAPIKeys,
+		"api-keys.vertex":   bootstrap.AdoptionRefProviderStateAPIKeys,
+		"oauth.model-alias": bootstrap.AdoptionRefProviderStateAPIKeys,
+		"oauth.settings":    bootstrap.AdoptionRefProviderStateAPIKeys,
+		"providers":         bootstrap.AdoptionRefProviderStateProviders,
+		"client":            bootstrap.AdoptionRefProviderStateClient,
+		"oauth":             bootstrap.AdoptionRefCPAAuthFiles,
+		"plugins.enabled":   bootstrap.AdoptionRefProviderStateProviders,
+		"made-up":           bootstrap.AdoptionRefProviderStateProviders,
+		"made-up.child":     bootstrap.AdoptionRefProviderStateProviders,
+	} {
+		ref := ItemRef(freshstore.AdoptionItem{Item: providerSectionItemName(section), Kind: freshstore.AdoptionKindProviderSection})
+		if ref != want {
+			t.Fatalf("provider section %s classified as %s, want %s", section, ref, want)
+		}
+	}
+	// The keys a section is copied under are the ones the executor actually
+	// enumerates: every provider section of the copy plan resolves to a root
+	// reference, and none of them lands on the fallback.
+	for _, section := range ProviderSections() {
+		ref := ItemRef(freshstore.AdoptionItem{Item: providerSectionItemName(section), Kind: freshstore.AdoptionKindProviderSection})
+		if _, known := cpa.AdoptionProviderSectionRef(section); !known {
+			t.Fatalf("copyable section %s has no root reference", section)
+		}
+		if ref != bootstrap.AdoptionRefProviderStateAPIKeys {
+			t.Fatalf("copyable section %s classified as %s", section, ref)
+		}
 	}
 }
 
