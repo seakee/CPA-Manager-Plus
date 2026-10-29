@@ -690,10 +690,157 @@ the Key records cannot silently become reachable from the Runtime child.
 
 Adoption stops at a `committed` checkpoint plus the protected destination
 snapshot in this lane; `POST complete` still answers 409 for
-`strategy = adopt_existing` (`fresh.go:418`), so adoption does not yet reach
+`strategy = adopt_existing` (`fresh.go:426`), so adoption does not yet reach
 product completion the way New Managed does. Completion arrives in a later
 slice. What it already writes is its own `external:sha256:` target identity, and
 it keeps `strategy = adopt_existing`; the prefixes are never merged.
+
+#### Migration after the destination is committed
+
+Once the destination is committed and its client keys are verified, the Manager
+copies a bounded inventory from the source CPA into it and records one result per
+item. The executor is `internal/service/freshadopt`, reached only from
+`freshApplication.runAdoptionMigration` (`fresh_adopt_migration.go`), guarded on
+`adopt_existing` + `network_existing` + `stage == committed`.
+
+| kind | source | destination | read-back |
+| --- | --- | --- | --- |
+| credential file | `GET /v8/management/credentials`, `GET /credentials/download?name=` | `POST /v8/management/credentials?name=`, then `PATCH /credentials/status` to restore the enabled state | the destination's listing entry (name, type, disabled) and the downloaded byte digest |
+| gateway leaf | one `GET /v8/management/config` | `PATCH /config/<group prefix>`, nested down to the leaf, using the same `cpa.ConfigLeafPaths()` table (39 leaves) the gateway page owns | `GET` that one path |
+| rule family | the same single document | `PUT /config/<family path>`, for the 5 `cpa.ConfigRuleFamilyIDs()` families | `GET` that path |
+| provider section | the same single document | `PUT /config/<section>`, for the 12 `api-keys.*`/`oauth.*` groups | `GET` that path |
+
+The approved scope names 13 provider ownership groups, but CPA v8.0.13 has no
+root `models` section: `internal/config/config_types.go:454-455,537-538,658-659`
+declares `models` only inside a `payload` rule list or a provider config, and
+`v8AllowedRoots` (`config_v8.go:572`) does not list it. It is absent from the
+table rather than guessed; its effective content arrives with the `api-keys.*`
+groups, which carry each group's own `models` list.
+
+Three properties are structural rather than conventional:
+
+- **The source is never written.** The source client interface has no write
+  method, so no code path in the package can issue a non-GET request to it. A
+  test asserts the fake source observed zero writes and kept its own bytes and
+  configuration.
+- **An unknown result is reconciled by read-back, never by resending.** An upload
+  or a configuration write whose reply was lost is decided by what the
+  destination holds afterwards: matching bytes or a matching value is a
+  successful copy, anything else is a reported failure. Every item already
+  recorded — `migrated`, `manual` or `failed` — is skipped on a rerun, because
+  resending a failed write is exactly what the checkpoint exists to prevent.
+- **Secrets stay in Manager memory.** Credential bytes and provider keys travel
+  inside the process only: they are never logged, never written to the record,
+  never returned in a result and never listed by an enumerable GET. The durable
+  summary carries item identities, outcomes, a bounded reason, a concrete
+  instruction and byte digests.
+
+`ManagerOwned` is the single exclusion predicate: `management.*`,
+`remote-management.*`, `server.host`, `server.port`, `plugins.*`,
+`disable-control-panel`, `oauth.auth-dir` and `access.api-keys` are never copied.
+They are the destination's own identity, listener, plugin root, auth directory
+and client key list, and the last of those was already written by the verified
+`StageDestination`/`VerifyV8Adoption` path. A test asserts that no table path
+matches the predicate and that the executor never sends one.
+
+A credential v8 cannot take becomes a `manual` item with a concrete instruction
+instead of a failure, and so does a copy whose enabled state or provider
+classification the destination did not accept. There are three such cases, and
+each one is decided from evidence this side holds:
+
+- a runtime-only/plugin virtual auth has no file to copy;
+- a file that is not a JSON object can never satisfy CPA's `buildAuthFromFileData`,
+  so it is refused locally and never uploaded — CPA's answer for such a body is
+  a `500 {"error":"invalid auth file: ..."}` (`auth_files_crud.go:125-128,482-508`),
+  not a 400, which only covers a bad `name` or an unreadable request body;
+- an upload CPA answered `500` for, with the file absent on read-back, is CPA's
+  verdict on the bytes and is recorded as `manual` without a resend.
+
+The per-item record is `freshstore.Record.AdoptionSummary`, written through the
+same revision CAS as every other Fresh write and held to a monotone append-only
+shape by the store itself. The executor checkpoints after each item, so the
+record is never behind a write that already happened; a refused checkpoint stops
+the run at that item, and the item in flight is the only one a resume may repeat.
+Manual and failed items are operator work carrying a concrete instruction: they
+never fail the adoption, and a source that cannot be read leaves the adoption
+committed with an empty summary. A committed replay of `POST strategy` is the
+resume path and continues from the durable prefix. Step 4's completion
+conditions read this summary; the authority generalization, usage enablement,
+model management and the Full Web Adopt flow are not part of this lane.
+
+The per-item summary is the operational record of the copy. It is deliberately
+*not* itself a qualification. `freshAdoptionRefRules`
+(`internal/domain/bootstrap/adoption.go`) now marks `cpa-auth-files`,
+`cpa-config-routing` and `provider-state-api-keys` as qualified, but the decision
+still requires per-kind evidence: the class-specific read/replay/verify chain
+must name the kind in all three traces, and every authorized kind must be in the
+rules' migrated set. A `legacy_managed` source authorizes client keys only, so its
+other kinds fall back to exactly the manual action they had before. That record
+is the reviewed authority for what the Manager's install-derived authority may
+claim, and it is bound to an independent acceptance of exactly those bytes and
+that scope; the `client_api_keys_only` limitation therefore remains on the
+legacy consumer and is no longer claimed for the network consumer.
+
+**Waiver (2026-10-29).** Acceptance `65eb659a` covered client API keys only.
+What this document describes for credentials, gateway configuration and provider
+sections was built and evidenced afterwards: those kinds are migrated under a
+**maintainer waiver dated 2026-10-29**, backed by real-CPA evidence from the
+`linux/amd64` container run and **pending the single pre-Beta independent
+re-acceptance**. No new review record was created and the consumer stays
+`accepted` under `65eb659a`; read every widened kind here as waived, not as
+independently accepted.
+
+The record is also the gate on the copy itself, not only on its label, and the
+record and the gate are computed from one resolver:
+`internal/service/cpa/adoption_ref.go`. That file answers both questions and is
+pinned by the consumer implementation digest, because it decides what an adoption
+copies.
+
+- `AdoptionItemRef(path)` is the reference of one item. A gateway leaf or payload
+  rule family the accepted gateway table names is `cpa-config-routing`;
+  `api-keys.*` groups and the copyable `oauth.*` children (`model-alias`,
+  `excluded-models`, `settings`, `request-scoped-errors` — provider
+  configuration, not the auth directory) are `provider-state-api-keys`; a
+  credential file is `cpa-auth-files`; any other section — a bare root name, a
+  provider group outside the copy plan, a made-up name — is `cpa-config-unknown`
+  and stays manual, and never borrows a root's verdict.
+- `AdoptionRootRefs(root)` is the *set* of references items under one
+  discovered root carry, derived from `AdoptionItemRef` over the enumerable item
+  universe — never restated, and never a reference no item produces. `oauth`
+  therefore contributes both `cpa-auth-files` (a credential file is discovered in
+  the source's auth directory) and `provider-state-api-keys` (its copyable
+  children). `requests`, `multimedia` and `upstream` are not named sections: the
+  v8 reader reports that gateway configuration under
+  `unknown_cpa_native_resource`, which contributes `cpa-config-routing` for the
+  paths the gateway table names and `cpa-config-unknown` for the paths it does
+  not. `client` is two gateway leaves and contributes routing configuration
+  only — the copy plan has no client section, so nothing there is provider state.
+  A root with no enumerable item at all (`access`, `server`, `management`,
+  `logging`, `usage`, `plugins`, `observability`, `providers`) contributes its
+  one declared fallback, because the operator may still have to redo it by hand.
+- `AdoptionItemUniverse()` also carries the source keys under a named root that
+  no copyable item covers, so they cannot vanish from the record: today
+  `oauth.auth-auto-refresh-workers` and the whole `oauth.providers` runtime
+  block, which is why `oauth` contributes `cpa-config-unknown` in addition to
+  its auth-file and provider-state references. `oauth.auth-dir` is not one of
+  them — it is the directory credential files are discovered in, so
+  `credential:<name>` carries it.
+
+Discovery records one decision per reference in each reported root's set, so the
+record holds a decision for every item the executor can classify under that root.
+The executor then copies an item only when that item's reference is `migrate`
+(`freshadopt.Executor.gated`); every other item is recorded with its reference's
+manual action and is never written. Because the two sides read the same resolver,
+the record cannot tell the operator to redo an item the executor copies, or
+authorize one it never copies.
+
+The resolver's own bytes are pinned with the safe-read implementation, and so is
+`AdoptionUniverseDigest` — the digest of every (item, reference) pair the
+classifier produces. `AdoptionItemRef` decides routing membership from the gateway
+page table (`config_schema.go`), which the gateway page edits often, so folding
+the universe into the pin makes a new gateway leaf, a moved rule family or a
+reclassified item invalidate an acceptance, without subjecting every gateway-page
+edit to a whole-file hash.
 
 #### Retry after a terminal destination failure
 

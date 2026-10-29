@@ -9,17 +9,22 @@ import (
 )
 
 // The compiled digest must cover both safe-read families, including the
-// explicit legacy adapter. This mirrors the checked-in destination pin test.
+// explicit legacy adapter, the adoption resolver and the adoption universe it
+// classifies — the resolver reads the gateway page table, which is not a file
+// this digest embeds, so the universe digest is what makes a widened or
+// reclassified item invalidate an acceptance. This mirrors the checked-in
+// destination pin test.
 func TestSafeReadImplementationDigestCoversBothSourceGenerations(t *testing.T) {
 	root := filepath.Clean(filepath.Join("..", "..", "..", "..", ".."))
 	hash := sha256.New()
-	for _, name := range []string{"v8.go", "v8_adoption.go", "legacy_adoption.go"} {
+	for _, name := range []string{"v8.go", "v8_adoption.go", "legacy_adoption.go", "adoption_ref.go"} {
 		data, err := os.ReadFile(filepath.Join(root, "apps", "manager-server", "internal", "service", "cpa", name))
 		if err != nil {
 			t.Fatal(err)
 		}
 		_, _ = hash.Write(data)
 	}
+	_, _ = hash.Write([]byte(AdoptionUniverseDigest()))
 	if got := hex.EncodeToString(hash.Sum(nil)); got != SafeReadImplementationSHA256() {
 		t.Fatalf("safe-read implementation digest drift: file=%s compiled=%s", got, SafeReadImplementationSHA256())
 	}

@@ -99,6 +99,25 @@ type syntheticAdoptionResource struct {
 	binding  adoptionResourceEvidence
 }
 
+// syntheticKindCounts is the per-kind evidence a run of this source class can
+// honestly produce: a v8 source has the whole v8 management surface, a v7 source
+// has only its client key list.
+func syntheticKindCounts(class bootstrap.AdoptSourceClass) map[string]int {
+	counts := map[string]int{"client-api-keys": 2}
+	if class == bootstrap.AdoptNetworkExisting {
+		counts["cpa-auth-files"] = 1
+		counts["cpa-config-routing"] = 2
+		counts["provider-state-api-keys"] = 1
+	}
+	return counts
+}
+
+// expectedAdoptionResourceCount is the number of decisions a loaded consumer of
+// this class carries.
+func expectedAdoptionResourceCount(class bootstrap.AdoptSourceClass) int {
+	return len(syntheticKindCounts(class))
+}
+
 func syntheticAdoptionResourceDefaults(record *productionRecord, class bootstrap.AdoptSourceClass) syntheticAdoptionResource {
 	head, tree := strings.Repeat("a", 40), strings.Repeat("b", 40)
 	short := "network"
@@ -132,10 +151,13 @@ func syntheticAdoptionResourceDefaults(record *productionRecord, class bootstrap
 			BinarySHA256:  cpa.AcceptedLegacyManagedBinarySHA256,
 		}
 	}
+	// The kinds this class's run exercises: a v8 source has the whole v8
+	// management surface, a v7 source has only the client key list, so nothing
+	// else can be authorized for it.
 	read := adoptionResourceReadTrace{
 		SchemaVersion: 1, RunID: syntheticAdoptionResourceRunID, CaseRef: readRef,
 		SourceClass: string(class), ConsumerImplementationSHA256: consumerImplementationSHA256(),
-		ReadVerified: true, ClientKeyCount: 2,
+		ReadVerified: true, ClientKeyCount: 2, ResourceCounts: syntheticKindCounts(class),
 	}
 	if class == bootstrap.AdoptNetworkExisting {
 		read.ManagementGeneration = "v8"
@@ -149,14 +171,14 @@ func syntheticAdoptionResourceDefaults(record *productionRecord, class bootstrap
 		SourceClass: string(class), ConsumerImplementationSHA256: consumerImplementationSHA256(),
 		ReplayVerified: true, TargetArtifactID: string(record.ArtifactID),
 		TargetArchiveSHA256: record.ArchiveSHA256, TargetBinarySHA256: record.BinarySHA256,
-		SourcePreserved: true, GatewayPending: true,
+		SourcePreserved: true, GatewayPending: true, CopiedResources: syntheticKindCounts(class),
 	}
 	verify := adoptionResourceVerifyTrace{
 		SchemaVersion: 1, RunID: syntheticAdoptionResourceRunID, CaseRef: verifyRef,
 		SourceClass: string(class), ConsumerImplementationSHA256: consumerImplementationSHA256(),
 		ReadbackVerified: true, EffectiveAuthVerified: true, DestinationVerified: true,
 		TargetArtifactID: string(record.ArtifactID), TargetArchiveSHA256: record.ArchiveSHA256,
-		TargetBinarySHA256: record.BinarySHA256, GatewayPending: true,
+		TargetBinarySHA256: record.BinarySHA256, GatewayPending: true, VerifiedResources: syntheticKindCounts(class),
 	}
 	report := evidenceReport{
 		SchemaVersion: 1, ContractID: adoptionResourceContract, ManifestRevision: manifest.Revision,
@@ -248,7 +270,9 @@ func TestGeneratedAdoptionResourceEvidenceSatisfiesProductionLoader(t *testing.T
 		record, files := acceptedConsumerFixture(t, index)
 		_, manifestData, manifest := embeddedAdoptionResourceManifest(t, record.Consumers[index].SourceClass)
 		artifact := record.ArtifactID
-		read := adoptionResourceReadTrace{ReadVerified: true, ClientKeyCount: 2}
+		// Each trace owns its own copy of the counts: a fixture that shared one map
+		// could not express a chain whose traces disagree.
+		read := adoptionResourceReadTrace{ReadVerified: true, ClientKeyCount: 2, ResourceCounts: syntheticKindCounts(manifest.SourceClass)}
 		if manifest.SourceClass == bootstrap.AdoptNetworkExisting {
 			read.ManagementGeneration = "v8"
 		} else {
@@ -256,8 +280,8 @@ func TestGeneratedAdoptionResourceEvidenceSatisfiesProductionLoader(t *testing.T
 			read.LegacyArchiveSHA256 = cpa.AcceptedLegacyManagedArchiveSHA256
 			read.LegacyBinarySHA256 = cpa.AcceptedLegacyManagedBinarySHA256
 		}
-		replay := adoptionResourceReplayTrace{ReplayVerified: true, TargetArtifactID: string(artifact), TargetArchiveSHA256: record.ArchiveSHA256, TargetBinarySHA256: record.BinarySHA256, SourcePreserved: true, GatewayPending: true}
-		verify := adoptionResourceVerifyTrace{ReadbackVerified: true, EffectiveAuthVerified: true, DestinationVerified: true, TargetArtifactID: string(artifact), TargetArchiveSHA256: record.ArchiveSHA256, TargetBinarySHA256: record.BinarySHA256, GatewayPending: true}
+		replay := adoptionResourceReplayTrace{ReplayVerified: true, TargetArtifactID: string(artifact), TargetArchiveSHA256: record.ArchiveSHA256, TargetBinarySHA256: record.BinarySHA256, SourcePreserved: true, GatewayPending: true, CopiedResources: syntheticKindCounts(manifest.SourceClass)}
+		verify := adoptionResourceVerifyTrace{ReadbackVerified: true, EffectiveAuthVerified: true, DestinationVerified: true, TargetArtifactID: string(artifact), TargetArchiveSHA256: record.ArchiveSHA256, TargetBinarySHA256: record.BinarySHA256, GatewayPending: true, VerifiedResources: syntheticKindCounts(manifest.SourceClass)}
 		head, tree := strings.Repeat("d", 40), strings.Repeat("e", 40)
 		readData, replayData, verifyData, reportData, _ := adoptionResourceEvidencePayload(t, manifestData, manifest, manifest.SourceClass, artifact, read, replay, verify, head, tree)
 		files["qualification/evidence/"+sha256Hex(manifestData)+".json"] = &fstest.MapFile{Data: manifestData}
@@ -272,7 +296,7 @@ func TestGeneratedAdoptionResourceEvidenceSatisfiesProductionLoader(t *testing.T
 		writeSyntheticRecord(t, files, record)
 		consumers, err := loadProductionQualification(files)
 		key := consumerKey{record.Consumers[index].Strategy, record.Consumers[index].SourceClass}
-		if err != nil || len(consumers[key].AdoptionResources) != 1 || consumers[key].ArtifactID != artifact {
+		if err != nil || len(consumers[key].AdoptionResources) != expectedAdoptionResourceCount(manifest.SourceClass) || consumers[key].ArtifactID != artifact {
 			t.Fatalf("%s generated resource evidence rejected by its loader: %v", manifest.SourceClass, err)
 		}
 	}
@@ -291,7 +315,7 @@ func TestAdoptionResourceEvidenceIsIndependentFromTransitionAndClass(t *testing.
 	record, files = resourceConsumerFixture(t, 2)
 	networkKey := consumerKey{bootstrap.AdoptExisting, bootstrap.AdoptNetworkExisting}
 	consumers, err := loadProductionQualification(files)
-	if err != nil || len(consumers[networkKey].AdoptionResources) != 1 ||
+	if err != nil || len(consumers[networkKey].AdoptionResources) != expectedAdoptionResourceCount(bootstrap.AdoptNetworkExisting) ||
 		consumers[networkKey].Qualification.StagingV8TransitionQualified {
 		t.Fatalf("network resource chain scope drifted: %v", err)
 	}
@@ -315,7 +339,7 @@ func TestAdoptionResourceEvidenceIsIndependentFromTransitionAndClass(t *testing.
 func TestPersistedAdoptionOperationRechecksResourceQualification(t *testing.T) {
 	record, files := resourceConsumerFixture(t, 2)
 	consumers, err := loadProductionQualification(files)
-	if err != nil || len(consumers[consumerKey{bootstrap.AdoptExisting, bootstrap.AdoptNetworkExisting}].AdoptionResources) != 1 {
+	if err != nil || len(consumers[consumerKey{bootstrap.AdoptExisting, bootstrap.AdoptNetworkExisting}].AdoptionResources) != expectedAdoptionResourceCount(bootstrap.AdoptNetworkExisting) {
 		t.Fatalf("accepted resources unavailable: %v", err)
 	}
 	var sourceCalls atomic.Int32
@@ -357,7 +381,7 @@ func TestProductionAdoptionResourceChainMustBeComplete(t *testing.T) {
 	networkKey := consumerKey{bootstrap.AdoptExisting, bootstrap.AdoptNetworkExisting}
 	record, files := resourceConsumerFixture(t, 2)
 	consumers, err := loadProductionQualification(files)
-	if err != nil || len(consumers[networkKey].AdoptionResources) != 1 || consumers[networkKey].ArtifactID != record.ArtifactID {
+	if err != nil || len(consumers[networkKey].AdoptionResources) != expectedAdoptionResourceCount(bootstrap.AdoptNetworkExisting) || consumers[networkKey].ArtifactID != record.ArtifactID {
 		t.Fatalf("positive resource control: %v", err)
 	}
 	chain := func(mutate func(*syntheticAdoptionResource), corrupt func(fstest.MapFS, syntheticAdoptionResource)) func(*productionRecord, fstest.MapFS) {
@@ -440,6 +464,21 @@ func TestProductionAdoptionResourceChainMustBeComplete(t *testing.T) {
 		"verify destination":               chain(func(s *syntheticAdoptionResource) { s.verify.DestinationVerified = false }, nil),
 		"verify target artifact":           chain(func(s *syntheticAdoptionResource) { s.verify.TargetArtifactID = "sha256:" + strings.Repeat("a", 64) }, nil),
 		"verify gateway not pending":       chain(func(s *syntheticAdoptionResource) { s.verify.GatewayPending = false }, nil),
+		// Per-kind authorization: a kind all three traces name is authorized,
+		// and a kind any one of them drops is not. The three cases below are the
+		// three ways a chain could over- or under-claim.
+		"replay trace drops a kind the read authorized": chain(func(s *syntheticAdoptionResource) {
+			delete(s.replay.CopiedResources, "cpa-auth-files")
+		}, nil),
+		"verify trace drops a kind the replay copied": chain(func(s *syntheticAdoptionResource) {
+			delete(s.verify.VerifiedResources, "provider-state-api-keys")
+		}, nil),
+		"read trace drops the mandatory client keys": chain(func(s *syntheticAdoptionResource) {
+			delete(s.read.ResourceCounts, "client-api-keys")
+		}, nil),
+		"read trace counts no item of a kind it authorizes": chain(func(s *syntheticAdoptionResource) {
+			s.read.ResourceCounts["cpa-config-routing"] = 0
+		}, nil),
 		"consumer implementation drift": func(r *productionRecord, _ fstest.MapFS) {
 			r.ImplementationSHA256 = strings.Repeat("a", 64)
 		},

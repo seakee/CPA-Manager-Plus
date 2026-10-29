@@ -16,6 +16,7 @@ apps/manager-server/internal/service/freshstrategy/adoption_resource.go text eol
 apps/manager-server/internal/service/cpa/v8.go text eol=lf
 apps/manager-server/internal/service/cpa/v8_adoption.go text eol=lf
 apps/manager-server/internal/service/cpa/legacy_adoption.go text eol=lf
+apps/manager-server/internal/service/cpa/adoption_ref.go text eol=lf
 apps/manager-server/internal/model/runtime.go text eol=lf
 apps/manager-server/internal/model/runtime_destination.go text eol=lf
 apps/manager-server/internal/service/runtime/destination.go text eol=lf

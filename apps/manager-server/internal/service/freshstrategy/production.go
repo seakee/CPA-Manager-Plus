@@ -26,6 +26,12 @@ var productionEvidence embed.FS
 // evidence runner HEADs. A semantic source change invalidates an old acceptance
 // without requiring a self-referential commit SHA inside that same commit.
 //
+// The adoption classification is pinned through
+// `cpa.SafeReadImplementationSHA256`, which embeds `cpa/adoption_ref.go`: that
+// file decides the reference every item is gated under and the references each
+// discovered root contributes, so a change to it must invalidate an acceptance
+// exactly as a change to one of the files below does.
+//
 //go:embed production.go service.go adoption.go legacy_transition.go adoption_resource.go
 var consumerImplementation embed.FS
 
@@ -151,7 +157,11 @@ func requiredConsumerLimitations(key consumerKey) []string {
 	case consumerKey{bootstrap.ConnectExternal, bootstrap.AdoptSourceNone}:
 		return []string{limitationManagementGenerationV8, limitationReadOnlyBoundedRead, limitationDirectTransport, limitationGatewayPending}
 	case consumerKey{bootstrap.AdoptExisting, bootstrap.AdoptNetworkExisting}:
-		return []string{limitationManagementGenerationV8, limitationReadOnlyBoundedRead, limitationDirectTransport, limitationClientAPIKeysOnly, limitationSourcePreserved, limitationGatewayPending}
+		// A network adoption migrates more than the client keys: the executor
+		// copies credentials, gateway configuration and the provider sections
+		// that carry provider keys. The bound on what migrates is the evidence
+		// chain, kind by kind, not a client-keys-only list.
+		return []string{limitationManagementGenerationV8, limitationReadOnlyBoundedRead, limitationDirectTransport, limitationSourcePreserved, limitationGatewayPending}
 	case consumerKey{bootstrap.AdoptExisting, bootstrap.AdoptLegacyManaged}:
 		return []string{limitationManagementGenerationV8, limitationReadOnlyBoundedRead, limitationDirectTransport, limitationClientAPIKeysOnly, limitationLegacyProfile, limitationSourcePreserved, limitationGatewayPending}
 	}
@@ -305,11 +315,25 @@ func loadProductionQualification(files fs.FS) (map[consumerKey]qualifiedConsumer
 				// Resource replay authority is independent of the source
 				// profile, the retained r4 background report and the legacy
 				// transition. Only its own class-specific chain may grant it.
-				if err := verifyAdoptionResourceEvidence(files, record, consumer, key.Class); err != nil {
+				authorized, err := verifyAdoptionResourceEvidence(files, record, consumer, key.Class)
+				if err != nil {
 					return nil, err
 				}
 				qualified.ArtifactID = record.ArtifactID
-				qualified.AdoptionResources = []bootstrap.AdoptionResourceDecision{{ResourceRef: "client-api-keys", Kind: bootstrap.APIKeys, Scope: bootstrap.ClientAPIKeys, ReadEvidenceRef: "preflight:client-api-keys-read", ReplayEvidenceRef: "preflight:client-api-keys-replay", VerifyEvidenceRef: "preflight:client-api-keys-verify", Qualification: bootstrap.CapabilityQualified, Disposition: bootstrap.Migrate}}
+				// One decision per authorized reference: the kinds the real-CPA run
+				// actually exercised, capped by the rules. A kind the source class
+				// cannot carry is not authorized, so it is not migrated either.
+				qualified.AdoptionResources = make([]bootstrap.AdoptionResourceDecision, 0, len(authorized))
+				for _, ref := range authorized {
+					kind, scope := adoptionResourceKindScope(ref)
+					qualified.AdoptionResources = append(qualified.AdoptionResources, bootstrap.AdoptionResourceDecision{
+						ResourceRef: ref, Kind: kind, Scope: scope,
+						ReadEvidenceRef:   bootstrap.CapabilityEvidenceRef("preflight:" + string(ref) + "-read"),
+						ReplayEvidenceRef: bootstrap.CapabilityEvidenceRef("preflight:" + string(ref) + "-replay"),
+						VerifyEvidenceRef: bootstrap.CapabilityEvidenceRef("preflight:" + string(ref) + "-verify"),
+						Qualification:     bootstrap.CapabilityQualified, Disposition: bootstrap.Migrate,
+					})
+				}
 			}
 		default:
 			return nil, errProductionQualification
@@ -317,6 +341,16 @@ func loadProductionQualification(files fs.FS) (map[consumerKey]qualifiedConsumer
 		consumers[key] = qualified
 	}
 	return consumers, nil
+}
+
+// adoptionResourceKindScope returns the resource kind and scope of one migrated
+// reference, taken from the deciding rule rather than restated here.
+func adoptionResourceKindScope(ref bootstrap.ResourceRef) (bootstrap.AdoptionResourceKind, bootstrap.AdoptionScope) {
+	rule, ok := bootstrap.FreshAdoptionRule(ref)
+	if !ok {
+		return "", ""
+	}
+	return rule.Kind, rule.Scope
 }
 
 func consumerImplementationSHA256() string {

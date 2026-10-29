@@ -107,17 +107,19 @@ func TestProductionRecordContainsOnlyIndependentlyReviewedConsumers(t *testing.T
 		if item.Strategy == bootstrap.ConnectExternal && !loaded.Qualification.RequiredProfileQualified {
 			t.Fatal("External safe read not accepted")
 		}
-		if item.Strategy == bootstrap.AdoptExisting && (!loaded.Qualification.RequiredProfileQualified || len(loaded.AdoptionResources) != 1 || loaded.ArtifactID != record.ArtifactID) {
+		if item.Strategy == bootstrap.AdoptExisting && (!loaded.Qualification.RequiredProfileQualified || len(loaded.AdoptionResources) != expectedAdoptionResourceCount(item.SourceClass) || loaded.ArtifactID != record.ArtifactID) {
 			t.Fatal("Adoption resource not independently accepted")
 		}
 		if item.SourceClass == bootstrap.AdoptLegacyManaged && !loaded.Qualification.StagingV8TransitionQualified {
 			t.Fatal("Legacy transition qualification not accepted")
 		}
 		if item.Strategy == bootstrap.AdoptExisting {
-			resource := loaded.AdoptionResources[0]
-			if resource.ResourceRef != "client-api-keys" || resource.Kind != bootstrap.APIKeys ||
-				resource.Scope != bootstrap.ClientAPIKeys || resource.Qualification != bootstrap.CapabilityQualified || resource.Disposition != bootstrap.Migrate {
-				t.Fatalf("unaccepted resource migration for %v: %+v", key, resource)
+			for _, resource := range loaded.AdoptionResources {
+				rule, ok := bootstrap.FreshAdoptionRule(resource.ResourceRef)
+				if !ok || resource.Kind != rule.Kind || resource.Scope != rule.Scope ||
+					resource.Qualification != bootstrap.CapabilityQualified || resource.Disposition != bootstrap.Migrate {
+					t.Fatalf("unaccepted resource migration for %v: %+v", key, resource)
+				}
 			}
 		} else if len(loaded.AdoptionResources) != 0 || (item.Strategy == bootstrap.ConnectExternal && loaded.ArtifactID != "") {
 			t.Fatalf("source-only qualification gained destination authority for %v", key)

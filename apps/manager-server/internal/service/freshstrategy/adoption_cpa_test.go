@@ -28,6 +28,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshadopt"
 	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
 )
 
@@ -119,7 +120,42 @@ func TestAdoptionExactCPAV8WithSupervisor(t *testing.T) {
 				waitClientModels(t, sourceAddr, clientKeys[0])
 			} else {
 				_, sourcePort, _ := net.SplitHostPort(sourceAddr)
-				sourceConfig := map[string]any{"config-version": 8, "server": map[string]any{"host": "127.0.0.1", "port": json.Number(sourcePort)}, "oauth": map[string]any{"auth-dir": filepath.Join(sourceRoot, "auth")}, "management": map[string]any{"secret-key": sourceKey, "disable-control-panel": true, "disable-auto-update-panel": true}, "access": map[string]any{"api-keys": clientKeys}, "plugins": map[string]any{"enabled": false}}
+				// The source carries a non-default value in every migrated kind, so
+				// the adoption executor has something real to copy out of it.
+				sourceConfig := map[string]any{
+					"config-version": 8,
+					"server":         map[string]any{"host": "127.0.0.1", "port": json.Number(sourcePort)},
+					"oauth": map[string]any{
+						"auth-dir":              filepath.Join(sourceRoot, "auth"),
+						"model-alias":           map[string]any{"claude": []any{map[string]any{"name": "claude-3", "alias": "claude-alias"}}},
+						"excluded-models":       map[string]any{"gemini": []any{"gemini-hidden"}},
+						"settings":              map[string]any{"claude": []any{map[string]any{"name": "claude-3", "max-context-length": json.Number("200000")}}},
+						"request-scoped-errors": map[string]any{"claude": []any{map[string]any{"status": json.Number("429"), "action": "stop"}}},
+					},
+					"management": map[string]any{"secret-key": sourceKey, "disable-control-panel": true, "disable-auto-update-panel": true},
+					"access":     map[string]any{"api-keys": clientKeys},
+					"plugins":    map[string]any{"enabled": false},
+					"routing": map[string]any{
+						"strategy":           "round-robin",
+						"force-model-prefix": true,
+						"retry":              map[string]any{"request-retry": json.Number("4"), "max-retry-credentials": json.Number("3")},
+						"cooldown":           map[string]any{"disable-cooling": true},
+					},
+					"requests": map[string]any{
+						"proxy-url": "http://proxy.internal:8080",
+						"streaming": map[string]any{"keepalive-seconds": json.Number("120")},
+						"payload":   map[string]any{"default": []any{map[string]any{"models": []any{map[string]any{"name": "gpt-4o"}}, "params": map[string]any{"temperature": json.Number("1")}}}},
+					},
+					"multimedia": map[string]any{"disable-image-generation": "chat"},
+					"upstream":   map[string]any{"codex": map[string]any{"response-steering": true}, "claude": map[string]any{"model-level-cooling": true}},
+					"client":     map[string]any{"codex": map[string]any{"enable-apply-patch": true}},
+					"api-keys": map[string]any{
+						"claude": []any{map[string]any{"name": "claude-group", "keys": []any{map[string]any{"api-key": "src-provider-claude-key"}}}},
+					},
+				}
+				for name, body := range classSourceCredentials() {
+					writeTestJSON(t, filepath.Join(sourceRoot, "auth", name), body)
+				}
 				configPath := filepath.Join(sourceRoot, "config.yaml")
 				writeTestJSON(t, configPath, sourceConfig)
 				source = exec.Command(cpaPath, "-config", configPath)
@@ -331,10 +367,18 @@ func TestAdoptionExactCPAV8WithSupervisor(t *testing.T) {
 				t.Fatalf("real v8 v0 endpoint was accepted as the accepted legacy source profile: %v", err)
 			}
 			directHTTP.CloseIdleConnections()
-			// Emit the class-specific client-key resource chain while both the
-			// source and the exact v8 destination are still live and verified.
-			// It is separate from the legacy transition chain.
-			writeAdoptionResourceEvidence(t, class, record, finalStatus, expectedArtifact, sourceURL, sourceKey, clientKeys, snapshot, legacyCPAPath)
+			// Exercise the migrated kinds for real: the adoption executor copies
+			// the source's credentials, gateway configuration and provider
+			// sections into the exact v8 destination, and only what it recorded as
+			// migrated may be claimed in the resource chain.
+			kindCounts := witnessMigrationKinds(t, class, sourceURL, sourceKey, "http://"+targetAddr, snapshot.Destination.ManagementKey, len(clientKeys))
+			if before != directoryDigest(t, sourceRoot) {
+				t.Fatal("the migration executor modified the source")
+			}
+			// Emit the class-specific resource chain while both the source and the
+			// exact v8 destination are still live and verified. It is separate
+			// from the legacy transition chain.
+			writeAdoptionResourceEvidence(t, class, record, finalStatus, expectedArtifact, sourceURL, sourceKey, clientKeys, kindCounts, snapshot, legacyCPAPath)
 
 			if class == bootstrap.AdoptLegacyManaged {
 				// The historical v7 process remains live, byte-preserved and on v0.
@@ -514,10 +558,142 @@ func legacyTransitionEvidencePayload(t *testing.T, manifestData []byte, manifest
 	return observationData, reportData, encodeJSON(t, authority)
 }
 
+// classSourceCredentials are the credential files a v8 source of this run
+// serves. They are real CPA auth-file shapes: `buildAuthFromFileData` requires a
+// JSON object before it will synthesize anything, so a body that is not one can
+// never be copied and is not part of the claim.
+func classSourceCredentials() map[string]map[string]any {
+	return map[string]map[string]any{
+		"evidence-claude.json": {"type": "claude", "access_token": "class-claude-token"},
+		"evidence-codex.json":  {"type": "codex", "access_token": "class-codex-token", "disabled": true},
+	}
+}
+
+// witnessMigrationKinds runs the real adoption executor from the live source to
+// the verified exact v8 destination and returns the per-kind item counts it
+// actually recorded as migrated. A kind with no migrated item is absent from the
+// map, so the evidence can never claim more than the executor copied.
+//
+// This is the only producer of those counts. Asserting them would make the
+// resource chain self-referential; running the executor against two real CPA
+// processes is what makes a `migrate` decision evidence-backed.
+func witnessMigrationKinds(t *testing.T, class bootstrap.AdoptSourceClass, sourceURL, sourceKey, destinationURL, destinationKey string, clientKeyCount int) map[string]int {
+	t.Helper()
+	// The client keys are the one kind every source class carries: the
+	// destination was brought up with the source's own key list and the class
+	// chain read it back above.
+	counts := map[string]int{"client-api-keys": clientKeyCount}
+	if class != bootstrap.AdoptNetworkExisting {
+		// A pre-v8 source has no v8 management surface at all: the executor
+		// cannot read its configuration or credential list, so nothing beyond the
+		// client keys the destination already received can be migrated from it.
+		return counts
+	}
+	source, err := freshadopt.NewSource(t.Context(), freshadopt.Endpoint{BaseURL: sourceURL, ManagementKey: sourceKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	destination, err := freshadopt.NewDestination(t.Context(), freshadopt.Endpoint{BaseURL: destinationURL, ManagementKey: destinationKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destination.Close()
+	// The source document is read before the run and compared with the
+	// destination afterwards. This is an independent observation of both ends:
+	// the executor's own outcomes are not taken on trust.
+	sourceDocument, err := source.ReadConfigDocument(t.Context())
+	if err != nil {
+		t.Fatalf("source configuration unavailable: %v", err)
+	}
+	// The checkpoint is the durable record the run is building; a run whose
+	// record the store would refuse is not evidence of anything.
+	var durable freshstore.AdoptionSummary
+	result, err := freshadopt.New(source, destination, decisionsForMigratedRefs()).Run(t.Context(), freshstore.AdoptionSummary{}, func(current freshstore.AdoptionSummary) error {
+		durable = current
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("adoption executor: %v", err)
+	}
+	if err = freshstore.ValidateAdoptionSummary(result.Summary); err != nil {
+		t.Fatalf("the executor produced an invalid record: %v", err)
+	}
+	if err = freshstore.ValidateAdoptionSummary(durable); err != nil {
+		t.Fatalf("the executor checkpointed an invalid record: %v", err)
+	}
+	// Every migrated item is counted under the reference the executor itself
+	// classified it into, so a kind is authorized by the items of that kind and
+	// never by another kind's items: a leaf the gateway table does not name stays
+	// out of the routing count, and a section is only a provider count.
+	names := adoptionResourceKindNames()
+	for _, item := range result.Summary.Items {
+		if item.Outcome != freshstore.AdoptionMigrated {
+			continue
+		}
+		name, ok := names[freshadopt.ItemRef(item)]
+		if !ok {
+			t.Fatalf("the executor migrated %s under no authorized reference", item.Item)
+		}
+		counts[name]++
+	}
+	if counts["cpa-auth-files"] == 0 || counts["cpa-config-routing"] == 0 || counts["provider-state-api-keys"] == 0 {
+		t.Fatalf("the executor migrated no item of every claimed kind: %v", counts)
+	}
+	// Independent destination read-back: every credential file the source served
+	// is present byte-identically, and every gateway path the request reaches is
+	// the source's value. A migrated item that this read does not confirm is not
+	// evidence the kind was copied.
+	for name := range classSourceCredentials() {
+		sourceBytes, err := source.DownloadCredential(t.Context(), name)
+		if err != nil {
+			t.Fatalf("%s: source download failed: %v", name, err)
+		}
+		state, err := destination.CredentialState(t.Context(), name)
+		if err != nil || !state.Present {
+			t.Fatalf("%s: absent on the destination: %+v %v", name, state, err)
+		}
+		destinationBytes, err := destination.DownloadCredential(t.Context(), name)
+		if err != nil || sha256Hex(destinationBytes) != sha256Hex(sourceBytes) {
+			t.Fatalf("%s: destination bytes differ from the source: %v", name, err)
+		}
+	}
+	var verifiedRouting, verifiedProvider int
+	for _, path := range slices.Concat(cpa.ConfigLeafPaths(), cpa.ConfigRuleFamilyPaths()) {
+		want, presence := cpa.LookupConfigValue(sourceDocument, path)
+		if presence != cpa.ConfigPresent || freshadopt.ManagerOwned(path) {
+			continue
+		}
+		got, seen, err := destination.ReadConfigValue(t.Context(), path)
+		if err != nil || seen != cpa.ConfigPresent {
+			continue
+		}
+		if reflect.DeepEqual(got, want) {
+			verifiedRouting++
+		}
+	}
+	for _, section := range freshadopt.ProviderSections() {
+		want, presence := cpa.LookupConfigValue(sourceDocument, section)
+		if presence != cpa.ConfigPresent {
+			continue
+		}
+		got, seen, err := destination.ReadConfigValue(t.Context(), section)
+		if err == nil && seen == cpa.ConfigPresent && reflect.DeepEqual(got, want) {
+			verifiedProvider++
+		}
+	}
+	if verifiedRouting != counts["cpa-config-routing"] || verifiedProvider != counts["provider-state-api-keys"] {
+		t.Fatalf("destination read-back disagrees with the recorded outcomes: routing %d/%d, provider %d/%d",
+			verifiedRouting, counts["cpa-config-routing"], verifiedProvider, counts["provider-state-api-keys"])
+	}
+	t.Logf("adoption executor witness: %v", counts)
+	return counts
+}
+
 // writeAdoptionResourceEvidence emits the class-specific client-key resource
 // chain: manifest copy, report and three distinct sanitized traces. It is
 // review input, never compiled authority, and never writes consumer.json.
-func writeAdoptionResourceEvidence(t *testing.T, class bootstrap.AdoptSourceClass, record freshstore.Record, status model.RuntimeObservedStatus, artifact model.RuntimeArtifactID, sourceURL, sourceKey string, clientKeys []string, snapshot adoptionSnapshot, legacyCPAPath string) {
+func writeAdoptionResourceEvidence(t *testing.T, class bootstrap.AdoptSourceClass, record freshstore.Record, status model.RuntimeObservedStatus, artifact model.RuntimeArtifactID, sourceURL, sourceKey string, clientKeys []string, kindCounts map[string]int, snapshot adoptionSnapshot, legacyCPAPath string) {
 	t.Helper()
 	directory := strings.TrimSpace(os.Getenv(adoptionResourceOutputKey))
 	if directory == "" {
@@ -571,7 +747,7 @@ func writeAdoptionResourceEvidence(t *testing.T, class bootstrap.AdoptSourceClas
 	if !slices.Equal(keys, clientKeys) {
 		t.Fatal("resource read evidence does not match the observed source keys")
 	}
-	read := adoptionResourceReadTrace{ReadVerified: true, ClientKeyCount: len(keys)}
+	read := adoptionResourceReadTrace{ReadVerified: true, ClientKeyCount: len(keys), ResourceCounts: kindCounts}
 	if class == bootstrap.AdoptNetworkExisting {
 		read.ManagementGeneration = "v8"
 	} else {
@@ -586,6 +762,7 @@ func writeAdoptionResourceEvidence(t *testing.T, class bootstrap.AdoptSourceClas
 	replay := adoptionResourceReplayTrace{
 		ReplayVerified: true, TargetArtifactID: string(artifact), TargetArchiveSHA256: realCPA8ArchiveSHA256,
 		TargetBinarySHA256: realCPA8BinarySHA256, SourcePreserved: true, GatewayPending: record.Operation.GatewayPending,
+		CopiedResources: kindCounts,
 	}
 	destinationKeys, err := cpa.ReadV8AdoptionKeys(t.Context(), snapshot.DestinationURL, snapshot.Destination.ManagementKey)
 	if err != nil || !slices.Equal(destinationKeys, clientKeys) {
@@ -601,6 +778,7 @@ func writeAdoptionResourceEvidence(t *testing.T, class bootstrap.AdoptSourceClas
 		ReadbackVerified: true, EffectiveAuthVerified: true, DestinationVerified: true,
 		TargetArtifactID: string(artifact), TargetArchiveSHA256: realCPA8ArchiveSHA256,
 		TargetBinarySHA256: realCPA8BinarySHA256, GatewayPending: record.Operation.GatewayPending,
+		VerifiedResources: kindCounts,
 	}
 	readData, replayData, verifyData, reportData, authorityData := adoptionResourceEvidencePayload(t, manifestData, manifest, class, artifact, read, replay, verify, head, tree)
 	short := "network"

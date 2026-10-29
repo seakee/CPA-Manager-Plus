@@ -30,25 +30,6 @@ type adoptionSourceSnapshot struct {
 	DiscoveredResources []bootstrap.ResourceRef
 }
 
-// adoptionSectionRefs maps the bounded safe-read section inventory to the
-// existing stable adoption resource references. Arbitrary upstream keys never
-// become refs.
-var adoptionSectionRefs = map[string]bootstrap.ResourceRef{
-	"access":                      bootstrap.AdoptionRefClientAPIKeys,
-	"oauth":                       bootstrap.AdoptionRefCPAAuthFiles,
-	"server":                      bootstrap.AdoptionRefConfigServer,
-	"management":                  bootstrap.AdoptionRefConfigManagement,
-	"routing":                     bootstrap.AdoptionRefConfigRouting,
-	"logging":                     bootstrap.AdoptionRefConfigLogging,
-	"usage":                       bootstrap.AdoptionRefConfigUsage,
-	"plugins":                     bootstrap.AdoptionRefConfigPlugins,
-	"observability":               bootstrap.AdoptionRefConfigObservability,
-	"unknown_cpa_native_resource": bootstrap.AdoptionRefConfigUnknown,
-	"providers":                   bootstrap.AdoptionRefProviderStateProviders,
-	"api-keys":                    bootstrap.AdoptionRefProviderStateAPIKeys,
-	"client":                      bootstrap.AdoptionRefProviderStateClient,
-}
-
 var errUnsupportedAdoptionSourceClass = errors.New("unsupported adoption source class")
 
 func connectionIdentity(base string) string {
@@ -56,19 +37,38 @@ func connectionIdentity(base string) string {
 	return "external:sha256:" + hex.EncodeToString(digest[:])
 }
 
-func qualifiedClientAPIKeyDecision(resources []bootstrap.AdoptionResourceDecision) (bootstrap.AdoptionResourceDecision, bool) {
-	if len(resources) != 1 {
-		return bootstrap.AdoptionResourceDecision{}, false
+// qualifiedAdoptionDecisions indexes the resource decisions the accepted
+// evidence authorizes, refusing any decision the rules do not mark migrate. The
+// inventory is built from this map, so a kind the evidence chain did not cover
+// can never be marked migrate.
+func qualifiedAdoptionDecisions(resources []bootstrap.AdoptionResourceDecision) (map[bootstrap.ResourceRef]bootstrap.AdoptionResourceDecision, bool) {
+	// Client keys are mandatory: a source with no adoptable key is refused, and a
+	// destination without them would accept anonymous callers. An empty or
+	// keyless set therefore authorizes nothing at all.
+	if len(resources) == 0 {
+		return nil, false
 	}
-	decision := resources[0]
-	disposition, err := bootstrap.DecideAdoptionResource(decision)
-	return decision, err == nil &&
-		decision.ResourceRef == bootstrap.AdoptionRefClientAPIKeys &&
-		decision.Kind == bootstrap.APIKeys &&
-		decision.Scope == bootstrap.ClientAPIKeys &&
-		decision.Qualification == bootstrap.CapabilityQualified &&
-		disposition == bootstrap.Migrate &&
-		decision.Disposition == disposition
+	decisions := make(map[bootstrap.ResourceRef]bootstrap.AdoptionResourceDecision, len(resources))
+	for _, decision := range resources {
+		if _, duplicate := decisions[decision.ResourceRef]; duplicate {
+			return nil, false
+		}
+		disposition, err := bootstrap.DecideAdoptionResource(decision)
+		if err != nil || disposition != bootstrap.Migrate || decision.Qualification != bootstrap.CapabilityQualified || decision.ManualAction != "" || decision.Disposition != disposition {
+			return nil, false
+		}
+		// The rule for this ref decides the kind and scope: a decision cannot
+		// claim a migrate verdict under another kind's shape.
+		expected, ok := bootstrap.FreshAdoptionDecision(decision.ResourceRef, decision)
+		if !ok || expected != decision {
+			return nil, false
+		}
+		decisions[decision.ResourceRef] = decision
+	}
+	if _, ok := decisions[bootstrap.AdoptionRefClientAPIKeys]; !ok {
+		return nil, false
+	}
+	return decisions, true
 }
 
 // readAdoptionSource performs the only source read for the explicit source
@@ -100,18 +100,40 @@ func readAdoptionSource(ctx context.Context, class bootstrap.AdoptSourceClass, s
 	return adoptionSourceSnapshot{APIKeys: keys, DiscoveredResources: refs}, nil
 }
 
+// adoptionResourceRefs is the record's inventory: one entry for every reference
+// an item under the reported roots can carry.
+//
+// A root is not one resource. `oauth` carries its auth directory and its
+// copyable provider maps; `client` carries the gateway's client leaves and the
+// provider section of the same name; `requests`, `multimedia` and `upstream` are
+// gateway configuration the reader reports under its unknown-root catch-all. The
+// executor gates each item on its own reference through the same resolver
+// (`cpa.AdoptionItemRef`), so the record must hold a decision for the whole set —
+// otherwise it tells the operator to redo an item the executor copies, or
+// authorizes one it never copies.
 func adoptionResourceRefs(sections []string) ([]bootstrap.ResourceRef, error) {
 	seenSection := map[string]bool{}
 	seenRef := map[bootstrap.ResourceRef]bool{}
 	refs := make([]bootstrap.ResourceRef, 0, len(sections))
 	for _, section := range sections {
-		ref, ok := adoptionSectionRefs[section]
-		if !ok || seenSection[section] || seenRef[ref] {
+		if seenSection[section] {
 			return nil, errUnsupportedAdoptionSourceClass
 		}
 		seenSection[section] = true
-		seenRef[ref] = true
-		refs = append(refs, ref)
+		rootRefs := cpa.AdoptionRootRefs(section)
+		if len(rootRefs) == 0 {
+			return nil, errUnsupportedAdoptionSourceClass
+		}
+		for _, ref := range rootRefs {
+			// Two roots may contribute the same reference — `api-keys` and
+			// `oauth` both carry provider configuration — and the record holds it
+			// once.
+			if seenRef[ref] {
+				continue
+			}
+			seenRef[ref] = true
+			refs = append(refs, ref)
+		}
 	}
 	if !seenRef[bootstrap.AdoptionRefClientAPIKeys] || !seenRef[bootstrap.AdoptionRefCPAAuthFiles] {
 		return nil, errUnsupportedAdoptionSourceClass
@@ -122,32 +144,29 @@ func adoptionResourceRefs(sections []string) ([]bootstrap.ResourceRef, error) {
 // adoptionDecisionsForInventory gives every discovered bounded resource exactly
 // one existing-domain decision. Only accepted client API keys may migrate; auth
 // files, provider state and configuration remain explicit manual actions.
-func adoptionDecisionsForInventory(refs []bootstrap.ResourceRef, migrate bootstrap.AdoptionResourceDecision) ([]bootstrap.AdoptionResourceDecision, bool) {
+func adoptionDecisionsForInventory(refs []bootstrap.ResourceRef, migrate map[bootstrap.ResourceRef]bootstrap.AdoptionResourceDecision) ([]bootstrap.AdoptionResourceDecision, bool) {
 	if len(refs) == 0 {
 		return nil, false
 	}
 	decisions := make([]bootstrap.AdoptionResourceDecision, 0, len(refs))
-	hasKeys, hasAuth := false, false
+	hasKeys := false
 	for _, ref := range refs {
-		decision, ok := bootstrap.FreshAdoptionDecision(ref, migrate)
+		decision, ok := bootstrap.FreshAdoptionDecision(ref, migrate[ref])
 		if !ok {
 			return nil, false
 		}
-		switch ref {
-		case bootstrap.AdoptionRefClientAPIKeys:
+		if ref == bootstrap.AdoptionRefClientAPIKeys {
 			hasKeys = true
-		case bootstrap.AdoptionRefCPAAuthFiles:
-			hasAuth = true
 		}
 		decisions = append(decisions, decision)
 	}
-	if !hasKeys || !hasAuth {
+	if !hasKeys {
 		return nil, false
 	}
 	return decisions, true
 }
 
-func adoptionCheckpointDecisionsValid(resources []bootstrap.ResourceRef, decisions []bootstrap.AdoptionResourceDecision, migrate bootstrap.AdoptionResourceDecision) bool {
+func adoptionCheckpointDecisionsValid(resources []bootstrap.ResourceRef, decisions []bootstrap.AdoptionResourceDecision, migrate map[bootstrap.ResourceRef]bootstrap.AdoptionResourceDecision) bool {
 	expected, ok := adoptionDecisionsForInventory(resources, migrate)
 	return ok && reflect.DeepEqual(decisions, expected)
 }
@@ -159,7 +178,7 @@ func (s *Service) adopt(ctx context.Context, op bootstrap.FreshOperation, r Requ
 	if !ok || s.options.Protector == nil || s.options.DestinationBaseURL == "" {
 		return result, &Blocker{Code: "adoption_destination_staging_required", Unsupported: []string{"cpa_native_destination_staging_required", "credentials_require_reauthentication", "provider_runtime_state_not_migrated", "historical_usage_excluded"}}
 	}
-	decision, ok := qualifiedClientAPIKeyDecision(s.options.AdoptionResources)
+	decision, ok := qualifiedAdoptionDecisions(s.options.AdoptionResources)
 	if !ok {
 		return block("adoption_resource_qualification_required")
 	}

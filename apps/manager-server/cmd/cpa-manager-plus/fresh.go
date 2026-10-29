@@ -145,6 +145,11 @@ type freshApplication struct {
 	// externalSource is the committed Connect External authority. It is the only
 	// source of an External management credential; no environment fallback exists.
 	externalSource freshkeyapply.ExternalSource
+	// The Adopt migration copy runs on its own worker, never on the commit
+	// request: adoptMigrationMu makes the start single-flight per installation
+	// and guards the flag that says a run is in flight.
+	adoptMigrationMu      sync.Mutex
+	adoptMigrationRunning bool
 	// rejection remembers that the user's CPA refused the stored External
 	// credential. Browser-driven reads consult it before they send anything: CPA
 	// bans an address after five failed authentications, so a page that keeps
@@ -450,6 +455,18 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 	case resource == "strategy" && r.Method == http.MethodPost:
 		a.executeStrategy(w, r, op)
 	case resource == "complete" && r.Method == http.MethodPost:
+		if a.adoptMigrationInFlight() {
+			// A completion decided while the copy is still running would finish
+			// the installation under a migration that then keeps writing into it:
+			// the last item of the run would land after the operator was told the
+			// installation was complete, and Step 4's completion conditions read
+			// exactly the summary this run is still filling in. Nothing is
+			// changed; the operator retries once the run has settled.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			writeFreshJSON(w, map[string]string{"code": "adopt_migration_running"})
+			return
+		}
 		if op.Strategy.Strategy == bootstrap.AdoptExisting {
 			w.WriteHeader(http.StatusConflict)
 			return
@@ -650,6 +667,24 @@ func (a *freshApplication) executeStrategy(w http.ResponseWriter, r *http.Reques
 		// Reconcile only after the strategy adapter validates the requested
 		// target and current server-owned qualification. Do not rewrite a
 		// committed checkpoint, connection ciphertext or revision on replay.
+		if op.Strategy.Strategy == bootstrap.AdoptExisting {
+			// A committed adoption replay is the resume path of the migration:
+			// the executor skips every item the record already settled, so a run
+			// that stopped on a failed checkpoint, an unreachable source or an
+			// unknown write continues from the durable prefix instead of repeating
+			// it. Only the per-item summary moves, which is what the store's
+			// monotone rule permits.
+			//
+			// The copy runs on its own worker, so this reply is not held by it: it
+			// states that the migration is running and the record carries the
+			// progress, exactly as the commit reply below does.
+			if replay, err := a.store.Load(r.Context()); err == nil {
+				token, _ := freshbootstrap.SessionToken(r)
+				writeFreshJSON(w, adoptMigrationReply{FreshOperation: replay.Operation,
+					MigrationState: a.runAdoptionMigration(r.Context(), replay, request.BaseURL, request.ManagementKey, token)})
+				return
+			}
+		}
 		writeFreshJSON(w, op)
 		return
 	}
@@ -698,6 +733,22 @@ func (a *freshApplication) executeStrategy(w http.ResponseWriter, r *http.Reques
 		}{next.Operation, result.InitialClientKey})
 		return
 	}
+	if next.Operation.Strategy.Strategy == bootstrap.AdoptExisting && next.Operation.Strategy.Stage == "committed" {
+		// The destination is committed and its client keys verified, so the
+		// bounded source inventory may now be copied into it. This is the hook
+		// Step 4's completion conditions read: the per-item summary is durable,
+		// and every outcome other than `migrated` is operator work rather than an
+		// adoption failure.
+		//
+		// The copy runs on its own worker. This reply returns at once with the
+		// state `running` and the committed revision it would have returned
+		// anyway; the migration's own checkpoints advance the durable revision
+		// afterwards, which is what the completion screen reads.
+		token, _ := freshbootstrap.SessionToken(r)
+		writeFreshJSON(w, adoptMigrationReply{FreshOperation: next.Operation,
+			MigrationState: a.runAdoptionMigration(r.Context(), next, request.BaseURL, request.ManagementKey, token)})
+		return
+	}
 	writeFreshJSON(w, next.Operation)
 }
 
@@ -739,6 +790,14 @@ func (a *freshApplication) retireDestinationAttempt(ctx context.Context, op boot
 		return nil
 	})
 	return err
+}
+
+// adoptMigrationReply is the committed Adopt reply. It is the committed
+// operation plus the state of the copy that runs beside it: the reply never
+// waits for the copy, so it has to say what is true now.
+type adoptMigrationReply struct {
+	bootstrap.FreshOperation
+	MigrationState string `json:"migrationState,omitempty"`
 }
 
 func writeFreshJSON(w http.ResponseWriter, v any) {

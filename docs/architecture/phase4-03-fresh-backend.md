@@ -158,13 +158,18 @@ connection persistence uses the existing Protector and canonical encrypted
 connection representation in the same checkpoint transaction; collector is off.
 External lifecycle, ingress and client-auth policy stay with the operator.
 
-The bounded Adopt destination implementation authorizes only the explicit
-`client-api-keys` resource. It discovers it through the same bounded v8 GET only
-after source-class, exact target artifact and resource read/replay/verify
-acceptance pass. It emits one existing `AdoptionResourceDecision`; credentials,
-provider/runtime state and usage/request/log/history are excluded from discovery
-and replay. Empty, duplicate, whitespace/control-bearing or oversized client-key
-sets fail closed (maximum 128 keys, 4096 bytes each).
+The bounded Adopt destination implementation authorizes the resource kinds its
+evidence chain exercises, one `AdoptionResourceDecision` per kind. It discovers
+the inventory through the same bounded v8 GET only after source-class, exact
+target artifact and resource read/replay/verify acceptance pass. A kind is
+`migrate` only when all three traces name it, and every authorized kind must be in
+the rules' migrated set (`client-api-keys`, `cpa-auth-files`,
+`cpa-config-routing`, `provider-state-api-keys`): one kind's evidence never
+authorizes another. A `legacy_managed` source is a pre-v8 process with no v8
+management surface, so its evidence authorizes `client-api-keys` only and the
+other kinds keep their manual action. Usage/request/log/history are excluded from
+discovery and replay. Empty, duplicate, whitespace/control-bearing or oversized
+client-key sets fail closed (maximum 128 keys, 4096 bytes each).
 
 Before any destination effect, the caller CAS-persists source URL identity,
 source class, target Runtime identity/generation/artifact, destination connection

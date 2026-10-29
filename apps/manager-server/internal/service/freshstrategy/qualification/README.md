@@ -43,7 +43,9 @@ The enforced limitation vocabulary is `management_generation_v8`,
 `direct_transport_no_proxy_no_redirect`, `client_api_keys_only`,
 `legacy_source_profile_cpa_v7_0_12`, `source_preserved` and `gateway_pending`,
 with a fixed set per consumer. These keys map to facts the code actually checks;
-they are not review prose.
+they are not review prose. `client_api_keys_only` is a `legacy_managed` limitation
+only: a network adoption migrates credentials, gateway configuration and the
+provider sections its evidence chain authorizes.
 
 The following evidence restrictions cannot be checked by the running Manager and
 therefore cannot be represented as accepted applicability. A review that relies
@@ -82,8 +84,10 @@ consumers reference original `CPA8-STAGE-r1` limited background evidence
 separately from the real-process resource proof. `adoptionEvidence` binds the
 independent class-specific `CPA8-ADOPT-RESOURCE-r1` manifest and its distinct
 `readCaseRef`, `replayCaseRef` and `verifyCaseRef`. Only those separately
-accepted completed/supported cases authorize the bounded `client-api-keys`
-`Migrate` decision and exact destination ArtifactID. External safe-read or the
+accepted completed/supported cases authorize the bounded `Migrate` decisions and
+exact destination ArtifactID. The three traces each carry a per-kind count, and
+a kind is authorized only when all three name it, so one kind's evidence can
+never authorize another. External safe-read or the
 original r4 `limited` observations cannot substitute for any resource proof.
 Legacy transition acceptance remains separate from network adoption acceptance.
 
@@ -153,26 +157,46 @@ trace, source profile or target fails the whole record closed.
 
 Accepted consumers also persist the bounded, non-secret
 `adoptionResources` inventory discovered from the source. Every entry has
-exactly one decision: only `client-api-keys` may be `Migrate`; auth files,
-provider state and configuration sections remain explicit manual or unsupported
-actions. Unknown upstream sections collapse to the fixed `cpa-config-unknown`
+exactly one decision. A kind may be `Migrate` only when the resource chain's
+three traces all name it, so `client-api-keys` and — for a `network_existing`
+source — `cpa-auth-files`, `cpa-config-routing` and `provider-state-api-keys`
+migrate, while the remaining sections stay explicit manual or unsupported
+actions. The section item is a whole `api-keys.*` group or one of the copyable
+`oauth.*` children, which are provider configuration rather than the source's
+auth directory; both are gated under `provider-state-api-keys`. A `legacy_managed`
+source is a pre-v8 process with no v8 management
+surface, so its evidence authorizes `client-api-keys` only and its other kinds
+keep the manual action they had before. Unknown upstream sections collapse to the fixed `cpa-config-unknown`
 reference and never become durable upstream-controlled identities. The
 inventory and its decisions are written through the existing Fresh CAS before
 any destination mutation and are immutable afterwards.
 
-The four accepted entries carry exact `applicability`, independently
-accepted evidence and their enforced limitations. On a missing/mismatched
-source or withdrawn qualification they remain fail-closed. Missing destination
-capability retains
-`adoption_destination_staging_required`; accepted source-only consumers with an
-available destination return `adoption_resource_qualification_required` before
-source discovery. Any target/transport/config/mode mismatch has no consumer entry
-and therefore fails before a source probe, destination staging or Runtime
-mutation. Test-only synthetic acceptance is constructed in memory and is never
-part of this directory or the production binary. Controlled real-CPA CI
-observations are review inputs, not authority files and not automatic production
-acceptance.
-
+**Honest status of the widened kinds (2026-10-29).** Acceptance `65eb659a`
+covered client API keys only. The network consumer's migration of credentials,
+gateway configuration and provider sections is backed by real-CPA evidence but
+runs under a **maintainer waiver dated 2026-10-29**, not under a new acceptance:
+no new review record exists, `status` is still `accepted` under `65eb659a`, and
+the widened kinds are pending the single pre-Beta independent re-acceptance.
+Until that re-acceptance the four-kind breadth of `network_existing` is a
+waived claim, and the executor's per-item gate is what keeps it honest: an item is
+copied only when the record's decision for its own reference is `migrate`. The
+record and the gate are computed from one pinned resolver,
+`internal/service/cpa/adoption_ref.go` (its bytes and the `AdoptionUniverseDigest`
+of every item-to-reference pair are part of the consumer digest):
+`AdoptionItemRef(item)` classifies one item, and `AdoptionRootRefs(root)` is the
+derived set every item under a discovered root carries. Discovery records a
+decision for every reference in each reported root's set, so a root is no longer
+one resource — `oauth` contributes `cpa-auth-files`, `provider-state-api-keys` and
+`cpa-config-unknown` (the source keys nothing copies: its refresh worker count and
+its `providers` runtime block), and the reader's unknown catch-all (where
+`requests`/`multimedia`/`upstream` arrive) both `cpa-config-routing` and
+`cpa-config-unknown`. No set contains a reference that no item under that root
+produces, so an item is never recorded as manual work under one reference while
+being copied under another, and the record never asks the operator to redo work
+the executor never does. A source key that no copyable item carries is named in
+the universe on purpose, and `TestEverySourceKeyIsCoveredByItsRoot` checks every
+direct child key of every named section against that, so a key of the accepted CPA
+v8 document cannot silently leave the adoption.
 
 ## Current acceptance-repair inputs
 

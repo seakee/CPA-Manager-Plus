@@ -52,6 +52,11 @@ type Record struct {
 	ConfigGroups        map[string]*ConfigGroupJournal
 	ConfigGroupsInvalid bool
 	ConfigGroupsDamaged map[string]json.RawMessage
+	// AdoptionSummary is the per-item result of the Adopt migration executor.
+	// It holds stable item identities, outcomes and byte digests only: no
+	// credential byte, provider key or configuration value is ever persisted.
+	// Only an adopted installation carries one.
+	AdoptionSummary *AdoptionSummary
 }
 
 // FieldJournal is the Manager-side journal for ONE allowlisted config field. It
