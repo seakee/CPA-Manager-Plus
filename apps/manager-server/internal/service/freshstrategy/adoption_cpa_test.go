@@ -366,6 +366,32 @@ func TestAdoptionExactCPAV8WithSupervisor(t *testing.T) {
 			if _, err := cpa.ReadLegacyManagedAdoptionSnapshot(t.Context(), "http://"+targetAddr, snapshot.Destination.ManagementKey); !errors.Is(err, cpa.LegacySourceProfileUnsupported) {
 				t.Fatalf("real v8 v0 endpoint was accepted as the accepted legacy source profile: %v", err)
 			}
+			// The adopted destination carries the installation's own template facts:
+			// usage statistics are on, because Key usage and the Key workspace read
+			// the destination's aggregation, and the Adopt posture proves with the
+			// install-derived management credential.
+			var template struct {
+				Observability struct {
+					Usage struct {
+						Enabled *bool `json:"usage-statistics-enabled"`
+					} `json:"usage"`
+				} `json:"observability"`
+			}
+			configRequest, _ := http.NewRequest(http.MethodGet, "http://"+targetAddr+"/v8/management/config", nil)
+			configRequest.Header.Set("Authorization", "Bearer "+snapshot.Destination.ManagementKey)
+			configResponse, err := directHTTP.Do(configRequest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			configBody, _ := io.ReadAll(configResponse.Body)
+			_ = configResponse.Body.Close()
+			if configResponse.StatusCode != http.StatusOK || json.Unmarshal(configBody, &template) != nil ||
+				template.Observability.Usage.Enabled == nil || !*template.Observability.Usage.Enabled {
+				t.Fatalf("the adopted destination does not record usage statistics: %s", configBody)
+			}
+			if snap, snapErr := cpa.ProveAdoptedDestination(t.Context(), "http://"+targetAddr, snapshot.Destination.ManagementKey); snapErr != nil || len(snap) == 0 {
+				t.Fatalf("the adopted destination does not prove the install-derived authority: %v", snapErr)
+			}
 			directHTTP.CloseIdleConnections()
 			// Exercise the migrated kinds for real: the adoption executor copies
 			// the source's credentials, gateway configuration and provider

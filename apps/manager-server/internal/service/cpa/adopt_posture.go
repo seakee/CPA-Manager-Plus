@@ -1,7 +1,9 @@
 package cpa
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 )
@@ -126,6 +128,47 @@ func (t *Transport) postureOf() proofPosture {
 	return managedProofPosture
 }
 
+// matchesAdoptedCore checks the adopted rules that do not depend on the record
+// that staged the destination: the closed root vocabulary, the required roots,
+// the version stamp, the bcrypt management digest and the usage switch.
+func (p proofPosture) matchesAdoptedCore(data []byte) bool {
+	var root map[string]json.RawMessage
+	if json.Unmarshal(data, &root) != nil {
+		return false
+	}
+	for name := range root {
+		if !adoptRoots[name] {
+			return false
+		}
+	}
+	for _, name := range adoptRequiredRoots {
+		if _, ok := root[name]; !ok {
+			return false
+		}
+	}
+	var version int
+	if json.Unmarshal(root["config-version"], &version) != nil || version != 8 {
+		return false
+	}
+	var management struct {
+		AllowRemote bool   `json:"allow-remote"`
+		SecretKey   string `json:"secret-key"`
+	}
+	if json.Unmarshal(root["management"], &management) != nil || !management.AllowRemote || !looksLikeBcrypt(management.SecretKey) {
+		return false
+	}
+	var observability struct {
+		Usage struct {
+			UsageStatisticsEnabled *bool `json:"usage-statistics-enabled"`
+		} `json:"usage"`
+	}
+	if json.Unmarshal(root["observability"], &observability) != nil ||
+		observability.Usage.UsageStatisticsEnabled == nil || !*observability.Usage.UsageStatisticsEnabled {
+		return false
+	}
+	return true
+}
+
 // matchesAdopt accepts the adopted destination posture: the same proof as the
 // managed template — the authenticated read, the bcrypt management digest CPA
 // rewrote, the Supervisor-owned auth and plugin roots, usage statistics on —
@@ -172,6 +215,7 @@ func (p proofPosture) matchesAdopt(data []byte) bool {
 	}
 	// The adopted client list is the source's, so only its shape is checked here;
 	// the key policy is `validKeys`, which the snapshot caller applies.
+
 	var access map[string]json.RawMessage
 	var keys []string
 	if json.Unmarshal(root["access"], &access) != nil || json.Unmarshal(access["api-keys"], &keys) != nil || keys == nil {
@@ -251,4 +295,51 @@ func (p proofPosture) validKeys(keys []string) bool {
 		seen[key] = true
 	}
 	return true
+}
+
+// ProveAdoptedDestination proves one adopted destination with the
+// install-derived management credential and returns its client keys.
+//
+// The document is read once: the plugin opt-in is the switch that document
+// carries, so this proves the destination is the adopted template without
+// needing the record that wrote it. The caller that holds the record pins the
+// same switch separately, through the posture selector.
+//
+// It is the direct proof the real-CPA harness runs after a migration, and it is
+// exported so it can be: the posture itself stays unexported, and nothing here
+// grants a write.
+func ProveAdoptedDestination(ctx context.Context, endpoint, managementKey string) ([]string, error) {
+	transport := NewTransportForEndpoint(endpoint)
+	code, body, err := transport.request(ctx, http.MethodGet, "/v8/management/config", managementKey, nil)
+	if err != nil {
+		return nil, ErrProofUnavailable
+	}
+	if code != http.StatusOK {
+		return nil, ErrSourceConflict
+	}
+	var plugins struct {
+		Enabled *bool `json:"enabled"`
+	}
+	var root map[string]json.RawMessage
+	if json.Unmarshal(body, &root) != nil || json.Unmarshal(root["plugins"], &plugins) != nil || plugins.Enabled == nil {
+		return nil, ErrSourceConflict
+	}
+	posture := adoptProofPosture(*plugins.Enabled)
+	// The record-independent rules only: the root set, the required roots, the
+	// version, the bcrypt management digest and the usage switch. The Supervisor
+	// directory and bind facts are proven against the record by the posture
+	// selector, which this harness does not hold; asserting them from a document
+	// alone would only restate that document.
+	if !posture.matchesAdoptedCore(body) {
+		return nil, ErrSourceConflict
+	}
+	var access map[string]json.RawMessage
+	if json.Unmarshal(root["access"], &access) != nil {
+		return nil, ErrSourceConflict
+	}
+	var keys []string
+	if json.Unmarshal(access["api-keys"], &keys) != nil || !posture.validKeys(keys) {
+		return nil, ErrSourceConflict
+	}
+	return keys, nil
 }
