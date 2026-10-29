@@ -101,6 +101,16 @@ func TestAdoptionExactCPAV8WithSupervisor(t *testing.T) {
 			if err := os.Chmod(root, 0o711); err != nil {
 				t.Fatal(err)
 			}
+			// In the image the runtime root sits under a traversable parent (`/` is
+			// 0755). The testing package's own temp parent is 0700 root-owned, so the
+			// CPA identity could not reach the runtime root at all: CPA v8 failed to
+			// open its own config with permission denied and never listened, which no
+			// product proof can succeed against. Make the path to the runtime root
+			// traversable for the child, as the image's is; the runtime root and the
+			// Supervisor root keep the image's modes.
+			if err := os.Chmod(filepath.Dir(root), 0o711); err != nil {
+				t.Fatal(err)
+			}
 			if err := os.Chown(targetRoot, 0, 10001); err != nil {
 				t.Fatal(err)
 			}
