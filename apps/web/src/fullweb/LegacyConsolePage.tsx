@@ -49,11 +49,14 @@ export function LegacyConsolePage({
   credential,
   onUnauthorized,
   client,
+  strategy,
 }: {
   context: RoutingContext;
   credential: string;
   onUnauthorized: () => void;
   client?: ReturnType<typeof createPublicApiClient>;
+  /** The committed strategy, so External-only surfaces never mount elsewhere. */
+  strategy?: string;
 }) {
   // Keep this hook unconditional: the legacy page can render once while the
   // in-memory credential is being installed, so router context must be read
@@ -142,6 +145,7 @@ export function LegacyConsolePage({
                 basePath={context.basePath}
                 client={client}
                 credential={credential}
+                strategy={strategy}
                 onUnauthorized={onUnauthorized}
                 onPending={setFreshPending}
                 onDirtyChange={setFreshDirty}

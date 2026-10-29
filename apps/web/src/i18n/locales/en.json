@@ -251,7 +251,15 @@
     "restart_title": "Restart CPA gateway?",
     "interruption": "Gateway requests may be interrupted. CPAMP Manager remains available.",
     "operation_conflict": "Another runtime operation is already in progress.",
-    "operation_failed": "Runtime operation could not be completed."
+    "operation_failed": "Runtime operation could not be completed.",
+    "cpa_version": "CPA version",
+    "version_support": "Version support",
+    "version_supported": "Supported",
+    "version_unsupported": "Unsupported",
+    "version_unverified": "Unverified",
+    "writes": "Writes",
+    "writes_blocked": "Blocked by this version",
+    "writes_allowed": "Not blocked by this version"
   },
   "cpa_updates": {
     "title": "CPA Engine",

@@ -45,6 +45,8 @@ import {
 } from './gatewayConfigClient';
 import { GatewayRuleEditor } from './GatewayRuleEditor';
 import { ruleSummary } from './gatewayRuleForm';
+import { FreshExternalBlocker } from './FreshExternalBlocker';
+import { blockerOf, type ExternalBlocker } from './externalState';
 
 // The gateway configuration page. One write is one page group: the page collects
 // every edited leaf of a group into a single PATCH, restores a leaf to CPA's own
@@ -82,12 +84,14 @@ export function FreshGatewayWorkspace({
   onUnauthorized,
   onPending,
   onDirtyChange,
+  onRebind,
 }: {
   client: PublicApiClient;
   credential: string;
   onUnauthorized: () => void;
   onPending: (pending: boolean) => void;
   onDirtyChange?: (dirty: boolean) => void;
+  onRebind?: () => void;
 }) {
   // Subscribe to language changes just like the original Console pages.
   const { i18n } = useTranslation();
@@ -100,6 +104,10 @@ export function FreshGatewayWorkspace({
   const [view, setView] = useState<GatewayView | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadFailed, setLoadFailed] = useState(false);
+  // A typed External blocker from the load, kept separate from the generic
+  // load failure: the page names the state and offers its own way out instead
+  // of a bare "could not read".
+  const [blocker, setBlocker] = useState<ExternalBlocker | null>(null);
   const [currentTab, setCurrentTab] = useState<GatewayTabKey>('overview');
   const [searchText, setSearchText] = useState('');
   const [changedOnly, setChangedOnly] = useState(false);
@@ -143,6 +151,7 @@ export function FreshGatewayWorkspace({
       try {
         const next = await readGatewayView(client, { kind: 'admin', value: credential });
         setView(next);
+        setBlocker(null);
         setLoadFailed(false);
         if (!options.keepDrafts) {
           setDrafts({});
@@ -152,6 +161,11 @@ export function FreshGatewayWorkspace({
         }
       } catch (error) {
         handleError(error);
+        // A typed External code is the page's own contract: it names the state
+        // and its way out, so the generic failure notice stays hidden.
+        setBlocker(
+          error instanceof PublicApiError ? blockerOf(error.code) : null
+        );
         setLoadFailed(true);
       } finally {
         setLoading(false);
@@ -1007,7 +1021,15 @@ export function FreshGatewayWorkspace({
         </div>
       </header>
       <p className="notice">{c('catalogNotice')}</p>
-      {loadFailed ? (
+      {blocker ? (
+        <FreshExternalBlocker
+          state={blocker}
+          onRebind={onRebind}
+          onReload={() => void load()}
+          onDismiss={() => setBlocker(null)}
+        />
+      ) : null}
+      {loadFailed && !blocker ? (
         <p className="alert alert-warn" role="alert" data-testid="gateway-load-failed">
           {c('loadFailed')}
         </p>
@@ -1347,6 +1369,12 @@ function reasonKey(reason: string | undefined): Parameters<typeof c>[0] {
   switch (reason) {
     case 'external_rule_write_unproven':
       return 'reasonExternalRules';
+    case 'external_management_key_rejected':
+      return 'reasonKeyRejected';
+    case 'external_target_moved':
+      return 'reasonTargetMoved';
+    case 'external_cpa_version_unsupported':
+      return 'reasonVersionUnsupported';
     case 'private_profile_scope_frozen':
       return 'reasonPrivateFrozen';
     case 'config_journal_invalid':

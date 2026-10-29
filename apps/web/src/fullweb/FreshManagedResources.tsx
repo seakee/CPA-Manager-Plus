@@ -5,6 +5,8 @@ import '../i18n';
 import { fullWebLanguage, fullWebText as t, setFullWebLanguage } from '../i18n/fullweb';
 import { FreshManagedKeysPage } from './FreshManagedKeysPage';
 import { FreshGatewayWorkspace } from './FreshGatewayWorkspace';
+import { FreshRebindDialog } from './FreshRebindDialog';
+import { externalWorkspaceText as x } from '../i18n/freshExternal';
 import type { createPublicApiClient } from './publicApi';
 
 // MainLayout's page transition unmounts routes. These editors live below the
@@ -36,6 +38,7 @@ export function FreshManagedResources({
   basePath,
   client,
   credential,
+  strategy,
   onUnauthorized,
   onPending,
   onDirtyChange,
@@ -43,6 +46,8 @@ export function FreshManagedResources({
   basePath: string;
   client: ReturnType<typeof createPublicApiClient>;
   credential: string;
+  /** The committed strategy, so External-only surfaces never mount elsewhere. */
+  strategy?: string;
   onUnauthorized: () => void;
   onPending: (pending: boolean) => void;
   onDirtyChange?: (dirty: boolean) => void;
@@ -66,6 +71,15 @@ export function FreshManagedResources({
         : pathname;
   const pending = useRef({ keys: false, retry: false });
   const [locks, setLocks] = useState({ keys: false, retry: false });
+  // An External installation gets the External panels: the typed blocker, the
+  // rebind dialog and the usage confirmation. Every other profile keeps exactly
+  // the surfaces it had.
+  const externalProfile = strategy === 'connect_external';
+  // One Rebind dialog for the whole Console: both the Keys page and the Gateway
+  // page report the refused credential, and the way out is the same one. The
+  // dialog is mounted here so switching pages mid-fix cannot drop it.
+  const [rebindOpen, setRebindOpen] = useState(false);
+  const [rebound, setRebound] = useState('');
 
   function reportPending(resource: 'keys' | 'retry', value: boolean) {
     if (pending.current[resource] === value) return;
@@ -95,6 +109,8 @@ export function FreshManagedResources({
           credential={credential}
           onUnauthorized={onUnauthorized}
           onPending={(value) => reportPending('keys', value)}
+          onRebind={externalProfile ? () => setRebindOpen(true) : undefined}
+          externalUsage={externalProfile}
         />
       </RetainedRoutePanel>
 
@@ -110,8 +126,27 @@ export function FreshManagedResources({
           credential={credential}
           onUnauthorized={onUnauthorized}
           onPending={(value) => reportPending('retry', value)}
+          onRebind={externalProfile ? () => setRebindOpen(true) : undefined}
         />
       </RetainedRoutePanel>
+
+      {rebound && (
+        <p className="alert alert-info" role="status" data-testid="rebind-recovered">
+          {rebound}
+        </p>
+      )}
+      {externalProfile && (
+        <FreshRebindDialog
+          open={rebindOpen}
+          client={client}
+          credential={credential}
+          onClose={() => setRebindOpen(false)}
+          onRebound={({ reverified }) => {
+            setRebindOpen(false);
+            setRebound(x(reverified ? 'rebindSucceededReverified' : 'rebindSucceededRebound'));
+          }}
+        />
+      )}
 
       {(locks.keys || locks.retry) && (
         <p className="alert alert-warn" role="status">

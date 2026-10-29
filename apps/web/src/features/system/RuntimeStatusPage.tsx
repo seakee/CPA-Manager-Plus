@@ -15,6 +15,11 @@ export type RuntimeStatusGateway = {
   state: string;
   ready: boolean;
   version?: string;
+  // The External class of the observed version: what this Manager proved about a
+  // CPA it does not own. Embedded leaves both empty; its artifact is the
+  // authority, not a version.
+  versionSupport?: 'supported' | 'unsupported' | 'unknown' | string;
+  writeBlocked?: boolean;
   artifactId?: string;
   capabilities?: string[];
   recovery?: { state: string; attemptsRemaining: number };
@@ -246,6 +251,34 @@ export function RuntimeStatusPage({
               <Button variant="secondary" onClick={() => requestAction('stop')} disabled={busy || !gateway.capabilities?.includes('stop')}>
                 {t('runtime_status.stop', { defaultValue: 'Stop' })}
               </Button>
+            </div>
+          )}
+          {status?.mode === 'external' && (
+            <div className="runtime-status-version" data-testid="runtime-status-cpa-version">
+              <dl>
+                <div>
+                  <dt>{t('runtime_status.cpa_version', { defaultValue: 'CPA version' })}</dt>
+                  <dd>{gateway?.version || t('runtime_status.unknown', { defaultValue: 'Unknown' })}</dd>
+                </div>
+                <div>
+                  <dt>{t('runtime_status.version_support', { defaultValue: 'Version support' })}</dt>
+                  <dd>
+                    {gateway?.versionSupport === 'supported'
+                      ? t('runtime_status.version_supported', { defaultValue: 'Supported' })
+                      : gateway?.versionSupport === 'unsupported'
+                        ? t('runtime_status.version_unsupported', { defaultValue: 'Unsupported' })
+                        : t('runtime_status.version_unverified', { defaultValue: 'Unverified' })}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{t('runtime_status.writes', { defaultValue: 'Writes' })}</dt>
+                  <dd>
+                    {gateway?.writeBlocked
+                      ? t('runtime_status.writes_blocked', { defaultValue: 'Blocked by this version' })
+                      : t('runtime_status.writes_allowed', { defaultValue: 'Not blocked by this version' })}
+                  </dd>
+                </div>
+              </dl>
             </div>
           )}
           {status?.mode === 'external' && (

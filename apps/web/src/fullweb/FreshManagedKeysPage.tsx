@@ -15,12 +15,16 @@ export function FreshManagedKeysPage({
   onUnauthorized,
   onPending,
   visible = true,
+  onRebind,
+  externalUsage = false,
 }: {
   client: ReturnType<typeof createPublicApiClient>;
   credential: string;
   onUnauthorized: () => void;
   onPending: (pending: boolean) => void;
   visible?: boolean;
+  onRebind?: () => void;
+  externalUsage?: boolean;
 }) {
   return (
     <div className="fresh-managed-config key-managed-page" data-testid="fresh-managed-keys">
@@ -32,6 +36,8 @@ export function FreshManagedKeysPage({
         onCreationPending={onPending}
         storedBadge={w('stored')}
         pageDescription={w('keysHelp')}
+        onRebind={onRebind}
+        externalUsage={externalUsage}
       />
     </div>
   );
