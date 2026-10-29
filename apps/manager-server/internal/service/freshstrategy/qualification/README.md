@@ -181,30 +181,18 @@ Until that re-acceptance the four-kind breadth of `network_existing` is a
 waived claim, and the executor's per-item gate is what keeps it honest: an item is
 copied only when the record's decision for its own reference is `migrate`. The
 record and the gate are computed from one pinned resolver,
-`internal/service/cpa/adoption_ref.go` (part of the consumer digest):
-`AdoptionItemRef(path)` classifies one item, and `AdoptionRootRefs(root)` is the
-derived set of references any item under a discovered root can carry. Discovery
-records a decision for every reference in each reported root's set, so a root is
-no longer one resource — `oauth` contributes `cpa-auth-files` and
-`provider-state-api-keys`, `client` its gateway leaves and its provider section,
-and the reader's unknown catch-all (where `requests`/`multimedia`/`upstream`
-arrive) both `cpa-config-routing` and `cpa-config-unknown`. An item is therefore
-never recorded as manual work under one reference while being copied under
-another.
-
-The four accepted entries carry exact `applicability`, independently
-accepted evidence and their enforced limitations. On a missing/mismatched
-source or withdrawn qualification they remain fail-closed. Missing destination
-capability retains
-`adoption_destination_staging_required`; accepted source-only consumers with an
-available destination return `adoption_resource_qualification_required` before
-source discovery. Any target/transport/config/mode mismatch has no consumer entry
-and therefore fails before a source probe, destination staging or Runtime
-mutation. Test-only synthetic acceptance is constructed in memory and is never
-part of this directory or the production binary. Controlled real-CPA CI
-observations are review inputs, not authority files and not automatic production
-acceptance.
-
+`internal/service/cpa/adoption_ref.go` (its bytes and the `AdoptionUniverseDigest`
+of every item-to-reference pair are part of the consumer digest):
+`AdoptionItemRef(item)` classifies one item, and `AdoptionRootRefs(root)` is the
+derived set every item under a discovered root carries. Discovery records a
+decision for every reference in each reported root's set, so a root is no longer
+one resource — `oauth` contributes `cpa-auth-files` and
+`provider-state-api-keys`, and the reader's unknown catch-all (where
+`requests`/`multimedia`/`upstream` arrive) both `cpa-config-routing` and
+`cpa-config-unknown`. No set contains a reference that no item under that root
+produces, so an item is never recorded as manual work under one reference while
+being copied under another, and the record never asks the operator to redo work
+the executor never does.
 
 ## Current acceptance-repair inputs
 

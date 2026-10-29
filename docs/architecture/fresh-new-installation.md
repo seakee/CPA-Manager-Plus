@@ -801,17 +801,23 @@ copies.
   `api-keys.*` groups and the copyable `oauth.*` children (`model-alias`,
   `excluded-models`, `settings`, `request-scoped-errors` — provider
   configuration, not the auth directory) are `provider-state-api-keys`; a
-  `client` or `providers` section keeps its own reference; anything else is
-  `cpa-config-unknown` and stays manual. Credential files are `cpa-auth-files`.
-- `AdoptionRootRefs(root)` is the *set* of references any item under one
-  discovered root can carry, derived from `AdoptionItemRef` over the enumerable
-  item universe — it is never restated. `oauth` therefore contributes both
-  `cpa-auth-files` (the root is the source's auth directory) and
-  `provider-state-api-keys` (its copyable children). `requests`, `multimedia` and
-  `upstream` are not named sections: the v8 reader reports them under
-  `unknown_cpa_native_resource`, so that root contributes `cpa-config-routing`
-  for the gateway configuration and `cpa-config-unknown` for anything the table
-  does not name. `client` contributes its client leaves and its provider section.
+  credential file is `cpa-auth-files`; any other section — a bare root name, a
+  provider group outside the copy plan, a made-up name — is `cpa-config-unknown`
+  and stays manual, and never borrows a root's verdict.
+- `AdoptionRootRefs(root)` is the *set* of references items under one
+  discovered root carry, derived from `AdoptionItemRef` over the enumerable item
+  universe — never restated, and never a reference no item produces. `oauth`
+  therefore contributes both `cpa-auth-files` (a credential file is discovered in
+  the source's auth directory) and `provider-state-api-keys` (its copyable
+  children). `requests`, `multimedia` and `upstream` are not named sections: the
+  v8 reader reports that gateway configuration under
+  `unknown_cpa_native_resource`, which contributes `cpa-config-routing` for the
+  paths the gateway table names and `cpa-config-unknown` for the paths it does
+  not. `client` is two gateway leaves and contributes routing configuration
+  only — the copy plan has no client section, so nothing there is provider state.
+  A root with no enumerable item at all (`access`, `server`, `management`,
+  `logging`, `usage`, `plugins`, `observability`, `providers`) contributes its
+  one declared fallback, because the operator may still have to redo it by hand.
 
 Discovery records one decision per reference in each reported root's set, so the
 record holds a decision for every item the executor can classify under that root.
@@ -820,6 +826,14 @@ The executor then copies an item only when that item's reference is `migrate`
 manual action and is never written. Because the two sides read the same resolver,
 the record cannot tell the operator to redo an item the executor copies, or
 authorize one it never copies.
+
+The resolver's own bytes are pinned with the safe-read implementation, and so is
+`AdoptionUniverseDigest` — the digest of every (item, reference) pair the
+classifier produces. `AdoptionItemRef` decides routing membership from the gateway
+page table (`config_schema.go`), which the gateway page edits often, so folding
+the universe into the pin makes a new gateway leaf, a moved rule family or a
+reclassified item invalidate an acceptance, without subjecting every gateway-page
+edit to a whole-file hash.
 
 #### Retry after a terminal destination failure
 

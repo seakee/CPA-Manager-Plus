@@ -592,14 +592,15 @@ executor is not run against it and its non-client kinds stay manual.
 The decision set and the copy gate come from one resolver,
 `internal/service/cpa/adoption_ref.go`, which is part of the consumer digest:
 `AdoptionItemRef` classifies one item and `AdoptionRootRefs` derives the set of
-references any item under a discovered root can carry. Discovery records a
-decision for every reference in each reported root's set, so a root that carries
-gateway configuration, a provider section and its own signal contributes all
-three — `oauth` contributes `cpa-auth-files` and `provider-state-api-keys`,
-`client` its gateway leaves and its provider section, and the reader's unknown
-catch-all (where `requests`/`multimedia`/`upstream` arrive) both
-`cpa-config-routing` and `cpa-config-unknown`. The witness above is unchanged by
-the wider record: the executor still copies exactly those items.
+references items under a discovered root carry, from the item universe and
+nothing else: no set holds a reference no item under that root produces.
+Discovery records a decision for every reference in each reported root's set, so
+`oauth` contributes `cpa-auth-files` and `provider-state-api-keys`, `client`
+contributes routing configuration only (it is two gateway leaves and the copy
+plan has no client section), and the reader's unknown catch-all (where
+`requests`/`multimedia`/`upstream` arrive) contributes both `cpa-config-routing`
+and `cpa-config-unknown`. The witness above is unchanged: the executor still
+copies exactly those items.
 
 Consequences recorded here because they change review-visible facts:
 
