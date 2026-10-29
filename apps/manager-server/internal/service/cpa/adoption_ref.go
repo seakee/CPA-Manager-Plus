@@ -159,6 +159,43 @@ var adoptionProviderSectionRefs = func() map[string]bootstrap.ResourceRef {
 	return refs
 }()
 
+// adoptionUncopiedSourceKeys are keys of the accepted CPA v8.0.13 configuration
+// document that sit under a named reader root and that no copyable item carries:
+// not a gateway leaf, not a rule family, not a provider section. They are in the
+// universe as representatives so that their root's set states them as
+// configuration nothing copies, instead of the reader reporting a root whose
+// every key is either copied or forgotten.
+//
+// A root with a whole-root fallback does not need such a list: its fallback
+// already tells the operator to redo the whole block (`server`, `management`,
+// `plugins`, `observability`, `access`, `providers`). The keys below are under
+// `oauth`, which carries copyable provider sections, so without them the record
+// would report `oauth` as fully accounted for while these two keys vanished.
+//
+// Verified against CPA v8.0.13 (tag d7914af):
+//
+//	internal/config/config_v8.go:84    auth-auto-refresh-workers→oauth.auth-auto-refresh-workers
+//	internal/config/config.go:84       AuthAutoRefreshWorkers `yaml:"auth-auto-refresh-workers"`
+//	internal/config/config_v8.go:86    ws-auth→oauth.providers.aistudio.ws-auth
+//	internal/config/config_v8.go:93-101 codex→oauth.providers.codex,
+//	                                   antigravity→oauth.providers.antigravity,
+//	                                   devin→oauth.providers.devin
+//
+// `oauth.providers` is one key for the whole provider runtime block: its canonical
+// children (codex header defaults and live media relay, antigravity, devin,
+// aistudio) are not gateway leaves, not rule families and not copyable sections,
+// so nothing copies them. The `oauth.providers.*` spellings that do have a
+// canonical home are the aliases `internal/config/config_v8.go:28-46` projects
+// to `client.codex.*` and `upstream.*`, and those are copied there, under the
+// gateway table's own leaves.
+//
+// `oauth.auth-dir` is deliberately absent: it is the directory the credentials are
+// discovered in, so `credential:<name>` — `cpa-auth-files` — is what carries it.
+var adoptionUncopiedSourceKeys = []string{
+	"oauth.auth-auto-refresh-workers",
+	"oauth.providers",
+}
+
 // adoptionFamilyPaths is the set of payload rule family paths. A family is a
 // configuration path like any other (`requests.payload.default`), so the same
 // path membership test classifies it.
@@ -213,10 +250,11 @@ func AdoptionItemRef(item string) bootstrap.ResourceRef {
 // classes; the invariant tests and the pin walk this, so a widened table is
 // covered without a second inventory.
 func AdoptionItemUniverse() []string {
-	items := make([]string, 0, len(ConfigLeafPaths())+len(ConfigRuleFamilyPaths())+len(adoptionProviderSections)+2)
+	items := make([]string, 0, len(ConfigLeafPaths())+len(ConfigRuleFamilyPaths())+len(adoptionProviderSections)+len(adoptionUncopiedSourceKeys)+2)
 	items = append(items, ConfigLeafPaths()...)
 	items = append(items, ConfigRuleFamilyPaths()...)
 	items = append(items, adoptionProviderSections...)
+	items = append(items, adoptionUncopiedSourceKeys...)
 	items = append(items, CredentialItemClass, OffTableConfigItemClass)
 	return items
 }

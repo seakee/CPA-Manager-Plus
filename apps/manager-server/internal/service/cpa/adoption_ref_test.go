@@ -2,6 +2,7 @@ package cpa
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
@@ -80,6 +81,120 @@ func hasUniverseItem(root string) bool {
 	return false
 }
 
+// sourceSectionKeys is the closed inventory of every direct child key of a named
+// section of the accepted CPA v8.0.13 configuration document, derived from the
+// type definitions rather than from any table here:
+//
+//	internal/config/config.go:10-60      the Config root's own sections
+//	internal/config/sdk_config.go:8-15   `client`
+//	internal/config/config_v8.go:75-120  the v8→canonical path translation
+//
+// A reader root is a section the v8 reader names; the gateway table is the only
+// source of copyable leaves. A child key that is neither in the gateway table nor
+// a copyable provider section is configuration nothing copies, so it must be
+// visible to the record — otherwise discovery reports the root as fully
+// accounted for while that key vanished from the adoption.
+var sourceSectionKeys = map[string][]string{
+	"server":        {"commercial-mode", "discovery", "host", "port", "tls"},
+	"management":    {"allow-remote", "base-url", "disable-auto-update-panel", "disable-control-panel", "panel-github-repository", "secret-key"},
+	"access":        {"api-keys"},
+	"oauth":         {"auth-auto-refresh-workers", "auth-dir", "excluded-models", "model-alias", "providers", "request-scoped-errors", "settings"},
+	"api-keys":      {"claude", "codex", "gemini", "interactions", "meta", "openai-compatibility", "vertex", "xai"},
+	"routing":       {"cooldown", "force-model-prefix", "retry", "session-affinity", "session-affinity-subagents", "session-affinity-ttl", "strategy"},
+	"client":        {"codex"},
+	"plugins":       {"auth-revision", "dir", "enabled"},
+	"observability": {"logs", "pprof", "usage"},
+}
+
+// gatewaySectionKeys are the source sections the v8 reader does not name, so its
+// report puts them under the unknown root. Their keys are gateway configuration:
+// each is either a leaf or a rule family of the gateway table, or it is uncopied
+// configuration the record has to state.
+var gatewaySectionKeys = map[string][]string{
+	"requests":   {"proxy-url", "passthrough-headers", "nonstream-keepalive-interval", "streaming", "payload"},
+	"multimedia": {"disable-image-generation", "gpt-image-2-base-model", "video-result-auth-cache-ttl"},
+	"upstream":   {"codex", "claude", "xai"},
+}
+
+// sourceKeyCarriers names the item that carries a source key whose own path is
+// not an item: the source's auth directory is exactly where the credential files
+// are discovered, so `credential:<name>` is what carries it.
+var sourceKeyCarriers = map[string]string{
+	"oauth.auth-dir": CredentialItemClass,
+}
+
+// TestEverySourceKeyIsCoveredByItsRoot is the invariant that a source key cannot
+// vanish. Every direct child of a named root is either carried by a copyable item
+// or listed as an uncopied key, and every uncopied key it lists is really a
+// source key of that root, so the table cannot drift into fiction.
+func TestEverySourceKeyIsCoveredByItsRoot(t *testing.T) {
+	uncopied := map[string]bool{}
+	for _, key := range adoptionUncopiedSourceKeys {
+		uncopied[key] = true
+	}
+	coveredBy := func(root, path string) bool {
+		carrier := sourceKeyCarriers[path]
+		for _, item := range AdoptionItemUniverse() {
+			if AdoptionRootOf(item) != root || uncopied[item] {
+				// A key that is in the universe only because it is declared uncopied
+				// does not carry itself: that would make the declaration the answer.
+				continue
+			}
+			if item == carrier || item == path || strings.HasPrefix(item, path+".") {
+				return true
+			}
+		}
+		return false
+	}
+	for root, children := range sourceSectionKeys {
+		// A root with no enumerable item contributes its whole-root fallback, which
+		// already tells the operator to redo the block: its children are covered by
+		// that one decision.
+		wholeRoot := !hasUniverseItem(root)
+		for _, child := range children {
+			path := root + "." + child
+			covered := coveredBy(root, path)
+			if !covered && !uncopied[path] && !wholeRoot {
+				t.Fatalf("source key %s is carried by no item and is not reported as uncopied", path)
+			}
+			if uncopied[path] && covered {
+				t.Fatalf("source key %s is reported as uncopied but an item carries it", path)
+			}
+			if uncopied[path] && wholeRoot {
+				t.Fatalf("source key %s is redundant: its root %q already falls back whole", path, root)
+			}
+		}
+	}
+	// The sections the reader does not name reach discovery under the unknown
+	// root, and each of their keys is gateway configuration the record must state.
+	for section, children := range gatewaySectionKeys {
+		if root := AdoptionRootOf(section); root != unknownSection {
+			t.Fatalf("source section %q discovered as %q, not the unknown root", section, root)
+		}
+		for _, child := range children {
+			path := section + "." + child
+			covered := coveredBy(unknownSection, path)
+			if !covered && !uncopied[path] {
+				t.Fatalf("gateway configuration %s is carried by no item and is not reported as uncopied", path)
+			}
+		}
+	}
+	// The declared uncopied keys are real source keys of a named root: a typo or a
+	// key that moved would silently cover nothing.
+	for key := range uncopied {
+		root, child, nested := strings.Cut(key, ".")
+		if !nested || !slices.Contains(sourceSectionKeys[root], child) {
+			t.Fatalf("declared uncopied key %q is not a source key of a named root", key)
+		}
+	}
+	// A carried key names an item that really exists.
+	for key, carrier := range sourceKeyCarriers {
+		if !slices.Contains(AdoptionItemUniverse(), carrier) {
+			t.Fatalf("carrier %q of source key %s is not an item", carrier, key)
+		}
+	}
+}
+
 // The sets are what makes a root's decision list complete: the gateway
 // configuration a v8 reader reports under its unknown-root catch-all must record
 // the routing decision *and* the unknown one, because a leaf outside the gateway
@@ -98,7 +213,10 @@ func TestAdoptionRootSetsFollowTheItems(t *testing.T) {
 		// the copy plan, so it contributes routing configuration and no provider
 		// verdict: `provider-state-client` covers configuration no item carries.
 		"client":    {bootstrap.AdoptionRefConfigRouting},
-		"oauth":     {bootstrap.AdoptionRefCPAAuthFiles, bootstrap.AdoptionRefProviderStateAPIKeys},
+		// `oauth` carries the auth directory (and so the credential files), its
+		// copyable provider maps, and the source keys nothing copies — its refresh
+		// worker count and its provider runtime block.
+		"oauth":     {bootstrap.AdoptionRefCPAAuthFiles, bootstrap.AdoptionRefConfigUnknown, bootstrap.AdoptionRefProviderStateAPIKeys},
 		"api-keys":  {bootstrap.AdoptionRefProviderStateAPIKeys},
 		"routing":   {bootstrap.AdoptionRefConfigRouting},
 		"providers": {bootstrap.AdoptionRefProviderStateProviders},

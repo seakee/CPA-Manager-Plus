@@ -84,8 +84,8 @@ func TestAdoptionInventoryMappingIsBounded(t *testing.T) {
 	refs, err := adoptionResourceRefs([]string{"access", "oauth", "unknown_cpa_native_resource", "providers"})
 	want := []bootstrap.ResourceRef{
 		bootstrap.AdoptionRefClientAPIKeys, bootstrap.AdoptionRefCPAAuthFiles,
-		bootstrap.AdoptionRefProviderStateAPIKeys, bootstrap.AdoptionRefConfigRouting,
-		bootstrap.AdoptionRefConfigUnknown, bootstrap.AdoptionRefProviderStateProviders,
+		bootstrap.AdoptionRefConfigUnknown, bootstrap.AdoptionRefProviderStateAPIKeys,
+		bootstrap.AdoptionRefConfigRouting, bootstrap.AdoptionRefProviderStateProviders,
 	}
 	if err != nil || !reflect.DeepEqual(refs, want) {
 		t.Fatalf("bounded mapping: %v %v", refs, err)
