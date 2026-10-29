@@ -47,6 +47,8 @@ type fakeCPA struct {
 	uploadStatus int
 	// lostUploadBody true stores the bytes then answers 500.
 	lostUploadBody bool
+	// failDownload makes these files fail their download, which writes nothing.
+	failDownload map[string]bool
 	// uploads records the file name of every POST /credentials received, so a
 	// test can prove which items were written twice.
 	uploads []string
@@ -138,7 +140,13 @@ func (c *fakeCPA) downloadCredential(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
 	c.mu.Lock()
 	data, ok := c.credentials[name]
+	broken := c.failDownload[name]
 	c.mu.Unlock()
+	if broken {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"failed to read file"}`))
+		return
+	}
 	if !ok {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"error":"file not found"}`))
@@ -877,9 +885,13 @@ func TestAFailedCheckpointStopsTheRunWithoutWritingLaterItems(t *testing.T) {
 		t.Fatalf("a durable item was uploaded again: %v", counts)
 	}
 	// codex-b.json is the third item, so it is the one the failed checkpoint left
-	// in flight and the resume repeats: same name, same bytes, one stored copy.
-	if counts["codex-b.json"] != 2 {
-		t.Fatalf("the in-flight item was not retried exactly once: %v", counts)
+	// in flight. The resume reads the destination before writing, finds the bytes
+	// already equal and records the item without a second upload.
+	if counts["codex-b.json"] != 1 {
+		t.Fatalf("the in-flight item was uploaded again: %v", counts)
+	}
+	if item, _ := resumed.Item(credentialItemName("codex-b.json")); item.Outcome != freshstore.AdoptionMigrated {
+		t.Fatalf("the in-flight item was not resolved by read-back: %+v", item)
 	}
 	if body, ok := destination.credential("codex-b.json"); !ok || !strings.Contains(string(body), "src-codex-token") {
 		t.Fatal("the retried item left the wrong bytes on the destination")
@@ -1045,5 +1057,202 @@ func TestServerRefusedUploadThatDidNotLandIsManual(t *testing.T) {
 	}
 	if item, _ := replay.Item(credentialItemName("gemini-c.json")); item.Outcome != freshstore.AdoptionManual {
 		t.Fatalf("a replay rewrote the refusal: %+v", item)
+	}
+}
+
+// A crash before the checkpoint leaves the destination already holding the
+// bytes. The replay must recognize them instead of writing again, and it must
+// never overwrite a value the operator changed on the destination in between.
+func TestReplayDoesNotRewriteWhatTheDestinationAlreadyHolds(t *testing.T) {
+	source, destination := sourceFixture(t), destinationFixture(t)
+	// A checkpoint that refuses the very first item is a crash before the first
+	// durable record, with that item's write already landed on the destination.
+	sourceWire, err := NewSource(source.endpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinationWire, err := NewDestination(destination.endpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	errCheckpoint := errors.New("checkpoint refused")
+	// The first two items are broken.json (a local manual verdict) and
+	// claude-a.json: refusing the second checkpoint is a crash after claude-a.json
+	// was written and before anything about it became durable.
+	calls := 0
+	_, runErr := New(sourceWire, destinationWire).Run(context.Background(), freshstore.AdoptionSummary{}, func(freshstore.AdoptionSummary) error {
+		calls++
+		if calls == 2 {
+			return errCheckpoint
+		}
+		return nil
+	})
+	if !errors.Is(runErr, errCheckpoint) {
+		t.Fatalf("a refused checkpoint must stop the run: %v", runErr)
+	}
+	// The crash left claude-a.json on the destination with nothing recorded.
+	if body, ok := destination.credential("claude-a.json"); !ok || !strings.Contains(string(body), "src-claude-token") {
+		t.Fatal("the crash did not leave the first credential on the destination")
+	}
+
+	// The operator also changed one destination credential by hand before the
+	// replay ran.
+	destination.mu.Lock()
+	destination.credentials["gemini-c.json"] = []byte(`{"type":"gemini","access_token":"operator-changed"}`)
+	destination.mu.Unlock()
+
+	summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+	counts := map[string]int{}
+	for _, name := range destination.uploadNames() {
+		counts[name]++
+	}
+	if counts["claude-a.json"] != 1 {
+		t.Fatalf("the replay uploaded a credential the destination already held: %v", counts)
+	}
+	if item := itemByName(t, summary, credentialItemName("claude-a.json")); item.Outcome != freshstore.AdoptionMigrated {
+		t.Fatalf("an equal destination value must be recorded as migrated: %+v", item)
+	}
+	if item := itemByName(t, summary, credentialItemName("gemini-c.json")); item.Outcome != freshstore.AdoptionMigrated {
+		t.Fatalf("a divergent destination value must be copied: %+v", item)
+	}
+	if counts["gemini-c.json"] != 1 {
+		t.Fatalf("the divergent credential was uploaded %d times", counts["gemini-c.json"])
+	}
+	wantBytes, _ := source.credential("gemini-c.json")
+	gotBytes, _ := destination.credential("gemini-c.json")
+	if string(gotBytes) != string(wantBytes) {
+		t.Fatal("the source bytes did not replace the operator's divergent value")
+	}
+}
+
+// configSectionValues proves a leaf and a whole section are read before they are
+// written: an equal destination value costs no request.
+func TestReplayDoesNotRewriteEqualConfigurationValues(t *testing.T) {
+	source, destination := sourceFixture(t), destinationFixture(t)
+	// The destination already holds the whole source routing group and its
+	// api-keys.claude section, so every leaf of that group and the section itself
+	// cost no request.
+	destination.mu.Lock()
+	sourceRouting := lookup(source.config, []string{"routing"})
+	destination.config["routing"] = map[string]any{}
+	mergeInto(destination.config, []string{"routing"}, sourceRouting)
+	sourceSection := lookup(source.config, []string{"api-keys", "claude"})
+	mergeInto(destination.config, []string{"api-keys", "claude"}, sourceSection)
+	destination.mu.Unlock()
+
+	summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+	if item := itemByName(t, summary, configLeafItemName("routing.strategy")); item.Outcome != freshstore.AdoptionMigrated {
+		t.Fatalf("an equal leaf must be migrated: %+v", item)
+	}
+	for _, entry := range destination.requestMethods() {
+		if !strings.HasPrefix(entry, http.MethodGet+" ") && strings.Contains(entry, "/config/routing") {
+			t.Fatalf("an equal leaf was written again: %s", entry)
+		}
+	}
+	if item := itemByName(t, summary, providerSectionItemName("api-keys.claude")); item.Outcome != freshstore.AdoptionMigrated {
+		t.Fatalf("an equal section must be migrated: %+v", item)
+	}
+	for _, entry := range destination.requestMethods() {
+		if !strings.HasPrefix(entry, http.MethodGet+" ") && strings.Contains(entry, "/config/api-keys/claude") {
+			t.Fatalf("an equal section was written again: %s", entry)
+		}
+	}
+}
+
+// An item the source does not set is recorded, so a replay cannot mistake the
+// operator's later destination value for a stale copy.
+func TestAbsentAtSourceIsRecordedSoAReplayLeavesTheDestinationAlone(t *testing.T) {
+	source, destination := sourceFixture(t), destinationFixture(t)
+	// A leaf that is in the gateway table but absent from the source document.
+	absentLeaf := ""
+	for _, path := range cpa.ConfigLeafPaths() {
+		if _, presence := cpa.LookupConfigValue(source.config, path); presence != cpa.ConfigPresent {
+			absentLeaf = path
+			break
+		}
+	}
+	if absentLeaf == "" {
+		t.Fatal("the fixture source sets every gateway leaf")
+	}
+	first := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+	item := itemByName(t, first, configLeafItemName(absentLeaf))
+	if item.Outcome != freshstore.AdoptionAbsentAtSource {
+		t.Fatalf("an absent leaf must be recorded as absent_at_source: %+v", item)
+	}
+
+	// The operator sets it on the destination after the migration.
+	parts := strings.Split(absentLeaf, ".")
+	destination.mu.Lock()
+	mergeInto(destination.config, parts, json.Number("300"))
+	destination.mu.Unlock()
+	before := destination.writeCount()
+
+	replay := runMigration(t, source, destination, first)
+	if destination.writeCount() != before {
+		t.Fatalf("a replay wrote %d times over an absent-at-source item", destination.writeCount()-before)
+	}
+	if got := lookup(destination.config, parts); got != json.Number("300") {
+		t.Fatalf("a replay overwrote the operator's value: %v", got)
+	}
+	if item, _ := replay.Item(configLeafItemName(absentLeaf)); item.Outcome != freshstore.AdoptionAbsentAtSource {
+		t.Fatalf("a replay rewrote the absent record: %+v", item)
+	}
+}
+
+// A failure that wrote nothing is retryable: the next run attempts it once and
+// records the real outcome. A failure after a write stays settled.
+func TestRetryableFailureIsRetriedOnceAndUnknownWriteIsNot(t *testing.T) {
+	source, destination := sourceFixture(t), destinationFixture(t)
+
+	// Make one source download fail, which writes nothing.
+	source.mu.Lock()
+	source.failDownload = map[string]bool{"claude-a.json": true}
+	source.mu.Unlock()
+
+	first := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+	failed := itemByName(t, first, credentialItemName("claude-a.json"))
+	if failed.Outcome != freshstore.AdoptionFailed || failed.Reason != "download_failed" {
+		t.Fatalf("a failed download must be a retryable failure: %+v", failed)
+	}
+	if first.Settled(credentialItemName("claude-a.json")) {
+		t.Fatal("a failure that wrote nothing must not be settled")
+	}
+	if _, stored := destination.credential("claude-a.json"); stored {
+		t.Fatal("a failed download must not write anything")
+	}
+
+	// The source answers again: the replay copies it and replaces the provisional
+	// record in place.
+	source.mu.Lock()
+	source.failDownload = nil
+	source.mu.Unlock()
+	second := runMigration(t, source, destination, first)
+	retried := itemByName(t, second, credentialItemName("claude-a.json"))
+	if retried.Outcome != freshstore.AdoptionMigrated {
+		t.Fatalf("a retryable failure was not retried: %+v", retried)
+	}
+	if len(second.Items) != len(first.Items) {
+		t.Fatalf("the retry appended a new record instead of replacing one: %d vs %d", len(second.Items), len(first.Items))
+	}
+	if index := second.Index(credentialItemName("claude-a.json")); index != first.Index(credentialItemName("claude-a.json")) {
+		t.Fatal("the retried item moved in the record")
+	}
+
+	// A failure after a write attempt is an unknown effect: it stays settled and
+	// a replay neither retries nor rewrites it.
+	unknown := freshstore.AdoptionSummary{Items: []freshstore.AdoptionItem{{
+		Item: credentialItemName("codex-b.json"), Kind: freshstore.AdoptionKindCredential,
+		Outcome: freshstore.AdoptionFailed, Reason: "apply_unknown",
+	}}}
+	if unknown.Settled(credentialItemName("codex-b.json")) != true {
+		t.Fatal("a failure after a write must stay settled")
+	}
+	before := len(destination.uploadNames())
+	replay := runMigration(t, source, destination, unknown)
+	if after := len(destination.uploadNames()); after != before {
+		t.Fatalf("a settled unknown write was resent %d times", after-before)
+	}
+	if item, _ := replay.Item(credentialItemName("codex-b.json")); item != unknown.Items[0] {
+		t.Fatalf("a settled unknown write was rewritten: %+v", item)
 	}
 }

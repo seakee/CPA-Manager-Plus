@@ -23,15 +23,21 @@ const (
 	AdoptionKindProviderSection AdoptionItemKind = "provider_section"
 )
 
-// AdoptionOutcome is the closed set of per-item results. "migrated" is the only
-// outcome a rerun skips; "manual" and "failed" are both reported to the
-// operator and neither fails the adoption.
+// AdoptionOutcome is the closed set of per-item results. Every outcome is a
+// recorded fact about one item; none of them fails the adoption, and a rerun
+// skips a settled item rather than writing it again.
+//
+// "absent_at_source" is the source having nothing to copy. Recording it is what
+// makes a replay safe after completion: an item the source does not set is
+// settled, so a later replay cannot mistake the destination's own value for a
+// stale copy and overwrite it.
 type AdoptionOutcome string
 
 const (
-	AdoptionMigrated AdoptionOutcome = "migrated"
-	AdoptionManual   AdoptionOutcome = "manual"
-	AdoptionFailed   AdoptionOutcome = "failed"
+	AdoptionMigrated       AdoptionOutcome = "migrated"
+	AdoptionManual         AdoptionOutcome = "manual"
+	AdoptionFailed         AdoptionOutcome = "failed"
+	AdoptionAbsentAtSource AdoptionOutcome = "absent_at_source"
 )
 
 // AdoptionItem is one bounded, non-secret migration result. It carries the item
@@ -55,6 +61,16 @@ type AdoptionSummary struct {
 	Items []AdoptionItem `json:"items"`
 }
 
+// Index returns the position of one item name in the recorded order.
+func (s AdoptionSummary) Index(name string) int {
+	for index, item := range s.Items {
+		if item.Item == name {
+			return index
+		}
+	}
+	return -1
+}
+
 // Item returns the recorded result of one item name.
 func (s AdoptionSummary) Item(name string) (AdoptionItem, bool) {
 	for _, item := range s.Items {
@@ -71,21 +87,48 @@ func (s AdoptionSummary) Migrated(name string) bool {
 	return ok && item.Outcome == AdoptionMigrated
 }
 
-// Settled reports whether this exact item already has a recorded outcome. A
-// rerun skips every settled item: a success must never be written twice, and a
-// failed item is an unknown write whose only permitted resolution is the
-// read-back that produced the record -- resending it would be exactly the write
-// the checkpoint exists to prevent.
+// Settled reports whether this exact item already has a recorded outcome that a
+// rerun must not repeat.
+//
+// Every outcome is settled except a failure that happened before any write: that
+// one recorded nothing, so retrying it is the only way the item can ever be
+// copied. A failure after a write attempt stays settled, because its only
+// permitted resolution is the read-back that produced it.
 func (s AdoptionSummary) Settled(name string) bool {
-	_, ok := s.Item(name)
-	return ok
+	item, ok := s.Item(name)
+	return ok && !(item.Outcome == AdoptionFailed && retryableReason(item.Reason))
 }
+
+// Retryable reports whether this item's failure happened before anything was
+// written, so a later run may attempt it again.
+//
+// The distinction is the whole point: a run that could not read the source wrote
+// nothing, and retrying it is the only way to copy the item. A run that wrote and
+// could not decide the result is an unknown effect, and its only permitted
+// resolution is the read-back that produced the record, never a second write.
+func (s AdoptionSummary) Retryable(name string) bool {
+	item, ok := s.Item(name)
+	return ok && item.Outcome == AdoptionFailed && retryableReason(item.Reason)
+}
+
+// retryableReasons are the failure reasons this package produces before any
+// destination write. Everything else is an unknown effect.
+var retryableReasons = map[string]bool{
+	"download_failed":   true,
+	"source_unreadable": true,
+}
+
+func retryableReason(reason string) bool { return retryableReasons[reason] }
+
+// RetryableReason reports whether one failure reason was produced before any
+// write, so a producer can classify a failure the same way this store does.
+func RetryableReason(reason string) bool { return retryableReason(reason) }
 
 // Counts reports the number of items per outcome, in a fixed order.
 func (s AdoptionSummary) Counts() (migrated, manual, failed int) {
 	for _, item := range s.Items {
 		switch item.Outcome {
-		case AdoptionMigrated:
+		case AdoptionMigrated, AdoptionAbsentAtSource:
 			migrated++
 		case AdoptionManual:
 			manual++
@@ -132,7 +175,7 @@ func validAdoptionItemKind(kind AdoptionItemKind) bool {
 
 func validAdoptionOutcome(outcome AdoptionOutcome) bool {
 	switch outcome {
-	case AdoptionMigrated, AdoptionManual, AdoptionFailed:
+	case AdoptionMigrated, AdoptionManual, AdoptionFailed, AdoptionAbsentAtSource:
 		return true
 	default:
 		return false
@@ -180,6 +223,9 @@ func validAdoptionSummary(summary AdoptionSummary) error {
 		if item.Outcome == AdoptionMigrated && (item.Instruction != "" || item.Reason != "") {
 			return errors.New("migrated adoption item cannot carry a reason or instruction")
 		}
+		if item.Outcome == AdoptionAbsentAtSource && item.Instruction != "" {
+			return errors.New("absent adoption item cannot carry an instruction")
+		}
 	}
 	return nil
 }
@@ -188,6 +234,11 @@ func validAdoptionSummary(summary AdoptionSummary) error {
 // an item, and may never rewrite or erase a result the Manager already
 // checkpointed. The unknown-result reconcile and the rerun skip both depend on
 // a recorded success staying recorded.
+//
+// The one permitted difference is the provisional record of a retryable failure:
+// a run that wrote nothing recorded nothing to protect, so the first real
+// outcome of that item replaces it. It can never replace anything else, and it
+// never moves an item.
 func validAdoptionSummaryUpdate(before, after *AdoptionSummary) error {
 	if before == nil {
 		return nil
@@ -196,7 +247,11 @@ func validAdoptionSummaryUpdate(before, after *AdoptionSummary) error {
 		return errors.New("adoption summary may not shrink")
 	}
 	for index, item := range before.Items {
-		if after.Items[index] != item {
+		if after.Items[index] == item {
+			continue
+		}
+		provisional := item.Outcome == AdoptionFailed && retryableReason(item.Reason)
+		if !provisional || after.Items[index].Item != item.Item {
 			return errors.New("adoption summary item rewritten")
 		}
 	}

@@ -125,7 +125,17 @@ func (e *Executor) record(ctx context.Context, summary *freshstore.AdoptionSumma
 		// observe would be a claim it cannot make.
 		return err
 	}
-	summary.Items = append(summary.Items, item)
+	// A provisional record is the one entry this run may replace in place. It is
+	// the failed attempt of a run that wrote nothing; the item it names keeps its
+	// position, so the record still reads in migration order.
+	if index := summary.Index(item.Item); index >= 0 {
+		if !summary.Retryable(item.Item) {
+			return nil
+		}
+		summary.Items[index] = item
+	} else {
+		summary.Items = append(summary.Items, item)
+	}
 	if checkpoint == nil {
 		return nil
 	}
@@ -379,9 +389,23 @@ func (e *Executor) migrateCredential(ctx context.Context, item string, file Cred
 	}
 	data, err := e.source.DownloadCredential(ctx, file.Name)
 	if err != nil {
+		// Nothing was written, so this is retryable rather than an unknown write:
+		// the next run attempts it again instead of settling on a copy that never
+		// started.
 		return freshstore.AdoptionItem{
 			Item: item, Kind: freshstore.AdoptionKindCredential, Outcome: freshstore.AdoptionFailed,
 			Reason: "download_failed", Instruction: manualInstruction(freshstore.AdoptionKindCredential, file.Name),
+		}
+	}
+	// Before writing anything, read what the destination already holds. An equal
+	// value is the copy this run would make, so it is recorded without a write:
+	// a crash before the checkpoint, or a user's later change on the destination,
+	// is never overwritten by a write that changes nothing.
+	if state, stateErr := e.destination.CredentialState(ctx, file.Name); stateErr == nil && state.Present {
+		if existing, readErr := e.destination.DownloadCredential(ctx, file.Name); readErr == nil {
+			if digestSHA256(existing) == digestSHA256(data) {
+				return e.credentialOutcome(ctx, item, file.Name, file, state, digestSHA256(data), digestSHA256(data))
+			}
 		}
 	}
 	if err := credentialParseable(data); err != nil {
@@ -434,18 +458,38 @@ func (e *Executor) migrateCredential(ctx context.Context, item string, file Cred
 		}
 	}
 
-	// The bytes are byte-identical. What can still diverge is the enabled state
-	// and the provider the destination classified the file under; both are
-	// manual work, never a claimed success and never a failed copy.
+	// The bytes are byte-identical, observed from the destination.
+	return e.credentialOutcome(ctx, item, file.Name, file, state, sourceDigest, digestSHA256(readBack))
+}
+
+// credentialOutcome resolves a credential whose bytes the destination holds.
+// What can still diverge is the enabled state and the provider the destination
+// classified the file under; both are manual work, never a claimed success and
+// never a failed copy.
+//
+// Both digests are what this run observed: the source bytes it read, and the
+// destination bytes it read back. Neither is copied from the other.
+func (e *Executor) credentialOutcome(ctx context.Context, item, name string, file CredentialFile, state CredentialState, sourceDigest, destinationDigest string) freshstore.AdoptionItem {
 	reason, instruction := "", ""
 	if file.Type != "" && state.Type != "" && !strings.EqualFold(state.Type, file.Type) {
 		reason, instruction = "type_diverged",
 			"The credential was copied but the destination classifies it as "+state.Type+". Check the provider in the destination Console."
 	}
 	if file.Disabled && !state.Disabled {
-		if err := e.destination.SetCredentialDisabled(ctx, file.Name, true); err != nil {
+		// The PATCH is read back on the same terms as every other write: an
+		// unknown reply is resolved by what the destination reports now, never by
+		// reporting a state this run did not observe.
+		patchErr := e.destination.SetCredentialDisabled(ctx, file.Name, true)
+		after, afterErr := e.destination.CredentialState(ctx, name)
+		switch {
+		case afterErr == nil && after.Present && after.Disabled:
+			// The read-back is the answer, whatever the PATCH replied.
+		case patchErr != nil:
 			reason, instruction = "status_write_failed",
-				"The credential was copied but stays enabled in the destination. Disable it in the destination Console."
+				"The credential was copied but the destination does not report it disabled. Disable it in the destination Console."
+		default:
+			reason, instruction = "status_unverified",
+				"The credential was copied but the destination's disabled state could not be read back. Check it in the destination Console."
 		}
 	}
 	outcome := freshstore.AdoptionMigrated
@@ -454,7 +498,7 @@ func (e *Executor) migrateCredential(ctx context.Context, item string, file Cred
 	}
 	return freshstore.AdoptionItem{
 		Item: item, Kind: freshstore.AdoptionKindCredential, Outcome: outcome,
-		Reason: reason, Instruction: instruction, SourceSHA256: sourceDigest, DestinationSHA256: sourceDigest,
+		Reason: reason, Instruction: instruction, SourceSHA256: sourceDigest, DestinationSHA256: destinationDigest,
 	}
 }
 
@@ -477,8 +521,15 @@ func (e *Executor) migrateConfigLeaves(ctx context.Context, summary *freshstore.
 		}
 		rawValue, presence := cpa.LookupConfigValue(document, path)
 		if presence != cpa.ConfigPresent {
-			// A leaf the source never set resolves to CPA's own default on the
-			// destination too, so there is nothing to copy and nothing to report.
+			// The source does not set this leaf, so there is nothing to copy. It is
+			// recorded anyway: a later replay must not mistake a value the operator
+			// set on the destination after completion for a stale copy and overwrite
+			// it with the source's absence.
+			if err := e.record(ctx, summary, freshstore.AdoptionItem{
+				Item: item, Kind: freshstore.AdoptionKindConfigLeaf, Outcome: freshstore.AdoptionAbsentAtSource,
+			}, checkpoint); err != nil {
+				return err
+			}
 			continue
 		}
 		value := normalizeValue(rawValue)
@@ -522,6 +573,12 @@ func (e *Executor) migrateConfigLeaves(ctx context.Context, summary *freshstore.
 // definite refusal is manual work; an unknown effect is decided by what the
 // destination holds now and never by resending the write.
 func (e *Executor) writeLeaf(ctx context.Context, item, path, prefix string, value any, payload []byte) freshstore.AdoptionItem {
+	// Read before writing: a value the destination already holds is recorded as
+	// migrated without a write, so a crash before the checkpoint and a change the
+	// operator made on the destination both survive a replay.
+	if observed, presence, err := e.destination.ReadConfigValue(ctx, path); err == nil && presence == cpa.ConfigPresent && equalConfigValue(value, observed) {
+		return freshstore.AdoptionItem{Item: item, Kind: freshstore.AdoptionKindConfigLeaf, Outcome: freshstore.AdoptionMigrated}
+	}
 	writeErr := e.destination.PatchConfigPath(ctx, prefix, payload)
 	observed, presence, readErr := e.destination.ReadConfigValue(ctx, path)
 	applied := readErr == nil && presence == cpa.ConfigPresent && equalConfigValue(value, observed)
@@ -558,7 +615,14 @@ func (e *Executor) migrateConfigFamilies(ctx context.Context, summary *freshstor
 		}
 		value, presence := cpa.LookupConfigValue(document, entry.Path)
 		if presence == cpa.ConfigMissing {
-			// Absent is CPA's own empty rule list; there is nothing to write.
+			// Absent is CPA's own empty rule list; there is nothing to write, but
+			// the absence is still recorded so a replay cannot overwrite what the
+			// operator later put here.
+			if err := e.record(ctx, summary, freshstore.AdoptionItem{
+				Item: item, Kind: freshstore.AdoptionKindConfigFamily, Outcome: freshstore.AdoptionAbsentAtSource,
+			}, checkpoint); err != nil {
+				return err
+			}
 			continue
 		}
 		payload, err := encodeJSONValue(value)
@@ -595,6 +659,11 @@ func (e *Executor) migrateProviderSections(ctx context.Context, summary *freshst
 		}
 		value, presence := cpa.LookupConfigValue(document, section)
 		if presence == cpa.ConfigMissing {
+			if err := e.record(ctx, summary, freshstore.AdoptionItem{
+				Item: item, Kind: freshstore.AdoptionKindProviderSection, Outcome: freshstore.AdoptionAbsentAtSource,
+			}, checkpoint); err != nil {
+				return err
+			}
 			continue
 		}
 		payload, err := encodeJSONValue(value)
@@ -618,6 +687,14 @@ func (e *Executor) migrateProviderSections(ctx context.Context, summary *freshst
 // by reading that path back, on the same terms as writeLeaf.
 func (e *Executor) writeWhole(ctx context.Context, kind freshstore.AdoptionItemKind, item, path string, value any, payload []byte) freshstore.AdoptionItem {
 	digest := digestSHA256(payload)
+	// Same rule as writeLeaf: an equal value is this run's own copy, so it is
+	// recorded without a write.
+	if observed, presence, err := e.destination.ReadConfigValue(ctx, path); err == nil && presence == cpa.ConfigPresent && equalConfigValue(value, observed) {
+		return freshstore.AdoptionItem{
+			Item: item, Kind: kind, Outcome: freshstore.AdoptionMigrated,
+			SourceSHA256: digest, DestinationSHA256: digestOfValue(observed),
+		}
+	}
 	writeErr := e.destination.PutConfigValue(ctx, path, payload)
 	observed, presence, readErr := e.destination.ReadConfigValue(ctx, path)
 	applied := readErr == nil && presence == cpa.ConfigPresent && equalConfigValue(value, observed)
@@ -625,7 +702,7 @@ func (e *Executor) writeWhole(ctx context.Context, kind freshstore.AdoptionItemK
 	case applied:
 		return freshstore.AdoptionItem{
 			Item: item, Kind: kind, Outcome: freshstore.AdoptionMigrated,
-			SourceSHA256: digest, DestinationSHA256: digest,
+			SourceSHA256: digest, DestinationSHA256: digestOfValue(observed),
 		}
 	case writeErr != nil && isDefiniteRefusal(writeErr):
 		return freshstore.AdoptionItem{
@@ -640,6 +717,17 @@ func (e *Executor) writeWhole(ctx context.Context, kind freshstore.AdoptionItemK
 			SourceSHA256: digest,
 		}
 	}
+}
+
+// digestOfValue is the canonical digest of one observed configuration value, so
+// a migrated item's destination digest is a measurement rather than a copy of the
+// source digest.
+func digestOfValue(value any) string {
+	encoded, err := encodeJSONValue(normalizeValue(value))
+	if err != nil {
+		return ""
+	}
+	return digestSHA256(encoded)
 }
 
 // equalConfigValue compares a source value with the destination read-back by

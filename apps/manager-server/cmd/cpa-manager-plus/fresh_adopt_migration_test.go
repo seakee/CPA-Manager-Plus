@@ -806,3 +806,57 @@ func TestAdoptionMigrationDeadlineIsTenMinutes(t *testing.T) {
 		t.Fatalf("migration deadline = %s", adoptMigrationDeadline)
 	}
 }
+
+// Once the installation is complete the migration is over. A committed replay
+// must not copy anything: the source is by definition another install, and its
+// values would overwrite what the operator chose on the destination.
+func TestCompletedInstallationIsNeverMigratedAgain(t *testing.T) {
+	fixture := newAdoptMigrationFixture(t)
+	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
+		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
+	}
+	fixture.wait()
+	record := fixture.reload(t)
+	if record.AdoptionSummary == nil || len(record.AdoptionSummary.Items) == 0 {
+		t.Fatal("the committed adoption recorded no items")
+	}
+
+	// The installation completes, and the operator changes the destination.
+	if _, err := fixture.app.store.Update(t.Context(), record.Operation.Identity, record.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.ProductComplete = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fixture.destination.mu.Lock()
+	fixture.destination.config["routing"] = map[string]any{"strategy": "operator-choice"}
+	fixture.destination.mu.Unlock()
+	// A credential the source gained after completion. Without the completion
+	// check a replay would happily copy it into a finished installation.
+	fixture.source.mu.Lock()
+	fixture.source.credentials["late-source.json"] = []byte(`{"type":"claude","access_token":"late"}`)
+	fixture.source.types["late-source.json"] = "claude"
+	fixture.source.mu.Unlock()
+	writes, uploads := fixture.destination.writeCount(), len(fixture.destination.uploads())
+
+	completed := fixture.reload(t)
+	replay := fixture.strategy(t, completed)
+	if replay.Code != http.StatusOK {
+		t.Fatalf("replay: %d %s", replay.Code, replay.Body.String())
+	}
+	fixture.wait()
+	if got := fixture.destination.writeCount(); got != writes {
+		t.Fatalf("a completed installation was migrated again: %d writes", got-writes)
+	}
+	if got := len(fixture.destination.uploads()); got != uploads {
+		t.Fatalf("a completed installation received %d more uploads", got-uploads)
+	}
+	if got := fixture.destination.value("routing", "strategy"); got != "operator-choice" {
+		t.Fatalf("the migration overwrote a post-completion change: %v", got)
+	}
+	for _, name := range fixture.destination.uploads() {
+		if name == "late-source.json" {
+			t.Fatal("a completed installation was migrated: a late source credential was copied")
+		}
+	}
+}
