@@ -276,6 +276,15 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 		// The destination address is the managed installation's own CPA, not the
 		// private loopback profile the default Transport dials.
 		a.gatewayConfig.EnableManaged(cfg.CPAUpstreamURL)
+		// New Managed and Adopt prove different destination postures, so the page
+		// asks the same committed checkpoint the key authority asks.
+		a.gatewayConfig.SetPostureSelector(func() (cpa.DestinationPosture, bool) {
+			install, err := a.managedSource(context.Background())
+			if err != nil {
+				return cpa.DestinationPosture{}, false
+			}
+			return cpa.PostureFor(install.Strategy, install.PluginsEnabled)
+		})
 	}
 	// The plugin capability the navigation reads is proven, not assumed: this
 	// installation must be able to show that its saved connection serves the
