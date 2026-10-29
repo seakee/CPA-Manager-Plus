@@ -7,10 +7,14 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	proxysvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/proxy"
 )
 
 func guardFreshLegacyWrites(next http.Handler, wiringErr error) http.Handler {
@@ -62,11 +66,13 @@ func externalLegacyReplacedWrite(path, method string) bool {
 	return false
 }
 
-// legacyBridgeReachesCPA reports whether a legacy request ends up presenting the
-// saved management credential to the user's CPA. Only those requests are gated:
-// the Manager-local families answer from its own store, and a page, a static asset
-// or a redirect must stay reachable so the user can still read the blocker.
-func legacyBridgeReachesCPA(path string) bool {
+// legacyBridgePresentsSavedKey reports whether a legacy request ends up presenting
+// the saved management credential to the user's CPA once its caller is authorized.
+// Only those requests are gated: the Manager-local families answer from its own
+// store, and a page, a static asset or a redirect must stay reachable so the user
+// can still read the blocker. The model list is deliberately absent: it forwards
+// the caller's own header, so it is not a presentation of the saved key.
+func legacyBridgePresentsSavedKey(path string) bool {
 	cleaned := strings.TrimRight(path, "/")
 	if cleaned == "/v0/resource/plugins" || strings.HasPrefix(cleaned, "/v0/resource/plugins/") {
 		return true
@@ -94,12 +100,73 @@ func legacyBridgeReachesCPA(path string) bool {
 	return true
 }
 
-// externalLegacyModelList reports the console's own model read. It is a plain
-// proxy that carries the saved management key, so a refused credential reaches
-// the CPA through it exactly as it does through a management read.
-func externalLegacyModelList(path string) bool {
-	cleaned := strings.TrimRight(path, "/")
-	return cleaned == "/v1/models" || cleaned == "/models"
+// externalLegacyDecision is the one answer the External cutover gives a legacy
+// request before anything is forwarded.
+type externalLegacyDecision int
+
+const (
+	// legacyDecisionPassthrough is a request the cutover does not own: another
+	// profile's bridge, a Manager-local family, a page, or a request that carries
+	// the caller's own credential instead of the saved key.
+	legacyDecisionPassthrough externalLegacyDecision = iota
+	// legacyDecisionReplacedWrite is a write Fresh already owns on External.
+	legacyDecisionReplacedWrite
+	// legacyDecisionUnavailable is a saved-key request this Manager cannot decide
+	// because its own committed instruction is unreadable.
+	legacyDecisionUnavailable
+	// legacyDecisionGated is an admin-authorized request that will present the saved
+	// management key, so it is serialized and its refusal recorded.
+	legacyDecisionGated
+)
+
+// externalLegacyDecision decides one legacy request before anything is forwarded,
+// and returns the record it decided from, so the gated path does not read the same
+// row twice.
+func (a *freshApplication) externalLegacyDecision(r *http.Request) (externalLegacyDecision, freshstore.Record) {
+	if a == nil || a.store == nil || r == nil || r.URL == nil {
+		return legacyDecisionPassthrough, freshstore.Record{}
+	}
+	presents := legacyBridgePresentsSavedKey(r.URL.Path)
+	record, err := a.store.Load(r.Context())
+	if err != nil {
+		// Fail closed: without the committed instruction this Manager cannot prove
+		// which credential a saved-key request would present, and presenting a
+		// credential it cannot name is how an address gets banned.
+		if presents {
+			return legacyDecisionUnavailable, freshstore.Record{}
+		}
+		return legacyDecisionPassthrough, freshstore.Record{}
+	}
+	if record.Operation.Strategy.Strategy != bootstrap.ConnectExternal {
+		// New Managed and Adopt keep the bridge they have always had: on those
+		// profiles it is the Console's own contract, not a duplicate route.
+		return legacyDecisionPassthrough, record
+	}
+	if externalLegacyReplacedWrite(r.URL.Path, r.Method) {
+		return legacyDecisionReplacedWrite, record
+	}
+	if !presents {
+		return legacyDecisionPassthrough, record
+	}
+	// Admin authorization runs before the gate. A caller-auth plugin-management
+	// request keeps the caller's own header, and every other unauthorized
+	// management request is answered by this Manager itself, so neither presents
+	// the saved key: neither may serialize a CPA read or file a refusal.
+	if !freshAdminAuthenticated(record, r) {
+		return legacyDecisionPassthrough, record
+	}
+	return legacyDecisionGated, record
+}
+
+// freshAdminAuthenticated reports whether the request carries this installation's
+// Admin key. The gate sits above the legacy router, where the same key is verified
+// again per controller, so the gate has to decide before it takes the credential
+// lock.
+func freshAdminAuthenticated(record freshstore.Record, r *http.Request) bool {
+	if record.Admin == nil || r == nil {
+		return false
+	}
+	return security.VerifyAdminKey(*record.Admin, security.ExtractBearerToken(r.Header.Get("Authorization")))
 }
 
 // guardFreshExternalLegacy is the External cutover of the legacy bridge. The
@@ -113,21 +180,41 @@ func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Han
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		answered, presents := app.externalLegacyRefusal(r.Context(), w, r)
-		if answered {
+		decision, record := app.externalLegacyDecision(r)
+		switch decision {
+		case legacyDecisionReplacedWrite:
+			writeLegacyRefusal(w, externalLegacyWriteReplaced)
+			return
+		case legacyDecisionUnavailable:
+			writeExternalAuthorityUnavailable(w)
+			return
+		case legacyDecisionGated:
+		default:
+			next.ServeHTTP(w, r)
 			return
 		}
-		if !presents {
-			next.ServeHTTP(w, r)
+		ctx := r.Context()
+		gate := &app.legacyCredentialGate
+		// A waiter whose request was cancelled gives up instead of queueing: no CPA
+		// request is ever made on behalf of a caller that stopped waiting.
+		if !gate.acquire(ctx) {
 			return
 		}
 		// One at a time, and the refusal is re-read under the lock: a page fires
 		// several of these in parallel, and the CPA bans an address after five
 		// failed authentications. Without this, one page load is enough to trip
 		// the ban and the blocker could never be cleared.
-		app.legacyCredentialMu.Lock()
-		defer app.legacyCredentialMu.Unlock()
-		if answered, _ := app.externalLegacyRefusal(r.Context(), w, r); answered {
+		//
+		// The grant is taken here, before the request leaves. It is the credential
+		// this request is about to send, so a refusal is filed against that and not
+		// against whatever a concurrent rebind stored while it was in flight.
+		grant := app.externalReadGrantFor(ctx, record)
+		if grant.Refused {
+			gate.release()
+			// The refused credential is the rebind blocker for every method: a read
+			// the CPA would refuse again, and a write whose effect cannot be read
+			// back.
+			writeExternalManagementRejected(w)
 			return
 		}
 		// A stale credential is refused by the CPA with 401, and the browser reads
@@ -135,22 +222,71 @@ func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Han
 		// clears the session and returns to the login form before any page can
 		// name the cause. The refusal is the same fact the typed reads block on, so
 		// it is recorded and answered as that blocker instead.
-		recorder := &externalLegacyRecorder{ResponseWriter: w}
-		next.ServeHTTP(recorder, r)
-		if recorder.refused {
-			app.noteExternalRejection(r.Context(), app.externalReadGrant(r.Context()), cpa.ErrManagementRejected)
-			return
+		markContext, mark := proxysvc.WithSavedKeyMark(ctx)
+		recorder := &externalLegacyRecorder{
+			ResponseWriter: w, ctx: markContext, app: app, gate: gate, grant: grant, mark: mark,
 		}
+		// The lock is held only until the status is known, which the recorder does;
+		// this defer covers the paths where no status ever reaches it.
+		defer recorder.release()
+		next.ServeHTTP(recorder, r.WithContext(markContext))
 	})
+}
+
+// externalCredentialGate serializes the legacy requests that present the saved
+// management credential. It is a channel rather than a mutex so a waiter can give
+// up when its own request is cancelled: holding a console page behind a caller that
+// is already gone would stall every other CPA read for no answer.
+type externalCredentialGate struct {
+	once sync.Once
+	slot chan struct{}
+}
+
+func (g *externalCredentialGate) acquire(ctx context.Context) bool {
+	g.once.Do(func() { g.slot = make(chan struct{}, 1) })
+	select {
+	case g.slot <- struct{}{}:
+		return true
+	default:
+	}
+	select {
+	case g.slot <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// release returns the gate. It is safe to call more than once: the recorder
+// releases on the status and its caller releases on every other exit.
+func (g *externalCredentialGate) release() {
+	g.once.Do(func() { g.slot = make(chan struct{}, 1) })
+	select {
+	case <-g.slot:
+	default:
+	}
 }
 
 // externalLegacyRecorder turns a CPA credential rejection into the typed blocker
 // while passing every other response through untouched. The status is decided
-// before any byte is written, so a streamed or large body is never buffered.
+// before any byte is written, so a streamed or large body is never buffered, and
+// the credential gate is released right there: serializing the body past the moment
+// the CPA authenticated would let one slow reader stall every other console read.
 type externalLegacyRecorder struct {
 	http.ResponseWriter
+	ctx   context.Context
+	app   *freshApplication
+	gate  *externalCredentialGate
+	grant externalReadGrant
+	mark  *proxysvc.SavedKeyMark
+	once  sync.Once
+
 	decided bool
 	refused bool
+}
+
+func (w *externalLegacyRecorder) release() {
+	w.once.Do(w.gate.release)
 }
 
 func (w *externalLegacyRecorder) WriteHeader(status int) {
@@ -158,12 +294,31 @@ func (w *externalLegacyRecorder) WriteHeader(status int) {
 		return
 	}
 	w.decided = true
-	if status == http.StatusUnauthorized {
-		w.refused = true
-		writeExternalManagementRejected(w.ResponseWriter)
-		return
+	// Only a refusal of the saved key is this gate's business. The caller-auth
+	// entry points forward the caller's own header, and a 401 from one of those
+	// says nothing about the stored key: recording it would block a healthy
+	// installation until someone rebound.
+	if w.mark.Attached() {
+		switch status {
+		case http.StatusUnauthorized:
+			w.refused = true
+			w.app.noteExternalRejection(w.ctx, w.grant, cpa.ErrManagementRejected)
+			writeExternalManagementRejected(w.ResponseWriter)
+			w.release()
+			return
+		case http.StatusForbidden:
+			// CPA refused this client rather than the credential: a ban, or remote
+			// management disabled for it. It is the same blocker the 2a routes name,
+			// with the detail that says the ban expires.
+			w.refused = true
+			w.app.noteExternalRejection(w.ctx, w.grant, cpa.ErrManagementClientForbidden)
+			writeExternalManagementForbidden(w.ResponseWriter)
+			w.release()
+			return
+		}
 	}
 	w.ResponseWriter.WriteHeader(status)
+	w.release()
 }
 
 // Unwrap lets http.ResponseController reach the real writer, so streaming a
@@ -187,37 +342,18 @@ func (w *externalLegacyRecorder) Write(body []byte) (int, error) {
 	if !w.decided {
 		w.WriteHeader(http.StatusOK)
 	}
-	if w.refused {
-		return len(body), nil
-	}
 	return w.ResponseWriter.Write(body)
 }
 
-// externalLegacyRefusal answers the refusal one legacy request must get on an
-// External install, and reports both whether it answered and whether the request
-// would otherwise have reached the CPA carrying the saved credential.
-func (a *freshApplication) externalLegacyRefusal(ctx context.Context, w http.ResponseWriter, r *http.Request) (bool, bool) {
-	if a == nil || a.store == nil || r == nil || r.URL == nil {
-		return false, false
-	}
-	record, err := a.store.Load(ctx)
-	if err != nil || record.Operation.Strategy.Strategy != bootstrap.ConnectExternal {
-		// New Managed and Adopt keep the bridge they have always had: on those
-		// profiles it is the Console's own contract, not a duplicate route.
-		return false, false
-	}
-	if externalLegacyReplacedWrite(r.URL.Path, r.Method) {
-		writeLegacyRefusal(w, externalLegacyWriteReplaced)
-		return true, false
-	}
-	presents := legacyBridgeReachesCPA(r.URL.Path) || externalLegacyModelList(r.URL.Path)
-	if !presents || !a.externalReadGrant(ctx).Refused {
-		return false, presents
-	}
-	// The refused credential is the rebind blocker for every method: a read the
-	// CPA would refuse again, and a write whose effect cannot be read back.
-	writeExternalManagementRejected(w)
-	return true, true
+// writeExternalAuthorityUnavailable fails a saved-key request closed: this Manager
+// could not read its own committed instruction, so it cannot prove which credential
+// the request would present, and it forwards nothing.
+func writeExternalAuthorityUnavailable(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	writeFreshJSON(w, struct {
+		Code string `json:"code"`
+	}{"external_cpa_authority_unavailable"})
 }
 
 // legacyResource exposes the existing CPAMP service/controller contracts below

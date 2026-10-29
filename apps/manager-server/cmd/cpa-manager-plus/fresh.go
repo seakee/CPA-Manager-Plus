@@ -107,11 +107,12 @@ type freshApplication struct {
 	// It is nil until the application knows which connection it serves.
 	pluginCapability *pluginCapabilityProbe
 	legacy          http.Handler
-	// legacyCredentialMu serializes the legacy requests that present the saved
+	// legacyCredentialGate serializes the legacy requests that present the saved
 	// management credential. A console page opens several at once, and five
 	// failed authentications ban this address, so the first refusal has to be
-	// recorded before the next request leaves.
-	legacyCredentialMu sync.Mutex
+	// recorded before the next request leaves. It is held only until the answer's
+	// status is known, and a waiter whose own request is cancelled gives up.
+	legacyCredentialGate externalCredentialGate
 	legacyCollector *collectorservice.Service
 	collectorWorker *worker.CollectorWorker
 	identityWorker  *identityreconcile.Worker

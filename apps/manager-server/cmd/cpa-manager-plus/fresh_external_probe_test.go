@@ -51,14 +51,21 @@ func newProbeCPA(t *testing.T, management string) *probeCPA {
 // counts every forwarded request.
 func newExternalProbeApp(t *testing.T) (*freshApplication, *probeCPA) {
 	t.Helper()
+	fake := newProbeCPA(t, externalAuthorityManagement)
+	return newExternalApp(t, fake.server.URL, externalAuthorityManagement), fake
+}
+
+// newExternalApp commits an External checkpoint bound to the given CPA address and
+// management key, so a test can own what that CPA answers and when.
+func newExternalApp(t *testing.T, cpaURL, management string) *freshApplication {
+	t.Helper()
 	app, closeApp := newA3TestApp(t)
 	t.Cleanup(closeApp)
-	fake := newProbeCPA(t, externalAuthorityManagement)
-	baseURL, err := cpa.NormalizeV8BaseURL(fake.server.URL)
+	baseURL, err := cpa.NormalizeV8BaseURL(cpaURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	protected, err := app.protector.ProtectString(externalAuthorityManagement)
+	protected, err := app.protector.ProtectString(management)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,5 +86,5 @@ func newExternalProbeApp(t *testing.T) (*freshApplication, *probeCPA) {
 	}
 	app.externalSource = externalInstallSource(app.store, app.protector)
 	app.keyApply = freshkeyapply.NewExternal(app.keyRepo, app.keys, app.externalSource)
-	return app, fake
+	return app
 }
