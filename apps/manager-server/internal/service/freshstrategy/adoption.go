@@ -37,6 +37,15 @@ func connectionIdentity(base string) string {
 	return "external:sha256:" + hex.EncodeToString(digest[:])
 }
 
+// AdoptedDestinationIdentity is the connection identity an adopted destination is
+// bound by: the digest of its normalized base URL, under the `external:` prefix
+// the External profile also uses. The prefix is deliberately *not* the managed
+// one — an adopted destination is reached through the address the adoption
+// recorded — so a reader must pick the identity by strategy and never by prefix
+// alone. This is the single producer of that value: the adoption checkpoint and
+// the install-derived authority both call it.
+func AdoptedDestinationIdentity(baseURL string) string { return connectionIdentity(baseURL) }
+
 // qualifiedAdoptionDecisions indexes the resource decisions the accepted
 // evidence authorizes, refusing any decision the rules do not mark migrate. The
 // inventory is built from this map, so a kind the evidence chain did not cover

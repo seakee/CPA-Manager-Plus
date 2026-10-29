@@ -18,6 +18,15 @@ import (
 // and never caches the management credential. Any mismatch between the
 // checkpoint, the destination identity and the configured Manager connection
 // fails closed instead of rebinding to another CPA.
+//
+// It answers for both Manager-owned strategies, and discriminates by strategy so
+// the two can never be confused by their identity value:
+//
+//   - New Managed is bound by `managed:sha256:` of the normalized Manager
+//     connection, the identity the staging step derived.
+//   - Adopt is bound by `external:sha256:` of the same normalized address, the
+//     identity the adoption recorded for the destination it staged, and carries
+//     the install-derived management key the Supervisor wrote into it.
 func managedInstallSource(store freshstore.Store, protector *security.Protector, endpoint string) freshkeyapply.ManagedSource {
 	baseURL, endpointErr := cpa.NormalizeV8BaseURL(endpoint)
 	return func(ctx context.Context) (freshkeyapply.ManagedInstall, error) {
@@ -29,15 +38,22 @@ func managedInstallSource(store freshstore.Store, protector *security.Protector,
 			return freshkeyapply.ManagedInstall{}, freshkeyapply.ErrUnavailable
 		}
 		checkpoint := record.Operation.Strategy
-		if checkpoint.Strategy != bootstrap.NewManaged || checkpoint.Stage != "committed" ||
-			!strings.HasPrefix(checkpoint.DestinationConnectionIdentity, "managed:sha256:") ||
-			record.Connection == nil {
+		if !freshkeyapply.ManagerOwnedStrategy(checkpoint.Strategy) || checkpoint.Stage != "committed" || record.Connection == nil {
 			return freshkeyapply.ManagedInstall{}, freshkeyapply.ErrUnavailable
 		}
 		// The Manager connection is the CPA the destination was staged for. A
 		// changed address is a different installation, never a silent rebind.
-		if cpa.NormalizeBaseURL(record.Connection.CPABaseURL) != baseURL ||
-			checkpoint.DestinationConnectionIdentity != freshstrategy.ManagedDestinationIdentity(baseURL) {
+		if cpa.NormalizeBaseURL(record.Connection.CPABaseURL) != baseURL {
+			return freshkeyapply.ManagedInstall{}, freshkeyapply.ErrUnavailable
+		}
+		var identity string
+		switch checkpoint.Strategy {
+		case bootstrap.NewManaged:
+			identity = freshstrategy.ManagedDestinationIdentity(baseURL)
+		case bootstrap.AdoptExisting:
+			identity = freshstrategy.AdoptedDestinationIdentity(baseURL)
+		}
+		if checkpoint.DestinationConnectionIdentity != identity {
 			return freshkeyapply.ManagedInstall{}, freshkeyapply.ErrUnavailable
 		}
 		key, err := protector.UnprotectString(record.Connection.ManagementKey)
