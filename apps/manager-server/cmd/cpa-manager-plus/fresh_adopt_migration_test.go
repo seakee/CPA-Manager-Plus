@@ -1,0 +1,604 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/fresh"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
+)
+
+// The fixture's own secrets. Every leak check below greps for these exact
+// values, because a leak would be one of them reaching durable state.
+const (
+	migrationSourceKey         = "adopt-migration-source-management-key"
+	migrationCredentialToken   = "adopt-migration-credential-token"
+	migrationProviderKeyValue  = "adopt-migration-provider-key"
+	migrationSourceClientValue = "adopt-migration-source-client-key"
+)
+
+// migrationFakeCPA is the smallest CPA v8 that can serve both ends of the
+// migration: the read face the executor lists, downloads and reads, and the
+// write face it patches. It records every write so a test can prove what the
+// executor did and did not touch.
+type migrationFakeCPA struct {
+	mu          sync.Mutex
+	auth        string
+	authFn      func() string
+	server      *httptest.Server
+	credentials map[string][]byte
+	types       map[string]string
+	disabled    map[string]bool
+	runtimeOnly map[string]bool
+	refuse      map[string]bool
+	config      map[string]any
+	writes      []string
+}
+
+func newMigrationFakeCPA(t *testing.T) *migrationFakeCPA {
+	t.Helper()
+	fake := &migrationFakeCPA{
+		credentials: map[string][]byte{}, types: map[string]string{},
+		disabled: map[string]bool{}, runtimeOnly: map[string]bool{}, refuse: map[string]bool{},
+		config: map[string]any{"config-version": json.Number("8")},
+	}
+	fake.server = httptest.NewServer(http.HandlerFunc(fake.serve))
+	t.Cleanup(fake.server.Close)
+	return fake
+}
+
+func (f *migrationFakeCPA) URL() string { return f.server.URL }
+
+func (f *migrationFakeCPA) key() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.authFn != nil {
+		return f.authFn()
+	}
+	return f.auth
+}
+
+func (f *migrationFakeCPA) serve(w http.ResponseWriter, r *http.Request) {
+	// CPA answers every management read as JSON; the source safe-read refuses any
+	// other media type, so the fake has to be honest about it.
+	w.Header().Set("Content-Type", "application/json")
+	path := r.URL.Path
+	if path == "/v1/models" {
+		// The client face, not the management face: only an installed client Key
+		// answers, and the management key and an anonymous call are both refused.
+		for _, key := range f.clientKeys() {
+			if r.Header.Get("Authorization") == "Bearer "+key {
+				_, _ = w.Write([]byte(`{"object":"list","data":[]}`))
+				return
+			}
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if r.Header.Get("Authorization") != "Bearer "+f.key() {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	switch {
+	case path == "/v8/management/credentials" && r.Method == http.MethodGet:
+		f.listCredentials(w)
+	case path == "/v8/management/credentials" && r.Method == http.MethodPost:
+		f.uploadCredential(w, r)
+	case path == "/v8/management/credentials/download" && r.Method == http.MethodGet:
+		f.downloadCredential(w, r)
+	case path == "/v8/management/credentials/status" && r.Method == http.MethodPatch:
+		f.patchStatus(w, r)
+	case path == "/v8/management/config" && r.Method == http.MethodGet:
+		f.mu.Lock()
+		body, _ := json.Marshal(f.config)
+		f.mu.Unlock()
+		_, _ = w.Write(body)
+	case strings.HasPrefix(path, "/v8/management/config/") && r.Method != http.MethodGet:
+		f.writeConfig(w, r, strings.TrimPrefix(path, "/v8/management/config/"))
+	case strings.HasPrefix(path, "/v8/management/config/") && r.Method == http.MethodGet:
+		dotted := strings.Split(strings.ReplaceAll(strings.TrimPrefix(path, "/v8/management/config/"), "/", "."), ".")
+		f.mu.Lock()
+		value, ok := migrationLookup(f.config, dotted)
+		f.mu.Unlock()
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "not_found"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(value)
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+// clientKeys reports the destination's installed client key list.
+func (f *migrationFakeCPA) clientKeys() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	access, _ := f.config["access"].(map[string]any)
+	if access == nil {
+		return nil
+	}
+	raw, _ := access["api-keys"].([]any)
+	keys := make([]string, 0, len(raw))
+	for _, entry := range raw {
+		if text, ok := entry.(string); ok {
+			keys = append(keys, text)
+		}
+	}
+	return keys
+}
+
+func (f *migrationFakeCPA) listCredentials(w http.ResponseWriter) {
+	f.mu.Lock()
+	files := make([]map[string]any, 0, len(f.credentials))
+	for name := range f.credentials {
+		files = append(files, map[string]any{
+			"name": name, "type": f.types[name],
+			"disabled": f.disabled[name], "runtime_only": f.runtimeOnly[name],
+		})
+	}
+	f.mu.Unlock()
+	_ = json.NewEncoder(w).Encode(map[string]any{"files": files})
+}
+
+func (f *migrationFakeCPA) downloadCredential(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+	f.mu.Lock()
+	data, ok := f.credentials[name]
+	f.mu.Unlock()
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	_, _ = w.Write(data)
+}
+
+func (f *migrationFakeCPA) uploadCredential(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+	body, _ := io.ReadAll(r.Body)
+	f.mu.Lock()
+	f.writes = append(f.writes, "POST "+r.URL.Path+" "+name)
+	refused := f.refuse[name]
+	if !refused {
+		f.credentials[name] = body
+		var parsed struct {
+			Type string `json:"type"`
+		}
+		_ = json.Unmarshal(body, &parsed)
+		if f.types[name] == "" {
+			f.types[name] = parsed.Type
+		}
+	}
+	f.mu.Unlock()
+	if refused {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "invalid auth file"})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+}
+
+func (f *migrationFakeCPA) patchStatus(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Name     string `json:"name"`
+		Disabled bool   `json:"disabled"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&request)
+	f.mu.Lock()
+	f.disabled[request.Name] = request.Disabled
+	f.writes = append(f.writes, "PATCH "+r.URL.Path+" "+request.Name)
+	f.mu.Unlock()
+	_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+}
+
+func (f *migrationFakeCPA) writeConfig(w http.ResponseWriter, r *http.Request, slashPath string) {
+	parts := strings.Split(strings.ReplaceAll(strings.Trim(slashPath, "/"), "/", "."), ".")
+	body, _ := io.ReadAll(r.Body)
+	var value any
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	f.mu.Lock()
+	f.writes = append(f.writes, r.Method+" "+r.URL.Path)
+	migrationMerge(f.config, parts, value)
+	f.mu.Unlock()
+	_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+}
+
+func migrationLookup(document map[string]any, parts []string) (any, bool) {
+	var cursor any = document
+	for _, part := range parts {
+		mapping, ok := cursor.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		if cursor, ok = mapping[part]; !ok {
+			return nil, false
+		}
+	}
+	return cursor, true
+}
+
+func migrationMerge(document map[string]any, parts []string, value any) {
+	cursor := document
+	for _, part := range parts[:len(parts)-1] {
+		next, ok := cursor[part].(map[string]any)
+		if !ok {
+			next = map[string]any{}
+			cursor[part] = next
+		}
+		cursor = next
+	}
+	key := parts[len(parts)-1]
+	if incoming, ok := value.(map[string]any); ok {
+		if existing, ok := cursor[key].(map[string]any); ok {
+			for nested, item := range incoming {
+				migrationMerge(existing, []string{nested}, item)
+			}
+			return
+		}
+	}
+	cursor[key] = value
+}
+
+func (f *migrationFakeCPA) writeCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.writes)
+}
+
+func (f *migrationFakeCPA) writesContaining(fragment string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, entry := range f.writes {
+		if strings.Contains(entry, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *migrationFakeCPA) value(path ...string) any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	value, _ := migrationLookup(f.config, path)
+	return value
+}
+
+// adoptMigrationFixture is a staged adoption whose source CPA carries every
+// migration kind and whose destination is the Manager-owned CPA the Supervisor
+// just staged. It is exactly the state the strategy handler is in when the
+// committed checkpoint has been persisted.
+type adoptMigrationFixture struct {
+	app         *freshApplication
+	runtime     *migrationRuntime
+	source      *migrationFakeCPA
+	destination *migrationFakeCPA
+	record      freshstore.Record
+	request     freshstrategy.Request
+}
+
+func newAdoptMigrationFixture(t *testing.T) *adoptMigrationFixture {
+	t.Helper()
+	ctx := t.Context()
+	dir := t.TempDir()
+	paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+	paths.Config = filepath.Join(dir, "config.json")
+	opened, err := fresh.Open(ctx, paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = opened.Close() })
+	artifact := model.RuntimeArtifactID("sha256:" + strings.Repeat("a", 64))
+	runtime := &migrationRuntime{status: model.RuntimeObservedStatus{
+		Identity: "runtime", Generation: 3, ProtocolVersion: "v1", State: model.RuntimeStateReady,
+		Capabilities:          model.RuntimeCapabilities{model.RuntimeCapabilityStart, model.RuntimeCapabilityStageDestination},
+		ActiveGatewayArtifact: &model.ActiveGatewayArtifact{Engine: "cpa", ArtifactID: artifact},
+	}}
+	fixture := &adoptMigrationFixture{runtime: runtime}
+
+	// Source: two copyable credentials (one disabled), one runtime-only
+	// credential, and configuration of all three migration kinds. The
+	// Manager-owned values differ from the destination's, so an accidental copy
+	// is visible rather than plausible.
+	source := newMigrationFakeCPA(t)
+	source.auth = migrationSourceKey
+	source.credentials["claude-source.json"] = []byte(`{"type":"claude","access_token":"` + migrationCredentialToken + `"}`)
+	source.types["claude-source.json"] = "claude"
+	source.credentials["codex-source.json"] = []byte(`{"type":"codex","access_token":"` + migrationCredentialToken + `-codex"}`)
+	source.types["codex-source.json"], source.disabled["codex-source.json"] = "codex", true
+	source.credentials["plugin-source.json"] = []byte(`{"runtime":true}`)
+	source.types["plugin-source.json"], source.runtimeOnly["plugin-source.json"] = "plugin", true
+	source.config["routing"] = map[string]any{"strategy": "round-robin", "force-model-prefix": true}
+	source.config["multimedia"] = map[string]any{"disable-image-generation": "chat"}
+	source.config["api-keys"] = map[string]any{"claude": []any{map[string]any{
+		"name": "claude-group", "keys": []any{map[string]any{"api-key": migrationProviderKeyValue}},
+	}}}
+	source.config["management"] = map[string]any{"secret-key": migrationSourceKey}
+	source.config["server"] = map[string]any{"host": "203.0.113.9", "port": json.Number("9999")}
+	source.config["access"] = map[string]any{"api-keys": []any{migrationSourceClientValue}}
+	source.config["plugins"] = map[string]any{"enabled": true, "dir": "/source/plugins"}
+	source.config["oauth"] = map[string]any{"auth-dir": "/source/auth"}
+	fixture.source = source
+
+	// Destination: the freshly staged CPA. The Supervisor generates its own
+	// management secret, so the fake authenticates whatever was staged last.
+	destination := newMigrationFakeCPA(t)
+	destination.refuse["unsupported.json"] = true
+	destination.config["server"] = map[string]any{"host": "0.0.0.0", "port": json.Number("8317")}
+	destination.config["plugins"] = map[string]any{"enabled": false, "dir": "/supervisor/plugins"}
+	destination.config["oauth"] = map[string]any{"auth-dir": "/destination/auth"}
+	// StageDestination installs the source's client keys on the destination, so
+	// the committed destination must already answer with them for
+	// cpa.VerifyV8Adoption to accept the takeover.
+	destination.config["access"] = map[string]any{"api-keys": []any{migrationSourceClientValue}}
+	destination.authFn = func() string { return runtime.stagedKey }
+	fixture.destination = destination
+
+	app := newFreshApplication(opened, config.Config{}, nil)
+	app.strategy = freshstrategy.New(freshstrategy.Options{
+		Runtime: runtime, Protector: opened.Protector, DestinationBaseURL: destination.URL(),
+		Qualification:       bootstrap.CPAQualification{ManagementGeneration: "v8", ArtifactQualified: true, RequiredProfileQualified: true},
+		QualifiedArtifactID: artifact, AdoptionResources: acceptedClientAPIKeysDecision(),
+	})
+	fixture.request = freshstrategy.Request{Strategy: bootstrap.AdoptExisting, AdoptSourceClass: bootstrap.AdoptNetworkExisting,
+		BaseURL: source.URL(), ManagementKey: migrationSourceKey,
+		ExpectedRuntimeIdentity: "runtime", ExpectedRuntimeGeneration: 3, ExpectedArtifactID: artifact}
+	record, err := app.store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staged, err := app.strategy.Execute(ctx, record.Operation, fixture.request)
+	if err != nil || staged.Checkpoint.Stage != "staged" {
+		t.Fatalf("stage: %+v %v", staged, err)
+	}
+	record, err = app.store.Update(ctx, record.Operation.Identity, record.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.Strategy = staged.Checkpoint
+		r.AdoptionCiphertext = staged.AdoptionCiphertext
+		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+			OperationID: r.Operation.Identity.OperationID, Revision: 1,
+			Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.app, fixture.record = app, record
+	return fixture
+}
+
+func (f *adoptMigrationFixture) reload(t *testing.T) freshstore.Record {
+	t.Helper()
+	record, err := f.app.store.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return record
+}
+
+func (f *adoptMigrationFixture) strategy(t *testing.T, record freshstore.Record) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(struct {
+		Identity         bootstrap.FreshIdentity `json:"identity"`
+		ExpectedRevision uint64                  `json:"expectedRevision"`
+		freshstrategy.Request
+	}{record.Operation.Identity, record.Operation.Revision, f.request})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+	response := httptest.NewRecorder()
+	f.app.canonicalAPI(response, request)
+	return response
+}
+
+// A committed adoption copies the bounded inventory and persists one result per
+// item, so the completion screen has something to show and a resume has
+// something to skip.
+func TestCommittedAdoptionMigratesTheBoundedInventory(t *testing.T) {
+	fixture := newAdoptMigrationFixture(t)
+
+	committed := fixture.strategy(t, fixture.record)
+	if committed.Code != http.StatusOK {
+		t.Fatalf("commit: %d %s", committed.Code, committed.Body.String())
+	}
+	record := fixture.reload(t)
+	if record.Operation.Strategy.Stage != "committed" || record.Connection == nil {
+		t.Fatalf("adoption did not commit: %+v", record.Operation.Strategy)
+	}
+	if record.AdoptionSummary == nil || len(record.AdoptionSummary.Items) == 0 {
+		t.Fatal("the committed adoption recorded no migration items")
+	}
+	migrated, manual, failed := record.AdoptionSummary.Counts()
+	if migrated == 0 || manual == 0 || failed != 0 {
+		t.Fatalf("unexpected item outcomes: %d migrated, %d manual, %d failed", migrated, manual, failed)
+	}
+
+	// Credentials: bytes, enabled state and the runtime-only refusal.
+	for _, name := range []string{"claude-source.json", "codex-source.json"} {
+		item, ok := record.AdoptionSummary.Item("credential:" + name)
+		if !ok || item.Outcome != freshstore.AdoptionMigrated {
+			t.Fatalf("credential %s: %+v", name, item)
+		}
+	}
+	if !fixture.destination.disabled["codex-source.json"] {
+		t.Fatal("a disabled source credential must stay disabled on the destination")
+	}
+	if item, _ := record.AdoptionSummary.Item("credential:plugin-source.json"); item.Outcome != freshstore.AdoptionManual || item.Instruction == "" {
+		t.Fatalf("a runtime-only credential must be a manual item: %+v", item)
+	}
+
+	// Configuration of both kinds.
+	if item, ok := record.AdoptionSummary.Item("config:routing.strategy"); !ok || item.Outcome != freshstore.AdoptionMigrated {
+		t.Fatalf("config leaf: %+v", item)
+	}
+	if got := fixture.destination.value("routing", "strategy"); got != "round-robin" {
+		t.Fatalf("destination routing.strategy=%v", got)
+	}
+	if item, ok := record.AdoptionSummary.Item("section:api-keys.claude"); !ok || item.Outcome != freshstore.AdoptionMigrated {
+		t.Fatalf("provider section: %+v", item)
+	}
+	if fixture.destination.value("api-keys", "claude") == nil {
+		t.Fatal("the provider section was not copied")
+	}
+
+	// Manager-owned values survive untouched.
+	if got := fixture.destination.value("server", "host"); got != "0.0.0.0" {
+		t.Fatalf("the destination listener was overwritten: %v", got)
+	}
+	if got := fixture.destination.value("plugins", "dir"); got != "/supervisor/plugins" {
+		t.Fatalf("the Supervisor plugin root was overwritten: %v", got)
+	}
+	if got := fixture.destination.value("oauth", "auth-dir"); got != "/destination/auth" {
+		t.Fatalf("the destination auth directory was overwritten: %v", got)
+	}
+	for _, owned := range []string{"/config/management", "/config/server/host", "/config/server/port", "/config/plugins", "/config/oauth/auth-dir", "/config/access/api-keys"} {
+		if fixture.destination.writesContaining(owned) {
+			t.Fatalf("the executor wrote a Manager-owned path: %s", owned)
+		}
+	}
+}
+
+// A manual or failed item is operator work, never an adoption failure: the
+// commit reply stays 200 and the checkpoint stays committed.
+func TestManualAndFailedItemsNeverFailTheAdoption(t *testing.T) {
+	fixture := newAdoptMigrationFixture(t)
+	// Make one destination leaf refuse, which the executor reports as manual.
+	fixture.destination.mu.Lock()
+	fixture.destination.config["routing"] = map[string]any{"strategy": "round-robin"}
+	fixture.destination.mu.Unlock()
+
+	committed := fixture.strategy(t, fixture.record)
+	if committed.Code != http.StatusOK {
+		t.Fatalf("a manual item failed the adoption: %d %s", committed.Code, committed.Body.String())
+	}
+	record := fixture.reload(t)
+	if record.Operation.Strategy.Stage != "committed" || record.AdoptionSummary == nil {
+		t.Fatalf("adoption state after a manual item: %+v summary=%v", record.Operation.Strategy, record.AdoptionSummary)
+	}
+	_, manual, _ := record.AdoptionSummary.Counts()
+	if manual == 0 {
+		t.Fatal("no manual item was recorded for the runtime-only credential")
+	}
+	// The reply carries the revision the caller must resume from, which is the
+	// one the migration's last checkpoint wrote.
+	var replied bootstrap.FreshOperation
+	if json.Unmarshal(committed.Body.Bytes(), &replied) != nil || replied.Revision != record.Operation.Revision {
+		t.Fatalf("reply revision %d != durable revision %d", replied.Revision, record.Operation.Revision)
+	}
+}
+
+// A committed replay resumes the migration from the durable prefix: settled
+// items are never written again, and the destination therefore sees no second
+// upload.
+func TestCommittedReplayResumesWithoutRewritingItems(t *testing.T) {
+	fixture := newAdoptMigrationFixture(t)
+	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
+		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
+	}
+	committed := fixture.reload(t)
+	before, beforeItems := fixture.destination.writeCount(), len(committed.AdoptionSummary.Items)
+
+	replay := fixture.strategy(t, committed)
+	if replay.Code != http.StatusOK {
+		t.Fatalf("replay: %d %s", replay.Code, replay.Body.String())
+	}
+	again := fixture.reload(t)
+	if fixture.destination.writeCount() != before {
+		t.Fatalf("a replay wrote %d times over settled items", fixture.destination.writeCount()-before)
+	}
+	if len(again.AdoptionSummary.Items) != beforeItems {
+		t.Fatalf("a replay appended %d items", len(again.AdoptionSummary.Items)-beforeItems)
+	}
+	for index, item := range committed.AdoptionSummary.Items {
+		if again.AdoptionSummary.Items[index] != item {
+			t.Fatalf("a replay rewrote item %d", index)
+		}
+	}
+}
+
+// The source CPA is only ever read: the migration cannot write to it, and the
+// test proves the fake observed no write.
+func TestAdoptionMigrationNeverWritesTheSource(t *testing.T) {
+	fixture := newAdoptMigrationFixture(t)
+	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
+		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
+	}
+	if writes := fixture.source.writeCount(); writes != 0 {
+		t.Fatalf("the source received %d write requests", writes)
+	}
+	if got := fixture.source.value("management", "secret-key"); got != migrationSourceKey {
+		t.Fatalf("the source management secret changed: %v", got)
+	}
+}
+
+// No credential byte, provider key or management secret may reach the durable
+// record or the HTTP reply: the summary carries identities, outcomes and
+// digests only.
+func TestAdoptionMigrationLeaksNoSecret(t *testing.T) {
+	fixture := newAdoptMigrationFixture(t)
+	response := fixture.strategy(t, fixture.record)
+	if response.Code != http.StatusOK {
+		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
+	}
+	record := fixture.reload(t)
+	summary, err := json.Marshal(record.AdoptionSummary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secrets := []string{
+		migrationSourceKey, migrationCredentialToken, migrationProviderKeyValue,
+		migrationSourceClientValue, fixture.runtime.stagedKey,
+	}
+	if fixture.runtime.stagedKey == "" {
+		t.Fatal("the fixture staged no destination management key")
+	}
+	for _, secret := range secrets {
+		if strings.Contains(string(summary), secret) {
+			t.Fatalf("the durable summary carries a secret")
+		}
+		if strings.Contains(response.Body.String(), secret) {
+			t.Fatalf("the commit reply carries a secret")
+		}
+	}
+}
+
+// A source that cannot be read leaves the adoption committed and the summary
+// empty: the migration is resumable work, not a failure of the takeover.
+func TestUnreachableSourceLeavesTheAdoptionCommitted(t *testing.T) {
+	fixture := newAdoptMigrationFixture(t)
+	// The fixture's staged snapshot already holds the source URL and secret, so
+	// taking the source down is how an unreachable source is reproduced.
+	fixture.source.server.Close()
+	committed := fixture.strategy(t, fixture.record)
+	if committed.Code != http.StatusOK {
+		t.Fatalf("an unreachable source failed the adoption: %d %s", committed.Code, committed.Body.String())
+	}
+	record := fixture.reload(t)
+	if record.Operation.Strategy.Stage != "committed" || record.Connection == nil {
+		t.Fatalf("the adoption did not commit: %+v", record.Operation.Strategy)
+	}
+	if record.AdoptionSummary != nil && len(record.AdoptionSummary.Items) != 0 {
+		t.Fatalf("an unreadable source recorded %d items", len(record.AdoptionSummary.Items))
+	}
+}
+
+var _ = filepath.Join

@@ -101,6 +101,29 @@ func New(source Source, destination Destination) *Executor {
 	return &Executor{source: source, destination: destination}
 }
 
+// Checkpoint persists the items recorded so far. It is called once per item,
+// after that item's write has been resolved, so the durable record is never
+// behind a write that already happened. A nil Checkpoint records nothing, which
+// is what a dry reconciliation run wants.
+//
+// It must only append: the store holds the summary monotone, and a rewrite would
+// be refused there rather than here.
+type Checkpoint func(freshstore.AdoptionSummary) error
+
+// record appends one resolved item and checkpoints it before the next item is
+// attempted. A failed checkpoint stops the run without retrying the item in
+// place: the write it describes already happened, and re-issuing it is exactly
+// what the record exists to prevent. The retry therefore resumes from the last
+// durable item, and any write it repeats is the same value or the same bytes
+// under the same name, which CPA accepts idempotently.
+func (e *Executor) record(summary *freshstore.AdoptionSummary, item freshstore.AdoptionItem, checkpoint Checkpoint) error {
+	summary.Items = append(summary.Items, item)
+	if checkpoint == nil {
+		return nil
+	}
+	return checkpoint(*summary)
+}
+
 var (
 	// ErrManagerOwned refuses to migrate an item the Manager owns on the
 	// destination.
@@ -116,7 +139,7 @@ var (
 
 // Run copies every item of the bounded inventory, appends one result per item to
 // the summary in migration order, and reports them.
-func (e *Executor) Run(ctx context.Context, previous freshstore.AdoptionSummary) (Result, error) {
+func (e *Executor) Run(ctx context.Context, previous freshstore.AdoptionSummary, checkpoint Checkpoint) (Result, error) {
 	if e == nil || e.source == nil || e.destination == nil {
 		return Result{}, errors.New("freshadopt: source and destination are required")
 	}
@@ -132,12 +155,18 @@ func (e *Executor) Run(ctx context.Context, previous freshstore.AdoptionSummary)
 	if err != nil {
 		return Result{Summary: summary}, fmt.Errorf("%w: %v", ErrInventoryUnavailable, err)
 	}
-	if err := e.migrateCredentials(ctx, &summary, files); err != nil {
+	if err := e.migrateCredentials(ctx, &summary, files, checkpoint); err != nil {
 		return Result{Summary: summary}, err
 	}
-	e.migrateConfigLeaves(ctx, &summary, document)
-	e.migrateConfigFamilies(ctx, &summary, document)
-	e.migrateProviderSections(ctx, &summary, document)
+	if err := e.migrateConfigLeaves(ctx, &summary, document, checkpoint); err != nil {
+		return Result{Summary: summary}, err
+	}
+	if err := e.migrateConfigFamilies(ctx, &summary, document, checkpoint); err != nil {
+		return Result{Summary: summary}, err
+	}
+	if err := e.migrateProviderSections(ctx, &summary, document, checkpoint); err != nil {
+		return Result{Summary: summary}, err
+	}
 	return Result{Summary: summary}, nil
 }
 
@@ -182,13 +211,15 @@ func manualInstruction(kind freshstore.AdoptionItemKind, name string) string {
 	}
 }
 
-func (e *Executor) migrateCredentials(ctx context.Context, summary *freshstore.AdoptionSummary, files []CredentialFile) error {
+func (e *Executor) migrateCredentials(ctx context.Context, summary *freshstore.AdoptionSummary, files []CredentialFile, checkpoint Checkpoint) error {
 	for _, file := range files {
 		item := credentialItemName(file.Name)
 		if summary.Settled(item) {
 			continue
 		}
-		summary.Items = append(summary.Items, e.migrateCredential(ctx, item, file))
+		if err := e.record(summary, e.migrateCredential(ctx, item, file), checkpoint); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -267,7 +298,7 @@ func (e *Executor) migrateCredential(ctx context.Context, item string, file Cred
 	}
 }
 
-func (e *Executor) migrateConfigLeaves(ctx context.Context, summary *freshstore.AdoptionSummary, document map[string]any) {
+func (e *Executor) migrateConfigLeaves(ctx context.Context, summary *freshstore.AdoptionSummary, document map[string]any, checkpoint Checkpoint) error {
 	for _, path := range cpa.ConfigLeafPaths() {
 		item := configLeafItemName(path)
 		if summary.Settled(item) {
@@ -276,10 +307,12 @@ func (e *Executor) migrateConfigLeaves(ctx context.Context, summary *freshstore.
 		if ManagerOwned(path) {
 			// The page table cannot name a Manager-owned path; this is defence in
 			// depth that would surface a widened gateway table, not a normal path.
-			summary.Items = append(summary.Items, freshstore.AdoptionItem{
+			if err := e.record(summary, freshstore.AdoptionItem{
 				Item: item, Kind: freshstore.AdoptionKindConfigLeaf, Outcome: freshstore.AdoptionManual,
 				Reason: "manager_owned", Instruction: manualInstruction(freshstore.AdoptionKindConfigLeaf, path),
-			})
+			}, checkpoint); err != nil {
+				return err
+			}
 			continue
 		}
 		rawValue, presence := cpa.LookupConfigValue(document, path)
@@ -290,30 +323,39 @@ func (e *Executor) migrateConfigLeaves(ctx context.Context, summary *freshstore.
 		}
 		value := normalizeValue(rawValue)
 		if err := cpa.ValidateConfigLeafValue(path, value); err != nil {
-			summary.Items = append(summary.Items, freshstore.AdoptionItem{
+			if err := e.record(summary, freshstore.AdoptionItem{
 				Item: item, Kind: freshstore.AdoptionKindConfigLeaf, Outcome: freshstore.AdoptionManual,
 				Reason: "value_shape_unsupported", Instruction: manualInstruction(freshstore.AdoptionKindConfigLeaf, path),
-			})
+			}, checkpoint); err != nil {
+				return err
+			}
 			continue
 		}
 		prefix, err := configLeafPrefix(path)
 		if err != nil {
-			summary.Items = append(summary.Items, freshstore.AdoptionItem{
+			if err := e.record(summary, freshstore.AdoptionItem{
 				Item: item, Kind: freshstore.AdoptionKindConfigLeaf, Outcome: freshstore.AdoptionFailed,
 				Reason: "path_unresolved", Instruction: manualInstruction(freshstore.AdoptionKindConfigLeaf, path),
-			})
+			}, checkpoint); err != nil {
+				return err
+			}
 			continue
 		}
 		body, err := leafPatchPayload(prefix, path, value)
 		if err != nil {
-			summary.Items = append(summary.Items, freshstore.AdoptionItem{
+			if err := e.record(summary, freshstore.AdoptionItem{
 				Item: item, Kind: freshstore.AdoptionKindConfigLeaf, Outcome: freshstore.AdoptionFailed,
 				Reason: "payload_unresolved", Instruction: manualInstruction(freshstore.AdoptionKindConfigLeaf, path),
-			})
+			}, checkpoint); err != nil {
+				return err
+			}
 			continue
 		}
-		summary.Items = append(summary.Items, e.writeLeaf(ctx, item, path, prefix, value, body))
+		if err := e.record(summary, e.writeLeaf(ctx, item, path, prefix, value, body), checkpoint); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // writeLeaf writes one leaf and resolves the outcome by reading it back. A
@@ -339,7 +381,7 @@ func (e *Executor) writeLeaf(ctx context.Context, item, path, prefix string, val
 	}
 }
 
-func (e *Executor) migrateConfigFamilies(ctx context.Context, summary *freshstore.AdoptionSummary, document map[string]any) {
+func (e *Executor) migrateConfigFamilies(ctx context.Context, summary *freshstore.AdoptionSummary, document map[string]any, checkpoint Checkpoint) error {
 	for _, family := range cpa.ConfigRuleFamilyIDs() {
 		item := configFamilyItemName(family)
 		if summary.Settled(item) {
@@ -347,9 +389,11 @@ func (e *Executor) migrateConfigFamilies(ctx context.Context, summary *freshstor
 		}
 		entry, ok := cpa.LookupConfigRuleFamily(family)
 		if !ok {
-			summary.Items = append(summary.Items, freshstore.AdoptionItem{
+			if err := e.record(summary, freshstore.AdoptionItem{
 				Item: item, Kind: freshstore.AdoptionKindConfigFamily, Outcome: freshstore.AdoptionFailed, Reason: "family_unresolved",
-			})
+			}, checkpoint); err != nil {
+				return err
+			}
 			continue
 		}
 		value, presence := cpa.LookupConfigValue(document, entry.Path)
@@ -359,27 +403,34 @@ func (e *Executor) migrateConfigFamilies(ctx context.Context, summary *freshstor
 		}
 		payload, err := encodeJSONValue(value)
 		if err != nil {
-			summary.Items = append(summary.Items, freshstore.AdoptionItem{
+			if err := e.record(summary, freshstore.AdoptionItem{
 				Item: item, Kind: freshstore.AdoptionKindConfigFamily, Outcome: freshstore.AdoptionManual,
 				Reason: "value_shape_unsupported", Instruction: manualInstruction(freshstore.AdoptionKindConfigFamily, family),
-			})
+			}, checkpoint); err != nil {
+				return err
+			}
 			continue
 		}
-		summary.Items = append(summary.Items, e.writeWhole(ctx, freshstore.AdoptionKindConfigFamily, item, entry.Path, value, payload))
+		if err := e.record(summary, e.writeWhole(ctx, freshstore.AdoptionKindConfigFamily, item, entry.Path, value, payload), checkpoint); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
-func (e *Executor) migrateProviderSections(ctx context.Context, summary *freshstore.AdoptionSummary, document map[string]any) {
+func (e *Executor) migrateProviderSections(ctx context.Context, summary *freshstore.AdoptionSummary, document map[string]any, checkpoint Checkpoint) error {
 	for _, section := range ProviderSections() {
 		item := providerSectionItemName(section)
 		if summary.Settled(item) {
 			continue
 		}
 		if ManagerOwned(section) {
-			summary.Items = append(summary.Items, freshstore.AdoptionItem{
+			if err := e.record(summary, freshstore.AdoptionItem{
 				Item: item, Kind: freshstore.AdoptionKindProviderSection, Outcome: freshstore.AdoptionManual,
 				Reason: "manager_owned", Instruction: manualInstruction(freshstore.AdoptionKindProviderSection, section),
-			})
+			}, checkpoint); err != nil {
+				return err
+			}
 			continue
 		}
 		value, presence := cpa.LookupConfigValue(document, section)
@@ -388,14 +439,19 @@ func (e *Executor) migrateProviderSections(ctx context.Context, summary *freshst
 		}
 		payload, err := encodeJSONValue(value)
 		if err != nil {
-			summary.Items = append(summary.Items, freshstore.AdoptionItem{
+			if err := e.record(summary, freshstore.AdoptionItem{
 				Item: item, Kind: freshstore.AdoptionKindProviderSection, Outcome: freshstore.AdoptionManual,
 				Reason: "value_shape_unsupported", Instruction: manualInstruction(freshstore.AdoptionKindProviderSection, section),
-			})
+			}, checkpoint); err != nil {
+				return err
+			}
 			continue
 		}
-		summary.Items = append(summary.Items, e.writeWhole(ctx, freshstore.AdoptionKindProviderSection, item, section, value, payload))
+		if err := e.record(summary, e.writeWhole(ctx, freshstore.AdoptionKindProviderSection, item, section, value, payload), checkpoint); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // writeWhole replaces one whole section or rule family and resolves the outcome

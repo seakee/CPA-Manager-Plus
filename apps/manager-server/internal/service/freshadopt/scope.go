@@ -40,8 +40,8 @@ var managerOwnedPrefixes = []string{
 // anything else. They exist so an exact match cannot be missed by the
 // trailing-dot prefix form.
 var managerOwnedExact = map[string]bool{
-	"server.host": true,
-	"server.port": true,
+	"server.host":           true,
+	"server.port":           true,
 	"disable-control-panel": true,
 	"oauth.auth-dir":        true,
 	"access.api-keys":       true,

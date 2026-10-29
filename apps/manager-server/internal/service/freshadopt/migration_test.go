@@ -5,10 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -45,7 +47,10 @@ type fakeCPA struct {
 	uploadStatus int
 	// lostUploadBody true stores the bytes then answers 500.
 	lostUploadBody bool
-	server         *httptest.Server
+	// uploads records the file name of every POST /credentials received, so a
+	// test can prove which items were written twice.
+	uploads []string
+	server  *httptest.Server
 }
 
 func newFakeCPA(t *testing.T, auth string) *fakeCPA {
@@ -151,6 +156,7 @@ func (c *fakeCPA) uploadCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.mu.Lock()
+	c.uploads = append(c.uploads, name)
 	refusal, refused := c.refuseUpload[name]
 	lost := c.lostUploadBody
 	c.mu.Unlock()
@@ -337,6 +343,13 @@ func (c *fakeCPA) usesOnlyReads(t *testing.T) {
 	}
 }
 
+// uploadNames reports the file name of every credential upload this CPA received.
+func (c *fakeCPA) uploadNames() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.uploads...)
+}
+
 // writeCount reports how many non-GET requests this CPA received.
 func (c *fakeCPA) writeCount() int {
 	count := 0
@@ -384,10 +397,10 @@ func sourceFixture(t *testing.T) *fakeCPA {
 		},
 		"plugins": map[string]any{"enabled": true, "dir": "/source/plugins"},
 		"routing": map[string]any{
-			"strategy":        "round-robin",
+			"strategy":           "round-robin",
 			"force-model-prefix": true,
-			"retry":           map[string]any{"request-retry": json.Number("4"), "max-retry-credentials": json.Number("3")},
-			"cooldown":        map[string]any{"disable-cooling": true},
+			"retry":              map[string]any{"request-retry": json.Number("4"), "max-retry-credentials": json.Number("3")},
+			"cooldown":           map[string]any{"disable-cooling": true},
 		},
 		"requests": map[string]any{
 			"proxy-url": "http://proxy.internal:8080",
@@ -406,7 +419,7 @@ func sourceFixture(t *testing.T) *fakeCPA {
 			"claude": []any{map[string]any{"name": "claude-group", "keys": []any{map[string]any{"api-key": "src-provider-claude-key"}}}},
 			"openai-compatibility": []any{map[string]any{
 				"name": "compat-group", "base-url": "http://compat.internal/v1",
-				"keys": []any{map[string]any{"api-key": "src-provider-compat-key"}},
+				"keys":   []any{map[string]any{"api-key": "src-provider-compat-key"}},
 				"models": []any{map[string]any{"name": "compat-model"}},
 			}},
 		},
@@ -433,6 +446,11 @@ func destinationFixture(t *testing.T) *fakeCPA {
 
 func runMigration(t *testing.T, source, destination *fakeCPA, previous freshstore.AdoptionSummary) freshstore.AdoptionSummary {
 	t.Helper()
+	return runMigrationWithCheckpoint(t, source, destination, previous, nil)
+}
+
+func runMigrationWithCheckpoint(t *testing.T, source, destination *fakeCPA, previous freshstore.AdoptionSummary, checkpoint Checkpoint) freshstore.AdoptionSummary {
+	t.Helper()
 	sourceWire, err := NewSource(source.endpoint())
 	if err != nil {
 		t.Fatal(err)
@@ -441,7 +459,7 @@ func runMigration(t *testing.T, source, destination *fakeCPA, previous freshstor
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := New(sourceWire, destinationWire).Run(context.Background(), previous)
+	result, err := New(sourceWire, destinationWire).Run(context.Background(), previous, checkpoint)
 	if err != nil {
 		t.Fatalf("migration failed: %v", err)
 	}
@@ -754,5 +772,122 @@ func TestManualItemNeverFailsTheAdoption(t *testing.T) {
 	}
 	if got := fmt.Sprintf("%d", len(summary.Items)); got == "0" {
 		t.Fatal("no items recorded")
+	}
+}
+
+// The checkpoint is the only durable record of the run, so it has to be
+// written once per item, in migration order, before the next item is attempted.
+// A run that batched at the end would lose every proven item to a crash.
+func TestEveryItemIsCheckpointedInOrder(t *testing.T) {
+	source, destination := sourceFixture(t), destinationFixture(t)
+	var snapshots []freshstore.AdoptionSummary
+	summary := runMigrationWithCheckpoint(t, source, destination, freshstore.AdoptionSummary{}, func(current freshstore.AdoptionSummary) error {
+		snapshots = append(snapshots, current)
+		return nil
+	})
+	if len(snapshots) != len(summary.Items) {
+		t.Fatalf("checkpointed %d times for %d items", len(snapshots), len(summary.Items))
+	}
+	if len(summary.Items) == 0 {
+		t.Fatal("no items recorded")
+	}
+	for index, snapshot := range snapshots {
+		// Each checkpoint holds exactly the items resolved so far, in order, and
+		// is a strict prefix of the final summary.
+		if len(snapshot.Items) != index+1 || !reflect.DeepEqual(snapshot.Items[index], summary.Items[index]) {
+			t.Fatalf("checkpoint %d does not append exactly item %d", index, index)
+		}
+		if index > 0 && !reflect.DeepEqual(snapshot.Items[:index], summary.Items[:index]) {
+			t.Fatalf("checkpoint %d rewrote an earlier item", index)
+		}
+	}
+}
+
+// A checkpoint that fails stops the run at that item. The item it describes has
+// already been written and resolved, so the run must not continue past it: the
+// caller resumes from the durable prefix, and the item that was in flight is the
+// only one a resume may repeat (it is the same bytes under the same name, which
+// CPA accepts idempotently).
+func TestAFailedCheckpointStopsTheRunWithoutWritingLaterItems(t *testing.T) {
+	source, destination := sourceFixture(t), destinationFixture(t)
+	errCheckpoint := errors.New("checkpoint refused")
+	var durable freshstore.AdoptionSummary
+	calls := 0
+	sourceWire, err := NewSource(source.endpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinationWire, err := NewDestination(destination.endpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The credentials are listed in name order, so item three is codex-b.json.
+	_, runErr := New(sourceWire, destinationWire).Run(context.Background(), freshstore.AdoptionSummary{}, func(current freshstore.AdoptionSummary) error {
+		calls++
+		if calls == 3 {
+			// The store refused this write, so this item is NOT durable: only the
+			// two acknowledged checkpoints describe what a restart would read.
+			return errCheckpoint
+		}
+		durable = current
+		return nil
+	})
+	if !errors.Is(runErr, errCheckpoint) {
+		t.Fatalf("a failed checkpoint must stop the run: %v", runErr)
+	}
+	if calls != 3 {
+		t.Fatalf("checkpoint was called %d times after failure", calls)
+	}
+	if len(durable.Items) != 2 {
+		t.Fatalf("durable prefix holds %d items", len(durable.Items))
+	}
+	// Nothing past the item in flight was written: gemini-c.json is item four
+	// and must still be absent from the destination. codex-b.json is item three,
+	// the one whose checkpoint failed, so its write did happen.
+	if _, stored := destination.credential("gemini-c.json"); stored {
+		t.Fatal("run continued past a failed checkpoint and wrote a later item")
+	}
+	if _, stored := destination.credential("codex-b.json"); !stored {
+		t.Fatal("the item in flight was resolved before its checkpoint was refused")
+	}
+	// The durable prefix is exactly what a resume skips: it keeps those records
+	// byte for byte and appends only the items the stop left unresolved.
+	resumed := runMigration(t, source, destination, durable)
+	if len(resumed.Items) <= len(durable.Items) {
+		t.Fatalf("a resume did not resolve the remaining items: %d vs %d", len(resumed.Items), len(durable.Items))
+	}
+	for index := range durable.Items {
+		if resumed.Items[index] != durable.Items[index] {
+			t.Fatalf("a resume rewrote durable item %d", index)
+		}
+	}
+	// Only the item that was in flight when the checkpoint failed may be written
+	// twice. Every durable item is uploaded exactly once; broken.json is the
+	// refused one and was attempted once.
+	counts := map[string]int{}
+	for _, name := range destination.uploadNames() {
+		counts[name]++
+	}
+	if counts["claude-a.json"] != 1 || counts["gemini-c.json"] != 1 || counts["broken.json"] != 1 {
+		t.Fatalf("a durable item was uploaded again: %v", counts)
+	}
+	// codex-b.json is the third item, so it is the one the failed checkpoint left
+	// in flight and the resume repeats: same name, same bytes, one stored copy.
+	if counts["codex-b.json"] != 2 {
+		t.Fatalf("the in-flight item was not retried exactly once: %v", counts)
+	}
+	if body, ok := destination.credential("codex-b.json"); !ok || !strings.Contains(string(body), "src-codex-token") {
+		t.Fatal("the retried item left the wrong bytes on the destination")
+	}
+	source.usesOnlyReads(t)
+}
+
+// A nil checkpoint is a dry run: nothing is persisted and the summary is still
+// complete in memory.
+func TestNoCheckpointStillResolvesEveryItem(t *testing.T) {
+	source, destination := sourceFixture(t), destinationFixture(t)
+	summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+	if len(summary.Items) == 0 {
+		t.Fatal("a dry run resolved no items")
 	}
 }

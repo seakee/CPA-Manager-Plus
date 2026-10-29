@@ -623,6 +623,21 @@ func (a *freshApplication) executeStrategy(w http.ResponseWriter, r *http.Reques
 		// Reconcile only after the strategy adapter validates the requested
 		// target and current server-owned qualification. Do not rewrite a
 		// committed checkpoint, connection ciphertext or revision on replay.
+		if op.Strategy.Strategy == bootstrap.AdoptExisting {
+			// A committed adoption replay is the resume path of the migration:
+			// the executor skips every item the record already settled, so a run
+			// that stopped on a failed checkpoint, an unreachable source or an
+			// unknown write continues from the durable prefix instead of repeating
+			// it. Only the per-item summary moves, which is what the store's
+			// monotone rule permits.
+			if replay, err := a.store.Load(r.Context()); err == nil {
+				a.runAdoptionMigration(r.Context(), replay, request.BaseURL, request.ManagementKey)
+				if reloaded, loadErr := a.store.Load(r.Context()); loadErr == nil {
+					writeFreshJSON(w, reloaded.Operation)
+					return
+				}
+			}
+		}
 		writeFreshJSON(w, op)
 		return
 	}
@@ -670,6 +685,20 @@ func (a *freshApplication) executeStrategy(w http.ResponseWriter, r *http.Reques
 			InitialClientKey string `json:"initialClientKey"`
 		}{next.Operation, result.InitialClientKey})
 		return
+	}
+	if next.Operation.Strategy.Strategy == bootstrap.AdoptExisting && next.Operation.Strategy.Stage == "committed" {
+		// The destination is committed and its client keys verified, so the
+		// bounded source inventory may now be copied into it. This is the hook
+		// Step 4's completion conditions read: the per-item summary is already
+		// durable, and every outcome other than `migrated` is operator work rather
+		// than an adoption failure.
+		a.runAdoptionMigration(r.Context(), next, request.BaseURL, request.ManagementKey)
+		// The migration wrote per-item results under the same CAS, so it advanced
+		// the revision. The reply must carry the record the caller will resume
+		// from, not the pre-migration revision it would then fail to match.
+		if reloaded, loadErr := a.store.Load(r.Context()); loadErr == nil {
+			next = reloaded
+		}
 	}
 	writeFreshJSON(w, next.Operation)
 }
