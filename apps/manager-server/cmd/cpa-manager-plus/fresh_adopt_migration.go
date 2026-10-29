@@ -144,6 +144,15 @@ func (a *freshApplication) startAdoptionMigration(run func(context.Context)) boo
 	return true
 }
 
+// adoptMigrationInFlight reports whether a background copy is running right now.
+// It is the read half of the single-flight lock, so the completion path and the
+// start path agree on what "running" means.
+func (a *freshApplication) adoptMigrationInFlight() bool {
+	a.adoptMigrationMu.Lock()
+	defer a.adoptMigrationMu.Unlock()
+	return a.adoptMigrationRunning
+}
+
 // waitAdoptionMigration blocks until the in-flight run has finished. It exists
 // for tests and for a graceful shutdown; the request path never calls it, which
 // is the point of the background worker.
@@ -179,37 +188,75 @@ func (a *freshApplication) adoptionMigrationSession(ctx context.Context, token s
 	}
 }
 
+// adoptSummaryWriteAttempts bounds how many times one checkpoint re-reads the
+// record after a revision conflict. A conflict is another writer having moved
+// the revision between the read and the write, which the next attempt resolves;
+// three is enough for the writers a committed installation has, and a conflict
+// that survives them is a different installation or a stuck writer, which is a
+// stop rather than a spin.
+const adoptSummaryWriteAttempts = 3
+
 // persistAdoptionSummary returns the executor's per-item checkpoint. Each call
 // appends exactly the item the run just resolved, through the same revision CAS
 // as every other Fresh write, so a recorded success can never describe a write
 // that did not happen and can never be rewritten.
+//
+// A revision conflict is not a failure of the item: the copy resolved nothing
+// extra, and another writer only moved the record forward. The checkpoint
+// therefore re-reads the record and retries the append under the new revision,
+// at most adoptSummaryWriteAttempts times. It stops when the conflict persists,
+// and it stops immediately when the record it re-read is no longer this adoption
+// still at committed — that is not a race but a record this run must not write.
 func persistAdoptionSummary(ctx context.Context, a *freshApplication, identity bootstrap.FreshIdentity, revision uint64, session adoptMigrationSession) freshadopt.Checkpoint {
 	return func(summary freshstore.AdoptionSummary) error {
-		// The session is re-checked before the write, not once at the start: a
-		// migration runs for minutes after the reply that started it.
-		if session != nil {
-			current, err := a.store.Load(ctx)
-			if err != nil {
+		for range adoptSummaryWriteAttempts {
+			// The session is re-checked before the write, not once at the start: a
+			// migration runs for minutes after the reply that started it.
+			if session != nil {
+				current, err := a.store.Load(ctx)
+				if err != nil {
+					return err
+				}
+				if err := session(current); err != nil {
+					return err
+				}
+			}
+			next, err := a.store.Update(ctx, identity, revision, func(record *freshstore.Record) error {
+				if !adoptionMigrationCommitted(*record) {
+					return freshstore.ErrConflict
+				}
+				copied := summary
+				record.AdoptionSummary = &copied
+				return nil
+			})
+			if err == nil {
+				revision = next.Operation.Revision
+				return nil
+			}
+			if !errors.Is(err, freshstore.ErrConflict) {
 				return err
 			}
-			if err := session(current); err != nil {
-				return err
+			// Re-read and decide: only the same adoption still at committed is a
+			// record this run may write to again.
+			current, loadErr := a.store.Load(ctx)
+			if loadErr != nil {
+				return loadErr
 			}
-		}
-		next, err := a.store.Update(ctx, identity, revision, func(record *freshstore.Record) error {
-			if record.Operation.Strategy.Strategy != bootstrap.AdoptExisting || record.Operation.Strategy.SourceClass != adoptMigrationSourceClass {
+			if current.Operation.Identity != identity || !adoptionMigrationCommitted(current) {
 				return freshstore.ErrConflict
 			}
-			copied := summary
-			record.AdoptionSummary = &copied
-			return nil
-		})
-		if err != nil {
-			return err
+			revision = current.Operation.Revision
 		}
-		revision = next.Operation.Revision
-		return nil
+		return freshstore.ErrConflict
 	}
+}
+
+// adoptionMigrationCommitted reports whether one record is still the committed
+// adoption this migration writes into.
+func adoptionMigrationCommitted(record freshstore.Record) bool {
+	return record.Operation.Strategy.Strategy == bootstrap.AdoptExisting &&
+		record.Operation.Strategy.SourceClass == adoptMigrationSourceClass &&
+		record.Operation.Strategy.Stage == "committed"
 }
 
 // adoptionMigrationCode bounds a migration error to the code the log may carry.

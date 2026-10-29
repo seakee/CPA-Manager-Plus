@@ -455,6 +455,18 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 	case resource == "strategy" && r.Method == http.MethodPost:
 		a.executeStrategy(w, r, op)
 	case resource == "complete" && r.Method == http.MethodPost:
+		if a.adoptMigrationInFlight() {
+			// A completion decided while the copy is still running would finish
+			// the installation under a migration that then keeps writing into it:
+			// the last item of the run would land after the operator was told the
+			// installation was complete, and Step 4's completion conditions read
+			// exactly the summary this run is still filling in. Nothing is
+			// changed; the operator retries once the run has settled.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			writeFreshJSON(w, map[string]string{"code": "adopt_migration_running"})
+			return
+		}
 		if op.Strategy.Strategy == bootstrap.AdoptExisting {
 			w.WriteHeader(http.StatusConflict)
 			return

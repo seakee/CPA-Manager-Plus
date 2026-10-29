@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -918,5 +919,143 @@ func TestCompletedInstallationIsNeverMigratedAgain(t *testing.T) {
 		if name == "late-source.json" {
 			t.Fatal("a completed installation was migrated: a late source credential was copied")
 		}
+	}
+}
+
+// complete posts the completion request of this fixture's installation.
+func (f *adoptMigrationFixture) complete(t *testing.T) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodPost, "/control/api/v2/complete", nil)
+	request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+	response := httptest.NewRecorder()
+	f.app.canonicalAPI(response, request)
+	return response
+}
+
+// A completion decided while the copy is still running is refused, names its own
+// code and changes nothing: the run keeps writing into the installation, so
+// finishing it underneath the run would record items after completion.
+func TestCompletionIsRefusedWhileTheMigrationIsRunning(t *testing.T) {
+	fixture := newAdoptMigrationFixture(t)
+	release, entered := blockCredentialDownloads(t, fixture)
+	defer release()
+	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
+		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
+	}
+	// The run is inside its first credential download, so it is provably in
+	// flight and has recorded nothing beyond what it reached before it.
+	<-entered
+	before := fixture.reload(t)
+	if before.Operation.ProductComplete {
+		t.Fatal("the fixture completed the installation before the run was blocked")
+	}
+
+	response := fixture.complete(t)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("a completion during the migration answered %d: %s", response.Code, response.Body.String())
+	}
+	var refusal struct {
+		Code string `json:"code"`
+	}
+	if json.Unmarshal(response.Body.Bytes(), &refusal) != nil || refusal.Code != "adopt_migration_running" {
+		t.Fatalf("the refusal did not name the migration: %s", response.Body.String())
+	}
+	after := fixture.reload(t)
+	if after.Operation.ProductComplete {
+		t.Fatal("a refused completion completed the installation anyway")
+	}
+	if after.Operation.Revision != before.Operation.Revision || adoptionItemCount(after) != adoptionItemCount(before) {
+		t.Fatalf("a refused completion changed the record: revision %d→%d, items %d→%d",
+			before.Operation.Revision, after.Operation.Revision, adoptionItemCount(before), adoptionItemCount(after))
+	}
+
+	// The run finishes, and the same request now reaches the adoption's own
+	// completion answer rather than being told a migration is running.
+	release()
+	fixture.wait()
+	settled := fixture.complete(t)
+	if settled.Code != http.StatusConflict {
+		t.Fatalf("the adopt completion answered %d: %s", settled.Code, settled.Body.String())
+	}
+	if json.Unmarshal(settled.Body.Bytes(), &refusal) == nil && refusal.Code == "adopt_migration_running" {
+		t.Fatal("a settled run still refused completion as running")
+	}
+	if fixture.reload(t).Operation.ProductComplete {
+		t.Fatal("an adoption completion completed the installation")
+	}
+}
+
+// adoptionItemCount is the number of recorded migration items, zero when the
+// record carries no summary yet.
+func adoptionItemCount(record freshstore.Record) int {
+	if record.AdoptionSummary == nil {
+		return 0
+	}
+	return len(record.AdoptionSummary.Items)
+}
+
+// A revision conflict between checkpoints is another writer, not a failed item:
+// the checkpoint re-reads the record and appends under the new revision, so
+// unrelated writes during the run — up to the retry bound — do not stop it.
+func TestCheckpointRetriesAfterConcurrentUnrelatedWrites(t *testing.T) {
+	fixture := newAdoptMigrationFixture(t)
+	// Every source credential download is the first write of one item, so the
+	// concurrent updates here land between two checkpoints.
+	var once sync.Once
+	fixture.source.mu.Lock()
+	fixture.source.beforeDownload = func() {
+		once.Do(func() {
+			// Two writers move the revision before the checkpoint's next write: the
+			// retry has to re-read twice and still append.
+			for range 2 {
+				current := fixture.reload(t)
+				if _, err := fixture.app.store.Update(t.Context(), current.Operation.Identity, current.Operation.Revision, func(r *freshstore.Record) error {
+					r.Operation.AdminInitialized = true
+					return nil
+				}); err != nil {
+					t.Errorf("concurrent write: %v", err)
+				}
+			}
+		})
+	}
+	fixture.source.mu.Unlock()
+
+	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
+		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
+	}
+	fixture.wait()
+	record := fixture.reload(t)
+	if adoptionItemCount(record) == 0 {
+		t.Fatal("a concurrent write stopped the run before it recorded anything")
+	}
+	migrated, _, failed := record.AdoptionSummary.Counts()
+	if migrated == 0 || failed != 0 {
+		t.Fatalf("the run did not survive the conflict: %d migrated, %d failed", migrated, failed)
+	}
+	// The run reached the end: a kind recorded last is present.
+	if item, ok := record.AdoptionSummary.Item("section:api-keys.claude"); !ok || item.Outcome != freshstore.AdoptionMigrated {
+		t.Fatalf("the run stopped at the conflict: %+v", item)
+	}
+}
+
+// A checkpoint built for a record the store does not own writes nothing: the
+// identity check is the boundary between a run and an installation that is not
+// the one it was started for.
+func TestCheckpointRefusesAnIdentityTheRecordDoesNotOwn(t *testing.T) {
+	fixture := newAdoptMigrationFixture(t)
+	record := fixture.reload(t)
+	checkpoint := persistAdoptionSummary(t.Context(), fixture.app, bootstrap.FreshIdentity{
+		AdmissionID: "another-admission", InstallationID: record.Operation.Identity.InstallationID,
+		Generation: record.Operation.Identity.Generation, DatabasePath: record.Operation.Identity.DatabasePath,
+		OperationID: record.Operation.Identity.OperationID,
+	}, record.Operation.Revision, nil)
+	err := checkpoint(freshstore.AdoptionSummary{Items: []freshstore.AdoptionItem{{
+		Item: "config:routing.strategy", Kind: freshstore.AdoptionKindConfigLeaf, Outcome: freshstore.AdoptionMigrated,
+	}}})
+	if !errors.Is(err, freshstore.ErrConflict) {
+		t.Fatalf("a foreign identity was accepted: %v", err)
+	}
+	if after := fixture.reload(t); adoptionItemCount(after) != 0 {
+		t.Fatalf("a refused checkpoint recorded %d items", adoptionItemCount(after))
 	}
 }
