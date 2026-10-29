@@ -122,20 +122,20 @@ func New(source Source, destination Destination, decisions []bootstrap.AdoptionR
 // the single classification of this package, and the reference the record's
 // decision is looked up under.
 //
-// It delegates to the same tables the discovery read uses
-// (`cpa.AdoptionConfigRef`, `cpa.AdoptionProviderSectionRef`), so an item is
-// gated under exactly the reference the record decided for it. A writable
-// gateway leaf or a whole payload rule family is routing configuration: that
-// table is the exact scope the gateway configuration page reads and writes
-// against CPA v8.0.13. Anything outside the table keeps the reference that
-// already describes it and stays manual: the executor never widens a scope by
-// classifying an item into a migrate verdict it was not given.
+// It strips the item prefix and delegates to `cpa.AdoptionItemRef`, the one
+// classification discovery also uses, so an item is gated under exactly the
+// reference the record decided for it. A writable gateway leaf or a whole payload
+// rule family is routing configuration: that table is the exact scope the gateway
+// configuration page reads and writes against CPA v8.0.13. Anything outside the
+// table keeps the reference that already describes it and stays manual: the
+// executor never widens a scope by classifying an item into a migrate verdict it
+// was not given.
 func ItemRef(item freshstore.AdoptionItem) bootstrap.ResourceRef {
 	switch item.Kind {
 	case freshstore.AdoptionKindCredential:
 		// Every credential item — a copied file, an overlong name, the excess
 		// marker — is the source's auth-file inventory.
-		return bootstrap.AdoptionRefCPAAuthFiles
+		return cpa.AdoptionItemRef(cpa.CredentialItemClass)
 	case freshstore.AdoptionKindConfigLeaf:
 		if path, ok := strings.CutPrefix(item.Item, "config:"); ok {
 			return cpa.AdoptionItemRef(path)

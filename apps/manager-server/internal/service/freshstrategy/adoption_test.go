@@ -184,25 +184,19 @@ func TestAdoptionStagesEncryptedSnapshotBeforeDestinationAndVerifiesActualAuth(t
 				t.Fatalf("stage did effects: %v", err)
 			}
 			// The record covers every reference an item under the reported roots can
-			// carry, not one reference per root. This source reports `server`,
-			// `access`, `oauth`, `providers` and `usage`; each contributes the
-			// reference of its own root plus everything its paths classify as, and
-			// a root may contribute more than one (`client` carries both its
-			// gateway leaves and its provider section). The v7 source reports
-			// `access`, `oauth`, `server`, `routing` and `usage`.
-			wantResources := []bootstrap.ResourceRef{
-				bootstrap.AdoptionRefConfigServer, bootstrap.AdoptionRefConfigUnknown,
-				bootstrap.AdoptionRefClientAPIKeys, bootstrap.AdoptionRefCPAAuthFiles,
-				bootstrap.AdoptionRefProviderStateAPIKeys, bootstrap.AdoptionRefProviderStateProviders,
-				bootstrap.AdoptionRefConfigUsage,
-			}
+			// carry, not one reference per root. This source reports the roots below;
+			// `oauth` contributes both its auth directory and its copyable provider
+			// maps, and `access` its client keys.
+			sections := []string{"server", "access", "oauth", "providers", "usage"}
 			if class == bootstrap.AdoptLegacyManaged {
-				wantResources = []bootstrap.ResourceRef{
-					bootstrap.AdoptionRefClientAPIKeys, bootstrap.AdoptionRefConfigUnknown,
-					bootstrap.AdoptionRefCPAAuthFiles, bootstrap.AdoptionRefProviderStateAPIKeys,
-					bootstrap.AdoptionRefConfigServer, bootstrap.AdoptionRefConfigRouting,
-					bootstrap.AdoptionRefConfigUsage, bootstrap.AdoptionRefProviderStateProviders,
-				}
+				// The legacy v0 projection of this fixture reports `tls` (server),
+				// `routing`, `usage-statistics-enabled`, `gemini-api-key`
+				// (providers), and always reports `access` and `oauth`.
+				sections = []string{"access", "oauth", "server", "routing", "usage", "providers"}
+			}
+			wantResources, err := adoptionResourceRefs(sections)
+			if err != nil {
+				t.Fatalf("the fixture roots are not a bounded inventory: %v", err)
 			}
 			if !reflect.DeepEqual(staged.Checkpoint.AdoptionResources, wantResources) {
 				t.Fatalf("discovered source inventory was not bounded: %+v", staged.Checkpoint.AdoptionResources)

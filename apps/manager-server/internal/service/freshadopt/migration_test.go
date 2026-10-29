@@ -1630,12 +1630,13 @@ func TestProviderSectionsAreGatedByTheirOwnRoot(t *testing.T) {
 	}
 	source.usesOnlyReads(t)
 
-	// The gate itself, per root: the same record refuses the two roots whose
-	// sections it did not authorize, and does not refuse the one it did.
+	// The gate itself: the record authorizes the provider-copy reference and
+	// nothing else, so a section the plan does not contain is refused rather than
+	// borrowing that verdict.
 	executor := New(nil, nil, apiKeysMigrate)
-	for _, section := range []string{"client", "providers", "made-up"} {
+	for _, section := range []string{"providers", "made-up", "client"} {
 		if _, gated := executor.gated(providerSection(section), section); !gated {
-			t.Fatalf("section %s under an unauthorized root was not gated", section)
+			t.Fatalf("section %q is not in the copy plan but was not gated", section)
 		}
 	}
 	for _, section := range []string{"api-keys.claude", "oauth.model-alias"} {
@@ -1643,14 +1644,22 @@ func TestProviderSectionsAreGatedByTheirOwnRoot(t *testing.T) {
 			t.Fatalf("authorized section %s was gated", section)
 		}
 	}
-	// The two roots are distinct references, so the api-keys verdict cannot
-	// reach a client section: it is the split that the earlier classification
-	// collapsed.
-	if ItemRef(providerSection("client")) == ItemRef(providerSection("api-keys.claude")) {
-		t.Fatal("a client section and an api-keys section share one reference")
+	// Only the twelve planned sections classify as provider state; a bare root
+	// name, and a section under a root the plan does not name, are configuration
+	// the executor does not copy, so they classify as unknown configuration and
+	// keep their own manual action.
+	for _, section := range ProviderSections() {
+		if ref := ItemRef(providerSection(section)); ref != bootstrap.AdoptionRefProviderStateAPIKeys {
+			t.Fatalf("planned section %s classified as %s", section, ref)
+		}
 	}
-	// Even a forged migrate claim for the client reference cannot authorize it:
-	// the rules keep that reference manual, so the gate still refuses.
+	for _, section := range []string{"client", "providers", "oauth", "api-keys", "made-up", "made-up.child"} {
+		if ref := ItemRef(providerSection(section)); ref != bootstrap.AdoptionRefConfigUnknown {
+			t.Fatalf("unplanned section %q classified as %s", section, ref)
+		}
+	}
+	// Even a forged migrate claim for the client reference cannot authorize a
+	// section: the rules keep that reference manual, and no section carries it.
 	forged := replaceDecision(apiKeysMigrate, bootstrap.AdoptionRefProviderStateClient, bootstrap.AdoptionResourceDecision{
 		ResourceRef: bootstrap.AdoptionRefProviderStateClient, Qualification: bootstrap.CapabilityQualified,
 		Disposition: bootstrap.Migrate,
@@ -1658,9 +1667,9 @@ func TestProviderSectionsAreGatedByTheirOwnRoot(t *testing.T) {
 	if _, gated := New(nil, nil, forged).gated(providerSection("client"), "client"); !gated {
 		t.Fatal("a forged migrate claim authorized a client section")
 	}
-	item, gated := New(nil, nil, apiKeysMigrate).gated(providerSection("client"), "client")
-	if !gated || item.Outcome != freshstore.AdoptionManual || item.Reason != string(bootstrap.ReauthenticateAfterAdoption) || item.Instruction == "" {
-		t.Fatalf("a provider section under a manual root was not recorded as manual work: %+v", item)
+	item, gated := New(nil, nil, apiKeysMigrate).gated(providerSection("providers"), "providers")
+	if !gated || item.Outcome != freshstore.AdoptionManual || item.Reason == "" || item.Instruction == "" {
+		t.Fatalf("an unplanned section was not recorded as manual work: %+v", item)
 	}
 }
 
@@ -1854,22 +1863,21 @@ func TestItemRefClassifiesAgainstTheGatewayTable(t *testing.T) {
 		t.Fatalf("credential classified as %s", ref)
 	}
 	// A provider section is gated under its own root, never under another
-	// root's reference: `client` is its own bounded resource, and a decision
-	// for `provider-state-api-keys` must not cover it.
+	// A section the copy plan does not contain is configuration the executor
+	// never writes, so it classifies as unknown configuration and stays manual.
+	// It never borrows a root's verdict: `providers` is a section whose contents
+	// the plan does not copy, and `client` is gateway leaves only.
 	for section, want := range map[string]bootstrap.ResourceRef{
 		"api-keys.claude":   bootstrap.AdoptionRefProviderStateAPIKeys,
 		"api-keys.vertex":   bootstrap.AdoptionRefProviderStateAPIKeys,
 		"oauth.model-alias": bootstrap.AdoptionRefProviderStateAPIKeys,
 		"oauth.settings":    bootstrap.AdoptionRefProviderStateAPIKeys,
-		"providers":         bootstrap.AdoptionRefProviderStateProviders,
-		"client":            bootstrap.AdoptionRefProviderStateClient,
-		"oauth":             bootstrap.AdoptionRefCPAAuthFiles,
-		// A path the gateway table does not name is unknown configuration, under
-		// a named root or the unknown one alike: it stays manual, and it never
-		// borrows a provider verdict.
-		"plugins.enabled": bootstrap.AdoptionRefConfigUnknown,
-		"made-up":         bootstrap.AdoptionRefConfigUnknown,
-		"made-up.child":   bootstrap.AdoptionRefConfigUnknown,
+		"providers":         bootstrap.AdoptionRefConfigUnknown,
+		"client":            bootstrap.AdoptionRefConfigUnknown,
+		"oauth":             bootstrap.AdoptionRefConfigUnknown,
+		"plugins.enabled":   bootstrap.AdoptionRefConfigUnknown,
+		"made-up":           bootstrap.AdoptionRefConfigUnknown,
+		"made-up.child":     bootstrap.AdoptionRefConfigUnknown,
 	} {
 		ref := ItemRef(freshstore.AdoptionItem{Item: providerSectionItemName(section), Kind: freshstore.AdoptionKindProviderSection})
 		if ref != want {

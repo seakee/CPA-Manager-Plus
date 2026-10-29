@@ -41,43 +41,70 @@ func TestAdoptionRootSetsCoverEveryItemUnderTheRoot(t *testing.T) {
 			t.Fatalf("family %q is not covered by its root's set", family)
 		}
 	}
-	// Every root the reader can report contributes at least one reference, and it
-	// contributes its own signal: a root with an empty set would be a root whose
-	// discovery yields no decision at all.
+	// Every root the reader can report contributes at least one reference: a root
+	// with an empty set would be a root whose discovery yields no decision at all.
 	for _, root := range AdoptionSectionNames() {
 		refs := AdoptionRootRefs(root)
 		if len(refs) == 0 {
 			t.Fatalf("root %q contributes no reference", root)
 		}
-		signal, ok := adoptionRootSignals[root]
-		if !ok || !slices.Contains(refs, signal) {
-			t.Fatalf("root %q does not contribute its own signal %s: %v", root, signal, refs)
-		}
 		for _, ref := range refs {
 			if _, known := bootstrap.FreshAdoptionRule(ref); !known {
 				t.Fatalf("root %q contributes %s, which has no adoption rule", root, ref)
 			}
+			// Nothing may be in a root's set unless some item under that root
+			// classifies as it, or the root has no item at all and declares the
+			// reference as its fallback.
+			grounded := false
+			for _, item := range AdoptionItemUniverse() {
+				if AdoptionRootOf(item) == root && AdoptionItemRef(item) == ref {
+					grounded = true
+					break
+				}
+			}
+			fallback, declared := adoptionRootFallbacks[root]
+			if !grounded && !(declared && fallback == ref && !hasUniverseItem(root)) {
+				t.Fatalf("root %q contributes %s, but no item under it classifies as that", root, ref)
+			}
 		}
 	}
+}
+
+// hasUniverseItem reports whether any enumerable item lands in the root.
+func hasUniverseItem(root string) bool {
+	for _, item := range AdoptionItemUniverse() {
+		if AdoptionRootOf(item) == root {
+			return true
+		}
+	}
+	return false
 }
 
 // The sets are what makes a root's decision list complete: the gateway
 // configuration a v8 reader reports under its unknown-root catch-all must record
 // the routing decision *and* the unknown one, because a leaf outside the gateway
 // table is still the operator's manual work.
-func TestAdoptionRootSetsFollowTheReaderRoots(t *testing.T) {
+func TestAdoptionRootSetsFollowTheItems(t *testing.T) {
+	// Every set is exactly what the universe's items under that root classify as,
+	// plus the declared fallback for a root with no item. Nothing else may appear:
+	// a reference in a root's set that no item produces would tell the operator to
+	// redo work the executor never does.
 	want := map[string][]bootstrap.ResourceRef{
 		// `requests`, `multimedia` and `upstream` are not named sections: the
-		// reader reports the gateway configuration under its catch-all.
+		// reader reports that gateway configuration under its catch-all, which is
+		// why it carries both the routing decision and the unknown one.
 		"unknown_cpa_native_resource": {bootstrap.AdoptionRefConfigRouting, bootstrap.AdoptionRefConfigUnknown},
-		"client":                      {bootstrap.AdoptionRefConfigRouting, bootstrap.AdoptionRefConfigUnknown, bootstrap.AdoptionRefProviderStateClient},
-		"oauth":                       {bootstrap.AdoptionRefCPAAuthFiles, bootstrap.AdoptionRefConfigUnknown, bootstrap.AdoptionRefProviderStateAPIKeys},
-		"api-keys":                    {bootstrap.AdoptionRefConfigUnknown, bootstrap.AdoptionRefProviderStateAPIKeys},
-		"providers":                   {bootstrap.AdoptionRefConfigUnknown, bootstrap.AdoptionRefProviderStateProviders},
-		"routing":                     {bootstrap.AdoptionRefConfigRouting, bootstrap.AdoptionRefConfigUnknown},
-		"server":                      {bootstrap.AdoptionRefConfigServer, bootstrap.AdoptionRefConfigUnknown},
-		"plugins":                     {bootstrap.AdoptionRefConfigPlugins, bootstrap.AdoptionRefConfigUnknown},
-		"access":                      {bootstrap.AdoptionRefClientAPIKeys, bootstrap.AdoptionRefConfigUnknown},
+		// `client` is exactly two gateway leaves. It has no provider section in
+		// the copy plan, so it contributes routing configuration and no provider
+		// verdict: `provider-state-client` covers configuration no item carries.
+		"client":    {bootstrap.AdoptionRefConfigRouting},
+		"oauth":     {bootstrap.AdoptionRefCPAAuthFiles, bootstrap.AdoptionRefProviderStateAPIKeys},
+		"api-keys":  {bootstrap.AdoptionRefProviderStateAPIKeys},
+		"routing":   {bootstrap.AdoptionRefConfigRouting},
+		"providers": {bootstrap.AdoptionRefProviderStateProviders},
+		"server":    {bootstrap.AdoptionRefConfigServer},
+		"plugins":   {bootstrap.AdoptionRefConfigPlugins},
+		"access":    {bootstrap.AdoptionRefClientAPIKeys},
 	}
 	for root, refs := range want {
 		if got := AdoptionRootRefs(root); !slices.Equal(got, refs) {
@@ -85,10 +112,30 @@ func TestAdoptionRootSetsFollowTheReaderRoots(t *testing.T) {
 		}
 	}
 	// A root the reader never reports has no set, so it can authorize nothing.
-	if refs := AdoptionRootRefs("requests"); len(refs) != 0 {
-		t.Fatalf("a root the reader never reports contributes %v", refs)
+	for _, root := range []string{"requests", "multimedia", "upstream"} {
+		if refs := AdoptionRootRefs(root); len(refs) != 0 {
+			t.Fatalf("root %q is not a reader root but contributes %v", root, refs)
+		}
 	}
 	if root := AdoptionRootOf("requests.proxy-url"); root != "unknown_cpa_native_resource" {
 		t.Fatalf("gateway configuration under requests discovered as %q", root)
+	}
+}
+
+// The digest is what the consumer pin folds in, so it must move when a
+// classification moves and stay still when nothing does.
+func TestAdoptionUniverseDigestTracksClassification(t *testing.T) {
+	universe := AdoptionItemUniverse()
+	digest := AdoptionUniverseDigest()
+	if digest != AdoptionUniverseDigest(universe...) {
+		t.Fatal("the digest depends on more than the items it is given")
+	}
+	if digest == AdoptionUniverseDigest(AdoptionItemUniverse()[:len(universe)-1]...) {
+		t.Fatal("dropping an item did not change the digest")
+	}
+	// A leaf the gateway table names and one it does not classify differently, and
+	// the digest reflects that.
+	if AdoptionUniverseDigest("requests.proxy-url") == AdoptionUniverseDigest("requests.made-up-leaf") {
+		t.Fatal("two differently classified items produced the same digest")
 	}
 }

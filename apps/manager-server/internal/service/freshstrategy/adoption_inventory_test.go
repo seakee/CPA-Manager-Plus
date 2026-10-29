@@ -76,16 +76,16 @@ func TestAdoptionSourceClassUsesOnlyItsExplicitReadSurface(t *testing.T) {
 
 func TestAdoptionInventoryMappingIsBounded(t *testing.T) {
 	// A root is not one resource: the record holds a decision for every reference
-	// an item under the reported roots can carry. `access` adds the client keys
-	// and the unknown configuration a path under it would be, `oauth` adds the
-	// auth directory and its copyable provider maps, `providers` its own section
-	// reference, and the unknown root the gateway configuration the reader does
-	// not name.
+	// an item under the reported roots can carry. `access` contributes the client
+	// keys, `oauth` the auth directory and its copyable provider maps,
+	// `providers` its catalogue reference, and the unknown root both the routing
+	// configuration the reader reports there and the unknown configuration a
+	// gateway-table miss would be.
 	refs, err := adoptionResourceRefs([]string{"access", "oauth", "unknown_cpa_native_resource", "providers"})
 	want := []bootstrap.ResourceRef{
-		bootstrap.AdoptionRefClientAPIKeys, bootstrap.AdoptionRefConfigUnknown,
-		bootstrap.AdoptionRefCPAAuthFiles, bootstrap.AdoptionRefProviderStateAPIKeys,
-		bootstrap.AdoptionRefConfigRouting, bootstrap.AdoptionRefProviderStateProviders,
+		bootstrap.AdoptionRefClientAPIKeys, bootstrap.AdoptionRefCPAAuthFiles,
+		bootstrap.AdoptionRefProviderStateAPIKeys, bootstrap.AdoptionRefConfigRouting,
+		bootstrap.AdoptionRefConfigUnknown, bootstrap.AdoptionRefProviderStateProviders,
 	}
 	if err != nil || !reflect.DeepEqual(refs, want) {
 		t.Fatalf("bounded mapping: %v %v", refs, err)
