@@ -2,13 +2,17 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"log"
+	"net/http"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshadopt"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 )
 
 // adoptMigrationSourceClass is the only source class the v8 migration executor
@@ -70,12 +74,13 @@ func (a *freshApplication) runAdoptionMigration(ctx context.Context, record fres
 		log.Printf("Fresh adoption migration skipped: destination credential unavailable")
 		return ""
 	}
-	previous := freshstore.AdoptionSummary{}
-	if record.AdoptionSummary != nil {
-		previous = *record.AdoptionSummary
-	}
-	identity, revision := record.Operation.Identity, record.Operation.Revision
-	a.startAdoptionMigration(func(ctx context.Context) {
+	identity := record.Operation.Identity
+	return a.startAdoptionMigration(ctx, identity, func(ctx context.Context, current freshstore.Record) {
+		previous := freshstore.AdoptionSummary{}
+		if current.AdoptionSummary != nil {
+			previous = *current.AdoptionSummary
+		}
+		revision := current.Operation.Revision
 		// Both clients fix their DNS resolution once and are closed with the run.
 		// A source or destination that cannot be reached ends the run here; the
 		// adoption itself is already committed.
@@ -85,7 +90,7 @@ func (a *freshApplication) runAdoptionMigration(ctx context.Context, record fres
 			return
 		}
 		defer source.Close()
-		destination, err := freshadopt.NewDestination(ctx, freshadopt.Endpoint{BaseURL: record.Connection.CPABaseURL, ManagementKey: destinationManagementKey})
+		destination, err := freshadopt.NewDestination(ctx, freshadopt.Endpoint{BaseURL: current.Connection.CPABaseURL, ManagementKey: destinationManagementKey})
 		if err != nil {
 			log.Printf("Fresh adoption migration skipped: destination endpoint invalid")
 			return
@@ -95,7 +100,7 @@ func (a *freshApplication) runAdoptionMigration(ctx context.Context, record fres
 		// the reply has already returned, and every write this run makes has to
 		// outlive it.
 		checkpoint := persistAdoptionSummary(ctx, a, identity, revision, a.adoptionMigrationSession(ctx, sessionToken))
-		result, runErr := freshadopt.New(source, destination, record.Operation.Strategy.AdoptionDecisions).Run(ctx, previous, checkpoint)
+		result, runErr := freshadopt.New(source, destination, current.Operation.Strategy.AdoptionDecisions).Run(ctx, previous, checkpoint)
 		if runErr != nil {
 			// Only the bounded code is logged. A runner error can quote an upstream
 			// value, and the code is the whole diagnosis the log needs.
@@ -105,35 +110,51 @@ func (a *freshApplication) runAdoptionMigration(ctx context.Context, record fres
 		migrated, manual, failed := result.Summary.Counts()
 		log.Printf("Fresh adoption migration recorded %d migrated, %d manual, %d failed items", migrated, manual, failed)
 	})
-	// Started here or already in flight: either way the copy is running now. The
-	// reply says exactly that and nothing more; the per-item progress is the
-	// summary the record carries.
-	return adoptMigrationStateRunning
 }
 
-// startAdoptionMigration starts one background run and reports whether this call
-// started it. It is the single-flight lock of the migration: the check and the
+// startAdoptionMigration starts one background run and reports the migration
+// state the caller may reply with: `running` when this call started the run or a
+// run was already in flight, and an empty state when nothing was started.
+//
+// It is the single-flight lock of the migration: the re-read, the check and the
 // start happen under one mutex, so two concurrent committed replays cannot both
-// begin a copy, and the flag is cleared only when the run has finished so a
-// later replay can resume a run that stopped.
+// begin a copy, and the flag is cleared only when the run has finished so a later
+// replay can resume a run that stopped.
+//
+// The record the caller derived this start from was read before the lock, which
+// is exactly why it is not trusted here: a completion that held the lock while
+// this call waited has set `ProductComplete`, and a run started on the stale
+// record would write into a finished installation after the operator's own
+// changes. The record is therefore re-read and re-validated under the lock —
+// still this adoption, still committed, not complete — and the run receives that
+// fresh record rather than the one the caller held.
 //
 // The run is derived from the host lifetime, not from the request: the reply
 // returns at once, and the request that started the copy ends long before it
 // does. The host lifetime is the right parent because the copy writes into this
 // process's installation, so a host shutdown must cancel it rather than leave a
 // goroutine writing into a closing database; the deadline bounds it besides.
-func (a *freshApplication) startAdoptionMigration(run func(context.Context)) bool {
+func (a *freshApplication) startAdoptionMigration(ctx context.Context, identity bootstrap.FreshIdentity, run func(context.Context, freshstore.Record)) string {
 	a.adoptMigrationMu.Lock()
-	defer a.adoptMigrationMu.Unlock()
 	if a.adoptMigrationRunning {
-		return false
+		a.adoptMigrationMu.Unlock()
+		return adoptMigrationStateRunning
+	}
+	current, err := a.store.Load(ctx)
+	if err != nil || current.Operation.Identity != identity || !adoptionMigrationCommitted(current) {
+		// Not this adoption at committed any more — complete, re-staged or
+		// replaced: a run would write into an installation this replay no longer
+		// describes, so none is started.
+		a.adoptMigrationMu.Unlock()
+		return ""
 	}
 	basis := a.runCtx
 	if basis == nil {
 		basis = context.Background()
 	}
 	a.adoptMigrationRunning = true
-	ctx, cancel := context.WithTimeout(basis, adoptMigrationDeadline)
+	deadline, cancel := context.WithTimeout(basis, adoptMigrationDeadline)
+	a.adoptMigrationMu.Unlock()
 	go func() {
 		defer cancel()
 		defer func() {
@@ -141,18 +162,165 @@ func (a *freshApplication) startAdoptionMigration(run func(context.Context)) boo
 			a.adoptMigrationRunning = false
 			a.adoptMigrationMu.Unlock()
 		}()
-		run(ctx)
+		run(deadline, current)
 	}()
-	return true
+	return adoptMigrationStateRunning
 }
 
 // adoptMigrationInFlight reports whether a background copy is running right now.
 // It is the read half of the single-flight lock, so the completion path and the
-// start path agree on what "running" means.
+// start path agree on what "running" means. A caller that also decides something
+// under the lock takes `adoptMigrationMu` itself instead.
 func (a *freshApplication) adoptMigrationInFlight() bool {
 	a.adoptMigrationMu.Lock()
 	defer a.adoptMigrationMu.Unlock()
 	return a.adoptMigrationRunning
+}
+
+// adoptCompleteRequest is the only field a completion request may carry. An
+// adoption's conditions are the record's, so the body never states them.
+type adoptCompleteRequest struct {
+	// AcceptRetryable lets the operator finish over items a run could not read
+	// from the source and wrote nothing for. It never accepts an item whose write
+	// result is unknown: that one's only resolution is its own read-back.
+	AcceptRetryable bool `json:"acceptRetryable,omitempty"`
+}
+
+// adoptComplete finishes an adopted installation once its migration has really
+// processed every planned item.
+//
+// The checks run in this order and each one refuses with its own answer:
+//
+//  1. a copy is not running right now;
+//  2. the installation is still committed;
+//  3. the protected connection decrypts and the destination passes the Adopt
+//     posture — the real proof that this Manager owns the CPA it completes;
+//  4. the destination carries at least one client key, because a CPA with none
+//     accepts unauthenticated Gateway traffic;
+//  5. the run recorded `Finished` with every planned item present;
+//  6. no item is retryable, unless the request accepts them.
+//
+// Every one of them is decided while `adoptMigrationMu` is held, and the CAS that
+// sets `ProductComplete` runs under the same lock, so a run can never start
+// between the last check and the write. The lock is released before the reply is
+// written and before the usage startup runs: that startup samples the destination
+// over the network, and a migration run must not wait on a sample to take the
+// same lock.
+func (a *freshApplication) adoptComplete(w http.ResponseWriter, r *http.Request, op bootstrap.FreshOperation, record freshstore.Record, continuation string, freshAuth bool) {
+	var request adoptCompleteRequest
+	// An empty body is the ordinary call; any body is bounded and closed.
+	if r.Body != nil {
+		d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+		d.DisallowUnknownFields()
+		if err := d.Decode(&request); err != nil && !errors.Is(err, io.EOF) {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+	}
+	if op.ProductComplete {
+		// A replay is also the retry trigger for a completion whose usage startup
+		// failed. It changes nothing and re-asks the idempotent startup path.
+		a.startUsageCollection(op)
+		writeFreshJSON(w, op)
+		return
+	}
+	if op.Strategy.Stage != "committed" || record.Connection == nil || a.protector == nil || a.keyApply == nil ||
+		!a.keyApply.Targets(op, freshkeyapply.SurfaceKeyOperation) {
+		w.WriteHeader(http.StatusConflict)
+		return
+	}
+	managementKey, err := a.protector.UnprotectString(record.Connection.ManagementKey)
+	if err != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	a.adoptMigrationMu.Lock()
+	decision := a.decideAdoptionCompletion(r.Context(), op, record, managementKey, continuation, freshAuth, request)
+	a.adoptMigrationMu.Unlock()
+	if decision.code != "" {
+		writeFreshAdoptCompleteError(w, decision.status, decision.code, decision.retryable)
+		return
+	}
+	if decision.status != 0 {
+		w.WriteHeader(decision.status)
+		return
+	}
+	// Completion is the moment the install-derived CPA authority exists, so the
+	// same idempotent startup path as a resumed install runs now.
+	a.startUsageCollection(decision.next.Operation)
+	writeFreshJSON(w, decision.next.Operation)
+}
+
+// adoptCompletion is what the completion decided under the migration lock: the
+// completed record, or the refusal the operator acts on. Exactly one of the two
+// is populated — a zero status with a code is a coded refusal, a non-zero status
+// without a code is a bare HTTP refusal.
+type adoptCompletion struct {
+	next      freshstore.Record
+	status    int
+	code      string
+	retryable int
+}
+
+// decideAdoptionCompletion runs the completion's checks and its CAS. The caller
+// holds `adoptMigrationMu` and releases it before using the result: nothing here
+// may hold the lock across a network sample other than the proof itself, which
+// has to be decided with the run's single-flight flag.
+func (a *freshApplication) decideAdoptionCompletion(ctx context.Context, op bootstrap.FreshOperation, record freshstore.Record, managementKey, continuation string, freshAuth bool, request adoptCompleteRequest) adoptCompletion {
+	if a.adoptMigrationRunning {
+		// The operator retries once the copy has settled. Nothing is written.
+		return adoptCompletion{status: http.StatusConflict, code: "adopt_migration_running"}
+	}
+	// One authenticated read of the destination is conditions 3 and 4: the Adopt
+	// posture proves the key this Manager installed, and the snapshot carries the
+	// client keys the destination actually has.
+	if _, err := a.keyApply.AdoptedDestinationKeys(ctx, managementKey); err != nil {
+		return adoptCompletion{status: http.StatusServiceUnavailable, code: "adopt_destination_unproven"}
+	}
+	summary := freshstore.AdoptionSummary{}
+	if record.AdoptionSummary != nil {
+		summary = *record.AdoptionSummary
+	}
+	if !summary.Finished || len(summary.Items) < summary.Planned {
+		return adoptCompletion{status: http.StatusConflict, code: "adopt_migration_incomplete"}
+	}
+	retryable := 0
+	for _, item := range summary.Items {
+		if summary.Retryable(item.Item) {
+			retryable++
+		}
+	}
+	if retryable > 0 && !request.AcceptRetryable {
+		return adoptCompletion{status: http.StatusConflict, code: "adopt_migration_retryable", retryable: retryable}
+	}
+	next, err := a.store.Update(ctx, op.Identity, op.Revision, func(record *freshstore.Record) error {
+		if freshAuth {
+			if err := a.authority.ValidateContinuation(*record, continuation); err != nil {
+				return err
+			}
+		}
+		if record.Operation.Strategy.Stage != "committed" || record.Operation.Strategy.Strategy != bootstrap.AdoptExisting || record.Operation.ProductComplete {
+			return freshstore.ErrConflict
+		}
+		record.Operation.ProductComplete = true
+		return nil
+	})
+	if err != nil {
+		return adoptCompletion{status: http.StatusConflict}
+	}
+	return adoptCompletion{next: next}
+}
+
+// writeFreshAdoptCompleteError refuses one adoption completion with the code the
+// operator acts on, and the retryable count when that is the reason.
+func writeFreshAdoptCompleteError(w http.ResponseWriter, status int, code string, retryable int) {
+	body := map[string]any{"code": code}
+	if retryable > 0 {
+		body["retryable"] = retryable
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	writeFreshJSON(w, body)
 }
 
 // adoptionMigrationSession re-reads the installation record and re-validates the
@@ -238,12 +406,15 @@ func persistAdoptionSummary(ctx context.Context, a *freshApplication, identity b
 	}
 }
 
-// adoptionMigrationCommitted reports whether one record is still the committed
-// adoption this migration writes into.
+// adoptionMigrationCommitted reports whether one record is still the committed,
+// unfinished adoption this migration writes into. A complete installation is
+// never a destination for a run: the copy would overwrite what the operator chose
+// after completion, and no later replay may reopen it.
 func adoptionMigrationCommitted(record freshstore.Record) bool {
 	return record.Operation.Strategy.Strategy == bootstrap.AdoptExisting &&
 		record.Operation.Strategy.SourceClass == adoptMigrationSourceClass &&
-		record.Operation.Strategy.Stage == "committed"
+		record.Operation.Strategy.Stage == "committed" &&
+		!record.Operation.ProductComplete
 }
 
 // adoptionMigrationCode bounds a migration error to the code the log may carry.

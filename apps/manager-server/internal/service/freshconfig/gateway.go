@@ -319,6 +319,20 @@ func (s *Service) EnableManaged(endpoint string) {
 	s.endpoint = strings.TrimRight(endpoint, "/")
 }
 
+// SetPostureSelector installs the destination posture of the committed strategy
+// this service was switched onto. A Manager-owned installation is either New
+// Managed or Adopt, and the two prove different destination rules, so the page
+// must ask the installation authority rather than assume the New Managed
+// template. The private and External profiles never call it.
+func (s *Service) SetPostureSelector(select_ cpa.PostureSelector) {
+	if s == nil {
+		return
+	}
+	if s.transport != nil {
+		s.transport.SetPostureSelector(select_)
+	}
+}
+
 // ExternalAuthority resolves the committed External target at one generation:
 // the address and the management credential of the CPA this installation owns.
 // The page never reads the Manager settings itself, so only the authority that

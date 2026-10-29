@@ -688,12 +688,113 @@ container mounts its own volume and never the Manager store. A repo test asserts
 that topology against `docker-compose.yml` so the claim anchor, the Fresh CAS and
 the Key records cannot silently become reachable from the Runtime child.
 
-Adoption stops at a `committed` checkpoint plus the protected destination
-snapshot in this lane; `POST complete` still answers 409 for
-`strategy = adopt_existing` (`fresh.go:426`), so adoption does not yet reach
-product completion the way New Managed does. Completion arrives in a later
-slice. What it already writes is its own `external:sha256:` target identity, and
-it keeps `strategy = adopt_existing`; the prefixes are never merged.
+A committed adoption carries its own `external:sha256:` target identity and keeps
+`strategy = adopt_existing`; the prefixes are never merged. From that point it
+behaves like a New Managed installation: the Keys page, gateway configuration
+writes, gateway admission, Key usage, runtime status and operations all answer
+through the same install-derived authority (see *The Adopt installation
+authority* below).
+
+That authority covers exactly two source classes: `new_managed`, and
+`adopt_existing` with source class `network_existing`. `legacy_managed` is
+Upgrade's source class — a destination this Fresh lane never staged, read or
+verified — so it is granted no install-derived authority at all; the same
+predicate refuses it on the Keys page, admission, usage and the update channel.
+An `adopt_existing` checkpoint with no source class is refused the same way.
+
+#### The Adopt installation authority
+
+One predicate decides which strategies this Manager owns a destination for
+(`freshkeyapply.ManagerOwnedStrategy`): New Managed and Adopt. Connect External
+is the user's own CPA and is never answered by it — it keeps its own connection,
+its own key routes and its own completion path.
+
+The authority is derived, never cached (`cmd/…/fresh_managed.go`): the committed
+checkpoint and the protected Manager connection must still name the normalized
+`CPAUpstreamURL`, the checkpoint's `DestinationConnectionIdentity` must be the
+identity its strategy derives — `managed:sha256:` for New Managed,
+`external:sha256:` for Adopt — and the decrypted credential must be the
+64-character install-derived management key. A mismatch fails closed instead of
+rebinding.
+
+**Destination posture.** The authenticated read of `/v8/management/config` with
+that credential is the real proof. New Managed proves the Supervisor's exact
+template; Adopt proves its own rules, because an adopted destination legitimately
+carries the source's content:
+
+| rule | New Managed | Adopt |
+| --- | --- | --- |
+| client keys | 1–2 canonical Manager key shapes | 1–128 unique printable source keys |
+| root sections | exactly the seven template roots | a subset of CPA v8's own vocabulary (`config-version`, `api-keys`, `plugins`, `quota-exceeded`, `client`, `server`, `management`, `access`, `credentials`, `routing`, `requests`, `oauth`, `upstream`, `multimedia`, `observability`), no exact count |
+| required roots | the template's | the template's: `config-version`, `server`, `management`, `access`, `oauth`, `plugins`, `observability` |
+| `observability.usage.usage-statistics-enabled` | `true` | `true` |
+| `plugins.enabled` | either (the operator's own switch) | either (the operator's own switch) |
+| management digest | bcrypt | bcrypt |
+
+Both postures keep the same Supervisor-owned facts: `server.host` 0.0.0.0 with
+port 8317, `management.allow-remote` on with the control and update panels off,
+the destination `auth-dir`, exactly one `access.api-keys` leaf, the closed
+`plugins` key set, and the Supervisor plugin root. The plugin switch itself is
+the operator's on both strategies — the plugin page opens for an adopted
+installation too, so a saved value can never invalidate a proof — and the
+recorded opt-in only drives the first start. The posture is
+selected from the committed strategy (`cpa.PostureFor`) through a selector
+installed on the transport, so a strategy the selector does not own — Connect
+External, or an unset one — resolves to a refusing posture rather than the
+loosest one. `KeySnapshot`, `WriteKeySet`, `InstallOne`, the derived key grant,
+the target proof and `DefaultInstallCPAAuthorityProven` all read that posture, so
+gateway admission follows the same answer.
+
+**Usage statistics** are on for both adopted classes
+(`lifecycle/destination.go`, `managedSourceClass`): the switch is a template fact
+of the installation this Supervisor staged, not the operator's original CPA
+posture, and Key usage and the Key workspace read the destination's own
+aggregation. A source CPA that is not staged here is never rebuilt, so its
+posture is untouched.
+
+**Plugin opt-in** is accepted for Adopt and persisted on the checkpoint and in
+the protected destination snapshot, exactly as for New Managed, where it drives
+the template the Supervisor writes at first start. A *strategy replay* that
+presents the other value is refused with `adopt_plugin_optin_conflict`, because
+that is a different staged destination; the switch the destination carries
+afterwards is the operator's and is not part of the posture. Connect External
+still refuses the opt-in (`fresh_strategy_plugin_scope_conflict`): that plugin
+root is the user's own process, not this installation's.
+
+**Completion** (`POST complete`, `cmd/…/fresh_adopt_migration.go`) is decided
+while `adoptMigrationMu` is held — the same mutex `startAdoptionMigration` takes
+— so a migration run can never start between the conditions and the CAS:
+
+1. a copy is not running → 409 `adopt_migration_running`;
+2. the installation is still `committed`;
+3. the connection decrypts and an authenticated read proves the Adopt posture →
+   503 `adopt_destination_unproven`;
+4. the destination carries at least one client key (part of the same read);
+5. the run recorded `Finished` with every planned item present → 409
+   `adopt_migration_incomplete`;
+6. no item is retryable, unless the body carries `{"acceptRetryable": true}` →
+   409 `adopt_migration_retryable` with `{"retryable": n}`.
+
+Only then does the CAS set `ProductComplete`, still under the lock. The lock is
+released before the reply is written and before the idempotent usage-collection
+startup, which samples the destination over the network: a migration run must not
+wait on that sample to take the same mutex. Manual items never block completion:
+a manual outcome is the operator's own work on the destination, and the run
+settled it.
+
+`Planned` is the plan the run fixed after its preflight and before its first
+write: what the record already held plus every item the run was going to settle.
+`Finished` is written by the migration in its final checkpoint only when the item
+list reached that plan — it is never inferred from the list, because a run
+stopped at an item leaves a list that looks exactly like a complete one. A stop
+therefore leaves `Finished` false with `len(Items) < Planned`, which is what the
+completion refuses.
+
+**The update channel stays New Managed only** (`cmd/…/fresh_updates.go`). The
+Fresh version-update wiring that replaces a Supervisor-staged artifact is Later,
+and until it exists there is no update path this lane may offer an adopted
+installation; nothing about the operator's own CPA is the reason.
+
 
 #### Migration after the destination is committed
 
@@ -764,9 +865,12 @@ the run at that item, and the item in flight is the only one a resume may repeat
 Manual and failed items are operator work carrying a concrete instruction: they
 never fail the adoption, and a source that cannot be read leaves the adoption
 committed with an empty summary. A committed replay of `POST strategy` is the
-resume path and continues from the durable prefix. Step 4's completion
-conditions read this summary; the authority generalization, usage enablement,
-model management and the Full Web Adopt flow are not part of this lane.
+resume path and continues from the durable prefix; a replay that was already
+waiting for the migration lock when a completion took it starts nothing, because
+the start re-reads the record under that lock and refuses a completed or
+re-staged installation. Step 4's completion conditions read this summary; the
+authority generalization and usage enablement are described above, while model
+management and the Full Web Adopt flow are not part of this lane.
 
 The per-item summary is the operational record of the copy. It is deliberately
 *not* itself a qualification. `freshAdoptionRefRules`

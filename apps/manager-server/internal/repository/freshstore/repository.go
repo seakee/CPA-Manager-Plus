@@ -385,7 +385,7 @@ func (r *repository) Update(ctx context.Context, id bootstrap.FreshIdentity, rev
 	if before.AdoptionCiphertext != "" && before.AdoptionCiphertext != v.AdoptionCiphertext {
 		return Record{}, ErrConflict
 	}
-	if err = validAdoptionSummaryUpdate(before.AdoptionSummary, v.AdoptionSummary); err != nil {
+	if err = validAdoptionSummaryUpdate(before.AdoptionSummary, v.AdoptionSummary, before.Operation.ProductComplete); err != nil {
 		return Record{}, ErrConflict
 	}
 	if before.Operation.Strategy.Strategy == bootstrap.AdoptExisting {

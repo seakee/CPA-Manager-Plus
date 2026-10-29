@@ -39,6 +39,10 @@ type ManagedInstall struct {
 	ArtifactID    string
 	BaseURL       string
 	ManagementKey string
+	// Strategy is the committed Fresh strategy that staged the destination: New
+	// Managed or Adopt. It selects the destination posture, so it is a fact of the
+	// installation and never a caller input.
+	Strategy string
 }
 
 // ManagedSource reloads and validates that authority on every call. It must
@@ -67,6 +71,9 @@ func NewManaged(r *repo.Repository, keys *freshkeys.Service, runtime runtimeserv
 		if install.RunID == "" || install.Generation == "" || install.Identity == "" || install.ArtifactID == "" || len(install.ManagementKey) != 64 {
 			return Permit{}, ErrUnavailable
 		}
+		if _, owned := cpa.PostureFor(install.Strategy); !owned {
+			return Permit{}, ErrUnavailable
+		}
 		// The credential and the transport must address the same CPA; a moved
 		// destination is a different installation, never a silent rebind.
 		if cpa.NormalizeBaseURL(install.BaseURL) != cpa.NormalizeBaseURL(s.endpoint) {
@@ -79,7 +86,21 @@ func NewManaged(r *repo.Repository, keys *freshkeys.Service, runtime runtimeserv
 		}, nil
 	}
 	s.keyOperations = true
-	s.wire = cpa.NewTransportForEndpoint(endpoint)
+	transport := cpa.NewTransportForEndpoint(endpoint)
+	// The destination posture follows the committed strategy, never the transport's
+	// default: an adopted destination is proven against the adopted rules, and a
+	// selector that cannot answer refuses instead of proving the loose posture.
+	transport.SetPostureSelector(func() (cpa.DestinationPosture, bool) {
+		if source == nil {
+			return cpa.DestinationPosture{}, false
+		}
+		install, err := source(context.Background())
+		if err != nil {
+			return cpa.DestinationPosture{}, false
+		}
+		return cpa.PostureFor(install.Strategy)
+	})
+	s.wire = transport
 	s.keyPermit = s.managedKeyGrant
 	return s
 }
@@ -126,10 +147,14 @@ func (s *Service) Targets(op bootstrap.FreshOperation, surface Surface) bool {
 	}
 	switch s.profile {
 	case ProfileManaged:
-		// One install-derived authority: the committed managed destination is the
-		// credential's destination on every surface, so keys, admission and
-		// configuration share exactly one answer.
-		return op.Strategy.Strategy == bootstrap.NewManaged && strings.HasPrefix(op.Strategy.DestinationConnectionIdentity, "managed:sha256:")
+		// One install-derived authority: the committed Manager-owned destination
+		// is the credential's destination on every surface, so keys, admission and
+		// configuration share exactly one answer. New Managed and Adopt both
+		// qualify; an adopted destination is bound by the `external:` digest the
+		// adoption recorded, so the prefix is read from the strategy and never
+		// guessed from the value.
+		prefix, owned := managerOwnedDestinationPrefix(op.Strategy)
+		return owned && strings.HasPrefix(op.Strategy.DestinationConnectionIdentity, prefix)
 	case ProfilePrivate:
 		// The private H1/direct profile names one attested runtime and artifact;
 		// the Host permit remains the write authority for whatever it names.
@@ -203,6 +228,30 @@ func (s *Service) managedKeyGrant(ctx context.Context, operationID, step string)
 		RunID: p.RunID, Generation: p.Generation, SourceSHA256: snap.SourceSHA256,
 		IssuedAtMS: now.UnixMilli(), ExpiresAtMS: expires,
 	}, nil
+}
+
+// AdoptedDestinationKeys is completion's authenticated read of an adopted
+// destination: it proves the Adopt posture with the install-derived credential
+// and returns the client keys the destination actually carries. It never writes,
+// and it refuses a destination whose posture is a New Managed template, because
+// that is a different installation.
+//
+// Completion calls it before it decides anything, so "the CPA this Manager
+// installed is still the CPA it holds" is a fact it observed rather than one it
+// asserted from the checkpoint.
+func (s *Service) AdoptedDestinationKeys(ctx context.Context, managementKey string) ([]string, error) {
+	if s == nil || s.profile != ProfileManaged || len(managementKey) != 64 {
+		return nil, ErrUnavailable
+	}
+	w, ok := s.wire.(keyWire)
+	if !ok {
+		return nil, ErrUnavailable
+	}
+	snap, err := w.KeySnapshot(ctx, managementKey)
+	if err != nil || len(snap.SourceSHA256) != 64 || len(snap.Keys) == 0 {
+		return nil, ErrUnavailable
+	}
+	return snap.Keys, nil
 }
 
 // targetProof is the caller-observed target handed to the single write. A

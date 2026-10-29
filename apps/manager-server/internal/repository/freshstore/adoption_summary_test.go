@@ -144,6 +144,105 @@ func TestAdoptionSummaryEnforcesItsSizeBounds(t *testing.T) {
 	}
 }
 
+// A run that stops early records a plan it never reached, and completion reads
+// exactly that: `Finished` plus the item count against `Planned`. The marker may
+// only move forward once the installation is complete, because reopening a
+// finished migration would claim a finished installation still has items to copy.
+func TestAdoptionSummaryFinishedIsMonotoneAfterCompletion(t *testing.T) {
+	store, id, record := adoptionSummaryStore(t)
+	item := migratedItem("config:routing.strategy")
+	finished := AdoptionSummary{Items: []AdoptionItem{item}, Finished: true, Planned: 1}
+	record, err := writeSummary(t, store, id, record, finished)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened := finished
+	reopened.Finished = false
+	// Before completion a later run may reopen the marker: it writes its own
+	// unfinished plan, which is what a replay that stopped again looks like.
+	if record, err = writeSummary(t, store, id, record, reopened); err != nil {
+		t.Fatalf("an unfinished replay was refused before completion: %v", err)
+	}
+	record, err = writeSummary(t, store, id, record, finished)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err = store.Update(t.Context(), id, record.Operation.Revision, func(r *Record) error {
+		// Completion needs a committed routing checkpoint and an initialized
+		// admin, which this fixture has not written yet.
+		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+			OperationID: r.Operation.Identity.OperationID, Revision: 1,
+			Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+		}
+		r.Operation.ProductComplete = true
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeSummary(t, store, id, record, reopened); !errors.Is(err, ErrConflict) {
+		t.Fatalf("a completed installation reopened its migration: %v", err)
+	}
+}
+
+// `Planned` is the plan, so the store bounds it and refuses a finished run whose
+// item list never reached it. Both halves are what make completion's
+// `len(Items) >= Planned` guard mean something.
+func TestAdoptionSummaryPlannedIsBounded(t *testing.T) {
+	item := migratedItem("config:routing.strategy")
+	for name, summary := range map[string]AdoptionSummary{
+		"negative":       {Items: []AdoptionItem{item}, Planned: -1},
+		"past the bound": {Items: []AdoptionItem{item}, Planned: maxAdoptionItems + 1},
+		"finished short": {Items: []AdoptionItem{item}, Finished: true, Planned: 2},
+	} {
+		if err := validAdoptionSummary(summary); err == nil {
+			t.Fatalf("%s plan accepted", name)
+		}
+	}
+	// An unfinished run whose plan is larger than its prefix is the ordinary
+	// state of a stop, and a finished run that reached its plan is the ordinary
+	// state of an end.
+	if err := validAdoptionSummary(AdoptionSummary{Items: []AdoptionItem{item}, Planned: 2}); err != nil {
+		t.Fatalf("an unfinished plan was refused: %v", err)
+	}
+	if err := validAdoptionSummary(AdoptionSummary{Items: []AdoptionItem{item}, Finished: true, Planned: 1}); err != nil {
+		t.Fatalf("a finished plan was refused: %v", err)
+	}
+	store, id, record := adoptionSummaryStore(t)
+	if _, err := writeSummary(t, store, id, record, AdoptionSummary{Items: []AdoptionItem{item}, Finished: true, Planned: 2}); err == nil {
+		t.Fatal("the store recorded a finished run short of its plan")
+	}
+	loaded, err := store.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.AdoptionSummary != nil {
+		t.Fatalf("a refused summary was recorded anyway: %+v", loaded.AdoptionSummary)
+	}
+}
+
+// The clone is what a CAS writes back, so it may never share an item with the
+// record it was read from: a later in-place edit would rewrite a recorded result
+// without going through the store.
+func TestAdoptionSummaryCloneIsIndependent(t *testing.T) {
+	original := &AdoptionSummary{Items: []AdoptionItem{migratedItem("config:routing.strategy")}, Finished: true, Planned: 1}
+	clone := cloneAdoptionSummary(original)
+	if clone == original || clone.Planned != 1 || !clone.Finished || len(clone.Items) != 1 {
+		t.Fatalf("the clone does not describe the same summary: %+v", clone)
+	}
+	if &clone.Items[0] == &original.Items[0] {
+		t.Fatal("the clone shares its item array with the record")
+	}
+	clone.Items[0] = migratedItem("config:routing.cooldown")
+	clone.Planned, clone.Finished = 4, false
+	if original.Items[0].Item != "config:routing.strategy" || original.Planned != 1 || !original.Finished {
+		t.Fatalf("a clone write reached the record: %+v", *original)
+	}
+	if cloneAdoptionSummary(nil) != nil {
+		t.Fatal("a nil summary cloned to a value")
+	}
+}
+
 // The absent-at-source outcome is part of the recorded vocabulary: it is what
 // keeps a replay from overwriting a value the operator set after completion.
 func TestAdoptionSummaryAcceptsAbsentAtSource(t *testing.T) {

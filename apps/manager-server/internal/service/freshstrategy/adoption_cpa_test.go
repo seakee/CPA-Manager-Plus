@@ -41,6 +41,15 @@ const (
 	legacyTransitionTreeKey   = "CPAMP_TEST_FRESH_TRANSITION_TREE"
 	evidenceSourceHeadKey     = "CPAMP_TEST_FRESH_TRANSITION_SOURCE_HEAD"
 	adoptionResourceOutputKey = "CPAMP_TEST_FRESH_RESOURCE_OUT_DIR"
+	// destinationAddress is the listener the Runtime image stages: Compose sets
+	// CPAMP_RUNTIME_CPA_ADDR to this address and CPAMP_RUNTIME_CPA_UID/GID to the
+	// image's CPA identity, so the destination document carries
+	// server.host 0.0.0.0 and server.port 8317. The Adopt posture pins both, so
+	// evidence against any other listener would prove a destination the product
+	// never stages.
+	destinationAddress = "127.0.0.1:8317"
+	destinationCpaUID  = "10001"
+	destinationCpaGID  = "10001"
 )
 
 // These controlled-source runs are implementation evidence, not an independent
@@ -72,13 +81,52 @@ func TestAdoptionExactCPAV8WithSupervisor(t *testing.T) {
 		t.Run(string(class), func(t *testing.T) {
 			root := t.TempDir()
 			sourceRoot := filepath.Join(root, "source")
-			targetRoot := filepath.Join(root, "target")
+			// The Supervisor root is named exactly as it is in the installation
+			// (`<runtime root>/supervisor`, journal beside the destination). The
+			// Adopt posture pins the Supervisor-owned directories, so a harness that
+			// laid them out differently would prove a destination the product never
+			// stages.
+			targetRoot := filepath.Join(root, "supervisor")
 			for _, dir := range []string{sourceRoot, targetRoot, filepath.Join(sourceRoot, "auth")} {
 				if err := os.Mkdir(dir, 0o700); err != nil {
 					t.Fatal(err)
 				}
 			}
-			sourceAddr, targetAddr, runtimeAddr := freeTestAddress(t), freeTestAddress(t), freeTestAddress(t)
+			if os.Geteuid() != 0 {
+				// The image's layout is root-owned: /runtime is 0711 and the
+				// Supervisor root is root:<cpa gid> 0710, with the CPA child running as
+				// the image identity. Without that, the destination cannot start.
+				t.Fatal("the exact destination layout requires root")
+			}
+			if err := os.Chmod(root, 0o711); err != nil {
+				t.Fatal(err)
+			}
+			// In the image the runtime root sits under a traversable parent (`/` is
+			// 0755). The testing package's own temp parent is 0700 root-owned, so the
+			// CPA identity could not reach the runtime root at all: CPA v8 failed to
+			// open its own config with permission denied and never listened, which no
+			// product proof can succeed against. Make the path to the runtime root
+			// traversable for the child, as the image's is; the runtime root and the
+			// Supervisor root keep the image's modes.
+			if err := os.Chmod(filepath.Dir(root), 0o711); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chown(targetRoot, 0, 10001); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(targetRoot, 0o710); err != nil {
+				t.Fatal(err)
+			}
+			// The destination port is the image's single port, so consecutive
+			// subtests wait for the previous child to release it.
+			waitTest(t, func() bool {
+				listener, err := net.Listen("tcp", destinationAddress)
+				if err != nil {
+					return false
+				}
+				return listener.Close() == nil
+			})
+			sourceAddr, targetAddr, runtimeAddr := freeTestAddress(t), destinationAddress, freeTestAddress(t)
 			sourceURL := "http://" + sourceAddr
 			sourceKey := "isolated-source-management-key"
 			clientKeys := []string{"isolated-client-one", "isolated-client-two"}
@@ -175,7 +223,8 @@ func TestAdoptionExactCPAV8WithSupervisor(t *testing.T) {
 			token := "isolated-runtime-transport-token"
 			supervisor := exec.Command(supervisorPath)
 			supervisor.Dir = targetRoot
-			supervisor.Env = append(os.Environ(), "CPAMP_RUNTIME_ADDR="+runtimeAddr, "CPAMP_RUNTIME_IDENTITY=isolated-adopt-runtime", "CPAMP_RUNTIME_TOKEN="+token, "CPAMP_RUNTIME_JOURNAL_PATH="+filepath.Join(targetRoot, "operations.sqlite"), "CPAMP_CPA_EXECUTABLE="+cpaPath, "CPAMP_CPA_ARTIFACT_MANIFEST="+manifest, "CPAMP_RUNTIME_CPA_ADDR="+targetAddr)
+			supervisor.Env = append(os.Environ(), "CPAMP_RUNTIME_ADDR="+runtimeAddr, "CPAMP_RUNTIME_IDENTITY=isolated-adopt-runtime", "CPAMP_RUNTIME_TOKEN="+token, "CPAMP_RUNTIME_JOURNAL_PATH="+filepath.Join(targetRoot, "operations.sqlite"), "CPAMP_CPA_EXECUTABLE="+cpaPath, "CPAMP_CPA_ARTIFACT_MANIFEST="+manifest, "CPAMP_RUNTIME_CPA_ADDR="+targetAddr,
+				"CPAMP_RUNTIME_CPA_UID="+destinationCpaUID, "CPAMP_RUNTIME_CPA_GID="+destinationCpaGID)
 			if err = supervisor.Start(); err != nil {
 				t.Fatal(err)
 			}
@@ -365,6 +414,32 @@ func TestAdoptionExactCPAV8WithSupervisor(t *testing.T) {
 			_ = v0Response.Body.Close()
 			if _, err := cpa.ReadLegacyManagedAdoptionSnapshot(t.Context(), "http://"+targetAddr, snapshot.Destination.ManagementKey); !errors.Is(err, cpa.LegacySourceProfileUnsupported) {
 				t.Fatalf("real v8 v0 endpoint was accepted as the accepted legacy source profile: %v", err)
+			}
+			// The adopted destination carries the installation's own template facts:
+			// usage statistics are on, because Key usage and the Key workspace read
+			// the destination's aggregation, and the Adopt posture proves with the
+			// install-derived management credential.
+			var template struct {
+				Observability struct {
+					Usage struct {
+						Enabled *bool `json:"usage-statistics-enabled"`
+					} `json:"usage"`
+				} `json:"observability"`
+			}
+			configRequest, _ := http.NewRequest(http.MethodGet, "http://"+targetAddr+"/v8/management/config", nil)
+			configRequest.Header.Set("Authorization", "Bearer "+snapshot.Destination.ManagementKey)
+			configResponse, err := directHTTP.Do(configRequest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			configBody, _ := io.ReadAll(configResponse.Body)
+			_ = configResponse.Body.Close()
+			if configResponse.StatusCode != http.StatusOK || json.Unmarshal(configBody, &template) != nil ||
+				template.Observability.Usage.Enabled == nil || !*template.Observability.Usage.Enabled {
+				t.Fatalf("the adopted destination does not record usage statistics: %s", configBody)
+			}
+			if snap, snapErr := cpa.ProveAdoptedDestination(t.Context(), "http://"+targetAddr, snapshot.Destination.ManagementKey); snapErr != nil || len(snap) == 0 {
+				t.Fatalf("the adopted destination does not prove the install-derived authority: %v", snapErr)
 			}
 			directHTTP.CloseIdleConnections()
 			// Exercise the migrated kinds for real: the adoption executor copies
