@@ -59,6 +59,15 @@ type AdoptionItem struct {
 // place a per-item result survives a Manager restart.
 type AdoptionSummary struct {
 	Items []AdoptionItem `json:"items"`
+	// Finished records that one run processed every item it planned: each item is
+	// settled or recorded as retryable. It is the run-finished marker completion
+	// reads, and it is never inferred from the item list, because a run that
+	// stopped early leaves that list looking no different.
+	Finished bool `json:"finished,omitempty"`
+	// Planned is the size of the plan that run made. A later replay run that
+	// settles more items rewrites it with its own plan, so `Finished` together
+	// with `len(Items) >= Planned` means that run really reached every item.
+	Planned int `json:"planned,omitempty"`
 }
 
 // Index returns the position of one item name in the recorded order.
@@ -205,6 +214,12 @@ func validAdoptionSummary(summary AdoptionSummary) error {
 	if len(summary.Items) > maxAdoptionItems {
 		return errors.New("adoption summary exceeds its item bound")
 	}
+	if summary.Planned < 0 || summary.Planned > maxAdoptionItems {
+		return errors.New("adoption summary plan exceeds its bound")
+	}
+	if summary.Finished && len(summary.Items) < summary.Planned {
+		return errors.New("a finished adoption run recorded fewer items than it planned")
+	}
 	seen := map[string]bool{}
 	for _, item := range summary.Items {
 		if item.Item == "" || len(item.Item) > maxAdoptionItemName || strings.TrimSpace(item.Item) != item.Item || seen[item.Item] {
@@ -239,12 +254,18 @@ func validAdoptionSummary(summary AdoptionSummary) error {
 // a run that wrote nothing recorded nothing to protect, so the first real
 // outcome of that item replaces it. It can never replace anything else, and it
 // never moves an item.
-func validAdoptionSummaryUpdate(before, after *AdoptionSummary) error {
+func validAdoptionSummaryUpdate(before, after *AdoptionSummary, productComplete bool) error {
 	if before == nil {
 		return nil
 	}
 	if after == nil || len(after.Items) < len(before.Items) {
 		return errors.New("adoption summary may not shrink")
+	}
+	// `Finished` may only move forward. A completed installation never goes back
+	// to an unfinished migration: a run that reappears after `ProductComplete`
+	// would claim it still has items to copy into a finished destination.
+	if before.Finished && !after.Finished && productComplete {
+		return errors.New("a completed installation may not reopen its migration")
 	}
 	for index, item := range before.Items {
 		if after.Items[index] == item {
@@ -262,7 +283,7 @@ func cloneAdoptionSummary(summary *AdoptionSummary) *AdoptionSummary {
 	if summary == nil {
 		return nil
 	}
-	copied := AdoptionSummary{Items: append([]AdoptionItem(nil), summary.Items...)}
+	copied := AdoptionSummary{Items: append([]AdoptionItem(nil), summary.Items...), Finished: summary.Finished, Planned: summary.Planned}
 	return &copied
 }
 

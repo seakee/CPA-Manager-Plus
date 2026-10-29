@@ -20,6 +20,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/fresh"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshadopt"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 )
@@ -56,6 +57,10 @@ type migrationFakeCPA struct {
 	// beforeDownload blocks every credential download until it returns. It is
 	// how a test holds the copy inside a source read.
 	beforeDownload func()
+	// downloadFailures fails these credential downloads with a 500, which is how
+	// a source read that wrote nothing is reproduced: the item is recorded as
+	// retryable and the next run may attempt it again.
+	downloadFailures map[string]bool
 }
 
 func newMigrationFakeCPA(t *testing.T) *migrationFakeCPA {
@@ -63,7 +68,8 @@ func newMigrationFakeCPA(t *testing.T) *migrationFakeCPA {
 	fake := &migrationFakeCPA{
 		credentials: map[string][]byte{}, types: map[string]string{},
 		disabled: map[string]bool{}, runtimeOnly: map[string]bool{}, refuse: map[string]bool{},
-		writeFailures: map[string]int{},
+		writeFailures:    map[string]int{},
+		downloadFailures: map[string]bool{},
 		config:        map[string]any{"config-version": json.Number("8")},
 	}
 	fake.server = httptest.NewServer(http.HandlerFunc(fake.serve))
@@ -112,6 +118,11 @@ func (f *migrationFakeCPA) serve(w http.ResponseWriter, r *http.Request) {
 		f.downloadCredential(w, r)
 	case path == "/v8/management/credentials/status" && r.Method == http.MethodPatch:
 		f.patchStatus(w, r)
+	case path == "/v8/management/config.yaml" && r.Method == http.MethodGet:
+		f.mu.Lock()
+		body, _ := json.Marshal(f.config)
+		f.mu.Unlock()
+		_, _ = w.Write(body)
 	case path == "/v8/management/config" && r.Method == http.MethodGet:
 		f.mu.Lock()
 		body, _ := json.Marshal(f.config)
@@ -174,6 +185,10 @@ func (f *migrationFakeCPA) downloadCredential(w http.ResponseWriter, r *http.Req
 	f.mu.Unlock()
 	if gate != nil {
 		gate()
+	}
+	if f.downloadFailures[name] {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	if !ok {
 		w.WriteHeader(http.StatusNotFound)
@@ -408,6 +423,12 @@ func newAdoptMigrationFixture(t *testing.T) *adoptMigrationFixture {
 	destination.config["server"] = map[string]any{"host": "0.0.0.0", "port": json.Number("8317")}
 	destination.config["plugins"] = map[string]any{"enabled": false, "dir": "/supervisor/plugins"}
 	destination.config["oauth"] = map[string]any{"auth-dir": "/destination/auth"}
+	// The staged destination presents the Adopt posture completion proves: the
+	// Supervisor template's version stamp, remote management with the digest CPA
+	// writes back, and the usage switch this Supervisor records.
+	destination.config["config-version"] = json.Number("8")
+	destination.config["management"] = map[string]any{"allow-remote": true, "secret-key": "$2a$10$abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXY12", "disable-control-panel": true, "disable-auto-update-panel": true}
+	destination.config["observability"] = map[string]any{"logs": map[string]any{"logging-to-file": false}, "usage": map[string]any{"usage-statistics-enabled": true}}
 	// StageDestination installs the source's client keys on the destination, so
 	// the committed destination must already answer with them for
 	// cpa.VerifyV8Adoption to accept the takeover.
@@ -444,6 +465,10 @@ func newAdoptMigrationFixture(t *testing.T) *adoptMigrationFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Completion proves the destination with the install-derived authority, so the
+	// fixture is wired exactly like the default profile: the managed source reads
+	// the committed checkpoint and the protected connection.
+	app.keyApply = freshkeyapply.NewManaged(nil, nil, nil, destination.URL(), managedInstallSource(app.store, opened.Protector, destination.URL()))
 	fixture.app, fixture.record = app, record
 	return fixture
 }
@@ -977,19 +1002,23 @@ func TestCompletionIsRefusedWhileTheMigrationIsRunning(t *testing.T) {
 			before.Operation.Revision, after.Operation.Revision, adoptionItemCount(before), adoptionItemCount(after))
 	}
 
-	// The run finishes, and the same request now reaches the adoption's own
-	// completion answer rather than being told a migration is running.
+	// The run finishes, and the same request now completes the installation: the
+	// migration processed every planned item, the destination still proves the
+	// install-derived authority, and the completion conditions are met.
 	release()
 	fixture.wait()
 	settled := fixture.complete(t)
-	if settled.Code != http.StatusConflict {
-		t.Fatalf("the adopt completion answered %d: %s", settled.Code, settled.Body.String())
+	if settled.Code != http.StatusOK {
+		t.Fatalf("the settled adopt completion answered %d: %s", settled.Code, settled.Body.String())
 	}
-	if json.Unmarshal(settled.Body.Bytes(), &refusal) == nil && refusal.Code == "adopt_migration_running" {
-		t.Fatal("a settled run still refused completion as running")
+	if !fixture.reload(t).Operation.ProductComplete {
+		t.Fatal("a settled adoption was not completed")
 	}
-	if fixture.reload(t).Operation.ProductComplete {
-		t.Fatal("an adoption completion completed the installation")
+	// A replay of an already-complete installation is idempotent and changes
+	// nothing about the migration record.
+	completed := fixture.reload(t)
+	if replay := fixture.complete(t); replay.Code != http.StatusOK || adoptionItemCount(fixture.reload(t)) != adoptionItemCount(completed) {
+		t.Fatalf("completion replay answered %d", replay.Code)
 	}
 }
 
@@ -1065,5 +1094,111 @@ func TestCheckpointRefusesAnIdentityTheRecordDoesNotOwn(t *testing.T) {
 	}
 	if after := fixture.reload(t); adoptionItemCount(after) != 0 {
 		t.Fatalf("a refused checkpoint recorded %d items", adoptionItemCount(after))
+	}
+}
+
+// completeWith posts a completion request carrying the given body.
+func (f *adoptMigrationFixture) completeWith(t *testing.T, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodPost, "/control/api/v2/complete", strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	f.app.canonicalAPI(response, request)
+	return response
+}
+
+// settledAdoption commits the fixture and waits for its migration to record the
+// run-finished marker, which is the state the completion conditions read.
+func settledAdoption(t *testing.T) *adoptMigrationFixture {
+	t.Helper()
+	fixture := newAdoptMigrationFixture(t)
+	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
+		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
+	}
+	fixture.wait()
+	if summary := fixture.reload(t).AdoptionSummary; summary == nil || !summary.Finished {
+		t.Fatalf("the migration did not record a finished run: %+v", summary)
+	}
+	return fixture
+}
+
+// An unfinished migration is not a completed installation: the run never reached
+// every planned item, so the record still describes work the destination has not
+// received.
+func TestCompletionRefusesAnUnfinishedAdoptionMigration(t *testing.T) {
+	fixture := settledAdoption(t)
+	record := fixture.reload(t)
+	if _, err := fixture.app.store.Update(t.Context(), record.Operation.Identity, record.Operation.Revision, func(r *freshstore.Record) error {
+		summary := *r.AdoptionSummary
+		summary.Finished, summary.Planned = false, summary.Planned+1
+		r.AdoptionSummary = &summary
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	response := fixture.complete(t)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("an unfinished migration answered %d: %s", response.Code, response.Body.String())
+	}
+	var refusal struct {
+		Code string `json:"code"`
+	}
+	if json.Unmarshal(response.Body.Bytes(), &refusal) != nil || refusal.Code != "adopt_migration_incomplete" {
+		t.Fatalf("the refusal did not name the unfinished migration: %s", response.Body.String())
+	}
+	if fixture.reload(t).Operation.ProductComplete {
+		t.Fatal("an unfinished migration was completed")
+	}
+}
+
+// A retryable item is a source read that wrote nothing, so the operator may
+// either retry the run or finish over it deliberately. Finishing over it is never
+// implied by an absent flag.
+func TestCompletionRefusesRetryableItemsUntilTheyAreAccepted(t *testing.T) {
+	fixture := newAdoptMigrationFixture(t)
+	// One credential download fails, so the run records that item as retryable
+	// and settles everything else. Nothing was written for it.
+	fixture.source.downloadFailures["codex-source.json"] = true
+	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
+		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
+	}
+	fixture.wait()
+	if _, _, failed := fixture.reload(t).AdoptionSummary.Counts(); failed != 1 {
+		t.Fatalf("the run did not record the retryable item: %d", failed)
+	}
+	response := fixture.complete(t)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("a retryable item answered %d: %s", response.Code, response.Body.String())
+	}
+	var refusal struct {
+		Code      string `json:"code"`
+		Retryable int    `json:"retryable"`
+	}
+	if json.Unmarshal(response.Body.Bytes(), &refusal) != nil || refusal.Code != "adopt_migration_retryable" || refusal.Retryable != 1 {
+		t.Fatalf("the refusal did not report the retryable item: %s", response.Body.String())
+	}
+	if fixture.reload(t).Operation.ProductComplete {
+		t.Fatal("a retryable item was completed without being accepted")
+	}
+	accepted := fixture.completeWith(t, `{"acceptRetryable":true}`)
+	if accepted.Code != http.StatusOK || !fixture.reload(t).Operation.ProductComplete {
+		t.Fatalf("an accepted retryable item answered %d: %s", accepted.Code, accepted.Body.String())
+	}
+}
+
+// Manual items are the operator's own work on the destination, so they never
+// block completion: the run settled them, and the record says so.
+func TestCompletionAdvancesOverManualItems(t *testing.T) {
+	fixture := settledAdoption(t)
+	_, manual, _ := fixture.reload(t).AdoptionSummary.Counts()
+	if manual == 0 {
+		t.Fatal("the fixture recorded no manual item")
+	}
+	if response := fixture.complete(t); response.Code != http.StatusOK {
+		t.Fatalf("manual items blocked completion: %d %s", response.Code, response.Body.String())
+	}
+	if !fixture.reload(t).Operation.ProductComplete {
+		t.Fatal("the installation was not completed")
 	}
 }

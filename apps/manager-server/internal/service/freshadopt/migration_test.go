@@ -881,7 +881,9 @@ func TestManualItemNeverFailsTheAdoption(t *testing.T) {
 
 // The checkpoint is the only durable record of the run, so it has to be
 // written once per item, in migration order, before the next item is attempted.
-// A run that batched at the end would lose every proven item to a crash.
+// A run that batched at the end would lose every proven item to a crash. One
+// final checkpoint carries the run-finished marker: completion reads it, and a
+// run stopped at an item leaves a list that looks exactly like a complete one.
 func TestEveryItemIsCheckpointedInOrder(t *testing.T) {
 	source, destination := sourceFixture(t), destinationFixture(t)
 	var snapshots []freshstore.AdoptionSummary
@@ -889,13 +891,24 @@ func TestEveryItemIsCheckpointedInOrder(t *testing.T) {
 		snapshots = append(snapshots, current)
 		return nil
 	})
-	if len(snapshots) != len(summary.Items) {
-		t.Fatalf("checkpointed %d times for %d items", len(snapshots), len(summary.Items))
-	}
 	if len(summary.Items) == 0 {
 		t.Fatal("no items recorded")
 	}
-	for index, snapshot := range snapshots {
+	if !summary.Finished || summary.Planned != len(summary.Items) {
+		t.Fatalf("finished run did not record its marker: %+v", summary)
+	}
+	if len(snapshots) != len(summary.Items)+1 {
+		t.Fatalf("checkpointed %d times for %d items and one marker", len(snapshots), len(summary.Items))
+	}
+	for _, snapshot := range snapshots[:len(summary.Items)] {
+		if snapshot.Finished {
+			t.Fatal("an item checkpoint claimed the run finished")
+		}
+	}
+	if last := snapshots[len(snapshots)-1]; !last.Finished || last.Planned != len(summary.Items) || len(last.Items) != len(summary.Items) {
+		t.Fatalf("final checkpoint is not the run-finished marker: %+v", last)
+	}
+	for index, snapshot := range snapshots[:len(summary.Items)] {
 		// Each checkpoint holds exactly the items resolved so far, in order, and
 		// is a strict prefix of the final summary.
 		if len(snapshot.Items) != index+1 || !reflect.DeepEqual(snapshot.Items[index], summary.Items[index]) {

@@ -233,6 +233,30 @@ func (s *Service) managedKeyGrant(ctx context.Context, operationID, step string)
 	}, nil
 }
 
+// AdoptedDestinationKeys is completion's authenticated read of an adopted
+// destination: it proves the Adopt posture with the install-derived credential
+// and returns the client keys the destination actually carries. It never writes,
+// and it refuses a destination whose posture is a New Managed template, because
+// that is a different installation.
+//
+// Completion calls it before it decides anything, so "the CPA this Manager
+// installed is still the CPA it holds" is a fact it observed rather than one it
+// asserted from the checkpoint.
+func (s *Service) AdoptedDestinationKeys(ctx context.Context, managementKey string) ([]string, error) {
+	if s == nil || s.profile != ProfileManaged || len(managementKey) != 64 {
+		return nil, ErrUnavailable
+	}
+	w, ok := s.wire.(keyWire)
+	if !ok {
+		return nil, ErrUnavailable
+	}
+	snap, err := w.KeySnapshot(ctx, managementKey)
+	if err != nil || len(snap.SourceSHA256) != 64 || len(snap.Keys) == 0 {
+		return nil, ErrUnavailable
+	}
+	return snap.Keys, nil
+}
+
 // targetProof is the caller-observed target handed to the single write. A
 // default install replaces the private attestation flags with the committed
 // checkpoint and the authenticated destination read-back.

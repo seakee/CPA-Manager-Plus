@@ -270,6 +270,18 @@ func (e *Executor) Run(ctx context.Context, previous freshstore.AdoptionSummary,
 	if err := e.migrateProviderSections(ctx, &summary, document, checkpoint); err != nil {
 		return Result{Summary: summary}, err
 	}
+	// Every planned item is now settled or recorded as retryable, so this run
+	// finished. The marker is written, never inferred: a run that stopped at an
+	// item leaves a list that looks no different from a complete one, and
+	// completion reads exactly this record. `Planned` is the plan this run
+	// actually reached, which a later replay rewrites with its own.
+	summary.Finished = true
+	summary.Planned = len(summary.Items)
+	if checkpoint != nil {
+		if err := checkpoint(summary); err != nil {
+			return Result{Summary: summary}, err
+		}
+	}
 	return Result{Summary: summary}, nil
 }
 
