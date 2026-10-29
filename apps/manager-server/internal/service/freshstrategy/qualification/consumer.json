@@ -130,8 +130,8 @@
       "adoptionEvidence": {
         "profile": "CPA8-ADOPT-RESOURCE-r1",
         "manifestSha256": "563ef299810ce576636df6bd5ebf39a0554d54e5b8bde31b8606405c4d2ac3be",
-        "reportSha256": "d342a599b85c419a76e26dded9647ba9c990b4f03134498e1f1c559a60033e34",
-        "implementationHead": "6c6e745c4e7a15f4c0fd3885d28003a9aba74785",
+        "reportSha256": "f2ed6b616f08fd185bba576945f608fe1b5bc7108f8ee1c42668e7592e6f01a1",
+        "implementationHead": "3291a3d1dc481df6b423820074ac8342278ed4e8",
         "readCaseRef": "fresh-network-client-api-keys-read",
         "replayCaseRef": "fresh-network-client-api-keys-replay",
         "verifyCaseRef": "fresh-network-client-api-keys-verify"
@@ -192,8 +192,8 @@
       "adoptionEvidence": {
         "profile": "CPA8-ADOPT-RESOURCE-r1",
         "manifestSha256": "7388022d21d2d6502449c311bc5379e4e954db0030912e73a2607d809fefb5f2",
-        "reportSha256": "eacdb87877219584e6511010c3c1a8c705d7a886e51d773824cb8a9f4581e060",
-        "implementationHead": "6c6e745c4e7a15f4c0fd3885d28003a9aba74785",
+        "reportSha256": "ecb02830f9f1f679dae28f2e7166646e272acb7b47da0bb02de525e2b136ea4f",
+        "implementationHead": "3291a3d1dc481df6b423820074ac8342278ed4e8",
         "readCaseRef": "fresh-legacy-client-api-keys-read",
         "replayCaseRef": "fresh-legacy-client-api-keys-replay",
         "verifyCaseRef": "fresh-legacy-client-api-keys-verify"
@@ -202,9 +202,9 @@
         "profile": "CPA8-STAGE-r1",
         "caseRef": "fresh-legacy-managed-stage-v8-r1",
         "manifestSha256": "316f7452e29145039eb856dee65cfc15c2f0bdc86e839be4cc4b43d8a1794694",
-        "reportSha256": "3acb883c42dcb0d1c0077348b217da804e944db35de44abae9d7716bdc1b49af",
-        "implementationHead": "6c6e745c4e7a15f4c0fd3885d28003a9aba74785",
-        "evidenceSha256": "2ea85c37eabf15c6ca200516ba32113f072f3e0bceb47988d9a6fbc9bb65a891",
+        "reportSha256": "fb318b190c9e0555664ae4550c5e96a4af9fd13ba86471e74c96467003413e1b",
+        "implementationHead": "3291a3d1dc481df6b423820074ac8342278ed4e8",
+        "evidenceSha256": "bfd8948294b764da95e540ee01def39dd0303acbce72cf9256bbedb1b4cdbaaf",
         "legacyVersion": "v7.0.12",
         "legacyArchiveSha256": "8afc9ed4c89a50a5ffce5d122a9bb93442c5b8ff3d8c6f07b7a274c719109b74",
         "legacyBinarySha256": "1eb108b85ad554b92bab9f5a85af433d7c2e1b951bb192b639d73605d4593d1a"
