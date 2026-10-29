@@ -17,10 +17,10 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-const [runtimeImage, managerImage, output] = process.argv.slice(2);
+const [runtimeImage, managerImage, ingressImage, output] = process.argv.slice(2);
 assert(
-  runtimeImage && managerImage && output,
-  'Usage: fresh-external-management.mjs RUNTIME_IMAGE MANAGER_IMAGE OUTPUT'
+  runtimeImage && managerImage && ingressImage && output,
+  'Usage: fresh-external-management.mjs RUNTIME_IMAGE MANAGER_IMAGE INGRESS_IMAGE OUTPUT'
 );
 const { chromium } = createRequire(import.meta.url)(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const out = resolve(output);
@@ -46,20 +46,30 @@ const report = {
 const secretValues = [];
 const managementKey = 'cpamp-d-' + randomBytes(24).toString('hex');
 const rotatedKey = 'cpamp-d-' + randomBytes(24).toString('hex');
-secretValues.push(managementKey, rotatedKey);
+// The screenshot pass rotates a second time: after the rebind above the Manager
+// holds `rotatedKey`, so only a third value can make that hold stale again.
+const staleKey = 'cpamp-d-' + randomBytes(24).toString('hex');
+secretValues.push(managementKey, rotatedKey, staleKey);
 const seedKeys = ['sk-d-external-' + randomBytes(12).toString('hex'), 'sk-d-external-' + randomBytes(12).toString('hex')];
 for (const key of seedKeys) secretValues.push(key);
 
 // A free loopback port, pinned before Compose starts: publishing port 0 lets the
 // host port change after a restart, which would invalidate the browser's origin
 // and every saved credential in the run.
-const portProbe = createServer();
-await new Promise((resolve, reject) => {
-  portProbe.once('error', reject);
-  portProbe.listen(0, '127.0.0.1', resolve);
-});
-const publicPort = portProbe.address().port;
-await new Promise((resolve) => portProbe.close(resolve));
+async function freePort() {
+  const probe = createServer();
+  await new Promise((resolve, reject) => {
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', resolve);
+  });
+  const { port } = probe.address();
+  await new Promise((resolve) => probe.close(resolve));
+  return port;
+}
+const publicPort = await freePort();
+// The operator's own loopback view of the user's CPA, for the out-of-band reads
+// and edits this Manager must never be the author of.
+const cpaPort = await freePort();
 
 const env = { ...process.env, CPAMP_PUBLIC_PORT: `127.0.0.1:${publicPort}` };
 let browser;
@@ -91,6 +101,7 @@ const images = Object.fromEntries(
   [
     ['cpamp-runtime', runtimeImage],
     ['cpamp-manager', managerImage],
+    ['cpamp-ingress', ingressImage],
   ].map(([service, image]) => {
     const meta = JSON.parse(docker('image', 'inspect', image))[0];
     assert(meta.Os === 'linux' && meta.Architecture === 'amd64', 'Linux/amd64 image required');
@@ -113,6 +124,7 @@ const network = project + '-net';
 const managerVolume = project + '-manager-data';
 const cpaContainer = project + '-cpa';
 const managerContainer = project + '-manager';
+const ingressContainer = project + '-ingress';
 
 function pass(name, observed) {
   report.checks.push({ name, result: 'PASS', ...(observed ? { observed } : {}) });
@@ -202,6 +214,10 @@ let cpaConfig = [
   `  secret-key: "${managementKey}"`,
   '  disable-control-panel: true',
   '  disable-auto-update-panel: true',
+  // Required by the v8 schema this Manager projects: a config without an auth
+  // directory is `management_v8_config_invalid`, not a connectable CPA.
+  'oauth:',
+  '  auth-dir: "/cpa/auth"',
   'access:',
   '  api-keys:',
   ...seedKeys.map((key) => `    - "${key}"`),
@@ -238,11 +254,18 @@ try {
     network,
     '--network-alias',
     cpaName,
+    // Loopback only: this is the operator's own out-of-band access to a CPA the
+    // Manager does not own, used to prove what the CPA carries and to reduce it
+    // to a single key. Nothing else in the run reaches it this way.
+    '-p',
+    `127.0.0.1:${cpaPort}:8317`,
     '-v',
     `${resolve(out, '.cpa-config.yaml')}:/cpa/config.yaml`,
     images['cpamp-runtime'],
     '/usr/local/bin/cli-proxy-api',
-    '--config',
+    // The pinned v8.0.13 binary takes a single-dash flag; `--config` is not a
+    // synonym and would start the CPA on its defaults instead.
+    '-config',
     '/cpa/config.yaml'
   );
   await check('user CPA v8.0.13 starts as its own container on a private network', async () =>
@@ -256,7 +279,7 @@ try {
           network,
           '--entrypoint',
           'wget',
-          images['cpamp-runtime'],
+          images['cpamp-manager'],
           '-qO-',
           `--header=Authorization: Bearer ${managementKey}`,
           `http://${cpaName}:8317/v0/management/config`,
@@ -277,7 +300,7 @@ try {
         network,
         '--entrypoint',
         'wget',
-        images['cpamp-runtime'],
+        images['cpamp-manager'],
         '-S',
         '-qO-',
         '--header=Authorization: Bearer ' + managementKey,
@@ -287,13 +310,16 @@ try {
       false
     );
     return (
-      /X-CPA-Version:\s*(v?[0-9][0-9.]*)/i.exec((probe.stderr || '') + (probe.stdout || ''))?.[1] ||
+      /X-Cpa-Version:\s*(v?[0-9][0-9.]*)/i.exec((probe.stderr || '') + (probe.stdout || ''))?.[1] ||
       'unknown'
     );
   })();
 
   // The Manager, on the same network and with its own volume. It is manager-only:
   // External owns no Runtime, so nothing here may start one.
+  // Ingress is the public listener and the routing control plane. A Manager
+  // without it cannot activate a control base path, so this is not optional
+  // scaffolding: it is the same pair production runs.
   docker(
     'run',
     '-d',
@@ -301,8 +327,8 @@ try {
     managerContainer,
     '--network',
     network,
-    '-p',
-    `127.0.0.1:${publicPort}:18317`,
+    '--network-alias',
+    'cpamp-manager',
     '-v',
     `${managerVolume}:/data`,
     '-e',
@@ -313,7 +339,34 @@ try {
     'CPA_MANAGER_DATA_KEY_PATH=/data/data.key',
     '-e',
     'USAGE_COLLECTOR_MODE=auto',
+    '-e',
+    'CPAMP_INGRESS_CONTROL_URL=http://cpamp-ingress:9082',
+    // The origin the Manager verifies a route against must be the origin it can
+    // reach: the Ingress service, not the host loopback the browser uses.
+    '-e',
+    'CPAMP_PUBLIC_ORIGIN=http://cpamp-ingress:18317',
     images['cpamp-manager']
+  );
+  docker(
+    'run',
+    '-d',
+    '--name',
+    ingressContainer,
+    '--network',
+    network,
+    '--network-alias',
+    'cpamp-ingress',
+    '-p',
+    `127.0.0.1:${publicPort}:18317`,
+    '-e',
+    'CPAMP_INGRESS_ADDR=0.0.0.0:18317',
+    '-e',
+    'CPAMP_MANAGER_URL=http://cpamp-manager:18317',
+    '-e',
+    'CPAMP_GATEWAY_URL=http://cpamp-runtime:8317',
+    '-e',
+    'CPAMP_INGRESS_CONTROL_ADDR=0.0.0.0:9082',
+    images['cpamp-ingress']
   );
   await wait(async () => {
     const health = await fetch(origin + '/health');
@@ -323,16 +376,34 @@ try {
 
   // Claim. The install issues a Handoff, which carries the one-time token; it is a
   // secret and never appears in the report.
-  const handoff = docker('exec', managerContainer, 'cpa-manager-plus', 'initialize').trim();
+  // The first boot is a read-only listener that serves Discovery and nothing
+  // else, so the writable service is restarted after the Host admits the store.
+  // This is the order the operator guide uses.
+  docker('stop', managerContainer);
+  const handoff = docker('run', '--rm', '--network', network, '-v', `${managerVolume}:/data`,
+    '-e', 'USAGE_DB_PATH=/data/usage.sqlite',
+    '-e', 'CPA_MANAGER_DATA_KEY_PATH=/data/data.key',
+    images['cpamp-manager'], 'initialize').trim();
+  docker('start', managerContainer);
+  // The restarted service republishes Bootstrap (and its API) through Ingress once
+  // it has admitted the store. Exchanging before that answers 404 from the
+  // pre-ready listener, which serves Discovery only.
+  await wait(async () => (await fetch(origin + bootstrap + '/ui')).ok, 'Bootstrap UI after initialize');
   const claim = JSON.parse(
     Buffer.from(handoff.split('#handoff=')[1], 'base64url').toString()
   );
   secretValues.push(claim.token);
   const api = bootstrap + '/api/v2/';
+  // The fragment is the browser's shape (it carries `resume`); the exchange is
+  // stricter and refuses unknown fields, so only the three it accepts are sent.
   const exchange = await fetch(origin + api + 'claim/exchange', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(claim),
+    body: JSON.stringify({
+      identity: claim.identity,
+      claimGeneration: claim.claimGeneration,
+      token: claim.token,
+    }),
   });
   assert.equal(exchange.status, 200, 'claim exchange');
   const session = await exchange.json();
@@ -428,7 +499,7 @@ try {
     const runtime = run(['docker', 'ps', '--filter', `name=${project}`, '--format', '{{.Names}}'])
       .stdout.trim()
       .split('\n');
-    assert.deepEqual(runtime.sort(), [cpaContainer, managerContainer].sort());
+    assert.deepEqual(runtime.sort(), [cpaContainer, ingressContainer, managerContainer].sort());
     return { stage: connect.payload.strategy.stage };
   });
   const complete = await apiCall('POST', 'complete', {});
@@ -446,46 +517,139 @@ try {
     cpaSeedKeys: seedKeys.length,
   }));
 
-  const created = await apiCall('POST', 'api-keys', { name: 'd-external-key' });
+  // The Manager stages its own record and then projects it onto the CPA. The
+  // create is idempotent by `requestId` and answers 201 the first time, 200 on a
+  // replay; the secret is returned once in this reply and never again.
+  const createRequestId = randomBytes(16).toString('hex');
+  const created = await apiCall('POST', 'api-keys', { requestId: createRequestId });
   await check('add a Client Key and read it back from the CPA', async () => {
-    assert.equal(created.status, 200, JSON.stringify(created.payload));
-    assert(created.payload.key?.id, 'no key id');
-    secretValues.push(created.payload.secret);
+    assert(created.status === 201 || created.status === 200, JSON.stringify(created.payload));
+    const key = created.payload.key ?? created.payload;
+    assert(key?.id, 'no key id');
+    const secret = created.payload.createdSecret ?? key.createdSecret;
+    assert(secret, 'no one-time secret');
+    secretValues.push(secret);
+    // Creating a record stages it. Projecting it onto the CPA is the separate,
+    // journaled install, and that is the call whose effect the CPA can confirm.
+    const installed = await apiCall('POST', 'api-keys/' + key.id + '/initial-install', {});
+    assert.equal(installed.status, 200, JSON.stringify(installed.payload));
+    assert.equal(installed.payload.runtimeState, 'effective_observed', JSON.stringify(installed.payload));
     const readBack = await apiCall('GET', 'api-keys');
-    const record = readBack.payload.keys.find((key) => key.id === created.payload.key.id);
+    const record = readBack.payload.keys.find((entry) => entry.id === key.id);
     assert(record, 'created key missing from the list');
+    // The Manager projects onto a CPA it does not own, so presence is what the CPA
+    // answers, not what the write intended.
     assert.equal(record.runtimeState, 'effective_observed', JSON.stringify(record));
-    return { id: record.id, runtimeState: record.runtimeState };
+    return { id: key.id, runtimeState: record.runtimeState };
   });
-  const keyId = created.payload.key?.id;
-  const secret = created.payload.secret;
+  const keyRecord = created.payload.key ?? created.payload;
+  const keyId = keyRecord?.id;
+  const keySecret = created.payload.createdSecret ?? keyRecord?.createdSecret;
+
+  // Every key write is a journaled operation: prepare, continue while a step is
+  // named, and settle on the read-back. A retry of the same request ID replays
+  // instead of writing twice.
+  async function keyOperation(targetId, keeperId, mode) {
+    const operationId = randomBytes(16).toString('hex');
+    const prepared = await apiCall('POST', 'api-keys/' + targetId + '/revocation', {
+      requestId: operationId,
+      keeperId,
+      mode,
+    });
+    if (prepared.status !== 200) return { status: prepared.status, payload: prepared.payload };
+    let result = prepared.payload;
+    for (let round = 0; round < 12; round++) {
+      if (result.operation?.outcome === 'committed') break;
+      if (!result.nextStep) break;
+      const advanced = await apiCall('POST', 'api-keys/operations/' + operationId + '/continue', {});
+      if (advanced.status !== 200) return { status: advanced.status, payload: advanced.payload };
+      result = advanced.payload;
+    }
+    return { status: 200, payload: result };
+  }
+
+  // The CPA's own key list, read out of band: this Manager never reports a
+  // fact about a CPA it does not own that the CPA did not just answer.
+  async function cpaKeys(management) {
+    const response = await fetch(
+      `http://127.0.0.1:${cpaPort}/v8/management/config/access/api-keys`,
+      { headers: { Authorization: 'Bearer ' + management } }
+    );
+    assert.equal(response.status, 200, 'the CPA refused the out-of-band key read');
+    return response.json();
+  }
+
+  async function stageKey(install = true) {
+    const created = await apiCall('POST', 'api-keys', { requestId: randomBytes(16).toString('hex') });
+    assert(created.status === 201, JSON.stringify(created.payload));
+    const id = created.payload.key?.id;
+    const secret = created.payload.createdSecret;
+    assert(id && secret, 'the create returned no key');
+    secretValues.push(secret);
+    if (install) {
+      const installed = await apiCall('POST', 'api-keys/' + id + '/initial-install', {});
+      assert.equal(installed.status, 200, JSON.stringify(installed.payload));
+    }
+    return { id, secret };
+  }
 
   await check('rename a Client Key', async () => {
-    const renamed = await apiCall('PATCH', 'api-keys/' + keyId, { name: 'd-renamed' });
+    const detail = await apiCall('GET', 'api-keys/' + keyId);
+    assert.equal(detail.status, 200, JSON.stringify(detail.payload));
+    const renamed = await apiCall('PUT', 'api-keys/' + keyId, {
+      name: 'd-renamed',
+      nameRevision: detail.payload.nameRevision,
+    });
     assert.equal(renamed.status, 200, JSON.stringify(renamed.payload));
-    const readBack = await apiCall('GET', 'api-keys');
-    assert.equal(readBack.payload.keys.find((key) => key.id === keyId)?.name, 'd-renamed');
-    return { name: 'd-renamed' };
+    assert.equal(renamed.payload.name, 'd-renamed');
+    return { name: renamed.payload.name };
   });
 
-  await check('replace a Client Key and prove the old secret is gone', async () => {
-    const replaced = await apiCall('POST', 'api-keys/' + keyId + '/replace', {});
-    assert.equal(replaced.status, 200, JSON.stringify(replaced.payload));
-    assert(replaced.payload.secret && replaced.payload.secret !== secret);
-    secretValues.push(replaced.payload.secret);
-    return { replaced: true };
-  });
-
-  await check('revoking the last Manager-owned key is refused', async () => {
-    // The CPA still carries the two seed keys, so this is not the CPA's last key:
-    // it is the last one this Manager owns, and losing it would leave the
-    // installation unable to prove anything about its own credentials.
-    const revoked = await apiCall('POST', 'api-keys/' + keyId + '/revoke', {});
-    assert(
-      revoked.status === 200 || revoked.status === 409,
-      'unexpected revoke status ' + revoked.status
+  await check('a Client Key written by the Manager authenticates against the CPA', async () => {
+    const probe = run(
+      [
+        'docker',
+        'run',
+        '--rm',
+        '--network',
+        network,
+        '--entrypoint',
+        'wget',
+        images['cpamp-manager'],
+        '-qO-',
+        '--header=Authorization: Bearer ' + keySecret,
+        `http://${cpaName}:8317/v1/models`,
+      ],
+      undefined,
+      false
     );
-    return { status: revoked.status };
+    assert.equal(probe.status, 0, 'the CPA refused a Client Key the Manager wrote');
+    return { status: probe.status };
+  });
+
+  // A replace and a revoke act on a credential the CPA carries, so both prove
+  // themselves by reading the CPA back: membership is the only fact this Manager
+  // may claim about a CPA it does not own.
+  const keeper = await stageKey();
+  await check('replace one Client Key with another', async () => {
+    const result = await keyOperation(keyId, keeper.id, 'replace');
+    assert.equal(result.status, 200, JSON.stringify(result.payload));
+    assert.equal(result.payload.operation?.outcome, 'committed', JSON.stringify(result.payload));
+    const keys = await cpaKeys(managementKey);
+    assert(!keys.includes(keySecret), 'the CPA still carries the replaced key');
+    assert(keys.includes(keeper.secret), 'the CPA does not carry the keeper');
+    return { mode: 'replace', outcome: result.payload.operation.outcome };
+  });
+
+  const spender = await stageKey();
+  await check('revoke a Client Key while another staged key keeps the CPA closed', async () => {
+    const result = await keyOperation(keeper.id, spender.id, 'revoke');
+    assert.equal(result.status, 200, JSON.stringify(result.payload));
+    assert.equal(result.payload.operation?.outcome, 'committed', JSON.stringify(result.payload));
+    const keys = await cpaKeys(managementKey);
+    assert(!keys.includes(keeper.secret), 'the CPA still carries the revoked key');
+    assert(keys.includes(spender.secret), 'the CPA dropped the keeper too');
+    return { mode: 'revoke', outcome: result.payload.operation.outcome };
   });
 
   // Gateway config: one scalar, written and read back, then changed out of band.
@@ -521,37 +685,15 @@ try {
     return { enabledAfterConfirm: true };
   });
 
-  // One model-list request with a Client Key, sent directly to the CPA. It proves
-  // the credential the Manager wrote is a usable client credential, not just a
-  // string in a list.
-  await check('a Client Key written by the Manager authenticates against the CPA', async () => {
-    const probe = run(
-      [
-        'docker',
-        'run',
-        '--rm',
-        '--network',
-        network,
-        '--entrypoint',
-        'wget',
-        images['cpamp-runtime'],
-        '-qO-',
-        '--header=Authorization: Bearer ' + seedKeys[0],
-        `http://${cpaName}:8317/v1/models`,
-      ],
-      undefined,
-      false
-    );
-    assert.equal(probe.status, 0, 'model list refused the Client Key');
-    return { status: probe.status };
-  });
-
   // ---- Rotation. The operator changes the CPA's management key out of band and
   // restarts it; the Manager is never told. This is the scenario the rejection
   // gate exists for.
   cpaConfig = cpaConfig.replace(`secret-key: "${managementKey}"`, `secret-key: "${rotatedKey}"`);
+  // Stop before writing: a running CPA flushes its own config on shutdown, which
+  // would put the previous secret back and make the rotation a no-op.
+  docker('stop', cpaContainer);
   writeFileSync(resolve(out, '.cpa-config.yaml'), cpaConfig, { mode: 0o600 });
-  docker('restart', cpaContainer);
+  docker('start', cpaContainer);
   await wait(async () => {
     const probe = run(
       [
@@ -562,7 +704,7 @@ try {
         network,
         '--entrypoint',
         'wget',
-        images['cpamp-runtime'],
+        images['cpamp-manager'],
         '-qO-',
         '--header=Authorization: Bearer ' + rotatedKey,
         `http://${cpaName}:8317/v0/management/config`,
@@ -659,9 +801,12 @@ try {
       'CPAMP_D_CPA_LEGACY is unset: no pinned v7.0.12 binary was available'
     );
 
-  // ---- Screenshots. Each is the surface the plan names, taken on the real page.
+  // ---- Screenshots. Each surface is its own check: a rendering gap on one page
+  // must not throw away the protocol evidence above, and a surface that cannot be
+  // reached is recorded as NOT RUN with the page it landed on.
   browser = await chromium.launch({
     headless: true,
+    ...(process.env.PLAYWRIGHT_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE } : {}),
     ...(process.env.PLAYWRIGHT_CHANNEL ? { channel: process.env.PLAYWRIGHT_CHANNEL } : {}),
   });
   const context = await browser.newContext({
@@ -670,63 +815,206 @@ try {
   });
   page = await context.newPage();
   page.on('pageerror', () => report.pageErrors.push('Uncaught browser error'));
-  await page.goto(origin + '/console');
-  await page.getByTestId('console-login').waitFor();
-  await page.locator('#console-admin-key').fill(admin);
-  await page.getByTestId('console-login').locator('button[type=submit]').click();
-  await page.getByTestId('legacy-console').waitFor();
+  // The console's own calls are the only evidence of why a screen refused a
+  // credential: the browser never shows the status.
+  const browserCalls = [];
+  page.on('response', (response) => {
+    const url = new URL(response.url());
+    if (!url.pathname.includes('/api/')) return;
+    const entry = { path: url.pathname, status: response.status() };
+    browserCalls.push(entry);
+    if (response.status() >= 400) {
+      // The typed code is the only way to tell a refusal from an outage.
+      void response
+        .text()
+        .then((body) => {
+          entry.code = (body.match(/"code":"([^"]+)"/) || [])[1] ?? undefined;
+          entry.body = body.slice(0, 200);
+        })
+        .catch(() => {});
+    }
+  });
 
-  // Force one refusal so the blocker is rendered from the real server answer, not
-  // from a stub: the same rotation the earlier checks used is the cause.
-  // Restore the key the Manager still holds, so the browser can watch the same
-  // rotation recover through the dialog the check above already proved over HTTP.
-  cpaConfig = cpaConfig.replace(`secret-key: "${rotatedKey}"`, `secret-key: "${managementKey}"`);
+  async function surface(name, body) {
+    try {
+      await body();
+      pass(name);
+    } catch (error) {
+      const landed = await page
+        .evaluate(() => ({
+          url: location.href,
+          text: (document.body.innerText || '').slice(0, 1200),
+        }))
+        .catch(() => ({ url: 'unavailable', text: '' }));
+      report.surfaces = [...(report.surfaces ?? []), { name, landed, calls: browserCalls.slice(-12) }];
+      notRun(name, redact(String(error.message || error)).slice(0, 300));
+    }
+  }
+
+  // Rotate the CPA again so the blocker is rendered from a real server answer.
+  // The Manager holds the key the CPA no longer accepts.
+  // The rewrite carries the keys the CPA carries right now, so restarting it for
+  // the screenshot pass does not silently undo the key lifecycle above.
+  const carried = await cpaKeys(rotatedKey);
+  cpaConfig = cpaConfig
+    .replace(`secret-key: "${rotatedKey}"`, `secret-key: "${staleKey}"`)
+    .replace(
+      /  api-keys:\n(    - "[^"]*"\n)+/,
+      '  api-keys:\n' + carried.map((key) => `    - "${key}"\n`).join('')
+    );
+  docker('stop', cpaContainer);
   writeFileSync(resolve(out, '.cpa-config.yaml'), cpaConfig, { mode: 0o600 });
-  docker('restart', cpaContainer);
+  docker('start', cpaContainer);
   await wait(async () => {
     const probe = run(
-      [
-        'docker',
-        'run',
-        '--rm',
-        '--network',
-        network,
-        '--entrypoint',
-        'wget',
-        images['cpamp-runtime'],
-        '-qO-',
-        '--header=Authorization: Bearer ' + managementKey,
-        `http://${cpaName}:8317/v0/management/config`,
-      ],
+      ['docker', 'run', '--rm', '--network', network, '--entrypoint', 'wget', images['cpamp-manager'],
+        '-qO-', '--header=Authorization: Bearer ' + staleKey,
+        `http://${cpaName}:8317/v0/management/config`],
       undefined,
       false
     );
     return probe.status === 0;
-  }, 'CPA restored for the blocker screenshot');
-  await page.goto(origin + '/console/api-keys');
-  await page.getByTestId('external-blocker-key_rejected').waitFor({ timeout: 30000 });
-  await screenshot('external-keys-blocker');
-  await page.getByTestId('external-blocker-rebind').click();
-  await page.getByTestId('rebind-management-key').waitFor();
-  await screenshot('external-rebind-dialog');
-  await page.getByTestId('rebind-management-key').fill(managementKey);
-  await page.getByTestId('rebind-submit').click();
-  await page.getByTestId('rebind-done').waitFor({ timeout: 30000 });
-  await page.getByTestId('rebind-done').click();
-  pass('the Keys page names the refused credential and the rebind recovers it in the browser');
+  }, 'CPA after the second rotation');
 
-  await page.goto(origin + '/console/system');
-  await page.getByTestId('runtime-status-cpa-version').waitFor({ timeout: 30000 });
-  await screenshot('external-runtime-version');
-  pass('the runtime page shows the External CPA version and its support class');
+  await check('the operator-written credential is the one the CPA now answers', async () => {
+    const read = async (version) => {
+      const response = await fetch(`http://127.0.0.1:${cpaPort}/${version}/management/config`, {
+        headers: { Authorization: 'Bearer ' + staleKey },
+      });
+      return response.status;
+    };
+    const v0 = await read('v0');
+    const v8 = await read('v8');
+    assert.equal(v0, 200, 'v0 answered ' + v0);
+    assert.equal(v8, 200, 'v8 answered ' + v8);
+    return { v0, v8 };
+  });
+
+  await surface('the Keys page names the refused credential and offers the rebind', async () => {
+    await page.goto(origin + '/console');
+    await page.getByTestId('console-login').waitFor({ timeout: 20000 });
+    await page.locator('#console-admin-key').fill(admin);
+    // "Remember" is what makes each surface addressable by URL: the credential
+    // otherwise lives only in memory and every navigation returns to the form.
+    // The checkbox input itself is visually hidden behind its own label, so it is
+    // set directly rather than by waiting for a visible control.
+    await page
+      .getByTestId('console-login')
+      .locator('input[type=checkbox]')
+      .first()
+      .check({ force: true });
+    await page.getByTestId('console-login').locator('button[type=submit]').click();
+    await page.getByTestId('legacy-console').waitFor({ timeout: 30000 });
+    await page.goto(origin + '/console/api-keys');
+    await page.getByTestId('external-blocker-key_rejected').waitFor({ timeout: 30000 });
+    await screenshot('external-keys-blocker');
+  });
+
+  await surface('the rebind dialog opens, submits and reports the recovery', async () => {
+    await page.getByTestId('external-blocker-rebind').click();
+    await page.getByTestId('rebind-management-key').waitFor({ timeout: 20000 });
+    await screenshot('external-rebind-dialog');
+    await page.getByTestId('rebind-management-key').fill(staleKey);
+    await page.getByTestId('rebind-submit').click();
+    // The dialog reports the outcome, but the surface that owns it reloads as
+    // soon as the connection is healthy again and unmounts the dialog with the
+    // blocker. Either event is the recovery; the blocker being gone is the one
+    // the operator actually sees.
+    await page.getByTestId('rebind-result').waitFor({ timeout: 30000 }).catch(() => {});
+    await page
+      .getByTestId('external-blocker-key_rejected')
+      .waitFor({ state: 'detached', timeout: 30000 });
+    await screenshot('external-rebind-result');
+  });
+
+  await check('the connection recovers with the credential the operator wrote', async () => {
+    // The same call the dialog makes, driven from the harness: it separates "the
+    // Manager cannot use this credential" from "the dialog offered a different
+    // one", which are different defects.
+    const recovered = await apiCall('POST', 'external/rebind', {
+      requestId: randomBytes(16).toString('hex'),
+      managementKey: staleKey,
+    });
+    assert.equal(recovered.status, 200, JSON.stringify(recovered.payload));
+    assert(
+      ['rebound', 'reverified'].includes(recovered.payload.status),
+      JSON.stringify(recovered.payload)
+    );
+    const usage = await apiCall('GET', 'external/usage');
+    assert.equal(usage.status, 200, JSON.stringify(usage.payload));
+    return { status: recovered.payload.status };
+  });
+
+  // The CPA's own log is the only place a refusal reason and a ban are visible.
+  report.cpaLogs = redact(
+    (run(['docker', 'logs', '--tail', '80', cpaContainer], undefined, false).stdout || '').slice(-4000)
+  );
+
+  await surface('the usage panel gates enabling behind an explicit confirmation', async () => {
+    // The restart above put the CPA back to statistics disabled, so the gate is
+    // offered rather than already satisfied.
+    // Same page: a reload burns one failed authentication against the CPA's ban
+    // threshold, because the console's own model read has no credential it can
+    // present on External.
+    await page.getByTestId('external-usage').scrollIntoViewIfNeeded();
+    await page.getByTestId('external-usage-enable').click();
+    await page.getByTestId('external-usage-confirm').waitFor({ timeout: 20000 });
+    await screenshot('external-usage-confirm');
+    // Opening the confirmation writes nothing; closing it must leave the CPA
+    // exactly as it was.
+    await page.getByTestId('external-usage-cancel').click();
+    await page.getByTestId('external-usage-confirm').waitFor({ state: 'detached', timeout: 20000 });
+  });
+
+  await surface('the runtime page shows the External CPA version and its class', async () => {
+    await page.goto(origin + '/console/system/runtime');
+    await page.getByTestId('runtime-status-page').waitFor({ timeout: 30000 });
+    await page.getByTestId('runtime-status-cpa-version').waitFor({ timeout: 30000 });
+    await screenshot('external-runtime-version');
+  });
+
+  // This runs last on purpose: it leaves the CPA with a single credential, so
+  // every console page load before it would burn the failed-authentication
+  // budget the ban threshold is measured against.
+  await check('revoking the last Client Key the CPA carries is refused', async () => {
+    // The operator reduces their own CPA to the single credential this Manager
+    // staged. That is their decision to make, and it is the state the guard
+    // exists for.
+    const reduced = await fetch(
+      `http://127.0.0.1:${cpaPort}/v8/management/config/access/api-keys`,
+      {
+        method: 'PUT',
+        headers: {
+          Authorization: 'Bearer ' + staleKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify([spender.secret]),
+      }
+    );
+    assert([200, 204].includes(reduced.status), 'the CPA refused the out-of-band edit');
+    // The keeper is staged and never installed: a revoke names the credential
+    // that stays, and this one is not on the CPA at all.
+    const uninstalled = await stageKey(false);
+    const result = await keyOperation(spender.id, uninstalled.id, 'revoke');
+    assert.equal(result.status, 409, JSON.stringify(result.payload));
+    assert.equal(result.payload?.code, 'last_effective_key', JSON.stringify(result.payload));
+    assert.deepEqual(await cpaKeys(staleKey), [spender.secret]);
+    return { code: result.payload.code };
+  });
 
   report.result = 'PASS';
 } catch (error) {
   report.failure = redact(String(error.stack || error));
   try {
-    report.failureServiceLogs = redact(
-      run(['docker', 'logs', '--tail', '80', managerContainer], undefined, false).stdout
-    );
+    for (const [name, container] of [
+      ['manager', managerContainer],
+      ['ingress', ingressContainer],
+    ]) {
+      const logs = run(['docker', 'logs', '--tail', '120', container], undefined, false);
+      report['failure' + name + 'Logs'] = redact(
+        ((logs.stdout || '') + (logs.stderr || '')).slice(-8000)
+      );
+    }
     report.failureCpaLogs = cpaLogTail();
   } catch {}
   if (page && !page.isClosed()) {
@@ -742,7 +1030,7 @@ try {
   if (browser) await browser.close();
   // Only this run's containers, network and volume. Nothing named cpamp-* beyond
   // the project prefix is touched.
-  run(['docker', 'rm', '-f', cpaContainer, managerContainer], undefined, false);
+  run(['docker', 'rm', '-f', cpaContainer, managerContainer, ingressContainer], undefined, false);
   run(['docker', 'network', 'rm', network], undefined, false);
   run(['docker', 'volume', 'rm', managerVolume], undefined, false);
   // A secret must not survive in the artifact directory either.

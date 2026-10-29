@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
@@ -123,5 +124,69 @@ func TestExternalLegacyBridgeStopsPresentingARejectedKey(t *testing.T) {
 	// not take them away.
 	if response := gatewayRequest(t, app, http.MethodGet, "cpamp/status", "", ""); response.Code != http.StatusOK {
 		t.Fatalf("Manager-local read after the rejection = %d %s", response.Code, response.Body.String())
+	}
+}
+
+// TestExternalLegacyBridgeTurnsAStaleKeyIntoTheBlocker covers the first refusal.
+// The CPA answers 401 to a management read the operator rotated out of band, and
+// the browser reads any 401 from this namespace as its own Admin session having
+// expired: it clears the session and returns to the login form before a page can
+// name the cause. The bridge therefore answers the typed blocker, records the
+// refusal, and never presents the stale key again.
+func TestExternalLegacyBridgeTurnsAStaleKeyIntoTheBlocker(t *testing.T) {
+	app, fake := newExternalProbeApp(t)
+	fake.management.Store(strings.Repeat("e", 64))
+	// No typed read ran first: the refusal is unknown when the bridge forwards.
+	if app.externalReadGrant(t.Context()).Refused {
+		t.Fatal("the refusal was recorded before any request")
+	}
+	response := gatewayRequest(t, app, http.MethodGet, "cpamp/v0/management/api-keys", "", "")
+	if response.Code != http.StatusConflict {
+		t.Fatalf("stale read = %d %s", response.Code, response.Body.String())
+	}
+	if code := errorCode(t, response); code != freshconfig.ReasonManagementRejected {
+		t.Fatalf("stale read code = %q", code)
+	}
+	if !app.externalReadGrant(t.Context()).Refused {
+		t.Fatal("the refusal was not recorded from the CPA's answer")
+	}
+	// A recorded refusal is local: the CPA is not asked a second time.
+	before := fake.requests.Load()
+	for range 3 {
+		repeated := gatewayRequest(t, app, http.MethodGet, "cpamp/v0/management/api-keys", "", "")
+		if repeated.Code != http.StatusConflict {
+			t.Fatalf("repeated read = %d %s", repeated.Code, repeated.Body.String())
+		}
+	}
+	if sent := fake.requests.Load() - before; sent != 0 {
+		t.Fatalf("the bridge presented the stale key %d more times", sent)
+	}
+}
+
+// TestExternalLegacyBridgeBoundsConcurrentRefusals covers the ban window. A
+// console page opens several credential-presenting reads at once; the CPA bans an
+// address after five failed authentications, so only the first may reach it and
+// every concurrent one must answer the recorded refusal locally.
+func TestExternalLegacyBridgeBoundsConcurrentRefusals(t *testing.T) {
+	app, fake := newExternalProbeApp(t)
+	fake.management.Store(strings.Repeat("d", 64))
+	before := fake.requests.Load()
+	var wg sync.WaitGroup
+	responses := make([]int, 8)
+	for i := range responses {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			responses[index] = gatewayRequest(t, app, http.MethodGet, "cpamp/v0/management/api-keys", "", "").Code
+		}(i)
+	}
+	wg.Wait()
+	if sent := fake.requests.Load() - before; sent != 1 {
+		t.Fatalf("the bridge presented the stale key %d times", sent)
+	}
+	for index, code := range responses {
+		if code != http.StatusConflict {
+			t.Fatalf("request %d = %d, want the typed blocker", index, code)
+		}
 	}
 }
