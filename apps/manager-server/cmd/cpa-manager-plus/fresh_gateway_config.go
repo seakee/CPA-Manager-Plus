@@ -245,7 +245,8 @@ func (a *freshApplication) gatewayConfiguration(w http.ResponseWriter, r *http.R
 		if service == nil {
 			return
 		}
-		if grant := a.externalReadGrant(r.Context()); grant.Refused {
+		grant := a.externalReadGrant(r.Context())
+		if grant.Refused {
 			// The user's CPA already refused the stored credential. This save would
 			// present it once more, and five refusals ban the address for thirty
 			// minutes: the answer is the same blocker, written locally.
@@ -253,6 +254,11 @@ func (a *freshApplication) gatewayConfiguration(w http.ResponseWriter, r *http.R
 			return
 		}
 		operation, err := service.SaveGroup(r.Context(), parts[1], q)
+		// The first 401 a save meets is the refusal of the credential it presented,
+		// so it is filed against this request's grant exactly as the read and the
+		// Key installs file theirs. Without it the page would present the same
+		// refused key on its next poll until the CPA banned the address.
+		a.noteExternalRejection(r.Context(), grant, err)
 		gatewayConfigReply(w, operation, err)
 	case parts[0] == "rules" && len(parts) == 2:
 		if r.Method != http.MethodPost {
@@ -276,11 +282,15 @@ func (a *freshApplication) gatewayConfiguration(w http.ResponseWriter, r *http.R
 		if service == nil {
 			return
 		}
-		if grant := a.externalReadGrant(r.Context()); grant.Refused {
+		grant := a.externalReadGrant(r.Context())
+		if grant.Refused {
 			gatewayConfigReply(w, nil, cpa.ErrManagementRejected)
 			return
 		}
 		operation, err := service.SaveFamily(r.Context(), parts[1], q)
+		// A family save presents the stored credential exactly like a group save,
+		// so its first refusal is filed the same way.
+		a.noteExternalRejection(r.Context(), grant, err)
 		gatewayConfigReply(w, operation, err)
 	case parts[0] == "operations" && (len(parts) == 2 || len(parts) == 3 && parts[2] == "reconcile"):
 		a.gatewayConfigOperation(w, r, parts)

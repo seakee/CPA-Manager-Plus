@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
@@ -196,8 +199,10 @@ func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Han
 		ctx := r.Context()
 		gate := &app.legacyCredentialGate
 		// A waiter whose request was cancelled gives up instead of queueing: no CPA
-		// request is ever made on behalf of a caller that stopped waiting.
+		// request is ever made on behalf of a caller that stopped waiting. It is told
+		// so locally rather than left with a connection that never answers.
 		if !gate.acquire(ctx) {
+			writeExternalCredentialWaitCancelled(w)
 			return
 		}
 		// One at a time, and the refusal is re-read under the lock: a page fires
@@ -223,13 +228,22 @@ func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Han
 		// name the cause. The refusal is the same fact the typed reads block on, so
 		// it is recorded and answered as that blocker instead.
 		markContext, mark := proxysvc.WithSavedKeyMark(ctx)
+		// The tenure is bounded in both directions: the recorder frees the gate the
+		// moment the status exists, and the budget frees it and ends the request
+		// when the CPA never sends one. Without the budget a CPA that accepts the
+		// connection and never answers would hold every other console read.
+		hold, requestCtx := beginExternalCredentialHold(markContext, gate, app.externalCredentialHeaderBudget())
 		recorder := &externalLegacyRecorder{
-			ResponseWriter: w, ctx: markContext, app: app, gate: gate, grant: grant, mark: mark,
+			ResponseWriter: w,
+			// The refusal is recorded against a context the caller cannot cancel: a
+			// browser that disconnects while the CPA answers 401 must still leave the
+			// gate in place, or the next page load presents the refused key again.
+			ctx: context.WithoutCancel(requestCtx), app: app, hold: hold, grant: grant, mark: mark,
 		}
 		// The lock is held only until the status is known, which the recorder does;
 		// this defer covers the paths where no status ever reaches it.
-		defer recorder.release()
-		next.ServeHTTP(recorder, r.WithContext(markContext))
+		defer hold.finish()
+		next.ServeHTTP(recorder, r.WithContext(requestCtx))
 	})
 }
 
@@ -267,6 +281,93 @@ func (g *externalCredentialGate) release() {
 	}
 }
 
+// externalCredentialHeaderBudgetDefault is how long one gated request may hold the
+// credential gate waiting for the CPA's status. It is deliberately longer than any
+// management read the console makes and shorter than a browser's own patience: its
+// only job is to keep a CPA that never answers from stalling every other read.
+const externalCredentialHeaderBudgetDefault = 30 * time.Second
+
+// externalCredentialHeaderBudget reports the bounded tenure of the credential gate
+// for one request.
+func (a *freshApplication) externalCredentialHeaderBudget() time.Duration {
+	if a != nil && a.credentialHeaderBudget > 0 {
+		return a.credentialHeaderBudget
+	}
+	return externalCredentialHeaderBudgetDefault
+}
+
+// statusClientClosedRequest names a request whose caller stopped waiting before
+// any answer existed. It is the Client Closed Request status (499) proxies already
+// use for exactly this fact.
+const statusClientClosedRequest = 499
+
+// externalCredentialWaitCancelled is the local code for a gated request that gave
+// up on the credential lock because its own caller was gone. No CPA request was
+// made, so it is not a refusal of the stored credential.
+const externalCredentialWaitCancelled = "external_credential_wait_cancelled"
+
+// writeExternalCredentialWaitCancelled answers a cancelled waiter locally instead
+// of returning silently: an abandoned connection that never receives a status is
+// indistinguishable from a Manager that hung.
+func writeExternalCredentialWaitCancelled(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusClientClosedRequest)
+	writeFreshJSON(w, struct {
+		Code string `json:"code"`
+	}{externalCredentialWaitCancelled})
+}
+
+// externalCredentialHold is one request's tenure of the credential gate. The gate
+// is released the moment the response status is known, and the budget releases it
+// and ends the request when the CPA never produces one, so a hung CPA cannot hold
+// every other console read behind it.
+type externalCredentialHold struct {
+	gate *externalCredentialGate
+	// timer is stored atomically because the budget callback can fire while the
+	// handle is still being built: the callback must never read a field the
+	// constructor has not published yet.
+	timer  atomic.Pointer[time.Timer]
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+// beginExternalCredentialHold takes the bounded tenure of an already-acquired gate
+// and returns the context the proxied request must use: cancelling it is what ends
+// a request whose CPA never answered.
+func beginExternalCredentialHold(
+	ctx context.Context,
+	gate *externalCredentialGate,
+	budget time.Duration,
+) (*externalCredentialHold, context.Context) {
+	requestCtx, cancel := context.WithCancel(ctx)
+	hold := &externalCredentialHold{gate: gate, cancel: cancel}
+	hold.timer.Store(time.AfterFunc(budget, func() {
+		hold.release()
+		cancel()
+	}))
+	return hold, requestCtx
+}
+
+// release frees the gate and stops the budget. It is safe to call more than once:
+// the recorder releases on the status, on a hijack and on every other exit.
+func (h *externalCredentialHold) release() {
+	h.once.Do(func() {
+		if timer := h.timer.Load(); timer != nil {
+			timer.Stop()
+		}
+		h.gate.release()
+	})
+}
+
+// finish ends the tenure once ServeHTTP returned. The request context is cancelled
+// only here: a streamed body whose status was already known keeps its own context.
+func (h *externalCredentialHold) finish() {
+	h.release()
+	if h.cancel != nil {
+		h.cancel()
+	}
+}
+
 // externalLegacyRecorder turns a CPA credential rejection into the typed blocker
 // while passing every other response through untouched. The status is decided
 // before any byte is written, so a streamed or large body is never buffered, and
@@ -276,21 +377,25 @@ type externalLegacyRecorder struct {
 	http.ResponseWriter
 	ctx   context.Context
 	app   *freshApplication
-	gate  *externalCredentialGate
+	hold  *externalCredentialHold
 	grant externalReadGrant
 	mark  *proxysvc.SavedKeyMark
-	once  sync.Once
 
 	decided bool
 	refused bool
 }
 
-func (w *externalLegacyRecorder) release() {
-	w.once.Do(w.gate.release)
-}
+func (w *externalLegacyRecorder) release() { w.hold.release() }
 
 func (w *externalLegacyRecorder) WriteHeader(status int) {
 	if w.decided {
+		return
+	}
+	if status < http.StatusOK {
+		// An informational status is not the answer. A 100 or a 103 says nothing
+		// about the credential, and deciding on it would release the gate before the
+		// CPA had a chance to refuse: the final status is what decides both.
+		w.ResponseWriter.WriteHeader(status)
 		return
 	}
 	w.decided = true
@@ -319,6 +424,19 @@ func (w *externalLegacyRecorder) WriteHeader(status int) {
 	}
 	w.ResponseWriter.WriteHeader(status)
 	w.release()
+}
+
+// Hijack releases the gate before handing the connection over. An upgraded
+// connection never carries a status this gate can decide, so the lock must not
+// outlive the handshake; the caller still owns the lifetime of the connection.
+func (w *externalLegacyRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, http.ErrNotSupported
+	}
+	w.release()
+	w.decided = true
+	return hijacker.Hijack()
 }
 
 // Unwrap lets http.ResponseController reach the real writer, so streaming a

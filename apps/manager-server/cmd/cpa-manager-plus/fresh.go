@@ -113,6 +113,11 @@ type freshApplication struct {
 	// recorded before the next request leaves. It is held only until the answer's
 	// status is known, and a waiter whose own request is cancelled gives up.
 	legacyCredentialGate externalCredentialGate
+	// credentialHeaderBudget is how long one gated request may hold the credential
+	// gate waiting for the CPA's status. It exists for the hung CPA: a process that
+	// accepts the connection and never answers must not stall every other console
+	// read. Zero means externalCredentialHeaderBudgetDefault.
+	credentialHeaderBudget time.Duration
 	legacyCollector *collectorservice.Service
 	collectorWorker *worker.CollectorWorker
 	identityWorker  *identityreconcile.Worker

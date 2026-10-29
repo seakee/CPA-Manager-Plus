@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -18,6 +21,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
+	proxysvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/proxy"
 )
 
 // gateAdmin is the browser's Admin header for one legacy-bridge request.
@@ -144,7 +148,8 @@ func TestExternalPluginResourceTakesNoCredentialGate(t *testing.T) {
 // TestExternalGateCancelledWaiterForwardsNothing keeps a cancelled request out of
 // the queue: a caller that stopped waiting never gets a CPA request made on its
 // behalf, because the refusal of that request would be filed against a key nobody
-// is waiting to hear about.
+// is waiting to hear about. It is answered locally instead of silently dropped: no
+// status at all is indistinguishable from a Manager that hung.
 func TestExternalGateCancelledWaiterForwardsNothing(t *testing.T) {
 	upstream := newGateUpstream(t, externalAuthorityManagement)
 	app := newExternalApp(t, upstream.server.URL, externalAuthorityManagement)
@@ -152,18 +157,33 @@ func TestExternalGateCancelledWaiterForwardsNothing(t *testing.T) {
 		t.Fatal("could not hold the credential gate")
 	}
 	defer app.legacyCredentialGate.release()
+	// The decision reads this Manager's own store before it reaches the gate, and a
+	// cancelled context would fail that read instead of the wait. The store here
+	// answers regardless of the caller, so the request really queues on the gate
+	// and the cancellation is what ends it.
+	app.store = uncancellableStore{app.store}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	request := gateHTTPRequest(http.MethodGet, "/v0/management/api-keys", gateAdmin).WithContext(ctx)
+	response := httptest.NewRecorder()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		app.legacy.ServeHTTP(httptest.NewRecorder(), request)
+		app.legacy.ServeHTTP(response, request)
 	}()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("a cancelled request kept waiting for the credential gate")
+	}
+	if response.Code != statusClientClosedRequest {
+		t.Fatalf("cancelled waiter = %d %s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil || payload.Code != externalCredentialWaitCancelled {
+		t.Fatalf("cancelled waiter body = %q (%v)", response.Body.String(), err)
 	}
 	if sent := upstream.requests.Load(); sent != 0 {
 		t.Fatalf("a cancelled request made %d CPA requests", sent)
@@ -487,4 +507,180 @@ func gateErrorCode(response *httptest.ResponseRecorder) string {
 		return ""
 	}
 	return payload.Code
+}
+
+// uncancellableStore answers its own reads regardless of the caller, so a test can
+// cancel a request before it reaches the gate without failing the decision first.
+type uncancellableStore struct{ freshstore.Store }
+
+func (s uncancellableStore) Load(ctx context.Context) (freshstore.Record, error) {
+	return s.Store.Load(context.WithoutCancel(ctx))
+}
+
+// gateIsFree probes the credential gate without waiting for it: the slot has one
+// seat, so a held gate is a full channel.
+func gateIsFree(app *freshApplication) bool {
+	select {
+	case app.legacyCredentialGate.slot <- struct{}{}:
+		<-app.legacyCredentialGate.slot
+		return true
+	default:
+		return false
+	}
+}
+
+// statusCapture keeps every status it is handed, including the informational ones
+// a plain recorder would swallow. Tests about which status decides need both.
+type statusCapture struct {
+	header http.Header
+	codes  []int
+	body   bytes.Buffer
+}
+
+func newStatusCapture() *statusCapture { return &statusCapture{header: http.Header{}} }
+
+func (w *statusCapture) Header() http.Header { return w.header }
+
+func (w *statusCapture) WriteHeader(status int) { w.codes = append(w.codes, status) }
+
+func (w *statusCapture) Write(body []byte) (int, error) { return w.body.Write(body) }
+
+func (w *statusCapture) Flush() {}
+
+// hijackCapture is the same writer plus the upgrade surface a hijacked response
+// needs.
+type hijackCapture struct {
+	*statusCapture
+	hijacked bool
+}
+
+func (w *hijackCapture) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	w.hijacked = true
+	return nil, nil, nil
+}
+
+// gateRecorder builds the recorder exactly as the guard does, over an already
+// acquired gate, so a test can drive one status at a time.
+func gateRecorder(t *testing.T, app *freshApplication, w http.ResponseWriter) *externalLegacyRecorder {
+	t.Helper()
+	if !app.legacyCredentialGate.acquire(t.Context()) {
+		t.Fatal("could not hold the credential gate")
+	}
+	markContext, mark := proxysvc.WithSavedKeyMark(t.Context())
+	// The proxy marks the request in its Director when it attaches the saved key;
+	// a recorder built outside the proxy marks it here, so a 401 is decided as one.
+	proxysvc.NoteSavedManagementKey(markContext)
+	hold, requestCtx := beginExternalCredentialHold(markContext, &app.legacyCredentialGate, time.Minute)
+	t.Cleanup(hold.finish)
+	return &externalLegacyRecorder{
+		ResponseWriter: w, ctx: requestCtx, app: app, hold: hold, mark: mark,
+	}
+}
+
+// TestExternalRecorderIgnoresInformationalStatus keeps an interim status from
+// deciding anything: a 103 says nothing about the credential, so the gate stays
+// held until the CPA's final status exists.
+func TestExternalRecorderIgnoresInformationalStatus(t *testing.T) {
+	upstream := newGateUpstream(t, externalAuthorityManagement)
+	app := newExternalApp(t, upstream.server.URL, externalAuthorityManagement)
+	capture := newStatusCapture()
+	recorder := gateRecorder(t, app, capture)
+	recorder.WriteHeader(http.StatusEarlyHints)
+	if gateIsFree(app) {
+		t.Fatal("an informational status released the credential gate")
+	}
+	recorder.WriteHeader(http.StatusUnauthorized)
+	if len(capture.codes) != 2 || capture.codes[0] != http.StatusEarlyHints || capture.codes[1] != http.StatusConflict {
+		t.Fatalf("statuses = %v", capture.codes)
+	}
+	if !strings.Contains(capture.body.String(), freshconfig.ReasonManagementRejected) {
+		t.Fatalf("body = %q", capture.body.String())
+	}
+	if !gateIsFree(app) {
+		t.Fatal("the final status did not release the credential gate")
+	}
+}
+
+// TestExternalRecorderReleasesTheGateOnHijack covers the upgrade: a hijacked
+// connection never carries a status this gate can decide, so the lock must not
+// outlive the handshake.
+func TestExternalRecorderReleasesTheGateOnHijack(t *testing.T) {
+	upstream := newGateUpstream(t, externalAuthorityManagement)
+	app := newExternalApp(t, upstream.server.URL, externalAuthorityManagement)
+	capture := &hijackCapture{statusCapture: newStatusCapture()}
+	recorder := gateRecorder(t, app, capture)
+	recorder.WriteHeader(http.StatusSwitchingProtocols)
+	if _, _, err := recorder.Hijack(); err != nil {
+		t.Fatalf("hijack: %v", err)
+	}
+	if !capture.hijacked {
+		t.Fatal("the hijack never reached the real writer")
+	}
+	if !gateIsFree(app) {
+		t.Fatal("a hijacked response kept the credential gate")
+	}
+}
+
+// TestExternalRecorderRefusesToHijackWithoutAnUpgradeableWriter proves the gate is
+// not released by a hijack that never happened: the caller keeps its tenure.
+func TestExternalRecorderRefusesToHijackWithoutAnUpgradeableWriter(t *testing.T) {
+	upstream := newGateUpstream(t, externalAuthorityManagement)
+	app := newExternalApp(t, upstream.server.URL, externalAuthorityManagement)
+	recorder := gateRecorder(t, app, newStatusCapture())
+	if _, _, err := recorder.Hijack(); !errors.Is(err, http.ErrNotSupported) {
+		t.Fatalf("hijack error = %v", err)
+	}
+	if gateIsFree(app) {
+		t.Fatal("an unsupported hijack released the credential gate")
+	}
+}
+
+// TestExternalGateBudgetFreesAHungCPA bounds the wait for the CPA's headers. A CPA
+// that accepts the connection and never answers must not hold every other console
+// read behind it.
+func TestExternalGateBudgetFreesAHungCPA(t *testing.T) {
+	block := make(chan struct{})
+	var first atomic.Bool
+	upstream := newGateUpstream(t, externalAuthorityManagement)
+	upstream.handle.Store(func(w http.ResponseWriter, r *http.Request) {
+		if first.CompareAndSwap(false, true) {
+			<-block
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	})
+	app := newExternalApp(t, upstream.server.URL, externalAuthorityManagement)
+	app.credentialHeaderBudget = 100 * time.Millisecond
+	hung := make(chan int, 1)
+	go func() {
+		response := httptest.NewRecorder()
+		app.legacy.ServeHTTP(response, gateHTTPRequest(http.MethodGet, "/v0/management/api-keys", gateAdmin))
+		hung <- response.Code
+	}()
+	waitForCondition(t, func() bool { return upstream.requests.Load() == 1 })
+	second := make(chan int, 1)
+	go func() {
+		response := httptest.NewRecorder()
+		app.legacy.ServeHTTP(response, gateHTTPRequest(http.MethodGet, "/v0/management/api-keys", gateAdmin))
+		second <- response.Code
+	}()
+	select {
+	case code := <-second:
+		if code != http.StatusOK {
+			t.Fatalf("the read behind a hung CPA = %d", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("a hung CPA held the credential gate past its %s budget", app.credentialHeaderBudget)
+	}
+	close(block)
+	select {
+	case code := <-hung:
+		if code != http.StatusBadGateway {
+			t.Fatalf("the hung read = %d", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the hung read never ended")
+	}
 }
