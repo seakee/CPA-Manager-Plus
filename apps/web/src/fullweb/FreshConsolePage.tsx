@@ -223,6 +223,7 @@ export function FreshConsolePage({
           context={context}
           credential={credential}
           client={client}
+          strategy={operation.strategy?.strategy}
           onUnauthorized={unauthorized}
         />
       </Suspense>

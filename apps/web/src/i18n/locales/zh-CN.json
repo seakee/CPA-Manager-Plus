@@ -251,7 +251,15 @@
     "restart_title": "重启 CPA 网关？",
     "interruption": "网关请求可能中断，但 CPAMP Manager 仍可用。",
     "operation_conflict": "已有运行时操作正在进行。",
-    "operation_failed": "运行时操作未能完成。"
+    "operation_failed": "运行时操作未能完成。",
+    "cpa_version": "CPA 版本",
+    "version_support": "版本支持状态",
+    "version_supported": "受支持",
+    "version_unsupported": "不受支持",
+    "version_unverified": "未验证",
+    "writes": "写入",
+    "writes_blocked": "该版本阻止写入",
+    "writes_allowed": "该版本未阻止写入"
   },
   "cpa_updates": {
     "title": "CPA Engine",

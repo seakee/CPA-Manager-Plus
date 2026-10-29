@@ -742,3 +742,32 @@ func TestExternalRejectionBelongsToTheKeyThatSentIt(t *testing.T) {
 		t.Fatalf("the rebound key was gated: %d %s", response.Code, response.Body.String())
 	}
 }
+
+// TestExternalUsageConfirmationNeverPresentsARefusedCredential proves the
+// confirmation is not a way around the gate. It re-runs the collection start, and
+// that start samples the CPA before it may write the switch, so a credential the
+// CPA already refused must answer the typed blocker locally: nothing is approved,
+// nothing is started and no request leaves this process.
+func TestExternalUsageConfirmationNeverPresentsARefusedCredential(t *testing.T) {
+	h := newExternalUsageHarness(t)
+	h.cpa.rejects.Store(true)
+	// The first read is the one that learns the refusal.
+	if first := h.call(t, http.MethodGet, "external/usage", ""); first.Code != http.StatusConflict {
+		t.Fatalf("read = %d %s", first.Code, first.Body.String())
+	}
+	requests := h.cpa.requests.Load()
+	response := h.call(t, http.MethodPost, "external/usage",
+		`{"requestId":"`+strings.Repeat("ab", 16)+`","confirmEnableStatistics":true}`)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), freshconfig.ReasonManagementRejected) {
+		t.Fatalf("confirm after the refusal = %d %s", response.Code, response.Body.String())
+	}
+	if sent := h.cpa.requests.Load() - requests; sent != 0 {
+		t.Fatalf("the confirm presented the refused credential %d times", sent)
+	}
+	if writes := h.cpa.statWrites.Load(); writes != 0 {
+		t.Fatalf("the confirm wrote the usage switch %d times", writes)
+	}
+	if h.app.usageCollectionStarted() {
+		t.Fatal("the confirm claimed collection started")
+	}
+}

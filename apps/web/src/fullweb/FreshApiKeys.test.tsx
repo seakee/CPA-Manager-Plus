@@ -895,4 +895,24 @@ describe('Fresh client key persistence UI', () => {
     expect(view()).toContain(k('usageStateUnknown'));
     expect(view()).not.toContain('≥');
   });
+
+  // A successful rebind resolves the blocker this page is showing, and nothing
+  // else re-reads it: the shell bumps the token and the page asks again.
+  it('re-reads the page when the shell reports a successful rebind', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(empty());
+    await mount(fetchMock);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      renderer.update(
+        <FreshApiKeys
+          client={createPublicApiClient(() => context, fetchMock)}
+          credential="admin-test-only"
+          onUnauthorized={unauthorized}
+          onCreationPending={vi.fn()}
+          reloadToken={1}
+        />
+      );
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });

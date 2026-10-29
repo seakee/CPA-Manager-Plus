@@ -279,6 +279,14 @@ func (a *freshApplication) confirmExternalUsageCollection(w http.ResponseWriter,
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
+	// A credential the user's CPA already refused is not presented again. This
+	// endpoint re-runs the collection start, and that start samples the CPA before
+	// it may write anything: answering the recorded blocker here is the same answer
+	// the read gives, and it costs the CPA no request.
+	if a.externalReadGrant(r.Context()).Refused {
+		a.writeExternalUsageError(w, cpa.ErrManagementRejected)
+		return
+	}
 	// A confirm while collection is already live is a no-op: the switch it would
 	// authorise is already on, and restarting the Collector here would cancel the
 	// running one and open the window this Manager works to avoid. The started
@@ -326,17 +334,19 @@ type externalUsageState struct {
 }
 
 func (a *freshApplication) externalUsageState(ctx context.Context) (externalUsageState, error) {
-	install, err := a.externalSource(ctx)
-	if err != nil {
-		return externalUsageState{}, err
-	}
 	// The CPA has already refused this credential, so this read would be another
 	// failed authentication against an address CPA is about to ban. The typed
 	// blocker is answered locally until a rebind or a re-verify proves the key
-	// again.
+	// again. The grant resolves the committed source itself, so it runs first:
+	// resolving the install above it only to discard it would be work this read
+	// must not do once the credential is refused.
 	grant := a.externalReadGrant(ctx)
 	if grant.Refused {
 		return externalUsageState{}, externalReadRefusedError()
+	}
+	install, err := a.externalSource(ctx)
+	if err != nil {
+		return externalUsageState{}, err
 	}
 	report, err := cpa.ObserveExternalVersion(ctx, install.BaseURL, install.ManagementKey)
 	if err != nil {

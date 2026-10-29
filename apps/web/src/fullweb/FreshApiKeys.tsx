@@ -10,6 +10,9 @@ import { FreshKeyDetails } from './FreshKeyDetails';
 import { FreshKeyRevocation } from './FreshKeyRevocation';
 import { parseUsageSummary, usageCountText, usageCoveragePill, usageReasonText, usageStateText, usageTimeText, type UsageSummary } from './freshKeyUsage';
 import { keyDisplayName, maskedPreviewOf, validKey, type Key } from './freshKeyMetadata';
+import { FreshExternalBlocker } from './FreshExternalBlocker';
+import { blockerOf, type ExternalBlocker } from './externalState';
+import { FreshExternalUsage } from './FreshExternalUsage';
 
 export function FreshApiKeys({
   client,
@@ -19,6 +22,9 @@ export function FreshApiKeys({
   storedBadge,
   pageDescription,
   visible = true,
+  onRebind,
+  externalUsage = false,
+  reloadToken = 0,
 }: {
   client: ReturnType<typeof createPublicApiClient>;
   credential: string;
@@ -27,8 +33,18 @@ export function FreshApiKeys({
   storedBadge?: string;
   pageDescription?: string;
   visible?: boolean;
+  /** Opens the Rebind dialog. Present only on an External installation. */
+  onRebind?: () => void;
+  /** Shows the External usage panel, which reads `external/usage`. */
+  externalUsage?: boolean;
+  /** Bumped by the shell after a successful rebind to re-read this page. */
+  reloadToken?: number;
 }) {
   const [keys, setKeys] = useState<Key[] | null>(null);
+  // A typed External blocker is the page's own contract. It is kept apart from
+  // the generic failure so the page names the state and offers its way out
+  // instead of collapsing everything into "key state is unavailable".
+  const [blocker, setBlocker] = useState<ExternalBlocker | null>(null);
   const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -85,7 +101,18 @@ export function FreshApiKeys({
 
   function failure(err: unknown) {
     if (err instanceof PublicApiError && err.kind === 'authentication') onUnauthorized();
-    else setError(t('keysUnavailable'));
+    else {
+      // A typed External code is a state the page names, not a generic outage.
+      const typed = err instanceof PublicApiError ? blockerOf(err.code) : null;
+      setBlocker(
+        typed && err instanceof PublicApiError
+          ? typed.kind === 'key_rejected'
+            ? { ...typed, detail: err.detail }
+            : typed
+          : null
+      );
+      setError(typed ? '' : t('keysUnavailable'));
+    }
   }
 
   async function refresh() {
@@ -111,6 +138,7 @@ export function FreshApiKeys({
         throw new Error();
       setKeys(result.keys);
       setRevocationAvailable(result.revocationAvailable);
+      if (alive.current) setBlocker(null);
       try {
         const parsed = parseUsageSummary(await client.get<unknown>('api-keys/usage-summary', auth));
         if (!parsed) throw new Error('Invalid usage summary response');
@@ -129,9 +157,11 @@ export function FreshApiKeys({
   }
 
   // No credential, secret or request journal enters persistent browser storage.
+  // A successful rebind changes `reloadToken`, so the blocker this page is
+  // showing is re-read instead of outliving the fix that resolved it.
   useEffect(() => {
     void refresh();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [reloadToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function copyCreatedSecret() {
     if (!secret) return;
@@ -466,11 +496,31 @@ export function FreshApiKeys({
           </button>
         </div>
       </header>
+      {blocker && (
+        <FreshExternalBlocker
+          state={blocker}
+          onRebind={onRebind}
+          onReload={() => void refresh()}
+          onDismiss={() => setBlocker(null)}
+        />
+      )}
       {error && !createOpen && !pending && (
         <p role="alert" className="key-notice key-notice-warning">
           <FullWebIcon name="alert" />
           <span>{error}</span>
         </p>
+      )}
+      {externalUsage && (
+        <FreshExternalUsage
+          reloadToken={reloadToken}
+          client={client}
+          credential={credential}
+          onUnauthorized={onUnauthorized}
+          onBlocker={(code) => {
+            const typed = blockerOf(code);
+            if (typed) setBlocker(typed);
+          }}
+        />
       )}
       {operationPending && !revocationOpen && (
         <p className="key-notice" role="status">

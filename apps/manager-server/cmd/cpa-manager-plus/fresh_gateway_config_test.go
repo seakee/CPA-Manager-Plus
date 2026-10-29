@@ -327,3 +327,62 @@ func TestGatewayConfigReplyKeepsTheManagerPrivateRangeCode(t *testing.T) {
 		t.Fatalf("field = %q", payload.Field)
 	}
 }
+
+// externalPageTarget reads the page of an External installation once and returns
+// the generation and the baseline of one group, so a save echoes what the page
+// published instead of a guess.
+func externalPageTarget(t *testing.T, app *freshApplication, group string) (string, string) {
+	t.Helper()
+	response := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("read status=%d body=%s", response.Code, response.Body.String())
+	}
+	var view struct {
+		Generation string `json:"generation"`
+		Groups     []struct {
+			ID       string `json:"id"`
+			Baseline string `json:"baseline"`
+		} `json:"groups"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &view); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range view.Groups {
+		if entry.ID == group {
+			return view.Generation, entry.Baseline
+		}
+	}
+	t.Fatalf("group %q is not on the page", group)
+	return "", ""
+}
+
+// TestExternalGatewaySaveFilesTheFirstRefusal proves a save that meets the CPA's
+// 401 records it, exactly as the read and the Key installs do. The page polls the
+// config read right after a failed save: a refusal it never recorded would be
+// presented again on that poll, and five of them ban the address for thirty
+// minutes.
+func TestExternalGatewaySaveFilesTheFirstRefusal(t *testing.T) {
+	app, cpaServer := externalAuthorityApp(t, "")
+	app.gatewayConfig = gatewayFor(app)
+	generation, baseline := externalPageTarget(t, app, "routing")
+	// The operator rotated the CPA's management key: every request it receives is
+	// now refused with 401.
+	cpaServer.reject.Store(true)
+	body := `{"requestId":"` + strings.Repeat("ab", 16) + `","expected":{"generation":"` + generation + `","baseline":"` + baseline + `"},` +
+		`"edits":[{"path":"routing.strategy","action":"set","value":"fill-first"}]}`
+	response := gatewayRequest(t, app, http.MethodPost, "gateway/config/groups/routing", body, "application/json")
+	if response.Code != http.StatusConflict || errorCode(t, response) != freshconfig.ReasonManagementRejected {
+		t.Fatalf("save status=%d body=%s", response.Code, response.Body.String())
+	}
+	if !app.externalReadGrant(t.Context()).Refused {
+		t.Fatal("the save's 401 was not recorded")
+	}
+	reads, probes := cpaServer.reads.Load(), cpaServer.probes.Load()
+	read := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", "")
+	if read.Code != http.StatusConflict || errorCode(t, read) != freshconfig.ReasonManagementRejected {
+		t.Fatalf("read after the recorded refusal = %d %s", read.Code, read.Body.String())
+	}
+	if cpaServer.reads.Load() != reads || cpaServer.probes.Load() != probes {
+		t.Fatal("the recorded refusal did not stop the next read from presenting the key")
+	}
+}

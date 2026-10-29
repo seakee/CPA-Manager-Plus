@@ -151,6 +151,54 @@ describe('canonical Full Web Public API transport', () => {
     });
   });
 
+  // An External install saves the gateway document through its committed CPA
+  // credential, so the same conflict carries any External code. Before the merge
+  // the gateway parser dropped it, `blockerOf` saw nothing and the page showed a
+  // bare status with no way out.
+  it('parses an External refusal on the gateway document', async () => {
+    browserOrigin();
+    const transport = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json(
+        { code: 'external_management_key_rejected', detail: 'the CPA replaced this key' },
+        { status: 409 }
+      )
+    );
+    const error = (await createPublicApiClient(() => context, transport)
+      .post('gateway/config/groups/retry', {}, credential)
+      .catch((value) => value)) as Error & { code?: string; detail?: string };
+    expect(error).toMatchObject({
+      kind: 'http',
+      status: 409,
+      code: 'external_management_key_rejected',
+      detail: 'the CPA replaced this key',
+    });
+  });
+
+  // A single key is written through the same credential as the list, so its
+  // writes answer the same typed codes. The operation journal keeps its own
+  // answer: widening the resource must not swallow `key_operation_*` results.
+  it('parses an External refusal on one key without taking over its operation journal', async () => {
+    browserOrigin();
+    const refused = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({ code: 'external_management_key_rejected' }, { status: 409 })
+    );
+    const refusal = (await createPublicApiClient(() => context, refused)
+      .put('api-keys/key-7', {}, credential)
+      .catch((value) => value)) as Error & { code?: string };
+    expect(refusal).toMatchObject({ kind: 'http', status: 409, code: 'external_management_key_rejected' });
+
+    const journal = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json(
+        { code: 'key_operation_pending', result: { operationId: 'operation-1', status: 'pending' } },
+        { status: 409 }
+      )
+    );
+    const pending = (await createPublicApiClient(() => context, journal)
+      .get('api-keys/operations/operation-1', credential)
+      .catch((value) => value)) as Error & { operationResult?: unknown };
+    expect(pending.operationResult).toEqual({ operationId: 'operation-1', status: 'pending' });
+  });
+
   it('keeps a zero leaf a number in the gateway projection', async () => {
     browserOrigin();
     const transport = vi.fn<typeof fetch>().mockResolvedValue(

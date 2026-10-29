@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
 )
@@ -128,14 +129,27 @@ func (a *freshApplication) externalReadGrant(ctx context.Context) externalReadGr
 	if a == nil || a.rejection == nil || a.externalSource == nil || a.store == nil {
 		return externalReadGrant{}
 	}
+	record, err := a.store.Load(ctx)
+	if err != nil {
+		return externalReadGrant{}
+	}
+	return a.externalReadGrantFor(ctx, record)
+}
+
+// externalReadGrantFor is externalReadGrant for a record the caller already
+// loaded. The legacy gate reads it once to decide the route, and a saved-key
+// request must not pay for the same row twice before it leaves.
+func (a *freshApplication) externalReadGrantFor(ctx context.Context, record freshstore.Record) externalReadGrant {
+	if a == nil || a.rejection == nil || a.externalSource == nil {
+		return externalReadGrant{}
+	}
 	install, err := a.externalSource(ctx)
 	if err != nil {
 		// An unresolvable authority is its own typed blocker further down; it is
 		// not evidence that the credential was refused.
 		return externalReadGrant{}
 	}
-	record, err := a.store.Load(ctx)
-	if err != nil || record.Connection == nil || record.Connection.ManagementKey == "" {
+	if record.Connection == nil || record.Connection.ManagementKey == "" {
 		// Without the envelope there is nothing to tell this read apart from one
 		// on a rebound key, so the gate stays open rather than risk hiding the
 		// user's data.
@@ -165,11 +179,40 @@ func externalReadRefusedError() error { return cpa.ErrManagementRejected }
 // a refused credential: a conflict with the typed code, which offers a rebind and
 // no retry.
 func writeExternalManagementRejected(w http.ResponseWriter) {
+	writeExternalManagementRejection(w, "")
+}
+
+// writeExternalManagementForbidden is the same blocker for a CPA 403. CPA answers
+// 403 rather than 401 to a client it refuses — a banned address, or remote
+// management disabled for it — and the 2a routes already pair that with the detail
+// that says the ban expires, so the bridge names it the same way.
+func writeExternalManagementForbidden(w http.ResponseWriter) {
+	writeExternalManagementRejection(w, externalRebindForbiddenDetail)
+}
+
+// writeExternalManagementRejection writes the local refusal. It drops every entity
+// header the proxy copied from CPA first: they describe the refused upstream body,
+// and a `Content-Length` left behind truncates or empties this one, which is how
+// the refusal became unreadable behind a real server.
+func writeExternalManagementRejection(w http.ResponseWriter, detail string) {
+	for _, name := range proxiedEntityHeaders {
+		w.Header().Del(name)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusConflict)
 	writeFreshJSON(w, struct {
-		Code string `json:"code"`
-	}{freshconfig.ReasonManagementRejected})
+		Code   string `json:"code"`
+		Detail string `json:"detail,omitempty"`
+	}{freshconfig.ReasonManagementRejected, detail})
+}
+
+// proxiedEntityHeaders are the response headers a reverse proxy copies from CPA
+// onto the Manager's own response. None of them can describe a body this Manager
+// writes itself.
+var proxiedEntityHeaders = []string{
+	"Content-Length", "Content-Type", "Content-Encoding", "Transfer-Encoding",
+	"Trailer", "Content-Range", "Content-Disposition", "Content-Language",
+	"Accept-Ranges", "ETag", "Last-Modified", "Vary",
 }
 
 // noteExternalRejection files a refusal against the grant the request used. It runs
