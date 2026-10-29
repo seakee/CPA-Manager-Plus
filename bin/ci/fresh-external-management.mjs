@@ -90,6 +90,9 @@ const publicPort = await freePort();
 // The operator's own loopback view of the user's CPA, for the out-of-band reads
 // and edits this Manager must never be the author of.
 const cpaPort = await freePort();
+// The second Manager install, used for the v7 CONNECT. Its listener is loopback
+// only: nothing but this script ever talks to it.
+const v7ManagerPort = await freePort();
 
 const env = { ...process.env, CPAMP_PUBLIC_PORT: `127.0.0.1:${publicPort}` };
 let browser;
@@ -145,11 +148,18 @@ report.gitHead = run(['git', 'rev-parse', 'HEAD']).stdout.trim();
 const dirtyWorktree = run(['git', 'status', '--porcelain']).stdout.trim();
 assert.equal(dirtyWorktree, '', 'the worktree must be clean: the report names this HEAD');
 report.testedSourceCommit = report.gitHead;
+// Every image must name the commit it was built from. An unlabelled image is a
+// candidate nobody can attribute, so it is a failure rather than an allowed
+// unknown: the checks below would be credited to source no one can name.
+for (const [service, revision] of Object.entries(report.imageSourceRevisions)) {
+  assert.notEqual(revision, 'unknown', 'the ' + service + ' image carries no source revision');
+  assert.equal(
+    revision,
+    report.gitHead,
+    'the ' + service + ' image was built from ' + revision + ', not ' + report.gitHead
+  );
+}
 report.imageSourceCommit = report.imageSourceRevisions['cpamp-manager'];
-assert(
-  report.imageSourceCommit === 'unknown' || report.imageSourceCommit === report.gitHead,
-  'the Manager image was built from ' + report.imageSourceCommit + ', not ' + report.gitHead
-);
 
 const network = project + '-net';
 const managerVolume = project + '-manager-data';
@@ -157,6 +167,11 @@ const cpaContainer = project + '-cpa';
 const managerContainer = project + '-manager';
 const ingressContainer = project + '-ingress';
 const v7Container = project + '-cpa-v7';
+// The v7 negative needs an install that has never committed a strategy: a
+// completed installation refuses a CONNECT before it asks the CPA anything, so a
+// second Manager with its own volume is the only caller that can see the answer.
+const v7ManagerContainer = project + '-manager-v7';
+const v7ManagerVolume = project + '-manager-v7-data';
 // The Manager's own address on the private network: the failed-authentication
 // counter only attributes a CPA log line to this Manager when it names this.
 let managerAddress = '';
@@ -169,7 +184,9 @@ function pass(name, observed) {
 }
 function fail(name, observed) {
   report.checks.push({ name, result: 'FAIL', ...(observed ? { observed } : {}) });
-  console.log('FAIL ' + name + (observed ? ' ' + JSON.stringify(observed) : ''));
+  // The same rule as pass(): the run log is a pasted artifact, so a failure never
+  // prints an observation that could carry a credential.
+  console.log('FAIL ' + name + (observed ? ' ' + redact(JSON.stringify(observed)) : ''));
   throw new Error('Check failed: ' + name);
 }
 function notRun(name, reason) {
@@ -262,9 +279,11 @@ function runContainerLogs() {
     return { name, text: (logs.stdout || '') + (logs.stderr || '') };
   });
 }
+// Raw on purpose: the secret assertion reads this text before redaction, and only
+// the written report is redacted.
 function cpaLogTail(lines = 40) {
   const logs = run(['docker', 'logs', '--tail', String(lines), cpaContainer], undefined, false);
-  return redact(((logs.stdout || '') + (logs.stderr || '')).slice(-6000));
+  return ((logs.stdout || '') + (logs.stderr || '')).slice(-6000);
 }
 
 // The CPA is the pinned v8.0.13 binary from the runtime candidate, started
@@ -736,15 +755,20 @@ try {
   });
 
   // The scalar this run saves is chosen from the projection, so it is a leaf this
-  // profile says is editable rather than a path the script assumes.
+  // profile says is editable rather than a path the script assumes. It is chosen by
+  // the leaf's declared type, not by its current value: a CPA config that never set
+  // the key reports no value at all, and an absent leaf is exactly what a save is
+  // for. An integer is the one type whose new value needs no CPA-specific spelling.
   const scalar = (() => {
     for (const group of gatewayRead.payload?.groups ?? []) {
       if (!group.writable) continue;
       for (const path of group.paths ?? []) {
         const field = (gatewayRead.payload?.fields ?? []).find((entry) => entry.path === path);
-        if (!field?.editable) continue;
-        if (!['number', 'boolean', 'string'].includes(typeof field.value)) continue;
-        return { group: group.id, baseline: group.baseline, path };
+        if (!field?.editable || field.type !== 'int') continue;
+        // The write must be observable, so a leaf already holding this run's value
+        // gets its neighbour instead.
+        const value = field.value === 3 ? 2 : 3;
+        return { group: group.id, baseline: group.baseline, path, value };
       }
     }
     return null;
@@ -755,7 +779,7 @@ try {
     const saved = await apiCall('POST', 'gateway/config/groups/' + scalar.group, {
       requestId: randomBytes(16).toString('hex'),
       expected: { generation: gatewayRead.payload.generation, baseline: scalar.baseline },
-      edits: [{ path: scalar.path, action: 'set', value: 3 }],
+      edits: [{ path: scalar.path, action: 'set', value: scalar.value }],
     });
     assert.equal(saved.status, 200, JSON.stringify(saved.payload));
     let observed = null;
@@ -764,7 +788,7 @@ try {
       if (read.status !== 200) return false;
       observed = (read.payload?.fields ?? []).find((field) => field.path === scalar.path);
       gatewayRead.payload = read.payload;
-      return observed?.value === 3;
+      return observed?.value === scalar.value;
     }, 'the saved scalar on the CPA');
     return { path: scalar.path, value: observed.value };
   });
@@ -773,19 +797,27 @@ try {
     // The operator edits the same leaf on their own CPA. The Manager's confirmed
     // baseline still names the document it last saw, so a save against it is a
     // conflict rather than a blind overwrite.
+    // The edit is a mapping merge below the group prefix with only the edited
+    // leaf, which is the write shape this Manager itself proves against v8 (the
+    // same PATCH prefix and object a group save sends).
+    const segments = scalar.path.split('.');
+    const leaf = segments.pop();
     const edited = await fetch(
-      `http://127.0.0.1:${cpaPort}/v8/management/config/` + scalar.path.split('.').join('/'),
+      `http://127.0.0.1:${cpaPort}/v8/management/config/` + segments.join('/'),
       {
         method: 'PATCH',
         headers: { Authorization: 'Bearer ' + managementKey, 'Content-Type': 'application/json' },
-        body: JSON.stringify(4),
+        body: JSON.stringify({ [leaf]: scalar.value + 1 }),
       }
     );
     assert([200, 204].includes(edited.status), 'the operator edit was refused: ' + edited.status);
+    // The digest this save echoes is the one the Manager recorded before the
+    // operator's edit, so the only difference between it and the CPA is the edit.
+    const confirmed = (gatewayRead.payload?.groups ?? []).find((group) => group.id === scalar.group);
     const stale = await apiCall('POST', 'gateway/config/groups/' + scalar.group, {
       requestId: randomBytes(16).toString('hex'),
-      expected: { generation: gatewayRead.payload.generation, baseline: scalar.baseline },
-      edits: [{ path: scalar.path, action: 'set', value: 3 }],
+      expected: { generation: gatewayRead.payload.generation, baseline: confirmed?.baseline },
+      edits: [{ path: scalar.path, action: 'set', value: scalar.value }],
     });
     assert.equal(stale.status, 409, JSON.stringify(stale.payload));
     assert.equal(stale.payload.code, 'source_or_operation_conflict', JSON.stringify(stale.payload));
@@ -875,12 +907,15 @@ try {
   const failedBefore = cpaFailedAuthCount();
 
   const blockedRead = await apiCall('GET', 'external/usage');
+  // The baseline is the count at the moment the gate engages: every refusal after
+  // it belongs to the Manager presenting a key the CPA already rejected, which is
+  // the number five bans an address for.
+  const failedAtRefusal = cpaFailedAuthCount();
   await check('after an out-of-band rotation writes are blocked and reads answer locally', async () => {
     assert.equal(blockedRead.status, 409, JSON.stringify(blockedRead.payload));
     assert.equal(blockedRead.payload.code, 'external_management_key_rejected');
     // The refused credential is now the standing state, so repeated reads must
     // answer from the Manager without touching the CPA at all.
-    const failedAtRefusal = cpaFailedAuthCount();
     for (let round = 0; round < 4; round++) {
       const again = await apiCall('GET', 'external/usage');
       assert.equal(again.status, 409, 'repeat read ' + round);
@@ -927,7 +962,7 @@ try {
     const save = await apiCall('POST', 'gateway/config/groups/' + scalar.group, {
       requestId: randomBytes(16).toString('hex'),
       expected: { generation: gatewayRead.payload?.generation, baseline: scalar.baseline },
-      edits: [{ path: scalar.path, action: 'set', value: 3 }],
+      edits: [{ path: scalar.path, action: 'set', value: scalar.value }],
     });
     assert.equal(save.status, 409, JSON.stringify(save.payload));
     assert.equal(save.payload.code, 'external_management_key_rejected', JSON.stringify(save.payload));
@@ -942,6 +977,18 @@ try {
     assert.equal(confirm.status, 409, JSON.stringify(confirm.payload));
     assert.equal(confirm.payload.code, 'external_management_key_rejected', JSON.stringify(confirm.payload));
     return { code: confirm.payload.code };
+  });
+
+  // The four writes above each presented the stored credential before the gate
+  // existed. Not one of them may have added a management 401 to the CPA's log.
+  await check('no post-rotation write presented the refused credential', async () => {
+    const failedAfterWrites = cpaFailedAuthCount();
+    assert.equal(
+      failedAfterWrites,
+      failedAtRefusal,
+      'a post-rotation write presented the refused credential'
+    );
+    return { failedAuthsAtRefusal: failedAtRefusal, failedAuthsAfterWrites: failedAfterWrites };
   });
 
   // The refusal is on record, so every read above and below answers from this
@@ -961,6 +1008,8 @@ try {
     return { failedAuthsAtGate: failedAtGate };
   });
 
+  // The whole first-rotation window, from the moment the CPA stopped accepting
+  // the stored key to the last local refusal: one credential, one 401.
   const failedDuringRotation = cpaFailedAuthCount() - failedBefore;
   report.failedAuthDuringRotation = failedDuringRotation;
   await check('failed authentications stay below the CPA ban threshold of five', async () => {
@@ -1053,6 +1102,10 @@ try {
   // The rewrite carries the keys the CPA carries right now, so restarting it for
   // the screenshot pass does not silently undo the key lifecycle above.
   const carried = await cpaKeys(rotatedKey);
+  // The second rotation is the same scenario the browser now renders: every
+  // console read the Manager makes until the dialog rebinds presents a key this
+  // CPA no longer accepts, so the window is counted like the first one.
+  const failedBeforeSecondRotation = cpaFailedAuthCount();
   cpaConfig = cpaConfig
     .replace(`secret-key: "${rotatedKey}"`, `secret-key: "${staleKey}"`)
     .replace(
@@ -1142,10 +1195,22 @@ try {
     return { status: recovered.payload.status };
   });
 
-  // The CPA's own log is the only place a refusal reason and a ban are visible.
-  report.cpaLogs = redact(
-    (run(['docker', 'logs', '--tail', '80', cpaContainer], undefined, false).stdout || '').slice(-4000)
-  );
+  const failedAfterSecondRotation = cpaFailedAuthCount();
+  report.failedAuthDuringSecondRotation = failedAfterSecondRotation - failedBeforeSecondRotation;
+  await check('the second rotation stays below the ban threshold across the browser pass', async () => {
+    const window = failedAfterSecondRotation - failedBeforeSecondRotation;
+    assert(window >= 0, 'the failed-authentication count went backwards');
+    assert(
+      window < 5,
+      'the browser pass presented a refused credential ' + window + ' times'
+    );
+    return { failedDuringSecondRotation: window, threshold: 5 };
+  });
+
+  // The CPA's own log is the only place a refusal reason and a ban are visible. It
+  // is kept raw here: the secret assertion in finally reads it before redaction,
+  // and redaction happens only when the report is written.
+  report.cpaLogs = (run(['docker', 'logs', '--tail', '80', cpaContainer], undefined, false).stdout || '').slice(-4000);
 
   await surface('the usage panel gates enabling behind an explicit confirmation', async () => {
     // The restart above put the CPA back to statistics disabled, so the gate is
@@ -1270,31 +1335,113 @@ try {
       );
       assert.equal(accepted.status, 0, 'the v7 CPA refused the stored credential');
 
-      // A CONNECT is the first thing an operator does with a CPA. It probes the v8
-      // safe read before anything is persisted, so a v7 CPA is refused there: the
-      // code is the 2a connect refusal (or the version code the other External
-      // surfaces name), and no journal entry exists afterwards.
-      const current = await apiCall('GET', 'operation');
-      const connectV7 = await apiCall('POST', 'strategy', {
-        identity: current.payload.identity,
-        expectedRevision: current.payload.revision,
+      // A CONNECT is the first thing an operator does with a CPA, and it is asked
+      // here from an install that has not committed a strategy yet: a completed
+      // installation refuses every CONNECT before it asks the CPA anything, so it
+      // could not tell a v7 CPA from a healthy one. The second Manager has its own
+      // volume and its own listener, and the bootstrap namespace carries the whole
+      // call, so nothing here borrows the first installation's state.
+      const secondaryOrigin = `http://127.0.0.1:${v7ManagerPort}`;
+      const secondaryEnv = [
+        '-e', 'HTTP_ADDR=0.0.0.0:18317',
+        '-e', 'USAGE_DB_PATH=/data/usage.sqlite',
+        '-e', 'CPA_MANAGER_DATA_KEY_PATH=/data/data.key',
+      ];
+      docker(
+        'run', '-d', '--name', v7ManagerContainer, '--network', network,
+        '-p', `127.0.0.1:${v7ManagerPort}:18317`,
+        '-v', `${v7ManagerVolume}:/data`,
+        ...secondaryEnv,
+        images['cpamp-manager']
+      );
+      await wait(async () => {
+        const health = await fetch(secondaryOrigin + '/health');
+        return health.status === 503 || health.status === 200;
+      }, 'the second Manager listener');
+      docker('stop', v7ManagerContainer);
+      const secondaryHandoff = docker(
+        'run', '--rm', '--network', network, '-v', `${v7ManagerVolume}:/data`,
+        ...secondaryEnv, images['cpamp-manager'], 'initialize'
+      ).trim();
+      docker('start', v7ManagerContainer);
+      await wait(
+        async () => (await fetch(secondaryOrigin + bootstrap + '/ui')).ok,
+        'the second Bootstrap UI'
+      );
+      const secondaryClaim = JSON.parse(
+        Buffer.from(secondaryHandoff.split('#handoff=')[1], 'base64url').toString()
+      );
+      secretValues.push(secondaryClaim.token);
+      const secondaryExchange = await fetch(secondaryOrigin + bootstrap + '/api/v2/claim/exchange', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          identity: secondaryClaim.identity,
+          claimGeneration: secondaryClaim.claimGeneration,
+          token: secondaryClaim.token,
+        }),
+      });
+      assert.equal(secondaryExchange.status, 200, 'the second claim exchange');
+      const secondarySession = await secondaryExchange.json();
+      secretValues.push(secondarySession.token);
+      const secondaryHeaders = {
+        'Content-Type': 'application/json',
+        Authorization: 'Fresh ' + secondarySession.token,
+      };
+      const secondaryCall = async (method, resource, body) => {
+        const response = await fetch(secondaryOrigin + bootstrap + '/api/v2/' + resource, {
+          method,
+          headers: secondaryHeaders,
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        });
+        let payload = null;
+        try {
+          payload = await response.json();
+        } catch {}
+        return { status: response.status, payload };
+      };
+      // An install with an Admin key and no strategy is the state a CONNECT starts
+      // from; the credential is generated here, never read from the environment.
+      const secondaryAdmin = await secondaryCall('POST', 'admin/generate', {});
+      assert.equal(secondaryAdmin.status, 200, 'the second admin/generate');
+      secretValues.push(secondaryAdmin.payload.key);
+      const secondaryCommit = await secondaryCall('POST', 'admin/commit', {
+        identity: secondarySession.operation.identity,
+        commitId: 'd-external-v7-commit',
+        key: secondaryAdmin.payload.key,
+      });
+      assert.equal(secondaryCommit.status, 200, 'the second admin/commit');
+      const secondaryOperation = await secondaryCall('GET', 'operation');
+      assert.equal(secondaryOperation.status, 200, 'the second install operation');
+
+      const connectV7 = await secondaryCall('POST', 'strategy', {
+        identity: secondaryOperation.payload.identity,
+        expectedRevision: secondaryOperation.payload.revision,
         attemptId: randomBytes(16).toString('hex'),
         strategy: 'connect_external',
         baseUrl: `http://${cpaName}:8317`,
         managementKey: staleKey,
       });
+      // A strategy refusal is the strategy service's Blocker, and its wire field is
+      // `Code` (publicApi.ts reads exactly that). Only a version or safe-read
+      // refusal is an answer about the CPA's generation: an authentication
+      // refusal would mean this test presented the wrong credential.
+      const connectCode = connectV7.payload?.Code ?? connectV7.payload?.code;
       const connectRefusals = [
         'external_cpa_version_unsupported',
-        'management_safe_read_unavailable',
-        'management_v8_config_invalid',
         'owner_upgrade_required',
-        'management_authentication_rejected',
+        'management_safe_read_unavailable',
       ];
       assert.equal(connectV7.status, 409, JSON.stringify(connectV7.payload));
       assert(
-        connectRefusals.includes(connectV7.payload.code),
+        connectRefusals.includes(connectCode),
         'connect refusal: ' + JSON.stringify(connectV7.payload)
       );
+      // The refusal happens before any checkpoint write, so the install is exactly
+      // as uncommitted as it was before the attempt.
+      const secondaryAfter = await secondaryCall('GET', 'operation');
+      assert.equal(secondaryAfter.payload?.strategy?.strategy ?? '', '', 'the refused CONNECT committed a strategy');
+      assert.equal(secondaryAfter.payload?.strategy?.stage ?? '', '', 'the refused CONNECT staged a checkpoint');
 
       // A write is refused with the version code before anything is sent. The
       // rebind is the write that names the credential: its one verification read
@@ -1304,7 +1451,8 @@ try {
         managementKey: staleKey,
       });
       assert.equal(write.status, 409, write.status + ' ' + JSON.stringify(write.payload));
-      if (write.payload.code !== 'external_cpa_version_unsupported') {
+      const writeCode = write.payload?.code ?? write.payload?.Code;
+      if (writeCode !== 'external_cpa_version_unsupported') {
         const logs = run(['docker', 'logs', '--tail', '30', v7Container], undefined, false);
         throw new Error(
           JSON.stringify(write.payload) + ' ||| ' + redact((logs.stdout || '') + (logs.stderr || ''))
@@ -1314,12 +1462,12 @@ try {
       // whatever the read answers (this run already has a rotation refusal on
       // record, so that is what it says), it is not the version code.
       const read = await apiCall('GET', 'external/usage');
-      if (read.payload?.code === 'external_cpa_version_unsupported') {
+      if ((read.payload?.code ?? read.payload?.Code) === 'external_cpa_version_unsupported') {
         throw new Error(JSON.stringify(read.payload));
       }
       return {
-        connect: connectV7.payload.code,
-        write: write.payload.code,
+        connect: connectCode,
+        write: writeCode,
         read: read.payload?.code ?? read.status,
       };
     });
@@ -1332,16 +1480,16 @@ try {
 
   report.result = 'PASS';
 } catch (error) {
-  report.failure = redact(String(error.stack || error));
+  report.failure = String(error.stack || error);
   try {
     for (const [name, container] of [
       ['manager', managerContainer],
       ['ingress', ingressContainer],
     ]) {
       const logs = run(['docker', 'logs', '--tail', '120', container], undefined, false);
-      report['failure' + name + 'Logs'] = redact(
-        ((logs.stdout || '') + (logs.stderr || '')).slice(-8000)
-      );
+      // Kept raw: the secret assertion reads the report before redaction, and
+      // redaction happens only when the report is written.
+      report['failure' + name + 'Logs'] = ((logs.stdout || '') + (logs.stderr || '')).slice(-8000);
     }
     report.failureCpaLogs = cpaLogTail();
   } catch {}
@@ -1356,11 +1504,15 @@ try {
   }
 } finally {
   if (browser) await browser.close();
-  // Only this run's containers, network and volume. Nothing named cpamp-* beyond
+  // The container logs are read before anything is removed: a removed container
+  // has no log, so an assertion after the teardown would be about an empty set and
+  // could never fail.
+  const containerLogs = runContainerLogs();
+  // Only this run's containers, network and volumes. Nothing named cpamp-* beyond
   // the project prefix is touched.
-  run(['docker', 'rm', '-f', cpaContainer, managerContainer, ingressContainer, v7Container], undefined, false);
+  run(['docker', 'rm', '-f', cpaContainer, managerContainer, ingressContainer, v7Container, v7ManagerContainer], undefined, false);
   run(['docker', 'network', 'rm', network], undefined, false);
-  run(['docker', 'volume', 'rm', managerVolume], undefined, false);
+  run(['docker', 'volume', 'rm', managerVolume, v7ManagerVolume], undefined, false);
   // The CPA's own config is an input, not evidence: it holds every management key
   // and every seed Client Key, so the whole secrets directory is removed rather
   // than redacted in place. A redacted copy could still be replayed into a live CPA.
@@ -1372,7 +1524,7 @@ try {
   try {
     assertNoSecret('the report', JSON.stringify(report));
     assertNoSecret('the run log', printed.join('\n'));
-    for (const { name, text } of runContainerLogs()) assertNoSecret('the logs of ' + name, text);
+    for (const { name, text } of containerLogs) assertNoSecret('the logs of ' + name, text);
   } catch (error) {
     report.secretAssertion = 'FAIL';
     report.secretFailure = String(error.message);

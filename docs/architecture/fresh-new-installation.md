@@ -683,9 +683,23 @@ confirm sends `{requestId, confirmEnableStatistics: true}`.
 
 ### D acceptance: `bin/ci/fresh-external-management.mjs`
 
-```
+```sh
+# Every image must carry the commit it was built from: the run refuses an
+# unlabelled image, because its checks would then be credited to source nobody
+# can name.
+revision=$(git rev-parse HEAD)
+docker buildx build --builder "$BUILDER" --platform linux/amd64 --load \
+  --label "org.opencontainers.image.revision=$revision" \
+  --target v8-amd64-candidate -f Dockerfile.runtime -t cpamp-d-runtime:local .
+docker buildx build --builder "$BUILDER" --platform linux/amd64 --load \
+  --label "org.opencontainers.image.revision=$revision" \
+  -f Dockerfile.manager-server -t cpamp-d-manager:local .
+docker buildx build --builder "$BUILDER" --platform linux/amd64 --load \
+  --label "org.opencontainers.image.revision=$revision" \
+  -f Dockerfile.ingress -t cpamp-d-ingress:local .
+
 node bin/ci/fresh-external-management.mjs \
-  RUNTIME_IMAGE MANAGER_IMAGE INGRESS_IMAGE OUT
+  cpamp-d-runtime:local cpamp-d-manager:local cpamp-d-ingress:local OUT
 ```
 
 It runs the External journey against a real CPA v8.0.13 container built from the
@@ -717,26 +731,35 @@ It is the acceptance for everything above:
    line counts only when it names the management surface (`/v0/management/` or
    `/v8/management/`, a management key or the secret), is an authentication
    refusal (401/unauthorized/invalid key), and — when it carries a peer address —
-   names the Manager's container. The count must stay below five for the whole
-   rotation-to-rebind window, and must not move at all once the local gate has
-   engaged;
+   names the Manager's container. The baseline is taken at the moment the gate
+   engages, so the four post-rotation writes are measured against it: not one of
+   them may add a management 401. The count must stay below five for the whole
+   rotation-to-rebind window and again for the browser pass, which rotates the CPA
+   a second time; once the local gate has engaged the count must not move at all;
 7. rebind with the new key recovers everything, and the same key reports
    `reverified`;
 8. screenshots of the Keys blocker, the rebind dialog, the usage confirmation and
    the runtime version row;
 9. the v7 negative: with `CPAMP_D_CPA_LEGACY` naming a pinned v7.0.12 binary, the
-   committed address is answered by that CPA instead; a **CONNECT** naming it is
-   refused with the 2a connect code (`management_safe_read_unavailable`) or
-   `external_cpa_version_unsupported`, the rebind write is refused with
-   `external_cpa_version_unsupported`, and a read is never answered with the
-   version code. v7 keeps its management key, port and auth directory at the
-   document root, so it needs its own config file rather than the v8 one.
+   committed address is answered by that CPA instead. A completed installation
+   refuses every **CONNECT** before it asks the CPA anything, so the CONNECT is
+   made from a second, not-yet-completed Manager install with its own volume and
+   listener (`manager-v7`), driven entirely through the bootstrap namespace. It
+   must answer 409 with `external_cpa_version_unsupported`, `owner_upgrade_required`
+   or `management_safe_read_unavailable` — never an authentication refusal, which
+   would mean the wrong credential was presented — and the second install must
+   still carry no strategy and no stage afterwards. The rebind write on the
+   committed install is refused with `external_cpa_version_unsupported`, and a
+   read is never answered with the version code. v7 keeps its management key, port
+   and auth directory at the document root, so it needs its own config file rather
+   than the v8 one.
 
 `report.json` (mode `0600`) carries per-check `PASS` / `FAIL` / `NOT RUN`, and it
 names its provenance: `gitHead` and `testedSourceCommit` are both `HEAD`, the run
-refuses a dirty worktree, and the Manager image's revision label must match it.
-The v7 negative is `NOT RUN` unless `CPAMP_D_CPA_LEGACY` names a pinned v7.0.12
-binary.
+refuses a dirty worktree, and every image's
+`org.opencontainers.image.revision` label must name that same commit — an
+unlabelled image is a failure, not an unknown. The v7 negative is `NOT RUN`
+unless `CPAMP_D_CPA_LEGACY` names a pinned v7.0.12 binary.
 
 Both CPA configs and the v7 auth directory live in a sibling
 `bin/tmp/d-external-secrets-<random>` directory, never inside the artifact
@@ -745,9 +768,10 @@ copy of a live CPA config is still a replayable one. Both management keys, the
 seed and staged Client Keys, the claim and session tokens and the Admin Key are
 generated in the run and asserted absent — before any redaction — from the
 unredacted report object, from everything the run printed, and from `docker logs`
-of every container of this run. A passing check never prints an observed value
-raw. A hit fails the run (`result: FAIL`, non-zero exit) instead of being redacted
-away. Cleanup removes this run's containers, network, volume and secrets
+of every container of this run, read before any container is removed. A passing
+check never prints an observed value raw, and a failing one prints it redacted.
+A hit fails the run (`result: FAIL`, non-zero exit) instead of being redacted
+away. Cleanup removes this run's containers, network, volumes and secrets
 directory only.
 
 ### Failed stage or start
