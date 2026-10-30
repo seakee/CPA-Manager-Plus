@@ -89,6 +89,7 @@ See [Choosing A CPA Panel](https://seakee.github.io/CPA-Manager-Plus/docs/en/gui
 
 - Manage CPA provider configurations, including Gemini, Codex, Claude, Vertex, xAI, Devin, Muse / Meta, and OpenAI-compatible providers.
 - Maintain auth files, OAuth logins, API keys, model aliases, priorities, plugins, logs, and system settings. Muse / Meta supports Device Flow credentials separately from `meta-api-key` inference providers.
+- In Manager Server mode, save an email or remark for each native provider API key and reuse it across providers, monitoring, and usage analytics without changing routing or usage identities.
 - Import official Sub2API OpenAI OAuth exports and split multiple accounts into separate CPA Codex auth files.
 
 ### Request Monitoring And Failure Diagnosis

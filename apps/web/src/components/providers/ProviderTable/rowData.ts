@@ -1,3 +1,4 @@
+import { sha256Hex } from '@/utils/apiKeyHash';
 import type { GeminiKeyConfig, OpenAIProviderConfig, ProviderKeyConfig } from '@/types';
 import { maskApiKey } from '@/utils/format';
 import type { StatusBarData } from '@/utils/recentRequests';
@@ -48,6 +49,9 @@ interface ProviderRowBase {
   originalIndex: number;
   /** 表格标识列：OpenAI 为名称，其余为掩码密钥 */
   label: string;
+  credentialHash?: string;
+  credentialLabel?: string;
+  maskedKey?: string;
   /** 名称排序依据：OpenAI 为名称，其余沿用 prefix/baseUrl/proxyUrl/authIndex 首个非空值 */
   sortName: string;
   baseUrl: string;
@@ -70,7 +74,10 @@ interface ProviderRowBase {
 export type ProviderRow =
   | (ProviderRowBase & { kind: 'gemini'; raw: GeminiKeyConfig })
   | (ProviderRowBase & { kind: 'interactions'; raw: GeminiKeyConfig })
-  | (ProviderRowBase & { kind: 'codex' | 'xai' | 'meta' | 'claude' | 'vertex'; raw: ProviderKeyConfig })
+  | (ProviderRowBase & {
+      kind: 'codex' | 'xai' | 'meta' | 'claude' | 'vertex';
+      raw: ProviderKeyConfig;
+    })
   | (ProviderRowBase & { kind: 'openai'; raw: OpenAIProviderConfig });
 
 export interface BuildProviderRowsInput {
@@ -83,6 +90,7 @@ export interface BuildProviderRowsInput {
   vertex: ProviderKeyConfig[];
   openai: OpenAIProviderConfig[];
   usageByProvider: ProviderRecentUsageMap;
+  credentialLabels?: Readonly<Record<string, string>>;
 }
 
 const collectModelNames = (models?: { name: string }[]): string[] =>
@@ -199,4 +207,24 @@ export function buildProviderRows({
     ...vertex.map((config, index) => buildKeyConfigRow('vertex', config, index, usageByProvider)),
     ...openai.map((provider, index) => buildOpenAIRow(provider, index, usageByProvider)),
   ];
+}
+
+export function withCredentialLabels(
+  rows: ProviderRow[],
+  labels: Readonly<Record<string, string>>
+): ProviderRow[] {
+  return rows.map((row) => {
+    if (row.kind === 'openai') return row;
+    const credentialHash = sha256Hex(row.raw.apiKey);
+    const credentialLabel = labels[credentialHash] || '';
+    return {
+      ...row,
+      credentialHash,
+      credentialLabel,
+      maskedKey: row.label,
+      label: credentialLabel || row.label,
+      sortName: credentialLabel || row.sortName,
+      haystack: [row.haystack, credentialLabel.toLowerCase()].join('\n'),
+    };
+  });
 }

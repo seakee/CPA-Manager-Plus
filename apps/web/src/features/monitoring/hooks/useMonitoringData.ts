@@ -1,3 +1,4 @@
+import { useCredentialLabels } from '@/hooks/useCredentialLabels';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { MonitoringAnalyticsEventRow } from '@/services/api/usageService';
 import type { AuthFileItem } from '@/types/authFile';
@@ -337,6 +338,7 @@ export function useMonitoringData({
   scopeFilters,
   activeDataTab = 'accounts',
 }: UseMonitoringDataParams): UseMonitoringDataReturn {
+  const { labels: credentialLabels } = useCredentialLabels();
   const connectionScopeKeyRef = useRef<string | null>(connectionScopeKey ?? null);
   const authFilesLoadedRef = useRef(false);
   const channelsLoadedRef = useRef(false);
@@ -470,6 +472,7 @@ export function useMonitoringData({
   const sourceInfoMap = useMemo(
     () =>
       buildSourceInfoMap({
+        credentialLabels,
         geminiApiKeys: config?.geminiApiKeys || [],
         claudeApiKeys: config?.claudeApiKeys || [],
         codexApiKeys: config?.codexApiKeys || [],
@@ -478,7 +481,7 @@ export function useMonitoringData({
         vertexApiKeys: config?.vertexApiKeys || [],
         openaiCompatibility: config?.openaiCompatibility || [],
       }),
-    [config]
+    [config, credentialLabels]
   );
 
   const channelByAuthIndex = useMemo(() => {

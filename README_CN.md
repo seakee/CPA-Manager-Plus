@@ -87,6 +87,7 @@ CPA / CLIProxyAPI 可以在 `:8317` 直接托管官方 Management Center，也�
 
 - 管理 CPA Provider 配置，包括 Gemini、Codex、Claude、Vertex、xAI、Devin、Muse / Meta 和 OpenAI-compatible Provider。
 - 维护认证文件、OAuth 登录、API Key、模型别名、优先级、插件、日志和系统配置。Muse / Meta 的 Device Flow 凭证与 `meta-api-key` 推理 Provider 分离管理。
+- 在 Manager Server 模式为原生提供商 API Key 保存邮箱或备注，并在提供商、请求监控和用量分析中统一展示，不改变路由或统计身份。
 - 导入官方 Sub2API OpenAI OAuth 导出，并把多账号拆分为独立的 CPA Codex 认证文件。
 
 ### 请求监控与失败诊断

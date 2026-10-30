@@ -10,13 +10,7 @@ import {
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
-import {
-  IconCheck,
-  IconEye,
-  IconPencil,
-  IconTrash2,
-  IconX,
-} from '@/components/ui/icons';
+import { IconCheck, IconEye, IconPencil, IconTrash2, IconX } from '@/components/ui/icons';
 import { ProviderStatusBar } from '../ProviderStatusBar';
 import { getProviderKindIcon, PROVIDER_KIND_LABELS } from './kindMeta';
 import type { ProviderRow } from './rowData';
@@ -34,6 +28,8 @@ interface ProviderTableProps {
   onDelete: (row: ProviderRow) => void;
   onToggle: (row: ProviderRow, enabled: boolean) => void;
   onPriorityChange: (row: ProviderRow, priority: number) => void;
+  onEditLabel?: (row: ProviderRow) => void;
+  labelEditingDisabled?: boolean;
 }
 
 const stopPropagation = (event: MouseEvent) => {
@@ -50,12 +46,7 @@ interface PriorityControlProps {
   onPriorityChange: (row: ProviderRow, priority: number) => void;
 }
 
-function PriorityControl({
-  row,
-  disabled,
-  editLabel,
-  onPriorityChange,
-}: PriorityControlProps) {
+function PriorityControl({ row, disabled, editLabel, onPriorityChange }: PriorityControlProps) {
   const [draft, setDraft] = useState(() => priorityToDraft(row.priority));
   const [isEditing, setIsEditing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -169,6 +160,8 @@ export function ProviderTable({
   onDelete,
   onToggle,
   onPriorityChange,
+  onEditLabel,
+  labelEditingDisabled = false,
 }: ProviderTableProps) {
   const { t } = useTranslation();
 
@@ -243,12 +236,29 @@ export function ProviderTable({
                 <span className={styles.identityLabel} title={row.label}>
                   {row.label}
                 </span>
+                {onEditLabel && row.credentialHash && (
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    iconOnly
+                    disabled={actionsDisabled || labelEditingDisabled}
+                    aria-label={t('ai_providers.credential_label_edit')}
+                    title={t('ai_providers.credential_label_edit')}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onEditLabel(row);
+                    }}
+                  >
+                    <IconPencil size={12} />
+                  </Button>
+                )}
                 {row.kind === 'openai' && (
                   <span className={styles.identityMeta}>
                     {t('ai_providers.openai_keys_count')}: {row.keyCount}
                   </span>
                 )}
               </div>
+              {row.credentialLabel && <span className={styles.identityMeta}>{row.maskedKey}</span>}
             </div>
 
             <div className={styles.cellUrl} role="cell" title={row.baseUrl || undefined}>
