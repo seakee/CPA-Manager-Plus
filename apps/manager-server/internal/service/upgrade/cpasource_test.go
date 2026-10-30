@@ -374,8 +374,13 @@ func TestCPASourceMappingTableNamesTheReleaseOfEveryEntry(t *testing.T) {
 		if _, ok := parseCPAVersion(path.introduced); !ok {
 			t.Fatalf("mapping row %q names an unparsable release %q", path.current, path.introduced)
 		}
-		if path.removed != "" {
-			t.Fatalf("mapping row %q is both mapped and removed in %q", path.current, path.removed)
+		// A mapped row never appears in the removal table: a key is either copied
+		// or reported as removed, and a row in both would claim contradictory
+		// answers for one path.
+		for _, removed := range cpaRemovedConfigPaths {
+			if removed.legacy == path.legacy {
+				t.Fatalf("mapping row %q is also reported as removed in %q", path.legacy, removed.removed)
+			}
 		}
 	}
 	for _, removed := range cpaRemovedConfigPaths {

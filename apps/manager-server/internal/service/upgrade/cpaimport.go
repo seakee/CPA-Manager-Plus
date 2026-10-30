@@ -138,13 +138,11 @@ type CPAImportResult struct {
 // the destination management secret and the source client keys, which the result
 // must never carry.
 type cpaImportRun struct {
-	options        CPAImportOptions
-	source         *cpaManagedSource
-	managementKey  string
-	stagedByRun    bool
-	copiedConfig   []string
-	copiedCreds    []string
-	verificationID string
+	options       CPAImportOptions
+	source        *cpaManagedSource
+	managementKey string
+	copiedConfig  []string
+	copiedCreds   []string
 }
 
 // ImportCPA carries a stopped 1.x stack's managed CPA state into the v2
@@ -330,7 +328,6 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 		return newUpgradeError(UpgradeErrorCPADestinationUnready, "the Runtime reported the destination start as failed", nil)
 	}
 	r.managementKey = managementKey
-	r.stagedByRun = true
 	return nil
 }
 

@@ -58,7 +58,6 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshadopt"
 )
 
@@ -126,7 +125,6 @@ type cpaConfigPath struct {
 	legacy     string
 	current    string
 	introduced string
-	removed    string
 	whole      bool
 	grouped    bool
 }
@@ -180,7 +178,7 @@ var cpaConfigPaths = []cpaConfigPath{
 	{legacy: "codex.stream-bootstrap-buffering", current: "upstream.codex.stream-bootstrap-buffering", introduced: "v7.2.138"},
 	{legacy: "codex.stream-bootstrap-timeout", current: "upstream.codex.stream-bootstrap-timeout", introduced: "v7.3.3"},
 	{legacy: "codex.orphan-delegation-compatibility", current: "upstream.codex.orphan-delegation-compatibility", introduced: "v7.2.149"},
-	{legacy: "codex.model-level-cooling", current: "upstream.codex.model-level-cooling", introduced: "v7.2.156"},
+	{legacy: "codex.model-level-cooling", current: "upstream.codex.model-level-cooling", introduced: "v7.3.7"},
 	{legacy: "codex.response-steering", current: "upstream.codex.response-steering", introduced: "v7.3.9"},
 	{legacy: "codex.optimize-multi-agent-v2", current: "client.codex.optimize-multi-agent-v2", introduced: "v7.2.98"},
 
@@ -193,7 +191,7 @@ var cpaConfigPaths = []cpaConfigPath{
 	{legacy: "claude-header-defaults.os", current: "upstream.claude.header-defaults.os", introduced: cpaPresenceAtFirstV7},
 	{legacy: "claude-header-defaults.arch", current: "upstream.claude.header-defaults.arch", introduced: cpaPresenceAtFirstV7},
 	{legacy: "claude-header-defaults.timeout", current: "upstream.claude.header-defaults.timeout", introduced: cpaPresenceAtFirstV7},
-	{legacy: "claude-header-defaults.timezone", current: "upstream.claude.header-defaults.timezone", introduced: cpaPresenceAtFirstV7},
+	{legacy: "claude-header-defaults.timezone", current: "upstream.claude.header-defaults.timezone", introduced: "v7.2.116"},
 	{legacy: "claude-header-defaults.stabilize-device-profile", current: "upstream.claude.header-defaults.stabilize-device-profile", introduced: cpaPresenceAtFirstV7},
 
 	// The xai provider block.
@@ -290,13 +288,6 @@ func parseCPAVersion(raw string) (cpaVersion, bool) {
 	return cpaVersion{major: numbers[0], minor: numbers[1], patch: numbers[2]}, true
 }
 
-// cpaVersionGate is the verdict of the source version gate. It is a value, not an
-// error: the caller turns a refusal into the typed code.
-type cpaVersionGate struct {
-	Version string
-	Layout  string
-}
-
 // cpaStackImagePattern finds the CPA image reference in a stack compose file.
 var cpaStackImagePattern = regexp.MustCompile(`^\s*(?:-\s*)?image:\s*"?([^\s"#]+)"?\s*(?:#.*)?$`)
 
@@ -346,7 +337,6 @@ func cpaSourceVersion(cpaDirectory, declared string) (string, bool) {
 // never carries a value.
 type cpaManualItem struct {
 	item        string
-	kind        freshstore.AdoptionItemKind
 	reason      string
 	instruction string
 }
@@ -355,7 +345,6 @@ type cpaManualItem struct {
 // directory.
 type cpaManagedSource struct {
 	directory   string
-	authDir     string
 	layout      string
 	version     string
 	document    map[string]any
@@ -604,7 +593,6 @@ func (s *cpaManagedSource) mapDocument(document map[string]any) error {
 			if !ok {
 				s.addManual(cpaManualItem{
 					item:        "section:" + path.current,
-					kind:        freshstore.AdoptionKindProviderSection,
 					reason:      "value_shape_unsupported",
 					instruction: "The source " + path.legacy + " entries are not the list CPA reads. Re-add this provider's keys on the destination Console.",
 				})
@@ -687,7 +675,6 @@ func (s *cpaManagedSource) reportUnmapped(document map[string]any, roots, consum
 		}
 		s.addManual(cpaManualItem{
 			item:        "section:" + key,
-			kind:        freshstore.AdoptionKindProviderSection,
 			reason:      "not_in_import_scope",
 			instruction: "The source section " + key + " is outside the CPA state this import copies. Set it on the destination Console if the destination still supports it.",
 		})
@@ -702,7 +689,6 @@ func (s *cpaManagedSource) reportRemovedSection(key string) {
 	}
 	s.addManual(cpaManualItem{
 		item:        "section:" + key,
-		kind:        freshstore.AdoptionKindProviderSection,
 		reason:      "removed_upstream",
 		instruction: instruction,
 	})
@@ -741,19 +727,17 @@ func (s *cpaManagedSource) reportUnmappedLeaves(section string, value any, consu
 		if index >= cpaMaxUnmappedLeavesInSection {
 			s.addManual(cpaManualItem{
 				item:        "section:" + section + "-unmapped",
-				kind:        freshstore.AdoptionKindProviderSection,
 				reason:      "not_in_import_scope",
 				instruction: fmt.Sprintf("%d further keys under %s are outside the CPA state this import copies. Review them on the destination Console.", len(paths)-index, section),
 			})
 			return
 		}
 		if reason, instruction, ok := cpaRemovedLeaf(path); ok {
-			s.addManual(cpaManualItem{item: "config:" + path, kind: freshstore.AdoptionKindConfigLeaf, reason: reason, instruction: instruction})
+			s.addManual(cpaManualItem{item: "config:" + path, reason: reason, instruction: instruction})
 			continue
 		}
 		s.addManual(cpaManualItem{
 			item:        "config:" + path,
-			kind:        freshstore.AdoptionKindConfigLeaf,
 			reason:      "not_in_import_scope",
 			instruction: "The source setting " + path + " is outside the CPA state this import copies. Set it on the destination Console if the destination still supports it.",
 		})
@@ -796,7 +780,6 @@ func (s *cpaManagedSource) addManual(item cpaManualItem) {
 		}
 		s.manual = append(s.manual, cpaManualItem{
 			item:        "cpa-config-unknown-remainder",
-			kind:        freshstore.AdoptionKindProviderSection,
 			reason:      "not_in_import_scope",
 			instruction: "Further source keys beyond the reported ones are outside the CPA state this import copies. Review the source CPA configuration on the destination Console.",
 		})
@@ -826,7 +809,6 @@ func (s *cpaManagedSource) readCredentials(override string) error {
 	if !ok {
 		return nil
 	}
-	s.authDir = directory
 	entries, err := os.ReadDir(directory)
 	if err != nil {
 		return newUpgradeError(UpgradeErrorCPASourceMissing, "the managed CPA auth directory could not be read", err)
@@ -852,7 +834,6 @@ func (s *cpaManagedSource) readCredentials(override string) error {
 		if strings.EqualFold(credential.Type, "gemini") {
 			s.addManual(cpaManualItem{
 				item:        "credential:" + entry.Name(),
-				kind:        freshstore.AdoptionKindCredential,
 				reason:      "gemini_credential_unsupported",
 				instruction: "CPA v8 never lists a gemini credential, so " + entry.Name() + " was not uploaded. Re-authenticate Gemini on the destination if the destination release supports it.",
 			})
