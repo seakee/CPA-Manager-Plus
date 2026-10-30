@@ -159,3 +159,38 @@ pending independent review**. One existing command/report and one maintained
 inspection path; existing locks, credential, bundle, candidate and admission
 contracts. No generic migration/auth/backup engine, extra journal/proof ledger,
 new public status, speculative all-version support or additional UI.
+
+## U1-1a: Upgrade operation row and read-only preflight
+
+Added after the 04A slice. `UpgradeAuthorized` and `TrustedHopReceipt` stay
+hard `false`; the new surface grants no migration authority.
+
+- **Operation state.** `upgrade_operations` (single row, `id = 1`) stores the
+  stage, the completed domains, the source kind/version and before/after
+  fingerprints, the backup manifest reference, reconciliation output and manual
+  items. `internal/repository/upgradeoperation.Advance` appends a domain and
+  moves the stage in one transaction; a backwards move is rejected and leaves
+  the row untouched. `complete` never moves again, `failed` parks the operation
+  without dropping completed domains. The table is created by the v2 migration
+  in the Manager database, never in the legacy source root.
+- **Preflight** (`internal/service/upgrade.Preflight`) is read-only. It holds
+  the existing source fence (`processlock.AcquireExisting`), opens
+  `usage.sqlite` with `mode=ro` plus `query_only` and runs `quick_check`, and
+  writes nothing — no WAL, no migration, no journal.
+- **Checks, in order:** `source_ownership` (`upgrade_source_busy`,
+  `upgrade_source_unreadable`), `source_version`
+  (`upgrade_source_version_unsupported`), `fingerprint`, `disk`
+  (`upgrade_disk_insufficient`), `cpa_classification`, `parity`. Parity gaps
+  (missing/mismatched projection, past watermark, per-day deleted coverage
+  disagreement) never block; they are reported for a later explicit decision.
+- **Version source.** 1.x never persisted its release, so the release is a
+  floor derived from schema and settings markers and compared with
+  `bootstrap.PlannedDirectRelease`. A marker introduced after the pinned release
+  is a mismatch. Re-pinning to v1.14.10 is U1-1b, not this slice.
+- **CLI.** `cpa-manager-plus upgrade preflight --legacy <dir> [--json]` prints
+  the report and exits 0 (ready), 1 (blocked) or 2 (usage/environment).
+  `cpa-manager-plus upgrade status [--json] [--db-path PATH]` reads the
+  operation row read-only, so both work on non-writable volumes.
+- **Deferred:** v1.14.10 re-pin and its qualification evidence (U1-1b), the
+  copy-in entry, reconciliation execution and CPA import (U1-2), and route
+  cutover/rollback (U1-3).
