@@ -1090,9 +1090,16 @@ try {
       'gateway.ready disagrees with ' + status.status
     );
     assert.match(status.gateway.identity || '', /\S/, 'the observation named no runtime identity');
+    // A Supervisor generation is a uint64 and commonly past JS's safe integer, so
+    // the wire keeps it a number and the page preserves it as a decimal string
+    // (`runtimeGeneration.ts`). This read only states that one was observed: the
+    // exact fence belongs to the client that sends it back, not to a harness that
+    // would round it.
+    const generation = status.gateway.generation;
     assert(
-      Number.isSafeInteger(status.gateway.generation) && status.gateway.generation > 0,
-      'the observation named no runtime generation: ' + status.gateway.generation
+      (typeof generation === 'number' && generation > 0) ||
+        (typeof generation === 'string' && /^[1-9][0-9]{0,19}$/.test(generation)),
+      'the observation named no runtime generation: ' + generation
     );
     assert.equal(status.gateway.protocolVersion, 'v1', 'the observation speaks ' + status.gateway.protocolVersion);
     assert(
@@ -1103,7 +1110,9 @@ try {
       mode: status.mode,
       status: status.status,
       identity: status.gateway.identity,
-      generation: status.gateway.generation,
+      // The value itself is a uint64 a plain JSON read rounds past 2^53, so the
+      // artifact records that one was named, not a number it cannot hold.
+      generation: typeof status.gateway.generation,
       ready: status.gateway.ready,
       observedAt: status.observedAt,
     };
