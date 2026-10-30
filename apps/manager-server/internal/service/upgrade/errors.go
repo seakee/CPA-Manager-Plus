@@ -25,6 +25,12 @@ const (
 	// the operator has not acknowledged those days. Nothing was marked and the
 	// operation row did not advance.
 	UpgradeErrorReconcileMismatch UpgradeErrorCode = "upgrade_reconcile_mismatch"
+	// UpgradeErrorReconcileTargetIncomplete reports that the v2 store cannot show
+	// a domain the 1.x source holds days of: the table is missing, or not one day
+	// could be compared. That is lost data, not a disagreement, so no
+	// acknowledgement can waive it. Nothing was marked and the operation row did
+	// not advance.
+	UpgradeErrorReconcileTargetIncomplete UpgradeErrorCode = "upgrade_reconcile_target_incomplete"
 )
 
 // UpgradeError is a typed Upgrade failure. Callers match it with errors.Is
@@ -55,9 +61,10 @@ func (e *UpgradeError) Is(target error) bool {
 
 // Sentinels for errors.Is. They carry no message of their own.
 var (
-	ErrTargetModified    = &UpgradeError{Code: UpgradeErrorTargetModified}
-	ErrSourceChanged     = &UpgradeError{Code: UpgradeErrorSourceChanged}
-	ErrReconcileMismatch = &UpgradeError{Code: UpgradeErrorReconcileMismatch}
+	ErrTargetModified            = &UpgradeError{Code: UpgradeErrorTargetModified}
+	ErrSourceChanged             = &UpgradeError{Code: UpgradeErrorSourceChanged}
+	ErrReconcileMismatch         = &UpgradeError{Code: UpgradeErrorReconcileMismatch}
+	ErrReconcileTargetIncomplete = &UpgradeError{Code: UpgradeErrorReconcileTargetIncomplete}
 )
 
 func newUpgradeError(code UpgradeErrorCode, message string, err error) error {

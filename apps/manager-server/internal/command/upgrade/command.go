@@ -35,13 +35,16 @@ var (
 	ErrBlocked = errors.New("upgrade preflight is blocked")
 )
 
-// ExitCode maps a Run result to the CLI contract: 0 ready, 1 blocked or
-// unacknowledged mismatch, 2 anything else.
+// ExitCode maps a Run result to the CLI contract: 0 ready, 1 blocked, an
+// unacknowledged mismatch or a store that cannot show what the source holds, 2
+// anything else.
 func ExitCode(err error) int {
 	switch {
 	case err == nil:
 		return 0
-	case errors.Is(err, ErrBlocked), errors.Is(err, upgradeservice.ErrReconcileMismatch):
+	case errors.Is(err, ErrBlocked),
+		errors.Is(err, upgradeservice.ErrReconcileMismatch),
+		errors.Is(err, upgradeservice.ErrReconcileTargetIncomplete):
 		return 1
 	default:
 		return 2
@@ -391,7 +394,8 @@ func writeReconcileSummary(w io.Writer, report upgradeservice.ReconcileReport) {
 			_, _ = fmt.Fprintln(w, line)
 			continue
 		}
-		line += fmt.Sprintf("%d day(s), %d mismatch(es)", domain.ComparedDays, len(domain.Mismatches))
+		line += fmt.Sprintf("%d day(s) compared of %d source day(s), %d mismatch(es)",
+			domain.ComparedDays, domain.SourceDays, len(domain.Mismatches))
 		_, _ = fmt.Fprintln(w, line)
 		for _, mismatch := range domain.Mismatches {
 			detail := fmt.Sprintf("    %s %s", mismatch.Day, mismatch.Field)

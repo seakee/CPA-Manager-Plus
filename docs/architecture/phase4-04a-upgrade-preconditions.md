@@ -287,24 +287,39 @@ and nothing is compared. The database and its `-wal`/`-shm`/`-journal` sidecars
 are then copied into `<TargetRoot>/.upgrade-reconcile` and the *copy* is opened
 read-write with `query_only`, so SQLite joins a WAL there. Opening the original,
 even read-only, would create a WAL index beside it and change the fingerprint
-the copy-in recorded. The scratch area is removed and recreated per run and must
-not sit inside or above the source root.
+the copy-in recorded. The scratch area is cleared and recreated per run and must
+not sit inside or above the source root; the copy itself is removed on every
+return path — a clean comparison, a mismatch, or a failure before the comparison
+finished — so nothing but the report (counts and days, never rows) survives the
+step.
 
 ### The four compared domains
 
 | Domain | Query | Match rule |
 | --- | --- | --- |
-| `retained` | `usage_events` grouped by `timestamp_ms/86400000`: `count(*)`, `sum(total_tokens)`, `sum(failed)`, `count(distinct api_key_hash)` | all four equal per day |
-| `pricing` | `usage_pricing_hourly_rollups_v1` summed per UTC day into requests, tokens and cost | requests and tokens exact; cost recomputed per side from its own `model_prices` within a 1e-6 relative tolerance |
-| `coverage` | `usage_archive_deleted_coverage_daily`: per-day `deleted_event_count` | equal per day |
-| `history` | `usage_monitoring_account_daily_rollups_v1` per day × `account_snapshot`: calls and tokens | equal per day |
+| `retained` | `usage_events` grouped by UTC hour, `model` and `api_key_hash`: `count(*)`, `sum(total_tokens)`, `sum(failed)` | every hour bucket and every per-key, per-model total equal |
+| `pricing` | `usage_pricing_hourly_rollups_v1` per stored row (hour bucket and the whole identity, `failed` included): calls, every token class and cost | every row and every column equal; cost is recomputed per side |
+| `coverage` | `usage_archive_deleted_coverage_daily`: per-day `deleted_event_count`, `min_timestamp_ms`, `max_timestamp_ms` | all three equal per day |
+| `history` | `usage_monitoring_account_daily_rollups_v1` per day, `account_snapshot`, `provider`, `api_key_hash` and `model` | calls and tokens equal per identity |
 
 The pricing table stores no cost, so cost is recomputed on both sides with
 `pricing.CostForModelCandidatesWithServiceTier`; a price change between the two
-stores is therefore visible instead of invisible. Each side is read inside one
-read-only transaction. A day present on only one side is reported as a
-`presence` mismatch, never as a skip. A domain whose table one side does not hold
-reports `applicable: false` with the reason instead of passing silently.
+stores is therefore visible instead of invisible, and it is compared exactly: the
+same inputs produce the same integer micro sum, so every difference is a
+difference and no relative tolerance may hide one. Comparing at the granularity
+each read path exposes is what makes a permutation inside a day visible instead
+of cancelling out in a day sum: a bucket that moved an hour, two `failed` rows
+trading their calls, a rewritten API key, provider or model, or rewritten
+coverage edges are reported in the column that moved (`bucket_ms`, `calls`,
+`api_key_hash`, `min_timestamp_ms`, …), on the row they moved on.
+
+Each side is read inside one read-only transaction. A day present on only one
+side is reported as a `presence` mismatch, never as a skip, and `comparedDays`
+counts only the days both sides hold. A domain both sides hold is `applicable`.
+A domain the 1.x source holds rows of but the store cannot show — the table is
+missing, or not one day could be compared — blocks with the typed
+`upgrade_reconcile_target_incomplete` naming the domain and the table: that is
+lost data, not a measured disagreement, so no acknowledgement can waive it.
 
 ### Verdict, marks and blocking
 
@@ -325,12 +340,15 @@ disagreed, or `projection_lost_before_v1_14_6` when only projection loss
 explains it — a measured disagreement always keeps the stronger reason.
 
 The write order is marks, then the evidence JSON into
-`upgrade_operations.reconciliation`, then `Advance` over the reconciled domains
-(`retained_projection`, `pricing`, `coverage`) to stage `reconcile`, always with
-`Advance`, never `Put`: `Put` rebuilds the row and would clear the provenance
-`complete` requires. A row already past `reconcile` keeps its stage. The mark
-insert is `on conflict (day) do nothing`, so a day keeps its first reason and
-timestamp and a second run marks nothing new.
+`upgrade_operations.reconciliation`, then `Advance` over the operation domains
+the comparison actually established — `retained_projection` for the retained
+events and the account rollups derived from them, `pricing`, `coverage` — to
+stage `reconcile`, always with `Advance`, never `Put`: `Put` rebuilds the row and
+would clear the provenance `complete` requires. A domain that was not applicable
+is never recorded, so `domains_done` only ever lists domains this step compared. A
+row already past `reconcile` keeps its stage. The mark insert is
+`on conflict (day) do nothing`, so a day keeps its first reason and timestamp and
+a second run marks nothing new.
 
 ### The marking table and its consumer
 
@@ -350,8 +368,12 @@ marked day as complete, and none of them changes the numbers:
 - `usagearchive.Repository.RawCoverage` sets `Incomplete` and lists
   `IncompleteDays[{day, reason}]` beside the counts it already returned.
 - `monitoring.AnalyticsCoverage` carries the same `Incomplete`/`IncompleteDays`
-  pair and `coverageWarningRequired` turns true when any range is marked, so the
-  analytics coverage warning is raised for it.
+  pair for the requested range, a `ComparisonIncomplete`/
+  `ComparisonIncompleteDays` pair for the comparison window, and
+  `Incomplete`/`IncompleteDays` inside every `AuxiliaryRange` — a marked day
+  cannot be presented as complete in a drilldown or a previous window — and
+  `coverageWarningRequired` turns true when any range is marked, so the analytics
+  coverage warning is raised for it.
 - The Key workspace (`identityusage`) reads `IncompleteDaysIn`, and a key's
   numbers read `partial` with reason `upgrade_incomplete` when a marked day falls
   inside that key's provable window.
@@ -361,7 +383,7 @@ marked day as complete, and none of them changes the numbers:
 `cpa-manager-plus upgrade reconcile --legacy <dir> [--target <dir>]
 [--bundle <dir>] [--json] [--acknowledge <day>]… [--acknowledge-parity-gaps]`
 runs the preflight gate first, then the reconciliation. Exit 0 reconciled,
-1 blocked or an unacknowledged mismatch (the report is printed either way),
-2 usage or environment error. The `--bundle` default is the recorded copy-in's
-backup destination, and the recorded copy-in is re-verified against it before
-anything is compared.
+1 blocked, an unacknowledged mismatch or a store that cannot show what the source
+holds (the report is printed either way), 2 usage or environment error. The
+`--bundle` default is the recorded copy-in's backup destination, and the recorded
+copy-in is re-verified against it before anything is compared.

@@ -199,6 +199,9 @@ func TestExitCodeMapping(t *testing.T) {
 	if code := ExitCode(upgradeservice.ErrReconcileMismatch); code != 1 {
 		t.Fatalf("unacknowledged mismatch exit code = %d, want 1", code)
 	}
+	if code := ExitCode(upgradeservice.ErrReconcileTargetIncomplete); code != 1 {
+		t.Fatalf("incomplete store exit code = %d, want 1", code)
+	}
 	if !errors.Is(ErrBlocked, ErrBlocked) {
 		t.Fatal("blocked error lost its identity")
 	}

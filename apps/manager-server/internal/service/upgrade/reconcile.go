@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,8 +37,10 @@ import (
 // after the comparison; a source that moved is refused instead of compared.
 //
 // A disagreement blocks: nothing is marked and the operation row does not
-// advance. Only the days the operator acknowledged are marked, and a marked day
-// stays marked for the life of the store.
+// advance. A domain the 1.x source holds rows of but the v2 store cannot show
+// blocks the same way, and no acknowledgement can waive that: a lost table is
+// not a measured difference. Only the days the operator acknowledged are marked,
+// and a marked day stays marked for the life of the store.
 
 // Reconcile domain names, in report order. They are the domains the copy claims
 // to preserve, not the operation's domain vocabulary.
@@ -48,51 +51,74 @@ const (
 	ReconcileDomainHistory  = "history"
 )
 
-// Compared measure names. They are stable codes; the operator text is the
-// surrounding report.
+// Compared column names. They are stable codes and are always the name of the
+// column that disagreed: a value column (count, total_tokens, cost_micros, ...)
+// or an identity column (api_key_hash, provider, bucket_ms, ...), so an
+// operator can find the row in the store from the report alone.
 const (
-	mismatchFieldPresence  = "presence"
-	mismatchFieldEvents    = "count"
-	mismatchFieldTokens    = "total_tokens"
-	mismatchFieldFailed    = "failed"
-	mismatchFieldKeyHashes = "api_key_hashes"
-	mismatchFieldRequests  = "requests"
-	mismatchFieldCost      = "cost_micros"
-	mismatchFieldDeleted   = "deleted_event_count"
-	mismatchFieldCalls     = "calls"
+	mismatchFieldPresence                = "presence"
+	mismatchFieldRow                     = "row"
+	mismatchFieldEvents                  = "count"
+	mismatchFieldTokens                  = "total_tokens"
+	mismatchFieldFailed                  = "failed"
+	mismatchFieldCalls                   = "calls"
+	mismatchFieldCost                    = "cost_micros"
+	mismatchFieldDeleted                 = "deleted_event_count"
+	mismatchFieldMinTimestamp            = "min_timestamp_ms"
+	mismatchFieldMaxTimestamp            = "max_timestamp_ms"
+	mismatchFieldHour                    = "hour"
+	mismatchFieldBucketMS                = "bucket_ms"
+	mismatchFieldModel                   = "model"
+	mismatchFieldBillingModel            = "billing_model"
+	mismatchFieldPricingModel            = "pricing_model"
+	mismatchFieldServiceTier             = "service_tier"
+	mismatchFieldThreshold               = "context_threshold_tokens"
+	mismatchFieldAPIKeyHash              = "api_key_hash"
+	mismatchFieldProvider                = "provider"
+	mismatchFieldAccountSnapshot         = "account_snapshot"
+	mismatchFieldInputTokens             = "input_tokens"
+	mismatchFieldOutputTokens            = "output_tokens"
+	mismatchFieldCachedTokens            = "cached_tokens"
+	mismatchFieldCacheReadTokens         = "cache_read_tokens"
+	mismatchFieldCacheCreationTokens     = "cache_creation_tokens"
+	mismatchFieldLongInputTokens         = "long_input_tokens"
+	mismatchFieldLongOutputTokens        = "long_output_tokens"
+	mismatchFieldLongCachedTokens        = "long_cached_tokens"
+	mismatchFieldLongCacheReadTokens     = "long_cache_read_tokens"
+	mismatchFieldLongCacheCreationTokens = "long_cache_creation_tokens"
 )
 
 const (
 	// reconcileScratchDirectory is this step's reserved scratch area inside the
-	// v2 data root. It is removed before Reconcile returns.
+	// v2 data root. Reconcile removes it on every return path: the copy of the
+	// 1.x database exists only for the length of the comparison, and the report
+	// (which names counts and days, never rows) is what survives.
 	reconcileScratchDirectory = ".upgrade-reconcile"
 	// utcDayMilliseconds is the width of the day buckets every compared table
 	// keys on.
 	utcDayMilliseconds = int64(24 * 60 * 60 * 1000)
-	// costMicrosPerUnit converts a dollar cost into micro-units. The compared
-	// cost tolerance is relative, because the two sides run the same floating
-	// point arithmetic over the same token sums and prices.
+	// costMicrosPerUnit converts a dollar cost into micro-units.
 	costMicrosPerUnit = 1_000_000.0
-	// costTolerance is the relative difference two cost totals may carry and
-	// still count as equal.
-	costTolerance = 1e-6
 )
 
-// reconcileDomains is the operation vocabulary the reconciliation establishes.
-// The four compared domains map onto it: the retained events, their pricing
-// rollups and the deleted-coverage table. The account history rollups are
-// derived from the same retained events, so they are covered by the retained
-// projection domain as well.
-var reconciledDomains = []string{
-	model.UpgradeDomainRetainedProjection,
-	model.UpgradeDomainPricing,
-	model.UpgradeDomainCoverage,
+// reconciledOperationDomains maps the compared domains onto the operation
+// vocabulary this step establishes. The retained events, their account history
+// rollups (derived from the same events) and the deleted-coverage table each
+// have their own operation domain; a domain that was not applicable is never
+// reported as done.
+var reconciledOperationDomains = map[string][]string{
+	ReconcileDomainRetained: {model.UpgradeDomainRetainedProjection},
+	ReconcileDomainHistory:  {model.UpgradeDomainRetainedProjection},
+	ReconcileDomainPricing:  {model.UpgradeDomainPricing},
+	ReconcileDomainCoverage: {model.UpgradeDomainCoverage},
 }
 
-// ReconcileMismatch is one compared measure that disagreed. A day present on
-// one side only is reported as Field "presence" with "present"/"absent"
-// values, never as a skip. Dimension names the row inside the day when the
-// compared measure is per account.
+// ReconcileMismatch is one compared column that disagreed. A day present on one
+// side only is reported as Field "presence" with "present"/"absent" values,
+// never as a skip, and a row present on one side only as Field "row". Dimension
+// names the row inside the day — the hour, model and key of a retained bucket,
+// the full identity of a pricing or history rollup — or the value of the
+// identity column that moved.
 type ReconcileMismatch struct {
 	Day       string `json:"day"`
 	Field     string `json:"field"`
@@ -103,10 +129,16 @@ type ReconcileMismatch struct {
 
 // ReconcileDomainReport is one domain's comparison. Applicable is false when a
 // side does not hold the table at all, and Reason says which side that is.
+// Table names the compared store table, so a blocked domain is actionable.
+// SourceDays counts the UTC days the 1.x source holds for the domain and
+// ComparedDays the days both sides hold: a day only one side holds is a
+// mismatch, never a compared day.
 type ReconcileDomainReport struct {
 	Domain       string              `json:"domain"`
+	Table        string              `json:"table"`
 	Applicable   bool                `json:"applicable"`
 	Reason       string              `json:"reason,omitempty"`
+	SourceDays   int                 `json:"sourceDays"`
 	ComparedDays int                 `json:"comparedDays"`
 	Mismatches   []ReconcileMismatch `json:"mismatches"`
 }
@@ -202,9 +234,19 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 	if err != nil {
 		return ReconcileReport{}, err
 	}
-	domains, parityDays, err := compareStores(ctx, sourceRoot, paths.Database, scratch)
-	if err != nil {
-		return ReconcileReport{}, err
+	// The copy of the 1.x database is scratch, never evidence: whoever leaves
+	// this function, the area is gone and only the sanitized report survives.
+	defer func() { _ = os.RemoveAll(scratch) }()
+	domains, parityDays, compareErr := compareStores(ctx, sourceRoot, paths.Database, scratch)
+	if compareErr != nil {
+		return ReconcileReport{ReconcileEvidence: ReconcileEvidence{
+			Domains:            domains,
+			ParityGapDays:      parityDays,
+			MismatchDays:       mismatchDays(domains),
+			AcknowledgedDays:   []string{},
+			UnacknowledgedDays: []string{},
+			IncompleteDays:     []ReconcileMarkedDay{},
+		}}, compareErr
 	}
 
 	after, _, err := fingerprintSource(sourceRoot)
@@ -356,7 +398,8 @@ func compareStores(ctx context.Context, sourceRoot, targetDatabase, scratchRoot 
 	if err != nil {
 		return nil, nil, fmt.Errorf("read the v2 store: %w", err)
 	}
-	return compareObservations(source, target), gaps.AffectedDates, nil
+	domains, err := compareObservations(source, target)
+	return domains, gaps.AffectedDates, err
 }
 
 // snapshotSourceDatabase copies the stopped 1.x database and its sidecars into
@@ -435,13 +478,17 @@ func scratchDataSourceName(path string) string {
 	return dsn.String()
 }
 
-// sideObservation is one store read as a single snapshot.
+// sideObservation is one store read as a single snapshot. Every domain keeps the
+// granularity its read path exposes: the retained log and the pricing rollups
+// per UTC hour and per row identity, the account history per day and per
+// account identity, the deleted coverage per UTC day. A day total alone cannot
+// see two rows of the same day trade places.
 type sideObservation struct {
 	tables   sourceSchema
-	retained map[string]retainedDay
-	pricing  map[string]pricingDay
-	coverage map[string]int64
-	history  map[string]map[string]historyDay
+	retained map[retainedCellKey]retainedCell
+	pricing  map[pricingCellKey]pricingCell
+	coverage map[string]coverageCell
+	history  map[historyCellKey]historyCell
 }
 
 // observeSide reads every comparable domain inside one read-only transaction,
@@ -454,7 +501,7 @@ func observeSide(ctx context.Context, db *sql.DB, schema sourceSchema) (sideObse
 	}
 	defer func() { _ = tx.Rollback() }()
 	if schema.tables["usage_events"] {
-		if observation.retained, err = readRetainedDays(ctx, tx); err != nil {
+		if observation.retained, err = readRetainedCells(ctx, tx); err != nil {
 			return observation, err
 		}
 	}
@@ -465,297 +512,550 @@ func observeSide(ctx context.Context, db *sql.DB, schema sourceSchema) (sideObse
 				return observation, fmt.Errorf("read the model prices: %w", err)
 			}
 		}
-		if observation.pricing, err = readPricingDays(ctx, tx, prices); err != nil {
+		if observation.pricing, err = readPricingCells(ctx, tx, prices); err != nil {
 			return observation, err
 		}
 	}
 	if schema.tables["usage_archive_deleted_coverage_daily"] {
-		if observation.coverage, err = readCoverageDays(ctx, tx); err != nil {
+		if observation.coverage, err = readCoverageCells(ctx, tx); err != nil {
 			return observation, err
 		}
 	}
 	if schema.tables["usage_monitoring_account_daily_rollups_v1"] {
-		if observation.history, err = readHistoryDays(ctx, tx); err != nil {
+		if observation.history, err = readHistoryCells(ctx, tx); err != nil {
 			return observation, err
 		}
 	}
 	return observation, tx.Commit()
 }
 
-type retainedDay struct {
-	events    int64
-	tokens    int64
+// retainedCellKey is one (UTC hour, model, API key) bucket of the retained event
+// log. The identity includes the hour and the model because a key that moved to
+// another hour or another model of the same day changes the bucket it belongs
+// to, and a day total would not show it.
+type retainedCellKey struct {
+	hourMS int64
+	model  string
+	apiKey string
+}
+
+type retainedCell struct {
+	events int64
+	tokens int64
+	failed int64
+}
+
+// pricingCellKey is one stored pricing rollup row: its hour bucket and the whole
+// identity the table keys on. The failed flag is part of it, so two rows that
+// differ only by outcome cannot trade their numbers unnoticed.
+type pricingCellKey struct {
+	hourMS    int64
+	model     string
+	billing   string
+	pricing   string
+	tier      string
+	threshold int64
 	failed    int64
-	keyHashes int64
 }
 
-type pricingDay struct {
-	requests   int64
-	tokens     int64
-	costMicros int64
+type pricingCell struct {
+	calls             int64
+	tokens            int64
+	input             int64
+	output            int64
+	cached            int64
+	cacheRead         int64
+	cacheCreation     int64
+	longInput         int64
+	longOutput        int64
+	longCached        int64
+	longCacheRead     int64
+	longCacheCreation int64
+	costMicros        int64
 }
 
-type historyDay struct {
+// historyCellKey is one account history rollup: the hour bucket and the identity
+// columns the history read path exposes.
+type historyCellKey struct {
+	hourMS   int64
+	account  string
+	provider string
+	apiKey   string
+	model    string
+}
+
+type historyCell struct {
 	calls  int64
 	tokens int64
 }
 
-// readRetainedDays summarises the retained event log per UTC day: how many
-// events, how many tokens, how many failures and how many distinct keys.
-func readRetainedDays(ctx context.Context, tx *sql.Tx) (map[string]retainedDay, error) {
+// coverageCell is one day of the deleted-coverage table, including the edges the
+// read path reports beside the count.
+type coverageCell struct {
+	deleted int64
+	minMS   int64
+	maxMS   int64
+}
+
+// readRetainedCells summarises the retained event log per UTC hour, model and
+// API key: how many events, how many tokens and how many failures.
+func readRetainedCells(ctx context.Context, tx *sql.Tx) (map[retainedCellKey]retainedCell, error) {
 	rows, err := tx.QueryContext(ctx, `select
-		timestamp_ms / 86400000 as utc_day,
+		timestamp_ms / 3600000 * 3600000 as utc_hour_ms,
+		model,
+		coalesce(api_key_hash, ''),
 		count(*),
 		coalesce(sum(total_tokens), 0),
-		coalesce(sum(failed), 0),
-		count(distinct api_key_hash)
+		coalesce(sum(failed), 0)
 		from usage_events
-		group by utc_day`)
+		group by timestamp_ms / 3600000, model, api_key_hash`)
 	if err != nil {
 		return nil, fmt.Errorf("read the retained events: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-	days := map[string]retainedDay{}
+	cells := map[retainedCellKey]retainedCell{}
 	for rows.Next() {
-		var day int64
-		var summary retainedDay
-		if err := rows.Scan(&day, &summary.events, &summary.tokens, &summary.failed, &summary.keyHashes); err != nil {
+		var key retainedCellKey
+		var cell retainedCell
+		if err := rows.Scan(&key.hourMS, &key.model, &key.apiKey, &cell.events, &cell.tokens, &cell.failed); err != nil {
 			return nil, err
 		}
-		days[utcDayLabel(day)] = summary
+		cells[key] = cell
 	}
-	return days, rows.Err()
+	return cells, rows.Err()
 }
 
-// readPricingDays summarises the pricing rollups per UTC day: requests, tokens
-// and cost. Cost is not stored: it is recomputed from each side's own price
+// readPricingCells reads every stored pricing rollup row with its token classes
+// and its cost. Cost is not stored: it is recomputed from each side's own price
 // table, which is exactly what makes a price change visible here.
-func readPricingDays(ctx context.Context, tx *sql.Tx, prices map[string]model.ModelPrice) (map[string]pricingDay, error) {
+func readPricingCells(ctx context.Context, tx *sql.Tx, prices map[string]model.ModelPrice) (map[pricingCellKey]pricingCell, error) {
 	rows, err := tx.QueryContext(ctx, `select
-		bucket_ms / 86400000 as utc_day,
-		model, billing_model, pricing_model, service_tier, context_threshold_tokens,
+		bucket_ms,
+		model, billing_model, pricing_model, service_tier, context_threshold_tokens, failed,
 		sum(calls), sum(total_tokens),
 		sum(input_tokens), sum(output_tokens), sum(cached_tokens),
 		sum(cache_read_tokens), sum(cache_creation_tokens),
 		sum(long_input_tokens), sum(long_output_tokens), sum(long_cached_tokens),
 		sum(long_cache_read_tokens), sum(long_cache_creation_tokens)
 		from usage_pricing_hourly_rollups_v1
-		group by utc_day, model, billing_model, pricing_model, service_tier, context_threshold_tokens
-		order by utc_day, model, billing_model, pricing_model, service_tier, context_threshold_tokens`)
+		group by bucket_ms, model, billing_model, pricing_model, service_tier, context_threshold_tokens, failed`)
 	if err != nil {
 		return nil, fmt.Errorf("read the pricing rollups: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-	days := map[string]pricingDay{}
+	cells := map[pricingCellKey]pricingCell{}
 	for rows.Next() {
-		var (
-			day                                                       int64
-			modelName, billingModel, pricingModel, serviceTier        string
-			threshold, calls, tokens                                  int64
-			input, output, cached, cacheRead, cacheCreation           int64
-			longInput, longOutput, longCached, longCacheRead, longCre int64
-		)
-		if err := rows.Scan(&day, &modelName, &billingModel, &pricingModel, &serviceTier, &threshold,
-			&calls, &tokens, &input, &output, &cached, &cacheRead, &cacheCreation,
-			&longInput, &longOutput, &longCached, &longCacheRead, &longCre); err != nil {
+		var key pricingCellKey
+		var cell pricingCell
+		if err := rows.Scan(&key.hourMS, &key.model, &key.billing, &key.pricing, &key.tier, &key.threshold, &key.failed,
+			&cell.calls, &cell.tokens,
+			&cell.input, &cell.output, &cell.cached,
+			&cell.cacheRead, &cell.cacheCreation,
+			&cell.longInput, &cell.longOutput, &cell.longCached,
+			&cell.longCacheRead, &cell.longCacheCreation); err != nil {
 			return nil, err
 		}
-		cost := pricing.CostForModelCandidatesWithServiceTier([]string{billingModel, modelName}, serviceTier, pricing.ModelTokens{
-			PricingModel:            pricingModel,
-			ContextThresholdTokens:  threshold,
-			InputTokens:             input,
-			OutputTokens:            output,
-			CachedTokens:            cached,
-			CacheReadTokens:         cacheRead,
-			CacheCreationTokens:     cacheCreation,
-			LongInputTokens:         longInput,
-			LongOutputTokens:        longOutput,
-			LongCachedTokens:        longCached,
-			LongCacheReadTokens:     longCacheRead,
-			LongCacheCreationTokens: longCre,
+		cost := pricing.CostForModelCandidatesWithServiceTier([]string{key.billing, key.model}, key.tier, pricing.ModelTokens{
+			PricingModel:            key.pricing,
+			ContextThresholdTokens:  key.threshold,
+			InputTokens:             cell.input,
+			OutputTokens:            cell.output,
+			CachedTokens:            cell.cached,
+			CacheReadTokens:         cell.cacheRead,
+			CacheCreationTokens:     cell.cacheCreation,
+			LongInputTokens:         cell.longInput,
+			LongOutputTokens:        cell.longOutput,
+			LongCachedTokens:        cell.longCached,
+			LongCacheReadTokens:     cell.longCacheRead,
+			LongCacheCreationTokens: cell.longCacheCreation,
 		}, prices)
-		label := utcDayLabel(day)
-		summary := days[label]
-		summary.requests += calls
-		summary.tokens += tokens
-		summary.costMicros += int64(math.Round(cost * costMicrosPerUnit))
-		days[label] = summary
+		cell.costMicros = int64(math.Round(cost * costMicrosPerUnit))
+		cells[key] = cell
 	}
-	return days, rows.Err()
+	return cells, rows.Err()
 }
 
-// readCoverageDays reads the per-day deleted event counts the archive kept.
-func readCoverageDays(ctx context.Context, tx *sql.Tx) (map[string]int64, error) {
+// readCoverageCells reads the per-day deleted event counts and the edges the
+// archive kept beside them.
+func readCoverageCells(ctx context.Context, tx *sql.Tx) (map[string]coverageCell, error) {
 	rows, err := tx.QueryContext(ctx,
-		`select utc_day, deleted_event_count from usage_archive_deleted_coverage_daily`)
+		`select utc_day, deleted_event_count, min_timestamp_ms, max_timestamp_ms
+		from usage_archive_deleted_coverage_daily`)
 	if err != nil {
 		return nil, fmt.Errorf("read the deleted coverage table: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-	days := map[string]int64{}
+	cells := map[string]coverageCell{}
 	for rows.Next() {
-		var day, deleted int64
-		if err := rows.Scan(&day, &deleted); err != nil {
+		var day int64
+		var cell coverageCell
+		if err := rows.Scan(&day, &cell.deleted, &cell.minMS, &cell.maxMS); err != nil {
 			return nil, err
 		}
-		days[utcDayLabel(day)] = deleted
+		cells[utcDayLabel(day)] = cell
 	}
-	return days, rows.Err()
+	return cells, rows.Err()
 }
 
-// readHistoryDays reads the per-account monitoring history per UTC day.
-func readHistoryDays(ctx context.Context, tx *sql.Tx) (map[string]map[string]historyDay, error) {
+// readHistoryCells reads the account history rollups per day and per identity
+// column the read path exposes.
+func readHistoryCells(ctx context.Context, tx *sql.Tx) (map[historyCellKey]historyCell, error) {
 	rows, err := tx.QueryContext(ctx, `select
-		bucket_ms / 86400000 as utc_day,
-		account_snapshot,
+		bucket_ms,
+		account_snapshot, provider, coalesce(api_key_hash, ''), model,
 		sum(calls),
 		sum(total_tokens)
 		from usage_monitoring_account_daily_rollups_v1
-		group by utc_day, account_snapshot`)
+		group by bucket_ms, account_snapshot, provider, api_key_hash, model`)
 	if err != nil {
 		return nil, fmt.Errorf("read the account history rollups: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-	days := map[string]map[string]historyDay{}
+	cells := map[historyCellKey]historyCell{}
 	for rows.Next() {
-		var day, calls, tokens int64
-		var account string
-		if err := rows.Scan(&day, &account, &calls, &tokens); err != nil {
+		var key historyCellKey
+		var cell historyCell
+		if err := rows.Scan(&key.hourMS, &key.account, &key.provider, &key.apiKey, &key.model,
+			&cell.calls, &cell.tokens); err != nil {
 			return nil, err
 		}
-		label := utcDayLabel(day)
-		if days[label] == nil {
-			days[label] = map[string]historyDay{}
-		}
-		days[label][account] = historyDay{calls: calls, tokens: tokens}
+		cells[key] = cell
 	}
-	return days, rows.Err()
+	return cells, rows.Err()
 }
 
-// compareObservations compares the four domains in report order.
-func compareObservations(source, target sideObservation) []ReconcileDomainReport {
-	return []ReconcileDomainReport{
+// compareObservations compares the four domains in report order. A domain the
+// source holds days of but the store cannot show is not a disagreement to
+// acknowledge: it is unreconcilable, so the comparison stops before anything can
+// be marked.
+func compareObservations(source, target sideObservation) ([]ReconcileDomainReport, error) {
+	domains := []ReconcileDomainReport{
 		compareRetainedDomain(source, target),
 		comparePricingDomain(source, target),
 		compareCoverageDomain(source, target),
 		compareHistoryDomain(source, target),
 	}
+	for _, domain := range domains {
+		if err := domain.targetIncompleteError(); err != nil {
+			return domains, err
+		}
+	}
+	return domains, nil
+}
+
+// targetIncompleteError reports a domain the 1.x source holds days of but the v2
+// store cannot show at all. That is lost data, not a measured disagreement, so
+// no acknowledgement may waive it.
+func (r ReconcileDomainReport) targetIncompleteError() error {
+	if r.SourceDays == 0 {
+		return nil
+	}
+	if !r.Applicable {
+		return newUpgradeError(UpgradeErrorReconcileTargetIncomplete, fmt.Sprintf(
+			"the v2 store holds no %s table, so the %q domain cannot show the %s the 1.x source holds; nothing was compared and nothing was marked",
+			r.Table, r.Domain, plural(r.SourceDays, "day", "days")), nil)
+	}
+	if r.ComparedDays == 0 {
+		return newUpgradeError(UpgradeErrorReconcileTargetIncomplete, fmt.Sprintf(
+			"the v2 store compared no day of %s, so the %q domain cannot show the %s the 1.x source holds; nothing was compared and nothing was marked",
+			r.Table, r.Domain, plural(r.SourceDays, "day", "days")), nil)
+	}
+	return nil
+}
+
+// identityValue is one identity column of a compared row: the column name and
+// the value this row holds in it.
+type identityValue struct {
+	field string
+	value string
+}
+
+// keyedSpec describes one keyed comparison: the UTC day a cell belongs to, how
+// the operator names it, its identity columns and its numeric columns, in the
+// order the values are read.
+type keyedSpec[K comparable, V any] struct {
+	day        func(K) string
+	render     func(K) string
+	identities func(K) []identityValue
+	fields     []string
+	values     func(V) []int64
+}
+
+var retainedSpec = keyedSpec[retainedCellKey, retainedCell]{
+	day: func(key retainedCellKey) string { return utcDayOfHour(key.hourMS) },
+	render: func(key retainedCellKey) string {
+		return utcHourLabel(key.hourMS) + " model=" + key.model + " key=" + key.apiKey
+	},
+	identities: func(key retainedCellKey) []identityValue {
+		return []identityValue{
+			{mismatchFieldHour, utcHourLabel(key.hourMS)},
+			{mismatchFieldModel, key.model},
+			{mismatchFieldAPIKeyHash, key.apiKey},
+		}
+	},
+	fields: []string{mismatchFieldEvents, mismatchFieldTokens, mismatchFieldFailed},
+	values: func(cell retainedCell) []int64 { return []int64{cell.events, cell.tokens, cell.failed} },
+}
+
+var pricingSpec = keyedSpec[pricingCellKey, pricingCell]{
+	day: func(key pricingCellKey) string { return utcDayOfHour(key.hourMS) },
+	render: func(key pricingCellKey) string {
+		return utcHourLabel(key.hourMS) + " model=" + key.model + " billing=" + key.billing +
+			" pricing=" + key.pricing + " tier=" + key.tier +
+			" threshold=" + strconv.FormatInt(key.threshold, 10) +
+			" failed=" + strconv.FormatInt(key.failed, 10)
+	},
+	identities: func(key pricingCellKey) []identityValue {
+		return []identityValue{
+			{mismatchFieldBucketMS, utcHourLabel(key.hourMS)},
+			{mismatchFieldModel, key.model},
+			{mismatchFieldBillingModel, key.billing},
+			{mismatchFieldPricingModel, key.pricing},
+			{mismatchFieldServiceTier, key.tier},
+			{mismatchFieldThreshold, strconv.FormatInt(key.threshold, 10)},
+			{mismatchFieldFailed, strconv.FormatInt(key.failed, 10)},
+		}
+	},
+	fields: []string{
+		mismatchFieldCalls, mismatchFieldTokens,
+		mismatchFieldInputTokens, mismatchFieldOutputTokens, mismatchFieldCachedTokens,
+		mismatchFieldCacheReadTokens, mismatchFieldCacheCreationTokens,
+		mismatchFieldLongInputTokens, mismatchFieldLongOutputTokens, mismatchFieldLongCachedTokens,
+		mismatchFieldLongCacheReadTokens, mismatchFieldLongCacheCreationTokens,
+		mismatchFieldCost,
+	},
+	values: func(cell pricingCell) []int64 {
+		return []int64{
+			cell.calls, cell.tokens,
+			cell.input, cell.output, cell.cached,
+			cell.cacheRead, cell.cacheCreation,
+			cell.longInput, cell.longOutput, cell.longCached,
+			cell.longCacheRead, cell.longCacheCreation,
+			cell.costMicros,
+		}
+	},
+}
+
+var coverageSpec = keyedSpec[string, coverageCell]{
+	day:        func(day string) string { return day },
+	render:     func(day string) string { return day },
+	identities: func(string) []identityValue { return nil },
+	fields:     []string{mismatchFieldDeleted, mismatchFieldMinTimestamp, mismatchFieldMaxTimestamp},
+	values: func(cell coverageCell) []int64 {
+		return []int64{cell.deleted, cell.minMS, cell.maxMS}
+	},
+}
+
+var historySpec = keyedSpec[historyCellKey, historyCell]{
+	day: func(key historyCellKey) string { return utcDayOfHour(key.hourMS) },
+	render: func(key historyCellKey) string {
+		return utcHourLabel(key.hourMS) + " account=" + key.account +
+			" provider=" + key.provider + " key=" + key.apiKey + " model=" + key.model
+	},
+	identities: func(key historyCellKey) []identityValue {
+		return []identityValue{
+			{mismatchFieldAccountSnapshot, key.account},
+			{mismatchFieldProvider, key.provider},
+			{mismatchFieldAPIKeyHash, key.apiKey},
+			{mismatchFieldModel, key.model},
+		}
+	},
+	fields: []string{mismatchFieldCalls, mismatchFieldTokens},
+	values: func(cell historyCell) []int64 { return []int64{cell.calls, cell.tokens} },
 }
 
 func compareRetainedDomain(source, target sideObservation) ReconcileDomainReport {
-	report := newDomainReport(ReconcileDomainRetained, source, target, "usage_events")
-	if !report.Applicable {
-		return report
+	report := newDomainReport(ReconcileDomainRetained, source, target, "usage_events",
+		len(daysOf(source.retained, retainedSpec.day)))
+	if report.Applicable {
+		compareKeyed(&report, source.retained, target.retained, retainedSpec)
 	}
-	for _, day := range unionDays(keys(source.retained), keys(target.retained)) {
-		sourceDay, inSource := source.retained[day]
-		targetDay, inTarget := target.retained[day]
-		if !inSource || !inTarget {
-			report.Mismatches = append(report.Mismatches, presenceMismatch(day, inSource))
-			continue
-		}
-		report.Mismatches = append(report.Mismatches, compareMeasures(day, "", map[string][2]int64{
-			mismatchFieldEvents:    {sourceDay.events, targetDay.events},
-			mismatchFieldTokens:    {sourceDay.tokens, targetDay.tokens},
-			mismatchFieldFailed:    {sourceDay.failed, targetDay.failed},
-			mismatchFieldKeyHashes: {sourceDay.keyHashes, targetDay.keyHashes},
-		}, []string{mismatchFieldEvents, mismatchFieldTokens, mismatchFieldFailed, mismatchFieldKeyHashes})...)
-	}
-	report.ComparedDays = len(unionDays(keys(source.retained), keys(target.retained)))
 	return report
 }
 
 func comparePricingDomain(source, target sideObservation) ReconcileDomainReport {
-	report := newDomainReport(ReconcileDomainPricing, source, target, "usage_pricing_hourly_rollups_v1")
-	if !report.Applicable {
-		return report
+	report := newDomainReport(ReconcileDomainPricing, source, target, "usage_pricing_hourly_rollups_v1",
+		len(daysOf(source.pricing, pricingSpec.day)))
+	if report.Applicable {
+		compareKeyed(&report, source.pricing, target.pricing, pricingSpec)
 	}
-	days := unionDays(keys(source.pricing), keys(target.pricing))
-	for _, day := range days {
-		sourceDay, inSource := source.pricing[day]
-		targetDay, inTarget := target.pricing[day]
-		if !inSource || !inTarget {
-			report.Mismatches = append(report.Mismatches, presenceMismatch(day, inSource))
-			continue
-		}
-		report.Mismatches = append(report.Mismatches, compareMeasures(day, "", map[string][2]int64{
-			mismatchFieldRequests: {sourceDay.requests, targetDay.requests},
-			mismatchFieldTokens:   {sourceDay.tokens, targetDay.tokens},
-		}, []string{mismatchFieldRequests, mismatchFieldTokens})...)
-		if !costsAgree(sourceDay.costMicros, targetDay.costMicros) {
-			report.Mismatches = append(report.Mismatches, ReconcileMismatch{
-				Day:    day,
-				Field:  mismatchFieldCost,
-				Source: formatMicros(sourceDay.costMicros),
-				Target: formatMicros(targetDay.costMicros),
-			})
-		}
-	}
-	report.ComparedDays = len(days)
 	return report
 }
 
 func compareCoverageDomain(source, target sideObservation) ReconcileDomainReport {
-	report := newDomainReport(ReconcileDomainCoverage, source, target, "usage_archive_deleted_coverage_daily")
-	if !report.Applicable {
-		return report
+	report := newDomainReport(ReconcileDomainCoverage, source, target, "usage_archive_deleted_coverage_daily",
+		len(source.coverage))
+	if report.Applicable {
+		compareKeyed(&report, source.coverage, target.coverage, coverageSpec)
 	}
-	days := unionDays(keys(source.coverage), keys(target.coverage))
-	for _, day := range days {
-		sourceDeleted, inSource := source.coverage[day]
-		targetDeleted, inTarget := target.coverage[day]
-		if !inSource || !inTarget {
-			report.Mismatches = append(report.Mismatches, presenceMismatch(day, inSource))
-			continue
-		}
-		report.Mismatches = append(report.Mismatches, compareMeasures(day, "", map[string][2]int64{
-			mismatchFieldDeleted: {sourceDeleted, targetDeleted},
-		}, []string{mismatchFieldDeleted})...)
-	}
-	report.ComparedDays = len(days)
 	return report
 }
 
 func compareHistoryDomain(source, target sideObservation) ReconcileDomainReport {
-	report := newDomainReport(ReconcileDomainHistory, source, target, "usage_monitoring_account_daily_rollups_v1")
-	if !report.Applicable {
-		return report
+	report := newDomainReport(ReconcileDomainHistory, source, target, "usage_monitoring_account_daily_rollups_v1",
+		len(daysOf(source.history, historySpec.day)))
+	if report.Applicable {
+		compareKeyed(&report, source.history, target.history, historySpec)
 	}
-	days := unionDays(keys(source.history), keys(target.history))
-	for _, day := range days {
-		sourceDay, inSource := source.history[day]
-		targetDay, inTarget := target.history[day]
+	return report
+}
+
+// compareKeyed compares one domain at row granularity: the days only one side
+// holds, the per-day distribution of every identity column, and every numeric
+// column of a row both sides hold. ComparedDays only counts days both sides
+// hold, because a day only one side holds was never compared.
+func compareKeyed[K comparable, V any](report *ReconcileDomainReport, source, target map[K]V, spec keyedSpec[K, V]) {
+	sourceDays := daysOf(source, spec.day)
+	targetDays := daysOf(target, spec.day)
+	for _, day := range unionDays(keys(sourceDays), keys(targetDays)) {
+		sourceKeys, inSource := sourceDays[day]
+		targetKeys, inTarget := targetDays[day]
 		if !inSource || !inTarget {
 			report.Mismatches = append(report.Mismatches, presenceMismatch(day, inSource))
 			continue
 		}
-		for _, account := range unionDays(keys(sourceDay), keys(targetDay)) {
-			sourceAccount, accountInSource := sourceDay[account]
-			targetAccount, accountInTarget := targetDay[account]
-			if !accountInSource || !accountInTarget {
-				report.Mismatches = append(report.Mismatches, ReconcileMismatch{
-					Day:       day,
-					Field:     mismatchFieldPresence,
-					Dimension: account,
-					Source:    presenceValue(accountInSource),
-					Target:    presenceValue(accountInTarget),
-				})
-				continue
-			}
-			report.Mismatches = append(report.Mismatches, compareMeasures(day, account, map[string][2]int64{
-				mismatchFieldCalls:  {sourceAccount.calls, targetAccount.calls},
-				mismatchFieldTokens: {sourceAccount.tokens, targetAccount.tokens},
-			}, []string{mismatchFieldCalls, mismatchFieldTokens})...)
+		report.Mismatches = append(report.Mismatches, compareIdentities(day, sourceKeys, targetKeys, spec)...)
+		report.Mismatches = append(report.Mismatches, compareCells(day, sourceKeys, targetKeys, source, target, spec)...)
+	}
+	report.SourceDays = len(sourceDays)
+	report.ComparedDays = comparedDays(sourceDays, targetDays)
+}
+
+// daysOf groups a keyed observation by the UTC day each cell belongs to.
+func daysOf[K comparable, V any](cells map[K]V, day func(K) string) map[string][]K {
+	days := make(map[string][]K, len(cells))
+	for key := range cells {
+		label := day(key)
+		days[label] = append(days[label], key)
+	}
+	return days
+}
+
+// comparedDays counts the days both sides hold.
+func comparedDays[V any](source, target map[string]V) int {
+	compared := 0
+	for day := range source {
+		if _, held := target[day]; held {
+			compared++
 		}
 	}
-	report.ComparedDays = len(days)
-	return report
+	return compared
+}
+
+// compareIdentities compares each identity column as the per-day distribution of
+// its values, so a row that moved to another hour, model or key is reported
+// against the column that moved instead of cancelling out inside a day total.
+func compareIdentities[K comparable, V any](day string, sourceKeys, targetKeys []K, spec keyedSpec[K, V]) []ReconcileMismatch {
+	mismatches := []ReconcileMismatch{}
+	if len(sourceKeys) == 0 {
+		return mismatches
+	}
+	width := len(spec.identities(sourceKeys[0]))
+	for column := range width {
+		sourceCounts := make(map[string]int64, len(sourceKeys))
+		for _, key := range sourceKeys {
+			sourceCounts[spec.identities(key)[column].value]++
+		}
+		targetCounts := make(map[string]int64, len(targetKeys))
+		for _, key := range targetKeys {
+			targetCounts[spec.identities(key)[column].value]++
+		}
+		field := spec.identities(sourceKeys[0])[column].field
+		for _, value := range unionDays(keys(sourceCounts), keys(targetCounts)) {
+			sourceCount, targetCount := sourceCounts[value], targetCounts[value]
+			if sourceCount == targetCount {
+				continue
+			}
+			mismatches = append(mismatches, ReconcileMismatch{
+				Day:       day,
+				Field:     field,
+				Dimension: value,
+				Source:    strconv.FormatInt(sourceCount, 10),
+				Target:    strconv.FormatInt(targetCount, 10),
+			})
+		}
+	}
+	return mismatches
+}
+
+// compareCells compares every numeric column of the rows both sides hold, in a
+// fixed order so two runs over the same state report the same list.
+func compareCells[K comparable, V any](day string, sourceKeys, targetKeys []K, source, target map[K]V, spec keyedSpec[K, V]) []ReconcileMismatch {
+	mismatches := []ReconcileMismatch{}
+	for _, key := range unionKeys(sourceKeys, targetKeys, spec.render) {
+		dimension := spec.render(key)
+		sourceCell, inSource := source[key]
+		targetCell, inTarget := target[key]
+		if !inSource || !inTarget {
+			mismatches = append(mismatches, ReconcileMismatch{
+				Day:       day,
+				Field:     mismatchFieldRow,
+				Dimension: dimension,
+				Source:    presenceValue(inSource),
+				Target:    presenceValue(inTarget),
+			})
+			continue
+		}
+		sourceValues, targetValues := spec.values(sourceCell), spec.values(targetCell)
+		for index, field := range spec.fields {
+			if sourceValues[index] == targetValues[index] {
+				continue
+			}
+			mismatches = append(mismatches, ReconcileMismatch{
+				Day:       day,
+				Field:     field,
+				Dimension: dimension,
+				Source:    strconv.FormatInt(sourceValues[index], 10),
+				Target:    strconv.FormatInt(targetValues[index], 10),
+			})
+		}
+	}
+	return mismatches
+}
+
+// unionKeys merges two key lists into one sorted list, named the way the
+// operator reads it.
+func unionKeys[K comparable](left, right []K, render func(K) string) []K {
+	seen := make(map[K]bool, len(left)+len(right))
+	merged := make([]K, 0, len(left)+len(right))
+	for _, key := range append(append([]K{}, left...), right...) {
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		merged = append(merged, key)
+	}
+	sort.Slice(merged, func(left, right int) bool { return render(merged[left]) < render(merged[right]) })
+	return merged
+}
+
+// utcHourLabel names one UTC hour in full, so every mismatch names the hour it
+// sits in.
+func utcHourLabel(hourMS int64) string {
+	return time.UnixMilli(hourMS).UTC().Format("2006-01-02T15:00")
+}
+
+// utcDayOfHour labels the UTC day an hour bucket belongs to.
+func utcDayOfHour(hourMS int64) string {
+	return utcDayLabel(floorDiv(hourMS, utcDayMilliseconds))
+}
+
+// floorDiv divides towards negative infinity, so hours before the epoch keep
+// belonging to the day they were in.
+func floorDiv(value, divisor int64) int64 {
+	quotient := value / divisor
+	if value%divisor != 0 && (value < 0) != (divisor < 0) {
+		quotient--
+	}
+	return quotient
 }
 
 // newDomainReport decides whether a domain can be compared at all. A side that
-// does not hold the table says so instead of passing silently.
-func newDomainReport(domain string, source, target sideObservation, table string) ReconcileDomainReport {
-	report := ReconcileDomainReport{Domain: domain, Mismatches: []ReconcileMismatch{}}
+// does not hold the table says so instead of passing silently; sourceDays is
+// what the 1.x source holds, which is what a missing store table is measured
+// against.
+func newDomainReport(domain string, source, target sideObservation, table string, sourceDays int) ReconcileDomainReport {
+	report := ReconcileDomainReport{Domain: domain, Table: table, SourceDays: sourceDays, Mismatches: []ReconcileMismatch{}}
 	sourceHolds, targetHolds := source.tables.tables[table], target.tables.tables[table]
 	if sourceHolds && targetHolds {
 		report.Applicable = true
@@ -772,26 +1072,6 @@ func newDomainReport(domain string, source, target sideObservation, table string
 	return report
 }
 
-// compareMeasures compares the named integer measures in a fixed order, so two
-// runs over the same state always report the same list.
-func compareMeasures(day, dimension string, values map[string][2]int64, fields []string) []ReconcileMismatch {
-	mismatches := []ReconcileMismatch{}
-	for _, field := range fields {
-		pair := values[field]
-		if pair[0] == pair[1] {
-			continue
-		}
-		mismatches = append(mismatches, ReconcileMismatch{
-			Day:       day,
-			Field:     field,
-			Dimension: dimension,
-			Source:    strconv.FormatInt(pair[0], 10),
-			Target:    strconv.FormatInt(pair[1], 10),
-		})
-	}
-	return mismatches
-}
-
 func presenceMismatch(day string, inSource bool) ReconcileMismatch {
 	return ReconcileMismatch{
 		Day:    day,
@@ -806,21 +1086,6 @@ func presenceValue(present bool) string {
 		return "present"
 	}
 	return "absent"
-}
-
-// costsAgree compares two daily cost totals in micro-units. The tolerance is
-// relative to the larger side, because the two sides differ only by the
-// floating point rounding of the same arithmetic.
-func costsAgree(source, target int64) bool {
-	if source == target {
-		return true
-	}
-	largest := math.Max(math.Abs(float64(source)), math.Abs(float64(target)))
-	return math.Abs(float64(source)-float64(target)) <= largest*costTolerance
-}
-
-func formatMicros(value int64) string {
-	return strconv.FormatInt(value, 10)
 }
 
 // keys returns the sorted keys of any map keyed by UTC day.
@@ -930,14 +1195,33 @@ func recordReconciliation(ctx context.Context, databasePath string, recorded mod
 	if err := repository.RecordReconciliation(ctx, payload); err != nil {
 		return model.UpgradeOperation{}, inserted, err
 	}
-	operation, err := advanceReconciledDomains(ctx, repository, recorded.Stage)
+	operation, err := advanceReconciledDomains(ctx, repository, recorded.Stage, establishedDomains(evidence.Domains))
 	return operation, inserted, err
+}
+
+// establishedDomains names the operation domains the compared domains actually
+// established, in operation order. A domain that was not applicable, or that
+// the store could not show, never appears: recording it would claim work this
+// step did not do.
+func establishedDomains(domains []ReconcileDomainReport) []string {
+	established := make([]string, 0, len(domains))
+	for _, domain := range domains {
+		if !domain.Applicable || domain.SourceDays > 0 && domain.ComparedDays == 0 {
+			continue
+		}
+		for _, candidate := range reconciledOperationDomains[domain.Domain] {
+			if !slices.Contains(established, candidate) {
+				established = append(established, candidate)
+			}
+		}
+	}
+	return established
 }
 
 // advanceReconciledDomains records the domains this step established. A store
 // that already moved past "reconcile" keeps its stage: the evidence is recorded
 // again, the operation never moves backwards.
-func advanceReconciledDomains(ctx context.Context, repository *upgradeoperation.Repository, current model.UpgradeStage) (model.UpgradeOperation, error) {
+func advanceReconciledDomains(ctx context.Context, repository *upgradeoperation.Repository, current model.UpgradeStage, domains []string) (model.UpgradeOperation, error) {
 	if current != "" && current.Valid() && !current.CanAdvanceTo(model.UpgradeStageReconcile) {
 		recorded, found, err := repository.Get(ctx)
 		if err != nil {
@@ -949,7 +1233,7 @@ func advanceReconciledDomains(ctx context.Context, repository *upgradeoperation.
 		return recorded, nil
 	}
 	var operation model.UpgradeOperation
-	for _, domain := range reconciledDomains {
+	for _, domain := range domains {
 		advanced, err := repository.Advance(ctx, domain, model.UpgradeStageReconcile)
 		if err != nil {
 			return model.UpgradeOperation{}, err
