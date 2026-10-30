@@ -75,6 +75,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return runReconcile(ctx, args[1:], stdout, stderr)
 	case "rollback":
 		return runRollback(ctx, args[1:], stdout, stderr)
+	case "cpa-import":
+		return runCPAImport(ctx, args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		writeUsage(stdout)
 		return nil
@@ -97,6 +99,10 @@ func writeUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  rollback --prepare --legacy <dir> [--legacy-image <ref>] [--project <name>] [--port N] [--manager-addr HOST:PORT] [--json]")
 	_, _ = fmt.Fprintln(w, "  rollback --verify --legacy <dir> [--backup <dir>] [--status-url <url>] [--legacy-image <ref>] [--json]")
 	_, _ = fmt.Fprintln(w, "                                      plan a 1.x restart, or record a proven one")
+	_, _ = fmt.Fprintln(w, "  cpa-import --legacy <dir> --plugins <true|false> [--cpa-dir <dir>] [--cpa-version <release>]")
+	_, _ = fmt.Fprintln(w, "             [--cpa-auth-dir <dir>] [--target <dir>] [--destination-url <url>] [--json]")
+	_, _ = fmt.Fprintln(w, "                                      import a stopped 1.x stack's managed CPA state into the")
+	_, _ = fmt.Fprintln(w, "                                      v2 destination and prove it")
 	_, _ = fmt.Fprintln(w, "Exit codes: 0 ready, 1 blocked, refused, or unacknowledged mismatch, 2 usage or environment error.")
 }
 

@@ -100,6 +100,49 @@ const (
 	// the columns a writable open adds. The store must be opened once by this
 	// build; nothing was written.
 	UpgradeErrorStoreSchemaOutdated UpgradeErrorCode = "upgrade_store_schema_outdated"
+	// UpgradeErrorCPASourceMissing reports that the 1.x stack holds no readable
+	// managed CPA directory, configuration or auth directory. The source was not
+	// read and nothing was written.
+	UpgradeErrorCPASourceMissing UpgradeErrorCode = "upgrade_cpa_source_missing"
+	// UpgradeErrorCPAConfigInvalid reports that the managed CPA configuration is
+	// not a readable YAML mapping, or declares a layout this destination does not
+	// load. Nothing was written.
+	UpgradeErrorCPAConfigInvalid UpgradeErrorCode = "upgrade_cpa_config_invalid"
+	// UpgradeErrorCPAVersionRequired reports that the source uses the v7 layout
+	// and neither the operator nor the stack file names its CPA release. A v7
+	// file carries no version of its own, and this import never infers one from
+	// the file's shape. Nothing was written.
+	UpgradeErrorCPAVersionRequired UpgradeErrorCode = "upgrade_cpa_version_required"
+	// UpgradeErrorCPAVersionUnsupported reports that the source CPA release is
+	// below the accepted floor, is not an exact release, or does not describe the
+	// configuration it holds. Nothing was written; the operator upgrades the CPA
+	// inside the 1.x stack first.
+	UpgradeErrorCPAVersionUnsupported UpgradeErrorCode = "upgrade_cpa_version_unsupported"
+	// UpgradeErrorCPAClientKeysMissing reports that the source CPA holds no client
+	// API key (or more than a destination accepts), so the destination could not
+	// be staged and verified with the keys the import would install. Nothing was
+	// written.
+	UpgradeErrorCPAClientKeysMissing UpgradeErrorCode = "upgrade_cpa_client_keys_missing"
+	// UpgradeErrorCPAPluginChoiceRequired reports that the run carries no explicit
+	// plugin-runtime decision. The choice is never inherited from the source and
+	// is never defaulted. Nothing was written.
+	UpgradeErrorCPAPluginChoiceRequired UpgradeErrorCode = "upgrade_cpa_plugin_choice_required"
+	// UpgradeErrorCPAStageConflict reports that the recorded operation is not in a
+	// stage that can enter the import, or is already past it. Nothing was
+	// written.
+	UpgradeErrorCPAStageConflict UpgradeErrorCode = "upgrade_cpa_stage_conflict"
+	// UpgradeErrorCPADestinationUnready reports that the destination could not be
+	// observed, staged or started, so no configuration was written to it.
+	UpgradeErrorCPADestinationUnready UpgradeErrorCode = "upgrade_cpa_destination_unready"
+	// UpgradeErrorCPAImportUnproven reports that a copied item does not read back
+	// from the destination as it was written, or that an item's effect is
+	// unknown. The import stops, the operation stays at cpa_import and the
+	// cpa_config domain is not recorded.
+	UpgradeErrorCPAImportUnproven UpgradeErrorCode = "upgrade_cpa_import_unproven"
+	// UpgradeErrorCPAImportUnavailable reports that the source inventory could not
+	// be read, so this run settled no item. Nothing was written to the
+	// destination by this run and the cpa_config domain is not recorded.
+	UpgradeErrorCPAImportUnavailable UpgradeErrorCode = "upgrade_cpa_import_unavailable"
 )
 
 // UpgradeError is a typed Upgrade failure. Callers match it with errors.Is
@@ -150,6 +193,17 @@ var (
 	ErrRollbackPortBusy      = &UpgradeError{Code: UpgradeErrorRollbackPortBusy}
 	ErrRollbackV2Running     = &UpgradeError{Code: UpgradeErrorRollbackV2Running}
 	ErrStoreSchemaOutdated   = &UpgradeError{Code: UpgradeErrorStoreSchemaOutdated}
+
+	ErrCPASourceMissing      = &UpgradeError{Code: UpgradeErrorCPASourceMissing}
+	ErrCPAConfigInvalid      = &UpgradeError{Code: UpgradeErrorCPAConfigInvalid}
+	ErrCPAVersionRequired    = &UpgradeError{Code: UpgradeErrorCPAVersionRequired}
+	ErrCPAVersionUnsupported = &UpgradeError{Code: UpgradeErrorCPAVersionUnsupported}
+	ErrCPAClientKeysMissing  = &UpgradeError{Code: UpgradeErrorCPAClientKeysMissing}
+	ErrCPAPluginChoice       = &UpgradeError{Code: UpgradeErrorCPAPluginChoiceRequired}
+	ErrCPAStageConflict      = &UpgradeError{Code: UpgradeErrorCPAStageConflict}
+	ErrCPADestinationUnready = &UpgradeError{Code: UpgradeErrorCPADestinationUnready}
+	ErrCPAImportUnproven     = &UpgradeError{Code: UpgradeErrorCPAImportUnproven}
+	ErrCPAImportUnavailable  = &UpgradeError{Code: UpgradeErrorCPAImportUnavailable}
 )
 
 func newUpgradeError(code UpgradeErrorCode, message string, err error) error {

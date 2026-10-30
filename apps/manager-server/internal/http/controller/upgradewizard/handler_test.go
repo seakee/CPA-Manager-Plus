@@ -765,7 +765,7 @@ func TestStatusStageToNextAction(t *testing.T) {
 		{stage: StagePreflight, action: ActionPreflight, stageKnown: true},
 		{stage: StageCopyIn, action: ActionCopyIn, stageKnown: true},
 		{stage: StageReconcile, action: ActionReconcile, stageKnown: true},
-		{stage: StageCPAImport, action: ActionReconcile, stageKnown: true},
+		{stage: StageCPAImport, action: ActionCPAImport, stageKnown: true},
 		{stage: StageExternal, action: ActionReconcile, stageKnown: true},
 		{stage: StageVerify, action: ActionReconcile, stageKnown: true},
 		{stage: StageFailed, action: ActionReconcile, stageKnown: true},

@@ -125,6 +125,7 @@ const (
 const (
 	ActionPreflight  = "preflight"
 	ActionCopyIn     = "copy_in"
+	ActionCPAImport  = "cpa_import"
 	ActionReconcile  = "reconcile"
 	ActionComplete   = "complete"
 	ActionRolledBack = "rolled_back"
@@ -807,7 +808,12 @@ func nextAction(stage string) string {
 		return ActionPreflight
 	case StageCopyIn:
 		return ActionCopyIn
-	case StageReconcile, StageCPAImport, StageExternal, StageVerify, StageFailed:
+	case StageCPAImport:
+		// The CPA import is a step of its own: it writes the destination and
+		// proves it, so the wizard offers it rather than the reconciliation that
+		// precedes it.
+		return ActionCPAImport
+	case StageReconcile, StageExternal, StageVerify, StageFailed:
 		return ActionReconcile
 	case StageComplete:
 		return ActionComplete
