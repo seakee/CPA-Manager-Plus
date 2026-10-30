@@ -78,10 +78,11 @@ type Options struct {
 	// Lock is the caller's held 1.x ownership fence. CopyIn requires the lock
 	// bound to the source database; Preflight acquires its own.
 	Lock *processlock.Lock
-	// ScratchDir is this step's private working area. Reconcile copies the
-	// stopped 1.x database here and reads the copy, so the source root is never
-	// opened as a database. Unset uses <TargetRoot>/.upgrade-reconcile and the
-	// directory is removed before Reconcile returns. Reconcile only.
+	// ScratchDir is the directory Reconcile may work in. It copies the stopped
+	// 1.x database into <ScratchDir>/.upgrade-reconcile and reads the copy, so
+	// the source root is never opened as a database and the directory named here
+	// is never itself removed. Unset uses the v2 data root. The named directory
+	// must not be, sit inside, or contain the 1.x source root. Reconcile only.
 	ScratchDir string
 	// Acknowledged lists the UTC days (YYYY-MM-DD) the operator explicitly
 	// accepts as permanently incomplete. Reconcile only.

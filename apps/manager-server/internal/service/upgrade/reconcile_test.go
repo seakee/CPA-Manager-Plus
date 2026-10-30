@@ -129,8 +129,9 @@ func markedDays(t *testing.T, path string) map[string]string {
 	}
 	defer func() { _ = db.Close() }()
 	// The bound only has to be a real instant after any mark this store can
-	// hold; an extreme value overflows the day arithmetic.
-	days, err := coverageincomplete.New(db).DaysIn(context.Background(), 0, 1<<40)
+	// hold; it reaches past the days the fixtures use and stays far from the
+	// day arithmetic's overflow.
+	days, err := coverageincomplete.New(db).DaysIn(context.Background(), 0, 1<<42)
 	if err != nil {
 		t.Fatalf("read the marked days: %v", err)
 	}
@@ -549,6 +550,11 @@ func TestReconcileBlocksWhenTheStoreLosesASourceTable(t *testing.T) {
 		if domain.Applicable || domain.Table != "usage_pricing_hourly_rollups_v1" || domain.SourceDays != 1 {
 			t.Fatalf("pricing report = %+v, want an inapplicable domain with one source day", domain)
 		}
+		// A dropped table is the other half of the derived-domain boundary: unlike
+		// a cleared one it has no way back, so it stays unwaivable.
+		if domain.Recoverable {
+			t.Fatalf("pricing report = %+v, want a dropped table to stay unrecoverable", domain)
+		}
 	}
 	if got := markedDays(t, copied.databasePath()); len(got) != 0 {
 		t.Fatalf("marked days = %v, want none", got)
@@ -651,6 +657,30 @@ func TestReconcileReportsEveryPermutationInsideADay(t *testing.T) {
 				{mismatchFieldAPIKeyHash, "key-z"},
 				{mismatchFieldModel, "gpt-other"},
 			},
+		},
+		{
+			// The credential identity is part of the row key: a label that moved
+			// is a different row, and a key without the label let the row's totals
+			// answer for another account's.
+			name:   "history auth label rewritten",
+			seed:   seedSourceHistory,
+			mutate: []string{`update usage_monitoring_account_daily_rollups_v1 set auth_label_snapshot = 'label-2'`},
+			domain: ReconcileDomainHistory,
+			want:   []wantedMismatch{{mismatchFieldAuthLabelSnapshot, "label-2"}},
+		},
+		{
+			name:   "history auth file rewritten",
+			seed:   seedSourceHistory,
+			mutate: []string{`update usage_monitoring_account_daily_rollups_v1 set auth_file_snapshot = 'file-b'`},
+			domain: ReconcileDomainHistory,
+			want:   []wantedMismatch{{mismatchFieldAuthFileSnapshot, "file-b"}},
+		},
+		{
+			name:   "history executor rewritten",
+			seed:   seedSourceHistory,
+			mutate: []string{`update usage_monitoring_account_daily_rollups_v1 set executor_type = 'claude'`},
+			domain: ReconcileDomainHistory,
+			want:   []wantedMismatch{{mismatchFieldExecutorType, "claude"}},
 		},
 		{
 			name: "retained api_key_hash swapped between events",
@@ -779,4 +809,362 @@ func TestReconcileSeesAPriceChangeOfOneMicroPerMillion(t *testing.T) {
 		t.Fatalf("marked days = %v, want none", got)
 	}
 	assertNoScratch(t, copied.target)
+}
+
+// seedNullAndEmptyKeys seeds one UTC hour and model under both ways a missing
+// API key is stored: a NULL api_key_hash and an empty one. They are one reported
+// key - "no key" - so a store must report their events as one bucket.
+func seedNullAndEmptyKeys(t *testing.T, volume legacyVolume) {
+	t.Helper()
+	execSource(t, volume,
+		fmt.Sprintf(`insert into usage_events (
+			event_hash, timestamp_ms, timestamp, model, requested_model, api_key_hash, total_tokens, created_at_ms)
+			values ('legacy-null-key', %d, '%d', 'gpt-test', 'gpt-test', NULL, 10, %d)`,
+			seededHourMS+1000, seededHourMS+1000, seededHourMS),
+		fmt.Sprintf(`insert into usage_events (
+			event_hash, timestamp_ms, timestamp, model, requested_model, api_key_hash, total_tokens, created_at_ms)
+			values ('legacy-empty-key', %d, '%d', 'gpt-test', 'gpt-test', '', 20, %d)`,
+			seededHourMS+2000, seededHourMS+2000, seededHourMS),
+	)
+}
+
+// TestReconcileAggregatesANullAndAnEmptyAPIKeyAsOneKey reproduces the round three
+// review's R1: the read selected a coalesced API key but grouped on the raw
+// column, so the NULL and the empty key were two groups that landed on the
+// same reported key and one overwrote the other. A change to the NULL row alone
+// was then certified clean.
+func TestReconcileAggregatesANullAndAnEmptyAPIKeyAsOneKey(t *testing.T) {
+	copied := newCopiedVolumeWith(t, seedNullAndEmptyKeys)
+	execTarget(t, copied.databasePath(),
+		`update usage_events set total_tokens = 11 where event_hash = 'legacy-null-key'`)
+
+	report, err := Reconcile(context.Background(), copied.reconcileOptions())
+	if !errors.Is(err, ErrReconcileMismatch) {
+		t.Fatalf("reconcile error = %v, want the typed mismatch", err)
+	}
+	mismatches := mismatchesOf(t, report, ReconcileDomainRetained)
+	if len(mismatches) != 1 || mismatches[0].Field != mismatchFieldTokens ||
+		mismatches[0].Day != seededDayName {
+		t.Fatalf("retained mismatches = %+v, want one total_tokens mismatch on %s", mismatches, seededDayName)
+	}
+	// Both rows are the same reported key, so the bucket totals are the sums:
+	// 10+20 on the source and 11+20 on the target.
+	if mismatches[0].Source != "30" || mismatches[0].Target != "31" {
+		t.Fatalf("mismatch = %+v, want the two rows summed as 30 and 31", mismatches[0])
+	}
+	if got := markedDays(t, copied.databasePath()); len(got) != 0 {
+		t.Fatalf("marked days = %v, want none", got)
+	}
+}
+
+// TestReadHistoryCellsGroupsANullAndAnEmptyKey reads the account history query
+// against a table that keeps the nullable credential columns a 1.x-era store can
+// hold. The same R1 shape applies here: a NULL and an empty api_key_hash are one
+// reported key, so they must come back as one cell with the calls summed instead
+// of two groups overwriting each other.
+func TestReadHistoryCellsGroupsANullAndAnEmptyKey(t *testing.T) {
+	path := filepath.Join(canonicalTempDir(t), "history.sqlite")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open the history fixture: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	for _, statement := range []string{
+		`create table usage_monitoring_account_daily_rollups_v1 (
+			bucket_ms integer, account_snapshot text, auth_label_snapshot text,
+			auth_file_snapshot text, provider text, api_key_hash text, executor_type text,
+			model text, calls integer, total_tokens integer)`,
+		fmt.Sprintf(`insert into usage_monitoring_account_daily_rollups_v1 values
+			(%d, 'acct-1', 'label-1', 'file-a', 'openai', null, 'codex', 'gpt-test', 2, 100)`, seededDayMS),
+		fmt.Sprintf(`insert into usage_monitoring_account_daily_rollups_v1 values
+			(%d, 'acct-1', 'label-1', 'file-a', 'openai', '', 'codex', 'gpt-test', 5, 200)`, seededDayMS),
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatalf("prepare the history fixture %q: %v", statement, err)
+		}
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin the history read: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	cells, err := readHistoryCells(context.Background(), tx)
+	if err != nil {
+		t.Fatalf("read the account history: %v", err)
+	}
+	if len(cells) != 1 {
+		t.Fatalf("cells = %d, want the two rows as one cell", len(cells))
+	}
+	for key, cell := range cells {
+		if key.apiKey != "" || cell.calls != 7 || cell.tokens != 300 {
+			t.Fatalf("cell %+v under %+v, want the two rows summed under the empty key", cell, key)
+		}
+	}
+}
+
+// TestReconcileRecordsNothingWhenNoDomainWasCompared reproduces the round three
+// review's R2: a source that holds none of the compared tables established no
+// domain, and the old run advanced nothing while reporting Recorded with an
+// empty stage.
+func TestReconcileRecordsNothingWhenNoDomainWasCompared(t *testing.T) {
+	volume := newLegacyVolume(t)
+	execSource(t, volume,
+		`pragma foreign_keys = off`,
+		`drop table usage_events`,
+		`drop table usage_pricing_hourly_rollups_v1`,
+		`drop table usage_archive_deleted_coverage_daily`,
+		`drop table usage_monitoring_account_daily_rollups_v1`)
+	copied := copyVolume(t, volume)
+
+	report, err := Reconcile(context.Background(), copied.reconcileOptions())
+	if !errors.Is(err, ErrReconcileNothingCompared) {
+		t.Fatalf("reconcile error = %v, want the nothing-compared refusal", err)
+	}
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorReconcileNothingCompared {
+		t.Fatalf("error code = %q (%t), want %q", code, ok, UpgradeErrorReconcileNothingCompared)
+	}
+	if report.Recorded || report.Stage != "" {
+		t.Fatalf("report = %+v, want not-recorded and no stage", report)
+	}
+	if len(report.DomainsDone) != 0 {
+		t.Fatalf("domains done = %v, want none: nothing was compared", report.DomainsDone)
+	}
+	if len(report.Domains) != 4 {
+		t.Fatalf("report domains = %d, want the four domains it looked for", len(report.Domains))
+	}
+	for _, domain := range report.Domains {
+		if domain.Applicable || domain.SourceDays != 0 {
+			t.Fatalf("domain = %+v, want an inapplicable domain with no source day", domain)
+		}
+	}
+	if got := markedDays(t, copied.databasePath()); len(got) != 0 {
+		t.Fatalf("marked days = %v, want none", got)
+	}
+	if recorded := operationRow(t, copied.databasePath()); recorded.Stage != model.UpgradeStageCopyIn {
+		t.Fatalf("stage = %q, want the untouched %q", recorded.Stage, model.UpgradeStageCopyIn)
+	}
+	assertNoScratch(t, copied.target)
+}
+
+// TestReconcileRepairsAnInterruptedRecording cuts the run at each instant inside
+// the recording: between the marks and the evidence, the point the three
+// separate writes used to leave a store with marks nothing explained, and
+// between the evidence and the stage. The recording is one transaction now, so a
+// cut leaves the store exactly as it was, the error says so, and the next run
+// writes the whole result.
+func TestReconcileRepairsAnInterruptedRecording(t *testing.T) {
+	cases := []struct {
+		name  string
+		point string
+	}{
+		{name: "between the marks and the evidence", point: reconcileRecordingAfterMarks},
+		{name: "between the evidence and the stage", point: reconcileRecordingAfterEvidence},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			copied := newCopiedVolume(t)
+			execTarget(t, copied.databasePath(),
+				`update usage_events set total_tokens = total_tokens + 1 where event_hash = 'legacy-event-1'`)
+			options := copied.reconcileOptions()
+			options.Acknowledged = []string{"1970-01-01"}
+			interrupted := errors.New("interrupted at " + testCase.point)
+			reconcileRecordingCut = func(point string) error {
+				if point == testCase.point {
+					return interrupted
+				}
+				return nil
+			}
+			t.Cleanup(func() { reconcileRecordingCut = nil })
+
+			report, err := Reconcile(context.Background(), options)
+			if !errors.Is(err, interrupted) {
+				t.Fatalf("reconcile error = %v, want the interruption", err)
+			}
+			if message := err.Error(); !strings.Contains(message, "the store is unchanged") {
+				t.Fatalf("error %q does not say what the interruption left behind", message)
+			}
+			if report.Recorded {
+				t.Fatalf("an interrupted reconcile recorded the operation: %+v", report)
+			}
+			if got := markedDays(t, copied.databasePath()); len(got) != 0 {
+				t.Fatalf("marked days = %v, want none: the mark rolled back with the evidence", got)
+			}
+			if recorded := operationRow(t, copied.databasePath()); recorded.Stage != model.UpgradeStageCopyIn ||
+				string(recorded.Reconciliation) != "{}" {
+				t.Fatalf("recorded operation = %+v, want the untouched copy-in stage and no evidence", recorded)
+			}
+
+			reconcileRecordingCut = nil
+			again, err := Reconcile(context.Background(), options)
+			if err != nil {
+				t.Fatalf("repairing reconcile: %v", err)
+			}
+			if !again.Recorded || again.Stage != model.UpgradeStageReconcile {
+				t.Fatalf("repaired report = %+v, want recorded at %q", again, model.UpgradeStageReconcile)
+			}
+			if again.NewlyMarkedDays != 1 {
+				t.Fatalf("repaired run marked %d days, want the one acknowledged day", again.NewlyMarkedDays)
+			}
+			if got := markedDays(t, copied.databasePath()); len(got) != 1 ||
+				got["1970-01-01"] != coverageincomplete.ReasonReconcileMismatch {
+				t.Fatalf("marked days = %v, want one %q mark", got, coverageincomplete.ReasonReconcileMismatch)
+			}
+			if recorded := operationRow(t, copied.databasePath()); recorded.Stage != model.UpgradeStageReconcile ||
+				string(recorded.Reconciliation) == "{}" {
+				t.Fatalf("recorded operation = %+v, want the stage and the evidence written together", recorded)
+			}
+		})
+	}
+}
+
+// TestReconcileRejectsAScratchAreaThatOverlapsTheSource reproduces the round
+// three review's M6: only a scratch area inside the source was refused, while
+// the message claimed "inside or above".
+func TestReconcileRejectsAScratchAreaThatOverlapsTheSource(t *testing.T) {
+	copied := newCopiedVolume(t)
+	cases := []struct {
+		name    string
+		scratch string
+	}{
+		{name: "inside the source", scratch: filepath.Join(copied.volume.root, "scratch")},
+		{name: "the source itself", scratch: copied.volume.root},
+		{name: "above the source", scratch: filepath.Dir(copied.volume.root)},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			sourceBefore := fingerprintTree(t, copied.volume.root)
+			options := copied.reconcileOptions()
+			options.ScratchDir = testCase.scratch
+
+			if report, err := Reconcile(context.Background(), options); err == nil {
+				t.Fatalf("reconcile accepted the scratch area %q: %+v", testCase.scratch, report)
+			}
+			if _, err := os.Stat(filepath.Join(testCase.scratch, reconcileScratchDirectory)); !os.IsNotExist(err) {
+				t.Fatalf("the rejected scratch area was created: %v", err)
+			}
+			assertTreeUnchanged(t, "1.x source", sourceBefore, fingerprintTree(t, copied.volume.root))
+			if got := markedDays(t, copied.databasePath()); len(got) != 0 {
+				t.Fatalf("marked days = %v, want none", got)
+			}
+		})
+	}
+}
+
+// TestReconcileOnlyRemovesItsOwnScratchDirectory proves the other half of M6: a
+// caller-supplied scratch root holds the tool-owned subdirectory and is never
+// itself the path this step deletes.
+func TestReconcileOnlyRemovesItsOwnScratchDirectory(t *testing.T) {
+	copied := newCopiedVolume(t)
+	scratchRoot := filepath.Join(canonicalTempDir(t), "operator-scratch")
+	if err := os.MkdirAll(scratchRoot, 0o700); err != nil {
+		t.Fatalf("create the caller's scratch root: %v", err)
+	}
+	kept := filepath.Join(scratchRoot, "keep.txt")
+	if err := os.WriteFile(kept, []byte("keep"), 0o600); err != nil {
+		t.Fatalf("write the caller's file: %v", err)
+	}
+	options := copied.reconcileOptions()
+	options.ScratchDir = scratchRoot
+
+	if _, err := Reconcile(context.Background(), options); err != nil {
+		t.Fatalf("reconcile with a caller scratch root: %v", err)
+	}
+	content, err := os.ReadFile(kept)
+	if err != nil || string(content) != "keep" {
+		t.Fatalf("the caller's file did not survive: %q %v", content, err)
+	}
+	if _, err := os.Stat(filepath.Join(scratchRoot, reconcileScratchDirectory)); !os.IsNotExist(err) {
+		t.Fatalf("the tool-owned subdirectory survived: %v", err)
+	}
+}
+
+// TestReconcileMarksAClearedDerivedTableAsARecoverableLoss covers the round three
+// decision about the derived-domain boundary: a rollup table that is still there
+// but holds none of the source's days is recoverable, because its rows can be
+// rebuilt from the retained events. It earns a permanent mark under its own
+// reason once the operator acknowledges the days, not the unwaivable block a
+// missing table earns.
+func TestReconcileMarksAClearedDerivedTableAsARecoverableLoss(t *testing.T) {
+	cases := []struct {
+		name   string
+		seed   func(*testing.T, legacyVolume)
+		clear  string
+		domain string
+	}{
+		{
+			name:   "pricing rollup cleared",
+			seed:   seedSourcePricing,
+			clear:  `delete from usage_pricing_hourly_rollups_v1`,
+			domain: ReconcileDomainPricing,
+		},
+		{
+			name:   "account history cleared",
+			seed:   seedSourceHistory,
+			clear:  `delete from usage_monitoring_account_daily_rollups_v1`,
+			domain: ReconcileDomainHistory,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			copied := newCopiedVolumeWith(t, testCase.seed)
+			execTarget(t, copied.databasePath(), testCase.clear)
+
+			report, err := Reconcile(context.Background(), copied.reconcileOptions())
+			if !errors.Is(err, ErrReconcileMismatch) {
+				t.Fatalf("reconcile error = %v, want a waivable mismatch instead of a hard block", err)
+			}
+			if errors.Is(err, ErrReconcileTargetIncomplete) {
+				t.Fatal("a cleared derived table was refused as a lost source table")
+			}
+			cleared := domainReport(t, report, testCase.domain)
+			if !cleared.Applicable || !cleared.Recoverable || cleared.SourceDays != 1 || cleared.ComparedDays != 0 {
+				t.Fatalf("%s report = %+v, want a recoverable domain with one uncompared source day",
+					testCase.domain, cleared)
+			}
+			if !slicesContain(report.UnacknowledgedDays, seededDayName) {
+				t.Fatalf("unacknowledged days = %v, want the lost %s", report.UnacknowledgedDays, seededDayName)
+			}
+			if report.Recorded {
+				t.Fatal("a cleared derived table recorded the operation before acknowledgement")
+			}
+			if got := markedDays(t, copied.databasePath()); len(got) != 0 {
+				t.Fatalf("marked days = %v, want none before acknowledgement", got)
+			}
+
+			options := copied.reconcileOptions()
+			options.Acknowledged = []string{seededDayName}
+			acknowledged, err := Reconcile(context.Background(), options)
+			if err != nil {
+				t.Fatalf("acknowledged reconcile: %v", err)
+			}
+			if len(acknowledged.IncompleteDays) != 1 ||
+				acknowledged.IncompleteDays[0].Reason != coverageincomplete.ReasonDerivedRollupLost {
+				t.Fatalf("incomplete days = %+v, want the lost day as %q",
+					acknowledged.IncompleteDays, coverageincomplete.ReasonDerivedRollupLost)
+			}
+			if acknowledged.NewlyMarkedDays != 1 || acknowledged.Stage != model.UpgradeStageReconcile {
+				t.Fatalf("report = %+v, want one new mark at %q", acknowledged, model.UpgradeStageReconcile)
+			}
+			if got := markedDays(t, copied.databasePath()); len(got) != 1 ||
+				got[seededDayName] != coverageincomplete.ReasonDerivedRollupLost {
+				t.Fatalf("marked days = %v, want one %q mark", got, coverageincomplete.ReasonDerivedRollupLost)
+			}
+			if testCase.domain == ReconcileDomainPricing &&
+				slicesContain(acknowledged.DomainsDone, model.UpgradeDomainPricing) {
+				t.Fatalf("domains done = %v, want no pricing: the rollup was never compared", acknowledged.DomainsDone)
+			}
+		})
+	}
+}
+
+// domainReport returns the one domain report with the wanted name.
+func domainReport(t *testing.T, report ReconcileReport, domain string) ReconcileDomainReport {
+	t.Helper()
+	for _, entry := range report.Domains {
+		if entry.Domain == domain {
+			return entry
+		}
+	}
+	t.Fatalf("report holds no %q domain: %+v", domain, report.Domains)
+	return ReconcileDomainReport{}
 }

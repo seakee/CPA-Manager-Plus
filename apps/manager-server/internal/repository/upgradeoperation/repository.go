@@ -182,22 +182,44 @@ func writeOperation(ctx context.Context, writer operationWriter, op model.Upgrad
 	return err
 }
 
+// Tx is the transaction surface the recording helpers need, so a caller can
+// commit a stage change together with the evidence that justifies it.
+type Tx interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 // Advance records a completed domain and moves the stage in one transaction.
 // Domains are append-only and the stage order is forward-only; an attempt to
 // go backwards returns ErrStageRegression and leaves the row untouched.
 // Advancing does not imply that later stages are authorized.
 func (r *Repository) Advance(ctx context.Context, domain string, stage model.UpgradeStage) (model.UpgradeOperation, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	advanced, err := AdvanceTx(ctx, tx, domain, stage)
+	if err != nil {
+		// A regression still reports the row it refused to move.
+		return advanced, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	return advanced, nil
+}
+
+// AdvanceTx records a completed domain and moves the stage inside the caller's
+// transaction, so the stage can only ever commit beside the evidence that
+// explains it. The rules are the ones Advance documents.
+func AdvanceTx(ctx context.Context, tx Tx, domain string, stage model.UpgradeStage) (model.UpgradeOperation, error) {
 	if domain != "" && !model.ValidUpgradeDomain(domain) {
 		return model.UpgradeOperation{}, fmt.Errorf("%w: %q", ErrUnknownDomain, domain)
 	}
 	if !stage.Valid() {
 		return model.UpgradeOperation{}, fmt.Errorf("%w: %q", ErrUnknownStage, stage)
 	}
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return model.UpgradeOperation{}, err
-	}
-	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UnixMilli()
 	// Take the write lock before reading so two advances cannot interleave and
 	// so the read below observes this transaction's own epoch.
@@ -234,9 +256,6 @@ func (r *Repository) Advance(ctx context.Context, domain string, stage model.Upg
 		where id = 1`, string(current.Stage), string(domains), current.CreatedAtMS, current.UpdatedAtMS); err != nil {
 		return model.UpgradeOperation{}, err
 	}
-	if err := tx.Commit(); err != nil {
-		return model.UpgradeOperation{}, err
-	}
 	return current, nil
 }
 
@@ -253,6 +272,21 @@ func nullString(value string) any {
 // already exist, because a reconciliation only ever describes a recorded
 // copy-in.
 func (r *Repository) RecordReconciliation(ctx context.Context, report json.RawMessage) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := RecordReconciliationTx(ctx, tx, report); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// RecordReconciliationTx stores the report inside the caller's transaction, so
+// the evidence commits together with the marks it explains and the stage it
+// authorizes.
+func RecordReconciliationTx(ctx context.Context, tx Tx, report json.RawMessage) error {
 	if len(report) == 0 {
 		report = json.RawMessage("{}")
 	}
@@ -260,7 +294,7 @@ func (r *Repository) RecordReconciliation(ctx context.Context, report json.RawMe
 	if err := json.Unmarshal(report, &object); err != nil {
 		return fmt.Errorf("%w: reconciliation must be a JSON object", ErrInvalidRow)
 	}
-	result, err := r.db.ExecContext(ctx, `update `+tableName+`
+	result, err := tx.ExecContext(ctx, `update `+tableName+`
 		set reconciliation = ?, updated_at_ms = ? where id = 1`, string(report), time.Now().UnixMilli())
 	if err != nil {
 		return err

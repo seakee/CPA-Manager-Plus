@@ -38,9 +38,13 @@ import (
 //
 // A disagreement blocks: nothing is marked and the operation row does not
 // advance. A domain the 1.x source holds rows of but the v2 store cannot show
-// blocks the same way, and no acknowledgement can waive that: a lost table is
-// not a measured difference. Only the days the operator acknowledged are marked,
-// and a marked day stays marked for the life of the store.
+// blocks the same way, and no acknowledgement can waive that: lost data is not a
+// measured difference. The one exception is a derived rollup the store cleared
+// while the table is still there — its rows can be rebuilt from the retained
+// events, so those days are marked under their own reason and the operator may
+// acknowledge them (see reconcileDerivedDomains). Only the days the operator
+// acknowledged are marked, and a marked day stays marked for the life of the
+// store.
 
 // Reconcile domain names, in report order. They are the domains the copy claims
 // to preserve, not the operation's domain vocabulary.
@@ -76,6 +80,9 @@ const (
 	mismatchFieldAPIKeyHash              = "api_key_hash"
 	mismatchFieldProvider                = "provider"
 	mismatchFieldAccountSnapshot         = "account_snapshot"
+	mismatchFieldAuthLabelSnapshot       = "auth_label_snapshot"
+	mismatchFieldAuthFileSnapshot        = "auth_file_snapshot"
+	mismatchFieldExecutorType            = "executor_type"
 	mismatchFieldInputTokens             = "input_tokens"
 	mismatchFieldOutputTokens            = "output_tokens"
 	mismatchFieldCachedTokens            = "cached_tokens"
@@ -89,10 +96,12 @@ const (
 )
 
 const (
-	// reconcileScratchDirectory is this step's reserved scratch area inside the
-	// v2 data root. Reconcile removes it on every return path: the copy of the
-	// 1.x database exists only for the length of the comparison, and the report
-	// (which names counts and days, never rows) is what survives.
+	// reconcileScratchDirectory is this step's reserved scratch area. It is the
+	// only path Reconcile creates and removes: it sits inside the caller's
+	// scratch root (the v2 data root by default), so the directory a caller
+	// named is never the thing deleted. The copy of the 1.x database exists only
+	// for the length of the comparison, and the report (which names counts and
+	// days, never rows) is what survives.
 	reconcileScratchDirectory = ".upgrade-reconcile"
 	// utcDayMilliseconds is the width of the day buckets every compared table
 	// keys on.
@@ -111,6 +120,30 @@ var reconciledOperationDomains = map[string][]string{
 	ReconcileDomainHistory:  {model.UpgradeDomainRetainedProjection},
 	ReconcileDomainPricing:  {model.UpgradeDomainPricing},
 	ReconcileDomainCoverage: {model.UpgradeDomainCoverage},
+}
+
+// reconcileDerivedDomains names the compared domains whose store table is a
+// projection of the retained event log rather than data of its own. The
+// boundary decides what a vanished table means:
+//
+//   - A derived rollup (pricing, account history) is rebuilt row by row from the
+//     retained events, so a rollup table that is present but holds none of the
+//     source's days is a gap a rebuild can still close. Reconcile marks those
+//     days incomplete under ReasonDerivedRollupLost and lets the operator
+//     acknowledge them, exactly like any other day it cannot complete, instead
+//     of blocking a migration that has every event it needs.
+//   - Every other compared table holds data that exists nowhere else: the
+//     retained events are the log itself and the deleted coverage table records
+//     which events an archive run removed. Neither can be recomputed, so a
+//     missing table, or one that holds none of the source's days, stays an
+//     unwaivable block.
+//
+// A cleared derived table is still a permanent mark, not a repair: no code in
+// this step rebuilds a rollup, so the day is recorded as incomplete and stays
+// marked for the life of the store.
+var reconcileDerivedDomains = map[string]bool{
+	ReconcileDomainPricing: true,
+	ReconcileDomainHistory: true,
 }
 
 // ReconcileMismatch is one compared column that disagreed. A day present on one
@@ -133,10 +166,18 @@ type ReconcileMismatch struct {
 // SourceDays counts the UTC days the 1.x source holds for the domain and
 // ComparedDays the days both sides hold: a day only one side holds is a
 // mismatch, never a compared day.
+//
+// Recoverable marks a derived domain whose table is there but holds none of the
+// days the source holds. The rows of a derived rollup are rebuildable from the
+// retained event log, so a cleared rollup is a gap the operator may
+// acknowledge instead of a store that lost data with no way back. A missing
+// table is never recoverable: nothing proves the rows can be rebuilt from a
+// table that is not there. See reconcileDerivedDomains for the boundary.
 type ReconcileDomainReport struct {
 	Domain       string              `json:"domain"`
 	Table        string              `json:"table"`
 	Applicable   bool                `json:"applicable"`
+	Recoverable  bool                `json:"recoverable,omitempty"`
 	Reason       string              `json:"reason,omitempty"`
 	SourceDays   int                 `json:"sourceDays"`
 	ComparedDays int                 `json:"comparedDays"`
@@ -178,10 +219,14 @@ type ReconcileReport struct {
 // Reconcile compares the copied-in v2 store with the 1.x source it came from.
 //
 // A clean comparison marks nothing, records the evidence and advances the
-// operation to "reconcile". A disagreement, or a day the source can never
-// complete again, blocks with ErrReconcileMismatch and leaves the store
-// untouched; the returned report still names every day that needs an explicit
-// acknowledgement.
+// operation to "reconcile"; the marks, the evidence and the stage are one
+// transaction, so an interruption can never leave one without the others. A
+// disagreement, or a day the source can never complete again, blocks with
+// ErrReconcileMismatch and leaves the store untouched; the returned report still
+// names every day that needs an explicit acknowledgement. A run that compared no
+// day of any domain established nothing to record, so it refuses with
+// ErrReconcileNothingCompared rather than reporting a stage that names no
+// domain.
 func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 	if err := ctx.Err(); err != nil {
 		return ReconcileReport{}, err
@@ -239,14 +284,7 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 	defer func() { _ = os.RemoveAll(scratch) }()
 	domains, parityDays, compareErr := compareStores(ctx, sourceRoot, paths.Database, scratch)
 	if compareErr != nil {
-		return ReconcileReport{ReconcileEvidence: ReconcileEvidence{
-			Domains:            domains,
-			ParityGapDays:      parityDays,
-			MismatchDays:       mismatchDays(domains),
-			AcknowledgedDays:   []string{},
-			UnacknowledgedDays: []string{},
-			IncompleteDays:     []ReconcileMarkedDay{},
-		}}, compareErr
+		return ReconcileReport{ReconcileEvidence: newReconcileEvidence(before, domains, parityDays)}, compareErr
 	}
 
 	after, _, err := fingerprintSource(sourceRoot)
@@ -258,24 +296,28 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 			"the 1.x source changed while it was being compared; nothing was compared further and nothing was marked", nil)
 	}
 
-	mismatchDays := mismatchDays(domains)
-	evidence := ReconcileEvidence{
-		SourceFingerprint: before,
-		Domains:           domains,
-		ParityGapDays:     parityDays,
-		MismatchDays:      mismatchDays,
-		IncompleteDays:    []ReconcileMarkedDay{},
+	evidence := newReconcileEvidence(before, domains, parityDays)
+	// A run that established no operation domain compared nothing a result
+	// could describe: either the 1.x source holds none of the compared tables, or
+	// every table it holds was derived and cleared in the store, so not one day
+	// could be compared. Recording it would advance no domain while claiming the
+	// step succeeded, so it stops with its own code and leaves the row alone; the
+	// report still names the domains and the days that were seen.
+	established := establishedDomains(evidence.Domains)
+	if len(established) == 0 {
+		return ReconcileReport{ReconcileEvidence: evidence}, newUpgradeError(UpgradeErrorReconcileNothingCompared,
+			"no compared domain could be established: this run compared no day of any domain, so nothing was marked and the operation did not advance", nil)
 	}
 	evidence.AcknowledgedDays, evidence.UnacknowledgedDays = decideAcknowledged(
-		unionDays(mismatchDays, parityDays), acknowledged, options.AcknowledgeParityGaps, parityDays)
+		unionDays(evidence.MismatchDays, parityDays), acknowledged, options.AcknowledgeParityGaps, parityDays)
 	if len(evidence.UnacknowledgedDays) > 0 {
 		return ReconcileReport{ReconcileEvidence: evidence}, newUpgradeError(UpgradeErrorReconcileMismatch,
 			fmt.Sprintf("%s must be acknowledged before they can be marked incomplete; nothing was marked: %s",
 				plural(len(evidence.UnacknowledgedDays), "day", "days"), strings.Join(evidence.UnacknowledgedDays, ", ")), nil)
 	}
-	evidence.IncompleteDays = incompleteDays(evidence.AcknowledgedDays, mismatchDays)
+	evidence.IncompleteDays = incompleteDays(evidence.AcknowledgedDays, measuredMismatchDays(domains), derivedLossDays(domains))
 
-	operation, inserted, err := recordReconciliation(ctx, paths.Database, recorded, evidence)
+	operation, inserted, err := recordReconciliation(ctx, paths.Database, evidence, established)
 	if err != nil {
 		return ReconcileReport{ReconcileEvidence: evidence}, err
 	}
@@ -324,19 +366,22 @@ func reconcileRoots(options Options) (string, string, string, error) {
 	return sourceRoot, targetRoot, bundleDir, nil
 }
 
-// reconcileScratchRoot resolves this step's scratch area. It must not sit
-// inside the 1.x source root: the point of the copy is that nothing this step
-// does can reach the source.
+// reconcileScratchRoot resolves this step's scratch area. The caller names a
+// directory it owns; the tool-owned subdirectory below it is the only path this
+// step ever removes, so a mistaken configuration can never delete a caller's
+// tree. The named root must not be the 1.x source root, sit inside it or
+// contain it: anything else would let the working copy of the source land where
+// the source itself lives.
 func reconcileScratchRoot(targetRoot, sourceRoot, configured string) (string, error) {
-	scratchRoot := strings.TrimSpace(configured)
-	if scratchRoot == "" {
-		scratchRoot = filepath.Join(targetRoot, reconcileScratchDirectory)
+	callerRoot := strings.TrimSpace(configured)
+	if callerRoot == "" {
+		callerRoot = targetRoot
 	}
-	absolute, err := filepath.Abs(scratchRoot)
+	absolute, err := filepath.Abs(callerRoot)
 	if err != nil {
 		return "", fmt.Errorf("resolve the reconciliation scratch area: %w", err)
 	}
-	canonicalScratch, err := canonicalPath(absolute)
+	canonicalRoot, err := canonicalPath(absolute)
 	if err != nil {
 		return "", err
 	}
@@ -344,10 +389,10 @@ func reconcileScratchRoot(targetRoot, sourceRoot, configured string) (string, er
 	if err != nil {
 		return "", err
 	}
-	if within(canonicalSource, canonicalScratch) {
-		return "", errors.New("the reconciliation scratch area must not sit inside or above the 1.x source root")
+	if within(canonicalSource, canonicalRoot) || within(canonicalRoot, canonicalSource) {
+		return "", errors.New("the reconciliation scratch area must not be the 1.x source root, sit inside it or contain it")
 	}
-	return absolute, nil
+	return filepath.Join(absolute, reconcileScratchDirectory), nil
 }
 
 // acknowledgedDays validates the operator's acknowledgement list. Anything that
@@ -575,12 +620,18 @@ type pricingCell struct {
 }
 
 // historyCellKey is one account history rollup: the hour bucket and the identity
-// columns the history read path exposes.
+// columns the history read path exposes. The credential identity is part of it
+// because two accounts can run the same model under the same key with different
+// labels, files or executors, and a key that ignored them would let one row's
+// totals answer for another's.
 type historyCellKey struct {
 	hourMS   int64
 	account  string
+	label    string
+	file     string
 	provider string
 	apiKey   string
+	executor string
 	model    string
 }
 
@@ -599,6 +650,11 @@ type coverageCell struct {
 
 // readRetainedCells summarises the retained event log per UTC hour, model and
 // API key: how many events, how many tokens and how many failures.
+//
+// The grouping key must be the selected key, not the column: a NULL and an
+// empty api_key_hash are one reported key, "no key", so grouping on the raw
+// column would return them as two groups that both land on the same cell and
+// silently overwrite each other.
 func readRetainedCells(ctx context.Context, tx *sql.Tx) (map[retainedCellKey]retainedCell, error) {
 	rows, err := tx.QueryContext(ctx, `select
 		timestamp_ms / 3600000 * 3600000 as utc_hour_ms,
@@ -608,7 +664,7 @@ func readRetainedCells(ctx context.Context, tx *sql.Tx) (map[retainedCellKey]ret
 		coalesce(sum(total_tokens), 0),
 		coalesce(sum(failed), 0)
 		from usage_events
-		group by timestamp_ms / 3600000, model, api_key_hash`)
+		group by timestamp_ms / 3600000, model, coalesce(api_key_hash, '')`)
 	if err != nil {
 		return nil, fmt.Errorf("read the retained events: %w", err)
 	}
@@ -698,15 +754,23 @@ func readCoverageCells(ctx context.Context, tx *sql.Tx) (map[string]coverageCell
 }
 
 // readHistoryCells reads the account history rollups per day and per identity
-// column the read path exposes.
+// column the read path exposes. The grouping key repeats the selected key
+// exactly: a NULL and an empty value are one reported value, so grouping on the
+// raw column would return two groups that overwrite each other in the cell map.
+// The credential columns are coalesced because a 1.x-era table keeps its
+// original nullable shape, so a value the current schema requires can still be
+// absent in the copied source.
 func readHistoryCells(ctx context.Context, tx *sql.Tx) (map[historyCellKey]historyCell, error) {
 	rows, err := tx.QueryContext(ctx, `select
 		bucket_ms,
-		account_snapshot, provider, coalesce(api_key_hash, ''), model,
+		account_snapshot, coalesce(auth_label_snapshot, ''), coalesce(auth_file_snapshot, ''),
+		provider, coalesce(api_key_hash, ''), coalesce(executor_type, ''), model,
 		sum(calls),
 		sum(total_tokens)
 		from usage_monitoring_account_daily_rollups_v1
-		group by bucket_ms, account_snapshot, provider, api_key_hash, model`)
+		group by bucket_ms, account_snapshot, coalesce(auth_label_snapshot, ''),
+			coalesce(auth_file_snapshot, ''), provider, coalesce(api_key_hash, ''),
+			coalesce(executor_type, ''), model`)
 	if err != nil {
 		return nil, fmt.Errorf("read the account history rollups: %w", err)
 	}
@@ -715,7 +779,8 @@ func readHistoryCells(ctx context.Context, tx *sql.Tx) (map[historyCellKey]histo
 	for rows.Next() {
 		var key historyCellKey
 		var cell historyCell
-		if err := rows.Scan(&key.hourMS, &key.account, &key.provider, &key.apiKey, &key.model,
+		if err := rows.Scan(&key.hourMS, &key.account, &key.label, &key.file, &key.provider,
+			&key.apiKey, &key.executor, &key.model,
 			&cell.calls, &cell.tokens); err != nil {
 			return nil, err
 		}
@@ -727,13 +792,18 @@ func readHistoryCells(ctx context.Context, tx *sql.Tx) (map[historyCellKey]histo
 // compareObservations compares the four domains in report order. A domain the
 // source holds days of but the store cannot show is not a disagreement to
 // acknowledge: it is unreconcilable, so the comparison stops before anything can
-// be marked.
+// be marked. The one exception is a derived rollup that was cleared rather than
+// dropped: recoverableDerivedLoss recognises it and leaves the decision to the
+// operator's acknowledgement.
 func compareObservations(source, target sideObservation) ([]ReconcileDomainReport, error) {
 	domains := []ReconcileDomainReport{
 		compareRetainedDomain(source, target),
 		comparePricingDomain(source, target),
 		compareCoverageDomain(source, target),
 		compareHistoryDomain(source, target),
+	}
+	for index := range domains {
+		domains[index].Recoverable = recoverableDerivedLoss(domains[index])
 	}
 	for _, domain := range domains {
 		if err := domain.targetIncompleteError(); err != nil {
@@ -743,11 +813,25 @@ func compareObservations(source, target sideObservation) ([]ReconcileDomainRepor
 	return domains, nil
 }
 
+// recoverableDerivedLoss reports whether a domain is a derived rollup whose
+// table is present but holds none of the days the source holds: the rollup was
+// cleared, its rows can be rebuilt from the retained events, and the domain was
+// therefore never compared (see reconcileDerivedDomains for the boundary).
+// Nothing here rebuilds anything, so the lost days are still marked; the flag
+// only decides that the mark may be acknowledged instead of blocking the step.
+func recoverableDerivedLoss(report ReconcileDomainReport) bool {
+	return reconcileDerivedDomains[report.Domain] && report.Applicable &&
+		report.SourceDays > 0 && report.ComparedDays == 0
+}
+
 // targetIncompleteError reports a domain the 1.x source holds days of but the v2
 // store cannot show at all. That is lost data, not a measured disagreement, so
-// no acknowledgement may waive it.
+// no acknowledgement may waive it. The one exception is a derived domain whose
+// table is still there: a cleared rollup is rebuildable from the retained
+// events, so its lost days are marked under their own reason and may be
+// acknowledged. A missing table has no such way back and stays unwaivable.
 func (r ReconcileDomainReport) targetIncompleteError() error {
-	if r.SourceDays == 0 {
+	if r.SourceDays == 0 || r.Recoverable {
 		return nil
 	}
 	if !r.Applicable {
@@ -850,13 +934,17 @@ var historySpec = keyedSpec[historyCellKey, historyCell]{
 	day: func(key historyCellKey) string { return utcDayOfHour(key.hourMS) },
 	render: func(key historyCellKey) string {
 		return utcHourLabel(key.hourMS) + " account=" + key.account +
-			" provider=" + key.provider + " key=" + key.apiKey + " model=" + key.model
+			" label=" + key.label + " provider=" + key.provider + " key=" + key.apiKey +
+			" file=" + key.file + " executor=" + key.executor + " model=" + key.model
 	},
 	identities: func(key historyCellKey) []identityValue {
 		return []identityValue{
 			{mismatchFieldAccountSnapshot, key.account},
+			{mismatchFieldAuthLabelSnapshot, key.label},
+			{mismatchFieldAuthFileSnapshot, key.file},
 			{mismatchFieldProvider, key.provider},
 			{mismatchFieldAPIKeyHash, key.apiKey},
+			{mismatchFieldExecutorType, key.executor},
 			{mismatchFieldModel, key.model},
 		}
 	},
@@ -1129,6 +1217,22 @@ func mismatchDays(domains []ReconcileDomainReport) []string {
 	return days
 }
 
+// newReconcileEvidence assembles the durable half of a run from what was
+// compared, with every decision still open: the acknowledgement lists stay
+// empty until decideAcknowledged fills them, and a run that returns before that
+// point reports empty lists rather than a decision it never took.
+func newReconcileEvidence(sourceFingerprint string, domains []ReconcileDomainReport, parityDays []string) ReconcileEvidence {
+	return ReconcileEvidence{
+		SourceFingerprint:  sourceFingerprint,
+		Domains:            domains,
+		ParityGapDays:      parityDays,
+		MismatchDays:       mismatchDays(domains),
+		AcknowledgedDays:   []string{},
+		UnacknowledgedDays: []string{},
+		IncompleteDays:     []ReconcileMarkedDay{},
+	}
+}
+
 // decideAcknowledged splits the days that need a decision into the ones the
 // operator accepted and the ones still blocking. An acknowledgement of a day
 // with nothing wrong is not an error and marks nothing: the returned accepted
@@ -1150,53 +1254,140 @@ func decideAcknowledged(candidates []string, acknowledged map[string]bool, ackno
 	return accepted, blocked
 }
 
+// measuredMismatchDays names every day a domain reported a disagreement on,
+// excluding the derived rollups this run could not compare. A day lost with a
+// cleared rollup is marked as such: it is not a measured disagreement between
+// two readings, and naming it one would hide that a rebuild can still close it.
+func measuredMismatchDays(domains []ReconcileDomainReport) []string {
+	measured := make([]ReconcileDomainReport, 0, len(domains))
+	for _, domain := range domains {
+		if domain.Recoverable {
+			continue
+		}
+		measured = append(measured, domain)
+	}
+	return mismatchDays(measured)
+}
+
+// derivedLossDays names every day a cleared derived rollup lost: a day the 1.x
+// source holds and the store's rollup does not.
+func derivedLossDays(domains []ReconcileDomainReport) []string {
+	days := []string{}
+	for _, domain := range domains {
+		if !domain.Recoverable {
+			continue
+		}
+		for _, mismatch := range domain.Mismatches {
+			if mismatch.Field == mismatchFieldPresence && mismatch.Source == presenceValue(true) {
+				days = append(days, mismatch.Day)
+			}
+		}
+	}
+	return unionDays(days, nil)
+}
+
 // incompleteDays maps each accepted day to the reason it is stored under. A day
 // whose measures disagreed keeps the stronger reason even when the parity
 // detection also flagged it: a value disagreement is not explained by the
-// projection loss alone.
-func incompleteDays(accepted, mismatchDays []string) []ReconcileMarkedDay {
-	disagreed := make(map[string]bool, len(mismatchDays))
-	for _, day := range mismatchDays {
+// projection loss alone. A day only a cleared derived rollup lost is named after
+// that loss, because a rebuild can still close it; only a day the 1.x source
+// itself lost keeps the projection reason.
+func incompleteDays(accepted, measured, derived []string) []ReconcileMarkedDay {
+	disagreed := make(map[string]bool, len(measured))
+	for _, day := range measured {
 		disagreed[day] = true
+	}
+	lost := make(map[string]bool, len(derived))
+	for _, day := range derived {
+		lost[day] = true
 	}
 	days := make([]ReconcileMarkedDay, 0, len(accepted))
 	for _, day := range accepted {
 		reason := coverageincomplete.ReasonProjectionLostBeforeV1146
-		if disagreed[day] {
+		switch {
+		case disagreed[day]:
 			reason = coverageincomplete.ReasonReconcileMismatch
+		case lost[day]:
+			reason = coverageincomplete.ReasonDerivedRollupLost
 		}
 		days = append(days, ReconcileMarkedDay{Day: day, Reason: reason})
 	}
 	return days
 }
 
-// recordReconciliation writes the marks, records the evidence and advances the
-// operation, in that order. Each step is idempotent, and the stage is only ever
-// moved after the evidence it describes is durable.
-func recordReconciliation(ctx context.Context, databasePath string, recorded model.UpgradeOperation, evidence ReconcileEvidence) (model.UpgradeOperation, int, error) {
+// reconcileRecordingCut is a test seam. A test cuts the recording at a named
+// instant to prove what an interruption there leaves behind; production leaves
+// it nil and never runs a cut.
+var reconcileRecordingCut func(point string) error
+
+// The instants the recording can be cut at: the marks are written, the evidence
+// is written, and the stage has not moved yet.
+const (
+	reconcileRecordingAfterMarks    = "after-marks"
+	reconcileRecordingAfterEvidence = "after-evidence"
+)
+
+func cutReconcileRecording(point string) error {
+	if reconcileRecordingCut == nil {
+		return nil
+	}
+	return reconcileRecordingCut(point)
+}
+
+// recordReconciliation writes the marks, the evidence that explains them and
+// the stage that authorizes them in one transaction, so a reader never sees one
+// without the others. An interruption leaves the store exactly as it was and
+// the error says so; because every write is idempotent (a mark keeps its first
+// reason, the evidence overwrites itself, the stage is forward-only), running
+// the step again writes the whole result, which is also how a store torn by an
+// earlier release that wrote the three steps separately repairs itself.
+func recordReconciliation(ctx context.Context, databasePath string, evidence ReconcileEvidence, established []string) (model.UpgradeOperation, int, error) {
 	db, err := managersqlite.Open(databasePath)
 	if err != nil {
 		return model.UpgradeOperation{}, 0, fmt.Errorf("open the v2 database to record the reconciliation: %w", err)
 	}
 	defer func() { _ = db.Close() }()
+	payload, err := json.Marshal(evidence)
+	if err != nil {
+		return model.UpgradeOperation{}, 0, err
+	}
 	marks := make([]coverageincomplete.Day, 0, len(evidence.IncompleteDays))
 	for _, day := range evidence.IncompleteDays {
 		marks = append(marks, coverageincomplete.Day{Day: day.Day, Reason: day.Reason})
 	}
-	inserted, err := coverageincomplete.New(db).Mark(ctx, marks, time.Now().UnixMilli())
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return model.UpgradeOperation{}, 0, err
+		return model.UpgradeOperation{}, 0, fmt.Errorf("begin the reconciliation transaction: %w", err)
 	}
-	payload, err := json.Marshal(evidence)
+	defer func() { _ = tx.Rollback() }()
+	inserted, err := coverageincomplete.MarkTx(ctx, tx, marks, time.Now().UnixMilli())
 	if err != nil {
-		return model.UpgradeOperation{}, inserted, err
+		return model.UpgradeOperation{}, 0, recordInterrupted(err)
 	}
-	repository := upgradeoperation.New(db)
-	if err := repository.RecordReconciliation(ctx, payload); err != nil {
-		return model.UpgradeOperation{}, inserted, err
+	if err := cutReconcileRecording(reconcileRecordingAfterMarks); err != nil {
+		return model.UpgradeOperation{}, 0, recordInterrupted(err)
 	}
-	operation, err := advanceReconciledDomains(ctx, repository, recorded.Stage, establishedDomains(evidence.Domains))
-	return operation, inserted, err
+	if err := upgradeoperation.RecordReconciliationTx(ctx, tx, payload); err != nil {
+		return model.UpgradeOperation{}, 0, recordInterrupted(err)
+	}
+	if err := cutReconcileRecording(reconcileRecordingAfterEvidence); err != nil {
+		return model.UpgradeOperation{}, 0, recordInterrupted(err)
+	}
+	operation, err := advanceReconciledDomains(ctx, tx, established)
+	if err != nil {
+		return model.UpgradeOperation{}, 0, recordInterrupted(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return model.UpgradeOperation{}, 0, recordInterrupted(err)
+	}
+	return operation, inserted, nil
+}
+
+// recordInterrupted says what an interrupted recording left behind. The marks,
+// the evidence and the stage travel in one transaction, so the answer is always
+// the same: nothing.
+func recordInterrupted(err error) error {
+	return fmt.Errorf("record the reconciliation: %w; the marks, the evidence and the stage commit together, so the store is unchanged and a rerun records all of them", err)
 }
 
 // establishedDomains names the operation domains the compared domains actually
@@ -1218,23 +1409,15 @@ func establishedDomains(domains []ReconcileDomainReport) []string {
 	return established
 }
 
-// advanceReconciledDomains records the domains this step established. A store
-// that already moved past "reconcile" keeps its stage: the evidence is recorded
-// again, the operation never moves backwards.
-func advanceReconciledDomains(ctx context.Context, repository *upgradeoperation.Repository, current model.UpgradeStage, domains []string) (model.UpgradeOperation, error) {
-	if current != "" && current.Valid() && !current.CanAdvanceTo(model.UpgradeStageReconcile) {
-		recorded, found, err := repository.Get(ctx)
-		if err != nil {
-			return model.UpgradeOperation{}, err
-		}
-		if !found {
-			return model.UpgradeOperation{}, fmt.Errorf("%w: no operation row to advance", upgradeoperation.ErrInvalidRow)
-		}
-		return recorded, nil
-	}
+// advanceReconciledDomains records the domains this step established inside the
+// caller's transaction, so the stage can only commit beside the evidence that
+// justifies it. The stage is forward-only: a store the operation already carried
+// past "reconcile" was refused before the comparison, so this never has to undo
+// one.
+func advanceReconciledDomains(ctx context.Context, tx upgradeoperation.Tx, domains []string) (model.UpgradeOperation, error) {
 	var operation model.UpgradeOperation
 	for _, domain := range domains {
-		advanced, err := repository.Advance(ctx, domain, model.UpgradeStageReconcile)
+		advanced, err := upgradeoperation.AdvanceTx(ctx, tx, domain, model.UpgradeStageReconcile)
 		if err != nil {
 			return model.UpgradeOperation{}, err
 		}

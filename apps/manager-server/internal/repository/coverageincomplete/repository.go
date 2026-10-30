@@ -31,6 +31,12 @@ const (
 	// ReasonReconcileMismatch marks a day whose reconciled measures disagreed
 	// between the 1.x source and the copied-in store.
 	ReasonReconcileMismatch = "reconcile_mismatch"
+	// ReasonDerivedRollupLost marks a day whose derived rollup the store can no
+	// longer show: the rollup table is there, but it holds no row the day's
+	// source rows landed in. The rows are derivable from the retained event log,
+	// so the loss is a gap the operator may acknowledge instead of a store that
+	// cannot be trusted at all; nothing in this release rebuilds them.
+	ReasonDerivedRollupLost = "derived_rollup_lost"
 )
 
 // SourceUpgradeReconcile is the only writer of a mark today.
@@ -82,6 +88,12 @@ func Label(utcDay int64) string {
 	return time.UnixMilli(utcDay * utcDayMS).UTC().Format(dayLayout)
 }
 
+// Execer is the write surface a caller inside its own transaction provides, so
+// a mark can commit together with the evidence that justifies it.
+type Execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
 // Mark inserts the days that are not marked yet, all or nothing. A day is
 // marked once: an existing row keeps its first reason and recorded instant, so
 // a repeated reconciliation can neither rewrite the evidence nor duplicate it.
@@ -90,14 +102,33 @@ func (r *Repository) Mark(ctx context.Context, days []Day, recordedAtMS int64) (
 	if len(days) == 0 {
 		return 0, nil
 	}
-	if recordedAtMS <= 0 {
-		return 0, fmt.Errorf("a coverage mark needs the instant it was recorded")
-	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	inserted, err := MarkTx(ctx, tx, days, recordedAtMS)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return inserted, nil
+}
+
+// MarkTx writes the days inside the caller's transaction, so the marks the
+// reconciliation concludes are durable exactly when the evidence that explains
+// them is: an interrupted run leaves neither. Inserting is idempotent, so a
+// caller that retries the whole recording writes the same marks again instead
+// of duplicating or rewriting them.
+func MarkTx(ctx context.Context, execer Execer, days []Day, recordedAtMS int64) (int, error) {
+	if len(days) == 0 {
+		return 0, nil
+	}
+	if recordedAtMS <= 0 {
+		return 0, fmt.Errorf("a coverage mark needs the instant it was recorded")
+	}
 	inserted := 0
 	for _, day := range days {
 		normalized, err := ParseDay(day.Day)
@@ -107,7 +138,7 @@ func (r *Repository) Mark(ctx context.Context, days []Day, recordedAtMS int64) (
 		if strings.TrimSpace(day.Reason) == "" {
 			return 0, fmt.Errorf("the mark for %s names no reason", normalized)
 		}
-		result, err := tx.ExecContext(ctx, `insert into `+TableName+` (day, reason, source, recorded_at_ms)
+		result, err := execer.ExecContext(ctx, `insert into `+TableName+` (day, reason, source, recorded_at_ms)
 			values (?, ?, ?, ?)
 			on conflict(day) do nothing`, normalized, day.Reason, SourceUpgradeReconcile, recordedAtMS)
 		if err != nil {
@@ -118,9 +149,6 @@ func (r *Repository) Mark(ctx context.Context, days []Day, recordedAtMS int64) (
 			return 0, err
 		}
 		inserted += int(affected)
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
 	}
 	return inserted, nil
 }
