@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
@@ -502,6 +503,206 @@ func TestCopyInResumesAfterARestoreWithoutRestoringTwice(t *testing.T) {
 		t.Fatalf("third copy in = %+v, want already complete", again)
 	}
 	assertTreeUnchanged(t, "v2 data root", completedTree, fingerprintTree(t, targetRoot))
+}
+
+// TestCopyInResumesAfterAnInterruptionInsideTheMigration is the regression for
+// the window the copy-in marker exists for: every member was moved and the
+// marker was published, and the process died while the incremental migration
+// was rewriting the database and its sidecars. Resuming used to compare those
+// rewritten bytes with the backup, conclude the target was never materialized,
+// delete the marker and then refuse to replace the members it had already
+// moved, leaving a store nothing could describe.
+func TestCopyInResumesAfterAnInterruptionInsideTheMigration(t *testing.T) {
+	volume := newLegacyVolume(t)
+	targetRoot := canonicalTempDir(t)
+	options := copyInOptions(volume, targetRoot)
+	options.Lock = volume.lock(t)
+	// A real 1.x volume is stopped with a live WAL, so the backup describes the
+	// database sidecars and the migration's own WAL is a genuine mismatch.
+	sourceWAL, err := sql.Open("sqlite", volume.databasePath())
+	if err != nil {
+		t.Fatalf("open the 1.x fixture: %v", err)
+	}
+	defer func() { _ = sourceWAL.Close() }()
+	for _, statement := range []string{
+		`pragma journal_mode = wal`,
+		`pragma wal_autocheckpoint = 0`,
+		`insert into settings (key, value, updated_at_ms) values ('wal_frame_probe', '1', 1)`,
+	} {
+		if _, err := sourceWAL.Exec(statement); err != nil {
+			t.Fatalf("prepare a live source WAL: %v", err)
+		}
+	}
+	injected := errors.New("injected interruption after the restore")
+	options.checkpoint = func(phase string) error {
+		if phase == "target-restored" {
+			return injected
+		}
+		return nil
+	}
+	if _, err := CopyIn(context.Background(), options); !errors.Is(err, injected) {
+		t.Fatalf("interrupted copy in = %v, want the injected error", err)
+	}
+	options.checkpoint = nil
+	if info, err := os.Lstat(filepath.Join(options.BundleDir, "database-wal")); err != nil || info.Size() == 0 {
+		t.Fatalf("the backup holds no database WAL (err=%v)", err)
+	}
+
+	// The run that died had published its provenance marker: it is written after
+	// every member moved and before the migration starts.
+	digest, err := manifestDigest(options.BundleDir)
+	if err != nil {
+		t.Fatalf("digest backup manifest: %v", err)
+	}
+	fingerprint, _, err := fingerprintSource(volume.root)
+	if err != nil {
+		t.Fatalf("fingerprint the 1.x source: %v", err)
+	}
+	databasePath := filepath.Join(targetRoot, databaseFileName)
+	if err := copyinmarker.Write(targetRoot, copyinmarker.Marker{
+		Version:                 copyinmarker.Version,
+		TargetDatabase:          databasePath,
+		SourceKind:              SourceKindUpgradedLegacy,
+		SourceFingerprintBefore: fingerprint,
+		SourceFingerprintAfter:  fingerprint,
+		BackupManifestSHA256:    digest,
+		BackupDirectory:         options.BundleDir,
+		WrittenAtMS:             1,
+	}); err != nil {
+		t.Fatalf("publish the copy-in marker: %v", err)
+	}
+
+	// The migration was already rewriting the copied store: the database left
+	// delete-journal mode and its sidecars hold frames the backup never had.
+	migration, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatalf("open the copied store: %v", err)
+	}
+	defer func() { _ = migration.Close() }()
+	if _, err := migration.Exec(`pragma journal_mode = wal`); err != nil {
+		t.Fatalf("switch the copied store to WAL: %v", err)
+	}
+	if _, err := migration.Exec(`pragma wal_autocheckpoint = 0; create table if not exists migration_probe (probe text)`); err != nil {
+		t.Fatalf("write the migration probe: %v", err)
+	}
+	if _, err := migration.Exec(`insert into migration_probe (probe) values ('interrupted')`); err != nil {
+		t.Fatalf("append the migration probe row: %v", err)
+	}
+	if info, err := os.Lstat(databasePath + "-wal"); err != nil || info.Size() == 0 {
+		t.Fatalf("the interrupted migration left no WAL (err=%v)", err)
+	}
+
+	// Resuming adopts the materialized target: nothing is restored or moved
+	// again, the migration finishes and the operation row commits.
+	result, err := CopyIn(context.Background(), options)
+	if err != nil {
+		t.Fatalf("resumed copy in: %v", err)
+	}
+	if result.Restored {
+		t.Fatal("resumed copy in restored bytes over a materialized target")
+	}
+	if result.Stage != model.UpgradeStageCopyIn {
+		t.Fatalf("resumed stage = %q, want %q", result.Stage, model.UpgradeStageCopyIn)
+	}
+	assertMigratedStore(t, databasePath)
+	if _, err := os.Lstat(filepath.Join(targetRoot, copyInWorkDirectoryName)); !os.IsNotExist(err) {
+		t.Fatalf("resumed copy in left its work directory behind (err=%v)", err)
+	}
+}
+
+// TestCopyInRefusesAStrayDatabaseInTheV2Root proves the resume path cannot be
+// widened into a license to overwrite a v2 data root this copy-in never wrote:
+// without its marker the materialized target is not recognized, and the move
+// still refuses to replace a database it did not place.
+func TestCopyInRefusesAStrayDatabaseInTheV2Root(t *testing.T) {
+	volume := newLegacyVolume(t)
+	targetRoot := canonicalTempDir(t)
+	strayPath := filepath.Join(targetRoot, databaseFileName)
+	stray, err := sql.Open("sqlite", strayPath)
+	if err != nil {
+		t.Fatalf("open the stray store: %v", err)
+	}
+	if _, err := stray.Exec(`create table foreign_probe (probe text); insert into foreign_probe (probe) values ('kept')`); err != nil {
+		_ = stray.Close()
+		t.Fatalf("seed the stray store: %v", err)
+	}
+	if err := stray.Close(); err != nil {
+		t.Fatalf("close the stray store: %v", err)
+	}
+	strayDigest, err := fileContentDigest(strayPath)
+	if err != nil {
+		t.Fatalf("digest the stray store: %v", err)
+	}
+
+	options := copyInOptions(volume, targetRoot)
+	options.Lock = volume.lock(t)
+	if _, err := CopyIn(context.Background(), options); err == nil || !strings.Contains(err.Error(), "refusing to replace") {
+		t.Fatalf("copy in over a stray database = %v, want a refusal to replace it", err)
+	}
+	if after, err := fileContentDigest(strayPath); err != nil || after != strayDigest {
+		t.Fatalf("refused copy in rewrote the stray database (digest %q, err=%v)", after, err)
+	}
+	if _, found, err := ReadRecord(context.Background(), strayPath); err != nil || found {
+		t.Fatalf("refused copy in recorded an operation: found=%t err=%v", found, err)
+	}
+}
+
+// TestCopyInRefusesToResumeOverAMemberItDidNotWrite pins the other side of the
+// same edge: a marker only vouches for the members this copy-in moved. When a
+// member the migration never touches no longer matches the backup, resuming
+// must refuse instead of overwriting the tree it found.
+func TestCopyInRefusesToResumeOverAMemberItDidNotWrite(t *testing.T) {
+	volume := newLegacyVolume(t)
+	targetRoot := canonicalTempDir(t)
+	options := copyInOptions(volume, targetRoot)
+	options.Lock = volume.lock(t)
+	injected := errors.New("injected interruption after the restore")
+	options.checkpoint = func(phase string) error {
+		if phase == "target-restored" {
+			return injected
+		}
+		return nil
+	}
+	if _, err := CopyIn(context.Background(), options); !errors.Is(err, injected) {
+		t.Fatalf("interrupted copy in = %v, want the injected error", err)
+	}
+	options.checkpoint = nil
+
+	digest, err := manifestDigest(options.BundleDir)
+	if err != nil {
+		t.Fatalf("digest backup manifest: %v", err)
+	}
+	fingerprint, _, err := fingerprintSource(volume.root)
+	if err != nil {
+		t.Fatalf("fingerprint the 1.x source: %v", err)
+	}
+	databasePath := filepath.Join(targetRoot, databaseFileName)
+	if err := copyinmarker.Write(targetRoot, copyinmarker.Marker{
+		Version:                 copyinmarker.Version,
+		TargetDatabase:          databasePath,
+		SourceKind:              SourceKindUpgradedLegacy,
+		SourceFingerprintBefore: fingerprint,
+		SourceFingerprintAfter:  fingerprint,
+		BackupManifestSHA256:    digest,
+		BackupDirectory:         options.BundleDir,
+		WrittenAtMS:             1,
+	}); err != nil {
+		t.Fatalf("publish the copy-in marker: %v", err)
+	}
+	// The archive tree is not rewritten by the migration, so bytes that differ
+	// from the backup were written by someone else after this copy-in moved it.
+	foreign := []byte("{\"segment\":\"someone-else\"}\n")
+	replaced := filepath.Join(targetRoot, archivesDirName, "2026-03", "segment-000001.jsonl")
+	if err := os.WriteFile(replaced, foreign, 0o600); err != nil {
+		t.Fatalf("replace a copied archive segment: %v", err)
+	}
+
+	if _, err := CopyIn(context.Background(), options); err == nil || !strings.Contains(err.Error(), "refusing to replace") {
+		t.Fatalf("resumed copy in over a replaced member = %v, want a refusal to replace it", err)
+	}
+	if after, err := os.ReadFile(replaced); err != nil || string(after) != string(foreign) {
+		t.Fatalf("refused resume rewrote the replaced archive segment (%q, err=%v)", after, err)
+	}
 }
 
 func TestCopyInRefusesAnExistingBackupThatDescribesAnotherSource(t *testing.T) {

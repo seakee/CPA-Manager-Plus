@@ -230,11 +230,18 @@ migration authority.
 - **Resumability.** A verified bundle is reused instead of recreated. A target
   whose members already match the manifest is not restored again. A published
   staging tree that still describes the backup is adopted rather than restored
-  twice. A committed `copy_in` (or later stage) is verified against the v2
-  layout before it is reported: the data key and the archive tree must still
-  match the backup, the archive tree must hold nothing the backup does not
-  describe, and the database must be the migrated store — otherwise the run
-  fails with `upgrade_target_modified` instead of a false success. A target that
+  twice. An interrupted run is recognized from its marker: the target is
+  already materialized when the database is a copied SQLite store and every
+  member the migration never touches — the data key and the archive tree — still
+  matches the backup. The database and its WAL/SHM/journal are deliberately not
+  compared there: the migration rewrites them in place, so a process killed
+  inside that rewrite leaves neither the backup bytes nor the finished v2
+  schema, and comparing them made exactly that window unresumable. A committed
+  `copy_in` (or later stage) is verified against the v2 layout before it is
+  reported: the data key and the archive tree must still match the backup, the
+  archive tree must hold nothing the backup does not describe, and the database
+  must be the migrated store — otherwise the run fails with
+  `upgrade_target_modified` instead of a false success. A target that
   holds *different* bytes under a member name is never replaced.
 - **Recorded fields** in `upgrade_operations`: `stage=copy_in`,
   `domains_done+=[source_copy]`, `source_kind=upgraded-legacy`,
