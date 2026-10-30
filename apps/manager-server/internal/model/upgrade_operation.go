@@ -21,6 +21,11 @@ const (
 	UpgradeStageExternalConnect UpgradeStage = "external_connect"
 	UpgradeStageVerify          UpgradeStage = "verify"
 	UpgradeStageComplete        UpgradeStage = "complete"
+	// UpgradeStageRolledBack records that the v2 root was abandoned and the
+	// v1 manager was put back in charge. It is a terminal position: a
+	// rolled-back operation is never resumed, so it can only be re-entered
+	// from itself.
+	UpgradeStageRolledBack UpgradeStage = "rolled_back"
 	// UpgradeStageFailed parks the operation without losing the domains that
 	// already completed. It has no position in the forward order.
 	UpgradeStageFailed UpgradeStage = "failed"
@@ -37,6 +42,7 @@ var upgradeStageRanks = map[UpgradeStage]int{
 	UpgradeStageExternalConnect: 5,
 	UpgradeStageVerify:          6,
 	UpgradeStageComplete:        7,
+	UpgradeStageRolledBack:      8,
 }
 
 func (s UpgradeStage) Valid() bool {
@@ -55,6 +61,16 @@ func (s UpgradeStage) rank() int { return upgradeStageRanks[s] }
 func (s UpgradeStage) CanAdvanceTo(next UpgradeStage) bool {
 	if s == next {
 		return true
+	}
+	if s == UpgradeStageRolledBack {
+		return false
+	}
+	// A rollback abandons the forward order instead of extending it. It is the
+	// one move a completed operation may still make, so the completion barrier
+	// below does not apply to it; the caller decides which positions may be
+	// abandoned.
+	if next == UpgradeStageRolledBack {
+		return s.Valid()
 	}
 	if s == UpgradeStageComplete {
 		return false

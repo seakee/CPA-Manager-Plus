@@ -20,6 +20,19 @@ const (
 	// copy-in held its fence. The members this run moved were rolled back and
 	// nothing was recorded.
 	UpgradeErrorSourceChanged UpgradeErrorCode = "upgrade_source_changed"
+	// UpgradeErrorRollbackNotApplicable reports that the recorded operation is
+	// not in a stage a rollback can start from, or that it has already been
+	// rolled back. Nothing was written.
+	UpgradeErrorRollbackNotApplicable UpgradeErrorCode = "upgrade_rollback_not_applicable"
+	// UpgradeErrorRollbackUnproven reports that the evidence a rollback would
+	// rely on does not hold: no operation row, no before/after fingerprint, or a
+	// backup destination that no longer carries the recorded manifest. Nothing
+	// was written.
+	UpgradeErrorRollbackUnproven UpgradeErrorCode = "upgrade_rollback_unproven"
+	// UpgradeErrorRollbackImageUnpinned reports that the 1.x image tag named by
+	// the operation cannot be derived as an exact version, so a rollback plan
+	// would have to fall back on a moving tag. Nothing was written.
+	UpgradeErrorRollbackImageUnpinned UpgradeErrorCode = "upgrade_rollback_image_unpinned"
 )
 
 // UpgradeError is a typed Upgrade failure. Callers match it with errors.Is
@@ -50,8 +63,11 @@ func (e *UpgradeError) Is(target error) bool {
 
 // Sentinels for errors.Is. They carry no message of their own.
 var (
-	ErrTargetModified = &UpgradeError{Code: UpgradeErrorTargetModified}
-	ErrSourceChanged  = &UpgradeError{Code: UpgradeErrorSourceChanged}
+	ErrTargetModified        = &UpgradeError{Code: UpgradeErrorTargetModified}
+	ErrSourceChanged         = &UpgradeError{Code: UpgradeErrorSourceChanged}
+	ErrRollbackNotApplicable = &UpgradeError{Code: UpgradeErrorRollbackNotApplicable}
+	ErrRollbackUnproven      = &UpgradeError{Code: UpgradeErrorRollbackUnproven}
+	ErrRollbackImageUnpinned = &UpgradeError{Code: UpgradeErrorRollbackImageUnpinned}
 )
 
 func newUpgradeError(code UpgradeErrorCode, message string, err error) error {

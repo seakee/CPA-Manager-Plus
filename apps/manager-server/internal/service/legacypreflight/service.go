@@ -65,6 +65,9 @@ type Admission struct {
 	// UpgradeStage is the recorded Upgrade position this admission was granted
 	// on; UpgradeStageNone when no record was read.
 	UpgradeStage UpgradeStage
+	// UpgradeReason explains a surface restriction; empty when the admission
+	// restricts nothing or has no more specific explanation.
+	UpgradeReason UpgradeReason
 }
 
 // RetainMarker makes the ownership marker permanent after writable DB open.
@@ -328,7 +331,7 @@ func AdmitStartup(ctx context.Context, paths sqlite.InspectionPaths, options Opt
 	options.SourceStopped = true // provisional cold read; WAL still requires a fence
 	// The Upgrade operation is read once, before any classification, so an
 	// unreadable record blocks startup instead of being mistaken for "none".
-	upgradeStage, upgradeErr := upgradeAdmissionStage(ctx, options.UpgradeAdmission)
+	upgradeStage, upgradeReason, upgradeErr := upgradeAdmissionStageAndReason(ctx, options.UpgradeAdmission)
 	if upgradeErr != nil {
 		return nil, upgradeErr
 	}
@@ -393,7 +396,8 @@ func AdmitStartup(ctx context.Context, paths sqlite.InspectionPaths, options Opt
 		freshAdmission.ConnectionStorage = before.Observed.ConnectionStorage
 		return freshAdmission, nil
 	}
-	return &Admission{Lock: lock, ConnectionStorage: before.Observed.ConnectionStorage, UpgradeStage: upgradeStage}, nil
+	return &Admission{Lock: lock, ConnectionStorage: before.Observed.ConnectionStorage,
+		UpgradeStage: upgradeStage, UpgradeReason: upgradeReason}, nil
 }
 
 func acquireStartupLock(databasePath string, fresh bool) (*processlock.Lock, error) {

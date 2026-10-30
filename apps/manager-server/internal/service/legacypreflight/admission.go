@@ -209,7 +209,7 @@ func readRecordedUpgrade(ctx context.Context, path string) (upgradeRecord, bool,
 		return upgradeRecord{}, false, nil
 	}
 	var (
-		stage                                     string
+		stage                                                           string
 		sourceKind, fingerprintBefore, fingerprintAfter, backupManifest sql.NullString
 	)
 	err = db.QueryRowContext(ctx, `select stage, source_kind, source_fingerprint_before,
@@ -284,7 +284,10 @@ func upgradeStageFromRecord(record upgradeRecord) (UpgradeStage, error) {
 		return UpgradeStageComplete, nil
 	case "", model.UpgradeStagePreflight, model.UpgradeStageCopyIn, model.UpgradeStageReconcile,
 		model.UpgradeStageCPAImport, model.UpgradeStageExternalConnect, model.UpgradeStageVerify,
-		model.UpgradeStageFailed:
+		// A rolled-back operation is unfinished by admission's terms: the v2
+		// root was abandoned, so serving the normal surfaces would present an
+		// abandoned install as a working one. It stays on the Upgrade surface.
+		model.UpgradeStageRolledBack, model.UpgradeStageFailed:
 		return UpgradeStageInProgress, nil
 	default:
 		return UpgradeStageNone, fmt.Errorf("recorded Upgrade stage %q is not supported", string(record.Stage))
