@@ -291,8 +291,10 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   without both fingerprints or the backup manifest digest
   (`upgrade_rollback_unproven`), and pins the 1.x image to
   `seakee/cpa-manager-plus:v<source_version>`. A recorded version that is not an
-  exact release, or an explicit `:latest`, is `upgrade_rollback_image_unpinned`:
-  the plan never names a moving tag. Refusals write nothing at all.
+  exact release, or an explicit reference that names no version — `:latest`, a
+  bare repository, an empty tag or a `@sha256:` digest — is
+  `upgrade_rollback_image_unpinned`: the plan never names a moving tag.
+  Refusals write nothing at all.
 - **The plan** (`<v2 data root>/.upgrade-rollback/plan.json`, canonical-JSON
   SHA-256 in `digest`) names the pinned image, the volume, the compose project,
   the exact `docker compose -p cpamp -f - up -d cpa-manager-plus` invocation,
@@ -303,21 +305,24 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   `upgradeoperation.Advance` and nothing else, so `source_kind`, both
   fingerprints, `backup_manifest_sha256` and the completed domains survive. It
   refuses unproven evidence: no read-only open, no status probe, an unhealthy
-  probe, no observation time or an unpinned image is `upgrade_rollback_unproven`;
+  probe, no observation time, an unpinned image, or a row or observation without
+  both source fingerprints is `upgrade_rollback_unproven`;
   an observed fingerprint that is not the recorded one is
   `upgrade_source_changed`; a stage a rollback cannot start from — including a
   second verdict — is `upgrade_rollback_not_applicable`. Every refusal leaves
   the row untouched.
 - **CLI.** `upgrade rollback --prepare --legacy <dir> [--legacy-image <ref>]
   [--json]` prints the plan and exits 0, or 1 with the typed refusal written to
-  stderr. `upgrade rollback --verify --legacy <dir> --status-url <url>
+  stderr. `upgrade rollback --verify --legacy <dir> [--status-url <url>]
   [--legacy-image <ref>] [--json]` runs the read-only open and the status probe
-  itself, then records; unproven evidence exits 1, usage errors 2.
+  itself (the probe URL defaults to the plan's `http://127.0.0.1:18317/status`),
+  then records; unproven evidence exits 1, usage errors 2.
 - **`upgrade run` stops at the copy-in.** It performs preflight plus copy-in,
   never reconciliation, and prints the exact
   `upgrade reconcile --legacy … --target …` command (with `--bundle` only when
-  the operator passed one). A recorded stage beyond `copy_in` is reported as-is
-  with no write, and a blocked preflight still writes nothing.
+  the operator passed one). A recorded stage beyond `copy_in` — including a
+  terminal `rolled_back` — is reported as-is with no write and no reconciliation
+  hint, and a blocked preflight still writes nothing.
 - **The 1.x volume is never written** by any path above: the probe opens the
   database immutable so not even a WAL index appears beside it, and the source
   manifest is unchanged by prepare, verify and every refusal.
