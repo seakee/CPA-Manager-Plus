@@ -471,6 +471,17 @@ func seedSourcePricing(t *testing.T, volume legacyVolume) {
 	)
 }
 
+// seedSourcePricingOnDay adds one pricing rollup row on the hour after the start
+// of the given UTC day, so a test can hold two source rollup days.
+func seedSourcePricingOnDay(t *testing.T, volume legacyVolume, dayMS int64) {
+	t.Helper()
+	execSource(t, volume, fmt.Sprintf(`insert into usage_pricing_hourly_rollups_v1 (
+		structure_revision, bucket_ms, model, billing_model, pricing_model, service_tier,
+		context_threshold_tokens, failed, calls, input_tokens, total_tokens, updated_at_ms)
+		values ('v1', %d, 'gpt-test', 'gpt-test', 'gpt-test', 'default', 0, 0, 3, 200000, 200000, 1)`,
+		dayMS+time.Hour.Milliseconds()))
+}
+
 func seedSourceCoverage(t *testing.T, volume legacyVolume) {
 	t.Helper()
 	execSource(t, volume, fmt.Sprintf(`insert into usage_archive_deleted_coverage_daily (
@@ -552,7 +563,7 @@ func TestReconcileBlocksWhenTheStoreLosesASourceTable(t *testing.T) {
 		}
 		// A dropped table is the other half of the derived-domain boundary: unlike
 		// a cleared one it has no way back, so it stays unwaivable.
-		if domain.Recoverable {
+		if len(domain.RecoverableDays) != 0 || len(domain.UnrecoverableDays) != 0 {
 			t.Fatalf("pricing report = %+v, want a dropped table to stay unrecoverable", domain)
 		}
 	}
@@ -1081,9 +1092,10 @@ func TestReconcileOnlyRemovesItsOwnScratchDirectory(t *testing.T) {
 // TestReconcileMarksAClearedDerivedTableAsARecoverableLoss covers the round three
 // decision about the derived-domain boundary: a rollup table that is still there
 // but holds none of the source's days is recoverable, because its rows can be
-// rebuilt from the retained events. It earns a permanent mark under its own
-// reason once the operator acknowledges the days, not the unwaivable block a
-// missing table earns.
+// rebuilt from the retained events — and the store still holds those events on
+// the lost day, which is the premise a rebuild needs. It earns a permanent mark
+// under its own reason once the operator acknowledges the days, not the
+// unwaivable block a missing table earns.
 func TestReconcileMarksAClearedDerivedTableAsARecoverableLoss(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -1092,14 +1104,20 @@ func TestReconcileMarksAClearedDerivedTableAsARecoverableLoss(t *testing.T) {
 		domain string
 	}{
 		{
-			name:   "pricing rollup cleared",
-			seed:   seedSourcePricing,
+			name: "pricing rollup cleared",
+			seed: func(t *testing.T, volume legacyVolume) {
+				seedSourceRetention(t, volume)
+				seedSourcePricing(t, volume)
+			},
 			clear:  `delete from usage_pricing_hourly_rollups_v1`,
 			domain: ReconcileDomainPricing,
 		},
 		{
-			name:   "account history cleared",
-			seed:   seedSourceHistory,
+			name: "account history cleared",
+			seed: func(t *testing.T, volume legacyVolume) {
+				seedSourceRetention(t, volume)
+				seedSourceHistory(t, volume)
+			},
 			clear:  `delete from usage_monitoring_account_daily_rollups_v1`,
 			domain: ReconcileDomainHistory,
 		},
@@ -1114,12 +1132,17 @@ func TestReconcileMarksAClearedDerivedTableAsARecoverableLoss(t *testing.T) {
 				t.Fatalf("reconcile error = %v, want a waivable mismatch instead of a hard block", err)
 			}
 			if errors.Is(err, ErrReconcileTargetIncomplete) {
-				t.Fatal("a cleared derived table was refused as a lost source table")
+				t.Fatal("a cleared derived table with retained support was refused as a lost source table")
 			}
 			cleared := domainReport(t, report, testCase.domain)
-			if !cleared.Applicable || !cleared.Recoverable || cleared.SourceDays != 1 || cleared.ComparedDays != 0 {
-				t.Fatalf("%s report = %+v, want a recoverable domain with one uncompared source day",
+			if !cleared.Applicable || cleared.SourceDays != 1 || cleared.ComparedDays != 0 {
+				t.Fatalf("%s report = %+v, want a cleared domain with one uncompared source day",
 					testCase.domain, cleared)
+			}
+			if !reflect.DeepEqual(cleared.RecoverableDays, []string{seededDayName}) ||
+				len(cleared.UnrecoverableDays) != 0 {
+				t.Fatalf("%s recoverable days = %v, unrecoverable = %v, want the retained day recoverable",
+					testCase.domain, cleared.RecoverableDays, cleared.UnrecoverableDays)
 			}
 			if !slicesContain(report.UnacknowledgedDays, seededDayName) {
 				t.Fatalf("unacknowledged days = %v, want the lost %s", report.UnacknowledgedDays, seededDayName)
@@ -1154,6 +1177,110 @@ func TestReconcileMarksAClearedDerivedTableAsARecoverableLoss(t *testing.T) {
 				t.Fatalf("domains done = %v, want no pricing: the rollup was never compared", acknowledged.DomainsDone)
 			}
 		})
+	}
+}
+
+// TestReconcileRefusesAClearedDerivedDayTheStoreCannotRebuild reproduces the
+// round four review's N2: the recoverable-derived path only checked that the
+// rollup table was still there and held none of the source's days, never that
+// the store still held the retained events a rebuild would read. A day with no
+// retained event has nothing to rebuild it from, so accepting it would waive
+// data that can never come back; acknowledging it must still refuse.
+func TestReconcileRefusesAClearedDerivedDayTheStoreCannotRebuild(t *testing.T) {
+	cases := []struct {
+		name   string
+		seed   func(*testing.T, legacyVolume)
+		clear  string
+		domain string
+	}{
+		{
+			name:   "pricing rollup cleared",
+			seed:   seedSourcePricing,
+			clear:  `delete from usage_pricing_hourly_rollups_v1`,
+			domain: ReconcileDomainPricing,
+		},
+		{
+			name:   "account history cleared",
+			seed:   seedSourceHistory,
+			clear:  `delete from usage_monitoring_account_daily_rollups_v1`,
+			domain: ReconcileDomainHistory,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			// The fixture's retained events live on 1970-01-01 while the seeded
+			// rollup lives on 2026-03-01, so that day holds no retained event the
+			// rebuild could read.
+			copied := newCopiedVolumeWith(t, testCase.seed)
+			execTarget(t, copied.databasePath(), testCase.clear)
+
+			options := copied.reconcileOptions()
+			options.Acknowledged = []string{seededDayName}
+			report, err := Reconcile(context.Background(), options)
+			if !errors.Is(err, ErrReconcileTargetIncomplete) {
+				t.Fatalf("reconcile error = %v, want the unrecoverable-day refusal even when acknowledged", err)
+			}
+			if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorReconcileTargetIncomplete {
+				t.Fatalf("error code = %q (%t), want %q", code, ok, UpgradeErrorReconcileTargetIncomplete)
+			}
+			if message := err.Error(); !strings.Contains(message, seededDayName) ||
+				!strings.Contains(message, "no retained events") {
+				t.Fatalf("error %q does not name the day and the retained support it is missing", message)
+			}
+			lost := domainReport(t, report, testCase.domain)
+			if len(lost.RecoverableDays) != 0 || !reflect.DeepEqual(lost.UnrecoverableDays, []string{seededDayName}) {
+				t.Fatalf("%s recoverable days = %v, unrecoverable = %v, want the day unwaivable",
+					testCase.domain, lost.RecoverableDays, lost.UnrecoverableDays)
+			}
+			if report.Recorded {
+				t.Fatal("an unwaivable derived day recorded the operation")
+			}
+			if got := markedDays(t, copied.databasePath()); len(got) != 0 {
+				t.Fatalf("marked days = %v, want none", got)
+			}
+			if recorded := operationRow(t, copied.databasePath()); recorded.Stage != model.UpgradeStageCopyIn {
+				t.Fatalf("stage = %q, want the untouched %q", recorded.Stage, model.UpgradeStageCopyIn)
+			}
+			assertNoScratch(t, copied.target)
+		})
+	}
+}
+
+// TestReconcileSplitsClearedDerivedDaysByRetainedSupport proves the split is per
+// day, not per domain: a cleared rollup that lost two days the store can rebuild
+// only one of refuses the run and names exactly the day nothing can rebuild,
+// even when the operator acknowledged both.
+func TestReconcileSplitsClearedDerivedDaysByRetainedSupport(t *testing.T) {
+	unsupportedDay := seededDayMS + utcDayMilliseconds
+	const unsupportedName = "2026-03-02"
+	copied := newCopiedVolumeWith(t, func(t *testing.T, volume legacyVolume) {
+		seedSourceRetention(t, volume)
+		seedSourcePricing(t, volume)
+		seedSourcePricingOnDay(t, volume, unsupportedDay)
+	})
+	execTarget(t, copied.databasePath(), `delete from usage_pricing_hourly_rollups_v1`)
+
+	options := copied.reconcileOptions()
+	options.Acknowledged = []string{seededDayName, unsupportedName}
+	report, err := Reconcile(context.Background(), options)
+	if !errors.Is(err, ErrReconcileTargetIncomplete) {
+		t.Fatalf("reconcile error = %v, want the day without retained support refused", err)
+	}
+	message := err.Error()
+	if !strings.Contains(message, unsupportedName) || strings.Contains(message, seededDayName) {
+		t.Fatalf("error %q must name only the day nothing can rebuild", message)
+	}
+	pricing := domainReport(t, report, ReconcileDomainPricing)
+	if !reflect.DeepEqual(pricing.RecoverableDays, []string{seededDayName}) ||
+		!reflect.DeepEqual(pricing.UnrecoverableDays, []string{unsupportedName}) {
+		t.Fatalf("pricing recoverable days = %v, unrecoverable = %v, want the split by retained support",
+			pricing.RecoverableDays, pricing.UnrecoverableDays)
+	}
+	if report.Recorded {
+		t.Fatalf("report = %+v, want nothing recorded while a day is unwaivable", report)
+	}
+	if got := markedDays(t, copied.databasePath()); len(got) != 0 {
+		t.Fatalf("marked days = %v, want none", got)
 	}
 }
 

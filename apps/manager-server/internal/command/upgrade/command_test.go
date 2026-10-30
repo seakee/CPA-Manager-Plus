@@ -5,7 +5,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -186,24 +185,37 @@ func TestStatusWithoutMigrationReportsNoRecord(t *testing.T) {
 	}
 }
 
-func TestExitCodeMapping(t *testing.T) {
-	if code := ExitCode(nil); code != 0 {
-		t.Fatalf("nil exit code = %d, want 0", code)
+// TestExitCodePinsEveryRefusal pins the CLI contract one row per refusal: a
+// decision the operator has to look at exits 1 no matter which typed code it
+// carries, and only a usage or environment failure exits 2. The rows carry a
+// message like the service sends, so the mapping is proven for a real typed
+// error and not just for the bare sentinel.
+func TestExitCodePinsEveryRefusal(t *testing.T) {
+	typed := func(code upgradeservice.UpgradeErrorCode) error {
+		return &upgradeservice.UpgradeError{Code: code, Message: "pinned by the exit-code table"}
 	}
-	if code := ExitCode(ErrBlocked); code != 1 {
-		t.Fatalf("blocked exit code = %d, want 1", code)
+	cases := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "ready", err: nil, want: 0},
+		{name: "blocked preflight (sentinel)", err: ErrBlocked, want: 1},
+		{name: "unacknowledged mismatch", err: typed(upgradeservice.UpgradeErrorReconcileMismatch), want: 1},
+		{name: "target incomplete", err: typed(upgradeservice.UpgradeErrorReconcileTargetIncomplete), want: 1},
+		{name: "nothing compared", err: typed(upgradeservice.UpgradeErrorReconcileNothingCompared), want: 1},
+		{name: "nothing compared (sentinel)", err: upgradeservice.ErrReconcileNothingCompared, want: 1},
+		{name: "source changed", err: typed(upgradeservice.UpgradeErrorSourceChanged), want: 2},
+		{name: "target modified", err: typed(upgradeservice.UpgradeErrorTargetModified), want: 2},
+		{name: "usage", err: ErrUsage, want: 2},
 	}
-	if code := ExitCode(ErrUsage); code != 2 {
-		t.Fatalf("usage exit code = %d, want 2", code)
-	}
-	if code := ExitCode(upgradeservice.ErrReconcileMismatch); code != 1 {
-		t.Fatalf("unacknowledged mismatch exit code = %d, want 1", code)
-	}
-	if code := ExitCode(upgradeservice.ErrReconcileTargetIncomplete); code != 1 {
-		t.Fatalf("incomplete store exit code = %d, want 1", code)
-	}
-	if !errors.Is(ErrBlocked, ErrBlocked) {
-		t.Fatal("blocked error lost its identity")
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if code := ExitCode(testCase.err); code != testCase.want {
+				code2, _ := upgradeservice.UpgradeErrorCodeOf(testCase.err)
+				t.Fatalf("exit code for %q = %d, want %d", code2, code, testCase.want)
+			}
+		})
 	}
 }
 

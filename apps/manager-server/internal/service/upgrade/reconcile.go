@@ -41,10 +41,10 @@ import (
 // blocks the same way, and no acknowledgement can waive that: lost data is not a
 // measured difference. The one exception is a derived rollup the store cleared
 // while the table is still there — its rows can be rebuilt from the retained
-// events, so those days are marked under their own reason and the operator may
-// acknowledge them (see reconcileDerivedDomains). Only the days the operator
-// acknowledged are marked, and a marked day stays marked for the life of the
-// store.
+// events, but only on a day the store still holds those events, so those days
+// are marked under their own reason and the operator may acknowledge them (see
+// reconcileDerivedDomains). Only the days the operator acknowledged are marked,
+// and a marked day stays marked for the life of the store.
 
 // Reconcile domain names, in report order. They are the domains the copy claims
 // to preserve, not the operation's domain vocabulary.
@@ -128,10 +128,14 @@ var reconciledOperationDomains = map[string][]string{
 //
 //   - A derived rollup (pricing, account history) is rebuilt row by row from the
 //     retained events, so a rollup table that is present but holds none of the
-//     source's days is a gap a rebuild can still close. Reconcile marks those
-//     days incomplete under ReasonDerivedRollupLost and lets the operator
-//     acknowledge them, exactly like any other day it cannot complete, instead
-//     of blocking a migration that has every event it needs.
+//     source's days is a gap a rebuild can still close — on the days the store
+//     still holds retained events for. Reconcile marks those days incomplete
+//     under ReasonDerivedRollupLost and lets the operator acknowledge them,
+//     exactly like any other day it cannot complete, instead of blocking a
+//     migration that has every event it needs. A lost day the store holds no
+//     retained event of has nothing to rebuild it from, so it stays an
+//     unwaivable block: the premise of the exception is the retained support,
+//     not the table's existence.
 //   - Every other compared table holds data that exists nowhere else: the
 //     retained events are the log itself and the deleted coverage table records
 //     which events an archive run removed. Neither can be recomputed, so a
@@ -167,21 +171,25 @@ type ReconcileMismatch struct {
 // ComparedDays the days both sides hold: a day only one side holds is a
 // mismatch, never a compared day.
 //
-// Recoverable marks a derived domain whose table is there but holds none of the
-// days the source holds. The rows of a derived rollup are rebuildable from the
-// retained event log, so a cleared rollup is a gap the operator may
-// acknowledge instead of a store that lost data with no way back. A missing
-// table is never recoverable: nothing proves the rows can be rebuilt from a
-// table that is not there. See reconcileDerivedDomains for the boundary.
+// RecoverableDays and UnrecoverableDays split the days a derived domain whose
+// table is there but holds none of the source's days has lost. The rows of a
+// derived rollup are rebuilt from the retained event log, so a lost day is
+// recoverable only when the store still holds a retained event on that day: the
+// rebuild has to read something. A day the store holds no retained event of has
+// nothing to rebuild from, so it stays unwaivable and is named in
+// UnrecoverableDays. A missing table is neither: nothing proves any row can be
+// rebuilt from a table that is not there. See reconcileDerivedDomains for the
+// boundary.
 type ReconcileDomainReport struct {
-	Domain       string              `json:"domain"`
-	Table        string              `json:"table"`
-	Applicable   bool                `json:"applicable"`
-	Recoverable  bool                `json:"recoverable,omitempty"`
-	Reason       string              `json:"reason,omitempty"`
-	SourceDays   int                 `json:"sourceDays"`
-	ComparedDays int                 `json:"comparedDays"`
-	Mismatches   []ReconcileMismatch `json:"mismatches"`
+	Domain            string              `json:"domain"`
+	Table             string              `json:"table"`
+	Applicable        bool                `json:"applicable"`
+	RecoverableDays   []string            `json:"recoverableDays,omitempty"`
+	UnrecoverableDays []string            `json:"unrecoverableDays,omitempty"`
+	Reason            string              `json:"reason,omitempty"`
+	SourceDays        int                 `json:"sourceDays"`
+	ComparedDays      int                 `json:"comparedDays"`
+	Mismatches        []ReconcileMismatch `json:"mismatches"`
 }
 
 // ReconcileMarkedDay is one day this reconciliation concluded is permanently
@@ -793,8 +801,9 @@ func readHistoryCells(ctx context.Context, tx *sql.Tx) (map[historyCellKey]histo
 // source holds days of but the store cannot show is not a disagreement to
 // acknowledge: it is unreconcilable, so the comparison stops before anything can
 // be marked. The one exception is a derived rollup that was cleared rather than
-// dropped: recoverableDerivedLoss recognises it and leaves the decision to the
-// operator's acknowledgement.
+// dropped: classifyDerivedLoss recognises it, day by day, and leaves the
+// decision to the operator's acknowledgement only where the store still holds
+// the retained events a rebuild would read.
 func compareObservations(source, target sideObservation) ([]ReconcileDomainReport, error) {
 	domains := []ReconcileDomainReport{
 		compareRetainedDomain(source, target),
@@ -802,8 +811,11 @@ func compareObservations(source, target sideObservation) ([]ReconcileDomainRepor
 		compareCoverageDomain(source, target),
 		compareHistoryDomain(source, target),
 	}
+	// The rebuild reads the store's own retained events, so the store's retained
+	// days are the only proof a lost rollup day can still be recomputed.
+	rebuildable := daysOf(target.retained, retainedSpec.day)
 	for index := range domains {
-		domains[index].Recoverable = recoverableDerivedLoss(domains[index])
+		domains[index].classifyDerivedLoss(rebuildable)
 	}
 	for _, domain := range domains {
 		if err := domain.targetIncompleteError(); err != nil {
@@ -813,15 +825,42 @@ func compareObservations(source, target sideObservation) ([]ReconcileDomainRepor
 	return domains, nil
 }
 
-// recoverableDerivedLoss reports whether a domain is a derived rollup whose
-// table is present but holds none of the days the source holds: the rollup was
-// cleared, its rows can be rebuilt from the retained events, and the domain was
-// therefore never compared (see reconcileDerivedDomains for the boundary).
-// Nothing here rebuilds anything, so the lost days are still marked; the flag
-// only decides that the mark may be acknowledged instead of blocking the step.
-func recoverableDerivedLoss(report ReconcileDomainReport) bool {
-	return reconcileDerivedDomains[report.Domain] && report.Applicable &&
-		report.SourceDays > 0 && report.ComparedDays == 0
+// classifyDerivedLoss splits the days a cleared derived rollup lost by whether a
+// rebuild could still read them. The rollup's rows are recomputed from the
+// retained event log, so a lost day is recoverable only when the store still
+// holds at least one retained event on that day; a day the store holds no such
+// event of has nothing to recompute it from and stays unwaivable. A domain that
+// is not a derived rollup, is not applicable, has no source day or was compared
+// on at least one day is left alone: this only decides the days a cleared
+// rollup lost. Nothing here rebuilds anything, so a recoverable day is still
+// marked; the split only decides which days an acknowledgement may waive.
+func (r *ReconcileDomainReport) classifyDerivedLoss(retainedDays map[string][]retainedCellKey) {
+	if !reconcileDerivedDomains[r.Domain] || !r.Applicable || r.SourceDays == 0 || r.ComparedDays != 0 {
+		return
+	}
+	recoverable := []string{}
+	unrecoverable := []string{}
+	for _, day := range lostDerivedDays(*r) {
+		if len(retainedDays[day]) > 0 {
+			recoverable = append(recoverable, day)
+			continue
+		}
+		unrecoverable = append(unrecoverable, day)
+	}
+	r.RecoverableDays = recoverable
+	r.UnrecoverableDays = unrecoverable
+}
+
+// lostDerivedDays names the days a cleared derived rollup lost: every presence
+// mismatch that says the 1.x source holds the day and the store does not, sorted.
+func lostDerivedDays(report ReconcileDomainReport) []string {
+	days := []string{}
+	for _, mismatch := range report.Mismatches {
+		if mismatch.Field == mismatchFieldPresence && mismatch.Source == presenceValue(true) {
+			days = append(days, mismatch.Day)
+		}
+	}
+	return unionDays(days, nil)
 }
 
 // targetIncompleteError reports a domain the 1.x source holds days of but the v2
@@ -829,9 +868,11 @@ func recoverableDerivedLoss(report ReconcileDomainReport) bool {
 // no acknowledgement may waive it. The one exception is a derived domain whose
 // table is still there: a cleared rollup is rebuildable from the retained
 // events, so its lost days are marked under their own reason and may be
-// acknowledged. A missing table has no such way back and stays unwaivable.
+// acknowledged — but only the days the store still holds those events for. A day
+// with no retained support has nothing to rebuild it from, and a missing table
+// has no such way back at all, so both stay unwaivable.
 func (r ReconcileDomainReport) targetIncompleteError() error {
-	if r.SourceDays == 0 || r.Recoverable {
+	if r.SourceDays == 0 {
 		return nil
 	}
 	if !r.Applicable {
@@ -839,7 +880,14 @@ func (r ReconcileDomainReport) targetIncompleteError() error {
 			"the v2 store holds no %s table, so the %q domain cannot show the %s the 1.x source holds; nothing was compared and nothing was marked",
 			r.Table, r.Domain, plural(r.SourceDays, "day", "days")), nil)
 	}
-	if r.ComparedDays == 0 {
+	if len(r.UnrecoverableDays) > 0 {
+		count := len(r.UnrecoverableDays)
+		return newUpgradeError(UpgradeErrorReconcileTargetIncomplete, fmt.Sprintf(
+			"the cleared %s rollup lost %s the v2 store holds no retained events for, so nothing can rebuild %s and no acknowledgement can waive %s: %s; nothing was compared and nothing was marked",
+			r.Table, plural(count, "day", "days"), plural(count, "it", "them"), plural(count, "it", "them"),
+			strings.Join(r.UnrecoverableDays, ", ")), nil)
+	}
+	if r.ComparedDays == 0 && len(r.RecoverableDays) == 0 {
 		return newUpgradeError(UpgradeErrorReconcileTargetIncomplete, fmt.Sprintf(
 			"the v2 store compared no day of %s, so the %q domain cannot show the %s the 1.x source holds; nothing was compared and nothing was marked",
 			r.Table, r.Domain, plural(r.SourceDays, "day", "days")), nil)
@@ -1255,33 +1303,41 @@ func decideAcknowledged(candidates []string, acknowledged map[string]bool, ackno
 }
 
 // measuredMismatchDays names every day a domain reported a disagreement on,
-// excluding the derived rollups this run could not compare. A day lost with a
-// cleared rollup is marked as such: it is not a measured disagreement between
-// two readings, and naming it one would hide that a rebuild can still close it.
+// excluding the days that domain's cleared derived rollup lost. A day lost with
+// a cleared rollup is not a measured disagreement between two readings, and
+// naming it one would hide that a rebuild can still close it. The exclusion is
+// per domain: a retained or coverage disagreement on the same day is still
+// measured, and a lost day the store cannot rebuild is excluded too but the
+// refusal names it before any mark is written.
 func measuredMismatchDays(domains []ReconcileDomainReport) []string {
-	measured := make([]ReconcileDomainReport, 0, len(domains))
+	days := []string{}
 	for _, domain := range domains {
-		if domain.Recoverable {
-			continue
+		lost := make(map[string]bool, len(domain.RecoverableDays)+len(domain.UnrecoverableDays))
+		for _, day := range domain.RecoverableDays {
+			lost[day] = true
 		}
-		measured = append(measured, domain)
+		for _, day := range domain.UnrecoverableDays {
+			lost[day] = true
+		}
+		for _, mismatch := range domain.Mismatches {
+			if mismatch.Field == mismatchFieldPresence && lost[mismatch.Day] {
+				continue
+			}
+			days = append(days, mismatch.Day)
+		}
 	}
-	return mismatchDays(measured)
+	return unionDays(days, nil)
 }
 
-// derivedLossDays names every day a cleared derived rollup lost: a day the 1.x
-// source holds and the store's rollup does not.
+// derivedLossDays names every day a cleared derived rollup lost that the store
+// can still rebuild from the retained events it holds: a day the 1.x source
+// holds and the store's rollup does not. A lost day with no retained support is
+// not named here: nothing can rebuild it, so the run refuses it before a mark is
+// ever written.
 func derivedLossDays(domains []ReconcileDomainReport) []string {
 	days := []string{}
 	for _, domain := range domains {
-		if !domain.Recoverable {
-			continue
-		}
-		for _, mismatch := range domain.Mismatches {
-			if mismatch.Field == mismatchFieldPresence && mismatch.Source == presenceValue(true) {
-				days = append(days, mismatch.Day)
-			}
-		}
+		days = append(days, domain.RecoverableDays...)
 	}
 	return unionDays(days, nil)
 }

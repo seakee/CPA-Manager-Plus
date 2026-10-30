@@ -35,16 +35,20 @@ var (
 	ErrBlocked = errors.New("upgrade preflight is blocked")
 )
 
-// ExitCode maps a Run result to the CLI contract: 0 ready, 1 blocked, an
-// unacknowledged mismatch or a store that cannot show what the source holds, 2
-// anything else.
+// ExitCode maps a Run result to the CLI contract: 0 ready, 1 a refusal the
+// operator has to look at — a blocked preflight, an unacknowledged mismatch, a
+// store that cannot show what the source holds, or a reconciliation that
+// compared nothing — and 2 anything else. A refusal is a decision about the
+// migration, not a usage or environment error, so every reconcile refusal shares
+// exit 1 and the typed code in the report says which one it was.
 func ExitCode(err error) int {
 	switch {
 	case err == nil:
 		return 0
 	case errors.Is(err, ErrBlocked),
 		errors.Is(err, upgradeservice.ErrReconcileMismatch),
-		errors.Is(err, upgradeservice.ErrReconcileTargetIncomplete):
+		errors.Is(err, upgradeservice.ErrReconcileTargetIncomplete),
+		errors.Is(err, upgradeservice.ErrReconcileNothingCompared):
 		return 1
 	default:
 		return 2

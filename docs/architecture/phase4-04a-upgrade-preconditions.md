@@ -330,10 +330,18 @@ exception is a derived rollup, and the boundary is what the table is derived
 from:
 
 - `pricing` and `history` are rollups of the retained event log. A rollup table
-  that is still there but holds none of the source's days (`recoverable: true`
-  in the report) is a rebuild away from being correct, so it does not block: its
-  lost days join the days that need an acknowledgement and are marked
-  `derived_rollup_lost` once the operator accepts them.
+  that is still there but holds none of the source's days is a rebuild away from
+  being correct, so it does not block: but the exception is only as strong as
+  its premise, which is the retained support the rebuild reads. Each lost day is
+  classified on its own: a day the store still holds at least one retained
+  event for is listed in the domain's `recoverableDays`, joins the days that
+  need an acknowledgement, and is marked `derived_rollup_lost` once the operator
+  accepts it. A lost day the store holds no retained event for has nothing to
+  rebuild it from: it is listed in `unrecoverableDays`, the run fails closed
+  with `upgrade_reconcile_target_incomplete` naming that day, and no
+  acknowledgement can waive it. That is the reviewer's probe: a source pricing
+  day with no retained events of its own, and a cleared store-side rollup, is
+  refused instead of being treated as recoverable.
 - A missing derived table, and any day of `retained` or `coverage` the store
   cannot show, stays unwaivable: the retained events are the log itself and the
   deleted coverage table records what an archive run removed, so neither can be
@@ -363,6 +371,14 @@ disagreed, `derived_rollup_lost` when only a cleared derived rollup explains it,
 or `projection_lost_before_v1_14_6` when only projection loss does — a measured
 disagreement always keeps the stronger reason.
 
+Each derived day is acknowledged individually. `--acknowledge <YYYY-MM-DD>` names
+one calendar day per flag and has to be repeated for every day the report lists,
+because there is no bulk switch for a cleared derived rollup:
+`--acknowledge-parity-gaps` covers only what the parity detection reports. The
+report lists the days under the domain's `recoverableDays` and repeats them in
+`unacknowledgedDays`, so the operator acknowledges exactly the days the run
+measured, and a day listed in `unrecoverableDays` cannot be acknowledged at all.
+
 The marks, the evidence JSON in `upgrade_operations.reconciliation` and the
 `Advance` over the operation domains the comparison actually established —
 `retained_projection` for the retained events and the account rollups derived
@@ -376,6 +392,21 @@ writes the whole result. A domain that was not applicable is never recorded, so
 already carried past `reconcile` is refused before anything is compared, and the
 mark insert is `on conflict (day) do nothing`, so a day keeps its first reason
 and timestamp and a second run marks nothing new.
+
+### After a rebuild
+
+Rebuilding a cleared derived rollup later does not clear its mark, and no code
+path in this repository removes one: `derived_rollup_lost` records what the
+migrated store lost, not what the running server can recompute later, and the
+marking table is evidence rather than derived data. The mark is therefore a
+lower bound that stays for the life of the store — it disappears only when the
+store itself is rewritten, and such a store starts from its own reconciliation
+and writes its own marks. An operator who rebuilds the lost days must leave the
+mark in place and keep treating those ranges as partial: `RawCoverage`,
+`AnalyticsCoverage` and the Key workspace report a marked day as incomplete no
+matter what the rebuilt rollup now holds, and a manual `delete from
+usage_coverage_incomplete_days` would silently restore the overstatement the
+mark exists to prevent.
 
 ### The marking table and its consumer
 
@@ -410,8 +441,13 @@ marked day as complete, and none of them changes the numbers:
 
 `cpa-manager-plus upgrade reconcile --legacy <dir> [--target <dir>]
 [--bundle <dir>] [--json] [--acknowledge <day>]… [--acknowledge-parity-gaps]`
-runs the preflight gate first, then the reconciliation. Exit 0 reconciled,
-1 blocked, an unacknowledged mismatch or a store that cannot show what the source
-holds (the report is printed either way), 2 usage or environment error. The
-`--bundle` default is the recorded copy-in's backup destination, and the recorded
-copy-in is re-verified against it before anything is compared.
+runs the preflight gate first, then the reconciliation. Exit 0 reconciled; exit 1
+is a refusal the operator has to look at — a blocked preflight, an
+unacknowledged mismatch (`upgrade_reconcile_mismatch`), a store that cannot show
+what the source holds (`upgrade_reconcile_target_incomplete`), or a run that
+compared nothing (`upgrade_reconcile_nothing_compared`); exit 2 is a usage or
+environment error. Every refusal prints the report with its typed `errorCode`
+first (the report is printed either way), so the exit code only says the
+migration did not advance and the code says why. The `--bundle` default is the
+recorded copy-in's backup destination, and the recorded copy-in is re-verified
+against it before anything is compared.
