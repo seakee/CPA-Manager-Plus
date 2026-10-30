@@ -178,6 +178,14 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 	if err := ctx.Err(); err != nil {
 		return Report{}, err
 	}
+	// The version ladder is built before anything is inspected. A malformed
+	// release string is a broken build contract, not a source condition: it
+	// must fail the preflight outright instead of degrading the newer-marker
+	// rule to an empty list that accepts everything.
+	ladder, err := newVersionLadder(pinnedSourceVersion())
+	if err != nil {
+		return Report{}, fmt.Errorf("upgrade preflight: %w", err)
+	}
 	report := Report{
 		SourceKind:    SourceKindUnknown,
 		SourceVersion: VersionUnknown,
@@ -281,9 +289,8 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 	} else {
 		report.SourceVersion = declaredVersion(options.DeclaredVersion)
 		report.MissingTables = schema.missingTables(requiredLegacyTables)
-		newerMarkers := schema.newerMarkers(pinnedSourceVersion())
 		check := versionCheck(
-			report.SourceKind, schema.v2OnlyTables(), report.MissingTables, newerMarkers,
+			report.SourceKind, schema.v2OnlyTables(), report.MissingTables, ladder.newer(schema),
 			options.DeclaredVersion, pinnedSourceVersion(),
 		)
 		if check.Status == StatusBlocked {

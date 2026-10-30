@@ -25,12 +25,15 @@ const VersionUnknown = "unknown"
 // observe. Nothing here is a profile, a version proof or a grant.
 //
 // The schema cannot identify a 1.x release: v1.14.0 through v1.14.10 create the
-// same tables, and the only per-release markers v1 writes are format revisions
-// of derived rollups that several releases share. Preflight therefore never
-// infers a release from DDL. What it does require is a structural lower bound:
-// a source below the v1.14 shape is refused no matter what release it declares.
-// It also refuses a source that carries a marker the pinned release genuinely
-// lacks, because that source has already moved past the pin.
+// same tables, and the only per-release values v1 writes into settings are
+// format revisions of derived rollups, each shared by several releases. The
+// cache-accounting semantics revision, for one, is 2 in v1.14.4 and v1.14.5 and
+// 3 from v1.14.6 on, so a settings value is a floor at release granularity and
+// never an identity. Preflight therefore never infers a release from DDL. It
+// requires a structural lower bound — a source below the v1.14 shape is refused
+// no matter what release it declares — and it refuses a source that carries a
+// marker the pinned release genuinely lacks, because that source has already
+// moved past the pin.
 type sourceSchema struct {
 	tables   map[string]bool
 	indexes  map[string]bool
@@ -187,7 +190,12 @@ func declaredVersion(declared string) string {
 // that lacks one is refused even when the declaration matches. So is a source
 // that carries a marker the pinned release genuinely lacks: the declaration
 // claims a release, and that claim cannot survive evidence of a later one.
-func versionCheck(kind string, v2Tables []string, missingTables []string, newerMarkers []string, declared string, pinned string) Check {
+//
+// The newer branch deliberately repeats neither the pin nor the declaration.
+// Printing "expected=v1.14.4 declared=v1.14.4" next to a refusal reads as if the
+// check contradicted itself; what actually decided it is the marker, so the
+// detail names the marker and the release that introduced it.
+func versionCheck(kind string, v2Tables []string, missingTables []string, newer []markerEvidence, declared string, pinned string) Check {
 	check := Check{Name: CheckSourceVersion, Status: StatusPass}
 	switch {
 	case kind == SourceKindNativeV2:
@@ -211,11 +219,15 @@ func versionCheck(kind string, v2Tables []string, missingTables []string, newerM
 		check.Status = StatusBlocked
 		check.Code = CodeSourceVersionUnsupported
 		check.Detail = fmt.Sprintf("expected=%s declared=%s", pinned, declared)
-	case len(newerMarkers) != 0:
+	case len(newer) != 0:
 		check.Status = StatusBlocked
 		check.Code = CodeSourceVersionUnsupported
-		check.Detail = fmt.Sprintf("expected=%s declared=%s; markers newer than pinned: %s",
-			pinned, declaredVersion(declared), strings.Join(newerMarkers, ","))
+		labels := make([]string, len(newer))
+		for index, evidence := range newer {
+			labels[index] = evidence.String()
+		}
+		check.Detail = fmt.Sprintf("source is newer than the pinned release %s; markers from later releases: %s",
+			pinned, strings.Join(labels, ", "))
 	default:
 		check.Detail = fmt.Sprintf("expected=%s declared=%s; structural lower bound satisfied", pinned, declared)
 	}
@@ -228,40 +240,63 @@ const (
 )
 
 // sourceMarker is one observation the version check may make against the
-// source. label is what the report names for the operator: the marker itself,
-// plus the value for a setting.
+// source. A setting marker is a revision floor, not an exact value: v1 only
+// ever raises a revision and never lowers it, so any value at or above the one
+// the introducing release wrote proves the source is at least that release.
+// Matching the exact value instead would accept a source carrying a revision
+// the 1.x line has not written yet, which is the one direction this check must
+// never fail in.
 type sourceMarker struct {
-	kind  string
-	name  string
-	value string
+	kind string
+	name string
+	// floor is the revision value the introducing release wrote. Only setting
+	// markers use it; v1 writes no numeric index or table marker.
+	floor int
 }
 
-func (m sourceMarker) label() string {
-	if m.kind == markerSetting {
-		return m.name + "=" + m.value
+// observedLabel reports whether the source carries the marker and, when it
+// does, names what was actually observed: the index, or the setting with the
+// value the source holds rather than the floor the check looked for.
+func (s sourceSchema) observedLabel(marker sourceMarker) (string, bool) {
+	switch marker.kind {
+	case markerIndex:
+		return marker.name, s.indexes[marker.name]
+	case markerSetting:
+		observed, found := s.settings[marker.name]
+		if !found {
+			return "", false
+		}
+		value, err := strconv.Atoi(strings.TrimSpace(observed))
+		if err != nil || value < marker.floor {
+			return "", false
+		}
+		return marker.name + "=" + observed, true
+	default:
+		return marker.name, s.tables[marker.name]
 	}
-	return m.name
 }
 
 // sourceMarkerKeys are the settings rows the version check reads. The v1 code
 // writes them itself; they are revision facts, not credentials.
 var sourceMarkerKeys = []string{datamigration.UsageCacheAccountingSemanticsRevisionKey}
 
-func (s sourceSchema) has(marker sourceMarker) bool {
-	switch marker.kind {
-	case markerIndex:
-		return s.indexes[marker.name]
-	case markerSetting:
-		return s.settings[marker.name] == marker.value
-	default:
-		return s.tables[marker.name]
-	}
-}
-
 type versionMarker struct {
+	// release is the 1.x release that introduced the marker. It is carried so
+	// a later re-pin drops the markers its own schema accepts instead of
+	// refusing itself, and so a refusal can name what the marker proves.
 	release string
 	marker  sourceMarker
 }
+
+// usageCacheAccountingSemanticsRevisionV1146 is the value v1.14.6 wrote into
+// usage_cache_accounting_semantics_revision (datamigration/repository.go at tag
+// v1.14.6: CurrentUsageCacheAccountingSemanticsRevision = 3; v1.14.4 and
+// v1.14.5 wrote 2). It is a literal on purpose. This is a historical fact about
+// the 1.x line, not a property of this build: reading
+// datamigration.CurrentUsageCacheAccountingSemanticsRevision would tie the
+// marker to a value v2 is free to bump, and a bump to 4 would stop matching a
+// 1.14.6–1.14.10 source and silently let it through.
+const usageCacheAccountingSemanticsRevisionV1146 = 3
 
 // laterSourceMarkers lists the markers the 1.x line introduced after the
 // pinned release, with the release that introduced each one. None of them is a
@@ -271,58 +306,101 @@ type versionMarker struct {
 // refuses a source of the pinned release itself, which is exactly the defect
 // the real-Docker harness found. The release is carried so a later re-pin drops
 // the markers its own schema accepts instead of refusing itself.
+//
+// The two markers do not have the same strength. The settings revision is
+// written by the v1.14.6 migration itself and a real 1.14.6+ source carries it,
+// so its presence is reliable positive evidence. The index is created through
+// the deferred/offline derived-index lifecycle: on a non-empty usage_events
+// table the post-listen maintenance defers it, and only the offline
+// `cleanup-derived` command builds it (release note v1.14.7-en.md, "Upgrade
+// Notes"). Its presence is reliable positive evidence, its absence proves
+// nothing at all.
 var laterSourceMarkers = []versionMarker{
 	{release: "v1.14.6", marker: sourceMarker{
 		kind:  markerSetting,
 		name:  datamigration.UsageCacheAccountingSemanticsRevisionKey,
-		value: strconv.Itoa(datamigration.CurrentUsageCacheAccountingSemanticsRevision),
+		floor: usageCacheAccountingSemanticsRevisionV1146,
 	}},
 	{release: "v1.14.7", marker: sourceMarker{kind: markerIndex, name: "idx_usage_events_ts_latency_ttft_cover"}},
 }
 
-// newerMarkers returns the labels of the markers the source carries that the
-// pinned release genuinely lacks, in lexical order. A marker introduced at or
-// below the pin is part of the schema the pin already accepts, so it can never
-// prove that the source moved past it.
-func (s sourceSchema) newerMarkers(pinned string) []string {
-	newer := []string{}
-	pinnedRank, pinnedKnown := parseRelease(pinned)
-	if !pinnedKnown {
-		return newer
+// markerEvidence is one marker the source carries that the pinned release
+// lacks. It names the observation and the release that introduced it, so the
+// refusal reads as evidence instead of a bare token.
+type markerEvidence struct {
+	label   string
+	release string
+}
+
+func (e markerEvidence) String() string {
+	return e.label + " (" + e.release + ")"
+}
+
+// versionLadder is the marker table narrowed to the releases after the pinned
+// one, in release order. Constructing it parses every release string involved,
+// so a malformed release is an error instead of a silently empty ladder: an
+// empty ladder accepts a source that has moved past the pin, which is exactly
+// the state the check exists to refuse.
+type versionLadder struct {
+	after []versionMarker
+}
+
+func newVersionLadder(pinned string) (versionLadder, error) {
+	pinnedRank, err := parseRelease(pinned)
+	if err != nil {
+		return versionLadder{}, fmt.Errorf("pinned source release: %w", err)
 	}
+	ladder := versionLadder{}
 	for _, candidate := range laterSourceMarkers {
-		rank, ok := parseRelease(candidate.release)
-		if !ok || rank <= pinnedRank {
+		rank, err := parseRelease(candidate.release)
+		if err != nil {
+			return versionLadder{}, fmt.Errorf("later marker release: %w", err)
+		}
+		if rank <= pinnedRank {
 			continue
 		}
-		if s.has(candidate.marker) {
-			newer = append(newer, candidate.marker.label())
-		}
+		ladder.after = append(ladder.after, candidate)
 	}
-	sort.Strings(newer)
+	return ladder, nil
+}
+
+// newer returns the markers the source carries that the pinned release
+// genuinely lacks, in the order the ladder lists them. A marker introduced at
+// or below the pin is part of the schema the pin already accepts, so it can
+// never prove that the source moved past it.
+func (l versionLadder) newer(s sourceSchema) []markerEvidence {
+	newer := []markerEvidence{}
+	for _, candidate := range l.after {
+		label, ok := s.observedLabel(candidate.marker)
+		if !ok {
+			continue
+		}
+		newer = append(newer, markerEvidence{label: label, release: candidate.release})
+	}
 	return newer
 }
 
-func parseRelease(release string) (int, bool) {
+// releaseRank packs a major.minor.patch release into one comparable number.
+type releaseRank int
+
+func parseRelease(release string) (releaseRank, error) {
 	trimmed := strings.TrimPrefix(strings.TrimSpace(release), "v")
 	parts := strings.Split(trimmed, ".")
 	if len(parts) != 3 {
-		return 0, false
+		return 0, fmt.Errorf("release %q is not major.minor.patch", release)
 	}
-	major, err := strconv.Atoi(parts[0])
-	if err != nil {
-		return 0, false
+	components := make([]int, len(parts))
+	for index, part := range parts {
+		if part == "" || strings.Trim(part, "0123456789") != "" {
+			return 0, fmt.Errorf("release %q has a non-numeric component %q", release, part)
+		}
+		value, err := strconv.Atoi(part)
+		// The rank packs three decimal components into one integer; a wider
+		// component would collide with the next one up.
+		if err != nil || value > 999 {
+			return 0, fmt.Errorf("release %q has an out-of-range component %q", release, part)
+		}
+		components[index] = value
 	}
-	minor, err := strconv.Atoi(parts[1])
-	if err != nil {
-		return 0, false
-	}
-	patch, err := strconv.Atoi(parts[2])
-	if err != nil {
-		return 0, false
-	}
-	if major < 0 || minor < 0 || patch < 0 {
-		return 0, false
-	}
-	return major*1_000_000 + minor*1_000 + patch, true
+	return releaseRank(components[0]*1_000_000 + components[1]*1_000 + components[2]), nil
 }

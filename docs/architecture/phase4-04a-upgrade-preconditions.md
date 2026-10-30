@@ -201,26 +201,66 @@ hard `false`; the new surface grants no migration authority.
   block; they are reported for a later explicit decision. A failed free-space
   probe blocks: an unmeasured target volume is never assumed to be big enough,
   and the probe measures the volume that will receive the copy, not the source.
-- **Version source.** No 1.x release persisted its release string: v1.14.0
-  through v1.14.10 write the same tables, and the only per-release values in
-  `settings` are derived-rollup format revisions that several releases share.
-  DDL therefore cannot discriminate releases, so preflight never infers one. The
-  operator declares the release (`--source-version`); preflight accepts only
+- **Version source.** No 1.x release persisted its release string, and the
+  tables do not discriminate: v1.14.0 through v1.14.10 create the same schema.
+  The only per-release values v1 write are derived-rollup format revisions in
+  `settings`, and each value belongs to a range of releases, never to one:
+  `usage_cache_accounting_semantics_revision` is `2` in v1.14.4 and v1.14.5 and
+  `3` from v1.14.6 on. A settings value is therefore a floor at release
+  granularity, never an identity, so preflight never derives a release from it.
+  The operator declares the release (`--source-version`); preflight accepts only
   exact equality with `bootstrap.PlannedDirectRelease` and blocks anything else
   with both values.
 - **Newer markers.** A declaration is a claim, so it is not the last word on the
   newer side either. A source that carries a marker the pinned release genuinely
   lacks has already moved past the pin, and blocks with
-  `upgrade_source_version_unsupported` even when the declaration matches; the
-  detail names each marker. For a v1.14.4 pin those markers are the
-  `usage_cache_accounting_semantics_revision=3` setting v1.14.6 wrote and the
-  `idx_usage_events_ts_latency_ttft_cover` index v1.14.7 added. The list is keyed
-  by the release that introduced each marker, so a later re-pin drops the
-  markers its own schema accepts instead of refusing its own source. No base
-  table is a later marker: every 1.14.x release creates
-  `usage_archive_deleted_coverage_daily`, the pinned one included, so reading it
-  as a v1.14.6 marker would refuse the pin's own source — the defect the
-  real-Docker harness found.
+  `upgrade_source_version_unsupported` even when the declaration matches. The
+  detail reads `source is newer than the pinned release <pin>` and names every
+  carried marker with the release that introduced it, e.g.
+  `usage_cache_accounting_semantics_revision=3 (v1.14.6)`; it no longer repeats
+  the matching `expected`/`declared` pair next to the refusal. For a v1.14.4 pin
+  those markers are the revision v1.14.6 raised to `3` (v1.14.4 and v1.14.5
+  write `2`) and the `idx_usage_events_ts_latency_ttft_cover` index v1.14.7
+  added. The revision is compared as a floor, not for equality: v1 only ever
+  raises it, so any value at or above `3` is evidence of v1.14.6 or later and a
+  value of `4` is refused rather than silently accepted. The floor is a literal
+  that names its release, not
+  `datamigration.CurrentUsageCacheAccountingSemanticsRevision`: that constant
+  tracks this build, and a future v2 bump would stop matching a 1.14.6–1.14.10
+  source and let it through. The list is keyed by the release that introduced
+  each marker, so a later re-pin drops the markers its own schema accepts
+  instead of refusing its own source. No base table is a later marker: every
+  1.14.x release creates `usage_archive_deleted_coverage_daily`, the pinned one
+  included, so reading it as a v1.14.6 marker would refuse the pin's own source —
+  the defect the real-Docker harness found.
+- **What each marker can prove.** The two markers are not equally strong. The
+  settings revision is written by the v1.14.6 migration itself, so a 1.14.6+
+  source that ran it carries the value: present is reliable positive evidence,
+  and absent is compatible with a pinned source (v1.14.4/1.14.5 write `2`, and an
+  install stopped before the migration wrote anything has no row at all). The
+  index is weaker. v1.14.7 creates it through the deferred/offline derived-index
+  lifecycle (`internal/repository/sqlite/derived_cleanup.go` at tag v1.14.7):
+  post-listen maintenance creates an index only when its target table is empty,
+  and on a non-empty `usage_events` it records a deferral and leaves the index to
+  the offline `cleanup-derived` command. The v1.14.7 release notes — "Upgrade
+  Notes" in `docs/release-notes/v1.14.7-en.md` at tag v1.14.7 — say the same:
+  skipping that maintenance only postpones the index's performance benefit. A
+  present index is therefore reliable positive evidence of v1.14.7 or later; an
+  absent one is no evidence at all, because most upgraded installs never built
+  it. The ladder keeps it for the positive direction only. The preflight fixture
+  therefore carries the pin's own `usage_cache_accounting_semantics_revision=2`
+  row, plus a case with the row absent, so neither a key-exists rule nor a plain
+  `!= 3` comparison can pass the suite.
+- **Limit of the gate.** The version check refuses on evidence; it does not
+  prove identity. Sources that are not the pinned release are accepted, and two
+  are enough to show it: v1.14.5, whose schema, settings values and structure
+  are identical to v1.14.4 (it writes the same `2`), so nothing distinguishes it
+  and accepting it is unavoidable; and a v1.14.7+ install that skipped the
+  offline derived-index maintenance and was stopped before its migration stamped
+  the revision `3`, so it carries neither evidence. That is the cost of a rule
+  restricted to observations a source actually makes. Proving the exact release
+  needs provenance — a writer archive or candidate commit — which this check
+  does not claim and the 04A admission above keeps blocked.
 - **Structural lower bound.** A declaration is a claim, so it is never the last
   word. The source must also carry the v1.14 structure: `settings`,
   `usage_events`, `usage_event_identity_ledger`, `usage_archive_event_refs`,
