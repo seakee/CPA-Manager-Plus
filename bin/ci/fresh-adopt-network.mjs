@@ -611,6 +611,7 @@ const plannedChecks = [
   'the usage collector started for the adopted installation',
   'runtime status is readable for the completed installation',
   'the source CPA is unchanged: identical config bytes and credential list',
+  'every progress read the page made was answered',
 ];
 
 try {
@@ -1061,9 +1062,43 @@ try {
       coverage: usage.coverage,
     };
   });
+  // `runtime/status` is the Runtime page's own read, so a 200 is not the claim:
+  // the body must carry what that page renders. A body without them is what the
+  // page shows as an unknown Runtime, which is exactly the case a 200-only check
+  // would pass.
   await check('runtime status is readable for the completed installation', async () => {
     const status = await adminGet('runtime/status');
-    return { state: status.state, identity: status.runtimeIdentity };
+    assert.equal(status.mode, 'embedded', 'the Manager runs the adopted CPA itself: ' + status.mode);
+    assert.equal(
+      status.manager?.state,
+      'ready',
+      'the Manager reported itself as ' + JSON.stringify(status.manager)
+    );
+    assert.match(status.status || '', /^(ready|starting|offline|unknown)$/, 'unexpected runtime status: ' + status.status);
+    assert.equal(status.errorCode, undefined, 'a readable status carried the error ' + status.errorCode);
+    assert(status.gateway && typeof status.gateway === 'object', 'the status carried no gateway observation');
+    // The gateway block is the same observation the status is named after: one
+    // read cannot report two states.
+    assert.equal(status.gateway.state, status.status, 'the gateway state and the status disagree');
+    assert.equal(status.gateway.ready, status.status === 'ready', 'gateway.ready disagrees with ' + status.status);
+    assert.match(status.gateway.identity || '', /\S/, 'the observation named no runtime identity');
+    assert(
+      Number.isSafeInteger(status.gateway.generation) && status.gateway.generation > 0,
+      'the observation named no runtime generation: ' + status.gateway.generation
+    );
+    assert.equal(status.gateway.protocolVersion, 'v1', 'the observation speaks ' + status.gateway.protocolVersion);
+    assert(
+      typeof status.observedAt === 'string' && Number.isFinite(Date.parse(status.observedAt)),
+      'the observation carried no timestamp: ' + status.observedAt
+    );
+    return {
+      mode: status.mode,
+      status: status.status,
+      identity: status.gateway.identity,
+      generation: status.gateway.generation,
+      ready: status.gateway.ready,
+      observedAt: status.observedAt,
+    };
   });
   await check('the source CPA is unchanged: identical config bytes and credential list', async () => {
     const after = sourceSnapshot();
@@ -1071,6 +1106,27 @@ try {
     assert.deepEqual(after.credentials, before.credentials, 'the source credential list changed');
     assert.deepEqual(after.digests, before.digests, 'a source credential changed');
     return { configSha256: after.configSha256, credentials: after.credentials.length };
+  });
+  // The page's progress read is the product path, so a request that never left or
+  // never answered is a failed read, not a page that happened to stop polling.
+  // Checked last because it covers every read of the run, and it refuses a run
+  // with no read at all: silence is not evidence of a healthy read.
+  await check('every progress read the page made was answered', async () => {
+    const failures = report.summaryRequestFailures || [];
+    assert.deepEqual(failures, [], 'the page could not read the migration summary: ' + failures.join(', '));
+    const statuses = report.summaryStatuses || [];
+    assert(statuses.length > 0, 'the page never read the migration summary');
+    assert.deepEqual(
+      statuses.filter((status) => status !== 200),
+      [],
+      'a progress read answered ' + statuses.join(',')
+    );
+    assert.equal(
+      report.summaryParseFailure,
+      undefined,
+      'a progress read could not be parsed: ' + report.summaryParseFailure
+    );
+    return { reads: statuses.length, failures: failures.length };
   });
   assert.deepEqual(report.pageErrors, []);
   report.result = 'PASS';
@@ -1100,6 +1156,24 @@ try {
     notRun(name, 'abandoned after "' + abandonedAfter + '" failed');
   }
 } finally {
+  // Every name this run recorded must be one it declared above, and every
+  // declared check must be in the report. A recorded name that is not registered
+  // is invisible to the NOT RUN backfill, so a failed report would drop it
+  // instead of naming it; a declared name that was never executed makes a
+  // passing report shorter than its own plan. Both fail the report rather than
+  // throw, so teardown and the artifact still happen.
+  const unregistered = [
+    ...new Set(report.checks.map((entry) => entry.name).filter((name) => !plannedChecks.includes(name))),
+  ];
+  const unobserved = plannedChecks.filter((name) => !report.checks.some((entry) => entry.name === name));
+  report.checkRegistry = unregistered.length === 0 && unobserved.length === 0 ? 'PASS' : 'FAIL';
+  if (report.checkRegistry === 'FAIL') {
+    report.checkRegistryFailure = [
+      ...(unregistered.length ? ['unregistered: ' + unregistered.join(' | ')] : []),
+      ...(unobserved.length ? ['unobserved: ' + unobserved.join(' | ')] : []),
+    ].join('; ');
+    report.result = 'FAIL';
+  }
   if (browser) await browser.close();
   // Container logs are read before anything is removed: a removed container has
   // no log, so an assertion after teardown could never fail.
