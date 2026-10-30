@@ -133,6 +133,16 @@ Backups must include both SQLite files and `data.key`. Do not upload `data.key` 
 
 Admin-key reset instructions are maintained separately. Stop Manager Server, back up `/data`, and follow [Reset the Manager Server Admin Key](reset-admin-key.md).
 
+## Managed CPA Import
+
+`cpa-manager-plus upgrade cpa-import` copies a stopped 1.x stack's managed CPA configuration and credential files into the v2 destination through the adoption executor. Three rules matter when you plan the move:
+
+- It reads the `--legacy` directory only if that directory is the one the recorded `copy-in` step read; a different tree is refused with `upgrade_cpa_source_root_mismatch` before anything is read.
+- The destination's own paths are never copied: its management secret, listener, ports, plugin root, auth directory and client key list stay the destination's. When the step stages the destination itself it records the generated management secret (encrypted with `/data/data.key`) before staging, so a retry against the now-running destination proceeds; the successful import deletes that record.
+- A destination that is already running and has no recorded secret needs `--destination-management-key-file`. The step refuses rather than inventing a second secret (`upgrade_cpa_destination_key_required`).
+
+**Stated limit: `codex-header-defaults`.** CPA v8 still loads the section (`codex-header-defaults` loads as `oauth.providers.codex.header-defaults`), but the v2 destination exposes no adoptable `upstream.codex.header-defaults` leaf, so the import does not copy it. The operation row reports it as the manual item `section:codex-header-defaults`; re-create those header defaults in the destination CPA configuration if you still need them. The sibling `claude-header-defaults.*` leaves do have destination paths and are copied.
+
 ## Rollback
 
 Stop Plus before rollback. The old CPA-Manager can still read the main usage tables and legacy `settings.setup`, but it does not understand Plus admin credentials, bootstrap state, or the data key. Prefer rolling back to the backup taken before migration.

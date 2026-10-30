@@ -143,6 +143,17 @@ const (
 	// be read, so this run settled no item. Nothing was written to the
 	// destination by this run and the cpa_config domain is not recorded.
 	UpgradeErrorCPAImportUnavailable UpgradeErrorCode = "upgrade_cpa_import_unavailable"
+	// UpgradeErrorCPASourceRootMismatch reports that the 1.x directory the run
+	// named is not the one the recorded copy-in read, so the CPA directory beside
+	// it belongs to another installation. Nothing was read from it and nothing
+	// was written.
+	UpgradeErrorCPASourceRootMismatch UpgradeErrorCode = "upgrade_cpa_source_root_mismatch"
+	// UpgradeErrorCPADestinationKeyRequired reports that the destination CPA is
+	// already running and this run holds no management secret for it: no earlier
+	// run of this step recorded one and the caller supplied none. The import never
+	// stages or invents a second secret for a destination it did not stage, so the
+	// operator supplies the secret the Manager stored. Nothing was written.
+	UpgradeErrorCPADestinationKeyRequired UpgradeErrorCode = "upgrade_cpa_destination_key_required"
 )
 
 // UpgradeError is a typed Upgrade failure. Callers match it with errors.Is
@@ -204,6 +215,8 @@ var (
 	ErrCPADestinationUnready = &UpgradeError{Code: UpgradeErrorCPADestinationUnready}
 	ErrCPAImportUnproven     = &UpgradeError{Code: UpgradeErrorCPAImportUnproven}
 	ErrCPAImportUnavailable  = &UpgradeError{Code: UpgradeErrorCPAImportUnavailable}
+	ErrCPASourceRootMismatch = &UpgradeError{Code: UpgradeErrorCPASourceRootMismatch}
+	ErrCPADestinationKey     = &UpgradeError{Code: UpgradeErrorCPADestinationKeyRequired}
 )
 
 func newUpgradeError(code UpgradeErrorCode, message string, err error) error {

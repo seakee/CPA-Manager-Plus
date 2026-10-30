@@ -14,6 +14,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 
@@ -40,6 +41,7 @@ func runCPAImport(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	cpaVersion := flags.String("cpa-version", "", "release of the source CPA; a v7 configuration carries no version of its own")
 	target := flags.String("target", "", "v2 data directory holding the recorded operation; defaults to the Manager data directory")
 	destination := flags.String("destination-url", "", "destination CPA base URL; defaults to CPA_UPSTREAM_URL")
+	destinationKeyFile := flags.String("destination-management-key-file", "", "file holding the management secret of an already-running destination CPA; only needed when no earlier run of this step recorded one")
 	plugins := flags.String("plugins", "", "v2's plugin-runtime choice for the destination: true or false; required")
 	asJSON := flags.Bool("json", false, "print the import result as JSON")
 	if err := flags.Parse(args); err != nil {
@@ -73,16 +75,21 @@ func runCPAImport(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	if err != nil {
 		return err
 	}
+	destinationManagementKey, err := readDestinationManagementKeyFile(*destinationKeyFile)
+	if err != nil {
+		return err
+	}
 	output := cpaImportOutput{}
 	result, err := upgradeservice.ImportCPA(ctx, upgradeservice.CPAImportOptions{
-		LegacyRoot:       *legacy,
-		CPADirectory:     strings.TrimSpace(*cpaDirectory),
-		CPAAuthDirectory: strings.TrimSpace(*cpaAuthDirectory),
-		CPAVersion:       strings.TrimSpace(*cpaVersion),
-		TargetRoot:       targetRoot,
-		Runtime:          runtime,
-		DestinationURL:   destinationURL,
-		PluginsEnabled:   choice,
+		LegacyRoot:               *legacy,
+		CPADirectory:             strings.TrimSpace(*cpaDirectory),
+		CPAAuthDirectory:         strings.TrimSpace(*cpaAuthDirectory),
+		CPAVersion:               strings.TrimSpace(*cpaVersion),
+		TargetRoot:               targetRoot,
+		Runtime:                  runtime,
+		DestinationURL:           destinationURL,
+		DestinationManagementKey: destinationManagementKey,
+		PluginsEnabled:           choice,
 	})
 	output.Result = &result
 	if err != nil {
@@ -115,6 +122,25 @@ func parsePluginChoice(raw string) (*bool, error) {
 		return nil, fmt.Errorf("--plugins must be true or false")
 	}
 	return &value, nil
+}
+
+// readDestinationManagementKeyFile reads the management secret of a destination
+// this Manager did not stage. The secret comes from a file rather than a flag
+// value so it never appears in the process list.
+func readDestinationManagementKeyFile(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("%w: read the destination management secret file: %v", ErrUsage, err)
+	}
+	secret := strings.TrimSpace(string(data))
+	if secret == "" {
+		return "", fmt.Errorf("%w: the destination management secret file %s is empty", ErrUsage, path)
+	}
+	return secret, nil
 }
 
 // cpaImportRuntime builds the Runtime client the import stages the destination

@@ -133,6 +133,16 @@ Plus 会把 CPA Management Key 加密存储到 SQLite。默认数据密钥位于
 
 管理员密钥重置指引已单独维护。请先停止 Manager Server、备份 `/data`，再按 [重置 Manager Server 管理员密钥](reset-admin-key.zh-CN.md) 处理。
 
+## Managed CPA 导入
+
+`cpa-manager-plus upgrade cpa-import` 会通过 adoption 执行器，把已停止的 1.x 实例中受管 CPA 的配置与凭证文件复制到 v2 目标。规划迁移时有三条规则：
+
+- 只有当 `--legacy` 目录就是 `copy-in` 步骤记录的那个目录时才会读取它；换成另一棵树会在任何读取之前以 `upgrade_cpa_source_root_mismatch` 拒绝。
+- 目标自己的路径永远不会被复制：目标的管理密钥、监听地址、端口、插件根目录、凭证目录和客户端密钥列表都保留目标自身的值。本步骤自行创建目标时会先生成管理密钥并用 `/data/data.key` 加密记录，然后才创建目标，因此目标是已运行状态时重试仍可继续；导入成功后该记录会被删除。
+- 目标已在运行且没有记录过密钥时，需要 `--destination-management-key-file`。本步骤会拒绝，而不会凭空再生成一个密钥（`upgrade_cpa_destination_key_required`）。
+
+**已知限制：`codex-header-defaults`。** CPA v8 仍会加载该配置段（`codex-header-defaults` 加载为 `oauth.providers.codex.header-defaults`），但 v2 目标没有可写入的 `upstream.codex.header-defaults` 叶子，因此导入不会复制它。操作行会把它记为手动项 `section:codex-header-defaults`；如仍需这些请求头默认值，请在目标 CPA 配置中重新设置。同类的 `claude-header-defaults.*` 在目标有对应路径，会被正常复制。
+
 ## 回滚
 
 回滚前先停止 Plus。旧 CPA-Manager 可继续读取主要用量表和旧 `settings.setup`，但无法识别 Plus 新增的管理员凭证、bootstrap 状态和加密数据密钥。建议只在完成备份后回滚，并优先回滚到迁移前备份。

@@ -174,11 +174,17 @@ var cpaConfigPaths = []cpaConfigPath{
 	// `upstream.codex.*` spelling (config_v8.go:23-46), so the canonical path is
 	// what this table writes. `codex.identity-confuse` is absent on purpose: it is
 	// a v7 field v8 drops, reported as a manual item instead.
+	//
+	// `codex-header-defaults` is absent for a different reason, recorded in
+	// cpaUnadoptableSections: v8 still loads it, but the destination gateway table
+	// has no `upstream.codex.header-defaults` leaf, so there is no path to write.
+	// The sibling `claude-header-defaults.*` leaves below do exist in that table,
+	// which is why they are mapped and the codex ones are not.
 	{legacy: "codex.disable-codex-cloaking", current: "upstream.codex.disable-codex-cloaking", introduced: "v7.2.110"},
 	{legacy: "codex.stream-bootstrap-buffering", current: "upstream.codex.stream-bootstrap-buffering", introduced: "v7.2.138"},
 	{legacy: "codex.stream-bootstrap-timeout", current: "upstream.codex.stream-bootstrap-timeout", introduced: "v7.3.3"},
 	{legacy: "codex.orphan-delegation-compatibility", current: "upstream.codex.orphan-delegation-compatibility", introduced: "v7.2.149"},
-	{legacy: "codex.model-level-cooling", current: "upstream.codex.model-level-cooling", introduced: "v7.3.7"},
+	{legacy: "codex.model-level-cooling", current: "upstream.codex.model-level-cooling", introduced: "v7.2.156"},
 	{legacy: "codex.response-steering", current: "upstream.codex.response-steering", introduced: "v7.3.9"},
 	{legacy: "codex.optimize-multi-agent-v2", current: "client.codex.optimize-multi-agent-v2", introduced: "v7.2.98"},
 
@@ -216,6 +222,23 @@ var cpaRemovedConfigPaths = []struct {
 		legacy: "codex.identity-confuse", suffix: "", removed: "v8.0.4",
 		instruction: "CPA v8 has no codex.identity-confuse field (removed upstream in v8.0.4). There is nothing to copy to the destination.",
 	},
+}
+
+// cpaUnadoptableSections are the v7 sections CPA v8 still loads but this import
+// cannot copy, because the destination's adoptable surface has no leaf for them.
+// Each one is kept as a manual item that names the destination path and says why
+// nothing was written, so the gap is recorded instead of the key disappearing.
+//
+// `codex-header-defaults` is the one such section today. CPA v8 keeps the field
+// — `codex-header-defaults` loads as `oauth.providers.codex.header-defaults`
+// (internal/config/config_v8.go:93, internal/config/config.go:144 at v8.0.13) —
+// but that subtree is provider runtime state the destination's gateway table
+// does not expose, so the adoption executor has no leaf to write and `oauth` is
+// a Manager-owned root (freshadopt.ManagerOwned). There is no
+// `upstream.codex.header-defaults` destination path, and inventing one would
+// write a key CPA never reads.
+var cpaUnadoptableSections = map[string]string{
+	"codex-header-defaults": "CPA v8 keeps codex header defaults (`codex-header-defaults` loads as `oauth.providers.codex.header-defaults`), but this import has no adoptable destination path for them, so they were not copied. Set them in the destination CPA configuration if you still need them.",
 }
 
 // cpaExcludedSourceSections are the source keys the destination must keep its
@@ -671,6 +694,14 @@ func (s *cpaManagedSource) reportUnmapped(document map[string]any, roots, consum
 		}
 		if isRemovedSection(key) {
 			s.reportRemovedSection(key)
+			continue
+		}
+		if instruction, ok := cpaUnadoptableSections[key]; ok {
+			s.addManual(cpaManualItem{
+				item:        "section:" + key,
+				reason:      "destination_surface_missing",
+				instruction: instruction,
+			})
 			continue
 		}
 		s.addManual(cpaManualItem{

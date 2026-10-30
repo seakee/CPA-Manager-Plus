@@ -38,21 +38,29 @@ package upgrade
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshadopt"
 )
+
+// cpaImportManualItemLimit bounds one manual item line in the operation row.
+const cpaImportManualItemLimit = 400
 
 // CPAImportOptions is the input of one Managed CPA import. The three arms of the
 // run — the stopped source, the destination and the choice — are explicit,
@@ -79,10 +87,13 @@ type CPAImportOptions struct {
 	// DestinationURL is the destination CPA's base URL, as the Runtime serves it.
 	DestinationURL string
 	// DestinationManagementKey is the destination's management secret when the
-	// destination is already staged and running. A run that stages the destination
-	// itself generates the secret; a run that finds it ready must be told the
-	// secret the Manager stored, because the import never invents a second one for
-	// a destination it did not stage.
+	// destination is already running. It wins over any secret an earlier run of
+	// this step recorded. A run that stages the destination itself uses it for the
+	// stage when supplied, and otherwise generates one and records it in the
+	// Manager store before staging, so the run that has to retry against a ready
+	// destination finds that same secret. A run that finds the destination ready
+	// with neither refuses: the import never invents a second secret for a
+	// destination it did not stage.
 	DestinationManagementKey string
 	// PluginsEnabled is v2's explicit "enable plugin runtime" choice. It is
 	// never inherited from the source and has no default: a run that does not say
@@ -140,6 +151,8 @@ type CPAImportResult struct {
 type cpaImportRun struct {
 	options       CPAImportOptions
 	source        *cpaManagedSource
+	databasePath  string
+	dataKeyPath   string
 	managementKey string
 	copiedConfig  []string
 	copiedCreds   []string
@@ -202,6 +215,13 @@ func ImportCPA(ctx context.Context, options CPAImportOptions) (CPAImportResult, 
 		return result, nil
 	}
 
+	// The import reads the tree the copy-in recorded and nothing else. The
+	// comparison is canonical and runs before the CPA directory is touched, so a
+	// run pointed at another installation's tree is refused without reading it.
+	if err := requireRecordedSourceRoot(recorded, options.LegacyRoot); err != nil {
+		return result, err
+	}
+
 	// The source is read and gated before the destination is touched: a source
 	// below the floor must be refused before the copy-in, not after it.
 	source, err := openManagedCPASource(cpaSourceOptions{
@@ -213,7 +233,7 @@ func ImportCPA(ctx context.Context, options CPAImportOptions) (CPAImportResult, 
 	if err != nil {
 		return result, err
 	}
-	run := &cpaImportRun{options: options, source: source}
+	run := &cpaImportRun{options: options, source: source, databasePath: paths.Database, dataKeyPath: paths.DataKey}
 	result.SourceVersion = source.version
 	result.SourceLayout = source.layout
 	result.SourceIdentity = source.sourceIdentity()
@@ -279,18 +299,29 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 	}
 	if status.State == model.RuntimeStateReady {
 		// The Supervisor's CPA is already the staged destination. Its management
-		// secret is the one this Manager stored for it, so the caller supplies it;
-		// the run never invents a second secret for a destination it did not stage.
-		if strings.TrimSpace(r.options.DestinationManagementKey) == "" {
-			return newUpgradeError(UpgradeErrorCPADestinationUnready,
-				"the destination CPA is already running and its management secret was not supplied, so the import cannot prove it", nil)
+		// secret is the one this run recorded when it staged it, or the one the
+		// caller supplies; the run never invents a second secret for a destination
+		// it did not stage.
+		managementKey, resolveErr := r.readyDestinationManagementKey(ctx, baseURL)
+		if resolveErr != nil {
+			return resolveErr
 		}
-		r.managementKey = r.options.DestinationManagementKey
+		r.managementKey = managementKey
 		return nil
 	}
-	managementKey, err := newCPAImportManagementSecret()
-	if err != nil {
-		return newUpgradeError(UpgradeErrorCPADestinationUnready, "a destination management secret could not be generated", err)
+	managementKey := strings.TrimSpace(r.options.DestinationManagementKey)
+	if managementKey == "" {
+		if managementKey, err = newCPAImportManagementSecret(); err != nil {
+			return newUpgradeError(UpgradeErrorCPADestinationUnready, "a destination management secret could not be generated", err)
+		}
+	}
+	// The secret is durable before the destination is staged. The stage hands the
+	// destination the only copy it will ever hold, so a run that fails after it
+	// must find the same secret on retry instead of demanding an operator input
+	// the CLI cannot supply.
+	if err := saveCPAImportDestinationKey(ctx, r.databasePath, r.dataKeyPath, baseURL, managementKey); err != nil {
+		return newUpgradeError(UpgradeErrorCPADestinationUnready,
+			"the destination management secret could not be recorded, so the destination was not staged", err)
 	}
 	request := model.RuntimeDestinationRequest{
 		OperationID:               "upgrade-cpa-import:" + digestBytes([]byte(result.SourceIdentity))[:32],
@@ -518,6 +549,13 @@ func recordCPAImport(ctx context.Context, databasePath string, result CPAImportR
 	if _, err := tx.ExecContext(ctx, `update upgrade_operations set manual_items = ? where id = 1`, string(payload)); err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("record the CPA import's manual items: %w", err)
 	}
+	// The imported destination is now recorded, so the secret this step minted for
+	// it has served its purpose: from here the Manager's own connection holds it.
+	// Clearing it in the same transaction keeps the row's lifetime exactly the
+	// window in which a retry still needs it.
+	if _, err := tx.ExecContext(ctx, `delete from settings where key = ?`, cpaImportDestinationKeySetting); err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("clear the recorded destination management secret: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("record the CPA import: %w", err)
 	}
@@ -532,10 +570,190 @@ func boundedManualItem(item CPAImportManualItem) string {
 	if item.Reason != "" {
 		line += " (" + item.Reason + ")"
 	}
-	if len(line) > 400 {
-		line = line[:400]
+	// Cut on a rune boundary. The item names a source path, which may be
+	// non-ASCII, and slicing bytes would put an invalid UTF-8 sequence in the
+	// operation row.
+	if len(line) > cpaImportManualItemLimit {
+		cut := cpaImportManualItemLimit
+		for cut > 0 && !utf8.RuneStart(line[cut]) {
+			cut--
+		}
+		line = line[:cut]
 	}
 	return line
+}
+
+// cpaImportDestinationKeySetting is the settings row that carries the management
+// secret this step staged a destination with.
+//
+// The stage hands the destination the only copy of that secret it will ever
+// hold, so the run records it in the same Manager store that holds the operation
+// row, before the stage. A run that fails after staging — and therefore finds a
+// ready destination on retry, which the CLI cannot supply a secret for — reads it
+// back instead of minting a second one. The successful record deletes the row:
+// it exists exactly while the destination identity this step created is still
+// unclaimed.
+const cpaImportDestinationKeySetting = "upgrade_cpa_import_destination_v1"
+
+// cpaImportDestinationKeyRecord is that row. BaseURL binds the secret to the
+// destination it was staged for: a Manager pointed at another CPA must never
+// present a secret minted for a different one.
+type cpaImportDestinationKeyRecord struct {
+	BaseURL       string `json:"baseUrl"`
+	ManagementKey string `json:"managementKey"`
+	UpdatedAtMS   int64  `json:"updatedAtMs"`
+}
+
+// readyDestinationManagementKey resolves the secret of a destination this run did
+// not stage. The caller's explicit value wins; otherwise the secret an earlier
+// run recorded for this destination is used. With neither, the run is refused: it
+// never invents a secret for a destination it did not stage, because the
+// destination would then hold a credential no Manager knows.
+func (r *cpaImportRun) readyDestinationManagementKey(ctx context.Context, baseURL string) (string, error) {
+	if supplied := strings.TrimSpace(r.options.DestinationManagementKey); supplied != "" {
+		return supplied, nil
+	}
+	recorded, found, err := loadCPAImportDestinationKey(ctx, r.databasePath, r.dataKeyPath, baseURL)
+	if err != nil {
+		return "", newUpgradeError(UpgradeErrorCPADestinationKeyRequired,
+			"the destination management secret an earlier run recorded cannot be read with this store's data key; pass the destination's management secret with --destination-management-key-file", err)
+	}
+	if !found {
+		return "", newUpgradeError(UpgradeErrorCPADestinationKeyRequired,
+			"the destination CPA is already running and this run holds no management secret for it; pass the secret the Manager stored with --destination-management-key-file, or stage the destination from a stopped state", nil)
+	}
+	return recorded, nil
+}
+
+// saveCPAImportDestinationKey records the secret before the destination is
+// staged, protected with the store's data key like every other persisted secret.
+func saveCPAImportDestinationKey(ctx context.Context, databasePath, dataKeyPath, baseURL, managementKey string) error {
+	key, _, err := security.LoadOrCreateDataKey("", dataKeyPath)
+	if err != nil {
+		return fmt.Errorf("load the Manager data key: %w", err)
+	}
+	protector, err := security.NewProtector(key)
+	if err != nil {
+		return fmt.Errorf("initialize the secret protector: %w", err)
+	}
+	protected, err := protector.ProtectString(managementKey)
+	if err != nil {
+		return fmt.Errorf("protect the destination management secret: %w", err)
+	}
+	updatedAtMS := time.Now().UnixMilli()
+	payload, err := json.Marshal(cpaImportDestinationKeyRecord{
+		BaseURL:       baseURL,
+		ManagementKey: protected,
+		UpdatedAtMS:   updatedAtMS,
+	})
+	if err != nil {
+		return fmt.Errorf("encode the destination management secret: %w", err)
+	}
+	db, err := managersqlite.Open(databasePath)
+	if err != nil {
+		return fmt.Errorf("open the v2 database to record the destination management secret: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin the destination management secret transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
+		`insert into settings (key, value, updated_at_ms) values (?, ?, ?)
+		 on conflict (key) do update set value = excluded.value, updated_at_ms = excluded.updated_at_ms`,
+		cpaImportDestinationKeySetting, string(payload), updatedAtMS); err != nil {
+		return fmt.Errorf("record the destination management secret: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("record the destination management secret: %w", err)
+	}
+	return nil
+}
+
+// loadCPAImportDestinationKey reads the secret an earlier run recorded for this
+// destination. A row for another destination is not this run's to use: the secret
+// belongs to the CPA at one URL, and presenting it elsewhere would be a different
+// authority.
+func loadCPAImportDestinationKey(ctx context.Context, databasePath, dataKeyPath, baseURL string) (string, bool, error) {
+	db, err := managersqlite.Open(databasePath)
+	if err != nil {
+		return "", false, fmt.Errorf("open the v2 database to read the destination management secret: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+	var raw string
+	err = db.QueryRowContext(ctx, `select value from settings where key = ?`, cpaImportDestinationKeySetting).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read the destination management secret: %w", err)
+	}
+	var record cpaImportDestinationKeyRecord
+	if err := json.Unmarshal([]byte(raw), &record); err != nil {
+		return "", false, fmt.Errorf("decode the destination management secret: %w", err)
+	}
+	if record.BaseURL != baseURL {
+		return "", false, nil
+	}
+	// The key is never created here: a read that minted a data key could not
+	// decrypt the envelope it is looking at, and would leave a second key behind.
+	if _, err := os.Stat(dataKeyPath); err != nil {
+		return "", false, fmt.Errorf("read the Manager data key: %w", err)
+	}
+	key, _, err := security.LoadOrCreateDataKey("", dataKeyPath)
+	if err != nil {
+		return "", false, fmt.Errorf("load the Manager data key: %w", err)
+	}
+	protector, err := security.NewProtector(key)
+	if err != nil {
+		return "", false, fmt.Errorf("initialize the secret protector: %w", err)
+	}
+	secret, err := protector.UnprotectString(record.ManagementKey)
+	if err != nil {
+		return "", false, fmt.Errorf("decrypt the destination management secret: %w", err)
+	}
+	if strings.TrimSpace(secret) == "" {
+		return "", false, nil
+	}
+	return secret, true, nil
+}
+
+// requireRecordedSourceRoot binds this run to the 1.x tree the copy-in read.
+//
+// The copy-in recorded the canonical root it read, and the CPA directory the
+// import walks sits beside it. Without this comparison any tree the operator
+// names — including another installation's — would be imported into an operation
+// whose stored provenance names a different one. Both sides are canonicalised, so
+// a relative or symlinked spelling of the recorded directory still matches.
+//
+// It runs before the CPA directory is opened, so a run pointed at another tree is
+// refused without reading it.
+func requireRecordedSourceRoot(recorded model.UpgradeOperation, legacyRoot string) error {
+	named := strings.TrimSpace(legacyRoot)
+	if named == "" {
+		return newUpgradeError(UpgradeErrorCPASourceRootMismatch,
+			"the CPA import did not name the 1.x source root the copy-in read, so it cannot be bound to the recorded operation; nothing was read or written", nil)
+	}
+	namedRoot, err := canonicalPath(named)
+	if err != nil {
+		return newUpgradeError(UpgradeErrorCPASourceRootMismatch,
+			"the named 1.x source root could not be resolved, so the import was not bound to the recorded operation; nothing was read or written", err)
+	}
+	if strings.TrimSpace(recorded.SourceRoot) == "" {
+		return newUpgradeError(UpgradeErrorCPASourceRootMismatch,
+			"the recorded operation names no 1.x source root, so the import cannot be bound to the tree the copy-in read; nothing was read or written", nil)
+	}
+	recordedRoot, err := canonicalPath(recorded.SourceRoot)
+	if err != nil {
+		return newUpgradeError(UpgradeErrorCPASourceRootMismatch,
+			"the recorded 1.x source root could not be resolved, so the import was not bound to it; nothing was read or written", err)
+	}
+	if namedRoot != recordedRoot {
+		return newUpgradeError(UpgradeErrorCPASourceRootMismatch,
+			"the named 1.x source root is not the directory this operation's copy-in read, so its CPA state belongs to another installation; nothing was read or written", nil)
+	}
+	return nil
 }
 
 // cpaImportDecisions is the record authorization this import runs under.
