@@ -50,7 +50,13 @@ func ExitCode(err error) int {
 		errors.Is(err, ErrRefused),
 		errors.Is(err, upgradeservice.ErrReconcileMismatch),
 		errors.Is(err, upgradeservice.ErrReconcileTargetIncomplete),
-		errors.Is(err, upgradeservice.ErrReconcileNothingCompared):
+		errors.Is(err, upgradeservice.ErrReconcileNothingCompared),
+		// The External connect stop is a decision about the user's CPA: a v7
+		// target, a rejected management key, or a target that moved. The owner
+		// has to act, so it shares exit 1 and never reads as a transient error.
+		errors.Is(err, upgradeservice.ErrExternalVersionUnsupported),
+		errors.Is(err, upgradeservice.ErrExternalManagementRejected),
+		errors.Is(err, upgradeservice.ErrExternalTargetMoved):
 		return 1
 	default:
 		return 2
@@ -75,6 +81,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return runReconcile(ctx, args[1:], stdout, stderr)
 	case "rollback":
 		return runRollback(ctx, args[1:], stdout, stderr)
+	case "external-connect":
+		return runExternalConnect(ctx, args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		writeUsage(stdout)
 		return nil
@@ -97,6 +105,8 @@ func writeUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  rollback --prepare --legacy <dir> [--legacy-image <ref>] [--project <name>] [--port N] [--manager-addr HOST:PORT] [--json]")
 	_, _ = fmt.Fprintln(w, "  rollback --verify --legacy <dir> [--backup <dir>] [--status-url <url>] [--legacy-image <ref>] [--json]")
 	_, _ = fmt.Fprintln(w, "                                      plan a 1.x restart, or record a proven one")
+	_, _ = fmt.Fprintln(w, "  external-connect --cpa-base-url <url> --management-key-file <path> [--target <dir>] [--cpa-version <v>] [--json]")
+	_, _ = fmt.Fprintln(w, "                                      connect the External CPA and record its identity; a v7 CPA stops")
 	_, _ = fmt.Fprintln(w, "Exit codes: 0 ready, 1 blocked, refused, or unacknowledged mismatch, 2 usage or environment error.")
 }
 

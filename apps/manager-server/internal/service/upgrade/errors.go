@@ -3,6 +3,9 @@ package upgrade
 import (
 	"errors"
 	"fmt"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
 )
 
 // UpgradeErrorCode is the stable, machine-readable half of an Upgrade failure.
@@ -100,6 +103,40 @@ const (
 	// the columns a writable open adds. The store must be opened once by this
 	// build; nothing was written.
 	UpgradeErrorStoreSchemaOutdated UpgradeErrorCode = "upgrade_store_schema_outdated"
+
+	// --- External Connect (U1-5) ---
+	//
+	// This group is the External connect step's own vocabulary. Every value is
+	// the same string the Fresh External flow and the external/rebind route
+	// already use, so an upgrade refusal and a live External refusal say the
+	// same words about the same CPA.
+	//
+	// UpgradeErrorExternalVersionUnsupported reports a user's CPA that did not
+	// advertise the v8 contract this Manager writes (a v7 CPA, or one whose
+	// version could not be read). The step stops: the operation row keeps its
+	// stage, carries this code, and the owner upgrades the CPA first. There is
+	// no continue-anyway path.
+	UpgradeErrorExternalVersionUnsupported UpgradeErrorCode = cpa.ReasonExternalVersionUnsupported
+	// UpgradeErrorExternalManagementRejected reports the user's CPA refusing the
+	// management credential — a 401, or the 403 it answers when it bans this
+	// client — so the key is the problem, never the version. Only rebinding the
+	// connection resolves it.
+	UpgradeErrorExternalManagementRejected UpgradeErrorCode = freshconfig.ReasonManagementRejected
+	// UpgradeErrorExternalTargetMoved reports that the recorded External target
+	// no longer names the connection this operation connected: the address
+	// changed after it was committed. The identity and generation recorded by
+	// the successful connect are the comparison, so a moved target is refused
+	// instead of silently reconnected.
+	UpgradeErrorExternalTargetMoved UpgradeErrorCode = freshconfig.ReasonTargetMoved
+	// UpgradeErrorExternalAuthorityUnavailable reports a target that could not
+	// be reached, or one that answered without proving the surface the step
+	// needs (the model surface, or the client-key list). It is an environment
+	// or target condition, not a decision about the migration.
+	UpgradeErrorExternalAuthorityUnavailable UpgradeErrorCode = "external_cpa_authority_unavailable"
+	// UpgradeErrorExternalNotApplicable reports that the recorded operation is
+	// not at a position the External connect step can run from, or that the v2
+	// data root holds no recorded copy-in. Nothing was written.
+	UpgradeErrorExternalNotApplicable UpgradeErrorCode = "upgrade_external_connect_not_applicable"
 )
 
 // UpgradeError is a typed Upgrade failure. Callers match it with errors.Is
@@ -150,6 +187,15 @@ var (
 	ErrRollbackPortBusy      = &UpgradeError{Code: UpgradeErrorRollbackPortBusy}
 	ErrRollbackV2Running     = &UpgradeError{Code: UpgradeErrorRollbackV2Running}
 	ErrStoreSchemaOutdated   = &UpgradeError{Code: UpgradeErrorStoreSchemaOutdated}
+
+	// External Connect (U1-5). A v7 CPA, a rejected management credential and a
+	// moved target are decisions the owner has to look at; an unreachable target
+	// is an environment condition.
+	ErrExternalVersionUnsupported   = &UpgradeError{Code: UpgradeErrorExternalVersionUnsupported}
+	ErrExternalManagementRejected   = &UpgradeError{Code: UpgradeErrorExternalManagementRejected}
+	ErrExternalTargetMoved          = &UpgradeError{Code: UpgradeErrorExternalTargetMoved}
+	ErrExternalAuthorityUnavailable = &UpgradeError{Code: UpgradeErrorExternalAuthorityUnavailable}
+	ErrExternalNotApplicable        = &UpgradeError{Code: UpgradeErrorExternalNotApplicable}
 )
 
 func newUpgradeError(code UpgradeErrorCode, message string, err error) error {

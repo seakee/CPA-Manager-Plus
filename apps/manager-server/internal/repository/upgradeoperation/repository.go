@@ -358,6 +358,30 @@ func nullString(value string) any {
 	return value
 }
 
+// RecordError records the typed refusal a step stopped on, without touching the
+// stage or the completed domains: the step did not advance, and no path may make
+// a refusal look like progress. Only the error columns and the update time move,
+// so the provenance a later rollback relies on is left exactly as it was.
+func (r *Repository) RecordError(ctx context.Context, code, detail string) error {
+	if strings.TrimSpace(code) == "" {
+		return fmt.Errorf("%w: the refusal code is empty", ErrInvalidRow)
+	}
+	result, err := r.db.ExecContext(ctx, `update `+tableName+`
+		set error_code = ?, error_detail = ?, updated_at_ms = ? where id = 1`,
+		code, nullString(strings.TrimSpace(detail)), time.Now().UnixMilli())
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return fmt.Errorf("%w: no operation row to record the refusal on", ErrInvalidRow)
+	}
+	return nil
+}
+
 // RecordReconciliation stores the reconciliation report on the single row
 // without rebuilding it: Put would clear the provenance a completed operation
 // must keep carrying, so this is the only writer for this column. A row must
@@ -400,6 +424,7 @@ func RecordReconciliationTx(ctx context.Context, tx Tx, report json.RawMessage) 
 	}
 	return nil
 }
+
 // requireVerdictEvidence keeps the terminal verdict and its observation
 // inseparable: rolled_back is never resumed, so a row without its evidence could
 // never be re-proven.
