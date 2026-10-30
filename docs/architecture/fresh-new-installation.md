@@ -742,19 +742,28 @@ It proves, in order:
    own report — carries exactly the source client keys, the seeded gateway values
    and the migrated credential bytes (and neither the unparseable file nor the
    credential the record cannot name), admits a client key through Ingress
-   `/v1/models` while refusing an unknown one, records a collection window the usage
-   workspace reports as proven, reports a readable runtime status, and leaves the
-   source's config bytes and credential list unchanged.
+   `/v1/models` while refusing an unknown one, records a collection window the
+   usage workspace reports as still catching up (`projection_catching_up`, so the
+   check asserts that a window exists and not that usage is proven), reports a
+   `runtime/status` body carrying what its page renders — mode, status, the
+   Manager's own state and the gateway observation of that same read — and leaves
+   the source's config bytes and credential list unchanged. The page's own
+   progress reads are checked as well: a read that never left, never answered or
+   never parsed fails the run, because a page that stopped polling and a read
+   that failed are not the same observation.
 
 Screenshots cover the source form, the inventory, the retryable result, the
 retryable completion and the finished installation. The report goes to
 `bin/tmp/d-adopt/report.json`, is written 0600, and records PASS/FAIL/NOT RUN for
 every check — including the checks a failure prevented from running, which are
 recorded as NOT RUN with the check that ended the run — plus `gitHead`, the image
-revisions and the failure logs. The harness is the External one — secrets in a
-sibling directory outside the artifact directory, `assertNoSecret` over the
-unredacted report, the run log and every container log before teardown, a dirty
-tree refused, and a `finally` that removes only this project.
+revisions and the failure logs. Its check registry is self-checking: a check the
+run recorded but never declared, or a declared check it never executed, fails the
+report, so a name cannot drift out of the NOT RUN backfill unnoticed. The harness
+is the External one — secrets in a sibling directory outside the artifact
+directory, `assertNoSecret` over the unredacted report, the run log and every
+container log before teardown, a dirty tree refused, and a `finally` that removes
+only this project.
 
 ### D acceptance: `bin/ci/fresh-external-management.mjs`
 
