@@ -241,7 +241,12 @@ Writable startup, readiness, Fresh takeover or canonical commit/completion
 retires this leaf to the captured generic 404 behavior. It never delegates to
 Gateway, normal login/config loading, `store.Open`, bootstrap initialization or
 collector startup. This narrow auth contract does not resolve the future
-migration executor or widen the Fresh-only fixed API.
+migration executor. The same fixed surface also serves the Upgrade wizard's two
+read-only routes (`installation/upgrade/preflight` and
+`installation/upgrade/status`) while the operation is unfinished — the copied-in
+v2 root carries no Fresh record for the canonical continuation. They share this
+leaf's gate and source credential and retire with it; no write route widens the
+Fresh-only fixed API.
 The fixed asset carrier admits only the Upgrade entry's static manifest closure
 in addition to its initial graph; dynamic Console imports remain unavailable.
 
