@@ -106,7 +106,7 @@ type freshApplication struct {
 	// pluginCapability is the short-lived proof behind X-CPA-SUPPORT-PLUGIN.
 	// It is nil until the application knows which connection it serves.
 	pluginCapability *pluginCapabilityProbe
-	legacy          http.Handler
+	legacy           http.Handler
 	// legacyCredentialGate serializes the legacy requests that present the saved
 	// management credential. A console page opens several at once, and five
 	// failed authentications ban this address, so the first refusal has to be
@@ -118,9 +118,9 @@ type freshApplication struct {
 	// accepts the connection and never answers must not stall every other console
 	// read. Zero means externalCredentialHeaderBudgetDefault.
 	credentialHeaderBudget time.Duration
-	legacyCollector *collectorservice.Service
-	collectorWorker *worker.CollectorWorker
-	identityWorker  *identityreconcile.Worker
+	legacyCollector        *collectorservice.Service
+	collectorWorker        *worker.CollectorWorker
+	identityWorker         *identityreconcile.Worker
 	// Usage chain: staged keys own source bindings, Collector events feed the
 	// canonical identity projection, and the workspace reads attributed usage.
 	managedSource   freshkeyapply.ManagedSource
@@ -319,7 +319,8 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 		a.externalPermit = privateFreshExternalAdmitted
 	}
 	a.fixed = freshbootstrap.Handler{Authority: a.authority, Routing: a.routing, Current: a.current,
-		Shell: httpapi.BootstrapWebHandler(), Strategy: http.HandlerFunc(a.fixedStrategy), Runtime: http.HandlerFunc(a.fixedRuntime)}
+		Shell: httpapi.BootstrapWebHandler(), Strategy: http.HandlerFunc(a.fixedStrategy), Runtime: http.HandlerFunc(a.fixedRuntime),
+		Adoption: http.HandlerFunc(a.fixedAdoption)}
 	return a
 }
 
@@ -557,6 +558,24 @@ func (a *freshApplication) fixedRuntime(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	a.installationRuntime(w, r, op)
+}
+
+// fixedAdoption serves the migration summary on the pre-cutover carrier. It
+// authorizes with the installation session exactly as the runtime observation
+// does: an adoption's progress belongs to the claim that committed it, and the
+// summary route is otherwise unreachable until the public route is committed.
+func (a *freshApplication) fixedAdoption(w http.ResponseWriter, r *http.Request) {
+	token, ok := freshbootstrap.SessionToken(r)
+	if !ok {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	op, err := a.authority.Authorize(r.Context(), token)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	a.adoptionSummary(w, r, op)
 }
 
 func (a *freshApplication) fixedStrategy(w http.ResponseWriter, r *http.Request) {

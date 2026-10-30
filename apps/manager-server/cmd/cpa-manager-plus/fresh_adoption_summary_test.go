@@ -222,3 +222,37 @@ func TestAdoptionSummaryLeaksNoSecretOrDigest(t *testing.T) {
 		}
 	}
 }
+
+// The summary is read while the public route is still pending, so the fixed
+// bootstrap carrier has to know the resource: a resource it does not know is
+// answered 404 by the carrier itself, which is what made the browser's progress
+// read fail with a plain-text page instead of the recorded summary.
+func TestAdoptionSummaryIsAServedResourceOnTheFixedCarrier(t *testing.T) {
+	dir := t.TempDir()
+	paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+	paths.Config = filepath.Join(dir, "config.json")
+	opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = opened.Close() })
+	app := newFreshApplication(opened, config.Config{}, nil)
+
+	request := func(resource string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(
+			http.MethodGet,
+			bootstrap.FixedBootstrapAPIPath+resource,
+			nil,
+		)
+		req.Header.Set("Authorization", "Fresh "+strings.Repeat("a", 43))
+		response := httptest.NewRecorder()
+		app.fixed.ServeHTTP(response, req)
+		return response
+	}
+	if response := request("installation/adoption"); response.Code != http.StatusUnauthorized {
+		t.Fatalf("the fixed carrier does not serve the summary: %d %s", response.Code, response.Body.String())
+	}
+	if response := request("installation/unknown"); response.Code != http.StatusNotFound {
+		t.Fatalf("an unknown resource was not refused: %d", response.Code)
+	}
+}
